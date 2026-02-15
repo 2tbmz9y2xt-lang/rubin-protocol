@@ -514,4 +514,159 @@ A release is valid if:
 
 ---
 
+
+# XIX. CRYPTO-AGILITY & ALGORITHM LIFECYCLE
+
+## 1. Multi-Algorithm Acceptance Set
+
+At any block height h, the accepted signature set is:
+
+```
+SigSet(h) = {ML_DSA_87, SLH_DSA, (legacy_ecdsa ∧ h < legacy_cutoff)}
+```
+
+Where `legacy_cutoff` is a soft-fork-configured constant and must remain zero only in emergency mode.
+
+## 2. Algorithm Selection Policy
+
+- Default protocol path: `ML_DSA_87` for consensus signing and transaction authentication.
+- Post-quantum fallback path: `SLH_DSA` for long-lived archival credentials and non-repudiation archives.
+- Legacy fallback path: retained for compatibility until full migration window closure.
+
+Selection is governed by on-chain activation gates and governance review in `CONTROLLER_DECISIONS`.
+
+## 3. Safe Deprecation Semantics
+
+An algorithm transition shall never be abrupt. For algorithm `A_old -> A_new`:
+
+1. Announcement phase: 2 epoch notice in governance docs.
+2. Shadow phase: both accepted, no enforcement bias.
+3. Quarantine phase: A_old outputs flagged for audit only (non-fatal).
+4. Enforcement phase: A_old rejected by consensus.
+5. Rollback window: bounded rollback policy with signed controller approval.
+
+## 4. WolfCrypt Binding Requirements
+
+- All production nodes MUST use module wrappers that enforce algorithm identity by OID-like algorithm tags.
+- Key imports into wolfCrypt must validate key-size, signature length, hash binding, and canonical prefix.
+- KAT (Known Answer Test) vectors used in CI must be identical across implementations.
+
+# XX. FORMAL POST-QUANTUM MIGRATION PROTOCOL
+
+## 1. Dual-Sign Address Format
+
+Each account key record MAY carry both:
+
+- `legacy_pubkey` (optional during migration)
+- `pq_pubkey` (required from migration checkpoint)
+
+Validation rule for migration window w:
+
+```
+accept(tx_sig) :=
+  (isLegacyAllowed(w) ∧ verify_legacy(tx_sig_legacy, legacy_pubkey)) ∨
+  verify_ml_dsa(tx_sig_pq, pq_pubkey)
+```
+
+## 2. Shadow Transaction Replay
+
+During transition, wallets SHOULD publish mirror transactions:
+
+- primary stream: active signing algorithm
+- shadow stream: migration candidate algorithm
+
+Divergence invariant:
+
+```
+ReplaySet(primary) == ReplaySet(shadow)
+```
+
+Any mismatch blocks migration to enforcement phase.
+
+## 3. Staged Rollout to Mainnet
+
+1. Staging nets validate parser parity and conformance suite.
+2. Canary shards run mixed-mode under opt-in governance.
+3. Mainnet shadow-phase for N blocks with no critical divergences.
+4. Final activation by explicit FSM transition and on-chain governance checkpoint.
+
+# XXI. THREAT MODEL & MITIGATIONS (Q1 ADAPTATION)
+
+## 1. Adversary Classes
+
+- Computational: owns α hashrate.
+- Quantum-capable offline: can attack recorded classical signatures and old sessions.
+- Network: can delay/withhold up to Δ delay in partial synchrony model.
+- Insider: compromised validator infrastructure or signing keys.
+
+## 2. Harvest-Now/Decrypt-Later Controls
+
+- Historical sensitive payloads in public channels are encrypted with hybrid session keys.
+- Retention windows are bounded by rekey policies and cryptographic refresh epochs.
+- Replay-safe archival proofs MUST use fresh domain separation and nonces.
+
+## 3. L2 Boundary Threat Controls
+
+- RETL batch signatures are required for public domains.
+- Domain invalidation is immediate on equivocation detection.
+- L1 never validates sequencer behavior, only anchoring commitments.
+
+# XXII. OPERATIONAL REQUIREMENTS & HARDENING
+
+## 1. Validator Crypto Inventory
+
+Each validator must attest:
+
+- secure boot / attestation chain (if available),
+- HSM or equivalent protection for signing keys,
+- reproducible build provenance for consensus software,
+- no raw private key material in process memory dumps (strict policy).
+
+## 2. Network Hardening
+
+- Anti-eclipse client rotation policy.
+- minimum peer diversity checks across ASNs and geographies.
+- anti-DoS admission throttles for malformed signatures and invalid witness encodings.
+
+## 3. Monitoring Gates
+
+- chainwork delta anomaly detector,
+- reorg depth alert for k > configured safety threshold,
+- covenant execution failure spikes.
+
+# XXIII. EXTENDED CONFORMANCE MATRICES
+
+The following minimum conformance axes are mandatory for any release candidate:
+
+1. Deterministic encode/decode roundtrip.
+2. Consensus replay with reference and optimized validator implementations.
+3. Crypto regression vectors for ML-DSA and SLH-DSA across implementations.
+4. RETL bond lifecycle, anchor commitments, and equivocation checks.
+5. FSM progression at all edge heights.
+
+## 1. Negative Tests (Must-Fail)
+
+- malformed compact-size encodings,
+- invalid nonces and duplicated signatures,
+- malformed covenant bytecode,
+- invalid anchor commitments,
+- anti-equviocation violations.
+
+## 2. Positive Tests (Must-Pass)
+
+- standard spend/receive flows,
+- deep reorg replay under bounded hash-power assumptions,
+- dual-sign migration mode,
+- deterministic canonical serialization in all languages.
+
+# XXIV. OPEN ISSUES FOR FUTURE REVISIONS
+
+1. Exact parameterization of `legacy_cutoff` and migration durations.
+2. Finalization thresholds for validator slashing in quantum key-rotation incidents.
+3. Standardized enterprise add-on interface contract and license metadata schema.
+4. Optional formalization of zk proof soundness bounds with concrete
+   reduction parameters.
+
+# XXV. END OF CURRENT EDITION
+
 # END OF SPECIFICATION
