@@ -1090,3 +1090,236 @@ If `α ≥ 0.5`, then `q ≥ 1` and catch-up probability bound loses exponential
 - T4 maps to XII.
 - T5 maps to XV and XII.
 - Soundness notation maps to Appendix F and XVIII.
+
+# APPENDIX J — MEASURE-THEORETIC POW MODEL
+
+## J.1 Probability Space
+
+Определим вероятностное пространство:
+
+\[
+(\Omega, \mathcal{F}, \mathbb{P})
+\]
+
+где:
+
+- \( \Omega = {H,A}^{\mathbb{N}} \) — бесконечные последовательности блоков (Honest/Attacker)
+- \( \mathcal{F} \) — σ-алгебра цилиндрических множеств
+- \( \mathbb{P} \) — произведение мер Бернулли:
+
+\[
+\mathbb{P}(H) = \beta,\quad
+\mathbb{P}(A) = \alpha
+\]
+
+Блок-процесс является i.i.d. последовательностью.
+
+---
+
+## J.2 Random Walk as Martingale with Drift
+
+Пусть:
+
+\[
+D_n = \sum_{i=1}^n X_i
+\]
+
+где:
+
+\[
+X_i =
+\begin{cases}
++1 & \text{если блок честный} \\
+-1 & \text{если блок атакующий}
+\end{cases}
+\]
+
+Тогда:
+
+\[
+\mathbb{E}[X_i] = \beta - \alpha
+\]
+
+Если ( \alpha < 0.5 ), процесс имеет положительный дрейф.
+
+По Strong Law of Large Numbers:
+
+\[
+\lim_{n\to\infty} \frac{D_n}{n} = \beta - \alpha
+\]
+
+почти наверное.
+
+Следовательно:
+
+\[
+\lim_{n\to\infty} D_n = +\infty \quad \text{almost surely}
+\]
+
+---
+
+# APPENDIX K — MARKOV CHAIN MODEL OF FORK COMPETITION
+
+Определим состояние цепочки как разность глубины:
+
+\[
+S_t = k
+\]
+
+где k — число блоков преимущества честной цепи.
+
+Переходы:
+
+\[
+P(k \to k+1) = \beta
+\]
+\[
+P(k \to k-1) = \alpha
+\]
+
+Это однородная марковская цепь на \(\mathbb{Z}\).
+
+Вероятность достижения 0 (catch-up) из состояния k:
+
+\[
+P_{\text{hit}}(k) =
+\begin{cases}
+1 & \alpha \ge \beta \\
+(\alpha/\beta)^k & \alpha < \beta
+\end{cases}
+\]
+
+---
+
+# APPENDIX L — ENTROPY ANALYSIS OF BLOCK HEADER
+
+Block header entropy sources:
+
+- nonce
+- merkle root
+- timestamp
+- previous block hash
+
+Let H be SHA3-256 output.
+
+Assume SHA3 acts as random oracle.
+
+Entropy of header before hashing:
+
+\[
+H_{input} \approx H_{nonce} + H_{merkle}
+\]
+
+Given 256-bit hash:
+
+\[
+H_{output} \approx 256 \text{ bits}
+\]
+
+Grover attack reduces effective security to ~128 bits, still sufficient.
+
+---
+
+# APPENDIX M — ADAPTIVE ADVERSARY MODEL
+
+Let α(t) be time-dependent attacker fraction.
+
+Define average:
+
+\[
+\bar{\alpha}_T =
+\frac{1}{T} \int_0^T \alpha(t),dt
+\]
+
+Security holds if:
+
+\[
+\limsup_{T\to\infty} \bar{\alpha}_T < 0.5
+\]
+
+Short-term burst cannot permanently alter long-term dominance.
+
+---
+
+# APPENDIX N — DIFFICULTY ADJUSTMENT STABILITY
+
+Retarget formula:
+
+\[
+target_{new} = target_{old} \cdot \frac{\Delta_{actual}}{\Delta_{expected}}
+\]
+
+Clamp constraint:
+
+\[
+\frac{1}{4} \le \frac{target_{new}}{target_{old}} \le 4
+\]
+
+Let hashpower jump by factor γ.
+
+Convergence condition:
+
+\[
+target_n \to equilibrium \quad \text{geometrically}
+\]
+
+Oscillation bounded by clamp.
+
+---
+
+# APPENDIX O — L2 COMPOSABILITY THEOREM
+
+Let:
+
+- L1 state: \(\mathbb{S}_h\)
+- L2 state: \(\mathbb{S}_h^{L2}\)
+
+L2 publishes only commitment:
+
+\[
+anchor_commitment = SHA3(anchor_data)
+\]
+
+L1 does not interpret L2 state.
+
+Thus:
+
+\[
+\forall h:
+\mathbb{S}_h^{L2} \not\subseteq \mathbb{S}_h^{L1}
+\]
+
+Failure of L2 cannot alter \(\mathbb{S}_h\).
+
+Isolation theorem:
+
+\[
+\text{L2 compromise} \not\Rightarrow \text{L1 safety violation}
+\]
+
+---
+
+# APPENDIX P — COMPOSITE SECURITY ENVELOPE (FORMAL STATEMENT)
+
+Given:
+
+1. ( \alpha < 0.5 )
+2. SHA3-256 random oracle assumption
+3. ML-DSA EUF-CMA security
+4. Deterministic validation
+5. Bounded Δ after GST
+6. Correct VERSION_BITS activation
+
+Then:
+
+- Inflation impossible
+- Signature forgery negligible
+- Reorg probability decays exponentially
+- Fork persistence probability → 0
+- L2 isolation holds
+- No privileged override exists
+
+---
+
+# END OF EXTENDED FORMAL APPENDIX
+
