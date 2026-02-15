@@ -930,3 +930,163 @@ RUBIN удовлетворяет:
 
 # END OF MATHEMATICAL APPENDIX
 
+
+# APPENDIX I — FORMAL FRAMEWORK
+
+## I.1 Primitive Notation
+
+- `α` — attacker mining share, `β = 1 - α`.
+- `D_t` — honest_work minus attacker_work at local PoW step t.
+- `𝒰_h` — UTXO set at height h.
+- `ApplyBlock` — deterministic state transition function over block body.
+- `Verify` — deterministic signature/zk/encoding verification predicate.
+- `S_h` — protocol state at height h (alias `𝒰_h` when only UTXO is needed).
+- `P[X]` — probability measure over probabilistic experiment X.
+- `Conf` — conformance suite.
+- `SAT` — satisfaction predicate under all mandatory checks.
+
+## I.2 Deterministic Semantics
+
+### Definition D1 (Well-Formed Block)
+A block `B` at height h is well-formed iff all header fields satisfy syntax constraints and all tx in `B.txs` pass deterministic transaction checks as defined in Section V order.
+
+### Definition D2 (Valid Chain)
+A chain is valid iff:
+1) genesis is valid, and
+2) each block is well-formed, and
+3) each block is reference-valid w.r.t. parent via `ApplyBlock`.
+
+### Definition D3 (Reference Validity)
+A block candidate `B` is reference-valid if `ApplyBlock(S_{h-1}, B)` is total and returns a unique `S_h`.
+
+## I.3 Core Lemmas
+
+### Lemma L1 (Deterministic State Function)
+For fixed parent state `S` and fixed block `B`, `ApplyBlock(S, B)` returns one unique state or fails with a unique rejection code.
+
+#### Assumptions
+- Parser is deterministic.
+- Validation order is fixed.
+- Verification functions are deterministic.
+
+#### Sketch
+All checks in Sections IV, V are pure functions over serialized bytes + current state + consensus constants. Composition of pure checks preserves determinism.
+
+### Lemma L2 (Monotone FSM)
+For VERSION_BITS state index `s_h` at block height h, `s_{h+1} ≥ s_h` under transition constraints.
+
+#### Assumptions
+- Legal transition relation excludes backward edges except allowed recovery state as specified.
+- Windowed signaling uses monotone counter `signal_i`.
+
+#### Sketch
+FSM transition predicates depend on cumulative historical properties of full windows and cannot decrease state by definition of DEFINED→STARTED→LOCKED_IN→ACTIVE/FAILED progression.
+
+### Lemma L3 (UTXO Conservation under No-Inflation Rule)
+Assuming all non-coinbase txs satisfy value conservation and coinbase is bounded by subsidy + fees, total spendable value never exceeds cumulative subsidy bound.
+
+#### Assumptions
+- Every non-coinbase tx obeys `Σ outputs ≤ Σ inputs`.
+- Coinbase rule from Section IV.2 is enforced.
+- Outputs created are exactly what `Created(B_h)` defines.
+
+#### Sketch
+Directly by induction over h. For base h=0, bound holds by genesis definition. At step h, remove spent set then add created outputs; non-coinbase preserves input-output upper bound while coinbase introduces only subsidy+fees credit.
+
+### Lemma L4 (Positive Drift Under Honest Majority)
+If `α < 0.5`, expected drift of `D_t` is strictly positive: `E[D_{t+1}-D_t] = β-α > 0`.
+
+#### Assumptions
+- PoW step model of A.2.
+
+#### Sketch
+Substitute transition probabilities into one-step expectation.
+
+### Lemma L5 (Eventual Divergence Escape)
+Under `α < 0.5`, for any initial deficit k, `P_catchup(k)` decreases exponentially in k via `q^k`, `q=α/β < 1`.
+
+#### Assumptions
+- Random walk approximation in Appendix A.
+
+#### Sketch
+Classical random walk result for gambler’s ruin with upward drift (`β>α`).
+
+### Lemma L6 (UTXO Set Boundedness by Index)
+If no soft errors in block/tx execution, `ApplyBlock` cannot produce negative output values and cannot remove non-existent UTXOs.
+
+#### Assumptions
+- Spent set existence checks on UTXO lookup.
+- Parsing rejects malformed amounts.
+- Value types are integers with no underflow.
+
+#### Sketch
+All operations are guarded by preconditions before subtraction or state replacement.
+
+## I.4 Main Theorems
+
+### Theorem T1 (Safety: No Double Spend Under Correct State)
+If two valid blocks at same height reference same parent and one of them spends an already-spent output, both cannot be jointly valid.
+
+#### Assumptions
+- UTXO lookup is strict and deterministic.
+- Spent outputs are removed exactly once from `𝒰_{h-1}`.
+
+#### Proof Sketch
+The first block to spend such output transitions state with the output removed. The second, applied on same parent in valid-path reasoning, fails spent-check. Therefore no two valid children can both spend same UTXO.
+
+### Theorem T2 (Eventual Consistency Under Valid Chain Selection)
+Among finite fork candidates at fixed height window, protocol selects chain with maximum ChainWork and tie-breaker by smaller hash, so state mapping `h ↦ S_h` is functionally well-defined.
+
+#### Assumptions
+- ChainWork definition from VII.
+- Tie-break order is total on block_hash bytes.
+
+#### Proof Sketch
+Fork-choice relation is total for equal heights via numeric max with deterministic tiebreak. Deterministic validity means each chosen parent yields unique child state.
+
+### Theorem T3 (Finality Risk Bound)
+Given target risk `ε`, any `k` satisfying Appendix B bound yields reorg risk ≤ ε in the PoW approximation.
+
+#### Assumptions
+- Catch-up approximation `P_reorg(k) ≈ q^k`.
+- `α < 0.5` so `q<1`.
+
+#### Proof Sketch
+Algebraic rearrangement of `q^k ≤ ε` using `q<1` and monotonicity.
+
+### Theorem T4 (RETL Isolation Invariant)
+RETLayer signatures and batch commitments do not alter consensus UTXO transition semantics.
+
+#### Assumptions
+- L1 does not invoke sequencer signature checks in consensus path.
+- Only optional anchor fields are parsed for availability checks.
+
+#### Proof Sketch
+`ApplyBlock` depends only on L1 fields and `B.txs`; RETL data is side-channel at consensus layer, so can not affect `𝒰_h` transitions.
+
+### Theorem T5 (Conformance Gate Progression)
+If `SAT = true` then all required checks in release gates are satisfied, and deployment of candidate spec bundle is admissible.
+
+#### Assumptions
+- Required checks list in XV and XII implemented.
+- `SAT` includes negative/positive mandatory suites.
+
+#### Sketch
+Direct definitionally from release-gate contract and completeness requirement of conformance matrix.
+
+## I.5 Counterexample Template (Invalid Configuration)
+
+If `α ≥ 0.5`, then `q ≥ 1` and catch-up probability bound loses exponential decay, so Theorem T3 assumptions break.
+
+Если `Verify` is non-deterministic, Lemma L1 and Theorem T2 fail (multiple possible `ApplyBlock` outcomes).
+
+Если VERSION_BITS transitions permit backward edges, Lemma L2 fails.
+
+## I.6 Cross-Reference Mapping
+
+- D1, Lemma L1, L2, T2 map to Sections V, VI, VII.
+- D3, L3, L6 map to Section IV and I.
+- L4, L5, T3 map to Appendices A/B.
+- T4 maps to XII.
+- T5 maps to XV and XII.
+- Soundness notation maps to Appendix F and XVIII.
