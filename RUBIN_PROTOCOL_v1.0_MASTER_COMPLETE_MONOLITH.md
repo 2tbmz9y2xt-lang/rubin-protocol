@@ -670,3 +670,263 @@ The following minimum conformance axes are mandatory for any release candidate:
 # XXV. END OF CURRENT EDITION
 
 # END OF SPECIFICATION
+
+# APPENDIX — MATHEMATICAL FORMALIZATION
+
+## APPENDIX A — Formal Probability Space for PoW
+
+### A.1 Block Production as Bernoulli Process
+
+Пусть в каждом “шаге” времени производится ровно один блок (модель редуцирована к последовательности событий).
+Вероятность того, что следующий блок найден атакующим:
+
+\[
+Pr[A] = \alpha,\quad Pr[H] = \beta = 1-\alpha
+\]
+
+Последовательность блоков — i.i.d. процесс Бернулли.
+
+### A.2 Biased Random Walk
+
+Определим разность работы:
+
+\[
+D_t = W_H(t) - W_A(t)
+\]
+
+где ( W_H, W_A ) — накопленная работа честной и атакующей цепи.
+
+Шаг:
+
+\[
+D_{t+1} =
+\begin{cases}
+D_t + 1 & \text{с вероятностью } \beta \\
+D_t - 1 & \text{с вероятностью } \alpha
+\end{cases}
+\]
+
+Математическое ожидание шага:
+
+\[
+\mathbb{E}[D_{t+1}-D_t] = \beta - \alpha
+\]
+
+Если ( \alpha < 0.5 ), то ( \beta - \alpha > 0 ), и процесс имеет положительный дрейф.
+
+### A.3 Catch-Up Probability
+
+Если атакующий отстаёт на ( k ) блоков, вероятность догнать:
+
+\[
+q = \frac{\alpha}{\beta}
+\]
+
+\[
+P_{\text{catchup}}(k) = q^k
+\]
+
+При ( \alpha < 0.5 \Rightarrow q < 1 \Rightarrow \lim_{k\to\infty} q^k = 0 ).
+
+### A.4 Exact Negative Binomial Expression
+
+Число атакующих блоков до появления ( k ) честных:
+
+\[
+X \sim \text{NegBin}(k, \beta)
+\]
+
+Тогда точная вероятность переписывания истории глубины ( k ):
+
+\[
+P_{\text{reorg}}(k)
+=\sum_{i=0}^{\infty}
+\binom{k+i-1}{i}
+\beta^k \alpha^i
+\cdot
+Pr[\text{attacker overtakes from deficit } k-i]
+\]
+
+Приближение:
+
+\[
+P_{\text{reorg}}(k) \approx \left(\frac{\alpha}{\beta}\right)^k
+\]
+
+## APPENDIX B — Formal Finality Bound
+
+Для заданной вероятности риска ( \varepsilon ):
+
+\[
+k \ge
+\frac{\log(\varepsilon)}{\log(\alpha/\beta)}
+\]
+
+Пример:
+
+\[
+\alpha = 0.1,\ \varepsilon = 10^{-9}
+\Rightarrow k \approx 10
+\]
+
+## APPENDIX C — Formal UTXO Algebra
+
+### C.1 UTXO Set
+
+\[
+\mathcal{U}_h \subseteq \mathcal{O} \to \mathbb{N}
+\]
+
+где ( \mathcal{O} = {(txid, vout)} ).
+
+Переход:
+
+\[
+\mathcal{U}_h =
+(\mathcal{U}_{h-1} \setminus \text{Spent})
+\cup
+\text{Created}
+\]
+
+### C.2 Inflation Safety Proof Sketch
+
+Для любого блока ( B_h ):
+
+\[
+\sum_{\text{coinbase}} \le Subsidy(h) + \sum_{\text{fees}}
+\]
+
+Так как:
+
+* non-coinbase: ( \sum out \le \sum in )
+* coinbase ограничен subsidy
+
+Следовательно:
+
+\[
+\sum value(\mathcal{U}_h)
+\le
+\sum_{i=0}^h Subsidy(i)
+\]
+
+## APPENDIX D — VERSION_BITS FSM Formal Model
+
+Состояния:
+
+\[
+S \in {DEFINED, STARTED, LOCKED_IN, ACTIVE, FAILED}
+\]
+
+Окно:
+
+\[
+W_i = [H_0 + i \cdot SIGNAL_WINDOW,\ H_0 + (i+1)\cdot SIGNAL_WINDOW)
+\]
+
+Сигнал:
+
+\[
+signal_i =
+\left|\{b \in W_i : (b.version \& (1 << BIT)) \neq 0\}\right|
+\]
+
+Переход:
+
+\[
+signal_i \ge THRESHOLD \Rightarrow LOCKED_IN
+\]
+
+Монотонность:
+
+\[
+S_{h+1} \ge S_h
+\]
+
+## APPENDIX E — Partial Synchrony Model
+
+Пусть:
+
+* ( \tau ) — средний интервал блока
+* ( \Delta ) — максимальная задержка после GST
+
+Вероятность stale-блока:
+
+\[
+p_{stale} = 1 - e^{-\Delta/\tau}
+\]
+
+При малых ( \Delta/\tau ):
+
+\[
+p_{stale} \approx \frac{\Delta}{\tau}
+\]
+
+Требование устойчивости:
+
+\[
+\Delta \ll \tau
+\]
+
+## APPENDIX F — zk-FRI Soundness Bound
+
+Пусть:
+
+* ( p(x) ) — многочлен степени < d
+* ( |F| ) — размер поля
+* r — число запросов FRI
+
+Soundness bound:
+
+\[
+Pr[\text{accept invalid proof}]
+\le
+\left(\frac{d}{|F|}\right)^r
+\]
+
+При увеличении r экспоненциальное снижение вероятности ошибки.
+
+## APPENDIX G — Recursive Aggregation Complexity
+
+Пусть:
+
+* N — число батчей
+* k — фактор агрегации
+
+Тогда глубина:
+
+\[
+d = \log_k N
+\]
+
+Размер итогового доказательства:
+
+\[
+O(\log N)
+\]
+
+Верификация:
+
+\[
+O(\log N)
+\]
+
+## APPENDIX H — Composite Stability Theorem
+
+При выполнении:
+
+1. ( \alpha < 0.5 )
+2. SHA3 collision resistance
+3. ML-DSA EUF-CMA security
+4. Deterministic implementation
+5. ( \Delta ) bounded after GST
+
+RUBIN удовлетворяет:
+
+* Вероятностной финальности
+* Инфляционной безопасности
+* Криптографической стойкости
+* Изоляции L2
+* Отсутствию централизованного контроля
+
+# END OF MATHEMATICAL APPENDIX
+
