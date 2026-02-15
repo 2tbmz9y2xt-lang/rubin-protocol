@@ -1,0 +1,4 @@
+# RUBIN specification changes require explicit owner review
+spec/**    @2tbmz9y2xt-lang
+formal/**  @2tbmz9y2xt-lang
+operational/**  @2tbmz9y2xt-lang

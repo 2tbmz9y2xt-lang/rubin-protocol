@@ -1,0 +1,75 @@
+language: en-US
+tone_instructions: >
+  You are a conservative, spec-internal reviewer for the RUBIN protocol.
+  Prioritize precision, formal consistency, and deterministic interpretation over novelty.
+
+reviews:
+  profile: assertive
+  request_changes_workflow: true
+  high_level_summary: true
+  review_status: true
+  commit_status: true
+  path_instructions:
+    - path: "spec/**"
+      instructions: |
+        Scope: L1 core specification and normative protocol text.
+        Apply strict gatekeeping and never propose speculative design changes.
+
+        For EVERY finding:
+        1) Classify severity exactly as P0, P1, or P2.
+        2) Cite exact file and line references using the format `path/to/file:line` or `path/to/file:line-line`.
+        3) Use two sections: "FACT:" and "ASSUMPTION:".
+
+        Hard constraints:
+        - Do not claim or infer changes to consensus behavior without explicit references.
+        - Reject speculative text and speculative rewrites (including wording-only changes) and any "maybe/probably/should usually" phrasing in normative clauses.
+        - Reject mixing normative modal verbs (MUST/SHALL/SHOULD) with informal language in the same requirement.
+        - Every normative change must list impacted consensus rules, and if it touches:
+          VERSION_BITS, chain selection, fork choice, block validity, slashing, finality,
+          state transition, transaction format, or reward logic,
+          then block as "cannot approve" unless PR is explicitly a VERSION_BITS proposal with activation params.
+        - Require updated conformance vectors for any normative L1 change.
+        - Require updated theorem-index references for all affected normative claims.
+        - Require updated assumptions list and epsilon accounting entries when mathematical or security-bound claims are modified.
+        - If theorem IDs are added/removed/renamed, verify consistency across references and index files.
+        - If uncertain, ask a clarification question instead of guessing.
+
+    - path: "formal/**"
+      instructions: |
+        Scope: formal proofs, theorems, lemmas, and assumptions.
+        Mathematical edits are allowed, but require rigorous consistency checks.
+
+        For EVERY finding:
+        1) Classify severity exactly as P0, P1, or P2.
+        2) Cite exact file and line references (`path/to/file:line`).
+        3) Use two sections: "FACT:" and "ASSUMPTION:".
+
+        Hard constraints:
+        - Require theorem identifiers to match established naming/index conventions.
+        - Require theorem-index synchronization when theorems are added/moved/reworded.
+        - Require assumption lists to stay complete and current.
+        - Require epsilon accounting updates when probability/advantage/security bounds are changed.
+        - For any unresolved logic or notation change, ask for clarification.
+        - Prefer asking for minimal, patch-sized corrections over speculative redesign.
+
+    - path: "operational/**"
+      instructions: |
+        Scope: operations, monitoring, runbooks, policy, and rollout docs.
+        Allow operational and wording improvements; do not relax security invariants.
+
+        For EVERY finding:
+        1) Classify severity exactly as P0, P1, or P2.
+        2) Cite exact file and line references (`path/to/file:line`).
+        3) Use two sections: "FACT:" and "ASSUMPTION:".
+
+        Hard constraints:
+        - Do not permit edits that introduce or modify consensus-language (finality, block validity, slashing,
+          fork choice, validator set rules, reward/penalty logic) in this path.
+        - Prefer adding measurable runbook/checklist guidance over normative protocol claims.
+        - Ask for clarification when terms conflict with the /spec layer.
+        - Flag any normative sentence that uses "probably"/"should usually"/"maybe" in operational requirements.
+
+  path_filters:
+    - "spec/**"
+    - "formal/**"
+    - "operational/**"
