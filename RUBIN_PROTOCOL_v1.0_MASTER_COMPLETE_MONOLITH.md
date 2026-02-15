@@ -1095,6 +1095,8 @@ If `α ≥ 0.5`, then `q ≥ 1` and catch-up probability bound loses exponential
 
 ## J.1 Probability Space
 
+### Lemma J.1 (Product Bernoulli Space)
+
 Определим вероятностное пространство:
 
 \[
@@ -1114,9 +1116,13 @@ If `α ≥ 0.5`, then `q ≥ 1` and catch-up probability bound loses exponential
 
 Блок-процесс является i.i.d. последовательностью.
 
+### Lemma J.2 (IID and Canonical Increments)
+
 ---
 
 ## J.2 Random Walk as Martingale with Drift
+
+### Lemma J.3 (Drift Formula)
 
 Пусть:
 
@@ -1156,9 +1162,13 @@ X_i =
 \lim_{n\to\infty} D_n = +\infty \quad \text{almost surely}
 \]
 
+### Theorem J.1 (Almost-Sure Honest Dominance)
+
 ---
 
 # APPENDIX K — MARKOV CHAIN MODEL OF FORK COMPETITION
+
+### Definition K.1 (Lead-State Markov Chain)
 
 Определим состояние цепочки как разность глубины:
 
@@ -1179,6 +1189,8 @@ P(k \to k-1) = \alpha
 
 Это однородная марковская цепь на \(\mathbb{Z}\).
 
+### Lemma K.1 (Step-Transition Equations)
+
 Вероятность достижения 0 (catch-up) из состояния k:
 
 \[
@@ -1189,9 +1201,19 @@ P_{\text{hit}}(k) =
 \end{cases}
 \]
 
+### Theorem K.1 (Catch-up Probability Threshold)
+
+Если \(\alpha < \beta\), вероятность догонять из состояния k строго меньше 1 и убывает как \((\alpha/\beta)^k\). При \(\alpha \ge \beta\), 
+
+\[
+P_{\text{hit}}(k)=1.
+\]
+
 ---
 
 # APPENDIX L — ENTROPY ANALYSIS OF BLOCK HEADER
+
+### Lemma L.1 (Entropy Sources)
 
 Block header entropy sources:
 
@@ -1216,11 +1238,18 @@ Given 256-bit hash:
 H_{output} \approx 256 \text{ bits}
 \]
 
-Grover attack reduces effective security to ~128 bits, still sufficient.
+Grover attack reduces effective security to \(\approx 128\) bits, still sufficient.
+
+### Theorem L.1 (Post-Grover Entropy Margin)
+
+With 
+\[H_{output}=256\], the quantum adversary complexity is \(\Theta(2^{128})\), preserving practical collision/discrete-search margins under honest assumptions.
 
 ---
 
 # APPENDIX M — ADAPTIVE ADVERSARY MODEL
+
+### Lemma M.1 (Average Workshare Bound)
 
 Let α(t) be time-dependent attacker fraction.
 
@@ -1239,9 +1268,16 @@ Security holds if:
 
 Short-term burst cannot permanently alter long-term dominance.
 
+### Theorem M.1 (Long-Run Honest Dominance)
+
+Under the bound
+\( \limsup_{T\to\infty} \bar{\alpha}_T < 0.5 \), adaptive short-term bursts do not overturn asymptotic lead persistence.
+
 ---
 
 # APPENDIX N — DIFFICULTY ADJUSTMENT STABILITY
+
+### Definition N.1 (Retarget Update Rule)
 
 Retarget formula:
 
@@ -1257,6 +1293,8 @@ Clamp constraint:
 
 Let hashpower jump by factor γ.
 
+### Lemma N.1 (Clamp Bound)
+
 Convergence condition:
 
 \[
@@ -1265,9 +1303,15 @@ target_n \to equilibrium \quad \text{geometrically}
 
 Oscillation bounded by clamp.
 
+### Theorem N.1 (Bounded Stability)
+
+If difficulty updates respect the clamp, chain-target updates remain bounded and cannot diverge in finite time under bounded hashrate shocks.
+
 ---
 
 # APPENDIX O — L2 COMPOSABILITY THEOREM
+
+### Theorem O.1 (L1 Safety under L2 Anchoring)
 
 Let:
 
@@ -1297,9 +1341,17 @@ Isolation theorem:
 \text{L2 compromise} \not\Rightarrow \text{L1 safety violation}
 \]
 
+### Corollary O.1 (Non-Propagation of L2 Faults)
+
+Failure in 
+\(\mathbb{S}_h^{L2}\) does not induce a state transition rule change in 
+\(\mathbb{S}_h\).
+
 ---
 
 # APPENDIX P — COMPOSITE SECURITY ENVELOPE (FORMAL STATEMENT)
+
+### Theorem P.1 (Composite Security Envelope)
 
 Given:
 
@@ -1325,6 +1377,8 @@ Then:
 
 
 # APPENDIX Q — MEASURE-THEORETIC POW FORMALIZATION
+
+### Definition Q.1 (σ-algebraic PoW Process)
 
 ## Q.1 Probability Space
 
@@ -1354,9 +1408,13 @@ Then:
 \mu(H) = \beta,\quad \mu(A) = \alpha
 \]
 
+### Lemma Q.1 (Equivalent Coin-Toss Representation)
+
 ---
 
 ## Q.2 Law of Large Numbers
+
+### Lemma Q.2 (SLLN Convergence)
 
 Define:
 
@@ -1392,9 +1450,15 @@ D_n \to +\infty \quad a.s.
 
 Almost sure honest dominance.
 
+### Theorem Q.1 (Consistency with Appendix J)
+
+Model Q explicitly constructs \(\Omega,\mathcal{F},\mathbb{P}\) as an infinite Bernoulli product space and is consistent with Appendix J random-walk representation.
+
 ---
 
 # APPENDIX R — SELFISH MINING PAYOFF DERIVATION
+
+### Theorem R.1 (Selfish Mining Payoff Threshold)
 
 Let:
 
@@ -1428,9 +1492,18 @@ Solve inequality:
 \alpha > \frac{1-\gamma}{3-2\gamma}
 \]
 
+### Corollary R.1 (Worst-Case Threshold)
+
+Для 
+\(\gamma=0\)
+получаем классический порог 
+\(\alpha>1/3\).
+
 ---
 
 # APPENDIX S — QUANTUM ENTROPY BOUND
+
+### Lemma S.1 (Grover Complexity Shift)
 
 Assume Grover speedup for search.
 
@@ -1456,9 +1529,15 @@ Security condition remains:
 \alpha < 0.5
 \]
 
+### Theorem S.1 (Security Threshold under Quantum Mining)
+
+При масштабировании вычислительных возможностей обоих классов участников одинаковым квантовым усилением порог доли атаки по модели конкуренции сохраняется.
+
 ---
 
 # APPENDIX T — ZK-SNARK CONSTRAINT ALGEBRA
+
+### Definition T.1 (Algebraic Constraint Language)
 
 Let:
 
@@ -1509,9 +1588,19 @@ Knowledge-extractability assumption (standard model):
 \approx 1 \Rightarrow C(w^*)=0
 \]
 
+### Lemma T.1 (Constraint Realisability)
+
+Если witness существует и satisfies, то \(\pi=Prove(C,w)\) образует корректное доказательство в целевой системе.
+
+### Theorem T.1 (Soundness-Completeness Contract)
+
+Система удовлетворяет стандартной компромиссу: полнота равна 1, а soundness bounded by \(\epsilon\).
+
 ---
 
 # APPENDIX U — ADAPTIVE ADVERSARY AS MDP
+
+### Definition U.1 (MDP Adversary Control)
 
 State space:
 
@@ -1553,9 +1642,17 @@ A security regime is enforced when
 
 for any \(\pi\) representing profitable selfish deviations, under \(\alpha < \alpha^* = \frac{1-\gamma}{3-2\gamma}\).
 
+### Theorem U.1 (Policy Dominance Region)
+
+При 
+\(\alpha < \alpha^*\)
+честная политика может быть выбрана как стационарная оптимальная и не проигрывает selfish deviations в бесконечном горизонте дисконтированных вознаграждений.
+
 ---
 
 # APPENDIX V — COMPOSITE FORMAL THEOREM
+
+### Theorem V.1 (Canonical Composite Security)
 
 Under assumptions:
 
@@ -1631,4 +1728,3 @@ Then:
 ## 5. Canonical Appendix Citation Format
 
 Use canonical names exactly as written in section titles.
-
