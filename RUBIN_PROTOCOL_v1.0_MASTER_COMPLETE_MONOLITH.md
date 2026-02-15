@@ -1577,3 +1577,58 @@ Then:
 
 ---
 
+
+# APPENDIX INDEX — UNIFIED CATALOG (A…V)
+
+## 1. Unified Order
+
+- A–V denote all appendix blocks currently in this file, preserving local continuity and direct cross-references.
+- A–H are included in `APPENDIX — MATHEMATICAL FORMALIZATION` as a sub-block cluster.
+- I–V are additional standalone advanced appendices.
+
+## 2. Alphabetical Registry
+
+- A `APPENDIX A — Formal Probability Space for PoW` (within `APPENDIX — MATHEMATICAL FORMALIZATION`) — base PoW probability model.
+- B `APPENDIX B — Formal Finality Bound` (within `APPENDIX — MATHEMATICAL FORMALIZATION`) — finality threshold algebra.
+- C `APPENDIX C — Formal UTXO Algebra` (within `APPENDIX — MATHEMATICAL FORMALIZATION`) — state transitions and inflation sketch.
+- D `APPENDIX D — VERSION_BITS FSM Formal Model` (within `APPENDIX — MATHEMATICAL FORMALIZATION`) — activation state machine.
+- E `APPENDIX E — Partial Synchrony Model` (within `APPENDIX — MATHEMATICAL FORMALIZATION`) — network model and stale probability.
+- F `APPENDIX F — zk-FRI Soundness Bound` (within `APPENDIX — MATHEMATICAL FORMALIZATION`) — soundness probability model.
+- G `APPENDIX G — Recursive Aggregation Complexity` (within `APPENDIX — MATHEMATICAL FORMALIZATION`) — complexity formulas.
+- H `APPENDIX H — Composite Stability Theorem` (within `APPENDIX — MATHEMATICAL FORMALIZATION`) — global safety summary.
+- I `APPENDIX I — FORMAL FRAMEWORK` — definitions, lemmas, theorems, and cross-maps.
+- J `APPENDIX J — MEASURE-THEORETIC POW MODEL` — sample-space and martingale formalization.
+- K `APPENDIX K — MARKOV CHAIN MODEL OF FORK COMPETITION` — fork-state transition chain.
+- L `APPENDIX L — ENTROPY ANALYSIS OF BLOCK HEADER` — header entropy and effective hash randomness.
+- M `APPENDIX M — ADAPTIVE ADVERSARY MODEL` — α(t) and long-run average attack bound.
+- N `APPENDIX N — DIFFICULTY ADJUSTMENT STABILITY` — target retarget dynamics and bounded oscillation.
+- O `APPENDIX O — L2 COMPOSABILITY THEOREM` — formal L1/L2 separation at commitment level.
+- P `APPENDIX P — COMPOSITE SECURITY ENVELOPE (FORMAL STATEMENT)` — security condition implication list.
+- Q `APPENDIX Q — MEASURE-THEORETIC POW FORMALIZATION` — expanded construction with SLLN statement and asymptotic dominance.
+- R `APPENDIX R — SELFISH MINING PAYOFF DERIVATION` — utility ratio and profitability threshold.
+- S `APPENDIX S — QUANTUM ENTROPY BOUND` — Grover bound and security interpretation.
+- T `APPENDIX T — ZK-SNARK CONSTRAINT ALGEBRA` — field constraints, soundness, completeness, extractability.
+- U `APPENDIX U — ADAPTIVE ADVERSARY AS MDP` — Markov decision process representation of adaptive strategies.
+- V `APPENDIX V — COMPOSITE FORMAL THEOREM` — consolidated formal implications.
+
+## 3. Cross-Reference Graph
+
+- A, J, Q form the PoW probability chain; J and Q refine A and use tools from Q.2 in Q.
+- I is the foundation for all later formal assertions and should be read before dependent theorem blocks.
+- K uses the drift process defined in A and J.
+- R refines selfish-mining condition stated in I assumptions and informs MDP analysis in U.
+- J, K, N, and V together support chain stability under bounded latency and adaptive behavior.
+- O, P, V are compositional safety consequences and should be used as a final validation checklist.
+
+## 4. Dependency Checklist
+
+- For inflation safety proofs: read C then H.
+- For conformance and governance safety reasoning: read D, I, P, and V.
+- For network-liveness and finality: read E, J, K, R, and V.
+- For L2 security claims: read O, I, and P.
+- For PQ/crypto claims and SNARK path: read L, T, and F.
+
+## 5. Canonical Appendix Citation Format
+
+Use canonical names exactly as written in section titles.
+
