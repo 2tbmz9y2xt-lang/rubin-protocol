@@ -45,12 +45,23 @@ Participants:
 - MUST configure outbound peers to the provided bootstrap list.
 - MUST disable public peer discovery features unless explicitly approved.
 
-### 2.2 Inbound access controls (required)
+### 2.2 Inbound access controls (required, public IP deployment)
 
 Operators SHOULD implement:
-- firewall allowlists on P2P port (only known peers),
+- firewall allowlists on the P2P port (only known peers),
+- explicit default-deny inbound for the P2P port from the public Internet,
 - per-peer connection caps + bandwidth caps,
 - aggressive stale/unknown peer eviction.
+
+Minimum practical rule set (operator checklist):
+1. Expose exactly one P2P listener port to the Internet.
+2. Restrict inbound source IPs to the invited participant list (and controller bootstrap nodes).
+3. Keep RPC/admin ports bound to localhost or a private management network only.
+4. Log and alert on any inbound connection attempt outside the allowlist.
+
+Implementation options (examples; choose one):
+- Cloud security group / firewall rule: allow `tcp/<p2p_port>` only from known participant IPs.
+- Host firewall (iptables/pf): allow `tcp/<p2p_port>` from allowlist; drop all other sources.
 
 ### 2.3 “Don’t leak the network” rules (required)
 
@@ -113,4 +124,3 @@ During private phase, use:
 
 Avoid:
 - “mainnet is live” (public claim) until the signed manifest is published.
-
