@@ -1,0 +1,27 @@
+id: CV-COMPACTSIZE
+description: CompactSize encode/decode golden vectors for cross-client determinism
+vectors:
+  - name: zero
+    value: 0
+    encoding_hex: "00"
+  - name: max_u8_minimal
+    value: 252
+    encoding_hex: "fc"
+  - name: u16_minimal_boundary
+    value: 253
+    encoding_hex: "fdfd00"
+  - name: u16_max
+    value: 65535
+    encoding_hex: "fdffff"
+  - name: u32_minimal_boundary
+    value: 65536
+    encoding_hex: "fe00000100"
+  - name: u32_mid
+    value: 305419896
+    encoding_hex: "fe78563412"
+  - name: u64_minimal_boundary
+    value: 4294967296
+    encoding_hex: "ff0000000001000000"
+  - name: u64_high
+    value: 18446744073709551615
+    encoding_hex: "ffffffffffffffffff"

@@ -1,0 +1,52 @@
+version: "1.1"
+gate: CV-DEP
+status: PASS
+description: "Deployment gate and suite_id activation behavior"
+tests:
+  - id: DEP-01
+    title: "Suite 0x02 spend rejected when suite not ACTIVE"
+    context:
+      chain_profile:
+        deployment_bit: 1
+        deployment_state: NOT_ACTIVE
+        activation_window: 1
+      tx:
+        suite_id: "0x02"
+        covenant_type: "CORE_P2PK"
+        witness: "SLH-DSA-SHAKE-256f signatures present"
+    expected_error: TX_ERR_DEPLOYMENT_INACTIVE
+    consensus: true
+
+  - id: DEP-02
+    title: "Suite 0x02 spend accepted when suite ACTIVE"
+    context:
+      chain_profile:
+        deployment_bit: 1
+        deployment_state: ACTIVE
+      tx:
+        suite_id: "0x02"
+        covenant_type: "CORE_P2PK"
+        witness: "valid signature and key"
+    expected_code: PASS
+    consensus: true
+
+  - id: DEP-03
+    title: "Suite 0x01 still valid while active"
+    context:
+      chain_profile:
+        deployment_bit: 1
+        deployment_state: NOT_ACTIVE
+      tx:
+        suite_id: "0x01"
+        covenant_type: "CORE_P2PK"
+        witness: "valid ML-DSA-87 signature"
+    expected_code: PASS
+    consensus: true
+
+  - id: DEP-04
+    title: "Unknown suite_id rejected as non-consensus alg"
+    context:
+      tx:
+        suite_id: "0xAA"
+    expected_error: TX_ERR_SIG_ALG_INVALID
+    consensus: true

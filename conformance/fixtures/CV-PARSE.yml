@@ -1,0 +1,33 @@
+version: "1.1"
+gate: CV-PARSE
+status: PASS
+description: "Transaction wire parse, CompactSize minimal encoding, witness-item/section roundtrip"
+tests:
+  - id: PARSE-01
+    title: "Non-minimal CompactSize encoding rejected"
+    context:
+      field: input_count
+      encoded: "fd01 00"
+      value: 1
+    expected_error: TX_ERR_PARSE
+    consensus: true
+
+  - id: PARSE-02
+    title: "Malformed witness_count encoding rejected"
+    context:
+      witness_count: 2
+      witness_items_present: 1
+      witness_item:
+        suite_id: 0x01
+        pubkey_length: 0
+        sig_length: 4627
+    expected_error: TX_ERR_PARSE
+    consensus: true
+
+  - id: PARSE-03
+    title: "Witness size overflow rejected"
+    context:
+      witness_size_bytes: 100001
+      max_witness_size_per_tx: 100000
+    expected_error: TX_ERR_WITNESS_OVERFLOW
+    consensus: true

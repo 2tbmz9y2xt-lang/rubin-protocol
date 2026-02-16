@@ -1,0 +1,13 @@
+[package]
+name = "rubin-node"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[features]
+default = []
+wolfcrypt-dylib = ["rubin-crypto/wolfcrypt-dylib"]
+
+[dependencies]
+rubin-consensus = { path = "../rubin-consensus" }
+rubin-crypto = { path = "../rubin-crypto" }

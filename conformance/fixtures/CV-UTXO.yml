@@ -1,0 +1,36 @@
+version: "1.1"
+gate: CV-UTXO
+status: PASS
+description: "UTXO lookup, missing/malformed spend, duplicate outpoint, value conservation"
+tests:
+  - id: UTXO-01
+    title: "Spend of missing outpoint rejected"
+    context:
+      tx_input_prevout:
+        txid: "00..00"
+        vout: 0
+      utxo_set_contains_prevout: false
+    expected_error: TX_ERR_MISSING_UTXO
+    consensus: true
+
+  - id: UTXO-02
+    title: "Intra-block double-spend of same outpoint rejected"
+    context:
+      tx_inputs:
+        - prevout: { txid: "aa11", vout: 0 }
+        - prevout: { txid: "aa11", vout: 0 }
+      preblock_utxo:
+        txid: "aa11"
+        vout: 0
+        value: 100
+    expected_error: TX_ERR_PARSE
+    consensus: true
+
+  - id: UTXO-03
+    title: "Value conservation rejection when outputs exceed inputs"
+    context:
+      sum_inputs: 100
+      sum_outputs: 101
+      covenant_type: CORE_P2PK
+    expected_error: TX_ERR_VALUE_CONSERVATION
+    consensus: true

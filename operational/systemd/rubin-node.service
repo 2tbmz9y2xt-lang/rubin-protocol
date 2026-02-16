@@ -1,0 +1,19 @@
+[Unit]
+Description=RUBIN node with verified wolfcrypt shim (local single-host)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/Users/gpt/Documents/rubin-protocol
+EnvironmentFile=/Users/gpt/Documents/rubin-protocol/operational/systemd/rubin-node.env
+ExecStart=/bin/bash -lc '\
+  source <(/Users/gpt/Documents/rubin-protocol/crypto/wolfcrypt/fetch_shim_from_ghcr.sh ${GHCR_REF} /Users/gpt/Documents/rubin-protocol/crypto/wolfcrypt/shim --export-env) && \
+  if [ "${CLIENT}" = "go" ]; then \
+    go run ./clients/go/node chain-id; \
+  else \
+    cargo run -p rubin-node -- chain-id; \
+  fi'
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

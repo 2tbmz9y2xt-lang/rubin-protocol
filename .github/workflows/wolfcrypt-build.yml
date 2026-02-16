@@ -1,0 +1,190 @@
+name: wolfcrypt-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      shim_out:
+        description: "Path for generated rubin_wc_shim.* (external output location)"
+        required: false
+        default: "/tmp/rubin-wolfcrypt/wolfcrypt-shim"
+        type: string
+  pull_request:
+    paths:
+      - 'crypto/wolfcrypt/shim/**'
+      - 'crypto/wolfcrypt/**'
+      - '.github/workflows/wolfcrypt-build.yml'
+      - 'scripts/wolfcrypt-build.sh'
+  push:
+    branches:
+      - main
+    paths:
+      - 'crypto/wolfcrypt/shim/**'
+      - 'crypto/wolfcrypt/**'
+      - '.github/workflows/wolfcrypt-build.yml'
+      - 'scripts/wolfcrypt-build.sh'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: wolfcrypt-build (${{ matrix.os }}, CC=${{ matrix.cc_bin }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    env:
+      RUBIN_WOLFSSL_TAG: v5.8.4-stable
+      RUBIN_WOLFCRYPT_WORKROOT: /tmp/rubin-wolfcrypt
+      RUBIN_WOLFSSL_PREFIX: /tmp/rubin-wolfcrypt/install
+      RUBIN_WOLFCRYPT_SHIM_OUT: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.shim_out != '') && github.event.inputs.shim_out || '/tmp/rubin-wolfcrypt/wolfcrypt-shim' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            cc_bin: gcc-12
+            cc_pkg: gcc-12
+          - os: ubuntu-22.04
+            cc_bin: clang-14
+            cc_pkg: clang-14
+          - os: macos-14
+            cc_bin: clang
+            cc_pkg: apple-clang
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate shim output path
+        run: |
+          allowed_prefix="/tmp/rubin-wolfcrypt"
+          case "${RUBIN_WOLFCRYPT_SHIM_OUT}" in
+            ${allowed_prefix}* ) echo "shim_out ok: ${RUBIN_WOLFCRYPT_SHIM_OUT}" ;;
+            * ) echo "Disallowed shim_out path: ${RUBIN_WOLFCRYPT_SHIM_OUT}" >&2; exit 1 ;;
+          esac
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git make "${CC_PKG}"
+          command -v "${CC_BIN}" || true
+          "${CC_BIN}" --version | head -n 1
+        env:
+          CC_BIN: ${{ matrix.cc_bin }}
+          CC_PKG: ${{ matrix.cc_pkg }}
+
+      - name: Verify compiler (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          which "${CC_BIN}" >/dev/null 2>&1 || CC_BIN=clang
+          "${CC_BIN}" --version | head -n 1
+        env:
+          CC_BIN: ${{ matrix.cc_bin }}
+
+      - name: Build wolfSSL with project script
+        env:
+          CC: ${{ matrix.cc_bin }}
+        run: |
+          chmod +x ./scripts/wolfcrypt-build.sh
+          ./scripts/wolfcrypt-build.sh
+
+      - name: Hash shim artifacts (SHA3-256)
+        run: |
+          out="${RUBIN_WOLFCRYPT_SHIM_OUT}"
+          if [ ! -d "${out}" ]; then
+            echo "shim output dir not found: ${out}" >&2
+            exit 1
+          fi
+          python - <<'PY'
+import hashlib, pathlib, os, sys
+out = pathlib.Path(os.environ["RUBIN_WOLFCRYPT_SHIM_OUT"])
+files = sorted([p for p in out.glob("*") if p.is_file()])
+if not files:
+    print("no shim files found", file=sys.stderr)
+    sys.exit(1)
+lines = []
+for p in files:
+    h = hashlib.sha3_256(p.read_bytes()).hexdigest()
+    lines.append(f"{h}  {p.name}")
+print("\n".join(lines))
+with open(out / "SHA3SUMS.txt", "w") as f:
+    for line in lines:
+        f.write(line + "\n")
+PY
+
+      - name: Upload shim + hashes
+        uses: actions/upload-artifact@v4
+        with:
+          name: wolfcrypt-shim-${{ matrix.os }}-${{ matrix.cc_bin }}
+          path: |
+            ${{ env.RUBIN_WOLFCRYPT_SHIM_OUT }}/*
+            ${{ env.RUBIN_WOLFCRYPT_SHIM_OUT }}/SHA3SUMS.txt
+          if-no-files-found: error
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.2.2'
+
+      - name: Sign SHA3SUMS.txt (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          COSIGN_YES: "true"
+        run: |
+          sums="${RUBIN_WOLFCRYPT_SHIM_OUT}/SHA3SUMS.txt"
+          [ -f "${sums}" ] || { echo "missing SHA3SUMS.txt"; exit 1; }
+          cosign sign-blob --output-signature "${sums}.sig" --output-certificate "${sums}.crt" "${sums}"
+
+      - name: Upload signatures
+        uses: actions/upload-artifact@v4
+        with:
+          name: wolfcrypt-shim-sigs-${{ matrix.os }}-${{ matrix.cc_bin }}
+          path: |
+            ${{ env.RUBIN_WOLFCRYPT_SHIM_OUT }}/SHA3SUMS.txt
+            ${{ env.RUBIN_WOLFCRYPT_SHIM_OUT }}/SHA3SUMS.txt.sig
+            ${{ env.RUBIN_WOLFCRYPT_SHIM_OUT }}/SHA3SUMS.txt.crt
+          if-no-files-found: error
+
+  publish-ghcr:
+    if: github.event_name != 'pull_request'
+    needs: build
+    name: publish ghcr (${{ matrix.os }}, CC=${{ matrix.cc_bin }})
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            cc_bin: gcc-12
+          - os: ubuntu-22.04
+            cc_bin: clang-14
+          - os: macos-14
+            cc_bin: clang
+    steps:
+      - name: Download shim artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wolfcrypt-shim-${{ matrix.os }}-${{ matrix.cc_bin }}
+          path: shim
+
+      - name: Download signatures
+        uses: actions/download-artifact@v4
+        with:
+          name: wolfcrypt-shim-sigs-${{ matrix.os }}-${{ matrix.cc_bin }}
+          path: shim
+
+      - name: Install oras
+        uses: oras-project/setup-oras@v1
+
+      - name: Publish to GHCR
+        env:
+          GHCR_REF: ghcr.io/${{ github.repository_owner }}/wolfcrypt-shim:${{ matrix.os }}-${{ matrix.cc_bin }}
+        run: |
+          ls -l shim
+          oras push "${GHCR_REF}" \
+            --artifact-type application/vnd.rubin.wolfcrypt-shim \
+            shim/*
