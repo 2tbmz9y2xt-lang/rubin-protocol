@@ -132,17 +132,36 @@ func cmdTxID(txHex string) error {
 	return nil
 }
 
-func cmdSighash(profilePath string, txHex string, inputIndex uint32, inputValue uint64) error {
+func parseChainIDHex(chainIDHex string) ([32]byte, error) {
+	raw, err := hexDecodeStrict(chainIDHex)
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("chain-id-hex: %w", err)
+	}
+	if len(raw) != 32 {
+		return [32]byte{}, fmt.Errorf("chain-id-hex must decode to 32 bytes (got %d)", len(raw))
+	}
+	var out [32]byte
+	copy(out[:], raw)
+	return out, nil
+}
+
+func hasFlagArg(argv []string, name string) bool {
+	want := "--" + name
+	wantEq := want + "="
+	for _, a := range argv {
+		if a == want || strings.HasPrefix(a, wantEq) {
+			return true
+		}
+	}
+	return false
+}
+
+func cmdSighash(chainID [32]byte, txHex string, inputIndex uint32, inputValue uint64) error {
 	p, cleanup, err := loadCryptoProvider()
 	if err != nil {
 		return err
 	}
 	defer cleanup()
-
-	chainID, err := deriveChainID(p, profilePath)
-	if err != nil {
-		return err
-	}
 
 	txBytes, err := hexDecodeStrict(txHex)
 	if err != nil {
@@ -163,7 +182,7 @@ func cmdSighash(profilePath string, txHex string, inputIndex uint32, inputValue 
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: rubin-node <command> [args]")
-		fmt.Fprintln(os.Stderr, "commands: version | chain-id --profile <path> | txid --tx-hex <hex> | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--profile <path>]")
+		fmt.Fprintln(os.Stderr, "commands: version | chain-id --profile <path> | txid --tx-hex <hex> | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>]")
 		os.Exit(2)
 	}
 
@@ -194,6 +213,7 @@ func main() {
 	case "sighash":
 		fs := flag.NewFlagSet("sighash", flag.ExitOnError)
 		profile := fs.String("profile", "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md", "chain instance profile path")
+		chainIDHex := fs.String("chain-id-hex", "", "override chain_id (64 hex chars)")
 		txHex := fs.String("tx-hex", "", "transaction hex bytes (TxBytes)")
 		inputIndex := fs.Uint("input-index", 0, "0-based input index")
 		inputValue := fs.Uint64("input-value", 0, "input UTXO value (u64)")
@@ -206,13 +226,42 @@ func main() {
 			fmt.Fprintln(os.Stderr, "input-index exceeds 32-bit bound")
 			os.Exit(2)
 		}
-		if err := cmdSighash(*profile, *txHex, uint32(*inputIndex) /* #nosec G115 -- inputIndex is bounded above by uint32 max */, *inputValue); err != nil {
+
+		if *chainIDHex != "" && hasFlagArg(os.Args[2:], "profile") {
+			fmt.Fprintln(os.Stderr, "use exactly one of --chain-id-hex or --profile")
+			os.Exit(2)
+		}
+
+		var chainID [32]byte
+		if *chainIDHex != "" {
+			parsed, err := parseChainIDHex(*chainIDHex)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			chainID = parsed
+		} else {
+			p, cleanup, err := loadCryptoProvider()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			defer cleanup()
+			derived, err := deriveChainID(p, *profile)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "sighash error:", err)
+				os.Exit(1)
+			}
+			chainID = derived
+		}
+
+		if err := cmdSighash(chainID, *txHex, uint32(*inputIndex) /* #nosec G115 -- inputIndex is bounded above by uint32 max */, *inputValue); err != nil {
 			fmt.Fprintln(os.Stderr, "sighash error:", err)
 			os.Exit(1)
 		}
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command")
-		fmt.Fprintln(os.Stderr, "commands: version | chain-id --profile <path> | txid --tx-hex <hex> | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--profile <path>]")
+		fmt.Fprintln(os.Stderr, "commands: version | chain-id --profile <path> | txid --tx-hex <hex> | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>]")
 		os.Exit(2)
 	}
 }

@@ -9,6 +9,7 @@ Supporting documents:
 - P2P protocol (aux): `spec/RUBIN_L1_P2P_PROTOCOL_v1.1.md`
 - Formal appendix (non-normative): `formal/RUBIN_FORMAL_APPENDIX_v1.1.md`
 - Operational security (non-normative): `operational/RUBIN_OPERATIONAL_SECURITY_v1.1.md`
+- Node policy defaults (non-consensus): `operational/RUBIN_NODE_POLICY_DEFAULTS_v1.1.md`
 
 Chain-instance profiles (publish concrete genesis bytes and derived `chain_id`):
 - Devnet: `spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md`
@@ -19,4 +20,3 @@ Conformance:
 - Bundle: `conformance/fixtures/RUBIN_L1_CONFORMANCE_BUNDLE_v1.1.yaml`
 - CV-SIGHASH vectors: `conformance/fixtures/CV-SIGHASH.yml`
 - Runner (parity check): `python3 conformance/runner/run_cv_sighash.py`
-

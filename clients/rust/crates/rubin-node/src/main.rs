@@ -97,11 +97,23 @@ fn cmd_txid(tx_hex: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_sighash(profile_path: &str, tx_hex: &str, input_index: u32, input_value: u64) -> Result<(), String> {
+fn parse_chain_id_hex(chain_id_hex: &str) -> Result<[u8; 32], String> {
+    let bytes = rubin_consensus::hex_decode_strict(chain_id_hex)?;
+    if bytes.len() != 32 {
+        return Err(format!(
+            "--chain-id-hex must decode to 32 bytes (got {})",
+            bytes.len()
+        ));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn cmd_sighash(chain_id: [u8; 32], tx_hex: &str, input_index: u32, input_value: u64) -> Result<(), String> {
     let tx_bytes = rubin_consensus::hex_decode_strict(tx_hex)?;
     let tx = rubin_consensus::parse_tx_bytes(&tx_bytes)?;
     let provider = load_crypto_provider()?;
-    let chain_id = derive_chain_id(provider.as_ref(), profile_path)?;
     let digest = rubin_consensus::sighash_v1_digest(provider.as_ref(), &chain_id, &tx, input_index, input_value)?;
     println!("{}", hex_encode(&digest));
     Ok(())
@@ -129,7 +141,7 @@ fn main() {
         eprintln!("  version");
         eprintln!("  chain-id --profile <path>");
         eprintln!("  txid --tx-hex <hex>");
-        eprintln!("  sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--profile <path>]");
+        eprintln!("  sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>]");
         std::process::exit(2);
     }
 
@@ -215,15 +227,54 @@ fn main() {
                     std::process::exit(2);
                 }
             };
-            let profile = match get_flag(&args, "--profile") {
-                Ok(Some(v)) => v,
-                Ok(None) => "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md".to_string(),
+
+            let chain_id_hex = match get_flag(&args, "--chain-id-hex") {
+                Ok(v) => v,
                 Err(e) => {
                     eprintln!("{e}");
                     std::process::exit(2);
                 }
             };
-            if let Err(e) = cmd_sighash(&profile, &tx_hex, input_index, input_value) {
+            let profile = match get_flag(&args, "--profile") {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+            };
+            if chain_id_hex.is_some() && profile.is_some() {
+                eprintln!("use exactly one of --chain-id-hex or --profile");
+                std::process::exit(2);
+            }
+
+            let chain_id = if let Some(hex) = chain_id_hex {
+                match parse_chain_id_hex(&hex) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(2);
+                    }
+                }
+            } else {
+                let profile = profile
+                    .unwrap_or_else(|| "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md".to_string());
+                let provider = match load_crypto_provider() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
+                };
+                match derive_chain_id(provider.as_ref(), &profile) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("sighash error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            };
+
+            if let Err(e) = cmd_sighash(chain_id, &tx_hex, input_index, input_value) {
                 eprintln!("sighash error: {e}");
                 std::process::exit(1);
             }
