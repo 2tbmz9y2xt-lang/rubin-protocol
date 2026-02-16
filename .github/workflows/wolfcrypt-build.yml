@@ -1,4 +1,5 @@
 name: wolfcrypt-build
+# web-visible: true (see operational/WEB_VISIBLE_POLICY.md)
 
 on:
   workflow_dispatch:
