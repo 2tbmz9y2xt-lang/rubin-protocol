@@ -1,4 +1,4 @@
-# RUBIN Protocol (Post-Quantum L1, wolfCrypt-first)
+# RUBIN Protocol (Post-Quantum L1, wolfCrypt-based)
 
 This repository is the canonical home of the RUBIN L1 specification and its supporting formal/operational appendices.
 
@@ -9,7 +9,7 @@ RUBIN is a **post-quantum oriented L1 blockchain** (PoW, UTXO-style, determinist
 Design focus:
 - strict deterministic consensus (cross-client reproducibility gates),
 - crypto-agility via VERSION_BITS,
-- an operationally realistic **FIPS-path** integration story (wolfCrypt-first behind a provider boundary).
+- an operationally realistic **FIPS-path** integration story (wolfCrypt-based behind a provider boundary).
 
 Status: development. Not a production readiness claim.
 
@@ -31,7 +31,7 @@ All consensus code must call crypto only via the provider interface (Rust: `clie
 
 ## Why wolfCrypt (FIPS-path)
 
-We use **wolfCrypt-first** as the primary backend path because it enables:
+We use a **wolfCrypt-based** backend path because it enables:
 - a controlled crypto supply chain suitable for compliance programs,
 - consistent C ABI delivery via a small shim dylib (`crypto/wolfcrypt/SHIM_DELIVERABLE_SPEC.md`),
 - runtime loading in both Rust and Go without importing wolfSSL headers into consensus code.
