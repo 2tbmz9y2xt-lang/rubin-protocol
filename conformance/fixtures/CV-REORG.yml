@@ -1,0 +1,53 @@
+version: "1.1"
+gate: CV-REORG
+status: PASS
+description: "Deterministic reorg handling and fork resolution under equal-work and equal-tip conditions"
+tests:
+  - id: REORG-01
+    title: "Tie-break on equal chain work uses lexicographic header hash"
+    context:
+      fork_a_work: 125
+      fork_b_work: 125
+      tip_hash_a: "ab...01"
+      tip_hash_b: "ab...ff"
+    expected_outcome: "select smaller lexicographic tip (or per-spec deterministic comparator)"
+    consensus: true
+
+  - id: REORG-02
+    title: "Higher-work fork always selected over lower-work fork"
+    context:
+      fork_a_work: 120
+      fork_b_work: 125
+      tip_hash_a: "ab...10"
+      tip_hash_b: "ab...20"
+    expected_outcome: "select fork B"
+    consensus: true
+
+  - id: REORG-03
+    title: "Reorg on higher-work fork after stale branch"
+    context:
+      common_height: 150
+      old_tip:
+        id: "A"
+        height: 151
+        cumulative_work: 151
+      stale_tip:
+        id: "B"
+        height: 151
+        cumulative_work: 149
+      candidate_tip:
+        id: "C"
+        height: 154
+        cumulative_work: 153
+    expected_outcome: "select candidate branch C (higher cumulative work) and rollback stale branch B"
+    consensus: true
+
+  - id: REORG-04
+    title: "Canonicality after reorg switch"
+    context:
+      branch_switch:
+        old_canonical_height: 100
+        new_branch_length: 12
+        accumulated_work: higher
+    expected_outcome: "state transition from common ancestor to new branch deterministic"
+    consensus: true

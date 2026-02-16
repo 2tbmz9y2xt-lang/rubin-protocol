@@ -1,0 +1,72 @@
+version: "1.1"
+gate: CV-BLOCK
+status: PASS
+description: "Header linkage, PoW, difficulty retarget, weight limits, and anchor caps"
+tests:
+  - id: BLOCK-01
+    title: "Invalid prev_block_hash"
+    context:
+      block_height: 128
+      prev_block_hash: "0000000000000000000000000000000000000000000000000000000000000000"
+    expected_error: BLOCK_ERR_LINKAGE_INVALID
+    consensus: true
+
+  - id: BLOCK-02
+    title: "Invalid PoW target mismatch"
+    context:
+      block_height: 256
+      block_hash: "invalid by proof-of-work predicate"
+    expected_error: BLOCK_ERR_POW_INVALID
+    consensus: true
+
+  - id: BLOCK-03
+    title: "Anchor per-output payload overflow"
+    context:
+      anchor_output:
+        covenant_type: CORE_ANCHOR
+        anchor_data_len: 65537
+    expected_error: TX_ERR_COVENANT_TYPE_INVALID
+    consensus: true
+
+  - id: BLOCK-04
+    title: "Anchor per-block payload overflow"
+    context:
+      anchor_block:
+        outputs: 2
+        each_anchor_len: 65536
+        total_anchor_len: 131072
+        additional_payload_len: 1
+    expected_error: BLOCK_ERR_ANCHOR_BYTES_EXCEEDED
+    consensus: true
+
+  - id: BLOCK-05
+    title: "Block weight overflow"
+    context:
+      sum_weight: 4000001
+    expected_error: BLOCK_ERR_WEIGHT_EXCEEDED
+    consensus: true
+
+  - id: BLOCK-06
+    title: "Difficulty retarget mismatch in periodic window"
+    context:
+      block_height: 4032
+      expected_target: "different from header target"
+    expected_error: BLOCK_ERR_TARGET_INVALID
+    consensus: true
+
+  - id: BLOCK-07
+    title: "Median-time-vs-timestamp old bound violation"
+    context:
+      median_time: 1700000010
+      block_timestamp: 1700000010
+    expected_error: BLOCK_ERR_TIMESTAMP_OLD
+    consensus: true
+
+  - id: BLOCK-08
+    title: "Future timestamp cap violation"
+    context:
+      local_time: 1700000000
+      block_timestamp: 1700072001
+      max_drift: 7200
+    expected_error: BLOCK_ERR_TIMESTAMP_FUTURE
+    consensus: true

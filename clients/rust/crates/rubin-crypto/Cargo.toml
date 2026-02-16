@@ -1,0 +1,15 @@
+[package]
+name = "rubin-crypto"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[features]
+default = ["dev-std"]
+wolfcrypt = []
+wolfcrypt-dylib = ["dep:libloading"]
+dev-std = []
+
+[dependencies]
+sha3 = "0.10"
+libloading = { version = "0.8", optional = true }

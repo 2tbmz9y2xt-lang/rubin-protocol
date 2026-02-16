@@ -1,0 +1,236 @@
+use std::fs;
+use std::path::{Component, Path};
+
+use rubin_crypto::CryptoProvider;
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{:02x}", byte)).collect()
+}
+
+fn extract_fenced_hex(doc: &str, key: &str) -> Result<String, String> {
+    let idx = doc
+        .find(key)
+        .ok_or_else(|| format!("missing key: {key}"))?;
+    let after = &doc[idx..];
+    let fence = after
+        .find("```")
+        .ok_or_else(|| format!("missing code fence after: {key}"))?;
+    let rest = &after[fence + 3..];
+    let end = rest
+        .find("```")
+        .ok_or_else(|| format!("unterminated code fence after: {key}"))?;
+    Ok(rest[..end].trim().to_string())
+}
+
+fn load_crypto_provider() -> Result<Box<dyn CryptoProvider>, String> {
+    #[cfg(feature = "wolfcrypt-dylib")]
+    {
+        if std::env::var("RUBIN_WOLFCRYPT_SHIM_PATH").is_ok() {
+            return Ok(Box::new(rubin_crypto::WolfcryptDylibProvider::load_from_env()?));
+        }
+    }
+    Ok(Box::new(rubin_crypto::DevStdCryptoProvider))
+}
+
+fn resolve_profile_path(profile_path: &str) -> Result<String, String> {
+    let path = Path::new(profile_path);
+    if path.is_absolute() {
+        return Err("profile path must be relative".to_string());
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err("profile path may not escape repository".to_string());
+    }
+
+    let root = Path::new("spec");
+    let abs_root = root
+        .canonicalize()
+        .map_err(|e| format!("resolve profile root: {e}"))?;
+    let abs_profile = path
+        .canonicalize()
+        .map_err(|e| format!("resolve profile path: {e}"))?;
+    if !abs_profile.starts_with(&abs_root) {
+        return Err(format!("profile path must be inside {}", root.display()));
+    }
+
+    abs_profile
+        .to_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "profile path is not valid UTF-8".to_string())
+}
+
+fn derive_chain_id(provider: &dyn CryptoProvider, profile_path: &str) -> Result<[u8; 32], String> {
+    let safe_profile = resolve_profile_path(profile_path)?;
+    let doc = fs::read_to_string(&safe_profile).map_err(|e| format!("read profile: {e}"))?;
+    let header_hex = extract_fenced_hex(&doc, "genesis_header_bytes")?;
+    let tx_hex = extract_fenced_hex(&doc, "genesis_tx_bytes")?;
+
+    let header_bytes = rubin_consensus::hex_decode_strict(&header_hex)?;
+    let tx_bytes = rubin_consensus::hex_decode_strict(&tx_hex)?;
+
+    // serialized_genesis_without_chain_id_field =
+    //   ASCII("RUBIN-GENESIS-v1") || genesis_header_bytes || CompactSize(1) || genesis_tx_bytes
+    let mut preimage = Vec::new();
+    preimage.extend_from_slice(b"RUBIN-GENESIS-v1");
+    preimage.extend_from_slice(&header_bytes);
+    preimage.extend_from_slice(&rubin_consensus::compact_size_encode(1));
+    preimage.extend_from_slice(&tx_bytes);
+
+    Ok(provider.sha3_256(&preimage)?)
+}
+
+fn cmd_chain_id(profile_path: &str) -> Result<(), String> {
+    let provider = load_crypto_provider()?;
+    let chain_id = derive_chain_id(provider.as_ref(), profile_path)?;
+    println!("{}", hex_encode(&chain_id));
+    Ok(())
+}
+
+fn cmd_txid(tx_hex: &str) -> Result<(), String> {
+    let tx_bytes = rubin_consensus::hex_decode_strict(tx_hex)?;
+    let tx = rubin_consensus::parse_tx_bytes(&tx_bytes)?;
+    let provider = load_crypto_provider()?;
+    let txid = rubin_consensus::txid(provider.as_ref(), &tx)?;
+    println!("{}", hex_encode(&txid));
+    Ok(())
+}
+
+fn cmd_sighash(profile_path: &str, tx_hex: &str, input_index: u32, input_value: u64) -> Result<(), String> {
+    let tx_bytes = rubin_consensus::hex_decode_strict(tx_hex)?;
+    let tx = rubin_consensus::parse_tx_bytes(&tx_bytes)?;
+    let provider = load_crypto_provider()?;
+    let chain_id = derive_chain_id(provider.as_ref(), profile_path)?;
+    let digest = rubin_consensus::sighash_v1_digest(provider.as_ref(), &chain_id, &tx, input_index, input_value)?;
+    println!("{}", hex_encode(&digest));
+    Ok(())
+}
+
+fn get_flag(args: &[String], flag: &str) -> Result<Option<String>, String> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == flag {
+            if i + 1 >= args.len() {
+                return Err(format!("missing value for {flag}"));
+            }
+            return Ok(Some(args[i + 1].clone()));
+        }
+        i += 1;
+    }
+    Ok(None)
+}
+
+fn main() {
+    let mut args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.is_empty() {
+        eprintln!("usage: rubin-node <command> [args]");
+        eprintln!("commands:");
+        eprintln!("  version");
+        eprintln!("  chain-id --profile <path>");
+        eprintln!("  txid --tx-hex <hex>");
+        eprintln!("  sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--profile <path>]");
+        std::process::exit(2);
+    }
+
+    let cmd = args.remove(0);
+    match cmd.as_str() {
+        "version" => {
+            println!("rubin-node (rust) {}", rubin_consensus::CONSENSUS_REVISION);
+        }
+        "chain-id" => {
+            let profile = match get_flag(&args, "--profile") {
+                Ok(Some(v)) => v,
+                Ok(None) => "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md".to_string(),
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+            };
+            if let Err(e) = cmd_chain_id(&profile) {
+                eprintln!("chain-id error: {e}");
+                std::process::exit(1);
+            }
+        }
+        "txid" => {
+            let tx_hex = match get_flag(&args, "--tx-hex") {
+                Ok(Some(v)) => v,
+                Ok(None) => {
+                    eprintln!("missing required flag: --tx-hex");
+                    std::process::exit(2);
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+            };
+            if let Err(e) = cmd_txid(&tx_hex) {
+                eprintln!("txid error: {e}");
+                std::process::exit(1);
+            }
+        }
+        "sighash" => {
+            let tx_hex = match get_flag(&args, "--tx-hex") {
+                Ok(Some(v)) => v,
+                Ok(None) => {
+                    eprintln!("missing required flag: --tx-hex");
+                    std::process::exit(2);
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+            };
+            let input_index = match get_flag(&args, "--input-index") {
+                Ok(Some(v)) => match v.parse::<u32>() {
+                    Ok(n) => n,
+                    Err(e) => {
+                        eprintln!("--input-index: {e}");
+                        std::process::exit(2);
+                    }
+                },
+                Ok(None) => {
+                    eprintln!("missing required flag: --input-index");
+                    std::process::exit(2);
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+            };
+            let input_value = match get_flag(&args, "--input-value") {
+                Ok(Some(v)) => match v.parse::<u64>() {
+                    Ok(n) => n,
+                    Err(e) => {
+                        eprintln!("--input-value: {e}");
+                        std::process::exit(2);
+                    }
+                },
+                Ok(None) => {
+                    eprintln!("missing required flag: --input-value");
+                    std::process::exit(2);
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+            };
+            let profile = match get_flag(&args, "--profile") {
+                Ok(Some(v)) => v,
+                Ok(None) => "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md".to_string(),
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+            };
+            if let Err(e) = cmd_sighash(&profile, &tx_hex, input_index, input_value) {
+                eprintln!("sighash error: {e}");
+                std::process::exit(1);
+            }
+        }
+        _ => {
+            eprintln!("unknown command: {cmd}");
+            std::process::exit(2);
+        }
+    }
+}

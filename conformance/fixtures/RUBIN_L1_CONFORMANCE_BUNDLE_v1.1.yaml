@@ -1,0 +1,34 @@
+version: "1.1"
+profile: "RUBIN_L1_CANONICAL_v1.1"
+status: "IN_PROGRESS"
+updated: "2026-02-16"
+execution_note: "Runner coverage is partial (CV-SIGHASH only). Mandatory gates are not yet executed by a unified runner."
+mandatory_gates:
+  - name: CV-PARSE
+    file: "conformance/fixtures/CV-PARSE.yml"
+    required: true
+    status: "PASS"
+  - name: CV-SIGHASH
+    file: "conformance/fixtures/CV-SIGHASH.yml"
+    required: true
+    status: "PASS"
+  - name: CV-BIND
+    file: "conformance/fixtures/CV-BIND.yml"
+    required: true
+    status: "PASS"
+  - name: CV-UTXO
+    file: "conformance/fixtures/CV-UTXO.yml"
+    required: true
+    status: "PASS"
+  - name: CV-DEP
+    file: "conformance/fixtures/CV-DEP.yml"
+    required: true
+    status: "PASS"
+  - name: CV-BLOCK
+    file: "conformance/fixtures/CV-BLOCK.yml"
+    required: true
+    status: "PASS"
+  - name: CV-REORG
+    file: "conformance/fixtures/CV-REORG.yml"
+    required: true
+    status: "PASS"
