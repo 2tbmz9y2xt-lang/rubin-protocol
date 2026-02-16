@@ -72,7 +72,13 @@ Create `operational/RUBIN_MAINNET_LAUNCH_MANIFEST_v1.1.json` using the schema be
 
 ### Step 4 — Controller signature
 
-Controller signs the JSON manifest bytes (canonical UTF-8; no trailing whitespace changes after signing) and publishes:
+Controller signs the manifest using **byte-exact signing**:
+
+- The controller MUST sign the **exact UTF-8 bytes** of the manifest file that will be published in the GitHub Release asset.
+- Verifiers MUST validate the detached signature against the **exact published bytes** (i.e., the downloaded file bytes).
+- If any canonicalization is used, it MUST be a named canonical scheme (recommended: RFC 8785 JSON Canonicalization Scheme) and the chosen scheme MUST be stated alongside the signature; otherwise, tools MUST NOT re-serialize or reformat JSON between signing and verification.
+
+Controller publishes:
 
 - the manifest JSON,
 - the detached signature file,
@@ -80,12 +86,17 @@ Controller signs the JSON manifest bytes (canonical UTF-8; no trailing whitespac
 
 ### Step 5 — Release publication (GitHub)
 
-1. Tag the release `mainnet-genesis-v1.1`.
+1. Create the release tag **pointing exactly at `SPEC_COMMIT`**:
+   - Create tag `mainnet-genesis-v1.1` on `SPEC_COMMIT` (not on a branch tip by accident).
+   - Verify the tag target equals `SPEC_COMMIT` before publishing.
 2. Create a GitHub Release containing:
    - the exact mainnet profile Markdown,
    - the JSON manifest,
    - the signature,
    - the controller public key / fingerprint file.
+3. Final pre-publish verification (controller + at least one operator):
+   - `manifest.spec_commit` MUST equal `SPEC_COMMIT`.
+   - The detached signature MUST verify against the **downloaded** manifest bytes from the release draft.
 
 ## 4. Launch manifest schema (JSON)
 
@@ -113,7 +124,7 @@ Create a JSON object with the following fields:
 Rules:
 - All `*_hex` fields MUST be lowercase hex with no `0x` prefix.
 - `chain_id_hex` and `genesis_block_hash_hex` MUST be exactly 64 hex chars.
-- `spec_commit` MUST identify the exact repo state used to publish the profile.
+- `spec_commit` MUST equal `SPEC_COMMIT` used for the `mainnet-genesis-v1.1` tag.
 
 ## 5. Post-publication operator checklist
 
@@ -127,4 +138,3 @@ Operators MUST:
 
 All official communication MUST reference `chain_id_hex` and the GitHub Release tag `mainnet-genesis-v1.1`.
 Any “RUBIN mainnet” claim without the exact `chain_id_hex` is non-authoritative.
-

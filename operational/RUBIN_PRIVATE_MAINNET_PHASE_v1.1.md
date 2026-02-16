@@ -47,7 +47,7 @@ Participants:
 
 ### 2.2 Inbound access controls (required, public IP deployment)
 
-Operators SHOULD implement:
+Operators MUST implement:
 - firewall allowlists on the P2P port (only known peers),
 - explicit default-deny inbound for the P2P port from the public Internet,
 - per-peer connection caps + bandwidth caps,
@@ -58,6 +58,7 @@ Minimum practical rule set (operator checklist):
 2. Restrict inbound source IPs to the invited participant list (and controller bootstrap nodes).
 3. Keep RPC/admin ports bound to localhost or a private management network only.
 4. Log and alert on any inbound connection attempt outside the allowlist.
+5. Enforce connection/bandwidth caps and eviction timers according to `operational/RUBIN_NODE_POLICY_DEFAULTS_v1.1.md` (P0 defaults) or stricter.
 
 Implementation options (examples; choose one):
 - Cloud security group / firewall rule: allow `tcp/<p2p_port>` only from known participant IPs.
@@ -102,7 +103,8 @@ Required gates:
 Controller MUST define:
 - a single incident channel,
 - a rollback policy for node binaries,
-- a “halt communications” template to avoid rumor-driven chain splits.
+- a “halt communications” template to avoid rumor-driven chain splits,
+- and publish them to invited operators as `operational/RUBIN_INCIDENT_RESPONSE_PRIVATE_PHASE_v1.1.md` (distributed out-of-band during the private phase).
 
 ## 7. Transition to public launch (controller checklist)
 
