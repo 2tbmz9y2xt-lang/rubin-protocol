@@ -894,6 +894,9 @@ tx_data_root ||
 withdrawals_root
 ```
 
+Interop note (non-consensus):
+- A recommended `anchor_data` envelope for RETLBatch interoperability (including `sequencer_sig`) is defined in `operational/RUBIN_RETL_INTEROP_FREEZE_CHECKLIST_v1.1.md §2.2.1`.
+
 Consensus requirements for anchor_data in a block:
 
 - Per-output constraint:

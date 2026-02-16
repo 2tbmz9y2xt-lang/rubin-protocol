@@ -50,3 +50,17 @@ tests:
         suite_id: "0xAA"
     expected_error: TX_ERR_SIG_ALG_INVALID
     consensus: true
+
+  - id: DEP-05
+    title: "VERSION_BITS transition priority: LOCKED_IN wins over FAILED at same boundary"
+    context:
+      deployment:
+        start_height: 0
+        timeout_height: 2016
+        signal_window: 2016
+        threshold: 1916
+        boundary_height: 2016
+        signal_count_in_window: 1916
+        timeout_reached: true
+    expected_deployment_state: LOCKED_IN
+    consensus: true

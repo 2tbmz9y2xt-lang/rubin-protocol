@@ -48,7 +48,8 @@ Interop freeze requirement:
 
 ```
 anchor_data =
-  ASCII("RUBIN-RETL/v1") ||
+  ASCII("RUBIN-RETL-v1") ||
+  chain_id ||
   RETLBatchV1Bytes
 ```
 
