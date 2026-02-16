@@ -10,7 +10,7 @@ This document deliberately does **not** change consensus validity. A transaction
 
 ### 1.1 Fee floor
 
-- Nodes MUST enforce `MIN_RELAY_FEE_RATE` as a local floor.
+- Nodes MUST enforce `MIN_RELAY_FEE_RATE` as a local floor (`MIN_RELAY_FEE_RATE = 1` in CANONICAL v1.1 §1.2; non-consensus relay policy).
 - Nodes MAY raise the floor dynamically under load (DoS defense).
 - Mempool admission SHOULD prioritize by `fee / weight(T)` (economic efficiency).
 
@@ -26,7 +26,7 @@ Nodes MAY enforce additional local caps, but SHOULD log and surface them as poli
 
 - When mempool is full, evict lowest `fee/weight` first.
 - Apply anti-starvation backoff so short bursts cannot permanently crowd out moderate-fee traffic.
-- Prefer “first-seen” ordering for conflicting spends until replacement policies are explicitly specified.
+- Prefer “first-seen” ordering for conflicting spends; any “replacement policies” and the trigger for switching behavior MUST be published via an operational update + release notes, and operators SHOULD switch only when that update defines deterministic criteria.
 
 ## 2. P2P DoS defenses (policy)
 
@@ -49,7 +49,7 @@ This is policy guidance; it is not a consensus requirement.
 
 ## 3. ANCHOR spam resistance (policy)
 
-`CORE_ANCHOR` is non-spendable and has `value = 0` by consensus, so spam pressure must be handled primarily by policy.
+Because `CORE_ANCHOR` outputs are non-spendable and require `value = 0` by consensus (CANONICAL v1.1 §3.6), spam pressure must be handled primarily by policy.
 
 Recommended mempool policy:
 - require higher effective fees for transactions containing `CORE_ANCHOR` payload bytes (e.g., a multiplier over the base fee floor),
@@ -60,7 +60,7 @@ Do **not** rely on “sender identity” in UTXO contexts; apply limits per peer
 
 ## 4. RETL-specific policies (application-layer)
 
-Consensus does not enforce RETL bond/slashing semantics. Nodes and operators MAY apply policy gates for what they *relay* or *surface*:
+RETL semantics are application-level (CANONICAL v1.1 §7). Nodes and operators MAY apply policy gates for what they *relay* or *surface*:
 
 - optional minimum RETL bond threshold for “preferred” domains (UI/relay prioritization),
 - domain reputation scoring (non-consensus),
@@ -70,7 +70,7 @@ Avoid hard whitelists for validity; prefer prioritization over censorship.
 
 ## 5. Nonce replay hardening (mempool policy)
 
-Consensus `tx_nonce` replay prevention is per-block. To reduce spam and reorg churn, nodes MAY add:
+Consensus `tx_nonce` replay prevention is per-block (CANONICAL v1.1 §3.4). To reduce spam and reorg churn, nodes MAY add:
 
 - mempool-level deduplication over `(key_id, tx_nonce)` for a rolling window,
 - per-key rate limits in mempool,
@@ -109,4 +109,3 @@ For compliance-oriented deployments:
 - pin and attest wolfCrypt shim binaries (hash + provenance),
 - record build identifiers and operating environment,
 - fail-stop on crypto provider internal errors (do not silently substitute hashes).
-
