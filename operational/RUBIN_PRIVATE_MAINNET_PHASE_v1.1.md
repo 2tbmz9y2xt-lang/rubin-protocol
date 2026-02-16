@@ -98,6 +98,10 @@ Required gates:
 - `python3 conformance/runner/run_cv_sighash.py` must PASS on release artifacts.
 - Any new protocol-affecting change requires an explicit controller announcement and a new release build.
 
+Definition (non-consensus, operational):
+- “Protocol-affecting change” includes changes to consensus rules, transaction/block wire formats, chain-instance profiles (genesis bytes / chain_id derivations), VERSION_BITS state machine semantics, or conformance fixtures that gate determinism.
+- It excludes documentation-only edits, CLI UX, logging, and non-consensus monitoring defaults.
+
 ## 6. Incident handling during private phase
 
 Controller MUST define:
