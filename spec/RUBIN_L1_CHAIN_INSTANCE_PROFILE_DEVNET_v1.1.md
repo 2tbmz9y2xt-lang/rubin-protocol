@@ -7,7 +7,7 @@ Purpose: publish deterministic chain-instance fields for local/dev deployments w
 Status interpretation: see `operational/RUBIN_OPERATIONAL_SECURITY_v1.1.md §1.1`.
 Transition governance: `operational/RUBIN_L1_FREEZE_TRANSITION_POLICY_v1.1.md`.
 
-This file defines a single chain instance. It does not modify consensus rules in `RUBIN_L1_CANONICAL_v1.1.md`.
+This file defines a single chain instance. It does not modify consensus rules in `spec/RUBIN_L1_CANONICAL_v1.1.md`.
 
 This file is **not** a production freeze and does not authorize any testnet/mainnet claim.
 
@@ -49,5 +49,4 @@ Derived outputs (for operator convenience; not input):
 
 If devnet activates any feature, publish:
 
-- `RUBIN_L1_DEPLOYMENTS_DEVNET_v1.1.md` per `RUBIN_L1_CANONICAL_v1.1.md §8.1`.
-
+- `spec/RUBIN_L1_DEPLOYMENTS_DEVNET_v1.1.md` per `spec/RUBIN_L1_CANONICAL_v1.1.md §8.1`.

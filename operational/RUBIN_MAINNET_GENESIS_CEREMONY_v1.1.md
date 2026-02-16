@@ -24,7 +24,7 @@ The ceremony produces and publishes:
 2. `genesis_tx_bytes` (hex)
 3. `chain_id` (hex; derived)
 4. `genesis_block_hash` (hex; derived)
-5. `RUBIN_MAINNET_LAUNCH_MANIFEST_v1.1.json` (signed by controller key)
+5. `operational/RUBIN_MAINNET_LAUNCH_MANIFEST_v1.1.json` (signed by controller key)
 
 ## 1. Preconditions (controller)
 

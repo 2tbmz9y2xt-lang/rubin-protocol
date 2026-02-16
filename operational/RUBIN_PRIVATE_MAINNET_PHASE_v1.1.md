@@ -108,12 +108,12 @@ Controller MUST define:
 
 ## 7. Transition to public launch (controller checklist)
 
-NUЖНО ОДОБРЕНИЕ КОНТРОЛЕРА:
+НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА:
 You authorize the transition only when all are true:
 
 1. Genesis is final and reproducible (two independent derivations match).
 2. Signed launch manifest is ready (`operational/RUBIN_MAINNET_GENESIS_CEREMONY_v1.1.md`).
-3. At least N independent operators confirm pinned `chain_id_hex` and stable operation over T days.
+3. At least **N=3** independent operators confirm pinned `chain_id_hex` and stable operation over **T=7 days**.
 4. Public bootstrap plan is ready (DNS seeds, docs, monitoring).
 
 Public launch action:

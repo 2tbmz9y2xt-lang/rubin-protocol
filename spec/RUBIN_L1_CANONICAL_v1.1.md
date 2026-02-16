@@ -127,7 +127,7 @@ where:
 key_id = SHA3-256(pubkey)
 ```
 
-- Address encoding, key-rotation lifecycle, and policy throttling are protocol-application decisions; L1 validation checks only that witness public keys are correctly typed and verify signatures. Address binding rules are specified in `RUBIN_L1_KEY_MANAGEMENT_v1.1.md`.
+- Address encoding, key-rotation lifecycle, and policy throttling are protocol-application decisions; L1 validation checks only that witness public keys are correctly typed and verify signatures. Address binding rules are specified in `spec/RUBIN_L1_KEY_MANAGEMENT_v1.1.md`.
 
 Canonical wire lengths and key identifiers used by consensus:
 
@@ -1029,7 +1029,7 @@ A protocol release is admissible only if:
 2. `CV-PARSE`/`CV-BIND`/`CV-UTXO`/`CV-DEP`/`CV-BLOCK`/`CV-REORG` gates are `PASS`.
 3. Cross-client parity is deterministic under identical inputs.
 4. Deterministic serialization and consensus invariants are mechanically reproduced.
-5. Conformance gate definitions are authoritative in `RUBIN_L1_CONFORMANCE_MANIFEST_v1.1.md`.
+5. Conformance gate definitions are authoritative in `spec/RUBIN_L1_CONFORMANCE_MANIFEST_v1.1.md`.
 
 ## 11. Weight and Fee Accounting (Normative)
 
@@ -1187,8 +1187,8 @@ Expected: TX_ERR_MISSING_UTXO
 - This file excludes probabilistic security derivations, UC proofs, and operational governance details.
 - Formal proofs and assumptions are in `../formal/RUBIN_FORMAL_APPENDIX_v1.1.md`.
 - Measurement and incident governance are in `../operational/RUBIN_OPERATIONAL_SECURITY_v1.1.md`.
-- Formal key format and address binding are in `RUBIN_L1_KEY_MANAGEMENT_v1.1.md`.
-- Coinbase/subsidy rules are in `RUBIN_L1_COINBASE_AND_REWARDS_v1.1.md`.
+- Formal key format and address binding are in `spec/RUBIN_L1_KEY_MANAGEMENT_v1.1.md`.
+- Coinbase/subsidy rules are in `spec/RUBIN_L1_COINBASE_AND_REWARDS_v1.1.md`.
 
 ## 14. Threat Model and Deployment Assumptions
 
@@ -1224,7 +1224,7 @@ Operationally, consensus-critical code MUST reject all non-minimal/ambiguous enc
 10. Light clients MUST reject headers chains with inconsistent median-time and PoW checks at each step.
 11. Nodes MAY enforce connection caps and per-peer bandwidth ceilings to resist eclipse/DoS attacks.
 12. Maximum message size is `MAX_RELAY_MSG_BYTES`.
-13. Full peer transport and light-client profile is specified in `RUBIN_L1_P2P_PROTOCOL_v1.1.md`.
+13. Full peer transport and light-client profile is specified in `spec/RUBIN_L1_P2P_PROTOCOL_v1.1.md`.
 
 ## 16. Crypto Agility and Upgrade Path (Normative)
 
@@ -1234,4 +1234,4 @@ Operationally, consensus-critical code MUST reject all non-minimal/ambiguous enc
 4. If migration leaves unknown `suite_id` in active consensus field, block validity is rejected.
 5. Unsupported `suite_id` in consensus-relevant witness data MUST be `TX_ERR_SIG_ALG_INVALID`.
 6. In a mixed-policy period, L1 can gate algorithm acceptance by deployment bit and height.
-7. Full rollout/rollback behavior is in `RUBIN_L1_CRYPTO_AGILITY_UPGRADE_v1.1.md`.
+7. Full rollout/rollback behavior is in `spec/RUBIN_L1_CRYPTO_AGILITY_UPGRADE_v1.1.md`.
