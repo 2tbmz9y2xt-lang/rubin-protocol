@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import os.path
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -36,6 +37,9 @@ def run(client: ClientCmd, argv: list[str]) -> str:
         )
     return p.stdout.strip()
 
+def relpath(from_dir: Path, to_path: Path) -> str:
+    return os.path.relpath(str(to_path), start=str(from_dir))
+
 
 def load_yaml(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
@@ -55,7 +59,7 @@ def main() -> int:
     parser.add_argument(
         "--profile",
         default=None,
-        help="Chain instance profile Markdown (default: repo/spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md)",
+        help="Chain instance profile Markdown (fallback if a test lacks chain_id_hex)",
     )
     args = parser.parse_args()
 
@@ -76,13 +80,22 @@ def main() -> int:
 
     rust = ClientCmd(
         name="rust",
-        cwd=repo_root / "clients" / "rust",
-        argv_prefix=["cargo", "run", "-q", "-p", "rubin-node", "--"],
+        cwd=repo_root,
+        argv_prefix=[
+            "cargo",
+            "run",
+            "-q",
+            "--manifest-path",
+            "clients/rust/Cargo.toml",
+            "-p",
+            "rubin-node",
+            "--",
+        ],
     )
     go = ClientCmd(
         name="go",
-        cwd=repo_root / "clients" / "go",
-        argv_prefix=["go", "run", "./node"],
+        cwd=repo_root,
+        argv_prefix=["go", "-C", "clients/go", "run", "./node"],
     )
 
     failures: list[str] = []
@@ -121,12 +134,22 @@ def main() -> int:
             if isinstance(expected_sighash, str) and expected_sighash:
                 input_index = ctx.get("input_index")
                 input_value = ctx.get("input_value")
+                chain_id_hex = ctx.get("chain_id_hex")
                 if not isinstance(input_index, int) or input_index < 0:
                     failures.append(f"{test_id}: invalid input_index")
                     continue
                 if not isinstance(input_value, int) or input_value < 0:
                     failures.append(f"{test_id}: invalid input_value")
                     continue
+
+                rust_chain_args: list[str]
+                go_chain_args: list[str]
+                if isinstance(chain_id_hex, str) and chain_id_hex:
+                    rust_chain_args = ["--chain-id-hex", chain_id_hex]
+                    go_chain_args = ["--chain-id-hex", chain_id_hex]
+                else:
+                    rust_chain_args = ["--profile", relpath(rust.cwd, profile_path)]
+                    go_chain_args = ["--profile", relpath(go.cwd, profile_path)]
 
                 out_r = run(
                     rust,
@@ -138,8 +161,7 @@ def main() -> int:
                         str(input_index),
                         "--input-value",
                         str(input_value),
-                        "--profile",
-                        str(profile_path),
+                        *rust_chain_args,
                     ],
                 )
                 out_g = run(
@@ -152,8 +174,7 @@ def main() -> int:
                         str(input_index),
                         "--input-value",
                         str(input_value),
-                        "--profile",
-                        str(profile_path),
+                        *go_chain_args,
                     ],
                 )
                 executed += 1
@@ -179,4 +200,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -36,7 +36,12 @@ We use a **wolfCrypt-based** backend path because it enables:
 - consistent C ABI delivery via a small shim dylib (`crypto/wolfcrypt/SHIM_DELIVERABLE_SPEC.md`),
 - runtime loading in both Rust and Go without importing wolfSSL headers into consensus code.
 
-Note: “FIPS-path” here means build discipline and deployability; it is not a blanket FIPS 140-3 validation claim for PQC operations.
+Compliance precision (as of 2026-02-16):
+- wolfCrypt has active FIPS 140-3 certificates (e.g., CMVP #4718 and #5041), but those validated modules do not list PQC algorithms in their published Security Policy documents.
+- wolfSSL publicly states it is developing a new PQC-enabled FIPS 140-3 certificate covering FIPS 203–205 and that the CMVP submission is in process (2026-02-10).
+- NIST CMVP “Modules In Process” lists a wolfCrypt FIPS 140-3 submission as “Review Pending (9/12/2025)”.
+
+Therefore: “FIPS-path” in this repo means build discipline and deployability; it is not a current “FIPS-validated PQC” claim.
 
 ## Canonical documents (v1.1)
 
@@ -44,6 +49,7 @@ Note: “FIPS-path” here means build discipline and deployability; it is not a
 - Spec index (web-friendly): `SPEC.md`
 - Formal appendix (non-normative): `formal/RUBIN_FORMAL_APPENDIX_v1.1.md`
 - Operational security (non-normative): `operational/RUBIN_OPERATIONAL_SECURITY_v1.1.md`
+- Node policy defaults (non-consensus): `operational/RUBIN_NODE_POLICY_DEFAULTS_v1.1.md`
 
 ## Chain instances (dev/test/main profiles)
 

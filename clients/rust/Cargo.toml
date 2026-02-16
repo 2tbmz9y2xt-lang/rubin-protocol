@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/rubin-crypto",
+  "crates/rubin-consensus",
+  "crates/rubin-node",
+]
+
