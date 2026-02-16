@@ -50,6 +50,7 @@ Therefore: “FIPS-path” in this repo means build discipline and deployability
 - Formal appendix (non-normative): `formal/RUBIN_FORMAL_APPENDIX_v1.1.md`
 - Operational security (non-normative): `operational/RUBIN_OPERATIONAL_SECURITY_v1.1.md`
 - Node policy defaults (non-consensus): `operational/RUBIN_NODE_POLICY_DEFAULTS_v1.1.md`
+- Mainnet genesis ceremony (controller-run): `operational/RUBIN_MAINNET_GENESIS_CEREMONY_v1.1.md`
 
 ## Chain instances (dev/test/main profiles)
 
