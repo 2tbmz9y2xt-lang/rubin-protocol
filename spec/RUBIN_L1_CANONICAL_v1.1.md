@@ -384,6 +384,7 @@ Semantics:
   - `covenant_data = suite_id:u8 || key_id:bytes32`.
   - `suite_id` is `0x01` or `0x02` (see §4.4 for the active policy and VERSION_BITS deployment gates).
   - The output is spendable only by a witness packet with matching `suite_id` and a signature over `sighash`.
+  - Note: creating outputs with `suite_id = 0x02` before VERSION_BITS activation is syntactically valid, but the output is unspendable until activation (§4 step 6) and permanently lost if the deployment reaches FAILED state. Wallet implementations SHOULD warn users before creating such outputs.
   - `covenant_data_len` MUST be exactly `1 + 32`.
 - `CORE_TIMELOCK_V1`:
   - `covenant_data = lock_mode:u8 || lock_value:u64le`.
@@ -407,7 +408,7 @@ Any unknown or future `covenant_type` MUST be rejected as `TX_ERR_COVENANT_TYPE_
 
 Validation for each non-coinbase transaction is fixed in this order:
 
-1. Canonical parse
+1. Canonical parse (including output covenant constraints per §3.6)
 2. Replay-domain checks (`tx_nonce`, `sequence`)
 3. UTXO lookup
 4. Coinbase maturity (non-coinbase skip)
@@ -484,6 +485,8 @@ hash_of_all_outputs = SHA3-256(concat(outputs[j] in TxOutput wire order for j in
 All fields in `preimage_tx_sig` are taken from the transaction `T` being signed (not the block header), except `input_value`.
 `input_value` is the `value` of the spendable UTXO entry referenced by this input's `(prev_txid, prev_vout)`.
 In particular, `version` means `T.version`.
+
+When `output_count = 0` (valid per §3.1), `hash_of_all_outputs = SHA3-256("")` (the SHA3-256 digest of the empty byte string). Implementations MUST handle this edge case.
 
 Serialization table (Normative):
 
@@ -751,6 +754,7 @@ Window boundaries and applicability (Normative):
 
 This is a consensus rule and MUST be deterministic.
 All division in this rule is integer division with floor.
+Intermediate products (`target_old × T_actual` and `target_old × 4`) MUST be computed using at least 320-bit (or arbitrary-precision) unsigned integer arithmetic. Silent truncation of intermediate values is non-conforming and will cause consensus splits between implementations using different integer widths.
 
 ### 6.5 Header Time Rules (Consensus-Critical)
 
@@ -976,6 +980,8 @@ State transitions at a window boundary height `h`:
 4. `LOCKED_IN -> ACTIVE`:
    - at the next window boundary after entering `LOCKED_IN`.
 5. `ACTIVE` and `FAILED` are terminal.
+
+Transitions are evaluated in the numbered order above at each window boundary. If transition 2 (LOCKED_IN) fires at a boundary, transition 3 (FAILED) MUST NOT be evaluated for that same boundary.
 
 v1.1 deployment registry:
 
