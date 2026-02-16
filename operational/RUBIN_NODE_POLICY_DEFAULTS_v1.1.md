@@ -6,6 +6,25 @@ Scope: relay/mempool/p2p/operator policies that MAY be changed without a network
 
 This document deliberately does **not** change consensus validity. A transaction or block that is consensus-valid may still be rejected by local policy (mempool/relay/mining policy).
 
+## 0. Launch priorities (P0/P1/P2)
+
+These priorities are **operational** (non-consensus) and intended for launch readiness.
+
+P0 (must-have before any private/public mainnet operations):
+- Enforce `MIN_RELAY_FEE_RATE` floor and eviction under load (§1.1, §1.3).
+- Per-peer bandwidth ceilings + connection caps + stale-peer eviction (§2.1).
+- Mempool-level nonce dedup + rate limiting (best-effort) (§5).
+- Shim pinning + strict fail-stop for crypto provider errors (if using wolfCrypt shim) (§9).
+
+P1 (strongly recommended for partner/private phase):
+- ANCHOR fee multiplier + near-limit deprioritization + per-peer rate limiting (§3).
+- Eclipse mitigations: diverse outbound + rotation + anchor connections (§2.2).
+- Explicit monitoring with alert thresholds (§8.1).
+
+P2 (optional / environment-dependent):
+- Light-client extra checks (checkpoints, anomaly detection) (§6).
+- RETL “preferred domain” prioritization for UI/relay (§4).
+
 ## 1. Relay + mempool policies
 
 ### 1.1 Fee floor
@@ -102,6 +121,32 @@ Operators SHOULD track:
 - anchor bytes per block and per tx (observed),
 - signature verification latency,
 - reorg frequency and depth (observed).
+
+### 8.1 Suggested alert thresholds (starting points)
+
+These are suggested starting points; tune for your hardware, bandwidth, and phase (private vs public).
+
+Mempool / relay:
+- Alert if mempool occupancy stays > 80% of configured limit for > 15 minutes.
+- Alert if eviction rate spikes to > 100 evictions/minute for > 5 minutes.
+- Alert if rejection rate spikes to > 30% of inbound tx for > 10 minutes (separate by reason).
+
+P2P:
+- Alert if new inbound connections exceed your expected peer set by > 10% (private phase) or > 2× baseline (public phase).
+- Alert if any single peer exceeds its bandwidth ceiling for > 60 seconds (misconfig or attack).
+- Alert if peer churn rate (disconnects/minute) exceeds 2× baseline for > 10 minutes.
+
+ANCHOR:
+- Alert if `Σ |anchor_data|` observed per block exceeds 80% of `MAX_ANCHOR_BYTES_PER_BLOCK` for > 3 consecutive blocks.
+- Alert if near-limit `anchor_data` submissions dominate (> 50% of anchor tx) for > 30 minutes.
+
+Crypto verification:
+- Alert if signature verification latency p95 exceeds 2× baseline for > 10 minutes.
+- Alert if any crypto provider internal error occurs in “strict” mode (treat as incident).
+
+Reorg:
+- Alert on any reorg depth ≥ 2.
+- Alert if reorg frequency exceeds 1/day (baseline-dependent; investigate hashrate instability or partitioning).
 
 ## 9. FIPS-path operational controls (non-consensus)
 
