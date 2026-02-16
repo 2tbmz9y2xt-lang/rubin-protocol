@@ -1206,6 +1206,42 @@ Assumptions:
 
 Operationally, consensus-critical code MUST reject all non-minimal/ambiguous encodings and use only fixed domain-separated hashes defined in this file.
 
+### 14.1 Miner and Relay Policy Abuse Considerations (Non-Normative)
+
+RUBIN distinguishes:
+- **Consensus rules** (this file): determine what is valid.
+- **Node relay/miner policies** (operator-local): determine what is propagated and what gets included first.
+
+#### 14.1.1 Acknowledged risks
+
+Miners and relays MAY abuse local policy for:
+- transaction censorship (selective inclusion or delay),
+- MEV-style extraction (re-ordering within a block),
+- self-preferencing (prioritizing own flows).
+
+#### 14.1.2 Consensus protections (cannot be violated)
+
+Even with adversarial policy, miners and relays cannot:
+- spend funds without valid signatures,
+- include invalid blocks (PoW + deterministic validation),
+- bypass covenant/timelock enforcement (once a transaction is included, validity is objective and verifiable).
+
+#### 14.1.3 Mitigations and limits
+
+Mitigations are economic/operational, not absolute:
+- competition: miners compete for fees; prolonged censorship is costly and observable,
+- propagation: a transaction can be rebroadcast via diverse peers and alternative relay paths; mempools are not identical, so diversity matters,
+- time: users can wait for a different miner to include the transaction.
+
+RETL/L2 note:
+- L2 users can always construct an L1-valid exit transaction, but inclusion still requires a miner; “sovereign exit” means *no L2 sequencer permission is required*, not that miners cannot delay inclusion.
+
+#### 14.1.4 User recommendations (non-normative)
+
+- time-sensitive transactions: use higher fees (and fee bumping where supported by wallet policy),
+- censorship-resistance: rebroadcast across multiple peers and avoid single relay dependencies,
+- MEV minimization: avoid broadcasting sensitive intent early; consider alternative dissemination paths if available in your environment.
+
 ## 15. Network and Light-Client Interface (Normative)
 
 1. Node peers MUST implement peer discovery and peer-version handshake sufficient to exchange:
