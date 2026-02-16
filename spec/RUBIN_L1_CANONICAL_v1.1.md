@@ -1084,6 +1084,9 @@ WitnessItemBytes(w) = u8(w.suite_id) || CompactSize(w.pubkey_length) || w.pubkey
 
 These are non-consensus operational constraints:
 
+Default operator guidance for v1.1 is collected in:
+- `../operational/RUBIN_NODE_POLICY_DEFAULTS_v1.1.md` (non-consensus; safe to change without network-wide upgrade).
+
 1. A relay node MUST reject transactions that do not meet local minimum fee floor computed from
    `min_fee(T)` and current node policy multiplier.
 2. Mempool ordering MUST prioritize higher `fee/weight` ratio.
@@ -1231,6 +1234,7 @@ Even with adversarial policy, miners and relays cannot:
 Mitigations are economic/operational, not absolute:
 - competition: miners compete for fees; prolonged censorship is costly and observable,
 - propagation: a transaction can be rebroadcast via diverse peers and alternative relay paths; mempools are not identical, so diversity matters,
+- transparency: public mempools and on-chain inclusion behavior are observable; operator policies that impact users should be documented,
 - time: users can wait for a different miner to include the transaction.
 
 RETL/L2 note:
@@ -1240,7 +1244,7 @@ RETL/L2 note:
 
 - time-sensitive transactions: use higher fees (and fee bumping where supported by wallet policy),
 - censorship-resistance: rebroadcast across multiple peers and avoid single relay dependencies,
-- MEV minimization: avoid broadcasting sensitive intent early; consider alternative dissemination paths if available in your environment.
+- MEV minimization: avoid broadcasting sensitive intent early; consider alternative dissemination paths (including private relay services) if available in your environment.
 
 ## 15. Network and Light-Client Interface (Normative)
 
