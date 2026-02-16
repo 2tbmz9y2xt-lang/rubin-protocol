@@ -46,4 +46,5 @@ See committed example: `operational/systemd/rubin-node.service` with env file `o
 - Keep shim directory read-only for service user after verification.
 
 ## Compliance note (precision)
+
 This runbook is about supply-chain pinning and reproducible deployment mechanics. It does **not** assert that PQC operations are currently inside a CMVP-validated boundary.
