@@ -45,7 +45,17 @@ Nodes MAY enforce additional local caps, but SHOULD log and surface them as poli
 
 - When mempool is full, evict lowest `fee/weight` first.
 - Apply anti-starvation backoff so short bursts cannot permanently crowd out moderate-fee traffic.
-- Prefer “first-seen” ordering for conflicting spends; any “replacement policies” and the trigger for switching behavior MUST be published via an operational update + release notes, and operators SHOULD switch only when that update defines deterministic criteria.
+- Prefer “first-seen” ordering for conflicting spends.
+
+Replacement (RBF-like) position (policy default):
+- Default for v1.1: **no replacement**. Conflicting spends are rejected from mempool/relay even if they pay higher fees.
+- Rationale: PQ witness sizes make replacement a DoS surface (large signatures amplify bandwidth/CPU churn).
+
+If an operator enables replacement (non-default), it SHOULD be constrained and measurable:
+1. Require a strict fee-rate bump: `new_fee_rate ≥ 2× old_fee_rate`.
+2. Require bounded churn: `new_witness_bytes ≤ old_witness_bytes` (do not allow a replacement that increases witness size).
+3. Limit per-outpoint churn: at most 1 replacement attempt per outpoint per 10 minutes.
+4. Keep replacement local-only: do not advertise replacement behavior unless it is published in release notes for the private/public phase.
 
 ## 2. P2P DoS defenses (policy)
 
@@ -56,6 +66,14 @@ Operators SHOULD configure:
 - maximum concurrent connections,
 - per-peer request quotas (headers/blocks/tx),
 - stale-peer eviction (idle or misbehaving peers).
+
+Recommended starting defaults (non-consensus):
+- Outbound peers: 16
+- Inbound peers: 64
+- Total peers hard cap: 128
+- Per-IP inbound cap: 4
+- Stale-peer eviction: disconnect if idle > 15 minutes
+- Per-peer bandwidth ceiling (sustained): 1 MiB/s inbound, 1 MiB/s outbound
 
 ### 2.2 Eclipse mitigations
 
@@ -71,9 +89,14 @@ This is policy guidance; it is not a consensus requirement.
 Because `CORE_ANCHOR` outputs are non-spendable and require `value = 0` by consensus (CANONICAL v1.1 §3.6), spam pressure must be handled primarily by policy.
 
 Recommended mempool policy:
-- require higher effective fees for transactions containing `CORE_ANCHOR` payload bytes (e.g., a multiplier over the base fee floor),
+- require higher effective fees for transactions containing `CORE_ANCHOR` payload bytes,
 - deprioritize near-limit `anchor_data` unless fee/weight is competitive,
 - rate-limit submission from peers that relay repeated near-limit anchors.
+
+Concrete starting point (non-consensus):
+- `ANCHOR_FEE_MULTIPLIER = 4×` over the base floor for the `anchor_data` bytes component.
+- “Near-limit” threshold: `|anchor_data| ≥ 0.9 × MAX_ANCHOR_PAYLOAD_SIZE`.
+- Per-peer rate limit: accept at most 1 near-limit ANCHOR tx per 10 seconds.
 
 Do **not** rely on “sender identity” in UTXO contexts; apply limits per peer / per connection rather than per “address”.
 
@@ -95,7 +118,22 @@ Consensus `tx_nonce` replay prevention is per-block (CANONICAL v1.1 §3.4). To r
 - per-key rate limits in mempool,
 - persistence of recently-seen nonces across restarts (operator option).
 
+Recommended starting window (non-consensus):
+- Rolling window: keep recently-seen `(key_id, tx_nonce)` for 144 blocks (~24 hours) or until mempool eviction.
+- Storage bound: cap dedup table at 200,000 entries (LRU/TTL eviction).
+- Per-key cap: max 1,000 outstanding nonces per `key_id` in mempool (beyond cap, reject or evict lowest-fee).
+
 Implementation note: `key_id` is derived from witness pubkey bytes; for policy dedup, only apply after canonical parsing and basic witness typing (do not require signature verification to apply dedup).
+
+### 5.1 PQ signature CPU exhaustion (policy)
+
+Because SLH-DSA verification is significantly more expensive than ML-DSA in v1.1 cost model (`VERIFY_COST_SLH_DSA = 64` vs `VERIFY_COST_ML_DSA = 8`), nodes SHOULD add CPU-safety limits:
+
+Recommended starting controls (non-consensus):
+- Per-peer SLH-DSA verify budget: 2 verifications/second sustained (burst 10, then backoff).
+- Per-peer ML-DSA verify budget: 20 verifications/second sustained (burst 100).
+- Under load, deprioritize `suite_id = 0x02` spends unless fee/weight is strictly higher than competing traffic.
+- Cache verification results keyed by `(sighash, pubkey, signature)` to avoid repeated work across peers.
 
 ## 6. Light client and SPV policies (non-consensus)
 
