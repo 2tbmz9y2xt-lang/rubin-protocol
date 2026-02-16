@@ -29,6 +29,10 @@ Consensus primitives (normative in `spec/RUBIN_L1_CANONICAL_v1.1.md`):
 
 All consensus code must call crypto only via the provider interface (Rust: `clients/rust/crates/rubin-crypto/src/lib.rs`, Go: `clients/go/crypto/provider.go`).
 
+Transport security (non-consensus):
+- The spec does not require network encryption for consensus validity, but production deployments SHOULD use encrypted transport for P2P/RPC.
+- Recommended baseline: TLS 1.3 in FIPS-mode where applicable; for PQ-readiness, consider a hybrid key exchange (classical + ML-KEM) when available in your stack.
+
 ## Why wolfCrypt (FIPS-path)
 
 We use a **wolfCrypt-based** backend path because it enables:
