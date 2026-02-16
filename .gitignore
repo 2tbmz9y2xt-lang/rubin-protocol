@@ -37,6 +37,9 @@ clients/go/**/*.test
 clients/go/gosec_output.json
 clients/go/semgrep_output.json
 
+# Rust security tool artifacts
+clients/rust/cargo_audit.json
+
 # wolfCrypt shim build artifacts (operator-local)
 **/librubin_wc_shim.so
 **/librubin_wc_shim.dylib

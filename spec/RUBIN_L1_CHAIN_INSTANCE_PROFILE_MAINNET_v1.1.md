@@ -91,6 +91,6 @@ chain_id = SHA3-256(serialized_genesis_without_chain_id_field)
 Mainnet deployment schedule is chain-instance specific:
 
 - If any FEATURE deployments are active on mainnet, publish
-  `RUBIN_L1_DEPLOYMENTS_MAINNET_v1.1.md` using schema in
-  `RUBIN_L1_CANONICAL_v1.1.md §8.1`.
+  `spec/RUBIN_L1_DEPLOYMENTS_MAINNET_v1.1.md` using schema in
+  `spec/RUBIN_L1_CANONICAL_v1.1.md §8.1`.
 - Until this file is fully populated, mainnet launch is not complete.

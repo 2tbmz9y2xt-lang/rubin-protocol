@@ -7,7 +7,7 @@ Purpose: publish concrete chain-instance fields for the RUBIN testnet deployment
 Status interpretation: see `operational/RUBIN_OPERATIONAL_SECURITY_v1.1.md §1.1`.
 Transition governance: `operational/RUBIN_L1_FREEZE_TRANSITION_POLICY_v1.1.md`.
 
-This file defines a single chain instance. It does not modify consensus rules in `RUBIN_L1_CANONICAL_v1.1.md`.
+This file defines a single chain instance. It does not modify consensus rules in `spec/RUBIN_L1_CANONICAL_v1.1.md`.
 
 This file is **not a production freeze** and does not authorize any mainnet freeze claim.
 
@@ -62,6 +62,6 @@ Unless explicitly changed by a future canonical revision, testnet uses:
 
 If testnet activates any feature, publish:
 
-- `RUBIN_L1_DEPLOYMENTS_TESTNET_v1.1.md` per `RUBIN_L1_DEPLOYMENTS_TEMPLATE_v1.1.md`.
+- `spec/RUBIN_L1_DEPLOYMENTS_TESTNET_v1.1.md` per `spec/RUBIN_L1_DEPLOYMENTS_TEMPLATE_v1.1.md`.
 
 If no deployments are active, publish an explicit empty deployment artifact (non-normative).

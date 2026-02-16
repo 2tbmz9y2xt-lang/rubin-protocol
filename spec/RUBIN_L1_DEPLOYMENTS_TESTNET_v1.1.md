@@ -5,7 +5,7 @@ Date: 2026-02-16
 
 This file publishes the testnet deployment registry using the normative schema in:
 
-- `RUBIN_L1_CANONICAL_v1.1.md §8.1`
+- `spec/RUBIN_L1_CANONICAL_v1.1.md §8.1`
 
 It does not change the canonical consensus rules. It fixes the chain-instance deployment schedule so all clients and operators share the same interpretation of deployment state on testnet.
 
@@ -14,4 +14,4 @@ It does not change the canonical consensus rules. It fixes the chain-instance de
 No consensus deployments are defined for testnet under v1.1 at this time.
 
 | deployment_id | bit | start_height | timeout_height | signal_window | threshold | state_machine | feature_summary |
-|---|---:|---:|---:|---:|---:|---|
+|---|---:|---:|---:|---:|---:|---:|---|

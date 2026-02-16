@@ -32,3 +32,14 @@ tests:
       lock_value: 1_000_000
     expected_error: TX_ERR_SIG_ALG_INVALID
     consensus: true
+
+  - id: BIND-04
+    title: "Creating CORE_P2PK output with suite_id=0x02 is syntactically valid pre-activation"
+    context:
+      covenant_type: CORE_P2PK
+      covenant_data:
+        suite_id: 0x02
+        key_id: "00 repeated 32 bytes"
+      note: "Spending remains deployment-gated (see CV-DEP)."
+    expected_code: PASS
+    consensus: true

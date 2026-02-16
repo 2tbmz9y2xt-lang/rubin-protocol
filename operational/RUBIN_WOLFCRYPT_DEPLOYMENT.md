@@ -27,7 +27,7 @@ See committed example: `operational/systemd/rubin-node.service` with env file `o
   sudo systemctl daemon-reload
   sudo systemctl enable --now rubin-node
   ```
-- Service uses `fetch_shim_from_ghcr.sh` to verify hash/signature on each start.
+- Service uses `crypto/wolfcrypt/fetch_shim_from_ghcr.sh` to verify hash/signature on each start.
 ```
 - Ensure `oras`/`cosign` are installed for the service user.
 

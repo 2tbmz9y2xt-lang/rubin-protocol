@@ -1,0 +1,17 @@
+{
+  "protocol": "RUBIN",
+  "canonical_revision": "v1.1",
+  "network": "mainnet",
+  "spec_commit": "TBD",
+  "published_at_utc": "TBD",
+  "genesis_header_bytes_hex": "TBD",
+  "genesis_tx_bytes_hex": "TBD",
+  "chain_id_hex": "TBD",
+  "genesis_block_hash_hex": "TBD",
+  "signing": {
+    "scheme": "TBD",
+    "public_key": "TBD",
+    "signature_file": "TBD"
+  }
+}
+

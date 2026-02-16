@@ -10,6 +10,8 @@ Supporting documents:
 - Formal appendix (non-normative): `formal/RUBIN_FORMAL_APPENDIX_v1.1.md`
 - Operational security (non-normative): `operational/RUBIN_OPERATIONAL_SECURITY_v1.1.md`
 - Node policy defaults (non-consensus): `operational/RUBIN_NODE_POLICY_DEFAULTS_v1.1.md`
+- Mainnet genesis ceremony (controller-run): `operational/RUBIN_MAINNET_GENESIS_CEREMONY_v1.1.md`
+- Private mainnet phase (pre-public): `operational/RUBIN_PRIVATE_MAINNET_PHASE_v1.1.md`
 
 Chain-instance profiles (publish concrete genesis bytes and derived `chain_id`):
 - Devnet: `spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md`

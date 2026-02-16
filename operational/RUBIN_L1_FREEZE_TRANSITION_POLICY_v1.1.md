@@ -41,6 +41,9 @@ Before any production claim, required artifacts must be available:
 2. Deployment schedule file for chain instance (or explicit empty deployment statement).
 3. Conformance bundle with all core gates `PASS`.
 4. Closeout or governance note indicating non-production intent.
+5. Formal methods posture:
+   - Pre-freeze: `formal/` may be a placeholder (controller-approved 2026-02-16).
+   - Freeze-eligible: `formal/` MUST contain real artifacts or a pointer to the authoritative formal repository + stable revision identifier.
 
 ### Phase B — Operational dry-run
 

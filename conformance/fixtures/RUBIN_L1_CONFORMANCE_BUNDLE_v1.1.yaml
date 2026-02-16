@@ -4,6 +4,10 @@ status: "IN_PROGRESS"
 updated: "2026-02-16"
 execution_note: "Runner coverage is partial (CV-SIGHASH only). Mandatory gates are not yet executed by a unified runner."
 mandatory_gates:
+  - name: CV-COMPACTSIZE
+    file: "conformance/fixtures/CV-COMPACTSIZE.yml"
+    required: true
+    status: "PASS"
   - name: CV-PARSE
     file: "conformance/fixtures/CV-PARSE.yml"
     required: true

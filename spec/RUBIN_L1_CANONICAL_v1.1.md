@@ -127,7 +127,7 @@ where:
 key_id = SHA3-256(pubkey)
 ```
 
-- Address encoding, key-rotation lifecycle, and policy throttling are protocol-application decisions; L1 validation checks only that witness public keys are correctly typed and verify signatures. Address binding rules are specified in `RUBIN_L1_KEY_MANAGEMENT_v1.1.md`.
+- Address encoding, key-rotation lifecycle, and policy throttling are protocol-application decisions; L1 validation checks only that witness public keys are correctly typed and verify signatures. Address binding rules are specified in `spec/RUBIN_L1_KEY_MANAGEMENT_v1.1.md`.
 
 Canonical wire lengths and key identifiers used by consensus:
 
@@ -384,6 +384,7 @@ Semantics:
   - `covenant_data = suite_id:u8 || key_id:bytes32`.
   - `suite_id` is `0x01` or `0x02` (see §4.4 for the active policy and VERSION_BITS deployment gates).
   - The output is spendable only by a witness packet with matching `suite_id` and a signature over `sighash`.
+  - Non-normative note (wallet safety): creating outputs with `suite_id = 0x02` before VERSION_BITS activation is syntactically valid, but spending is deployment-gated; if the deployment never reaches ACTIVE (e.g., FAILED), such outputs may become unspendable. Wallet implementations SHOULD warn users before creating such outputs. Conformance: CV-BIND BIND-04; CV-DEP DEP-01/DEP-05.
   - `covenant_data_len` MUST be exactly `1 + 32`.
 - `CORE_TIMELOCK_V1`:
   - `covenant_data = lock_mode:u8 || lock_value:u64le`.
@@ -407,7 +408,7 @@ Any unknown or future `covenant_type` MUST be rejected as `TX_ERR_COVENANT_TYPE_
 
 Validation for each non-coinbase transaction is fixed in this order:
 
-1. Canonical parse
+1. Canonical parse (including output covenant constraints per §3.6)
 2. Replay-domain checks (`tx_nonce`, `sequence`)
 3. UTXO lookup
 4. Coinbase maturity (non-coinbase skip)
@@ -484,6 +485,9 @@ hash_of_all_outputs = SHA3-256(concat(outputs[j] in TxOutput wire order for j in
 All fields in `preimage_tx_sig` are taken from the transaction `T` being signed (not the block header), except `input_value`.
 `input_value` is the `value` of the spendable UTXO entry referenced by this input's `(prev_txid, prev_vout)`.
 In particular, `version` means `T.version`.
+
+When `output_count = 0` (valid per §3.1), `hash_of_all_outputs = SHA3-256("")` (the SHA3-256 digest of the empty byte string). Implementations MUST handle this edge case.
+Conformance: CV-SIGHASH SIGHASH-06.
 
 Serialization table (Normative):
 
@@ -751,6 +755,8 @@ Window boundaries and applicability (Normative):
 
 This is a consensus rule and MUST be deterministic.
 All division in this rule is integer division with floor.
+Intermediate products (`target_old × T_actual` and `target_old × 4`) MUST be computed using at least 320-bit (or arbitrary-precision) unsigned integer arithmetic. Silent truncation of intermediate values is non-conforming and will cause consensus splits between implementations using different integer widths.
+Conformance: CV-BLOCK BLOCK-09.
 
 ### 6.5 Header Time Rules (Consensus-Critical)
 
@@ -890,6 +896,9 @@ tx_data_root ||
 withdrawals_root
 ```
 
+Interop note (non-consensus):
+- A recommended `anchor_data` envelope for RETLBatch interoperability (including `sequencer_sig`) is defined in `operational/RUBIN_RETL_INTEROP_FREEZE_CHECKLIST_v1.1.md §2.2.1`.
+
 Consensus requirements for anchor_data in a block:
 
 - Per-output constraint:
@@ -977,6 +986,9 @@ State transitions at a window boundary height `h`:
    - at the next window boundary after entering `LOCKED_IN`.
 5. `ACTIVE` and `FAILED` are terminal.
 
+Transitions are evaluated in the numbered order above at each window boundary. If transition 2 (LOCKED_IN) fires at a boundary, transition 3 (FAILED) MUST NOT be evaluated for that same boundary.
+Conformance: CV-DEP DEP-05.
+
 v1.1 deployment registry:
 
 - No consensus deployments are ACTIVE by default in this spec revision.
@@ -1023,7 +1035,7 @@ A protocol release is admissible only if:
 2. `CV-PARSE`/`CV-BIND`/`CV-UTXO`/`CV-DEP`/`CV-BLOCK`/`CV-REORG` gates are `PASS`.
 3. Cross-client parity is deterministic under identical inputs.
 4. Deterministic serialization and consensus invariants are mechanically reproduced.
-5. Conformance gate definitions are authoritative in `RUBIN_L1_CONFORMANCE_MANIFEST_v1.1.md`.
+5. Conformance gate definitions are authoritative in `spec/RUBIN_L1_CONFORMANCE_MANIFEST_v1.1.md`.
 
 ## 11. Weight and Fee Accounting (Normative)
 
@@ -1181,8 +1193,8 @@ Expected: TX_ERR_MISSING_UTXO
 - This file excludes probabilistic security derivations, UC proofs, and operational governance details.
 - Formal proofs and assumptions are in `../formal/RUBIN_FORMAL_APPENDIX_v1.1.md`.
 - Measurement and incident governance are in `../operational/RUBIN_OPERATIONAL_SECURITY_v1.1.md`.
-- Formal key format and address binding are in `RUBIN_L1_KEY_MANAGEMENT_v1.1.md`.
-- Coinbase/subsidy rules are in `RUBIN_L1_COINBASE_AND_REWARDS_v1.1.md`.
+- Formal key format and address binding are in `spec/RUBIN_L1_KEY_MANAGEMENT_v1.1.md`.
+- Coinbase/subsidy rules are in `spec/RUBIN_L1_COINBASE_AND_REWARDS_v1.1.md`.
 
 ## 14. Threat Model and Deployment Assumptions
 
@@ -1193,6 +1205,42 @@ Assumptions:
 3. PQ adversary can attack at quantum level subject to standard NIST security reductions for ML-DSA-87 and SLH-DSA-SHAKE-256f.
 
 Operationally, consensus-critical code MUST reject all non-minimal/ambiguous encodings and use only fixed domain-separated hashes defined in this file.
+
+### 14.1 Miner and Relay Policy Abuse Considerations (Non-Normative)
+
+RUBIN distinguishes:
+- **Consensus rules** (this file): determine what is valid.
+- **Node relay/miner policies** (operator-local): determine what is propagated and what gets included first.
+
+#### 14.1.1 Acknowledged risks
+
+Miners and relays MAY abuse local policy for:
+- transaction censorship (selective inclusion or delay),
+- MEV-style extraction (re-ordering within a block),
+- self-preferencing (prioritizing own flows).
+
+#### 14.1.2 Consensus protections (cannot be violated)
+
+Even with adversarial policy, miners and relays cannot:
+- spend funds without valid signatures,
+- include invalid blocks (PoW + deterministic validation),
+- bypass covenant/timelock enforcement (once a transaction is included, validity is objective and verifiable).
+
+#### 14.1.3 Mitigations and limits
+
+Mitigations are economic/operational, not absolute:
+- competition: miners compete for fees; prolonged censorship is costly and observable,
+- propagation: a transaction can be rebroadcast via diverse peers and alternative relay paths; mempools are not identical, so diversity matters,
+- time: users can wait for a different miner to include the transaction.
+
+RETL/L2 note:
+- L2 users can always construct an L1-valid exit transaction, but inclusion still requires a miner; “sovereign exit” means *no L2 sequencer permission is required*, not that miners cannot delay inclusion.
+
+#### 14.1.4 User recommendations (non-normative)
+
+- time-sensitive transactions: use higher fees (and fee bumping where supported by wallet policy),
+- censorship-resistance: rebroadcast across multiple peers and avoid single relay dependencies,
+- MEV minimization: avoid broadcasting sensitive intent early; consider alternative dissemination paths if available in your environment.
 
 ## 15. Network and Light-Client Interface (Normative)
 
@@ -1218,7 +1266,7 @@ Operationally, consensus-critical code MUST reject all non-minimal/ambiguous enc
 10. Light clients MUST reject headers chains with inconsistent median-time and PoW checks at each step.
 11. Nodes MAY enforce connection caps and per-peer bandwidth ceilings to resist eclipse/DoS attacks.
 12. Maximum message size is `MAX_RELAY_MSG_BYTES`.
-13. Full peer transport and light-client profile is specified in `RUBIN_L1_P2P_PROTOCOL_v1.1.md`.
+13. Full peer transport and light-client profile is specified in `spec/RUBIN_L1_P2P_PROTOCOL_v1.1.md`.
 
 ## 16. Crypto Agility and Upgrade Path (Normative)
 
@@ -1228,4 +1276,4 @@ Operationally, consensus-critical code MUST reject all non-minimal/ambiguous enc
 4. If migration leaves unknown `suite_id` in active consensus field, block validity is rejected.
 5. Unsupported `suite_id` in consensus-relevant witness data MUST be `TX_ERR_SIG_ALG_INVALID`.
 6. In a mixed-policy period, L1 can gate algorithm acceptance by deployment bit and height.
-7. Full rollout/rollback behavior is in `RUBIN_L1_CRYPTO_AGILITY_UPGRADE_v1.1.md`.
+7. Full rollout/rollback behavior is in `spec/RUBIN_L1_CRYPTO_AGILITY_UPGRADE_v1.1.md`.

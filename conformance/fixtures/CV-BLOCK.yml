@@ -70,3 +70,25 @@ tests:
       max_drift: 7200
     expected_error: BLOCK_ERR_TIMESTAMP_FUTURE
     consensus: true
+
+  - id: BLOCK-09
+    title: "Difficulty retarget arithmetic width (320-bit intermediate products)"
+    context:
+      window:
+        target_old_hex: "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        T_expected: 1209600
+        T_actual: 12096000
+      expected_target_new_hex: "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffc"
+    expected_code: PASS
+    consensus: true
+
+  - id: BLOCK-10
+    title: "Coinbase subsidy schedule at halving boundaries"
+    context:
+      subsidy:
+        h_0: 5000000000
+        h_209999: 5000000000
+        h_210000: 2500000000
+        h_420000: 1250000000
+    expected_code: PASS
+    consensus: true
