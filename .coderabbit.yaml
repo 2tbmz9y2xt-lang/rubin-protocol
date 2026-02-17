@@ -10,6 +10,21 @@ reviews:
   review_status: true
   commit_status: true
   path_instructions:
+    - path: "**/*"
+      instructions: |
+        Scope: all changed repository files not matched by more specific path rules.
+        Maintain conservative review with explicit, actionable findings.
+
+        For EVERY finding:
+        1) Classify severity exactly as P0, P1, or P2.
+        2) Cite exact file and line references using the format `path/to/file:line` or `path/to/file:line-line`.
+        3) Use two sections: "FACT:" and "ASSUMPTION:".
+
+        Hard constraints:
+        - Prefer minimal deterministic patches.
+        - Flag security-relevant config/drift risks, especially in CI, scripts, and deployment helpers.
+        - Ask for clarifications where assumptions are implied but not explicit.
+        - Do not emit speculative redesign suggestions; request precise scope changes instead.
     - path: "clients/**"
       instructions: |
         Scope: Go and Rust client implementations.
@@ -130,6 +145,7 @@ reviews:
         - Flag any normative sentence that uses "probably"/"should usually"/"maybe" in operational requirements.
 
   path_filters:
+    - "**/*"
     - "clients/**"
     - "conformance/**"
     - "crypto/**"
