@@ -136,7 +136,7 @@ Canonical wire lengths and key identifiers used by consensus:
 - `ml_dsa_sig_len = MAX_ML_DSA_SIGNATURE_BYTES`
 - `slh_dsa_sig_max_len = MAX_SLH_DSA_SIG_BYTES`
 - `key_id = SHA3-256(pubkey)`
-- `script_sig` is reserved and non-functional in this profile.
+- `script_sig` is reserved and non-functional in this profile, except where explicitly specified (see `CORE_HTLC_V1`).
 
 ### 2.2 Key management and address binding
 
@@ -214,6 +214,13 @@ WitnessItem {
 ```
 
 For each input, exactly one witness item corresponds to its authorization data by index.
+
+`script_sig` is reserved by default:
+
+- For any input spending a non-HTLC covenant, `script_sig_len` MUST be 0.
+- For an input spending `CORE_HTLC_V1`, `script_sig_len` MUST be either:
+  - `0` (refund path), or
+  - `32` (claim path; `script_sig` carries the 32-byte preimage).
 
 For covenant types that do not require key-based authorization (`CORE_TIMELOCK_V1`),
 the corresponding witness item MUST be a sentinel:
@@ -376,6 +383,8 @@ The following `covenant_type` values are valid:
 - `0x0000` `CORE_P2PK`
 - `0x0001` `CORE_TIMELOCK_V1`
 - `0x0002` `CORE_ANCHOR`
+- `0x0100` `CORE_HTLC_V1`
+- `0x0101` `CORE_VAULT_V1`
 - `0x00ff` `CORE_RESERVED_FUTURE`
 
 Semantics:
@@ -400,6 +409,21 @@ Semantics:
   - Per-block constraint: `Σ |anchor_data|` over all CORE_ANCHOR outputs MUST NOT exceed `MAX_ANCHOR_BYTES_PER_BLOCK`.
   - If the per-block constraint is violated, the block MUST be rejected as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
   - `anchor_commitment = SHA3-256(anchor_data)` is computable by any observer but is NOT stored on-chain separately.
+- `CORE_HTLC_V1`:
+  - Purpose: fixed-template hashlock+timelock for atomicity primitives without a general-purpose script language.
+  - `covenant_data = hash:bytes32 || lock_mode:u8 || lock_value:u64le || claim_key_id:bytes32 || refund_key_id:bytes32`.
+  - `hash = SHA3-256(preimage32)` for the 32-byte secret preimage.
+  - `lock_mode = 0x00` for height lock, `0x01` for UNIX-time lock.
+  - Claim path: provides `preimage32` in `script_sig` and spends using `claim_key_id`.
+  - Refund path: uses `refund_key_id` and is forbidden until `lock_value` condition is met by current chain consensus state.
+  - `covenant_data_len` MUST be exactly `32 + 1 + 8 + 32 + 32 = 105`.
+- `CORE_VAULT_V1`:
+  - Purpose: fixed-template owner-bound vault with delayed recovery, intended for safer self-custody and key-compromise recovery.
+  - `covenant_data = owner_key_id:bytes32 || lock_mode:u8 || lock_value:u64le || recovery_key_id:bytes32`.
+  - `lock_mode = 0x00` for height lock, `0x01` for UNIX-time lock.
+  - Owner path: `owner_key_id` may spend at any time (no timelock check).
+  - Recovery path: `recovery_key_id` may spend only when the lock condition is met.
+  - `covenant_data_len` MUST be exactly `32 + 1 + 8 + 32 = 73`.
 - `CORE_RESERVED_FUTURE`: forbidden until explicit activation by consensus.
 
 Any unknown or future `covenant_type` MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
@@ -439,10 +463,31 @@ For each non-coinbase input spending output `o`:
    - `lock_mode = 0x01`: require `timestamp(B) ≥ lock_value`;
    - any other `lock_mode` MUST be `TX_ERR_PARSE`;
    - if lock condition is not met, reject with `TX_ERR_TIMELOCK_NOT_MET`.
-4. If `o.covenant_type = CORE_ANCHOR`: this output is non-spendable and MUST NOT
+4. If `o.covenant_type = CORE_HTLC_V1`:
+   - parse `hash || lock_mode || lock_value || claim_key_id || refund_key_id`;
+   - any other `lock_mode` MUST be `TX_ERR_PARSE`;
+   - If `script_sig_len` is neither `0` nor `32`, reject as `TX_ERR_PARSE`.
+   - If `script_sig_len = 32` (claim path):
+     - require `SHA3-256(script_sig) = hash`; otherwise reject as `TX_ERR_SIG_INVALID`;
+     - witness public key hash MUST equal `claim_key_id`; otherwise reject as `TX_ERR_SIG_INVALID`.
+   - If `script_sig_len = 0` (refund path):
+     - witness public key hash MUST equal `refund_key_id`; otherwise reject as `TX_ERR_SIG_INVALID`;
+     - `lock_mode = 0x00`: require `height(B) ≥ lock_value`;
+     - `lock_mode = 0x01`: require `timestamp(B) ≥ lock_value`;
+     - if lock condition is not met, reject with `TX_ERR_TIMELOCK_NOT_MET`.
+5. If `o.covenant_type = CORE_VAULT_V1`:
+   - parse `owner_key_id || lock_mode || lock_value || recovery_key_id`;
+   - any other `lock_mode` MUST be `TX_ERR_PARSE`;
+   - If witness public key hash equals `owner_key_id` (owner path): accept (no timelock check).
+   - Else if witness public key hash equals `recovery_key_id` (recovery path):
+     - `lock_mode = 0x00`: require `height(B) ≥ lock_value`;
+     - `lock_mode = 0x01`: require `timestamp(B) ≥ lock_value`;
+     - if lock condition is not met, reject with `TX_ERR_TIMELOCK_NOT_MET`.
+   - Else reject as `TX_ERR_SIG_INVALID`.
+6. If `o.covenant_type = CORE_ANCHOR`: this output is non-spendable and MUST NOT
    appear as an input. If reached, reject as `TX_ERR_MISSING_UTXO`.
-5. If `o.covenant_type = CORE_RESERVED_FUTURE`, reject as `TX_ERR_COVENANT_TYPE_INVALID`.
-6. Any other covenant type is rejected by `TX_ERR_COVENANT_TYPE_INVALID`.
+7. If `o.covenant_type = CORE_RESERVED_FUTURE`, reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+8. Any other covenant type is rejected by `TX_ERR_COVENANT_TYPE_INVALID`.
 
 For each block:
 
@@ -518,10 +563,10 @@ Each block MUST satisfy `Σ weight(T) ≤ MAX_BLOCK_WEIGHT`.
 
 ### 4.4 Signature suite policy (Normative)
 
-- Allowed `suite_id` for CORE_P2PK transaction spending: `0x01` (ML-DSA-87).
-- `suite_id = 0x02` (SLH-DSA-SHAKE-256f) is reserved for CORE_P2PK pending future VERSION_BITS activation.
-- RETL sequencer signatures (§7) use `suite_id = 0x02` under separate deployment policy; this is not a CORE_P2PK spend.
-- `suite_id = 0x00` (sentinel) is permitted only for keyless covenants (CORE_TIMELOCK_V1).
+- Allowed `suite_id` for key-based covenant spending: `0x01` (ML-DSA-87).
+- `suite_id = 0x02` (SLH-DSA-SHAKE-256f) is reserved for key-based covenant spending pending future VERSION_BITS activation.
+- RETL sequencer signatures (§7) use `suite_id = 0x02` under separate deployment policy; this is not a key-based covenant spend.
+- `suite_id = 0x00` (sentinel) is permitted only for keyless covenants (`CORE_TIMELOCK_V1`) and MUST NOT be used for key-based covenant spends.
 
 Additional block checks:
 
@@ -644,7 +689,7 @@ For each non-sentinel witness item (i.e. `suite_id ≠ 0x00`):
 2. `sig_length = 0` is non-canonical and MUST be rejected as `TX_ERR_SIG_NONCANONICAL`.
 3. If `suite_id = 0x01`, `sig_length` MUST equal 4_627 and `pubkey_length` MUST equal 2_592; any violation MUST be rejected as `TX_ERR_SIG_NONCANONICAL`.
 4. If `suite_id = 0x02`, `0 < sig_length ≤ MAX_SLH_DSA_SIG_BYTES` and `pubkey_length` MUST equal 64; any violation MUST be rejected as `TX_ERR_SIG_NONCANONICAL`.
-5. If `suite_id = 0x02` is used in `CORE_P2PK` before explicit migration activation, reject as `TX_ERR_DEPLOYMENT_INACTIVE`.
+5. If `suite_id = 0x02` is used for a key-based covenant spend (`CORE_P2PK`, `CORE_HTLC_V1`, `CORE_VAULT_V1`) before explicit migration activation, reject as `TX_ERR_DEPLOYMENT_INACTIVE`.
 6. If the witness item is well-formed and canonical-length but signature verification fails, reject as `TX_ERR_SIG_INVALID`.
 
 Definition: anchor_data

@@ -5,7 +5,10 @@ edition = "2024"
 license = "Apache-2.0"
 
 [features]
-default = ["dev-std"]
+# Default features are intentionally empty.
+# - `dev-std` is development-only tooling (non-FIPS, non-production).
+# - production / CI should opt into `wolfcrypt-dylib` explicitly.
+default = []
 wolfcrypt = []
 wolfcrypt-dylib = ["dep:libloading"]
 dev-std = []

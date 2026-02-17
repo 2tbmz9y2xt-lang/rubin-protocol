@@ -78,6 +78,7 @@ jobs:
       - name: Verify compiler (macOS)
         if: runner.os == 'macOS'
         run: |
+          brew install autoconf automake libtool
           which "${CC_BIN}" >/dev/null 2>&1 || CC_BIN=clang
           "${CC_BIN}" --version | head -n 1
         env:
