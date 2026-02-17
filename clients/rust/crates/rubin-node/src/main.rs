@@ -145,12 +145,63 @@ fn parse_chain_id_hex(chain_id_hex: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
+fn parse_u16_flag(args: &[String], flag: &str) -> Result<u16, i32> {
+    match get_flag(args, flag) {
+        Ok(Some(v)) => v.parse::<u16>().map_err(|e| {
+            eprintln!("{flag}: {e}");
+            2
+        }),
+        Ok(None) => {
+            eprintln!("missing required flag: {flag}");
+            Err(2)
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            Err(2)
+        }
+    }
+}
+
 fn cmd_sighash(chain_id: [u8; 32], tx_hex: &str, input_index: u32, input_value: u64) -> Result<(), String> {
     let tx_bytes = rubin_consensus::hex_decode_strict(tx_hex)?;
     let tx = rubin_consensus::parse_tx_bytes(&tx_bytes)?;
     let provider = load_crypto_provider()?;
     let digest = rubin_consensus::sighash_v1_digest(provider.as_ref(), &chain_id, &tx, input_index, input_value)?;
     println!("{}", hex_encode(&digest));
+    Ok(())
+}
+
+fn cmd_verify(
+    chain_id: [u8; 32],
+    tx_hex: &str,
+    input_index: u32,
+    input_value: u64,
+    prevout_covenant_type: u16,
+    prevout_covenant_data: Vec<u8>,
+    chain_height: u64,
+    chain_timestamp: u64,
+    suite_id_02_active: bool,
+) -> Result<(), String> {
+    let tx_bytes = rubin_consensus::hex_decode_strict(tx_hex)?;
+    let tx = rubin_consensus::parse_tx_bytes(&tx_bytes)?;
+    let provider = load_crypto_provider()?;
+    let prevout = rubin_consensus::TxOutput {
+        value: input_value,
+        covenant_type: prevout_covenant_type,
+        covenant_data: prevout_covenant_data,
+    };
+    rubin_consensus::validate_input_authorization(
+        provider.as_ref(),
+        &chain_id,
+        &tx,
+        input_index as usize,
+        input_value,
+        &prevout,
+        chain_height,
+        chain_timestamp,
+        suite_id_02_active,
+    )?;
+    println!("OK");
     Ok(())
 }
 
@@ -204,6 +255,10 @@ fn get_flag(args: &[String], flag: &str) -> Result<Option<String>, String> {
     Ok(None)
 }
 
+fn flag_present(args: &[String], flag: &str) -> bool {
+    args.iter().any(|arg| arg == flag)
+}
+
 fn usage() {
     eprintln!("usage: rubin-node <command> [args]");
     eprintln!("commands:");
@@ -216,6 +271,9 @@ fn usage() {
     );
     eprintln!(
         "  sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>]"
+    );
+    eprintln!(
+        "  verify --tx-hex <hex> --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--chain-height <u64> | --chain-timestamp <u64> | --chain-id-hex <hex64> | --profile <path> | --suite-id-02-active]"
     );
 }
 
@@ -333,6 +391,140 @@ fn cmd_parse_main(args: &[String]) -> i32 {
     0
 }
 
+fn cmd_verify_main(args: &[String]) -> i32 {
+    let tx_hex = match get_flag(args, "--tx-hex") {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            eprintln!("missing required flag: --tx-hex");
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let input_index = match parse_required_u32(args, "--input-index") {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let input_value = match parse_required_u64(args, "--input-value") {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let prevout_covenant_type = match parse_u16_flag(args, "--prevout-covenant-type") {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let prevout_covenant_data = match get_flag(args, "--prevout-covenant-data-hex") {
+        Ok(Some(v)) => match rubin_consensus::hex_decode_strict(&v) {
+            Ok(decoded) => decoded,
+            Err(e) => {
+                eprintln!("prevout-covenant-data-hex: {e}");
+                return 1;
+            }
+        },
+        Ok(None) => {
+            eprintln!("missing required flag: --prevout-covenant-data-hex");
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let chain_id_hex = match get_flag(args, "--chain-id-hex") {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let profile = match get_flag(args, "--profile") {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    if chain_id_hex.is_some() && profile.is_some() {
+        eprintln!("use exactly one of --chain-id-hex or --profile");
+        return 2;
+    }
+
+    let chain_height = match get_flag(args, "--chain-height") {
+        Ok(Some(v)) => match v.parse::<u64>() {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("--chain-height: {e}");
+                return 2;
+            }
+        },
+        Ok(None) => 0,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let chain_timestamp = match get_flag(args, "--chain-timestamp") {
+        Ok(Some(v)) => match v.parse::<u64>() {
+            Ok(ts) => ts,
+            Err(e) => {
+                eprintln!("--chain-timestamp: {e}");
+                return 2;
+            }
+        },
+        Ok(None) => 0,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let suite_id_02_active = flag_present(args, "--suite-id-02-active");
+
+    let chain_id = if let Some(hex) = chain_id_hex {
+        match parse_chain_id_hex(&hex) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("{e}");
+                return 2;
+            }
+        }
+    } else {
+        let profile =
+            profile.unwrap_or_else(|| "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md".to_string());
+        let provider = match load_crypto_provider() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("{e}");
+                return 1;
+            }
+        };
+        match derive_chain_id(provider.as_ref(), &profile) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("verify error: {e}");
+                return 1;
+            }
+        }
+    };
+
+    if let Err(e) = cmd_verify(
+        chain_id,
+        &tx_hex,
+        input_index,
+        input_value,
+        prevout_covenant_type,
+        prevout_covenant_data,
+        chain_height,
+        chain_timestamp,
+        suite_id_02_active,
+    ) {
+        eprintln!("verify error: {e}");
+        return 1;
+    }
+    0
+}
+
 fn cmd_compactsize_main(args: &[String]) -> i32 {
     let encoded_hex = match get_flag(args, "--encoded-hex") {
         Ok(Some(v)) => v,
@@ -435,6 +627,7 @@ fn dispatch(cmd: &str, args: &[String]) -> i32 {
         "parse" => cmd_parse_main(args),
         "compactsize" => cmd_compactsize_main(args),
         "sighash" => cmd_sighash_main(args),
+        "verify" => cmd_verify_main(args),
         _ => {
             eprintln!("unknown command: {cmd}");
             2

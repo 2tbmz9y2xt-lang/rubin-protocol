@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 
-from run_cv_common import make_parse_tx_bytes
+from run_cv_common import make_parse_tx_bytes, parse_int, parse_hex
 
 
 @dataclass(frozen=True)
@@ -278,6 +278,169 @@ def run_sighash(fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd, failure
     return executed
 
 
+def run_sigcheck(
+    fixture: dict[str, Any],
+    rust: ClientCmd,
+    go: ClientCmd,
+    failures: list[str],
+    profile_path: Path,
+) -> int:
+    tests = fixture.get("tests")
+    if not isinstance(tests, list) or not tests:
+        failures.append("CV-SIGCHECK: fixture has no tests")
+        return 0
+
+    executed = 0
+    for t in tests:
+        if not isinstance(t, dict):
+            failures.append("CV-SIGCHECK: invalid test entry (not a mapping)")
+            continue
+        test_id = str(t.get("id", "<missing id>"))
+        ctx = t.get("context")
+        if not isinstance(ctx, dict):
+            failures.append(f"CV-SIGCHECK:{test_id}: missing context")
+            continue
+
+        tx_hex_ctx = ctx.get("tx_hex")
+        if isinstance(tx_hex_ctx, str) and tx_hex_ctx:
+            tx_hex = tx_hex_ctx
+        else:
+            try:
+                tx_hex = make_parse_tx_bytes(ctx)
+            except Exception as e:
+                failures.append(f"CV-SIGCHECK:{test_id}: no parse fixture data: {e}")
+                continue
+
+        expected_code = str(t.get("expected_code", "")).upper() if t.get("expected_code") else ""
+        expected_error = str(t.get("expected_error", "")).upper() if t.get("expected_error") else ""
+        if not expected_code and not expected_error:
+            failures.append(f"CV-SIGCHECK:{test_id}: neither expected_code nor expected_error")
+            continue
+
+        prevout_covenant_type = ctx.get("prevout_covenant_type")
+        prevout_covenant_data_hex = ctx.get("prevout_covenant_data_hex")
+        if not isinstance(prevout_covenant_data_hex, str) or prevout_covenant_data_hex == "":
+            failures.append(f"CV-SIGCHECK:{test_id}: missing prevout_covenant_data_hex")
+            continue
+        try:
+            _ = parse_hex(prevout_covenant_data_hex)
+        except Exception as e:
+            failures.append(f"CV-SIGCHECK:{test_id}: invalid prevout_covenant_data_hex: {e}")
+            continue
+
+        input_index = ctx.get("input_index")
+        input_value = ctx.get("input_value")
+        if input_index is None:
+            failures.append(f"CV-SIGCHECK:{test_id}: missing input_index")
+            continue
+        if input_value is None:
+            failures.append(f"CV-SIGCHECK:{test_id}: missing input_value")
+            continue
+        if prevout_covenant_type is None:
+            failures.append(f"CV-SIGCHECK:{test_id}: missing prevout_covenant_type")
+            continue
+
+        try:
+            input_index = parse_int(input_index)
+            if input_index < 0:
+                raise ValueError("input_index must be >= 0")
+            input_value = parse_int(input_value)
+            if input_value < 0:
+                raise ValueError("input_value must be >= 0")
+            prevout_type = parse_int(prevout_covenant_type)
+            if prevout_type < 0:
+                raise ValueError("prevout_covenant_type must be >= 0")
+        except (TypeError, ValueError, OverflowError) as e:
+            failures.append(f"CV-SIGCHECK:{test_id}: invalid integer field: {e}")
+            continue
+
+        chain_height = ctx.get("chain_height")
+        chain_timestamp = ctx.get("chain_timestamp")
+        chain_id_hex = ctx.get("chain_id_hex")
+
+        chain_args = []
+        if isinstance(chain_id_hex, str) and chain_id_hex:
+            chain_args = ["--chain-id-hex", chain_id_hex]
+        else:
+            chain_args = ["--profile", relpath(rust.cwd, profile_path)]
+
+        if chain_height is not None:
+            try:
+                chain_args.extend(["--chain-height", str(parse_int(chain_height))])
+            except (TypeError, ValueError, OverflowError) as e:
+                failures.append(f"CV-SIGCHECK:{test_id}: invalid chain-height: {e}")
+                continue
+
+        if chain_timestamp is not None:
+            try:
+                chain_args.extend(["--chain-timestamp", str(parse_int(chain_timestamp))])
+            except (TypeError, ValueError, OverflowError) as e:
+                failures.append(f"CV-SIGCHECK:{test_id}: invalid chain-timestamp: {e}")
+                continue
+
+        if ctx.get("suite_id_02_active"):
+            chain_args.append("--suite-id-02-active")
+
+        cmd = [
+            "verify",
+            "--tx-hex",
+            tx_hex,
+            "--input-index",
+            str(input_index),
+            "--input-value",
+            str(input_value),
+            "--prevout-covenant-type",
+            str(prevout_type),
+            "--prevout-covenant-data-hex",
+            prevout_covenant_data_hex,
+            *chain_args,
+        ]
+
+        pr = run_result(rust, cmd)
+        pg = run_result(go, cmd)
+
+        out_r = pr.stdout.strip()
+        err_r = pr.stderr.strip()
+        rc_r = pr.returncode
+
+        out_g = pg.stdout.strip()
+        err_g = pg.stderr.strip()
+        rc_g = pg.returncode
+
+        executed += 1
+
+        if expected_code:
+            if rc_r != 0:
+                failures.append(f"CV-SIGCHECK:{test_id}: rust expected {expected_code} but failed: {err_r}")
+            elif out_r != "OK":
+                failures.append(f"CV-SIGCHECK:{test_id}: rust output mismatch: got={out_r}")
+            if rc_g != 0:
+                failures.append(f"CV-SIGCHECK:{test_id}: go expected {expected_code} but failed: {err_g}")
+            elif out_g != "OK":
+                failures.append(f"CV-SIGCHECK:{test_id}: go output mismatch: got={out_g}")
+            if out_r != out_g:
+                failures.append(f"CV-SIGCHECK:{test_id}: cross-client pass output mismatch: rust={out_r} go={out_g}")
+            if rc_r != rc_g:
+                failures.append(f"CV-SIGCHECK:{test_id}: cross-client exit mismatch: rust={rc_r} go={rc_g}")
+            continue
+
+        if expected_error:
+            code = expected_error
+            if rc_r == 0:
+                failures.append(f"CV-SIGCHECK:{test_id}: rust expected {code} but succeeded: {out_r}")
+            elif code not in err_r:
+                failures.append(f"CV-SIGCHECK:{test_id}: rust expected {code}, got={err_r}")
+
+            if rc_g == 0:
+                failures.append(f"CV-SIGCHECK:{test_id}: go expected {code} but succeeded: {out_g}")
+            elif code not in err_g:
+                failures.append(f"CV-SIGCHECK:{test_id}: go expected {code}, got={err_g}")
+
+            continue
+
+    return executed
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run all supported conformance gates against Rust + Go clients.")
     parser.add_argument(
@@ -368,6 +531,9 @@ def main() -> int:
             continue
         if gate == "CV-SIGHASH":
             checks += run_sighash(fixture, rust, go, failures, profile_path)
+            continue
+        if gate == "CV-SIGCHECK":
+            checks += run_sigcheck(fixture, rust, go, failures, profile_path)
             continue
         if gate == "CV-PARSE":
             checks += run_parse(gate, fixture, rust, go, failures, skips)

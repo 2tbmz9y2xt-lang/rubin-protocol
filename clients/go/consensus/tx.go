@@ -1,10 +1,31 @@
 package consensus
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 
 	"rubin.dev/node/crypto"
+)
+
+const (
+	CORE_P2PK            = 0x0000
+	CORE_TIMELOCK_V1     = 0x0001
+	CORE_ANCHOR          = 0x0002
+	CORE_HTLC_V1         = 0x0100
+	CORE_VAULT_V1        = 0x0101
+	CORE_RESERVED_FUTURE = 0x00ff
+
+	SUITE_ID_SENTINEL     = 0x00
+	SUITE_ID_ML_DSA       = 0x01
+	SUITE_ID_SLH_DSA      = 0x02
+	ML_DSA_PUBKEY_BYTES   = 2592
+	ML_DSA_SIG_BYTES      = 4_627
+	SLH_DSA_PUBKEY_BYTES  = 64
+	SLH_DSA_SIG_MAX_BYTES = 49_856
+
+	TIMELOCK_MODE_HEIGHT    = 0x00
+	TIMELOCK_MODE_TIMESTAMP = 0x01
 )
 
 type Tx struct {
@@ -481,4 +502,231 @@ func SighashV1Digest(
 	preimage = append(preimage, tmp4[:]...)
 
 	return p.SHA3_256(preimage), nil
+}
+
+func parseU64LE(v []byte, start int, name string) (uint64, error) {
+	if start+8 > len(v) {
+		return 0, fmt.Errorf("parse: %s truncated", name)
+	}
+	var tmp [8]byte
+	copy(tmp[:], v[start:start+8])
+	return binary.LittleEndian.Uint64(tmp[:]), nil
+}
+
+func isScriptSigZeroLen(itemName string, scriptSigLen int) error {
+	if scriptSigLen != 0 {
+		return fmt.Errorf("parse: %s script_sig must be empty", itemName)
+	}
+	return nil
+}
+
+func validateHTLCScriptSigLen(scriptSigLen int) error {
+	switch scriptSigLen {
+	case 0, 32:
+		return nil
+	default:
+		return fmt.Errorf("TX_ERR_PARSE")
+	}
+}
+
+func checkWitnessFormat(item WitnessItem, suiteIDSLHActive bool) error {
+	switch item.SuiteID {
+	case SUITE_ID_SENTINEL:
+		if len(item.Pubkey) != 0 || len(item.Signature) != 0 {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+		return nil
+	case SUITE_ID_ML_DSA:
+		if len(item.Pubkey) != ML_DSA_PUBKEY_BYTES || len(item.Signature) != ML_DSA_SIG_BYTES {
+			return fmt.Errorf("TX_ERR_SIG_NONCANONICAL")
+		}
+		return nil
+	case SUITE_ID_SLH_DSA:
+		if !suiteIDSLHActive {
+			return fmt.Errorf("TX_ERR_DEPLOYMENT_INACTIVE")
+		}
+		if len(item.Pubkey) != SLH_DSA_PUBKEY_BYTES || len(item.Signature) == 0 || len(item.Signature) > SLH_DSA_SIG_MAX_BYTES {
+			return fmt.Errorf("TX_ERR_SIG_NONCANONICAL")
+		}
+		return nil
+	default:
+		return fmt.Errorf("TX_ERR_SIG_ALG_INVALID")
+	}
+}
+
+func satisfyLock(lockMode byte, lockValue, height, timestamp uint64) error {
+	switch lockMode {
+	case TIMELOCK_MODE_HEIGHT:
+		if height >= lockValue {
+			return nil
+		}
+		return fmt.Errorf("TX_ERR_TIMELOCK_NOT_MET")
+	case TIMELOCK_MODE_TIMESTAMP:
+		if timestamp >= lockValue {
+			return nil
+		}
+		return fmt.Errorf("TX_ERR_TIMELOCK_NOT_MET")
+	default:
+		return fmt.Errorf("TX_ERR_PARSE")
+	}
+}
+
+func ValidateInputAuthorization(
+	p crypto.CryptoProvider,
+	chainID [32]byte,
+	tx *Tx,
+	inputIndex uint32,
+	prevValue uint64,
+	prevout *TxOutput,
+	chainHeight uint64,
+	chainTimestamp uint64,
+	suiteIDSLHActive bool,
+) error {
+	if int(inputIndex) >= len(tx.Inputs) {
+		return fmt.Errorf("TX_ERR_PARSE")
+	}
+	if int(inputIndex) >= len(tx.Witness.Witnesses) {
+		return fmt.Errorf("TX_ERR_PARSE")
+	}
+	if prevout == nil {
+		return fmt.Errorf("TX_ERR_PARSE")
+	}
+
+	inputIndexInt, err := u32ToInt(inputIndex, "input_index", len(tx.Inputs))
+	if err != nil {
+		return err
+	}
+	input := tx.Inputs[inputIndexInt]
+	witness := tx.Witness.Witnesses[inputIndexInt]
+
+	switch prevout.CovenantType {
+	case CORE_P2PK:
+		if err := isScriptSigZeroLen("CORE_P2PK", len(input.ScriptSig)); err != nil {
+			return err
+		}
+		if err := checkWitnessFormat(witness, suiteIDSLHActive); err != nil {
+			return err
+		}
+
+		if len(prevout.CovenantData) != 33 {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+		suiteID := prevout.CovenantData[0]
+		if suiteID != witness.SuiteID {
+			return fmt.Errorf("TX_ERR_SIG_INVALID")
+		}
+		actualKeyID := p.SHA3_256(witness.Pubkey)
+		if expected := prevout.CovenantData[1:33]; !bytes.Equal(actualKeyID[:], expected) {
+			return fmt.Errorf("TX_ERR_SIG_INVALID")
+		}
+	case CORE_TIMELOCK_V1:
+		if err := isScriptSigZeroLen("CORE_TIMELOCK_V1", len(input.ScriptSig)); err != nil {
+			return err
+		}
+		if witness.SuiteID != SUITE_ID_SENTINEL {
+			return fmt.Errorf("TX_ERR_SIG_ALG_INVALID")
+		}
+		if len(prevout.CovenantData) != 9 {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+		lockMode := prevout.CovenantData[0]
+		lockValue, err := parseU64LE(prevout.CovenantData, 1, "covenant_lock_value")
+		if err != nil {
+			return err
+		}
+		if err := satisfyLock(lockMode, lockValue, chainHeight, chainTimestamp); err != nil {
+			return err
+		}
+	case CORE_HTLC_V1:
+		if err := validateHTLCScriptSigLen(len(input.ScriptSig)); err != nil {
+			return err
+		}
+		if err := checkWitnessFormat(witness, suiteIDSLHActive); err != nil {
+			return err
+		}
+		if len(prevout.CovenantData) != 105 {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+		lockMode := prevout.CovenantData[32]
+		lockValue, err := parseU64LE(prevout.CovenantData, 33, "htlc_lock_value")
+		if err != nil {
+			return err
+		}
+		if len(input.ScriptSig) == 32 {
+			expectedHash := prevout.CovenantData[:32]
+			scriptHash := p.SHA3_256(input.ScriptSig)
+			if !bytes.Equal(scriptHash[:], expectedHash) {
+				return fmt.Errorf("TX_ERR_SIG_INVALID")
+			}
+			expectedClaimKeyID := prevout.CovenantData[41:73]
+			actualKeyID := p.SHA3_256(witness.Pubkey)
+			if !bytes.Equal(actualKeyID[:], expectedClaimKeyID) {
+				return fmt.Errorf("TX_ERR_SIG_INVALID")
+			}
+		} else {
+			expectedRefundKeyID := prevout.CovenantData[73:105]
+			actualKeyID := p.SHA3_256(witness.Pubkey)
+			if !bytes.Equal(actualKeyID[:], expectedRefundKeyID) {
+				return fmt.Errorf("TX_ERR_SIG_INVALID")
+			}
+			if err := satisfyLock(lockMode, lockValue, chainHeight, chainTimestamp); err != nil {
+				return err
+			}
+		}
+	case CORE_VAULT_V1:
+		if err := isScriptSigZeroLen("CORE_VAULT_V1", len(input.ScriptSig)); err != nil {
+			return err
+		}
+		if err := checkWitnessFormat(witness, suiteIDSLHActive); err != nil {
+			return err
+		}
+		if len(prevout.CovenantData) != 73 {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+		lockMode := prevout.CovenantData[32]
+		lockValue, err := parseU64LE(prevout.CovenantData, 33, "vault_lock_value")
+		if err != nil {
+			return err
+		}
+		ownerKeyID := prevout.CovenantData[:32]
+		recoveryKeyID := prevout.CovenantData[41:73]
+		actualKeyID := p.SHA3_256(witness.Pubkey)
+		if !bytes.Equal(actualKeyID[:], ownerKeyID) && !bytes.Equal(actualKeyID[:], recoveryKeyID) {
+			return fmt.Errorf("TX_ERR_SIG_INVALID")
+		}
+		if bytes.Equal(actualKeyID[:], recoveryKeyID) {
+			if err := satisfyLock(lockMode, lockValue, chainHeight, chainTimestamp); err != nil {
+				return err
+			}
+		}
+	case CORE_ANCHOR:
+		return fmt.Errorf("TX_ERR_MISSING_UTXO")
+	case CORE_RESERVED_FUTURE:
+		return fmt.Errorf("TX_ERR_COVENANT_TYPE_INVALID")
+	default:
+		return fmt.Errorf("TX_ERR_COVENANT_TYPE_INVALID")
+	}
+
+		digest, err := SighashV1Digest(p, chainID, tx, inputIndex, prevValue)
+	if err != nil {
+		return err
+	}
+
+	switch witness.SuiteID {
+	case SUITE_ID_ML_DSA:
+		if p.VerifyMLDSA87(witness.Pubkey, witness.Signature, digest) {
+			return nil
+		}
+		return fmt.Errorf("TX_ERR_SIG_INVALID")
+	case SUITE_ID_SLH_DSA:
+		if p.VerifySLHDSASHAKE_256f(witness.Pubkey, witness.Signature, digest) {
+			return nil
+		}
+		return fmt.Errorf("TX_ERR_SIG_INVALID")
+	case SUITE_ID_SENTINEL:
+		// Timelock-only covenants are already validated above.
+		return nil
+	default:
+		return fmt.Errorf("TX_ERR_SIG_ALG_INVALID")
+	}
 }

@@ -12,12 +12,13 @@ Planned behavior:
    - `error_code`
    - (later) block validity and state hash
 
-## Current runner (CV-SIGHASH)
+## Current runner (CV-SIGHASH / CV-SIGCHECK)
 
 From repo root:
 
 ```bash
 python3 conformance/runner/run_cv_sighash.py
+python3 conformance/runner/run_cv_bundle.py
 ```
 
 Notes:
@@ -38,6 +39,7 @@ python3 conformance/runner/run_cv_reorg.py
 
 Notes:
 - `CV-COMPACTSIZE` and `CV-PARSE` now perform cross-client checks.
+- `CV-SIGHASH` and `CV-SIGCHECK` are now cross-client in the bundle runner.
 - `CV-BIND`, `CV-UTXO`, `CV-DEP`, `CV-BLOCK`, `CV-REORG` are runner shells and currently return a clear `NOT RUN` reason until node-layer APIs are implemented.
 
 ## Bundle runner (WIP)
@@ -50,6 +52,7 @@ python3 conformance/runner/run_cv_bundle.py
 
 - `CV-COMPACTSIZE` via `compactsize`
 - `CV-SIGHASH` via `txid` + `sighash`
+- `CV-SIGCHECK` via `verify`
 - `CV-PARSE` using fixture context builders (`tx_hex` when present, fallback synthesis otherwise)
 
 It emits explicit `SKIP` lines for unsupported/unrunnable gates and unsupported fixtures.
