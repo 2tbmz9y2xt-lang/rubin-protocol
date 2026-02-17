@@ -45,5 +45,9 @@ clients/rust/cargo_audit.json
 **/librubin_wc_shim.dylib
 **/librubin_wc_shim.dll
 
+# SonarQube / SonarCloud (do not commit)
+sonar-project.properties
+.scannerwork/
+
 # Local UI artifacts
 rubin-ui/
