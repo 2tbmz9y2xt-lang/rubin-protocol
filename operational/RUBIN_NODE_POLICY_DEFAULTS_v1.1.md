@@ -263,6 +263,15 @@ Nodes and indexers SHOULD:
 - Slashing is reputational and legal, not cryptographic.
 - Future versions MAY introduce `CORE_BOND_V1` (a new covenant type via VERSION_BITS) to enforce exit windows on-chain. This is deferred to post-MVP phase.
 
+### 4.4 On-chain bond upgrade path (informative)
+
+When the sequencer ecosystem is established, `CORE_BOND_V1` can be activated via one of two VERSION_BITS paths (CANONICAL v1.1 §8.2):
+
+- **Direct bit allocation:** use one bit from the `COVENANTS` range (bits 12..17). Appropriate if `CORE_BOND_V1` is the only or first covenant extension needed.
+- **Via meta-bit (preferred for post-MVP):** if `upgrade_framework_v1` (bit 20, `UPGRADE_FRAMEWORK_META`) is active, `bond_v1` can be deployed as a sub-feature under the upgrade framework without consuming a `COVENANTS` bit. This is the preferred path once multiple covenant extensions are queued.
+
+The meta-bit path is intentionally deferred in v1.1 to avoid over-complexity (CANONICAL §8.2). Operators planning to deploy `CORE_BOND_V1` SHOULD reserve a `COVENANTS` bit in their chain-instance deployment registry now to avoid bit conflicts later.
+
 ## 5. Nonce replay hardening (mempool policy)
 
 Consensus `tx_nonce` replay prevention is per-block (CANONICAL v1.1 §3.4). To reduce spam and reorg churn, nodes MAY add:
