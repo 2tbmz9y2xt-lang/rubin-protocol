@@ -352,7 +352,7 @@ func cmdApplyUTXO(contextPath string) error {
 		return mapParseError(err)
 	}
 
-	utxo := make(map[consensus.TxOutPoint]consensus.TxOutput, len(ctx.UTXOSet))
+	utxo := make(map[consensus.TxOutPoint]consensus.UtxoEntry, len(ctx.UTXOSet))
 	for _, entry := range ctx.UTXOSet {
 		prevTxid, err := parseTxIDHex(entry.Txid)
 		if err != nil {
@@ -367,7 +367,11 @@ func cmdApplyUTXO(contextPath string) error {
 			CovenantType: entry.CovenantType,
 			CovenantData: covenantData,
 		}
-		utxo[consensus.TxOutPoint{TxID: prevTxid, Vout: entry.Vout}] = out
+		utxo[consensus.TxOutPoint{TxID: prevTxid, Vout: entry.Vout}] = consensus.UtxoEntry{
+			Output:            out,
+			CreationHeight:    ctx.ChainHeight,
+			CreatedByCoinbase: false,
+		}
 	}
 
 	return consensus.ApplyTx(

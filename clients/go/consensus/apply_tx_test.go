@@ -66,10 +66,16 @@ func TestApplyTxOK(t *testing.T) {
 	keyID := p.SHA3_256(make([]byte, ML_DSA_PUBKEY_BYTES))
 	tx.Witness.Witnesses[0].Pubkey = make([]byte, ML_DSA_PUBKEY_BYTES)
 	covenantData := append([]byte{SUITE_ID_ML_DSA}, keyID[:]...)
+	for i := range tx.Outputs {
+		tx.Outputs[i].CovenantType = CORE_P2PK
+		tx.Outputs[i].CovenantData = covenantData
+	}
 	prevoutData.CovenantData = covenantData
 
-	utxo := map[TxOutPoint]TxOutput{
-		prevout: prevoutData,
+	utxo := map[TxOutPoint]UtxoEntry{
+		prevout: {
+			Output: prevoutData,
+		},
 	}
 	chainID := [32]byte{}
 
@@ -97,7 +103,7 @@ func TestApplyTxMissingUTXO(t *testing.T) {
 			},
 		},
 	}
-	if err := ApplyTx(p, [32]byte{}, &tx, map[TxOutPoint]TxOutput{}, 0, 0, false); err == nil {
+	if err := ApplyTx(p, [32]byte{}, &tx, map[TxOutPoint]UtxoEntry{}, 0, 0, false); err == nil {
 		t.Fatal("expected missing utxo error")
 	}
 }
@@ -119,7 +125,11 @@ func TestApplyTxDuplicatePrevout(t *testing.T) {
 			{PrevTxid: prevout.TxID, PrevVout: prevout.Vout},
 			{PrevTxid: prevout.TxID, PrevVout: prevout.Vout},
 		},
-		Outputs:  []TxOutput{{Value: 100}},
+		Outputs: []TxOutput{{
+			Value:        200,
+			CovenantType: CORE_P2PK,
+			CovenantData: append([]byte{SUITE_ID_ML_DSA}, keyID[:]...),
+		}},
 		Locktime: 0,
 		Witness: WitnessSection{
 			Witnesses: []WitnessItem{
@@ -128,8 +138,10 @@ func TestApplyTxDuplicatePrevout(t *testing.T) {
 			},
 		},
 	}
-	utxo := map[TxOutPoint]TxOutput{
-		prevout: prevoutData,
+	utxo := map[TxOutPoint]UtxoEntry{
+		prevout: {
+			Output: prevoutData,
+		},
 	}
 	if err := ApplyTx(p, [32]byte{}, &tx, utxo, 0, 0, false); err == nil {
 		t.Fatal("expected duplicate prevout parse error")
@@ -146,10 +158,14 @@ func TestApplyTxValueConservation(t *testing.T) {
 		CovenantData: append([]byte{SUITE_ID_ML_DSA}, keyID[:]...),
 	}
 	tx := Tx{
-		Version:  1,
-		TxNonce:  1,
-		Inputs:   []TxInput{{PrevTxid: prevout.TxID, PrevVout: prevout.Vout}},
-		Outputs:  []TxOutput{{Value: 200}},
+		Version: 1,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prevout.TxID, PrevVout: prevout.Vout}},
+		Outputs: []TxOutput{{
+			Value:        101,
+			CovenantType: CORE_P2PK,
+			CovenantData: append([]byte{SUITE_ID_ML_DSA}, keyID[:]...),
+		}},
 		Locktime: 0,
 		Witness: WitnessSection{
 			Witnesses: []WitnessItem{
@@ -157,8 +173,10 @@ func TestApplyTxValueConservation(t *testing.T) {
 			},
 		},
 	}
-	utxo := map[TxOutPoint]TxOutput{
-		prevout: prevoutData,
+	utxo := map[TxOutPoint]UtxoEntry{
+		prevout: {
+			Output: prevoutData,
+		},
 	}
 	if err := ApplyTx(p, [32]byte{}, &tx, utxo, 0, 0, false); err == nil {
 		t.Fatal("expected value conservation error")
@@ -173,15 +191,17 @@ func TestApplyTxInputOutputCountMismatch(t *testing.T) {
 		Inputs: []TxInput{
 			{PrevTxid: [32]byte{}, PrevVout: 0},
 		},
-		Outputs: []TxOutput{
-			{Value: 0},
-		},
+		Outputs: []TxOutput{{
+			Value:        0,
+			CovenantType: CORE_P2PK,
+			CovenantData: append([]byte{SUITE_ID_ML_DSA}, make([]byte, 32)...),
+		}},
 		Locktime: 0,
 		Witness: WitnessSection{
 			Witnesses: []WitnessItem{},
 		},
 	}
-	err := ApplyTx(p, [32]byte{}, &tx, map[TxOutPoint]TxOutput{}, 0, 0, false)
+	err := ApplyTx(p, [32]byte{}, &tx, map[TxOutPoint]UtxoEntry{}, 0, 0, false)
 	if err == nil {
 		t.Fatal("expected parse error due witness count mismatch")
 	}
