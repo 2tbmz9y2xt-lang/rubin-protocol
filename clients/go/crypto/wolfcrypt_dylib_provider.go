@@ -10,12 +10,15 @@ package crypto
 
 typedef int32_t (*rubin_sha3_256_fn)(const uint8_t*, size_t, uint8_t*);
 typedef int32_t (*rubin_verify_fn)(const uint8_t*, size_t, const uint8_t*, size_t, const uint8_t*);
+typedef int32_t (*rubin_keywrap_fn)(const uint8_t*, size_t, const uint8_t*, size_t, uint8_t*, size_t*);
 
 typedef struct {
 	void* handle;
 	rubin_sha3_256_fn sha3_256;
 	rubin_verify_fn verify_mldsa87;
 	rubin_verify_fn verify_slhdsa_shake_256f;
+	rubin_keywrap_fn aes_keywrap;
+	rubin_keywrap_fn aes_keyunwrap;
 } rubin_wc_provider_t;
 
 static int rubin_wc_load(rubin_wc_provider_t* p, const char* path) {
@@ -25,6 +28,9 @@ static int rubin_wc_load(rubin_wc_provider_t* p, const char* path) {
 	p->sha3_256 = (rubin_sha3_256_fn)dlsym(p->handle, "rubin_wc_sha3_256");
 	p->verify_mldsa87 = (rubin_verify_fn)dlsym(p->handle, "rubin_wc_verify_mldsa87");
 	p->verify_slhdsa_shake_256f = (rubin_verify_fn)dlsym(p->handle, "rubin_wc_verify_slhdsa_shake_256f");
+	/* keywrap symbols are optional — older shims without keywrap still load fine */
+	p->aes_keywrap   = (rubin_keywrap_fn)dlsym(p->handle, "rubin_wc_aes_keywrap");
+	p->aes_keyunwrap = (rubin_keywrap_fn)dlsym(p->handle, "rubin_wc_aes_keyunwrap");
 
 	if (!p->sha3_256 || !p->verify_mldsa87 || !p->verify_slhdsa_shake_256f) {
 		dlclose(p->handle);
@@ -32,6 +38,26 @@ static int rubin_wc_load(rubin_wc_provider_t* p, const char* path) {
 		return -2;
 	}
 	return 0;
+}
+
+static int32_t rubin_wc_aes_keywrap_call(
+	rubin_wc_provider_t* p,
+	const uint8_t* kek, size_t kek_len,
+	const uint8_t* key_in, size_t key_in_len,
+	uint8_t* out, size_t* out_len)
+{
+	if (!p || !p->aes_keywrap) return -99; /* symbol not present in shim */
+	return p->aes_keywrap(kek, kek_len, key_in, key_in_len, out, out_len);
+}
+
+static int32_t rubin_wc_aes_keyunwrap_call(
+	rubin_wc_provider_t* p,
+	const uint8_t* kek, size_t kek_len,
+	const uint8_t* wrapped, size_t wrapped_len,
+	uint8_t* key_out, size_t* key_out_len)
+{
+	if (!p || !p->aes_keyunwrap) return -99;
+	return p->aes_keyunwrap(kek, kek_len, wrapped, wrapped_len, key_out, key_out_len);
 }
 
 static int32_t rubin_wc_sha3_256_call(rubin_wc_provider_t* p, const uint8_t* input, size_t len, uint8_t* out) {
@@ -199,3 +225,66 @@ func (w *WolfcryptDylibProvider) VerifySLHDSASHAKE_256f(pubkey []byte, sig []byt
 		panic(fmt.Sprintf("wolfcrypt shim error: rubin_wc_verify_slhdsa_shake_256f rc=%d", rc))
 	}
 }
+
+// HasKeyManagement returns true if the loaded shim exports keywrap symbols.
+// Older shims without keywrap will return false — callers should check before use.
+func (w *WolfcryptDylibProvider) HasKeyManagement() bool {
+	return w.p.aes_keywrap != nil && w.p.aes_keyunwrap != nil
+}
+
+// KeyWrap wraps key material using AES-256-KW (RFC 3394).
+// kek must be exactly 32 bytes (AES-256). keyIn must be a non-zero multiple of 8 bytes.
+// Returns the wrapped blob (keyIn length + 8 bytes ICV).
+//
+// Error codes from shim:
+//   -30 null argument, -31 bad kek_len, -32 bad key_in_len,
+//   -33 buf too small, -34 aes init, -35 wrap failed, -99 symbol absent in shim.
+func (w *WolfcryptDylibProvider) KeyWrap(kek, keyIn []byte) ([]byte, error) {
+	if len(kek) != 32 {
+		return nil, errors.New("keywrap: kek must be 32 bytes (AES-256)")
+	}
+	if len(keyIn) == 0 || len(keyIn)%8 != 0 {
+		return nil, errors.New("keywrap: keyIn must be non-zero multiple of 8 bytes (RFC 3394)")
+	}
+	outBuf := make([]byte, len(keyIn)+8)
+	outLen := C.size_t(len(outBuf))
+	rc := C.int32_t(C.rubin_wc_aes_keywrap_call(
+		&w.p,
+		(*C.uint8_t)(unsafe.Pointer(&kek[0])), C.size_t(len(kek)),
+		(*C.uint8_t)(unsafe.Pointer(&keyIn[0])), C.size_t(len(keyIn)),
+		(*C.uint8_t)(unsafe.Pointer(&outBuf[0])), &outLen,
+	))
+	if rc <= 0 {
+		return nil, fmt.Errorf("keywrap: shim error rc=%d", rc)
+	}
+	return outBuf[:int(outLen)], nil
+}
+
+// KeyUnwrap unwraps a blob produced by KeyWrap using AES-256-KW (RFC 3394).
+// Returns ErrKeyWrapIntegrity if the blob is corrupted or the KEK is wrong (-36).
+func (w *WolfcryptDylibProvider) KeyUnwrap(kek, wrapped []byte) ([]byte, error) {
+	if len(kek) != 32 {
+		return nil, errors.New("keyunwrap: kek must be 32 bytes (AES-256)")
+	}
+	if len(wrapped) < 16 {
+		return nil, errors.New("keyunwrap: wrapped blob too short")
+	}
+	outBuf := make([]byte, len(wrapped)) // plaintext is always shorter than wrapped
+	outLen := C.size_t(len(outBuf))
+	rc := C.int32_t(C.rubin_wc_aes_keyunwrap_call(
+		&w.p,
+		(*C.uint8_t)(unsafe.Pointer(&kek[0])), C.size_t(len(kek)),
+		(*C.uint8_t)(unsafe.Pointer(&wrapped[0])), C.size_t(len(wrapped)),
+		(*C.uint8_t)(unsafe.Pointer(&outBuf[0])), &outLen,
+	))
+	if rc == -36 {
+		return nil, ErrKeyWrapIntegrity
+	}
+	if rc <= 0 {
+		return nil, fmt.Errorf("keyunwrap: shim error rc=%d", rc)
+	}
+	return outBuf[:int(outLen)], nil
+}
+
+// ErrKeyWrapIntegrity is returned when AES-KW integrity check fails (wrong KEK or corrupted blob).
+var ErrKeyWrapIntegrity = errors.New("keyunwrap: integrity check failed (wrong KEK or corrupted blob)")
