@@ -68,19 +68,12 @@ jobs:
               echo "local fallback shim not found: ${local_shim}" >&2
               exit 1
             fi
-            local_shim_sha="$(python3 - <<'PY'
-import hashlib, pathlib
-path = pathlib.Path("/tmp/rubin-wolfcrypt/wolfcrypt-shim/librubin_wc_shim.so")
-print(hashlib.sha3_256(path.read_bytes()).hexdigest())
-PY
-)"
+            local_shim_sha="$(python3 -c 'import hashlib, pathlib; print(hashlib.sha3_256(pathlib.Path("/tmp/rubin-wolfcrypt/wolfcrypt-shim/librubin_wc_shim.so").read_bytes()).hexdigest())')"
             echo "RUBIN_WOLFCRYPT_SHIM_PATH=${local_shim}" >> "${GITHUB_ENV}"
             echo "RUBIN_WOLFCRYPT_SHIM_SHA3_256=${local_shim_sha}" >> "${GITHUB_ENV}"
             echo "RUBIN_WOLFCRYPT_STRICT=1" >> "${GITHUB_ENV}"
             shim_dir="$(dirname "${local_shim}")"
           fi
-
-          echo "shim_dir=${shim_dir}" >> "${GITHUB_ENV}"
 
       - name: Install runner deps
         run: python3 -m pip install --upgrade pip pyyaml
