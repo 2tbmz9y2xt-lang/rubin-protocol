@@ -70,5 +70,6 @@ jobs:
           RUBIN_WOLFCRYPT_SHIM_PATH: ${{ env.RUBIN_WOLFCRYPT_SHIM_PATH }}
           RUBIN_WOLFCRYPT_SHIM_SHA3_256: ${{ env.RUBIN_WOLFCRYPT_SHIM_SHA3_256 }}
         run: |
+          shim_dir="$(dirname "${RUBIN_WOLFCRYPT_SHIM_PATH}")"
+          export LD_LIBRARY_PATH="${shim_dir}:${LD_LIBRARY_PATH-}"
           python3 conformance/runner/run_cv_sighash.py
-

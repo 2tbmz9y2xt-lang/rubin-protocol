@@ -22,12 +22,12 @@ OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 if [[ "${OS}" == "darwin" ]]; then
   CPU_CORES="$(sysctl -n hw.ncpu)"
   SHARED_EXT="dylib"
-  RPATH_ARGS="-Wl,-rpath,${PREFIX}/lib"
+  RPATH_ARGS='-Wl,-rpath,@loader_path'
   LD_ENV_VAR="DYLD_LIBRARY_PATH"
 elif [[ "${OS}" == "linux" ]]; then
   CPU_CORES="$(nproc)"
   SHARED_EXT="so"
-  RPATH_ARGS="-Wl,-rpath,${PREFIX}/lib"
+  RPATH_ARGS='-Wl,-rpath,$ORIGIN'
   LD_ENV_VAR="LD_LIBRARY_PATH"
 else
   echo "Unsupported OS: ${OS}" >&2
@@ -239,6 +239,18 @@ if [[ ! -f "${SHIM_OUT_ROOT}/librubin_wc_shim.${SHARED_EXT}" ]]; then
   echo "Missing shim output: ${SHIM_OUT_ROOT}/librubin_wc_shim.${SHARED_EXT}" >&2
   exit 1
 fi
+
+for lib in \
+  "${PREFIX}/lib/libwolfssl."*.${SHARED_EXT} \
+  "${PREFIX}/lib"/libwolfssl.${SHARED_EXT}* \
+  "${PREFIX}/lib"/libwolfssl.*.${SHARED_EXT}* \
+  "${PREFIX}/lib"/libwolfssl*.${SHARED_EXT} \
+  "${PREFIX}/lib"/libwolfssl.*dylib* \
+  "${PREFIX}/lib"/libwolfssl.dylib*; do
+  if [ -e "${lib}" ] && [ -f "${lib}" ]; then
+    cp -L "${lib}" "${SHIM_OUT_ROOT}/" || true
+  fi
+done
 
 SHIM_DYLIB_PATH="${SHIM_OUT_ROOT}/librubin_wc_shim.${SHARED_EXT}"
 
