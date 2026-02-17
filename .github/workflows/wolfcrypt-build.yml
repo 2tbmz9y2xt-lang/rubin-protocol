@@ -27,6 +27,7 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write      # cosign keyless signing via Fulcio OIDC
 
 jobs:
   build:
@@ -79,6 +80,9 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew install autoconf automake libtool
+          eval "$(/opt/homebrew/bin/brew shellenv)"
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+          which autoconf autoreconf automake libtool
           which "${CC_BIN}" >/dev/null 2>&1 || CC_BIN=clang
           "${CC_BIN}" --version | head -n 1
         env:
