@@ -1,8 +1,8 @@
-# RUBIN L1 Chain Instance Profile: MAINNET v1.1 (TEMPLATE)
+# RUBIN L1 Chain Instance Profile: MAINNET v1.1
 
 Status: DRAFT (NON-CONSENSUS)
 Date: 2026-02-16
-Scope: Mainnet chain instance binding (placeholder values for integration alignment)
+Scope: Mainnet chain instance binding (concrete draft values for integration alignment)
 
 Status interpretation: see `operational/RUBIN_OPERATIONAL_SECURITY_v1.1.md §1.1`.
 Transition governance: `operational/RUBIN_L1_FREEZE_TRANSITION_POLICY_v1.1.md`.

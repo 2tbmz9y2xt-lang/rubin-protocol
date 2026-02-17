@@ -35,19 +35,19 @@ Receivers SHOULD drop messages whose payload length exceeds `MAX_RELAY_MSG_BYTES
 
 Payload fields (recommended):
 
-1. `magic`: u32be (network magic from chain-instance profile; included in 24-byte message header)
-2. `protocol_version`: u32le
-3. `chain_id`: bytes32 (MUST match pinned chain_id for the network)
-4. `peer_services`: u64le (bitset; non-consensus)
-5. `timestamp`: u64le (UNIX seconds)
-6. `nonce`: u64le (anti-self-connect)
-7. `user_agent_len`: CompactSize
-8. `user_agent`: bytes[user_agent_len] (UTF-8)
-9. `start_height`: u32le (best-effort)
-10. `relay`: u8 (0/1)
+1. `protocol_version`: u32le
+2. `chain_id`: bytes32 (MUST match pinned chain_id for the network)
+3. `peer_services`: u64le (bitset; non-consensus)
+4. `timestamp`: u64le (UNIX seconds)
+5. `nonce`: u64le (anti-self-connect)
+6. `user_agent_len`: CompactSize
+7. `user_agent`: bytes[user_agent_len] (UTF-8)
+8. `start_height`: u32le (best-effort)
+9. `relay`: u8 (0/1)
+
+`magic` is carried only in the 24-byte transport prefix as canonical network-domain separation.
 
 Nodes MUST reject peers whose `chain_id` does not match the locally pinned `chain_id_hex`.
-For wire-format sanity, only the 24-byte prefix carries `magic`; nodes MUST NOT duplicate `magic` in the payload body.
 
 ### 2.2 `verack` (required)
 
