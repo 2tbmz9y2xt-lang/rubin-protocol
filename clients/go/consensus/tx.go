@@ -16,6 +16,10 @@ const (
 	CORE_VAULT_V1        = 0x0101
 	CORE_RESERVED_FUTURE = 0x00ff
 
+	MAX_TX_INPUTS     = 1_024
+	MAX_TX_OUTPUTS    = 1_024
+	MAX_WITNESS_ITEMS = 1_024
+
 	SUITE_ID_SENTINEL     = 0x00
 	SUITE_ID_ML_DSA       = 0x01
 	SUITE_ID_SLH_DSA      = 0x02
@@ -35,6 +39,11 @@ type Tx struct {
 	Outputs  []TxOutput
 	Locktime uint32
 	Witness  WitnessSection
+}
+
+type TxOutPoint struct {
+	TxID [32]byte
+	Vout uint32
 }
 
 type TxInput struct {
@@ -432,6 +441,13 @@ func TxID(p crypto.CryptoProvider, tx *Tx) [32]byte {
 	return p.SHA3_256(TxNoWitnessBytes(tx))
 }
 
+func addUint64(a, b uint64) (uint64, error) {
+	if b > (^uint64(0) - a) {
+		return 0, fmt.Errorf("TX_ERR_PARSE")
+	}
+	return a + b, nil
+}
+
 func SighashV1Digest(
 	p crypto.CryptoProvider,
 	chainID [32]byte,
@@ -527,6 +543,77 @@ func validateHTLCScriptSigLen(scriptSigLen int) error {
 	default:
 		return fmt.Errorf("TX_ERR_PARSE")
 	}
+}
+
+func ApplyTx(
+	p crypto.CryptoProvider,
+	chainID [32]byte,
+	tx *Tx,
+	utxo map[TxOutPoint]TxOutput,
+	chainHeight uint64,
+	chainTimestamp uint64,
+	suiteIDSLHActive bool,
+) error {
+	if tx == nil {
+		return fmt.Errorf("TX_ERR_PARSE")
+	}
+	if len(tx.Inputs) > MAX_TX_INPUTS || len(tx.Outputs) > MAX_TX_OUTPUTS || len(tx.Witness.Witnesses) > MAX_WITNESS_ITEMS {
+		return fmt.Errorf("TX_ERR_PARSE")
+	}
+	if len(tx.Inputs) != len(tx.Witness.Witnesses) {
+		return fmt.Errorf("TX_ERR_PARSE")
+	}
+
+	seen := make(map[TxOutPoint]struct{}, len(tx.Inputs))
+	var totalInputs uint64
+	var totalOutputs uint64
+
+	for i, input := range tx.Inputs {
+		prevout := TxOutPoint{
+			TxID: input.PrevTxid,
+			Vout: input.PrevVout,
+		}
+		if _, dup := seen[prevout]; dup {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+		seen[prevout] = struct{}{}
+
+		prevOutput, ok := utxo[prevout]
+		if !ok {
+			return fmt.Errorf("TX_ERR_MISSING_UTXO")
+		}
+		if err := ValidateInputAuthorization(
+			p,
+			chainID,
+			tx,
+			uint32(i),
+			prevOutput.Value,
+			&prevOutput,
+			chainHeight,
+			chainTimestamp,
+			suiteIDSLHActive,
+		); err != nil {
+			return err
+		}
+
+		var sumErr error
+		totalInputs, sumErr = addUint64(totalInputs, prevOutput.Value)
+		if sumErr != nil {
+			return sumErr
+		}
+	}
+
+	for _, output := range tx.Outputs {
+		var sumErr error
+		totalOutputs, sumErr = addUint64(totalOutputs, output.Value)
+		if sumErr != nil {
+			return sumErr
+		}
+	}
+	if totalOutputs > totalInputs {
+		return fmt.Errorf("TX_ERR_VALUE_CONSERVATION")
+	}
+	return nil
 }
 
 func checkWitnessFormat(item WitnessItem, suiteIDSLHActive bool) error {
@@ -707,7 +794,7 @@ func ValidateInputAuthorization(
 		return fmt.Errorf("TX_ERR_COVENANT_TYPE_INVALID")
 	}
 
-		digest, err := SighashV1Digest(p, chainID, tx, inputIndex, prevValue)
+	digest, err := SighashV1Digest(p, chainID, tx, inputIndex, prevValue)
 	if err != nil {
 		return err
 	}
