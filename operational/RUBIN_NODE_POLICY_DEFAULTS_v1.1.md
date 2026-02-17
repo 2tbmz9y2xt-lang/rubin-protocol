@@ -57,47 +57,48 @@ If an operator enables replacement (non-default), it SHOULD be constrained and m
 3. Limit per-outpoint churn: at most 1 replacement attempt per outpoint per 10 minutes.
 4. Keep replacement local-only: do not advertise replacement behavior unless it is published in release notes for the private/public phase.
 
-### 1.4 TIMELOCK (keyless covenant) spend rate-limiting
+### 1.4 Keyless covenant flood resistance (CORE_TIMELOCK_V1)
 
-`CORE_TIMELOCK_V1` spends carry a sentinel witness (`suite_id = 0x00`, zero-length pubkey
-and signature). This means `sig_cost = 0` and no cryptographic verification is required.
+`CORE_TIMELOCK_V1` spends are keyless by design and use a sentinel witness (`suite_id = 0x00`,
+zero-length pubkey/signature). This means `sig_cost = 0` and no cryptographic verification on spend.
+As a result, these transactions can be much lighter than key-bearing spends and are a relay/mempool DoS surface.
 
-A minimal 1-in/1-out TIMELOCK transaction weighs approximately **334 weight units** —
-roughly **22× lighter** than a 1-in/1-out ML-DSA transaction (~7,561 wu).
-At `MAX_BLOCK_WEIGHT = 4,000,000`, a block could theoretically contain ~11,976 TIMELOCK
-spends, creating a cheap mempool flood vector that imposes essentially zero CPU cost on
-the attacker but burdens relay, mempool bookkeeping, and UTXO churn on all full nodes.
+A minimal 1-in/1-out TIMELOCK transaction weighs approximately **334 wu** (about **22x lighter**
+than a comparable ML-DSA spend at ~7,561 wu). At `MAX_BLOCK_WEIGHT = 4,000,000`, a block could
+theoretically include ~11,976 TIMELOCK spends.
 
 **Default policy (non-consensus, relay + mempool):**
 
 ```
-MIN_TIMELOCK_RELAY_FEE_MULTIPLIER = 4      # require 4× base MIN_RELAY_FEE_RATE for TIMELOCK spends
-MAX_TIMELOCK_TX_PER_PEER_PER_SECOND = 10   # per-peer relay rate cap
-MAX_TIMELOCK_TX_IN_MEMPOOL = 5_000         # absolute mempool cap for TIMELOCK spends
-MAX_TIMELOCK_WEIGHT_PER_BLOCK_FRACTION = 0.25  # soft cap: TIMELOCK spends ≤ 25% of block weight
+MIN_TIMELOCK_RELAY_FEE_MULTIPLIER = 4           # require 4x base MIN_RELAY_FEE_RATE
+MIN_KEYLESS_EFFECTIVE_WEIGHT = 1_500            # floor for fee/priority accounting
+MAX_TIMELOCK_TX_PER_PEER_PER_SECOND = 10        # sustained per-peer relay cap
+MAX_TIMELOCK_TX_IN_MEMPOOL = 5_000              # absolute mempool cap for TIMELOCK spends
+MAX_TIMELOCK_WEIGHT_PER_BLOCK_FRACTION = 0.25   # soft cap: <= 25% of block weight
 ```
 
 Enforcement:
 
-1. **Fee floor**: before mempool admission, require  
-   `fee(T) ≥ weight(T) × MIN_RELAY_FEE_RATE × MIN_TIMELOCK_RELAY_FEE_MULTIPLIER`.  
-   Rationale: raises the economic cost of TIMELOCK floods to ~4× the base relay cost,
-   roughly compensating for the absent signature verification cost.
+1. **Fee floor with effective weight**:
+   - `effective_weight(T) = max(weight(T), MIN_KEYLESS_EFFECTIVE_WEIGHT)`
+   - `required_fee(T) = effective_weight(T) x MIN_RELAY_FEE_RATE x MIN_TIMELOCK_RELAY_FEE_MULTIPLIER`
+   - Admit only if `fee(T) >= required_fee(T)`.
+   - For eviction/prioritization, compare by `fee / effective_weight(T)`.
 
-2. **Per-peer relay rate**: if a peer submits more than `MAX_TIMELOCK_TX_PER_PEER_PER_SECOND`
-   TIMELOCK-spending transactions in any 1-second window, drop excess and increment ban-score +5.
+2. **Per-peer relay rate**: if a peer exceeds `MAX_TIMELOCK_TX_PER_PEER_PER_SECOND`
+   in a 1-second window, drop excess and increment ban-score (+5).
 
-3. **Mempool cap**: if TIMELOCK-spending transactions already occupy `MAX_TIMELOCK_TX_IN_MEMPOOL`
-   slots, reject new arrivals (return relay-rejection, do not ban).  
-   When mempool is full, evict lowest-fee TIMELOCK spends first (before key-bearing spends).
+3. **Mempool cap**: if TIMELOCK spends already occupy `MAX_TIMELOCK_TX_IN_MEMPOOL`,
+   reject new arrivals (relay rejection, no ban). Under pressure, evict lowest-fee
+   TIMELOCK spends before key-bearing spends.
 
-4. **Block weight soft cap** (mining policy, non-consensus):  
-   Miners/validators SHOULD limit TIMELOCK spends to `MAX_TIMELOCK_WEIGHT_PER_BLOCK_FRACTION`
-   of block weight to preserve block space for economically meaningful key-bearing transactions.  
-   This is a soft recommendation; consensus does not enforce it.
+4. **UTXO-health bias under load**: deprioritize transactions creating many tiny UTXOs
+   (policy-only heuristic; not a consensus rule).
 
-These are starting defaults. Operators MAY relax them (e.g., raise the mempool cap) if
-TIMELOCK usage is legitimate and monitored. Any override MUST be documented.
+5. **Block-level soft cap** (mining policy): miners/validators SHOULD keep TIMELOCK spends
+   below `MAX_TIMELOCK_WEIGHT_PER_BLOCK_FRACTION` of block weight.
+
+Operators MAY tune these defaults for legitimate workloads, but overrides SHOULD be documented.
 
 ## 2. P2P DoS defenses (policy)
 
@@ -218,6 +219,31 @@ Recommended starting controls (non-consensus):
 - Per-peer ML-DSA verify budget: 20 verifications/second sustained (burst 100).
 - Under load, deprioritize `suite_id = 0x02` spends unless fee/weight is strictly higher than competing traffic.
 - Cache verification results keyed by `(sighash, pubkey, signature)` to avoid repeated work across peers.
+
+### 5.2 Witness byte bandwidth floor (policy)
+
+`WITNESS_DISCOUNT_DIVISOR` reduces transaction weight independently of raw wire size.
+A large-witness transaction is cheaper by weight but still consumes full bandwidth and storage on every relay node.
+
+Nodes SHOULD apply a bandwidth-aware admission floor in addition to the weight-based floor:
+
+```
+bandwidth_cost(T) = base_size + wit_size   # undiscounted, reflects actual wire bytes
+bandwidth_fee_floor(T) = MIN_RELAY_FEE_RATE × ceil(bandwidth_cost(T) / 1_000)
+weight_fee_floor(T)    = MIN_RELAY_FEE_RATE × weight(T)
+required_fee(T)        = max(weight_fee_floor(T), bandwidth_fee_floor(T))
+```
+
+Effective admission: `fee(T) ≥ required_fee(T)`.
+
+Starting parameters (non-consensus; tune per hardware/phase):
+- `MIN_RELAY_FEE_RATE = 1` (from CANONICAL §1.2; non-consensus relay policy).
+- Bandwidth floor adds ~1 sat per KB of raw witness on top of weight-based fee.
+- At `wit_size = 90_000` (near `MAX_WITNESS_BYTES_PER_TX`): bandwidth floor ≈ 90 sat; weight floor ≈ 30 sat — bandwidth floor wins, as intended.
+
+Rationale: without this floor, the witness discount creates an asymmetry where an attacker can fill relay bandwidth at 3× lower cost than the weight-based fee model implies. This floor restores the fee/bandwidth relationship without changing consensus.
+
+Operators SHOULD raise the bandwidth floor multiplier if large-witness spam is observed in private or public phase.
 
 ## 6. Light client and SPV policies (non-consensus)
 
