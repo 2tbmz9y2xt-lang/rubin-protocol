@@ -295,7 +295,7 @@ else
 fi
 
 "${CC:-cc}" -std=c11 -O2 \
-  -I"${PREFIX}/include" -o "${SHIM_BIN}" "${SHIM_LOG}" -L"${PREFIX}/lib" ${DLFLAGS} -lwolfssl
+  -I"${PREFIX}/include" -o "${SHIM_BIN}" "${SHIM_LOG}" -L"${PREFIX}/lib" ${RPATH_ARGS} ${DLFLAGS} -lwolfssl
 
 if [[ ! -x "${SHIM_BIN}" ]]; then
   echo "Shim smoke binary not built: ${SHIM_BIN}" >&2
@@ -303,7 +303,12 @@ if [[ ! -x "${SHIM_BIN}" ]]; then
 fi
 
 (
-  cd "${WORKROOT}" && "${SHIM_BIN}"
+  cd "${WORKROOT}"
+  if [[ "${LD_ENV_VAR}" == "DYLD_LIBRARY_PATH" ]]; then
+    DYLD_LIBRARY_PATH="${PREFIX}/lib:${DYLD_LIBRARY_PATH-}" "${SHIM_BIN}"
+  else
+    LD_LIBRARY_PATH="${PREFIX}/lib:${LD_LIBRARY_PATH-}" "${SHIM_BIN}"
+  fi
 )
 
 echo ""

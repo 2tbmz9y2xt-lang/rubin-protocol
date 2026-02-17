@@ -179,89 +179,121 @@ func cmdSighash(chainID [32]byte, txHex string, inputIndex uint32, inputValue ui
 	return nil
 }
 
+const usageCommands = "commands: version | chain-id --profile <path> | txid --tx-hex <hex> | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>]"
+
+func printUsage() {
+	fmt.Fprintln(os.Stderr, "usage: rubin-node <command> [args]")
+	fmt.Fprintln(os.Stderr, usageCommands)
+}
+
+func cmdVersionMain() int {
+	fmt.Println("rubin-node (go): scaffold v1.1")
+	return 0
+}
+
+func cmdChainIDMain(argv []string) int {
+	fs := flag.NewFlagSet("chain-id", flag.ExitOnError)
+	profile := fs.String("profile", "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md", "chain instance profile path")
+	_ = fs.Parse(argv)
+	if err := cmdChainID(*profile); err != nil {
+		fmt.Fprintln(os.Stderr, "chain-id error:", err)
+		return 1
+	}
+	return 0
+}
+
+func cmdTxIDMain(argv []string) int {
+	fs := flag.NewFlagSet("txid", flag.ExitOnError)
+	txHex := fs.String("tx-hex", "", "transaction hex bytes (TxBytes)")
+	_ = fs.Parse(argv)
+	if *txHex == "" {
+		fmt.Fprintln(os.Stderr, "missing required flag: --tx-hex")
+		return 2
+	}
+	if err := cmdTxID(*txHex); err != nil {
+		fmt.Fprintln(os.Stderr, "txid error:", err)
+		return 1
+	}
+	return 0
+}
+
+func cmdSighashMain(argv []string) int {
+	fs := flag.NewFlagSet("sighash", flag.ExitOnError)
+	profile := fs.String("profile", "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md", "chain instance profile path")
+	chainIDHex := fs.String("chain-id-hex", "", "override chain_id (64 hex chars)")
+	txHex := fs.String("tx-hex", "", "transaction hex bytes (TxBytes)")
+	inputIndex := fs.Uint("input-index", 0, "0-based input index")
+	inputValue := fs.Uint64("input-value", 0, "input UTXO value (u64)")
+	_ = fs.Parse(argv)
+	if *txHex == "" {
+		fmt.Fprintln(os.Stderr, "missing required flag: --tx-hex")
+		return 2
+	}
+	if uint64(*inputIndex) > uint64(^uint32(0)) {
+		fmt.Fprintln(os.Stderr, "input-index exceeds 32-bit bound")
+		return 2
+	}
+
+	if *chainIDHex != "" && hasFlagArg(argv, "profile") {
+		fmt.Fprintln(os.Stderr, "use exactly one of --chain-id-hex or --profile")
+		return 2
+	}
+
+	var chainID [32]byte
+	if *chainIDHex != "" {
+		parsed, err := parseChainIDHex(*chainIDHex)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		chainID = parsed
+	} else {
+		p, cleanup, err := loadCryptoProvider()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		defer cleanup()
+		derived, err := deriveChainID(p, *profile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "sighash error:", err)
+			return 1
+		}
+		chainID = derived
+	}
+
+	// #nosec G115 -- inputIndex is bounded above by uint32 max.
+	if err := cmdSighash(chainID, *txHex, uint32(*inputIndex), *inputValue); err != nil {
+		fmt.Fprintln(os.Stderr, "sighash error:", err)
+		return 1
+	}
+	return 0
+}
+
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: rubin-node <command> [args]")
-		fmt.Fprintln(os.Stderr, "commands: version | chain-id --profile <path> | txid --tx-hex <hex> | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>]")
+		printUsage()
 		os.Exit(2)
 	}
 
 	command := os.Args[1]
+	argv := os.Args[2:]
+	exitCode := 0
 	switch command {
 	case "version":
-		fmt.Println("rubin-node (go): scaffold v1.1")
+		exitCode = cmdVersionMain()
 	case "chain-id":
-		fs := flag.NewFlagSet("chain-id", flag.ExitOnError)
-		profile := fs.String("profile", "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md", "chain instance profile path")
-		_ = fs.Parse(os.Args[2:])
-		if err := cmdChainID(*profile); err != nil {
-			fmt.Fprintln(os.Stderr, "chain-id error:", err)
-			os.Exit(1)
-		}
+		exitCode = cmdChainIDMain(argv)
 	case "txid":
-		fs := flag.NewFlagSet("txid", flag.ExitOnError)
-		txHex := fs.String("tx-hex", "", "transaction hex bytes (TxBytes)")
-		_ = fs.Parse(os.Args[2:])
-		if *txHex == "" {
-			fmt.Fprintln(os.Stderr, "missing required flag: --tx-hex")
-			os.Exit(2)
-		}
-		if err := cmdTxID(*txHex); err != nil {
-			fmt.Fprintln(os.Stderr, "txid error:", err)
-			os.Exit(1)
-		}
+		exitCode = cmdTxIDMain(argv)
 	case "sighash":
-		fs := flag.NewFlagSet("sighash", flag.ExitOnError)
-		profile := fs.String("profile", "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md", "chain instance profile path")
-		chainIDHex := fs.String("chain-id-hex", "", "override chain_id (64 hex chars)")
-		txHex := fs.String("tx-hex", "", "transaction hex bytes (TxBytes)")
-		inputIndex := fs.Uint("input-index", 0, "0-based input index")
-		inputValue := fs.Uint64("input-value", 0, "input UTXO value (u64)")
-		_ = fs.Parse(os.Args[2:])
-		if *txHex == "" {
-			fmt.Fprintln(os.Stderr, "missing required flag: --tx-hex")
-			os.Exit(2)
-		}
-		if uint64(*inputIndex) > uint64(^uint32(0)) {
-			fmt.Fprintln(os.Stderr, "input-index exceeds 32-bit bound")
-			os.Exit(2)
-		}
-
-		if *chainIDHex != "" && hasFlagArg(os.Args[2:], "profile") {
-			fmt.Fprintln(os.Stderr, "use exactly one of --chain-id-hex or --profile")
-			os.Exit(2)
-		}
-
-		var chainID [32]byte
-		if *chainIDHex != "" {
-			parsed, err := parseChainIDHex(*chainIDHex)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(2)
-			}
-			chainID = parsed
-		} else {
-			p, cleanup, err := loadCryptoProvider()
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
-			}
-			defer cleanup()
-			derived, err := deriveChainID(p, *profile)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "sighash error:", err)
-				os.Exit(1)
-			}
-			chainID = derived
-		}
-
-		if err := cmdSighash(chainID, *txHex, uint32(*inputIndex) /* #nosec G115 -- inputIndex is bounded above by uint32 max */, *inputValue); err != nil {
-			fmt.Fprintln(os.Stderr, "sighash error:", err)
-			os.Exit(1)
-		}
+		exitCode = cmdSighashMain(argv)
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command")
-		fmt.Fprintln(os.Stderr, "commands: version | chain-id --profile <path> | txid --tx-hex <hex> | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>]")
-		os.Exit(2)
+		printUsage()
+		exitCode = 2
+	}
+	if exitCode != 0 {
+		os.Exit(exitCode)
 	}
 }
