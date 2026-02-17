@@ -1294,7 +1294,7 @@ RETL/L2 note:
 ## 15. Network and Light-Client Interface (Normative)
 
 1. Node peers MUST implement peer discovery and peer-version handshake sufficient to exchange:
-   - `version`, `verack`, `wtxid`, `ping`, `pong`,
+   - `version`, `verack`, `wtxid` (relayed via `inv/getdata` `inv_type = 2`), `ping`, `pong`,
    - headers, compact headers, inv/msg getdata, blocks, and txs.
 2. `BlockHeader` wire is shared by all peers; chain state is validated with PoW, difficulty, and header chain rules.
 3. SPV validation requires proof of inclusion as:
@@ -1306,7 +1306,7 @@ RETL/L2 note:
 5. Peer discovery is non-consensus and at minimum supports address relay and stale-peer eviction.
 6. A node MUST reject oversized protocol messages above negotiated caps from network policy to resist DoS.
 7. Handshake message MUST include:
-   - `magic` (network domain separation),
+   - network magic via the 24-byte transport prefix (magic is not duplicated in the version payload),
    - `protocol_version`,
    - `chain_id`,
    - `peer_services`.
