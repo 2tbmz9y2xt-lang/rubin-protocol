@@ -48,7 +48,7 @@ COSIGN_EXPERIMENTAL=1 COSIGN_YES=true cosign verify-blob \
   --certificate-identity-regexp '^https://github.com/2tbmz9y2xt-lang/rubin-protocol/.github/workflows/wolfcrypt-build.yml@refs/(heads/.+|pull/.+/.+)$' \
   "${SUMS}"
 
-echo "cosign verification OK for ${SUMS}"
+echo "cosign verification OK for ${SUMS}" >&2
 
 if [ -n "${SHIM}" ]; then
   if [ ! -f "${SHIM}" ]; then
@@ -61,7 +61,7 @@ if [ -n "${SHIM}" ]; then
     echo "hash mismatch for ${name}: ${HASH} not in ${SUMS}" >&2
     exit 1
   fi
-  echo "hash match: ${name} ${HASH}"
+  echo "hash match: ${name} ${HASH}" >&2
   if [ ${EXPORT} -eq 1 ]; then
     echo "export RUBIN_WOLFCRYPT_SHIM_PATH=\"${SHIM}\""
     echo "export RUBIN_WOLFCRYPT_SHIM_SHA3_256=${HASH}"
