@@ -27,9 +27,9 @@ CC=gcc-12 \
 ./scripts/wolfcrypt-build.sh
 ```
 
-If your local `scripts/wolfcrypt-build.sh` is unavailable, run the identical workflow step from:
-`.github/workflows/wolfcrypt-build.yml`
-(same env vars and commands).
+If your local `scripts/wolfcrypt-build.sh` is unavailable, use the same
+env vars/commands as listed in the command block and keep the toolchain versions
+explicitly pinned in your local build environment.
 
 Defaults (if env vars omitted):
 

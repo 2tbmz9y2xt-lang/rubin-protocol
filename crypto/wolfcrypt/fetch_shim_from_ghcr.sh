@@ -33,7 +33,7 @@ if ! command -v cosign >/dev/null 2>&1; then
 fi
 
 mkdir -p "${OUTDIR}"
-oras pull "${REF}" -o "${OUTDIR}"
+oras pull "${REF}" -o "${OUTDIR}" >&2
 
 SUMS=$(find "${OUTDIR}" -type f -name "SHA3SUMS.txt" | sort | head -n1 || true)
 if [ -z "${SUMS}" ]; then

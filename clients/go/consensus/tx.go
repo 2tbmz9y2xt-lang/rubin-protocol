@@ -1,11 +1,119 @@
 package consensus
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math/big"
+	"sort"
 
 	"rubin.dev/node/crypto"
 )
+
+const (
+	CORE_P2PK            = 0x0000
+	CORE_TIMELOCK_V1     = 0x0001
+	CORE_ANCHOR          = 0x0002
+	CORE_HTLC_V1         = 0x0100
+	CORE_VAULT_V1        = 0x0101
+	CORE_RESERVED_FUTURE = 0x00ff
+
+	MAX_BLOCK_WEIGHT           = 4_000_000
+	MAX_ANCHOR_BYTES_PER_BLOCK = 131_072
+	MAX_ANCHOR_PAYLOAD_SIZE    = 65_536
+	WINDOW_SIZE                = 2_016
+	TARGET_BLOCK_INTERVAL      = 600
+	MAX_FUTURE_DRIFT           = 7_200
+	BLOCK_SUBSIDY_INITIAL      = 50_0000_0000
+	COINBASE_MATURITY          = 100
+	SUBSIDY_HALVING_INTERVAL   = 210_000
+	MAX_SUPPLY                 = 2_100_000_000_000_000
+	VERIFY_COST_ML_DSA         = 8
+	VERIFY_COST_SLH_DSA        = 64
+
+	MAX_TX_INPUTS     = 1_024
+	MAX_TX_OUTPUTS    = 1_024
+	MAX_WITNESS_ITEMS = 1_024
+
+	SUITE_ID_SENTINEL     = 0x00
+	SUITE_ID_ML_DSA       = 0x01
+	SUITE_ID_SLH_DSA      = 0x02
+	ML_DSA_PUBKEY_BYTES   = 2592
+	ML_DSA_SIG_BYTES      = 4_627
+	SLH_DSA_PUBKEY_BYTES  = 64
+	SLH_DSA_SIG_MAX_BYTES = 49_856
+
+	TIMELOCK_MODE_HEIGHT    = 0x00
+	TIMELOCK_MODE_TIMESTAMP = 0x01
+)
+
+const (
+	TX_NONCE_ZERO            = 0
+	TX_MAX_SEQUENCE          = 0x7fffffff
+	TX_COINBASE_PREVOUT_VOUT = ^uint32(0)
+	TX_ERR_NONCE_REPLAY      = "TX_ERR_NONCE_REPLAY"
+	TX_ERR_TX_NONCE_INVALID  = "TX_ERR_TX_NONCE_INVALID"
+	TX_ERR_SEQUENCE_INVALID  = "TX_ERR_SEQUENCE_INVALID"
+	TX_ERR_COINBASE_IMMATURE = "TX_ERR_COINBASE_IMMATURE"
+	TX_ERR_MISSING_UTXO      = "TX_ERR_MISSING_UTXO"
+)
+
+var MAX_TARGET = [32]byte{
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+}
+
+var maxTargetBig = new(big.Int).SetBytes(MAX_TARGET[:])
+
+var targetBlockIntervalBig = big.NewInt(TARGET_BLOCK_INTERVAL * WINDOW_SIZE)
+
+type BlockHeader struct {
+	Version       uint32
+	PrevBlockHash [32]byte
+	MerkleRoot    [32]byte
+	Timestamp     uint64
+	Target        [32]byte
+	Nonce         uint64
+}
+
+type Block struct {
+	Header       BlockHeader
+	Transactions []Tx
+}
+
+// BlockValidationContext captures chain and validation settings used by ApplyBlock.
+// AncestorHeaders must be ordered from oldest to newest and include the parent block
+// of Header as the last entry when available.
+type BlockValidationContext struct {
+	Height           uint64
+	AncestorHeaders  []BlockHeader
+	LocalTime        uint64
+	LocalTimeSet     bool
+	SuiteIDSLHActive bool
+}
+
+const (
+	BLOCK_ERR_PARSE                 = "BLOCK_ERR_PARSE"
+	BLOCK_ERR_LINKAGE_INVALID       = "BLOCK_ERR_LINKAGE_INVALID"
+	BLOCK_ERR_POW_INVALID           = "BLOCK_ERR_POW_INVALID"
+	BLOCK_ERR_TARGET_INVALID        = "BLOCK_ERR_TARGET_INVALID"
+	BLOCK_ERR_MERKLE_INVALID        = "BLOCK_ERR_MERKLE_INVALID"
+	BLOCK_ERR_WEIGHT_EXCEEDED       = "BLOCK_ERR_WEIGHT_EXCEEDED"
+	BLOCK_ERR_COINBASE_INVALID      = "BLOCK_ERR_COINBASE_INVALID"
+	BLOCK_ERR_SUBSIDY_EXCEEDED      = "BLOCK_ERR_SUBSIDY_EXCEEDED"
+	BLOCK_ERR_TIMESTAMP_OLD         = "BLOCK_ERR_TIMESTAMP_OLD"
+	BLOCK_ERR_TIMESTAMP_FUTURE      = "BLOCK_ERR_TIMESTAMP_FUTURE"
+	BLOCK_ERR_ANCHOR_BYTES_EXCEEDED = "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED"
+	BLOCK_ERR_MINTING               = "BLOCK_ERR_MINTING"
+)
+
+type blockWeightError struct {
+	code string
+}
+
+func (e blockWeightError) Error() string { return e.code }
 
 type Tx struct {
 	Version  uint32
@@ -14,6 +122,11 @@ type Tx struct {
 	Outputs  []TxOutput
 	Locktime uint32
 	Witness  WitnessSection
+}
+
+type TxOutPoint struct {
+	TxID [32]byte
+	Vout uint32
 }
 
 type TxInput struct {
@@ -27,6 +140,12 @@ type TxOutput struct {
 	Value        uint64
 	CovenantType uint16
 	CovenantData []byte
+}
+
+type UtxoEntry struct {
+	Output            TxOutput
+	CreationHeight    uint64
+	CreatedByCoinbase bool
 }
 
 type WitnessSection struct {
@@ -339,6 +458,130 @@ func ParseTxBytes(b []byte) (*Tx, error) {
 	}, nil
 }
 
+func BlockHeaderBytes(header BlockHeader) []byte {
+	out := make([]byte, 0, 4+32+32+8+32+8)
+	var tmp4 [4]byte
+	var tmp8 [8]byte
+
+	binary.LittleEndian.PutUint32(tmp4[:], header.Version)
+	out = append(out, tmp4[:]...)
+	out = append(out, header.PrevBlockHash[:]...)
+	out = append(out, header.MerkleRoot[:]...)
+	binary.LittleEndian.PutUint64(tmp8[:], header.Timestamp)
+	out = append(out, tmp8[:]...)
+	out = append(out, header.Target[:]...)
+	binary.LittleEndian.PutUint64(tmp8[:], header.Nonce)
+	out = append(out, tmp8[:]...)
+	return out
+}
+
+func ParseBlockHeader(cur *cursor) (BlockHeader, error) {
+	version, err := cur.readU32LE()
+	if err != nil {
+		return BlockHeader{}, err
+	}
+	prev, err := cur.readExact(32)
+	if err != nil {
+		return BlockHeader{}, err
+	}
+	merkle, err := cur.readExact(32)
+	if err != nil {
+		return BlockHeader{}, err
+	}
+	timestamp, err := cur.readU64LE()
+	if err != nil {
+		return BlockHeader{}, err
+	}
+	target, err := cur.readExact(32)
+	if err != nil {
+		return BlockHeader{}, err
+	}
+	nonce, err := cur.readU64LE()
+	if err != nil {
+		return BlockHeader{}, err
+	}
+	var target32 [32]byte
+	copy(target32[:], target)
+	var prev32 [32]byte
+	copy(prev32[:], prev)
+	var merkle32 [32]byte
+	copy(merkle32[:], merkle)
+	return BlockHeader{
+		Version:       version,
+		PrevBlockHash: prev32,
+		MerkleRoot:    merkle32,
+		Timestamp:     timestamp,
+		Target:        target32,
+		Nonce:         nonce,
+	}, nil
+}
+
+func ParseBlockBytes(b []byte) (Block, error) {
+	cur := newCursor(b)
+	header, err := ParseBlockHeader(cur)
+	if err != nil {
+		return Block{}, err
+	}
+	txCountU64, err := cur.readCompactSize()
+	if err != nil {
+		return Block{}, err
+	}
+	txCount, err := toIntLen(txCountU64, "tx_count")
+	if err != nil {
+		return Block{}, err
+	}
+	txs := make([]Tx, 0, txCount)
+	for i := 0; i < txCount; i++ {
+		tx, err := ParseTxBytesFromCursor(cur)
+		if err != nil {
+			return Block{}, err
+		}
+		txs = append(txs, *tx)
+	}
+	if cur.pos != len(b) {
+		return Block{}, fmt.Errorf("BLOCK_ERR_PARSE")
+	}
+	return Block{
+		Header:       header,
+		Transactions: txs,
+	}, nil
+}
+
+func ParseTxBytesFromCursor(cur *cursor) (*Tx, error) {
+	version, err := cur.readU32LE()
+	if err != nil {
+		return nil, err
+	}
+	txNonce, err := cur.readU64LE()
+	if err != nil {
+		return nil, err
+	}
+	inputs, err := parseInputList(cur)
+	if err != nil {
+		return nil, err
+	}
+	outputs, err := parseOutputList(cur)
+	if err != nil {
+		return nil, err
+	}
+	locktime, err := cur.readU32LE()
+	if err != nil {
+		return nil, err
+	}
+	witnesses, err := parseWitnessList(cur)
+	if err != nil {
+		return nil, err
+	}
+	return &Tx{
+		Version:  version,
+		TxNonce:  txNonce,
+		Inputs:   inputs,
+		Outputs:  outputs,
+		Locktime: locktime,
+		Witness:  WitnessSection{Witnesses: witnesses},
+	}, nil
+}
+
 func TxOutputBytes(o TxOutput) []byte {
 	out := make([]byte, 0, 8+2+9+len(o.CovenantData))
 	var tmp8 [8]byte
@@ -407,8 +650,382 @@ func TxBytes(tx *Tx) []byte {
 	return out
 }
 
+func BlockBytes(block *Block) []byte {
+	out := make([]byte, 0, 64)
+	out = append(out, BlockHeaderBytes(block.Header)...)
+	out = append(out, CompactSize(len(block.Transactions)).Encode()...)
+	for _, tx := range block.Transactions {
+		out = append(out, TxBytes(&tx)...)
+	}
+	return out
+}
+
+func TxWeight(tx *Tx) (uint64, error) {
+	base := len(TxNoWitnessBytes(tx))
+	witness := len(WitnessBytes(tx.Witness))
+	base = base * 4
+	sigCost := 0
+	for i, item := range tx.Witness.Witnesses {
+		if i < len(tx.Inputs) {
+			switch item.SuiteID {
+			case SUITE_ID_ML_DSA:
+				sigCost += VERIFY_COST_ML_DSA
+			case SUITE_ID_SLH_DSA:
+				sigCost += VERIFY_COST_SLH_DSA
+			}
+		}
+	}
+	total, err := addUint64(uint64(base), uint64(witness))
+	if err != nil {
+		return 0, fmt.Errorf("TX_ERR_PARSE")
+	}
+	return addUint64(total, uint64(sigCost))
+}
+
+func blockHeaderHash(p crypto.CryptoProvider, header *BlockHeader) [32]byte {
+	out := BlockHeaderBytes(*header)
+	return p.SHA3_256(out)
+}
+
+func blockRewardForHeight(height uint64) uint64 {
+	epoch := height / SUBSIDY_HALVING_INTERVAL
+	if epoch > 33 {
+		return 0
+	}
+	reward := uint64(BLOCK_SUBSIDY_INITIAL)
+	for i := uint64(0); i < epoch; i++ {
+		reward /= 2
+	}
+	return reward
+}
+
+func medianPastTimestamp(headers []BlockHeader, height uint64) (uint64, error) {
+	if height == 0 {
+		return 0, fmt.Errorf(BLOCK_ERR_TIMESTAMP_OLD)
+	}
+	if len(headers) == 0 {
+		return 0, fmt.Errorf(BLOCK_ERR_TIMESTAMP_OLD)
+	}
+
+	k := uint64(11)
+	if height < k {
+		k = height
+	}
+	limit := int(k)
+	if len(headers) < limit {
+		limit = len(headers)
+	}
+	timestamps := make([]uint64, limit)
+	for i := 0; i < limit; i++ {
+		timestamps[i] = headers[len(headers)-1-i].Timestamp
+	}
+	sort.Slice(timestamps, func(i, j int) bool {
+		return timestamps[i] < timestamps[j]
+	})
+	return timestamps[(len(timestamps)-1)/2], nil
+}
+
+func blockExpectedTarget(headers []BlockHeader, height uint64, targetIn [32]byte) ([32]byte, error) {
+	if height == 0 {
+		return targetIn, nil
+	}
+	if len(headers) == 0 {
+		return [32]byte{}, fmt.Errorf(BLOCK_ERR_TARGET_INVALID)
+	}
+
+	targetOld := new(big.Int).SetBytes(headers[len(headers)-1].Target[:])
+	if int(height%WINDOW_SIZE) != 0 {
+		var target [32]byte
+		targetOld.FillBytes(target[:])
+		return target, nil
+	}
+
+	if len(headers) < WINDOW_SIZE {
+		return [32]byte{}, fmt.Errorf(BLOCK_ERR_TARGET_INVALID)
+	}
+
+	first := headers[len(headers)-WINDOW_SIZE].Timestamp
+	last := headers[len(headers)-1].Timestamp
+	tActual := new(big.Int)
+	if last >= first {
+		tActual.SetUint64(last - first)
+	} else {
+		tActual.SetInt64(1)
+	}
+
+	targetNew := new(big.Int).Mul(targetOld, tActual)
+	targetNew.Quo(targetNew, targetBlockIntervalBig)
+
+	minTarget := new(big.Int).Quo(targetOld, big.NewInt(4))
+	if minTarget.Sign() == 0 {
+		minTarget = big.NewInt(1)
+	}
+	maxTarget := new(big.Int).Mul(targetOld, big.NewInt(4))
+
+	if targetNew.Cmp(minTarget) < 0 {
+		targetNew = minTarget
+	}
+	if targetNew.Cmp(maxTarget) > 0 {
+		targetNew = maxTarget
+	}
+
+	var expected [32]byte
+	targetNew.FillBytes(expected[:])
+	return expected, nil
+}
+
+func txSums(tx *Tx, utxo map[TxOutPoint]UtxoEntry) (uint64, uint64, error) {
+	var inputSum uint64
+	var outputSum uint64
+	for _, input := range tx.Inputs {
+		prev := TxOutPoint{
+			TxID: input.PrevTxid,
+			Vout: input.PrevVout,
+		}
+		entry, ok := utxo[prev]
+		if !ok {
+			return 0, 0, fmt.Errorf(TX_ERR_MISSING_UTXO)
+		}
+		var err error
+		inputSum, err = addUint64(inputSum, entry.Output.Value)
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+	for _, output := range tx.Outputs {
+		var err error
+		outputSum, err = addUint64(outputSum, output.Value)
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+	return inputSum, outputSum, nil
+}
+
+func subUint64(a, b uint64) (uint64, error) {
+	if b > a {
+		return 0, fmt.Errorf("TX_ERR_VALUE_CONSERVATION")
+	}
+	return a - b, nil
+}
+
+// ApplyBlock validates all block-level consensus rules for block B and mutates utxo on success.
+// On error, utxo is not modified.
+func ApplyBlock(
+	p crypto.CryptoProvider,
+	chainID [32]byte,
+	block *Block,
+	utxo map[TxOutPoint]UtxoEntry,
+	ctx BlockValidationContext,
+) error {
+	if block == nil || len(block.Transactions) == 0 {
+		return fmt.Errorf(BLOCK_ERR_COINBASE_INVALID)
+	}
+
+	if ctx.Height > 0 && len(ctx.AncestorHeaders) == 0 {
+		return fmt.Errorf(BLOCK_ERR_LINKAGE_INVALID)
+	}
+
+	if ctx.Height == 0 {
+		var zero [32]byte
+		if block.Header.PrevBlockHash != zero {
+			return fmt.Errorf(BLOCK_ERR_LINKAGE_INVALID)
+		}
+	} else {
+		parent := ctx.AncestorHeaders[len(ctx.AncestorHeaders)-1]
+		if block.Header.PrevBlockHash != blockHeaderHash(p, &parent) {
+			return fmt.Errorf(BLOCK_ERR_LINKAGE_INVALID)
+		}
+	}
+
+	expectedTarget, err := blockExpectedTarget(ctx.AncestorHeaders, ctx.Height, block.Header.Target)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(block.Header.Target[:], expectedTarget[:]) {
+		return fmt.Errorf(BLOCK_ERR_TARGET_INVALID)
+	}
+
+	blockHash := blockHeaderHash(p, &block.Header)
+	if bytes.Compare(blockHash[:], block.Header.Target[:]) >= 0 {
+		return fmt.Errorf(BLOCK_ERR_POW_INVALID)
+	}
+
+	headerTxs := make([]*Tx, len(block.Transactions))
+	for i := range block.Transactions {
+		headerTxs[i] = &block.Transactions[i]
+	}
+	merkleRoot, err := merkleRootTxIDs(p, headerTxs)
+	if err != nil {
+		return fmt.Errorf(BLOCK_ERR_MERKLE_INVALID)
+	}
+	if merkleRoot != block.Header.MerkleRoot {
+		return fmt.Errorf(BLOCK_ERR_MERKLE_INVALID)
+	}
+
+	if ctx.Height > 0 {
+		medianTs, err := medianPastTimestamp(ctx.AncestorHeaders, ctx.Height)
+		if err != nil {
+			return err
+		}
+		if block.Header.Timestamp <= medianTs {
+			return fmt.Errorf(BLOCK_ERR_TIMESTAMP_OLD)
+		}
+		if ctx.LocalTimeSet && block.Header.Timestamp > ctx.LocalTime+MAX_FUTURE_DRIFT {
+			return fmt.Errorf(BLOCK_ERR_TIMESTAMP_FUTURE)
+		}
+	}
+
+	coinbaseCount := 0
+	for i := range block.Transactions {
+		if isCoinbaseTx(&block.Transactions[i], ctx.Height) {
+			coinbaseCount++
+			if i != 0 {
+				return fmt.Errorf(BLOCK_ERR_COINBASE_INVALID)
+			}
+		}
+	}
+	if coinbaseCount != 1 {
+		return fmt.Errorf(BLOCK_ERR_COINBASE_INVALID)
+	}
+
+	workingUTXO := make(map[TxOutPoint]UtxoEntry, len(utxo))
+	for point, entry := range utxo {
+		workingUTXO[point] = entry
+	}
+
+	var totalWeight uint64
+	var totalAnchorBytes uint64
+	var totalFees uint64
+	seenNonces := make(map[uint64]struct{}, len(block.Transactions))
+
+	for _, tx := range block.Transactions {
+		weight, err := TxWeight(&tx)
+		if err != nil {
+			return err
+		}
+		totalWeight, err = addUint64(totalWeight, weight)
+		if err != nil {
+			return err
+		}
+
+		isCoinbase := isCoinbaseTx(&tx, ctx.Height)
+		if !isCoinbase {
+			if _, exists := seenNonces[tx.TxNonce]; exists {
+				return fmt.Errorf(TX_ERR_NONCE_REPLAY)
+			}
+			seenNonces[tx.TxNonce] = struct{}{}
+		}
+
+		if err := ApplyTx(p, chainID, &tx, workingUTXO, ctx.Height, block.Header.Timestamp, ctx.SuiteIDSLHActive); err != nil {
+			return err
+		}
+
+		if !isCoinbase {
+			inputSum, outputSum, err := txSums(&tx, workingUTXO)
+			if err != nil {
+				return err
+			}
+			fee, err := subUint64(inputSum, outputSum)
+			if err != nil {
+				return err
+			}
+			totalFees, err = addUint64(totalFees, fee)
+			if err != nil {
+				return err
+			}
+			for _, input := range tx.Inputs {
+				delete(workingUTXO, TxOutPoint{TxID: input.PrevTxid, Vout: input.PrevVout})
+			}
+		}
+
+		txID := TxID(p, &tx)
+		for i, output := range tx.Outputs {
+			if output.CovenantType == CORE_ANCHOR {
+				totalAnchorBytes, err = addUint64(totalAnchorBytes, uint64(len(output.CovenantData)))
+				if err != nil {
+					return err
+				}
+			}
+			workingUTXO[TxOutPoint{TxID: txID, Vout: uint32(i)}] = UtxoEntry{
+				Output:            output,
+				CreationHeight:    ctx.Height,
+				CreatedByCoinbase: isCoinbase,
+			}
+		}
+	}
+
+	if totalWeight > MAX_BLOCK_WEIGHT {
+		return fmt.Errorf(BLOCK_ERR_WEIGHT_EXCEEDED)
+	}
+	if totalAnchorBytes > MAX_ANCHOR_BYTES_PER_BLOCK {
+		return fmt.Errorf(BLOCK_ERR_ANCHOR_BYTES_EXCEEDED)
+	}
+
+	var coinbaseValue uint64
+	for _, output := range block.Transactions[0].Outputs {
+		var err error
+		coinbaseValue, err = addUint64(coinbaseValue, output.Value)
+		if err != nil {
+			return err
+		}
+	}
+	maxCoinbase, err := addUint64(blockRewardForHeight(ctx.Height), totalFees)
+	if err != nil {
+		return err
+	}
+	if coinbaseValue > maxCoinbase {
+		return fmt.Errorf(BLOCK_ERR_SUBSIDY_EXCEEDED)
+	}
+
+	for prev := range utxo {
+		delete(utxo, prev)
+	}
+	for point, entry := range workingUTXO {
+		utxo[point] = entry
+	}
+	return nil
+}
+
+func merkleRootTxIDs(p crypto.CryptoProvider, txs []*Tx) ([32]byte, error) {
+	if len(txs) == 0 {
+		return [32]byte{}, fmt.Errorf("BLOCK_ERR_MERKLE_INVALID")
+	}
+	level := make([][32]byte, 0, len(txs))
+	for _, tx := range txs {
+		level = append(level, TxID(p, tx))
+	}
+	for len(level) > 1 {
+		next := make([][32]byte, 0, (len(level)+1)/2)
+		for i := 0; i < len(level); i += 2 {
+			if i+1 == len(level) {
+				next = append(next, level[i])
+				continue
+			}
+			concat := make([]byte, 0, 1+len(level[i])+len(level[i+1]))
+			concat = append(concat, 0x01)
+			concat = append(concat, level[i][:]...)
+			concat = append(concat, level[i+1][:]...)
+			next = append(next, p.SHA3_256(concat))
+		}
+		level = next
+	}
+	return level[0], nil
+}
+
+func txidFromTx(p crypto.CryptoProvider, tx *Tx) [32]byte {
+	return TxID(p, tx)
+}
+
 func TxID(p crypto.CryptoProvider, tx *Tx) [32]byte {
 	return p.SHA3_256(TxNoWitnessBytes(tx))
+}
+
+func addUint64(a, b uint64) (uint64, error) {
+	if b > (^uint64(0) - a) {
+		return 0, fmt.Errorf("TX_ERR_PARSE")
+	}
+	return a + b, nil
 }
 
 func SighashV1Digest(
@@ -481,4 +1098,416 @@ func SighashV1Digest(
 	preimage = append(preimage, tmp4[:]...)
 
 	return p.SHA3_256(preimage), nil
+}
+
+func parseU64LE(v []byte, start int, name string) (uint64, error) {
+	if start+8 > len(v) {
+		return 0, fmt.Errorf("parse: %s truncated", name)
+	}
+	var tmp [8]byte
+	copy(tmp[:], v[start:start+8])
+	return binary.LittleEndian.Uint64(tmp[:]), nil
+}
+
+func isZeroOutPoint(prevout TxOutPoint) bool {
+	return prevout.TxID == ([32]byte{}) && prevout.Vout == TX_COINBASE_PREVOUT_VOUT
+}
+
+func isCoinbaseTx(tx *Tx, blockHeight uint64) bool {
+	if tx == nil {
+		return false
+	}
+	if len(tx.Inputs) != 1 {
+		return false
+	}
+	if uint64(tx.Locktime) != blockHeight {
+		return false
+	}
+	if tx.TxNonce != 0 {
+		return false
+	}
+	if len(tx.Witness.Witnesses) != 0 {
+		return false
+	}
+	txin := tx.Inputs[0]
+	return isZeroOutPoint(TxOutPoint{TxID: txin.PrevTxid, Vout: txin.PrevVout}) &&
+		txin.Sequence == TX_COINBASE_PREVOUT_VOUT &&
+		len(txin.ScriptSig) == 0
+}
+
+func validateOutputCovenantConstraints(output TxOutput) error {
+	switch output.CovenantType {
+	case CORE_P2PK:
+		if len(output.CovenantData) != 33 {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+	case CORE_TIMELOCK_V1:
+		if len(output.CovenantData) != 9 {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+	case CORE_ANCHOR:
+		if output.Value != 0 {
+			return fmt.Errorf("TX_ERR_COVENANT_TYPE_INVALID")
+		}
+		if len(output.CovenantData) == 0 || len(output.CovenantData) > MAX_ANCHOR_PAYLOAD_SIZE {
+			return fmt.Errorf("TX_ERR_COVENANT_TYPE_INVALID")
+		}
+	case CORE_HTLC_V1:
+		if len(output.CovenantData) != 105 {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+	case CORE_VAULT_V1:
+		if len(output.CovenantData) != 73 {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+	case CORE_RESERVED_FUTURE:
+		return fmt.Errorf("TX_ERR_COVENANT_TYPE_INVALID")
+	default:
+		return fmt.Errorf("TX_ERR_COVENANT_TYPE_INVALID")
+	}
+	return nil
+}
+
+func validateCoinbaseTxInputs(tx *Tx) error {
+	if tx.TxNonce != 0 {
+		return fmt.Errorf("TX_ERR_COINBASE_INVALID")
+	}
+	if len(tx.Inputs) != 1 {
+		return fmt.Errorf("TX_ERR_COINBASE_INVALID")
+	}
+	in := tx.Inputs[0]
+	if in.Sequence != TX_COINBASE_PREVOUT_VOUT {
+		return fmt.Errorf("TX_ERR_COINBASE_INVALID")
+	}
+	if in.PrevTxid != ([32]byte{}) || in.PrevVout != TX_COINBASE_PREVOUT_VOUT {
+		return fmt.Errorf("TX_ERR_COINBASE_INVALID")
+	}
+	if len(in.ScriptSig) != 0 {
+		return fmt.Errorf("TX_ERR_COINBASE_INVALID")
+	}
+	if len(tx.Witness.Witnesses) != 0 {
+		return fmt.Errorf("TX_ERR_COINBASE_INVALID")
+	}
+	return nil
+}
+
+func isScriptSigZeroLen(itemName string, scriptSigLen int) error {
+	if scriptSigLen != 0 {
+		return fmt.Errorf("parse: %s script_sig must be empty", itemName)
+	}
+	return nil
+}
+
+func validateHTLCScriptSigLen(scriptSigLen int) error {
+	switch scriptSigLen {
+	case 0, 32:
+		return nil
+	default:
+		return fmt.Errorf("TX_ERR_PARSE")
+	}
+}
+
+func ApplyTx(
+	p crypto.CryptoProvider,
+	chainID [32]byte,
+	tx *Tx,
+	utxo map[TxOutPoint]UtxoEntry,
+	chainHeight uint64,
+	chainTimestamp uint64,
+	suiteIDSLHActive bool,
+) error {
+	if tx == nil {
+		return fmt.Errorf("TX_ERR_PARSE")
+	}
+	if len(tx.Inputs) > MAX_TX_INPUTS || len(tx.Outputs) > MAX_TX_OUTPUTS || len(tx.Witness.Witnesses) > MAX_WITNESS_ITEMS {
+		return fmt.Errorf("TX_ERR_PARSE")
+	}
+
+	if isCoinbaseTx(tx, chainHeight) {
+		if err := validateCoinbaseTxInputs(tx); err != nil {
+			return err
+		}
+		for _, output := range tx.Outputs {
+			if err := validateOutputCovenantConstraints(output); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if tx.TxNonce == TX_NONCE_ZERO {
+		return fmt.Errorf(TX_ERR_TX_NONCE_INVALID)
+	}
+	if len(tx.Inputs) != len(tx.Witness.Witnesses) {
+		return fmt.Errorf("TX_ERR_PARSE")
+	}
+
+	for _, output := range tx.Outputs {
+		if err := validateOutputCovenantConstraints(output); err != nil {
+			return err
+		}
+	}
+
+	seen := make(map[TxOutPoint]struct{}, len(tx.Inputs))
+	var totalInputs uint64
+	var totalOutputs uint64
+
+	for i, input := range tx.Inputs {
+		if input.Sequence == TX_COINBASE_PREVOUT_VOUT || input.Sequence > TX_MAX_SEQUENCE {
+			return fmt.Errorf(TX_ERR_SEQUENCE_INVALID)
+		}
+
+		prevout := TxOutPoint{
+			TxID: input.PrevTxid,
+			Vout: input.PrevVout,
+		}
+		if isZeroOutPoint(prevout) {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+		if _, dup := seen[prevout]; dup {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+		seen[prevout] = struct{}{}
+
+		prevEntry, ok := utxo[prevout]
+		if !ok {
+			return fmt.Errorf("TX_ERR_MISSING_UTXO")
+		}
+		if err := ValidateInputAuthorization(
+			p,
+			chainID,
+			tx,
+			uint32(i),
+			prevEntry.Output.Value,
+			&prevEntry.Output,
+			chainHeight,
+			chainTimestamp,
+			suiteIDSLHActive,
+		); err != nil {
+			return err
+		}
+		if prevEntry.CreatedByCoinbase && chainHeight < prevEntry.CreationHeight+COINBASE_MATURITY {
+			return fmt.Errorf(TX_ERR_COINBASE_IMMATURE)
+		}
+
+		var sumErr error
+		totalInputs, sumErr = addUint64(totalInputs, prevEntry.Output.Value)
+		if sumErr != nil {
+			return sumErr
+		}
+	}
+
+	for _, output := range tx.Outputs {
+		var sumErr error
+		totalOutputs, sumErr = addUint64(totalOutputs, output.Value)
+		if sumErr != nil {
+			return sumErr
+		}
+	}
+	if totalOutputs > totalInputs {
+		return fmt.Errorf("TX_ERR_VALUE_CONSERVATION")
+	}
+	return nil
+}
+
+func checkWitnessFormat(item WitnessItem, suiteIDSLHActive bool) error {
+	switch item.SuiteID {
+	case SUITE_ID_SENTINEL:
+		if len(item.Pubkey) != 0 || len(item.Signature) != 0 {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+		return nil
+	case SUITE_ID_ML_DSA:
+		if len(item.Pubkey) != ML_DSA_PUBKEY_BYTES || len(item.Signature) != ML_DSA_SIG_BYTES {
+			return fmt.Errorf("TX_ERR_SIG_NONCANONICAL")
+		}
+		return nil
+	case SUITE_ID_SLH_DSA:
+		if !suiteIDSLHActive {
+			return fmt.Errorf("TX_ERR_DEPLOYMENT_INACTIVE")
+		}
+		if len(item.Pubkey) != SLH_DSA_PUBKEY_BYTES || len(item.Signature) == 0 || len(item.Signature) > SLH_DSA_SIG_MAX_BYTES {
+			return fmt.Errorf("TX_ERR_SIG_NONCANONICAL")
+		}
+		return nil
+	default:
+		return fmt.Errorf("TX_ERR_SIG_ALG_INVALID")
+	}
+}
+
+func satisfyLock(lockMode byte, lockValue, height, timestamp uint64) error {
+	switch lockMode {
+	case TIMELOCK_MODE_HEIGHT:
+		if height >= lockValue {
+			return nil
+		}
+		return fmt.Errorf("TX_ERR_TIMELOCK_NOT_MET")
+	case TIMELOCK_MODE_TIMESTAMP:
+		if timestamp >= lockValue {
+			return nil
+		}
+		return fmt.Errorf("TX_ERR_TIMELOCK_NOT_MET")
+	default:
+		return fmt.Errorf("TX_ERR_PARSE")
+	}
+}
+
+func ValidateInputAuthorization(
+	p crypto.CryptoProvider,
+	chainID [32]byte,
+	tx *Tx,
+	inputIndex uint32,
+	prevValue uint64,
+	prevout *TxOutput,
+	chainHeight uint64,
+	chainTimestamp uint64,
+	suiteIDSLHActive bool,
+) error {
+	if int(inputIndex) >= len(tx.Inputs) {
+		return fmt.Errorf("TX_ERR_PARSE")
+	}
+	if int(inputIndex) >= len(tx.Witness.Witnesses) {
+		return fmt.Errorf("TX_ERR_PARSE")
+	}
+	if prevout == nil {
+		return fmt.Errorf("TX_ERR_PARSE")
+	}
+
+	inputIndexInt, err := u32ToInt(inputIndex, "input_index", len(tx.Inputs))
+	if err != nil {
+		return err
+	}
+	input := tx.Inputs[inputIndexInt]
+	witness := tx.Witness.Witnesses[inputIndexInt]
+
+	switch prevout.CovenantType {
+	case CORE_P2PK:
+		if err := isScriptSigZeroLen("CORE_P2PK", len(input.ScriptSig)); err != nil {
+			return err
+		}
+		if err := checkWitnessFormat(witness, suiteIDSLHActive); err != nil {
+			return err
+		}
+
+		if len(prevout.CovenantData) != 33 {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+		suiteID := prevout.CovenantData[0]
+		if suiteID != witness.SuiteID {
+			return fmt.Errorf("TX_ERR_SIG_INVALID")
+		}
+		actualKeyID := p.SHA3_256(witness.Pubkey)
+		if expected := prevout.CovenantData[1:33]; !bytes.Equal(actualKeyID[:], expected) {
+			return fmt.Errorf("TX_ERR_SIG_INVALID")
+		}
+	case CORE_TIMELOCK_V1:
+		if err := isScriptSigZeroLen("CORE_TIMELOCK_V1", len(input.ScriptSig)); err != nil {
+			return err
+		}
+		if witness.SuiteID != SUITE_ID_SENTINEL {
+			return fmt.Errorf("TX_ERR_SIG_ALG_INVALID")
+		}
+		if len(prevout.CovenantData) != 9 {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+		lockMode := prevout.CovenantData[0]
+		lockValue, err := parseU64LE(prevout.CovenantData, 1, "covenant_lock_value")
+		if err != nil {
+			return err
+		}
+		if err := satisfyLock(lockMode, lockValue, chainHeight, chainTimestamp); err != nil {
+			return err
+		}
+	case CORE_HTLC_V1:
+		if err := validateHTLCScriptSigLen(len(input.ScriptSig)); err != nil {
+			return err
+		}
+		if err := checkWitnessFormat(witness, suiteIDSLHActive); err != nil {
+			return err
+		}
+		if len(prevout.CovenantData) != 105 {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+		lockMode := prevout.CovenantData[32]
+		lockValue, err := parseU64LE(prevout.CovenantData, 33, "htlc_lock_value")
+		if err != nil {
+			return err
+		}
+		if len(input.ScriptSig) == 32 {
+			expectedHash := prevout.CovenantData[:32]
+			scriptHash := p.SHA3_256(input.ScriptSig)
+			if !bytes.Equal(scriptHash[:], expectedHash) {
+				return fmt.Errorf("TX_ERR_SIG_INVALID")
+			}
+			expectedClaimKeyID := prevout.CovenantData[41:73]
+			actualKeyID := p.SHA3_256(witness.Pubkey)
+			if !bytes.Equal(actualKeyID[:], expectedClaimKeyID) {
+				return fmt.Errorf("TX_ERR_SIG_INVALID")
+			}
+		} else {
+			expectedRefundKeyID := prevout.CovenantData[73:105]
+			actualKeyID := p.SHA3_256(witness.Pubkey)
+			if !bytes.Equal(actualKeyID[:], expectedRefundKeyID) {
+				return fmt.Errorf("TX_ERR_SIG_INVALID")
+			}
+			if err := satisfyLock(lockMode, lockValue, chainHeight, chainTimestamp); err != nil {
+				return err
+			}
+		}
+	case CORE_VAULT_V1:
+		if err := isScriptSigZeroLen("CORE_VAULT_V1", len(input.ScriptSig)); err != nil {
+			return err
+		}
+		if err := checkWitnessFormat(witness, suiteIDSLHActive); err != nil {
+			return err
+		}
+		if len(prevout.CovenantData) != 73 {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+		lockMode := prevout.CovenantData[32]
+		lockValue, err := parseU64LE(prevout.CovenantData, 33, "vault_lock_value")
+		if err != nil {
+			return err
+		}
+		ownerKeyID := prevout.CovenantData[:32]
+		recoveryKeyID := prevout.CovenantData[41:73]
+		actualKeyID := p.SHA3_256(witness.Pubkey)
+		if !bytes.Equal(actualKeyID[:], ownerKeyID) && !bytes.Equal(actualKeyID[:], recoveryKeyID) {
+			return fmt.Errorf("TX_ERR_SIG_INVALID")
+		}
+		if bytes.Equal(actualKeyID[:], recoveryKeyID) {
+			if err := satisfyLock(lockMode, lockValue, chainHeight, chainTimestamp); err != nil {
+				return err
+			}
+		}
+	case CORE_ANCHOR:
+		return fmt.Errorf("TX_ERR_MISSING_UTXO")
+	case CORE_RESERVED_FUTURE:
+		return fmt.Errorf("TX_ERR_COVENANT_TYPE_INVALID")
+	default:
+		return fmt.Errorf("TX_ERR_COVENANT_TYPE_INVALID")
+	}
+
+	digest, err := SighashV1Digest(p, chainID, tx, inputIndex, prevValue)
+	if err != nil {
+		return err
+	}
+
+	switch witness.SuiteID {
+	case SUITE_ID_ML_DSA:
+		if p.VerifyMLDSA87(witness.Pubkey, witness.Signature, digest) {
+			return nil
+		}
+		return fmt.Errorf("TX_ERR_SIG_INVALID")
+	case SUITE_ID_SLH_DSA:
+		if p.VerifySLHDSASHAKE_256f(witness.Pubkey, witness.Signature, digest) {
+			return nil
+		}
+		return fmt.Errorf("TX_ERR_SIG_INVALID")
+	case SUITE_ID_SENTINEL:
+		// Timelock-only covenants are already validated above.
+		return nil
+	default:
+		return fmt.Errorf("TX_ERR_SIG_ALG_INVALID")
+	}
 }

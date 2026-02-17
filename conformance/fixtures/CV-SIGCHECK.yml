@@ -1,0 +1,86 @@
+version: "1.1"
+gate: CV-SIGCHECK
+status: PASS
+description: "Input authorization signature path checks"
+tests:
+  - id: SIGCHECK-01
+    title: "CORE_P2PK with wrong ML-DSA signature"
+    context:
+      chain_id_hex: "7dcf48a266788491e77bbb7b9c97ad6a2c89b882293dfaf3bdebeec62548cc00"
+      input_index: 0
+      input_value: 1000
+      prevout_covenant_type: 0
+      prevout_covenant_data_hex: "01 1edfaf2f621f3e155766bfe1935ee19c923842f9dc72021db8a09bebd77c5af0"
+      witness_count: 1
+      witness_items_present: 1
+      witness_item:
+        suite_id: 0x01
+        pubkey_length: 2592
+        sig_length: 4627
+    expected_error: TX_ERR_SIG_INVALID
+
+  - id: SIGCHECK-02
+    title: "CORE_P2PK noncanonical witness lengths"
+    context:
+      chain_id_hex: "7dcf48a266788491e77bbb7b9c97ad6a2c89b882293dfaf3bdebeec62548cc00"
+      input_index: 0
+      input_value: 1000
+      prevout_covenant_type: 0
+      prevout_covenant_data_hex: "01 1edfaf2f621f3e155766bfe1935ee19c923842f9dc72021db8a09bebd77c5af0"
+      witness_count: 1
+      witness_items_present: 1
+      witness_item:
+        suite_id: 0x01
+        pubkey_length: 8
+        sig_length: 10
+    expected_error: TX_ERR_SIG_NONCANONICAL
+
+  - id: SIGCHECK-03
+    title: "Unknown suite_id rejected as non-consensus"
+    context:
+      chain_id_hex: "7dcf48a266788491e77bbb7b9c97ad6a2c89b882293dfaf3bdebeec62548cc00"
+      input_index: 0
+      input_value: 1000
+      prevout_covenant_type: 0
+      prevout_covenant_data_hex: "01 1edfaf2f621f3e155766bfe1935ee19c923842f9dc72021db8a09bebd77c5af0"
+      witness_count: 1
+      witness_items_present: 1
+      witness_item:
+        suite_id: 0xaa
+        pubkey_length: 32
+        sig_length: 64
+    expected_error: TX_ERR_SIG_ALG_INVALID
+
+  - id: SIGCHECK-04
+    title: "Suite_ID 0x02 rejected while deployment inactive"
+    context:
+      chain_id_hex: "7dcf48a266788491e77bbb7b9c97ad6a2c89b882293dfaf3bdebeec62548cc00"
+      input_index: 0
+      input_value: 1000
+      prevout_covenant_type: 0
+      prevout_covenant_data_hex: "02 1edfaf2f621f3e155766bfe1935ee19c923842f9dc72021db8a09bebd77c5af0"
+      witness_count: 1
+      witness_items_present: 1
+      witness_item:
+        suite_id: 0x02
+        pubkey_length: 64
+        sig_length: 1
+    expected_error: TX_ERR_DEPLOYMENT_INACTIVE
+
+  - id: SIGCHECK-05
+    title: "CORE_TIMELOCK timelock satisfaction returns OK"
+    context:
+      chain_id_hex: "7dcf48a266788491e77bbb7b9c97ad6a2c89b882293dfaf3bdebeec62548cc00"
+      input_index: 0
+      input_value: 1000
+      prevout_covenant_type: 1
+      prevout_covenant_data_hex: "00 2800000000000000"
+      chain_height: 100
+      chain_timestamp: 0
+      witness_count: 1
+      witness_items_present: 1
+      witness_item:
+        suite_id: 0x00
+        pubkey_length: 0
+        sig_length: 0
+    expected_code: PASS

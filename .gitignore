@@ -44,3 +44,6 @@ clients/rust/cargo_audit.json
 **/librubin_wc_shim.so
 **/librubin_wc_shim.dylib
 **/librubin_wc_shim.dll
+
+# Local UI artifacts
+rubin-ui/

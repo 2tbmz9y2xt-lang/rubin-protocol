@@ -6,9 +6,10 @@ Network: mainnet
 
 This file publishes the VERSION_BITS deployment schedule and activation states for the RUBIN v1.1 MAINNET chain instance.
 
-## v1.1 deployments
+## Deployment Table (v1.1)
 
-No consensus deployments are scheduled for v1.1 MAINNET at this stage.
+No consensus deployments are scheduled for mainnet under v1.1 at this stage.
+state: none
 
-All `deployment_bit` slots are `UNUSED` for MAINNET until an explicit governance decision publishes a non-empty deployment table.
-
+| deployment_id | bit | start_height | timeout_height | signal_window | threshold | state_machine | feature_summary |
+|---|---:|---:|---:|---:|---:|---:|---|

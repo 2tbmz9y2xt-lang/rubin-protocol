@@ -16,7 +16,8 @@ use libloading::Library;
 use sha3::{Digest, Sha3_256};
 use std::fs;
 
-type RubSha3_256 = unsafe extern "C" fn(input_ptr: *const u8, input_len: usize, out32: *mut u8) -> i32;
+type RubSha3_256 =
+    unsafe extern "C" fn(input_ptr: *const u8, input_len: usize, out32: *mut u8) -> i32;
 type RubVerify = unsafe extern "C" fn(
     pubkey_ptr: *const u8,
     pubkey_len: usize,
@@ -40,13 +41,18 @@ impl WolfcryptDylibProvider {
     /// - `rubin_wc_verify_mldsa87`
     /// - `rubin_wc_verify_slhdsa_shake_256f`
     pub fn load(path: &str) -> Result<Self, String> {
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let lib = unsafe { Library::new(path).map_err(|e| e.to_string())? };
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
-            let sha3_256: RubSha3_256 = *lib.get(b"rubin_wc_sha3_256\0").map_err(|e| e.to_string())?;
-            let verify_mldsa87: RubVerify =
-                *lib.get(b"rubin_wc_verify_mldsa87\0").map_err(|e| e.to_string())?;
-            let verify_slhdsa_shake_256f: RubVerify =
-                *lib.get(b"rubin_wc_verify_slhdsa_shake_256f\0").map_err(|e| e.to_string())?;
+            let sha3_256: RubSha3_256 =
+                *lib.get(b"rubin_wc_sha3_256\0").map_err(|e| e.to_string())?;
+            let verify_mldsa87: RubVerify = *lib
+                .get(b"rubin_wc_verify_mldsa87\0")
+                .map_err(|e| e.to_string())?;
+            let verify_slhdsa_shake_256f: RubVerify = *lib
+                .get(b"rubin_wc_verify_slhdsa_shake_256f\0")
+                .map_err(|e| e.to_string())?;
 
             Ok(Self {
                 _lib: lib,
@@ -76,7 +82,9 @@ impl WolfcryptDylibProvider {
                 return Err("wolfcrypt shim hash mismatch (RUBIN_WOLFCRYPT_SHIM_SHA3_256)".into());
             }
         } else if strict {
-            return Err("RUBIN_WOLFCRYPT_SHIM_SHA3_256 required when RUBIN_WOLFCRYPT_STRICT=1".into());
+            return Err(
+                "RUBIN_WOLFCRYPT_SHIM_SHA3_256 required when RUBIN_WOLFCRYPT_STRICT=1".into(),
+            );
         }
 
         Self::load(&path)
@@ -86,6 +94,7 @@ impl WolfcryptDylibProvider {
 impl CryptoProvider for WolfcryptDylibProvider {
     fn sha3_256(&self, input: &[u8]) -> Result<[u8; 32], String> {
         let mut out = [0u8; 32];
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let rc = unsafe { (self.sha3_256)(input.as_ptr(), input.len(), out.as_mut_ptr()) };
         if rc != 1 {
             return Err(format!("wolfcrypt shim error: rubin_wc_sha3_256 rc={rc}"));
@@ -93,24 +102,46 @@ impl CryptoProvider for WolfcryptDylibProvider {
         Ok(out)
     }
 
-    fn verify_mldsa87(&self, pubkey: &[u8], sig: &[u8], digest32: &[u8; 32]) -> Result<bool, String> {
+    fn verify_mldsa87(
+        &self,
+        pubkey: &[u8],
+        sig: &[u8],
+        digest32: &[u8; 32],
+    ) -> Result<bool, String> {
         let rc =
+            // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             unsafe { (self.verify_mldsa87)(pubkey.as_ptr(), pubkey.len(), sig.as_ptr(), sig.len(), digest32.as_ptr()) };
         match rc {
             1 => Ok(true),
             0 => Ok(false),
-            _ => Err(format!("wolfcrypt shim error: rubin_wc_verify_mldsa87 rc={rc}")),
+            _ => Err(format!(
+                "wolfcrypt shim error: rubin_wc_verify_mldsa87 rc={rc}"
+            )),
         }
     }
 
-    fn verify_slhdsa_shake_256f(&self, pubkey: &[u8], sig: &[u8], digest32: &[u8; 32]) -> Result<bool, String> {
+    fn verify_slhdsa_shake_256f(
+        &self,
+        pubkey: &[u8],
+        sig: &[u8],
+        digest32: &[u8; 32],
+    ) -> Result<bool, String> {
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let rc = unsafe {
-            (self.verify_slhdsa_shake_256f)(pubkey.as_ptr(), pubkey.len(), sig.as_ptr(), sig.len(), digest32.as_ptr())
+            (self.verify_slhdsa_shake_256f)(
+                pubkey.as_ptr(),
+                pubkey.len(),
+                sig.as_ptr(),
+                sig.len(),
+                digest32.as_ptr(),
+            )
         };
         match rc {
             1 => Ok(true),
             0 => Ok(false),
-            _ => Err(format!("wolfcrypt shim error: rubin_wc_verify_slhdsa_shake_256f rc={rc}")),
+            _ => Err(format!(
+                "wolfcrypt shim error: rubin_wc_verify_slhdsa_shake_256f rc={rc}"
+            )),
         }
     }
 }

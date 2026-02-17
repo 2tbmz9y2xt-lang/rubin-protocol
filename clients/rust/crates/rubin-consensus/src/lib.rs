@@ -6,6 +6,7 @@
 //! Non-consensus policy MUST NOT be implemented here.
 
 use rubin_crypto::CryptoProvider;
+use std::collections::{HashMap, HashSet};
 
 pub const CONSENSUS_REVISION: &str = "v1.1";
 
@@ -24,6 +25,9 @@ pub const ML_DSA_PUBKEY_BYTES: usize = 2_592;
 pub const SLH_DSA_PUBKEY_BYTES: usize = 64;
 pub const ML_DSA_SIG_BYTES: usize = 4_627;
 pub const SLH_DSA_SIG_MAX_BYTES: usize = 49_856;
+pub const MAX_TX_INPUTS: usize = 1_024;
+pub const MAX_TX_OUTPUTS: usize = 1_024;
+pub const MAX_WITNESS_ITEMS: usize = 1_024;
 
 pub const TIMELOCK_MODE_HEIGHT: u8 = 0x00;
 pub const TIMELOCK_MODE_TIMESTAMP: u8 = 0x01;
@@ -115,6 +119,12 @@ pub struct TxOutput {
     pub value: u64,
     pub covenant_type: u16,
     pub covenant_data: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TxOutPoint {
+    pub txid: [u8; 32],
+    pub vout: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -409,6 +419,13 @@ fn satisfy_lock(lock_mode: u8, lock_value: u64, height: u64, timestamp: u64) -> 
     }
 }
 
+fn add_u64(a: u64, b: u64) -> Result<u64, String> {
+    match a.checked_add(b) {
+        Some(v) => Ok(v),
+        None => Err("TX_ERR_PARSE".to_string()),
+    }
+}
+
 pub fn validate_input_authorization(
     provider: &dyn CryptoProvider,
     chain_id: &[u8; 32],
@@ -546,6 +563,67 @@ pub fn validate_input_authorization(
     }
 }
 
+pub fn apply_tx(
+    provider: &dyn CryptoProvider,
+    chain_id: &[u8; 32],
+    tx: &Tx,
+    utxo: &HashMap<TxOutPoint, TxOutput>,
+    chain_height: u64,
+    chain_timestamp: u64,
+    suite_id_02_active: bool,
+) -> Result<(), String> {
+    if tx.inputs.len() > MAX_TX_INPUTS
+        || tx.outputs.len() > MAX_TX_OUTPUTS
+        || tx.witness.witnesses.len() > MAX_WITNESS_ITEMS
+    {
+        return Err("TX_ERR_PARSE".to_string());
+    }
+    if tx.inputs.len() != tx.witness.witnesses.len() {
+        return Err("TX_ERR_PARSE".to_string());
+    }
+
+    let mut seen = HashSet::with_capacity(tx.inputs.len());
+    let mut total_inputs = 0u64;
+    let mut total_outputs = 0u64;
+
+    for (input_index, input) in tx.inputs.iter().enumerate() {
+        let prevout = TxOutPoint {
+            txid: input.prev_txid,
+            vout: input.prev_vout,
+        };
+        if !seen.insert(prevout.clone()) {
+            return Err("TX_ERR_PARSE".to_string());
+        }
+
+        let prev = utxo
+            .get(&prevout)
+            .ok_or_else(|| "TX_ERR_MISSING_UTXO".to_string())?;
+
+        validate_input_authorization(
+            provider,
+            chain_id,
+            tx,
+            input_index,
+            prev.value,
+            prev,
+            chain_height,
+            chain_timestamp,
+            suite_id_02_active,
+        )?;
+
+        total_inputs = add_u64(total_inputs, prev.value)?;
+    }
+
+    for output in &tx.outputs {
+        total_outputs = add_u64(total_outputs, output.value)?;
+    }
+
+    if total_outputs > total_inputs {
+        return Err("TX_ERR_VALUE_CONSERVATION".into());
+    }
+    Ok(())
+}
+
 pub fn txid(provider: &dyn CryptoProvider, tx: &Tx) -> Result<[u8; 32], String> {
     provider.sha3_256(&tx_no_witness_bytes(tx))
 }
@@ -606,6 +684,7 @@ pub fn sighash_v1_digest(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     struct TestProvider;
 
@@ -827,5 +906,159 @@ mod tests {
         let err = validate_input_authorization(&p, &chain_id, &tx, 0, 100, &prevout, 10, 0, false)
             .unwrap_err();
         assert_eq!(err, "TX_ERR_TIMELOCK_NOT_MET");
+    }
+
+    fn make_apply_tx_prevout(value: u64, covenant_type: u16, covenant_data: Vec<u8>) -> TxOutput {
+        TxOutput {
+            value,
+            covenant_type,
+            covenant_data,
+        }
+    }
+
+    fn make_apply_tx_input(txid: [u8; 32], vout: u32) -> TxInput {
+        TxInput {
+            prev_txid: txid,
+            prev_vout: vout,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }
+    }
+
+    fn make_apply_tx_tx(
+        inputs: Vec<TxInput>,
+        outputs: Vec<TxOutput>,
+        witness: Vec<WitnessItem>,
+    ) -> Tx {
+        Tx {
+            version: 1,
+            tx_nonce: 1,
+            inputs,
+            outputs,
+            locktime: 0,
+            witness: WitnessSection { witnesses: witness },
+        }
+    }
+
+    #[test]
+    fn apply_tx_rejects_missing_utxo() {
+        let p = TestProvider;
+        let tx = make_apply_tx_tx(
+            vec![make_apply_tx_input([1u8; 32], 0)],
+            vec![TxOutput {
+                value: 10,
+                covenant_type: CORE_P2PK,
+                covenant_data: Vec::new(),
+            }],
+            vec![WitnessItem {
+                suite_id: SUITE_ID_ML_DSA,
+                pubkey: vec![0x11u8; ML_DSA_PUBKEY_BYTES],
+                signature: vec![0x22u8; ML_DSA_SIG_BYTES],
+            }],
+        );
+
+        let err = apply_tx(&p, &[0u8; 32], &tx, &HashMap::new(), 0, 0, false).unwrap_err();
+        assert_eq!(err, "TX_ERR_MISSING_UTXO");
+    }
+
+    #[test]
+    fn apply_tx_rejects_duplicate_prevout() {
+        let p = TestProvider;
+        let txid = [2u8; 32];
+        let key_id = p.sha3_256(&[0x11u8; ML_DSA_PUBKEY_BYTES]).unwrap();
+        let prevout = make_apply_tx_prevout(
+            200,
+            CORE_P2PK,
+            [vec![SUITE_ID_ML_DSA], key_id.to_vec()].concat(),
+        );
+        let witness = vec![
+            WitnessItem {
+                suite_id: SUITE_ID_ML_DSA,
+                pubkey: vec![0x11u8; ML_DSA_PUBKEY_BYTES],
+                signature: vec![0x22u8; ML_DSA_SIG_BYTES],
+            },
+            WitnessItem {
+                suite_id: SUITE_ID_ML_DSA,
+                pubkey: vec![0x11u8; ML_DSA_PUBKEY_BYTES],
+                signature: vec![0x22u8; ML_DSA_SIG_BYTES],
+            },
+        ];
+        let tx = make_apply_tx_tx(
+            vec![make_apply_tx_input(txid, 0), make_apply_tx_input(txid, 0)],
+            vec![TxOutput {
+                value: 100,
+                covenant_type: CORE_P2PK,
+                covenant_data: Vec::new(),
+            }],
+            witness,
+        );
+
+        let mut utxo = HashMap::new();
+        utxo.insert(TxOutPoint { txid, vout: 0 }, prevout);
+
+        let err = apply_tx(&p, &[0u8; 32], &tx, &utxo, 0, 0, false).unwrap_err();
+        assert_eq!(err, "TX_ERR_PARSE");
+    }
+
+    #[test]
+    fn apply_tx_rejects_value_conservation_violation() {
+        let p = TestProvider;
+        let txid = [3u8; 32];
+        let key_id = p.sha3_256(&[0x33u8; ML_DSA_PUBKEY_BYTES]).unwrap();
+        let prevout = make_apply_tx_prevout(
+            100,
+            CORE_P2PK,
+            [vec![SUITE_ID_ML_DSA], key_id.to_vec()].concat(),
+        );
+        let tx = make_apply_tx_tx(
+            vec![make_apply_tx_input(txid, 0)],
+            vec![TxOutput {
+                value: 101,
+                covenant_type: CORE_P2PK,
+                covenant_data: Vec::new(),
+            }],
+            vec![WitnessItem {
+                suite_id: SUITE_ID_ML_DSA,
+                pubkey: vec![0x33u8; ML_DSA_PUBKEY_BYTES],
+                signature: vec![0x44u8; ML_DSA_SIG_BYTES],
+            }],
+        );
+
+        let mut utxo = HashMap::new();
+        utxo.insert(TxOutPoint { txid, vout: 0 }, prevout);
+
+        let err = apply_tx(&p, &[0u8; 32], &tx, &utxo, 0, 0, false).unwrap_err();
+        assert_eq!(err, "TX_ERR_VALUE_CONSERVATION");
+    }
+
+    #[test]
+    fn apply_tx_accepts_valid_p2pk_spend() {
+        let p = TestProvider;
+        let txid = [4u8; 32];
+        let pubkey = vec![0x55u8; ML_DSA_PUBKEY_BYTES];
+        let key_id = p.sha3_256(&pubkey).unwrap();
+        let prevout = TxOutput {
+            value: 100,
+            covenant_type: CORE_P2PK,
+            covenant_data: [vec![SUITE_ID_ML_DSA], key_id.to_vec()].concat(),
+        };
+        let tx = make_apply_tx_tx(
+            vec![make_apply_tx_input(txid, 0)],
+            vec![TxOutput {
+                value: 90,
+                covenant_type: CORE_P2PK,
+                covenant_data: Vec::new(),
+            }],
+            vec![WitnessItem {
+                suite_id: SUITE_ID_ML_DSA,
+                pubkey: pubkey.clone(),
+                signature: vec![0x66u8; ML_DSA_SIG_BYTES],
+            }],
+        );
+
+        let mut utxo = HashMap::new();
+        utxo.insert(TxOutPoint { txid, vout: 0 }, prevout);
+
+        apply_tx(&p, &[0u8; 32], &tx, &utxo, 0, 0, false).unwrap();
     }
 }

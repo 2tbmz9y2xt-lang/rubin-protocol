@@ -45,6 +45,8 @@ Payload fields (recommended):
 8. `start_height`: u32le (best-effort)
 9. `relay`: u8 (0/1)
 
+`magic` is carried only in the 24-byte transport prefix as canonical network-domain separation.
+
 Nodes MUST reject peers whose `chain_id` does not match the locally pinned `chain_id_hex`.
 
 ### 2.2 `verack` (required)
@@ -74,6 +76,8 @@ Suggested `inv_type` values (non-consensus):
 - `1`: txid (witness-free)
 - `2`: wtxid (full tx bytes hash)
 - `3`: block hash
+
+Canonical note: CANONICAL §15 mentions `wtxid` as a required exchange target for peers; in this v1.1 draft it is represented by `inv`/`getdata` with `inv_type = 2`.
 
 ### 4.2 `getdata` (required)
 

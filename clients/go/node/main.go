@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -11,6 +12,26 @@ import (
 	"rubin.dev/node/consensus"
 	"rubin.dev/node/crypto"
 )
+
+const defaultChainProfile = "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md"
+
+type applyUTXOUtxoEntry struct {
+	Txid         string `json:"txid"`
+	Vout         uint32 `json:"vout"`
+	Value        uint64 `json:"value"`
+	CovenantType uint16 `json:"covenant_type"`
+	CovenantData string `json:"covenant_data"`
+}
+
+type applyUTXOContext struct {
+	ChainIDHex      string               `json:"chain_id_hex"`
+	Profile         string               `json:"profile"`
+	ChainHeight     uint64               `json:"chain_height"`
+	ChainTimestamp  uint64               `json:"chain_timestamp"`
+	SuiteID02Active bool                 `json:"suite_id_02_active"`
+	TxHex           string               `json:"tx_hex"`
+	UTXOSet         []applyUTXOUtxoEntry `json:"utxo_set"`
+}
 
 func extractFencedHex(doc string, key string) (string, error) {
 	idx := strings.Index(doc, key)
@@ -179,7 +200,192 @@ func cmdSighash(chainID [32]byte, txHex string, inputIndex uint32, inputValue ui
 	return nil
 }
 
-const usageCommands = "commands: version | chain-id --profile <path> | txid --tx-hex <hex> | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>]"
+func cmdVerify(
+	chainID [32]byte,
+	txHex string,
+	inputIndex uint32,
+	inputValue uint64,
+	prevoutCovenantType uint16,
+	prevoutCovenantData []byte,
+	chainHeight uint64,
+	chainTimestamp uint64,
+	suiteID02Active bool,
+) error {
+	p, cleanup, err := loadCryptoProvider()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	txBytes, err := hexDecodeStrict(txHex)
+	if err != nil {
+		return fmt.Errorf("tx hex: %w", err)
+	}
+	tx, err := consensus.ParseTxBytes(txBytes)
+	if err != nil {
+		return err
+	}
+
+	prevout := consensus.TxOutput{
+		Value:        inputValue,
+		CovenantType: prevoutCovenantType,
+		CovenantData: prevoutCovenantData,
+	}
+
+	if err := consensus.ValidateInputAuthorization(
+		p,
+		chainID,
+		tx,
+		inputIndex,
+		inputValue,
+		&prevout,
+		chainHeight,
+		chainTimestamp,
+		suiteID02Active,
+	); err != nil {
+		return err
+	}
+	fmt.Println("OK")
+	return nil
+}
+
+func cmdCompactSize(encodedHex string) error {
+	encoded, err := hexDecodeStrict(encodedHex)
+	if err != nil {
+		return fmt.Errorf("encoded-hex: %w", err)
+	}
+	value, _, err := consensus.DecodeCompactSize(encoded)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%d\n", value)
+	return nil
+}
+
+func mapParseError(err error) error {
+	msg := err.Error()
+	if strings.HasPrefix(msg, "parse:") || strings.HasPrefix(msg, "compactsize:") {
+		return fmt.Errorf("TX_ERR_PARSE")
+	}
+	return err
+}
+
+func cmdParse(txHex string, maxWitnessBytes uint64) error {
+	txBytes, err := hexDecodeStrict(txHex)
+	if err != nil {
+		return fmt.Errorf("tx hex: %w", err)
+	}
+	tx, err := consensus.ParseTxBytes(txBytes)
+	if err != nil {
+		return mapParseError(err)
+	}
+	if maxWitnessBytes > 0 {
+		witnessBytes := consensus.WitnessBytes(tx.Witness)
+		if uint64(len(witnessBytes)) > maxWitnessBytes {
+			return fmt.Errorf("TX_ERR_WITNESS_OVERFLOW")
+		}
+	}
+	fmt.Println("OK")
+	return nil
+}
+
+func parseTxIDHex(s string) ([32]byte, error) {
+	raw, err := hexDecodeStrict(s)
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("txid-hex: %w", err)
+	}
+	if len(raw) != 32 {
+		return [32]byte{}, fmt.Errorf("txid-hex must decode to 32 bytes (got %d)", len(raw))
+	}
+	var out [32]byte
+	copy(out[:], raw)
+	return out, nil
+}
+
+func cmdApplyUTXO(contextPath string) error {
+	raw, err := os.ReadFile(contextPath) // #nosec G304 -- path is explicitly provided by operator.
+	if err != nil {
+		return fmt.Errorf("context-json: %w", err)
+	}
+	var ctx applyUTXOContext
+	if err := json.Unmarshal(raw, &ctx); err != nil {
+		return fmt.Errorf("context-json: %w", err)
+	}
+	if ctx.TxHex == "" {
+		return fmt.Errorf("missing required field: tx_hex")
+	}
+
+	p, cleanup, err := loadCryptoProvider()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	var chainID [32]byte
+	switch {
+	case ctx.ChainIDHex != "" && ctx.Profile != "":
+		return fmt.Errorf("use exactly one of chain_id_hex or profile in context-json")
+	case ctx.ChainIDHex != "":
+		decoded, err := parseChainIDHex(ctx.ChainIDHex)
+		if err != nil {
+			return err
+		}
+		chainID = decoded
+	case ctx.Profile != "":
+		chainID, err = deriveChainID(p, ctx.Profile)
+		if err != nil {
+			return err
+		}
+	default:
+		chainID, err = deriveChainID(p, defaultChainProfile)
+		if err != nil {
+			return err
+		}
+	}
+
+	txBytes, err := hexDecodeStrict(ctx.TxHex)
+	if err != nil {
+		return fmt.Errorf("tx-hex: %w", err)
+	}
+	tx, err := consensus.ParseTxBytes(txBytes)
+	if err != nil {
+		return mapParseError(err)
+	}
+
+	utxo := make(map[consensus.TxOutPoint]consensus.UtxoEntry, len(ctx.UTXOSet))
+	for _, entry := range ctx.UTXOSet {
+		prevTxid, err := parseTxIDHex(entry.Txid)
+		if err != nil {
+			return err
+		}
+		covenantData, err := hexDecodeStrict(entry.CovenantData)
+		if err != nil {
+			return fmt.Errorf("covenant-data-hex: %w", err)
+		}
+		out := consensus.TxOutput{
+			Value:        entry.Value,
+			CovenantType: entry.CovenantType,
+			CovenantData: covenantData,
+		}
+		utxo[consensus.TxOutPoint{TxID: prevTxid, Vout: entry.Vout}] = consensus.UtxoEntry{
+			Output:            out,
+			CreationHeight:    ctx.ChainHeight,
+			CreatedByCoinbase: false,
+		}
+	}
+
+	return consensus.ApplyTx(
+		p,
+		chainID,
+		tx,
+		utxo,
+		ctx.ChainHeight,
+		ctx.ChainTimestamp,
+		ctx.SuiteID02Active,
+	)
+}
+
+const usageCommands = "commands: version | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse --tx-hex <hex> [--max-witness-bytes <u64>] | txid --tx-hex <hex> | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify --tx-hex <hex> --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--chain-id-hex <hex64> | --profile <path>] | apply-utxo --context-json <path>"
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage: rubin-node <command> [args]")
@@ -193,7 +399,7 @@ func cmdVersionMain() int {
 
 func cmdChainIDMain(argv []string) int {
 	fs := flag.NewFlagSet("chain-id", flag.ExitOnError)
-	profile := fs.String("profile", "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md", "chain instance profile path")
+	profile := fs.String("profile", defaultChainProfile, "chain instance profile path")
 	_ = fs.Parse(argv)
 	if err := cmdChainID(*profile); err != nil {
 		fmt.Fprintln(os.Stderr, "chain-id error:", err)
@@ -219,7 +425,7 @@ func cmdTxIDMain(argv []string) int {
 
 func cmdSighashMain(argv []string) int {
 	fs := flag.NewFlagSet("sighash", flag.ExitOnError)
-	profile := fs.String("profile", "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md", "chain instance profile path")
+	profile := fs.String("profile", defaultChainProfile, "chain instance profile path")
 	chainIDHex := fs.String("chain-id-hex", "", "override chain_id (64 hex chars)")
 	txHex := fs.String("tx-hex", "", "transaction hex bytes (TxBytes)")
 	inputIndex := fs.Uint("input-index", 0, "0-based input index")
@@ -270,6 +476,134 @@ func cmdSighashMain(argv []string) int {
 	return 0
 }
 
+func cmdVerifyMain(argv []string) int {
+	fs := flag.NewFlagSet("verify", flag.ExitOnError)
+	profile := fs.String("profile", defaultChainProfile, "chain instance profile path")
+	chainIDHex := fs.String("chain-id-hex", "", "override chain_id (64 hex chars)")
+	txHex := fs.String("tx-hex", "", "transaction hex bytes (TxBytes)")
+	inputIndex := fs.Uint("input-index", 0, "0-based input index")
+	inputValue := fs.Uint64("input-value", 0, "input UTXO value (u64)")
+	prevoutCovenantType := fs.Uint("prevout-covenant-type", 0, "prevout covenant type")
+	prevoutCovenantDataHex := fs.String("prevout-covenant-data-hex", "", "hex-encoded prevout covenant bytes")
+	chainHeight := fs.Uint64("chain-height", 0, "chain height context")
+	chainTimestamp := fs.Uint64("chain-timestamp", 0, "chain timestamp context")
+	suiteID02Active := fs.Bool("suite-id-02-active", false, "treat suite_id 0x02 as active")
+	_ = fs.Parse(argv)
+
+	if *txHex == "" {
+		fmt.Fprintln(os.Stderr, "missing required flag: --tx-hex")
+		return 2
+	}
+	if *prevoutCovenantDataHex == "" {
+		fmt.Fprintln(os.Stderr, "missing required flag: --prevout-covenant-data-hex")
+		return 2
+	}
+	if uint64(*inputIndex) > uint64(^uint32(0)) {
+		fmt.Fprintln(os.Stderr, "input-index exceeds 32-bit bound")
+		return 2
+	}
+	if *prevoutCovenantType > 0xffff {
+		fmt.Fprintln(os.Stderr, "prevout-covenant-type must fit u16")
+		return 2
+	}
+	if *chainIDHex != "" && hasFlagArg(argv, "profile") {
+		fmt.Fprintln(os.Stderr, "use exactly one of --chain-id-hex or --profile")
+		return 2
+	}
+
+	covenantData, err := hexDecodeStrict(*prevoutCovenantDataHex)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "prevout-covenant-data-hex:", err)
+		return 1
+	}
+
+	var chainID [32]byte
+	if *chainIDHex != "" {
+		parsed, err := parseChainIDHex(*chainIDHex)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		chainID = parsed
+	} else {
+		p, cleanup, err := loadCryptoProvider()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		defer cleanup()
+		derived, err := deriveChainID(p, *profile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "verify error:", err)
+			return 1
+		}
+		chainID = derived
+	}
+
+	if err := cmdVerify(
+		chainID,
+		*txHex,
+		uint32(*inputIndex),
+		*inputValue,
+		uint16(*prevoutCovenantType),
+		covenantData,
+		*chainHeight,
+		*chainTimestamp,
+		*suiteID02Active,
+	); err != nil {
+		fmt.Fprintln(os.Stderr, "verify error:", err)
+		return 1
+	}
+	return 0
+}
+
+func cmdCompactSizeMain(argv []string) int {
+	fs := flag.NewFlagSet("compactsize", flag.ExitOnError)
+	encodedHex := fs.String("encoded-hex", "", "CompactSize payload in hex")
+	_ = fs.Parse(argv)
+	if *encodedHex == "" {
+		fmt.Fprintln(os.Stderr, "missing required flag: --encoded-hex")
+		return 2
+	}
+	if err := cmdCompactSize(*encodedHex); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
+}
+
+func cmdParseMain(argv []string) int {
+	fs := flag.NewFlagSet("parse", flag.ExitOnError)
+	txHex := fs.String("tx-hex", "", "transaction hex bytes (TxBytes)")
+	maxWitnessBytes := fs.Uint64("max-witness-bytes", 0, "maximum accepted witness section bytes")
+	_ = fs.Parse(argv)
+	if *txHex == "" {
+		fmt.Fprintln(os.Stderr, "missing required flag: --tx-hex")
+		return 2
+	}
+	if err := cmdParse(*txHex, *maxWitnessBytes); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
+}
+
+func cmdApplyUTXOMain(argv []string) int {
+	fs := flag.NewFlagSet("apply-utxo", flag.ExitOnError)
+	contextPath := fs.String("context-json", "", "path to JSON context payload")
+	_ = fs.Parse(argv)
+	if *contextPath == "" {
+		fmt.Fprintln(os.Stderr, "missing required flag: --context-json")
+		return 2
+	}
+	if err := cmdApplyUTXO(*contextPath); err != nil {
+		fmt.Fprintln(os.Stderr, "apply-utxo error:", err)
+		return 1
+	}
+	fmt.Println("OK")
+	return 0
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -282,12 +616,20 @@ func main() {
 	switch command {
 	case "version":
 		exitCode = cmdVersionMain()
+	case "compactsize":
+		exitCode = cmdCompactSizeMain(argv)
+	case "parse":
+		exitCode = cmdParseMain(argv)
 	case "chain-id":
 		exitCode = cmdChainIDMain(argv)
 	case "txid":
 		exitCode = cmdTxIDMain(argv)
 	case "sighash":
 		exitCode = cmdSighashMain(argv)
+	case "verify":
+		exitCode = cmdVerifyMain(argv)
+	case "apply-utxo":
+		exitCode = cmdApplyUTXOMain(argv)
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command")
 		printUsage()

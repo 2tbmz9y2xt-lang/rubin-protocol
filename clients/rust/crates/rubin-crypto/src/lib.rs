@@ -11,8 +11,18 @@ pub enum SuiteId {
 
 pub trait CryptoProvider {
     fn sha3_256(&self, input: &[u8]) -> Result<[u8; 32], String>;
-    fn verify_mldsa87(&self, pubkey: &[u8], sig: &[u8], digest32: &[u8; 32]) -> Result<bool, String>;
-    fn verify_slhdsa_shake_256f(&self, pubkey: &[u8], sig: &[u8], digest32: &[u8; 32]) -> Result<bool, String>;
+    fn verify_mldsa87(
+        &self,
+        pubkey: &[u8],
+        sig: &[u8],
+        digest32: &[u8; 32],
+    ) -> Result<bool, String>;
+    fn verify_slhdsa_shake_256f(
+        &self,
+        pubkey: &[u8],
+        sig: &[u8],
+        digest32: &[u8; 32],
+    ) -> Result<bool, String>;
 }
 
 #[cfg(feature = "wolfcrypt-dylib")]
@@ -37,11 +47,21 @@ impl CryptoProvider for DevStdCryptoProvider {
         Ok(r)
     }
 
-    fn verify_mldsa87(&self, _pubkey: &[u8], _sig: &[u8], _digest32: &[u8; 32]) -> Result<bool, String> {
+    fn verify_mldsa87(
+        &self,
+        _pubkey: &[u8],
+        _sig: &[u8],
+        _digest32: &[u8; 32],
+    ) -> Result<bool, String> {
         Ok(false)
     }
 
-    fn verify_slhdsa_shake_256f(&self, _pubkey: &[u8], _sig: &[u8], _digest32: &[u8; 32]) -> Result<bool, String> {
+    fn verify_slhdsa_shake_256f(
+        &self,
+        _pubkey: &[u8],
+        _sig: &[u8],
+        _digest32: &[u8; 32],
+    ) -> Result<bool, String> {
         Ok(false)
     }
 }

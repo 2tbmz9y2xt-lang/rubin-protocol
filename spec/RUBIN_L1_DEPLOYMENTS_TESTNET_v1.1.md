@@ -1,6 +1,6 @@
 # RUBIN L1 VERSION_BITS Deployments: TESTNET v1.1
 
-Status: DEVELOPMENT (CHAIN-INSTANCE, NON-CONSENSUS PUBLICATION)  
+Status: DRAFT (NON-CONSENSUS)  
 Date: 2026-02-16
 
 This file publishes the testnet deployment registry using the normative schema in:
@@ -12,6 +12,7 @@ It does not change the canonical consensus rules. It fixes the chain-instance de
 ## Deployment Table (v1.1)
 
 No consensus deployments are defined for testnet under v1.1 at this time.
+state: none
 
 | deployment_id | bit | start_height | timeout_height | signal_window | threshold | state_machine | feature_summary |
 |---|---:|---:|---:|---:|---:|---:|---|

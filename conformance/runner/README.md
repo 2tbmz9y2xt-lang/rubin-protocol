@@ -12,17 +12,50 @@ Planned behavior:
    - `error_code`
    - (later) block validity and state hash
 
-## Current runner (CV-SIGHASH)
+## Current runner (CV-SIGHASH / CV-SIGCHECK)
 
 From repo root:
 
 ```bash
 python3 conformance/runner/run_cv_sighash.py
+python3 conformance/runner/run_cv_bundle.py
 ```
 
 Notes:
 - The runner prefers `chain_id_hex` from each test vector and passes it via `--chain-id-hex` to avoid depending on chain-instance Markdown profiles.
 - `--profile` is kept only as a fallback for fixtures that do not embed `chain_id_hex`.
+
+## Additional runners
+
+```bash
+python3 conformance/runner/run_cv_compactsize.py
+python3 conformance/runner/run_cv_parse.py
+python3 conformance/runner/run_cv_bind.py
+python3 conformance/runner/run_cv_utxo.py
+python3 conformance/runner/run_cv_dep.py
+python3 conformance/runner/run_cv_block.py
+python3 conformance/runner/run_cv_reorg.py
+```
+
+Notes:
+- `CV-COMPACTSIZE` and `CV-PARSE` now perform cross-client checks.
+- `CV-SIGHASH` and `CV-SIGCHECK` are now cross-client in the bundle runner.
+- `CV-BIND`, `CV-UTXO`, `CV-DEP`, `CV-BLOCK`, `CV-REORG` currently have deterministic bundle-side checks (fixture-shape driven); full node-layer parity is still TODO in standalone runners.
+
+## Bundle runner (WIP)
+
+```bash
+python3 conformance/runner/run_cv_bundle.py
+```
+
+`run_cv_bundle.py` runs gates from `RUBIN_L1_CONFORMANCE_BUNDLE_v1.1.yaml` where CLI parity exists:
+
+- `CV-COMPACTSIZE` via `compactsize`
+- `CV-SIGHASH` via `txid` + `sighash`
+- `CV-SIGCHECK` via `verify`
+- `CV-PARSE` using fixture context builders (`tx_hex` when present, fallback synthesis otherwise)
+- `CV-BIND`, `CV-UTXO`, `CV-DEP` via deterministic fixture checks
+- `CV-BLOCK`, `CV-REORG` via deterministic block/reorg fixture checks
 
 ## Strict wolfcrypt mode (CI / production tooling)
 

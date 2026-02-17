@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path};
 
@@ -8,9 +9,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn extract_fenced_hex(doc: &str, key: &str) -> Result<String, String> {
-    let idx = doc
-        .find(key)
-        .ok_or_else(|| format!("missing key: {key}"))?;
+    let idx = doc.find(key).ok_or_else(|| format!("missing key: {key}"))?;
     let after = &doc[idx..];
     let fence = after
         .find("```")
@@ -28,6 +27,8 @@ fn wolfcrypt_strict() -> bool {
         .unwrap_or(false)
 }
 
+const DEFAULT_CHAIN_PROFILE: &str = "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md";
+
 fn load_crypto_provider() -> Result<Box<dyn CryptoProvider>, String> {
     let strict = wolfcrypt_strict();
 
@@ -42,7 +43,9 @@ fn load_crypto_provider() -> Result<Box<dyn CryptoProvider>, String> {
             if !has_shim_path {
                 return Err("RUBIN_WOLFCRYPT_STRICT=1 requires RUBIN_WOLFCRYPT_SHIM_PATH".into());
             }
-            return Ok(Box::new(rubin_crypto::WolfcryptDylibProvider::load_from_env()?));
+            return Ok(Box::new(
+                rubin_crypto::WolfcryptDylibProvider::load_from_env()?,
+            ));
         }
         #[cfg(not(feature = "wolfcrypt-dylib"))]
         {
@@ -53,7 +56,9 @@ fn load_crypto_provider() -> Result<Box<dyn CryptoProvider>, String> {
     #[cfg(feature = "wolfcrypt-dylib")]
     {
         if has_shim_path {
-            return Ok(Box::new(rubin_crypto::WolfcryptDylibProvider::load_from_env()?));
+            return Ok(Box::new(
+                rubin_crypto::WolfcryptDylibProvider::load_from_env()?,
+            ));
         }
     }
 
@@ -145,12 +150,213 @@ fn parse_chain_id_hex(chain_id_hex: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
-fn cmd_sighash(chain_id: [u8; 32], tx_hex: &str, input_index: u32, input_value: u64) -> Result<(), String> {
+fn parse_u16_flag(args: &[String], flag: &str) -> Result<u16, i32> {
+    match get_flag(args, flag) {
+        Ok(Some(v)) => v.parse::<u16>().map_err(|e| {
+            eprintln!("{flag}: {e}");
+            2
+        }),
+        Ok(None) => {
+            eprintln!("missing required flag: {flag}");
+            Err(2)
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            Err(2)
+        }
+    }
+}
+
+fn cmd_sighash(
+    chain_id: [u8; 32],
+    tx_hex: &str,
+    input_index: u32,
+    input_value: u64,
+) -> Result<(), String> {
     let tx_bytes = rubin_consensus::hex_decode_strict(tx_hex)?;
     let tx = rubin_consensus::parse_tx_bytes(&tx_bytes)?;
     let provider = load_crypto_provider()?;
-    let digest = rubin_consensus::sighash_v1_digest(provider.as_ref(), &chain_id, &tx, input_index, input_value)?;
+    let digest = rubin_consensus::sighash_v1_digest(
+        provider.as_ref(),
+        &chain_id,
+        &tx,
+        input_index,
+        input_value,
+    )?;
     println!("{}", hex_encode(&digest));
+    Ok(())
+}
+
+fn cmd_verify(
+    chain_id: [u8; 32],
+    tx_hex: &str,
+    input_index: u32,
+    input_value: u64,
+    prevout_covenant_type: u16,
+    prevout_covenant_data: Vec<u8>,
+    chain_height: u64,
+    chain_timestamp: u64,
+    suite_id_02_active: bool,
+) -> Result<(), String> {
+    let tx_bytes = rubin_consensus::hex_decode_strict(tx_hex)?;
+    let tx = rubin_consensus::parse_tx_bytes(&tx_bytes)?;
+    let provider = load_crypto_provider()?;
+    let prevout = rubin_consensus::TxOutput {
+        value: input_value,
+        covenant_type: prevout_covenant_type,
+        covenant_data: prevout_covenant_data,
+    };
+    rubin_consensus::validate_input_authorization(
+        provider.as_ref(),
+        &chain_id,
+        &tx,
+        input_index as usize,
+        input_value,
+        &prevout,
+        chain_height,
+        chain_timestamp,
+        suite_id_02_active,
+    )?;
+    println!("OK");
+    Ok(())
+}
+
+fn cmd_compactsize(encoded_hex: &str) -> Result<(), String> {
+    let bytes = rubin_consensus::hex_decode_strict(encoded_hex)?;
+    let (value, _) = rubin_consensus::compact_size_decode(&bytes)?;
+    println!("{value}");
+    Ok(())
+}
+
+fn map_parse_error(err: &str) -> String {
+    if err.contains("compactsize:") || err.starts_with("parse:") {
+        return "TX_ERR_PARSE".to_string();
+    }
+    err.to_string()
+}
+
+fn cmd_parse(tx_hex: &str, max_witness_bytes: Option<u64>) -> Result<(), String> {
+    let tx_bytes = rubin_consensus::hex_decode_strict(tx_hex)?;
+    let tx = match rubin_consensus::parse_tx_bytes(&tx_bytes) {
+        Ok(v) => v,
+        Err(e) => return Err(map_parse_error(&e).to_string()),
+    };
+
+    if let Some(max_witness_bytes) = max_witness_bytes {
+        let max_witness_bytes = usize::try_from(max_witness_bytes)
+            .map_err(|_| format!("invalid --max-witness-bytes {max_witness_bytes}"))?;
+        if max_witness_bytes > 0 {
+            let witness_bytes = rubin_consensus::witness_bytes(&tx.witness);
+            if witness_bytes.len() > max_witness_bytes {
+                return Err("TX_ERR_WITNESS_OVERFLOW".to_string());
+            }
+        }
+    }
+
+    println!("OK");
+    Ok(())
+}
+
+fn parse_hex32(s: &str) -> Result<[u8; 32], String> {
+    let bytes = rubin_consensus::hex_decode_strict(s)?;
+    if bytes.len() != 32 {
+        return Err(format!("expected 32 bytes for txid, got {}", bytes.len()));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn cmd_apply_utxo(context_path: &str) -> Result<(), String> {
+    let raw = fs::read_to_string(context_path).map_err(|e| format!("context-json: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("context-json: {e}"))?;
+
+    let tx_hex = v
+        .get("tx_hex")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "missing required field: tx_hex".to_string())?;
+    let chain_height = v
+        .get("chain_height")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let chain_timestamp = v
+        .get("chain_timestamp")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let suite_id_02_active = v
+        .get("suite_id_02_active")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+
+    let tx_bytes = rubin_consensus::hex_decode_strict(tx_hex)?;
+    let tx = rubin_consensus::parse_tx_bytes(&tx_bytes)?;
+    let provider = load_crypto_provider()?;
+
+    let chain_id = match (
+        v.get("chain_id_hex").and_then(|value| value.as_str()),
+        v.get("profile").and_then(|value| value.as_str()),
+    ) {
+        (Some(_), Some(_)) => return Err("use exactly one of chain_id_hex or profile".to_string()),
+        (Some(chain_id_hex), None) => parse_chain_id_hex(chain_id_hex)?,
+        (None, Some(profile)) => derive_chain_id(provider.as_ref(), profile)?,
+        (None, None) => derive_chain_id(provider.as_ref(), DEFAULT_CHAIN_PROFILE)?,
+    };
+
+    let mut utxo = HashMap::new();
+    if let Some(entries) = v.get("utxo_set").and_then(|value| value.as_array()) {
+        for entry in entries {
+            let txid_str = entry
+                .get("txid")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "utxo_set entry missing txid".to_string())?;
+            let vout = entry
+                .get("vout")
+                .and_then(|value| value.as_u64())
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| "utxo_set entry missing vout".to_string())?;
+            let value = entry
+                .get("value")
+                .and_then(|value| value.as_u64())
+                .ok_or_else(|| "utxo_set entry missing value".to_string())?;
+            let covenant_type = entry
+                .get("covenant_type")
+                .and_then(|value| value.as_u64())
+                .and_then(|value| u16::try_from(value).ok())
+                .ok_or_else(|| "utxo_set entry missing covenant_type".to_string())?;
+            let covenant_data_hex = entry
+                .get("covenant_data")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let covenant_data = if covenant_data_hex.is_empty() {
+                Vec::new()
+            } else {
+                rubin_consensus::hex_decode_strict(covenant_data_hex)?
+            };
+
+            utxo.insert(
+                rubin_consensus::TxOutPoint {
+                    txid: parse_hex32(txid_str)?,
+                    vout,
+                },
+                rubin_consensus::TxOutput {
+                    value,
+                    covenant_type,
+                    covenant_data,
+                },
+            );
+        }
+    }
+
+    rubin_consensus::apply_tx(
+        provider.as_ref(),
+        &chain_id,
+        &tx,
+        &utxo,
+        chain_height,
+        chain_timestamp,
+        suite_id_02_active,
+    )?;
     Ok(())
 }
 
@@ -168,13 +374,25 @@ fn get_flag(args: &[String], flag: &str) -> Result<Option<String>, String> {
     Ok(None)
 }
 
+fn flag_present(args: &[String], flag: &str) -> bool {
+    args.iter().any(|arg| arg == flag)
+}
+
 fn usage() {
     eprintln!("usage: rubin-node <command> [args]");
     eprintln!("commands:");
     eprintln!("  version");
     eprintln!("  chain-id --profile <path>");
     eprintln!("  txid --tx-hex <hex>");
-    eprintln!("  sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>]");
+    eprintln!("  apply-utxo --context-json <path>");
+    eprintln!("  compactsize --encoded-hex <hex>");
+    eprintln!("  parse --tx-hex <hex> [--max-witness-bytes <u64>]");
+    eprintln!(
+        "  sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>]"
+    );
+    eprintln!(
+        "  verify --tx-hex <hex> --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--chain-height <u64> | --chain-timestamp <u64> | --chain-id-hex <hex64> | --profile <path> | --suite-id-02-active]"
+    );
 }
 
 fn cmd_version() -> i32 {
@@ -185,7 +403,7 @@ fn cmd_version() -> i32 {
 fn cmd_chain_id_main(args: &[String]) -> i32 {
     let profile = match get_flag(args, "--profile") {
         Ok(Some(v)) => v,
-        Ok(None) => "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md".to_string(),
+        Ok(None) => DEFAULT_CHAIN_PROFILE.to_string(),
         Err(e) => {
             eprintln!("{e}");
             return 2;
@@ -251,6 +469,224 @@ fn parse_required_u64(args: &[String], flag: &str) -> Result<u64, i32> {
     }
 }
 
+fn parse_optional_u64(args: &[String], flag: &str) -> Result<Option<u64>, i32> {
+    match get_flag(args, flag) {
+        Ok(Some(v)) => v
+            .parse::<u64>()
+            .map_err(|e| {
+                eprintln!("{flag}: {e}");
+                2
+            })
+            .map(Some),
+        Ok(None) => Ok(None),
+        Err(e) => {
+            eprintln!("{e}");
+            Err(2)
+        }
+    }
+}
+
+fn cmd_parse_main(args: &[String]) -> i32 {
+    let tx_hex = match get_flag(args, "--tx-hex") {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            eprintln!("missing required flag: --tx-hex");
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let max_witness_bytes = match parse_optional_u64(args, "--max-witness-bytes") {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+
+    if let Err(e) = cmd_parse(&tx_hex, max_witness_bytes) {
+        eprintln!("{e}");
+        return 1;
+    }
+    0
+}
+
+fn cmd_apply_utxo_main(args: &[String]) -> i32 {
+    let context_path = match get_flag(args, "--context-json") {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            eprintln!("missing required flag: --context-json");
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+
+    match cmd_apply_utxo(&context_path) {
+        Ok(()) => {
+            println!("OK");
+            0
+        }
+        Err(e) => {
+            eprintln!("apply-utxo error: {e}");
+            1
+        }
+    }
+}
+
+fn cmd_verify_main(args: &[String]) -> i32 {
+    let tx_hex = match get_flag(args, "--tx-hex") {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            eprintln!("missing required flag: --tx-hex");
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let input_index = match parse_required_u32(args, "--input-index") {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let input_value = match parse_required_u64(args, "--input-value") {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let prevout_covenant_type = match parse_u16_flag(args, "--prevout-covenant-type") {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let prevout_covenant_data = match get_flag(args, "--prevout-covenant-data-hex") {
+        Ok(Some(v)) => match rubin_consensus::hex_decode_strict(&v) {
+            Ok(decoded) => decoded,
+            Err(e) => {
+                eprintln!("prevout-covenant-data-hex: {e}");
+                return 1;
+            }
+        },
+        Ok(None) => {
+            eprintln!("missing required flag: --prevout-covenant-data-hex");
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let chain_id_hex = match get_flag(args, "--chain-id-hex") {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let profile = match get_flag(args, "--profile") {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    if chain_id_hex.is_some() && profile.is_some() {
+        eprintln!("use exactly one of --chain-id-hex or --profile");
+        return 2;
+    }
+
+    let chain_height = match get_flag(args, "--chain-height") {
+        Ok(Some(v)) => match v.parse::<u64>() {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("--chain-height: {e}");
+                return 2;
+            }
+        },
+        Ok(None) => 0,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let chain_timestamp = match get_flag(args, "--chain-timestamp") {
+        Ok(Some(v)) => match v.parse::<u64>() {
+            Ok(ts) => ts,
+            Err(e) => {
+                eprintln!("--chain-timestamp: {e}");
+                return 2;
+            }
+        },
+        Ok(None) => 0,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let suite_id_02_active = flag_present(args, "--suite-id-02-active");
+
+    let chain_id = if let Some(hex) = chain_id_hex {
+        match parse_chain_id_hex(&hex) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("{e}");
+                return 2;
+            }
+        }
+    } else {
+        let profile = profile.unwrap_or_else(|| DEFAULT_CHAIN_PROFILE.to_string());
+        let provider = match load_crypto_provider() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("{e}");
+                return 1;
+            }
+        };
+        match derive_chain_id(provider.as_ref(), &profile) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("verify error: {e}");
+                return 1;
+            }
+        }
+    };
+
+    if let Err(e) = cmd_verify(
+        chain_id,
+        &tx_hex,
+        input_index,
+        input_value,
+        prevout_covenant_type,
+        prevout_covenant_data,
+        chain_height,
+        chain_timestamp,
+        suite_id_02_active,
+    ) {
+        eprintln!("verify error: {e}");
+        return 1;
+    }
+    0
+}
+
+fn cmd_compactsize_main(args: &[String]) -> i32 {
+    let encoded_hex = match get_flag(args, "--encoded-hex") {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            eprintln!("missing required flag: --encoded-hex");
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    if let Err(e) = cmd_compactsize(&encoded_hex) {
+        eprintln!("{e}");
+        return 1;
+    }
+    0
+}
+
 fn cmd_sighash_main(args: &[String]) -> i32 {
     let tx_hex = match get_flag(args, "--tx-hex") {
         Ok(Some(v)) => v,
@@ -301,8 +737,7 @@ fn cmd_sighash_main(args: &[String]) -> i32 {
             }
         }
     } else {
-        let profile =
-            profile.unwrap_or_else(|| "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md".to_string());
+        let profile = profile.unwrap_or_else(|| DEFAULT_CHAIN_PROFILE.to_string());
         let provider = match load_crypto_provider() {
             Ok(p) => p,
             Err(e) => {
@@ -331,7 +766,11 @@ fn dispatch(cmd: &str, args: &[String]) -> i32 {
         "version" => cmd_version(),
         "chain-id" => cmd_chain_id_main(args),
         "txid" => cmd_txid_main(args),
+        "parse" => cmd_parse_main(args),
+        "apply-utxo" => cmd_apply_utxo_main(args),
+        "compactsize" => cmd_compactsize_main(args),
         "sighash" => cmd_sighash_main(args),
+        "verify" => cmd_verify_main(args),
         _ => {
             eprintln!("unknown command: {cmd}");
             2
@@ -340,6 +779,7 @@ fn dispatch(cmd: &str, args: &[String]) -> i32 {
 }
 
 fn main() {
+    // nosemgrep: rust.lang.security.args.args
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
         usage();
