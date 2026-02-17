@@ -21,4 +21,4 @@ These labels do not change consensus rules.
 ## 2. Publication hygiene
 
 1. INBOX.md, inbox/, and other local process artifacts MUST NOT be committed.
-2. Repository automation (CI workflows, third-party review bots) MUST be treated as operator-local infrastructure and MUST NOT be relied upon for consensus correctness.
+2. Any artifact intended for public GitHub visibility SHOULD be marked `web-visible` (see `operational/WEB_VISIBLE_POLICY.md`).
