@@ -55,14 +55,7 @@ if [ -n "${SHIM}" ]; then
     echo "shim file not found: ${SHIM}" >&2
     exit 1
   fi
-  HASH=$(python - <<'PY'
-import hashlib, sys
-path = sys.argv[1]
-with open(path, "rb") as f:
-    h = hashlib.sha3_256(f.read()).hexdigest()
-print(h)
-PY
-"${SHIM}")
+  HASH=$(python3 -c 'import hashlib, sys; print(hashlib.sha3_256(open(sys.argv[1], "rb").read()).hexdigest())' "${SHIM}")
   name=$(basename "${SHIM}")
   if ! grep -q "${HASH}  ${name}" "${SUMS}"; then
     echo "hash mismatch for ${name}: ${HASH} not in ${SUMS}" >&2
