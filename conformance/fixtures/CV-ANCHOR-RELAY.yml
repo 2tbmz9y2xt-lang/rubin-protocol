@@ -1,0 +1,126 @@
+version: "1.1"
+gate: CV-ANCHOR-RELAY
+status: PENDING
+description: >
+  Relay-level policy enforcement for CORE_ANCHOR outputs.
+  These are NON-CONSENSUS tests — they validate node relay/mempool policy
+  as specified in operational/RUBIN_NODE_POLICY_DEFAULTS_v1.1.md §3.1.
+  Consensus-valid blocks may contain anchors up to MAX_ANCHOR_PAYLOAD_SIZE (65536).
+  Relay policy caps at MAX_ANCHOR_PAYLOAD_RELAY (1024) per output.
+
+policy_constants:
+  MAX_ANCHOR_PAYLOAD_RELAY: 1024
+  MAX_ANCHOR_OUTPUTS_PER_TX_RELAY: 4
+  MAX_ANCHOR_BYTES_PER_TX_RELAY: 2048
+  MAX_ANCHOR_PAYLOAD_SIZE: 65536       # consensus limit (unchanged)
+  MAX_ANCHOR_BYTES_PER_BLOCK: 131072   # consensus limit (unchanged)
+
+tests:
+  - id: ANCHOR-RELAY-01
+    title: "RELAY-ACCEPT: single ANCHOR output, 64-byte payload (RETL state root)"
+    kind: relay_policy
+    consensus: false
+    description: >
+      64-byte anchor payload — typical RETL batch commitment.
+      Must be accepted by relay policy and mempool.
+    anchor_outputs:
+      - payload_bytes: 64
+    expected_relay: ACCEPT
+
+  - id: ANCHOR-RELAY-02
+    title: "RELAY-ACCEPT: single ANCHOR output, 1024-byte payload (at relay cap)"
+    kind: relay_policy
+    consensus: false
+    description: >
+      Exactly MAX_ANCHOR_PAYLOAD_RELAY = 1024 bytes.
+      Must be accepted (boundary inclusive).
+    anchor_outputs:
+      - payload_bytes: 1024
+    expected_relay: ACCEPT
+
+  - id: ANCHOR-RELAY-03
+    title: "RELAY-REJECT: single ANCHOR output, 1025-byte payload (exceeds relay cap)"
+    kind: relay_policy
+    consensus: false
+    description: >
+      1025 bytes > MAX_ANCHOR_PAYLOAD_RELAY = 1024.
+      Must be rejected at relay level with ban-score increment.
+      Note: this tx is still CONSENSUS-VALID (1025 < 65536).
+    anchor_outputs:
+      - payload_bytes: 1025
+    expected_relay: REJECT
+    reject_reason: ANCHOR_PAYLOAD_EXCEEDS_RELAY_CAP
+    ban_score_increment: true
+
+  - id: ANCHOR-RELAY-04
+    title: "RELAY-REJECT: single ANCHOR output, 65536-byte payload (consensus max, relay blocked)"
+    kind: relay_policy
+    consensus: false
+    description: >
+      65536 bytes = MAX_ANCHOR_PAYLOAD_SIZE (consensus valid).
+      Must be rejected at relay — well above 1024 relay cap.
+    anchor_outputs:
+      - payload_bytes: 65536
+    expected_relay: REJECT
+    reject_reason: ANCHOR_PAYLOAD_EXCEEDS_RELAY_CAP
+    ban_score_increment: true
+
+  - id: ANCHOR-RELAY-05
+    title: "RELAY-ACCEPT: 4 ANCHOR outputs, 512 bytes each (total 2048, at relay cap)"
+    kind: relay_policy
+    consensus: false
+    description: >
+      4 outputs x 512 bytes = 2048 total = MAX_ANCHOR_BYTES_PER_TX_RELAY.
+      Count = MAX_ANCHOR_OUTPUTS_PER_TX_RELAY. Both at boundary — accept.
+    anchor_outputs:
+      - payload_bytes: 512
+      - payload_bytes: 512
+      - payload_bytes: 512
+      - payload_bytes: 512
+    expected_relay: ACCEPT
+
+  - id: ANCHOR-RELAY-06
+    title: "RELAY-REJECT: 5 ANCHOR outputs (exceeds MAX_ANCHOR_OUTPUTS_PER_TX_RELAY = 4)"
+    kind: relay_policy
+    consensus: false
+    description: >
+      5 outputs with small payloads — count exceeds relay cap regardless of total bytes.
+    anchor_outputs:
+      - payload_bytes: 100
+      - payload_bytes: 100
+      - payload_bytes: 100
+      - payload_bytes: 100
+      - payload_bytes: 100
+    expected_relay: REJECT
+    reject_reason: ANCHOR_OUTPUT_COUNT_EXCEEDS_RELAY_CAP
+    ban_score_increment: false
+
+  - id: ANCHOR-RELAY-07
+    title: "RELAY-REJECT: 2 ANCHOR outputs, total 2049 bytes (exceeds MAX_ANCHOR_BYTES_PER_TX_RELAY)"
+    kind: relay_policy
+    consensus: false
+    description: >
+      Each output is within 1024 cap, but sum 1025+1024=2049 > MAX_ANCHOR_BYTES_PER_TX_RELAY=2048.
+    anchor_outputs:
+      - payload_bytes: 1025
+      - payload_bytes: 1024
+    expected_relay: REJECT
+    reject_reason: ANCHOR_TOTAL_BYTES_EXCEEDS_RELAY_CAP
+    ban_score_increment: false
+
+  - id: ANCHOR-RELAY-08
+    title: "CONSENSUS-VALID + RELAY-REJECT: block includes 65536-byte anchor (consensus accepts, relay would have blocked)"
+    kind: consensus_vs_relay
+    consensus: true
+    description: >
+      This test documents the intentional gap: a miner can include a block with a
+      65536-byte ANCHOR payload and it is CONSENSUS-VALID. Relay policy would have
+      blocked propagation of the originating tx, but if received as a block it MUST
+      be accepted. Relay caps are pre-mempool only — they do not affect block validation.
+    anchor_outputs:
+      - payload_bytes: 65536
+    expected_relay: REJECT         # would be rejected if seen as standalone tx
+    expected_block_validation: PASS  # MUST pass when received as part of a block
+    note: >
+      Validators MUST NOT apply relay policy during block validation.
+      MAX_ANCHOR_PAYLOAD_SIZE (consensus) is the only block-level anchor size constraint.

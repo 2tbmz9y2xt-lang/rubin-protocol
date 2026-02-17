@@ -88,17 +88,59 @@ This is policy guidance; it is not a consensus requirement.
 
 Because `CORE_ANCHOR` outputs are non-spendable and require `value = 0` by consensus (CANONICAL v1.1 §3.6), spam pressure must be handled primarily by policy.
 
-Recommended mempool policy:
-- require higher effective fees for transactions containing `CORE_ANCHOR` payload bytes,
-- deprioritize near-limit `anchor_data` unless fee/weight is competitive,
-- rate-limit submission from peers that relay repeated near-limit anchors.
+### 3.1 Relay-level hard cap (pre-mempool)
 
-Concrete starting point (non-consensus):
-- `ANCHOR_FEE_MULTIPLIER = 4×` over the base floor for the `anchor_data` bytes component.
-- “Near-limit” threshold: `|anchor_data| ≥ 0.9 × MAX_ANCHOR_PAYLOAD_SIZE`.
+Consensus allows up to `MAX_ANCHOR_PAYLOAD_SIZE = 65_536` bytes per ANCHOR output.
+Without a relay-level cap, a peer can relay transactions carrying 65 KB anchor payloads
+at near-zero weight cost (ANCHOR is non-spendable, adds no sig_cost), creating a cheap
+relay DoS vector even when block inclusion never happens.
+
+**Default relay policy — enforced before mempool admission (non-consensus):**
+
+```
+MAX_ANCHOR_PAYLOAD_RELAY      = 1_024   # bytes per single ANCHOR output
+MAX_ANCHOR_OUTPUTS_PER_TX_RELAY = 4    # max ANCHOR outputs accepted per tx
+MAX_ANCHOR_BYTES_PER_TX_RELAY = 2_048  # total anchor bytes across all outputs in tx
+```
+
+Enforcement steps on receiving a tx via P2P:
+
+1. For each output where `covenant_type = CORE_ANCHOR`:
+   - If `|anchor_data| > MAX_ANCHOR_PAYLOAD_RELAY` → **reject relay**, increment ban-score.
+2. If tx has more than `MAX_ANCHOR_OUTPUTS_PER_TX_RELAY` ANCHOR outputs → reject relay.
+3. If sum of `|anchor_data|` across ANCHOR outputs exceeds `MAX_ANCHOR_BYTES_PER_TX_RELAY` → reject relay.
+4. Log rejection for monitoring; do not propagate as a consensus error.
+
+Rationale for 1 KB: covers all legitimate ANCHOR use cases:
+- RETL batch state root: 32–64 bytes
+- Key migration shadow-binding envelope: ~200 bytes
+- HTLC preimage commitment: 32 bytes
+- Application metadata: up to ~800 bytes remaining
+
+Payloads above 1 KB per output indicate misconfigured clients or active spam.
+The consensus backstops `MAX_ANCHOR_PAYLOAD_SIZE = 65_536` and
+`MAX_ANCHOR_BYTES_PER_BLOCK = 131_072` remain unchanged.
+
+Operator override: operators with legitimate large-anchor needs (e.g., rollup DA)
+MAY raise `MAX_ANCHOR_PAYLOAD_RELAY` up to the consensus limit on their own nodes.
+They MUST document the override and accept the associated relay DoS risk locally.
+
+### 3.2 Mempool fee and prioritization policy
+
+Applies after relay cap passes:
+
+- Require higher effective fees for transactions containing `CORE_ANCHOR` payload bytes.
+- Deprioritize near-limit anchor_data unless fee/weight is competitive.
+- Rate-limit submission from peers that relay repeated near-limit anchors.
+
+Concrete starting point:
+
+- `ANCHOR_FEE_MULTIPLIER = 4x` over the base floor for the `anchor_data` bytes component.
+- "Near-limit" threshold: `|anchor_data| >= 0.9 x MAX_ANCHOR_PAYLOAD_RELAY` (relay cap, not consensus limit).
 - Per-peer rate limit: accept at most 1 near-limit ANCHOR tx per 10 seconds.
 
-Do **not** rely on “sender identity” in UTXO contexts; apply limits per peer / per connection rather than per “address”.
+Do **not** rely on "sender identity" in UTXO contexts; apply limits per peer / per connection rather than per "address".
+
 
 ## 4. RETL-specific policies (application-layer)
 
