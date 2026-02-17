@@ -195,6 +195,74 @@ RETL semantics are application-level (CANONICAL v1.1 §7). Nodes and operators M
 
 Avoid hard whitelists for validity; prefer prioritization over censorship.
 
+### 4.1 Sequencer bond trust model (non-consensus)
+
+**Trust model:** RETL sequencers are expected to be institutional operators (exchanges, custodians, licensed entities). Users select a sequencer the same way they select an exchange — based on reputation, legal accountability, and published SLAs. L1 does not enforce bond slashing; accountability is off-chain.
+
+This is an explicit design choice: on-chain slashing requires a new covenant type and consensus upgrade. For v1.1, institutional accountability is the primary enforcement mechanism.
+
+### 4.2 Canonical bond pattern (operational standard)
+
+To ensure observability and consistency across sequencer operators, v1.1 defines a canonical bond pattern. Sequencers SHOULD follow this pattern so watchtowers and indexers can monitor uniformly.
+
+**Step 1 — Bond UTXO creation:**
+
+```
+CORE_VAULT_V1 {
+  owner_key_id    = sequencer_key_id
+  lock_mode       = 0x00  (height lock)
+  lock_value      = registration_height + BOND_LOCK_BLOCKS
+  recovery_key_id = SHA3-256("RUBIN-UNSPENDABLE-v1")  // provably unspendable
+}
+```
+
+Recommended `BOND_LOCK_BLOCKS`: operator policy (suggested minimum: 2016 blocks, ~2 weeks).
+
+Using a provably-unspendable `recovery_key_id` means the bond cannot be slashed on-chain — it can only be withdrawn by the sequencer after the lock expires. This is an acknowledged limitation of the v1.1 trust model.
+
+**Step 2 — Per-batch commitment (each batch):**
+
+Each batch transaction MUST include a `CORE_ANCHOR` output with:
+
+```
+anchor_data =
+  ASCII("RUBINv1-retl-bond-commit/") ||
+  bond_outpoint_txid  : bytes32 ||
+  bond_outpoint_vout  : u32le   ||
+  batch_hash          : bytes32
+```
+
+Total anchor_data: 25 + 32 + 4 + 32 = 93 bytes. This creates an on-chain linkage between every batch and the active bond UTXO, allowing any observer to verify continuity.
+
+**Step 3 — Exit notice (before withdrawal):**
+
+Before spending the bond UTXO, the sequencer MUST publish an exit-notice `CORE_ANCHOR` at least `EXIT_NOTICE_BLOCKS` blocks prior:
+
+```
+anchor_data =
+  ASCII("RUBINv1-retl-bond-exit/") ||
+  sequencer_key_id : bytes32 ||
+  exit_height      : u64le
+```
+
+Total anchor_data: 24 + 32 + 8 = 64 bytes. Recommended `EXIT_NOTICE_BLOCKS`: suggested minimum 144 blocks (~24 hours).
+
+L1 consensus does NOT enforce this notice — it is an observable convention. Watchtowers that detect a bond withdrawal without a preceding exit-notice SHOULD flag the domain as untrusted and alert downstream clients.
+
+**Step 4 — Watchtower responsibilities (indexers/relay nodes):**
+
+Nodes and indexers SHOULD:
+- track active bond UTXOs per `retl_domain_id`,
+- verify per-batch `bond-commit` anchors are present and link to an active bond,
+- alert if a bond UTXO is spent without a preceding `bond-exit` notice,
+- alert if `bond-commit` anchors are absent for more than N consecutive batches (suggested N=3).
+
+### 4.3 Acknowledged limitations
+
+- A sequencer CAN withdraw bond via `owner_key_id` without following the exit-notice protocol. L1 will not reject this.
+- Slashing is reputational and legal, not cryptographic.
+- Future versions MAY introduce `CORE_BOND_V1` (a new covenant type via VERSION_BITS) to enforce exit windows on-chain. This is deferred to post-MVP phase.
+
 ## 5. Nonce replay hardening (mempool policy)
 
 Consensus `tx_nonce` replay prevention is per-block (CANONICAL v1.1 §3.4). To reduce spam and reorg churn, nodes MAY add:
