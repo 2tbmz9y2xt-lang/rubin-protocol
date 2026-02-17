@@ -10,6 +10,66 @@ reviews:
   review_status: true
   commit_status: true
   path_instructions:
+    - path: "clients/**"
+      instructions: |
+        Scope: Go and Rust client implementations.
+        Apply strict review for correctness, deterministic behavior, and protocol conformance.
+
+        For EVERY finding:
+        1) Classify severity exactly as P0, P1, or P2.
+        2) Cite exact file and line references using the format `path/to/file:line` or `path/to/file:line-line`.
+        3) Use two sections: "FACT:" and "ASSUMPTION:".
+
+        Hard constraints:
+        - Prefer deterministic, minimal patches over refactors.
+        - Flag protocol-state mismatches, consensus rule drift, and potential validation bypasses.
+        - If behavior diverges from spec wording, require explicit spec reference in the review.
+    - path: "conformance/**"
+      instructions: |
+        Scope: Conformance tests, fixtures, and runners.
+        Validate vector determinism, edge-case coverage, and expected-result consistency.
+
+        For EVERY finding:
+        1) Classify severity exactly as P0, P1, or P2.
+        2) Cite exact file and line references using the format `path/to/file:line` or `path/to/file:line-line`.
+        3) Use two sections: "FACT:" and "ASSUMPTION:".
+
+        Hard constraints:
+        - Require failing cases to assert precise error codes.
+        - Preserve backward determinism of existing vectors unless intentionally changed.
+        - Ask for clarification if assumptions are implicit.
+    - path: "crypto/**"
+      instructions: |
+        Scope: cryptography integration scripts, shim, and build/publish assets.
+        Focus on integrity, reproducibility, and secure execution assumptions.
+
+        For EVERY finding:
+        1) Classify severity exactly as P0, P1, or P2.
+        2) Cite exact file and line references using the format `path/to/file:line` or `path/to/file:line-line`.
+        3) Use two sections: "FACT:" and "ASSUMPTION:".
+
+        Hard constraints:
+        - Verify trust-root assumptions for fetched binaries/artifacts.
+        - Flag weak verification, missing pinning, and unsafe defaults.
+        - If changes touch verification policy, request an explicit trust model update in docs.
+    - path: ".github/**"
+      instructions: |
+        Scope: CI workflows and repository automation.
+        Enforce deterministic behavior and avoid hidden fail-open conditions.
+
+        For EVERY finding:
+        1) Classify severity exactly as P0, P1, or P2.
+        2) Cite exact file and line references using the format `path/to/file:line` or `path/to/file:line-line`.
+        3) Use two sections: "FACT:" and "ASSUMPTION:".
+    - path: "scripts/**"
+      instructions: |
+        Scope: repository helper scripts and automation utilities.
+        Focus on safety, error handling, and reproducibility.
+
+        For EVERY finding:
+        1) Classify severity exactly as P0, P1, or P2.
+        2) Cite exact file and line references using the format `path/to/file:line` or `path/to/file:line-line`.
+        3) Use two sections: "FACT:" and "ASSUMPTION:".
     - path: "spec/**"
       instructions: |
         Scope: L1 core specification and normative protocol text.
@@ -70,6 +130,12 @@ reviews:
         - Flag any normative sentence that uses "probably"/"should usually"/"maybe" in operational requirements.
 
   path_filters:
+    - "clients/**"
+    - "conformance/**"
+    - "crypto/**"
     - "spec/**"
     - "formal/**"
     - "operational/**"
+    - ".github/**"
+    - ".circleci/**"
+    - "scripts/**"
