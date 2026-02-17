@@ -22,14 +22,49 @@ fn extract_fenced_hex(doc: &str, key: &str) -> Result<String, String> {
     Ok(rest[..end].trim().to_string())
 }
 
+fn wolfcrypt_strict() -> bool {
+    std::env::var("RUBIN_WOLFCRYPT_STRICT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 fn load_crypto_provider() -> Result<Box<dyn CryptoProvider>, String> {
+    let strict = wolfcrypt_strict();
+
+    #[cfg(feature = "wolfcrypt-dylib")]
+    let has_shim_path = std::env::var("RUBIN_WOLFCRYPT_SHIM_PATH")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+
+    if strict {
+        #[cfg(feature = "wolfcrypt-dylib")]
+        {
+            if !has_shim_path {
+                return Err("RUBIN_WOLFCRYPT_STRICT=1 requires RUBIN_WOLFCRYPT_SHIM_PATH".into());
+            }
+            return Ok(Box::new(rubin_crypto::WolfcryptDylibProvider::load_from_env()?));
+        }
+        #[cfg(not(feature = "wolfcrypt-dylib"))]
+        {
+            return Err("RUBIN_WOLFCRYPT_STRICT=1 requires feature wolfcrypt-dylib".into());
+        }
+    }
+
     #[cfg(feature = "wolfcrypt-dylib")]
     {
-        if std::env::var("RUBIN_WOLFCRYPT_SHIM_PATH").is_ok() {
+        if has_shim_path {
             return Ok(Box::new(rubin_crypto::WolfcryptDylibProvider::load_from_env()?));
         }
     }
-    Ok(Box::new(rubin_crypto::DevStdCryptoProvider))
+
+    #[cfg(feature = "dev-std")]
+    {
+        return Ok(Box::new(rubin_crypto::DevStdCryptoProvider));
+    }
+    #[cfg(not(feature = "dev-std"))]
+    {
+        Err("no crypto provider available (enable dev-std or wolfcrypt-dylib)".into())
+    }
 }
 
 fn resolve_profile_path(profile_path: &str) -> Result<String, String> {

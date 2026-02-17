@@ -5,7 +5,8 @@ edition = "2024"
 license = "Apache-2.0"
 
 [features]
-default = []
+default = ["dev-std"]
+dev-std = ["rubin-crypto/dev-std"]
 wolfcrypt-dylib = ["rubin-crypto/wolfcrypt-dylib"]
 
 [dependencies]

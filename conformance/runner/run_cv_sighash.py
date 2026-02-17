@@ -78,24 +78,36 @@ def main() -> int:
     if not isinstance(tests, list) or not tests:
         raise ValueError(f"fixture has no tests: {fixture_path}")
 
+    rust_prefix: list[str] = [
+        "cargo",
+        "run",
+        "-q",
+        "--manifest-path",
+        "clients/rust/Cargo.toml",
+    ]
+    if os.environ.get("RUBIN_CONFORMANCE_RUST_NO_DEFAULT", "").strip() not in ("", "0", "false", "False"):
+        rust_prefix.append("--no-default-features")
+    rust_features = os.environ.get("RUBIN_CONFORMANCE_RUST_FEATURES", "").strip()
+    if rust_features:
+        rust_prefix.extend(["--features", rust_features])
+    rust_prefix.extend(["-p", "rubin-node", "--"])
+
     rust = ClientCmd(
         name="rust",
         cwd=repo_root,
-        argv_prefix=[
-            "cargo",
-            "run",
-            "-q",
-            "--manifest-path",
-            "clients/rust/Cargo.toml",
-            "-p",
-            "rubin-node",
-            "--",
-        ],
+        argv_prefix=rust_prefix,
     )
+
+    go_prefix: list[str] = ["go", "-C", "clients/go", "run"]
+    go_tags = os.environ.get("RUBIN_CONFORMANCE_GO_TAGS", "").strip()
+    if go_tags:
+        go_prefix.extend(["-tags", go_tags])
+    go_prefix.append("./node")
+
     go = ClientCmd(
         name="go",
         cwd=repo_root,
-        argv_prefix=["go", "-C", "clients/go", "run", "./node"],
+        argv_prefix=go_prefix,
     )
 
     failures: list[str] = []
