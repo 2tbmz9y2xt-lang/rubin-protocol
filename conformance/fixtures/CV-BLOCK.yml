@@ -1,94 +1,61 @@
 version: "1.1"
 gate: CV-BLOCK
 status: PASS
-description: "Header linkage, PoW, difficulty retarget, weight limits, and anchor caps"
+description: "Block validation via apply-block CLI (linkage, target/pow, merkle, timestamp bounds, anchor caps, coinbase rules, subsidy bound)"
 tests:
   - id: BLOCK-01
-    title: "Invalid prev_block_hash"
-    context:
-      block_height: 128
-      prev_block_hash: "0000000000000000000000000000000000000000000000000000000000000000"
+    title: "Invalid prev_block_hash => BLOCK_ERR_LINKAGE_INVALID"
+    context: { case: LINKAGE_INVALID }
     expected_error: BLOCK_ERR_LINKAGE_INVALID
     consensus: true
 
   - id: BLOCK-02
-    title: "Invalid PoW target mismatch"
-    context:
-      block_height: 256
-      block_hash: "invalid by proof-of-work predicate"
-    expected_error: BLOCK_ERR_POW_INVALID
-    consensus: true
-
-  - id: BLOCK-03
-    title: "Anchor per-output payload overflow"
-    context:
-      anchor_output:
-        covenant_type: CORE_ANCHOR
-        anchor_data_len: 65537
-    expected_error: TX_ERR_COVENANT_TYPE_INVALID
-    consensus: true
-
-  - id: BLOCK-04
-    title: "Anchor per-block payload overflow"
-    context:
-      anchor_block:
-        outputs: 2
-        each_anchor_len: 65536
-        total_anchor_len: 131072
-        additional_payload_len: 1
-    expected_error: BLOCK_ERR_ANCHOR_BYTES_EXCEEDED
-    consensus: true
-
-  - id: BLOCK-05
-    title: "Block weight overflow"
-    context:
-      sum_weight: 4000001
-    expected_error: BLOCK_ERR_WEIGHT_EXCEEDED
-    consensus: true
-
-  - id: BLOCK-06
-    title: "Difficulty retarget mismatch in periodic window"
-    context:
-      block_height: 4032
-      expected_target: "different from header target"
+    title: "Invalid target mismatch => BLOCK_ERR_TARGET_INVALID"
+    context: { case: TARGET_INVALID }
     expected_error: BLOCK_ERR_TARGET_INVALID
     consensus: true
 
+  - id: BLOCK-03
+    title: "PoW invalid (target=0) => BLOCK_ERR_POW_INVALID"
+    context: { case: POW_INVALID }
+    expected_error: BLOCK_ERR_POW_INVALID
+    consensus: true
+
+  - id: BLOCK-04
+    title: "Merkle mismatch => BLOCK_ERR_MERKLE_INVALID"
+    context: { case: MERKLE_INVALID }
+    expected_error: BLOCK_ERR_MERKLE_INVALID
+    consensus: true
+
+  - id: BLOCK-05
+    title: "Anchor bytes exceeded => BLOCK_ERR_ANCHOR_BYTES_EXCEEDED"
+    context: { case: ANCHOR_BYTES_EXCEEDED }
+    expected_error: BLOCK_ERR_ANCHOR_BYTES_EXCEEDED
+    consensus: true
+
+  - id: BLOCK-06
+    title: "Coinbase invalid: second coinbase tx present => BLOCK_ERR_COINBASE_INVALID"
+    context: { case: COINBASE_INVALID_TWO_COINBASE }
+    expected_error: BLOCK_ERR_COINBASE_INVALID
+    consensus: true
+
   - id: BLOCK-07
-    title: "Median-time-vs-timestamp old bound violation"
-    context:
-      median_time: 1700000010
-      block_timestamp: 1700000010
+    title: "Median-time-vs-timestamp old bound violation => BLOCK_ERR_TIMESTAMP_OLD"
+    context: { case: TIMESTAMP_OLD }
     expected_error: BLOCK_ERR_TIMESTAMP_OLD
     consensus: true
 
   - id: BLOCK-08
-    title: "Future timestamp cap violation"
+    title: "Future timestamp cap violation => BLOCK_ERR_TIMESTAMP_FUTURE"
     context:
+      case: TIMESTAMP_FUTURE
       local_time: 1700000000
-      block_timestamp: 1700072001
-      max_drift: 7200
     expected_error: BLOCK_ERR_TIMESTAMP_FUTURE
     consensus: true
 
   - id: BLOCK-09
-    title: "Difficulty retarget arithmetic width (320-bit intermediate products)"
-    context:
-      window:
-        target_old_hex: "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-        T_expected: 1209600
-        T_actual: 12096000
-      expected_target_new_hex: "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffc"
-    expected_code: PASS
+    title: "Subsidy exceeded => BLOCK_ERR_SUBSIDY_EXCEEDED"
+    context: { case: SUBSIDY_EXCEEDED }
+    expected_error: BLOCK_ERR_SUBSIDY_EXCEEDED
     consensus: true
 
-  - id: BLOCK-10
-    title: "Coinbase subsidy schedule at halving boundaries"
-    context:
-      subsidy:
-        h_0: 5000000000
-        h_209999: 5000000000
-        h_210000: 2500000000
-        h_420000: 1250000000
-    expected_code: PASS
-    consensus: true

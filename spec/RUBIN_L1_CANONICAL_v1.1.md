@@ -71,6 +71,7 @@ Development status note (non-normative):
 - `VERIFY_COST_SLH_DSA = 64`
 - `MAX_P2PK_COVENANT_DATA = 33`
 - `MAX_TIMELOCK_COVENANT_DATA = 9`
+- `MAX_VAULT_COVENANT_DATA = 81`
 - `MAX_RELAY_MSG_BYTES = 8_388_608`
 - `MIN_RELAY_FEE_RATE = 1` (non-consensus relay policy)
 
@@ -221,6 +222,8 @@ For each input, exactly one witness item corresponds to its authorization data b
 - For an input spending `CORE_HTLC_V1`, `script_sig_len` MUST be either:
   - `0` (refund path), or
   - `32` (claim path; `script_sig` carries the 32-byte preimage).
+- For an input spending `CORE_HTLC_V2`, `script_sig_len` MUST be `0`.
+  The preimage is delivered via a `CORE_ANCHOR` envelope output in the same transaction (see §3.6 and §4 rule 4a).
 
 For covenant types that do not require key-based authorization (`CORE_TIMELOCK_V1`),
 the corresponding witness item MUST be a sentinel:
@@ -385,6 +388,7 @@ The following `covenant_type` values are valid:
 - `0x0002` `CORE_ANCHOR`
 - `0x0100` `CORE_HTLC_V1`
 - `0x0101` `CORE_VAULT_V1`
+- `0x0102` `CORE_HTLC_V2`
 - `0x00ff` `CORE_RESERVED_FUTURE`
 
 Semantics:
@@ -419,11 +423,41 @@ Semantics:
   - `covenant_data_len` MUST be exactly `32 + 1 + 8 + 32 + 32 = 105`.
 - `CORE_VAULT_V1`:
   - Purpose: fixed-template owner-bound vault with delayed recovery, intended for safer self-custody and key-compromise recovery.
-  - `covenant_data = owner_key_id:bytes32 || lock_mode:u8 || lock_value:u64le || recovery_key_id:bytes32`.
+  - `covenant_data` has two encodings (backward compatible):
+    - Legacy: `owner_key_id:bytes32 || lock_mode:u8 || lock_value:u64le || recovery_key_id:bytes32` (73 bytes).
+    - Extended: `owner_key_id:bytes32 || spend_delay:u64le || lock_mode:u8 || lock_value:u64le || recovery_key_id:bytes32` (81 bytes).
+  - `spend_delay` is a relative height delay (in blocks) for the owner path, computed from the output's `creation_height` stored in the spendable UTXO set:
+    - If `spend_delay = 0`, owner path is immediate (legacy behavior).
+    - If `spend_delay > 0`, owner path is forbidden until `height(B) ≥ o.creation_height + spend_delay`.
   - `lock_mode = 0x00` for height lock, `0x01` for UNIX-time lock.
   - Owner path: `owner_key_id` may spend at any time (no timelock check).
   - Recovery path: `recovery_key_id` may spend only when the lock condition is met.
-  - `covenant_data_len` MUST be exactly `32 + 1 + 8 + 32 = 73`.
+  - `covenant_data_len` MUST be exactly `73` or `81`:
+    - `73` implies `spend_delay = 0`.
+    - `81` parses `spend_delay` as defined above.
+- `CORE_HTLC_V2`:
+  - Deployment-gated: MUST be rejected as `TX_ERR_DEPLOYMENT_INACTIVE` unless deployment `htlc_anchor_v1` is ACTIVE at the validated height.
+  - Purpose: HTLC with preimage delivered on-chain via a `CORE_ANCHOR` envelope, rather than in `script_sig`. Enables anchor-based atomic swaps without exposing the preimage in the input witness.
+  - `covenant_data = hash:bytes32 || lock_mode:u8 || lock_value:u64le || claim_key_id:bytes32 || refund_key_id:bytes32`.
+  - `hash = SHA3-256(preimage32)` for a 32-byte secret preimage.
+  - `lock_mode = 0x00` for height lock, `0x01` for UNIX-time lock.
+  - `claim_key_id != refund_key_id` MUST be enforced; equal values MUST be rejected as `TX_ERR_PARSE`.
+  - `covenant_data_len` MUST be exactly `32 + 1 + 8 + 32 + 32 = 105`.
+  - Claim path (`script_sig_len = 0`, preimage in ANCHOR envelope):
+    - Scan all `CORE_ANCHOR` outputs in the transaction for a matching envelope:
+      - A matching envelope has `|anchor_data| = 54` AND `anchor_data[0:22] = ASCII("RUBINv1-htlc-preimage/")`.
+    - If no matching envelope is found: reject as `TX_ERR_PARSE`.
+    - If two or more matching envelopes are found: reject as `TX_ERR_PARSE` (non-deterministic).
+    - If exactly one matching envelope: `preimage32 = anchor_data[22:54]`.
+      - Require `SHA3-256(preimage32) = hash`; otherwise reject as `TX_ERR_SIG_INVALID`.
+      - Witness public key hash MUST equal `claim_key_id`; otherwise reject as `TX_ERR_SIG_INVALID`.
+  - Refund path (determined by witness key matching `refund_key_id`):
+    - If no matching ANCHOR envelope and witness public key hash equals `refund_key_id`:
+      - `lock_mode = 0x00`: require `height(B) >= lock_value`.
+      - `lock_mode = 0x01`: require `timestamp(B) >= lock_value`.
+      - If lock condition is not met: reject as `TX_ERR_TIMELOCK_NOT_MET`.
+    - If lock condition met and key matches `refund_key_id`: proceed to signature verification.
+  - Non-matching `CORE_ANCHOR` outputs in the same transaction are permitted and do not affect HTLC_V2 validation.
 - `CORE_RESERVED_FUTURE`: forbidden until explicit activation by consensus.
 
 Any unknown or future `covenant_type` MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
@@ -475,10 +509,33 @@ For each non-coinbase input spending output `o`:
      - `lock_mode = 0x00`: require `height(B) ≥ lock_value`;
      - `lock_mode = 0x01`: require `timestamp(B) ≥ lock_value`;
      - if lock condition is not met, reject with `TX_ERR_TIMELOCK_NOT_MET`.
+4a. If `o.covenant_type = CORE_HTLC_V2`:
+   - If deployment `htlc_anchor_v1` is NOT ACTIVE at `height(B)`: reject as `TX_ERR_DEPLOYMENT_INACTIVE`.
+   - `script_sig_len` MUST be `0`; otherwise reject as `TX_ERR_PARSE`.
+   - parse `hash || lock_mode || lock_value || claim_key_id || refund_key_id` (105 bytes);
+     if `covenant_data_len != 105`, reject as `TX_ERR_PARSE`;
+     if `claim_key_id = refund_key_id`, reject as `TX_ERR_PARSE`;
+     any `lock_mode` other than `0x00` or `0x01` MUST be `TX_ERR_PARSE`.
+   - Determine path by scanning ANCHOR envelopes:
+     - Let `matching` = { output `a` in tx outputs : `a.covenant_type = CORE_ANCHOR` AND `|a.anchor_data| = 54` AND `a.anchor_data[0:22] = ASCII("RUBINv1-htlc-preimage/")` }.
+     - If `|matching| >= 2`: reject as `TX_ERR_PARSE` (ambiguous preimage — non-deterministic).
+     - If `|matching| = 1` (claim path):
+       - `preimage32 = matching[0].anchor_data[22:54]`.
+       - Require `SHA3-256(preimage32) = hash`; otherwise reject as `TX_ERR_SIG_INVALID`.
+       - Witness public key hash MUST equal `claim_key_id`; otherwise reject as `TX_ERR_SIG_INVALID`.
+     - If `|matching| = 0` (refund path):
+       - Witness public key hash MUST equal `refund_key_id`; otherwise reject as `TX_ERR_SIG_INVALID`.
+       - `lock_mode = 0x00`: require `height(B) ≥ lock_value`.
+       - `lock_mode = 0x01`: require `timestamp(B) ≥ lock_value`.
+       - If lock condition is not met: reject as `TX_ERR_TIMELOCK_NOT_MET`.
 5. If `o.covenant_type = CORE_VAULT_V1`:
-   - parse `owner_key_id || lock_mode || lock_value || recovery_key_id`;
+   - parse `owner_key_id || spend_delay || lock_mode || lock_value || recovery_key_id` with backward compatibility:
+     - `covenant_data_len = 73`: parse legacy form and set `spend_delay = 0`.
+     - `covenant_data_len = 81`: parse extended form.
    - any other `lock_mode` MUST be `TX_ERR_PARSE`;
-   - If witness public key hash equals `owner_key_id` (owner path): accept (no timelock check).
+   - If witness public key hash equals `owner_key_id` (owner path):
+     - If `spend_delay = 0`: accept (legacy behavior).
+     - Else require `height(B) ≥ o.creation_height + spend_delay`; if not met, reject with `TX_ERR_TIMELOCK_NOT_MET`.
    - Else if witness public key hash equals `recovery_key_id` (recovery path):
      - `lock_mode = 0x00`: require `height(B) ≥ lock_value`;
      - `lock_mode = 0x01`: require `timestamp(B) ≥ lock_value`;

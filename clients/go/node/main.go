@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -21,6 +22,8 @@ type applyUTXOUtxoEntry struct {
 	Value        uint64 `json:"value"`
 	CovenantType uint16 `json:"covenant_type"`
 	CovenantData string `json:"covenant_data"`
+	CreationHeight    uint64 `json:"creation_height"`
+	CreatedByCoinbase bool   `json:"created_by_coinbase"`
 }
 
 type applyUTXOContext struct {
@@ -31,6 +34,32 @@ type applyUTXOContext struct {
 	SuiteID02Active bool                 `json:"suite_id_02_active"`
 	TxHex           string               `json:"tx_hex"`
 	UTXOSet         []applyUTXOUtxoEntry `json:"utxo_set"`
+}
+
+type applyBlockContext struct {
+	ChainIDHex         string               `json:"chain_id_hex"`
+	Profile            string               `json:"profile"`
+	BlockHeight        uint64               `json:"block_height"`
+	LocalTime          uint64               `json:"local_time"`
+	LocalTimeSet       bool                 `json:"local_time_set"`
+	SuiteID02Active    bool                 `json:"suite_id_02_active"`
+	AncestorHeadersHex []string             `json:"ancestor_headers_hex"`
+	BlockHex           string               `json:"block_hex"`
+	UTXOSet            []applyUTXOUtxoEntry `json:"utxo_set"`
+}
+
+func parseBlockHeaderBytesStrict(b []byte) (consensus.BlockHeader, error) {
+	if len(b) != 4+32+32+8+32+8 {
+		return consensus.BlockHeader{}, fmt.Errorf("block-header-bytes: expected 116 bytes, got %d", len(b))
+	}
+	var h consensus.BlockHeader
+	h.Version = binary.LittleEndian.Uint32(b[0:4])
+	copy(h.PrevBlockHash[:], b[4:36])
+	copy(h.MerkleRoot[:], b[36:68])
+	h.Timestamp = binary.LittleEndian.Uint64(b[68:76])
+	copy(h.Target[:], b[76:108])
+	h.Nonce = binary.LittleEndian.Uint64(b[108:116])
+	return h, nil
 }
 
 func extractFencedHex(doc string, key string) (string, error) {
@@ -207,6 +236,7 @@ func cmdVerify(
 	inputValue uint64,
 	prevoutCovenantType uint16,
 	prevoutCovenantData []byte,
+	prevoutCreationHeight uint64,
 	chainHeight uint64,
 	chainTimestamp uint64,
 	suiteID02Active bool,
@@ -239,6 +269,7 @@ func cmdVerify(
 		inputIndex,
 		inputValue,
 		&prevout,
+		prevoutCreationHeight,
 		chainHeight,
 		chainTimestamp,
 		suiteID02Active,
@@ -367,10 +398,14 @@ func cmdApplyUTXO(contextPath string) error {
 			CovenantType: entry.CovenantType,
 			CovenantData: covenantData,
 		}
+		creationHeight := entry.CreationHeight
+		if creationHeight == 0 {
+			creationHeight = ctx.ChainHeight
+		}
 		utxo[consensus.TxOutPoint{TxID: prevTxid, Vout: entry.Vout}] = consensus.UtxoEntry{
 			Output:            out,
-			CreationHeight:    ctx.ChainHeight,
-			CreatedByCoinbase: false,
+			CreationHeight:    creationHeight,
+			CreatedByCoinbase: entry.CreatedByCoinbase,
 		}
 	}
 
@@ -385,7 +420,108 @@ func cmdApplyUTXO(contextPath string) error {
 	)
 }
 
-const usageCommands = "commands: version | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse --tx-hex <hex> [--max-witness-bytes <u64>] | txid --tx-hex <hex> | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify --tx-hex <hex> --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--chain-id-hex <hex64> | --profile <path>] | apply-utxo --context-json <path>"
+func cmdApplyBlock(contextPath string) error {
+	raw, err := os.ReadFile(contextPath) // #nosec G304 -- path is explicitly provided by operator.
+	if err != nil {
+		return fmt.Errorf("context-json: %w", err)
+	}
+	var ctx applyBlockContext
+	if err := json.Unmarshal(raw, &ctx); err != nil {
+		return fmt.Errorf("context-json: %w", err)
+	}
+	if ctx.BlockHex == "" {
+		return fmt.Errorf("missing required field: block_hex")
+	}
+
+	p, cleanup, err := loadCryptoProvider()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	var chainID [32]byte
+	switch {
+	case ctx.ChainIDHex != "" && ctx.Profile != "":
+		return fmt.Errorf("use exactly one of chain_id_hex or profile in context-json")
+	case ctx.ChainIDHex != "":
+		decoded, err := parseChainIDHex(ctx.ChainIDHex)
+		if err != nil {
+			return err
+		}
+		chainID = decoded
+	case ctx.Profile != "":
+		derived, err := deriveChainID(p, ctx.Profile)
+		if err != nil {
+			return err
+		}
+		chainID = derived
+	default:
+		derived, err := deriveChainID(p, defaultChainProfile)
+		if err != nil {
+			return err
+		}
+		chainID = derived
+	}
+
+	blockBytes, err := hexDecodeStrict(ctx.BlockHex)
+	if err != nil {
+		return fmt.Errorf("block-hex: %w", err)
+	}
+	block, err := consensus.ParseBlockBytes(blockBytes)
+	if err != nil {
+		return err
+	}
+
+	ancestors := make([]consensus.BlockHeader, 0, len(ctx.AncestorHeadersHex))
+	for _, headerHex := range ctx.AncestorHeadersHex {
+		hb, err := hexDecodeStrict(headerHex)
+		if err != nil {
+			return fmt.Errorf("ancestor_headers_hex: %w", err)
+		}
+		h, err := parseBlockHeaderBytesStrict(hb)
+		if err != nil {
+			return err
+		}
+		ancestors = append(ancestors, h)
+	}
+
+	utxo := make(map[consensus.TxOutPoint]consensus.UtxoEntry, len(ctx.UTXOSet))
+	for _, entry := range ctx.UTXOSet {
+		prevTxid, err := parseTxIDHex(entry.Txid)
+		if err != nil {
+			return err
+		}
+		covenantData, err := hexDecodeStrict(entry.CovenantData)
+		if err != nil {
+			return fmt.Errorf("covenant-data-hex: %w", err)
+		}
+		out := consensus.TxOutput{
+			Value:        entry.Value,
+			CovenantType: entry.CovenantType,
+			CovenantData: covenantData,
+		}
+		creationHeight := entry.CreationHeight
+		if creationHeight == 0 {
+			creationHeight = ctx.BlockHeight
+		}
+		utxo[consensus.TxOutPoint{TxID: prevTxid, Vout: entry.Vout}] = consensus.UtxoEntry{
+			Output:            out,
+			CreationHeight:    creationHeight,
+			CreatedByCoinbase: entry.CreatedByCoinbase,
+		}
+	}
+
+	blockCtx := consensus.BlockValidationContext{
+		Height:           ctx.BlockHeight,
+		AncestorHeaders:  ancestors,
+		LocalTime:        ctx.LocalTime,
+		LocalTimeSet:     ctx.LocalTimeSet,
+		SuiteIDSLHActive: ctx.SuiteID02Active,
+	}
+	return consensus.ApplyBlock(p, chainID, &block, utxo, blockCtx)
+}
+
+const usageCommands = "commands: version | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse --tx-hex <hex> [--max-witness-bytes <u64>] | txid --tx-hex <hex> | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify --tx-hex <hex> --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-id-hex <hex64> | --profile <path>] | apply-utxo --context-json <path> | apply-block --context-json <path>"
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage: rubin-node <command> [args]")
@@ -485,6 +621,7 @@ func cmdVerifyMain(argv []string) int {
 	inputValue := fs.Uint64("input-value", 0, "input UTXO value (u64)")
 	prevoutCovenantType := fs.Uint("prevout-covenant-type", 0, "prevout covenant type")
 	prevoutCovenantDataHex := fs.String("prevout-covenant-data-hex", "", "hex-encoded prevout covenant bytes")
+	prevoutCreationHeight := fs.Uint64("prevout-creation-height", 0, "prevout creation height (for relative covenants)")
 	chainHeight := fs.Uint64("chain-height", 0, "chain height context")
 	chainTimestamp := fs.Uint64("chain-timestamp", 0, "chain timestamp context")
 	suiteID02Active := fs.Bool("suite-id-02-active", false, "treat suite_id 0x02 as active")
@@ -547,6 +684,7 @@ func cmdVerifyMain(argv []string) int {
 		*inputValue,
 		uint16(*prevoutCovenantType),
 		covenantData,
+		*prevoutCreationHeight,
 		*chainHeight,
 		*chainTimestamp,
 		*suiteID02Active,
@@ -604,6 +742,22 @@ func cmdApplyUTXOMain(argv []string) int {
 	return 0
 }
 
+func cmdApplyBlockMain(argv []string) int {
+	fs := flag.NewFlagSet("apply-block", flag.ExitOnError)
+	contextPath := fs.String("context-json", "", "path to JSON context payload")
+	_ = fs.Parse(argv)
+	if *contextPath == "" {
+		fmt.Fprintln(os.Stderr, "missing required flag: --context-json")
+		return 2
+	}
+	if err := cmdApplyBlock(*contextPath); err != nil {
+		fmt.Fprintln(os.Stderr, "apply-block error:", err)
+		return 1
+	}
+	fmt.Println("OK")
+	return 0
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -630,6 +784,8 @@ func main() {
 		exitCode = cmdVerifyMain(argv)
 	case "apply-utxo":
 		exitCode = cmdApplyUTXOMain(argv)
+	case "apply-block":
+		exitCode = cmdApplyBlockMain(argv)
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command")
 		printUsage()

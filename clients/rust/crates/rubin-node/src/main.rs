@@ -194,6 +194,7 @@ fn cmd_verify(
     input_value: u64,
     prevout_covenant_type: u16,
     prevout_covenant_data: Vec<u8>,
+    prevout_creation_height: u64,
     chain_height: u64,
     chain_timestamp: u64,
     suite_id_02_active: bool,
@@ -213,6 +214,7 @@ fn cmd_verify(
         input_index as usize,
         input_value,
         &prevout,
+        prevout_creation_height,
         chain_height,
         chain_timestamp,
         suite_id_02_active,
@@ -265,6 +267,32 @@ fn parse_hex32(s: &str) -> Result<[u8; 32], String> {
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
     Ok(out)
+}
+
+fn parse_block_header_bytes_strict(bytes: &[u8]) -> Result<rubin_consensus::BlockHeader, String> {
+    if bytes.len() != 4 + 32 + 32 + 8 + 32 + 8 {
+        return Err(format!(
+            "block-header-bytes: expected 116 bytes, got {}",
+            bytes.len()
+        ));
+    }
+    let version = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+    let mut prev_block_hash = [0u8; 32];
+    prev_block_hash.copy_from_slice(&bytes[4..36]);
+    let mut merkle_root = [0u8; 32];
+    merkle_root.copy_from_slice(&bytes[36..68]);
+    let timestamp = u64::from_le_bytes(bytes[68..76].try_into().unwrap());
+    let mut target = [0u8; 32];
+    target.copy_from_slice(&bytes[76..108]);
+    let nonce = u64::from_le_bytes(bytes[108..116].try_into().unwrap());
+    Ok(rubin_consensus::BlockHeader {
+        version,
+        prev_block_hash,
+        merkle_root,
+        timestamp,
+        target,
+        nonce,
+    })
 }
 
 fn cmd_apply_utxo(context_path: &str) -> Result<(), String> {
@@ -333,16 +361,28 @@ fn cmd_apply_utxo(context_path: &str) -> Result<(), String> {
             } else {
                 rubin_consensus::hex_decode_strict(covenant_data_hex)?
             };
+            let creation_height = entry
+                .get("creation_height")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(chain_height);
+            let created_by_coinbase = entry
+                .get("created_by_coinbase")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
 
             utxo.insert(
                 rubin_consensus::TxOutPoint {
                     txid: parse_hex32(txid_str)?,
                     vout,
                 },
-                rubin_consensus::TxOutput {
-                    value,
-                    covenant_type,
-                    covenant_data,
+                rubin_consensus::UtxoEntry {
+                    output: rubin_consensus::TxOutput {
+                        value,
+                        covenant_type,
+                        covenant_data,
+                    },
+                    creation_height,
+                    created_by_coinbase,
                 },
             );
         }
@@ -357,6 +397,126 @@ fn cmd_apply_utxo(context_path: &str) -> Result<(), String> {
         chain_timestamp,
         suite_id_02_active,
     )?;
+    Ok(())
+}
+
+fn cmd_apply_block(context_path: &str) -> Result<(), String> {
+    let raw = fs::read_to_string(context_path).map_err(|e| format!("context-json: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("context-json: {e}"))?;
+
+    let block_hex = v
+        .get("block_hex")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "missing required field: block_hex".to_string())?;
+    let block_height = v
+        .get("block_height")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let local_time = v.get("local_time").and_then(|value| value.as_u64()).unwrap_or(0);
+    let local_time_set = v
+        .get("local_time_set")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let suite_id_02_active = v
+        .get("suite_id_02_active")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+
+    let block_bytes = rubin_consensus::hex_decode_strict(block_hex)?;
+    let block = rubin_consensus::parse_block_bytes(&block_bytes)?;
+    let provider = load_crypto_provider()?;
+
+    let chain_id = match (
+        v.get("chain_id_hex").and_then(|value| value.as_str()),
+        v.get("profile").and_then(|value| value.as_str()),
+    ) {
+        (Some(_), Some(_)) => return Err("use exactly one of chain_id_hex or profile".to_string()),
+        (Some(chain_id_hex), None) => parse_chain_id_hex(chain_id_hex)?,
+        (None, Some(profile)) => derive_chain_id(provider.as_ref(), profile)?,
+        (None, None) => derive_chain_id(provider.as_ref(), DEFAULT_CHAIN_PROFILE)?,
+    };
+
+    let mut ancestors = Vec::new();
+    if let Some(entries) = v
+        .get("ancestor_headers_hex")
+        .and_then(|value| value.as_array())
+    {
+        for entry in entries {
+            let hx = entry
+                .as_str()
+                .ok_or_else(|| "ancestor_headers_hex entry must be string".to_string())?;
+            let hb = rubin_consensus::hex_decode_strict(hx)?;
+            ancestors.push(parse_block_header_bytes_strict(&hb)?);
+        }
+    }
+
+    let mut utxo = HashMap::new();
+    if let Some(entries) = v.get("utxo_set").and_then(|value| value.as_array()) {
+        for entry in entries {
+            let txid_str = entry
+                .get("txid")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "utxo_set entry missing txid".to_string())?;
+            let vout = entry
+                .get("vout")
+                .and_then(|value| value.as_u64())
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| "utxo_set entry missing vout".to_string())?;
+            let value = entry
+                .get("value")
+                .and_then(|value| value.as_u64())
+                .ok_or_else(|| "utxo_set entry missing value".to_string())?;
+            let covenant_type = entry
+                .get("covenant_type")
+                .and_then(|value| value.as_u64())
+                .and_then(|value| u16::try_from(value).ok())
+                .ok_or_else(|| "utxo_set entry missing covenant_type".to_string())?;
+            let covenant_data_hex = entry
+                .get("covenant_data")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let covenant_data = if covenant_data_hex.is_empty() {
+                Vec::new()
+            } else {
+                rubin_consensus::hex_decode_strict(covenant_data_hex)?
+            };
+            let creation_height = entry
+                .get("creation_height")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(block_height);
+            let created_by_coinbase = entry
+                .get("created_by_coinbase")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+
+            utxo.insert(
+                rubin_consensus::TxOutPoint {
+                    txid: parse_hex32(txid_str)?,
+                    vout,
+                },
+                rubin_consensus::UtxoEntry {
+                    output: rubin_consensus::TxOutput {
+                        value,
+                        covenant_type,
+                        covenant_data,
+                    },
+                    creation_height,
+                    created_by_coinbase,
+                },
+            );
+        }
+    }
+
+    let ctx = rubin_consensus::BlockValidationContext {
+        height: block_height,
+        ancestor_headers: ancestors,
+        local_time,
+        local_time_set,
+        suite_id_02_active,
+    };
+
+    rubin_consensus::apply_block(provider.as_ref(), &chain_id, &block, &mut utxo, &ctx)?;
     Ok(())
 }
 
@@ -385,13 +545,14 @@ fn usage() {
     eprintln!("  chain-id --profile <path>");
     eprintln!("  txid --tx-hex <hex>");
     eprintln!("  apply-utxo --context-json <path>");
+    eprintln!("  apply-block --context-json <path>");
     eprintln!("  compactsize --encoded-hex <hex>");
     eprintln!("  parse --tx-hex <hex> [--max-witness-bytes <u64>]");
     eprintln!(
         "  sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>]"
     );
     eprintln!(
-        "  verify --tx-hex <hex> --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--chain-height <u64> | --chain-timestamp <u64> | --chain-id-hex <hex64> | --profile <path> | --suite-id-02-active]"
+        "  verify --tx-hex <hex> --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-height <u64> | --chain-timestamp <u64> | --chain-id-hex <hex64> | --profile <path> | --suite-id-02-active]"
     );
 }
 
@@ -535,6 +696,31 @@ fn cmd_apply_utxo_main(args: &[String]) -> i32 {
     }
 }
 
+fn cmd_apply_block_main(args: &[String]) -> i32 {
+    let context_path = match get_flag(args, "--context-json") {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            eprintln!("missing required flag: --context-json");
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+
+    match cmd_apply_block(&context_path) {
+        Ok(()) => {
+            println!("OK");
+            0
+        }
+        Err(e) => {
+            eprintln!("apply-block error: {e}");
+            1
+        }
+    }
+}
+
 fn cmd_verify_main(args: &[String]) -> i32 {
     let tx_hex = match get_flag(args, "--tx-hex") {
         Ok(Some(v)) => v,
@@ -623,6 +809,20 @@ fn cmd_verify_main(args: &[String]) -> i32 {
             return 2;
         }
     };
+    let prevout_creation_height = match get_flag(args, "--prevout-creation-height") {
+        Ok(Some(v)) => match v.parse::<u64>() {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("--prevout-creation-height: {e}");
+                return 2;
+            }
+        },
+        Ok(None) => chain_height,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
     let suite_id_02_active = flag_present(args, "--suite-id-02-active");
 
     let chain_id = if let Some(hex) = chain_id_hex {
@@ -658,6 +858,7 @@ fn cmd_verify_main(args: &[String]) -> i32 {
         input_value,
         prevout_covenant_type,
         prevout_covenant_data,
+        prevout_creation_height,
         chain_height,
         chain_timestamp,
         suite_id_02_active,
@@ -768,6 +969,7 @@ fn dispatch(cmd: &str, args: &[String]) -> i32 {
         "txid" => cmd_txid_main(args),
         "parse" => cmd_parse_main(args),
         "apply-utxo" => cmd_apply_utxo_main(args),
+        "apply-block" => cmd_apply_block_main(args),
         "compactsize" => cmd_compactsize_main(args),
         "sighash" => cmd_sighash_main(args),
         "verify" => cmd_verify_main(args),

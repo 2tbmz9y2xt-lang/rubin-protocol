@@ -16,6 +16,7 @@ const (
 	CORE_ANCHOR          = 0x0002
 	CORE_HTLC_V1         = 0x0100
 	CORE_VAULT_V1        = 0x0101
+	CORE_HTLC_V2         = 0x0102
 	CORE_RESERVED_FUTURE = 0x00ff
 
 	MAX_BLOCK_WEIGHT           = 4_000_000
@@ -993,7 +994,12 @@ func merkleRootTxIDs(p crypto.CryptoProvider, txs []*Tx) ([32]byte, error) {
 	}
 	level := make([][32]byte, 0, len(txs))
 	for _, tx := range txs {
-		level = append(level, TxID(p, tx))
+		// Leaf domain separation (spec §5.1.1): Leaf = SHA3-256(0x00 || txid)
+		txid := TxID(p, tx)
+		leaf := make([]byte, 0, 1+len(txid))
+		leaf = append(leaf, 0x00)
+		leaf = append(leaf, txid[:]...)
+		level = append(level, p.SHA3_256(leaf))
 	}
 	for len(level) > 1 {
 		next := make([][32]byte, 0, (len(level)+1)/2)
@@ -1157,7 +1163,7 @@ func validateOutputCovenantConstraints(output TxOutput) error {
 			return fmt.Errorf("TX_ERR_PARSE")
 		}
 	case CORE_VAULT_V1:
-		if len(output.CovenantData) != 73 {
+		if len(output.CovenantData) != 73 && len(output.CovenantData) != 81 {
 			return fmt.Errorf("TX_ERR_PARSE")
 		}
 	case CORE_RESERVED_FUTURE:
@@ -1280,6 +1286,7 @@ func ApplyTx(
 			uint32(i),
 			prevEntry.Output.Value,
 			&prevEntry.Output,
+			prevEntry.CreationHeight,
 			chainHeight,
 			chainTimestamp,
 			suiteIDSLHActive,
@@ -1359,6 +1366,7 @@ func ValidateInputAuthorization(
 	inputIndex uint32,
 	prevValue uint64,
 	prevout *TxOutput,
+	prevCreationHeight uint64,
 	chainHeight uint64,
 	chainTimestamp uint64,
 	suiteIDSLHActive bool,
@@ -1384,6 +1392,9 @@ func ValidateInputAuthorization(
 	case CORE_P2PK:
 		if err := isScriptSigZeroLen("CORE_P2PK", len(input.ScriptSig)); err != nil {
 			return err
+		}
+		if witness.SuiteID == SUITE_ID_SENTINEL {
+			return fmt.Errorf("TX_ERR_SIG_ALG_INVALID")
 		}
 		if err := checkWitnessFormat(witness, suiteIDSLHActive); err != nil {
 			return err
@@ -1422,6 +1433,9 @@ func ValidateInputAuthorization(
 		if err := validateHTLCScriptSigLen(len(input.ScriptSig)); err != nil {
 			return err
 		}
+		if witness.SuiteID == SUITE_ID_SENTINEL {
+			return fmt.Errorf("TX_ERR_SIG_ALG_INVALID")
+		}
 		if err := checkWitnessFormat(witness, suiteIDSLHActive); err != nil {
 			return err
 		}
@@ -1458,22 +1472,58 @@ func ValidateInputAuthorization(
 		if err := isScriptSigZeroLen("CORE_VAULT_V1", len(input.ScriptSig)); err != nil {
 			return err
 		}
+		if witness.SuiteID == SUITE_ID_SENTINEL {
+			return fmt.Errorf("TX_ERR_SIG_ALG_INVALID")
+		}
 		if err := checkWitnessFormat(witness, suiteIDSLHActive); err != nil {
 			return err
 		}
-		if len(prevout.CovenantData) != 73 {
+		var ownerKeyID []byte
+		var recoveryKeyID []byte
+		var spendDelay uint64
+		var lockMode byte
+		var lockValue uint64
+		switch len(prevout.CovenantData) {
+		case 73:
+			ownerKeyID = prevout.CovenantData[:32]
+			spendDelay = 0
+			lockMode = prevout.CovenantData[32]
+			var err error
+			lockValue, err = parseU64LE(prevout.CovenantData, 33, "vault_lock_value")
+			if err != nil {
+				return err
+			}
+			recoveryKeyID = prevout.CovenantData[41:73]
+		case 81:
+			ownerKeyID = prevout.CovenantData[:32]
+			var err error
+			spendDelay, err = parseU64LE(prevout.CovenantData, 32, "vault_spend_delay")
+			if err != nil {
+				return err
+			}
+			lockMode = prevout.CovenantData[40]
+			lockValue, err = parseU64LE(prevout.CovenantData, 41, "vault_lock_value")
+			if err != nil {
+				return err
+			}
+			recoveryKeyID = prevout.CovenantData[49:81]
+		default:
 			return fmt.Errorf("TX_ERR_PARSE")
 		}
-		lockMode := prevout.CovenantData[32]
-		lockValue, err := parseU64LE(prevout.CovenantData, 33, "vault_lock_value")
-		if err != nil {
-			return err
+		if lockMode != TIMELOCK_MODE_HEIGHT && lockMode != TIMELOCK_MODE_TIMESTAMP {
+			return fmt.Errorf("TX_ERR_PARSE")
 		}
-		ownerKeyID := prevout.CovenantData[:32]
-		recoveryKeyID := prevout.CovenantData[41:73]
+		if bytes.Equal(ownerKeyID, recoveryKeyID) {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
 		actualKeyID := p.SHA3_256(witness.Pubkey)
 		if !bytes.Equal(actualKeyID[:], ownerKeyID) && !bytes.Equal(actualKeyID[:], recoveryKeyID) {
 			return fmt.Errorf("TX_ERR_SIG_INVALID")
+		}
+		if bytes.Equal(actualKeyID[:], ownerKeyID) && spendDelay > 0 {
+			if chainHeight < prevCreationHeight+spendDelay {
+				return fmt.Errorf("TX_ERR_TIMELOCK_NOT_MET")
+			}
 		}
 		if bytes.Equal(actualKeyID[:], recoveryKeyID) {
 			if err := satisfyLock(lockMode, lockValue, chainHeight, chainTimestamp); err != nil {

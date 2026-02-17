@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from run_cv_unimplemented import run_unimplemented
+# Thin wrapper: unified bundle runner now executes CV-BLOCK via apply-block.
+
+import subprocess
+import sys
+from pathlib import Path
 
 
 def main() -> int:
-    return run_unimplemented(
-        "CV-BLOCK",
-        "block validation/reorg/UTXO pipeline currently not exposed via CLI in this phase",
+    repo_root = Path(__file__).resolve().parents[2]
+    p = subprocess.run(
+        [sys.executable, "conformance/runner/run_cv_bundle.py"],
+        cwd=str(repo_root),
     )
+    return p.returncode
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

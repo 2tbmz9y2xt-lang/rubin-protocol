@@ -122,6 +122,7 @@ CONFIGURE_ARGS=(
 if [[ -n "${SLH_DSA_FLAG}" ]]; then
   CONFIGURE_ARGS+=("${SLH_DSA_FLAG}")
 fi
+append_flag_if_supported "--enable-aeskeywrap"   # RFC 3394 AES-KW — required for FIPS key management
 append_flag_if_supported "--enable-shared"
 append_flag_if_supported "--disable-examples"
 append_flag_if_supported "--disable-tests"
