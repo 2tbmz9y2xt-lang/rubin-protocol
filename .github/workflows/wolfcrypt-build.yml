@@ -194,6 +194,7 @@ jobs:
           GHCR_REF: ghcr.io/${{ github.repository_owner }}/wolfcrypt-shim:${{ matrix.os }}-${{ matrix.cc_bin }}
         run: |
           ls -l shim
+          cd shim
           oras push "${GHCR_REF}" \
             --artifact-type application/vnd.rubin.wolfcrypt-shim \
-            shim/*
+            ./*

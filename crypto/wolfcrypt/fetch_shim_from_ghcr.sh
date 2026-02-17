@@ -35,14 +35,14 @@ fi
 mkdir -p "${OUTDIR}"
 oras pull "${REF}" -o "${OUTDIR}"
 
-SUMS="${OUTDIR}/SHA3SUMS.txt"
-if [ ! -f "${SUMS}" ]; then
+SUMS=$(find "${OUTDIR}" -type f -name "SHA3SUMS.txt" | sort | head -n1 || true)
+if [ -z "${SUMS}" ]; then
   echo "missing SHA3SUMS.txt in pulled artifact" >&2
   exit 1
 fi
 
 # Pick first shim file
-SHIM=$(find "${OUTDIR}" -maxdepth 1 -type f -name "librubin_wc_shim.*" | head -n1 || true)
+SHIM=$(find "${OUTDIR}" -type f -name "librubin_wc_shim.*" | sort | head -n1 || true)
 if [ -z "${SHIM}" ]; then
   echo "shim binary not found in artifact" >&2
   exit 1
