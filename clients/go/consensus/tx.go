@@ -128,6 +128,174 @@ func (c *cursor) readCompactSize() (uint64, error) {
 	return uint64(cs), nil
 }
 
+func parseInput(cur *cursor) (TxInput, error) {
+	prevTxidBytes, err := cur.readExact(32)
+	if err != nil {
+		return TxInput{}, err
+	}
+	var prevTxid [32]byte
+	copy(prevTxid[:], prevTxidBytes)
+
+	prevVout, err := cur.readU32LE()
+	if err != nil {
+		return TxInput{}, err
+	}
+
+	scriptSigLenU64, err := cur.readCompactSize()
+	if err != nil {
+		return TxInput{}, err
+	}
+	scriptSigLen, err := toIntLen(scriptSigLenU64, "script_sig_len")
+	if err != nil {
+		return TxInput{}, err
+	}
+	scriptSigBytes, err := cur.readExact(scriptSigLen)
+	if err != nil {
+		return TxInput{}, err
+	}
+
+	sequence, err := cur.readU32LE()
+	if err != nil {
+		return TxInput{}, err
+	}
+
+	return TxInput{
+		PrevTxid:  prevTxid,
+		PrevVout:  prevVout,
+		ScriptSig: append([]byte(nil), scriptSigBytes...),
+		Sequence:  sequence,
+	}, nil
+}
+
+func parseOutput(cur *cursor) (TxOutput, error) {
+	value, err := cur.readU64LE()
+	if err != nil {
+		return TxOutput{}, err
+	}
+	covenantType, err := cur.readU16LE()
+	if err != nil {
+		return TxOutput{}, err
+	}
+
+	covenantDataLenU64, err := cur.readCompactSize()
+	if err != nil {
+		return TxOutput{}, err
+	}
+	covenantDataLen, err := toIntLen(covenantDataLenU64, "covenant_data_len")
+	if err != nil {
+		return TxOutput{}, err
+	}
+	covenantDataBytes, err := cur.readExact(covenantDataLen)
+	if err != nil {
+		return TxOutput{}, err
+	}
+
+	return TxOutput{
+		Value:        value,
+		CovenantType: covenantType,
+		CovenantData: append([]byte(nil), covenantDataBytes...),
+	}, nil
+}
+
+func parseWitnessItem(cur *cursor) (WitnessItem, error) {
+	suiteID, err := cur.readU8()
+	if err != nil {
+		return WitnessItem{}, err
+	}
+
+	pubkeyLenU64, err := cur.readCompactSize()
+	if err != nil {
+		return WitnessItem{}, err
+	}
+	pubkeyLen, err := toIntLen(pubkeyLenU64, "pubkey_len")
+	if err != nil {
+		return WitnessItem{}, err
+	}
+	pubkeyBytes, err := cur.readExact(pubkeyLen)
+	if err != nil {
+		return WitnessItem{}, err
+	}
+
+	sigLenU64, err := cur.readCompactSize()
+	if err != nil {
+		return WitnessItem{}, err
+	}
+	sigLen, err := toIntLen(sigLenU64, "sig_len")
+	if err != nil {
+		return WitnessItem{}, err
+	}
+	sigBytes, err := cur.readExact(sigLen)
+	if err != nil {
+		return WitnessItem{}, err
+	}
+
+	return WitnessItem{
+		SuiteID:   suiteID,
+		Pubkey:    append([]byte(nil), pubkeyBytes...),
+		Signature: append([]byte(nil), sigBytes...),
+	}, nil
+}
+
+func parseInputList(cur *cursor) ([]TxInput, error) {
+	inputCountU64, err := cur.readCompactSize()
+	if err != nil {
+		return nil, err
+	}
+	inputCount, err := toIntLen(inputCountU64, "input_count")
+	if err != nil {
+		return nil, err
+	}
+	inputs := make([]TxInput, 0, inputCount)
+	for i := 0; i < inputCount; i++ {
+		inp, err := parseInput(cur)
+		if err != nil {
+			return nil, err
+		}
+		inputs = append(inputs, inp)
+	}
+	return inputs, nil
+}
+
+func parseOutputList(cur *cursor) ([]TxOutput, error) {
+	outputCountU64, err := cur.readCompactSize()
+	if err != nil {
+		return nil, err
+	}
+	outputCount, err := toIntLen(outputCountU64, "output_count")
+	if err != nil {
+		return nil, err
+	}
+	outputs := make([]TxOutput, 0, outputCount)
+	for i := 0; i < outputCount; i++ {
+		out, err := parseOutput(cur)
+		if err != nil {
+			return nil, err
+		}
+		outputs = append(outputs, out)
+	}
+	return outputs, nil
+}
+
+func parseWitnessList(cur *cursor) ([]WitnessItem, error) {
+	witnessCountU64, err := cur.readCompactSize()
+	if err != nil {
+		return nil, err
+	}
+	witnessCount, err := toIntLen(witnessCountU64, "witness_count")
+	if err != nil {
+		return nil, err
+	}
+	witnesses := make([]WitnessItem, 0, witnessCount)
+	for i := 0; i < witnessCount; i++ {
+		w, err := parseWitnessItem(cur)
+		if err != nil {
+			return nil, err
+		}
+		witnesses = append(witnesses, w)
+	}
+	return witnesses, nil
+}
+
 func ParseTxBytes(b []byte) (*Tx, error) {
 	cur := newCursor(b)
 
@@ -139,143 +307,22 @@ func ParseTxBytes(b []byte) (*Tx, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	inputCountU64, err := cur.readCompactSize()
+	inputs, err := parseInputList(cur)
 	if err != nil {
 		return nil, err
 	}
-	inputCount, err := toIntLen(inputCountU64, "input_count")
+	outputs, err := parseOutputList(cur)
 	if err != nil {
 		return nil, err
-	}
-	inputs := make([]TxInput, 0, inputCount)
-	for i := 0; i < inputCount; i++ {
-		prevTxidBytes, err := cur.readExact(32)
-		if err != nil {
-			return nil, err
-		}
-		var prevTxid [32]byte
-		copy(prevTxid[:], prevTxidBytes)
-
-		prevVout, err := cur.readU32LE()
-		if err != nil {
-			return nil, err
-		}
-
-		scriptSigLenU64, err := cur.readCompactSize()
-		if err != nil {
-			return nil, err
-		}
-		scriptSigLen, err := toIntLen(scriptSigLenU64, "script_sig_len")
-		if err != nil {
-			return nil, err
-		}
-		scriptSigBytes, err := cur.readExact(scriptSigLen)
-		if err != nil {
-			return nil, err
-		}
-
-		sequence, err := cur.readU32LE()
-		if err != nil {
-			return nil, err
-		}
-
-		inputs = append(inputs, TxInput{
-			PrevTxid:  prevTxid,
-			PrevVout:  prevVout,
-			ScriptSig: append([]byte(nil), scriptSigBytes...),
-			Sequence:  sequence,
-		})
-	}
-
-	outputCountU64, err := cur.readCompactSize()
-	if err != nil {
-		return nil, err
-	}
-	outputCount, err := toIntLen(outputCountU64, "output_count")
-	if err != nil {
-		return nil, err
-	}
-	outputs := make([]TxOutput, 0, outputCount)
-	for i := 0; i < outputCount; i++ {
-		value, err := cur.readU64LE()
-		if err != nil {
-			return nil, err
-		}
-		covenantType, err := cur.readU16LE()
-		if err != nil {
-			return nil, err
-		}
-		covenantDataLenU64, err := cur.readCompactSize()
-		if err != nil {
-			return nil, err
-		}
-		covenantDataLen, err := toIntLen(covenantDataLenU64, "covenant_data_len")
-		if err != nil {
-			return nil, err
-		}
-		covenantDataBytes, err := cur.readExact(covenantDataLen)
-		if err != nil {
-			return nil, err
-		}
-
-		outputs = append(outputs, TxOutput{
-			Value:        value,
-			CovenantType: covenantType,
-			CovenantData: append([]byte(nil), covenantDataBytes...),
-		})
 	}
 
 	locktime, err := cur.readU32LE()
 	if err != nil {
 		return nil, err
 	}
-
-	witnessCountU64, err := cur.readCompactSize()
+	witnesses, err := parseWitnessList(cur)
 	if err != nil {
 		return nil, err
-	}
-	witnessCount, err := toIntLen(witnessCountU64, "witness_count")
-	if err != nil {
-		return nil, err
-	}
-	witnesses := make([]WitnessItem, 0, witnessCount)
-	for i := 0; i < witnessCount; i++ {
-		suiteID, err := cur.readU8()
-		if err != nil {
-			return nil, err
-		}
-		pubkeyLenU64, err := cur.readCompactSize()
-		if err != nil {
-			return nil, err
-		}
-		pubkeyLen, err := toIntLen(pubkeyLenU64, "pubkey_len")
-		if err != nil {
-			return nil, err
-		}
-		pubkeyBytes, err := cur.readExact(pubkeyLen)
-		if err != nil {
-			return nil, err
-		}
-
-		sigLenU64, err := cur.readCompactSize()
-		if err != nil {
-			return nil, err
-		}
-		sigLen, err := toIntLen(sigLenU64, "sig_len")
-		if err != nil {
-			return nil, err
-		}
-		sigBytes, err := cur.readExact(sigLen)
-		if err != nil {
-			return nil, err
-		}
-
-		witnesses = append(witnesses, WitnessItem{
-			SuiteID:   suiteID,
-			Pubkey:    append([]byte(nil), pubkeyBytes...),
-			Signature: append([]byte(nil), sigBytes...),
-		})
 	}
 
 	if cur.pos != len(b) {
