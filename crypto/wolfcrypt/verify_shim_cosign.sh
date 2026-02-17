@@ -45,7 +45,7 @@ COSIGN_EXPERIMENTAL=1 COSIGN_YES=true cosign verify-blob \
   --certificate "${CRT}" \
   --signature "${SIG}" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  --certificate-identity-regexp '^https://github.com/2tbmz9y2xt-lang/rubin-protocol/.github/workflows/wolfcrypt-build.yml@refs/(heads/.+|pull/.+/.+)$' \
+  --certificate-identity-regexp '^https://github.com/2tbmz9y2xt-lang/rubin-protocol/.+@refs/(heads/.+|pull/.+/.+|tags/.+)$' \
   "${SUMS}"
 
 echo "cosign verification OK for ${SUMS}" >&2

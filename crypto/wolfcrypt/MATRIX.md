@@ -4,7 +4,7 @@
 
 Provide a stable local matrix for running `scripts/wolfcrypt-build.sh` in CI and operator environments.
 
-The CI workflow in `.github/workflows/wolfcrypt-build.yml` invokes the script with:
+Canonical invocation uses the following environment and command pattern:
 
 - `RUBIN_WOLFSSL_TAG=v5.8.4-stable`
 - `RUBIN_WOLFCRYPT_WORKROOT=/tmp/rubin-wolfcrypt`
@@ -17,9 +17,9 @@ For v1.1, this is the normative matrix for FIPS-oriented runs: the active provid
 
 | CI job            | OS / Runner   | `CC`          | Expected toolchain       | Check command                  | Notes |
 |-------------------|---------------|---------------|-------------------------|-------------------------------|-------|
-| `wolfcrypt-build (ubuntu-22.04, gcc-12)` | `ubuntu-22.04` | `gcc-12`      | GCC 12.x                  | `gcc-12 --version`            | Linux baseline GNU compiler path |
-| `wolfcrypt-build (ubuntu-22.04, clang-14)` | `ubuntu-22.04` | `clang-14`    | Clang 14.x                | `clang-14 --version`          | Linux LLVM baseline path |
-| `wolfcrypt-build (macos-14, clang)` | `macos-14`    | `clang`       | Apple Clang (system)       | `clang --version`             | Uses macOS SDK + Apple Clang |
+| `build profile (ubuntu-22.04, gcc-12)` | `ubuntu-22.04` | `gcc-12`      | GCC 12.x                  | `gcc-12 --version`            | Linux baseline GNU compiler path |
+| `build profile (ubuntu-22.04, clang-14)` | `ubuntu-22.04` | `clang-14`    | Clang 14.x                | `clang-14 --version`          | Linux LLVM baseline path |
+| `build profile (macos-14, clang)` | `macos-14`    | `clang`       | Apple Clang (system)       | `clang --version`             | Uses macOS SDK + Apple Clang |
 
 ## Why `CC` is important
 
