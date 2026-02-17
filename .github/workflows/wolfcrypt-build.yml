@@ -97,22 +97,22 @@ jobs:
             echo "shim output dir not found: ${out}" >&2
             exit 1
           fi
-          python - <<'PY'
-import hashlib, pathlib, os, sys
-out = pathlib.Path(os.environ["RUBIN_WOLFCRYPT_SHIM_OUT"])
-files = sorted([p for p in out.glob("*") if p.is_file()])
-if not files:
-    print("no shim files found", file=sys.stderr)
-    sys.exit(1)
-lines = []
-for p in files:
-    h = hashlib.sha3_256(p.read_bytes()).hexdigest()
-    lines.append(f"{h}  {p.name}")
-print("\n".join(lines))
-with open(out / "SHA3SUMS.txt", "w") as f:
-    for line in lines:
-        f.write(line + "\n")
-PY
+          python3 - <<'PY'
+          import hashlib, pathlib, os, sys
+          out = pathlib.Path(os.environ["RUBIN_WOLFCRYPT_SHIM_OUT"])
+          files = sorted([p for p in out.glob("*") if p.is_file()])
+          if not files:
+              print("no shim files found", file=sys.stderr)
+              sys.exit(1)
+          lines = []
+          for p in files:
+              h = hashlib.sha3_256(p.read_bytes()).hexdigest()
+              lines.append(f"{h}  {p.name}")
+          print("\n".join(lines))
+          with open(out / "SHA3SUMS.txt", "w") as f:
+              for line in lines:
+                  f.write(line + "\n")
+          PY
 
       - name: Upload shim + hashes
         uses: actions/upload-artifact@v4
@@ -180,6 +180,9 @@ PY
 
       - name: Install oras
         uses: oras-project/setup-oras@v1
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Publish to GHCR
         env:
