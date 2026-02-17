@@ -707,15 +707,16 @@ func medianPastTimestamp(headers []BlockHeader, height uint64) (uint64, error) {
 		return 0, fmt.Errorf(BLOCK_ERR_TIMESTAMP_OLD)
 	}
 
-	k := int(height)
-	if k > 11 {
-		k = 11
+	k := uint64(11)
+	if height < k {
+		k = height
 	}
-	if len(headers) < k {
-		k = len(headers)
+	limit := int(k)
+	if len(headers) < limit {
+		limit = len(headers)
 	}
-	timestamps := make([]uint64, k)
-	for i := 0; i < k; i++ {
+	timestamps := make([]uint64, limit)
+	for i := 0; i < limit; i++ {
 		timestamps[i] = headers[len(headers)-1-i].Timestamp
 	}
 	sort.Slice(timestamps, func(i, j int) bool {
@@ -745,12 +746,14 @@ func blockExpectedTarget(headers []BlockHeader, height uint64, targetIn [32]byte
 
 	first := headers[len(headers)-WINDOW_SIZE].Timestamp
 	last := headers[len(headers)-1].Timestamp
-	tActual := int64(last) - int64(first)
-	if tActual <= 0 {
-		tActual = 1
+	tActual := new(big.Int)
+	if last >= first {
+		tActual.SetUint64(last - first)
+	} else {
+		tActual.SetInt64(1)
 	}
 
-	targetNew := new(big.Int).Mul(targetOld, big.NewInt(tActual))
+	targetNew := new(big.Int).Mul(targetOld, tActual)
 	targetNew.Quo(targetNew, targetBlockIntervalBig)
 
 	minTarget := new(big.Int).Quo(targetOld, big.NewInt(4))
