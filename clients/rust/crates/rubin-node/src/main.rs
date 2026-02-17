@@ -154,6 +154,42 @@ fn cmd_sighash(chain_id: [u8; 32], tx_hex: &str, input_index: u32, input_value: 
     Ok(())
 }
 
+fn cmd_compactsize(encoded_hex: &str) -> Result<(), String> {
+    let bytes = rubin_consensus::hex_decode_strict(encoded_hex)?;
+    let (value, _) = rubin_consensus::compact_size_decode(&bytes)?;
+    println!("{value}");
+    Ok(())
+}
+
+fn map_parse_error(err: &str) -> String {
+    if err.contains("compactsize:") || err.starts_with("parse:") {
+        return "TX_ERR_PARSE".to_string();
+    }
+    err.to_string()
+}
+
+fn cmd_parse(tx_hex: &str, max_witness_bytes: Option<u64>) -> Result<(), String> {
+    let tx_bytes = rubin_consensus::hex_decode_strict(tx_hex)?;
+    let tx = match rubin_consensus::parse_tx_bytes(&tx_bytes) {
+        Ok(v) => v,
+        Err(e) => return Err(map_parse_error(&e).to_string()),
+    };
+
+    if let Some(max_witness_bytes) = max_witness_bytes {
+        let max_witness_bytes = usize::try_from(max_witness_bytes)
+            .map_err(|_| format!("invalid --max-witness-bytes {max_witness_bytes}"))?;
+        if max_witness_bytes > 0 {
+            let witness_bytes = rubin_consensus::witness_bytes(&tx.witness);
+            if witness_bytes.len() > max_witness_bytes {
+                return Err("TX_ERR_WITNESS_OVERFLOW".to_string());
+            }
+        }
+    }
+
+    println!("OK");
+    Ok(())
+}
+
 fn get_flag(args: &[String], flag: &str) -> Result<Option<String>, String> {
     let mut i = 0;
     while i < args.len() {
@@ -174,7 +210,13 @@ fn usage() {
     eprintln!("  version");
     eprintln!("  chain-id --profile <path>");
     eprintln!("  txid --tx-hex <hex>");
-    eprintln!("  sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>]");
+    eprintln!("  compactsize --encoded-hex <hex>");
+    eprintln!(
+        "  parse --tx-hex <hex> [--max-witness-bytes <u64>]"
+    );
+    eprintln!(
+        "  sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>]"
+    );
 }
 
 fn cmd_version() -> i32 {
@@ -249,6 +291,65 @@ fn parse_required_u64(args: &[String], flag: &str) -> Result<u64, i32> {
             Err(2)
         }
     }
+}
+
+fn parse_optional_u64(args: &[String], flag: &str) -> Result<Option<u64>, i32> {
+    match get_flag(args, flag) {
+        Ok(Some(v)) => {
+            v.parse::<u64>().map_err(|e| {
+                eprintln!("{flag}: {e}");
+                2
+            }).map(Some)
+        }
+        Ok(None) => Ok(None),
+        Err(e) => {
+            eprintln!("{e}");
+            Err(2)
+        }
+    }
+}
+
+fn cmd_parse_main(args: &[String]) -> i32 {
+    let tx_hex = match get_flag(args, "--tx-hex") {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            eprintln!("missing required flag: --tx-hex");
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let max_witness_bytes = match parse_optional_u64(args, "--max-witness-bytes") {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+
+    if let Err(e) = cmd_parse(&tx_hex, max_witness_bytes) {
+        eprintln!("{e}");
+        return 1;
+    }
+    0
+}
+
+fn cmd_compactsize_main(args: &[String]) -> i32 {
+    let encoded_hex = match get_flag(args, "--encoded-hex") {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            eprintln!("missing required flag: --encoded-hex");
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    if let Err(e) = cmd_compactsize(&encoded_hex) {
+        eprintln!("{e}");
+        return 1;
+    }
+    0
 }
 
 fn cmd_sighash_main(args: &[String]) -> i32 {
@@ -331,6 +432,8 @@ fn dispatch(cmd: &str, args: &[String]) -> i32 {
         "version" => cmd_version(),
         "chain-id" => cmd_chain_id_main(args),
         "txid" => cmd_txid_main(args),
+        "parse" => cmd_parse_main(args),
+        "compactsize" => cmd_compactsize_main(args),
         "sighash" => cmd_sighash_main(args),
         _ => {
             eprintln!("unknown command: {cmd}");
@@ -340,6 +443,7 @@ fn dispatch(cmd: &str, args: &[String]) -> i32 {
 }
 
 fn main() {
+    // nosemgrep: rust.lang.security.args.args
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
         usage();

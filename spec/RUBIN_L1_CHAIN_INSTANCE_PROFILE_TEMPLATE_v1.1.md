@@ -10,24 +10,23 @@ Normative derivations are defined in `spec/RUBIN_L1_CANONICAL_v1.1.md §1.1`.
 ## 1. Identity
 
 - network_name: `<string>`
-- network_magic: `<u32be hex, 8 chars, no 0x>`
+- network_magic: `<u32be hex, 8 chars, with 0x prefix>`
 - protocol_version: `1`
 
 ## 2. Genesis
 
 Required fields:
 
-- genesis_header_bytes_hex: `<hex>`
-- genesis_tx_bytes_hex: `<hex>`
+- genesis_header_bytes: `<hex>`
+- genesis_tx_bytes: `<hex>`
 
 Derived fields (must be recomputed from the published bytes):
 
-- chain_id_hex: `<hex32>`
-- genesis_block_hash_hex: `<hex32>`
+- chain_id: `<hex32>`
+- genesis_block_hash: `<hex32>`
 
 ## 3. Deployments
 
 Link the corresponding deployments registry:
 
 - `spec/RUBIN_L1_DEPLOYMENTS_<network>_v1.1.md`
-

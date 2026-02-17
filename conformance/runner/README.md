@@ -24,6 +24,36 @@ Notes:
 - The runner prefers `chain_id_hex` from each test vector and passes it via `--chain-id-hex` to avoid depending on chain-instance Markdown profiles.
 - `--profile` is kept only as a fallback for fixtures that do not embed `chain_id_hex`.
 
+## Additional runners
+
+```bash
+python3 conformance/runner/run_cv_compactsize.py
+python3 conformance/runner/run_cv_parse.py
+python3 conformance/runner/run_cv_bind.py
+python3 conformance/runner/run_cv_utxo.py
+python3 conformance/runner/run_cv_dep.py
+python3 conformance/runner/run_cv_block.py
+python3 conformance/runner/run_cv_reorg.py
+```
+
+Notes:
+- `CV-COMPACTSIZE` and `CV-PARSE` now perform cross-client checks.
+- `CV-BIND`, `CV-UTXO`, `CV-DEP`, `CV-BLOCK`, `CV-REORG` are runner shells and currently return a clear `NOT RUN` reason until node-layer APIs are implemented.
+
+## Bundle runner (WIP)
+
+```bash
+python3 conformance/runner/run_cv_bundle.py
+```
+
+`run_cv_bundle.py` runs gates from `RUBIN_L1_CONFORMANCE_BUNDLE_v1.1.yaml` where CLI parity exists:
+
+- `CV-COMPACTSIZE` via `compactsize`
+- `CV-SIGHASH` via `txid` + `sighash`
+- `CV-PARSE` using fixture context builders (`tx_hex` when present, fallback synthesis otherwise)
+
+It emits explicit `SKIP` lines for unsupported/unrunnable gates and unsupported fixtures.
+
 ## Strict wolfcrypt mode (CI / production tooling)
 
 To force the runner to use the wolfcrypt shim (no DevStd fallback), set:

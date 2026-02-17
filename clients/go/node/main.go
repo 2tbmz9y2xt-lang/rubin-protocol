@@ -179,7 +179,47 @@ func cmdSighash(chainID [32]byte, txHex string, inputIndex uint32, inputValue ui
 	return nil
 }
 
-const usageCommands = "commands: version | chain-id --profile <path> | txid --tx-hex <hex> | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>]"
+func cmdCompactSize(encodedHex string) error {
+	encoded, err := hexDecodeStrict(encodedHex)
+	if err != nil {
+		return fmt.Errorf("encoded-hex: %w", err)
+	}
+	value, _, err := consensus.DecodeCompactSize(encoded)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%d\n", value)
+	return nil
+}
+
+func mapParseError(err error) error {
+	msg := err.Error()
+	if strings.HasPrefix(msg, "parse:") || strings.HasPrefix(msg, "compactsize:") {
+		return fmt.Errorf("TX_ERR_PARSE")
+	}
+	return err
+}
+
+func cmdParse(txHex string, maxWitnessBytes uint64) error {
+	txBytes, err := hexDecodeStrict(txHex)
+	if err != nil {
+		return fmt.Errorf("tx hex: %w", err)
+	}
+	tx, err := consensus.ParseTxBytes(txBytes)
+	if err != nil {
+		return mapParseError(err)
+	}
+	if maxWitnessBytes > 0 {
+		witnessBytes := consensus.WitnessBytes(tx.Witness)
+		if uint64(len(witnessBytes)) > maxWitnessBytes {
+			return fmt.Errorf("TX_ERR_WITNESS_OVERFLOW")
+		}
+	}
+	fmt.Println("OK")
+	return nil
+}
+
+const usageCommands = "commands: version | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse --tx-hex <hex> [--max-witness-bytes <u64>] | txid --tx-hex <hex> | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>]"
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage: rubin-node <command> [args]")
@@ -270,6 +310,37 @@ func cmdSighashMain(argv []string) int {
 	return 0
 }
 
+func cmdCompactSizeMain(argv []string) int {
+	fs := flag.NewFlagSet("compactsize", flag.ExitOnError)
+	encodedHex := fs.String("encoded-hex", "", "CompactSize payload in hex")
+	_ = fs.Parse(argv)
+	if *encodedHex == "" {
+		fmt.Fprintln(os.Stderr, "missing required flag: --encoded-hex")
+		return 2
+	}
+	if err := cmdCompactSize(*encodedHex); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
+}
+
+func cmdParseMain(argv []string) int {
+	fs := flag.NewFlagSet("parse", flag.ExitOnError)
+	txHex := fs.String("tx-hex", "", "transaction hex bytes (TxBytes)")
+	maxWitnessBytes := fs.Uint64("max-witness-bytes", 0, "maximum accepted witness section bytes")
+	_ = fs.Parse(argv)
+	if *txHex == "" {
+		fmt.Fprintln(os.Stderr, "missing required flag: --tx-hex")
+		return 2
+	}
+	if err := cmdParse(*txHex, *maxWitnessBytes); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -282,6 +353,10 @@ func main() {
 	switch command {
 	case "version":
 		exitCode = cmdVersionMain()
+	case "compactsize":
+		exitCode = cmdCompactSizeMain(argv)
+	case "parse":
+		exitCode = cmdParseMain(argv)
 	case "chain-id":
 		exitCode = cmdChainIDMain(argv)
 	case "txid":
