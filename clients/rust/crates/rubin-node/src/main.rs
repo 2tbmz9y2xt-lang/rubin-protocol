@@ -161,6 +161,12 @@ fn cmd_txid(tx_hex: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_weight(tx_hex: &str) -> Result<u64, String> {
+    let tx_bytes = rubin_consensus::hex_decode_strict(tx_hex)?;
+    let tx = rubin_consensus::parse_tx_bytes(&tx_bytes)?;
+    rubin_consensus::tx_weight(&tx)
+}
+
 fn parse_chain_id_hex(chain_id_hex: &str) -> Result<[u8; 32], String> {
     let bytes = rubin_consensus::hex_decode_strict(chain_id_hex)?;
     if bytes.len() != 32 {
@@ -696,6 +702,7 @@ fn usage() {
     eprintln!("  version");
     eprintln!("  chain-id --profile <path>");
     eprintln!("  txid --tx-hex <hex>");
+    eprintln!("  weight --tx-hex <hex>");
     eprintln!("  apply-utxo --context-json <path>");
     eprintln!("  apply-block --context-json <path>");
     eprintln!("  compactsize --encoded-hex <hex>");
@@ -747,6 +754,32 @@ fn cmd_txid_main(args: &[String]) -> i32 {
         return 1;
     }
     0
+}
+
+fn cmd_weight_main(args: &[String]) -> i32 {
+    let tx_hex = match get_flag(args, "--tx-hex") {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            eprintln!("missing required flag: --tx-hex");
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+
+    // Conformance weight gate expects any failure to surface as TX_ERR_PARSE.
+    match cmd_weight(&tx_hex) {
+        Ok(w) => {
+            println!("{w}");
+            0
+        }
+        Err(_) => {
+            eprintln!("TX_ERR_PARSE");
+            1
+        }
+    }
 }
 
 fn parse_required_u32(args: &[String], flag: &str) -> Result<u32, i32> {
@@ -1147,6 +1180,7 @@ fn dispatch(cmd: &str, args: &[String]) -> i32 {
         "version" => cmd_version(),
         "chain-id" => cmd_chain_id_main(args),
         "txid" => cmd_txid_main(args),
+        "weight" | "tx-weight" => cmd_weight_main(args),
         "parse" => cmd_parse_main(args),
         "apply-utxo" => cmd_apply_utxo_main(args),
         "apply-block" => cmd_apply_block_main(args),

@@ -1150,7 +1150,15 @@ pub fn validate_input_authorization(
             if prevout.covenant_data.len() != 105 {
                 return Err("TX_ERR_PARSE".into());
             }
+            let claim_key_id = &prevout.covenant_data[41..73];
+            let refund_key_id = &prevout.covenant_data[73..105];
+            if claim_key_id == refund_key_id {
+                return Err("TX_ERR_PARSE".into());
+            }
             let lock_mode = prevout.covenant_data[32];
+            if lock_mode != TIMELOCK_MODE_HEIGHT && lock_mode != TIMELOCK_MODE_TIMESTAMP {
+                return Err("TX_ERR_PARSE".into());
+            }
             let lock_value = parse_u64_le(&prevout.covenant_data, 33, "htlc_lock_value")?;
             if input.script_sig.len() == 32 {
                 let expected_hash = &prevout.covenant_data[0..32];
@@ -1158,15 +1166,13 @@ pub fn validate_input_authorization(
                 if script_hash.as_slice() != expected_hash {
                     return Err("TX_ERR_SIG_INVALID".into());
                 }
-                let expected_claim_key_id = &prevout.covenant_data[41..73];
                 let actual_key_id = compute_key_id(provider, &witness.pubkey)?;
-                if actual_key_id.as_slice() != expected_claim_key_id {
+                if actual_key_id.as_slice() != claim_key_id {
                     return Err("TX_ERR_SIG_INVALID".into());
                 }
             } else {
-                let expected_refund_key_id = &prevout.covenant_data[73..105];
                 let actual_key_id = compute_key_id(provider, &witness.pubkey)?;
-                if actual_key_id.as_slice() != expected_refund_key_id {
+                if actual_key_id.as_slice() != refund_key_id {
                     return Err("TX_ERR_SIG_INVALID".into());
                 }
                 satisfy_lock(lock_mode, lock_value, chain_height, chain_timestamp)?;

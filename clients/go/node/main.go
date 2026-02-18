@@ -211,6 +211,22 @@ func cmdTxID(txHex string) error {
 	return nil
 }
 
+func cmdWeight(txHex string) (uint64, error) {
+	txBytes, err := hexDecodeStrict(txHex)
+	if err != nil {
+		return 0, fmt.Errorf("TX_ERR_PARSE")
+	}
+	tx, err := consensus.ParseTxBytes(txBytes)
+	if err != nil {
+		return 0, fmt.Errorf("TX_ERR_PARSE")
+	}
+	w, err := consensus.TxWeight(tx)
+	if err != nil {
+		return 0, fmt.Errorf("TX_ERR_PARSE")
+	}
+	return w, nil
+}
+
 func parseChainIDHex(chainIDHex string) ([32]byte, error) {
 	raw, err := hexDecodeStrict(chainIDHex)
 	if err != nil {
@@ -661,7 +677,7 @@ func cmdReorg(contextPath string) (string, error) {
 	return "", fmt.Errorf("REORG_ERR_PARSE: unsupported context shape")
 }
 
-const usageCommands = "commands: version | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse --tx-hex <hex> [--max-witness-bytes <u64>] | txid --tx-hex <hex> | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify --tx-hex <hex> --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-id-hex <hex64> | --profile <path> | --suite-id-02-active | --htlc-v2-active] | apply-utxo --context-json <path> | apply-block --context-json <path> | reorg --context-json <path>"
+const usageCommands = "commands: version | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse --tx-hex <hex> [--max-witness-bytes <u64>] | txid --tx-hex <hex> | weight --tx-hex <hex> | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify --tx-hex <hex> --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-id-hex <hex64> | --profile <path> | --suite-id-02-active | --htlc-v2-active] | apply-utxo --context-json <path> | apply-block --context-json <path> | reorg --context-json <path>"
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage: rubin-node <command> [args]")
@@ -696,6 +712,24 @@ func cmdTxIDMain(argv []string) int {
 		fmt.Fprintln(os.Stderr, "txid error:", err)
 		return 1
 	}
+	return 0
+}
+
+func cmdWeightMain(argv []string) int {
+	fs := flag.NewFlagSet("weight", flag.ExitOnError)
+	txHex := fs.String("tx-hex", "", "transaction hex bytes (TxBytes)")
+	_ = fs.Parse(argv)
+	if *txHex == "" {
+		fmt.Fprintln(os.Stderr, "missing required flag: --tx-hex")
+		return 2
+	}
+	w, err := cmdWeight(*txHex)
+	if err != nil {
+		// Conformance expects the canonical error token, with no prefix.
+		fmt.Fprintln(os.Stderr, "TX_ERR_PARSE")
+		return 1
+	}
+	fmt.Printf("%d\n", w)
 	return 0
 }
 
@@ -937,6 +971,8 @@ func main() {
 		exitCode = cmdChainIDMain(argv)
 	case "txid":
 		exitCode = cmdTxIDMain(argv)
+	case "weight":
+		exitCode = cmdWeightMain(argv)
 	case "sighash":
 		exitCode = cmdSighashMain(argv)
 	case "verify":
