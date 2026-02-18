@@ -484,27 +484,20 @@ Semantics:
     - `73` implies `spend_delay = 0`.
     - `81` parses `spend_delay` as defined above.
 - `CORE_HTLC_V2`:
-  - Deployment-gated: MUST be rejected as `TX_ERR_DEPLOYMENT_INACTIVE` unless deployment `htlc_anchor_v1` is ACTIVE at the validated height.
+  - Deployment-gated (spend-time): spending a `CORE_HTLC_V2` UTXO MUST be rejected as
+    `TX_ERR_DEPLOYMENT_INACTIVE` unless deployment `htlc_anchor_v1` is ACTIVE at the
+    validated height (see §4.1 item 6).
   - Purpose: HTLC with preimage delivered on-chain via a `CORE_ANCHOR` envelope, rather than in `script_sig`. Enables anchor-based atomic swaps without exposing the preimage in the input witness.
   - `covenant_data = hash:bytes32 || lock_mode:u8 || lock_value:u64le || claim_key_id:bytes32 || refund_key_id:bytes32`.
   - `hash = SHA3-256(preimage32)` for a 32-byte secret preimage.
   - `lock_mode = 0x00` for height lock, `0x01` for UNIX-time lock.
   - `claim_key_id != refund_key_id` MUST be enforced; equal values MUST be rejected as `TX_ERR_PARSE`.
   - `covenant_data_len` MUST be exactly `32 + 1 + 8 + 32 + 32 = 105`.
-  - Claim path (`script_sig_len = 0`, preimage in ANCHOR envelope):
-    - Scan all `CORE_ANCHOR` outputs in the transaction for a matching envelope:
-      - A matching envelope has `|anchor_data| = 54` AND `anchor_data[0:22] = ASCII("RUBINv1-htlc-preimage/")`.
-    - If no matching envelope is found: reject as `TX_ERR_PARSE`.
-    - If two or more matching envelopes are found: reject as `TX_ERR_PARSE` (non-deterministic).
-    - If exactly one matching envelope: `preimage32 = anchor_data[22:54]`.
-      - Require `SHA3-256(preimage32) = hash`; otherwise reject as `TX_ERR_SIG_INVALID`.
-      - Witness public key hash MUST equal `claim_key_id`; otherwise reject as `TX_ERR_SIG_INVALID`.
-  - Refund path (determined by witness key matching `refund_key_id`):
-    - If no matching ANCHOR envelope and witness public key hash equals `refund_key_id`:
-      - `lock_mode = 0x00`: require `height(B) >= lock_value`.
-      - `lock_mode = 0x01`: require `timestamp(B) >= lock_value`.
-      - If lock condition is not met: reject as `TX_ERR_TIMELOCK_NOT_MET`.
-    - If lock condition met and key matches `refund_key_id`: proceed to signature verification.
+  - Spend path selection is determined by ANCHOR envelope matching and witness key binding (see §4.1 item 6).
+  - Non-normative wallet safety: creating `CORE_HTLC_V2` outputs before the deployment is ACTIVE is
+    syntactically valid, but spending them remains deployment-gated; if the deployment never reaches
+    ACTIVE (e.g., FAILED), such outputs may become unspendable. Wallets SHOULD warn users before
+    creating `CORE_HTLC_V2` outputs on chains where `htlc_anchor_v1` is not ACTIVE.
   - Non-matching `CORE_ANCHOR` outputs in the same transaction are permitted and do not affect HTLC_V2 validation.
 - `CORE_RESERVED_FUTURE`: forbidden until explicit activation by consensus.
 

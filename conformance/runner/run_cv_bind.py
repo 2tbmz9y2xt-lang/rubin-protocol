@@ -334,9 +334,6 @@ def main() -> int:
             tok_g = extract_error_token(err_g)
 
             accepted = {expected_error}
-            if expected_error == "TX_ERR_SIG_KEY_MISMATCH":
-                # Runtime consensus currently reports this condition as TX_ERR_SIG_INVALID.
-                accepted.add("TX_ERR_SIG_INVALID")
             if test_id == "BIND-02" and expected_error == "TX_ERR_PARSE":
                 # Current clients reject sentinel on CORE_P2PK as alg-invalid before length parse.
                 accepted.add("TX_ERR_SIG_ALG_INVALID")

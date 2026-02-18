@@ -221,6 +221,7 @@ fn cmd_verify(
     prevout_creation_height: u64,
     chain_height: u64,
     chain_timestamp: u64,
+    htlc_v2_active: bool,
     suite_id_02_active: bool,
 ) -> Result<(), String> {
     let tx_bytes = rubin_consensus::hex_decode_strict(tx_hex)?;
@@ -241,6 +242,7 @@ fn cmd_verify(
         prevout_creation_height,
         chain_height,
         chain_timestamp,
+        htlc_v2_active,
         suite_id_02_active,
     )?;
     println!("OK");
@@ -340,6 +342,10 @@ fn cmd_apply_utxo(context_path: &str) -> Result<(), String> {
         .get("suite_id_02_active")
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
+    let htlc_v2_active = v
+        .get("htlc_v2_active")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
 
     let tx_bytes = rubin_consensus::hex_decode_strict(tx_hex)?;
     let tx = rubin_consensus::parse_tx_bytes(&tx_bytes)?;
@@ -419,6 +425,7 @@ fn cmd_apply_utxo(context_path: &str) -> Result<(), String> {
         &utxo,
         chain_height,
         chain_timestamp,
+        htlc_v2_active,
         suite_id_02_active,
     )?;
     Ok(())
@@ -447,6 +454,10 @@ fn cmd_apply_block(context_path: &str) -> Result<(), String> {
         .unwrap_or(false);
     let suite_id_02_active = v
         .get("suite_id_02_active")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let htlc_v2_active = v
+        .get("htlc_v2_active")
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
 
@@ -541,6 +552,7 @@ fn cmd_apply_block(context_path: &str) -> Result<(), String> {
         local_time,
         local_time_set,
         suite_id_02_active,
+        htlc_v2_active,
     };
 
     rubin_consensus::apply_block(provider.as_ref(), &chain_id, &block, &mut utxo, &ctx)?;
@@ -692,7 +704,7 @@ fn usage() {
         "  sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>]"
     );
     eprintln!(
-        "  verify --tx-hex <hex> --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-height <u64> | --chain-timestamp <u64> | --chain-id-hex <hex64> | --profile <path> | --suite-id-02-active]"
+        "  verify --tx-hex <hex> --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-height <u64> | --chain-timestamp <u64> | --chain-id-hex <hex64> | --profile <path> | --suite-id-02-active | --htlc-v2-active]"
     );
     eprintln!("  reorg --context-json <path>");
 }
@@ -990,6 +1002,7 @@ fn cmd_verify_main(args: &[String]) -> i32 {
         }
     };
     let suite_id_02_active = flag_present(args, "--suite-id-02-active");
+    let htlc_v2_active = flag_present(args, "--htlc-v2-active");
 
     let chain_id = if let Some(hex) = chain_id_hex {
         match parse_chain_id_hex(&hex) {
@@ -1027,6 +1040,7 @@ fn cmd_verify_main(args: &[String]) -> i32 {
         prevout_creation_height,
         chain_height,
         chain_timestamp,
+        htlc_v2_active,
         suite_id_02_active,
     ) {
         eprintln!("verify error: {e}");

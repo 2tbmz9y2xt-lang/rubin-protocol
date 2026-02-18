@@ -170,7 +170,10 @@ impl CryptoProvider for WolfcryptDylibProvider {
 pub struct KeyWrapIntegrityError;
 impl std::fmt::Display for KeyWrapIntegrityError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "keyunwrap: integrity check failed (wrong KEK or corrupted blob)")
+        write!(
+            f,
+            "keyunwrap: integrity check failed (wrong KEK or corrupted blob)"
+        )
     }
 }
 impl std::error::Error for KeyWrapIntegrityError {}
@@ -185,7 +188,8 @@ impl WolfcryptDylibProvider {
     /// `kek` must be exactly 32 bytes. `key_in` must be a non-zero multiple of 8 bytes.
     /// Returns wrapped blob (`key_in.len() + 8` bytes).
     pub fn key_wrap(&self, kek: &[u8], key_in: &[u8]) -> Result<Vec<u8>, String> {
-        let f = self.aes_keywrap
+        let f = self
+            .aes_keywrap
             .ok_or_else(|| "keywrap symbol absent in shim (upgrade shim to v1.1+)".to_string())?;
         if kek.len() != 32 {
             return Err("keywrap: kek must be 32 bytes (AES-256)".into());
@@ -197,7 +201,14 @@ impl WolfcryptDylibProvider {
         let mut out_len = out.len();
         // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let rc = unsafe {
-            f(kek.as_ptr(), kek.len(), key_in.as_ptr(), key_in.len(), out.as_mut_ptr(), &mut out_len)
+            f(
+                kek.as_ptr(),
+                kek.len(),
+                key_in.as_ptr(),
+                key_in.len(),
+                out.as_mut_ptr(),
+                &mut out_len,
+            )
         };
         if rc <= 0 {
             return Err(format!("keywrap: shim error rc={rc}"));
@@ -208,8 +219,13 @@ impl WolfcryptDylibProvider {
 
     /// Unwrap a blob produced by `key_wrap` using AES-256-KW (RFC 3394).
     /// Returns `Err(KeyWrapIntegrityError)` if the KEK is wrong or blob is corrupted.
-    pub fn key_unwrap(&self, kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        let f = self.aes_keyunwrap
+    pub fn key_unwrap(
+        &self,
+        kek: &[u8],
+        wrapped: &[u8],
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let f = self
+            .aes_keyunwrap
             .ok_or_else(|| "keyunwrap symbol absent in shim (upgrade shim to v1.1+)".to_string())?;
         if kek.len() != 32 {
             return Err("keyunwrap: kek must be 32 bytes (AES-256)".into());
@@ -221,7 +237,14 @@ impl WolfcryptDylibProvider {
         let mut out_len = out.len();
         // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let rc = unsafe {
-            f(kek.as_ptr(), kek.len(), wrapped.as_ptr(), wrapped.len(), out.as_mut_ptr(), &mut out_len)
+            f(
+                kek.as_ptr(),
+                kek.len(),
+                wrapped.as_ptr(),
+                wrapped.len(),
+                out.as_mut_ptr(),
+                &mut out_len,
+            )
         };
         if rc == -36 {
             return Err(Box::new(KeyWrapIntegrityError));
