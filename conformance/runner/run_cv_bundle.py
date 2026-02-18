@@ -283,10 +283,11 @@ def _key_id_from_witness_item(w: dict[str, Any]) -> bytes:
     pub = w.get("pubkey", b"")
     if not isinstance(pub, (bytes, bytearray)):
         raise TypeError("pubkey must be bytes")
-    # Spec-aligned: key_id = SHA3-256(pubkey_wire), where pubkey_wire matches witness encoding prefixing.
-    # Use CompactSize(len(pubkey)) (not u16le) for the length prefix.
-    pub_wire = bytes([suite_id & 0xFF]) + _compact_size_encode(len(pub)) + bytes(pub)
-    return _sha3_256(pub_wire)
+    # Consensus key_id: SHA3-256(pubkey), where pubkey is the canonical wire value for the suite.
+    # NOTE: suite_id and witness length prefixes are NOT included in key_id derivation.
+    # (See CV-HTLC / CV-VAULT vectors: their expected key_id values match SHA3(pubkey) directly.)
+    _ = suite_id  # keep suite_id available for future checks / logging without changing behavior
+    return _sha3_256(bytes(pub))
 
 
 def _parse_lock_mode(b: int) -> str:
