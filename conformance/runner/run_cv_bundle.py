@@ -32,14 +32,32 @@ def run_result(client: ClientCmd, argv: list[str]) -> subprocess.CompletedProces
         fallback_cache.mkdir(parents=True, exist_ok=True)
         env["GOCACHE"] = str(fallback_cache)
 
-    return subprocess.run(
-        client.argv_prefix + argv,
-        cwd=str(client.cwd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-    )
+    # Hard timeout prevents indefinite hangs (e.g., toolchain issues). Keep generous
+    # because the first invocation may compile.
+    timeout_s = int(os.environ.get("RUBIN_CONFORMANCE_CMD_TIMEOUT_S", "900"))
+
+    cmd = client.argv_prefix + argv
+    try:
+        return subprocess.run(
+            cmd,
+            cwd=str(client.cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout if isinstance(e.stdout, str) else ""
+        err = e.stderr if isinstance(e.stderr, str) else ""
+        if err and not err.endswith("\n"):
+            err += "\n"
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=124,
+            stdout=out,
+            stderr=err + f"TIMEOUT after {timeout_s}s\ncmd: {' '.join(cmd)}\n",
+        )
 
 
 def run_success(client: ClientCmd, argv: list[str]) -> str:
@@ -328,48 +346,70 @@ def run_fees(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd,
 
         ctx = t.get("context")
         if not isinstance(ctx, dict):
-            _record_gate_result(test_id, gate, expected, "TX_ERR_PARSE", failures)
+            failures.append(f"{gate}:{test_id}: missing/invalid context")
             continue
 
+        # CV-FEES must be evaluated by the real node CLI (apply-utxo), because value conservation
+        # is a consensus invariant that is enforced there (and must match across rust+go nodes).
         executed += 1
-        tx_hex = ctx.get("tx_hex")
-        utxo_set = ctx.get("utxo_set", [])
-        if not isinstance(tx_hex, str) or not isinstance(utxo_set, list):
-            actual = "TX_ERR_PARSE"
-        else:
-            tx = _parse_tx_bytes(parse_hex(tx_hex))
-            utxo_map: dict[tuple[bytes, int], int] = {}
-            for e in utxo_set:
-                if not isinstance(e, dict):
-                    continue
-                txid = parse_hex(e.get("txid", "")).rjust(32, b"\x00")
-                vout = _to_int(e.get("vout", 0))
-                val = _to_int(e.get("value", 0))
-                utxo_map[(txid, vout)] = val
+        # Build the context JSON payload as expected by the CLI.
+        # NOTE: Go ignores unknown fields (e.g., htlc_v2_active), Rust consumes them.
+        context_json: dict[str, Any] = {
+            "chain_id_hex": ctx.get("chain_id_hex", ""),
+            "chain_height": _to_int(ctx.get("chain_height", 0)),
+            "chain_timestamp": _to_int(ctx.get("chain_timestamp", 0)),
+            "suite_id_02_active": bool(ctx.get("suite_id_02_active", False)),
+            "htlc_v2_active": bool(ctx.get("htlc_v2_active", False)),
+            "tx_hex": ctx.get("tx_hex", ""),
+            "utxo_set": ctx.get("utxo_set", []),
+        }
 
-            total_in = 0
-            try:
-                for inp in tx["inputs"]:
-                    key = (inp["prev_txid"], int(inp["prev_vout"]))
-                    if key not in utxo_map:
-                        raise KeyError("missing utxo")
-                    total_in += utxo_map[key]
-                    if total_in > 0xFFFFFFFFFFFFFFFF:
-                        raise OverflowError("sum_in overflow")
-            except (KeyError, OverflowError):
-                actual = "TX_ERR_PARSE" if "overflow" in str(sys.exc_info()[1]).lower() else "TX_ERR_MISSING_UTXO"
-            else:
-                total_out = 0
-                try:
-                    for out in tx["outputs"]:
-                        total_out += int(out["value"])
-                        if total_out > 0xFFFFFFFFFFFFFFFF:
-                            raise OverflowError("sum_out overflow")
-                except OverflowError:
-                    actual = "TX_ERR_PARSE"
-                else:
-                    actual = "TX_ERR_VALUE_CONSERVATION" if total_out > total_in else "PASS"
-        _record_gate_result(test_id, gate, expected, actual, failures)
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
+            json.dump(context_json, f)
+            context_path = f.name
+        try:
+            p_r = run_result(rust, ["apply-utxo", "--context-json", context_path])
+            p_g = run_result(go, ["apply-utxo", "--context-json", context_path])
+        finally:
+            Path(context_path).unlink(missing_ok=True)
+
+        out_r = p_r.stdout.strip()
+        out_g = p_g.stdout.strip()
+        tok_r = _extract_err_token(p_r.stderr)
+        tok_g = _extract_err_token(p_g.stderr)
+
+        if expected == "PASS":
+            if p_r.returncode != 0:
+                failures.append(f"{gate}:{test_id}: rust expected PASS, got={tok_r}")
+            elif out_r != "OK":
+                failures.append(f"{gate}:{test_id}: rust expected OK, got={out_r!r}")
+
+            if p_g.returncode != 0:
+                failures.append(f"{gate}:{test_id}: go expected PASS, got={tok_g}")
+            elif out_g != "OK":
+                failures.append(f"{gate}:{test_id}: go expected OK, got={out_g!r}")
+
+            if p_r.returncode != p_g.returncode:
+                failures.append(
+                    f"{gate}:{test_id}: cross-client rc mismatch rust={p_r.returncode} go={p_g.returncode}"
+                )
+            continue
+
+        # expected is an error token (TX_ERR_...).
+        if p_r.returncode == 0:
+            failures.append(f"{gate}:{test_id}: rust expected {expected}, got OK")
+        elif tok_r != expected:
+            failures.append(f"{gate}:{test_id}: rust expected {expected}, got={tok_r} ({p_r.stderr.strip()})")
+
+        if p_g.returncode == 0:
+            failures.append(f"{gate}:{test_id}: go expected {expected}, got OK")
+        elif tok_g != expected:
+            failures.append(f"{gate}:{test_id}: go expected {expected}, got={tok_g} ({p_g.stderr.strip()})")
+
+        if p_r.returncode != p_g.returncode:
+            failures.append(f"{gate}:{test_id}: cross-client rc mismatch rust={p_r.returncode} go={p_g.returncode}")
+        elif p_r.returncode != 0 and tok_r != tok_g:
+            failures.append(f"{gate}:{test_id}: cross-client token mismatch rust={tok_r} go={tok_g}")
 
     return executed
 
@@ -392,65 +432,61 @@ def run_vault(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd
             continue
         ctx = t.get("context")
         if not isinstance(ctx, dict):
-            _record_gate_result(test_id, gate, expected, "TX_ERR_PARSE", failures)
+            failures.append(f"{gate}:{test_id}: missing/invalid context")
             continue
         executed += 1
 
-        tx_hex = ctx.get("tx_hex")
-        utxo_set = ctx.get("utxo_set", [])
-        chain_height = _to_int(ctx.get("chain_height", 0))
-        chain_ts = _to_int(ctx.get("chain_timestamp", 0))
-        if not isinstance(tx_hex, str) or not isinstance(utxo_set, list):
-            actual = "TX_ERR_PARSE"
-        else:
-            tx = _parse_tx_bytes(parse_hex(tx_hex))
-            if not tx["witnesses"]:
-                actual = "TX_ERR_PARSE"
-            else:
-                w0 = tx["witnesses"][0]
-                if int(w0["suite_id"]) == SUITE_ID_SENTINEL:
-                    actual = "TX_ERR_SIG_ALG_INVALID"
-                else:
-                    kid = _key_id_from_witness_item(w0)
-                    # single-input vectors: use first utxo entry
-                    e0 = utxo_set[0] if utxo_set and isinstance(utxo_set[0], dict) else {}
-                    cd = parse_hex(e0.get("covenant_data", "")) if isinstance(e0, dict) else b""
-                    ch = _to_int(e0.get("creation_height", 0)) if isinstance(e0, dict) else 0
+        # Evaluate via real node CLI, so rust+go stay in lockstep on consensus enforcement.
+        context_json: dict[str, Any] = {
+            "chain_id_hex": ctx.get("chain_id_hex", ""),
+            "chain_height": _to_int(ctx.get("chain_height", 0)),
+            "chain_timestamp": _to_int(ctx.get("chain_timestamp", 0)),
+            "suite_id_02_active": bool(ctx.get("suite_id_02_active", False)),
+            "htlc_v2_active": bool(ctx.get("htlc_v2_active", False)),
+            "tx_hex": ctx.get("tx_hex", ""),
+            "utxo_set": ctx.get("utxo_set", []),
+        }
 
-                    try:
-                        if len(cd) == 73:
-                            owner = cd[0:32]
-                            lock_mode = _parse_lock_mode(cd[32])
-                            lock_value = _u64_from_le8(cd[33:41])
-                            recov = cd[41:73]
-                            spend_delay = 0
-                        elif len(cd) == 81:
-                            owner = cd[0:32]
-                            spend_delay = _u64_from_le8(cd[32:40])
-                            lock_mode = _parse_lock_mode(cd[40])
-                            lock_value = _u64_from_le8(cd[41:49])
-                            recov = cd[49:81]
-                        else:
-                            raise ValueError("bad vault len")
-                        if owner == recov:
-                            raise ValueError("overlap")
-                    except ValueError:
-                        actual = "TX_ERR_PARSE"
-                    else:
-                        if kid == owner:
-                            if spend_delay == 0:
-                                actual = "TX_ERR_SIG_INVALID"
-                            else:
-                                if chain_height >= ch + spend_delay:
-                                    actual = "TX_ERR_SIG_INVALID"
-                                else:
-                                    actual = "TX_ERR_TIMELOCK_NOT_MET"
-                        elif kid == recov:
-                            ok = chain_height >= lock_value if lock_mode == "height" else chain_ts >= lock_value
-                            actual = "TX_ERR_SIG_INVALID" if ok else "TX_ERR_TIMELOCK_NOT_MET"
-                        else:
-                            actual = "TX_ERR_SIG_INVALID"
-        _record_gate_result(test_id, gate, expected, actual, failures)
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
+            json.dump(context_json, f)
+            context_path = f.name
+        try:
+            p_r = run_result(rust, ["apply-utxo", "--context-json", context_path])
+            p_g = run_result(go, ["apply-utxo", "--context-json", context_path])
+        finally:
+            Path(context_path).unlink(missing_ok=True)
+
+        out_r = p_r.stdout.strip()
+        out_g = p_g.stdout.strip()
+        tok_r = _extract_err_token(p_r.stderr)
+        tok_g = _extract_err_token(p_g.stderr)
+
+        if expected == "PASS":
+            if p_r.returncode != 0:
+                failures.append(f"{gate}:{test_id}: rust expected PASS, got={tok_r}")
+            elif out_r != "OK":
+                failures.append(f"{gate}:{test_id}: rust expected OK, got={out_r!r}")
+            if p_g.returncode != 0:
+                failures.append(f"{gate}:{test_id}: go expected PASS, got={tok_g}")
+            elif out_g != "OK":
+                failures.append(f"{gate}:{test_id}: go expected OK, got={out_g!r}")
+            if p_r.returncode != p_g.returncode:
+                failures.append(
+                    f"{gate}:{test_id}: cross-client rc mismatch rust={p_r.returncode} go={p_g.returncode}"
+                )
+        else:
+            if p_r.returncode == 0:
+                failures.append(f"{gate}:{test_id}: rust expected {expected}, got OK")
+            elif tok_r != expected:
+                failures.append(f"{gate}:{test_id}: rust expected {expected}, got={tok_r} ({p_r.stderr.strip()})")
+            if p_g.returncode == 0:
+                failures.append(f"{gate}:{test_id}: go expected {expected}, got OK")
+            elif tok_g != expected:
+                failures.append(f"{gate}:{test_id}: go expected {expected}, got={tok_g} ({p_g.stderr.strip()})")
+            if p_r.returncode != p_g.returncode:
+                failures.append(f"{gate}:{test_id}: cross-client rc mismatch rust={p_r.returncode} go={p_g.returncode}")
+            elif tok_r != tok_g:
+                failures.append(f"{gate}:{test_id}: cross-client token mismatch rust={tok_r} go={tok_g}")
 
     return executed
 
@@ -473,61 +509,60 @@ def run_htlc(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd,
             continue
         ctx = t.get("context")
         if not isinstance(ctx, dict):
-            _record_gate_result(test_id, gate, expected, "TX_ERR_PARSE", failures)
+            failures.append(f"{gate}:{test_id}: missing/invalid context")
             continue
         executed += 1
 
-        tx_hex = ctx.get("tx_hex")
-        utxo_set = ctx.get("utxo_set", [])
-        chain_height = _to_int(ctx.get("chain_height", 0))
-        chain_ts = _to_int(ctx.get("chain_timestamp", 0))
-        if not isinstance(tx_hex, str) or not isinstance(utxo_set, list):
-            actual = "TX_ERR_PARSE"
+        context_json: dict[str, Any] = {
+            "chain_id_hex": ctx.get("chain_id_hex", ""),
+            "chain_height": _to_int(ctx.get("chain_height", 0)),
+            "chain_timestamp": _to_int(ctx.get("chain_timestamp", 0)),
+            "suite_id_02_active": bool(ctx.get("suite_id_02_active", False)),
+            "htlc_v2_active": bool(ctx.get("htlc_v2_active", False)),
+            "tx_hex": ctx.get("tx_hex", ""),
+            "utxo_set": ctx.get("utxo_set", []),
+        }
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
+            json.dump(context_json, f)
+            context_path = f.name
+        try:
+            p_r = run_result(rust, ["apply-utxo", "--context-json", context_path])
+            p_g = run_result(go, ["apply-utxo", "--context-json", context_path])
+        finally:
+            Path(context_path).unlink(missing_ok=True)
+
+        out_r = p_r.stdout.strip()
+        out_g = p_g.stdout.strip()
+        tok_r = _extract_err_token(p_r.stderr)
+        tok_g = _extract_err_token(p_g.stderr)
+
+        if expected == "PASS":
+            if p_r.returncode != 0:
+                failures.append(f"{gate}:{test_id}: rust expected PASS, got={tok_r}")
+            elif out_r != "OK":
+                failures.append(f"{gate}:{test_id}: rust expected OK, got={out_r!r}")
+            if p_g.returncode != 0:
+                failures.append(f"{gate}:{test_id}: go expected PASS, got={tok_g}")
+            elif out_g != "OK":
+                failures.append(f"{gate}:{test_id}: go expected OK, got={out_g!r}")
+            if p_r.returncode != p_g.returncode:
+                failures.append(
+                    f"{gate}:{test_id}: cross-client rc mismatch rust={p_r.returncode} go={p_g.returncode}"
+                )
         else:
-            tx = _parse_tx_bytes(parse_hex(tx_hex))
-            if not tx["witnesses"]:
-                actual = "TX_ERR_PARSE"
-            else:
-                w0 = tx["witnesses"][0]
-                if int(w0["suite_id"]) == SUITE_ID_SENTINEL:
-                    actual = "TX_ERR_SIG_ALG_INVALID"
-                else:
-                    kid = _key_id_from_witness_item(w0)
-                    inp0 = tx["inputs"][0] if tx["inputs"] else {"script_sig": b""}
-                    script_sig = inp0.get("script_sig", b"")
-                    # use first utxo entry (fixtures are controlled)
-                    e0 = utxo_set[0] if utxo_set and isinstance(utxo_set[0], dict) else {}
-                    cd = parse_hex(e0.get("covenant_data", "")) if isinstance(e0, dict) else b""
-                    try:
-                        if len(cd) != 105:
-                            raise ValueError("bad len")
-                        hsh = cd[0:32]
-                        lock_mode = _parse_lock_mode(cd[32])
-                        lock_value = _u64_from_le8(cd[33:41])
-                        claim = cd[41:73]
-                        refund = cd[73:105]
-                        if claim == refund:
-                            raise ValueError("overlap")
-                    except ValueError:
-                        actual = "TX_ERR_PARSE"
-                    else:
-                        if len(script_sig) == 32:
-                            preimage = script_sig
-                            if _sha3_256(preimage) != hsh:
-                                actual = "TX_ERR_SIG_INVALID"
-                            elif kid != claim:
-                                actual = "TX_ERR_SIG_INVALID"
-                            else:
-                                actual = "TX_ERR_SIG_INVALID"
-                        elif len(script_sig) == 0:
-                            if kid != refund:
-                                actual = "TX_ERR_SIG_INVALID"
-                            else:
-                                ok = chain_height >= lock_value if lock_mode == "height" else chain_ts >= lock_value
-                                actual = "TX_ERR_SIG_INVALID" if ok else "TX_ERR_TIMELOCK_NOT_MET"
-                        else:
-                            actual = "TX_ERR_PARSE"
-        _record_gate_result(test_id, gate, expected, actual, failures)
+            if p_r.returncode == 0:
+                failures.append(f"{gate}:{test_id}: rust expected {expected}, got OK")
+            elif tok_r != expected:
+                failures.append(f"{gate}:{test_id}: rust expected {expected}, got={tok_r} ({p_r.stderr.strip()})")
+            if p_g.returncode == 0:
+                failures.append(f"{gate}:{test_id}: go expected {expected}, got OK")
+            elif tok_g != expected:
+                failures.append(f"{gate}:{test_id}: go expected {expected}, got={tok_g} ({p_g.stderr.strip()})")
+            if p_r.returncode != p_g.returncode:
+                failures.append(f"{gate}:{test_id}: cross-client rc mismatch rust={p_r.returncode} go={p_g.returncode}")
+            elif tok_r != tok_g:
+                failures.append(f"{gate}:{test_id}: cross-client token mismatch rust={tok_r} go={tok_g}")
 
     return executed
 
@@ -617,29 +652,16 @@ def run_htlc_anchor(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: Cli
     return executed
 
 
-def run_weight(gate: str, fixture: dict[str, Any], failures: list[str]) -> int:
+def run_weight(
+    gate: str,
+    fixture: dict[str, Any],
+    rust: ClientCmd,
+    go: ClientCmd,
+    failures: list[str],
+) -> int:
     tests = fixture.get("tests")
     if not isinstance(tests, list) or not tests:
         failures.append(f"{gate}: fixture has no tests")
-        return 0
-
-    def witness_item_len(item: dict[str, Any]) -> int:
-        suite_id = _to_int(item.get("suite_id", 0x00))
-        pub_len = _to_int(item.get("pubkey_length", 0))
-        sig_len = _to_int(item.get("sig_length", 0))
-        # suite_id:u8 + CompactSize(pub_len) + pub + CompactSize(sig_len) + sig
-        return 1 + len(_compact_size_encode(pub_len)) + pub_len + len(_compact_size_encode(sig_len)) + sig_len
-
-    def sig_cost_for(item: dict[str, Any]) -> int:
-        # v1.1 defaults: ML-DSA verify_cost=8, SLH-DSA verify_cost=64. Others are informational only.
-        suite_id = _to_int(item.get("suite_id", 0x00))
-        if suite_id == 0x01:
-            return 8
-        if suite_id == 0x02:
-            return 64
-        # informational vectors may specify verify_cost explicitly
-        if "verify_cost" in item:
-            return _to_int(item.get("verify_cost", 0))
         return 0
 
     executed = 0
@@ -660,44 +682,34 @@ def run_weight(gate: str, fixture: dict[str, Any], failures: list[str]) -> int:
             continue
 
         executed += 1
-        input_count = _to_int(ctx.get("input_count", 1))
-        output_count = _to_int(ctx.get("output_count", 0))
-        witness_count = _to_int(ctx.get("witness_count", 0))
-        witness_items_present = _to_int(ctx.get("witness_items_present", 0))
-        item = ctx.get("witness_item", {})
-        item = item if isinstance(item, dict) else {}
+        tx_hex = make_parse_tx_bytes(ctx)
 
-        # Base size for synthetic tx shape (matches `make_parse_tx_bytes` layout).
-        base = bytearray()
-        base.extend(_u32le(1))
-        base.extend(_u64le(0))
-        base.extend(_compact_size_encode(input_count))
-        # inputs: 32 prev + 4 vout + cs(script_sig_len) + script_sig + 4 sequence; script_sig is empty in these vectors.
-        for _ in range(input_count):
-            base.extend(bytes(32))
-            base.extend(_u32le(0))
-            base.extend(_compact_size_encode(0))
-            base.extend(_u32le(0))
-        base.extend(_compact_size_encode(output_count))
-        # outputs: value(8) + covenant_type(2) + cs(covenant_data_len) + covenant_data(empty)
-        for _ in range(output_count):
-            base.extend(_u64le(0))
-            base.extend(_u16le(0))
-            base.extend(_compact_size_encode(0))
-        base.extend(_u32le(0))  # locktime
-        base_size = len(base)
+        pr = run_result(rust, ["weight", "--tx-hex", tx_hex])
+        pg = run_result(go, ["weight", "--tx-hex", tx_hex])
 
-        # Witness bytes for the synthetic witness section.
-        wit = bytearray()
-        wit.extend(_compact_size_encode(witness_count))
-        per_item = witness_item_len(item)
-        wit_size = len(wit) + per_item * witness_items_present
+        if pr.returncode != 0 or pg.returncode != 0:
+            actual_r = "PASS" if pr.returncode == 0 else _extract_err_token(pr.stderr)
+            actual_g = "PASS" if pg.returncode == 0 else _extract_err_token(pg.stderr)
+            failures.append(
+                f"{gate}:{test_id}: expected weight={expected_weight}, got error: rust={actual_r} go={actual_g}"
+            )
+            continue
 
-        sig_cost = sig_cost_for(item) * witness_items_present
-        weight = 4 * base_size + wit_size + sig_cost
+        try:
+            wr = int(pr.stdout.strip() or "0", 10)
+        except ValueError:
+            failures.append(f"{gate}:{test_id}: rust weight stdout not int: {pr.stdout!r}")
+            continue
+        try:
+            wg = int(pg.stdout.strip() or "0", 10)
+        except ValueError:
+            failures.append(f"{gate}:{test_id}: go weight stdout not int: {pg.stdout!r}")
+            continue
 
-        if weight != expected_weight:
-            failures.append(f"{gate}:{test_id}: expected weight={expected_weight}, got={weight}")
+        if wr != wg:
+            failures.append(f"{gate}:{test_id}: rust/go mismatch: rust={wr} go={wg}")
+        if wr != expected_weight:
+            failures.append(f"{gate}:{test_id}: expected weight={expected_weight}, got={wr}")
 
     return executed
 
@@ -760,19 +772,11 @@ def run_anchor_relay(gate: str, fixture: dict[str, Any], failures: list[str]) ->
     return executed
 
 
-def run_coinbase(gate: str, fixture: dict[str, Any], failures: list[str]) -> int:
+def run_coinbase(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd, failures: list[str]) -> int:
     tests = fixture.get("tests")
     if not isinstance(tests, list) or not tests:
         failures.append(f"{gate}: fixture has no tests")
         return 0
-
-    def subsidy_for_height(h: int) -> tuple[int, int]:
-        # v1.1 linear emission: distribute TOTAL across the first N blocks, then 0.
-        # phase: 0 => subsidy > 0 (height < N), 1 => subsidy == 0 (height >= N)
-        if h >= SUBSIDY_DURATION_BLOCKS:
-            return 0, 1
-        subsidy = BASE_SUBSIDY + (1 if h < REM_SUBSIDY_BLOCKS else 0)
-        return subsidy, 0
 
     executed = 0
     for t in tests:
@@ -791,15 +795,43 @@ def run_coinbase(gate: str, fixture: dict[str, Any], failures: list[str]) -> int
         expected_code = str(t.get("expected_code", "")).strip().upper()
 
         executed += 1
-
-        subsidy, epoch = subsidy_for_height(h)
+        fees = _to_int(ctx.get("fees_in_block", 0))
+        coinbase_val = _to_int(ctx.get("coinbase_output_value", 0))
 
         if expected_err:
-            fees = _to_int(ctx.get("fees_in_block", 0))
-            coinbase_val = _to_int(ctx.get("coinbase_output_value", 0))
-            actual = "PASS" if coinbase_val <= subsidy + fees else "BLOCK_ERR_SUBSIDY_EXCEEDED"
-            if actual != expected_err:
-                failures.append(f"{gate}:{test_id}: expected {expected_err}, got {actual}")
+            pr = run_result(
+                rust,
+                [
+                    "coinbase",
+                    "--block-height",
+                    str(h),
+                    "--fees-in-block",
+                    str(fees),
+                    "--coinbase-output-value",
+                    str(coinbase_val),
+                ],
+            )
+            pg = run_result(
+                go,
+                [
+                    "coinbase",
+                    "--block-height",
+                    str(h),
+                    "--fees-in-block",
+                    str(fees),
+                    "--coinbase-output-value",
+                    str(coinbase_val),
+                ],
+            )
+
+            tok_r = "PASS" if pr.returncode == 0 else _extract_err_token(pr.stderr)
+            tok_g = "PASS" if pg.returncode == 0 else _extract_err_token(pg.stderr)
+            if tok_r != expected_err:
+                failures.append(f"{gate}:{test_id}: rust expected {expected_err}, got={tok_r} ({pr.stderr.strip()})")
+            if tok_g != expected_err:
+                failures.append(f"{gate}:{test_id}: go expected {expected_err}, got={tok_g} ({pg.stderr.strip()})")
+            if tok_r != tok_g:
+                failures.append(f"{gate}:{test_id}: cross-client token mismatch rust={tok_r} go={tok_g}")
             continue
 
         if expected_code:
@@ -811,10 +843,30 @@ def run_coinbase(gate: str, fixture: dict[str, Any], failures: list[str]) -> int
             failures.append(f"{gate}:{test_id}: missing expected_subsidy/expected_epoch")
             continue
 
-        if subsidy != expected_subsidy:
-            failures.append(f"{gate}:{test_id}: subsidy mismatch: expected={expected_subsidy}, got={subsidy}")
-        if epoch != expected_epoch:
-            failures.append(f"{gate}:{test_id}: epoch mismatch: expected={expected_epoch}, got={epoch}")
+        pr = run_result(rust, ["coinbase", "--block-height", str(h)])
+        pg = run_result(go, ["coinbase", "--block-height", str(h)])
+        if pr.returncode != 0:
+            failures.append(f"{gate}:{test_id}: rust coinbase --block-height failed: {_extract_err_token(pr.stderr)}")
+            continue
+        if pg.returncode != 0:
+            failures.append(f"{gate}:{test_id}: go coinbase --block-height failed: {_extract_err_token(pg.stderr)}")
+            continue
+
+        try:
+            r_parts = pr.stdout.strip().split()
+            g_parts = pg.stdout.strip().split()
+            rs, re = int(r_parts[0], 10), int(r_parts[1], 10)
+            gs, ge = int(g_parts[0], 10), int(g_parts[1], 10)
+        except Exception:
+            failures.append(f"{gate}:{test_id}: coinbase output parse error: rust={pr.stdout!r} go={pg.stdout!r}")
+            continue
+
+        if (rs, re) != (gs, ge):
+            failures.append(f"{gate}:{test_id}: cross-client subsidy/epoch mismatch rust=({rs},{re}) go=({gs},{ge})")
+        if rs != expected_subsidy:
+            failures.append(f"{gate}:{test_id}: subsidy mismatch: expected={expected_subsidy}, got={rs}")
+        if re != expected_epoch:
+            failures.append(f"{gate}:{test_id}: epoch mismatch: expected={expected_epoch}, got={re}")
 
     return executed
 
@@ -1992,25 +2044,61 @@ def main() -> int:
             continue
         gate_map[name] = Path(file)
 
-    rust_prefix: list[str] = [
-        "cargo",
-        "run",
-        "-q",
-        "--manifest-path",
-        "clients/rust/Cargo.toml",
-    ]
+    # Build the node CLIs once and invoke the binaries directly.
+    #
+    # Rationale:
+    # - `cargo run` / `go run` spawn temp executables and can trigger repeated platform
+    #   security validation. Prebuilding avoids repeated compile/exec overhead.
+    rust_build: list[str] = ["cargo", "build", "-q", "--manifest-path", "clients/rust/Cargo.toml"]
     if os.environ.get("RUBIN_CONFORMANCE_RUST_NO_DEFAULT", "").strip() not in ("", "0", "false", "False"):
-        rust_prefix.append("--no-default-features")
+        rust_build.append("--no-default-features")
     rust_features = os.environ.get("RUBIN_CONFORMANCE_RUST_FEATURES", "").strip()
     if rust_features:
-        rust_prefix.extend(["--features", rust_features])
-    rust_prefix.extend(["-p", "rubin-node", "--"])
+        rust_build.extend(["--features", rust_features])
+    rust_build.extend(["-p", "rubin-node"])
 
-    go_prefix: list[str] = ["go", "-C", "clients/go", "run"]
+    p = subprocess.run(
+        rust_build,
+        cwd=str(repo_root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if p.returncode != 0:
+        print("rust build failed:", file=sys.stderr)
+        print(p.stderr.strip(), file=sys.stderr)
+        return 2
+
+    rust_bin = (repo_root / "clients/rust/target/debug/rubin-node").resolve()
+    if not rust_bin.exists():
+        print(f"rust binary not found: {rust_bin}", file=sys.stderr)
+        return 2
+    rust_prefix: list[str] = [str(rust_bin)]
+
     go_tags = os.environ.get("RUBIN_CONFORMANCE_GO_TAGS", "").strip()
+    go_bin_dir = (repo_root / "clients/go/target").resolve()
+    go_bin_dir.mkdir(parents=True, exist_ok=True)
+    go_bin = (go_bin_dir / "rubin-node").resolve()
+    go_build: list[str] = ["go", "-C", "clients/go", "build", "-o", str(go_bin)]
     if go_tags:
-        go_prefix.extend(["-tags", go_tags])
-    go_prefix.append("./node")
+        go_build.extend(["-tags", go_tags])
+    go_build.append("./node")
+
+    p = subprocess.run(
+        go_build,
+        cwd=str(repo_root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if p.returncode != 0:
+        print("go build failed:", file=sys.stderr)
+        print(p.stderr.strip(), file=sys.stderr)
+        return 2
+    if not go_bin.exists():
+        print(f"go binary not found: {go_bin}", file=sys.stderr)
+        return 2
+    go_prefix: list[str] = [str(go_bin)]
 
     rust = ClientCmd(name="rust", cwd=repo_root, argv_prefix=rust_prefix)
     go = ClientCmd(name="go", cwd=repo_root, argv_prefix=go_prefix)
@@ -2082,10 +2170,10 @@ def main() -> int:
             checks += run_htlc_anchor(gate, fixture, rust, go, failures)
             continue
         if gate == "CV-WEIGHT":
-            checks += run_weight(gate, fixture, failures)
+            checks += run_weight(gate, fixture, rust, go, failures)
             continue
         if gate == "CV-COINBASE":
-            checks += run_coinbase(gate, fixture, failures)
+            checks += run_coinbase(gate, fixture, rust, go, failures)
             continue
         if gate == "CV-ANCHOR-RELAY":
             checks += run_anchor_relay(gate, fixture, failures)

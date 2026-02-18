@@ -1474,21 +1474,29 @@ func ValidateInputAuthorization(
 		if err != nil {
 			return err
 		}
+		// Enforce lock_mode domain even on claim path (refund path uses satisfyLock, but
+		// claim path must also reject invalid lock_mode deterministically).
+		if lockMode != TIMELOCK_MODE_HEIGHT && lockMode != TIMELOCK_MODE_TIMESTAMP {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+		claimKeyID := prevout.CovenantData[41:73]
+		refundKeyID := prevout.CovenantData[73:105]
+		if bytes.Equal(claimKeyID, refundKeyID) {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
 		if len(input.ScriptSig) == 32 {
 			expectedHash := prevout.CovenantData[:32]
 			scriptHash := p.SHA3_256(input.ScriptSig)
 			if !bytes.Equal(scriptHash[:], expectedHash) {
 				return fmt.Errorf("TX_ERR_SIG_INVALID")
 			}
-			expectedClaimKeyID := prevout.CovenantData[41:73]
 			actualKeyID := p.SHA3_256(witness.Pubkey)
-			if !bytes.Equal(actualKeyID[:], expectedClaimKeyID) {
+			if !bytes.Equal(actualKeyID[:], claimKeyID) {
 				return fmt.Errorf("TX_ERR_SIG_INVALID")
 			}
 		} else {
-			expectedRefundKeyID := prevout.CovenantData[73:105]
 			actualKeyID := p.SHA3_256(witness.Pubkey)
-			if !bytes.Equal(actualKeyID[:], expectedRefundKeyID) {
+			if !bytes.Equal(actualKeyID[:], refundKeyID) {
 				return fmt.Errorf("TX_ERR_SIG_INVALID")
 			}
 			if err := satisfyLock(lockMode, lockValue, chainHeight, chainTimestamp); err != nil {

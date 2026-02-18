@@ -5,6 +5,8 @@
 
 # Rust
 **/target/
+target-validator/
+target-validator-tests/
 **/venv/
 **/.venv/
 
