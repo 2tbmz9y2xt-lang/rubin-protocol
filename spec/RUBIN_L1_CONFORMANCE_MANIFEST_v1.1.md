@@ -27,7 +27,7 @@ Source of truth for the bundle list:
 | CV-HTLC-ANCHOR | ✓ | PASS | 10 | consensus |
 | CV-VAULT | ✓ | PASS | 9 | consensus |
 | CV-WEIGHT | ✓ | PASS | 3 | consensus |
-| CV-COINBASE | ✓ | PASS | 12 | consensus |
+| CV-COINBASE | ✓ | PASS | 9 | consensus |
 | CV-ANCHOR-RELAY | — | PENDING | 11 | policy-only |
 
 **15 consensus gates — all PASS. 1 policy gate — PENDING (runner support needed).**
