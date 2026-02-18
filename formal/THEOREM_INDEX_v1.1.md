@@ -22,7 +22,7 @@ Proof status:
 - **Statement**: `hashOutputs(tx)` when `tx.output_count = 0` MUST equal `SHA3-256("")` (empty preimage), not an implementation-defined value.
 - **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §4.2` hashOutputs rule
 - **Evidence**: `conformance/fixtures/CV-SIGHASH.yml` SIGHASH-06
-- **Status**: `spec+vector`
+- **Status**: `lean4-proven` (empty outputs preimage lemma) — `/Users/gpt/Documents/rubin-formal/RubinFormal/TxWire.lean`
 
 ### T-004 — ApplyBlock determinism
 
