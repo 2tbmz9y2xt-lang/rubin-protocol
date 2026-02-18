@@ -39,6 +39,36 @@ tests:
     expected_error: BLOCK_ERR_COINBASE_INVALID
     consensus: true
 
+  - id: BLOCK-06A
+    title: "Coinbase invalid: tx_nonce != 0 on coinbase-shaped tx => BLOCK_ERR_COINBASE_INVALID"
+    context: { case: COINBASE_INVALID_TX_NONCE }
+    expected_error: BLOCK_ERR_COINBASE_INVALID
+    consensus: true
+
+  - id: BLOCK-06B
+    title: "Coinbase invalid: script_sig_len != 0 on coinbase-shaped tx => BLOCK_ERR_COINBASE_INVALID"
+    context: { case: COINBASE_INVALID_SCRIPT_SIG }
+    expected_error: BLOCK_ERR_COINBASE_INVALID
+    consensus: true
+
+  - id: BLOCK-06C
+    title: "Coinbase invalid: sequence != 0xffffffff on coinbase-shaped tx => BLOCK_ERR_COINBASE_INVALID"
+    context: { case: COINBASE_INVALID_SEQUENCE }
+    expected_error: BLOCK_ERR_COINBASE_INVALID
+    consensus: true
+
+  - id: BLOCK-06D
+    title: "Coinbase invalid: locktime != height(B) on coinbase-shaped tx => BLOCK_ERR_COINBASE_INVALID"
+    context: { case: COINBASE_INVALID_LOCKTIME }
+    expected_error: BLOCK_ERR_COINBASE_INVALID
+    consensus: true
+
+  - id: BLOCK-06E
+    title: "Coinbase invalid: witness_count != 0 on coinbase-shaped tx => BLOCK_ERR_COINBASE_INVALID"
+    context: { case: COINBASE_INVALID_WITNESS }
+    expected_error: BLOCK_ERR_COINBASE_INVALID
+    consensus: true
+
   - id: BLOCK-07
     title: "Median-time-vs-timestamp old bound violation => BLOCK_ERR_TIMESTAMP_OLD"
     context: { case: TIMESTAMP_OLD }

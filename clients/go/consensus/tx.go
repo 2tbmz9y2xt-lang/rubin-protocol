@@ -1194,23 +1194,23 @@ func validateOutputCovenantConstraints(output TxOutput) error {
 
 func validateCoinbaseTxInputs(tx *Tx) error {
 	if tx.TxNonce != 0 {
-		return fmt.Errorf("TX_ERR_COINBASE_INVALID")
+		return fmt.Errorf(BLOCK_ERR_COINBASE_INVALID)
 	}
 	if len(tx.Inputs) != 1 {
-		return fmt.Errorf("TX_ERR_COINBASE_INVALID")
+		return fmt.Errorf(BLOCK_ERR_COINBASE_INVALID)
 	}
 	in := tx.Inputs[0]
 	if in.Sequence != TX_COINBASE_PREVOUT_VOUT {
-		return fmt.Errorf("TX_ERR_COINBASE_INVALID")
+		return fmt.Errorf(BLOCK_ERR_COINBASE_INVALID)
 	}
 	if in.PrevTxid != ([32]byte{}) || in.PrevVout != TX_COINBASE_PREVOUT_VOUT {
-		return fmt.Errorf("TX_ERR_COINBASE_INVALID")
+		return fmt.Errorf(BLOCK_ERR_COINBASE_INVALID)
 	}
 	if len(in.ScriptSig) != 0 {
-		return fmt.Errorf("TX_ERR_COINBASE_INVALID")
+		return fmt.Errorf(BLOCK_ERR_COINBASE_INVALID)
 	}
 	if len(tx.Witness.Witnesses) != 0 {
-		return fmt.Errorf("TX_ERR_COINBASE_INVALID")
+		return fmt.Errorf(BLOCK_ERR_COINBASE_INVALID)
 	}
 	return nil
 }
