@@ -24,6 +24,8 @@ jobs:
           repository: 2tbmz9y2xt-lang/rubin-formal
           path: rubin-formal
           ref: 664e484a6a535d5e6bf627a72aab73ee54151d6c
+          ssh-key: ${{ secrets.RUBIN_FORMAL_DEPLOY_KEY }}
+          persist-credentials: false
 
       - name: Install elan (Lean toolchain)
         run: |
