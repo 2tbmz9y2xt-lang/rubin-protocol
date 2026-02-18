@@ -45,6 +45,10 @@ need_cmd git
 need_cmd cc
 need_cmd make
 
+git_safe() {
+  git -c core.hooksPath=/dev/null "$@"
+}
+
 mkdir -p "${WORKROOT}" "${SMOKE_DIR}"
 
 configure_has_flag() {
@@ -62,29 +66,29 @@ append_flag_if_supported() {
 if [[ ! -d "${SRC_DIR}/.git" ]]; then
   echo "Cloning wolfSSL ${WOLFSSL_TAG} from ${WOLFSSL_REPO}..."
   rm -rf "${SRC_DIR}"
-  git clone --depth 1 --branch "${WOLFSSL_TAG}" --single-branch "${WOLFSSL_REPO}" "${SRC_DIR}"
+  git_safe clone --depth 1 --branch "${WOLFSSL_TAG}" --single-branch "${WOLFSSL_REPO}" "${SRC_DIR}"
 else
   echo "Updating local wolfSSL checkout at ${SRC_DIR}..."
-  (cd "${SRC_DIR}" && git fetch --all --tags --prune)
+  (cd "${SRC_DIR}" && git_safe fetch --all --tags --prune)
 fi
 
 (
   cd "${SRC_DIR}" && \
-  git fetch --all --tags --prune
+  git_safe fetch --all --tags --prune
 
-  if ! git rev-parse -q --verify "refs/tags/${WOLFSSL_TAG}" >/dev/null; then
+  if ! git_safe rev-parse -q --verify "refs/tags/${WOLFSSL_TAG}" >/dev/null; then
     if [[ "${WOLFSSL_TAG}" != *"-stable" ]] && \
-       git rev-parse -q --verify "refs/tags/${WOLFSSL_TAG}-stable" >/dev/null; then
+       git_safe rev-parse -q --verify "refs/tags/${WOLFSSL_TAG}-stable" >/dev/null; then
       WOLFSSL_TAG="${WOLFSSL_TAG}-stable"
       echo "Resolved legacy tag to ${WOLFSSL_TAG}"
     fi
   fi
 
-  git checkout "${WOLFSSL_TAG}"
-  if git show-ref --verify --quiet "refs/remotes/origin/${WOLFSSL_TAG}"; then \
-    git reset --hard "origin/${WOLFSSL_TAG}"; \
+  git_safe checkout "${WOLFSSL_TAG}"
+  if git_safe show-ref --verify --quiet "refs/remotes/origin/${WOLFSSL_TAG}"; then \
+    git_safe reset --hard "origin/${WOLFSSL_TAG}"; \
   else \
-    git reset --hard "${WOLFSSL_TAG}"; \
+    git_safe reset --hard "${WOLFSSL_TAG}"; \
   fi
 
   if [[ -x ./autogen.sh ]]; then ./autogen.sh; fi

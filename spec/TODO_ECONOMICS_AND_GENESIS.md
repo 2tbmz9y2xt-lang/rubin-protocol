@@ -18,6 +18,9 @@ It is not yet reflected in the canonical consensus spec or chain-instance profil
 Current v1.1 chain-instance profiles include a genesis coinbase with **0 outputs**
 (`output_count = 0`) which implies **no premine at height 0** and emission begins at block 1.
 
+Note: CANONICAL v1.1 includes a genesis exception for the coinbase output bound at height 0
+(genesis allocations are fixed by published genesis bytes; see `spec/RUBIN_L1_CANONICAL_v1.1.md §4.5`).
+
 Intent is to move to a genesis that includes outputs (i.e., `output_count > 0`) to support:
 
 - A developer fund premine output(s) totaling **1,000,000 RBN**.
@@ -38,4 +41,3 @@ Timelock mode preference:
   - `spec/RUBIN_L1_COINBASE_AND_REWARDS_*.md` (economics constants/schedule)
   - `spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_MAINNET_*.md` (+ testnet/devnet as needed)
   - conformance vectors that depend on genesis-derived values (if any).
-

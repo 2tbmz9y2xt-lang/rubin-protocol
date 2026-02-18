@@ -1,7 +1,7 @@
 version: "1.1"
 gate: CV-WEIGHT
 status: PASS
-description: "Consensus transaction weight computation with witness discount divisor (WITNESS_DISCOUNT_DIVISOR=3) and deterministic cross-client parity"
+description: "Consensus transaction weight computation (weight = 4*base_size + wit_size + sig_cost) and deterministic cross-client parity"
 tests:
   - id: WEIGHT-01
     title: "Minimal 1-in/0-out sentinel witness"
