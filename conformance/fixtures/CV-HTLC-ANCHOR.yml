@@ -111,6 +111,25 @@ tests:
     expected_error: TX_ERR_DEPLOYMENT_INACTIVE
     consensus: true
 
+  - id: HTLC2-07
+    title: "Redeem FAIL: script_sig_len != 0 for CORE_HTLC_V2 => TX_ERR_PARSE"
+    context:
+      chain_id_hex: "7dcf48a266788491e77bbb7b9c97ad6a2c89b882293dfaf3bdebeec62548cc00"
+      chain_height: 600
+      chain_timestamp: 1700000600
+      suite_id_02_active: true
+      htlc_v2_active: true
+      # Same as HTLC2-01, but input script_sig_len=1 with a 1-byte script_sig payload. Must be rejected.
+      tx_hex: "010000000100000000000000010303030303030303030303030303030303030303030303030303030303030303000000000100000000000000000000010240000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100"
+      utxo_set:
+        - txid: "0303030303030303030303030303030303030303030303030303030303030303"
+          vout: 0
+          value: 1000
+          covenant_type: 258
+          covenant_data: "e2929f80ffdaaa51c427cbf42df6679013fddb1630bc28f234ca48692b35399200f401000000000000070fa1ab6fcc557ed14d42941f1967693048551eb9042a8d0a057afbd75e81e03333333333333333333333333333333333333333333333333333333333333333"
+    expected_error: TX_ERR_PARSE
+    consensus: true
+
   - id: HTLC2-08
     title: "Redeem reaches signature: extra non-matching CORE_ANCHOR present => still TX_ERR_SIG_INVALID (prefix-scoped matching)"
     context:
