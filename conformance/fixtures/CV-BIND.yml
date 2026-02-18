@@ -43,3 +43,60 @@ tests:
       note: "Spending remains deployment-gated (see CV-DEP)."
     expected_code: PASS
     consensus: true
+
+  - id: BIND-05
+    title: "T-017: Two distinct ML-DSA pubkeys produce distinct key_id values"
+    context:
+      description: >
+        key_id = SHA3-256(pubkey_wire) where pubkey_wire = suite_id || pubkey_length_le16 || pubkey_bytes.
+        Two keys differing in any byte MUST produce distinct key_id values (collision resistance).
+        This is a cryptographic axiom over SHA3-256 (2^-256 collision probability).
+      pubkey_a:
+        suite_id: "0x01"
+        pubkey_hex: "0101010101010101010101010101010101010101010101010101010101010101"
+        key_id: "0d27f4a06c2494fecfc949e73ed3df8a986eecbb6ee76b36fe429c1149b6ee8f"
+        note: "ML-DSA wire: 0x01 || len_le16 || pubkey_bytes (full 2592-byte key abbreviated here)"
+      pubkey_b:
+        suite_id: "0x01"
+        pubkey_hex: "0202020202020202020202020202020202020202020202020202020202020202"
+        key_id: "ae3fe65a8680594b24b67e7b76452857936e995d0a7901fe57e512b9c2b24295"
+        note: "Different pubkey bytes → different key_id"
+    expected_outcome: "key_id_a != key_id_b"
+    consensus: true
+    theorem: T-017
+
+  - id: BIND-06
+    title: "T-017: ML-DSA and SLH-DSA keys with overlapping prefix bytes produce distinct key_id"
+    context:
+      description: >
+        Even if raw pubkey bytes partially overlap, the suite_id prefix in pubkey_wire
+        guarantees structural distinctness before hashing. Different suite_id → different wire → different key_id.
+      pubkey_ml:
+        suite_id: "0x01"
+        note: "ML-DSA wire includes 0x01 prefix"
+        key_id: "0d27f4a06c2494fecfc949e73ed3df8a986eecbb6ee76b36fe429c1149b6ee8f"
+      pubkey_slh:
+        suite_id: "0x02"
+        note: "SLH-DSA wire includes 0x02 prefix — structurally different even if key bytes overlap"
+        key_id: "6e8259b9a165bfa22ee13f0242125189add795aca28b6e0d31927f6bcedcceb2"
+    expected_outcome: "key_id_ml != key_id_slh"
+    consensus: true
+    theorem: T-017
+
+  - id: BIND-07
+    title: "T-017: Binding rejection when tx witness key_id != output covenant key_id"
+    context:
+      description: >
+        A spend attempt where the witness pubkey hashes to a different key_id than
+        the one recorded in the covenant_data MUST be rejected. This enforces binding
+        uniqueness: only the holder of the exact registered pubkey can spend.
+      output_covenant:
+        covenant_type: CORE_P2PK
+        key_id_hex: "0d27f4a06c2494fecfc949e73ed3df8a986eecbb6ee76b36fe429c1149b6ee8f"
+      spend_witness:
+        suite_id: "0x01"
+        pubkey_hex: "0202020202020202020202020202020202020202020202020202020202020202"
+        note: "Computes to key_id ae3fe6... which != output key_id 0d27f4..."
+    expected_error: TX_ERR_SIG_KEY_MISMATCH
+    consensus: true
+    theorem: T-017

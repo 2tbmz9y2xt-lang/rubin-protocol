@@ -17,19 +17,20 @@ Source of truth for the bundle list:
 | CV-PARSE | ✓ | PASS | — | consensus |
 | CV-SIGHASH | ✓ | PASS | — | consensus |
 | CV-SIGCHECK | ✓ | PASS | — | consensus |
-| CV-BIND | ✓ | PASS | — | consensus |
+| CV-BIND | ✓ | PASS | 7 | consensus |
 | CV-UTXO | ✓ | PASS | — | consensus |
 | CV-DEP | ✓ | PASS | — | consensus |
 | CV-BLOCK | ✓ | PASS | — | consensus |
-| CV-REORG | ✓ | PASS | — | consensus |
+| CV-REORG | ✓ | PASS | 6 | consensus |
 | CV-FEES | ✓ | PASS | 3 | consensus |
 | CV-HTLC | ✓ | PASS | 6 | consensus |
 | CV-HTLC-ANCHOR | ✓ | PASS | 10 | consensus |
 | CV-VAULT | ✓ | PASS | 9 | consensus |
 | CV-WEIGHT | ✓ | PASS | 3 | consensus |
-| CV-ANCHOR-RELAY | — | PENDING | 8 | policy-only |
+| CV-COINBASE | ✓ | PASS | 12 | consensus |
+| CV-ANCHOR-RELAY | — | PENDING | 11 | policy-only |
 
-**14 consensus gates — all PASS. 1 policy gate — PENDING (runner support needed).**
+**15 consensus gates — all PASS. 1 policy gate — PENDING (runner support needed).**
 
 ## What "PASS" means
 

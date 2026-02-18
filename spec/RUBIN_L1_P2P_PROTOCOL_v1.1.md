@@ -323,6 +323,24 @@ with ban-score +5 (relay policy, not consensus).
 
 **Rate limiting:** at most 100 `anchorproof` messages per peer per minute; excess → drop + ban-score +2.
 
+### 6.4 `getanchorproof` — light client request for anchor proof (Normative)
+
+Used by light clients to request an `anchorproof` for a specific ANCHOR output.
+Required for multi-peer confirmation protocol (LIGHT_CLIENT_SECURITY §3.4).
+
+```
+command: "getanchorproof"
+payload:
+  txid         : bytes32    (txid of the transaction containing the ANCHOR output)
+  output_index : u32le      (index of the CORE_ANCHOR output within the tx)
+  flags        : u8         (bit 0: request tx_bytes in response; reserved bits MUST be 0)
+```
+
+The receiving peer MUST respond with an `anchorproof` message (§6.3) for the requested
+outpoint if known, or a `notfound` message otherwise.
+
+Rate limiting: `getanchorproof` shares the rate limit with `anchorproof` (100/peer/minute).
+
 ---
 
 ## 7. Peer management and DoS hardening

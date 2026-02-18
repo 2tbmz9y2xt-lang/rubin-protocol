@@ -918,7 +918,8 @@ func ApplyBlock(
 			seenNonces[tx.TxNonce] = struct{}{}
 		}
 
-		if err := ApplyTx(p, chainID, &tx, workingUTXO, ctx.Height, block.Header.Timestamp, ctx.SuiteIDSLHActive); err != nil {
+		// HTLC_V2 is VERSION_BITS deployment-gated; wire activation through ctx when deployments are implemented.
+		if err := ApplyTx(p, chainID, &tx, workingUTXO, ctx.Height, block.Header.Timestamp, ctx.SuiteIDSLHActive, false); err != nil {
 			return err
 		}
 
@@ -1162,6 +1163,17 @@ func validateOutputCovenantConstraints(output TxOutput) error {
 		if len(output.CovenantData) != 105 {
 			return fmt.Errorf("TX_ERR_PARSE")
 		}
+	case CORE_HTLC_V2:
+		// Deployment gate checked at spend time, not output creation time.
+		// Output-level constraint: same covenant_data layout as HTLC_V1.
+		if len(output.CovenantData) != 105 {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+		claimKeyID := output.CovenantData[41:73]
+		refundKeyID := output.CovenantData[73:105]
+		if bytes.Equal(claimKeyID, refundKeyID) {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
 	case CORE_VAULT_V1:
 		if len(output.CovenantData) != 73 && len(output.CovenantData) != 81 {
 			return fmt.Errorf("TX_ERR_PARSE")
@@ -1221,6 +1233,7 @@ func ApplyTx(
 	chainHeight uint64,
 	chainTimestamp uint64,
 	suiteIDSLHActive bool,
+	htlcV2Active bool,
 ) error {
 	if tx == nil {
 		return fmt.Errorf("TX_ERR_PARSE")
@@ -1290,6 +1303,7 @@ func ApplyTx(
 			chainHeight,
 			chainTimestamp,
 			suiteIDSLHActive,
+			htlcV2Active,
 		); err != nil {
 			return err
 		}
@@ -1370,6 +1384,7 @@ func ValidateInputAuthorization(
 	chainHeight uint64,
 	chainTimestamp uint64,
 	suiteIDSLHActive bool,
+	htlcV2Active bool,
 ) error {
 	if int(inputIndex) >= len(tx.Inputs) {
 		return fmt.Errorf("TX_ERR_PARSE")
@@ -1529,6 +1544,71 @@ func ValidateInputAuthorization(
 			if err := satisfyLock(lockMode, lockValue, chainHeight, chainTimestamp); err != nil {
 				return err
 			}
+		}
+	case CORE_HTLC_V2:
+		// Deployment gate
+		if !htlcV2Active {
+			return fmt.Errorf("TX_ERR_DEPLOYMENT_INACTIVE")
+		}
+		if len(input.ScriptSig) != 0 {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+		if witness.SuiteID == SUITE_ID_SENTINEL {
+			return fmt.Errorf("TX_ERR_SIG_ALG_INVALID")
+		}
+		if err := checkWitnessFormat(witness, suiteIDSLHActive); err != nil {
+			return err
+		}
+		if len(prevout.CovenantData) != 105 {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+		claimKeyID2 := prevout.CovenantData[41:73]
+		refundKeyID2 := prevout.CovenantData[73:105]
+		if bytes.Equal(claimKeyID2, refundKeyID2) {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
+		hash2 := prevout.CovenantData[:32]
+		lockMode2 := prevout.CovenantData[32]
+		lockValue2, err := parseU64LE(prevout.CovenantData, 33, "htlc2_lock_value")
+		if err != nil {
+			return err
+		}
+		// Scan ANCHOR outputs for matching HTLC_V2 envelope
+		// prefix = ASCII("RUBINv1-htlc-preimage/") — 22 bytes, total envelope = 54 bytes
+		const htlcV2Prefix = "RUBINv1-htlc-preimage/"
+		const htlcV2EnvelopeLen = 54
+		var matchingAnchors [][]byte
+		for _, out := range tx.Outputs {
+			if out.CovenantType == CORE_ANCHOR &&
+				len(out.CovenantData) == htlcV2EnvelopeLen &&
+				string(out.CovenantData[:len(htlcV2Prefix)]) == htlcV2Prefix {
+				matchingAnchors = append(matchingAnchors, out.CovenantData)
+			}
+		}
+		switch len(matchingAnchors) {
+		case 0:
+			// Refund path
+			actualKeyID2 := p.SHA3_256(witness.Pubkey)
+			if !bytes.Equal(actualKeyID2[:], refundKeyID2) {
+				return fmt.Errorf("TX_ERR_SIG_INVALID")
+			}
+			if err := satisfyLock(lockMode2, lockValue2, chainHeight, chainTimestamp); err != nil {
+				return err
+			}
+		case 1:
+			// Claim path
+			preimage32 := matchingAnchors[0][len(htlcV2Prefix):]
+			preimageHash := p.SHA3_256(preimage32)
+			if !bytes.Equal(preimageHash[:], hash2) {
+				return fmt.Errorf("TX_ERR_SIG_INVALID")
+			}
+			actualKeyID2 := p.SHA3_256(witness.Pubkey)
+			if !bytes.Equal(actualKeyID2[:], claimKeyID2) {
+				return fmt.Errorf("TX_ERR_SIG_INVALID")
+			}
+		default:
+			// Two or more matching envelopes — non-deterministic, reject
+			return fmt.Errorf("TX_ERR_PARSE")
 		}
 	case CORE_ANCHOR:
 		return fmt.Errorf("TX_ERR_MISSING_UTXO")

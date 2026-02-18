@@ -23,7 +23,7 @@ Set these two fields during the testnet genesis ceremony:
 
 - `genesis_header_bytes` (hex, `BlockHeaderBytes(genesis_header)`): `01000000000000000000000000000000000000000000000000000000000000000000000024687b35a5bef7ae62cd384e711c835ca57814f6f9730d2a9a2e7fcb280f58a500f1536500000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000`
 
-- `genesis_tx_bytes` (hex, `TxBytes(genesis_coinbase_tx)`): `010000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff000000000002`
+- `genesis_tx_bytes` (hex, `TxBytes(genesis_coinbase_tx)`): `010000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff000000000000`
 
 Then compute:
 
@@ -40,7 +40,7 @@ genesis_block_hash = SHA3-256(genesis_header_bytes)
 
 Derived outputs (for operator convenience; not input):
 
-- `chain_id`: `abb57bd1efb9f114ed060ef0c633d87fc6b35c737f1d70b66864a5557d46757d`
+- `chain_id`: `7dcf48a266788491e77bbb7b9c97ad6a2c89b882293dfaf3bdebeec62548cc00`
 
 - `genesis_block_hash`: `2577dca80125dacfde2f0ed90a121442c857accb11176b0f0d5d35ab03056388`
 

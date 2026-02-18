@@ -9,6 +9,30 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn extract_fenced_hex(doc: &str, key: &str) -> Result<String, String> {
+    // Preferred format in chain-instance profiles is an inline backticked value:
+    // - `genesis_header_bytes`: `...hex...`
+    for line in doc.lines() {
+        if !line.contains(key) {
+            continue;
+        }
+        let Some(colon) = line.find(':') else {
+            continue;
+        };
+        let after = &line[colon + 1..];
+        let Some(first) = after.find('`') else {
+            continue;
+        };
+        let after_first = &after[first + 1..];
+        let Some(second) = after_first.find('`') else {
+            continue;
+        };
+        let value = after_first[..second].trim();
+        if !value.is_empty() {
+            return Ok(value.to_string());
+        }
+    }
+
+    // Legacy fallback: fenced code block after the key.
     let idx = doc.find(key).ok_or_else(|| format!("missing key: {key}"))?;
     let after = &doc[idx..];
     let fence = after

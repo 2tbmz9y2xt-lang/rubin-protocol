@@ -23,7 +23,7 @@
 ### Dev-only: operationally safe
 
 - `spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md` — `DEVELOPMENT (NON-CONSENSUS)`
-- `spec/RUBIN_L1_DEPLOYMENTS_DEVNET_v1.1.md` — `DEVELOPMENT (CHAIN-INSTANCE, NON-CONSENSUS PUBLICATION)`
+- `spec/RUBIN_L1_DEPLOYMENTS_DEVNET_v1.1.md` — `DEVELOPMENT (NON-CONSENSUS)`
 - Conformance fixtures and test harnesses are in development/processing status as implementation artifacts, not consensus-ready governance signals.
 
 ### Draft: integration profile, not freeze

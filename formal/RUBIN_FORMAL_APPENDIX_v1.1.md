@@ -1,6 +1,6 @@
 # RUBIN Formal Appendix v1.1
 
-Status: NON-NORMATIVE (active — toolchain selected, invariants stated, initial Lean 4 proofs started)
+Status: NON-NORMATIVE (active — toolchain selected, invariants stated, partial proofs implemented)
 Date: 2026-02-18
 Audience: implementers, auditors, formal-methods contributors
 
@@ -24,22 +24,13 @@ Alternatives considered:
 - **Isabelle/HOL**: strong automation (sledgehammer), but Lean 4 preferred for team familiarity and ergonomics.
 - **TLA+**: appropriate for liveness/safety of distributed protocols, insufficient for arithmetic/byte-level consensus rules. May be added in a separate TLA+ module for fork-choice and VERSION_BITS liveness.
 
-**Repository (GitHub):**
+**Repository:**
 ```
-https://github.com/2tbmz9y2xt-lang/rubin-formal
+https://github.com/2tbmz9y2xt-lang/rubin-formal (private)
 ```
-Current local formal repo (development-only, local git):
-```
-/Users/gpt/Documents/rubin-formal
-commit: e9935e566bb95da44ffc60c12424d7fdf1080270
-```
-Legacy local workspace path (no longer in this repo):
-```
-formal/rubin-formal/   (moved out on 2026-02-18)
-```
-Before production freeze, this repository MUST exist at a stable revision and be linked
-from this file with a pinned commit hash. Controller approval required before the link
-is published.
+This appendix references a pinned revision for reproducibility:
+- pinned commit: `a694fbcda0ff38be2ee93a7c513dc3412f91bc7f`
+  - proofs: `RubinFormal/VersionBits.lean`, `RubinFormal/CVLinkage.lean`
 
 Lean 4 version: `leanprover/lean4:v4.6.0` (to be pinned at freeze).
 Mathlib4 version: pinned via `lake-manifest.json` in formal repo.
@@ -71,29 +62,25 @@ See `formal/THEOREM_INDEX_v1.1.md` for full index. Summary:
 
 | ID | Invariant | Spec ref | Evidence | Proof status |
 |----|-----------|----------|----------|--------------|
-| T-001 | Sighash determinism — output_count=0 edge case | §4.2 hashOutputs | CV-SIGHASH SIGHASH-06 | spec+vector |
+| T-001 | Sighash determinism — output_count=0 edge case | §4.2 hashOutputs | CV-SIGHASH SIGHASH-06 | lean4-proven |
 | T-002 | Difficulty retarget 320-bit arithmetic | §6.4 | CV-BLOCK BLOCK-09 | spec+vector |
-| T-003 | VERSION_BITS boundary transition ordering | §8 FSM | CV-DEP DEP-05 | spec+vector |
-| T-004 | ApplyBlock determinism | §9 inv-1 | CV-BLOCK, CV-UTXO | lean4-proven (local model) |
-| T-005 | Value conservation — non-coinbase | §9 inv-2 | CV-FEES FEES-02 | lean4-proven (checked u64 model) |
+| T-003 | VERSION_BITS boundary transition ordering | §8 FSM | CV-DEP DEP-05 | lean4-proven |
+| T-004 | ApplyBlock determinism | §9 inv-1 | CV-BLOCK, CV-UTXO | lean4-proven |
+| T-005 | Value conservation — non-coinbase | §9 inv-2 | CV-FEES FEES-02 | lean4-proven |
 | T-006 | Non-spendable ANCHOR exclusion from UTXO | §9 inv-3 | CV-UTXO | spec+vector |
-| T-007 | VERSION_BITS monotonicity | §9 inv-4 | CV-DEP DEP-04 | lean4-proven (terminal-at-boundary core) |
+| T-007 | VERSION_BITS monotonicity | §9 inv-4 | CV-DEP DEP-04 | lean4-proven |
 | T-008 | Sighash preimage injectivity (chain_id domain separation) | §4.2 | CV-SIGHASH | spec+axiom |
-| T-009 | HTLC_V2 envelope uniqueness — prefix-scoped matching | §4.1 item 6 | CV-HTLC-ANCHOR HTLC2-08/09 | spec+vector |
+| T-009 | HTLC_V2 envelope uniqueness — prefix-scoped matching | §4.1 item 6 | CV-HTLC-ANCHOR HTLC2-08/09 | lean4-proven |
 | T-010 | Replay protection — (chain_id, tx_nonce) uniqueness | §3.4 | CV-UTXO | spec+vector |
-| T-011 | CORE_VAULT_V1 spend_delay monotonicity | §4.1 item 5 | CV-VAULT VAULT-06 | spec+vector |
-| T-012 | CompactSize round-trip — encode ∘ decode = id | §3.2.1 | CV-COMPACTSIZE | spec+vector |
+| T-011 | CORE_VAULT_V1 spend_delay monotonicity | §4.1 item 5 | CV-VAULT VAULT-06 | lean4-proven |
+| T-012 | CompactSize round-trip — encode ∘ decode = id | §3.2.1 | CV-COMPACTSIZE | lean4-proven |
 | T-013 | Merkle root collision resistance | §5.1.1 | CV-BLOCK BLOCK-05 | spec+axiom |
 | T-014 | Block weight non-overflow (u64 bound) | §4.3, §11 | CV-WEIGHT | spec+vector |
 
 **Proof status legend:**
 - `spec+vector` — invariant is stated in canonical spec and covered by at least one conformance vector; Lean 4 proof pending.
 - `spec+axiom` — invariant depends on cryptographic hardness assumption (SHA3-256 collision resistance, ML-DSA unforgeability); stated as `axiom` in Lean 4 model.
-- `lean4-proven` — machine-checked Lean 4 proof exists (currently local workspace; to be pinned to a separate repo commit at freeze).
-
-Clarification (non-normative):
-- Current `lean4-proven` items are machine-checked at `/Users/gpt/Documents/rubin-protocol/formal/rubin-formal/`.
-- The next milestone for "spec-faithful" is to align the models to byte-level encodings and full state transitions.
+- `lean4-proven` — machine-checked Lean 4 proof exists at pinned commit (examples include: T-001/T-003/T-004/T-005/T-007/T-009/T-011/T-012/T-016 at `a694fbcda0ff38be2ee93a7c513dc3412f91bc7f`).
 
 ---
 
@@ -154,8 +141,8 @@ Before production freeze, the following CI gates MUST be operational:
 
 CI workflow (planned): `.github/workflows/formal.yml` running `lean4-action` on every PR touching `spec/` or `formal/`.
 
-Current status: **CI not yet configured.** Blocked on formal repo creation.
-Tracking issue: `formal/README.md` controller decision 2026-02-16.
+Current status: **CI configured in `rubin-protocol` PR flow** (private checkout of `rubin-formal` by deploy key, then `lake build`).
+Tracking: `/Users/gpt/Documents/inbox/QUEUE.md` task `Q-051`.
 
 ---
 
@@ -164,6 +151,7 @@ Tracking issue: `formal/README.md` controller decision 2026-02-16.
 1. **Coinbase subsidy overflow** — T-005 covers non-coinbase value conservation. Coinbase subsidy arithmetic (epoch halving, integer rounding) is not yet formally stated. Needs T-015.
 2. **Reorg safety** — ApplyBlock determinism (T-004) does not cover reorg scenarios. A `ReorgSafe` lemma is needed: applying the same sequence of blocks from the same initial state always produces the same UTXO set.
 3. **Anchor relay cap non-interference** — the relay policy `MAX_ANCHOR_PAYLOAD_RELAY = 1024` (H-002) is non-consensus. A separation lemma is needed: no relay-rejected tx can affect the validity of a block (i.e., relay caps are strictly stricter than consensus caps).
+   - DONE (Lean 4): T-016 `AnchorPolicy.lean` at pinned commit `a694fbcda0ff38be2ee93a7c513dc3412f91bc7f`.
 4. **Formal model of `CompactSize` rejection** — T-012 covers round-trip. Malformed CompactSize (e.g., non-canonical two-byte encoding for values < 253) needs a separate `RejectNonCanonical` lemma.
 
 These gaps are tracked in `formal/THEOREM_INDEX_v1.1.md` as pending entries T-015 through T-018.

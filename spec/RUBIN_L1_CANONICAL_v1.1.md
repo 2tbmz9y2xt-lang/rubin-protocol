@@ -61,6 +61,16 @@ Development status note (non-normative):
 - `BLOCK_SUBSIDY_INITIAL = 50_0000_0000`
 - `SUBSIDY_HALVING_INTERVAL = 210_000`
 - `MAX_SUPPLY = 2_100_000_000_000_000`
+
+Non-normative note (emission schedule and genesis intent): total supply target is
+100,000,000 RBN (`MAX_SUPPLY = 2_100_000_000_000_000` base units; 1 RBN = 21_000_000
+base units). The discrete halving schedule over 34 epochs (epoch 0..33) yields a
+theoretical maximum emission of `2_099_999_997_690_000` base units, which is `2_310_000`
+base units below `MAX_SUPPLY`. Epoch 32 subsidy = 1 base unit (last non-zero); epoch
+33+ = 0. Intended genesis: 1_000_000 RBN premine to a developer foundation fund split
+across 100 addresses with height-based timelocks; 1_000 additional unspendable outputs.
+Current v1.1 chain-instance profiles contain a placeholder genesis with 0 outputs
+pending final ceremony (see `spec/TODO_ECONOMICS_AND_GENESIS.md`). Full subsidy formula: §4.5.
 - `MAX_TX_INPUTS = 1_024`
 - `MAX_TX_OUTPUTS = 1_024`
 - `MAX_WITNESS_ITEMS = 1_024`
@@ -379,6 +389,14 @@ For each non-coinbase transaction `T` in block order:
 4. If `T.tx_nonce` already appears in `N_seen`, return `TX_ERR_NONCE_REPLAY`.
 5. If `T.tx_nonce` is not in `[1, max(u64)]`, return `TX_ERR_TX_NONCE_INVALID`.
 
+**Cross-block replay protection (normative):** `tx_nonce` uniqueness is enforced only
+within a single block. Cross-block replay is prevented by UTXO exhaustion: once an input
+outpoint is consumed by `SpendTx` (§2), it is removed from `U` and any subsequent transaction
+attempting to spend the same outpoint will fail with `TX_ERR_MISSING_UTXO`. A transaction
+cannot be replayed across blocks because its input UTXOs no longer exist after the first
+inclusion. `tx_nonce` therefore serves as an intra-block deduplication guard, not as a
+global sequence number.
+
 For each non-coinbase input `i`:
 
 1. `sequence` MUST NOT be `0xffffffff`.
@@ -641,7 +659,12 @@ Each block MUST satisfy `Σ weight(T) ≤ MAX_BLOCK_WEIGHT`.
 - RETL sequencer signatures (§7) use `suite_id = 0x02` under separate deployment policy; this is not a key-based covenant spend.
 - `suite_id = 0x00` (sentinel) is permitted only for keyless covenants (`CORE_TIMELOCK_V1`) and MUST NOT be used for key-based covenant spends.
 
-Additional block checks:
+Weight and fee checks are normative:
+
+1. For each transaction: `weight(T)` MUST be computed as in §4.3.
+2. For each block: `Σ weight(T) ≤ MAX_BLOCK_WEIGHT`.
+
+### 4.5 Coinbase and Subsidy (Normative)
 
 - The first transaction in a block MUST be exactly one coinbase transaction.
   Any missing coinbase or additional coinbase transaction(s) MUST be rejected as `BLOCK_ERR_COINBASE_INVALID`.
@@ -652,28 +675,28 @@ sum(outputs.value) ≤ block_subsidy(height) + Σ fees(tx in transactions exclud
 ```
 
 - If the coinbase bound is violated, the block MUST be rejected as `BLOCK_ERR_SUBSIDY_EXCEEDED`.
+- `block_subsidy(height)` is a deterministic epoch schedule defined below; it is part of consensus
+  constants for this spec version and MUST be computed identically by all implementations.
 
-- `block_subsidy(height)` is a deterministic epoch schedule and is part of consensus constants for this spec version.
-
-Consensus coinbase subsidy schedule:
+**Subsidy formula:**
 
 Let `epoch = floor(height / SUBSIDY_HALVING_INTERVAL)`.
 
 ```
-block_subsidy(height) = BLOCK_SUBSIDY_INITIAL / 2^epoch, for epoch ≤ 33
-block_subsidy(height) = 0 for epoch > 33
+block_subsidy(height) = BLOCK_SUBSIDY_INITIAL >> epoch,  for epoch ≤ 33
+block_subsidy(height) = 0,                               for epoch > 33
 ```
+
+Arithmetic MUST use integer right-shift (floor division by 2^epoch), not floating-point.
+Overflow is impossible: `BLOCK_SUBSIDY_INITIAL = 5_000_000_000` fits in u64; each halving
+reduces the value; epoch 33 yields 1 satoshi; epoch 34+ yields 0.
 
 Total issuance is capped so that emitted sum never exceeds `MAX_SUPPLY`.
 Non-normative note: the discrete halving schedule yields an actual total emission of
-`2_099_999_997_690_000` satoshis (which is `2_310_000` satoshis below `MAX_SUPPLY`).
+`2_099_999_997_690_000` base units, which is `2_310_000` base units below `MAX_SUPPLY`.
+Conformance: CV-COINBASE.
 
-Weight and fee checks are normative:
-
-1. For each transaction: `weight(T)` MUST be computed as in §4.3.
-2. For each block: `Σ weight(T) ≤ MAX_BLOCK_WEIGHT`.
-
-### 4.5 Value conservation (Normative)
+### 4.6 Value conservation (Normative)
 
 For each non-coinbase transaction `T`:
 
@@ -699,6 +722,11 @@ Definitions (consensus-critical):
 - `txid = SHA3-256(TxNoWitnessBytes(T))` where `TxNoWitnessBytes` excludes the `witness` section.
 - `block_hash = SHA3-256(BlockHeaderBytes(B))`
 - `anchor_commitment = SHA3-256(anchor_data)`
+
+**Definition — `anchor_data`:** the exact raw byte string stored in a `CORE_ANCHOR` output's
+covenant data payload, committed on-chain via `anchor_commitment`. No additional encoding
+layer exists; the payload bytes are represented only by `anchor_data` itself.
+See §3.6 for `CORE_ANCHOR` covenant type. Size constraints: §1.2 (`MAX_ANCHOR_PAYLOAD_SIZE`).
 
 ### 5.1 BlockHeader (Normative)
 
@@ -758,7 +786,10 @@ where `parent(B_h)` is the unique block whose `block_hash` equals `B_h.prev_bloc
 
 Height is a derived property; it is not carried as a header field.
 
-For each non-sentinel witness item (i.e. `suite_id ≠ 0x00`):
+### 5.4 Witness Item Validation (Normative)
+
+Witness item validation is performed during step 8 ("Signature verification") of the
+validation order in §4. For each non-sentinel witness item (i.e. `suite_id ≠ 0x00`):
 
 1. Unknown `suite_id` is rejected as `TX_ERR_SIG_ALG_INVALID`.
 2. `sig_length = 0` is non-canonical and MUST be rejected as `TX_ERR_SIG_NONCANONICAL`.
@@ -767,16 +798,7 @@ For each non-sentinel witness item (i.e. `suite_id ≠ 0x00`):
 5. If `suite_id = 0x02` is used for a key-based covenant spend (`CORE_P2PK`, `CORE_HTLC_V1`, `CORE_VAULT_V1`) before explicit migration activation, reject as `TX_ERR_DEPLOYMENT_INACTIVE`.
 6. If the witness item is well-formed and canonical-length but signature verification fails, reject as `TX_ERR_SIG_INVALID`.
 
-Definition: anchor_data
-
-anchor_data is the exact raw byte string stored in the ANCHOR output and
-committed via:
-
-    anchor_commitment = SHA3-256(anchor_data)
-
-No additional encoding layer exists. The payload bytes in ANCHOR are represented only by `anchor_data`.
-
-Security assumptions are normative prerequisites for this spec:
+**Security assumptions (normative prerequisites):**
 
 - SHA3-256 has collision resistance under the stated query budget.
 - ML-DSA-87 and SLH-DSA are EUF-CMA secure under their respective operational domains.
@@ -1152,7 +1174,7 @@ The following invariants are part of consensus semantics:
 A protocol release is admissible only if:
 
 1. All conformance vectors pass.
-2. `CV-PARSE`/`CV-BIND`/`CV-UTXO`/`CV-DEP`/`CV-BLOCK`/`CV-REORG` gates are `PASS`.
+2. `CV-PARSE`/`CV-BIND`/`CV-UTXO`/`CV-DEP`/`CV-BLOCK`/`CV-REORG`/`CV-COINBASE` gates are `PASS`.
 3. Cross-client parity is deterministic under identical inputs.
 4. Deterministic serialization and consensus invariants are mechanically reproduced.
 5. Conformance gate definitions are authoritative in `spec/RUBIN_L1_CONFORMANCE_MANIFEST_v1.1.md`.
@@ -1317,7 +1339,7 @@ Expected: TX_ERR_MISSING_UTXO
 - Formal proofs and assumptions are in `../formal/RUBIN_FORMAL_APPENDIX_v1.1.md`.
 - Measurement and incident governance are in `../operational/RUBIN_OPERATIONAL_SECURITY_v1.1.md`.
 - Formal key format and address binding are in `spec/RUBIN_L1_KEY_MANAGEMENT_v1.1.md`.
-- Coinbase/subsidy rules are in `spec/RUBIN_L1_COINBASE_AND_REWARDS_v1.1.md`.
+- Coinbase/subsidy rules are in `spec/RUBIN_L1_COINBASE_AND_REWARDS_v1.1.md` (auxiliary) and normatively in `§4.5`.
 
 ## 14. Threat Model and Deployment Assumptions
 
@@ -1421,40 +1443,36 @@ Against a light client without checkpoints or diverse peers:
 - **Chain tip lag**: serve a stale tip to keep the client operating on an old chain view,
   enabling time-based covenant attacks (e.g., HTLC refund window manipulation).
 
-#### 14.2.4 Mitigations for light clients (non-normative)
+#### 14.2.4 Mitigations for light clients
 
-These are operational recommendations, not consensus requirements:
+Items 2 and 6 below are normatively specified in
+`spec/RUBIN_L1_LIGHT_CLIENT_SECURITY_v1.1.md`. The remaining items are operational
+recommendations.
 
 1. **Multiple diverse peers**: connect to ≥ 3 peers across independent operators/subnets.
-   Probability of complete eclipse drops sharply with peer diversity.
    See `spec/RUBIN_L1_P2P_PROTOCOL_v1.1.md §7.1` (anti-eclipse heuristics).
 
-2. **Checkpoints**: embed one or more operator-selected block hashes at known heights as
-   trust anchors. A checkpoint prevents the adversary from feeding a chain that forks
-   before the checkpoint height, as long as the checkpoint was obtained honestly
-   (e.g., hard-coded at client build time from a trusted source).
-   Checkpoint hygiene: checkpoints SHOULD be at heights ≥ `COINBASE_MATURITY` blocks
-   behind the tip to avoid pinning on orphan-risk blocks.
+2. **Checkpoints** *(normative — see LIGHT_CLIENT_SECURITY §2)*: hard-coded block hashes
+   at known heights. A chain conflicting with any checkpoint MUST be rejected as
+   `ECLIPSE_ERR_CHECKPOINT_MISMATCH`. Build-time embedding required for mainnet.
+   Checkpoint hygiene: heights MUST be ≥ `COINBASE_MATURITY` blocks behind the tip
+   at publish time. Gap limit: `MAX_CHECKPOINT_GAP = 100_800` blocks.
 
-3. **Difficulty anomaly detection**: reject headers whose difficulty drops by more than
-   an expected retarget bound in a single window (CANONICAL §6.4). Sudden difficulty
-   drops suggest the adversary is feeding a low-work fork.
+3. **Difficulty anomaly detection**: reject headers whose difficulty drops beyond the
+   expected retarget bound in a single window (CANONICAL §6.4).
 
-4. **Median-time consistency**: enforce header `timestamp` rules at every step
-   (CANONICAL §6.5, §15 item 10). Inconsistent timestamps across a fed chain indicate
-   a fabricated sequence.
+4. **Median-time consistency**: enforce header `timestamp` rules (CANONICAL §6.5).
 
 5. **Out-of-band tip verification**: periodically query a trusted HTTPS endpoint or
-   DNS seed for the current chain tip hash. A discrepancy between the P2P-fed tip and
-   the out-of-band tip is a strong eclipse signal.
+   DNS seed for the current chain tip hash.
 
-6. **`anchorproof` multi-path confirmation**: for high-value ANCHOR verification
-   (HTLC claims, key-migration shadow-bindings), request the same `anchorproof` from
-   at least 2 independent peers. Divergent responses indicate either a fork or an eclipse.
+6. **`anchorproof` multi-peer confirmation** *(normative — see LIGHT_CLIENT_SECURITY §3)*:
+   for HTLC claims and key-migration operations, require `MIN_ANCHORPROOF_PEERS = 2`
+   independent peers to return agreeing `anchorproof` responses before acting.
+   Minimum confirmation depth: `MIN_ANCHORPROOF_DEPTH = 6` blocks.
 
-7. **Connection-layer diversity**: for mobile/embedded light clients, prefer connections
-   via Tor or an independent transport to ensure the network-layer adversary cannot
-   trivially identify and reroute all connections to adversary-controlled nodes.
+7. **Connection-layer diversity**: for mobile/embedded clients, prefer Tor or independent
+   transport to prevent network-layer adversaries from rerouting all connections.
 
 #### 14.2.5 RUBIN-specific risk: ANCHOR-based eclipse
 
@@ -1468,9 +1486,11 @@ layer consequences beyond simple payment fraud:
 - A fraudulent shadow-binding anchor causes the client to accept a key rotation that
   did not occur on-chain, enabling key replacement attacks.
 
-Mitigation: all ANCHOR-based application logic SHOULD require multi-peer confirmation
-(§14.2.4 item 6) and SHOULD enforce a confirmation depth ≥ 6 blocks before treating
-an anchor as authoritative (see also KEY_MANAGEMENT §3.1 timelock recommendation).
+Mitigation: all ANCHOR-based application logic MUST require multi-peer confirmation
+and confirmation depth ≥ `MIN_ANCHORPROOF_DEPTH` blocks before treating an anchor as
+authoritative. Full normative specification:
+`spec/RUBIN_L1_LIGHT_CLIENT_SECURITY_v1.1.md §3`
+(see also KEY_MANAGEMENT §3.1 timelock recommendation).
 
 1. Node peers MUST implement peer discovery and peer-version handshake sufficient to exchange:
    - `version`, `verack`, `wtxid` (relayed via `inv/getdata` `inv_type = 2`), `ping`, `pong`,

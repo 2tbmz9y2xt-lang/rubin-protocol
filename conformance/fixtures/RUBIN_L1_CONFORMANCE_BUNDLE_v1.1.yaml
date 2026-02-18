@@ -78,3 +78,9 @@ mandatory_gates:
   description: Relay-level anchor payload caps (non-consensus policy). MAX_ANCHOR_PAYLOAD_RELAY=1024. 7 policy vectors + 1
     consensus-vs-relay gap doc (RELAY-08). Closes H-002 DoS finding.
   note: policy-only — relay/mempool enforcement, not block validity
+- name: CV-COINBASE
+  file: conformance/fixtures/CV-COINBASE.yml
+  required: true
+  status: PASS
+  description: Coinbase subsidy formula correctness and non-overflow (T-015). Epoch boundaries, epoch 33 last non-zero, epoch 34+ zero, subsidy-exceeded rejection (12 vectors).
+  note: consensus

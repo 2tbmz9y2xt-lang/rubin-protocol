@@ -51,3 +51,62 @@ tests:
         accumulated_work: higher
     expected_outcome: "state transition from common ancestor to new branch deterministic"
     consensus: true
+
+  - id: REORG-05
+    title: "T-018: ApplyBlock from common ancestor produces identical UTXO state regardless of prior tip"
+    context:
+      description: >
+        Formal statement for T-018: reorg determinism.
+        Two chains C1 and C2 share common ancestor at height h.
+        Both chains include block B at height h+1.
+        ApplyBlock(S_h, B) MUST produce identical UTXOSet regardless of which
+        chain tip was the node's prior best chain.
+        ApplyBlock operates only on (UTXOSet, BlockBytes) — no chain-state dependency.
+      common_ancestor_height: 100
+      utxo_state_at_100:
+        description: "Fixed UTXO set S_100 — identical for both chains by assumption"
+        utxo_count: 5
+      chain_c1:
+        tip_height: 105
+        tip_chain_work: 1050
+        note: "Node was previously following C1"
+      chain_c2:
+        tip_height: 101
+        tip_chain_work: 1010
+        note: "C2 extends common ancestor directly"
+      block_b_at_101:
+        description: "Same BlockBytes B applied in both scenarios"
+      scenario_a:
+        prior_tip: "C1 (height 105)"
+        rollback_to: "height 100"
+        apply: "B at height 101"
+        resulting_utxo: "S_101"
+      scenario_b:
+        prior_tip: "C2 (height 100)"
+        apply: "B at height 101"
+        resulting_utxo: "S_101"
+    expected_outcome: "S_101 identical in both scenarios"
+    consensus: true
+    theorem: T-018
+
+  - id: REORG-06
+    title: "T-018: UTXO spend ordering within reorg block is deterministic (sequential tx processing)"
+    context:
+      description: >
+        Within a reorg block, transactions are applied in canonical order (tx index 0, 1, 2...).
+        Intra-block spends (T_i spending output of T_j where j < i) are valid.
+        Order is determined solely by position in block, not by prior chain state.
+        This ensures ApplyBlock^k is path-independent.
+      block_height: 101
+      transactions:
+        - index: 0
+          description: "Coinbase — creates new UTXO"
+        - index: 1
+          description: "Spends UTXO from ancestor block (h=95)"
+          creates_utxo: "utxo_x"
+        - index: 2
+          description: "Spends utxo_x created by tx index 1 in this same block (intra-block spend)"
+          spends_utxo: "utxo_x"
+    expected_outcome: "Tx index 2 successfully spends intra-block utxo_x — order is canonical and deterministic"
+    consensus: true
+    theorem: T-018

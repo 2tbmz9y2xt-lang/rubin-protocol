@@ -620,6 +620,27 @@ def run_bind(
         else:
             result = "TX_ERR_SIG_ALG_INVALID"
 
+        # BIND-07 style: binding rejection when witness key_id != covenant key_id.
+        # This is modeled here as a pure byte binding check; signature verification is out of scope.
+        if result == "PASS":
+            out_cov = ctx.get("output_covenant")
+            spend_wit = ctx.get("spend_witness")
+            if isinstance(out_cov, dict) and isinstance(spend_wit, dict):
+                out_key_hex = out_cov.get("key_id_hex")
+                wit_suite = spend_wit.get("suite_id", suite_id)
+                wit_pub_hex = spend_wit.get("pubkey_hex")
+                if isinstance(out_key_hex, str) and isinstance(wit_pub_hex, str):
+                    try:
+                        out_key = parse_hex(out_key_hex)
+                        wit_suite_id = _to_int(wit_suite)
+                        wit_pub = parse_hex(wit_pub_hex)
+                        pub_wire = bytes([wit_suite_id]) + len(wit_pub).to_bytes(2, "little") + wit_pub
+                        wit_kid = _sha3_256(pub_wire)
+                        if wit_kid != out_key:
+                            result = "TX_ERR_SIG_KEY_MISMATCH"
+                    except Exception:
+                        result = "TX_ERR_PARSE"
+
         _record_gate_result(test_id, gate, expected, result, failures)
 
     return executed
