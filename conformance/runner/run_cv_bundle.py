@@ -283,7 +283,9 @@ def _key_id_from_witness_item(w: dict[str, Any]) -> bytes:
     pub = w.get("pubkey", b"")
     if not isinstance(pub, (bytes, bytearray)):
         raise TypeError("pubkey must be bytes")
-    pub_wire = bytes([suite_id & 0xFF]) + len(pub).to_bytes(2, "little") + bytes(pub)
+    # Spec-aligned: key_id = SHA3-256(pubkey_wire), where pubkey_wire matches witness encoding prefixing.
+    # Use CompactSize(len(pubkey)) (not u16le) for the length prefix.
+    pub_wire = bytes([suite_id & 0xFF]) + _compact_size_encode(len(pub)) + bytes(pub)
     return _sha3_256(pub_wire)
 
 
