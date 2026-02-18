@@ -679,7 +679,7 @@ pub fn parse_block_bytes(bytes: &[u8]) -> Result<Block, String> {
         txs.push(tx);
     }
     if cursor.pos != bytes.len() {
-        return Err("parse: trailing bytes".into());
+        return Err(BLOCK_ERR_PARSE.into());
     }
     Ok(Block {
         header,
