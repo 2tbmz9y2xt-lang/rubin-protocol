@@ -1853,6 +1853,11 @@ def main() -> int:
         default="conformance/fixtures",
         help="Fixture directory under repo root",
     )
+    parser.add_argument(
+        "--only-gates",
+        default="",
+        help="Optional comma-separated gate filter (e.g. CV-BLOCK,CV-UTXO)",
+    )
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[2]
@@ -1905,8 +1910,15 @@ def main() -> int:
     skips: list[str] = []
     checks = 0
     skipped = []
+    only_gates = {
+        item.strip()
+        for item in args.only_gates.split(",")
+        if item.strip()
+    }
 
     for gate, rel in gate_map.items():
+        if only_gates and gate not in only_gates:
+            continue
         rel_path = Path(rel)
         if rel_path.is_absolute():
             fixture_path = rel_path

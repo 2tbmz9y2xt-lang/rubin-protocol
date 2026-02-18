@@ -12,7 +12,10 @@ This document is non-normative. The authoritative text is:
   - `sum(coinbase.outputs.value) ≤ block_subsidy(height) + Σ fees(T_i)` over all non-coinbase tx in the same block.
 - Added a normative genesis exception:
   - for height `0`, the coinbase bound is not evaluated; genesis outputs are chain-instance allocations fixed by published genesis bytes.
-- Updated consensus constants to the agreed issuance plan:
+- Proposed (not landed as of 2026-02-18): updated consensus constants to an agreed issuance plan.
+  NOTE: this section does not match the current canonical v1.1 constants in
+  `spec/RUBIN_L1_CANONICAL_v1.1.md`. Treat it as historical design intent only; for current
+  genesis/economics planning see `spec/TODO_ECONOMICS_AND_GENESIS.md`.
   - `MAX_SUPPLY = 100,000,000 RBN` (8 decimals),
   - `SUBSIDY_HALVING_INTERVAL = 420,000`,
   - genesis burn allocation `GENESIS_BURN_SAT = 1,000 RBN`,
@@ -36,4 +39,3 @@ This document is non-normative. The authoritative text is:
 - Added a normative requirement to publish a per-network deployments registry file:
   - `spec/RUBIN_L1_DEPLOYMENTS_<network>_v1.1.md`,
   - and listed minimum expected deployment_ids for v1.1 (`sig_suite_02_v1`, `htlc_anchor_v1`) if the features exist.
-

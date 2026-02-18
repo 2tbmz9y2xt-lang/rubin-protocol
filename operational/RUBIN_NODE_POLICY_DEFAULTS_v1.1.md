@@ -35,7 +35,8 @@ P2 (optional / environment-dependent):
 
 ### 1.2 Size and complexity caps (policy)
 
-These are already defined as policy knobs in CANONICAL v1.1:
+These limits are defined in CANONICAL v1.1:
+- `MAX_WITNESS_BYTES_PER_TX` (consensus per-tx witness cap)
 - `MAX_WITNESS_ITEM_BYTES` (single witness item cap, relay-only)
 - `MAX_RELAY_MSG_BYTES` (P2P message cap, relay-only)
 

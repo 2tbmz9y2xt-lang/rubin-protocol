@@ -299,7 +299,7 @@ payload:
 
 `MerkleProof`:
 ```
-depth       : u8                    (tree depth; 0 = single-tx block)
+depth       : u8                    (proof depth; 0 = single-tx block)
 sibling_cnt : CompactSize           (MUST equal depth)
 siblings[]  : bytes32               (sibling hashes from leaf to root, left-to-right)
 ```
@@ -311,9 +311,12 @@ siblings[]  : bytes32               (sibling hashes from leaf to root, left-to-r
    verify `output.covenant_type = CORE_ANCHOR` and `output.anchor_data` matches `anchor_data`.
    Compute `txid = SHA3-256(TxNoWitnessBytes(tx))`.
 3. If `!(flags & 0x01)`: the verifier must obtain the txid externally (e.g., via prior `inv`/`tx`).
-4. Compute Merkle path: starting from `txid` as leaf, iteratively hash with each `siblings[i]`
-   (left or right determined by `(tx_index >> i) & 1`; 0 = sibling on right, 1 = sibling on left).
-5. Verify the computed root equals `block_header.merkle_root`.
+4. Compute Merkle path per CANONICAL §5.1.1:
+   - Initialize leaf hash: `h = SHA3-256(0x00 || txid)`.
+   - For each level `i` in `[0..depth-1]`:
+     - If `(tx_index >> i) & 1 == 0` (sibling on the right): `h = SHA3-256(0x01 || h || siblings[i])`.
+     - If `(tx_index >> i) & 1 == 1` (sibling on the left):  `h = SHA3-256(0x01 || siblings[i] || h)`.
+5. Verify the computed root `h` equals `block_header.merkle_root`.
 6. Optionally verify `anchor_data` application prefix (e.g., `"RUBINv1-htlc-preimage/"` for HTLC proofs).
 
 **Size constraint:** `anchor_data_len` MUST NOT exceed `MAX_ANCHOR_PAYLOAD_SIZE = 65_536`.

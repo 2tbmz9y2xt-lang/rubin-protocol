@@ -82,5 +82,5 @@ mandatory_gates:
   file: conformance/fixtures/CV-COINBASE.yml
   required: true
   status: PASS
-  description: Coinbase subsidy formula correctness and non-overflow (T-015). Epoch boundaries, epoch 33 last non-zero, epoch 34+ zero, subsidy-exceeded rejection (12 vectors).
+  description: Coinbase subsidy formula correctness and non-overflow (T-015). Epoch boundaries, epoch 32 last non-zero, epoch 33+ zero, subsidy-exceeded rejection (12 vectors).
   note: consensus
