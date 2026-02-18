@@ -57,6 +57,48 @@ If an operator enables replacement (non-default), it SHOULD be constrained and m
 3. Limit per-outpoint churn: at most 1 replacement attempt per outpoint per 10 minutes.
 4. Keep replacement local-only: do not advertise replacement behavior unless it is published in release notes for the private/public phase.
 
+### 1.4 TIMELOCK (keyless covenant) spend rate-limiting
+
+`CORE_TIMELOCK_V1` spends carry a sentinel witness (`suite_id = 0x00`, zero-length pubkey
+and signature). This means `sig_cost = 0` and no cryptographic verification is required.
+
+A minimal 1-in/1-out TIMELOCK transaction weighs approximately **334 weight units** —
+roughly **22× lighter** than a 1-in/1-out ML-DSA transaction (~7,561 wu).
+At `MAX_BLOCK_WEIGHT = 4,000,000`, a block could theoretically contain ~11,976 TIMELOCK
+spends, creating a cheap mempool flood vector that imposes essentially zero CPU cost on
+the attacker but burdens relay, mempool bookkeeping, and UTXO churn on all full nodes.
+
+**Default policy (non-consensus, relay + mempool):**
+
+```
+MIN_TIMELOCK_RELAY_FEE_MULTIPLIER = 4      # require 4× base MIN_RELAY_FEE_RATE for TIMELOCK spends
+MAX_TIMELOCK_TX_PER_PEER_PER_SECOND = 10   # per-peer relay rate cap
+MAX_TIMELOCK_TX_IN_MEMPOOL = 5_000         # absolute mempool cap for TIMELOCK spends
+MAX_TIMELOCK_WEIGHT_PER_BLOCK_FRACTION = 0.25  # soft cap: TIMELOCK spends ≤ 25% of block weight
+```
+
+Enforcement:
+
+1. **Fee floor**: before mempool admission, require  
+   `fee(T) ≥ weight(T) × MIN_RELAY_FEE_RATE × MIN_TIMELOCK_RELAY_FEE_MULTIPLIER`.  
+   Rationale: raises the economic cost of TIMELOCK floods to ~4× the base relay cost,
+   roughly compensating for the absent signature verification cost.
+
+2. **Per-peer relay rate**: if a peer submits more than `MAX_TIMELOCK_TX_PER_PEER_PER_SECOND`
+   TIMELOCK-spending transactions in any 1-second window, drop excess and increment ban-score +5.
+
+3. **Mempool cap**: if TIMELOCK-spending transactions already occupy `MAX_TIMELOCK_TX_IN_MEMPOOL`
+   slots, reject new arrivals (return relay-rejection, do not ban).  
+   When mempool is full, evict lowest-fee TIMELOCK spends first (before key-bearing spends).
+
+4. **Block weight soft cap** (mining policy, non-consensus):  
+   Miners/validators SHOULD limit TIMELOCK spends to `MAX_TIMELOCK_WEIGHT_PER_BLOCK_FRACTION`
+   of block weight to preserve block space for economically meaningful key-bearing transactions.  
+   This is a soft recommendation; consensus does not enforce it.
+
+These are starting defaults. Operators MAY relax them (e.g., raise the mempool cap) if
+TIMELOCK usage is legitimate and monitored. Any override MUST be documented.
+
 ## 2. P2P DoS defenses (policy)
 
 ### 2.1 Connection management

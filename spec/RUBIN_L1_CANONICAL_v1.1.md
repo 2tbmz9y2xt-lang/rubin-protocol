@@ -253,6 +253,22 @@ Transaction syntax limits:
    - `suite_id = 0x02`: `0 < sig_length ≤ MAX_SLH_DSA_SIG_BYTES`.
 5. `|witness.witnesses|` is bounded by protocol limits under the block weight constraints in §4.3.
 
+> **Non-normative note — effective maximum inputs per transaction (v1.1):**
+> The practical upper bound on inputs is determined by `MAX_WITNESS_BYTES_PER_TX = 100_000`
+> (relay policy, §1.2), not by `MAX_TX_INPUTS = 1_024` or `MAX_BLOCK_WEIGHT`.
+> With canonical v1.1 key sizes:
+> - `suite_id = 0x01` (ML-DSA-87): pubkey 2592 B + sig 4627 B → **≤ 13 inputs** per transaction
+>   (13 inputs ≈ 93,913 witness bytes; 14 inputs would exceed `MAX_WITNESS_BYTES_PER_TX`).
+> - `suite_id = 0x02` (SLH-DSA-SHAKE-256f): pubkey 64 B + sig 49856 B → **≤ 2 inputs** per transaction
+>   (2 inputs ≈ 99,851 witness bytes; 3 inputs would exceed `MAX_WITNESS_BYTES_PER_TX`).
+> - `suite_id = 0x00` (sentinel / TIMELOCK): witness is zero-length → up to `MAX_TX_INPUTS = 1_024` inputs,
+>   but each such transaction has `sig_cost = 0` and weighs ~334 wu (1-in/1-out),
+>   making mempool rate-limiting necessary (see node policy §1.4).
+>
+> Wallet implementations SHOULD respect these effective caps when constructing transactions
+> to avoid relay rejection. These bounds shift if `MAX_WITNESS_BYTES_PER_TX` is updated
+> via a future governance action.
+
 Witness is excluded from `txid` (consensus-critical serialization rule). `sighash` is computed from the transaction fields and `chain_id` per §4.2; it does not include the witness section bytes.
 
 `TxNoWitnessBytes(T)` and `TxBytes(T)` are defined as:
@@ -509,7 +525,20 @@ For each non-coinbase input spending output `o`:
      - `lock_mode = 0x00`: require `height(B) ≥ lock_value`;
      - `lock_mode = 0x01`: require `timestamp(B) ≥ lock_value`;
      - if lock condition is not met, reject with `TX_ERR_TIMELOCK_NOT_MET`.
-4a. If `o.covenant_type = CORE_HTLC_V2`:
+5. If `o.covenant_type = CORE_VAULT_V1`:
+   - parse `owner_key_id || spend_delay || lock_mode || lock_value || recovery_key_id` with backward compatibility:
+     - `covenant_data_len = 73`: parse legacy form and set `spend_delay = 0`.
+     - `covenant_data_len = 81`: parse extended form.
+   - any other `lock_mode` MUST be `TX_ERR_PARSE`;
+   - If witness public key hash equals `owner_key_id` (owner path):
+     - If `spend_delay = 0`: accept (legacy behavior).
+     - Else require `height(B) ≥ o.creation_height + spend_delay`; if not met, reject with `TX_ERR_TIMELOCK_NOT_MET`.
+   - Else if witness public key hash equals `recovery_key_id` (recovery path):
+     - `lock_mode = 0x00`: require `height(B) ≥ lock_value`;
+     - `lock_mode = 0x01`: require `timestamp(B) ≥ lock_value`;
+     - if lock condition is not met, reject with `TX_ERR_TIMELOCK_NOT_MET`.
+   - Else reject as `TX_ERR_SIG_INVALID`.
+6. If `o.covenant_type = CORE_HTLC_V2`:
    - If deployment `htlc_anchor_v1` is NOT ACTIVE at `height(B)`: reject as `TX_ERR_DEPLOYMENT_INACTIVE`.
    - `script_sig_len` MUST be `0`; otherwise reject as `TX_ERR_PARSE`.
    - parse `hash || lock_mode || lock_value || claim_key_id || refund_key_id` (105 bytes);
@@ -528,23 +557,10 @@ For each non-coinbase input spending output `o`:
        - `lock_mode = 0x00`: require `height(B) ≥ lock_value`.
        - `lock_mode = 0x01`: require `timestamp(B) ≥ lock_value`.
        - If lock condition is not met: reject as `TX_ERR_TIMELOCK_NOT_MET`.
-5. If `o.covenant_type = CORE_VAULT_V1`:
-   - parse `owner_key_id || spend_delay || lock_mode || lock_value || recovery_key_id` with backward compatibility:
-     - `covenant_data_len = 73`: parse legacy form and set `spend_delay = 0`.
-     - `covenant_data_len = 81`: parse extended form.
-   - any other `lock_mode` MUST be `TX_ERR_PARSE`;
-   - If witness public key hash equals `owner_key_id` (owner path):
-     - If `spend_delay = 0`: accept (legacy behavior).
-     - Else require `height(B) ≥ o.creation_height + spend_delay`; if not met, reject with `TX_ERR_TIMELOCK_NOT_MET`.
-   - Else if witness public key hash equals `recovery_key_id` (recovery path):
-     - `lock_mode = 0x00`: require `height(B) ≥ lock_value`;
-     - `lock_mode = 0x01`: require `timestamp(B) ≥ lock_value`;
-     - if lock condition is not met, reject with `TX_ERR_TIMELOCK_NOT_MET`.
-   - Else reject as `TX_ERR_SIG_INVALID`.
-6. If `o.covenant_type = CORE_ANCHOR`: this output is non-spendable and MUST NOT
+7. If `o.covenant_type = CORE_ANCHOR`: this output is non-spendable and MUST NOT
    appear as an input. If reached, reject as `TX_ERR_MISSING_UTXO`.
-7. If `o.covenant_type = CORE_RESERVED_FUTURE`, reject as `TX_ERR_COVENANT_TYPE_INVALID`.
-8. Any other covenant type is rejected by `TX_ERR_COVENANT_TYPE_INVALID`.
+8. If `o.covenant_type = CORE_RESERVED_FUTURE`, reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+9. Any other covenant type is rejected by `TX_ERR_COVENANT_TYPE_INVALID`.
 
 For each block:
 
@@ -649,6 +665,8 @@ block_subsidy(height) = 0 for epoch > 33
 ```
 
 Total issuance is capped so that emitted sum never exceeds `MAX_SUPPLY`.
+Non-normative note: the discrete halving schedule yields an actual total emission of
+`2_099_999_997_690_000` satoshis (which is `2_310_000` satoshis below `MAX_SUPPLY`).
 
 Weight and fee checks are normative:
 
