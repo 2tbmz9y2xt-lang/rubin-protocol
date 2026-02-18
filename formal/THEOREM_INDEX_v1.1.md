@@ -10,7 +10,7 @@ For toolchain rationale and proof strategy see `formal/RUBIN_FORMAL_APPENDIX_v1.
 Proof status:
 - `spec+vector`  — stated in canonical spec, covered by conformance vector; Lean 4 proof pending
 - `spec+axiom`   — depends on cryptographic hardness assumption; stated as `axiom` in Lean 4 model
-- `lean4-proven` — machine-checked at pinned commit (none yet; target: production freeze)
+- `lean4-proven` — machine-checked (currently local repo `/Users/gpt/Documents/rubin-formal`; will be pinned at freeze)
 - `pending`      — not yet covered by spec section or conformance vector
 
 ---
@@ -29,7 +29,7 @@ Proof status:
 - **Statement**: For fixed `(UTXOSet, chain_id, height, timestamp, BlockBytes)`, `ApplyBlock` returns a uniquely determined `(UTXOSet', outcome)`. No valid implementation may return different outcomes for identical inputs.
 - **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §9 inv-1`
 - **Evidence**: `CV-BLOCK`, `CV-UTXO` (all tests are deterministic by construction)
-- **Status**: `spec+vector`
+- **Status**: `lean4-proven` (local model scaffold) — `/Users/gpt/Documents/rubin-formal/RubinFormal/Core.lean`
 
 ### T-010 — Replay protection: (chain_id, tx_nonce) uniqueness
 
@@ -43,7 +43,7 @@ Proof status:
 - **Statement**: For all `n : ℕ` with `n < 2^64`, `decode(encode(n)) = n` and `encode` is canonical (no non-minimal encodings accepted).
 - **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §3.2.1`
 - **Evidence**: `conformance/fixtures/CV-COMPACTSIZE.yml`
-- **Status**: `spec+vector`
+- **Status**: `lean4-proven` (canonical encode/decode + round-trip theorem) — `/Users/gpt/Documents/rubin-formal/RubinFormal/CompactSize.lean`
 
 ---
 
@@ -54,7 +54,7 @@ Proof status:
 - **Statement**: For any valid non-coinbase `Tx`: `Σ output.value ≤ Σ spent_utxo.value`. Fee = difference ≥ 0.
 - **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §9 inv-2`, §4.5
 - **Evidence**: `conformance/fixtures/CV-FEES.yml` FEES-02 (TX_ERR_VALUE_CONSERVATION)
-- **Status**: `spec+vector`
+- **Status**: `lean4-proven` (checked-u64 summation model) — `/Users/gpt/Documents/rubin-formal/RubinFormal/Tx.lean`
 
 ### T-006 — Non-spendable ANCHOR exclusion from UTXO
 
@@ -69,6 +69,20 @@ Proof status:
 - **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §4.4`
 - **Evidence**: no dedicated conformance vector yet
 - **Status**: `pending` — needs T-015 conformance vector in CV-FEES or new CV-COINBASE gate
+
+---
+
+## VERSION_BITS
+
+### T-007 — VERSION_BITS terminality / monotonicity core
+
+- **Statement**: `ACTIVE` and `FAILED` are terminal under the FSM at window boundaries (spec §8.0.1 rule 5).
+- **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §8.0.1`
+- **Evidence**: `conformance/fixtures/CV-DEP.yml` DEP-04/DEP-05
+- **Status**: `lean4-proven` (terminal-at-boundary core) — `/Users/gpt/Documents/rubin-formal/RubinFormal/VersionBits.lean`
+
+Note (non-normative): a stronger theorem "ACTIVE at height h implies ACTIVE at all h' > h" is planned once the
+composition lemma for boundary-iteration (`applyBoundaries`) is formalized.
 
 ---
 
