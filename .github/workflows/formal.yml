@@ -23,7 +23,7 @@ jobs:
         with:
           repository: 2tbmz9y2xt-lang/rubin-formal
           path: rubin-formal
-          ref: 2831b20ce1f93a22de2555392176504e1a2bfd5d
+          ref: 4e0dae2ffe4965cf4cc598314a61dd3935efa7ed
 
       - name: Install elan (Lean toolchain)
         run: |
@@ -36,4 +36,3 @@ jobs:
           set -euo pipefail
           cd rubin-formal
           lake build
-
