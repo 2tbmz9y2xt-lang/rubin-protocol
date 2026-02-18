@@ -191,7 +191,7 @@ Same payload format as `inv`. Sent in response to `getdata` for items not found 
 
 ```
 count     : CompactSize
-headers[] : BlockHeaderBytes  (CANONICAL §5.1, exactly 80 bytes each)
+headers[] : BlockHeaderBytes  (CANONICAL §5.1; 116 bytes in v1.1)
 ```
 
 ### 5.2 `getheaders` (RECOMMENDED)
@@ -264,7 +264,7 @@ is the sole signal. Full nodes that do not implement compact headers respond wit
 Provides a filtered block with a partial Merkle proof for requested transactions.
 
 ```
-block_header  : BlockHeaderBytes  (80 bytes)
+block_header  : BlockHeaderBytes  (CANONICAL §5.1; 116 bytes in v1.1)
 total_txns    : u32le
 hash_count    : CompactSize
 hashes[]      : bytes32           (Merkle tree nodes needed for proof)
@@ -286,7 +286,7 @@ downloading the full block.
 ```
 command: "anchorproof"
 payload:
-  block_header    : BlockHeaderBytes  (80 bytes — for PoW and timestamp validation)
+  block_header    : BlockHeaderBytes  (CANONICAL §5.1; 116 bytes in v1.1 — for PoW and timestamp validation)
   tx_index        : u32le             (index of the anchor tx in the block)
   tx_proof        : MerkleProof       (see below)
   output_index    : u32le             (output index within the tx)
