@@ -58,23 +58,31 @@ Development status note (non-normative):
 - `K_CONFIRM_L1 = 8` (non-consensus recommended parameter)
 - `K_CONFIRM_BRIDGE = 12` (non-consensus recommended parameter)
 - `K_CONFIRM_GOV = 16` (non-consensus recommended parameter)
-- `BLOCK_SUBSIDY_INITIAL = 50_0000_0000`
+- `BLOCK_SUBSIDY_INITIAL = 5_000_000_000`
 - `SUBSIDY_HALVING_INTERVAL = 210_000`
 - `MAX_SUPPLY = 2_100_000_000_000_000`
 
 Non-normative note (emission schedule and genesis intent): total supply target is
 100,000,000 RBN (`MAX_SUPPLY = 2_100_000_000_000_000` base units; 1 RBN = 21_000_000
-base units). The discrete halving schedule over 34 epochs (epoch 0..33) yields a
-theoretical maximum emission of `2_099_999_997_690_000` base units, which is `2_310_000`
-base units below `MAX_SUPPLY`. Epoch 32 subsidy = 1 base unit (last non-zero); epoch
-33+ = 0. Intended genesis: 1_000_000 RBN premine to a developer foundation fund split
-across 100 addresses with height-based timelocks; 1_000 additional unspendable outputs.
-Current v1.1 chain-instance profiles contain a placeholder genesis with 0 outputs
-pending final ceremony (see `spec/TODO_ECONOMICS_AND_GENESIS.md`). Full subsidy formula: §4.5.
+base units).
+
+Under the v1.1 subsidy schedule (mined emission only, excluding any genesis allocations),
+the discrete halving schedule over 34 epochs (epoch 0..33) yields a theoretical maximum
+mined emission of `2_099_999_997_690_000` base units, which is `2_310_000` base units
+below `MAX_SUPPLY`. Epoch 32 subsidy = 1 base unit (last non-zero); epoch 33+ = 0.
+
+Genesis allocations (e.g., premine / unspendables) are chain-instance decisions. Current
+v1.1 chain-instance profiles contain a placeholder genesis with 0 outputs pending final
+ceremony (see `spec/TODO_ECONOMICS_AND_GENESIS.md`). If genesis outputs are introduced,
+emission parameters MUST be revised in a future canonical revision to keep the total
+supply target consistent.
+
+Full subsidy formula: §4.5.
 - `MAX_TX_INPUTS = 1_024`
 - `MAX_TX_OUTPUTS = 1_024`
 - `MAX_WITNESS_ITEMS = 1_024`
 - `MAX_WITNESS_ITEM_BYTES = 65_000` (non-consensus relay policy)
+- `MAX_WITNESS_BYTES_PER_TX = 100_000`
 - `MAX_ML_DSA_SIGNATURE_BYTES = 4_627`
 - `MAX_SLH_DSA_SIG_BYTES = 49_856`
 - `VERIFY_COST_ML_DSA = 8`
@@ -99,7 +107,7 @@ Let:
 Define:
 
 ```
-UtxoEntry = (value, covenant_type, covenant_data, creation_height)
+UtxoEntry = (value, covenant_type, covenant_data, creation_height, created_by_coinbase)
 ```
 
 State transition is:
@@ -115,14 +123,15 @@ and is defined sequentially over transactions in block order:
 
 for i = 0..(\mathcal{B}_h.txs.count-1):
   T := \mathcal{B}_h.txs[i]
-  \mathcal{U}^{work} := SpendTx(\mathcal{U}^{work}, T, h)
+  is_coinbase := (i = 0)
+  \mathcal{U}^{work} := SpendTx(\mathcal{U}^{work}, T, h, is_coinbase)
 
 \mathcal{U}_h := \mathcal{U}^{work}
 ```
 
 where:
 
-1. `SpendTx(U, T, h)` removes all input outpoints of `T` from `U` and adds all **spendable** outputs of `T` with `creation_height = h`.
+1. `SpendTx(U, T, h, is_coinbase)` removes all input outpoints of `T` from `U` and adds all **spendable** outputs of `T` with `creation_height = h` and `created_by_coinbase = is_coinbase`.
 2. Non-spendable covenant outputs (e.g., `CORE_ANCHOR`) are never added to the spendable UTXO set.
 3. This sequential definition permits intra-block spending: a later transaction in the same block MAY spend a spendable output created by an earlier transaction in the same block.
 
@@ -261,15 +270,16 @@ Transaction syntax limits:
 
 1. `input_count ≤ MAX_TX_INPUTS`.
 2. `output_count ≤ MAX_TX_OUTPUTS`.
-3. `witness.witness_count ≤ MAX_WITNESS_ITEMS`.
-4. For each witness item, signature lengths MUST be bounded by the configured profile. Any violation MUST be rejected as `TX_ERR_SIG_NONCANONICAL`:
+3. `witness.witness_count ≤ MAX_WITNESS_ITEMS`. Any violation MUST be rejected as `TX_ERR_WITNESS_OVERFLOW`.
+4. `|WitnessBytes(T.witness)| ≤ MAX_WITNESS_BYTES_PER_TX`. Any violation MUST be rejected as `TX_ERR_WITNESS_OVERFLOW`.
+5. For each witness item, signature lengths MUST be bounded by the configured profile. Any violation MUST be rejected as `TX_ERR_SIG_NONCANONICAL`:
    - `suite_id = 0x01`: `sig_length = 4_627`;
    - `suite_id = 0x02`: `0 < sig_length ≤ MAX_SLH_DSA_SIG_BYTES`.
-5. `|witness.witnesses|` is bounded by protocol limits under the block weight constraints in §4.3.
+6. `|witness.witnesses|` is bounded by protocol limits under the block weight constraints in §4.3.
 
 > **Non-normative note — effective maximum inputs per transaction (v1.1):**
 > The practical upper bound on inputs is determined by `MAX_WITNESS_BYTES_PER_TX = 100_000`
-> (relay policy, §1.2), not by `MAX_TX_INPUTS = 1_024` or `MAX_BLOCK_WEIGHT`.
+> (consensus, §1.2), not by `MAX_TX_INPUTS = 1_024` or `MAX_BLOCK_WEIGHT`.
 > With canonical v1.1 key sizes:
 > - `suite_id = 0x01` (ML-DSA-87): pubkey 2592 B + sig 4627 B → **≤ 13 inputs** per transaction
 >   (13 inputs ≈ 93,913 witness bytes; 14 inputs would exceed `MAX_WITNESS_BYTES_PER_TX`).
@@ -280,8 +290,8 @@ Transaction syntax limits:
 >   making mempool rate-limiting necessary (see node policy §1.4).
 >
 > Wallet implementations SHOULD respect these effective caps when constructing transactions
-> to avoid relay rejection. These bounds shift if `MAX_WITNESS_BYTES_PER_TX` is updated
-> via a future governance action.
+> to avoid consensus rejection (`TX_ERR_WITNESS_OVERFLOW`). These bounds shift if
+> `MAX_WITNESS_BYTES_PER_TX` changes in a future canonical revision.
 
 Witness is excluded from `txid` (consensus-critical serialization rule). `sighash` is computed from the transaction fields and `chain_id` per §4.2; it does not include the witness section bytes.
 
@@ -519,6 +529,14 @@ UTXO lookup semantics (Normative):
 - Transaction validation operates against an incrementally updated working UTXO set for the current block.
 - Specifically, for transaction `T_i` in block order, all UTXO lookups and spends occur against the state produced after applying `SpendTx` for all prior transactions `T_0..T_{i-1}` in the same block (see §2).
 
+Coinbase maturity (Normative):
+
+For each input spending a spendable UTXO entry `e` at validated block height `h = height(B)`:
+
+1. If `e.created_by_coinbase = true` and `h < e.creation_height + COINBASE_MATURITY`,
+   the transaction MUST be rejected as `TX_ERR_COINBASE_IMMATURE`.
+2. Otherwise, the spend is not blocked by coinbase maturity.
+
 ### 4.1 Covenant binding and evaluation (Deterministic)
 
 For each non-coinbase input spending output `o`:
@@ -678,6 +696,10 @@ Weight and fee checks are normative:
 sum(outputs.value) ≤ block_subsidy(height) + Σ fees(tx in transactions excluding coinbase)
 ```
 
+- **Genesis exception (normative):** for height `0` (the genesis block), the coinbase output
+  bound is not evaluated. Genesis outputs are chain-instance allocations fixed by the published
+  genesis bytes and are not constrained by `block_subsidy(0)` or fees.
+
 - If the coinbase bound is violated, the block MUST be rejected as `BLOCK_ERR_SUBSIDY_EXCEEDED`.
 - `block_subsidy(height)` is a deterministic epoch schedule defined below; it is part of consensus
   constants for this spec version and MUST be computed identically by all implementations.
@@ -693,10 +715,11 @@ block_subsidy(height) = 0,                               for epoch > 33
 
 Arithmetic MUST use integer right-shift (floor division by 2^epoch), not floating-point.
 Overflow is impossible: `BLOCK_SUBSIDY_INITIAL = 5_000_000_000` fits in u64; each halving
-reduces the value; epoch 33 yields 1 satoshi; epoch 34+ yields 0.
+reduces the value; epoch 32 yields 1 base unit; epoch 33+ yields 0.
 
-Total issuance is capped so that emitted sum never exceeds `MAX_SUPPLY`.
-Non-normative note: the discrete halving schedule yields an actual total emission of
+Total mined emission (subsidy-only; excluding any genesis allocations) is capped so that the
+sum of emitted subsidy never exceeds `MAX_SUPPLY`.
+Non-normative note: the discrete halving schedule yields a total mined emission of
 `2_099_999_997_690_000` base units, which is `2_310_000` base units below `MAX_SUPPLY`.
 Conformance: CV-COINBASE.
 
@@ -790,7 +813,7 @@ where `parent(B_h)` is the unique block whose `block_hash` equals `B_h.prev_bloc
 
 Height is a derived property; it is not carried as a header field.
 
-### 5.4 Witness Item Validation (Normative)
+### 5.2 Witness Item Validation (Normative)
 
 Witness item validation is performed during step 8 ("Signature verification") of the
 validation order in §4. For each non-sentinel witness item (i.e. `suite_id ≠ 0x00`):
@@ -799,7 +822,7 @@ validation order in §4. For each non-sentinel witness item (i.e. `suite_id ≠ 
 2. `sig_length = 0` is non-canonical and MUST be rejected as `TX_ERR_SIG_NONCANONICAL`.
 3. If `suite_id = 0x01`, `sig_length` MUST equal 4_627 and `pubkey_length` MUST equal 2_592; any violation MUST be rejected as `TX_ERR_SIG_NONCANONICAL`.
 4. If `suite_id = 0x02`, `0 < sig_length ≤ MAX_SLH_DSA_SIG_BYTES` and `pubkey_length` MUST equal 64; any violation MUST be rejected as `TX_ERR_SIG_NONCANONICAL`.
-5. If `suite_id = 0x02` is used for a key-based covenant spend (`CORE_P2PK`, `CORE_HTLC_V1`, `CORE_VAULT_V1`) before explicit migration activation, reject as `TX_ERR_DEPLOYMENT_INACTIVE`.
+5. If `suite_id = 0x02` is used for a key-based covenant spend (`CORE_P2PK`, `CORE_HTLC_V1`, `CORE_HTLC_V2`, `CORE_VAULT_V1`) before explicit migration activation, reject as `TX_ERR_DEPLOYMENT_INACTIVE`.
 6. If the witness item is well-formed and canonical-length but signature verification fails, reject as `TX_ERR_SIG_INVALID`.
 
 **Security assumptions (normative prerequisites):**
@@ -808,7 +831,7 @@ validation order in §4. For each non-sentinel witness item (i.e. `suite_id ≠ 
 - ML-DSA-87 and SLH-DSA are EUF-CMA secure under their respective operational domains.
 - Signature verification uses canonical preimage hashing; raw preimage signing is forbidden.
 
-### 5.2 Batch Verification (Normative)
+### 5.3 Batch Verification (Normative)
 
 Implementations MAY use batch verification for ML-DSA-87 signatures within a single block.
 Batch verification MUST produce the same accept/reject outcome as individual verification
@@ -816,7 +839,7 @@ for every signature in the batch. If batch verification rejects, the implementat
 fall back to individual verification to identify the invalid signature(s) and produce the
 correct per-transaction error code.
 
-### 5.3 Signature Canonical Form (Normative)
+### 5.4 Signature Canonical Form (Normative)
 
 ML-DSA-87 signing SHOULD use deterministic signing mode (FIPS 204 pure mode).
 
@@ -1202,6 +1225,8 @@ For block:
 Σ weight(T in block) ≤ MAX_BLOCK_WEIGHT
 ```
 
+If the block constraint is violated, the block MUST be rejected as `BLOCK_ERR_WEIGHT_EXCEEDED`.
+
 For any non-coinbase transaction:
 
 ```
@@ -1237,7 +1262,9 @@ Default operator guidance for v1.1 is collected in:
    `min_fee(T)` and current node policy multiplier.
 2. Mempool ordering MUST prioritize higher `fee/weight` ratio.
 3. Mempool eviction MUST remove lowest priority entries to enforce node local memory caps.
-4. A transaction with `witness.witness_count > MAX_WITNESS_ITEMS` or above a node-local `|Tx|` policy cap is non-relay, regardless of consensus validity.
+4. A relay node MUST reject any transaction that violates consensus parsing limits, including
+   `witness.witness_count > MAX_WITNESS_ITEMS` or `|WitnessBytes(T.witness)| > MAX_WITNESS_BYTES_PER_TX`
+   (both `TX_ERR_WITNESS_OVERFLOW`).
 5. A relay node MAY additionally reject transactions where any single witness item exceeds a node-local byte cap such as `MAX_WITNESS_ITEM_BYTES` when measured over `WitnessItemBytes(w)` from §11.
 
 Operational policy MAY include:
@@ -1459,7 +1486,7 @@ recommendations.
 2. **Checkpoints** *(normative — see LIGHT_CLIENT_SECURITY §2)*: hard-coded block hashes
    at known heights. A chain conflicting with any checkpoint MUST be rejected as
    `ECLIPSE_ERR_CHECKPOINT_MISMATCH`. Build-time embedding required for mainnet.
-   Checkpoint hygiene: heights MUST be ≥ `COINBASE_MATURITY` blocks behind the tip
+   Checkpoint hygiene (non-genesis): heights MUST be ≥ `COINBASE_MATURITY` blocks behind the tip
    at publish time. Gap limit: `MAX_CHECKPOINT_GAP = 100_800` blocks.
 
 3. **Difficulty anomaly detection**: reject headers whose difficulty drops beyond the
@@ -1496,29 +1523,75 @@ authoritative. Full normative specification:
 `spec/RUBIN_L1_LIGHT_CLIENT_SECURITY_v1.1.md §3`
 (see also KEY_MANAGEMENT §3.1 timelock recommendation).
 
-1. Node peers MUST implement peer discovery and peer-version handshake sufficient to exchange:
-   - `version`, `verack`, `wtxid` (relayed via `inv/getdata` `inv_type = 2`), `ping`, `pong`,
-   - headers, compact headers, inv/msg getdata, blocks, and txs.
-2. `BlockHeader` wire is shared by all peers; chain state is validated with PoW, difficulty, and header chain rules.
-3. SPV validation requires proof of inclusion as:
-   - merkle_path (binary proof with siblings at each depth),
-   - block_header with valid work/target and timestamp rules,
-   - witness-free txid and explicit tx index.
-4. Minimum required P2P transport envelope is 24-byte fixed prefix:
-   - magic (4 bytes), command (12 bytes, ASCII, zero padded), payload_length (4 bytes), checksum (4 bytes).
-5. Peer discovery is non-consensus and at minimum supports address relay and stale-peer eviction.
-6. A node MUST reject oversized protocol messages above negotiated caps from network policy to resist DoS.
-7. Handshake message MUST include:
-   - network magic via the 24-byte transport prefix (magic is not duplicated in the version payload),
-   - `protocol_version`,
-   - `chain_id`,
-   - `peer_services`.
-8. `msg_inv`, `msg_getdata`, and `msg_headers` are minimum required message families.
-9. Nodes MUST support `mempool` and `getmempool` for relay-aware peers and `light` role nodes.
-10. Light clients MUST reject headers chains with inconsistent median-time and PoW checks at each step.
-11. Nodes MAY enforce connection caps and per-peer bandwidth ceilings to resist eclipse/DoS attacks.
-12. Maximum message size is `MAX_RELAY_MSG_BYTES`.
-13. Full peer transport and light-client profile is specified in `spec/RUBIN_L1_P2P_PROTOCOL_v1.1.md`.
+P2P minimum requirements (normative, non-consensus) are specified in §15.
+
+## 15. P2P Minimum Requirements (Normative, non-consensus)
+
+This section defines the minimum P2P interoperability profile for RUBIN v1.1. These
+requirements are NOT consensus rules (they do not affect block validity), but conforming
+implementations MUST meet them to interoperate at the network layer.
+
+### 15.1 Peer Discovery and Handshake Exchange
+
+Node peers MUST implement peer discovery and peer-version handshake sufficient to exchange:
+- `version`, `verack`, `wtxid` (relayed via `inv/getdata` `inv_type = 2`), `ping`, `pong`,
+- headers, compact headers, inv/msg getdata, blocks, and txs.
+
+### 15.2 Shared Header Wire and Header-Chain Validation
+
+`BlockHeader` wire is shared by all peers; chain state is validated with PoW, difficulty, and header chain rules.
+
+### 15.3 SPV Inclusion Proof Requirements
+
+SPV validation requires proof of inclusion as:
+- merkle_path (binary proof with siblings at each depth),
+- block_header with valid work/target and timestamp rules,
+- witness-free txid and explicit tx index.
+
+### 15.4 Transport Envelope Minimum
+
+Minimum required P2P transport envelope is 24-byte fixed prefix:
+- magic (4 bytes), command (12 bytes, ASCII, zero padded), payload_length (4 bytes), checksum (4 bytes).
+
+### 15.5 Peer Discovery Baseline
+
+Peer discovery is non-consensus and at minimum supports address relay and stale-peer eviction.
+
+### 15.6 Oversized Message Rejection
+
+A node MUST reject oversized protocol messages above negotiated caps from network policy to resist DoS.
+
+### 15.7 Handshake Required Fields
+
+Handshake message MUST include:
+- network magic via the 24-byte transport prefix (magic is not duplicated in the version payload),
+- `protocol_version`,
+- `chain_id`,
+- `peer_services`.
+
+### 15.8 Minimum Required Message Families
+
+`msg_inv`, `msg_getdata`, and `msg_headers` are minimum required message families.
+
+### 15.9 Mempool Inventory Helpers
+
+Nodes MUST support `mempool` and `getmempool` for relay-aware peers and `light` role nodes.
+
+### 15.10 Light Client Header-Chain Rejection Rules
+
+Light clients MUST reject headers chains with inconsistent median-time and PoW checks at each step.
+
+### 15.11 Connection Caps and Bandwidth Ceilings
+
+Nodes MAY enforce connection caps and per-peer bandwidth ceilings to resist eclipse/DoS attacks.
+
+### 15.12 Maximum Message Size
+
+Maximum message size is `MAX_RELAY_MSG_BYTES`.
+
+### 15.13 Full P2P Protocol Reference
+
+Full peer transport and light-client profile is specified in `spec/RUBIN_L1_P2P_PROTOCOL_v1.1.md`.
 
 ## 16. Crypto Agility and Upgrade Path (Normative)
 

@@ -116,10 +116,14 @@ the only accepted distribution method for mainnet.
 
 ### 2.4 Checkpoint hygiene (Normative)
 
-- Checkpoints MUST be at heights with `COINBASE_MATURITY`-block buffer from the current
-  tip, to guard against reorg-risk at the checkpoint itself.
-- Light clients MUST NOT use a checkpoint height that is within `COINBASE_MATURITY` blocks
-  of the checkpoint-publisher's reported tip at time of publishing.
+- A genesis checkpoint at `height = 0` is permitted and RECOMMENDED to bind chain identity.
+  It is not subject to the `COINBASE_MATURITY`-buffer requirement.
+- For non-genesis checkpoints (`height > 0`), checkpoints MUST be at heights with
+  `COINBASE_MATURITY`-block buffer from the current tip, to guard against reorg-risk at
+  the checkpoint itself.
+- For non-genesis checkpoints (`height > 0`), light clients MUST NOT use a checkpoint
+  height that is within `COINBASE_MATURITY` blocks of the checkpoint-publisher's reported
+  tip at time of publishing.
 - After a checkpoint mismatch (`ECLIPSE_ERR_CHECKPOINT_MISMATCH`), the client MUST:
   1. Disconnect and ban (ban-score MAX) all peers that served the conflicting chain.
   2. Emit a user-visible alert with the conflicting `block_hash` and `height`.
@@ -279,17 +283,18 @@ A conforming light client implementation MUST:
 
 ### 7.2 Testnet checkpoint (initial value)
 
-The testnet checkpoint will be populated at testnet genesis. Until genesis, this field
-is a placeholder:
+The testnet checkpoint at height 0 is derived from
+`spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_TESTNET_v1.1.md`:
 
 ```
 chain_id_hex: "7dcf48a266788491e77bbb7b9c97ad6a2c89b882293dfaf3bdebeec62548cc00"
 checkpoints:
   - height: 0
-    block_hash_hex: "<testnet genesis hash — to be filled at genesis ceremony>"
-    timestamp: 0
+    block_hash_hex: "2577dca80125dacfde2f0ed90a121442c857accb11176b0f0d5d35ab03056388"
+    timestamp: 1700000000
 ```
 
+If testnet genesis bytes are replaced, this checkpoint MUST be updated accordingly.
 Mainnet checkpoints: populated at mainnet genesis ceremony (Q-017).
 
 ---

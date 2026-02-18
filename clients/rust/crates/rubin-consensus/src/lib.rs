@@ -28,6 +28,7 @@ pub const SLH_DSA_SIG_MAX_BYTES: usize = 49_856;
 pub const MAX_TX_INPUTS: usize = 1_024;
 pub const MAX_TX_OUTPUTS: usize = 1_024;
 pub const MAX_WITNESS_ITEMS: usize = 1_024;
+pub const MAX_WITNESS_BYTES_PER_TX: usize = 100_000;
 
 pub const TIMELOCK_MODE_HEIGHT: u8 = 0x00;
 pub const TIMELOCK_MODE_TIMESTAMP: u8 = 0x01;
@@ -66,6 +67,7 @@ pub const TX_ERR_NONCE_REPLAY: &str = "TX_ERR_NONCE_REPLAY";
 pub const TX_ERR_TX_NONCE_INVALID: &str = "TX_ERR_TX_NONCE_INVALID";
 pub const TX_ERR_SEQUENCE_INVALID: &str = "TX_ERR_SEQUENCE_INVALID";
 pub const TX_ERR_COINBASE_IMMATURE: &str = "TX_ERR_COINBASE_IMMATURE";
+pub const TX_ERR_WITNESS_OVERFLOW: &str = "TX_ERR_WITNESS_OVERFLOW";
 
 // MAX_TARGET is the maximum allowed PoW target. This implementation treats it as all-ones.
 pub const MAX_TARGET: [u8; 32] = [0xffu8; 32];
@@ -1033,9 +1035,11 @@ pub fn apply_block(
     for out in &block.transactions[0].outputs {
         coinbase_value = add_u64(coinbase_value, out.value)?;
     }
-    let max_coinbase = add_u64(block_reward_for_height(ctx.height), total_fees)?;
-    if coinbase_value > max_coinbase {
-        return Err(BLOCK_ERR_SUBSIDY_EXCEEDED.into());
+    if ctx.height != 0 {
+        let max_coinbase = add_u64(block_reward_for_height(ctx.height), total_fees)?;
+        if coinbase_value > max_coinbase {
+            return Err(BLOCK_ERR_SUBSIDY_EXCEEDED.into());
+        }
     }
 
     utxo.clear();
@@ -1227,11 +1231,14 @@ pub fn apply_tx(
     chain_timestamp: u64,
     suite_id_02_active: bool,
 ) -> Result<(), String> {
-    if tx.inputs.len() > MAX_TX_INPUTS
-        || tx.outputs.len() > MAX_TX_OUTPUTS
-        || tx.witness.witnesses.len() > MAX_WITNESS_ITEMS
-    {
+    if tx.inputs.len() > MAX_TX_INPUTS || tx.outputs.len() > MAX_TX_OUTPUTS {
         return Err("TX_ERR_PARSE".to_string());
+    }
+    if tx.witness.witnesses.len() > MAX_WITNESS_ITEMS {
+        return Err(TX_ERR_WITNESS_OVERFLOW.to_string());
+    }
+    if witness_bytes(&tx.witness).len() > MAX_WITNESS_BYTES_PER_TX {
+        return Err(TX_ERR_WITNESS_OVERFLOW.to_string());
     }
     if is_coinbase_tx(tx, chain_height) {
         validate_coinbase_tx_inputs(tx)?;

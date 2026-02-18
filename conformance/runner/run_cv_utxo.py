@@ -19,6 +19,7 @@ from run_cv_common import (
 
 CORE_P2PK = 0x0000
 CORE_TIMELOCK_V1 = 0x0001
+CORE_ANCHOR = 0x0002
 SUITE_ID_SENTINEL = 0x00
 
 
@@ -55,6 +56,8 @@ def run_apply_utxo(clients: dict[str, object], ctx: dict[str, object]) -> tuple[
 
 
 def build_context_for_test(test_id: str, ctx: dict[str, object]) -> dict[str, object]:
+    case_name = str(ctx.get("case", "")).strip().upper()
+
     if test_id == "UTXO-01":
         prev = ctx.get("tx_input_prevout")
         if not isinstance(prev, dict):
@@ -164,6 +167,184 @@ def build_context_for_test(test_id: str, ctx: dict[str, object]) -> dict[str, ob
         return {
             "chain_id_hex": "00" * 32,
             "chain_height": 10,
+            "chain_timestamp": 0,
+            "suite_id_02_active": False,
+            "tx_hex": tx_hex,
+            "utxo_set": [utxo_entry],
+        }
+
+    if test_id == "UTXO-04" or case_name == "TX_NONCE_INVALID":
+        prev_txid = bytes([0xC1]) * 32
+        tx_hex = build_tx_hex(
+            version=1,
+            tx_nonce=0,
+            inputs=[
+                {
+                    "prev_txid": prev_txid,
+                    "prev_vout": 0,
+                    "script_sig": b"",
+                    "sequence": 1,
+                }
+            ],
+            outputs=[{"value": 1, "covenant_type": CORE_P2PK, "covenant_data": bytes([0x01]) + bytes(32)}],
+            locktime=0,
+            witnesses=[{"suite_id": SUITE_ID_SENTINEL, "pubkey": b"", "sig": b""}],
+        )
+        utxo_entry = {
+            "txid": prev_txid.hex(),
+            "vout": 0,
+            "value": 2,
+            "covenant_type": CORE_TIMELOCK_V1,
+            "covenant_data": timelock_data(0).hex(),
+            "creation_height": 0,
+            "created_by_coinbase": False,
+        }
+        return {
+            "chain_id_hex": "00" * 32,
+            "chain_height": 10,
+            "chain_timestamp": 0,
+            "suite_id_02_active": False,
+            "tx_hex": tx_hex,
+            "utxo_set": [utxo_entry],
+        }
+
+    if test_id == "UTXO-05" or case_name == "SEQUENCE_INVALID":
+        prev_txid = bytes([0xC2]) * 32
+        tx_hex = build_tx_hex(
+            version=1,
+            tx_nonce=1,
+            inputs=[
+                {
+                    "prev_txid": prev_txid,
+                    "prev_vout": 0,
+                    "script_sig": b"",
+                    "sequence": 0xFFFF_FFFF,
+                }
+            ],
+            outputs=[{"value": 1, "covenant_type": CORE_P2PK, "covenant_data": bytes([0x01]) + bytes(32)}],
+            locktime=0,
+            witnesses=[{"suite_id": SUITE_ID_SENTINEL, "pubkey": b"", "sig": b""}],
+        )
+        utxo_entry = {
+            "txid": prev_txid.hex(),
+            "vout": 0,
+            "value": 2,
+            "covenant_type": CORE_TIMELOCK_V1,
+            "covenant_data": timelock_data(0).hex(),
+            "creation_height": 0,
+            "created_by_coinbase": False,
+        }
+        return {
+            "chain_id_hex": "00" * 32,
+            "chain_height": 10,
+            "chain_timestamp": 0,
+            "suite_id_02_active": False,
+            "tx_hex": tx_hex,
+            "utxo_set": [utxo_entry],
+        }
+
+    if test_id == "UTXO-06" or case_name == "ANCHOR_NONZERO_VALUE":
+        prev_txid = bytes([0xC3]) * 32
+        tx_hex = build_tx_hex(
+            version=1,
+            tx_nonce=1,
+            inputs=[
+                {
+                    "prev_txid": prev_txid,
+                    "prev_vout": 0,
+                    "script_sig": b"",
+                    "sequence": 1,
+                }
+            ],
+            outputs=[{"value": 1, "covenant_type": CORE_ANCHOR, "covenant_data": b"\xAA"}],
+            locktime=0,
+            witnesses=[{"suite_id": SUITE_ID_SENTINEL, "pubkey": b"", "sig": b""}],
+        )
+        utxo_entry = {
+            "txid": prev_txid.hex(),
+            "vout": 0,
+            "value": 2,
+            "covenant_type": CORE_TIMELOCK_V1,
+            "covenant_data": timelock_data(0).hex(),
+            "creation_height": 0,
+            "created_by_coinbase": False,
+        }
+        return {
+            "chain_id_hex": "00" * 32,
+            "chain_height": 10,
+            "chain_timestamp": 0,
+            "suite_id_02_active": False,
+            "tx_hex": tx_hex,
+            "utxo_set": [utxo_entry],
+        }
+
+    if test_id == "UTXO-07" or case_name == "COVENANT_UNKNOWN_TYPE":
+        unknown_type = parse_int(ctx.get("unknown_covenant_type", 0x0200))
+        prev_txid = bytes([0xC4]) * 32
+        tx_hex = build_tx_hex(
+            version=1,
+            tx_nonce=1,
+            inputs=[
+                {
+                    "prev_txid": prev_txid,
+                    "prev_vout": 0,
+                    "script_sig": b"",
+                    "sequence": 1,
+                }
+            ],
+            outputs=[{"value": 1, "covenant_type": unknown_type, "covenant_data": b"\x01"}],
+            locktime=0,
+            witnesses=[{"suite_id": SUITE_ID_SENTINEL, "pubkey": b"", "sig": b""}],
+        )
+        utxo_entry = {
+            "txid": prev_txid.hex(),
+            "vout": 0,
+            "value": 2,
+            "covenant_type": CORE_TIMELOCK_V1,
+            "covenant_data": timelock_data(0).hex(),
+            "creation_height": 0,
+            "created_by_coinbase": False,
+        }
+        return {
+            "chain_id_hex": "00" * 32,
+            "chain_height": 10,
+            "chain_timestamp": 0,
+            "suite_id_02_active": False,
+            "tx_hex": tx_hex,
+            "utxo_set": [utxo_entry],
+        }
+
+    if test_id == "UTXO-08" or case_name == "COINBASE_IMMATURE":
+        prev_txid = bytes([0xC5]) * 32
+        chain_height = parse_int(ctx.get("chain_height", 50))
+        creation_height = parse_int(ctx.get("creation_height", 1))
+        tx_hex = build_tx_hex(
+            version=1,
+            tx_nonce=1,
+            inputs=[
+                {
+                    "prev_txid": prev_txid,
+                    "prev_vout": 0,
+                    "script_sig": b"",
+                    "sequence": 1,
+                }
+            ],
+            outputs=[{"value": 1, "covenant_type": CORE_P2PK, "covenant_data": bytes([0x01]) + bytes(32)}],
+            locktime=0,
+            witnesses=[{"suite_id": SUITE_ID_SENTINEL, "pubkey": b"", "sig": b""}],
+        )
+        utxo_entry = {
+            "txid": prev_txid.hex(),
+            "vout": 0,
+            "value": 2,
+            "covenant_type": CORE_TIMELOCK_V1,
+            "covenant_data": timelock_data(0).hex(),
+            "creation_height": creation_height,
+            "created_by_coinbase": True,
+        }
+        return {
+            "chain_id_hex": "00" * 32,
+            "chain_height": chain_height,
             "chain_timestamp": 0,
             "suite_id_02_active": False,
             "tx_hex": tx_hex,

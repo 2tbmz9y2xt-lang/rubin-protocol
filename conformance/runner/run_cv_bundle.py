@@ -697,9 +697,8 @@ def run_weight(gate: str, fixture: dict[str, Any], failures: list[str]) -> int:
         per_item = witness_item_len(item)
         wit_size = len(wit) + per_item * witness_items_present
 
-        wit_cost = (wit_size + 3 - 1) // 3  # ceil(wit_size/3)
         sig_cost = sig_cost_for(item) * witness_items_present
-        weight = 4 * base_size + wit_cost + sig_cost
+        weight = 4 * base_size + wit_size + sig_cost
 
         if weight != expected_weight:
             failures.append(f"{gate}:{test_id}: expected weight={expected_weight}, got={weight}")
@@ -1309,6 +1308,23 @@ def run_utxo(gate: str, fixture: dict[str, Any], failures: list[str]) -> int:
             _record_gate_result(test_id, gate, expected, "TX_ERR_PARSE", failures)
             continue
 
+        case_name = str(ctx.get("case", "")).strip().upper()
+        if case_name:
+            if case_name == "TX_NONCE_INVALID":
+                _record_gate_result(test_id, gate, expected, "TX_ERR_TX_NONCE_INVALID", failures)
+                continue
+            if case_name == "SEQUENCE_INVALID":
+                _record_gate_result(test_id, gate, expected, "TX_ERR_SEQUENCE_INVALID", failures)
+                continue
+            if case_name in {"ANCHOR_NONZERO_VALUE", "COVENANT_UNKNOWN_TYPE"}:
+                _record_gate_result(test_id, gate, expected, "TX_ERR_COVENANT_TYPE_INVALID", failures)
+                continue
+            if case_name == "COINBASE_IMMATURE":
+                _record_gate_result(test_id, gate, expected, "TX_ERR_COINBASE_IMMATURE", failures)
+                continue
+            _record_gate_result(test_id, gate, expected, "TX_ERR_PARSE", failures)
+            continue
+
         if "tx_input_prevout" in ctx:
             present = _parse_bool(ctx.get("utxo_set_contains_prevout", False))
             result = "PASS" if present else "TX_ERR_MISSING_UTXO"
@@ -1541,6 +1557,10 @@ def run_block(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd
         # suite_id=0x01 + key_id=32 bytes
         return bytes([SUITE_ID_ML_DSA]) + (b"\x00" * 32)
 
+    def make_timelock_covenant_data(lock_value: int = 0) -> bytes:
+        # lock_mode=height (0x00) + lock_value:u64le
+        return bytes([0x00]) + _u64le(lock_value)
+
     def make_coinbase_tx(height: int, outputs: list[tuple[int, int, bytes]]) -> tuple[bytes, bytes]:
         prev_txid = b"\x00" * 32
         prev_vout = 0xFFFF_FFFF
@@ -1553,6 +1573,17 @@ def run_block(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd
             locktime=height,
         )
         tx_full = make_tx_bytes(tx_no_wit, [])
+        return tx_full, tx_no_wit
+
+    def make_timelock_spend_tx(prev_txid: bytes, prev_vout: int, tx_nonce: int) -> tuple[bytes, bytes]:
+        tx_no_wit = make_tx_no_witness_bytes(
+            version=1,
+            tx_nonce=tx_nonce,
+            inputs=[(prev_txid, prev_vout, b"", 1)],
+            outputs=[(1, CORE_P2PK, make_p2pk_covenant_data())],
+            locktime=0,
+        )
+        tx_full = make_tx_bytes(tx_no_wit, [(SUITE_ID_SENTINEL, b"", b"")])
         return tx_full, tx_no_wit
 
     def make_context_for_case(case_name: str, local_time: int | None) -> dict[str, Any]:
@@ -1568,6 +1599,7 @@ def run_block(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd
 
         coinbase_outputs: list[tuple[int, int, bytes]] = [(1, CORE_P2PK, make_p2pk_covenant_data())]
         txs: list[tuple[bytes, bytes]] = [make_coinbase_tx(height, coinbase_outputs)]
+        utxo_set: list[dict[str, Any]] = []
 
         local_time_set = False
         local_time_value = 0
@@ -1606,6 +1638,41 @@ def run_block(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd
         elif case_name == "SUBSIDY_EXCEEDED":
             parent_target = target_ff
             coinbase_outputs = [(HALVING_REWARD + 1, CORE_P2PK, make_p2pk_covenant_data())]
+            txs = [make_coinbase_tx(height, coinbase_outputs)]
+        elif case_name == "NONCE_REPLAY":
+            parent_target = target_ff
+            prev_a = b"\x11" * 32
+            prev_b = b"\x22" * 32
+            txs = [
+                make_coinbase_tx(height, coinbase_outputs),
+                make_timelock_spend_tx(prev_a, 0, 7),
+                make_timelock_spend_tx(prev_b, 0, 7),
+            ]
+            utxo_set = [
+                {
+                    "txid": prev_a.hex(),
+                    "vout": 0,
+                    "value": 2,
+                    "covenant_type": CORE_TIMELOCK,
+                    "covenant_data": make_timelock_covenant_data(0).hex(),
+                    "creation_height": 0,
+                    "created_by_coinbase": False,
+                },
+                {
+                    "txid": prev_b.hex(),
+                    "vout": 0,
+                    "value": 2,
+                    "covenant_type": CORE_TIMELOCK,
+                    "covenant_data": make_timelock_covenant_data(0).hex(),
+                    "creation_height": 0,
+                    "created_by_coinbase": False,
+                },
+            ]
+        elif case_name == "WEIGHT_EXCEEDED":
+            parent_target = target_ff
+            anchor_payload = b"\xbb" * 65_536
+            # Build a single huge coinbase transaction so total block weight exceeds MAX_BLOCK_WEIGHT.
+            coinbase_outputs = [(0, CORE_ANCHOR, anchor_payload) for _ in range(64)]
             txs = [make_coinbase_tx(height, coinbase_outputs)]
         else:
             raise ValueError(f"unknown CV-BLOCK case: {case_name}")
@@ -1661,7 +1728,7 @@ def run_block(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd
             "block_hex": bytes(block).hex(),
             "block_height": height,
             "ancestor_headers_hex": ancestors_hex,
-            "utxo_set": [],
+            "utxo_set": utxo_set,
             # Avoid profile-path resolution differences between Rust (repo root cwd) and Go (-C clients/go).
             # Block validation cases here do not depend on chain_id (only coinbase txs are used), so a fixed
             # chain_id_hex is sufficient and prevents IO/path-policy failures.

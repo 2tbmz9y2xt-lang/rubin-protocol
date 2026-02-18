@@ -1,7 +1,7 @@
 version: "1.1"
 gate: CV-BLOCK
 status: PASS
-description: "Block validation via apply-block CLI (linkage, target/pow, merkle, timestamp bounds, anchor caps, coinbase rules, subsidy bound)"
+description: "Block validation via apply-block CLI (linkage, target/pow, merkle, timestamp bounds, nonce replay, weight/anchor caps, coinbase rules, subsidy bound)"
 tests:
   - id: BLOCK-01
     title: "Invalid prev_block_hash => BLOCK_ERR_LINKAGE_INVALID"
@@ -59,3 +59,14 @@ tests:
     expected_error: BLOCK_ERR_SUBSIDY_EXCEEDED
     consensus: true
 
+  - id: BLOCK-10
+    title: "Duplicate non-coinbase tx_nonce in one block => TX_ERR_NONCE_REPLAY"
+    context: { case: NONCE_REPLAY }
+    expected_error: TX_ERR_NONCE_REPLAY
+    consensus: true
+
+  - id: BLOCK-11
+    title: "Block total weight exceeded => BLOCK_ERR_WEIGHT_EXCEEDED"
+    context: { case: WEIGHT_EXCEEDED }
+    expected_error: BLOCK_ERR_WEIGHT_EXCEEDED
+    consensus: true

@@ -1,7 +1,7 @@
 version: "1.1"
 gate: CV-UTXO
 status: PASS
-description: "UTXO lookup, missing/malformed spend, duplicate outpoint, value conservation"
+description: "UTXO lookup, nonce/sequence constraints, covenant type checks, coinbase maturity, value conservation"
 tests:
   - id: UTXO-01
     title: "Spend of missing outpoint rejected"
@@ -33,4 +33,42 @@ tests:
       sum_outputs: 101
       covenant_type: CORE_P2PK
     expected_error: TX_ERR_VALUE_CONSERVATION
+    consensus: true
+
+  - id: UTXO-04
+    title: "Non-coinbase tx_nonce=0 rejected"
+    context:
+      case: TX_NONCE_INVALID
+    expected_error: TX_ERR_TX_NONCE_INVALID
+    consensus: true
+
+  - id: UTXO-05
+    title: "Non-coinbase sequence=0xffffffff rejected"
+    context:
+      case: SEQUENCE_INVALID
+    expected_error: TX_ERR_SEQUENCE_INVALID
+    consensus: true
+
+  - id: UTXO-06
+    title: "CORE_ANCHOR output with non-zero value rejected"
+    context:
+      case: ANCHOR_NONZERO_VALUE
+    expected_error: TX_ERR_COVENANT_TYPE_INVALID
+    consensus: true
+
+  - id: UTXO-07
+    title: "Unknown covenant_type rejected"
+    context:
+      case: COVENANT_UNKNOWN_TYPE
+      unknown_covenant_type: 0x0200
+    expected_error: TX_ERR_COVENANT_TYPE_INVALID
+    consensus: true
+
+  - id: UTXO-08
+    title: "Coinbase immature spend rejected"
+    context:
+      case: COINBASE_IMMATURE
+      chain_height: 50
+      creation_height: 1
+    expected_error: TX_ERR_COINBASE_IMMATURE
     consensus: true
