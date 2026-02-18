@@ -34,7 +34,7 @@ def run_result(client: ClientCmd, argv: list[str]) -> subprocess.CompletedProces
 
     # Hard timeout prevents indefinite hangs (e.g., toolchain issues). Keep generous
     # because the first invocation may compile.
-    timeout_s = int(os.environ.get("RUBIN_CONFORMANCE_CMD_TIMEOUT_S", "10"))
+    timeout_s = int(os.environ.get("RUBIN_CONFORMANCE_CMD_TIMEOUT_S", "900"))
 
     cmd = client.argv_prefix + argv
     try:
@@ -47,12 +47,16 @@ def run_result(client: ClientCmd, argv: list[str]) -> subprocess.CompletedProces
             env=env,
             timeout=timeout_s,
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout if isinstance(e.stdout, str) else ""
+        err = e.stderr if isinstance(e.stderr, str) else ""
+        if err and not err.endswith("\n"):
+            err += "\n"
         return subprocess.CompletedProcess(
             args=cmd,
             returncode=124,
-            stdout="",
-            stderr=f"TIMEOUT after {timeout_s}s\ncmd: {' '.join(cmd)}\n",
+            stdout=out,
+            stderr=err + f"TIMEOUT after {timeout_s}s\ncmd: {' '.join(cmd)}\n",
         )
 
 
@@ -2040,25 +2044,61 @@ def main() -> int:
             continue
         gate_map[name] = Path(file)
 
-    rust_prefix: list[str] = [
-        "cargo",
-        "run",
-        "-q",
-        "--manifest-path",
-        "clients/rust/Cargo.toml",
-    ]
+    # Build the node CLIs once and invoke the binaries directly.
+    #
+    # Rationale:
+    # - `cargo run` / `go run` spawn temp executables and can trigger repeated platform
+    #   security validation. Prebuilding avoids repeated compile/exec overhead.
+    rust_build: list[str] = ["cargo", "build", "-q", "--manifest-path", "clients/rust/Cargo.toml"]
     if os.environ.get("RUBIN_CONFORMANCE_RUST_NO_DEFAULT", "").strip() not in ("", "0", "false", "False"):
-        rust_prefix.append("--no-default-features")
+        rust_build.append("--no-default-features")
     rust_features = os.environ.get("RUBIN_CONFORMANCE_RUST_FEATURES", "").strip()
     if rust_features:
-        rust_prefix.extend(["--features", rust_features])
-    rust_prefix.extend(["-p", "rubin-node", "--"])
+        rust_build.extend(["--features", rust_features])
+    rust_build.extend(["-p", "rubin-node"])
 
-    go_prefix: list[str] = ["go", "-C", "clients/go", "run"]
+    p = subprocess.run(
+        rust_build,
+        cwd=str(repo_root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if p.returncode != 0:
+        print("rust build failed:", file=sys.stderr)
+        print(p.stderr.strip(), file=sys.stderr)
+        return 2
+
+    rust_bin = (repo_root / "clients/rust/target/debug/rubin-node").resolve()
+    if not rust_bin.exists():
+        print(f"rust binary not found: {rust_bin}", file=sys.stderr)
+        return 2
+    rust_prefix: list[str] = [str(rust_bin)]
+
     go_tags = os.environ.get("RUBIN_CONFORMANCE_GO_TAGS", "").strip()
+    go_bin_dir = (repo_root / "clients/go/target").resolve()
+    go_bin_dir.mkdir(parents=True, exist_ok=True)
+    go_bin = (go_bin_dir / "rubin-node").resolve()
+    go_build: list[str] = ["go", "-C", "clients/go", "build", "-o", str(go_bin)]
     if go_tags:
-        go_prefix.extend(["-tags", go_tags])
-    go_prefix.append("./node")
+        go_build.extend(["-tags", go_tags])
+    go_build.append("./node")
+
+    p = subprocess.run(
+        go_build,
+        cwd=str(repo_root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if p.returncode != 0:
+        print("go build failed:", file=sys.stderr)
+        print(p.stderr.strip(), file=sys.stderr)
+        return 2
+    if not go_bin.exists():
+        print(f"go binary not found: {go_bin}", file=sys.stderr)
+        return 2
+    go_prefix: list[str] = [str(go_bin)]
 
     rust = ClientCmd(name="rust", cwd=repo_root, argv_prefix=rust_prefix)
     go = ClientCmd(name="go", cwd=repo_root, argv_prefix=go_prefix)
