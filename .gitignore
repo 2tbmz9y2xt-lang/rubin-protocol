@@ -21,6 +21,9 @@ clients/rust/cargo_audit.json
 # Local analysis outputs
 analysis/
 
+# Node tooling (spec annotator)
+node_modules/
+
 # Local runtime env files
 operational/systemd/rubin-node.env
 
