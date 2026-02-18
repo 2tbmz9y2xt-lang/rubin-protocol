@@ -62,11 +62,15 @@ Development status note (non-normative):
 - `SUBSIDY_HALVING_INTERVAL = 210_000`
 - `MAX_SUPPLY = 2_100_000_000_000_000`
 
-Non-normative note (emission schedule): the discrete halving schedule over 34 epochs
-(epoch 0..33) yields a theoretical maximum emission of `2_099_999_997_690_000` base
-units, which is `2_310_000` base units below `MAX_SUPPLY`. Epoch 32 subsidy = 1 base
-unit (last non-zero); epoch 33+ = 0. Genesis coinbase (height 0) has zero outputs —
-no premine; emission begins at block 1. Full subsidy formula: §4.5.
+Non-normative note (emission schedule and genesis intent): total supply target is
+100,000,000 RBN (`MAX_SUPPLY = 2_100_000_000_000_000` base units; 1 RBN = 21_000_000
+base units). The discrete halving schedule over 34 epochs (epoch 0..33) yields a
+theoretical maximum emission of `2_099_999_997_690_000` base units, which is `2_310_000`
+base units below `MAX_SUPPLY`. Epoch 32 subsidy = 1 base unit (last non-zero); epoch
+33+ = 0. Intended genesis: 1_000_000 RBN premine to a developer foundation fund split
+across 100 addresses with height-based timelocks; 1_000 additional unspendable outputs.
+Current v1.1 chain-instance profiles contain a placeholder genesis with 0 outputs
+pending final ceremony (see `spec/TODO_ECONOMICS_AND_GENESIS.md`). Full subsidy formula: §4.5.
 - `MAX_TX_INPUTS = 1_024`
 - `MAX_TX_OUTPUTS = 1_024`
 - `MAX_WITNESS_ITEMS = 1_024`
