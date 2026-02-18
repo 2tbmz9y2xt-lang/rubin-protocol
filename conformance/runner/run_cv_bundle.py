@@ -563,10 +563,9 @@ def run_htlc_anchor(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: Cli
             actual = "TX_ERR_PARSE"
         else:
             tx = _parse_tx_bytes(parse_hex(tx_hex))
-            # deployment gate: any create/spend of HTLC_V2 while inactive
-            creates_v2 = any(int(o["covenant_type"]) == 0x0102 for o in tx["outputs"])
+            # Deployment gate is spend-time only: spending a CORE_HTLC_V2 UTXO is invalid while inactive.
             spends_v2 = any(isinstance(e, dict) and _to_int(e.get("covenant_type", 0)) == 0x0102 for e in utxo_set)
-            if (creates_v2 or spends_v2) and not htlc_active:
+            if spends_v2 and not htlc_active:
                 actual = "TX_ERR_DEPLOYMENT_INACTIVE"
             else:
                 if not tx["witnesses"]:
@@ -592,29 +591,37 @@ def run_htlc_anchor(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: Cli
                         except ValueError:
                             actual = "TX_ERR_PARSE"
                         else:
-                            if kid == claim:
-                                # claim path requires exactly one matching ANCHOR envelope
-                                prefix = b"RUBINv1-htlc-preimage/"
-                                matching = []
-                                for o in tx["outputs"]:
-                                    if int(o["covenant_type"]) != CORE_ANCHOR:
-                                        continue
-                                    data = o["covenant_data"]
-                                    if len(data) == 54 and data[: len(prefix)] == prefix:
-                                        matching.append(data)
-                                if len(matching) != 1:
-                                    actual = "TX_ERR_PARSE"
+                            # Path selection matches CANONICAL §4.1 item 6:
+                            # - |matching|>=2 => parse error
+                            # - |matching|=1 => claim path (requires claim key binding)
+                            # - |matching|=0 => refund path (requires refund key binding + timelock)
+                            prefix = b"RUBINv1-htlc-preimage/"
+                            matching = []
+                            for o in tx["outputs"]:
+                                if int(o["covenant_type"]) != CORE_ANCHOR:
+                                    continue
+                                data = o["covenant_data"]
+                                if len(data) == 54 and data[: len(prefix)] == prefix:
+                                    matching.append(data)
+
+                            if len(matching) >= 2:
+                                actual = "TX_ERR_PARSE"
+                            elif len(matching) == 1:
+                                preimage = matching[0][len(prefix) : 54]
+                                if _sha3_256(preimage) != hsh:
+                                    actual = "TX_ERR_SIG_INVALID"
+                                elif kid != claim:
+                                    actual = "TX_ERR_SIG_INVALID"
                                 else:
-                                    preimage = matching[0][len(prefix) : 54]
-                                    if _sha3_256(preimage) != hsh:
-                                        actual = "TX_ERR_SIG_INVALID"
-                                    else:
-                                        actual = "TX_ERR_SIG_INVALID"
-                            elif kid == refund:
-                                ok = chain_height >= lock_value if lock_mode == "height" else chain_ts >= lock_value
-                                actual = "TX_ERR_SIG_INVALID" if ok else "TX_ERR_TIMELOCK_NOT_MET"
+                                    # Reaches signature verification in real clients; we don't model signatures here.
+                                    actual = "TX_ERR_SIG_INVALID"
                             else:
-                                actual = "TX_ERR_SIG_INVALID"
+                                # Refund path
+                                if kid != refund:
+                                    actual = "TX_ERR_SIG_INVALID"
+                                else:
+                                    ok = chain_height >= lock_value if lock_mode == "height" else chain_ts >= lock_value
+                                    actual = "TX_ERR_SIG_INVALID" if ok else "TX_ERR_TIMELOCK_NOT_MET"
 
         _record_gate_result(test_id, gate, expected, actual, failures)
 

@@ -14,5 +14,7 @@ Testnet and mainnet MUST use canonical THRESHOLD=1916.
 
 | deployment_id | bit | start_height | timeout_height | signal_window | threshold | state_machine | feature_summary |
 |---|---:|---:|---:|---:|---:|---:|---|
-| `htlc_anchor_v1` | 0 | 100 | 50000 | 2016 | 1008 | v1.1-fsm | Enables CORE_HTLC_V2 (0x0102). Preimage delivered on-chain via CORE_ANCHOR envelope (prefix `RUBINv1-htlc-preimage/`, 54 bytes). Conformance: CV-HTLC-ANCHOR. |
 | `sig_slh_dsa_p2pk_v1` | 1 | 200 | 50000 | 2016 | 1008 | v1.1-fsm | Enables suite_id=0x02 (SLH-DSA-SHAKE-256f) for CORE_P2PK, CORE_HTLC_V1, CORE_VAULT_V1 spends. Conformance: CV-DEP DEP-01/DEP-05. |
+
+Devnet note (2026-02-18): `CORE_HTLC_V2` is implemented but intentionally **not scheduled**
+for activation in this devnet deployment table.

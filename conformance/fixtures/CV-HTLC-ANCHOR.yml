@@ -4,7 +4,7 @@ status: PASS
 description: "CORE_HTLC_V2: redeem via CORE_ANCHOR envelope (prefix+len), refund via timelock, deterministic errors"
 tests:
   - id: HTLC2-01
-    title: "Redeem FAIL: missing CORE_ANCHOR output => TX_ERR_PARSE"
+    title: "Redeem FAIL: missing matching CORE_ANCHOR envelope => TX_ERR_SIG_INVALID (falls through refund path, refund key mismatch)"
     context:
       chain_id_hex: "7dcf48a266788491e77bbb7b9c97ad6a2c89b882293dfaf3bdebeec62548cc00"
       chain_height: 600
@@ -18,11 +18,11 @@ tests:
           value: 1000
           covenant_type: 258
           covenant_data: "e2929f80ffdaaa51c427cbf42df6679013fddb1630bc28f234ca48692b35399200f401000000000000070fa1ab6fcc557ed14d42941f1967693048551eb9042a8d0a057afbd75e81e03333333333333333333333333333333333333333333333333333333333333333"
-    expected_error: TX_ERR_PARSE
+    expected_error: TX_ERR_SIG_INVALID
     consensus: true
 
   - id: HTLC2-02
-    title: "Redeem FAIL: CORE_ANCHOR wrong prefix => TX_ERR_PARSE"
+    title: "Redeem FAIL: CORE_ANCHOR wrong prefix (non-matching) => TX_ERR_SIG_INVALID (falls through refund path, refund key mismatch)"
     context:
       chain_id_hex: "7dcf48a266788491e77bbb7b9c97ad6a2c89b882293dfaf3bdebeec62548cc00"
       chain_height: 600
@@ -36,11 +36,11 @@ tests:
           value: 1000
           covenant_type: 258
           covenant_data: "e2929f80ffdaaa51c427cbf42df6679013fddb1630bc28f234ca48692b35399200f401000000000000070fa1ab6fcc557ed14d42941f1967693048551eb9042a8d0a057afbd75e81e03333333333333333333333333333333333333333333333333333333333333333"
-    expected_error: TX_ERR_PARSE
+    expected_error: TX_ERR_SIG_INVALID
     consensus: true
 
   - id: HTLC2-03
-    title: "Redeem FAIL: CORE_ANCHOR wrong total length (53 != 54) => TX_ERR_PARSE"
+    title: "Redeem FAIL: CORE_ANCHOR wrong total length (53 != 54, non-matching) => TX_ERR_SIG_INVALID (falls through refund path, refund key mismatch)"
     context:
       chain_id_hex: "7dcf48a266788491e77bbb7b9c97ad6a2c89b882293dfaf3bdebeec62548cc00"
       chain_height: 600
@@ -54,7 +54,7 @@ tests:
           value: 1000
           covenant_type: 258
           covenant_data: "e2929f80ffdaaa51c427cbf42df6679013fddb1630bc28f234ca48692b35399200f401000000000000070fa1ab6fcc557ed14d42941f1967693048551eb9042a8d0a057afbd75e81e03333333333333333333333333333333333333333333333333333333333333333"
-    expected_error: TX_ERR_PARSE
+    expected_error: TX_ERR_SIG_INVALID
     consensus: true
 
   - id: HTLC2-04
@@ -108,24 +108,6 @@ tests:
           value: 1000
           covenant_type: 258
           covenant_data: "e2929f80ffdaaa51c427cbf42df6679013fddb1630bc28f234ca48692b35399200f401000000000000070fa1ab6fcc557ed14d42941f1967693048551eb9042a8d0a057afbd75e81e03333333333333333333333333333333333333333333333333333333333333333"
-    expected_error: TX_ERR_DEPLOYMENT_INACTIVE
-    consensus: true
-
-  - id: HTLC2-07
-    title: "Pre-activation FAIL: creating CORE_HTLC_V2 output before deployment ACTIVE => TX_ERR_DEPLOYMENT_INACTIVE"
-    context:
-      chain_id_hex: "7dcf48a266788491e77bbb7b9c97ad6a2c89b882293dfaf3bdebeec62548cc00"
-      chain_height: 1
-      chain_timestamp: 1700000001
-      suite_id_02_active: false
-      htlc_v2_active: false
-      tx_hex: "01000000010000000000000001040404040404040404040404040404040404040404040404040404040404040400000000000000000001e803000000000000020169e2929f80ffdaaa51c427cbf42df6679013fddb1630bc28f234ca48692b35399200f401000000000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0000000001000000"
-      utxo_set:
-        - txid: "0404040404040404040404040404040404040404040404040404040404040404"
-          vout: 0
-          value: 1000
-          covenant_type: 1
-          covenant_data: "000000000000000000"
     expected_error: TX_ERR_DEPLOYMENT_INACTIVE
     consensus: true
 
