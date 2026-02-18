@@ -555,75 +555,59 @@ def run_htlc_anchor(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: Cli
             # narrative-only vector (e.g., HTLC2-10): skip execution but keep the gate runnable.
             continue
 
+        utxo_set = ctx.get("utxo_set", [])
+        if not isinstance(utxo_set, list) or not utxo_set or not isinstance(utxo_set[0], dict):
+            _record_gate_result(test_id, gate, expected, "TX_ERR_PARSE", failures)
+            continue
+
+        chain_id_hex = str(ctx.get("chain_id_hex", "")).strip()
         chain_height = _to_int(ctx.get("chain_height", 0))
         chain_ts = _to_int(ctx.get("chain_timestamp", 0))
+        suite_02 = _parse_bool(ctx.get("suite_id_02_active", False))
         htlc_active = _parse_bool(ctx.get("htlc_v2_active", True))
-        utxo_set = ctx.get("utxo_set", [])
-        if not isinstance(utxo_set, list) or not utxo_set:
-            actual = "TX_ERR_PARSE"
-        else:
-            tx = _parse_tx_bytes(parse_hex(tx_hex))
-            # Deployment gate is spend-time only: spending a CORE_HTLC_V2 UTXO is invalid while inactive.
-            spends_v2 = any(isinstance(e, dict) and _to_int(e.get("covenant_type", 0)) == 0x0102 for e in utxo_set)
-            if spends_v2 and not htlc_active:
-                actual = "TX_ERR_DEPLOYMENT_INACTIVE"
-            else:
-                if not tx["witnesses"]:
-                    actual = "TX_ERR_PARSE"
-                else:
-                    w0 = tx["witnesses"][0]
-                    if int(w0["suite_id"]) == SUITE_ID_SENTINEL:
-                        actual = "TX_ERR_SIG_ALG_INVALID"
-                    else:
-                        kid = _key_id_from_witness_item(w0)
-                        e0 = utxo_set[0] if isinstance(utxo_set[0], dict) else {}
-                        cd = parse_hex(e0.get("covenant_data", "")) if isinstance(e0, dict) else b""
-                        try:
-                            if len(cd) != 105:
-                                raise ValueError("bad len")
-                            hsh = cd[0:32]
-                            lock_mode = _parse_lock_mode(cd[32])
-                            lock_value = _u64_from_le8(cd[33:41])
-                            claim = cd[41:73]
-                            refund = cd[73:105]
-                            if claim == refund:
-                                raise ValueError("overlap")
-                        except ValueError:
-                            actual = "TX_ERR_PARSE"
-                        else:
-                            # Path selection matches CANONICAL §4.1 item 6:
-                            # - |matching|>=2 => parse error
-                            # - |matching|=1 => claim path (requires claim key binding)
-                            # - |matching|=0 => refund path (requires refund key binding + timelock)
-                            prefix = b"RUBINv1-htlc-preimage/"
-                            matching = []
-                            for o in tx["outputs"]:
-                                if int(o["covenant_type"]) != CORE_ANCHOR:
-                                    continue
-                                data = o["covenant_data"]
-                                if len(data) == 54 and data[: len(prefix)] == prefix:
-                                    matching.append(data)
 
-                            if len(matching) >= 2:
-                                actual = "TX_ERR_PARSE"
-                            elif len(matching) == 1:
-                                preimage = matching[0][len(prefix) : 54]
-                                if _sha3_256(preimage) != hsh:
-                                    actual = "TX_ERR_SIG_INVALID"
-                                elif kid != claim:
-                                    actual = "TX_ERR_SIG_INVALID"
-                                else:
-                                    # Reaches signature verification in real clients; we don't model signatures here.
-                                    actual = "TX_ERR_SIG_INVALID"
-                            else:
-                                # Refund path
-                                if kid != refund:
-                                    actual = "TX_ERR_SIG_INVALID"
-                                else:
-                                    ok = chain_height >= lock_value if lock_mode == "height" else chain_ts >= lock_value
-                                    actual = "TX_ERR_SIG_INVALID" if ok else "TX_ERR_TIMELOCK_NOT_MET"
+        e0 = utxo_set[0]
+        input_value = _to_int(e0.get("value", 0))
+        prevout_type = _to_int(e0.get("covenant_type", 0))
+        prevout_data_hex = str(e0.get("covenant_data", "")).strip()
 
-        _record_gate_result(test_id, gate, expected, actual, failures)
+        # Both nodes support the same verify flags.
+        argv = [
+            "verify",
+            "--tx-hex",
+            tx_hex,
+            "--input-index",
+            "0",
+            "--input-value",
+            str(input_value),
+            "--prevout-covenant-type",
+            str(prevout_type),
+            "--prevout-covenant-data-hex",
+            prevout_data_hex,
+            "--prevout-creation-height",
+            str(chain_height),
+            "--chain-height",
+            str(chain_height),
+            "--chain-timestamp",
+            str(chain_ts),
+        ]
+        if chain_id_hex:
+            argv.extend(["--chain-id-hex", chain_id_hex])
+        if suite_02:
+            argv.append("--suite-id-02-active")
+        if htlc_active:
+            argv.append("--htlc-v2-active")
+
+        pr = run_result(rust, argv)
+        pg = run_result(go, argv)
+
+        actual_r = "PASS" if pr.returncode == 0 else _extract_err_token(pr.stderr)
+        actual_g = "PASS" if pg.returncode == 0 else _extract_err_token(pg.stderr)
+
+        # Require cross-client parity and expected match.
+        if actual_r != actual_g:
+            failures.append(f"{gate}:{test_id}: rust/go mismatch: rust={actual_r} go={actual_g}")
+        _record_gate_result(test_id, gate, expected, actual_r, failures)
 
     return executed
 
