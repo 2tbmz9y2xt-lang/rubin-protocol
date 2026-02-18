@@ -159,8 +159,12 @@ Canonical wire lengths and key identifiers used by consensus:
 - `key_id` is computed as:
 
 ```
-key_id = SHA3-256(pubkey_wire)
+key_id = SHA3-256(pubkey)
 ```
+
+- Where `pubkey` is the **canonical wire value** of the witness public key for the selected `suite_id`
+  (e.g., exactly 2592 bytes for `ML-DSA-87`, exactly 64 bytes for `SLH-DSA-SHAKE-256f`).
+  The `suite_id` byte and any witness length prefixes are NOT included in `key_id` derivation.
 
 - `address_version = 0x00` for `ML-DSA-87` key binding.
 - `address_version = 0x01` for `SLH-DSA-SHAKE-256f` key binding.

@@ -12,13 +12,15 @@ Scope: Consensus key binding, identity fingerprints, and application-layer key l
    - signature over consensus `sighash`.
 2. `key_id` is canonicalized as:
 
-   `key_id = SHA3-256(pubkey_wire)`
+   `key_id = SHA3-256(pubkey)`
 
 3. `key_id` is always 32 bytes.
 4. Allowed key sizes:
    - ML-DSA-87: public key 2592 bytes, signature 4627 bytes exactly,
    - SLH-DSA-SHAKE-256f: public key 64 bytes, signature 1..`MAX_SLH_DSA_SIG_BYTES` bytes.
 5. L1-consensus MUST enforce exact public-key length for the selected `suite_id` and reject malformed encodings.
+6. `pubkey` is the canonical public-key wire value for the selected `suite_id` (raw key bytes only).
+   The `suite_id` byte and any witness length prefixes are NOT included in `key_id` derivation.
 
 ## 2. Address Binding Layer (Non-Consensus)
 
