@@ -17,6 +17,9 @@
    - `operational/RUBIN_OPERATIONAL_SECURITY_v1.1.md` updated: draft-stage governance applies only to integration stage; `freeze=READY` not evaluated.
 4. **Candidate wording eliminated where needed**
    - Replaced legacy “FROZEN_CANDIDATE / candidate artifact” language for main/test profiles.
+5. **P2P pre-freeze checklist closed (spec-level)**
+   - `spec/RUBIN_L1_P2P_PROTOCOL_v1.1.md` §8: anchorproof wire format (§6.3), compact headers negotiation (§5.4), and IPv6 scope filtering (§7.1) are marked [x].
+   - Light client `anchorproof` multi-peer confirmation is normatively specified in `spec/RUBIN_L1_LIGHT_CLIENT_SECURITY_v1.1.md` and referenced from CANONICAL §14.2.
 
 ## 2) Current state classification
 
@@ -40,6 +43,8 @@
    - Activate freeze criteria in operational appendix only after release governance switch.
 3. **Ongoing audit synchronization**
    - Keep this taxonomy reflected in future checklist/readme files as new profiles/deployment artifacts are added.
+4. **Cross-client P2P interop execution**
+   - The spec items are closed, but the remaining operational step is to execute and record Go↔Rust interop checks for `version`/`verack`, `getheaders`/`compacthdr`, and `getanchorproof`/`anchorproof` flows before any testnet freeze.
 
 ## 4) Decision needed
 
