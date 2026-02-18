@@ -1,7 +1,7 @@
 # RUBIN L1 Chain Instance Profile: DEVNET v1.1
 
 Status: DEVELOPMENT (NON-CONSENSUS)
-Date: 2026-02-16
+Date: 2026-02-18
 Purpose: publish deterministic chain-instance fields for local/dev deployments while preserving core consensus compatibility with v1.1.
 
 Status interpretation: see `operational/RUBIN_OPERATIONAL_SECURITY_v1.1.md §1.1`.
@@ -21,11 +21,9 @@ This file is **not** a production freeze and does not authorize any testnet/main
 
 These values are for local development and CI parity checks. Public networks MUST publish their own concrete chain-instance profile.
 
-- `genesis_header_bytes` (hex, `BlockHeaderBytes(genesis_header)`):
-  `01000000000000000000000000000000000000000000000000000000000000000000000024687b35a5bef7ae62cd384e711c835ca57814f6f9730d2a9a2e7fcb280f58a500f1536500000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000002`
+- `genesis_header_bytes` (hex, `BlockHeaderBytes(genesis_header)`): `01000000000000000000000000000000000000000000000000000000000000000000000024687b35a5bef7ae62cd384e711c835ca57814f6f9730d2a9a2e7fcb280f58a500f1536500000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000002`
 
-- `genesis_tx_bytes` (hex, `TxBytes(genesis_coinbase_tx)`):
-  `010000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff000000000000`
+- `genesis_tx_bytes` (hex, `TxBytes(genesis_coinbase_tx)`): `010000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff000000000000`
 
 Derivation:
 
