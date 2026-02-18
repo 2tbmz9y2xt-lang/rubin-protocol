@@ -1,0 +1,73 @@
+version: "1.1"
+gate: CV-WEIGHT
+status: PASS
+description: "Consensus transaction weight computation with witness discount divisor (WITNESS_DISCOUNT_DIVISOR=3) and deterministic cross-client parity"
+tests:
+  - id: WEIGHT-01
+    title: "Minimal 1-in/0-out sentinel witness"
+    context:
+      input_count: 1
+      output_count: 0
+      witness_count: 1
+      witness_items_present: 1
+      witness_item:
+        suite_id: 0x00
+        pubkey_length: 0
+        sig_length: 0
+    expected_weight: 238
+    consensus: true
+
+  - id: WEIGHT-02
+    title: "Minimal 1-in/1-out sentinel witness"
+    context:
+      input_count: 1
+      output_count: 1
+      witness_count: 1
+      witness_items_present: 1
+      witness_item:
+        suite_id: 0x00
+        pubkey_length: 0
+        sig_length: 0
+    expected_weight: 282
+    consensus: true
+
+  - id: WEIGHT-03
+    title: "Key-based 1-in/1-out ML-DSA witness canonical lengths"
+    context:
+      input_count: 1
+      output_count: 1
+      witness_count: 1
+      witness_items_present: 1
+      witness_item:
+        suite_id: 0x01
+        pubkey_length: 2592
+        sig_length: 4627
+    expected_weight: 2697
+    consensus: true
+
+  - id: WEIGHT-04
+    title: "New suite_id with verify_cost=24 (deployment-introduced algorithm, informational)"
+    kind: informational
+    consensus: false
+    description: >
+      Documents how weight is computed for a hypothetical new suite_id=0x03
+      with verify_cost=24 (declared via deployment table per CRYPTO_AGILITY §6.3).
+      Weight formula: 4*base_size + wit_size + (1 * verify_cost).
+      This vector is NOT a consensus test for v1.1 (suite_id=0x03 is undefined).
+      It serves as a template for implementers adding new algorithm support.
+    context:
+      input_count: 1
+      output_count: 1
+      witness_count: 1
+      witness_items_present: 1
+      witness_item:
+        suite_id: 0x03
+        pubkey_length: 897
+        sig_length: 690
+        verify_cost: 24
+    note: >
+      base_size = 10 (header) + 41 (input) + 44 (output) = 95 bytes (approx).
+      wit_size = 1 (count) + 1 (suite_id) + 2 (pubkey_len) + 897 + 2 (sig_len) + 690 = 1593 bytes.
+      sig_cost = 1 * 24 = 24.
+      weight = 4*95 + 1593 + 24 = 1997 (illustrative — exact value depends on full serialization).
+    spec_ref: "CRYPTO_AGILITY §6.3, CANONICAL §11"
