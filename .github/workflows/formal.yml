@@ -23,7 +23,7 @@ jobs:
         with:
           repository: 2tbmz9y2xt-lang/rubin-formal
           path: rubin-formal
-          ref: f832af29817affaf2d703360f7b12b99cdbffa82
+          ref: 442a9c50094c2e353725b734623d94e8671e7853
           ssh-key: ${{ secrets.RUBIN_FORMAL_DEPLOY_KEY }}
           persist-credentials: false
 
