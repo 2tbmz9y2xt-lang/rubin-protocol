@@ -30,6 +30,12 @@ Provide a schedule CSV with exactly 100 rows:
 
 and one constant `recovery_key_id_unspendable_hex` (bytes32 hex) shared by all outputs.
 
+Generate a skeleton schedule (no secrets; owner_key_id left empty):
+
+```bash
+python3 scripts/genesis/gen_dev_fund_schedule_v1_1.py --out /tmp/dev_fund_schedule.csv
+```
+
 ```bash
 python3 scripts/genesis/build_genesis_v1_1.py \
   --schedule-csv operational/dev_fund_schedule.csv \
@@ -54,4 +60,3 @@ python3 scripts/genesis/build_genesis_v1_1.py \
   --schedule-csv operational/dev_fund_schedule.csv \
   --recovery-key-id-unspendable-hex <bytes32hex>
 ```
-
