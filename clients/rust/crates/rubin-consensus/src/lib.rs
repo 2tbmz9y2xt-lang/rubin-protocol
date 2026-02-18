@@ -1626,12 +1626,16 @@ mod tests {
     #[test]
     fn apply_tx_rejects_missing_utxo() {
         let p = TestProvider;
+        // Use a valid 33-byte P2PK covenant_data for the output so output
+        // covenant validation passes; the UTXO lookup should fail first.
+        let dummy_key_id = p.sha3_256(&vec![0x11u8; ML_DSA_PUBKEY_BYTES]).unwrap();
+        let valid_p2pk_data = [vec![SUITE_ID_ML_DSA], dummy_key_id.to_vec()].concat();
         let tx = make_apply_tx_tx(
             vec![make_apply_tx_input([1u8; 32], 0)],
             vec![TxOutput {
                 value: 10,
                 covenant_type: CORE_P2PK,
-                covenant_data: Vec::new(),
+                covenant_data: valid_p2pk_data,
             }],
             vec![WitnessItem {
                 suite_id: SUITE_ID_ML_DSA,
@@ -1709,12 +1713,16 @@ mod tests {
             CORE_P2PK,
             [vec![SUITE_ID_ML_DSA], key_id.to_vec()].concat(),
         );
+        // Output value > input: value_conservation must fire.
+        // Use a valid P2PK covenant_data so output validation passes first.
+        let out_key_id = p.sha3_256(&[0x33u8; ML_DSA_PUBKEY_BYTES]).unwrap();
+        let valid_out_data = [vec![SUITE_ID_ML_DSA], out_key_id.to_vec()].concat();
         let tx = make_apply_tx_tx(
             vec![make_apply_tx_input(txid, 0)],
             vec![TxOutput {
                 value: 101,
                 covenant_type: CORE_P2PK,
-                covenant_data: Vec::new(),
+                covenant_data: valid_out_data,
             }],
             vec![WitnessItem {
                 suite_id: SUITE_ID_ML_DSA,
@@ -1748,12 +1756,15 @@ mod tests {
             covenant_type: CORE_P2PK,
             covenant_data: [vec![SUITE_ID_ML_DSA], key_id.to_vec()].concat(),
         };
+        // Output needs valid 33-byte P2PK covenant_data
+        let out_key_id = p.sha3_256(&vec![0x55u8; ML_DSA_PUBKEY_BYTES]).unwrap();
+        let valid_out_data = [vec![SUITE_ID_ML_DSA], out_key_id.to_vec()].concat();
         let tx = make_apply_tx_tx(
             vec![make_apply_tx_input(txid, 0)],
             vec![TxOutput {
                 value: 90,
                 covenant_type: CORE_P2PK,
-                covenant_data: Vec::new(),
+                covenant_data: valid_out_data,
             }],
             vec![WitnessItem {
                 suite_id: SUITE_ID_ML_DSA,
