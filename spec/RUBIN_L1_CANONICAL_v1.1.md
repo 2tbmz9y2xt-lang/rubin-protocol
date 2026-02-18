@@ -61,6 +61,12 @@ Development status note (non-normative):
 - `BLOCK_SUBSIDY_INITIAL = 50_0000_0000`
 - `SUBSIDY_HALVING_INTERVAL = 210_000`
 - `MAX_SUPPLY = 2_100_000_000_000_000`
+
+Non-normative note (emission schedule): the discrete halving schedule over 34 epochs
+(epoch 0..33) yields actual total emission of `2_099_999_997_690_000` satoshis
+(`20_999_999.97690000` coins), which is `2_310_000` satoshis below `MAX_SUPPLY`.
+Epoch 33 subsidy = `BLOCK_SUBSIDY_INITIAL >> 33 = 0` (zero; last non-zero is epoch 32 = 1 sat).
+Full subsidy formula: §4.5.
 - `MAX_TX_INPUTS = 1_024`
 - `MAX_TX_OUTPUTS = 1_024`
 - `MAX_WITNESS_ITEMS = 1_024`
