@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import os.path
 import subprocess
@@ -79,6 +81,40 @@ CORE_ANCHOR = 0x0002
 SUITE_ID_ML_DSA = 0x01
 SUITE_ID_SLH_DSA = 0x02
 SUITE_ID_SENTINEL = 0x00
+
+
+def _sha3_256(b: bytes) -> bytes:
+    return hashlib.sha3_256(b).digest()
+
+
+def _u16le(v: int) -> bytes:
+    return v.to_bytes(2, "little", signed=False)
+
+
+def _u32le(v: int) -> bytes:
+    return v.to_bytes(4, "little", signed=False)
+
+
+def _u64le(v: int) -> bytes:
+    return v.to_bytes(8, "little", signed=False)
+
+
+def _compact_size_encode(v: int) -> bytes:
+    if v < 0xFD:
+        return bytes([v])
+    if v <= 0xFFFF:
+        return bytes([0xFD]) + v.to_bytes(2, "little", signed=False)
+    if v <= 0xFFFFFFFF:
+        return bytes([0xFE]) + v.to_bytes(4, "little", signed=False)
+    return bytes([0xFF]) + v.to_bytes(8, "little", signed=False)
+
+
+def _extract_err_token(stderr: str) -> str:
+    normalized = stderr.replace(":", " ").replace(",", " ").replace("(", " ").replace(")", " ")
+    for tok in normalized.split():
+        if tok.startswith("BLOCK_ERR_") or tok.startswith("TX_ERR_"):
+            return tok
+    return stderr.strip() or "PASS"
 
 
 def _to_int(value: object) -> int:
@@ -740,11 +776,240 @@ def run_dep(gate: str, fixture: dict[str, Any], failures: list[str]) -> int:
     return executed
 
 
-def run_block(gate: str, fixture: dict[str, Any], failures: list[str]) -> int:
+def run_block(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd, failures: list[str]) -> int:
     tests = fixture.get("tests")
     if not isinstance(tests, list) or not tests:
         failures.append(f"{gate}: fixture has no tests")
         return 0
+
+    def make_tx_output_bytes(value: int, covenant_type: int, covenant_data: bytes) -> bytes:
+        out = bytearray()
+        out.extend(_u64le(value))
+        out.extend(_u16le(covenant_type))
+        out.extend(_compact_size_encode(len(covenant_data)))
+        out.extend(covenant_data)
+        return bytes(out)
+
+    def make_tx_no_witness_bytes(
+        *,
+        version: int,
+        tx_nonce: int,
+        inputs: list[tuple[bytes, int, bytes, int]],
+        outputs: list[tuple[int, int, bytes]],
+        locktime: int,
+    ) -> bytes:
+        out = bytearray()
+        out.extend(_u32le(version))
+        out.extend(_u64le(tx_nonce))
+        out.extend(_compact_size_encode(len(inputs)))
+        for prev_txid, prev_vout, script_sig, sequence in inputs:
+            if len(prev_txid) != 32:
+                raise ValueError("prev_txid must be 32 bytes")
+            out.extend(prev_txid)
+            out.extend(_u32le(prev_vout))
+            out.extend(_compact_size_encode(len(script_sig)))
+            out.extend(script_sig)
+            out.extend(_u32le(sequence))
+        out.extend(_compact_size_encode(len(outputs)))
+        for value, covenant_type, covenant_data in outputs:
+            out.extend(make_tx_output_bytes(value, covenant_type, covenant_data))
+        out.extend(_u32le(locktime))
+        return bytes(out)
+
+    def make_witness_section_bytes(witnesses: list[tuple[int, bytes, bytes]]) -> bytes:
+        out = bytearray()
+        out.extend(_compact_size_encode(len(witnesses)))
+        for suite_id, pubkey, sig in witnesses:
+            out.append(suite_id & 0xFF)
+            out.extend(_compact_size_encode(len(pubkey)))
+            out.extend(pubkey)
+            out.extend(_compact_size_encode(len(sig)))
+            out.extend(sig)
+        return bytes(out)
+
+    def make_tx_bytes(tx_no_witness: bytes, witnesses: list[tuple[int, bytes, bytes]]) -> bytes:
+        out = bytearray(tx_no_witness)
+        out.extend(make_witness_section_bytes(witnesses))
+        return bytes(out)
+
+    def txid_sha3_256(tx_no_witness: bytes) -> bytes:
+        return _sha3_256(tx_no_witness)
+
+    def merkle_root_from_txids(txids: list[bytes]) -> bytes:
+        if not txids:
+            raise ValueError("empty tx list")
+        level = [_sha3_256(b"\x00" + t) for t in txids]
+        while len(level) > 1:
+            nxt: list[bytes] = []
+            i = 0
+            while i < len(level):
+                if i + 1 == len(level):
+                    nxt.append(level[i])
+                    i += 1
+                    continue
+                nxt.append(_sha3_256(b"\x01" + level[i] + level[i + 1]))
+                i += 2
+            level = nxt
+        return level[0]
+
+    def header_bytes(
+        *,
+        version: int,
+        prev_hash: bytes,
+        merkle_root: bytes,
+        timestamp: int,
+        target: bytes,
+        nonce: int,
+    ) -> bytes:
+        if len(prev_hash) != 32 or len(merkle_root) != 32 or len(target) != 32:
+            raise ValueError("header fields must be 32 bytes")
+        out = bytearray()
+        out.extend(_u32le(version))
+        out.extend(prev_hash)
+        out.extend(merkle_root)
+        out.extend(_u64le(timestamp))
+        out.extend(target)
+        out.extend(_u64le(nonce))
+        if len(out) != 116:
+            raise AssertionError("header_bytes must be 116 bytes")
+        return bytes(out)
+
+    def header_hash(hdr_bytes: bytes) -> bytes:
+        return _sha3_256(hdr_bytes)
+
+    def make_p2pk_covenant_data() -> bytes:
+        # suite_id=0x01 + key_id=32 bytes
+        return bytes([SUITE_ID_ML_DSA]) + (b"\x00" * 32)
+
+    def make_coinbase_tx(height: int, outputs: list[tuple[int, int, bytes]]) -> tuple[bytes, bytes]:
+        prev_txid = b"\x00" * 32
+        prev_vout = 0xFFFF_FFFF
+        seq = 0xFFFF_FFFF
+        tx_no_wit = make_tx_no_witness_bytes(
+            version=1,
+            tx_nonce=0,
+            inputs=[(prev_txid, prev_vout, b"", seq)],
+            outputs=outputs,
+            locktime=height,
+        )
+        tx_full = make_tx_bytes(tx_no_wit, [])
+        return tx_full, tx_no_wit
+
+    def make_context_for_case(case_name: str, local_time: int | None) -> dict[str, Any]:
+        height = 1
+        base_parent_ts = 1_700_000_000
+        max_future_drift = 7_200
+
+        target_ff = b"\xff" * 32
+        target_00 = b"\x00" * 32
+
+        parent_target = target_ff
+        parent_ts = base_parent_ts
+
+        coinbase_outputs: list[tuple[int, int, bytes]] = [(1, CORE_P2PK, make_p2pk_covenant_data())]
+        txs: list[tuple[bytes, bytes]] = [make_coinbase_tx(height, coinbase_outputs)]
+
+        local_time_set = False
+        local_time_value = 0
+        want_ancestors = True
+
+        if case_name == "LINKAGE_INVALID":
+            want_ancestors = False
+        elif case_name == "TARGET_INVALID":
+            parent_target = target_ff
+        elif case_name == "POW_INVALID":
+            parent_target = target_00
+        elif case_name == "MERKLE_INVALID":
+            parent_target = target_ff
+        elif case_name == "ANCHOR_BYTES_EXCEEDED":
+            parent_target = target_ff
+            anchor_payload = b"\xaa" * 65_536
+            coinbase_outputs = [
+                (0, CORE_ANCHOR, anchor_payload),
+                (0, CORE_ANCHOR, anchor_payload),
+                (0, CORE_ANCHOR, anchor_payload),
+            ]
+            txs = [make_coinbase_tx(height, coinbase_outputs)]
+        elif case_name == "COINBASE_INVALID_TWO_COINBASE":
+            parent_target = target_ff
+            txs = [
+                make_coinbase_tx(height, coinbase_outputs),
+                make_coinbase_tx(height, coinbase_outputs),
+            ]
+        elif case_name == "TIMESTAMP_OLD":
+            parent_target = target_ff
+        elif case_name == "TIMESTAMP_FUTURE":
+            parent_target = target_ff
+            local_time_value = int(local_time or base_parent_ts)
+            local_time_set = True
+            parent_ts = local_time_value
+        elif case_name == "SUBSIDY_EXCEEDED":
+            parent_target = target_ff
+            coinbase_outputs = [(HALVING_REWARD + 1, CORE_P2PK, make_p2pk_covenant_data())]
+            txs = [make_coinbase_tx(height, coinbase_outputs)]
+        else:
+            raise ValueError(f"unknown CV-BLOCK case: {case_name}")
+
+        parent_hdr = header_bytes(
+            version=1,
+            prev_hash=b"\x00" * 32,
+            merkle_root=b"\x00" * 32,
+            timestamp=parent_ts,
+            target=parent_target,
+            nonce=0,
+        )
+        parent_hash = header_hash(parent_hdr)
+
+        txids = [txid_sha3_256(tx_no_wit) for _, tx_no_wit in txs]
+        merkle = merkle_root_from_txids(txids)
+
+        timestamp = parent_ts + 1
+        if case_name == "TIMESTAMP_OLD":
+            timestamp = parent_ts
+        if case_name == "TIMESTAMP_FUTURE" and local_time_set:
+            timestamp = local_time_value + max_future_drift + 1
+
+        target = parent_target
+        if case_name == "TARGET_INVALID":
+            target = target_00
+
+        prev_hash = parent_hash
+        if not want_ancestors:
+            prev_hash = b"\x00" * 32
+
+        hdr_merkle = merkle
+        if case_name == "MERKLE_INVALID":
+            hdr_merkle = b"\x00" * 32
+
+        cur_hdr = header_bytes(
+            version=1,
+            prev_hash=prev_hash,
+            merkle_root=hdr_merkle,
+            timestamp=timestamp,
+            target=target,
+            nonce=0,
+        )
+
+        block = bytearray()
+        block.extend(cur_hdr)
+        block.extend(_compact_size_encode(len(txs)))
+        for tx_full, _ in txs:
+            block.extend(tx_full)
+
+        ancestors_hex = [parent_hdr.hex()] if want_ancestors else []
+        return {
+            "block_hex": bytes(block).hex(),
+            "block_height": height,
+            "ancestor_headers_hex": ancestors_hex,
+            "utxo_set": [],
+            # Avoid profile-path resolution differences between Rust (repo root cwd) and Go (-C clients/go).
+            # Block validation cases here do not depend on chain_id (only coinbase txs are used), so a fixed
+            # chain_id_hex is sufficient and prevents IO/path-policy failures.
+            "chain_id_hex": "00" * 32,
+            "local_time": local_time_value,
+            "local_time_set": local_time_set,
+            "suite_id_02_active": False,
+        }
 
     executed = 0
     for t in tests:
@@ -758,149 +1023,64 @@ def run_block(gate: str, fixture: dict[str, Any], failures: list[str]) -> int:
             failures.append(f"{gate}:{test_id}: missing expected_code/expected_error")
             continue
 
-        executed += 1
         ctx = t.get("context")
         if not isinstance(ctx, dict):
             _record_gate_result(test_id, gate, expected, "BLOCK_ERR_PARSE", failures)
             continue
 
-        # Deterministic, single-condition checks mapped to fixture scenarios.
-        if "prev_block_hash" in ctx:
-            prev = str(ctx.get("prev_block_hash", "")).strip()
-            _record_gate_result(
-                test_id,
-                gate,
-                expected,
-                "BLOCK_ERR_LINKAGE_INVALID" if prev.endswith("0000000000000000000000000000000000000000000000000000000000000000") else "PASS",
-                failures,
-            )
+        case_name = str(ctx.get("case", "")).strip().upper()
+        if not case_name:
+            _record_gate_result(test_id, gate, expected, "BLOCK_ERR_PARSE", failures)
             continue
 
-        if isinstance(ctx.get("block_hash"), str) and "invalid" in str(ctx.get("block_hash")).lower():
-            _record_gate_result(test_id, gate, expected, "BLOCK_ERR_POW_INVALID", failures)
+        local_time = ctx.get("local_time")
+        try:
+            local_time_value = parse_int(local_time) if local_time is not None else None
+        except (TypeError, ValueError, OverflowError):
+            _record_gate_result(test_id, gate, expected, "BLOCK_ERR_PARSE", failures)
             continue
 
-        if "anchor_output" in ctx:
-            anchor = ctx.get("anchor_output")
-            if not isinstance(anchor, dict):
-                _record_gate_result(test_id, gate, expected, "TX_ERR_PARSE", failures)
-                continue
-            try:
-                anchor_len = parse_int(anchor.get("anchor_data_len", 0))
-            except (TypeError, ValueError, OverflowError):
-                _record_gate_result(test_id, gate, expected, "TX_ERR_PARSE", failures)
-                continue
-            _record_gate_result(
-                test_id,
-                gate,
-                expected,
-                "TX_ERR_COVENANT_TYPE_INVALID" if anchor_len > MAX_ANCHOR_PAYLOAD_SIZE else "PASS",
-                failures,
-            )
+        try:
+            context_obj = make_context_for_case(case_name, local_time_value)
+        except Exception as e:
+            failures.append(f"{gate}:{test_id}: runner error: failed to build case {case_name}: {e}")
             continue
 
-        if "anchor_block" in ctx:
-            anchor_block = ctx.get("anchor_block")
-            if not isinstance(anchor_block, dict):
-                _record_gate_result(test_id, gate, expected, "TX_ERR_PARSE", failures)
-                continue
-            try:
-                each_anchor_len = parse_int(anchor_block.get("each_anchor_len", 0))
-                outputs = parse_int(anchor_block.get("outputs", 0))
-                additional = parse_int(anchor_block.get("additional_payload_len", 0))
-            except (TypeError, ValueError, OverflowError):
-                _record_gate_result(test_id, gate, expected, "TX_ERR_PARSE", failures)
-                continue
-            total = each_anchor_len * outputs + additional
-            _record_gate_result(
-                test_id,
-                gate,
-                expected,
-                "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED" if total > MAX_ANCHOR_BYTES_PER_BLOCK else "PASS",
-                failures,
-            )
-            continue
+        tmp_path = ""
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
+                json.dump(context_obj, f)
+                tmp_path = f.name
 
-        if "sum_weight" in ctx:
-            try:
-                sum_weight = parse_int(ctx.get("sum_weight"))
-            except (TypeError, ValueError, OverflowError):
-                _record_gate_result(test_id, gate, expected, "BLOCK_ERR_WEIGHT_EXCEEDED", failures)
-                continue
-            _record_gate_result(
-                test_id,
-                gate,
-                expected,
-                "BLOCK_ERR_WEIGHT_EXCEEDED" if sum_weight > MAX_BLOCK_WEIGHT else "PASS",
-                failures,
-            )
-            continue
-
-        if "window" in ctx:
-            window = ctx.get("window")
-            if isinstance(window, dict):
-                target_old_hex = str(window.get("target_old_hex", "")).strip()
-                if target_old_hex:
-                    try:
-                        target_old = _hex_to_int(target_old_hex)
-                        t_old = parse_int(window.get("T_expected", 0))
-                        t_new = parse_int(window.get("T_actual", 0))
-                    except (TypeError, ValueError, OverflowError):
-                        _record_gate_result(test_id, gate, expected, "BLOCK_ERR_PARSE", failures)
-                        continue
-                    if target_old < 0 or t_old <= 0:
-                        _record_gate_result(test_id, gate, expected, "BLOCK_ERR_TARGET_INVALID", failures)
-                        continue
-                    adjusted = target_old * t_new // t_old if t_new is not None else target_old
-                    _ = min(adjusted, MAX_TARGET)
-                    _record_gate_result(test_id, gate, expected, "PASS", failures)
+            for side in ("rust", "go"):
+                client = rust if side == "rust" else go
+                p = run_result(client, ["apply-block", "--context-json", tmp_path])
+                if expected == "PASS":
+                    if p.returncode != 0:
+                        failures.append(
+                            f"{gate}:{test_id}: {side} expected PASS, exit={p.returncode} stderr={p.stderr.strip()}"
+                        )
+                    else:
+                        out = p.stdout.strip()
+                        if out != "OK":
+                            failures.append(f"{gate}:{test_id}: {side} expected OK, got={out}")
                     continue
 
-        if "expected_target" in ctx:
-            _record_gate_result(test_id, gate, expected, "BLOCK_ERR_TARGET_INVALID", failures)
-            continue
-
-        if "median_time" in ctx and "block_timestamp" in ctx:
-            median = parse_int(ctx.get("median_time", 0))
-            ts = parse_int(ctx.get("block_timestamp", 0))
-            _record_gate_result(test_id, gate, expected, "BLOCK_ERR_TIMESTAMP_OLD" if ts <= median else "PASS", failures)
-            continue
-
-        if {"local_time", "block_timestamp"}.issubset(ctx):
-            try:
-                local_time = parse_int(ctx.get("local_time"))
-                block_time = parse_int(ctx.get("block_timestamp"))
-                max_drift = parse_int(ctx.get("max_drift"))
-            except (TypeError, ValueError, OverflowError):
-                _record_gate_result(test_id, gate, expected, "BLOCK_ERR_PARSE", failures)
-                continue
-            _record_gate_result(
-                test_id,
-                gate,
-                expected,
-                "BLOCK_ERR_TIMESTAMP_FUTURE" if (block_time - local_time) > max_drift else "PASS",
-                failures,
-            )
-            continue
-
-        if "subsidy" in ctx:
-            subsidy = ctx.get("subsidy")
-            if not isinstance(subsidy, dict):
-                _record_gate_result(test_id, gate, expected, "BLOCK_ERR_PARSE", failures)
-                continue
-            try:
-                h0 = parse_int(subsidy.get("h_0"))
-                h209999 = parse_int(subsidy.get("h_209999"))
-                h210000 = parse_int(subsidy.get("h_210000"))
-                h420000 = parse_int(subsidy.get("h_420000"))
-            except (TypeError, ValueError, OverflowError):
-                _record_gate_result(test_id, gate, expected, "BLOCK_ERR_PARSE", failures)
-                continue
-            valid_schedule = h209999 == h0 and h210000 == h0 // 2 and h420000 == h0 // 4
-            _record_gate_result(test_id, gate, expected, "PASS" if valid_schedule else "BLOCK_ERR_MINTING", failures)
-            continue
-
-        _record_gate_result(test_id, gate, expected, "PASS", failures)
+                if p.returncode == 0:
+                    failures.append(f"{gate}:{test_id}: {side} expected {expected} but apply-block succeeded")
+                    continue
+                got = p.stderr.strip()
+                if expected not in got:
+                    failures.append(
+                        f"{gate}:{test_id}: {side} expected {expected}, got={_extract_err_token(got)} ({got})"
+                    )
+            executed += 2
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
     return executed
 
@@ -1103,7 +1283,7 @@ def main() -> int:
             checks += run_dep(gate, fixture, failures)
             continue
         if gate == "CV-BLOCK":
-            checks += run_block(gate, fixture, failures)
+            checks += run_block(gate, fixture, rust, go, failures)
             continue
         if gate == "CV-REORG":
             checks += run_reorg(gate, fixture, failures)

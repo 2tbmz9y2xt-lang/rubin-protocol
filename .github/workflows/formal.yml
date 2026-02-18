@@ -1,0 +1,40 @@
+name: formal (Lean 4)
+
+on:
+  pull_request:
+    paths:
+      - "formal/**"
+      - ".github/workflows/formal.yml"
+  push:
+    branches: ["main"]
+    paths:
+      - "formal/**"
+      - ".github/workflows/formal.yml"
+
+jobs:
+  lean4:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout rubin-protocol
+        uses: actions/checkout@v4
+
+      - name: Checkout rubin-formal
+        uses: actions/checkout@v4
+        with:
+          repository: 2tbmz9y2xt-lang/rubin-formal
+          path: rubin-formal
+          ref: a694fbcda0ff38be2ee93a7c513dc3412f91bc7f
+          ssh-key: ${{ secrets.RUBIN_FORMAL_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - name: Install elan (Lean toolchain)
+        run: |
+          set -euo pipefail
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Build rubin-formal
+        run: |
+          set -euo pipefail
+          cd rubin-formal
+          lake build

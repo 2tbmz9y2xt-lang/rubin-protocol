@@ -1,42 +1,80 @@
-version: "1.1"
-profile: "RUBIN_L1_CANONICAL_v1.1"
-status: "IN_PROGRESS"
-updated: "2026-02-16"
-execution_note: "Runner coverage is partial (CV-SIGHASH and CV-SIGCHECK). Mandatory gates are not yet fully executed by a unified runner."
+version: '1.1'
+profile: RUBIN_L1_CANONICAL_v1.1
+status: IN_PROGRESS
+updated: '2026-02-18'
+execution_note: Runner coverage is partial (CV-SIGHASH, CV-SIGCHECK). All mandatory and supplementary gates are registered.
+  CV-ANCHOR-RELAY is policy-only (non-consensus); marked as PENDING until runner support added.
 mandatory_gates:
-  - name: CV-COMPACTSIZE
-    file: "conformance/fixtures/CV-COMPACTSIZE.yml"
-    required: true
-    status: "PASS"
-  - name: CV-PARSE
-    file: "conformance/fixtures/CV-PARSE.yml"
-    required: true
-    status: "PASS"
-  - name: CV-SIGHASH
-    file: "conformance/fixtures/CV-SIGHASH.yml"
-    required: true
-    status: "PASS"
-  - name: CV-SIGCHECK
-    file: "conformance/fixtures/CV-SIGCHECK.yml"
-    required: true
-    status: "PASS"
-  - name: CV-BIND
-    file: "conformance/fixtures/CV-BIND.yml"
-    required: true
-    status: "PASS"
-  - name: CV-UTXO
-    file: "conformance/fixtures/CV-UTXO.yml"
-    required: true
-    status: "PASS"
-  - name: CV-DEP
-    file: "conformance/fixtures/CV-DEP.yml"
-    required: true
-    status: "PASS"
-  - name: CV-BLOCK
-    file: "conformance/fixtures/CV-BLOCK.yml"
-    required: true
-    status: "PASS"
-  - name: CV-REORG
-    file: "conformance/fixtures/CV-REORG.yml"
-    required: true
-    status: "PASS"
+- name: CV-COMPACTSIZE
+  file: conformance/fixtures/CV-COMPACTSIZE.yml
+  required: true
+  status: PASS
+- name: CV-PARSE
+  file: conformance/fixtures/CV-PARSE.yml
+  required: true
+  status: PASS
+- name: CV-SIGHASH
+  file: conformance/fixtures/CV-SIGHASH.yml
+  required: true
+  status: PASS
+- name: CV-SIGCHECK
+  file: conformance/fixtures/CV-SIGCHECK.yml
+  required: true
+  status: PASS
+- name: CV-BIND
+  file: conformance/fixtures/CV-BIND.yml
+  required: true
+  status: PASS
+- name: CV-UTXO
+  file: conformance/fixtures/CV-UTXO.yml
+  required: true
+  status: PASS
+- name: CV-DEP
+  file: conformance/fixtures/CV-DEP.yml
+  required: true
+  status: PASS
+- name: CV-BLOCK
+  file: conformance/fixtures/CV-BLOCK.yml
+  required: true
+  status: PASS
+- name: CV-REORG
+  file: conformance/fixtures/CV-REORG.yml
+  required: true
+  status: PASS
+- name: CV-FEES
+  file: conformance/fixtures/CV-FEES.yml
+  required: true
+  status: PASS
+  description: Fee/value conservation on CORE_TIMELOCK_V1 spends (3 vectors)
+  note: consensus
+- name: CV-HTLC
+  file: conformance/fixtures/CV-HTLC.yml
+  required: true
+  status: PASS
+  description: CORE_HTLC_V1 claim/refund/error paths (6 vectors)
+  note: consensus
+- name: CV-HTLC-ANCHOR
+  file: conformance/fixtures/CV-HTLC-ANCHOR.yml
+  required: true
+  status: PASS
+  description: CORE_HTLC_V2 anchor-envelope claim, refund, deployment gate (10 vectors). HTLC2-08/09/10 cover Q-048 prefix-check.
+  note: consensus
+- name: CV-VAULT
+  file: conformance/fixtures/CV-VAULT.yml
+  required: true
+  status: PASS
+  description: CORE_VAULT_V1 owner/recovery paths, spend_delay, legacy/extended forms (9 vectors)
+  note: consensus
+- name: CV-WEIGHT
+  file: conformance/fixtures/CV-WEIGHT.yml
+  required: true
+  status: PASS
+  description: Block weight formula, VERIFY_COST_ML_DSA/SLH_DSA accounting (3 vectors)
+  note: consensus
+- name: CV-ANCHOR-RELAY
+  file: conformance/fixtures/CV-ANCHOR-RELAY.yml
+  required: false
+  status: PENDING
+  description: Relay-level anchor payload caps (non-consensus policy). MAX_ANCHOR_PAYLOAD_RELAY=1024. 7 policy vectors + 1
+    consensus-vs-relay gap doc (RELAY-08). Closes H-002 DoS finding.
+  note: policy-only — relay/mempool enforcement, not block validity

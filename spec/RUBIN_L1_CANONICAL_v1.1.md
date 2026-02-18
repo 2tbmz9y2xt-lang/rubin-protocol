@@ -71,6 +71,7 @@ Development status note (non-normative):
 - `VERIFY_COST_SLH_DSA = 64`
 - `MAX_P2PK_COVENANT_DATA = 33`
 - `MAX_TIMELOCK_COVENANT_DATA = 9`
+- `MAX_VAULT_COVENANT_DATA = 81`
 - `MAX_RELAY_MSG_BYTES = 8_388_608`
 - `MIN_RELAY_FEE_RATE = 1` (non-consensus relay policy)
 
@@ -221,6 +222,8 @@ For each input, exactly one witness item corresponds to its authorization data b
 - For an input spending `CORE_HTLC_V1`, `script_sig_len` MUST be either:
   - `0` (refund path), or
   - `32` (claim path; `script_sig` carries the 32-byte preimage).
+- For an input spending `CORE_HTLC_V2`, `script_sig_len` MUST be `0`.
+  The preimage is delivered via a `CORE_ANCHOR` envelope output in the same transaction (see §3.6 and §4 rule 4a).
 
 For covenant types that do not require key-based authorization (`CORE_TIMELOCK_V1`),
 the corresponding witness item MUST be a sentinel:
@@ -249,6 +252,22 @@ Transaction syntax limits:
    - `suite_id = 0x01`: `sig_length = 4_627`;
    - `suite_id = 0x02`: `0 < sig_length ≤ MAX_SLH_DSA_SIG_BYTES`.
 5. `|witness.witnesses|` is bounded by protocol limits under the block weight constraints in §4.3.
+
+> **Non-normative note — effective maximum inputs per transaction (v1.1):**
+> The practical upper bound on inputs is determined by `MAX_WITNESS_BYTES_PER_TX = 100_000`
+> (relay policy, §1.2), not by `MAX_TX_INPUTS = 1_024` or `MAX_BLOCK_WEIGHT`.
+> With canonical v1.1 key sizes:
+> - `suite_id = 0x01` (ML-DSA-87): pubkey 2592 B + sig 4627 B → **≤ 13 inputs** per transaction
+>   (13 inputs ≈ 93,913 witness bytes; 14 inputs would exceed `MAX_WITNESS_BYTES_PER_TX`).
+> - `suite_id = 0x02` (SLH-DSA-SHAKE-256f): pubkey 64 B + sig 49856 B → **≤ 2 inputs** per transaction
+>   (2 inputs ≈ 99,851 witness bytes; 3 inputs would exceed `MAX_WITNESS_BYTES_PER_TX`).
+> - `suite_id = 0x00` (sentinel / TIMELOCK): witness is zero-length → up to `MAX_TX_INPUTS = 1_024` inputs,
+>   but each such transaction has `sig_cost = 0` and weighs ~334 wu (1-in/1-out),
+>   making mempool rate-limiting necessary (see node policy §1.4).
+>
+> Wallet implementations SHOULD respect these effective caps when constructing transactions
+> to avoid relay rejection. These bounds shift if `MAX_WITNESS_BYTES_PER_TX` is updated
+> via a future governance action.
 
 Witness is excluded from `txid` (consensus-critical serialization rule). `sighash` is computed from the transaction fields and `chain_id` per §4.2; it does not include the witness section bytes.
 
@@ -385,6 +404,7 @@ The following `covenant_type` values are valid:
 - `0x0002` `CORE_ANCHOR`
 - `0x0100` `CORE_HTLC_V1`
 - `0x0101` `CORE_VAULT_V1`
+- `0x0102` `CORE_HTLC_V2`
 - `0x00ff` `CORE_RESERVED_FUTURE`
 
 Semantics:
@@ -419,11 +439,41 @@ Semantics:
   - `covenant_data_len` MUST be exactly `32 + 1 + 8 + 32 + 32 = 105`.
 - `CORE_VAULT_V1`:
   - Purpose: fixed-template owner-bound vault with delayed recovery, intended for safer self-custody and key-compromise recovery.
-  - `covenant_data = owner_key_id:bytes32 || lock_mode:u8 || lock_value:u64le || recovery_key_id:bytes32`.
+  - `covenant_data` has two encodings (backward compatible):
+    - Legacy: `owner_key_id:bytes32 || lock_mode:u8 || lock_value:u64le || recovery_key_id:bytes32` (73 bytes).
+    - Extended: `owner_key_id:bytes32 || spend_delay:u64le || lock_mode:u8 || lock_value:u64le || recovery_key_id:bytes32` (81 bytes).
+  - `spend_delay` is a relative height delay (in blocks) for the owner path, computed from the output's `creation_height` stored in the spendable UTXO set:
+    - If `spend_delay = 0`, owner path is immediate (legacy behavior).
+    - If `spend_delay > 0`, owner path is forbidden until `height(B) ≥ o.creation_height + spend_delay`.
   - `lock_mode = 0x00` for height lock, `0x01` for UNIX-time lock.
   - Owner path: `owner_key_id` may spend at any time (no timelock check).
   - Recovery path: `recovery_key_id` may spend only when the lock condition is met.
-  - `covenant_data_len` MUST be exactly `32 + 1 + 8 + 32 = 73`.
+  - `covenant_data_len` MUST be exactly `73` or `81`:
+    - `73` implies `spend_delay = 0`.
+    - `81` parses `spend_delay` as defined above.
+- `CORE_HTLC_V2`:
+  - Deployment-gated: MUST be rejected as `TX_ERR_DEPLOYMENT_INACTIVE` unless deployment `htlc_anchor_v1` is ACTIVE at the validated height.
+  - Purpose: HTLC with preimage delivered on-chain via a `CORE_ANCHOR` envelope, rather than in `script_sig`. Enables anchor-based atomic swaps without exposing the preimage in the input witness.
+  - `covenant_data = hash:bytes32 || lock_mode:u8 || lock_value:u64le || claim_key_id:bytes32 || refund_key_id:bytes32`.
+  - `hash = SHA3-256(preimage32)` for a 32-byte secret preimage.
+  - `lock_mode = 0x00` for height lock, `0x01` for UNIX-time lock.
+  - `claim_key_id != refund_key_id` MUST be enforced; equal values MUST be rejected as `TX_ERR_PARSE`.
+  - `covenant_data_len` MUST be exactly `32 + 1 + 8 + 32 + 32 = 105`.
+  - Claim path (`script_sig_len = 0`, preimage in ANCHOR envelope):
+    - Scan all `CORE_ANCHOR` outputs in the transaction for a matching envelope:
+      - A matching envelope has `|anchor_data| = 54` AND `anchor_data[0:22] = ASCII("RUBINv1-htlc-preimage/")`.
+    - If no matching envelope is found: reject as `TX_ERR_PARSE`.
+    - If two or more matching envelopes are found: reject as `TX_ERR_PARSE` (non-deterministic).
+    - If exactly one matching envelope: `preimage32 = anchor_data[22:54]`.
+      - Require `SHA3-256(preimage32) = hash`; otherwise reject as `TX_ERR_SIG_INVALID`.
+      - Witness public key hash MUST equal `claim_key_id`; otherwise reject as `TX_ERR_SIG_INVALID`.
+  - Refund path (determined by witness key matching `refund_key_id`):
+    - If no matching ANCHOR envelope and witness public key hash equals `refund_key_id`:
+      - `lock_mode = 0x00`: require `height(B) >= lock_value`.
+      - `lock_mode = 0x01`: require `timestamp(B) >= lock_value`.
+      - If lock condition is not met: reject as `TX_ERR_TIMELOCK_NOT_MET`.
+    - If lock condition met and key matches `refund_key_id`: proceed to signature verification.
+  - Non-matching `CORE_ANCHOR` outputs in the same transaction are permitted and do not affect HTLC_V2 validation.
 - `CORE_RESERVED_FUTURE`: forbidden until explicit activation by consensus.
 
 Any unknown or future `covenant_type` MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
@@ -476,18 +526,41 @@ For each non-coinbase input spending output `o`:
      - `lock_mode = 0x01`: require `timestamp(B) ≥ lock_value`;
      - if lock condition is not met, reject with `TX_ERR_TIMELOCK_NOT_MET`.
 5. If `o.covenant_type = CORE_VAULT_V1`:
-   - parse `owner_key_id || lock_mode || lock_value || recovery_key_id`;
+   - parse `owner_key_id || spend_delay || lock_mode || lock_value || recovery_key_id` with backward compatibility:
+     - `covenant_data_len = 73`: parse legacy form and set `spend_delay = 0`.
+     - `covenant_data_len = 81`: parse extended form.
    - any other `lock_mode` MUST be `TX_ERR_PARSE`;
-   - If witness public key hash equals `owner_key_id` (owner path): accept (no timelock check).
+   - If witness public key hash equals `owner_key_id` (owner path):
+     - If `spend_delay = 0`: accept (legacy behavior).
+     - Else require `height(B) ≥ o.creation_height + spend_delay`; if not met, reject with `TX_ERR_TIMELOCK_NOT_MET`.
    - Else if witness public key hash equals `recovery_key_id` (recovery path):
      - `lock_mode = 0x00`: require `height(B) ≥ lock_value`;
      - `lock_mode = 0x01`: require `timestamp(B) ≥ lock_value`;
      - if lock condition is not met, reject with `TX_ERR_TIMELOCK_NOT_MET`.
    - Else reject as `TX_ERR_SIG_INVALID`.
-6. If `o.covenant_type = CORE_ANCHOR`: this output is non-spendable and MUST NOT
+6. If `o.covenant_type = CORE_HTLC_V2`:
+   - If deployment `htlc_anchor_v1` is NOT ACTIVE at `height(B)`: reject as `TX_ERR_DEPLOYMENT_INACTIVE`.
+   - `script_sig_len` MUST be `0`; otherwise reject as `TX_ERR_PARSE`.
+   - parse `hash || lock_mode || lock_value || claim_key_id || refund_key_id` (105 bytes);
+     if `covenant_data_len != 105`, reject as `TX_ERR_PARSE`;
+     if `claim_key_id = refund_key_id`, reject as `TX_ERR_PARSE`;
+     any `lock_mode` other than `0x00` or `0x01` MUST be `TX_ERR_PARSE`.
+   - Determine path by scanning ANCHOR envelopes:
+     - Let `matching` = { output `a` in tx outputs : `a.covenant_type = CORE_ANCHOR` AND `|a.anchor_data| = 54` AND `a.anchor_data[0:22] = ASCII("RUBINv1-htlc-preimage/")` }.
+     - If `|matching| >= 2`: reject as `TX_ERR_PARSE` (ambiguous preimage — non-deterministic).
+     - If `|matching| = 1` (claim path):
+       - `preimage32 = matching[0].anchor_data[22:54]`.
+       - Require `SHA3-256(preimage32) = hash`; otherwise reject as `TX_ERR_SIG_INVALID`.
+       - Witness public key hash MUST equal `claim_key_id`; otherwise reject as `TX_ERR_SIG_INVALID`.
+     - If `|matching| = 0` (refund path):
+       - Witness public key hash MUST equal `refund_key_id`; otherwise reject as `TX_ERR_SIG_INVALID`.
+       - `lock_mode = 0x00`: require `height(B) ≥ lock_value`.
+       - `lock_mode = 0x01`: require `timestamp(B) ≥ lock_value`.
+       - If lock condition is not met: reject as `TX_ERR_TIMELOCK_NOT_MET`.
+7. If `o.covenant_type = CORE_ANCHOR`: this output is non-spendable and MUST NOT
    appear as an input. If reached, reject as `TX_ERR_MISSING_UTXO`.
-7. If `o.covenant_type = CORE_RESERVED_FUTURE`, reject as `TX_ERR_COVENANT_TYPE_INVALID`.
-8. Any other covenant type is rejected by `TX_ERR_COVENANT_TYPE_INVALID`.
+8. If `o.covenant_type = CORE_RESERVED_FUTURE`, reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+9. Any other covenant type is rejected by `TX_ERR_COVENANT_TYPE_INVALID`.
 
 For each block:
 
@@ -592,6 +665,8 @@ block_subsidy(height) = 0 for epoch > 33
 ```
 
 Total issuance is capped so that emitted sum never exceeds `MAX_SUPPLY`.
+Non-normative note: the discrete halving schedule yields an actual total emission of
+`2_099_999_997_690_000` satoshis (which is `2_310_000` satoshis below `MAX_SUPPLY`).
 
 Weight and fee checks are normative:
 
@@ -1291,7 +1366,111 @@ RETL/L2 note:
 - censorship-resistance: rebroadcast across multiple peers and avoid single relay dependencies,
 - MEV minimization: avoid broadcasting sensitive intent early; consider alternative dissemination paths (including private relay services) if available in your environment.
 
-## 15. Network and Light-Client Interface (Normative)
+### 14.2 Eclipse and Network Attacks on Light Clients (Non-Normative)
+
+Light clients and SPV nodes present a distinct attack surface from full nodes because they
+do not independently validate the full chain — they rely on the header chain and Merkle proofs
+supplied by connected peers. An adversary who controls all of a light client's peers can feed
+it a false view of the chain.
+
+#### 14.2.1 Eclipse attack model
+
+An **eclipse attack** isolates a target node by filling all of its peer slots with adversary-
+controlled nodes. For a light client this is particularly dangerous because:
+
+1. The adversary can present a valid-PoW but fraudulent header chain (longer fake chain
+   or selectively withheld blocks).
+2. The adversary can suppress transactions or block confirmations, causing the light client
+   to believe a payment is unconfirmed or double-spent.
+3. The adversary can feed stale or selectively filtered `merkleblock`/`anchorproof` responses,
+   causing the client to accept fabricated inclusion proofs against a fork.
+
+RUBIN-specific amplifier: because block headers do not contain the UTXO commitment or any
+state root (by design — RUBIN is UTXO-minimal), a light client has no in-header state anchor
+to detect UTXO fraud. Its only protections are PoW and Merkle inclusion.
+
+#### 14.2.2 Consensus properties that hold under eclipse
+
+Even under a complete eclipse (all peers adversarial), the following hold for an honest
+light client that correctly implements RUBIN v1.1:
+
+1. **PoW integrity**: the adversary cannot present a header with less cumulative work than
+   the real chain tip *if the client has any out-of-band knowledge of chain tip PoW*
+   (e.g., a trusted checkpoint). Without checkpoints, the adversary can present an
+   alternative chain with equal or greater PoW, which the client cannot distinguish.
+2. **Merkle proof integrity**: given a valid `block_header.merkle_root`, a Merkle inclusion
+   proof cannot be forged (SHA3-256 collision resistance, T-013). An eclipsed client that
+   accepts a fraudulent header may accept a fraudulent Merkle proof — but only against that
+   fraudulent header, not against the honest chain.
+3. **Signature integrity**: a light client that verifies transaction signatures (e.g., for
+   received payments) cannot be deceived about whether a given output was created by a valid
+   PQ signature. Adversary cannot forge ML-DSA-87 or SLH-DSA signatures.
+4. **Covenant binding**: the covenant type and `key_id` binding are consensus-enforced;
+   an eclipsed light client cannot be shown a covenant spend that violates binding rules
+   *within the fraudulent chain* it has been fed (binding is deterministic from tx data).
+
+#### 14.2.3 What an eclipse can achieve
+
+Against a light client without checkpoints or diverse peers:
+
+- **Double-spend attack**: show the client a confirmation on fork A, while the real chain
+  is on fork B where the transaction is absent or reversed.
+- **Withheld block attack**: suppress a confirmed block to delay payment detection.
+- **ANCHOR spoofing**: feed a fraudulent `anchorproof` against a fake header to falsely
+  confirm an HTLC preimage or key-migration shadow-binding that does not exist on the real chain.
+- **Chain tip lag**: serve a stale tip to keep the client operating on an old chain view,
+  enabling time-based covenant attacks (e.g., HTLC refund window manipulation).
+
+#### 14.2.4 Mitigations for light clients (non-normative)
+
+These are operational recommendations, not consensus requirements:
+
+1. **Multiple diverse peers**: connect to ≥ 3 peers across independent operators/subnets.
+   Probability of complete eclipse drops sharply with peer diversity.
+   See `spec/RUBIN_L1_P2P_PROTOCOL_v1.1.md §7.1` (anti-eclipse heuristics).
+
+2. **Checkpoints**: embed one or more operator-selected block hashes at known heights as
+   trust anchors. A checkpoint prevents the adversary from feeding a chain that forks
+   before the checkpoint height, as long as the checkpoint was obtained honestly
+   (e.g., hard-coded at client build time from a trusted source).
+   Checkpoint hygiene: checkpoints SHOULD be at heights ≥ `COINBASE_MATURITY` blocks
+   behind the tip to avoid pinning on orphan-risk blocks.
+
+3. **Difficulty anomaly detection**: reject headers whose difficulty drops by more than
+   an expected retarget bound in a single window (CANONICAL §6.4). Sudden difficulty
+   drops suggest the adversary is feeding a low-work fork.
+
+4. **Median-time consistency**: enforce header `timestamp` rules at every step
+   (CANONICAL §6.5, §15 item 10). Inconsistent timestamps across a fed chain indicate
+   a fabricated sequence.
+
+5. **Out-of-band tip verification**: periodically query a trusted HTTPS endpoint or
+   DNS seed for the current chain tip hash. A discrepancy between the P2P-fed tip and
+   the out-of-band tip is a strong eclipse signal.
+
+6. **`anchorproof` multi-path confirmation**: for high-value ANCHOR verification
+   (HTLC claims, key-migration shadow-bindings), request the same `anchorproof` from
+   at least 2 independent peers. Divergent responses indicate either a fork or an eclipse.
+
+7. **Connection-layer diversity**: for mobile/embedded light clients, prefer connections
+   via Tor or an independent transport to ensure the network-layer adversary cannot
+   trivially identify and reroute all connections to adversary-controlled nodes.
+
+#### 14.2.5 RUBIN-specific risk: ANCHOR-based eclipse
+
+Because `CORE_ANCHOR` outputs are used for HTLC preimage delivery (§3.6, §4 rule 4a),
+key-migration shadow-bindings (CRYPTO_AGILITY §5.1), and RETL batch commitments (§7),
+an eclipsed light client that accepts fraudulent `anchorproof` messages faces application-
+layer consequences beyond simple payment fraud:
+
+- A fraudulent HTLC preimage anchor causes the client to believe a hashlock condition
+  is satisfied when it is not (or vice versa), enabling HTLC theft or lock-in.
+- A fraudulent shadow-binding anchor causes the client to accept a key rotation that
+  did not occur on-chain, enabling key replacement attacks.
+
+Mitigation: all ANCHOR-based application logic SHOULD require multi-peer confirmation
+(§14.2.4 item 6) and SHOULD enforce a confirmation depth ≥ 6 blocks before treating
+an anchor as authoritative (see also KEY_MANAGEMENT §3.1 timelock recommendation).
 
 1. Node peers MUST implement peer discovery and peer-version handshake sufficient to exchange:
    - `version`, `verack`, `wtxid` (relayed via `inv/getdata` `inv_type = 2`), `ping`, `pong`,

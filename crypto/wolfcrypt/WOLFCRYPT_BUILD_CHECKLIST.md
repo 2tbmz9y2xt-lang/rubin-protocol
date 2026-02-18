@@ -100,6 +100,14 @@ Alternative shim-only override (if required by CI or compliance chain):
 - generated shim exists:
   - macOS: `${RUBIN_WOLFCRYPT_SHIM_OUT}/librubin_wc_shim.dylib`
   - Linux: `${RUBIN_WOLFCRYPT_SHIM_OUT}/librubin_wc_shim.so`
+- [x] **keywrap smoke test passes** (`test_keywrap`): 6/6 — PASS (2026-02-18, macOS, wolfSSL v5.8.4-stable)
+  - T1 wrap+unwrap roundtrip (32-byte key)
+  - T2 wrong KEK → -36 (integrity check failed)
+  - T3 null arguments → -30
+  - T4 kek_len != 32 → -31
+  - T5 zero key_in_len → -32
+  - T6 small output buffer → -33
+- [x] **shim exports 5 symbols**: `rubin_wc_sha3_256`, `rubin_wc_verify_mldsa87`, `rubin_wc_verify_slhdsa_shake_256f`, `rubin_wc_aes_keywrap`, `rubin_wc_aes_keyunwrap`
 
 ## Notes
 

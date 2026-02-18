@@ -32,6 +32,69 @@ pub const MAX_WITNESS_ITEMS: usize = 1_024;
 pub const TIMELOCK_MODE_HEIGHT: u8 = 0x00;
 pub const TIMELOCK_MODE_TIMESTAMP: u8 = 0x01;
 
+// Block-level consensus constants (v1.1).
+pub const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
+pub const MAX_ANCHOR_BYTES_PER_BLOCK: u64 = 131_072;
+pub const MAX_ANCHOR_PAYLOAD_SIZE: usize = 65_536;
+pub const WINDOW_SIZE: u64 = 2_016;
+pub const TARGET_BLOCK_INTERVAL: u64 = 600;
+pub const MAX_FUTURE_DRIFT: u64 = 7_200;
+pub const COINBASE_MATURITY: u64 = 100;
+
+// Signature verification cost model (consensus weight accounting) — must match spec + Go client.
+pub const VERIFY_COST_ML_DSA: u64 = 8;
+pub const VERIFY_COST_SLH_DSA: u64 = 64;
+
+// Tx-level replay / sequence constraints.
+pub const TX_NONCE_ZERO: u64 = 0;
+pub const TX_MAX_SEQUENCE: u32 = 0x7fffffff;
+pub const TX_COINBASE_PREVOUT_VOUT: u32 = u32::MAX;
+
+pub const BLOCK_ERR_PARSE: &str = "BLOCK_ERR_PARSE";
+pub const BLOCK_ERR_LINKAGE_INVALID: &str = "BLOCK_ERR_LINKAGE_INVALID";
+pub const BLOCK_ERR_POW_INVALID: &str = "BLOCK_ERR_POW_INVALID";
+pub const BLOCK_ERR_TARGET_INVALID: &str = "BLOCK_ERR_TARGET_INVALID";
+pub const BLOCK_ERR_MERKLE_INVALID: &str = "BLOCK_ERR_MERKLE_INVALID";
+pub const BLOCK_ERR_WEIGHT_EXCEEDED: &str = "BLOCK_ERR_WEIGHT_EXCEEDED";
+pub const BLOCK_ERR_COINBASE_INVALID: &str = "BLOCK_ERR_COINBASE_INVALID";
+pub const BLOCK_ERR_SUBSIDY_EXCEEDED: &str = "BLOCK_ERR_SUBSIDY_EXCEEDED";
+pub const BLOCK_ERR_TIMESTAMP_OLD: &str = "BLOCK_ERR_TIMESTAMP_OLD";
+pub const BLOCK_ERR_TIMESTAMP_FUTURE: &str = "BLOCK_ERR_TIMESTAMP_FUTURE";
+pub const BLOCK_ERR_ANCHOR_BYTES_EXCEEDED: &str = "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED";
+
+pub const TX_ERR_NONCE_REPLAY: &str = "TX_ERR_NONCE_REPLAY";
+pub const TX_ERR_TX_NONCE_INVALID: &str = "TX_ERR_TX_NONCE_INVALID";
+pub const TX_ERR_SEQUENCE_INVALID: &str = "TX_ERR_SEQUENCE_INVALID";
+pub const TX_ERR_COINBASE_IMMATURE: &str = "TX_ERR_COINBASE_IMMATURE";
+
+// MAX_TARGET is the maximum allowed PoW target. This implementation treats it as all-ones.
+pub const MAX_TARGET: [u8; 32] = [0xffu8; 32];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockHeader {
+    pub version: u32,
+    pub prev_block_hash: [u8; 32],
+    pub merkle_root: [u8; 32],
+    pub timestamp: u64,
+    pub target: [u8; 32],
+    pub nonce: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Block {
+    pub header: BlockHeader,
+    pub transactions: Vec<Tx>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockValidationContext {
+    pub height: u64,
+    pub ancestor_headers: Vec<BlockHeader>, // ordered from oldest to newest, parent is last
+    pub local_time: u64,
+    pub local_time_set: bool,
+    pub suite_id_02_active: bool,
+}
+
 pub fn compact_size_encode(n: u64) -> Vec<u8> {
     if n < 253 {
         return vec![n as u8];
@@ -128,6 +191,13 @@ pub struct TxOutPoint {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UtxoEntry {
+    pub output: TxOutput,
+    pub creation_height: u64,
+    pub created_by_coinbase: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WitnessSection {
     pub witnesses: Vec<WitnessItem>,
 }
@@ -192,7 +262,14 @@ impl<'a> Cursor<'a> {
 
 pub fn parse_tx_bytes(bytes: &[u8]) -> Result<Tx, String> {
     let mut cursor = Cursor::new(bytes);
+    let tx = parse_tx_from_cursor(&mut cursor)?;
+    if cursor.pos != bytes.len() {
+        return Err("parse: trailing bytes".into());
+    }
+    Ok(tx)
+}
 
+fn parse_tx_from_cursor(cursor: &mut Cursor<'_>) -> Result<Tx, String> {
     let version = cursor.read_u32le()?;
     let tx_nonce = cursor.read_u64le()?;
 
@@ -271,10 +348,6 @@ pub fn parse_tx_bytes(bytes: &[u8]) -> Result<Tx, String> {
             pubkey,
             signature,
         });
-    }
-
-    if cursor.pos != bytes.len() {
-        return Err("parse: trailing bytes".into());
     }
 
     Ok(Tx {
@@ -426,6 +499,552 @@ fn add_u64(a: u64, b: u64) -> Result<u64, String> {
     }
 }
 
+fn sub_u64(a: u64, b: u64) -> Result<u64, String> {
+    if b > a {
+        return Err("TX_ERR_VALUE_CONSERVATION".into());
+    }
+    Ok(a - b)
+}
+
+fn is_zero_outpoint(txid: &[u8; 32], vout: u32) -> bool {
+    txid == &[0u8; 32] && vout == TX_COINBASE_PREVOUT_VOUT
+}
+
+fn is_coinbase_tx(tx: &Tx, block_height: u64) -> bool {
+    if tx.inputs.len() != 1 {
+        return false;
+    }
+    if tx.locktime as u64 != block_height {
+        return false;
+    }
+    if tx.tx_nonce != 0 {
+        return false;
+    }
+    if !tx.witness.witnesses.is_empty() {
+        return false;
+    }
+    let txin = &tx.inputs[0];
+    is_zero_outpoint(&txin.prev_txid, txin.prev_vout)
+        && txin.sequence == TX_COINBASE_PREVOUT_VOUT
+        && txin.script_sig.is_empty()
+}
+
+fn validate_coinbase_tx_inputs(tx: &Tx) -> Result<(), String> {
+    if tx.tx_nonce != 0 {
+        return Err("TX_ERR_COINBASE_INVALID".into());
+    }
+    if tx.inputs.len() != 1 {
+        return Err("TX_ERR_COINBASE_INVALID".into());
+    }
+    let input = &tx.inputs[0];
+    if input.sequence != TX_COINBASE_PREVOUT_VOUT {
+        return Err("TX_ERR_COINBASE_INVALID".into());
+    }
+    if !is_zero_outpoint(&input.prev_txid, input.prev_vout) {
+        return Err("TX_ERR_COINBASE_INVALID".into());
+    }
+    if !input.script_sig.is_empty() {
+        return Err("TX_ERR_COINBASE_INVALID".into());
+    }
+    if !tx.witness.witnesses.is_empty() {
+        return Err("TX_ERR_COINBASE_INVALID".into());
+    }
+    Ok(())
+}
+
+fn validate_output_covenant_constraints(output: &TxOutput) -> Result<(), String> {
+    match output.covenant_type {
+        CORE_P2PK => {
+            if output.covenant_data.len() != 33 {
+                return Err("TX_ERR_PARSE".into());
+            }
+        }
+        CORE_TIMELOCK_V1 => {
+            if output.covenant_data.len() != 9 {
+                return Err("TX_ERR_PARSE".into());
+            }
+        }
+        CORE_ANCHOR => {
+            if output.value != 0 {
+                return Err("TX_ERR_COVENANT_TYPE_INVALID".into());
+            }
+            if output.covenant_data.is_empty() || output.covenant_data.len() > MAX_ANCHOR_PAYLOAD_SIZE
+            {
+                return Err("TX_ERR_COVENANT_TYPE_INVALID".into());
+            }
+        }
+        CORE_HTLC_V1 => {
+            if output.covenant_data.len() != 105 {
+                return Err("TX_ERR_PARSE".into());
+            }
+        }
+        CORE_VAULT_V1 => {
+            if output.covenant_data.len() != 73 && output.covenant_data.len() != 81 {
+                return Err("TX_ERR_PARSE".into());
+            }
+        }
+        CORE_RESERVED_FUTURE => return Err("TX_ERR_COVENANT_TYPE_INVALID".into()),
+        _ => return Err("TX_ERR_COVENANT_TYPE_INVALID".into()),
+    }
+    Ok(())
+}
+
+pub fn tx_weight(tx: &Tx) -> Result<u64, String> {
+    let base = tx_no_witness_bytes(tx).len();
+    let witness = witness_bytes(&tx.witness).len();
+    let mut sig_cost: u64 = 0;
+    for (i, item) in tx.witness.witnesses.iter().enumerate() {
+        if i < tx.inputs.len() {
+            match item.suite_id {
+                SUITE_ID_ML_DSA => sig_cost = sig_cost.saturating_add(VERIFY_COST_ML_DSA as u64),
+                SUITE_ID_SLH_DSA => sig_cost = sig_cost.saturating_add(VERIFY_COST_SLH_DSA as u64),
+                _ => {}
+            }
+        }
+    }
+    let base_weight = (base as u64)
+        .checked_mul(4)
+        .ok_or_else(|| "TX_ERR_PARSE".to_string())?;
+    add_u64(add_u64(base_weight, witness as u64)?, sig_cost)
+}
+
+pub fn block_header_bytes(h: &BlockHeader) -> [u8; 116] {
+    let mut out = [0u8; 116];
+    out[0..4].copy_from_slice(&h.version.to_le_bytes());
+    out[4..36].copy_from_slice(&h.prev_block_hash);
+    out[36..68].copy_from_slice(&h.merkle_root);
+    out[68..76].copy_from_slice(&h.timestamp.to_le_bytes());
+    out[76..108].copy_from_slice(&h.target);
+    out[108..116].copy_from_slice(&h.nonce.to_le_bytes());
+    out
+}
+
+pub fn block_header_hash(provider: &dyn CryptoProvider, h: &BlockHeader) -> Result<[u8; 32], String> {
+    provider.sha3_256(&block_header_bytes(h))
+}
+
+fn parse_block_header_from_cursor(cursor: &mut Cursor<'_>) -> Result<BlockHeader, String> {
+    let version = cursor.read_u32le()?;
+    let prev_block_hash_slice = cursor.read_exact(32)?;
+    let mut prev_block_hash = [0u8; 32];
+    prev_block_hash.copy_from_slice(prev_block_hash_slice);
+    let merkle_root_slice = cursor.read_exact(32)?;
+    let mut merkle_root = [0u8; 32];
+    merkle_root.copy_from_slice(merkle_root_slice);
+    let timestamp = cursor.read_u64le()?;
+    let target_slice = cursor.read_exact(32)?;
+    let mut target = [0u8; 32];
+    target.copy_from_slice(target_slice);
+    let nonce = cursor.read_u64le()?;
+    Ok(BlockHeader {
+        version,
+        prev_block_hash,
+        merkle_root,
+        timestamp,
+        target,
+        nonce,
+    })
+}
+
+pub fn parse_block_bytes(bytes: &[u8]) -> Result<Block, String> {
+    let mut cursor = Cursor::new(bytes);
+    let header = parse_block_header_from_cursor(&mut cursor)?;
+    let tx_count_u64 = cursor.read_compact_size()?;
+    let tx_count: usize = tx_count_u64
+        .try_into()
+        .map_err(|_| "parse: tx_count overflows usize".to_string())?;
+    let mut txs = Vec::with_capacity(tx_count);
+    for _ in 0..tx_count {
+        let tx = parse_tx_from_cursor(&mut cursor)?;
+        txs.push(tx);
+    }
+    if cursor.pos != bytes.len() {
+        return Err("parse: trailing bytes".into());
+    }
+    Ok(Block {
+        header,
+        transactions: txs,
+    })
+}
+
+fn merkle_root_txids(provider: &dyn CryptoProvider, txs: &[Tx]) -> Result<[u8; 32], String> {
+    if txs.is_empty() {
+        return Err(BLOCK_ERR_MERKLE_INVALID.into());
+    }
+    let mut level: Vec<[u8; 32]> = Vec::with_capacity(txs.len());
+    for tx in txs {
+        let txid = txid(provider, tx)?;
+        let mut leaf = Vec::with_capacity(1 + 32);
+        leaf.push(0x00);
+        leaf.extend_from_slice(&txid);
+        level.push(provider.sha3_256(&leaf)?);
+    }
+    while level.len() > 1 {
+        let mut next: Vec<[u8; 32]> = Vec::with_capacity((level.len() + 1) / 2);
+        let mut i = 0;
+        while i < level.len() {
+            if i + 1 == level.len() {
+                next.push(level[i]);
+                i += 1;
+                continue;
+            }
+            let mut concat = Vec::with_capacity(1 + 32 + 32);
+            concat.push(0x01);
+            concat.extend_from_slice(&level[i]);
+            concat.extend_from_slice(&level[i + 1]);
+            next.push(provider.sha3_256(&concat)?);
+            i += 2;
+        }
+        level = next;
+    }
+    Ok(level[0])
+}
+
+fn median_past_timestamp(headers: &[BlockHeader], height: u64) -> Result<u64, String> {
+    if height == 0 || headers.is_empty() {
+        return Err(BLOCK_ERR_TIMESTAMP_OLD.into());
+    }
+    let mut k = 11u64;
+    if height < k {
+        k = height;
+    }
+    let mut limit = k as usize;
+    if headers.len() < limit {
+        limit = headers.len();
+    }
+    let mut timestamps = Vec::with_capacity(limit);
+    for i in 0..limit {
+        timestamps.push(headers[headers.len() - 1 - i].timestamp);
+    }
+    timestamps.sort_unstable();
+    Ok(timestamps[(timestamps.len() - 1) / 2])
+}
+
+fn u256_from_be_bytes32(b: &[u8; 32]) -> [u64; 4] {
+    let mut limbs = [0u64; 4];
+    for i in 0..4 {
+        let start = i * 8;
+        limbs[i] = u64::from_be_bytes([
+            b[start],
+            b[start + 1],
+            b[start + 2],
+            b[start + 3],
+            b[start + 4],
+            b[start + 5],
+            b[start + 6],
+            b[start + 7],
+        ]);
+    }
+    limbs
+}
+
+fn u256_to_be_bytes32(limbs: &[u64; 4]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for i in 0..4 {
+        out[i * 8..i * 8 + 8].copy_from_slice(&limbs[i].to_be_bytes());
+    }
+    out
+}
+
+fn u256_cmp(a: &[u64; 4], b: &[u64; 4]) -> core::cmp::Ordering {
+    for i in 0..4 {
+        if a[i] < b[i] {
+            return core::cmp::Ordering::Less;
+        }
+        if a[i] > b[i] {
+            return core::cmp::Ordering::Greater;
+        }
+    }
+    core::cmp::Ordering::Equal
+}
+
+fn u256_is_zero(a: &[u64; 4]) -> bool {
+    a.iter().all(|v| *v == 0)
+}
+
+fn u256_shr2(a: &[u64; 4]) -> [u64; 4] {
+    let mut out = [0u64; 4];
+    let mut carry: u64 = 0;
+    for i in 0..4 {
+        let v = a[i];
+        out[i] = (carry << 62) | (v >> 2);
+        carry = v & 0x3;
+    }
+    out
+}
+
+fn u256_shl2_saturating(a: &[u64; 4]) -> [u64; 4] {
+    let mut out = [0u64; 4];
+    let mut carry: u64 = 0;
+    for i in (0..4).rev() {
+        let v = a[i];
+        out[i] = (v << 2) | carry;
+        carry = v >> 62;
+    }
+    if carry != 0 {
+        // overflow => saturate
+        return u256_from_be_bytes32(&MAX_TARGET);
+    }
+    out
+}
+
+fn u256_mul_u64_to_u320(a: &[u64; 4], m: u64) -> [u64; 5] {
+    let mut out = [0u64; 5];
+    let mut carry: u128 = 0;
+    for i in (0..4).rev() {
+        let prod = (a[i] as u128) * (m as u128) + carry;
+        out[i + 1] = (prod & 0xffff_ffff_ffff_ffff) as u64;
+        carry = prod >> 64;
+    }
+    out[0] = carry as u64;
+    out
+}
+
+fn u320_div_u64_to_u256(n: &[u64; 5], d: u64) -> Result<[u64; 4], String> {
+    if d == 0 {
+        return Err(BLOCK_ERR_TARGET_INVALID.into());
+    }
+    let mut q = [0u64; 4];
+    let mut rem: u128 = 0;
+    for i in 0..5 {
+        let limb = n[i] as u128;
+        let cur = (rem << 64) | limb;
+        let q_limb = cur / (d as u128);
+        rem = cur % (d as u128);
+        if i > 0 {
+            q[i - 1] = q_limb as u64;
+        } else if q_limb != 0 {
+            // quotient exceeds 256-bit; saturate
+            return Ok(u256_from_be_bytes32(&MAX_TARGET));
+        }
+    }
+    Ok(q)
+}
+
+fn block_expected_target(headers: &[BlockHeader], height: u64, target_in: &[u8; 32]) -> Result<[u8; 32], String> {
+    if height == 0 {
+        return Ok(*target_in);
+    }
+    if headers.is_empty() {
+        return Err(BLOCK_ERR_TARGET_INVALID.into());
+    }
+
+    let target_old = u256_from_be_bytes32(&headers[headers.len() - 1].target);
+    if (height % WINDOW_SIZE) != 0 {
+        return Ok(u256_to_be_bytes32(&target_old));
+    }
+
+    let window = WINDOW_SIZE as usize;
+    if headers.len() < window {
+        return Err(BLOCK_ERR_TARGET_INVALID.into());
+    }
+
+    let first_ts = headers[headers.len() - window].timestamp;
+    let last_ts = headers[headers.len() - 1].timestamp;
+    let t_actual = if last_ts >= first_ts { last_ts - first_ts } else { 1 };
+    let t_expected = TARGET_BLOCK_INTERVAL * WINDOW_SIZE;
+
+    let n320 = u256_mul_u64_to_u320(&target_old, t_actual);
+    let mut target_new = u320_div_u64_to_u256(&n320, t_expected)?;
+
+    // clamp to [target_old/4, target_old*4]
+    let mut min_target = u256_shr2(&target_old);
+    if u256_is_zero(&min_target) {
+        min_target = [0, 0, 0, 1];
+    }
+    let max_target = u256_shl2_saturating(&target_old);
+
+    if u256_cmp(&target_new, &min_target) == core::cmp::Ordering::Less {
+        target_new = min_target;
+    }
+    if u256_cmp(&target_new, &max_target) == core::cmp::Ordering::Greater {
+        target_new = max_target;
+    }
+
+    Ok(u256_to_be_bytes32(&target_new))
+}
+
+fn block_reward_for_height(height: u64) -> u64 {
+    // v1.1 baseline constants (Bitcoin-like).
+    const BLOCK_SUBSIDY_INITIAL: u64 = 5_000_000_000;
+    const SUBSIDY_HALVING_INTERVAL: u64 = 210_000;
+
+    let epoch = height / SUBSIDY_HALVING_INTERVAL;
+    if epoch > 33 {
+        return 0;
+    }
+    let mut reward = BLOCK_SUBSIDY_INITIAL;
+    for _ in 0..epoch {
+        reward /= 2;
+    }
+    reward
+}
+
+fn tx_sums(tx: &Tx, utxo: &HashMap<TxOutPoint, UtxoEntry>) -> Result<(u64, u64), String> {
+    let mut input_sum = 0u64;
+    let mut output_sum = 0u64;
+    for input in &tx.inputs {
+        let prev = TxOutPoint {
+            txid: input.prev_txid,
+            vout: input.prev_vout,
+        };
+        let entry = utxo.get(&prev).ok_or_else(|| "TX_ERR_MISSING_UTXO".to_string())?;
+        input_sum = add_u64(input_sum, entry.output.value)?;
+    }
+    for output in &tx.outputs {
+        output_sum = add_u64(output_sum, output.value)?;
+    }
+    Ok((input_sum, output_sum))
+}
+
+pub fn apply_block(
+    provider: &dyn CryptoProvider,
+    chain_id: &[u8; 32],
+    block: &Block,
+    utxo: &mut HashMap<TxOutPoint, UtxoEntry>,
+    ctx: &BlockValidationContext,
+) -> Result<(), String> {
+    if block.transactions.is_empty() {
+        return Err(BLOCK_ERR_COINBASE_INVALID.into());
+    }
+
+    if ctx.height > 0 && ctx.ancestor_headers.is_empty() {
+        return Err(BLOCK_ERR_LINKAGE_INVALID.into());
+    }
+
+    if ctx.height == 0 {
+        if block.header.prev_block_hash != [0u8; 32] {
+            return Err(BLOCK_ERR_LINKAGE_INVALID.into());
+        }
+    } else {
+        let parent = ctx.ancestor_headers.last().ok_or_else(|| BLOCK_ERR_LINKAGE_INVALID.to_string())?;
+        let parent_hash = block_header_hash(provider, parent)?;
+        if block.header.prev_block_hash != parent_hash {
+            return Err(BLOCK_ERR_LINKAGE_INVALID.into());
+        }
+    }
+
+    let expected_target = block_expected_target(&ctx.ancestor_headers, ctx.height, &block.header.target)?;
+    if expected_target != block.header.target {
+        return Err(BLOCK_ERR_TARGET_INVALID.into());
+    }
+
+    let bhash = block_header_hash(provider, &block.header)?;
+    if bhash.as_slice() >= block.header.target.as_slice() {
+        return Err(BLOCK_ERR_POW_INVALID.into());
+    }
+
+    let merkle = merkle_root_txids(provider, &block.transactions)?;
+    if merkle != block.header.merkle_root {
+        return Err(BLOCK_ERR_MERKLE_INVALID.into());
+    }
+
+    if ctx.height > 0 {
+        let median_ts = median_past_timestamp(&ctx.ancestor_headers, ctx.height)?;
+        if block.header.timestamp <= median_ts {
+            return Err(BLOCK_ERR_TIMESTAMP_OLD.into());
+        }
+        if ctx.local_time_set && block.header.timestamp > ctx.local_time + MAX_FUTURE_DRIFT {
+            return Err(BLOCK_ERR_TIMESTAMP_FUTURE.into());
+        }
+    }
+
+    let mut coinbase_count = 0u64;
+    for (i, tx) in block.transactions.iter().enumerate() {
+        if is_coinbase_tx(tx, ctx.height) {
+            coinbase_count += 1;
+            if i != 0 {
+                return Err(BLOCK_ERR_COINBASE_INVALID.into());
+            }
+        }
+    }
+    if coinbase_count != 1 {
+        return Err(BLOCK_ERR_COINBASE_INVALID.into());
+    }
+
+    let mut working_utxo = utxo.clone();
+    let mut total_weight = 0u64;
+    let mut total_anchor_bytes = 0u64;
+    let mut total_fees = 0u64;
+    let mut seen_nonces: HashSet<u64> = HashSet::with_capacity(block.transactions.len());
+
+    for tx in &block.transactions {
+        total_weight = add_u64(total_weight, tx_weight(tx)?)?;
+
+        let is_coinbase = is_coinbase_tx(tx, ctx.height);
+        if !is_coinbase {
+            if seen_nonces.contains(&tx.tx_nonce) {
+                return Err(TX_ERR_NONCE_REPLAY.into());
+            }
+            seen_nonces.insert(tx.tx_nonce);
+        }
+
+        apply_tx(
+            provider,
+            chain_id,
+            tx,
+            &working_utxo,
+            ctx.height,
+            block.header.timestamp,
+            ctx.suite_id_02_active,
+        )?;
+
+        if !is_coinbase {
+            let (in_sum, out_sum) = tx_sums(tx, &working_utxo)?;
+            let fee = sub_u64(in_sum, out_sum)?;
+            total_fees = add_u64(total_fees, fee)?;
+
+            for input in &tx.inputs {
+                working_utxo.remove(&TxOutPoint {
+                    txid: input.prev_txid,
+                    vout: input.prev_vout,
+                });
+            }
+        }
+
+        let txid_v = txid(provider, tx)?;
+        for (vout, out) in tx.outputs.iter().enumerate() {
+            if out.covenant_type == CORE_ANCHOR {
+                total_anchor_bytes = add_u64(total_anchor_bytes, out.covenant_data.len() as u64)?;
+                continue;
+            }
+            working_utxo.insert(
+                TxOutPoint {
+                    txid: txid_v,
+                    vout: vout as u32,
+                },
+                UtxoEntry {
+                    output: out.clone(),
+                    creation_height: ctx.height,
+                    created_by_coinbase: is_coinbase,
+                },
+            );
+        }
+    }
+
+    if total_weight > MAX_BLOCK_WEIGHT {
+        return Err(BLOCK_ERR_WEIGHT_EXCEEDED.into());
+    }
+    if total_anchor_bytes > MAX_ANCHOR_BYTES_PER_BLOCK {
+        return Err(BLOCK_ERR_ANCHOR_BYTES_EXCEEDED.into());
+    }
+
+    let mut coinbase_value = 0u64;
+    for out in &block.transactions[0].outputs {
+        coinbase_value = add_u64(coinbase_value, out.value)?;
+    }
+    let max_coinbase = add_u64(block_reward_for_height(ctx.height), total_fees)?;
+    if coinbase_value > max_coinbase {
+        return Err(BLOCK_ERR_SUBSIDY_EXCEEDED.into());
+    }
+
+    utxo.clear();
+    for (k, v) in working_utxo {
+        utxo.insert(k, v);
+    }
+    Ok(())
+}
+
 pub fn validate_input_authorization(
     provider: &dyn CryptoProvider,
     chain_id: &[u8; 32],
@@ -433,6 +1052,7 @@ pub fn validate_input_authorization(
     input_index: usize,
     prev_value: u64,
     prevout: &TxOutput,
+    prev_creation_height: u64,
     chain_height: u64,
     chain_timestamp: u64,
     suite_id_02_active: bool,
@@ -449,6 +1069,9 @@ pub fn validate_input_authorization(
     match prevout.covenant_type {
         CORE_P2PK => {
             is_script_sig_zero_len("CORE_P2PK", input.script_sig.len())?;
+            if witness.suite_id == SUITE_ID_SENTINEL {
+                return Err("TX_ERR_SIG_ALG_INVALID".into());
+            }
             check_witness_format(witness, suite_id_02_active)?;
 
             if prevout.covenant_data.len() != 33 {
@@ -479,6 +1102,9 @@ pub fn validate_input_authorization(
         }
         CORE_HTLC_V1 => {
             validate_htlc_script_sig_len(input.script_sig.len())?;
+            if witness.suite_id == SUITE_ID_SENTINEL {
+                return Err("TX_ERR_SIG_ALG_INVALID".into());
+            }
             check_witness_format(witness, suite_id_02_active)?;
 
             if prevout.covenant_data.len() != 105 {
@@ -508,21 +1134,50 @@ pub fn validate_input_authorization(
         }
         CORE_VAULT_V1 => {
             is_script_sig_zero_len("CORE_VAULT_V1", input.script_sig.len())?;
+            if witness.suite_id == SUITE_ID_SENTINEL {
+                return Err("TX_ERR_SIG_ALG_INVALID".into());
+            }
             check_witness_format(witness, suite_id_02_active)?;
 
-            if prevout.covenant_data.len() != 73 {
+            let (owner_key_id, spend_delay, lock_mode, lock_value, recovery_key_id) =
+                match prevout.covenant_data.len() {
+                    73 => {
+                        let owner_key_id = &prevout.covenant_data[0..32];
+                        let lock_mode = prevout.covenant_data[32];
+                        let lock_value =
+                            parse_u64_le(&prevout.covenant_data, 33, "vault_lock_value")?;
+                        let recovery_key_id = &prevout.covenant_data[41..73];
+                        (owner_key_id, 0u64, lock_mode, lock_value, recovery_key_id)
+                    }
+                    81 => {
+                        let owner_key_id = &prevout.covenant_data[0..32];
+                        let spend_delay =
+                            parse_u64_le(&prevout.covenant_data, 32, "vault_spend_delay")?;
+                        let lock_mode = prevout.covenant_data[40];
+                        let lock_value =
+                            parse_u64_le(&prevout.covenant_data, 41, "vault_lock_value")?;
+                        let recovery_key_id = &prevout.covenant_data[49..81];
+                        (owner_key_id, spend_delay, lock_mode, lock_value, recovery_key_id)
+                    }
+                    _ => return Err("TX_ERR_PARSE".into()),
+                };
+            if lock_mode != TIMELOCK_MODE_HEIGHT && lock_mode != TIMELOCK_MODE_TIMESTAMP {
                 return Err("TX_ERR_PARSE".into());
             }
-            let lock_mode = prevout.covenant_data[32];
-            let lock_value = parse_u64_le(&prevout.covenant_data, 33, "vault_lock_value")?;
-            let owner_key_id = &prevout.covenant_data[0..32];
-            let recovery_key_id = &prevout.covenant_data[41..73];
+            if owner_key_id == recovery_key_id {
+                return Err("TX_ERR_PARSE".into());
+            }
             let actual_key_id = compute_key_id(provider, &witness.pubkey)?;
 
             if actual_key_id.as_slice() != owner_key_id
                 && actual_key_id.as_slice() != recovery_key_id
             {
                 return Err("TX_ERR_SIG_INVALID".into());
+            }
+            if actual_key_id.as_slice() == owner_key_id && spend_delay > 0 {
+                if chain_height < prev_creation_height + spend_delay {
+                    return Err("TX_ERR_TIMELOCK_NOT_MET".into());
+                }
             }
             if actual_key_id.as_slice() == recovery_key_id {
                 satisfy_lock(lock_mode, lock_value, chain_height, chain_timestamp)?;
@@ -567,7 +1222,7 @@ pub fn apply_tx(
     provider: &dyn CryptoProvider,
     chain_id: &[u8; 32],
     tx: &Tx,
-    utxo: &HashMap<TxOutPoint, TxOutput>,
+    utxo: &HashMap<TxOutPoint, UtxoEntry>,
     chain_height: u64,
     chain_timestamp: u64,
     suite_id_02_active: bool,
@@ -578,8 +1233,22 @@ pub fn apply_tx(
     {
         return Err("TX_ERR_PARSE".to_string());
     }
+    if is_coinbase_tx(tx, chain_height) {
+        validate_coinbase_tx_inputs(tx)?;
+        for out in &tx.outputs {
+            validate_output_covenant_constraints(out)?;
+        }
+        return Ok(());
+    }
+
+    if tx.tx_nonce == TX_NONCE_ZERO {
+        return Err(TX_ERR_TX_NONCE_INVALID.to_string());
+    }
     if tx.inputs.len() != tx.witness.witnesses.len() {
         return Err("TX_ERR_PARSE".to_string());
+    }
+    for out in &tx.outputs {
+        validate_output_covenant_constraints(out)?;
     }
 
     let mut seen = HashSet::with_capacity(tx.inputs.len());
@@ -587,10 +1256,16 @@ pub fn apply_tx(
     let mut total_outputs = 0u64;
 
     for (input_index, input) in tx.inputs.iter().enumerate() {
+        if input.sequence == TX_COINBASE_PREVOUT_VOUT || input.sequence > TX_MAX_SEQUENCE {
+            return Err(TX_ERR_SEQUENCE_INVALID.to_string());
+        }
         let prevout = TxOutPoint {
             txid: input.prev_txid,
             vout: input.prev_vout,
         };
+        if is_zero_outpoint(&prevout.txid, prevout.vout) {
+            return Err("TX_ERR_PARSE".to_string());
+        }
         if !seen.insert(prevout.clone()) {
             return Err("TX_ERR_PARSE".to_string());
         }
@@ -604,14 +1279,19 @@ pub fn apply_tx(
             chain_id,
             tx,
             input_index,
-            prev.value,
-            prev,
+            prev.output.value,
+            &prev.output,
+            prev.creation_height,
             chain_height,
             chain_timestamp,
             suite_id_02_active,
         )?;
 
-        total_inputs = add_u64(total_inputs, prev.value)?;
+        if prev.created_by_coinbase && chain_height < prev.creation_height + COINBASE_MATURITY {
+            return Err(TX_ERR_COINBASE_IMMATURE.to_string());
+        }
+
+        total_inputs = add_u64(total_inputs, prev.output.value)?;
     }
 
     for output in &tx.outputs {
@@ -840,7 +1520,8 @@ mod tests {
         );
 
         let chain_id = [0u8; 32];
-        let err = validate_input_authorization(&p, &chain_id, &tx, 0, 100, &prevout, 0, 0, false)
+        let err =
+            validate_input_authorization(&p, &chain_id, &tx, 0, 100, &prevout, 0, 0, 0, false)
             .unwrap_err();
         assert_eq!(err, "TX_ERR_PARSE");
     }
@@ -860,7 +1541,8 @@ mod tests {
         );
 
         let chain_id = [0u8; 32];
-        let err = validate_input_authorization(&p, &chain_id, &tx, 0, 100, &prevout, 10, 0, false)
+        let err =
+            validate_input_authorization(&p, &chain_id, &tx, 0, 100, &prevout, 0, 10, 0, false)
             .unwrap_err();
         assert_eq!(err, "TX_ERR_TIMELOCK_NOT_MET");
     }
@@ -880,7 +1562,7 @@ mod tests {
         );
 
         let chain_id = [0u8; 32];
-        let ok = validate_input_authorization(&p, &chain_id, &tx, 0, 100, &prevout, 10, 0, false);
+        let ok = validate_input_authorization(&p, &chain_id, &tx, 0, 100, &prevout, 0, 10, 0, false);
         assert!(ok.is_ok());
     }
 
@@ -903,7 +1585,8 @@ mod tests {
         );
 
         let chain_id = [0u8; 32];
-        let err = validate_input_authorization(&p, &chain_id, &tx, 0, 100, &prevout, 10, 0, false)
+        let err =
+            validate_input_authorization(&p, &chain_id, &tx, 0, 100, &prevout, 0, 10, 0, false)
             .unwrap_err();
         assert_eq!(err, "TX_ERR_TIMELOCK_NOT_MET");
     }
@@ -957,7 +1640,16 @@ mod tests {
             }],
         );
 
-        let err = apply_tx(&p, &[0u8; 32], &tx, &HashMap::new(), 0, 0, false).unwrap_err();
+        let err = apply_tx(
+            &p,
+            &[0u8; 32],
+            &tx,
+            &HashMap::<TxOutPoint, UtxoEntry>::new(),
+            0,
+            0,
+            false,
+        )
+        .unwrap_err();
         assert_eq!(err, "TX_ERR_MISSING_UTXO");
     }
 
@@ -994,7 +1686,14 @@ mod tests {
         );
 
         let mut utxo = HashMap::new();
-        utxo.insert(TxOutPoint { txid, vout: 0 }, prevout);
+        utxo.insert(
+            TxOutPoint { txid, vout: 0 },
+            UtxoEntry {
+                output: prevout,
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
 
         let err = apply_tx(&p, &[0u8; 32], &tx, &utxo, 0, 0, false).unwrap_err();
         assert_eq!(err, "TX_ERR_PARSE");
@@ -1025,7 +1724,14 @@ mod tests {
         );
 
         let mut utxo = HashMap::new();
-        utxo.insert(TxOutPoint { txid, vout: 0 }, prevout);
+        utxo.insert(
+            TxOutPoint { txid, vout: 0 },
+            UtxoEntry {
+                output: prevout,
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
 
         let err = apply_tx(&p, &[0u8; 32], &tx, &utxo, 0, 0, false).unwrap_err();
         assert_eq!(err, "TX_ERR_VALUE_CONSERVATION");
@@ -1057,7 +1763,14 @@ mod tests {
         );
 
         let mut utxo = HashMap::new();
-        utxo.insert(TxOutPoint { txid, vout: 0 }, prevout);
+        utxo.insert(
+            TxOutPoint { txid, vout: 0 },
+            UtxoEntry {
+                output: prevout,
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
 
         apply_tx(&p, &[0u8; 32], &tx, &utxo, 0, 0, false).unwrap();
     }

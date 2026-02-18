@@ -19,15 +19,38 @@ It exists to keep Rust and Go clients decoupled from wolfCrypt internal headers 
 
 The shim dynamic library MUST export exactly these symbols (C ABI), with these signatures:
 
+**Verification (consensus-critical):**
 1. `int32_t rubin_wc_sha3_256(const uint8_t* input, size_t input_len, uint8_t out32[32]);`
 2. `int32_t rubin_wc_verify_mldsa87(const uint8_t* pk, size_t pk_len, const uint8_t* sig, size_t sig_len, const uint8_t digest32[32]);`
 3. `int32_t rubin_wc_verify_slhdsa_shake_256f(const uint8_t* pk, size_t pk_len, const uint8_t* sig, size_t sig_len, const uint8_t digest32[32]);`
 
+**Key management (operator / sequencer):**
+4. `int32_t rubin_wc_aes_keywrap(const uint8_t* kek, size_t kek_len, const uint8_t* key_in, size_t key_in_len, uint8_t* out, size_t* out_len);`
+5. `int32_t rubin_wc_aes_keyunwrap(const uint8_t* kek, size_t kek_len, const uint8_t* wrapped, size_t wrapped_len, uint8_t* key_out, size_t* key_out_len);`
+
 Return code contract (MUST):
 
+**Verification symbols (1–3):**
 - `1`: verification succeeded (signature valid)
 - `0`: verification failed (signature invalid)
 - `<0`: internal/provider error (treated as validation failure by clients)
+
+**Keywrap symbols (4–5):**
+- `>0`: bytes written to output buffer (success)
+- `-30`: null argument
+- `-31`: `kek_len != 32` — only AES-256 (32-byte KEK) is accepted
+- `-32`: `key_in_len` is 0 or exceeds `RUBIN_WC_KEYWRAP_MAX_KEY_BYTES` (4096)
+- `-33`: output buffer too small
+- `-34`: wolfCrypt AES init failed
+- `-35`: wolfCrypt wrap/unwrap operation failed
+- `-36`: integrity check failed (unwrap only — wrong KEK or corrupted blob)
+
+**Keywrap algorithm:**
+- Algorithm: AES-256 Key Wrap per RFC 3394, default IV (`0xA6A6A6A6A6A6A6A6`)
+- `kek_len` MUST be 32 (AES-256 only — AES-128/192 rejected with `-31`)
+- `key_in_len` MUST be a non-zero multiple of 8 (RFC 3394 requirement)
+- Output size = `key_in_len + 8` (8-byte integrity check value)
+- Deterministic for identical inputs and KEK
 
 Memory safety contract (MUST):
 
