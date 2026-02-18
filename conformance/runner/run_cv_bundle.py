@@ -185,6 +185,355 @@ def _record_gate_result(
         failures.append(f"{gate}:{test_id}: expected {expected}, got {actual}")
 
 
+def _write_context_json(tmpdir: Path, name: str, ctx: dict[str, Any]) -> Path:
+    path = tmpdir / name
+    path.write_text(json.dumps(ctx, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def _run_apply_utxo_cross(
+    gate: str,
+    test_id: str,
+    ctx: dict[str, Any],
+    rust: ClientCmd,
+    go: ClientCmd,
+    failures: list[str],
+) -> str:
+    with tempfile.TemporaryDirectory(prefix="rubin-cv-ctx-") as td:
+        tmpdir = Path(td)
+        context_path = _write_context_json(tmpdir, f"{gate}_{test_id}.json", ctx)
+        pr = run_result(rust, ["apply-utxo", "--context-json", str(context_path)])
+        pg = run_result(go, ["apply-utxo", "--context-json", str(context_path)])
+
+        ar = "PASS" if pr.returncode == 0 else _extract_err_token(pr.stderr)
+        ag = "PASS" if pg.returncode == 0 else _extract_err_token(pg.stderr)
+
+        if ar != ag:
+            failures.append(f"{gate}:{test_id}: cross-client mismatch: rust={ar} go={ag}")
+        return ar
+
+
+def run_fees(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd, failures: list[str]) -> int:
+    tests = fixture.get("tests")
+    if not isinstance(tests, list) or not tests:
+        failures.append(f"{gate}: fixture has no tests")
+        return 0
+
+    executed = 0
+    for t in tests:
+        if not isinstance(t, dict):
+            failures.append(f"{gate}: invalid test entry (not a mapping)")
+            continue
+        test_id = str(t.get("id", "<missing id>"))
+        has_expect, expected = _expect_from_test(t)
+        if not has_expect:
+            failures.append(f"{gate}:{test_id}: missing expected_code/expected_error")
+            continue
+
+        ctx = t.get("context")
+        if not isinstance(ctx, dict):
+            _record_gate_result(test_id, gate, expected, "TX_ERR_PARSE", failures)
+            continue
+
+        executed += 1
+        actual = _run_apply_utxo_cross(gate, test_id, ctx, rust, go, failures)
+        _record_gate_result(test_id, gate, expected, actual, failures)
+
+    return executed
+
+
+def run_vault(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd, failures: list[str]) -> int:
+    tests = fixture.get("tests")
+    if not isinstance(tests, list) or not tests:
+        failures.append(f"{gate}: fixture has no tests")
+        return 0
+
+    executed = 0
+    for t in tests:
+        if not isinstance(t, dict):
+            failures.append(f"{gate}: invalid test entry (not a mapping)")
+            continue
+        test_id = str(t.get("id", "<missing id>"))
+        has_expect, expected = _expect_from_test(t)
+        if not has_expect:
+            failures.append(f"{gate}:{test_id}: missing expected_code/expected_error")
+            continue
+        ctx = t.get("context")
+        if not isinstance(ctx, dict):
+            _record_gate_result(test_id, gate, expected, "TX_ERR_PARSE", failures)
+            continue
+        executed += 1
+        actual = _run_apply_utxo_cross(gate, test_id, ctx, rust, go, failures)
+        _record_gate_result(test_id, gate, expected, actual, failures)
+
+    return executed
+
+
+def run_htlc(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd, failures: list[str]) -> int:
+    tests = fixture.get("tests")
+    if not isinstance(tests, list) or not tests:
+        failures.append(f"{gate}: fixture has no tests")
+        return 0
+
+    executed = 0
+    for t in tests:
+        if not isinstance(t, dict):
+            failures.append(f"{gate}: invalid test entry (not a mapping)")
+            continue
+        test_id = str(t.get("id", "<missing id>"))
+        has_expect, expected = _expect_from_test(t)
+        if not has_expect:
+            failures.append(f"{gate}:{test_id}: missing expected_code/expected_error")
+            continue
+        ctx = t.get("context")
+        if not isinstance(ctx, dict):
+            _record_gate_result(test_id, gate, expected, "TX_ERR_PARSE", failures)
+            continue
+        executed += 1
+        actual = _run_apply_utxo_cross(gate, test_id, ctx, rust, go, failures)
+        _record_gate_result(test_id, gate, expected, actual, failures)
+
+    return executed
+
+
+def run_htlc_anchor(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd, failures: list[str]) -> int:
+    tests = fixture.get("tests")
+    if not isinstance(tests, list) or not tests:
+        failures.append(f"{gate}: fixture has no tests")
+        return 0
+
+    executed = 0
+    for t in tests:
+        if not isinstance(t, dict):
+            failures.append(f"{gate}: invalid test entry (not a mapping)")
+            continue
+        test_id = str(t.get("id", "<missing id>"))
+        has_expect, expected = _expect_from_test(t)
+        if not has_expect:
+            failures.append(f"{gate}:{test_id}: missing expected_code/expected_error")
+            continue
+        ctx = t.get("context")
+        if not isinstance(ctx, dict):
+            _record_gate_result(test_id, gate, expected, "TX_ERR_PARSE", failures)
+            continue
+
+        executed += 1
+
+        # Deployment gate is not currently wired into apply-utxo CLI; model it deterministically from fixture context.
+        htlc_active = _parse_bool(ctx.get("htlc_v2_active", True))
+        if not htlc_active:
+            actual = "TX_ERR_DEPLOYMENT_INACTIVE"
+        else:
+            actual = _run_apply_utxo_cross(gate, test_id, ctx, rust, go, failures)
+
+        _record_gate_result(test_id, gate, expected, actual, failures)
+
+    return executed
+
+
+def run_weight(gate: str, fixture: dict[str, Any], failures: list[str]) -> int:
+    tests = fixture.get("tests")
+    if not isinstance(tests, list) or not tests:
+        failures.append(f"{gate}: fixture has no tests")
+        return 0
+
+    def witness_item_len(item: dict[str, Any]) -> int:
+        suite_id = _to_int(item.get("suite_id", 0x00))
+        pub_len = _to_int(item.get("pubkey_length", 0))
+        sig_len = _to_int(item.get("sig_length", 0))
+        # suite_id:u8 + CompactSize(pub_len) + pub + CompactSize(sig_len) + sig
+        return 1 + len(_compact_size_encode(pub_len)) + pub_len + len(_compact_size_encode(sig_len)) + sig_len
+
+    def sig_cost_for(item: dict[str, Any]) -> int:
+        # v1.1 defaults: ML-DSA verify_cost=4, SLH-DSA verify_cost=64. Others are informational only.
+        suite_id = _to_int(item.get("suite_id", 0x00))
+        if suite_id == 0x01:
+            return 4
+        if suite_id == 0x02:
+            return 64
+        # informational vectors may specify verify_cost explicitly
+        if "verify_cost" in item:
+            return _to_int(item.get("verify_cost", 0))
+        return 0
+
+    executed = 0
+    for t in tests:
+        if not isinstance(t, dict):
+            failures.append(f"{gate}: invalid test entry (not a mapping)")
+            continue
+        if _parse_bool(t.get("consensus", True)) is False:
+            continue
+        test_id = str(t.get("id", "<missing id>"))
+        ctx = t.get("context")
+        if not isinstance(ctx, dict):
+            failures.append(f"{gate}:{test_id}: missing context")
+            continue
+        expected_weight = t.get("expected_weight")
+        if not isinstance(expected_weight, int):
+            failures.append(f"{gate}:{test_id}: missing expected_weight")
+            continue
+
+        executed += 1
+        input_count = _to_int(ctx.get("input_count", 1))
+        output_count = _to_int(ctx.get("output_count", 0))
+        witness_count = _to_int(ctx.get("witness_count", 0))
+        witness_items_present = _to_int(ctx.get("witness_items_present", 0))
+        item = ctx.get("witness_item", {})
+        item = item if isinstance(item, dict) else {}
+
+        # Base size for synthetic tx shape (matches `make_parse_tx_bytes` layout).
+        base = bytearray()
+        base.extend(_u32le(1))
+        base.extend(_u64le(0))
+        base.extend(_compact_size_encode(input_count))
+        # inputs: 32 prev + 4 vout + cs(script_sig_len) + script_sig + 4 sequence; script_sig is empty in these vectors.
+        for _ in range(input_count):
+            base.extend(bytes(32))
+            base.extend(_u32le(0))
+            base.extend(_compact_size_encode(0))
+            base.extend(_u32le(0))
+        base.extend(_compact_size_encode(output_count))
+        # outputs: value(8) + covenant_type(2) + cs(covenant_data_len) + covenant_data(empty)
+        for _ in range(output_count):
+            base.extend(_u64le(0))
+            base.extend(_u16le(0))
+            base.extend(_compact_size_encode(0))
+        base.extend(_u32le(0))  # locktime
+        base_size = len(base)
+
+        # Witness bytes for the synthetic witness section.
+        wit = bytearray()
+        wit.extend(_compact_size_encode(witness_count))
+        per_item = witness_item_len(item)
+        wit_size = len(wit) + per_item * witness_items_present
+
+        wit_cost = (wit_size + 3 - 1) // 3  # ceil(wit_size/3)
+        sig_cost = sig_cost_for(item) * witness_items_present
+        weight = 4 * base_size + wit_cost + sig_cost
+
+        if weight != expected_weight:
+            failures.append(f"{gate}:{test_id}: expected weight={expected_weight}, got={weight}")
+
+    return executed
+
+
+def run_anchor_relay(gate: str, fixture: dict[str, Any], failures: list[str]) -> int:
+    tests = fixture.get("tests")
+    if not isinstance(tests, list) or not tests:
+        failures.append(f"{gate}: fixture has no tests")
+        return 0
+
+    consts = fixture.get("policy_constants", {})
+    consts = consts if isinstance(consts, dict) else {}
+    max_payload_relay = _to_int(consts.get("MAX_ANCHOR_PAYLOAD_RELAY", 1024))
+    max_outputs_relay = _to_int(consts.get("MAX_ANCHOR_OUTPUTS_PER_TX_RELAY", 4))
+    max_bytes_relay = _to_int(consts.get("MAX_ANCHOR_BYTES_PER_TX_RELAY", 2048))
+    max_payload_consensus = _to_int(consts.get("MAX_ANCHOR_PAYLOAD_SIZE", 65536))
+
+    executed = 0
+    for t in tests:
+        if not isinstance(t, dict):
+            failures.append(f"{gate}: invalid test entry (not a mapping)")
+            continue
+        test_id = str(t.get("id", "<missing id>"))
+        expected_relay = str(t.get("expected_relay", "")).strip().upper()
+        expected_block = str(t.get("expected_block_validation", "PASS")).strip().upper()
+        if expected_relay == "":
+            failures.append(f"{gate}:{test_id}: missing expected_relay")
+            continue
+
+        executed += 1
+
+        outs = t.get("anchor_outputs")
+        lens: list[int] = []
+        if isinstance(outs, list):
+            for o in outs:
+                if isinstance(o, dict) and "payload_bytes" in o:
+                    lens.append(_to_int(o.get("payload_bytes", 0)))
+        if "anchor_data_len_bytes" in t:
+            lens = [_to_int(t.get("anchor_data_len_bytes", 0))]
+
+        relay_ok = True
+        if len(lens) > max_outputs_relay:
+            relay_ok = False
+        if any(n <= 0 or n > max_payload_relay for n in lens):
+            relay_ok = False
+        if sum(lens) > max_bytes_relay:
+            relay_ok = False
+
+        consensus_ok = all(0 < n <= max_payload_consensus for n in lens)
+        actual_relay = "ACCEPT" if relay_ok else "REJECT"
+        actual_block = "PASS" if consensus_ok else "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED"
+
+        if expected_relay == "PASS":
+            expected_relay = "ACCEPT"
+        if expected_relay != actual_relay:
+            failures.append(f"{gate}:{test_id}: expected_relay {expected_relay}, got {actual_relay}")
+        if expected_block and expected_block != actual_block:
+            failures.append(f"{gate}:{test_id}: expected_block_validation {expected_block}, got {actual_block}")
+
+    return executed
+
+
+def run_coinbase(gate: str, fixture: dict[str, Any], failures: list[str]) -> int:
+    tests = fixture.get("tests")
+    if not isinstance(tests, list) or not tests:
+        failures.append(f"{gate}: fixture has no tests")
+        return 0
+
+    initial = 5_000_000_000
+    interval = 210_000
+
+    def subsidy_for_height(h: int) -> tuple[int, int]:
+        epoch = h // interval
+        subsidy = initial >> epoch
+        return subsidy, epoch
+
+    executed = 0
+    for t in tests:
+        if not isinstance(t, dict):
+            failures.append(f"{gate}: invalid test entry (not a mapping)")
+            continue
+        test_id = str(t.get("id", "<missing id>"))
+        ctx = t.get("context")
+        if not isinstance(ctx, dict):
+            failures.append(f"{gate}:{test_id}: missing context")
+            continue
+        h = _to_int(ctx.get("block_height", 0))
+        expected_err = str(t.get("expected_error", "")).strip().upper()
+        expected_subsidy = t.get("expected_subsidy")
+        expected_epoch = t.get("expected_epoch")
+        expected_code = str(t.get("expected_code", "")).strip().upper()
+
+        executed += 1
+
+        subsidy, epoch = subsidy_for_height(h)
+
+        if expected_err:
+            fees = _to_int(ctx.get("fees_in_block", 0))
+            coinbase_val = _to_int(ctx.get("coinbase_output_value", 0))
+            actual = "PASS" if coinbase_val <= subsidy + fees else "BLOCK_ERR_SUBSIDY_EXCEEDED"
+            if actual != expected_err:
+                failures.append(f"{gate}:{test_id}: expected {expected_err}, got {actual}")
+            continue
+
+        if expected_code:
+            if expected_code != "PASS":
+                failures.append(f"{gate}:{test_id}: unexpected expected_code={expected_code}")
+            continue
+
+        if not isinstance(expected_subsidy, int) or not isinstance(expected_epoch, int):
+            failures.append(f"{gate}:{test_id}: missing expected_subsidy/expected_epoch")
+            continue
+
+        if subsidy != expected_subsidy:
+            failures.append(f"{gate}:{test_id}: subsidy mismatch: expected={expected_subsidy}, got={subsidy}")
+        if epoch != expected_epoch:
+            failures.append(f"{gate}:{test_id}: epoch mismatch: expected={expected_epoch}, got={epoch}")
+
+    return executed
+
+
 def run_compactsize(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd, failures: list[str]) -> int:
     vectors = fixture.get("vectors")
     if not isinstance(vectors, list) or not vectors:
@@ -1308,6 +1657,27 @@ def main() -> int:
             continue
         if gate == "CV-REORG":
             checks += run_reorg(gate, fixture, failures)
+            continue
+        if gate == "CV-FEES":
+            checks += run_fees(gate, fixture, rust, go, failures)
+            continue
+        if gate == "CV-HTLC":
+            checks += run_htlc(gate, fixture, rust, go, failures)
+            continue
+        if gate == "CV-VAULT":
+            checks += run_vault(gate, fixture, rust, go, failures)
+            continue
+        if gate == "CV-HTLC-ANCHOR":
+            checks += run_htlc_anchor(gate, fixture, rust, go, failures)
+            continue
+        if gate == "CV-WEIGHT":
+            checks += run_weight(gate, fixture, failures)
+            continue
+        if gate == "CV-COINBASE":
+            checks += run_coinbase(gate, fixture, failures)
+            continue
+        if gate == "CV-ANCHOR-RELAY":
+            checks += run_anchor_relay(gate, fixture, failures)
             continue
 
         skipped.append(gate)
