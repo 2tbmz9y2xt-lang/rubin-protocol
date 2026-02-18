@@ -94,14 +94,14 @@ composition lemma for boundary-iteration (`applyBoundaries`) is formalized.
 - **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §4.1 item 6`
 - **Evidence**: `CV-HTLC-ANCHOR` HTLC2-08 (extra non-matching anchor → SIG_INVALID, not PARSE), HTLC2-09 (two matching → PARSE), HTLC2-10 (multi-app narrative)
 - **Closes**: Q-048
-- **Status**: `spec+vector`
+- **Status**: `lean4-proven` (semantic model: non-matching anchors ignored + ≥2 matching => PARSE) — `/Users/gpt/Documents/rubin-formal/RubinFormal/CovenantTheorems.lean`
 
 ### T-011 — CORE_VAULT_V1 spend_delay monotonicity
 
 - **Statement**: The `spend_delay` field in `CORE_VAULT_V1` extended form enforces `height(B) ≥ o.creation_height + spend_delay`. This is monotone: once satisfiable at height `h`, it remains satisfiable at all `h' > h`.
 - **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §4.1 item 5`
 - **Evidence**: `conformance/fixtures/CV-VAULT.yml` VAULT-06
-- **Status**: `spec+vector` (semantic covenant model exists in `/Users/gpt/Documents/rubin-formal/RubinFormal/Covenant.lean`; monotonicity proof pending)
+- **Status**: `lean4-proven` (owner-path spend_delay monotonicity) — `/Users/gpt/Documents/rubin-formal/RubinFormal/CovenantTheorems.lean`
 
 ### T-016 — Anchor relay cap non-interference (PENDING)
 
