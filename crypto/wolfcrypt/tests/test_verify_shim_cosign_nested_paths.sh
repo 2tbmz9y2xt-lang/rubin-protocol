@@ -23,7 +23,13 @@ sums="${tmp}/out/shim/SHA3SUMS.txt"
 # Nested path in sums (matches basename).
 echo "${hash}  shim/$(basename "${shim}")" > "${sums}"
 
-# Should pass (skip cosign; still enforces hash membership).
+# Without dev-skip, missing .sig/.crt must fail.
+if "${script}" "${sums}" "${shim}" >/dev/null 2>/dev/null; then
+  echo "expected failure without cosign artifacts, but verify succeeded" >&2
+  exit 1
+fi
+
+# Should pass in dev-skip mode (still enforces hash membership).
 RUBIN_WOLFCRYPT_DEV_SKIP_COSIGN=1 "${script}" "${sums}" "${shim}" >/dev/null
 
 # Negative: wrong name in sums should fail.
@@ -34,4 +40,3 @@ if RUBIN_WOLFCRYPT_DEV_SKIP_COSIGN=1 "${script}" "${sums}" "${shim}" >/dev/null 
 fi
 
 echo "OK"
-
