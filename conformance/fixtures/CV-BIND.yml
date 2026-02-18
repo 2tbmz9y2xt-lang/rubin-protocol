@@ -97,6 +97,6 @@ tests:
         suite_id: "0x01"
         pubkey_hex: "0202020202020202020202020202020202020202020202020202020202020202"
         note: "Computes to key_id ae3fe6... which != output key_id 0d27f4..."
-    expected_error: TX_ERR_SIG_KEY_MISMATCH
+    expected_error: TX_ERR_SIG_INVALID
     consensus: true
     theorem: T-017

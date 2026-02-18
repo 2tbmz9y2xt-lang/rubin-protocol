@@ -1266,7 +1266,7 @@ def run_bind(
             result = "TX_ERR_SIG_ALG_INVALID"
 
         # BIND-07 style: binding rejection when witness key_id != covenant key_id.
-        # This is modeled here as a pure byte binding check; signature verification is out of scope.
+        # Canonical consensus mapping uses TX_ERR_SIG_INVALID.
         if result == "PASS":
             out_cov = ctx.get("output_covenant")
             spend_wit = ctx.get("spend_witness")
@@ -1282,7 +1282,7 @@ def run_bind(
                         pub_wire = bytes([wit_suite_id]) + len(wit_pub).to_bytes(2, "little") + wit_pub
                         wit_kid = _sha3_256(pub_wire)
                         if wit_kid != out_key:
-                            result = "TX_ERR_SIG_KEY_MISMATCH"
+                            result = "TX_ERR_SIG_INVALID"
                     except Exception:
                         result = "TX_ERR_PARSE"
 
