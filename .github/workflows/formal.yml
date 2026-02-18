@@ -23,7 +23,7 @@ jobs:
         with:
           repository: 2tbmz9y2xt-lang/rubin-formal
           path: rubin-formal
-          ref: 4999c52d8fd3a2eb775ad187d9f0d570b28321d5
+          ref: 664e484a6a535d5e6bf627a72aab73ee54151d6c
 
       - name: Install elan (Lean toolchain)
         run: |
