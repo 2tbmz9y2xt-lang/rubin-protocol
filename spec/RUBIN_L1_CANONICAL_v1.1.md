@@ -1366,7 +1366,111 @@ RETL/L2 note:
 - censorship-resistance: rebroadcast across multiple peers and avoid single relay dependencies,
 - MEV minimization: avoid broadcasting sensitive intent early; consider alternative dissemination paths (including private relay services) if available in your environment.
 
-## 15. Network and Light-Client Interface (Normative)
+### 14.2 Eclipse and Network Attacks on Light Clients (Non-Normative)
+
+Light clients and SPV nodes present a distinct attack surface from full nodes because they
+do not independently validate the full chain — they rely on the header chain and Merkle proofs
+supplied by connected peers. An adversary who controls all of a light client's peers can feed
+it a false view of the chain.
+
+#### 14.2.1 Eclipse attack model
+
+An **eclipse attack** isolates a target node by filling all of its peer slots with adversary-
+controlled nodes. For a light client this is particularly dangerous because:
+
+1. The adversary can present a valid-PoW but fraudulent header chain (longer fake chain
+   or selectively withheld blocks).
+2. The adversary can suppress transactions or block confirmations, causing the light client
+   to believe a payment is unconfirmed or double-spent.
+3. The adversary can feed stale or selectively filtered `merkleblock`/`anchorproof` responses,
+   causing the client to accept fabricated inclusion proofs against a fork.
+
+RUBIN-specific amplifier: because block headers do not contain the UTXO commitment or any
+state root (by design — RUBIN is UTXO-minimal), a light client has no in-header state anchor
+to detect UTXO fraud. Its only protections are PoW and Merkle inclusion.
+
+#### 14.2.2 Consensus properties that hold under eclipse
+
+Even under a complete eclipse (all peers adversarial), the following hold for an honest
+light client that correctly implements RUBIN v1.1:
+
+1. **PoW integrity**: the adversary cannot present a header with less cumulative work than
+   the real chain tip *if the client has any out-of-band knowledge of chain tip PoW*
+   (e.g., a trusted checkpoint). Without checkpoints, the adversary can present an
+   alternative chain with equal or greater PoW, which the client cannot distinguish.
+2. **Merkle proof integrity**: given a valid `block_header.merkle_root`, a Merkle inclusion
+   proof cannot be forged (SHA3-256 collision resistance, T-013). An eclipsed client that
+   accepts a fraudulent header may accept a fraudulent Merkle proof — but only against that
+   fraudulent header, not against the honest chain.
+3. **Signature integrity**: a light client that verifies transaction signatures (e.g., for
+   received payments) cannot be deceived about whether a given output was created by a valid
+   PQ signature. Adversary cannot forge ML-DSA-87 or SLH-DSA signatures.
+4. **Covenant binding**: the covenant type and `key_id` binding are consensus-enforced;
+   an eclipsed light client cannot be shown a covenant spend that violates binding rules
+   *within the fraudulent chain* it has been fed (binding is deterministic from tx data).
+
+#### 14.2.3 What an eclipse can achieve
+
+Against a light client without checkpoints or diverse peers:
+
+- **Double-spend attack**: show the client a confirmation on fork A, while the real chain
+  is on fork B where the transaction is absent or reversed.
+- **Withheld block attack**: suppress a confirmed block to delay payment detection.
+- **ANCHOR spoofing**: feed a fraudulent `anchorproof` against a fake header to falsely
+  confirm an HTLC preimage or key-migration shadow-binding that does not exist on the real chain.
+- **Chain tip lag**: serve a stale tip to keep the client operating on an old chain view,
+  enabling time-based covenant attacks (e.g., HTLC refund window manipulation).
+
+#### 14.2.4 Mitigations for light clients (non-normative)
+
+These are operational recommendations, not consensus requirements:
+
+1. **Multiple diverse peers**: connect to ≥ 3 peers across independent operators/subnets.
+   Probability of complete eclipse drops sharply with peer diversity.
+   See `spec/RUBIN_L1_P2P_PROTOCOL_v1.1.md §7.1` (anti-eclipse heuristics).
+
+2. **Checkpoints**: embed one or more operator-selected block hashes at known heights as
+   trust anchors. A checkpoint prevents the adversary from feeding a chain that forks
+   before the checkpoint height, as long as the checkpoint was obtained honestly
+   (e.g., hard-coded at client build time from a trusted source).
+   Checkpoint hygiene: checkpoints SHOULD be at heights ≥ `COINBASE_MATURITY` blocks
+   behind the tip to avoid pinning on orphan-risk blocks.
+
+3. **Difficulty anomaly detection**: reject headers whose difficulty drops by more than
+   an expected retarget bound in a single window (CANONICAL §6.4). Sudden difficulty
+   drops suggest the adversary is feeding a low-work fork.
+
+4. **Median-time consistency**: enforce header `timestamp` rules at every step
+   (CANONICAL §6.5, §15 item 10). Inconsistent timestamps across a fed chain indicate
+   a fabricated sequence.
+
+5. **Out-of-band tip verification**: periodically query a trusted HTTPS endpoint or
+   DNS seed for the current chain tip hash. A discrepancy between the P2P-fed tip and
+   the out-of-band tip is a strong eclipse signal.
+
+6. **`anchorproof` multi-path confirmation**: for high-value ANCHOR verification
+   (HTLC claims, key-migration shadow-bindings), request the same `anchorproof` from
+   at least 2 independent peers. Divergent responses indicate either a fork or an eclipse.
+
+7. **Connection-layer diversity**: for mobile/embedded light clients, prefer connections
+   via Tor or an independent transport to ensure the network-layer adversary cannot
+   trivially identify and reroute all connections to adversary-controlled nodes.
+
+#### 14.2.5 RUBIN-specific risk: ANCHOR-based eclipse
+
+Because `CORE_ANCHOR` outputs are used for HTLC preimage delivery (§3.6, §4 rule 4a),
+key-migration shadow-bindings (CRYPTO_AGILITY §5.1), and RETL batch commitments (§7),
+an eclipsed light client that accepts fraudulent `anchorproof` messages faces application-
+layer consequences beyond simple payment fraud:
+
+- A fraudulent HTLC preimage anchor causes the client to believe a hashlock condition
+  is satisfied when it is not (or vice versa), enabling HTLC theft or lock-in.
+- A fraudulent shadow-binding anchor causes the client to accept a key rotation that
+  did not occur on-chain, enabling key replacement attacks.
+
+Mitigation: all ANCHOR-based application logic SHOULD require multi-peer confirmation
+(§14.2.4 item 6) and SHOULD enforce a confirmation depth ≥ 6 blocks before treating
+an anchor as authoritative (see also KEY_MANAGEMENT §3.1 timelock recommendation).
 
 1. Node peers MUST implement peer discovery and peer-version handshake sufficient to exchange:
    - `version`, `verack`, `wtxid` (relayed via `inv/getdata` `inv_type = 2`), `ping`, `pong`,
