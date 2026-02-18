@@ -31,7 +31,7 @@ https://github.com/2tbmz9y2xt-lang/rubin-formal
 Current local formal repo (development-only, local git):
 ```
 /Users/gpt/Documents/rubin-formal
-commit: fc77771dc7cae64dfdab8b1013f28d5e722e43e5
+commit: 6a51a34c9102586dff12e65769eed5fbc6554f1c
 ```
 Legacy local workspace path (no longer in this repo):
 ```
