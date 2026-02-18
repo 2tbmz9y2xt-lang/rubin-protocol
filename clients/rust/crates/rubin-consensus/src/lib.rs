@@ -15,6 +15,7 @@ pub const CORE_TIMELOCK_V1: u16 = 0x0001;
 pub const CORE_ANCHOR: u16 = 0x0002;
 pub const CORE_HTLC_V1: u16 = 0x0100;
 pub const CORE_VAULT_V1: u16 = 0x0101;
+pub const CORE_HTLC_V2: u16 = 0x0102;
 pub const CORE_RESERVED_FUTURE: u16 = 0x00ff;
 
 pub const SUITE_ID_SENTINEL: u8 = 0x00;
@@ -95,6 +96,7 @@ pub struct BlockValidationContext {
     pub local_time: u64,
     pub local_time_set: bool,
     pub suite_id_02_active: bool,
+    pub htlc_v2_active: bool,
 }
 
 pub fn compact_size_encode(n: u64) -> Vec<u8> {
@@ -570,13 +572,26 @@ fn validate_output_covenant_constraints(output: &TxOutput) -> Result<(), String>
             if output.value != 0 {
                 return Err("TX_ERR_COVENANT_TYPE_INVALID".into());
             }
-            if output.covenant_data.is_empty() || output.covenant_data.len() > MAX_ANCHOR_PAYLOAD_SIZE
+            if output.covenant_data.is_empty()
+                || output.covenant_data.len() > MAX_ANCHOR_PAYLOAD_SIZE
             {
                 return Err("TX_ERR_COVENANT_TYPE_INVALID".into());
             }
         }
         CORE_HTLC_V1 => {
             if output.covenant_data.len() != 105 {
+                return Err("TX_ERR_PARSE".into());
+            }
+        }
+        CORE_HTLC_V2 => {
+            // Deployment gate checked at spend time, not output creation time.
+            // Output-level constraint: same covenant_data layout as HTLC_V1.
+            if output.covenant_data.len() != 105 {
+                return Err("TX_ERR_PARSE".into());
+            }
+            let claim_key_id = &output.covenant_data[41..73];
+            let refund_key_id = &output.covenant_data[73..105];
+            if claim_key_id == refund_key_id {
                 return Err("TX_ERR_PARSE".into());
             }
         }
@@ -621,7 +636,10 @@ pub fn block_header_bytes(h: &BlockHeader) -> [u8; 116] {
     out
 }
 
-pub fn block_header_hash(provider: &dyn CryptoProvider, h: &BlockHeader) -> Result<[u8; 32], String> {
+pub fn block_header_hash(
+    provider: &dyn CryptoProvider,
+    h: &BlockHeader,
+) -> Result<[u8; 32], String> {
     provider.sha3_256(&block_header_bytes(h))
 }
 
@@ -823,7 +841,11 @@ fn u320_div_u64_to_u256(n: &[u64; 5], d: u64) -> Result<[u64; 4], String> {
     Ok(q)
 }
 
-fn block_expected_target(headers: &[BlockHeader], height: u64, target_in: &[u8; 32]) -> Result<[u8; 32], String> {
+fn block_expected_target(
+    headers: &[BlockHeader],
+    height: u64,
+    target_in: &[u8; 32],
+) -> Result<[u8; 32], String> {
     if height == 0 {
         return Ok(*target_in);
     }
@@ -843,7 +865,11 @@ fn block_expected_target(headers: &[BlockHeader], height: u64, target_in: &[u8; 
 
     let first_ts = headers[headers.len() - window].timestamp;
     let last_ts = headers[headers.len() - 1].timestamp;
-    let t_actual = if last_ts >= first_ts { last_ts - first_ts } else { 1 };
+    let t_actual = if last_ts >= first_ts {
+        last_ts - first_ts
+    } else {
+        1
+    };
     let t_expected = TARGET_BLOCK_INTERVAL * WINDOW_SIZE;
 
     let n320 = u256_mul_u64_to_u320(&target_old, t_actual);
@@ -890,7 +916,9 @@ fn tx_sums(tx: &Tx, utxo: &HashMap<TxOutPoint, UtxoEntry>) -> Result<(u64, u64),
             txid: input.prev_txid,
             vout: input.prev_vout,
         };
-        let entry = utxo.get(&prev).ok_or_else(|| "TX_ERR_MISSING_UTXO".to_string())?;
+        let entry = utxo
+            .get(&prev)
+            .ok_or_else(|| "TX_ERR_MISSING_UTXO".to_string())?;
         input_sum = add_u64(input_sum, entry.output.value)?;
     }
     for output in &tx.outputs {
@@ -919,14 +947,18 @@ pub fn apply_block(
             return Err(BLOCK_ERR_LINKAGE_INVALID.into());
         }
     } else {
-        let parent = ctx.ancestor_headers.last().ok_or_else(|| BLOCK_ERR_LINKAGE_INVALID.to_string())?;
+        let parent = ctx
+            .ancestor_headers
+            .last()
+            .ok_or_else(|| BLOCK_ERR_LINKAGE_INVALID.to_string())?;
         let parent_hash = block_header_hash(provider, parent)?;
         if block.header.prev_block_hash != parent_hash {
             return Err(BLOCK_ERR_LINKAGE_INVALID.into());
         }
     }
 
-    let expected_target = block_expected_target(&ctx.ancestor_headers, ctx.height, &block.header.target)?;
+    let expected_target =
+        block_expected_target(&ctx.ancestor_headers, ctx.height, &block.header.target)?;
     if expected_target != block.header.target {
         return Err(BLOCK_ERR_TARGET_INVALID.into());
     }
@@ -988,6 +1020,7 @@ pub fn apply_block(
             &working_utxo,
             ctx.height,
             block.header.timestamp,
+            ctx.htlc_v2_active,
             ctx.suite_id_02_active,
         )?;
 
@@ -1059,6 +1092,7 @@ pub fn validate_input_authorization(
     prev_creation_height: u64,
     chain_height: u64,
     chain_timestamp: u64,
+    htlc_v2_active: bool,
     suite_id_02_active: bool,
 ) -> Result<(), String> {
     if tx.inputs.is_empty() || input_index >= tx.inputs.len() {
@@ -1136,6 +1170,84 @@ pub fn validate_input_authorization(
                 satisfy_lock(lock_mode, lock_value, chain_height, chain_timestamp)?;
             }
         }
+        CORE_HTLC_V2 => {
+            // Deployment gate (spend-time only).
+            if !htlc_v2_active {
+                return Err("TX_ERR_DEPLOYMENT_INACTIVE".into());
+            }
+            if input.script_sig.len() != 0 {
+                return Err("TX_ERR_PARSE".into());
+            }
+            if witness.suite_id == SUITE_ID_SENTINEL {
+                return Err("TX_ERR_SIG_ALG_INVALID".into());
+            }
+            check_witness_format(witness, suite_id_02_active)?;
+
+            if prevout.covenant_data.len() != 105 {
+                return Err("TX_ERR_PARSE".into());
+            }
+            let claim_key_id = &prevout.covenant_data[41..73];
+            let refund_key_id = &prevout.covenant_data[73..105];
+            if claim_key_id == refund_key_id {
+                return Err("TX_ERR_PARSE".into());
+            }
+
+            let expected_hash = &prevout.covenant_data[0..32];
+            let lock_mode = prevout.covenant_data[32];
+            let lock_value = parse_u64_le(&prevout.covenant_data, 33, "htlc2_lock_value")?;
+
+            // Scan ANCHOR outputs for matching HTLC_V2 envelope
+            // prefix = ASCII("RUBINv1-htlc-preimage/") — 22 bytes, total envelope = 54 bytes
+            const HTLC_V2_PREFIX: &[u8] = b"RUBINv1-htlc-preimage/";
+            const HTLC_V2_ENVELOPE_LEN: usize = 54;
+
+            let mut matching_anchors = 0usize;
+            let mut matching_anchor: Option<&[u8]> = None;
+            for out in &tx.outputs {
+                if out.covenant_type != CORE_ANCHOR {
+                    continue;
+                }
+                if out.covenant_data.len() != HTLC_V2_ENVELOPE_LEN {
+                    continue;
+                }
+                if &out.covenant_data[0..HTLC_V2_PREFIX.len()] != HTLC_V2_PREFIX {
+                    continue;
+                }
+                matching_anchors += 1;
+                matching_anchor = Some(&out.covenant_data);
+                if matching_anchors >= 2 {
+                    break;
+                }
+            }
+
+            match matching_anchors {
+                0 => {
+                    // Refund path
+                    let actual_key_id = compute_key_id(provider, &witness.pubkey)?;
+                    if actual_key_id.as_slice() != refund_key_id {
+                        return Err("TX_ERR_SIG_INVALID".into());
+                    }
+                    satisfy_lock(lock_mode, lock_value, chain_height, chain_timestamp)?;
+                }
+                1 => {
+                    // Claim path
+                    let env = matching_anchor.ok_or_else(|| "TX_ERR_PARSE".to_string())?;
+                    let preimage32 = &env[HTLC_V2_PREFIX.len()..];
+                    let preimage_hash = provider.sha3_256(preimage32)?;
+                    if preimage_hash.as_slice() != expected_hash {
+                        return Err("TX_ERR_SIG_INVALID".into());
+                    }
+                    let actual_key_id = compute_key_id(provider, &witness.pubkey)?;
+                    if actual_key_id.as_slice() != claim_key_id {
+                        return Err("TX_ERR_SIG_INVALID".into());
+                    }
+                }
+                _ => {
+                    // Two or more matching envelopes — non-deterministic, reject
+                    return Err("TX_ERR_PARSE".into());
+                }
+            }
+        }
         CORE_VAULT_V1 => {
             is_script_sig_zero_len("CORE_VAULT_V1", input.script_sig.len())?;
             if witness.suite_id == SUITE_ID_SENTINEL {
@@ -1143,28 +1255,34 @@ pub fn validate_input_authorization(
             }
             check_witness_format(witness, suite_id_02_active)?;
 
-            let (owner_key_id, spend_delay, lock_mode, lock_value, recovery_key_id) =
-                match prevout.covenant_data.len() {
-                    73 => {
-                        let owner_key_id = &prevout.covenant_data[0..32];
-                        let lock_mode = prevout.covenant_data[32];
-                        let lock_value =
-                            parse_u64_le(&prevout.covenant_data, 33, "vault_lock_value")?;
-                        let recovery_key_id = &prevout.covenant_data[41..73];
-                        (owner_key_id, 0u64, lock_mode, lock_value, recovery_key_id)
-                    }
-                    81 => {
-                        let owner_key_id = &prevout.covenant_data[0..32];
-                        let spend_delay =
-                            parse_u64_le(&prevout.covenant_data, 32, "vault_spend_delay")?;
-                        let lock_mode = prevout.covenant_data[40];
-                        let lock_value =
-                            parse_u64_le(&prevout.covenant_data, 41, "vault_lock_value")?;
-                        let recovery_key_id = &prevout.covenant_data[49..81];
-                        (owner_key_id, spend_delay, lock_mode, lock_value, recovery_key_id)
-                    }
-                    _ => return Err("TX_ERR_PARSE".into()),
-                };
+            let (owner_key_id, spend_delay, lock_mode, lock_value, recovery_key_id) = match prevout
+                .covenant_data
+                .len()
+            {
+                73 => {
+                    let owner_key_id = &prevout.covenant_data[0..32];
+                    let lock_mode = prevout.covenant_data[32];
+                    let lock_value = parse_u64_le(&prevout.covenant_data, 33, "vault_lock_value")?;
+                    let recovery_key_id = &prevout.covenant_data[41..73];
+                    (owner_key_id, 0u64, lock_mode, lock_value, recovery_key_id)
+                }
+                81 => {
+                    let owner_key_id = &prevout.covenant_data[0..32];
+                    let spend_delay =
+                        parse_u64_le(&prevout.covenant_data, 32, "vault_spend_delay")?;
+                    let lock_mode = prevout.covenant_data[40];
+                    let lock_value = parse_u64_le(&prevout.covenant_data, 41, "vault_lock_value")?;
+                    let recovery_key_id = &prevout.covenant_data[49..81];
+                    (
+                        owner_key_id,
+                        spend_delay,
+                        lock_mode,
+                        lock_value,
+                        recovery_key_id,
+                    )
+                }
+                _ => return Err("TX_ERR_PARSE".into()),
+            };
             if lock_mode != TIMELOCK_MODE_HEIGHT && lock_mode != TIMELOCK_MODE_TIMESTAMP {
                 return Err("TX_ERR_PARSE".into());
             }
@@ -1229,6 +1347,7 @@ pub fn apply_tx(
     utxo: &HashMap<TxOutPoint, UtxoEntry>,
     chain_height: u64,
     chain_timestamp: u64,
+    htlc_v2_active: bool,
     suite_id_02_active: bool,
 ) -> Result<(), String> {
     if tx.inputs.len() > MAX_TX_INPUTS || tx.outputs.len() > MAX_TX_OUTPUTS {
@@ -1291,6 +1410,7 @@ pub fn apply_tx(
             prev.creation_height,
             chain_height,
             chain_timestamp,
+            htlc_v2_active,
             suite_id_02_active,
         )?;
 
@@ -1527,9 +1647,10 @@ mod tests {
         );
 
         let chain_id = [0u8; 32];
-        let err =
-            validate_input_authorization(&p, &chain_id, &tx, 0, 100, &prevout, 0, 0, 0, false)
-            .unwrap_err();
+        let err = validate_input_authorization(
+            &p, &chain_id, &tx, 0, 100, &prevout, 0, 0, 0, true, false,
+        )
+        .unwrap_err();
         assert_eq!(err, "TX_ERR_PARSE");
     }
 
@@ -1548,9 +1669,10 @@ mod tests {
         );
 
         let chain_id = [0u8; 32];
-        let err =
-            validate_input_authorization(&p, &chain_id, &tx, 0, 100, &prevout, 0, 10, 0, false)
-            .unwrap_err();
+        let err = validate_input_authorization(
+            &p, &chain_id, &tx, 0, 100, &prevout, 0, 10, 0, true, false,
+        )
+        .unwrap_err();
         assert_eq!(err, "TX_ERR_TIMELOCK_NOT_MET");
     }
 
@@ -1569,7 +1691,9 @@ mod tests {
         );
 
         let chain_id = [0u8; 32];
-        let ok = validate_input_authorization(&p, &chain_id, &tx, 0, 100, &prevout, 0, 10, 0, false);
+        let ok = validate_input_authorization(
+            &p, &chain_id, &tx, 0, 100, &prevout, 0, 10, 0, true, false,
+        );
         assert!(ok.is_ok());
     }
 
@@ -1592,9 +1716,10 @@ mod tests {
         );
 
         let chain_id = [0u8; 32];
-        let err =
-            validate_input_authorization(&p, &chain_id, &tx, 0, 100, &prevout, 0, 10, 0, false)
-            .unwrap_err();
+        let err = validate_input_authorization(
+            &p, &chain_id, &tx, 0, 100, &prevout, 0, 10, 0, true, false,
+        )
+        .unwrap_err();
         assert_eq!(err, "TX_ERR_TIMELOCK_NOT_MET");
     }
 
@@ -1658,6 +1783,7 @@ mod tests {
             &HashMap::<TxOutPoint, UtxoEntry>::new(),
             0,
             0,
+            true,
             false,
         )
         .unwrap_err();
@@ -1706,7 +1832,7 @@ mod tests {
             },
         );
 
-        let err = apply_tx(&p, &[0u8; 32], &tx, &utxo, 0, 0, false).unwrap_err();
+        let err = apply_tx(&p, &[0u8; 32], &tx, &utxo, 0, 0, true, false).unwrap_err();
         assert_eq!(err, "TX_ERR_PARSE");
     }
 
@@ -1748,7 +1874,7 @@ mod tests {
             },
         );
 
-        let err = apply_tx(&p, &[0u8; 32], &tx, &utxo, 0, 0, false).unwrap_err();
+        let err = apply_tx(&p, &[0u8; 32], &tx, &utxo, 0, 0, true, false).unwrap_err();
         assert_eq!(err, "TX_ERR_VALUE_CONSERVATION");
     }
 
@@ -1790,6 +1916,6 @@ mod tests {
             },
         );
 
-        apply_tx(&p, &[0u8; 32], &tx, &utxo, 0, 0, false).unwrap();
+        apply_tx(&p, &[0u8; 32], &tx, &utxo, 0, 0, true, false).unwrap();
     }
 }
