@@ -1,6 +1,6 @@
 # RUBIN Formal Appendix v1.1
 
-Status: NON-NORMATIVE (active — toolchain selected, invariants stated, proofs pending)
+Status: NON-NORMATIVE (active — toolchain selected, invariants stated, initial Lean 4 proofs started)
 Date: 2026-02-18
 Audience: implementers, auditors, formal-methods contributors
 
@@ -24,9 +24,18 @@ Alternatives considered:
 - **Isabelle/HOL**: strong automation (sledgehammer), but Lean 4 preferred for team familiarity and ergonomics.
 - **TLA+**: appropriate for liveness/safety of distributed protocols, insufficient for arithmetic/byte-level consensus rules. May be added in a separate TLA+ module for fork-choice and VERSION_BITS liveness.
 
-**Repository (planned):**
+**Repository (GitHub):**
 ```
-https://github.com/rubin-protocol/rubin-formal (not yet public)
+https://github.com/2tbmz9y2xt-lang/rubin-formal
+```
+Current local formal repo (development-only, local git):
+```
+/Users/gpt/Documents/rubin-formal
+commit: 2831b20ce1f93a22de2555392176504e1a2bfd5d
+```
+Legacy local workspace path (no longer in this repo):
+```
+formal/rubin-formal/   (moved out on 2026-02-18)
 ```
 Before production freeze, this repository MUST exist at a stable revision and be linked
 from this file with a pinned commit hash. Controller approval required before the link
@@ -65,10 +74,10 @@ See `formal/THEOREM_INDEX_v1.1.md` for full index. Summary:
 | T-001 | Sighash determinism — output_count=0 edge case | §4.2 hashOutputs | CV-SIGHASH SIGHASH-06 | spec+vector |
 | T-002 | Difficulty retarget 320-bit arithmetic | §6.4 | CV-BLOCK BLOCK-09 | spec+vector |
 | T-003 | VERSION_BITS boundary transition ordering | §8 FSM | CV-DEP DEP-05 | spec+vector |
-| T-004 | ApplyBlock determinism | §9 inv-1 | CV-BLOCK, CV-UTXO | spec+vector |
-| T-005 | Value conservation — non-coinbase | §9 inv-2 | CV-FEES FEES-02 | spec+vector |
+| T-004 | ApplyBlock determinism | §9 inv-1 | CV-BLOCK, CV-UTXO | lean4-proven (local model) |
+| T-005 | Value conservation — non-coinbase | §9 inv-2 | CV-FEES FEES-02 | lean4-proven (checked u64 model) |
 | T-006 | Non-spendable ANCHOR exclusion from UTXO | §9 inv-3 | CV-UTXO | spec+vector |
-| T-007 | VERSION_BITS monotonicity | §9 inv-4 | CV-DEP DEP-04 | spec+vector |
+| T-007 | VERSION_BITS monotonicity | §9 inv-4 | CV-DEP DEP-04 | lean4-proven (terminal-at-boundary core) |
 | T-008 | Sighash preimage injectivity (chain_id domain separation) | §4.2 | CV-SIGHASH | spec+axiom |
 | T-009 | HTLC_V2 envelope uniqueness — prefix-scoped matching | §4.1 item 6 | CV-HTLC-ANCHOR HTLC2-08/09 | spec+vector |
 | T-010 | Replay protection — (chain_id, tx_nonce) uniqueness | §3.4 | CV-UTXO | spec+vector |
@@ -80,7 +89,11 @@ See `formal/THEOREM_INDEX_v1.1.md` for full index. Summary:
 **Proof status legend:**
 - `spec+vector` — invariant is stated in canonical spec and covered by at least one conformance vector; Lean 4 proof pending.
 - `spec+axiom` — invariant depends on cryptographic hardness assumption (SHA3-256 collision resistance, ML-DSA unforgeability); stated as `axiom` in Lean 4 model.
-- `lean4-proven` — machine-checked Lean 4 proof exists at pinned commit (none yet; target: production freeze).
+- `lean4-proven` — machine-checked Lean 4 proof exists (currently local workspace; to be pinned to a separate repo commit at freeze).
+
+Clarification (non-normative):
+- Current `lean4-proven` items are machine-checked at `/Users/gpt/Documents/rubin-protocol/formal/rubin-formal/`.
+- The next milestone for "spec-faithful" is to align the models to byte-level encodings and full state transitions.
 
 ---
 
