@@ -1,9 +1,9 @@
 version: '1.1'
 profile: RUBIN_L1_CANONICAL_v1.1
-status: IN_PROGRESS
+status: PASS
 updated: '2026-02-18'
-execution_note: Runner coverage is partial (CV-SIGHASH, CV-SIGCHECK). All mandatory and supplementary gates are registered.
-  CV-ANCHOR-RELAY is policy-only (non-consensus); marked as PENDING until runner support added.
+execution_note: Phase 0 DoD closed (CV-PARSE/CV-SIGHASH/CV-BIND/CV-UTXO/CV-DEP/CV-BLOCK/CV-REORG PASS with cross-client parity in standalone runners).
+  Remaining node-layer runner expansion for non-Phase-0 gates is tracked separately (C-003). CV-ANCHOR-RELAY is policy-only (non-consensus) and remains PENDING.
 mandatory_gates:
 - name: CV-COMPACTSIZE
   file: conformance/fixtures/CV-COMPACTSIZE.yml

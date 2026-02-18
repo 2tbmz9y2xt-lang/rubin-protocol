@@ -60,8 +60,8 @@ python3 conformance/runner/run_cv_bundle.py
 - `CV-SIGHASH` via `txid` + `sighash`
 - `CV-SIGCHECK` via `verify`
 - `CV-PARSE` using fixture context builders (`tx_hex` when present, fallback synthesis otherwise)
-- `CV-BIND`, `CV-UTXO`, `CV-DEP` via deterministic fixture checks
-- `CV-BLOCK`, `CV-REORG` via deterministic block/reorg fixture checks
+- `CV-BIND`, `CV-UTXO`, `CV-DEP` via deterministic fixture checks in bundle; cross-client CLI parity is enforced by standalone runners
+- `CV-BLOCK` via `apply-block` cross-client checks; `CV-REORG` via deterministic fixture checks in bundle (cross-client parity via standalone runner)
 
 Gate filter:
 
