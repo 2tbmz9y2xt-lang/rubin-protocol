@@ -383,6 +383,7 @@ conforming implementations:
 - Coinbase subsidy exceeded            → `BLOCK_ERR_SUBSIDY_EXCEEDED`
 - Timestamp too old (MTP)              → `BLOCK_ERR_TIMESTAMP_OLD`
 - Timestamp too far in future          → `BLOCK_ERR_TIMESTAMP_FUTURE`
+- Malformed block encoding             → `BLOCK_ERR_PARSE`
 
 Any alternative error code for these cases is non-conforming.
 
