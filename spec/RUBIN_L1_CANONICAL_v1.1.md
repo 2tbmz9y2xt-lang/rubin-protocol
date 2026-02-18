@@ -379,6 +379,14 @@ For each non-coinbase transaction `T` in block order:
 4. If `T.tx_nonce` already appears in `N_seen`, return `TX_ERR_NONCE_REPLAY`.
 5. If `T.tx_nonce` is not in `[1, max(u64)]`, return `TX_ERR_TX_NONCE_INVALID`.
 
+**Cross-block replay protection (normative):** `tx_nonce` uniqueness is enforced only
+within a single block. Cross-block replay is prevented by UTXO exhaustion: once an input
+outpoint is consumed by `SpendTx` (§2), it is removed from `U` and any subsequent transaction
+attempting to spend the same outpoint will fail with `TX_ERR_MISSING_UTXO`. A transaction
+cannot be replayed across blocks because its input UTXOs no longer exist after the first
+inclusion. `tx_nonce` therefore serves as an intra-block deduplication guard, not as a
+global sequence number.
+
 For each non-coinbase input `i`:
 
 1. `sequence` MUST NOT be `0xffffffff`.
@@ -705,6 +713,11 @@ Definitions (consensus-critical):
 - `block_hash = SHA3-256(BlockHeaderBytes(B))`
 - `anchor_commitment = SHA3-256(anchor_data)`
 
+**Definition — `anchor_data`:** the exact raw byte string stored in a `CORE_ANCHOR` output's
+covenant data payload, committed on-chain via `anchor_commitment`. No additional encoding
+layer exists; the payload bytes are represented only by `anchor_data` itself.
+See §3.6 for `CORE_ANCHOR` covenant type. Size constraints: §1.2 (`MAX_ANCHOR_PAYLOAD_SIZE`).
+
 ### 5.1 BlockHeader (Normative)
 
 ```
@@ -763,7 +776,10 @@ where `parent(B_h)` is the unique block whose `block_hash` equals `B_h.prev_bloc
 
 Height is a derived property; it is not carried as a header field.
 
-For each non-sentinel witness item (i.e. `suite_id ≠ 0x00`):
+### 5.4 Witness Item Validation (Normative)
+
+Witness item validation is performed during step 8 ("Signature verification") of the
+validation order in §4. For each non-sentinel witness item (i.e. `suite_id ≠ 0x00`):
 
 1. Unknown `suite_id` is rejected as `TX_ERR_SIG_ALG_INVALID`.
 2. `sig_length = 0` is non-canonical and MUST be rejected as `TX_ERR_SIG_NONCANONICAL`.
@@ -772,16 +788,7 @@ For each non-sentinel witness item (i.e. `suite_id ≠ 0x00`):
 5. If `suite_id = 0x02` is used for a key-based covenant spend (`CORE_P2PK`, `CORE_HTLC_V1`, `CORE_VAULT_V1`) before explicit migration activation, reject as `TX_ERR_DEPLOYMENT_INACTIVE`.
 6. If the witness item is well-formed and canonical-length but signature verification fails, reject as `TX_ERR_SIG_INVALID`.
 
-Definition: anchor_data
-
-anchor_data is the exact raw byte string stored in the ANCHOR output and
-committed via:
-
-    anchor_commitment = SHA3-256(anchor_data)
-
-No additional encoding layer exists. The payload bytes in ANCHOR are represented only by `anchor_data`.
-
-Security assumptions are normative prerequisites for this spec:
+**Security assumptions (normative prerequisites):**
 
 - SHA3-256 has collision resistance under the stated query budget.
 - ML-DSA-87 and SLH-DSA are EUF-CMA secure under their respective operational domains.
@@ -1322,7 +1329,7 @@ Expected: TX_ERR_MISSING_UTXO
 - Formal proofs and assumptions are in `../formal/RUBIN_FORMAL_APPENDIX_v1.1.md`.
 - Measurement and incident governance are in `../operational/RUBIN_OPERATIONAL_SECURITY_v1.1.md`.
 - Formal key format and address binding are in `spec/RUBIN_L1_KEY_MANAGEMENT_v1.1.md`.
-- Coinbase/subsidy rules are in `spec/RUBIN_L1_COINBASE_AND_REWARDS_v1.1.md`.
+- Coinbase/subsidy rules are in `spec/RUBIN_L1_COINBASE_AND_REWARDS_v1.1.md` (auxiliary) and normatively in `§4.5`.
 
 ## 14. Threat Model and Deployment Assumptions
 
