@@ -72,7 +72,12 @@ MAX_ANCHOR_BYTES_PER_BLOCK = 131_072
 MAX_TARGET = (1 << 256) - 4
 WINDOW_SIZE = 2_016
 HALVING_INTERVAL = 210_000
-HALVING_REWARD = 5_000_000_000
+SUBSIDY_TOTAL_MINED = 9_900_000_000_000_000
+SUBSIDY_DURATION_BLOCKS = 1_314_900
+BASE_SUBSIDY = SUBSIDY_TOTAL_MINED // SUBSIDY_DURATION_BLOCKS
+REM_SUBSIDY_BLOCKS = SUBSIDY_TOTAL_MINED % SUBSIDY_DURATION_BLOCKS
+
+HALVING_REWARD = BASE_SUBSIDY + 1  # legacy name used in some fixtures/cases
 
 CORE_P2PK = 0x0000
 CORE_TIMELOCK = 0x0001
@@ -761,13 +766,13 @@ def run_coinbase(gate: str, fixture: dict[str, Any], failures: list[str]) -> int
         failures.append(f"{gate}: fixture has no tests")
         return 0
 
-    initial = 5_000_000_000
-    interval = 210_000
-
     def subsidy_for_height(h: int) -> tuple[int, int]:
-        epoch = h // interval
-        subsidy = initial >> epoch
-        return subsidy, epoch
+        # v1.1 linear emission: distribute TOTAL across the first N blocks, then 0.
+        # phase: 0 => subsidy > 0 (height < N), 1 => subsidy == 0 (height >= N)
+        if h >= SUBSIDY_DURATION_BLOCKS:
+            return 0, 1
+        subsidy = BASE_SUBSIDY + (1 if h < REM_SUBSIDY_BLOCKS else 0)
+        return subsidy, 0
 
     executed = 0
     for t in tests:

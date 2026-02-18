@@ -893,19 +893,21 @@ fn block_expected_target(
 }
 
 fn block_reward_for_height(height: u64) -> u64 {
-    // v1.1 baseline constants (Bitcoin-like).
-    const BLOCK_SUBSIDY_INITIAL: u64 = 5_000_000_000;
-    const SUBSIDY_HALVING_INTERVAL: u64 = 210_000;
+    // v1.1 consensus constants (linear emission; no halving; no tail).
+    const SUBSIDY_TOTAL_MINED: u64 = 9_900_000_000_000_000; // 99,000,000 RBN @ 1e8 base units
+    const SUBSIDY_DURATION_BLOCKS: u64 = 1_314_900; // fixed schedule in blocks
 
-    let epoch = height / SUBSIDY_HALVING_INTERVAL;
-    if epoch > 33 {
+    if height >= SUBSIDY_DURATION_BLOCKS {
         return 0;
     }
-    let mut reward = BLOCK_SUBSIDY_INITIAL;
-    for _ in 0..epoch {
-        reward /= 2;
+
+    let base = SUBSIDY_TOTAL_MINED / SUBSIDY_DURATION_BLOCKS;
+    let rem = SUBSIDY_TOTAL_MINED % SUBSIDY_DURATION_BLOCKS;
+    if height < rem {
+        base + 1
+    } else {
+        base
     }
-    reward
 }
 
 fn tx_sums(tx: &Tx, utxo: &HashMap<TxOutPoint, UtxoEntry>) -> Result<(u64, u64), String> {

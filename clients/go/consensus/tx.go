@@ -23,12 +23,13 @@ const (
 	MAX_ANCHOR_BYTES_PER_BLOCK = 131_072
 	MAX_ANCHOR_PAYLOAD_SIZE    = 65_536
 	WINDOW_SIZE                = 2_016
-		TARGET_BLOCK_INTERVAL      = 600
-		MAX_FUTURE_DRIFT           = 7_200
-		BLOCK_SUBSIDY_INITIAL      = 5_000_000_000
-		COINBASE_MATURITY          = 100
-		SUBSIDY_HALVING_INTERVAL   = 210_000
-		MAX_SUPPLY                 = 2_100_000_000_000_000
+	TARGET_BLOCK_INTERVAL      = 600
+	MAX_FUTURE_DRIFT           = 7_200
+	COINBASE_MATURITY          = 100
+	BASE_UNITS_PER_RBN         = 100_000_000
+	MAX_SUPPLY                 = 10_000_000_000_000_000
+	SUBSIDY_TOTAL_MINED        = 9_900_000_000_000_000
+	SUBSIDY_DURATION_BLOCKS    = 1_314_900
 	VERIFY_COST_ML_DSA         = 8
 	VERIFY_COST_SLH_DSA        = 64
 
@@ -691,15 +692,15 @@ func blockHeaderHash(p crypto.CryptoProvider, header *BlockHeader) [32]byte {
 }
 
 func blockRewardForHeight(height uint64) uint64 {
-	epoch := height / SUBSIDY_HALVING_INTERVAL
-	if epoch > 33 {
+	if height >= SUBSIDY_DURATION_BLOCKS {
 		return 0
 	}
-	reward := uint64(BLOCK_SUBSIDY_INITIAL)
-	for i := uint64(0); i < epoch; i++ {
-		reward /= 2
+	base := uint64(SUBSIDY_TOTAL_MINED / SUBSIDY_DURATION_BLOCKS)
+	rem := uint64(SUBSIDY_TOTAL_MINED % SUBSIDY_DURATION_BLOCKS)
+	if height < rem {
+		return base + 1
 	}
-	return reward
+	return base
 }
 
 func medianPastTimestamp(headers []BlockHeader, height uint64) (uint64, error) {
