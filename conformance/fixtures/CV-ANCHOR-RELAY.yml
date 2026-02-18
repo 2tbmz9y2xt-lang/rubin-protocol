@@ -124,3 +124,47 @@ tests:
     note: >
       Validators MUST NOT apply relay policy during block validation.
       MAX_ANCHOR_PAYLOAD_SIZE (consensus) is the only block-level anchor size constraint.
+
+  - id: ANCHOR-RELAY-09
+    title: "T-016 SEPARATION: relay cap (1024) strictly < consensus cap (65536)"
+    kind: separation_lemma
+    consensus: true
+    description: >
+      Formal statement for T-016: MAX_ANCHOR_PAYLOAD_RELAY=1024 < MAX_ANCHOR_PAYLOAD_SIZE=65536.
+      Any anchor_data with |anchor_data| in (1024, 65536] is:
+        (a) relay-rejected (pre-mempool policy), AND
+        (b) consensus-valid when included in a block.
+      The two caps are strictly non-overlapping from the relay side.
+      A block containing such a tx MUST be accepted by all consensus-validating nodes
+      regardless of whether the originating tx was relayed.
+    anchor_data_len_bytes: 1025
+    expected_relay: REJECT
+    expected_block_validation: PASS
+    relay_cap: 1024
+    consensus_cap: 65536
+    theorem: T-016
+    note: "Separation is structural: relay policy applied before mempool admission, block validation never applies relay caps"
+
+  - id: ANCHOR-RELAY-10
+    title: "T-016 BOUNDARY: anchor_data_len = MAX_ANCHOR_PAYLOAD_RELAY (1024) passes both relay and consensus"
+    kind: separation_lemma
+    consensus: true
+    description: >
+      At exactly MAX_ANCHOR_PAYLOAD_RELAY=1024 bytes, the tx passes relay AND is consensus-valid.
+      Confirms the boundary is inclusive for relay.
+    anchor_data_len_bytes: 1024
+    expected_relay: PASS
+    expected_block_validation: PASS
+    theorem: T-016
+
+  - id: ANCHOR-RELAY-11
+    title: "T-016 BOUNDARY: anchor_data_len = MAX_ANCHOR_PAYLOAD_SIZE (65536) — consensus valid, relay blocked"
+    kind: separation_lemma
+    consensus: true
+    description: >
+      At exactly MAX_ANCHOR_PAYLOAD_SIZE=65536 (consensus cap), tx is consensus-valid
+      but relay-rejected. Confirms upper consensus boundary.
+    anchor_data_len_bytes: 65536
+    expected_relay: REJECT
+    expected_block_validation: PASS
+    theorem: T-016

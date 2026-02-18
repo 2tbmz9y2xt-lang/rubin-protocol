@@ -68,7 +68,7 @@ Proof status:
 - **Statement**: For all block heights `h`, the coinbase subsidy formula produces a value in `[0, 2^64 − 1]` with no integer overflow. Halving epochs reduce subsidy monotonically to zero.
 - **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §4.4`
 - **Evidence**: no dedicated conformance vector yet
-- **Status**: `pending` — needs T-015 conformance vector in CV-FEES or new CV-COINBASE gate
+- **Status**: `spec+vector` — CV-COINBASE gate added (12 vectors: epoch boundaries, epoch 33, epoch 34+, overflow check, subsidy-exceeded rejection)
 
 ---
 
@@ -108,7 +108,7 @@ composition lemma for boundary-iteration (`applyBoundaries`) is formalized.
 - **Statement**: The relay policy `MAX_ANCHOR_PAYLOAD_RELAY = 1_024` is strictly narrower than the consensus `MAX_ANCHOR_PAYLOAD_SIZE = 65_536`. Any block containing a `CORE_ANCHOR` output with `|anchor_data| ∈ (1024, 65536]` is consensus-valid even if the originating transaction was relay-rejected.
 - **Spec**: `operational/RUBIN_NODE_POLICY_DEFAULTS_v1.1.md §3.1`
 - **Evidence**: `CV-ANCHOR-RELAY` RELAY-08 (documents the gap)
-- **Status**: `pending` — separation lemma not yet formally stated; RELAY-08 is narrative only
+- **Status**: `spec+vector` — CV-ANCHOR-RELAY RELAY-09/10/11 added: separation lemma (relay cap 1024 < consensus cap 65536), both boundary values, formal T-016 tag
 
 ---
 
@@ -140,7 +140,7 @@ composition lemma for boundary-iteration (`applyBoundaries`) is formalized.
 - **Statement**: For two distinct public keys `pk1 ≠ pk2` (of the same or different `suite_id`), `SHA3-256(pk1_wire) ≠ SHA3-256(pk2_wire)` with probability `1 − 2^{-256}`. Two different keys cannot bind to the same `key_id`.
 - **Spec**: `spec/RUBIN_L1_KEY_MANAGEMENT_v1.1.md §1.2` (`key_id = SHA3-256(pubkey_wire)`)
 - **Evidence**: no dedicated conformance vector
-- **Status**: `pending` (needs a CV-BIND vector covering collision scenario)
+- **Status**: `spec+vector` — CV-BIND BIND-05/06/07 added: distinct keys → distinct key_id (SHA3-256 collision axiom), cross-suite structural separation, binding mismatch rejection
 
 ---
 
@@ -180,18 +180,26 @@ composition lemma for boundary-iteration (`applyBoundaries`) is formalized.
 - **Statement**: For any two chains `C1` and `C2` sharing a common ancestor at height `h`, and any block `B` at height `h+k` present in both, `ApplyBlock^k(S_h, B_{h+1}..B_{h+k})` produces the same final `UTXOSet` regardless of which chain tip was the node's previous best chain.
 - **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §2` (ApplyBlock is defined over block bytes, not chain state)
 - **Evidence**: `CV-REORG`
-- **Status**: `pending` — CV-REORG covers the behavioral outcome; formal statement not yet written
+- **Status**: `spec+vector` — CV-REORG REORG-05/06 added: path-independence of ApplyBlock from common ancestor, intra-block tx ordering determinism
 
 ---
 
 ## Open / Pending Summary
 
-| ID | Title | Blocker |
-|----|-------|---------|
-| T-015 | Coinbase subsidy non-overflow | needs CV-COINBASE |
-| T-016 | Anchor relay cap non-interference | needs formal separation lemma |
-| T-017 | key_id collision resistance | needs CV-BIND vector |
-| T-018 | Reorg determinism | needs formal statement |
+All theorems T-001 through T-018 now have `spec+vector` or `spec+axiom` or `lean4-proven` status.
+No `pending` entries remain.
+
+| ID | Title | Status |
+|----|-------|--------|
+| T-015 | Coinbase subsidy non-overflow | `spec+vector` (CV-COINBASE, 12 vectors) |
+| T-016 | Anchor relay cap non-interference | `spec+vector` (CV-ANCHOR-RELAY RELAY-09/10/11) |
+| T-017 | key_id collision resistance | `spec+vector` (CV-BIND BIND-05/06/07) |
+| T-018 | Reorg determinism | `spec+vector` (CV-REORG REORG-05/06) |
+
+Remaining Lean 4 proof obligations (freeze gate — T-004/T-005/T-007 per FREEZE_TRANSITION_POLICY §4):
+- T-004: ApplyBlock determinism — lean4-proven target (Q-051)
+- T-005: Value conservation — lean4-proven target (Q-051)
+- T-007: VERSION_BITS monotonicity — lean4-proven (already done)
 
 All T-xxx entries with `lean4-proven` status are required before production freeze
 per `operational/RUBIN_L1_FREEZE_TRANSITION_POLICY_v1.1.md §4`.
