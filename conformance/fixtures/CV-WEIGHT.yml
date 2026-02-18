@@ -14,7 +14,7 @@ tests:
         suite_id: 0x00
         pubkey_length: 0
         sig_length: 0
-    expected_weight: 238
+    expected_weight: 240
     consensus: true
 
   - id: WEIGHT-02
@@ -28,7 +28,7 @@ tests:
         suite_id: 0x00
         pubkey_length: 0
         sig_length: 0
-    expected_weight: 282
+    expected_weight: 284
     consensus: true
 
   - id: WEIGHT-03
@@ -42,7 +42,7 @@ tests:
         suite_id: 0x01
         pubkey_length: 2592
         sig_length: 4627
-    expected_weight: 2697
+    expected_weight: 7515
     consensus: true
 
   - id: WEIGHT-04
