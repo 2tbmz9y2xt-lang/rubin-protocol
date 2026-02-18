@@ -63,9 +63,8 @@ Development status note (non-normative):
 - `MAX_SUPPLY = 2_100_000_000_000_000`
 
 Non-normative note (emission schedule): the discrete halving schedule over 34 epochs
-(epoch 0..33) yields actual total emission of `2_099_999_997_690_000` base units
-(`99_999_999.89` coins at `21_000_000` base units per coin), which is `2_310_000`
-base units below `MAX_SUPPLY` (100_000_000 coins). Epoch 32 subsidy = 1 base unit
+(epoch 0..33) yields actual total emission of `2_099_999_997_690_000` base units,
+which is `2_310_000` base units below `MAX_SUPPLY`. Epoch 32 subsidy = 1 base unit
 (last non-zero); epoch 33+ = 0. Full subsidy formula: §4.5.
 - `MAX_TX_INPUTS = 1_024`
 - `MAX_TX_OUTPUTS = 1_024`
@@ -689,8 +688,7 @@ reduces the value; epoch 33 yields 1 satoshi; epoch 34+ yields 0.
 
 Total issuance is capped so that emitted sum never exceeds `MAX_SUPPLY`.
 Non-normative note: the discrete halving schedule yields an actual total emission of
-`2_099_999_997_690_000` base units (`99_999_999.89` coins), which is `2_310_000`
-base units below `MAX_SUPPLY` (100_000_000 coins).
+`2_099_999_997_690_000` base units, which is `2_310_000` base units below `MAX_SUPPLY`.
 Conformance: CV-COINBASE.
 
 ### 4.6 Value conservation (Normative)
