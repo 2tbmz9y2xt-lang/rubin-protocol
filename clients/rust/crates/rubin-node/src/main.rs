@@ -167,6 +167,24 @@ fn cmd_weight(tx_hex: &str) -> Result<u64, String> {
     rubin_consensus::tx_weight(&tx)
 }
 
+fn coinbase_subsidy_epoch_for_height(height: u64) -> (u64, u64) {
+    // Keep in sync with consensus (linear emission; no halving; no tail).
+    const SUBSIDY_TOTAL_MINED: u64 = 9_900_000_000_000_000; // 99,000,000 RBN @ 1e8 base units
+    const SUBSIDY_DURATION_BLOCKS: u64 = 1_314_900; // fixed schedule in blocks
+
+    // epoch: 0 => subsidy > 0 (height < N), 1 => subsidy == 0 (height >= N)
+    if height >= SUBSIDY_DURATION_BLOCKS {
+        return (0, 1);
+    }
+    let base = SUBSIDY_TOTAL_MINED / SUBSIDY_DURATION_BLOCKS;
+    let rem = SUBSIDY_TOTAL_MINED % SUBSIDY_DURATION_BLOCKS;
+    if height < rem {
+        (base + 1, 0)
+    } else {
+        (base, 0)
+    }
+}
+
 fn parse_chain_id_hex(chain_id_hex: &str) -> Result<[u8; 32], String> {
     let bytes = rubin_consensus::hex_decode_strict(chain_id_hex)?;
     if bytes.len() != 32 {
@@ -703,6 +721,7 @@ fn usage() {
     eprintln!("  chain-id --profile <path>");
     eprintln!("  txid --tx-hex <hex>");
     eprintln!("  weight --tx-hex <hex>");
+    eprintln!("  coinbase --block-height <u64> [--fees-in-block <u64> --coinbase-output-value <u64>]");
     eprintln!("  apply-utxo --context-json <path>");
     eprintln!("  apply-block --context-json <path>");
     eprintln!("  compactsize --encoded-hex <hex>");
@@ -780,6 +799,50 @@ fn cmd_weight_main(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+fn cmd_coinbase_main(args: &[String]) -> i32 {
+    let block_height = match parse_required_u64(args, "--block-height") {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let fees_in_block = match parse_optional_u64(args, "--fees-in-block") {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let coinbase_output_value = match parse_optional_u64(args, "--coinbase-output-value") {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+
+    if fees_in_block.is_some() != coinbase_output_value.is_some() {
+        eprintln!("--fees-in-block and --coinbase-output-value must be provided together");
+        return 2;
+    }
+
+    let (subsidy, epoch) = coinbase_subsidy_epoch_for_height(block_height);
+
+    // Subsidy query mode.
+    if fees_in_block.is_none() {
+        println!("{subsidy} {epoch}");
+        return 0;
+    }
+
+    // Validation mode: enforce block-level maximum coinbase output value.
+    let max_val = match subsidy.checked_add(fees_in_block.unwrap()) {
+        Some(v) => v,
+        None => {
+            eprintln!("BLOCK_ERR_SUBSIDY_EXCEEDED");
+            return 1;
+        }
+    };
+    if coinbase_output_value.unwrap() > max_val {
+        eprintln!("BLOCK_ERR_SUBSIDY_EXCEEDED");
+        return 1;
+    }
+
+    println!("OK");
+    0
 }
 
 fn parse_required_u32(args: &[String], flag: &str) -> Result<u32, i32> {
@@ -1181,6 +1244,7 @@ fn dispatch(cmd: &str, args: &[String]) -> i32 {
         "chain-id" => cmd_chain_id_main(args),
         "txid" => cmd_txid_main(args),
         "weight" | "tx-weight" => cmd_weight_main(args),
+        "coinbase" => cmd_coinbase_main(args),
         "parse" => cmd_parse_main(args),
         "apply-utxo" => cmd_apply_utxo_main(args),
         "apply-block" => cmd_apply_block_main(args),

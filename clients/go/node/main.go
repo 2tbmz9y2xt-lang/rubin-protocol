@@ -227,6 +227,20 @@ func cmdWeight(txHex string) (uint64, error) {
 	return w, nil
 }
 
+func cmdCoinbaseSubsidy(height uint64) (subsidy uint64, epoch uint64) {
+	// v1.1 linear emission: distribute TOTAL across the first N blocks, then 0.
+	// epoch: 0 => subsidy > 0 (height < N), 1 => subsidy == 0 (height >= N)
+	if height >= consensus.SUBSIDY_DURATION_BLOCKS {
+		return 0, 1
+	}
+	base := uint64(consensus.SUBSIDY_TOTAL_MINED / consensus.SUBSIDY_DURATION_BLOCKS)
+	rem := uint64(consensus.SUBSIDY_TOTAL_MINED % consensus.SUBSIDY_DURATION_BLOCKS)
+	if height < rem {
+		return base + 1, 0
+	}
+	return base, 0
+}
+
 func parseChainIDHex(chainIDHex string) ([32]byte, error) {
 	raw, err := hexDecodeStrict(chainIDHex)
 	if err != nil {
@@ -677,7 +691,7 @@ func cmdReorg(contextPath string) (string, error) {
 	return "", fmt.Errorf("REORG_ERR_PARSE: unsupported context shape")
 }
 
-const usageCommands = "commands: version | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse --tx-hex <hex> [--max-witness-bytes <u64>] | txid --tx-hex <hex> | weight --tx-hex <hex> | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify --tx-hex <hex> --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-id-hex <hex64> | --profile <path> | --suite-id-02-active | --htlc-v2-active] | apply-utxo --context-json <path> | apply-block --context-json <path> | reorg --context-json <path>"
+const usageCommands = "commands: version | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse --tx-hex <hex> [--max-witness-bytes <u64>] | txid --tx-hex <hex> | weight --tx-hex <hex> | coinbase --block-height <u64> [--fees-in-block <u64> --coinbase-output-value <u64>] | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify --tx-hex <hex> --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-id-hex <hex64> | --profile <path> | --suite-id-02-active | --htlc-v2-active] | apply-utxo --context-json <path> | apply-block --context-json <path> | reorg --context-json <path>"
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage: rubin-node <command> [args]")
@@ -730,6 +744,44 @@ func cmdWeightMain(argv []string) int {
 		return 1
 	}
 	fmt.Printf("%d\n", w)
+	return 0
+}
+
+func addUint64Safe(a, b uint64) (sum uint64, overflow bool) {
+	sum = a + b
+	if sum < a {
+		return 0, true
+	}
+	return sum, false
+}
+
+func cmdCoinbaseMain(argv []string) int {
+	fs := flag.NewFlagSet("coinbase", flag.ExitOnError)
+	blockHeight := fs.Uint64("block-height", 0, "block height")
+	feesInBlock := fs.Uint64("fees-in-block", 0, "total fees in block (u64)")
+	coinbaseOutputValue := fs.Uint64("coinbase-output-value", 0, "coinbase output value (u64)")
+	_ = fs.Parse(argv)
+
+	// Validation mode is enabled only if both flags were provided explicitly.
+	hasFees := hasFlagArg(argv, "fees-in-block")
+	hasCoinbase := hasFlagArg(argv, "coinbase-output-value")
+	if hasFees != hasCoinbase {
+		fmt.Fprintln(os.Stderr, "missing required flags: --fees-in-block and --coinbase-output-value must be provided together")
+		return 2
+	}
+
+	subsidy, epoch := cmdCoinbaseSubsidy(*blockHeight)
+	if !hasFees {
+		fmt.Printf("%d %d\n", subsidy, epoch)
+		return 0
+	}
+
+	maxVal, overflow := addUint64Safe(subsidy, *feesInBlock)
+	if overflow || *coinbaseOutputValue > maxVal {
+		fmt.Fprintln(os.Stderr, "BLOCK_ERR_SUBSIDY_EXCEEDED")
+		return 1
+	}
+	fmt.Println("OK")
 	return 0
 }
 
@@ -973,6 +1025,8 @@ func main() {
 		exitCode = cmdTxIDMain(argv)
 	case "weight":
 		exitCode = cmdWeightMain(argv)
+	case "coinbase":
+		exitCode = cmdCoinbaseMain(argv)
 	case "sighash":
 		exitCode = cmdSighashMain(argv)
 	case "verify":
