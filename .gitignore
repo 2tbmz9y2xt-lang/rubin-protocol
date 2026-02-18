@@ -1,0 +1,21 @@
+# Local/dev artifacts (do not commit)
+
+# OS/editor
+.DS_Store
+
+# Rust
+**/target/
+
+# Go tool outputs / local scan artifacts
+clients/go/gosec_output.json
+clients/go/semgrep_output.json
+
+# Rust scan artifacts
+clients/rust/cargo_audit.json
+
+# Local UI / task tracker workspace
+rubin-ui/
+
+# Local scratch docs
+IMPLEMENTATION_ROADMAP.md
+
