@@ -1433,40 +1433,36 @@ Against a light client without checkpoints or diverse peers:
 - **Chain tip lag**: serve a stale tip to keep the client operating on an old chain view,
   enabling time-based covenant attacks (e.g., HTLC refund window manipulation).
 
-#### 14.2.4 Mitigations for light clients (non-normative)
+#### 14.2.4 Mitigations for light clients
 
-These are operational recommendations, not consensus requirements:
+Items 2 and 6 below are normatively specified in
+`spec/RUBIN_L1_LIGHT_CLIENT_SECURITY_v1.1.md`. The remaining items are operational
+recommendations.
 
 1. **Multiple diverse peers**: connect to ≥ 3 peers across independent operators/subnets.
-   Probability of complete eclipse drops sharply with peer diversity.
    See `spec/RUBIN_L1_P2P_PROTOCOL_v1.1.md §7.1` (anti-eclipse heuristics).
 
-2. **Checkpoints**: embed one or more operator-selected block hashes at known heights as
-   trust anchors. A checkpoint prevents the adversary from feeding a chain that forks
-   before the checkpoint height, as long as the checkpoint was obtained honestly
-   (e.g., hard-coded at client build time from a trusted source).
-   Checkpoint hygiene: checkpoints SHOULD be at heights ≥ `COINBASE_MATURITY` blocks
-   behind the tip to avoid pinning on orphan-risk blocks.
+2. **Checkpoints** *(normative — see LIGHT_CLIENT_SECURITY §2)*: hard-coded block hashes
+   at known heights. A chain conflicting with any checkpoint MUST be rejected as
+   `ECLIPSE_ERR_CHECKPOINT_MISMATCH`. Build-time embedding required for mainnet.
+   Checkpoint hygiene: heights MUST be ≥ `COINBASE_MATURITY` blocks behind the tip
+   at publish time. Gap limit: `MAX_CHECKPOINT_GAP = 100_800` blocks.
 
-3. **Difficulty anomaly detection**: reject headers whose difficulty drops by more than
-   an expected retarget bound in a single window (CANONICAL §6.4). Sudden difficulty
-   drops suggest the adversary is feeding a low-work fork.
+3. **Difficulty anomaly detection**: reject headers whose difficulty drops beyond the
+   expected retarget bound in a single window (CANONICAL §6.4).
 
-4. **Median-time consistency**: enforce header `timestamp` rules at every step
-   (CANONICAL §6.5, §15 item 10). Inconsistent timestamps across a fed chain indicate
-   a fabricated sequence.
+4. **Median-time consistency**: enforce header `timestamp` rules (CANONICAL §6.5).
 
 5. **Out-of-band tip verification**: periodically query a trusted HTTPS endpoint or
-   DNS seed for the current chain tip hash. A discrepancy between the P2P-fed tip and
-   the out-of-band tip is a strong eclipse signal.
+   DNS seed for the current chain tip hash.
 
-6. **`anchorproof` multi-path confirmation**: for high-value ANCHOR verification
-   (HTLC claims, key-migration shadow-bindings), request the same `anchorproof` from
-   at least 2 independent peers. Divergent responses indicate either a fork or an eclipse.
+6. **`anchorproof` multi-peer confirmation** *(normative — see LIGHT_CLIENT_SECURITY §3)*:
+   for HTLC claims and key-migration operations, require `MIN_ANCHORPROOF_PEERS = 2`
+   independent peers to return agreeing `anchorproof` responses before acting.
+   Minimum confirmation depth: `MIN_ANCHORPROOF_DEPTH = 6` blocks.
 
-7. **Connection-layer diversity**: for mobile/embedded light clients, prefer connections
-   via Tor or an independent transport to ensure the network-layer adversary cannot
-   trivially identify and reroute all connections to adversary-controlled nodes.
+7. **Connection-layer diversity**: for mobile/embedded clients, prefer Tor or independent
+   transport to prevent network-layer adversaries from rerouting all connections.
 
 #### 14.2.5 RUBIN-specific risk: ANCHOR-based eclipse
 
@@ -1480,9 +1476,11 @@ layer consequences beyond simple payment fraud:
 - A fraudulent shadow-binding anchor causes the client to accept a key rotation that
   did not occur on-chain, enabling key replacement attacks.
 
-Mitigation: all ANCHOR-based application logic SHOULD require multi-peer confirmation
-(§14.2.4 item 6) and SHOULD enforce a confirmation depth ≥ 6 blocks before treating
-an anchor as authoritative (see also KEY_MANAGEMENT §3.1 timelock recommendation).
+Mitigation: all ANCHOR-based application logic MUST require multi-peer confirmation
+and confirmation depth ≥ `MIN_ANCHORPROOF_DEPTH` blocks before treating an anchor as
+authoritative. Full normative specification:
+`spec/RUBIN_L1_LIGHT_CLIENT_SECURITY_v1.1.md §3`
+(see also KEY_MANAGEMENT §3.1 timelock recommendation).
 
 1. Node peers MUST implement peer discovery and peer-version handshake sufficient to exchange:
    - `version`, `verack`, `wtxid` (relayed via `inv/getdata` `inv_type = 2`), `ping`, `pong`,
