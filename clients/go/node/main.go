@@ -269,6 +269,7 @@ func cmdVerify(
 	chainHeight uint64,
 	chainTimestamp uint64,
 	suiteID02Active bool,
+	htlcV2Active bool,
 ) error {
 	p, cleanup, err := loadCryptoProvider()
 	if err != nil {
@@ -302,7 +303,7 @@ func cmdVerify(
 		chainHeight,
 		chainTimestamp,
 		suiteID02Active,
-		false, // htlc_anchor_v1 deployment gate (wired via VERSION_BITS deployments in future)
+		htlcV2Active, // htlc_anchor_v1 deployment gate (wired via VERSION_BITS deployments in future)
 	); err != nil {
 		return err
 	}
@@ -660,7 +661,7 @@ func cmdReorg(contextPath string) (string, error) {
 	return "", fmt.Errorf("REORG_ERR_PARSE: unsupported context shape")
 }
 
-const usageCommands = "commands: version | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse --tx-hex <hex> [--max-witness-bytes <u64>] | txid --tx-hex <hex> | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify --tx-hex <hex> --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-id-hex <hex64> | --profile <path>] | apply-utxo --context-json <path> | apply-block --context-json <path> | reorg --context-json <path>"
+const usageCommands = "commands: version | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse --tx-hex <hex> [--max-witness-bytes <u64>] | txid --tx-hex <hex> | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify --tx-hex <hex> --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-id-hex <hex64> | --profile <path> | --suite-id-02-active | --htlc-v2-active] | apply-utxo --context-json <path> | apply-block --context-json <path> | reorg --context-json <path>"
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage: rubin-node <command> [args]")
@@ -764,6 +765,7 @@ func cmdVerifyMain(argv []string) int {
 	chainHeight := fs.Uint64("chain-height", 0, "chain height context")
 	chainTimestamp := fs.Uint64("chain-timestamp", 0, "chain timestamp context")
 	suiteID02Active := fs.Bool("suite-id-02-active", false, "treat suite_id 0x02 as active")
+	htlcV2Active := fs.Bool("htlc-v2-active", false, "treat CORE_HTLC_V2 (htlc_anchor_v1) as active")
 	_ = fs.Parse(argv)
 
 	if *txHex == "" {
@@ -827,6 +829,7 @@ func cmdVerifyMain(argv []string) int {
 		*chainHeight,
 		*chainTimestamp,
 		*suiteID02Active,
+		*htlcV2Active,
 	); err != nil {
 		fmt.Fprintln(os.Stderr, "verify error:", err)
 		return 1
