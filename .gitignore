@@ -5,17 +5,27 @@
 
 # Rust
 **/target/
+**/venv/
+**/.venv/
 
 # Go tool outputs / local scan artifacts
 clients/go/gosec_output.json
 clients/go/semgrep_output.json
+**/gosec_output.json
+**/semgrep_output.json
 
 # Rust scan artifacts
 clients/rust/cargo_audit.json
+**/cargo_audit.json
+
+# Local analysis outputs
+analysis/
+
+# Local runtime env files
+operational/systemd/rubin-node.env
 
 # Local UI / task tracker workspace
 rubin-ui/
 
 # Local scratch docs
 IMPLEMENTATION_ROADMAP.md
-
