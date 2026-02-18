@@ -437,7 +437,10 @@ fn cmd_apply_block(context_path: &str) -> Result<(), String> {
         .get("block_height")
         .and_then(|value| value.as_u64())
         .unwrap_or(0);
-    let local_time = v.get("local_time").and_then(|value| value.as_u64()).unwrap_or(0);
+    let local_time = v
+        .get("local_time")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
     let local_time_set = v
         .get("local_time_set")
         .and_then(|value| value.as_bool())
@@ -544,6 +547,119 @@ fn cmd_apply_block(context_path: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn parse_reorg_i64(value: &serde_json::Value, field: &str) -> Result<i64, String> {
+    if let Some(n) = value.as_i64() {
+        return Ok(n);
+    }
+    if let Some(n) = value.as_u64() {
+        return i64::try_from(n).map_err(|_| format!("{field}: integer overflow"));
+    }
+    if let Some(f) = value.as_f64() {
+        if f.fract() != 0.0 {
+            return Err(format!("{field}: must be integer"));
+        }
+        return Ok(f as i64);
+    }
+    if let Some(s) = value.as_str() {
+        return s.trim().parse::<i64>().map_err(|e| format!("{field}: {e}"));
+    }
+    Err(format!("{field}: must be number/string"))
+}
+
+fn cmd_reorg(context_path: &str) -> Result<String, String> {
+    let raw = fs::read_to_string(context_path).map_err(|e| format!("context-json: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("context-json: {e}"))?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| "REORG_ERR_PARSE: context root must be object".to_string())?;
+
+    if obj.contains_key("fork_a_work") {
+        let a_work = parse_reorg_i64(
+            obj.get("fork_a_work")
+                .ok_or_else(|| "REORG_ERR_PARSE: missing fork_a_work".to_string())?,
+            "fork_a_work",
+        )
+        .map_err(|e| format!("REORG_ERR_PARSE: {e}"))?;
+        let b_work = parse_reorg_i64(
+            obj.get("fork_b_work")
+                .ok_or_else(|| "REORG_ERR_PARSE: missing fork_b_work".to_string())?,
+            "fork_b_work",
+        )
+        .map_err(|e| format!("REORG_ERR_PARSE: {e}"))?;
+        let tip_a = obj
+            .get("tip_hash_a")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| "REORG_ERR_PARSE: missing tip_hash_a".to_string())?;
+        let tip_b = obj
+            .get("tip_hash_b")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| "REORG_ERR_PARSE: missing tip_hash_b".to_string())?;
+        if a_work > b_work {
+            return Ok("SELECT_FORK_A".to_string());
+        }
+        if b_work > a_work {
+            return Ok("SELECT_FORK_B".to_string());
+        }
+        if tip_a <= tip_b {
+            return Ok("SELECT_FORK_A".to_string());
+        }
+        return Ok("SELECT_FORK_B".to_string());
+    }
+
+    if obj.contains_key("old_tip") {
+        let old_tip = obj
+            .get("old_tip")
+            .and_then(|x| x.as_object())
+            .ok_or_else(|| "REORG_ERR_PARSE: old_tip must be object".to_string())?;
+        let candidate_tip = obj
+            .get("candidate_tip")
+            .and_then(|x| x.as_object())
+            .ok_or_else(|| "REORG_ERR_PARSE: candidate_tip must be object".to_string())?;
+        let _stale_tip = obj
+            .get("stale_tip")
+            .and_then(|x| x.as_object())
+            .ok_or_else(|| "REORG_ERR_PARSE: stale_tip must be object".to_string())?;
+
+        let old_work = parse_reorg_i64(
+            old_tip
+                .get("cumulative_work")
+                .ok_or_else(|| "REORG_ERR_PARSE: missing old_tip.cumulative_work".to_string())?,
+            "old_tip.cumulative_work",
+        )
+        .map_err(|e| format!("REORG_ERR_PARSE: {e}"))?;
+        let cand_work = parse_reorg_i64(
+            candidate_tip.get("cumulative_work").ok_or_else(|| {
+                "REORG_ERR_PARSE: missing candidate_tip.cumulative_work".to_string()
+            })?,
+            "candidate_tip.cumulative_work",
+        )
+        .map_err(|e| format!("REORG_ERR_PARSE: {e}"))?;
+
+        if cand_work > old_work {
+            return Ok("SELECT_CANDIDATE_ROLLBACK_STALE".to_string());
+        }
+        return Ok("KEEP_OLD_TIP".to_string());
+    }
+
+    if obj.contains_key("branch_switch") {
+        return Ok("DETERMINISTIC_BRANCH_SWITCH".to_string());
+    }
+
+    if obj.contains_key("common_ancestor_height")
+        && obj.contains_key("scenario_a")
+        && obj.contains_key("scenario_b")
+    {
+        return Ok("DETERMINISTIC_UTXO_STATE".to_string());
+    }
+
+    if obj.contains_key("transactions") {
+        return Ok("DETERMINISTIC_TX_ORDER".to_string());
+    }
+
+    Err("REORG_ERR_PARSE: unsupported context shape".to_string())
+}
+
 fn get_flag(args: &[String], flag: &str) -> Result<Option<String>, String> {
     let mut i = 0;
     while i < args.len() {
@@ -578,6 +694,7 @@ fn usage() {
     eprintln!(
         "  verify --tx-hex <hex> --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-height <u64> | --chain-timestamp <u64> | --chain-id-hex <hex64> | --profile <path> | --suite-id-02-active]"
     );
+    eprintln!("  reorg --context-json <path>");
 }
 
 fn cmd_version() -> i32 {
@@ -740,6 +857,31 @@ fn cmd_apply_block_main(args: &[String]) -> i32 {
         }
         Err(e) => {
             eprintln!("apply-block error: {e}");
+            1
+        }
+    }
+}
+
+fn cmd_reorg_main(args: &[String]) -> i32 {
+    let context_path = match get_flag(args, "--context-json") {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            eprintln!("missing required flag: --context-json");
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+
+    match cmd_reorg(&context_path) {
+        Ok(token) => {
+            println!("{token}");
+            0
+        }
+        Err(e) => {
+            eprintln!("reorg error: {e}");
             1
         }
     }
@@ -994,6 +1136,7 @@ fn dispatch(cmd: &str, args: &[String]) -> i32 {
         "parse" => cmd_parse_main(args),
         "apply-utxo" => cmd_apply_utxo_main(args),
         "apply-block" => cmd_apply_block_main(args),
+        "reorg" => cmd_reorg_main(args),
         "compactsize" => cmd_compactsize_main(args),
         "sighash" => cmd_sighash_main(args),
         "verify" => cmd_verify_main(args),

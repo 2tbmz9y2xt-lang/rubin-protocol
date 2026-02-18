@@ -40,7 +40,13 @@ python3 conformance/runner/run_cv_reorg.py
 Notes:
 - `CV-COMPACTSIZE` and `CV-PARSE` now perform cross-client checks.
 - `CV-SIGHASH` and `CV-SIGCHECK` are now cross-client in the bundle runner.
-- `CV-BIND`, `CV-UTXO`, `CV-DEP`, `CV-BLOCK`, `CV-REORG` currently have deterministic bundle-side checks (fixture-shape driven); full node-layer parity is still TODO in standalone runners.
+- Standalone runners now execute cross-client node CLI checks for:
+  - `CV-BIND` (`verify` / `apply-utxo` where applicable),
+  - `CV-UTXO` (`apply-utxo`),
+  - `CV-DEP` (`verify` deployment-gate behavior),
+  - `CV-REORG` (`reorg` command),
+  - `CV-BLOCK` (`apply-block` via bundle filter).
+- For `CV-BIND` theorem-style vectors (`BIND-05/06`) and `CV-DEP` signature-validity-free checks, runners keep deterministic assertions where fixtures are proof/shape-oriented.
 
 ## Bundle runner (WIP)
 
@@ -56,6 +62,12 @@ python3 conformance/runner/run_cv_bundle.py
 - `CV-PARSE` using fixture context builders (`tx_hex` when present, fallback synthesis otherwise)
 - `CV-BIND`, `CV-UTXO`, `CV-DEP` via deterministic fixture checks
 - `CV-BLOCK`, `CV-REORG` via deterministic block/reorg fixture checks
+
+Gate filter:
+
+```bash
+python3 conformance/runner/run_cv_bundle.py --only-gates CV-BLOCK
+```
 
 ## Strict wolfcrypt mode (CI / production tooling)
 

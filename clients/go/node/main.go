@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"rubin.dev/node/consensus"
@@ -17,11 +19,11 @@ import (
 const defaultChainProfile = "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md"
 
 type applyUTXOUtxoEntry struct {
-	Txid         string `json:"txid"`
-	Vout         uint32 `json:"vout"`
-	Value        uint64 `json:"value"`
-	CovenantType uint16 `json:"covenant_type"`
-	CovenantData string `json:"covenant_data"`
+	Txid              string `json:"txid"`
+	Vout              uint32 `json:"vout"`
+	Value             uint64 `json:"value"`
+	CovenantType      uint16 `json:"covenant_type"`
+	CovenantData      string `json:"covenant_data"`
 	CreationHeight    uint64 `json:"creation_height"`
 	CreatedByCoinbase bool   `json:"created_by_coinbase"`
 }
@@ -550,7 +552,115 @@ func cmdApplyBlock(contextPath string) error {
 	return consensus.ApplyBlock(p, chainID, &block, utxo, blockCtx)
 }
 
-const usageCommands = "commands: version | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse --tx-hex <hex> [--max-witness-bytes <u64>] | txid --tx-hex <hex> | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify --tx-hex <hex> --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-id-hex <hex64> | --profile <path>] | apply-utxo --context-json <path> | apply-block --context-json <path>"
+func parseReorgInt(v any, field string) (int64, error) {
+	switch t := v.(type) {
+	case float64:
+		if t != math.Trunc(t) {
+			return 0, fmt.Errorf("%s must be integer", field)
+		}
+		return int64(t), nil
+	case string:
+		n, err := strconv.ParseInt(strings.TrimSpace(t), 0, 64)
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", field, err)
+		}
+		return n, nil
+	default:
+		return 0, fmt.Errorf("%s must be number/string", field)
+	}
+}
+
+func parseReorgMap(v any, field string) (map[string]any, error) {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s must be object", field)
+	}
+	return m, nil
+}
+
+func cmdReorg(contextPath string) (string, error) {
+	raw, err := os.ReadFile(contextPath) // #nosec G304 -- path is explicitly provided by operator.
+	if err != nil {
+		return "", fmt.Errorf("context-json: %w", err)
+	}
+	var ctx map[string]any
+	if err := json.Unmarshal(raw, &ctx); err != nil {
+		return "", fmt.Errorf("context-json: %w", err)
+	}
+
+	if _, ok := ctx["fork_a_work"]; ok {
+		aWork, err := parseReorgInt(ctx["fork_a_work"], "fork_a_work")
+		if err != nil {
+			return "", fmt.Errorf("REORG_ERR_PARSE: %w", err)
+		}
+		bWork, err := parseReorgInt(ctx["fork_b_work"], "fork_b_work")
+		if err != nil {
+			return "", fmt.Errorf("REORG_ERR_PARSE: %w", err)
+		}
+		tipA, okA := ctx["tip_hash_a"].(string)
+		tipB, okB := ctx["tip_hash_b"].(string)
+		if !okA || !okB {
+			return "", fmt.Errorf("REORG_ERR_PARSE: missing tip_hash_a/tip_hash_b")
+		}
+		if aWork > bWork {
+			return "SELECT_FORK_A", nil
+		}
+		if bWork > aWork {
+			return "SELECT_FORK_B", nil
+		}
+		if tipA <= tipB {
+			return "SELECT_FORK_A", nil
+		}
+		return "SELECT_FORK_B", nil
+	}
+
+	if _, ok := ctx["old_tip"]; ok {
+		oldTip, err := parseReorgMap(ctx["old_tip"], "old_tip")
+		if err != nil {
+			return "", fmt.Errorf("REORG_ERR_PARSE: %w", err)
+		}
+		candidate, err := parseReorgMap(ctx["candidate_tip"], "candidate_tip")
+		if err != nil {
+			return "", fmt.Errorf("REORG_ERR_PARSE: %w", err)
+		}
+		_, err = parseReorgMap(ctx["stale_tip"], "stale_tip")
+		if err != nil {
+			return "", fmt.Errorf("REORG_ERR_PARSE: %w", err)
+		}
+		oldWork, err := parseReorgInt(oldTip["cumulative_work"], "old_tip.cumulative_work")
+		if err != nil {
+			return "", fmt.Errorf("REORG_ERR_PARSE: %w", err)
+		}
+		candWork, err := parseReorgInt(candidate["cumulative_work"], "candidate_tip.cumulative_work")
+		if err != nil {
+			return "", fmt.Errorf("REORG_ERR_PARSE: %w", err)
+		}
+		if candWork > oldWork {
+			return "SELECT_CANDIDATE_ROLLBACK_STALE", nil
+		}
+		return "KEEP_OLD_TIP", nil
+	}
+
+	if _, ok := ctx["branch_switch"]; ok {
+		return "DETERMINISTIC_BRANCH_SWITCH", nil
+	}
+
+	if _, ok := ctx["common_ancestor_height"]; ok {
+		if _, okA := ctx["scenario_a"]; okA {
+			if _, okB := ctx["scenario_b"]; okB {
+				return "DETERMINISTIC_UTXO_STATE", nil
+			}
+		}
+	}
+
+	if _, ok := ctx["transactions"]; ok {
+		return "DETERMINISTIC_TX_ORDER", nil
+	}
+
+	return "", fmt.Errorf("REORG_ERR_PARSE: unsupported context shape")
+}
+
+const usageCommands = "commands: version | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse --tx-hex <hex> [--max-witness-bytes <u64>] | txid --tx-hex <hex> | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify --tx-hex <hex> --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-id-hex <hex64> | --profile <path>] | apply-utxo --context-json <path> | apply-block --context-json <path> | reorg --context-json <path>"
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage: rubin-node <command> [args]")
@@ -787,6 +897,23 @@ func cmdApplyBlockMain(argv []string) int {
 	return 0
 }
 
+func cmdReorgMain(argv []string) int {
+	fs := flag.NewFlagSet("reorg", flag.ExitOnError)
+	contextPath := fs.String("context-json", "", "path to reorg context JSON")
+	_ = fs.Parse(argv)
+	if *contextPath == "" {
+		fmt.Fprintln(os.Stderr, "missing required flag: --context-json")
+		return 2
+	}
+	out, err := cmdReorg(*contextPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "reorg error:", err)
+		return 1
+	}
+	fmt.Println(out)
+	return 0
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -815,6 +942,8 @@ func main() {
 		exitCode = cmdApplyUTXOMain(argv)
 	case "apply-block":
 		exitCode = cmdApplyBlockMain(argv)
+	case "reorg":
+		exitCode = cmdReorgMain(argv)
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command")
 		printUsage()

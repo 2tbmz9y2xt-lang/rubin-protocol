@@ -11,7 +11,7 @@ from pathlib import Path
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[2]
     p = subprocess.run(
-        [sys.executable, "conformance/runner/run_cv_bundle.py"],
+        [sys.executable, "conformance/runner/run_cv_bundle.py", "--only-gates", "CV-BLOCK"],
         cwd=str(repo_root),
     )
     return p.returncode
@@ -19,4 +19,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

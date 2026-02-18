@@ -166,6 +166,83 @@ def make_parse_tx_bytes(ctx: dict[str, object]) -> str:
     return hexlify(tx_parts)
 
 
+def extract_error_token(stderr: str) -> str:
+    normalized = (
+        stderr.replace(":", " ")
+        .replace(",", " ")
+        .replace("(", " ")
+        .replace(")", " ")
+    )
+    for tok in normalized.split():
+        if tok.startswith("TX_ERR_") or tok.startswith("BLOCK_ERR_") or tok.startswith("REORG_ERR_"):
+            return tok
+    return stderr.strip()
+
+
+def build_tx_hex(
+    *,
+    version: int,
+    tx_nonce: int,
+    inputs: list[dict[str, object]],
+    outputs: list[dict[str, object]],
+    locktime: int,
+    witnesses: list[dict[str, object]],
+) -> str:
+    b = bytearray()
+    b.extend(encode_u32_le(version))
+    b.extend(encode_u64_le(tx_nonce))
+
+    b.extend(encode_compact_size(len(inputs)))
+    for item in inputs:
+        prev_txid = item.get("prev_txid", bytes(32))
+        if not isinstance(prev_txid, (bytes, bytearray)) or len(prev_txid) != 32:
+            raise ValueError("input.prev_txid must be 32 bytes")
+        prev_vout = parse_int(item.get("prev_vout", 0))
+        script_sig = item.get("script_sig", b"")
+        if not isinstance(script_sig, (bytes, bytearray)):
+            raise ValueError("input.script_sig must be bytes")
+        sequence = parse_int(item.get("sequence", 0))
+
+        b.extend(prev_txid)
+        b.extend(encode_u32_le(prev_vout))
+        b.extend(encode_compact_size(len(script_sig)))
+        b.extend(script_sig)
+        b.extend(encode_u32_le(sequence))
+
+    b.extend(encode_compact_size(len(outputs)))
+    for item in outputs:
+        value = parse_int(item.get("value", 0))
+        covenant_type = parse_int(item.get("covenant_type", 0))
+        covenant_data = item.get("covenant_data", b"")
+        if not isinstance(covenant_data, (bytes, bytearray)):
+            raise ValueError("output.covenant_data must be bytes")
+        b.extend(encode_u64_le(value))
+        b.extend(encode_u16_le(covenant_type))
+        b.extend(encode_compact_size(len(covenant_data)))
+        b.extend(covenant_data)
+
+    b.extend(encode_u32_le(locktime))
+    b.extend(encode_compact_size(len(witnesses)))
+    for item in witnesses:
+        suite_id = parse_int(item.get("suite_id", 0))
+        pubkey = item.get("pubkey", b"")
+        sig = item.get("sig", b"")
+        if not isinstance(pubkey, (bytes, bytearray)):
+            raise ValueError("witness.pubkey must be bytes")
+        if not isinstance(sig, (bytes, bytearray)):
+            raise ValueError("witness.sig must be bytes")
+        if not (0 <= suite_id <= 255):
+            raise ValueError("witness.suite_id must fit u8")
+
+        b.append(suite_id & 0xFF)
+        b.extend(encode_compact_size(len(pubkey)))
+        b.extend(pubkey)
+        b.extend(encode_compact_size(len(sig)))
+        b.extend(sig)
+
+    return hexlify(bytes(b))
+
+
 def run(
     client: ClientCmd,
     argv: list[str],
