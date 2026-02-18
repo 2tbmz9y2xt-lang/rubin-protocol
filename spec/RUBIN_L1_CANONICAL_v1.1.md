@@ -58,24 +58,17 @@ Development status note (non-normative):
 - `K_CONFIRM_L1 = 8` (non-consensus recommended parameter)
 - `K_CONFIRM_BRIDGE = 12` (non-consensus recommended parameter)
 - `K_CONFIRM_GOV = 16` (non-consensus recommended parameter)
-- `BLOCK_SUBSIDY_INITIAL = 5_000_000_000`
-- `SUBSIDY_HALVING_INTERVAL = 210_000`
-- `MAX_SUPPLY = 2_100_000_000_000_000`
+- `BASE_UNITS_PER_RBN = 100_000_000`
+- `MAX_SUPPLY = 10_000_000_000_000_000` base units (100,000,000 RBN)
+- `SUBSIDY_TOTAL_MINED = 9_900_000_000_000_000` base units (99,000,000 RBN)
+- `SUBSIDY_DURATION_BLOCKS = 1_314_900` blocks
 
-Non-normative note (emission schedule and genesis intent): total supply target is
-100,000,000 RBN (`MAX_SUPPLY = 2_100_000_000_000_000` base units; 1 RBN = 21_000_000
-base units).
-
-Under the v1.1 subsidy schedule (mined emission only, excluding any genesis allocations),
-the discrete halving schedule over 34 epochs (epoch 0..33) yields a theoretical maximum
-mined emission of `2_099_999_997_690_000` base units, which is `2_310_000` base units
-below `MAX_SUPPLY`. Epoch 32 subsidy = 1 base unit (last non-zero); epoch 33+ = 0.
-
-Genesis allocations (e.g., premine / unspendables) are chain-instance decisions. Current
-v1.1 chain-instance profiles contain a placeholder genesis with 0 outputs pending final
-ceremony (see `spec/TODO_ECONOMICS_AND_GENESIS.md`). If genesis outputs are introduced,
-emission parameters MUST be revised in a future canonical revision to keep the total
-supply target consistent.
+Non-normative note (emission schedule and genesis intent):
+- Total supply target is 100,000,000 RBN (`MAX_SUPPLY`) where values in transactions are in base units
+  (`BASE_UNITS_PER_RBN`).
+- Genesis allocations (e.g., premine / unspendables) are chain-instance decisions fixed by published genesis bytes.
+- v1.1 fixes the mined subsidy emission to `SUBSIDY_TOTAL_MINED` (99,000,000 RBN), leaving up to
+  1,000,000 RBN (1% of total) for genesis allocations while keeping the total supply target consistent.
 
 Full subsidy formula: §4.5.
 - `MAX_TX_INPUTS = 1_024`
@@ -699,21 +692,26 @@ sum(outputs.value) ≤ block_subsidy(height) + Σ fees(tx in transactions exclud
 
 **Subsidy formula:**
 
-Let `epoch = floor(height / SUBSIDY_HALVING_INTERVAL)`.
+Let:
+- `N = SUBSIDY_DURATION_BLOCKS`
+- `TOTAL = SUBSIDY_TOTAL_MINED`
+- `BASE = floor(TOTAL / N)`
+- `REM = TOTAL mod N`
 
 ```
-block_subsidy(height) = BLOCK_SUBSIDY_INITIAL >> epoch,  for epoch ≤ 33
-block_subsidy(height) = 0,                               for epoch > 33
+block_subsidy(height) = 0,                      for height ≥ N
+block_subsidy(height) = BASE + 1,               for height < REM
+block_subsidy(height) = BASE,                   for REM ≤ height < N
 ```
 
-Arithmetic MUST use integer right-shift (floor division by 2^epoch), not floating-point.
-Overflow is impossible: `BLOCK_SUBSIDY_INITIAL = 5_000_000_000` fits in u64; each halving
-reduces the value; epoch 32 yields 1 base unit; epoch 33+ yields 0.
+Arithmetic MUST use integer division / modulo; no floating-point is permitted.
+Overflow is impossible: all values are within `u64` and all operations are checked.
 
-Total mined emission (subsidy-only; excluding any genesis allocations) is capped so that the
-sum of emitted subsidy never exceeds `MAX_SUPPLY`.
-Non-normative note: the discrete halving schedule yields a total mined emission of
-`2_099_999_997_690_000` base units, which is `2_310_000` base units below `MAX_SUPPLY`.
+Total mined emission (subsidy-only; excluding any genesis allocations) is fixed so that:
+- the sum of emitted subsidy over all heights equals exactly `SUBSIDY_TOTAL_MINED`, and
+- `SUBSIDY_TOTAL_MINED ≤ MAX_SUPPLY`.
+
+Non-normative note: for the v1.1 constants above, `BASE = 7_529_089_664` and `REM = 806_400`.
 Conformance: CV-COINBASE.
 
 ### 4.6 Value conservation (Normative)

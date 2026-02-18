@@ -77,7 +77,7 @@ Build-time checkpoints MUST satisfy:
 - `height ≥ COINBASE_MATURITY` (100) to avoid orphan-risk blocks.
 - `height ≤ chain_height_at_build_time − COINBASE_MATURITY` to avoid reorg-risk.
 - At least one checkpoint per major release. For testnet: at least one per epoch
-  (`SUBSIDY_HALVING_INTERVAL = 210_000` blocks). For mainnet: at least one per year
+  (at least one per difficulty window: `WINDOW_SIZE = 2_016` blocks). For mainnet: at least one per year
   of expected block production.
 
 **Method B — Operator-signed checkpoint file (OPTIONAL, testnet only):**

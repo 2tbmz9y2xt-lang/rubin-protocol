@@ -3,124 +3,92 @@ gate: CV-COINBASE
 status: PASS
 description: >
   Coinbase subsidy formula correctness and non-overflow (T-015).
-  Tests cover: epoch boundary transitions, epoch 32 (last non-zero subsidy),
-  epoch 33+ (zero subsidy), subsidy-exceeded rejection, and u64 non-overflow
-  at all valid heights. Theorem: block_subsidy(h) ∈ [0, BLOCK_SUBSIDY_INITIAL]
-  with no integer overflow for all h ∈ [0, 2^64-1].
-  Ref: CANONICAL §4.5, §1.2 (BLOCK_SUBSIDY_INITIAL, SUBSIDY_HALVING_INTERVAL).
+  Tests cover: linear emission remainder distribution, transition to zero subsidy,
+  subsidy-exceeded rejection, and u64 non-overflow at all valid heights.
+  Ref: CANONICAL §4.5, §1.2 (SUBSIDY_TOTAL_MINED, SUBSIDY_DURATION_BLOCKS).
 
 tests:
   - id: COINBASE-01
-    title: "PASS: genesis block subsidy = BLOCK_SUBSIDY_INITIAL (5_000_000_000)"
+    title: "PASS: genesis subsidy (h=0) is BASE+1 (remainder region)"
     context:
       block_height: 0
-    expected_subsidy: 5000000000
+    expected_subsidy: 7529089665
     expected_epoch: 0
     consensus: true
     theorem: T-015
 
   - id: COINBASE-02
-    title: "PASS: last block of epoch 0 (h=209_999) subsidy = 5_000_000_000"
+    title: "PASS: last remainder block (h=REM-1) subsidy = BASE+1"
     context:
-      block_height: 209999
-    expected_subsidy: 5000000000
+      block_height: 806399
+    expected_subsidy: 7529089665
     expected_epoch: 0
     consensus: true
     theorem: T-015
 
   - id: COINBASE-03
-    title: "PASS: first halving (h=210_000, epoch 1) subsidy = 2_500_000_000"
+    title: "PASS: first base-only block (h=REM) subsidy = BASE"
     context:
-      block_height: 210000
-    expected_subsidy: 2500000000
-    expected_epoch: 1
+      block_height: 806400
+    expected_subsidy: 7529089664
+    expected_epoch: 0
     consensus: true
     theorem: T-015
 
   - id: COINBASE-04
-    title: "PASS: second halving (h=420_000, epoch 2) subsidy = 1_250_000_000"
+    title: "PASS: last subsidized block (h=N-1) subsidy = BASE"
     context:
-      block_height: 420000
-    expected_subsidy: 1250000000
-    expected_epoch: 2
+      block_height: 1314899
+    expected_subsidy: 7529089664
+    expected_epoch: 0
     consensus: true
     theorem: T-015
 
   - id: COINBASE-05
-    title: "PASS: epoch 32 start (h=6_720_000) — last non-zero subsidy epoch boundary"
+    title: "PASS: first zero-subsidy block (h=N) subsidy = 0"
     context:
-      block_height: 6720000
-    expected_subsidy: 1
-    expected_epoch: 32
+      block_height: 1314900
+    expected_subsidy: 0
+    expected_epoch: 1
     consensus: true
     theorem: T-015
-    note: "epoch=floor(6720000/210000)=32; subsidy=5_000_000_000>>32=1 base unit"
 
   - id: COINBASE-06
-    title: "PASS: epoch 34 (h=7_140_000) subsidy = 0"
-    context:
-      block_height: 7140000
-    expected_subsidy: 0
-    expected_epoch: 34
-    consensus: true
-    theorem: T-015
-
-  - id: COINBASE-07
     title: "PASS: max u32 height (h=4_294_967_295) subsidy = 0 (no overflow)"
     context:
       block_height: 4294967295
     expected_subsidy: 0
-    expected_epoch: 20452
+    expected_epoch: 1
     consensus: true
     theorem: T-015
-    note: "Non-overflow: epoch>>33 → subsidy=0; no arithmetic on large epoch produces overflow"
 
-  - id: COINBASE-08
+  - id: COINBASE-07
     title: "FAIL: coinbase output value > subsidy + fees (non-genesis) => BLOCK_ERR_SUBSIDY_EXCEEDED"
     context:
       block_height: 1
       fees_in_block: 0
-      coinbase_output_value: 5000000001
+      coinbase_output_value: 7529089666
+    expected_error: BLOCK_ERR_SUBSIDY_EXCEEDED
+    consensus: true
+    theorem: T-015
+
+  - id: COINBASE-08
+    title: "FAIL: coinbase output value > subsidy+fees even with fees (non-genesis) => BLOCK_ERR_SUBSIDY_EXCEEDED"
+    context:
+      block_height: 1
+      fees_in_block: 1000
+      coinbase_output_value: 7529090666
     expected_error: BLOCK_ERR_SUBSIDY_EXCEEDED
     consensus: true
     theorem: T-015
 
   - id: COINBASE-09
-    title: "FAIL: coinbase output value > subsidy+fees even with fees (non-genesis) => BLOCK_ERR_SUBSIDY_EXCEEDED"
-    context:
-      block_height: 1
-      fees_in_block: 100
-      coinbase_output_value: 5000000200
-    expected_error: BLOCK_ERR_SUBSIDY_EXCEEDED
-    consensus: true
-    theorem: T-015
-
-  - id: COINBASE-10
     title: "PASS: coinbase value = subsidy + fees exactly (boundary, non-genesis)"
     context:
       block_height: 1
-      fees_in_block: 500
-      coinbase_output_value: 5000000500
+      fees_in_block: 1000
+      coinbase_output_value: 7529090665
     expected_code: PASS
     consensus: true
     theorem: T-015
 
-  - id: COINBASE-11
-    title: "PASS: epoch 32 last non-zero (h=6_929_999, epoch 32) subsidy = 1 base unit"
-    context:
-      block_height: 6929999
-    expected_subsidy: 1
-    expected_epoch: 32
-    consensus: true
-    theorem: T-015
-    note: "epoch=floor(6929999/210000)=32; subsidy=5_000_000_000>>32=1 base unit; confirms monotone decrease"
-
-  - id: COINBASE-12
-    title: "PASS: subsidy halving is integer shift (floor), not rounding"
-    context:
-      block_height: 630000
-    expected_subsidy: 625000000
-    expected_epoch: 3
-    consensus: true
-    theorem: T-015
-    note: "5_000_000_000>>3=625_000_000; confirms integer arithmetic, no rounding"
