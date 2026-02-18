@@ -63,6 +63,33 @@ func parseBlockHeaderBytesStrict(b []byte) (consensus.BlockHeader, error) {
 }
 
 func extractFencedHex(doc string, key string) (string, error) {
+	// Preferred format in chain-instance profiles is an inline backticked value:
+	// - `genesis_header_bytes`: `...hex...`
+	for _, line := range strings.Split(doc, "\n") {
+		if !strings.Contains(line, key) {
+			continue
+		}
+		colon := strings.Index(line, ":")
+		if colon < 0 {
+			continue
+		}
+		after := line[colon+1:]
+		first := strings.Index(after, "`")
+		if first < 0 {
+			continue
+		}
+		afterFirst := after[first+1:]
+		second := strings.Index(afterFirst, "`")
+		if second < 0 {
+			continue
+		}
+		value := strings.TrimSpace(afterFirst[:second])
+		if value != "" {
+			return value, nil
+		}
+	}
+
+	// Legacy fallback: fenced code block after the key.
 	idx := strings.Index(doc, key)
 	if idx < 0 {
 		return "", fmt.Errorf("missing key: %s", key)
@@ -273,6 +300,7 @@ func cmdVerify(
 		chainHeight,
 		chainTimestamp,
 		suiteID02Active,
+		false, // htlc_anchor_v1 deployment gate (wired via VERSION_BITS deployments in future)
 	); err != nil {
 		return err
 	}
@@ -417,6 +445,7 @@ func cmdApplyUTXO(contextPath string) error {
 		ctx.ChainHeight,
 		ctx.ChainTimestamp,
 		ctx.SuiteID02Active,
+		false,
 	)
 }
 

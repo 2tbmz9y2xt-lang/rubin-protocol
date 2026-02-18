@@ -10,7 +10,7 @@ For toolchain rationale and proof strategy see `formal/RUBIN_FORMAL_APPENDIX_v1.
 Proof status:
 - `spec+vector`  — stated in canonical spec, covered by conformance vector; Lean 4 proof pending
 - `spec+axiom`   — depends on cryptographic hardness assumption; stated as `axiom` in Lean 4 model
-- `lean4-proven` — machine-checked (currently local repo `/Users/gpt/Documents/rubin-formal`; will be pinned at freeze)
+- `lean4-proven` — machine-checked in `rubin-formal` at pinned commit `a694fbcda0ff38be2ee93a7c513dc3412f91bc7f`
 - `pending`      — not yet covered by spec section or conformance vector
 
 ---
@@ -35,7 +35,7 @@ Proof status:
 
 - **Statement**: A transaction accepted into a valid chain at height `h` with `(chain_id, tx_nonce)` MUST NOT be re-accepted at any height `h' > h` in the same chain. Cross-chain replay is prevented by `chain_id` domain separation in sighash.
 - **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §3.4`
-- **Evidence**: `CV-UTXO` (double-spend vector)
+- **Evidence**: `conformance/fixtures/CV-UTXO.yml` UTXO-01 (missing prevout), plus general CV-UTXO deterministic runner behavior
 - **Status**: `spec+vector`
 
 ### T-012 — CompactSize round-trip
@@ -72,19 +72,7 @@ Proof status:
 
 ---
 
-## VERSION_BITS
-
-### T-007 — VERSION_BITS terminality / monotonicity core
-
-- **Statement**: `ACTIVE` and `FAILED` are terminal under the FSM at window boundaries (spec §8.0.1 rule 5).
-- **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §8.0.1`
-- **Evidence**: `conformance/fixtures/CV-DEP.yml` DEP-04/DEP-05
-- **Status**: `lean4-proven` (terminal-at-boundary core) — `/Users/gpt/Documents/rubin-formal/RubinFormal/VersionBits.lean`
-
-Note (non-normative): a stronger theorem "ACTIVE at height h implies ACTIVE at all h' > h" is planned once the
-composition lemma for boundary-iteration (`applyBoundaries`) is formalized.
-
----
+----
 
 ## Covenant Semantics
 
@@ -103,12 +91,13 @@ composition lemma for boundary-iteration (`applyBoundaries`) is formalized.
 - **Evidence**: `conformance/fixtures/CV-VAULT.yml` VAULT-06
 - **Status**: `lean4-proven` (owner-path spend_delay monotonicity) — `/Users/gpt/Documents/rubin-formal/RubinFormal/CovenantTheorems.lean`
 
-### T-016 — Anchor relay cap non-interference (PENDING)
+### T-016 — Anchor relay cap non-interference
 
 - **Statement**: The relay policy `MAX_ANCHOR_PAYLOAD_RELAY = 1_024` is strictly narrower than the consensus `MAX_ANCHOR_PAYLOAD_SIZE = 65_536`. Any block containing a `CORE_ANCHOR` output with `|anchor_data| ∈ (1024, 65536]` is consensus-valid even if the originating transaction was relay-rejected.
 - **Spec**: `operational/RUBIN_NODE_POLICY_DEFAULTS_v1.1.md §3.1`
 - **Evidence**: `CV-ANCHOR-RELAY` RELAY-08 (documents the gap)
-- **Status**: `spec+vector` — CV-ANCHOR-RELAY RELAY-09/10/11 added: separation lemma (relay cap 1024 < consensus cap 65536), both boundary values, formal T-016 tag
+- **Formal (Lean 4)**: `rubin-formal` pinned commit `a694fbcda0ff38be2ee93a7c513dc3412f91bc7f`, file `RubinFormal/AnchorPolicy.lean` (theorems `T016_anchor_relay_cap_non_interference_output`, `T016_anchor_relay_cap_strict`).
+- **Status**: `lean4-proven`
 
 ---
 
@@ -135,30 +124,33 @@ composition lemma for boundary-iteration (`applyBoundaries`) is formalized.
 - **Evidence**: `CV-BLOCK` BLOCK-05
 - **Status**: `spec+axiom`
 
-### T-017 — key_id collision resistance (PENDING)
+### T-017 — key_id collision resistance
 
 - **Statement**: For two distinct public keys `pk1 ≠ pk2` (of the same or different `suite_id`), `SHA3-256(pk1_wire) ≠ SHA3-256(pk2_wire)` with probability `1 − 2^{-256}`. Two different keys cannot bind to the same `key_id`.
 - **Spec**: `spec/RUBIN_L1_KEY_MANAGEMENT_v1.1.md §1.2` (`key_id = SHA3-256(pubkey_wire)`)
 - **Evidence**: no dedicated conformance vector
-- **Status**: `spec+vector` — CV-BIND BIND-05/06/07 added: distinct keys → distinct key_id (SHA3-256 collision axiom), cross-suite structural separation, binding mismatch rejection
+- **Formal (Lean 4)**: modeled axiomatically as SHA3-256 injectivity (`RubinFormal/Hash.lean` axiom `SHA3_256_injective`).
+- **Status**: `spec+axiom` — CV-BIND BIND-05/06/07 cover structural separation and binding mismatch rejection (but collision-resistance itself is cryptographic).
 
 ---
 
-## VERSION_BITS and Deployment
+## VERSION_BITS
 
 ### T-003 — VERSION_BITS boundary transition ordering
 
 - **Statement**: At each window boundary, transitions are evaluated in the order: DEFINED→STARTED, STARTED→LOCKED_IN, STARTED→FAILED, LOCKED_IN→ACTIVE. If LOCKED_IN fires, FAILED MUST NOT be evaluated in the same boundary.
 - **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §8 FSM`
 - **Evidence**: `conformance/fixtures/CV-DEP.yml` DEP-05
-- **Status**: `spec+vector`
+- **Formal (Lean 4)**: `rubin-formal` pinned commit `a694fbcda0ff38be2ee93a7c513dc3412f91bc7f`, file `RubinFormal/VersionBits.lean` (theorem `T003_started_boundary_ordering_lockedin_over_failed`).
+- **Status**: `lean4-proven`
 
 ### T-007 — VERSION_BITS monotonicity
 
 - **Statement**: For any deployment `D` and chain `C`, state transitions are monotone: once `ACTIVE`, always `ACTIVE`; once `FAILED`, always `FAILED`. No backwards transitions exist for a fixed chain history.
 - **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §9 inv-4`
 - **Evidence**: `CV-DEP` DEP-04
-- **Status**: `spec+vector`
+- **Formal (Lean 4)**: `rubin-formal` pinned commit `a694fbcda0ff38be2ee93a7c513dc3412f91bc7f`, file `RubinFormal/VersionBits.lean` (theorem `T007_version_bits_monotonicity_strong`).
+- **Status**: `lean4-proven`
 
 ---
 

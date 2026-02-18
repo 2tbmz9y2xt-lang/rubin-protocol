@@ -1,0 +1,57 @@
+rules:
+  - id: go.security.tls-insecure-skip-verify
+    message: "InsecureSkipVerify=true disables TLS certificate verification."
+    severity: ERROR
+    languages: [go]
+    patterns:
+      - pattern: |
+          tls.Config{..., InsecureSkipVerify: true, ...}
+
+  - id: go.security.crypto-md5
+    message: "MD5 is cryptographically broken; use SHA-256/512 or a modern construction."
+    severity: WARNING
+    languages: [go]
+    pattern-either:
+      - pattern: md5.New(...)
+      - pattern: md5.Sum(...)
+
+  - id: go.security.crypto-sha1
+    message: "SHA-1 is cryptographically weak; prefer SHA-256/512."
+    severity: WARNING
+    languages: [go]
+    pattern-either:
+      - pattern: sha1.New(...)
+      - pattern: sha1.Sum(...)
+
+  - id: go.security.math-rand
+    message: "math/rand is not suitable for secrets; use crypto/rand for security-sensitive randomness."
+    severity: WARNING
+    languages: [go]
+    patterns:
+      - pattern-either:
+          - pattern: rand.Int(...)
+          - pattern: rand.Intn(...)
+          - pattern: rand.Read(...)
+          - pattern: rand.New(...)
+          - pattern: rand.NewSource(...)
+      - pattern-not: crand.Read(...)
+
+  - id: go.security.sql-injection-sprintf
+    message: "Potential SQL injection: building queries via string formatting. Use parameterized queries."
+    severity: WARNING
+    languages: [go]
+    patterns:
+      - pattern-either:
+          - pattern: fmt.Sprintf($Q, ...)
+          - pattern: fmt.Sprintf($Q, $X, ...)
+      - metavariable-regex:
+          metavariable: $Q
+          regex: ".*(SELECT|INSERT|UPDATE|DELETE).*"
+
+  - id: go.security.tempfile-unsafe
+    message: "Avoid predictable temp files; use os.CreateTemp / os.MkdirTemp."
+    severity: WARNING
+    languages: [go]
+    pattern-either:
+      - pattern: ioutil.TempFile(...)
+      - pattern: ioutil.TempDir(...)

@@ -6,6 +6,7 @@ Date: 2026-02-16
 Purpose: provide a template for chain-instance publications. Profiles bind a specific network instance by publishing concrete genesis bytes and derived identifiers.
 
 Normative derivations are defined in `spec/RUBIN_L1_CANONICAL_v1.1.md §1.1`.
+Status label taxonomy is defined in `operational/RUBIN_OPERATIONAL_SECURITY_v1.1.md §1.1`.
 
 ## 1. Identity
 

@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from run_cv_unimplemented import run_unimplemented
+# Thin wrapper: unified bundle runner executes CV-UTXO via run_utxo() (implemented).
+# Previous placeholder calling run_unimplemented() was stale — ApplyTx/UTXO are
+# fully implemented in Go (consensus/tx.go) and Rust (rubin-consensus/src/lib.rs).
+
+import subprocess
+import sys
+from pathlib import Path
 
 
 def main() -> int:
-    return run_unimplemented(
-        "CV-UTXO",
-        "UTXO set and spend checks require ApplyTx/UTXO-layer in node runtime",
+    repo_root = Path(__file__).resolve().parents[2]
+    p = subprocess.run(
+        [sys.executable, "conformance/runner/run_cv_bundle.py"],
+        cwd=str(repo_root),
     )
+    return p.returncode
 
 
 if __name__ == "__main__":

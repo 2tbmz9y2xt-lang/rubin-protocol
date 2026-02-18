@@ -79,7 +79,7 @@ func TestApplyTxOK(t *testing.T) {
 	}
 	chainID := [32]byte{}
 
-	if err := ApplyTx(p, chainID, &tx, utxo, 0, 0, false); err != nil {
+	if err := ApplyTx(p, chainID, &tx, utxo, 0, 0, false, false); err != nil {
 		t.Fatalf("ApplyTx failed: %v", err)
 	}
 }
@@ -103,7 +103,7 @@ func TestApplyTxMissingUTXO(t *testing.T) {
 			},
 		},
 	}
-	if err := ApplyTx(p, [32]byte{}, &tx, map[TxOutPoint]UtxoEntry{}, 0, 0, false); err == nil {
+	if err := ApplyTx(p, [32]byte{}, &tx, map[TxOutPoint]UtxoEntry{}, 0, 0, false, false); err == nil {
 		t.Fatal("expected missing utxo error")
 	}
 }
@@ -143,7 +143,7 @@ func TestApplyTxDuplicatePrevout(t *testing.T) {
 			Output: prevoutData,
 		},
 	}
-	if err := ApplyTx(p, [32]byte{}, &tx, utxo, 0, 0, false); err == nil {
+	if err := ApplyTx(p, [32]byte{}, &tx, utxo, 0, 0, false, false); err == nil {
 		t.Fatal("expected duplicate prevout parse error")
 	}
 }
@@ -178,7 +178,7 @@ func TestApplyTxValueConservation(t *testing.T) {
 			Output: prevoutData,
 		},
 	}
-	if err := ApplyTx(p, [32]byte{}, &tx, utxo, 0, 0, false); err == nil {
+	if err := ApplyTx(p, [32]byte{}, &tx, utxo, 0, 0, false, false); err == nil {
 		t.Fatal("expected value conservation error")
 	}
 }
@@ -201,7 +201,7 @@ func TestApplyTxInputOutputCountMismatch(t *testing.T) {
 			Witnesses: []WitnessItem{},
 		},
 	}
-	err := ApplyTx(p, [32]byte{}, &tx, map[TxOutPoint]UtxoEntry{}, 0, 0, false)
+	err := ApplyTx(p, [32]byte{}, &tx, map[TxOutPoint]UtxoEntry{}, 0, 0, false, false)
 	if err == nil {
 		t.Fatal("expected parse error due witness count mismatch")
 	}

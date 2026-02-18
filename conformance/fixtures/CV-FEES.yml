@@ -1,0 +1,64 @@
+version: "1.1"
+gate: CV-FEES
+status: PASS
+description: "Fee/value accounting via Apply-UTXO on keyless TIMELOCK spends (no signature), including multi-input sums and overflow behavior"
+tests:
+  - id: FEES-01
+    title: "PASS: sum_out < sum_in (fee positive) on CORE_TIMELOCK_V1 spend"
+    context:
+      chain_id_hex: "7dcf48a266788491e77bbb7b9c97ad6a2c89b882293dfaf3bdebeec62548cc00"
+      chain_height: 1
+      chain_timestamp: 1700000001
+      suite_id_02_active: true
+      htlc_v2_active: true
+      tx_hex: "01000000010000000000000001111111111111111111111111111111111111111111111111111111111111111100000000000000000001840300000000000000002101aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0000000001000000"
+      utxo_set:
+        - txid: "1111111111111111111111111111111111111111111111111111111111111111"
+          vout: 0
+          value: 1000
+          covenant_type: 1
+          covenant_data: "000000000000000000"
+    expected_code: PASS
+    consensus: true
+
+  - id: FEES-02
+    title: "FAIL: sum_out > sum_in => TX_ERR_VALUE_CONSERVATION"
+    context:
+      chain_id_hex: "7dcf48a266788491e77bbb7b9c97ad6a2c89b882293dfaf3bdebeec62548cc00"
+      chain_height: 1
+      chain_timestamp: 1700000001
+      suite_id_02_active: true
+      htlc_v2_active: true
+      tx_hex: "01000000010000000000000001111111111111111111111111111111111111111111111111111111111111111100000000000000000001e90300000000000000002101aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0000000001000000"
+      utxo_set:
+        - txid: "1111111111111111111111111111111111111111111111111111111111111111"
+          vout: 0
+          value: 1000
+          covenant_type: 1
+          covenant_data: "000000000000000000"
+    expected_error: TX_ERR_VALUE_CONSERVATION
+    consensus: true
+
+  - id: FEES-03
+    title: "FAIL: checked arithmetic overflow in sum_in => TX_ERR_PARSE"
+    context:
+      chain_id_hex: "7dcf48a266788491e77bbb7b9c97ad6a2c89b882293dfaf3bdebeec62548cc00"
+      chain_height: 1
+      chain_timestamp: 1700000001
+      suite_id_02_active: true
+      htlc_v2_active: true
+      tx_hex: "010000000100000000000000022121212121212121212121212121212121212121212121212121212121212121000000000000000000222222222222222222222222222222222222222222222222222222222222222201000000000000000001000000000000000000002101aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0000000002000000000000"
+      utxo_set:
+        - txid: "2121212121212121212121212121212121212121212121212121212121212121"
+          vout: 0
+          value: 18446744073709551615
+          covenant_type: 1
+          covenant_data: "000000000000000000"
+        - txid: "2222222222222222222222222222222222222222222222222222222222222222"
+          vout: 1
+          value: 1
+          covenant_type: 1
+          covenant_data: "000000000000000000"
+    expected_error: TX_ERR_PARSE
+    consensus: true
+

@@ -18,6 +18,11 @@ Use these labels for *non-consensus* lifecycle tracking only:
 
 These labels do not change consensus rules.
 
+### 1.2 Governance interpretation (non-normative)
+
+- `DRAFT (NON-CONSENSUS)` is an integration artifact classification only. It is NOT a production freeze and MUST NOT be interpreted as a production readiness claim.
+- Unless explicitly declared by controller, `freeze=READY` is NOT evaluated and MUST be treated as inactive.
+
 ## 2. Publication hygiene
 
 1. INBOX.md, inbox/, and other local process artifacts MUST NOT be committed.
