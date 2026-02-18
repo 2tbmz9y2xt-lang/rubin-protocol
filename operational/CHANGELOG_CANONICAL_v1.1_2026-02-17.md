@@ -12,15 +12,15 @@ This document is non-normative. The authoritative text is:
   - `sum(coinbase.outputs.value) ≤ block_subsidy(height) + Σ fees(T_i)` over all non-coinbase tx in the same block.
 - Added a normative genesis exception:
   - for height `0`, the coinbase bound is not evaluated; genesis outputs are chain-instance allocations fixed by published genesis bytes.
-- Proposed (not landed as of 2026-02-18): updated consensus constants to an agreed issuance plan.
-  NOTE: this section does not match the current canonical v1.1 constants in
-  `spec/RUBIN_L1_CANONICAL_v1.1.md`. Treat it as historical design intent only; for current
-  genesis/economics planning see `spec/TODO_ECONOMICS_AND_GENESIS.md`.
-  - `MAX_SUPPLY = 100,000,000 RBN` (8 decimals),
-  - `SUBSIDY_HALVING_INTERVAL = 420,000`,
-  - genesis burn allocation `GENESIS_BURN_SAT = 1,000 RBN`,
-  - developer fund premine `GENESIS_DEV_FUND_SAT = 1,000,000 RBN` across `GENESIS_DEV_FUND_OUTPUTS = 100`,
-  - `BLOCK_SUBSIDY_INITIAL` adjusted so that mined emission plus genesis allocations stays under `MAX_SUPPLY`.
+- Economics constants were finalized in CANONICAL v1.1 (landed 2026-02-18):
+  - `BASE_UNITS_PER_RBN = 100_000_000`,
+  - `MAX_SUPPLY = 100,000,000 RBN`,
+  - mined subsidy emission is linear over 25 years:
+    - `SUBSIDY_TOTAL_MINED = 99,000,000 RBN`,
+    - `SUBSIDY_DURATION_BLOCKS = 1_314_900`,
+    - remainder is distributed to earliest blocks (`BASE+1` for the first `REM` blocks).
+  - Genesis allocations (e.g., premine) are chain-instance decisions and are bounded operationally
+    by the gap `MAX_SUPPLY - SUBSIDY_TOTAL_MINED = 1,000,000 RBN` (1% of total).
 
 ## 2. HTLC via ANCHOR (CORE_HTLC_V2)
 
