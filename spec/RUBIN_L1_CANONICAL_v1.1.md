@@ -641,7 +641,12 @@ Each block MUST satisfy `Σ weight(T) ≤ MAX_BLOCK_WEIGHT`.
 - RETL sequencer signatures (§7) use `suite_id = 0x02` under separate deployment policy; this is not a key-based covenant spend.
 - `suite_id = 0x00` (sentinel) is permitted only for keyless covenants (`CORE_TIMELOCK_V1`) and MUST NOT be used for key-based covenant spends.
 
-Additional block checks:
+Weight and fee checks are normative:
+
+1. For each transaction: `weight(T)` MUST be computed as in §4.3.
+2. For each block: `Σ weight(T) ≤ MAX_BLOCK_WEIGHT`.
+
+### 4.5 Coinbase and Subsidy (Normative)
 
 - The first transaction in a block MUST be exactly one coinbase transaction.
   Any missing coinbase or additional coinbase transaction(s) MUST be rejected as `BLOCK_ERR_COINBASE_INVALID`.
@@ -652,28 +657,28 @@ sum(outputs.value) ≤ block_subsidy(height) + Σ fees(tx in transactions exclud
 ```
 
 - If the coinbase bound is violated, the block MUST be rejected as `BLOCK_ERR_SUBSIDY_EXCEEDED`.
+- `block_subsidy(height)` is a deterministic epoch schedule defined below; it is part of consensus
+  constants for this spec version and MUST be computed identically by all implementations.
 
-- `block_subsidy(height)` is a deterministic epoch schedule and is part of consensus constants for this spec version.
-
-Consensus coinbase subsidy schedule:
+**Subsidy formula:**
 
 Let `epoch = floor(height / SUBSIDY_HALVING_INTERVAL)`.
 
 ```
-block_subsidy(height) = BLOCK_SUBSIDY_INITIAL / 2^epoch, for epoch ≤ 33
-block_subsidy(height) = 0 for epoch > 33
+block_subsidy(height) = BLOCK_SUBSIDY_INITIAL >> epoch,  for epoch ≤ 33
+block_subsidy(height) = 0,                               for epoch > 33
 ```
+
+Arithmetic MUST use integer right-shift (floor division by 2^epoch), not floating-point.
+Overflow is impossible: `BLOCK_SUBSIDY_INITIAL = 5_000_000_000` fits in u64; each halving
+reduces the value; epoch 33 yields 1 satoshi; epoch 34+ yields 0.
 
 Total issuance is capped so that emitted sum never exceeds `MAX_SUPPLY`.
 Non-normative note: the discrete halving schedule yields an actual total emission of
-`2_099_999_997_690_000` satoshis (which is `2_310_000` satoshis below `MAX_SUPPLY`).
+`2_099_999_997_690_000` satoshis (`2_310_000` satoshis below `MAX_SUPPLY`).
+Conformance: CV-COINBASE.
 
-Weight and fee checks are normative:
-
-1. For each transaction: `weight(T)` MUST be computed as in §4.3.
-2. For each block: `Σ weight(T) ≤ MAX_BLOCK_WEIGHT`.
-
-### 4.5 Value conservation (Normative)
+### 4.6 Value conservation (Normative)
 
 For each non-coinbase transaction `T`:
 
@@ -1152,7 +1157,7 @@ The following invariants are part of consensus semantics:
 A protocol release is admissible only if:
 
 1. All conformance vectors pass.
-2. `CV-PARSE`/`CV-BIND`/`CV-UTXO`/`CV-DEP`/`CV-BLOCK`/`CV-REORG` gates are `PASS`.
+2. `CV-PARSE`/`CV-BIND`/`CV-UTXO`/`CV-DEP`/`CV-BLOCK`/`CV-REORG`/`CV-COINBASE` gates are `PASS`.
 3. Cross-client parity is deterministic under identical inputs.
 4. Deterministic serialization and consensus invariants are mechanically reproduced.
 5. Conformance gate definitions are authoritative in `spec/RUBIN_L1_CONFORMANCE_MANIFEST_v1.1.md`.

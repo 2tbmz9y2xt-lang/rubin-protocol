@@ -66,7 +66,7 @@ Proof status:
 ### T-015 — Coinbase subsidy non-overflow (PENDING)
 
 - **Statement**: For all block heights `h`, the coinbase subsidy formula produces a value in `[0, 2^64 − 1]` with no integer overflow. Halving epochs reduce subsidy monotonically to zero.
-- **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §4.4`
+- **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §4.5`
 - **Evidence**: no dedicated conformance vector yet
 - **Status**: `spec+vector` — CV-COINBASE gate added (12 vectors: epoch boundaries, epoch 33, epoch 34+, overflow check, subsidy-exceeded rejection)
 

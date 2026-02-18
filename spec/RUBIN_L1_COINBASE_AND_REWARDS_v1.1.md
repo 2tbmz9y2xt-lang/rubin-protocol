@@ -10,7 +10,7 @@ Normative consensus rules remain in:
 
 ## Subsidy schedule
 
-RUBIN v1.1 uses the subsidy function defined in CANONICAL (§4.4). Implementations MUST match the canonical definition and its integer arithmetic behavior at epoch boundaries.
+RUBIN v1.1 uses the subsidy function defined in CANONICAL (§4.5). Implementations MUST match the canonical definition and its integer arithmetic behavior at epoch boundaries.
 
 ## Coinbase transaction
 
