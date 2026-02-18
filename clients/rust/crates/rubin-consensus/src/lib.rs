@@ -535,23 +535,23 @@ fn is_coinbase_tx(tx: &Tx, block_height: u64) -> bool {
 
 fn validate_coinbase_tx_inputs(tx: &Tx) -> Result<(), String> {
     if tx.tx_nonce != 0 {
-        return Err("TX_ERR_COINBASE_INVALID".into());
+        return Err(BLOCK_ERR_COINBASE_INVALID.into());
     }
     if tx.inputs.len() != 1 {
-        return Err("TX_ERR_COINBASE_INVALID".into());
+        return Err(BLOCK_ERR_COINBASE_INVALID.into());
     }
     let input = &tx.inputs[0];
     if input.sequence != TX_COINBASE_PREVOUT_VOUT {
-        return Err("TX_ERR_COINBASE_INVALID".into());
+        return Err(BLOCK_ERR_COINBASE_INVALID.into());
     }
     if !is_zero_outpoint(&input.prev_txid, input.prev_vout) {
-        return Err("TX_ERR_COINBASE_INVALID".into());
+        return Err(BLOCK_ERR_COINBASE_INVALID.into());
     }
     if !input.script_sig.is_empty() {
-        return Err("TX_ERR_COINBASE_INVALID".into());
+        return Err(BLOCK_ERR_COINBASE_INVALID.into());
     }
     if !tx.witness.witnesses.is_empty() {
-        return Err("TX_ERR_COINBASE_INVALID".into());
+        return Err(BLOCK_ERR_COINBASE_INVALID.into());
     }
     Ok(())
 }

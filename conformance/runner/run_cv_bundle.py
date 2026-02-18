@@ -1571,6 +1571,30 @@ def run_block(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd
         tx_full = make_tx_bytes(tx_no_wit, [])
         return tx_full, tx_no_wit
 
+    def make_coinbase_tx_invalid(
+        *,
+        height: int,
+        outputs: list[tuple[int, int, bytes]],
+        tx_nonce: int = 0,
+        script_sig: bytes = b"",
+        sequence: int = 0xFFFF_FFFF,
+        locktime: int | None = None,
+        witness_items: list[tuple[int, bytes, bytes]] | None = None,
+    ) -> tuple[bytes, bytes]:
+        prev_txid = b"\x00" * 32
+        prev_vout = 0xFFFF_FFFF
+        if locktime is None:
+            locktime = height
+        tx_no_wit = make_tx_no_witness_bytes(
+            version=1,
+            tx_nonce=tx_nonce,
+            inputs=[(prev_txid, prev_vout, script_sig, sequence)],
+            outputs=outputs,
+            locktime=locktime,
+        )
+        tx_full = make_tx_bytes(tx_no_wit, witness_items or [])
+        return tx_full, tx_no_wit
+
     def make_timelock_spend_tx(prev_txid: bytes, prev_vout: int, tx_nonce: int) -> tuple[bytes, bytes]:
         tx_no_wit = make_tx_no_witness_bytes(
             version=1,
@@ -1623,6 +1647,28 @@ def run_block(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd
             txs = [
                 make_coinbase_tx(height, coinbase_outputs),
                 make_coinbase_tx(height, coinbase_outputs),
+            ]
+        elif case_name == "COINBASE_INVALID_TX_NONCE":
+            parent_target = target_ff
+            txs = [make_coinbase_tx_invalid(height=height, outputs=coinbase_outputs, tx_nonce=1)]
+        elif case_name == "COINBASE_INVALID_SCRIPT_SIG":
+            parent_target = target_ff
+            txs = [make_coinbase_tx_invalid(height=height, outputs=coinbase_outputs, script_sig=b"\x01")]
+        elif case_name == "COINBASE_INVALID_SEQUENCE":
+            parent_target = target_ff
+            txs = [make_coinbase_tx_invalid(height=height, outputs=coinbase_outputs, sequence=0)]
+        elif case_name == "COINBASE_INVALID_LOCKTIME":
+            parent_target = target_ff
+            txs = [make_coinbase_tx_invalid(height=height, outputs=coinbase_outputs, locktime=0)]
+        elif case_name == "COINBASE_INVALID_WITNESS":
+            parent_target = target_ff
+            # Coinbase MUST have witness_count=0; include a dummy sentinel witness to violate.
+            txs = [
+                make_coinbase_tx_invalid(
+                    height=height,
+                    outputs=coinbase_outputs,
+                    witness_items=[(SUITE_ID_SENTINEL, b"", b"")],
+                )
             ]
         elif case_name == "TIMESTAMP_OLD":
             parent_target = target_ff
