@@ -33,14 +33,14 @@ const (
 	VERIFY_COST_ML_DSA         = 8
 	VERIFY_COST_SLH_DSA        = 64
 
-		MAX_TX_INPUTS     = 1_024
-		MAX_TX_OUTPUTS    = 1_024
-		MAX_WITNESS_ITEMS = 1_024
-		MAX_WITNESS_BYTES_PER_TX = 100_000
+	MAX_TX_INPUTS            = 1_024
+	MAX_TX_OUTPUTS           = 1_024
+	MAX_WITNESS_ITEMS        = 1_024
+	MAX_WITNESS_BYTES_PER_TX = 100_000
 
-		SUITE_ID_SENTINEL     = 0x00
-		SUITE_ID_ML_DSA       = 0x01
-		SUITE_ID_SLH_DSA      = 0x02
+	SUITE_ID_SENTINEL     = 0x00
+	SUITE_ID_ML_DSA       = 0x01
+	SUITE_ID_SLH_DSA      = 0x02
 	ML_DSA_PUBKEY_BYTES   = 2592
 	ML_DSA_SIG_BYTES      = 4_627
 	SLH_DSA_PUBKEY_BYTES  = 64
@@ -50,17 +50,17 @@ const (
 	TIMELOCK_MODE_TIMESTAMP = 0x01
 )
 
-	const (
-		TX_NONCE_ZERO            = 0
-		TX_MAX_SEQUENCE          = 0x7fffffff
-		TX_COINBASE_PREVOUT_VOUT = ^uint32(0)
-		TX_ERR_NONCE_REPLAY      = "TX_ERR_NONCE_REPLAY"
-		TX_ERR_TX_NONCE_INVALID  = "TX_ERR_TX_NONCE_INVALID"
-		TX_ERR_SEQUENCE_INVALID  = "TX_ERR_SEQUENCE_INVALID"
-		TX_ERR_COINBASE_IMMATURE = "TX_ERR_COINBASE_IMMATURE"
-		TX_ERR_WITNESS_OVERFLOW  = "TX_ERR_WITNESS_OVERFLOW"
-		TX_ERR_MISSING_UTXO      = "TX_ERR_MISSING_UTXO"
-	)
+const (
+	TX_NONCE_ZERO            = 0
+	TX_MAX_SEQUENCE          = 0x7fffffff
+	TX_COINBASE_PREVOUT_VOUT = ^uint32(0)
+	TX_ERR_NONCE_REPLAY      = "TX_ERR_NONCE_REPLAY"
+	TX_ERR_TX_NONCE_INVALID  = "TX_ERR_TX_NONCE_INVALID"
+	TX_ERR_SEQUENCE_INVALID  = "TX_ERR_SEQUENCE_INVALID"
+	TX_ERR_COINBASE_IMMATURE = "TX_ERR_COINBASE_IMMATURE"
+	TX_ERR_WITNESS_OVERFLOW  = "TX_ERR_WITNESS_OVERFLOW"
+	TX_ERR_MISSING_UTXO      = "TX_ERR_MISSING_UTXO"
+)
 
 var MAX_TARGET = [32]byte{
 	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -946,21 +946,21 @@ func ApplyBlock(
 			}
 		}
 
-			txID := TxID(p, &tx)
-			for i, output := range tx.Outputs {
-				if output.CovenantType == CORE_ANCHOR {
-					totalAnchorBytes, err = addUint64(totalAnchorBytes, uint64(len(output.CovenantData)))
-					if err != nil {
-						return err
-					}
-					continue
+		txID := TxID(p, &tx)
+		for i, output := range tx.Outputs {
+			if output.CovenantType == CORE_ANCHOR {
+				totalAnchorBytes, err = addUint64(totalAnchorBytes, uint64(len(output.CovenantData)))
+				if err != nil {
+					return err
 				}
-				workingUTXO[TxOutPoint{TxID: txID, Vout: uint32(i)}] = UtxoEntry{
-					Output:            output,
-					CreationHeight:    ctx.Height,
-					CreatedByCoinbase: isCoinbase,
-				}
+				continue
 			}
+			workingUTXO[TxOutPoint{TxID: txID, Vout: uint32(i)}] = UtxoEntry{
+				Output:            output,
+				CreationHeight:    ctx.Height,
+				CreatedByCoinbase: isCoinbase,
+			}
+		}
 	}
 
 	if totalWeight > MAX_BLOCK_WEIGHT {
@@ -978,19 +978,19 @@ func ApplyBlock(
 			return err
 		}
 	}
-		maxCoinbase, err := addUint64(blockRewardForHeight(ctx.Height), totalFees)
-		if err != nil {
-			return err
+	maxCoinbase, err := addUint64(blockRewardForHeight(ctx.Height), totalFees)
+	if err != nil {
+		return err
+	}
+	if ctx.Height != 0 {
+		if coinbaseValue > maxCoinbase {
+			return fmt.Errorf(BLOCK_ERR_SUBSIDY_EXCEEDED)
 		}
-		if ctx.Height != 0 {
-			if coinbaseValue > maxCoinbase {
-				return fmt.Errorf(BLOCK_ERR_SUBSIDY_EXCEEDED)
-			}
-		}
+	}
 
-		for prev := range utxo {
-			delete(utxo, prev)
-		}
+	for prev := range utxo {
+		delete(utxo, prev)
+	}
 	for point, entry := range workingUTXO {
 		utxo[point] = entry
 	}

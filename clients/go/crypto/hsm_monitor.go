@@ -82,14 +82,14 @@ type HealthCheckFn func() error
 
 // HSMMonitor runs the health check loop and drives the state machine.
 type HSMMonitor struct {
-	cfg         HSMConfig
-	check       HealthCheckFn
-	state       atomic.Int32
-	failCount   int
+	cfg           HSMConfig
+	check         HealthCheckFn
+	state         atomic.Int32
+	failCount     int
 	readOnlySince time.Time
-	mu          sync.Mutex
-	onFailed    func() // called when entering FAILED (trigger graceful shutdown)
-	logger      *slog.Logger
+	mu            sync.Mutex
+	onFailed      func() // called when entering FAILED (trigger graceful shutdown)
+	logger        *slog.Logger
 }
 
 // NewHSMMonitor creates an HSMMonitor. onFailed is called once when the node
