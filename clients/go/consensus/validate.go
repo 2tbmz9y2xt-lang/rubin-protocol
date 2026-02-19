@@ -325,8 +325,8 @@ func ApplyBlock(
 			seenNonces[tx.TxNonce] = struct{}{}
 		}
 
-		// HTLC_V2 is VERSION_BITS deployment-gated; wire activation through ctx when deployments are implemented.
-		if err := ApplyTx(p, chainID, &tx, workingUTXO, ctx.Height, block.Header.Timestamp, ctx.SuiteIDSLHActive, false); err != nil {
+		// HTLC_V2 is VERSION_BITS deployment-gated; allow wiring activation through ctx for conformance/dev.
+		if err := ApplyTx(p, chainID, &tx, workingUTXO, ctx.Height, block.Header.Timestamp, ctx.SuiteIDSLHActive, ctx.HTLCV2Active); err != nil {
 			return err
 		}
 

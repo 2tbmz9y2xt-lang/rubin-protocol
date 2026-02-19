@@ -5,6 +5,7 @@
 //!
 //! Non-consensus policy MUST NOT be implemented here.
 
+mod chainstate_hash;
 mod encode;
 mod parse;
 mod pow;
@@ -13,6 +14,7 @@ mod util;
 mod validate;
 mod wire;
 
+pub use chainstate_hash::utxo_set_hash;
 pub use encode::{
     block_header_bytes, tx_bytes, tx_no_witness_bytes, tx_output_bytes, witness_bytes,
     witness_item_bytes,

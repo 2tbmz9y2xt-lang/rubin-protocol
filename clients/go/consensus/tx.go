@@ -88,6 +88,7 @@ type BlockValidationContext struct {
 	LocalTime        uint64
 	LocalTimeSet     bool
 	SuiteIDSLHActive bool
+	HTLCV2Active     bool
 }
 
 const (
