@@ -42,7 +42,13 @@ def _tx_hex_file(tx_hex: str) -> str:
 
 
 def run_result(client: ClientCmd, argv: list[str]) -> subprocess.CompletedProcess[str]:
-    env = os.environ.copy()
+    # Use a minimal environment to avoid OSError ENOMEM/E2BIG in CI
+    # (GitHub Actions injects large env that can exceed ARG_MAX when passed to subprocess).
+    _KEEP = {"PATH", "HOME", "USER", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL",
+             "CARGO_HOME", "CARGO_INCREMENTAL", "CARGO_TERM_COLOR",
+             "RUSTUP_HOME", "GOPATH", "GOROOT", "GOCACHE", "GOMODCACHE"}
+    env = {k: v for k, v in os.environ.items()
+           if k in _KEEP or k.startswith("RUBIN_")}
     if client.name == "go" and not env.get("GOCACHE", "").strip():
         fallback_cache = Path(tempfile.gettempdir()) / "rubin-conformance-go-cache"
         fallback_cache.mkdir(parents=True, exist_ok=True)
