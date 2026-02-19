@@ -152,7 +152,8 @@ Undo format (minimum required fields):
   - restored_creation_height: u64
 
 Note:
-- A fuller reorg/disconnect/connect engineering spec (including on-disk encoding) is tracked separately as Q-075.
+- A fuller reorg/disconnect/connect engineering spec (including crash boundaries and undo schema) is defined in:
+  `operational/RUBIN_REORG_DISCONNECT_CONNECT_v1.1.md`.
 
 ## 7. Minimal observability hooks (recommended)
 
