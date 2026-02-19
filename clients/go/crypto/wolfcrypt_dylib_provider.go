@@ -28,7 +28,7 @@ static int rubin_wc_load(rubin_wc_provider_t* p, const char* path) {
 	p->sha3_256 = (rubin_sha3_256_fn)dlsym(p->handle, "rubin_wc_sha3_256");
 	p->verify_mldsa87 = (rubin_verify_fn)dlsym(p->handle, "rubin_wc_verify_mldsa87");
 	p->verify_slhdsa_shake_256f = (rubin_verify_fn)dlsym(p->handle, "rubin_wc_verify_slhdsa_shake_256f");
-	/* keywrap symbols are optional — older shims without keywrap still load fine */
+	// keywrap symbols are optional - older shims without keywrap still load fine
 	p->aes_keywrap   = (rubin_keywrap_fn)dlsym(p->handle, "rubin_wc_aes_keywrap");
 	p->aes_keyunwrap = (rubin_keywrap_fn)dlsym(p->handle, "rubin_wc_aes_keyunwrap");
 
@@ -45,10 +45,10 @@ static int32_t rubin_wc_aes_keywrap_call(
 	const uint8_t* kek, size_t kek_len,
 	const uint8_t* key_in, size_t key_in_len,
 	uint8_t* out, size_t* out_len)
-{
-	if (!p || !p->aes_keywrap) return -99; /* symbol not present in shim */
-	return p->aes_keywrap(kek, kek_len, key_in, key_in_len, out, out_len);
-}
+	{
+		if (!p || !p->aes_keywrap) return -99; // symbol not present in shim
+		return p->aes_keywrap(kek, kek_len, key_in, key_in_len, out, out_len);
+	}
 
 static int32_t rubin_wc_aes_keyunwrap_call(
 	rubin_wc_provider_t* p,
@@ -110,7 +110,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"runtime"
 	"strings"
 	"unsafe"
 
@@ -165,29 +164,47 @@ func LoadWolfcryptDylibProvider(path string) (*WolfcryptDylibProvider, error) {
 		return nil, errors.New("failed to load wolfcrypt shim dylib")
 	}
 
-	prov := &WolfcryptDylibProvider{p: p}
-	runtime.SetFinalizer(prov, func(x *WolfcryptDylibProvider) { C.rubin_wc_close(&x.p) })
-	return prov, nil
+	return &WolfcryptDylibProvider{p: p}, nil
+}
+
+// Close releases the dylib handle. Callers SHOULD close deterministically
+// (e.g. `defer prov.Close()`) rather than relying on GC finalizers.
+func (w *WolfcryptDylibProvider) Close() {
+	C.rubin_wc_close(&w.p)
 }
 
 func (w *WolfcryptDylibProvider) SHA3_256(input []byte) [32]byte {
 	var out [32]byte
+
+	// The shim uses wolfCrypt APIs with `word32` length parameters. Avoid calling into the shim
+	// with lengths that cannot be represented without truncation.
+	if uint64(len(input)) > uint64(^uint32(0)) {
+		sum := sha3.Sum256(input)
+		return sum
+	}
+
 	if len(input) == 0 {
 		rc := C.int32_t(C.rubin_wc_sha3_256_call(&w.p, nil, 0, (*C.uint8_t)(unsafe.Pointer(&out[0]))))
 		if rc != 1 {
-			panic(fmt.Sprintf("wolfcrypt shim error: rubin_wc_sha3_256 rc=%d", rc))
+			// Fallback to native SHA3-256 (deterministic) on shim error.
+			sum := sha3.Sum256(nil)
+			return sum
 		}
 		return out
 	}
+
 	rc := C.int32_t(C.rubin_wc_sha3_256_call(&w.p, (*C.uint8_t)(unsafe.Pointer(&input[0])), C.size_t(len(input)), (*C.uint8_t)(unsafe.Pointer(&out[0]))))
 	if rc != 1 {
-		panic(fmt.Sprintf("wolfcrypt shim error: rubin_wc_sha3_256 rc=%d", rc))
+		// Fallback to native SHA3-256 (deterministic) on shim error.
+		sum := sha3.Sum256(input)
+		return sum
 	}
 	return out
 }
 
 func (w *WolfcryptDylibProvider) VerifyMLDSA87(pubkey []byte, sig []byte, digest32 [32]byte) bool {
-	if len(pubkey) == 0 || len(sig) == 0 {
+	// Defense-in-depth at the FFI boundary. Consensus already enforces canonical sizes.
+	if len(pubkey) != 2592 || len(sig) != 4627 {
 		return false
 	}
 	rc := C.int32_t(C.rubin_wc_verify_mldsa87_call(
@@ -199,15 +216,16 @@ func (w *WolfcryptDylibProvider) VerifyMLDSA87(pubkey []byte, sig []byte, digest
 	switch rc {
 	case 1:
 		return true
-	case 0:
-		return false
-	default:
-		panic(fmt.Sprintf("wolfcrypt shim error: rubin_wc_verify_mldsa87 rc=%d", rc))
+		case 0:
+			return false
+		default:
+			return false
 	}
 }
 
 func (w *WolfcryptDylibProvider) VerifySLHDSASHAKE_256f(pubkey []byte, sig []byte, digest32 [32]byte) bool {
-	if len(pubkey) == 0 || len(sig) == 0 {
+	// Defense-in-depth at the FFI boundary. Consensus already enforces canonical sizes.
+	if len(pubkey) != 64 || len(sig) != 49856 {
 		return false
 	}
 	rc := C.int32_t(C.rubin_wc_verify_slhdsa_shake_256f_call(
@@ -219,10 +237,10 @@ func (w *WolfcryptDylibProvider) VerifySLHDSASHAKE_256f(pubkey []byte, sig []byt
 	switch rc {
 	case 1:
 		return true
-	case 0:
-		return false
-	default:
-		panic(fmt.Sprintf("wolfcrypt shim error: rubin_wc_verify_slhdsa_shake_256f rc=%d", rc))
+		case 0:
+			return false
+		default:
+			return false
 	}
 }
 

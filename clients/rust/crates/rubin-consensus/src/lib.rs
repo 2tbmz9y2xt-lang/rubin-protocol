@@ -1009,6 +1009,9 @@ pub fn apply_block(
 
         let is_coinbase = is_coinbase_tx(tx, ctx.height);
         if !is_coinbase {
+            if tx.tx_nonce == TX_NONCE_ZERO {
+                return Err(TX_ERR_TX_NONCE_INVALID.into());
+            }
             if seen_nonces.contains(&tx.tx_nonce) {
                 return Err(TX_ERR_NONCE_REPLAY.into());
             }

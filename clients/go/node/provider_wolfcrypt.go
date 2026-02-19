@@ -16,13 +16,13 @@ func loadCryptoProvider() (crypto.CryptoProvider, func(), error) {
 		return v == "1" || strings.EqualFold(v, "true")
 	}()
 
-	if path, ok := os.LookupEnv("RUBIN_WOLFCRYPT_SHIM_PATH"); ok && path != "" {
-		prov, err := crypto.LoadWolfcryptDylibProviderFromEnv()
-		if err != nil {
-			return nil, func() {}, err
+		if path, ok := os.LookupEnv("RUBIN_WOLFCRYPT_SHIM_PATH"); ok && path != "" {
+			prov, err := crypto.LoadWolfcryptDylibProviderFromEnv()
+			if err != nil {
+				return nil, func() {}, err
+			}
+			return prov, func() { prov.Close() }, nil
 		}
-		return prov, func() {}, nil
-	}
 	if strict {
 		return nil, func() {}, errors.New("RUBIN_WOLFCRYPT_STRICT=1 requires RUBIN_WOLFCRYPT_SHIM_PATH")
 	}

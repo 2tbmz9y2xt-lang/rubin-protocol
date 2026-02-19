@@ -25,6 +25,12 @@
 #include <stdint.h>
 #include <string.h>
 
+#define RUBIN_U32_MAX ((size_t)0xffffffffu)
+#define RUBIN_ML_DSA87_PUBKEY_BYTES 2592u
+#define RUBIN_ML_DSA87_SIG_BYTES 4627u
+#define RUBIN_SLH_DSA_SHAKE_256F_PUBKEY_BYTES 64u
+#define RUBIN_SLH_DSA_SHAKE_256F_SIG_BYTES 49856u
+
 #include <wolfssl/options.h>
 #include <wolfssl/wolfcrypt/sha3.h>
 #include <wolfssl/wolfcrypt/dilithium.h>
@@ -44,6 +50,9 @@ static int32_t rubin_wc_sha3_256_impl(const uint8_t* input, size_t input_len,
     }
     if (input == NULL && input_len != 0) {
         return -2;
+    }
+    if (input_len > RUBIN_U32_MAX) {
+        return -6;
     }
 
     wc_Sha3 hash;
@@ -77,6 +86,12 @@ int32_t rubin_wc_verify_mldsa87(const uint8_t* pk, size_t pk_len,
                                 const uint8_t digest32[32]) {
     if (pk == NULL || sig == NULL || digest32 == NULL) {
         return -10;
+    }
+    if (pk_len != RUBIN_ML_DSA87_PUBKEY_BYTES) {
+        return -13;
+    }
+    if (sig_len != RUBIN_ML_DSA87_SIG_BYTES) {
+        return -14;
     }
 
     int rc;
@@ -116,6 +131,12 @@ int32_t rubin_wc_verify_slhdsa_shake_256f(const uint8_t* pk, size_t pk_len,
     #if defined(HAVE_PQC) && defined(HAVE_SPHINCS)
     if (pk == NULL || sig == NULL || digest32 == NULL) {
         return -20;
+    }
+    if (pk_len != RUBIN_SLH_DSA_SHAKE_256F_PUBKEY_BYTES) {
+        return -23;
+    }
+    if (sig_len != RUBIN_SLH_DSA_SHAKE_256F_SIG_BYTES) {
+        return -24;
     }
 
     int rc;
@@ -178,7 +199,7 @@ int32_t rubin_wc_aes_keywrap(
         return -30;
     if (kek_len != 32)
         return -31;
-    if (key_in_len == 0 || key_in_len > RUBIN_WC_KEYWRAP_MAX_KEY_BYTES)
+    if (key_in_len == 0 || key_in_len > RUBIN_WC_KEYWRAP_MAX_KEY_BYTES || (key_in_len % 8) != 0)
         return -32;
 
     size_t required = key_in_len + RUBIN_WC_KEYWRAP_OVERHEAD;
@@ -224,7 +245,8 @@ int32_t rubin_wc_aes_keyunwrap(
     if (kek_len != 32)
         return -31;
     if (wrapped_len < RUBIN_WC_KEYWRAP_OVERHEAD ||
-        wrapped_len > RUBIN_WC_KEYWRAP_MAX_KEY_BYTES + RUBIN_WC_KEYWRAP_OVERHEAD)
+        wrapped_len > RUBIN_WC_KEYWRAP_MAX_KEY_BYTES + RUBIN_WC_KEYWRAP_OVERHEAD ||
+        (wrapped_len % 8) != 0)
         return -32;
 
     size_t plain_len = wrapped_len - RUBIN_WC_KEYWRAP_OVERHEAD;

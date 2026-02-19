@@ -307,7 +307,10 @@ For each non-coinbase input `i`:
 
 1. `witness.witness_count` MUST equal `input_count`.
 2. `prevout` MUST be present and well-formed.
-3. `script_sig` MUST be empty (`script_sig_len = 0`).
+3. `script_sig_len` MUST satisfy the `script_sig` constraints defined above:
+   - for inputs spending a non-HTLC covenant, `script_sig_len = 0`;
+   - for inputs spending `CORE_HTLC_V1`, `script_sig_len ∈ {0, 32}` (claim path carries `preimage32`);
+   - for inputs spending `CORE_HTLC_V2`, `script_sig_len = 0`.
 4. In v1.1, `prevout` MUST NOT be all-zero (`prev_txid=0` and `prev_vout=0xffffffff`) for any non-coinbase input.
 5. `sequence` MUST be between 0 and 0x7fffffff.
 6. `witness.witnesses[i]` MUST be a canonical `WitnessItem`.
@@ -391,11 +394,10 @@ Any alternative error code for these cases is non-conforming.
 
 For each non-coinbase transaction `T` in block order:
 
-1. `T.tx_nonce` MUST be non-zero and MUST satisfy `1 ≤ tx_nonce ≤ max(u64)`.
+1. If `T.tx_nonce` is not in `[1, max(u64)]`, reject as `TX_ERR_TX_NONCE_INVALID`.
 2. `tx_nonce` is part of the signed domain and is compared only within the same consensus chain.
-3. Let `N_seen` be the multiset of non-coinbase `tx_nonce` in the current block.
-4. If `T.tx_nonce` already appears in `N_seen`, return `TX_ERR_NONCE_REPLAY`.
-5. If `T.tx_nonce` is not in `[1, max(u64)]`, return `TX_ERR_TX_NONCE_INVALID`.
+3. Let `N_seen` be the set of `tx_nonce` values already observed in prior non-coinbase transactions of the current block.
+4. If `T.tx_nonce` already appears in `N_seen`, reject as `TX_ERR_NONCE_REPLAY`.
 
 **Cross-block replay protection (normative):** `tx_nonce` uniqueness is enforced only
 within a single block. Cross-block replay is prevented by UTXO exhaustion: once an input
@@ -409,7 +411,7 @@ For each non-coinbase input `i`:
 
 1. `sequence` MUST NOT be `0xffffffff`.
 2. `sequence` MUST be ≤ `0x7fffffff`.
-3. If `sequence` is structurally invalid, return `TX_ERR_SEQUENCE_INVALID`.
+3. Any violation MUST be rejected as `TX_ERR_SEQUENCE_INVALID`.
 
 ### 3.5 Deterministic iteration and ordering
 
@@ -440,12 +442,12 @@ Semantics:
   - `suite_id` is `0x01` or `0x02` (see §4.4 for the active policy and VERSION_BITS deployment gates).
   - The output is spendable only by a witness packet with matching `suite_id` and a signature over `sighash`.
   - Non-normative note (wallet safety): creating outputs with `suite_id = 0x02` before VERSION_BITS activation is syntactically valid, but spending is deployment-gated; if the deployment never reaches ACTIVE (e.g., FAILED), such outputs may become unspendable. Wallet implementations SHOULD warn users before creating such outputs. Conformance: CV-BIND BIND-04; CV-DEP DEP-01/DEP-05.
-  - `covenant_data_len` MUST be exactly `1 + 32`.
+  - `covenant_data_len` MUST be exactly `MAX_P2PK_COVENANT_DATA`.
 - `CORE_TIMELOCK_V1`:
   - `covenant_data = lock_mode:u8 || lock_value:u64le`.
   - `lock_mode = 0x00` for height lock, `0x01` for UNIX-time lock.
   - Spend is forbidden until `lock_value` condition is met by current chain consensus state.
-  - `covenant_data_len` MUST be exactly `1 + 8`.
+  - `covenant_data_len` MUST be exactly `MAX_TIMELOCK_COVENANT_DATA`.
 - `CORE_ANCHOR`:
   - `covenant_data = anchor_data` (raw bytes, no additional wrapping).
   - `covenant_data_len` MUST be `0 < covenant_data_len ≤ MAX_ANCHOR_PAYLOAD_SIZE`.
@@ -460,6 +462,7 @@ Semantics:
   - `covenant_data = hash:bytes32 || lock_mode:u8 || lock_value:u64le || claim_key_id:bytes32 || refund_key_id:bytes32`.
   - `hash = SHA3-256(preimage32)` for the 32-byte secret preimage.
   - `lock_mode = 0x00` for height lock, `0x01` for UNIX-time lock.
+  - `claim_key_id != refund_key_id` MUST be enforced; equal values MUST be rejected as `TX_ERR_PARSE`.
   - Claim path: provides `preimage32` in `script_sig` and spends using `claim_key_id`.
   - Refund path: uses `refund_key_id` and is forbidden until `lock_value` condition is met by current chain consensus state.
   - `covenant_data_len` MUST be exactly `32 + 1 + 8 + 32 + 32 = 105`.
@@ -492,6 +495,9 @@ Semantics:
     syntactically valid, but spending them remains deployment-gated; if the deployment never reaches
     ACTIVE (e.g., FAILED), such outputs may become unspendable. Wallets SHOULD warn users before
     creating `CORE_HTLC_V2` outputs on chains where `htlc_anchor_v1` is not ACTIVE.
+  - Non-normative wallet safety: because the claim-path preimage is delivered via a `CORE_ANCHOR`
+    envelope that MUST be unique per transaction (`|matching| >= 2` is a consensus failure), wallets
+    SHOULD NOT attempt to claim multiple distinct `CORE_HTLC_V2` preimages in a single transaction.
   - Non-matching `CORE_ANCHOR` outputs in the same transaction are permitted and do not affect HTLC_V2 validation.
 - `CORE_RESERVED_FUTURE`: forbidden until explicit activation by consensus.
 
@@ -533,7 +539,7 @@ For each non-coinbase input spending output `o`:
    - parse `suite_id || key_id` from `o.covenant_data`;
    - witness public key hash MUST equal `key_id`;
    - witness `suite_id` MUST equal parsed `suite_id`;
-   - if parse fails, return `TX_ERR_PARSE`.
+   - if parse fails, reject as `TX_ERR_PARSE`.
 3. If `o.covenant_type = CORE_TIMELOCK_V1`:
    - parse `lock_mode || lock_value`;
    - `lock_mode = 0x00`: require `height(B) ≥ lock_value`;
@@ -542,6 +548,7 @@ For each non-coinbase input spending output `o`:
    - if lock condition is not met, reject with `TX_ERR_TIMELOCK_NOT_MET`.
 4. If `o.covenant_type = CORE_HTLC_V1`:
    - parse `hash || lock_mode || lock_value || claim_key_id || refund_key_id`;
+   - if `claim_key_id = refund_key_id`, reject as `TX_ERR_PARSE`;
    - any other `lock_mode` MUST be `TX_ERR_PARSE`;
    - If `script_sig_len` is neither `0` nor `32`, reject as `TX_ERR_PARSE`.
    - If `script_sig_len = 32` (claim path):
@@ -574,6 +581,8 @@ For each non-coinbase input spending output `o`:
      any `lock_mode` other than `0x00` or `0x01` MUST be `TX_ERR_PARSE`.
    - Determine path by scanning ANCHOR envelopes:
      - Let `matching` = { output `a` in tx outputs : `a.covenant_type = CORE_ANCHOR` AND `|a.anchor_data| = 54` AND `a.anchor_data[0:22] = ASCII("RUBINv1-htlc-preimage/")` }.
+     - Non-normative wallet safety: `matching` is computed from the transaction outputs and is therefore shared across all inputs.
+       As a consequence, a single transaction can provide at most one unique preimage envelope for claim-path spends.
      - If `|matching| >= 2`: reject as `TX_ERR_PARSE` (ambiguous preimage — non-deterministic).
      - If `|matching| = 1` (claim path):
        - `preimage32 = matching[0].anchor_data[22:54]`.
@@ -1016,7 +1025,7 @@ where:
 
 - Batch:
 
-```
+```text
 RETLBatch {
   retl_domain_id
   batch_number
@@ -1026,11 +1035,10 @@ RETLBatch {
   withdrawals_root
   sequencer_sig
 }
-
-`sequencer_sig` is a `WitnessItem` with mandatory `suite_id = 0x02` (SLH-DSA-SHAKE-256f) and is signed over:
-
-`"RUBIN-RETL-v1" || chain_id || retl_domain_id || batch_number || prev_batch_hash || state_root || tx_data_root || withdrawals_root`.
 ```
+
+`sequencer_sig` is a `WitnessItem` with mandatory `suite_id = 0x02` (SLH-DSA-SHAKE-256f) and is signed over
+the canonical preimage bytes specified in §7.0.2.
 
 #### 7.0.2 RETLBatch field types and signing serialization (Application-layer, interoperability)
 
@@ -1103,6 +1111,12 @@ State:
 
 `S ∈ { DEFINED, STARTED, LOCKED_IN, ACTIVE, FAILED }`
 
+Initial state:
+
+- For any deployment `D`, the initial state is `DEFINED`.
+- Formally, for any validated height `h` such that `h < max(VERSION_BITS_START_HEIGHT, D.start_height)`,
+  `State(D, h) = DEFINED`.
+
 For a deployment `D`, define:
 
 - `D.bit` as the bit index in `BlockHeader.version` used for signaling.
@@ -1153,7 +1167,10 @@ Conformance: CV-DEP DEP-05.
 v1.1 deployment registry:
 
 - No consensus deployments are ACTIVE by default in this spec revision.
-- Any activation schedule (bit assignments, start heights, and timeouts) is chain-instance and revision-specific and MUST be specified in a future canonical revision before any new behavior is permitted.
+- Any activation schedule (bit assignments, start heights, and timeouts) is chain-instance specific and MUST be
+  published as part of the chain-instance specification (e.g., `spec/RUBIN_L1_DEPLOYMENTS_<NETWORK>_v1.1.md`)
+  before nodes can treat the deployment as anything other than `DEFINED`. If a `deployment_id` is not present
+  in the chain-instance deployment table, nodes MUST treat it as `DEFINED` / not ACTIVE.
  
 Development status P0 (future release blockers):
 
@@ -1183,7 +1200,7 @@ Normative requirements:
 The following invariants are part of consensus semantics:
 
 1. **Deterministic validation**: For fixed state and block bytes, `ApplyBlock` returns a unique valid/invalid outcome and unique final state if valid.
-2. **Value conservation**: non-coinbase outputs do not exceed canonical inputs; coinbase outputs are bounded by block subsidy + fees.
+2. **Value conservation**: for any non-coinbase transaction, the sum of output values MUST NOT exceed the sum of input values (the difference is the fee); coinbase outputs are bounded by block subsidy + fees.
 3. **Non-spendable exclusion**: non-spendable covenant outputs are excluded from spendable UTXO creation.
 4. **Monotonic VERSION_BITS per chain**: no backwards transitions of the per-chain deployment state.
 5. **Canonical selection**: nodes use chain selection exactly as specified in §6.6.
@@ -1315,7 +1332,7 @@ fixture:
       sig_length: 0
       signature: empty
   locktime: 0xffffffff
-Expected: TX_ERR_SIG_INVALID
+Expected: TX_ERR_SIG_NONCANONICAL
 ```
 
 ### TV-03 invalid binding
@@ -1343,7 +1360,7 @@ Expected: TX_ERR_COVENANT_TYPE_INVALID
 
 ```
 anchor_data = 00 repeated 65537 bytes
-Expected: BLOCK_ERR_ANCHOR_BYTES_EXCEEDED
+Expected: TX_ERR_COVENANT_TYPE_INVALID
 ```
 
 ### TV-05 double spend
@@ -1440,9 +1457,12 @@ Even under a complete eclipse (all peers adversarial), the following hold for an
 light client that correctly implements RUBIN v1.1:
 
 1. **PoW integrity**: the adversary cannot present a header with less cumulative work than
-   the real chain tip *if the client has any out-of-band knowledge of chain tip PoW*
-   (e.g., a trusted checkpoint). Without checkpoints, the adversary can present an
-   alternative chain with equal or greater PoW, which the client cannot distinguish.
+   the adversary cannot present a header chain that violates PoW validity rules (§6.2).
+   However, without trusted checkpoints or diverse peers, the adversary can present an
+   alternative valid-PoW chain with equal or greater cumulative work, which the client
+   cannot distinguish from the honest chain.
+   With a trusted checkpoint (known block hash at height `h_c`), the client can reject any
+   presented chain that does not contain that checkpoint.
 2. **Merkle proof integrity**: given a valid `block_header.merkle_root`, a Merkle inclusion
    proof cannot be forged (SHA3-256 collision resistance, T-013). An eclipsed client that
    accepts a fraudulent header may accept a fraudulent Merkle proof — but only against that
