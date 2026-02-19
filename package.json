@@ -8,10 +8,10 @@
     "spec:explain": "node scripts/spec/spec-explainer.mjs",
     "spec:watch": "node scripts/spec/watch-spec.mjs",
     "spec:all": "npm run spec:html && npm run spec:diff && npm run spec:explain",
-    "lint": "eslint 'scripts/**/*.mjs' 'scripts/**/*.js'",
-    "lint:fix": "eslint 'scripts/**/*.mjs' 'scripts/**/*.js' --fix",
-    "format": "prettier --write 'scripts/**/*.mjs' 'scripts/**/*.js'",
-    "format:check": "prettier --check 'scripts/**/*.mjs' 'scripts/**/*.js'"
+    "lint": "eslint 'scripts/**/*.mjs'",
+    "lint:fix": "eslint 'scripts/**/*.mjs' --fix",
+    "format": "prettier --write 'scripts/**/*.mjs'",
+    "format:check": "prettier --check 'scripts/**/*.mjs'"
   },
   "dependencies": {
     "marked": "^12.0.2"
