@@ -109,6 +109,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"strings"
 	"unsafe"
@@ -121,6 +122,7 @@ import (
 type WolfcryptDylibProvider struct {
 	p      C.rubin_wc_provider_t
 	strict bool
+	path   string
 }
 
 // LoadWolfcryptDylibProviderFromEnv loads the shim from RUBIN_WOLFCRYPT_SHIM_PATH.
@@ -165,7 +167,7 @@ func LoadWolfcryptDylibProvider(path string, strict bool) (*WolfcryptDylibProvid
 		return nil, errors.New("failed to load wolfcrypt shim dylib")
 	}
 
-	return &WolfcryptDylibProvider{p: p, strict: strict}, nil
+	return &WolfcryptDylibProvider{p: p, strict: strict, path: path}, nil
 }
 
 // Close releases the dylib handle. Callers SHOULD close deterministically
@@ -183,6 +185,7 @@ func (w *WolfcryptDylibProvider) SHA3_256(input []byte) ([32]byte, error) {
 		if w.strict {
 			return [32]byte{}, errors.New("wolfcrypt shim sha3_256: input too large for word32 length")
 		}
+		log.Printf("wolfcrypt shim SHA3_256 fallback to software (path=%q): input too large for word32 length (len=%d)", w.path, len(input))
 		sum := sha3.Sum256(input)
 		return sum, nil
 	}
@@ -193,6 +196,7 @@ func (w *WolfcryptDylibProvider) SHA3_256(input []byte) ([32]byte, error) {
 			if w.strict {
 				return [32]byte{}, fmt.Errorf("wolfcrypt shim sha3_256 failed: rc=%d", int32(rc))
 			}
+			log.Printf("wolfcrypt shim SHA3_256 fallback to software (path=%q): rc=%d len=0", w.path, int32(rc))
 			// Fallback to native SHA3-256 (deterministic) on shim error.
 			sum := sha3.Sum256(nil)
 			return sum, nil
@@ -205,6 +209,7 @@ func (w *WolfcryptDylibProvider) SHA3_256(input []byte) ([32]byte, error) {
 		if w.strict {
 			return [32]byte{}, fmt.Errorf("wolfcrypt shim sha3_256 failed: rc=%d", int32(rc))
 		}
+		log.Printf("wolfcrypt shim SHA3_256 fallback to software (path=%q): rc=%d len=%d", w.path, int32(rc), len(input))
 		// Fallback to native SHA3-256 (deterministic) on shim error.
 		sum := sha3.Sum256(input)
 		return sum, nil
