@@ -473,6 +473,7 @@ Semantics:
   - `covenant_data` has two encodings (backward compatible):
     - Legacy: `owner_key_id:bytes32 || lock_mode:u8 || lock_value:u64le || recovery_key_id:bytes32` (73 bytes).
     - Extended: `owner_key_id:bytes32 || spend_delay:u64le || lock_mode:u8 || lock_value:u64le || recovery_key_id:bytes32` (81 bytes).
+  - `owner_key_id != recovery_key_id` MUST be enforced; equal values MUST be rejected as `TX_ERR_PARSE`.
   - `spend_delay` is a relative height delay (in blocks) for the owner path, computed from the output's `creation_height` stored in the spendable UTXO set:
     - If `spend_delay = 0`, owner path is immediate (legacy behavior).
     - If `spend_delay > 0`, owner path is forbidden until `height(B) ≥ o.creation_height + spend_delay`.
@@ -566,6 +567,7 @@ For each non-coinbase input spending output `o`:
    - parse `owner_key_id || spend_delay || lock_mode || lock_value || recovery_key_id` with backward compatibility:
      - `covenant_data_len = 73`: parse legacy form and set `spend_delay = 0`.
      - `covenant_data_len = 81`: parse extended form.
+   - If `owner_key_id = recovery_key_id`, reject as `TX_ERR_PARSE`.
    - any other `lock_mode` MUST be `TX_ERR_PARSE`;
    - If witness public key hash equals `owner_key_id` (owner path):
      - If `spend_delay = 0`: accept (legacy behavior).

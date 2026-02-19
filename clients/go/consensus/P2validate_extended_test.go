@@ -63,14 +63,34 @@ func TestValidateOutputCovenantConstraintsExtended(t *testing.T) {
 	})
 
 	t.Run("VAULT_V1 len=73 OK", func(t *testing.T) {
-		if err := validateOutputCovenantConstraints(TxOutput{CovenantType: CORE_VAULT_V1, CovenantData: make([]byte, 73)}); err != nil {
+		var owner [32]byte
+		var recovery [32]byte
+		owner[0] = 0x11
+		recovery[0] = 0x22
+		data := makeVaultV1Data(t, owner, recovery, 0, TIMELOCK_MODE_HEIGHT, 0, false)
+		if err := validateOutputCovenantConstraints(TxOutput{CovenantType: CORE_VAULT_V1, CovenantData: data}); err != nil {
 			t.Fatalf("expected OK, got %v", err)
 		}
 	})
 
 	t.Run("VAULT_V1 len=81 OK", func(t *testing.T) {
-		if err := validateOutputCovenantConstraints(TxOutput{CovenantType: CORE_VAULT_V1, CovenantData: make([]byte, 81)}); err != nil {
+		var owner [32]byte
+		var recovery [32]byte
+		owner[0] = 0x11
+		recovery[0] = 0x22
+		data := makeVaultV1Data(t, owner, recovery, 1, TIMELOCK_MODE_HEIGHT, 0, true)
+		if err := validateOutputCovenantConstraints(TxOutput{CovenantType: CORE_VAULT_V1, CovenantData: data}); err != nil {
 			t.Fatalf("expected OK, got %v", err)
+		}
+	})
+
+	t.Run("VAULT_V1 owner==recovery parse", func(t *testing.T) {
+		var owner [32]byte
+		owner[0] = 0x11
+		data := makeVaultV1Data(t, owner, owner, 0, TIMELOCK_MODE_HEIGHT, 0, false)
+		err := validateOutputCovenantConstraints(TxOutput{CovenantType: CORE_VAULT_V1, CovenantData: data})
+		if err == nil || err.Error() != "TX_ERR_PARSE" {
+			t.Fatalf("expected parse, got %v", err)
 		}
 	})
 
