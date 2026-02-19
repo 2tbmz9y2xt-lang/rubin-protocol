@@ -2044,7 +2044,7 @@ def run_chainstate(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: Clie
 
         chain_id_hex = str(ctx.get("chain_id_hex", "")).strip()
         profile = str(ctx.get("profile", "")).strip()
-        if chain_id_hex and profile:
+        if (chain_id_hex and profile) or (not chain_id_hex and not profile):
             failures.append(f"{gate}:{test_id}: context must set exactly one of chain_id_hex or profile")
             continue
 

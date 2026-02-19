@@ -415,12 +415,13 @@ fn cmd_apply_utxo(context_path: &str) -> Result<(), String> {
             } else {
                 rubin_consensus::hex_decode_strict(covenant_data_hex)?
             };
+            // Deterministic tooling default: missing/null UtxoEntry::creation_height => 0.
             let creation_height = match entry.get("creation_height") {
-                None => chain_height,
-                Some(v) if v.is_null() => chain_height,
-                Some(v) => v
-                    .as_u64()
-                    .ok_or_else(|| "utxo_set entry creation_height must be u64".to_string())?,
+                None => 0,
+                Some(v) if v.is_null() => 0,
+                Some(v) => v.as_u64().ok_or_else(|| {
+                    "utxo_set entry UtxoEntry::creation_height must be u64".to_string()
+                })?,
             };
             let created_by_coinbase = entry
                 .get("created_by_coinbase")
@@ -546,12 +547,13 @@ fn cmd_apply_block(context_path: &str) -> Result<(), String> {
             } else {
                 rubin_consensus::hex_decode_strict(covenant_data_hex)?
             };
+            // Deterministic tooling default: missing/null UtxoEntry::creation_height => 0.
             let creation_height = match entry.get("creation_height") {
-                None => block_height,
-                Some(v) if v.is_null() => block_height,
-                Some(v) => v
-                    .as_u64()
-                    .ok_or_else(|| "utxo_set entry creation_height must be u64".to_string())?,
+                None => 0,
+                Some(v) if v.is_null() => 0,
+                Some(v) => v.as_u64().ok_or_else(|| {
+                    "utxo_set entry UtxoEntry::creation_height must be u64".to_string()
+                })?,
             };
             let created_by_coinbase = entry
                 .get("created_by_coinbase")
@@ -681,12 +683,13 @@ fn cmd_chainstate(context_path: &str) -> Result<String, String> {
             } else {
                 rubin_consensus::hex_decode_strict(covenant_data_hex)?
             };
+            // Deterministic tooling default: missing/null UtxoEntry::creation_height => 0.
             let creation_height = match entry.get("creation_height") {
-                None => start_height,
-                Some(v) if v.is_null() => start_height,
-                Some(v) => v
-                    .as_u64()
-                    .ok_or_else(|| "utxo_set entry creation_height must be u64".to_string())?,
+                None => 0,
+                Some(v) if v.is_null() => 0,
+                Some(v) => v.as_u64().ok_or_else(|| {
+                    "utxo_set entry UtxoEntry::creation_height must be u64".to_string()
+                })?,
             };
             let created_by_coinbase = entry
                 .get("created_by_coinbase")

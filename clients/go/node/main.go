@@ -473,7 +473,7 @@ func cmdApplyUTXO(contextPath string) error {
 			CovenantType: entry.CovenantType,
 			CovenantData: covenantData,
 		}
-		creationHeight := ctx.ChainHeight
+		creationHeight := uint64(0)
 		if entry.CreationHeight != nil {
 			creationHeight = *entry.CreationHeight
 		}
@@ -576,7 +576,7 @@ func cmdApplyBlock(contextPath string) error {
 			CovenantType: entry.CovenantType,
 			CovenantData: covenantData,
 		}
-		creationHeight := ctx.BlockHeight
+		creationHeight := uint64(0)
 		if entry.CreationHeight != nil {
 			creationHeight = *entry.CreationHeight
 		}
@@ -672,7 +672,7 @@ func cmdChainstate(contextPath string) (string, error) {
 			CovenantType: entry.CovenantType,
 			CovenantData: covenantData,
 		}
-		creationHeight := ctx.StartHeight
+		creationHeight := uint64(0)
 		if entry.CreationHeight != nil {
 			creationHeight = *entry.CreationHeight
 		}
