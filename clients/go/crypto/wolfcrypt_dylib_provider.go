@@ -119,7 +119,8 @@ import (
 // WolfcryptDylibProvider loads a local shim dylib exposing the stable RUBIN wolfCrypt ABI.
 // The shim is expected to be provided by the compliance build pipeline and linked to wolfCrypt.
 type WolfcryptDylibProvider struct {
-	p C.rubin_wc_provider_t
+	p      C.rubin_wc_provider_t
+	strict bool
 }
 
 // LoadWolfcryptDylibProviderFromEnv loads the shim from RUBIN_WOLFCRYPT_SHIM_PATH.
@@ -151,10 +152,10 @@ func LoadWolfcryptDylibProviderFromEnv() (*WolfcryptDylibProvider, error) {
 	} else if strict {
 		return nil, errors.New("RUBIN_WOLFCRYPT_SHIM_SHA3_256 required when RUBIN_WOLFCRYPT_STRICT=1")
 	}
-	return LoadWolfcryptDylibProvider(path)
+	return LoadWolfcryptDylibProvider(path, strict)
 }
 
-func LoadWolfcryptDylibProvider(path string) (*WolfcryptDylibProvider, error) {
+func LoadWolfcryptDylibProvider(path string, strict bool) (*WolfcryptDylibProvider, error) {
 	cpath := C.CString(path)
 	defer C.free(unsafe.Pointer(cpath))
 
@@ -164,7 +165,7 @@ func LoadWolfcryptDylibProvider(path string) (*WolfcryptDylibProvider, error) {
 		return nil, errors.New("failed to load wolfcrypt shim dylib")
 	}
 
-	return &WolfcryptDylibProvider{p: p}, nil
+	return &WolfcryptDylibProvider{p: p, strict: strict}, nil
 }
 
 // Close releases the dylib handle. Callers SHOULD close deterministically
@@ -173,33 +174,42 @@ func (w *WolfcryptDylibProvider) Close() {
 	C.rubin_wc_close(&w.p)
 }
 
-func (w *WolfcryptDylibProvider) SHA3_256(input []byte) [32]byte {
+func (w *WolfcryptDylibProvider) SHA3_256(input []byte) ([32]byte, error) {
 	var out [32]byte
 
 	// The shim uses wolfCrypt APIs with `word32` length parameters. Avoid calling into the shim
 	// with lengths that cannot be represented without truncation.
 	if uint64(len(input)) > uint64(^uint32(0)) {
+		if w.strict {
+			return [32]byte{}, errors.New("wolfcrypt shim sha3_256: input too large for word32 length")
+		}
 		sum := sha3.Sum256(input)
-		return sum
+		return sum, nil
 	}
 
 	if len(input) == 0 {
 		rc := C.int32_t(C.rubin_wc_sha3_256_call(&w.p, nil, 0, (*C.uint8_t)(unsafe.Pointer(&out[0]))))
 		if rc != 1 {
+			if w.strict {
+				return [32]byte{}, fmt.Errorf("wolfcrypt shim sha3_256 failed: rc=%d", int32(rc))
+			}
 			// Fallback to native SHA3-256 (deterministic) on shim error.
 			sum := sha3.Sum256(nil)
-			return sum
+			return sum, nil
 		}
-		return out
+		return out, nil
 	}
 
 	rc := C.int32_t(C.rubin_wc_sha3_256_call(&w.p, (*C.uint8_t)(unsafe.Pointer(&input[0])), C.size_t(len(input)), (*C.uint8_t)(unsafe.Pointer(&out[0]))))
 	if rc != 1 {
+		if w.strict {
+			return [32]byte{}, fmt.Errorf("wolfcrypt shim sha3_256 failed: rc=%d", int32(rc))
+		}
 		// Fallback to native SHA3-256 (deterministic) on shim error.
 		sum := sha3.Sum256(input)
-		return sum
+		return sum, nil
 	}
-	return out
+	return out, nil
 }
 
 func (w *WolfcryptDylibProvider) VerifyMLDSA87(pubkey []byte, sig []byte, digest32 [32]byte) bool {

@@ -8,7 +8,7 @@ import (
 	"rubin.dev/node/crypto"
 )
 
-func blockHeaderHash(p crypto.CryptoProvider, header *BlockHeader) [32]byte {
+func blockHeaderHash(p crypto.CryptoProvider, header *BlockHeader) ([32]byte, error) {
 	out := BlockHeaderBytes(*header)
 	return p.SHA3_256(out)
 }
@@ -16,7 +16,7 @@ func blockHeaderHash(p crypto.CryptoProvider, header *BlockHeader) [32]byte {
 // BlockHeaderHash returns the canonical RUBIN block header hash (SHA3-256 over the 116-byte header encoding).
 //
 // This is exported for node tooling to stay consistent with consensus linkage/PoW validation.
-func BlockHeaderHash(p crypto.CryptoProvider, header BlockHeader) [32]byte {
+func BlockHeaderHash(p crypto.CryptoProvider, header BlockHeader) ([32]byte, error) {
 	return blockHeaderHash(p, &header)
 }
 

@@ -29,11 +29,7 @@ func TxWeight(tx *Tx) (uint64, error) {
 	return addUint64(total, uint64(sigCost))
 }
 
-func txidFromTx(p crypto.CryptoProvider, tx *Tx) [32]byte {
-	return TxID(p, tx)
-}
-
-func TxID(p crypto.CryptoProvider, tx *Tx) [32]byte {
+func TxID(p crypto.CryptoProvider, tx *Tx) ([32]byte, error) {
 	return p.SHA3_256(TxNoWitnessBytes(tx))
 }
 
@@ -44,11 +40,18 @@ func merkleRootTxIDs(p crypto.CryptoProvider, txs []*Tx) ([32]byte, error) {
 	level := make([][32]byte, 0, len(txs))
 	for _, tx := range txs {
 		// Leaf domain separation (spec §5.1.1): Leaf = SHA3-256(0x00 || txid)
-		txid := TxID(p, tx)
+		txid, err := TxID(p, tx)
+		if err != nil {
+			return [32]byte{}, err
+		}
 		leaf := make([]byte, 0, 1+len(txid))
 		leaf = append(leaf, 0x00)
 		leaf = append(leaf, txid[:]...)
-		level = append(level, p.SHA3_256(leaf))
+		leafHash, err := p.SHA3_256(leaf)
+		if err != nil {
+			return [32]byte{}, err
+		}
+		level = append(level, leafHash)
 	}
 	for len(level) > 1 {
 		next := make([][32]byte, 0, (len(level)+1)/2)
@@ -61,7 +64,11 @@ func merkleRootTxIDs(p crypto.CryptoProvider, txs []*Tx) ([32]byte, error) {
 			concat = append(concat, 0x01)
 			concat = append(concat, level[i][:]...)
 			concat = append(concat, level[i+1][:]...)
-			next = append(next, p.SHA3_256(concat))
+			concatHash, err := p.SHA3_256(concat)
+			if err != nil {
+				return [32]byte{}, err
+			}
+			next = append(next, concatHash)
 		}
 		level = next
 	}
@@ -238,7 +245,11 @@ func ApplyBlock(
 		}
 	} else {
 		parent := ctx.AncestorHeaders[len(ctx.AncestorHeaders)-1]
-		if block.Header.PrevBlockHash != blockHeaderHash(p, &parent) {
+		parentHash, err := blockHeaderHash(p, &parent)
+		if err != nil {
+			return err
+		}
+		if block.Header.PrevBlockHash != parentHash {
 			return fmt.Errorf(BLOCK_ERR_LINKAGE_INVALID)
 		}
 	}
@@ -251,7 +262,10 @@ func ApplyBlock(
 		return fmt.Errorf(BLOCK_ERR_TARGET_INVALID)
 	}
 
-	blockHash := blockHeaderHash(p, &block.Header)
+	blockHash, err := blockHeaderHash(p, &block.Header)
+	if err != nil {
+		return err
+	}
 	if bytes.Compare(blockHash[:], block.Header.Target[:]) >= 0 {
 		return fmt.Errorf(BLOCK_ERR_POW_INVALID)
 	}
@@ -262,7 +276,7 @@ func ApplyBlock(
 	}
 	merkleRoot, err := merkleRootTxIDs(p, headerTxs)
 	if err != nil {
-		return fmt.Errorf(BLOCK_ERR_MERKLE_INVALID)
+		return err
 	}
 	if merkleRoot != block.Header.MerkleRoot {
 		return fmt.Errorf(BLOCK_ERR_MERKLE_INVALID)
@@ -348,7 +362,10 @@ func ApplyBlock(
 			}
 		}
 
-		txID := TxID(p, &tx)
+		txID, err := TxID(p, &tx)
+		if err != nil {
+			return err
+		}
 		for i, output := range tx.Outputs {
 			if output.CovenantType == CORE_ANCHOR {
 				totalAnchorBytes, err = addUint64(totalAnchorBytes, uint64(len(output.CovenantData)))
@@ -561,7 +578,10 @@ func ValidateInputAuthorization(
 		if suiteID != witness.SuiteID {
 			return fmt.Errorf("TX_ERR_SIG_INVALID")
 		}
-		actualKeyID := p.SHA3_256(witness.Pubkey)
+		actualKeyID, err := p.SHA3_256(witness.Pubkey)
+		if err != nil {
+			return err
+		}
 		if expected := prevout.CovenantData[1:33]; !bytes.Equal(actualKeyID[:], expected) {
 			return fmt.Errorf("TX_ERR_SIG_INVALID")
 		}
@@ -613,16 +633,25 @@ func ValidateInputAuthorization(
 		}
 		if len(input.ScriptSig) == 32 {
 			expectedHash := prevout.CovenantData[:32]
-			scriptHash := p.SHA3_256(input.ScriptSig)
+			scriptHash, err := p.SHA3_256(input.ScriptSig)
+			if err != nil {
+				return err
+			}
 			if !bytes.Equal(scriptHash[:], expectedHash) {
 				return fmt.Errorf("TX_ERR_SIG_INVALID")
 			}
-			actualKeyID := p.SHA3_256(witness.Pubkey)
+			actualKeyID, err := p.SHA3_256(witness.Pubkey)
+			if err != nil {
+				return err
+			}
 			if !bytes.Equal(actualKeyID[:], claimKeyID) {
 				return fmt.Errorf("TX_ERR_SIG_INVALID")
 			}
 		} else {
-			actualKeyID := p.SHA3_256(witness.Pubkey)
+			actualKeyID, err := p.SHA3_256(witness.Pubkey)
+			if err != nil {
+				return err
+			}
 			if !bytes.Equal(actualKeyID[:], refundKeyID) {
 				return fmt.Errorf("TX_ERR_SIG_INVALID")
 			}
@@ -678,7 +707,10 @@ func ValidateInputAuthorization(
 		if bytes.Equal(ownerKeyID, recoveryKeyID) {
 			return fmt.Errorf("TX_ERR_PARSE")
 		}
-		actualKeyID := p.SHA3_256(witness.Pubkey)
+		actualKeyID, err := p.SHA3_256(witness.Pubkey)
+		if err != nil {
+			return err
+		}
 		if !bytes.Equal(actualKeyID[:], ownerKeyID) && !bytes.Equal(actualKeyID[:], recoveryKeyID) {
 			return fmt.Errorf("TX_ERR_SIG_INVALID")
 		}
@@ -735,7 +767,10 @@ func ValidateInputAuthorization(
 		switch len(matchingAnchors) {
 		case 0:
 			// Refund path
-			actualKeyID2 := p.SHA3_256(witness.Pubkey)
+			actualKeyID2, err := p.SHA3_256(witness.Pubkey)
+			if err != nil {
+				return err
+			}
 			if !bytes.Equal(actualKeyID2[:], refundKeyID2) {
 				return fmt.Errorf("TX_ERR_SIG_INVALID")
 			}
@@ -745,11 +780,17 @@ func ValidateInputAuthorization(
 		case 1:
 			// Claim path
 			preimage32 := matchingAnchors[0][len(htlcV2Prefix):]
-			preimageHash := p.SHA3_256(preimage32)
+			preimageHash, err := p.SHA3_256(preimage32)
+			if err != nil {
+				return err
+			}
 			if !bytes.Equal(preimageHash[:], hash2) {
 				return fmt.Errorf("TX_ERR_SIG_INVALID")
 			}
-			actualKeyID2 := p.SHA3_256(witness.Pubkey)
+			actualKeyID2, err := p.SHA3_256(witness.Pubkey)
+			if err != nil {
+				return err
+			}
 			if !bytes.Equal(actualKeyID2[:], claimKeyID2) {
 				return fmt.Errorf("TX_ERR_SIG_INVALID")
 			}
