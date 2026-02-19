@@ -363,4 +363,3 @@ func (d *DB) applyBlockAsNewTip(
 	}
 	return ApplyAppliedAsTip, nil
 }
-
