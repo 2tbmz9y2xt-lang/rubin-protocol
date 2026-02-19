@@ -2236,6 +2236,326 @@ def run_chainstate(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: Clie
     return executed
 
 
+def _extract_inline_backticked_value(doc: str, key: str) -> str:
+    # Preferred profile format: `key`: `...hex...`
+    for line in doc.splitlines():
+        if key not in line:
+            continue
+        colon = line.find(":")
+        if colon < 0:
+            continue
+        after = line[colon + 1 :]
+        first = after.find("`")
+        if first < 0:
+            continue
+        after_first = after[first + 1 :]
+        second = after_first.find("`")
+        if second < 0:
+            continue
+        value = after_first[:second].strip()
+        if value:
+            return value
+    raise ValueError(f"missing key: {key}")
+
+
+def _read_genesis_header_bytes_from_profile(repo_root: Path, profile: str) -> bytes:
+    profile_path = Path(profile)
+    if not profile_path.is_absolute():
+        profile_path = (repo_root / profile_path).resolve()
+    doc = profile_path.read_text(encoding="utf-8")
+    header_hex = _extract_inline_backticked_value(doc, "genesis_header_bytes")
+    hb = bytes.fromhex("".join(header_hex.split()))
+    if len(hb) != 116:
+        raise ValueError(f"genesis_header_bytes must be 116 bytes (got {len(hb)})")
+    return hb
+
+
+def _parse_header_target_and_timestamp(header_bytes_116: bytes) -> tuple[bytes, int]:
+    if len(header_bytes_116) != 116:
+        raise ValueError("header bytes must be 116")
+    target = header_bytes_116[76:108]
+    ts = int.from_bytes(header_bytes_116[68:76], "little", signed=False)
+    return target, ts
+
+
+def _coinbase_tx_bytes(height: int, key_id32: bytes) -> bytes:
+    if len(key_id32) != 32:
+        raise ValueError("key_id must be 32 bytes")
+    version = 1
+    tx_nonce = 0
+    prev_txid = b"\x00" * 32
+    prev_vout = 0xFFFFFFFF
+    sequence = 0xFFFFFFFF
+    value = 0
+    covenant_type = 0x0000  # CORE_P2PK
+    covenant_data = bytes([0x01]) + key_id32  # suite_id + key_id
+
+    # TxNoWitnessBytes layout matches clients/go/consensus/encode.go
+    out = bytearray()
+    out.extend(_u32le(version))
+    out.extend(_u64le(tx_nonce))
+
+    out.extend(_compact_size_encode(1))  # input count
+    out.extend(prev_txid)
+    out.extend(_u32le(prev_vout))
+    out.extend(_compact_size_encode(0))  # script_sig_len
+    out.extend(_u32le(sequence))
+
+    out.extend(_compact_size_encode(1))  # output count
+    out.extend(_u64le(value))
+    out.extend(_u16le(covenant_type))
+    out.extend(_compact_size_encode(len(covenant_data)))
+    out.extend(covenant_data)
+
+    out.extend(_u32le(height))  # locktime
+
+    # WitnessBytes: CompactSize(0)
+    out.extend(_compact_size_encode(0))
+    return bytes(out)
+
+
+def _txid_from_tx_bytes(tx_bytes: bytes) -> bytes:
+    # txid is SHA3-256 over TxNoWitnessBytes.
+    # Our tx is coinbase-only with witness_count=0, so the TxNoWitnessBytes
+    # is tx_bytes without the final CompactSize(0) witness section.
+    if len(tx_bytes) < 1:
+        raise ValueError("tx bytes truncated")
+    nowit = tx_bytes[:-1]
+    return _sha3_256(nowit)
+
+
+def _merkle_root_single(txid32: bytes) -> bytes:
+    if len(txid32) != 32:
+        raise ValueError("txid must be 32")
+    return _sha3_256(b"\x00" + txid32)
+
+
+def _make_block_bytes(
+    *,
+    height: int,
+    prev_hash32: bytes,
+    target32: bytes,
+    timestamp: int,
+    key_id32: bytes,
+) -> bytes:
+    if len(prev_hash32) != 32:
+        raise ValueError("prev hash must be 32 bytes")
+    if len(target32) != 32:
+        raise ValueError("target must be 32 bytes")
+    tx = _coinbase_tx_bytes(height, key_id32)
+    txid = _txid_from_tx_bytes(tx)
+    merkle = _merkle_root_single(txid)
+
+    version = 1
+    nonce = 0
+
+    # Find a nonce that satisfies PoW (hash < target). Target is typically huge on dev profiles,
+    # but we loop to be robust for stricter profiles.
+    while True:
+        header = bytearray()
+        header.extend(_u32le(version))
+        header.extend(prev_hash32)
+        header.extend(merkle)
+        header.extend(_u64le(timestamp))
+        header.extend(target32)
+        header.extend(_u64le(nonce))
+        h = _sha3_256(bytes(header))
+        if h < target32:
+            break
+        nonce += 1
+        if nonce > 10_000_000:
+            raise RuntimeError("failed to find PoW nonce under given target")
+
+    block = bytearray()
+    block.extend(header)
+    block.extend(_compact_size_encode(1))  # tx count
+    block.extend(tx)
+    return bytes(block)
+
+
+def _hex(b: bytes) -> str:
+    return b.hex()
+
+
+def _parse_utxo_set_hash_output(stdout: str) -> tuple[int, str, str]:
+    out = json.loads(stdout.strip())
+    if not isinstance(out, dict):
+        raise ValueError("utxo-set-hash output must be object")
+    tip_height = parse_int(out.get("tip_height"))
+    tip_hash = str(out.get("tip_hash_hex", "")).strip().lower()
+    utxo_hash = str(out.get("utxo_set_hash_hex", "")).strip().lower()
+    if not tip_hash or not utxo_hash:
+        raise ValueError("missing tip_hash_hex/utxo_set_hash_hex")
+    return tip_height, tip_hash, utxo_hash
+
+
+def run_chainstate_store(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd, failures: list[str]) -> int:
+    tests = fixture.get("tests")
+    if not isinstance(tests, list) or not tests:
+        failures.append(f"{gate}: fixture has no tests")
+        return 0
+
+    repo_root = Path(__file__).resolve().parents[2]
+    executed = 0
+
+    key_id32 = b"\x00" * 32
+
+    for t in tests:
+        if not isinstance(t, dict):
+            failures.append(f"{gate}: invalid test entry (not a mapping)")
+            continue
+        test_id = str(t.get("id", "<missing id>"))
+        has_expect, expected = _expect_from_test(t)
+        if not has_expect or expected != "PASS":
+            failures.append(f"{gate}:{test_id}: expected_code MUST be PASS")
+            continue
+        profile = str(t.get("profile", "")).strip()
+        if not profile:
+            failures.append(f"{gate}:{test_id}: missing profile")
+            continue
+        plan = t.get("plan")
+        if not isinstance(plan, dict):
+            failures.append(f"{gate}:{test_id}: missing/invalid plan")
+            continue
+        kind = str(plan.get("kind", "")).strip().lower()
+        if kind not in {"linear", "reorg"}:
+            failures.append(f"{gate}:{test_id}: unknown plan kind: {kind}")
+            continue
+
+        try:
+            genesis_header = _read_genesis_header_bytes_from_profile(repo_root, profile)
+            target32, genesis_ts = _parse_header_target_and_timestamp(genesis_header)
+            genesis_hash = _sha3_256(genesis_header)
+        except Exception as e:
+            failures.append(f"{gate}:{test_id}: profile parse failed: {e}")
+            continue
+
+        blocks: list[bytes] = []
+
+        try:
+            if kind == "linear":
+                n = _to_int(plan.get("blocks"))
+                if n <= 0:
+                    raise ValueError("blocks must be >0")
+                prev = genesis_hash
+                for h in range(1, n + 1):
+                    b = _make_block_bytes(
+                        height=h,
+                        prev_hash32=prev,
+                        target32=target32,
+                        timestamp=genesis_ts + h,
+                        key_id32=key_id32,
+                    )
+                    header_hash = _sha3_256(b[:116])
+                    blocks.append(b)
+                    prev = header_hash
+
+            if kind == "reorg":
+                main_len = _to_int(plan.get("main_len"))
+                fork_point = _to_int(plan.get("fork_point"))
+                fork_len = _to_int(plan.get("fork_len"))
+                if main_len <= 0 or fork_len <= 0:
+                    raise ValueError("main_len/fork_len must be >0")
+                if fork_point < 0 or fork_point >= min(main_len, fork_len):
+                    raise ValueError("fork_point must be within both chains")
+
+                # Build chain A headers.
+                a_hashes: list[bytes] = [genesis_hash]
+                a_blocks: list[bytes] = []
+                for h in range(1, main_len + 1):
+                    b = _make_block_bytes(
+                        height=h,
+                        prev_hash32=a_hashes[h - 1],
+                        target32=target32,
+                        timestamp=genesis_ts + h,
+                        key_id32=key_id32,
+                    )
+                    a_blocks.append(b)
+                    a_hashes.append(_sha3_256(b[:116]))
+
+                # Build chain B headers, sharing up to fork_point.
+                b_hashes: list[bytes] = a_hashes[: fork_point + 1]
+                b_blocks: list[bytes] = []
+                for h in range(1, fork_point + 1):
+                    # same block bytes as chain A for shared prefix
+                    b_blocks.append(a_blocks[h - 1])
+
+                # Diverging blocks from fork_point+1 .. fork_len
+                prev = b_hashes[fork_point]
+                # Use a different timestamp schedule on the fork to avoid accidental header hash collisions.
+                for h in range(fork_point + 1, fork_len + 1):
+                    b = _make_block_bytes(
+                        height=h,
+                        prev_hash32=prev,
+                        target32=target32,
+                        timestamp=genesis_ts + 10_000 + h,
+                        key_id32=key_id32,
+                    )
+                    b_blocks.append(b)
+                    prev = _sha3_256(b[:116])
+                    b_hashes.append(prev)
+
+                # Import order: first apply chain A to its tip, then import chain B's
+                # diverging suffix (which should trigger reorg when it becomes best).
+                blocks = a_blocks + b_blocks[fork_point:]  # include B[fork_point+1..]
+        except Exception as e:
+            failures.append(f"{gate}:{test_id}: block generation failed: {e}")
+            continue
+
+        executed += 1
+
+        with tempfile.TemporaryDirectory(prefix="rubin-cv-chainstate-store-") as tmp:
+            tmpdir = Path(tmp)
+            datadir_g = tmpdir / "go"
+            datadir_r = tmpdir / "rust"
+            datadir_g.mkdir(parents=True, exist_ok=True)
+            datadir_r.mkdir(parents=True, exist_ok=True)
+
+            # Init both datadirs.
+            p_r = run_result(rust, ["init", "--datadir", str(datadir_r), "--profile", profile])
+            p_g = run_result(go, ["init", "--datadir", str(datadir_g), "--profile", profile])
+            if p_r.returncode != 0:
+                failures.append(f"{gate}:{test_id}: rust init failed: {_extract_err_token(p_r.stderr)} ({p_r.stderr.strip()})")
+                continue
+            if p_g.returncode != 0:
+                failures.append(f"{gate}:{test_id}: go init failed: {_extract_err_token(p_g.stderr)} ({p_g.stderr.strip()})")
+                continue
+
+            # Import blocks.
+            for b in blocks:
+                hx = _hex(b)
+                p_r = run_result(rust, ["import-block", "--datadir", str(datadir_r), "--profile", profile, "--block-hex", hx])
+                p_g = run_result(go, ["import-block", "--datadir", str(datadir_g), "--profile", profile, "--block-hex", hx])
+                if p_r.returncode != 0:
+                    failures.append(f"{gate}:{test_id}: rust import-block failed: {_extract_err_token(p_r.stderr)} ({p_r.stderr.strip()})")
+                    break
+                if p_g.returncode != 0:
+                    failures.append(f"{gate}:{test_id}: go import-block failed: {_extract_err_token(p_g.stderr)} ({p_g.stderr.strip()})")
+                    break
+
+            # Final hash parity.
+            p_r = run_result(rust, ["utxo-set-hash", "--datadir", str(datadir_r), "--profile", profile])
+            p_g = run_result(go, ["utxo-set-hash", "--datadir", str(datadir_g), "--profile", profile])
+            if p_r.returncode != 0:
+                failures.append(f"{gate}:{test_id}: rust utxo-set-hash failed: {_extract_err_token(p_r.stderr)} ({p_r.stderr.strip()})")
+                continue
+            if p_g.returncode != 0:
+                failures.append(f"{gate}:{test_id}: go utxo-set-hash failed: {_extract_err_token(p_g.stderr)} ({p_g.stderr.strip()})")
+                continue
+
+            try:
+                hr = _parse_utxo_set_hash_output(p_r.stdout)
+                hg = _parse_utxo_set_hash_output(p_g.stdout)
+            except Exception as e:
+                failures.append(f"{gate}:{test_id}: failed to parse utxo-set-hash JSON: {e}")
+                continue
+
+            if hr != hg:
+                failures.append(f"{gate}:{test_id}: cross-client mismatch: rust={hr} go={hg}")
+
+    return executed
+
+
 def main() -> int:
     global _TXHEX_DIR
     txhex_tmp = tempfile.TemporaryDirectory(prefix="rubin-cv-txhex-")
@@ -2402,6 +2722,9 @@ def main() -> int:
             continue
         if gate == "CV-CHAINSTATE":
             checks += run_chainstate(gate, fixture, rust, go, failures)
+            continue
+        if gate == "CV-CHAINSTATE-STORE":
+            checks += run_chainstate_store(gate, fixture, rust, go, failures)
             continue
         if gate == "CV-FEES":
             checks += run_fees(gate, fixture, rust, go, failures)

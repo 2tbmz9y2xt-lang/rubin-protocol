@@ -25,6 +25,23 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// Create an initial manifest for an uninitialized (empty) chain store.
+    ///
+    /// This is used by `node init` before importing genesis via the normal import pipeline.
+    /// Tip fields are set to zero/empty so that genesis is always selected as the first tip.
+    pub fn empty(chain_id_hex: &str) -> Self {
+        let zero_hash_hex = "00".repeat(32);
+        Self {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            chain_id_hex: chain_id_hex.to_string(),
+            tip_hash: zero_hash_hex.clone(),
+            tip_height: 0,
+            tip_cumulative_work: "0".to_string(),
+            last_applied_block_hash: zero_hash_hex,
+            last_applied_height: 0,
+        }
+    }
+
     /// Create an initial manifest for genesis state.
     pub fn genesis(chain_id_hex: &str, genesis_hash_hex: &str, genesis_work: u128) -> Self {
         Self {
