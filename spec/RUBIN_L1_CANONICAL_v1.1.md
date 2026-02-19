@@ -62,7 +62,7 @@ Development status note (non-normative):
 - `MAX_SUPPLY = 10_000_000_000_000_000` base units (100,000,000 RBN)
 - `SUBSIDY_TOTAL_MINED = 9_900_000_000_000_000` base units (99,000,000 RBN)
 - `SUBSIDY_DURATION_BLOCKS = 1_314_900` blocks
-  - Non-normative: `1_314_900 = 2² × 3³ × 5² × 487`; divisible by `COINBASE_MATURITY` (100) and `TARGET_BLOCK_INTERVAL` (600) but not by `SIGNAL_WINDOW` (2016).
+  - Non-normative: `1_314_900 = 2² × 3³ × 5² × 487`; divisible by `COINBASE_MATURITY` (100) but not by `TARGET_BLOCK_INTERVAL` (600) or `SIGNAL_WINDOW` (2016).
 
 Non-normative note (emission schedule and genesis intent):
 - Total supply target is 100,000,000 RBN (`MAX_SUPPLY`) where values in transactions are in base units
