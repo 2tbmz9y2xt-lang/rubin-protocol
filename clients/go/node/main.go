@@ -187,7 +187,7 @@ func deriveChainID(p crypto.CryptoProvider, profilePath string) ([32]byte, error
 	preimage = append(preimage, consensus.CompactSize(1).Encode()...)
 	preimage = append(preimage, txBytes...)
 
-	return p.SHA3_256(preimage), nil
+	return p.SHA3_256(preimage)
 }
 
 func cmdChainID(profilePath string) error {
@@ -220,7 +220,10 @@ func cmdTxID(txHex string) error {
 	if err != nil {
 		return err
 	}
-	txid := consensus.TxID(p, tx)
+	txid, err := consensus.TxID(p, tx)
+	if err != nil {
+		return err
+	}
 	fmt.Printf("%x\n", txid)
 	return nil
 }
@@ -711,12 +714,18 @@ func cmdChainstate(contextPath string) (string, error) {
 			return "", err
 		}
 
-		tipHash = consensus.BlockHeaderHash(p, block.Header)
+		tipHash, err = consensus.BlockHeaderHash(p, block.Header)
+		if err != nil {
+			return "", err
+		}
 		tipHeight = blockHeight
 		ancestors = append(ancestors, block.Header)
 	}
 
-	utxoHash := consensus.UtxoSetHash(p, utxo)
+	utxoHash, err := consensus.UtxoSetHash(p, utxo)
+	if err != nil {
+		return "", err
+	}
 	out := map[string]any{
 		"tip_height":        tipHeight,
 		"tip_hash_hex":      hex.EncodeToString(tipHash[:]),

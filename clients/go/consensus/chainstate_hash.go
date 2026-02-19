@@ -25,7 +25,7 @@ func outpointKeyBytes(p TxOutPoint) [36]byte {
 
 // UtxoSetHash computes the Phase 1 canonical `utxo_set_hash` used for cross-client chainstate comparability.
 // See operational/RUBIN_CHAINSTATE_SNAPSHOT_HASH_v1.1.md.
-func UtxoSetHash(p crypto.CryptoProvider, utxo map[TxOutPoint]UtxoEntry) [32]byte {
+func UtxoSetHash(p crypto.CryptoProvider, utxo map[TxOutPoint]UtxoEntry) ([32]byte, error) {
 	items := make([]utxoSetHashItem, 0, len(utxo))
 	for point, entry := range utxo {
 		items = append(items, utxoSetHashItem{

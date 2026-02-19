@@ -29,20 +29,29 @@ func SighashV1Digest(
 		binary.LittleEndian.PutUint32(tmp4[:], in.PrevVout)
 		prevouts = append(prevouts, tmp4[:]...)
 	}
-	hashPrevouts := p.SHA3_256(prevouts)
+	hashPrevouts, err := p.SHA3_256(prevouts)
+	if err != nil {
+		return [32]byte{}, err
+	}
 
 	sequences := make([]byte, 0, len(tx.Inputs)*4)
 	for _, in := range tx.Inputs {
 		binary.LittleEndian.PutUint32(tmp4[:], in.Sequence)
 		sequences = append(sequences, tmp4[:]...)
 	}
-	hashSequences := p.SHA3_256(sequences)
+	hashSequences, err := p.SHA3_256(sequences)
+	if err != nil {
+		return [32]byte{}, err
+	}
 
 	outputsBytes := make([]byte, 0)
 	for _, o := range tx.Outputs {
 		outputsBytes = append(outputsBytes, TxOutputBytes(o)...)
 	}
-	hashOutputs := p.SHA3_256(outputsBytes)
+	hashOutputs, err := p.SHA3_256(outputsBytes)
+	if err != nil {
+		return [32]byte{}, err
+	}
 
 	in := tx.Inputs[inputIndexInt]
 
@@ -76,5 +85,5 @@ func SighashV1Digest(
 	binary.LittleEndian.PutUint32(tmp4[:], tx.Locktime)
 	preimage = append(preimage, tmp4[:]...)
 
-	return p.SHA3_256(preimage), nil
+	return p.SHA3_256(preimage)
 }

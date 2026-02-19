@@ -8,7 +8,7 @@ import (
 
 type applyTxStubProvider struct{}
 
-func (p applyTxStubProvider) SHA3_256(input []byte) [32]byte {
+func (p applyTxStubProvider) SHA3_256(input []byte) ([32]byte, error) {
 	return crypto.DevStdCryptoProvider{}.SHA3_256(input)
 }
 
@@ -17,10 +17,19 @@ func (p applyTxStubProvider) VerifySLHDSASHAKE_256f(_ []byte, _ []byte, _ [32]by
 	return true
 }
 
+func mustSHA3_256(t *testing.T, p crypto.CryptoProvider, input []byte) [32]byte {
+	t.Helper()
+	out, err := p.SHA3_256(input)
+	if err != nil {
+		t.Fatalf("SHA3_256 failed: %v", err)
+	}
+	return out
+}
+
 func makeP2PKPrevout(t *testing.T, p crypto.CryptoProvider) TxOutput {
 	t.Helper()
 	pubkey := make([]byte, ML_DSA_PUBKEY_BYTES)
-	keyID := p.SHA3_256(pubkey)
+	keyID := mustSHA3_256(t, p, pubkey)
 	covenantData := append([]byte{SUITE_ID_ML_DSA}, keyID[:]...)
 	return TxOutput{
 		Value:        1000,
@@ -63,7 +72,7 @@ func TestApplyTxOK(t *testing.T) {
 
 	tx := makeP2PKTx(prevout, prevoutData.Value)
 	// ensure key id is correct for the witness pubkey
-	keyID := p.SHA3_256(make([]byte, ML_DSA_PUBKEY_BYTES))
+	keyID := mustSHA3_256(t, p, make([]byte, ML_DSA_PUBKEY_BYTES))
 	tx.Witness.Witnesses[0].Pubkey = make([]byte, ML_DSA_PUBKEY_BYTES)
 	covenantData := append([]byte{SUITE_ID_ML_DSA}, keyID[:]...)
 	for i := range tx.Outputs {
@@ -111,7 +120,7 @@ func TestApplyTxMissingUTXO(t *testing.T) {
 func TestApplyTxDuplicatePrevout(t *testing.T) {
 	p := applyTxStubProvider{}
 	prevout := TxOutPoint{TxID: [32]byte{1}, Vout: 0}
-	keyID := p.SHA3_256(make([]byte, ML_DSA_PUBKEY_BYTES))
+	keyID := mustSHA3_256(t, p, make([]byte, ML_DSA_PUBKEY_BYTES))
 	prevoutData := TxOutput{
 		Value:        200,
 		CovenantType: CORE_P2PK,
@@ -151,7 +160,7 @@ func TestApplyTxDuplicatePrevout(t *testing.T) {
 func TestApplyTxValueConservation(t *testing.T) {
 	p := applyTxStubProvider{}
 	prevout := TxOutPoint{TxID: [32]byte{2}, Vout: 0}
-	keyID := p.SHA3_256(make([]byte, ML_DSA_PUBKEY_BYTES))
+	keyID := mustSHA3_256(t, p, make([]byte, ML_DSA_PUBKEY_BYTES))
 	prevoutData := TxOutput{
 		Value:        100,
 		CovenantType: CORE_P2PK,
