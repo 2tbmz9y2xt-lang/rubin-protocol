@@ -1,0 +1,47 @@
+name: UI webhook sync on merge
+
+on:
+  workflow_dispatch: # disabled until RUBIN_UI_WEBHOOK_URL + RUBIN_UI_WEBHOOK_TOKEN secrets are configured
+
+permissions:
+  contents: read
+
+jobs:
+  notify-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger UI webhook
+        env:
+          UI_WEBHOOK_URL: ${{ secrets.RUBIN_UI_WEBHOOK_URL }}
+          UI_WEBHOOK_TOKEN: ${{ secrets.RUBIN_UI_WEBHOOK_TOKEN }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${UI_WEBHOOK_URL:-}" ]; then
+            echo "RUBIN_UI_WEBHOOK_URL is not set; skip notify."
+            exit 0
+          fi
+
+          payload="$(cat <<JSON
+          {
+            "source": "github-actions",
+            "actor": "${ACTOR}",
+            "repository": "${REPO}",
+            "ref": "${REF}",
+            "sha": "${SHA}"
+          }
+          JSON
+          )"
+
+          curl --fail --silent --show-error \
+            --retry 3 --retry-all-errors --max-time 30 \
+            -X POST "${UI_WEBHOOK_URL}" \
+            -H "content-type: application/json" \
+            -H "x-rubin-webhook-token: ${UI_WEBHOOK_TOKEN:-}" \
+            --data "${payload}"
+
+          echo "UI webhook delivered."

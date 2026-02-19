@@ -7,9 +7,19 @@
     "spec:diff": "node scripts/spec/gen-spec-diff.mjs",
     "spec:explain": "node scripts/spec/spec-explainer.mjs",
     "spec:watch": "node scripts/spec/watch-spec.mjs",
-    "spec:all": "npm run spec:html && npm run spec:diff && npm run spec:explain"
+    "spec:all": "npm run spec:html && npm run spec:diff && npm run spec:explain",
+    "lint": "eslint 'scripts/**/*.mjs'",
+    "lint:fix": "eslint 'scripts/**/*.mjs' --fix",
+    "format": "prettier --write 'scripts/**/*.mjs'",
+    "format:check": "prettier --check 'scripts/**/*.mjs'"
   },
   "dependencies": {
     "marked": "^12.0.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.0.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.8.1"
   }
 }

@@ -5,26 +5,26 @@
  * Input:  git diff -- spec/RUBIN_L1_CANONICAL_v1.1.md
  * Output: analysis/spec/spec-diff.json
  */
-import fs from 'node:fs'
-import path from 'node:path'
-import { execSync } from 'node:child_process'
+import fs from "node:fs";
+import path from "node:path";
+import { execSync } from "node:child_process";
 
-const repoRoot = process.cwd()
-const target = path.join(repoRoot, 'analysis', 'spec', 'spec-diff.json')
-const updated = new Date().toISOString().replace('T', ' ').slice(0, 19)
+const repoRoot = process.cwd();
+const target = path.join(repoRoot, "analysis", "spec", "spec-diff.json");
+const updated = new Date().toISOString().replace("T", " ").slice(0, 19);
 
-let diff = ''
+let diff = "";
 try {
-  diff = execSync('git diff --unified=3 -- spec/RUBIN_L1_CANONICAL_v1.1.md', {
+  diff = execSync("git diff --unified=3 -- spec/RUBIN_L1_CANONICAL_v1.1.md", {
     cwd: repoRoot,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim()
-  if (!diff) diff = 'No changes in canonical spec relative to current HEAD.'
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+  if (!diff) diff = "No changes in canonical spec relative to current HEAD.";
 } catch (e) {
-  diff = `Failed to get diff: ${e.message}`
+  diff = `Failed to get diff: ${e.message}`;
 }
 
-fs.mkdirSync(path.dirname(target), { recursive: true })
-fs.writeFileSync(target, JSON.stringify({ updated, diff }, null, 2), 'utf8')
-console.log(`[${updated}] spec-diff.json saved -> ${target}`)
+fs.mkdirSync(path.dirname(target), { recursive: true });
+fs.writeFileSync(target, JSON.stringify({ updated, diff }, null, 2), "utf8");
+console.log(`[${updated}] spec-diff.json saved -> ${target}`);

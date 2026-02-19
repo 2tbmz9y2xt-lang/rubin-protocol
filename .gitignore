@@ -20,8 +20,9 @@ clients/go/semgrep_output.json
 clients/rust/cargo_audit.json
 **/cargo_audit.json
 
-# Local analysis outputs
-analysis/
+# Local analysis outputs (generated, not source)
+analysis/spec/spec-diff.json
+analysis/spec/spec-explainer.json
 
 # Node tooling (spec annotator)
 node_modules/
@@ -38,3 +39,12 @@ rubin-ui/
 
 # Local scratch docs
 IMPLEMENTATION_ROADMAP.md
+
+# Security scan artifacts
+clients/go/gosec_output.json
+clients/go/semgrep_output.json
+clients/rust/cargo_audit.json
+
+# Generated spec analysis artifacts
+analysis/spec/spec-diff.json
+analysis/spec/spec-explainer.json

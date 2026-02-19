@@ -7,22 +7,22 @@
  *
  * This is tooling-only; output is ignored by git.
  */
-import fs from 'node:fs'
-import path from 'node:path'
-import { marked } from 'marked'
+import fs from "node:fs";
+import path from "node:path";
+import { marked } from "marked";
 
-const repoRoot = process.cwd()
-const src = path.join(repoRoot, 'spec', 'RUBIN_L1_CANONICAL_v1.1.md')
-const dstDir = path.join(repoRoot, 'analysis', 'spec')
-const dst = path.join(dstDir, 'RUBIN_L1_CANONICAL_v1.1.html')
+const repoRoot = process.cwd();
+const src = path.join(repoRoot, "spec", "RUBIN_L1_CANONICAL_v1.1.md");
+const dstDir = path.join(repoRoot, "analysis", "spec");
+const dst = path.join(dstDir, "RUBIN_L1_CANONICAL_v1.1.html");
 
 if (!fs.existsSync(src)) {
-  console.error(`spec:html: missing input: ${src}`)
-  process.exit(1)
+  console.error(`spec:html: missing input: ${src}`);
+  process.exit(1);
 }
 
-const md = fs.readFileSync(src, 'utf8')
-const htmlBody = marked.parse(md)
+const md = fs.readFileSync(src, "utf8");
+const htmlBody = marked.parse(md);
 const template = `<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -42,9 +42,8 @@ const template = `<!DOCTYPE html>
 <body>
 ${htmlBody}
 </body>
-</html>`
+</html>`;
 
-fs.mkdirSync(dstDir, { recursive: true })
-fs.writeFileSync(dst, template, 'utf8')
-console.log(`Spec HTML saved -> ${dst}`)
-
+fs.mkdirSync(dstDir, { recursive: true });
+fs.writeFileSync(dst, template, "utf8");
+console.log(`Spec HTML saved -> ${dst}`);
