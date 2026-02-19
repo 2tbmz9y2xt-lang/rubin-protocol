@@ -133,10 +133,15 @@ def main() -> int:
         expected_txid = t.get("expected_txid_sha3_256_hex")
         expected_sighash = t.get("expected_sighash_v1_hex")
 
+        tx_path = ""
         try:
+            with tempfile.NamedTemporaryFile("w", suffix=".txhex", delete=False, encoding="utf-8") as f:
+                f.write(tx_hex.strip() + "\n")
+                tx_path = f.name
+
             if isinstance(expected_txid, str) and expected_txid:
-                out_r = run(rust, ["txid", "--tx-hex", tx_hex])
-                out_g = run(go, ["txid", "--tx-hex", tx_hex])
+                out_r = run(rust, ["txid", "--tx-hex-file", tx_path])
+                out_g = run(go, ["txid", "--tx-hex-file", tx_path])
                 executed += 1
                 if out_r != expected_txid:
                     failures.append(f"{test_id}: rust txid mismatch: got={out_r} expected={expected_txid}")
@@ -169,8 +174,8 @@ def main() -> int:
                     rust,
                     [
                         "sighash",
-                        "--tx-hex",
-                        tx_hex,
+                        "--tx-hex-file",
+                        tx_path,
                         "--input-index",
                         str(input_index),
                         "--input-value",
@@ -182,8 +187,8 @@ def main() -> int:
                     go,
                     [
                         "sighash",
-                        "--tx-hex",
-                        tx_hex,
+                        "--tx-hex-file",
+                        tx_path,
                         "--input-index",
                         str(input_index),
                         "--input-value",
@@ -201,6 +206,9 @@ def main() -> int:
 
         except Exception as e:  # noqa: BLE001
             failures.append(f"{test_id}: runner error: {e}")
+        finally:
+            if tx_path:
+                Path(tx_path).unlink(missing_ok=True)
 
     if failures:
         sys.stderr.write("CV-SIGHASH: FAIL\n")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import tempfile
 
 from run_cv_common import build_clients, make_parse_tx_bytes, parse_int, run, load_yaml
 
@@ -47,6 +48,9 @@ def main() -> int:
     failures: list[str] = []
     executed = 0
 
+    tmp = tempfile.TemporaryDirectory(prefix="rubin-cv-txhex-")
+    tx_dir = Path(tmp.name)
+
     for t in tests:
         if not isinstance(t, dict):
             failures.append("invalid test entry (not a mapping)")
@@ -58,7 +62,9 @@ def main() -> int:
             continue
 
         tx_hex = make_parse_tx_bytes(ctx)
-        cmd = ["parse", "--tx-hex", tx_hex]
+        tx_path = tx_dir / f"{test_id}.txhex"
+        tx_path.write_text(tx_hex.strip() + "\n", encoding="utf-8")
+        cmd = ["parse", "--tx-hex-file", str(tx_path)]
 
         max_witness_size = ctx.get("max_witness_size_per_tx")
         if max_witness_size is not None:

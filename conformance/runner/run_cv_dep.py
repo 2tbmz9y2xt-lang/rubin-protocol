@@ -154,8 +154,8 @@ def main() -> int:
         state = deployment_state(ctx)
         cmd = [
             "verify",
-            "--tx-hex",
-            tx_hex,
+            "--tx-hex-file",
+            "",
             "--input-index",
             "0",
             "--input-value",
@@ -171,11 +171,18 @@ def main() -> int:
             "--chain-timestamp",
             "0",
         ]
+        with tempfile.NamedTemporaryFile("w", suffix=".txhex", delete=False, encoding="utf-8") as f:
+            f.write(tx_hex.strip() + "\n")
+            cmd[cmd.index("--tx-hex-file") + 1] = f.name
+            tx_path = f.name
         if suite_id_02_active(state):
             cmd.append("--suite-id-02-active")
 
-        out_r, err_r, rc_r = run(clients["rust"], cmd)
-        out_g, err_g, rc_g = run(clients["go"], cmd)
+        try:
+            out_r, err_r, rc_r = run(clients["rust"], cmd)
+            out_g, err_g, rc_g = run(clients["go"], cmd)
+        finally:
+            Path(tx_path).unlink(missing_ok=True)
         tok_r = extract_error_token(err_r)
         tok_g = extract_error_token(err_g)
         executed += 1
