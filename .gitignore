@@ -26,6 +26,10 @@ analysis/
 # Node tooling (spec annotator)
 node_modules/
 
+# Agent/LLM worktree artifacts
+.claude/
+.codex/
+
 # Local runtime env files
 operational/systemd/rubin-node.env
 
