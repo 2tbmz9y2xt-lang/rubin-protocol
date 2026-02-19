@@ -1,0 +1,23 @@
+rules:
+  - id: go-net-file-read-no-cleanse
+    languages: [go]
+    message: 'Potential user-controlled file path in file read; validate/resolve under intended base.'
+    severity: WARNING
+    metadata:
+      category: correctness
+      technology: go
+      source: phase0-local-fallback
+    patterns:
+      - pattern: os.ReadFile($PATH)
+      - pattern-not: os.ReadFile(safePath)
+      - pattern-not: os.ReadFile(contextPath)
+  - id: go-net-http-url-parse
+    languages: [go]
+    message: 'Potentially tainted URL creation/usage; ensure URL input is validated.'
+    severity: WARNING
+    metadata:
+      category: security
+      technology: go
+      source: phase0-local-fallback
+    patterns:
+      - pattern: http.NewRequest($METHOD, $URL, $BODY)
