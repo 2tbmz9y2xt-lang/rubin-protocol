@@ -61,9 +61,19 @@ python3 scripts/genesis/build_genesis_v1_1.py \
 ```
 
 Notes:
-- If you use a premine/dev-fund schedule, it is an *input artifact* only; do not publish private keys. See:
-  - `operational/RUBIN_GENESIS_DEV_FUND_SCHEDULE_TEMPLATE_v1.1.md`
-  - `scripts/genesis/README.md`
+- If you use a premine/dev-fund schedule, it is an *input artifact* only.
+  - The filled `--schedule-csv` file MUST NOT be committed to the repo and MUST NOT be included in GitHub Release assets.
+  - Store filled schedules only in private, out-of-repo storage before/throughout the ceremony.
+  - Template/schema: `operational/RUBIN_GENESIS_DEV_FUND_SCHEDULE_TEMPLATE_v1.1.md` and `scripts/genesis/README.md`.
+- Recommended local ignore patterns (to reduce accidental commits):
+
+```gitignore
+operational/dev_fund_schedule.csv
+**/*dev_fund_schedule*.csv
+**/*.dev-fund-schedule.csv
+```
+
+- Optional hardening: add a pre-commit/CI rule that rejects committed schedule CSVs (fail-fast before publication).
 - After updating the profile, commit the changes. The resulting commit hash is the `SPEC_COMMIT` you must tag/release.
 
 ## 2. Deterministic derivations (must match spec)
