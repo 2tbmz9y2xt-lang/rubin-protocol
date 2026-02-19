@@ -12,11 +12,34 @@ set -euo pipefail
 # 4) if --export-env is passed, print export lines for RUBIN_WOLFCRYPT_SHIM_PATH, RUBIN_WOLFCRYPT_SHIM_SHA3_256, RUBIN_WOLFCRYPT_STRICT=1
 
 REF="${1:-}"
-OUTDIR="${2:-shim-download}"
+shift || true
+
+OUTDIR="shim-download"
+OUTDIR_SET=0
 EXPORT=0
-if [ "${2:-}" = "--export-env" ] || [ "${3:-}" = "--export-env" ]; then
-  EXPORT=1
-fi
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --export-env)
+      EXPORT=1
+      shift
+      ;;
+    -*)
+      echo "unknown flag: $1" >&2
+      exit 1
+      ;;
+    *)
+      if [ "${OUTDIR_SET}" -eq 0 ]; then
+        OUTDIR="$1"
+        OUTDIR_SET=1
+      else
+        echo "unexpected argument: $1" >&2
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
 
 if [ -z "${REF}" ]; then
   echo "usage: $0 ghcr.io/<owner>/wolfcrypt-shim:<tag> [outdir] [--export-env]" >&2
@@ -48,4 +71,8 @@ if [ -z "${SHIM}" ]; then
   exit 1
 fi
 
-./crypto/wolfcrypt/verify_shim_cosign.sh "${SUMS}" "${SHIM}" $( [ ${EXPORT} -eq 1 ] && echo "--export-env" )
+ARGS=("${SUMS}" "${SHIM}")
+if [ "${EXPORT}" -eq 1 ]; then
+  ARGS+=("--export-env")
+fi
+./crypto/wolfcrypt/verify_shim_cosign.sh "${ARGS[@]}"
