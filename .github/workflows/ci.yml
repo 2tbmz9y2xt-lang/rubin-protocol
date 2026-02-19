@@ -81,3 +81,17 @@ jobs:
           npm ci
           npm run -s spec:all
 
+      - name: ESLint + Prettier (scripts)
+        run: |
+          set -euo pipefail
+          npm run lint
+          npm run format:check
+
+      - name: Semgrep SAST
+        run: |
+          set -euo pipefail
+          pip install semgrep --quiet
+          semgrep scan --config=auto --error \
+            clients/go clients/rust/crates conformance/runner \
+            --exclude='*.lock' --exclude='target/' 2>&1 | tail -20
+
