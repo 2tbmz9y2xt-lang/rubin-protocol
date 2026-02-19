@@ -299,11 +299,27 @@ func TestValidateInputAuthorizationHTLCV2(t *testing.T) {
 		}
 	})
 
+	t.Run("active claim wrong key", func(t *testing.T) {
+		tx := makeHTLCV2Tx(t, nil, refundPub, refundSig, makeHTLCV2Anchor(t, preimage))
+		err := ValidateInputAuthorization(p, [32]byte{}, &tx, 0, prevout.Value, &prevout, 0, 0, 0, false, true)
+		if err == nil || err.Error() != "TX_ERR_SIG_INVALID" {
+			t.Fatalf("expected sig invalid, got %v", err)
+		}
+	})
+
 	t.Run("active refund path no anchors", func(t *testing.T) {
 		tx := makeHTLCV2Tx(t, nil, refundPub, refundSig)
 		err := ValidateInputAuthorization(p, [32]byte{}, &tx, 0, prevout.Value, &prevout, 0, 150, 0, false, true)
 		if err != nil {
 			t.Fatalf("expected success, got %v", err)
+		}
+	})
+
+	t.Run("active refund wrong key", func(t *testing.T) {
+		tx := makeHTLCV2Tx(t, nil, claimPub, claimSig)
+		err := ValidateInputAuthorization(p, [32]byte{}, &tx, 0, prevout.Value, &prevout, 0, 150, 0, false, true)
+		if err == nil || err.Error() != "TX_ERR_SIG_INVALID" {
+			t.Fatalf("expected sig invalid, got %v", err)
 		}
 	})
 
