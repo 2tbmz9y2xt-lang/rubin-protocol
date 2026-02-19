@@ -16,7 +16,7 @@ func ChainDir(datadir string, chainIDHex string) string {
 }
 
 func ensureDir(path string) error {
-	if err := os.MkdirAll(path, 0o755); err != nil {
+	if err := os.MkdirAll(path, 0o750); err != nil { // #nosec G301 -- 0o750 limits group write; datadir is operator-controlled.
 		return fmt.Errorf("mkdir %s: %w", path, err)
 	}
 	return nil

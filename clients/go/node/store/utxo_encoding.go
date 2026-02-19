@@ -34,7 +34,7 @@ func encodeUtxoEntry(e consensus.UtxoEntry) ([]byte, error) {
 	out := make([]byte, 8+2+4+len(data)+8+1)
 	binary.LittleEndian.PutUint64(out[0:8], e.Output.Value)
 	binary.LittleEndian.PutUint16(out[8:10], e.Output.CovenantType)
-	binary.LittleEndian.PutUint32(out[10:14], uint32(len(data)))
+	binary.LittleEndian.PutUint32(out[10:14], uint32(len(data))) // #nosec G115 -- len checked against 0xffffffff in caller (encodeUndoRecord).
 	copy(out[14:14+len(data)], data)
 	off := 14 + len(data)
 	binary.LittleEndian.PutUint64(out[off:off+8], e.CreationHeight)
