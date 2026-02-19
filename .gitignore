@@ -10,60 +10,28 @@ target-validator-tests/
 **/venv/
 **/.venv/
 
-# Go tool outputs / local scan artifacts
-clients/go/gosec_output.json
-clients/go/semgrep_output.json
+# Node tooling
+node_modules/
+
+# Generated analysis outputs
+analysis/
+
+# Coverage outputs
+**/coverage*.out
+**/coverage*.txt
+
+# Security scan outputs
 **/gosec_output.json
 **/semgrep_output.json
-
-# Go local coverage artifacts
-clients/go/coverage*.out
-clients/go/coverage*.txt
-
-# Rust scan artifacts
-clients/rust/cargo_audit.json
 **/cargo_audit.json
-
-# Local analysis outputs (generated, not source)
-analysis/
-analysis/spec/spec-diff.json
-analysis/spec/spec-explainer.json
-
-# Node tooling (spec annotator)
-node_modules/
 
 # Agent/LLM worktree artifacts
 .claude/
 .codex/
 
-# Local runtime env files
-operational/systemd/rubin-node.env
-
-# Mainnet ceremony inputs (private; do not commit)
-operational/dev_fund_schedule.csv
-**/*dev_fund_schedule*.csv
-**/*.dev-fund-schedule.csv
+# Local environment files (keep examples tracked)
+**/*.env
+!**/*.env.example
 
 # Local UI / task tracker workspace
 rubin-ui/
-
-# Local scratch docs
-IMPLEMENTATION_ROADMAP.md
-RUBIN_WHITEPAPER_*.pdf
-
-# Local scratch crypto notes
-clients/go/_manual_SHA3/
-clients/go/_manual_SHA3
-
-# Stray local file created by tooling
-=
-
-# Security scan artifacts
-clients/go/gosec_output.json
-clients/go/semgrep_output.json
-clients/rust/cargo_audit.json
-
-# Generated spec analysis artifacts
-analysis/spec/spec-diff.json
-analysis/spec/spec-explainer.json
-IMPLEMENTATION_ROADMAP.md
