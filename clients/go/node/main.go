@@ -19,13 +19,13 @@ import (
 const defaultChainProfile = "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md"
 
 type applyUTXOUtxoEntry struct {
-	Txid              string `json:"txid"`
-	Vout              uint32 `json:"vout"`
-	Value             uint64 `json:"value"`
-	CovenantType      uint16 `json:"covenant_type"`
-	CovenantData      string `json:"covenant_data"`
-	CreationHeight    uint64 `json:"creation_height"`
-	CreatedByCoinbase bool   `json:"created_by_coinbase"`
+	Txid              string  `json:"txid"`
+	Vout              uint32  `json:"vout"`
+	Value             uint64  `json:"value"`
+	CovenantType      uint16  `json:"covenant_type"`
+	CovenantData      string  `json:"covenant_data"`
+	CreationHeight    *uint64 `json:"creation_height"`
+	CreatedByCoinbase bool    `json:"created_by_coinbase"`
 }
 
 type applyUTXOContext struct {
@@ -45,9 +45,23 @@ type applyBlockContext struct {
 	LocalTime          uint64               `json:"local_time"`
 	LocalTimeSet       bool                 `json:"local_time_set"`
 	SuiteID02Active    bool                 `json:"suite_id_02_active"`
+	HTLCV2Active       bool                 `json:"htlc_v2_active"`
 	AncestorHeadersHex []string             `json:"ancestor_headers_hex"`
 	BlockHex           string               `json:"block_hex"`
 	UTXOSet            []applyUTXOUtxoEntry `json:"utxo_set"`
+}
+
+type chainstateContext struct {
+	ChainIDHex         string               `json:"chain_id_hex"`
+	Profile            string               `json:"profile"`
+	StartHeight        uint64               `json:"start_height"`
+	LocalTime          uint64               `json:"local_time"`
+	LocalTimeSet       bool                 `json:"local_time_set"`
+	SuiteID02Active    bool                 `json:"suite_id_02_active"`
+	HTLCV2Active       bool                 `json:"htlc_v2_active"`
+	AncestorHeadersHex []string             `json:"ancestor_headers_hex"`
+	UTXOSet            []applyUTXOUtxoEntry `json:"utxo_set"`
+	BlocksHex          []string             `json:"blocks_hex"`
 }
 
 func parseBlockHeaderBytesStrict(b []byte) (consensus.BlockHeader, error) {
@@ -459,9 +473,9 @@ func cmdApplyUTXO(contextPath string) error {
 			CovenantType: entry.CovenantType,
 			CovenantData: covenantData,
 		}
-		creationHeight := entry.CreationHeight
-		if creationHeight == 0 {
-			creationHeight = ctx.ChainHeight
+		creationHeight := uint64(0)
+		if entry.CreationHeight != nil {
+			creationHeight = *entry.CreationHeight
 		}
 		utxo[consensus.TxOutPoint{TxID: prevTxid, Vout: entry.Vout}] = consensus.UtxoEntry{
 			Output:            out,
@@ -562,9 +576,9 @@ func cmdApplyBlock(contextPath string) error {
 			CovenantType: entry.CovenantType,
 			CovenantData: covenantData,
 		}
-		creationHeight := entry.CreationHeight
-		if creationHeight == 0 {
-			creationHeight = ctx.BlockHeight
+		creationHeight := uint64(0)
+		if entry.CreationHeight != nil {
+			creationHeight = *entry.CreationHeight
 		}
 		utxo[consensus.TxOutPoint{TxID: prevTxid, Vout: entry.Vout}] = consensus.UtxoEntry{
 			Output:            out,
@@ -579,8 +593,140 @@ func cmdApplyBlock(contextPath string) error {
 		LocalTime:        ctx.LocalTime,
 		LocalTimeSet:     ctx.LocalTimeSet,
 		SuiteIDSLHActive: ctx.SuiteID02Active,
+		HTLCV2Active:     ctx.HTLCV2Active,
 	}
 	return consensus.ApplyBlock(p, chainID, &block, utxo, blockCtx)
+}
+
+func cmdChainstate(contextPath string) (string, error) {
+	raw, err := os.ReadFile(contextPath) // #nosec G304 -- path is explicitly provided by operator.
+	if err != nil {
+		return "", fmt.Errorf("context-json: %w", err)
+	}
+	var ctx chainstateContext
+	if err := json.Unmarshal(raw, &ctx); err != nil {
+		return "", fmt.Errorf("context-json: %w", err)
+	}
+	if len(ctx.BlocksHex) == 0 {
+		return "", fmt.Errorf("missing required field: blocks_hex")
+	}
+
+	p, cleanup, err := loadCryptoProvider()
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+
+	var chainID [32]byte
+	switch {
+	case ctx.ChainIDHex != "" && ctx.Profile != "":
+		return "", fmt.Errorf("use exactly one of chain_id_hex or profile in context-json")
+	case ctx.ChainIDHex != "":
+		decoded, err := parseChainIDHex(ctx.ChainIDHex)
+		if err != nil {
+			return "", err
+		}
+		chainID = decoded
+	case ctx.Profile != "":
+		derived, err := deriveChainID(p, ctx.Profile)
+		if err != nil {
+			return "", err
+		}
+		chainID = derived
+	default:
+		derived, err := deriveChainID(p, defaultChainProfile)
+		if err != nil {
+			return "", err
+		}
+		chainID = derived
+	}
+
+	ancestors := make([]consensus.BlockHeader, 0, len(ctx.AncestorHeadersHex))
+	for _, headerHex := range ctx.AncestorHeadersHex {
+		hb, err := hexDecodeStrict(headerHex)
+		if err != nil {
+			return "", fmt.Errorf("ancestor_headers_hex: %w", err)
+		}
+		h, err := parseBlockHeaderBytesStrict(hb)
+		if err != nil {
+			return "", err
+		}
+		ancestors = append(ancestors, h)
+	}
+	if ctx.StartHeight > 0 && len(ancestors) == 0 {
+		return "", fmt.Errorf("missing required field: ancestor_headers_hex")
+	}
+
+	utxo := make(map[consensus.TxOutPoint]consensus.UtxoEntry, len(ctx.UTXOSet))
+	for _, entry := range ctx.UTXOSet {
+		prevTxid, err := parseTxIDHex(entry.Txid)
+		if err != nil {
+			return "", err
+		}
+		covenantData, err := hexDecodeStrict(entry.CovenantData)
+		if err != nil {
+			return "", fmt.Errorf("covenant-data-hex: %w", err)
+		}
+		out := consensus.TxOutput{
+			Value:        entry.Value,
+			CovenantType: entry.CovenantType,
+			CovenantData: covenantData,
+		}
+		creationHeight := uint64(0)
+		if entry.CreationHeight != nil {
+			creationHeight = *entry.CreationHeight
+		}
+		utxo[consensus.TxOutPoint{TxID: prevTxid, Vout: entry.Vout}] = consensus.UtxoEntry{
+			Output:            out,
+			CreationHeight:    creationHeight,
+			CreatedByCoinbase: entry.CreatedByCoinbase,
+		}
+	}
+
+	var tipHash [32]byte
+	var tipHeight uint64
+	for i, blockHex := range ctx.BlocksHex {
+		if uint64(i) > ^uint64(0)-ctx.StartHeight {
+			return "", fmt.Errorf("start_height overflow")
+		}
+		blockHeight := ctx.StartHeight + uint64(i)
+		blockBytes, err := hexDecodeStrict(blockHex)
+		if err != nil {
+			return "", fmt.Errorf("blocks_hex[%d]: %w", i, err)
+		}
+		block, err := consensus.ParseBlockBytes(blockBytes)
+		if err != nil {
+			return "", err
+		}
+
+		blockCtx := consensus.BlockValidationContext{
+			Height:           blockHeight,
+			AncestorHeaders:  ancestors,
+			LocalTime:        ctx.LocalTime,
+			LocalTimeSet:     ctx.LocalTimeSet,
+			SuiteIDSLHActive: ctx.SuiteID02Active,
+			HTLCV2Active:     ctx.HTLCV2Active,
+		}
+		if err := consensus.ApplyBlock(p, chainID, &block, utxo, blockCtx); err != nil {
+			return "", err
+		}
+
+		tipHash = consensus.BlockHeaderHash(p, block.Header)
+		tipHeight = blockHeight
+		ancestors = append(ancestors, block.Header)
+	}
+
+	utxoHash := consensus.UtxoSetHash(p, utxo)
+	out := map[string]any{
+		"tip_height":        tipHeight,
+		"tip_hash_hex":      hex.EncodeToString(tipHash[:]),
+		"utxo_set_hash_hex": hex.EncodeToString(utxoHash[:]),
+	}
+	enc, err := json.Marshal(out)
+	if err != nil {
+		return "", fmt.Errorf("chainstate-json: %w", err)
+	}
+	return string(enc), nil
 }
 
 func parseReorgInt(v any, field string) (int64, error) {
@@ -691,7 +837,7 @@ func cmdReorg(contextPath string) (string, error) {
 	return "", fmt.Errorf("REORG_ERR_PARSE: unsupported context shape")
 }
 
-const usageCommands = "commands: version | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse (--tx-hex <hex> | --tx-hex-file <path>) [--max-witness-bytes <u64>] | txid (--tx-hex <hex> | --tx-hex-file <path>) | weight (--tx-hex <hex> | --tx-hex-file <path>) | coinbase --block-height <u64> [--fees-in-block <u64> --coinbase-output-value <u64>] | sighash (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-id-hex <hex64> | --profile <path> | --suite-id-02-active | --htlc-v2-active] | apply-utxo --context-json <path> | apply-block --context-json <path> | reorg --context-json <path>"
+const usageCommands = "commands: version | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse (--tx-hex <hex> | --tx-hex-file <path>) [--max-witness-bytes <u64>] | txid (--tx-hex <hex> | --tx-hex-file <path>) | weight (--tx-hex <hex> | --tx-hex-file <path>) | coinbase --block-height <u64> [--fees-in-block <u64> --coinbase-output-value <u64>] | sighash (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-id-hex <hex64> | --profile <path> | --suite-id-02-active | --htlc-v2-active] | apply-utxo --context-json <path> | apply-block --context-json <path> | reorg --context-json <path> | chainstate --context-json <path>"
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage: rubin-node <command> [args]")
@@ -1034,6 +1180,23 @@ func cmdReorgMain(argv []string) int {
 	return 0
 }
 
+func cmdChainstateMain(argv []string) int {
+	fs := flag.NewFlagSet("chainstate", flag.ExitOnError)
+	contextPath := fs.String("context-json", "", "path to chainstate context JSON")
+	_ = fs.Parse(argv)
+	if *contextPath == "" {
+		fmt.Fprintln(os.Stderr, "missing required flag: --context-json")
+		return 2
+	}
+	out, err := cmdChainstate(*contextPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "chainstate error:", err)
+		return 1
+	}
+	fmt.Println(out)
+	return 0
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -1068,6 +1231,8 @@ func main() {
 		exitCode = cmdApplyBlockMain(argv)
 	case "reorg":
 		exitCode = cmdReorgMain(argv)
+	case "chainstate":
+		exitCode = cmdChainstateMain(argv)
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command")
 		printUsage()

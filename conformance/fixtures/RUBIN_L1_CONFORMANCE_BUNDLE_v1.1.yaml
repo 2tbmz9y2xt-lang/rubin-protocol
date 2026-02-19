@@ -41,6 +41,12 @@ mandatory_gates:
   file: conformance/fixtures/CV-REORG.yml
   required: true
   status: PASS
+- name: CV-CHAINSTATE
+  file: conformance/fixtures/CV-CHAINSTATE.yml
+  required: true
+  status: PASS
+  description: Cross-client chainstate parity after applying block sequences (2 vectors)
+  note: consensus (node-layer integration)
 - name: CV-FEES
   file: conformance/fixtures/CV-FEES.yml
   required: true

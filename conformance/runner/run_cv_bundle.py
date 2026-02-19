@@ -2019,6 +2019,155 @@ def run_reorg(gate: str, fixture: dict[str, Any], failures: list[str]) -> int:
     return executed
 
 
+def run_chainstate(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd, failures: list[str]) -> int:
+    tests = fixture.get("tests")
+    if not isinstance(tests, list) or not tests:
+        failures.append(f"{gate}: fixture has no tests")
+        return 0
+
+    executed = 0
+    for t in tests:
+        if not isinstance(t, dict):
+            failures.append(f"{gate}: invalid test entry (not a mapping)")
+            continue
+
+        test_id = str(t.get("id", "<missing id>"))
+        has_expect, expected = _expect_from_test(t)
+        if not has_expect:
+            failures.append(f"{gate}:{test_id}: missing expected_code/expected_error")
+            continue
+
+        ctx = t.get("context")
+        if not isinstance(ctx, dict):
+            failures.append(f"{gate}:{test_id}: missing/invalid context")
+            continue
+
+        chain_id_hex = str(ctx.get("chain_id_hex", "")).strip()
+        profile = str(ctx.get("profile", "")).strip()
+        if (chain_id_hex and profile) or (not chain_id_hex and not profile):
+            failures.append(f"{gate}:{test_id}: context must set exactly one of chain_id_hex or profile")
+            continue
+
+        context_json: dict[str, Any] = {
+            "start_height": _to_int(ctx.get("start_height", 0)),
+            "local_time": _to_int(ctx.get("local_time", 0)),
+            "local_time_set": _parse_bool(ctx.get("local_time_set", False)),
+            "suite_id_02_active": _parse_bool(ctx.get("suite_id_02_active", False)),
+            "htlc_v2_active": _parse_bool(ctx.get("htlc_v2_active", False)),
+            "ancestor_headers_hex": ctx.get("ancestor_headers_hex", []),
+            "utxo_set": ctx.get("utxo_set", []),
+            "blocks_hex": ctx.get("blocks_hex", []),
+        }
+        if chain_id_hex:
+            context_json["chain_id_hex"] = chain_id_hex
+        if profile:
+            context_json["profile"] = profile
+
+        executed += 1
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
+            json.dump(context_json, f)
+            context_path = f.name
+        try:
+            p_r = run_result(rust, ["chainstate", "--context-json", context_path])
+            p_g = run_result(go, ["chainstate", "--context-json", context_path])
+        finally:
+            Path(context_path).unlink(missing_ok=True)
+
+        tok_r = _extract_err_token(p_r.stderr)
+        tok_g = _extract_err_token(p_g.stderr)
+
+        # Error expected: verify token parity.
+        if expected != "PASS":
+            if p_r.returncode == 0:
+                failures.append(f"{gate}:{test_id}: rust expected {expected}, got PASS")
+            elif tok_r != expected:
+                failures.append(f"{gate}:{test_id}: rust expected {expected}, got={tok_r} ({p_r.stderr.strip()})")
+
+            if p_g.returncode == 0:
+                failures.append(f"{gate}:{test_id}: go expected {expected}, got PASS")
+            elif tok_g != expected:
+                failures.append(f"{gate}:{test_id}: go expected {expected}, got={tok_g} ({p_g.stderr.strip()})")
+
+            if p_r.returncode != p_g.returncode:
+                failures.append(f"{gate}:{test_id}: cross-client rc mismatch rust={p_r.returncode} go={p_g.returncode}")
+            elif p_r.returncode != 0 and tok_r != tok_g:
+                failures.append(f"{gate}:{test_id}: cross-client token mismatch rust={tok_r} go={tok_g}")
+            continue
+
+        # PASS: require deterministic JSON output.
+        if p_r.returncode != 0:
+            failures.append(f"{gate}:{test_id}: rust expected PASS, got={tok_r} ({p_r.stderr.strip()})")
+            continue
+        if p_g.returncode != 0:
+            failures.append(f"{gate}:{test_id}: go expected PASS, got={tok_g} ({p_g.stderr.strip()})")
+            continue
+
+        try:
+            out_r = json.loads(p_r.stdout.strip())
+            out_g = json.loads(p_g.stdout.strip())
+        except json.JSONDecodeError as e:
+            failures.append(f"{gate}:{test_id}: failed to parse chainstate JSON output: {e}")
+            continue
+
+        if not isinstance(out_r, dict) or not isinstance(out_g, dict):
+            failures.append(f"{gate}:{test_id}: chainstate output must be a JSON object")
+            continue
+
+        try:
+            exp_tip_height = _to_int(t.get("expected_tip_height"))
+        except (TypeError, ValueError, OverflowError):
+            failures.append(f"{gate}:{test_id}: missing/invalid expected_tip_height")
+            continue
+        raw_tip_hash = t.get("expected_tip_hash_hex")
+        raw_utxo_hash = t.get("expected_utxo_set_hash_hex")
+        if not isinstance(raw_tip_hash, str) or not raw_tip_hash.strip():
+            failures.append(f"{gate}:{test_id}: missing/invalid expected_tip_hash_hex")
+            continue
+        if not isinstance(raw_utxo_hash, str) or not raw_utxo_hash.strip():
+            failures.append(f"{gate}:{test_id}: missing/invalid expected_utxo_set_hash_hex")
+            continue
+        exp_tip_hash_hex = raw_tip_hash.strip().lower()
+        exp_utxo_hash_hex = raw_utxo_hash.strip().lower()
+        if not exp_tip_hash_hex or not exp_utxo_hash_hex:
+            failures.append(f"{gate}:{test_id}: missing expected_tip_hash_hex / expected_utxo_set_hash_hex")
+            continue
+
+        try:
+            tip_height_r = parse_int(out_r.get("tip_height"))
+            tip_height_g = parse_int(out_g.get("tip_height"))
+            tip_hash_r = str(out_r.get("tip_hash_hex", "")).strip().lower()
+            tip_hash_g = str(out_g.get("tip_hash_hex", "")).strip().lower()
+            utxo_hash_r = str(out_r.get("utxo_set_hash_hex", "")).strip().lower()
+            utxo_hash_g = str(out_g.get("utxo_set_hash_hex", "")).strip().lower()
+        except (AttributeError, TypeError, ValueError, OverflowError) as e:
+            failures.append(f"{gate}:{test_id}: invalid chainstate output fields: {e}")
+            continue
+
+        if tip_height_r != exp_tip_height:
+            failures.append(f"{gate}:{test_id}: rust tip_height expected {exp_tip_height}, got {tip_height_r}")
+        if tip_height_g != exp_tip_height:
+            failures.append(f"{gate}:{test_id}: go tip_height expected {exp_tip_height}, got {tip_height_g}")
+
+        if tip_hash_r != exp_tip_hash_hex:
+            failures.append(f"{gate}:{test_id}: rust tip_hash expected {exp_tip_hash_hex}, got {tip_hash_r}")
+        if tip_hash_g != exp_tip_hash_hex:
+            failures.append(f"{gate}:{test_id}: go tip_hash expected {exp_tip_hash_hex}, got {tip_hash_g}")
+
+        if utxo_hash_r != exp_utxo_hash_hex:
+            failures.append(f"{gate}:{test_id}: rust utxo_set_hash expected {exp_utxo_hash_hex}, got {utxo_hash_r}")
+        if utxo_hash_g != exp_utxo_hash_hex:
+            failures.append(f"{gate}:{test_id}: go utxo_set_hash expected {exp_utxo_hash_hex}, got {utxo_hash_g}")
+
+        if (tip_height_r, tip_hash_r, utxo_hash_r) != (tip_height_g, tip_hash_g, utxo_hash_g):
+            failures.append(
+                f"{gate}:{test_id}: cross-client mismatch: rust=({tip_height_r},{tip_hash_r},{utxo_hash_r}) "
+                f"go=({tip_height_g},{tip_hash_g},{utxo_hash_g})"
+            )
+
+    return executed
+
+
 def main() -> int:
     global _TXHEX_DIR
     txhex_tmp = tempfile.TemporaryDirectory(prefix="rubin-cv-txhex-")
@@ -2182,6 +2331,9 @@ def main() -> int:
             continue
         if gate == "CV-REORG":
             checks += run_reorg(gate, fixture, failures)
+            continue
+        if gate == "CV-CHAINSTATE":
+            checks += run_chainstate(gate, fixture, rust, go, failures)
             continue
         if gate == "CV-FEES":
             checks += run_fees(gate, fixture, rust, go, failures)

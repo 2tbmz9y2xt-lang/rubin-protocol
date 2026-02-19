@@ -13,6 +13,13 @@ func blockHeaderHash(p crypto.CryptoProvider, header *BlockHeader) [32]byte {
 	return p.SHA3_256(out)
 }
 
+// BlockHeaderHash returns the canonical RUBIN block header hash (SHA3-256 over the 116-byte header encoding).
+//
+// This is exported for node tooling to stay consistent with consensus linkage/PoW validation.
+func BlockHeaderHash(p crypto.CryptoProvider, header BlockHeader) [32]byte {
+	return blockHeaderHash(p, &header)
+}
+
 func blockRewardForHeight(height uint64) uint64 {
 	if height >= SUBSIDY_DURATION_BLOCKS {
 		return 0
