@@ -72,8 +72,8 @@ Using `block_index_by_hash`:
 - compare candidate tip(s) to the current `tip` using the CANONICAL fork-choice rule (higher work; deterministic tie-break).
 
 Rules:
-- If candidate is not better than current `tip`, the node MAY keep it stored as `VALID_HEADER` (or similar) but MUST NOT
-  apply it to the active UTXO set in Phase 1.
+- If candidate is not better than current `tip`, the node MAY keep it stored as `VALID_HEADER` but MUST NOT apply it to
+  the active UTXO set in Phase 1.
 - If candidate is better than current `tip`, proceed to Stage 4 and Stage 5 to apply it (including any required reorg).
 
 ### Stage 4: Full block validation against chainstate (consensus)
@@ -81,7 +81,11 @@ Rules:
 This is the expensive stage and MUST only run when:
 - block is not known-invalid, and
 - its parent chain is available, and
-- it is a candidate for best chain (or explicitly requested by operator tooling).
+- it is a candidate for best chain.
+
+Operator tooling (diagnostics):
+- An operator MAY request Stage 4 for a non-candidate block strictly for diagnostics/forensics; such runs MUST NOT mutate
+  persistent chainstate, MUST NOT affect fork-choice, and MUST NOT write any `undo_by_block_hash` entries.
 
 Validation:
 - Run transaction-level validation in the consensus-defined order.
@@ -126,14 +130,29 @@ On startup:
 Hard requirement:
 - The node MUST NOT end up with a UTXO set that corresponds to a different tip than manifest.
 
-## 6. Reorg integration points (bridge to Q-075)
+## 6. Reorg integration points
 
 If a better chain tip arrives:
 - find fork point (common ancestor) using `prev_hash` links in `block_index_by_hash`.
 - disconnect blocks from old tip down to fork point using `undo_by_block_hash`.
 - connect blocks from fork point to new tip using Stage 5.
 
-Details (undo format, deterministic reapply order) are specified in `Q-075`.
+Deterministic reapply order (required):
+- Disconnect order MUST be strictly from the current applied tip down to (but excluding) the fork point, in descending
+  height order (tip, tip-1, ..., fork_point+1).
+- Connect order MUST be strictly from (and excluding) the fork point up to the new tip, in ascending height order
+  (fork_point+1, ..., new_tip).
+- Within a block, transactions MUST be applied in their wire order.
+
+Undo format (minimum required fields):
+- `undo_by_block_hash[block_hash]` MUST allow deterministic reversal of every spent outpoint in that block. The minimal
+  record per spent outpoint is:
+  - outpoint: (prev_txid[32], prev_vout[u32])
+  - restored_output: (value[u64], covenant_type[u16], covenant_data[bytes])
+  - restored_creation_height: u64
+
+Note:
+- A fuller reorg/disconnect/connect engineering spec (including on-disk encoding) is tracked separately as Q-075.
 
 ## 7. Minimal observability hooks (recommended)
 
@@ -142,4 +161,3 @@ Implementations SHOULD emit structured logs for:
 - reason category for invalid marking
 - connect/disconnect counts during reorg
 - wall-clock timings for Stage 4 and Stage 5
-
