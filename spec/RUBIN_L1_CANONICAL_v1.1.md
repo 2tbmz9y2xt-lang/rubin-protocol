@@ -394,7 +394,7 @@ Any alternative error code for these cases is non-conforming.
 
 For each non-coinbase transaction `T` in block order:
 
-1. If `T.tx_nonce` is not in `[1, max(u64)]`, reject as `TX_ERR_TX_NONCE_INVALID`.
+1. If `T.tx_nonce` is not in `[1, 0xffffffffffffffff]`, reject as `TX_ERR_TX_NONCE_INVALID`.
 2. `tx_nonce` is part of the signed domain and is compared only within the same consensus chain.
 3. Let `N_seen` be the set of `tx_nonce` values already observed in prior non-coinbase transactions of the current block.
 4. If `T.tx_nonce` already appears in `N_seen`, reject as `TX_ERR_NONCE_REPLAY`.
@@ -495,9 +495,10 @@ Semantics:
     syntactically valid, but spending them remains deployment-gated; if the deployment never reaches
     ACTIVE (e.g., FAILED), such outputs may become unspendable. Wallets SHOULD warn users before
     creating `CORE_HTLC_V2` outputs on chains where `htlc_anchor_v1` is not ACTIVE.
-  - Non-normative wallet safety: because the claim-path preimage is delivered via a `CORE_ANCHOR`
-    envelope that MUST be unique per transaction (`|matching| >= 2` is a consensus failure), wallets
-    SHOULD NOT attempt to claim multiple distinct `CORE_HTLC_V2` preimages in a single transaction.
+  - Non-normative wallet safety: for `CORE_HTLC_V2`, the claim path is selected by locating a matching
+    `CORE_ANCHOR` envelope in the same transaction (see §4.1 item 6). Consensus requires `|matching| ≤ 1`;
+    if `|matching| ≥ 2`, the transaction is rejected as `TX_ERR_PARSE`. Wallets SHOULD NOT attempt to
+    claim multiple distinct `CORE_HTLC_V2` preimages in a single transaction.
   - Non-matching `CORE_ANCHOR` outputs in the same transaction are permitted and do not affect HTLC_V2 validation.
 - `CORE_RESERVED_FUTURE`: forbidden until explicit activation by consensus.
 

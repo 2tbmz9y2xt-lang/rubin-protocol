@@ -117,8 +117,20 @@ You authorize the transition only when all are true:
 
 1. Genesis is final and reproducible (two independent derivations match).
 2. Signed launch manifest is ready (`operational/RUBIN_MAINNET_GENESIS_CEREMONY_v1.1.md`).
-3. At least **N=3** independent operators confirm pinned `chain_id_hex` and stable operation over **T=7 days**.
-4. Public bootstrap plan is ready (DNS seeds, docs, monitoring).
+3. At least **N=3** independent operators confirm pinned `chain_id_hex` and stable operation over **T=7 days**:
+   - Confirm pinned `chain_id_hex` = each operator posts an attestation in the incident channel containing:
+     org/name, node identifier(s), `chain_id_hex`, current tip (height + hash), and both client versions (Rust/Go if both are run).
+   - Stable operation over **T=7 days** = all are true:
+     - no observed consensus divergence between independent implementations (tip hash matches at scheduled checkpoints),
+     - no unresolved P0/P1 incidents at the end of the window,
+     - no recurring P1/P2 alerts in the final 72 hours,
+     - bootstrap nodes and at least N operators maintain ≥99% availability on the P2P port during the window.
+4. Public bootstrap plan is ready:
+   - DNS seeds resolve from at least 2 regions/providers,
+   - bootstrap nodes are reachable and return expected `chain_id_hex`,
+   - public docs are prepared (install, upgrade, pinning `chain_id_hex`, incident contacts),
+   - monitoring + alerting is configured and has been test-fired (at least one dry-run alert),
+   - rollback plan for binaries/config is written and distributed.
 
 Public launch action:
 - Publish a GitHub Release containing the signed launch manifest + mainnet profile + exact `chain_id_hex`.

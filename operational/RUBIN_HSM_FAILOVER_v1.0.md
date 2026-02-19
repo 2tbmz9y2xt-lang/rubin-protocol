@@ -38,7 +38,9 @@ RUBIN_HSM_HEALTH_INTERVAL=10
 # Consecutive failures before switching to READ_ONLY
 RUBIN_HSM_FAIL_THRESHOLD=3
 
-# Maximum time in READ_ONLY before FAILED (seconds). 0 = infinite (not recommended)
+# Maximum time in READ_ONLY before FAILED (seconds).
+# Recommended: 120..600. 0 disables the READ_ONLY → FAILED transition (node remains READ_ONLY indefinitely) and
+# MUST be used only with an explicit operational mitigation (e.g., external watchdog + 24/7 paging).
 RUBIN_HSM_FAILOVER_TIMEOUT=300
 
 # Alert webhook (optional) - invoked on READ_ONLY and FAILED transitions

@@ -216,10 +216,10 @@ func (w *WolfcryptDylibProvider) VerifyMLDSA87(pubkey []byte, sig []byte, digest
 	switch rc {
 	case 1:
 		return true
-		case 0:
-			return false
-		default:
-			return false
+	case 0:
+		return false
+	default:
+		return false
 	}
 }
 
@@ -237,10 +237,10 @@ func (w *WolfcryptDylibProvider) VerifySLHDSASHAKE_256f(pubkey []byte, sig []byt
 	switch rc {
 	case 1:
 		return true
-		case 0:
-			return false
-		default:
-			return false
+	case 0:
+		return false
+	default:
+		return false
 	}
 }
 
@@ -255,8 +255,9 @@ func (w *WolfcryptDylibProvider) HasKeyManagement() bool {
 // Returns the wrapped blob (keyIn length + 8 bytes ICV).
 //
 // Error codes from shim:
-//   -30 null argument, -31 bad kek_len, -32 bad key_in_len,
-//   -33 buf too small, -34 aes init, -35 wrap failed, -99 symbol absent in shim.
+//
+//	-30 null argument, -31 bad kek_len, -32 bad key_in_len,
+//	-33 buf too small, -34 aes init, -35 wrap failed, -99 symbol absent in shim.
 func (w *WolfcryptDylibProvider) KeyWrap(kek, keyIn []byte) ([]byte, error) {
 	if len(kek) != 32 {
 		return nil, errors.New("keywrap: kek must be 32 bytes (AES-256)")
