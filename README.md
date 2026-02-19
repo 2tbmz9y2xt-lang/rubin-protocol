@@ -19,6 +19,23 @@ Status: development. Not a production readiness claim.
 2. **Determinism as a release gate**: txid/sighash/error codes must match across independent clients.
 3. **Compliance-oriented supply chain**: keep consensus crypto behind a stable provider/shim ABI to enable controlled builds and future validated-module workflows.
 
+## Economics and long-term security budget
+
+**v1.1 default**: hard cap of 100,000,000 RBN. 99M mined over ~25 years via a linear decay schedule (not halving). After block `N`, `block_subsidy() = 0` and miners are sustained by transaction fees alone.
+
+**The unsolved problem**: fee-only security is an open research question. Bitcoin will face this after ~2140; no major PoW chain has operated in that regime yet. Monero's answer is a hardcoded perpetual tail emission (~0.6 XMR/block forever) — which solves miner incentive but makes supply permanently inflationary by design, with no community override.
+
+**RUBIN's answer**: neither hardcode inflation nor rule it out. VERSION_BITS (§8 of the canonical spec) gives the live network a **consensus-grade activation mechanism**. If, after the emission window closes, the community determines that fee revenue is insufficient to maintain an adequate security budget, they can propose a `tail_emission_v1` deployment:
+
+- a deployment entry is published with a bit assignment and activation window,
+- miners signal in block headers,
+- at 75% threshold over a 2016-block window: `LOCKED_IN → ACTIVE`,
+- `block_subsidy()` returns a `TAIL_CONSTANT` instead of 0 for all future blocks.
+
+This is a coordinated hardfork — all nodes must upgrade — but the signaling, threshold, and activation height are transparent and measurable on-chain, not a surprise flag day.
+
+The default (v1.1) is a clean hard cap. Tail emission is an option the network can exercise through its own governance mechanism, not a parameter set by the founding team. That distinction matters.
+
 ## Cryptography (v1.1)
 
 Consensus primitives (normative in `spec/RUBIN_L1_CANONICAL_v1.1.md`):
