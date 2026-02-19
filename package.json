@@ -14,7 +14,7 @@
     "format:check": "prettier --check 'scripts/**/*.mjs'"
   },
   "dependencies": {
-    "marked": "^12.0.2"
+    "marked": "^17.0.3"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
