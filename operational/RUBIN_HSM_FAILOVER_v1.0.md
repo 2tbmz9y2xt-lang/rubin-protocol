@@ -1,124 +1,124 @@
 # RUBIN HSM Failover Protocol v1.0
 
 Status: OPERATIONAL (non-consensus)
-Scope: Секвенсеры и валидаторы использующие HSM для хранения приватных ключей
+Scope: Sequencers and validators using an HSM for private key custody
 
-## Проблема
+## Problem
 
-FIPS 140-3 требует чтобы приватные ключи хранились внутри HSM. При потере доступа к HSM нода не должна:
-- упасть тихо (silent failure) — опасно для сети
-- использовать ключ из памяти как fallback — нарушает FIPS boundary
-- продолжать подписывать без HSM — нарушает key custody policy
+FIPS 140-3 requires private keys to be stored inside the HSM boundary. If HSM access is lost, a node MUST NOT:
+- fail silently (silent failure) - dangerous for the network
+- fall back to an in-memory key - violates the FIPS boundary
+- keep signing without the HSM - violates key custody policy
 
-## Три состояния ноды
+## Three node states
 
 ```
-NORMAL          — HSM доступен, подписи работают
-READ_ONLY       — HSM недоступен, верификация работает, подписи отключены
-FAILED          — HSM недоступен > MAX_HSM_FAILOVER_WAIT, нода останавливается
+NORMAL          - HSM reachable, signing enabled
+READ_ONLY       - HSM unreachable, verification enabled, signing disabled
+FAILED          - HSM unreachable for > MAX_HSM_FAILOVER_WAIT, node stops
 ```
 
-Переходы:
+Transitions:
 
 ```
 NORMAL → READ_ONLY   : HSM health check fails (3 consecutive)
 READ_ONLY → NORMAL   : HSM health check passes (1 success)
 READ_ONLY → FAILED   : timeout MAX_HSM_FAILOVER_WAIT exceeded
-FAILED → NORMAL      : только ручной рестарт с `--hsm-override` флагом
+FAILED → NORMAL      : manual restart only, with `--hsm-override`
 ```
 
-## Конфигурация
+## Configuration
 
-В `rubin-node.env`:
+In `rubin-node.env`:
 
 ```env
-# Период health check HSM (секунды)
+# HSM health check interval (seconds)
 RUBIN_HSM_HEALTH_INTERVAL=10
 
-# Количество consecutive failures до перехода в READ_ONLY
+# Consecutive failures before switching to READ_ONLY
 RUBIN_HSM_FAIL_THRESHOLD=3
 
-# Максимальное время в READ_ONLY до FAILED (секунды). 0 = бесконечно (не рекомендуется)
+# Maximum time in READ_ONLY before FAILED (seconds). 0 = infinite (not recommended)
 RUBIN_HSM_FAILOVER_TIMEOUT=300
 
-# Алерт webhook (опционально) — вызывается при переходе в READ_ONLY и FAILED
+# Alert webhook (optional) - invoked on READ_ONLY and FAILED transitions
 RUBIN_HSM_ALERT_WEBHOOK=https://ops.example.com/alerts/hsm
 ```
 
-## KEK хранение и keywrap flow
+## KEK storage and keywrap flow
 
-Приватный ключ в памяти существует только в wrapped (зашифрованном) виде. Расшифровка происходит только внутри HSM boundary. Поток:
-
-```
-1. Нода стартует
-2. Запрашивает KEK у HSM через PKCS#11: C_WrapKey / C_GetAttributeValue
-3. HSM возвращает wrapped blob ключа
-4. Нода хранит wrapped blob в памяти (plaintext никогда не попадает в process memory)
-5. При необходимости подписать:
-   a. Передаёт digest в HSM: C_SignInit + C_Sign
-   b. HSM подписывает внутри, возвращает подпись
-   c. Plaintext ключ никогда не покидает HSM
-6. HSM health check каждые RUBIN_HSM_HEALTH_INTERVAL секунд:
-   a. PKCS#11 C_GetSlotInfo или пустой C_Sign вызов
-   b. Failure → счётчик++
-   c. Счётчик >= FAIL_THRESHOLD → READ_ONLY
-```
-
-`rubin_wc_aes_keywrap` / `rubin_wc_aes_keyunwrap` используются для:
-- **Offline backup**: экспорт зашифрованного ключа на cold storage перед заменой HSM
-- **HSM-to-HSM migration**: перенос ключа между двумя HSM через encrypted blob
-- **Test/dev**: замена PKCS#11 в средах без физического HSM
-
-## Failover последовательность
-
-### Сценарий: HSM перестал отвечать
+The private key exists in memory only in wrapped (encrypted) form. Unwrapping/decryption happens only inside the HSM boundary. Flow:
 
 ```
-T=0s   NORMAL — нормальная работа
-T=10s  health check #1 — FAIL — счётчик=1
-T=20s  health check #2 — FAIL — счётчик=2
-T=30s  health check #3 — FAIL — счётчик=3 ≥ FAIL_THRESHOLD
-       → ПЕРЕХОД В READ_ONLY
-       → АЛЕРТ оператору (webhook + stderr)
-       → Логировать: "HSM unreachable, entering READ_ONLY mode"
-       → Все входящие Sign запросы → HTTP 503 / ошибка "HSM unavailable"
-       → Верификация продолжает работать
-
-T=30s–330s   READ_ONLY — операторы реагируют
-T=330s  RUBIN_HSM_FAILOVER_TIMEOUT=300 истёк
-        → ПЕРЕХОД В FAILED
-        → Логировать: "HSM timeout exceeded, node shutting down"
-        → АЛЕРТ (повторный)
-        → Graceful shutdown (завершить текущие запросы, закрыть connections)
-
-Оператор:
-1. Проверяет физический HSM или резервный
-2. Переключает на резервный HSM (меняет PKCS#11 slot в конфиге)
-3. Рестартует ноду: systemctl restart rubin-node
+1. Node starts
+2. Requests KEK via PKCS#11: C_WrapKey / C_GetAttributeValue
+3. HSM returns a wrapped key blob
+4. Node stores the wrapped blob in memory (plaintext never enters process memory)
+5. When signing is needed:
+   a. Send digest to the HSM: C_SignInit + C_Sign
+   b. HSM signs internally and returns the signature
+   c. Plaintext key never leaves the HSM
+6. HSM health check every RUBIN_HSM_HEALTH_INTERVAL seconds:
+   a. PKCS#11 C_GetSlotInfo or a dummy C_Sign
+   b. Failure → counter++
+   c. counter >= FAIL_THRESHOLD → READ_ONLY
 ```
 
-### Сценарий: плановая замена HSM
+`rubin_wc_aes_keywrap` / `rubin_wc_aes_keyunwrap` are used for:
+- **Offline backup**: export an encrypted key blob to cold storage before HSM replacement
+- **HSM-to-HSM migration**: move a key between two HSMs via an encrypted blob
+- **Test/dev**: replace PKCS#11 in environments without a physical HSM
+
+## Failover sequence
+
+### Scenario: HSM stops responding
 
 ```
-1. Operator export (до замены):
+T=0s   NORMAL - normal operation
+T=10s  health check #1 - FAIL - fail_count=1
+T=20s  health check #2 - FAIL - fail_count=2
+T=30s  health check #3 - FAIL - fail_count=3 >= FAIL_THRESHOLD
+       → SWITCH TO READ_ONLY
+       → ALERT operator (webhook + stderr)
+       → Log: \"HSM unreachable, entering READ_ONLY mode\"
+       → All incoming Sign requests → HTTP 503 / error \"HSM unavailable\"
+       → Verification continues to work
+
+T=30s-330s   READ_ONLY - operators respond
+T=330s  RUBIN_HSM_FAILOVER_TIMEOUT=300 elapsed
+        → SWITCH TO FAILED
+        → Log: \"HSM timeout exceeded, node shutting down\"
+        → ALERT (repeat)
+        → Graceful shutdown (finish in-flight requests, close connections)
+
+Operator:
+1. Check primary HSM or standby
+2. Switch to standby HSM (change PKCS#11 slot in config)
+3. Restart node: systemctl restart rubin-node
+```
+
+### Scenario: planned HSM replacement
+
+```
+1. Operator export (before replacement):
    rubin-node keymgr export-wrapped --out /secure/backup/key_$(date +%Y%m%d).bin
-   # внутри: rubin_wc_aes_keywrap(kek_from_hsm, sk_from_hsm, ...)
+   # internally: rubin_wc_aes_keywrap(kek_from_hsm, sk_from_hsm, ...)
 
-2. Установить новый HSM, импортировать KEK
+2. Install the new HSM and import KEK
 
-3. Import на новый HSM:
+3. Import into the new HSM:
    rubin-node keymgr import-wrapped --in /secure/backup/key_YYYYMMDD.bin
-   # внутри: rubin_wc_aes_keyunwrap(new_kek, wrapped_blob, ...)
+   # internally: rubin_wc_aes_keyunwrap(new_kek, wrapped_blob, ...)
 
 4. Verify: rubin-node keymgr verify-pubkey
-   # проверяет что pubkey совпадает с ожидаемым key_id
+   # checks that the pubkey matches the expected key_id
 
-5. Рестарт ноды
+5. Restart the node
 ```
 
-## Что логировать (обязательно)
+## What to log (required)
 
-Каждое событие состояния HSM MUST записываться в structured log:
+Every HSM state transition MUST be written to structured logs:
 
 ```json
 {
@@ -133,7 +133,7 @@ T=330s  RUBIN_HSM_FAILOVER_TIMEOUT=300 истёк
 }
 ```
 
-## Алерт формат (webhook)
+## Alert format (webhook)
 
 POST JSON:
 
@@ -148,11 +148,11 @@ POST JSON:
 }
 ```
 
-## Связь с keywrap PoC
+## Relationship to keywrap PoC
 
-`rubin_wc_aes_keywrap` / `rubin_wc_aes_keyunwrap` реализованы в shim как:
-- замена PKCS#11 для dev/test окружений без HSM
-- утилита для offline backup/restore ключей
-- основа для интеграционного теста keymgr pipeline
+`rubin_wc_aes_keywrap` / `rubin_wc_aes_keyunwrap` are implemented in the shim as:
+- a PKCS#11 replacement for dev/test environments without an HSM
+- an offline backup/restore helper
+- a base for keymgr pipeline integration tests
 
-В production PKCS#11 C_WrapKey/C_UnwrapKey вызывается напрямую к HSM — shim функции не используются для online операций.
+In production, PKCS#11 C_WrapKey/C_UnwrapKey are called directly on the HSM; shim functions are not used for online operations.

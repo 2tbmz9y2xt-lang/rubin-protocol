@@ -9,7 +9,7 @@ Canonical invocation uses the following environment and command pattern:
 - `RUBIN_WOLFSSL_TAG=v5.8.4-stable`
 - `RUBIN_WOLFCRYPT_WORKROOT=/tmp/rubin-wolfcrypt`
 - `RUBIN_WOLFSSL_PREFIX=/tmp/rubin-wolfcrypt/install`
-- `CC` из матрицы
+- set `CC` from the matrix
 
 For v1.1, this is the normative matrix for FIPS-oriented runs: the active provider path is wolfCrypt + shim.
 

@@ -20,12 +20,11 @@ try {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim()
-  if (!diff) diff = 'Нет изменений в каноникале относительно текущего HEAD.'
+  if (!diff) diff = 'No changes in canonical spec relative to current HEAD.'
 } catch (e) {
-  diff = `Не удалось получить diff: ${e.message}`
+  diff = `Failed to get diff: ${e.message}`
 }
 
 fs.mkdirSync(path.dirname(target), { recursive: true })
 fs.writeFileSync(target, JSON.stringify({ updated, diff }, null, 2), 'utf8')
 console.log(`[${updated}] spec-diff.json saved -> ${target}`)
-

@@ -3,7 +3,7 @@
 Status: NON-CONSENSUS  
 Purpose: define how chain-instance profiles move from development artifacts to production-freeze eligibility.
 
-**НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА:** production freeze and any mainnet-claim are only valid after explicit controller sign-off.
+**CONTROLLER APPROVAL REQUIRED:** production freeze and any mainnet-claim are only valid after explicit controller sign-off.
 
 ## 1) Scope
 
@@ -62,7 +62,7 @@ Controller review packet includes:
 3. Risk snapshot (`γ_obs`, `p_stale^{obs}`, orphan trend, incident triggers).
 4. Explicit statement of no production freeze intent at this stage.
 
-Only после этого controller may approve `RELEASE-READINESS`.
+Only after this may the controller approve `RELEASE-READINESS`.
 
 ## 4) Release-Readiness conditions
 

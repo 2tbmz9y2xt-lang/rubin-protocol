@@ -112,7 +112,7 @@ Controller MUST define:
 
 ## 7. Transition to public launch (controller checklist)
 
-НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА:
+CONTROLLER APPROVAL REQUIRED:
 You authorize the transition only when all are true:
 
 1. Genesis is final and reproducible (two independent derivations match).

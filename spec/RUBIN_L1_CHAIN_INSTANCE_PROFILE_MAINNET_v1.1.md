@@ -49,8 +49,8 @@ Deployment artifact values must be published in this exact order:
 3. `chain_id`
 4. `genesis_block_hash`
 
-Цель этого файла: зафиксировать структуру выпуска mainnet‑профиля и требования к данным.
-Основная генерация mainnet genesis для v1.1 выполняется отдельным chain‑deployment процессом.
+Goal of this file: pin the mainnet profile release structure and required data.
+Mainnet genesis generation for v1.1 is performed by a separate chain-deployment process.
 
 ## 1. Identity
 
