@@ -2067,8 +2067,8 @@ def run_chainstate(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: Clie
                 "utxo_set": ctx.get("utxo_set", []),
                 "blocks_hex": ctx.get("blocks_hex", []),
             }
-        except (TypeError, ValueError, OverflowError) as e:
-            failures.append(f"{gate}:{test_id}: invalid chainstate context fields: {e}")
+        except (TypeError, ValueError, OverflowError):
+            failures.append(f"{gate}:{test_id}: CHAINSTATE_ERR_PARSE")
             continue
         if chain_id_hex:
             context_json["chain_id_hex"] = chain_id_hex
