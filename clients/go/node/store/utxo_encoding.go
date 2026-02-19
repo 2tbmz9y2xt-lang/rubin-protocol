@@ -69,8 +69,19 @@ func decodeUtxoEntry(b []byte) (consensus.UtxoEntry, error) {
 		return consensus.UtxoEntry{}, fmt.Errorf("utxo: covenant_data_len: %w", err)
 	}
 	off += n
-	dataLen := int(covDataLenCS)
-	if dataLen < 0 || off+dataLen+8+1 != len(b) {
+
+	// Bounds check before converting CompactSize (u64) -> int (slice indexing).
+	// gosec does not track flow, so we also suppress the cast warning with justification.
+	remaining := len(b) - off
+	if remaining < 8+1 {
+		return consensus.UtxoEntry{}, fmt.Errorf("utxo: truncated")
+	}
+	maxData := remaining - (8 + 1)
+	if covDataLenCS > consensus.CompactSize(uint64(maxData)) {
+		return consensus.UtxoEntry{}, fmt.Errorf("utxo: bad covenant_data_len")
+	}
+	dataLen := int(covDataLenCS) // #nosec G115 -- covDataLenCS is bounded by maxData derived from len(b) (int) above.
+	if off+dataLen+8+1 != len(b) {
 		return consensus.UtxoEntry{}, fmt.Errorf("utxo: bad covenant_data_len")
 	}
 	data := append([]byte(nil), b[off:off+dataLen]...)
