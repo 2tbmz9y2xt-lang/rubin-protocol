@@ -16,10 +16,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout rubin-protocol
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Checkout rubin-formal
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: 2tbmz9y2xt-lang/rubin-formal
           path: rubin-formal
