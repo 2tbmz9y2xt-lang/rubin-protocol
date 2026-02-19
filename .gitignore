@@ -16,11 +16,16 @@ clients/go/semgrep_output.json
 **/gosec_output.json
 **/semgrep_output.json
 
+# Go local coverage artifacts
+clients/go/coverage*.out
+clients/go/coverage*.txt
+
 # Rust scan artifacts
 clients/rust/cargo_audit.json
 **/cargo_audit.json
 
 # Local analysis outputs (generated, not source)
+analysis/
 analysis/spec/spec-diff.json
 analysis/spec/spec-explainer.json
 
@@ -44,6 +49,12 @@ rubin-ui/
 
 # Local scratch docs
 IMPLEMENTATION_ROADMAP.md
+
+# Local scratch crypto notes
+clients/go/_manual_SHA3/
+
+# Stray local file created by tooling
+=
 
 # Security scan artifacts
 clients/go/gosec_output.json
