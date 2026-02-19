@@ -64,7 +64,10 @@ func (d *DB) ApplyBlockIfBestTip(
 		return "", err
 	}
 	if prev != tipHash {
-		return ApplyReorgRequired, nil
+		if err := d.ReorgToTip(p, chainID, blockHash, opts); err != nil {
+			return "", err
+		}
+		return ApplyAppliedAsTip, nil
 	}
 
 	parentIndex, ok, err := d.GetIndex(prev)
