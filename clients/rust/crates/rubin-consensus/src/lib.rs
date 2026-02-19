@@ -903,11 +903,7 @@ fn block_reward_for_height(height: u64) -> u64 {
 
     let base = SUBSIDY_TOTAL_MINED / SUBSIDY_DURATION_BLOCKS;
     let rem = SUBSIDY_TOTAL_MINED % SUBSIDY_DURATION_BLOCKS;
-    if height < rem {
-        base + 1
-    } else {
-        base
-    }
+    if height < rem { base + 1 } else { base }
 }
 
 fn tx_sums(tx: &Tx, utxo: &HashMap<TxOutPoint, UtxoEntry>) -> Result<(u64, u64), String> {

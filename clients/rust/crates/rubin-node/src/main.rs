@@ -721,7 +721,9 @@ fn usage() {
     eprintln!("  chain-id --profile <path>");
     eprintln!("  txid --tx-hex <hex>");
     eprintln!("  weight --tx-hex <hex>");
-    eprintln!("  coinbase --block-height <u64> [--fees-in-block <u64> --coinbase-output-value <u64>]");
+    eprintln!(
+        "  coinbase --block-height <u64> [--fees-in-block <u64> --coinbase-output-value <u64>]"
+    );
     eprintln!("  apply-utxo --context-json <path>");
     eprintln!("  apply-block --context-json <path>");
     eprintln!("  compactsize --encoded-hex <hex>");
