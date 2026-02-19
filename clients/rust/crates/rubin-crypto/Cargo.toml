@@ -15,4 +15,4 @@ dev-std = []
 
 [dependencies]
 sha3 = "0.10"
-libloading = { version = "0.8", optional = true }
+libloading = { version = "0.9", optional = true }
