@@ -129,6 +129,28 @@ func hexDecodeStrict(s string) ([]byte, error) {
 	return hex.DecodeString(cleaned)
 }
 
+func findRepoRootFromCWD() (string, error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("getwd: %w", err)
+	}
+	dir := wd
+	for i := 0; i < 20; i++ {
+		// Consider it a repo root if both folders exist.
+		if st, err := os.Stat(filepath.Join(dir, "spec")); err == nil && st.IsDir() {
+			if st2, err := os.Stat(filepath.Join(dir, "clients")); err == nil && st2.IsDir() {
+				return dir, nil
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return "", fmt.Errorf("repo root not found from cwd=%q", wd)
+}
+
 func resolveProfilePath(profilePath string) (string, error) {
 	cleaned := filepath.Clean(profilePath)
 	if filepath.IsAbs(cleaned) {
@@ -138,17 +160,28 @@ func resolveProfilePath(profilePath string) (string, error) {
 		return "", fmt.Errorf("profile path may not escape repository")
 	}
 
-	root := filepath.Clean("spec")
-	absRoot, err := filepath.Abs(root)
-	if err != nil {
-		return "", fmt.Errorf("resolve profile root: %w", err)
+	// Profiles are always repo-relative and must live under spec/.
+	// We resolve them against the repo root so `go run` works from any subdir
+	// (e.g. from clients/go as documented).
+	if cleaned != "spec" && cleaned != "." && !strings.HasPrefix(cleaned, "spec"+string(filepath.Separator)) {
+		return "", fmt.Errorf("profile path must be inside spec/")
 	}
-	absProfile, err := filepath.Abs(cleaned)
+
+	repoRoot, err := findRepoRootFromCWD()
+	if err != nil {
+		return "", err
+	}
+	absRoot, err := filepath.Abs(filepath.Join(repoRoot, "spec"))
+	if err != nil {
+		return "", fmt.Errorf("resolve spec root: %w", err)
+	}
+
+	absProfile, err := filepath.Abs(filepath.Join(repoRoot, cleaned))
 	if err != nil {
 		return "", fmt.Errorf("resolve profile path: %w", err)
 	}
 	if absProfile != absRoot && !strings.HasPrefix(absProfile, absRoot+string(filepath.Separator)) {
-		return "", fmt.Errorf("profile path must be inside %s", root)
+		return "", fmt.Errorf("profile path must be inside spec/")
 	}
 	return absProfile, nil
 }
