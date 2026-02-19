@@ -1463,13 +1463,13 @@ to detect UTXO fraud. Its only protections are PoW and Merkle inclusion.
 Even under a complete eclipse (all peers adversarial), the following hold for an honest
 light client that correctly implements RUBIN v1.1:
 
-1. **PoW integrity**: the adversary cannot present a header with less cumulative work than
-   the adversary cannot present a header chain that violates PoW validity rules (§6.2).
-   However, without trusted checkpoints or diverse peers, the adversary can present an
-   alternative valid-PoW chain with equal or greater cumulative work, which the client
-   cannot distinguish from the honest chain.
-   With a trusted checkpoint (known block hash at height `h_c`), the client can reject any
-   presented chain that does not contain that checkpoint.
+1. **PoW integrity**: the adversary cannot present a header chain that violates PoW validity rules (§6.2).
+   That is, an eclipsed light client can still enforce *validity* of the presented header chain.
+   However, without trusted checkpoints or diverse peers, the adversary can present an alternative
+   valid-PoW header chain with equal or greater cumulative work, which the client cannot distinguish
+   from the honest chain.
+   With a trusted checkpoint (known block hash at height `h_c`), the client can reject any presented
+   chain that does not contain that checkpoint.
 2. **Merkle proof integrity**: given a valid `block_header.merkle_root`, a Merkle inclusion
    proof cannot be forged (SHA3-256 collision resistance, T-013). An eclipsed client that
    accepts a fraudulent header may accept a fraudulent Merkle proof — but only against that
