@@ -93,4 +93,4 @@ jobs:
           pip install semgrep --quiet
           semgrep scan --config=auto --error \
             clients/go clients/rust/crates conformance/runner \
-            --exclude='*.lock' --exclude='target/' 2>&1 | tail -20
+            --exclude='*.lock' --exclude='target/' 2>&1

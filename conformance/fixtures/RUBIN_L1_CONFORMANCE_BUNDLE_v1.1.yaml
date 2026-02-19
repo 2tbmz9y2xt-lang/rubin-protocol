@@ -81,8 +81,8 @@ mandatory_gates:
   file: conformance/fixtures/CV-ANCHOR-RELAY.yml
   required: false
   status: PASS
-  description: Relay-level anchor payload caps (non-consensus policy). MAX_ANCHOR_PAYLOAD_RELAY=1024. 7 policy vectors + 1
-    consensus-vs-relay gap doc (RELAY-08). Closes H-002 DoS finding.
+  description: Relay-level anchor payload caps (non-consensus policy). MAX_ANCHOR_PAYLOAD_RELAY=1024. 7 relay-policy vectors (01-07) +
+    1 consensus-vs-relay (08) + 3 T-016 separation lemma vectors (09-11) = 11 total. Closes H-002 DoS finding.
   note: policy-only — relay/mempool enforcement, not block validity
 - name: CV-COINBASE
   file: conformance/fixtures/CV-COINBASE.yml

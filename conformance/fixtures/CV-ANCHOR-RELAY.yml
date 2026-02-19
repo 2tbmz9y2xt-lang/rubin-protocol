@@ -96,14 +96,15 @@ tests:
     ban_score_increment: false
 
   - id: ANCHOR-RELAY-07
-    title: "RELAY-REJECT: 2 ANCHOR outputs, total 2049 bytes (exceeds MAX_ANCHOR_BYTES_PER_TX_RELAY)"
+    title: "RELAY-REJECT: 3 ANCHOR outputs, total 2049 bytes (exceeds MAX_ANCHOR_BYTES_PER_TX_RELAY)"
     kind: relay_policy
     consensus: false
     description: >
-      Each output is within 1024 cap, but sum 1025+1024=2049 > MAX_ANCHOR_BYTES_PER_TX_RELAY=2048.
+      Each output is within 1024 cap, but sum 1024+1024+1=2049 > MAX_ANCHOR_BYTES_PER_TX_RELAY=2048.
     anchor_outputs:
-      - payload_bytes: 1025
       - payload_bytes: 1024
+      - payload_bytes: 1024
+      - payload_bytes: 1
     expected_relay: REJECT
     reject_reason: ANCHOR_TOTAL_BYTES_EXCEEDS_RELAY_CAP
     ban_score_increment: false
