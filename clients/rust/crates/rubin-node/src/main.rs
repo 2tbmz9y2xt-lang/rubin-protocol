@@ -1615,28 +1615,9 @@ fn cmd_init_main(args: &[String]) -> i32 {
         return 1;
     }
 
-    // Import genesis block via the pipeline.
-    let genesis_hash = match provider.sha3_256(&header_bytes) {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("hash genesis header: {e}");
-            return 1;
-        }
-    };
-
-    // Create initial manifest (height 0, genesis).
-    let genesis_work =
-        rubin_store::keys::header_work(&match parse_block_header_bytes_strict(&header_bytes) {
-            Ok(h) => h.target,
-            Err(e) => {
-                eprintln!("parse genesis header: {e}");
-                return 1;
-            }
-        });
-    let genesis_hash_hex = hex_encode(&genesis_hash);
-
-    let mut manifest =
-        rubin_store::Manifest::genesis(&chain_id_hex, &genesis_hash_hex, genesis_work);
+    // Initialize from an empty manifest, then import genesis via the normal pipeline.
+    // This ensures genesis is selected as the first tip (instead of being "already the tip").
+    let mut manifest = rubin_store::Manifest::empty(&chain_id_hex);
 
     // Use pipeline to import genesis.
     match rubin_store::import_block(
@@ -1872,13 +1853,23 @@ fn cmd_utxo_set_hash_main(args: &[String]) -> i32 {
         }
     };
 
+    let utxo_count = match store.utxo_count() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("utxo-set-hash error: {e}");
+            return 1;
+        }
+    };
+
     match rubin_store::utxo_set_hash(&store, provider.as_ref()) {
         Ok(hash) => {
+            // Deterministic JSON output (matches Go node fields).
+            // Values here are either u64 or lowercase hex, so manual formatting is safe.
+            let tip_hash_hex = manifest.tip_hash.to_lowercase();
+            let utxo_set_hash_hex = hex_encode(&hash);
             println!(
-                "tip_height={} tip_hash={} utxo_set_hash={}",
-                manifest.tip_height,
-                manifest.tip_hash,
-                hex_encode(&hash),
+                "{{\"tip_height\":{},\"tip_hash_hex\":\"{}\",\"utxo_count\":{},\"utxo_set_hash_hex\":\"{}\"}}",
+                manifest.tip_height, tip_hash_hex, utxo_count, utxo_set_hash_hex
             );
             0
         }

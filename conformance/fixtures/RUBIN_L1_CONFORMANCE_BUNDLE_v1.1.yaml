@@ -47,6 +47,12 @@ mandatory_gates:
   status: PASS
   description: Cross-client chainstate parity after applying block sequences (2 vectors)
   note: consensus (node-layer integration)
+- name: CV-CHAINSTATE-STORE
+  file: conformance/fixtures/CV-CHAINSTATE-STORE.yml
+  required: false
+  status: PASS
+  description: Phase 1 persistent-store chainstate parity via init/import-block/utxo-set-hash (Go bbolt vs Rust redb)
+  note: phase1 (storage/import/reorg), not a pure consensus gate
 - name: CV-FEES
   file: conformance/fixtures/CV-FEES.yml
   required: true

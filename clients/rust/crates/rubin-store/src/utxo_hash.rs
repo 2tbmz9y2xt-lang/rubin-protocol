@@ -9,6 +9,7 @@
 use rubin_crypto::CryptoProvider;
 
 use crate::db::Store;
+use crate::keys::decode_utxo_entry;
 
 const DST: &[u8] = b"RUBINv1-utxo-set-hash/";
 
@@ -21,9 +22,29 @@ pub fn utxo_set_hash(store: &Store, provider: &dyn CryptoProvider) -> Result<[u8
     preimage.extend_from_slice(DST);
     preimage.extend_from_slice(&count.to_le_bytes());
 
-    store.iter_utxos(|key_bytes, value_bytes| {
+    store.iter_utxos(|key_bytes, value_bytes| -> Result<(), String> {
+        // Canonical pair encoding MUST match Go `consensus.UtxoSetHash` byte-for-byte.
+        // pair = outpoint_key_bytes || utxo_entry_canonical_bytes
+        //
+        // utxo_entry_canonical_bytes =
+        //   value[8] || covenant_type[2] || covenant_data_len[compactsize] || covenant_data[var] ||
+        //   creation_height[8] || coinbase_flag[1]
         preimage.extend_from_slice(key_bytes);
-        preimage.extend_from_slice(value_bytes);
+
+        // Decode DB encoding to consensus fields, then re-encode canonically for hashing.
+        // This keeps DB storage layout an internal detail while the hash remains protocol-stable.
+        let entry = decode_utxo_entry(value_bytes)
+            .map_err(|e| format!("decode utxo entry for hash: {e}"))?;
+
+        preimage.extend_from_slice(&entry.output.value.to_le_bytes());
+        preimage.extend_from_slice(&entry.output.covenant_type.to_le_bytes());
+        preimage.extend_from_slice(&rubin_consensus::compact_size_encode(
+            entry.output.covenant_data.len() as u64,
+        ));
+        preimage.extend_from_slice(&entry.output.covenant_data);
+        preimage.extend_from_slice(&entry.creation_height.to_le_bytes());
+        preimage.push(if entry.created_by_coinbase { 1 } else { 0 });
+        Ok(())
     })?;
 
     provider.sha3_256(&preimage)

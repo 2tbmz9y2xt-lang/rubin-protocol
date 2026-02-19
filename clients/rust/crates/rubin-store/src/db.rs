@@ -154,7 +154,7 @@ impl Store {
     /// Calls `f(outpoint_key_bytes, utxo_entry_bytes)` for each entry.
     pub fn iter_utxos<F>(&self, mut f: F) -> Result<(), String>
     where
-        F: FnMut(&[u8], &[u8]),
+        F: FnMut(&[u8], &[u8]) -> Result<(), String>,
     {
         let tx = self
             .db
@@ -166,7 +166,7 @@ impl Store {
         let iter = table.iter().map_err(|e| format!("utxo iter: {e}"))?;
         for result in iter {
             let (key_guard, val_guard) = result.map_err(|e| format!("utxo next: {e}"))?;
-            f(key_guard.value(), val_guard.value());
+            f(key_guard.value(), val_guard.value())?;
         }
         Ok(())
     }
