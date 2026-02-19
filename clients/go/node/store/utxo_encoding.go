@@ -30,33 +30,51 @@ func encodeUtxoEntry(e consensus.UtxoEntry) ([]byte, error) {
 	if len(data) > 0xffffffff {
 		return nil, fmt.Errorf("utxo: covenant_data too large")
 	}
-	// value u64le | covenant_type u16le | covenant_data_len u32le | covenant_data | creation_height u64le | created_by_coinbase u8
-	out := make([]byte, 8+2+4+len(data)+8+1)
-	binary.LittleEndian.PutUint64(out[0:8], e.Output.Value)
-	binary.LittleEndian.PutUint16(out[8:10], e.Output.CovenantType)
-	binary.LittleEndian.PutUint32(out[10:14], uint32(len(data))) // #nosec G115 -- len checked against 0xffffffff in caller (encodeUndoRecord).
-	copy(out[14:14+len(data)], data)
-	off := 14 + len(data)
-	binary.LittleEndian.PutUint64(out[off:off+8], e.CreationHeight)
-	off += 8
+	// Canonical KV encoding aligns with operational/RUBIN_CHAINSTATE_SNAPSHOT_HASH_v1.1.md §4:
+	// value u64le | covenant_type u16le | covenant_data_len CompactSize | covenant_data | creation_height u64le | created_by_coinbase u8
+	//
+	// Note: this is an *engineering* (Phase 1) persistence format, not a consensus wire format.
+	covLen := consensus.CompactSize(len(data)).Encode()
+	out := make([]byte, 0, 8+2+len(covLen)+len(data)+8+1)
+	var tmp8 [8]byte
+	var tmp2 [2]byte
+	binary.LittleEndian.PutUint64(tmp8[:], e.Output.Value)
+	out = append(out, tmp8[:]...)
+	binary.LittleEndian.PutUint16(tmp2[:], e.Output.CovenantType)
+	out = append(out, tmp2[:]...)
+	out = append(out, covLen...)
+	out = append(out, data...)
+	binary.LittleEndian.PutUint64(tmp8[:], e.CreationHeight)
+	out = append(out, tmp8[:]...)
+	// created_by_coinbase byte
+	out = append(out, 0x00)
 	if e.CreatedByCoinbase {
-		out[off] = 1
+		out[len(out)-1] = 1
 	}
 	return out, nil
 }
 
 func decodeUtxoEntry(b []byte) (consensus.UtxoEntry, error) {
-	if len(b) < 8+2+4+8+1 {
+	if len(b) < 8+2+8+1 {
 		return consensus.UtxoEntry{}, fmt.Errorf("utxo: truncated")
 	}
-	value := binary.LittleEndian.Uint64(b[0:8])
-	covType := binary.LittleEndian.Uint16(b[8:10])
-	dataLen := int(binary.LittleEndian.Uint32(b[10:14]))
-	if dataLen < 0 || 14+dataLen+8+1 != len(b) {
+	off := 0
+	value := binary.LittleEndian.Uint64(b[off : off+8])
+	off += 8
+	covType := binary.LittleEndian.Uint16(b[off : off+2])
+	off += 2
+
+	covDataLenCS, n, err := consensus.DecodeCompactSize(b[off:])
+	if err != nil {
+		return consensus.UtxoEntry{}, fmt.Errorf("utxo: covenant_data_len: %w", err)
+	}
+	off += n
+	dataLen := int(covDataLenCS)
+	if dataLen < 0 || off+dataLen+8+1 != len(b) {
 		return consensus.UtxoEntry{}, fmt.Errorf("utxo: bad covenant_data_len")
 	}
-	data := append([]byte(nil), b[14:14+dataLen]...)
-	off := 14 + dataLen
+	data := append([]byte(nil), b[off:off+dataLen]...)
+	off += dataLen
 	creationHeight := binary.LittleEndian.Uint64(b[off : off+8])
 	off += 8
 	createdByCoinbase := b[off] == 1
