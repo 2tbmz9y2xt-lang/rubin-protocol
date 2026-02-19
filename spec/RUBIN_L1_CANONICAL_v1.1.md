@@ -1563,9 +1563,31 @@ Node peers MUST implement peer discovery and peer-version handshake sufficient t
 ### 15.3 SPV Inclusion Proof Requirements
 
 SPV validation requires proof of inclusion as:
-- merkle_path (binary proof with siblings at each depth),
-- block_header with valid work/target and timestamp rules,
-- witness-free txid and explicit tx index.
+- `block_header` with valid work/target and timestamp rules,
+- witness-free `txid` and explicit transaction index `tx_index` within the block,
+- `merkle_path` proving `txid` is committed to by `block_header.merkle_root`.
+
+Minimum Merkle path schema (v1.1):
+
+```
+MerkleProofV1 {
+  depth       : u8           (proof depth; 0 = single-tx block)
+  sibling_cnt : CompactSize  (MUST equal depth)
+  siblings[]  : bytes32      (sibling hashes from leaf to root)
+}
+```
+
+Merkle path verification procedure (normative, non-consensus):
+
+1. Compute `txid = SHA3-256(TxNoWitnessBytes(tx))` (CANONICAL §3.1).
+2. Initialize leaf hash: `h = SHA3-256(0x00 || txid)`.
+3. For each level `i` in `[0..depth-1]`:
+   - If `(tx_index >> i) & 1 == 0` (sibling on the right): `h = SHA3-256(0x01 || h || siblings[i])`.
+   - If `(tx_index >> i) & 1 == 1` (sibling on the left):  `h = SHA3-256(0x01 || siblings[i] || h)`.
+4. Verify the computed root `h` equals `block_header.merkle_root`.
+
+Wire-level message formats for SPV proofs (`merkleblock` and `anchorproof`) are specified in
+`spec/RUBIN_L1_P2P_PROTOCOL_v1.1.md §6.2–§6.4`.
 
 ### 15.4 Transport Envelope Minimum
 
