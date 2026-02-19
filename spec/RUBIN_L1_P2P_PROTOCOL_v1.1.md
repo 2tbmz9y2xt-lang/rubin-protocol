@@ -24,9 +24,12 @@ payload_length  : bytes4   (u32le)
 checksum        : bytes4   (first 4 bytes of SHA3-256(payload_bytes))
 ```
 
+Receivers MUST drop the connection if `magic` does not match the locally pinned chain-instance
+profile magic. This is not ban-worthy (a peer may be on a different legitimate network).
+
 ### 1.1 Checksum semantics and rejection behavior
 
-- `checksum` is computed as `SHA3-256(payload_bytes)[0:4]` (first 4 bytes, big-endian slice).
+- `checksum` is computed as `SHA3-256(payload_bytes)[0:4]` (raw first 4 bytes of the digest).
 - On receive: compute expected checksum from received payload bytes.
 - If `checksum_received ≠ checksum_computed`: drop the message and increment sender ban-score by 10.
 - Do NOT disconnect on first checksum failure (transient corruption may occur); disconnect after cumulative ban-score ≥ 100.
@@ -43,6 +46,36 @@ checksum        : bytes4   (first 4 bytes of SHA3-256(payload_bytes))
 
 - Unknown `command` strings MUST be silently ignored (forward compatibility).
 - Do not increment ban-score for unknown commands.
+
+### 1.4 CompactSize encoding (normative)
+
+All `CompactSize` values in P2P message payloads MUST be minimally encoded per
+`spec/RUBIN_L1_CANONICAL_v1.1.md §3.2.1` (same encoding as transaction/block wire).
+
+If a peer sends a non-minimal `CompactSize`, receivers MUST treat the message as
+malformed: drop the message and increment sender ban-score by +10. Implementations
+that support `reject` (§2.3) SHOULD send `reject` with `ccode = REJECT_MALFORMED`
+and `message = <command>`.
+
+### 1.5 Field caps (normative)
+
+In addition to the global message-size cap `MAX_RELAY_MSG_BYTES`, receivers MUST enforce
+the following caps to ensure deterministic CPU/RAM bounds while parsing.
+
+| Constant | Value | Applies to |
+|---|---:|---|
+| `MAX_USER_AGENT_BYTES` | 256 | `version.user_agent_len` |
+| `MAX_REJECT_REASON_BYTES` | 111 | `reject.reason_len` |
+| `MAX_INV_ENTRIES` | 50_000 | `inv/getdata/notfound.count` |
+| `MAX_HEADERS_PER_MSG` | 2_000 | `headers.count`, `compacthdr.count` |
+| `MAX_LOCATOR_HASHES` | 64 | `getheaders.hash_count` |
+| `MAX_ADDR_ENTRIES` | 1_000 | `addr.count` |
+| `MAX_MERKLEPROOF_DEPTH` | 32 | `anchorproof.tx_proof.depth` and `sibling_cnt` |
+| `MAX_MERKLEBLOCK_HASHES` | 20_000 | `merkleblock.hash_count` |
+| `MAX_MERKLEBLOCK_FLAG_BYTES` | 20_000 | `merkleblock.flag_byte_cnt` |
+
+If a cap is exceeded, receivers MUST treat the message as malformed: drop the message and
+increment sender ban-score by +10. Implementations MAY disconnect early on repeated violations.
 
 ---
 
@@ -65,6 +98,12 @@ Payload fields (wire order, all little-endian unless noted):
 | 9 | `relay` | u8 | `1` = accept tx relay; `0` = headers only |
 
 `magic` is in the 24-byte transport prefix only — not duplicated in `version` payload.
+
+**Parsing constraints (normative):**
+
+- `user_agent_len` MUST be ≤ `MAX_USER_AGENT_BYTES = 256`.
+- `user_agent` MUST be valid UTF-8. If decoding fails, treat as malformed.
+- `relay` MUST be either `0` or `1` (other values are malformed).
 
 Nodes MUST reject peers whose `chain_id ≠ locally_pinned_chain_id` with a `reject` message
 and immediate disconnect. This is the primary network-domain separation mechanism.
@@ -93,7 +132,8 @@ This test MUST be verified across at least Go↔Go and Go↔Rust client pairs be
 | 2 | `NODE_RETL` | RETL batch relay support |
 | 3 | `NODE_BLOOM` | Bloom filter support (deprecated, kept for compat) |
 
-Bits 4–63 are reserved and MUST be `0` in v1.1. Receivers MUST ignore unknown service bits.
+Senders MUST set bits 4–63 to `0` in v1.1. Receivers MUST ignore unknown service bits and MUST NOT
+reject solely because reserved bits are non-zero (treat unknown bits as `0`).
 
 ### 2.2 `verack` (required)
 
@@ -143,6 +183,33 @@ Rejection codes:
 > Nodes that choose to suppress `reject` messages SHOULD still log them locally.
 > Receivers MUST NOT rely on `reject` for consensus-critical decisions.
 
+### 2.4 Handshake FSM and timeouts (normative)
+
+The P2P handshake is an interoperability requirement (non-consensus). Implementations MUST enforce
+a finite handshake timeout and MUST NOT process high-cost message families before handshake completion.
+
+State machine (minimum):
+
+1. `INIT` (TCP connected, handshake not complete)
+   - A node MUST send `version` to the peer promptly after connecting.
+   - A node MUST disconnect if it does not receive a valid `version` within 10 seconds.
+   - Before a valid `version` is received, nodes MUST ignore unknown/unsolicited messages. If a peer
+     repeatedly sends non-handshake messages in `INIT`, increment ban-score by +5 per message.
+
+2. `GOT_VERSION` (valid `version` received)
+   - A node MUST send `verack` after validating the peer's `version`.
+   - A node MUST disconnect if it does not receive `verack` within 10 seconds after sending its own `verack`.
+
+3. `READY` (handshake complete: both sides exchanged `version` and `verack`)
+   - After entering `READY`, nodes MAY process all required message families (§4–§6).
+
+Duplicate/early messages:
+
+- A second `version` message after `READY` MUST be treated as malformed: disconnect and increment ban-score by +10.
+- A `verack` received before a valid `version` SHOULD be ignored. Repeated early `verack` MAY be treated as malformed (+5).
+
+## 3. Keepalive messages
+
 ### 3.1 `ping` / `pong` (required)
 
 Payload: `nonce` (u64le). Pong echoes the ping nonce.
@@ -159,6 +226,12 @@ Recommended: if no message received from peer in 20 minutes, send `ping`. If no 
 count     : CompactSize
 entries[] : InvVector
 ```
+
+Parsing constraints (normative):
+
+- `count` MUST be ≤ `MAX_INV_ENTRIES = 50_000`.
+- Receivers MUST reject non-minimal `CompactSize` encodings (§1.4).
+- Unknown `inv_type` values MUST be ignored (do not ban-score).
 
 `InvVector`:
 ```
@@ -178,10 +251,12 @@ hash     : bytes32
 ### 4.2 `getdata` (required)
 
 Same payload format as `inv`. Used to request specific items by hash.
+`count` MUST be ≤ `MAX_INV_ENTRIES = 50_000`.
 
 ### 4.3 `notfound` (RECOMMENDED)
 
 Same payload format as `inv`. Sent in response to `getdata` for items not found locally.
+`count` MUST be ≤ `MAX_INV_ENTRIES = 50_000`.
 
 ---
 
@@ -194,6 +269,10 @@ count     : CompactSize
 headers[] : BlockHeaderBytes  (CANONICAL §5.1; 116 bytes in v1.1)
 ```
 
+Parsing constraints (normative):
+
+- `count` MUST be ≤ `MAX_HEADERS_PER_MSG = 2_000`.
+
 ### 5.2 `getheaders` (RECOMMENDED)
 
 ```
@@ -202,6 +281,11 @@ hash_count    : CompactSize
 block_locator : bytes32[]  (from tip backwards, exponential spacing)
 hash_stop     : bytes32    (zero to fetch up to 2000 headers)
 ```
+
+Parsing constraints (normative):
+
+- `hash_count` MUST satisfy `1 ≤ hash_count ≤ MAX_LOCATOR_HASHES = 64`.
+- The `block_locator` array length MUST equal `hash_count`.
 
 Response: `headers` with up to 2000 entries.
 
@@ -236,8 +320,12 @@ A compact header message reduces bandwidth for SPV clients that only need header
 command: "compacthdr"
 payload:
   count       : CompactSize
-  headers[]   : BlockHeaderBytes  (same 80-byte format as §5.1)
+  headers[]   : BlockHeaderBytes  (CANONICAL §5.1; 116 bytes in v1.1)
 ```
+
+Parsing constraints (normative):
+
+- `count` MUST be ≤ `MAX_HEADERS_PER_MSG = 2_000`.
 
 **Negotiation (normative):**
 Compact headers are offered only to peers that have advertised `NODE_LIGHT` service bit
@@ -249,6 +337,36 @@ that supports compact headers SHOULD respond with `compacthdr` to such peers.
 There is no separate capability negotiation handshake; `NODE_LIGHT` in `peer_services`
 is the sole signal. Full nodes that do not implement compact headers respond with standard
 `headers` to all peers regardless of `NODE_LIGHT`.
+
+### 5.5 Header-chain validation and rejection profile (normative)
+
+Header-chain validation is consensus-critical, but the P2P *handling* of invalid/future data is
+node policy (non-consensus). To interoperate safely, implementations MUST apply the following
+minimum validation when processing `headers` / `compacthdr` streams:
+
+For each received header `B_h`:
+
+1. **Linkage**: validate `prev_block_hash` linkage to the prior header in the candidate chain.
+2. **PoW**: validate PoW per `spec/RUBIN_L1_CANONICAL_v1.1.md §6.2`.
+3. **Difficulty target**: validate the `target` field per `spec/RUBIN_L1_CANONICAL_v1.1.md §6.4`
+   (including retarget boundaries and integer arithmetic requirements).
+4. **Timestamp rules**: validate per `spec/RUBIN_L1_CANONICAL_v1.1.md §6.5`:
+   - If the header violates the median-time-past rule (timestamp too old), treat as invalid and
+     increment ban-score by +100 (equivalent to an invalid block).
+   - If the header violates `MAX_FUTURE_DRIFT` (timestamp too far in the future), treat as invalid
+     *for now* but do NOT immediately ban-score or disconnect solely for this reason. Cache as a
+     deferred candidate and re-evaluate when `local_time` advances (see
+     `operational/RUBIN_NODE_POLICY_DEFAULTS_v1.1.md §2.3`).
+
+Chain selection (non-validation procedure):
+
+- Nodes select the best chain by `ChainWork` per `spec/RUBIN_L1_CANONICAL_v1.1.md §6.1`,
+  with tie-break per §6.3.
+
+Light-client minimum:
+
+- Light clients MUST apply the same per-header PoW/target/timestamp/linkage checks for headers they
+  accept, even if they do not download full blocks.
 
 ---
 
@@ -271,6 +389,14 @@ hashes[]      : bytes32           (Merkle tree nodes needed for proof)
 flag_byte_cnt : CompactSize
 flags[]       : bytes             (bit flags for tree traversal)
 ```
+
+Parsing constraints (normative):
+
+- `total_txns` MUST be ≥ 1.
+- `hash_count` MUST be ≤ `MAX_MERKLEBLOCK_HASHES = 20_000`.
+- `flag_byte_cnt` MUST be ≤ `MAX_MERKLEBLOCK_FLAG_BYTES = 20_000`.
+- `flag_byte_cnt` MUST be ≤ `floor((total_txns + 7) / 8)`.
+- `hash_count` MUST be ≤ `2 × total_txns` (full tree upper bound).
 
 SPV clients request `merkleblock` via `getdata` with `inv_type = MSG_FILTERED_BLOCK`.
 The partial Merkle tree follows the same algorithm as CANONICAL §5.1.1.
@@ -303,6 +429,14 @@ depth       : u8                    (proof depth; 0 = single-tx block)
 sibling_cnt : CompactSize           (MUST equal depth)
 siblings[]  : bytes32               (sibling hashes from leaf to root, left-to-right)
 ```
+
+Parsing constraints (normative):
+
+- `depth` MUST be ≤ `MAX_MERKLEPROOF_DEPTH = 32`.
+- `sibling_cnt` MUST equal `depth` and MUST be minimally encoded.
+- `flags` reserved bits MUST be `0` (only bit 0 is defined in v1.1).
+- If `flags & 0x01` is set, `tx_bytes_len` and `tx_bytes` MUST be present.
+- If `flags & 0x01` is not set, `tx_bytes_len` / `tx_bytes` MUST be omitted.
 
 **Verification by light client (normative):**
 
@@ -338,6 +472,10 @@ payload:
   output_index : u32le      (index of the CORE_ANCHOR output within the tx)
   flags        : u8         (bit 0: request tx_bytes in response; reserved bits MUST be 0)
 ```
+
+Parsing constraints (normative):
+
+- `flags` reserved bits MUST be `0` (only bit 0 is defined in v1.1).
 
 The receiving peer MUST respond with an `anchorproof` message (§6.3) for the requested
 outpoint if known, or a `notfound` message otherwise.
@@ -375,7 +513,7 @@ Relay rules:
   addresses from public relay (operator policy).
 
 Anti-eclipse heuristics:
-- Maintain at least 8 outbound connections to diverse /16 subnets.
+- Maintain at least 16 outbound connections to diverse /16 subnets.
 - Rotate 1 outbound slot per 20 minutes to a freshly sampled address.
 - Maintain 2–4 long-lived "anchor" connections (peers that have been reliably connected for > 1 hour) that are not rotated; these resist eclipse by requiring the attacker to eclipse all anchor slots simultaneously.
 - If > 50% of outbound peers share the same /16 subnet, evict the excess and resample.
@@ -395,6 +533,9 @@ Score increments (selected events):
 |-------|-----------|
 | Checksum failure | +10 |
 | Oversized message | +20 (+ disconnect) |
+| Non-minimal `CompactSize` | +10 |
+| Declared count/len cap exceeded | +10 |
+| Repeated non-handshake messages before `READY` | +5 (each) |
 | Invalid block | +100 (immediate ban) |
 | Invalid tx | +5 |
 | `addr` flood (> 1000/24h) | +20 |
@@ -405,16 +546,20 @@ Ban scores decay at a rate of 1 point per minute (half-life ~100 minutes).
 
 ### 7.3 Connection limits
 
-Recommended defaults (non-consensus, operator-adjustable):
+Recommended defaults (non-consensus, operator-adjustable).
+These values MUST be treated as policy only; see `operational/RUBIN_NODE_POLICY_DEFAULTS_v1.1.md §2.1`
+for the operator-facing defaults.
 
 ```
-MAX_OUTBOUND_CONNECTIONS = 8
-MAX_INBOUND_CONNECTIONS  = 125
+MAX_OUTBOUND_CONNECTIONS = 16
+MAX_INBOUND_CONNECTIONS  = 64
+MAX_TOTAL_CONNECTIONS    = 128
+MAX_INBOUND_PER_IP       = 4
 MAX_FEELER_CONNECTIONS   = 2     # short-lived probes for address freshness
 ```
 
 Nodes SHOULD limit inbound connections per /16 subnet to 4 to resist Sybil eclipse.
-Inbound slots beyond `MAX_INBOUND_CONNECTIONS` are rejected with a `reject` message (`REJECT_DUPLICATE`).
+Inbound slots beyond caps are rejected (optionally with a `reject` message `REJECT_DUPLICATE`).
 
 ---
 
@@ -422,12 +567,17 @@ Inbound slots beyond `MAX_INBOUND_CONNECTIONS` are rejected with a `reject` mess
 
 The following items MUST be resolved before this document is promoted from DRAFT to CANONICAL-AUXILIARY:
 
+- [x] Spec hygiene: add missing `## 3` wrapper for keepalive, fix `compacthdr` header size (116 bytes), clarify reserved `peer_services` bits (§2.1.1, §3, §5.4)
+- [x] Parsing caps: CompactSize minimal encoding + caps table + malformed handling (§1.4–§1.5)
+- [x] Handshake FSM + finite timeouts + pre-handshake gating (§2.4)
+- [x] Header-chain validation/rejection profile (PoW/target/time) with future-timestamp deferral (§5.5)
 - [x] `anchorproof` wire format finalized (§6.3) — `flags` field added for optional tx_bytes, Merkle path direction normative, rate limit 100/min, relay size constraint
 - [x] Compact headers negotiation protocol defined (§5.4) — `NODE_LIGHT` service bit is the sole signal; no separate capability negotiation
 - [x] `addr` message IPv6 scope: link-local (`fe80::/10`), loopback, multicast, unspecified MUST be filtered; IPv4-mapped link-local also filtered (§7.1)
 - [x] `reject` message deprecation decision: retained as RECOMMENDED through testnet phase; re-evaluate before public mainnet; receiver MUST NOT use for consensus decisions (§2.3)
 - [x] Exact `getheaders` block locator algorithm: first 12 steps at step 1, then doubling offsets, max 64 hashes + genesis (§5.2)
 - [x] Cross-client interop test for `version`/`verack` with chain_id mismatch: normative test vector added (§2.1); MUST pass Go↔Go and Go↔Rust before testnet freeze
+- [x] Operational alignment: connection caps/defaults match `operational/RUBIN_NODE_POLICY_DEFAULTS_v1.1.md` (§7.3)
 
 All pre-freeze items resolved. This document is ready for promotion to CANONICAL-AUXILIARY
 pending cross-client interop test execution.
