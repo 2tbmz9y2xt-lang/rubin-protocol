@@ -29,4 +29,3 @@ func TestDevStdVerifyAlwaysFalse(t *testing.T) {
 		t.Fatalf("VerifySLHDSASHAKE_256f unexpectedly returned true")
 	}
 }
-

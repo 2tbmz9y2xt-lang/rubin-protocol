@@ -176,8 +176,8 @@ func TestDeriveChainID_DevnetProfile(t *testing.T) {
 func TestCmdTxIDWeightParse_HappyPath(t *testing.T) {
 	// Minimal coinbase-like tx (valid parse/txid/weight; not meant to be applied).
 	tx := &consensus.Tx{
-		Version:  1,
-		TxNonce:  0,
+		Version: 1,
+		TxNonce: 0,
 		Inputs: []consensus.TxInput{{
 			PrevTxid:  [32]byte{},
 			PrevVout:  consensus.TX_COINBASE_PREVOUT_VOUT,

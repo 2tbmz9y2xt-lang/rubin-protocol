@@ -66,4 +66,3 @@ func TestUndoRecord_RoundTrip(t *testing.T) {
 		t.Fatalf("encoding not deterministic")
 	}
 }
-

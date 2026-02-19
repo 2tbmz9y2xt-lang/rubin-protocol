@@ -62,4 +62,3 @@ func TestUtxoEntry_RoundTripAndBounds(t *testing.T) {
 		t.Fatalf("expected covenant_data_len error")
 	}
 }
-

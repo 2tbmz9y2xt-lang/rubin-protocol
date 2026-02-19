@@ -32,4 +32,3 @@ func TestLoadCryptoProvider_DevStdWhenNotStrict(t *testing.T) {
 		t.Fatalf("expected provider")
 	}
 }
-
