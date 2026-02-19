@@ -1177,6 +1177,10 @@ Development status P0 (future release blockers):
 1. A concrete chain-instance profile MUST be published for any public network (devnet/testnet/mainnet) fixing exact genesis bytes so all clients derive the same `chain_id`.
 2. Any consensus feature activation via VERSION_BITS MUST publish a populated deployment table (schema in §8.1) before release.
 3. Any change to consensus weight accounting (including `VERIFY_COST_*`) MUST be accompanied by updated conformance vectors covering boundary blocks and weight computation determinism.
+4. The deployment parameter table (§8.1) is intentionally empty in this spec revision. Before launching any
+   network (devnet/testnet/mainnet), a chain-instance profile MUST define concrete values for each deployment:
+   `bit`, `start_height`, `timeout_height`, and `signal_window`. Until populated, all deployment-gated features
+   (including `CORE_HTLC_V2` spends) will permanently return `TX_ERR_DEPLOYMENT_INACTIVE` on any network.
 
 #### 8.1 Deployment table format (Normative schema)
 
