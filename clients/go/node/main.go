@@ -847,7 +847,7 @@ func cmdReorg(contextPath string) (string, error) {
 	return "", fmt.Errorf("REORG_ERR_PARSE: unsupported context shape")
 }
 
-const usageCommands = "commands: version | init --datadir <path> [--profile <path>] | import-stage03 --datadir <path> [--profile <path>] (--block-hex <hex> | --block-hex-file <path>) | import-block --datadir <path> [--profile <path> --local-time <u64> --suite-id-02-active --htlc-v2-active] (--block-hex <hex> | --block-hex-file <path>) | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse (--tx-hex <hex> | --tx-hex-file <path>) [--max-witness-bytes <u64>] | txid (--tx-hex <hex> | --tx-hex-file <path>) | weight (--tx-hex <hex> | --tx-hex-file <path>) | coinbase --block-height <u64> [--fees-in-block <u64> --coinbase-output-value <u64>] | sighash (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-id-hex <hex64> | --profile <path> | --suite-id-02-active | --htlc-v2-active] | apply-utxo --context-json <path> | apply-block --context-json <path> | reorg --context-json <path> | chainstate --context-json <path>"
+const usageCommands = "commands: version | init --datadir <path> [--profile <path>] | import-stage03 --datadir <path> [--profile <path>] (--block-hex <hex> | --block-hex-file <path>) | import-block --datadir <path> [--profile <path> --local-time <u64> --suite-id-02-active --htlc-v2-active] (--block-hex <hex> | --block-hex-file <path>) | utxo-set-hash --datadir <path> [--profile <path>] | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse (--tx-hex <hex> | --tx-hex-file <path>) [--max-witness-bytes <u64>] | txid (--tx-hex <hex> | --tx-hex-file <path>) | weight (--tx-hex <hex> | --tx-hex-file <path>) | coinbase --block-height <u64> [--fees-in-block <u64> --coinbase-output-value <u64>] | sighash (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-id-hex <hex64> | --profile <path> | --suite-id-02-active | --htlc-v2-active] | apply-utxo --context-json <path> | apply-block --context-json <path> | reorg --context-json <path> | chainstate --context-json <path>"
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage: rubin-node <command> [args]")
@@ -966,7 +966,7 @@ func readHexFlag(name string, hexStr string, hexFile string) (string, error) {
 		return "", fmt.Errorf("use exactly one of --%s or --%s-file", name, name)
 	}
 	if hexFile != "" {
-		b, err := os.ReadFile(hexFile)
+		b, err := os.ReadFile(hexFile) // #nosec G304 -- path is a user-supplied CLI argument; operator controls the process.
 		if err != nil {
 			return "", fmt.Errorf("read --%s-file: %w", name, err)
 		}
@@ -1103,7 +1103,7 @@ func readTxHexFlag(txHex, txHexFile string) (string, error) {
 		return "", fmt.Errorf("use exactly one of --tx-hex or --tx-hex-file")
 	}
 	if txHexFile != "" {
-		b, err := os.ReadFile(txHexFile)
+		b, err := os.ReadFile(txHexFile) // #nosec G304 -- path is a user-supplied CLI argument; operator controls the process.
 		if err != nil {
 			return "", fmt.Errorf("read --tx-hex-file: %w", err)
 		}
@@ -1418,6 +1418,77 @@ func cmdReorgMain(argv []string) int {
 	return 0
 }
 
+func cmdUtxoSetHash(datadir string, profilePath string) (string, error) {
+	p, cleanup, err := loadCryptoProvider()
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+
+	chainID, err := deriveChainID(p, profilePath)
+	if err != nil {
+		return "", err
+	}
+	chainIDHex := hex.EncodeToString(chainID[:])
+
+	db, err := store.Open(datadir, chainIDHex)
+	if err != nil {
+		return "", fmt.Errorf("open datadir: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	m := db.Manifest()
+	if m == nil {
+		return "", fmt.Errorf("chain not initialized (no MANIFEST.json) — run init first")
+	}
+
+	utxo, err := db.LoadUTXOSet()
+	if err != nil {
+		return "", fmt.Errorf("load utxo set: %w", err)
+	}
+
+	utxoHash, err := consensus.UtxoSetHash(p, utxo)
+	if err != nil {
+		return "", fmt.Errorf("utxo set hash: %w", err)
+	}
+
+	// Use a struct (not map) so encoding/json emits a stable key order.
+	out := struct {
+		TipHeight      uint64 `json:"tip_height"`
+		TipHashHex     string `json:"tip_hash_hex"`
+		UtxoCount      int    `json:"utxo_count"`
+		UtxoSetHashHex string `json:"utxo_set_hash_hex"`
+	}{
+		TipHeight:      m.TipHeight,
+		TipHashHex:     m.TipHashHex,
+		UtxoCount:      len(utxo),
+		UtxoSetHashHex: hex.EncodeToString(utxoHash[:]),
+	}
+	enc, err := json.Marshal(out)
+	if err != nil {
+		return "", fmt.Errorf("json: %w", err)
+	}
+	return string(enc), nil
+}
+
+func cmdUtxoSetHashMain(argv []string) int {
+	fs := flag.NewFlagSet("utxo-set-hash", flag.ExitOnError)
+	datadir := fs.String("datadir", "", "data directory root")
+	profile := fs.String("profile", defaultChainProfile, "chain-instance profile path")
+	_ = fs.Parse(argv)
+	if *datadir == "" {
+		fmt.Fprintln(os.Stderr, "missing required flag: --datadir")
+		return 2
+	}
+	out, err := cmdUtxoSetHash(*datadir, *profile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "utxo-set-hash error:", err)
+		return 1
+	}
+	fmt.Println(out)
+	return 0
+}
+
 func cmdChainstateMain(argv []string) int {
 	fs := flag.NewFlagSet("chainstate", flag.ExitOnError)
 	contextPath := fs.String("context-json", "", "path to chainstate context JSON")
@@ -1477,6 +1548,8 @@ func main() {
 		exitCode = cmdReorgMain(argv)
 	case "chainstate":
 		exitCode = cmdChainstateMain(argv)
+	case "utxo-set-hash":
+		exitCode = cmdUtxoSetHashMain(argv)
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command")
 		printUsage()
