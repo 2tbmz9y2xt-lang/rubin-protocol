@@ -710,6 +710,50 @@ fn get_flag(args: &[String], flag: &str) -> Result<Option<String>, String> {
     Ok(None)
 }
 
+fn get_tx_hex(args: &[String]) -> Result<String, i32> {
+    let tx_hex = match get_flag(args, "--tx-hex") {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return Err(2);
+        }
+    };
+    let tx_hex_file = match get_flag(args, "--tx-hex-file") {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return Err(2);
+        }
+    };
+
+    if tx_hex.is_some() && tx_hex_file.is_some() {
+        eprintln!("use exactly one of --tx-hex or --tx-hex-file");
+        return Err(2);
+    }
+
+    if let Some(path) = tx_hex_file {
+        match fs::read_to_string(path) {
+            Ok(s) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    eprintln!("--tx-hex-file is empty");
+                    return Err(2);
+                }
+                Ok(trimmed.to_string())
+            }
+            Err(e) => {
+                eprintln!("read --tx-hex-file: {e}");
+                Err(2)
+            }
+        }
+    } else if let Some(v) = tx_hex {
+        Ok(v)
+    } else {
+        eprintln!("missing required flag: --tx-hex (or --tx-hex-file)");
+        Err(2)
+    }
+}
+
 fn flag_present(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
 }
@@ -719,18 +763,20 @@ fn usage() {
     eprintln!("commands:");
     eprintln!("  version");
     eprintln!("  chain-id --profile <path>");
-    eprintln!("  txid --tx-hex <hex>");
-    eprintln!("  weight --tx-hex <hex>");
-    eprintln!("  coinbase --block-height <u64> [--fees-in-block <u64> --coinbase-output-value <u64>]");
+    eprintln!("  txid (--tx-hex <hex> | --tx-hex-file <path>)");
+    eprintln!("  weight (--tx-hex <hex> | --tx-hex-file <path>)");
+    eprintln!(
+        "  coinbase --block-height <u64> [--fees-in-block <u64> --coinbase-output-value <u64>]"
+    );
     eprintln!("  apply-utxo --context-json <path>");
     eprintln!("  apply-block --context-json <path>");
     eprintln!("  compactsize --encoded-hex <hex>");
-    eprintln!("  parse --tx-hex <hex> [--max-witness-bytes <u64>]");
+    eprintln!("  parse (--tx-hex <hex> | --tx-hex-file <path>) [--max-witness-bytes <u64>]");
     eprintln!(
-        "  sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>]"
+        "  sighash (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>]"
     );
     eprintln!(
-        "  verify --tx-hex <hex> --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-height <u64> | --chain-timestamp <u64> | --chain-id-hex <hex64> | --profile <path> | --suite-id-02-active | --htlc-v2-active]"
+        "  verify (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-height <u64> | --chain-timestamp <u64> | --chain-id-hex <hex64> | --profile <path> | --suite-id-02-active | --htlc-v2-active]"
     );
     eprintln!("  reorg --context-json <path>");
 }
@@ -757,16 +803,9 @@ fn cmd_chain_id_main(args: &[String]) -> i32 {
 }
 
 fn cmd_txid_main(args: &[String]) -> i32 {
-    let tx_hex = match get_flag(args, "--tx-hex") {
-        Ok(Some(v)) => v,
-        Ok(None) => {
-            eprintln!("missing required flag: --tx-hex");
-            return 2;
-        }
-        Err(e) => {
-            eprintln!("{e}");
-            return 2;
-        }
+    let tx_hex = match get_tx_hex(args) {
+        Ok(v) => v,
+        Err(code) => return code,
     };
     if let Err(e) = cmd_txid(&tx_hex) {
         eprintln!("txid error: {e}");
@@ -776,16 +815,9 @@ fn cmd_txid_main(args: &[String]) -> i32 {
 }
 
 fn cmd_weight_main(args: &[String]) -> i32 {
-    let tx_hex = match get_flag(args, "--tx-hex") {
-        Ok(Some(v)) => v,
-        Ok(None) => {
-            eprintln!("missing required flag: --tx-hex");
-            return 2;
-        }
-        Err(e) => {
-            eprintln!("{e}");
-            return 2;
-        }
+    let tx_hex = match get_tx_hex(args) {
+        Ok(v) => v,
+        Err(code) => return code,
     };
 
     // Conformance weight gate expects any failure to surface as TX_ERR_PARSE.
@@ -897,16 +929,9 @@ fn parse_optional_u64(args: &[String], flag: &str) -> Result<Option<u64>, i32> {
 }
 
 fn cmd_parse_main(args: &[String]) -> i32 {
-    let tx_hex = match get_flag(args, "--tx-hex") {
-        Ok(Some(v)) => v,
-        Ok(None) => {
-            eprintln!("missing required flag: --tx-hex");
-            return 2;
-        }
-        Err(e) => {
-            eprintln!("{e}");
-            return 2;
-        }
+    let tx_hex = match get_tx_hex(args) {
+        Ok(v) => v,
+        Err(code) => return code,
     };
     let max_witness_bytes = match parse_optional_u64(args, "--max-witness-bytes") {
         Ok(v) => v,
@@ -996,16 +1021,9 @@ fn cmd_reorg_main(args: &[String]) -> i32 {
 }
 
 fn cmd_verify_main(args: &[String]) -> i32 {
-    let tx_hex = match get_flag(args, "--tx-hex") {
-        Ok(Some(v)) => v,
-        Ok(None) => {
-            eprintln!("missing required flag: --tx-hex");
-            return 2;
-        }
-        Err(e) => {
-            eprintln!("{e}");
-            return 2;
-        }
+    let tx_hex = match get_tx_hex(args) {
+        Ok(v) => v,
+        Err(code) => return code,
     };
     let input_index = match parse_required_u32(args, "--input-index") {
         Ok(v) => v,
@@ -1165,16 +1183,9 @@ fn cmd_compactsize_main(args: &[String]) -> i32 {
 }
 
 fn cmd_sighash_main(args: &[String]) -> i32 {
-    let tx_hex = match get_flag(args, "--tx-hex") {
-        Ok(Some(v)) => v,
-        Ok(None) => {
-            eprintln!("missing required flag: --tx-hex");
-            return 2;
-        }
-        Err(e) => {
-            eprintln!("{e}");
-            return 2;
-        }
+    let tx_hex = match get_tx_hex(args) {
+        Ok(v) => v,
+        Err(code) => return code,
     };
 
     let input_index = match parse_required_u32(args, "--input-index") {

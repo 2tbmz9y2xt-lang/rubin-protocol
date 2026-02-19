@@ -161,10 +161,13 @@ def run_verify_case(
     covenant_type: int,
     prevout_data: bytes,
 ) -> tuple[tuple[str, str, int], tuple[str, str, int]]:
+    with tempfile.NamedTemporaryFile("w", suffix=".txhex", delete=False, encoding="utf-8") as f:
+        f.write(tx_hex.strip() + "\n")
+        tx_path = f.name
     cmd = [
         "verify",
-        "--tx-hex",
-        tx_hex,
+        "--tx-hex-file",
+        tx_path,
         "--input-index",
         "0",
         "--input-value",
@@ -180,9 +183,12 @@ def run_verify_case(
         "--chain-timestamp",
         "0",
     ]
-    rust = run(clients["rust"], cmd)
-    go = run(clients["go"], cmd)
-    return rust, go
+    try:
+        rust = run(clients["rust"], cmd)
+        go = run(clients["go"], cmd)
+        return rust, go
+    finally:
+        Path(tx_path).unlink(missing_ok=True)
 
 
 def key_id_from_wire(suite_id: int, pubkey_hex: str) -> str:

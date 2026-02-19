@@ -25,8 +25,30 @@ class ClientCmd:
     argv_prefix: list[str]
 
 
+_TXHEX_DIR: Path | None = None
+
+
+def _tx_hex_file(tx_hex: str) -> str:
+    s = tx_hex.strip()
+    if s == "":
+        raise ValueError("tx_hex is empty")
+    if _TXHEX_DIR is None:
+        raise RuntimeError("tx hex temp dir not initialized")
+    digest = hashlib.sha256(s.encode("utf-8")).hexdigest()
+    path = _TXHEX_DIR / f"{digest}.txhex"
+    if not path.exists():
+        path.write_text(s + "\n", encoding="utf-8")
+    return str(path)
+
+
 def run_result(client: ClientCmd, argv: list[str]) -> subprocess.CompletedProcess[str]:
-    env = os.environ.copy()
+    # Use a minimal environment to avoid OSError ENOMEM/E2BIG in CI
+    # (GitHub Actions injects large env that can exceed ARG_MAX when passed to subprocess).
+    _KEEP = {"PATH", "HOME", "USER", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL",
+             "CARGO_HOME", "CARGO_INCREMENTAL", "CARGO_TERM_COLOR",
+             "RUSTUP_HOME", "GOPATH", "GOROOT", "GOCACHE", "GOMODCACHE"}
+    env = {k: v for k, v in os.environ.items()
+           if k in _KEEP or k.startswith("RUBIN_")}
     if client.name == "go" and not env.get("GOCACHE", "").strip():
         fallback_cache = Path(tempfile.gettempdir()) / "rubin-conformance-go-cache"
         fallback_cache.mkdir(parents=True, exist_ok=True)
@@ -614,8 +636,8 @@ def run_htlc_anchor(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: Cli
         # Both nodes support the same verify flags.
         argv = [
             "verify",
-            "--tx-hex",
-            tx_hex,
+            "--tx-hex-file",
+            _tx_hex_file(tx_hex),
             "--input-index",
             "0",
             "--input-value",
@@ -684,8 +706,8 @@ def run_weight(
         executed += 1
         tx_hex = make_parse_tx_bytes(ctx)
 
-        pr = run_result(rust, ["weight", "--tx-hex", tx_hex])
-        pg = run_result(go, ["weight", "--tx-hex", tx_hex])
+        pr = run_result(rust, ["weight", "--tx-hex-file", _tx_hex_file(tx_hex)])
+        pg = run_result(go, ["weight", "--tx-hex-file", _tx_hex_file(tx_hex)])
 
         if pr.returncode != 0 or pg.returncode != 0:
             actual_r = "PASS" if pr.returncode == 0 else _extract_err_token(pr.stderr)
@@ -957,7 +979,7 @@ def run_parse(
 
         for side in ("rust", "go"):
             client = rust if side == "rust" else go
-            argv = ["parse", "--tx-hex", tx_hex]
+            argv = ["parse", "--tx-hex-file", _tx_hex_file(tx_hex)]
             if max_witness_bytes:
                 argv.extend(["--max-witness-bytes", max_witness_bytes])
             p = run_result(client, argv)
@@ -1017,8 +1039,8 @@ def run_sighash(fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd, failure
         expected_sighash = t.get("expected_sighash_v1_hex")
         try:
             if isinstance(expected_txid, str) and expected_txid:
-                out_r = run_success(rust, ["txid", "--tx-hex", tx_hex])
-                out_g = run_success(go, ["txid", "--tx-hex", tx_hex])
+                out_r = run_success(rust, ["txid", "--tx-hex-file", _tx_hex_file(tx_hex)])
+                out_g = run_success(go, ["txid", "--tx-hex-file", _tx_hex_file(tx_hex)])
                 executed += 1
                 if out_r != expected_txid:
                     failures.append(f"CV-SIGHASH:{test_id}: rust txid mismatch: got={out_r} expected={expected_txid}")
@@ -1049,8 +1071,8 @@ def run_sighash(fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd, failure
                     rust,
                     [
                         "sighash",
-                        "--tx-hex",
-                        tx_hex,
+                        "--tx-hex-file",
+                        _tx_hex_file(tx_hex),
                         "--input-index",
                         str(input_index),
                         "--input-value",
@@ -1062,8 +1084,8 @@ def run_sighash(fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd, failure
                     go,
                     [
                         "sighash",
-                        "--tx-hex",
-                        tx_hex,
+                        "--tx-hex-file",
+                        _tx_hex_file(tx_hex),
                         "--input-index",
                         str(input_index),
                         "--input-value",
@@ -1190,8 +1212,8 @@ def run_sigcheck(
 
         cmd = [
             "verify",
-            "--tx-hex",
-            tx_hex,
+            "--tx-hex-file",
+            _tx_hex_file(tx_hex),
             "--input-index",
             str(input_index),
             "--input-value",
@@ -1998,6 +2020,10 @@ def run_reorg(gate: str, fixture: dict[str, Any], failures: list[str]) -> int:
 
 
 def main() -> int:
+    global _TXHEX_DIR
+    txhex_tmp = tempfile.TemporaryDirectory(prefix="rubin-cv-txhex-")
+    _TXHEX_DIR = Path(txhex_tmp.name)
+
     parser = argparse.ArgumentParser(description="Run all supported conformance gates against Rust + Go clients.")
     parser.add_argument(
         "--bundle",

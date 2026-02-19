@@ -691,7 +691,7 @@ func cmdReorg(contextPath string) (string, error) {
 	return "", fmt.Errorf("REORG_ERR_PARSE: unsupported context shape")
 }
 
-const usageCommands = "commands: version | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse --tx-hex <hex> [--max-witness-bytes <u64>] | txid --tx-hex <hex> | weight --tx-hex <hex> | coinbase --block-height <u64> [--fees-in-block <u64> --coinbase-output-value <u64>] | sighash --tx-hex <hex> --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify --tx-hex <hex> --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-id-hex <hex64> | --profile <path> | --suite-id-02-active | --htlc-v2-active] | apply-utxo --context-json <path> | apply-block --context-json <path> | reorg --context-json <path>"
+const usageCommands = "commands: version | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse (--tx-hex <hex> | --tx-hex-file <path>) [--max-witness-bytes <u64>] | txid (--tx-hex <hex> | --tx-hex-file <path>) | weight (--tx-hex <hex> | --tx-hex-file <path>) | coinbase --block-height <u64> [--fees-in-block <u64> --coinbase-output-value <u64>] | sighash (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-id-hex <hex64> | --profile <path> | --suite-id-02-active | --htlc-v2-active] | apply-utxo --context-json <path> | apply-block --context-json <path> | reorg --context-json <path>"
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage: rubin-node <command> [args]")
@@ -714,15 +714,38 @@ func cmdChainIDMain(argv []string) int {
 	return 0
 }
 
+func readTxHexFlag(txHex, txHexFile string) (string, error) {
+	if txHex != "" && txHexFile != "" {
+		return "", fmt.Errorf("use exactly one of --tx-hex or --tx-hex-file")
+	}
+	if txHexFile != "" {
+		b, err := os.ReadFile(txHexFile)
+		if err != nil {
+			return "", fmt.Errorf("read --tx-hex-file: %w", err)
+		}
+		s := strings.TrimSpace(string(b))
+		if s == "" {
+			return "", fmt.Errorf("--tx-hex-file is empty")
+		}
+		return s, nil
+	}
+	if txHex == "" {
+		return "", fmt.Errorf("missing required flag: --tx-hex (or --tx-hex-file)")
+	}
+	return txHex, nil
+}
+
 func cmdTxIDMain(argv []string) int {
 	fs := flag.NewFlagSet("txid", flag.ExitOnError)
 	txHex := fs.String("tx-hex", "", "transaction hex bytes (TxBytes)")
+	txHexFile := fs.String("tx-hex-file", "", "path to file containing transaction hex bytes (TxBytes)")
 	_ = fs.Parse(argv)
-	if *txHex == "" {
-		fmt.Fprintln(os.Stderr, "missing required flag: --tx-hex")
+	resolved, err := readTxHexFlag(*txHex, *txHexFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
-	if err := cmdTxID(*txHex); err != nil {
+	if err := cmdTxID(resolved); err != nil {
 		fmt.Fprintln(os.Stderr, "txid error:", err)
 		return 1
 	}
@@ -732,12 +755,14 @@ func cmdTxIDMain(argv []string) int {
 func cmdWeightMain(argv []string) int {
 	fs := flag.NewFlagSet("weight", flag.ExitOnError)
 	txHex := fs.String("tx-hex", "", "transaction hex bytes (TxBytes)")
+	txHexFile := fs.String("tx-hex-file", "", "path to file containing transaction hex bytes (TxBytes)")
 	_ = fs.Parse(argv)
-	if *txHex == "" {
-		fmt.Fprintln(os.Stderr, "missing required flag: --tx-hex")
+	resolved, err := readTxHexFlag(*txHex, *txHexFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
-	w, err := cmdWeight(*txHex)
+	w, err := cmdWeight(resolved)
 	if err != nil {
 		// Conformance expects the canonical error token, with no prefix.
 		fmt.Fprintln(os.Stderr, "TX_ERR_PARSE")
@@ -790,11 +815,13 @@ func cmdSighashMain(argv []string) int {
 	profile := fs.String("profile", defaultChainProfile, "chain instance profile path")
 	chainIDHex := fs.String("chain-id-hex", "", "override chain_id (64 hex chars)")
 	txHex := fs.String("tx-hex", "", "transaction hex bytes (TxBytes)")
+	txHexFile := fs.String("tx-hex-file", "", "path to file containing transaction hex bytes (TxBytes)")
 	inputIndex := fs.Uint("input-index", 0, "0-based input index")
 	inputValue := fs.Uint64("input-value", 0, "input UTXO value (u64)")
 	_ = fs.Parse(argv)
-	if *txHex == "" {
-		fmt.Fprintln(os.Stderr, "missing required flag: --tx-hex")
+	resolved, err := readTxHexFlag(*txHex, *txHexFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
 	if uint64(*inputIndex) > uint64(^uint32(0)) {
@@ -831,7 +858,7 @@ func cmdSighashMain(argv []string) int {
 	}
 
 	// #nosec G115 -- inputIndex is bounded above by uint32 max.
-	if err := cmdSighash(chainID, *txHex, uint32(*inputIndex), *inputValue); err != nil {
+	if err := cmdSighash(chainID, resolved, uint32(*inputIndex), *inputValue); err != nil {
 		fmt.Fprintln(os.Stderr, "sighash error:", err)
 		return 1
 	}
@@ -843,6 +870,7 @@ func cmdVerifyMain(argv []string) int {
 	profile := fs.String("profile", defaultChainProfile, "chain instance profile path")
 	chainIDHex := fs.String("chain-id-hex", "", "override chain_id (64 hex chars)")
 	txHex := fs.String("tx-hex", "", "transaction hex bytes (TxBytes)")
+	txHexFile := fs.String("tx-hex-file", "", "path to file containing transaction hex bytes (TxBytes)")
 	inputIndex := fs.Uint("input-index", 0, "0-based input index")
 	inputValue := fs.Uint64("input-value", 0, "input UTXO value (u64)")
 	prevoutCovenantType := fs.Uint("prevout-covenant-type", 0, "prevout covenant type")
@@ -854,8 +882,9 @@ func cmdVerifyMain(argv []string) int {
 	htlcV2Active := fs.Bool("htlc-v2-active", false, "treat CORE_HTLC_V2 (htlc_anchor_v1) as active")
 	_ = fs.Parse(argv)
 
-	if *txHex == "" {
-		fmt.Fprintln(os.Stderr, "missing required flag: --tx-hex")
+	resolved, err := readTxHexFlag(*txHex, *txHexFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
 	if *prevoutCovenantDataHex == "" {
@@ -906,7 +935,7 @@ func cmdVerifyMain(argv []string) int {
 
 	if err := cmdVerify(
 		chainID,
-		*txHex,
+		resolved,
 		uint32(*inputIndex),
 		*inputValue,
 		uint16(*prevoutCovenantType),
@@ -941,13 +970,15 @@ func cmdCompactSizeMain(argv []string) int {
 func cmdParseMain(argv []string) int {
 	fs := flag.NewFlagSet("parse", flag.ExitOnError)
 	txHex := fs.String("tx-hex", "", "transaction hex bytes (TxBytes)")
+	txHexFile := fs.String("tx-hex-file", "", "path to file containing transaction hex bytes (TxBytes)")
 	maxWitnessBytes := fs.Uint64("max-witness-bytes", 0, "maximum accepted witness section bytes")
 	_ = fs.Parse(argv)
-	if *txHex == "" {
-		fmt.Fprintln(os.Stderr, "missing required flag: --tx-hex")
+	resolved, err := readTxHexFlag(*txHex, *txHexFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
-	if err := cmdParse(*txHex, *maxWitnessBytes); err != nil {
+	if err := cmdParse(resolved, *maxWitnessBytes); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
