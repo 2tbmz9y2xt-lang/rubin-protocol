@@ -41,7 +41,7 @@ Constraints:
 Development status note (non-normative):
 
 - During early development, the spec defines the genesis serialization function but does not fix concrete genesis bytes.
-- Any concrete network (devnet/testnet/mainnet) MUST publish a chain-instance profile that fixes the exact genesis bytes (or genesis header/tx bytes) so all clients derive the same `chain_id`.
+- Any concrete network (devnet/testnet/mainnet) MUST publish a chain-instance profile that fixes the exact genesis bytes (or genesis header/tx bytes) so all clients derive the same `chain_id`. Recommended publication format: `spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_TEMPLATE_v1.1.md` (non-consensus).
 
 ### 1.2 Consensus constants
 

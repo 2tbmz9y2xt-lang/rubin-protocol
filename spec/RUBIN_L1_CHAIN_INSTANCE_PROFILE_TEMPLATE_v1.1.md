@@ -31,3 +31,22 @@ Derived fields (must be recomputed from the published bytes):
 Link the corresponding deployments registry:
 
 - `spec/RUBIN_L1_DEPLOYMENTS_<network>_v1.1.md`
+
+This deployments file is the chain-instance specific VERSION_BITS activation schedule (§8 in CANONICAL).
+If the deployments file is absent or empty, nodes MUST treat all deployments as `DEFINED` / not ACTIVE
+(and any deployment-gated spends will return `TX_ERR_DEPLOYMENT_INACTIVE`).
+
+## 4. Premine / Initial Distribution (Non-consensus, required disclosure)
+
+The initial distribution is committed to by `genesis_tx_bytes`. This section is a required disclosure
+for operator and tooling interoperability. It MUST be consistent with the published `genesis_tx_bytes`.
+
+Recommended fields:
+
+- premine_total: `<u64>` (coins, not base-units)
+- premine_outputs: `<text summary>` (how many outputs, what covenant types, any vesting/spend_delay)
+- premine_security_posture: `<string>` (e.g., unspendable placeholder for devnet/testnet; or vault-based vesting for mainnet)
+
+Mainnet note:
+- If the premine requires key material (e.g., `CORE_VAULT_V1` owner/recovery keys), it MUST be produced
+  as part of the genesis ceremony, not generated ad-hoc by operators after launch.
