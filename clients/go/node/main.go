@@ -19,13 +19,13 @@ import (
 const defaultChainProfile = "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md"
 
 type applyUTXOUtxoEntry struct {
-	Txid              string `json:"txid"`
-	Vout              uint32 `json:"vout"`
-	Value             uint64 `json:"value"`
-	CovenantType      uint16 `json:"covenant_type"`
-	CovenantData      string `json:"covenant_data"`
-	CreationHeight    uint64 `json:"creation_height"`
-	CreatedByCoinbase bool   `json:"created_by_coinbase"`
+	Txid              string  `json:"txid"`
+	Vout              uint32  `json:"vout"`
+	Value             uint64  `json:"value"`
+	CovenantType      uint16  `json:"covenant_type"`
+	CovenantData      string  `json:"covenant_data"`
+	CreationHeight    *uint64 `json:"creation_height"`
+	CreatedByCoinbase bool    `json:"created_by_coinbase"`
 }
 
 type applyUTXOContext struct {
@@ -473,9 +473,9 @@ func cmdApplyUTXO(contextPath string) error {
 			CovenantType: entry.CovenantType,
 			CovenantData: covenantData,
 		}
-		creationHeight := entry.CreationHeight
-		if creationHeight == 0 {
-			creationHeight = ctx.ChainHeight
+		creationHeight := ctx.ChainHeight
+		if entry.CreationHeight != nil {
+			creationHeight = *entry.CreationHeight
 		}
 		utxo[consensus.TxOutPoint{TxID: prevTxid, Vout: entry.Vout}] = consensus.UtxoEntry{
 			Output:            out,
@@ -576,9 +576,9 @@ func cmdApplyBlock(contextPath string) error {
 			CovenantType: entry.CovenantType,
 			CovenantData: covenantData,
 		}
-		creationHeight := entry.CreationHeight
-		if creationHeight == 0 {
-			creationHeight = ctx.BlockHeight
+		creationHeight := ctx.BlockHeight
+		if entry.CreationHeight != nil {
+			creationHeight = *entry.CreationHeight
 		}
 		utxo[consensus.TxOutPoint{TxID: prevTxid, Vout: entry.Vout}] = consensus.UtxoEntry{
 			Output:            out,
@@ -672,9 +672,9 @@ func cmdChainstate(contextPath string) (string, error) {
 			CovenantType: entry.CovenantType,
 			CovenantData: covenantData,
 		}
-		creationHeight := entry.CreationHeight
-		if creationHeight == 0 {
-			creationHeight = ctx.StartHeight
+		creationHeight := ctx.StartHeight
+		if entry.CreationHeight != nil {
+			creationHeight = *entry.CreationHeight
 		}
 		utxo[consensus.TxOutPoint{TxID: prevTxid, Vout: entry.Vout}] = consensus.UtxoEntry{
 			Output:            out,
@@ -708,7 +708,7 @@ func cmdChainstate(contextPath string) (string, error) {
 			return "", err
 		}
 
-		tipHash = p.SHA3_256(consensus.BlockHeaderBytes(block.Header))
+		tipHash = consensus.BlockHeaderHash(p, block.Header)
 		tipHeight = blockHeight
 		ancestors = append(ancestors, block.Header)
 	}

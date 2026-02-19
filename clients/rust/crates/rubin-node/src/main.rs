@@ -415,10 +415,13 @@ fn cmd_apply_utxo(context_path: &str) -> Result<(), String> {
             } else {
                 rubin_consensus::hex_decode_strict(covenant_data_hex)?
             };
-            let creation_height = entry
-                .get("creation_height")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(chain_height);
+            let creation_height = match entry.get("creation_height") {
+                None => chain_height,
+                Some(v) if v.is_null() => chain_height,
+                Some(v) => v
+                    .as_u64()
+                    .ok_or_else(|| "utxo_set entry creation_height must be u64".to_string())?,
+            };
             let created_by_coinbase = entry
                 .get("created_by_coinbase")
                 .and_then(|value| value.as_bool())
@@ -543,10 +546,13 @@ fn cmd_apply_block(context_path: &str) -> Result<(), String> {
             } else {
                 rubin_consensus::hex_decode_strict(covenant_data_hex)?
             };
-            let creation_height = entry
-                .get("creation_height")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(block_height);
+            let creation_height = match entry.get("creation_height") {
+                None => block_height,
+                Some(v) if v.is_null() => block_height,
+                Some(v) => v
+                    .as_u64()
+                    .ok_or_else(|| "utxo_set entry creation_height must be u64".to_string())?,
+            };
             let created_by_coinbase = entry
                 .get("created_by_coinbase")
                 .and_then(|value| value.as_bool())
@@ -675,10 +681,13 @@ fn cmd_chainstate(context_path: &str) -> Result<String, String> {
             } else {
                 rubin_consensus::hex_decode_strict(covenant_data_hex)?
             };
-            let creation_height = entry
-                .get("creation_height")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(start_height);
+            let creation_height = match entry.get("creation_height") {
+                None => start_height,
+                Some(v) if v.is_null() => start_height,
+                Some(v) => v
+                    .as_u64()
+                    .ok_or_else(|| "utxo_set entry creation_height must be u64".to_string())?,
+            };
             let created_by_coinbase = entry
                 .get("created_by_coinbase")
                 .and_then(|value| value.as_bool())

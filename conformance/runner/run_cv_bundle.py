@@ -2042,8 +2042,6 @@ def run_chainstate(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: Clie
             failures.append(f"{gate}:{test_id}: missing/invalid context")
             continue
 
-        executed += 1
-
         chain_id_hex = str(ctx.get("chain_id_hex", "")).strip()
         profile = str(ctx.get("profile", "")).strip()
         if chain_id_hex and profile:
@@ -2064,6 +2062,8 @@ def run_chainstate(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: Clie
             context_json["chain_id_hex"] = chain_id_hex
         if profile:
             context_json["profile"] = profile
+
+        executed += 1
 
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
             json.dump(context_json, f)
@@ -2106,7 +2106,7 @@ def run_chainstate(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: Clie
         try:
             out_r = json.loads(p_r.stdout.strip())
             out_g = json.loads(p_g.stdout.strip())
-        except Exception as e:
+        except json.JSONDecodeError as e:
             failures.append(f"{gate}:{test_id}: failed to parse chainstate JSON output: {e}")
             continue
 
@@ -2119,8 +2119,16 @@ def run_chainstate(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: Clie
         except Exception:
             failures.append(f"{gate}:{test_id}: missing/invalid expected_tip_height")
             continue
-        exp_tip_hash_hex = str(t.get("expected_tip_hash_hex", "")).strip().lower()
-        exp_utxo_hash_hex = str(t.get("expected_utxo_set_hash_hex", "")).strip().lower()
+        raw_tip_hash = t.get("expected_tip_hash_hex")
+        raw_utxo_hash = t.get("expected_utxo_set_hash_hex")
+        if not isinstance(raw_tip_hash, str) or not raw_tip_hash.strip():
+            failures.append(f"{gate}:{test_id}: missing/invalid expected_tip_hash_hex")
+            continue
+        if not isinstance(raw_utxo_hash, str) or not raw_utxo_hash.strip():
+            failures.append(f"{gate}:{test_id}: missing/invalid expected_utxo_set_hash_hex")
+            continue
+        exp_tip_hash_hex = raw_tip_hash.strip().lower()
+        exp_utxo_hash_hex = raw_utxo_hash.strip().lower()
         if not exp_tip_hash_hex or not exp_utxo_hash_hex:
             failures.append(f"{gate}:{test_id}: missing expected_tip_hash_hex / expected_utxo_set_hash_hex")
             continue

@@ -57,4 +57,3 @@ tests:
     expected_tip_hash_hex: "d72a68b0e749ed2ba884a14791c91d042efe4fd0be9a75e56caa77ca78ecc800"
     expected_utxo_set_hash_hex: "a20cf249c6651935a078322b4e25ce98b126f3b89b56da8f247443dcf5ad8add"
     consensus: true
-
