@@ -21,12 +21,14 @@ class ClientCmd:
 
 
 def run(client: ClientCmd, argv: list[str]) -> str:
+    timeout_s = int(os.environ.get("RUBIN_CONFORMANCE_TIMEOUT_S", "60"))
     p = subprocess.run(
         client.argv_prefix + argv,
         cwd=str(client.cwd),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        timeout=timeout_s,
     )
     if p.returncode != 0:
         raise RuntimeError(

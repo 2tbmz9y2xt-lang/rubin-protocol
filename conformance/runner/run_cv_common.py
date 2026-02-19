@@ -248,12 +248,14 @@ def run(
     argv: list[str],
     capture_stderr: bool = True,
 ) -> tuple[str, str, int]:
+    timeout_s = int(os.environ.get("RUBIN_CONFORMANCE_TIMEOUT_S", "60"))
     p = subprocess.run(
         client.argv_prefix + argv,
         cwd=str(client.cwd),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE if capture_stderr else subprocess.DEVNULL,
         text=True,
+        timeout=timeout_s,
     )
     return p.stdout.strip(), p.stderr.strip(), p.returncode
 

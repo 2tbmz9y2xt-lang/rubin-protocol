@@ -1,0 +1,83 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+          cache-dependency-path: clients/go/go.sum
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Python deps (conformance runner)
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r conformance/runner/requirements.txt
+
+      - name: Go fmt (check)
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -l clients/go | tee /dev/stderr)"
+
+      - name: Go tests
+        run: |
+          set -euo pipefail
+          cd clients/go
+          go test ./...
+
+      - name: Go tests (wolfcrypt_dylib tag)
+        run: |
+          set -euo pipefail
+          cd clients/go
+          go test -tags wolfcrypt_dylib ./...
+
+      - name: Rust fmt (check)
+        run: |
+          set -euo pipefail
+          cargo fmt --manifest-path clients/rust/Cargo.toml --all -- --check
+
+      - name: Rust tests
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path clients/rust/Cargo.toml -q
+
+      - name: Conformance bundle
+        run: |
+          set -euo pipefail
+          python3 conformance/runner/run_cv_bundle.py
+
+      - name: Spec tooling
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run -s spec:all
+
