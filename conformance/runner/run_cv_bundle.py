@@ -589,7 +589,14 @@ def run_htlc(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd,
     return executed
 
 
-def run_htlc_anchor(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd, failures: list[str]) -> int:
+def run_htlc_anchor(
+    gate: str,
+    fixture: dict[str, Any],
+    rust: ClientCmd,
+    go: ClientCmd,
+    failures: list[str],
+    skips: list[str],
+) -> int:
     tests = fixture.get("tests")
     if not isinstance(tests, list) or not tests:
         failures.append(f"{gate}: fixture has no tests")
@@ -610,12 +617,13 @@ def run_htlc_anchor(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: Cli
             _record_gate_result(test_id, gate, expected, "TX_ERR_PARSE", failures)
             continue
 
-        executed += 1
-
         tx_hex = ctx.get("tx_hex")
         if not isinstance(tx_hex, str) or not tx_hex:
             # narrative-only vector (e.g., HTLC2-10): skip execution but keep the gate runnable.
+            skips.append(f"{gate}:{test_id}: narrative-only vector (missing tx_hex)")
             continue
+
+        executed += 1
 
         utxo_set = ctx.get("utxo_set", [])
         if not isinstance(utxo_set, list) or not utxo_set or not isinstance(utxo_set[0], dict):
@@ -2345,7 +2353,7 @@ def main() -> int:
             checks += run_vault(gate, fixture, rust, go, failures)
             continue
         if gate == "CV-HTLC-ANCHOR":
-            checks += run_htlc_anchor(gate, fixture, rust, go, failures)
+            checks += run_htlc_anchor(gate, fixture, rust, go, failures, skips)
             continue
         if gate == "CV-WEIGHT":
             checks += run_weight(gate, fixture, rust, go, failures)
