@@ -2056,16 +2056,20 @@ def run_chainstate(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: Clie
             failures.append(f"{gate}:{test_id}: context must set exactly one of chain_id_hex or profile")
             continue
 
-        context_json: dict[str, Any] = {
-            "start_height": _to_int(ctx.get("start_height", 0)),
-            "local_time": _to_int(ctx.get("local_time", 0)),
-            "local_time_set": _parse_bool(ctx.get("local_time_set", False)),
-            "suite_id_02_active": _parse_bool(ctx.get("suite_id_02_active", False)),
-            "htlc_v2_active": _parse_bool(ctx.get("htlc_v2_active", False)),
-            "ancestor_headers_hex": ctx.get("ancestor_headers_hex", []),
-            "utxo_set": ctx.get("utxo_set", []),
-            "blocks_hex": ctx.get("blocks_hex", []),
-        }
+        try:
+            context_json: dict[str, Any] = {
+                "start_height": _to_int(ctx.get("start_height", 0)),
+                "local_time": _to_int(ctx.get("local_time", 0)),
+                "local_time_set": _parse_bool(ctx.get("local_time_set", False)),
+                "suite_id_02_active": _parse_bool(ctx.get("suite_id_02_active", False)),
+                "htlc_v2_active": _parse_bool(ctx.get("htlc_v2_active", False)),
+                "ancestor_headers_hex": ctx.get("ancestor_headers_hex", []),
+                "utxo_set": ctx.get("utxo_set", []),
+                "blocks_hex": ctx.get("blocks_hex", []),
+            }
+        except (TypeError, ValueError, OverflowError):
+            failures.append(f"{gate}:{test_id}: CHAINSTATE_ERR_PARSE")
+            continue
         if chain_id_hex:
             context_json["chain_id_hex"] = chain_id_hex
         if profile:
