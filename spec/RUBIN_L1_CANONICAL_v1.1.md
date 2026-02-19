@@ -62,6 +62,7 @@ Development status note (non-normative):
 - `MAX_SUPPLY = 10_000_000_000_000_000` base units (100,000,000 RBN)
 - `SUBSIDY_TOTAL_MINED = 9_900_000_000_000_000` base units (99,000,000 RBN)
 - `SUBSIDY_DURATION_BLOCKS = 1_314_900` blocks
+  - Non-normative: `1_314_900 = 2² × 3³ × 5² × 487`; divisible by `COINBASE_MATURITY` (100) but not by `TARGET_BLOCK_INTERVAL` (600) or `SIGNAL_WINDOW` (2016).
 
 Non-normative note (emission schedule and genesis intent):
 - Total supply target is 100,000,000 RBN (`MAX_SUPPLY`) where values in transactions are in base units
@@ -131,6 +132,7 @@ where:
 ### 2.1 Key material and script-binding
 
 - `ML-DSA-87` public keys are 2592-byte wire values.
+- `ML-DSA-87` corresponds to NIST Post-Quantum Security Level 5 (FIPS 204).
 - `SLH-DSA-SHAKE-256f` public keys are 64-byte wire values.
 - `ML-DSA-87` signatures are fixed 4,627-byte wire values.
 - `SLH-DSA-SHAKE-256f` signatures are bounded by `MAX_SLH_DSA_SIG_BYTES`.
