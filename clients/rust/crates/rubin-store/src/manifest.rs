@@ -7,6 +7,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -57,7 +58,14 @@ impl Manifest {
             .parent()
             .ok_or_else(|| "manifest path has no parent dir".to_string())?;
 
-        let tmp_path = dir.join(".MANIFEST.json.tmp");
+        // Use a unique tmp name to avoid cross-test/process collisions.
+        // Uniqueness is an operational property, not a consensus one.
+        let pid = std::process::id();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp_path = dir.join(format!(".MANIFEST.json.tmp.{pid}.{nanos}"));
 
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("serialize manifest: {e}"))?;
@@ -68,6 +76,7 @@ impl Manifest {
             .map_err(|e| format!("write manifest tmp: {e}"))?;
         f.sync_all()
             .map_err(|e| format!("fsync manifest tmp: {e}"))?;
+        drop(f);
 
         fs::rename(&tmp_path, path).map_err(|e| format!("rename manifest: {e}"))?;
 
