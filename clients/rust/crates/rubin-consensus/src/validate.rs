@@ -119,7 +119,19 @@ fn validate_output_covenant_constraints(output: &TxOutput) -> Result<(), String>
             }
         }
         CORE_VAULT_V1 => {
-            if output.covenant_data.len() != 73 && output.covenant_data.len() != 81 {
+            let len = output.covenant_data.len();
+            if len != 73 && len != 81 {
+                return Err("TX_ERR_PARSE".into());
+            }
+            // VAULT: owner_key_id and recovery_key_id MUST be distinct; otherwise semantics collapse
+            // (recovery timelock becomes meaningless since owner-branch matches first).
+            let owner_key_id = &output.covenant_data[0..32];
+            let recovery_key_id = if len == 73 {
+                &output.covenant_data[41..73]
+            } else {
+                &output.covenant_data[49..81]
+            };
+            if owner_key_id == recovery_key_id {
                 return Err("TX_ERR_PARSE".into());
             }
         }
