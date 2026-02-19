@@ -847,7 +847,7 @@ func cmdReorg(contextPath string) (string, error) {
 	return "", fmt.Errorf("REORG_ERR_PARSE: unsupported context shape")
 }
 
-const usageCommands = "commands: version | init --datadir <path> [--profile <path>] | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse (--tx-hex <hex> | --tx-hex-file <path>) [--max-witness-bytes <u64>] | txid (--tx-hex <hex> | --tx-hex-file <path>) | weight (--tx-hex <hex> | --tx-hex-file <path>) | coinbase --block-height <u64> [--fees-in-block <u64> --coinbase-output-value <u64>] | sighash (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-id-hex <hex64> | --profile <path> | --suite-id-02-active | --htlc-v2-active] | apply-utxo --context-json <path> | apply-block --context-json <path> | reorg --context-json <path> | chainstate --context-json <path>"
+const usageCommands = "commands: version | init --datadir <path> [--profile <path>] | import-stage03 --datadir <path> [--profile <path>] (--block-hex <hex> | --block-hex-file <path>) | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse (--tx-hex <hex> | --tx-hex-file <path>) [--max-witness-bytes <u64>] | txid (--tx-hex <hex> | --tx-hex-file <path>) | weight (--tx-hex <hex> | --tx-hex-file <path>) | coinbase --block-height <u64> [--fees-in-block <u64> --coinbase-output-value <u64>] | sighash (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-id-hex <hex64> | --profile <path> | --suite-id-02-active | --htlc-v2-active] | apply-utxo --context-json <path> | apply-block --context-json <path> | reorg --context-json <path> | chainstate --context-json <path>"
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage: rubin-node <command> [args]")
@@ -958,6 +958,81 @@ func cmdInitMain(argv []string) int {
 		fmt.Fprintln(os.Stderr, "init error:", err)
 		return 1
 	}
+	return 0
+}
+
+func readHexFlag(name string, hexStr string, hexFile string) (string, error) {
+	if hexStr != "" && hexFile != "" {
+		return "", fmt.Errorf("use exactly one of --%s or --%s-file", name, name)
+	}
+	if hexFile != "" {
+		b, err := os.ReadFile(hexFile)
+		if err != nil {
+			return "", fmt.Errorf("read --%s-file: %w", name, err)
+		}
+		s := strings.TrimSpace(string(b))
+		if s == "" {
+			return "", fmt.Errorf("--%s-file is empty", name)
+		}
+		return s, nil
+	}
+	if hexStr == "" {
+		return "", fmt.Errorf("missing required flag: --%s (or --%s-file)", name, name)
+	}
+	return hexStr, nil
+}
+
+func cmdImportStage03(datadir string, profilePath string, blockHex string) (string, error) {
+	p, cleanup, err := loadCryptoProvider()
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+
+	chainID, err := deriveChainID(p, profilePath)
+	if err != nil {
+		return "", err
+	}
+	chainIDHex := hex.EncodeToString(chainID[:])
+	db, err := store.Open(datadir, chainIDHex)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = db.Close() }()
+
+	blockBytes, err := hexDecodeStrict(blockHex)
+	if err != nil {
+		return "", fmt.Errorf("block hex: %w", err)
+	}
+	res, err := db.ImportStage0To3(p, blockBytes)
+	if err != nil {
+		return "", err
+	}
+	return string(res.Decision), nil
+}
+
+func cmdImportStage03Main(argv []string) int {
+	fs := flag.NewFlagSet("import-stage03", flag.ExitOnError)
+	datadir := fs.String("datadir", "", "data directory root")
+	profile := fs.String("profile", defaultChainProfile, "chain instance profile path")
+	blockHex := fs.String("block-hex", "", "block hex bytes (BlockBytes)")
+	blockHexFile := fs.String("block-hex-file", "", "path to file containing block hex bytes (BlockBytes)")
+	_ = fs.Parse(argv)
+	if *datadir == "" {
+		fmt.Fprintln(os.Stderr, "missing required flag: --datadir")
+		return 2
+	}
+	resolved, err := readHexFlag("block-hex", *blockHex, *blockHexFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	out, err := cmdImportStage03(*datadir, *profile, resolved)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "import-stage03 error:", err)
+		return 1
+	}
+	fmt.Println(out)
 	return 0
 }
 
@@ -1312,6 +1387,8 @@ func main() {
 		exitCode = cmdVersionMain()
 	case "init":
 		exitCode = cmdInitMain(argv)
+	case "import-stage03":
+		exitCode = cmdImportStage03Main(argv)
 	case "compactsize":
 		exitCode = cmdCompactSizeMain(argv)
 	case "parse":
