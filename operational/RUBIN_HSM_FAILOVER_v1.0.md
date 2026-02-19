@@ -15,7 +15,7 @@ FIPS 140-3 requires private keys to be stored inside the HSM boundary. If HSM ac
 ```text
 NORMAL          - HSM reachable, signing enabled
 READ_ONLY       - HSM unreachable, verification enabled, signing disabled
-FAILED          - HSM unreachable for > MAX_HSM_FAILOVER_WAIT, node stops
+FAILED          - HSM unreachable for > RUBIN_HSM_FAILOVER_TIMEOUT, node stops
 ```
 
 Transitions:
@@ -23,7 +23,7 @@ Transitions:
 ```text
 NORMAL → READ_ONLY   : HSM health check fails (3 consecutive)
 READ_ONLY → NORMAL   : HSM health check passes (1 success)
-READ_ONLY → FAILED   : timeout MAX_HSM_FAILOVER_WAIT exceeded
+READ_ONLY → FAILED   : timeout RUBIN_HSM_FAILOVER_TIMEOUT exceeded
 FAILED → NORMAL      : manual restart only, with `--hsm-override`
 ```
 
