@@ -14,6 +14,7 @@ type ApplyDecision string
 const (
 	ApplyStoredNotSelected ApplyDecision = "STORED_NOT_SELECTED"
 	ApplyOrphaned          ApplyDecision = "ORPHANED"
+	ApplyInvalidHeader     ApplyDecision = "INVALID_HEADER"
 	ApplyInvalidAncestry   ApplyDecision = "INVALID_ANCESTRY"
 	ApplyAppliedAsTip      ApplyDecision = "APPLIED_AS_NEW_TIP"
 	ApplyReorgRequired     ApplyDecision = "REORG_REQUIRED"
@@ -33,13 +34,15 @@ func (d *DB) ApplyBlockIfBestTip(
 	opts ApplyOptions,
 ) (ApplyDecision, error) {
 	// Stage 0-3.
-	st03, err := d.ImportStage0To3(p, blockBytes)
+	st03, err := d.ImportStage0To3(p, blockBytes, Stage03Options{LocalTime: opts.LocalTime, LocalTimeSet: opts.LocalTimeSet})
 	if err != nil {
 		return "", err
 	}
 	switch st03.Decision {
 	case Stage03Orphaned:
 		return ApplyOrphaned, nil
+	case Stage03InvalidHeader:
+		return ApplyInvalidHeader, nil
 	case Stage03InvalidAncestry:
 		return ApplyInvalidAncestry, nil
 	case Stage03NotSelected:
@@ -103,7 +106,7 @@ func (d *DB) ApplyBlockIfBestTip(
 		// NOTE: For Phase 1 we store INVALID in index; reason token plumbing is future.
 		idx, ok, _ := d.GetIndex(blockHash)
 		if ok {
-			idx.Status = BlockStatusInvalid
+			idx.Status = BlockStatusInvalidBody
 			_ = d.PutIndex(blockHash, *idx)
 		}
 		return "", err

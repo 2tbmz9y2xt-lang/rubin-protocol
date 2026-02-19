@@ -25,10 +25,19 @@ var (
 type BlockStatus byte
 
 const (
-	BlockStatusUnknown  BlockStatus = 0
-	BlockStatusValid    BlockStatus = 1
+	BlockStatusUnknown BlockStatus = 0
+	BlockStatusValid   BlockStatus = 1
+	// BlockStatusInvalid is a legacy generic INVALID marker (kept for backwards compatibility).
 	BlockStatusInvalid  BlockStatus = 2
 	BlockStatusOrphaned BlockStatus = 3
+
+	// Phase 1 invalid categories (engineering semantics; non-consensus).
+	//
+	// These are used by the staged import pipeline to mark why a block is invalid.
+	// Encoding is still a single status byte in block_index_by_hash.
+	BlockStatusInvalidHeader   BlockStatus = 4
+	BlockStatusInvalidAncestry BlockStatus = 5
+	BlockStatusInvalidBody     BlockStatus = 6
 )
 
 type BlockIndexEntry struct {
@@ -103,6 +112,15 @@ func (d *DB) Close() error {
 		return nil
 	}
 	return d.db.Close()
+}
+
+func (s BlockStatus) IsInvalid() bool {
+	switch s {
+	case BlockStatusInvalid, BlockStatusInvalidHeader, BlockStatusInvalidAncestry, BlockStatusInvalidBody:
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *DB) ChainDir() string { return d.chainDir }

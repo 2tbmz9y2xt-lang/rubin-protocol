@@ -75,6 +75,76 @@ func merkleRootTxIDs(p crypto.CryptoProvider, txs []*Tx) ([32]byte, error) {
 	return level[0], nil
 }
 
+// MerkleRootTxIDs computes the canonical RUBIN merkle root over transaction IDs.
+// See operational/RUBIN_CHAINSTATE_SNAPSHOT_HASH_v1.1.md for domain separation notes used elsewhere.
+func MerkleRootTxIDs(p crypto.CryptoProvider, txs []*Tx) ([32]byte, error) {
+	return merkleRootTxIDs(p, txs)
+}
+
+// ValidateBlockHeaderStage1 performs Phase 1 "Stage 1" header-level validation:
+// - expected target (when ancestor headers are available)
+// - PoW check (hash < target)
+// - merkle root correctness
+// - timestamp bounds (when ancestor headers are available)
+//
+// This is non-consensus node tooling glue; it must stay consistent with ApplyBlock's header checks.
+func ValidateBlockHeaderStage1(
+	p crypto.CryptoProvider,
+	block *Block,
+	ctx BlockValidationContext,
+) error {
+	if block == nil {
+		return fmt.Errorf(BLOCK_ERR_PARSE)
+	}
+
+	// Target/timestamp checks require ancestry context. For orphan blocks (unknown parent),
+	// the node cannot compute expected target or median-past time; we still validate PoW+merkle.
+	if ctx.Height > 0 && len(ctx.AncestorHeaders) > 0 {
+		expectedTarget, err := blockExpectedTarget(ctx.AncestorHeaders, ctx.Height, block.Header.Target)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(block.Header.Target[:], expectedTarget[:]) {
+			return fmt.Errorf(BLOCK_ERR_TARGET_INVALID)
+		}
+	}
+
+	blockHash, err := blockHeaderHash(p, &block.Header)
+	if err != nil {
+		return err
+	}
+	if bytes.Compare(blockHash[:], block.Header.Target[:]) >= 0 {
+		return fmt.Errorf(BLOCK_ERR_POW_INVALID)
+	}
+
+	headerTxs := make([]*Tx, len(block.Transactions))
+	for i := range block.Transactions {
+		headerTxs[i] = &block.Transactions[i]
+	}
+	merkleRoot, err := merkleRootTxIDs(p, headerTxs)
+	if err != nil {
+		return err
+	}
+	if merkleRoot != block.Header.MerkleRoot {
+		return fmt.Errorf(BLOCK_ERR_MERKLE_INVALID)
+	}
+
+	if ctx.Height > 0 && len(ctx.AncestorHeaders) > 0 {
+		medianTs, err := medianPastTimestamp(ctx.AncestorHeaders, ctx.Height)
+		if err != nil {
+			return err
+		}
+		if block.Header.Timestamp <= medianTs {
+			return fmt.Errorf(BLOCK_ERR_TIMESTAMP_OLD)
+		}
+		if ctx.LocalTimeSet && block.Header.Timestamp > ctx.LocalTime+MAX_FUTURE_DRIFT {
+			return fmt.Errorf(BLOCK_ERR_TIMESTAMP_FUTURE)
+		}
+	}
+
+	return nil
+}
+
 func txSums(tx *Tx, utxo map[TxOutPoint]UtxoEntry) (uint64, uint64, error) {
 	var inputSum uint64
 	var outputSum uint64

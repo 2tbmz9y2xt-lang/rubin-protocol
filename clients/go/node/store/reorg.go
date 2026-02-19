@@ -121,7 +121,7 @@ func (d *DB) ReorgToTip(p crypto.CryptoProvider, chainID [32]byte, newTipHash [3
 			// Mark INVALID_BODY on failure and stop reorg; applied tip stays consistent.
 			idx, ok2, _ := d.GetIndex(h)
 			if ok2 {
-				idx.Status = BlockStatusInvalid
+				idx.Status = BlockStatusInvalidBody
 				_ = d.PutIndex(h, *idx)
 			}
 			return err

@@ -101,6 +101,11 @@ Status enum (Phase 1 minimum):
 - `2` INVALID
 - `3` ORPHANED
 
+Status enum (Phase 1 reference implementations MAY extend):
+- `4` INVALID_HEADER (Stage 1 failed: PoW/target/timestamp/merkle)
+- `5` INVALID_ANCESTRY (Stage 2 failed: parent known-invalid)
+- `6` INVALID_BODY (Stage 4 failed: full consensus block validation)
+
 Notes:
 - `cumulative_work` is stored as a non-negative integer.
 - `cumulative_work_be` MUST be minimal-length for determinism (no leading zero bytes).
@@ -142,4 +147,3 @@ Rules:
 
 Phase 1 note:
 - Until public devnet is launched, a schema bump is acceptable with a clear changelog.
-

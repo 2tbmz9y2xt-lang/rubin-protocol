@@ -1004,7 +1004,7 @@ func cmdImportStage03(datadir string, profilePath string, blockHex string) (stri
 	if err != nil {
 		return "", fmt.Errorf("block hex: %w", err)
 	}
-	res, err := db.ImportStage0To3(p, blockBytes)
+	res, err := db.ImportStage0To3(p, blockBytes, store.Stage03Options{})
 	if err != nil {
 		return "", err
 	}
