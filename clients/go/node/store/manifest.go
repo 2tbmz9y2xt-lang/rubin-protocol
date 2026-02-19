@@ -86,4 +86,3 @@ func writeManifestAtomic(chainDir string, m *Manifest) error {
 	}
 	return nil
 }
-

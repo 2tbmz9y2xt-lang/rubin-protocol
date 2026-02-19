@@ -70,4 +70,3 @@ func decodeUtxoEntry(b []byte) (consensus.UtxoEntry, error) {
 		CreatedByCoinbase: createdByCoinbase,
 	}, nil
 }
-

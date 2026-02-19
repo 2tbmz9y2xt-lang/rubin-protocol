@@ -9,7 +9,8 @@ import (
 // ChainDir returns the on-disk directory for a given chain under datadir.
 //
 // Phase 1 storage model (operational/RUBIN_NODE_STORAGE_MODEL_v1.1.md):
-//   datadir/chains/<chain_id_hex>/
+//
+//	datadir/chains/<chain_id_hex>/
 func ChainDir(datadir string, chainIDHex string) string {
 	return filepath.Join(datadir, "chains", chainIDHex)
 }
@@ -20,4 +21,3 @@ func ensureDir(path string) error {
 	}
 	return nil
 }
-

@@ -16,4 +16,3 @@ func WorkFromTarget(target32 [32]byte) (*big.Int, error) {
 	}
 	return new(big.Int).Quo(twoTo256, t), nil
 }
-

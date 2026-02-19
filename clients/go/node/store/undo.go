@@ -118,4 +118,3 @@ func decodeUndoRecord(b []byte) (*UndoRecord, error) {
 	}
 	return &UndoRecord{Spent: spent, Created: created}, nil
 }
-

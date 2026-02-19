@@ -202,4 +202,3 @@ func isCoinbaseLike(tx *consensus.Tx, blockHeight uint64) bool {
 		in.PrevVout == consensus.TX_COINBASE_PREVOUT_VOUT &&
 		in.Sequence == consensus.TX_COINBASE_PREVOUT_VOUT
 }
-
