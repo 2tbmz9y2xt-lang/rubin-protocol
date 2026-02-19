@@ -1936,7 +1936,13 @@ def run_block(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd
     return executed
 
 
-def run_reorg(gate: str, fixture: dict[str, Any], failures: list[str]) -> int:
+def run_reorg(
+    gate: str,
+    fixture: dict[str, Any],
+    rust: ClientCmd,
+    go: ClientCmd,
+    failures: list[str],
+) -> int:
     tests = fixture.get("tests")
     if not isinstance(tests, list) or not tests:
         failures.append(f"{gate}: fixture has no tests")
@@ -1954,7 +1960,6 @@ def run_reorg(gate: str, fixture: dict[str, Any], failures: list[str]) -> int:
             failures.append(f"{gate}:{test_id}: missing expected_outcome")
             continue
 
-        executed += 1
         ctx = t.get("context")
         if not isinstance(ctx, dict):
             failures.append(f"{gate}:{test_id}: missing context")
@@ -1962,6 +1967,33 @@ def run_reorg(gate: str, fixture: dict[str, Any], failures: list[str]) -> int:
 
         expected_outcome = str(t.get("expected_outcome", "")).strip()
         expected_outcome_norm = expected_outcome.lower()
+
+        # Reorg is a P2P/tooling surface: require cross-client parity on the CLI behavior.
+        context_path = ""
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
+                json.dump(ctx, f)
+                context_path = f.name
+            p_r = run_result(rust, ["reorg", "--context-json", context_path])
+            p_g = run_result(go, ["reorg", "--context-json", context_path])
+        finally:
+            if context_path:
+                Path(context_path).unlink(missing_ok=True)
+
+        if p_r.returncode != 0:
+            failures.append(f"{gate}:{test_id}: rust reorg failed: {p_r.stderr.strip()}")
+            continue
+        if p_g.returncode != 0:
+            failures.append(f"{gate}:{test_id}: go reorg failed: {p_g.stderr.strip()}")
+            continue
+
+        out_r = p_r.stdout.strip()
+        out_g = p_g.stdout.strip()
+        if out_r != out_g:
+            failures.append(f"{gate}:{test_id}: cross-client mismatch rust={out_r!r} go={out_g!r}")
+            continue
+        actual_token = out_r
+        executed += 1
 
         if {"fork_a_work", "fork_b_work", "tip_hash_a", "tip_hash_b"}.issubset(ctx):
             try:
@@ -1979,23 +2011,22 @@ def run_reorg(gate: str, fixture: dict[str, Any], failures: list[str]) -> int:
             else:
                 selected = "fork_a" if tip_a <= tip_b else "fork_b"
 
-            actual = (
-                "select fork B"
-                if selected == "fork_b"
-                else "select fork A"
-            )
+            selected = "fork_a" if actual_token == "SELECT_FORK_A" else "fork_b"
+            if a_work > b_work and selected == "fork_a":
+                continue
+            if b_work > a_work and selected == "fork_b":
+                continue
+            if a_work == b_work and "smaller lexicographic tip" in expected_outcome_norm:
+                if selected == ("fork_a" if tip_a <= tip_b else "fork_b"):
+                    continue
             if ("select fork a" in expected_outcome_norm and selected == "fork_a") or (
                 "select fork b" in expected_outcome_norm and selected == "fork_b"
-            ) or (
-                "smaller lexicographic tip" in expected_outcome_norm
-                and selected == ("fork_a" if tip_a <= tip_b else "fork_b")
             ):
                 continue
-            failures.append(f"{gate}:{test_id}: expected '{expected_outcome}', got {actual}")
+            failures.append(f"{gate}:{test_id}: expected '{expected_outcome}', got {actual_token}")
             continue
 
         if {"old_tip", "candidate_tip", "stale_tip"}.issubset(ctx):
-            # Deterministic stale->candidate replacement by cumulative work
             old_tip = ctx.get("old_tip", {})
             stale = ctx.get("stale_tip", {})
             candidate = ctx.get("candidate_tip", {})
@@ -2008,20 +2039,45 @@ def run_reorg(gate: str, fixture: dict[str, Any], failures: list[str]) -> int:
             except (TypeError, ValueError, OverflowError):
                 failures.append(f"{gate}:{test_id}: invalid cumulative work in reorg context")
                 continue
-            if cand_work > old_work and "rollback" in expected_outcome_norm:
+            if cand_work > old_work:
+                if actual_token != "SELECT_CANDIDATE_ROLLBACK_STALE":
+                    failures.append(
+                        f"{gate}:{test_id}: expected SELECT_CANDIDATE_ROLLBACK_STALE, got {actual_token}"
+                    )
+                    continue
+                if "rollback" in expected_outcome_norm or "select candidate" in expected_outcome_norm:
+                    continue
                 continue
             if cand_work <= old_work:
-                failures.append(f"{gate}:{test_id}: expected higher candidate work to reorg")
+                if actual_token != "KEEP_OLD_TIP":
+                    failures.append(f"{gate}:{test_id}: expected KEEP_OLD_TIP, got {actual_token}")
                 continue
 
         if "branch_switch" in ctx:
-            expected_phrase = expected_outcome
-            if expected_phrase and ("deterministic" in expected_phrase.lower() or "canonical" in expected_phrase.lower()):
+            if actual_token != "DETERMINISTIC_BRANCH_SWITCH":
+                failures.append(
+                    f"{gate}:{test_id}: expected DETERMINISTIC_BRANCH_SWITCH, got {actual_token}"
+                )
                 continue
-            failures.append(f"{gate}:{test_id}: expected_outcome did not match reorg deterministic swap")
+            expected_phrase = expected_outcome
+            if expected_phrase and (
+                "deterministic" in expected_phrase.lower() or "canonical" in expected_phrase.lower()
+            ):
+                continue
+            failures.append(f"{gate}:{test_id}: expected_outcome did not match branch_switch case")
             continue
 
-        # Fallback: deterministic default
+        if "common_ancestor_height" in ctx and "scenario_a" in ctx and "scenario_b" in ctx:
+            if actual_token != "DETERMINISTIC_UTXO_STATE":
+                failures.append(f"{gate}:{test_id}: expected DETERMINISTIC_UTXO_STATE, got {actual_token}")
+            continue
+
+        if "transactions" in ctx:
+            if actual_token != "DETERMINISTIC_TX_ORDER":
+                failures.append(f"{gate}:{test_id}: expected DETERMINISTIC_TX_ORDER, got {actual_token}")
+            continue
+
+        # Fallback: if context shape is unknown to the runner, still require cross-client parity.
         continue
 
     return executed
@@ -2342,7 +2398,7 @@ def main() -> int:
             checks += run_block(gate, fixture, rust, go, failures)
             continue
         if gate == "CV-REORG":
-            checks += run_reorg(gate, fixture, failures)
+            checks += run_reorg(gate, fixture, rust, go, failures)
             continue
         if gate == "CV-CHAINSTATE":
             checks += run_chainstate(gate, fixture, rust, go, failures)
