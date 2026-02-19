@@ -111,6 +111,21 @@ Decision tokens (stdout):
 - `INVALID_ANCESTRY`
 - `APPLIED_AS_NEW_TIP`
 
+### 4) UTXO set snapshot hash (persisted KV state)
+
+Reads the persisted `utxo_by_outpoint` table from `datadir` and outputs a JSON object:
+- `tip_height`
+- `tip_hash_hex`
+- `utxo_count`
+- `utxo_set_hash_hex`
+
+```bash
+cd clients/go
+go run ./node utxo-set-hash \
+  --datadir /tmp/rubin-data \
+  --profile spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md
+```
+
 ## Crypto provider selection (dev-std vs wolfCrypt)
 
 The Go node chooses crypto backend at runtime:
@@ -127,4 +142,3 @@ cd clients/go
 RUBIN_WOLFCRYPT_SHIM_PATH=/absolute/path/to/librubin_wc_shim.so \
   go run -tags wolfcrypt_dylib ./node version
 ```
-
