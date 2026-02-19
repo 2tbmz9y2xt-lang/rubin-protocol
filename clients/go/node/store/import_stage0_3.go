@@ -15,10 +15,10 @@ import (
 type Stage03Decision string
 
 const (
-	Stage03Orphaned       Stage03Decision = "ORPHANED"
+	Stage03Orphaned        Stage03Decision = "ORPHANED"
 	Stage03InvalidAncestry Stage03Decision = "INVALID_ANCESTRY"
-	Stage03NotSelected    Stage03Decision = "STORED_NOT_SELECTED"
-	Stage03CandidateBest  Stage03Decision = "CANDIDATE_BEST"
+	Stage03NotSelected     Stage03Decision = "STORED_NOT_SELECTED"
+	Stage03CandidateBest   Stage03Decision = "CANDIDATE_BEST"
 )
 
 type Stage03Result struct {
@@ -189,4 +189,3 @@ func (d *DB) ImportStage0To3(p crypto.CryptoProvider, blockBytes []byte) (*Stage
 		CumulativeWork: cumulative,
 	}, nil
 }
-
