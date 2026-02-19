@@ -280,6 +280,17 @@ func TestValidateInputAuthorizationHTLCV2(t *testing.T) {
 		}
 	})
 
+	t.Run("active but sentinel suite id invalid", func(t *testing.T) {
+		tx := makeHTLCV2Tx(t, nil, claimPub, claimSig, makeHTLCV2Anchor(t, preimage))
+		tx.Witness.Witnesses[0].SuiteID = SUITE_ID_SENTINEL
+		tx.Witness.Witnesses[0].Pubkey = nil
+		tx.Witness.Witnesses[0].Signature = nil
+		err := ValidateInputAuthorization(p, [32]byte{}, &tx, 0, prevout.Value, &prevout, 0, 0, 0, false, true)
+		if err == nil || err.Error() != "TX_ERR_SIG_ALG_INVALID" {
+			t.Fatalf("expected sig alg invalid, got %v", err)
+		}
+	})
+
 	t.Run("active claim path with one matching anchor", func(t *testing.T) {
 		tx := makeHTLCV2Tx(t, nil, claimPub, claimSig, makeHTLCV2Anchor(t, preimage))
 		err := ValidateInputAuthorization(p, [32]byte{}, &tx, 0, prevout.Value, &prevout, 0, 0, 0, false, true)
