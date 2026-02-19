@@ -415,10 +415,14 @@ fn cmd_apply_utxo(context_path: &str) -> Result<(), String> {
             } else {
                 rubin_consensus::hex_decode_strict(covenant_data_hex)?
             };
-            let creation_height = entry
-                .get("creation_height")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(chain_height);
+            // Deterministic tooling default: missing/null UtxoEntry::creation_height => 0.
+            let creation_height = match entry.get("creation_height") {
+                None => 0,
+                Some(v) if v.is_null() => 0,
+                Some(v) => v.as_u64().ok_or_else(|| {
+                    "utxo_set entry UtxoEntry::creation_height must be u64".to_string()
+                })?,
+            };
             let created_by_coinbase = entry
                 .get("created_by_coinbase")
                 .and_then(|value| value.as_bool())
@@ -543,10 +547,14 @@ fn cmd_apply_block(context_path: &str) -> Result<(), String> {
             } else {
                 rubin_consensus::hex_decode_strict(covenant_data_hex)?
             };
-            let creation_height = entry
-                .get("creation_height")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(block_height);
+            // Deterministic tooling default: missing/null UtxoEntry::creation_height => 0.
+            let creation_height = match entry.get("creation_height") {
+                None => 0,
+                Some(v) if v.is_null() => 0,
+                Some(v) => v.as_u64().ok_or_else(|| {
+                    "utxo_set entry UtxoEntry::creation_height must be u64".to_string()
+                })?,
+            };
             let created_by_coinbase = entry
                 .get("created_by_coinbase")
                 .and_then(|value| value.as_bool())
@@ -581,6 +589,212 @@ fn cmd_apply_block(context_path: &str) -> Result<(), String> {
 
     rubin_consensus::apply_block(provider.as_ref(), &chain_id, &block, &mut utxo, &ctx)?;
     Ok(())
+}
+
+fn cmd_chainstate(context_path: &str) -> Result<String, String> {
+    let raw = fs::read_to_string(context_path).map_err(|e| format!("context-json: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("context-json: {e}"))?;
+
+    fn ctx_opt_u64(v: &serde_json::Value, key: &str) -> Result<u64, String> {
+        match v.get(key) {
+            None => Ok(0),
+            Some(v) if v.is_null() => Ok(0),
+            Some(v) => v
+                .as_u64()
+                .ok_or_else(|| format!("context-json: {key} must be u64")),
+        }
+    }
+
+    fn ctx_opt_bool(v: &serde_json::Value, key: &str) -> Result<bool, String> {
+        match v.get(key) {
+            None => Ok(false),
+            Some(v) if v.is_null() => Ok(false),
+            Some(v) => v
+                .as_bool()
+                .ok_or_else(|| format!("context-json: {key} must be bool")),
+        }
+    }
+
+    fn ctx_opt_string(v: &serde_json::Value, key: &str) -> Result<String, String> {
+        match v.get(key) {
+            None => Ok(String::new()),
+            Some(v) if v.is_null() => Ok(String::new()),
+            Some(v) => v
+                .as_str()
+                .map(|s| s.to_string())
+                .ok_or_else(|| format!("context-json: {key} must be string")),
+        }
+    }
+
+    fn ctx_opt_string_array(v: &serde_json::Value, key: &str) -> Result<Vec<String>, String> {
+        match v.get(key) {
+            None => Ok(Vec::new()),
+            Some(v) if v.is_null() => Ok(Vec::new()),
+            Some(v) => {
+                let entries = v
+                    .as_array()
+                    .ok_or_else(|| format!("context-json: {key} must be array"))?;
+                let mut out = Vec::with_capacity(entries.len());
+                for (i, entry) in entries.iter().enumerate() {
+                    let s = entry
+                        .as_str()
+                        .ok_or_else(|| format!("context-json: {key}[{i}] entry must be string"))?;
+                    out.push(s.to_string());
+                }
+                Ok(out)
+            }
+        }
+    }
+
+    let blocks = ctx_opt_string_array(&v, "blocks_hex")?;
+    if blocks.is_empty() {
+        return Err("missing required field: blocks_hex".to_string());
+    }
+
+    let start_height = ctx_opt_u64(&v, "start_height")?;
+    let local_time = ctx_opt_u64(&v, "local_time")?;
+    let local_time_set = ctx_opt_bool(&v, "local_time_set")?;
+    let suite_id_02_active = ctx_opt_bool(&v, "suite_id_02_active")?;
+    let htlc_v2_active = ctx_opt_bool(&v, "htlc_v2_active")?;
+
+    let provider = load_crypto_provider()?;
+    let chain_id_hex = ctx_opt_string(&v, "chain_id_hex")?;
+    let profile = ctx_opt_string(&v, "profile")?;
+    let chain_id = match (chain_id_hex.is_empty(), profile.is_empty()) {
+        (false, false) => return Err("use exactly one of chain_id_hex or profile".to_string()),
+        (false, true) => parse_chain_id_hex(&chain_id_hex)?,
+        (true, false) => derive_chain_id(provider.as_ref(), &profile)?,
+        (true, true) => derive_chain_id(provider.as_ref(), DEFAULT_CHAIN_PROFILE)?,
+    };
+
+    let mut ancestors = Vec::new();
+    let entries = ctx_opt_string_array(&v, "ancestor_headers_hex")?;
+    for hx in entries {
+        let hb = rubin_consensus::hex_decode_strict(&hx)?;
+        ancestors.push(parse_block_header_bytes_strict(&hb)?);
+    }
+    if start_height > 0 && ancestors.is_empty() {
+        return Err("missing required field: ancestor_headers_hex".to_string());
+    }
+
+    let mut utxo = HashMap::new();
+    match v.get("utxo_set") {
+        None => {}
+        Some(v) if v.is_null() => {}
+        Some(v) => {
+            let entries = v
+                .as_array()
+                .ok_or_else(|| "context-json: utxo_set must be array".to_string())?;
+            for entry in entries {
+                let txid_str = entry
+                    .get("txid")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| "utxo_set entry missing txid".to_string())?;
+                let vout = entry
+                    .get("vout")
+                    .and_then(|value| value.as_u64())
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or_else(|| "utxo_set entry missing vout".to_string())?;
+                let value = entry
+                    .get("value")
+                    .and_then(|value| value.as_u64())
+                    .ok_or_else(|| "utxo_set entry missing value".to_string())?;
+                let covenant_type = entry
+                    .get("covenant_type")
+                    .and_then(|value| value.as_u64())
+                    .and_then(|value| u16::try_from(value).ok())
+                    .ok_or_else(|| "utxo_set entry missing covenant_type".to_string())?;
+                let covenant_data_hex = match entry.get("covenant_data") {
+                    None => String::new(),
+                    Some(v) if v.is_null() => String::new(),
+                    Some(v) => v.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                        "utxo_set entry UtxoEntry::covenant_data must be string".to_string()
+                    })?,
+                };
+                let covenant_data = if covenant_data_hex.is_empty() {
+                    Vec::new()
+                } else {
+                    rubin_consensus::hex_decode_strict(&covenant_data_hex)?
+                };
+                // Deterministic tooling default: missing/null UtxoEntry::creation_height => 0.
+                let creation_height = match entry.get("creation_height") {
+                    None => 0,
+                    Some(v) if v.is_null() => 0,
+                    Some(v) => v.as_u64().ok_or_else(|| {
+                        "utxo_set entry UtxoEntry::creation_height must be u64".to_string()
+                    })?,
+                };
+                let created_by_coinbase = match entry.get("created_by_coinbase") {
+                    None => false,
+                    Some(v) if v.is_null() => false,
+                    Some(v) => v.as_bool().ok_or_else(|| {
+                        "utxo_set entry UtxoEntry::created_by_coinbase must be bool".to_string()
+                    })?,
+                };
+
+                utxo.insert(
+                    rubin_consensus::TxOutPoint {
+                        txid: parse_hex32(txid_str)?,
+                        vout,
+                    },
+                    rubin_consensus::UtxoEntry {
+                        output: rubin_consensus::TxOutput {
+                            value,
+                            covenant_type,
+                            covenant_data,
+                        },
+                        creation_height,
+                        created_by_coinbase,
+                    },
+                );
+            }
+        }
+    }
+
+    let mut tip_height = 0u64;
+    let mut tip_hash = [0u8; 32];
+
+    let mut ctx = rubin_consensus::BlockValidationContext {
+        height: 0,
+        ancestor_headers: ancestors,
+        local_time,
+        local_time_set,
+        suite_id_02_active,
+        htlc_v2_active,
+    };
+
+    for (i, hx) in blocks.iter().enumerate() {
+        let block_height = start_height
+            .checked_add(i as u64)
+            .ok_or_else(|| "start_height overflow".to_string())?;
+        let block_bytes = rubin_consensus::hex_decode_strict(hx)?;
+        let block = rubin_consensus::parse_block_bytes(&block_bytes)?;
+
+        ctx.height = block_height;
+        rubin_consensus::apply_block(provider.as_ref(), &chain_id, &block, &mut utxo, &ctx)?;
+
+        tip_height = block_height;
+        tip_hash = rubin_consensus::block_header_hash(provider.as_ref(), &block.header)?;
+        ctx.ancestor_headers.push(block.header);
+    }
+
+    let utxo_hash = rubin_consensus::utxo_set_hash(provider.as_ref(), &utxo)?;
+
+    let mut out = serde_json::Map::new();
+    out.insert(
+        "tip_height".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(tip_height)),
+    );
+    out.insert(
+        "tip_hash_hex".to_string(),
+        serde_json::Value::String(hex_encode(&tip_hash)),
+    );
+    out.insert(
+        "utxo_set_hash_hex".to_string(),
+        serde_json::Value::String(hex_encode(&utxo_hash)),
+    );
+    Ok(serde_json::Value::Object(out).to_string())
 }
 
 fn parse_reorg_i64(value: &serde_json::Value, field: &str) -> Result<i64, String> {
@@ -770,6 +984,7 @@ fn usage() {
     );
     eprintln!("  apply-utxo --context-json <path>");
     eprintln!("  apply-block --context-json <path>");
+    eprintln!("  chainstate --context-json <path>");
     eprintln!("  compactsize --encoded-hex <hex>");
     eprintln!("  parse (--tx-hex <hex> | --tx-hex-file <path>) [--max-witness-bytes <u64>]");
     eprintln!(
@@ -993,6 +1208,31 @@ fn cmd_apply_block_main(args: &[String]) -> i32 {
         }
         Err(e) => {
             eprintln!("apply-block error: {e}");
+            1
+        }
+    }
+}
+
+fn cmd_chainstate_main(args: &[String]) -> i32 {
+    let context_path = match get_flag(args, "--context-json") {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            eprintln!("missing required flag: --context-json");
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+
+    match cmd_chainstate(&context_path) {
+        Ok(out) => {
+            println!("{out}");
+            0
+        }
+        Err(e) => {
+            eprintln!("chainstate error: {e}");
             1
         }
     }
@@ -1662,6 +1902,7 @@ fn dispatch(cmd: &str, args: &[String]) -> i32 {
         "parse" => cmd_parse_main(args),
         "apply-utxo" => cmd_apply_utxo_main(args),
         "apply-block" => cmd_apply_block_main(args),
+        "chainstate" => cmd_chainstate_main(args),
         "reorg" => cmd_reorg_main(args),
         "compactsize" => cmd_compactsize_main(args),
         "sighash" => cmd_sighash_main(args),
