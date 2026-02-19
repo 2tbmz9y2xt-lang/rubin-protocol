@@ -84,6 +84,7 @@ Two-client roadmap and scaffolds (Rust + Go):
 
 - Rust workspace: `clients/rust/`
 - Go module: `clients/go/`
+- Go node CLI usage (Phase 1): `clients/go/node/README.md`
 - Shared conformance: `conformance/`
 - wolfCrypt notes: `crypto/wolfcrypt/`
 
