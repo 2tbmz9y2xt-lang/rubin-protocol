@@ -14,6 +14,7 @@ import (
 
 	"rubin.dev/node/consensus"
 	"rubin.dev/node/crypto"
+	"rubin.dev/node/node/store"
 )
 
 const defaultChainProfile = "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md"
@@ -846,7 +847,7 @@ func cmdReorg(contextPath string) (string, error) {
 	return "", fmt.Errorf("REORG_ERR_PARSE: unsupported context shape")
 }
 
-const usageCommands = "commands: version | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse (--tx-hex <hex> | --tx-hex-file <path>) [--max-witness-bytes <u64>] | txid (--tx-hex <hex> | --tx-hex-file <path>) | weight (--tx-hex <hex> | --tx-hex-file <path>) | coinbase --block-height <u64> [--fees-in-block <u64> --coinbase-output-value <u64>] | sighash (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-id-hex <hex64> | --profile <path> | --suite-id-02-active | --htlc-v2-active] | apply-utxo --context-json <path> | apply-block --context-json <path> | reorg --context-json <path> | chainstate --context-json <path>"
+const usageCommands = "commands: version | init --datadir <path> [--profile <path>] | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse (--tx-hex <hex> | --tx-hex-file <path>) [--max-witness-bytes <u64>] | txid (--tx-hex <hex> | --tx-hex-file <path>) | weight (--tx-hex <hex> | --tx-hex-file <path>) | coinbase --block-height <u64> [--fees-in-block <u64> --coinbase-output-value <u64>] | sighash (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-id-hex <hex64> | --profile <path> | --suite-id-02-active | --htlc-v2-active] | apply-utxo --context-json <path> | apply-block --context-json <path> | reorg --context-json <path> | chainstate --context-json <path>"
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage: rubin-node <command> [args]")
@@ -864,6 +865,97 @@ func cmdChainIDMain(argv []string) int {
 	_ = fs.Parse(argv)
 	if err := cmdChainID(*profile); err != nil {
 		fmt.Fprintln(os.Stderr, "chain-id error:", err)
+		return 1
+	}
+	return 0
+}
+
+func loadGenesisBlockBytesFromProfile(p crypto.CryptoProvider, profilePath string) ([]byte, [32]byte, error) {
+	safePath, err := resolveProfilePath(profilePath)
+	if err != nil {
+		return nil, [32]byte{}, err
+	}
+	raw, err := os.ReadFile(safePath) // #nosec G304 -- path is normalized and constrained to spec/ subtree.
+	if err != nil {
+		return nil, [32]byte{}, fmt.Errorf("read profile: %w", err)
+	}
+	doc := string(raw)
+
+	headerHex, err := extractFencedHex(doc, "genesis_header_bytes")
+	if err != nil {
+		return nil, [32]byte{}, err
+	}
+	txHex, err := extractFencedHex(doc, "genesis_tx_bytes")
+	if err != nil {
+		return nil, [32]byte{}, err
+	}
+	headerBytes, err := hexDecodeStrict(headerHex)
+	if err != nil {
+		return nil, [32]byte{}, fmt.Errorf("header hex: %w", err)
+	}
+	txBytes, err := hexDecodeStrict(txHex)
+	if err != nil {
+		return nil, [32]byte{}, fmt.Errorf("tx hex: %w", err)
+	}
+	if len(headerBytes) != 116 {
+		return nil, [32]byte{}, fmt.Errorf("genesis header bytes must be 116, got %d", len(headerBytes))
+	}
+
+	genesis := make([]byte, 0, len(headerBytes)+1+len(txBytes))
+	genesis = append(genesis, headerBytes...)
+	genesis = append(genesis, consensus.CompactSize(1).Encode()...)
+	genesis = append(genesis, txBytes...)
+
+	chainID, err := deriveChainID(p, profilePath)
+	if err != nil {
+		return nil, [32]byte{}, err
+	}
+	return genesis, chainID, nil
+}
+
+func cmdInitDatadir(datadir string, profilePath string) error {
+	p, cleanup, err := loadCryptoProvider()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	genesisBytes, chainID, err := loadGenesisBlockBytesFromProfile(p, profilePath)
+	if err != nil {
+		return err
+	}
+
+	chainIDHex := hex.EncodeToString(chainID[:])
+	db, err := store.Open(datadir, chainIDHex)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+
+	if db.Manifest() != nil {
+		// Already initialized.
+		fmt.Println("OK")
+		return nil
+	}
+
+	if err := db.InitGenesis(p, chainID, genesisBytes); err != nil {
+		return err
+	}
+	fmt.Println("OK")
+	return nil
+}
+
+func cmdInitMain(argv []string) int {
+	fs := flag.NewFlagSet("init", flag.ExitOnError)
+	datadir := fs.String("datadir", "", "data directory root")
+	profile := fs.String("profile", defaultChainProfile, "chain instance profile path")
+	_ = fs.Parse(argv)
+	if *datadir == "" {
+		fmt.Fprintln(os.Stderr, "missing required flag: --datadir")
+		return 2
+	}
+	if err := cmdInitDatadir(*datadir, *profile); err != nil {
+		fmt.Fprintln(os.Stderr, "init error:", err)
 		return 1
 	}
 	return 0
@@ -1218,6 +1310,8 @@ func main() {
 	switch command {
 	case "version":
 		exitCode = cmdVersionMain()
+	case "init":
+		exitCode = cmdInitMain(argv)
 	case "compactsize":
 		exitCode = cmdCompactSizeMain(argv)
 	case "parse":
