@@ -167,5 +167,6 @@ This document intentionally defines `utxo_by_outpoint` key encoding as:
 `txid || vout_le` so an ordered iteration is well-defined.
 
 Follow-up:
-- Q-076: Define `utxo_set_hash` as a canonical hash over lexicographically ordered `(outpoint, utxo_entry_bytes)` pairs.
+- Q-076: Define `utxo_set_hash` as a canonical hash over lexicographically ordered `(outpoint, utxo_entry_bytes)` pairs
+  (`operational/RUBIN_CHAINSTATE_SNAPSHOT_HASH_v1.1.md`).
 - Q-077: Add `CV-CHAINSTATE` conformance gate to compare Rust vs Go on block sequences.
