@@ -25,6 +25,33 @@
 #include <stdint.h>
 #include <string.h>
 
+#define RUBIN_U32_MAX ((size_t)0xffffffffu)
+
+#define RUBIN_ML_DSA87_PUBKEY_BYTES 2592u
+#define RUBIN_ML_DSA87_SIG_BYTES 4627u
+#define RUBIN_SLH_DSA_SHAKE_256F_PUBKEY_BYTES 64u
+#define RUBIN_SLH_DSA_SHAKE_256F_SIG_BYTES 49856u
+
+/* Error codes for signature verify APIs (negative => failure). */
+#define RUBIN_WC_ERR_SHA3_INPUT_TOO_LARGE (-6)
+
+#define RUBIN_WC_ERR_ML_DSA87_NULL    (-10)
+#define RUBIN_WC_ERR_ML_DSA87_INIT    (-11)
+#define RUBIN_WC_ERR_ML_DSA87_LEVEL   (-12)
+#define RUBIN_WC_ERR_ML_DSA87_IMPORT  (-13)
+#define RUBIN_WC_ERR_ML_DSA87_VERIFY  (-14)
+#define RUBIN_WC_ERR_ML_DSA87_PK_LEN  (-15)
+#define RUBIN_WC_ERR_ML_DSA87_SIG_LEN (-16)
+
+#define RUBIN_WC_ERR_SLH_NULL    (-20)
+#define RUBIN_WC_ERR_SLH_INIT    (-21)
+#define RUBIN_WC_ERR_SLH_LEVEL   (-22)
+#define RUBIN_WC_ERR_SLH_IMPORT  (-23)
+#define RUBIN_WC_ERR_SLH_VERIFY  (-24)
+#define RUBIN_WC_ERR_SLH_UNAVAILABLE (-25)
+#define RUBIN_WC_ERR_SLH_PK_LEN  (-26)
+#define RUBIN_WC_ERR_SLH_SIG_LEN (-27)
+
 #include <wolfssl/options.h>
 #include <wolfssl/wolfcrypt/sha3.h>
 #include <wolfssl/wolfcrypt/dilithium.h>
@@ -44,6 +71,9 @@ static int32_t rubin_wc_sha3_256_impl(const uint8_t* input, size_t input_len,
     }
     if (input == NULL && input_len != 0) {
         return -2;
+    }
+    if (input_len > RUBIN_U32_MAX) {
+        return RUBIN_WC_ERR_SHA3_INPUT_TOO_LARGE;
     }
 
     wc_Sha3 hash;
@@ -76,27 +106,33 @@ int32_t rubin_wc_verify_mldsa87(const uint8_t* pk, size_t pk_len,
                                 const uint8_t* sig, size_t sig_len,
                                 const uint8_t digest32[32]) {
     if (pk == NULL || sig == NULL || digest32 == NULL) {
-        return -10;
+        return RUBIN_WC_ERR_ML_DSA87_NULL;
+    }
+    if (pk_len != RUBIN_ML_DSA87_PUBKEY_BYTES) {
+        return RUBIN_WC_ERR_ML_DSA87_PK_LEN;
+    }
+    if (sig_len != RUBIN_ML_DSA87_SIG_BYTES) {
+        return RUBIN_WC_ERR_ML_DSA87_SIG_LEN;
     }
 
-    int rc;
+    int rc = 0;
     dilithium_key key;
     rc = wc_dilithium_init(&key);
     if (rc != 0) {
-        return -11;
+        return RUBIN_WC_ERR_ML_DSA87_INIT;
     }
 
     // ML-DSA Level 5 = RubiN ML-DSA-87.
     rc = wc_dilithium_set_level(&key, 5);
     if (rc != 0) {
         wc_dilithium_free(&key);
-        return -12;
+        return RUBIN_WC_ERR_ML_DSA87_LEVEL;
     }
 
     rc = wc_dilithium_import_public(pk, (word32)pk_len, &key);
     if (rc != 0) {
         wc_dilithium_free(&key);
-        return -13;
+        return RUBIN_WC_ERR_ML_DSA87_IMPORT;
     }
 
     int verified = 0;
@@ -104,7 +140,7 @@ int32_t rubin_wc_verify_mldsa87(const uint8_t* pk, size_t pk_len,
                                 &key);
     wc_dilithium_free(&key);
     if (rc != 0) {
-        return -14;
+        return RUBIN_WC_ERR_ML_DSA87_VERIFY;
     }
 
     return (verified == 1) ? 1 : 0;
@@ -115,34 +151,40 @@ int32_t rubin_wc_verify_slhdsa_shake_256f(const uint8_t* pk, size_t pk_len,
                                           const uint8_t digest32[32]) {
     #if defined(HAVE_PQC) && defined(HAVE_SPHINCS)
     if (pk == NULL || sig == NULL || digest32 == NULL) {
-        return -20;
+        return RUBIN_WC_ERR_SLH_NULL;
+    }
+    if (pk_len != RUBIN_SLH_DSA_SHAKE_256F_PUBKEY_BYTES) {
+        return RUBIN_WC_ERR_SLH_PK_LEN;
+    }
+    if (sig_len != RUBIN_SLH_DSA_SHAKE_256F_SIG_BYTES) {
+        return RUBIN_WC_ERR_SLH_SIG_LEN;
     }
 
     int rc;
     sphincs_key key;
     rc = wc_sphincs_init(&key);
     if (rc != 0) {
-        return -21;
+        return RUBIN_WC_ERR_SLH_INIT;
     }
 
     // Level 5 FAST = SLH-DSA-SHAKE-256f equivalent in wolfCrypt API mapping.
     rc = wc_sphincs_set_level_and_optim(&key, 5, FAST_VARIANT);
     if (rc != 0) {
         wc_sphincs_free(&key);
-        return -22;
+        return RUBIN_WC_ERR_SLH_LEVEL;
     }
 
     rc = wc_sphincs_import_public(pk, (word32)pk_len, &key);
     if (rc != 0) {
         wc_sphincs_free(&key);
-        return -23;
+        return RUBIN_WC_ERR_SLH_IMPORT;
     }
 
     int verified = 0;
     rc = wc_sphincs_verify_msg(sig, (word32)sig_len, digest32, 32, &verified, &key);
     wc_sphincs_free(&key);
     if (rc != 0) {
-        return -24;
+        return RUBIN_WC_ERR_SLH_VERIFY;
     }
 
     return (verified == 1) ? 1 : 0;
@@ -152,7 +194,7 @@ int32_t rubin_wc_verify_slhdsa_shake_256f(const uint8_t* pk, size_t pk_len,
     (void)sig;
     (void)sig_len;
     (void)digest32;
-    return -25;
+    return RUBIN_WC_ERR_SLH_UNAVAILABLE;
     #endif
 }
 
@@ -178,7 +220,7 @@ int32_t rubin_wc_aes_keywrap(
         return -30;
     if (kek_len != 32)
         return -31;
-    if (key_in_len == 0 || key_in_len > RUBIN_WC_KEYWRAP_MAX_KEY_BYTES)
+    if (key_in_len == 0 || key_in_len > RUBIN_WC_KEYWRAP_MAX_KEY_BYTES || (key_in_len % 8) != 0)
         return -32;
 
     size_t required = key_in_len + RUBIN_WC_KEYWRAP_OVERHEAD;
@@ -224,7 +266,8 @@ int32_t rubin_wc_aes_keyunwrap(
     if (kek_len != 32)
         return -31;
     if (wrapped_len < RUBIN_WC_KEYWRAP_OVERHEAD ||
-        wrapped_len > RUBIN_WC_KEYWRAP_MAX_KEY_BYTES + RUBIN_WC_KEYWRAP_OVERHEAD)
+        wrapped_len > RUBIN_WC_KEYWRAP_MAX_KEY_BYTES + RUBIN_WC_KEYWRAP_OVERHEAD ||
+        (wrapped_len % 8) != 0)
         return -32;
 
     size_t plain_len = wrapped_len - RUBIN_WC_KEYWRAP_OVERHEAD;

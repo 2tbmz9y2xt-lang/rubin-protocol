@@ -112,6 +112,14 @@ impl WolfcryptDylibProvider {
 
 impl CryptoProvider for WolfcryptDylibProvider {
     fn sha3_256(&self, input: &[u8]) -> Result<[u8; 32], String> {
+        // The shim uses wolfCrypt APIs with `word32` length parameters. Reject or safely
+        // fall back if the input length cannot fit into a u32.
+        if input.len() > u32::MAX as usize {
+            let digest = Sha3_256::digest(input);
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&digest);
+            return Ok(out);
+        }
         let mut out = [0u8; 32];
         // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let rc = unsafe { (self.sha3_256)(input.as_ptr(), input.len(), out.as_mut_ptr()) };
@@ -127,6 +135,10 @@ impl CryptoProvider for WolfcryptDylibProvider {
         sig: &[u8],
         digest32: &[u8; 32],
     ) -> Result<bool, String> {
+        // Consensus enforces canonical sizes; this is a defense-in-depth check at the FFI boundary.
+        if pubkey.len() != 2592 || sig.len() != 4627 {
+            return Ok(false);
+        }
         let rc =
             // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             unsafe { (self.verify_mldsa87)(pubkey.as_ptr(), pubkey.len(), sig.as_ptr(), sig.len(), digest32.as_ptr()) };
@@ -145,6 +157,10 @@ impl CryptoProvider for WolfcryptDylibProvider {
         sig: &[u8],
         digest32: &[u8; 32],
     ) -> Result<bool, String> {
+        // Consensus enforces canonical sizes; this is a defense-in-depth check at the FFI boundary.
+        if pubkey.len() != 64 || sig.len() != 49_856 {
+            return Ok(false);
+        }
         // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let rc = unsafe {
             (self.verify_slhdsa_shake_256f)(

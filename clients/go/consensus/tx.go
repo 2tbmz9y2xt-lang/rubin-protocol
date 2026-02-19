@@ -914,6 +914,9 @@ func ApplyBlock(
 
 		isCoinbase := isCoinbaseTx(&tx, ctx.Height)
 		if !isCoinbase {
+			if tx.TxNonce == TX_NONCE_ZERO {
+				return fmt.Errorf(TX_ERR_TX_NONCE_INVALID)
+			}
 			if _, exists := seenNonces[tx.TxNonce]; exists {
 				return fmt.Errorf(TX_ERR_NONCE_REPLAY)
 			}

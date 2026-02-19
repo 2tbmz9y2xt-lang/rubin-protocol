@@ -32,13 +32,13 @@ function explain(d) {
   const touchesDeploy = /version_bits|deployment|locked_in|active|failed/i.test(lower)
   const touchesHtlc = /\bhtlc\b/i.test(lower)
 
-  if (diff.includes('Нет изменений')) {
+  if (diff.includes('No changes')) {
     return [
       {
         area: 'No-op',
         impact: 'docs',
-        summary: 'Изменений в каноникале относительно HEAD нет.',
-        action: 'Ничего делать не нужно.',
+        summary: 'No changes in canonical spec relative to HEAD.',
+        action: 'No action required.',
         risk: 'low',
       },
     ]
@@ -48,8 +48,8 @@ function explain(d) {
     findings.push({
       area: 'L1 weight/TPS',
       impact: 'consensus',
-      summary: 'Изменены/затронуты правила веса или witness. Это может менять TPS и DoS-порог.',
-      action: 'Прогнать conformance bundle и пересчитать производные метрики.',
+      summary: 'Weight and/or witness rules were touched; TPS and DoS thresholds may change.',
+      action: 'Run the conformance bundle and recompute derived metrics.',
       risk: 'medium',
     })
   }
@@ -57,8 +57,8 @@ function explain(d) {
     findings.push({
       area: 'ANCHOR limits',
       impact: 'consensus',
-      summary: 'Затронуты ANCHOR-ограничения/семантика.',
-      action: 'Сверить per-block лимиты, relay-политику и light-client anchorproof протокол.',
+      summary: 'ANCHOR limits/semantics were touched.',
+      action: 'Re-check per-block limits, relay policy, and the light-client anchorproof protocol.',
       risk: 'medium',
     })
   }
@@ -66,8 +66,8 @@ function explain(d) {
     findings.push({
       area: 'VERSION_BITS',
       impact: 'consensus',
-      summary: 'Затронуты deployment/активации (VERSION_BITS).',
-      action: 'Проверить deployment таблицы для devnet/testnet/mainnet и cross-client интерпретацию.',
+      summary: 'Deployment/activation logic was touched (VERSION_BITS).',
+      action: 'Verify deployment tables for devnet/testnet/mainnet and cross-client interpretation.',
       risk: 'medium',
     })
   }
@@ -75,8 +75,8 @@ function explain(d) {
     findings.push({
       area: 'HTLC',
       impact: hasConsensus ? 'consensus' : 'docs',
-      summary: 'Затронуты HTLC правила/описания.',
-      action: 'Проверить error codes и conformance CV-HTLC/CV-HTLC-ANCHOR.',
+      summary: 'HTLC rules/descriptions were touched.',
+      action: 'Check error codes and conformance CV-HTLC/CV-HTLC-ANCHOR.',
       risk: 'low',
     })
   }
@@ -85,8 +85,8 @@ function explain(d) {
     findings.push({
       area: 'Docs/format',
       impact: hasConsensus ? 'consensus' : 'docs',
-      summary: 'Diff не зацепил типовые ключевые области (weight/witness/anchor/deploy/htlc).',
-      action: 'Просмотреть diff вручную на предмет терминологии и ссылок.',
+      summary: 'Diff did not touch typical key areas (weight/witness/anchor/deploy/htlc).',
+      action: 'Review the diff manually for terminology and references.',
       risk: 'low',
     })
   }
@@ -103,4 +103,3 @@ const output = {
 fs.mkdirSync(path.dirname(outPath), { recursive: true })
 fs.writeFileSync(outPath, JSON.stringify(output, null, 2), 'utf8')
 console.log(`[${updated}] spec-explainer.json saved -> ${outPath} (${findings.length} findings)`)
-

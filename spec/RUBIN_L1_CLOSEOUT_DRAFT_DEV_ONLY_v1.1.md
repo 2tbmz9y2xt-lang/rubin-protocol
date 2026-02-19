@@ -1,13 +1,13 @@
 # RUBIN L1 v1.1 Closeout (Current Cycle) — Dev/Test Draft Status
 
-## 1) Итоги цикла
+## 1) Cycle summary
 
-### Закрыто
+### Completed
 
 1. **Status semantics aligned (non-freeze by default)**
    - Chain-instance status model now normalized in:
      - `operational/RUBIN_OPERATIONAL_SECURITY_v1.1.md` (`DEVELOPMENT`, `DRAFT`, `TEMPLATE` in §1.1)
-     - `spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_TEMPLATE_v1.1.md` (ссылка на taxonomy)
+     - `spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_TEMPLATE_v1.1.md` (taxonomy reference)
      - `spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_MAINNET_v1.1.md`
      - `spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_TESTNET_v1.1.md`
      - `spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md` (`DEVELOPMENT` preserved)

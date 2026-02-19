@@ -37,14 +37,14 @@ Timelock mode preference:
 Selected: **`CORE_VAULT_V1`** (vault-style delayed spend), not `CORE_TIMELOCK_V1`.
 
 Reason (pragmatic):
-- Vault дает "один и тот же" UTXO-формат для preminе и для обычных программируемых фондов, и позволяет держать
-  owner/recovery ключи (операционная безопасность), при этом задержка расходования задается в **высотах блоков**.
+- Vault provides the same UTXO format for premine and for regular programmable funds, and allows holding
+  owner/recovery keys (operational security), while the spend delay is expressed in **block heights**.
 
 Vesting intent:
 - Total premine: `1_000_000 RBN`.
-- Outputs: `100` шт.
+- Outputs: `100` items.
 - Per-output value: `10_000 RBN`.
-- Vesting duration: `48 месяцев` (4 года).
+- Vesting duration: `48 months` (4 years).
 
 Height schedule (deterministic mapping):
 - Let `TARGET_BLOCK_INTERVAL = 600s` (10 minutes).
