@@ -48,3 +48,4 @@ clients/rust/cargo_audit.json
 # Generated spec analysis artifacts
 analysis/spec/spec-diff.json
 analysis/spec/spec-explainer.json
+IMPLEMENTATION_ROADMAP.md
