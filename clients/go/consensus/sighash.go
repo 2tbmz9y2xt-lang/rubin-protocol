@@ -7,6 +7,13 @@ import (
 	"rubin.dev/node/crypto"
 )
 
+// SighashV1Digest computes the RUBIN v1 signature digest for a specific input of a transaction.
+// 
+// It constructs a canonical preimage (starting with the ASCII prefix "RUBINv1-sighash/" followed by the provided chainID)
+// that encodes the transaction version, nonce, hashed prevouts, hashed sequences, the target input (prevout, value, sequence),
+// hashed outputs, and locktime, then returns the SHA3-256 digest of that preimage.
+// 
+// An error is returned if the provided inputIndex cannot be interpreted as a valid index or is out of range for tx.Inputs.
 func SighashV1Digest(
 	p crypto.CryptoProvider,
 	chainID [32]byte,

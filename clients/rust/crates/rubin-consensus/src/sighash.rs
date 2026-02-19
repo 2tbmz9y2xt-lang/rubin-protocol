@@ -2,6 +2,31 @@ use crate::Tx;
 use crate::encode::tx_output_bytes;
 use rubin_crypto::CryptoProvider;
 
+/// Compute the v1 signature hash (sighash) for a transaction input.
+///
+/// The digest is SHA3-256 over a preimage built from a fixed prefix, the provided
+/// 32-byte chain ID, transaction metadata (version and tx_nonce), aggregated
+/// hashes of all prevouts, sequences, and outputs, the selected input's
+/// identifying fields plus the supplied `input_value`, and the transaction
+/// locktime.
+///
+/// # Errors
+///
+/// Returns `Err` if `input_index` cannot be converted to `usize` or is out of
+/// bounds for `tx.inputs`, or if any underlying `CryptoProvider::sha3_256` call
+/// fails.
+///
+/// # Examples
+///
+/// ```
+/// // Construct or obtain a CryptoProvider `provider`, a Tx `tx`, and a chain_id:
+/// // let provider: &dyn CryptoProvider = ...;
+/// // let chain_id: [u8; 32] = [0u8; 32];
+/// // let tx: Tx = ...;
+///
+/// let result = sighash_v1_digest(provider, &chain_id, &tx, 0, 1_000);
+/// assert!(result.is_ok());
+/// ```
 pub fn sighash_v1_digest(
     provider: &dyn CryptoProvider,
     chain_id: &[u8; 32],

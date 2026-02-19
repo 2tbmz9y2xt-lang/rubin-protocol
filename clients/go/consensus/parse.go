@@ -2,6 +2,11 @@ package consensus
 
 import "fmt"
 
+// parseInput reads a TxInput from cur.
+// It expects: 32 bytes previous transaction id, a little-endian 4-byte previous output index,
+// a compact-size length followed by that many scriptSig bytes, and a little-endian 4-byte sequence.
+// The returned TxInput contains a copied 32-byte PrevTxid array, PrevVout, a copied ScriptSig slice, and Sequence.
+// Any read or conversion error is returned immediately.
 func parseInput(cur *cursor) (TxInput, error) {
 	prevTxidBytes, err := cur.readExact(32)
 	if err != nil {
@@ -41,6 +46,10 @@ func parseInput(cur *cursor) (TxInput, error) {
 	}, nil
 }
 
+// parseOutput parses a TxOutput from cur.
+// It reads the output value, covenant type, a compact-size length for the covenant data,
+// and then the covenant data bytes. It returns a TxOutput containing copied covenant data,
+// or a non-nil error if any read or length conversion fails.
 func parseOutput(cur *cursor) (TxOutput, error) {
 	value, err := cur.readU64LE()
 	if err != nil {
@@ -71,6 +80,11 @@ func parseOutput(cur *cursor) (TxOutput, error) {
 	}, nil
 }
 
+// parseWitnessItem reads a WitnessItem from the cursor.
+// It reads the suite ID, a compact-size pubkey length and that many pubkey bytes,
+// then a compact-size signature length and that many signature bytes, and returns
+// a WitnessItem whose byte slices are copied. An error is returned if any read
+// or length-conversion operation fails.
 func parseWitnessItem(cur *cursor) (WitnessItem, error) {
 	suiteID, err := cur.readU8()
 	if err != nil {
@@ -110,6 +124,10 @@ func parseWitnessItem(cur *cursor) (WitnessItem, error) {
 	}, nil
 }
 
+// parseInputList reads a compact-size input count from cur and parses that many
+// TxInput entries, returning them as a slice.
+// It returns an error if reading the count, converting it to an int, or parsing
+// any input fails.
 func parseInputList(cur *cursor) ([]TxInput, error) {
 	inputCountU64, err := cur.readCompactSize()
 	if err != nil {
@@ -130,6 +148,9 @@ func parseInputList(cur *cursor) ([]TxInput, error) {
 	return inputs, nil
 }
 
+// parseOutputList reads a compact-size encoded count from cur and parses that
+// many TxOutput entries, returning them as a slice. It returns an error if
+// reading the count or parsing any individual output fails.
 func parseOutputList(cur *cursor) ([]TxOutput, error) {
 	outputCountU64, err := cur.readCompactSize()
 	if err != nil {
@@ -150,6 +171,9 @@ func parseOutputList(cur *cursor) ([]TxOutput, error) {
 	return outputs, nil
 }
 
+// parseWitnessList parses a compact-size-prefixed list of witness items from cur and returns them.
+// It reads the compact-size count, converts it to an int (returning an error on overflow or invalid length),
+// then parses that many WitnessItem values in order. Any read or parsing error is propagated.
 func parseWitnessList(cur *cursor) ([]WitnessItem, error) {
 	witnessCountU64, err := cur.readCompactSize()
 	if err != nil {
@@ -170,6 +194,10 @@ func parseWitnessList(cur *cursor) ([]WitnessItem, error) {
 	return witnesses, nil
 }
 
+// ParseTxBytes parses a serialized transaction from b into a Tx.
+// It decodes the version, transaction nonce, input list, output list, locktime,
+// and witness list, and returns an error if any field is malformed or if bytes
+// remain unconsumed (trailing bytes).
 func ParseTxBytes(b []byte) (*Tx, error) {
 	cur := newCursor(b)
 
@@ -213,6 +241,11 @@ func ParseTxBytes(b []byte) (*Tx, error) {
 	}, nil
 }
 
+// ParseBlockHeader parses a block header from the given cursor.
+// It reads the version, 32-byte previous block hash, 32-byte merkle root,
+// timestamp, 32-byte target, and nonce, copying each 32-byte field into a
+// fixed-size array in the returned BlockHeader. It returns an error if any
+// cursor read fails.
 func ParseBlockHeader(cur *cursor) (BlockHeader, error) {
 	version, err := cur.readU32LE()
 	if err != nil {
@@ -254,6 +287,10 @@ func ParseBlockHeader(cur *cursor) (BlockHeader, error) {
 	}, nil
 }
 
+// ParseBlockBytes parses a complete block from b and returns the parsed Block.
+// It decodes the block header, reads a compact-encoded transaction count,
+// parses that many transactions, and returns an error if any read fails or if
+// trailing bytes remain after parsing.
 func ParseBlockBytes(b []byte) (Block, error) {
 	cur := newCursor(b)
 	header, err := ParseBlockHeader(cur)
@@ -285,6 +322,9 @@ func ParseBlockBytes(b []byte) (Block, error) {
 	}, nil
 }
 
+// ParseTxBytesFromCursor parses a transaction from the provided cursor and returns the resulting Tx.
+// It reads the version, transaction nonce, input list, output list, locktime, and witness list in that order.
+// On success it returns a Tx populated with those fields; on failure it returns nil and the first read or parse error encountered.
 func ParseTxBytesFromCursor(cur *cursor) (*Tx, error) {
 	version, err := cur.readU32LE()
 	if err != nil {

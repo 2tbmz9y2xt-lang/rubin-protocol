@@ -7,6 +7,9 @@ import (
 	"rubin.dev/node/crypto"
 )
 
+// TxWeight computes an estimated weight for the given transaction.
+// It combines a base component (4× the length of the transaction without witnesses), the total witness bytes, and per-input signature-verification costs for witnessed inputs using ML_DSA or SLH_DSA suites.
+// Returns the computed total weight, or an error if internal size additions overflow or parsing fails.
 func TxWeight(tx *Tx) (uint64, error) {
 	base := len(TxNoWitnessBytes(tx))
 	witness := len(WitnessBytes(tx.Witness))
@@ -29,14 +32,20 @@ func TxWeight(tx *Tx) (uint64, error) {
 	return addUint64(total, uint64(sigCost))
 }
 
+// txidFromTx computes the transaction ID for the given transaction using the provided crypto provider.
 func txidFromTx(p crypto.CryptoProvider, tx *Tx) [32]byte {
 	return TxID(p, tx)
 }
 
+// TxID computes the transaction identifier for tx by hashing the transaction bytes without witnesses.
+// It returns the 32-byte SHA3-256 digest produced by the provided crypto provider.
 func TxID(p crypto.CryptoProvider, tx *Tx) [32]byte {
 	return p.SHA3_256(TxNoWitnessBytes(tx))
 }
 
+// merkleRootTxIDs computes the Merkle root of the provided transactions using
+// leaf and inner-node domain separation (leaf prefix 0x00, inner-node prefix 0x01).
+// It returns the 32-byte Merkle root or an error when the input slice is empty.
 func merkleRootTxIDs(p crypto.CryptoProvider, txs []*Tx) ([32]byte, error) {
 	if len(txs) == 0 {
 		return [32]byte{}, fmt.Errorf("BLOCK_ERR_MERKLE_INVALID")
@@ -68,6 +77,9 @@ func merkleRootTxIDs(p crypto.CryptoProvider, txs []*Tx) ([32]byte, error) {
 	return level[0], nil
 }
 
+// txSums computes the total input value by summing the referenced UTXO outputs and the total output value by summing tx.Outputs.
+// It looks up each input's previous outpoint in the provided utxo map to obtain its value.
+// Returns the total input value, the total output value, and an error if a referenced UTXO is missing or if any addition overflows.
 func txSums(tx *Tx, utxo map[TxOutPoint]UtxoEntry) (uint64, uint64, error) {
 	var inputSum uint64
 	var outputSum uint64
@@ -96,6 +108,18 @@ func txSums(tx *Tx, utxo map[TxOutPoint]UtxoEntry) (uint64, uint64, error) {
 	return inputSum, outputSum, nil
 }
 
+// validateOutputCovenantConstraints checks covenant-specific structural constraints for a transaction output.
+// 
+// It enforces required covenant data lengths and value constraints for supported covenant types:
+// - CORE_P2PK: CovenantData must be 33 bytes.
+// - CORE_TIMELOCK_V1: CovenantData must be 9 bytes.
+// - CORE_ANCHOR: Value must be 0 and CovenantData length must be between 1 and MAX_ANCHOR_PAYLOAD_SIZE.
+// - CORE_HTLC_V1: CovenantData must be 105 bytes.
+// - CORE_HTLC_V2: CovenantData must be 105 bytes and the claim key ID (bytes 41..73) must differ from the refund key ID (bytes 73..105).
+// - CORE_VAULT_V1: CovenantData must be either 73 or 81 bytes.
+// - CORE_RESERVED_FUTURE and unknown types are rejected.
+//
+// Returns an error with code "TX_ERR_PARSE" for malformed covenant data, or "TX_ERR_COVENANT_TYPE_INVALID" for invalid covenant types or anchor/value violations.
 func validateOutputCovenantConstraints(output TxOutput) error {
 	switch output.CovenantType {
 	case CORE_P2PK:
@@ -140,6 +164,10 @@ func validateOutputCovenantConstraints(output TxOutput) error {
 	return nil
 }
 
+// validateCoinbaseTxInputs verifies that tx uses the exact input shape required for a coinbase:
+// it must have TxNonce == 0, exactly one input, that input's Sequence equal to TX_COINBASE_PREVOUT_VOUT,
+// PrevTxid equal to the zero txid, PrevVout equal to TX_COINBASE_PREVOUT_VOUT, an empty ScriptSig,
+// and no witnesses. It returns an error if any of these constraints are violated.
 func validateCoinbaseTxInputs(tx *Tx) error {
 	if tx.TxNonce != 0 {
 		return fmt.Errorf(BLOCK_ERR_COINBASE_INVALID)
@@ -163,6 +191,9 @@ func validateCoinbaseTxInputs(tx *Tx) error {
 	return nil
 }
 
+// validateHTLCScriptSigLen enforces allowed scriptSig lengths for HTLC outputs.
+// It accepts only lengths of 0 or 32.
+// Returns nil if the length is 0 or 32, otherwise an error with code "TX_ERR_PARSE".
 func validateHTLCScriptSigLen(scriptSigLen int) error {
 	switch scriptSigLen {
 	case 0, 32:
@@ -172,6 +203,10 @@ func validateHTLCScriptSigLen(scriptSigLen int) error {
 	}
 }
 
+// checkWitnessFormat validates that a witness item's public key and signature lengths match the expectations for its SuiteID.
+// For SUITE_ID_SENTINEL both Pubkey and Signature must be empty. For SUITE_ID_ML_DSA Pubkey and Signature must match exact canonical lengths.
+// For SUITE_ID_SLH_DSA the SLH suite must be active and Pubkey must match the canonical length while Signature must be non-zero and not exceed the maximum allowed length.
+// Returns an error with a specific consensus error code when the suite is inactive, lengths are non-canonical, or the SuiteID is unrecognized.
 func checkWitnessFormat(item WitnessItem, suiteIDSLHActive bool) error {
 	switch item.SuiteID {
 	case SUITE_ID_SENTINEL:
@@ -197,6 +232,9 @@ func checkWitnessFormat(item WitnessItem, suiteIDSLHActive bool) error {
 	}
 }
 
+// satisfyLock verifies a timelock given mode and value against the provided height and timestamp.
+// It returns nil if the lock condition is met, an error "TX_ERR_TIMELOCK_NOT_MET" if the lock is not yet met,
+// or "TX_ERR_PARSE" for an unrecognized lock mode.
 func satisfyLock(lockMode byte, lockValue, height, timestamp uint64) error {
 	switch lockMode {
 	case TIMELOCK_MODE_HEIGHT:
@@ -215,7 +253,11 @@ func satisfyLock(lockMode byte, lockValue, height, timestamp uint64) error {
 }
 
 // ApplyBlock validates all block-level consensus rules for block B and mutates utxo on success.
-// On error, utxo is not modified.
+// ApplyBlock validates and applies a full block against consensus rules, updating the provided UTXO map on success.
+// It verifies header linkage, target and PoW, merkle root, and timestamps; ensures exactly one coinbase transaction;
+// computes transaction weights and fees, enforces per-block limits (weight, anchor bytes, subsidy), and validates and
+// applies each transaction (including coinbase rules) using the working UTXO set. On success the provided utxo map is
+// replaced with the updated state; on any error the original utxo map is left unmodified.
 func ApplyBlock(
 	p crypto.CryptoProvider,
 	chainID [32]byte,
@@ -399,6 +441,15 @@ func ApplyBlock(
 	return nil
 }
 
+// ApplyTx validates a single transaction against consensus rules using the provided UTXO set and chain context.
+// 
+// It performs structural checks (limits on inputs/outputs and witness sizes), enforces coinbase-specific rules,
+// validates covenant constraints for outputs, enforces nonces and witness/input count consistency for non-coinbase
+// transactions, checks input sequence values and duplicate/zero prevouts, verifies input authorization against
+// the referenced UTXOs, enforces coinbase maturity, and ensures input value is greater than or equal to output value.
+// The function does not mutate the provided UTXO map.
+//
+// Returns an error if the transaction fails validation, nil otherwise.
 func ApplyTx(
 	p crypto.CryptoProvider,
 	chainID [32]byte,
@@ -512,6 +563,15 @@ func ApplyTx(
 	return nil
 }
 
+// ValidateInputAuthorization validates that the transaction input at inputIndex is authorized to spend
+// the provided previous output (prevout) according to the prevout's covenant, the corresponding witness,
+// and the chain context (height, timestamp, chainID). It enforces covenant-specific constraints and lock
+// semantics (P2PK, TIMELOCK_V1, HTLC_V1, VAULT_V1, HTLC_V2), checks witness format and key-id matching,
+// validates timelocks and spend-delays, and verifies the input signature using the witness suite.
+//
+// The function returns nil on successful authorization. It returns an error (with domain-specific codes such
+// as TX_ERR_PARSE, TX_ERR_SIG_INVALID, TX_ERR_TIMELOCK_NOT_MET, TX_ERR_DEPLOYMENT_INACTIVE,
+// TX_ERR_MISSING_UTXO, TX_ERR_COVENANT_TYPE_INVALID, TX_ERR_SIG_ALG_INVALID) when validation fails.
 func ValidateInputAuthorization(
 	p crypto.CryptoProvider,
 	chainID [32]byte,

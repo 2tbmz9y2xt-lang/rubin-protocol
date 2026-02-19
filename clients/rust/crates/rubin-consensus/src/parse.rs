@@ -3,6 +3,19 @@ use crate::{
     BLOCK_ERR_PARSE, Block, BlockHeader, Tx, TxInput, TxOutput, WitnessItem, WitnessSection,
 };
 
+/// Parses a serialized transaction from a byte slice and fails if any trailing bytes remain.
+///
+/// # Returns
+///
+/// `Tx` on success, or an error `String` describing the parse failure.
+///
+/// # Examples
+///
+/// ```
+/// // `data` is a byte slice containing a single serialized transaction.
+/// let tx = parse_tx_bytes(&data).unwrap();
+/// // Use `tx`...
+/// ```
 pub fn parse_tx_bytes(bytes: &[u8]) -> Result<Tx, String> {
     let mut cursor = Cursor::new(bytes);
     let tx = parse_tx_from_cursor(&mut cursor)?;
@@ -12,6 +25,27 @@ pub fn parse_tx_bytes(bytes: &[u8]) -> Result<Tx, String> {
     Ok(tx)
 }
 
+/// Parse a transaction from the given cursor, consuming the bytes required for the transaction.
+///
+/// Parses version, tx_nonce, inputs, outputs, locktime, and witness section and constructs a `Tx`.
+///
+/// # Errors
+///
+/// Returns an `Err(String)` if the cursor cannot supply required bytes, if any compact-size counts or lengths
+/// overflow `usize`, or if any numeric reads fail.
+///
+/// # Examples
+///
+/// ```
+/// // Example bytes would normally come from a serialized transaction.
+/// let bytes: Vec<u8> = vec![/* ... serialized tx ... */];
+/// let mut cursor = Cursor::new(&bytes);
+/// let tx = parse_tx_from_cursor(&mut cursor);
+/// match tx {
+///     Ok(tx) => println!("parsed tx with {} inputs", tx.inputs.len()),
+///     Err(e) => println!("parse error: {}", e),
+/// }
+/// ```
 pub(crate) fn parse_tx_from_cursor(cursor: &mut Cursor<'_>) -> Result<Tx, String> {
     let version = cursor.read_u32le()?;
     let tx_nonce = cursor.read_u64le()?;
@@ -103,6 +137,22 @@ pub(crate) fn parse_tx_from_cursor(cursor: &mut Cursor<'_>) -> Result<Tx, String
     })
 }
 
+/// Parses a complete block from a byte slice, consuming the entire input.
+///
+/// On success returns a Block populated with the parsed header and transaction list.
+/// On failure returns a string describing the parse error.
+///
+/// # Examples
+///
+/// no_run
+/// ```
+/// let bytes = /* serialized block bytes */ &[];
+/// let res = parse_block_bytes(bytes);
+/// match res {
+///     Ok(block) => println!("parsed {} transactions", block.transactions.len()),
+///     Err(e) => eprintln!("block parse error: {}", e),
+/// }
+/// ```
 pub fn parse_block_bytes(bytes: &[u8]) -> Result<Block, String> {
     let mut cursor = Cursor::new(bytes);
     let header = parse_block_header_from_cursor(&mut cursor)?;
@@ -124,6 +174,21 @@ pub fn parse_block_bytes(bytes: &[u8]) -> Result<Block, String> {
     })
 }
 
+/// Parses a block header from the provided cursor.
+///
+/// Consumes exactly the bytes required for a block header in the following order:
+/// version (u32 little-endian), previous block hash (32 bytes), merkle root (32 bytes),
+/// timestamp (u64 little-endian), target (32 bytes), and nonce (u64 little-endian).
+///
+/// # Examples
+///
+/// ```
+/// // prepare a zeroed buffer of the exact header length: 4 + 32 + 32 + 8 + 32 + 8 = 116
+/// let bytes = vec![0u8; 116];
+/// let mut cursor = Cursor::new(&bytes);
+/// let header = parse_block_header_from_cursor(&mut cursor).unwrap();
+/// assert_eq!(header.version, 0);
+/// ```
 fn parse_block_header_from_cursor(cursor: &mut Cursor<'_>) -> Result<BlockHeader, String> {
     let version = cursor.read_u32le()?;
     let prev_block_hash_slice = cursor.read_exact(32)?;

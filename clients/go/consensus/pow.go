@@ -8,11 +8,18 @@ import (
 	"rubin.dev/node/crypto"
 )
 
+// blockHeaderHash computes the SHA3-256 hash of the given block header.
+// The header is serialized and hashed via the provided CryptoProvider.
 func blockHeaderHash(p crypto.CryptoProvider, header *BlockHeader) [32]byte {
 	out := BlockHeaderBytes(*header)
 	return p.SHA3_256(out)
 }
 
+// blockRewardForHeight computes the block subsidy for a given block height.
+// It distributes SUBSIDY_TOTAL_MINED evenly across SUBSIDY_DURATION_BLOCKS and
+// awards an extra unit to the first rem = SUBSIDY_TOTAL_MINED % SUBSIDY_DURATION_BLOCKS
+// heights to account for any remainder. For heights greater than or equal to
+// SUBSIDY_DURATION_BLOCKS the subsidy is 0.
 func blockRewardForHeight(height uint64) uint64 {
 	if height >= SUBSIDY_DURATION_BLOCKS {
 		return 0
@@ -25,6 +32,9 @@ func blockRewardForHeight(height uint64) uint64 {
 	return base
 }
 
+// medianPastTimestamp computes the median timestamp from up to the last 11 block headers preceding the given height.
+// It uses at most 11 most-recent headers (fewer if height or header count is smaller) and returns an error
+// with message BLOCK_ERR_TIMESTAMP_OLD if height is zero or the headers slice is empty.
 func medianPastTimestamp(headers []BlockHeader, height uint64) (uint64, error) {
 	if height == 0 {
 		return 0, fmt.Errorf(BLOCK_ERR_TIMESTAMP_OLD)
@@ -51,6 +61,9 @@ func medianPastTimestamp(headers []BlockHeader, height uint64) (uint64, error) {
 	return timestamps[(len(timestamps)-1)/2], nil
 }
 
+// blockExpectedTarget computes the expected 32-byte difficulty target for the block at the given height using the recent header window.
+//
+// If height is 0 the input target is returned unchanged. If height is not a WINDOW_SIZE boundary the current target from the last header is returned. An error is returned when headers is empty or contains fewer than WINDOW_SIZE elements required to compute a windowed adjustment. The returned target is clamped to within [old/4, old*4] of the previous target and scaled according to the actual time span between the first and last headers in the window.
 func blockExpectedTarget(headers []BlockHeader, height uint64, targetIn [32]byte) ([32]byte, error) {
 	if height == 0 {
 		return targetIn, nil

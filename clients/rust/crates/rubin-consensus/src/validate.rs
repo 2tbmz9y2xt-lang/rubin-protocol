@@ -26,10 +26,90 @@ use crate::{
     TX_MAX_SEQUENCE, TX_NONCE_ZERO, Tx, TxOutPoint, TxOutput, UtxoEntry, WitnessItem,
 };
 
+/// Compute a 32-byte key identifier from a public key using the provided crypto provider.
+///
+/// The identifier is the SHA3-256 digest of `pubkey` as produced by `provider`.
+///
+/// # Returns
+///
+/// A 32-byte array containing the SHA3-256 hash of `pubkey`.
+///
+/// # Examples
+///
+/// ```
+/// // `provider` implements CryptoProvider and `pubkey` is a byte slice.
+/// // let id = compute_key_id(&provider, &pubkey).unwrap();
+/// // assert_eq!(id.len(), 32);
+/// ```
 pub fn compute_key_id(provider: &dyn CryptoProvider, pubkey: &[u8]) -> Result<[u8; 32], String> {
     provider.sha3_256(pubkey)
 }
 
+/// Validates the canonical format of a witness item for its declared signature suite.
+
+///
+
+/// Checks that the witness item's public key and signature lengths (and presence) match
+
+/// the requirements for its `suite_id`, and enforces deployment activation for SLH_DSA.
+
+///
+
+/// # Parameters
+
+///
+
+/// - `item`: the witness item to validate.
+
+/// - `suite_activation_slh_active`: whether the SLH_DSA suite is currently active; required for SLH_DSA.
+
+///
+
+/// # Returns
+
+///
+
+/// `Ok(())` if the witness item is correctly formatted for its suite; otherwise an `Err` with one of:
+
+/// - `"TX_ERR_PARSE"`: sentinel suite contains unexpected data.
+
+/// - `"TX_ERR_SIG_NONCANONICAL"`: key or signature lengths are invalid for the suite.
+
+/// - `"TX_ERR_DEPLOYMENT_INACTIVE"`: SLH_DSA used while not active.
+
+/// - `"TX_ERR_SIG_ALG_INVALID"`: unknown/unsupported suite id.
+
+///
+
+/// # Examples
+
+///
+
+/// ```
+
+/// // sentinel: must have no pubkey or signature
+
+/// let sentinel = WitnessItem { suite_id: SUITE_ID_SENTINEL, pubkey: vec![], signature: vec![] };
+
+/// assert!(check_witness_format(&sentinel, false).is_ok());
+
+///
+
+/// // ML_DSA: exact sizes required
+
+/// let ml = WitnessItem {
+
+///     suite_id: SUITE_ID_ML_DSA,
+
+///     pubkey: vec![0u8; ML_DSA_PUBKEY_BYTES],
+
+///     signature: vec![0u8; ML_DSA_SIG_BYTES],
+
+/// };
+
+/// assert!(check_witness_format(&ml, false).is_ok());
+
+/// ```
 fn check_witness_format(
     item: &WitnessItem,
     suite_activation_slh_active: bool,
@@ -61,6 +141,22 @@ fn check_witness_format(
     Err("TX_ERR_SIG_ALG_INVALID".into())
 }
 
+/// Checks whether a timelock condition is satisfied given chain height and timestamp.
+///
+/// The function interprets `lock_mode` as either a block height lock or a timestamp lock:
+/// - If `lock_mode` equals `TIMELOCK_MODE_HEIGHT`, the lock is satisfied when `height >= lock_value`.
+/// - If `lock_mode` equals `TIMELOCK_MODE_TIMESTAMP`, the lock is satisfied when `timestamp >= lock_value`.
+/// Any other `lock_mode` is treated as a parse/validation error.
+///
+/// # Examples
+///
+/// ```
+/// // height-based lock satisfied
+/// assert!(satisfy_lock(TIMELOCK_MODE_HEIGHT, 100, 150, 0).is_ok());
+/// // timestamp-based lock not satisfied
+/// assert_eq!(satisfy_lock(TIMELOCK_MODE_TIMESTAMP, 1_600_000_000, 0, 1_599_999_000).unwrap_err(), "TX_ERR_TIMELOCK_NOT_MET");
+/// ```
+fn satisfy_lock(lock_mode: u8, lock_value: u64, height: u64, timestamp: u64) -> Result<(), String>;
 fn satisfy_lock(lock_mode: u8, lock_value: u64, height: u64, timestamp: u64) -> Result<(), String> {
     match lock_mode {
         TIMELOCK_MODE_HEIGHT => {
@@ -81,6 +177,29 @@ fn satisfy_lock(lock_mode: u8, lock_value: u64, height: u64, timestamp: u64) -> 
     }
 }
 
+/// Validate covenant-specific constraints for a transaction output.
+///
+/// Checks that the output's covenant type and associated covenant data (and
+/// where applicable the output value) meet the consensus rules for that
+/// covenant. Returns an error string containing the consensus error code when
+/// a constraint is violated.
+///
+/// # Returns
+///
+/// `Ok(())` if the output satisfies the covenant constraints, `Err(String)` with
+/// a consensus error code (e.g. `"TX_ERR_PARSE"`, `"TX_ERR_COVENANT_TYPE_INVALID"`) otherwise.
+///
+/// # Examples
+///
+/// ```no_run
+/// let out = TxOutput {
+///     covenant_type: CORE_P2PK,
+///     covenant_data: vec![0u8; 33],
+///     value: 0,
+///     // other fields...
+/// };
+/// validate_output_covenant_constraints(&out).unwrap();
+/// ```
 fn validate_output_covenant_constraints(output: &TxOutput) -> Result<(), String> {
     match output.covenant_type {
         CORE_P2PK => {
@@ -129,6 +248,23 @@ fn validate_output_covenant_constraints(output: &TxOutput) -> Result<(), String>
     Ok(())
 }
 
+/// Compute a transaction's consensus weight.
+///
+/// The weight is calculated as (base_size * 4) + witness_size + per-signature verification cost
+/// for each input-bearing witness using ML_DSA or SLH_DSA cost constants.
+///
+/// # Returns
+///
+/// `Ok(weight)` with the computed weight as a `u64`, or `Err("TX_ERR_PARSE")` if a size-based
+/// overflow is detected.
+///
+/// # Examples
+///
+/// ```no_run
+/// // Construct `tx` appropriately for your environment, then:
+/// let weight = tx_weight(&tx).unwrap();
+/// println!("tx weight = {}", weight);
+/// ```
 pub fn tx_weight(tx: &Tx) -> Result<u64, String> {
     let base = tx_no_witness_bytes(tx).len();
     let witness = witness_bytes(&tx.witness).len();
@@ -148,10 +284,35 @@ pub fn tx_weight(tx: &Tx) -> Result<u64, String> {
     add_u64(add_u64(base_weight, witness as u64)?, sig_cost)
 }
 
+/// Computes the transaction identifier by hashing the transaction's non-witness serialization with SHA3-256.
+///
+/// The returned identifier is the 32-byte digest of the transaction bytes excluding witness data.
+///
+/// # Examples
+///
+/// ```no_run
+/// let id = txid(provider, &tx)?;
+/// assert_eq!(id.len(), 32);
+/// ```
 pub fn txid(provider: &dyn CryptoProvider, tx: &Tx) -> Result<[u8; 32], String> {
     provider.sha3_256(&tx_no_witness_bytes(tx))
 }
 
+/// Compute the Merkle root of a list of transactions.
+///
+/// Leaves are the transaction IDs hashed with a 0x00 prefix; internal nodes are hashed from a 0x01 prefix followed by the left and right child hashes. When a level has an odd number of nodes, the last node is carried forward to the next level unchanged.
+///
+/// # Examples
+///
+/// ```
+/// // Given a CryptoProvider `provider` and a non-empty `Vec<Tx>` named `txs`:
+/// let root = merkle_root_txids(&provider, &txs).unwrap();
+/// assert_eq!(root.len(), 32);
+/// ```
+///
+/// # Errors
+///
+/// Returns an `Err` with `BLOCK_ERR_MERKLE_INVALID` if `txs` is empty, or another provider-derived error if hashing fails.
 fn merkle_root_txids(provider: &dyn CryptoProvider, txs: &[Tx]) -> Result<[u8; 32], String> {
     if txs.is_empty() {
         return Err(BLOCK_ERR_MERKLE_INVALID.into());
@@ -185,6 +346,24 @@ fn merkle_root_txids(provider: &dyn CryptoProvider, txs: &[Tx]) -> Result<[u8; 3
     Ok(level[0])
 }
 
+/// Compute the total input value and total output value for a transaction using the given UTXO set.
+///
+/// The returned tuple is `(input_sum, output_sum)`, where `input_sum` is the sum of values from the
+/// previous outputs referenced by the transaction's inputs (looked up in `utxo`), and `output_sum`
+/// is the sum of the transaction's outputs.
+///
+/// # Errors
+///
+/// Returns `Err("TX_ERR_MISSING_UTXO")` if any input refers to a missing UTXO, or any arithmetic
+/// overflow error forwarded from internal addition.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use std::collections::HashMap;
+/// // Construct a Tx and a UTXO map then call tx_sums:
+/// // let (in_sum, out_sum) = tx_sums(&tx, &utxo)?;
+/// ```
 fn tx_sums(tx: &Tx, utxo: &HashMap<TxOutPoint, UtxoEntry>) -> Result<(u64, u64), String> {
     let mut input_sum = 0u64;
     let mut output_sum = 0u64;
@@ -204,6 +383,39 @@ fn tx_sums(tx: &Tx, utxo: &HashMap<TxOutPoint, UtxoEntry>) -> Result<(u64, u64),
     Ok((input_sum, output_sum))
 }
 
+/// Validates a block against consensus rules and, on success, applies its transactions to the provided UTXO set.
+///
+/// This performs full block-level validation (linkage, target and PoW checks, merkle root, timestamps,
+/// single coinbase rules, per-transaction validation, block weight and anchor limits, and subsidy vs fees)
+/// and mutates `utxo` to the new post-state when validation succeeds. Returns an `Err` with a consensus
+/// error string if any validation step fails.
+///
+/// # Errors
+///
+/// Returns an `Err` when the block is invalid for reasons including (but not limited to): missing or
+/// multiple coinbase transactions, invalid header linkage or target, insufficient proof-of-work,
+/// merkle root mismatch, invalid timestamps, per-transaction validation failures, block weight or
+/// anchor byte limits exceeded, or subsidy exceeding allowed reward plus fees.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use std::collections::HashMap;
+/// # use rubin_consensus::validate::apply_block;
+/// # use rubin_consensus::{CryptoProvider, Block, BlockValidationContext, TxOutPoint, UtxoEntry};
+/// // `provider`, `chain_id`, `block`, `ctx`, and `utxo` must be provided by the caller.
+/// // The call below demonstrates the usage pattern; heavy setup is omitted.
+/// let provider: &dyn CryptoProvider = /* ... */;
+/// let chain_id: &[u8; 32] = &[0u8; 32];
+/// let block: Block = /* ... */;
+/// let ctx: BlockValidationContext = /* ... */;
+/// let mut utxo: HashMap<TxOutPoint, UtxoEntry> = HashMap::new();
+///
+/// match apply_block(provider, chain_id, &block, &mut utxo, &ctx) {
+///     Ok(()) => { /* UTXO set updated with block's effects */ }
+///     Err(e) => eprintln!("Block validation failed: {}", e),
+/// }
+/// ```
 pub fn apply_block(
     provider: &dyn CryptoProvider,
     chain_id: &[u8; 32],
@@ -362,7 +574,49 @@ pub fn apply_block(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Validate the authorization for a single transaction input against its previous output.
+///
+/// Performs covenant-specific checks (scriptSig/witness formats, covenant data lengths and semantics,
+/// timelocks, HTLC and vault rules) and verifies the input's signature matches the expected key
+/// according to the previous output and witness data.
+///
+/// # Returns
+///
+/// `Ok(())` if the input is authorized, `Err` with a consensus error code string otherwise.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use rubin_consensus::validate::validate_input_authorization;
+/// # use rubin_consensus::crypto::CryptoProvider;
+/// # use rubin_consensus::{Tx, TxOutput};
+/// // Provider, chain_id, tx and related values would be constructed according to context.
+/// let provider: &dyn CryptoProvider = unimplemented!();
+/// let chain_id: &[u8;32] = &[0u8;32];
+/// let tx: &Tx = unimplemented!();
+/// let input_index = 0usize;
+/// let prev_value = 0u64;
+/// let prevout: &TxOutput = unimplemented!();
+/// let prev_creation_height = 0u64;
+/// let chain_height = 0u64;
+/// let chain_timestamp = 0u64;
+/// let htlc_v2_active = false;
+/// let suite_id_02_active = false;
+///
+/// let res = validate_input_authorization(
+///     provider,
+///     chain_id,
+///     tx,
+///     input_index,
+///     prev_value,
+///     prevout,
+///     prev_creation_height,
+///     chain_height,
+///     chain_timestamp,
+///     htlc_v2_active,
+///     suite_id_02_active,
+/// );
+/// ```
 pub fn validate_input_authorization(
     provider: &dyn CryptoProvider,
     chain_id: &[u8; 32],
@@ -619,7 +873,19 @@ pub fn validate_input_authorization(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Validate a transaction against consensus rules and the provided UTXO set, returning an error if it is invalid.
+///
+/// This enforces limits (inputs/outputs/witness sizes), coinbase handling, per-output covenant constraints,
+/// per-input authorization (signatures, covenants, timelocks), UTXO existence and uniqueness, coinbase maturity,
+/// and value conservation (outputs must not exceed inputs).
+///
+/// # Examples
+///
+/// ```
+/// // assume `provider`, `chain_id`, `tx`, and `utxo` are prepared test fixtures
+/// let res = apply_tx(&provider, &chain_id, &tx, &utxo, 100, 1_640_000_000, false, false);
+/// assert!(res.is_ok() || res.is_err());
+/// ```
 pub fn apply_tx(
     provider: &dyn CryptoProvider,
     chain_id: &[u8; 32],

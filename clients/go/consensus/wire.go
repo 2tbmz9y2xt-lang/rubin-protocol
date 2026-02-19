@@ -10,6 +10,7 @@ type cursor struct {
 	pos int
 }
 
+// newCursor creates a cursor for reading from b with the initial read position set to 0.
 func newCursor(b []byte) *cursor {
 	return &cursor{b: b, pos: 0}
 }

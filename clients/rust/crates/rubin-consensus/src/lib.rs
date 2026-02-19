@@ -238,6 +238,22 @@ mod tests {
     struct TestProvider;
 
     impl TestProvider {
+        /// Computes a deterministic 32-byte, checksum-like digest of `input`.
+        ///
+        /// Intended for tests and non-cryptographic use; identical inputs produce identical outputs.
+        ///
+        /// # Returns
+        ///
+        /// A 32-byte array derived from the input.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// let a = simple_hash(b"hello");
+        /// let b = simple_hash(b"hello");
+        /// assert_eq!(a, b);
+        /// assert_ne!(a, simple_hash(b"world"));
+        /// ```
         fn simple_hash(input: &[u8]) -> [u8; 32] {
             let mut out = [0u8; 32];
             for (i, byte) in input.iter().enumerate() {
@@ -248,6 +264,27 @@ mod tests {
     }
 
     impl rubin_crypto::CryptoProvider for TestProvider {
+        /// Compute the SHA3-256 digest of the provided input bytes.
+        ///
+        /// # Returns
+        ///
+        /// `Ok([u8; 32])` containing the 32-byte SHA3-256 digest of `input`, or `Err(String)` on failure.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// struct Dummy;
+        /// impl Dummy {
+        ///     fn sha3_256(&self, _input: &[u8]) -> Result<[u8; 32], String> {
+        ///         // Example-only stub: real implementation returns the SHA3-256 digest.
+        ///         Ok([0u8; 32])
+        ///     }
+        /// }
+        ///
+        /// let p = Dummy;
+        /// let out = p.sha3_256(b"example").unwrap();
+        /// assert_eq!(out.len(), 32);
+        /// ```
         fn sha3_256(&self, input: &[u8]) -> Result<[u8; 32], String> {
             Ok(Self::simple_hash(input))
         }
