@@ -34,6 +34,11 @@ node_modules/
 # Local runtime env files
 operational/systemd/rubin-node.env
 
+# Mainnet ceremony inputs (private; do not commit)
+operational/dev_fund_schedule.csv
+**/*dev_fund_schedule*.csv
+**/*.dev-fund-schedule.csv
+
 # Local UI / task tracker workspace
 rubin-ui/
 
