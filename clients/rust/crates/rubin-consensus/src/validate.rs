@@ -3,25 +3,27 @@ use std::collections::{HashMap, HashSet};
 use rubin_crypto::CryptoProvider;
 
 use crate::encode::{tx_no_witness_bytes, witness_bytes};
-use crate::pow::{block_expected_target, block_header_hash, block_reward_for_height, median_past_timestamp};
+use crate::pow::{
+    block_expected_target, block_header_hash, block_reward_for_height, median_past_timestamp,
+};
 use crate::sighash::sighash_v1_digest;
 use crate::util::{
     add_u64, is_coinbase_tx, is_script_sig_zero_len, is_zero_outpoint, parse_u64_le, sub_u64,
     validate_coinbase_tx_inputs, validate_htlc_script_sig_len,
 };
 use crate::{
-    Block, BlockValidationContext, Tx, TxOutPoint, TxOutput, UtxoEntry, WitnessItem,
     BLOCK_ERR_ANCHOR_BYTES_EXCEEDED, BLOCK_ERR_COINBASE_INVALID, BLOCK_ERR_LINKAGE_INVALID,
     BLOCK_ERR_MERKLE_INVALID, BLOCK_ERR_POW_INVALID, BLOCK_ERR_SUBSIDY_EXCEEDED,
     BLOCK_ERR_TARGET_INVALID, BLOCK_ERR_TIMESTAMP_FUTURE, BLOCK_ERR_TIMESTAMP_OLD,
-    BLOCK_ERR_WEIGHT_EXCEEDED, COINBASE_MATURITY, CORE_ANCHOR, CORE_HTLC_V1, CORE_HTLC_V2,
-    CORE_P2PK, CORE_RESERVED_FUTURE, CORE_TIMELOCK_V1, CORE_VAULT_V1, MAX_ANCHOR_BYTES_PER_BLOCK,
-    MAX_ANCHOR_PAYLOAD_SIZE, MAX_BLOCK_WEIGHT, MAX_FUTURE_DRIFT, MAX_TX_INPUTS, MAX_TX_OUTPUTS,
-    MAX_WITNESS_BYTES_PER_TX, MAX_WITNESS_ITEMS, ML_DSA_PUBKEY_BYTES, ML_DSA_SIG_BYTES,
-    SLH_DSA_PUBKEY_BYTES, SLH_DSA_SIG_MAX_BYTES, SUITE_ID_ML_DSA, SUITE_ID_SENTINEL,
-    SUITE_ID_SLH_DSA, TIMELOCK_MODE_HEIGHT, TIMELOCK_MODE_TIMESTAMP, TX_COINBASE_PREVOUT_VOUT,
-    TX_ERR_COINBASE_IMMATURE, TX_ERR_NONCE_REPLAY, TX_ERR_SEQUENCE_INVALID,
-    TX_ERR_TX_NONCE_INVALID, TX_ERR_WITNESS_OVERFLOW, TX_MAX_SEQUENCE, TX_NONCE_ZERO,
+    BLOCK_ERR_WEIGHT_EXCEEDED, Block, BlockValidationContext, COINBASE_MATURITY, CORE_ANCHOR,
+    CORE_HTLC_V1, CORE_HTLC_V2, CORE_P2PK, CORE_RESERVED_FUTURE, CORE_TIMELOCK_V1, CORE_VAULT_V1,
+    MAX_ANCHOR_BYTES_PER_BLOCK, MAX_ANCHOR_PAYLOAD_SIZE, MAX_BLOCK_WEIGHT, MAX_FUTURE_DRIFT,
+    MAX_TX_INPUTS, MAX_TX_OUTPUTS, MAX_WITNESS_BYTES_PER_TX, MAX_WITNESS_ITEMS,
+    ML_DSA_PUBKEY_BYTES, ML_DSA_SIG_BYTES, SLH_DSA_PUBKEY_BYTES, SLH_DSA_SIG_MAX_BYTES,
+    SUITE_ID_ML_DSA, SUITE_ID_SENTINEL, SUITE_ID_SLH_DSA, TIMELOCK_MODE_HEIGHT,
+    TIMELOCK_MODE_TIMESTAMP, TX_COINBASE_PREVOUT_VOUT, TX_ERR_COINBASE_IMMATURE,
+    TX_ERR_NONCE_REPLAY, TX_ERR_SEQUENCE_INVALID, TX_ERR_TX_NONCE_INVALID, TX_ERR_WITNESS_OVERFLOW,
+    TX_MAX_SEQUENCE, TX_NONCE_ZERO, Tx, TxOutPoint, TxOutput, UtxoEntry, WitnessItem,
 };
 
 pub fn compute_key_id(provider: &dyn CryptoProvider, pubkey: &[u8]) -> Result<[u8; 32], String> {
@@ -612,9 +614,7 @@ pub fn validate_input_authorization(
                 Err("TX_ERR_SIG_INVALID".into())
             }
         }
-        SUITE_ID_SENTINEL => {
-            Ok(())
-        }
+        SUITE_ID_SENTINEL => Ok(()),
         _ => Err("TX_ERR_SIG_ALG_INVALID".into()),
     }
 }

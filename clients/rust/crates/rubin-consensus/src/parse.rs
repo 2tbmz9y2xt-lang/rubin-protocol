@@ -1,6 +1,6 @@
 use crate::wire::Cursor;
 use crate::{
-    Block, BlockHeader, Tx, TxInput, TxOutput, WitnessItem, WitnessSection, BLOCK_ERR_PARSE,
+    BLOCK_ERR_PARSE, Block, BlockHeader, Tx, TxInput, TxOutput, WitnessItem, WitnessSection,
 };
 
 pub fn parse_tx_bytes(bytes: &[u8]) -> Result<Tx, String> {

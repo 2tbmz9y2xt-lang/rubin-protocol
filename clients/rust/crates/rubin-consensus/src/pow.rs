@@ -1,6 +1,6 @@
 use crate::encode::block_header_bytes;
 use crate::{
-    BlockHeader, BLOCK_ERR_TARGET_INVALID, BLOCK_ERR_TIMESTAMP_OLD, MAX_TARGET,
+    BLOCK_ERR_TARGET_INVALID, BLOCK_ERR_TIMESTAMP_OLD, BlockHeader, MAX_TARGET,
     TARGET_BLOCK_INTERVAL, WINDOW_SIZE,
 };
 use rubin_crypto::CryptoProvider;

@@ -1,4 +1,4 @@
-use crate::{compact_size_encode, BlockHeader, Tx, TxOutput, WitnessItem, WitnessSection};
+use crate::{BlockHeader, Tx, TxOutput, WitnessItem, WitnessSection, compact_size_encode};
 
 pub fn block_header_bytes(h: &BlockHeader) -> [u8; 116] {
     let mut out = [0u8; 116];

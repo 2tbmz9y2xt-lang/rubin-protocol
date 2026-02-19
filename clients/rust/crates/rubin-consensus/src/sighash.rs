@@ -1,5 +1,5 @@
-use crate::encode::tx_output_bytes;
 use crate::Tx;
+use crate::encode::tx_output_bytes;
 use rubin_crypto::CryptoProvider;
 
 pub fn sighash_v1_digest(

@@ -5,19 +5,24 @@
 //!
 //! Non-consensus policy MUST NOT be implemented here.
 
-mod wire;
-mod parse;
 mod encode;
+mod parse;
 mod pow;
 mod sighash;
-mod validate;
 mod util;
+mod validate;
+mod wire;
 
-pub use encode::{block_header_bytes, tx_bytes, tx_no_witness_bytes, tx_output_bytes, witness_bytes, witness_item_bytes};
+pub use encode::{
+    block_header_bytes, tx_bytes, tx_no_witness_bytes, tx_output_bytes, witness_bytes,
+    witness_item_bytes,
+};
 pub use parse::{parse_block_bytes, parse_tx_bytes};
 pub use pow::block_header_hash;
 pub use sighash::sighash_v1_digest;
-pub use validate::{apply_block, apply_tx, compute_key_id, tx_weight, txid, validate_input_authorization};
+pub use validate::{
+    apply_block, apply_tx, compute_key_id, tx_weight, txid, validate_input_authorization,
+};
 
 pub const CONSENSUS_REVISION: &str = "v1.1";
 
