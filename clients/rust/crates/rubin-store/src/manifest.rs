@@ -67,11 +67,10 @@ impl Manifest {
             .unwrap_or(0);
         let tmp_path = dir.join(format!(".MANIFEST.json.tmp.{pid}.{nanos}"));
 
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| format!("serialize manifest: {e}"))?;
+        let json =
+            serde_json::to_string_pretty(self).map_err(|e| format!("serialize manifest: {e}"))?;
 
-        let mut f =
-            fs::File::create(&tmp_path).map_err(|e| format!("create manifest tmp: {e}"))?;
+        let mut f = fs::File::create(&tmp_path).map_err(|e| format!("create manifest tmp: {e}"))?;
         f.write_all(json.as_bytes())
             .map_err(|e| format!("write manifest tmp: {e}"))?;
         f.sync_all()

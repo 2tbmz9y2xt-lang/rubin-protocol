@@ -14,5 +14,5 @@ pub mod utxo_hash;
 pub use db::{Store, WriteBatch};
 pub use keys::{BlockIndexEntry, BlockStatus, UndoEntry, UndoRecord};
 pub use manifest::Manifest;
-pub use pipeline::{import_block, ImportResult};
+pub use pipeline::{ImportResult, import_block};
 pub use utxo_hash::utxo_set_hash;

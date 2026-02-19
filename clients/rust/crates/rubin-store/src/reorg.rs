@@ -8,7 +8,7 @@ use rubin_crypto::CryptoProvider;
 
 use crate::db::Store;
 use crate::keys::BlockIndexEntry;
-use crate::manifest::{hex_encode, Manifest};
+use crate::manifest::{Manifest, hex_encode};
 use crate::pipeline;
 
 // ---------------------------------------------------------------------------
@@ -160,7 +160,8 @@ pub fn execute_reorg(
             .ok_or_else(|| format!("REORG_ERR_BLOCK_MISSING: {}", hex_encode(hash)))?;
         let block = rubin_consensus::parse_block_bytes(&block_bytes)
             .map_err(|e| format!("REORG_ERR_PARSE: {e}"))?;
-        let block_hash_computed = provider.sha3_256(&rubin_consensus::block_header_bytes(&block.header))?;
+        let block_hash_computed =
+            provider.sha3_256(&rubin_consensus::block_header_bytes(&block.header))?;
 
         let idx = store
             .get_block_index(hash)?
