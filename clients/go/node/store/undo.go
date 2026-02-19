@@ -30,7 +30,7 @@ func encodeUndoRecord(u UndoRecord) ([]byte, error) {
 	out := make([]byte, 0, 4+len(u.Spent)*(36+4+64)+4+len(u.Created)*36)
 
 	var tmp4 [4]byte
-	binary.LittleEndian.PutUint32(tmp4[:], uint32(len(u.Spent)))
+	binary.LittleEndian.PutUint32(tmp4[:], uint32(len(u.Spent))) // #nosec G115 -- len checked against 0xffffffff above.
 	out = append(out, tmp4[:]...)
 
 	for _, s := range u.Spent {
@@ -39,12 +39,12 @@ func encodeUndoRecord(u UndoRecord) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		binary.LittleEndian.PutUint32(tmp4[:], uint32(len(utxoBytes)))
+		binary.LittleEndian.PutUint32(tmp4[:], uint32(len(utxoBytes))) // #nosec G115 -- utxo bytes len fits u32; caller encodes bounded utxo entry.
 		out = append(out, tmp4[:]...)
 		out = append(out, utxoBytes...)
 	}
 
-	binary.LittleEndian.PutUint32(tmp4[:], uint32(len(u.Created)))
+	binary.LittleEndian.PutUint32(tmp4[:], uint32(len(u.Created))) // #nosec G115 -- len checked against 0xffffffff above.
 	out = append(out, tmp4[:]...)
 	for _, p := range u.Created {
 		out = append(out, encodeOutpointKey(p)...)
@@ -85,7 +85,7 @@ func decodeUndoRecord(b []byte) (*UndoRecord, error) {
 		if err != nil {
 			return nil, err
 		}
-		if utxoLen > uint32(len(b)-off) {
+		if utxoLen > uint32(len(b)-off) { // #nosec G115 -- len(b)-off is non-negative (checked by prior offset bounds); fits u32.
 			return nil, fmt.Errorf("undo: truncated utxo bytes")
 		}
 		utxoBytes := b[off : off+int(utxoLen)]

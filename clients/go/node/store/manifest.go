@@ -52,7 +52,7 @@ func writeManifestAtomic(chainDir string, m *Manifest) error {
 	final := manifestPath(chainDir)
 	tmp := final + ".tmp"
 
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600) // #nosec G304 -- tmp path is derived from operator-controlled datadir; G302 addressed by 0o600.
 	if err != nil {
 		return fmt.Errorf("manifest open tmp: %w", err)
 	}
@@ -73,7 +73,7 @@ func writeManifestAtomic(chainDir string, m *Manifest) error {
 	}
 
 	// Fsync the directory so rename is durable.
-	d, err := os.Open(chainDir)
+	d, err := os.Open(chainDir) // #nosec G304 -- chainDir is derived from operator-controlled datadir, not user input.
 	if err != nil {
 		return fmt.Errorf("manifest fsync dir open: %w", err)
 	}

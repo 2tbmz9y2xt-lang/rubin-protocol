@@ -274,7 +274,7 @@ func encodeIndexEntry(e BlockIndexEntry) ([]byte, error) {
 	binary.LittleEndian.PutUint64(out[0:8], e.Height)
 	copy(out[8:40], e.PrevHash[:])
 	out[40] = byte(e.Status)
-	binary.LittleEndian.PutUint16(out[41:43], uint16(len(work)))
+	binary.LittleEndian.PutUint16(out[41:43], uint16(len(work))) // #nosec G115 -- len(work) checked against 0xffff above.
 	copy(out[43:], work)
 	return out, nil
 }
