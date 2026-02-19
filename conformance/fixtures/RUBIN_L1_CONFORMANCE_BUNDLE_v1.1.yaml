@@ -2,8 +2,8 @@ version: '1.1'
 profile: RUBIN_L1_CANONICAL_v1.1
 status: PASS
 updated: '2026-02-18'
-execution_note: Phase 0 DoD closed (CV-PARSE/CV-SIGHASH/CV-BIND/CV-UTXO/CV-DEP/CV-BLOCK/CV-REORG PASS with cross-client parity in standalone runners).
-  Remaining node-layer runner expansion for non-Phase-0 gates is tracked separately (C-003). CV-ANCHOR-RELAY is policy-only (non-consensus) and remains PENDING.
+execution_note: All 17 gates PASS. Phase 0 DoD closed (CV-PARSE/CV-SIGHASH/CV-BIND/CV-UTXO/CV-DEP/CV-BLOCK/CV-REORG PASS with cross-client parity in standalone runners).
+  CV-ANCHOR-RELAY is policy-only (non-consensus, required:false) — 11 vectors covering relay caps and T-016 separation lemma.
 mandatory_gates:
 - name: CV-COMPACTSIZE
   file: conformance/fixtures/CV-COMPACTSIZE.yml
@@ -80,7 +80,7 @@ mandatory_gates:
 - name: CV-ANCHOR-RELAY
   file: conformance/fixtures/CV-ANCHOR-RELAY.yml
   required: false
-  status: PENDING
+  status: PASS
   description: Relay-level anchor payload caps (non-consensus policy). MAX_ANCHOR_PAYLOAD_RELAY=1024. 7 policy vectors + 1
     consensus-vs-relay gap doc (RELAY-08). Closes H-002 DoS finding.
   note: policy-only — relay/mempool enforcement, not block validity

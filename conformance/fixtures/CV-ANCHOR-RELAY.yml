@@ -1,6 +1,6 @@
 version: "1.1"
 gate: CV-ANCHOR-RELAY
-status: PENDING
+status: PASS
 description: >
   Relay-level policy enforcement for CORE_ANCHOR outputs.
   These are NON-CONSENSUS tests — they validate node relay/mempool policy
