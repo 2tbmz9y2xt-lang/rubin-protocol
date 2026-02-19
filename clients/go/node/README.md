@@ -6,7 +6,7 @@ Status: development tooling (non-production).
 
 ## Build / Run
 
-From repo root:
+You can run from repo root or from inside `clients/go` (both work).
 
 ```bash
 cd clients/go
@@ -35,6 +35,10 @@ Devnet default profile (as wired in code):
 - `spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md`
 
 You can override it with `--profile <path>`.
+
+Note: profile paths are **repo-relative** and constrained to `spec/` for safety.
+The CLI resolves them relative to the repo root (it searches upwards from the current working directory),
+so `--profile spec/...` works even when running from `clients/go`.
 
 ## Phase 1 Commands (datadir + persistence)
 
