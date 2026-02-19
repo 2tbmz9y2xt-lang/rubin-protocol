@@ -103,12 +103,16 @@ func (d *DB) ImportStage0To3(p crypto.CryptoProvider, blockBytes []byte, opts St
 	// For orphan blocks we only have enough context for PoW+merkle; target/timestamp are validated once ancestry is known.
 	{
 		var ctx consensus.BlockValidationContext
+		var parent *BlockIndexEntry
+		var parentOK bool
 		if prev != ([32]byte{}) {
-			parent, ok, err := d.GetIndex(prev)
+			pidx, ok, err := d.GetIndex(prev)
 			if err != nil {
 				return nil, err
 			}
-			if ok {
+			parent = pidx
+			parentOK = ok
+			if parentOK {
 				height := parent.Height + 1
 				ancestorHeaders, err := d.loadAncestorHeadersForParent(prev, height)
 				if err != nil {
@@ -131,12 +135,9 @@ func (d *DB) ImportStage0To3(p crypto.CryptoProvider, blockBytes []byte, opts St
 
 			var height uint64
 			cumulative := new(big.Int).Set(work)
-			if prev != ([32]byte{}) {
-				parent, ok, _ := d.GetIndex(prev)
-				if ok && parent != nil && parent.CumulativeWork != nil {
-					height = parent.Height + 1
-					cumulative = new(big.Int).Add(parent.CumulativeWork, work)
-				}
+			if prev != ([32]byte{}) && parentOK && parent != nil && parent.CumulativeWork != nil {
+				height = parent.Height + 1
+				cumulative = new(big.Int).Add(parent.CumulativeWork, work)
 			}
 
 			putErr := d.PutIndex(blockHash, BlockIndexEntry{
