@@ -2116,7 +2116,7 @@ def run_chainstate(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: Clie
 
         try:
             exp_tip_height = _to_int(t.get("expected_tip_height"))
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             failures.append(f"{gate}:{test_id}: missing/invalid expected_tip_height")
             continue
         raw_tip_hash = t.get("expected_tip_hash_hex")
@@ -2140,7 +2140,7 @@ def run_chainstate(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: Clie
             tip_hash_g = str(out_g.get("tip_hash_hex", "")).strip().lower()
             utxo_hash_r = str(out_r.get("utxo_set_hash_hex", "")).strip().lower()
             utxo_hash_g = str(out_g.get("utxo_set_hash_hex", "")).strip().lower()
-        except Exception as e:
+        except (AttributeError, TypeError, ValueError, OverflowError) as e:
             failures.append(f"{gate}:{test_id}: invalid chainstate output fields: {e}")
             continue
 

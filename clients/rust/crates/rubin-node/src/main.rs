@@ -714,6 +714,15 @@ fn cmd_chainstate(context_path: &str) -> Result<String, String> {
     let mut tip_height = 0u64;
     let mut tip_hash = [0u8; 32];
 
+    let mut ctx = rubin_consensus::BlockValidationContext {
+        height: 0,
+        ancestor_headers: ancestors,
+        local_time,
+        local_time_set,
+        suite_id_02_active,
+        htlc_v2_active,
+    };
+
     for (i, entry) in blocks.iter().enumerate() {
         let hx = entry
             .as_str()
@@ -724,19 +733,12 @@ fn cmd_chainstate(context_path: &str) -> Result<String, String> {
         let block_bytes = rubin_consensus::hex_decode_strict(hx)?;
         let block = rubin_consensus::parse_block_bytes(&block_bytes)?;
 
-        let ctx = rubin_consensus::BlockValidationContext {
-            height: block_height,
-            ancestor_headers: ancestors.clone(),
-            local_time,
-            local_time_set,
-            suite_id_02_active,
-            htlc_v2_active,
-        };
+        ctx.height = block_height;
         rubin_consensus::apply_block(provider.as_ref(), &chain_id, &block, &mut utxo, &ctx)?;
 
         tip_height = block_height;
         tip_hash = rubin_consensus::block_header_hash(provider.as_ref(), &block.header)?;
-        ancestors.push(block.header);
+        ctx.ancestor_headers.push(block.header);
     }
 
     let utxo_hash = rubin_consensus::utxo_set_hash(provider.as_ref(), &utxo)?;

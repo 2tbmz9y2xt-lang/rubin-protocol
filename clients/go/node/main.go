@@ -686,6 +686,9 @@ func cmdChainstate(contextPath string) (string, error) {
 	var tipHash [32]byte
 	var tipHeight uint64
 	for i, blockHex := range ctx.BlocksHex {
+		if uint64(i) > ^uint64(0)-ctx.StartHeight {
+			return "", fmt.Errorf("start_height overflow")
+		}
 		blockHeight := ctx.StartHeight + uint64(i)
 		blockBytes, err := hexDecodeStrict(blockHex)
 		if err != nil {
