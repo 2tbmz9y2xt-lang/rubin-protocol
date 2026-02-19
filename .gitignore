@@ -49,6 +49,7 @@ rubin-ui/
 
 # Local scratch docs
 IMPLEMENTATION_ROADMAP.md
+RUBIN_WHITEPAPER_*.pdf
 
 # Local scratch crypto notes
 clients/go/_manual_SHA3/
