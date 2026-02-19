@@ -38,7 +38,6 @@ operational/systemd/rubin-node.env
 rubin-ui/
 
 # Local scratch docs
-IMPLEMENTATION_ROADMAP.md
 
 # Security scan artifacts
 clients/go/gosec_output.json
