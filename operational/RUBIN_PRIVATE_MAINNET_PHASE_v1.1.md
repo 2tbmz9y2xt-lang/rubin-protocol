@@ -120,11 +120,12 @@ You authorize the transition only when all are true:
 3. At least **N=3** independent operators confirm pinned `chain_id_hex` and stable operation over **T=7 days**:
    - Confirm pinned `chain_id_hex` = each operator posts an attestation in the incident channel containing:
      org/name, node identifier(s), `chain_id_hex`, current tip (height + hash), and both client versions (Rust/Go if both are run).
-   - Stable operation over **T=7 days** = all are true:
-     - no observed consensus divergence between independent implementations (tip hash matches at scheduled checkpoints),
-     - no unresolved P0/P1 incidents at the end of the window,
-     - no recurring P1/P2 alerts in the final 72 hours,
-     - bootstrap nodes and at least N operators maintain ≥99% availability on the P2P port during the window.
+	   - Stable operation over **T=7 days** = all are true:
+	     - no observed consensus divergence between independent implementations (tip hash matches at scheduled checkpoints:
+	       cadence = every 6 hours at HH:00 UTC; source = operator attestation posts in the incident channel with tip height+hash per client),
+	     - no unresolved P0/P1 incidents at the end of the window,
+	     - no recurring P1/P2 alerts in the final 72 hours ("recurring" = ≥3 alerts of the same name in any 24h window; thresholds per `operational/RUBIN_NODE_POLICY_DEFAULTS_v1.1.md` §8.1),
+	     - bootstrap nodes and at least N operators maintain ≥99% availability on the P2P port during the window (SLI: controller-run TCP connect probe from an allowlisted host every 60s; availability = successful connects / total samples; exclude announced maintenance windows).
 4. Public bootstrap plan is ready:
    - DNS seeds resolve from at least 2 regions/providers,
    - bootstrap nodes are reachable and return expected `chain_id_hex`,

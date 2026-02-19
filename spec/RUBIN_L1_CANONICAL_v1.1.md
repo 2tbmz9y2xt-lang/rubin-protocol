@@ -1,8 +1,8 @@
 # RUBIN L1 Canonical Specification v1.1
 
-Status: CANONICAL  
-Model: Fully Permissionless  
-Scope: L1 consensus + byte-anchored RETL envelope. RETL domain identity and constraints are defined; RETL semantics are application-layer.  
+Status: CANONICAL
+Model: Fully Permissionless
+Scope: L1 consensus + byte-anchored RETL envelope. RETL domain identity and constraints are defined; RETL semantics are application-layer.
 Date: 2026-02-15
 
 This file is normative.
@@ -986,7 +986,7 @@ These parameters are non-consensus operational values unless otherwise reference
 
 ## 7. RETL and ANCHOR Semantics Boundary
 
-**ANCHOR format constraints are consensus-level.**  
+**ANCHOR format constraints are consensus-level.**
 **RETL semantics are application-level.**
 
 Protocol-level constraints:
@@ -1172,7 +1172,7 @@ v1.1 deployment registry:
   published as part of the chain-instance specification (e.g., `spec/RUBIN_L1_DEPLOYMENTS_<NETWORK>_v1.1.md`)
   before nodes can treat the deployment as anything other than `DEFINED`. If a `deployment_id` is not present
   in the chain-instance deployment table, nodes MUST treat it as `DEFINED` / not ACTIVE.
- 
+
 Development status P0 (future release blockers):
 
 1. A concrete chain-instance profile MUST be published for any public network (devnet/testnet/mainnet) fixing exact genesis bytes so all clients derive the same `chain_id`.

@@ -45,10 +45,10 @@ static int32_t rubin_wc_aes_keywrap_call(
 	const uint8_t* kek, size_t kek_len,
 	const uint8_t* key_in, size_t key_in_len,
 	uint8_t* out, size_t* out_len)
-	{
-		if (!p || !p->aes_keywrap) return -99; // symbol not present in shim
-		return p->aes_keywrap(kek, kek_len, key_in, key_in_len, out, out_len);
-	}
+{
+	if (!p || !p->aes_keywrap) return -99; // symbol not present in shim
+	return p->aes_keywrap(kek, kek_len, key_in, key_in_len, out, out_len);
+}
 
 static int32_t rubin_wc_aes_keyunwrap_call(
 	rubin_wc_provider_t* p,

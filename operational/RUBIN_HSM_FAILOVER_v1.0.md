@@ -12,7 +12,7 @@ FIPS 140-3 requires private keys to be stored inside the HSM boundary. If HSM ac
 
 ## Three node states
 
-```
+```text
 NORMAL          - HSM reachable, signing enabled
 READ_ONLY       - HSM unreachable, verification enabled, signing disabled
 FAILED          - HSM unreachable for > MAX_HSM_FAILOVER_WAIT, node stops
@@ -20,7 +20,7 @@ FAILED          - HSM unreachable for > MAX_HSM_FAILOVER_WAIT, node stops
 
 Transitions:
 
-```
+```text
 NORMAL → READ_ONLY   : HSM health check fails (3 consecutive)
 READ_ONLY → NORMAL   : HSM health check passes (1 success)
 READ_ONLY → FAILED   : timeout MAX_HSM_FAILOVER_WAIT exceeded
@@ -51,7 +51,7 @@ RUBIN_HSM_ALERT_WEBHOOK=https://ops.example.com/alerts/hsm
 
 The private key exists in memory only in wrapped (encrypted) form. Unwrapping/decryption happens only inside the HSM boundary. Flow:
 
-```
+```text
 1. Node starts
 2. Requests KEK via PKCS#11: C_WrapKey / C_GetAttributeValue
 3. HSM returns a wrapped key blob
@@ -75,7 +75,7 @@ The private key exists in memory only in wrapped (encrypted) form. Unwrapping/de
 
 ### Scenario: HSM stops responding
 
-```
+```text
 T=0s   NORMAL - normal operation
 T=10s  health check #1 - FAIL - fail_count=1
 T=20s  health check #2 - FAIL - fail_count=2
@@ -101,7 +101,7 @@ Operator:
 
 ### Scenario: planned HSM replacement
 
-```
+```text
 1. Operator export (before replacement):
    rubin-node keymgr export-wrapped --out /secure/backup/key_$(date +%Y%m%d).bin
    # internally: rubin_wc_aes_keywrap(kek_from_hsm, sk_from_hsm, ...)

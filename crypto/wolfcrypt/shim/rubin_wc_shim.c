@@ -33,24 +33,24 @@
 #define RUBIN_SLH_DSA_SHAKE_256F_SIG_BYTES 49856u
 
 /* Error codes for signature verify APIs (negative => failure). */
-#define RUBIN_WC_ERR_SHA3_INPUT_TOO_LARGE -6
+#define RUBIN_WC_ERR_SHA3_INPUT_TOO_LARGE (-6)
 
-#define RUBIN_WC_ERR_ML_DSA87_NULL    -10
-#define RUBIN_WC_ERR_ML_DSA87_INIT    -11
-#define RUBIN_WC_ERR_ML_DSA87_LEVEL   -12
-#define RUBIN_WC_ERR_ML_DSA87_IMPORT  -13
-#define RUBIN_WC_ERR_ML_DSA87_VERIFY  -14
-#define RUBIN_WC_ERR_ML_DSA87_PK_LEN  -15
-#define RUBIN_WC_ERR_ML_DSA87_SIG_LEN -16
+#define RUBIN_WC_ERR_ML_DSA87_NULL    (-10)
+#define RUBIN_WC_ERR_ML_DSA87_INIT    (-11)
+#define RUBIN_WC_ERR_ML_DSA87_LEVEL   (-12)
+#define RUBIN_WC_ERR_ML_DSA87_IMPORT  (-13)
+#define RUBIN_WC_ERR_ML_DSA87_VERIFY  (-14)
+#define RUBIN_WC_ERR_ML_DSA87_PK_LEN  (-15)
+#define RUBIN_WC_ERR_ML_DSA87_SIG_LEN (-16)
 
-#define RUBIN_WC_ERR_SLH_NULL    -20
-#define RUBIN_WC_ERR_SLH_INIT    -21
-#define RUBIN_WC_ERR_SLH_LEVEL   -22
-#define RUBIN_WC_ERR_SLH_IMPORT  -23
-#define RUBIN_WC_ERR_SLH_VERIFY  -24
-#define RUBIN_WC_ERR_SLH_UNAVAILABLE -25
-#define RUBIN_WC_ERR_SLH_PK_LEN  -26
-#define RUBIN_WC_ERR_SLH_SIG_LEN -27
+#define RUBIN_WC_ERR_SLH_NULL    (-20)
+#define RUBIN_WC_ERR_SLH_INIT    (-21)
+#define RUBIN_WC_ERR_SLH_LEVEL   (-22)
+#define RUBIN_WC_ERR_SLH_IMPORT  (-23)
+#define RUBIN_WC_ERR_SLH_VERIFY  (-24)
+#define RUBIN_WC_ERR_SLH_UNAVAILABLE (-25)
+#define RUBIN_WC_ERR_SLH_PK_LEN  (-26)
+#define RUBIN_WC_ERR_SLH_SIG_LEN (-27)
 
 #include <wolfssl/options.h>
 #include <wolfssl/wolfcrypt/sha3.h>
@@ -115,7 +115,7 @@ int32_t rubin_wc_verify_mldsa87(const uint8_t* pk, size_t pk_len,
         return RUBIN_WC_ERR_ML_DSA87_SIG_LEN;
     }
 
-    int rc;
+    int rc = 0;
     dilithium_key key;
     rc = wc_dilithium_init(&key);
     if (rc != 0) {
