@@ -12,7 +12,6 @@ const utxoSetHashDST = "RUBINv1-utxo-set-hash/"
 
 type utxoSetHashItem struct {
 	key   [36]byte
-	point TxOutPoint
 	entry UtxoEntry
 }
 
@@ -30,7 +29,6 @@ func UtxoSetHash(p crypto.CryptoProvider, utxo map[TxOutPoint]UtxoEntry) ([32]by
 	for point, entry := range utxo {
 		items = append(items, utxoSetHashItem{
 			key:   outpointKeyBytes(point),
-			point: point,
 			entry: entry,
 		})
 	}
