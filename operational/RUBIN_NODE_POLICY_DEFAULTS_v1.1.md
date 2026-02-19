@@ -128,6 +128,29 @@ Nodes SHOULD:
 
 This is policy guidance; it is not a consensus requirement.
 
+### 2.3 Clock skew handling (BLOCK_ERR_TIMESTAMP_FUTURE)
+
+Consensus rule (CANONICAL v1.1 §6.5.3):
+- A block is invalid if `timestamp(B_h) > local_time + MAX_FUTURE_DRIFT` and MUST be rejected as
+  `BLOCK_ERR_TIMESTAMP_FUTURE`.
+
+Operational reality:
+- `local_time` is node-local system time and is not globally consistent across the network.
+- Therefore, the same header may be temporarily rejected as "future" by some nodes while being
+  accepted by others, until wall-clock time catches up.
+
+Recommended default policy (non-consensus):
+- Do **not** immediately ban-score or disconnect a peer solely for relaying a future-timestamp block,
+  unless the peer repeatedly sends far-future blocks beyond a configured abuse threshold.
+- Cache the block/header as a **deferred candidate** and re-evaluate when `local_time` advances.
+- If the deferred block becomes valid under the consensus time rule, process it normally.
+
+Operator guidance:
+- Nodes SHOULD run a stable time source (NTP/chrony) and monitor local clock drift.
+- If the local clock is detected to be behind wall-clock by more than `MAX_FUTURE_DRIFT / 2`,
+  operators SHOULD treat all future-timestamp rejections as suspect and fix system time before
+  attributing misbehavior to peers.
+
 ## 3. ANCHOR spam resistance (policy)
 
 Because `CORE_ANCHOR` outputs are non-spendable and require `value = 0` by consensus (CANONICAL v1.1 §3.6), spam pressure must be handled primarily by policy.
