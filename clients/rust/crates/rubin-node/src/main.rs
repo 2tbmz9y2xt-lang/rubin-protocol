@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use rubin_crypto::CryptoProvider;
 
@@ -994,6 +994,9 @@ fn usage() {
         "  verify (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-height <u64> | --chain-timestamp <u64> | --chain-id-hex <hex64> | --profile <path> | --suite-id-02-active | --htlc-v2-active]"
     );
     eprintln!("  reorg --context-json <path>");
+    eprintln!("  init --datadir <path> [--profile <path>]");
+    eprintln!("  import-block --datadir <path> (--block-hex <hex> | --block-hex-file <path>) [--profile <path>]");
+    eprintln!("  utxo-set-hash --datadir <path> [--profile <path>]");
 }
 
 fn cmd_version() -> i32 {
@@ -1489,6 +1492,406 @@ fn cmd_sighash_main(args: &[String]) -> i32 {
     0
 }
 
+// ---------------------------------------------------------------------------
+// Storage-backed commands: init, import-block, utxo-set-hash
+// ---------------------------------------------------------------------------
+
+fn resolve_chain_dir(datadir: &str, chain_id_hex: &str) -> PathBuf {
+    PathBuf::from(datadir)
+        .join("chains")
+        .join(chain_id_hex)
+}
+
+fn cmd_init_main(args: &[String]) -> i32 {
+    let datadir = match get_flag(args, "--datadir") {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            eprintln!("missing required flag: --datadir");
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let profile = match get_flag(args, "--profile") {
+        Ok(v) => v.unwrap_or_else(|| DEFAULT_CHAIN_PROFILE.to_string()),
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+
+    let provider = match load_crypto_provider() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("crypto provider: {e}");
+            return 1;
+        }
+    };
+
+    let chain_id = match derive_chain_id(provider.as_ref(), &profile) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("derive chain_id: {e}");
+            return 1;
+        }
+    };
+    let chain_id_hex = hex_encode(&chain_id);
+
+    let chain_dir = resolve_chain_dir(&datadir, &chain_id_hex);
+    let db_dir = chain_dir.join("db");
+
+    if let Err(e) = fs::create_dir_all(&db_dir) {
+        eprintln!("create datadir: {e}");
+        return 1;
+    }
+
+    let db_path = db_dir.join("data.redb");
+    let store = match rubin_store::Store::open(&db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("open db: {e}");
+            return 1;
+        }
+    };
+
+    // Load genesis block from profile.
+    let safe_profile = match resolve_profile_path(&profile) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("profile: {e}");
+            return 1;
+        }
+    };
+    let doc = match fs::read_to_string(&safe_profile) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("read profile: {e}");
+            return 1;
+        }
+    };
+    let header_hex = match extract_fenced_hex(&doc, "genesis_header_bytes") {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("genesis header: {e}");
+            return 1;
+        }
+    };
+    let tx_hex = match extract_fenced_hex(&doc, "genesis_tx_bytes") {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("genesis tx: {e}");
+            return 1;
+        }
+    };
+
+    let header_bytes = match rubin_consensus::hex_decode_strict(&header_hex) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("decode header hex: {e}");
+            return 1;
+        }
+    };
+    let tx_bytes = match rubin_consensus::hex_decode_strict(&tx_hex) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("decode tx hex: {e}");
+            return 1;
+        }
+    };
+
+    // Build genesis block bytes: header_bytes || compact_size(1) || tx_bytes.
+    let mut genesis_block_bytes = Vec::new();
+    genesis_block_bytes.extend_from_slice(&header_bytes);
+    genesis_block_bytes.extend_from_slice(&rubin_consensus::compact_size_encode(1));
+    genesis_block_bytes.extend_from_slice(&tx_bytes);
+
+    let manifest_path = rubin_store::Manifest::path_in(&chain_dir);
+
+    // Check if already initialized.
+    if manifest_path.exists() {
+        eprintln!("already initialized at {}", chain_dir.display());
+        return 1;
+    }
+
+    // Import genesis block via the pipeline.
+    let genesis_hash = match provider.sha3_256(&header_bytes) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("hash genesis header: {e}");
+            return 1;
+        }
+    };
+
+    // Create initial manifest (height 0, genesis).
+    let genesis_work = rubin_store::keys::header_work(
+        &match parse_block_header_bytes_strict(&header_bytes) {
+            Ok(h) => h.target,
+            Err(e) => {
+                eprintln!("parse genesis header: {e}");
+                return 1;
+            }
+        },
+    );
+    let genesis_hash_hex = hex_encode(&genesis_hash);
+
+    let mut manifest =
+        rubin_store::Manifest::genesis(&chain_id_hex, &genesis_hash_hex, genesis_work);
+
+    // Use pipeline to import genesis.
+    match rubin_store::import_block(
+        &store,
+        &mut manifest,
+        &manifest_path,
+        provider.as_ref(),
+        &chain_id,
+        &genesis_block_bytes,
+    ) {
+        Ok(result) => {
+            match &result {
+                rubin_store::ImportResult::AcceptedNewTip { height, block_hash } => {
+                    println!(
+                        "initialized: chain_id={} genesis_hash={} height={}",
+                        chain_id_hex,
+                        hex_encode(block_hash),
+                        height,
+                    );
+                }
+                other => {
+                    eprintln!("unexpected genesis import result: {:?}", other);
+                    return 1;
+                }
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("import genesis: {e}");
+            1
+        }
+    }
+}
+
+fn cmd_import_block_main(args: &[String]) -> i32 {
+    let datadir = match get_flag(args, "--datadir") {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            eprintln!("missing required flag: --datadir");
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+
+    let block_hex = match get_flag(args, "--block-hex") {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let block_hex_file = match get_flag(args, "--block-hex-file") {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+
+    let hex_str = if block_hex.is_some() && block_hex_file.is_some() {
+        eprintln!("use exactly one of --block-hex or --block-hex-file");
+        return 2;
+    } else if let Some(hex) = block_hex {
+        hex
+    } else if let Some(path) = block_hex_file {
+        match fs::read_to_string(&path) {
+            Ok(s) => {
+                let trimmed = s.trim().to_string();
+                if trimmed.is_empty() {
+                    eprintln!("--block-hex-file is empty");
+                    return 2;
+                }
+                trimmed
+            }
+            Err(e) => {
+                eprintln!("read --block-hex-file: {e}");
+                return 2;
+            }
+        }
+    } else {
+        eprintln!("missing required flag: --block-hex (or --block-hex-file)");
+        return 2;
+    };
+
+    let block_bytes = match rubin_consensus::hex_decode_strict(&hex_str) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("decode block hex: {e}");
+            return 1;
+        }
+    };
+
+    let provider = match load_crypto_provider() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("crypto provider: {e}");
+            return 1;
+        }
+    };
+
+    let profile = match get_flag(args, "--profile") {
+        Ok(v) => v.unwrap_or_else(|| DEFAULT_CHAIN_PROFILE.to_string()),
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+
+    let chain_id = match derive_chain_id(provider.as_ref(), &profile) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("derive chain_id: {e}");
+            return 1;
+        }
+    };
+    let chain_id_hex = hex_encode(&chain_id);
+
+    let chain_dir = resolve_chain_dir(&datadir, &chain_id_hex);
+    let manifest_path = rubin_store::Manifest::path_in(&chain_dir);
+
+    let mut manifest = match rubin_store::Manifest::load(&manifest_path) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("load manifest: {e} (did you run `init`?)");
+            return 1;
+        }
+    };
+
+    let db_path = chain_dir.join("db").join("data.redb");
+    let store = match rubin_store::Store::open(&db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("open db: {e}");
+            return 1;
+        }
+    };
+
+    match rubin_store::import_block(
+        &store,
+        &mut manifest,
+        &manifest_path,
+        provider.as_ref(),
+        &chain_id,
+        &block_bytes,
+    ) {
+        Ok(result) => {
+            match &result {
+                rubin_store::ImportResult::AcceptedNewTip { height, block_hash } => {
+                    println!("accepted height={} hash={}", height, hex_encode(block_hash));
+                }
+                rubin_store::ImportResult::StoredNotSelected { height, block_hash } => {
+                    println!(
+                        "stored (not selected) height={} hash={}",
+                        height,
+                        hex_encode(block_hash),
+                    );
+                }
+                rubin_store::ImportResult::Orphaned { block_hash } => {
+                    println!("orphaned hash={}", hex_encode(block_hash));
+                }
+                rubin_store::ImportResult::Rejected { block_hash, reason } => {
+                    eprintln!(
+                        "rejected hash={} reason={}",
+                        hex_encode(block_hash),
+                        reason,
+                    );
+                    return 1;
+                }
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("import-block error: {e}");
+            1
+        }
+    }
+}
+
+fn cmd_utxo_set_hash_main(args: &[String]) -> i32 {
+    let datadir = match get_flag(args, "--datadir") {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            eprintln!("missing required flag: --datadir");
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+
+    let provider = match load_crypto_provider() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("crypto provider: {e}");
+            return 1;
+        }
+    };
+
+    let profile = match get_flag(args, "--profile") {
+        Ok(v) => v.unwrap_or_else(|| DEFAULT_CHAIN_PROFILE.to_string()),
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+
+    let chain_id = match derive_chain_id(provider.as_ref(), &profile) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("derive chain_id: {e}");
+            return 1;
+        }
+    };
+    let chain_id_hex = hex_encode(&chain_id);
+
+    let chain_dir = resolve_chain_dir(&datadir, &chain_id_hex);
+    let manifest_path = rubin_store::Manifest::path_in(&chain_dir);
+
+    let manifest = match rubin_store::Manifest::load(&manifest_path) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("load manifest: {e} (did you run `init`?)");
+            return 1;
+        }
+    };
+
+    let db_path = chain_dir.join("db").join("data.redb");
+    let store = match rubin_store::Store::open(&db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("open db: {e}");
+            return 1;
+        }
+    };
+
+    match rubin_store::utxo_set_hash(&store, provider.as_ref()) {
+        Ok(hash) => {
+            println!(
+                "tip_height={} tip_hash={} utxo_set_hash={}",
+                manifest.tip_height, manifest.tip_hash, hex_encode(&hash),
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("utxo-set-hash error: {e}");
+            1
+        }
+    }
+}
+
 fn dispatch(cmd: &str, args: &[String]) -> i32 {
     match cmd {
         "version" => cmd_version(),
@@ -1504,6 +1907,9 @@ fn dispatch(cmd: &str, args: &[String]) -> i32 {
         "compactsize" => cmd_compactsize_main(args),
         "sighash" => cmd_sighash_main(args),
         "verify" => cmd_verify_main(args),
+        "init" => cmd_init_main(args),
+        "import-block" => cmd_import_block_main(args),
+        "utxo-set-hash" => cmd_utxo_set_hash_main(args),
         _ => {
             eprintln!("unknown command: {cmd}");
             2
