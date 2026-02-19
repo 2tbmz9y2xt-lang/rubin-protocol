@@ -209,6 +209,19 @@ func validateOutputCovenantConstraints(output TxOutput) error {
 		if len(output.CovenantData) != 73 && len(output.CovenantData) != 81 {
 			return fmt.Errorf("TX_ERR_PARSE")
 		}
+		// ownerKeyID = [0:32], recoveryKeyID = [41:73] (73-byte layout)
+		// or [0:32], [49:81] (81-byte layout with spend_delay).
+		// owner == recovery would create an unspendable output — reject at creation.
+		ownerKeyID := output.CovenantData[:32]
+		var recoveryKeyID []byte
+		if len(output.CovenantData) == 73 {
+			recoveryKeyID = output.CovenantData[41:73]
+		} else {
+			recoveryKeyID = output.CovenantData[49:81]
+		}
+		if bytes.Equal(ownerKeyID, recoveryKeyID) {
+			return fmt.Errorf("TX_ERR_PARSE")
+		}
 	case CORE_RESERVED_FUTURE:
 		return fmt.Errorf("TX_ERR_COVENANT_TYPE_INVALID")
 	default:

@@ -63,14 +63,44 @@ func TestValidateOutputCovenantConstraintsExtended(t *testing.T) {
 	})
 
 	t.Run("VAULT_V1 len=73 OK", func(t *testing.T) {
-		if err := validateOutputCovenantConstraints(TxOutput{CovenantType: CORE_VAULT_V1, CovenantData: make([]byte, 73)}); err != nil {
+		data := make([]byte, 73)
+		// ownerKeyID [0:32] = 0x11..., recoveryKeyID [41:73] = 0x22... (distinct)
+		for i := 0; i < 32; i++ { data[i] = 0x11 }
+		for i := 41; i < 73; i++ { data[i] = 0x22 }
+		if err := validateOutputCovenantConstraints(TxOutput{CovenantType: CORE_VAULT_V1, CovenantData: data}); err != nil {
 			t.Fatalf("expected OK, got %v", err)
 		}
 	})
 
 	t.Run("VAULT_V1 len=81 OK", func(t *testing.T) {
-		if err := validateOutputCovenantConstraints(TxOutput{CovenantType: CORE_VAULT_V1, CovenantData: make([]byte, 81)}); err != nil {
+		data := make([]byte, 81)
+		// ownerKeyID [0:32] = 0x11..., recoveryKeyID [49:81] = 0x22... (distinct)
+		for i := 0; i < 32; i++ { data[i] = 0x11 }
+		for i := 49; i < 81; i++ { data[i] = 0x22 }
+		if err := validateOutputCovenantConstraints(TxOutput{CovenantType: CORE_VAULT_V1, CovenantData: data}); err != nil {
 			t.Fatalf("expected OK, got %v", err)
+		}
+	})
+
+	t.Run("VAULT_V1 owner==recovery len=73 parse", func(t *testing.T) {
+		data := make([]byte, 73)
+		// ownerKeyID == recoveryKeyID → both 0x11... → unspendable → reject
+		for i := 0; i < 32; i++ { data[i] = 0x11 }
+		for i := 41; i < 73; i++ { data[i] = 0x11 }
+		err := validateOutputCovenantConstraints(TxOutput{CovenantType: CORE_VAULT_V1, CovenantData: data})
+		if err == nil || err.Error() != "TX_ERR_PARSE" {
+			t.Fatalf("expected TX_ERR_PARSE, got %v", err)
+		}
+	})
+
+	t.Run("VAULT_V1 owner==recovery len=81 parse", func(t *testing.T) {
+		data := make([]byte, 81)
+		// ownerKeyID == recoveryKeyID → both 0x11... → unspendable → reject
+		for i := 0; i < 32; i++ { data[i] = 0x11 }
+		for i := 49; i < 81; i++ { data[i] = 0x11 }
+		err := validateOutputCovenantConstraints(TxOutput{CovenantType: CORE_VAULT_V1, CovenantData: data})
+		if err == nil || err.Error() != "TX_ERR_PARSE" {
+			t.Fatalf("expected TX_ERR_PARSE, got %v", err)
 		}
 	})
 
