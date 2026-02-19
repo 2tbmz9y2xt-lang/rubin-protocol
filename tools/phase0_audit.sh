@@ -10,6 +10,15 @@ warn() { echo "⚠️  $*" >&2; }
 
 echo "== Phase-0 audit (spec ↔ Go ↔ tests) =="
 
+# Cleanup temp files (best-effort).
+TMPFILES=()
+cleanup() {
+  for f in "${TMPFILES[@]:-}"; do
+    rm -f "$f" 2>/dev/null || true
+  done
+}
+trap cleanup EXIT
+
 # ---- 0) Required files / structure ----
 [[ -f "spec/RUBIN_L1_CANONICAL_v1.1.md" ]] || fail "Missing spec/RUBIN_L1_CANONICAL_v1.1.md"
 [[ -f "clients/go/go.mod" ]] || fail "Missing clients/go/go.mod"
@@ -61,10 +70,12 @@ ok "Spec/Go contain HTLC_V2 + deployment-inactive error token (existence check)"
   go test ./consensus -count=1 -coverprofile=coverage_consensus.out -covermode=atomic
   go tool cover -func=coverage_consensus.out | tee coverage_consensus.txt
 
-  TOTAL_LINE="$(go tool cover -func=coverage_consensus.out | tail -n 1 | awk '{print $3}' | tr -d '%')"
-  if [[ -n "${TOTAL_LINE}" ]]; then
-    awk -v x="$TOTAL_LINE" 'BEGIN{ if (x+0 < 70.0) exit 1; }' || fail "Consensus coverage < 70% (raise threshold per Phase-0 target)"
+  TOTAL_LINE_RAW="$(go tool cover -func=coverage_consensus.out | tail -n 1)"
+  TOTAL_LINE="$(printf '%s' "$TOTAL_LINE_RAW" | grep -Eo '[0-9]+([.][0-9]+)?%' | tail -n 1 | tr -d '%')"
+  if [[ -z "${TOTAL_LINE}" ]] || ! printf '%s' "${TOTAL_LINE}" | grep -Eq '^[0-9]+([.][0-9]+)?$'; then
+    fail "Failed to parse consensus coverage percentage from: ${TOTAL_LINE_RAW}"
   fi
+  awk -v x="$TOTAL_LINE" 'BEGIN{ if (x+0 < 70.0) exit 1; }' || fail "Consensus coverage < 70% (raise threshold per Phase-0 target)"
 )
 
 # ---- 3) Optional security/static analysis ----
@@ -98,12 +109,20 @@ fi
 
 if command -v semgrep >/dev/null 2>&1; then
   ok "semgrep"
-  if ! semgrep --config p/ci --config p/security-audit --config p/secrets . >/tmp/phase0_semgrep.log 2>&1; then
-    if rg -q "HTTP 401|connection error|failed to download" /tmp/phase0_semgrep.log; then
+  SEMGREP_LOG="$(mktemp -t rubin-phase0-semgrep.XXXXXX.log)"
+  TMPFILES+=("$SEMGREP_LOG")
+  if ! semgrep --config p/ci --config p/security-audit --config p/secrets . >"$SEMGREP_LOG" 2>&1; then
+    if grep -E -q "HTTP 401|connection error|failed to download" "$SEMGREP_LOG"; then
       warn "semgrep remote config fetch failed (no network / 401), fallback to local config tools/semgrep_phase0_local.yml"
-      semgrep --config tools/semgrep_phase0_local.yml . || true
+      set +e
+      semgrep --config tools/semgrep_phase0_local.yml .
+      semgrep_exit=$?
+      set -e
+      if [[ $semgrep_exit -ne 0 ]]; then
+        warn "semgrep local config returned exit=$semgrep_exit (findings present); Phase-0 audit does not fail on this by default"
+      fi
     else
-      cat /tmp/phase0_semgrep.log
+      cat "$SEMGREP_LOG"
       fail "semgrep failed for unexpected reason"
     fi
   fi
