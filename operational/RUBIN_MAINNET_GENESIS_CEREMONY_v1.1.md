@@ -30,10 +30,41 @@ The ceremony produces and publishes:
 
 1. Decide the exact mainnet genesis parameters (timestamp, target, nonce, coinbase output policy, etc.).
 2. Freeze the repo revision used as the “spec publication point”:
-   - identify commit `SPEC_COMMIT` (Git SHA) that contains CANONICAL v1.1 and the mainnet profile file.
+   - identify commit `SPEC_COMMIT` (Git SHA) that contains CANONICAL v1.1 and the **final** mainnet profile values (including concrete genesis bytes).
 3. Select a signing key and a signing algorithm for the *manifest signature*.
    - Recommended: a widely supported, offline-friendly signature scheme (e.g., minisign or OpenPGP).
    - The signature is **not** a consensus primitive; it is a publication authenticity mechanism.
+
+### Tooling (recommended, non-consensus)
+
+Use the deterministic genesis builder to avoid hand-editing or inconsistent derivations:
+
+- Verify the current profile is self-consistent (derivations match the published bytes):
+
+```bash
+python3 scripts/genesis/build_genesis_v1_1.py \
+  --profile spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_MAINNET_v1.1.md \
+  --verify-profile
+```
+
+- Update the mainnet profile in-place during the ceremony (controller/operator workflow):
+
+```bash
+python3 scripts/genesis/build_genesis_v1_1.py \
+  --profile spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_MAINNET_v1.1.md \
+  --update-profile \
+  --schedule-csv <path-to-dev-fund-schedule.csv> \
+  --recovery-key-id-unspendable-hex <bytes32hex> \
+  --timestamp <u64> \
+  --target-hex <hex32> \
+  --nonce <u64>
+```
+
+Notes:
+- If you use a premine/dev-fund schedule, it is an *input artifact* only; do not publish private keys. See:
+  - `operational/RUBIN_GENESIS_DEV_FUND_SCHEDULE_TEMPLATE_v1.1.md`
+  - `scripts/genesis/README.md`
+- After updating the profile, commit the changes. The resulting commit hash is the `SPEC_COMMIT` you must tag/release.
 
 ## 2. Deterministic derivations (must match spec)
 
@@ -59,6 +90,7 @@ genesis_block_hash = SHA3-256(genesis_header_bytes)
 2. Recompute and update the derived:
    - `chain_id`
    - `genesis_block_hash`
+3. Commit the changes and record the commit hash as `SPEC_COMMIT`.
 
 ### Step 2 — Independent verification (required)
 
