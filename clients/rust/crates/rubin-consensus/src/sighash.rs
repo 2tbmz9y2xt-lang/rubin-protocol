@@ -1,7 +1,5 @@
 use crate::encode::tx_output_bytes;
-use crate::{
-    compact_size_encode, Tx, TX_KIND_DA_CHUNK, TX_KIND_DA_COMMIT, TX_KIND_STANDARD,
-};
+use crate::{TX_KIND_DA_CHUNK, TX_KIND_DA_COMMIT, TX_KIND_STANDARD, Tx, compact_size_encode};
 use rubin_crypto::CryptoProvider;
 
 fn da_core_fields_bytes(tx: &Tx) -> Result<Vec<u8>, String> {

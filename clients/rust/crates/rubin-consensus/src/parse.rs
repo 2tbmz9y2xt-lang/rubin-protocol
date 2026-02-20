@@ -1,8 +1,8 @@
 use crate::wire::Cursor;
 use crate::{
-    DAChunkFields, DACommitFields, BLOCK_ERR_PARSE, Block, BlockHeader, Tx, TxInput, TxOutput,
-    WitnessItem, WitnessSection, MAX_DA_CHUNK_BYTES_PER_TX, MAX_DA_MANIFEST_BYTES_PER_TX,
-    TX_KIND_DA_CHUNK, TX_KIND_DA_COMMIT, TX_KIND_STANDARD, TX_VERSION_V2,
+    BLOCK_ERR_PARSE, Block, BlockHeader, DAChunkFields, DACommitFields, MAX_DA_CHUNK_BYTES_PER_TX,
+    MAX_DA_MANIFEST_BYTES_PER_TX, TX_KIND_DA_CHUNK, TX_KIND_DA_COMMIT, TX_KIND_STANDARD,
+    TX_VERSION_V2, Tx, TxInput, TxOutput, WitnessItem, WitnessSection,
 };
 
 pub fn parse_tx_bytes(bytes: &[u8]) -> Result<Tx, String> {

@@ -17,9 +17,8 @@ use crate::{
     BLOCK_ERR_TARGET_INVALID, BLOCK_ERR_TIMESTAMP_FUTURE, BLOCK_ERR_TIMESTAMP_OLD,
     BLOCK_ERR_WEIGHT_EXCEEDED, Block, BlockValidationContext, COINBASE_MATURITY, CORE_ANCHOR,
     CORE_DA_COMMIT, CORE_HTLC_V1, CORE_HTLC_V2, CORE_P2PK, CORE_RESERVED_FUTURE, CORE_TIMELOCK_V1,
-    CORE_VAULT_V1,
-    MAX_ANCHOR_BYTES_PER_BLOCK, MAX_ANCHOR_PAYLOAD_SIZE, MAX_BLOCK_WEIGHT, MAX_FUTURE_DRIFT,
-    MAX_TX_INPUTS, MAX_TX_OUTPUTS, MAX_WITNESS_BYTES_PER_TX, MAX_WITNESS_ITEMS,
+    CORE_VAULT_V1, MAX_ANCHOR_BYTES_PER_BLOCK, MAX_ANCHOR_PAYLOAD_SIZE, MAX_BLOCK_WEIGHT,
+    MAX_FUTURE_DRIFT, MAX_TX_INPUTS, MAX_TX_OUTPUTS, MAX_WITNESS_BYTES_PER_TX, MAX_WITNESS_ITEMS,
     ML_DSA_PUBKEY_BYTES, ML_DSA_SIG_BYTES, SLH_DSA_PUBKEY_BYTES, SLH_DSA_SIG_MAX_BYTES,
     SUITE_ID_ML_DSA, SUITE_ID_SENTINEL, SUITE_ID_SLH_DSA, TIMELOCK_MODE_HEIGHT,
     TIMELOCK_MODE_TIMESTAMP, TX_COINBASE_PREVOUT_VOUT, TX_ERR_COINBASE_IMMATURE,
@@ -600,9 +599,7 @@ pub fn validate_input_authorization(
             {
                 return Err("TX_ERR_SIG_INVALID".into());
             }
-            if actual_key_id.as_slice() == owner_key_id
-                && spend_delay > 0
-            {
+            if actual_key_id.as_slice() == owner_key_id && spend_delay > 0 {
                 let unlock_height = prev_creation_height
                     .checked_add(spend_delay)
                     .ok_or("TX_ERR_TIMELOCK_NOT_MET")?;

@@ -1,6 +1,6 @@
 use crate::{
-    compact_size_encode, BlockHeader, DAChunkFields, DACommitFields, Tx, TxOutput, WitnessItem,
-    WitnessSection, TX_KIND_DA_CHUNK, TX_KIND_DA_COMMIT, TX_KIND_STANDARD,
+    BlockHeader, DAChunkFields, DACommitFields, TX_KIND_DA_CHUNK, TX_KIND_DA_COMMIT,
+    TX_KIND_STANDARD, Tx, TxOutput, WitnessItem, WitnessSection, compact_size_encode,
 };
 
 pub fn block_header_bytes(h: &BlockHeader) -> [u8; 116] {
