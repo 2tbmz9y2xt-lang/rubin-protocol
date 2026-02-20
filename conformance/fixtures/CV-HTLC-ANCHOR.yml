@@ -183,15 +183,13 @@ tests:
       chain_timestamp: 1700000600
       suite_id_02_active: true
       htlc_v2_active: true
-      anchor_outputs:
-        - payload: "RUBINv1-htlc-preimage/<preimage32>"   # matching envelope (1)
-        - payload: "RUBINv1-retl-batch/..."               # non-matching: wrong prefix
-        - payload: "<arbitrary app data>"                  # non-matching: wrong len
-        - payload: "RUBINv1-keymig-v1/..."                # non-matching: wrong prefix
-      note: >
-        tx_hex omitted — this test is spec-narrative only.
-        See HTLC2-08 for a fully-encoded equivalent with one non-matching anchor.
-        Implementations MUST pass HTLC2-08 as the authoritative binary test.
+      tx_hex: "010000000100000000000000010303030303030303030303030303030303030303030303030303030303030303000000000000000000040000000000000000020036525542494e76312d68746c632d707265696d6167652f11111111111111111111111111111111111111111111111111111111111111110000000000000000020004010203040000000000000000020016525542494e76312d7265746c2d62617463682f2e2e2e0000000000000000020015525542494e76312d6b65796d69672d76312f2e2e2e00000000010240000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100"
+      utxo_set:
+        - txid: "0303030303030303030303030303030303030303030303030303030303030303"
+          vout: 0
+          value: 1000
+          covenant_type: 258
+          covenant_data: "e2929f80ffdaaa51c427cbf42df6679013fddb1630bc28f234ca48692b35399200f401000000000000070fa1ab6fcc557ed14d42941f1967693048551eb9042a8d0a057afbd75e81e03333333333333333333333333333333333333333333333333333333333333333"
     expected_error: TX_ERR_SIG_INVALID
     spec_ref: "CANONICAL §4.1 item 6 — matching set filtered by prefix+len"
     closes: Q-048
