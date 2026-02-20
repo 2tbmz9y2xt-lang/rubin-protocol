@@ -8,6 +8,7 @@ Supporting documents:
 - Crypto agility (aux): `spec/RUBIN_L1_CRYPTO_AGILITY_UPGRADE_v1.1.md`
 - P2P protocol (aux): `spec/RUBIN_L1_P2P_PROTOCOL_v1.1.md`
 - P2P conformance plan (aux): `spec/RUBIN_L1_P2P_CONFORMANCE_PLAN_v1.1.md`
+- RETL/L2 on-chain DA MVP (aux, draft): `spec/RUBIN_L2_RETL_ONCHAIN_DA_MVP_v1.1.md`
 - Formal appendix (non-normative): `formal/RUBIN_FORMAL_APPENDIX_v1.1.md`
 - Operational security (non-normative): `operational/RUBIN_OPERATIONAL_SECURITY_v1.1.md`
 - Node policy defaults (non-consensus): `operational/RUBIN_NODE_POLICY_DEFAULTS_v1.1.md`

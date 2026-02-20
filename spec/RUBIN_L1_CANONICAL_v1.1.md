@@ -1104,6 +1104,9 @@ Accordingly:
    cross-chain data in L1.
 3. Any increase of `MAX_ANCHOR_PAYLOAD_SIZE` or `MAX_ANCHOR_BYTES_PER_BLOCK` changes block validity and therefore
    MUST be performed via a consensus upgrade (VERSION_BITS deployment) and conformance re-baselining.
+4. Future note (non-normative): a separate on-chain DA carrier (not `CORE_ANCHOR`) may be introduced in a future
+   canonical revision to support public RETL/L2 data availability at higher byte volumes. A draft `DA_OBJECT` wire
+   format and DoS caps are specified in `spec/RUBIN_L2_RETL_ONCHAIN_DA_MVP_v1.1.md`.
 
 Coinbase transactions MAY include `CORE_ANCHOR` outputs, subject to the same per-output and per-block `anchor_data`
 limits as any other transaction.
