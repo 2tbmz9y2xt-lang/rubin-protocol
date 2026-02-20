@@ -147,4 +147,3 @@ func TestChecksumMismatchBan10NoDisconnect(t *testing.T) {
 		t.Fatalf("expected no disconnect +10 ban, got disconnect=%v ban=%d", rerr.Disconnect, rerr.BanScoreDelta)
 	}
 }
-

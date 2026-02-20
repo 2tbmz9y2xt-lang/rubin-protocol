@@ -188,4 +188,3 @@ func ReadMessage(r io.Reader, p crypto.CryptoProvider, expectedMagic uint32) (*M
 
 	return &Message{Magic: magic, Command: cmd, Payload: payload}, nil
 }
-
