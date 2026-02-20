@@ -13,4 +13,8 @@ wolfcrypt-dylib = ["rubin-crypto/wolfcrypt-dylib"]
 rubin-consensus = { path = "../rubin-consensus" }
 rubin-crypto = { path = "../rubin-crypto" }
 rubin-store = { path = "../rubin-store" }
+aes = "0.8"
 serde_json = "1.0"
+
+[dev-dependencies]
+tempfile = "3"
