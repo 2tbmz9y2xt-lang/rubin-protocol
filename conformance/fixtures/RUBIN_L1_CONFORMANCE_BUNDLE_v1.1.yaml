@@ -5,6 +5,18 @@ updated: '2026-02-18'
 execution_note: All 17 gates PASS. Phase 0 DoD closed (CV-PARSE/CV-SIGHASH/CV-BIND/CV-UTXO/CV-DEP/CV-BLOCK/CV-REORG PASS with cross-client parity in standalone runners).
   CV-ANCHOR-RELAY is policy-only (non-consensus, required:false) — 11 vectors covering relay caps and T-016 separation lemma.
 mandatory_gates:
+- name: CV-STORAGE
+  file: conformance/fixtures/CV-STORAGE.yml
+  required: false
+  status: DRAFT
+  description: Phase 1 engineering gate (storage layout + manifest + DB file checks)
+  note: non-consensus
+- name: CV-IMPORT
+  file: conformance/fixtures/CV-IMPORT.yml
+  required: false
+  status: DRAFT
+  description: Phase 1 engineering gate (import pipeline staged semantics)
+  note: non-consensus
 - name: CV-COMPACTSIZE
   file: conformance/fixtures/CV-COMPACTSIZE.yml
   required: true
@@ -53,6 +65,12 @@ mandatory_gates:
   status: PASS
   description: Phase 1 persistent-store chainstate parity via init/import-block/utxo-set-hash (Go bbolt vs Rust redb)
   note: phase1 (storage/import/reorg), not a pure consensus gate
+- name: CV-CRASH-RECOVERY
+  file: conformance/fixtures/CV-CRASH-RECOVERY.yml
+  required: false
+  status: DRAFT
+  description: Phase 1 engineering gate (crash recovery invariants around manifest)
+  note: non-consensus
 - name: CV-FEES
   file: conformance/fixtures/CV-FEES.yml
   required: true
@@ -90,6 +108,12 @@ mandatory_gates:
   description: Relay-level anchor payload caps (non-consensus policy). MAX_ANCHOR_PAYLOAD_RELAY=1024. 7 relay-policy vectors (01-07) +
     1 consensus-vs-relay (08) + 3 T-016 separation lemma vectors (09-11) = 11 total. Closes H-002 DoS finding.
   note: policy-only — relay/mempool enforcement, not block validity
+- name: CV-P2P
+  file: conformance/fixtures/CV-P2P.yml
+  required: false
+  status: DRAFT
+  description: Phase 2 engineering gate (P2P interop smoke)
+  note: non-consensus (currently bound to go p2p interop tests)
 - name: CV-COINBASE
   file: conformance/fixtures/CV-COINBASE.yml
   required: true

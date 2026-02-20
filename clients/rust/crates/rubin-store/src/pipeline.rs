@@ -178,7 +178,7 @@ pub fn import_block(
     }
 
     // ── Stage 4 + 5: Full validation and apply ──────────────────────
-    connect_block(
+    if let Err(e) = connect_block(
         store,
         manifest,
         manifest_path,
@@ -189,7 +189,15 @@ pub fn import_block(
         block_bytes,
         candidate_height,
         candidate_work,
-    )?;
+    ) {
+        // If Stage 4/5 fails, we must persist INVALID status so descendants are rejected as
+        // INVALID_ANCESTRY (and we don't accidentally treat the header as a valid parent).
+        mark_invalid(store, &block_hash, &block.header, candidate_height, BlockStatus::Invalid)?;
+        return Ok(ImportResult::Rejected {
+            block_hash,
+            reason: e,
+        });
+    }
 
     Ok(ImportResult::AcceptedNewTip {
         height: candidate_height,

@@ -1,0 +1,12 @@
+version: "1.1"
+gate: CV-P2P
+status: DRAFT
+description: "Phase 2: P2P interoperability gate (non-consensus). Current implementation binds to existing Go p2p interop tests."
+tests:
+  - id: P2P-INT-01
+    title: "Go↔Rust P2P interop smoke (handshake + headers) via go test"
+    kind: go_test
+    # Note: package includes tests that spawn the Rust side on localhost.
+    pkg: "./node/p2p"
+    run: "TestInterop"
+    expected_code: PASS

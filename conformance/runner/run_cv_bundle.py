@@ -9,6 +9,7 @@ import os.path
 import subprocess
 import sys
 import tempfile
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -2389,6 +2390,441 @@ def _parse_utxo_set_hash_output(stdout: str) -> tuple[int, str, str]:
     return tip_height, tip_hash, utxo_hash
 
 
+def _find_single_chain_dir(datadir: Path) -> Path:
+    chains = datadir / "chains"
+    if not chains.exists():
+        raise ValueError("missing chains/ directory")
+    subs = [p for p in chains.iterdir() if p.is_dir()]
+    if len(subs) != 1:
+        raise ValueError(f"expected exactly 1 chain dir under chains/ (got {len(subs)})")
+    return subs[0]
+
+
+def _assert_not_world_writable(path: Path) -> None:
+    st = path.stat()
+    if st.st_mode & stat.S_IWOTH:
+        raise ValueError(f"path is world-writable: {path}")
+
+
+def run_storage(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd, failures: list[str]) -> int:
+    tests = fixture.get("tests")
+    if not isinstance(tests, list) or not tests:
+        failures.append(f"{gate}: fixture has no tests")
+        return 0
+
+    repo_root = Path(__file__).resolve().parents[2]
+    executed = 0
+
+    for t in tests:
+        if not isinstance(t, dict):
+            failures.append(f"{gate}: invalid test entry (not a mapping)")
+            continue
+        test_id = str(t.get("id", "<missing id>"))
+        has_expect, expected = _expect_from_test(t)
+        if not has_expect or expected != "PASS":
+            failures.append(f"{gate}:{test_id}: expected_code MUST be PASS")
+            continue
+        profile = str(t.get("profile", "")).strip()
+        if not profile:
+            failures.append(f"{gate}:{test_id}: missing profile")
+            continue
+
+        for client in (go, rust):
+            with tempfile.TemporaryDirectory(prefix=f"rubin-cv-storage-{client.name}-") as td:
+                datadir = Path(td)
+                r = run_result(client, ["init", "--datadir", str(datadir), "--profile", profile])
+                if r.returncode != 0:
+                    failures.append(f"{gate}:{test_id}:{client.name}: init failed: {r.stderr.strip()}")
+                    continue
+
+                try:
+                    chain_dir = _find_single_chain_dir(datadir)
+                    manifest = chain_dir / "MANIFEST.json"
+                    if not manifest.exists():
+                        raise ValueError("missing MANIFEST.json")
+                    _assert_not_world_writable(manifest)
+                    obj = json.loads(manifest.read_text(encoding="utf-8"))
+                    if not isinstance(obj, dict):
+                        raise ValueError("MANIFEST.json must be JSON object")
+                    if "schema_version" not in obj:
+                        raise ValueError("MANIFEST.json missing schema_version")
+                    if "chain_id_hex" not in obj:
+                        raise ValueError("MANIFEST.json missing chain_id_hex")
+
+                    db_dir = chain_dir / "db"
+                    if not db_dir.exists():
+                        raise ValueError("missing db/ directory")
+                    _assert_not_world_writable(db_dir)
+                    # Engine-specific DB file name(s): accept at least one file under db/.
+                    db_files = [p for p in db_dir.iterdir() if p.is_file()]
+                    if not db_files:
+                        raise ValueError("db/ has no files (expected kv.db or data.redb)")
+                    for f in db_files:
+                        _assert_not_world_writable(f)
+
+                except Exception as e:
+                    failures.append(f"{gate}:{test_id}:{client.name}: {e}")
+                    continue
+
+        executed += 1
+
+    return executed
+
+
+def _parse_import_outcome_go(stdout: str, stderr: str, returncode: int) -> tuple[str, str]:
+    # Go prints a decision token to stdout on success; on error it prints prefixed error to stderr.
+    if returncode != 0:
+        tok = _extract_err_token(stderr)
+        return "ERROR", tok
+    tok = stdout.strip().splitlines()[-1].strip() if stdout.strip() else ""
+    return "OK", tok
+
+
+def _parse_import_outcome_rust(stdout: str, stderr: str, returncode: int) -> tuple[str, str]:
+    # Rust prints structured stdout; on error, it uses stderr and non-zero exit.
+    if returncode != 0:
+        tok = _extract_err_token(stderr)
+        # Some Stage 2 rejections use non-BLOCK_ERR reason tokens; keep raw if no token found.
+        if tok == stderr.strip() or tok == "PASS":
+            return "ERROR", (stderr.strip().split("reason=")[-1].strip() if "reason=" in stderr else tok)
+        return "ERROR", tok
+
+    s = stdout.strip().lower()
+    if s.startswith("accepted"):
+        return "OK", "APPLIED_AS_NEW_TIP"
+    if s.startswith("stored"):
+        return "OK", "STORED_NOT_SELECTED"
+    if s.startswith("orphaned"):
+        return "OK", "ORPHANED"
+    if s.startswith("rejected"):
+        # If rust ever prints rejected on stdout, normalize.
+        if "reason=" in s:
+            return "ERROR", s.split("reason=", 1)[1].strip()
+        return "ERROR", "REJECTED"
+    return "OK", stdout.strip()
+
+
+def _expand_prev_hash_hex(s: str) -> bytes:
+    # Allow short forms like "11" -> 32 bytes of 0x11 for convenience.
+    clean = s.strip().lower().replace("0x", "")
+    if clean == "":
+        raise ValueError("prev_hash_hex empty")
+    if len(clean) == 2:
+        return bytes([int(clean, 16)]) * 32
+    b = bytes.fromhex(clean)
+    if len(b) != 32:
+        raise ValueError(f"prev_hash_hex must be 32 bytes (got {len(b)})")
+    return b
+
+
+def run_import(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd, failures: list[str]) -> int:
+    tests = fixture.get("tests")
+    if not isinstance(tests, list) or not tests:
+        failures.append(f"{gate}: fixture has no tests")
+        return 0
+
+    repo_root = Path(__file__).resolve().parents[2]
+    executed = 0
+
+    key_id32 = b"\x00" * 32
+
+    for t in tests:
+        if not isinstance(t, dict):
+            failures.append(f"{gate}: invalid test entry (not a mapping)")
+            continue
+        test_id = str(t.get("id", "<missing id>"))
+        profile = str(t.get("profile", "")).strip()
+        if not profile:
+            failures.append(f"{gate}:{test_id}: missing profile")
+            continue
+        scenario = t.get("scenario")
+        if not isinstance(scenario, dict):
+            failures.append(f"{gate}:{test_id}: missing/invalid scenario")
+            continue
+
+        expected_error = str(t.get("expected_error", "")).strip().upper()
+        expected_outcome = str(t.get("expected_outcome", "")).strip().upper()
+        if bool(expected_error) == bool(expected_outcome):
+            failures.append(f"{gate}:{test_id}: must set exactly one of expected_error or expected_outcome")
+            continue
+
+        try:
+            genesis_header = _read_genesis_header_bytes_from_profile(repo_root, profile)
+            target32, genesis_ts = _parse_header_target_and_timestamp(genesis_header)
+            genesis_hash = _sha3_256(genesis_header)
+        except Exception as e:
+            failures.append(f"{gate}:{test_id}: profile parse failed: {e}")
+            continue
+
+        kind = str(scenario.get("kind", "")).strip().lower()
+
+        def make_valid_block(height: int, prev_hash32: bytes, ts: int) -> bytes:
+            return _make_block_bytes(
+                height=height,
+                prev_hash32=prev_hash32,
+                target32=target32,
+                timestamp=ts,
+                key_id32=key_id32,
+            )
+
+        def make_merkle_invalid_block(height: int, prev_hash32: bytes, ts: int) -> bytes:
+            b = bytearray(make_valid_block(height, prev_hash32, ts))
+            # Flip one byte in merkle_root (header bytes 4+32..4+32+32)
+            i = 4 + 32
+            b[i] ^= 0x01
+            return bytes(b)
+
+        # Run the same scenario against both clients and compare normalized outcomes.
+        for client in (go, rust):
+            with tempfile.TemporaryDirectory(prefix=f"rubin-cv-import-{client.name}-") as td:
+                datadir = Path(td)
+                r0 = run_result(client, ["init", "--datadir", str(datadir), "--profile", profile])
+                if r0.returncode != 0:
+                    failures.append(f"{gate}:{test_id}:{client.name}: init failed: {r0.stderr.strip()}")
+                    continue
+
+                block_bytes: bytes | None = None
+                block_bytes_2: bytes | None = None
+
+                try:
+                    if kind == "apply_one":
+                        h = _to_int(scenario.get("height"))
+                        dts = _to_int(scenario.get("timestamp_delta"))
+                        block_bytes = make_valid_block(h, genesis_hash, genesis_ts + dts)
+
+                    elif kind == "orphan":
+                        h = _to_int(scenario.get("height"))
+                        dts = _to_int(scenario.get("timestamp_delta"))
+                        prev = _expand_prev_hash_hex(str(scenario.get("prev_hash_hex", "")))
+                        block_bytes = make_valid_block(h, prev, genesis_ts + dts)
+
+                    elif kind == "invalid_header_merkle":
+                        h = _to_int(scenario.get("height"))
+                        dts = _to_int(scenario.get("timestamp_delta"))
+                        block_bytes = make_merkle_invalid_block(h, genesis_hash, genesis_ts + dts)
+
+                    elif kind == "invalid_ancestry":
+                        ph = _to_int(scenario.get("parent_height"))
+                        ch = _to_int(scenario.get("child_height"))
+                        pdt = _to_int(scenario.get("parent_timestamp_delta"))
+                        cdt = _to_int(scenario.get("child_timestamp_delta"))
+                        parent_invalid = make_merkle_invalid_block(ph, genesis_hash, genesis_ts + pdt)
+                        parent_hash = _sha3_256(parent_invalid[:116])
+                        child = make_valid_block(ch, parent_hash, genesis_ts + cdt)
+                        # Import invalid parent first, then child.
+                        block_bytes = parent_invalid
+                        block_bytes_2 = child
+
+                    elif kind == "tie_break_not_selected":
+                        adt = _to_int(scenario.get("a_timestamp_delta"))
+                        bdt = _to_int(scenario.get("b_timestamp_delta"))
+                        a = make_valid_block(1, genesis_hash, genesis_ts + adt)
+                        b = make_valid_block(1, genesis_hash, genesis_ts + bdt)
+                        ha = _sha3_256(a[:116])
+                        hb = _sha3_256(b[:116])
+                        # Smaller hash wins; to get STORED_NOT_SELECTED, import winner first then loser.
+                        if hb < ha:
+                            a, b = b, a
+                            ha, hb = hb, ha
+                        block_bytes = a  # winner
+                        block_bytes_2 = b  # loser
+
+                    else:
+                        raise ValueError(f"unknown scenario kind: {kind}")
+
+                except Exception as e:
+                    failures.append(f"{gate}:{test_id}: scenario build failed: {e}")
+                    continue
+
+                def import_one(bb: bytes) -> tuple[int, str, str]:
+                    out = run_result(client, ["import-block", "--datadir", str(datadir), "--profile", profile, "--block-hex", _hex(bb)])
+                    if client.name == "go":
+                        ok, tok = _parse_import_outcome_go(out.stdout, out.stderr, out.returncode)
+                    else:
+                        ok, tok = _parse_import_outcome_rust(out.stdout, out.stderr, out.returncode)
+                    return out.returncode, ok, tok
+
+                rc1, ok1, tok1 = import_one(block_bytes)
+                if block_bytes_2 is not None:
+                    rc2, ok2, tok2 = import_one(block_bytes_2)
+                    # For composite scenarios, expectation applies to second import unless expected_error is set for first.
+                    ok_use, tok_use = ok2, tok2
+                else:
+                    ok_use, tok_use = ok1, tok1
+
+                if expected_error:
+                    if ok_use == "OK":
+                        failures.append(f"{gate}:{test_id}:{client.name}: expected error {expected_error}, got OK:{tok_use}")
+                    elif tok_use.upper() != expected_error:
+                        failures.append(f"{gate}:{test_id}:{client.name}: expected error {expected_error}, got {tok_use}")
+                else:
+                    if ok_use != "OK":
+                        failures.append(f"{gate}:{test_id}:{client.name}: expected outcome {expected_outcome}, got ERROR:{tok_use}")
+                    elif tok_use.upper() != expected_outcome:
+                        failures.append(f"{gate}:{test_id}:{client.name}: expected outcome {expected_outcome}, got {tok_use}")
+
+        executed += 1
+
+    return executed
+
+
+def run_crash_recovery(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd, failures: list[str]) -> int:
+    tests = fixture.get("tests")
+    if not isinstance(tests, list) or not tests:
+        failures.append(f"{gate}: fixture has no tests")
+        return 0
+
+    repo_root = Path(__file__).resolve().parents[2]
+    executed = 0
+
+    key_id32 = b"\x00" * 32
+
+    for t in tests:
+        if not isinstance(t, dict):
+            failures.append(f"{gate}: invalid test entry (not a mapping)")
+            continue
+        test_id = str(t.get("id", "<missing id>"))
+        has_expect, expected = _expect_from_test(t)
+        if not has_expect or expected != "PASS":
+            failures.append(f"{gate}:{test_id}: expected_code MUST be PASS")
+            continue
+        profile = str(t.get("profile", "")).strip()
+        if not profile:
+            failures.append(f"{gate}:{test_id}: missing profile")
+            continue
+        plan = t.get("plan")
+        if not isinstance(plan, dict):
+            failures.append(f"{gate}:{test_id}: missing/invalid plan")
+            continue
+        if str(plan.get("kind", "")).strip().lower() != "linear":
+            failures.append(f"{gate}:{test_id}: only linear plan is supported in CV-CRASH-RECOVERY v1")
+            continue
+        n = _to_int(plan.get("blocks"))
+        if n <= 0:
+            failures.append(f"{gate}:{test_id}: blocks must be >0")
+            continue
+
+        try:
+            genesis_header = _read_genesis_header_bytes_from_profile(repo_root, profile)
+            target32, genesis_ts = _parse_header_target_and_timestamp(genesis_header)
+            genesis_hash = _sha3_256(genesis_header)
+        except Exception as e:
+            failures.append(f"{gate}:{test_id}: profile parse failed: {e}")
+            continue
+
+        # Prepare blocks (coinbase-only).
+        blocks: list[bytes] = []
+        prev = genesis_hash
+        for h in range(1, n + 1):
+            b = _make_block_bytes(
+                height=h,
+                prev_hash32=prev,
+                target32=target32,
+                timestamp=genesis_ts + h,
+                key_id32=key_id32,
+            )
+            prev = _sha3_256(b[:116])
+            blocks.append(b)
+
+        for client in (go, rust):
+            with tempfile.TemporaryDirectory(prefix=f"rubin-cv-crash-{client.name}-") as td:
+                datadir = Path(td)
+                r0 = run_result(client, ["init", "--datadir", str(datadir), "--profile", profile])
+                if r0.returncode != 0:
+                    failures.append(f"{gate}:{test_id}:{client.name}: init failed: {r0.stderr.strip()}")
+                    continue
+
+                for bb in blocks:
+                    r1 = run_result(client, ["import-block", "--datadir", str(datadir), "--profile", profile, "--block-hex", _hex(bb)])
+                    if r1.returncode != 0:
+                        failures.append(f"{gate}:{test_id}:{client.name}: import-block failed: {r1.stderr.strip()}")
+                        break
+
+                # Baseline chainstate snapshot.
+                r2 = run_result(client, ["utxo-set-hash", "--datadir", str(datadir), "--profile", profile])
+                if r2.returncode != 0:
+                    failures.append(f"{gate}:{test_id}:{client.name}: utxo-set-hash failed: {r2.stderr.strip()}")
+                    continue
+                base = r2.stdout.strip()
+                try:
+                    chain_dir = _find_single_chain_dir(datadir)
+                except Exception as e:
+                    failures.append(f"{gate}:{test_id}:{client.name}: {e}")
+                    continue
+
+                # Simulate crash before rename: write a bogus tmp manifest alongside MANIFEST.json.
+                # Go uses MANIFEST.json.tmp; Rust uses .MANIFEST.json.tmp.<pid>.<nanos>. We create both patterns.
+                bogus = {
+                    "schema_version": 1,
+                    "chain_id_hex": "00" * 32,
+                    "tip_hash": "ff" * 32,
+                    "tip_height": 999,
+                    "tip_cumulative_work": "999",
+                    "last_applied_block_hash": "ff" * 32,
+                    "last_applied_height": 999,
+                }
+                try:
+                    (chain_dir / "MANIFEST.json.tmp").write_text(json.dumps(bogus) + "\n", encoding="utf-8")
+                    (chain_dir / ".MANIFEST.json.tmp.0.0").write_text(json.dumps(bogus) + "\n", encoding="utf-8")
+                except Exception as e:
+                    failures.append(f"{gate}:{test_id}:{client.name}: write tmp manifest failed: {e}")
+                    continue
+
+                # After "crash", node should still read MANIFEST.json and expose identical utxo-set-hash.
+                r3 = run_result(client, ["utxo-set-hash", "--datadir", str(datadir), "--profile", profile])
+                if r3.returncode != 0:
+                    failures.append(f"{gate}:{test_id}:{client.name}: utxo-set-hash(after tmp) failed: {r3.stderr.strip()}")
+                    continue
+                if r3.stdout.strip() != base:
+                    failures.append(f"{gate}:{test_id}:{client.name}: chainstate changed after tmp manifest injection")
+
+        executed += 1
+
+    return executed
+
+
+def run_p2p(gate: str, fixture: dict[str, Any], failures: list[str]) -> int:
+    tests = fixture.get("tests")
+    if not isinstance(tests, list) or not tests:
+        failures.append(f"{gate}: fixture has no tests")
+        return 0
+    repo_root = Path(__file__).resolve().parents[2]
+    executed = 0
+
+    for t in tests:
+        if not isinstance(t, dict):
+            failures.append(f"{gate}: invalid test entry (not a mapping)")
+            continue
+        test_id = str(t.get("id", "<missing id>"))
+        has_expect, expected = _expect_from_test(t)
+        if not has_expect or expected != "PASS":
+            failures.append(f"{gate}:{test_id}: expected_code MUST be PASS")
+            continue
+        kind = str(t.get("kind", "")).strip().lower()
+        if kind != "go_test":
+            failures.append(f"{gate}:{test_id}: unsupported kind: {kind}")
+            continue
+        pkg = str(t.get("pkg", "")).strip()
+        run_pat = str(t.get("run", "")).strip()
+        if not pkg or not run_pat:
+            failures.append(f"{gate}:{test_id}: missing pkg/run")
+            continue
+
+        # Use `go test` so we can reuse existing interop harness that spawns Rust side on localhost.
+        # Important: `clients/go` is the Go module root, so we must run `go test` from there.
+        cmd = ["go", "-C", "clients/go", "test", pkg, "-run", run_pat, "-count=1"]
+        p = subprocess.run(cmd, cwd=str(repo_root), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if p.returncode != 0:
+            failures.append(
+                f"{gate}:{test_id}: go test failed (exit={p.returncode})\n"
+                f"stdout:\n{p.stdout.strip()}\n"
+                f"stderr:\n{p.stderr.strip()}\n"
+            )
+        executed += 1
+
+    return executed
+
+
 def run_chainstate_store(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd, failures: list[str]) -> int:
     tests = fixture.get("tests")
     if not isinstance(tests, list) or not tests:
@@ -2726,6 +3162,15 @@ def main() -> int:
         if gate == "CV-CHAINSTATE-STORE":
             checks += run_chainstate_store(gate, fixture, rust, go, failures)
             continue
+        if gate == "CV-STORAGE":
+            checks += run_storage(gate, fixture, rust, go, failures)
+            continue
+        if gate == "CV-IMPORT":
+            checks += run_import(gate, fixture, rust, go, failures)
+            continue
+        if gate == "CV-CRASH-RECOVERY":
+            checks += run_crash_recovery(gate, fixture, rust, go, failures)
+            continue
         if gate == "CV-FEES":
             checks += run_fees(gate, fixture, rust, go, failures)
             continue
@@ -2746,6 +3191,9 @@ def main() -> int:
             continue
         if gate == "CV-ANCHOR-RELAY":
             checks += run_anchor_relay(gate, fixture, failures)
+            continue
+        if gate == "CV-P2P":
+            checks += run_p2p(gate, fixture, failures)
             continue
 
         skipped.append(gate)

@@ -1,0 +1,10 @@
+version: "1.1"
+gate: CV-STORAGE
+status: DRAFT
+description: "Phase 1: datadir layout + MANIFEST.json existence/shape + DB file presence (per-client)"
+tests:
+  - id: ST-01
+    title: "init creates chain dir + MANIFEST.json + db file (Go + Rust)"
+    profile: "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md"
+    expected_code: PASS
+
