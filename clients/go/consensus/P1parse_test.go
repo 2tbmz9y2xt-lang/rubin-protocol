@@ -24,9 +24,9 @@ func makeParseCoinbaseTx(height uint32) Tx {
 				CovenantData: bytes.Repeat([]byte{0x11}, 33),
 			},
 		},
-		Locktime: uint32(height),
+		Locktime:  uint32(height),
 		DAPayload: nil,
-		Witness:  WitnessSection{},
+		Witness:   WitnessSection{},
 	}
 }
 
@@ -50,7 +50,7 @@ func makeParseTxFixture() Tx {
 				CovenantData: bytes.Repeat([]byte{0xaa}, 33),
 			},
 		},
-		Locktime: 12345,
+		Locktime:  12345,
 		DAPayload: nil,
 		Witness: WitnessSection{
 			Witnesses: []WitnessItem{{
@@ -96,7 +96,7 @@ func TestParseTxBytes(t *testing.T) {
 	t.Run("compactsize overflow in input_count", func(t *testing.T) {
 		raw := make([]byte, 0, 12+9)
 		raw = append(raw, []byte{0x02, 0x00, 0x00, 0x00}...) // version=2
-		raw = append(raw, 0x00)                               // tx_kind=standard
+		raw = append(raw, 0x00)                              // tx_kind=standard
 		raw = append(raw, []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}...)
 		raw = append(raw, 0xff)
 		raw = append(raw, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80)

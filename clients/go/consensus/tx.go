@@ -53,7 +53,7 @@ const (
 const (
 	TX_VERSION_V2 = 2
 
-	TX_KIND_STANDARD = 0x00
+	TX_KIND_STANDARD  = 0x00
 	TX_KIND_DA_COMMIT = 0x01
 	TX_KIND_DA_CHUNK  = 0x02
 )
@@ -140,8 +140,8 @@ type Tx struct {
 	Locktime uint32
 
 	// DA core fields (present iff TxKind != 0x00) and DA payload bytes (present iff TxKind != 0x00).
-	DACommit *DACommitFields
-	DAChunk  *DAChunkFields
+	DACommit  *DACommitFields
+	DAChunk   *DAChunkFields
 	DAPayload []byte
 
 	Witness WitnessSection
