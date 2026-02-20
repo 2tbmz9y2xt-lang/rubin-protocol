@@ -10,8 +10,8 @@ Priority: P0 (blocker) → P1 (pre-devnet) → P2 (pre-mainnet) → P3 (post-mai
 | ID | Task | Owner | Effort | Status |
 |---|---|---|---|---|
 | Q-A01 | Заполнить deployment table §8.1 (`slh_dsa_p2pk_v1`, `htlc_anchor_v1`) | — | 1d | TODO |
-| Q-A10 | **Go difficulty panic**: `maxTarget = targetOld*4` без cap на MAX_TARGET → `FillBytes([32]byte)` паникует при `targetOld` близком к `0xFFFF...`. Rust безопасен (`u256_shl2_saturating`). Фикс: добавить `if maxTarget.Cmp(maxTargetBig) > 0 { maxTarget = maxTargetBig }` перед clamp. | — | 2h | TODO |
-| Q-A13 | **VAULT spend_delay overflow (Go + Rust)**: `chainHeight < prevCreationHeight + spendDelay` — unchecked u64 addition. Если атакующий создаёт VAULT с `spend_delay = 2^64 - creationHeight`, сумма wraps в 1 → timelock обходится немедленно. Rust release-mode тоже wraps (нет overflow-checks в Cargo.toml). Фикс Go: заменить `prevCreationHeight+spendDelay` на `addUint64(prevCreationHeight, spendDelay)` и вернуть ошибку при overflow. Фикс Rust: `prev_creation_height.checked_add(spend_delay).ok_or(...)`. | — | 1h | TODO |
+| Q-A10 | **Go difficulty panic**: `maxTarget = targetOld*4` без cap на MAX_TARGET → `FillBytes([32]byte)` паникует при `targetOld` близком к `0xFFFF...`. Rust безопасен (`u256_shl2_saturating`). Фикс: добавить `if maxTarget.Cmp(maxTargetBig) > 0 { maxTarget = maxTargetBig }` перед clamp. | — | 2h | ✅ DONE (2c7da7d) |
+| Q-A13 | **VAULT spend_delay overflow (Go + Rust)**: `chainHeight < prevCreationHeight + spendDelay` — unchecked u64 addition. Если атакующий создаёт VAULT с `spend_delay = 2^64 - creationHeight`, сумма wraps в 1 → timelock обходится немедленно. Rust release-mode тоже wraps (нет overflow-checks в Cargo.toml). Фикс Go: заменить `prevCreationHeight+spendDelay` на `addUint64(prevCreationHeight, spendDelay)` и вернуть ошибку при overflow. Фикс Rust: `prev_creation_height.checked_add(spend_delay).ok_or(...)`. | — | 1h | ✅ DONE (2c7da7d) |
 
 ## P1 — Pre-devnet (обязательно)
 
