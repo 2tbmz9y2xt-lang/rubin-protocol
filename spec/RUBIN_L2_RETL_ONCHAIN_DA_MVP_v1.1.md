@@ -95,7 +95,7 @@ The mechanism that makes `DA_OBJECT` bytes retrievable from L1 must be defined b
 This document treats that mechanism as L1-side consensus and therefore **out of scope** here.
 
 A concrete draft for Option A is provided in:
-- `spec/RUBIN_L1_DA_TX_CARRIER_DRAFT_v1.1.md` (DRAFT, non-canonical)
+- `spec/RUBIN_L1_CANONICAL_v1.1.md §17` (On-chain DA tx-carrier upgrade; gated)
 
 Two plausible publication mechanisms exist:
 
@@ -118,7 +118,7 @@ Operationally:
 Draft carrier shape:
 - `DA_COMMIT_TX`: carries a `DA_OBJECT_V1` manifest in a prunable `da_payload`.
 - `DA_CHUNK_TX`: carries a raw chunk payload in `da_payload`, committed by a `chunk_hash` in consensus bytes.
-- The `tx_kind` discriminator and the `da_payload` placement are defined by the L1 wire-v2 draft.
+- The `tx_kind` discriminator and the `da_payload` placement are defined by `spec/RUBIN_L1_CANONICAL_v1.1.md §17`.
 
 Commitment requirements:
 

@@ -59,7 +59,7 @@ Tasks:
    - Reference: `spec/RUBIN_L2_RETL_ONCHAIN_DA_MVP_v1.1.md` (DA_OBJECT_V1).
 2. Define L1 publication mechanism for on-chain DA bytes:
    - block-level DA section or dedicated carrier wire (requires L1 upgrade).
-   - Draft carrier spec: `spec/RUBIN_L1_DA_TX_CARRIER_DRAFT_v1.1.md` (DRAFT).
+   - Draft carrier spec: `spec/RUBIN_L1_CANONICAL_v1.1.md §17` (On-chain DA tx-carrier upgrade; gated).
 3. Implement sequencer-side publisher:
    - build DA_OBJECT bytes,
    - publish on L1 together with RETL commitments.
