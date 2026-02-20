@@ -80,6 +80,12 @@ func Handshake(
 			}
 			peerVersion = v
 			goto gotVersion
+		case CmdReject:
+			rp, err := DecodeRejectPayload(msg.Payload)
+			if err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("p2p: handshake: reject(%s) code=0x%02x reason=%q", rp.Message, rp.Code, rp.Reason)
 		case CmdVerack:
 			// Early verack should be ignored.
 			continue
@@ -114,6 +120,12 @@ gotVersion:
 		case CmdVersion:
 			// A second version after handshake start is malformed; in READY it's +10 ban+disconnect.
 			return nil, fmt.Errorf("p2p: handshake: duplicate version")
+		case CmdReject:
+			rp, err := DecodeRejectPayload(msg.Payload)
+			if err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("p2p: handshake: reject(%s) code=0x%02x reason=%q", rp.Message, rp.Code, rp.Reason)
 		default:
 			// Ignore until verack arrives.
 			continue
