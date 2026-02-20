@@ -4,7 +4,7 @@
 //! match the Go implementation byte-for-byte for cross-client parity.
 
 use rubin_consensus::{
-    compact_size_decode, compact_size_encode, BlockHeader, TxOutPoint, TxOutput, UtxoEntry,
+    BlockHeader, TxOutPoint, TxOutput, UtxoEntry, compact_size_decode, compact_size_encode,
 };
 
 // ---------------------------------------------------------------------------
@@ -87,7 +87,10 @@ pub fn encode_outpoint_key(outpoint: &TxOutPoint) -> [u8; 36] {
 
 pub fn decode_outpoint_key(data: &[u8]) -> Result<TxOutPoint, String> {
     if data.len() != 36 {
-        return Err(format!("outpoint key: expected 36 bytes, got {}", data.len()));
+        return Err(format!(
+            "outpoint key: expected 36 bytes, got {}",
+            data.len()
+        ));
     }
     let mut txid = [0u8; 32];
     txid.copy_from_slice(&data[0..32]);

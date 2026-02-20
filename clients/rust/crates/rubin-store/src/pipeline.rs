@@ -6,14 +6,14 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use rubin_consensus::{
-    block_header_bytes, parse_block_bytes, Block, BlockHeader, BlockValidationContext, TxOutPoint,
-    UtxoEntry, CORE_ANCHOR,
+    Block, BlockHeader, BlockValidationContext, CORE_ANCHOR, TxOutPoint, UtxoEntry,
+    block_header_bytes, parse_block_bytes,
 };
 use rubin_crypto::CryptoProvider;
 
 use crate::db::Store;
-use crate::keys::{header_work, BlockIndexEntry, BlockStatus, UndoEntry, UndoRecord};
-use crate::manifest::{hex_encode, Manifest};
+use crate::keys::{BlockIndexEntry, BlockStatus, UndoEntry, UndoRecord, header_work};
+use crate::manifest::{Manifest, hex_encode};
 use crate::reorg;
 
 // ---------------------------------------------------------------------------
@@ -165,7 +165,14 @@ pub fn import_block(
 
     // If we need to reorg (current tip is not our parent), do it first.
     if current_tip_hash != parent_hash && manifest.tip_height > 0 {
-        reorg::execute_reorg(store, manifest, manifest_path, provider, chain_id, &block_hash)?;
+        reorg::execute_reorg(
+            store,
+            manifest,
+            manifest_path,
+            provider,
+            chain_id,
+            &block_hash,
+        )?;
         // After reorg, the manifest tip should be our parent.
         // Now connect this block.
     }

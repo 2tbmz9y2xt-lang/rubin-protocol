@@ -780,7 +780,9 @@ fn usage() {
     );
     eprintln!("  reorg --context-json <path>");
     eprintln!("  init --datadir <path> [--profile <path>]");
-    eprintln!("  import-block --datadir <path> (--block-hex <hex> | --block-hex-file <path>) [--profile <path>]");
+    eprintln!(
+        "  import-block --datadir <path> (--block-hex <hex> | --block-hex-file <path>) [--profile <path>]"
+    );
     eprintln!("  utxo-set-hash --datadir <path> [--profile <path>]");
 }
 
@@ -1257,9 +1259,7 @@ fn cmd_sighash_main(args: &[String]) -> i32 {
 // ---------------------------------------------------------------------------
 
 fn resolve_chain_dir(datadir: &str, chain_id_hex: &str) -> PathBuf {
-    PathBuf::from(datadir)
-        .join("chains")
-        .join(chain_id_hex)
+    PathBuf::from(datadir).join("chains").join(chain_id_hex)
 }
 
 fn cmd_init_main(args: &[String]) -> i32 {
@@ -1385,15 +1385,14 @@ fn cmd_init_main(args: &[String]) -> i32 {
     };
 
     // Create initial manifest (height 0, genesis).
-    let genesis_work = rubin_store::keys::header_work(
-        &match parse_block_header_bytes_strict(&header_bytes) {
+    let genesis_work =
+        rubin_store::keys::header_work(&match parse_block_header_bytes_strict(&header_bytes) {
             Ok(h) => h.target,
             Err(e) => {
                 eprintln!("parse genesis header: {e}");
                 return 1;
             }
-        },
-    );
+        });
     let genesis_hash_hex = hex_encode(&genesis_hash);
 
     let mut manifest =
@@ -1562,11 +1561,7 @@ fn cmd_import_block_main(args: &[String]) -> i32 {
                     println!("orphaned hash={}", hex_encode(block_hash));
                 }
                 rubin_store::ImportResult::Rejected { block_hash, reason } => {
-                    eprintln!(
-                        "rejected hash={} reason={}",
-                        hex_encode(block_hash),
-                        reason,
-                    );
+                    eprintln!("rejected hash={} reason={}", hex_encode(block_hash), reason,);
                     return 1;
                 }
             }
@@ -1641,7 +1636,9 @@ fn cmd_utxo_set_hash_main(args: &[String]) -> i32 {
         Ok(hash) => {
             println!(
                 "tip_height={} tip_hash={} utxo_set_hash={}",
-                manifest.tip_height, manifest.tip_hash, hex_encode(&hash),
+                manifest.tip_height,
+                manifest.tip_hash,
+                hex_encode(&hash),
             );
             0
         }

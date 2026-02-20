@@ -13,10 +13,7 @@ use crate::db::Store;
 const DST: &[u8] = b"RUBINv1-utxo-set-hash/";
 
 /// Compute utxo_set_hash by iterating the UTXO table in lex order.
-pub fn utxo_set_hash(
-    store: &Store,
-    provider: &dyn CryptoProvider,
-) -> Result<[u8; 32], String> {
+pub fn utxo_set_hash(store: &Store, provider: &dyn CryptoProvider) -> Result<[u8; 32], String> {
     let count = store.utxo_count()?;
 
     // Build preimage: DST || N_le[8] || pairs...

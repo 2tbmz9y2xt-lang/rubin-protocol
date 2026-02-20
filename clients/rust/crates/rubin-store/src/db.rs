@@ -12,9 +12,9 @@ use std::path::Path;
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition, WriteTransaction};
 
 use crate::keys::{
-    decode_block_header, decode_block_index, decode_undo_record, decode_utxo_entry,
-    encode_block_header, encode_block_index, encode_outpoint_key, encode_undo_record,
-    encode_utxo_entry, BlockIndexEntry, UndoRecord,
+    BlockIndexEntry, UndoRecord, decode_block_header, decode_block_index, decode_undo_record,
+    decode_utxo_entry, encode_block_header, encode_block_index, encode_outpoint_key,
+    encode_undo_record, encode_utxo_entry,
 };
 use rubin_consensus::{BlockHeader, TxOutPoint, UtxoEntry};
 
@@ -224,11 +224,7 @@ impl WriteBatch {
         Ok(())
     }
 
-    pub fn put_block_bytes(
-        &self,
-        block_hash: &[u8; 32],
-        block_bytes: &[u8],
-    ) -> Result<(), String> {
+    pub fn put_block_bytes(&self, block_hash: &[u8; 32], block_bytes: &[u8]) -> Result<(), String> {
         let mut table = self
             .tx
             .open_table(BLOCKS_TABLE)
