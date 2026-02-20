@@ -10,6 +10,7 @@ Priority: P0 (blocker) → P1 (pre-devnet) → P2 (pre-mainnet) → P3 (post-mai
 | ID | Task | Owner | Effort | Status |
 |---|---|---|---|---|
 | Q-A01 | Заполнить deployment table §8.1 (`slh_dsa_p2pk_v1`, `htlc_anchor_v1`) | — | 1d | TODO |
+| Q-A10 | **Go difficulty panic**: `maxTarget = targetOld*4` через `big.Int` без cap на MAX_TARGET → `FillBytes([32]byte)` паникует при `targetOld` близком к `0xFFFF...`. Rust безопасен (`u256_shl2_saturating`). Фикс: добавить `if maxTarget.Cmp(maxTargetBig) > 0 { maxTarget = maxTargetBig }` перед clamp. | — | 2h | TODO |
 
 ## P1 — Pre-devnet (обязательно)
 
@@ -19,6 +20,8 @@ Priority: P0 (blocker) → P1 (pre-devnet) → P2 (pre-mainnet) → P3 (post-mai
 | Q-A03 | Зафиксировать Go version в CI (`actions/setup-go@v5` + `go-version: '1.22.x'`) | — | 30m | TODO |
 | Q-A04 | Настроить fuzzing: `cargo fuzz` targets для block/tx/witness (Rust) | — | 1w | TODO |
 | Q-A05 | Генерация SBOM (`cargo-sbom`, `syft`) + `cargo audit` / `govulncheck` в CI | — | 1d | TODO |
+| Q-A11 | P2P шифрование: TLS 1.3 + опциональный PQ KEM transport | — | 1w | TODO |
+| Q-A12 | Threat Model документ: Eclipse, reorg-race, key leakage, supply chain | — | 2d | TODO |
 
 ## P2 — Pre-mainnet (желательно)
 
