@@ -342,6 +342,20 @@ func ApplyBlock(
 		return fmt.Errorf(BLOCK_ERR_TARGET_INVALID)
 	}
 
+	// Pre-scan: reject oversized witnesses before PoW hash computation.
+	// A tx with witness bytes > MAX_WITNESS_BYTES_PER_TX is invalid regardless of PoW;
+	// checking early avoids returning BLOCK_ERR_POW_INVALID for a structurally invalid tx,
+	// and also provides DoS protection (reject before expensive hash).
+	for i := range block.Transactions {
+		tx := &block.Transactions[i]
+		if len(tx.Witness.Witnesses) > MAX_WITNESS_ITEMS {
+			return fmt.Errorf(TX_ERR_WITNESS_OVERFLOW)
+		}
+		if len(WitnessBytes(tx.Witness)) > MAX_WITNESS_BYTES_PER_TX {
+			return fmt.Errorf(TX_ERR_WITNESS_OVERFLOW)
+		}
+	}
+
 	blockHash, err := blockHeaderHash(p, &block.Header)
 	if err != nil {
 		return err
