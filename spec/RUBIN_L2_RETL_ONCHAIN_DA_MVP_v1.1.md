@@ -92,7 +92,52 @@ For each announced RETL batch `(retl_domain_id, batch_number, tx_data_root, ...)
 - `tx_data_root`
 
 The mechanism that makes `DA_OBJECT` bytes retrievable from L1 is **out of scope** for this document and must be
-defined by an L1 upgrade (e.g., a block-level DA section or a dedicated transaction carrier format).
+defined by an L1 upgrade. Two plausible publication mechanisms exist:
+
+### 4.1 Option A (RECOMMENDED): `tx-carrier` (chunked DA transactions)
+
+Design intent:
+
+- Make on-chain DA compatible with compact block relay (§1) by ensuring the heavy DA bytes are relayed and present in
+  peer mempools **before** a block is mined.
+
+Operationally:
+
+1. Sequencer builds `DAObjectV1Bytes` (this spec) and publishes it to the L1 network as one or more **DA carrier
+   transactions** ("DA-txs").
+2. DA-txs are relayed over P2P (entering peer mempools).
+3. When a miner finds a block, the block can be reconstructed quickly from mempools using compact blocks, because the
+   DA-txs are already present locally on receivers.
+
+Commitment requirements:
+
+- L1 consensus MUST commit to the DA bytes in the block. If the DA bytes are not directly committed by `txid` /
+  `merkle_root` (e.g., if carried in a prunable field), the carrier format MUST include an explicit commitment
+  (e.g., `SHA3-256(da_bytes)` stored in consensus-committed bytes) and L1 validation MUST reject mismatches.
+
+Pruning note (non-consensus):
+
+- "On-chain DA" means the bytes are in L1 blocks at inclusion time. Node-local pruning does not change the chain, but
+  it reduces long-term retrievability unless sufficient archival infrastructure exists.
+- Gateways/watchtowers SHOULD archive DA bytes for at least the maximum withdrawal finalization horizon of the domain.
+
+This document assumes Option A for the `DA_BYTES_PER_BLOCK = 32 MB` planning profile because it minimizes stale/orphan
+pressure when combined with compact-block relay.
+
+### 4.2 Option B: block-level DA section (`DASection`)
+
+Design intent:
+
+- Attach DA bytes to the block as a separate section not represented as transactions.
+
+Tradeoff:
+
+- Compact blocks do not help if the receiver cannot reconstruct the DA section from its mempool. In that case the
+  miner must transmit the full DA section (e.g., 32 MB) in real time after mining, increasing propagation delay and
+  stale/orphan rates.
+
+If a block-level DA section is used, the P2P layer likely needs a dedicated "DA chunk inventory" protocol to pre-gossip
+DA bytes, which makes it operationally closer to Option A but with additional protocol complexity.
 
 RETL indexers and gateways MUST treat an announced batch as "DA missing" until a matching `DA_OBJECT` is found and
 validated per §7.
