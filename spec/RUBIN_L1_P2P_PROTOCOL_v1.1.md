@@ -244,7 +244,7 @@ hash     : bytes32
 | Value | Name | Hash content |
 |-------|------|--------------|
 | `1` | `MSG_TX` | txid (witness-stripped) |
-| `2` | `MSG_WITNESS_TX` | wtxid = SHA3-256(TxBytes including witness) |
+| `2` | `MSG_WITNESS_TX` | wtxid = SHA3-256(TxBytes including witness and DA payload) |
 | `3` | `MSG_BLOCK` | block hash = SHA3-256(BlockHeaderBytes) |
 | `4` | `MSG_FILTERED_BLOCK` | block hash (request with merkle proof) |
 

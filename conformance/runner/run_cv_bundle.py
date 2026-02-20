@@ -981,7 +981,7 @@ def run_parse(
             failures.append(f"{gate}:{test_id}: neither expected_code nor expected_error")
             continue
 
-        max_witness = ctx.get("witness_size_bytes")
+        max_witness = ctx.get("max_witness_size_per_tx")
         max_witness_bytes = ""
         if isinstance(max_witness, int) and max_witness >= 0:
             max_witness_bytes = str(max_witness)
@@ -1548,6 +1548,7 @@ def run_block(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd
     def make_tx_no_witness_bytes(
         *,
         version: int,
+        tx_kind: int,
         tx_nonce: int,
         inputs: list[tuple[bytes, int, bytes, int]],
         outputs: list[tuple[int, int, bytes]],
@@ -1555,6 +1556,7 @@ def run_block(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd
     ) -> bytes:
         out = bytearray()
         out.extend(_u32le(version))
+        out.append(tx_kind & 0xFF)
         out.extend(_u64le(tx_nonce))
         out.extend(_compact_size_encode(len(inputs)))
         for prev_txid, prev_vout, script_sig, sequence in inputs:
@@ -1585,6 +1587,8 @@ def run_block(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd
     def make_tx_bytes(tx_no_witness: bytes, witnesses: list[tuple[int, bytes, bytes]]) -> bytes:
         out = bytearray(tx_no_witness)
         out.extend(make_witness_section_bytes(witnesses))
+        # DA payload is not used in these v1.1 phase tests; encode da_payload_len=0.
+        out.extend(_compact_size_encode(0))
         return bytes(out)
 
     def txid_sha3_256(tx_no_witness: bytes) -> bytes:
@@ -1645,7 +1649,8 @@ def run_block(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd
         prev_vout = 0xFFFF_FFFF
         seq = 0xFFFF_FFFF
         tx_no_wit = make_tx_no_witness_bytes(
-            version=1,
+            version=2,
+            tx_kind=0x00,
             tx_nonce=0,
             inputs=[(prev_txid, prev_vout, b"", seq)],
             outputs=outputs,
@@ -1669,7 +1674,8 @@ def run_block(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd
         if locktime is None:
             locktime = height
         tx_no_wit = make_tx_no_witness_bytes(
-            version=1,
+            version=2,
+            tx_kind=0x00,
             tx_nonce=tx_nonce,
             inputs=[(prev_txid, prev_vout, script_sig, sequence)],
             outputs=outputs,
@@ -1680,7 +1686,8 @@ def run_block(gate: str, fixture: dict[str, Any], rust: ClientCmd, go: ClientCmd
 
     def make_timelock_spend_tx(prev_txid: bytes, prev_vout: int, tx_nonce: int) -> tuple[bytes, bytes]:
         tx_no_wit = make_tx_no_witness_bytes(
-            version=1,
+            version=2,
+            tx_kind=0x00,
             tx_nonce=tx_nonce,
             inputs=[(prev_txid, prev_vout, b"", 1)],
             outputs=[(1, CORE_P2PK, make_p2pk_covenant_data())],
@@ -2282,7 +2289,8 @@ def _parse_header_target_and_timestamp(header_bytes_116: bytes) -> tuple[bytes, 
 def _coinbase_tx_bytes(height: int, key_id32: bytes) -> bytes:
     if len(key_id32) != 32:
         raise ValueError("key_id must be 32 bytes")
-    version = 1
+    version = 2
+    tx_kind = 0x00  # standard
     tx_nonce = 0
     prev_txid = b"\x00" * 32
     prev_vout = 0xFFFFFFFF
@@ -2291,38 +2299,43 @@ def _coinbase_tx_bytes(height: int, key_id32: bytes) -> bytes:
     covenant_type = 0x0000  # CORE_P2PK
     covenant_data = bytes([0x01]) + key_id32  # suite_id + key_id
 
-    # TxNoWitnessBytes layout matches clients/go/consensus/encode.go
+    # TxCoreBytes layout matches clients/go/consensus/encode.go (wire v2).
+    core = bytearray()
+    core.extend(_u32le(version))
+    core.extend(bytes([tx_kind]))
+    core.extend(_u64le(tx_nonce))
+
+    core.extend(_compact_size_encode(1))  # input count
+    core.extend(prev_txid)
+    core.extend(_u32le(prev_vout))
+    core.extend(_compact_size_encode(0))  # script_sig_len
+    core.extend(_u32le(sequence))
+
+    core.extend(_compact_size_encode(1))  # output count
+    core.extend(_u64le(value))
+    core.extend(_u16le(covenant_type))
+    core.extend(_compact_size_encode(len(covenant_data)))
+    core.extend(covenant_data)
+
+    core.extend(_u32le(height))  # locktime
+
+    # TxBytes = TxCoreBytes || WitnessBytes || DA_Payload_Length(0).
     out = bytearray()
-    out.extend(_u32le(version))
-    out.extend(_u64le(tx_nonce))
-
-    out.extend(_compact_size_encode(1))  # input count
-    out.extend(prev_txid)
-    out.extend(_u32le(prev_vout))
-    out.extend(_compact_size_encode(0))  # script_sig_len
-    out.extend(_u32le(sequence))
-
-    out.extend(_compact_size_encode(1))  # output count
-    out.extend(_u64le(value))
-    out.extend(_u16le(covenant_type))
-    out.extend(_compact_size_encode(len(covenant_data)))
-    out.extend(covenant_data)
-
-    out.extend(_u32le(height))  # locktime
-
-    # WitnessBytes: CompactSize(0)
-    out.extend(_compact_size_encode(0))
+    out.extend(core)
+    out.extend(_compact_size_encode(0))  # witness_count=0
+    out.extend(_compact_size_encode(0))  # da_payload_len=0
     return bytes(out)
 
 
 def _txid_from_tx_bytes(tx_bytes: bytes) -> bytes:
-    # txid is SHA3-256 over TxNoWitnessBytes.
-    # Our tx is coinbase-only with witness_count=0, so the TxNoWitnessBytes
-    # is tx_bytes without the final CompactSize(0) witness section.
-    if len(tx_bytes) < 1:
+    # txid is SHA3-256 over TxCoreBytes (wire v2: excludes witness and DA payload).
+    # The runner constructs coinbase-only txs with witness_count=0 and da_payload_len=0,
+    # so TxCoreBytes == tx_bytes without the last two CompactSize(0) bytes.
+    if len(tx_bytes) < 2:
         raise ValueError("tx bytes truncated")
-    nowit = tx_bytes[:-1]
-    return _sha3_256(nowit)
+    if tx_bytes[-2:] != b"\x00\x00":
+        raise ValueError("runner txid helper expects witness_count=0 and da_payload_len=0")
+    return _sha3_256(tx_bytes[:-2])
 
 
 def _merkle_root_single(txid32: bytes) -> bytes:

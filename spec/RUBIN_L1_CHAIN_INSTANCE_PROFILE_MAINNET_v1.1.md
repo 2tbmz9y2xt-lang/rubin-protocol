@@ -26,8 +26,8 @@ This section defines the exact inputs for `chain_id` derivation and block-0 hash
 
 Set these two concrete fields during chain-deployment ceremony:
 
-- `genesis_header_bytes`: <hex, BlockHeaderBytes(genesis_header)>
-- `genesis_tx_bytes`: <hex, TxBytes(genesis_coinbase_tx)>
+- `010000000000000000000000000000000000000000000000000000000000000000000000de73e02cc3f22fcbb8ecf92fd13ec584ae6077cb170c144958ac0cf1cc758b7500f1536500000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000001`: <hex, BlockHeaderBytes(genesis_header)>
+- `02000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff00000000000000`: <hex, TxBytes(genesis_coinbase_tx)>
 
 Then compute:
 
@@ -56,13 +56,13 @@ Mainnet genesis generation for v1.1 is performed by a separate chain-deployment 
 
 - `network_name`: `rubin-mainnet`
 - `network_magic`: `0x524d4149`  (ASCII "RMAI")
-- `protocol_version`: `1` (u32)
+- `protocol_version`: `2` (u32)
 
 ## 2. Genesis (concrete values required before mainnet launch)
 
-- `genesis_header_bytes`: `01000000000000000000000000000000000000000000000000000000000000000000000024687b35a5bef7ae62cd384e711c835ca57814f6f9730d2a9a2e7fcb280f58a500f1536500000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000001`
+- `genesis_header_bytes`: `010000000000000000000000000000000000000000000000000000000000000000000000de73e02cc3f22fcbb8ecf92fd13ec584ae6077cb170c144958ac0cf1cc758b7500f1536500000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000001`
 
-- `genesis_tx_bytes`: `010000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff000000000000`
+- `genesis_tx_bytes`: `02000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff00000000000000`
 
 Derivation:
 
@@ -76,9 +76,9 @@ serialized_genesis_without_chain_id_field =
 chain_id = SHA3-256(serialized_genesis_without_chain_id_field)
 ```
 
-- `chain_id`: `b71f012bdfacaf2ef127d909c43caf2de7d24a13066f746c9b47112c43170773`
+- `chain_id`: `24648de54a451871d45dd917c4ae9845996b3af4e018067dce5554fd285e804c`
 
-- `genesis_block_hash`: `6e31d98c19d6d457944d4cd7d101482e108a16cef7c85239d6b1d50b87c3c33b`
+- `genesis_block_hash`: `d182418e6f6316a02365b4a92f45b9af8a81c2de4053bcc84eda7824529d2dc2`
 
 ## 3. Consensus constant profile
 

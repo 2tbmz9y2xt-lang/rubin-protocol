@@ -16,9 +16,9 @@ use crate::{
     BLOCK_ERR_MERKLE_INVALID, BLOCK_ERR_POW_INVALID, BLOCK_ERR_SUBSIDY_EXCEEDED,
     BLOCK_ERR_TARGET_INVALID, BLOCK_ERR_TIMESTAMP_FUTURE, BLOCK_ERR_TIMESTAMP_OLD,
     BLOCK_ERR_WEIGHT_EXCEEDED, Block, BlockValidationContext, COINBASE_MATURITY, CORE_ANCHOR,
-    CORE_HTLC_V1, CORE_HTLC_V2, CORE_P2PK, CORE_RESERVED_FUTURE, CORE_TIMELOCK_V1, CORE_VAULT_V1,
-    MAX_ANCHOR_BYTES_PER_BLOCK, MAX_ANCHOR_PAYLOAD_SIZE, MAX_BLOCK_WEIGHT, MAX_FUTURE_DRIFT,
-    MAX_TX_INPUTS, MAX_TX_OUTPUTS, MAX_WITNESS_BYTES_PER_TX, MAX_WITNESS_ITEMS,
+    CORE_DA_COMMIT, CORE_HTLC_V1, CORE_HTLC_V2, CORE_P2PK, CORE_RESERVED_FUTURE, CORE_TIMELOCK_V1,
+    CORE_VAULT_V1, MAX_ANCHOR_BYTES_PER_BLOCK, MAX_ANCHOR_PAYLOAD_SIZE, MAX_BLOCK_WEIGHT,
+    MAX_FUTURE_DRIFT, MAX_TX_INPUTS, MAX_TX_OUTPUTS, MAX_WITNESS_BYTES_PER_TX, MAX_WITNESS_ITEMS,
     ML_DSA_PUBKEY_BYTES, ML_DSA_SIG_BYTES, SLH_DSA_PUBKEY_BYTES, SLH_DSA_SIG_MAX_BYTES,
     SUITE_ID_ML_DSA, SUITE_ID_SENTINEL, SUITE_ID_SLH_DSA, TIMELOCK_MODE_HEIGHT,
     TIMELOCK_MODE_TIMESTAMP, TX_COINBASE_PREVOUT_VOUT, TX_ERR_COINBASE_IMMATURE,
@@ -103,6 +103,14 @@ fn validate_output_covenant_constraints(output: &TxOutput) -> Result<(), String>
                 return Err("TX_ERR_COVENANT_TYPE_INVALID".into());
             }
         }
+        CORE_DA_COMMIT => {
+            if output.value != 0 {
+                return Err("TX_ERR_COVENANT_TYPE_INVALID".into());
+            }
+            if output.covenant_data.len() != 32 {
+                return Err("TX_ERR_PARSE".into());
+            }
+        }
         CORE_HTLC_V1 => {
             if output.covenant_data.len() != 105 {
                 return Err("TX_ERR_PARSE".into());
@@ -144,6 +152,7 @@ fn validate_output_covenant_constraints(output: &TxOutput) -> Result<(), String>
 pub fn tx_weight(tx: &Tx) -> Result<u64, String> {
     let base = tx_no_witness_bytes(tx).len();
     let witness = witness_bytes(&tx.witness).len();
+    let da = crate::compact_size_encode(tx.da_payload.len() as u64).len() + tx.da_payload.len();
     let mut sig_cost: u64 = 0;
     for (i, item) in tx.witness.witnesses.iter().enumerate() {
         if i < tx.inputs.len() {
@@ -157,7 +166,8 @@ pub fn tx_weight(tx: &Tx) -> Result<u64, String> {
     let base_weight = (base as u64)
         .checked_mul(4)
         .ok_or_else(|| "TX_ERR_PARSE".to_string())?;
-    add_u64(add_u64(base_weight, witness as u64)?, sig_cost)
+    let w = add_u64(add_u64(base_weight, witness as u64)?, da as u64)?;
+    add_u64(w, sig_cost)
 }
 
 pub fn txid(provider: &dyn CryptoProvider, tx: &Tx) -> Result<[u8; 32], String> {
@@ -589,9 +599,7 @@ pub fn validate_input_authorization(
             {
                 return Err("TX_ERR_SIG_INVALID".into());
             }
-            if actual_key_id.as_slice() == owner_key_id
-                && spend_delay > 0
-            {
+            if actual_key_id.as_slice() == owner_key_id && spend_delay > 0 {
                 let unlock_height = prev_creation_height
                     .checked_add(spend_delay)
                     .ok_or("TX_ERR_TIMELOCK_NOT_MET")?;

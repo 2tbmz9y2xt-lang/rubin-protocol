@@ -51,11 +51,53 @@ func WitnessBytes(w WitnessSection) []byte {
 	return out
 }
 
-func TxNoWitnessBytes(tx *Tx) []byte {
-	out := make([]byte, 0, 4+8)
+func daCoreFieldsBytes(tx *Tx) []byte {
+	switch tx.TxKind {
+	case TX_KIND_STANDARD:
+		return nil
+	case TX_KIND_DA_COMMIT:
+		if tx.DACommit == nil || tx.DAChunk != nil {
+			panic("DA core fields: DA_COMMIT kind requires DACommit and forbids DAChunk")
+		}
+		// Fixed fields plus variable-length signature.
+		out := make([]byte, 0, 32+2+32+8+32+32+32+1+9+len(tx.DACommit.BatchSig))
+		out = append(out, tx.DACommit.DAID[:]...)
+		var tmp2 [2]byte
+		binary.LittleEndian.PutUint16(tmp2[:], tx.DACommit.ChunkCount)
+		out = append(out, tmp2[:]...)
+		out = append(out, tx.DACommit.RETLDomainID[:]...)
+		var tmp8 [8]byte
+		binary.LittleEndian.PutUint64(tmp8[:], tx.DACommit.BatchNumber)
+		out = append(out, tmp8[:]...)
+		out = append(out, tx.DACommit.TxDataRoot[:]...)
+		out = append(out, tx.DACommit.StateRoot[:]...)
+		out = append(out, tx.DACommit.WithdrawalsRoot[:]...)
+		out = append(out, byte(tx.DACommit.BatchSigSuite))
+		out = append(out, CompactSize(len(tx.DACommit.BatchSig)).Encode()...)
+		out = append(out, tx.DACommit.BatchSig...)
+		return out
+	case TX_KIND_DA_CHUNK:
+		if tx.DAChunk == nil || tx.DACommit != nil {
+			panic("DA core fields: DA_CHUNK kind requires DAChunk and forbids DACommit")
+		}
+		out := make([]byte, 0, 32+2+32)
+		out = append(out, tx.DAChunk.DAID[:]...)
+		var tmp2 [2]byte
+		binary.LittleEndian.PutUint16(tmp2[:], tx.DAChunk.ChunkIndex)
+		out = append(out, tmp2[:]...)
+		out = append(out, tx.DAChunk.ChunkHash[:]...)
+		return out
+	default:
+		panic("unknown tx kind")
+	}
+}
+
+func TxCoreBytes(tx *Tx) []byte {
+	out := make([]byte, 0, 4+1+8)
 	var tmp4 [4]byte
 	binary.LittleEndian.PutUint32(tmp4[:], tx.Version)
 	out = append(out, tmp4[:]...)
+	out = append(out, byte(tx.TxKind))
 	var tmp8 [8]byte
 	binary.LittleEndian.PutUint64(tmp8[:], tx.TxNonce)
 	out = append(out, tmp8[:]...)
@@ -78,12 +120,16 @@ func TxNoWitnessBytes(tx *Tx) []byte {
 
 	binary.LittleEndian.PutUint32(tmp4[:], tx.Locktime)
 	out = append(out, tmp4[:]...)
+
+	out = append(out, daCoreFieldsBytes(tx)...)
 	return out
 }
 
 func TxBytes(tx *Tx) []byte {
-	out := TxNoWitnessBytes(tx)
+	out := TxCoreBytes(tx)
 	out = append(out, WitnessBytes(tx.Witness)...)
+	out = append(out, CompactSize(len(tx.DAPayload)).Encode()...)
+	out = append(out, tx.DAPayload...)
 	return out
 }
 

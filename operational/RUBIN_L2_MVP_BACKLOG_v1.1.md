@@ -9,12 +9,15 @@ This document is a development backlog. It does not change L1 consensus.
 ## 0. Product split (from strategy)
 
 Public:
-- L1: settlement + commitments.
-- L2: RETL domain + External DA (see `operational/RUBIN_PUBLIC_L2_EXTERNAL_DA_PROFILE_v1.1.md`).
+- L1: settlement + commitments + **on-chain DA** (RETL `DA_OBJECT` bytes are retrievable from L1 blocks).
+- L2: RETL domain + gateway policy.
+- Spec: `spec/RUBIN_L2_RETL_ONCHAIN_DA_MVP_v1.1.md` (draft auxiliary).
 
 Corporate:
 - L1: settlement + commitments.
-- L2: RETL domain + DA committee (see `operational/RUBIN_RETL_DA_COMMITTEE_PROFILE_v1.1.md`).
+- L2: RETL domain + (policy choice):
+  - on-chain DA (public auditability), or
+  - DA committee (private/corporate deployments; see `operational/RUBIN_RETL_DA_COMMITTEE_PROFILE_v1.1.md`).
 
 ## 1. MVP deliverables (what "done" means)
 
@@ -46,27 +49,34 @@ Outputs:
 - `sequencer` binary/service
 - test vectors for root computation and signing
 
-## 3. External DA (public) MVP
+## 3. On-chain DA (public) MVP
 
-Goal: store and serve `DA_OBJECT` per batch, addressed by `da_object_id`.
+Goal: publish `DA_OBJECT` bytes on L1 (no external withholding) and make them discoverable and verifiable against `tx_data_root`.
 
 Tasks:
 1. Define `DA_OBJECT` container format (versioned):
-   - encoding, compression, chunking.
-2. Implement DA publisher (sequencer-side):
-   - upload/store object,
-   - return retrieval URLs.
-3. Implement retrieval client:
-   - fetch by `da_object_id`,
+   - encoding, chunking, DoS caps.
+   - Reference: `spec/RUBIN_L2_RETL_ONCHAIN_DA_MVP_v1.1.md` (DA_OBJECT_V1).
+2. Define L1 publication mechanism for on-chain DA bytes:
+   - block-level DA section or dedicated carrier wire (requires L1 upgrade).
+   - Draft carrier spec: `spec/RUBIN_L1_CANONICAL_v1.1.md §17` (On-chain DA tx-carrier upgrade; gated).
+3. Implement sequencer-side publisher:
+   - build DA_OBJECT bytes,
+   - publish on L1 together with RETL commitments.
+4. Implement retrieval + validation:
+   - locate matching DA_OBJECT by `(retl_domain_id, batch_number, tx_data_root)`,
    - recompute `tx_data_root`,
    - fail closed if mismatch.
-4. Implement multi-provider mirroring:
-   - at least 3 independent endpoints per domain.
 
 Outputs:
 - `da-publisher` module
 - `da-client` module
-- reference DA provider API spec
+- L1 publication mechanism spec + reference implementation plan
+
+## 3.1 Optional: external mirroring (non-consensus)
+
+Even with on-chain DA, public deployments MAY operate mirrors and discovery endpoints to reduce initial sync burden.
+See `operational/RUBIN_PUBLIC_L2_EXTERNAL_DA_PROFILE_v1.1.md` for an external mirroring profile.
 
 ## 4. DA committee (corporate) MVP
 
@@ -144,7 +154,6 @@ Outputs:
 
 ## 8. Explicit out-of-scope (for MVP)
 
-1. Full on-chain DA.
+1. Trustless rollup correctness (fraud proofs / validity proofs).
 2. Full Ethereum bridge with light-client verification.
 3. General-purpose VM; MVP can be app-specific.
-

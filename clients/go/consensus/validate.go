@@ -8,8 +8,9 @@ import (
 )
 
 func TxWeight(tx *Tx) (uint64, error) {
-	base := len(TxNoWitnessBytes(tx))
+	base := len(TxCoreBytes(tx))
 	witness := len(WitnessBytes(tx.Witness))
+	da := len(CompactSize(len(tx.DAPayload)).Encode()) + len(tx.DAPayload)
 	base = base * 4
 	sigCost := 0
 	for i, item := range tx.Witness.Witnesses {
@@ -26,11 +27,15 @@ func TxWeight(tx *Tx) (uint64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("TX_ERR_PARSE")
 	}
+	total, err = addUint64(total, uint64(da))
+	if err != nil {
+		return 0, fmt.Errorf("TX_ERR_PARSE")
+	}
 	return addUint64(total, uint64(sigCost))
 }
 
 func TxID(p crypto.CryptoProvider, tx *Tx) ([32]byte, error) {
-	return p.SHA3_256(TxNoWitnessBytes(tx))
+	return p.SHA3_256(TxCoreBytes(tx))
 }
 
 func merkleRootTxIDs(p crypto.CryptoProvider, txs []*Tx) ([32]byte, error) {
@@ -189,6 +194,13 @@ func validateOutputCovenantConstraints(output TxOutput) error {
 		}
 		if len(output.CovenantData) == 0 || len(output.CovenantData) > MAX_ANCHOR_PAYLOAD_SIZE {
 			return fmt.Errorf("TX_ERR_COVENANT_TYPE_INVALID")
+		}
+	case CORE_DA_COMMIT:
+		if output.Value != 0 {
+			return fmt.Errorf("TX_ERR_COVENANT_TYPE_INVALID")
+		}
+		if len(output.CovenantData) != 32 {
+			return fmt.Errorf("TX_ERR_PARSE")
 		}
 	case CORE_HTLC_V1:
 		if len(output.CovenantData) != 105 {

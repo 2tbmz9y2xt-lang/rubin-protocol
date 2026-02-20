@@ -12,7 +12,8 @@ func makeCoinbaseOnlyBlockBytes(t *testing.T, p crypto.CryptoProvider, height ui
 
 	// Minimal coinbase tx satisfying consensus coinbase rules.
 	cb := consensus.Tx{
-		Version: 1,
+		Version: 2,
+		TxKind:  consensus.TX_KIND_STANDARD,
 		TxNonce: 0,
 		Inputs: []consensus.TxInput{{
 			PrevTxid:  [32]byte{},

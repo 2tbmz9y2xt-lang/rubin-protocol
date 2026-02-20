@@ -172,45 +172,14 @@ func parseWitnessList(cur *cursor) ([]WitnessItem, error) {
 
 func ParseTxBytes(b []byte) (*Tx, error) {
 	cur := newCursor(b)
-
-	version, err := cur.readU32LE()
+	tx, err := ParseTxBytesFromCursor(cur)
 	if err != nil {
 		return nil, err
 	}
-	txNonce, err := cur.readU64LE()
-	if err != nil {
-		return nil, err
-	}
-	inputs, err := parseInputList(cur)
-	if err != nil {
-		return nil, err
-	}
-	outputs, err := parseOutputList(cur)
-	if err != nil {
-		return nil, err
-	}
-
-	locktime, err := cur.readU32LE()
-	if err != nil {
-		return nil, err
-	}
-	witnesses, err := parseWitnessList(cur)
-	if err != nil {
-		return nil, err
-	}
-
 	if cur.pos != len(b) {
 		return nil, fmt.Errorf("parse: trailing bytes")
 	}
-
-	return &Tx{
-		Version:  version,
-		TxNonce:  txNonce,
-		Inputs:   inputs,
-		Outputs:  outputs,
-		Locktime: locktime,
-		Witness:  WitnessSection{Witnesses: witnesses},
-	}, nil
+	return tx, nil
 }
 
 func ParseBlockHeader(cur *cursor) (BlockHeader, error) {
@@ -290,6 +259,14 @@ func ParseTxBytesFromCursor(cur *cursor) (*Tx, error) {
 	if err != nil {
 		return nil, err
 	}
+	if version != TX_VERSION_V2 {
+		return nil, fmt.Errorf("TX_ERR_PARSE")
+	}
+	kindU8, err := cur.readU8()
+	if err != nil {
+		return nil, err
+	}
+	txKind := uint8(kindU8)
 	txNonce, err := cur.readU64LE()
 	if err != nil {
 		return nil, err
@@ -306,16 +283,135 @@ func ParseTxBytesFromCursor(cur *cursor) (*Tx, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	var daCommit *DACommitFields
+	var daChunk *DAChunkFields
+	switch txKind {
+	case TX_KIND_STANDARD:
+		// no DA core fields
+	case TX_KIND_DA_COMMIT:
+		var f DACommitFields
+		daid, err := cur.readExact(32)
+		if err != nil {
+			return nil, err
+		}
+		copy(f.DAID[:], daid)
+		cc, err := cur.readU16LE()
+		if err != nil {
+			return nil, err
+		}
+		f.ChunkCount = cc
+		domain, err := cur.readExact(32)
+		if err != nil {
+			return nil, err
+		}
+		copy(f.RETLDomainID[:], domain)
+		bn, err := cur.readU64LE()
+		if err != nil {
+			return nil, err
+		}
+		f.BatchNumber = bn
+		r1, err := cur.readExact(32)
+		if err != nil {
+			return nil, err
+		}
+		copy(f.TxDataRoot[:], r1)
+		r2, err := cur.readExact(32)
+		if err != nil {
+			return nil, err
+		}
+		copy(f.StateRoot[:], r2)
+		r3, err := cur.readExact(32)
+		if err != nil {
+			return nil, err
+		}
+		copy(f.WithdrawalsRoot[:], r3)
+		suite, err := cur.readU8()
+		if err != nil {
+			return nil, err
+		}
+		f.BatchSigSuite = uint8(suite)
+		sigLenU64, err := cur.readCompactSize()
+		if err != nil {
+			return nil, err
+		}
+		sigLen, err := toIntLen(sigLenU64, "batch_sig_len")
+		if err != nil {
+			return nil, err
+		}
+		sig, err := cur.readExact(sigLen)
+		if err != nil {
+			return nil, err
+		}
+		f.BatchSig = append([]byte(nil), sig...)
+		daCommit = &f
+	case TX_KIND_DA_CHUNK:
+		var f DAChunkFields
+		daid, err := cur.readExact(32)
+		if err != nil {
+			return nil, err
+		}
+		copy(f.DAID[:], daid)
+		ci, err := cur.readU16LE()
+		if err != nil {
+			return nil, err
+		}
+		f.ChunkIndex = ci
+		h, err := cur.readExact(32)
+		if err != nil {
+			return nil, err
+		}
+		copy(f.ChunkHash[:], h)
+		daChunk = &f
+	default:
+		return nil, fmt.Errorf("TX_ERR_PARSE")
+	}
+
 	witnesses, err := parseWitnessList(cur)
 	if err != nil {
 		return nil, err
 	}
+
+	daPayloadLenU64, err := cur.readCompactSize()
+	if err != nil {
+		return nil, err
+	}
+	daPayloadLen, err := toIntLen(daPayloadLenU64, "da_payload_len")
+	if err != nil {
+		return nil, err
+	}
+	daPayload, err := cur.readExact(daPayloadLen)
+	if err != nil {
+		return nil, err
+	}
+
+	if txKind == TX_KIND_STANDARD {
+		if daPayloadLen != 0 {
+			return nil, fmt.Errorf("TX_ERR_PARSE")
+		}
+	} else {
+		if daPayloadLen == 0 {
+			return nil, fmt.Errorf("TX_ERR_PARSE")
+		}
+		// Per-tx consensus caps.
+		if txKind == TX_KIND_DA_COMMIT && daPayloadLen > MAX_DA_MANIFEST_BYTES_PER_TX {
+			return nil, fmt.Errorf("TX_ERR_PARSE")
+		}
+		if txKind == TX_KIND_DA_CHUNK && daPayloadLen > MAX_DA_CHUNK_BYTES_PER_TX {
+			return nil, fmt.Errorf("TX_ERR_PARSE")
+		}
+	}
+
 	return &Tx{
-		Version:  version,
-		TxNonce:  txNonce,
-		Inputs:   inputs,
-		Outputs:  outputs,
-		Locktime: locktime,
-		Witness:  WitnessSection{Witnesses: witnesses},
+		Version:   version,
+		TxKind:    txKind,
+		TxNonce:   txNonce,
+		Inputs:    inputs,
+		Outputs:   outputs,
+		Locktime:  locktime,
+		DACommit:  daCommit,
+		DAChunk:   daChunk,
+		DAPayload: append([]byte(nil), daPayload...),
+		Witness:   WitnessSection{Witnesses: witnesses},
 	}, nil
 }

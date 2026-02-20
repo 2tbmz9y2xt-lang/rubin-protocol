@@ -9,6 +9,7 @@ const (
 	CORE_HTLC_V1         = 0x0100
 	CORE_VAULT_V1        = 0x0101
 	CORE_HTLC_V2         = 0x0102
+	CORE_DA_COMMIT       = 0x0103
 	CORE_RESERVED_FUTURE = 0x00ff
 
 	MAX_BLOCK_WEIGHT           = 4_000_000
@@ -30,6 +31,13 @@ const (
 	MAX_WITNESS_ITEMS        = 1_024
 	MAX_WITNESS_BYTES_PER_TX = 100_000
 
+	// DA (on-chain data availability) consensus caps (v2 wire, planning profile).
+	MAX_DA_MANIFEST_BYTES_PER_TX = 65_536
+	MAX_DA_CHUNK_BYTES_PER_TX    = 524_288
+	MAX_DA_BYTES_PER_BLOCK       = 32_000_000
+	MAX_DA_COMMITS_PER_BLOCK     = 128
+	MAX_DA_CHUNK_COUNT           = 4_096
+
 	SUITE_ID_SENTINEL     = 0x00
 	SUITE_ID_ML_DSA       = 0x01
 	SUITE_ID_SLH_DSA      = 0x02
@@ -40,6 +48,14 @@ const (
 
 	TIMELOCK_MODE_HEIGHT    = 0x00
 	TIMELOCK_MODE_TIMESTAMP = 0x01
+)
+
+const (
+	TX_VERSION_V2 = 2
+
+	TX_KIND_STANDARD  = 0x00
+	TX_KIND_DA_COMMIT = 0x01
+	TX_KIND_DA_CHUNK  = 0x02
 )
 
 const (
@@ -112,12 +128,41 @@ type blockWeightError struct {
 func (e blockWeightError) Error() string { return e.code }
 
 type Tx struct {
-	Version  uint32
+	// Consensus wire v2: Version MUST be TX_VERSION_V2.
+	Version uint32
+
+	// tx_kind: 0x00=standard, 0x01=DA_COMMIT_TX, 0x02=DA_CHUNK_TX.
+	TxKind uint8
+
 	TxNonce  uint64
 	Inputs   []TxInput
 	Outputs  []TxOutput
 	Locktime uint32
-	Witness  WitnessSection
+
+	// DA core fields (present iff TxKind != 0x00) and DA payload bytes (present iff TxKind != 0x00).
+	DACommit  *DACommitFields
+	DAChunk   *DAChunkFields
+	DAPayload []byte
+
+	Witness WitnessSection
+}
+
+type DACommitFields struct {
+	DAID            [32]byte
+	ChunkCount      uint16
+	RETLDomainID    [32]byte
+	BatchNumber     uint64
+	TxDataRoot      [32]byte
+	StateRoot       [32]byte
+	WithdrawalsRoot [32]byte
+	BatchSigSuite   uint8
+	BatchSig        []byte
+}
+
+type DAChunkFields struct {
+	DAID       [32]byte
+	ChunkIndex uint16
+	ChunkHash  [32]byte
 }
 
 type TxOutPoint struct {

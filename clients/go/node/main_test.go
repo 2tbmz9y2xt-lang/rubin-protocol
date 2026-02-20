@@ -176,7 +176,8 @@ func TestDeriveChainID_DevnetProfile(t *testing.T) {
 func TestCmdTxIDWeightParse_HappyPath(t *testing.T) {
 	// Minimal coinbase-like tx (valid parse/txid/weight; not meant to be applied).
 	tx := &consensus.Tx{
-		Version: 1,
+		Version: consensus.TX_VERSION_V2,
+		TxKind:  consensus.TX_KIND_STANDARD,
 		TxNonce: 0,
 		Inputs: []consensus.TxInput{{
 			PrevTxid:  [32]byte{},
@@ -189,8 +190,9 @@ func TestCmdTxIDWeightParse_HappyPath(t *testing.T) {
 			CovenantType: consensus.CORE_P2PK,
 			CovenantData: make([]byte, 33),
 		}},
-		Locktime: 0,
-		Witness:  consensus.WitnessSection{Witnesses: nil},
+		Locktime:  0,
+		DAPayload: nil,
+		Witness:   consensus.WitnessSection{Witnesses: nil},
 	}
 	txHex := hex.EncodeToString(consensus.TxBytes(tx))
 
@@ -210,11 +212,13 @@ func TestCmdTxIDWeightParse_HappyPath(t *testing.T) {
 
 	// Force witness overflow branch in cmdParse by using a tx with a non-empty witness section.
 	tx2 := &consensus.Tx{
-		Version:  1,
-		TxNonce:  0,
-		Inputs:   []consensus.TxInput{{PrevTxid: [32]byte{}, PrevVout: consensus.TX_COINBASE_PREVOUT_VOUT, Sequence: consensus.TX_COINBASE_PREVOUT_VOUT}},
-		Outputs:  []consensus.TxOutput{{Value: 0, CovenantType: consensus.CORE_P2PK, CovenantData: make([]byte, 33)}},
-		Locktime: 0,
+		Version:   consensus.TX_VERSION_V2,
+		TxKind:    consensus.TX_KIND_STANDARD,
+		TxNonce:   0,
+		Inputs:    []consensus.TxInput{{PrevTxid: [32]byte{}, PrevVout: consensus.TX_COINBASE_PREVOUT_VOUT, Sequence: consensus.TX_COINBASE_PREVOUT_VOUT}},
+		Outputs:   []consensus.TxOutput{{Value: 0, CovenantType: consensus.CORE_P2PK, CovenantData: make([]byte, 33)}},
+		Locktime:  0,
+		DAPayload: nil,
 		Witness: consensus.WitnessSection{Witnesses: []consensus.WitnessItem{
 			{SuiteID: consensus.SUITE_ID_SENTINEL, Pubkey: nil, Signature: nil},
 		}},

@@ -1,7 +1,7 @@
 version: "1.1"
 gate: CV-WEIGHT
 status: PASS
-description: "Consensus transaction weight computation (weight = 4*base_size + wit_size + sig_cost) and deterministic cross-client parity"
+description: "Consensus transaction weight computation (weight = 4*base_size + wit_size + da_size + sig_cost) and deterministic cross-client parity"
 tests:
   - id: WEIGHT-01
     title: "Minimal 1-in/0-out sentinel witness"
@@ -14,7 +14,7 @@ tests:
         suite_id: 0x00
         pubkey_length: 0
         sig_length: 0
-    expected_weight: 240
+    expected_weight: 245
     consensus: true
 
   - id: WEIGHT-02
@@ -28,7 +28,7 @@ tests:
         suite_id: 0x00
         pubkey_length: 0
         sig_length: 0
-    expected_weight: 284
+    expected_weight: 289
     consensus: true
 
   - id: WEIGHT-03
@@ -42,7 +42,7 @@ tests:
         suite_id: 0x01
         pubkey_length: 2592
         sig_length: 4627
-    expected_weight: 7515
+    expected_weight: 7520
     consensus: true
 
   - id: WEIGHT-04
