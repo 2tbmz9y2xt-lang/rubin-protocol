@@ -142,7 +142,7 @@ else
   warn "No conformance/ directory found (Phase-0 usually requires it)"
 fi
 
-# ---- 5) Lean/formal (если есть в монорепо) ----
+# ---- 5) Lean/formal (if present in the monorepo) ----
 if [[ -f "formal/lakefile.lean" ]] || [[ -f "lakefile.lean" ]]; then
   if command -v lake >/dev/null 2>&1; then
     ok "Lean: lake build"

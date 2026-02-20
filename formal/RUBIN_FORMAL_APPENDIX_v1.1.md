@@ -26,10 +26,10 @@ Alternatives considered:
 
 **Repository:**
 ```
-https://github.com/2tbmz9y2xt-lang/rubin-formal (private)
+https://github.com/2tbmz9y2xt-lang/rubin-formal
 ```
 This appendix references a pinned revision for reproducibility:
-- pinned commit: `a694fbcda0ff38be2ee93a7c513dc3412f91bc7f`
+- pinned commit: `5e3420f86325564cdab65750699582faafe4958a`
   - proofs: `RubinFormal/VersionBits.lean`, `RubinFormal/CVLinkage.lean`
 
 Lean 4 version: `leanprover/lean4:v4.6.0` (to be pinned at freeze).
@@ -80,7 +80,7 @@ See `formal/THEOREM_INDEX_v1.1.md` for full index. Summary:
 **Proof status legend:**
 - `spec+vector` — invariant is stated in canonical spec and covered by at least one conformance vector; Lean 4 proof pending.
 - `spec+axiom` — invariant depends on cryptographic hardness assumption (SHA3-256 collision resistance, ML-DSA unforgeability); stated as `axiom` in Lean 4 model.
-- `lean4-proven` — machine-checked Lean 4 proof exists at pinned commit (examples include: T-001/T-003/T-004/T-005/T-007/T-009/T-011/T-012/T-016 at `a694fbcda0ff38be2ee93a7c513dc3412f91bc7f`).
+- `lean4-proven` — machine-checked Lean 4 proof exists at pinned commit (examples include: T-001/T-003/T-004/T-005/T-007/T-009/T-011/T-012/T-016 at `5e3420f86325564cdab65750699582faafe4958a`).
 
 ---
 
@@ -142,7 +142,7 @@ Before production freeze, the following CI gates MUST be operational:
 CI workflow (planned): `.github/workflows/formal.yml` running `lean4-action` on every PR touching `spec/` or `formal/`.
 
 Current status: **CI configured in `rubin-protocol` PR flow** (private checkout of `rubin-formal` by deploy key, then `lake build`).
-Tracking: `/Users/gpt/Documents/inbox/QUEUE.md` task `Q-051`.
+Tracking: task `Q-051`.
 
 ---
 
@@ -151,7 +151,7 @@ Tracking: `/Users/gpt/Documents/inbox/QUEUE.md` task `Q-051`.
 1. **Coinbase subsidy overflow** — T-005 covers non-coinbase value conservation. Coinbase subsidy arithmetic (epoch halving, integer rounding) is not yet formally stated. Needs T-015.
 2. **Reorg safety** — ApplyBlock determinism (T-004) does not cover reorg scenarios. A `ReorgSafe` lemma is needed: applying the same sequence of blocks from the same initial state always produces the same UTXO set.
 3. **Anchor relay cap non-interference** — the relay policy `MAX_ANCHOR_PAYLOAD_RELAY = 1024` (H-002) is non-consensus. A separation lemma is needed: no relay-rejected tx can affect the validity of a block (i.e., relay caps are strictly stricter than consensus caps).
-   - DONE (Lean 4): T-016 `AnchorPolicy.lean` at pinned commit `a694fbcda0ff38be2ee93a7c513dc3412f91bc7f`.
+   - DONE (Lean 4): T-016 `AnchorPolicy.lean` at pinned commit `5e3420f86325564cdab65750699582faafe4958a`.
 4. **Formal model of `CompactSize` rejection** — T-012 covers round-trip. Malformed CompactSize (e.g., non-canonical two-byte encoding for values < 253) needs a separate `RejectNonCanonical` lemma.
 
 These gaps are tracked in `formal/THEOREM_INDEX_v1.1.md` as pending entries T-015 through T-018.

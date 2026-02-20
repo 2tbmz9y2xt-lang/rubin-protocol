@@ -10,7 +10,7 @@ For toolchain rationale and proof strategy see `formal/RUBIN_FORMAL_APPENDIX_v1.
 Proof status:
 - `spec+vector`  — stated in canonical spec, covered by conformance vector; Lean 4 proof pending
 - `spec+axiom`   — depends on cryptographic hardness assumption; stated as `axiom` in Lean 4 model
-- `lean4-proven` — machine-checked in `rubin-formal` at pinned commit `a694fbcda0ff38be2ee93a7c513dc3412f91bc7f`
+- `lean4-proven` — machine-checked in `rubin-formal` at pinned commit `5e3420f86325564cdab65750699582faafe4958a`
 - `pending`      — not yet covered by spec section or conformance vector
 
 ---
@@ -22,14 +22,14 @@ Proof status:
 - **Statement**: `hashOutputs(tx)` when `tx.output_count = 0` MUST equal `SHA3-256("")` (empty preimage), not an implementation-defined value.
 - **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §4.2` hashOutputs rule
 - **Evidence**: `conformance/fixtures/CV-SIGHASH.yml` SIGHASH-06
-- **Status**: `lean4-proven` (empty outputs preimage lemma) — `/Users/gpt/Documents/rubin-formal/RubinFormal/TxWire.lean`
+- **Status**: `lean4-proven` (empty outputs preimage lemma) — `rubin-formal` @ pinned commit, file `RubinFormal/TxWire.lean`
 
 ### T-004 — ApplyBlock determinism
 
 - **Statement**: For fixed `(UTXOSet, chain_id, height, timestamp, BlockBytes)`, `ApplyBlock` returns a uniquely determined `(UTXOSet', outcome)`. No valid implementation may return different outcomes for identical inputs.
 - **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §9 inv-1`
 - **Evidence**: `CV-BLOCK`, `CV-UTXO` (all tests are deterministic by construction)
-- **Status**: `lean4-proven` (local model scaffold) — `/Users/gpt/Documents/rubin-formal/RubinFormal/Core.lean`
+- **Status**: `lean4-proven` (local model scaffold) — `rubin-formal` @ pinned commit, file `RubinFormal/Core.lean`
 
 ### T-010 — Replay protection: (chain_id, tx_nonce) uniqueness
 
@@ -43,7 +43,7 @@ Proof status:
 - **Statement**: For all `n : ℕ` with `n < 2^64`, `decode(encode(n)) = n` and `encode` is canonical (no non-minimal encodings accepted).
 - **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §3.2.1`
 - **Evidence**: `conformance/fixtures/CV-COMPACTSIZE.yml`
-- **Status**: `lean4-proven` (canonical encode/decode + round-trip theorem) — `/Users/gpt/Documents/rubin-formal/RubinFormal/CompactSize.lean`
+- **Status**: `lean4-proven` (canonical encode/decode + round-trip theorem) — `rubin-formal` @ pinned commit, file `RubinFormal/CompactSize.lean`
 
 ---
 
@@ -54,7 +54,7 @@ Proof status:
 - **Statement**: For any valid non-coinbase `Tx`: `Σ output.value ≤ Σ spent_utxo.value`. Fee = difference ≥ 0.
 - **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §9 inv-2`, §4.5
 - **Evidence**: `conformance/fixtures/CV-FEES.yml` FEES-02 (TX_ERR_VALUE_CONSERVATION)
-- **Status**: `lean4-proven` (checked-u64 summation model) — `/Users/gpt/Documents/rubin-formal/RubinFormal/Tx.lean`
+- **Status**: `lean4-proven` (checked-u64 summation model) — `rubin-formal` @ pinned commit, file `RubinFormal/Tx.lean`
 
 ### T-006 — Non-spendable ANCHOR exclusion from UTXO
 
@@ -82,21 +82,21 @@ Proof status:
 - **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §4.1 item 6`
 - **Evidence**: `CV-HTLC-ANCHOR` HTLC2-08 (extra non-matching anchor → SIG_INVALID, not PARSE), HTLC2-09 (two matching → PARSE), HTLC2-10 (multi-app narrative)
 - **Closes**: Q-048
-- **Status**: `lean4-proven` (semantic model: non-matching anchors ignored + ≥2 matching => PARSE) — `/Users/gpt/Documents/rubin-formal/RubinFormal/CovenantTheorems.lean`
+- **Status**: `lean4-proven` (semantic model: non-matching anchors ignored + >=2 matching => PARSE) — `rubin-formal` @ pinned commit, file `RubinFormal/CovenantTheorems.lean`
 
 ### T-011 — CORE_VAULT_V1 spend_delay monotonicity
 
 - **Statement**: The `spend_delay` field in `CORE_VAULT_V1` extended form enforces `height(B) ≥ o.creation_height + spend_delay`. This is monotone: once satisfiable at height `h`, it remains satisfiable at all `h' > h`.
 - **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §4.1 item 5`
 - **Evidence**: `conformance/fixtures/CV-VAULT.yml` VAULT-06
-- **Status**: `lean4-proven` (owner-path spend_delay monotonicity) — `/Users/gpt/Documents/rubin-formal/RubinFormal/CovenantTheorems.lean`
+- **Status**: `lean4-proven` (owner-path spend_delay monotonicity) — `rubin-formal` @ pinned commit, file `RubinFormal/CovenantTheorems.lean`
 
 ### T-016 — Anchor relay cap non-interference
 
 - **Statement**: The relay policy `MAX_ANCHOR_PAYLOAD_RELAY = 1_024` is strictly narrower than the consensus `MAX_ANCHOR_PAYLOAD_SIZE = 65_536`. Any block containing a `CORE_ANCHOR` output with `|anchor_data| ∈ (1024, 65536]` is consensus-valid even if the originating transaction was relay-rejected.
 - **Spec**: `operational/RUBIN_NODE_POLICY_DEFAULTS_v1.1.md §3.1`
 - **Evidence**: `CV-ANCHOR-RELAY` RELAY-08 (documents the gap)
-- **Formal (Lean 4)**: `rubin-formal` pinned commit `a694fbcda0ff38be2ee93a7c513dc3412f91bc7f`, file `RubinFormal/AnchorPolicy.lean` (theorems `T016_anchor_relay_cap_non_interference_output`, `T016_anchor_relay_cap_strict`).
+- **Formal (Lean 4)**: `rubin-formal` pinned commit `5e3420f86325564cdab65750699582faafe4958a`, file `RubinFormal/AnchorPolicy.lean` (theorems `T016_anchor_relay_cap_non_interference_output`, `T016_anchor_relay_cap_strict`).
 - **Status**: `lean4-proven`
 
 ---
@@ -141,7 +141,7 @@ Proof status:
 - **Statement**: At each window boundary, transitions are evaluated in the order: DEFINED→STARTED, STARTED→LOCKED_IN, STARTED→FAILED, LOCKED_IN→ACTIVE. If LOCKED_IN fires, FAILED MUST NOT be evaluated in the same boundary.
 - **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §8 FSM`
 - **Evidence**: `conformance/fixtures/CV-DEP.yml` DEP-05
-- **Formal (Lean 4)**: `rubin-formal` pinned commit `a694fbcda0ff38be2ee93a7c513dc3412f91bc7f`, file `RubinFormal/VersionBits.lean` (theorem `T003_started_boundary_ordering_lockedin_over_failed`).
+- **Formal (Lean 4)**: `rubin-formal` pinned commit `5e3420f86325564cdab65750699582faafe4958a`, file `RubinFormal/VersionBits.lean` (theorem `T003_started_boundary_ordering_lockedin_over_failed`).
 - **Status**: `lean4-proven`
 
 ### T-007 — VERSION_BITS monotonicity
@@ -149,7 +149,7 @@ Proof status:
 - **Statement**: For any deployment `D` and chain `C`, state transitions are monotone: once `ACTIVE`, always `ACTIVE`; once `FAILED`, always `FAILED`. No backwards transitions exist for a fixed chain history.
 - **Spec**: `spec/RUBIN_L1_CANONICAL_v1.1.md §9 inv-4`
 - **Evidence**: `CV-DEP` DEP-04
-- **Formal (Lean 4)**: `rubin-formal` pinned commit `a694fbcda0ff38be2ee93a7c513dc3412f91bc7f`, file `RubinFormal/VersionBits.lean` (theorem `T007_version_bits_monotonicity_strong`).
+- **Formal (Lean 4)**: `rubin-formal` pinned commit `5e3420f86325564cdab65750699582faafe4958a`, file `RubinFormal/VersionBits.lean` (theorem `T007_version_bits_monotonicity_strong`).
 - **Status**: `lean4-proven`
 
 ---
@@ -184,14 +184,12 @@ No `pending` entries remain.
 | ID | Title | Status |
 |----|-------|--------|
 | T-015 | Coinbase subsidy non-overflow | `spec+vector` (CV-COINBASE, 12 vectors) |
-| T-016 | Anchor relay cap non-interference | `spec+vector` (CV-ANCHOR-RELAY RELAY-09/10/11) |
-| T-017 | key_id collision resistance | `spec+vector` (CV-BIND BIND-05/06/07) |
+| T-016 | Anchor relay cap non-interference | `lean4-proven` |
+| T-017 | key_id collision resistance | `spec+axiom` |
 | T-018 | Reorg determinism | `spec+vector` (CV-REORG REORG-05/06) |
 
-Remaining Lean 4 proof obligations (freeze gate — T-004/T-005/T-007 per FREEZE_TRANSITION_POLICY §4):
-- T-004: ApplyBlock determinism — lean4-proven target (Q-051)
-- T-005: Value conservation — lean4-proven target (Q-051)
-- T-007: VERSION_BITS monotonicity — lean4-proven (already done)
+Freeze minimum (per FREEZE_TRANSITION_POLICY §4):
+- T-004, T-005, T-007 are `lean4-proven` at pinned commit `5e3420f86325564cdab65750699582faafe4958a` (Q-051).
 
 All T-xxx entries with `lean4-proven` status are required before production freeze
 per `operational/RUBIN_L1_FREEZE_TRANSITION_POLICY_v1.1.md §4`.

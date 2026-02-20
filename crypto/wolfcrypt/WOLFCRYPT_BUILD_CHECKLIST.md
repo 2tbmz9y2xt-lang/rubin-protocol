@@ -18,7 +18,6 @@ For CI/operator matrix reference (linux/macOS + compiler combinations), see:
 From repository root (operator-local reproducibility entrypoint):
 
 ```bash
-cd /Users/gpt/Documents/rubin-protocol
 RUBIN_WOLFSSL_TAG=v5.8.4-stable \
 RUBIN_WOLFCRYPT_WORKROOT=/tmp/rubin-wolfcrypt \
 RUBIN_WOLFSSL_PREFIX=/tmp/rubin-wolfcrypt/install \

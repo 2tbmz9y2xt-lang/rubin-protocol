@@ -3,8 +3,8 @@
 This folder contains **non-consensus** tooling to deterministically derive RUBIN chain identity from concrete genesis bytes.
 
 Spec reference:
-- `/Users/gpt/Documents/rubin-protocol/spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_MAINNET_v1.1.md`
-- `/Users/gpt/Documents/rubin-protocol/spec/RUBIN_L1_CANONICAL_v1.1.md` (genesis + hashing rules)
+- `spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_MAINNET_v1.1.md`
+- `spec/RUBIN_L1_CANONICAL_v1.1.md` (genesis + hashing rules)
 
 ## Verify An Existing Profile
 

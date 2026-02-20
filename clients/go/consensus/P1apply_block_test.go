@@ -175,7 +175,7 @@ func TestApplyBlock(t *testing.T) {
 	key := mustSHA3ForTest(t, p, repeatByte(0x11, ML_DSA_PUBKEY_BYTES))
 	cbOut := makeP2PKOutputForKeyID(key, 0)
 
-	t.Run("минимальный valid block (coinbase только)", func(t *testing.T) {
+	t.Run("minimal valid block (coinbase only)", func(t *testing.T) {
 		parent := makeParentHeader([32]byte{0xff}, 1)
 		cb := makeApplyCoinbaseTx(0, []TxOutput{cbOut})
 		block := makeApplyBlock(0, parent, 2, []Tx{cb})
@@ -383,7 +383,7 @@ func TestValidateCoinbaseTxInputs(t *testing.T) {
 		}
 	})
 
-	t.Run("scriptSig не пуст", func(t *testing.T) {
+	t.Run("scriptSig is not empty", func(t *testing.T) {
 		tx := makeApplyCoinbaseTx(0, nil)
 		tx.Inputs[0].ScriptSig = []byte{1}
 		err := validateCoinbaseTxInputs(&tx)
@@ -392,7 +392,7 @@ func TestValidateCoinbaseTxInputs(t *testing.T) {
 		}
 	})
 
-	t.Run("witnesses не пуст", func(t *testing.T) {
+	t.Run("witnesses is not empty", func(t *testing.T) {
 		tx := makeApplyCoinbaseTx(0, nil)
 		tx.Witness.Witnesses = []WitnessItem{{SuiteID: SUITE_ID_ML_DSA}}
 		err := validateCoinbaseTxInputs(&tx)

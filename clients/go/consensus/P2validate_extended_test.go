@@ -324,7 +324,7 @@ func TestApplyTxExtended(t *testing.T) {
 		}
 	})
 
-	t.Run("ApplyTx: ANCHOR output в не-coinbase tx", func(t *testing.T) {
+	t.Run("ApplyTx: ANCHOR output in non-coinbase tx", func(t *testing.T) {
 		witnessKey := bytesRepeat(ML_DSA_PUBKEY_BYTES, 0x11)
 		witnessID := mustSHA3ForTest(t, p, witnessKey)
 		prevout := TxOutPoint{TxID: [32]byte{4}, Vout: 0}

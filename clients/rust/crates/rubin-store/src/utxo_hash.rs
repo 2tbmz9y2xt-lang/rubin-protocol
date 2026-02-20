@@ -1,6 +1,6 @@
 //! Canonical utxo_set_hash computation.
 //!
-//! Spec (from user ТЗ / operational Q-076):
+//! Spec (from user tech spec / operational Q-076):
 //!   DST = "RUBINv1-utxo-set-hash/"
 //!   utxo_set_hash = SHA3-256( DST || N_le[8] || pair_0 || pair_1 || ... )
 //!   pair_i = outpoint_key_bytes || utxo_entry_bytes
