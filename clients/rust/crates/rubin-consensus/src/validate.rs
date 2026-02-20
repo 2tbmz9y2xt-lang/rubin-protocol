@@ -591,9 +591,13 @@ pub fn validate_input_authorization(
             }
             if actual_key_id.as_slice() == owner_key_id
                 && spend_delay > 0
-                && chain_height < prev_creation_height + spend_delay
             {
-                return Err("TX_ERR_TIMELOCK_NOT_MET".into());
+                let unlock_height = prev_creation_height
+                    .checked_add(spend_delay)
+                    .ok_or("TX_ERR_TIMELOCK_NOT_MET")?;
+                if chain_height < unlock_height {
+                    return Err("TX_ERR_TIMELOCK_NOT_MET".into());
+                }
             }
             if actual_key_id.as_slice() == recovery_key_id {
                 satisfy_lock(lock_mode, lock_value, chain_height, chain_timestamp)?;

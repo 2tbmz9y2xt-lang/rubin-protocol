@@ -809,7 +809,12 @@ func ValidateInputAuthorization(
 			return fmt.Errorf("TX_ERR_SIG_INVALID")
 		}
 		if bytes.Equal(actualKeyID[:], ownerKeyID) && spendDelay > 0 {
-			if chainHeight < prevCreationHeight+spendDelay {
+			unlockHeight, err := addUint64(prevCreationHeight, spendDelay)
+			if err != nil {
+				// spend_delay overflows u64: vault is permanently locked by owner path.
+				return fmt.Errorf("TX_ERR_TIMELOCK_NOT_MET")
+			}
+			if chainHeight < unlockHeight {
 				return fmt.Errorf("TX_ERR_TIMELOCK_NOT_MET")
 			}
 		}

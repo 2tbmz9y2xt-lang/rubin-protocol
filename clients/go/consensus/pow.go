@@ -94,6 +94,11 @@ func blockExpectedTarget(headers []BlockHeader, height uint64, targetIn [32]byte
 		minTarget = big.NewInt(1)
 	}
 	maxTarget := new(big.Int).Mul(targetOld, big.NewInt(4))
+	// Cap maxTarget at the protocol maximum to prevent big.Int exceeding 256 bits,
+	// which would cause FillBytes([32]byte) to panic. Mirrors Rust u256_shl2_saturating.
+	if maxTarget.Cmp(maxTargetBig) > 0 {
+		maxTarget = maxTargetBig
+	}
 
 	if targetNew.Cmp(minTarget) < 0 {
 		targetNew = minTarget
