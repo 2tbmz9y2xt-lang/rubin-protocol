@@ -106,3 +106,15 @@ func blockExpectedTarget(headers []BlockHeader, height uint64, targetIn [32]byte
 	targetNew.FillBytes(expected[:])
 	return expected, nil
 }
+
+// MedianPastTimestamp computes the median time past (MTP) used for header-chain timestamp validation.
+// This is exported for node/P2P tooling and must remain consistent with ApplyBlock's header checks.
+func MedianPastTimestamp(headers []BlockHeader, height uint64) (uint64, error) {
+	return medianPastTimestamp(headers, height)
+}
+
+// BlockExpectedTarget computes the expected difficulty target for a given height, given ancestor headers.
+// This is exported for node/P2P tooling and must remain consistent with ApplyBlock's header checks.
+func BlockExpectedTarget(headers []BlockHeader, height uint64, targetIn [32]byte) ([32]byte, error) {
+	return blockExpectedTarget(headers, height, targetIn)
+}

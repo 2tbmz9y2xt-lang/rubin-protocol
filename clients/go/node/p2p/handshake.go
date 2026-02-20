@@ -17,6 +17,14 @@ type HandshakeResult struct {
 	Ready       bool
 }
 
+func handleHandshakeReject(payload []byte) error {
+	rp, err := DecodeRejectPayload(payload)
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("p2p: handshake: reject(%s) code=0x%02x reason=%q", rp.Message, rp.Code, rp.Reason)
+}
+
 // Handshake performs the minimum v1.1 P2P handshake:
 // - send version
 // - receive+validate peer version (incl chain_id match)
@@ -80,6 +88,8 @@ func Handshake(
 			}
 			peerVersion = v
 			goto gotVersion
+		case CmdReject:
+			return nil, handleHandshakeReject(msg.Payload)
 		case CmdVerack:
 			// Early verack should be ignored.
 			continue
@@ -114,6 +124,8 @@ gotVersion:
 		case CmdVersion:
 			// A second version after handshake start is malformed; in READY it's +10 ban+disconnect.
 			return nil, fmt.Errorf("p2p: handshake: duplicate version")
+		case CmdReject:
+			return nil, handleHandshakeReject(msg.Payload)
 		default:
 			// Ignore until verack arrives.
 			continue
