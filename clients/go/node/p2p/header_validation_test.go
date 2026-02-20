@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"errors"
 	"testing"
 
 	"rubin.dev/node/consensus"
@@ -41,7 +42,7 @@ func TestValidateHeadersProfilePassAndLinkageFail(t *testing.T) {
 	// Linkage mismatch should fail.
 	hBad := h1
 	hBad.PrevBlockHash[0] ^= 0xff
-	if err := ValidateHeadersProfile(cp, []consensus.BlockHeader{hBad}, ctx); err == nil || err.Error() != consensus.BLOCK_ERR_LINKAGE_INVALID {
-		t.Fatalf("expected %s, got %v", consensus.BLOCK_ERR_LINKAGE_INVALID, err)
+	if err := ValidateHeadersProfile(cp, []consensus.BlockHeader{hBad}, ctx); err == nil || !errors.Is(err, ErrHeaderLinkageInvalid) {
+		t.Fatalf("expected %v, got %v", ErrHeaderLinkageInvalid, err)
 	}
 }

@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -140,8 +141,13 @@ func (p *Peer) Run(ctx context.Context, h PeerHandler) error {
 				p.Ban.Add(now, 10)
 				continue
 			}
-			pong, _ := EncodePongPayload(PongPayload{Nonce: pp.Nonce})
-			_ = p.Send(CmdPong, pong)
+			pong, err := EncodePongPayload(PongPayload{Nonce: pp.Nonce})
+			if err != nil {
+				return err
+			}
+			if err := p.Send(CmdPong, pong); err != nil {
+				return err
+			}
 		case CmdPong:
 			// Higher layers can track RTT; we ignore for now.
 			continue
@@ -170,13 +176,13 @@ func (p *Peer) Run(ctx context.Context, h PeerHandler) error {
 			if err := h.OnHeaders(p, headers); err != nil {
 				// Policy: invalid header-chain data is treated as "invalid block" (+100),
 				// except for future timestamps which should be deferred without immediate ban.
-				switch err.Error() {
-				case consensus.BLOCK_ERR_TIMESTAMP_FUTURE:
+				switch {
+				case errors.Is(err, ErrHeaderTimestampFuture):
 					// No ban; caller may retry later.
-				case consensus.BLOCK_ERR_LINKAGE_INVALID,
-					consensus.BLOCK_ERR_POW_INVALID,
-					consensus.BLOCK_ERR_TARGET_INVALID,
-					consensus.BLOCK_ERR_TIMESTAMP_OLD:
+				case errors.Is(err, ErrHeaderLinkageInvalid),
+					errors.Is(err, ErrHeaderPOWInvalid),
+					errors.Is(err, ErrHeaderTargetInvalid),
+					errors.Is(err, ErrHeaderTimestampOld):
 					p.Ban.Add(now, 100)
 				default:
 					p.Ban.Add(now, 10)

@@ -2,10 +2,19 @@ package p2p
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 
 	"rubin.dev/node/consensus"
 	"rubin.dev/node/crypto"
+)
+
+var (
+	ErrHeaderLinkageInvalid  = errors.New(consensus.BLOCK_ERR_LINKAGE_INVALID)
+	ErrHeaderPOWInvalid      = errors.New(consensus.BLOCK_ERR_POW_INVALID)
+	ErrHeaderTargetInvalid   = errors.New(consensus.BLOCK_ERR_TARGET_INVALID)
+	ErrHeaderTimestampOld    = errors.New(consensus.BLOCK_ERR_TIMESTAMP_OLD)
+	ErrHeaderTimestampFuture = errors.New(consensus.BLOCK_ERR_TIMESTAMP_FUTURE)
 )
 
 // ValidateHeadersProfile applies the P2P header-chain validation profile from the P2P spec (§5.5):
@@ -46,7 +55,7 @@ func ValidateHeadersProfile(
 		hdr := headers[i]
 		if havePrev {
 			if hdr.PrevBlockHash != prevHash {
-				return fmt.Errorf(consensus.BLOCK_ERR_LINKAGE_INVALID)
+				return fmt.Errorf("%w", ErrHeaderLinkageInvalid)
 			}
 		}
 
@@ -58,7 +67,7 @@ func ValidateHeadersProfile(
 				return err
 			}
 			if !bytes.Equal(hdr.Target[:], exp[:]) {
-				return fmt.Errorf(consensus.BLOCK_ERR_TARGET_INVALID)
+				return fmt.Errorf("%w", ErrHeaderTargetInvalid)
 			}
 
 			medianTs, err := consensus.MedianPastTimestamp(anc, height)
@@ -66,11 +75,11 @@ func ValidateHeadersProfile(
 				return err
 			}
 			if hdr.Timestamp <= medianTs {
-				return fmt.Errorf(consensus.BLOCK_ERR_TIMESTAMP_OLD)
+				return fmt.Errorf("%w", ErrHeaderTimestampOld)
 			}
 			if ctx.LocalTimeSet && hdr.Timestamp > ctx.LocalTime+consensus.MAX_FUTURE_DRIFT {
 				// Spec: do not immediately ban for future timestamps; callers may defer.
-				return fmt.Errorf(consensus.BLOCK_ERR_TIMESTAMP_FUTURE)
+				return fmt.Errorf("%w", ErrHeaderTimestampFuture)
 			}
 		}
 
@@ -79,7 +88,7 @@ func ValidateHeadersProfile(
 			return err
 		}
 		if bytes.Compare(hash[:], hdr.Target[:]) >= 0 {
-			return fmt.Errorf(consensus.BLOCK_ERR_POW_INVALID)
+			return fmt.Errorf("%w", ErrHeaderPOWInvalid)
 		}
 
 		prevHash = hash

@@ -121,9 +121,10 @@ func BuildBlockLocatorHeights(tipHeight uint64) []uint64 {
 		heights = append(heights, tipHeight-i)
 	}
 
-	// Then exponential offsets: 12 + 2^0, 12 + 2^1, ...
-	var step uint64 = 2
-	var offset uint64 = 14 // 12 + 2
+	// Then exponential offsets (spec §5.2 worked example): 14, 18, 26, 42, 74, ...
+	// Implemented as a running offset with a doubling step.
+	var step uint64 = 4
+	var offset uint64 = 14
 	for len(heights) < MaxLocatorHashes {
 		if tipHeight < offset {
 			break
