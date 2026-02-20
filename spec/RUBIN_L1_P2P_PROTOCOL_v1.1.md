@@ -17,12 +17,12 @@ RECOMMENDED and will be promoted to normative at production freeze.
 
 CANONICAL §15 requires a 24-byte fixed prefix for every message:
 
-```
+```text
 magic           : bytes4   (u32be network magic from chain-instance profile)
 command         : bytes12  (ASCII command string, zero-padded on the right)
 payload_length  : bytes4   (u32le)
 checksum        : bytes4   (first 4 bytes of SHA3-256(payload_bytes))
-```
+```text
 
 Receivers MUST drop the connection if `magic` does not match the locally pinned chain-instance
 profile magic. This is not ban-worthy (a peer may be on a different legitimate network).
@@ -87,7 +87,7 @@ Payload fields (wire order, all little-endian unless noted):
 
 | # | Field | Type | Notes |
 |---|-------|------|-------|
-| 1 | `protocol_version` | u32le | Current: `1` |
+| 1 | `protocol_version` | u32le | Current: `2` |
 | 2 | `chain_id` | bytes32 | MUST match locally pinned `chain_id_hex` |
 | 3 | `peer_services` | u64le | Service bitset (see §2.1.1) |
 | 4 | `timestamp` | u64le | UNIX seconds (best-effort; not consensus) |
@@ -222,10 +222,10 @@ Recommended: if no message received from peer in 20 minutes, send `ping`. If no 
 
 ### 4.1 `inv` (required)
 
-```
+```text
 count     : CompactSize
 entries[] : InvVector
-```
+```text
 
 Parsing constraints (normative):
 
@@ -234,10 +234,10 @@ Parsing constraints (normative):
 - Unknown `inv_type` values MUST be ignored (do not ban-score).
 
 `InvVector`:
-```
+```text
 inv_type : u32le
 hash     : bytes32
-```
+```text
 
 `inv_type` values:
 
@@ -264,10 +264,10 @@ Same payload format as `inv`. Sent in response to `getdata` for items not found 
 
 ### 5.1 `headers` (required)
 
-```
+```text
 count     : CompactSize
 headers[] : BlockHeaderBytes  (CANONICAL §5.1; 116 bytes in v1.1)
-```
+```text
 
 Parsing constraints (normative):
 
@@ -275,12 +275,12 @@ Parsing constraints (normative):
 
 ### 5.2 `getheaders` (RECOMMENDED)
 
-```
+```text
 version       : u32le
 hash_count    : CompactSize
 block_locator : bytes32[]  (from tip backwards, exponential spacing)
 hash_stop     : bytes32    (zero to fetch up to 2000 headers)
-```
+```text
 
 Parsing constraints (normative):
 
@@ -294,11 +294,11 @@ Response: `headers` with up to 2000 entries.
 Starting from the chain tip, include block hashes at the following heights
 (expressed as steps back from the current tip height `h`):
 
-```
+```text
 steps = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,   # first 12: step 1
          14, 18, 26, 42, 74, 138, 266, ...           # then double each step
          genesis]                                    # always include genesis
-```
+```text
 
 Formally: the first 12 entries are `h, h-1, h-2, ..., h-11`; then for `k ≥ 12`,
 the offset doubles: `h - (12 + 2^(k-12))` until 0 is reached, then append genesis hash.
@@ -312,16 +312,130 @@ Receiving node responds starting from the first hash it recognises in the locato
 - `block`: `BlockBytes` (CANONICAL wire encoding)
 - `tx`: `TxBytes` (CANONICAL wire encoding including witness section)
 
+### 5.3.1 Compact blocks (RECOMMENDED)
+
+This section specifies a compact-block relay protocol analogous to Bitcoin BIP152,
+adapted to RUBIN primitives and transaction identifiers.
+
+Goal: reduce orphan/stale blocks by avoiding full-block transmission when the receiver
+already has most transactions in its mempool.
+
+Key rules:
+
+1. Short transaction identifiers MUST be derived from **WTXID**, not TXID.
+2. In RUBIN, `WTXID = SHA3-256(TxBytes)` where `TxBytes` includes witness bytes and includes
+   `DA_Payload` bytes (Tx wire v2).
+3. Peers that do not implement compact-block messages will ignore unknown commands (§1.3).
+
+#### 5.3.1.1 `sendcmpct` (RECOMMENDED)
+
+Peers use this message to request compact-block announcements.
+
+```text
+command: "sendcmpct"
+payload:
+  announce         : u8     (0 = do not announce; 1 = announce compact blocks)
+  shortid_wtxid    : u8     (MUST be 1 in RUBIN; 0 is invalid)
+  protocol_version : u32le  (currently 1 for this sub-protocol)
+```text
+
+Parsing constraints:
+
+- If `shortid_wtxid != 1`, treat as malformed: ban-score +10 and ignore the request.
+- Implementations MAY require `announce = 1` before sending `cmpctblock` to a peer.
+
+#### 5.3.1.2 ShortID derivation (normative)
+
+Each `cmpctblock` carries a per-block random `nonce:u64le`.
+
+Define:
+
+```text
+key_material = SHA3-256(ASCII("RUBIN-CMPCT-v1") || BlockHeaderBytes || nonce_u64le)
+k0 = u64le(key_material[0:8])
+k1 = u64le(key_material[8:16])
+```text
+
+For any transaction `T`, compute:
+
+```text
+shortid64 = SipHash-2-4(k0, k1, WTXID(T))
+shortid   = low_6_bytes_le(shortid64)   # 6 bytes
+```text
+
+#### 5.3.1.3 `cmpctblock` (RECOMMENDED)
+
+Compact block announcement carrying a header and a list of shortids for non-prefilled txs.
+
+```text
+command: "cmpctblock"
+payload:
+  header             : BlockHeaderBytes (116 bytes)
+  nonce              : u64le
+  tx_count           : CompactSize      (total tx in the block)
+  shortid_count      : CompactSize
+  shortids[]         : bytes6[shortid_count]
+  prefilled_count    : CompactSize
+  prefilled[]:
+    index_delta      : CompactSize
+    tx_bytes         : TxBytes
+```text
+
+Index encoding:
+
+- The first `index_delta` is the absolute tx index.
+- Each subsequent `index_delta` encodes: `index = previous_index + 1 + index_delta`.
+
+Receiver reconstruction algorithm (normative):
+
+1. Compute `block_hash = SHA3-256(BlockHeaderBytes(header))`.
+2. Place each `prefilled.tx_bytes` at its decoded tx index.
+3. For each `shortid` (in wire order), map to a mempool tx by matching `shortid` derived from
+   its WTXID using the above `k0/k1`.
+4. If any tx indices remain missing, request them via `getblocktxn`.
+
+#### 5.3.1.4 `getblocktxn` (RECOMMENDED)
+
+Request missing transactions by index.
+
+```text
+command: "getblocktxn"
+payload:
+  block_hash      : bytes32
+  index_count     : CompactSize
+  index_deltas[]  : CompactSize[index_count]
+```text
+
+Index encoding uses the same delta scheme as `cmpctblock.prefilled[]`.
+
+#### 5.3.1.5 `blocktxn` (RECOMMENDED)
+
+Response providing missing transactions.
+
+```text
+command: "blocktxn"
+payload:
+  block_hash   : bytes32
+  tx_count     : CompactSize
+  txs[]        : TxBytes[tx_count]
+```text
+
+#### 5.3.1.6 Failure handling (policy)
+
+- If a peer repeatedly announces `cmpctblock` that cannot be reconstructed from mempool and
+  does not respond to `getblocktxn`, increment ban-score (+10 each) and disconnect when ≥100.
+- Implementations SHOULD bound in-flight compact-block reconstructions (e.g., ≤ 2 concurrent).
+
 ### 5.4 Compact headers (RECOMMENDED)
 
 A compact header message reduces bandwidth for SPV clients that only need header chains.
 
-```
+```text
 command: "compacthdr"
 payload:
   count       : CompactSize
   headers[]   : BlockHeaderBytes  (CANONICAL §5.1; 116 bytes in v1.1)
-```
+```text
 
 Parsing constraints (normative):
 
@@ -381,14 +495,14 @@ Light-client minimum:
 
 Provides a filtered block with a partial Merkle proof for requested transactions.
 
-```
+```text
 block_header  : BlockHeaderBytes  (CANONICAL §5.1; 116 bytes in v1.1)
 total_txns    : u32le
 hash_count    : CompactSize
 hashes[]      : bytes32           (Merkle tree nodes needed for proof)
 flag_byte_cnt : CompactSize
 flags[]       : bytes             (bit flags for tree traversal)
-```
+```text
 
 Parsing constraints (normative):
 
@@ -409,7 +523,7 @@ downloading the full block.
 
 **Finalized wire format (normative):**
 
-```
+```text
 command: "anchorproof"
 payload:
   block_header    : BlockHeaderBytes  (CANONICAL §5.1; 116 bytes in v1.1 — for PoW and timestamp validation)
@@ -421,14 +535,14 @@ payload:
   flags           : u8                (bit 0: tx_bytes_included; reserved bits MUST be 0)
   tx_bytes_len    : CompactSize       (present only if flags & 0x01)
   tx_bytes        : bytes             (full TxBytes, present only if flags & 0x01)
-```
+```text
 
 `MerkleProof`:
-```
+```text
 depth       : u8                    (proof depth; 0 = single-tx block)
 sibling_cnt : CompactSize           (MUST equal depth)
 siblings[]  : bytes32               (sibling hashes from leaf to root, left-to-right)
-```
+```text
 
 Parsing constraints (normative):
 
@@ -465,13 +579,13 @@ with ban-score +5 (relay policy, not consensus).
 Used by light clients to request an `anchorproof` for a specific ANCHOR output.
 Required for multi-peer confirmation protocol (LIGHT_CLIENT_SECURITY §3.4).
 
-```
+```text
 command: "getanchorproof"
 payload:
   txid         : bytes32    (txid of the transaction containing the ANCHOR output)
   output_index : u32le      (index of the CORE_ANCHOR output within the tx)
   flags        : u8         (bit 0: request tx_bytes in response; reserved bits MUST be 0)
-```
+```text
 
 Parsing constraints (normative):
 
@@ -488,7 +602,7 @@ Rate limiting: `getanchorproof` shares the rate limit with `anchorproof` (100/pe
 
 ### 7.1 Peer address relay
 
-```
+```text
 command: "addr"
 payload:
   count       : CompactSize  (max 1000 per message)
@@ -497,7 +611,7 @@ payload:
     services  : u64le        (peer_services bitset, §2.1.1)
     ip        : bytes16      (IPv6; IPv4-mapped for IPv4 addresses)
     port      : u16be
-```
+```text
 
 Relay rules:
 - Forward received addresses to at most 2 randomly selected peers (limit amplification).
@@ -550,13 +664,13 @@ Recommended defaults (non-consensus, operator-adjustable).
 These values MUST be treated as policy only; see `operational/RUBIN_NODE_POLICY_DEFAULTS_v1.1.md §2.1`
 for the operator-facing defaults.
 
-```
+```text
 MAX_OUTBOUND_CONNECTIONS = 16
 MAX_INBOUND_CONNECTIONS  = 64
 MAX_TOTAL_CONNECTIONS    = 128
 MAX_INBOUND_PER_IP       = 4
 MAX_FEELER_CONNECTIONS   = 2     # short-lived probes for address freshness
-```
+```text
 
 Nodes SHOULD limit inbound connections per /16 subnet to 4 to resist Sybil eclipse.
 Inbound slots beyond caps are rejected (optionally with a `reject` message `REJECT_DUPLICATE`).
