@@ -1,0 +1,55 @@
+version: "1.1"
+gate: CV-IMPORT
+status: DRAFT
+description: "Phase 1: staged import semantics (orphan/invalid_header/invalid_ancestry/tie-break not-selected) via import-block CLI"
+tests:
+  - id: IMP-01
+    title: "Valid block extending tip is applied as new tip"
+    profile: "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md"
+    scenario:
+      kind: apply_one
+      height: 1
+      timestamp_delta: 1
+    expected_outcome: APPLIED_AS_NEW_TIP
+
+  - id: IMP-02
+    title: "Unknown parent => ORPHANED"
+    profile: "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md"
+    scenario:
+      kind: orphan
+      height: 1
+      timestamp_delta: 1
+      prev_hash_hex: "11" # expanded by runner to 32 bytes: 0x11..11
+    expected_outcome: ORPHANED
+
+  - id: IMP-03
+    title: "Merkle invalid => INVALID_HEADER (error token must be merkle invalid)"
+    profile: "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md"
+    scenario:
+      kind: invalid_header_merkle
+      height: 1
+      timestamp_delta: 1
+    expected_error: BLOCK_ERR_MERKLE_INVALID
+
+  - id: IMP-04
+    title: "Invalid ancestry: child of invalid header => INVALID_ANCESTRY"
+    profile: "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md"
+    scenario:
+      kind: invalid_ancestry
+      # build invalid parent at height 1, then child at height 2 referencing it
+      parent_height: 1
+      child_height: 2
+      parent_timestamp_delta: 1
+      child_timestamp_delta: 2
+    expected_outcome: INVALID_ANCESTRY
+
+  - id: IMP-05
+    title: "Tie-break loser => STORED_NOT_SELECTED"
+    profile: "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md"
+    scenario:
+      kind: tie_break_not_selected
+      # build two competing blocks at height 1 with different timestamps
+      a_timestamp_delta: 1
+      b_timestamp_delta: 2
+    expected_outcome: STORED_NOT_SELECTED
+

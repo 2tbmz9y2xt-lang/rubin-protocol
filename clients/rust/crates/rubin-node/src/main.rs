@@ -1786,6 +1786,13 @@ fn cmd_import_block_main(args: &[String]) -> i32 {
                     println!("orphaned hash={}", hex_encode(block_hash));
                 }
                 rubin_store::ImportResult::Rejected { block_hash, reason } => {
+                    // `INVALID_ANCESTRY` is a deterministic import decision (not an internal error).
+                    // Match Go CLI semantics: emit the decision token to stdout with exit=0 so
+                    // conformance can treat it as an outcome.
+                    if reason == "INVALID_ANCESTRY" {
+                        println!("INVALID_ANCESTRY");
+                        return 0;
+                    }
                     eprintln!("rejected hash={} reason={}", hex_encode(block_hash), reason,);
                     return 1;
                 }

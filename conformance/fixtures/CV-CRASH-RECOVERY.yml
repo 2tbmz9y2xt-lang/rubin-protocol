@@ -1,0 +1,13 @@
+version: "1.1"
+gate: CV-CRASH-RECOVERY
+status: DRAFT
+description: "Phase 1: crash-safety around MANIFEST commit point (simulated: tmp manifest exists, final manifest remains authoritative)"
+tests:
+  - id: CR-01
+    title: "Simulated crash before rename: stale tmp manifest must not affect utxo-set-hash"
+    profile: "spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md"
+    plan:
+      kind: linear
+      blocks: 5
+    expected_code: PASS
+
