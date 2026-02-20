@@ -103,10 +103,12 @@ def hexlify(b: bytes) -> str:
 
 
 def make_parse_tx_bytes(ctx: dict[str, object]) -> str:
-    version = 1
+    version = 2
+    tx_kind = 0x00  # standard
     tx_nonce = 0
     tx_parts = bytearray()
     tx_parts.extend(encode_u32_le(version))
+    tx_parts.append(tx_kind)
     tx_parts.extend(encode_u64_le(tx_nonce))
 
     field = ctx.get("field")
@@ -163,6 +165,8 @@ def make_parse_tx_bytes(ctx: dict[str, object]) -> str:
         tx_parts.extend(encode_compact_size(sig_len))
         tx_parts.extend(bytes(sig_len))
 
+    # DA payload length tail (wire v2). Standard tx MUST have da_payload_len=0.
+    tx_parts.extend(encode_compact_size(0))
     return hexlify(tx_parts)
 
 
@@ -182,6 +186,7 @@ def extract_error_token(stderr: str) -> str:
 def build_tx_hex(
     *,
     version: int,
+    tx_kind: int = 0x00,
     tx_nonce: int,
     inputs: list[dict[str, object]],
     outputs: list[dict[str, object]],
@@ -190,6 +195,7 @@ def build_tx_hex(
 ) -> str:
     b = bytearray()
     b.extend(encode_u32_le(version))
+    b.append(tx_kind & 0xFF)
     b.extend(encode_u64_le(tx_nonce))
 
     b.extend(encode_compact_size(len(inputs)))
@@ -240,6 +246,8 @@ def build_tx_hex(
         b.extend(encode_compact_size(len(sig)))
         b.extend(sig)
 
+    # DA payload length tail (wire v2). Standard tx uses da_payload_len=0.
+    b.extend(encode_compact_size(0))
     return hexlify(bytes(b))
 
 

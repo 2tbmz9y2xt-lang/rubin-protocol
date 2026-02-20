@@ -13,7 +13,8 @@ import (
 func makeTestCoinbaseTx(height uint64) consensus.Tx {
 	// Minimal coinbase shape expected by consensus.ApplyBlock.
 	return consensus.Tx{
-		Version: 1,
+		Version: 2,
+		TxKind:  consensus.TX_KIND_STANDARD,
 		TxNonce: 0,
 		Inputs: []consensus.TxInput{
 			{
