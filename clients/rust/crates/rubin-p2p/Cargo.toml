@@ -1,0 +1,9 @@
+[package]
+name = "rubin-p2p"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rubin-crypto = { path = "../rubin-crypto", default-features = false, features = ["dev-std"] }
+rubin-consensus = { path = "../rubin-consensus" }
+hex = "0.4"

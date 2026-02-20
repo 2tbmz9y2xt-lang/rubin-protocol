@@ -3,7 +3,7 @@ resolver = "2"
 members = [
   "crates/rubin-crypto",
   "crates/rubin-consensus",
+  "crates/rubin-p2p",
   "crates/rubin-store",
   "crates/rubin-node",
 ]
-
