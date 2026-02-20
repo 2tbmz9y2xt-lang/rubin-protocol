@@ -9,6 +9,12 @@ reviews:
   high_level_summary: true
   review_status: true
   commit_status: true
+  # Disable PR-generating "finishing touches" (docstrings/unit tests). We only want review comments.
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
   path_instructions:
     - path: "**/*"
       instructions: |
