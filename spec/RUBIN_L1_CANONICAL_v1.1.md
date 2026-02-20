@@ -1664,6 +1664,18 @@ Nodes MAY enforce connection caps and per-peer bandwidth ceilings to resist ecli
 
 Maximum message size is `MAX_RELAY_MSG_BYTES`.
 
+### 15.12.1 Compact-Block ShortIDs (Normative, non-consensus)
+
+Nodes MAY implement compact-block relay to reduce orphan/stale blocks under high bandwidth load.
+If implemented, compact-block relay MUST derive short transaction identifiers from `WTXID`, not `TXID`.
+
+Rationale: `WTXID = SHA3-256(TxBytes)` commits to the full transaction bytes including witness bytes and
+including `DA_Payload` bytes (Tx wire v2). Using TXID-based shortids would allow reconstruction of a
+block skeleton without the required witness/DA bytes.
+
+See `spec/RUBIN_L1_P2P_PROTOCOL_v1.1.md §5.3.1` for the message family (`sendcmpct`, `cmpctblock`,
+`getblocktxn`, `blocktxn`) and shortid derivation procedure.
+
 ### 15.13 Full P2P Protocol Reference
 
 Full peer transport and light-client profile is specified in `spec/RUBIN_L1_P2P_PROTOCOL_v1.1.md`.
