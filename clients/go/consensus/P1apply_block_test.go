@@ -95,6 +95,8 @@ func makeHTLCSpendBundle(
 
 	utxo := make(map[TxOutPoint]UtxoEntry, inputCount)
 	var totalIn uint64
+	inputs := make([]TxInput, 0, inputCount)
+	witnesses := make([]WitnessItem, 0, inputCount)
 	for i := 0; i < inputCount; i++ {
 		point := TxOutPoint{
 			TxID: [32]byte{byte(i)},
@@ -106,12 +108,7 @@ func makeHTLCSpendBundle(
 			CreatedByCoinbase: false,
 		}
 		totalIn += covenant.Value
-	}
 
-	inputs := make([]TxInput, 0, len(utxo))
-	witnesses := make([]WitnessItem, 0, len(utxo))
-	for point := range utxo {
-		_ = point
 		inputs = append(inputs, TxInput{
 			PrevTxid:  point.TxID,
 			PrevVout:  point.Vout,
