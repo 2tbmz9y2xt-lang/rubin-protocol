@@ -1,217 +1,239 @@
-# RUBIN L1 DA Tx-Carrier (Draft) v1.1 (auxiliary)
+# RUBIN L1 DA Tx-Carrier via Transaction Wire v2 (Draft) v1.1 (auxiliary)
 
 Status: DRAFT (NON-CANONICAL)  
 Date: 2026-02-20  
-Scope: Proposed L1 wire + covenant extensions to carry large L2 DA bytes on-chain while remaining compatible with compact block relay.
+Scope: Proposed L1 transaction-wire v2 changes to carry large L2 DA bytes on-chain while remaining compatible with
+compact block relay (mempool-first propagation).
 
-This document is a **draft**. It describes a concrete path to implement "Mode A + 32MB on-chain DA" from
-`spec/RUBIN_L2_RETL_ONCHAIN_DA_MVP_v1.1.md` without relying on a block-level DA section.
+This document is a **draft**. It does **not** change `spec/RUBIN_L1_CANONICAL_v1.1.md` by itself. Any adoption
+requires an explicit L1 network upgrade plan (new canonical revision and/or chain-instance activation schedule).
 
-It **does not** change `spec/RUBIN_L1_CANONICAL_v1.1.md` by itself. Any adoption requires a new canonical revision
-or an explicit network upgrade plan.
+Related:
+- L2 DA model and `DA_OBJECT_V1` manifest format: `spec/RUBIN_L2_RETL_ONCHAIN_DA_MVP_v1.1.md` (Option A).
+- P2P compact blocks (mempool-first reconstruction): `spec/RUBIN_L1_P2P_PROTOCOL_v1.1.md` (compact blocks draft).
 
 ---
 
-## 0. Why tx-carrier (design intent)
+## 0. Design intent (why tx-carrier)
 
-If DA bytes are only available as a block-level payload (a `DASection` attached to the block), compact blocks do not
-help propagation: peers do not have the DA bytes in their mempools prior to block mining, so miners must transmit
-full DA bytes in real time, increasing propagation delay and stale/orphan rate.
+If DA bytes are published only as a block-level payload (`DASection`), compact blocks do not help propagation because
+peers do not have the DA bytes in mempools before the block is found. Miners must transmit the full DA bytes in real
+time, increasing propagation delay and stale/orphan rate.
 
 Tx-carrier solves this by making DA bytes travel as mempool-relayed transactions:
 
-1. Sequencer publishes DA chunk transactions.
-2. Peers download them into mempool **before** the block is found.
-3. When the block is found, compact blocks can reference the DA txs by shortid (wtxid), so receivers reconstruct
-   quickly from mempool.
+1. Sequencer publishes a small manifest transaction (`DA_COMMIT_TX`) plus many chunk transactions (`DA_CHUNK_TX`).
+2. Peers download these transactions into mempool **before** block mining.
+3. When the block is found, compact blocks can reference the DA transactions by shortid derived from `wtxid`, so the
+   receiver reconstructs quickly from mempool.
 
 ---
 
-## 1. Draft wire extension: `TxBytes` carries an optional `data_section`
+## 1. Scope boundary: consensus vs policy
 
-This draft introduces an additional prunable data section at the end of `TxBytes`.
+This draft separates:
 
-### 1.1 Extended transaction bytes
+Consensus (validity):
+- the transaction wire v2 structure,
+- binding of DA payload bytes to consensus-committed fields,
+- per-tx and per-block hard caps.
+
+Policy (relay/mempool/L2 logic):
+- any "window" such as `H..H+K` for accepting late chunks,
+- retention/pruning horizons,
+- separate DA mempool sizing and eviction rules.
+
+In particular, a chunk-acceptance window `H..H+K` is **policy-only**: it MUST NOT make blocks retrospectively invalid.
+
+---
+
+## 2. Draft: Transaction Wire v2 (L1 upgrade)
+
+### 2.1 Wire structure
+
+This draft extends the transaction bytes with a `tx_kind` discriminator, optional DA core fields, and an optional
+DA payload blob.
+
+```
+version            : u32le
+tx_kind            : u8                  # 0x00=standard, 0x01=DA_COMMIT, 0x02=DA_CHUNK
+tx_nonce           : u64le
+inputs             : CompactSize + Input[]
+outputs            : CompactSize + Output[]
+locktime           : u32le
+da_core_fields     : bytes[...]          # present iff tx_kind in {0x01, 0x02}
+witness_section    : WitnessSectionBytes # as in CANONICAL v1.1
+da_payload_len     : CompactSize
+da_payload         : bytes[da_payload_len]
+```
+
+Constraints:
+- For `tx_kind = 0x00`, `da_payload_len` MUST be `0` and `da_core_fields` MUST be empty.
+- For `tx_kind in {0x01, 0x02}`, `da_payload_len` MUST be `> 0` and `da_core_fields` MUST be present.
+- `MAX_WITNESS_BYTES_PER_TX` continues to apply only to the witness section (not to `da_payload`).
+
+### 2.2 Identifiers (`txid` vs `wtxid`)
+
+To support pruning of `da_payload` without changing consensus commitments:
+
+- `txid` MUST NOT commit to `da_payload` bytes.
+- `wtxid` MUST commit to the full wire bytes (including witness and `da_payload`) for mempool matching and compact relay.
 
 Define:
 
 ```
-DataSectionBytes =
-  CompactSize(data_len) ||
-  data_bytes[data_len]
-```
-
-Then redefine:
-
-```
-TxBytes(T) = TxNoWitnessBytes(T) || WitnessBytes(T.witness) || DataSectionBytes(T.data)
-```
-
-Notes:
-
-- For ordinary L1 transactions, `data_len = 0`.
-- `data_bytes` are not part of `txid` (see §1.2), and SHOULD NOT be part of `sighash` (to avoid signing bulk bytes).
-- The `MAX_WITNESS_BYTES_PER_TX` limit from CANONICAL v1.1 is unchanged and continues to apply only to the witness section.
-
-### 1.2 Hash identifiers
-
-Consensus `txid` remains unchanged (CANONICAL v1.1):
-
-```
-txid = SHA3-256(TxNoWitnessBytes(T))
-```
-
-Network `wtxid` (for compact blocks / mempool inventory) MUST include `data_section`:
-
-```
-wtxid = SHA3-256(TxBytes(T))
-```
-
-Rationale:
-
-- compact blocks and mempool matching must uniquely identify the full transaction bytes required to validate DA chunks.
-
----
-
-## 2. Draft covenant type: `CORE_DA_CHUNK_V1`
-
-This draft introduces a new covenant type used only as a non-spendable DA carrier output.
-
-### 2.1 Registry entry (draft)
-
-Add to the covenant registry (future canonical revision):
-
-- `0x0200` `CORE_DA_CHUNK_V1`
-
-### 2.2 Output rules (draft)
-
-For `CORE_DA_CHUNK_V1` outputs:
-
-- `value` MUST be exactly `0`.
-- The output is **non-spendable** and MUST NOT be added to the spendable UTXO set.
-- Any transaction attempting to spend a `CORE_DA_CHUNK_V1` output MUST be rejected as `TX_ERR_MISSING_UTXO`.
-
-### 2.3 Covenant data encoding (draft)
-
-```
-covenant_data =
-  da_object_id : bytes32 ||
-  chunk_index  : u32le   ||
-  chunk_len    : u32le   ||
-  chunk_hash   : bytes32
-```
-
-Where:
-
-- `chunk_hash = SHA3-256(chunk_bytes)` over the corresponding bytes in the transaction `data_section`.
-
-Encoding constraints:
-
-- `covenant_data_len` MUST be exactly `32 + 4 + 4 + 32 = 72`.
-
-### 2.4 Binding `data_section` to DA outputs (draft consensus rule)
-
-Let `DAOutputs(T)` be the list of outputs in `T` whose `covenant_type = CORE_DA_CHUNK_V1`, in output order.
-
-Rules:
-
-- A transaction with `|DAOutputs(T)| = 0` MUST have `data_len = 0`.
-- A transaction with `|DAOutputs(T)| > 0` MUST:
-  - have `data_len > 0`,
-  - have `|DAOutputs(T)| = 1` (one chunk per transaction, in v1),
-  - satisfy `data_len == chunk_len`,
-  - satisfy `SHA3-256(data_bytes) == chunk_hash`.
-
-Rationale:
-
-- one-chunk-per-tx simplifies mempool, compact-block reconstruction, and DoS caps.
-
----
-
-## 3. Per-block DA caps (draft consensus rule)
-
-Define a per-block cap for total DA bytes:
-
-- `MAX_DA_BYTES_PER_BLOCK = 32_000_000` (planning profile for DA32)
-
-Rule:
-
-For a block `B`, let:
-
-```
-da_bytes(B) = Σ chunk_len over all CORE_DA_CHUNK_V1 outputs in all txs of B
+TxCoreBytes(T) = all fields of the wire encoding up to and including witness_section,
+                 excluding da_payload_len and da_payload
 ```
 
 Then:
 
-- `da_bytes(B) MUST be ≤ MAX_DA_BYTES_PER_BLOCK`.
+```
+txid  = SHA3-256(TxCoreBytes(T))
+wtxid = SHA3-256(TxBytesV2(T))   # full bytes including witness + da_payload
+```
 
-Nodes MUST also enforce a per-tx cap (DoS hardening):
+Interop note:
+- P2P inventory and compact blocks MUST use `wtxid` for DA-capable nodes (shortid derived from `wtxid`).
 
-- `MAX_DA_BYTES_PER_TX = 1_048_576` (1 MiB)
+### 2.3 Sighash scope (draft)
 
-Rule:
+DA payload bytes SHOULD NOT be covered by signature hashes to avoid signing bulk data.
 
-- for any tx with a DA output, `data_len MUST be ≤ MAX_DA_BYTES_PER_TX`.
+Draft rule:
+- all signature-hash constructions MUST commit to `TxCoreBytes(T)` only (not to `da_payload` bytes).
 
 ---
 
-## 4. Weight accounting (draft)
+## 3. Draft: DA transaction kinds
 
-To preserve the planning model where DA bytes cost ~`1 wu/byte`, the weight formula must treat `data_section` bytes
-as witness-like discounted bytes.
+### 3.1 `DA_COMMIT_TX` (`tx_kind = 0x01`)
 
-Draft weight definition:
+`da_core_fields` encoding:
 
 ```
-base_size = |TxNoWitnessBytes(T)|
-wit_size  = |WitnessBytes(T.witness)|
-da_size   = |DataSectionBytes(T.data)|
+da_id              : bytes32  # derived identifier (see below)
+chunk_count        : u16le
+retl_domain_id     : bytes32
+batch_number       : u64le
+tx_data_root       : bytes32
+state_root         : bytes32
+withdrawals_root   : bytes32
+batch_sig_suite    : u8       # 0x01=ML-DSA-87, 0x02=SLH-DSA
+batch_sig_len      : CompactSize
+batch_sig          : bytes[batch_sig_len]
+```
+
+Payload:
+- `da_payload` MUST be a valid `DA_OBJECT_V1` manifest bytes (see `spec/RUBIN_L2_RETL_ONCHAIN_DA_MVP_v1.1.md`).
+
+Derived identifier:
+
+```
+da_id = SHA3-256( ASCII("RUBIN_DA_ID") || da_payload )
+```
+
+Consensus binding rules (draft):
+- The `DA_OBJECT_V1` header fields MUST match the corresponding `da_core_fields`:
+  - `retl_domain_id`, `batch_number`, `tx_data_root`, `state_root`, `withdrawals_root`, `chunk_count`.
+- `tx_data_root` MUST equal the Merkle root over the manifest's chunk table (per `DA_OBJECT_V1` definition).
+
+### 3.2 `DA_CHUNK_TX` (`tx_kind = 0x02`)
+
+`da_core_fields` encoding:
+
+```
+da_id        : bytes32
+chunk_index  : u16le
+chunk_hash   : bytes32    # SHA3-256(da_payload)
+```
+
+Consensus binding rules (draft):
+- `chunk_hash` MUST equal `SHA3-256(da_payload)`.
+
+Note:
+- Any additional "only accept chunk if commit seen within K blocks" rule is **policy-only** (not consensus).
+
+---
+
+## 4. Draft covenant type: `CORE_DA_COMMIT` (deployment-gated)
+
+This draft uses a deployment-gated covenant output as an explicit consensus commitment to the DA payload hash in the
+transaction outputs.
+
+Registry (draft):
+- `0x0103` `CORE_DA_COMMIT` (deployment-gated; activation via VERSION_BITS-like schedule)
+
+Output rules (draft):
+- `value` MUST be exactly `0`.
+- Output MUST be non-spendable and MUST NOT be added to the spendable UTXO set.
+- Any transaction attempting to spend such an output MUST be rejected as `TX_ERR_MISSING_UTXO`.
+
+Encoding (draft):
+- `covenant_data_len` MUST be exactly `32`.
+- `covenant_data` MUST equal `SHA3-256(da_payload)` of the same transaction.
+
+Placement rules (draft):
+- A `DA_COMMIT_TX` MUST contain exactly one `CORE_DA_COMMIT` output.
+- A `DA_CHUNK_TX` MAY omit `CORE_DA_COMMIT` (it already commits `chunk_hash` in core fields).
+
+Deployment gating (draft):
+- Before the deployment is ACTIVE, any transaction that uses `tx_kind in {0x01, 0x02}` or includes a
+  `CORE_DA_COMMIT` output MUST be rejected as `TX_ERR_DEPLOYMENT_INACTIVE`.
+
+---
+
+## 5. Hard caps (draft consensus)
+
+Per-transaction caps:
+- `MAX_DA_MANIFEST_BYTES_PER_TX = 65_536` (64 KiB): applies to `DA_COMMIT_TX da_payload_len`.
+- `MAX_DA_CHUNK_BYTES_PER_TX = 524_288` (512 KiB): applies to `DA_CHUNK_TX da_payload_len`.
+
+Per-block caps:
+- `MAX_DA_BYTES_PER_BLOCK = 32_000_000` (DA32 planning profile)
+- `MAX_DA_COMMITS_PER_BLOCK = 128`
+
+Rules (draft):
+- For a block `B`:
+  - `Σ da_payload_len` over all DA transactions in `B` MUST be ≤ `MAX_DA_BYTES_PER_BLOCK`.
+  - `count(DA_COMMIT_TX in B)` MUST be ≤ `MAX_DA_COMMITS_PER_BLOCK`.
+
+Duplicate control (draft):
+- Within a single block, duplicate `(da_id, chunk_index)` pairs across `DA_CHUNK_TX` MUST be rejected as invalid.
+
+Optional additional validity (draft, may be delayed):
+- For each `DA_CHUNK_TX`, require `chunk_index < chunk_count` where `chunk_count` is obtained from a matching
+  `DA_COMMIT_TX` in the same block. (Cross-block enforcement is not allowed without consensus state.)
+
+---
+
+## 6. Weight accounting (draft)
+
+To preserve the planning model where DA bytes cost ~`1 wu/byte`, treat DA payload bytes as witness-like bytes:
+
+```
+base_size = |TxCoreBytes(T)| without witness and without da_payload
+wit_size  = |WitnessSectionBytes(T.witness)|
+da_size   = da_payload_len
 sig_cost  = (as in CANONICAL v1.1)
 
 weight(T) = 4 * base_size + wit_size + da_size + sig_cost
 ```
 
-If instead DA bytes are carried as base bytes (e.g., in output covenant payload), they cost ~`4 wu/byte` and the
-block weight parameters must be re-derived.
-
----
-
-## 5. P2P requirements (policy, not consensus)
-
-To support DA32 in practice, nodes MUST raise message-size policy caps above legacy defaults.
-
-Recommended:
-
-- `MAX_RELAY_MSG_BYTES >= 96 MiB` (covers large blocks and fallback full-block relay)
-
-Compact blocks are RECOMMENDED (P2P protocol draft):
-
-- `spec/RUBIN_L1_P2P_PROTOCOL_v1.1.md` (Compact blocks: `sendcmpct`, `cmpctblock`, `getblocktxn`, `blocktxn`;
-  see the "Compact blocks" section)
-
 Note:
-
-- even with compact blocks, a safe fallback path must exist for peers missing DA txs.
-
----
-
-## 6. Pruning (node policy)
-
-Nodes MAY prune `data_section` bytes for historical DA-chunk transactions after they are older than a configured
-retention horizon.
-
-However, pruning reduces long-term retrievability. Gateways/watchtowers operating withdrawals MUST archive DA bytes
-for at least the domain's withdrawal finalization horizon.
+- This is a consensus change if introduced. Until then it is a planning target.
 
 ---
 
 ## 7. Conformance (planned)
 
-If adopted, this draft should be covered by a new conformance gate (e.g., `CV-DA-CARRIER`) with minimum vectors:
+If adopted, this draft should be covered by a new conformance gate (e.g., `CV-DA-WIRE2`) with minimum vectors:
 
-- reject: tx has DA output but `data_len = 0`
-- reject: `data_len != chunk_len`
-- reject: `SHA3(data) != chunk_hash`
-- reject: `data_len > MAX_DA_BYTES_PER_TX`
-- reject: block where `Σ chunk_len > MAX_DA_BYTES_PER_BLOCK`
+- reject: `tx_kind=0x00` but `da_payload_len>0`
+- reject: `DA_COMMIT_TX` missing `CORE_DA_COMMIT`
+- reject: `CORE_DA_COMMIT.covenant_data != SHA3(da_payload)`
+- reject: `DA_CHUNK_TX.chunk_hash != SHA3(da_payload)`
+- reject: per-tx DA cap exceeded (manifest/chunk)
+- reject: per-block DA cap exceeded
+- reject: duplicate `(da_id, chunk_index)` within a block
+

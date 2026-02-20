@@ -115,6 +115,11 @@ Operationally:
 3. When a miner finds a block, the block can be reconstructed quickly from mempools using compact blocks, because the
    DA-txs are already present locally on receivers.
 
+Draft carrier shape:
+- `DA_COMMIT_TX`: carries a `DA_OBJECT_V1` manifest in a prunable `da_payload`.
+- `DA_CHUNK_TX`: carries a raw chunk payload in `da_payload`, committed by a `chunk_hash` in consensus bytes.
+- The `tx_kind` discriminator and the `da_payload` placement are defined by the L1 wire-v2 draft.
+
 Commitment requirements:
 
 - L1 consensus MUST commit to the DA bytes in the block. If the DA bytes are not directly committed by `txid` /
