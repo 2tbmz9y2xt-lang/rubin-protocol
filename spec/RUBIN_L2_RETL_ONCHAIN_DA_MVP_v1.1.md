@@ -37,6 +37,9 @@ These parameters are **planning targets** for a "safe L1 + DA32" profile. They a
 - L1 tx budget (approx): `W_L1 ≈ 36_000_000 wu` (targets ~5 L1 TPS for ~7_900 wu/tx PQ profile)
 - On-chain DA budget: `DA_BYTES_PER_BLOCK = 32_000_000 bytes` (32 MB)
 - Block weight target: `MAX_BLOCK_WEIGHT ≈ 68_000_000 wu` (order-of-magnitude planning)
+  - Assumption: the L1 DA carrier charges DA bytes at ~`1 wu/byte` (witness-like accounting).
+    If DA is carried as base bytes (e.g., via output covenant payload bytes), it costs ~`4 wu/byte` and the
+    block-weight model must be re-derived.
 - To keep bytes and weight consistent, an explicit consensus cap is required:
   - `MAX_BLOCK_BYTES` (recommended planning value: ~72 MiB)
 - P2P policy must be compatible with the above:
@@ -302,4 +305,3 @@ To operationalize this model, the following must exist:
 - A concrete L1 mechanism to carry `DA_OBJECT` bytes on-chain (block/tx wire upgrade).
 - P2P compact-block relay to keep orphan rate low at higher block bytes.
 - A gateway policy spec (what proofs/inputs authorize L2->L1 withdrawals in Mode A).
-
