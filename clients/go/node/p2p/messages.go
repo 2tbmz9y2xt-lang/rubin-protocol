@@ -4,6 +4,16 @@ const (
 	CmdVersion = "version"
 	CmdVerack  = "verack"
 	CmdReject  = "reject"
+
+	CmdInv        = "inv"
+	CmdGetData    = "getdata"
+	CmdNotFound   = "notfound"
+	CmdGetHeaders = "getheaders"
+	CmdHeaders    = "headers"
+	CmdBlock      = "block"
+	CmdTx         = "tx"
+	CmdPing       = "ping"
+	CmdPong       = "pong"
 )
 
 const (
