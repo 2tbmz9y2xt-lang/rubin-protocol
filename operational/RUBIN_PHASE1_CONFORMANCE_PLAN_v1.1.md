@@ -37,11 +37,11 @@ Phase 1 is complete only when **all required gates** below are PASS.
 |---|---:|---|---:|
 | CV-STORAGE | ✓ | datadir layout + manifest + KV schema/version rules | no |
 | CV-IMPORT | ✓ | staged import semantics (invalid/orphan marking, fork-choice, apply/reorg integration points) | no |
-| CV-CHAINSTATE | ✓ | `(tip_hash, tip_height, utxo_set_hash)` parity between Go and Rust after sequences | yes |
+| CV-CHAINSTATE-STORE | ✓ | persistent-store parity via init/import-block/utxo-set-hash (Go == Rust) | yes |
 | CV-CRASH-RECOVERY | ✓ | kill/restart invariants (no partial apply visible) | yes |
 
 Notes:
-- CV-CHAINSTATE is the **core Phase 1 cross-client determinism gate**.
+- CV-CHAINSTATE-STORE is the **core Phase 1 cross-client determinism gate**.
 - CV-CRASH-RECOVERY is required because manifest atomicity is a Phase 1 hard requirement.
 
 ---
@@ -72,7 +72,7 @@ Rust node (reference):
 - `cargo run -q -p rubin-node -- import-block --datadir <path> --profile <path> ...`
 - `cargo run -q -p rubin-node -- utxo-set-hash --datadir <path> --profile <path>`
 
-Hard requirement for CV-CHAINSTATE and CV-CRASH-RECOVERY:
+Hard requirement for CV-CHAINSTATE-STORE and CV-CRASH-RECOVERY:
 - Both clients MUST use the **same crypto provider policy** for hashing:
   - dev-only `DevStdCryptoProvider` is acceptable for early Phase 1 local runs,
     but Phase 1 sign-off SHOULD run with `RUBIN_WOLFCRYPT_STRICT=1` where feasible.
@@ -87,31 +87,28 @@ All Phase 1 fixtures live under:
 Suggested files:
 - `conformance/fixtures/CV-STORAGE.yml`
 - `conformance/fixtures/CV-IMPORT.yml`
-- `conformance/fixtures/CV-CHAINSTATE.yml`
+- `conformance/fixtures/CV-CHAINSTATE-STORE.yml`
 - `conformance/fixtures/CV-CRASH-RECOVERY.yml`
 
-Common YAML schema (minimum):
+Existing consensus integration gate (not a Phase 1 exit criterion):
+- `conformance/fixtures/CV-CHAINSTATE.yml`
+
+Common YAML schema (minimum) for CV-CHAINSTATE-STORE:
 ```yaml
-gate: CV-CHAINSTATE
-version: 1
-vectors:
+gate: CV-CHAINSTATE-STORE
+version: "1.1"
+tests:
   - id: CS-01
     profile: spec/RUBIN_L1_CHAIN_INSTANCE_PROFILE_DEVNET_v1.1.md
-    ops:
-      - op: init
-      - op: import_block
-        block_hex: "..."
-      - op: import_block
-        block_hex: "..."
-      - op: utxo_set_hash
-    expect:
-      mode: parity  # parity between clients (Go == Rust), not a fixed hash literal
+    plan:
+      kind: linear
+      blocks: 10
+    expected_code: PASS
 ```
 
 Notes:
-- For CV-CHAINSTATE the expectation SHOULD be `mode: parity` (Go output equals Rust output),
-  to avoid hardcoding hashes while encodings are still stabilizing pre-devnet.
-- Once encodings are frozen, CV-CHAINSTATE MAY additionally include fixed expected hashes.
+- Expected outcome is parity by construction: Go output MUST equal Rust output.
+- Once encodings are frozen, CV-CHAINSTATE-STORE MAY additionally include fixed expected hashes.
 
 ---
 
@@ -176,4 +173,3 @@ Minimum checks:
   - `conformance/runner/run_cv_crash_recovery.py`
 - Integrate into `conformance/runner/run_cv_bundle.py` under new gate names.
 - Update `spec/RUBIN_L1_CONFORMANCE_MANIFEST_v1.1.md` (or a new Phase 1 manifest) to track PASS/FAIL.
-

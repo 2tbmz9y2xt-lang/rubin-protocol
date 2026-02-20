@@ -14,11 +14,11 @@ Formal-verification artifacts for RUBIN L1 v1.1.
 
 ## Status
 
-- Lean 4 proofs: **in progress** (local repo exists; minimum proofs started)
+- Lean 4 proofs: **active** (see `rubin-formal` pinned commit below)
 - All theorems in `THEOREM_INDEX_v1.1.md` have spec citations and conformance vector evidence
 - T-004, T-005, T-007 are the **minimum required** for production freeze
-- Formal repository (local-only, dev): `/Users/gpt/Documents/rubin-formal` (git commit `858db2833e7399adba1d5244222a60a62fb0b87f`)
-- Formal repository (GitHub): `https://github.com/2tbmz9y2xt-lang/rubin-formal` (pinned commit in appendix)
+- Formal repository (GitHub): `https://github.com/2tbmz9y2xt-lang/rubin-formal`
+- Pinned commit (reproducibility): `5e3420f86325564cdab65750699582faafe4958a`
 
 ## Controller decision
 
@@ -26,5 +26,5 @@ Formal-verification artifacts for RUBIN L1 v1.1.
 provided invariants are fully stated with spec references and conformance vector mappings.
 That condition is now met as of 2026-02-18.
 
-Before production freeze: this file MUST be updated with a pinned commit to the
-formal repository once T-004, T-005, T-007 are `lean4-proven`.
+This file MUST remain synced with the formal pinned commit once T-004, T-005, T-007
+are `lean4-proven` (freeze minimum).

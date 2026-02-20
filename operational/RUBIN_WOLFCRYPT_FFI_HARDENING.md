@@ -31,13 +31,15 @@ will silently accept invalid signatures, breaking consensus security.
 python3 -c "
 import hashlib, sys
 data = open(sys.argv[1],'rb').read()
-import sha3; print(hashlib.sha3_256(data).hexdigest())
+print(hashlib.sha3_256(data).hexdigest())
 " /path/to/librubin_wc_shim.so
 ```
 
-Or use the provided script:
+If you have a CI-produced `SHA3SUMS.txt`, prefer verifying and exporting env vars
+in one step (from repo root):
+
 ```bash
-scripts/hash_shim.sh /path/to/librubin_wc_shim.so
+source <(./crypto/wolfcrypt/verify_shim_cosign.sh /path/to/SHA3SUMS.txt /path/to/librubin_wc_shim.* --export-env)
 ```
 
 ## Supply chain: fetching from GHCR

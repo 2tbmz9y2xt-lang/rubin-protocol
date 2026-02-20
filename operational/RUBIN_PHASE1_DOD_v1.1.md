@@ -62,7 +62,7 @@ Phase 1 does NOT include: P2P networking, key lifecycle, genesis ceremony, or ma
 
 ---
 
-## 2. Rust node — persistent storage (Q-108, TBD)
+## 2. Rust node — persistent storage (Q-108)
 
 - [ ] `rubin-node (rust) init --datadir <path> --profile <path>` — creates identical
   directory structure as Go node
@@ -76,17 +76,17 @@ see §6 below).
 
 ---
 
-## 3. Cross-client determinism (CV-CHAINSTATE)
+## 3. Cross-client determinism (CV-CHAINSTATE-STORE)
 
-This is the core Phase 1 exit gate.
+This is the core Phase 1 exit gate (datadir-backed parity).
 
-- [ ] CV-CHAINSTATE gate exists in `spec/RUBIN_L1_CONFORMANCE_MANIFEST_v1.1.md` with status PASS
-- [ ] CV-CHAINSTATE fixture `conformance/fixtures/CV-CHAINSTATE.yml` exists with ≥ 3 test sequences:
+- [ ] CV-CHAINSTATE-STORE fixture `conformance/fixtures/CV-CHAINSTATE-STORE.yml` exists with >= 3 test sequences:
   - CS-01: linear chain of N=10 blocks, no reorg — Go and Rust `utxo_set_hash` must match
   - CS-02: 2-block reorg — Go and Rust must agree on post-reorg `utxo_set_hash`
   - CS-03: deep reorg crossing difficulty window — both clients agree on final state
-- [ ] `conformance/runner/run_cv_chainstate.py` exists and all vectors PASS
-- [ ] Both Go and Rust node binaries used in CV-CHAINSTATE runner are built with
+- [ ] Gate is automated and all vectors PASS:
+  - `python3 conformance/runner/run_cv_bundle.py --only-gates CV-CHAINSTATE-STORE`
+- [ ] Both Go and Rust node binaries used in CV-CHAINSTATE-STORE runner are built with
   real crypto provider (not dev-std stub)
 
 ---
@@ -146,7 +146,7 @@ Updates to existing documents:
 
 ## 7. Operational minimum
 
-- [ ] `systemd/rubin-node.service` is parameterized (no hardcoded `/Users/gpt/...` paths)
+- [ ] `systemd/rubin-node.service` is parameterized (no hardcoded user-specific absolute paths)
 - [ ] `scripts/launch_rubin_node.sh` works with `--datadir` flag for both clients
 - [ ] `RUBIN_WOLFCRYPT_STRICT=1` is enforced in import-block pipeline (not dev-std)
 
@@ -175,11 +175,11 @@ Controller declares Phase 1 done when ALL of the following are true:
 | §1.2 import pipeline Stage 0–3 | Q-101 | DONE |
 | §1.2 import pipeline Stage 4–5 | Q-102 | DONE |
 | §1.3 reorg disconnect/connect | Q-103 | DONE |
-| §1.4 utxo-set-hash --datadir | Q-104 | OPEN |
-| §2 Rust persistent storage | Q-108 | NOT YET CREATED |
-| §3 CV-CHAINSTATE | Q-109 | NOT YET CREATED |
-| §4 BUG-01 Stage 1 fix | Q-110 | NOT YET CREATED |
-| §4 BUG-02 encoding alignment | Q-111 | NOT YET CREATED |
-| §5 gosec G304 | Q-107 | OPEN |
-| §6 KV engine spec doc | Q-112 | NOT YET CREATED |
-| §6 Phase 1 conformance plan doc | Q-113 | NOT YET CREATED |
+| §1.4 utxo-set-hash --datadir | Q-104 | DONE |
+| §2 Rust persistent storage | Q-108 | DONE |
+| §3 CV-CHAINSTATE-STORE | Q-109 | DONE |
+| §4 BUG-01 Stage 1 fix | Q-110 | DONE |
+| §4 BUG-02 encoding alignment | Q-111 | DONE |
+| §5 gosec G304 | Q-107 | DONE |
+| §6 KV engine spec doc | Q-112 | DONE |
+| §6 Phase 1 conformance plan doc | Q-113 | DONE |

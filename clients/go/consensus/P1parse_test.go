@@ -79,7 +79,7 @@ func TestParseTxBytes(t *testing.T) {
 		}
 	})
 
-	t.Run("truncated на каждом поле", func(t *testing.T) {
+	t.Run("truncated at each field", func(t *testing.T) {
 		tx := makeParseTxFixture()
 		full := TxBytes(&tx)
 		for i := 0; i < len(full); i++ {
@@ -89,7 +89,7 @@ func TestParseTxBytes(t *testing.T) {
 		}
 	})
 
-	t.Run("compactsize overflow в input_count", func(t *testing.T) {
+	t.Run("compactsize overflow in input_count", func(t *testing.T) {
 		raw := make([]byte, 0, 12+9)
 		raw = append(raw, []byte{0x01, 0x00, 0x00, 0x00}...)
 		raw = append(raw, []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}...)
@@ -157,7 +157,7 @@ func TestParseBlockHeader(t *testing.T) {
 	copy(header.PrevBlockHash[:], bytes.Repeat([]byte{0xaa}, 32))
 	copy(header.MerkleRoot[:], bytes.Repeat([]byte{0xbb}, 32))
 
-	t.Run("correct 116-байтовый header", func(t *testing.T) {
+	t.Run("correct 116-byte header", func(t *testing.T) {
 		raw := BlockHeaderBytes(header)
 		parsed, err := ParseBlockHeader(newCursor(raw))
 		if err != nil {

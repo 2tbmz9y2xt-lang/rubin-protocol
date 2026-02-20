@@ -4,10 +4,14 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/Users/gpt/Documents/rubin-protocol
-EnvironmentFile=/Users/gpt/Documents/rubin-protocol/operational/systemd/rubin-node.env
+#
+# Template for dev/test single-host use. Adjust paths for your environment.
+#
+WorkingDirectory=/opt/rubin/rubin-protocol
+EnvironmentFile=/etc/rubin/rubin-node.env
 ExecStart=/bin/bash -lc '\
-  source <(/Users/gpt/Documents/rubin-protocol/crypto/wolfcrypt/fetch_shim_from_ghcr.sh ${GHCR_REF} /Users/gpt/Documents/rubin-protocol/crypto/wolfcrypt/shim --export-env) && \
+  set -euo pipefail && \
+  source <(./crypto/wolfcrypt/fetch_shim_from_ghcr.sh "${GHCR_REF}" /var/lib/rubin/wolfcrypt-shim --export-env) && \
   if [ "${CLIENT}" = "go" ]; then \
     go run ./clients/go/node chain-id; \
   else \
