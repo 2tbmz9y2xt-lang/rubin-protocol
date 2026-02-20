@@ -192,7 +192,13 @@ pub fn import_block(
     ) {
         // If Stage 4/5 fails, we must persist INVALID status so descendants are rejected as
         // INVALID_ANCESTRY (and we don't accidentally treat the header as a valid parent).
-        mark_invalid(store, &block_hash, &block.header, candidate_height, BlockStatus::Invalid)?;
+        mark_invalid(
+            store,
+            &block_hash,
+            &block.header,
+            candidate_height,
+            BlockStatus::Invalid,
+        )?;
         return Ok(ImportResult::Rejected {
             block_hash,
             reason: e,
