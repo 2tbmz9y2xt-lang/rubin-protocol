@@ -21,7 +21,7 @@ func BlockHeaderBytes(header BlockHeader) []byte {
 }
 
 // TxOutputBytes serializes a TxOutput into its canonical byte representation.
-// 
+//
 // It encodes Value as 8-byte little-endian, CovenantType as 2-byte little-endian,
 // then the length of CovenantData using CompactSize followed by the CovenantData bytes.
 // The resulting slice is the concatenation of those fields in that order.
@@ -64,7 +64,7 @@ func WitnessBytes(w WitnessSection) []byte {
 }
 
 // TxNoWitnessBytes serializes a transaction excluding its witness section into a byte slice.
-// 
+//
 // The serialized layout is:
 // - Version (4 bytes, little-endian)
 // - TxNonce (8 bytes, little-endian)
@@ -73,6 +73,7 @@ func WitnessBytes(w WitnessSection) []byte {
 //   - PrevVout (4 bytes, little-endian)
 //   - ScriptSig length (CompactSize) and ScriptSig bytes
 //   - Sequence (4 bytes, little-endian)
+//
 // - Outputs count (CompactSize) followed by each output serialized by TxOutputBytes
 // - Locktime (4 bytes, little-endian)
 func TxNoWitnessBytes(tx *Tx) []byte {

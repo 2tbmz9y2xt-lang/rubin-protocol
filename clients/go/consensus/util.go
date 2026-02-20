@@ -72,7 +72,7 @@ func isZeroOutPoint(prevout TxOutPoint) bool {
 }
 
 // isCoinbaseTx reports whether tx is a coinbase transaction for the given blockHeight.
-// 
+//
 // A transaction is considered coinbase only if all of the following hold:
 // - tx is non-nil and has exactly one input,
 // - tx.Locktime equals blockHeight,

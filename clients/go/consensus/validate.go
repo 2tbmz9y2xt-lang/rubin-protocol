@@ -109,7 +109,7 @@ func txSums(tx *Tx, utxo map[TxOutPoint]UtxoEntry) (uint64, uint64, error) {
 }
 
 // validateOutputCovenantConstraints checks covenant-specific structural constraints for a transaction output.
-// 
+//
 // It enforces required covenant data lengths and value constraints for supported covenant types:
 // - CORE_P2PK: CovenantData must be 33 bytes.
 // - CORE_TIMELOCK_V1: CovenantData must be 9 bytes.
@@ -442,7 +442,7 @@ func ApplyBlock(
 }
 
 // ApplyTx validates a single transaction against consensus rules using the provided UTXO set and chain context.
-// 
+//
 // It performs structural checks (limits on inputs/outputs and witness sizes), enforces coinbase-specific rules,
 // validates covenant constraints for outputs, enforces nonces and witness/input count consistency for non-coinbase
 // transactions, checks input sequence values and duplicate/zero prevouts, verifies input authorization against
