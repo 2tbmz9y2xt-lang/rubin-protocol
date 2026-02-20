@@ -49,6 +49,27 @@ In particular, a chunk-acceptance window `H..H+K` is **policy-only**: it MUST NO
 
 ## 2. Draft: Transaction Wire v2 (L1 upgrade)
 
+### 2.0 Activation semantics (draft)
+
+This draft assumes an explicit activation height `H_activation` published in the chain-instance profile for the
+upgraded network instance.
+
+Wire versions:
+- Wire v1 (CANONICAL v1.1): `T.version = 1` and the transaction wire format is exactly `TxBytes(T)` as defined in
+  `spec/RUBIN_L1_CANONICAL_v1.1.md` (no `tx_kind`, no `da_payload`).
+- Wire v2 (this draft): `T.version = 2` and the wire format is as defined in §2.1 (includes `tx_kind` and `da_payload`).
+
+Validity rules:
+
+1. If `height(B) < H_activation` then any transaction with `T.version = 2` MUST cause `B` to be rejected as invalid.
+2. If `height(B) ≥ H_activation` then:
+   - Any DA transaction (`tx_kind in {0x01, 0x02}`) MUST use wire v2 (`T.version = 2`).
+   - Standard transactions MAY be encoded as either wire v1 (`T.version = 1`) or wire v2 (`T.version = 2` with
+     `tx_kind = 0x00`), subject to local policy and wallet conventions.
+
+Notes:
+- Wire v1 nodes are not full validators after activation. They may remain header-only peers if the P2P layer supports it.
+
 ### 2.1 Wire structure
 
 This draft extends the transaction bytes with a `tx_kind` discriminator, optional DA core fields, and an optional
@@ -94,7 +115,7 @@ wtxid = SHA3-256(TxBytesV2(T))   # full bytes including witness + da_payload
 ```
 
 Interop note:
-- P2P inventory and compact blocks MUST use `wtxid` for DA-capable nodes (shortid derived from `wtxid`).
+- After activation, P2P inventory and compact blocks MUST use `wtxid` for DA-capable nodes (shortid derived from `wtxid`).
 
 ### 2.3 Sighash scope (draft)
 
@@ -197,13 +218,17 @@ Rules (draft):
 - For a block `B`:
   - `Σ da_payload_len` over all DA transactions in `B` MUST be ≤ `MAX_DA_BYTES_PER_BLOCK`.
   - `count(DA_COMMIT_TX in B)` MUST be ≤ `MAX_DA_COMMITS_PER_BLOCK`.
+- For each DA transaction `T`:
+  - If `T` is `DA_COMMIT_TX`, then `da_payload_len(T) MUST be ≤ MAX_DA_MANIFEST_BYTES_PER_TX`.
+  - If `T` is `DA_CHUNK_TX`, then `da_payload_len(T) MUST be ≤ MAX_DA_CHUNK_BYTES_PER_TX`.
 
 Duplicate control (draft):
 - Within a single block, duplicate `(da_id, chunk_index)` pairs across `DA_CHUNK_TX` MUST be rejected as invalid.
 
-Optional additional validity (draft, may be delayed):
-- For each `DA_CHUNK_TX`, require `chunk_index < chunk_count` where `chunk_count` is obtained from a matching
-  `DA_COMMIT_TX` in the same block. (Cross-block enforcement is not allowed without consensus state.)
+Chunk-index semantics:
+- `chunk_index < chunk_count` is enforced by L2/policy logic using the referenced commit's manifest.
+- L1 consensus MUST remain stateless across blocks; therefore, L1 consensus validity MUST NOT depend on discovering
+  the referenced commit outside the current block.
 
 ---
 
@@ -236,4 +261,3 @@ If adopted, this draft should be covered by a new conformance gate (e.g., `CV-DA
 - reject: per-tx DA cap exceeded (manifest/chunk)
 - reject: per-block DA cap exceeded
 - reject: duplicate `(da_id, chunk_index)` within a block
-
