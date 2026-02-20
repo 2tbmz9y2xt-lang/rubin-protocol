@@ -13,9 +13,9 @@ This file is normative.
 
 - `chain_id` is defined once and only once as:
 
-```
+```text
 chain_id = SHA3-256(serialized_genesis_without_chain_id_field)
-```
+```text
 
 - `chain_id` is immutable for this spec version and is part of the consensus domain separation.
 
@@ -23,12 +23,12 @@ chain_id = SHA3-256(serialized_genesis_without_chain_id_field)
 
 `serialized_genesis_without_chain_id_field` is defined as:
 
-```
+```text
 ASCII("RUBIN-GENESIS-v1") ||
 BlockHeaderBytes(genesis_header) ||
 CompactSize(genesis_tx_count) ||
 TxBytes(genesis_txs[0]) || ... || TxBytes(genesis_txs[genesis_tx_count-1])
-```
+```text
 
 Constraints:
 
@@ -100,19 +100,19 @@ Let:
 
 Define:
 
-```
+```text
 UtxoEntry = (value, covenant_type, covenant_data, creation_height, created_by_coinbase)
-```
+```text
 
 State transition is:
 
-```
+```text
 \mathcal{S}_h = ApplyBlock(\mathcal{S}_{h-1}, \mathcal{B}_h)
-```
+```text
 
 and is defined sequentially over transactions in block order:
 
-```
+```text
 \mathcal{U}^{work} := \mathcal{U}_{h-1}
 
 for i = 0..(\mathcal{B}_h.txs.count-1):
@@ -121,7 +121,7 @@ for i = 0..(\mathcal{B}_h.txs.count-1):
   \mathcal{U}^{work} := SpendTx(\mathcal{U}^{work}, T, h, is_coinbase)
 
 \mathcal{U}_h := \mathcal{U}^{work}
-```
+```text
 
 where:
 
@@ -138,9 +138,9 @@ where:
 - `SLH-DSA-SHAKE-256f` signatures are bounded by `MAX_SLH_DSA_SIG_BYTES`.
 - An output authorization reference is the canonical key hash:
 
-```
+```text
 key_id = SHA3-256(pubkey)
-```
+```text
 
 - Address encoding, key-rotation lifecycle, and policy throttling are protocol-application decisions; L1 validation checks only that witness public keys are correctly typed and verify signatures. Address binding rules are specified in `spec/RUBIN_L1_KEY_MANAGEMENT_v1.1.md`.
 
@@ -162,9 +162,9 @@ Canonical wire lengths and key identifiers used by consensus:
 - A validator MUST treat key identifiers as 32-byte `key_id`.
 - `key_id` is computed as:
 
-```
+```text
 key_id = SHA3-256(pubkey)
-```
+```text
 
 - Where `pubkey` is the **canonical wire value** of the witness public key for the selected `suite_id`
   (e.g., exactly 2592 bytes for `ML-DSA-87`, exactly 64 bytes for `SLH-DSA-SHAKE-256f`).
@@ -190,7 +190,7 @@ For protocol implementations:
 
 ### 3.1 Transaction format
 
-```
+```text
 Tx {
   version : u32le
   tx_nonce : u64le
@@ -230,7 +230,7 @@ WitnessItem {
   sig_length : CompactSize
   signature : bytes[sig_length]
 }
-```
+```text
 
 For each input, exactly one witness item corresponds to its authorization data by index.
 
@@ -246,7 +246,7 @@ For each input, exactly one witness item corresponds to its authorization data b
 For covenant types that do not require key-based authorization (`CORE_TIMELOCK_V1`),
 the corresponding witness item MUST be a sentinel:
 
-```
+```text
 Sentinel WitnessItem {
   suite_id = 0x00
   pubkey_length = 0
@@ -254,7 +254,7 @@ Sentinel WitnessItem {
   sig_length = 0
   signature = (empty)
 }
-```
+```text
 
 For `CORE_TIMELOCK_V1` spends, any non-sentinel witness item (`suite_id != 0x00`) MUST be rejected as `TX_ERR_SIG_ALG_INVALID`.
 
@@ -302,7 +302,7 @@ Transaction wire encoding (v1.1 baseline):
 
 `TxCoreBytes(T)` and `TxBytes(T)` are defined as:
 
-```
+```text
 TxCoreBytes(T) =
   u32le(T.version=2) ||
   u8(T.tx_kind) ||
@@ -319,7 +319,7 @@ TxBytes(T) =
   WitnessBytes(T.witness) ||
   CompactSize(T.da_payload_len) ||
   T.da_payload[T.da_payload_len]
-```
+```text
 
 For each non-coinbase input `i`:
 
@@ -352,9 +352,9 @@ The only consensus use of `locktime` in v1.1 is coinbase uniqueness (rule 7 abov
 1. All `CompactSize` values MUST be minimally encoded.
 2. Parsing and serialization are mutually inverse for valid encodings:
 
-```
+```text
 parse(serialize(x)) = x
-```
+```text
 
 3. Deterministic failure code mapping is normative and defined in §3.3.
 
@@ -451,6 +451,7 @@ The following `covenant_type` values are valid:
 - `0x0100` `CORE_HTLC_V1`
 - `0x0101` `CORE_VAULT_V1`
 - `0x0102` `CORE_HTLC_V2`
+- `0x0103` `CORE_DA_COMMIT`
 - `0x00ff` `CORE_RESERVED_FUTURE`
 
 Semantics:
@@ -519,6 +520,11 @@ Semantics:
     if `|matching| ≥ 2`, the transaction is rejected as `TX_ERR_PARSE`. Wallets SHOULD NOT attempt to
     claim multiple distinct `CORE_HTLC_V2` preimages in a single transaction.
   - Non-matching `CORE_ANCHOR` outputs in the same transaction are permitted and do not affect HTLC_V2 validation.
+- `CORE_DA_COMMIT`:
+  - Purpose: commit to on-chain data availability (DA) payload bytes carried by a `DA_COMMIT_TX` (see §17).
+  - This output is **non-spendable** and MUST NOT be added to the spendable UTXO set.
+  - `value` MUST be exactly `0`.
+  - `covenant_data_len` MUST be exactly `32` bytes: `SHA3-256(DA_Payload)`.
 - `CORE_RESERVED_FUTURE`: forbidden until explicit activation by consensus.
 
 Any unknown or future `covenant_type` MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
@@ -635,7 +641,7 @@ Header checks (Normative minimum set):
 
 ### 4.2 Sighash v1 (Normative)
 
-```
+```text
 preimage_tx_sig =
   ASCII("RUBINv2-sighash/") ||
   chain_id ||
@@ -658,7 +664,7 @@ hash_of_da_core_fields = SHA3-256(DA_Core_Fields(T))  (empty if tx_kind=0x00)
 hash_of_all_prevouts = SHA3-256(concat(inputs[i].prev_txid || u32le(inputs[i].prev_vout) for i in [0..input_count-1]))
 hash_of_all_sequences = SHA3-256(concat(u32le(inputs[i].sequence) for i in [0..input_count-1]))
 hash_of_all_outputs = SHA3-256(concat(outputs[j] in TxOutput wire order for j in [0..output_count-1]))
-```
+```text
 
 All fields in `preimage_tx_sig` are taken from the transaction `T` being signed (not the block header), except `input_value`.
 `input_value` is the `value` of the spendable UTXO entry referenced by this input's `(prev_txid, prev_vout)`.
@@ -715,9 +721,9 @@ Weight and fee checks are normative:
   Any missing coinbase or additional coinbase transaction(s) MUST be rejected as `BLOCK_ERR_COINBASE_INVALID`.
 - Coinbase outputs are bounded by:
 
-```
+```text
 sum(outputs.value) ≤ block_subsidy(height) + Σ fees(tx in transactions excluding coinbase)
-```
+```text
 
 - **Genesis exception (normative):** for height `0` (the genesis block), the coinbase output
   bound is not evaluated. Genesis outputs are chain-instance allocations fixed by the published
@@ -735,11 +741,11 @@ Let:
 - `BASE = floor(TOTAL / N)`
 - `REM = TOTAL mod N`
 
-```
+```text
 block_subsidy(height) = 0,                      for height ≥ N
 block_subsidy(height) = BASE + 1,               for height < REM
 block_subsidy(height) = BASE,                   for REM ≤ height < N
-```
+```text
 
 Arithmetic MUST use integer division / modulo; no floating-point is permitted.
 Overflow is impossible: all values are within `u64` and all operations are checked.
@@ -786,7 +792,7 @@ See §3.6 for `CORE_ANCHOR` covenant type. Size constraints: §1.2 (`MAX_ANCHOR_
 
 ### 5.1 BlockHeader (Normative)
 
-```
+```text
 BlockHeader = {
   version: u32le
   prev_block_hash: bytes32
@@ -795,23 +801,23 @@ BlockHeader = {
   target: bytes32   // big-endian integer when compared
   nonce: u64le
 }
-```
+```text
 
 `BlockHeaderBytes(B)` serialize fields in the order above; integer fields use little-endian except `target`, which is serialized as raw 32-byte big-endian.
 
 Proof-of-Work rule:
 
-```
+```text
 block_hash = SHA3-256(BlockHeaderBytes(B))
 Valid iff integer(block_hash, big-endian) < integer(target, big-endian)
-```
+```text
 
 ### 5.1.1 Merkle Tree (Normative)
 
-```
+```text
 Leaf   = SHA3-256(0x00 || txid)
 Node   = SHA3-256(0x01 || left || right)
-```
+```text
 
 If the number of elements at any tree level is odd, the lone element is
 promoted to the next level without hashing. Duplication of the last leaf
@@ -834,9 +840,9 @@ Block height definition:
 1. `height(B_0) = 0` for genesis.
 2. For any block `B_h` with `h > 0` that satisfies chain linkage above, define:
 
-```
+```text
 height(B_h) = height(parent(B_h)) + 1
-```
+```text
 
 where `parent(B_h)` is the unique block whose `block_hash` equals `B_h.prev_block_hash`.
 
@@ -889,10 +895,10 @@ Implementations MUST NOT impose additional structural constraints beyond length 
 
 ### 6.1 Chainwork
 
-```
+```text
 work(B) = ⌊2^256 / target(B)⌋
 ChainWork(chain) = Σ work(B_i)
-```
+```text
 
 Canonical chain is the valid chain with maximal `ChainWork` among candidates at each height.
 
@@ -900,9 +906,9 @@ Canonical chain is the valid chain with maximal `ChainWork` among candidates at 
 
 For block `B`:
 
-```
+```text
 block_hash = SHA3-256(BlockHeaderBytes(B))
-```
+```text
 
 `B` is PoW-valid iff the big-endian integer value of `block_hash` is strictly less than the big-endian integer value of `target(B)`.
 
@@ -923,14 +929,14 @@ Let:
 
 If T_actual ≤ 0, set T_actual = 1.
 
-```
+```text
 target_new =
     clamp(
         floor(target_old × T_actual / T_expected),
         max(1, floor(target_old / 4)),
         target_old × 4
     )
-```
+```text
 
 Window boundaries and applicability (Normative):
 
@@ -1020,15 +1026,15 @@ Protocol-level constraints:
 
 - Domain identifier:
 
-```
+```text
 retl_domain_id = SHA3-256("RUBINv1-retl-domain/" || chain_id || descriptor_bytes)
-```
+```text
 
 #### 7.0.1 `descriptor_bytes` (Normative, stable serialization)
 
 `descriptor_bytes` MUST be the canonical serialization of:
 
-```
+```text
 RETLDomainDescriptorV1 = {
   version: u8 = 1
   sequencer_suite_id: u8
@@ -1036,7 +1042,7 @@ RETLDomainDescriptorV1 = {
   sequencer_pubkey: bytes[sequencer_pubkey_length]
   flags: u32le
 }
-```
+```text
 
 where:
 
@@ -1063,7 +1069,7 @@ RETLBatch {
   withdrawals_root
   sequencer_sig
 }
-```
+```text
 
 `sequencer_sig` is a `WitnessItem` with mandatory `suite_id = 0x02` (SLH-DSA-SHAKE-256f) and is signed over
 the canonical preimage bytes specified in §7.0.2.
@@ -1082,7 +1088,7 @@ field types and signing serialization are specified:
 
 Signing preimage (bytes):
 
-```
+```text
 ASCII("RUBIN-RETL-v1") ||
 chain_id ||
 retl_domain_id ||
@@ -1091,7 +1097,7 @@ prev_batch_hash ||
 state_root ||
 tx_data_root ||
 withdrawals_root
-```
+```text
 
 Interop note (non-consensus):
 - A recommended `anchor_data` envelope for RETLBatch interoperability (including `sequencer_sig`) is defined in `operational/RUBIN_RETL_INTEROP_FREEZE_CHECKLIST_v1.1.md §2.2.1`.
@@ -1157,10 +1163,10 @@ For a deployment `D`, define:
 
 Signals are counted per `window_index`:
 
-```
+```text
 window_index = floor((height - max(VERSION_BITS_START_HEIGHT, D.start_height)) / D.signal_window)
 signal_count = |{ b in window : ((b.version >> D.bit) & 1) = 1 }|
-```
+```text
 
 Transition:
 
@@ -1174,9 +1180,9 @@ For a deployment `D` with parameters `(bit, start_height, timeout_height, signal
 
 1. A *window boundary* height `h` is any height such that:
 
-```
+```text
 (h - max(VERSION_BITS_START_HEIGHT, D.start_height)) % D.signal_window = 0
-```
+```text
 
 2. Signaling is evaluated over completed windows. Let a completed window end at height `h-1` where `h` is a window boundary.
 
@@ -1254,46 +1260,46 @@ A protocol release is admissible only if:
 
 For transaction:
 
-```
+```text
 base_size = |TxNoWitnessBytes(T)|
 wit_size  = |WitnessBytes(T.witness)|
 ml_count  = count inputs with witness suite_id=0x01
 slh_count = count inputs with witness suite_id=0x02
 sig_cost  = ml_count * VERIFY_COST_ML_DSA + slh_count * VERIFY_COST_SLH_DSA
 weight(T) = 4 * base_size + wit_size + sig_cost
-```
+```text
 
 For block:
 
-```
+```text
 Σ weight(T in block) ≤ MAX_BLOCK_WEIGHT
-```
+```text
 
 If the block constraint is violated, the block MUST be rejected as `BLOCK_ERR_WEIGHT_EXCEEDED`.
 
 For any non-coinbase transaction:
 
-```
+```text
 fee(T) = Σ inputs.value - Σ outputs.value
-```
+```text
 
 `fee(T) ≥ 0` is guaranteed by the value conservation invariant (§9, invariant 2).
 
 `min_fee` is a policy parameter derived from `weight(T)` and `MIN_RELAY_FEE_RATE`:
 
-```
+```text
 min_fee(T) = max(1, weight(T) * MIN_RELAY_FEE_RATE)
-```
+```text
 
 Relay policy may enforce higher local floors above this base formula.
 Consensus does not define fee schedules directly.
 
 `WitnessBytes(WitnessSection)` is the canonical witness serialization:
 
-```
+```text
 WitnessBytes(W) = CompactSize(W.witness_count) || concat( WitnessItemBytes(w) for each w in W.witnesses in order )
 WitnessItemBytes(w) = u8(w.suite_id) || CompactSize(w.pubkey_length) || w.pubkey || CompactSize(w.sig_length) || w.signature
-```
+```text
 
 ### 11.1 Mempool and relay policy (Non-consensus)
 
@@ -1329,10 +1335,10 @@ Operational policy MAY include:
 
 ### TV-01 invalid CompactSize
 
-```
+```text
 raw_tx = "0001fd00"
 Expected: TX_ERR_PARSE
-```
+```text
 
 The following vectors are illustrative examples and are NOT normative fixtures.
 Authoritative conformance vectors are defined in the separate YAML test suite.
@@ -1368,7 +1374,7 @@ fixture:
       signature: empty
   locktime: 0xffffffff
 Expected: TX_ERR_SIG_NONCANONICAL
-```
+```text
 
 ### TV-03 invalid binding
 
@@ -1377,7 +1383,7 @@ Authoritative conformance vectors are defined in the separate YAML test suite.
 
 This test is provided as fixture schema (not a raw byte vector):
 
-```
+```text
 fixture:
   preloaded_UTXO:
     covenant_type: CORE_RESERVED_FUTURE (0x00ff)
@@ -1389,23 +1395,23 @@ fixture:
       witness_count: 1
       witnesses: well-formed syntax
 Expected: TX_ERR_COVENANT_TYPE_INVALID
-```
+```text
 
 ### TV-04 anchor overflow
 
-```
+```text
 anchor_data = 00 repeated 65537 bytes
 Expected: TX_ERR_COVENANT_TYPE_INVALID
-```
+```text
 
 ### TV-05 double spend
 
-```
+```text
 block_1:
   tx1 spends outpoint O
   tx2 also spends outpoint O in same block
 Expected: TX_ERR_MISSING_UTXO
-```
+```text
 
 ## 13. Non-Normative Guidance
 
@@ -1597,13 +1603,13 @@ SPV validation requires proof of inclusion as:
 
 Minimum Merkle path schema (v1.1):
 
-```
+```text
 MerkleProofV1 {
   depth       : u8           (proof depth; 0 = single-tx block)
   sibling_cnt : CompactSize  (MUST equal depth)
   siblings[]  : bytes32      (sibling hashes from leaf to root)
 }
-```
+```text
 
 Merkle path verification procedure (normative, non-consensus):
 
@@ -1686,7 +1692,7 @@ Notes:
 
 `DA_Core_Fields` encoding (wire order):
 
-```
+```text
 da_id              : bytes32  = SHA3-256(ASCII("RUBIN_DA_ID") || da_payload)
 chunk_count        : u16le
 retl_domain_id     : bytes32
@@ -1697,7 +1703,7 @@ withdrawals_root   : bytes32
 batch_sig_suite    : u8       (0x01=ML-DSA-87, 0x02=SLH-DSA)
 batch_sig_len      : CompactSize
 batch_sig          : bytes[batch_sig_len]
-```
+```text
 
 `da_payload` for `DA_COMMIT_TX` MUST be a `DA_OBJECT_V1` manifest as defined by
 `spec/RUBIN_L2_RETL_ONCHAIN_DA_MVP_v1.1.md` (auxiliary).
@@ -1712,11 +1718,11 @@ Consensus binding rules:
 
 `DA_Core_Fields` encoding (wire order):
 
-```
+```text
 da_id        : bytes32
 chunk_index  : u16le
 chunk_hash   : bytes32  = SHA3-256(da_payload)
-```
+```text
 
 Consensus binding rule:
 - `chunk_hash` MUST equal `SHA3-256(da_payload)`; any mismatch MUST be rejected as `TX_ERR_PARSE`.

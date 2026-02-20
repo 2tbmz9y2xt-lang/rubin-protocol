@@ -177,7 +177,7 @@ Compression:
 
 `DAObjectV1Bytes`:
 
-```
+```text
 magic            : bytes8    = ASCII("RUBINDA1") || 0x00
 version          : u8        = 1
 flags            : u8        (bit 0 = has_sig_root, bit 1 = compressed; bits 2..7 MUST be 0)
@@ -195,14 +195,14 @@ addr_table       : bytes32[addr_table_len]
 token_table      : bytes32[token_table_len]
 chunk_table      : ChunkDesc[chunk_count]
 chunk_payload    : bytes[ sum(chunk_len) ]
-```
+```text
 
 `ChunkDesc`:
 
-```
+```text
 chunk_len  : u32le
 chunk_hash : bytes32   = SHA3-256(chunk_bytes)
-```
+```text
 
 ### 5.3 `tx_data_root` definition (Normative)
 
@@ -210,19 +210,19 @@ Let `chunk_hashes` be the `chunk_hash` values in `chunk_table` order.
 
 Define the Merkle tree as:
 
-```
+```text
 Leaf = SHA3-256(0x00 || u32le(chunk_len) || chunk_hash)
 Node = SHA3-256(0x01 || left || right)
-```
+```text
 
 If a level has an odd number of nodes, the final node is promoted to the next level unchanged.
 Duplicating the last element is forbidden.
 
 Then:
 
-```
+```text
 tx_data_root = MerkleRoot( Leaf_i for each chunk i )
-```
+```text
 
 ---
 
@@ -238,13 +238,13 @@ If `flags.has_sig_root = 1` then:
 
 Define:
 
-```
+```text
 SigEntryBytes = WitnessItemBytes (as in CANONICAL v1.1 §11, minimally-encoded CompactSize lengths)
 SigCommit     = SHA3-256(SigEntryBytes)
 
 Leaf = SHA3-256(0x02 || SigCommit)
 Node = SHA3-256(0x03 || left || right)
-```
+```text
 
 Odd-leaf promotion rules are the same as §5.3.
 
@@ -290,7 +290,8 @@ If any check fails, the DA object is invalid for RETL; indexers/gateways MUST NO
 - `addr_table` entries are 32-byte identifiers (e.g., `key_id`-derived or L2 account ids).
 - `token_table` entries are 32-byte identifiers (token ids).
 
-Any tx referencing an index `>= table_len` is invalid.
+Any transaction referencing an address index `>= addr_table_len` is invalid.
+Any transaction referencing a token index `>= token_table_len` is invalid.
 
 ### 8.2 L2Tx wire (MVP)
 
@@ -298,12 +299,12 @@ All variable-length integers use L1 `CompactSize` encoding rules (minimally enco
 
 `L2TxBytes`:
 
-```
+```text
 op          : u8
 from_idx    : CompactSize
 nonce_delta : CompactSize
 ... op-specific fields ...
-```
+```text
 
 Opcode set (MVP):
 
@@ -313,42 +314,42 @@ Opcode set (MVP):
 
 #### 8.2.1 `TRANSFER`
 
-```
+```text
 to_idx    : CompactSize
 token_idx : CompactSize
 amount    : CompactSize
 max_fee   : CompactSize
-```
+```text
 
 #### 8.2.2 `SWAP` (MVP placeholder)
 
 MVP `SWAP` encoding is app-specific. For generic interop, define:
 
-```
+```text
 pool_id        : CompactSize
 token_in_idx   : CompactSize
 token_out_idx  : CompactSize
 amount_in      : CompactSize
 min_amount_out : CompactSize
 max_fee        : CompactSize
-```
+```text
 
 #### 8.2.3 `WITHDRAW_REQUEST`
 
-```
+```text
 l1_dest_key_id : bytes32
 token_idx      : CompactSize
 amount         : CompactSize
 max_fee        : CompactSize
-```
+```text
 
 ### 8.3 Tx stream and count binding
 
 Let `TxStreamBytes` be the concatenation of `tx_count` transactions:
 
-```
+```text
 TxStreamBytes = concat( L2TxBytes(tx_i) for i in [0..tx_count-1] )
-```
+```text
 
 In DA_OBJECT_V1, the `chunk_payload` bytes MUST be exactly `TxStreamBytes` (no trailing bytes).
 
