@@ -4,6 +4,9 @@ use std::path::{Component, Path, PathBuf};
 
 use rubin_crypto::CryptoProvider;
 
+mod aeskw;
+mod keymgr;
+
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{:02x}", byte)).collect()
 }
@@ -999,6 +1002,7 @@ fn usage() {
         "  import-block --datadir <path> (--block-hex <hex> | --block-hex-file <path>) [--profile <path>]"
     );
     eprintln!("  utxo-set-hash --datadir <path> [--profile <path>]");
+    eprintln!("  keymgr <export-wrapped|import-wrapped|verify-pubkey> [flags]");
 }
 
 fn cmd_version() -> i32 {
@@ -1898,6 +1902,7 @@ fn dispatch(cmd: &str, args: &[String]) -> i32 {
         "init" => cmd_init_main(args),
         "import-block" => cmd_import_block_main(args),
         "utxo-set-hash" => cmd_utxo_set_hash_main(args),
+        "keymgr" => keymgr::cmd_keymgr_main(args),
         _ => {
             eprintln!("unknown command: {cmd}");
             2
