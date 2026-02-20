@@ -285,6 +285,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rubin-p2p"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "rubin-consensus",
+ "rubin-crypto",
+]
+
+[[package]]
 name = "rubin-store"
 version = "0.1.0"
 dependencies = [
