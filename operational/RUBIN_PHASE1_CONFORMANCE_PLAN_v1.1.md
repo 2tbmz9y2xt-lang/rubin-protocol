@@ -140,9 +140,9 @@ Vector types:
 - orphan blocks
 - blocks with invalid ancestry
 
-### 5.3 CV-CHAINSTATE (required)
+### 5.3 CV-CHAINSTATE-STORE (required)
 
-Goal: cross-client parity on applied chainstate snapshot:
+Goal: cross-client parity on persisted chainstate snapshot via node CLI:
 `(tip_hash, tip_height, utxo_set_hash)` MUST match between Go and Rust after each test sequence.
 
 Minimum required vectors:
@@ -166,10 +166,10 @@ Minimum checks:
 
 ## 6. Runner Implementation Plan (non-normative)
 
-- Add new Python runners:
+- Add new Python runners (planned):
   - `conformance/runner/run_cv_storage.py`
   - `conformance/runner/run_cv_import.py`
-  - `conformance/runner/run_cv_chainstate.py`
   - `conformance/runner/run_cv_crash_recovery.py`
-- Integrate into `conformance/runner/run_cv_bundle.py` under new gate names.
+- CV-CHAINSTATE-STORE is implemented in `conformance/runner/run_cv_bundle.py` (`run_chainstate_store`) and consumes `conformance/fixtures/CV-CHAINSTATE-STORE.yml`.
+- Integrate remaining planned runners into `conformance/runner/run_cv_bundle.py` under new gate names.
 - Update `spec/RUBIN_L1_CONFORMANCE_MANIFEST_v1.1.md` (or a new Phase 1 manifest) to track PASS/FAIL.

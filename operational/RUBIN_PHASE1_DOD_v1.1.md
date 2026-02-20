@@ -114,7 +114,7 @@ This is the core Phase 1 exit gate (datadir-backed parity).
 - [ ] `cargo audit` — no known vulnerabilities
 - [ ] Go consensus package coverage ≥ 80% (currently 82.3% ✅)
 - [ ] Go node/store package coverage ≥ 70% (integration tests for import/reorg)
-- [ ] `gosec G304` fix in `node/main.go:877` (Q-107)
+- [ ] `gosec G304` fix in `clients/go/node/main.go` (Q-107)
 
 ---
 
@@ -146,7 +146,7 @@ Updates to existing documents:
 
 ## 7. Operational minimum
 
-- [ ] `systemd/rubin-node.service` is parameterized (no hardcoded user-specific absolute paths)
+- [ ] `operational/systemd/rubin-node.service` is parameterized (no hardcoded user-specific absolute paths)
 - [ ] `scripts/launch_rubin_node.sh` works with `--datadir` flag for both clients
 - [ ] `RUBIN_WOLFCRYPT_STRICT=1` is enforced in import-block pipeline (not dev-std)
 
