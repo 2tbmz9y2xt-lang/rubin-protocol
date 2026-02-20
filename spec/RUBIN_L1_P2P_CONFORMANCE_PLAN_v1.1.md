@@ -130,6 +130,15 @@ Light-client helpers:
 - anchorproof: depth > 32 (malformed)
 - getanchorproof: reserved flags bits set (malformed)
 
+Compact blocks (if implemented):
+
+- sendcmpct: announce=2 (malformed) -> drop + ban-score
+- sendcmpct: version != 1 -> ignore (no ban-score)
+- cmpctblock: missing prefilled coinbase at index 0 (malformed)
+- cmpctblock: shortid derivation determinism (same header/nonce => same shortids)
+- getblocktxn: delta decoding monotonicity; out-of-range index (malformed)
+- blocktxn: tx_count mismatch vs requested indexes (malformed)
+
 Peer management:
 
 - addr relay drops IPv6 link-local (`fe80::/10`) and IPv4-mapped link-local (`::ffff:169.254.0.0/112`)
@@ -140,4 +149,3 @@ Peer management:
 
 - This plan does not define encrypted transport / hybrid key exchange.
   If added later, it should be validated as a separate gate (e.g., CV-P2P-CRYPTO) and remain non-consensus.
-

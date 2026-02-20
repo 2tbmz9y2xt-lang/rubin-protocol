@@ -312,6 +312,150 @@ Receiving node responds starting from the first hash it recognises in the locato
 - `block`: `BlockBytes` (CANONICAL wire encoding)
 - `tx`: `TxBytes` (CANONICAL wire encoding including witness section)
 
+### 5.3.1 Compact blocks (RECOMMENDED)
+
+Compact blocks reduce block propagation bandwidth and round trips by transmitting a block header plus short
+identifiers for transactions the receiver is expected to already have in its mempool. This is critical for
+high-throughput profiles where full block relay would otherwise increase stale/orphan rates.
+
+Compact blocks in RUBIN v1.1 follow the design intent of BIP152 ("compact block relay") but use SHA3-256 and
+`wtxid` (witness-inclusive tx hash) as the transaction identifier.
+
+Negotiation is explicit via `sendcmpct` after the handshake reaches `READY`.
+
+#### 5.3.1.1 `sendcmpct` (RECOMMENDED)
+
+```
+command: "sendcmpct"
+payload:
+  announce : u8      (0 = do not announce new blocks via cmpctblock; 1 = announce via cmpctblock)
+  version  : u64le   (current: 1)
+```
+
+Rules:
+
+- A peer MAY send `sendcmpct` only after `READY`.
+- `announce` MUST be `0` or `1`; any other value is malformed (drop + ban-score +10).
+- `version` MUST be `1` in v1.1; other values MUST be ignored (do not ban-score).
+- If both peers have exchanged `sendcmpct` with `announce=1`, they SHOULD announce new blocks by sending
+  `cmpctblock` instead of `inv(MSG_BLOCK)`.
+
+#### 5.3.1.2 `cmpctblock` (RECOMMENDED)
+
+```
+command: "cmpctblock"
+payload:
+  header          : BlockHeaderBytes  (CANONICAL §5.1; 116 bytes)
+  shortids_nonce  : u64le
+  shortid_count   : CompactSize
+  shortids[]      : bytes6[shortid_count]
+  prefilled_count : CompactSize
+  prefilled[]     : PrefilledTx[prefilled_count]
+```
+
+`PrefilledTx`:
+
+```
+index_delta : CompactSize
+tx_bytes    : TxBytes
+```
+
+Index decoding (normative):
+
+- Let `last_index = -1`.
+- For each prefilled entry `p` in order:
+  - `index = last_index + 1 + index_delta`
+  - set `last_index = index`
+- Prefilled indexes MUST be strictly increasing and MUST be within `[0 .. total_tx_count-1]`.
+
+Transaction count binding (normative):
+
+- `total_tx_count = shortid_count + prefilled_count`.
+- A `cmpctblock` with `total_tx_count = 0` is malformed.
+- Coinbase MUST be prefilled:
+  - `prefilled_count MUST be >= 1`
+  - the first decoded prefilled `index` MUST equal `0`
+  - the corresponding `tx_bytes` MUST parse as a coinbase transaction (CANONICAL §3.1).
+
+#### 5.3.1.3 ShortID algorithm (normative)
+
+ShortIDs are 48-bit identifiers derived from `wtxid` under a per-block key to reduce collision attacks.
+
+Definitions:
+
+- `block_hash = SHA3-256(BlockHeaderBytes(header))` (CANONICAL §5.1)
+- `shortid_key = SHA3-256( ASCII(\"RUBINv1-cmpct/\") || block_hash || u64le(shortids_nonce) )`
+- `wtxid = SHA3-256(TxBytes(tx))` (as in `inv_type = MSG_WITNESS_TX`)
+
+ShortID derivation:
+
+```
+shortid48 = SHA3-256( 0x00 || shortid_key || wtxid )[0:6]
+```
+
+`shortid48` is compared as raw bytes. Implementations MUST NOT interpret it as an integer with
+endianness-dependent conversions.
+
+#### 5.3.1.4 Reconstruction and fallback (normative)
+
+Upon receiving `cmpctblock`:
+
+1. Parse and validate caps/structure.
+2. Compute `shortid_key` per §5.3.1.3.
+3. Build a per-message lookup from `shortid48 -> tx_bytes` using the receiver's mempool:
+   - For each mempool transaction `m`, compute `wtxid(m)` and `shortid48(m)` under `shortid_key`.
+   - If multiple mempool transactions map to the same `shortid48`, mark that id as ambiguous.
+4. Construct the ordered transaction list of length `total_tx_count`:
+   - Fill all prefilled positions.
+   - For remaining positions, consume `shortids[]` in order:
+     - if `shortid` is missing or ambiguous, mark position as missing.
+     - otherwise insert the matched transaction.
+5. If any positions are missing:
+   - Send `getblocktxn` requesting missing indexes.
+   - If `blocktxn` does not arrive within 2 seconds, retry with a different peer.
+   - If reconstruction fails after 3 peers or 6 seconds total, fall back to requesting the full block via
+     `getdata(MSG_BLOCK)`.
+
+Note: fall back does not guarantee success if the block exceeds the node's configured message-size policy cap.
+Operators running high-throughput profiles SHOULD raise `MAX_RELAY_MSG_BYTES` accordingly.
+
+#### 5.3.1.5 `getblocktxn` / `blocktxn` (RECOMMENDED)
+
+`getblocktxn` requests missing transactions for a `cmpctblock` by index.
+
+```
+command: "getblocktxn"
+payload:
+  block_hash   : bytes32
+  index_count  : CompactSize
+  index_deltas : CompactSize[index_count]
+```
+
+Index decoding matches §5.3.1.2 (delta encoding):
+
+- Let `last = -1`.
+- For each `d` in `index_deltas`:
+  - `idx = last + 1 + d`
+  - set `last = idx`
+
+Caps (normative):
+
+- `index_count` MUST satisfy `1 ≤ index_count ≤ 20_000`.
+- Indexes MUST be strictly increasing and MUST be within the `cmpctblock.total_tx_count` range.
+- Any violation is malformed (drop + ban-score +10).
+
+`blocktxn` replies with the requested transactions, in the same order as the requested indexes.
+
+```
+command: "blocktxn"
+payload:
+  block_hash : bytes32
+  tx_count   : CompactSize
+  txs[]      : TxBytes[tx_count]
+```
+
+`tx_count` MUST equal the number of requested indexes. Any mismatch is malformed (drop + ban-score +10).
+
 ### 5.4 Compact headers (RECOMMENDED)
 
 A compact header message reduces bandwidth for SPV clients that only need header chains.
@@ -573,11 +717,11 @@ The following items MUST be resolved before this document is promoted from DRAFT
 - [x] Header-chain validation/rejection profile (PoW/target/time) with future-timestamp deferral (§5.5)
 - [x] `anchorproof` wire format finalized (§6.3) — `flags` field added for optional tx_bytes, Merkle path direction normative, rate limit 100/min, relay size constraint
 - [x] Compact headers negotiation protocol defined (§5.4) — `NODE_LIGHT` service bit is the sole signal; no separate capability negotiation
+- [ ] Compact blocks relay defined and interop-tested (§5.3.1): `sendcmpct`, `cmpctblock`, `getblocktxn`, `blocktxn`
 - [x] `addr` message IPv6 scope: link-local (`fe80::/10`), loopback, multicast, unspecified MUST be filtered; IPv4-mapped link-local also filtered (§7.1)
 - [x] `reject` message deprecation decision: retained as RECOMMENDED through testnet phase; re-evaluate before public mainnet; receiver MUST NOT use for consensus decisions (§2.3)
 - [x] Exact `getheaders` block locator algorithm: first 12 steps at step 1, then doubling offsets, max 64 hashes + genesis (§5.2)
 - [x] Cross-client interop test for `version`/`verack` with chain_id mismatch: normative test vector added (§2.1); MUST pass Go↔Go and Go↔Rust before testnet freeze
 - [x] Operational alignment: connection caps/defaults match `operational/RUBIN_NODE_POLICY_DEFAULTS_v1.1.md` (§7.3)
 
-All pre-freeze items resolved. This document is ready for promotion to CANONICAL-AUXILIARY
-pending cross-client interop test execution.
+Pre-freeze status: compact block relay interop is not yet validated (CV-P2P runner work).
