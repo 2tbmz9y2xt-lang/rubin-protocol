@@ -7,7 +7,8 @@ import (
 
 func makeParseCoinbaseTx(height uint32) Tx {
 	return Tx{
-		Version: 1,
+		Version: TX_VERSION_V2,
+		TxKind:  TX_KIND_STANDARD,
 		TxNonce: 0,
 		Inputs: []TxInput{
 			{
@@ -24,13 +25,15 @@ func makeParseCoinbaseTx(height uint32) Tx {
 			},
 		},
 		Locktime: uint32(height),
+		DAPayload: nil,
 		Witness:  WitnessSection{},
 	}
 }
 
 func makeParseTxFixture() Tx {
 	return Tx{
-		Version: 1,
+		Version: TX_VERSION_V2,
+		TxKind:  TX_KIND_STANDARD,
 		TxNonce: 1,
 		Inputs: []TxInput{
 			{
@@ -48,6 +51,7 @@ func makeParseTxFixture() Tx {
 			},
 		},
 		Locktime: 12345,
+		DAPayload: nil,
 		Witness: WitnessSection{
 			Witnesses: []WitnessItem{{
 				SuiteID:   SUITE_ID_ML_DSA,
@@ -91,7 +95,8 @@ func TestParseTxBytes(t *testing.T) {
 
 	t.Run("compactsize overflow in input_count", func(t *testing.T) {
 		raw := make([]byte, 0, 12+9)
-		raw = append(raw, []byte{0x01, 0x00, 0x00, 0x00}...)
+		raw = append(raw, []byte{0x02, 0x00, 0x00, 0x00}...) // version=2
+		raw = append(raw, 0x00)                               // tx_kind=standard
 		raw = append(raw, []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}...)
 		raw = append(raw, 0xff)
 		raw = append(raw, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80)

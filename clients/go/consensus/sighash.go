@@ -53,18 +53,28 @@ func SighashV1Digest(
 		return [32]byte{}, err
 	}
 
+	daCore := daCoreFieldsBytes(tx)
+	hashDaCore, err := p.SHA3_256(daCore)
+	if err != nil {
+		return [32]byte{}, err
+	}
+
 	in := tx.Inputs[inputIndexInt]
 
-	preimage := make([]byte, 0, 14+32+4+8+32+32+4+32+4+8+4+32+4)
-	preimage = append(preimage, []byte("RUBINv1-sighash/")...)
+	preimage := make([]byte, 0, 14+32+4+1+8+32+32+32+4+32+4+8+4+32+4)
+	preimage = append(preimage, []byte("RUBINv2-sighash/")...)
 	preimage = append(preimage, chainID[:]...)
 
 	binary.LittleEndian.PutUint32(tmp4[:], tx.Version)
 	preimage = append(preimage, tmp4[:]...)
 
+	preimage = append(preimage, byte(tx.TxKind))
+
 	var tmp8 [8]byte
 	binary.LittleEndian.PutUint64(tmp8[:], tx.TxNonce)
 	preimage = append(preimage, tmp8[:]...)
+
+	preimage = append(preimage, hashDaCore[:]...)
 
 	preimage = append(preimage, hashPrevouts[:]...)
 	preimage = append(preimage, hashSequences[:]...)

@@ -288,21 +288,37 @@ Transaction syntax limits:
 > to avoid consensus rejection (`TX_ERR_WITNESS_OVERFLOW`). These bounds shift if
 > `MAX_WITNESS_BYTES_PER_TX` changes in a future canonical revision.
 
-Witness is excluded from `txid` (consensus-critical serialization rule). `sighash` is computed from the transaction fields and `chain_id` per §4.2; it does not include the witness section bytes.
+Witness and DA payload bytes are excluded from `txid` (consensus-critical serialization rule). `sighash` is computed
+from the transaction fields and `chain_id` per §4.2; it does not include the witness section bytes and MUST NOT
+include DA payload bytes.
 
-`TxNoWitnessBytes(T)` and `TxBytes(T)` are defined as:
+Transaction wire encoding (v1.1 baseline):
+
+1. `T.version` MUST equal `2`.
+2. `T.tx_kind` selects the transaction kind:
+   - `0x00`: standard transaction (no DA).
+   - `0x01`: `DA_COMMIT_TX` (manifest carrier).
+   - `0x02`: `DA_CHUNK_TX` (chunk carrier).
+
+`TxCoreBytes(T)` and `TxBytes(T)` are defined as:
 
 ```
-TxNoWitnessBytes(T) =
-  u32le(T.version) ||
+TxCoreBytes(T) =
+  u32le(T.version=2) ||
+  u8(T.tx_kind) ||
   u64le(T.tx_nonce) ||
   CompactSize(T.input_count) ||
   concat(inputs[i] encoded in the TxInput wire format of §3.1 for i in [0..input_count-1]) ||
   CompactSize(T.output_count) ||
   concat(outputs[j] encoded in the TxOutput wire format of §3.1 for j in [0..output_count-1]) ||
-  u32le(T.locktime)
+  u32le(T.locktime) ||
+  DA_Core_Fields(T)   # present iff tx_kind ∈ {0x01, 0x02}; empty otherwise
 
-TxBytes(T) = TxNoWitnessBytes(T) || WitnessBytes(T.witness)
+TxBytes(T) =
+  TxCoreBytes(T) ||
+  WitnessBytes(T.witness) ||
+  CompactSize(T.da_payload_len) ||
+  T.da_payload[T.da_payload_len]
 ```
 
 For each non-coinbase input `i`:
@@ -621,10 +637,12 @@ Header checks (Normative minimum set):
 
 ```
 preimage_tx_sig =
-  ASCII("RUBINv1-sighash/") ||
+  ASCII("RUBINv2-sighash/") ||
   chain_id ||
   version ||
+  tx_kind ||
   tx_nonce ||
+  hash_of_da_core_fields ||
   hash_of_all_prevouts ||
   hash_of_all_sequences ||
   input_index ||
@@ -636,6 +654,7 @@ preimage_tx_sig =
   locktime
 
 digest = SHA3-256(preimage_tx_sig)
+hash_of_da_core_fields = SHA3-256(DA_Core_Fields(T))  (empty if tx_kind=0x00)
 hash_of_all_prevouts = SHA3-256(concat(inputs[i].prev_txid || u32le(inputs[i].prev_vout) for i in [0..input_count-1]))
 hash_of_all_sequences = SHA3-256(concat(u32le(inputs[i].sequence) for i in [0..input_count-1]))
 hash_of_all_outputs = SHA3-256(concat(outputs[j] in TxOutput wire order for j in [0..output_count-1]))
@@ -644,6 +663,7 @@ hash_of_all_outputs = SHA3-256(concat(outputs[j] in TxOutput wire order for j in
 All fields in `preimage_tx_sig` are taken from the transaction `T` being signed (not the block header), except `input_value`.
 `input_value` is the `value` of the spendable UTXO entry referenced by this input's `(prev_txid, prev_vout)`.
 In particular, `version` means `T.version`.
+In particular, `tx_kind` means `T.tx_kind` and `DA_Core_Fields(T)` is the exact byte string serialized by §3.1.
 
 When `output_count = 0` (valid per §3.1), `hash_of_all_outputs = SHA3-256("")` (the SHA3-256 digest of the empty byte string). Implementations MUST handle this edge case.
 Conformance: CV-SIGHASH SIGHASH-06.
@@ -652,10 +672,12 @@ Serialization table (Normative):
 
 | Field | Serialization |
 |---|---|
-| domain_tag | ASCII("RUBINv1-sighash/") |
+| domain_tag | ASCII("RUBINv2-sighash/") |
 | chain_id | bytes32 |
 | version | u32le |
+| tx_kind | u8 |
 | tx_nonce | u64le |
+| hash_of_da_core_fields | bytes32 |
 | hash_of_all_prevouts | bytes32 |
 | hash_of_all_sequences | bytes32 |
 | input_index | u32le (0-based) |
@@ -752,7 +774,8 @@ For each non-coinbase transaction `T`:
 
 Definitions (consensus-critical):
 
-- `txid = SHA3-256(TxNoWitnessBytes(T))` where `TxNoWitnessBytes` excludes the `witness` section.
+- `txid = SHA3-256(TxCoreBytes(T))` where `TxCoreBytes` excludes the witness section and DA payload bytes (§3.1).
+- `wtxid = SHA3-256(TxBytes(T))` where `TxBytes` includes witness and DA payload bytes (§3.1).
 - `block_hash = SHA3-256(BlockHeaderBytes(B))`
 - `anchor_commitment = SHA3-256(anchor_data)`
 
@@ -1649,71 +1672,17 @@ Full peer transport and light-client profile is specified in `spec/RUBIN_L1_P2P_
 6. In a mixed-policy period, L1 can gate algorithm acceptance by deployment bit and height.
 7. Full rollout/rollback behavior is in `spec/RUBIN_L1_CRYPTO_AGILITY_UPGRADE_v1.1.md`.
 
-## 17. On-chain DA Tx-Carrier Upgrade (Transaction Wire v2) (Normative, Gated)
+## 17. On-chain DA Tx-Carrier (Normative)
 
-This section defines a **planned** L1 upgrade that enables large on-chain data-availability (DA) bytes to be carried
-inside transactions ("tx-carrier") while remaining compatible with compact block relay (mempool-first propagation).
+This section defines the DA transaction kinds carried by the v1.1 transaction wire format (§3.1).
 
-Scope:
-- This upgrade changes the **transaction wire encoding** for DA-capable transactions (wire v2).
-- The block header format remains unchanged in this milestone (no `DASection`, no header v2).
-- Any "chunk arrival window" such as `H..H+K` is **policy-only** and MUST NOT be consensus-validity.
+Notes:
+- The block header format remains unchanged (no `DASection`, no header v2).
+- Any "chunk arrival window" such as `H..H+K` is **policy-only** and MUST NOT affect consensus validity.
 
-Activation:
-- This upgrade is gated by an explicit chain-instance deployment (e.g., `da_wire_v2`).
-- If the deployment is not ACTIVE, implementations MUST reject any wire-v2 transaction encoding as invalid.
+### 17.1 DA Transaction Kinds and Core Fields (Normative)
 
-### 17.1 Wire v2: Transaction Encoding and IDs (Normative when ACTIVE)
-
-Wire versions:
-- Wire v1 (this spec baseline): `T.version = 1` and `TxBytes(T)` is exactly as defined in §3.1.
-- Wire v2 (this section): `T.version = 2` and `TxBytesV2(T)` is defined below.
-
-Validity rules:
-1. If deployment `da_wire_v2` is not ACTIVE: any transaction with `T.version = 2` MUST be rejected as `TX_ERR_PARSE`.
-2. If deployment `da_wire_v2` is ACTIVE:
-   - Any DA transaction (see `tx_kind` below) MUST use wire v2 (`T.version = 2`).
-   - Standard transactions MAY be encoded as either wire v1 (`T.version = 1`) or wire v2 (`T.version = 2` with
-     `tx_kind = 0x00`), subject to local policy and wallet conventions.
-
-Wire v2 structure:
-
-```
-TxNoWitnessBytesV2(T) =
-  u32le(T.version=2) ||
-  u8(T.tx_kind) ||
-  u64le(T.tx_nonce) ||
-  CompactSize(T.input_count) ||
-  concat(inputs[i] encoded in the TxInput wire format of §3.1 for i in [0..input_count-1]) ||
-  CompactSize(T.output_count) ||
-  concat(outputs[j] encoded in the TxOutput wire format of §3.1 for j in [0..output_count-1]) ||
-  u32le(T.locktime) ||
-  DA_Core_Fields(T)     # present iff tx_kind ∈ {0x01, 0x02}; empty otherwise
-
-TxBytesV2(T) =
-  TxNoWitnessBytesV2(T) ||
-  WitnessBytes(T.witness) ||
-  CompactSize(T.da_payload_len) ||
-  T.da_payload[T.da_payload_len]
-```
-
-`tx_kind` values:
-- `0x00`: standard transaction (no DA).
-- `0x01`: `DA_COMMIT_TX` (manifest carrier).
-- `0x02`: `DA_CHUNK_TX` (chunk carrier).
-
-`txid` and `wtxid`:
-- Wire v1: `txid = SHA3-256(TxNoWitnessBytes(T))` and `TxBytes(T)` as in §3.1.
-- Wire v2: `txid = SHA3-256(TxNoWitnessBytesV2(T))` (witness and DA payload excluded).
-- For wire v2, define `wtxid = SHA3-256(TxBytesV2(T))` (includes witness and DA payload).
-
-Sighash scope:
-- The sighash construction in §4.2 commits to transaction fields and `chain_id` and excludes witness bytes.
-- Under wire v2, sighash MUST also exclude `da_payload` bytes (do not sign bulk DA bytes).
-
-### 17.2 DA Transaction Kinds and Core Fields (Normative when ACTIVE)
-
-#### 17.2.1 `DA_COMMIT_TX` (`tx_kind = 0x01`)
+#### 17.1.1 `DA_COMMIT_TX` (`tx_kind = 0x01`)
 
 `DA_Core_Fields` encoding (wire order):
 
@@ -1731,7 +1700,7 @@ batch_sig          : bytes[batch_sig_len]
 ```
 
 `da_payload` for `DA_COMMIT_TX` MUST be a `DA_OBJECT_V1` manifest as defined by
-`spec/RUBIN_L2_RETL_ONCHAIN_DA_MVP_v1.1.md` (auxiliary; promoted to canonical alongside this upgrade).
+`spec/RUBIN_L2_RETL_ONCHAIN_DA_MVP_v1.1.md` (auxiliary).
 
 Consensus binding rules:
 1. Parse `da_payload` as `DA_OBJECT_V1` and reject malformed encodings as `TX_ERR_PARSE`.
@@ -1739,7 +1708,7 @@ Consensus binding rules:
    - `retl_domain_id`, `batch_number`, `tx_data_root`, `state_root`, `withdrawals_root`, `chunk_count`.
 3. `tx_data_root` MUST equal the Merkle root computed from the manifest chunk table per `DA_OBJECT_V1`.
 
-#### 17.2.2 `DA_CHUNK_TX` (`tx_kind = 0x02`)
+#### 17.1.2 `DA_CHUNK_TX` (`tx_kind = 0x02`)
 
 `DA_Core_Fields` encoding (wire order):
 
@@ -1756,9 +1725,9 @@ Chunk-index semantics:
 - Any additional `chunk_index < chunk_count` rule is L2/policy-only (requires cross-block state) and MUST NOT be
   consensus validity in this milestone.
 
-### 17.3 Covenant Commitment: `CORE_DA_COMMIT` (Normative when ACTIVE)
+### 17.2 Covenant Commitment: `CORE_DA_COMMIT` (Normative)
 
-Add a new deployment-gated covenant type:
+Add a covenant type:
 - `CORE_DA_COMMIT = 0x0103`
 
 Output rules (same non-spendable posture as `CORE_ANCHOR`):
@@ -1770,7 +1739,7 @@ Binding rule (commitment to payload):
 - In a `DA_COMMIT_TX`, there MUST exist exactly one output with `covenant_type = CORE_DA_COMMIT` and its
   `covenant_data` MUST equal `SHA3-256(da_payload)` of the same transaction. Violations MUST be rejected as `TX_ERR_PARSE`.
 
-### 17.4 Hard Caps and Duplicate Rules (Normative when ACTIVE)
+### 17.3 Hard Caps and Duplicate Rules (Normative)
 
 Per-transaction caps:
 - `MAX_DA_MANIFEST_BYTES_PER_TX = 65_536` (64 KiB): applies to `DA_COMMIT_TX.da_payload_len`.
@@ -1787,10 +1756,10 @@ Validity rules:
 4. For each block, `count(DA_COMMIT_TX) MUST be ≤ MAX_DA_COMMITS_PER_BLOCK`.
 5. Within a single block, duplicate `(da_id, chunk_index)` pairs across `DA_CHUNK_TX` MUST be rejected as `TX_ERR_PARSE`.
 
-### 17.5 P2P Compact Relay Requirement (Normative when ACTIVE)
+### 17.4 P2P Compact Relay Requirement (Normative)
 
-After this upgrade is ACTIVE, compact block relay MUST be able to reconstruct blocks that include DA transactions
-without re-downloading bulk DA bytes post-mining.
+Compact block relay MUST be able to reconstruct blocks that include DA transactions without re-downloading bulk DA bytes
+post-mining.
 
 Normative requirement:
 

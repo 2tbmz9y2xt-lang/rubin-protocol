@@ -34,6 +34,7 @@ pub const CORE_ANCHOR: u16 = 0x0002;
 pub const CORE_HTLC_V1: u16 = 0x0100;
 pub const CORE_VAULT_V1: u16 = 0x0101;
 pub const CORE_HTLC_V2: u16 = 0x0102;
+pub const CORE_DA_COMMIT: u16 = 0x0103;
 pub const CORE_RESERVED_FUTURE: u16 = 0x00ff;
 
 pub const SUITE_ID_SENTINEL: u8 = 0x00;
@@ -48,6 +49,18 @@ pub const MAX_TX_INPUTS: usize = 1_024;
 pub const MAX_TX_OUTPUTS: usize = 1_024;
 pub const MAX_WITNESS_ITEMS: usize = 1_024;
 pub const MAX_WITNESS_BYTES_PER_TX: usize = 100_000;
+
+// DA (on-chain data availability) consensus caps (v2 wire, planning profile).
+pub const MAX_DA_MANIFEST_BYTES_PER_TX: usize = 65_536;
+pub const MAX_DA_CHUNK_BYTES_PER_TX: usize = 524_288;
+pub const MAX_DA_BYTES_PER_BLOCK: u64 = 32_000_000;
+pub const MAX_DA_COMMITS_PER_BLOCK: u64 = 128;
+pub const MAX_DA_CHUNK_COUNT: u64 = 4_096;
+
+pub const TX_VERSION_V2: u32 = 2;
+pub const TX_KIND_STANDARD: u8 = 0x00;
+pub const TX_KIND_DA_COMMIT: u8 = 0x01;
+pub const TX_KIND_DA_CHUNK: u8 = 0x02;
 
 pub const TIMELOCK_MODE_HEIGHT: u8 = 0x00;
 pub const TIMELOCK_MODE_TIMESTAMP: u8 = 0x01;
@@ -184,11 +197,35 @@ pub fn hex_decode_strict(s: &str) -> Result<Vec<u8>, String> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tx {
     pub version: u32,
+    pub tx_kind: u8,
     pub tx_nonce: u64,
     pub inputs: Vec<TxInput>,
     pub outputs: Vec<TxOutput>,
     pub locktime: u32,
+    pub da_commit: Option<DACommitFields>,
+    pub da_chunk: Option<DAChunkFields>,
+    pub da_payload: Vec<u8>,
     pub witness: WitnessSection,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DACommitFields {
+    pub da_id: [u8; 32],
+    pub chunk_count: u16,
+    pub retl_domain_id: [u8; 32],
+    pub batch_number: u64,
+    pub tx_data_root: [u8; 32],
+    pub state_root: [u8; 32],
+    pub withdrawals_root: [u8; 32],
+    pub batch_sig_suite: u8,
+    pub batch_sig: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DAChunkFields {
+    pub da_id: [u8; 32],
+    pub chunk_index: u16,
+    pub chunk_hash: [u8; 32],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -328,11 +365,15 @@ mod tests {
 
     fn make_tx(input: TxInput, witness: WitnessItem) -> Tx {
         Tx {
-            version: 1,
+            version: TX_VERSION_V2,
+            tx_kind: TX_KIND_STANDARD,
             tx_nonce: 1,
             inputs: vec![input],
             outputs: vec![],
             locktime: 0,
+            da_commit: None,
+            da_chunk: None,
+            da_payload: Vec::new(),
             witness: WitnessSection {
                 witnesses: vec![witness],
             },
@@ -490,11 +531,15 @@ mod tests {
         witness: Vec<WitnessItem>,
     ) -> Tx {
         Tx {
-            version: 1,
+            version: TX_VERSION_V2,
+            tx_kind: TX_KIND_STANDARD,
             tx_nonce: 1,
             inputs,
             outputs,
             locktime: 0,
+            da_commit: None,
+            da_chunk: None,
+            da_payload: Vec::new(),
             witness: WitnessSection { witnesses: witness },
         }
     }
