@@ -91,8 +91,13 @@ For each announced RETL batch `(retl_domain_id, batch_number, tx_data_root, ...)
 - `batch_number`
 - `tx_data_root`
 
-The mechanism that makes `DA_OBJECT` bytes retrievable from L1 is **out of scope** for this document and must be
-defined by an L1 upgrade. Two plausible publication mechanisms exist:
+The mechanism that makes `DA_OBJECT` bytes retrievable from L1 must be defined by an L1 upgrade.
+This document treats that mechanism as L1-side consensus and therefore **out of scope** here.
+
+A concrete draft for Option A is provided in:
+- `spec/RUBIN_L1_DA_TX_CARRIER_DRAFT_v1.1.md` (DRAFT, non-canonical)
+
+Two plausible publication mechanisms exist:
 
 ### 4.1 Option A (RECOMMENDED): `tx-carrier` (chunked DA transactions)
 
@@ -100,6 +105,7 @@ Design intent:
 
 - Make on-chain DA compatible with compact block relay (§1) by ensuring the heavy DA bytes are relayed and present in
   peer mempools **before** a block is mined.
+- Draft L1 tx-carrier mechanism: `spec/RUBIN_L1_DA_TX_CARRIER_DRAFT_v1.1.md`.
 
 Operationally:
 
