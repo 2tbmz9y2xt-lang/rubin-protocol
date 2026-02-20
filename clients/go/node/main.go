@@ -880,7 +880,7 @@ func cmdReorg(contextPath string) (string, error) {
 	return "", fmt.Errorf("REORG_ERR_PARSE: unsupported context shape")
 }
 
-const usageCommands = "commands: version | init --datadir <path> [--profile <path>] | import-stage03 --datadir <path> [--profile <path>] (--block-hex <hex> | --block-hex-file <path>) | import-block --datadir <path> [--profile <path> --local-time <u64> --suite-id-02-active --htlc-v2-active] (--block-hex <hex> | --block-hex-file <path>) | utxo-set-hash --datadir <path> [--profile <path>] | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse (--tx-hex <hex> | --tx-hex-file <path>) [--max-witness-bytes <u64>] | txid (--tx-hex <hex> | --tx-hex-file <path>) | weight (--tx-hex <hex> | --tx-hex-file <path>) | coinbase --block-height <u64> [--fees-in-block <u64> --coinbase-output-value <u64>] | sighash (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-id-hex <hex64> | --profile <path> | --suite-id-02-active | --htlc-v2-active] | apply-utxo --context-json <path> | apply-block --context-json <path> | reorg --context-json <path> | chainstate --context-json <path>"
+const usageCommands = "commands: version | init --datadir <path> [--profile <path>] | import-stage03 --datadir <path> [--profile <path>] (--block-hex <hex> | --block-hex-file <path>) | import-block --datadir <path> [--profile <path> --local-time <u64> --suite-id-02-active --htlc-v2-active] (--block-hex <hex> | --block-hex-file <path>) | utxo-set-hash --datadir <path> [--profile <path>] | chain-id --profile <path> | compactsize --encoded-hex <hex> | parse (--tx-hex <hex> | --tx-hex-file <path>) [--max-witness-bytes <u64>] | txid (--tx-hex <hex> | --tx-hex-file <path>) | weight (--tx-hex <hex> | --tx-hex-file <path>) | coinbase --block-height <u64> [--fees-in-block <u64> --coinbase-output-value <u64>] | sighash (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> [--chain-id-hex <hex64> | --profile <path>] | verify (--tx-hex <hex> | --tx-hex-file <path>) --input-index <u32> --input-value <u64> --prevout-covenant-type <u16> --prevout-covenant-data-hex <hex> [--prevout-creation-height <u64>] [--chain-id-hex <hex64> | --profile <path> | --suite-id-02-active | --htlc-v2-active] | keymgr <subcommand> ... | apply-utxo --context-json <path> | apply-block --context-json <path> | reorg --context-json <path> | chainstate --context-json <path>"
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage: rubin-node <command> [args]")
@@ -1573,6 +1573,8 @@ func main() {
 		exitCode = cmdSighashMain(argv)
 	case "verify":
 		exitCode = cmdVerifyMain(argv)
+	case "keymgr":
+		exitCode = cmdKeymgrMain(argv)
 	case "apply-utxo":
 		exitCode = cmdApplyUTXOMain(argv)
 	case "apply-block":
