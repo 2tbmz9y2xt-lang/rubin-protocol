@@ -51,6 +51,7 @@ pub const MAX_TX_INPUTS: usize = 1_024;
 pub const MAX_TX_OUTPUTS: usize = 1_024;
 pub const MAX_WITNESS_ITEMS: usize = 1_024;
 pub const MAX_WITNESS_BYTES_PER_TX: usize = 100_000;
+pub const MAX_SCRIPT_SIG_BYTES: usize = 32;
 
 // DA (on-chain data availability) consensus caps (v2 wire, planning profile).
 pub const MAX_DA_MANIFEST_BYTES_PER_TX: usize = 65_536;

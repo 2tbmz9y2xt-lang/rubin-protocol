@@ -30,6 +30,7 @@ const (
 	MAX_TX_OUTPUTS           = 1_024
 	MAX_WITNESS_ITEMS        = 1_024
 	MAX_WITNESS_BYTES_PER_TX = 100_000
+	MAX_SCRIPT_SIG_BYTES     = 32
 
 	// DA (on-chain data availability) consensus caps (v2 wire, planning profile).
 	MAX_DA_MANIFEST_BYTES_PER_TX = 65_536

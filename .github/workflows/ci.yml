@@ -52,7 +52,7 @@ jobs:
         run: |
           set -euo pipefail
           cd clients/go
-          go test ./...
+          go test -race ./...
 
       - name: Go tests (wolfcrypt_dylib tag)
         run: |

@@ -8,9 +8,12 @@ import (
 )
 
 func TxWeight(tx *Tx) (uint64, error) {
-	base := len(TxCoreBytes(tx))
+	base := uint64(len(TxCoreBytes(tx)))
 	witness := len(WitnessBytes(tx.Witness))
 	da := len(CompactSize(len(tx.DAPayload)).Encode()) + len(tx.DAPayload)
+	if base > (^uint64(0))/4 {
+		return 0, fmt.Errorf("TX_ERR_PARSE")
+	}
 	base = base * 4
 	sigCost := 0
 	for i, item := range tx.Witness.Witnesses {

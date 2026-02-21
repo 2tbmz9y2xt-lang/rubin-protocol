@@ -1,8 +1,8 @@
 use crate::wire::Cursor;
 use crate::{
     BLOCK_ERR_PARSE, Block, BlockHeader, DAChunkFields, DACommitFields, MAX_DA_CHUNK_BYTES_PER_TX,
-    MAX_DA_MANIFEST_BYTES_PER_TX, TX_KIND_DA_CHUNK, TX_KIND_DA_COMMIT, TX_KIND_STANDARD,
-    TX_VERSION_V2, Tx, TxInput, TxOutput, WitnessItem, WitnessSection,
+    MAX_DA_MANIFEST_BYTES_PER_TX, MAX_SCRIPT_SIG_BYTES, TX_KIND_DA_CHUNK, TX_KIND_DA_COMMIT,
+    TX_KIND_STANDARD, TX_VERSION_V2, Tx, TxInput, TxOutput, WitnessItem, WitnessSection,
 };
 
 pub fn parse_tx_bytes(bytes: &[u8]) -> Result<Tx, String> {
@@ -59,6 +59,9 @@ pub(crate) fn parse_tx_from_cursor(cursor: &mut Cursor<'_>) -> Result<Tx, String
         let script_sig_len: usize = script_sig_len_u64
             .try_into()
             .map_err(|_| "parse: script_sig_len overflows usize".to_string())?;
+        if script_sig_len > MAX_SCRIPT_SIG_BYTES {
+            return Err("TX_ERR_PARSE".into());
+        }
         let script_sig = cursor.read_exact(script_sig_len)?.to_vec();
         let sequence = cursor.read_u32le()?;
 

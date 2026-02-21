@@ -17,14 +17,14 @@ Priority: P0 (blocker) → P1 (pre-devnet) → P2 (pre-mainnet) → P3 (post-mai
 
 | ID | Task | Owner | Effort | Status |
 |---|---|---|---|---|
-| Q-A02 | Добавить `-race` флаг в CI `ci.yml` для Go тестов | — | 30m | TODO |
-| Q-A03 | Зафиксировать Go version в CI (`actions/setup-go@v5` + `go-version: '1.22.x'`) | — | 30m | TODO |
+| Q-A02 | Добавить `-race` флаг в CI `ci.yml` для Go тестов | — | 30m | ✅ DONE |
+| Q-A03 | Зафиксировать Go version в CI (setup-go + pinned `go-version`) | — | 30m | ✅ DONE |
 | Q-A04 | Настроить fuzzing: `cargo fuzz` targets для block/tx/witness (Rust) | — | 1w | TODO |
 | Q-A05 | Генерация SBOM (`cargo-sbom`, `syft`) + `cargo audit` / `govulncheck` в CI | — | 1d | TODO |
 | Q-A11 | P2P шифрование: TLS 1.3 + опциональный PQ KEM transport | — | 1w | TODO |
 | Q-A12 | Threat Model документ: Eclipse, reorg-race, key leakage, supply chain | — | 2d | TODO |
-| Q-A14 | **parseInput: нет лимита на script_sig size** — `readExact(scriptSigLen)` аллоцирует произвольно. P2P ограничен `MaxRelayMsgBytes=8MB`, но `ParseBlockBytes` в non-P2P контексте (тест, RPC, file import) уязвим к OOM. Фикс: добавить `if scriptSigLen > MAX_SCRIPT_SIG_BYTES (32) { return error }` в parseInput (Go и Rust). | — | 30m | TODO |
-| Q-A15 | **Go TxWeight: `base = base * 4` без overflow check** — Rust использует `checked_mul(4)`. На 64-bit Go практически невозможен overflow, но расхождение с Rust паттерном. Фикс: привести к единому стилю checked arithmetic. | — | 30m | TODO |
+| Q-A14 | **parseInput: нет лимита на script_sig size** — `readExact(scriptSigLen)` аллоцирует произвольно. P2P ограничен `MaxRelayMsgBytes=8MB`, но `ParseBlockBytes` в non-P2P контексте (тест, RPC, file import) уязвим к OOM. Фикс: добавить `if scriptSigLen > MAX_SCRIPT_SIG_BYTES (32) { return error }` в parseInput (Go и Rust). | — | 30m | ✅ DONE |
+| Q-A15 | **Go TxWeight: `base = base * 4` без overflow check** — Rust использует `checked_mul(4)`. На 64-bit Go практически невозможен overflow, но расхождение с Rust паттерном. Фикс: привести к единому стилю checked arithmetic. | — | 30m | ✅ DONE |
 | Q-P2P-01 | P2P compact blocks: Go payload encode/decode + ShortID(WTXID,SipHash-2-4) + Peer dispatch + unit tests (`sendcmpct/cmpctblock/getblocktxn/blocktxn`) | — | 1d | ✅ DONE (f244e1e) |
 | Q-P2P-02 | P2P compact blocks: Rust `rubin-p2p` encode/decode + ShortID(WTXID,SipHash-2-4) + unit tests | — | 1d | ✅ DONE (f244e1e) |
 | Q-P2P-03 | P2P compact blocks: Go node integration (mempool shortid index, cmpctblock reconstruction, getblocktxn/blocktxn responder path) | — | 2-4d | TODO |

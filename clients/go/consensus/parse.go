@@ -23,6 +23,9 @@ func parseInput(cur *cursor) (TxInput, error) {
 	if err != nil {
 		return TxInput{}, err
 	}
+	if scriptSigLen > MAX_SCRIPT_SIG_BYTES {
+		return TxInput{}, fmt.Errorf("TX_ERR_PARSE")
+	}
 	scriptSigBytes, err := cur.readExact(scriptSigLen)
 	if err != nil {
 		return TxInput{}, err
