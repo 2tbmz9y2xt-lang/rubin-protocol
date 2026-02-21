@@ -48,6 +48,8 @@ These constants are consensus-critical defaults for the genesis ruleset:
 - `MAX_WITNESS_BYTES_PER_TX = 100_000`
 - `MAX_SCRIPT_SIG_BYTES = 32`
 - `MAX_BLOCK_WEIGHT = 4_000_000` weight units
+- `MAX_ANCHOR_PAYLOAD_SIZE = 65_536` bytes
+- `MAX_ANCHOR_BYTES_PER_BLOCK = 131_072` bytes
 
 PQC witness canonical sizes (genesis profile):
 
@@ -421,3 +423,67 @@ All fields in `preimage_tx_sig` are taken from the transaction `T` being signed,
 `input_value` is the `value` of the spendable UTXO entry referenced by this input's `(prev_txid, prev_vout)`.
 
 For coinbase transactions, sighash is not computed (no witness).
+
+## 13. Consensus Error Codes (Normative)
+
+The following error codes are consensus-critical and MUST be returned identically by all conforming
+implementations for the described failure classes:
+
+- Non-minimal CompactSize                          -> `TX_ERR_PARSE`
+- Malformed witness encoding                       -> `TX_ERR_PARSE`
+- Cryptographically invalid signature              -> `TX_ERR_SIG_INVALID`
+- Invalid signature type                           -> `TX_ERR_SIG_ALG_INVALID`
+- Invalid signature length / non-canonical witness -> `TX_ERR_SIG_NONCANONICAL`
+- Witness overflow                                 -> `TX_ERR_WITNESS_OVERFLOW`
+- Invalid covenant_type / covenant encoding        -> `TX_ERR_COVENANT_TYPE_INVALID`
+- Missing UTXO / attempt to spend non-spendable    -> `TX_ERR_MISSING_UTXO`
+- Timelock condition not met                       -> `TX_ERR_TIMELOCK_NOT_MET`
+- Invalid prev_block_hash linkage                  -> `BLOCK_ERR_LINKAGE_INVALID`
+- Invalid merkle_root                              -> `BLOCK_ERR_MERKLE_INVALID`
+- PoW invalid                                      -> `BLOCK_ERR_POW_INVALID`
+- Weight exceedance                                -> `BLOCK_ERR_WEIGHT_EXCEEDED`
+- Anchor bytes exceeded                            -> `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`
+- Malformed block encoding                         -> `BLOCK_ERR_PARSE`
+
+Error priority (short-circuit):
+
+- Implementations MUST apply checks in the validation order and return the first applicable error code.
+- Signature verification MUST NOT be attempted if prior parsing, covenant, timelock, or UTXO rules already
+  cause rejection.
+
+## 14. Covenant Type Registry (Normative)
+
+The following `covenant_type` values are valid at genesis:
+
+- `0x0000` `CORE_P2PK`
+- `0x0001` `CORE_TIMELOCK_V1`
+- `0x0002` `CORE_ANCHOR`
+- `0x00ff` `CORE_RESERVED_FUTURE`
+
+Any unknown or future `covenant_type` MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+
+Semantics:
+
+- `CORE_P2PK`:
+  - `covenant_data = suite_id:u8 || key_id:bytes32`.
+  - `covenant_data_len MUST equal 33`.
+  - Spend authorization requires a witness item whose `suite_id` matches and whose `pubkey` hashes to `key_id`,
+    and a valid signature over `digest` (Section 12).
+  - `key_id = SHA3-256(pubkey)` where `pubkey` is the canonical witness public key byte string for the selected
+    `suite_id` (no extra length prefixes are included).
+- `CORE_TIMELOCK_V1`:
+  - `covenant_data = lock_mode:u8 || lock_value:u64le`.
+  - `covenant_data_len MUST equal 9`.
+  - `lock_mode = 0x00` means height lock; `lock_mode = 0x01` means timestamp lock.
+  - Spend is forbidden until the corresponding lock condition is satisfied by the current validated chain state;
+    otherwise reject as `TX_ERR_TIMELOCK_NOT_MET`.
+- `CORE_ANCHOR`:
+  - `covenant_data = anchor_data` (raw bytes, no additional wrapping).
+  - `0 < covenant_data_len <= MAX_ANCHOR_PAYLOAD_SIZE` MUST hold; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+  - `value MUST equal 0`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+  - `CORE_ANCHOR` outputs are non-spendable and MUST NOT be added to the spendable UTXO set. Any attempt to spend an
+    ANCHOR output MUST be rejected as `TX_ERR_MISSING_UTXO`.
+  - Per-block constraint: sum of `covenant_data_len` across all `CORE_ANCHOR` outputs in a block MUST be
+    `<= MAX_ANCHOR_BYTES_PER_BLOCK`; otherwise reject the block as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
+- `CORE_RESERVED_FUTURE`:
+  - Forbidden at genesis; any appearance MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
