@@ -54,6 +54,8 @@ These constants are consensus-critical for this protocol ruleset:
 - `MAX_BLOCK_WEIGHT = 4_000_000` weight units
 - `MAX_ANCHOR_PAYLOAD_SIZE = 65_536` bytes
 - `MAX_ANCHOR_BYTES_PER_BLOCK = 131_072` bytes
+- `MAX_P2PK_COVENANT_DATA = 33` bytes
+- `MAX_TIMELOCK_COVENANT_DATA = 9` bytes
 
 Monetary constants (consensus-critical):
 
@@ -67,6 +69,12 @@ Non-consensus operational defaults (not used for validity):
 - `K_CONFIRM_L1 = 8`
 - `K_CONFIRM_BRIDGE = 12`
 - `K_CONFIRM_GOV = 16`
+
+Non-consensus relay policy defaults (not used for validity):
+
+- `MAX_WITNESS_ITEM_BYTES = 65_000`
+- `MAX_RELAY_MSG_BYTES = 8_388_608`
+- `MIN_RELAY_FEE_RATE = 1`
 
 PQC witness canonical sizes:
 
@@ -495,14 +503,14 @@ Semantics:
 
 - `CORE_P2PK`:
   - `covenant_data = suite_id:u8 || key_id:bytes32`.
-  - `covenant_data_len MUST equal 33`.
+  - `covenant_data_len MUST equal MAX_P2PK_COVENANT_DATA`.
   - Spend authorization requires a witness item whose `suite_id` matches and whose `pubkey` hashes to `key_id`,
     and a valid signature over `digest` (Section 12).
   - `key_id = SHA3-256(pubkey)` where `pubkey` is the canonical witness public key byte string for the selected
     `suite_id` (no extra length prefixes are included).
 - `CORE_TIMELOCK_V1`:
   - `covenant_data = lock_mode:u8 || lock_value:u64le`.
-  - `covenant_data_len MUST equal 9`.
+  - `covenant_data_len MUST equal MAX_TIMELOCK_COVENANT_DATA`.
   - `lock_mode = 0x00` means height lock; `lock_mode = 0x01` means timestamp lock.
   - Spend is forbidden until the corresponding lock condition is satisfied by the current validated chain state;
     otherwise reject as `TX_ERR_TIMELOCK_NOT_MET`.
@@ -645,15 +653,16 @@ Then enforce:
 1. If `e.covenant_type = CORE_P2PK`:
    - Require `w.suite_id = SUITE_ID_ML_DSA_87 (0x01)`. If `w.suite_id = 0x02`, reject as `TX_ERR_DEPLOYMENT_INACTIVE`.
      Otherwise reject as `TX_ERR_SIG_ALG_INVALID`.
-   - Let `key_id = e.covenant_data[1:33]` (after the suite_id byte); require `e.covenant_data_len = 33` and the first
-     byte matches `w.suite_id`. Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+   - Require `len(e.covenant_data) = MAX_P2PK_COVENANT_DATA` and the first byte equals `w.suite_id`. Otherwise reject as
+     `TX_ERR_COVENANT_TYPE_INVALID`.
+   - Let `key_id = e.covenant_data[1:33]` (after the suite_id byte).
    - Require `SHA3-256(w.pubkey) = key_id`. Otherwise reject as `TX_ERR_SIG_INVALID`.
    - Require signature verification of `w.signature` over `digest` (Section 12) succeeds. Otherwise reject as
      `TX_ERR_SIG_INVALID`.
 2. If `e.covenant_type = CORE_TIMELOCK_V1`:
    - Require `w.suite_id = SUITE_ID_SENTINEL (0x00)`. Otherwise reject as `TX_ERR_SIG_ALG_INVALID`.
-   - Parse `lock_mode:u8 || lock_value:u64le` from `e.covenant_data` (must be exactly 9 bytes). Otherwise reject as
-     `TX_ERR_COVENANT_TYPE_INVALID`.
+   - Parse `lock_mode:u8 || lock_value:u64le` from `e.covenant_data` (must be exactly `MAX_TIMELOCK_COVENANT_DATA` bytes).
+     Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
    - If `lock_mode = 0x00` (height lock): require `h >= lock_value`. Otherwise reject as `TX_ERR_TIMELOCK_NOT_MET`.
    - If `lock_mode = 0x01` (timestamp lock): require `timestamp(B_h) >= lock_value`. Otherwise reject as
      `TX_ERR_TIMELOCK_NOT_MET`.
@@ -759,3 +768,35 @@ Canonical chain selection:
 
 1. Prefer the valid chain with maximal `ChainWork`.
 2. If `ChainWork` is equal, choose the chain whose tip `block_hash` is lexicographically smaller (bytewise big-endian).
+
+## 23. Determinism Requirements (Normative)
+
+Consensus validity MUST be deterministic given the same chain state and the same block bytes.
+
+- Implementations MUST NOT rely on non-deterministic iteration order (for example, hash-map iteration order).
+- If any rule requires iterating over an unordered set/map, the iteration order MUST be defined as lexicographic order
+  over the canonical key bytes for that collection.
+
+## 24. Block Validation Order (Normative)
+
+Implementations MUST apply validity checks in a deterministic order and return the first applicable error code.
+
+Minimum required order for validating a candidate block `B_h` at height `h`:
+
+1. Parse `BlockHeaderBytes` and all `TxBytes` encodings; any malformed encoding MUST reject as `BLOCK_ERR_PARSE` or the
+   corresponding `TX_ERR_*` (Section 13).
+2. Check header PoW validity (Section 10.3). If invalid, reject as `BLOCK_ERR_POW_INVALID`.
+3. Check the header `target` matches the expected target (Section 15). If mismatch, reject as `BLOCK_ERR_TARGET_INVALID`.
+4. Check `prev_block_hash` linkage against the selected parent block hash. If invalid, reject as `BLOCK_ERR_LINKAGE_INVALID`.
+5. Check `merkle_root` matches the Merkle root computed from transaction `txid` values (Section 10.4). If invalid, reject
+   as `BLOCK_ERR_MERKLE_INVALID`.
+6. Check block timestamp rules (Section 21). If invalid, reject as `BLOCK_ERR_TIMESTAMP_OLD` or `BLOCK_ERR_TIMESTAMP_FUTURE`.
+7. Check total block weight (Section 9). If exceeded, reject as `BLOCK_ERR_WEIGHT_EXCEEDED`.
+8. Check per-block ANCHOR byte limits (Section 14). If exceeded, reject as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
+9. Apply transactions sequentially (Section 18), enforcing:
+   - coinbase structural rules (Sections 10.5 and 16),
+   - transaction structural rules (Section 16),
+   - replay-domain checks (Section 17),
+   - covenant evaluation (Section 18.2),
+   - coinbase subsidy/value bound (Section 19),
+   - value conservation (Section 20).
