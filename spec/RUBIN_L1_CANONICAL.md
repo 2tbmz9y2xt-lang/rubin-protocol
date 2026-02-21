@@ -258,3 +258,98 @@ sum_weight = sum(weight(T) for each transaction T in B.txs)
 ```
 
 `sum_weight MUST be <= MAX_BLOCK_WEIGHT`. Otherwise the block is invalid.
+
+## 10. Block Wire Format (Normative)
+
+### 10.1 BlockHeader
+
+```text
+BlockHeader {
+  version: u32le
+  prev_block_hash: bytes32
+  merkle_root: bytes32
+  timestamp: u64le
+  target: bytes32    # compared as a big-endian integer
+  nonce: u64le
+}
+```
+
+`BlockHeaderBytes(B)` is the canonical serialization:
+
+```text
+u32le(version) ||
+prev_block_hash ||
+merkle_root ||
+u64le(timestamp) ||
+target ||
+u64le(nonce)
+```
+
+Integer fields use little-endian, except `target` which is serialized as raw 32 bytes and compared as a
+big-endian integer.
+
+### 10.2 Block and BlockBytes
+
+```text
+Block {
+  header: BlockHeader
+  tx_count: CompactSize
+  txs: TxV2[tx_count]
+}
+```
+
+`BlockBytes(B)` is:
+
+```text
+BlockHeaderBytes(B.header) ||
+CompactSize(tx_count) ||
+TxBytes(B.txs[0]) || ... || TxBytes(B.txs[tx_count-1])
+```
+
+### 10.3 Block Hash and Proof-of-Work Check
+
+- `block_hash(B) = SHA3-256(BlockHeaderBytes(B.header))`
+
+Proof-of-Work validity:
+
+```text
+valid_pow(B) iff integer(block_hash(B), big-endian) < integer(B.header.target, big-endian)
+```
+
+### 10.4 Merkle Root (Transaction Commitment)
+
+Merkle tree hashing is defined over transaction identifiers (`txid`), in block transaction order.
+
+```text
+Leaf = SHA3-256(0x00 || txid)
+Node = SHA3-256(0x01 || left || right)
+```
+
+Odd-element rule (normative):
+
+- If the number of elements at any level is odd, the lone element is promoted to the next level unchanged.
+- Duplicating the last element is forbidden.
+
+`merkle_root` is the final root after full binary reduction over all transaction `txid` values.
+
+### 10.5 Coinbase Basics (Structural)
+
+Every block MUST contain exactly one coinbase transaction and it MUST be the first transaction.
+
+Define `is_coinbase_tx(T)` for `TxV2` as:
+
+- `T.input_count = 1`, and
+- `T.inputs[0].prev_txid` is 32 zero bytes, and
+- `T.inputs[0].prev_vout = 0xffff_ffff`, and
+- `T.inputs[0].script_sig_len = 0`, and
+- `T.inputs[0].sequence = 0xffff_ffff`, and
+- `T.witness.witness_count = 0`, and
+- `T.tx_nonce = 0`.
+
+Rules:
+
+- `tx_count MUST be >= 1`.
+- `B.txs[0]` MUST satisfy `is_coinbase_tx(B.txs[0])`.
+- No other transaction `B.txs[i]` with `i > 0` may satisfy `is_coinbase_tx`.
+
+Coinbase economics (subsidy, maturity, and fee rules) are defined in later sections.
