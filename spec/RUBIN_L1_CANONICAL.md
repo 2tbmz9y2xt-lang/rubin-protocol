@@ -174,3 +174,54 @@ applicable error code:
 No cryptographic verification is performed in this section. Signature verification, covenant evaluation, and
 value/binding rules are specified in later sections.
 
+## 8. Transaction Identifiers (TXID / WTXID)
+
+### 8.1 Hash Function
+
+RUBIN uses `SHA3-256` (FIPS 202) as the consensus hash function.
+
+### 8.2 Canonical Transaction Serializations
+
+For any valid transaction `T` (i.e. one that parses under Transaction Wire v2 with all rules in Sections 3-7):
+
+`TxCoreBytes(T)` is defined as the canonical serialization of:
+
+```text
+u32le(T.version) ||
+u8(T.tx_kind) ||
+u64le(T.tx_nonce) ||
+CompactSize(T.input_count) ||
+concat(T.inputs[i] for i in [0..input_count-1]) ||
+CompactSize(T.output_count) ||
+concat(T.outputs[j] for j in [0..output_count-1]) ||
+u32le(T.locktime)
+```
+
+Where each `TxInput` and `TxOutput` is serialized exactly as in Section 5.1, and all `CompactSize` values MUST be
+minimally encoded (see Section 3).
+
+`TxBytes(T)` is defined as:
+
+```text
+TxBytes(T) =
+  TxCoreBytes(T) ||
+  WitnessBytes(T.witness) ||
+  CompactSize(T.da_payload_len) ||
+  T.da_payload[T.da_payload_len]
+```
+
+### 8.3 Identifier Definitions (Normative)
+
+- `txid(T) = SHA3-256(TxCoreBytes(T))`
+- `wtxid(T) = SHA3-256(TxBytes(T))`
+
+Consensus usage:
+
+- `txid` is the identifier used by consensus for outpoints (`prev_txid`).
+- `wtxid` is a wire identifier that commits to witness bytes and (future) DA payload bytes.
+
+### 8.4 Canonicality and Undefined Inputs
+
+- For invalid transactions (that do not parse canonically), `TxCoreBytes`, `TxBytes`, `txid`, and `wtxid` are
+  undefined.
+- Implementations MUST NOT compute or cache identifiers for non-canonically parsed transactions.
