@@ -1,4 +1,7 @@
-use rubin_consensus::{merkle_root_txids, parse_tx_v2, sighash_v1_digest, ErrorCode};
+use rubin_consensus::{
+    block_hash, merkle_root_txids, parse_tx_v2, pow_check, retarget_v1, sighash_v1_digest,
+    ErrorCode,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
@@ -19,6 +22,21 @@ struct Request {
 
     #[serde(default)]
     chain_id: String,
+
+    #[serde(default)]
+    header_hex: String,
+
+    #[serde(default)]
+    target_hex: String,
+
+    #[serde(default)]
+    target_old: String,
+
+    #[serde(default)]
+    timestamp_first: u64,
+
+    #[serde(default)]
+    timestamp_last: u64,
 }
 
 #[derive(Serialize)]
@@ -42,6 +60,12 @@ struct Response {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     consumed: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_hash: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_new: Option<String>,
 }
 
 fn err_code(code: ErrorCode) -> String {
@@ -60,6 +84,8 @@ fn main() {
                 merkle_root: None,
                 digest: None,
                 consumed: None,
+                block_hash: None,
+                target_new: None,
             };
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
             return;
@@ -79,6 +105,8 @@ fn main() {
                         merkle_root: None,
                         digest: None,
                         consumed: None,
+                        block_hash: None,
+                        target_new: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -94,6 +122,8 @@ fn main() {
                         merkle_root: None,
                         digest: None,
                         consumed: Some(n),
+                        block_hash: None,
+                        target_new: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -106,6 +136,8 @@ fn main() {
                         merkle_root: None,
                         digest: None,
                         consumed: None,
+                        block_hash: None,
+                        target_new: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -125,6 +157,8 @@ fn main() {
                             merkle_root: None,
                             digest: None,
                             consumed: None,
+                            block_hash: None,
+                            target_new: None,
                         };
                         let _ = serde_json::to_writer(std::io::stdout(), &resp);
                         return;
@@ -139,6 +173,8 @@ fn main() {
                         merkle_root: None,
                         digest: None,
                         consumed: None,
+                        block_hash: None,
+                        target_new: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -157,6 +193,8 @@ fn main() {
                         merkle_root: Some(hex::encode(root)),
                         digest: None,
                         consumed: None,
+                        block_hash: None,
+                        target_new: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -169,6 +207,8 @@ fn main() {
                         merkle_root: None,
                         digest: None,
                         consumed: None,
+                        block_hash: None,
+                        target_new: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -186,6 +226,8 @@ fn main() {
                         merkle_root: None,
                         digest: None,
                         consumed: None,
+                        block_hash: None,
+                        target_new: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -202,6 +244,8 @@ fn main() {
                         merkle_root: None,
                         digest: None,
                         consumed: None,
+                        block_hash: None,
+                        target_new: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -219,6 +263,8 @@ fn main() {
                         merkle_root: None,
                         digest: None,
                         consumed: None,
+                        block_hash: None,
+                        target_new: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -233,6 +279,8 @@ fn main() {
                     merkle_root: None,
                     digest: None,
                     consumed: None,
+                    block_hash: None,
+                    target_new: None,
                 };
                 let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 return;
@@ -250,6 +298,8 @@ fn main() {
                         merkle_root: None,
                         digest: Some(hex::encode(d)),
                         consumed: None,
+                        block_hash: None,
+                        target_new: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -262,6 +312,212 @@ fn main() {
                         merkle_root: None,
                         digest: None,
                         consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+            }
+        }
+        "block_hash" => {
+            let header_bytes = match hex::decode(req.header_hex) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad header".to_string()),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            match block_hash(&header_bytes) {
+                Ok(h) => {
+                    let resp = Response {
+                        ok: true,
+                        err: None,
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: Some(hex::encode(h)),
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(err_code(e.code)),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+            }
+        }
+        "pow_check" => {
+            let header_bytes = match hex::decode(req.header_hex) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad header".to_string()),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            let target_bytes = match hex::decode(req.target_hex) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad target".to_string()),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            if target_bytes.len() != 32 {
+                let resp = Response {
+                    ok: false,
+                    err: Some("bad target".to_string()),
+                    txid: None,
+                    wtxid: None,
+                    merkle_root: None,
+                    digest: None,
+                    consumed: None,
+                    block_hash: None,
+                    target_new: None,
+                };
+                let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                return;
+            }
+            let mut target = [0u8; 32];
+            target.copy_from_slice(&target_bytes);
+
+            match pow_check(&header_bytes, target) {
+                Ok(()) => {
+                    let resp = Response {
+                        ok: true,
+                        err: None,
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(err_code(e.code)),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+            }
+        }
+        "retarget_v1" => {
+            let old_bytes = match hex::decode(req.target_old) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad target_old".to_string()),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            if old_bytes.len() != 32 {
+                let resp = Response {
+                    ok: false,
+                    err: Some("bad target_old".to_string()),
+                    txid: None,
+                    wtxid: None,
+                    merkle_root: None,
+                    digest: None,
+                    consumed: None,
+                    block_hash: None,
+                    target_new: None,
+                };
+                let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                return;
+            }
+            let mut old = [0u8; 32];
+            old.copy_from_slice(&old_bytes);
+
+            match retarget_v1(old, req.timestamp_first, req.timestamp_last) {
+                Ok(new_t) => {
+                    let resp = Response {
+                        ok: true,
+                        err: None,
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: Some(hex::encode(new_t)),
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(err_code(e.code)),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -276,6 +532,8 @@ fn main() {
                 merkle_root: None,
                 digest: None,
                 consumed: None,
+                block_hash: None,
+                target_new: None,
             };
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }

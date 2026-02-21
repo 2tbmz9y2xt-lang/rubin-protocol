@@ -89,6 +89,15 @@ def validate_vector(
         req["chain_id"] = v["chain_id"]
         req["input_index"] = v["input_index"]
         req["input_value"] = v["input_value"]
+    elif op == "block_hash":
+        req["header_hex"] = v["header_hex"]
+    elif op == "pow_check":
+        req["header_hex"] = v["header_hex"]
+        req["target_hex"] = v["target_hex"]
+    elif op == "retarget_v1":
+        req["target_old"] = v["target_old"]
+        req["timestamp_first"] = v["timestamp_first"]
+        req["timestamp_last"] = v["timestamp_last"]
     else:
         return [f"{gate}/{v.get('id','?')}: unknown op {op}"]
 
@@ -140,6 +149,23 @@ def validate_vector(
             )
         if "expect_digest" in v and go_resp.get("digest") != v["expect_digest"]:
             problems.append(f"{gate}/{vid}: expect_digest mismatch")
+    elif op == "block_hash":
+        if go_resp.get("block_hash") != rust_resp.get("block_hash"):
+            problems.append(
+                f"{gate}/{vid}: block_hash mismatch go={go_resp.get('block_hash')} rust={rust_resp.get('block_hash')}"
+            )
+        if "expect_block_hash" in v and go_resp.get("block_hash") != v["expect_block_hash"]:
+            problems.append(f"{gate}/{vid}: expect_block_hash mismatch")
+    elif op == "retarget_v1":
+        if go_resp.get("target_new") != rust_resp.get("target_new"):
+            problems.append(
+                f"{gate}/{vid}: target_new mismatch go={go_resp.get('target_new')} rust={rust_resp.get('target_new')}"
+            )
+        if "expect_target_new" in v and go_resp.get("target_new") != v["expect_target_new"]:
+            problems.append(f"{gate}/{vid}: expect_target_new mismatch")
+    elif op == "pow_check":
+        # ok/err parity is already checked above.
+        pass
 
     return problems
 

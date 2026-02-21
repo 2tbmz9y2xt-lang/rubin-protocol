@@ -17,6 +17,12 @@ type Request struct {
 	InputIndex uint32   `json:"input_index,omitempty"`
 	InputValue uint64   `json:"input_value,omitempty"`
 	ChainIDHex string   `json:"chain_id,omitempty"`
+
+	HeaderHex      string `json:"header_hex,omitempty"`
+	TargetHex      string `json:"target_hex,omitempty"`
+	TargetOldHex   string `json:"target_old,omitempty"`
+	TimestampFirst uint64 `json:"timestamp_first,omitempty"`
+	TimestampLast  uint64 `json:"timestamp_last,omitempty"`
 }
 
 type Response struct {
@@ -26,6 +32,8 @@ type Response struct {
 	WtxidHex  string `json:"wtxid,omitempty"`
 	MerkleHex string `json:"merkle_root,omitempty"`
 	DigestHex string `json:"digest,omitempty"`
+	BlockHash string `json:"block_hash,omitempty"`
+	TargetNew string `json:"target_new,omitempty"`
 	Consumed  int    `json:"consumed,omitempty"`
 }
 
@@ -124,6 +132,68 @@ func main() {
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true, DigestHex: hex.EncodeToString(d[:])})
+		return
+
+	case "block_hash":
+		headerBytes, err := hex.DecodeString(req.HeaderHex)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad header"})
+			return
+		}
+		h, err := consensus.BlockHash(headerBytes)
+		if err != nil {
+			if te, ok := err.(*consensus.TxError); ok {
+				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
+				return
+			}
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+		writeResp(os.Stdout, Response{Ok: true, BlockHash: hex.EncodeToString(h[:])})
+		return
+
+	case "pow_check":
+		headerBytes, err := hex.DecodeString(req.HeaderHex)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad header"})
+			return
+		}
+		targetBytes, err := hex.DecodeString(req.TargetHex)
+		if err != nil || len(targetBytes) != 32 {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad target"})
+			return
+		}
+		var target [32]byte
+		copy(target[:], targetBytes)
+		if err := consensus.PowCheck(headerBytes, target); err != nil {
+			if te, ok := err.(*consensus.TxError); ok {
+				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
+				return
+			}
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+		writeResp(os.Stdout, Response{Ok: true})
+		return
+
+	case "retarget_v1":
+		oldBytes, err := hex.DecodeString(req.TargetOldHex)
+		if err != nil || len(oldBytes) != 32 {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad target_old"})
+			return
+		}
+		var old [32]byte
+		copy(old[:], oldBytes)
+		newT, err := consensus.RetargetV1(old, req.TimestampFirst, req.TimestampLast)
+		if err != nil {
+			if te, ok := err.(*consensus.TxError); ok {
+				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
+				return
+			}
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+		writeResp(os.Stdout, Response{Ok: true, TargetNew: hex.EncodeToString(newT[:])})
 		return
 
 	default:
