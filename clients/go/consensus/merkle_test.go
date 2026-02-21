@@ -4,7 +4,7 @@ import "testing"
 
 func TestMerkleRootTxids_Single(t *testing.T) {
 	txBytes := minimalTxBytes()
-	_, txid, _, _, err := ParseTxV2(txBytes)
+	_, txid, _, _, err := ParseTx(txBytes)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -29,11 +29,11 @@ func TestMerkleRootTxids_Two(t *testing.T) {
 	// Change locktime LSB (within core) to ensure different txid.
 	tx2[4+1+8+1+1+0] = 0x01
 
-	_, txid1, _, _, err := ParseTxV2(tx1)
+	_, txid1, _, _, err := ParseTx(tx1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	_, txid2, _, _, err := ParseTxV2(tx2)
+	_, txid2, _, _, err := ParseTx(tx2)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

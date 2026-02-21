@@ -14,7 +14,7 @@ pub use error::{ErrorCode, TxError};
 pub use merkle::merkle_root_txids;
 pub use pow::{pow_check, retarget_v1};
 pub use sighash::sighash_v1_digest;
-pub use tx::{parse_tx_v2, TxInput, TxOutput, TxV2, WitnessItem};
+pub use tx::{parse_tx, Tx, TxInput, TxOutput, WitnessItem};
 
 #[cfg(test)]
 mod tests;

@@ -1,6 +1,5 @@
 use rubin_consensus::{
-    block_hash, merkle_root_txids, parse_tx_v2, pow_check, retarget_v1, sighash_v1_digest,
-    ErrorCode,
+    block_hash, merkle_root_txids, parse_tx, pow_check, retarget_v1, sighash_v1_digest, ErrorCode,
 };
 use serde::{Deserialize, Serialize};
 
@@ -112,7 +111,7 @@ fn main() {
                     return;
                 }
             };
-            match parse_tx_v2(&tx_bytes) {
+            match parse_tx(&tx_bytes) {
                 Ok((_tx, txid, wtxid, n)) => {
                     let resp = Response {
                         ok: true,
@@ -233,7 +232,7 @@ fn main() {
                     return;
                 }
             };
-            let tx = match parse_tx_v2(&tx_bytes) {
+            let tx = match parse_tx(&tx_bytes) {
                 Ok((tx, _txid, _wtxid, _n)) => tx,
                 Err(e) => {
                     let resp = Response {

@@ -1,10 +1,10 @@
 use crate::compactsize::encode_compact_size;
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
-use crate::tx::TxV2;
+use crate::tx::Tx;
 
 pub fn sighash_v1_digest(
-    tx: &TxV2,
+    tx: &Tx,
     input_index: u32,
     input_value: u64,
     chain_id: [u8; 32],
@@ -44,7 +44,7 @@ pub fn sighash_v1_digest(
     let i = &tx.inputs[idx];
 
     let mut preimage = Vec::with_capacity(256);
-    preimage.extend_from_slice(b"RUBINv2-sighash/");
+    preimage.extend_from_slice(b"RUBINv1-sighash/");
     preimage.extend_from_slice(&chain_id);
     preimage.extend_from_slice(&tx.version.to_le_bytes());
     preimage.push(tx.tx_kind);

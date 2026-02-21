@@ -28,10 +28,10 @@ func minimalTxBytes() []byte {
 	return b.Bytes()
 }
 
-func TestParseTxV2_Minimal_TxIDWTXID(t *testing.T) {
+func TestParseTx_Minimal_TxIDWTXID(t *testing.T) {
 	txBytes := minimalTxBytes()
 
-	_, txid, wtxid, n, err := ParseTxV2(txBytes)
+	_, txid, wtxid, n, err := ParseTx(txBytes)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -51,14 +51,14 @@ func TestParseTxV2_Minimal_TxIDWTXID(t *testing.T) {
 	}
 }
 
-func TestParseTxV2_NonMinimalCompactSize(t *testing.T) {
+func TestParseTx_NonMinimalCompactSize(t *testing.T) {
 	txBytes := minimalTxBytes()
 	// Replace input_count=0x00 with a non-minimal CompactSize encoding 0xfd 0x00 0x00.
 	// Offsets: version(4) + tx_kind(1) + tx_nonce(8) = 13.
 	bad := append([]byte{}, txBytes...)
 	bad = append(bad[:13], append([]byte{0xfd, 0x00, 0x00}, bad[14:]...)...)
 
-	_, _, _, _, err := ParseTxV2(bad)
+	_, _, _, _, err := ParseTx(bad)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -67,7 +67,7 @@ func TestParseTxV2_NonMinimalCompactSize(t *testing.T) {
 	}
 }
 
-func TestParseTxV2_ScriptSigLenOverflow(t *testing.T) {
+func TestParseTx_ScriptSigLenOverflow(t *testing.T) {
 	var b bytes.Buffer
 	_ = binary.Write(&b, binary.LittleEndian, uint32(TX_WIRE_VERSION))
 	b.WriteByte(0x00) // tx_kind
@@ -82,7 +82,7 @@ func TestParseTxV2_ScriptSigLenOverflow(t *testing.T) {
 	b.WriteByte(0x00)                                    // witness_count
 	b.WriteByte(0x00)                                    // da_payload_len
 
-	_, _, _, _, err := ParseTxV2(b.Bytes())
+	_, _, _, _, err := ParseTx(b.Bytes())
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -91,7 +91,7 @@ func TestParseTxV2_ScriptSigLenOverflow(t *testing.T) {
 	}
 }
 
-func TestParseTxV2_WitnessCountOverflow(t *testing.T) {
+func TestParseTx_WitnessCountOverflow(t *testing.T) {
 	txBytes := minimalTxBytes()
 	// Replace witness_count=0x00 with CompactSize(1025) = 0xfd 0x01 0x04.
 	// Offset to witness_count: coreEnd (19 bytes) + current witness_count (1 byte) => 19.
@@ -99,7 +99,7 @@ func TestParseTxV2_WitnessCountOverflow(t *testing.T) {
 	bad := append([]byte{}, txBytes...)
 	bad = append(bad[:coreEnd], append([]byte{0xfd, 0x01, 0x04}, bad[coreEnd+1:]...)...)
 
-	_, _, _, _, err := ParseTxV2(bad)
+	_, _, _, _, err := ParseTx(bad)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -108,7 +108,7 @@ func TestParseTxV2_WitnessCountOverflow(t *testing.T) {
 	}
 }
 
-func TestParseTxV2_WitnessItem_Canonicalization(t *testing.T) {
+func TestParseTx_WitnessItem_Canonicalization(t *testing.T) {
 	t.Run("sentinel_noncanonical", func(t *testing.T) {
 		// witness_count=1, suite_id=0, pubkey_length=1, pubkey=0x00, sig_length=0
 		txBytes := append([]byte{}, minimalTxBytes()...)
@@ -122,7 +122,7 @@ func TestParseTxV2_WitnessItem_Canonicalization(t *testing.T) {
 		w.WriteByte(0x00) // da_payload_len
 		txBytes = append(txBytes[:coreEnd], w.Bytes()...)
 
-		_, _, _, _, err := ParseTxV2(txBytes)
+		_, _, _, _, err := ParseTx(txBytes)
 		if err == nil {
 			t.Fatalf("expected error")
 		}
@@ -142,7 +142,7 @@ func TestParseTxV2_WitnessItem_Canonicalization(t *testing.T) {
 		w.WriteByte(0x00) // da_payload_len
 		txBytes = append(txBytes[:coreEnd], w.Bytes()...)
 
-		_, _, _, _, err := ParseTxV2(txBytes)
+		_, _, _, _, err := ParseTx(txBytes)
 		if err == nil {
 			t.Fatalf("expected error")
 		}
@@ -168,7 +168,7 @@ func TestParseTxV2_WitnessItem_Canonicalization(t *testing.T) {
 		w.WriteByte(0x00) // da_payload_len
 		txBytes = append(txBytes[:coreEnd], w.Bytes()...)
 
-		_, _, _, _, err := ParseTxV2(txBytes)
+		_, _, _, _, err := ParseTx(txBytes)
 		if err == nil {
 			t.Fatalf("expected error")
 		}
@@ -189,7 +189,7 @@ func TestParseTxV2_WitnessItem_Canonicalization(t *testing.T) {
 		w.WriteByte(0x00) // da_payload_len
 		txBytes = append(txBytes[:coreEnd], w.Bytes()...)
 
-		_, _, _, _, err := ParseTxV2(txBytes)
+		_, _, _, _, err := ParseTx(txBytes)
 		if err == nil {
 			t.Fatalf("expected error")
 		}
@@ -199,7 +199,7 @@ func TestParseTxV2_WitnessItem_Canonicalization(t *testing.T) {
 	})
 }
 
-func TestParseTxV2_WitnessBytesOverflow(t *testing.T) {
+func TestParseTx_WitnessBytesOverflow(t *testing.T) {
 	txBytes := append([]byte{}, minimalTxBytes()...)
 	coreEnd := 4 + 1 + 8 + 1 + 1 + 4
 
@@ -217,7 +217,7 @@ func TestParseTxV2_WitnessBytesOverflow(t *testing.T) {
 	w.WriteByte(0x00) // da_payload_len
 	txBytes = append(txBytes[:coreEnd], w.Bytes()...)
 
-	_, _, _, _, err := ParseTxV2(txBytes)
+	_, _, _, _, err := ParseTx(txBytes)
 	if err == nil {
 		t.Fatalf("expected error")
 	}

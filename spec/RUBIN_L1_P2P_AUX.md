@@ -41,7 +41,7 @@ For a given block header `H` and a compact-block nonce `n` (`u64le`), define:
 
 ```text
 shortid(T, H, n) = SHA3-256(
-    ASCII("RUBINv2-shortid/") ||
+    ASCII("RUBINv1-shortid/") ||
     BlockHeaderBytes(H) ||
     u64le(n) ||
     WTXID(T)
@@ -70,4 +70,3 @@ Nodes SHOULD implement the following behavior:
 
 If a future ruleset allows `da_payload_len > 0`, `WTXID` commits to the DA payload bytes (CANONICAL §8.2).
 Using `WTXID`-based shortids ensures compact relay remains correct for DA-carrying transactions.
-

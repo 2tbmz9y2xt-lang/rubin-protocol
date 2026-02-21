@@ -24,7 +24,7 @@ func TestSighashV1Digest_Smoke(t *testing.T) {
 	txb.WriteByte(0x00)                                    // witness_count
 	txb.WriteByte(0x00)                                    // da_payload_len
 
-	tx, _, _, _, err := ParseTxV2(txb.Bytes())
+	tx, _, _, _, err := ParseTx(txb.Bytes())
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestSighashV1Digest_Smoke(t *testing.T) {
 	hashOfAllOutputs := sha3_256([]byte{})
 
 	preimage := make([]byte, 0, 256)
-	preimage = append(preimage, []byte("RUBINv2-sighash/")...)
+	preimage = append(preimage, []byte("RUBINv1-sighash/")...)
 	preimage = append(preimage, chainID[:]...)
 	preimage = appendU32le(preimage, TX_WIRE_VERSION)
 	preimage = append(preimage, 0x00) // tx_kind

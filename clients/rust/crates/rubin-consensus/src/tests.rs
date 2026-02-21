@@ -3,7 +3,7 @@ use crate::error::ErrorCode;
 use crate::hash::sha3_256;
 use crate::pow::{pow_check, retarget_v1};
 use crate::sighash_v1_digest;
-use crate::{block_hash, merkle_root_txids, parse_tx_v2, BLOCK_HEADER_BYTES};
+use crate::{block_hash, merkle_root_txids, parse_tx, BLOCK_HEADER_BYTES};
 use num_bigint::BigUint;
 use num_traits::One;
 
@@ -26,9 +26,9 @@ fn core_end() -> usize {
 }
 
 #[test]
-fn parse_tx_v2_minimal_txid_wtxid() {
+fn parse_tx_minimal_txid_wtxid() {
     let tx_bytes = minimal_tx_bytes();
-    let (_tx, txid, wtxid, n) = parse_tx_v2(&tx_bytes).expect("parse");
+    let (_tx, txid, wtxid, n) = parse_tx(&tx_bytes).expect("parse");
     assert_eq!(n, tx_bytes.len());
 
     let want_txid = sha3_256(&tx_bytes[..core_end()]);
@@ -38,18 +38,18 @@ fn parse_tx_v2_minimal_txid_wtxid() {
 }
 
 #[test]
-fn parse_tx_v2_nonminimal_compactsize() {
+fn parse_tx_nonminimal_compactsize() {
     let mut tx_bytes = minimal_tx_bytes();
     // Replace input_count=0x00 with 0xfd 0x00 0x00 (non-minimal).
     let off_input_count = 4 + 1 + 8;
     tx_bytes.splice(off_input_count..off_input_count + 1, [0xfd, 0x00, 0x00]);
 
-    let err = parse_tx_v2(&tx_bytes).unwrap_err();
+    let err = parse_tx(&tx_bytes).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrParse);
 }
 
 #[test]
-fn parse_tx_v2_script_sig_len_overflow() {
+fn parse_tx_script_sig_len_overflow() {
     let mut b = Vec::new();
     b.extend_from_slice(&TX_WIRE_VERSION.to_le_bytes());
     b.push(0x00); // tx_kind
@@ -64,23 +64,23 @@ fn parse_tx_v2_script_sig_len_overflow() {
     b.push(0x00); // witness_count
     b.push(0x00); // da_payload_len
 
-    let err = parse_tx_v2(&b).unwrap_err();
+    let err = parse_tx(&b).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrParse);
 }
 
 #[test]
-fn parse_tx_v2_witness_count_overflow() {
+fn parse_tx_witness_count_overflow() {
     let mut tx_bytes = minimal_tx_bytes();
     // Replace witness_count=0x00 with CompactSize(1025) = 0xfd 0x01 0x04.
     let off_witness_count = core_end();
     tx_bytes.splice(off_witness_count..off_witness_count + 1, [0xfd, 0x01, 0x04]);
 
-    let err = parse_tx_v2(&tx_bytes).unwrap_err();
+    let err = parse_tx(&tx_bytes).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrWitnessOverflow);
 }
 
 #[test]
-fn parse_tx_v2_witness_item_canonicalization() {
+fn parse_tx_witness_item_canonicalization() {
     // Start from a minimal tx and overwrite the witness section.
     let mut base = minimal_tx_bytes();
     base.truncate(core_end());
@@ -93,7 +93,7 @@ fn parse_tx_v2_witness_item_canonicalization() {
     tx1.push(0x00); // pubkey
     tx1.push(0x00); // sig_length
     tx1.push(0x00); // da_payload_len
-    let err = parse_tx_v2(&tx1).unwrap_err();
+    let err = parse_tx(&tx1).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrParse);
 
     // unknown_suite: witness_count=1, suite=0x03, pubkey_length=0, sig_length=0.
@@ -103,7 +103,7 @@ fn parse_tx_v2_witness_item_canonicalization() {
     tx2.push(0x00);
     tx2.push(0x00);
     tx2.push(0x00);
-    let err = parse_tx_v2(&tx2).unwrap_err();
+    let err = parse_tx(&tx2).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
 
     // ml_dsa_len_mismatch: pubkey_length=2591 (0x0A1F) and canonical sig_length.
@@ -115,7 +115,7 @@ fn parse_tx_v2_witness_item_canonicalization() {
     tx3.extend_from_slice(&[0xfd, 0x13, 0x12]); // sig_length = 4627
     tx3.extend_from_slice(&vec![0u8; 4627]);
     tx3.push(0x00); // da_payload_len
-    let err = parse_tx_v2(&tx3).unwrap_err();
+    let err = parse_tx(&tx3).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
 
     // slh_dsa_sig_len_zero: pubkey_length=64, sig_length=0.
@@ -126,12 +126,12 @@ fn parse_tx_v2_witness_item_canonicalization() {
     tx4.extend_from_slice(&vec![0u8; 64]);
     tx4.push(0x00); // sig_length = 0
     tx4.push(0x00); // da_payload_len
-    let err = parse_tx_v2(&tx4).unwrap_err();
+    let err = parse_tx(&tx4).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
 }
 
 #[test]
-fn parse_tx_v2_witness_bytes_overflow() {
+fn parse_tx_witness_bytes_overflow() {
     let mut tx = minimal_tx_bytes();
     tx.truncate(core_end());
 
@@ -145,14 +145,14 @@ fn parse_tx_v2_witness_bytes_overflow() {
     }
     tx.push(0x00); // da_payload_len
 
-    let err = parse_tx_v2(&tx).unwrap_err();
+    let err = parse_tx(&tx).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrWitnessOverflow);
 }
 
 #[test]
 fn merkle_root_single_and_two() {
     let tx1 = minimal_tx_bytes();
-    let (_t1, txid1, _w1, _n1) = parse_tx_v2(&tx1).expect("tx1");
+    let (_t1, txid1, _w1, _n1) = parse_tx(&tx1).expect("tx1");
 
     let root1 = merkle_root_txids(&[txid1]).expect("root1");
     let mut leaf_preimage = [0u8; 33];
@@ -162,7 +162,7 @@ fn merkle_root_single_and_two() {
 
     let mut tx2 = minimal_tx_bytes();
     tx2[core_end() - 4] = 0x01; // locktime LSB = 1
-    let (_t2, txid2, _w2, _n2) = parse_tx_v2(&tx2).expect("tx2");
+    let (_t2, txid2, _w2, _n2) = parse_tx(&tx2).expect("tx2");
 
     let root2 = merkle_root_txids(&[txid1, txid2]).expect("root2");
     leaf_preimage[1..].copy_from_slice(&txid1);
@@ -195,7 +195,7 @@ fn sighash_v1_digest_smoke() {
     b.push(0x00); // witness_count
     b.push(0x00); // da_payload_len
 
-    let (tx, _txid, _wtxid, _n) = parse_tx_v2(&b).expect("parse");
+    let (tx, _txid, _wtxid, _n) = parse_tx(&b).expect("parse");
 
     let mut chain_id = [0u8; 32];
     chain_id[31] = 0x01;
@@ -210,7 +210,7 @@ fn sighash_v1_digest_smoke() {
     let hash_of_all_outputs = sha3_256(&[]);
 
     let mut preimage = Vec::new();
-    preimage.extend_from_slice(b"RUBINv2-sighash/");
+    preimage.extend_from_slice(b"RUBINv1-sighash/");
     preimage.extend_from_slice(&chain_id);
     preimage.extend_from_slice(&TX_WIRE_VERSION.to_le_bytes());
     preimage.push(0x00);
