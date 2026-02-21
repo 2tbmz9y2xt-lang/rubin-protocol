@@ -27,8 +27,8 @@ Note for hardware provisioning: 18.05 TiB raw data requires a disk marketed as ~
 | Parameter | Value | Notes |
 |-----------|-------|-------|
 | `TARGET_BLOCK_INTERVAL` | 120 s | |
-| `MAX_BLOCK_WEIGHT` | 68_000_000 wu | 36M L1 + 32M DA |
-| `MAX_BLOCK_BYTES` | 75_497_472 bytes (= 72 MiB) | |
+| `MAX_BLOCK_WEIGHT` | 68_000_000 wu | Single unified weight pool; DA has a *separate* byte cap (MAX_DA_BYTES_PER_BLOCK) |
+| `MAX_BLOCK_BYTES` | 75_497_472 bytes (= 72 MiB) | Operational P2P parser cap; exceeds consensus weight limit by design (safety margin) |
 | `MAX_DA_BYTES_PER_BLOCK` | 32_000_000 bytes (= 30.5 MiB) | |
 | `WINDOW_SIZE` | 10_080 blocks | retarget = 14 days |
 | `MIN_DA_RETENTION_BLOCKS` | 15_120 blocks | DA pruning window = 21 days |
@@ -101,7 +101,7 @@ and is outside the scope of this document.
 
 ---
 
-## 3. DA Transaction Types
+## 2. DA Transaction Types
 
 DA transaction types (`DA_COMMIT_TX`, `DA_CHUNK_TX`), `da_id` linkage, chunk integrity,
 and set completeness (CheckBlock DA) are fully defined in
@@ -112,7 +112,7 @@ in RUBIN_L1_CANONICAL.md before applying the P2P relay policies defined here.
 
 ---
 
-## 4. sendcmpct Modes
+## 3. sendcmpct Modes
 
 All sections of this document use the following notation:
 
@@ -124,7 +124,7 @@ All sections of this document use the following notation:
 
 ---
 
-## 3. Cache Miss Protection
+## 4. Cache Miss Protection
 
 **Risk:** Node does not have a transaction in the mempool on block arrival → round-trip getblocktxn
 request → propagation delay → at high miss rates compact blocks perform worse than full block relay.
@@ -187,7 +187,7 @@ orphan_pool_fill_pct > 75%                   alert
 
 ---
 
-## 4. DA Mempool — Set State Machine
+## 5. DA Mempool — Set State Machine
 
 `DA_CHUNK_WINDOW_BLOCKS = 2` is the expected spread of chunk arrival under normal network
 conditions. `DA_ORPHAN_TTL_BLOCKS = 3` is the hard timeout with margin
@@ -259,19 +259,20 @@ Eviction: total_fee / total_bytes (lower = evicted first), atomic by da_id.
   (commit spam without chunks blocks pinned memory at no real cost to attacker).
 - Eviction is always atomic by da_id. No orphaned chunks without a commit.
 - CheckBlock independently forbids inclusion of an incomplete set regardless
-  of mempool state. See RUBIN_L1_CANONICAL.md §CheckBlock for the consensus rule.
+  of mempool state. See RUBIN_L1_CANONICAL.md §21.3 for the consensus rule.
 - Per-peer and per-da_id limits are applied simultaneously and independently.
 
 ---
 
-## 5. Mempool Policy Divergence
+## 6. Mempool Policy Divergence
 
 **Risk:** Different nodes filter transactions differently → mempools diverge → miss rate increases.
 
 **Mitigations:**
 
-- Relay rules are normative in RUBIN_L1_CANONICAL.md, not in a separate policy document.
-- `MIN_RELAY_FEE_RATE` is a consensus constant.
+- Relay rules in this document are normative for P2P behavior; consensus validity rules remain in
+  RUBIN_L1_CANONICAL.md.
+- `MIN_RELAY_FEE_RATE` is a relay-policy default (non-consensus).
 - A node with non-standard relay rules experiences high miss rates, making it
   economically disadvantageous. This is a self-correcting mechanism.
 - Conformance gate `CV-COMPACT` covers: short_id generation (SipHash-2-4 on WTXID),
@@ -280,12 +281,12 @@ Eviction: total_fee / total_bytes (lower = evicted first), atomic by da_id.
 
 ---
 
-## 6. Short ID and Collision Handling
+## 7. Short ID and Collision Handling
 
 ```
 SHORT_ID_LENGTH = 6 bytes
 Hash function:  SipHash-2-4 keyed on (nonce1, nonce2) from cmpctblock header
-Input:          WTXID (see Section 12 for tx_nonce relay requirement)
+Input:          WTXID (see Section 11 for tx_nonce relay requirement)
 Analogue:       BIP-152
 ```
 
@@ -345,7 +346,7 @@ Do not activate preemptively.
 
 ---
 
-## 7. Private Transactions and Pre-mining
+## 8. Private Transactions and Pre-mining
 
 **Risk:** Miner withholds transactions from the mempool before announcing a block →
 all nodes issue getblocktxn round-trips → miner gains time advantage (MEV-like).
@@ -380,7 +381,7 @@ If `miss_rate_bytes > 10%` for 5 consecutive blocks, the node MUST set
 
 ---
 
-## 8. IBD and Warm-up
+## 9. IBD and Warm-up
 
 **IBD exit and warm-up are receiver-driven. No hardcoded timers.**
 
@@ -419,13 +420,13 @@ If local sendcmpct_mode >= 1:
     Send sendcmpct_mode = 2.
 
 A node MUST NOT send sendcmpct_mode = 2 to more than 3 peers simultaneously.
-High-bandwidth peers are selected based on peer_quality_score (see Section 13).
+High-bandwidth peers are selected based on peer_quality_score (see Section 14).
 If a better peer connects, demote the lowest-scoring current HB peer to mode = 1.
 ```
 
 ---
 
-## 9. DA Retention and Pruning
+## 10. DA Retention and Pruning
 
 - A node announces `pruned_below_height` in its P2P `version` message.
 - A node with `pruned_below_height > current_height - MIN_DA_RETENTION_BLOCKS`
@@ -446,7 +447,7 @@ If a better peer connects, demote the lowest-scoring current HB peer to mode = 1
 
 ---
 
-## 12. tx_nonce — P2P Relay Requirement
+## 11. tx_nonce — P2P Relay Requirement
 
 `tx_nonce` consensus rules (wire format, preimage inclusion, uniqueness) are defined in
 **RUBIN_L1_CANONICAL.md §5.1, §8, §16, §17**.
@@ -469,11 +470,11 @@ collision attacks.
 A node MUST NOT relay a transaction with `tx_nonce = 0` (reserved for coinbase).
 Any such transaction MUST be rejected at the relay layer before mempool admission.
 
-Test vectors for `tx_nonce` in WTXID computation are required in `CV-COMPACT` (Section 14).
+Test vectors for `tx_nonce` in WTXID computation are required in `CV-COMPACT` (Section 15).
 
 ---
 
-## 11. ML-DSA-87 Batch Verification
+## 12. ML-DSA-87 Batch Verification
 
 When reconstructing a block from compact form, implementations MUST use
 batch verification for ML-DSA-87 signatures:
@@ -491,7 +492,7 @@ including the batch-fail -> individual-fallback path.
 
 ---
 
-## 12. Normative Telemetry Fields
+## 13. Normative Telemetry Fields
 
 Implementations MUST expose the following metrics:
 
@@ -507,12 +508,12 @@ partial_set_count             sets in State B at any given time
 partial_set_age_p95           95th percentile age of State B sets
 prefetch_latency_ms           per peer, per set
 orphan_recovery_success_rate  sets reaching COMPLETE_SET before TTL / total sets received
-peer_quality_score            current score per peer (see Section 13)
+peer_quality_score            current score per peer (see Section 14)
 ```
 
 ---
 
-## 13. Peer Quality Score
+## 14. Peer Quality Score
 
 Peer quality score is a local, non-consensus value. It is never transmitted to peers.
 It influences peer selection and sendcmpct mode assignment only.
@@ -554,10 +555,13 @@ after 6 blocks if score >= 75.
 
 During `GRACE_PERIOD_BLOCKS = 1_440` blocks after genesis, score penalties
 are halved and disconnect threshold is score < 5 (effectively disabled).
+Grace period applicability is evaluated per-block (block height < GRACE_PERIOD_BLOCKS),
+not per-peer-session. A peer connected during the grace period does not retain grace treatment
+after block height 1_440.
 
 ---
 
-## 14. CV-COMPACT Conformance Gate
+## 15. CV-COMPACT Conformance Gate
 
 `CV-COMPACT` is the conformance test suite for compact block relay.
 All items marked MUST are required for mainnet readiness.
@@ -567,7 +571,7 @@ All items marked MUST are required for mainnet readiness.
 | CV-C-01 | short_id generation: SipHash-2-4 on WTXID with given nonce1/nonce2 | MUST |
 | CV-C-02 | short_id collision: getblocktxn fallback, then full block fallback | MUST |
 | CV-C-03 | tx_nonce in WTXID preimage: two identical txs differ only by nonce → different WTXID | MUST |
-| CV-C-04 | tx_nonce NOT in TXID preimage: two txs with same semantic fields, different nonce → same TXID | MUST |
+| CV-C-04 | tx_nonce in TXID preimage: two txs identical except tx_nonce produce different TXID | MUST |
 | CV-C-05 | ML-DSA-87 witness serialization round-trip | MUST |
 | CV-C-06 | ML-DSA-87 batch verification (64 sigs), happy path | MUST |
 | CV-C-07 | ML-DSA-87 batch verification fail → individual fallback identifies invalid tx | MUST |
@@ -585,7 +589,7 @@ All items marked MUST are required for mainnet readiness.
 
 ---
 
-## 15. Design Decisions
+## 16. Design Decisions
 
 The following items were open during drafting and are now resolved.
 
@@ -593,5 +597,5 @@ The following items were open during drafting and are now resolved.
 |-----------|----------|-----------|
 | `DA_ORPHAN_TTL_BLOCKS` | **3** (360 s) | K=2 insufficient for real propagation delays. K=4 extends DoS window to 8 min. K=3 provides one relay window of margin. Revisit if `orphan_recovery_success_rate` < 99.9% at peak latency on mainnet. |
 | `TARGET_FILL_RATE` | **30% (non-normative)** | Protocol MUST be designed for 100% fill. 30% is a baseline for economic models only. Does not affect any node code path. Established by Tokenomics WG; outside scope of this document. Actual fill may be 0-100% in any period. |
-| `PREFETCH_BYTES_PER_SEC` | **4_000_000 B/s** per peer | Derived: ceil(MAX_DA_BYTES_PER_BLOCK / PREFETCH_TARGET_COMPLETE_SEC). Calibrate on testnet. |
+| `PREFETCH_BYTES_PER_SEC` | **4_000_000 B/s** per peer | Derived: ceil(MAX_DA_BYTES_PER_BLOCK / PREFETCH_TARGET_COMPLETE_SEC). Calibrate on testnet. Non-consensus; may be adjusted via coordinated node upgrade (no hard fork required). |
 | `PREFETCH_GLOBAL_BPS` | **32_000_000 B/s** | Derived: PREFETCH_GLOBAL_PARALLEL x PREFETCH_BYTES_PER_SEC. Not an independent constant. |
