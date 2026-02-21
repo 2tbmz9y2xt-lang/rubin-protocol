@@ -8,6 +8,9 @@
 node_modules/
 analysis/
 
+# Local UI tooling (not part of genesis rewrite)
+rubin-ui/
+
 # Local data
 *.db
 *.sqlite
