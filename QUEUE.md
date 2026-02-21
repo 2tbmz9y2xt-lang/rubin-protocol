@@ -25,8 +25,8 @@ Priority: P0 (blocker) → P1 (pre-devnet) → P2 (pre-mainnet) → P3 (post-mai
 | Q-A12 | Threat Model документ: Eclipse, reorg-race, key leakage, supply chain | — | 2d | TODO |
 | Q-A14 | **parseInput: нет лимита на script_sig size** — `readExact(scriptSigLen)` аллоцирует произвольно. P2P ограничен `MaxRelayMsgBytes=8MB`, но `ParseBlockBytes` в non-P2P контексте (тест, RPC, file import) уязвим к OOM. Фикс: добавить `if scriptSigLen > MAX_SCRIPT_SIG_BYTES (32) { return error }` в parseInput (Go и Rust). | — | 30m | TODO |
 | Q-A15 | **Go TxWeight: `base = base * 4` без overflow check** — Rust использует `checked_mul(4)`. На 64-bit Go практически невозможен overflow, но расхождение с Rust паттерном. Фикс: привести к единому стилю checked arithmetic. | — | 30m | TODO |
-| Q-P2P-01 | P2P compact blocks: Go payload encode/decode + ShortID(WTXID,SipHash-2-4) + Peer dispatch + unit tests (`sendcmpct/cmpctblock/getblocktxn/blocktxn`) | — | 1d | ✅ DONE |
-| Q-P2P-02 | P2P compact blocks: Rust `rubin-p2p` encode/decode + ShortID(WTXID,SipHash-2-4) + unit tests | — | 1d | ✅ DONE |
+| Q-P2P-01 | P2P compact blocks: Go payload encode/decode + ShortID(WTXID,SipHash-2-4) + Peer dispatch + unit tests (`sendcmpct/cmpctblock/getblocktxn/blocktxn`) | — | 1d | ✅ DONE (f244e1e) |
+| Q-P2P-02 | P2P compact blocks: Rust `rubin-p2p` encode/decode + ShortID(WTXID,SipHash-2-4) + unit tests | — | 1d | ✅ DONE (f244e1e) |
 | Q-P2P-03 | P2P compact blocks: Go node integration (mempool shortid index, cmpctblock reconstruction, getblocktxn/blocktxn responder path) | — | 2-4d | TODO |
 | Q-P2P-04 | P2P compact blocks: Rust node integration (wire + mempool + responder path) | — | 2-4d | TODO |
 
