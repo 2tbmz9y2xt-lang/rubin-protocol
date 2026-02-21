@@ -1,0 +1,18 @@
+# Build outputs
+**/target/
+**/bin/
+**/*.exe
+**/*.out
+
+# Node / spec tooling
+node_modules/
+analysis/
+
+# Local data
+*.db
+*.sqlite
+*.sqlite3
+.DS_Store
+
+# Vault draft (local)
+spec/RUBIN_CORE_VAULT_V1_SPEC_v0.9.md
