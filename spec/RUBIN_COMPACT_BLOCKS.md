@@ -102,22 +102,12 @@ and is outside the scope of this document.
 
 ## 3. DA Transaction Types
 
-This document refers to the following transaction kinds defined in RUBIN_L1_CANONICAL.md:
+DA transaction types (`DA_COMMIT_TX`, `DA_CHUNK_TX`), `da_id` linkage, chunk integrity,
+and set completeness (CheckBlock DA) are fully defined in
+**RUBIN_L1_CANONICAL.md §5 (Transaction Wire), §14 (Covenant Registry), and §21 (DA Set Integrity)**.
 
-| Type | Description | Key Fields |
-|------|-------------|------------|
-| `DA_COMMIT_TX` | Commits to a DA payload. Anchors the set on L1. | `da_id`, `chunk_count`, `payload_commitment` (SHA3-256 of full payload) |
-| `DA_CHUNK_TX` | Carries one chunk of DA payload data. | `da_id`, `chunk_index`, `chunk_data` |
-
-`da_id` is a 32-byte identifier derived from the DA_COMMIT_TX TXID. It links all
-DA_CHUNK_TX records to their corresponding DA_COMMIT_TX.
-
-A complete DA set consists of exactly one DA_COMMIT_TX and `chunk_count` DA_CHUNK_TX
-records sharing the same `da_id`. A set is only valid for block inclusion when all
-`chunk_count` chunks are present and `SHA3-256(concat(chunk_data[0..n]))` matches
-`payload_commitment` in the commit transaction.
-
-See RUBIN_L1_CANONICAL.md §DA for the full wire format.
+This document refers to those types by name. Implementations MUST satisfy all consensus rules
+in RUBIN_L1_CANONICAL.md before applying the P2P relay policies defined here.
 
 ---
 
@@ -294,7 +284,7 @@ Eviction: total_fee / total_bytes (lower = evicted first), atomic by da_id.
 ```
 SHORT_ID_LENGTH = 6 bytes
 Hash function:  SipHash-2-4 keyed on (nonce1, nonce2) from cmpctblock header
-Input:          WTXID (see Section 12 for tx_nonce requirement)
+Input:          WTXID (see Section 12 for tx_nonce relay requirement)
 Analogue:       BIP-152
 ```
 
@@ -444,6 +434,7 @@ If a better peer connects, demote the lowest-scoring current HB peer to mode = 1
   TXID -> MerkleRoot -> BlockHeader remains intact.
 - `DA_Core_Fields` MUST include a commitment to DA_Payload so that an archival node
   can cryptographically match payload to L1 data.
+  This is enforced at consensus level by RUBIN_L1_CANONICAL.md §21.4 (Payload Commitment Verification).
 - Node roles are explicit and non-overlapping:
 
   | Role | DA Retention | Consensus Participation |
@@ -454,25 +445,30 @@ If a better peer connects, demote the lowest-scoring current HB peer to mode = 1
 
 ---
 
-## 10. tx_nonce — Consensus Requirement
+## 12. tx_nonce — P2P Relay Requirement
 
-`tx_nonce: u64le` MUST satisfy all of the following:
+`tx_nonce` consensus rules (wire format, preimage inclusion, uniqueness) are defined in
+**RUBIN_L1_CANONICAL.md §5.1, §8, §16, §17**.
 
-1. **WTXID preimage:** tx_nonce MUST be included in the canonical transaction
-   serialization used to compute the WTXID.
-2. **Signature preimage:** tx_nonce MUST be included in the ML-DSA-87 signature
-   preimage. Omitting it opens a malleability edge case.
-3. **Not in TXID:** tx_nonce MUST NOT be included in the TXID preimage.
-   This preserves soft-fork compatibility.
-4. **Semantic neutrality:** tx_nonce does not change transaction semantics.
-   It affects only the transaction identifier.
+Summary relevant to compact block relay:
 
-**Rationale:** Without this requirement, an attacker can modify tx_nonce to
-produce a short_id collision without invalidating the signature.
-tx_nonce guarantees WTXID uniqueness even for two transactions
-identical in all other fields.
+- `txid(T) = SHA3-256(TxCoreBytes(T))` — `tx_nonce` is included in `TxCoreBytes`, therefore in TXID.
+- `wtxid(T) = SHA3-256(TxBytes(T))` — `tx_nonce` is included in `TxBytes`, therefore in WTXID.
+- `tx_nonce` is included in the ML-DSA-87 signature preimage (`preimage_tx_sig` in §12 of CANONICAL).
 
-Test vectors for tx_nonce in WTXID computation are required in `CV-COMPACT`.
+**Consequence for short_id uniqueness:**
+
+Because `tx_nonce` is part of `TxBytes` (WTXID preimage), two transactions that are
+identical in all semantic fields but differ in `tx_nonce` produce different WTXIDs and
+therefore different `short_id` values. This eliminates a class of deliberate short_id
+collision attacks.
+
+**Relay requirement:**
+
+A node MUST NOT relay a transaction with `tx_nonce = 0` (reserved for coinbase).
+Any such transaction MUST be rejected at the relay layer before mempool admission.
+
+Test vectors for `tx_nonce` in WTXID computation are required in `CV-COMPACT` (Section 14).
 
 ---
 
