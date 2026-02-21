@@ -1,6 +1,6 @@
 # RUBIN Compact Block Relay — Security Specification
 
-**Status:** Draft v0.6 — pending controller approval
+**Status:** Approved v0.7
 **Date:** 2026-02-21
 
 This document is normative for P2P relay behavior. Requirements expressed with MUST / MUST NOT
@@ -48,8 +48,10 @@ Note for hardware provisioning: 18.05 TiB raw data requires a disk marketed as ~
 | `ML_DSA_BATCH_SIZE` | 64 signatures | for batch verification |
 | `PREFETCH_TARGET_COMPLETE_SEC` | 8 s | [NON-NORMATIVE] target time to fetch a full DA payload from one peer |
 | `PREFETCH_BYTES_PER_SEC` | 4_000_000 B/s per peer | = ceil(MAX_DA_BYTES_PER_BLOCK / PREFETCH_TARGET_COMPLETE_SEC) |
-| `PREFETCH_GLOBAL_BPS` | 32_000_000 B/s | = PREFETCH_PARALLEL_SETS x PREFETCH_BYTES_PER_SEC |
 | `PREFETCH_GLOBAL_PARALLEL` | 8 sets | global parallel prefetch cap |
+| `PREFETCH_GLOBAL_BPS` | 32_000_000 B/s | = PREFETCH_GLOBAL_PARALLEL x PREFETCH_BYTES_PER_SEC |
+| `RELAY_TIMEOUT_BASE_MS` | 2_000 ms | base relay timeout before payload scaling |
+| `RELAY_TIMEOUT_RATE` | 1_000_000 B/s | divisor for payload-size timeout extension |
 
 ### 1.1 Network Characteristics
 
@@ -98,7 +100,28 @@ and is outside the scope of this document.
 
 ---
 
-## 2. sendcmpct Modes
+## 3. DA Transaction Types
+
+This document refers to the following transaction kinds defined in RUBIN_L1_CANONICAL.md:
+
+| Type | Description | Key Fields |
+|------|-------------|------------|
+| `DA_COMMIT_TX` | Commits to a DA payload. Anchors the set on L1. | `da_id`, `chunk_count`, `payload_commitment` (SHA3-256 of full payload) |
+| `DA_CHUNK_TX` | Carries one chunk of DA payload data. | `da_id`, `chunk_index`, `chunk_data` |
+
+`da_id` is a 32-byte identifier derived from the DA_COMMIT_TX TXID. It links all
+DA_CHUNK_TX records to their corresponding DA_COMMIT_TX.
+
+A complete DA set consists of exactly one DA_COMMIT_TX and `chunk_count` DA_CHUNK_TX
+records sharing the same `da_id`. A set is only valid for block inclusion when all
+`chunk_count` chunks are present and `SHA3-256(concat(chunk_data[0..n]))` matches
+`payload_commitment` in the commit transaction.
+
+See RUBIN_L1_CANONICAL.md §DA for the full wire format.
+
+---
+
+## 4. sendcmpct Modes
 
 All sections of this document use the following notation:
 
@@ -151,7 +174,8 @@ request → propagation delay → at high miss rates compact blocks perform wors
   Request a full block only if `getblocktxn` reconstruction fails.
 
 - Relay timeout scales with payload size:
-  `timeout = BASE_TIMEOUT_MS + len(DA_Payload) / RELAY_RATE`
+  `timeout_ms = RELAY_TIMEOUT_BASE_MS + len(DA_Payload) / RELAY_TIMEOUT_RATE`
+  Example: 32 MB payload → 2000 + 32_000_000 / 1_000_000 = 2032 ms
 
 **Formal definition of miss_rate_bytes:**
 
@@ -244,7 +268,7 @@ Eviction: total_fee / total_bytes (lower = evicted first), atomic by da_id.
   (commit spam without chunks blocks pinned memory at no real cost to attacker).
 - Eviction is always atomic by da_id. No orphaned chunks without a commit.
 - CheckBlock independently forbids inclusion of an incomplete set regardless
-  of mempool state.
+  of mempool state. See RUBIN_L1_CANONICAL.md §CheckBlock for the consensus rule.
 - Per-peer and per-da_id limits are applied simultaneously and independently.
 
 ---
@@ -270,8 +294,20 @@ Eviction: total_fee / total_bytes (lower = evicted first), atomic by da_id.
 ```
 SHORT_ID_LENGTH = 6 bytes
 Hash function:  SipHash-2-4 keyed on (nonce1, nonce2) from cmpctblock header
-Input:          WTXID (see Section 9 for tx_nonce requirement)
+Input:          WTXID (see Section 12 for tx_nonce requirement)
 Analogue:       BIP-152
+```
+
+**SipHash key generation:**
+
+```
+nonce1, nonce2 are two u64le values included in the cmpctblock header message.
+The sender generates them as cryptographically random values per block announcement.
+short_id(tx) = SipHash-2-4( key=(nonce1 || nonce2), input=WTXID )[0:6]  (first 6 bytes)
+
+The receiver uses the same nonce1, nonce2 from the received cmpctblock header
+to recompute short_ids for all transactions in its mempool.
+Nonces are per-announcement, not per-peer or per-session.
 ```
 
 **Collision probability at ML-DSA-87 parameters:**
@@ -381,6 +417,21 @@ Step 5. Self-downgrade at any time:
 send `sendcmpct`. It is NOT a protocol norm. The receiver-driven `sendcmpct`
 mechanism is the authoritative gating condition.
 
+**Steady-state peer connection (non-IBD):**
+
+When a fully-synced node accepts a new inbound or outbound peer connection:
+
+```
+If local sendcmpct_mode >= 1:
+  Send sendcmpct_mode = 1 to the new peer immediately after version handshake.
+  If the peer is selected as a high-bandwidth peer (up to 3 peers total):
+    Send sendcmpct_mode = 2.
+
+A node MUST NOT send sendcmpct_mode = 2 to more than 3 peers simultaneously.
+High-bandwidth peers are selected based on peer_quality_score (see Section 13).
+If a better peer connects, demote the lowest-scoring current HB peer to mode = 1.
+```
+
 ---
 
 ## 9. DA Retention and Pruning
@@ -458,18 +509,92 @@ miss_rate_bytes_DA            per block
 partial_set_count             sets in State B at any given time
 partial_set_age_p95           95th percentile age of State B sets
 prefetch_latency_ms           per peer, per set
+orphan_recovery_success_rate  sets reaching COMPLETE_SET before TTL / total sets received
+peer_quality_score            current score per peer (see Section 13)
 ```
 
 ---
 
-## 13. Design Decisions
+## 13. Peer Quality Score
+
+Peer quality score is a local, non-consensus value. It is never transmitted to peers.
+It influences peer selection and sendcmpct mode assignment only.
+
+**Score definition:**
+
+```
+peer_quality_score: integer, range [0, 100], default 50 on new connection.
+
+Positive events (increase score):
+  +2   block reconstruction succeeded without getblocktxn
+  +1   getblocktxn succeeded on first attempt
+  +1   prefetch completed before block arrival
+
+Negative events (decrease score):
+  -5   incomplete_set recorded (State B TTL expiry attributed to this peer)
+  -3   getblocktxn required for reconstruction
+  -10  full block request required (getblocktxn failed)
+  -2   prefetch rate cap exceeded
+
+Score is clamped to [0, 100] after each update.
+Score decays toward 50 at rate of 1 point per 144 blocks (passive normalization).
+```
+
+**Score thresholds and actions:**
+
+```
+score >= 75   eligible for sendcmpct_mode = 2 (high-bandwidth)
+score >= 40   eligible for sendcmpct_mode = 1 (low-bandwidth)
+score <  40   sendcmpct_mode = 0 (full blocks only) for this peer
+score <  20   disconnect candidate (subject to GRACE_PERIOD_BLOCKS)
+
+Maximum 3 peers at sendcmpct_mode = 2 simultaneously.
+On new connection: assign mode = 1 initially; promote to mode = 2
+after 6 blocks if score >= 75.
+```
+
+**Grace period:**
+
+During `GRACE_PERIOD_BLOCKS = 1_440` blocks after genesis, score penalties
+are halved and disconnect threshold is score < 5 (effectively disabled).
+
+---
+
+## 14. CV-COMPACT Conformance Gate
+
+`CV-COMPACT` is the conformance test suite for compact block relay.
+All items marked MUST are required for mainnet readiness.
+
+| Test ID | Description | MUST / SHOULD |
+|---------|-------------|---------------|
+| CV-C-01 | short_id generation: SipHash-2-4 on WTXID with given nonce1/nonce2 | MUST |
+| CV-C-02 | short_id collision: getblocktxn fallback, then full block fallback | MUST |
+| CV-C-03 | tx_nonce in WTXID preimage: two identical txs differ only by nonce → different WTXID | MUST |
+| CV-C-04 | tx_nonce NOT in TXID preimage: two txs with same semantic fields, different nonce → same TXID | MUST |
+| CV-C-05 | ML-DSA-87 witness serialization round-trip | MUST |
+| CV-C-06 | ML-DSA-87 batch verification (64 sigs), happy path | MUST |
+| CV-C-07 | ML-DSA-87 batch verification fail → individual fallback identifies invalid tx | MUST |
+| CV-C-08 | getblocktxn / blocktxn prefill round-trip | MUST |
+| CV-C-09 | State machine A→B→C: chunks before commit, then commit arrives | MUST |
+| CV-C-10 | State machine A→B TTL expiry: atomic eviction of commit + chunks | MUST |
+| CV-C-11 | COMPLETE_SET pinned; incomplete set rejected by CheckBlock | MUST |
+| CV-C-12 | per-peer orphan limit enforced (4 MiB cap) | MUST |
+| CV-C-13 | per-da_id orphan limit enforced (8 MiB cap) | MUST |
+| CV-C-14 | TTL resets on A→B transition | MUST |
+| CV-C-15 | sendcmpct_mode 0/1/2 transitions: IBD, warm-up, self-downgrade | MUST |
+| CV-C-16 | peer_quality_score updates on reconstruction success/failure | SHOULD |
+| CV-C-17 | prefetch rate cap per-peer and global | SHOULD |
+| CV-C-18 | orphan_recovery_success_rate telemetry output | SHOULD |
+
+---
+
+## 15. Design Decisions
 
 The following items were open during drafting and are now resolved.
 
 | Parameter | Decision | Rationale |
 |-----------|----------|-----------|
-| `DA_ORPHAN_TTL_BLOCKS` | **3** (360 s) | K=2 is insufficient for real propagation delays (~1-2 blocks). K=4 extends the DoS window to 8 min. K=3 provides one relay window of margin — standard practice in distributed state machine design. Revisit if `orphan_recovery_success_rate` < 99.9% at peak latency on mainnet. |
-| `TARGET_FILL_RATE` | **30% (non-normative)** | Protocol and consensus MUST be designed for 100% fill rate. 30% is a reasonable baseline for economic models (miner revenue, first-year inflation). It does not affect any node code path. Established by Tokenomics WG; outside the scope of this document. |
-| `PREFETCH_BYTES_PER_SEC` | **4_000_000 B/s** per peer | = ceil(MAX_DA_BYTES_PER_BLOCK / PREFETCH_TARGET_COMPLETE_SEC). Calibrate on testnet. |
-| `PREFETCH_GLOBAL_BPS` | **32_000_000 B/s** | = PREFETCH_GLOBAL_PARALLEL x PREFETCH_BYTES_PER_SEC. Derived, not independent. |
-| Target fill rate | **30% (non-normative)** | Economic baseline only. Hardware MUST provision for 100%. Actual fill rate may be 0-100% in any period; economic models must account for full sensitivity range. |
+| `DA_ORPHAN_TTL_BLOCKS` | **3** (360 s) | K=2 insufficient for real propagation delays. K=4 extends DoS window to 8 min. K=3 provides one relay window of margin. Revisit if `orphan_recovery_success_rate` < 99.9% at peak latency on mainnet. |
+| `TARGET_FILL_RATE` | **30% (non-normative)** | Protocol MUST be designed for 100% fill. 30% is a baseline for economic models only. Does not affect any node code path. Established by Tokenomics WG; outside scope of this document. Actual fill may be 0-100% in any period. |
+| `PREFETCH_BYTES_PER_SEC` | **4_000_000 B/s** per peer | Derived: ceil(MAX_DA_BYTES_PER_BLOCK / PREFETCH_TARGET_COMPLETE_SEC). Calibrate on testnet. |
+| `PREFETCH_GLOBAL_BPS` | **32_000_000 B/s** | Derived: PREFETCH_GLOBAL_PARALLEL x PREFETCH_BYTES_PER_SEC. Not an independent constant. |
