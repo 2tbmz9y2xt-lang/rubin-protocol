@@ -42,6 +42,8 @@ These constants are consensus-critical defaults for the genesis ruleset:
 
 - `TX_WIRE_VERSION = 2`
 - `WITNESS_DISCOUNT_DIVISOR = 4`
+- `TARGET_BLOCK_INTERVAL = 600` seconds
+- `WINDOW_SIZE = 2_016` blocks
 - `MAX_TX_INPUTS = 1024`
 - `MAX_TX_OUTPUTS = 1024`
 - `MAX_WITNESS_ITEMS = 1024`
@@ -441,6 +443,7 @@ implementations for the described failure classes:
 - Invalid prev_block_hash linkage                  -> `BLOCK_ERR_LINKAGE_INVALID`
 - Invalid merkle_root                              -> `BLOCK_ERR_MERKLE_INVALID`
 - PoW invalid                                      -> `BLOCK_ERR_POW_INVALID`
+- Target mismatch                                  -> `BLOCK_ERR_TARGET_INVALID`
 - Weight exceedance                                -> `BLOCK_ERR_WEIGHT_EXCEEDED`
 - Anchor bytes exceeded                            -> `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`
 - Malformed block encoding                         -> `BLOCK_ERR_PARSE`
@@ -487,3 +490,44 @@ Semantics:
     `<= MAX_ANCHOR_BYTES_PER_BLOCK`; otherwise reject the block as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
 - `CORE_RESERVED_FUTURE`:
   - Forbidden at genesis; any appearance MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+
+## 15. Difficulty Update (Normative)
+
+Let:
+
+```text
+T_actual = timestamp_last_block_in_window - timestamp_first_block_in_window
+T_expected = TARGET_BLOCK_INTERVAL * WINDOW_SIZE
+```
+
+If `T_actual <= 0`, set `T_actual = 1`.
+
+```text
+target_new =
+    clamp(
+        floor(target_old * T_actual / T_expected),
+        max(1, floor(target_old / 4)),
+        target_old * 4
+    )
+```
+
+Window boundaries and applicability:
+
+1. Let block height be `h` (genesis has `h = 0`).
+2. For `h = 0`, the expected `target(B_0)` is the `target` field encoded in the published genesis header bytes.
+3. For `h > 0` and `h % WINDOW_SIZE != 0`, the expected `target(B_h)` MUST equal `target(B_{h-1})`.
+4. For `h > 0` and `h % WINDOW_SIZE = 0` (a retarget boundary), define the preceding window as blocks:
+   - first block in window: `B_{h-WINDOW_SIZE}`
+   - last block in window: `B_{h-1}`
+
+   Then:
+   - `target_old = target(B_{h-1})`
+   - `timestamp_first_block_in_window = timestamp(B_{h-WINDOW_SIZE})`
+   - `timestamp_last_block_in_window  = timestamp(B_{h-1})`
+   - expected `target(B_h)` MUST equal `target_new` as computed by the formula above.
+
+Any block whose `target` field does not match the expected value is invalid (`BLOCK_ERR_TARGET_INVALID`).
+
+All division is integer division with floor.
+Intermediate products (`target_old * T_actual` and `target_old * 4`) MUST be computed using at least 320-bit
+unsigned integer arithmetic (or arbitrary-precision). Silent truncation is non-conforming.

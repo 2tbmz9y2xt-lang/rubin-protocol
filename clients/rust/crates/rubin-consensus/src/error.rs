@@ -15,6 +15,7 @@ pub enum ErrorCode {
     BlockErrWeightExceeded,
     BlockErrAnchorBytesExceeded,
     BlockErrPowInvalid,
+    BlockErrTargetInvalid,
     BlockErrLinkageInvalid,
     BlockErrMerkleInvalid,
 }
@@ -35,6 +36,7 @@ impl ErrorCode {
             ErrorCode::BlockErrWeightExceeded => "BLOCK_ERR_WEIGHT_EXCEEDED",
             ErrorCode::BlockErrAnchorBytesExceeded => "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED",
             ErrorCode::BlockErrPowInvalid => "BLOCK_ERR_POW_INVALID",
+            ErrorCode::BlockErrTargetInvalid => "BLOCK_ERR_TARGET_INVALID",
             ErrorCode::BlockErrLinkageInvalid => "BLOCK_ERR_LINKAGE_INVALID",
             ErrorCode::BlockErrMerkleInvalid => "BLOCK_ERR_MERKLE_INVALID",
         }

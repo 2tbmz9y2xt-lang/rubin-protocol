@@ -2,6 +2,9 @@ pub const TX_WIRE_VERSION: u32 = 2;
 
 pub const WITNESS_DISCOUNT_DIVISOR: u64 = 4;
 
+pub const TARGET_BLOCK_INTERVAL: u64 = 600;
+pub const WINDOW_SIZE: u64 = 2_016;
+
 pub const MAX_TX_INPUTS: u64 = 1024;
 pub const MAX_TX_OUTPUTS: u64 = 1024;
 pub const MAX_WITNESS_ITEMS: u64 = 1024;

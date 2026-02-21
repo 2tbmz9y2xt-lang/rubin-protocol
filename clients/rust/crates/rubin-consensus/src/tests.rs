@@ -1,8 +1,11 @@
 use crate::constants::*;
 use crate::error::ErrorCode;
 use crate::hash::sha3_256;
+use crate::pow::{pow_check, retarget_v1};
 use crate::sighash_v1_digest;
-use crate::{merkle_root_txids, parse_tx_v2};
+use crate::{block_hash, merkle_root_txids, parse_tx_v2, BLOCK_HEADER_BYTES};
+use num_bigint::BigUint;
+use num_traits::One;
 
 fn minimal_tx_bytes() -> Vec<u8> {
     let mut b = Vec::new();
@@ -225,4 +228,55 @@ fn sighash_v1_digest_smoke() {
 
     let want = sha3_256(&preimage);
     assert_eq!(digest, want);
+}
+
+#[test]
+fn retarget_v1_vectors() {
+    let target_old = hex32("0000000000000000000000000000000000000000000000000000000000001234");
+    let t_expected = TARGET_BLOCK_INTERVAL * WINDOW_SIZE;
+    let got = retarget_v1(target_old, 100, 100 + t_expected).expect("retarget");
+    assert_eq!(got, target_old);
+
+    let target_old = hex32("0000000000000000000000000000000000000000000000000000000000001000"); // 4096
+    let got = retarget_v1(target_old, 200, 200).expect("retarget"); // T_actual <= 0 => 1
+    let want = hex32("0000000000000000000000000000000000000000000000000000000000000400"); // 1024
+    assert_eq!(got, want);
+
+    let got = retarget_v1(target_old, 0, 10 * t_expected).expect("retarget");
+    let want = hex32("0000000000000000000000000000000000000000000000000000000000004000"); // 16384
+    assert_eq!(got, want);
+}
+
+#[test]
+fn pow_check_strict_less() {
+    let mut header = vec![0u8; BLOCK_HEADER_BYTES];
+    header[0] = 1;
+    let h = block_hash(&header).expect("hash");
+
+    // target == hash => invalid (strict less required)
+    let err = pow_check(&header, h).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrPowInvalid);
+
+    // target = hash + 1 => valid (unless hash is max, which is practically impossible)
+    let mut bi = BigUint::from_bytes_be(&h);
+    bi += BigUint::one();
+    let target1 = biguint_to_bytes32(&bi);
+    pow_check(&header, target1).expect("pow ok");
+}
+
+fn hex32(s: &str) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    assert_eq!(s.len(), 64);
+    for i in 0..32 {
+        out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).expect("hex byte");
+    }
+    out
+}
+
+fn biguint_to_bytes32(x: &BigUint) -> [u8; 32] {
+    let b = x.to_bytes_be();
+    assert!(b.len() <= 32);
+    let mut out = [0u8; 32];
+    out[32 - b.len()..].copy_from_slice(&b);
+    out
 }
