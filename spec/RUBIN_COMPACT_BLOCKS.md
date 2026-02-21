@@ -46,9 +46,10 @@ Note for hardware provisioning: 18.05 TiB raw data requires a disk marketed as ~
 | `FINALITY_K_L1` | 8 blocks | = 16 min |
 | `FINALITY_K_BRIDGE` | 12 blocks | = 24 min |
 | `ML_DSA_BATCH_SIZE` | 64 signatures | for batch verification |
-| `PREFETCH_BYTES_PER_SEC` | 4_000_000 B/s per peer | [NON-NORMATIVE, empirical default] |
-| `PREFETCH_GLOBAL_BPS` | 32_000_000 B/s | global cap across all peers |
-| `PREFETCH_GLOBAL_PARALLEL` | 64 sets | global parallel prefetch cap |
+| `PREFETCH_TARGET_COMPLETE_SEC` | 8 s | [NON-NORMATIVE] target time to fetch a full DA payload from one peer |
+| `PREFETCH_BYTES_PER_SEC` | 4_000_000 B/s per peer | = ceil(MAX_DA_BYTES_PER_BLOCK / PREFETCH_TARGET_COMPLETE_SEC) |
+| `PREFETCH_GLOBAL_BPS` | 32_000_000 B/s | = PREFETCH_PARALLEL_SETS x PREFETCH_BYTES_PER_SEC |
+| `PREFETCH_GLOBAL_PARALLEL` | 8 sets | global parallel prefetch cap |
 
 ### 1.1 Network Characteristics
 
@@ -125,12 +126,26 @@ request → propagation delay → at high miss rates compact blocks perform wors
   identified by `da_id`. Prefetch is rate-limited:
 
   ```
-  Per-peer:  PREFETCH_BYTES_PER_SEC   = 4_000_000 B/s  [NON-NORMATIVE]
-  Global:    PREFETCH_GLOBAL_BPS      = 32_000_000 B/s
-             PREFETCH_GLOBAL_PARALLEL = 64 concurrent sets
+  Per-peer:  PREFETCH_BYTES_PER_SEC   = ceil(MAX_DA_BYTES_PER_BLOCK / PREFETCH_TARGET_COMPLETE_SEC)
+                                       = ceil(32_000_000 / 8) = 4_000_000 B/s
+             Goal: fetch a full DA payload from one peer within PREFETCH_TARGET_COMPLETE_SEC (8 s),
+             well within TARGET_BLOCK_INTERVAL (120 s).
+
+  Global:    PREFETCH_GLOBAL_BPS      = PREFETCH_GLOBAL_PARALLEL x PREFETCH_BYTES_PER_SEC
+                                       = 8 x 4_000_000 = 32_000_000 B/s
+             PREFETCH_GLOBAL_PARALLEL = 8 concurrent sets
   ```
 
-  Exceeding the global cap reduces the offending peer's quality score; it does not disconnect.
+  The global cap is derived from per-peer rate and parallel set count — not an independent
+  magic number. Exceeding the global cap reduces the offending peer's quality score; it does
+  not disconnect.
+
+  **Testnet calibration criteria** (to validate or adjust these defaults):
+  - `commit -> complete_set` latency distribution: p50 / p95 / p99 by peer type
+  - Actual bytes prefetched per DA set
+  - Impact on `miss_rate_bytes_DA` and cmpctblock reconstruction time
+  - `incomplete_set` rate at various TTL and rate-limit combinations
+  - Total prefetch traffic per node at N active peers
 
 - On cache miss: send `getblocktxn` for specific missing transaction indices only.
   Request a full block only if `getblocktxn` reconstruction fails.
@@ -455,4 +470,6 @@ The following items were open during drafting and are now resolved.
 |-----------|----------|-----------|
 | `DA_ORPHAN_TTL_BLOCKS` | **3** (360 s) | K=2 is insufficient for real propagation delays (~1-2 blocks). K=4 extends the DoS window to 8 min. K=3 provides one relay window of margin — standard practice in distributed state machine design. Revisit if `orphan_recovery_success_rate` < 99.9% at peak latency on mainnet. |
 | `TARGET_FILL_RATE` | **30% (non-normative)** | Protocol and consensus MUST be designed for 100% fill rate. 30% is a reasonable baseline for economic models (miner revenue, first-year inflation). It does not affect any node code path. Established by Tokenomics WG; outside the scope of this document. |
-| `PREFETCH_BYTES_PER_SEC` | **4_000_000 B/s (empirical default)** | Allows prefetch of a maximum DA block (32 MB) in ~8 s, well within the 120 s block interval. Does not saturate a standard 100 Mbps home node uplink. Global cap 32_000_000 B/s = 8x per-peer. Both values to be calibrated on testnet metrics (latency, bandwidth distribution). |
+| `PREFETCH_BYTES_PER_SEC` | **4_000_000 B/s** per peer | = ceil(MAX_DA_BYTES_PER_BLOCK / PREFETCH_TARGET_COMPLETE_SEC). Calibrate on testnet. |
+| `PREFETCH_GLOBAL_BPS` | **32_000_000 B/s** | = PREFETCH_GLOBAL_PARALLEL x PREFETCH_BYTES_PER_SEC. Derived, not independent. |
+| Target fill rate | **30% (non-normative)** | Economic baseline only. Hardware MUST provision for 100%. Actual fill rate may be 0-100% in any period; economic models must account for full sensitivity range. |
