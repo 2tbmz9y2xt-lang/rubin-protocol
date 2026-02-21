@@ -353,3 +353,71 @@ Rules:
 - No other transaction `B.txs[i]` with `i > 0` may satisfy `is_coinbase_tx`.
 
 Coinbase economics (subsidy, maturity, and fee rules) are defined in later sections.
+
+## 11. Chain ID (Consensus Identity)
+
+`chain_id` is a 32-byte consensus identifier used for signature domain separation.
+
+Definition:
+
+```text
+chain_id = SHA3-256(serialized_genesis_without_chain_id_field)
+```
+
+Where `serialized_genesis_without_chain_id_field` is:
+
+```text
+ASCII("RUBIN-GENESIS-v2") ||
+BlockHeaderBytes(genesis_header) ||
+CompactSize(genesis_tx_count) ||
+TxBytes(genesis_txs[0]) || ... || TxBytes(genesis_txs[genesis_tx_count-1])
+```
+
+Chain-instance requirement:
+
+- A concrete network (devnet/testnet/mainnet) MUST publish its exact genesis bytes so all nodes derive the same
+  `chain_id`.
+
+## 12. Sighash v1 (Normative)
+
+Sighash is computed for each non-coinbase input to produce a 32-byte digest that is signed by the witness
+signature.
+
+Definitions:
+
+```text
+hash_of_da_core_fields = SHA3-256("")   # genesis tx_kind=0x00 has no DA core fields
+hash_of_all_prevouts = SHA3-256(concat(inputs[i].prev_txid || u32le(inputs[i].prev_vout) for i in [0..input_count-1]))
+hash_of_all_sequences = SHA3-256(concat(u32le(inputs[i].sequence) for i in [0..input_count-1]))
+hash_of_all_outputs = SHA3-256(concat(outputs[j] in TxOutput wire order for j in [0..output_count-1]))
+```
+
+For `output_count = 0`, `hash_of_all_outputs = SHA3-256("")`.
+
+Preimage and digest:
+
+```text
+preimage_tx_sig =
+  ASCII("RUBINv2-sighash/") ||
+  chain_id ||
+  u32le(version) ||
+  u8(tx_kind) ||
+  u64le(tx_nonce) ||
+  hash_of_da_core_fields ||
+  hash_of_all_prevouts ||
+  hash_of_all_sequences ||
+  u32le(input_index) ||
+  prev_txid ||
+  u32le(prev_vout) ||
+  u64le(input_value) ||
+  u32le(sequence) ||
+  hash_of_all_outputs ||
+  u32le(locktime)
+
+digest = SHA3-256(preimage_tx_sig)
+```
+
+All fields in `preimage_tx_sig` are taken from the transaction `T` being signed, except `input_value`.
+`input_value` is the `value` of the spendable UTXO entry referenced by this input's `(prev_txid, prev_vout)`.
+
+For coinbase transactions, sighash is not computed (no witness).

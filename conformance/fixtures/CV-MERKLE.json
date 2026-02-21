@@ -1,0 +1,24 @@
+{
+  "gate": "CV-MERKLE",
+  "vectors": [
+    {
+      "id": "MERKLE-01",
+      "op": "merkle_root",
+      "txids": [
+        "39c539643a6ee6828488a5cbb880a11c5c88fc746cfdebcec86c939e2c3b3b3d"
+      ],
+      "expect_ok": true,
+      "expect_merkle_root": "e1ed07c68b293c8c537ef872d0485f79d4cba13c9c06e21479d9d4c867d9144b"
+    },
+    {
+      "id": "MERKLE-02",
+      "op": "merkle_root",
+      "txids": [
+        "39c539643a6ee6828488a5cbb880a11c5c88fc746cfdebcec86c939e2c3b3b3d",
+        "dc17c8ac4e545a2058ba11b4ea304b56db0820a762f4059a496a3ba9b983d5d6"
+      ],
+      "expect_ok": true,
+      "expect_merkle_root": "6733a9710ffdcc70190daedb4b89d3bb986ab7fa5aa3937ba23af5ac3b816576"
+    }
+  ]
+}

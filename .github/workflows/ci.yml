@@ -23,3 +23,7 @@ jobs:
         run: |
           cd clients/rust
           cargo test --workspace
+
+      - name: Conformance bundle
+        run: |
+          python3 conformance/runner/run_cv_bundle.py

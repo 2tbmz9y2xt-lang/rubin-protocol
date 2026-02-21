@@ -11,6 +11,9 @@ analysis/
 # Local UI tooling (not part of genesis rewrite)
 rubin-ui/
 
+# Conformance build outputs
+conformance/bin/
+
 # Local data
 *.db
 *.sqlite
