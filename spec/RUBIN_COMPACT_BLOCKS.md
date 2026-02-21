@@ -58,8 +58,8 @@ Note for hardware provisioning: 18.05 TiB raw data requires a disk marketed as ~
 ```
 Blocks per year     = 365 x 86400 / 120       = 262_800
 
-L1 TPS (ML-DSA-87)  ~ 39    (4,704 tx/block; weight = 4x104 + 7,227 + 1 + 8 = 7,652 wu/tx)
-L1 TPS (SLH-DSA)    ~ 6     (714 tx/block;   weight = 4x104 + 49,926 + 1 + 64 = 50,407 wu/tx)
+L1 TPS (ML-DSA-87)  ~ 74    (8,886 tx/block; weight = 7,652 wu/tx; full 68M wu available)
+L1 TPS (SLH-DSA)    ~ 11    (1,349 tx/block; weight = 50,407 wu/tx)
 L2 TPS              ~ 2667  (32_000_000 / 120 / 100 B/tx)
 DA throughput       = 32_000_000 / 120         = 266_667 B/s = 0.267 MB/s = 0.254 MiB/s
 Orphan rate         ~ 0.02%  (compact blocks eliminate propagation bottleneck)
