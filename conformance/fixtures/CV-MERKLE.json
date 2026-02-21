@@ -5,20 +5,20 @@
       "id": "MERKLE-01",
       "op": "merkle_root",
       "txids": [
-        "39c539643a6ee6828488a5cbb880a11c5c88fc746cfdebcec86c939e2c3b3b3d"
+        "d205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0"
       ],
       "expect_ok": true,
-      "expect_merkle_root": "e1ed07c68b293c8c537ef872d0485f79d4cba13c9c06e21479d9d4c867d9144b"
+      "expect_merkle_root": "cc91bf5776e6097dd079c8bc871c8af0b291bb436cb222b4df5b67dca7ebf15e"
     },
     {
       "id": "MERKLE-02",
       "op": "merkle_root",
       "txids": [
-        "39c539643a6ee6828488a5cbb880a11c5c88fc746cfdebcec86c939e2c3b3b3d",
+        "d205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0",
         "dc17c8ac4e545a2058ba11b4ea304b56db0820a762f4059a496a3ba9b983d5d6"
       ],
       "expect_ok": true,
-      "expect_merkle_root": "6733a9710ffdcc70190daedb4b89d3bb986ab7fa5aa3937ba23af5ac3b816576"
+      "expect_merkle_root": "00ba641b6ef898f24ee5740111be08344db28cbd6714ae7dbcdf3d75c648c7bb"
     }
   ]
 }

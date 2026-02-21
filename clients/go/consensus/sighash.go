@@ -1,6 +1,6 @@
 package consensus
 
-func SighashV1Digest(tx *TxV2, inputIndex uint32, inputValue uint64, chainID [32]byte) ([32]byte, error) {
+func SighashV1Digest(tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte) ([32]byte, error) {
 	var zero [32]byte
 	if tx == nil {
 		return zero, txerr(TX_ERR_PARSE, "sighash: nil tx")
@@ -39,7 +39,7 @@ func SighashV1Digest(tx *TxV2, inputIndex uint32, inputValue uint64, chainID [32
 	in := tx.Inputs[inputIndex]
 
 	preimage := make([]byte, 0, 256)
-	preimage = append(preimage, []byte("RUBINv2-sighash/")...)
+	preimage = append(preimage, []byte("RUBINv1-sighash/")...)
 	preimage = append(preimage, chainID[:]...)
 	preimage = appendU32le(preimage, tx.Version)
 	preimage = append(preimage, tx.TxKind)

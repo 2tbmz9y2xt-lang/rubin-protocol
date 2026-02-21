@@ -1,4 +1,4 @@
-pub const TX_WIRE_VERSION: u32 = 2;
+pub const TX_WIRE_VERSION: u32 = 1;
 
 pub const WITNESS_DISCOUNT_DIVISOR: u64 = 4;
 

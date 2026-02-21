@@ -5,7 +5,7 @@ use crate::hash::sha3_256;
 use crate::wire_read::Reader;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TxV2 {
+pub struct Tx {
     pub version: u32,
     pub tx_kind: u8,
     pub tx_nonce: u64,
@@ -38,7 +38,7 @@ pub struct WitnessItem {
     pub signature: Vec<u8>,
 }
 
-pub fn parse_tx_v2(b: &[u8]) -> Result<(TxV2, [u8; 32], [u8; 32], usize), TxError> {
+pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
     let mut r = Reader::new(b);
 
     let version = r.read_u32_le()?;
@@ -225,7 +225,7 @@ pub fn parse_tx_v2(b: &[u8]) -> Result<(TxV2, [u8; 32], [u8; 32], usize), TxErro
     let txid = sha3_256(&b[..core_end]);
     let wtxid = sha3_256(&b[..total_end]);
 
-    let tx = TxV2 {
+    let tx = Tx {
         version,
         tx_kind,
         tx_nonce,

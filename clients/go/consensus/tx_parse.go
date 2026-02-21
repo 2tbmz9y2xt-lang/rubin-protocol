@@ -2,7 +2,7 @@ package consensus
 
 import "math"
 
-type TxV2 struct {
+type Tx struct {
 	Version   uint32
 	TxKind    uint8
 	TxNonce   uint64
@@ -32,7 +32,7 @@ type WitnessItem struct {
 	Signature []byte
 }
 
-func ParseTxV2(b []byte) (*TxV2, [32]byte, [32]byte, int, error) {
+func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 	var zero [32]byte
 	off := 0
 
@@ -247,7 +247,7 @@ func ParseTxV2(b []byte) (*TxV2, [32]byte, [32]byte, int, error) {
 	txid := sha3_256(b[:coreEnd])
 	wtxid := sha3_256(b[:totalEnd])
 
-	tx := &TxV2{
+	tx := &Tx{
 		Version:   version,
 		TxKind:    txKind,
 		TxNonce:   txNonce,

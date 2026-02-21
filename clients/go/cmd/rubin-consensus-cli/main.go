@@ -57,7 +57,7 @@ func main() {
 			writeResp(os.Stdout, Response{Ok: false, Err: "bad hex"})
 			return
 		}
-		_, txid, wtxid, n, err := consensus.ParseTxV2(txBytes)
+		_, txid, wtxid, n, err := consensus.ParseTx(txBytes)
 		if err != nil {
 			if te, ok := err.(*consensus.TxError); ok {
 				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
@@ -104,7 +104,7 @@ func main() {
 			writeResp(os.Stdout, Response{Ok: false, Err: "bad hex"})
 			return
 		}
-		tx, _, _, _, err := consensus.ParseTxV2(txBytes)
+		tx, _, _, _, err := consensus.ParseTx(txBytes)
 		if err != nil {
 			if te, ok := err.(*consensus.TxError); ok {
 				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})

@@ -3,11 +3,12 @@
 This document is consensus-critical. All requirements expressed with MUST / MUST NOT are mandatory for
 consensus validity.
 
-## 1. Genesis Rule (Wire Version)
+## 1. Genesis Rule (Transaction Wire)
 
-- The chain uses **transaction wire v2 at genesis**.
+- "Transaction wire" is the byte-level transaction serialization used in blocks and P2P relay.
+- The chain uses **Transaction Wire version 1 at genesis**.
 - There is no activation height and no VERSION_BITS gate for wire versions.
-- Any node that does not implement Transaction Wire v2 cannot validate the chain.
+- Any node that does not implement Transaction Wire version 1 cannot validate the chain.
 
 ## 2. Primitive Encodings
 
@@ -40,7 +41,7 @@ Canonical rule (minimality):
 
 These constants are consensus-critical for this protocol ruleset:
 
-- `TX_WIRE_VERSION = 2`
+- `TX_WIRE_VERSION = 1`
 - `WITNESS_DISCOUNT_DIVISOR = 4`
 - `TARGET_BLOCK_INTERVAL = 600` seconds
 - `WINDOW_SIZE = 2_016` blocks
@@ -94,12 +95,12 @@ Keyless sentinel witness:
 
 - `SUITE_ID_SENTINEL = 0x00` (reserved; MUST NOT be used for cryptographic verification)
 
-## 5. Transaction Wire v2
+## 5. Transaction Wire (Version 1)
 
 ### 5.1 Transaction Data Structures
 
 ```text
-TxV2 {
+Tx {
   version : u32le
   tx_kind : u8
   tx_nonce : u64le
@@ -191,7 +192,7 @@ Witness items are parsed and checked for canonical form:
 For any valid transaction `T`, serialization and parsing MUST be mutually inverse:
 
 ```text
-parse_tx_v2(serialize_tx_v2(T)) = T
+parse_tx(serialize_tx(T)) = T
 ```
 
 ## 7. Deterministic Parse Error Mapping (Wire)
@@ -216,7 +217,7 @@ RUBIN uses `SHA3-256` (FIPS 202) as the consensus hash function.
 
 ### 8.2 Canonical Transaction Serializations
 
-For any valid transaction `T` (i.e. one that parses under Transaction Wire v2 with all rules in Sections 3-7):
+For any valid transaction `T` (i.e. one that parses under Transaction Wire (Section 5) with all rules in Sections 3-7):
 
 `TxCoreBytes(T)` is defined as the canonical serialization of:
 
@@ -321,7 +322,7 @@ big-endian integer.
 Block {
   header: BlockHeader
   tx_count: CompactSize
-  txs: TxV2[tx_count]
+  txs: Tx[tx_count]
 }
 ```
 
@@ -363,7 +364,7 @@ Odd-element rule (normative):
 
 Every block MUST contain exactly one coinbase transaction and it MUST be the first transaction.
 
-Define `is_coinbase_tx(T)` for `TxV2` as:
+Define `is_coinbase_tx(T)` for `Tx` as:
 
 - `T.input_count = 1`, and
 - `T.inputs[0].prev_txid` is 32 zero bytes, and
@@ -394,7 +395,7 @@ chain_id = SHA3-256(serialized_genesis_without_chain_id_field)
 Where `serialized_genesis_without_chain_id_field` is:
 
 ```text
-ASCII("RUBIN-GENESIS-v2") ||
+ASCII("RUBIN-GENESIS-v1") ||
 BlockHeaderBytes(genesis_header) ||
 CompactSize(genesis_tx_count) ||
 TxBytes(genesis_txs[0]) || ... || TxBytes(genesis_txs[genesis_tx_count-1])
@@ -425,7 +426,7 @@ Preimage and digest:
 
 ```text
 preimage_tx_sig =
-  ASCII("RUBINv2-sighash/") ||
+  ASCII("RUBINv1-sighash/") ||
   chain_id ||
   u32le(version) ||
   u8(tx_kind) ||
@@ -568,7 +569,7 @@ unsigned integer arithmetic (or arbitrary-precision). Silent truncation is non-c
 
 ## 16. Transaction Structural Rules (Normative)
 
-These rules apply after a transaction has been parsed under Transaction Wire v2.
+These rules apply after a transaction has been parsed under Transaction Wire (Section 5).
 
 Define `is_coinbase_prevout` for an input `I` as:
 

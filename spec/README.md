@@ -3,7 +3,7 @@
 ## Consensus-Critical
 
 - `./RUBIN_L1_CANONICAL.md`
-  - L1 transaction wire v2 (genesis rule)
+  - L1 transaction wire (version 1 at genesis)
   - TXID/WTXID, weight, block header, PoW, difficulty retarget
   - covenant registry and error code registry (genesis profile)
 

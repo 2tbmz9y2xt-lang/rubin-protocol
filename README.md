@@ -1,4 +1,4 @@
-# rubin-protocol (Genesis = Wire v2)
+# rubin-protocol (Genesis = Wire v1)
 
 This repository contains:
 
@@ -6,9 +6,9 @@ This repository contains:
 - minimal reference implementations (Go + Rust),
 - a cross-client conformance runner (parity gate).
 
-**What "Genesis = Wire v2" means:** the chain starts at genesis using the current
-transaction serialization format ("Transaction Wire v2") including TXID/WTXID
-rules. There is no on-chain activation for this; nodes must implement Wire v2 to
+**What "Genesis = Wire v1" means:** the chain starts at genesis using the current
+transaction serialization format ("Transaction Wire (version 1)") including TXID/WTXID
+rules. There is no on-chain activation for this; nodes must implement Wire v1 to
 validate the chain.
 
 ## Structure

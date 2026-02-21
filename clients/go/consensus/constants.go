@@ -1,7 +1,7 @@
 package consensus
 
 const (
-	TX_WIRE_VERSION = 2
+	TX_WIRE_VERSION = 1
 
 	WITNESS_DISCOUNT_DIVISOR = 4
 
