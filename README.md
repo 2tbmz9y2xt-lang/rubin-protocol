@@ -6,10 +6,6 @@ This repository contains:
 - minimal reference implementations (Go + Rust),
 - a cross-client conformance runner (parity gate).
 
-Legacy snapshot:
-- branch: `legacy/v1.1`
-- tag: `legacy-v1.1-freeze-2026-02-21`
-
 ## Structure
 
 - `/Users/gpt/Documents/rubin-protocol/spec/` specs (see `spec/README.md`)

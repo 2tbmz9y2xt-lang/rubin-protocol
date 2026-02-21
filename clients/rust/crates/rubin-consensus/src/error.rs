@@ -7,8 +7,14 @@ pub enum ErrorCode {
     TxErrSigNoncanonical,
     TxErrSigAlgInvalid,
     TxErrSigInvalid,
+    TxErrValueConservation,
+    TxErrTxNonceInvalid,
+    TxErrSequenceInvalid,
+    TxErrNonceReplay,
     TxErrCovenantTypeInvalid,
     TxErrMissingUtxo,
+    TxErrCoinbaseImmature,
+    TxErrDeploymentInactive,
     TxErrTimelockNotMet,
 
     BlockErrParse,
@@ -18,6 +24,10 @@ pub enum ErrorCode {
     BlockErrTargetInvalid,
     BlockErrLinkageInvalid,
     BlockErrMerkleInvalid,
+    BlockErrCoinbaseInvalid,
+    BlockErrSubsidyExceeded,
+    BlockErrTimestampOld,
+    BlockErrTimestampFuture,
 }
 
 impl ErrorCode {
@@ -28,8 +38,14 @@ impl ErrorCode {
             ErrorCode::TxErrSigNoncanonical => "TX_ERR_SIG_NONCANONICAL",
             ErrorCode::TxErrSigAlgInvalid => "TX_ERR_SIG_ALG_INVALID",
             ErrorCode::TxErrSigInvalid => "TX_ERR_SIG_INVALID",
+            ErrorCode::TxErrValueConservation => "TX_ERR_VALUE_CONSERVATION",
+            ErrorCode::TxErrTxNonceInvalid => "TX_ERR_TX_NONCE_INVALID",
+            ErrorCode::TxErrSequenceInvalid => "TX_ERR_SEQUENCE_INVALID",
+            ErrorCode::TxErrNonceReplay => "TX_ERR_NONCE_REPLAY",
             ErrorCode::TxErrCovenantTypeInvalid => "TX_ERR_COVENANT_TYPE_INVALID",
             ErrorCode::TxErrMissingUtxo => "TX_ERR_MISSING_UTXO",
+            ErrorCode::TxErrCoinbaseImmature => "TX_ERR_COINBASE_IMMATURE",
+            ErrorCode::TxErrDeploymentInactive => "TX_ERR_DEPLOYMENT_INACTIVE",
             ErrorCode::TxErrTimelockNotMet => "TX_ERR_TIMELOCK_NOT_MET",
 
             ErrorCode::BlockErrParse => "BLOCK_ERR_PARSE",
@@ -39,6 +55,10 @@ impl ErrorCode {
             ErrorCode::BlockErrTargetInvalid => "BLOCK_ERR_TARGET_INVALID",
             ErrorCode::BlockErrLinkageInvalid => "BLOCK_ERR_LINKAGE_INVALID",
             ErrorCode::BlockErrMerkleInvalid => "BLOCK_ERR_MERKLE_INVALID",
+            ErrorCode::BlockErrCoinbaseInvalid => "BLOCK_ERR_COINBASE_INVALID",
+            ErrorCode::BlockErrSubsidyExceeded => "BLOCK_ERR_SUBSIDY_EXCEEDED",
+            ErrorCode::BlockErrTimestampOld => "BLOCK_ERR_TIMESTAMP_OLD",
+            ErrorCode::BlockErrTimestampFuture => "BLOCK_ERR_TIMESTAMP_FUTURE",
         }
     }
 }
