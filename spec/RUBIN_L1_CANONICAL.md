@@ -41,11 +41,13 @@ Canonical rule (minimality):
 These constants are consensus-critical defaults for the genesis ruleset:
 
 - `TX_WIRE_VERSION = 2`
+- `WITNESS_DISCOUNT_DIVISOR = 4`
 - `MAX_TX_INPUTS = 1024`
 - `MAX_TX_OUTPUTS = 1024`
 - `MAX_WITNESS_ITEMS = 1024`
 - `MAX_WITNESS_BYTES_PER_TX = 100_000`
 - `MAX_SCRIPT_SIG_BYTES = 32`
+- `MAX_BLOCK_WEIGHT = 4_000_000` weight units
 
 PQC witness canonical sizes (genesis profile):
 
@@ -55,6 +57,11 @@ PQC witness canonical sizes (genesis profile):
 - `SUITE_ID_SLH_DSA_SHAKE_256F = 0x02`
   - `SLH_DSA_SHAKE_256F_PUBKEY_BYTES = 64`
   - `MAX_SLH_DSA_SIG_BYTES = 49_856`
+
+Signature verification cost weights (genesis profile):
+
+- `VERIFY_COST_ML_DSA_87 = 8`
+- `VERIFY_COST_SLH_DSA_SHAKE_256F = 64`
 
 Keyless sentinel witness:
 
@@ -225,3 +232,29 @@ Consensus usage:
 - For invalid transactions (that do not parse canonically), `TxCoreBytes`, `TxBytes`, `txid`, and `wtxid` are
   undefined.
 - Implementations MUST NOT compute or cache identifiers for non-canonically parsed transactions.
+
+## 9. Weight Accounting (Normative)
+
+For any valid transaction `T`:
+
+```text
+base_size = |TxCoreBytes(T)|
+wit_size  = |WitnessBytes(T.witness)|
+ml_count  = count witness items where suite_id = SUITE_ID_ML_DSA_87
+slh_count = count witness items where suite_id = SUITE_ID_SLH_DSA_SHAKE_256F
+sig_cost  = ml_count * VERIFY_COST_ML_DSA_87 + slh_count * VERIFY_COST_SLH_DSA_SHAKE_256F
+weight(T) = WITNESS_DISCOUNT_DIVISOR * base_size + wit_size + sig_cost
+```
+
+Notes:
+
+- `WITNESS_DISCOUNT_DIVISOR = 4` discounts witness bytes relative to non-witness bytes.
+- `sig_cost` exists to account for CPU verification work that is not captured by byte length alone.
+
+For any block `B` with transactions `B.txs[]`:
+
+```text
+sum_weight = sum(weight(T) for each transaction T in B.txs)
+```
+
+`sum_weight MUST be <= MAX_BLOCK_WEIGHT`. Otherwise the block is invalid.
