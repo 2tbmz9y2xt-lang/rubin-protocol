@@ -1,4 +1,4 @@
-# RUBIN L1 CANONICAL (DRAFT)
+# RUBIN L1 CANONICAL
 
 This document is consensus-critical. All requirements expressed with MUST / MUST NOT are mandatory for
 consensus validity.
@@ -38,12 +38,14 @@ Canonical rule (minimality):
 
 ## 4. Consensus Constants (Wire-Level)
 
-These constants are consensus-critical defaults for the genesis ruleset:
+These constants are consensus-critical for this protocol ruleset:
 
 - `TX_WIRE_VERSION = 2`
 - `WITNESS_DISCOUNT_DIVISOR = 4`
 - `TARGET_BLOCK_INTERVAL = 600` seconds
 - `WINDOW_SIZE = 2_016` blocks
+- `COINBASE_MATURITY = 100` blocks
+- `MAX_FUTURE_DRIFT = 7_200` seconds
 - `MAX_TX_INPUTS = 1024`
 - `MAX_TX_OUTPUTS = 1024`
 - `MAX_WITNESS_ITEMS = 1024`
@@ -53,7 +55,20 @@ These constants are consensus-critical defaults for the genesis ruleset:
 - `MAX_ANCHOR_PAYLOAD_SIZE = 65_536` bytes
 - `MAX_ANCHOR_BYTES_PER_BLOCK = 131_072` bytes
 
-PQC witness canonical sizes (genesis profile):
+Monetary constants (consensus-critical):
+
+- `BASE_UNITS_PER_RBN = 100_000_000`
+- `MAX_SUPPLY = 10_000_000_000_000_000` base units (100_000_000 RBN)
+- `SUBSIDY_TOTAL_MINED = 9_900_000_000_000_000` base units (99_000_000 RBN)
+- `SUBSIDY_DURATION_BLOCKS = 1_314_900` blocks
+
+Non-consensus operational defaults (not used for validity):
+
+- `K_CONFIRM_L1 = 8`
+- `K_CONFIRM_BRIDGE = 12`
+- `K_CONFIRM_GOV = 16`
+
+PQC witness canonical sizes:
 
 - `SUITE_ID_ML_DSA_87 = 0x01`
   - `ML_DSA_87_PUBKEY_BYTES = 2592`
@@ -62,7 +77,7 @@ PQC witness canonical sizes (genesis profile):
   - `SLH_DSA_SHAKE_256F_PUBKEY_BYTES = 64`
   - `MAX_SLH_DSA_SIG_BYTES = 49_856`
 
-Signature verification cost weights (genesis profile):
+Signature verification cost weights:
 
 - `VERIFY_COST_ML_DSA_87 = 8`
 - `VERIFY_COST_SLH_DSA_SHAKE_256F = 64`
@@ -129,7 +144,7 @@ WitnessItem {
 
 Rules:
 
-- For genesis ruleset, `tx_kind` MUST equal `0x00`. Any other value MUST be rejected as `TX_ERR_PARSE`.
+- `tx_kind` MUST equal `0x00`. Any other value MUST be rejected as `TX_ERR_PARSE`.
 - For `tx_kind = 0x00`, `da_payload_len` MUST equal `0`. Any other value MUST be rejected as `TX_ERR_PARSE`.
 
 ### 5.3 Syntax Limits (Parsing)
@@ -390,7 +405,7 @@ signature.
 Definitions:
 
 ```text
-hash_of_da_core_fields = SHA3-256("")   # genesis tx_kind=0x00 has no DA core fields
+hash_of_da_core_fields = SHA3-256("")   # tx_kind=0x00 has no DA core fields
 hash_of_all_prevouts = SHA3-256(concat(inputs[i].prev_txid || u32le(inputs[i].prev_vout) for i in [0..input_count-1]))
 hash_of_all_sequences = SHA3-256(concat(u32le(inputs[i].sequence) for i in [0..input_count-1]))
 hash_of_all_outputs = SHA3-256(concat(outputs[j] in TxOutput wire order for j in [0..output_count-1]))
@@ -433,17 +448,28 @@ implementations for the described failure classes:
 
 - Non-minimal CompactSize                          -> `TX_ERR_PARSE`
 - Malformed witness encoding                       -> `TX_ERR_PARSE`
+- Duplicate input outpoint                         -> `TX_ERR_PARSE`
+- Output value > input value                       -> `TX_ERR_VALUE_CONSERVATION`
+- Invalid tx_nonce                                 -> `TX_ERR_TX_NONCE_INVALID`
+- Invalid sequence number                          -> `TX_ERR_SEQUENCE_INVALID`
+- Duplicate nonce                                  -> `TX_ERR_NONCE_REPLAY`
 - Cryptographically invalid signature              -> `TX_ERR_SIG_INVALID`
 - Invalid signature type                           -> `TX_ERR_SIG_ALG_INVALID`
 - Invalid signature length / non-canonical witness -> `TX_ERR_SIG_NONCANONICAL`
 - Witness overflow                                 -> `TX_ERR_WITNESS_OVERFLOW`
 - Invalid covenant_type / covenant encoding        -> `TX_ERR_COVENANT_TYPE_INVALID`
 - Missing UTXO / attempt to spend non-spendable    -> `TX_ERR_MISSING_UTXO`
+- Coinbase immature                                -> `TX_ERR_COINBASE_IMMATURE`
+- Deployment inactive                              -> `TX_ERR_DEPLOYMENT_INACTIVE`
 - Timelock condition not met                       -> `TX_ERR_TIMELOCK_NOT_MET`
 - Invalid prev_block_hash linkage                  -> `BLOCK_ERR_LINKAGE_INVALID`
 - Invalid merkle_root                              -> `BLOCK_ERR_MERKLE_INVALID`
 - PoW invalid                                      -> `BLOCK_ERR_POW_INVALID`
 - Target mismatch                                  -> `BLOCK_ERR_TARGET_INVALID`
+- Timestamp too old (MTP)                          -> `BLOCK_ERR_TIMESTAMP_OLD`
+- Timestamp too far in future                      -> `BLOCK_ERR_TIMESTAMP_FUTURE`
+- Coinbase rule violation                          -> `BLOCK_ERR_COINBASE_INVALID`
+- Coinbase subsidy exceeded                        -> `BLOCK_ERR_SUBSIDY_EXCEEDED`
 - Weight exceedance                                -> `BLOCK_ERR_WEIGHT_EXCEEDED`
 - Anchor bytes exceeded                            -> `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`
 - Malformed block encoding                         -> `BLOCK_ERR_PARSE`
@@ -456,7 +482,7 @@ Error priority (short-circuit):
 
 ## 14. Covenant Type Registry (Normative)
 
-The following `covenant_type` values are valid at genesis:
+The following `covenant_type` values are valid:
 
 - `0x0000` `CORE_P2PK`
 - `0x0001` `CORE_TIMELOCK_V1`
@@ -489,7 +515,7 @@ Semantics:
   - Per-block constraint: sum of `covenant_data_len` across all `CORE_ANCHOR` outputs in a block MUST be
     `<= MAX_ANCHOR_BYTES_PER_BLOCK`; otherwise reject the block as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
 - `CORE_RESERVED_FUTURE`:
-  - Forbidden at genesis; any appearance MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+  - Forbidden; any appearance MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
 
 ## 15. Difficulty Update (Normative)
 
@@ -531,3 +557,205 @@ Any block whose `target` field does not match the expected value is invalid (`BL
 All division is integer division with floor.
 Intermediate products (`target_old * T_actual` and `target_old * 4`) MUST be computed using at least 320-bit
 unsigned integer arithmetic (or arbitrary-precision). Silent truncation is non-conforming.
+
+## 16. Transaction Structural Rules (Normative)
+
+These rules apply after a transaction has been parsed under Transaction Wire v2.
+
+Define `is_coinbase_prevout` for an input `I` as:
+
+- `I.prev_txid` is 32 zero bytes, and
+- `I.prev_vout = 0xffff_ffff`.
+
+For any non-coinbase transaction `T`:
+
+1. `T.tx_nonce` MUST be in `[1, 0xffff_ffff_ffff_ffff]`. Otherwise reject as `TX_ERR_TX_NONCE_INVALID`.
+2. `T.witness.witness_count` MUST equal `T.input_count`. Otherwise reject as `TX_ERR_PARSE`.
+3. No input may use the coinbase prevout encoding. If any input satisfies `is_coinbase_prevout`, reject as
+   `TX_ERR_PARSE`.
+4. For genesis covenant set (Section 14 only), every input MUST have `script_sig_len = 0`. Otherwise reject as
+   `TX_ERR_PARSE`.
+5. For each input, `sequence` MUST be `<= 0x7fffffff`. Otherwise reject as `TX_ERR_SEQUENCE_INVALID`.
+6. All input outpoints `(prev_txid, prev_vout)` within the transaction MUST be unique. Otherwise reject as
+   `TX_ERR_PARSE`.
+
+For coinbase transaction `T` (the first transaction in a block at height `h = height(B)`):
+
+1. `T` MUST satisfy `is_coinbase_tx(T)` (Section 10.5). Otherwise the block is invalid (`BLOCK_ERR_COINBASE_INVALID`).
+2. `T.locktime` MUST equal `u32le(h)` (height-commitment). Otherwise the block is invalid (`BLOCK_ERR_COINBASE_INVALID`).
+
+`locktime` has no general transaction-level semantics in this ruleset. The only consensus use of `locktime` is the
+coinbase height-commitment above.
+
+## 17. Replay-Domain Checks (Normative)
+
+For each non-coinbase transaction `T` in block order:
+
+1. Let `N_seen` be the set of `tx_nonce` values already observed in prior non-coinbase transactions of the same block.
+2. If `T.tx_nonce` already appears in `N_seen`, reject as `TX_ERR_NONCE_REPLAY`.
+
+Cross-block replay is prevented by UTXO exhaustion: once an input outpoint is consumed, it is removed from the
+spendable UTXO set and cannot be spent again.
+
+## 18. UTXO State Model (Normative)
+
+Define an outpoint as:
+
+```text
+Outpoint = (txid: bytes32, vout: u32le)
+```
+
+Define a spendable UTXO entry as:
+
+```text
+UtxoEntry = (value: u64, covenant_type: u16, covenant_data: bytes, creation_height: u64, created_by_coinbase: bool)
+```
+
+Let `U_h : Outpoint -> UtxoEntry` be the spendable UTXO map at chain height `h`.
+
+State transition is defined by applying a block's transactions sequentially in block order:
+
+```text
+U_work := U_{h-1}
+for i = 0..(tx_count-1):
+  T := B_h.txs[i]
+  if i = 0:
+    U_work := ApplyCoinbase(U_work, T, h)
+  else:
+    U_work := SpendTx(U_work, T, B_h, h)
+U_h := U_work
+```
+
+If any transaction application rejects with an error, the entire block is invalid and MUST NOT advance state.
+
+### 18.1 Coinbase Maturity (Normative)
+
+If a referenced UTXO entry `e` has `created_by_coinbase = true` and `h < e.creation_height + COINBASE_MATURITY`,
+reject the spending transaction as `TX_ERR_COINBASE_IMMATURE`.
+
+### 18.2 Covenant Evaluation (Genesis Covenants) (Normative)
+
+For each non-coinbase input at index `i`, let `w = T.witness.witnesses[i]` be the witness item paired with that input
+(Section 16 requires `witness_count = input_count`).
+
+Let `e = U_work[(prev_txid, prev_vout)]` be the referenced UTXO entry. If missing, reject as `TX_ERR_MISSING_UTXO`.
+
+Then enforce:
+
+1. If `e.covenant_type = CORE_P2PK`:
+   - Require `w.suite_id = SUITE_ID_ML_DSA_87 (0x01)`. If `w.suite_id = 0x02`, reject as `TX_ERR_DEPLOYMENT_INACTIVE`.
+     Otherwise reject as `TX_ERR_SIG_ALG_INVALID`.
+   - Let `key_id = e.covenant_data[1:33]` (after the suite_id byte); require `e.covenant_data_len = 33` and the first
+     byte matches `w.suite_id`. Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+   - Require `SHA3-256(w.pubkey) = key_id`. Otherwise reject as `TX_ERR_SIG_INVALID`.
+   - Require signature verification of `w.signature` over `digest` (Section 12) succeeds. Otherwise reject as
+     `TX_ERR_SIG_INVALID`.
+2. If `e.covenant_type = CORE_TIMELOCK_V1`:
+   - Require `w.suite_id = SUITE_ID_SENTINEL (0x00)`. Otherwise reject as `TX_ERR_SIG_ALG_INVALID`.
+   - Parse `lock_mode:u8 || lock_value:u64le` from `e.covenant_data` (must be exactly 9 bytes). Otherwise reject as
+     `TX_ERR_COVENANT_TYPE_INVALID`.
+   - If `lock_mode = 0x00` (height lock): require `h >= lock_value`. Otherwise reject as `TX_ERR_TIMELOCK_NOT_MET`.
+   - If `lock_mode = 0x01` (timestamp lock): require `timestamp(B_h) >= lock_value`. Otherwise reject as
+     `TX_ERR_TIMELOCK_NOT_MET`.
+   - Any other `lock_mode` MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+3. If `e.covenant_type = CORE_ANCHOR`: this output is non-spendable. Any attempt to spend it MUST be rejected as
+   `TX_ERR_MISSING_UTXO`.
+4. Any other covenant type MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+
+## 19. Coinbase and Subsidy (Normative)
+
+Every block MUST contain exactly one coinbase transaction and it MUST be the first transaction.
+
+Any missing coinbase or additional coinbase transaction(s) MUST be rejected as `BLOCK_ERR_COINBASE_INVALID`.
+
+### 19.1 Subsidy Schedule (Normative)
+
+Let:
+
+- `N = SUBSIDY_DURATION_BLOCKS`
+- `TOTAL = SUBSIDY_TOTAL_MINED`
+- `BASE = floor(TOTAL / N)`
+- `REM = TOTAL mod N`
+
+Define:
+
+```text
+block_subsidy(h) = 0,        for h >= N
+block_subsidy(h) = BASE + 1, for h < REM
+block_subsidy(h) = BASE,     for REM <= h < N
+```
+
+Arithmetic MUST use integer division / modulo; no floating-point is permitted.
+
+### 19.2 Coinbase Value Bound (Normative)
+
+For a block at height `h > 0`:
+
+```text
+sum_coinbase_outputs_value <= block_subsidy(h) + sum_fees
+```
+
+Where `sum_fees` is:
+
+```text
+sum_fees = Σ (sum_in(T) - sum_out(T)) over all non-coinbase transactions T in the block
+```
+
+Genesis exception:
+
+- For height `h = 0`, the coinbase value bound is not evaluated. Genesis outputs are chain-instance allocations fixed
+  by the published genesis bytes.
+
+If the coinbase value bound is violated, the block MUST be rejected as `BLOCK_ERR_SUBSIDY_EXCEEDED`.
+
+## 20. Value Conservation (Normative)
+
+For each non-coinbase transaction `T`:
+
+1. Let `sum_in` be the sum of referenced input values.
+2. Let `sum_out` be the sum of `T.outputs[j].value` over all outputs `j`.
+3. If `sum_out > sum_in`, reject as `TX_ERR_VALUE_CONSERVATION`.
+4. Arithmetic MUST be exact. Any overflow MUST be rejected as `TX_ERR_PARSE`.
+
+## 21. Block Timestamp Rules (Normative)
+
+Timestamp is a 64-bit unsigned integer representing seconds since UNIX epoch.
+
+For block `B_h` with `h > 0`:
+
+1. Let `k = min(11, h)` and define the multiset:
+
+   ```text
+   S_h = { timestamp(B_{h-1}), timestamp(B_{h-2}), ..., timestamp(B_{h-k}) }
+   ```
+
+2. Let `median(S_h)` be defined as:
+   - sort `S_h` in non-decreasing order;
+   - select the element at index `floor((|S_h| - 1)/2)` (the lower median).
+
+3. `timestamp(B_h)` MUST be strictly greater than `median(S_h)`. If violated, reject as `BLOCK_ERR_TIMESTAMP_OLD`.
+
+4. `timestamp(B_h)` MUST be `<= median(S_h) + MAX_FUTURE_DRIFT`. If violated, reject as `BLOCK_ERR_TIMESTAMP_FUTURE`.
+
+For genesis (`h = 0`), these rules are not evaluated.
+
+## 22. Chainwork and Fork Choice (Non-Validation Procedure)
+
+Fork choice is not part of block validity. Nodes select a canonical chain among valid candidates.
+
+Define per-block work:
+
+```text
+work(B) = floor(2^256 / target(B))
+```
+
+Define cumulative chainwork:
+
+```text
+ChainWork(chain) = Σ work(B_i)
+```
+
+Canonical chain selection:
+
+1. Prefer the valid chain with maximal `ChainWork`.
+2. If `ChainWork` is equal, choose the chain whose tip `block_hash` is lexicographically smaller (bytewise big-endian).
