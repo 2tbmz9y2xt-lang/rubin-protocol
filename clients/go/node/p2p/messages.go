@@ -14,6 +14,12 @@ const (
 	CmdTx         = "tx"
 	CmdPing       = "ping"
 	CmdPong       = "pong"
+
+	// Compact blocks (spec/RUBIN_L1_P2P_PROTOCOL_v1.1.md §5.3.1).
+	CmdSendCmpct   = "sendcmpct"
+	CmdCmpctBlock  = "cmpctblock"
+	CmdGetBlockTxn = "getblocktxn"
+	CmdBlockTxn    = "blocktxn"
 )
 
 const (

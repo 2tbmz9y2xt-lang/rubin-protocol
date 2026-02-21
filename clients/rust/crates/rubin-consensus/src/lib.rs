@@ -19,7 +19,9 @@ pub use encode::{
     block_header_bytes, tx_bytes, tx_no_witness_bytes, tx_output_bytes, witness_bytes,
     witness_item_bytes,
 };
-pub use parse::{parse_block_bytes, parse_tx_bytes};
+pub use parse::{
+    parse_block_bytes, parse_block_header_bytes, parse_tx_bytes, parse_tx_bytes_prefix,
+};
 pub use pow::block_header_hash;
 pub use sighash::sighash_v1_digest;
 pub use validate::{

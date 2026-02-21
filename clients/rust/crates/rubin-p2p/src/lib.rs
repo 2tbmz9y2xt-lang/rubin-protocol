@@ -1,3 +1,4 @@
+pub mod compactblock;
 pub mod compactsize;
 pub mod envelope;
 pub mod reject;

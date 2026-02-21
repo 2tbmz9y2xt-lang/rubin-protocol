@@ -36,6 +36,18 @@ type PeerHandler interface {
 	OnTx(peer *Peer, txBytes []byte) error
 }
 
+// CompactBlockHandler is an optional extension interface for peers that
+// implement compact-block relay (spec/RUBIN_L1_P2P_PROTOCOL_v1.1.md §5.3.1).
+//
+// If the provided handler does not implement this interface, compact-block
+// messages are ignored (like unknown commands).
+type CompactBlockHandler interface {
+	OnSendCmpct(peer *Peer, req *SendCmpctPayload) error
+	OnCmpctBlock(peer *Peer, msg *CmpctBlockPayload) error
+	OnGetBlockTxn(peer *Peer, req *GetBlockTxnPayload) error
+	OnBlockTxn(peer *Peer, msg *BlockTxnPayload) error
+}
+
 type PeerConfig struct {
 	Magic        uint32
 	LocalChainID [32]byte
@@ -85,6 +97,7 @@ func (p *Peer) Run(ctx context.Context, h PeerHandler) error {
 	if h == nil {
 		return fmt.Errorf("p2p: peer: nil handler")
 	}
+	ch, _ := h.(CompactBlockHandler)
 	if err := p.Handshake(); err != nil {
 		return err
 	}
@@ -228,6 +241,55 @@ func (p *Peer) Run(ctx context.Context, h PeerHandler) error {
 		case CmdTx:
 			if err := h.OnTx(p, msg.Payload); err != nil {
 				p.Ban.Add(now, 5)
+			}
+		case CmdSendCmpct:
+			if ch == nil {
+				continue
+			}
+			req, err := DecodeSendCmpctPayload(msg.Payload)
+			if err != nil {
+				p.Ban.Add(now, 10)
+				continue
+			}
+			if err := ch.OnSendCmpct(p, req); err != nil {
+				// Policy-only errors: do not ban by default.
+				continue
+			}
+		case CmdCmpctBlock:
+			if ch == nil {
+				continue
+			}
+			cb, err := DecodeCmpctBlockPayload(msg.Payload)
+			if err != nil {
+				p.Ban.Add(now, 10)
+				continue
+			}
+			if err := ch.OnCmpctBlock(p, cb); err != nil {
+				p.Ban.Add(now, 10)
+			}
+		case CmdGetBlockTxn:
+			if ch == nil {
+				continue
+			}
+			req, err := DecodeGetBlockTxnPayload(msg.Payload)
+			if err != nil {
+				p.Ban.Add(now, 10)
+				continue
+			}
+			if err := ch.OnGetBlockTxn(p, req); err != nil {
+				p.Ban.Add(now, 2)
+			}
+		case CmdBlockTxn:
+			if ch == nil {
+				continue
+			}
+			resp, err := DecodeBlockTxnPayload(msg.Payload)
+			if err != nil {
+				p.Ban.Add(now, 10)
+				continue
+			}
+			if err := ch.OnBlockTxn(p, resp); err != nil {
+				p.Ban.Add(now, 2)
 			}
 		default:
 			// Unknown command: ignore, no ban-score.

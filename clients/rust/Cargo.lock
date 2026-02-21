@@ -323,6 +323,7 @@ dependencies = [
  "hex",
  "rubin-consensus",
  "rubin-crypto",
+ "siphasher",
 ]
 
 [[package]]
@@ -408,6 +409,12 @@ dependencies = [
  "digest",
  "keccak",
 ]
+
+[[package]]
+name = "siphasher"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2aa850e253778c88a04c3d7323b043aeda9d3e30d5971937c1855769763678e"
 
 [[package]]
 name = "syn"

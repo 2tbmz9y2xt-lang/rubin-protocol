@@ -182,6 +182,18 @@ func ParseTxBytes(b []byte) (*Tx, error) {
 	return tx, nil
 }
 
+// ParseTxBytesPrefix parses a single transaction from the start of b and returns
+// the number of bytes consumed. This is used by P2P compact-block messages where
+// multiple TxBytes are concatenated without explicit per-tx length prefixes.
+func ParseTxBytesPrefix(b []byte) (*Tx, int, error) {
+	cur := newCursor(b)
+	tx, err := ParseTxBytesFromCursor(cur)
+	if err != nil {
+		return nil, 0, err
+	}
+	return tx, cur.pos, nil
+}
+
 func ParseBlockHeader(cur *cursor) (BlockHeader, error) {
 	version, err := cur.readU32LE()
 	if err != nil {

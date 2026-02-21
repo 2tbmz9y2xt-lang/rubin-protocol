@@ -14,6 +14,28 @@ pub fn parse_tx_bytes(bytes: &[u8]) -> Result<Tx, String> {
     Ok(tx)
 }
 
+/// Parse a canonical v1.1 block header (116 bytes) and reject trailing bytes.
+///
+/// This is intended for P2P `headers` / `cmpctblock` payload parsing.
+pub fn parse_block_header_bytes(bytes: &[u8]) -> Result<BlockHeader, String> {
+    let mut cursor = Cursor::new(bytes);
+    let header = parse_block_header_from_cursor(&mut cursor)?;
+    if cursor.pos != bytes.len() {
+        return Err(BLOCK_ERR_PARSE.into());
+    }
+    Ok(header)
+}
+
+/// Parse a single Tx from the start of `bytes` and return the number of bytes consumed.
+///
+/// This is used by P2P compact-block messages where multiple TxBytes are concatenated
+/// without explicit per-tx length prefixes.
+pub fn parse_tx_bytes_prefix(bytes: &[u8]) -> Result<(Tx, usize), String> {
+    let mut cursor = Cursor::new(bytes);
+    let tx = parse_tx_from_cursor(&mut cursor)?;
+    Ok((tx, cursor.pos))
+}
+
 pub(crate) fn parse_tx_from_cursor(cursor: &mut Cursor<'_>) -> Result<Tx, String> {
     let version = cursor.read_u32le()?;
     if version != TX_VERSION_V2 {
