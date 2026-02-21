@@ -32,10 +32,12 @@ In case of conflict, RUBIN_L1_CANONICAL.md takes precedence.
 | Metric | Value | Notes |
 |--------|-------|-------|
 | Blocks per year | 262,800 | 365 × 86400 / 120 |
-| L1 TPS | ~19 | ML-DSA-87, 1-in/1-out, ~8000 wu/tx |
+| L1 TPS (ML-DSA-87) | ~39 | 4,704 tx/block / 120s; weight = 4×104 + 7,227 + 1 + 8 = 7,652 wu/tx |
+| L1 TPS (SLH-DSA fallback) | ~6 | 714 tx/block / 120s; weight = 4×104 + 49,926 + 1 + 64 = 50,407 wu/tx |
 | L2 TPS | ~2,667 | 32 MB DA / 120 s / 100 B/tx |
 | DA throughput | 0.267 MB/s | 32,000,000 / 120 |
 | Orphan rate | ~0.02% | compact blocks |
+| TPS drop at SLH-DSA activation | 6.6× | emergency fallback only |
 
 ---
 
