@@ -18,7 +18,7 @@ are mandatory. SHOULD / MAY are recommendations.
 | TiB    | 2^40 bytes |
 
 Example: 32_000_000 bytes = 32 MB = 30.5 MiB.
-Note for hardware provisioning: 18.05 TiB raw data requires a disk marketed as ~20 TB.
+Note for hardware provisioning: 17.21 TiB raw data requires a disk marketed as ~20 TB.
 
 ---
 
@@ -28,7 +28,7 @@ Note for hardware provisioning: 18.05 TiB raw data requires a disk marketed as ~
 |-----------|-------|-------|
 | `TARGET_BLOCK_INTERVAL` | 120 s | |
 | `MAX_BLOCK_WEIGHT` | 68_000_000 wu | Single unified weight pool; DA has a *separate* byte cap (MAX_DA_BYTES_PER_BLOCK) |
-| `MAX_BLOCK_BYTES` | 75_497_472 bytes (= 72 MiB) | Operational P2P parser cap; exceeds consensus weight limit by design (safety margin) |
+| `MAX_BLOCK_BYTES` | 72_000_000 bytes (= 72 MB) | Operational P2P parser cap; exceeds consensus weight limit by design (safety margin) |
 | `MAX_DA_BYTES_PER_BLOCK` | 32_000_000 bytes (= 30.5 MiB) | |
 | `WINDOW_SIZE` | 10_080 blocks | retarget = 14 days |
 | `MIN_DA_RETENTION_BLOCKS` | 15_120 blocks | DA pruning window = 21 days |
@@ -73,14 +73,14 @@ Finality bridge     = 24 min (FINALITY_K_BRIDGE = 12)
 Storage (100% fill rate, max load):
 
   DA-only / year       = 32_000_000 x 262_800 / 2^40  = 7.65 TiB
-  Full block / year    = 75_497_472 x 262_800 / 2^40  = 18.05 TiB
+  Full block / year    = 72_000_000 x 262_800 / 2^40  = 17.21 TiB
   Live window DA       = 32_000_000 x 15_120  / 2^30  = 451 GiB
-  Live window full     = 75_497_472 x 15_120  / 2^40  = 1.04 TiB
+  Live window full     = 72_000_000 x 15_120  / 2^40  = 0.99 TiB
 
 Storage (30% fill rate, non-normative target):
 
   DA-only / year       = 7.65  x 0.3 = 2.29 TiB
-  Full block / year    = 18.05 x 0.3 = 5.41 TiB
+  Full block / year    = 17.21 x 0.3 = 5.16 TiB
   Live window DA       = 451   x 0.3 = 135  GiB
 
 Formula: storage = max_storage x fill_rate

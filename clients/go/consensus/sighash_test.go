@@ -8,7 +8,7 @@ import (
 
 func TestSighashV1Digest_Smoke(t *testing.T) {
 	var txb bytes.Buffer
-	_ = binary.Write(&txb, binary.LittleEndian, uint32(TX_WIRE_VERSION))
+	_ = binary.Write(&txb, binary.LittleEndian, uint32(1))
 	txb.WriteByte(0x00) // tx_kind
 	_ = binary.Write(&txb, binary.LittleEndian, uint64(0))
 	txb.WriteByte(0x01) // input_count
@@ -46,7 +46,7 @@ func TestSighashV1Digest_Smoke(t *testing.T) {
 	preimage := make([]byte, 0, 256)
 	preimage = append(preimage, []byte("RUBINv1-sighash/")...)
 	preimage = append(preimage, chainID[:]...)
-	preimage = appendU32le(preimage, TX_WIRE_VERSION)
+	preimage = appendU32le(preimage, 1)
 	preimage = append(preimage, 0x00) // tx_kind
 	preimage = appendU64le(preimage, 0)
 	preimage = append(preimage, hashOfDaCoreFields[:]...)

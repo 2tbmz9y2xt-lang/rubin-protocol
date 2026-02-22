@@ -1,0 +1,57 @@
+{
+  "gate": "CV-BLOCK-BASIC",
+  "vectors": [
+    {
+      "id": "CV-B-01",
+      "op": "block_basic_check",
+      "expect_ok": true,
+      "block_hex": "010000001111111111111111111111111111111111111111111111111111111111111111cc91bf5776e6097dd079c8bc871c8af0b291bb436cb222b4df5b67dca7ebf15e0100000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff070000000000000001010000000000000000000000000000000000000000",
+      "expected_prev_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "expected_target": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "expect_block_hash": "f07e1430009d59dd66a36b555ca3d99bbedc468458ace6e2c480838b699e1644"
+    },
+    {
+      "id": "CV-B-02",
+      "op": "block_basic_check",
+      "expect_ok": false,
+      "expect_err": "BLOCK_ERR_LINKAGE_INVALID",
+      "block_hex": "010000001111111111111111111111111111111111111111111111111111111111111111cc91bf5776e6097dd079c8bc871c8af0b291bb436cb222b4df5b67dca7ebf15e0100000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff070000000000000001010000000000000000000000000000000000000000",
+      "expected_prev_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "expected_target": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "id": "CV-B-03",
+      "op": "block_basic_check",
+      "expect_ok": false,
+      "expect_err": "BLOCK_ERR_MERKLE_INVALID",
+      "block_hex": "0100000011111111111111111111111111111111111111111111111111111111111111113391bf5776e6097dd079c8bc871c8af0b291bb436cb222b4df5b67dca7ebf15e0100000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff070000000000000001010000000000000000000000000000000000000000",
+      "expected_prev_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "expected_target": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "id": "CV-B-04",
+      "op": "block_basic_check",
+      "expect_ok": false,
+      "expect_err": "BLOCK_ERR_POW_INVALID",
+      "block_hex": "010000001111111111111111111111111111111111111111111111111111111111111111cc91bf5776e6097dd079c8bc871c8af0b291bb436cb222b4df5b67dca7ebf15e01000000000000000000000000000000000000000000000000000000000000000000000000000000070000000000000001010000000000000000000000000000000000000000",
+      "expected_prev_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "expected_target": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "id": "CV-B-05",
+      "op": "block_basic_check",
+      "expect_ok": false,
+      "expect_err": "BLOCK_ERR_TARGET_INVALID",
+      "block_hex": "010000001111111111111111111111111111111111111111111111111111111111111111cc91bf5776e6097dd079c8bc871c8af0b291bb436cb222b4df5b67dca7ebf15e0100000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff070000000000000001010000000000000000000000000000000000000000",
+      "expected_prev_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "expected_target": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "id": "CV-B-06",
+      "op": "block_basic_check",
+      "expect_ok": false,
+      "expect_err": "BLOCK_ERR_PARSE",
+      "block_hex": "010000001111111111111111111111111111111111111111111111111111111111111111cc91bf5776e6097dd079c8bc871c8af0b291bb436cb222b4df5b67dca7ebf15e0100000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff07000000000000000101000000000000000000000000000000000000000000"
+    }
+  ]
+}

@@ -17,7 +17,7 @@ In case of conflict, RUBIN_L1_CANONICAL.md takes precedence.
 |-----------|-------|--------|
 | `TARGET_BLOCK_INTERVAL` | 120 s | CANONICAL §4 |
 | `MAX_BLOCK_WEIGHT` | 68,000,000 wu | CANONICAL §4 |
-| `MAX_BLOCK_BYTES` | 75,497,472 bytes (72 MiB) | CANONICAL §4 |
+| `MAX_BLOCK_BYTES` | 72,000,000 bytes (72 MB) | CANONICAL §4 |
 | `MAX_DA_BYTES_PER_BLOCK` | 32,000,000 bytes (30.5 MiB) | CANONICAL §4 |
 | `WINDOW_SIZE` (retarget) | 10,080 blocks (14 days) | CANONICAL §4 |
 | `MIN_DA_RETENTION_BLOCKS` | 15,120 blocks (21 days) | COMPACT §1 |
@@ -131,8 +131,8 @@ Retained permanently: TXID, DA_Core_Fields, SHA3-256(DA_Payload).
 
 | Fill rate | DA only / year | Full block / year | Live window DA |
 |-----------|---------------|-------------------|----------------|
-| 100% (max load) | 7.65 TiB | 18.05 TiB | 451 GiB |
-| 30% (planning target) | 2.29 TiB | 5.41 TiB | 135 GiB |
+| 100% (max load) | 7.65 TiB | 17.21 TiB | 451 GiB |
+| 30% (planning target) | 2.29 TiB | 5.16 TiB | 135 GiB |
 
 Recommended: NAS or object storage with ≥ 20 TB usable at launch,
 expandable. This is an operator cost, not a protocol requirement.
@@ -186,15 +186,17 @@ Storage depends on number of monitored channels; no protocol minimum.
 
 ---
 
-## 10. Covenant Types (Genesis Active)
+## 10. Covenant Types (Genesis Registry)
 
 | Code | Name | Description |
 |------|------|-------------|
 | 0x0000 | CORE_P2PK | Standard pay-to-public-key (ML-DSA-87) |
-| 0x0001 | CORE_TIMELOCK_V1 | Height or timestamp lock |
+| 0x0001 | CORE_TIMELOCK | Height or timestamp lock |
 | 0x0002 | CORE_ANCHOR | Non-spendable data anchor |
-| 0x0103 | CORE_DA_COMMIT | DA payload commitment (non-spendable) |
-| 0x00ff | CORE_RESERVED_FUTURE | Forbidden at genesis |
+| 0x00FF | CORE_RESERVED_FUTURE | Forbidden — TX_ERR_COVENANT_TYPE_INVALID |
+| 0x0100 | CORE_HTLC | RESERVED — spec pending (Q-S001) → TX_ERR_COVENANT_TYPE_INVALID |
+| 0x0101 | CORE_VAULT | Consensus-native — semantics pending Q-V01 approval → TX_ERR_COVENANT_TYPE_INVALID until ratified |
+| 0x0103 | CORE_DA_COMMIT | DA payload commitment (non-spendable, tx_kind=0x01 only) |
 
 ---
 

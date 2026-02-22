@@ -1,6 +1,6 @@
 use rubin_consensus::{
     block_hash, compact_shortid, merkle_root_txids, parse_tx, pow_check, retarget_v1,
-    sighash_v1_digest, ErrorCode,
+    sighash_v1_digest, validate_block_basic, validate_tx_covenants_genesis, ErrorCode,
 };
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +10,9 @@ struct Request {
 
     #[serde(default)]
     tx_hex: String,
+
+    #[serde(default)]
+    block_hex: String,
 
     #[serde(default)]
     txids: Vec<String>,
@@ -46,6 +49,12 @@ struct Request {
 
     #[serde(default)]
     timestamp_last: u64,
+
+    #[serde(default)]
+    expected_prev_hash: String,
+
+    #[serde(default)]
+    expected_target: String,
 }
 
 #[derive(Serialize)]
@@ -513,6 +522,209 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: Some(hex::encode(new_t)),
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(err_code(e.code)),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+            }
+        }
+        "block_basic_check" => {
+            let block_bytes = match hex::decode(req.block_hex) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad block".to_string()),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+
+            let expected_prev = if req.expected_prev_hash.is_empty() {
+                None
+            } else {
+                let b = match hex::decode(req.expected_prev_hash) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let resp = Response {
+                            ok: false,
+                            err: Some("bad expected_prev_hash".to_string()),
+                            txid: None,
+                            wtxid: None,
+                            merkle_root: None,
+                            digest: None,
+                            consumed: None,
+                            block_hash: None,
+                            target_new: None,
+                        };
+                        let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                        return;
+                    }
+                };
+                if b.len() != 32 {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad expected_prev_hash".to_string()),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+                let mut h = [0u8; 32];
+                h.copy_from_slice(&b);
+                Some(h)
+            };
+
+            let expected_target = if req.expected_target.is_empty() {
+                None
+            } else {
+                let b = match hex::decode(req.expected_target) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let resp = Response {
+                            ok: false,
+                            err: Some("bad expected_target".to_string()),
+                            txid: None,
+                            wtxid: None,
+                            merkle_root: None,
+                            digest: None,
+                            consumed: None,
+                            block_hash: None,
+                            target_new: None,
+                        };
+                        let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                        return;
+                    }
+                };
+                if b.len() != 32 {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad expected_target".to_string()),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+                let mut h = [0u8; 32];
+                h.copy_from_slice(&b);
+                Some(h)
+            };
+
+            match validate_block_basic(&block_bytes, expected_prev, expected_target) {
+                Ok(summary) => {
+                    let resp = Response {
+                        ok: true,
+                        err: None,
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: Some(hex::encode(summary.block_hash)),
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(err_code(e.code)),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+            }
+        }
+        "covenant_genesis_check" => {
+            let tx_bytes = match hex::decode(req.tx_hex) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad hex".to_string()),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+
+            let tx = match parse_tx(&tx_bytes) {
+                Ok((tx, _txid, _wtxid, _n)) => tx,
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(err_code(e.code)),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+
+            match validate_tx_covenants_genesis(&tx) {
+                Ok(()) => {
+                    let resp = Response {
+                        ok: true,
+                        err: None,
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }

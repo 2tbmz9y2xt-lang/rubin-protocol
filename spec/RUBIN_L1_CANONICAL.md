@@ -6,8 +6,10 @@ consensus validity.
 ## 1. Genesis Rule (Transaction Wire)
 
 - "Transaction wire" is the byte-level transaction serialization used in blocks and P2P relay.
-- The chain uses **Transaction Wire version 1 at genesis**.
-- Any node that does not implement Transaction Wire version 1 cannot validate the chain.
+- The chain uses a **single transaction wire format from genesis**.
+- `tx_kind` is the only transaction-shape selector. Wire-level activation by transaction version is not used.
+- The `version` field is committed into `TxCoreBytes`, `txid`, and sighash preimages, but MUST NOT be interpreted as
+  a deployment gate.
 
 ## 2. Primitive Encodings
 
@@ -40,7 +42,6 @@ Canonical rule (minimality):
 
 These constants are consensus-critical for this protocol ruleset:
 
-- `TX_WIRE_VERSION = 1`
 - `WITNESS_DISCOUNT_DIVISOR = 4`
 - `TARGET_BLOCK_INTERVAL = 120` seconds
 - `WINDOW_SIZE = 10_080` blocks
@@ -74,11 +75,13 @@ Non-consensus operational defaults (not used for validity):
 - `K_CONFIRM_L1 = 8`
 - `K_CONFIRM_BRIDGE = 12`
 - `K_CONFIRM_GOV = 16`
+- `MIN_DA_RETENTION_BLOCKS = 15_120` blocks (21 days at 120s per block)
 
 Non-consensus relay policy defaults (not used for validity):
 
+- `MAX_BLOCK_BYTES = 72_000_000`
 - `MAX_WITNESS_ITEM_BYTES = 65_000`
-- `MAX_RELAY_MSG_BYTES = 100_663_296`
+- `MAX_RELAY_MSG_BYTES = 96_000_000`
 - `MIN_RELAY_FEE_RATE = 1`
 
 PQC witness canonical sizes:
@@ -99,7 +102,7 @@ Keyless sentinel witness:
 
 - `SUITE_ID_SENTINEL = 0x00` (reserved; MUST NOT be used for cryptographic verification)
 
-## 5. Transaction Wire (Version 1)
+## 5. Transaction Wire
 
 ### 5.1 Transaction Data Structures
 
@@ -187,19 +190,19 @@ Rules:
 
 - `tx_kind` MUST be one of `0x00`, `0x01`, or `0x02`. Any other value MUST be rejected as `TX_ERR_PARSE`.
 - For `tx_kind = 0x00`, `da_payload_len` MUST equal `0`. Any other value MUST be rejected as `TX_ERR_PARSE`.
-- For `tx_kind = 0x01`, `da_payload_len MUST be <= MAX_DA_MANIFEST_BYTES_PER_TX`. Otherwise reject as `TX_ERR_PARSE`.
+- For `tx_kind = 0x01`, `da_payload` is the DA batch manifest (application-layer metadata for the L2 operator).
+  `da_payload_len MUST be <= MAX_DA_MANIFEST_BYTES_PER_TX`. Otherwise reject as `TX_ERR_PARSE`.
 - For `tx_kind = 0x02`, `da_payload_len MUST be <= CHUNK_BYTES`. Otherwise reject as `TX_ERR_PARSE`.
 
 ### 5.3 Syntax Limits (Parsing)
 
 For any transaction `T`:
 
-1. `T.version` MUST equal `TX_WIRE_VERSION`. Otherwise reject as `TX_ERR_PARSE`.
-2. `input_count MUST be <= MAX_TX_INPUTS`. Otherwise reject as `TX_ERR_PARSE`.
-3. `output_count MUST be <= MAX_TX_OUTPUTS`. Otherwise reject as `TX_ERR_PARSE`.
-4. `script_sig_len MUST be <= MAX_SCRIPT_SIG_BYTES`. Otherwise reject as `TX_ERR_PARSE`.
-5. `witness.witness_count MUST be <= MAX_WITNESS_ITEMS`. Otherwise reject as `TX_ERR_WITNESS_OVERFLOW`.
-6. `WitnessBytes(T.witness) MUST be <= MAX_WITNESS_BYTES_PER_TX`. Otherwise reject as `TX_ERR_WITNESS_OVERFLOW`.
+1. `input_count MUST be <= MAX_TX_INPUTS`. Otherwise reject as `TX_ERR_PARSE`.
+2. `output_count MUST be <= MAX_TX_OUTPUTS`. Otherwise reject as `TX_ERR_PARSE`.
+3. `script_sig_len MUST be <= MAX_SCRIPT_SIG_BYTES`. Otherwise reject as `TX_ERR_PARSE`.
+4. `witness.witness_count MUST be <= MAX_WITNESS_ITEMS`. Otherwise reject as `TX_ERR_WITNESS_OVERFLOW`.
+5. `WitnessBytes(T.witness) MUST be <= MAX_WITNESS_BYTES_PER_TX`. Otherwise reject as `TX_ERR_WITNESS_OVERFLOW`.
 
 Where `WitnessBytes(WitnessSection)` is the exact serialized byte length of:
 
@@ -235,7 +238,7 @@ If multiple parsing errors exist, implementations MUST apply checks in this orde
 applicable error code:
 
 1. CompactSize minimality and integer decode bounds (`TX_ERR_PARSE`).
-2. `version` / `tx_kind` / `da_payload_len` rules (`TX_ERR_PARSE`).
+2. `tx_kind` / `da_payload_len` rules (`TX_ERR_PARSE`).
 3. Input/output/script_sig length bounds (`TX_ERR_PARSE`).
 4. Witness section item count / total bytes bounds (`TX_ERR_WITNESS_OVERFLOW`).
 5. Witness item canonicalization (`TX_ERR_PARSE` / `TX_ERR_SIG_NONCANONICAL` / `TX_ERR_SIG_ALG_INVALID`).
@@ -437,10 +440,10 @@ Coinbase economics (subsidy, maturity, and fee rules) are defined in later secti
 Definition:
 
 ```text
-chain_id = SHA3-256(serialized_genesis_without_chain_id_field)
+chain_id = SHA3-256(serialized_genesis_for_chain_id)
 ```
 
-Where `serialized_genesis_without_chain_id_field` is:
+Where `serialized_genesis_for_chain_id` is:
 
 ```text
 ASCII("RUBIN-GENESIS-v1") ||
@@ -517,7 +520,6 @@ implementations for the described failure classes:
 - Invalid covenant_type / covenant encoding        -> `TX_ERR_COVENANT_TYPE_INVALID`
 - Missing UTXO / attempt to spend non-spendable    -> `TX_ERR_MISSING_UTXO`
 - Coinbase immature                                -> `TX_ERR_COINBASE_IMMATURE`
-- Deployment inactive                              -> `TX_ERR_DEPLOYMENT_INACTIVE`
 - Timelock condition not met                       -> `TX_ERR_TIMELOCK_NOT_MET`
 - Invalid prev_block_hash linkage                  -> `BLOCK_ERR_LINKAGE_INVALID`
 - Invalid merkle_root                              -> `BLOCK_ERR_MERKLE_INVALID`
@@ -532,6 +534,8 @@ implementations for the described failure classes:
 - DA set incomplete (commit without all chunks)    -> `BLOCK_ERR_DA_INCOMPLETE`
 - DA chunk hash mismatch                           -> `BLOCK_ERR_DA_CHUNK_HASH_INVALID`
 - DA set orphan chunk (chunk without commit)       -> `BLOCK_ERR_DA_SET_INVALID`
+- DA duplicate commit for same da_id              -> `BLOCK_ERR_DA_SET_INVALID`
+- DA payload commitment mismatch or ambiguous      -> `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID`
 - DA batch count exceeded                          -> `BLOCK_ERR_DA_BATCH_EXCEEDED`
 - Malformed block encoding                         -> `BLOCK_ERR_PARSE`
 
@@ -546,12 +550,15 @@ Error priority (short-circuit):
 The following `covenant_type` values are valid:
 
 - `0x0000` `CORE_P2PK`
-- `0x0001` `CORE_TIMELOCK_V1`
+- `0x0001` `CORE_TIMELOCK`
 - `0x0002` `CORE_ANCHOR`
+- `0x00FF` `CORE_RESERVED_FUTURE`
+- `0x0100` `CORE_HTLC`
+- `0x0101` `CORE_VAULT`
+- `0x0102` *(unassigned — MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`)*
 - `0x0103` `CORE_DA_COMMIT`
-- `0x00ff` `CORE_RESERVED_FUTURE`
 
-Any unknown or future `covenant_type` MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+Any other unknown or future `covenant_type` MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
 
 Semantics:
 
@@ -562,7 +569,7 @@ Semantics:
     and a valid signature over `digest` (Section 12).
   - `key_id = SHA3-256(pubkey)` where `pubkey` is the canonical witness public key byte string for the selected
     `suite_id` (no extra length prefixes are included).
-- `CORE_TIMELOCK_V1`:
+- `CORE_TIMELOCK`:
   - `covenant_data = lock_mode:u8 || lock_value:u64le`.
   - `covenant_data_len MUST equal MAX_TIMELOCK_COVENANT_DATA`.
   - `lock_mode = 0x00` means height lock; `lock_mode = 0x01` means timestamp lock.
@@ -576,6 +583,22 @@ Semantics:
     ANCHOR output MUST be rejected as `TX_ERR_MISSING_UTXO`.
   - Per-block constraint: sum of `covenant_data_len` across all `CORE_ANCHOR` outputs in a block MUST be
     `<= MAX_ANCHOR_BYTES_PER_BLOCK`; otherwise reject the block as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
+- `CORE_HTLC`:
+  - RESERVED. Spec pending (→ Q-S001).
+  - Until semantics are ratified in this document, any output with `covenant_type = 0x0100` MUST be
+    rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+- `CORE_VAULT`:
+  - Consensus-native covenant, active from genesis. Full spend semantics defined in Section 14.1.
+  - **Section 14.1 is pending Q-V01 controller approval.** Until ratified, any output with
+    `covenant_type = 0x0101` MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+
+### 14.1 CORE_VAULT Semantics (Normative)
+
+> **TODO — pending Q-V01 controller approval.**
+> This section will define the full consensus spend rules for `CORE_VAULT` (0x0101):
+> covenant_data layout, spend_delay, whitelist_root, recovery_key, partial_spend rules,
+> early_close fee, CheckBlock rules, and error codes.
+> Do not implement until this section is populated and approved.
 - `CORE_DA_COMMIT`:
   - `covenant_data_len MUST equal 32`. Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
   - `covenant_data MUST equal SHA3-256(T.da_payload)` where `T` is the containing transaction. Otherwise reject as
@@ -714,15 +737,14 @@ Let `e = U_work[(prev_txid, prev_vout)]` be the referenced UTXO entry. If missin
 Then enforce:
 
 1. If `e.covenant_type = CORE_P2PK`:
-   - Require `w.suite_id = SUITE_ID_ML_DSA_87 (0x01)`. If `w.suite_id = 0x02`, reject as `TX_ERR_DEPLOYMENT_INACTIVE`.
-     Otherwise reject as `TX_ERR_SIG_ALG_INVALID`.
+   - Require `w.suite_id = SUITE_ID_ML_DSA_87 (0x01)`. Any other suite MUST be rejected as `TX_ERR_SIG_ALG_INVALID`.
    - Require `len(e.covenant_data) = MAX_P2PK_COVENANT_DATA` and the first byte equals `w.suite_id`. Otherwise reject as
      `TX_ERR_COVENANT_TYPE_INVALID`.
    - Let `key_id = e.covenant_data[1:33]` (after the suite_id byte).
    - Require `SHA3-256(w.pubkey) = key_id`. Otherwise reject as `TX_ERR_SIG_INVALID`.
    - Require signature verification of `w.signature` over `digest` (Section 12) succeeds. Otherwise reject as
      `TX_ERR_SIG_INVALID`.
-2. If `e.covenant_type = CORE_TIMELOCK_V1`:
+2. If `e.covenant_type = CORE_TIMELOCK`:
    - Require `w.suite_id = SUITE_ID_SENTINEL (0x00)`. Otherwise reject as `TX_ERR_SIG_ALG_INVALID`.
    - Parse `lock_mode:u8 || lock_value:u64le` from `e.covenant_data` (must be exactly `MAX_TIMELOCK_COVENANT_DATA` bytes).
      Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
@@ -819,6 +841,9 @@ Rules:
 - **No orphan chunks:** Every `DA_CHUNK_TX` in `B` MUST have a corresponding `DA_COMMIT_TX` in `B` with the same `da_id`.
   If any `DA_CHUNK_TX` exists without a matching commit, reject as `BLOCK_ERR_DA_SET_INVALID`.
 
+- **No duplicate commits:** For each `da_id` value, `B` MUST contain exactly one `DA_COMMIT_TX` with that `da_id`.
+  If more than one `DA_COMMIT_TX` with the same `da_id` appears in `B`, reject as `BLOCK_ERR_DA_SET_INVALID`.
+
 - **Complete sets only:** For every `DA_COMMIT_TX` with `chunk_count = C` and `da_id = D` in `B`,
   the block MUST contain exactly `C` `DA_CHUNK_TX` records with `da_id = D` and `chunk_index` values
   `{0, 1, ..., C-1}` each appearing exactly once.
@@ -835,9 +860,9 @@ Rules:
 For each `DA_COMMIT_TX` `T` with `chunk_count = C` and `da_id = D`:
 
 - Let `chunks_sorted` be the `C` DA_CHUNK_TX records for `D` sorted by `chunk_index` ascending.
-- `T` MUST contain a `CORE_DA_COMMIT` output whose `covenant_data` equals
+- `T` MUST contain **exactly one** `CORE_DA_COMMIT` output whose `covenant_data` equals
   `SHA3-256(concat(chunk.da_payload for chunk in chunks_sorted))`.
-  If violated, reject as `BLOCK_ERR_DA_CHUNK_HASH_INVALID`.
+  If no such output exists, or if more than one `CORE_DA_COMMIT` output exists in `T`, reject as `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID`.
 
 This is the binding commitment that links the on-chain commit to the full DA payload.
 
@@ -863,7 +888,7 @@ For block `B_h` with `h > 0`:
 
 For genesis (`h = 0`), these rules are not evaluated.
 
-## 22. Chainwork and Fork Choice (Non-Validation Procedure)
+## 23. Chainwork and Fork Choice (Non-Validation Procedure)
 
 Fork choice is not part of block validity. Nodes select a canonical chain among valid candidates.
 
@@ -884,7 +909,7 @@ Canonical chain selection:
 1. Prefer the valid chain with maximal `ChainWork`.
 2. If `ChainWork` is equal, choose the chain whose tip `block_hash` is lexicographically smaller (bytewise big-endian).
 
-## 23. Determinism Requirements (Normative)
+## 24. Determinism Requirements (Normative)
 
 Consensus validity MUST be deterministic given the same chain state and the same block bytes.
 
@@ -892,7 +917,7 @@ Consensus validity MUST be deterministic given the same chain state and the same
 - If any rule requires iterating over an unordered set/map, the iteration order MUST be defined as lexicographic order
   over the canonical key bytes for that collection.
 
-## 24. Block Validation Order (Normative)
+## 25. Block Validation Order (Normative)
 
 Implementations MUST apply validity checks in a deterministic order and return the first applicable error code.
 
@@ -905,12 +930,12 @@ Minimum required order for validating a candidate block `B_h` at height `h`:
 4. Check `prev_block_hash` linkage against the selected parent block hash. If invalid, reject as `BLOCK_ERR_LINKAGE_INVALID`.
 5. Check `merkle_root` matches the Merkle root computed from transaction `txid` values (Section 10.4). If invalid, reject
    as `BLOCK_ERR_MERKLE_INVALID`.
-6. Check block timestamp rules (Section 21). If invalid, reject as `BLOCK_ERR_TIMESTAMP_OLD` or `BLOCK_ERR_TIMESTAMP_FUTURE`.
+6. Check block timestamp rules (Section 22). If invalid, reject as `BLOCK_ERR_TIMESTAMP_OLD` or `BLOCK_ERR_TIMESTAMP_FUTURE`.
 7. Check total block weight (Section 9). If exceeded, reject as `BLOCK_ERR_WEIGHT_EXCEEDED`.
 8. Check per-block ANCHOR byte limits (Section 14). If exceeded, reject as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
 9. Check DA chunk hash integrity (Section 21.2). If any chunk_hash mismatch, reject as `BLOCK_ERR_DA_CHUNK_HASH_INVALID`.
 10. Check DA set completeness (Section 21.3): no orphan chunks, complete sets, batch count. Reject as applicable.
-11. Check DA payload commitment (Section 21.4). If mismatch, reject as `BLOCK_ERR_DA_CHUNK_HASH_INVALID`.
+11. Check DA payload commitment (Section 21.4). If mismatch or ambiguous (missing or duplicate CORE_DA_COMMIT output), reject as `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID`.
 12. Apply transactions sequentially (Section 18), enforcing:
    - coinbase structural rules (Sections 10.5 and 16),
    - transaction structural rules (Section 16),
