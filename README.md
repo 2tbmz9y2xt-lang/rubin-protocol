@@ -41,6 +41,13 @@ python3 conformance/runner/run_cv_bundle.py
 python3 conformance/runner/run_cv_bundle.py --only-gates CV-COMPACT
 ```
 
+Optional spec tooling (HTML + diff + explainer):
+
+```bash
+npm install
+npm run spec:all
+```
+
 ## Adding Conformance Vectors
 
 1. Add a new fixture file: `./conformance/fixtures/CV-<GATE>.json`.
