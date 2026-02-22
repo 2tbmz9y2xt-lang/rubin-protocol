@@ -17,7 +17,10 @@ It supports two spend paths:
 - **Refund path:** spender provides a valid signature from `refund_key_id`,
   after the locktime condition is satisfied.
 
-`CORE_HTLC` is a single-key covenant (one WitnessItem per input). It has no
+`CORE_HTLC` is a single-signature covenant (one signature is required per spend).
+It consumes **2 WitnessItems** from the witness cursor: a spend-path selector and
+the signature for the selected path.
+It has no
 destination whitelist — output routing is unrestricted, subject to standard
 value conservation rules (Section 20, RUBIN_L1_CANONICAL.md).
 
@@ -224,9 +227,11 @@ Upon ratification of this document, update `RUBIN_L1_CANONICAL.md` §14 as follo
 1. Replace:
 ```
 - `CORE_HTLC`:
-  - RESERVED. Spec pending (→ Q-S001).
-  - Until semantics are ratified in this document, any output with `covenant_type = 0x0100` MUST be
-    rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+  - RESERVED in CANONICAL (not active at genesis).
+  - A standalone HTLC specification exists in `spec/RUBIN_CORE_HTLC_SPEC.md`, but it is not yet integrated
+    into this document.
+  - Until integrated, any output with `covenant_type = 0x0100` MUST be rejected as
+    `TX_ERR_COVENANT_TYPE_INVALID`.
 ```
 
 With:
