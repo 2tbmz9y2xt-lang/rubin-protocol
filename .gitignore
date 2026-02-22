@@ -7,6 +7,10 @@
 # Node / spec tooling
 node_modules/
 analysis/
+output/
+tmp/
+.claude/
+.codex/
 
 # Local UI tooling (not part of genesis rewrite)
 rubin-ui/
@@ -26,3 +30,7 @@ spec/RUBIN_CORE_VAULT_V1_SPEC_v0.9.md
 # Local control docs (must stay off GitHub)
 spec/RUBIN_AGENT_EXECUTION_TZ.md
 spec/RUBIN_IMPLEMENTATION_ROADMAP.md
+
+# Local orchestration files (must stay local-only)
+scripts/orchestration/
+operational/orchestration/

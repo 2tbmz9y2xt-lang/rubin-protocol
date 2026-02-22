@@ -98,6 +98,14 @@ def validate_vector(
         req["target_old"] = v["target_old"]
         req["timestamp_first"] = v["timestamp_first"]
         req["timestamp_last"] = v["timestamp_last"]
+    elif op == "block_basic_check":
+        req["block_hex"] = v["block_hex"]
+        if "expected_prev_hash" in v:
+            req["expected_prev_hash"] = v["expected_prev_hash"]
+        if "expected_target" in v:
+            req["expected_target"] = v["expected_target"]
+    elif op == "covenant_genesis_check":
+        req["tx_hex"] = v["tx_hex"]
     elif op == "compact_shortid":
         req["wtxid"] = v["wtxid"]
         req["nonce1"] = v["nonce1"]
@@ -168,6 +176,16 @@ def validate_vector(
         if "expect_target_new" in v and go_resp.get("target_new") != v["expect_target_new"]:
             problems.append(f"{gate}/{vid}: expect_target_new mismatch")
     elif op == "pow_check":
+        # ok/err parity is already checked above.
+        pass
+    elif op == "block_basic_check":
+        if go_resp.get("block_hash") != rust_resp.get("block_hash"):
+            problems.append(
+                f"{gate}/{vid}: block_hash mismatch go={go_resp.get('block_hash')} rust={rust_resp.get('block_hash')}"
+            )
+        if "expect_block_hash" in v and go_resp.get("block_hash") != v["expect_block_hash"]:
+            problems.append(f"{gate}/{vid}: expect_block_hash mismatch")
+    elif op == "covenant_genesis_check":
         # ok/err parity is already checked above.
         pass
     elif op == "compact_shortid":

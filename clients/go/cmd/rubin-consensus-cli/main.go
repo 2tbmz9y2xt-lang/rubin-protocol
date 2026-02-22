@@ -13,6 +13,7 @@ import (
 type Request struct {
 	Op         string   `json:"op"`
 	TxHex      string   `json:"tx_hex,omitempty"`
+	BlockHex   string   `json:"block_hex,omitempty"`
 	Txids      []string `json:"txids,omitempty"`
 	WtxidHex   string   `json:"wtxid,omitempty"`
 	Nonce1     uint64   `json:"nonce1,omitempty"`
@@ -26,6 +27,8 @@ type Request struct {
 	TargetOldHex   string `json:"target_old,omitempty"`
 	TimestampFirst uint64 `json:"timestamp_first,omitempty"`
 	TimestampLast  uint64 `json:"timestamp_last,omitempty"`
+	ExpectedPrev   string `json:"expected_prev_hash,omitempty"`
+	ExpectedTarget string `json:"expected_target,omitempty"`
 }
 
 type Response struct {
@@ -198,6 +201,75 @@ func main() {
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true, TargetNew: hex.EncodeToString(newT[:])})
+		return
+
+	case "block_basic_check":
+		blockBytes, err := hex.DecodeString(req.BlockHex)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad block"})
+			return
+		}
+
+		var expectedPrev *[32]byte
+		if req.ExpectedPrev != "" {
+			b, err := hex.DecodeString(req.ExpectedPrev)
+			if err != nil || len(b) != 32 {
+				writeResp(os.Stdout, Response{Ok: false, Err: "bad expected_prev_hash"})
+				return
+			}
+			var h [32]byte
+			copy(h[:], b)
+			expectedPrev = &h
+		}
+
+		var expectedTarget *[32]byte
+		if req.ExpectedTarget != "" {
+			b, err := hex.DecodeString(req.ExpectedTarget)
+			if err != nil || len(b) != 32 {
+				writeResp(os.Stdout, Response{Ok: false, Err: "bad expected_target"})
+				return
+			}
+			var h [32]byte
+			copy(h[:], b)
+			expectedTarget = &h
+		}
+
+		s, err := consensus.ValidateBlockBasic(blockBytes, expectedPrev, expectedTarget)
+		if err != nil {
+			if te, ok := err.(*consensus.TxError); ok {
+				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
+				return
+			}
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+		writeResp(os.Stdout, Response{Ok: true, BlockHash: hex.EncodeToString(s.BlockHash[:])})
+		return
+
+	case "covenant_genesis_check":
+		txBytes, err := hex.DecodeString(req.TxHex)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad hex"})
+			return
+		}
+		tx, _, _, _, err := consensus.ParseTx(txBytes)
+		if err != nil {
+			if te, ok := err.(*consensus.TxError); ok {
+				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
+				return
+			}
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+		if err := consensus.ValidateTxCovenantsGenesis(tx); err != nil {
+			if te, ok := err.(*consensus.TxError); ok {
+				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
+				return
+			}
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+		writeResp(os.Stdout, Response{Ok: true})
 		return
 
 	case "compact_shortid":
