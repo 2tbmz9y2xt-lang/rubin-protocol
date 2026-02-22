@@ -125,3 +125,79 @@ func TestApplyNonCoinbaseTxBasic_OK(t *testing.T) {
 		t.Fatalf("utxo_count=%d, want 1", s.UtxoCount)
 	}
 }
+
+func TestApplyNonCoinbaseTxBasic_VaultCannotFundFee(t *testing.T) {
+	var prevVault, prevFee, txid [32]byte
+	prevVault[0] = 0xc0
+	prevFee[0] = 0xc1
+	txid[0] = 0xc2
+
+	tx := &Tx{
+		Inputs: []TxInput{
+			{PrevTxid: prevVault, PrevVout: 0},
+			{PrevTxid: prevFee, PrevVout: 0},
+		},
+		Outputs: []TxOutput{
+			{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
+		},
+	}
+
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prevVault, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_VAULT,
+			CovenantData: vaultCovenantData(false, 0, 0x00, 0, false),
+		},
+		{Txid: prevFee, Vout: 0}: {
+			Value:        10,
+			CovenantType: COV_TYPE_P2PK,
+			CovenantData: validP2PKCovenantData(),
+		},
+	}
+
+	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_VALUE_CONSERVATION {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_VALUE_CONSERVATION)
+	}
+}
+
+func TestApplyNonCoinbaseTxBasic_VaultPreservedWithExternalFeeSponsor(t *testing.T) {
+	var prevVault, prevFee, txid [32]byte
+	prevVault[0] = 0xd0
+	prevFee[0] = 0xd1
+	txid[0] = 0xd2
+
+	tx := &Tx{
+		Inputs: []TxInput{
+			{PrevTxid: prevVault, PrevVout: 0},
+			{PrevTxid: prevFee, PrevVout: 0},
+		},
+		Outputs: []TxOutput{
+			{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
+		},
+	}
+
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prevVault, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_VAULT,
+			CovenantData: vaultCovenantData(false, 0, 0x00, 0, false),
+		},
+		{Txid: prevFee, Vout: 0}: {
+			Value:        10,
+			CovenantType: COV_TYPE_P2PK,
+			CovenantData: validP2PKCovenantData(),
+		},
+	}
+
+	s, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if s.Fee != 10 {
+		t.Fatalf("fee=%d, want 10", s.Fee)
+	}
+}

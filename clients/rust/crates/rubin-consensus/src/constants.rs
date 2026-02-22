@@ -27,9 +27,9 @@ pub const MAX_P2PK_COVENANT_DATA: u64 = 33;
 pub const MAX_VAULT_COVENANT_DATA: u64 = 81;
 pub const MAX_VAULT_COVENANT_LEGACY: u64 = 73;
 pub const MIN_VAULT_SPEND_DELAY: u64 = 4_320;
-pub const MAX_VAULT_KEYS: u8 = 13;
+pub const MAX_VAULT_KEYS: u8 = 12;
 pub const MAX_VAULT_WHITELIST_ENTRIES: u16 = 1024;
-pub const MAX_MULTISIG_KEYS: u8 = 13;
+pub const MAX_MULTISIG_KEYS: u8 = 12;
 pub const COV_TYPE_MULTISIG: u16 = 0x0104;
 
 pub const MAX_TX_INPUTS: u64 = 1024;

@@ -62,9 +62,9 @@ These constants are consensus-critical for this protocol ruleset:
 - `MAX_ANCHOR_PAYLOAD_SIZE = 65_536` bytes
 - `MAX_ANCHOR_BYTES_PER_BLOCK = 131_072` bytes
 - `MAX_P2PK_COVENANT_DATA = 33` bytes
-- `MAX_VAULT_KEYS = 13`
+- `MAX_VAULT_KEYS = 12`
 - `MAX_VAULT_WHITELIST_ENTRIES = 1_024`
-- `MAX_MULTISIG_KEYS = 13`
+- `MAX_MULTISIG_KEYS = 12`
 
 Monetary constants (consensus-critical):
 
@@ -712,6 +712,11 @@ Multi-input rule:
 - If a transaction spends multiple `CORE_VAULT` inputs with different whitelists,
   the whitelist check above is applied independently for each input.
   Therefore every output MUST belong to the intersection of all referenced vault whitelists.
+- Fee preservation rule (strong vault mode):
+  - Let `sum_in_vault` be the sum of input values whose referenced UTXO covenant type is `CORE_VAULT`.
+  - For any transaction that spends at least one `CORE_VAULT` input, `sum_out MUST be >= sum_in_vault`.
+    Otherwise reject as `TX_ERR_VALUE_CONSERVATION`.
+  - This forbids spending miner fee from `CORE_VAULT` value; fee must be funded by non-VAULT inputs.
 
 ### 14.2 CORE_MULTISIG Semantics (Normative)
 
@@ -993,8 +998,11 @@ For each non-coinbase transaction `T`:
 
 1. Let `sum_in` be the sum of referenced input values.
 2. Let `sum_out` be the sum of `T.outputs[j].value` over all outputs `j`.
-3. If `sum_out > sum_in`, reject as `TX_ERR_VALUE_CONSERVATION`.
-4. Arithmetic MUST be exact and MUST be computed in at least 128-bit unsigned integer arithmetic.
+3. Let `sum_in_vault` be the sum of referenced input values whose UTXO covenant type is `CORE_VAULT`.
+4. If `sum_out > sum_in`, reject as `TX_ERR_VALUE_CONSERVATION`.
+5. If `T` spends at least one `CORE_VAULT` input and `sum_out < sum_in_vault`,
+   reject as `TX_ERR_VALUE_CONSERVATION`.
+6. Arithmetic MUST be exact and MUST be computed in at least 128-bit unsigned integer arithmetic.
    Any overflow MUST be rejected as `TX_ERR_PARSE`.
 
 ## 21. DA Set Integrity (Normative)
@@ -1112,7 +1120,7 @@ For inputs spending `CORE_VAULT` (after standard Section 18 parse):
 3. Assign `key_count` WitnessItems via the cursor model (Section 16).
 4. Signature threshold check: count valid signatures and require `valid >= threshold`.
 5. Whitelist membership check per output using binary search (`O(log W)`).
-6. Value conservation.
+6. Value conservation, including strong vault fee-preservation rule (`sum_out >= sum_in_vault` for VAULT spends).
 
 Short-circuit on first error.
 

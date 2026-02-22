@@ -47,6 +47,8 @@ pub fn apply_non_coinbase_tx_basic(
 
     let mut work = utxo_set.clone();
     let mut sum_in: u64 = 0;
+    let mut sum_in_vault: u64 = 0;
+    let mut has_vault_input = false;
 
     for input in &tx.inputs {
         let op = Outpoint {
@@ -75,6 +77,12 @@ pub fn apply_non_coinbase_tx_basic(
         sum_in = sum_in
             .checked_add(entry.value)
             .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
+        if entry.covenant_type == COV_TYPE_VAULT {
+            has_vault_input = true;
+            sum_in_vault = sum_in_vault
+                .checked_add(entry.value)
+                .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
+        }
         work.remove(&op);
     }
 
@@ -109,6 +117,12 @@ pub fn apply_non_coinbase_tx_basic(
             "sum_out exceeds sum_in",
         ));
     }
+    if has_vault_input && sum_out < sum_in_vault {
+        return Err(TxError::new(
+            ErrorCode::TxErrValueConservation,
+            "vault inputs cannot fund miner fee",
+        ));
+    }
 
     Ok(UtxoApplySummary {
         fee: sum_in - sum_out,
@@ -117,10 +131,7 @@ pub fn apply_non_coinbase_tx_basic(
 }
 
 #[allow(dead_code)]
-fn check_spend_covenant(
-    covenant_type: u16,
-    covenant_data: &[u8],
-) -> Result<(), TxError> {
+fn check_spend_covenant(covenant_type: u16, covenant_data: &[u8]) -> Result<(), TxError> {
     if covenant_type == COV_TYPE_P2PK {
         return Ok(());
     }

@@ -833,3 +833,141 @@ fn apply_non_coinbase_tx_basic_ok() {
     assert_eq!(summary.fee, 10);
     assert_eq!(summary.utxo_count, 1);
 }
+
+#[test]
+fn apply_non_coinbase_tx_basic_vault_cannot_fund_fee() {
+    let mut prev_vault = [0u8; 32];
+    prev_vault[0] = 0xc0;
+    let mut prev_fee = [0u8; 32];
+    prev_fee[0] = 0xc1;
+    let mut txid = [0u8; 32];
+    txid[0] = 0xc2;
+
+    let tx = crate::tx::Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![
+            crate::tx::TxInput {
+                prev_txid: prev_vault,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            },
+            crate::tx::TxInput {
+                prev_txid: prev_fee,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            },
+        ],
+        outputs: vec![crate::tx::TxOutput {
+            value: 90,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: valid_p2pk_covenant_data(),
+        }],
+        locktime: 0,
+        witness: vec![],
+        da_payload: vec![],
+    };
+
+    let mut utxos: HashMap<Outpoint, UtxoEntry> = HashMap::new();
+    utxos.insert(
+        Outpoint {
+            txid: prev_vault,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_VAULT,
+            covenant_data: vault_covenant_data(false, 0, 0x00, 0, false),
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    );
+    utxos.insert(
+        Outpoint {
+            txid: prev_fee,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 10,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: valid_p2pk_covenant_data(),
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    );
+
+    let err = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrValueConservation);
+}
+
+#[test]
+fn apply_non_coinbase_tx_basic_vault_preserved_with_external_fee_sponsor() {
+    let mut prev_vault = [0u8; 32];
+    prev_vault[0] = 0xd0;
+    let mut prev_fee = [0u8; 32];
+    prev_fee[0] = 0xd1;
+    let mut txid = [0u8; 32];
+    txid[0] = 0xd2;
+
+    let tx = crate::tx::Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![
+            crate::tx::TxInput {
+                prev_txid: prev_vault,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            },
+            crate::tx::TxInput {
+                prev_txid: prev_fee,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            },
+        ],
+        outputs: vec![crate::tx::TxOutput {
+            value: 100,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: valid_p2pk_covenant_data(),
+        }],
+        locktime: 0,
+        witness: vec![],
+        da_payload: vec![],
+    };
+
+    let mut utxos: HashMap<Outpoint, UtxoEntry> = HashMap::new();
+    utxos.insert(
+        Outpoint {
+            txid: prev_vault,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_VAULT,
+            covenant_data: vault_covenant_data(false, 0, 0x00, 0, false),
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    );
+    utxos.insert(
+        Outpoint {
+            txid: prev_fee,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 10,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: valid_p2pk_covenant_data(),
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    );
+
+    let summary = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000).expect("ok");
+    assert_eq!(summary.fee, 10);
+}

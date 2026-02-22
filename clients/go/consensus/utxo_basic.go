@@ -36,6 +36,8 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 	}
 
 	var sumIn uint64
+	var sumInVault uint64
+	hasVaultInput := false
 	for _, in := range tx.Inputs {
 		op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
 		entry, ok := work[op]
@@ -55,6 +57,13 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 		sumIn, err = addU64(sumIn, entry.Value)
 		if err != nil {
 			return nil, err
+		}
+		if entry.CovenantType == COV_TYPE_VAULT {
+			hasVaultInput = true
+			sumInVault, err = addU64(sumInVault, entry.Value)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		delete(work, op)
@@ -84,6 +93,9 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 
 	if sumOut > sumIn {
 		return nil, txerr(TX_ERR_VALUE_CONSERVATION, "sum_out exceeds sum_in")
+	}
+	if hasVaultInput && sumOut < sumInVault {
+		return nil, txerr(TX_ERR_VALUE_CONSERVATION, "vault inputs cannot fund miner fee")
 	}
 
 	return &UtxoApplySummary{
