@@ -193,10 +193,9 @@ Storage depends on number of monitored channels; no protocol minimum.
 | 0x0000 | CORE_P2PK | Standard pay-to-public-key (ML-DSA-87) |
 | 0x0001 | CORE_TIMELOCK | Height or timestamp lock |
 | 0x0002 | CORE_ANCHOR | Non-spendable data anchor |
-| 0x00ff | CORE_RESERVED_FUTURE | Forbidden — TX_ERR_COVENANT_TYPE_INVALID |
-| 0x0100 | CORE_HTLC | RESERVED — spec pending (Q-S001) → BLOCK_ERR_UNKNOWN_COVENANT_TYPE |
-| 0x0101 | CORE_VAULT | Consensus-native — semantics pending Q-V01 approval → BLOCK_ERR_UNKNOWN_COVENANT_TYPE until ratified |
-| 0x0102 | *(unassigned)* | Not in registry — TX_ERR_COVENANT_TYPE_INVALID |
+| 0x00FF | CORE_RESERVED_FUTURE | Forbidden — TX_ERR_COVENANT_TYPE_INVALID |
+| 0x0100 | CORE_HTLC | RESERVED — spec pending (Q-S001) → TX_ERR_COVENANT_TYPE_INVALID |
+| 0x0101 | CORE_VAULT | Consensus-native — semantics pending Q-V01 approval → TX_ERR_COVENANT_TYPE_INVALID until ratified |
 | 0x0103 | CORE_DA_COMMIT | DA payload commitment (non-spendable, tx_kind=0x01 only) |
 
 ---

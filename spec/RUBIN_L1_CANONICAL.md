@@ -552,12 +552,10 @@ The following `covenant_type` values are valid:
 - `0x0000` `CORE_P2PK`
 - `0x0001` `CORE_TIMELOCK`
 - `0x0002` `CORE_ANCHOR`
-- `0x00ff` `CORE_RESERVED_FUTURE`
+- `0x00FF` `CORE_RESERVED_FUTURE`
 - `0x0100` `CORE_HTLC`
 - `0x0101` `CORE_VAULT`
 - `0x0103` `CORE_DA_COMMIT`
-
-Code `0x0102` is not assigned and MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
 
 Any other unknown or future `covenant_type` MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
 
@@ -587,13 +585,11 @@ Semantics:
 - `CORE_HTLC`:
   - RESERVED. Spec pending (→ Q-S001).
   - Until semantics are ratified in this document, any output with `covenant_type = 0x0100` MUST be
-    rejected as `BLOCK_ERR_UNKNOWN_COVENANT_TYPE`.
+    rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
 - `CORE_VAULT`:
   - Consensus-native covenant active from genesis. Full semantics defined in Section 14.1 (→ Q-V01, required before Q-C001 rewrite is complete).
   - Until Q-V01 is approved and Section 14.1 is populated, any output with `covenant_type = 0x0101` MUST be
-    rejected as `BLOCK_ERR_UNKNOWN_COVENANT_TYPE`.
-- `CORE_HTLC_V2`:
-  - Code `0x0102` is not assigned. MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+    rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
 - `CORE_DA_COMMIT`:
   - `covenant_data_len MUST equal 32`. Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
   - `covenant_data MUST equal SHA3-256(T.da_payload)` where `T` is the containing transaction. Otherwise reject as
