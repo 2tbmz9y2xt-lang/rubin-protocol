@@ -555,6 +555,7 @@ The following `covenant_type` values are valid:
 - `0x00FF` `CORE_RESERVED_FUTURE`
 - `0x0100` `CORE_HTLC`
 - `0x0101` `CORE_VAULT`
+- `0x0102` *(unassigned — MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`)*
 - `0x0103` `CORE_DA_COMMIT`
 
 Any other unknown or future `covenant_type` MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
@@ -587,9 +588,17 @@ Semantics:
   - Until semantics are ratified in this document, any output with `covenant_type = 0x0100` MUST be
     rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
 - `CORE_VAULT`:
-  - Consensus-native covenant active from genesis. Full semantics defined in Section 14.1 (→ Q-V01, required before Q-C001 rewrite is complete).
-  - Until Q-V01 is approved and Section 14.1 is populated, any output with `covenant_type = 0x0101` MUST be
-    rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+  - Consensus-native covenant, active from genesis. Full spend semantics defined in Section 14.1.
+  - **Section 14.1 is pending Q-V01 controller approval.** Until ratified, any output with
+    `covenant_type = 0x0101` MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+
+### 14.1 CORE_VAULT Semantics (Normative)
+
+> **TODO — pending Q-V01 controller approval.**
+> This section will define the full consensus spend rules for `CORE_VAULT` (0x0101):
+> covenant_data layout, spend_delay, whitelist_root, recovery_key, partial_spend rules,
+> early_close fee, CheckBlock rules, and error codes.
+> Do not implement until this section is populated and approved.
 - `CORE_DA_COMMIT`:
   - `covenant_data_len MUST equal 32`. Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
   - `covenant_data MUST equal SHA3-256(T.da_payload)` where `T` is the containing transaction. Otherwise reject as
@@ -879,7 +888,7 @@ For block `B_h` with `h > 0`:
 
 For genesis (`h = 0`), these rules are not evaluated.
 
-## 22. Chainwork and Fork Choice (Non-Validation Procedure)
+## 23. Chainwork and Fork Choice (Non-Validation Procedure)
 
 Fork choice is not part of block validity. Nodes select a canonical chain among valid candidates.
 
@@ -900,7 +909,7 @@ Canonical chain selection:
 1. Prefer the valid chain with maximal `ChainWork`.
 2. If `ChainWork` is equal, choose the chain whose tip `block_hash` is lexicographically smaller (bytewise big-endian).
 
-## 23. Determinism Requirements (Normative)
+## 24. Determinism Requirements (Normative)
 
 Consensus validity MUST be deterministic given the same chain state and the same block bytes.
 
@@ -908,7 +917,7 @@ Consensus validity MUST be deterministic given the same chain state and the same
 - If any rule requires iterating over an unordered set/map, the iteration order MUST be defined as lexicographic order
   over the canonical key bytes for that collection.
 
-## 24. Block Validation Order (Normative)
+## 25. Block Validation Order (Normative)
 
 Implementations MUST apply validity checks in a deterministic order and return the first applicable error code.
 
@@ -921,7 +930,7 @@ Minimum required order for validating a candidate block `B_h` at height `h`:
 4. Check `prev_block_hash` linkage against the selected parent block hash. If invalid, reject as `BLOCK_ERR_LINKAGE_INVALID`.
 5. Check `merkle_root` matches the Merkle root computed from transaction `txid` values (Section 10.4). If invalid, reject
    as `BLOCK_ERR_MERKLE_INVALID`.
-6. Check block timestamp rules (Section 21). If invalid, reject as `BLOCK_ERR_TIMESTAMP_OLD` or `BLOCK_ERR_TIMESTAMP_FUTURE`.
+6. Check block timestamp rules (Section 22). If invalid, reject as `BLOCK_ERR_TIMESTAMP_OLD` or `BLOCK_ERR_TIMESTAMP_FUTURE`.
 7. Check total block weight (Section 9). If exceeded, reject as `BLOCK_ERR_WEIGHT_EXCEEDED`.
 8. Check per-block ANCHOR byte limits (Section 14). If exceeded, reject as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
 9. Check DA chunk hash integrity (Section 21.2). If any chunk_hash mismatch, reject as `BLOCK_ERR_DA_CHUNK_HASH_INVALID`.
