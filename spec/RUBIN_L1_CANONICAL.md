@@ -1220,6 +1220,15 @@ For block `B_h` with `h > 0`:
 Note (non-normative): unlike Bitcoin, the upper bound uses Median Time Past (`median(S_h)`) as baseline,
 not node-local wall clock time. This keeps the timestamp rule fully deterministic across implementations.
 
+Security note (non-normative): because both the lower and upper timestamp bounds are derived from Median Time Past,
+block producers can influence chain time within the allowed window. In particular, an adversary who can
+consistently dominate recent block production (or a material fraction of a retarget window) may gradually
+advance `median(S_h)` and therefore advance accepted timestamps, which can bias `T_actual` in the difficulty
+update procedure (Section 15). Per-window difficulty changes remain bounded by the retarget clamp (at most
+4x increase or 4x decrease), but sustained dominance can bias difficulty over multiple windows. Implementations
+MUST treat the block timestamp as miner-provided data constrained by consensus rules, not as a trusted wall-clock
+time source; protocol time semantics should be expressed in block height where possible.
+
 For genesis (`h = 0`), these rules are not evaluated.
 
 ## 23. Chainwork and Fork Choice (Non-Validation Procedure)
