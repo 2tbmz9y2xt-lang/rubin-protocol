@@ -22,3 +22,7 @@ conformance/bin/
 
 # Vault draft (local)
 spec/RUBIN_CORE_VAULT_V1_SPEC_v0.9.md
+
+# Local control docs (must stay off GitHub)
+spec/RUBIN_AGENT_EXECUTION_TZ.md
+spec/RUBIN_IMPLEMENTATION_ROADMAP.md
