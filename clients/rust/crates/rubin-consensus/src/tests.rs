@@ -3,13 +3,16 @@ use crate::error::ErrorCode;
 use crate::hash::sha3_256;
 use crate::pow::{pow_check, retarget_v1};
 use crate::sighash_v1_digest;
-use crate::{block_hash, merkle_root_txids, parse_tx, BLOCK_HEADER_BYTES};
+use crate::{
+    block_hash, merkle_root_txids, parse_block_bytes, parse_tx, validate_block_basic,
+    validate_tx_covenants_genesis, BLOCK_HEADER_BYTES,
+};
 use num_bigint::BigUint;
 use num_traits::One;
 
 fn minimal_tx_bytes() -> Vec<u8> {
     let mut b = Vec::new();
-    b.extend_from_slice(&TX_WIRE_VERSION.to_le_bytes());
+    b.extend_from_slice(&1u32.to_le_bytes());
     b.push(0x00); // tx_kind
     b.extend_from_slice(&0u64.to_le_bytes());
     b.push(0x00); // input_count
@@ -51,7 +54,7 @@ fn parse_tx_nonminimal_compactsize() {
 #[test]
 fn parse_tx_script_sig_len_overflow() {
     let mut b = Vec::new();
-    b.extend_from_slice(&TX_WIRE_VERSION.to_le_bytes());
+    b.extend_from_slice(&1u32.to_le_bytes());
     b.push(0x00); // tx_kind
     b.extend_from_slice(&0u64.to_le_bytes());
     b.push(0x01); // input_count
@@ -179,7 +182,7 @@ fn merkle_root_single_and_two() {
 #[test]
 fn sighash_v1_digest_smoke() {
     let mut b = Vec::new();
-    b.extend_from_slice(&TX_WIRE_VERSION.to_le_bytes());
+    b.extend_from_slice(&1u32.to_le_bytes());
     b.push(0x00); // tx_kind
     b.extend_from_slice(&0u64.to_le_bytes());
     b.push(0x01); // input_count
@@ -212,7 +215,7 @@ fn sighash_v1_digest_smoke() {
     let mut preimage = Vec::new();
     preimage.extend_from_slice(b"RUBINv1-sighash/");
     preimage.extend_from_slice(&chain_id);
-    preimage.extend_from_slice(&TX_WIRE_VERSION.to_le_bytes());
+    preimage.extend_from_slice(&1u32.to_le_bytes());
     preimage.push(0x00);
     preimage.extend_from_slice(&0u64.to_le_bytes());
     preimage.extend_from_slice(&hash_of_da_core_fields);
@@ -264,6 +267,167 @@ fn pow_check_strict_less() {
     pow_check(&header, target1).expect("pow ok");
 }
 
+fn build_block_bytes(
+    prev_hash: [u8; 32],
+    merkle_root: [u8; 32],
+    target: [u8; 32],
+    nonce: u64,
+    txs: &[Vec<u8>],
+) -> Vec<u8> {
+    assert!(!txs.is_empty());
+    let mut header = Vec::with_capacity(BLOCK_HEADER_BYTES);
+    header.extend_from_slice(&1u32.to_le_bytes()); // version
+    header.extend_from_slice(&prev_hash);
+    header.extend_from_slice(&merkle_root);
+    header.extend_from_slice(&1u64.to_le_bytes()); // timestamp
+    header.extend_from_slice(&target);
+    header.extend_from_slice(&nonce.to_le_bytes());
+    assert_eq!(header.len(), BLOCK_HEADER_BYTES);
+
+    let mut b = header;
+    crate::compactsize::encode_compact_size(txs.len() as u64, &mut b);
+    for tx in txs {
+        b.extend_from_slice(tx);
+    }
+    b
+}
+
+fn tx_with_one_output(value: u64, covenant_type: u16, covenant_data: &[u8]) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&1u32.to_le_bytes()); // version
+    b.push(0x00); // tx_kind
+    b.extend_from_slice(&0u64.to_le_bytes()); // tx_nonce
+    crate::compactsize::encode_compact_size(0, &mut b); // input_count
+    crate::compactsize::encode_compact_size(1, &mut b); // output_count
+    b.extend_from_slice(&value.to_le_bytes());
+    b.extend_from_slice(&covenant_type.to_le_bytes());
+    crate::compactsize::encode_compact_size(covenant_data.len() as u64, &mut b);
+    b.extend_from_slice(covenant_data);
+    b.extend_from_slice(&0u32.to_le_bytes()); // locktime
+    crate::compactsize::encode_compact_size(0, &mut b); // witness_count
+    crate::compactsize::encode_compact_size(0, &mut b); // da_payload_len
+    b
+}
+
+#[test]
+fn parse_block_bytes_ok() {
+    let tx = minimal_tx_bytes();
+    let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
+    let root = merkle_root_txids(&[txid]).expect("root");
+    let mut prev = [0u8; 32];
+    prev[0] = 0x11;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(prev, root, target, 7, &[tx]);
+
+    let parsed = parse_block_bytes(&block).expect("parse_block");
+    assert_eq!(parsed.tx_count, 1);
+    assert_eq!(parsed.txs.len(), 1);
+    assert_eq!(parsed.txids.len(), 1);
+}
+
+#[test]
+fn validate_block_basic_ok() {
+    let tx = minimal_tx_bytes();
+    let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
+    let root = merkle_root_txids(&[txid]).expect("root");
+    let mut prev = [0u8; 32];
+    prev[0] = 0x22;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(prev, root, target, 9, &[tx]);
+
+    let s = validate_block_basic(&block, Some(prev), Some(target)).expect("validate");
+    assert_eq!(s.tx_count, 1);
+}
+
+#[test]
+fn validate_block_basic_linkage_mismatch() {
+    let tx = minimal_tx_bytes();
+    let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
+    let root = merkle_root_txids(&[txid]).expect("root");
+    let mut prev = [0u8; 32];
+    prev[0] = 0x33;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(prev, root, target, 11, &[tx]);
+    let mut wrong_prev = [0u8; 32];
+    wrong_prev[0] = 0x99;
+
+    let err = validate_block_basic(&block, Some(wrong_prev), Some(target)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrLinkageInvalid);
+}
+
+#[test]
+fn validate_block_basic_merkle_mismatch() {
+    let tx = minimal_tx_bytes();
+    let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
+    let mut root = merkle_root_txids(&[txid]).expect("root");
+    root[0] ^= 0xff;
+    let mut prev = [0u8; 32];
+    prev[0] = 0x44;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(prev, root, target, 13, &[tx]);
+
+    let err = validate_block_basic(&block, Some(prev), Some(target)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrMerkleInvalid);
+}
+
+#[test]
+fn validate_block_basic_pow_invalid() {
+    let tx = minimal_tx_bytes();
+    let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
+    let root = merkle_root_txids(&[txid]).expect("root");
+    let mut prev = [0u8; 32];
+    prev[0] = 0x55;
+    let zero_target = [0u8; 32];
+    let block = build_block_bytes(prev, root, zero_target, 15, &[tx]);
+
+    let err = validate_block_basic(&block, Some(prev), Some(zero_target)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrPowInvalid);
+}
+
+#[test]
+fn validate_block_basic_target_mismatch() {
+    let tx = minimal_tx_bytes();
+    let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
+    let root = merkle_root_txids(&[txid]).expect("root");
+    let mut prev = [0u8; 32];
+    prev[0] = 0x66;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(prev, root, target, 17, &[tx]);
+    let wrong_target = [0xeeu8; 32];
+
+    let err = validate_block_basic(&block, Some(prev), Some(wrong_target)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrTargetInvalid);
+}
+
+#[test]
+fn parse_block_bytes_trailing_bytes() {
+    let tx = minimal_tx_bytes();
+    let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
+    let root = merkle_root_txids(&[txid]).expect("root");
+    let mut prev = [0u8; 32];
+    prev[0] = 0x77;
+    let target = [0xffu8; 32];
+    let mut block = build_block_bytes(prev, root, target, 19, &[tx]);
+    block.push(0x00);
+
+    let err = parse_block_bytes(&block).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrParse);
+}
+
+#[test]
+fn validate_block_basic_covenant_invalid() {
+    let tx = tx_with_one_output(1, COV_TYPE_ANCHOR, &[0x01]);
+    let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
+    let root = merkle_root_txids(&[txid]).expect("root");
+    let mut prev = [0u8; 32];
+    prev[0] = 0x88;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(prev, root, target, 21, &[tx]);
+
+    let err = validate_block_basic(&block, Some(prev), Some(target)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+}
+
 fn hex32(s: &str) -> [u8; 32] {
     let mut out = [0u8; 32];
     assert_eq!(s.len(), 64);
@@ -279,4 +443,55 @@ fn biguint_to_bytes32(x: &BigUint) -> [u8; 32] {
     let mut out = [0u8; 32];
     out[32 - b.len()..].copy_from_slice(&b);
     out
+}
+
+#[test]
+fn validate_tx_covenants_genesis_p2pk_ok() {
+    let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
+    let mut cov = vec![0u8; MAX_P2PK_COVENANT_DATA as usize];
+    cov[0] = SUITE_ID_ML_DSA_87;
+    tx.outputs = vec![crate::tx::TxOutput {
+        value: 1,
+        covenant_type: COV_TYPE_P2PK,
+        covenant_data: cov,
+    }];
+    validate_tx_covenants_genesis(&tx).expect("ok");
+}
+
+#[test]
+fn validate_tx_covenants_genesis_timelock_bad_mode() {
+    let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
+    let mut cov = vec![0u8; MAX_TIMELOCK_COVENANT_DATA as usize];
+    cov[0] = 0x02;
+    tx.outputs = vec![crate::tx::TxOutput {
+        value: 1,
+        covenant_type: COV_TYPE_TIMELOCK,
+        covenant_data: cov,
+    }];
+    let err = validate_tx_covenants_genesis(&tx).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+}
+
+#[test]
+fn validate_tx_covenants_genesis_anchor_nonzero_value() {
+    let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
+    tx.outputs = vec![crate::tx::TxOutput {
+        value: 1,
+        covenant_type: COV_TYPE_ANCHOR,
+        covenant_data: vec![0x01],
+    }];
+    let err = validate_tx_covenants_genesis(&tx).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+}
+
+#[test]
+fn validate_tx_covenants_genesis_vault_rejected_pending_qv01() {
+    let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
+    tx.outputs = vec![crate::tx::TxOutput {
+        value: 1,
+        covenant_type: COV_TYPE_VAULT,
+        covenant_data: vec![0x00],
+    }];
+    let err = validate_tx_covenants_genesis(&tx).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
 }

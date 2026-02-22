@@ -17,7 +17,7 @@ func mustTxErrCode(t *testing.T, err error) ErrorCode {
 
 func minimalTxBytes() []byte {
 	var b bytes.Buffer
-	_ = binary.Write(&b, binary.LittleEndian, uint32(TX_WIRE_VERSION))
+	_ = binary.Write(&b, binary.LittleEndian, uint32(1))
 	b.WriteByte(0x00) // tx_kind
 	_ = binary.Write(&b, binary.LittleEndian, uint64(0))
 	b.WriteByte(0x00)                                    // input_count
@@ -69,7 +69,7 @@ func TestParseTx_NonMinimalCompactSize(t *testing.T) {
 
 func TestParseTx_ScriptSigLenOverflow(t *testing.T) {
 	var b bytes.Buffer
-	_ = binary.Write(&b, binary.LittleEndian, uint32(TX_WIRE_VERSION))
+	_ = binary.Write(&b, binary.LittleEndian, uint32(1))
 	b.WriteByte(0x00) // tx_kind
 	_ = binary.Write(&b, binary.LittleEndian, uint64(0))
 	b.WriteByte(0x01) // input_count

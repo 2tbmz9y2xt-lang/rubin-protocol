@@ -42,9 +42,6 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
     let mut r = Reader::new(b);
 
     let version = r.read_u32_le()?;
-    if version != TX_WIRE_VERSION {
-        return Err(TxError::new(ErrorCode::TxErrParse, "invalid tx version"));
-    }
 
     let tx_kind = r.read_u8()?;
     if tx_kind != 0x00 {

@@ -14,7 +14,6 @@ pub enum ErrorCode {
     TxErrCovenantTypeInvalid,
     TxErrMissingUtxo,
     TxErrCoinbaseImmature,
-    TxErrDeploymentInactive,
     TxErrTimelockNotMet,
 
     BlockErrParse,
@@ -45,7 +44,6 @@ impl ErrorCode {
             ErrorCode::TxErrCovenantTypeInvalid => "TX_ERR_COVENANT_TYPE_INVALID",
             ErrorCode::TxErrMissingUtxo => "TX_ERR_MISSING_UTXO",
             ErrorCode::TxErrCoinbaseImmature => "TX_ERR_COINBASE_IMMATURE",
-            ErrorCode::TxErrDeploymentInactive => "TX_ERR_DEPLOYMENT_INACTIVE",
             ErrorCode::TxErrTimelockNotMet => "TX_ERR_TIMELOCK_NOT_MET",
 
             ErrorCode::BlockErrParse => "BLOCK_ERR_PARSE",

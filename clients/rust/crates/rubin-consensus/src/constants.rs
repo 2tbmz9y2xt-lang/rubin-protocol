@@ -1,9 +1,7 @@
-pub const TX_WIRE_VERSION: u32 = 1;
-
 pub const WITNESS_DISCOUNT_DIVISOR: u64 = 4;
 
-pub const TARGET_BLOCK_INTERVAL: u64 = 600;
-pub const WINDOW_SIZE: u64 = 2_016;
+pub const TARGET_BLOCK_INTERVAL: u64 = 120;
+pub const WINDOW_SIZE: u64 = 10_080;
 
 pub const COINBASE_MATURITY: u64 = 100;
 pub const MAX_FUTURE_DRIFT: u64 = 7_200;
@@ -11,7 +9,22 @@ pub const MAX_FUTURE_DRIFT: u64 = 7_200;
 pub const BASE_UNITS_PER_RBN: u64 = 100_000_000;
 pub const MAX_SUPPLY: u64 = 10_000_000_000_000_000;
 pub const SUBSIDY_TOTAL_MINED: u64 = 9_900_000_000_000_000;
-pub const SUBSIDY_DURATION_BLOCKS: u64 = 1_314_900;
+pub const SUBSIDY_DURATION_BLOCKS: u64 = 876_600;
+
+pub const MAX_BLOCK_WEIGHT: u64 = 68_000_000;
+pub const MAX_BLOCK_BYTES: u64 = 72_000_000; // operational P2P cap; not a consensus validity bound
+pub const MAX_DA_BYTES_PER_BLOCK: u64 = 32_000_000;
+pub const MIN_DA_RETENTION_BLOCKS: u64 = 15_120;
+pub const MAX_RELAY_MSG_BYTES: u64 = 96_000_000;
+
+pub const MAX_DA_MANIFEST_BYTES_PER_TX: u64 = 65_536;
+pub const CHUNK_BYTES: u64 = 524_288;
+pub const MAX_DA_BATCHES_PER_BLOCK: u64 = 128;
+pub const MAX_DA_CHUNK_COUNT: u64 = 4_096;
+pub const MAX_ANCHOR_PAYLOAD_SIZE: u64 = 65_536;
+pub const MAX_ANCHOR_BYTES_PER_BLOCK: u64 = 131_072;
+pub const MAX_P2PK_COVENANT_DATA: u64 = 33;
+pub const MAX_TIMELOCK_COVENANT_DATA: u64 = 9;
 
 pub const MAX_TX_INPUTS: u64 = 1024;
 pub const MAX_TX_OUTPUTS: u64 = 1024;
@@ -23,8 +36,19 @@ pub const SUITE_ID_SENTINEL: u8 = 0x00;
 pub const SUITE_ID_ML_DSA_87: u8 = 0x01;
 pub const SUITE_ID_SLH_DSA_SHAKE_256F: u8 = 0x02;
 
+pub const COV_TYPE_P2PK: u16 = 0x0000;
+pub const COV_TYPE_TIMELOCK: u16 = 0x0001;
+pub const COV_TYPE_ANCHOR: u16 = 0x0002;
+pub const COV_TYPE_RESERVED_FUTURE: u16 = 0x00FF;
+pub const COV_TYPE_HTLC: u16 = 0x0100;
+pub const COV_TYPE_VAULT: u16 = 0x0101;
+pub const COV_TYPE_DA_COMMIT: u16 = 0x0103;
+
 pub const ML_DSA_87_PUBKEY_BYTES: u64 = 2592;
 pub const ML_DSA_87_SIG_BYTES: u64 = 4627;
 
 pub const SLH_DSA_SHAKE_256F_PUBKEY_BYTES: u64 = 64;
 pub const MAX_SLH_DSA_SIG_BYTES: u64 = 49_856;
+
+pub const VERIFY_COST_ML_DSA_87: u64 = 8;
+pub const VERIFY_COST_SLH_DSA_SHAKE_256F: u64 = 64;
