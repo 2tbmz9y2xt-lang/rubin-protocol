@@ -618,6 +618,8 @@ Semantics:
 - `CORE_TIMELOCK`:
   - `covenant_data = lock_mode:u8 || lock_value:u64le`.
   - `covenant_data_len MUST equal MAX_TIMELOCK_COVENANT_DATA`.
+  - `lock_mode MUST be `0x00` or `0x01`; any other value MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`
+    at output creation (CheckTx) and at spend.
   - `lock_mode = 0x00` means height lock; `lock_mode = 0x01` means timestamp lock.
   - Spend is forbidden until the corresponding lock condition is satisfied by the current validated chain state;
     otherwise reject as `TX_ERR_TIMELOCK_NOT_MET`.
@@ -808,7 +810,14 @@ For any non-coinbase transaction `T`:
 
 1. `T.tx_nonce` MUST be in `[1, 0xffff_ffff_ffff_ffff]`. Otherwise reject as `TX_ERR_TX_NONCE_INVALID`.
 2. `T.input_count` MUST be `>= 1`. Otherwise reject as `TX_ERR_PARSE`.
-3. WitnessItems are consumed by inputs using a cursor model.
+3. No input may use the coinbase prevout encoding. If any input satisfies `is_coinbase_prevout`, reject as
+   `TX_ERR_PARSE`.
+4. For genesis covenant set (Section 14 only), every input MUST have `script_sig_len = 0`. Otherwise reject as
+   `TX_ERR_PARSE`.
+5. For each input, `sequence` MUST be `<= 0x7fffffff`. Otherwise reject as `TX_ERR_SEQUENCE_INVALID`.
+6. All input outpoints `(prev_txid, prev_vout)` within the transaction MUST be unique. Otherwise reject as
+   `TX_ERR_PARSE`.
+7. WitnessItems are consumed by inputs using a cursor model.
 
    Define `witness_slots(e)` for a referenced UTXO entry `e`:
    - If `e.covenant_type = CORE_TIMELOCK`: `witness_slots(e) = 0`.
@@ -816,28 +825,26 @@ For any non-coinbase transaction `T`:
      where `key_count(e)` is read from `e.covenant_data` (validated at UTXO creation).
    - Otherwise: `witness_slots(e) = 1`.
 
-   Future covenant types MUST explicitly declare their `witness_slots` value.
-   Default for undeclared types: `witness_slots = 1`.
+   Any unknown or future `covenant_type` encountered during cursor iteration MUST be rejected immediately
+   as `TX_ERR_COVENANT_TYPE_INVALID`. The default `witness_slots = 1` applies only to known covenant types
+   not listed above. Future covenant types MUST explicitly declare their `witness_slots` value in this document.
 
-   Cursor interpretation:
+   Normative cursor algorithm (implementations MUST produce identical results):
 
-   Let `W = 0`.
+   ```
+   W := 0
+   for i in 0 .. input_count-1:
+       e := utxo_lookup(inputs[i].prev_txid, inputs[i].prev_vout)
+       if e is missing: reject TX_ERR_MISSING_UTXO
+       if e.covenant_type is unknown: reject TX_ERR_COVENANT_TYPE_INVALID
+       slots := witness_slots(e.covenant_type, e.covenant_data)
+       // witnesses[W .. W+slots-1] are assigned to input i
+       W := W + slots
+   if W != witness_count: reject TX_ERR_PARSE
+   ```
 
-   For each input `i` in transaction order:
-     Let `e` be the referenced UTXO entry. If missing, reject as `TX_ERR_MISSING_UTXO`.
-     Let `slots = witness_slots(e)`.
-     WitnessItems assigned to input `i` are: `T.witness.witnesses[W .. W+slots-1]`.
-     `W := W + slots`.
-
-   After all inputs:
-     `W MUST equal T.witness.witness_count`. Otherwise reject as `TX_ERR_PARSE`.
-4. No input may use the coinbase prevout encoding. If any input satisfies `is_coinbase_prevout`, reject as
-   `TX_ERR_PARSE`.
-5. For genesis covenant set (Section 14 only), every input MUST have `script_sig_len = 0`. Otherwise reject as
-   `TX_ERR_PARSE`.
-6. For each input, `sequence` MUST be `<= 0x7fffffff`. Otherwise reject as `TX_ERR_SEQUENCE_INVALID`.
-7. All input outpoints `(prev_txid, prev_vout)` within the transaction MUST be unique. Otherwise reject as
-   `TX_ERR_PARSE`.
+   WitnessItems assigned to input `i` are: `T.witness.witnesses[W_i .. W_i+slots_i-1]`
+   where `W_i` is the value of `W` before processing input `i`.
 
 If multiple failures apply in this section, checks MUST be applied in the numbered order above.
 
@@ -1006,7 +1013,8 @@ For each non-coinbase transaction `T`:
 1. Let `sum_in` be the sum of referenced input values.
 2. Let `sum_out` be the sum of `T.outputs[j].value` over all outputs `j`.
 3. If `sum_out > sum_in`, reject as `TX_ERR_VALUE_CONSERVATION`.
-4. Arithmetic MUST be exact. Any overflow MUST be rejected as `TX_ERR_PARSE`.
+4. Arithmetic MUST be exact and MUST be computed in at least 128-bit unsigned integer arithmetic.
+   Any overflow MUST be rejected as `TX_ERR_PARSE`.
 
 ## 21. DA Set Integrity (Normative)
 
