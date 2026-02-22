@@ -187,7 +187,8 @@ Rules:
 
 - `tx_kind` MUST be one of `0x00`, `0x01`, or `0x02`. Any other value MUST be rejected as `TX_ERR_PARSE`.
 - For `tx_kind = 0x00`, `da_payload_len` MUST equal `0`. Any other value MUST be rejected as `TX_ERR_PARSE`.
-- For `tx_kind = 0x01`, `da_payload_len MUST be <= MAX_DA_MANIFEST_BYTES_PER_TX`. Otherwise reject as `TX_ERR_PARSE`.
+- For `tx_kind = 0x01`, `da_payload` is the DA batch manifest (application-layer metadata for the L2 operator).
+  `da_payload_len MUST be <= MAX_DA_MANIFEST_BYTES_PER_TX`. Otherwise reject as `TX_ERR_PARSE`.
 - For `tx_kind = 0x02`, `da_payload_len MUST be <= CHUNK_BYTES`. Otherwise reject as `TX_ERR_PARSE`.
 
 ### 5.3 Syntax Limits (Parsing)
@@ -532,6 +533,8 @@ implementations for the described failure classes:
 - DA set incomplete (commit without all chunks)    -> `BLOCK_ERR_DA_INCOMPLETE`
 - DA chunk hash mismatch                           -> `BLOCK_ERR_DA_CHUNK_HASH_INVALID`
 - DA set orphan chunk (chunk without commit)       -> `BLOCK_ERR_DA_SET_INVALID`
+- DA duplicate commit for same da_id              -> `BLOCK_ERR_DA_SET_INVALID`
+- DA payload commitment mismatch or ambiguous      -> `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID`
 - DA batch count exceeded                          -> `BLOCK_ERR_DA_BATCH_EXCEEDED`
 - Malformed block encoding                         -> `BLOCK_ERR_PARSE`
 
@@ -819,6 +822,9 @@ Rules:
 - **No orphan chunks:** Every `DA_CHUNK_TX` in `B` MUST have a corresponding `DA_COMMIT_TX` in `B` with the same `da_id`.
   If any `DA_CHUNK_TX` exists without a matching commit, reject as `BLOCK_ERR_DA_SET_INVALID`.
 
+- **No duplicate commits:** For each `da_id` value, `B` MUST contain exactly one `DA_COMMIT_TX` with that `da_id`.
+  If more than one `DA_COMMIT_TX` with the same `da_id` appears in `B`, reject as `BLOCK_ERR_DA_SET_INVALID`.
+
 - **Complete sets only:** For every `DA_COMMIT_TX` with `chunk_count = C` and `da_id = D` in `B`,
   the block MUST contain exactly `C` `DA_CHUNK_TX` records with `da_id = D` and `chunk_index` values
   `{0, 1, ..., C-1}` each appearing exactly once.
@@ -835,9 +841,9 @@ Rules:
 For each `DA_COMMIT_TX` `T` with `chunk_count = C` and `da_id = D`:
 
 - Let `chunks_sorted` be the `C` DA_CHUNK_TX records for `D` sorted by `chunk_index` ascending.
-- `T` MUST contain a `CORE_DA_COMMIT` output whose `covenant_data` equals
+- `T` MUST contain **exactly one** `CORE_DA_COMMIT` output whose `covenant_data` equals
   `SHA3-256(concat(chunk.da_payload for chunk in chunks_sorted))`.
-  If violated, reject as `BLOCK_ERR_DA_CHUNK_HASH_INVALID`.
+  If no such output exists, or if more than one `CORE_DA_COMMIT` output exists in `T`, reject as `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID`.
 
 This is the binding commitment that links the on-chain commit to the full DA payload.
 
@@ -910,7 +916,7 @@ Minimum required order for validating a candidate block `B_h` at height `h`:
 8. Check per-block ANCHOR byte limits (Section 14). If exceeded, reject as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
 9. Check DA chunk hash integrity (Section 21.2). If any chunk_hash mismatch, reject as `BLOCK_ERR_DA_CHUNK_HASH_INVALID`.
 10. Check DA set completeness (Section 21.3): no orphan chunks, complete sets, batch count. Reject as applicable.
-11. Check DA payload commitment (Section 21.4). If mismatch, reject as `BLOCK_ERR_DA_CHUNK_HASH_INVALID`.
+11. Check DA payload commitment (Section 21.4). If mismatch or ambiguous (missing or duplicate CORE_DA_COMMIT output), reject as `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID`.
 12. Apply transactions sequentially (Section 18), enforcing:
    - coinbase structural rules (Sections 10.5 and 16),
    - transaction structural rules (Section 16),
