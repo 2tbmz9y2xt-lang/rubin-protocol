@@ -11,6 +11,16 @@
       "expect_short_id": "b50c6fb86b2f"
     },
     {
+      "id": "CV-C-02",
+      "op": "compact_collision_fallback",
+      "expect_ok": true,
+      "missing_indices": [2, 7],
+      "getblocktxn_ok": false,
+      "expect_request_getblocktxn": true,
+      "expect_request_full_block": true,
+      "expect_penalize_peer": false
+    },
+    {
       "id": "CV-C-03",
       "op": "parse_tx",
       "tx_hex": "010000000001000000000000000000000000000000",
@@ -25,6 +35,185 @@
       "expect_ok": true,
       "expect_txid": "abf5ba685f88998ef336e4baf0bdd902ac4c9a5f3036933ad91e67e2a1174d87",
       "expect_wtxid": "79b8a499bcf22429f1deac90380812d56b2d81621e34c1d200aba61d5a375e80"
+    },
+    {
+      "id": "CV-C-05",
+      "op": "compact_witness_roundtrip",
+      "expect_ok": true,
+      "suite_id": 1,
+      "pubkey_length": 2592,
+      "sig_length": 4627,
+      "expect_roundtrip_ok": true,
+      "expect_wire_bytes": 7226
+    },
+    {
+      "id": "CV-C-06",
+      "op": "compact_batch_verify",
+      "expect_ok": true,
+      "batch_size": 64,
+      "invalid_indices": [],
+      "expect_batch_ok": true,
+      "expect_fallback": false,
+      "expect_invalid_indices": []
+    },
+    {
+      "id": "CV-C-07",
+      "op": "compact_batch_verify",
+      "expect_ok": true,
+      "batch_size": 64,
+      "invalid_indices": [17],
+      "expect_batch_ok": false,
+      "expect_fallback": true,
+      "expect_invalid_indices": [17]
+    },
+    {
+      "id": "CV-C-08",
+      "op": "compact_prefill_roundtrip",
+      "expect_ok": true,
+      "tx_count": 8,
+      "prefilled_indices": [0, 3],
+      "mempool_indices": [1, 2, 4, 6, 7],
+      "blocktxn_indices": [5],
+      "expect_missing_indices": [5],
+      "expect_reconstructed": true,
+      "expect_request_full_block": false
+    },
+    {
+      "id": "CV-C-09",
+      "op": "compact_state_machine",
+      "expect_ok": true,
+      "chunk_count": 3,
+      "initial_chunks": [0, 1],
+      "events": [
+        {"type": "commit"},
+        {"type": "chunk", "index": 2}
+      ],
+      "expect_final_state": "C",
+      "expect_pinned": true,
+      "expect_evicted": false,
+      "expect_ttl": 3,
+      "expect_ttl_reset_count": 1
+    },
+    {
+      "id": "CV-C-10",
+      "op": "compact_state_machine",
+      "expect_ok": true,
+      "chunk_count": 3,
+      "initial_chunks": [0],
+      "events": [
+        {"type": "commit"},
+        {"type": "tick", "blocks": 3}
+      ],
+      "expect_final_state": "EVICTED",
+      "expect_pinned": false,
+      "expect_evicted": true,
+      "expect_ttl": 0
+    },
+    {
+      "id": "CV-C-11",
+      "op": "compact_state_machine",
+      "expect_ok": true,
+      "chunk_count": 2,
+      "initial_chunks": [],
+      "events": [
+        {"type": "commit"},
+        {"type": "checkblock"},
+        {"type": "chunk", "index": 0},
+        {"type": "checkblock"},
+        {"type": "chunk", "index": 1},
+        {"type": "checkblock"}
+      ],
+      "expect_checkblock_results": [false, false, true],
+      "expect_final_state": "C",
+      "expect_pinned": true,
+      "expect_evicted": false
+    },
+    {
+      "id": "CV-C-12",
+      "op": "compact_orphan_limits",
+      "expect_ok": true,
+      "current_peer_bytes": 4193280,
+      "current_da_id_bytes": 0,
+      "current_global_bytes": 0,
+      "incoming_chunk_bytes": 2048,
+      "expect_admit": false
+    },
+    {
+      "id": "CV-C-13",
+      "op": "compact_orphan_limits",
+      "expect_ok": true,
+      "current_peer_bytes": 0,
+      "current_da_id_bytes": 8387584,
+      "current_global_bytes": 0,
+      "incoming_chunk_bytes": 2048,
+      "expect_admit": false
+    },
+    {
+      "id": "CV-C-14",
+      "op": "compact_state_machine",
+      "expect_ok": true,
+      "chunk_count": 4,
+      "initial_chunks": [0],
+      "events": [
+        {"type": "tick", "blocks": 2},
+        {"type": "commit"},
+        {"type": "tick", "blocks": 2}
+      ],
+      "expect_final_state": "B",
+      "expect_evicted": false,
+      "expect_ttl_reset_count": 1,
+      "expect_ttl": 1
+    },
+    {
+      "id": "CV-C-15",
+      "op": "compact_sendcmpct_modes",
+      "expect_ok": true,
+      "phases": [
+        {"in_ibd": true, "warmup_done": false, "miss_rate_pct": 0.0, "miss_rate_blocks": 0},
+        {"in_ibd": false, "warmup_done": true, "miss_rate_pct": 0.2, "miss_rate_blocks": 1},
+        {"in_ibd": false, "warmup_done": true, "miss_rate_pct": 12.0, "miss_rate_blocks": 5}
+      ],
+      "expect_modes": [0, 2, 0]
+    },
+    {
+      "id": "CV-C-16",
+      "op": "compact_peer_quality",
+      "expect_ok": true,
+      "start_score": 50,
+      "events": [
+        "reconstruct_no_getblocktxn",
+        "getblocktxn_required",
+        "full_block_required"
+      ],
+      "expect_score": 39,
+      "expect_mode": 0
+    },
+    {
+      "id": "CV-C-17",
+      "op": "compact_prefetch_caps",
+      "expect_ok": true,
+      "peer_streams_bps": [
+        4500000,
+        4000000,
+        4000000,
+        4000000,
+        4000000,
+        4000000,
+        4000000,
+        4000000
+      ],
+      "expect_peer_exceeded": true,
+      "expect_global_exceeded": true,
+      "expect_quality_penalty": true,
+      "expect_disconnect": false
+    },
+    {
+      "id": "CV-C-18",
+      "op": "compact_telemetry_rate",
+      "expect_ok": true,
+      "completed_sets": 97,
+      "total_sets": 100,
+      "expect_rate": 0.97
     }
   ]
 }

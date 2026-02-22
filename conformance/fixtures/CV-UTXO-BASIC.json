@@ -55,6 +55,8 @@
       "id": "CV-U-06",
       "op": "utxo_apply_basic",
       "expect_ok": true,
+      "expect_fee": 10,
+      "expect_utxo_count": 1,
       "height": 200,
       "block_timestamp": 1000,
       "tx_hex": "0100000000010000000000000001afafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafaf000000000000000000015a00000000000000000021010000000000000000000000000000000000000000000000000000000000000000000000000000",
