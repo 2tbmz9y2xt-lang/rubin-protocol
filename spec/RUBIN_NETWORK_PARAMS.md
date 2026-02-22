@@ -197,7 +197,7 @@ Storage depends on number of monitored channels; no protocol minimum.
 | Code | Name | Description |
 |------|------|-------------|
 | 0x0000 | CORE_P2PK | Standard pay-to-public-key (ML-DSA-87) |
-| 0x0001 | CORE_TIMELOCK | Height or timestamp lock |
+| 0x0001 | UNASSIGNED | Forbidden — TX_ERR_COVENANT_TYPE_INVALID |
 | 0x0002 | CORE_ANCHOR | Non-spendable data anchor |
 | 0x00FF | CORE_RESERVED_FUTURE | Forbidden — TX_ERR_COVENANT_TYPE_INVALID |
 | 0x0100 | CORE_HTLC | RESERVED — spec pending (Q-S001) → TX_ERR_COVENANT_TYPE_INVALID |

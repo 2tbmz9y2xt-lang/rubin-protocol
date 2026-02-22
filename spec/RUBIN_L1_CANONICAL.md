@@ -563,7 +563,6 @@ implementations for the described failure classes:
 - Invalid covenant_type / covenant encoding        -> `TX_ERR_COVENANT_TYPE_INVALID`
 - Missing UTXO / attempt to spend non-spendable    -> `TX_ERR_MISSING_UTXO`
 - Coinbase immature                                -> `TX_ERR_COINBASE_IMMATURE`
-- Timelock condition not met                       -> *(removed; CORE_TIMELOCK is not a genesis covenant)*
 - Invalid prev_block_hash linkage                  -> `BLOCK_ERR_LINKAGE_INVALID`
 - Invalid merkle_root                              -> `BLOCK_ERR_MERKLE_INVALID`
 - Missing/duplicate witness commitment             -> `BLOCK_ERR_WITNESS_COMMITMENT`
@@ -853,8 +852,11 @@ For each non-coinbase transaction `T` in block order:
 1. Let `N_seen` be the set of `tx_nonce` values already observed in prior non-coinbase transactions of the same block.
 2. If `T.tx_nonce` already appears in `N_seen`, reject as `TX_ERR_NONCE_REPLAY`.
 
-Cross-block replay is prevented by UTXO exhaustion: once an input outpoint is consumed, it is removed from the
-spendable UTXO set and cannot be spent again.
+Note on scope: `tx_nonce` replay protection is **intra-block only** — it prevents two transactions with the
+same nonce from appearing in the same block. It does not provide cross-block replay protection.
+Cross-block replay is prevented by a separate mechanism: UTXO exhaustion. Once an input outpoint is consumed,
+it is removed from the spendable UTXO set and cannot be referenced again in any future block.
+These are two independent mechanisms with different scopes.
 
 ## 18. UTXO State Model (Normative)
 
