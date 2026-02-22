@@ -24,7 +24,10 @@ pub use pow::{pow_check, retarget_v1};
 pub use sighash::sighash_v1_digest;
 pub use tx::{parse_tx, Tx, TxInput, TxOutput, WitnessItem};
 pub use utxo_basic::{apply_non_coinbase_tx_basic, Outpoint, UtxoApplySummary, UtxoEntry};
-pub use vault::{parse_vault_covenant_data, VaultCovenant};
+pub use vault::{
+    output_descriptor_bytes, parse_multisig_covenant_data, parse_vault_covenant_data,
+    witness_slots, MultisigCovenant, VaultCovenant,
+};
 
 #[cfg(test)]
 mod compact_relay_tests;

@@ -39,6 +39,7 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 
 	var sumIn u128
 	var sumInVault u128
+	var vaultWhitelists [][][32]byte
 	hasVaultInput := false
 	for _, in := range tx.Inputs {
 		op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
@@ -54,6 +55,9 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 		if entry.CreatedByCoinbase && height < entry.CreationHeight+COINBASE_MATURITY {
 			return nil, txerr(TX_ERR_COINBASE_IMMATURE, "coinbase immature")
 		}
+		if err := checkSpendCovenant(entry.CovenantType, entry.CovenantData); err != nil {
+			return nil, err
+		}
 
 		var err error
 		sumIn, err = addU64ToU128(sumIn, entry.Value)
@@ -62,6 +66,11 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 		}
 		if entry.CovenantType == COV_TYPE_VAULT {
 			hasVaultInput = true
+			v, err := ParseVaultCovenantData(entry.CovenantData)
+			if err != nil {
+				return nil, err
+			}
+			vaultWhitelists = append(vaultWhitelists, v.Whitelist)
 			sumInVault, err = addU64ToU128(sumInVault, entry.Value)
 			if err != nil {
 				return nil, err
@@ -90,6 +99,17 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 			CovenantData:      append([]byte(nil), out.CovenantData...),
 			CreationHeight:    height,
 			CreatedByCoinbase: false,
+		}
+	}
+	if len(vaultWhitelists) > 0 {
+		for _, out := range tx.Outputs {
+			desc := OutputDescriptorBytes(out.CovenantType, out.CovenantData)
+			h := sha3_256(desc)
+			for _, wl := range vaultWhitelists {
+				if !HashInSorted32(wl, h) {
+					return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "output not whitelisted for CORE_VAULT")
+				}
+			}
 		}
 	}
 
@@ -127,6 +147,14 @@ func checkSpendCovenant(
 			return err
 		}
 		_ = v
+		return nil
+	}
+	if covType == COV_TYPE_MULTISIG {
+		m, err := ParseMultisigCovenantData(covData)
+		if err != nil {
+			return err
+		}
+		_ = m
 		return nil
 	}
 	// HTLC/reserved/unknown are unsupported in basic apply path.

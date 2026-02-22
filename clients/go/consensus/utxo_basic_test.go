@@ -146,7 +146,7 @@ func TestApplyNonCoinbaseTxBasic_VaultCannotFundFee(t *testing.T) {
 		{Txid: prevVault, Vout: 0}: {
 			Value:        100,
 			CovenantType: COV_TYPE_VAULT,
-			CovenantData: vaultCovenantData(false, 0, 0x00, 0, false),
+			CovenantData: validVaultCovenantDataForP2PKOutput(),
 		},
 		{Txid: prevFee, Vout: 0}: {
 			Value:        10,
@@ -184,7 +184,7 @@ func TestApplyNonCoinbaseTxBasic_VaultPreservedWithExternalFeeSponsor(t *testing
 		{Txid: prevVault, Vout: 0}: {
 			Value:        100,
 			CovenantType: COV_TYPE_VAULT,
-			CovenantData: vaultCovenantData(false, 0, 0x00, 0, false),
+			CovenantData: validVaultCovenantDataForP2PKOutput(),
 		},
 		{Txid: prevFee, Vout: 0}: {
 			Value:        10,
@@ -193,6 +193,72 @@ func TestApplyNonCoinbaseTxBasic_VaultPreservedWithExternalFeeSponsor(t *testing
 		},
 	}
 
+	s, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if s.Fee != 10 {
+		t.Fatalf("fee=%d, want 10", s.Fee)
+	}
+}
+
+func TestApplyNonCoinbaseTxBasic_VaultWhitelistRejectsOutput(t *testing.T) {
+	var prevVault, prevFee, txid [32]byte
+	prevVault[0] = 0xe0
+	prevFee[0] = 0xe1
+	txid[0] = 0xe2
+
+	nonWhitelistedOutData := make([]byte, MAX_P2PK_COVENANT_DATA)
+	nonWhitelistedOutData[0] = SUITE_ID_ML_DSA_87
+	nonWhitelistedOutData[1] = 0xff
+
+	tx := &Tx{
+		Inputs: []TxInput{
+			{PrevTxid: prevVault, PrevVout: 0},
+			{PrevTxid: prevFee, PrevVout: 0},
+		},
+		Outputs: []TxOutput{
+			{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: nonWhitelistedOutData},
+		},
+	}
+
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prevVault, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_VAULT,
+			CovenantData: validVaultCovenantDataForP2PKOutput(),
+		},
+		{Txid: prevFee, Vout: 0}: {
+			Value:        10,
+			CovenantType: COV_TYPE_P2PK,
+			CovenantData: validP2PKCovenantData(),
+		},
+	}
+
+	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	}
+}
+
+func TestApplyNonCoinbaseTxBasic_MultisigInputAccepted(t *testing.T) {
+	var prevMS, txid [32]byte
+	prevMS[0] = 0xf0
+	txid[0] = 0xf1
+	txBytes := txWithOneInputOneOutput(prevMS, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
+	tx, parsedTxid := mustParseTxForUtxo(t, txBytes)
+	txid = parsedTxid
+
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prevMS, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_MULTISIG,
+			CovenantData: encodeMultisigCovenantData(1, makeKeys(1, 0x31)),
+		},
+	}
 	s, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

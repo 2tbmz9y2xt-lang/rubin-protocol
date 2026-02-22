@@ -1,12 +1,17 @@
 use std::collections::HashMap;
 
 use crate::constants::{
-    COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_P2PK, COV_TYPE_VAULT,
+    COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_MULTISIG, COV_TYPE_P2PK,
+    COV_TYPE_VAULT,
 };
 use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
+use crate::hash::sha3_256;
 use crate::tx::Tx;
-use crate::vault::parse_vault_covenant_data;
+use crate::vault::{
+    hash_in_sorted_32, output_descriptor_bytes, parse_multisig_covenant_data,
+    parse_vault_covenant_data,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Outpoint {
@@ -48,6 +53,7 @@ pub fn apply_non_coinbase_tx_basic(
     let mut work = utxo_set.clone();
     let mut sum_in: u128 = 0;
     let mut sum_in_vault: u128 = 0;
+    let mut vault_whitelists: Vec<Vec<[u8; 32]>> = Vec::new();
     let mut has_vault_input = false;
 
     for input in &tx.inputs {
@@ -73,12 +79,15 @@ pub fn apply_non_coinbase_tx_basic(
                 "coinbase immature",
             ));
         }
+        check_spend_covenant(entry.covenant_type, &entry.covenant_data)?;
 
         sum_in = sum_in
             .checked_add(entry.value as u128)
             .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u128 overflow"))?;
         if entry.covenant_type == COV_TYPE_VAULT {
             has_vault_input = true;
+            let v = parse_vault_covenant_data(&entry.covenant_data)?;
+            vault_whitelists.push(v.whitelist);
             sum_in_vault = sum_in_vault
                 .checked_add(entry.value as u128)
                 .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u128 overflow"))?;
@@ -110,6 +119,20 @@ pub fn apply_non_coinbase_tx_basic(
             },
         );
     }
+    if !vault_whitelists.is_empty() {
+        for out in &tx.outputs {
+            let desc = output_descriptor_bytes(out.covenant_type, &out.covenant_data);
+            let h = sha3_256(&desc);
+            for wl in &vault_whitelists {
+                if !hash_in_sorted_32(wl, &h) {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrCovenantTypeInvalid,
+                        "output not whitelisted for CORE_VAULT",
+                    ));
+                }
+            }
+        }
+    }
 
     if sum_out > sum_in {
         return Err(TxError::new(
@@ -138,6 +161,10 @@ fn check_spend_covenant(covenant_type: u16, covenant_data: &[u8]) -> Result<(), 
     }
     if covenant_type == COV_TYPE_VAULT {
         parse_vault_covenant_data(covenant_data)?;
+        return Ok(());
+    }
+    if covenant_type == COV_TYPE_MULTISIG {
+        parse_multisig_covenant_data(covenant_data)?;
         return Ok(());
     }
     Err(TxError::new(

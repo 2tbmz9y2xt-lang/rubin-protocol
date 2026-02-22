@@ -1,71 +1,188 @@
-use crate::constants::{MAX_VAULT_COVENANT_DATA, MAX_VAULT_COVENANT_LEGACY, MIN_VAULT_SPEND_DELAY};
+use crate::compactsize::encode_compact_size;
+use crate::constants::{
+    COV_TYPE_MULTISIG, COV_TYPE_VAULT, MAX_MULTISIG_KEYS, MAX_VAULT_KEYS,
+    MAX_VAULT_WHITELIST_ENTRIES,
+};
 use crate::error::{ErrorCode, TxError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VaultCovenant {
-    pub owner_key_id: [u8; 32],
-    pub recovery_key_id: [u8; 32],
-    pub spend_delay: u64,
-    pub lock_mode: u8,
-    pub lock_value: u64,
+    pub threshold: u8,
+    pub key_count: u8,
+    pub keys: Vec<[u8; 32]>,
+    pub whitelist_count: u16,
+    pub whitelist: Vec<[u8; 32]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MultisigCovenant {
+    pub threshold: u8,
+    pub key_count: u8,
+    pub keys: Vec<[u8; 32]>,
 }
 
 pub fn parse_vault_covenant_data(covenant_data: &[u8]) -> Result<VaultCovenant, TxError> {
-    let mut owner = [0u8; 32];
-    let mut recovery = [0u8; 32];
-
-    let (spend_delay, lock_mode, lock_value) = match covenant_data.len() as u64 {
-        MAX_VAULT_COVENANT_LEGACY => {
-            owner.copy_from_slice(&covenant_data[0..32]);
-            recovery.copy_from_slice(&covenant_data[41..73]);
-            let mut raw = [0u8; 8];
-            raw.copy_from_slice(&covenant_data[33..41]);
-            (0u64, covenant_data[32], u64::from_le_bytes(raw))
-        }
-        MAX_VAULT_COVENANT_DATA => {
-            owner.copy_from_slice(&covenant_data[0..32]);
-            recovery.copy_from_slice(&covenant_data[49..81]);
-
-            let mut delay_raw = [0u8; 8];
-            delay_raw.copy_from_slice(&covenant_data[32..40]);
-            let spend_delay = u64::from_le_bytes(delay_raw);
-            if spend_delay < MIN_VAULT_SPEND_DELAY {
-                return Err(TxError::new(
-                    ErrorCode::TxErrCovenantTypeInvalid,
-                    "CORE_VAULT spend_delay below minimum",
-                ));
-            }
-
-            let mut lock_raw = [0u8; 8];
-            lock_raw.copy_from_slice(&covenant_data[41..49]);
-            (spend_delay, covenant_data[40], u64::from_le_bytes(lock_raw))
-        }
-        _ => {
-            return Err(TxError::new(
-                ErrorCode::TxErrCovenantTypeInvalid,
-                "invalid CORE_VAULT covenant_data length",
-            ))
-        }
-    };
-
-    if lock_mode != 0x00 && lock_mode != 0x01 {
+    if covenant_data.len() < 68 {
         return Err(TxError::new(
             ErrorCode::TxErrCovenantTypeInvalid,
-            "invalid CORE_VAULT lock_mode",
+            "CORE_VAULT covenant_data too short",
         ));
     }
-    if owner == recovery {
+
+    let threshold = covenant_data[0];
+    let key_count = covenant_data[1];
+    if key_count == 0 || key_count > MAX_VAULT_KEYS {
         return Err(TxError::new(
             ErrorCode::TxErrCovenantTypeInvalid,
-            "CORE_VAULT owner_key_id equals recovery_key_id",
+            "CORE_VAULT key_count out of range",
+        ));
+    }
+    if threshold == 0 || threshold > key_count {
+        return Err(TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_VAULT threshold out of range",
+        ));
+    }
+
+    let mut offset = 2usize;
+    let mut keys = Vec::with_capacity(key_count as usize);
+    for _ in 0..key_count {
+        if offset + 32 > covenant_data.len() {
+            return Err(TxError::new(
+                ErrorCode::TxErrCovenantTypeInvalid,
+                "CORE_VAULT truncated keys",
+            ));
+        }
+        let mut k = [0u8; 32];
+        k.copy_from_slice(&covenant_data[offset..offset + 32]);
+        offset += 32;
+        keys.push(k);
+    }
+    if !strictly_sorted_unique_32(&keys) {
+        return Err(TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_VAULT keys not strictly sorted",
+        ));
+    }
+
+    if offset + 2 > covenant_data.len() {
+        return Err(TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_VAULT missing whitelist_count",
+        ));
+    }
+    let whitelist_count = u16::from_le_bytes([covenant_data[offset], covenant_data[offset + 1]]);
+    offset += 2;
+    if whitelist_count == 0 || whitelist_count > MAX_VAULT_WHITELIST_ENTRIES {
+        return Err(TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_VAULT whitelist_count out of range",
+        ));
+    }
+
+    let expected_len = 2 + (key_count as usize) * 32 + 2 + (whitelist_count as usize) * 32;
+    if covenant_data.len() != expected_len {
+        return Err(TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_VAULT covenant_data length mismatch",
+        ));
+    }
+
+    let mut whitelist = Vec::with_capacity(whitelist_count as usize);
+    for _ in 0..whitelist_count {
+        let mut h = [0u8; 32];
+        h.copy_from_slice(&covenant_data[offset..offset + 32]);
+        offset += 32;
+        whitelist.push(h);
+    }
+    if !strictly_sorted_unique_32(&whitelist) {
+        return Err(TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_VAULT whitelist not strictly sorted",
         ));
     }
 
     Ok(VaultCovenant {
-        owner_key_id: owner,
-        recovery_key_id: recovery,
-        spend_delay,
-        lock_mode,
-        lock_value,
+        threshold,
+        key_count,
+        keys,
+        whitelist_count,
+        whitelist,
     })
+}
+
+pub fn parse_multisig_covenant_data(covenant_data: &[u8]) -> Result<MultisigCovenant, TxError> {
+    if covenant_data.len() < 34 {
+        return Err(TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_MULTISIG covenant_data too short",
+        ));
+    }
+
+    let threshold = covenant_data[0];
+    let key_count = covenant_data[1];
+    if key_count == 0 || key_count > MAX_MULTISIG_KEYS {
+        return Err(TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_MULTISIG key_count out of range",
+        ));
+    }
+    if threshold == 0 || threshold > key_count {
+        return Err(TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_MULTISIG threshold out of range",
+        ));
+    }
+
+    let expected_len = 2 + (key_count as usize) * 32;
+    if covenant_data.len() != expected_len {
+        return Err(TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_MULTISIG covenant_data length mismatch",
+        ));
+    }
+
+    let mut keys = Vec::with_capacity(key_count as usize);
+    let mut offset = 2usize;
+    for _ in 0..key_count {
+        let mut k = [0u8; 32];
+        k.copy_from_slice(&covenant_data[offset..offset + 32]);
+        offset += 32;
+        keys.push(k);
+    }
+    if !strictly_sorted_unique_32(&keys) {
+        return Err(TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_MULTISIG keys not strictly sorted",
+        ));
+    }
+
+    Ok(MultisigCovenant {
+        threshold,
+        key_count,
+        keys,
+    })
+}
+
+pub fn output_descriptor_bytes(covenant_type: u16, covenant_data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + 9 + covenant_data.len());
+    out.extend_from_slice(&covenant_type.to_le_bytes());
+    encode_compact_size(covenant_data.len() as u64, &mut out);
+    out.extend_from_slice(covenant_data);
+    out
+}
+
+pub fn witness_slots(covenant_type: u16, covenant_data: &[u8]) -> usize {
+    match covenant_type {
+        COV_TYPE_VAULT | COV_TYPE_MULTISIG => covenant_data.get(1).copied().unwrap_or(1) as usize,
+        _ => 1,
+    }
+}
+
+pub fn hash_in_sorted_32(list: &[[u8; 32]], target: &[u8; 32]) -> bool {
+    list.binary_search(target).is_ok()
+}
+
+fn strictly_sorted_unique_32(xs: &[[u8; 32]]) -> bool {
+    xs.windows(2).all(|w| w[0] < w[1])
 }

@@ -28,6 +28,10 @@ func ValidateTxCovenantsGenesis(tx *Tx) error {
 			if _, err := ParseVaultCovenantData(out.CovenantData); err != nil {
 				return err
 			}
+		case COV_TYPE_MULTISIG:
+			if _, err := ParseMultisigCovenantData(out.CovenantData); err != nil {
+				return err
+			}
 
 		case COV_TYPE_RESERVED_FUTURE, COV_TYPE_HTLC, COV_TYPE_DA_COMMIT:
 			return txerr(TX_ERR_COVENANT_TYPE_INVALID, "reserved or unsupported covenant_type")
