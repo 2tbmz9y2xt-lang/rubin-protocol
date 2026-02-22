@@ -24,7 +24,6 @@ pub const MAX_DA_CHUNK_COUNT: u64 = 4_096;
 pub const MAX_ANCHOR_PAYLOAD_SIZE: u64 = 65_536;
 pub const MAX_ANCHOR_BYTES_PER_BLOCK: u64 = 131_072;
 pub const MAX_P2PK_COVENANT_DATA: u64 = 33;
-pub const MAX_TIMELOCK_COVENANT_DATA: u64 = 9;
 pub const MAX_VAULT_COVENANT_DATA: u64 = 81;
 pub const MAX_VAULT_COVENANT_LEGACY: u64 = 73;
 pub const MIN_VAULT_SPEND_DELAY: u64 = 4_320;
@@ -44,7 +43,6 @@ pub const SUITE_ID_ML_DSA_87: u8 = 0x01;
 pub const SUITE_ID_SLH_DSA_SHAKE_256F: u8 = 0x02;
 
 pub const COV_TYPE_P2PK: u16 = 0x0000;
-pub const COV_TYPE_TIMELOCK: u16 = 0x0001;
 pub const COV_TYPE_ANCHOR: u16 = 0x0002;
 pub const COV_TYPE_RESERVED_FUTURE: u16 = 0x00FF;
 pub const COV_TYPE_HTLC: u16 = 0x0100;

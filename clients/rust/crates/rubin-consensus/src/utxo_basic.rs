@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
 use crate::constants::{
-    COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_P2PK, COV_TYPE_TIMELOCK,
-    COV_TYPE_VAULT, MAX_TIMELOCK_COVENANT_DATA,
+    COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_P2PK, COV_TYPE_VAULT,
 };
 use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
@@ -35,7 +34,7 @@ pub fn apply_non_coinbase_tx_basic(
     txid: [u8; 32],
     utxo_set: &HashMap<Outpoint, UtxoEntry>,
     height: u64,
-    block_timestamp: u64,
+    _block_timestamp: u64,
 ) -> Result<UtxoApplySummary, TxError> {
     if tx.inputs.is_empty() {
         return Err(TxError::new(
@@ -72,14 +71,6 @@ pub fn apply_non_coinbase_tx_basic(
                 "coinbase immature",
             ));
         }
-
-        check_spend_timelock(
-            entry.covenant_type,
-            &entry.covenant_data,
-            height,
-            block_timestamp,
-            entry.creation_height,
-        )?;
 
         sum_in = sum_in
             .checked_add(entry.value)
@@ -125,73 +116,20 @@ pub fn apply_non_coinbase_tx_basic(
     })
 }
 
-fn check_spend_timelock(
+#[allow(dead_code)]
+fn check_spend_covenant(
     covenant_type: u16,
     covenant_data: &[u8],
-    height: u64,
-    block_timestamp: u64,
-    creation_height: u64,
 ) -> Result<(), TxError> {
     if covenant_type == COV_TYPE_P2PK {
         return Ok(());
     }
     if covenant_type == COV_TYPE_VAULT {
-        let vault = parse_vault_covenant_data(covenant_data)?;
-        // Basic apply path models owner spend-delay guard only.
-        if vault.spend_delay > 0 {
-            let unlock_height = creation_height
-                .checked_add(vault.spend_delay)
-                .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
-            if height < unlock_height {
-                return Err(TxError::new(
-                    ErrorCode::TxErrTimelockNotMet,
-                    "vault spend_delay not met",
-                ));
-            }
-        }
+        parse_vault_covenant_data(covenant_data)?;
         return Ok(());
     }
-    if covenant_type != COV_TYPE_TIMELOCK {
-        return Err(TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
-            "unsupported covenant in basic apply",
-        ));
-    }
-
-    if covenant_data.len() as u64 != MAX_TIMELOCK_COVENANT_DATA {
-        return Err(TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
-            "invalid timelock covenant_data length",
-        ));
-    }
-
-    let lock_mode = covenant_data[0];
-    let mut raw = [0u8; 8];
-    raw.copy_from_slice(&covenant_data[1..9]);
-    let lock_value = u64::from_le_bytes(raw);
-    match lock_mode {
-        0x00 => {
-            if height < lock_value {
-                return Err(TxError::new(
-                    ErrorCode::TxErrTimelockNotMet,
-                    "height timelock not met",
-                ));
-            }
-        }
-        0x01 => {
-            if block_timestamp < lock_value {
-                return Err(TxError::new(
-                    ErrorCode::TxErrTimelockNotMet,
-                    "timestamp timelock not met",
-                ));
-            }
-        }
-        _ => {
-            return Err(TxError::new(
-                ErrorCode::TxErrCovenantTypeInvalid,
-                "invalid timelock lock_mode",
-            ));
-        }
-    }
-    Ok(())
+    Err(TxError::new(
+        ErrorCode::TxErrCovenantTypeInvalid,
+        "unsupported covenant in basic apply",
+    ))
 }

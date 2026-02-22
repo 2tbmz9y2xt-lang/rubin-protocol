@@ -4,62 +4,50 @@
   "vectors": [
     {
       "id": "CV-OD-01",
-      "description": "CORE_P2PK output: covenant_type=0x0000, covenant_data=33 bytes (suite_id + key_id)",
+      "description": "CORE_P2PK output: covenant_type=0x0000, covenant_data=33 bytes (suite_id + key_id). value excluded.",
       "op": "output_descriptor_bytes",
       "input": {
         "covenant_type": "0x0000",
-        "covenant_data_hex": "01" + "aabbccdd" + "00112233445566778899aabbccddeeff00112233445566778899aabbccddee",
+        "covenant_data_hex": "01aabbccdd00112233445566778899aabbccddeeff00112233445566778899aabbccddee",
         "value": "1000000"
       },
-      "note": "value is intentionally excluded from OutputDescriptorBytes",
-      "expected_hex": "0000" + "21" + "01aabbccdd00112233445566778899aabbccddeeff00112233445566778899aabbccddee"
+      "note": "OutputDescriptorBytes = u16le(0x0000) || CompactSize(33) || covenant_data. value intentionally excluded.",
+      "expected_hex": "00002101aabbccdd00112233445566778899aabbccddeeff00112233445566778899aabbccddee"
     },
     {
       "id": "CV-OD-02",
-      "description": "CORE_TIMELOCK output: covenant_type=0x0001, covenant_data=9 bytes (lock_mode=0x00 + lock_value=u64le)",
-      "op": "output_descriptor_bytes",
-      "input": {
-        "covenant_type": "0x0001",
-        "covenant_data_hex": "00" + "8813000000000000",
-        "value": "500000"
-      },
-      "note": "lock_value=5000 (0x1388) in little-endian = 8813000000000000",
-      "expected_hex": "0100" + "09" + "008813000000000000"
-    },
-    {
-      "id": "CV-OD-03",
-      "description": "CORE_VAULT output: covenant_type=0x0101, minimal vault (threshold=1, key_count=1, whitelist_count=1). CompactSize of covenant_data_len must be canonical.",
+      "description": "CORE_VAULT output: covenant_type=0x0101, threshold=1, key_count=1, whitelist_count=1. covenant_data_len=68. CompactSize(68)=0x44.",
       "op": "output_descriptor_bytes",
       "input": {
         "covenant_type": "0x0101",
-        "covenant_data_hex": "0101" + "1111111111111111111111111111111111111111111111111111111111111111" + "0100" + "2222222222222222222222222222222222222222222222222222222222222222",
+        "covenant_data_hex": "010111111111111111111111111111111111111111111111111111111111111111111101002222222222222222222222222222222222222222222222222222222222222222",
         "value": "9999999"
       },
-      "note": "covenant_data_len = 2+32+2+32 = 68 bytes. CompactSize(68) = 0x44 (1 byte, fits <0xfd). value excluded.",
-      "expected_hex": "0101" + "44" + "0101" + "1111111111111111111111111111111111111111111111111111111111111111" + "0100" + "2222222222222222222222222222222222222222222222222222222222222222"
+      "note": "covenant_data_len=2+32+2+32=68 bytes. CompactSize(68)=0x44 (single byte). value excluded.",
+      "expected_hex": "010144010111111111111111111111111111111111111111111111111111111111111111111101002222222222222222222222222222222222222222222222222222222222222222"
     },
     {
-      "id": "CV-OD-04",
-      "description": "CORE_ANCHOR output: covenant_type=0x0002, value=0, small payload. Tests that value=0 is still excluded.",
+      "id": "CV-OD-03",
+      "description": "CORE_ANCHOR output: covenant_type=0x0002, covenant_data=4 bytes, value=0. Tests that value=0 excluded same as any other value.",
       "op": "output_descriptor_bytes",
       "input": {
         "covenant_type": "0x0002",
         "covenant_data_hex": "deadbeef",
         "value": "0"
       },
-      "note": "covenant_data_len=4. CompactSize(4)=0x04. value=0 excluded same as any other value.",
-      "expected_hex": "0200" + "04" + "deadbeef"
+      "note": "CompactSize(4)=0x04.",
+      "expected_hex": "020004deadbeef"
     },
     {
-      "id": "CV-OD-05",
-      "description": "SHA3-256 of OutputDescriptorBytes: verify whitelist hash derivation for a P2PK output",
+      "id": "CV-OD-04",
+      "description": "SHA3-256 of OutputDescriptorBytes for a P2PK output — whitelist hash derivation reference.",
       "op": "output_descriptor_hash",
       "input": {
         "covenant_type": "0x0000",
         "covenant_data_hex": "01aabbccdd00112233445566778899aabbccddeeff00112233445566778899aabbccddee",
         "value": "1000000"
       },
-      "note": "expected_hash = SHA3-256(OutputDescriptorBytes(output)). Reference value must be computed and filled by implementation.",
+      "note": "expected_hash = SHA3-256(OutputDescriptorBytes). Must be computed by implementation.",
       "expected_hash": "FILL_BY_IMPLEMENTATION"
     }
   ]

@@ -1,7 +1,5 @@
 package consensus
 
-import "encoding/binary"
-
 type Outpoint struct {
 	Txid [32]byte
 	Vout uint32
@@ -53,16 +51,6 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 			return nil, txerr(TX_ERR_COINBASE_IMMATURE, "coinbase immature")
 		}
 
-		if err := checkSpendTimelock(
-			entry.CovenantType,
-			entry.CovenantData,
-			height,
-			blockTimestamp,
-			entry.CreationHeight,
-		); err != nil {
-			return nil, err
-		}
-
 		var err error
 		sumIn, err = addU64(sumIn, entry.Value)
 		if err != nil {
@@ -104,12 +92,9 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 	}, nil
 }
 
-func checkSpendTimelock(
+func checkSpendCovenant(
 	covType uint16,
 	covData []byte,
-	height uint64,
-	blockTimestamp uint64,
-	creationHeight uint64,
 ) error {
 	if covType == COV_TYPE_P2PK {
 		return nil
@@ -119,39 +104,9 @@ func checkSpendTimelock(
 		if err != nil {
 			return err
 		}
-		// Basic apply path models owner spend-delay guard only.
-		if v.SpendDelay > 0 {
-			unlockHeight, err := addU64(creationHeight, v.SpendDelay)
-			if err != nil {
-				return err
-			}
-			if height < unlockHeight {
-				return txerr(TX_ERR_TIMELOCK_NOT_MET, "vault spend_delay not met")
-			}
-		}
+		_ = v
 		return nil
 	}
-	if covType != COV_TYPE_TIMELOCK {
-		// HTLC/reserved/unknown are unsupported in basic apply path.
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "unsupported covenant in basic apply")
-	}
-
-	if len(covData) != MAX_TIMELOCK_COVENANT_DATA {
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "invalid timelock covenant_data length")
-	}
-	lockMode := covData[0]
-	lockValue := binary.LittleEndian.Uint64(covData[1:])
-	switch lockMode {
-	case 0x00:
-		if height < lockValue {
-			return txerr(TX_ERR_TIMELOCK_NOT_MET, "height timelock not met")
-		}
-	case 0x01:
-		if blockTimestamp < lockValue {
-			return txerr(TX_ERR_TIMELOCK_NOT_MET, "timestamp timelock not met")
-		}
-	default:
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "invalid timelock lock_mode")
-	}
-	return nil
+	// HTLC/reserved/unknown are unsupported in basic apply path.
+	return txerr(TX_ERR_COVENANT_TYPE_INVALID, "unsupported covenant in basic apply")
 }

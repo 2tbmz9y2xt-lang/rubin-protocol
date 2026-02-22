@@ -62,7 +62,6 @@ These constants are consensus-critical for this protocol ruleset:
 - `MAX_ANCHOR_PAYLOAD_SIZE = 65_536` bytes
 - `MAX_ANCHOR_BYTES_PER_BLOCK = 131_072` bytes
 - `MAX_P2PK_COVENANT_DATA = 33` bytes
-- `MAX_TIMELOCK_COVENANT_DATA = 9` bytes
 - `MAX_VAULT_KEYS = 16`
 - `MAX_VAULT_WHITELIST_ENTRIES = 1_024`
 - `MAX_MULTISIG_KEYS = 16`
@@ -564,7 +563,7 @@ implementations for the described failure classes:
 - Invalid covenant_type / covenant encoding        -> `TX_ERR_COVENANT_TYPE_INVALID`
 - Missing UTXO / attempt to spend non-spendable    -> `TX_ERR_MISSING_UTXO`
 - Coinbase immature                                -> `TX_ERR_COINBASE_IMMATURE`
-- Timelock condition not met                       -> `TX_ERR_TIMELOCK_NOT_MET`
+- Timelock condition not met                       -> *(removed; CORE_TIMELOCK is not a genesis covenant)*
 - Invalid prev_block_hash linkage                  -> `BLOCK_ERR_LINKAGE_INVALID`
 - Invalid merkle_root                              -> `BLOCK_ERR_MERKLE_INVALID`
 - Missing/duplicate witness commitment             -> `BLOCK_ERR_WITNESS_COMMITMENT`
@@ -587,7 +586,7 @@ implementations for the described failure classes:
 Error priority (short-circuit):
 
 - Implementations MUST apply checks in the validation order and return the first applicable error code.
-- Signature verification MUST NOT be attempted if prior parsing, covenant, timelock, or UTXO rules already
+- Signature verification MUST NOT be attempted if prior parsing, covenant, or UTXO rules already
   cause rejection.
 
 ## 14. Covenant Type Registry (Normative)
@@ -595,7 +594,7 @@ Error priority (short-circuit):
 The following `covenant_type` values are valid:
 
 - `0x0000` `CORE_P2PK`
-- `0x0001` `CORE_TIMELOCK`
+- `0x0001` *(unassigned — MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`)*
 - `0x0002` `CORE_ANCHOR`
 - `0x00FF` `CORE_RESERVED_FUTURE`
 - `0x0100` `CORE_HTLC`
@@ -615,14 +614,6 @@ Semantics:
     and a valid signature over `digest` (Section 12).
   - `key_id = SHA3-256(pubkey)` where `pubkey` is the canonical witness public key byte string for the selected
     `suite_id` (no extra length prefixes are included).
-- `CORE_TIMELOCK`:
-  - `covenant_data = lock_mode:u8 || lock_value:u64le`.
-  - `covenant_data_len MUST equal MAX_TIMELOCK_COVENANT_DATA`.
-  - `lock_mode MUST be `0x00` or `0x01`; any other value MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`
-    at output creation (CheckTx) and at spend.
-  - `lock_mode = 0x00` means height lock; `lock_mode = 0x01` means timestamp lock.
-  - Spend is forbidden until the corresponding lock condition is satisfied by the current validated chain state;
-    otherwise reject as `TX_ERR_TIMELOCK_NOT_MET`.
 - `CORE_ANCHOR`:
   - `covenant_data = anchor_data` (raw bytes, no additional wrapping).
   - `0 < covenant_data_len <= MAX_ANCHOR_PAYLOAD_SIZE` MUST hold; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
@@ -820,7 +811,6 @@ For any non-coinbase transaction `T`:
 7. WitnessItems are consumed by inputs using a cursor model.
 
    Define `witness_slots(e)` for a referenced UTXO entry `e`:
-   - If `e.covenant_type = CORE_TIMELOCK`: `witness_slots(e) = 0`.
    - If `e.covenant_type ∈ {CORE_VAULT, CORE_MULTISIG}`: `witness_slots(e) = key_count(e)`,
      where `key_count(e)` is read from `e.covenant_data` (validated at UTXO creation).
    - Otherwise: `witness_slots(e) = 1`.
@@ -920,24 +910,13 @@ Then enforce:
    - Require `SHA3-256(w.pubkey) = key_id`. Otherwise reject as `TX_ERR_SIG_INVALID`.
    - Require signature verification of `w.signature` over `digest` (Section 12) succeeds. Otherwise reject as
      `TX_ERR_SIG_INVALID`.
-2. If `e.covenant_type = CORE_TIMELOCK`:
-   - This covenant is keyless and consumes 0 WitnessItems (Section 16).
-   - No signature is required. Any witness item for this input causes cursor mismatch
-     and is rejected as `TX_ERR_PARSE`.
-   - Parse `lock_mode:u8 || lock_value:u64le` from `e.covenant_data`
-     (MUST be exactly `MAX_TIMELOCK_COVENANT_DATA` bytes).
-     Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
-   - If `lock_mode = 0x00` (height lock): require `h >= lock_value`. Otherwise reject as `TX_ERR_TIMELOCK_NOT_MET`.
-   - If `lock_mode = 0x01` (timestamp lock): require `timestamp(B_h) >= lock_value`. Otherwise reject as
-     `TX_ERR_TIMELOCK_NOT_MET`.
-   - Any other `lock_mode` MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
-3. If `e.covenant_type = CORE_VAULT`:
+2. If `e.covenant_type = CORE_VAULT`:
    - Evaluate per Section 14.1 using WitnessItems assigned by the cursor model.
-4. If `e.covenant_type = CORE_MULTISIG`:
+3. If `e.covenant_type = CORE_MULTISIG`:
    - Evaluate per Section 14.2 using WitnessItems assigned by the cursor model.
-5. If `e.covenant_type = CORE_ANCHOR`: this output is non-spendable. Any attempt to spend it MUST be rejected as
+4. If `e.covenant_type = CORE_ANCHOR`: this output is non-spendable. Any attempt to spend it MUST be rejected as
    `TX_ERR_MISSING_UTXO`.
-6. Any other covenant type MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+5. Any other covenant type MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
 
 ### 18.3 OutputDescriptorBytes (Normative)
 

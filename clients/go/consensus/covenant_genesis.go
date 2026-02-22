@@ -15,15 +15,6 @@ func ValidateTxCovenantsGenesis(tx *Tx) error {
 				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "invalid CORE_P2PK suite_id")
 			}
 
-		case COV_TYPE_TIMELOCK:
-			if len(out.CovenantData) != MAX_TIMELOCK_COVENANT_DATA {
-				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "invalid CORE_TIMELOCK covenant_data length")
-			}
-			lockMode := out.CovenantData[0]
-			if lockMode != 0x00 && lockMode != 0x01 {
-				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "invalid CORE_TIMELOCK lock_mode")
-			}
-
 		case COV_TYPE_ANCHOR:
 			if out.Value != 0 {
 				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_ANCHOR value must be 0")

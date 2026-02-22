@@ -1,7 +1,6 @@
 use crate::constants::{
     COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_HTLC, COV_TYPE_P2PK, COV_TYPE_RESERVED_FUTURE,
-    COV_TYPE_TIMELOCK, COV_TYPE_VAULT, MAX_ANCHOR_PAYLOAD_SIZE, MAX_P2PK_COVENANT_DATA,
-    MAX_TIMELOCK_COVENANT_DATA, SUITE_ID_ML_DSA_87,
+    COV_TYPE_VAULT, MAX_ANCHOR_PAYLOAD_SIZE, MAX_P2PK_COVENANT_DATA, SUITE_ID_ML_DSA_87,
 };
 use crate::error::{ErrorCode, TxError};
 use crate::tx::Tx;
@@ -21,21 +20,6 @@ pub fn validate_tx_covenants_genesis(tx: &Tx) -> Result<(), TxError> {
                     return Err(TxError::new(
                         ErrorCode::TxErrCovenantTypeInvalid,
                         "invalid CORE_P2PK suite_id",
-                    ));
-                }
-            }
-            COV_TYPE_TIMELOCK => {
-                if out.covenant_data.len() as u64 != MAX_TIMELOCK_COVENANT_DATA {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrCovenantTypeInvalid,
-                        "invalid CORE_TIMELOCK covenant_data length",
-                    ));
-                }
-                let lock_mode = out.covenant_data[0];
-                if lock_mode != 0x00 && lock_mode != 0x01 {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrCovenantTypeInvalid,
-                        "invalid CORE_TIMELOCK lock_mode",
                     ));
                 }
             }
