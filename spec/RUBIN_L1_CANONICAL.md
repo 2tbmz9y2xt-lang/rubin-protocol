@@ -636,6 +636,8 @@ Semantics:
   - Constraints at creation (CheckTx):
     - `1 <= key_count <= MAX_VAULT_KEYS`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
     - `1 <= threshold <= key_count`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+    - `keys[]` MUST be strictly lexicographically sorted (ascending) with no duplicates;
+      otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
     - `1 <= whitelist_count <= MAX_VAULT_WHITELIST_ENTRIES`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
     - `whitelist_count = 0` is explicitly forbidden; reject as `TX_ERR_COVENANT_TYPE_INVALID`.
     - `whitelist[]` MUST be strictly lexicographically sorted (ascending) with no duplicates;
@@ -654,6 +656,8 @@ Semantics:
   - Constraints at creation (CheckTx):
     - `1 <= key_count <= MAX_MULTISIG_KEYS`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
     - `1 <= threshold <= key_count`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+    - `keys[]` MUST be strictly lexicographically sorted (ascending) with no duplicates;
+      otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
   - `keys[i] = SHA3-256(pubkey_i)`.
   - Spend semantics: Section 14.2.
   - Witness consumption: `key_count` WitnessItems (Section 16).
