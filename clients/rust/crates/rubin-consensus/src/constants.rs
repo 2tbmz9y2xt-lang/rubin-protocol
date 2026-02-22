@@ -5,6 +5,8 @@ pub const WINDOW_SIZE: u64 = 10_080;
 
 pub const COINBASE_MATURITY: u64 = 100;
 pub const MAX_FUTURE_DRIFT: u64 = 7_200;
+// Derived consensus constant (CANONICAL §4 / §15).
+pub const MAX_TIMESTAMP_STEP_PER_BLOCK: u64 = 10 * TARGET_BLOCK_INTERVAL;
 
 pub const BASE_UNITS_PER_RBN: u64 = 100_000_000;
 pub const MAX_SUPPLY: u64 = 10_000_000_000_000_000;

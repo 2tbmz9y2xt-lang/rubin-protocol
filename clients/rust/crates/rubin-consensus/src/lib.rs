@@ -23,7 +23,7 @@ pub use compact_relay::compact_shortid;
 pub use covenant_genesis::validate_tx_covenants_genesis;
 pub use error::{ErrorCode, TxError};
 pub use merkle::merkle_root_txids;
-pub use pow::{pow_check, retarget_v1};
+pub use pow::{pow_check, retarget_v1, retarget_v1_clamped};
 pub use sighash::sighash_v1_digest;
 pub use tx::{parse_tx, Tx, TxInput, TxOutput, WitnessItem};
 pub use utxo_basic::{apply_non_coinbase_tx_basic, Outpoint, UtxoApplySummary, UtxoEntry};

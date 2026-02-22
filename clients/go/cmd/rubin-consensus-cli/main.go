@@ -26,13 +26,14 @@ type Request struct {
 	InputValue      uint64   `json:"input_value,omitempty"`
 	ChainIDHex      string   `json:"chain_id,omitempty"`
 
-	HeaderHex      string `json:"header_hex,omitempty"`
-	TargetHex      string `json:"target_hex,omitempty"`
-	TargetOldHex   string `json:"target_old,omitempty"`
-	TimestampFirst uint64 `json:"timestamp_first,omitempty"`
-	TimestampLast  uint64 `json:"timestamp_last,omitempty"`
-	ExpectedPrev   string `json:"expected_prev_hash,omitempty"`
-	ExpectedTarget string `json:"expected_target,omitempty"`
+	HeaderHex        string   `json:"header_hex,omitempty"`
+	TargetHex        string   `json:"target_hex,omitempty"`
+	TargetOldHex     string   `json:"target_old,omitempty"`
+	TimestampFirst   uint64   `json:"timestamp_first,omitempty"`
+	TimestampLast    uint64   `json:"timestamp_last,omitempty"`
+	WindowTimestamps []uint64 `json:"window_timestamps,omitempty"`
+	ExpectedPrev     string   `json:"expected_prev_hash,omitempty"`
+	ExpectedTarget   string   `json:"expected_target,omitempty"`
 
 	Utxos          []UtxoJSON `json:"utxos,omitempty"`
 	Height         uint64     `json:"height,omitempty"`
@@ -212,13 +213,19 @@ func main() {
 		}
 		var old [32]byte
 		copy(old[:], oldBytes)
-		newT, err := consensus.RetargetV1(old, req.TimestampFirst, req.TimestampLast)
-		if err != nil {
-			if te, ok := err.(*consensus.TxError); ok {
+		var newT [32]byte
+		var retErr error
+		if len(req.WindowTimestamps) > 0 {
+			newT, retErr = consensus.RetargetV1Clamped(old, req.WindowTimestamps)
+		} else {
+			newT, retErr = consensus.RetargetV1(old, req.TimestampFirst, req.TimestampLast)
+		}
+		if retErr != nil {
+			if te, ok := retErr.(*consensus.TxError); ok {
 				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
 				return
 			}
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			writeResp(os.Stdout, Response{Ok: false, Err: retErr.Error()})
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true, TargetNew: hex.EncodeToString(newT[:])})

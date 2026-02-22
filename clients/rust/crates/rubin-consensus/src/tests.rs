@@ -2,7 +2,7 @@ use crate::constants::*;
 use crate::error::ErrorCode;
 use crate::hash::sha3_256;
 use crate::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
-use crate::pow::{pow_check, retarget_v1};
+use crate::pow::{pow_check, retarget_v1, retarget_v1_clamped};
 use crate::sighash_v1_digest;
 use crate::{
     apply_non_coinbase_tx_basic, block_hash, merkle_root_txids, parse_block_bytes, parse_tx,
@@ -279,6 +279,21 @@ fn retarget_v1_vectors() {
 
     let got = retarget_v1(POW_LIMIT, 0, 10 * t_expected).expect("retarget");
     assert_eq!(got, POW_LIMIT);
+
+    let target_old = hex32("0000000000000000000000000000000000000000000000000000000000001000");
+    let mut window = vec![0u64; WINDOW_SIZE as usize];
+    for i in 1..window.len() {
+        window[i] = window[i - 1] + TARGET_BLOCK_INTERVAL;
+    }
+    let last = window.len() - 1;
+    let prev = window[last - 1];
+    window[last] = prev + 1_000_000;
+    let got = retarget_v1_clamped(target_old, &window).expect("retarget clamped");
+    let want = hex32("0000000000000000000000000000000000000000000000000000000000001003");
+    assert_eq!(got, want);
+
+    let err = retarget_v1_clamped(target_old, &[0u64, 120u64]).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrParse);
 }
 
 #[test]

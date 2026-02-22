@@ -1,6 +1,6 @@
 use rubin_consensus::{
     apply_non_coinbase_tx_basic, block_hash, compact_shortid, merkle_root_txids, parse_tx,
-    pow_check, retarget_v1, sighash_v1_digest, validate_block_basic_at_height,
+    pow_check, retarget_v1, retarget_v1_clamped, sighash_v1_digest, validate_block_basic_at_height,
     validate_tx_covenants_genesis, ErrorCode, Outpoint, UtxoEntry,
 };
 use serde::{Deserialize, Serialize};
@@ -58,6 +58,9 @@ struct Request {
 
     #[serde(default)]
     timestamp_last: u64,
+
+    #[serde(default)]
+    window_timestamps: Vec<u64>,
 
     #[serde(default)]
     expected_prev_hash: String,
@@ -593,7 +596,12 @@ fn main() {
             let mut old = [0u8; 32];
             old.copy_from_slice(&old_bytes);
 
-            match retarget_v1(old, req.timestamp_first, req.timestamp_last) {
+            let retarget_res = if !req.window_timestamps.is_empty() {
+                retarget_v1_clamped(old, &req.window_timestamps)
+            } else {
+                retarget_v1(old, req.timestamp_first, req.timestamp_last)
+            };
+            match retarget_res {
                 Ok(new_t) => {
                     let resp = Response {
                         ok: true,

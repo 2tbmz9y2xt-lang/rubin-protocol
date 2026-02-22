@@ -21,7 +21,7 @@
     "sighash_v1": "e3aac16f46dd80792b2c08ddfdc9e514491137e86ada16acb3fd520414140b05",
     "consensus_error_codes": "48f7fd8ff131278c1fd52500bd45b9ec1e6d769c6d9d148db8692ebb2881c759",
     "covenant_registry": "c41a20d9a34f1622e60c556ae9834cfdf9921d74c843590fa55a523eadc799b0",
-    "difficulty_update": "655db7a351b409d6fa8b4035dcec057054b3e0a1f969a9264dbfac5edf67dafd",
+    "difficulty_update": "c7c1acb11958bb034d8a89c9c4e43ed39e4daa5bfde2eb1f4fd673c56302e298",
     "value_conservation": "ee3b046749d68f52ac800ed17a485cb94cca31287251b51aa9abfd2275b636c2",
     "da_set_integrity": "2bb603930fc823563efbc7d0d1f1b2e8fac64e6c8b41bcb029de73fd690b0642"
   }

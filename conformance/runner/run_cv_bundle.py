@@ -555,6 +555,28 @@ def validate_vector(
         req["target_old"] = v["target_old"]
         req["timestamp_first"] = v["timestamp_first"]
         req["timestamp_last"] = v["timestamp_last"]
+        if isinstance(v.get("window_timestamps"), list):
+            req["window_timestamps"] = [int(x) for x in v["window_timestamps"]]
+        elif isinstance(v.get("window_pattern"), dict):
+            p = v["window_pattern"]
+            mode = str(p.get("mode", ""))
+            if mode == "step_with_last_jump":
+                window_size = int(p.get("window_size", 10_080))
+                start = int(p.get("start", 0))
+                step = int(p.get("step", 120))
+                last_jump = int(p.get("last_jump", 0))
+                if window_size < 2:
+                    return [f"{gate}/{v.get('id','?')}: window_pattern.window_size must be >= 2"]
+                if step < 0 or last_jump < 0:
+                    return [f"{gate}/{v.get('id','?')}: window_pattern step/jump must be non-negative"]
+                ts = [start]
+                for _ in range(1, window_size):
+                    ts.append(ts[-1] + step)
+                if last_jump > 0:
+                    ts[-1] = ts[-2] + last_jump
+                req["window_timestamps"] = ts
+            else:
+                return [f"{gate}/{v.get('id','?')}: unknown window_pattern.mode={mode}"]
     elif op == "block_basic_check":
         req["block_hex"] = v["block_hex"]
         if "expected_prev_hash" in v:

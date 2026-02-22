@@ -61,6 +61,7 @@ These constants are consensus-critical for this protocol ruleset:
 - `WINDOW_SIZE = 10_080` blocks
 - `COINBASE_MATURITY = 100` blocks
 - `MAX_FUTURE_DRIFT = 7_200` seconds
+- `MAX_TIMESTAMP_STEP_PER_BLOCK = 10 * TARGET_BLOCK_INTERVAL = 1_200` seconds (derived)
 - `MAX_TX_INPUTS = 1024`
 - `MAX_TX_OUTPUTS = 1024`
 - `MAX_WITNESS_ITEMS = 1024`
@@ -854,8 +855,30 @@ No whitelist check is performed for `CORE_MULTISIG`.
 Let:
 
 ```text
-T_actual = timestamp_last_block_in_window - timestamp_first_block_in_window
 T_expected = TARGET_BLOCK_INTERVAL * WINDOW_SIZE
+```
+
+For the purpose of retarget only, define clamped timestamps `ts'[i]` over the preceding retarget
+window as follows:
+
+```text
+ts'[h-WINDOW_SIZE] = timestamp(B_{h-WINDOW_SIZE})
+
+for i = h-WINDOW_SIZE+1 .. h-1:
+    lo = ts'[i-1] + 1
+    hi = ts'[i-1] + MAX_TIMESTAMP_STEP_PER_BLOCK
+    ts'[i] = clamp(timestamp(B_i), lo, hi)
+
+where clamp(v, lo, hi) = max(lo, min(v, hi)).
+```
+
+`ts'` is a pure function of block timestamps in the retarget window. It is NOT stored in consensus
+state and is NOT used outside this section.
+
+Then:
+
+```text
+T_actual = ts'[h-1] - ts'[h-WINDOW_SIZE]
 ```
 
 If `T_actual <= 0`, set `T_actual = 1`.
@@ -885,6 +908,9 @@ Window boundaries and applicability:
    - expected `target(B_h)` MUST equal `target_new` as computed by the formula above.
 
 Any block whose `target` field does not match the expected value is invalid (`BLOCK_ERR_TARGET_INVALID`).
+
+Note: Clamping is applied only to the retarget calculation. Block timestamps are validated as-is per
+Section 22 (`MTP` floor + `MAX_FUTURE_DRIFT` ceiling).
 
 Implementation note:
 - The first retarget window (`0 .. WINDOW_SIZE-1`) uses the genesis timestamp as `T_start`.
