@@ -295,7 +295,8 @@ Analogue:       BIP-152
 ```
 nonce1, nonce2 are two u64le values included in the cmpctblock header message.
 The sender generates them as cryptographically random values per block announcement.
-short_id(tx) = SipHash-2-4( key=(nonce1 || nonce2), input=WTXID )[0:6]  (first 6 bytes)
+Let h = SipHash-2-4( key=(nonce1 || nonce2), input=wtxid(T) ) as a 64-bit unsigned integer.
+short_id(tx) = first 6 bytes of little-endian(h & 0x0000ffffffffffff)  (lower 48 bits, LE byte order)
 
 The receiver uses the same nonce1, nonce2 from the received cmpctblock header
 to recompute short_ids for all transactions in its mempool.
@@ -454,9 +455,10 @@ If a better peer connects, demote the lowest-scoring current HB peer to mode = 1
 
 Summary relevant to compact block relay:
 
-- `txid(T) = SHA3-256(TxCoreBytes(T))` — `tx_nonce` is included in `TxCoreBytes`, therefore in TXID.
-- `wtxid(T) = SHA3-256(TxBytes(T))` — `tx_nonce` is included in `TxBytes`, therefore in WTXID.
+- `txid(T) = SHA3-256(TxCoreBytes(T))` — `tx_nonce` is included in `TxCoreBytes`, therefore in `txid`.
+- `wtxid(T) = SHA3-256(TxBytes(T))` — `tx_nonce` is included in `TxBytes`, therefore in `wtxid`.
 - `tx_nonce` is included in the ML-DSA-87 signature preimage (`preimage_tx_sig` in §12 of CANONICAL).
+- Witness commitment is anchored in coinbase (`CORE_ANCHOR`) per CANONICAL §10.4.1; compact relay still uses `wtxid`.
 
 **Consequence for short_id uniqueness:**
 

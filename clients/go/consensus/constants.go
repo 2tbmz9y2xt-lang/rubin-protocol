@@ -28,6 +28,9 @@ const (
 	MAX_ANCHOR_BYTES_PER_BLOCK   = 131_072
 	MAX_P2PK_COVENANT_DATA       = 33
 	MAX_TIMELOCK_COVENANT_DATA   = 9
+	MAX_VAULT_COVENANT_DATA      = 81
+	MAX_VAULT_COVENANT_LEGACY    = 73
+	MIN_VAULT_SPEND_DELAY        = 4_320
 
 	MAX_TX_INPUTS            = 1024
 	MAX_TX_OUTPUTS           = 1024
@@ -56,3 +59,10 @@ const (
 	VERIFY_COST_ML_DSA_87          = 8
 	VERIFY_COST_SLH_DSA_SHAKE_256F = 64
 )
+
+var POW_LIMIT = [32]byte{
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+}

@@ -25,6 +25,9 @@ pub const MAX_ANCHOR_PAYLOAD_SIZE: u64 = 65_536;
 pub const MAX_ANCHOR_BYTES_PER_BLOCK: u64 = 131_072;
 pub const MAX_P2PK_COVENANT_DATA: u64 = 33;
 pub const MAX_TIMELOCK_COVENANT_DATA: u64 = 9;
+pub const MAX_VAULT_COVENANT_DATA: u64 = 81;
+pub const MAX_VAULT_COVENANT_LEGACY: u64 = 73;
+pub const MIN_VAULT_SPEND_DELAY: u64 = 4_320;
 
 pub const MAX_TX_INPUTS: u64 = 1024;
 pub const MAX_TX_OUTPUTS: u64 = 1024;
@@ -52,3 +55,5 @@ pub const MAX_SLH_DSA_SIG_BYTES: u64 = 49_856;
 
 pub const VERIFY_COST_ML_DSA_87: u64 = 8;
 pub const VERIFY_COST_SLH_DSA_SHAKE_256F: u64 = 64;
+
+pub const POW_LIMIT: [u8; 32] = [0xff; 32];

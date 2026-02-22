@@ -106,6 +106,11 @@ def validate_vector(
             req["expected_target"] = v["expected_target"]
     elif op == "covenant_genesis_check":
         req["tx_hex"] = v["tx_hex"]
+    elif op == "utxo_apply_basic":
+        req["tx_hex"] = v["tx_hex"]
+        req["utxos"] = v["utxos"]
+        req["height"] = v["height"]
+        req["block_timestamp"] = v["block_timestamp"]
     elif op == "compact_shortid":
         req["wtxid"] = v["wtxid"]
         req["nonce1"] = v["nonce1"]
@@ -186,6 +191,9 @@ def validate_vector(
         if "expect_block_hash" in v and go_resp.get("block_hash") != v["expect_block_hash"]:
             problems.append(f"{gate}/{vid}: expect_block_hash mismatch")
     elif op == "covenant_genesis_check":
+        # ok/err parity is already checked above.
+        pass
+    elif op == "utxo_apply_basic":
         # ok/err parity is already checked above.
         pass
     elif op == "compact_shortid":

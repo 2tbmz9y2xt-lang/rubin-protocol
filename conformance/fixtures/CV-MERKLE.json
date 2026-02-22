@@ -19,6 +19,30 @@
       ],
       "expect_ok": true,
       "expect_merkle_root": "00ba641b6ef898f24ee5740111be08344db28cbd6714ae7dbcdf3d75c648c7bb"
+    },
+    {
+      "id": "MERKLE-03",
+      "op": "merkle_root",
+      "txids": [
+        "d205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0",
+        "dc17c8ac4e545a2058ba11b4ea304b56db0820a762f4059a496a3ba9b983d5d6",
+        "5f2a5f7a9c5e4bc5c8fe4a41d16ec77cce574f5ec0bd2f7c6f7f2f3f11aa77b1"
+      ],
+      "expect_ok": true,
+      "expect_merkle_root": "df9de20c0dde92db5c88f636299e00c061a63432089a138ae43d368bf54e6730"
+    },
+    {
+      "id": "MERKLE-04",
+      "op": "merkle_root",
+      "txids": [
+        "d205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0",
+        "dc17c8ac4e545a2058ba11b4ea304b56db0820a762f4059a496a3ba9b983d5d6",
+        "5f2a5f7a9c5e4bc5c8fe4a41d16ec77cce574f5ec0bd2f7c6f7f2f3f11aa77b1",
+        "0d69caca2f0f231273962b6adf388b0bdb86f77f731fb5be7c3f9c1b7302de43",
+        "f2f4a0f1ef5ff4c8cfb9232d7caea8662f5f31e9f10f8917ac12f90b43f864f8"
+      ],
+      "expect_ok": true,
+      "expect_merkle_root": "e60e918a5cc22ee98bf9dbafd96be1a09e08f2c433634a8baacf5366d4c853ba"
     }
   ]
 }

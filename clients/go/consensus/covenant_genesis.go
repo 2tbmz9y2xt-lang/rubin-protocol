@@ -34,8 +34,9 @@ func ValidateTxCovenantsGenesis(tx *Tx) error {
 			}
 
 		case COV_TYPE_VAULT:
-			// Q-V01 pending: until vault semantics are ratified, reject 0x0101.
-			return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_VAULT semantics pending")
+			if _, err := ParseVaultCovenantData(out.CovenantData); err != nil {
+				return err
+			}
 
 		case COV_TYPE_RESERVED_FUTURE, COV_TYPE_HTLC, COV_TYPE_DA_COMMIT:
 			return txerr(TX_ERR_COVENANT_TYPE_INVALID, "reserved or unsupported covenant_type")

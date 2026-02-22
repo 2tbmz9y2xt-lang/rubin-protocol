@@ -5,6 +5,7 @@ use crate::constants::{
 };
 use crate::error::{ErrorCode, TxError};
 use crate::tx::Tx;
+use crate::vault::parse_vault_covenant_data;
 
 pub fn validate_tx_covenants_genesis(tx: &Tx) -> Result<(), TxError> {
     for out in &tx.outputs {
@@ -54,11 +55,7 @@ pub fn validate_tx_covenants_genesis(tx: &Tx) -> Result<(), TxError> {
                 }
             }
             COV_TYPE_VAULT => {
-                // Q-V01 pending: until vault semantics are ratified, reject 0x0101.
-                return Err(TxError::new(
-                    ErrorCode::TxErrCovenantTypeInvalid,
-                    "CORE_VAULT semantics pending",
-                ));
+                parse_vault_covenant_data(&out.covenant_data)?;
             }
             COV_TYPE_RESERVED_FUTURE | COV_TYPE_HTLC | COV_TYPE_DA_COMMIT => {
                 return Err(TxError::new(

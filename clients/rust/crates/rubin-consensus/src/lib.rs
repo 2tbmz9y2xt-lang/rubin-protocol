@@ -10,6 +10,8 @@ pub mod merkle;
 pub mod pow;
 pub mod sighash;
 pub mod tx;
+mod utxo_basic;
+mod vault;
 mod wire_read;
 
 pub use block::{block_hash, parse_block_header_bytes, BlockHeader, BLOCK_HEADER_BYTES};
@@ -21,6 +23,8 @@ pub use merkle::merkle_root_txids;
 pub use pow::{pow_check, retarget_v1};
 pub use sighash::sighash_v1_digest;
 pub use tx::{parse_tx, Tx, TxInput, TxOutput, WitnessItem};
+pub use utxo_basic::{apply_non_coinbase_tx_basic, Outpoint, UtxoApplySummary, UtxoEntry};
+pub use vault::{parse_vault_covenant_data, VaultCovenant};
 
 #[cfg(test)]
 mod compact_relay_tests;

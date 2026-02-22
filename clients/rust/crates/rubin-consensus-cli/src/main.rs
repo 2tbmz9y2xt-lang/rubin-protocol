@@ -1,8 +1,10 @@
 use rubin_consensus::{
-    block_hash, compact_shortid, merkle_root_txids, parse_tx, pow_check, retarget_v1,
-    sighash_v1_digest, validate_block_basic, validate_tx_covenants_genesis, ErrorCode,
+    apply_non_coinbase_tx_basic, block_hash, compact_shortid, merkle_root_txids, parse_tx,
+    pow_check, retarget_v1, sighash_v1_digest, validate_block_basic, validate_tx_covenants_genesis,
+    ErrorCode, Outpoint, UtxoEntry,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Deserialize)]
 struct Request {
@@ -55,6 +57,26 @@ struct Request {
 
     #[serde(default)]
     expected_target: String,
+
+    #[serde(default)]
+    utxos: Vec<UtxoJson>,
+
+    #[serde(default)]
+    height: u64,
+
+    #[serde(default)]
+    block_timestamp: u64,
+}
+
+#[derive(Deserialize)]
+struct UtxoJson {
+    txid: String,
+    vout: u32,
+    value: u64,
+    covenant_type: u16,
+    covenant_data: String,
+    creation_height: u64,
+    created_by_coinbase: bool,
 }
 
 #[derive(Serialize)]
@@ -715,6 +737,149 @@ fn main() {
 
             match validate_tx_covenants_genesis(&tx) {
                 Ok(()) => {
+                    let resp = Response {
+                        ok: true,
+                        err: None,
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(err_code(e.code)),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+            }
+        }
+        "utxo_apply_basic" => {
+            let tx_bytes = match hex::decode(req.tx_hex) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad hex".to_string()),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+
+            let (tx, txid, _wtxid, _n) = match parse_tx(&tx_bytes) {
+                Ok(v) => v,
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(err_code(e.code)),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+
+            let mut utxo_set: HashMap<Outpoint, UtxoEntry> =
+                HashMap::with_capacity(req.utxos.len());
+            for u in &req.utxos {
+                let txid_raw = match hex::decode(&u.txid) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let resp = Response {
+                            ok: false,
+                            err: Some("bad utxo txid".to_string()),
+                            txid: None,
+                            wtxid: None,
+                            merkle_root: None,
+                            digest: None,
+                            consumed: None,
+                            block_hash: None,
+                            target_new: None,
+                        };
+                        let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                        return;
+                    }
+                };
+                if txid_raw.len() != 32 {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad utxo txid".to_string()),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+                let cov_data = match hex::decode(&u.covenant_data) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let resp = Response {
+                            ok: false,
+                            err: Some("bad utxo covenant_data".to_string()),
+                            txid: None,
+                            wtxid: None,
+                            merkle_root: None,
+                            digest: None,
+                            consumed: None,
+                            block_hash: None,
+                            target_new: None,
+                        };
+                        let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                        return;
+                    }
+                };
+
+                let mut op_txid = [0u8; 32];
+                op_txid.copy_from_slice(&txid_raw);
+                utxo_set.insert(
+                    Outpoint {
+                        txid: op_txid,
+                        vout: u.vout,
+                    },
+                    UtxoEntry {
+                        value: u.value,
+                        covenant_type: u.covenant_type,
+                        covenant_data: cov_data,
+                        creation_height: u.creation_height,
+                        created_by_coinbase: u.created_by_coinbase,
+                    },
+                );
+            }
+
+            match apply_non_coinbase_tx_basic(&tx, txid, &utxo_set, req.height, req.block_timestamp)
+            {
+                Ok(_summary) => {
                     let resp = Response {
                         ok: true,
                         err: None,

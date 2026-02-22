@@ -29,20 +29,58 @@ func buildBlockBytes(t *testing.T, prevHash [32]byte, merkleRoot [32]byte, targe
 }
 
 func txWithOneOutput(value uint64, covenantType uint16, covenantData []byte) []byte {
-	b := make([]byte, 0, 128+len(covenantData))
+	return txWithOutputs([]testOutput{
+		{value: value, covenantType: covenantType, covenantData: covenantData},
+	})
+}
+
+type testOutput struct {
+	value        uint64
+	covenantType uint16
+	covenantData []byte
+}
+
+func txWithOutputs(outputs []testOutput) []byte {
+	sizeHint := 96
+	for _, out := range outputs {
+		sizeHint += 16 + len(out.covenantData)
+	}
+	b := make([]byte, 0, sizeHint)
 	b = appendU32le(b, 1) // version
 	b = append(b, 0x00)   // tx_kind
 	b = appendU64le(b, 0) // tx_nonce
 	b = appendCompactSize(b, 0)
-	b = appendCompactSize(b, 1)
-	b = appendU64le(b, value)
-	b = appendU16le(b, covenantType)
-	b = appendCompactSize(b, uint64(len(covenantData)))
-	b = append(b, covenantData...)
+	b = appendCompactSize(b, uint64(len(outputs)))
+	for _, out := range outputs {
+		b = appendU64le(b, out.value)
+		b = appendU16le(b, out.covenantType)
+		b = appendCompactSize(b, uint64(len(out.covenantData)))
+		b = append(b, out.covenantData...)
+	}
 	b = appendU32le(b, 0) // locktime
 	b = appendCompactSize(b, 0)
 	b = appendCompactSize(b, 0)
 	return b
+}
+
+func coinbaseWithWitnessCommitment(t *testing.T, nonCoinbaseTxs ...[]byte) []byte {
+	t.Helper()
+
+	wtxids := make([][32]byte, 1, 1+len(nonCoinbaseTxs))
+	for _, txb := range nonCoinbaseTxs {
+		_, _, wtxid, _, err := ParseTx(txb)
+		if err != nil {
+			t.Fatalf("ParseTx(non-coinbase): %v", err)
+		}
+		wtxids = append(wtxids, wtxid)
+	}
+
+	wroot, err := WitnessMerkleRootWtxids(wtxids)
+	if err != nil {
+		t.Fatalf("WitnessMerkleRootWtxids: %v", err)
+	}
+	commit := WitnessCommitmentHash(wroot)
+	return txWithOneOutput(0, COV_TYPE_ANCHOR, commit[:])
 }
 
 func testTxID(t *testing.T, tx []byte) [32]byte {
@@ -105,7 +143,7 @@ func TestParseBlockBytes_OK(t *testing.T) {
 }
 
 func TestValidateBlockBasic_OK(t *testing.T) {
-	tx := minimalTxBytes()
+	tx := coinbaseWithWitnessCommitment(t)
 	txid := testTxID(t, tx)
 	root, err := MerkleRootTxids([][32]byte{txid})
 	if err != nil {
@@ -189,14 +227,36 @@ func TestValidateBlockBasic_PowInvalid(t *testing.T) {
 
 	var prev [32]byte
 	prev[0] = 0x55
-	var zeroTarget [32]byte // all zeros => impossible strict-less
-	block := buildBlockBytes(t, prev, root, zeroTarget, 15, [][]byte{tx})
-	_, err = ValidateBlockBasic(block, &prev, &zeroTarget)
+	var tinyTarget [32]byte
+	tinyTarget[31] = 0x01 // positive and valid range, but effectively impossible strict-less
+	block := buildBlockBytes(t, prev, root, tinyTarget, 15, [][]byte{tx})
+	_, err = ValidateBlockBasic(block, &prev, &tinyTarget)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
 	if got := mustTxErrCode(t, err); got != BLOCK_ERR_POW_INVALID {
 		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_POW_INVALID)
+	}
+}
+
+func TestValidateBlockBasic_TargetRangeInvalid(t *testing.T) {
+	tx := minimalTxBytes()
+	txid := testTxID(t, tx)
+	root, err := MerkleRootTxids([][32]byte{txid})
+	if err != nil {
+		t.Fatalf("MerkleRootTxids: %v", err)
+	}
+
+	var prev [32]byte
+	prev[0] = 0x56
+	var zeroTarget [32]byte
+	block := buildBlockBytes(t, prev, root, zeroTarget, 15, [][]byte{tx})
+	_, err = ValidateBlockBasic(block, &prev, &zeroTarget)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != BLOCK_ERR_TARGET_INVALID {
+		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_TARGET_INVALID)
 	}
 }
 
@@ -250,5 +310,94 @@ func TestParseBlockBytes_TrailingBytes(t *testing.T) {
 	}
 	if got := mustTxErrCode(t, err); got != BLOCK_ERR_PARSE {
 		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_PARSE)
+	}
+}
+
+func TestValidateBlockBasic_NonCoinbaseMustHaveInput(t *testing.T) {
+	invalidNonCoinbase := txWithOneOutput(1, COV_TYPE_P2PK, validP2PKCovenantData())
+	coinbase := coinbaseWithWitnessCommitment(t, invalidNonCoinbase)
+
+	cbid := testTxID(t, coinbase)
+	ncid := testTxID(t, invalidNonCoinbase)
+	root, err := MerkleRootTxids([][32]byte{cbid, ncid})
+	if err != nil {
+		t.Fatalf("MerkleRootTxids: %v", err)
+	}
+
+	var prev [32]byte
+	prev[0] = 0x88
+	var target [32]byte
+	for i := range target {
+		target[i] = 0xff
+	}
+	block := buildBlockBytes(t, prev, root, target, 23, [][]byte{coinbase, invalidNonCoinbase})
+
+	_, err = ValidateBlockBasic(block, &prev, &target)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
+	}
+}
+
+func TestValidateBlockBasic_WitnessCommitmentMissing(t *testing.T) {
+	tx := minimalTxBytes()
+	txid := testTxID(t, tx)
+	root, err := MerkleRootTxids([][32]byte{txid})
+	if err != nil {
+		t.Fatalf("MerkleRootTxids: %v", err)
+	}
+
+	var prev [32]byte
+	prev[0] = 0x90
+	var target [32]byte
+	for i := range target {
+		target[i] = 0xff
+	}
+	block := buildBlockBytes(t, prev, root, target, 25, [][]byte{tx})
+	_, err = ValidateBlockBasic(block, &prev, &target)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != BLOCK_ERR_WITNESS_COMMITMENT {
+		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_WITNESS_COMMITMENT)
+	}
+}
+
+func TestValidateBlockBasic_WitnessCommitmentDuplicate(t *testing.T) {
+	cbSingle := coinbaseWithWitnessCommitment(t)
+	_, _, wtxid, _, err := ParseTx(cbSingle)
+	if err != nil {
+		t.Fatalf("ParseTx(cbSingle): %v", err)
+	}
+	wroot, err := WitnessMerkleRootWtxids([][32]byte{wtxid})
+	if err != nil {
+		t.Fatalf("WitnessMerkleRootWtxids: %v", err)
+	}
+	commit := WitnessCommitmentHash(wroot)
+	tx := txWithOutputs([]testOutput{
+		{value: 0, covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]},
+		{value: 0, covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]},
+	})
+
+	txid := testTxID(t, tx)
+	root, err := MerkleRootTxids([][32]byte{txid})
+	if err != nil {
+		t.Fatalf("MerkleRootTxids: %v", err)
+	}
+	var prev [32]byte
+	prev[0] = 0x91
+	var target [32]byte
+	for i := range target {
+		target[i] = 0xff
+	}
+	block := buildBlockBytes(t, prev, root, target, 27, [][]byte{tx})
+	_, err = ValidateBlockBasic(block, &prev, &target)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != BLOCK_ERR_WITNESS_COMMITMENT {
+		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_WITNESS_COMMITMENT)
 	}
 }

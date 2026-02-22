@@ -16,6 +16,7 @@ In case of conflict, RUBIN_L1_CANONICAL.md takes precedence.
 | Parameter | Value | Source |
 |-----------|-------|--------|
 | `TARGET_BLOCK_INTERVAL` | 120 s | CANONICAL §4 |
+| `POW_LIMIT` | 0xffff..ffff (bytes32 max) | CANONICAL §4, §15 |
 | `MAX_BLOCK_WEIGHT` | 68,000,000 wu | CANONICAL §4 |
 | `MAX_BLOCK_BYTES` | 72,000,000 bytes (72 MB) | CANONICAL §4 |
 | `MAX_DA_BYTES_PER_BLOCK` | 32,000,000 bytes (30.5 MiB) | CANONICAL §4 |
@@ -24,6 +25,7 @@ In case of conflict, RUBIN_L1_CANONICAL.md takes precedence.
 | `COINBASE_MATURITY` | 100 blocks | CANONICAL §4 |
 | `MAX_FUTURE_DRIFT` | 7,200 s | CANONICAL §4 |
 | `WITNESS_DISCOUNT_DIVISOR` | 4 | CANONICAL §4 |
+| Coinbase witness commitment | Required (CORE_ANCHOR, single 32-byte hash) | CANONICAL §10.4.1 |
 
 ---
 
@@ -171,7 +173,7 @@ Storage depends on number of monitored channels; no protocol minimum.
 
 | Parameter | Value |
 |-----------|-------|
-| Short ID length | 6 bytes (SipHash-2-4 on WTXID) |
+| Short ID length | 6 bytes (SipHash-2-4 on `wtxid`, lower-48 LE bytes) |
 | sendcmpct_mode 0 | Compact disabled, full blocks only |
 | sendcmpct_mode 1 | Compact low-bandwidth |
 | sendcmpct_mode 2 | Compact high-bandwidth |
@@ -195,7 +197,7 @@ Storage depends on number of monitored channels; no protocol minimum.
 | 0x0002 | CORE_ANCHOR | Non-spendable data anchor |
 | 0x00FF | CORE_RESERVED_FUTURE | Forbidden — TX_ERR_COVENANT_TYPE_INVALID |
 | 0x0100 | CORE_HTLC | RESERVED — spec pending (Q-S001) → TX_ERR_COVENANT_TYPE_INVALID |
-| 0x0101 | CORE_VAULT | Consensus-native — semantics pending Q-V01 approval → TX_ERR_COVENANT_TYPE_INVALID until ratified |
+| 0x0101 | CORE_VAULT | Consensus-native: owner/recovery vault with optional spend_delay (legacy 73B / extended 81B) |
 | 0x0103 | CORE_DA_COMMIT | DA payload commitment (non-spendable, tx_kind=0x01 only) |
 
 ---

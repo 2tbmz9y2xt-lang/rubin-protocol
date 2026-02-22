@@ -1,5 +1,7 @@
 package consensus
 
+import "bytes"
+
 type ParsedBlock struct {
 	Header      BlockHeader
 	HeaderBytes []byte
@@ -96,7 +98,11 @@ func ValidateBlockBasic(blockBytes []byte, expectedPrevHash *[32]byte, expectedT
 	var sumWeight uint64
 	var sumDa uint64
 	var sumAnchor uint64
-	for _, tx := range pb.Txs {
+	for i, tx := range pb.Txs {
+		// Non-coinbase transactions must carry at least one input.
+		if i > 0 && len(tx.Inputs) == 0 {
+			return nil, txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
+		}
 		if err := ValidateTxCovenantsGenesis(tx); err != nil {
 			return nil, err
 		}
@@ -116,6 +122,9 @@ func ValidateBlockBasic(blockBytes []byte, expectedPrevHash *[32]byte, expectedT
 		if err != nil {
 			return nil, err
 		}
+	}
+	if err := validateCoinbaseWitnessCommitment(pb); err != nil {
+		return nil, err
 	}
 
 	if sumDa > MAX_DA_BYTES_PER_BLOCK {
@@ -139,6 +148,33 @@ func ValidateBlockBasic(blockBytes []byte, expectedPrevHash *[32]byte, expectedT
 		SumDa:     sumDa,
 		BlockHash: blockHash,
 	}, nil
+}
+
+func validateCoinbaseWitnessCommitment(pb *ParsedBlock) error {
+	if pb == nil || len(pb.Txs) == 0 || len(pb.Wtxids) == 0 {
+		return txerr(BLOCK_ERR_COINBASE_INVALID, "missing coinbase")
+	}
+
+	wroot, err := WitnessMerkleRootWtxids(pb.Wtxids)
+	if err != nil {
+		return txerr(BLOCK_ERR_WITNESS_COMMITMENT, "failed to compute witness merkle root")
+	}
+	expected := WitnessCommitmentHash(wroot)
+
+	matches := 0
+	for _, out := range pb.Txs[0].Outputs {
+		if out.CovenantType != COV_TYPE_ANCHOR || len(out.CovenantData) != 32 {
+			continue
+		}
+		if bytes.Equal(out.CovenantData, expected[:]) {
+			matches++
+		}
+	}
+
+	if matches != 1 {
+		return txerr(BLOCK_ERR_WITNESS_COMMITMENT, "coinbase witness commitment missing or duplicated")
+	}
+	return nil
 }
 
 func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
