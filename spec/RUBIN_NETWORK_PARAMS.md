@@ -197,8 +197,10 @@ Storage depends on number of monitored channels; no protocol minimum.
 | 0x0002 | CORE_ANCHOR | Non-spendable data anchor |
 | 0x00FF | CORE_RESERVED_FUTURE | Forbidden — TX_ERR_COVENANT_TYPE_INVALID |
 | 0x0100 | CORE_HTLC | RESERVED — spec pending (Q-S001) → TX_ERR_COVENANT_TYPE_INVALID |
-| 0x0101 | CORE_VAULT | Consensus-native: owner/recovery vault with optional spend_delay (legacy 73B / extended 81B) |
+| 0x0101 | CORE_VAULT | Consensus-native: M-of-N multisig + mandatory destination whitelist |
+| 0x0102 | UNASSIGNED | Forbidden — TX_ERR_COVENANT_TYPE_INVALID |
 | 0x0103 | CORE_DA_COMMIT | DA payload commitment (non-spendable, tx_kind=0x01 only) |
+| 0x0104 | CORE_MULTISIG | Consensus-native: M-of-N multisig without whitelist restrictions |
 
 ---
 
