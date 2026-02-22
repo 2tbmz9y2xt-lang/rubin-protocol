@@ -214,6 +214,13 @@
       "completed_sets": 97,
       "total_sets": 100,
       "expect_rate": 0.97
+    },
+    {
+      "id": "CV-C-19",
+      "op": "compact_chunk_count_cap",
+      "expect_ok": false,
+      "chunk_count": 62,
+      "expect_err": "TX_ERR_PARSE"
     }
   ]
 }

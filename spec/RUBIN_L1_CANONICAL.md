@@ -72,7 +72,7 @@ These constants are consensus-critical for this protocol ruleset:
 - `MAX_DA_MANIFEST_BYTES_PER_TX = 65_536` bytes
 - `CHUNK_BYTES = 524_288` bytes
 - `MAX_DA_BATCHES_PER_BLOCK = 128`
-- `MAX_DA_CHUNK_COUNT = 4_096`
+- `MAX_DA_CHUNK_COUNT = floor(MAX_DA_BYTES_PER_BLOCK / CHUNK_BYTES) = 61` (derived)
 - `MAX_ANCHOR_PAYLOAD_SIZE = 65_536` bytes
 - `MAX_ANCHOR_BYTES_PER_BLOCK = 131_072` bytes
 - `MAX_P2PK_COVENANT_DATA = 33` bytes
@@ -621,6 +621,7 @@ implementations for the described failure classes:
 - Non-minimal CompactSize                          -> `TX_ERR_PARSE`
 - Malformed witness encoding                       -> `TX_ERR_PARSE`
 - Duplicate input outpoint                         -> `TX_ERR_PARSE`
+- Value conservation overflow (`sum_in`/`sum_out` beyond u128) -> `TX_ERR_PARSE`
 - Output value > input value                       -> `TX_ERR_VALUE_CONSERVATION`
 - Invalid tx_nonce                                 -> `TX_ERR_TX_NONCE_INVALID`
 - Invalid sequence number                          -> `TX_ERR_SEQUENCE_INVALID`
@@ -650,6 +651,9 @@ implementations for the described failure classes:
 - DA payload commitment mismatch or ambiguous      -> `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID`
 - DA set count exceeded (`MAX_DA_BATCHES_PER_BLOCK`) -> `BLOCK_ERR_DA_BATCH_EXCEEDED`
 - Malformed block encoding                         -> `BLOCK_ERR_PARSE`
+
+Note: Value conservation overflow (`sum_in` or `sum_out` exceeding unsigned u128 range)
+MUST be reported as `TX_ERR_PARSE`. This mapping is intentional and consensus-critical.
 
 Error priority (short-circuit):
 

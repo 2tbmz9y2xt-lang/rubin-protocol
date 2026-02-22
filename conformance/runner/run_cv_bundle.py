@@ -19,6 +19,8 @@ COMPACT_DEFAULTS: Dict[str, int] = {
     "DA_ORPHAN_POOL_PER_PEER_MAX": 4 * 1024 * 1024,
     "DA_ORPHAN_POOL_PER_DA_ID_MAX": 8 * 1024 * 1024,
     "DA_ORPHAN_POOL_SIZE": 64 * 1024 * 1024,
+    "MAX_DA_BYTES_PER_BLOCK": 32_000_000,
+    "CHUNK_BYTES": 524_288,
     "PREFETCH_BYTES_PER_SEC": 4_000_000,
     "PREFETCH_GLOBAL_BPS": 32_000_000,
 }
@@ -31,6 +33,7 @@ LOCAL_OPS = {
     "compact_prefill_roundtrip",
     "compact_state_machine",
     "compact_orphan_limits",
+    "compact_chunk_count_cap",
     "compact_sendcmpct_modes",
     "compact_peer_quality",
     "compact_prefetch_caps",
@@ -375,6 +378,21 @@ def validate_local_vector(gate: str, v: Dict[str, Any]) -> List[str]:
             check_expect(problems, prefix, admit, bool(v["expect_admit"]), "admit")
         return problems
 
+    if op == "compact_chunk_count_cap":
+        max_count = int(
+            v.get(
+                "max_da_chunk_count",
+                COMPACT_DEFAULTS["MAX_DA_BYTES_PER_BLOCK"] // COMPACT_DEFAULTS["CHUNK_BYTES"],
+            )
+        )
+        chunk_count = int(v.get("chunk_count", 0))
+        ok = 0 <= chunk_count <= max_count
+        expected_ok = bool(v.get("expect_ok", True))
+        check_expect(problems, prefix, ok, expected_ok, "ok")
+        if not ok and "expect_err" in v:
+            check_expect(problems, prefix, "TX_ERR_PARSE", v["expect_err"], "err")
+        return problems
+
     if op == "compact_sendcmpct_modes":
         def compute_mode(payload: Dict[str, Any]) -> int:
             in_ibd = bool(payload.get("in_ibd", False))
@@ -516,9 +534,6 @@ def validate_vector(
         return [f"{gate}/{v.get('id','?')}: missing op"]
 
     if op in LOCAL_OPS:
-        expected_ok = bool(v.get("expect_ok", True))
-        if not expected_ok:
-            return [f"{gate}/{v.get('id','?')}: local op currently supports only expect_ok=true"]
         return validate_local_vector(gate, v)
 
     req: Dict[str, Any] = {"op": op}

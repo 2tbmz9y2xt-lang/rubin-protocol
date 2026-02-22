@@ -19,7 +19,7 @@
     "weight_accounting": "e5d52ed803added423bf95d181ba2e94b43ec717e96fce0d7dbd39c92608d2bc",
     "witness_commitment": "cd0e55b16f47b6e35414a13e699b47f638519e23fe6cad6a8801d27792393bc9",
     "sighash_v1": "e3aac16f46dd80792b2c08ddfdc9e514491137e86ada16acb3fd520414140b05",
-    "consensus_error_codes": "f3399c934fd9b93bc9dac09b8f2f2d3bcafdd8cb301c8d3a7b89c7124adcd1e9",
+    "consensus_error_codes": "48f7fd8ff131278c1fd52500bd45b9ec1e6d769c6d9d148db8692ebb2881c759",
     "covenant_registry": "eb875dc44ba2cdcfc1ca990c19321ef86030e1d7234d0ca6de711abab85e7722",
     "difficulty_update": "655db7a351b409d6fa8b4035dcec057054b3e0a1f969a9264dbfac5edf67dafd",
     "value_conservation": "ee3b046749d68f52ac800ed17a485cb94cca31287251b51aa9abfd2275b636c2",
