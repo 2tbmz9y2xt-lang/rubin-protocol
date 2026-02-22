@@ -52,7 +52,6 @@ These constants are consensus-critical for this protocol ruleset:
 - `MAX_WITNESS_ITEMS = 1024`
 - `MAX_WITNESS_BYTES_PER_TX = 100_000`
 - `MAX_SCRIPT_SIG_BYTES = 32`
-- `POW_LIMIT = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff` (bytes32)
 - `MAX_BLOCK_WEIGHT = 68_000_000` weight units
 - `MAX_DA_BYTES_PER_BLOCK = 32_000_000` bytes
 - `MAX_DA_MANIFEST_BYTES_PER_TX = 65_536` bytes
@@ -63,9 +62,9 @@ These constants are consensus-critical for this protocol ruleset:
 - `MAX_ANCHOR_BYTES_PER_BLOCK = 131_072` bytes
 - `MAX_P2PK_COVENANT_DATA = 33` bytes
 - `MAX_TIMELOCK_COVENANT_DATA = 9` bytes
-- `MAX_VAULT_COVENANT_LEGACY = 73` bytes
-- `MAX_VAULT_COVENANT_DATA = 81` bytes
-- `MIN_VAULT_SPEND_DELAY = 4_320` blocks
+- `MAX_VAULT_KEYS = 16`
+- `MAX_VAULT_WHITELIST_ENTRIES = 1_024`
+- `MAX_MULTISIG_KEYS = 16`
 
 Monetary constants (consensus-critical):
 
@@ -399,11 +398,6 @@ Proof-of-Work validity:
 valid_pow(B) iff integer(block_hash(B), big-endian) < integer(B.header.target, big-endian)
 ```
 
-Target range validity:
-
-- `integer(B.header.target, big-endian)` MUST satisfy `1 <= target <= POW_LIMIT`.
-- A block with out-of-range `target` MUST be rejected as `BLOCK_ERR_TARGET_INVALID`.
-
 ### 10.4 Merkle Root (Transaction Commitment)
 
 Merkle tree hashing is defined over transaction identifiers (`txid`), in block transaction order.
@@ -419,41 +413,6 @@ Odd-element rule (normative):
 - Duplicating the last element is forbidden.
 
 `merkle_root` is the final root after full binary reduction over all transaction `txid` values.
-
-### 10.4.1 Witness Commitment (Coinbase Anchor)
-
-Witness commitment uses transaction `wtxid` values and commits them through a coinbase `CORE_ANCHOR` output.
-
-Define witness commitment IDs per transaction index `i`:
-
-- For `i = 0` (coinbase), `wtxid_commit[0] = 0x00..00` (32 zero bytes).
-- For `i > 0`, `wtxid_commit[i] = wtxid(B.txs[i])`.
-
-Witness Merkle tree:
-
-```text
-Leaf = SHA3-256(0x02 || wtxid_commit[i])
-Node = SHA3-256(0x03 || left || right)
-```
-
-Odd-element rule is identical to Section 10.4: promote unchanged; duplication forbidden.
-
-Let `witness_merkle_root` be the final root from this tree.
-
-Define:
-
-```text
-witness_commitment_hash = SHA3-256(ASCII("RUBIN-WITNESS/") || witness_merkle_root)
-```
-
-Coinbase commitment rule:
-
-- The coinbase transaction `B.txs[0]` MUST contain exactly one output with:
-  - `covenant_type = CORE_ANCHOR`, and
-  - `covenant_data_len = 32`, and
-  - `covenant_data = witness_commitment_hash`.
-
-If missing or duplicated, reject block as `BLOCK_ERR_WITNESS_COMMITMENT`.
 
 ### 10.5 Coinbase Basics (Structural)
 
@@ -567,7 +526,6 @@ implementations for the described failure classes:
 - Timelock condition not met                       -> `TX_ERR_TIMELOCK_NOT_MET`
 - Invalid prev_block_hash linkage                  -> `BLOCK_ERR_LINKAGE_INVALID`
 - Invalid merkle_root                              -> `BLOCK_ERR_MERKLE_INVALID`
-- Missing/duplicate witness commitment             -> `BLOCK_ERR_WITNESS_COMMITMENT`
 - PoW invalid                                      -> `BLOCK_ERR_POW_INVALID`
 - Target mismatch                                  -> `BLOCK_ERR_TARGET_INVALID`
 - Timestamp too old (MTP)                          -> `BLOCK_ERR_TIMESTAMP_OLD`
@@ -602,6 +560,7 @@ The following `covenant_type` values are valid:
 - `0x0101` `CORE_VAULT`
 - `0x0102` *(unassigned — MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`)*
 - `0x0103` `CORE_DA_COMMIT`
+- `0x0104` `CORE_MULTISIG`
 
 Any other unknown or future `covenant_type` MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
 
@@ -624,7 +583,6 @@ Semantics:
   - `covenant_data = anchor_data` (raw bytes, no additional wrapping).
   - `0 < covenant_data_len <= MAX_ANCHOR_PAYLOAD_SIZE` MUST hold; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
   - `value MUST equal 0`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
-  - In coinbase, witness commitment anchoring requirements are defined in Section 10.4.1.
   - `CORE_ANCHOR` outputs are non-spendable and MUST NOT be added to the spendable UTXO set. Any attempt to spend an
     ANCHOR output MUST be rejected as `TX_ERR_MISSING_UTXO`.
   - Per-block constraint: sum of `covenant_data_len` across all `CORE_ANCHOR` outputs in a block MUST be
@@ -634,41 +592,36 @@ Semantics:
   - Until semantics are ratified in this document, any output with `covenant_type = 0x0100` MUST be
     rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
 - `CORE_VAULT`:
-  - Consensus-native covenant, active from genesis.
-  - `covenant_data` has two valid encodings:
-    - legacy (73 bytes): `owner_key_id:bytes32 || lock_mode:u8 || lock_value:u64le || recovery_key_id:bytes32`
-    - extended (81 bytes): `owner_key_id:bytes32 || spend_delay:u64le || lock_mode:u8 || lock_value:u64le || recovery_key_id:bytes32`
-  - `covenant_data_len` MUST be either `73` or `81`. Any other length MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
-  - For extended form, `spend_delay` MUST be `>= MIN_VAULT_SPEND_DELAY`. Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
-  - `lock_mode` MUST be `0x00` (height lock) or `0x01` (timestamp lock). Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
-  - `owner_key_id` MUST NOT equal `recovery_key_id`. Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
-  - Spend semantics are defined in Section 14.1.
-
-### 14.1 CORE_VAULT Semantics (Normative)
-
-For each non-coinbase input spending a `CORE_VAULT` output `o`:
-
-1. `script_sig_len` MUST be `0`. Otherwise reject as `TX_ERR_PARSE`.
-2. Parse `o.covenant_data` according to Section 14:
-   - legacy (73 bytes) implies `spend_delay = 0`
-   - extended (81 bytes) carries explicit `spend_delay`
-3. Compute `actual_key_id = SHA3-256(witness.pubkey)`.
-4. If `actual_key_id = owner_key_id` (owner path):
-   - if `spend_delay = 0`, owner spend is immediate;
-   - if `spend_delay > 0`, require `height(B) >= o.creation_height + spend_delay`, else reject as
-     `TX_ERR_TIMELOCK_NOT_MET`.
-5. Else if `actual_key_id = recovery_key_id` (recovery path):
-   - if `lock_mode = 0x00`, require `height(B) >= lock_value`;
-   - if `lock_mode = 0x01`, require `timestamp(B) >= lock_value`;
-   - if condition is not met, reject as `TX_ERR_TIMELOCK_NOT_MET`.
-6. Else reject as `TX_ERR_SIG_INVALID`.
-
-Notes:
-- Signature suite and signature-validity checks for `CORE_VAULT` follow the same witness rules as `CORE_P2PK`
-  (Section 13 and Section 16 ordering).
-- This profile defines `CORE_VAULT` core semantics only. Optional policy features (for example destination whitelist,
-  early-close fee policy, and partial-spend policy) are non-consensus extensions and are out of scope for this
-  canonical section.
+  - Consensus-native covenant for value storage with mandatory destination whitelist.
+  - Active from genesis block 0.
+  - `covenant_data` format:
+    - `threshold:u8 || key_count:u8 || keys[key_count] || whitelist_count:u16le || whitelist[whitelist_count]`
+    - each `keys[i]` is `bytes32`; each `whitelist[j]` is `bytes32`
+    - `covenant_data_len MUST equal 2 + 32*key_count + 2 + 32*whitelist_count`
+  - Constraints at creation (CheckTx):
+    - `1 <= key_count <= MAX_VAULT_KEYS`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+    - `1 <= threshold <= key_count`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+    - `1 <= whitelist_count <= MAX_VAULT_WHITELIST_ENTRIES`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+    - `whitelist_count = 0` is explicitly forbidden; reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+    - `whitelist[]` MUST be strictly lexicographically sorted (ascending) with no duplicates;
+      otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+  - `keys[i] = SHA3-256(pubkey_i)`.
+  - `whitelist[j] = SHA3-256(OutputDescriptorBytes(output_j))` (Section 18.3).
+  - Spend semantics: Section 14.1.
+  - Witness consumption: `key_count` WitnessItems (Section 16).
+- `CORE_MULTISIG`:
+  - Operational M-of-N multisig covenant without destination restrictions.
+  - Active from genesis block 0.
+  - `covenant_data` format:
+    - `threshold:u8 || key_count:u8 || keys[key_count]`
+    - each `keys[i]` is `bytes32`
+    - `covenant_data_len MUST equal 2 + 32*key_count`
+  - Constraints at creation (CheckTx):
+    - `1 <= key_count <= MAX_MULTISIG_KEYS`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+    - `1 <= threshold <= key_count`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+  - `keys[i] = SHA3-256(pubkey_i)`.
+  - Spend semantics: Section 14.2.
+  - Witness consumption: `key_count` WitnessItems (Section 16).
 - `CORE_DA_COMMIT`:
   - `covenant_data_len MUST equal 32`. Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
   - `covenant_data MUST equal SHA3-256(T.da_payload)` where `T` is the containing transaction. Otherwise reject as
@@ -680,6 +633,73 @@ Notes:
     `tx_kind` values MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
 - `CORE_RESERVED_FUTURE`:
   - Forbidden; any appearance MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+
+### 14.1 CORE_VAULT Semantics (Normative)
+
+For each non-coinbase input spending a `CORE_VAULT` UTXO entry `e`,
+with WitnessItems `witnesses[W .. W+key_count-1]` assigned by the cursor model (Section 16):
+
+#### Signature verification
+
+For each index `i` in `[0..key_count-1]`:
+
+Let `w = witnesses[W+i]`.
+
+If `w.suite_id = SUITE_ID_SENTINEL (0x00)` (non-participating key):
+- `w.pubkey_length MUST equal 0` and `w.sig_length MUST equal 0`. Otherwise reject as `TX_ERR_PARSE`.
+
+If `w.suite_id = SUITE_ID_ML_DSA_87 (0x01)`:
+- Require `SHA3-256(w.pubkey) = keys[i]`. Otherwise reject as `TX_ERR_SIG_INVALID`.
+- Require `verify_sig(w.signature, digest) = true` where `digest` is per Section 12
+  with `input_index` bound to this input's index in the transaction.
+  Otherwise reject as `TX_ERR_SIG_INVALID`.
+- Count as one valid signature.
+
+Any other `suite_id` MUST be rejected as `TX_ERR_SIG_ALG_INVALID`.
+
+Let `valid = count of valid ML_DSA_87 signatures across all key_count WitnessItems`.
+
+If `valid < threshold`: reject as `TX_ERR_SIG_INVALID`.
+
+#### Whitelist verification
+
+For each output `out` in the spending transaction:
+
+Compute `h = SHA3-256(OutputDescriptorBytes(out))` (Section 18.3).
+
+`h` MUST be found in `e.whitelist[]` using binary search
+(whitelist is guaranteed sorted at UTXO creation).
+
+If any output is not found: reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+
+### 14.2 CORE_MULTISIG Semantics (Normative)
+
+For each non-coinbase input spending a `CORE_MULTISIG` UTXO entry `e`,
+with WitnessItems `witnesses[W .. W+key_count-1]` assigned by the cursor model (Section 16):
+
+#### Signature verification
+
+For each index `i` in `[0..key_count-1]`:
+
+Let `w = witnesses[W+i]`.
+
+If `w.suite_id = SUITE_ID_SENTINEL (0x00)`:
+- `w.pubkey_length MUST equal 0` and `w.sig_length MUST equal 0`. Otherwise reject as `TX_ERR_PARSE`.
+
+If `w.suite_id = SUITE_ID_ML_DSA_87 (0x01)`:
+- Require `SHA3-256(w.pubkey) = keys[i]`. Otherwise reject as `TX_ERR_SIG_INVALID`.
+- Require `verify_sig(w.signature, digest) = true` where `digest` is per Section 12
+  with `input_index` bound to this input's index.
+  Otherwise reject as `TX_ERR_SIG_INVALID`.
+- Count as one valid signature.
+
+Any other `suite_id` MUST be rejected as `TX_ERR_SIG_ALG_INVALID`.
+
+Let `valid = count of valid signatures`.
+
+If `valid < threshold`: reject as `TX_ERR_SIG_INVALID`.
+
+No whitelist check is performed for `CORE_MULTISIG`.
 
 ## 15. Difficulty Update (Normative)
 
@@ -697,7 +717,7 @@ target_new =
     clamp(
         floor(target_old * T_actual / T_expected),
         max(1, floor(target_old / 4)),
-        min(target_old * 4, POW_LIMIT)
+        target_old * 4
     )
 ```
 
@@ -718,10 +738,6 @@ Window boundaries and applicability:
 
 Any block whose `target` field does not match the expected value is invalid (`BLOCK_ERR_TARGET_INVALID`).
 
-Target range:
-
-- `target_old` and `target_new` MUST satisfy `1 <= target <= POW_LIMIT`.
-
 All division is integer division with floor.
 Intermediate products (`target_old * T_actual` and `target_old * 4`) MUST be computed using at least 320-bit
 unsigned integer arithmetic (or arbitrary-precision). Silent truncation is non-conforming.
@@ -739,7 +755,29 @@ For any non-coinbase transaction `T`:
 
 1. `T.tx_nonce` MUST be in `[1, 0xffff_ffff_ffff_ffff]`. Otherwise reject as `TX_ERR_TX_NONCE_INVALID`.
 2. `T.input_count` MUST be `>= 1`. Otherwise reject as `TX_ERR_PARSE`.
-3. `T.witness.witness_count` MUST equal `T.input_count`. Otherwise reject as `TX_ERR_PARSE`.
+3. WitnessItems are consumed by inputs using a cursor model.
+
+   Define `witness_slots(e)` for a referenced UTXO entry `e`:
+   - If `e.covenant_type = CORE_TIMELOCK`: `witness_slots(e) = 0`.
+   - If `e.covenant_type ∈ {CORE_VAULT, CORE_MULTISIG}`: `witness_slots(e) = key_count(e)`,
+     where `key_count(e)` is read from `e.covenant_data` (validated at UTXO creation).
+   - Otherwise: `witness_slots(e) = 1`.
+
+   Future covenant types MUST explicitly declare their `witness_slots` value.
+   Default for undeclared types: `witness_slots = 1`.
+
+   Cursor interpretation:
+
+   Let `W = 0`.
+
+   For each input `i` in transaction order:
+     Let `e` be the referenced UTXO entry. If missing, reject as `TX_ERR_MISSING_UTXO`.
+     Let `slots = witness_slots(e)`.
+     WitnessItems assigned to input `i` are: `T.witness.witnesses[W .. W+slots-1]`.
+     `W := W + slots`.
+
+   After all inputs:
+     `W MUST equal T.witness.witness_count`. Otherwise reject as `TX_ERR_PARSE`.
 4. No input may use the coinbase prevout encoding. If any input satisfies `is_coinbase_prevout`, reject as
    `TX_ERR_PARSE`.
 5. For genesis covenant set (Section 14 only), every input MUST have `script_sig_len = 0`. Otherwise reject as
@@ -765,8 +803,8 @@ For each non-coinbase transaction `T` in block order:
 1. Let `N_seen` be the set of `tx_nonce` values already observed in prior non-coinbase transactions of the same block.
 2. If `T.tx_nonce` already appears in `N_seen`, reject as `TX_ERR_NONCE_REPLAY`.
 
-`tx_nonce` uniqueness scope is per block only. UTXO consumption prevents replay of the same spent outpoints across
-blocks, but does not impose global cross-block uniqueness for `tx_nonce` values.
+Cross-block replay is prevented by UTXO exhaustion: once an input outpoint is consumed, it is removed from the
+spendable UTXO set and cannot be spent again.
 
 ## 18. UTXO State Model (Normative)
 
@@ -806,14 +844,15 @@ reject the spending transaction as `TX_ERR_COINBASE_IMMATURE`.
 
 ### 18.2 Covenant Evaluation (Genesis Covenants) (Normative)
 
-For each non-coinbase input at index `i`, let `w = T.witness.witnesses[i]` be the witness item paired with that input
-(Section 16 requires `witness_count = input_count`).
+For each non-coinbase input at index `i`, WitnessItems assigned to this input are determined
+by the cursor model defined in Section 16.
 
 Let `e = U_work[(prev_txid, prev_vout)]` be the referenced UTXO entry. If missing, reject as `TX_ERR_MISSING_UTXO`.
 
 Then enforce:
 
 1. If `e.covenant_type = CORE_P2PK`:
+   - Let `w` be the single WitnessItem assigned to this input by the cursor model.
    - Require `w.suite_id = SUITE_ID_ML_DSA_87 (0x01)`. Any other suite MUST be rejected as `TX_ERR_SIG_ALG_INVALID`.
    - Require `len(e.covenant_data) = MAX_P2PK_COVENANT_DATA` and the first byte equals `w.suite_id`. Otherwise reject as
      `TX_ERR_COVENANT_TYPE_INVALID`.
@@ -822,21 +861,44 @@ Then enforce:
    - Require signature verification of `w.signature` over `digest` (Section 12) succeeds. Otherwise reject as
      `TX_ERR_SIG_INVALID`.
 2. If `e.covenant_type = CORE_TIMELOCK`:
-   - Require `w.suite_id = SUITE_ID_SENTINEL (0x00)`. Otherwise reject as `TX_ERR_SIG_ALG_INVALID`.
-   - Parse `lock_mode:u8 || lock_value:u64le` from `e.covenant_data` (must be exactly `MAX_TIMELOCK_COVENANT_DATA` bytes).
+   - This covenant is keyless and consumes 0 WitnessItems (Section 16).
+   - No signature is required. Any witness item for this input causes cursor mismatch
+     and is rejected as `TX_ERR_PARSE`.
+   - Parse `lock_mode:u8 || lock_value:u64le` from `e.covenant_data`
+     (MUST be exactly `MAX_TIMELOCK_COVENANT_DATA` bytes).
      Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
    - If `lock_mode = 0x00` (height lock): require `h >= lock_value`. Otherwise reject as `TX_ERR_TIMELOCK_NOT_MET`.
    - If `lock_mode = 0x01` (timestamp lock): require `timestamp(B_h) >= lock_value`. Otherwise reject as
      `TX_ERR_TIMELOCK_NOT_MET`.
    - Any other `lock_mode` MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
 3. If `e.covenant_type = CORE_VAULT`:
-   - Require `w.suite_id = SUITE_ID_ML_DSA_87 (0x01)`. Any other suite MUST be rejected as `TX_ERR_SIG_ALG_INVALID`.
-   - Evaluate owner/recovery path conditions exactly as defined in Section 14.1.
-   - Require signature verification of `w.signature` over `digest` (Section 12) succeeds. Otherwise reject as
-     `TX_ERR_SIG_INVALID`.
-4. If `e.covenant_type = CORE_ANCHOR`: this output is non-spendable. Any attempt to spend it MUST be rejected as
+   - Evaluate per Section 14.1 using WitnessItems assigned by the cursor model.
+4. If `e.covenant_type = CORE_MULTISIG`:
+   - Evaluate per Section 14.2 using WitnessItems assigned by the cursor model.
+5. If `e.covenant_type = CORE_ANCHOR`: this output is non-spendable. Any attempt to spend it MUST be rejected as
    `TX_ERR_MISSING_UTXO`.
-5. Any other covenant type MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+6. Any other covenant type MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+
+### 18.3 OutputDescriptorBytes (Normative)
+
+`OutputDescriptorBytes` is the canonical serialization of a transaction output
+used for `CORE_VAULT` whitelist membership hashing.
+
+```text
+OutputDescriptorBytes(output) =
+    u16le(output.covenant_type) ||
+    CompactSize(output.covenant_data_len) ||
+    output.covenant_data
+```
+
+`output.value` is intentionally excluded so that whitelist entries are
+independent of transfer amounts.
+
+Normative definition for all `CORE_VAULT` whitelist computations:
+
+```text
+whitelist[j] = SHA3-256(OutputDescriptorBytes(output_j))
+```
 
 ## 19. Coinbase and Subsidy (Normative)
 
@@ -999,6 +1061,19 @@ Consensus validity MUST be deterministic given the same chain state and the same
 - If any rule requires iterating over an unordered set/map, the iteration order MUST be defined as lexicographic order
   over the canonical key bytes for that collection.
 
+### 24.1 CORE_VAULT Input Validation Order
+
+For inputs spending `CORE_VAULT` (after standard Section 18 parse):
+
+1. Parse `covenant_data`: verify `threshold`, `key_count`, `whitelist_count`, and data length.
+2. Whitelist canonical order is checked at UTXO creation only and MUST NOT be re-checked at spend.
+3. Assign `key_count` WitnessItems via the cursor model (Section 16).
+4. Signature threshold check: count valid signatures and require `valid >= threshold`.
+5. Whitelist membership check per output using binary search (`O(log W)`).
+6. Value conservation.
+
+Short-circuit on first error.
+
 ## 25. Block Validation Order (Normative)
 
 Implementations MUST apply validity checks in a deterministic order and return the first applicable error code.
@@ -1007,21 +1082,18 @@ Minimum required order for validating a candidate block `B_h` at height `h`:
 
 1. Parse `BlockHeaderBytes` and all `TxBytes` encodings; any malformed encoding MUST reject as `BLOCK_ERR_PARSE` or the
    corresponding `TX_ERR_*` (Section 13).
-2. Check header `target` range and PoW validity (Section 10.3):
-   - if `target` is out of range, reject as `BLOCK_ERR_TARGET_INVALID`;
-   - otherwise, if PoW is invalid, reject as `BLOCK_ERR_POW_INVALID`.
+2. Check header PoW validity (Section 10.3). If invalid, reject as `BLOCK_ERR_POW_INVALID`.
 3. Check the header `target` matches the expected target (Section 15). If mismatch, reject as `BLOCK_ERR_TARGET_INVALID`.
 4. Check `prev_block_hash` linkage against the selected parent block hash. If invalid, reject as `BLOCK_ERR_LINKAGE_INVALID`.
 5. Check `merkle_root` matches the Merkle root computed from transaction `txid` values (Section 10.4). If invalid, reject
    as `BLOCK_ERR_MERKLE_INVALID`.
-6. Check coinbase witness commitment (Section 10.4.1). If missing or duplicated, reject as `BLOCK_ERR_WITNESS_COMMITMENT`.
-7. Check block timestamp rules (Section 22). If invalid, reject as `BLOCK_ERR_TIMESTAMP_OLD` or `BLOCK_ERR_TIMESTAMP_FUTURE`.
-8. Check total block weight (Section 9). If exceeded, reject as `BLOCK_ERR_WEIGHT_EXCEEDED`.
-9. Check per-block ANCHOR byte limits (Section 14). If exceeded, reject as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
-10. Check DA chunk hash integrity (Section 21.2). If any chunk_hash mismatch, reject as `BLOCK_ERR_DA_CHUNK_HASH_INVALID`.
-11. Check DA set completeness (Section 21.3): no orphan chunks, complete sets, batch count. Reject as applicable.
-12. Check DA payload commitment (Section 21.4). If mismatch or ambiguous (missing or duplicate CORE_DA_COMMIT output), reject as `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID`.
-13. Apply transactions sequentially (Section 18), enforcing:
+6. Check block timestamp rules (Section 22). If invalid, reject as `BLOCK_ERR_TIMESTAMP_OLD` or `BLOCK_ERR_TIMESTAMP_FUTURE`.
+7. Check total block weight (Section 9). If exceeded, reject as `BLOCK_ERR_WEIGHT_EXCEEDED`.
+8. Check per-block ANCHOR byte limits (Section 14). If exceeded, reject as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
+9. Check DA chunk hash integrity (Section 21.2). If any chunk_hash mismatch, reject as `BLOCK_ERR_DA_CHUNK_HASH_INVALID`.
+10. Check DA set completeness (Section 21.3): no orphan chunks, complete sets, batch count. Reject as applicable.
+11. Check DA payload commitment (Section 21.4). If mismatch or ambiguous (missing or duplicate CORE_DA_COMMIT output), reject as `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID`.
+12. Apply transactions sequentially (Section 18), enforcing:
    - coinbase structural rules (Sections 10.5 and 16),
    - transaction structural rules (Section 16),
    - replay-domain checks (Section 17),
