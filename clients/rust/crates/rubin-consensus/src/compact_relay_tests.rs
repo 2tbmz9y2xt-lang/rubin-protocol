@@ -1,0 +1,26 @@
+use crate::compact_relay::siphash24;
+use crate::compact_shortid;
+
+#[test]
+fn compact_siphash_reference_vectors() {
+    let k0 = 0x0706_0504_0302_0100u64;
+    let k1 = 0x0f0e_0d0c_0b0a_0908u64;
+    assert_eq!(siphash24(&[], k0, k1), 0x726fdb47dd0e0e31);
+
+    let mut msg = [0u8; 15];
+    for (i, b) in msg.iter_mut().enumerate() {
+        *b = i as u8;
+    }
+    assert_eq!(siphash24(&msg, k0, k1), 0xa129ca6149be45e5);
+}
+
+#[test]
+fn compact_shortid_vector() {
+    let wtxid = [
+        0x26, 0xce, 0x78, 0xc5, 0x67, 0x1f, 0x12, 0x91, 0x1e, 0x36, 0x10, 0x83, 0x10, 0x95, 0x30,
+        0x5e, 0xd0, 0x0a, 0x11, 0x2b, 0x9b, 0xa5, 0x9c, 0xdd, 0xb8, 0x7c, 0x69, 0x4b, 0xb8, 0xb4,
+        0xe6, 0x95,
+    ];
+    let got = compact_shortid(wtxid, 0x0706_0504_0302_0100, 0x0f0e_0d0c_0b0a_0908);
+    assert_eq!(got, [0xb5, 0x0c, 0x6f, 0xb8, 0x6b, 0x2f]);
+}

@@ -1,4 +1,4 @@
-# rubin-protocol (Genesis = Wire v1)
+# rubin-protocol (Genesis = Canonical Transaction Wire)
 
 This repository contains:
 
@@ -6,10 +6,9 @@ This repository contains:
 - minimal reference implementations (Go + Rust),
 - a cross-client conformance runner (parity gate).
 
-**What "Genesis = Wire v1" means:** the chain starts at genesis using the current
-transaction serialization format ("Transaction Wire (version 1)") including TXID/WTXID
-rules. There is no on-chain activation for this; nodes must implement Wire v1 to
-validate the chain.
+**What this means:** the chain starts at genesis with one canonical transaction
+serialization format (including `tx_kind`, TXID/WTXID rules, and DA fields).
+There is no delayed wire-activation mechanism.
 
 ## Structure
 
@@ -17,6 +16,11 @@ validate the chain.
 - `./clients/go/` Go reference consensus library + CLI
 - `./clients/rust/` Rust reference consensus library + CLI
 - `./conformance/` fixtures + runner (Go↔Rust parity)
+
+Execution control documents:
+
+- `./spec/RUBIN_IMPLEMENTATION_ROADMAP.md`
+- `./spec/RUBIN_AGENT_EXECUTION_TZ.md`
 
 ## Quick Start (Local)
 
@@ -34,6 +38,7 @@ Run cross-client conformance (builds local CLIs into `./conformance/bin/`):
 
 ```bash
 python3 conformance/runner/run_cv_bundle.py
+python3 conformance/runner/run_cv_bundle.py --only-gates CV-COMPACT
 ```
 
 ## Adding Conformance Vectors
