@@ -32,7 +32,7 @@ Note for hardware provisioning: 18.05 TiB raw data requires a disk marketed as ~
 | `MAX_DA_BYTES_PER_BLOCK` | 32_000_000 bytes (= 30.5 MiB) | |
 | `WINDOW_SIZE` | 10_080 blocks | retarget = 14 days |
 | `MIN_DA_RETENTION_BLOCKS` | 15_120 blocks | DA pruning window = 21 days |
-| `MAX_RELAY_MSG_BYTES` | 96_000_000 bytes (= 91.6 MiB) | |
+| `MAX_RELAY_MSG_BYTES` | 100_663_296 bytes (= 96 MiB) | |
 | `DA_MEMPOOL_SIZE` | 512 MiB | minimum for high-bandwidth relay |
 | `DA_MEMPOOL_PINNED_PAYLOAD_MAX` | 96_000_000 bytes | 3 full DA blocks (payload bytes only) |
 | `DA_ORPHAN_POOL_SIZE` | 64 MiB | = 2 x MAX_DA_BYTES_PER_BLOCK |

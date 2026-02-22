@@ -409,7 +409,45 @@ Odd-element rule (normative):
 
 `merkle_root` is the final root after full binary reduction over all transaction `txid` values.
 
-### 10.5 Coinbase Basics (Structural)
+Conformance requirement:
+
+- Conformance vectors MUST include at least `tx_count = 1, 2, 3, 5` to validate odd-element promotion
+  without last-element duplication.
+
+### 10.5 Witness Commitment (Normative)
+
+Block bytes are additionally committed to witness data through a mandatory witness commitment in coinbase.
+
+Define witness merkle hashing over transaction `wtxid` values in block transaction order:
+
+```text
+WLeaf = SHA3-256(0x00 || wtxid)
+WNode = SHA3-256(0x01 || left || right)
+```
+
+Odd-element rule is identical to Section 10.4:
+
+- If the number of elements at any level is odd, the lone element is promoted to the next level unchanged.
+- Duplicating the last element is forbidden.
+
+Let `witness_merkle_root(B)` be the final root of this reduction.
+
+Coinbase witness commitment format:
+
+```text
+WITNESS_COMMIT_PREFIX = ASCII("RUBINv1-witness-root/")
+witness_commitment_payload = WITNESS_COMMIT_PREFIX || witness_merkle_root(B)
+```
+
+Consensus rules:
+
+- `B.txs[0]` (coinbase) MUST contain exactly one `CORE_ANCHOR` output whose `covenant_data` starts with
+  `WITNESS_COMMIT_PREFIX` and has total length `len(WITNESS_COMMIT_PREFIX) + 32`.
+- The trailing 32 bytes of that payload MUST equal `witness_merkle_root(B)`.
+- Missing, duplicate, malformed, or mismatching witness commitment MUST be rejected as
+  `BLOCK_ERR_WITNESS_COMMITMENT_INVALID`.
+
+### 10.6 Coinbase Basics (Structural)
 
 Every block MUST contain exactly one coinbase transaction and it MUST be the first transaction.
 
@@ -438,10 +476,10 @@ Coinbase economics (subsidy, maturity, and fee rules) are defined in later secti
 Definition:
 
 ```text
-chain_id = SHA3-256(serialized_genesis_without_chain_id_field)
+chain_id = SHA3-256(serialized_genesis_for_chain_id)
 ```
 
-Where `serialized_genesis_without_chain_id_field` is:
+Where `serialized_genesis_for_chain_id` is:
 
 ```text
 ASCII("RUBIN-GENESIS-v1") ||
@@ -466,7 +504,8 @@ Definitions:
 hash_of_da_core_fields = SHA3-256(DaCoreFieldsBytes(T))
 hash_of_all_prevouts = SHA3-256(concat(inputs[i].prev_txid || u32le(inputs[i].prev_vout) for i in [0..input_count-1]))
 hash_of_all_sequences = SHA3-256(concat(u32le(inputs[i].sequence) for i in [0..input_count-1]))
-hash_of_all_outputs = SHA3-256(concat(outputs[j] in TxOutput wire order for j in [0..output_count-1]))
+TxOutputBytes(o) = u64le(o.value) || u16le(o.covenant_type) || CompactSize(len(o.covenant_data)) || o.covenant_data
+hash_of_all_outputs = SHA3-256(concat(TxOutputBytes(outputs[j]) for j in [0..output_count-1]))
 ```
 
 For `output_count = 0`, `hash_of_all_outputs = SHA3-256("")`.
@@ -496,6 +535,7 @@ digest = SHA3-256(preimage_tx_sig)
 
 All fields in `preimage_tx_sig` are taken from the transaction `T` being signed, except `input_value`.
 `input_value` is the `value` of the spendable UTXO entry referenced by this input's `(prev_txid, prev_vout)`.
+`input_index` MUST be the index of the currently validated input within `T.inputs`.
 
 For coinbase transactions, sighash is not computed (no witness).
 
@@ -527,6 +567,7 @@ implementations for the described failure classes:
 - Timestamp too old (MTP)                          -> `BLOCK_ERR_TIMESTAMP_OLD`
 - Timestamp too far in future                      -> `BLOCK_ERR_TIMESTAMP_FUTURE`
 - Coinbase rule violation                          -> `BLOCK_ERR_COINBASE_INVALID`
+- Witness commitment missing/malformed/mismatch    -> `BLOCK_ERR_WITNESS_COMMITMENT_INVALID`
 - Coinbase subsidy exceeded                        -> `BLOCK_ERR_SUBSIDY_EXCEEDED`
 - Weight exceedance                                -> `BLOCK_ERR_WEIGHT_EXCEEDED`
 - Anchor bytes exceeded                            -> `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`
@@ -561,6 +602,8 @@ Semantics:
 - `CORE_P2PK`:
   - `covenant_data = suite_id:u8 || key_id:bytes32`.
   - `covenant_data_len MUST equal MAX_P2PK_COVENANT_DATA`.
+  - Genesis profile restriction: only `SUITE_ID_ML_DSA_87 (0x01)` is active for `CORE_P2PK` spends.
+    `SUITE_ID_SLH_DSA_SHAKE_256F (0x02)` MUST be rejected as `TX_ERR_DEPLOYMENT_INACTIVE`.
   - Spend authorization requires a witness item whose `suite_id` matches and whose `pubkey` hashes to `key_id`,
     and a valid signature over `digest` (Section 12).
   - `key_id = SHA3-256(pubkey)` where `pubkey` is the canonical witness public key byte string for the selected
@@ -581,8 +624,9 @@ Semantics:
     `<= MAX_ANCHOR_BYTES_PER_BLOCK`; otherwise reject the block as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
 - `CORE_DA_COMMIT`:
   - `covenant_data_len MUST equal 32`. Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
-  - `covenant_data MUST equal SHA3-256(T.da_payload)` where `T` is the containing transaction. Otherwise reject as
-    `TX_ERR_COVENANT_TYPE_INVALID`.
+  - `covenant_data` is the DA set payload commitment, validated in Section 21.4 as
+    `SHA3-256(concat(chunk.da_payload for chunk in chunks_sorted))` for the set identified by `da_id`.
+    Mismatch or ambiguity MUST be rejected as `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID`.
   - `value MUST equal 0`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
   - `CORE_DA_COMMIT` outputs are non-spendable and MUST NOT be added to the spendable UTXO set. Any attempt to spend a
     DA_COMMIT output MUST be rejected as `TX_ERR_MISSING_UTXO`.
@@ -607,9 +651,12 @@ target_new =
     clamp(
         floor(target_old * T_actual / T_expected),
         max(1, floor(target_old / 4)),
-        target_old * 4
+        min(target_old * 4, POW_LIMIT)
     )
 ```
+
+`POW_LIMIT` is the maximum allowed target for the chain instance and MUST equal the published genesis target.
+All valid headers MUST satisfy `1 <= target <= POW_LIMIT`. `target = 0` is invalid.
 
 Window boundaries and applicability:
 
@@ -635,6 +682,8 @@ unsigned integer arithmetic (or arbitrary-precision). Silent truncation is non-c
 ## 16. Transaction Structural Rules (Normative)
 
 These rules apply after a transaction has been parsed under Transaction Wire (Section 5).
+If multiple failures apply within this section, checks MUST be evaluated in numbered order and the first
+applicable error code MUST be returned.
 
 Define `is_coinbase_prevout` for an input `I` as:
 
@@ -644,18 +693,19 @@ Define `is_coinbase_prevout` for an input `I` as:
 For any non-coinbase transaction `T`:
 
 1. `T.tx_nonce` MUST be in `[1, 0xffff_ffff_ffff_ffff]`. Otherwise reject as `TX_ERR_TX_NONCE_INVALID`.
-2. `T.witness.witness_count` MUST equal `T.input_count`. Otherwise reject as `TX_ERR_PARSE`.
-3. No input may use the coinbase prevout encoding. If any input satisfies `is_coinbase_prevout`, reject as
+2. `T.input_count MUST be >= 1`. Otherwise reject as `TX_ERR_PARSE`.
+3. `T.witness.witness_count` MUST equal `T.input_count`. Otherwise reject as `TX_ERR_PARSE`.
+4. No input may use the coinbase prevout encoding. If any input satisfies `is_coinbase_prevout`, reject as
    `TX_ERR_PARSE`.
-4. For genesis covenant set (Section 14 only), every input MUST have `script_sig_len = 0`. Otherwise reject as
+5. For genesis covenant set (Section 14 only), every input MUST have `script_sig_len = 0`. Otherwise reject as
    `TX_ERR_PARSE`.
-5. For each input, `sequence` MUST be `<= 0x7fffffff`. Otherwise reject as `TX_ERR_SEQUENCE_INVALID`.
-6. All input outpoints `(prev_txid, prev_vout)` within the transaction MUST be unique. Otherwise reject as
+6. For each input, `sequence` MUST be `<= 0x7fffffff`. Otherwise reject as `TX_ERR_SEQUENCE_INVALID`.
+7. All input outpoints `(prev_txid, prev_vout)` within the transaction MUST be unique. Otherwise reject as
    `TX_ERR_PARSE`.
 
 For coinbase transaction `T` (the first transaction in a block at height `h = height(B)`):
 
-1. `T` MUST satisfy `is_coinbase_tx(T)` (Section 10.5). Otherwise the block is invalid (`BLOCK_ERR_COINBASE_INVALID`).
+1. `T` MUST satisfy `is_coinbase_tx(T)` (Section 10.6). Otherwise the block is invalid (`BLOCK_ERR_COINBASE_INVALID`).
 2. `T.locktime` MUST equal `u32le(h)` (height-commitment). Otherwise the block is invalid (`BLOCK_ERR_COINBASE_INVALID`).
 
 `locktime` has no general transaction-level semantics in this ruleset. The only consensus use of `locktime` is the
@@ -668,8 +718,10 @@ For each non-coinbase transaction `T` in block order:
 1. Let `N_seen` be the set of `tx_nonce` values already observed in prior non-coinbase transactions of the same block.
 2. If `T.tx_nonce` already appears in `N_seen`, reject as `TX_ERR_NONCE_REPLAY`.
 
-Cross-block replay is prevented by UTXO exhaustion: once an input outpoint is consumed, it is removed from the
-spendable UTXO set and cannot be spent again.
+Cross-block double-spend of the same input is prevented by UTXO exhaustion: once an input outpoint is consumed, it is
+removed from the spendable UTXO set and cannot be spent again.
+This section defines only per-block `tx_nonce` uniqueness and MUST NOT be interpreted as a global cross-block
+nonce uniqueness mechanism.
 
 ## 18. UTXO State Model (Normative)
 
@@ -869,7 +921,7 @@ For block `B_h` with `h > 0`:
 
 For genesis (`h = 0`), these rules are not evaluated.
 
-## 22. Chainwork and Fork Choice (Non-Validation Procedure)
+## 23. Chainwork and Fork Choice (Non-Validation Procedure)
 
 Fork choice is not part of block validity. Nodes select a canonical chain among valid candidates.
 
@@ -890,7 +942,7 @@ Canonical chain selection:
 1. Prefer the valid chain with maximal `ChainWork`.
 2. If `ChainWork` is equal, choose the chain whose tip `block_hash` is lexicographically smaller (bytewise big-endian).
 
-## 23. Determinism Requirements (Normative)
+## 24. Determinism Requirements (Normative)
 
 Consensus validity MUST be deterministic given the same chain state and the same block bytes.
 
@@ -898,7 +950,7 @@ Consensus validity MUST be deterministic given the same chain state and the same
 - If any rule requires iterating over an unordered set/map, the iteration order MUST be defined as lexicographic order
   over the canonical key bytes for that collection.
 
-## 24. Block Validation Order (Normative)
+## 25. Block Validation Order (Normative)
 
 Implementations MUST apply validity checks in a deterministic order and return the first applicable error code.
 
@@ -911,14 +963,16 @@ Minimum required order for validating a candidate block `B_h` at height `h`:
 4. Check `prev_block_hash` linkage against the selected parent block hash. If invalid, reject as `BLOCK_ERR_LINKAGE_INVALID`.
 5. Check `merkle_root` matches the Merkle root computed from transaction `txid` values (Section 10.4). If invalid, reject
    as `BLOCK_ERR_MERKLE_INVALID`.
-6. Check block timestamp rules (Section 21). If invalid, reject as `BLOCK_ERR_TIMESTAMP_OLD` or `BLOCK_ERR_TIMESTAMP_FUTURE`.
-7. Check total block weight (Section 9). If exceeded, reject as `BLOCK_ERR_WEIGHT_EXCEEDED`.
-8. Check per-block ANCHOR byte limits (Section 14). If exceeded, reject as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
-9. Check DA chunk hash integrity (Section 21.2). If any chunk_hash mismatch, reject as `BLOCK_ERR_DA_CHUNK_HASH_INVALID`.
-10. Check DA set completeness (Section 21.3): no orphan chunks, complete sets, batch count. Reject as applicable.
-11. Check DA payload commitment (Section 21.4). If mismatch or ambiguous (missing or duplicate CORE_DA_COMMIT output), reject as `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID`.
-12. Apply transactions sequentially (Section 18), enforcing:
-   - coinbase structural rules (Sections 10.5 and 16),
+6. Check witness commitment (Section 10.5). If missing/malformed/mismatching, reject as
+   `BLOCK_ERR_WITNESS_COMMITMENT_INVALID`.
+7. Check block timestamp rules (Section 22). If invalid, reject as `BLOCK_ERR_TIMESTAMP_OLD` or `BLOCK_ERR_TIMESTAMP_FUTURE`.
+8. Check total block weight (Section 9). If exceeded, reject as `BLOCK_ERR_WEIGHT_EXCEEDED`.
+9. Check per-block ANCHOR byte limits (Section 14). If exceeded, reject as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
+10. Check DA chunk hash integrity (Section 21.2). If any chunk_hash mismatch, reject as `BLOCK_ERR_DA_CHUNK_HASH_INVALID`.
+11. Check DA set completeness (Section 21.3): no orphan chunks, complete sets, batch count. Reject as applicable.
+12. Check DA payload commitment (Section 21.4). If mismatch or ambiguous (missing or duplicate CORE_DA_COMMIT output), reject as `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID`.
+13. Apply transactions sequentially (Section 18), enforcing:
+   - coinbase structural rules (Sections 10.6 and 16),
    - transaction structural rules (Section 16),
    - replay-domain checks (Section 17),
    - covenant evaluation (Section 18.2),

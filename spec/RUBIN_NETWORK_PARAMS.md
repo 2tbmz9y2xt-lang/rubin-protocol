@@ -17,8 +17,9 @@ In case of conflict, RUBIN_L1_CANONICAL.md takes precedence.
 |-----------|-------|--------|
 | `TARGET_BLOCK_INTERVAL` | 120 s | CANONICAL §4 |
 | `MAX_BLOCK_WEIGHT` | 68,000,000 wu | CANONICAL §4 |
-| `MAX_BLOCK_BYTES` | 75,497,472 bytes (72 MiB) | CANONICAL §4 |
+| `MAX_BLOCK_BYTES` | 75,497,472 bytes (72 MiB) | COMPACT §1 (operational cap) |
 | `MAX_DA_BYTES_PER_BLOCK` | 32,000,000 bytes (30.5 MiB) | CANONICAL §4 |
+| `MAX_RELAY_MSG_BYTES` | 100,663,296 bytes (96 MiB) | CANONICAL §4 / COMPACT §1 |
 | `WINDOW_SIZE` (retarget) | 10,080 blocks (14 days) | CANONICAL §4 |
 | `MIN_DA_RETENTION_BLOCKS` | 15,120 blocks (21 days) | COMPACT §1 |
 | `COINBASE_MATURITY` | 100 blocks | CANONICAL §4 |
