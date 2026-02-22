@@ -6,7 +6,8 @@ use crate::pow::{pow_check, retarget_v1};
 use crate::sighash_v1_digest;
 use crate::{
     apply_non_coinbase_tx_basic, block_hash, merkle_root_txids, parse_block_bytes, parse_tx,
-    validate_block_basic, validate_tx_covenants_genesis, Outpoint, UtxoEntry, BLOCK_HEADER_BYTES,
+    validate_block_basic, validate_block_basic_at_height, validate_tx_covenants_genesis, Outpoint,
+    UtxoEntry, BLOCK_HEADER_BYTES,
 };
 use num_bigint::BigUint;
 use num_traits::One;
@@ -568,6 +569,70 @@ fn validate_block_basic_witness_commitment_duplicate() {
     assert_eq!(err.code, ErrorCode::BlockErrWitnessCommitment);
 }
 
+#[test]
+fn validate_block_basic_slh_inactive_at_height() {
+    let prev_txid = [0xabu8; 32];
+    let pubkey = vec![0u8; SLH_DSA_SHAKE_256F_PUBKEY_BYTES as usize];
+    let sig = vec![0x01];
+    let non_coinbase = tx_with_one_input_one_output_with_witness(
+        prev_txid,
+        0,
+        1,
+        COV_TYPE_P2PK,
+        &valid_p2pk_covenant_data(),
+        SUITE_ID_SLH_DSA_SHAKE_256F,
+        &pubkey,
+        &sig,
+    );
+    let coinbase = coinbase_with_witness_commitment(std::slice::from_ref(&non_coinbase));
+
+    let (_t1, txid1, _w1, _n1) = parse_tx(&coinbase).expect("coinbase");
+    let (_t2, txid2, _w2, _n2) = parse_tx(&non_coinbase).expect("noncoinbase");
+    let root = merkle_root_txids(&[txid1, txid2]).expect("root");
+    let mut prev = [0u8; 32];
+    prev[0] = 0xa1;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(prev, root, target, 29, &[coinbase, non_coinbase]);
+
+    let err = validate_block_basic_at_height(
+        &block,
+        Some(prev),
+        Some(target),
+        SLH_DSA_ACTIVATION_HEIGHT - 1,
+    )
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+}
+
+#[test]
+fn validate_block_basic_slh_active_at_height() {
+    let prev_txid = [0xacu8; 32];
+    let pubkey = vec![0u8; SLH_DSA_SHAKE_256F_PUBKEY_BYTES as usize];
+    let sig = vec![0x01];
+    let non_coinbase = tx_with_one_input_one_output_with_witness(
+        prev_txid,
+        0,
+        1,
+        COV_TYPE_P2PK,
+        &valid_p2pk_covenant_data(),
+        SUITE_ID_SLH_DSA_SHAKE_256F,
+        &pubkey,
+        &sig,
+    );
+    let coinbase = coinbase_with_witness_commitment(std::slice::from_ref(&non_coinbase));
+
+    let (_t1, txid1, _w1, _n1) = parse_tx(&coinbase).expect("coinbase");
+    let (_t2, txid2, _w2, _n2) = parse_tx(&non_coinbase).expect("noncoinbase");
+    let root = merkle_root_txids(&[txid1, txid2]).expect("root");
+    let mut prev = [0u8; 32];
+    prev[0] = 0xa2;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(prev, root, target, 31, &[coinbase, non_coinbase]);
+
+    validate_block_basic_at_height(&block, Some(prev), Some(target), SLH_DSA_ACTIVATION_HEIGHT)
+        .expect("validate");
+}
+
 fn hex32(s: &str) -> [u8; 32] {
     let mut out = [0u8; 32];
     assert_eq!(s.len(), 64);
@@ -734,6 +799,41 @@ fn tx_with_one_input_one_output(
     b.extend_from_slice(out_cov_data);
     b.extend_from_slice(&0u32.to_le_bytes()); // locktime
     crate::compactsize::encode_compact_size(0, &mut b); // witness_count
+    crate::compactsize::encode_compact_size(0, &mut b); // da_payload_len
+    b
+}
+
+fn tx_with_one_input_one_output_with_witness(
+    prev_txid: [u8; 32],
+    prev_vout: u32,
+    out_value: u64,
+    out_cov_type: u16,
+    out_cov_data: &[u8],
+    suite_id: u8,
+    pubkey: &[u8],
+    signature: &[u8],
+) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&1u32.to_le_bytes());
+    b.push(0x00); // tx_kind
+    b.extend_from_slice(&1u64.to_le_bytes());
+    crate::compactsize::encode_compact_size(1, &mut b); // input_count
+    b.extend_from_slice(&prev_txid);
+    b.extend_from_slice(&prev_vout.to_le_bytes());
+    crate::compactsize::encode_compact_size(0, &mut b); // script_sig_len
+    b.extend_from_slice(&0u32.to_le_bytes()); // sequence
+    crate::compactsize::encode_compact_size(1, &mut b); // output_count
+    b.extend_from_slice(&out_value.to_le_bytes());
+    b.extend_from_slice(&out_cov_type.to_le_bytes());
+    crate::compactsize::encode_compact_size(out_cov_data.len() as u64, &mut b);
+    b.extend_from_slice(out_cov_data);
+    b.extend_from_slice(&0u32.to_le_bytes()); // locktime
+    crate::compactsize::encode_compact_size(1, &mut b); // witness_count
+    b.push(suite_id);
+    crate::compactsize::encode_compact_size(pubkey.len() as u64, &mut b);
+    b.extend_from_slice(pubkey);
+    crate::compactsize::encode_compact_size(signature.len() as u64, &mut b);
+    b.extend_from_slice(signature);
     crate::compactsize::encode_compact_size(0, &mut b); // da_payload_len
     b
 }

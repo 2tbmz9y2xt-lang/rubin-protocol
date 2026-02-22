@@ -15,7 +15,10 @@ mod vault;
 mod wire_read;
 
 pub use block::{block_hash, parse_block_header_bytes, BlockHeader, BLOCK_HEADER_BYTES};
-pub use block_basic::{parse_block_bytes, validate_block_basic, BlockBasicSummary, ParsedBlock};
+pub use block_basic::{
+    parse_block_bytes, validate_block_basic, validate_block_basic_at_height, BlockBasicSummary,
+    ParsedBlock,
+};
 pub use compact_relay::compact_shortid;
 pub use covenant_genesis::validate_tx_covenants_genesis;
 pub use error::{ErrorCode, TxError};

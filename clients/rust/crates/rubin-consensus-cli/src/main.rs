@@ -1,7 +1,7 @@
 use rubin_consensus::{
     apply_non_coinbase_tx_basic, block_hash, compact_shortid, merkle_root_txids, parse_tx,
-    pow_check, retarget_v1, sighash_v1_digest, validate_block_basic, validate_tx_covenants_genesis,
-    ErrorCode, Outpoint, UtxoEntry,
+    pow_check, retarget_v1, sighash_v1_digest, validate_block_basic_at_height,
+    validate_tx_covenants_genesis, ErrorCode, Outpoint, UtxoEntry,
 };
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
@@ -672,7 +672,12 @@ fn main() {
                 Some(h)
             };
 
-            match validate_block_basic(&block_bytes, expected_prev, expected_target) {
+            match validate_block_basic_at_height(
+                &block_bytes,
+                expected_prev,
+                expected_target,
+                req.height,
+            ) {
                 Ok(summary) => {
                     let resp = Response {
                         ok: true,

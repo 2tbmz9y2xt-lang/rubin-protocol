@@ -2,8 +2,8 @@ use crate::block::{block_hash, parse_block_header_bytes, BlockHeader, BLOCK_HEAD
 use crate::compactsize::read_compact_size;
 use crate::constants::{
     COV_TYPE_ANCHOR, MAX_ANCHOR_BYTES_PER_BLOCK, MAX_BLOCK_WEIGHT, MAX_DA_BYTES_PER_BLOCK,
-    SUITE_ID_ML_DSA_87, SUITE_ID_SLH_DSA_SHAKE_256F, VERIFY_COST_ML_DSA_87,
-    VERIFY_COST_SLH_DSA_SHAKE_256F, WITNESS_DISCOUNT_DIVISOR,
+    SLH_DSA_ACTIVATION_HEIGHT, SUITE_ID_ML_DSA_87, SUITE_ID_SLH_DSA_SHAKE_256F,
+    VERIFY_COST_ML_DSA_87, VERIFY_COST_SLH_DSA_SHAKE_256F, WITNESS_DISCOUNT_DIVISOR,
 };
 use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
@@ -98,6 +98,15 @@ pub fn validate_block_basic(
     expected_prev_hash: Option<[u8; 32]>,
     expected_target: Option<[u8; 32]>,
 ) -> Result<BlockBasicSummary, TxError> {
+    validate_block_basic_at_height(block_bytes, expected_prev_hash, expected_target, 0)
+}
+
+pub fn validate_block_basic_at_height(
+    block_bytes: &[u8],
+    expected_prev_hash: Option<[u8; 32]>,
+    expected_target: Option<[u8; 32]>,
+    block_height: u64,
+) -> Result<BlockBasicSummary, TxError> {
     let pb = parse_block_bytes(block_bytes)?;
 
     if let Some(prev) = expected_prev_hash {
@@ -133,6 +142,7 @@ pub fn validate_block_basic(
     let mut sum_da: u64 = 0;
     let mut sum_anchor: u64 = 0;
     for (i, tx) in pb.txs.iter().enumerate() {
+        validate_witness_suite_activation(tx, i, block_height)?;
         // Non-coinbase transactions must carry at least one input.
         if i > 0 && tx.inputs.is_empty() {
             return Err(TxError::new(
@@ -182,6 +192,26 @@ pub fn validate_block_basic(
         sum_da,
         block_hash: h,
     })
+}
+
+fn validate_witness_suite_activation(
+    tx: &Tx,
+    tx_index: usize,
+    block_height: u64,
+) -> Result<(), TxError> {
+    if tx_index == 0 {
+        // Coinbase witness is structurally empty in genesis profile.
+        return Ok(());
+    }
+    for w in &tx.witness {
+        if w.suite_id == SUITE_ID_SLH_DSA_SHAKE_256F && block_height < SLH_DSA_ACTIVATION_HEIGHT {
+            return Err(TxError::new(
+                ErrorCode::TxErrSigAlgInvalid,
+                "SLH-DSA suite inactive at this height",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_coinbase_witness_commitment(pb: &ParsedBlock) -> Result<(), TxError> {

@@ -70,6 +70,15 @@ func ParseBlockBytes(b []byte) (*ParsedBlock, error) {
 }
 
 func ValidateBlockBasic(blockBytes []byte, expectedPrevHash *[32]byte, expectedTarget *[32]byte) (*BlockBasicSummary, error) {
+	return ValidateBlockBasicAtHeight(blockBytes, expectedPrevHash, expectedTarget, 0)
+}
+
+func ValidateBlockBasicAtHeight(
+	blockBytes []byte,
+	expectedPrevHash *[32]byte,
+	expectedTarget *[32]byte,
+	blockHeight uint64,
+) (*BlockBasicSummary, error) {
 	pb, err := ParseBlockBytes(blockBytes)
 	if err != nil {
 		return nil, err
@@ -99,6 +108,9 @@ func ValidateBlockBasic(blockBytes []byte, expectedPrevHash *[32]byte, expectedT
 	var sumDa uint64
 	var sumAnchor uint64
 	for i, tx := range pb.Txs {
+		if err := validateWitnessSuiteActivation(tx, i, blockHeight); err != nil {
+			return nil, err
+		}
 		// Non-coinbase transactions must carry at least one input.
 		if i > 0 && len(tx.Inputs) == 0 {
 			return nil, txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
@@ -148,6 +160,22 @@ func ValidateBlockBasic(blockBytes []byte, expectedPrevHash *[32]byte, expectedT
 		SumDa:     sumDa,
 		BlockHash: blockHash,
 	}, nil
+}
+
+func validateWitnessSuiteActivation(tx *Tx, txIndex int, blockHeight uint64) error {
+	if tx == nil {
+		return txerr(TX_ERR_PARSE, "nil tx")
+	}
+	if txIndex == 0 {
+		// Coinbase witness is structurally empty in genesis profile.
+		return nil
+	}
+	for _, w := range tx.Witness {
+		if w.SuiteID == SUITE_ID_SLH_DSA_SHAKE_256F && blockHeight < SLH_DSA_ACTIVATION_HEIGHT {
+			return txerr(TX_ERR_SIG_ALG_INVALID, "SLH-DSA suite inactive at this height")
+		}
+	}
+	return nil
 }
 
 func validateCoinbaseWitnessCommitment(pb *ParsedBlock) error {

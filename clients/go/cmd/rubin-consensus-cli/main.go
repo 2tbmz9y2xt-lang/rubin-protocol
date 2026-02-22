@@ -255,7 +255,7 @@ func main() {
 			expectedTarget = &h
 		}
 
-		s, err := consensus.ValidateBlockBasic(blockBytes, expectedPrev, expectedTarget)
+		s, err := consensus.ValidateBlockBasicAtHeight(blockBytes, expectedPrev, expectedTarget, req.Height)
 		if err != nil {
 			if te, ok := err.(*consensus.TxError); ok {
 				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})

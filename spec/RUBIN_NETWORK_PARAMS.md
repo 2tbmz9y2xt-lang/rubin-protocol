@@ -25,6 +25,7 @@ In case of conflict, RUBIN_L1_CANONICAL.md takes precedence.
 | `COINBASE_MATURITY` | 100 blocks | CANONICAL §4 |
 | `MAX_FUTURE_DRIFT` | 7,200 s | CANONICAL §4 |
 | `WITNESS_DISCOUNT_DIVISOR` | 4 | CANONICAL §4 |
+| `SLH_DSA_ACTIVATION_HEIGHT` | 1,000,000 | CANONICAL §4, §14, §18.2 |
 | Coinbase witness commitment | Required (CORE_ANCHOR, single 32-byte hash) | CANONICAL §10.4.1 |
 
 ---
@@ -81,7 +82,7 @@ See CANONICAL §19 for exact formula.
 | ML-DSA-87 pubkey | 2,592 bytes |
 | ML-DSA-87 signature | 4,627 bytes |
 | ML-DSA-87 weight cost | 8 wu / signature |
-| Backup signature | SLH-DSA-SHAKE-256f (inactive at genesis) |
+| Backup signature | SLH-DSA-SHAKE-256f (consensus-gated; active from `SLH_DSA_ACTIVATION_HEIGHT`) |
 | SLH-DSA pubkey | 64 bytes |
 | SLH-DSA max signature | 49,856 bytes |
 | SLH-DSA weight cost | 64 wu / signature |
@@ -216,3 +217,4 @@ Storage depends on number of monitored channels; no protocol minimum.
 | `RUBIN_COMPACT_BLOCKS.md` | P2P relay policy: compact blocks, mempool, peer scoring |
 | `RUBIN_NETWORK_PARAMS.md` | This file: reference summary for TZ, roadmap, hardware planning |
 | `RUBIN_L1_P2P_AUX.md` | Auxiliary P2P rules |
+| `RUBIN_SLH_FALLBACK_PLAYBOOK.md` | Operational activation/rollback runbook for SLH fallback mode |

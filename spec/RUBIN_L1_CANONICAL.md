@@ -95,6 +95,7 @@ PQC witness canonical sizes:
 - `SUITE_ID_SLH_DSA_SHAKE_256F = 0x02`
   - `SLH_DSA_SHAKE_256F_PUBKEY_BYTES = 64`
   - `MAX_SLH_DSA_SIG_BYTES = 49_856`
+- `SLH_DSA_ACTIVATION_HEIGHT = 1_000_000`
 
 Signature verification cost weights:
 
@@ -226,6 +227,14 @@ Witness items are parsed and checked for canonical form:
   - `pubkey_length MUST equal SLH_DSA_SHAKE_256F_PUBKEY_BYTES` and
     `0 < sig_length <= MAX_SLH_DSA_SIG_BYTES`; otherwise reject as `TX_ERR_SIG_NONCANONICAL`.
 - Any other `suite_id` MUST be rejected as `TX_ERR_SIG_ALG_INVALID`.
+
+Activation note:
+
+- Witness canonicalization in this section validates byte-level encoding only.
+- Consensus activation gate for `SUITE_ID_SLH_DSA_SHAKE_256F` is enforced in spend validation sections
+  (Sections 14.1, 14.2, 18.2) against block height.
+- If `block_height < SLH_DSA_ACTIVATION_HEIGHT` and any required spend witness uses
+  `SUITE_ID_SLH_DSA_SHAKE_256F`, validation MUST reject as `TX_ERR_SIG_ALG_INVALID`.
 
 ## 6. Canonical Encode/Parse Invariant
 
@@ -611,6 +620,8 @@ Semantics:
   - `covenant_data_len MUST equal MAX_P2PK_COVENANT_DATA`.
   - Spend authorization requires a witness item whose `suite_id` matches and whose `pubkey` hashes to `key_id`,
     and a valid signature over `digest` (Section 12).
+  - If `suite_id = SUITE_ID_SLH_DSA_SHAKE_256F (0x02)` and `block_height < SLH_DSA_ACTIVATION_HEIGHT`,
+    spend MUST be rejected as `TX_ERR_SIG_ALG_INVALID`.
   - `key_id = SHA3-256(pubkey)` where `pubkey` is the canonical witness public key byte string for the selected
     `suite_id` (no extra length prefixes are included).
 - `CORE_ANCHOR`:
@@ -694,9 +705,17 @@ If `w.suite_id = SUITE_ID_ML_DSA_87 (0x01)`:
   Otherwise reject as `TX_ERR_SIG_INVALID`.
 - Count as one valid signature.
 
+If `w.suite_id = SUITE_ID_SLH_DSA_SHAKE_256F (0x02)`:
+- If `block_height < SLH_DSA_ACTIVATION_HEIGHT`, reject as `TX_ERR_SIG_ALG_INVALID`.
+- Require `SHA3-256(w.pubkey) = keys[i]`. Otherwise reject as `TX_ERR_SIG_INVALID`.
+- Require `verify_sig(w.signature, digest) = true` where `digest` is per Section 12
+  with `input_index` bound to this input's index in the transaction.
+  Otherwise reject as `TX_ERR_SIG_INVALID`.
+- Count as one valid signature.
+
 Any other `suite_id` MUST be rejected as `TX_ERR_SIG_ALG_INVALID`.
 
-Let `valid = count of valid ML_DSA_87 signatures across all key_count WitnessItems`.
+Let `valid = count of valid signatures across all key_count WitnessItems`.
 
 If `valid < threshold`: reject as `TX_ERR_SIG_INVALID`.
 
@@ -737,6 +756,14 @@ If `w.suite_id = SUITE_ID_SENTINEL (0x00)`:
 - `w.pubkey_length MUST equal 0` and `w.sig_length MUST equal 0`. Otherwise reject as `TX_ERR_PARSE`.
 
 If `w.suite_id = SUITE_ID_ML_DSA_87 (0x01)`:
+- Require `SHA3-256(w.pubkey) = keys[i]`. Otherwise reject as `TX_ERR_SIG_INVALID`.
+- Require `verify_sig(w.signature, digest) = true` where `digest` is per Section 12
+  with `input_index` bound to this input's index.
+  Otherwise reject as `TX_ERR_SIG_INVALID`.
+- Count as one valid signature.
+
+If `w.suite_id = SUITE_ID_SLH_DSA_SHAKE_256F (0x02)`:
+- If `block_height < SLH_DSA_ACTIVATION_HEIGHT`, reject as `TX_ERR_SIG_ALG_INVALID`.
 - Require `SHA3-256(w.pubkey) = keys[i]`. Otherwise reject as `TX_ERR_SIG_INVALID`.
 - Require `verify_sig(w.signature, digest) = true` where `digest` is per Section 12
   with `input_index` bound to this input's index.
@@ -914,7 +941,10 @@ Then enforce:
 
 1. If `e.covenant_type = CORE_P2PK`:
    - Let `w` be the single WitnessItem assigned to this input by the cursor model.
-   - Require `w.suite_id = SUITE_ID_ML_DSA_87 (0x01)`. Any other suite MUST be rejected as `TX_ERR_SIG_ALG_INVALID`.
+   - `w.suite_id` MUST be `SUITE_ID_ML_DSA_87 (0x01)` or `SUITE_ID_SLH_DSA_SHAKE_256F (0x02)`.
+     Any other suite MUST be rejected as `TX_ERR_SIG_ALG_INVALID`.
+   - If `w.suite_id = SUITE_ID_SLH_DSA_SHAKE_256F (0x02)` and `h < SLH_DSA_ACTIVATION_HEIGHT`,
+     reject as `TX_ERR_SIG_ALG_INVALID`.
    - Require `len(e.covenant_data) = MAX_P2PK_COVENANT_DATA` and the first byte equals `w.suite_id`. Otherwise reject as
      `TX_ERR_COVENANT_TYPE_INVALID`.
    - Let `key_id = e.covenant_data[1:33]` (after the suite_id byte).

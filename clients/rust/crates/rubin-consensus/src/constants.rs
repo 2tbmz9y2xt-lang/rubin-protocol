@@ -38,6 +38,7 @@ pub const MAX_SCRIPT_SIG_BYTES: u64 = 32;
 pub const SUITE_ID_SENTINEL: u8 = 0x00;
 pub const SUITE_ID_ML_DSA_87: u8 = 0x01;
 pub const SUITE_ID_SLH_DSA_SHAKE_256F: u8 = 0x02;
+pub const SLH_DSA_ACTIVATION_HEIGHT: u64 = 1_000_000;
 
 pub const COV_TYPE_P2PK: u16 = 0x0000;
 pub const COV_TYPE_ANCHOR: u16 = 0x0002;

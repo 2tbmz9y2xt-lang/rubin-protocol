@@ -15,3 +15,5 @@ Execution baseline/control files are maintained locally and are intentionally no
 
 - `./RUBIN_L1_P2P_AUX.md`
   - P2P notes (compact blocks shortid MUST be derived from WTXID)
+- `./RUBIN_SLH_FALLBACK_PLAYBOOK.md`
+  - Operational activation/rollback runbook for SLH fallback mode
