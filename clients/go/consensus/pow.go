@@ -9,10 +9,15 @@ import (
 //
 // All arithmetic is done with arbitrary precision; the result MUST fit in 32 bytes.
 func RetargetV1(targetOld [32]byte, timestampFirst uint64, timestampLast uint64) ([32]byte, error) {
+	powLimit := new(big.Int).SetBytes(POW_LIMIT[:])
 	tOld := new(big.Int).SetBytes(targetOld[:]) // big-endian
 	if tOld.Sign() == 0 {
 		var zero [32]byte
 		return zero, txerr(TX_ERR_PARSE, "retarget: target_old is zero")
+	}
+	if tOld.Cmp(powLimit) > 0 {
+		var zero [32]byte
+		return zero, txerr(TX_ERR_PARSE, "retarget: target_old above pow_limit")
 	}
 
 	var tActual uint64
@@ -39,6 +44,9 @@ func RetargetV1(targetOld [32]byte, timestampFirst uint64, timestampLast uint64)
 	}
 	// upper = target_old * 4
 	upper := new(big.Int).Lsh(new(big.Int).Set(tOld), 2)
+	if upper.Cmp(powLimit) > 0 {
+		upper = powLimit
+	}
 
 	if tNew.Cmp(lower) < 0 {
 		tNew = lower
@@ -52,6 +60,12 @@ func RetargetV1(targetOld [32]byte, timestampFirst uint64, timestampLast uint64)
 
 // PowCheck verifies integer(block_hash, be) < integer(target, be).
 func PowCheck(headerBytes []byte, target [32]byte) error {
+	targetInt := new(big.Int).SetBytes(target[:])
+	powLimit := new(big.Int).SetBytes(POW_LIMIT[:])
+	if targetInt.Sign() == 0 || targetInt.Cmp(powLimit) > 0 {
+		return txerr(BLOCK_ERR_TARGET_INVALID, "target out of range")
+	}
+
 	h, err := BlockHash(headerBytes)
 	if err != nil {
 		return err

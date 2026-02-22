@@ -48,6 +48,17 @@ func TestRetargetV1_UpperClamp(t *testing.T) {
 	}
 }
 
+func TestRetargetV1_ClampsToPowLimit(t *testing.T) {
+	tExpected := uint64(TARGET_BLOCK_INTERVAL) * uint64(WINDOW_SIZE)
+	got, err := RetargetV1(POW_LIMIT, 0, 10*tExpected)
+	if err != nil {
+		t.Fatalf("RetargetV1 error: %v", err)
+	}
+	if got != POW_LIMIT {
+		t.Fatalf("target mismatch: got=%x want=%x", got, POW_LIMIT)
+	}
+}
+
 func TestPowCheck_StrictLess(t *testing.T) {
 	header := make([]byte, BLOCK_HEADER_BYTES)
 	header[0] = 1 // just to avoid all-zero input
@@ -71,6 +82,20 @@ func TestPowCheck_StrictLess(t *testing.T) {
 	}
 	if err := PowCheck(header, target1); err != nil {
 		t.Fatalf("expected pow valid for target = hash+1, got err=%v", err)
+	}
+}
+
+func TestPowCheck_TargetRangeInvalidZero(t *testing.T) {
+	header := make([]byte, BLOCK_HEADER_BYTES)
+	header[0] = 1
+
+	var zeroTarget [32]byte
+	err := PowCheck(header, zeroTarget)
+	if err == nil {
+		t.Fatalf("expected target range error")
+	}
+	if got := mustTxErrCode(t, err); got != BLOCK_ERR_TARGET_INVALID {
+		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_TARGET_INVALID)
 	}
 }
 

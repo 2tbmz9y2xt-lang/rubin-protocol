@@ -7,7 +7,7 @@ use crate::constants::{
 };
 use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
-use crate::merkle::merkle_root_txids;
+use crate::merkle::{merkle_root_txids, witness_commitment_hash, witness_merkle_root_wtxids};
 use crate::pow::pow_check;
 use crate::tx::{parse_tx, Tx};
 use crate::wire_read::Reader;
@@ -132,7 +132,14 @@ pub fn validate_block_basic(
     let mut sum_weight: u64 = 0;
     let mut sum_da: u64 = 0;
     let mut sum_anchor: u64 = 0;
-    for tx in &pb.txs {
+    for (i, tx) in pb.txs.iter().enumerate() {
+        // Non-coinbase transactions must carry at least one input.
+        if i > 0 && tx.inputs.is_empty() {
+            return Err(TxError::new(
+                ErrorCode::TxErrParse,
+                "non-coinbase must have at least one input",
+            ));
+        }
         validate_tx_covenants_genesis(tx)?;
         let (w, da, anchor_bytes) = tx_weight_and_stats(tx)?;
         sum_weight = sum_weight
@@ -145,6 +152,7 @@ pub fn validate_block_basic(
             .checked_add(anchor_bytes)
             .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
     }
+    validate_coinbase_witness_commitment(&pb)?;
 
     if sum_da > MAX_DA_BYTES_PER_BLOCK {
         return Err(TxError::new(
@@ -174,6 +182,41 @@ pub fn validate_block_basic(
         sum_da,
         block_hash: h,
     })
+}
+
+fn validate_coinbase_witness_commitment(pb: &ParsedBlock) -> Result<(), TxError> {
+    if pb.txs.is_empty() || pb.wtxids.is_empty() {
+        return Err(TxError::new(
+            ErrorCode::BlockErrCoinbaseInvalid,
+            "missing coinbase",
+        ));
+    }
+
+    let wroot = witness_merkle_root_wtxids(&pb.wtxids).map_err(|_| {
+        TxError::new(
+            ErrorCode::BlockErrWitnessCommitment,
+            "failed to compute witness merkle root",
+        )
+    })?;
+    let expected = witness_commitment_hash(wroot);
+
+    let mut matches = 0u64;
+    for out in &pb.txs[0].outputs {
+        if out.covenant_type != COV_TYPE_ANCHOR || out.covenant_data.len() != 32 {
+            continue;
+        }
+        if out.covenant_data.as_slice() == &expected[..] {
+            matches += 1;
+        }
+    }
+
+    if matches != 1 {
+        return Err(TxError::new(
+            ErrorCode::BlockErrWitnessCommitment,
+            "coinbase witness commitment missing or duplicated",
+        ));
+    }
+    Ok(())
 }
 
 fn tx_weight_and_stats(tx: &Tx) -> Result<(u64, u64, u64), TxError> {

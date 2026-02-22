@@ -29,6 +29,24 @@
       "expect_target_new": "0000000000000000000000000000000000000000000000000000000000004000"
     },
     {
+      "id": "POW-03A",
+      "op": "retarget_v1",
+      "expect_ok": true,
+      "target_old": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "timestamp_first": 0,
+      "timestamp_last": 12096000,
+      "expect_target_new": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "id": "POW-03B",
+      "op": "retarget_v1",
+      "expect_ok": false,
+      "target_old": "0000000000000000000000000000000000000000000000000000000000000000",
+      "timestamp_first": 100,
+      "timestamp_last": 200,
+      "expect_err": "TX_ERR_PARSE"
+    },
+    {
       "id": "POW-04",
       "op": "block_hash",
       "expect_ok": true,
@@ -49,7 +67,14 @@
       "expect_err": "BLOCK_ERR_POW_INVALID",
       "header_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
       "target_hex": "6df1cafaee3b81e81e298bc474b514cf8f4ba09e36f527a2d715957dd3360fff"
+    },
+    {
+      "id": "POW-07",
+      "op": "pow_check",
+      "expect_ok": false,
+      "expect_err": "BLOCK_ERR_TARGET_INVALID",
+      "header_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "target_hex": "0000000000000000000000000000000000000000000000000000000000000000"
     }
   ]
 }
-

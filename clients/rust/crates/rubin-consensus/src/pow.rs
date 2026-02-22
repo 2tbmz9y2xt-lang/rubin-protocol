@@ -1,4 +1,4 @@
-use crate::constants::{TARGET_BLOCK_INTERVAL, WINDOW_SIZE};
+use crate::constants::{POW_LIMIT, TARGET_BLOCK_INTERVAL, WINDOW_SIZE};
 use crate::error::{ErrorCode, TxError};
 use crate::{block_hash, BLOCK_HEADER_BYTES};
 use num_bigint::BigUint;
@@ -9,11 +9,18 @@ pub fn retarget_v1(
     timestamp_first: u64,
     timestamp_last: u64,
 ) -> Result<[u8; 32], TxError> {
+    let pow_limit = BigUint::from_bytes_be(&POW_LIMIT);
     let t_old = BigUint::from_bytes_be(&target_old);
     if t_old.is_zero() {
         return Err(TxError::new(
             ErrorCode::TxErrParse,
             "retarget: target_old is zero",
+        ));
+    }
+    if t_old > pow_limit {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "retarget: target_old above pow_limit",
         ));
     }
 
@@ -42,7 +49,8 @@ pub fn retarget_v1(
         lower = BigUint::one();
     }
     // upper = target_old * 4
-    let upper = &t_old << 2;
+    let upper_unclamped = &t_old << 2;
+    let upper = core::cmp::min(upper_unclamped, pow_limit);
 
     if t_new < lower {
         t_new = lower;
@@ -59,6 +67,14 @@ pub fn pow_check(header_bytes: &[u8], target: [u8; 32]) -> Result<(), TxError> {
         return Err(TxError::new(
             ErrorCode::TxErrParse,
             "pow: invalid header length",
+        ));
+    }
+    let target_bi = BigUint::from_bytes_be(&target);
+    let pow_limit = BigUint::from_bytes_be(&POW_LIMIT);
+    if target_bi.is_zero() || target_bi > pow_limit {
+        return Err(TxError::new(
+            ErrorCode::BlockErrTargetInvalid,
+            "target out of range",
         ));
     }
     let h = block_hash(header_bytes)?;

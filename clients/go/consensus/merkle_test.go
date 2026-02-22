@@ -60,3 +60,37 @@ func TestMerkleRootTxids_Two(t *testing.T) {
 		t.Fatalf("root mismatch")
 	}
 }
+
+func TestWitnessMerkleRootWtxids_SingleUsesZeroCoinbaseID(t *testing.T) {
+	txBytes := minimalTxBytes()
+	_, _, wtxid, _, err := ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	root, err := WitnessMerkleRootWtxids([][32]byte{wtxid})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var zeroID [32]byte
+	var leafPre [1 + 32]byte
+	leafPre[0] = 0x02
+	copy(leafPre[1:], zeroID[:])
+	want := sha3_256(leafPre[:])
+	if root != want {
+		t.Fatalf("root mismatch")
+	}
+}
+
+func TestWitnessCommitmentHash(t *testing.T) {
+	var root [32]byte
+	root[31] = 0x7a
+
+	got := WitnessCommitmentHash(root)
+	preimage := append([]byte("RUBIN-WITNESS/"), root[:]...)
+	want := sha3_256(preimage)
+	if got != want {
+		t.Fatalf("commitment hash mismatch")
+	}
+}
