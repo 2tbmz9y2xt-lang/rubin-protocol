@@ -599,14 +599,12 @@ fn validate_tx_covenants_genesis_p2pk_ok() {
 }
 
 #[test]
-fn validate_tx_covenants_genesis_timelock_bad_mode() {
+fn validate_tx_covenants_genesis_unassigned_0001_rejected() {
     let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
-    let mut cov = vec![0u8; MAX_TIMELOCK_COVENANT_DATA as usize];
-    cov[0] = 0x02;
     tx.outputs = vec![crate::tx::TxOutput {
         value: 1,
-        covenant_type: COV_TYPE_TIMELOCK,
-        covenant_data: cov,
+        covenant_type: 0x0001,
+        covenant_data: vec![0x00],
     }];
     let err = validate_tx_covenants_genesis(&tx).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
@@ -715,13 +713,6 @@ fn valid_p2pk_covenant_data() -> Vec<u8> {
     b
 }
 
-fn timelock_data(mode: u8, lock_value: u64) -> Vec<u8> {
-    let mut b = vec![0u8; MAX_TIMELOCK_COVENANT_DATA as usize];
-    b[0] = mode;
-    b[1..9].copy_from_slice(&lock_value.to_le_bytes());
-    b
-}
-
 fn vault_covenant_data(
     extended: bool,
     spend_delay: u64,
@@ -789,60 +780,6 @@ fn apply_non_coinbase_tx_basic_spend_anchor_rejected() {
 }
 
 #[test]
-fn apply_non_coinbase_tx_basic_timelock_height_not_met() {
-    let mut prev = [0u8; 32];
-    prev[0] = 0xac;
-    let tx_bytes =
-        tx_with_one_input_one_output(prev, 0, 1, COV_TYPE_P2PK, &valid_p2pk_covenant_data());
-    let (tx, txid, _wtxid, _n) = parse_tx(&tx_bytes).expect("parse");
-
-    let mut utxos: HashMap<Outpoint, UtxoEntry> = HashMap::new();
-    utxos.insert(
-        Outpoint {
-            txid: prev,
-            vout: 0,
-        },
-        UtxoEntry {
-            value: 1,
-            covenant_type: COV_TYPE_TIMELOCK,
-            covenant_data: timelock_data(0x00, 200),
-            creation_height: 0,
-            created_by_coinbase: false,
-        },
-    );
-
-    let err = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 100, 1000).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrTimelockNotMet);
-}
-
-#[test]
-fn apply_non_coinbase_tx_basic_timelock_timestamp_not_met() {
-    let mut prev = [0u8; 32];
-    prev[0] = 0xad;
-    let tx_bytes =
-        tx_with_one_input_one_output(prev, 0, 1, COV_TYPE_P2PK, &valid_p2pk_covenant_data());
-    let (tx, txid, _wtxid, _n) = parse_tx(&tx_bytes).expect("parse");
-
-    let mut utxos: HashMap<Outpoint, UtxoEntry> = HashMap::new();
-    utxos.insert(
-        Outpoint {
-            txid: prev,
-            vout: 0,
-        },
-        UtxoEntry {
-            value: 1,
-            covenant_type: COV_TYPE_TIMELOCK,
-            covenant_data: timelock_data(0x01, 1500),
-            creation_height: 0,
-            created_by_coinbase: false,
-        },
-    );
-
-    let err = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrTimelockNotMet);
-}
-
-#[test]
 fn apply_non_coinbase_tx_basic_value_conservation() {
     let mut prev = [0u8; 32];
     prev[0] = 0xae;
@@ -895,60 +832,4 @@ fn apply_non_coinbase_tx_basic_ok() {
     let summary = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000).expect("ok");
     assert_eq!(summary.fee, 10);
     assert_eq!(summary.utxo_count, 1);
-}
-
-#[test]
-fn apply_non_coinbase_tx_basic_vault_spend_delay_not_met() {
-    let mut prev = [0u8; 32];
-    prev[0] = 0xb0;
-    let tx_bytes =
-        tx_with_one_input_one_output(prev, 0, 90, COV_TYPE_P2PK, &valid_p2pk_covenant_data());
-    let (tx, txid, _wtxid, _n) = parse_tx(&tx_bytes).expect("parse");
-
-    let mut utxos: HashMap<Outpoint, UtxoEntry> = HashMap::new();
-    utxos.insert(
-        Outpoint {
-            txid: prev,
-            vout: 0,
-        },
-        UtxoEntry {
-            value: 100,
-            covenant_type: COV_TYPE_VAULT,
-            covenant_data: vault_covenant_data(true, MIN_VAULT_SPEND_DELAY, 0x00, 0, false),
-            creation_height: 100,
-            created_by_coinbase: false,
-        },
-    );
-
-    let err = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 100 + MIN_VAULT_SPEND_DELAY - 1, 1000)
-        .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrTimelockNotMet);
-}
-
-#[test]
-fn apply_non_coinbase_tx_basic_vault_spend_delay_met() {
-    let mut prev = [0u8; 32];
-    prev[0] = 0xb1;
-    let tx_bytes =
-        tx_with_one_input_one_output(prev, 0, 90, COV_TYPE_P2PK, &valid_p2pk_covenant_data());
-    let (tx, txid, _wtxid, _n) = parse_tx(&tx_bytes).expect("parse");
-
-    let mut utxos: HashMap<Outpoint, UtxoEntry> = HashMap::new();
-    utxos.insert(
-        Outpoint {
-            txid: prev,
-            vout: 0,
-        },
-        UtxoEntry {
-            value: 100,
-            covenant_type: COV_TYPE_VAULT,
-            covenant_data: vault_covenant_data(true, MIN_VAULT_SPEND_DELAY, 0x00, 0, false),
-            creation_height: 100,
-            created_by_coinbase: false,
-        },
-    );
-
-    let summary = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 100 + MIN_VAULT_SPEND_DELAY, 1000)
-        .expect("ok");
-    assert_eq!(summary.fee, 10);
 }

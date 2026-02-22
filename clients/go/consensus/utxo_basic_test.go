@@ -1,7 +1,6 @@
 package consensus
 
 import (
-	"encoding/binary"
 	"testing"
 )
 
@@ -31,13 +30,6 @@ func txWithOneInputOneOutput(prevTxid [32]byte, prevVout uint32, outValue uint64
 func validP2PKCovenantData() []byte {
 	b := make([]byte, MAX_P2PK_COVENANT_DATA)
 	b[0] = SUITE_ID_ML_DSA_87
-	return b
-}
-
-func timelockData(mode byte, lockValue uint64) []byte {
-	b := make([]byte, MAX_TIMELOCK_COVENANT_DATA)
-	b[0] = mode
-	binary.LittleEndian.PutUint64(b[1:], lockValue)
 	return b
 }
 
@@ -87,50 +79,6 @@ func TestApplyNonCoinbaseTxBasic_SpendAnchorRejected(t *testing.T) {
 	}
 }
 
-func TestApplyNonCoinbaseTxBasic_TimelockHeightNotMet(t *testing.T) {
-	var prev [32]byte
-	prev[0] = 0xac
-	txBytes := txWithOneInputOneOutput(prev, 0, 1, COV_TYPE_P2PK, validP2PKCovenantData())
-	tx, txid := mustParseTxForUtxo(t, txBytes)
-
-	utxos := map[Outpoint]UtxoEntry{
-		{Txid: prev, Vout: 0}: {
-			Value:        1,
-			CovenantType: COV_TYPE_TIMELOCK,
-			CovenantData: timelockData(0x00, 200),
-		},
-	}
-	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 100, 1000)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_TIMELOCK_NOT_MET {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_TIMELOCK_NOT_MET)
-	}
-}
-
-func TestApplyNonCoinbaseTxBasic_TimelockTimestampNotMet(t *testing.T) {
-	var prev [32]byte
-	prev[0] = 0xad
-	txBytes := txWithOneInputOneOutput(prev, 0, 1, COV_TYPE_P2PK, validP2PKCovenantData())
-	tx, txid := mustParseTxForUtxo(t, txBytes)
-
-	utxos := map[Outpoint]UtxoEntry{
-		{Txid: prev, Vout: 0}: {
-			Value:        1,
-			CovenantType: COV_TYPE_TIMELOCK,
-			CovenantData: timelockData(0x01, 1500),
-		},
-	}
-	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_TIMELOCK_NOT_MET {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_TIMELOCK_NOT_MET)
-	}
-}
-
 func TestApplyNonCoinbaseTxBasic_ValueConservation(t *testing.T) {
 	var prev [32]byte
 	prev[0] = 0xae
@@ -175,51 +123,5 @@ func TestApplyNonCoinbaseTxBasic_OK(t *testing.T) {
 	}
 	if s.UtxoCount != 1 {
 		t.Fatalf("utxo_count=%d, want 1", s.UtxoCount)
-	}
-}
-
-func TestApplyNonCoinbaseTxBasic_VaultSpendDelayNotMet(t *testing.T) {
-	var prev [32]byte
-	prev[0] = 0xb0
-	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
-	tx, txid := mustParseTxForUtxo(t, txBytes)
-
-	utxos := map[Outpoint]UtxoEntry{
-		{Txid: prev, Vout: 0}: {
-			Value:          100,
-			CovenantType:   COV_TYPE_VAULT,
-			CovenantData:   vaultCovenantData(true, MIN_VAULT_SPEND_DELAY, 0x00, 0, false),
-			CreationHeight: 100,
-		},
-	}
-	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 100+MIN_VAULT_SPEND_DELAY-1, 1000)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_TIMELOCK_NOT_MET {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_TIMELOCK_NOT_MET)
-	}
-}
-
-func TestApplyNonCoinbaseTxBasic_VaultSpendDelayMet(t *testing.T) {
-	var prev [32]byte
-	prev[0] = 0xb1
-	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
-	tx, txid := mustParseTxForUtxo(t, txBytes)
-
-	utxos := map[Outpoint]UtxoEntry{
-		{Txid: prev, Vout: 0}: {
-			Value:          100,
-			CovenantType:   COV_TYPE_VAULT,
-			CovenantData:   vaultCovenantData(true, MIN_VAULT_SPEND_DELAY, 0x00, 0, false),
-			CreationHeight: 100,
-		},
-	}
-	s, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 100+MIN_VAULT_SPEND_DELAY, 1000)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if s.Fee != 10 {
-		t.Fatalf("fee=%d, want 10", s.Fee)
 	}
 }

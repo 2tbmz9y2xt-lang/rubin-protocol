@@ -74,32 +74,13 @@ func TestValidateTxCovenantsGenesis_P2PK_BadSuite(t *testing.T) {
 	}
 }
 
-func TestValidateTxCovenantsGenesis_TIMELOCK_OK(t *testing.T) {
-	data := make([]byte, MAX_TIMELOCK_COVENANT_DATA)
-	data[0] = 0x00
+func TestValidateTxCovenantsGenesis_Unassigned0001Rejected(t *testing.T) {
 	tx := &Tx{
 		Outputs: []TxOutput{
 			{
 				Value:        1,
-				CovenantType: COV_TYPE_TIMELOCK,
-				CovenantData: data,
-			},
-		},
-	}
-	if err := ValidateTxCovenantsGenesis(tx); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestValidateTxCovenantsGenesis_TIMELOCK_BadMode(t *testing.T) {
-	data := make([]byte, MAX_TIMELOCK_COVENANT_DATA)
-	data[0] = 0x02
-	tx := &Tx{
-		Outputs: []TxOutput{
-			{
-				Value:        1,
-				CovenantType: COV_TYPE_TIMELOCK,
-				CovenantData: data,
+				CovenantType: 0x0001,
+				CovenantData: []byte{0x00},
 			},
 		},
 	}
