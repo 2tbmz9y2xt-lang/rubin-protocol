@@ -6,17 +6,23 @@
   "section_headings": {
     "transaction_identifiers": "## 8. Transaction Identifiers (TXID / WTXID)",
     "weight_accounting": "## 9. Weight Accounting (Normative)",
+    "witness_commitment": "### 10.4.1 Witness Commitment (Coinbase Anchor)",
     "sighash_v1": "## 12. Sighash v1 (Normative)",
     "consensus_error_codes": "## 13. Consensus Error Codes (Normative)",
+    "covenant_registry": "## 14. Covenant Type Registry (Normative)",
     "difficulty_update": "## 15. Difficulty Update (Normative)",
-    "value_conservation": "## 20. Value Conservation (Normative)"
+    "value_conservation": "## 20. Value Conservation (Normative)",
+    "da_set_integrity": "## 21. DA Set Integrity (Normative)"
   },
   "sections": {
     "transaction_identifiers": "d6c8bba62ac2f03dc42b223d16ef0c4560b64b48de3388f7403d3d7b79180913",
     "weight_accounting": "e5d52ed803added423bf95d181ba2e94b43ec717e96fce0d7dbd39c92608d2bc",
-    "sighash_v1": "6feb7b6a869c01a007ba7666a0fa833045ef61491d9f7711ffff36d8e04da435",
+    "witness_commitment": "cd0e55b16f47b6e35414a13e699b47f638519e23fe6cad6a8801d27792393bc9",
+    "sighash_v1": "e3aac16f46dd80792b2c08ddfdc9e514491137e86ada16acb3fd520414140b05",
     "consensus_error_codes": "f3399c934fd9b93bc9dac09b8f2f2d3bcafdd8cb301c8d3a7b89c7124adcd1e9",
-    "difficulty_update": "e70a3de4b7607ab71b37fdf325da6720d687acdcf9bbcf268f174f17ade2ba65",
-    "value_conservation": "ee3b046749d68f52ac800ed17a485cb94cca31287251b51aa9abfd2275b636c2"
+    "covenant_registry": "eb875dc44ba2cdcfc1ca990c19321ef86030e1d7234d0ca6de711abab85e7722",
+    "difficulty_update": "655db7a351b409d6fa8b4035dcec057054b3e0a1f969a9264dbfac5edf67dafd",
+    "value_conservation": "ee3b046749d68f52ac800ed17a485cb94cca31287251b51aa9abfd2275b636c2",
+    "da_set_integrity": "2bb603930fc823563efbc7d0d1f1b2e8fac64e6c8b41bcb029de73fd690b0642"
   }
 }

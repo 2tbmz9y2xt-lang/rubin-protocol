@@ -9,6 +9,10 @@ must remain consistent with RUBIN_L1_CANONICAL.md and RUBIN_COMPACT_BLOCKS.md.
 
 In case of conflict, RUBIN_L1_CANONICAL.md takes precedence.
 
+Units convention:
+- Unless explicitly marked as binary (`MiB`, `GiB`, `TiB`), byte quantities use SI prefixes
+  (`1 MB = 1_000_000 bytes`, `1 GB = 1_000_000_000 bytes`).
+
 ---
 
 ## 1. Block Parameters

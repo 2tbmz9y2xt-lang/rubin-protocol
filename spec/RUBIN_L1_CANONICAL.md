@@ -31,6 +31,14 @@ consensus validity.
 - **DA batch** (application term): L2 metadata carried inside `da_payload` (for example `batch_number`).
   Unless explicitly stated otherwise, this document uses **DA set** for consensus rules.
 
+### 2.4 Units
+
+- Consensus constants are specified in exact byte counts.
+- Unless explicitly marked `MiB`/`GiB`, SI prefixes are used:
+  - `1 MB = 1_000_000 bytes`
+  - `1 GB = 1_000_000_000 bytes`
+- `MiB` and `GiB` are binary units (`2^20` and `2^30` bytes).
+
 ## 3. CompactSize (Varint)
 
 CompactSize encodes an unsigned integer `n` in 1, 3, 5, or 9 bytes:
@@ -187,6 +195,10 @@ DaChunkCoreFields {
   chunk_hash : bytes32
 }
 ```
+
+Note:
+- `batch_sig` is L2-application data. L1 consensus MUST NOT verify `batch_sig` contents and MUST NOT reject a
+  transaction based on `batch_sig` bytes. L1 stores and hashes this field as opaque data.
 
 ### 5.2 `tx_kind`
 
@@ -562,6 +574,12 @@ All fields in `preimage_tx_sig` are taken from the transaction `T` being signed,
 
 For coinbase transactions, sighash is not computed (no witness).
 
+Forward-compatibility note:
+- `locktime` and `sequence` are committed in the sighash preimage for deterministic transaction binding and future
+  covenant extensibility (for example, HTLC semantics when specified).
+- In the current active covenant set, there is no additional covenant-specific locktime/sequence semantics beyond the
+  transaction structural checks in Section 16.
+
 ### 12.1 `verify_sig` Profile (Normative)
 
 `verify_sig` is a consensus predicate over raw bytes and MUST be implemented as a deterministic,
@@ -720,6 +738,7 @@ Semantics:
   - `covenant_data` is the DA payload commitment hash and is verified at block level (Section 21.4).
     Commitment mismatch or ambiguity MUST reject as `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID`.
   - `value MUST equal 0`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+  - `CORE_DA_COMMIT` outputs are counted toward `MAX_ANCHOR_BYTES_PER_BLOCK`.
   - `CORE_DA_COMMIT` outputs are non-spendable and MUST NOT be added to the spendable UTXO set. Any attempt to spend a
     DA_COMMIT output MUST be rejected as `TX_ERR_MISSING_UTXO`.
   - `CORE_DA_COMMIT` MAY only appear in `tx_kind = 0x01` (DA commit transactions). Any appearance in other
@@ -783,6 +802,9 @@ Multi-input rule:
   - For any transaction that spends at least one `CORE_VAULT` input, `sum_out MUST be >= sum_in_vault`.
     Otherwise reject as `TX_ERR_VALUE_CONSERVATION`.
   - This forbids spending miner fee from `CORE_VAULT` value; fee must be funded by non-VAULT inputs.
+- Design note:
+  - Vault whitelist constrains allowed destinations, not per-destination amounts.
+  - Amount-per-destination constraints are intentionally out of L1 scope and belong to L2 logic or off-chain policy.
 
 ### 14.2 CORE_MULTISIG Semantics (Normative)
 
@@ -857,6 +879,10 @@ Window boundaries and applicability:
    - expected `target(B_h)` MUST equal `target_new` as computed by the formula above.
 
 Any block whose `target` field does not match the expected value is invalid (`BLOCK_ERR_TARGET_INVALID`).
+
+Implementation note:
+- The first retarget window (`0 .. WINDOW_SIZE-1`) uses the genesis timestamp as `T_start`.
+- Accuracy of the first adjustment depends on genesis ceremony timestamp quality.
 
 Target range:
 
@@ -935,7 +961,9 @@ Note on scope: `tx_nonce` replay protection is **intra-block only** — it preve
 same nonce from appearing in the same block. It does not provide cross-block replay protection.
 Cross-block replay is prevented by a separate mechanism: UTXO exhaustion. Once an input outpoint is consumed,
 it is removed from the spendable UTXO set and cannot be referenced again in any future block.
-These are two independent mechanisms with different scopes.
+Additionally, including `tx_nonce` in `preimage_tx_sig` (Section 12) binds signatures to a specific nonce value,
+eliminating nonce-malleability for otherwise identical transactions.
+These are complementary mechanisms with different scopes.
 
 ## 18. UTXO State Model (Normative)
 
@@ -1152,6 +1180,11 @@ Rules:
 
 - **Chunk count per set:** For each `DA_COMMIT_TX`, `chunk_count MUST be <= MAX_DA_CHUNK_COUNT`.
   If exceeded, reject as `TX_ERR_PARSE`.
+
+Note:
+- `da_id` uniqueness is enforced per block only.
+- Cross-block reuse of `da_id` is permitted by L1 consensus.
+- Namespace separation across blocks is an L2 responsibility (`retl_domain_id` and application logic).
 
 ### 21.4 Payload Commitment Verification
 
