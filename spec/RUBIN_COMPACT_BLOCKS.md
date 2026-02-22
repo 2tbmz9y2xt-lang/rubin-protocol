@@ -34,7 +34,7 @@ Note for hardware provisioning: 17.21 TiB raw data requires a disk marketed as ~
 | `MIN_DA_RETENTION_BLOCKS` | 15_120 blocks | DA pruning window = 21 days |
 | `MAX_RELAY_MSG_BYTES` | 96_000_000 bytes (= 91.6 MiB) | |
 | `DA_MEMPOOL_SIZE` | 512 MiB | minimum for high-bandwidth relay |
-| `DA_MEMPOOL_PINNED_PAYLOAD_MAX` | 96_000_000 bytes | 3 full DA blocks (payload bytes only) |
+| `DA_MEMPOOL_PINNED_PAYLOAD_MAX` | 96_000_000 bytes | hard cap for COMPLETE_SET payload pinning (max 3 full DA sets pinned at once) |
 | `DA_ORPHAN_POOL_SIZE` | 64 MiB | = 2 x MAX_DA_BYTES_PER_BLOCK |
 | `DA_ORPHAN_POOL_PER_PEER_MAX` | 4 MiB | |
 | `DA_ORPHAN_POOL_PER_DA_ID_MAX` | 8 MiB | one da_id from 2+ peers accumulates |
@@ -48,7 +48,7 @@ Note for hardware provisioning: 17.21 TiB raw data requires a disk marketed as ~
 | `ML_DSA_BATCH_SIZE` | 64 signatures | for batch verification |
 | `PREFETCH_TARGET_COMPLETE_SEC` | 8 s | [NON-NORMATIVE] target time to fetch a full DA payload from one peer |
 | `PREFETCH_BYTES_PER_SEC` | 4_000_000 B/s per peer | = ceil(MAX_DA_BYTES_PER_BLOCK / PREFETCH_TARGET_COMPLETE_SEC) |
-| `PREFETCH_GLOBAL_PARALLEL` | 8 sets | global parallel prefetch cap |
+| `PREFETCH_GLOBAL_PARALLEL` | 8 sets | global parallel prefetch cap for STAGED_COMMIT sets (independent from pinned COMPLETE_SET cap) |
 | `PREFETCH_GLOBAL_BPS` | 32_000_000 B/s | = PREFETCH_GLOBAL_PARALLEL x PREFETCH_BYTES_PER_SEC |
 | `RELAY_TIMEOUT_BASE_MS` | 2_000 ms | base relay timeout before payload scaling |
 | `RELAY_TIMEOUT_RATE` | 1_000_000 B/s | divisor for payload-size timeout extension |
@@ -58,9 +58,9 @@ Note for hardware provisioning: 17.21 TiB raw data requires a disk marketed as ~
 ```
 Blocks per year     = 365 x 86400 / 120       = 262_800
 
-L1 TPS (ML-DSA-87)  ~ 74    (8,886 tx/block; weight = 7,652 wu/tx; full 68M wu available)
-L1 TPS (SLH-DSA)    ~ 11    (1,349 tx/block; weight = 50,407 wu/tx)
-L2 TPS              ~ 2667  (32_000_000 / 120 / 100 B/tx)
+L1 TPS (ML-DSA-87)  ~ 74    (8,886 tx/block; weight = 7,652 wu/tx; assumes DA bytes near zero)
+L1 TPS (SLH-DSA)    ~ 11    (1,349 tx/block; weight = 50,407 wu/tx; assumes DA bytes near zero)
+L2 TPS              ~ 2667  (32_000_000 / 120 / 100 B/tx; assumes DA budget saturated)
 DA throughput       = 32_000_000 / 120         = 266_667 B/s = 0.267 MB/s = 0.254 MiB/s
 Orphan rate         ~ 0.02%  (compact blocks eliminate propagation bottleneck)
 Finality L1         = 16 min (FINALITY_K_L1 = 8)
