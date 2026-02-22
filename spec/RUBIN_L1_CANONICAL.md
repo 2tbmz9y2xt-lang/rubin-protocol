@@ -52,6 +52,7 @@ These constants are consensus-critical for this protocol ruleset:
 - `MAX_WITNESS_ITEMS = 1024`
 - `MAX_WITNESS_BYTES_PER_TX = 100_000`
 - `MAX_SCRIPT_SIG_BYTES = 32`
+- `POW_LIMIT = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff` (bytes32)
 - `MAX_BLOCK_WEIGHT = 68_000_000` weight units
 - `MAX_DA_BYTES_PER_BLOCK = 32_000_000` bytes
 - `MAX_DA_MANIFEST_BYTES_PER_TX = 65_536` bytes
@@ -398,6 +399,11 @@ Proof-of-Work validity:
 valid_pow(B) iff integer(block_hash(B), big-endian) < integer(B.header.target, big-endian)
 ```
 
+Target range validity:
+
+- `integer(B.header.target, big-endian)` MUST satisfy `1 <= target <= POW_LIMIT`.
+- A block with out-of-range `target` MUST be rejected as `BLOCK_ERR_TARGET_INVALID`.
+
 ### 10.4 Merkle Root (Transaction Commitment)
 
 Merkle tree hashing is defined over transaction identifiers (`txid`), in block transaction order.
@@ -413,6 +419,41 @@ Odd-element rule (normative):
 - Duplicating the last element is forbidden.
 
 `merkle_root` is the final root after full binary reduction over all transaction `txid` values.
+
+### 10.4.1 Witness Commitment (Coinbase Anchor)
+
+Witness commitment uses transaction `wtxid` values and commits them through a coinbase `CORE_ANCHOR` output.
+
+Define witness commitment IDs per transaction index `i`:
+
+- For `i = 0` (coinbase), `wtxid_commit[0] = 0x00..00` (32 zero bytes).
+- For `i > 0`, `wtxid_commit[i] = wtxid(B.txs[i])`.
+
+Witness Merkle tree:
+
+```text
+Leaf = SHA3-256(0x02 || wtxid_commit[i])
+Node = SHA3-256(0x03 || left || right)
+```
+
+Odd-element rule is identical to Section 10.4: promote unchanged; duplication forbidden.
+
+Let `witness_merkle_root` be the final root from this tree.
+
+Define:
+
+```text
+witness_commitment_hash = SHA3-256(ASCII("RUBIN-WITNESS/") || witness_merkle_root)
+```
+
+Coinbase commitment rule:
+
+- The coinbase transaction `B.txs[0]` MUST contain exactly one output with:
+  - `covenant_type = CORE_ANCHOR`, and
+  - `covenant_data_len = 32`, and
+  - `covenant_data = witness_commitment_hash`.
+
+If missing or duplicated, reject block as `BLOCK_ERR_WITNESS_COMMITMENT`.
 
 ### 10.5 Coinbase Basics (Structural)
 
@@ -526,6 +567,7 @@ implementations for the described failure classes:
 - Timelock condition not met                       -> `TX_ERR_TIMELOCK_NOT_MET`
 - Invalid prev_block_hash linkage                  -> `BLOCK_ERR_LINKAGE_INVALID`
 - Invalid merkle_root                              -> `BLOCK_ERR_MERKLE_INVALID`
+- Missing/duplicate witness commitment             -> `BLOCK_ERR_WITNESS_COMMITMENT`
 - PoW invalid                                      -> `BLOCK_ERR_POW_INVALID`
 - Target mismatch                                  -> `BLOCK_ERR_TARGET_INVALID`
 - Timestamp too old (MTP)                          -> `BLOCK_ERR_TIMESTAMP_OLD`
@@ -583,6 +625,7 @@ Semantics:
   - `covenant_data = anchor_data` (raw bytes, no additional wrapping).
   - `0 < covenant_data_len <= MAX_ANCHOR_PAYLOAD_SIZE` MUST hold; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
   - `value MUST equal 0`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+  - In coinbase, witness commitment anchoring requirements are defined in Section 10.4.1.
   - `CORE_ANCHOR` outputs are non-spendable and MUST NOT be added to the spendable UTXO set. Any attempt to spend an
     ANCHOR output MUST be rejected as `TX_ERR_MISSING_UTXO`.
   - Per-block constraint: sum of `covenant_data_len` across all `CORE_ANCHOR` outputs in a block MUST be
@@ -624,8 +667,8 @@ Semantics:
   - Witness consumption: `key_count` WitnessItems (Section 16).
 - `CORE_DA_COMMIT`:
   - `covenant_data_len MUST equal 32`. Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
-  - `covenant_data MUST equal SHA3-256(T.da_payload)` where `T` is the containing transaction. Otherwise reject as
-    `TX_ERR_COVENANT_TYPE_INVALID`.
+  - `covenant_data` is the DA payload commitment hash and is verified at block level (Section 21.4).
+    Commitment mismatch or ambiguity MUST reject as `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID`.
   - `value MUST equal 0`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
   - `CORE_DA_COMMIT` outputs are non-spendable and MUST NOT be added to the spendable UTXO set. Any attempt to spend a
     DA_COMMIT output MUST be rejected as `TX_ERR_MISSING_UTXO`.
@@ -672,6 +715,12 @@ Compute `h = SHA3-256(OutputDescriptorBytes(out))` (Section 18.3).
 
 If any output is not found: reject as `TX_ERR_COVENANT_TYPE_INVALID`.
 
+Multi-input rule:
+
+- If a transaction spends multiple `CORE_VAULT` inputs with different whitelists,
+  the whitelist check above is applied independently for each input.
+  Therefore every output MUST belong to the intersection of all referenced vault whitelists.
+
 ### 14.2 CORE_MULTISIG Semantics (Normative)
 
 For each non-coinbase input spending a `CORE_MULTISIG` UTXO entry `e`,
@@ -717,7 +766,7 @@ target_new =
     clamp(
         floor(target_old * T_actual / T_expected),
         max(1, floor(target_old / 4)),
-        target_old * 4
+        min(target_old * 4, POW_LIMIT)
     )
 ```
 
@@ -737,6 +786,10 @@ Window boundaries and applicability:
    - expected `target(B_h)` MUST equal `target_new` as computed by the formula above.
 
 Any block whose `target` field does not match the expected value is invalid (`BLOCK_ERR_TARGET_INVALID`).
+
+Target range:
+
+- `target_old` and `target_new` MUST satisfy `1 <= target <= POW_LIMIT`.
 
 All division is integer division with floor.
 Intermediate products (`target_old * T_actual` and `target_old * 4`) MUST be computed using at least 320-bit
@@ -1082,18 +1135,21 @@ Minimum required order for validating a candidate block `B_h` at height `h`:
 
 1. Parse `BlockHeaderBytes` and all `TxBytes` encodings; any malformed encoding MUST reject as `BLOCK_ERR_PARSE` or the
    corresponding `TX_ERR_*` (Section 13).
-2. Check header PoW validity (Section 10.3). If invalid, reject as `BLOCK_ERR_POW_INVALID`.
+2. Check header `target` range and PoW validity (Section 10.3):
+   - if `target` is out of range, reject as `BLOCK_ERR_TARGET_INVALID`;
+   - otherwise, if PoW is invalid, reject as `BLOCK_ERR_POW_INVALID`.
 3. Check the header `target` matches the expected target (Section 15). If mismatch, reject as `BLOCK_ERR_TARGET_INVALID`.
 4. Check `prev_block_hash` linkage against the selected parent block hash. If invalid, reject as `BLOCK_ERR_LINKAGE_INVALID`.
 5. Check `merkle_root` matches the Merkle root computed from transaction `txid` values (Section 10.4). If invalid, reject
    as `BLOCK_ERR_MERKLE_INVALID`.
-6. Check block timestamp rules (Section 22). If invalid, reject as `BLOCK_ERR_TIMESTAMP_OLD` or `BLOCK_ERR_TIMESTAMP_FUTURE`.
-7. Check total block weight (Section 9). If exceeded, reject as `BLOCK_ERR_WEIGHT_EXCEEDED`.
-8. Check per-block ANCHOR byte limits (Section 14). If exceeded, reject as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
-9. Check DA chunk hash integrity (Section 21.2). If any chunk_hash mismatch, reject as `BLOCK_ERR_DA_CHUNK_HASH_INVALID`.
-10. Check DA set completeness (Section 21.3): no orphan chunks, complete sets, batch count. Reject as applicable.
-11. Check DA payload commitment (Section 21.4). If mismatch or ambiguous (missing or duplicate CORE_DA_COMMIT output), reject as `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID`.
-12. Apply transactions sequentially (Section 18), enforcing:
+6. Check coinbase witness commitment (Section 10.4.1). If missing or duplicated, reject as `BLOCK_ERR_WITNESS_COMMITMENT`.
+7. Check block timestamp rules (Section 22). If invalid, reject as `BLOCK_ERR_TIMESTAMP_OLD` or `BLOCK_ERR_TIMESTAMP_FUTURE`.
+8. Check total block weight (Section 9). If exceeded, reject as `BLOCK_ERR_WEIGHT_EXCEEDED`.
+9. Check per-block ANCHOR byte limits (Section 14). If exceeded, reject as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
+10. Check DA chunk hash integrity (Section 21.2). If any chunk_hash mismatch, reject as `BLOCK_ERR_DA_CHUNK_HASH_INVALID`.
+11. Check DA set completeness (Section 21.3): no orphan chunks, complete sets, batch count. Reject as applicable.
+12. Check DA payload commitment (Section 21.4). If mismatch or ambiguous (missing or duplicate CORE_DA_COMMIT output), reject as `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID`.
+13. Apply transactions sequentially (Section 18), enforcing:
    - coinbase structural rules (Sections 10.5 and 16),
    - transaction structural rules (Section 16),
    - replay-domain checks (Section 17),
