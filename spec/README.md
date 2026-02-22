@@ -7,15 +7,9 @@
   - TXID/WTXID, weight, block header, PoW, difficulty retarget
   - covenant registry and error code registry (genesis profile)
 
-## Program Control (Execution Baseline)
+## Program Control (Local-Only)
 
-- `./RUBIN_IMPLEMENTATION_ROADMAP.md`
-  - phase-by-phase implementation order
-  - mandatory phase gates and acceptance criteria
-
-- `./RUBIN_AGENT_EXECUTION_TZ.md`
-  - anti-drift execution contract for agents
-  - required validation/reporting rules
+Execution baseline/control files are maintained locally and are intentionally not tracked in this public repository.
 
 ## Non-Consensus / AUX
 

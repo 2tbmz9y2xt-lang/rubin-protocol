@@ -17,11 +17,6 @@ There is no delayed wire-activation mechanism.
 - `./clients/rust/` Rust reference consensus library + CLI
 - `./conformance/` fixtures + runner (Go↔Rust parity)
 
-Execution control documents:
-
-- `./spec/RUBIN_IMPLEMENTATION_ROADMAP.md`
-- `./spec/RUBIN_AGENT_EXECUTION_TZ.md`
-
 ## Quick Start (Local)
 
 Clone and run unit tests:
@@ -41,10 +36,10 @@ python3 conformance/runner/run_cv_bundle.py
 python3 conformance/runner/run_cv_bundle.py --only-gates CV-COMPACT
 ```
 
-Optional spec tooling (HTML + diff + explainer):
+Spec tooling (HTML + diff + explainer):
 
 ```bash
-npm install
+npm ci
 npm run spec:all
 ```
 
