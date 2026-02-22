@@ -218,3 +218,24 @@ Storage depends on number of monitored channels; no protocol minimum.
 | `RUBIN_NETWORK_PARAMS.md` | This file: reference summary for TZ, roadmap, hardware planning |
 | `RUBIN_L1_P2P_AUX.md` | Auxiliary P2P rules |
 | `RUBIN_SLH_FALLBACK_PLAYBOOK.md` | Operational activation/rollback runbook for SLH fallback mode |
+
+---
+
+## 12. Feature-Bit Activation Defaults
+
+Consensus and relay parameter changes that require coordinated activation MUST use the
+feature-bit framework defined in `RUBIN_L1_CANONICAL.md` §23.1.
+
+Default signaling parameters:
+
+- `SIGNAL_WINDOW = 2016` blocks
+- `SIGNAL_THRESHOLD = 1815` blocks (90%)
+
+Each deployment MUST define at least:
+
+- deployment `name`
+- `bit` index in block header `version`
+- `start_height`
+- `timeout_height`
+
+No deployment is ACTIVE by default unless explicitly declared in canonical specs.

@@ -25,6 +25,12 @@ consensus validity.
 - `bytesN`: exactly N raw bytes.
 - `bytes[L]`: exactly L raw bytes.
 
+### 2.3 DA Terminology
+
+- **DA set** (consensus term): one `DA_COMMIT_TX` plus all `DA_CHUNK_TX` records linked by the same `da_id`.
+- **DA batch** (application term): L2 metadata carried inside `da_payload` (for example `batch_number`).
+  Unless explicitly stated otherwise, this document uses **DA set** for consensus rules.
+
 ## 3. CompactSize (Varint)
 
 CompactSize encodes an unsigned integer `n` in 1, 3, 5, or 9 bytes:
@@ -194,7 +200,8 @@ Rules:
 
 - `tx_kind` MUST be one of `0x00`, `0x01`, or `0x02`. Any other value MUST be rejected as `TX_ERR_PARSE`.
 - For `tx_kind = 0x00`, `da_payload_len` MUST equal `0`. Any other value MUST be rejected as `TX_ERR_PARSE`.
-- For `tx_kind = 0x01`, `da_payload` is the DA batch manifest (application-layer metadata for the L2 operator).
+- For `tx_kind = 0x01`, `da_payload` is the DA set manifest (application-layer metadata for the L2 operator;
+  it may contain L2 batch fields such as `batch_number`).
   `da_payload_len MUST be <= MAX_DA_MANIFEST_BYTES_PER_TX`. Otherwise reject as `TX_ERR_PARSE`.
 - For `tx_kind = 0x02`, `da_payload_len MUST be <= CHUNK_BYTES`. Otherwise reject as `TX_ERR_PARSE`.
 
@@ -588,7 +595,7 @@ implementations for the described failure classes:
 - DA set orphan chunk (chunk without commit)       -> `BLOCK_ERR_DA_SET_INVALID`
 - DA duplicate commit for same da_id              -> `BLOCK_ERR_DA_SET_INVALID`
 - DA payload commitment mismatch or ambiguous      -> `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID`
-- DA batch count exceeded                          -> `BLOCK_ERR_DA_BATCH_EXCEEDED`
+- DA set count exceeded (`MAX_DA_BATCHES_PER_BLOCK`) -> `BLOCK_ERR_DA_BATCH_EXCEEDED`
 - Malformed block encoding                         -> `BLOCK_ERR_PARSE`
 
 Error priority (short-circuit):
@@ -1077,7 +1084,7 @@ Rules:
   `{0, 1, ..., C-1}` each appearing exactly once.
   If any chunk is missing or duplicated, reject as `BLOCK_ERR_DA_INCOMPLETE`.
 
-- **Batch count:** The number of distinct `da_id` values in `B` MUST be `<= MAX_DA_BATCHES_PER_BLOCK`.
+- **DA set count:** The number of distinct `da_id` values in `B` MUST be `<= MAX_DA_BATCHES_PER_BLOCK`.
   If exceeded, reject as `BLOCK_ERR_DA_BATCH_EXCEEDED`.
 
 - **Chunk count per set:** For each `DA_COMMIT_TX`, `chunk_count MUST be <= MAX_DA_CHUNK_COUNT`.
@@ -1137,6 +1144,44 @@ Canonical chain selection:
 1. Prefer the valid chain with maximal `ChainWork`.
 2. If `ChainWork` is equal, choose the chain whose tip `block_hash` is lexicographically smaller (bytewise big-endian).
 
+### 23.1 Feature-Bit Activation Framework (Upgrade Procedure)
+
+This framework defines how future consensus changes are coordinated using block header `version` signaling.
+It is an upgrade procedure and does not change block validity unless a specific deployment is declared ACTIVE.
+
+Default activation parameters (unless overridden by a deployment specification):
+
+- `SIGNAL_WINDOW = 2016` blocks
+- `SIGNAL_THRESHOLD = 1815` signaling blocks (90%)
+
+A deployment descriptor MUST define:
+
+- `name`
+- `bit` (bit index in header `version`)
+- `start_height`
+- `timeout_height`
+
+Signaling rule:
+
+- A block `B_h` signals deployment bit `b` iff `((version(B_h) >> b) & 1) = 1`.
+
+State machine (evaluated only at `SIGNAL_WINDOW` boundaries):
+
+- `DEFINED` -> `STARTED` when `h >= start_height`.
+- `STARTED` -> `LOCKED_IN` if signaling count in the previous full window is `>= SIGNAL_THRESHOLD`.
+- `STARTED` -> `FAILED` if `h >= timeout_height` and lock-in was not reached.
+- `LOCKED_IN` -> `ACTIVE` after one full additional window.
+- `ACTIVE` and `FAILED` are terminal.
+
+Operational constraints:
+
+- Rollback is never automatic. Deactivation/replacement MUST use a new deployment.
+- Nodes SHOULD expose telemetry for each deployment (`state`, signaling count per window, estimated activation height).
+
+Current profile:
+
+- No feature-bit deployments are ACTIVE by default in this document.
+
 ## 24. Determinism Requirements (Normative)
 
 Consensus validity MUST be deterministic given the same chain state and the same block bytes.
@@ -1178,7 +1223,7 @@ Minimum required order for validating a candidate block `B_h` at height `h`:
 8. Check total block weight (Section 9). If exceeded, reject as `BLOCK_ERR_WEIGHT_EXCEEDED`.
 9. Check per-block ANCHOR byte limits (Section 14). If exceeded, reject as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
 10. Check DA chunk hash integrity (Section 21.2). If any chunk_hash mismatch, reject as `BLOCK_ERR_DA_CHUNK_HASH_INVALID`.
-11. Check DA set completeness (Section 21.3): no orphan chunks, complete sets, batch count. Reject as applicable.
+11. Check DA set completeness (Section 21.3): no orphan chunks, complete sets, DA set count. Reject as applicable.
 12. Check DA payload commitment (Section 21.4). If mismatch or ambiguous (missing or duplicate CORE_DA_COMMIT output), reject as `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID`.
 13. Apply transactions sequentially (Section 18), enforcing:
    - coinbase structural rules (Sections 10.5 and 16),

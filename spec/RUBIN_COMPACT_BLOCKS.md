@@ -342,7 +342,9 @@ Thresholds:
 ```
 
 **Upgrade path:** 8-byte short_id reserved via feature-bit.
-Activation requires observed threshold breach and a coordinated upgrade plan.
+Activation MUST follow the feature-bit framework in
+`RUBIN_L1_CANONICAL.md` Section 23.1 (default window/threshold: 2016 / 1815),
+with a dedicated deployment descriptor for short-id length change.
 Do not activate preemptively.
 
 ---
@@ -567,6 +569,20 @@ after block height 1_440.
 
 `CV-COMPACT` is the conformance test suite for compact block relay.
 All items marked MUST are required for mainnet readiness.
+
+Normative machine-readable vectors (inputs and expected outputs) are stored in:
+
+- `conformance/fixtures/CV-COMPACT.json`
+
+Execution path:
+
+- `conformance/runner/run_cv_bundle.py --only-gates CV-COMPACT`
+
+Vector schema (normative for CI gate):
+
+- required fields: `id`, `op`, `expect_ok`
+- on failure vectors: `expect_err`
+- on success vectors: operation-specific `expect_*` fields (`expect_short_id`, `expect_txid`, etc.)
 
 | Test ID | Description | MUST / SHOULD |
 |---------|-------------|---------------|
