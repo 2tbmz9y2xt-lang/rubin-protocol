@@ -24,7 +24,8 @@
     {
       "id": "CV-COV-04",
       "op": "covenant_genesis_check",
-      "expect_ok": true,
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
       "tx_hex": "0100000000000000000000000000010100000000000000010009007b00000000000000000000000000"
     },
     {

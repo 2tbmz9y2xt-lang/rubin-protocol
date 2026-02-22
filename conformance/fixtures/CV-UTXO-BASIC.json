@@ -73,7 +73,8 @@
     {
       "id": "CV-U-08",
       "op": "utxo_apply_basic",
-      "expect_ok": true,
+      "expect_ok": false,
+      "expect_err": "TX_ERR_VALUE_CONSERVATION",
       "height": 4420,
       "block_timestamp": 1000,
       "tx_hex": "0100000000010000000000000001b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1000000000000000000015a00000000000000000021010000000000000000000000000000000000000000000000000000000000000000000000000000",

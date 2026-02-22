@@ -115,6 +115,18 @@ def validate_vector(
         req["wtxid"] = v["wtxid"]
         req["nonce1"] = v["nonce1"]
         req["nonce2"] = v["nonce2"]
+    elif op == "output_descriptor_bytes":
+        cov_type = v["input"]["covenant_type"]
+        if isinstance(cov_type, str):
+            cov_type = int(cov_type, 0)
+        req["covenant_type"] = cov_type
+        req["covenant_data_hex"] = v["input"]["covenant_data_hex"]
+    elif op == "output_descriptor_hash":
+        cov_type = v["input"]["covenant_type"]
+        if isinstance(cov_type, str):
+            cov_type = int(cov_type, 0)
+        req["covenant_type"] = cov_type
+        req["covenant_data_hex"] = v["input"]["covenant_data_hex"]
     else:
         return [f"{gate}/{v.get('id','?')}: unknown op {op}"]
 
@@ -128,8 +140,9 @@ def validate_vector(
         problems.append(f"{gate}/{vid}: go ok={go_resp.get('ok')} rust ok={rust_resp.get('ok')}")
         return problems
 
-    if bool(v.get("expect_ok")) != bool(go_resp.get("ok")):
-        problems.append(f"{gate}/{vid}: expect_ok={v.get('expect_ok')} got_ok={go_resp.get('ok')}")
+    expected_ok = bool(v.get("expect_ok", True))
+    if expected_ok != bool(go_resp.get("ok")):
+        problems.append(f"{gate}/{vid}: expect_ok={expected_ok} got_ok={go_resp.get('ok')}")
         return problems
 
     if not go_resp.get("ok"):
@@ -205,6 +218,24 @@ def validate_vector(
             )
         if "expect_short_id" in v and go_sid != v["expect_short_id"]:
             problems.append(f"{gate}/{vid}: expect_short_id mismatch")
+    elif op == "output_descriptor_bytes":
+        go_desc = go_resp.get("descriptor_hex") or go_resp.get("digest")
+        rust_desc = rust_resp.get("descriptor_hex") or rust_resp.get("digest")
+        if go_desc != rust_desc:
+            problems.append(
+                f"{gate}/{vid}: descriptor_hex mismatch go={go_desc} rust={rust_desc}"
+            )
+        if "expected_hex" in v and go_desc != v["expected_hex"]:
+            problems.append(f"{gate}/{vid}: expected_hex mismatch")
+    elif op == "output_descriptor_hash":
+        go_hash = go_resp.get("digest")
+        rust_hash = rust_resp.get("digest")
+        if go_hash != rust_hash:
+            problems.append(
+                f"{gate}/{vid}: digest mismatch go={go_hash} rust={rust_hash}"
+            )
+        if "expected_hash" in v and go_hash != v["expected_hash"]:
+            problems.append(f"{gate}/{vid}: expected_hash mismatch")
 
     return problems
 

@@ -4,6 +4,7 @@ use rubin_consensus::{
     ErrorCode, Outpoint, UtxoEntry,
 };
 use serde::{Deserialize, Serialize};
+use sha3::{Digest, Sha3_256};
 use std::collections::HashMap;
 
 #[derive(Deserialize)]
@@ -21,6 +22,12 @@ struct Request {
 
     #[serde(default)]
     wtxid: String,
+
+    #[serde(default)]
+    covenant_type: u16,
+
+    #[serde(default)]
+    covenant_data_hex: String,
 
     #[serde(default)]
     nonce1: u64,
@@ -959,6 +966,75 @@ fn main() {
             };
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
+        "output_descriptor_bytes" => {
+            let cov_data = match hex::decode(req.covenant_data_hex) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad covenant_data_hex".to_string()),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            let desc = output_descriptor_bytes(req.covenant_type, &cov_data);
+            let resp = Response {
+                ok: true,
+                err: None,
+                txid: None,
+                wtxid: None,
+                merkle_root: None,
+                digest: Some(hex::encode(desc)),
+                consumed: None,
+                block_hash: None,
+                target_new: None,
+            };
+            let _ = serde_json::to_writer(std::io::stdout(), &resp);
+        }
+        "output_descriptor_hash" => {
+            let cov_data = match hex::decode(req.covenant_data_hex) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad covenant_data_hex".to_string()),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            let desc = output_descriptor_bytes(req.covenant_type, &cov_data);
+            let mut hasher = Sha3_256::new();
+            hasher.update(desc);
+            let h = hasher.finalize();
+            let resp = Response {
+                ok: true,
+                err: None,
+                txid: None,
+                wtxid: None,
+                merkle_root: None,
+                digest: Some(hex::encode(h)),
+                consumed: None,
+                block_hash: None,
+                target_new: None,
+            };
+            let _ = serde_json::to_writer(std::io::stdout(), &resp);
+        }
         _ => {
             let resp = Response {
                 ok: false,
@@ -973,5 +1049,31 @@ fn main() {
             };
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
+    }
+}
+
+fn output_descriptor_bytes(covenant_type: u16, covenant_data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + 9 + covenant_data.len());
+    out.extend_from_slice(&covenant_type.to_le_bytes());
+    out.extend_from_slice(&encode_compact_size(covenant_data.len() as u64));
+    out.extend_from_slice(covenant_data);
+    out
+}
+
+fn encode_compact_size(n: u64) -> Vec<u8> {
+    if n < 0xfd {
+        vec![n as u8]
+    } else if n <= 0xffff {
+        let mut out = vec![0xfd, 0, 0];
+        out[1..3].copy_from_slice(&(n as u16).to_le_bytes());
+        out
+    } else if n <= 0xffff_ffff {
+        let mut out = vec![0xfe, 0, 0, 0, 0];
+        out[1..5].copy_from_slice(&(n as u32).to_le_bytes());
+        out
+    } else {
+        let mut out = vec![0xff, 0, 0, 0, 0, 0, 0, 0, 0];
+        out[1..9].copy_from_slice(&n.to_le_bytes());
+        out
     }
 }

@@ -46,8 +46,8 @@ pub fn apply_non_coinbase_tx_basic(
     validate_tx_covenants_genesis(tx)?;
 
     let mut work = utxo_set.clone();
-    let mut sum_in: u64 = 0;
-    let mut sum_in_vault: u64 = 0;
+    let mut sum_in: u128 = 0;
+    let mut sum_in_vault: u128 = 0;
     let mut has_vault_input = false;
 
     for input in &tx.inputs {
@@ -75,22 +75,22 @@ pub fn apply_non_coinbase_tx_basic(
         }
 
         sum_in = sum_in
-            .checked_add(entry.value)
-            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
+            .checked_add(entry.value as u128)
+            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u128 overflow"))?;
         if entry.covenant_type == COV_TYPE_VAULT {
             has_vault_input = true;
             sum_in_vault = sum_in_vault
-                .checked_add(entry.value)
-                .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
+                .checked_add(entry.value as u128)
+                .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u128 overflow"))?;
         }
         work.remove(&op);
     }
 
-    let mut sum_out: u64 = 0;
+    let mut sum_out: u128 = 0;
     for (i, out) in tx.outputs.iter().enumerate() {
         sum_out = sum_out
-            .checked_add(out.value)
-            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
+            .checked_add(out.value as u128)
+            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u128 overflow"))?;
 
         if out.covenant_type == COV_TYPE_ANCHOR || out.covenant_type == COV_TYPE_DA_COMMIT {
             continue;
@@ -125,7 +125,8 @@ pub fn apply_non_coinbase_tx_basic(
     }
 
     Ok(UtxoApplySummary {
-        fee: sum_in - sum_out,
+        fee: u64::try_from(sum_in - sum_out)
+            .map_err(|_| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?,
         utxo_count: work.len() as u64,
     })
 }

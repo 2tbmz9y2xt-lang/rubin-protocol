@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha3"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -11,16 +13,18 @@ import (
 )
 
 type Request struct {
-	Op         string   `json:"op"`
-	TxHex      string   `json:"tx_hex,omitempty"`
-	BlockHex   string   `json:"block_hex,omitempty"`
-	Txids      []string `json:"txids,omitempty"`
-	WtxidHex   string   `json:"wtxid,omitempty"`
-	Nonce1     uint64   `json:"nonce1,omitempty"`
-	Nonce2     uint64   `json:"nonce2,omitempty"`
-	InputIndex uint32   `json:"input_index,omitempty"`
-	InputValue uint64   `json:"input_value,omitempty"`
-	ChainIDHex string   `json:"chain_id,omitempty"`
+	Op              string   `json:"op"`
+	TxHex           string   `json:"tx_hex,omitempty"`
+	BlockHex        string   `json:"block_hex,omitempty"`
+	Txids           []string `json:"txids,omitempty"`
+	WtxidHex        string   `json:"wtxid,omitempty"`
+	CovenantType    uint16   `json:"covenant_type,omitempty"`
+	CovenantDataHex string   `json:"covenant_data_hex,omitempty"`
+	Nonce1          uint64   `json:"nonce1,omitempty"`
+	Nonce2          uint64   `json:"nonce2,omitempty"`
+	InputIndex      uint32   `json:"input_index,omitempty"`
+	InputValue      uint64   `json:"input_value,omitempty"`
+	ChainIDHex      string   `json:"chain_id,omitempty"`
 
 	HeaderHex      string `json:"header_hex,omitempty"`
 	TargetHex      string `json:"target_hex,omitempty"`
@@ -46,18 +50,19 @@ type UtxoJSON struct {
 }
 
 type Response struct {
-	Ok        bool   `json:"ok"`
-	Err       string `json:"err,omitempty"`
-	TxidHex   string `json:"txid,omitempty"`
-	WtxidHex  string `json:"wtxid,omitempty"`
-	MerkleHex string `json:"merkle_root,omitempty"`
-	DigestHex string `json:"digest,omitempty"`
-	BlockHash string `json:"block_hash,omitempty"`
-	TargetNew string `json:"target_new,omitempty"`
-	ShortID   string `json:"short_id,omitempty"`
-	Consumed  int    `json:"consumed,omitempty"`
-	Fee       uint64 `json:"fee,omitempty"`
-	UtxoCount uint64 `json:"utxo_count,omitempty"`
+	Ok            bool   `json:"ok"`
+	Err           string `json:"err,omitempty"`
+	TxidHex       string `json:"txid,omitempty"`
+	WtxidHex      string `json:"wtxid,omitempty"`
+	MerkleHex     string `json:"merkle_root,omitempty"`
+	DigestHex     string `json:"digest,omitempty"`
+	BlockHash     string `json:"block_hash,omitempty"`
+	TargetNew     string `json:"target_new,omitempty"`
+	ShortID       string `json:"short_id,omitempty"`
+	DescriptorHex string `json:"descriptor_hex,omitempty"`
+	Consumed      int    `json:"consumed,omitempty"`
+	Fee           uint64 `json:"fee,omitempty"`
+	UtxoCount     uint64 `json:"utxo_count,omitempty"`
 }
 
 func writeResp(w io.Writer, resp Response) {
@@ -354,8 +359,63 @@ func main() {
 		writeResp(os.Stdout, Response{Ok: true, ShortID: hex.EncodeToString(shortID[:])})
 		return
 
+	case "output_descriptor_bytes":
+		desc, err := outputDescriptorBytes(req.CovenantType, req.CovenantDataHex)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad covenant_data_hex"})
+			return
+		}
+		writeResp(os.Stdout, Response{Ok: true, DescriptorHex: hex.EncodeToString(desc)})
+		return
+
+	case "output_descriptor_hash":
+		desc, err := outputDescriptorBytes(req.CovenantType, req.CovenantDataHex)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad covenant_data_hex"})
+			return
+		}
+		h := sha3.Sum256(desc)
+		writeResp(os.Stdout, Response{Ok: true, DigestHex: hex.EncodeToString(h[:])})
+		return
+
 	default:
 		writeResp(os.Stdout, Response{Ok: false, Err: "unknown op"})
 		return
+	}
+}
+
+func outputDescriptorBytes(covType uint16, covDataHex string) ([]byte, error) {
+	covData, err := hex.DecodeString(covDataHex)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 0, 2+9+len(covData))
+	var ct [2]byte
+	binary.LittleEndian.PutUint16(ct[:], covType)
+	out = append(out, ct[:]...)
+	out = append(out, encodeCompactSize(uint64(len(covData)))...)
+	out = append(out, covData...)
+	return out, nil
+}
+
+func encodeCompactSize(n uint64) []byte {
+	switch {
+	case n < 0xfd:
+		return []byte{byte(n)}
+	case n <= 0xffff:
+		out := make([]byte, 3)
+		out[0] = 0xfd
+		binary.LittleEndian.PutUint16(out[1:], uint16(n))
+		return out
+	case n <= 0xffffffff:
+		out := make([]byte, 5)
+		out[0] = 0xfe
+		binary.LittleEndian.PutUint32(out[1:], uint32(n))
+		return out
+	default:
+		out := make([]byte, 9)
+		out[0] = 0xff
+		binary.LittleEndian.PutUint64(out[1:], n)
+		return out
 	}
 }
