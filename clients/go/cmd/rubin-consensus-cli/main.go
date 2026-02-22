@@ -29,6 +29,20 @@ type Request struct {
 	TimestampLast  uint64 `json:"timestamp_last,omitempty"`
 	ExpectedPrev   string `json:"expected_prev_hash,omitempty"`
 	ExpectedTarget string `json:"expected_target,omitempty"`
+
+	Utxos          []UtxoJSON `json:"utxos,omitempty"`
+	Height         uint64     `json:"height,omitempty"`
+	BlockTimestamp uint64     `json:"block_timestamp,omitempty"`
+}
+
+type UtxoJSON struct {
+	Txid              string `json:"txid"`
+	Vout              uint32 `json:"vout"`
+	Value             uint64 `json:"value"`
+	CovenantType      uint16 `json:"covenant_type"`
+	CovenantDataHex   string `json:"covenant_data"`
+	CreationHeight    uint64 `json:"creation_height"`
+	CreatedByCoinbase bool   `json:"created_by_coinbase"`
 }
 
 type Response struct {
@@ -42,6 +56,8 @@ type Response struct {
 	TargetNew string `json:"target_new,omitempty"`
 	ShortID   string `json:"short_id,omitempty"`
 	Consumed  int    `json:"consumed,omitempty"`
+	Fee       uint64 `json:"fee,omitempty"`
+	UtxoCount uint64 `json:"utxo_count,omitempty"`
 }
 
 func writeResp(w io.Writer, resp Response) {
@@ -270,6 +286,59 @@ func main() {
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true})
+		return
+
+	case "utxo_apply_basic":
+		txBytes, err := hex.DecodeString(req.TxHex)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad hex"})
+			return
+		}
+		tx, txid, _, _, err := consensus.ParseTx(txBytes)
+		if err != nil {
+			if te, ok := err.(*consensus.TxError); ok {
+				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
+				return
+			}
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+
+		utxos := make(map[consensus.Outpoint]consensus.UtxoEntry, len(req.Utxos))
+		for _, u := range req.Utxos {
+			txidBytes, err := hex.DecodeString(u.Txid)
+			if err != nil || len(txidBytes) != 32 {
+				writeResp(os.Stdout, Response{Ok: false, Err: "bad utxo txid"})
+				return
+			}
+			covData, err := hex.DecodeString(u.CovenantDataHex)
+			if err != nil {
+				writeResp(os.Stdout, Response{Ok: false, Err: "bad utxo covenant_data"})
+				return
+			}
+
+			var opTxid [32]byte
+			copy(opTxid[:], txidBytes)
+			op := consensus.Outpoint{Txid: opTxid, Vout: u.Vout}
+			utxos[op] = consensus.UtxoEntry{
+				Value:             u.Value,
+				CovenantType:      u.CovenantType,
+				CovenantData:      covData,
+				CreationHeight:    u.CreationHeight,
+				CreatedByCoinbase: u.CreatedByCoinbase,
+			}
+		}
+
+		s, err := consensus.ApplyNonCoinbaseTxBasic(tx, txid, utxos, req.Height, req.BlockTimestamp)
+		if err != nil {
+			if te, ok := err.(*consensus.TxError); ok {
+				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
+				return
+			}
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+		writeResp(os.Stdout, Response{Ok: true, Fee: s.Fee, UtxoCount: s.UtxoCount})
 		return
 
 	case "compact_shortid":
