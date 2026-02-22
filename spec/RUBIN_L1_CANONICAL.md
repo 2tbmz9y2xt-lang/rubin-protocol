@@ -699,9 +699,11 @@ Semantics:
   - Per-block constraint: sum of `covenant_data_len` across all `CORE_ANCHOR` outputs in a block MUST be
     `<= MAX_ANCHOR_BYTES_PER_BLOCK`; otherwise reject the block as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
 - `CORE_HTLC`:
-  - RESERVED. Spec pending (→ Q-S001).
-  - Until semantics are ratified in this document, any output with `covenant_type = 0x0100` MUST be
-    rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+  - RESERVED in CANONICAL (not active at genesis).
+  - A standalone HTLC specification exists in `spec/RUBIN_CORE_HTLC_SPEC.md`, but it is not yet integrated
+    into this document.
+  - Until integrated, any output with `covenant_type = 0x0100` MUST be rejected as
+    `TX_ERR_COVENANT_TYPE_INVALID`.
 - `CORE_VAULT`:
   - Consensus-native covenant for value storage with mandatory destination whitelist.
   - Active from genesis block 0.
