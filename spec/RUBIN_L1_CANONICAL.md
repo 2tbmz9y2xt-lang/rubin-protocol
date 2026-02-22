@@ -62,9 +62,9 @@ These constants are consensus-critical for this protocol ruleset:
 - `MAX_ANCHOR_PAYLOAD_SIZE = 65_536` bytes
 - `MAX_ANCHOR_BYTES_PER_BLOCK = 131_072` bytes
 - `MAX_P2PK_COVENANT_DATA = 33` bytes
-- `MAX_VAULT_KEYS = 16`
+- `MAX_VAULT_KEYS = 13`
 - `MAX_VAULT_WHITELIST_ENTRIES = 1_024`
-- `MAX_MULTISIG_KEYS = 16`
+- `MAX_MULTISIG_KEYS = 13`
 
 Monetary constants (consensus-critical):
 
