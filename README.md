@@ -48,6 +48,14 @@ npm install
 npm run spec:all
 ```
 
+Orchestration gates (roadmap/context safety):
+
+```bash
+npm run orch:state:init
+npm run orch:drift
+npm run orch:preflight -- --allow-dirty
+```
+
 ## Adding Conformance Vectors
 
 1. Add a new fixture file: `./conformance/fixtures/CV-<GATE>.json`.

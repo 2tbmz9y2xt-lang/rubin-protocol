@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rubin.local/operational/orchestration/state.schema.json",
+  "title": "RUBIN Orchestration State",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "status",
+    "active_phase",
+    "active_task_id",
+    "next_step",
+    "last_merged_pr",
+    "spec_hashes",
+    "updated_at"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "IN_PROGRESS",
+        "BLOCKED",
+        "DONE",
+        "SKIPPED"
+      ]
+    },
+    "active_phase": {
+      "type": "string",
+      "minLength": 1
+    },
+    "active_task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "next_step": {
+      "type": "string",
+      "minLength": 1
+    },
+    "last_merged_pr": {
+      "type": "string",
+      "pattern": "^$|^#?[0-9]+$"
+    },
+    "spec_hashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_sha256",
+        "compact_sha256",
+        "network_sha256"
+      ],
+      "properties": {
+        "canonical_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "compact_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "network_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

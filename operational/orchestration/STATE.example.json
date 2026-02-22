@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "status": "IN_PROGRESS",
+  "active_phase": "S0",
+  "active_task_id": "Q-C001",
+  "next_step": "Resolve open critical spec findings and sync cross-file constants.",
+  "last_merged_pr": "#123",
+  "spec_hashes": {
+    "canonical_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "compact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "network_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "updated_at": "2026-02-22T00:00:00.000Z"
+}

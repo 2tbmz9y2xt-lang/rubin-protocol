@@ -180,7 +180,7 @@ Storage depends on number of monitored channels; no protocol minimum.
 | Prefetch rate global | 32 MB/s |
 | DA orphan TTL | 3 blocks (360 s) |
 | DA orphan pool | 64 MiB |
-| Max relay message | 96,000,000 bytes (91.6 MiB) |
+| Max relay message | 100,663,296 bytes (96 MiB) |
 | Grace period | 1,440 blocks (~2 days) |
 | IBD exit condition | Tip timestamp lag < 24 h from system time |
 

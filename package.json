@@ -7,7 +7,13 @@
     "spec:diff": "node scripts/spec/gen-spec-diff.mjs",
     "spec:explain": "node scripts/spec/spec-explainer.mjs",
     "spec:watch": "node scripts/spec/watch-spec.mjs",
-    "spec:all": "npm run spec:html && npm run spec:diff && npm run spec:explain"
+    "spec:all": "npm run spec:html && npm run spec:diff && npm run spec:explain",
+    "orch:state:init": "node scripts/orchestration/state.mjs init",
+    "orch:state:validate": "node scripts/orchestration/state.mjs validate",
+    "orch:drift": "node scripts/orchestration/check-spec-drift.mjs",
+    "orch:guard": "node scripts/orchestration/guard-branch.mjs",
+    "orch:preflight": "node scripts/orchestration/preflight.mjs",
+    "orch:sync": "node scripts/orchestration/sync-inbox-queue.mjs"
   },
   "dependencies": {
     "marked": "^17.0.3"
