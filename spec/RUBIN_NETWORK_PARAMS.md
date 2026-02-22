@@ -69,7 +69,9 @@ Notes:
 | Base unit | 1 RBN = 100,000,000 base units |
 | Max supply (base units) | 10,000,000,000,000,000 |
 
-Subsidy schedule: linear decay with remainder distribution.
+Subsidy schedule: flat per-block subsidy with remainder distribution.
+Each block awards `floor(SUBSIDY_TOTAL_MINED / SUBSIDY_DURATION_BLOCKS)` base units.
+The indivisible remainder is distributed to the final blocks of the subsidy period.
 See CANONICAL §19 for exact formula.
 
 ---
@@ -187,6 +189,7 @@ Storage depends on number of monitored channels; no protocol minimum.
 | Prefetch rate global | 32 MB/s |
 | DA orphan TTL | 3 blocks (360 s) |
 | DA orphan pool | 64 MiB |
+| DA orphan commit overhead cap | 8 MiB (`DA_ORPHAN_COMMIT_OVERHEAD_MAX`) |
 | Max relay message | 96,000,000 bytes (91.6 MiB) |
 | Grace period | 1,440 blocks (~2 days) |
 | IBD exit condition | Tip timestamp lag < 24 h from system time |

@@ -1,8 +1,22 @@
 {
-  "transaction_identifiers": "d6c8bba62ac2f03dc42b223d16ef0c4560b64b48de3388f7403d3d7b79180913",
-  "weight_accounting": "e5d52ed803added423bf95d181ba2e94b43ec717e96fce0d7dbd39c92608d2bc",
-  "sighash_v1": "6feb7b6a869c01a007ba7666a0fa833045ef61491d9f7711ffff36d8e04da435",
-  "consensus_error_codes": "f3399c934fd9b93bc9dac09b8f2f2d3bcafdd8cb301c8d3a7b89c7124adcd1e9",
-  "difficulty_update": "e70a3de4b7607ab71b37fdf325da6720d687acdcf9bbcf268f174f17ade2ba65",
-  "value_conservation": "ee3b046749d68f52ac800ed17a485cb94cca31287251b51aa9abfd2275b636c2"
+  "schema_version": 1,
+  "hash_algorithm": "sha256",
+  "source_file": "spec/RUBIN_L1_CANONICAL.md",
+  "canonicalization": "LF normalization; extract markdown from exact section heading to next heading of same/higher level; trim; append trailing LF",
+  "section_headings": {
+    "transaction_identifiers": "## 8. Transaction Identifiers (TXID / WTXID)",
+    "weight_accounting": "## 9. Weight Accounting (Normative)",
+    "sighash_v1": "## 12. Sighash v1 (Normative)",
+    "consensus_error_codes": "## 13. Consensus Error Codes (Normative)",
+    "difficulty_update": "## 15. Difficulty Update (Normative)",
+    "value_conservation": "## 20. Value Conservation (Normative)"
+  },
+  "sections": {
+    "transaction_identifiers": "d6c8bba62ac2f03dc42b223d16ef0c4560b64b48de3388f7403d3d7b79180913",
+    "weight_accounting": "e5d52ed803added423bf95d181ba2e94b43ec717e96fce0d7dbd39c92608d2bc",
+    "sighash_v1": "6feb7b6a869c01a007ba7666a0fa833045ef61491d9f7711ffff36d8e04da435",
+    "consensus_error_codes": "f3399c934fd9b93bc9dac09b8f2f2d3bcafdd8cb301c8d3a7b89c7124adcd1e9",
+    "difficulty_update": "e70a3de4b7607ab71b37fdf325da6720d687acdcf9bbcf268f174f17ade2ba65",
+    "value_conservation": "ee3b046749d68f52ac800ed17a485cb94cca31287251b51aa9abfd2275b636c2"
+  }
 }

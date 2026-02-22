@@ -50,5 +50,15 @@ for (const [key, heading] of Object.entries(sectionHeadings)) {
   console.log(`${key}: ${hashes[key]}`);
 }
 
-fs.writeFileSync(outPath, JSON.stringify(hashes, null, 2) + "\n", "utf8");
+const doc = {
+  schema_version: 1,
+  hash_algorithm: "sha256",
+  source_file: "spec/RUBIN_L1_CANONICAL.md",
+  canonicalization:
+    "LF normalization; extract markdown from exact section heading to next heading of same/higher level; trim; append trailing LF",
+  section_headings: sectionHeadings,
+  sections: hashes,
+};
+
+fs.writeFileSync(outPath, JSON.stringify(doc, null, 2) + "\n", "utf8");
 console.log(`Updated ${outPath}`);

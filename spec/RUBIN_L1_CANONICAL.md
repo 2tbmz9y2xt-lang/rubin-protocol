@@ -1184,6 +1184,9 @@ For block `B_h` with `h > 0`:
 
 4. `timestamp(B_h)` MUST be `<= median(S_h) + MAX_FUTURE_DRIFT`. If violated, reject as `BLOCK_ERR_TIMESTAMP_FUTURE`.
 
+Note (non-normative): unlike Bitcoin, the upper bound uses Median Time Past (`median(S_h)`) as baseline,
+not node-local wall clock time. This keeps the timestamp rule fully deterministic across implementations.
+
 For genesis (`h = 0`), these rules are not evaluated.
 
 ## 23. Chainwork and Fork Choice (Non-Validation Procedure)

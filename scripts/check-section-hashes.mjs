@@ -9,7 +9,16 @@ const specPath = path.join(root, "spec", "RUBIN_L1_CANONICAL.md");
 const hashesPath = path.join(root, "spec", "SECTION_HASHES.json");
 
 const spec = fs.readFileSync(specPath, "utf8").replace(/\r\n/g, "\n");
-const expected = JSON.parse(fs.readFileSync(hashesPath, "utf8"));
+const expectedDoc = JSON.parse(fs.readFileSync(hashesPath, "utf8"));
+
+let expected = expectedDoc;
+if (expectedDoc && typeof expectedDoc === "object" && expectedDoc.sections) {
+  expected = expectedDoc.sections;
+  if (expectedDoc.hash_algorithm && expectedDoc.hash_algorithm !== "sha256") {
+    console.error(`FAIL [meta] unsupported hash_algorithm: ${expectedDoc.hash_algorithm}`);
+    process.exit(1);
+  }
+}
 
 const sectionHeadings = {
   transaction_identifiers: "## 8. Transaction Identifiers (TXID / WTXID)",

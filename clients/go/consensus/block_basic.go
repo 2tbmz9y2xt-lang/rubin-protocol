@@ -210,9 +210,13 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 		return 0, 0, 0, txerr(TX_ERR_PARSE, "nil tx")
 	}
 
+	var err error
 	var baseSize uint64
 	baseSize = 4 + 1 + 8 // version + tx_kind + tx_nonce
-	baseSize, _ = addU64(baseSize, compactSizeLen(uint64(len(tx.Inputs))))
+	baseSize, err = addU64(baseSize, compactSizeLen(uint64(len(tx.Inputs))))
+	if err != nil {
+		return 0, 0, 0, txerr(TX_ERR_PARSE, "tx base size overflow")
+	}
 	for _, in := range tx.Inputs {
 		var err error
 		baseSize, err = addU64(baseSize, 32+4) // prevout
@@ -232,7 +236,10 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 			return 0, 0, 0, err
 		}
 	}
-	baseSize, _ = addU64(baseSize, compactSizeLen(uint64(len(tx.Outputs))))
+	baseSize, err = addU64(baseSize, compactSizeLen(uint64(len(tx.Outputs))))
+	if err != nil {
+		return 0, 0, 0, txerr(TX_ERR_PARSE, "tx base size overflow")
+	}
 	var anchorBytes uint64
 	for _, out := range tx.Outputs {
 		var err error
@@ -256,7 +263,10 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 			}
 		}
 	}
-	baseSize, _ = addU64(baseSize, 4) // locktime
+	baseSize, err = addU64(baseSize, 4) // locktime
+	if err != nil {
+		return 0, 0, 0, txerr(TX_ERR_PARSE, "tx base size overflow")
+	}
 
 	var witnessSize uint64
 	witnessSize = compactSizeLen(uint64(len(tx.Witness)))

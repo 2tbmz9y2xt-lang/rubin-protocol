@@ -482,3 +482,9 @@ func TestValidateBlockBasic_SLHActiveAtHeight(t *testing.T) {
 		t.Fatalf("ValidateBlockBasicAtHeight: %v", err)
 	}
 }
+
+func TestAddU64_Overflow(t *testing.T) {
+	if _, err := addU64(^uint64(0), 1); err == nil {
+		t.Fatalf("expected overflow error")
+	}
+}
