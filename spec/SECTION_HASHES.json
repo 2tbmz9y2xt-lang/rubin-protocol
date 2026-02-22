@@ -1,7 +1,7 @@
 {
   "transaction_identifiers": "d6c8bba62ac2f03dc42b223d16ef0c4560b64b48de3388f7403d3d7b79180913",
   "weight_accounting": "e5d52ed803added423bf95d181ba2e94b43ec717e96fce0d7dbd39c92608d2bc",
-  "sighash_v1": "5647c509b1e7589750b8d1fa3f9df7effbc7d47572110d53bf6204581b2c0863",
+  "sighash_v1": "6feb7b6a869c01a007ba7666a0fa833045ef61491d9f7711ffff36d8e04da435",
   "consensus_error_codes": "f3399c934fd9b93bc9dac09b8f2f2d3bcafdd8cb301c8d3a7b89c7124adcd1e9",
   "difficulty_update": "e70a3de4b7607ab71b37fdf325da6720d687acdcf9bbcf268f174f17ade2ba65",
   "value_conservation": "ee3b046749d68f52ac800ed17a485cb94cca31287251b51aa9abfd2275b636c2"

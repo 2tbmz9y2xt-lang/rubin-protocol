@@ -25,7 +25,7 @@ In case of conflict, RUBIN_L1_CANONICAL.md takes precedence.
 | `COINBASE_MATURITY` | 100 blocks | CANONICAL §4 |
 | `MAX_FUTURE_DRIFT` | 7,200 s | CANONICAL §4 |
 | `WITNESS_DISCOUNT_DIVISOR` | 4 | CANONICAL §4 |
-| `SLH_DSA_ACTIVATION_HEIGHT` | 1,000,000 | CANONICAL §4, §14, §18.2 |
+| `SLH_DSA_ACTIVATION_HEIGHT` | 1,000,000 | CANONICAL §4, §14.1, §14.2 |
 | Coinbase witness commitment | Required (CORE_ANCHOR, single 32-byte hash) | CANONICAL §10.4.1 |
 
 ---
@@ -224,7 +224,7 @@ Storage depends on number of monitored channels; no protocol minimum.
 ## 12. Feature-Bit Activation Defaults
 
 Consensus and relay parameter changes that require coordinated activation MUST use the
-feature-bit framework defined in `RUBIN_L1_CANONICAL.md` §23.1.
+feature-bit framework defined in `RUBIN_L1_CANONICAL.md` §23.2.
 
 Default signaling parameters:
 

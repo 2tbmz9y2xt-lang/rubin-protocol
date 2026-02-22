@@ -343,7 +343,7 @@ Thresholds:
 
 **Upgrade path:** 8-byte short_id reserved via feature-bit.
 Activation MUST follow the feature-bit framework in
-`RUBIN_L1_CANONICAL.md` Section 23.1 (default window/threshold: 2016 / 1815),
+`RUBIN_L1_CANONICAL.md` Section 23.2 (default window/threshold: 2016 / 1815),
 with a dedicated deployment descriptor for short-id length change.
 Do not activate preemptively.
 

@@ -239,7 +239,7 @@ Activation note:
 
 - Witness canonicalization in this section validates byte-level encoding only.
 - Consensus activation gate for `SUITE_ID_SLH_DSA_SHAKE_256F` is enforced in spend validation sections
-  (Sections 14.1, 14.2, 18.2) against block height.
+  (Sections 14.1 and 14.2) against block height.
 - If `block_height < SLH_DSA_ACTIVATION_HEIGHT` and any required spend witness uses
   `SUITE_ID_SLH_DSA_SHAKE_256F`, validation MUST reject as `TX_ERR_SIG_ALG_INVALID`.
 
@@ -477,11 +477,13 @@ Every block MUST contain exactly one coinbase transaction and it MUST be the fir
 Define `is_coinbase_tx(T)` for `Tx` as:
 
 - `T.input_count = 1`, and
+- `T.tx_kind = 0x00`, and
 - `T.inputs[0].prev_txid` is 32 zero bytes, and
 - `T.inputs[0].prev_vout = 0xffff_ffff`, and
 - `T.inputs[0].script_sig_len = 0`, and
 - `T.inputs[0].sequence = 0xffff_ffff`, and
 - `T.witness.witness_count = 0`, and
+- `T.da_payload_len = 0`, and
 - `T.tx_nonce = 0`.
 
 Rules:
@@ -560,6 +562,39 @@ All fields in `preimage_tx_sig` are taken from the transaction `T` being signed,
 
 For coinbase transactions, sighash is not computed (no witness).
 
+### 12.1 `verify_sig` Profile (Normative)
+
+`verify_sig` is a consensus predicate over raw bytes and MUST be implemented as a deterministic,
+side-effect-free function:
+
+```text
+verify_sig(suite_id, pubkey, signature, digest32) -> bool
+```
+
+Rules:
+
+1. `digest32` MUST be exactly the 32-byte `digest` defined in this section. No additional hashing,
+   truncation, pre-hash wrapper, context string, or domain prefix may be added by the implementation.
+2. `suite_id = SUITE_ID_ML_DSA_87 (0x01)`:
+   - MUST invoke ML-DSA-87 verification over `(pubkey, signature, digest32)` using canonical byte strings.
+3. `suite_id = SUITE_ID_SLH_DSA_SHAKE_256F (0x02)`:
+   - MUST invoke SLH-DSA-SHAKE-256f verification over `(pubkey, signature, digest32)` using canonical byte strings.
+4. Any other `suite_id` MUST be rejected as `TX_ERR_SIG_ALG_INVALID` before `verify_sig` is invoked.
+5. Any verification failure from rule 2 or 3 MUST be mapped to `TX_ERR_SIG_INVALID`.
+
+Dispatch, input bytes, and success/failure mapping are consensus-critical.
+
+### 12.2 Signature Profile Vectors (Normative)
+
+Consensus vectors for signature-profile behavior:
+
+| Vector ID | Condition | Expected |
+| --- | --- | --- |
+| CV-SIG-01 | `suite_id = 0x01`, canonical ML-DSA lengths, cryptographically invalid signature bytes | `TX_ERR_SIG_INVALID` |
+| CV-SIG-02 | `suite_id = 0x02`, `block_height < SLH_DSA_ACTIVATION_HEIGHT` in required spend slot | `TX_ERR_SIG_ALG_INVALID` |
+| CV-SIG-03 | unknown `suite_id` in spend slot | `TX_ERR_SIG_ALG_INVALID` |
+| CV-SIG-04 | non-canonical signature lengths for selected suite | `TX_ERR_SIG_NONCANONICAL` |
+
 ## 13. Consensus Error Codes (Normative)
 
 The following error codes are consensus-critical and MUST be returned identically by all conforming
@@ -625,10 +660,11 @@ Semantics:
 - `CORE_P2PK`:
   - `covenant_data = suite_id:u8 || key_id:bytes32`.
   - `covenant_data_len MUST equal MAX_P2PK_COVENANT_DATA`.
-  - Spend authorization requires a witness item whose `suite_id` matches and whose `pubkey` hashes to `key_id`,
-    and a valid signature over `digest` (Section 12).
-  - If `suite_id = SUITE_ID_SLH_DSA_SHAKE_256F (0x02)` and `block_height < SLH_DSA_ACTIVATION_HEIGHT`,
-    spend MUST be rejected as `TX_ERR_SIG_ALG_INVALID`.
+  - At output creation, `suite_id MUST equal SUITE_ID_ML_DSA_87 (0x01)`.
+    Any other value MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+  - Spend authorization requires exactly one witness item with `suite_id = SUITE_ID_ML_DSA_87 (0x01)`,
+    `SHA3-256(pubkey) = key_id`, and a valid signature over `digest` (Section 12).
+    Any other suite in this spend path MUST be rejected as `TX_ERR_SIG_ALG_INVALID`.
   - `key_id = SHA3-256(pubkey)` where `pubkey` is the canonical witness public key byte string for the selected
     `suite_id` (no extra length prefixes are included).
 - `CORE_ANCHOR`:
@@ -948,10 +984,7 @@ Then enforce:
 
 1. If `e.covenant_type = CORE_P2PK`:
    - Let `w` be the single WitnessItem assigned to this input by the cursor model.
-   - `w.suite_id` MUST be `SUITE_ID_ML_DSA_87 (0x01)` or `SUITE_ID_SLH_DSA_SHAKE_256F (0x02)`.
-     Any other suite MUST be rejected as `TX_ERR_SIG_ALG_INVALID`.
-   - If `w.suite_id = SUITE_ID_SLH_DSA_SHAKE_256F (0x02)` and `h < SLH_DSA_ACTIVATION_HEIGHT`,
-     reject as `TX_ERR_SIG_ALG_INVALID`.
+   - `w.suite_id` MUST equal `SUITE_ID_ML_DSA_87 (0x01)`. Any other suite MUST be rejected as `TX_ERR_SIG_ALG_INVALID`.
    - Require `len(e.covenant_data) = MAX_P2PK_COVENANT_DATA` and the first byte equals `w.suite_id`. Otherwise reject as
      `TX_ERR_COVENANT_TYPE_INVALID`.
    - Let `key_id = e.covenant_data[1:33]` (after the suite_id byte).
@@ -986,6 +1019,36 @@ Normative definition for all `CORE_VAULT` whitelist computations:
 ```text
 whitelist[j] = SHA3-256(OutputDescriptorBytes(output_j))
 ```
+
+### 18.4 Output Creation Validation and UTXO Transition (Normative)
+
+Output validation at creation is consensus-critical and MUST be applied before any new spendable output
+is inserted into the UTXO map.
+
+Define:
+
+- `ValidateOutputAtCreation(out)` = Section 14 constraints for `out.covenant_type` and `out.covenant_data`.
+- `IsSpendable(out)` is true iff `out.covenant_type` is neither `CORE_ANCHOR` nor `CORE_DA_COMMIT`.
+
+#### `ApplyCoinbase(U_in, T, h)`
+
+1. `T` MUST satisfy coinbase structural rules (Sections 10.5 and 16). Otherwise reject `BLOCK_ERR_COINBASE_INVALID`.
+2. For each output `out` in index order:
+   - run `ValidateOutputAtCreation(out)`; on failure reject with the first returned `TX_ERR_*`;
+   - if `IsSpendable(out)`, add
+     `U[(txid(T), vout_index)] = (value, covenant_type, covenant_data, creation_height=h, created_by_coinbase=true)`.
+
+#### `SpendTx(U_in, T, B_h, h)`
+
+1. Validate transaction-level structural rules and replay-domain rules (Sections 16 and 17).
+2. For each output `out` in index order, run `ValidateOutputAtCreation(out)` first.
+   On first failure reject with the returned `TX_ERR_*`.
+3. Resolve and validate all referenced inputs against `U_in` (missing/non-spendable/maturity/covenant checks).
+4. Remove spent outpoints from working state.
+5. Apply value conservation and covenant spend checks (Sections 18.2 and 20).
+6. Add new spendable outputs in `vout` order with `created_by_coinbase=false`.
+
+If any step fails, the entire transaction application fails and no state update is committed.
 
 ## 19. Coinbase and Subsidy (Normative)
 
@@ -1127,24 +1190,42 @@ For genesis (`h = 0`), these rules are not evaluated.
 
 Fork choice is not part of block validity. Nodes select a canonical chain among valid candidates.
 
-Define per-block work:
+Define per-block work with unsigned arbitrary-precision arithmetic:
 
 ```text
 work(B) = floor(2^256 / target(B))
 ```
 
+Where:
+
+- `target(B)` is parsed as an unsigned 256-bit big-endian integer from `header.target`.
+- `target(B)` range is constrained by Section 10.3 to `1 <= target <= POW_LIMIT`.
+- `2^256` MUST be represented exactly as an arbitrary-precision integer constant (not `u256`, not float).
+- Implementations MUST NOT use floating-point arithmetic for work or chainwork.
+
 Define cumulative chainwork:
 
 ```text
-ChainWork(chain) = Σ work(B_i)
+ChainWork(chain) = Σ work(B_i), i=0..n
 ```
 
-Canonical chain selection:
+`B_0` (genesis) is included in the sum.
+
+Canonical chain selection (deterministic):
 
 1. Prefer the valid chain with maximal `ChainWork`.
 2. If `ChainWork` is equal, choose the chain whose tip `block_hash` is lexicographically smaller (bytewise big-endian).
 
-### 23.1 Feature-Bit Activation Framework (Upgrade Procedure)
+### 23.1 Fork-Choice Test Vectors (Normative)
+
+| Vector ID | Inputs | Expected |
+| --- | --- | --- |
+| CV-FC-01 | `target = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff` | `work = 0x1` |
+| CV-FC-02 | `target = 0x8000000000000000000000000000000000000000000000000000000000000000` | `work = 0x2` |
+| CV-FC-03 | Chain A targets: `[ff..ff, 80..00]`; Chain B targets: `[ff..ff, ff..ff, ff..ff]`; `tip_hash_A < tip_hash_B` | equal `ChainWork`, choose Chain A |
+| CV-FC-04 | `target = 0x0000000000000000000000000000000000000000000000000000000000000001` | `work = 0x10000000000000000000000000000000000000000000000000000000000000000` |
+
+### 23.2 Feature-Bit Activation Framework (Upgrade Procedure)
 
 This framework defines how future consensus changes are coordinated using block header `version` signaling.
 It is an upgrade procedure and does not change block validity unless a specific deployment is declared ACTIVE.
@@ -1225,10 +1306,11 @@ Minimum required order for validating a candidate block `B_h` at height `h`:
 10. Check DA chunk hash integrity (Section 21.2). If any chunk_hash mismatch, reject as `BLOCK_ERR_DA_CHUNK_HASH_INVALID`.
 11. Check DA set completeness (Section 21.3): no orphan chunks, complete sets, DA set count. Reject as applicable.
 12. Check DA payload commitment (Section 21.4). If mismatch or ambiguous (missing or duplicate CORE_DA_COMMIT output), reject as `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID`.
-13. Apply transactions sequentially (Section 18), enforcing:
+13. Apply transactions sequentially using `ApplyCoinbase`/`SpendTx` semantics (Section 18.4), enforcing:
    - coinbase structural rules (Sections 10.5 and 16),
    - transaction structural rules (Section 16),
    - replay-domain checks (Section 17),
+   - output creation validation at insertion time (Sections 14 and 18.4),
    - covenant evaluation (Section 18.2),
    - coinbase subsidy/value bound (Section 19),
    - value conservation (Section 20).
