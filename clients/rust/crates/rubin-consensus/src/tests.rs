@@ -486,12 +486,58 @@ fn validate_tx_covenants_genesis_anchor_nonzero_value() {
 }
 
 #[test]
-fn validate_tx_covenants_genesis_vault_rejected_pending_qv01() {
+fn validate_tx_covenants_genesis_vault_legacy_ok() {
     let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
     tx.outputs = vec![crate::tx::TxOutput {
         value: 1,
         covenant_type: COV_TYPE_VAULT,
-        covenant_data: vec![0x00],
+        covenant_data: vault_covenant_data(false, 0, 0x00, 100, false),
+    }];
+    validate_tx_covenants_genesis(&tx).expect("ok");
+}
+
+#[test]
+fn validate_tx_covenants_genesis_vault_extended_ok() {
+    let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
+    tx.outputs = vec![crate::tx::TxOutput {
+        value: 1,
+        covenant_type: COV_TYPE_VAULT,
+        covenant_data: vault_covenant_data(true, MIN_VAULT_SPEND_DELAY, 0x01, 1_700_000_000, false),
+    }];
+    validate_tx_covenants_genesis(&tx).expect("ok");
+}
+
+#[test]
+fn validate_tx_covenants_genesis_vault_bad_delay() {
+    let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
+    tx.outputs = vec![crate::tx::TxOutput {
+        value: 1,
+        covenant_type: COV_TYPE_VAULT,
+        covenant_data: vault_covenant_data(true, MIN_VAULT_SPEND_DELAY - 1, 0x00, 100, false),
+    }];
+    let err = validate_tx_covenants_genesis(&tx).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+}
+
+#[test]
+fn validate_tx_covenants_genesis_vault_owner_equals_recovery() {
+    let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
+    tx.outputs = vec![crate::tx::TxOutput {
+        value: 1,
+        covenant_type: COV_TYPE_VAULT,
+        covenant_data: vault_covenant_data(true, MIN_VAULT_SPEND_DELAY, 0x00, 100, true),
+    }];
+    let err = validate_tx_covenants_genesis(&tx).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+}
+
+#[test]
+fn validate_tx_covenants_genesis_vault_bad_lock_mode() {
+    let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
+    tx.outputs = vec![crate::tx::TxOutput {
+        value: 1,
+        covenant_type: COV_TYPE_VAULT,
+        covenant_data: vault_covenant_data(false, 0, 0x02, 100, false),
     }];
     let err = validate_tx_covenants_genesis(&tx).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
@@ -534,6 +580,32 @@ fn timelock_data(mode: u8, lock_value: u64) -> Vec<u8> {
     let mut b = vec![0u8; MAX_TIMELOCK_COVENANT_DATA as usize];
     b[0] = mode;
     b[1..9].copy_from_slice(&lock_value.to_le_bytes());
+    b
+}
+
+fn vault_covenant_data(
+    extended: bool,
+    spend_delay: u64,
+    lock_mode: u8,
+    lock_value: u64,
+    same_keys: bool,
+) -> Vec<u8> {
+    let owner = [0x11u8; 32];
+    let recovery = if same_keys { owner } else { [0x22u8; 32] };
+    if !extended {
+        let mut b = Vec::with_capacity(MAX_VAULT_COVENANT_LEGACY as usize);
+        b.extend_from_slice(&owner);
+        b.push(lock_mode);
+        b.extend_from_slice(&lock_value.to_le_bytes());
+        b.extend_from_slice(&recovery);
+        return b;
+    }
+    let mut b = Vec::with_capacity(MAX_VAULT_COVENANT_DATA as usize);
+    b.extend_from_slice(&owner);
+    b.extend_from_slice(&spend_delay.to_le_bytes());
+    b.push(lock_mode);
+    b.extend_from_slice(&lock_value.to_le_bytes());
+    b.extend_from_slice(&recovery);
     b
 }
 
@@ -684,4 +756,60 @@ fn apply_non_coinbase_tx_basic_ok() {
     let summary = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000).expect("ok");
     assert_eq!(summary.fee, 10);
     assert_eq!(summary.utxo_count, 1);
+}
+
+#[test]
+fn apply_non_coinbase_tx_basic_vault_spend_delay_not_met() {
+    let mut prev = [0u8; 32];
+    prev[0] = 0xb0;
+    let tx_bytes =
+        tx_with_one_input_one_output(prev, 0, 90, COV_TYPE_P2PK, &valid_p2pk_covenant_data());
+    let (tx, txid, _wtxid, _n) = parse_tx(&tx_bytes).expect("parse");
+
+    let mut utxos: HashMap<Outpoint, UtxoEntry> = HashMap::new();
+    utxos.insert(
+        Outpoint {
+            txid: prev,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_VAULT,
+            covenant_data: vault_covenant_data(true, MIN_VAULT_SPEND_DELAY, 0x00, 0, false),
+            creation_height: 100,
+            created_by_coinbase: false,
+        },
+    );
+
+    let err = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 100 + MIN_VAULT_SPEND_DELAY - 1, 1000)
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrTimelockNotMet);
+}
+
+#[test]
+fn apply_non_coinbase_tx_basic_vault_spend_delay_met() {
+    let mut prev = [0u8; 32];
+    prev[0] = 0xb1;
+    let tx_bytes =
+        tx_with_one_input_one_output(prev, 0, 90, COV_TYPE_P2PK, &valid_p2pk_covenant_data());
+    let (tx, txid, _wtxid, _n) = parse_tx(&tx_bytes).expect("parse");
+
+    let mut utxos: HashMap<Outpoint, UtxoEntry> = HashMap::new();
+    utxos.insert(
+        Outpoint {
+            txid: prev,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_VAULT,
+            covenant_data: vault_covenant_data(true, MIN_VAULT_SPEND_DELAY, 0x00, 0, false),
+            creation_height: 100,
+            created_by_coinbase: false,
+        },
+    );
+
+    let summary = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 100 + MIN_VAULT_SPEND_DELAY, 1000)
+        .expect("ok");
+    assert_eq!(summary.fee, 10);
 }

@@ -2,11 +2,12 @@ use std::collections::HashMap;
 
 use crate::constants::{
     COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_P2PK, COV_TYPE_TIMELOCK,
-    MAX_TIMELOCK_COVENANT_DATA,
+    COV_TYPE_VAULT, MAX_TIMELOCK_COVENANT_DATA,
 };
 use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
 use crate::tx::Tx;
+use crate::vault::parse_vault_covenant_data;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Outpoint {
@@ -77,6 +78,7 @@ pub fn apply_non_coinbase_tx_basic(
             &entry.covenant_data,
             height,
             block_timestamp,
+            entry.creation_height,
         )?;
 
         sum_in = sum_in
@@ -128,11 +130,28 @@ fn check_spend_timelock(
     covenant_data: &[u8],
     height: u64,
     block_timestamp: u64,
+    creation_height: u64,
 ) -> Result<(), TxError> {
-    if covenant_type != COV_TYPE_TIMELOCK {
-        if covenant_type == COV_TYPE_P2PK {
-            return Ok(());
+    if covenant_type == COV_TYPE_P2PK {
+        return Ok(());
+    }
+    if covenant_type == COV_TYPE_VAULT {
+        let vault = parse_vault_covenant_data(covenant_data)?;
+        // Basic apply path models owner spend-delay guard only.
+        if vault.spend_delay > 0 {
+            let unlock_height = creation_height
+                .checked_add(vault.spend_delay)
+                .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
+            if height < unlock_height {
+                return Err(TxError::new(
+                    ErrorCode::TxErrTimelockNotMet,
+                    "vault spend_delay not met",
+                ));
+            }
         }
+        return Ok(());
+    }
+    if covenant_type != COV_TYPE_TIMELOCK {
         return Err(TxError::new(
             ErrorCode::TxErrCovenantTypeInvalid,
             "unsupported covenant in basic apply",

@@ -53,7 +53,13 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 			return nil, txerr(TX_ERR_COINBASE_IMMATURE, "coinbase immature")
 		}
 
-		if err := checkSpendTimelock(entry.CovenantType, entry.CovenantData, height, blockTimestamp); err != nil {
+		if err := checkSpendTimelock(
+			entry.CovenantType,
+			entry.CovenantData,
+			height,
+			blockTimestamp,
+			entry.CreationHeight,
+		); err != nil {
 			return nil, err
 		}
 
@@ -98,12 +104,35 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 	}, nil
 }
 
-func checkSpendTimelock(covType uint16, covData []byte, height uint64, blockTimestamp uint64) error {
-	if covType != COV_TYPE_TIMELOCK {
-		if covType == COV_TYPE_P2PK {
-			return nil
+func checkSpendTimelock(
+	covType uint16,
+	covData []byte,
+	height uint64,
+	blockTimestamp uint64,
+	creationHeight uint64,
+) error {
+	if covType == COV_TYPE_P2PK {
+		return nil
+	}
+	if covType == COV_TYPE_VAULT {
+		v, err := ParseVaultCovenantData(covData)
+		if err != nil {
+			return err
 		}
-		// VAULT/HTLC/reserved/unknown are unsupported in basic apply path.
+		// Basic apply path models owner spend-delay guard only.
+		if v.SpendDelay > 0 {
+			unlockHeight, err := addU64(creationHeight, v.SpendDelay)
+			if err != nil {
+				return err
+			}
+			if height < unlockHeight {
+				return txerr(TX_ERR_TIMELOCK_NOT_MET, "vault spend_delay not met")
+			}
+		}
+		return nil
+	}
+	if covType != COV_TYPE_TIMELOCK {
+		// HTLC/reserved/unknown are unsupported in basic apply path.
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "unsupported covenant in basic apply")
 	}
 

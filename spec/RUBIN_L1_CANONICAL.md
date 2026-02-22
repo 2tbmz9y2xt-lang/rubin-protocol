@@ -62,6 +62,9 @@ These constants are consensus-critical for this protocol ruleset:
 - `MAX_ANCHOR_BYTES_PER_BLOCK = 131_072` bytes
 - `MAX_P2PK_COVENANT_DATA = 33` bytes
 - `MAX_TIMELOCK_COVENANT_DATA = 9` bytes
+- `MAX_VAULT_COVENANT_LEGACY = 73` bytes
+- `MAX_VAULT_COVENANT_DATA = 81` bytes
+- `MIN_VAULT_SPEND_DELAY = 4_320` blocks
 
 Monetary constants (consensus-critical):
 
@@ -588,17 +591,41 @@ Semantics:
   - Until semantics are ratified in this document, any output with `covenant_type = 0x0100` MUST be
     rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
 - `CORE_VAULT`:
-  - Consensus-native covenant, active from genesis. Full spend semantics defined in Section 14.1.
-  - **Section 14.1 is pending Q-V01 controller approval.** Until ratified, any output with
-    `covenant_type = 0x0101` MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+  - Consensus-native covenant, active from genesis.
+  - `covenant_data` has two valid encodings:
+    - legacy (73 bytes): `owner_key_id:bytes32 || lock_mode:u8 || lock_value:u64le || recovery_key_id:bytes32`
+    - extended (81 bytes): `owner_key_id:bytes32 || spend_delay:u64le || lock_mode:u8 || lock_value:u64le || recovery_key_id:bytes32`
+  - `covenant_data_len` MUST be either `73` or `81`. Any other length MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+  - For extended form, `spend_delay` MUST be `>= MIN_VAULT_SPEND_DELAY`. Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+  - `lock_mode` MUST be `0x00` (height lock) or `0x01` (timestamp lock). Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+  - `owner_key_id` MUST NOT equal `recovery_key_id`. Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+  - Spend semantics are defined in Section 14.1.
 
 ### 14.1 CORE_VAULT Semantics (Normative)
 
-> **TODO — pending Q-V01 controller approval.**
-> This section will define the full consensus spend rules for `CORE_VAULT` (0x0101):
-> covenant_data layout, spend_delay, whitelist_root, recovery_key, partial_spend rules,
-> early_close fee, CheckBlock rules, and error codes.
-> Do not implement until this section is populated and approved.
+For each non-coinbase input spending a `CORE_VAULT` output `o`:
+
+1. `script_sig_len` MUST be `0`. Otherwise reject as `TX_ERR_PARSE`.
+2. Parse `o.covenant_data` according to Section 14:
+   - legacy (73 bytes) implies `spend_delay = 0`
+   - extended (81 bytes) carries explicit `spend_delay`
+3. Compute `actual_key_id = SHA3-256(witness.pubkey)`.
+4. If `actual_key_id = owner_key_id` (owner path):
+   - if `spend_delay = 0`, owner spend is immediate;
+   - if `spend_delay > 0`, require `height(B) >= o.creation_height + spend_delay`, else reject as
+     `TX_ERR_TIMELOCK_NOT_MET`.
+5. Else if `actual_key_id = recovery_key_id` (recovery path):
+   - if `lock_mode = 0x00`, require `height(B) >= lock_value`;
+   - if `lock_mode = 0x01`, require `timestamp(B) >= lock_value`;
+   - if condition is not met, reject as `TX_ERR_TIMELOCK_NOT_MET`.
+6. Else reject as `TX_ERR_SIG_INVALID`.
+
+Notes:
+- Signature suite and signature-validity checks for `CORE_VAULT` follow the same witness rules as `CORE_P2PK`
+  (Section 13 and Section 16 ordering).
+- This profile defines `CORE_VAULT` core semantics only. Optional policy features (for example destination whitelist,
+  early-close fee policy, and partial-spend policy) are non-consensus extensions and are out of scope for this
+  canonical section.
 - `CORE_DA_COMMIT`:
   - `covenant_data_len MUST equal 32`. Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
   - `covenant_data MUST equal SHA3-256(T.da_payload)` where `T` is the containing transaction. Otherwise reject as
