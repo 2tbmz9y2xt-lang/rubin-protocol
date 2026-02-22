@@ -108,7 +108,7 @@ See CANONICAL §19 for exact formula.
 | Max witness bytes per tx | 100,000 |
 | Max script_sig bytes | 32 |
 | Max DA batches per block | 128 |
-| Max chunks per DA set | 4,096 |
+| Max chunks per DA set | 61 (derived: floor(MAX_DA_BYTES_PER_BLOCK / CHUNK_BYTES)) |
 | Chunk size | 524,288 bytes (512 KiB) |
 | Max DA manifest bytes per tx | 65,536 |
 | Max anchor payload per tx | 65,536 bytes |
