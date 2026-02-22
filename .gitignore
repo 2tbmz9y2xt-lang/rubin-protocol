@@ -24,6 +24,9 @@ conformance/bin/
 *.sqlite3
 .DS_Store
 
+# JSON guard artifacts (never commit)
+*.invalid.*.json
+
 # Vault draft (local)
 spec/RUBIN_CORE_VAULT_V1_SPEC_v0.9.md
 
