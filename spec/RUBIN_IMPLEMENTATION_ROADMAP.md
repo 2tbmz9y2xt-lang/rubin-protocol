@@ -55,6 +55,9 @@ Scope:
 - Header linkage, PoW, target, merkle checks.
 - Block validation order aligned with CANONICAL.
 
+Prerequisite: Q-V01 (vault spec approval) and Q-C001 (CANONICAL rewrite) must be complete.
+CORE_VAULT_V1 is a consensus-native covenant active from genesis — Q-R001 onwards must reflect full registry.
+
 Mapped queue items:
 
 - `Q-R001`
@@ -67,13 +70,15 @@ Exit criteria:
 
 ## 3.3 Phase C2 - Covenant and UTXO Core (Go + Rust parity)
 
-Goal: deterministic covenant/UTXO behavior parity.
+Goal: deterministic covenant/UTXO behavior parity including vault.
 
 Scope:
 
 - `CORE_P2PK`, `CORE_TIMELOCK_V1`, `CORE_ANCHOR`, `CORE_DA_COMMIT` checks.
+- `CORE_VAULT_V1` — consensus-native, full CheckBlock rules (spend_delay, whitelist_root, recovery_key, partial_spend, early_close fee).
 - Non-spendable output handling.
 - Basic UTXO apply paths and deterministic error mapping.
+- `BLOCK_ERR_UNKNOWN_COVENANT_TYPE` for RESERVED slots (0x0100, 0x0102).
 
 Mapped queue items:
 
@@ -82,8 +87,9 @@ Mapped queue items:
 
 Exit criteria:
 
-1. Cross-client parity for positive and negative covenant/UTXO vectors.
+1. Cross-client parity for positive and negative covenant/UTXO vectors including vault.
 2. Error code parity for all covered failure classes.
+3. CV-VAULT conformance gate green on both clients.
 
 ## 3.4 Phase C3 - Conformance Expansion
 
@@ -106,23 +112,80 @@ Exit criteria:
 2. Fixture corpus covers all implemented consensus branches.
 3. Bundle run is green on both clients.
 
-## 3.5 Phase C4 - Vault Integration (after approval)
+## 3.5 Phase 2 - P2P Protocol Spec + Implementation
 
-Goal: integrate finalized vault semantics without destabilizing previous gates.
+Goal: P2P protocol fully specified and implemented in both clients. No node binary yet — transport layer only.
 
 Scope:
 
-- Integrate approved vault spec into CANONICAL.
-- Implement Go/Rust parity and CV coverage.
+- P2P message framing, handshake, `MAX_RELAY_MSG_BYTES` enforcement (spec + code).
+- Compact block send/receive logic in Go and Rust (no running node required).
+- DA mempool (512 MiB) and orphan pool (64 MiB / 3-block TTL) — in-process, not networked.
+- Conformance gates for P2P relay behavior (CV-P2P-* bundle).
+- SipHash-2-4 short-id generation parity Go↔Rust.
 
-Mapped queue item:
-
-- `Q-V01`
+Note: node binary and actual networking between processes belong to Phase 3 (Devnet).
 
 Exit criteria:
 
-1. Controller approval on vault semantics exists.
-2. Go and Rust parity is proven by dedicated vectors.
+1. P2P message encoding/decoding passes Go↔Rust parity vectors.
+2. Compact block relay logic passes CV-COMPACT full matrix (all 18 gates).
+3. DA mempool accept/evict logic is unit-tested in both clients.
+
+## 3.7 Phase 3 - Devnet
+
+Goal: functional chain running between ≥2 independent nodes.
+
+Scope:
+
+- Node binary (Go or Rust) capable of mining, broadcasting, and validating blocks.
+- P2P handshake and compact block relay operational.
+- DA relay functional end-to-end.
+- genesis block produced from deterministic test parameters (not mainnet ceremony).
+
+Exit criteria:
+
+1. ≥2 nodes reach consensus on the same chain tip.
+2. Full block relay and compact block relay both functional.
+3. DA set arrives and passes CheckBlock on receiving node.
+
+## 3.8 Phase 4 - Testnet
+
+Goal: public testnet with external participants, 30-day stability window.
+
+Scope:
+
+- Testnet genesis ceremony (non-mainnet keys).
+- PREFETCH parameter validation via telemetry.
+- Public faucet and block explorer.
+- `orphan_recovery_success_rate ≥ 99.5%` sustained.
+- Independent security audit engagement.
+
+Exit criteria:
+
+1. 30 days continuous operation without consensus divergence.
+2. `shortid_collision_count` within expected bounds.
+3. `miss_rate_bytes_DA < 0.5%` at tip under normal conditions.
+4. Audit report received and critical findings resolved.
+
+## 3.9 Phase 5 - Mainnet
+
+Goal: mainnet launch.
+
+Scope:
+
+- Mainnet genesis ceremony (B-01, B-02, B-03).
+- `chain_id` derived and published.
+- Spec frozen (FREEZE tag on all four spec documents).
+- Final audit sign-off.
+
+Exit criteria:
+
+1. B-01 genesis_header_bytes_hex — ceremony complete.
+2. B-02 genesis_tx_bytes_hex — ceremony complete.
+3. B-03 chain_id_hex + genesis_block_hash_hex — derived and published.
+4. All spec documents tagged FREEZE.
+5. Independent audit sign-off on consensus layer.
 
 ## 4. Global Delivery Rules
 
