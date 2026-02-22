@@ -56,7 +56,7 @@ Scope:
 - Block validation order aligned with CANONICAL.
 
 Prerequisite: Q-V01 (vault spec approval) and Q-C001 (CANONICAL rewrite) must be complete.
-CORE_VAULT_V1 is a consensus-native covenant active from genesis — Q-R001 onwards must reflect full registry.
+CORE_VAULT is a consensus-native covenant active from genesis — Q-R001 onwards must reflect full registry.
 
 Mapped queue items:
 
@@ -74,11 +74,11 @@ Goal: deterministic covenant/UTXO behavior parity including vault.
 
 Scope:
 
-- `CORE_P2PK`, `CORE_TIMELOCK_V1`, `CORE_ANCHOR`, `CORE_DA_COMMIT` checks.
-- `CORE_VAULT_V1` — consensus-native, full CheckBlock rules (spend_delay, whitelist_root, recovery_key, partial_spend, early_close fee).
+- `CORE_P2PK`, `CORE_TIMELOCK`, `CORE_ANCHOR`, `CORE_DA_COMMIT` checks.
+- `CORE_VAULT` — consensus-native, full CheckBlock rules (spend_delay, whitelist_root, recovery_key, partial_spend, early_close fee).
 - Non-spendable output handling.
 - Basic UTXO apply paths and deterministic error mapping.
-- `BLOCK_ERR_UNKNOWN_COVENANT_TYPE` for RESERVED slots (0x0100, 0x0102).
+- `TX_ERR_COVENANT_TYPE_INVALID` for RESERVED slot `0x0100` until `Q-S001`.
 
 Mapped queue items:
 
