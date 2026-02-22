@@ -1,0 +1,30 @@
+{
+  "gate": "CV-COMPACT",
+  "vectors": [
+    {
+      "id": "CV-C-01",
+      "op": "compact_shortid",
+      "wtxid": "26ce78c5671f12911e3610831095305ed00a112b9ba59cddb87c694bb8b4e695",
+      "nonce1": 506097522914230528,
+      "nonce2": 1084818905618843912,
+      "expect_ok": true,
+      "expect_short_id": "b50c6fb86b2f"
+    },
+    {
+      "id": "CV-C-03",
+      "op": "parse_tx",
+      "tx_hex": "010000000001000000000000000000000000000000",
+      "expect_ok": true,
+      "expect_txid": "76f13ad1afe0e8ef7c8bc2cc9c25037ffdfc44b1deb8c518122f16bba9f84a54",
+      "expect_wtxid": "26ce78c5671f12911e3610831095305ed00a112b9ba59cddb87c694bb8b4e695"
+    },
+    {
+      "id": "CV-C-04",
+      "op": "parse_tx",
+      "tx_hex": "010000000002000000000000000000000000000000",
+      "expect_ok": true,
+      "expect_txid": "abf5ba685f88998ef336e4baf0bdd902ac4c9a5f3036933ad91e67e2a1174d87",
+      "expect_wtxid": "79b8a499bcf22429f1deac90380812d56b2d81621e34c1d200aba61d5a375e80"
+    }
+  ]
+}

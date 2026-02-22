@@ -14,6 +14,9 @@ type Request struct {
 	Op         string   `json:"op"`
 	TxHex      string   `json:"tx_hex,omitempty"`
 	Txids      []string `json:"txids,omitempty"`
+	WtxidHex   string   `json:"wtxid,omitempty"`
+	Nonce1     uint64   `json:"nonce1,omitempty"`
+	Nonce2     uint64   `json:"nonce2,omitempty"`
 	InputIndex uint32   `json:"input_index,omitempty"`
 	InputValue uint64   `json:"input_value,omitempty"`
 	ChainIDHex string   `json:"chain_id,omitempty"`
@@ -34,6 +37,7 @@ type Response struct {
 	DigestHex string `json:"digest,omitempty"`
 	BlockHash string `json:"block_hash,omitempty"`
 	TargetNew string `json:"target_new,omitempty"`
+	ShortID   string `json:"short_id,omitempty"`
 	Consumed  int    `json:"consumed,omitempty"`
 }
 
@@ -194,6 +198,19 @@ func main() {
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true, TargetNew: hex.EncodeToString(newT[:])})
+		return
+
+	case "compact_shortid":
+		wtxidBytes, err := hex.DecodeString(req.WtxidHex)
+		if err != nil || len(wtxidBytes) != 32 {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad wtxid"})
+			return
+		}
+		var wtxid [32]byte
+		copy(wtxid[:], wtxidBytes)
+
+		shortID := consensus.CompactShortID(wtxid, req.Nonce1, req.Nonce2)
+		writeResp(os.Stdout, Response{Ok: true, ShortID: hex.EncodeToString(shortID[:])})
 		return
 
 	default:

@@ -98,6 +98,10 @@ def validate_vector(
         req["target_old"] = v["target_old"]
         req["timestamp_first"] = v["timestamp_first"]
         req["timestamp_last"] = v["timestamp_last"]
+    elif op == "compact_shortid":
+        req["wtxid"] = v["wtxid"]
+        req["nonce1"] = v["nonce1"]
+        req["nonce2"] = v["nonce2"]
     else:
         return [f"{gate}/{v.get('id','?')}: unknown op {op}"]
 
@@ -166,6 +170,15 @@ def validate_vector(
     elif op == "pow_check":
         # ok/err parity is already checked above.
         pass
+    elif op == "compact_shortid":
+        go_sid = go_resp.get("short_id") or go_resp.get("digest")
+        rust_sid = rust_resp.get("short_id") or rust_resp.get("digest")
+        if go_sid != rust_sid:
+            problems.append(
+                f"{gate}/{vid}: short_id mismatch go={go_sid} rust={rust_sid}"
+            )
+        if "expect_short_id" in v and go_sid != v["expect_short_id"]:
+            problems.append(f"{gate}/{vid}: expect_short_id mismatch")
 
     return problems
 

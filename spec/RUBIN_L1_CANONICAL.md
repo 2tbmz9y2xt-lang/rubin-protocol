@@ -7,7 +7,6 @@ consensus validity.
 
 - "Transaction wire" is the byte-level transaction serialization used in blocks and P2P relay.
 - The chain uses **Transaction Wire version 1 at genesis**.
-- There is no activation height and no VERSION_BITS gate for wire versions.
 - Any node that does not implement Transaction Wire version 1 cannot validate the chain.
 
 ## 2. Primitive Encodings
@@ -43,8 +42,8 @@ These constants are consensus-critical for this protocol ruleset:
 
 - `TX_WIRE_VERSION = 1`
 - `WITNESS_DISCOUNT_DIVISOR = 4`
-- `TARGET_BLOCK_INTERVAL = 600` seconds
-- `WINDOW_SIZE = 2_016` blocks
+- `TARGET_BLOCK_INTERVAL = 120` seconds
+- `WINDOW_SIZE = 10_080` blocks
 - `COINBASE_MATURITY = 100` blocks
 - `MAX_FUTURE_DRIFT = 7_200` seconds
 - `MAX_TX_INPUTS = 1024`
@@ -52,7 +51,12 @@ These constants are consensus-critical for this protocol ruleset:
 - `MAX_WITNESS_ITEMS = 1024`
 - `MAX_WITNESS_BYTES_PER_TX = 100_000`
 - `MAX_SCRIPT_SIG_BYTES = 32`
-- `MAX_BLOCK_WEIGHT = 4_000_000` weight units
+- `MAX_BLOCK_WEIGHT = 68_000_000` weight units
+- `MAX_DA_BYTES_PER_BLOCK = 32_000_000` bytes
+- `MAX_DA_MANIFEST_BYTES_PER_TX = 65_536` bytes
+- `CHUNK_BYTES = 524_288` bytes
+- `MAX_DA_BATCHES_PER_BLOCK = 128`
+- `MAX_DA_CHUNK_COUNT = 4_096`
 - `MAX_ANCHOR_PAYLOAD_SIZE = 65_536` bytes
 - `MAX_ANCHOR_BYTES_PER_BLOCK = 131_072` bytes
 - `MAX_P2PK_COVENANT_DATA = 33` bytes
@@ -63,7 +67,7 @@ Monetary constants (consensus-critical):
 - `BASE_UNITS_PER_RBN = 100_000_000`
 - `MAX_SUPPLY = 10_000_000_000_000_000` base units (100_000_000 RBN)
 - `SUBSIDY_TOTAL_MINED = 9_900_000_000_000_000` base units (99_000_000 RBN)
-- `SUBSIDY_DURATION_BLOCKS = 1_314_900` blocks
+- `SUBSIDY_DURATION_BLOCKS = 876_600` blocks
 
 Non-consensus operational defaults (not used for validity):
 
@@ -74,7 +78,7 @@ Non-consensus operational defaults (not used for validity):
 Non-consensus relay policy defaults (not used for validity):
 
 - `MAX_WITNESS_ITEM_BYTES = 65_000`
-- `MAX_RELAY_MSG_BYTES = 8_388_608`
+- `MAX_RELAY_MSG_BYTES = 100_663_296`
 - `MIN_RELAY_FEE_RATE = 1`
 
 PQC witness canonical sizes:
@@ -109,6 +113,7 @@ Tx {
   output_count : CompactSize
   outputs[] : TxOutput[output_count]
   locktime : u32le
+  da_core_fields : DaCoreFields
   witness : WitnessSection
   da_payload_len : CompactSize
   da_payload : bytes[da_payload_len]
@@ -141,6 +146,33 @@ WitnessItem {
   sig_length : CompactSize
   signature : bytes[sig_length]
 }
+
+DaCoreFields depends on `tx_kind`:
+
+DaCoreFields(tx_kind=0x00) = empty
+
+DaCoreFields(tx_kind=0x01) = DaCommitCoreFields
+
+DaCoreFields(tx_kind=0x02) = DaChunkCoreFields
+
+DaCommitCoreFields {
+  da_id : bytes32
+  chunk_count : u16le
+  retl_domain_id : bytes32
+  batch_number : u64le
+  tx_data_root : bytes32
+  state_root : bytes32
+  withdrawals_root : bytes32
+  batch_sig_suite : u8
+  batch_sig_len : CompactSize
+  batch_sig : bytes[batch_sig_len]
+}
+
+DaChunkCoreFields {
+  da_id : bytes32
+  chunk_index : u16le
+  chunk_hash : bytes32
+}
 ```
 
 ### 5.2 `tx_kind`
@@ -148,13 +180,15 @@ WitnessItem {
 `tx_kind` is an explicit transaction kind selector:
 
 - `0x00`: standard transaction (no DA).
-- `0x01`: reserved (future).
-- `0x02`: reserved (future).
+- `0x01`: DA commit transaction.
+- `0x02`: DA chunk transaction.
 
 Rules:
 
-- `tx_kind` MUST equal `0x00`. Any other value MUST be rejected as `TX_ERR_PARSE`.
+- `tx_kind` MUST be one of `0x00`, `0x01`, or `0x02`. Any other value MUST be rejected as `TX_ERR_PARSE`.
 - For `tx_kind = 0x00`, `da_payload_len` MUST equal `0`. Any other value MUST be rejected as `TX_ERR_PARSE`.
+- For `tx_kind = 0x01`, `da_payload_len MUST be <= MAX_DA_MANIFEST_BYTES_PER_TX`. Otherwise reject as `TX_ERR_PARSE`.
+- For `tx_kind = 0x02`, `da_payload_len MUST be <= CHUNK_BYTES`. Otherwise reject as `TX_ERR_PARSE`.
 
 ### 5.3 Syntax Limits (Parsing)
 
@@ -229,11 +263,19 @@ CompactSize(T.input_count) ||
 concat(T.inputs[i] for i in [0..input_count-1]) ||
 CompactSize(T.output_count) ||
 concat(T.outputs[j] for j in [0..output_count-1]) ||
-u32le(T.locktime)
+u32le(T.locktime) ||
+DaCoreFieldsBytes(T)
 ```
 
 Where each `TxInput` and `TxOutput` is serialized exactly as in Section 5.1, and all `CompactSize` values MUST be
 minimally encoded (see Section 3).
+
+`DaCoreFieldsBytes(T)` is defined as:
+
+- If `T.tx_kind = 0x00`: the empty byte string.
+- If `T.tx_kind = 0x01`: the canonical serialization of `DaCommitCoreFields` (Section 5.1) in that exact field order,
+  with `batch_sig_len` minimally-encoded CompactSize.
+- If `T.tx_kind = 0x02`: the canonical serialization of `DaChunkCoreFields` (Section 5.1) in that exact field order.
 
 `TxBytes(T)` is defined as:
 
@@ -268,10 +310,11 @@ For any valid transaction `T`:
 ```text
 base_size = |TxCoreBytes(T)|
 wit_size  = |WitnessBytes(T.witness)|
+da_size   = |CompactSize(T.da_payload_len)| + T.da_payload_len
 ml_count  = count witness items where suite_id = SUITE_ID_ML_DSA_87
 slh_count = count witness items where suite_id = SUITE_ID_SLH_DSA_SHAKE_256F
 sig_cost  = ml_count * VERIFY_COST_ML_DSA_87 + slh_count * VERIFY_COST_SLH_DSA_SHAKE_256F
-weight(T) = WITNESS_DISCOUNT_DIVISOR * base_size + wit_size + sig_cost
+weight(T) = WITNESS_DISCOUNT_DIVISOR * base_size + wit_size + da_size + sig_cost
 ```
 
 Notes:
@@ -286,6 +329,11 @@ sum_weight = sum(weight(T) for each transaction T in B.txs)
 ```
 
 `sum_weight MUST be <= MAX_BLOCK_WEIGHT`. Otherwise the block is invalid.
+
+Per-block DA bytes constraint:
+
+- Let `sum_da_bytes(B) = sum(T.da_payload_len for each transaction T in B.txs where T.tx_kind != 0x00)`.
+- `sum_da_bytes(B) MUST be <= MAX_DA_BYTES_PER_BLOCK`. Otherwise the block is invalid (`BLOCK_ERR_WEIGHT_EXCEEDED`).
 
 ## 10. Block Wire Format (Normative)
 
@@ -414,7 +462,7 @@ signature.
 Definitions:
 
 ```text
-hash_of_da_core_fields = SHA3-256("")   # tx_kind=0x00 has no DA core fields
+hash_of_da_core_fields = SHA3-256(DaCoreFieldsBytes(T))
 hash_of_all_prevouts = SHA3-256(concat(inputs[i].prev_txid || u32le(inputs[i].prev_vout) for i in [0..input_count-1]))
 hash_of_all_sequences = SHA3-256(concat(u32le(inputs[i].sequence) for i in [0..input_count-1]))
 hash_of_all_outputs = SHA3-256(concat(outputs[j] in TxOutput wire order for j in [0..output_count-1]))
@@ -481,6 +529,10 @@ implementations for the described failure classes:
 - Coinbase subsidy exceeded                        -> `BLOCK_ERR_SUBSIDY_EXCEEDED`
 - Weight exceedance                                -> `BLOCK_ERR_WEIGHT_EXCEEDED`
 - Anchor bytes exceeded                            -> `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`
+- DA set incomplete (commit without all chunks)    -> `BLOCK_ERR_DA_INCOMPLETE`
+- DA chunk hash mismatch                           -> `BLOCK_ERR_DA_CHUNK_HASH_INVALID`
+- DA set orphan chunk (chunk without commit)       -> `BLOCK_ERR_DA_SET_INVALID`
+- DA batch count exceeded                          -> `BLOCK_ERR_DA_BATCH_EXCEEDED`
 - Malformed block encoding                         -> `BLOCK_ERR_PARSE`
 
 Error priority (short-circuit):
@@ -496,6 +548,7 @@ The following `covenant_type` values are valid:
 - `0x0000` `CORE_P2PK`
 - `0x0001` `CORE_TIMELOCK_V1`
 - `0x0002` `CORE_ANCHOR`
+- `0x0103` `CORE_DA_COMMIT`
 - `0x00ff` `CORE_RESERVED_FUTURE`
 
 Any unknown or future `covenant_type` MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
@@ -523,6 +576,15 @@ Semantics:
     ANCHOR output MUST be rejected as `TX_ERR_MISSING_UTXO`.
   - Per-block constraint: sum of `covenant_data_len` across all `CORE_ANCHOR` outputs in a block MUST be
     `<= MAX_ANCHOR_BYTES_PER_BLOCK`; otherwise reject the block as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
+- `CORE_DA_COMMIT`:
+  - `covenant_data_len MUST equal 32`. Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+  - `covenant_data MUST equal SHA3-256(T.da_payload)` where `T` is the containing transaction. Otherwise reject as
+    `TX_ERR_COVENANT_TYPE_INVALID`.
+  - `value MUST equal 0`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+  - `CORE_DA_COMMIT` outputs are non-spendable and MUST NOT be added to the spendable UTXO set. Any attempt to spend a
+    DA_COMMIT output MUST be rejected as `TX_ERR_MISSING_UTXO`.
+  - `CORE_DA_COMMIT` MAY only appear in `tx_kind = 0x01` (DA commit transactions). Any appearance in other
+    `tx_kind` values MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
 - `CORE_RESERVED_FUTURE`:
   - Forbidden; any appearance MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
 
@@ -727,7 +789,59 @@ For each non-coinbase transaction `T`:
 3. If `sum_out > sum_in`, reject as `TX_ERR_VALUE_CONSERVATION`.
 4. Arithmetic MUST be exact. Any overflow MUST be rejected as `TX_ERR_PARSE`.
 
-## 21. Block Timestamp Rules (Normative)
+## 21. DA Set Integrity (Normative)
+
+These rules apply during block validation after all transaction parsing is complete.
+
+### 21.1 Definitions
+
+A **DA set** is identified by a `da_id` value (bytes32). A DA set consists of:
+- Exactly one `DA_COMMIT_TX` (`tx_kind = 0x01`) whose `DaCommitCoreFields.da_id` equals the set's `da_id`.
+- Exactly `chunk_count` `DA_CHUNK_TX` records (`tx_kind = 0x02`) whose `DaChunkCoreFields.da_id` equals the set's `da_id`,
+  with `chunk_index` values `0, 1, ..., chunk_count - 1` each appearing exactly once.
+
+### 21.2 Chunk Hash Integrity
+
+For each `DA_CHUNK_TX` transaction `T` in a block:
+
+- `T.da_core_fields.chunk_hash MUST equal SHA3-256(T.da_payload)`.
+  If violated, reject the block as `BLOCK_ERR_DA_CHUNK_HASH_INVALID`.
+
+### 21.3 Set Completeness (CheckBlock DA)
+
+For each block `B`:
+
+1. Let `commits` be the set of all `DA_COMMIT_TX` in `B`, keyed by `da_id`.
+2. Let `chunks` be the multiset of all `DA_CHUNK_TX` in `B`, grouped by `da_id`.
+
+Rules:
+
+- **No orphan chunks:** Every `DA_CHUNK_TX` in `B` MUST have a corresponding `DA_COMMIT_TX` in `B` with the same `da_id`.
+  If any `DA_CHUNK_TX` exists without a matching commit, reject as `BLOCK_ERR_DA_SET_INVALID`.
+
+- **Complete sets only:** For every `DA_COMMIT_TX` with `chunk_count = C` and `da_id = D` in `B`,
+  the block MUST contain exactly `C` `DA_CHUNK_TX` records with `da_id = D` and `chunk_index` values
+  `{0, 1, ..., C-1}` each appearing exactly once.
+  If any chunk is missing or duplicated, reject as `BLOCK_ERR_DA_INCOMPLETE`.
+
+- **Batch count:** The number of distinct `da_id` values in `B` MUST be `<= MAX_DA_BATCHES_PER_BLOCK`.
+  If exceeded, reject as `BLOCK_ERR_DA_BATCH_EXCEEDED`.
+
+- **Chunk count per set:** For each `DA_COMMIT_TX`, `chunk_count MUST be <= MAX_DA_CHUNK_COUNT`.
+  If exceeded, reject as `TX_ERR_PARSE`.
+
+### 21.4 Payload Commitment Verification
+
+For each `DA_COMMIT_TX` `T` with `chunk_count = C` and `da_id = D`:
+
+- Let `chunks_sorted` be the `C` DA_CHUNK_TX records for `D` sorted by `chunk_index` ascending.
+- `T` MUST contain a `CORE_DA_COMMIT` output whose `covenant_data` equals
+  `SHA3-256(concat(chunk.da_payload for chunk in chunks_sorted))`.
+  If violated, reject as `BLOCK_ERR_DA_CHUNK_HASH_INVALID`.
+
+This is the binding commitment that links the on-chain commit to the full DA payload.
+
+## 22. Block Timestamp Rules (Normative)
 
 Timestamp is a 64-bit unsigned integer representing seconds since UNIX epoch.
 
@@ -794,7 +908,10 @@ Minimum required order for validating a candidate block `B_h` at height `h`:
 6. Check block timestamp rules (Section 21). If invalid, reject as `BLOCK_ERR_TIMESTAMP_OLD` or `BLOCK_ERR_TIMESTAMP_FUTURE`.
 7. Check total block weight (Section 9). If exceeded, reject as `BLOCK_ERR_WEIGHT_EXCEEDED`.
 8. Check per-block ANCHOR byte limits (Section 14). If exceeded, reject as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
-9. Apply transactions sequentially (Section 18), enforcing:
+9. Check DA chunk hash integrity (Section 21.2). If any chunk_hash mismatch, reject as `BLOCK_ERR_DA_CHUNK_HASH_INVALID`.
+10. Check DA set completeness (Section 21.3): no orphan chunks, complete sets, batch count. Reject as applicable.
+11. Check DA payload commitment (Section 21.4). If mismatch, reject as `BLOCK_ERR_DA_CHUNK_HASH_INVALID`.
+12. Apply transactions sequentially (Section 18), enforcing:
    - coinbase structural rules (Sections 10.5 and 16),
    - transaction structural rules (Section 16),
    - replay-domain checks (Section 17),

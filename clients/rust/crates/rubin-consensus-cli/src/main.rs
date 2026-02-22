@@ -1,5 +1,6 @@
 use rubin_consensus::{
-    block_hash, merkle_root_txids, parse_tx, pow_check, retarget_v1, sighash_v1_digest, ErrorCode,
+    block_hash, compact_shortid, merkle_root_txids, parse_tx, pow_check, retarget_v1,
+    sighash_v1_digest, ErrorCode,
 };
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +13,15 @@ struct Request {
 
     #[serde(default)]
     txids: Vec<String>,
+
+    #[serde(default)]
+    wtxid: String,
+
+    #[serde(default)]
+    nonce1: u64,
+
+    #[serde(default)]
+    nonce2: u64,
 
     #[serde(default)]
     input_index: u32,
@@ -521,6 +531,56 @@ fn main() {
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
             }
+        }
+        "compact_shortid" => {
+            let wtxid_bytes = match hex::decode(req.wtxid) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad wtxid".to_string()),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            if wtxid_bytes.len() != 32 {
+                let resp = Response {
+                    ok: false,
+                    err: Some("bad wtxid".to_string()),
+                    txid: None,
+                    wtxid: None,
+                    merkle_root: None,
+                    digest: None,
+                    consumed: None,
+                    block_hash: None,
+                    target_new: None,
+                };
+                let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                return;
+            }
+            let mut wtxid = [0u8; 32];
+            wtxid.copy_from_slice(&wtxid_bytes);
+            let sid = compact_shortid(wtxid, req.nonce1, req.nonce2);
+            let resp = Response {
+                ok: true,
+                err: None,
+                txid: None,
+                wtxid: None,
+                merkle_root: None,
+                digest: Some(hex::encode(sid)),
+                consumed: None,
+                block_hash: None,
+                target_new: None,
+            };
+            let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
         _ => {
             let resp = Response {
