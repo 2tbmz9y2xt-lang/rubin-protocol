@@ -37,3 +37,6 @@ spec/RUBIN_IMPLEMENTATION_ROADMAP.md
 # Local orchestration files (must stay local-only)
 scripts/orchestration/
 operational/orchestration/
+
+# Native wolfSSL build artifacts
+scripts/crypto/wolfssl/.work/

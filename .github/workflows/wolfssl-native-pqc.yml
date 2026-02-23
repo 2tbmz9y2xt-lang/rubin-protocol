@@ -1,0 +1,43 @@
+name: wolfssl-native-pqc
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [ main ]
+    paths:
+      - 'scripts/crypto/wolfssl/**'
+      - '.github/workflows/wolfssl-native-pqc.yml'
+
+jobs:
+  native-pqc-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake libtool pkg-config git
+
+      - name: Build native wolfSSL (no liboqs)
+        run: |
+          ./scripts/crypto/wolfssl/build-wolfssl-native.sh
+        env:
+          WOLFSSL_REF: v5.8.4-stable
+          WOLFSSL_MLKEM_OPTION: 768,make,encapsulate,decapsulate,ml-kem
+          WOLFSSL_MLDSA_OPTION: 87,make,sign,verify
+
+      - name: Smoke test PQ API
+        run: |
+          ./scripts/crypto/wolfssl/run-smoke.sh
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wolfssl-native-pqc-build-log
+          path: scripts/crypto/wolfssl/.work/logs/last-build.log
