@@ -86,12 +86,11 @@ Notes:
   - 500,000 RBN treasury pool, unlocked linearly over 5 years using `CORE_HTLC` refund-height tranches.
 
 Treasury tranche schedule (informative):
-- Total treasury amount: 500,000 RBN split into `N = 60` tranches (60-month approximation).
-- Each tranche unlocks at `refund_lock_height = i * 21,900` blocks, for tranche index `i = 1..60`
-  (since `21,900 * 60 = 1,314,000` blocks ≈ 5 years at 120s block time).
+- Total treasury amount: 500,000 RBN split into `N = 20` tranches (quarterly over 5 years).
+- Each tranche unlocks at `refund_lock_height = i * 65,700` blocks, for tranche index `i = 1..20`
+  (since `65,700 * 20 = 1,314,000` blocks ≈ 5 years at 120s block time).
 - Tranche values use integer base units:
-  - `base = floor(500,000 RBN / 60) = 8,333.33333333 RBN` per tranche (833,333,333,333 base units)
-  - the remainder (20 base units) is distributed by adding +1 base unit to the first 20 tranches.
+  - `500,000 RBN / 20 = 25,000 RBN` per tranche (2,500,000,000,000 base units); no remainder.
 
 Exact recipient key IDs and hashes are chain-instance parameters and MUST be fixed by the published genesis bytes.
 
