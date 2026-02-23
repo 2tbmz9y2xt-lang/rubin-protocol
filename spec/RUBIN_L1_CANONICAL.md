@@ -1208,6 +1208,12 @@ Genesis exception:
 - For height `h = 0`, the coinbase value bound is not evaluated. Genesis outputs are chain-instance allocations fixed
   by the published genesis bytes.
 
+Note (informative):
+
+- A chain instance MAY encode genesis allocations with consensus-native restrictions (for example, distributing a treasury
+  allocation across multiple `CORE_HTLC` outputs using refund height locks). This does not alter consensus rules; it is
+  expressed entirely by the published genesis outputs.
+
 If the coinbase value bound is violated, the block MUST be rejected as `BLOCK_ERR_SUBSIDY_EXCEEDED`.
 
 ## 20. Value Conservation (Normative)

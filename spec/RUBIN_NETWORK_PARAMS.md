@@ -81,7 +81,19 @@ See CANONICAL §19 for the exact consensus formula.
 Notes:
 - Total supply is unbounded after tail activation (tail continues indefinitely).
 - The stated "50,000 RBN/year" is informative; consensus uses the fixed per-block constant.
-- Genesis allocation split (informative): 500,000 RBN treasury + 500,000 RBN airdrop pool.
+- Genesis allocation split (informative):
+  - 500,000 RBN airdrop pool (unlocked at genesis).
+  - 500,000 RBN treasury pool, unlocked linearly over 5 years using `CORE_HTLC` refund-height tranches.
+
+Treasury tranche schedule (informative):
+- Total treasury amount: 500,000 RBN split into `N = 60` tranches (60-month approximation).
+- Each tranche unlocks at `refund_lock_height = i * 21,900` blocks, for tranche index `i = 1..60`
+  (since `21,900 * 60 = 1,314,000` blocks ≈ 5 years at 120s block time).
+- Tranche values use integer base units:
+  - `base = floor(500,000 RBN / 60) = 8,333.33333333 RBN` per tranche (833,333,333,333 base units)
+  - the remainder (20 base units) is distributed by adding +1 base unit to the first 20 tranches.
+
+Exact recipient key IDs and hashes are chain-instance parameters and MUST be fixed by the published genesis bytes.
 
 ---
 
