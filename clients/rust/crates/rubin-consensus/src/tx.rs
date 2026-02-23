@@ -161,11 +161,34 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
 
         match suite_id {
             SUITE_ID_SENTINEL => {
-                if !((pub_len == 0 && sig_len == 0)
-                    || (pub_len == 32
-                        && sig_len >= 2
-                        && sig_len <= 2 + MAX_HTLC_PREIMAGE_BYTES as usize))
-                {
+                let ok = if pub_len == 0 && sig_len == 0 {
+                    true
+                } else if pub_len == 32 {
+                    if sig_len == 1 {
+                        signature.get(0) == Some(&0x01)
+                    } else if sig_len >= 3 {
+                        if signature.get(0) != Some(&0x00) {
+                            false
+                        } else {
+                            let pre_len = u16::from_le_bytes(
+                                signature[1..3]
+                                    .try_into()
+                                    .expect("signature[1..3] is 2 bytes"),
+                            ) as usize;
+                            if pre_len as u64 > MAX_HTLC_PREIMAGE_BYTES {
+                                false
+                            } else {
+                                sig_len == 3 + pre_len
+                            }
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if !ok {
                     return Err(TxError::new(
                         ErrorCode::TxErrParse,
                         "non-canonical sentinel witness item",
@@ -173,9 +196,7 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
                 }
             }
             SUITE_ID_ML_DSA_87 => {
-                if !((pub_len_u64 == ML_DSA_87_PUBKEY_BYTES && sig_len_u64 == ML_DSA_87_SIG_BYTES)
-                    || (pub_len == 32 && sig_len == 0))
-                {
+                if !(pub_len_u64 == ML_DSA_87_PUBKEY_BYTES && sig_len_u64 == ML_DSA_87_SIG_BYTES) {
                     return Err(TxError::new(
                         ErrorCode::TxErrSigNoncanonical,
                         "non-canonical ML-DSA witness item lengths",

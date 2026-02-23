@@ -19,7 +19,8 @@ func encodeHTLCCovenantData(
 }
 
 func encodeHTLCClaimPayload(preimage []byte) []byte {
-	b := make([]byte, 0, 2+len(preimage))
+	b := make([]byte, 0, 3+len(preimage))
+	b = append(b, 0x00) // path_id = claim
 	b = appendU16le(b, uint16(len(preimage)))
 	b = append(b, preimage...)
 	return b
@@ -85,7 +86,7 @@ func TestValidateHTLCSpend_ClaimHashMismatch(t *testing.T) {
 	}
 
 	path := WitnessItem{
-		SuiteID:   LOCK_MODE_HEIGHT,
+		SuiteID:   SUITE_ID_SENTINEL,
 		Pubkey:    claimKeyID[:],
 		Signature: encodeHTLCClaimPayload([]byte("actual-preimage")),
 	}
@@ -124,9 +125,9 @@ func TestValidateHTLCSpend_RefundTimelockNotMet(t *testing.T) {
 		CovenantData: cov,
 	}
 	path := WitnessItem{
-		SuiteID:   LOCK_MODE_TIMESTAMP,
+		SuiteID:   SUITE_ID_SENTINEL,
 		Pubkey:    refundKeyID[:],
-		Signature: nil,
+		Signature: []byte{0x01}, // path_id = refund
 	}
 	sig := WitnessItem{
 		SuiteID:   SUITE_ID_SLH_DSA_SHAKE_256F,
@@ -157,7 +158,7 @@ func TestApplyNonCoinbaseTxBasic_HTLCUnknownPath(t *testing.T) {
 
 	tx.Witness = []WitnessItem{
 		// Unknown spend path for CORE_HTLC.
-		{SuiteID: SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES), Signature: []byte{0x01}},
+		{SuiteID: SUITE_ID_SENTINEL, Pubkey: claimKeyID[:], Signature: []byte{0x02}},
 		// Signature item (shape is irrelevant because first item already fails).
 		{SuiteID: SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: claimPub, Signature: []byte{0x01}},
 	}

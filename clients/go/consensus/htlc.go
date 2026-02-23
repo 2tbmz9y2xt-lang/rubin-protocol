@@ -48,8 +48,19 @@ func ValidateHTLCSpend(
 	}
 
 	var expectedKeyID [32]byte
-	switch pathItem.SuiteID {
-	case LOCK_MODE_HEIGHT: // claim path selector = 0x00
+	if pathItem.SuiteID != SUITE_ID_SENTINEL {
+		return txerr(TX_ERR_PARSE, "CORE_HTLC selector suite_id invalid")
+	}
+	pathSig := pathItem.Signature
+	if len(pathItem.Pubkey) != 32 {
+		return txerr(TX_ERR_PARSE, "CORE_HTLC selector key_id length invalid")
+	}
+	if len(pathSig) < 1 {
+		return txerr(TX_ERR_PARSE, "CORE_HTLC selector payload too short")
+	}
+	pathID := pathSig[0]
+	switch pathID {
+	case 0x00: // claim
 		if len(pathItem.Pubkey) != 32 {
 			return txerr(TX_ERR_PARSE, "CORE_HTLC claim path key_id length invalid")
 		}
@@ -58,28 +69,28 @@ func ValidateHTLCSpend(
 		if pathKeyID != c.ClaimKeyID {
 			return txerr(TX_ERR_SIG_INVALID, "CORE_HTLC claim key_id mismatch")
 		}
-		if len(pathItem.Signature) < 2 {
+		if len(pathSig) < 3 {
 			return txerr(TX_ERR_PARSE, "CORE_HTLC claim payload too short")
 		}
-		preLen := int(binary.LittleEndian.Uint16(pathItem.Signature[:2]))
+		preLen := int(binary.LittleEndian.Uint16(pathSig[1:3]))
 		if preLen > MAX_HTLC_PREIMAGE_BYTES {
 			return txerr(TX_ERR_PARSE, "CORE_HTLC preimage length overflow")
 		}
-		if len(pathItem.Signature) != 2+preLen {
+		if len(pathSig) != 3+preLen {
 			return txerr(TX_ERR_PARSE, "CORE_HTLC claim payload length mismatch")
 		}
-		preimage := pathItem.Signature[2:]
+		preimage := pathSig[3:]
 		if sha3_256(preimage) != c.Hash {
 			return txerr(TX_ERR_SIG_INVALID, "CORE_HTLC claim preimage hash mismatch")
 		}
 		expectedKeyID = c.ClaimKeyID
 
-	case LOCK_MODE_TIMESTAMP: // refund path selector = 0x01
+	case 0x01: // refund
 		if len(pathItem.Pubkey) != 32 {
 			return txerr(TX_ERR_PARSE, "CORE_HTLC refund path key_id length invalid")
 		}
-		if len(pathItem.Signature) != 0 {
-			return txerr(TX_ERR_PARSE, "CORE_HTLC refund path payload must be empty")
+		if len(pathSig) != 1 {
+			return txerr(TX_ERR_PARSE, "CORE_HTLC refund payload length mismatch")
 		}
 		var pathKeyID [32]byte
 		copy(pathKeyID[:], pathItem.Pubkey)

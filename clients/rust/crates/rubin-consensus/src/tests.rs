@@ -102,6 +102,40 @@ fn parse_tx_witness_item_canonicalization() {
     let err = parse_tx(&tx1).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrParse);
 
+    // sentinel_htlc_refund_selector_ok: suite=0x00, pubkey_length=32, sig_length=1, signature[0]=0x01.
+    let mut tx1_ok_refund = base.clone();
+    tx1_ok_refund.push(0x01); // witness_count
+    tx1_ok_refund.push(SUITE_ID_SENTINEL);
+    tx1_ok_refund.push(0x20); // pubkey_length = 32
+    tx1_ok_refund.extend_from_slice(&[0u8; 32]);
+    tx1_ok_refund.push(0x01); // sig_length = 1
+    tx1_ok_refund.push(0x01); // refund path_id
+    tx1_ok_refund.push(0x00); // da_payload_len
+    parse_tx(&tx1_ok_refund).expect("refund selector should be canonical");
+
+    // sentinel_htlc_claim_selector_ok: suite=0x00, pubkey_length=32, sig_length=3, signature=0x00||u16le(0).
+    let mut tx1_ok_claim = base.clone();
+    tx1_ok_claim.push(0x01); // witness_count
+    tx1_ok_claim.push(SUITE_ID_SENTINEL);
+    tx1_ok_claim.push(0x20); // pubkey_length = 32
+    tx1_ok_claim.extend_from_slice(&[0u8; 32]);
+    tx1_ok_claim.push(0x03); // sig_length = 3
+    tx1_ok_claim.extend_from_slice(&[0x00, 0x00, 0x00]); // claim path_id + preimage_len=0
+    tx1_ok_claim.push(0x00); // da_payload_len
+    parse_tx(&tx1_ok_claim).expect("claim selector should be canonical");
+
+    // sentinel_htlc_unknown_path_reject: suite=0x00, pubkey_length=32, sig_length=1, signature[0]=0x02.
+    let mut tx1_bad_path = base.clone();
+    tx1_bad_path.push(0x01); // witness_count
+    tx1_bad_path.push(SUITE_ID_SENTINEL);
+    tx1_bad_path.push(0x20); // pubkey_length = 32
+    tx1_bad_path.extend_from_slice(&[0u8; 32]);
+    tx1_bad_path.push(0x01); // sig_length = 1
+    tx1_bad_path.push(0x02); // invalid path_id
+    tx1_bad_path.push(0x00); // da_payload_len
+    let err = parse_tx(&tx1_bad_path).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+
     // unknown_suite: witness_count=1, suite=0x03, pubkey_length=0, sig_length=0.
     let mut tx2 = base.clone();
     tx2.push(0x01);
@@ -111,6 +145,17 @@ fn parse_tx_witness_item_canonicalization() {
     tx2.push(0x00);
     let err = parse_tx(&tx2).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+
+    // ml_dsa_selector_reject: suite=0x01, pubkey_length=32, sig_length=0.
+    let mut tx2_bad_ml_selector = base.clone();
+    tx2_bad_ml_selector.push(0x01); // witness_count
+    tx2_bad_ml_selector.push(SUITE_ID_ML_DSA_87);
+    tx2_bad_ml_selector.push(0x20); // pubkey_length = 32
+    tx2_bad_ml_selector.extend_from_slice(&[0u8; 32]);
+    tx2_bad_ml_selector.push(0x00); // sig_length = 0
+    tx2_bad_ml_selector.push(0x00); // da_payload_len
+    let err = parse_tx(&tx2_bad_ml_selector).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
 
     // ml_dsa_len_mismatch: pubkey_length=2591 (0x0A1F) and canonical sig_length.
     let mut tx3 = base.clone();

@@ -1,6 +1,9 @@
 package consensus
 
-import "math"
+import (
+	"encoding/binary"
+	"math"
+)
 
 type Tx struct {
 	Version   uint32
@@ -201,15 +204,28 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 		}
 		witnessBytes += sigLen
 
-		switch suiteID {
-		case SUITE_ID_SENTINEL:
-			if !((pubLen == 0 && sigLen == 0) || (pubLen == 32 && sigLen >= 2 && sigLen <= 2+MAX_HTLC_PREIMAGE_BYTES)) {
-				return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "non-canonical sentinel witness item")
-			}
-		case SUITE_ID_ML_DSA_87:
-			if !((pubLen == ML_DSA_87_PUBKEY_BYTES && sigLen == ML_DSA_87_SIG_BYTES) || (pubLen == 32 && sigLen == 0)) {
-				return nil, zero, zero, 0, txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
-			}
+			switch suiteID {
+			case SUITE_ID_SENTINEL:
+				ok := false
+				if pubLen == 0 && sigLen == 0 {
+					ok = true
+				} else if pubLen == 32 {
+					if sigLen == 1 {
+						ok = len(sig) == 1 && sig[0] == 0x01
+					} else if sigLen >= 3 {
+						if len(sig) >= 3 && sig[0] == 0x00 {
+							preLen := int(binary.LittleEndian.Uint16(sig[1:3]))
+							ok = preLen <= MAX_HTLC_PREIMAGE_BYTES && sigLen == 3+preLen
+						}
+					}
+				}
+				if !ok {
+					return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "non-canonical sentinel witness item")
+				}
+			case SUITE_ID_ML_DSA_87:
+				if !(pubLen == ML_DSA_87_PUBKEY_BYTES && sigLen == ML_DSA_87_SIG_BYTES) {
+					return nil, zero, zero, 0, txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
+				}
 		case SUITE_ID_SLH_DSA_SHAKE_256F:
 			if pubLen != SLH_DSA_SHAKE_256F_PUBKEY_BYTES || sigLen <= 0 || sigLen > MAX_SLH_DSA_SIG_BYTES {
 				return nil, zero, zero, 0, txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical SLH-DSA witness item lengths")

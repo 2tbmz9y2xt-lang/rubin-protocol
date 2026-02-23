@@ -1,7 +1,8 @@
 use crate::constants::{
     LOCK_MODE_HEIGHT, LOCK_MODE_TIMESTAMP, MAX_HTLC_COVENANT_DATA, MAX_HTLC_PREIMAGE_BYTES,
     MAX_SLH_DSA_SIG_BYTES, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SLH_DSA_ACTIVATION_HEIGHT,
-    SLH_DSA_SHAKE_256F_PUBKEY_BYTES, SUITE_ID_ML_DSA_87, SUITE_ID_SLH_DSA_SHAKE_256F,
+    SLH_DSA_SHAKE_256F_PUBKEY_BYTES, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
+    SUITE_ID_SLH_DSA_SHAKE_256F,
 };
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
@@ -69,45 +70,60 @@ pub fn validate_htlc_spend(
 ) -> Result<(), TxError> {
     let cov = parse_htlc_covenant_data(&entry.covenant_data)?;
 
-    let expected_key_id = match path_item.suite_id {
-        LOCK_MODE_HEIGHT => {
-            if path_item.pubkey.len() != 32 {
-                return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "CORE_HTLC claim path key_id length invalid",
-                ));
-            }
-            let mut path_key = [0u8; 32];
-            path_key.copy_from_slice(&path_item.pubkey);
-            if path_key != cov.claim_key_id {
+    if path_item.suite_id != SUITE_ID_SENTINEL {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "CORE_HTLC selector suite_id invalid",
+        ));
+    }
+    if path_item.pubkey.len() != 32 {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "CORE_HTLC selector key_id length invalid",
+        ));
+    }
+    if path_item.signature.is_empty() {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "CORE_HTLC selector payload too short",
+        ));
+    }
+
+    let mut selector_key_id = [0u8; 32];
+    selector_key_id.copy_from_slice(&path_item.pubkey);
+
+    let path_id = path_item.signature[0];
+    let expected_key_id = match path_id {
+        0x00 => {
+            // Claim path.
+            if selector_key_id != cov.claim_key_id {
                 return Err(TxError::new(
                     ErrorCode::TxErrSigInvalid,
                     "CORE_HTLC claim key_id mismatch",
                 ));
             }
-            if path_item.signature.len() < 2 {
+            if path_item.signature.len() < 3 {
                 return Err(TxError::new(
                     ErrorCode::TxErrParse,
                     "CORE_HTLC claim payload too short",
                 ));
             }
-            let pre_len =
-                u16::from_le_bytes(path_item.signature[0..2].try_into().map_err(|_| {
-                    TxError::new(ErrorCode::TxErrParse, "bad CORE_HTLC preimage_len")
-                })?) as usize;
+            let pre_len = u16::from_le_bytes(path_item.signature[1..3].try_into().map_err(|_| {
+                TxError::new(ErrorCode::TxErrParse, "bad CORE_HTLC preimage_len")
+            })?) as usize;
             if pre_len as u64 > MAX_HTLC_PREIMAGE_BYTES {
                 return Err(TxError::new(
                     ErrorCode::TxErrParse,
                     "CORE_HTLC preimage length overflow",
                 ));
             }
-            if path_item.signature.len() != 2 + pre_len {
+            if path_item.signature.len() != 3 + pre_len {
                 return Err(TxError::new(
                     ErrorCode::TxErrParse,
                     "CORE_HTLC claim payload length mismatch",
                 ));
             }
-            let preimage = &path_item.signature[2..];
+            let preimage = &path_item.signature[3..];
             if sha3_256(preimage) != cov.hash {
                 return Err(TxError::new(
                     ErrorCode::TxErrSigInvalid,
@@ -116,25 +132,18 @@ pub fn validate_htlc_spend(
             }
             cov.claim_key_id
         }
-        LOCK_MODE_TIMESTAMP => {
-            if path_item.pubkey.len() != 32 {
-                return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "CORE_HTLC refund path key_id length invalid",
-                ));
-            }
-            if !path_item.signature.is_empty() {
-                return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "CORE_HTLC refund path payload must be empty",
-                ));
-            }
-            let mut path_key = [0u8; 32];
-            path_key.copy_from_slice(&path_item.pubkey);
-            if path_key != cov.refund_key_id {
+        0x01 => {
+            // Refund path.
+            if selector_key_id != cov.refund_key_id {
                 return Err(TxError::new(
                     ErrorCode::TxErrSigInvalid,
                     "CORE_HTLC refund key_id mismatch",
+                ));
+            }
+            if path_item.signature.len() != 1 {
+                return Err(TxError::new(
+                    ErrorCode::TxErrParse,
+                    "CORE_HTLC refund payload length mismatch",
                 ));
             }
             if cov.lock_mode == LOCK_MODE_HEIGHT {
