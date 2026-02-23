@@ -2,7 +2,7 @@
 
 **Document:** `RUBIN_CORE_HTLC_SPEC.md`  
 **Covenant type:** `CORE_HTLC` (`0x0100`)  
-**Status:** RATIFIED (standalone) — not yet activated in `RUBIN_L1_CANONICAL.md`  
+**Status:** ACTIVE — activated from genesis in `RUBIN_L1_CANONICAL.md`  
 **Formal verification:** `rubin-formal/RubinFormal/CVHTLCV2.lean`, `HTLCV2ValueTheorems.lean`, `HTLCV2GatingTheorems.lean` (8 theorems, all proved)
 
 ---
