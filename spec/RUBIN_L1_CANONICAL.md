@@ -222,7 +222,6 @@ Rules:
   `da_payload_len MUST be <= MAX_DA_MANIFEST_BYTES_PER_TX`. Otherwise reject as `TX_ERR_PARSE`.
 - For `tx_kind = 0x01`, `chunk_count` MUST satisfy `1 <= chunk_count <= MAX_DA_CHUNK_COUNT`.
   Otherwise reject as `TX_ERR_PARSE`.
-- For `tx_kind = 0x02`, `da_payload_len MUST be <= CHUNK_BYTES`. Otherwise reject as `TX_ERR_PARSE`.
 - For `tx_kind = 0x02`, `da_payload_len` MUST satisfy `1 <= da_payload_len <= CHUNK_BYTES`.
   Otherwise reject as `TX_ERR_PARSE`.
 
@@ -1303,6 +1302,9 @@ For each `DA_COMMIT_TX` `T` with `chunk_count = C` and `da_id = D`:
   If no such output exists, or if more than one `CORE_DA_COMMIT` output exists in `T`, reject as `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID`.
 
 This is the binding commitment that links the on-chain commit to the full DA payload.
+
+Note (non-normative): `concat(...)` is raw byte-wise concatenation in the specified order, with **no**
+delimiters, separators, or length prefixes.
 
 ## 22. Block Timestamp Rules (Normative)
 
