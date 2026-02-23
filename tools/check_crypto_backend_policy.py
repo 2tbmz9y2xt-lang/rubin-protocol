@@ -14,15 +14,11 @@ FORBIDDEN_PATH = ROOT / "scripts" / "crypto" / "wolfssl"
 
 REQUIRED_PROFILE_PHRASES = [
     "OpenSSL 3.5+",
-    "wolfCrypt",
-    "wolfSSL",
-    "liboqs",
+    "MUST use",
+    "non-OpenSSL PQ backend binding is forbidden",
 ]
 
 ALLOWED_MENTION_FILES = {
-    "spec/RUBIN_CRYPTO_BACKEND_PROFILE.md",
-    "spec/README.md",
-    "spec/RUBIN_NETWORK_PARAMS.md",
     "tools/check_crypto_backend_policy.py",
 }
 

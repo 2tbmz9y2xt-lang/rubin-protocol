@@ -114,8 +114,8 @@ Exact recipient key IDs and hashes are chain-instance parameters and MUST be fix
 ### 5.1 Backend Implementation Profile (non-consensus)
 
 - Repository baseline: **OpenSSL 3.5+** EVP backend for ML-DSA / SLH-DSA paths.
-- `wolfCrypt` / `wolfSSL` / `liboqs` dependencies are not part of the approved
-  implementation profile for this repository.
+- Alternative PQ backend bindings are not part of the approved implementation
+  profile for this repository.
 - Backend selection is non-consensus as long as wire bytes and consensus
   validation outcomes remain identical to CANONICAL.
 

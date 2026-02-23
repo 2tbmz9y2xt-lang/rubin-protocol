@@ -25,14 +25,9 @@ Mapping:
 
 ## 3. Explicitly Forbidden Dependencies
 
-The following dependencies are forbidden in this repository:
+Any non-OpenSSL PQ backend binding is forbidden in this repository.
 
-- `wolfCrypt`
-- `wolfSSL`
-- `liboqs`
-- OQS headers/APIs (`oqs/`, `OQS_*`)
-
-Any introduction of these dependencies in source code, scripts, docs, or CI
+Any introduction of non-OpenSSL PQ backend bindings in source code, scripts, docs, or CI
 MUST fail repository checks.
 
 ## 4. FIPS Positioning

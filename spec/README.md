@@ -50,7 +50,7 @@ Integrity:
 
 - `./RUBIN_CRYPTO_BACKEND_PROFILE.md` — normative implementation profile
   - OpenSSL-only crypto backend profile for clients and CI
-  - Explicit ban on `wolfCrypt` / `wolfSSL` / `liboqs` dependencies in this repo
+  - Explicit ban on alternative PQ backend bindings in this repo
   - Non-consensus: does not change wire format or block validity rules
 
 ## Non-Consensus / AUX
