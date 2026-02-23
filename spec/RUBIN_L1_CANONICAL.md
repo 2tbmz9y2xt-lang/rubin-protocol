@@ -222,7 +222,7 @@ Rules:
   `da_payload_len MUST be <= MAX_DA_MANIFEST_BYTES_PER_TX`. Otherwise reject as `TX_ERR_PARSE`.
 - For `tx_kind = 0x01`, `chunk_count` MUST satisfy `1 <= chunk_count <= MAX_DA_CHUNK_COUNT`.
   Otherwise reject as `TX_ERR_PARSE`.
-- For `tx_kind = 0x02`, `da_payload_len MUST be <= CHUNK_BYTES`. Otherwise reject as `TX_ERR_PARSE`.
+- For `tx_kind = 0x01`, `batch_sig_len MUST be <= MAX_DA_MANIFEST_BYTES_PER_TX`. Otherwise reject as `TX_ERR_PARSE`.
 - For `tx_kind = 0x02`, `da_payload_len` MUST satisfy `1 <= da_payload_len <= CHUNK_BYTES`.
   Otherwise reject as `TX_ERR_PARSE`.
 
@@ -736,6 +736,7 @@ Semantics:
   - `covenant_data = suite_id:u8 || key_id:bytes32`.
   - `covenant_data_len MUST equal MAX_P2PK_COVENANT_DATA`.
   - At output creation:
+    - `value MUST be > 0`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
     - `suite_id` MUST be `SUITE_ID_ML_DSA_87 (0x01)`, or
     - `suite_id` MAY be `SUITE_ID_SLH_DSA_SHAKE_256F (0x02)` only if `block_height >= SLH_DSA_ACTIVATION_HEIGHT`.
     Any other value MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
@@ -769,6 +770,7 @@ Semantics:
     - each `keys[i]` is `bytes32`; each `whitelist[j]` is `bytes32`
     - `covenant_data_len MUST equal 2 + 32*key_count + 2 + 32*whitelist_count`
   - Constraints at creation (CheckTx):
+    - `value MUST be > 0`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
     - `1 <= key_count <= MAX_VAULT_KEYS`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
     - `1 <= threshold <= key_count`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
     - `keys[]` MUST be strictly lexicographically sorted (ascending) with no duplicates;
@@ -789,6 +791,7 @@ Semantics:
     - each `keys[i]` is `bytes32`
     - `covenant_data_len MUST equal 2 + 32*key_count`
   - Constraints at creation (CheckTx):
+    - `value MUST be > 0`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
     - `1 <= key_count <= MAX_MULTISIG_KEYS`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
     - `1 <= threshold <= key_count`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
     - `keys[]` MUST be strictly lexicographically sorted (ascending) with no duplicates;

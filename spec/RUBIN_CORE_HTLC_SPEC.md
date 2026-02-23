@@ -162,9 +162,10 @@ When `spend_path_item.signature[0] = 0x01`:
      `block_height MUST be >= lock_value`.
      Otherwise reject as `TX_ERR_TIMELOCK_NOT_MET`.
    - If `lock_mode = LOCK_MODE_TIMESTAMP (0x01)`:
-     `MTP(prev_11_blocks) MUST be >= lock_value`
-     where MTP is the median timestamp of the previous 11 block headers
-     (Section 22, RUBIN_L1_CANONICAL.md).
+     `MTP(prev_k_blocks) MUST be >= lock_value` where:
+     - `k = min(11, block_height)`, and
+     - `MTP(prev_k_blocks)` is the median timestamp defined in Section 22 of
+       `RUBIN_L1_CANONICAL.md` for the block being validated.
      Otherwise reject as `TX_ERR_TIMELOCK_NOT_MET`.
 
 2. **Selector binding:**
@@ -283,8 +284,8 @@ L2 protocols using HTLC SHOULD rotate keys and hashes per payment.
 
 **Locktime granularity:** Height-based locks (`LOCK_MODE_HEIGHT`) are precise to
 one block (~120 seconds). Timestamp-based locks (`LOCK_MODE_TIMESTAMP`) use MTP
-of the previous 11 blocks — consistent with the deterministic timestamp model
-(Section 22, RUBIN_L1_CANONICAL.md).
+as defined in CANONICAL Section 22 (with `k = min(11, h)` predecessors) — consistent
+with the deterministic timestamp model.
 
 **Key separation:** `claim_key_id ≠ refund_key_id` is enforced at creation.
 Using the same key for both paths would allow the refund key holder to claim

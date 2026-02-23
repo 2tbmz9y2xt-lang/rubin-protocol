@@ -19,13 +19,13 @@
     "da_set_integrity": "## 21. DA Set Integrity (Normative)"
   },
   "sections": {
-    "transaction_wire": "19c116ee6b36173f41a380210cc47c83b8191cb15a643d67a1a2ea2c1644ea4b",
+    "transaction_wire": "6baaf8ed2a75d91d22532fbf2dbcb4e0fd0a53177e310dcd1ac4a7d43e9b8918",
     "transaction_identifiers": "9f9a425ffee4847fffd04eb2db1eb7c99a77c85f0802efaf960bd9d928785d27",
     "weight_accounting": "28b82c09a53f60c7506294f709aee710528b85d84e205cf744a88c59254590da",
     "witness_commitment": "cd0e55b16f47b6e35414a13e699b47f638519e23fe6cad6a8801d27792393bc9",
     "sighash_v1": "e3aac16f46dd80792b2c08ddfdc9e514491137e86ada16acb3fd520414140b05",
     "consensus_error_codes": "aa93a01534020021944089472064bddee52ce680b44f23e15e0d01ac0a7d9368",
-    "covenant_registry": "08dc1fdbb27fac15d257b891e8d21b0615b0713e0cbcba01ebd4cc0a77475cda",
+    "covenant_registry": "1e4a7cb11af2b2cf5c1064a25d44b49d3a0bcedecbda4e5b173a32ec201b59ce",
     "difficulty_update": "c7c1acb11958bb034d8a89c9c4e43ed39e4daa5bfde2eb1f4fd673c56302e298",
     "transaction_structural_rules": "7703928d6686bece71e9e670eecd6beeccc05883145dbd55c845685cdb47cea3",
     "replay_domain_checks": "fdb0a3526361b636e7ef8aa1d5a3cb5632498fd5394c1d9dc8f764f7d724c4f8",
