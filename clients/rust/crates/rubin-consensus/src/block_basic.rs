@@ -2,7 +2,8 @@ use crate::block::{block_hash, parse_block_header_bytes, BlockHeader, BLOCK_HEAD
 use crate::compactsize::read_compact_size;
 use crate::constants::{
     COV_TYPE_ANCHOR, MAX_ANCHOR_BYTES_PER_BLOCK, MAX_BLOCK_WEIGHT, MAX_DA_BYTES_PER_BLOCK,
-    SLH_DSA_ACTIVATION_HEIGHT, SUITE_ID_ML_DSA_87, SUITE_ID_SLH_DSA_SHAKE_256F,
+    MAX_SLH_DSA_SIG_BYTES, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SLH_DSA_ACTIVATION_HEIGHT,
+    SLH_DSA_SHAKE_256F_PUBKEY_BYTES, SUITE_ID_ML_DSA_87, SUITE_ID_SLH_DSA_SHAKE_256F,
     VERIFY_COST_ML_DSA_87, VERIFY_COST_SLH_DSA_SHAKE_256F, WITNESS_DISCOUNT_DIVISOR,
 };
 use crate::covenant_genesis::validate_tx_covenants_genesis;
@@ -314,8 +315,21 @@ fn tx_weight_and_stats(tx: &Tx) -> Result<(u64, u64, u64), TxError> {
             .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
 
         match w.suite_id {
-            SUITE_ID_ML_DSA_87 => ml_count += 1,
-            SUITE_ID_SLH_DSA_SHAKE_256F => slh_count += 1,
+            SUITE_ID_ML_DSA_87 => {
+                if w.pubkey.len() as u64 == ML_DSA_87_PUBKEY_BYTES
+                    && w.signature.len() as u64 == ML_DSA_87_SIG_BYTES
+                {
+                    ml_count += 1;
+                }
+            }
+            SUITE_ID_SLH_DSA_SHAKE_256F => {
+                if w.pubkey.len() as u64 == SLH_DSA_SHAKE_256F_PUBKEY_BYTES
+                    && !w.signature.is_empty()
+                    && w.signature.len() as u64 <= MAX_SLH_DSA_SIG_BYTES
+                {
+                    slh_count += 1;
+                }
+            }
             _ => {}
         }
     }

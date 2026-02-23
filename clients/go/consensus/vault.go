@@ -127,6 +127,8 @@ func WitnessSlots(covenantType uint16, covenantData []byte) int {
 			return int(covenantData[1])
 		}
 		return 1
+	case COV_TYPE_HTLC:
+		return 2
 	default:
 		return 1
 	}

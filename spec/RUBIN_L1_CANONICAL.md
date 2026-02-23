@@ -77,6 +77,8 @@ These constants are consensus-critical for this protocol ruleset:
 - `MAX_ANCHOR_PAYLOAD_SIZE = 65_536` bytes
 - `MAX_ANCHOR_BYTES_PER_BLOCK = 131_072` bytes
 - `MAX_P2PK_COVENANT_DATA = 33` bytes
+- `MAX_HTLC_COVENANT_DATA = 105` bytes
+- `MAX_HTLC_PREIMAGE_BYTES = 256` bytes
 - `MAX_VAULT_KEYS = 12`
 - `MAX_VAULT_WHITELIST_ENTRIES = 1_024`
 - `MAX_MULTISIG_KEYS = 12`
@@ -239,10 +241,16 @@ CompactSize(witness_count) || concat(witness_item_bytes[i] for i in [0..witness_
 Witness items are parsed and checked for canonical form:
 
 - If `suite_id = SUITE_ID_SENTINEL (0x00)`:
-  - `pubkey_length MUST equal 0` and `sig_length MUST equal 0`; otherwise reject as `TX_ERR_PARSE`.
+  - Either:
+    - sentinel form: `pubkey_length MUST equal 0` and `sig_length MUST equal 0`, or
+    - HTLC claim-path selector form: `pubkey_length MUST equal 32` and `2 <= sig_length <= 2 + MAX_HTLC_PREIMAGE_BYTES`.
+  - Any other shape MUST be rejected as `TX_ERR_PARSE`.
 - If `suite_id = SUITE_ID_ML_DSA_87 (0x01)`:
-  - `pubkey_length MUST equal ML_DSA_87_PUBKEY_BYTES` and `sig_length MUST equal ML_DSA_87_SIG_BYTES`;
-    otherwise reject as `TX_ERR_SIG_NONCANONICAL`.
+  - Either:
+    - ML-DSA canonical form: `pubkey_length MUST equal ML_DSA_87_PUBKEY_BYTES` and
+      `sig_length MUST equal ML_DSA_87_SIG_BYTES`, or
+    - HTLC refund-path selector form: `pubkey_length MUST equal 32` and `sig_length MUST equal 0`.
+  - Any other shape MUST be rejected as `TX_ERR_SIG_NONCANONICAL`.
 - If `suite_id = SUITE_ID_SLH_DSA_SHAKE_256F (0x02)`:
   - `pubkey_length MUST equal SLH_DSA_SHAKE_256F_PUBKEY_BYTES` and
     `0 < sig_length <= MAX_SLH_DSA_SIG_BYTES`; otherwise reject as `TX_ERR_SIG_NONCANONICAL`.
@@ -346,8 +354,14 @@ For any valid transaction `T`:
 base_size = |TxCoreBytes(T)|
 wit_size  = |WitnessBytes(T.witness)|
 da_size   = |CompactSize(T.da_payload_len)| + T.da_payload_len
-ml_count  = count witness items where suite_id = SUITE_ID_ML_DSA_87
-slh_count = count witness items where suite_id = SUITE_ID_SLH_DSA_SHAKE_256F
+ml_count  = count witness items where
+            suite_id = SUITE_ID_ML_DSA_87 AND
+            pubkey_length = ML_DSA_87_PUBKEY_BYTES AND
+            sig_length = ML_DSA_87_SIG_BYTES
+slh_count = count witness items where
+            suite_id = SUITE_ID_SLH_DSA_SHAKE_256F AND
+            pubkey_length = SLH_DSA_SHAKE_256F_PUBKEY_BYTES AND
+            0 < sig_length <= MAX_SLH_DSA_SIG_BYTES
 sig_cost  = ml_count * VERIFY_COST_ML_DSA_87 + slh_count * VERIFY_COST_SLH_DSA_SHAKE_256F
 weight(T) = WITNESS_DISCOUNT_DIVISOR * base_size + wit_size + da_size + sig_cost
 ```
@@ -630,6 +644,7 @@ implementations for the described failure classes:
 - Cryptographically invalid signature              -> `TX_ERR_SIG_INVALID`
 - Invalid signature type                           -> `TX_ERR_SIG_ALG_INVALID`
 - Invalid signature length / non-canonical witness -> `TX_ERR_SIG_NONCANONICAL`
+- HTLC refund locktime not met                    -> `TX_ERR_TIMELOCK_NOT_MET`
 - Witness overflow                                 -> `TX_ERR_WITNESS_OVERFLOW`
 - Invalid covenant_type / covenant encoding        -> `TX_ERR_COVENANT_TYPE_INVALID`
 - Missing UTXO / attempt to spend non-spendable    -> `TX_ERR_MISSING_UTXO`
@@ -700,11 +715,11 @@ Semantics:
   - Per-block constraint: sum of `covenant_data_len` across all `CORE_ANCHOR` outputs in a block MUST be
     `<= MAX_ANCHOR_BYTES_PER_BLOCK`; otherwise reject the block as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
 - `CORE_HTLC`:
-  - RESERVED in CANONICAL (not active at genesis).
-  - A standalone HTLC specification exists in `spec/RUBIN_CORE_HTLC_SPEC.md`, but it is not yet integrated
-    into this document.
-  - Until integrated, any output with `covenant_type = 0x0100` MUST be rejected as
-    `TX_ERR_COVENANT_TYPE_INVALID`.
+  - Hash Time-Locked Contract.
+  - Active from genesis block 0.
+  - `covenant_data_len MUST equal MAX_HTLC_COVENANT_DATA (105)`.
+  - Spend semantics: `spec/RUBIN_CORE_HTLC_SPEC.md` §5.
+  - Witness consumption: 2 WitnessItems (Section 16).
 - `CORE_VAULT`:
   - Consensus-native covenant for value storage with mandatory destination whitelist.
   - Active from genesis block 0.
@@ -947,6 +962,7 @@ For any non-coinbase transaction `T`:
 7. WitnessItems are consumed by inputs using a cursor model.
 
    Define `witness_slots(e)` for a referenced UTXO entry `e`:
+   - If `e.covenant_type = CORE_HTLC`: `witness_slots(e) = 2`.
    - If `e.covenant_type ∈ {CORE_VAULT, CORE_MULTISIG}`: `witness_slots(e) = key_count(e)`,
      where `key_count(e)` is read from `e.covenant_data` (validated at UTXO creation).
    - Otherwise: `witness_slots(e) = 1`.
@@ -1055,9 +1071,11 @@ Then enforce:
    - Evaluate per Section 14.1 using WitnessItems assigned by the cursor model.
 3. If `e.covenant_type = CORE_MULTISIG`:
    - Evaluate per Section 14.2 using WitnessItems assigned by the cursor model.
-4. If `e.covenant_type = CORE_ANCHOR`: this output is non-spendable. Any attempt to spend it MUST be rejected as
+4. If `e.covenant_type = CORE_HTLC`:
+   - Evaluate per `spec/RUBIN_CORE_HTLC_SPEC.md` §5 using WitnessItems assigned by the cursor model.
+5. If `e.covenant_type = CORE_ANCHOR`: this output is non-spendable. Any attempt to spend it MUST be rejected as
    `TX_ERR_MISSING_UTXO`.
-5. Any other covenant type MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+6. Any other covenant type MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
 
 ### 18.3 OutputDescriptorBytes (Normative)
 

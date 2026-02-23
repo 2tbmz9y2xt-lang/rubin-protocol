@@ -41,6 +41,7 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 	var sumInVault u128
 	var vaultWhitelists [][][32]byte
 	hasVaultInput := false
+	witnessCursor := 0
 	for _, in := range tx.Inputs {
 		op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
 		entry, ok := work[op]
@@ -55,8 +56,32 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 		if entry.CreatedByCoinbase && height < entry.CreationHeight+COINBASE_MATURITY {
 			return nil, txerr(TX_ERR_COINBASE_IMMATURE, "coinbase immature")
 		}
-		if err := checkSpendCovenant(entry.CovenantType, entry.CovenantData); err != nil {
+		if entry.CovenantType == COV_TYPE_HTLC {
+			slots := 2
+			if witnessCursor+slots > len(tx.Witness) {
+				return nil, txerr(TX_ERR_PARSE, "CORE_HTLC witness underflow")
+			}
+			if err := ValidateHTLCSpend(
+				entry,
+				tx.Witness[witnessCursor],
+				tx.Witness[witnessCursor+1],
+				height,
+				blockTimestamp,
+			); err != nil {
+				return nil, err
+			}
+			witnessCursor += slots
+		} else if err := checkSpendCovenant(entry.CovenantType, entry.CovenantData); err != nil {
 			return nil, err
+		} else if len(tx.Witness) > 0 {
+			slots := WitnessSlots(entry.CovenantType, entry.CovenantData)
+			if slots <= 0 {
+				return nil, txerr(TX_ERR_PARSE, "invalid witness slots")
+			}
+			if witnessCursor+slots > len(tx.Witness) {
+				return nil, txerr(TX_ERR_PARSE, "witness underflow")
+			}
+			witnessCursor += slots
 		}
 
 		var err error
@@ -78,6 +103,9 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 		}
 
 		delete(work, op)
+	}
+	if len(tx.Witness) > 0 && witnessCursor != len(tx.Witness) {
+		return nil, txerr(TX_ERR_PARSE, "witness_count mismatch")
 	}
 
 	var sumOut u128
@@ -157,7 +185,13 @@ func checkSpendCovenant(
 		_ = m
 		return nil
 	}
-	// HTLC/reserved/unknown are unsupported in basic apply path.
+	if covType == COV_TYPE_HTLC {
+		if _, err := ParseHTLCCovenantData(covData); err != nil {
+			return err
+		}
+		return nil
+	}
+	// Reserved/unknown are unsupported in basic apply path.
 	return txerr(TX_ERR_COVENANT_TYPE_INVALID, "unsupported covenant in basic apply")
 }
 

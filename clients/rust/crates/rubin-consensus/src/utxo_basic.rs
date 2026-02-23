@@ -1,16 +1,17 @@
 use std::collections::HashMap;
 
 use crate::constants::{
-    COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_MULTISIG, COV_TYPE_P2PK,
-    COV_TYPE_VAULT,
+    COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_HTLC, COV_TYPE_MULTISIG,
+    COV_TYPE_P2PK, COV_TYPE_VAULT,
 };
 use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
+use crate::htlc::{parse_htlc_covenant_data, validate_htlc_spend};
 use crate::tx::Tx;
 use crate::vault::{
     hash_in_sorted_32, output_descriptor_bytes, parse_multisig_covenant_data,
-    parse_vault_covenant_data,
+    parse_vault_covenant_data, witness_slots,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -39,7 +40,7 @@ pub fn apply_non_coinbase_tx_basic(
     txid: [u8; 32],
     utxo_set: &HashMap<Outpoint, UtxoEntry>,
     height: u64,
-    _block_timestamp: u64,
+    block_timestamp: u64,
 ) -> Result<UtxoApplySummary, TxError> {
     if tx.inputs.is_empty() {
         return Err(TxError::new(
@@ -55,6 +56,7 @@ pub fn apply_non_coinbase_tx_basic(
     let mut sum_in_vault: u128 = 0;
     let mut vault_whitelists: Vec<Vec<[u8; 32]>> = Vec::new();
     let mut has_vault_input = false;
+    let mut witness_cursor: usize = 0;
 
     for input in &tx.inputs {
         let op = Outpoint {
@@ -79,7 +81,35 @@ pub fn apply_non_coinbase_tx_basic(
                 "coinbase immature",
             ));
         }
-        check_spend_covenant(entry.covenant_type, &entry.covenant_data)?;
+        if entry.covenant_type == COV_TYPE_HTLC {
+            let slots = 2usize;
+            if witness_cursor + slots > tx.witness.len() {
+                return Err(TxError::new(
+                    ErrorCode::TxErrParse,
+                    "CORE_HTLC witness underflow",
+                ));
+            }
+            validate_htlc_spend(
+                &entry,
+                &tx.witness[witness_cursor],
+                &tx.witness[witness_cursor + 1],
+                height,
+                block_timestamp,
+            )?;
+            witness_cursor += slots;
+        } else {
+            check_spend_covenant(entry.covenant_type, &entry.covenant_data)?;
+            if !tx.witness.is_empty() {
+                let slots = witness_slots(entry.covenant_type, &entry.covenant_data);
+                if slots == 0 {
+                    return Err(TxError::new(ErrorCode::TxErrParse, "invalid witness slots"));
+                }
+                if witness_cursor + slots > tx.witness.len() {
+                    return Err(TxError::new(ErrorCode::TxErrParse, "witness underflow"));
+                }
+                witness_cursor += slots;
+            }
+        }
 
         sum_in = sum_in
             .checked_add(entry.value as u128)
@@ -93,6 +123,12 @@ pub fn apply_non_coinbase_tx_basic(
                 .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u128 overflow"))?;
         }
         work.remove(&op);
+    }
+    if !tx.witness.is_empty() && witness_cursor != tx.witness.len() {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "witness_count mismatch",
+        ));
     }
 
     let mut sum_out: u128 = 0;
@@ -165,6 +201,10 @@ fn check_spend_covenant(covenant_type: u16, covenant_data: &[u8]) -> Result<(), 
     }
     if covenant_type == COV_TYPE_MULTISIG {
         parse_multisig_covenant_data(covenant_data)?;
+        return Ok(());
+    }
+    if covenant_type == COV_TYPE_HTLC {
+        parse_htlc_covenant_data(covenant_data)?;
         return Ok(());
     }
     Err(TxError::new(

@@ -4,6 +4,7 @@ use crate::constants::{
     SUITE_ID_ML_DSA_87,
 };
 use crate::error::{ErrorCode, TxError};
+use crate::htlc::parse_htlc_covenant_data;
 use crate::tx::Tx;
 use crate::vault::{parse_multisig_covenant_data, parse_vault_covenant_data};
 
@@ -45,7 +46,16 @@ pub fn validate_tx_covenants_genesis(tx: &Tx) -> Result<(), TxError> {
             COV_TYPE_MULTISIG => {
                 parse_multisig_covenant_data(&out.covenant_data)?;
             }
-            COV_TYPE_RESERVED_FUTURE | COV_TYPE_HTLC | COV_TYPE_DA_COMMIT => {
+            COV_TYPE_HTLC => {
+                if out.value == 0 {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrCovenantTypeInvalid,
+                        "CORE_HTLC value must be > 0",
+                    ));
+                }
+                parse_htlc_covenant_data(&out.covenant_data)?;
+            }
+            COV_TYPE_RESERVED_FUTURE | COV_TYPE_DA_COMMIT => {
                 return Err(TxError::new(
                     ErrorCode::TxErrCovenantTypeInvalid,
                     "reserved or unsupported covenant_type",

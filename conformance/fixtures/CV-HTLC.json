@@ -1,0 +1,166 @@
+{
+  "gate": "CV-HTLC",
+  "vectors": [
+    {
+      "expect_err": "TX_ERR_PARSE",
+      "expect_ok": false,
+      "id": "CV-HTLC-01",
+      "op": "covenant_genesis_check",
+      "tx_hex": "010000000001000000000000000001010000000000000000016954e89e15c3eef53f39d5e758fd47dfc84f15f042cd83edc0c93723e93b7d0a83000a00000000000000b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a716b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a716000000000000"
+    },
+    {
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "expect_ok": false,
+      "id": "CV-HTLC-02",
+      "op": "covenant_genesis_check",
+      "tx_hex": "010000000001000000000000000001010000000000000000016954e89e15c3eef53f39d5e758fd47dfc84f15f042cd83edc0c93723e93b7d0a83020a00000000000000b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a716740f390c63f636b67acc3cc7a09df93e5c53804af23e0c70c074bd1271322694000000000000"
+    },
+    {
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "expect_ok": false,
+      "id": "CV-HTLC-03",
+      "op": "covenant_genesis_check",
+      "tx_hex": "010000000001000000000000000001010000000000000000016854e89e15c3eef53f39d5e758fd47dfc84f15f042cd83edc0c93723e93b7d0a83000a00000000000000b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a716740f390c63f636b67acc3cc7a09df93e5c53804af23e0c70c074bd12713226000000000000"
+    },
+    {
+      "block_timestamp": 2000,
+      "expect_err": "TX_ERR_SIG_INVALID",
+      "expect_ok": false,
+      "height": 1000000,
+      "id": "CV-HTLC-04",
+      "op": "utxo_apply_basic",
+      "tx_hex": "0100000000010000000000000001a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4000000000000000000015a0000000000000000002101000000000000000000000000000000000000000000000000000000000000000000000000020020b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a716151300727562696e2d68746c632d707265696d616765024011111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111010100",
+      "utxos": [
+        {
+          "covenant_data": "ff1c29db1f4da85ca6688c798e0ffe6c8422f6a4390b9b400c12fa9b674b2fa4000a00000000000000b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a716740f390c63f636b67acc3cc7a09df93e5c53804af23e0c70c074bd1271322694",
+          "covenant_type": 256,
+          "created_by_coinbase": false,
+          "creation_height": 0,
+          "txid": "a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4",
+          "value": 100,
+          "vout": 0
+        }
+      ]
+    },
+    {
+      "block_timestamp": 2000,
+      "expect_err": "TX_ERR_SIG_INVALID",
+      "expect_ok": false,
+      "height": 1000000,
+      "id": "CV-HTLC-05",
+      "op": "utxo_apply_basic",
+      "tx_hex": "0100000000010000000000000001a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5000000000000000000015a0000000000000000002101000000000000000000000000000000000000000000000000000000000000000000000000020020e1a56f27a58e6f5778390d6c8ad36ffb6371c68bf46176a477abc6e8b23f107f151300727562696e2d68746c632d707265696d616765024011111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111010100",
+      "utxos": [
+        {
+          "covenant_data": "54e89e15c3eef53f39d5e758fd47dfc84f15f042cd83edc0c93723e93b7d0a83000a00000000000000b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a716740f390c63f636b67acc3cc7a09df93e5c53804af23e0c70c074bd1271322694",
+          "covenant_type": 256,
+          "created_by_coinbase": false,
+          "creation_height": 0,
+          "txid": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+          "value": 100,
+          "vout": 0
+        }
+      ]
+    },
+    {
+      "block_timestamp": 2000,
+      "expect_err": "TX_ERR_SIG_INVALID",
+      "expect_ok": false,
+      "height": 1000000,
+      "id": "CV-HTLC-06",
+      "op": "utxo_apply_basic",
+      "tx_hex": "0100000000010000000000000001a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6000000000000000000015a0000000000000000002101000000000000000000000000000000000000000000000000000000000000000000000000020120e1a56f27a58e6f5778390d6c8ad36ffb6371c68bf46176a477abc6e8b23f107f00024022222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222010100",
+      "utxos": [
+        {
+          "covenant_data": "54e89e15c3eef53f39d5e758fd47dfc84f15f042cd83edc0c93723e93b7d0a83000a00000000000000b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a716740f390c63f636b67acc3cc7a09df93e5c53804af23e0c70c074bd1271322694",
+          "covenant_type": 256,
+          "created_by_coinbase": false,
+          "creation_height": 0,
+          "txid": "a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6",
+          "value": 100,
+          "vout": 0
+        }
+      ]
+    },
+    {
+      "block_timestamp": 2000,
+      "expect_err": "TX_ERR_TIMELOCK_NOT_MET",
+      "expect_ok": false,
+      "height": 1000000,
+      "id": "CV-HTLC-07",
+      "op": "utxo_apply_basic",
+      "tx_hex": "0100000000010000000000000001a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7000000000000000000015a0000000000000000002101000000000000000000000000000000000000000000000000000000000000000000000000020120740f390c63f636b67acc3cc7a09df93e5c53804af23e0c70c074bd127132269400024022222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222010100",
+      "utxos": [
+        {
+          "covenant_data": "54e89e15c3eef53f39d5e758fd47dfc84f15f042cd83edc0c93723e93b7d0a8300a4420f0000000000b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a716740f390c63f636b67acc3cc7a09df93e5c53804af23e0c70c074bd1271322694",
+          "covenant_type": 256,
+          "created_by_coinbase": false,
+          "creation_height": 0,
+          "txid": "a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
+          "value": 100,
+          "vout": 0
+        }
+      ]
+    },
+    {
+      "block_timestamp": 1000,
+      "expect_err": "TX_ERR_TIMELOCK_NOT_MET",
+      "expect_ok": false,
+      "height": 1000000,
+      "id": "CV-HTLC-08",
+      "op": "utxo_apply_basic",
+      "tx_hex": "0100000000010000000000000001a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8000000000000000000015a0000000000000000002101000000000000000000000000000000000000000000000000000000000000000000000000020120740f390c63f636b67acc3cc7a09df93e5c53804af23e0c70c074bd127132269400024022222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222010100",
+      "utxos": [
+        {
+          "covenant_data": "54e89e15c3eef53f39d5e758fd47dfc84f15f042cd83edc0c93723e93b7d0a8301d007000000000000b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a716740f390c63f636b67acc3cc7a09df93e5c53804af23e0c70c074bd1271322694",
+          "covenant_type": 256,
+          "created_by_coinbase": false,
+          "creation_height": 0,
+          "txid": "a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8",
+          "value": 100,
+          "vout": 0
+        }
+      ]
+    },
+    {
+      "block_timestamp": 2000,
+      "expect_err": "TX_ERR_PARSE",
+      "expect_ok": false,
+      "height": 1000000,
+      "id": "CV-HTLC-09",
+      "op": "utxo_apply_basic",
+      "tx_hex": "0100000000010000000000000001a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9000000000000000000015a0000000000000000002101000000000000000000000000000000000000000000000000000000000000000000000000020020b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a716fd02010101aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa024011111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111010100",
+      "utxos": [
+        {
+          "covenant_data": "54e89e15c3eef53f39d5e758fd47dfc84f15f042cd83edc0c93723e93b7d0a83000a00000000000000b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a716740f390c63f636b67acc3cc7a09df93e5c53804af23e0c70c074bd1271322694",
+          "covenant_type": 256,
+          "created_by_coinbase": false,
+          "creation_height": 0,
+          "txid": "a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9",
+          "value": 100,
+          "vout": 0
+        }
+      ]
+    },
+    {
+      "block_timestamp": 2000,
+      "expect_err": "TX_ERR_PARSE",
+      "expect_ok": false,
+      "height": 1000000,
+      "id": "CV-HTLC-10",
+      "op": "utxo_apply_basic",
+      "tx_hex": "0100000000010000000000000001aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000000000000000000015a0000000000000000002101000000000000000000000000000000000000000000000000000000000000000000000000020240111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111110101024011111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111010100",
+      "utxos": [
+        {
+          "covenant_data": "54e89e15c3eef53f39d5e758fd47dfc84f15f042cd83edc0c93723e93b7d0a83000a00000000000000b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a716740f390c63f636b67acc3cc7a09df93e5c53804af23e0c70c074bd1271322694",
+          "covenant_type": 256,
+          "created_by_coinbase": false,
+          "creation_height": 0,
+          "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "value": 100,
+          "vout": 0
+        }
+      ]
+    }
+  ]
+}
