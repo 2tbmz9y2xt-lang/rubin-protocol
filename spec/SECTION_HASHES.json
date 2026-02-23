@@ -15,7 +15,7 @@
     "da_set_integrity": "## 21. DA Set Integrity (Normative)"
   },
   "sections": {
-    "transaction_identifiers": "d6c8bba62ac2f03dc42b223d16ef0c4560b64b48de3388f7403d3d7b79180913",
+    "transaction_identifiers": "9f9a425ffee4847fffd04eb2db1eb7c99a77c85f0802efaf960bd9d928785d27",
     "weight_accounting": "28b82c09a53f60c7506294f709aee710528b85d84e205cf744a88c59254590da",
     "witness_commitment": "cd0e55b16f47b6e35414a13e699b47f638519e23fe6cad6a8801d27792393bc9",
     "sighash_v1": "e3aac16f46dd80792b2c08ddfdc9e514491137e86ada16acb3fd520414140b05",

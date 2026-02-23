@@ -299,6 +299,27 @@ value/binding rules are specified in later sections.
 
 RUBIN uses `SHA3-256` (FIPS 202) as the consensus hash function.
 
+### 8.1.1 SHA3-256 Security Properties (Informative)
+
+`SHA3-256` (FIPS 202, Keccak[512](M, 256)) provides the following asymptotic security properties:
+
+- **Preimage resistance:** ~256-bit (classical), ~128-bit (quantum; Grover)
+- **Second-preimage resistance:** ~256-bit (classical), ~128-bit (quantum; Grover)
+- **Collision resistance:** ~128-bit (classical; birthday bound), ~85-bit (quantum; BHT)
+
+Binding targets by usage domain (informative):
+
+- `txid/wtxid` (Section 8.3): collision / second-preimage resistance (identifier uniqueness and outpoint safety)
+- Merkle root (Section 10.4): collision / second-preimage resistance (prevents tree mutation / ambiguity)
+- `key_id = SHA3-256(pubkey)` (e.g. `CORE_P2PK`, `CORE_VAULT`, `CORE_HTLC`): preimage resistance (prevents key_id spoofing)
+- `whitelist[j] = SHA3-256(OutputDescriptorBytes(output_j))` (Section 18.3): preimage resistance (prevents destination spoofing)
+- sighash digest (Section 12): collision / second-preimage resistance (prevents signature substitution across different preimages)
+- DA `chunk_hash = SHA3-256(da_payload)` (Section 21.2): second-preimage resistance (prevents payload substitution)
+- witness commitment hash (Section 10.4.1): second-preimage resistance (prevents witness substitution)
+
+RUBIN does not require 256-bit collision resistance for consensus-critical safety. `SHA3-256` collision resistance
+(~128-bit classical) is sufficient for identifier uniqueness and Merkle-style commitments under the stated threat model.
+
 ### 8.2 Canonical Transaction Serializations
 
 For any valid transaction `T` (i.e. one that parses under Transaction Wire (Section 5) with all rules in Sections 3-7):
