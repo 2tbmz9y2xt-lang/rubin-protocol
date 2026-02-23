@@ -657,6 +657,8 @@ def validate_vector(
             )
         if "expect_merkle_root" in v and go_resp.get("merkle_root") != v["expect_merkle_root"]:
             problems.append(f"{gate}/{vid}: expect_merkle_root mismatch")
+        if "expect_not_merkle_root" in v and go_resp.get("merkle_root") == v["expect_not_merkle_root"]:
+            problems.append(f"{gate}/{vid}: expect_not_merkle_root violated")
     elif op == "sighash_v1":
         if go_resp.get("digest") != rust_resp.get("digest"):
             problems.append(
