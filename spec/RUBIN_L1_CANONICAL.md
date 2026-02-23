@@ -1304,9 +1304,6 @@ For each `DA_COMMIT_TX` `T` with `chunk_count = C` and `da_id = D`:
 
 This is the binding commitment that links the on-chain commit to the full DA payload.
 
-Note (non-normative): `concat(...)` is raw byte-wise concatenation in the specified order, with **no**
-delimiters, separators, or length prefixes.
-
 ## 22. Block Timestamp Rules (Normative)
 
 Timestamp is a 64-bit unsigned integer representing seconds since UNIX epoch.
