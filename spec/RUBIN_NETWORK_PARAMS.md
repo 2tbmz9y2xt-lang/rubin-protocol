@@ -3,7 +3,7 @@
 **Status:** Approved v1.0
 **Date:** 2026-02-21
 
-This document is the authoritative reference for RUBIN network parameters,
+This document is the reference summary for RUBIN network parameters,
 node requirements, and technical characteristics. It is derived from and
 must remain consistent with RUBIN_L1_CANONICAL.md and RUBIN_COMPACT_BLOCKS.md.
 
