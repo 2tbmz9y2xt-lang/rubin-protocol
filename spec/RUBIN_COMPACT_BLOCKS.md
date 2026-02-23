@@ -122,6 +122,19 @@ All sections of this document use the following notation:
 | `sendcmpct_mode = 1` | Compact enabled, low-bandwidth (node receives cmpctblock, does not push) |
 | `sendcmpct_mode = 2` | Compact enabled, high-bandwidth (node receives and pushes cmpctblock) |
 
+### 3.1 Reject Message Policy
+
+The legacy `reject` P2P message is deprecated for public mainnet operation.
+
+- Mainnet nodes SHOULD NOT send `reject`.
+- Implementations MUST NOT depend on `reject` for protocol correctness or relay progress.
+- Invalid data handling MUST use deterministic local validation, peer quality scoring,
+  and normal request/response flows (`inv/getdata/getblocktxn/blocktxn`).
+
+For testnet/devnet debugging, implementations MAY expose an operator-only flag to emit
+diagnostic reject payloads. Such diagnostics are non-consensus and MUST NOT alter relay
+state transitions or block/transaction validity outcomes.
+
 ---
 
 ## 4. Cache Miss Protection

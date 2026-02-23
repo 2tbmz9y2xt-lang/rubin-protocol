@@ -25,7 +25,9 @@ pub fn validate_tx_covenants_genesis(tx: &Tx, block_height: u64) -> Result<(), T
                         "invalid CORE_P2PK suite_id",
                     ));
                 }
-                if suite_id == SUITE_ID_SLH_DSA_SHAKE_256F && block_height < SLH_DSA_ACTIVATION_HEIGHT {
+                if suite_id == SUITE_ID_SLH_DSA_SHAKE_256F
+                    && block_height < SLH_DSA_ACTIVATION_HEIGHT
+                {
                     return Err(TxError::new(
                         ErrorCode::TxErrCovenantTypeInvalid,
                         "CORE_P2PK SLH-DSA suite inactive at this height",

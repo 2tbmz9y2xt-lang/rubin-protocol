@@ -12,10 +12,10 @@ const (
 	MAX_TIMESTAMP_STEP_PER_BLOCK = 10 * TARGET_BLOCK_INTERVAL
 
 	BASE_UNITS_PER_RBN      = 100_000_000
-	MAX_SUPPLY         = 5_000_000_000_000_000 // emission anchor; total supply becomes unbounded after tail activation
-	GENESIS_ALLOCATION = 100_000_000_000_000
-	MINEABLE_CAP       = 4_900_000_000_000_000
-	EMISSION_SPEED_FACTOR = uint8(20)
+	MAX_SUPPLY              = 5_000_000_000_000_000 // emission anchor; total supply becomes unbounded after tail activation
+	GENESIS_ALLOCATION      = 100_000_000_000_000
+	MINEABLE_CAP            = 4_900_000_000_000_000
+	EMISSION_SPEED_FACTOR   = uint8(20)
 	TAIL_EMISSION_PER_BLOCK = 19_025_875
 
 	MAX_BLOCK_WEIGHT        = 68_000_000
