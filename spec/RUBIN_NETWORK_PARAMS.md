@@ -204,6 +204,7 @@ Storage depends on number of monitored channels; no protocol minimum.
 | sendcmpct_mode 0 | Compact disabled, full blocks only |
 | sendcmpct_mode 1 | Compact low-bandwidth |
 | sendcmpct_mode 2 | Compact high-bandwidth |
+| reject message | Deprecated for mainnet (diagnostic-only on testnet/devnet) |
 | Max high-bandwidth peers | 3 simultaneous |
 | Prefetch rate per peer | 4 MB/s |
 | Prefetch rate global | 32 MB/s |
