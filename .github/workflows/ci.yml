@@ -84,6 +84,9 @@ jobs:
       - name: Spec section hashes check
         run: node scripts/check-section-hashes.mjs
 
+      - name: Crypto backend policy check
+        run: python3 tools/check_crypto_backend_policy.py
+
       - name: Conformance bundle
         run: |
           python3 conformance/runner/run_cv_bundle.py

@@ -48,6 +48,11 @@ Integrity:
   - At conflict with CANONICAL: CANONICAL wins.
   - Human-readable throughput/storage/TPS estimates.
 
+- `./RUBIN_CRYPTO_BACKEND_PROFILE.md` — normative implementation profile
+  - OpenSSL-only crypto backend profile for clients and CI
+  - Explicit ban on `wolfCrypt` / `wolfSSL` / `liboqs` dependencies in this repo
+  - Non-consensus: does not change wire format or block validity rules
+
 ## Non-Consensus / AUX
 
 - `./RUBIN_L1_P2P_AUX.md` — non-consensus P2P notes

@@ -26,6 +26,8 @@ This document does not change consensus rules. Consensus values are defined in
    - P95/P99 block validation latency under SLH-heavy traffic within SLO.
    - Propagation delay and stale/orphan rate within SLO.
    - No sustained mempool backlog growth under nominal traffic.
+   - Benchmark backend MUST match repository profile in
+     `RUBIN_CRYPTO_BACKEND_PROFILE.md` (OpenSSL 3.5+ path).
 4. Upgrade readiness:
    - >= 95% upgraded validators before boundary height.
    - Fallback communication published to operators and exchanges.

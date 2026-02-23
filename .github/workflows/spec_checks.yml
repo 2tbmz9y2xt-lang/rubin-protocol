@@ -22,3 +22,5 @@ jobs:
       - name: Check SECTION_HASHES integrity
         run: python3 tools/check_section_hashes.py
 
+      - name: Check crypto backend policy
+        run: python3 tools/check_crypto_backend_policy.py

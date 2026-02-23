@@ -111,6 +111,14 @@ Exact recipient key IDs and hashes are chain-instance parameters and MUST be fix
 | Hash function | SHA3-256 (FIPS 202) |
 | Batch verification | 64 signatures per batch (ML-DSA-87) |
 
+### 5.1 Backend Implementation Profile (non-consensus)
+
+- Repository baseline: **OpenSSL 3.5+** EVP backend for ML-DSA / SLH-DSA paths.
+- `wolfCrypt` / `wolfSSL` / `liboqs` dependencies are not part of the approved
+  implementation profile for this repository.
+- Backend selection is non-consensus as long as wire bytes and consensus
+  validation outcomes remain identical to CANONICAL.
+
 ---
 
 ## 6. Transaction Limits
@@ -242,6 +250,7 @@ Storage depends on number of monitored channels; no protocol minimum.
 | `RUBIN_NETWORK_PARAMS.md` | This file: reference summary for TZ, roadmap, hardware planning |
 | `RUBIN_L1_P2P_AUX.md` | Auxiliary P2P rules |
 | `RUBIN_SLH_FALLBACK_PLAYBOOK.md` | Operational activation/rollback runbook for SLH fallback mode |
+| `RUBIN_CRYPTO_BACKEND_PROFILE.md` | OpenSSL-only implementation profile and forbidden dependency policy |
 
 ---
 
