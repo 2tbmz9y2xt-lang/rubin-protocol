@@ -10,6 +10,7 @@ const outPath = path.join(root, "spec", "SECTION_HASHES.json");
 const spec = fs.readFileSync(specPath, "utf8").replace(/\r\n/g, "\n");
 
 const sectionHeadings = {
+  transaction_wire: "## 5. Transaction Wire",
   transaction_identifiers: "## 8. Transaction Identifiers (TXID / WTXID)",
   weight_accounting: "## 9. Weight Accounting (Normative)",
   witness_commitment: "### 10.4.1 Witness Commitment (Coinbase Anchor)",
@@ -17,6 +18,9 @@ const sectionHeadings = {
   consensus_error_codes: "## 13. Consensus Error Codes (Normative)",
   covenant_registry: "## 14. Covenant Type Registry (Normative)",
   difficulty_update: "## 15. Difficulty Update (Normative)",
+  transaction_structural_rules: "## 16. Transaction Structural Rules (Normative)",
+  replay_domain_checks: "## 17. Replay-Domain Checks (Normative)",
+  utxo_state_model: "## 18. UTXO State Model (Normative)",
   value_conservation: "## 20. Value Conservation (Normative)",
   da_set_integrity: "## 21. DA Set Integrity (Normative)",
 };

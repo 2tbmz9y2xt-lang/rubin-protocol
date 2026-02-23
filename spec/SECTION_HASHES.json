@@ -4,6 +4,7 @@
   "source_file": "spec/RUBIN_L1_CANONICAL.md",
   "canonicalization": "LF normalization; extract markdown from exact section heading to next heading of same/higher level; trim; append trailing LF",
   "section_headings": {
+    "transaction_wire": "## 5. Transaction Wire",
     "transaction_identifiers": "## 8. Transaction Identifiers (TXID / WTXID)",
     "weight_accounting": "## 9. Weight Accounting (Normative)",
     "witness_commitment": "### 10.4.1 Witness Commitment (Coinbase Anchor)",
@@ -11,10 +12,14 @@
     "consensus_error_codes": "## 13. Consensus Error Codes (Normative)",
     "covenant_registry": "## 14. Covenant Type Registry (Normative)",
     "difficulty_update": "## 15. Difficulty Update (Normative)",
+    "transaction_structural_rules": "## 16. Transaction Structural Rules (Normative)",
+    "replay_domain_checks": "## 17. Replay-Domain Checks (Normative)",
+    "utxo_state_model": "## 18. UTXO State Model (Normative)",
     "value_conservation": "## 20. Value Conservation (Normative)",
     "da_set_integrity": "## 21. DA Set Integrity (Normative)"
   },
   "sections": {
+    "transaction_wire": "19c116ee6b36173f41a380210cc47c83b8191cb15a643d67a1a2ea2c1644ea4b",
     "transaction_identifiers": "9f9a425ffee4847fffd04eb2db1eb7c99a77c85f0802efaf960bd9d928785d27",
     "weight_accounting": "28b82c09a53f60c7506294f709aee710528b85d84e205cf744a88c59254590da",
     "witness_commitment": "cd0e55b16f47b6e35414a13e699b47f638519e23fe6cad6a8801d27792393bc9",
@@ -22,6 +27,9 @@
     "consensus_error_codes": "aa93a01534020021944089472064bddee52ce680b44f23e15e0d01ac0a7d9368",
     "covenant_registry": "08dc1fdbb27fac15d257b891e8d21b0615b0713e0cbcba01ebd4cc0a77475cda",
     "difficulty_update": "c7c1acb11958bb034d8a89c9c4e43ed39e4daa5bfde2eb1f4fd673c56302e298",
+    "transaction_structural_rules": "7703928d6686bece71e9e670eecd6beeccc05883145dbd55c845685cdb47cea3",
+    "replay_domain_checks": "fdb0a3526361b636e7ef8aa1d5a3cb5632498fd5394c1d9dc8f764f7d724c4f8",
+    "utxo_state_model": "65246ea5f6c0ddac721d225e1b4113db2a4279c34289ee857f62ee7ae0f4fe39",
     "value_conservation": "ee3b046749d68f52ac800ed17a485cb94cca31287251b51aa9abfd2275b636c2",
     "da_set_integrity": "2bb603930fc823563efbc7d0d1f1b2e8fac64e6c8b41bcb029de73fd690b0642"
   }
