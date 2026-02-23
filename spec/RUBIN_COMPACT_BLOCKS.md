@@ -507,6 +507,24 @@ Step 3. If a batch fails, fall back to individual verification to identify
 `CV-COMPACT` MUST include a test case for ML-DSA-87 batch verification,
 including the batch-fail -> individual-fallback path.
 
+### 12.1 SLH-DSA Parallel Verification (Implementation Note)
+
+This note is non-consensus and describes implementation guidance for validator
+performance in SLH fallback mode.
+
+- ML-DSA-87 batch verification remains unchanged (`ML_DSA_BATCH_SIZE = 64`).
+- SLH-DSA-SHAKE-256f does not have a batch-verify path in this profile; nodes
+  SHOULD parallelize verification across independent transactions / inputs.
+- For SLO targets defined in `RUBIN_SLH_FALLBACK_PLAYBOOK.md` §2.1, the
+  baseline hardware profile is 16 physical CPU cores.
+
+Reference local baseline (Apple Silicon, 16 cores, OpenSSL 3.5.5 speed test):
+- `SLH-DSA-SHAKE-256f verify/s = 7360.8`
+- `ML-DSA-87 verify/s = 102012.8`
+
+The `VERIFY_COST` constants are consensus parameters and are not changed by
+this implementation note.
+
 ---
 
 ## 13. Normative Telemetry Fields

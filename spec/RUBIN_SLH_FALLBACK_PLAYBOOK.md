@@ -44,6 +44,14 @@ change consensus.
 - Storage: NVMe SSD
 - Network: 1 Gbps, stable RTT <= 50 ms to at least 8 peers
 
+**Implementation guidance (non-consensus)**
+- In SLH-heavy validation, implementations SHOULD use parallel verification
+  across independent transactions / inputs using a worker pool mapped to
+  available physical cores (baseline target: 16 cores).
+- In this profile, SLH-DSA-SHAKE-256f has no batch-verify path; performance is
+  achieved via parallelism, unlike ML-DSA-87 batch verification in
+  `RUBIN_COMPACT_BLOCKS.md` §12.
+
 **Benchmark workload (SLH-heavy)**
 - Block template: >= 90% of `MAX_BLOCK_WEIGHT`
 - Signature mix: >= 80% of required spend witness items use `suite_id = 0x02`
