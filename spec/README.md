@@ -1,3 +1,21 @@
+<!--
+RUBIN SPEC FREEZE HEADER (informational)
+
+This repository contains consensus-critical and normative specifications.
+Consensus source-of-truth: RUBIN_L1_CANONICAL.md.
+
+Precedence (normative):
+  1) RUBIN_L1_CANONICAL.md     (consensus validity)
+  2) RUBIN_COMPACT_BLOCKS.md   (normative P2P behavior)
+  3) RUBIN_NETWORK_PARAMS.md   (reference summary; derived; CANONICAL prevails)
+  4) AUX / operational docs
+
+Integrity:
+  - SECTION_HASHES.json pins consensus-critical section hashes of RUBIN_L1_CANONICAL.md.
+  - Any change to a pinned section MUST update SECTION_HASHES.json deterministically
+    (per canonicalization rules in SECTION_HASHES.json).
+-->
+
 # Spec Index
 
 ## Consensus-Critical
@@ -8,6 +26,10 @@
   - Covenant registry and error code registry (genesis profile)
   - Emission schedule (smooth decay + tail, `EMISSION_SPEED_FACTOR=20`)
   - At conflict with any other document, CANONICAL takes precedence.
+
+- `./SECTION_HASHES.json` — consensus-critical integrity pins
+  - SHA256 hashes of selected consensus-critical sections from `RUBIN_L1_CANONICAL.md`
+  - Canonicalization rule is documented inside the JSON.
 
 - `./RUBIN_CORE_HTLC_SPEC.md` — consensus-critical covenant spec
   - `CORE_HTLC` (0x0100), active from genesis block 0
@@ -42,7 +64,7 @@
   - Open findings (Q-C013..Q-C019, HTLC BUG-1/2)
   - Инструкция для аудитора
 
-## Document Priority
+## Document Precedence
 
 ```
 CANONICAL > COMPACT_BLOCKS > NETWORK_PARAMS

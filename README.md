@@ -1,3 +1,21 @@
+<!--
+RUBIN SPEC FREEZE HEADER (informational)
+
+This repository contains consensus-critical and normative specifications.
+Consensus source-of-truth: RUBIN_L1_CANONICAL.md.
+
+Precedence (normative):
+  1) RUBIN_L1_CANONICAL.md     (consensus validity)
+  2) RUBIN_COMPACT_BLOCKS.md   (normative P2P behavior)
+  3) RUBIN_NETWORK_PARAMS.md   (reference summary; derived; CANONICAL prevails)
+  4) AUX / operational docs
+
+Integrity:
+  - SECTION_HASHES.json pins consensus-critical section hashes of RUBIN_L1_CANONICAL.md.
+  - Any change to a pinned section MUST update SECTION_HASHES.json deterministically
+    (per canonicalization rules in SECTION_HASHES.json).
+-->
+
 # rubin-protocol (Genesis = Canonical Transaction Wire)
 
 This repository contains:
