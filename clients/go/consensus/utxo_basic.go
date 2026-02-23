@@ -1,6 +1,6 @@
 package consensus
 
-import "encoding/binary"
+import "math/bits"
 
 type Outpoint struct {
 	Txid [32]byte
@@ -37,7 +37,11 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 		work[k] = v
 	}
 
-	var sumIn uint64
+	var sumIn u128
+	var sumInVault u128
+	var vaultWhitelists [][][32]byte
+	hasVaultInput := false
+	witnessCursor := 0
 	for _, in := range tx.Inputs {
 		op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
 		entry, ok := work[op]
@@ -52,30 +56,62 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 		if entry.CreatedByCoinbase && height < entry.CreationHeight+COINBASE_MATURITY {
 			return nil, txerr(TX_ERR_COINBASE_IMMATURE, "coinbase immature")
 		}
-
-		if err := checkSpendTimelock(
-			entry.CovenantType,
-			entry.CovenantData,
-			height,
-			blockTimestamp,
-			entry.CreationHeight,
-		); err != nil {
+		if entry.CovenantType == COV_TYPE_HTLC {
+			slots := 2
+			if witnessCursor+slots > len(tx.Witness) {
+				return nil, txerr(TX_ERR_PARSE, "CORE_HTLC witness underflow")
+			}
+			if err := ValidateHTLCSpend(
+				entry,
+				tx.Witness[witnessCursor],
+				tx.Witness[witnessCursor+1],
+				height,
+				blockTimestamp,
+			); err != nil {
+				return nil, err
+			}
+			witnessCursor += slots
+		} else if err := checkSpendCovenant(entry.CovenantType, entry.CovenantData); err != nil {
 			return nil, err
+		} else if len(tx.Witness) > 0 {
+			slots := WitnessSlots(entry.CovenantType, entry.CovenantData)
+			if slots <= 0 {
+				return nil, txerr(TX_ERR_PARSE, "invalid witness slots")
+			}
+			if witnessCursor+slots > len(tx.Witness) {
+				return nil, txerr(TX_ERR_PARSE, "witness underflow")
+			}
+			witnessCursor += slots
 		}
 
 		var err error
-		sumIn, err = addU64(sumIn, entry.Value)
+		sumIn, err = addU64ToU128(sumIn, entry.Value)
 		if err != nil {
 			return nil, err
+		}
+		if entry.CovenantType == COV_TYPE_VAULT {
+			hasVaultInput = true
+			v, err := ParseVaultCovenantData(entry.CovenantData)
+			if err != nil {
+				return nil, err
+			}
+			vaultWhitelists = append(vaultWhitelists, v.Whitelist)
+			sumInVault, err = addU64ToU128(sumInVault, entry.Value)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		delete(work, op)
 	}
+	if len(tx.Witness) > 0 && witnessCursor != len(tx.Witness) {
+		return nil, txerr(TX_ERR_PARSE, "witness_count mismatch")
+	}
 
-	var sumOut uint64
+	var sumOut u128
 	for i, out := range tx.Outputs {
 		var err error
-		sumOut, err = addU64(sumOut, out.Value)
+		sumOut, err = addU64ToU128(sumOut, out.Value)
 		if err != nil {
 			return nil, err
 		}
@@ -93,23 +129,42 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 			CreatedByCoinbase: false,
 		}
 	}
+	if len(vaultWhitelists) > 0 {
+		for _, out := range tx.Outputs {
+			desc := OutputDescriptorBytes(out.CovenantType, out.CovenantData)
+			h := sha3_256(desc)
+			for _, wl := range vaultWhitelists {
+				if !HashInSorted32(wl, h) {
+					return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "output not whitelisted for CORE_VAULT")
+				}
+			}
+		}
+	}
 
-	if sumOut > sumIn {
+	if cmpU128(sumOut, sumIn) > 0 {
 		return nil, txerr(TX_ERR_VALUE_CONSERVATION, "sum_out exceeds sum_in")
+	}
+	if hasVaultInput && cmpU128(sumOut, sumInVault) < 0 {
+		return nil, txerr(TX_ERR_VALUE_CONSERVATION, "vault inputs cannot fund miner fee")
+	}
+	feeU128, err := subU128(sumIn, sumOut)
+	if err != nil {
+		return nil, err
+	}
+	fee, err := u128ToU64(feeU128)
+	if err != nil {
+		return nil, err
 	}
 
 	return &UtxoApplySummary{
-		Fee:       sumIn - sumOut,
+		Fee:       fee,
 		UtxoCount: uint64(len(work)),
 	}, nil
 }
 
-func checkSpendTimelock(
+func checkSpendCovenant(
 	covType uint16,
 	covData []byte,
-	height uint64,
-	blockTimestamp uint64,
-	creationHeight uint64,
 ) error {
 	if covType == COV_TYPE_P2PK {
 		return nil
@@ -119,39 +174,72 @@ func checkSpendTimelock(
 		if err != nil {
 			return err
 		}
-		// Basic apply path models owner spend-delay guard only.
-		if v.SpendDelay > 0 {
-			unlockHeight, err := addU64(creationHeight, v.SpendDelay)
-			if err != nil {
-				return err
-			}
-			if height < unlockHeight {
-				return txerr(TX_ERR_TIMELOCK_NOT_MET, "vault spend_delay not met")
-			}
+		_ = v
+		return nil
+	}
+	if covType == COV_TYPE_MULTISIG {
+		m, err := ParseMultisigCovenantData(covData)
+		if err != nil {
+			return err
+		}
+		_ = m
+		return nil
+	}
+	if covType == COV_TYPE_HTLC {
+		if _, err := ParseHTLCCovenantData(covData); err != nil {
+			return err
 		}
 		return nil
 	}
-	if covType != COV_TYPE_TIMELOCK {
-		// HTLC/reserved/unknown are unsupported in basic apply path.
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "unsupported covenant in basic apply")
-	}
+	// Reserved/unknown are unsupported in basic apply path.
+	return txerr(TX_ERR_COVENANT_TYPE_INVALID, "unsupported covenant in basic apply")
+}
 
-	if len(covData) != MAX_TIMELOCK_COVENANT_DATA {
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "invalid timelock covenant_data length")
+type u128 struct {
+	hi uint64
+	lo uint64
+}
+
+func addU64ToU128(x u128, v uint64) (u128, error) {
+	lo, carry := bits.Add64(x.lo, v, 0)
+	hi, carry2 := bits.Add64(x.hi, 0, carry)
+	if carry2 != 0 {
+		return u128{}, txerr(TX_ERR_PARSE, "u128 overflow")
 	}
-	lockMode := covData[0]
-	lockValue := binary.LittleEndian.Uint64(covData[1:])
-	switch lockMode {
-	case 0x00:
-		if height < lockValue {
-			return txerr(TX_ERR_TIMELOCK_NOT_MET, "height timelock not met")
-		}
-	case 0x01:
-		if blockTimestamp < lockValue {
-			return txerr(TX_ERR_TIMELOCK_NOT_MET, "timestamp timelock not met")
-		}
-	default:
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "invalid timelock lock_mode")
+	return u128{hi: hi, lo: lo}, nil
+}
+
+func cmpU128(a u128, b u128) int {
+	if a.hi < b.hi {
+		return -1
 	}
-	return nil
+	if a.hi > b.hi {
+		return 1
+	}
+	if a.lo < b.lo {
+		return -1
+	}
+	if a.lo > b.lo {
+		return 1
+	}
+	return 0
+}
+
+func subU128(a u128, b u128) (u128, error) {
+	if cmpU128(a, b) < 0 {
+		return u128{}, txerr(TX_ERR_PARSE, "u128 underflow")
+	}
+	lo, borrow := bits.Sub64(a.lo, b.lo, 0)
+	hi, borrow2 := bits.Sub64(a.hi, b.hi, borrow)
+	if borrow2 != 0 {
+		return u128{}, txerr(TX_ERR_PARSE, "u128 underflow")
+	}
+	return u128{hi: hi, lo: lo}, nil
+}
+
+func u128ToU64(x u128) (uint64, error) {
+	if x.hi != 0 {
+		return 0, txerr(TX_ERR_PARSE, "u64 overflow")
+	}
+	return x.lo, nil
 }

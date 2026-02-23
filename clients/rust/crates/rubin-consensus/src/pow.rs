@@ -1,4 +1,6 @@
-use crate::constants::{POW_LIMIT, TARGET_BLOCK_INTERVAL, WINDOW_SIZE};
+use crate::constants::{
+    MAX_TIMESTAMP_STEP_PER_BLOCK, POW_LIMIT, TARGET_BLOCK_INTERVAL, WINDOW_SIZE,
+};
 use crate::error::{ErrorCode, TxError};
 use crate::{block_hash, BLOCK_HEADER_BYTES};
 use num_bigint::BigUint;
@@ -9,6 +11,55 @@ pub fn retarget_v1(
     timestamp_first: u64,
     timestamp_last: u64,
 ) -> Result<[u8; 32], TxError> {
+    let t_actual = if timestamp_last <= timestamp_first {
+        1u64
+    } else {
+        timestamp_last - timestamp_first
+    };
+    retarget_v1_with_actual(target_old, t_actual)
+}
+
+// Retarget using clamped per-block timestamps (CANONICAL §15).
+// The caller MUST provide exactly WINDOW_SIZE timestamps for the retarget window.
+pub fn retarget_v1_clamped(
+    target_old: [u8; 32],
+    window_timestamps: &[u64],
+) -> Result<[u8; 32], TxError> {
+    if window_timestamps.len() != WINDOW_SIZE as usize {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "retarget: invalid window timestamp count",
+        ));
+    }
+    let first = window_timestamps[0];
+    let mut prev = first;
+
+    for raw in &window_timestamps[1..] {
+        let lo = prev.checked_add(1).ok_or_else(|| {
+            TxError::new(ErrorCode::TxErrParse, "retarget: timestamp clamp overflow")
+        })?;
+        let hi = prev
+            .checked_add(MAX_TIMESTAMP_STEP_PER_BLOCK)
+            .ok_or_else(|| {
+                TxError::new(ErrorCode::TxErrParse, "retarget: timestamp clamp overflow")
+            })?;
+        let mut v = *raw;
+        if v < lo {
+            v = lo;
+        } else if v > hi {
+            v = hi;
+        }
+        prev = v;
+    }
+
+    let mut t_actual = prev - first;
+    if t_actual == 0 {
+        t_actual = 1;
+    }
+    retarget_v1_with_actual(target_old, t_actual)
+}
+
+fn retarget_v1_with_actual(target_old: [u8; 32], t_actual: u64) -> Result<[u8; 32], TxError> {
     let pow_limit = BigUint::from_bytes_be(&POW_LIMIT);
     let t_old = BigUint::from_bytes_be(&target_old);
     if t_old.is_zero() {
@@ -23,12 +74,6 @@ pub fn retarget_v1(
             "retarget: target_old above pow_limit",
         ));
     }
-
-    let t_actual = if timestamp_last <= timestamp_first {
-        1u64
-    } else {
-        timestamp_last - timestamp_first
-    };
 
     let t_expected = TARGET_BLOCK_INTERVAL
         .checked_mul(WINDOW_SIZE)

@@ -16,6 +16,47 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Strict JSON parse (tracked)
+        run: |
+          python3 - <<'PY'
+          import json, subprocess, sys
+          from pathlib import Path
+          
+          def reject_const(x: str):
+            raise ValueError(f"non-standard JSON constant not allowed: {x}")
+          
+          tracked = subprocess.check_output(["git", "ls-files", "*.json"], text=True).splitlines()
+          paths = [Path(p) for p in tracked if p.strip()]
+          if not paths:
+            print("no tracked json files found")
+            sys.exit(1)
+          
+          bad = False
+          for p in paths:
+            try:
+              s = p.read_text(encoding="utf-8")
+            except Exception as e:
+              print(f"READ_FAIL {p}: {e}")
+              bad = True
+              continue
+            try:
+              v = json.loads(s, parse_constant=reject_const)
+            except Exception as e:
+              print(f"PARSE_FAIL {p}: {e}")
+              bad = True
+              continue
+            if not isinstance(v, (dict, list)):
+              print(f"ROOT_FAIL {p}: root must be object or array")
+              bad = True
+          
+          if bad:
+            sys.exit(1)
+          print(f"ok: {len(paths)} files")
+          PY
 
       - name: Go fmt
         run: |
@@ -36,6 +77,12 @@ jobs:
         run: |
           cd clients/rust
           cargo test --workspace
+
+      - name: Spec invariants check
+        run: node scripts/check-spec-invariants.mjs
+
+      - name: Spec section hashes check
+        run: node scripts/check-section-hashes.mjs
 
       - name: Conformance bundle
         run: |

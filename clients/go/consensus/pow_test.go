@@ -59,6 +59,36 @@ func TestRetargetV1_ClampsToPowLimit(t *testing.T) {
 	}
 }
 
+func TestRetargetV1Clamped_LastStepJump(t *testing.T) {
+	targetOld := mustBytes32Hex(t, "0000000000000000000000000000000000000000000000000000000000001000")
+	window := make([]uint64, WINDOW_SIZE)
+	for i := 1; i < len(window); i++ {
+		window[i] = window[i-1] + uint64(TARGET_BLOCK_INTERVAL)
+	}
+	// Malicious jump on the last timestamp; clamped path MUST limit its retarget impact.
+	window[len(window)-1] = window[len(window)-2] + 1_000_000
+
+	got, err := RetargetV1Clamped(targetOld, window)
+	if err != nil {
+		t.Fatalf("RetargetV1Clamped error: %v", err)
+	}
+	want := mustBytes32Hex(t, "0000000000000000000000000000000000000000000000000000000000001003")
+	if got != want {
+		t.Fatalf("target mismatch: got=%x want=%x", got, want)
+	}
+}
+
+func TestRetargetV1Clamped_InvalidWindowLength(t *testing.T) {
+	targetOld := mustBytes32Hex(t, "0000000000000000000000000000000000000000000000000000000000001000")
+	_, err := RetargetV1Clamped(targetOld, []uint64{0, 120})
+	if err == nil {
+		t.Fatalf("expected parse error for invalid window length")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
+	}
+}
+
 func TestPowCheck_StrictLess(t *testing.T) {
 	header := make([]byte, BLOCK_HEADER_BYTES)
 	header[0] = 1 // just to avoid all-zero input

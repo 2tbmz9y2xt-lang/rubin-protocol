@@ -7,6 +7,7 @@ pub enum ErrorCode {
     TxErrSigNoncanonical,
     TxErrSigAlgInvalid,
     TxErrSigInvalid,
+    TxErrTimelockNotMet,
     TxErrValueConservation,
     TxErrTxNonceInvalid,
     TxErrSequenceInvalid,
@@ -14,7 +15,6 @@ pub enum ErrorCode {
     TxErrCovenantTypeInvalid,
     TxErrMissingUtxo,
     TxErrCoinbaseImmature,
-    TxErrTimelockNotMet,
 
     BlockErrParse,
     BlockErrWeightExceeded,
@@ -38,6 +38,7 @@ impl ErrorCode {
             ErrorCode::TxErrSigNoncanonical => "TX_ERR_SIG_NONCANONICAL",
             ErrorCode::TxErrSigAlgInvalid => "TX_ERR_SIG_ALG_INVALID",
             ErrorCode::TxErrSigInvalid => "TX_ERR_SIG_INVALID",
+            ErrorCode::TxErrTimelockNotMet => "TX_ERR_TIMELOCK_NOT_MET",
             ErrorCode::TxErrValueConservation => "TX_ERR_VALUE_CONSERVATION",
             ErrorCode::TxErrTxNonceInvalid => "TX_ERR_TX_NONCE_INVALID",
             ErrorCode::TxErrSequenceInvalid => "TX_ERR_SEQUENCE_INVALID",
@@ -45,7 +46,6 @@ impl ErrorCode {
             ErrorCode::TxErrCovenantTypeInvalid => "TX_ERR_COVENANT_TYPE_INVALID",
             ErrorCode::TxErrMissingUtxo => "TX_ERR_MISSING_UTXO",
             ErrorCode::TxErrCoinbaseImmature => "TX_ERR_COINBASE_IMMATURE",
-            ErrorCode::TxErrTimelockNotMet => "TX_ERR_TIMELOCK_NOT_MET",
 
             ErrorCode::BlockErrParse => "BLOCK_ERR_PARSE",
             ErrorCode::BlockErrWeightExceeded => "BLOCK_ERR_WEIGHT_EXCEEDED",

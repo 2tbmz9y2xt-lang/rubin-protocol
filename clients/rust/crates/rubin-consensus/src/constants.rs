@@ -5,6 +5,8 @@ pub const WINDOW_SIZE: u64 = 10_080;
 
 pub const COINBASE_MATURITY: u64 = 100;
 pub const MAX_FUTURE_DRIFT: u64 = 7_200;
+// Derived consensus constant (CANONICAL §4 / §15).
+pub const MAX_TIMESTAMP_STEP_PER_BLOCK: u64 = 10 * TARGET_BLOCK_INTERVAL;
 
 pub const BASE_UNITS_PER_RBN: u64 = 100_000_000;
 pub const MAX_SUPPLY: u64 = 10_000_000_000_000_000;
@@ -20,14 +22,16 @@ pub const MAX_RELAY_MSG_BYTES: u64 = 96_000_000;
 pub const MAX_DA_MANIFEST_BYTES_PER_TX: u64 = 65_536;
 pub const CHUNK_BYTES: u64 = 524_288;
 pub const MAX_DA_BATCHES_PER_BLOCK: u64 = 128;
-pub const MAX_DA_CHUNK_COUNT: u64 = 4_096;
+pub const MAX_DA_CHUNK_COUNT: u64 = MAX_DA_BYTES_PER_BLOCK / CHUNK_BYTES;
 pub const MAX_ANCHOR_PAYLOAD_SIZE: u64 = 65_536;
 pub const MAX_ANCHOR_BYTES_PER_BLOCK: u64 = 131_072;
 pub const MAX_P2PK_COVENANT_DATA: u64 = 33;
-pub const MAX_TIMELOCK_COVENANT_DATA: u64 = 9;
-pub const MAX_VAULT_COVENANT_DATA: u64 = 81;
-pub const MAX_VAULT_COVENANT_LEGACY: u64 = 73;
-pub const MIN_VAULT_SPEND_DELAY: u64 = 4_320;
+pub const MAX_HTLC_COVENANT_DATA: u64 = 105;
+pub const MAX_HTLC_PREIMAGE_BYTES: u64 = 256;
+pub const MAX_VAULT_KEYS: u8 = 12;
+pub const MAX_VAULT_WHITELIST_ENTRIES: u16 = 1024;
+pub const MAX_MULTISIG_KEYS: u8 = 12;
+pub const COV_TYPE_MULTISIG: u16 = 0x0104;
 
 pub const MAX_TX_INPUTS: u64 = 1024;
 pub const MAX_TX_OUTPUTS: u64 = 1024;
@@ -38,14 +42,17 @@ pub const MAX_SCRIPT_SIG_BYTES: u64 = 32;
 pub const SUITE_ID_SENTINEL: u8 = 0x00;
 pub const SUITE_ID_ML_DSA_87: u8 = 0x01;
 pub const SUITE_ID_SLH_DSA_SHAKE_256F: u8 = 0x02;
+pub const SLH_DSA_ACTIVATION_HEIGHT: u64 = 1_000_000;
 
 pub const COV_TYPE_P2PK: u16 = 0x0000;
-pub const COV_TYPE_TIMELOCK: u16 = 0x0001;
 pub const COV_TYPE_ANCHOR: u16 = 0x0002;
 pub const COV_TYPE_RESERVED_FUTURE: u16 = 0x00FF;
 pub const COV_TYPE_HTLC: u16 = 0x0100;
 pub const COV_TYPE_VAULT: u16 = 0x0101;
 pub const COV_TYPE_DA_COMMIT: u16 = 0x0103;
+
+pub const LOCK_MODE_HEIGHT: u8 = 0x00;
+pub const LOCK_MODE_TIMESTAMP: u8 = 0x01;
 
 pub const ML_DSA_87_PUBKEY_BYTES: u64 = 2592;
 pub const ML_DSA_87_SIG_BYTES: u64 = 4627;

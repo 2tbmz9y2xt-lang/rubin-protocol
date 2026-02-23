@@ -1,9 +1,10 @@
 use rubin_consensus::{
     apply_non_coinbase_tx_basic, block_hash, compact_shortid, merkle_root_txids, parse_tx,
-    pow_check, retarget_v1, sighash_v1_digest, validate_block_basic, validate_tx_covenants_genesis,
-    ErrorCode, Outpoint, UtxoEntry,
+    pow_check, retarget_v1, retarget_v1_clamped, sighash_v1_digest, validate_block_basic_at_height,
+    validate_tx_covenants_genesis, ErrorCode, Outpoint, UtxoEntry,
 };
 use serde::{Deserialize, Serialize};
+use sha3::{Digest, Sha3_256};
 use std::collections::HashMap;
 
 #[derive(Deserialize)]
@@ -21,6 +22,12 @@ struct Request {
 
     #[serde(default)]
     wtxid: String,
+
+    #[serde(default)]
+    covenant_type: u16,
+
+    #[serde(default)]
+    covenant_data_hex: String,
 
     #[serde(default)]
     nonce1: u64,
@@ -51,6 +58,9 @@ struct Request {
 
     #[serde(default)]
     timestamp_last: u64,
+
+    #[serde(default)]
+    window_timestamps: Vec<u64>,
 
     #[serde(default)]
     expected_prev_hash: String,
@@ -106,6 +116,12 @@ struct Response {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     target_new: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fee: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    utxo_count: Option<u64>,
 }
 
 fn err_code(code: ErrorCode) -> String {
@@ -126,6 +142,8 @@ fn main() {
                 consumed: None,
                 block_hash: None,
                 target_new: None,
+                fee: None,
+                utxo_count: None,
             };
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
             return;
@@ -147,6 +165,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -164,6 +184,8 @@ fn main() {
                         consumed: Some(n),
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -178,6 +200,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -199,6 +223,8 @@ fn main() {
                             consumed: None,
                             block_hash: None,
                             target_new: None,
+                            fee: None,
+                            utxo_count: None,
                         };
                         let _ = serde_json::to_writer(std::io::stdout(), &resp);
                         return;
@@ -215,6 +241,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -235,6 +263,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -249,6 +279,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -268,6 +300,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -286,6 +320,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -305,6 +341,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -321,6 +359,8 @@ fn main() {
                     consumed: None,
                     block_hash: None,
                     target_new: None,
+                    fee: None,
+                    utxo_count: None,
                 };
                 let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 return;
@@ -340,6 +380,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -354,6 +396,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -373,6 +417,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -390,6 +436,8 @@ fn main() {
                         consumed: None,
                         block_hash: Some(hex::encode(h)),
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -404,6 +452,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -423,6 +473,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -441,6 +493,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -457,6 +511,8 @@ fn main() {
                     consumed: None,
                     block_hash: None,
                     target_new: None,
+                    fee: None,
+                    utxo_count: None,
                 };
                 let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 return;
@@ -476,6 +532,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -490,6 +548,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -509,6 +569,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -525,6 +587,8 @@ fn main() {
                     consumed: None,
                     block_hash: None,
                     target_new: None,
+                    fee: None,
+                    utxo_count: None,
                 };
                 let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 return;
@@ -532,7 +596,12 @@ fn main() {
             let mut old = [0u8; 32];
             old.copy_from_slice(&old_bytes);
 
-            match retarget_v1(old, req.timestamp_first, req.timestamp_last) {
+            let retarget_res = if !req.window_timestamps.is_empty() {
+                retarget_v1_clamped(old, &req.window_timestamps)
+            } else {
+                retarget_v1(old, req.timestamp_first, req.timestamp_last)
+            };
+            match retarget_res {
                 Ok(new_t) => {
                     let resp = Response {
                         ok: true,
@@ -544,6 +613,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: Some(hex::encode(new_t)),
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -558,6 +629,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -577,6 +650,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -599,6 +674,8 @@ fn main() {
                             consumed: None,
                             block_hash: None,
                             target_new: None,
+                            fee: None,
+                            utxo_count: None,
                         };
                         let _ = serde_json::to_writer(std::io::stdout(), &resp);
                         return;
@@ -615,6 +692,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -640,6 +719,8 @@ fn main() {
                             consumed: None,
                             block_hash: None,
                             target_new: None,
+                            fee: None,
+                            utxo_count: None,
                         };
                         let _ = serde_json::to_writer(std::io::stdout(), &resp);
                         return;
@@ -656,6 +737,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -665,7 +748,12 @@ fn main() {
                 Some(h)
             };
 
-            match validate_block_basic(&block_bytes, expected_prev, expected_target) {
+            match validate_block_basic_at_height(
+                &block_bytes,
+                expected_prev,
+                expected_target,
+                req.height,
+            ) {
                 Ok(summary) => {
                     let resp = Response {
                         ok: true,
@@ -677,6 +765,8 @@ fn main() {
                         consumed: None,
                         block_hash: Some(hex::encode(summary.block_hash)),
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -691,6 +781,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -710,6 +802,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -729,6 +823,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -747,6 +843,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -761,6 +859,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -780,6 +880,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -799,6 +901,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -821,6 +925,8 @@ fn main() {
                             consumed: None,
                             block_hash: None,
                             target_new: None,
+                            fee: None,
+                            utxo_count: None,
                         };
                         let _ = serde_json::to_writer(std::io::stdout(), &resp);
                         return;
@@ -837,6 +943,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -854,6 +962,8 @@ fn main() {
                             consumed: None,
                             block_hash: None,
                             target_new: None,
+                            fee: None,
+                            utxo_count: None,
                         };
                         let _ = serde_json::to_writer(std::io::stdout(), &resp);
                         return;
@@ -879,7 +989,7 @@ fn main() {
 
             match apply_non_coinbase_tx_basic(&tx, txid, &utxo_set, req.height, req.block_timestamp)
             {
-                Ok(_summary) => {
+                Ok(summary) => {
                     let resp = Response {
                         ok: true,
                         err: None,
@@ -890,6 +1000,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: Some(summary.fee),
+                        utxo_count: Some(summary.utxo_count),
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -904,6 +1016,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -923,6 +1037,8 @@ fn main() {
                         consumed: None,
                         block_hash: None,
                         target_new: None,
+                        fee: None,
+                        utxo_count: None,
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -939,6 +1055,8 @@ fn main() {
                     consumed: None,
                     block_hash: None,
                     target_new: None,
+                    fee: None,
+                    utxo_count: None,
                 };
                 let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 return;
@@ -956,6 +1074,85 @@ fn main() {
                 consumed: None,
                 block_hash: None,
                 target_new: None,
+                fee: None,
+                utxo_count: None,
+            };
+            let _ = serde_json::to_writer(std::io::stdout(), &resp);
+        }
+        "output_descriptor_bytes" => {
+            let cov_data = match hex::decode(req.covenant_data_hex) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad covenant_data_hex".to_string()),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                        fee: None,
+                        utxo_count: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            let desc = output_descriptor_bytes(req.covenant_type, &cov_data);
+            let resp = Response {
+                ok: true,
+                err: None,
+                txid: None,
+                wtxid: None,
+                merkle_root: None,
+                digest: Some(hex::encode(desc)),
+                consumed: None,
+                block_hash: None,
+                target_new: None,
+                fee: None,
+                utxo_count: None,
+            };
+            let _ = serde_json::to_writer(std::io::stdout(), &resp);
+        }
+        "output_descriptor_hash" => {
+            let cov_data = match hex::decode(req.covenant_data_hex) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad covenant_data_hex".to_string()),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                        fee: None,
+                        utxo_count: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            let desc = output_descriptor_bytes(req.covenant_type, &cov_data);
+            let mut hasher = Sha3_256::new();
+            hasher.update(desc);
+            let h = hasher.finalize();
+            let resp = Response {
+                ok: true,
+                err: None,
+                txid: None,
+                wtxid: None,
+                merkle_root: None,
+                digest: Some(hex::encode(h)),
+                consumed: None,
+                block_hash: None,
+                target_new: None,
+                fee: None,
+                utxo_count: None,
             };
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
@@ -970,8 +1167,36 @@ fn main() {
                 consumed: None,
                 block_hash: None,
                 target_new: None,
+                fee: None,
+                utxo_count: None,
             };
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
+    }
+}
+
+fn output_descriptor_bytes(covenant_type: u16, covenant_data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + 9 + covenant_data.len());
+    out.extend_from_slice(&covenant_type.to_le_bytes());
+    out.extend_from_slice(&encode_compact_size(covenant_data.len() as u64));
+    out.extend_from_slice(covenant_data);
+    out
+}
+
+fn encode_compact_size(n: u64) -> Vec<u8> {
+    if n < 0xfd {
+        vec![n as u8]
+    } else if n <= 0xffff {
+        let mut out = vec![0xfd, 0, 0];
+        out[1..3].copy_from_slice(&(n as u16).to_le_bytes());
+        out
+    } else if n <= 0xffff_ffff {
+        let mut out = vec![0xfe, 0, 0, 0, 0];
+        out[1..5].copy_from_slice(&(n as u32).to_le_bytes());
+        out
+    } else {
+        let mut out = vec![0xff, 0, 0, 0, 0, 0, 0, 0, 0];
+        out[1..9].copy_from_slice(&n.to_le_bytes());
+        out
     }
 }

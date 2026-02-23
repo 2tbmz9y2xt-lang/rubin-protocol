@@ -1,0 +1,54 @@
+{
+  "gate": "CV-OUTPUT-DESCRIPTOR",
+  "description": "Conformance vectors for OutputDescriptorBytes canonical serialization (§18.3). Used in CORE_VAULT whitelist hashing. All implementations MUST produce identical byte output.",
+  "vectors": [
+    {
+      "id": "CV-OD-01",
+      "description": "CORE_P2PK output: covenant_type=0x0000, covenant_data=36 bytes (suite_id + key_id). value excluded.",
+      "op": "output_descriptor_bytes",
+      "input": {
+        "covenant_type": "0x0000",
+        "covenant_data_hex": "01aabbccdd00112233445566778899aabbccddeeff00112233445566778899aabbccddee",
+        "value": "1000000"
+      },
+      "note": "OutputDescriptorBytes = u16le(0x0000) || CompactSize(36) || covenant_data. value intentionally excluded.",
+      "expected_hex": "00002401aabbccdd00112233445566778899aabbccddeeff00112233445566778899aabbccddee"
+    },
+    {
+      "id": "CV-OD-02",
+      "description": "CORE_VAULT output: covenant_type=0x0101, threshold=1, key_count=1, whitelist_count=1. covenant_data_len=69. CompactSize(69)=0x45.",
+      "op": "output_descriptor_bytes",
+      "input": {
+        "covenant_type": "0x0101",
+        "covenant_data_hex": "010111111111111111111111111111111111111111111111111111111111111111111101002222222222222222222222222222222222222222222222222222222222222222",
+        "value": "9999999"
+      },
+      "note": "covenant_data_len=2+33+2+32=69 bytes. CompactSize(69)=0x45 (single byte). value excluded.",
+      "expected_hex": "010145010111111111111111111111111111111111111111111111111111111111111111111101002222222222222222222222222222222222222222222222222222222222222222"
+    },
+    {
+      "id": "CV-OD-03",
+      "description": "CORE_ANCHOR output: covenant_type=0x0002, covenant_data=4 bytes, value=0. Tests that value=0 excluded same as any other value.",
+      "op": "output_descriptor_bytes",
+      "input": {
+        "covenant_type": "0x0002",
+        "covenant_data_hex": "deadbeef",
+        "value": "0"
+      },
+      "note": "CompactSize(4)=0x04.",
+      "expected_hex": "020004deadbeef"
+    },
+    {
+      "id": "CV-OD-04",
+      "description": "SHA3-256 of OutputDescriptorBytes for a P2PK output — whitelist hash derivation reference.",
+      "op": "output_descriptor_hash",
+      "input": {
+        "covenant_type": "0x0000",
+        "covenant_data_hex": "01aabbccdd00112233445566778899aabbccddeeff00112233445566778899aabbccddee",
+        "value": "1000000"
+      },
+      "note": "expected_hash = SHA3-256(OutputDescriptorBytes). Must be computed by implementation.",
+      "expected_hash": "c613ecb3ab48f4f78ee398790f4c40095f699e348b41288a829b9cde419f9beb"
+    }
+  ]
+}

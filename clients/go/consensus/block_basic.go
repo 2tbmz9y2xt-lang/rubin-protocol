@@ -70,6 +70,15 @@ func ParseBlockBytes(b []byte) (*ParsedBlock, error) {
 }
 
 func ValidateBlockBasic(blockBytes []byte, expectedPrevHash *[32]byte, expectedTarget *[32]byte) (*BlockBasicSummary, error) {
+	return ValidateBlockBasicAtHeight(blockBytes, expectedPrevHash, expectedTarget, 0)
+}
+
+func ValidateBlockBasicAtHeight(
+	blockBytes []byte,
+	expectedPrevHash *[32]byte,
+	expectedTarget *[32]byte,
+	blockHeight uint64,
+) (*BlockBasicSummary, error) {
 	pb, err := ParseBlockBytes(blockBytes)
 	if err != nil {
 		return nil, err
@@ -99,6 +108,9 @@ func ValidateBlockBasic(blockBytes []byte, expectedPrevHash *[32]byte, expectedT
 	var sumDa uint64
 	var sumAnchor uint64
 	for i, tx := range pb.Txs {
+		if err := validateWitnessSuiteActivation(tx, i, blockHeight); err != nil {
+			return nil, err
+		}
 		// Non-coinbase transactions must carry at least one input.
 		if i > 0 && len(tx.Inputs) == 0 {
 			return nil, txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
@@ -150,6 +162,22 @@ func ValidateBlockBasic(blockBytes []byte, expectedPrevHash *[32]byte, expectedT
 	}, nil
 }
 
+func validateWitnessSuiteActivation(tx *Tx, txIndex int, blockHeight uint64) error {
+	if tx == nil {
+		return txerr(TX_ERR_PARSE, "nil tx")
+	}
+	if txIndex == 0 {
+		// Coinbase witness is structurally empty in genesis profile.
+		return nil
+	}
+	for _, w := range tx.Witness {
+		if w.SuiteID == SUITE_ID_SLH_DSA_SHAKE_256F && blockHeight < SLH_DSA_ACTIVATION_HEIGHT {
+			return txerr(TX_ERR_SIG_ALG_INVALID, "SLH-DSA suite inactive at this height")
+		}
+	}
+	return nil
+}
+
 func validateCoinbaseWitnessCommitment(pb *ParsedBlock) error {
 	if pb == nil || len(pb.Txs) == 0 || len(pb.Wtxids) == 0 {
 		return txerr(BLOCK_ERR_COINBASE_INVALID, "missing coinbase")
@@ -182,9 +210,13 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 		return 0, 0, 0, txerr(TX_ERR_PARSE, "nil tx")
 	}
 
+	var err error
 	var baseSize uint64
 	baseSize = 4 + 1 + 8 // version + tx_kind + tx_nonce
-	baseSize, _ = addU64(baseSize, compactSizeLen(uint64(len(tx.Inputs))))
+	baseSize, err = addU64(baseSize, compactSizeLen(uint64(len(tx.Inputs))))
+	if err != nil {
+		return 0, 0, 0, txerr(TX_ERR_PARSE, "tx base size overflow")
+	}
 	for _, in := range tx.Inputs {
 		var err error
 		baseSize, err = addU64(baseSize, 32+4) // prevout
@@ -204,7 +236,10 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 			return 0, 0, 0, err
 		}
 	}
-	baseSize, _ = addU64(baseSize, compactSizeLen(uint64(len(tx.Outputs))))
+	baseSize, err = addU64(baseSize, compactSizeLen(uint64(len(tx.Outputs))))
+	if err != nil {
+		return 0, 0, 0, txerr(TX_ERR_PARSE, "tx base size overflow")
+	}
 	var anchorBytes uint64
 	for _, out := range tx.Outputs {
 		var err error
@@ -228,7 +263,10 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 			}
 		}
 	}
-	baseSize, _ = addU64(baseSize, 4) // locktime
+	baseSize, err = addU64(baseSize, 4) // locktime
+	if err != nil {
+		return 0, 0, 0, txerr(TX_ERR_PARSE, "tx base size overflow")
+	}
 
 	var witnessSize uint64
 	witnessSize = compactSizeLen(uint64(len(tx.Witness)))
@@ -258,9 +296,13 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 		}
 		switch w.SuiteID {
 		case SUITE_ID_ML_DSA_87:
-			mlCount++
+			if len(w.Pubkey) == ML_DSA_87_PUBKEY_BYTES && len(w.Signature) == ML_DSA_87_SIG_BYTES {
+				mlCount++
+			}
 		case SUITE_ID_SLH_DSA_SHAKE_256F:
-			slhCount++
+			if len(w.Pubkey) == SLH_DSA_SHAKE_256F_PUBKEY_BYTES && len(w.Signature) > 0 && len(w.Signature) <= MAX_SLH_DSA_SIG_BYTES {
+				slhCount++
+			}
 		}
 	}
 

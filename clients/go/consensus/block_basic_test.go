@@ -63,6 +63,33 @@ func txWithOutputs(outputs []testOutput) []byte {
 	return b
 }
 
+func txWithOneInputOneOutputAndWitness(suiteID byte, pubkey []byte, signature []byte) []byte {
+	outCov := validP2PKCovenantData()
+	b := make([]byte, 0, 160+len(pubkey)+len(signature)+len(outCov))
+	b = appendU32le(b, 1) // version
+	b = append(b, 0x00)   // tx_kind
+	b = appendU64le(b, 1) // tx_nonce
+	b = appendCompactSize(b, 1)
+	b = append(b, make([]byte, 32)...)
+	b = appendU32le(b, 0)
+	b = appendCompactSize(b, 0)
+	b = appendU32le(b, 0)
+	b = appendCompactSize(b, 1)
+	b = appendU64le(b, 1)
+	b = appendU16le(b, COV_TYPE_P2PK)
+	b = appendCompactSize(b, uint64(len(outCov)))
+	b = append(b, outCov...)
+	b = appendU32le(b, 0)
+	b = appendCompactSize(b, 1)
+	b = append(b, suiteID)
+	b = appendCompactSize(b, uint64(len(pubkey)))
+	b = append(b, pubkey...)
+	b = appendCompactSize(b, uint64(len(signature)))
+	b = append(b, signature...)
+	b = appendCompactSize(b, 0)
+	return b
+}
+
 func coinbaseWithWitnessCommitment(t *testing.T, nonCoinbaseTxs ...[]byte) []byte {
 	t.Helper()
 
@@ -399,5 +426,65 @@ func TestValidateBlockBasic_WitnessCommitmentDuplicate(t *testing.T) {
 	}
 	if got := mustTxErrCode(t, err); got != BLOCK_ERR_WITNESS_COMMITMENT {
 		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_WITNESS_COMMITMENT)
+	}
+}
+
+func TestValidateBlockBasic_SLHInactiveAtHeight(t *testing.T) {
+	pub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
+	sig := []byte{0x01}
+	nonCoinbase := txWithOneInputOneOutputAndWitness(SUITE_ID_SLH_DSA_SHAKE_256F, pub, sig)
+	coinbase := coinbaseWithWitnessCommitment(t, nonCoinbase)
+
+	cbid := testTxID(t, coinbase)
+	ncid := testTxID(t, nonCoinbase)
+	root, err := MerkleRootTxids([][32]byte{cbid, ncid})
+	if err != nil {
+		t.Fatalf("MerkleRootTxids: %v", err)
+	}
+	var prev [32]byte
+	prev[0] = 0xa1
+	var target [32]byte
+	for i := range target {
+		target[i] = 0xff
+	}
+	block := buildBlockBytes(t, prev, root, target, 29, [][]byte{coinbase, nonCoinbase})
+
+	_, err = ValidateBlockBasicAtHeight(block, &prev, &target, SLH_DSA_ACTIVATION_HEIGHT-1)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
+	}
+}
+
+func TestValidateBlockBasic_SLHActiveAtHeight(t *testing.T) {
+	pub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
+	sig := []byte{0x01}
+	nonCoinbase := txWithOneInputOneOutputAndWitness(SUITE_ID_SLH_DSA_SHAKE_256F, pub, sig)
+	coinbase := coinbaseWithWitnessCommitment(t, nonCoinbase)
+
+	cbid := testTxID(t, coinbase)
+	ncid := testTxID(t, nonCoinbase)
+	root, err := MerkleRootTxids([][32]byte{cbid, ncid})
+	if err != nil {
+		t.Fatalf("MerkleRootTxids: %v", err)
+	}
+	var prev [32]byte
+	prev[0] = 0xa2
+	var target [32]byte
+	for i := range target {
+		target[i] = 0xff
+	}
+	block := buildBlockBytes(t, prev, root, target, 31, [][]byte{coinbase, nonCoinbase})
+
+	if _, err := ValidateBlockBasicAtHeight(block, &prev, &target, SLH_DSA_ACTIVATION_HEIGHT); err != nil {
+		t.Fatalf("ValidateBlockBasicAtHeight: %v", err)
+	}
+}
+
+func TestAddU64_Overflow(t *testing.T) {
+	if _, err := addU64(^uint64(0), 1); err == nil {
+		t.Fatalf("expected overflow error")
 	}
 }

@@ -152,6 +152,7 @@ dependencies = [
  "rubin-consensus",
  "serde",
  "serde_json",
+ "sha3",
 ]
 
 [[package]]

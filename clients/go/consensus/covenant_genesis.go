@@ -15,15 +15,6 @@ func ValidateTxCovenantsGenesis(tx *Tx) error {
 				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "invalid CORE_P2PK suite_id")
 			}
 
-		case COV_TYPE_TIMELOCK:
-			if len(out.CovenantData) != MAX_TIMELOCK_COVENANT_DATA {
-				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "invalid CORE_TIMELOCK covenant_data length")
-			}
-			lockMode := out.CovenantData[0]
-			if lockMode != 0x00 && lockMode != 0x01 {
-				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "invalid CORE_TIMELOCK lock_mode")
-			}
-
 		case COV_TYPE_ANCHOR:
 			if out.Value != 0 {
 				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_ANCHOR value must be 0")
@@ -37,8 +28,19 @@ func ValidateTxCovenantsGenesis(tx *Tx) error {
 			if _, err := ParseVaultCovenantData(out.CovenantData); err != nil {
 				return err
 			}
+		case COV_TYPE_MULTISIG:
+			if _, err := ParseMultisigCovenantData(out.CovenantData); err != nil {
+				return err
+			}
+		case COV_TYPE_HTLC:
+			if out.Value == 0 {
+				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_HTLC value must be > 0")
+			}
+			if _, err := ParseHTLCCovenantData(out.CovenantData); err != nil {
+				return err
+			}
 
-		case COV_TYPE_RESERVED_FUTURE, COV_TYPE_HTLC, COV_TYPE_DA_COMMIT:
+		case COV_TYPE_RESERVED_FUTURE, COV_TYPE_DA_COMMIT:
 			return txerr(TX_ERR_COVENANT_TYPE_INVALID, "reserved or unsupported covenant_type")
 
 		default:

@@ -9,6 +9,10 @@ must remain consistent with RUBIN_L1_CANONICAL.md and RUBIN_COMPACT_BLOCKS.md.
 
 In case of conflict, RUBIN_L1_CANONICAL.md takes precedence.
 
+Units convention:
+- Unless explicitly marked as binary (`MiB`, `GiB`, `TiB`), byte quantities use SI prefixes
+  (`1 MB = 1_000_000 bytes`, `1 GB = 1_000_000_000 bytes`).
+
 ---
 
 ## 1. Block Parameters
@@ -24,7 +28,9 @@ In case of conflict, RUBIN_L1_CANONICAL.md takes precedence.
 | `MIN_DA_RETENTION_BLOCKS` | 15,120 blocks (21 days) | COMPACT §1 |
 | `COINBASE_MATURITY` | 100 blocks | CANONICAL §4 |
 | `MAX_FUTURE_DRIFT` | 7,200 s | CANONICAL §4 |
+| `MAX_TIMESTAMP_STEP_PER_BLOCK` | 1,200 s (`10 * TARGET_BLOCK_INTERVAL`) | CANONICAL §4, §15 |
 | `WITNESS_DISCOUNT_DIVISOR` | 4 | CANONICAL §4 |
+| `SLH_DSA_ACTIVATION_HEIGHT` | 1,000,000 | CANONICAL §4, §14.1, §14.2 |
 | Coinbase witness commitment | Required (CORE_ANCHOR, single 32-byte hash) | CANONICAL §10.4.1 |
 
 ---
@@ -34,12 +40,16 @@ In case of conflict, RUBIN_L1_CANONICAL.md takes precedence.
 | Metric | Value | Notes |
 |--------|-------|-------|
 | Blocks per year | 262,800 | 365 × 86400 / 120 |
-| L1 TPS (ML-DSA-87) | ~74 | 8,886 tx/block / 120s; weight = 7,652 wu/tx; full 68M wu available |
-| L1 TPS (SLH-DSA fallback) | ~11 | 1,349 tx/block / 120s; weight = 50,407 wu/tx |
-| L2 TPS | ~2,667 | 32 MB DA / 120 s / 100 B/tx |
+| L1 TPS (ML-DSA-87) | ~74 | 8,886 tx/block / 120s; weight = 7,652 wu/tx; assumes DA bytes near zero |
+| L1 TPS (SLH-DSA fallback) | ~11 | 1,349 tx/block / 120s; weight = 50,407 wu/tx; assumes DA bytes near zero |
+| L2 TPS | ~2,667 | 32 MB DA / 120 s / 100 B/tx; assumes DA budget saturated |
 | DA throughput | 0.267 MB/s | 32,000,000 / 120 |
 | Orphan rate | ~0.02% | compact blocks |
 | TPS drop at SLH-DSA activation | 6.6× | emergency fallback only |
+
+Notes:
+- L1 TPS and L2 DA-saturated TPS are different operating points and are not simultaneously achievable in one block.
+- When DA usage increases, available L1 transaction capacity decreases proportionally due to shared `MAX_BLOCK_WEIGHT`.
 
 ---
 
@@ -64,7 +74,9 @@ In case of conflict, RUBIN_L1_CANONICAL.md takes precedence.
 | Base unit | 1 RBN = 100,000,000 base units |
 | Max supply (base units) | 10,000,000,000,000,000 |
 
-Subsidy schedule: linear decay with remainder distribution.
+Subsidy schedule: flat per-block subsidy with remainder distribution.
+Each block awards `floor(SUBSIDY_TOTAL_MINED / SUBSIDY_DURATION_BLOCKS)` base units.
+The indivisible remainder is distributed to the final blocks of the subsidy period.
 See CANONICAL §19 for exact formula.
 
 ---
@@ -77,7 +89,7 @@ See CANONICAL §19 for exact formula.
 | ML-DSA-87 pubkey | 2,592 bytes |
 | ML-DSA-87 signature | 4,627 bytes |
 | ML-DSA-87 weight cost | 8 wu / signature |
-| Backup signature | SLH-DSA-SHAKE-256f (inactive at genesis) |
+| Backup signature | SLH-DSA-SHAKE-256f (consensus-gated; active from `SLH_DSA_ACTIVATION_HEIGHT`) |
 | SLH-DSA pubkey | 64 bytes |
 | SLH-DSA max signature | 49,856 bytes |
 | SLH-DSA weight cost | 64 wu / signature |
@@ -96,7 +108,7 @@ See CANONICAL §19 for exact formula.
 | Max witness bytes per tx | 100,000 |
 | Max script_sig bytes | 32 |
 | Max DA batches per block | 128 |
-| Max chunks per DA set | 4,096 |
+| Max chunks per DA set | 61 (derived: floor(MAX_DA_BYTES_PER_BLOCK / CHUNK_BYTES)) |
 | Chunk size | 524,288 bytes (512 KiB) |
 | Max DA manifest bytes per tx | 65,536 |
 | Max anchor payload per tx | 65,536 bytes |
@@ -182,6 +194,7 @@ Storage depends on number of monitored channels; no protocol minimum.
 | Prefetch rate global | 32 MB/s |
 | DA orphan TTL | 3 blocks (360 s) |
 | DA orphan pool | 64 MiB |
+| DA orphan commit overhead cap | 8 MiB (`DA_ORPHAN_COMMIT_OVERHEAD_MAX`) |
 | Max relay message | 96,000,000 bytes (91.6 MiB) |
 | Grace period | 1,440 blocks (~2 days) |
 | IBD exit condition | Tip timestamp lag < 24 h from system time |
@@ -193,12 +206,14 @@ Storage depends on number of monitored channels; no protocol minimum.
 | Code | Name | Description |
 |------|------|-------------|
 | 0x0000 | CORE_P2PK | Standard pay-to-public-key (ML-DSA-87) |
-| 0x0001 | CORE_TIMELOCK | Height or timestamp lock |
+| 0x0001 | UNASSIGNED | Forbidden — TX_ERR_COVENANT_TYPE_INVALID |
 | 0x0002 | CORE_ANCHOR | Non-spendable data anchor |
 | 0x00FF | CORE_RESERVED_FUTURE | Forbidden — TX_ERR_COVENANT_TYPE_INVALID |
-| 0x0100 | CORE_HTLC | RESERVED — spec pending (Q-S001) → TX_ERR_COVENANT_TYPE_INVALID |
-| 0x0101 | CORE_VAULT | Consensus-native: owner/recovery vault with optional spend_delay (legacy 73B / extended 81B) |
+| 0x0100 | CORE_HTLC | Hash Time-Locked Contract, active from genesis (`covenant_data_len = 105`, witness_slots=2) |
+| 0x0101 | CORE_VAULT | Consensus-native: M-of-N multisig + mandatory destination whitelist |
+| 0x0102 | UNASSIGNED | Forbidden — TX_ERR_COVENANT_TYPE_INVALID |
 | 0x0103 | CORE_DA_COMMIT | DA payload commitment (non-spendable, tx_kind=0x01 only) |
+| 0x0104 | CORE_MULTISIG | Consensus-native: M-of-N multisig without whitelist restrictions |
 
 ---
 
@@ -210,3 +225,25 @@ Storage depends on number of monitored channels; no protocol minimum.
 | `RUBIN_COMPACT_BLOCKS.md` | P2P relay policy: compact blocks, mempool, peer scoring |
 | `RUBIN_NETWORK_PARAMS.md` | This file: reference summary for TZ, roadmap, hardware planning |
 | `RUBIN_L1_P2P_AUX.md` | Auxiliary P2P rules |
+| `RUBIN_SLH_FALLBACK_PLAYBOOK.md` | Operational activation/rollback runbook for SLH fallback mode |
+
+---
+
+## 12. Feature-Bit Activation Defaults
+
+Consensus and relay parameter changes that require coordinated activation MUST use the
+feature-bit framework defined in `RUBIN_L1_CANONICAL.md` §23.2.
+
+Default signaling parameters:
+
+- `SIGNAL_WINDOW = 2016` blocks
+- `SIGNAL_THRESHOLD = 1815` blocks (90%)
+
+Each deployment MUST define at least:
+
+- deployment `name`
+- `bit` index in block header `version`
+- `start_height`
+- `timeout_height`
+
+No deployment is ACTIVE by default unless explicitly declared in canonical specs.

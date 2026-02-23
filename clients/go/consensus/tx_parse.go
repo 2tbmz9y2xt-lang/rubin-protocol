@@ -203,11 +203,11 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 
 		switch suiteID {
 		case SUITE_ID_SENTINEL:
-			if pubLen != 0 || sigLen != 0 {
+			if !((pubLen == 0 && sigLen == 0) || (pubLen == 32 && sigLen >= 2 && sigLen <= 2+MAX_HTLC_PREIMAGE_BYTES)) {
 				return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "non-canonical sentinel witness item")
 			}
 		case SUITE_ID_ML_DSA_87:
-			if pubLen != ML_DSA_87_PUBKEY_BYTES || sigLen != ML_DSA_87_SIG_BYTES {
+			if !((pubLen == ML_DSA_87_PUBKEY_BYTES && sigLen == ML_DSA_87_SIG_BYTES) || (pubLen == 32 && sigLen == 0)) {
 				return nil, zero, zero, 0, txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
 			}
 		case SUITE_ID_SLH_DSA_SHAKE_256F:

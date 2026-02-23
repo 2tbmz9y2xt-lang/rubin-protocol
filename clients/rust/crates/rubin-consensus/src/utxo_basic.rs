@@ -1,13 +1,18 @@
 use std::collections::HashMap;
 
 use crate::constants::{
-    COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_P2PK, COV_TYPE_TIMELOCK,
-    COV_TYPE_VAULT, MAX_TIMELOCK_COVENANT_DATA,
+    COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_HTLC, COV_TYPE_MULTISIG,
+    COV_TYPE_P2PK, COV_TYPE_VAULT,
 };
 use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
+use crate::hash::sha3_256;
+use crate::htlc::{parse_htlc_covenant_data, validate_htlc_spend};
 use crate::tx::Tx;
-use crate::vault::parse_vault_covenant_data;
+use crate::vault::{
+    hash_in_sorted_32, output_descriptor_bytes, parse_multisig_covenant_data,
+    parse_vault_covenant_data, witness_slots,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Outpoint {
@@ -47,7 +52,11 @@ pub fn apply_non_coinbase_tx_basic(
     validate_tx_covenants_genesis(tx)?;
 
     let mut work = utxo_set.clone();
-    let mut sum_in: u64 = 0;
+    let mut sum_in: u128 = 0;
+    let mut sum_in_vault: u128 = 0;
+    let mut vault_whitelists: Vec<Vec<[u8; 32]>> = Vec::new();
+    let mut has_vault_input = false;
+    let mut witness_cursor: usize = 0;
 
     for input in &tx.inputs {
         let op = Outpoint {
@@ -72,26 +81,61 @@ pub fn apply_non_coinbase_tx_basic(
                 "coinbase immature",
             ));
         }
-
-        check_spend_timelock(
-            entry.covenant_type,
-            &entry.covenant_data,
-            height,
-            block_timestamp,
-            entry.creation_height,
-        )?;
+        if entry.covenant_type == COV_TYPE_HTLC {
+            let slots = 2usize;
+            if witness_cursor + slots > tx.witness.len() {
+                return Err(TxError::new(
+                    ErrorCode::TxErrParse,
+                    "CORE_HTLC witness underflow",
+                ));
+            }
+            validate_htlc_spend(
+                &entry,
+                &tx.witness[witness_cursor],
+                &tx.witness[witness_cursor + 1],
+                height,
+                block_timestamp,
+            )?;
+            witness_cursor += slots;
+        } else {
+            check_spend_covenant(entry.covenant_type, &entry.covenant_data)?;
+            if !tx.witness.is_empty() {
+                let slots = witness_slots(entry.covenant_type, &entry.covenant_data);
+                if slots == 0 {
+                    return Err(TxError::new(ErrorCode::TxErrParse, "invalid witness slots"));
+                }
+                if witness_cursor + slots > tx.witness.len() {
+                    return Err(TxError::new(ErrorCode::TxErrParse, "witness underflow"));
+                }
+                witness_cursor += slots;
+            }
+        }
 
         sum_in = sum_in
-            .checked_add(entry.value)
-            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
+            .checked_add(entry.value as u128)
+            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u128 overflow"))?;
+        if entry.covenant_type == COV_TYPE_VAULT {
+            has_vault_input = true;
+            let v = parse_vault_covenant_data(&entry.covenant_data)?;
+            vault_whitelists.push(v.whitelist);
+            sum_in_vault = sum_in_vault
+                .checked_add(entry.value as u128)
+                .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u128 overflow"))?;
+        }
         work.remove(&op);
     }
+    if !tx.witness.is_empty() && witness_cursor != tx.witness.len() {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "witness_count mismatch",
+        ));
+    }
 
-    let mut sum_out: u64 = 0;
+    let mut sum_out: u128 = 0;
     for (i, out) in tx.outputs.iter().enumerate() {
         sum_out = sum_out
-            .checked_add(out.value)
-            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
+            .checked_add(out.value as u128)
+            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u128 overflow"))?;
 
         if out.covenant_type == COV_TYPE_ANCHOR || out.covenant_type == COV_TYPE_DA_COMMIT {
             continue;
@@ -111,6 +155,20 @@ pub fn apply_non_coinbase_tx_basic(
             },
         );
     }
+    if !vault_whitelists.is_empty() {
+        for out in &tx.outputs {
+            let desc = output_descriptor_bytes(out.covenant_type, &out.covenant_data);
+            let h = sha3_256(&desc);
+            for wl in &vault_whitelists {
+                if !hash_in_sorted_32(wl, &h) {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrCovenantTypeInvalid,
+                        "output not whitelisted for CORE_VAULT",
+                    ));
+                }
+            }
+        }
+    }
 
     if sum_out > sum_in {
         return Err(TxError::new(
@@ -118,80 +176,39 @@ pub fn apply_non_coinbase_tx_basic(
             "sum_out exceeds sum_in",
         ));
     }
+    if has_vault_input && sum_out < sum_in_vault {
+        return Err(TxError::new(
+            ErrorCode::TxErrValueConservation,
+            "vault inputs cannot fund miner fee",
+        ));
+    }
 
     Ok(UtxoApplySummary {
-        fee: sum_in - sum_out,
+        fee: u64::try_from(sum_in - sum_out)
+            .map_err(|_| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?,
         utxo_count: work.len() as u64,
     })
 }
 
-fn check_spend_timelock(
-    covenant_type: u16,
-    covenant_data: &[u8],
-    height: u64,
-    block_timestamp: u64,
-    creation_height: u64,
-) -> Result<(), TxError> {
+#[allow(dead_code)]
+fn check_spend_covenant(covenant_type: u16, covenant_data: &[u8]) -> Result<(), TxError> {
     if covenant_type == COV_TYPE_P2PK {
         return Ok(());
     }
     if covenant_type == COV_TYPE_VAULT {
-        let vault = parse_vault_covenant_data(covenant_data)?;
-        // Basic apply path models owner spend-delay guard only.
-        if vault.spend_delay > 0 {
-            let unlock_height = creation_height
-                .checked_add(vault.spend_delay)
-                .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
-            if height < unlock_height {
-                return Err(TxError::new(
-                    ErrorCode::TxErrTimelockNotMet,
-                    "vault spend_delay not met",
-                ));
-            }
-        }
+        parse_vault_covenant_data(covenant_data)?;
         return Ok(());
     }
-    if covenant_type != COV_TYPE_TIMELOCK {
-        return Err(TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
-            "unsupported covenant in basic apply",
-        ));
+    if covenant_type == COV_TYPE_MULTISIG {
+        parse_multisig_covenant_data(covenant_data)?;
+        return Ok(());
     }
-
-    if covenant_data.len() as u64 != MAX_TIMELOCK_COVENANT_DATA {
-        return Err(TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
-            "invalid timelock covenant_data length",
-        ));
+    if covenant_type == COV_TYPE_HTLC {
+        parse_htlc_covenant_data(covenant_data)?;
+        return Ok(());
     }
-
-    let lock_mode = covenant_data[0];
-    let mut raw = [0u8; 8];
-    raw.copy_from_slice(&covenant_data[1..9]);
-    let lock_value = u64::from_le_bytes(raw);
-    match lock_mode {
-        0x00 => {
-            if height < lock_value {
-                return Err(TxError::new(
-                    ErrorCode::TxErrTimelockNotMet,
-                    "height timelock not met",
-                ));
-            }
-        }
-        0x01 => {
-            if block_timestamp < lock_value {
-                return Err(TxError::new(
-                    ErrorCode::TxErrTimelockNotMet,
-                    "timestamp timelock not met",
-                ));
-            }
-        }
-        _ => {
-            return Err(TxError::new(
-                ErrorCode::TxErrCovenantTypeInvalid,
-                "invalid timelock lock_mode",
-            ));
-        }
-    }
-    Ok(())
+    Err(TxError::new(
+        ErrorCode::TxErrCovenantTypeInvalid,
+        "unsupported covenant in basic apply",
+    ))
 }

@@ -225,3 +225,39 @@ func TestParseTx_WitnessBytesOverflow(t *testing.T) {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_WITNESS_OVERFLOW)
 	}
 }
+
+func TestParseTx_HTLCPathWitnessItemsCanonical(t *testing.T) {
+	txBytes := append([]byte{}, minimalTxBytes()...)
+	coreEnd := 4 + 1 + 8 + 1 + 1 + 4
+
+	claimPayload := appendU16le(nil, 1)
+	claimPayload = append(claimPayload, 0x42)
+
+	var w bytes.Buffer
+	w.WriteByte(0x02) // witness_count = 2
+
+	// path item: suite_id=0x00, key_id=32 bytes, payload=u16le(len)+preimage
+	w.WriteByte(SUITE_ID_SENTINEL)
+	w.WriteByte(0x20) // pubkey_length=32
+	w.Write(make([]byte, 32))
+	w.WriteByte(byte(len(claimPayload))) // sig_length = 3
+	w.Write(claimPayload)
+
+	// signature item: suite_id=0x01 with canonical ML-DSA lengths
+	w.WriteByte(SUITE_ID_ML_DSA_87)
+	w.WriteByte(0xfd)
+	w.WriteByte(0x20)
+	w.WriteByte(0x0a)
+	w.Write(make([]byte, ML_DSA_87_PUBKEY_BYTES))
+	w.WriteByte(0xfd)
+	w.WriteByte(0x13)
+	w.WriteByte(0x12)
+	w.Write(make([]byte, ML_DSA_87_SIG_BYTES))
+
+	w.WriteByte(0x00) // da_payload_len
+	txBytes = append(txBytes[:coreEnd], w.Bytes()...)
+
+	if _, _, _, _, err := ParseTx(txBytes); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

@@ -47,6 +47,22 @@
       "expect_err": "TX_ERR_PARSE"
     },
     {
+      "id": "POW-08",
+      "op": "retarget_v1",
+      "expect_ok": true,
+      "target_old": "0000000000000000000000000000000000000000000000000000000000001000",
+      "timestamp_first": 0,
+      "timestamp_last": 2209360,
+      "window_pattern": {
+        "mode": "step_with_last_jump",
+        "window_size": 10080,
+        "start": 0,
+        "step": 120,
+        "last_jump": 1000000
+      },
+      "expect_target_new": "0000000000000000000000000000000000000000000000000000000000001003"
+    },
+    {
       "id": "POW-04",
       "op": "block_hash",
       "expect_ok": true,

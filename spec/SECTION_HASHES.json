@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "hash_algorithm": "sha256",
+  "source_file": "spec/RUBIN_L1_CANONICAL.md",
+  "canonicalization": "LF normalization; extract markdown from exact section heading to next heading of same/higher level; trim; append trailing LF",
+  "section_headings": {
+    "transaction_identifiers": "## 8. Transaction Identifiers (TXID / WTXID)",
+    "weight_accounting": "## 9. Weight Accounting (Normative)",
+    "witness_commitment": "### 10.4.1 Witness Commitment (Coinbase Anchor)",
+    "sighash_v1": "## 12. Sighash v1 (Normative)",
+    "consensus_error_codes": "## 13. Consensus Error Codes (Normative)",
+    "covenant_registry": "## 14. Covenant Type Registry (Normative)",
+    "difficulty_update": "## 15. Difficulty Update (Normative)",
+    "value_conservation": "## 20. Value Conservation (Normative)",
+    "da_set_integrity": "## 21. DA Set Integrity (Normative)"
+  },
+  "sections": {
+    "transaction_identifiers": "d6c8bba62ac2f03dc42b223d16ef0c4560b64b48de3388f7403d3d7b79180913",
+    "weight_accounting": "28b82c09a53f60c7506294f709aee710528b85d84e205cf744a88c59254590da",
+    "witness_commitment": "cd0e55b16f47b6e35414a13e699b47f638519e23fe6cad6a8801d27792393bc9",
+    "sighash_v1": "e3aac16f46dd80792b2c08ddfdc9e514491137e86ada16acb3fd520414140b05",
+    "consensus_error_codes": "a864aa7b1bec72a78b3df4f9c6a935810a9bf1c7bfb785a6dfee2c435e41b736",
+    "covenant_registry": "c6e558068d685e1353282d7a9ea53c93c24ec21b34d11ac379ccdebc1d587004",
+    "difficulty_update": "c7c1acb11958bb034d8a89c9c4e43ed39e4daa5bfde2eb1f4fd673c56302e298",
+    "value_conservation": "ee3b046749d68f52ac800ed17a485cb94cca31287251b51aa9abfd2275b636c2",
+    "da_set_integrity": "2bb603930fc823563efbc7d0d1f1b2e8fac64e6c8b41bcb029de73fd690b0642"
+  }
+}
