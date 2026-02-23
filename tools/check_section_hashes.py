@@ -12,6 +12,10 @@ def sha256_hex(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
+def sha3_256_hex(b: bytes) -> str:
+    return hashlib.sha3_256(b).hexdigest()
+
+
 def normalize_lf(s: str) -> str:
     return s.replace("\r\n", "\n").replace("\r", "\n")
 
@@ -67,7 +71,7 @@ def main() -> int:
         return 2
 
     algo = str(data.get("hash_algorithm", "sha256")).lower()
-    if algo != "sha256":
+    if algo not in {"sha256", "sha3-256"}:
         print(f"ERROR: unsupported hash_algorithm: {algo}", file=sys.stderr)
         return 2
 
@@ -93,7 +97,11 @@ def main() -> int:
             failures += 1
             continue
 
-        got = sha256_hex(chunk.encode("utf-8"))
+        payload = chunk.encode("utf-8")
+        if algo == "sha3-256":
+            got = sha3_256_hex(payload)
+        else:
+            got = sha256_hex(payload)
         if got != exp:
             print(f"FAIL: section {key} hash mismatch", file=sys.stderr)
             print(f"  heading:   {heading}", file=sys.stderr)
@@ -110,4 +118,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

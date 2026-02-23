@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "hash_algorithm": "sha256",
+  "hash_algorithm": "sha3-256",
   "source_file": "spec/RUBIN_L1_CANONICAL.md",
   "canonicalization": "LF normalization; extract markdown from exact section heading to next heading of same/higher level; trim; append trailing LF",
   "section_headings": {
@@ -19,18 +19,18 @@
     "da_set_integrity": "## 21. DA Set Integrity (Normative)"
   },
   "sections": {
-    "transaction_wire": "6baaf8ed2a75d91d22532fbf2dbcb4e0fd0a53177e310dcd1ac4a7d43e9b8918",
-    "transaction_identifiers": "9f9a425ffee4847fffd04eb2db1eb7c99a77c85f0802efaf960bd9d928785d27",
-    "weight_accounting": "28b82c09a53f60c7506294f709aee710528b85d84e205cf744a88c59254590da",
-    "witness_commitment": "cd0e55b16f47b6e35414a13e699b47f638519e23fe6cad6a8801d27792393bc9",
-    "sighash_v1": "e3aac16f46dd80792b2c08ddfdc9e514491137e86ada16acb3fd520414140b05",
-    "consensus_error_codes": "aa93a01534020021944089472064bddee52ce680b44f23e15e0d01ac0a7d9368",
-    "covenant_registry": "1e4a7cb11af2b2cf5c1064a25d44b49d3a0bcedecbda4e5b173a32ec201b59ce",
-    "difficulty_update": "c7c1acb11958bb034d8a89c9c4e43ed39e4daa5bfde2eb1f4fd673c56302e298",
-    "transaction_structural_rules": "7703928d6686bece71e9e670eecd6beeccc05883145dbd55c845685cdb47cea3",
-    "replay_domain_checks": "fdb0a3526361b636e7ef8aa1d5a3cb5632498fd5394c1d9dc8f764f7d724c4f8",
-    "utxo_state_model": "65246ea5f6c0ddac721d225e1b4113db2a4279c34289ee857f62ee7ae0f4fe39",
-    "value_conservation": "ee3b046749d68f52ac800ed17a485cb94cca31287251b51aa9abfd2275b636c2",
-    "da_set_integrity": "2bb603930fc823563efbc7d0d1f1b2e8fac64e6c8b41bcb029de73fd690b0642"
+    "transaction_wire": "1c9afdad12da2a6d869b0495709f54a7296a4186be303aad15b88492306462bc",
+    "transaction_identifiers": "4ef9d9777bb3f0a2e3c145d6578738c1a18134a192f63e66ff3b343f996377d4",
+    "weight_accounting": "2ad57571c7ac1239ebbee6889b99be9f507d4b904346a79d3cfa4eef36dcf755",
+    "witness_commitment": "10a0e0b289df6023e6c6589d575e0f25b37025c0b84ba404dae5738ad50abf3d",
+    "sighash_v1": "827cf93aafea5271ada5c0241164699d37cf8e3f398b6eecf824375981397d9d",
+    "consensus_error_codes": "8a45d187ea0523c29fc1fff3298f4bbaab3bce4e7f2fb67ea737a5858e2d78e1",
+    "covenant_registry": "b43922371de9a212b77ccc54539ec0772f7cf4a842ea5a4b68832a3fdbd92842",
+    "difficulty_update": "1b755c3a6e65add9e1f92e382d171acea87763145929978fea5a6e54a51b969d",
+    "transaction_structural_rules": "cda940d89f17467ae803d5504d9d7f11725b44593a9487ccf4ab829dfcf3b5d7",
+    "replay_domain_checks": "f65201c5b65cdc4c53286074806cb189eaaf5909a007ea0079102e3cb616f115",
+    "utxo_state_model": "f3f96f3dd27ee8d7d3725502cc4afcbd6cc301cd03c49fa2e1b7e6417ee2ba42",
+    "value_conservation": "6aee9b8a883467c413ba37c32d404de5a75db0ed0026df6d712b6148fe643226",
+    "da_set_integrity": "3e71e5f27c3c33997564d5bc7bc36f63467a345ab0ed4b2d40c5c1ff9a94c244"
   }
 }

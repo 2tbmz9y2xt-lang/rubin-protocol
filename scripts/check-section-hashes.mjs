@@ -12,10 +12,14 @@ const spec = fs.readFileSync(specPath, "utf8").replace(/\r\n/g, "\n");
 const expectedDoc = JSON.parse(fs.readFileSync(hashesPath, "utf8"));
 
 let expected = expectedDoc;
+let hashAlgorithm = "sha256";
 if (expectedDoc && typeof expectedDoc === "object" && expectedDoc.sections) {
   expected = expectedDoc.sections;
-  if (expectedDoc.hash_algorithm && expectedDoc.hash_algorithm !== "sha256") {
-    console.error(`FAIL [meta] unsupported hash_algorithm: ${expectedDoc.hash_algorithm}`);
+  if (expectedDoc.hash_algorithm) {
+    hashAlgorithm = String(expectedDoc.hash_algorithm).toLowerCase();
+  }
+  if (!["sha256", "sha3-256"].includes(hashAlgorithm)) {
+    console.error(`FAIL [meta] unsupported hash_algorithm: ${hashAlgorithm}`);
     process.exit(1);
   }
 }
@@ -65,7 +69,7 @@ for (const [key, heading] of Object.entries(sectionHeadings)) {
     failed += 1;
     continue;
   }
-  const actual = crypto.createHash("sha256").update(section).digest("hex");
+  const actual = crypto.createHash(hashAlgorithm).update(section).digest("hex");
   if (actual !== expected[key]) {
     console.error(`FAIL [${key}] hash mismatch`);
     console.error(`  expected: ${expected[key]}`);

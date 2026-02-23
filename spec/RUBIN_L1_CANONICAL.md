@@ -465,6 +465,14 @@ CompactSize(tx_count) ||
 TxBytes(B.txs[0]) || ... || TxBytes(B.txs[tx_count-1])
 ```
 
+Consensus size-limit note:
+
+- Consensus validity MUST be determined by consensus limits only (`MAX_BLOCK_WEIGHT`, `MAX_DA_BYTES_PER_BLOCK`,
+  `MAX_ANCHOR_BYTES_PER_BLOCK`, and structural/validation rules in Sections 9, 14, and 25).
+- `MAX_BLOCK_BYTES` in Section 4 is a non-consensus relay policy default.
+- Implementations MUST NOT reject an otherwise-valid block solely because raw `BlockBytes` length exceeds
+  relay-policy `MAX_BLOCK_BYTES`.
+
 ### 10.3 Block Hash and Proof-of-Work Check
 
 - `block_hash(B) = SHA3-256(BlockHeaderBytes(B.header))`
@@ -811,6 +819,9 @@ Semantics:
     `tx_kind` values MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
 - `CORE_RESERVED_FUTURE`:
   - Forbidden; any appearance MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
+  - Activation path for any currently reserved or unassigned `covenant_type` MUST follow the
+    Feature-Bit Activation Framework (Section 23.2) with an explicit deployment descriptor.
+    Until that deployment reaches `ACTIVE`, such values remain invalid and MUST reject.
 
 ### 14.1 CORE_VAULT Semantics (Normative)
 

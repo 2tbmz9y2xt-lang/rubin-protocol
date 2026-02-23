@@ -53,13 +53,13 @@ for (const [key, heading] of Object.entries(sectionHeadings)) {
     console.error(`Section not found: ${heading}`);
     process.exit(1);
   }
-  hashes[key] = crypto.createHash("sha256").update(section).digest("hex");
+  hashes[key] = crypto.createHash("sha3-256").update(section).digest("hex");
   console.log(`${key}: ${hashes[key]}`);
 }
 
 const doc = {
   schema_version: 1,
-  hash_algorithm: "sha256",
+  hash_algorithm: "sha3-256",
   source_file: "spec/RUBIN_L1_CANONICAL.md",
   canonicalization:
     "LF normalization; extract markdown from exact section heading to next heading of same/higher level; trim; append trailing LF",

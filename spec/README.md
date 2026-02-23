@@ -28,7 +28,7 @@ Integrity:
   - At conflict with any other document, CANONICAL takes precedence.
 
 - `./SECTION_HASHES.json` — consensus-critical integrity pins
-  - SHA256 hashes of selected consensus-critical sections from `RUBIN_L1_CANONICAL.md`
+  - SHA3-256 hashes of selected consensus-critical sections from `RUBIN_L1_CANONICAL.md`
   - Canonicalization rule is documented inside the JSON.
 
 - `./RUBIN_CORE_HTLC_SPEC.md` — consensus-critical covenant spec
