@@ -241,16 +241,23 @@ CompactSize(witness_count) || concat(witness_item_bytes[i] for i in [0..witness_
 Witness items are parsed and checked for canonical form:
 
 - If `suite_id = SUITE_ID_SENTINEL (0x00)`:
+  - This suite_id is a **meta witness**: it MUST NOT be used for cryptographic signature verification.
   - Either:
-    - sentinel form: `pubkey_length MUST equal 0` and `sig_length MUST equal 0`, or
-    - HTLC claim-path selector form: `pubkey_length MUST equal 32` and `2 <= sig_length <= 2 + MAX_HTLC_PREIMAGE_BYTES`.
-  - Any other shape MUST be rejected as `TX_ERR_PARSE`.
+    - keyless sentinel form: `pubkey_length MUST equal 0` and `sig_length MUST equal 0`; or
+    - `CORE_HTLC` selector form:
+      - `pubkey_length MUST equal 32` (selector `key_id`), and
+      - `sig_length MUST be`:
+        - `1` (refund selector), or
+        - `3 <= sig_length <= 3 + MAX_HTLC_PREIMAGE_BYTES` (claim selector).
+      - The selector payload is encoded inside the `signature` bytes as:
+        - `signature[0] = 0x00` (claim) or `0x01` (refund); any other value MUST be rejected as `TX_ERR_PARSE`.
+        - If claim (`0x00`): `signature[1:3]` is `u16le(preimage_len)` and `signature[3:]` is `preimage`.
+          `preimage_len MUST be <= MAX_HTLC_PREIMAGE_BYTES` and `sig_length MUST equal 3 + preimage_len`.
+        - If refund (`0x01`): `sig_length MUST equal 1`.
+  - Any other encoding MUST be rejected as `TX_ERR_PARSE`.
 - If `suite_id = SUITE_ID_ML_DSA_87 (0x01)`:
-  - Either:
-    - ML-DSA canonical form: `pubkey_length MUST equal ML_DSA_87_PUBKEY_BYTES` and
-      `sig_length MUST equal ML_DSA_87_SIG_BYTES`, or
-    - HTLC refund-path selector form: `pubkey_length MUST equal 32` and `sig_length MUST equal 0`.
-  - Any other shape MUST be rejected as `TX_ERR_SIG_NONCANONICAL`.
+  - `pubkey_length MUST equal ML_DSA_87_PUBKEY_BYTES` and `sig_length MUST equal ML_DSA_87_SIG_BYTES`;
+    otherwise reject as `TX_ERR_SIG_NONCANONICAL`.
 - If `suite_id = SUITE_ID_SLH_DSA_SHAKE_256F (0x02)`:
   - `pubkey_length MUST equal SLH_DSA_SHAKE_256F_PUBKEY_BYTES` and
     `0 < sig_length <= MAX_SLH_DSA_SIG_BYTES`; otherwise reject as `TX_ERR_SIG_NONCANONICAL`.
@@ -260,7 +267,7 @@ Activation note:
 
 - Witness canonicalization in this section validates byte-level encoding only.
 - Consensus activation gate for `SUITE_ID_SLH_DSA_SHAKE_256F` is enforced in spend validation sections
-  (Sections 14.1 and 14.2) against block height.
+  (Sections 14.1, 14.2, and `spec/RUBIN_CORE_HTLC_SPEC.md` §5) against block height.
 - If `block_height < SLH_DSA_ACTIVATION_HEIGHT` and any required spend witness uses
   `SUITE_ID_SLH_DSA_SHAKE_256F`, validation MUST reject as `TX_ERR_SIG_ALG_INVALID`.
 

@@ -90,52 +90,72 @@ WitnessItem[W+1] : sig_item         -- signature from the appropriate key
 
 `witness_slots(CORE_HTLC) = 2`
 
-**spend_path_item** encodes the spend path and path-specific data:
+**spend_path_item** is a **meta witness** item (CANONICAL §5.4) and MUST NOT be used for cryptographic verification.
+
+It is encoded as a standard `WitnessItem`:
 
 ```
-suite_id   : u8       -- 0x00 = claim path, 0x01 = refund path
-key_id     : bytes32  -- MUST match claim_key_id (0x00) or refund_key_id (0x01)
-...        : bytes    -- path-specific payload (see below)
+suite_id         = SUITE_ID_SENTINEL (0x00)
+pubkey_length    = 32
+pubkey           = key_id (bytes32)  -- binds path to claim_key_id or refund_key_id
+sig_length       = 1 (refund) OR 3..(3+MAX_HTLC_PREIMAGE_BYTES) (claim)
+signature bytes  = selector payload (see below)
 ```
 
-For the **claim path** (`suite_id = 0x00` in spend_path_item):
-- `preimage_len : u16le` — length of preimage P
-- `preimage     : bytes[preimage_len]`
-- `preimage_len MUST be <= MAX_HTLC_PREIMAGE_BYTES`; otherwise reject as `TX_ERR_PARSE`.
+Selector payload encoding (inside `signature` bytes):
 
-For the **refund path** (`suite_id = 0x01` in spend_path_item):
-- No additional payload fields.
+- `signature[0]` is `path_id`:
+  - `0x00` = claim path
+  - `0x01` = refund path
+  - any other value MUST be rejected as `TX_ERR_PARSE`
 
-**sig_item** carries the cryptographic signature:
-- `suite_id   : u8`     — MUST be `SUITE_ID_ML_DSA_87 (0x01)` or `SUITE_ID_SLH_DSA_SHAKE_256F (0x02)`
-- `key_id     : bytes32`
-- `pubkey_len : u16le` + `pubkey : bytes[pubkey_len]`
-- `sig_len    : u16le` + `sig    : bytes[sig_len]`
+- For the **claim path** (`path_id = 0x00`):
+  - `signature[1:3]` is `u16le(preimage_len)`
+  - `signature[3:]` is `preimage` (`preimage_len` bytes)
+  - `preimage_len MUST be <= MAX_HTLC_PREIMAGE_BYTES`; otherwise reject as `TX_ERR_PARSE`.
+  - `sig_length MUST equal 3 + preimage_len`; otherwise reject as `TX_ERR_PARSE`.
+
+- For the **refund path** (`path_id = 0x01`):
+  - `sig_length MUST equal 1`; otherwise reject as `TX_ERR_PARSE`.
+
+**sig_item** is a standard `WitnessItem` (CANONICAL §5.4) carrying a cryptographic signature:
+- `suite_id        : u8` — MUST be `SUITE_ID_ML_DSA_87 (0x01)` or `SUITE_ID_SLH_DSA_SHAKE_256F (0x02)`
+- `pubkey_length   : CompactSize`
+- `pubkey          : bytes[pubkey_length]`
+- `sig_length      : CompactSize`
+- `signature       : bytes[sig_length]`
+
+Byte-level canonical constraints for these suites (pubkey/sig lengths) are defined in CANONICAL §5.4.
 
 ### 5.2 Claim Path Validation
 
-When `spend_path_item.suite_id = 0x00`:
+When `spend_path_item.signature[0] = 0x00`:
 
 1. **Preimage check:**
+   Let `preimage_len = u16le(spend_path_item.signature[1:3])` and `preimage = spend_path_item.signature[3:]`.
    `SHA3-256(preimage) MUST equal hash` from `covenant_data`.
    Otherwise reject as `TX_ERR_SIG_INVALID`.
 
-2. **Key binding:**
+2. **Selector binding:**
+   `spend_path_item.pubkey MUST equal claim_key_id` from `covenant_data`.
+   Otherwise reject as `TX_ERR_SIG_INVALID`.
+
+3. **Key binding:**
    `SHA3-256(sig_item.pubkey) MUST equal claim_key_id` from `covenant_data`.
    Otherwise reject as `TX_ERR_SIG_INVALID`.
 
-3. **Signature verification:**
-   `verify_sig(sig_item.suite_id, sig_item.pubkey, sig_item.sig, digest) MUST be true`
+4. **Signature verification:**
+   `verify_sig(sig_item.suite_id, sig_item.pubkey, sig_item.signature, digest) MUST be true`
    where `digest` is the sighash v1 digest (Section 12, RUBIN_L1_CANONICAL.md)
    with `input_index` bound to this input's position in the transaction.
    Otherwise reject as `TX_ERR_SIG_INVALID`.
 
-4. **SLH-DSA gate:** if `sig_item.suite_id = SUITE_ID_SLH_DSA_SHAKE_256F (0x02)` and
+5. **SLH-DSA gate:** if `sig_item.suite_id = SUITE_ID_SLH_DSA_SHAKE_256F (0x02)` and
    `block_height < SLH_DSA_ACTIVATION_HEIGHT`, reject as `TX_ERR_SIG_ALG_INVALID`.
 
 ### 5.3 Refund Path Validation
 
-When `spend_path_item.suite_id = 0x01`:
+When `spend_path_item.signature[0] = 0x01`:
 
 1. **Locktime check:**
    - If `lock_mode = LOCK_MODE_HEIGHT (0x00)`:
@@ -147,20 +167,24 @@ When `spend_path_item.suite_id = 0x01`:
      (Section 22, RUBIN_L1_CANONICAL.md).
      Otherwise reject as `TX_ERR_TIMELOCK_NOT_MET`.
 
-2. **Key binding:**
+2. **Selector binding:**
+   `spend_path_item.pubkey MUST equal refund_key_id` from `covenant_data`.
+   Otherwise reject as `TX_ERR_SIG_INVALID`.
+
+3. **Key binding:**
    `SHA3-256(sig_item.pubkey) MUST equal refund_key_id` from `covenant_data`.
    Otherwise reject as `TX_ERR_SIG_INVALID`.
 
-3. **Signature verification:**
-   `verify_sig(sig_item.suite_id, sig_item.pubkey, sig_item.sig, digest) MUST be true`
+4. **Signature verification:**
+   `verify_sig(sig_item.suite_id, sig_item.pubkey, sig_item.signature, digest) MUST be true`
    where `digest` is per Section 12, RUBIN_L1_CANONICAL.md.
    Otherwise reject as `TX_ERR_SIG_INVALID`.
 
-4. **SLH-DSA gate:** same as claim path rule 4 above.
+5. **SLH-DSA gate:** same as claim path rule 5 above.
 
 ### 5.4 Invalid Path
 
-Any value of `spend_path_item.suite_id` other than `0x00` or `0x01` MUST be
+Any value of `spend_path_item.signature[0]` other than `0x00` or `0x01` MUST be
 rejected as `TX_ERR_PARSE`.
 
 ---
@@ -174,7 +198,7 @@ rejected as `TX_ERR_PARSE`.
 | `claim_key_id = refund_key_id` | `TX_ERR_PARSE` |
 | `value = 0` at creation | `TX_ERR_COVENANT_TYPE_INVALID` |
 | `preimage_len > MAX_HTLC_PREIMAGE_BYTES` | `TX_ERR_PARSE` |
-| Unknown spend path (`suite_id ∉ {0x00, 0x01}`) | `TX_ERR_PARSE` |
+| Unknown spend path (`spend_path_item.signature[0] ∉ {0x00, 0x01}`) | `TX_ERR_PARSE` |
 | `SHA3-256(preimage) ≠ hash` | `TX_ERR_SIG_INVALID` |
 | `SHA3-256(pubkey) ≠ claim_key_id or refund_key_id` | `TX_ERR_SIG_INVALID` |
 | Signature verification failure | `TX_ERR_SIG_INVALID` |
