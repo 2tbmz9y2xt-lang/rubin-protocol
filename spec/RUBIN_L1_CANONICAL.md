@@ -705,6 +705,9 @@ implementations for the described failure classes:
 Note: Value conservation overflow (`sum_in` or `sum_out` exceeding unsigned u128 range)
 MUST be reported as `TX_ERR_PARSE`. This mapping is intentional and consensus-critical.
 
+Note: `MAX_TIMESTAMP_STEP_PER_BLOCK` is enforced via clamping in Section 15 and does not
+produce a dedicated error code.
+
 Error priority (short-circuit):
 
 - Implementations MUST apply checks in the validation order and return the first applicable error code.
