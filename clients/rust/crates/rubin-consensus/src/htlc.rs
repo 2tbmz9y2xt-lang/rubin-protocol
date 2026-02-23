@@ -108,9 +108,10 @@ pub fn validate_htlc_spend(
                     "CORE_HTLC claim payload too short",
                 ));
             }
-            let pre_len = u16::from_le_bytes(path_item.signature[1..3].try_into().map_err(|_| {
-                TxError::new(ErrorCode::TxErrParse, "bad CORE_HTLC preimage_len")
-            })?) as usize;
+            let pre_len =
+                u16::from_le_bytes(path_item.signature[1..3].try_into().map_err(|_| {
+                    TxError::new(ErrorCode::TxErrParse, "bad CORE_HTLC preimage_len")
+                })?) as usize;
             if pre_len as u64 > MAX_HTLC_PREIMAGE_BYTES {
                 return Err(TxError::new(
                     ErrorCode::TxErrParse,
