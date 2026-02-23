@@ -221,6 +221,66 @@
       "expect_ok": false,
       "chunk_count": 62,
       "expect_err": "TX_ERR_PARSE"
+    },
+    {
+      "id": "CV-C-20",
+      "op": "compact_grace_period",
+      "expect_ok": true,
+      "grace_period_blocks": 1440,
+      "elapsed_blocks": 120,
+      "start_score": 6,
+      "events": ["full_block_required"],
+      "expect_grace_active": true,
+      "expect_score": 1,
+      "expect_disconnect": false
+    },
+    {
+      "id": "CV-C-21",
+      "op": "compact_grace_period",
+      "expect_ok": true,
+      "grace_period_blocks": 1440,
+      "elapsed_blocks": 1500,
+      "start_score": 6,
+      "events": ["full_block_required"],
+      "expect_grace_active": false,
+      "expect_score": 0,
+      "expect_disconnect": true
+    },
+    {
+      "id": "CV-C-22",
+      "op": "compact_telemetry_fields",
+      "expect_ok": true,
+      "telemetry": {
+        "shortid_collision_count": 1,
+        "shortid_collision_blocks": ["0000aa"],
+        "shortid_collision_peers": ["peer-1"],
+        "da_mempool_fill_pct": 77,
+        "orphan_pool_fill_pct": 13,
+        "miss_rate_bytes_L1": 0.4,
+        "miss_rate_bytes_DA": 0.6,
+        "partial_set_count": 2,
+        "partial_set_age_p95": 42,
+        "prefetch_latency_ms": 187,
+        "peer_quality_score": 61
+      }
+    },
+    {
+      "id": "CV-C-23",
+      "op": "compact_telemetry_fields",
+      "expect_ok": false,
+      "telemetry": {
+        "shortid_collision_count": 0,
+        "shortid_collision_blocks": [],
+        "shortid_collision_peers": [],
+        "da_mempool_fill_pct": 5,
+        "orphan_pool_fill_pct": 1,
+        "miss_rate_bytes_L1": 0.0,
+        "miss_rate_bytes_DA": 0.0,
+        "partial_set_count": 0,
+        "partial_set_age_p95": 0,
+        "prefetch_latency_ms": 0
+      },
+      "expect_missing_fields": ["peer_quality_score"]
     }
   ]
 }

@@ -1,0 +1,28 @@
+{
+  "gate": "CV-REPLAY",
+  "vectors": [
+    {
+      "id": "CV-RP-01",
+      "op": "nonce_replay_intrablock",
+      "nonces": [1, 2, 3, 4],
+      "expect_ok": true,
+      "expect_duplicates": []
+    },
+    {
+      "id": "CV-RP-02",
+      "op": "nonce_replay_intrablock",
+      "nonces": [10, 11, 10, 12],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_NONCE_REPLAY",
+      "expect_duplicates": [10]
+    },
+    {
+      "id": "CV-RP-03",
+      "op": "nonce_replay_intrablock",
+      "nonces": [21, 21, 22, 23, 22, 24],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_NONCE_REPLAY",
+      "expect_duplicates": [21, 22]
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "gate": "CV-DETERMINISM",
+  "vectors": [
+    {
+      "id": "CV-DT-01",
+      "op": "determinism_order",
+      "expect_ok": true,
+      "keys": ["k3", "k1", "k2"],
+      "expect_sorted_keys": ["k1", "k2", "k3"]
+    },
+    {
+      "id": "CV-DT-02",
+      "op": "determinism_order",
+      "expect_ok": true,
+      "keys": ["0xff", "0x0a", "0x10", "0x01"],
+      "expect_sorted_keys": ["0x01", "0x0a", "0x10", "0xff"]
+    }
+  ]
+}

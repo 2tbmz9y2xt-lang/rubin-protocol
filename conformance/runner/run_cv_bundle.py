@@ -38,6 +38,14 @@ LOCAL_OPS = {
     "compact_peer_quality",
     "compact_prefetch_caps",
     "compact_telemetry_rate",
+    "compact_telemetry_fields",
+    "compact_grace_period",
+    "nonce_replay_intrablock",
+    "timestamp_bounds",
+    "fork_work",
+    "fork_choice_select",
+    "determinism_order",
+    "validation_order",
 }
 
 
@@ -108,6 +116,30 @@ def as_sorted_ints(values: Any) -> List[int]:
 def check_expect(problems: List[str], prefix: str, got: Any, expected: Any, field: str) -> None:
     if expected != got:
         problems.append(f"{prefix}: {field} expected={expected} got={got}")
+
+
+def parse_hex_uint(value: Any) -> int:
+    if isinstance(value, int):
+        return value
+    if not isinstance(value, str):
+        raise ValueError("expected integer or hex string")
+    text = value.strip().lower()
+    if text.startswith("0x"):
+        text = text[2:]
+    if text == "":
+        return 0
+    return int(text, 16)
+
+
+def parse_hex_bytes(value: Any) -> bytes:
+    if not isinstance(value, str):
+        raise ValueError("expected hex string")
+    text = value.strip().lower()
+    if text.startswith("0x"):
+        text = text[2:]
+    if len(text) % 2 == 1:
+        text = "0" + text
+    return bytes.fromhex(text)
 
 
 def validate_local_vector(gate: str, v: Dict[str, Any]) -> List[str]:
@@ -517,6 +549,218 @@ def validate_local_vector(gate: str, v: Dict[str, Any]) -> List[str]:
             expected = float(v["expect_rate"])
             if abs(rate - expected) > 1e-9:
                 problems.append(f"{prefix}: rate expected={expected} got={rate}")
+        return problems
+
+    if op == "compact_telemetry_fields":
+        telemetry = v.get("telemetry", {})
+        if not isinstance(telemetry, dict):
+            problems.append(f"{prefix}: telemetry must be object")
+            return problems
+        required = [
+            "shortid_collision_count",
+            "shortid_collision_blocks",
+            "shortid_collision_peers",
+            "da_mempool_fill_pct",
+            "orphan_pool_fill_pct",
+            "miss_rate_bytes_L1",
+            "miss_rate_bytes_DA",
+            "partial_set_count",
+            "partial_set_age_p95",
+            "prefetch_latency_ms",
+            "peer_quality_score",
+        ]
+        missing = sorted([k for k in required if k not in telemetry])
+        if "expect_missing_fields" in v:
+            check_expect(
+                problems,
+                prefix,
+                missing,
+                sorted([str(x) for x in v["expect_missing_fields"]]),
+                "missing_fields",
+            )
+        if "expect_ok" in v:
+            check_expect(problems, prefix, len(missing) == 0, bool(v["expect_ok"]), "ok")
+        return problems
+
+    if op == "compact_grace_period":
+        grace_period_blocks = int(v.get("grace_period_blocks", 1440))
+        elapsed_blocks = int(v.get("elapsed_blocks", 0))
+        grace_active = elapsed_blocks < grace_period_blocks
+        score = int(v.get("start_score", 50))
+        events = [str(e) for e in v.get("events", [])]
+        deltas = {
+            "reconstruct_no_getblocktxn": 2,
+            "getblocktxn_first_try": 1,
+            "prefetch_completed": 1,
+            "incomplete_set": -5,
+            "getblocktxn_required": -3,
+            "full_block_required": -10,
+            "prefetch_cap_exceeded": -2,
+        }
+        for ev in events:
+            if ev not in deltas:
+                problems.append(f"{prefix}: unknown grace event={ev}")
+                return problems
+            delta = deltas[ev]
+            if grace_active and delta < 0:
+                delta = int(delta / 2)
+            score = max(0, min(100, score + delta))
+        disconnect = (score < 5) and (not grace_active)
+        if "expect_grace_active" in v:
+            check_expect(problems, prefix, grace_active, bool(v["expect_grace_active"]), "grace_active")
+        if "expect_score" in v:
+            check_expect(problems, prefix, score, int(v["expect_score"]), "score")
+        if "expect_disconnect" in v:
+            check_expect(problems, prefix, disconnect, bool(v["expect_disconnect"]), "disconnect")
+        if "expect_ok" in v:
+            check_expect(problems, prefix, True, bool(v["expect_ok"]), "ok")
+        return problems
+
+    if op == "nonce_replay_intrablock":
+        nonces = [int(x) for x in v.get("nonces", [])]
+        seen = set()
+        duplicates: List[int] = []
+        for nonce in nonces:
+            if nonce in seen:
+                duplicates.append(nonce)
+            else:
+                seen.add(nonce)
+        replay = len(duplicates) > 0
+        ok = not replay
+        err = "TX_ERR_NONCE_REPLAY" if replay else None
+        if "expect_duplicates" in v:
+            check_expect(
+                problems,
+                prefix,
+                sorted(duplicates),
+                sorted([int(x) for x in v["expect_duplicates"]]),
+                "duplicates",
+            )
+        if "expect_ok" in v:
+            check_expect(problems, prefix, ok, bool(v["expect_ok"]), "ok")
+        if "expect_err" in v:
+            check_expect(problems, prefix, err, v["expect_err"], "err")
+        return problems
+
+    if op == "timestamp_bounds":
+        timestamp = int(v.get("timestamp", 0))
+        mtp = int(v.get("mtp", 0))
+        max_future_drift = int(v.get("max_future_drift", 7_200))
+        ok = True
+        err = None
+        if timestamp <= mtp:
+            ok = False
+            err = "BLOCK_ERR_TIMESTAMP_OLD"
+        elif timestamp > mtp + max_future_drift:
+            ok = False
+            err = "BLOCK_ERR_TIMESTAMP_FUTURE"
+        if "expect_ok" in v:
+            check_expect(problems, prefix, ok, bool(v["expect_ok"]), "ok")
+        if "expect_err" in v:
+            check_expect(problems, prefix, err, v["expect_err"], "err")
+        return problems
+
+    if op == "fork_work":
+        target = parse_hex_uint(v.get("target"))
+        if target <= 0:
+            problems.append(f"{prefix}: target must be > 0")
+            return problems
+        work = (1 << 256) // target
+        work_hex = hex(work)
+        if "expect_work" in v:
+            expected_work = hex(parse_hex_uint(v["expect_work"]))
+            check_expect(problems, prefix, work_hex, expected_work, "work")
+        if "expect_ok" in v:
+            check_expect(problems, prefix, True, bool(v["expect_ok"]), "ok")
+        return problems
+
+    if op == "fork_choice_select":
+        chains = v.get("chains", [])
+        if not isinstance(chains, list) or len(chains) == 0:
+            problems.append(f"{prefix}: chains must be non-empty array")
+            return problems
+
+        best_id = None
+        best_work = -1
+        best_tip = None
+        for chain in chains:
+            if not isinstance(chain, dict):
+                problems.append(f"{prefix}: chain entry must be object")
+                return problems
+            cid = str(chain.get("id"))
+            tip_hash = parse_hex_bytes(chain.get("tip_hash", ""))
+            targets = chain.get("targets", [])
+            if not isinstance(targets, list) or len(targets) == 0:
+                problems.append(f"{prefix}: chain {cid} targets must be non-empty array")
+                return problems
+            total_work = 0
+            for t in targets:
+                target = parse_hex_uint(t)
+                if target <= 0:
+                    problems.append(f"{prefix}: chain {cid} has non-positive target")
+                    return problems
+                total_work += (1 << 256) // target
+
+            if (total_work > best_work) or (
+                total_work == best_work and (best_tip is None or tip_hash < best_tip)
+            ):
+                best_work = total_work
+                best_tip = tip_hash
+                best_id = cid
+
+        if "expect_winner" in v:
+            check_expect(problems, prefix, best_id, str(v["expect_winner"]), "winner")
+        if "expect_chainwork" in v:
+            expected_work = parse_hex_uint(v["expect_chainwork"])
+            check_expect(problems, prefix, best_work, expected_work, "chainwork")
+        if "expect_ok" in v:
+            check_expect(problems, prefix, True, bool(v["expect_ok"]), "ok")
+        return problems
+
+    if op == "determinism_order":
+        keys = v.get("keys", [])
+        if not isinstance(keys, list):
+            problems.append(f"{prefix}: keys must be array")
+            return problems
+
+        def key_bytes(item: Any) -> bytes:
+            if isinstance(item, str):
+                stripped = item.strip().lower()
+                if stripped.startswith("0x"):
+                    return parse_hex_bytes(stripped)
+                return item.encode("utf-8")
+            return str(item).encode("utf-8")
+
+        sorted_keys = sorted(keys, key=lambda x: key_bytes(x))
+        if "expect_sorted_keys" in v:
+            check_expect(problems, prefix, sorted_keys, v["expect_sorted_keys"], "sorted_keys")
+        if "expect_ok" in v:
+            check_expect(problems, prefix, True, bool(v["expect_ok"]), "ok")
+        return problems
+
+    if op == "validation_order":
+        checks = v.get("checks", [])
+        if not isinstance(checks, list) or len(checks) == 0:
+            problems.append(f"{prefix}: checks must be non-empty array")
+            return problems
+        first_err = None
+        evaluated: List[str] = []
+        for check in checks:
+            if not isinstance(check, dict):
+                problems.append(f"{prefix}: check entry must be object")
+                return problems
+            name = str(check.get("name", ""))
+            evaluated.append(name)
+            if bool(check.get("fails", False)):
+                first_err = check.get("err")
+                break
+        if "expect_first_err" in v:
+            check_expect(problems, prefix, first_err, v["expect_first_err"], "first_err")
+        if "expect_evaluated" in v:
+            check_expect(problems, prefix, evaluated, v["expect_evaluated"], "evaluated")
+        if "expect_ok" in v:
+            expected_ok = bool(v["expect_ok"])
+            check_expect(problems, prefix, first_err is None, expected_ok, "ok")
         return problems
 
     problems.append(f"{prefix}: unknown local op {op}")

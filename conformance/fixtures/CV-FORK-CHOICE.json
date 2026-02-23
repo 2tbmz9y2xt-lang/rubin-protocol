@@ -1,0 +1,51 @@
+{
+  "gate": "CV-FORK-CHOICE",
+  "vectors": [
+    {
+      "id": "CV-FC-01",
+      "op": "fork_work",
+      "target": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "expect_ok": true,
+      "expect_work": "0x1"
+    },
+    {
+      "id": "CV-FC-02",
+      "op": "fork_work",
+      "target": "0x8000000000000000000000000000000000000000000000000000000000000000",
+      "expect_ok": true,
+      "expect_work": "0x2"
+    },
+    {
+      "id": "CV-FC-03",
+      "op": "fork_choice_select",
+      "expect_ok": true,
+      "expect_winner": "A",
+      "chains": [
+        {
+          "id": "A",
+          "targets": [
+            "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "0x8000000000000000000000000000000000000000000000000000000000000000"
+          ],
+          "tip_hash": "0x00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+        },
+        {
+          "id": "B",
+          "targets": [
+            "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          ],
+          "tip_hash": "0x10112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+        }
+      ]
+    },
+    {
+      "id": "CV-FC-04",
+      "op": "fork_work",
+      "target": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "expect_ok": true,
+      "expect_work": "0x10000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ]
+}
