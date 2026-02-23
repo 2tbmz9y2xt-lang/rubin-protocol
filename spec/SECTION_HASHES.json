@@ -31,6 +31,6 @@
     "replay_domain_checks": "fdb0a3526361b636e7ef8aa1d5a3cb5632498fd5394c1d9dc8f764f7d724c4f8",
     "utxo_state_model": "65246ea5f6c0ddac721d225e1b4113db2a4279c34289ee857f62ee7ae0f4fe39",
     "value_conservation": "ee3b046749d68f52ac800ed17a485cb94cca31287251b51aa9abfd2275b636c2",
-    "da_set_integrity": "2bb603930fc823563efbc7d0d1f1b2e8fac64e6c8b41bcb029de73fd690b0642"
+    "da_set_integrity": "eb0b2077c3be3f676a2c930c9cedb2a51915e3e48b38b8ba311dc656e93f4dbb"
   }
 }
