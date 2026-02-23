@@ -28,7 +28,7 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 		return nil, txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
 	}
 
-	if err := ValidateTxCovenantsGenesis(tx); err != nil {
+	if err := ValidateTxCovenantsGenesis(tx, height); err != nil {
 		return nil, err
 	}
 

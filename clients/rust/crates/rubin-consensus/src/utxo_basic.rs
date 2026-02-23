@@ -49,7 +49,7 @@ pub fn apply_non_coinbase_tx_basic(
         ));
     }
 
-    validate_tx_covenants_genesis(tx)?;
+    validate_tx_covenants_genesis(tx, height)?;
 
     let mut work = utxo_set.clone();
     let mut sum_in: u128 = 0;

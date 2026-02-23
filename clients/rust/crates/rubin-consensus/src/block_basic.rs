@@ -151,7 +151,7 @@ pub fn validate_block_basic_at_height(
                 "non-coinbase must have at least one input",
             ));
         }
-        validate_tx_covenants_genesis(tx)?;
+        validate_tx_covenants_genesis(tx, block_height)?;
         let (w, da, anchor_bytes) = tx_weight_and_stats(tx)?;
         sum_weight = sum_weight
             .checked_add(w)

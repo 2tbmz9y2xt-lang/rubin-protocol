@@ -53,7 +53,7 @@ func TestValidateTxCovenantsGenesis_P2PK_OK(t *testing.T) {
 			{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: data},
 		},
 	}
-	if err := ValidateTxCovenantsGenesis(tx); err != nil {
+	if err := ValidateTxCovenantsGenesis(tx, 0); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -66,12 +66,16 @@ func TestValidateTxCovenantsGenesis_P2PK_BadSuite(t *testing.T) {
 			{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: data},
 		},
 	}
-	err := ValidateTxCovenantsGenesis(tx)
+	err := ValidateTxCovenantsGenesis(tx, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
 	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	}
+
+	if err := ValidateTxCovenantsGenesis(tx, SLH_DSA_ACTIVATION_HEIGHT); err != nil {
+		t.Fatalf("unexpected error at activation height: %v", err)
 	}
 }
 
@@ -81,7 +85,7 @@ func TestValidateTxCovenantsGenesis_Unassigned0001Rejected(t *testing.T) {
 			{Value: 1, CovenantType: 0x0001, CovenantData: []byte{0x00}},
 		},
 	}
-	err := ValidateTxCovenantsGenesis(tx)
+	err := ValidateTxCovenantsGenesis(tx, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -96,7 +100,7 @@ func TestValidateTxCovenantsGenesis_ANCHOR_OK(t *testing.T) {
 			{Value: 0, CovenantType: COV_TYPE_ANCHOR, CovenantData: []byte{0x01}},
 		},
 	}
-	if err := ValidateTxCovenantsGenesis(tx); err != nil {
+	if err := ValidateTxCovenantsGenesis(tx, 0); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -107,7 +111,7 @@ func TestValidateTxCovenantsGenesis_ANCHOR_NonZeroValue(t *testing.T) {
 			{Value: 1, CovenantType: COV_TYPE_ANCHOR, CovenantData: []byte{0x01}},
 		},
 	}
-	err := ValidateTxCovenantsGenesis(tx)
+	err := ValidateTxCovenantsGenesis(tx, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -122,7 +126,7 @@ func TestValidateTxCovenantsGenesis_VAULT_OK(t *testing.T) {
 			{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: validVaultCovenantDataForP2PKOutput()},
 		},
 	}
-	if err := ValidateTxCovenantsGenesis(tx); err != nil {
+	if err := ValidateTxCovenantsGenesis(tx, 0); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -135,7 +139,7 @@ func TestValidateTxCovenantsGenesis_VAULT_BadThreshold(t *testing.T) {
 			{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: encodeVaultCovenantData(3, keys, whitelist)},
 		},
 	}
-	err := ValidateTxCovenantsGenesis(tx)
+	err := ValidateTxCovenantsGenesis(tx, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -153,7 +157,7 @@ func TestValidateTxCovenantsGenesis_VAULT_UnsortedKeys(t *testing.T) {
 			{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: encodeVaultCovenantData(1, keys, whitelist)},
 		},
 	}
-	err := ValidateTxCovenantsGenesis(tx)
+	err := ValidateTxCovenantsGenesis(tx, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -171,7 +175,7 @@ func TestValidateTxCovenantsGenesis_VAULT_UnsortedWhitelist(t *testing.T) {
 			{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: encodeVaultCovenantData(1, keys, whitelist)},
 		},
 	}
-	err := ValidateTxCovenantsGenesis(tx)
+	err := ValidateTxCovenantsGenesis(tx, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -187,7 +191,7 @@ func TestValidateTxCovenantsGenesis_VAULT_EmptyWhitelist(t *testing.T) {
 			{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: encodeVaultCovenantData(1, keys, nil)},
 		},
 	}
-	err := ValidateTxCovenantsGenesis(tx)
+	err := ValidateTxCovenantsGenesis(tx, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -202,7 +206,7 @@ func TestValidateTxCovenantsGenesis_MULTISIG_OK(t *testing.T) {
 			{Value: 1, CovenantType: COV_TYPE_MULTISIG, CovenantData: encodeMultisigCovenantData(2, makeKeys(2, 0x31))},
 		},
 	}
-	if err := ValidateTxCovenantsGenesis(tx); err != nil {
+	if err := ValidateTxCovenantsGenesis(tx, 0); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -213,7 +217,7 @@ func TestValidateTxCovenantsGenesis_MULTISIG_BadThreshold(t *testing.T) {
 			{Value: 1, CovenantType: COV_TYPE_MULTISIG, CovenantData: encodeMultisigCovenantData(3, makeKeys(2, 0x31))},
 		},
 	}
-	err := ValidateTxCovenantsGenesis(tx)
+	err := ValidateTxCovenantsGenesis(tx, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -230,7 +234,7 @@ func TestValidateTxCovenantsGenesis_MULTISIG_UnsortedKeys(t *testing.T) {
 			{Value: 1, CovenantType: COV_TYPE_MULTISIG, CovenantData: encodeMultisigCovenantData(1, keys)},
 		},
 	}
-	err := ValidateTxCovenantsGenesis(tx)
+	err := ValidateTxCovenantsGenesis(tx, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}

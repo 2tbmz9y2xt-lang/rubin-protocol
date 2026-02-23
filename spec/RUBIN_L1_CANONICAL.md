@@ -220,7 +220,11 @@ Rules:
 - For `tx_kind = 0x01`, `da_payload` is the DA set manifest (application-layer metadata for the L2 operator;
   it may contain L2 batch fields such as `batch_number`).
   `da_payload_len MUST be <= MAX_DA_MANIFEST_BYTES_PER_TX`. Otherwise reject as `TX_ERR_PARSE`.
+- For `tx_kind = 0x01`, `chunk_count` MUST satisfy `1 <= chunk_count <= MAX_DA_CHUNK_COUNT`.
+  Otherwise reject as `TX_ERR_PARSE`.
 - For `tx_kind = 0x02`, `da_payload_len MUST be <= CHUNK_BYTES`. Otherwise reject as `TX_ERR_PARSE`.
+- For `tx_kind = 0x02`, `da_payload_len` MUST satisfy `1 <= da_payload_len <= CHUNK_BYTES`.
+  Otherwise reject as `TX_ERR_PARSE`.
 
 ### 5.3 Syntax Limits (Parsing)
 
@@ -728,11 +732,15 @@ Semantics:
 - `CORE_P2PK`:
   - `covenant_data = suite_id:u8 || key_id:bytes32`.
   - `covenant_data_len MUST equal MAX_P2PK_COVENANT_DATA`.
-  - At output creation, `suite_id MUST equal SUITE_ID_ML_DSA_87 (0x01)`.
+  - At output creation:
+    - `suite_id` MUST be `SUITE_ID_ML_DSA_87 (0x01)`, or
+    - `suite_id` MAY be `SUITE_ID_SLH_DSA_SHAKE_256F (0x02)` only if `block_height >= SLH_DSA_ACTIVATION_HEIGHT`.
     Any other value MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
-  - Spend authorization requires exactly one witness item with `suite_id = SUITE_ID_ML_DSA_87 (0x01)`,
-    `SHA3-256(pubkey) = key_id`, and a valid signature over `digest` (Section 12).
-    Any other suite in this spend path MUST be rejected as `TX_ERR_SIG_ALG_INVALID`.
+  - Spend authorization requires exactly one witness item:
+    - `w.suite_id` MUST equal `suite_id` from `covenant_data`; otherwise reject as `TX_ERR_SIG_ALG_INVALID`.
+    - If `w.suite_id = SUITE_ID_SLH_DSA_SHAKE_256F (0x02)` and `block_height < SLH_DSA_ACTIVATION_HEIGHT`,
+      reject as `TX_ERR_SIG_ALG_INVALID`.
+    - `SHA3-256(pubkey) = key_id`, and a valid signature over `digest` (Section 12).
   - `key_id = SHA3-256(pubkey)` where `pubkey` is the canonical witness public key byte string for the selected
     `suite_id` (no extra length prefixes are included).
 - `CORE_ANCHOR`:
@@ -742,8 +750,8 @@ Semantics:
   - In coinbase, witness commitment anchoring requirements are defined in Section 10.4.1.
   - `CORE_ANCHOR` outputs are non-spendable and MUST NOT be added to the spendable UTXO set. Any attempt to spend an
     ANCHOR output MUST be rejected as `TX_ERR_MISSING_UTXO`.
-  - Per-block constraint: sum of `covenant_data_len` across all `CORE_ANCHOR` outputs in a block MUST be
-    `<= MAX_ANCHOR_BYTES_PER_BLOCK`; otherwise reject the block as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
+  - Per-block constraint: sum of `covenant_data_len` across all `CORE_ANCHOR` and `CORE_DA_COMMIT` outputs in a block
+    MUST be `<= MAX_ANCHOR_BYTES_PER_BLOCK`; otherwise reject the block as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
 - `CORE_HTLC`:
   - Hash Time-Locked Contract.
   - Active from genesis block 0.
@@ -814,7 +822,7 @@ If `w.suite_id = SUITE_ID_SENTINEL (0x00)` (non-participating key):
 
 If `w.suite_id = SUITE_ID_ML_DSA_87 (0x01)`:
 - Require `SHA3-256(w.pubkey) = keys[i]`. Otherwise reject as `TX_ERR_SIG_INVALID`.
-- Require `verify_sig(w.signature, digest) = true` where `digest` is per Section 12
+- Require `verify_sig(w.suite_id, w.pubkey, w.signature, digest) = true` where `digest` is per Section 12
   with `input_index` bound to this input's index in the transaction.
   Otherwise reject as `TX_ERR_SIG_INVALID`.
 - Count as one valid signature.
@@ -822,7 +830,7 @@ If `w.suite_id = SUITE_ID_ML_DSA_87 (0x01)`:
 If `w.suite_id = SUITE_ID_SLH_DSA_SHAKE_256F (0x02)`:
 - If `block_height < SLH_DSA_ACTIVATION_HEIGHT`, reject as `TX_ERR_SIG_ALG_INVALID`.
 - Require `SHA3-256(w.pubkey) = keys[i]`. Otherwise reject as `TX_ERR_SIG_INVALID`.
-- Require `verify_sig(w.signature, digest) = true` where `digest` is per Section 12
+- Require `verify_sig(w.suite_id, w.pubkey, w.signature, digest) = true` where `digest` is per Section 12
   with `input_index` bound to this input's index in the transaction.
   Otherwise reject as `TX_ERR_SIG_INVALID`.
 - Count as one valid signature.
@@ -874,7 +882,7 @@ If `w.suite_id = SUITE_ID_SENTINEL (0x00)`:
 
 If `w.suite_id = SUITE_ID_ML_DSA_87 (0x01)`:
 - Require `SHA3-256(w.pubkey) = keys[i]`. Otherwise reject as `TX_ERR_SIG_INVALID`.
-- Require `verify_sig(w.signature, digest) = true` where `digest` is per Section 12
+- Require `verify_sig(w.suite_id, w.pubkey, w.signature, digest) = true` where `digest` is per Section 12
   with `input_index` bound to this input's index.
   Otherwise reject as `TX_ERR_SIG_INVALID`.
 - Count as one valid signature.
@@ -882,7 +890,7 @@ If `w.suite_id = SUITE_ID_ML_DSA_87 (0x01)`:
 If `w.suite_id = SUITE_ID_SLH_DSA_SHAKE_256F (0x02)`:
 - If `block_height < SLH_DSA_ACTIVATION_HEIGHT`, reject as `TX_ERR_SIG_ALG_INVALID`.
 - Require `SHA3-256(w.pubkey) = keys[i]`. Otherwise reject as `TX_ERR_SIG_INVALID`.
-- Require `verify_sig(w.signature, digest) = true` where `digest` is per Section 12
+- Require `verify_sig(w.suite_id, w.pubkey, w.signature, digest) = true` where `digest` is per Section 12
   with `input_index` bound to this input's index.
   Otherwise reject as `TX_ERR_SIG_INVALID`.
 - Count as one valid signature.
@@ -1090,12 +1098,16 @@ Then enforce:
 
 1. If `e.covenant_type = CORE_P2PK`:
    - Let `w` be the single WitnessItem assigned to this input by the cursor model.
-   - `w.suite_id` MUST equal `SUITE_ID_ML_DSA_87 (0x01)`. Any other suite MUST be rejected as `TX_ERR_SIG_ALG_INVALID`.
+   - `w.suite_id` MUST be `SUITE_ID_ML_DSA_87 (0x01)` or `SUITE_ID_SLH_DSA_SHAKE_256F (0x02)`.
+     Any other suite MUST be rejected as `TX_ERR_SIG_ALG_INVALID`.
+   - If `w.suite_id = SUITE_ID_SLH_DSA_SHAKE_256F (0x02)` and `block_height < SLH_DSA_ACTIVATION_HEIGHT`,
+     reject as `TX_ERR_SIG_ALG_INVALID`.
    - Require `len(e.covenant_data) = MAX_P2PK_COVENANT_DATA` and the first byte equals `w.suite_id`. Otherwise reject as
      `TX_ERR_COVENANT_TYPE_INVALID`.
    - Let `key_id = e.covenant_data[1:33]` (after the suite_id byte).
    - Require `SHA3-256(w.pubkey) = key_id`. Otherwise reject as `TX_ERR_SIG_INVALID`.
-   - Require signature verification of `w.signature` over `digest` (Section 12) succeeds. Otherwise reject as
+   - Require `verify_sig(w.suite_id, w.pubkey, w.signature, digest) = true` where `digest` is per Section 12.
+     Otherwise reject as
      `TX_ERR_SIG_INVALID`.
 2. If `e.covenant_type = CORE_VAULT`:
    - Evaluate per Section 14.1 using WitnessItems assigned by the cursor model.

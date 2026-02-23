@@ -115,7 +115,7 @@ func ValidateBlockBasicAtHeight(
 		if i > 0 && len(tx.Inputs) == 0 {
 			return nil, txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
 		}
-		if err := ValidateTxCovenantsGenesis(tx); err != nil {
+		if err := ValidateTxCovenantsGenesis(tx, blockHeight); err != nil {
 			return nil, err
 		}
 		w, da, anchorBytes, err := txWeightAndStats(tx)

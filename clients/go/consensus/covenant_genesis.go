@@ -1,6 +1,6 @@
 package consensus
 
-func ValidateTxCovenantsGenesis(tx *Tx) error {
+func ValidateTxCovenantsGenesis(tx *Tx, blockHeight uint64) error {
 	if tx == nil {
 		return txerr(TX_ERR_PARSE, "nil tx")
 	}
@@ -11,8 +11,12 @@ func ValidateTxCovenantsGenesis(tx *Tx) error {
 			if len(out.CovenantData) != MAX_P2PK_COVENANT_DATA {
 				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "invalid CORE_P2PK covenant_data length")
 			}
-			if out.CovenantData[0] != SUITE_ID_ML_DSA_87 {
+			suiteID := out.CovenantData[0]
+			if suiteID != SUITE_ID_ML_DSA_87 && suiteID != SUITE_ID_SLH_DSA_SHAKE_256F {
 				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "invalid CORE_P2PK suite_id")
+			}
+			if suiteID == SUITE_ID_SLH_DSA_SHAKE_256F && blockHeight < SLH_DSA_ACTIVATION_HEIGHT {
+				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_P2PK SLH-DSA suite inactive at this height")
 			}
 
 		case COV_TYPE_ANCHOR:

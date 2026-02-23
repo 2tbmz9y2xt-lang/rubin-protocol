@@ -56,7 +56,7 @@ func TestParseHTLCCovenantData_InvalidLockMode(t *testing.T) {
 	cov := encodeHTLCCovenantData(hash, 0x02, 1, claim, refund)
 	err := ValidateTxCovenantsGenesis(&Tx{
 		Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_HTLC, CovenantData: cov}},
-	})
+	}, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}

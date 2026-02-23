@@ -720,7 +720,24 @@ fn validate_tx_covenants_genesis_p2pk_ok() {
         covenant_type: COV_TYPE_P2PK,
         covenant_data: cov,
     }];
-    validate_tx_covenants_genesis(&tx).expect("ok");
+    validate_tx_covenants_genesis(&tx, 0).expect("ok");
+}
+
+#[test]
+fn validate_tx_covenants_genesis_p2pk_slh_gated_by_height() {
+    let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
+    let mut cov = vec![0u8; MAX_P2PK_COVENANT_DATA as usize];
+    cov[0] = SUITE_ID_SLH_DSA_SHAKE_256F;
+    tx.outputs = vec![crate::tx::TxOutput {
+        value: 1,
+        covenant_type: COV_TYPE_P2PK,
+        covenant_data: cov,
+    }];
+
+    let err = validate_tx_covenants_genesis(&tx, 0).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+
+    validate_tx_covenants_genesis(&tx, SLH_DSA_ACTIVATION_HEIGHT).expect("ok at activation height");
 }
 
 #[test]
@@ -731,7 +748,7 @@ fn validate_tx_covenants_genesis_unassigned_0001_rejected() {
         covenant_type: 0x0001,
         covenant_data: vec![0x00],
     }];
-    let err = validate_tx_covenants_genesis(&tx).unwrap_err();
+    let err = validate_tx_covenants_genesis(&tx, 0).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
@@ -743,7 +760,7 @@ fn validate_tx_covenants_genesis_anchor_nonzero_value() {
         covenant_type: COV_TYPE_ANCHOR,
         covenant_data: vec![0x01],
     }];
-    let err = validate_tx_covenants_genesis(&tx).unwrap_err();
+    let err = validate_tx_covenants_genesis(&tx, 0).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
@@ -755,7 +772,7 @@ fn validate_tx_covenants_genesis_vault_ok() {
         covenant_type: COV_TYPE_VAULT,
         covenant_data: valid_vault_covenant_data_for_p2pk_output(),
     }];
-    validate_tx_covenants_genesis(&tx).expect("ok");
+    validate_tx_covenants_genesis(&tx, 0).expect("ok");
 }
 
 #[test]
@@ -766,7 +783,7 @@ fn validate_tx_covenants_genesis_vault_bad_threshold() {
         covenant_type: COV_TYPE_VAULT,
         covenant_data: encode_vault_covenant_data(3, &make_keys(2, 0x11), &make_keys(1, 0x51)),
     }];
-    let err = validate_tx_covenants_genesis(&tx).unwrap_err();
+    let err = validate_tx_covenants_genesis(&tx, 0).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
@@ -780,7 +797,7 @@ fn validate_tx_covenants_genesis_vault_unsorted_keys() {
         covenant_type: COV_TYPE_VAULT,
         covenant_data: encode_vault_covenant_data(1, &keys, &make_keys(1, 0x51)),
     }];
-    let err = validate_tx_covenants_genesis(&tx).unwrap_err();
+    let err = validate_tx_covenants_genesis(&tx, 0).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
@@ -795,7 +812,7 @@ fn validate_tx_covenants_genesis_vault_unsorted_whitelist() {
         covenant_type: COV_TYPE_VAULT,
         covenant_data: encode_vault_covenant_data(1, &keys, &whitelist),
     }];
-    let err = validate_tx_covenants_genesis(&tx).unwrap_err();
+    let err = validate_tx_covenants_genesis(&tx, 0).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
@@ -807,7 +824,7 @@ fn validate_tx_covenants_genesis_multisig_ok() {
         covenant_type: COV_TYPE_MULTISIG,
         covenant_data: encode_multisig_covenant_data(2, &make_keys(2, 0x31)),
     }];
-    validate_tx_covenants_genesis(&tx).expect("ok");
+    validate_tx_covenants_genesis(&tx, 0).expect("ok");
 }
 
 #[test]
@@ -818,7 +835,7 @@ fn validate_tx_covenants_genesis_multisig_bad_threshold() {
         covenant_type: COV_TYPE_MULTISIG,
         covenant_data: encode_multisig_covenant_data(3, &make_keys(2, 0x31)),
     }];
-    let err = validate_tx_covenants_genesis(&tx).unwrap_err();
+    let err = validate_tx_covenants_genesis(&tx, 0).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
@@ -832,7 +849,7 @@ fn validate_tx_covenants_genesis_multisig_unsorted_keys() {
         covenant_type: COV_TYPE_MULTISIG,
         covenant_data: encode_multisig_covenant_data(1, &keys),
     }];
-    let err = validate_tx_covenants_genesis(&tx).unwrap_err();
+    let err = validate_tx_covenants_genesis(&tx, 0).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 

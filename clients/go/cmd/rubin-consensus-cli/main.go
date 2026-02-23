@@ -289,7 +289,7 @@ func main() {
 			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
 			return
 		}
-		if err := consensus.ValidateTxCovenantsGenesis(tx); err != nil {
+		if err := consensus.ValidateTxCovenantsGenesis(tx, req.Height); err != nil {
 			if te, ok := err.(*consensus.TxError); ok {
 				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
 				return
