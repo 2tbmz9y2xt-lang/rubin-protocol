@@ -230,17 +230,18 @@ func TestParseTx_HTLCPathWitnessItemsCanonical(t *testing.T) {
 	txBytes := append([]byte{}, minimalTxBytes()...)
 	coreEnd := 4 + 1 + 8 + 1 + 1 + 4
 
-	claimPayload := appendU16le(nil, 1)
+	claimPayload := []byte{0x00} // HTLC path selector for claim
+	claimPayload = appendU16le(claimPayload, 1)
 	claimPayload = append(claimPayload, 0x42)
 
 	var w bytes.Buffer
 	w.WriteByte(0x02) // witness_count = 2
 
-	// path item: suite_id=0x00, key_id=32 bytes, payload=u16le(len)+preimage
+	// path item: suite_id=0x00, key_id=32 bytes, payload=path_selector+u16le(len)+preimage
 	w.WriteByte(SUITE_ID_SENTINEL)
 	w.WriteByte(0x20) // pubkey_length=32
 	w.Write(make([]byte, 32))
-	w.WriteByte(byte(len(claimPayload))) // sig_length = 3
+	w.WriteByte(byte(len(claimPayload))) // sig_length = 4
 	w.Write(claimPayload)
 
 	// signature item: suite_id=0x01 with canonical ML-DSA lengths
