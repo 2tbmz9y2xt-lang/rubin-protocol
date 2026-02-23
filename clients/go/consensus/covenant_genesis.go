@@ -8,6 +8,9 @@ func ValidateTxCovenantsGenesis(tx *Tx, blockHeight uint64) error {
 	for _, out := range tx.Outputs {
 		switch out.CovenantType {
 		case COV_TYPE_P2PK:
+			if out.Value == 0 {
+				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_P2PK value must be > 0")
+			}
 			if len(out.CovenantData) != MAX_P2PK_COVENANT_DATA {
 				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "invalid CORE_P2PK covenant_data length")
 			}
@@ -29,10 +32,16 @@ func ValidateTxCovenantsGenesis(tx *Tx, blockHeight uint64) error {
 			}
 
 		case COV_TYPE_VAULT:
+			if out.Value == 0 {
+				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_VAULT value must be > 0")
+			}
 			if _, err := ParseVaultCovenantData(out.CovenantData); err != nil {
 				return err
 			}
 		case COV_TYPE_MULTISIG:
+			if out.Value == 0 {
+				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_MULTISIG value must be > 0")
+			}
 			if _, err := ParseMultisigCovenantData(out.CovenantData); err != nil {
 				return err
 			}

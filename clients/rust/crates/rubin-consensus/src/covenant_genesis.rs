@@ -12,6 +12,12 @@ pub fn validate_tx_covenants_genesis(tx: &Tx, block_height: u64) -> Result<(), T
     for out in &tx.outputs {
         match out.covenant_type {
             COV_TYPE_P2PK => {
+                if out.value == 0 {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrCovenantTypeInvalid,
+                        "CORE_P2PK value must be > 0",
+                    ));
+                }
                 if out.covenant_data.len() as u64 != MAX_P2PK_COVENANT_DATA {
                     return Err(TxError::new(
                         ErrorCode::TxErrCovenantTypeInvalid,
@@ -50,9 +56,21 @@ pub fn validate_tx_covenants_genesis(tx: &Tx, block_height: u64) -> Result<(), T
                 }
             }
             COV_TYPE_VAULT => {
+                if out.value == 0 {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrCovenantTypeInvalid,
+                        "CORE_VAULT value must be > 0",
+                    ));
+                }
                 parse_vault_covenant_data(&out.covenant_data)?;
             }
             COV_TYPE_MULTISIG => {
+                if out.value == 0 {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrCovenantTypeInvalid,
+                        "CORE_MULTISIG value must be > 0",
+                    ));
+                }
                 parse_multisig_covenant_data(&out.covenant_data)?;
             }
             COV_TYPE_HTLC => {
