@@ -67,17 +67,21 @@ Notes:
 
 | Parameter | Value |
 |-----------|-------|
-| Max supply | 100,000,000 RBN |
-| Mined supply | 99,000,000 RBN |
-| Pre-allocated (genesis) | 1,000,000 RBN |
-| Subsidy duration | 876,600 blocks (~3.3 years) |
+| Emission anchor supply | 50,000,000 RBN |
+| Pre-allocated (genesis) | 1,000,000 RBN (2%) |
+| Mineable cap (pre-tail) | 49,000,000 RBN |
+| Emission curve | Smooth decay (`remaining >> 20`) + tail |
+| Tail emission | 0.19025875 RBN/block (50,000 RBN/year @ 120s, 365d) |
 | Base unit | 1 RBN = 100,000,000 base units |
-| Max supply (base units) | 10,000,000,000,000,000 |
+| Emission anchor (base units) | 5,000,000,000,000,000 |
 
-Subsidy schedule: flat per-block subsidy with remainder distribution.
-Each block awards `floor(SUBSIDY_TOTAL_MINED / SUBSIDY_DURATION_BLOCKS)` base units.
-The indivisible remainder is distributed to the final blocks of the subsidy period.
-See CANONICAL §19 for exact formula.
+Subsidy schedule: CryptoNote-style smooth decay with a fixed tail emission floor.
+See CANONICAL §19 for the exact consensus formula.
+
+Notes:
+- Total supply is unbounded after tail activation (tail continues indefinitely).
+- The stated "50,000 RBN/year" is informative; consensus uses the fixed per-block constant.
+- Genesis allocation split (informative): 500,000 RBN treasury + 500,000 RBN airdrop pool.
 
 ---
 

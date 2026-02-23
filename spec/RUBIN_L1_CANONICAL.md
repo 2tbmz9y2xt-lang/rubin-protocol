@@ -86,9 +86,11 @@ These constants are consensus-critical for this protocol ruleset:
 Monetary constants (consensus-critical):
 
 - `BASE_UNITS_PER_RBN = 100_000_000`
-- `MAX_SUPPLY = 10_000_000_000_000_000` base units (100_000_000 RBN)
-- `SUBSIDY_TOTAL_MINED = 9_900_000_000_000_000` base units (99_000_000 RBN)
-- `SUBSIDY_DURATION_BLOCKS = 876_600` blocks
+- `MAX_SUPPLY = 5_000_000_000_000_000` base units (50_000_000 RBN, emission anchor; total supply becomes unbounded after tail activation)
+- `GENESIS_ALLOCATION = 100_000_000_000_000` base units (1_000_000 RBN)
+- `MINEABLE_CAP = 4_900_000_000_000_000` base units (49_000_000 RBN)
+- `EMISSION_SPEED_FACTOR = 20` (smooth-decay right-shift)
+- `TAIL_EMISSION_PER_BLOCK = 19_025_875` base units (0.19025875 RBN)
 
 Non-consensus operational defaults (not used for validity):
 
@@ -1166,20 +1168,26 @@ Any missing coinbase or additional coinbase transaction(s) MUST be rejected as `
 
 Let:
 
-- `N = SUBSIDY_DURATION_BLOCKS`
-- `TOTAL = SUBSIDY_TOTAL_MINED`
-- `BASE = floor(TOTAL / N)`
-- `REM = TOTAL mod N`
+- `h` be the height of the block being validated.
+- `already_generated(h)` be the sum of **subsidy only** (excluding fees) for coinbase transactions in heights `1..h-1`.
+  - For `h = 0`, define `already_generated(0) = 0`.
+- `remaining(h) = max(0, MINEABLE_CAP - already_generated(h))`.
+- `base_reward(h) = remaining(h) >> EMISSION_SPEED_FACTOR`.
 
 Define:
 
 ```text
-block_subsidy(h) = 0,        for h >= N
-block_subsidy(h) = BASE + 1, for h < REM
-block_subsidy(h) = BASE,     for REM <= h < N
+block_subsidy(0) = 0
+block_subsidy(h) = max(base_reward(h), TAIL_EMISSION_PER_BLOCK), for h > 0
 ```
 
-Arithmetic MUST use integer division / modulo; no floating-point is permitted.
+Arithmetic MUST use integer operations only; no floating-point is permitted.
+
+Notes (informative):
+
+- `MAX_SUPPLY` is an emission anchor used to parameterize the mineable phase and tail emission magnitude. After tail activation,
+  the total supply increases without a fixed hard cap.
+- The tail constant `TAIL_EMISSION_PER_BLOCK` is fixed at genesis and is not computed from wall-clock time during consensus validation.
 
 ### 19.2 Coinbase Value Bound (Normative)
 

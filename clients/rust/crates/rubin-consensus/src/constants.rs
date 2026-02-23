@@ -9,9 +9,11 @@ pub const MAX_FUTURE_DRIFT: u64 = 7_200;
 pub const MAX_TIMESTAMP_STEP_PER_BLOCK: u64 = 10 * TARGET_BLOCK_INTERVAL;
 
 pub const BASE_UNITS_PER_RBN: u64 = 100_000_000;
-pub const MAX_SUPPLY: u64 = 10_000_000_000_000_000;
-pub const SUBSIDY_TOTAL_MINED: u64 = 9_900_000_000_000_000;
-pub const SUBSIDY_DURATION_BLOCKS: u64 = 876_600;
+pub const MAX_SUPPLY: u64 = 5_000_000_000_000_000; // emission anchor; total supply becomes unbounded after tail activation
+pub const GENESIS_ALLOCATION: u64 = 100_000_000_000_000;
+pub const MINEABLE_CAP: u64 = 4_900_000_000_000_000;
+pub const EMISSION_SPEED_FACTOR: u8 = 20;
+pub const TAIL_EMISSION_PER_BLOCK: u64 = 19_025_875;
 
 pub const MAX_BLOCK_WEIGHT: u64 = 68_000_000;
 pub const MAX_BLOCK_BYTES: u64 = 72_000_000; // operational P2P cap; not a consensus validity bound
