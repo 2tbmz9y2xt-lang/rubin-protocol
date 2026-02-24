@@ -479,18 +479,21 @@ fn coinbase_with_witness_commitment_and_p2pk_value(
 
     let wroot = witness_merkle_root_wtxids(&wtxids).expect("witness merkle root");
     let commit = witness_commitment_hash(wroot);
-    coinbase_tx_with_outputs(locktime, &[
-        TestOutput {
-            value,
-            covenant_type: COV_TYPE_P2PK,
-            covenant_data: valid_p2pk_covenant_data(),
-        },
-        TestOutput {
-            value: 0,
-            covenant_type: COV_TYPE_ANCHOR,
-            covenant_data: commit.to_vec(),
-        },
-    ])
+    coinbase_tx_with_outputs(
+        locktime,
+        &[
+            TestOutput {
+                value,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: valid_p2pk_covenant_data(),
+            },
+            TestOutput {
+                value: 0,
+                covenant_type: COV_TYPE_ANCHOR,
+                covenant_data: commit.to_vec(),
+            },
+        ],
+    )
 }
 
 #[test]
@@ -694,8 +697,7 @@ fn validate_block_basic_covenant_invalid() {
 #[test]
 fn validate_block_basic_non_coinbase_must_have_input() {
     let invalid_non_coinbase = tx_with_one_output(1, COV_TYPE_P2PK, &valid_p2pk_covenant_data());
-    let coinbase =
-        coinbase_with_witness_commitment(0, std::slice::from_ref(&invalid_non_coinbase));
+    let coinbase = coinbase_with_witness_commitment(0, std::slice::from_ref(&invalid_non_coinbase));
 
     let (_t1, txid1, _w1, _n1) = parse_tx(&coinbase).expect("coinbase");
     let (_t2, txid2, _w2, _n2) = parse_tx(&invalid_non_coinbase).expect("noncoinbase");
@@ -789,18 +791,21 @@ fn validate_block_basic_witness_commitment_duplicate() {
     let (_tx, _txid, wtxid, _n) = parse_tx(&base_cb).expect("parse base coinbase");
     let wroot = witness_merkle_root_wtxids(&[wtxid]).expect("wroot");
     let commit = witness_commitment_hash(wroot);
-    let tx = coinbase_tx_with_outputs(0, &[
-        TestOutput {
-            value: 0,
-            covenant_type: COV_TYPE_ANCHOR,
-            covenant_data: commit.to_vec(),
-        },
-        TestOutput {
-            value: 0,
-            covenant_type: COV_TYPE_ANCHOR,
-            covenant_data: commit.to_vec(),
-        },
-    ]);
+    let tx = coinbase_tx_with_outputs(
+        0,
+        &[
+            TestOutput {
+                value: 0,
+                covenant_type: COV_TYPE_ANCHOR,
+                covenant_data: commit.to_vec(),
+            },
+            TestOutput {
+                value: 0,
+                covenant_type: COV_TYPE_ANCHOR,
+                covenant_data: commit.to_vec(),
+            },
+        ],
+    );
 
     let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
     let root = merkle_root_txids(&[txid]).expect("root");
