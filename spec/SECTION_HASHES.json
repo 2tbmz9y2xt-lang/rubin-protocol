@@ -25,7 +25,7 @@
     "witness_commitment": "10a0e0b289df6023e6c6589d575e0f25b37025c0b84ba404dae5738ad50abf3d",
     "sighash_v1": "e20b0bcae92ec4a9549150f1d6b7dc9f29e888c1e6d56341e6beb6062e4a7d1f",
     "consensus_error_codes": "8a45d187ea0523c29fc1fff3298f4bbaab3bce4e7f2fb67ea737a5858e2d78e1",
-    "covenant_registry": "b43922371de9a212b77ccc54539ec0772f7cf4a842ea5a4b68832a3fdbd92842",
+    "covenant_registry": "2a95eafaae6b79d74f66bacef27cd817edcb1cedd4ef2c8c5045f9f346b0871e",
     "difficulty_update": "1b755c3a6e65add9e1f92e382d171acea87763145929978fea5a6e54a51b969d",
     "transaction_structural_rules": "cda940d89f17467ae803d5504d9d7f11725b44593a9487ccf4ab829dfcf3b5d7",
     "replay_domain_checks": "f65201c5b65cdc4c53286074806cb189eaaf5909a007ea0079102e3cb616f115",

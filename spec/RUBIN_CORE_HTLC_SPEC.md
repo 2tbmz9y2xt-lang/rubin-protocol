@@ -22,7 +22,7 @@ It consumes **2 WitnessItems** from the witness cursor: a spend-path selector an
 the signature for the selected path.
 It has no
 destination whitelist — output routing is unrestricted, subject to standard
-value conservation rules (Section 20, RUBIN_L1_CANONICAL.md).
+value conservation rules (`RUBIN_L1_CANONICAL.md` §20).
 
 ---
 
@@ -80,8 +80,8 @@ When a transaction output has `covenant_type = 0x0100 (CORE_HTLC)`:
 
 ### 5.1 Witness Structure
 
-`CORE_HTLC` consumes exactly **2 WitnessItems** from the witness cursor (Section 16,
-RUBIN_L1_CANONICAL.md):
+`CORE_HTLC` consumes exactly **2 WitnessItems** from the witness cursor
+(`RUBIN_L1_CANONICAL.md` §16):
 
 ```
 WitnessItem[W+0] : spend_path_item  -- encodes which path is taken
@@ -146,7 +146,7 @@ When `spend_path_item.signature[0] = 0x00`:
 
 4. **Signature verification:**
    `verify_sig(sig_item.suite_id, sig_item.pubkey, sig_item.signature, digest) MUST be true`
-   where `digest` is the sighash v1 digest (Section 12, RUBIN_L1_CANONICAL.md)
+   where `digest` is the sighash v1 digest (`RUBIN_L1_CANONICAL.md` §12)
    with `input_index` bound to this input's position in the transaction.
    Otherwise reject as `TX_ERR_SIG_INVALID`.
 
@@ -178,7 +178,7 @@ When `spend_path_item.signature[0] = 0x01`:
 
 4. **Signature verification:**
    `verify_sig(sig_item.suite_id, sig_item.pubkey, sig_item.signature, digest) MUST be true`
-   where `digest` is per Section 12, RUBIN_L1_CANONICAL.md.
+   where `digest` is per `RUBIN_L1_CANONICAL.md` §12.
    Otherwise reject as `TX_ERR_SIG_INVALID`.
 
 5. **SLH-DSA gate:** same as claim path rule 5 above.
@@ -214,7 +214,7 @@ Structural/parse errors MUST be returned before signature verification is attemp
 ## 7. Value Conservation
 
 `CORE_HTLC` inputs are subject to standard value conservation rules
-(Section 20, RUBIN_L1_CANONICAL.md): `sum_out <= sum_in` for any
+(`RUBIN_L1_CANONICAL.md` §20): `sum_out <= sum_in` for any
 transaction spending one or more HTLC inputs (along with any other input types).
 
 There is no fee-preservation rule (unlike `CORE_VAULT`). The spender may
@@ -240,7 +240,7 @@ See `conformance/fixtures/CV-HTLC.json`. Required coverage:
 | CV-HTLC-07 | refund | locktime not met (height mode) | `TX_ERR_TIMELOCK_NOT_MET` |
 | CV-HTLC-08 | refund | locktime not met (timestamp mode) | `TX_ERR_TIMELOCK_NOT_MET` |
 | CV-HTLC-09 | claim | `preimage_len > 256` | `TX_ERR_PARSE` |
-| CV-HTLC-10 | spend | unknown spend path (`suite_id = 0x02`) | `TX_ERR_PARSE` |
+| CV-HTLC-10 | spend | unknown spend path (`path_id ∉ {0x00, 0x01}`) | `TX_ERR_PARSE` |
 
 ---
 

@@ -923,6 +923,14 @@ If `valid < threshold`: reject as `TX_ERR_SIG_INVALID`.
 
 No whitelist check is performed for `CORE_MULTISIG`.
 
+Operational note (non-consensus):
+
+- SLH-DSA signatures are bounded by `MAX_SLH_DSA_SIG_BYTES = 49_856` and transaction witness by
+  `MAX_WITNESS_BYTES_PER_TX = 100_000`.
+- For `CORE_MULTISIG`, this means SLH fallback can materially reduce the feasible number of participating
+  signers per transaction under witness-byte limits (even when `threshold` is lower than `key_count`).
+- Implementations SHOULD prefer ML-DSA-87 as default multisig path and reserve SLH-DSA for fallback/incident mode.
+
 ## 15. Difficulty Update (Normative)
 
 Let:

@@ -61,8 +61,8 @@
 | 1 | DA bytes cap маппится на `BLOCK_ERR_WEIGHT_EXCEEDED` | INTENTIONAL | ALREADY_FIXED | Так задано в CANONICAL: `sum_da_bytes(B) ... иначе BLOCK_ERR_WEIGHT_EXCEEDED`. (`spec/RUBIN_L1_CANONICAL.md:419`) |
 | 2 | HTLC claim допускает `preimage_len = 0` (нет нижней границы) | REAL | OPEN | В HTLC spec есть только `<= MAX`; в Go/Rust проверок `>= 1` нет. (`spec/RUBIN_CORE_HTLC_SPEC.md:115`, `clients/go/consensus/htlc.go:75`) **Консенсусное ужесточение ⇒ НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА.** |
 | 3 | HTLC refund: `lock_value = 0` при HEIGHT делает refund немедленным | REAL | OPEN | Правило `block_height >= lock_value` делает `0` тривиально истинным. (`spec/RUBIN_CORE_HTLC_SPEC.md:161`, `clients/go/consensus/htlc.go:100`) **Консенсусное ужесточение ⇒ НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА.** |
-| 4 | Witness cursor model не имеет formal proof-pack в репо | REAL | DEFERRED | В спеке есть нормативный алгоритм, но proof-pack заявлен out-of-tree (`rubin-formal/`). (`spec/README.md:37`, `spec/AUDIT_CONTEXT.md:23`) |
-| 5 | SLH-DSA плохо сочетается с multisig из-за лимита witness bytes | REAL | DOC_FIX | Лимиты зафиксированы (`MAX_WITNESS_BYTES_PER_TX`, `MAX_SLH_DSA_SIG_BYTES`). Нужно явно описать эксплуатационное ограничение для SLH fallback. (`spec/RUBIN_L1_CANONICAL.md:68`, `:116`) |
+| 4 | Witness cursor model не имеет formal proof-pack в репо | FALSE | ALREADY_FIXED | Proof-pack baseline вендорится в `rubin-formal/` и синхронизирован через `tools/check_formal_coverage.py` + CI job `formal`. (`spec/README.md`, `.github/workflows/ci.yml`) |
+| 5 | SLH-DSA плохо сочетается с multisig из-за лимита witness bytes | REAL | ALREADY_FIXED | Ограничение явно зафиксировано operational note в `CORE_MULTISIG` semantics (non-consensus), с рекомендацией ML-DSA default и SLH как fallback. (`spec/RUBIN_L1_CANONICAL.md` §14.2) |
 | 6 | `batch_sig` до 64KB — unverified blob (DoS) | INTENTIONAL | ALREADY_FIXED | CANONICAL прямо запрещает L1 проверять `batch_sig`; размер ограничен 65,536. (`spec/RUBIN_L1_CANONICAL.md:205`, `:225`) |
 | 7 | CORE_VAULT fee-preservation может требовать non-VAULT input | INTENTIONAL | ALREADY_FIXED | Это нормативно описано как “fee must be funded by non-VAULT inputs”. (`spec/RUBIN_L1_CANONICAL.md:880`) |
 | 8 | В BlockHeader нет height | INTENTIONAL | ALREADY_FIXED | Height — функция положения в цепи; есть coinbase height-commitment (`locktime = h`). (`spec/RUBIN_L1_CANONICAL.md:426`, `:1054`) |
@@ -72,8 +72,8 @@
 | 12 | `output_count = 0` не запрещён | INTENTIONAL | ALREADY_FIXED | Sighash задаёт `SHA3-256(\"\")` для `output_count=0`. (`spec/RUBIN_L1_CANONICAL.md:604`) |
 | 13 | Feature-bit framework не полностью специфицирован | FALSE | ALREADY_FIXED | FSM `DEFINED→STARTED→LOCKED_IN→ACTIVE/FAILED` описан. (`spec/RUBIN_L1_CANONICAL.md:1402`, `:1425`) |
 | 14 | SLH suite до активации может “залочить” funds | FALSE | ALREADY_FIXED | Creation rules гейтят `suite_id=0x02` по высоте. (`spec/RUBIN_NETWORK_PARAMS.md:132`, `clients/go/consensus/covenant_genesis.go:21`) |
-| 15 | Непоследовательный стиль перекрёстных ссылок | REAL | DOC_FIX | Смешаны форматы `spec/... §` и `CANONICAL §...`. (`spec/RUBIN_L1_CANONICAL.md:1137`, `spec/RUBIN_CORE_HTLC_SPEC.md:93`) |
-| 16 | CV-HTLC-10 описан как “unknown spend path (suite_id=0x02)” | REAL | DOC_FIX | Текст путает `suite_id` и `path_id`. (`spec/RUBIN_CORE_HTLC_SPEC.md:243`, `conformance/fixtures/CV-HTLC.json:150`) |
+| 15 | Непоследовательный стиль перекрёстных ссылок | REAL | ALREADY_FIXED | HTLC spec нормализован на единый формат ссылок `RUBIN_L1_CANONICAL.md §N`; смешанный стиль в audit-critical участках устранён. (`spec/RUBIN_CORE_HTLC_SPEC.md`) |
+| 16 | CV-HTLC-10 описан как “unknown spend path (suite_id=0x02)” | REAL | ALREADY_FIXED | Формулировка исправлена на корректную семантику `path_id ∉ {0x00,0x01}` без изменения fixture semantics. (`spec/RUBIN_CORE_HTLC_SPEC.md` §8) |
 | 17 | `da_id` uniqueness только per-block, reuse across blocks разрешён | INTENTIONAL | ALREADY_FIXED | Явно задано в CANONICAL. (`spec/RUBIN_L1_CANONICAL.md:1309`) |
 | 18 | Нет опубликованных точных genesis bytes/allocations | REAL | OPEN | Спека требует, чтобы сеть опубликовала exact genesis bytes для derivation `chain_id`, но репо не содержит chain-instance genesis pack. (`spec/RUBIN_L1_CANONICAL.md:587`, `spec/RUBIN_NETWORK_PARAMS.md:101`) |
 
