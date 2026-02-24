@@ -8,6 +8,22 @@
 - `proof_coverage.json` с baseline-покрытием всех pinned секций из `spec/SECTION_HASHES.json`
 - модельные теоремы (`status=proved`) для pinned секций в `RubinFormal/PinnedSections.lean`
 
+## Граница claims (критично)
+
+Этот proof-pack — **toy/model baseline**. Он нужен для воспроизводимого “якоря” и ранних инвариантов,
+но **не** является freeze-ready формальной верификацией CANONICAL.
+
+Разрешённые формулировки (OK):
+- “model-level proved baseline for pinned sections”
+- “toy/model invariants proved; refinement to byte-accurate/executable semantics is pending”
+
+Запрещённые формулировки (NOT OK):
+- “formal verification of RUBIN consensus / CANONICAL”
+- “bit-exact wire/serialization proven”
+- “proved equivalence between spec and Go/Rust implementations”
+
+Источник истины по границе claims — `rubin-formal/proof_coverage.json` (`proof_level`, `claims`).
+
 ## Что это значит
 
 - Это **не** полный formal freeze-ready пакет уровня “бит-в-бит байтовая модель wire + state transition”.

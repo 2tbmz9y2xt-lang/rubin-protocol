@@ -20,8 +20,9 @@
 
 ## Formal proof-pack (informational)
 
-- Lean4 proof-pack вендорится в `rubin-formal/` и входит в audit-pack как baseline (`status=proved` на модельном уровне).
+- Lean4 proof-pack вендорится в `rubin-formal/` и входит в audit-pack как baseline (`proof_level=toy-model`; `status=proved` означает “proved in toy/model baseline”, а не байтовую/исполняемую эквивалентность CANONICAL).
 - Freeze-ready claim для formal verification допускается только после byte-accurate/executable refinement поверх модельного baseline.
+- Любые публичные/аудиторские формулировки должны следовать `rubin-formal/proof_coverage.json` (`claims.allowed[]` / `claims.forbidden[]`).
 
 ## Правило дедупликации finding’ов
 
