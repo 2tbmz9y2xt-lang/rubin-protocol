@@ -27,3 +27,6 @@ jobs:
 
       - name: Check formal coverage baseline
         run: python3 tools/check_formal_coverage.py
+
+      - name: Hygiene: no absolute home paths
+        run: python3 tools/check_no_absolute_paths.py
