@@ -203,8 +203,8 @@ func applyNonCoinbaseTxBasicWork(
 	if cmpU128(sumOut, sumIn) > 0 {
 		return nil, 0, txerr(TX_ERR_VALUE_CONSERVATION, "sum_out exceeds sum_in")
 	}
-	if hasVaultInput && cmpU128(sumOut, sumInVault) < 0 {
-		return nil, 0, txerr(TX_ERR_VALUE_CONSERVATION, "vault inputs cannot fund miner fee")
+	if hasVaultInput && cmpU128(sumOut, sumInVault) != 0 {
+		return nil, 0, txerr(TX_ERR_VALUE_CONSERVATION, "vault spends must preserve exact vault value in outputs")
 	}
 	feeU128, err := subU128(sumIn, sumOut)
 	if err != nil {

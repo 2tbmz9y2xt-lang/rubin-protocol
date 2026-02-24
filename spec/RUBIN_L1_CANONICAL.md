@@ -879,9 +879,10 @@ Multi-input rule:
   Therefore every output MUST belong to the intersection of all referenced vault whitelists.
 - Fee preservation rule (strong vault mode):
   - Let `sum_in_vault` be the sum of input values whose referenced UTXO covenant type is `CORE_VAULT`.
-  - For any transaction that spends at least one `CORE_VAULT` input, `sum_out MUST be >= sum_in_vault`.
+  - For any transaction that spends at least one `CORE_VAULT` input, `sum_out MUST equal sum_in_vault`.
     Otherwise reject as `TX_ERR_VALUE_CONSERVATION`.
-  - This forbids spending miner fee from `CORE_VAULT` value; fee must be funded by non-VAULT inputs.
+  - This forbids spending miner fee from `CORE_VAULT` value and forbids increasing routed output value above vault input value.
+    Any non-VAULT inputs in the same transaction are therefore fully consumed as miner fee.
 - Design note:
   - Vault whitelist constrains allowed destinations, not per-destination amounts.
   - Amount-per-destination constraints are intentionally out of L1 scope and belong to L2 logic or off-chain policy.
@@ -1264,7 +1265,7 @@ For each non-coinbase transaction `T`:
 2. Let `sum_out` be the sum of `T.outputs[j].value` over all outputs `j`.
 3. Let `sum_in_vault` be the sum of referenced input values whose UTXO covenant type is `CORE_VAULT`.
 4. If `sum_out > sum_in`, reject as `TX_ERR_VALUE_CONSERVATION`.
-5. If `T` spends at least one `CORE_VAULT` input and `sum_out < sum_in_vault`,
+5. If `T` spends at least one `CORE_VAULT` input and `sum_out != sum_in_vault`,
    reject as `TX_ERR_VALUE_CONSERVATION`.
 6. Arithmetic MUST be exact and MUST be computed in at least 128-bit unsigned integer arithmetic.
    Any overflow MUST be rejected as `TX_ERR_PARSE`.
@@ -1462,7 +1463,7 @@ For inputs spending `CORE_VAULT` (after standard Section 18 parse):
 3. Assign `key_count` WitnessItems via the cursor model (Section 16).
 4. Signature threshold check: count valid signatures and require `valid >= threshold`.
 5. Whitelist membership check per output using binary search (`O(log W)`).
-6. Value conservation, including strong vault fee-preservation rule (`sum_out >= sum_in_vault` for VAULT spends).
+6. Value conservation, including strong vault fee-preservation rule (`sum_out == sum_in_vault` for VAULT spends).
 
 Short-circuit on first error.
 

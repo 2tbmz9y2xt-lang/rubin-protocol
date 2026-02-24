@@ -254,7 +254,7 @@ func TestApplyNonCoinbaseTxBasic_VaultPreservedWithExternalFeeSponsor(t *testing
 	}
 }
 
-func TestApplyNonCoinbaseTxBasic_VaultFeeFundedByNonVaultInputAllowed(t *testing.T) {
+func TestApplyNonCoinbaseTxBasic_VaultRequiresExactOutputSum(t *testing.T) {
 	var prevVault, prevFee, txid [32]byte
 	prevVault[0] = 0xd3
 	prevFee[0] = 0xd4
@@ -284,12 +284,12 @@ func TestApplyNonCoinbaseTxBasic_VaultFeeFundedByNonVaultInputAllowed(t *testing
 		},
 	}
 
-	s, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000)
+	if err == nil {
+		t.Fatalf("expected error")
 	}
-	if s.Fee != 5 {
-		t.Fatalf("fee=%d, want 5", s.Fee)
+	if got := mustTxErrCode(t, err); got != TX_ERR_VALUE_CONSERVATION {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_VALUE_CONSERVATION)
 	}
 }
 
