@@ -4,6 +4,25 @@ on:
   pull_request:
 
 jobs:
+  formal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install elan (Lean toolchain manager)
+        run: |
+          curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Lean build (rubin-formal)
+        run: |
+          cd rubin-formal
+          lake env lean --version
+          lake build
+
+      - name: Formal coverage baseline check
+        run: python3 tools/check_formal_coverage.py
+
   test:
     runs-on: ubuntu-latest
     steps:

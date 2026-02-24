@@ -1,8 +1,9 @@
 use rubin_consensus::{
-    apply_non_coinbase_tx_basic, block_hash, compact_shortid, merkle_root_txids, parse_tx,
-    pow_check, retarget_v1, retarget_v1_clamped, sighash_v1_digest,
+    apply_non_coinbase_tx_basic, block_hash, compact_shortid,
+    connect_block_basic_in_memory_at_height, merkle_root_txids, parse_tx, pow_check, retarget_v1,
+    retarget_v1_clamped, sighash_v1_digest, validate_block_basic_with_context_and_fees_at_height,
     validate_block_basic_with_context_at_height, validate_tx_covenants_genesis, ErrorCode,
-    Outpoint, UtxoEntry,
+    InMemoryChainState, Outpoint, UtxoEntry,
 };
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
@@ -80,6 +81,12 @@ struct Request {
 
     #[serde(default)]
     block_timestamp: u64,
+
+    #[serde(default)]
+    already_generated: u64,
+
+    #[serde(default)]
+    sum_fees: u64,
 }
 
 #[derive(Deserialize)]
@@ -93,7 +100,7 @@ struct UtxoJson {
     created_by_coinbase: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 struct Response {
     ok: bool,
 
@@ -126,6 +133,15 @@ struct Response {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     utxo_count: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sum_fees: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    already_generated: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    already_generated_n1: Option<u64>,
 }
 
 fn err_code(code: ErrorCode) -> String {
@@ -148,6 +164,10 @@ fn main() {
                 target_new: None,
                 fee: None,
                 utxo_count: None,
+                sum_fees: None,
+                already_generated: None,
+                already_generated_n1: None,
+                ..Default::default()
             };
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
             return;
@@ -171,6 +191,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -190,6 +211,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -206,6 +228,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -229,6 +252,7 @@ fn main() {
                             target_new: None,
                             fee: None,
                             utxo_count: None,
+                            ..Default::default()
                         };
                         let _ = serde_json::to_writer(std::io::stdout(), &resp);
                         return;
@@ -247,6 +271,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -269,6 +294,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -285,6 +311,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -306,6 +333,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -326,6 +354,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -347,6 +376,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -365,6 +395,7 @@ fn main() {
                     target_new: None,
                     fee: None,
                     utxo_count: None,
+                    ..Default::default()
                 };
                 let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 return;
@@ -386,6 +417,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -402,6 +434,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -423,6 +456,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -442,6 +476,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -458,6 +493,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -479,6 +515,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -499,6 +536,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -517,6 +555,7 @@ fn main() {
                     target_new: None,
                     fee: None,
                     utxo_count: None,
+                    ..Default::default()
                 };
                 let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 return;
@@ -538,6 +577,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -554,6 +594,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -575,6 +616,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -593,6 +635,7 @@ fn main() {
                     target_new: None,
                     fee: None,
                     utxo_count: None,
+                    ..Default::default()
                 };
                 let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 return;
@@ -619,6 +662,7 @@ fn main() {
                         target_new: Some(hex::encode(new_t)),
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -635,6 +679,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -656,6 +701,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -680,6 +726,7 @@ fn main() {
                             target_new: None,
                             fee: None,
                             utxo_count: None,
+                            ..Default::default()
                         };
                         let _ = serde_json::to_writer(std::io::stdout(), &resp);
                         return;
@@ -698,6 +745,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -725,6 +773,7 @@ fn main() {
                             target_new: None,
                             fee: None,
                             utxo_count: None,
+                            ..Default::default()
                         };
                         let _ = serde_json::to_writer(std::io::stdout(), &resp);
                         return;
@@ -743,6 +792,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -778,6 +828,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -794,6 +845,341 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+            }
+        }
+        "block_basic_check_with_fees" => {
+            let block_bytes = match hex::decode(req.block_hex) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad block".to_string()),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                        fee: None,
+                        utxo_count: None,
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+
+            let expected_prev = if req.expected_prev_hash.is_empty() {
+                None
+            } else {
+                let b = match hex::decode(req.expected_prev_hash) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let resp = Response {
+                            ok: false,
+                            err: Some("bad expected_prev_hash".to_string()),
+                            txid: None,
+                            wtxid: None,
+                            merkle_root: None,
+                            digest: None,
+                            consumed: None,
+                            block_hash: None,
+                            target_new: None,
+                            fee: None,
+                            utxo_count: None,
+                            ..Default::default()
+                        };
+                        let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                        return;
+                    }
+                };
+                if b.len() != 32 {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad expected_prev_hash".to_string()),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                        fee: None,
+                        utxo_count: None,
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+                let mut h = [0u8; 32];
+                h.copy_from_slice(&b);
+                Some(h)
+            };
+
+            let expected_target = if req.expected_target.is_empty() {
+                None
+            } else {
+                let b = match hex::decode(req.expected_target) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let resp = Response {
+                            ok: false,
+                            err: Some("bad expected_target".to_string()),
+                            txid: None,
+                            wtxid: None,
+                            merkle_root: None,
+                            digest: None,
+                            consumed: None,
+                            block_hash: None,
+                            target_new: None,
+                            fee: None,
+                            utxo_count: None,
+                            ..Default::default()
+                        };
+                        let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                        return;
+                    }
+                };
+                if b.len() != 32 {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad expected_target".to_string()),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                        fee: None,
+                        utxo_count: None,
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+                let mut h = [0u8; 32];
+                h.copy_from_slice(&b);
+                Some(h)
+            };
+
+            let prev_timestamps = if req.prev_timestamps.is_empty() {
+                None
+            } else {
+                Some(req.prev_timestamps.as_slice())
+            };
+
+            match validate_block_basic_with_context_and_fees_at_height(
+                &block_bytes,
+                expected_prev,
+                expected_target,
+                req.height,
+                prev_timestamps,
+                req.already_generated,
+                req.sum_fees,
+            ) {
+                Ok(summary) => {
+                    let resp = Response {
+                        ok: true,
+                        err: None,
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: Some(hex::encode(summary.block_hash)),
+                        target_new: None,
+                        fee: None,
+                        utxo_count: None,
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(err_code(e.code)),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                        fee: None,
+                        utxo_count: None,
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+            }
+        }
+        "connect_block_basic" => {
+            let block_bytes = match hex::decode(req.block_hex) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad block".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+
+            let expected_prev = if req.expected_prev_hash.is_empty() {
+                None
+            } else {
+                let b = match hex::decode(req.expected_prev_hash) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let resp = Response {
+                            ok: false,
+                            err: Some("bad expected_prev_hash".to_string()),
+                            ..Default::default()
+                        };
+                        let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                        return;
+                    }
+                };
+                if b.len() != 32 {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad expected_prev_hash".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+                let mut h = [0u8; 32];
+                h.copy_from_slice(&b);
+                Some(h)
+            };
+
+            let expected_target = if req.expected_target.is_empty() {
+                None
+            } else {
+                let b = match hex::decode(req.expected_target) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let resp = Response {
+                            ok: false,
+                            err: Some("bad expected_target".to_string()),
+                            ..Default::default()
+                        };
+                        let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                        return;
+                    }
+                };
+                if b.len() != 32 {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad expected_target".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+                let mut h = [0u8; 32];
+                h.copy_from_slice(&b);
+                Some(h)
+            };
+
+            let prev_timestamps = if req.prev_timestamps.is_empty() {
+                None
+            } else {
+                Some(req.prev_timestamps.as_slice())
+            };
+
+            let mut utxo_set: HashMap<Outpoint, UtxoEntry> =
+                HashMap::with_capacity(req.utxos.len());
+            for u in &req.utxos {
+                let txid_raw = match hex::decode(&u.txid) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let resp = Response {
+                            ok: false,
+                            err: Some("bad utxo txid".to_string()),
+                            ..Default::default()
+                        };
+                        let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                        return;
+                    }
+                };
+                if txid_raw.len() != 32 {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad utxo txid".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+                let cov_data = match hex::decode(&u.covenant_data) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let resp = Response {
+                            ok: false,
+                            err: Some("bad utxo covenant_data".to_string()),
+                            ..Default::default()
+                        };
+                        let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                        return;
+                    }
+                };
+
+                let mut op_txid = [0u8; 32];
+                op_txid.copy_from_slice(&txid_raw);
+                utxo_set.insert(
+                    Outpoint {
+                        txid: op_txid,
+                        vout: u.vout,
+                    },
+                    UtxoEntry {
+                        value: u.value,
+                        covenant_type: u.covenant_type,
+                        covenant_data: cov_data,
+                        creation_height: u.creation_height,
+                        created_by_coinbase: u.created_by_coinbase,
+                    },
+                );
+            }
+
+            let mut state = InMemoryChainState {
+                utxos: utxo_set,
+                already_generated: req.already_generated,
+            };
+
+            match connect_block_basic_in_memory_at_height(
+                &block_bytes,
+                expected_prev,
+                expected_target,
+                req.height,
+                prev_timestamps,
+                &mut state,
+            ) {
+                Ok(summary) => {
+                    let resp = Response {
+                        ok: true,
+                        sum_fees: Some(summary.sum_fees),
+                        utxo_count: Some(summary.utxo_count),
+                        already_generated: Some(summary.already_generated),
+                        already_generated_n1: Some(summary.already_generated_n1),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(err_code(e.code)),
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -815,6 +1201,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -836,6 +1223,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -856,6 +1244,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -872,6 +1261,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -893,6 +1283,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -914,6 +1305,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -938,6 +1330,7 @@ fn main() {
                             target_new: None,
                             fee: None,
                             utxo_count: None,
+                            ..Default::default()
                         };
                         let _ = serde_json::to_writer(std::io::stdout(), &resp);
                         return;
@@ -956,6 +1349,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -975,6 +1369,7 @@ fn main() {
                             target_new: None,
                             fee: None,
                             utxo_count: None,
+                            ..Default::default()
                         };
                         let _ = serde_json::to_writer(std::io::stdout(), &resp);
                         return;
@@ -1013,6 +1408,7 @@ fn main() {
                         target_new: None,
                         fee: Some(summary.fee),
                         utxo_count: Some(summary.utxo_count),
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -1029,6 +1425,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
@@ -1050,6 +1447,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -1068,6 +1466,7 @@ fn main() {
                     target_new: None,
                     fee: None,
                     utxo_count: None,
+                    ..Default::default()
                 };
                 let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 return;
@@ -1087,6 +1486,7 @@ fn main() {
                 target_new: None,
                 fee: None,
                 utxo_count: None,
+                ..Default::default()
             };
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
@@ -1106,6 +1506,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -1124,6 +1525,7 @@ fn main() {
                 target_new: None,
                 fee: None,
                 utxo_count: None,
+                ..Default::default()
             };
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
@@ -1143,6 +1545,7 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
@@ -1164,6 +1567,7 @@ fn main() {
                 target_new: None,
                 fee: None,
                 utxo_count: None,
+                ..Default::default()
             };
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
@@ -1180,6 +1584,7 @@ fn main() {
                 target_new: None,
                 fee: None,
                 utxo_count: None,
+                ..Default::default()
             };
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }

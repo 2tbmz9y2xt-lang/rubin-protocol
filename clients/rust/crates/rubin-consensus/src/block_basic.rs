@@ -12,6 +12,7 @@ use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
 use crate::merkle::{merkle_root_txids, witness_commitment_hash, witness_merkle_root_wtxids};
 use crate::pow::pow_check;
+use crate::subsidy::block_subsidy;
 use crate::tx::{da_core_fields_bytes, parse_tx, Tx};
 use crate::wire_read::Reader;
 use std::collections::HashMap;
@@ -223,6 +224,64 @@ pub fn validate_block_basic_with_context_at_height(
         sum_da,
         block_hash: h,
     })
+}
+
+pub fn validate_block_basic_with_context_and_fees_at_height(
+    block_bytes: &[u8],
+    expected_prev_hash: Option<[u8; 32]>,
+    expected_target: Option<[u8; 32]>,
+    block_height: u64,
+    prev_timestamps: Option<&[u64]>,
+    already_generated: u64,
+    sum_fees: u64,
+) -> Result<BlockBasicSummary, TxError> {
+    let s = validate_block_basic_with_context_at_height(
+        block_bytes,
+        expected_prev_hash,
+        expected_target,
+        block_height,
+        prev_timestamps,
+    )?;
+    let pb = parse_block_bytes(block_bytes)?;
+    validate_coinbase_value_bound(&pb, block_height, already_generated, sum_fees)?;
+    Ok(s)
+}
+
+fn validate_coinbase_value_bound(
+    pb: &ParsedBlock,
+    block_height: u64,
+    already_generated: u64,
+    sum_fees: u64,
+) -> Result<(), TxError> {
+    if block_height == 0 {
+        return Ok(());
+    }
+    if pb.txs.is_empty() {
+        return Err(TxError::new(
+            ErrorCode::BlockErrCoinbaseInvalid,
+            "missing coinbase",
+        ));
+    }
+    let coinbase = &pb.txs[0];
+
+    let mut sum_coinbase: u64 = 0;
+    for out in &coinbase.outputs {
+        sum_coinbase = sum_coinbase
+            .checked_add(out.value)
+            .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "coinbase value overflow"))?;
+    }
+
+    let subsidy = block_subsidy(block_height, already_generated);
+    let limit = subsidy
+        .checked_add(sum_fees)
+        .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "subsidy+fees overflow"))?;
+    if sum_coinbase > limit {
+        return Err(TxError::new(
+            ErrorCode::BlockErrSubsidyExceeded,
+            "coinbase outputs exceed subsidy+fees bound",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_witness_suite_activation(

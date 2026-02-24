@@ -24,3 +24,6 @@ jobs:
 
       - name: Check crypto backend policy
         run: python3 tools/check_crypto_backend_policy.py
+
+      - name: Check formal coverage baseline
+        run: python3 tools/check_formal_coverage.py

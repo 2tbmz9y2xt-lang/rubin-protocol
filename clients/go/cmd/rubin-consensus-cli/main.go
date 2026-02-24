@@ -35,6 +35,8 @@ type Request struct {
 	ExpectedPrev     string   `json:"expected_prev_hash,omitempty"`
 	ExpectedTarget   string   `json:"expected_target,omitempty"`
 	PrevTimestamps   []uint64 `json:"prev_timestamps,omitempty"`
+	AlreadyGenerated uint64   `json:"already_generated,omitempty"`
+	SumFees          uint64   `json:"sum_fees,omitempty"`
 
 	Utxos          []UtxoJSON `json:"utxos,omitempty"`
 	Height         uint64     `json:"height,omitempty"`
@@ -52,19 +54,22 @@ type UtxoJSON struct {
 }
 
 type Response struct {
-	Ok            bool   `json:"ok"`
-	Err           string `json:"err,omitempty"`
-	TxidHex       string `json:"txid,omitempty"`
-	WtxidHex      string `json:"wtxid,omitempty"`
-	MerkleHex     string `json:"merkle_root,omitempty"`
-	DigestHex     string `json:"digest,omitempty"`
-	BlockHash     string `json:"block_hash,omitempty"`
-	TargetNew     string `json:"target_new,omitempty"`
-	ShortID       string `json:"short_id,omitempty"`
-	DescriptorHex string `json:"descriptor_hex,omitempty"`
-	Consumed      int    `json:"consumed,omitempty"`
-	Fee           uint64 `json:"fee,omitempty"`
-	UtxoCount     uint64 `json:"utxo_count,omitempty"`
+	Ok                 bool   `json:"ok"`
+	Err                string `json:"err,omitempty"`
+	TxidHex            string `json:"txid,omitempty"`
+	WtxidHex           string `json:"wtxid,omitempty"`
+	MerkleHex          string `json:"merkle_root,omitempty"`
+	DigestHex          string `json:"digest,omitempty"`
+	BlockHash          string `json:"block_hash,omitempty"`
+	TargetNew          string `json:"target_new,omitempty"`
+	ShortID            string `json:"short_id,omitempty"`
+	DescriptorHex      string `json:"descriptor_hex,omitempty"`
+	Consumed           int    `json:"consumed,omitempty"`
+	Fee                uint64 `json:"fee,omitempty"`
+	SumFees            uint64 `json:"sum_fees,omitempty"`
+	UtxoCount          uint64 `json:"utxo_count,omitempty"`
+	AlreadyGenerated   uint64 `json:"already_generated,omitempty"`
+	AlreadyGeneratedN1 uint64 `json:"already_generated_n1,omitempty"`
 }
 
 func writeResp(w io.Writer, resp Response) {
@@ -279,6 +284,142 @@ func main() {
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true, BlockHash: hex.EncodeToString(s.BlockHash[:])})
+		return
+
+	case "block_basic_check_with_fees":
+		blockBytes, err := hex.DecodeString(req.BlockHex)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad block"})
+			return
+		}
+
+		var expectedPrev *[32]byte
+		if req.ExpectedPrev != "" {
+			b, err := hex.DecodeString(req.ExpectedPrev)
+			if err != nil || len(b) != 32 {
+				writeResp(os.Stdout, Response{Ok: false, Err: "bad expected_prev_hash"})
+				return
+			}
+			var h [32]byte
+			copy(h[:], b)
+			expectedPrev = &h
+		}
+
+		var expectedTarget *[32]byte
+		if req.ExpectedTarget != "" {
+			b, err := hex.DecodeString(req.ExpectedTarget)
+			if err != nil || len(b) != 32 {
+				writeResp(os.Stdout, Response{Ok: false, Err: "bad expected_target"})
+				return
+			}
+			var h [32]byte
+			copy(h[:], b)
+			expectedTarget = &h
+		}
+
+		s, err := consensus.ValidateBlockBasicWithContextAndFeesAtHeight(
+			blockBytes,
+			expectedPrev,
+			expectedTarget,
+			req.Height,
+			req.PrevTimestamps,
+			req.AlreadyGenerated,
+			req.SumFees,
+		)
+		if err != nil {
+			if te, ok := err.(*consensus.TxError); ok {
+				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
+				return
+			}
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+		writeResp(os.Stdout, Response{Ok: true, BlockHash: hex.EncodeToString(s.BlockHash[:])})
+		return
+
+	case "connect_block_basic":
+		blockBytes, err := hex.DecodeString(req.BlockHex)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad block"})
+			return
+		}
+
+		var expectedPrev *[32]byte
+		if req.ExpectedPrev != "" {
+			b, err := hex.DecodeString(req.ExpectedPrev)
+			if err != nil || len(b) != 32 {
+				writeResp(os.Stdout, Response{Ok: false, Err: "bad expected_prev_hash"})
+				return
+			}
+			var h [32]byte
+			copy(h[:], b)
+			expectedPrev = &h
+		}
+
+		var expectedTarget *[32]byte
+		if req.ExpectedTarget != "" {
+			b, err := hex.DecodeString(req.ExpectedTarget)
+			if err != nil || len(b) != 32 {
+				writeResp(os.Stdout, Response{Ok: false, Err: "bad expected_target"})
+				return
+			}
+			var h [32]byte
+			copy(h[:], b)
+			expectedTarget = &h
+		}
+
+		utxos := make(map[consensus.Outpoint]consensus.UtxoEntry, len(req.Utxos))
+		for _, u := range req.Utxos {
+			txidBytes, err := hex.DecodeString(u.Txid)
+			if err != nil || len(txidBytes) != 32 {
+				writeResp(os.Stdout, Response{Ok: false, Err: "bad utxo txid"})
+				return
+			}
+			covData, err := hex.DecodeString(u.CovenantDataHex)
+			if err != nil {
+				writeResp(os.Stdout, Response{Ok: false, Err: "bad utxo covenant_data"})
+				return
+			}
+
+			var opTxid [32]byte
+			copy(opTxid[:], txidBytes)
+			op := consensus.Outpoint{Txid: opTxid, Vout: u.Vout}
+			utxos[op] = consensus.UtxoEntry{
+				Value:             u.Value,
+				CovenantType:      u.CovenantType,
+				CovenantData:      covData,
+				CreationHeight:    u.CreationHeight,
+				CreatedByCoinbase: u.CreatedByCoinbase,
+			}
+		}
+
+		st := consensus.InMemoryChainState{
+			Utxos:            utxos,
+			AlreadyGenerated: req.AlreadyGenerated,
+		}
+		s, err := consensus.ConnectBlockBasicInMemoryAtHeight(
+			blockBytes,
+			expectedPrev,
+			expectedTarget,
+			req.Height,
+			req.PrevTimestamps,
+			&st,
+		)
+		if err != nil {
+			if te, ok := err.(*consensus.TxError); ok {
+				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
+				return
+			}
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+		writeResp(os.Stdout, Response{
+			Ok:                 true,
+			SumFees:            s.SumFees,
+			UtxoCount:          s.UtxoCount,
+			AlreadyGenerated:   s.AlreadyGenerated,
+			AlreadyGeneratedN1: s.AlreadyGeneratedN1,
+		})
 		return
 
 	case "covenant_genesis_check":

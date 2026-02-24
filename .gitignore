@@ -18,6 +18,11 @@ rubin-ui/
 # Conformance build outputs
 conformance/bin/
 
+# Lean formal build outputs
+rubin-formal/.lake/
+rubin-formal/.lean/
+rubin-formal/build/
+
 # Local data
 *.db
 *.sqlite

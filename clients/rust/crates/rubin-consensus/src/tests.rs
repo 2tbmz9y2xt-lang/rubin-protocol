@@ -6,7 +6,8 @@ use crate::pow::{pow_check, retarget_v1, retarget_v1_clamped};
 use crate::sighash_v1_digest;
 use crate::{
     apply_non_coinbase_tx_basic, block_hash, merkle_root_txids, parse_block_bytes, parse_tx,
-    validate_block_basic, validate_block_basic_at_height, validate_tx_covenants_genesis, Outpoint,
+    validate_block_basic, validate_block_basic_at_height,
+    validate_block_basic_with_context_and_fees_at_height, validate_tx_covenants_genesis, Outpoint,
     UtxoEntry, BLOCK_HEADER_BYTES,
 };
 use num_bigint::BigUint;
@@ -434,6 +435,33 @@ fn coinbase_with_witness_commitment(non_coinbase_txs: &[Vec<u8>]) -> Vec<u8> {
     tx_with_one_output(0, COV_TYPE_ANCHOR, &commit)
 }
 
+fn coinbase_with_witness_commitment_and_p2pk_value(
+    value: u64,
+    non_coinbase_txs: &[Vec<u8>],
+) -> Vec<u8> {
+    let mut wtxids: Vec<[u8; 32]> = Vec::with_capacity(1 + non_coinbase_txs.len());
+    wtxids.push([0u8; 32]);
+    for txb in non_coinbase_txs {
+        let (_tx, _txid, wtxid, _n) = parse_tx(txb).expect("parse non-coinbase");
+        wtxids.push(wtxid);
+    }
+
+    let wroot = witness_merkle_root_wtxids(&wtxids).expect("witness merkle root");
+    let commit = witness_commitment_hash(wroot);
+    tx_with_outputs(&[
+        TestOutput {
+            value,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: valid_p2pk_covenant_data(),
+        },
+        TestOutput {
+            value: 0,
+            covenant_type: COV_TYPE_ANCHOR,
+            covenant_data: commit.to_vec(),
+        },
+    ])
+}
+
 #[test]
 fn parse_block_bytes_ok() {
     let tx = minimal_tx_bytes();
@@ -461,6 +489,62 @@ fn validate_block_basic_ok() {
     let block = build_block_bytes(prev, root, target, 9, &[tx]);
 
     let s = validate_block_basic(&block, Some(prev), Some(target)).expect("validate");
+    assert_eq!(s.tx_count, 1);
+}
+
+#[test]
+fn validate_block_basic_subsidy_exceeded() {
+    let height = 1u64;
+    let already_generated = 0u64;
+    let sum_fees = 0u64;
+
+    let subsidy = crate::subsidy::block_subsidy(height, already_generated);
+    let tx = coinbase_with_witness_commitment_and_p2pk_value(subsidy + 1, &[]);
+    let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
+    let root = merkle_root_txids(&[txid]).expect("root");
+    let mut prev = [0u8; 32];
+    prev[0] = 0x9b;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(prev, root, target, 33, &[tx]);
+
+    let err = validate_block_basic_with_context_and_fees_at_height(
+        &block,
+        Some(prev),
+        Some(target),
+        height,
+        None,
+        already_generated,
+        sum_fees,
+    )
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrSubsidyExceeded);
+}
+
+#[test]
+fn validate_block_basic_subsidy_with_fees_ok() {
+    let height = 1u64;
+    let already_generated = 0u64;
+    let sum_fees = 5u64;
+
+    let subsidy = crate::subsidy::block_subsidy(height, already_generated);
+    let tx = coinbase_with_witness_commitment_and_p2pk_value(subsidy + sum_fees, &[]);
+    let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
+    let root = merkle_root_txids(&[txid]).expect("root");
+    let mut prev = [0u8; 32];
+    prev[0] = 0x9c;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(prev, root, target, 34, &[tx]);
+
+    let s = validate_block_basic_with_context_and_fees_at_height(
+        &block,
+        Some(prev),
+        Some(target),
+        height,
+        None,
+        already_generated,
+        sum_fees,
+    )
+    .expect("validate");
     assert_eq!(s.tx_count, 1);
 }
 

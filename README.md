@@ -34,6 +34,7 @@ There is no delayed wire-activation mechanism.
 - `./clients/go/` Go reference consensus library + CLI
 - `./clients/rust/` Rust reference consensus library + CLI
 - `./conformance/` fixtures + runner (Go↔Rust parity)
+- `./rubin-formal/` Lean4 proof-pack bootstrap (formal coverage baseline)
 
 ## Quick Start (Local)
 

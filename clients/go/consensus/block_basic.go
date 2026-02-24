@@ -188,6 +188,67 @@ func ValidateBlockBasicWithContextAtHeight(
 	}, nil
 }
 
+// ValidateBlockBasicWithContextAndFeesAtHeight extends basic block validation with the
+// coinbase subsidy/value bound (CANONICAL §19.2).
+//
+// sumFees MUST be the sum of (sum_in - sum_out) over all non-coinbase transactions in the block.
+// alreadyGenerated MUST be already_generated(h) per CANONICAL §19.1 (subsidy-only, excluding fees).
+//
+// This does not compute fees; it only enforces the bound once fees are known.
+func ValidateBlockBasicWithContextAndFeesAtHeight(
+	blockBytes []byte,
+	expectedPrevHash *[32]byte,
+	expectedTarget *[32]byte,
+	blockHeight uint64,
+	prevTimestamps []uint64,
+	alreadyGenerated uint64,
+	sumFees uint64,
+) (*BlockBasicSummary, error) {
+	s, err := ValidateBlockBasicWithContextAtHeight(blockBytes, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps)
+	if err != nil {
+		return nil, err
+	}
+	pb, err := ParseBlockBytes(blockBytes)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateCoinbaseValueBound(pb, blockHeight, alreadyGenerated, sumFees); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func validateCoinbaseValueBound(pb *ParsedBlock, blockHeight uint64, alreadyGenerated uint64, sumFees uint64) error {
+	if pb == nil || len(pb.Txs) == 0 {
+		return txerr(BLOCK_ERR_COINBASE_INVALID, "missing coinbase")
+	}
+	if blockHeight == 0 {
+		return nil
+	}
+	coinbase := pb.Txs[0]
+	if coinbase == nil {
+		return txerr(BLOCK_ERR_COINBASE_INVALID, "nil coinbase")
+	}
+
+	var sumCoinbase uint64
+	for _, out := range coinbase.Outputs {
+		var err error
+		sumCoinbase, err = addU64(sumCoinbase, out.Value)
+		if err != nil {
+			return txerr(BLOCK_ERR_PARSE, "coinbase value overflow")
+		}
+	}
+	subsidy := BlockSubsidy(blockHeight, alreadyGenerated)
+	limit, err := addU64(subsidy, sumFees)
+	if err != nil {
+		return txerr(BLOCK_ERR_PARSE, "subsidy+fees overflow")
+	}
+	if sumCoinbase > limit {
+		return txerr(BLOCK_ERR_SUBSIDY_EXCEEDED, "coinbase outputs exceed subsidy+fees bound")
+	}
+	return nil
+}
+
 func validateWitnessSuiteActivation(tx *Tx, txIndex int, blockHeight uint64) error {
 	if tx == nil {
 		return txerr(TX_ERR_PARSE, "nil tx")

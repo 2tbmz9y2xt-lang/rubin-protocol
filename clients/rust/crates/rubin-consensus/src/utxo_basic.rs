@@ -35,13 +35,13 @@ pub struct UtxoApplySummary {
     pub utxo_count: u64,
 }
 
-pub fn apply_non_coinbase_tx_basic(
+pub fn apply_non_coinbase_tx_basic_update(
     tx: &Tx,
     txid: [u8; 32],
     utxo_set: &HashMap<Outpoint, UtxoEntry>,
     height: u64,
     block_timestamp: u64,
-) -> Result<UtxoApplySummary, TxError> {
+) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
     if tx.inputs.is_empty() {
         return Err(TxError::new(
             ErrorCode::TxErrParse,
@@ -183,11 +183,27 @@ pub fn apply_non_coinbase_tx_basic(
         ));
     }
 
-    Ok(UtxoApplySummary {
-        fee: u64::try_from(sum_in - sum_out)
-            .map_err(|_| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?,
+    let fee = u64::try_from(sum_in - sum_out)
+        .map_err(|_| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
+
+    let summary = UtxoApplySummary {
+        fee,
         utxo_count: work.len() as u64,
-    })
+    };
+
+    Ok((work, summary))
+}
+
+pub fn apply_non_coinbase_tx_basic(
+    tx: &Tx,
+    txid: [u8; 32],
+    utxo_set: &HashMap<Outpoint, UtxoEntry>,
+    height: u64,
+    block_timestamp: u64,
+) -> Result<UtxoApplySummary, TxError> {
+    let (_work, summary) =
+        apply_non_coinbase_tx_basic_update(tx, txid, utxo_set, height, block_timestamp)?;
+    Ok(summary)
 }
 
 #[allow(dead_code)]
