@@ -101,6 +101,19 @@ node scripts/check-section-hashes.mjs
 python3 conformance/runner/run_cv_bundle.py
 ```
 
+Сборка **audit pack** (для внешнего аудита, только tracked файлы; детерминированный архив):
+
+```bash
+scripts/dev-env.sh -- python3 tools/make_audit_pack.py --print-sha256
+```
+
+Проверка детерминизма (sha256 должен совпасть при неизменном git tree):
+
+```bash
+scripts/dev-env.sh -- python3 tools/make_audit_pack.py --out artifacts/audit-pack/a1.tar.gz --print-sha256
+scripts/dev-env.sh -- python3 tools/make_audit_pack.py --out artifacts/audit-pack/a2.tar.gz --print-sha256
+```
+
 Это operational note (не консенсус).
 
 ### Go→Rust parity (operational)

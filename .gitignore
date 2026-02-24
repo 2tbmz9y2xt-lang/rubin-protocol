@@ -18,6 +18,9 @@ rubin-ui/
 # Conformance build outputs
 conformance/bin/
 
+# Audit pack outputs
+artifacts/audit-pack/
+
 # Lean formal build outputs
 rubin-formal/.lake/
 rubin-formal/.lean/
