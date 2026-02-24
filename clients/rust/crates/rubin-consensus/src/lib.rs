@@ -1,5 +1,6 @@
 pub mod block;
 pub mod block_basic;
+pub mod connect_block_inmem;
 mod compact_relay;
 mod compactsize;
 pub mod constants;
@@ -31,7 +32,13 @@ pub use pow::{pow_check, retarget_v1, retarget_v1_clamped};
 pub use sighash::sighash_v1_digest;
 pub use subsidy::block_subsidy;
 pub use tx::{parse_tx, DaChunkCore, DaCommitCore, Tx, TxInput, TxOutput, WitnessItem};
-pub use utxo_basic::{apply_non_coinbase_tx_basic, Outpoint, UtxoApplySummary, UtxoEntry};
+pub use utxo_basic::{
+    apply_non_coinbase_tx_basic, apply_non_coinbase_tx_basic_update, Outpoint, UtxoApplySummary,
+    UtxoEntry,
+};
+pub use connect_block_inmem::{
+    connect_block_basic_in_memory_at_height, ConnectBlockBasicSummary, InMemoryChainState,
+};
 pub use vault::{
     output_descriptor_bytes, parse_multisig_covenant_data, parse_vault_covenant_data,
     witness_slots, MultisigCovenant, VaultCovenant,

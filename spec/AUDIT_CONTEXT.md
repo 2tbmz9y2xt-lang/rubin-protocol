@@ -41,7 +41,7 @@
 | ID | Статус | Кратко |
 |---|---|---|
 | F-03 | OPEN | Нет end-to-end crypto `verify_sig` в consensus path (задача `Q-R006`) |
-| F-05 | OPEN (partial) | Fee-aware coinbase bound check существует, но end-to-end закрытие зависит от вычисления `sum_fees` и `already_generated(h)` в stateful apply path (`Q-R006`). |
+| F-05 | ALREADY_FIXED | Coinbase bound теперь вызывается только из stateful `connect_block`-пути с локально вычисленным `sum_fees` (UTXO apply non-coinbase tx). `already_generated(h)` ведётся в chainstate-счётчике (in-memory reference). Персистентное хранилище chainstate (DB) требуется для “ноды”, но не влияет на консенсусную семантику и вынесено отдельно. |
 | F-10 | ALREADY_FIXED | `RUBIN_L1_P2P_AUX.md` содержит минимальные `version`/`verack` поля (`tx_relay`, `pruned_below_height`) на которые ссылается COMPACT. |
 
 ## Already fixed (из прошлых аудитов)

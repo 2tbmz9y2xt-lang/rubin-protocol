@@ -21,15 +21,44 @@ type UtxoApplySummary struct {
 }
 
 func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEntry, height uint64, blockTimestamp uint64) (*UtxoApplySummary, error) {
+	work, summary, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxoSet, height, blockTimestamp)
+	_ = work
+	return summary, err
+}
+
+// ApplyNonCoinbaseTxBasicUpdate applies a non-coinbase transaction to the provided UTXO snapshot
+// and returns the updated UTXO set. This is a stateful helper for block connection logic.
+//
+// NOTE: This function still does not implement end-to-end signature verification; it is used to
+// deterministically compute (sum_in - sum_out) fees and update UTXO membership under the "basic"
+// apply ruleset.
+func ApplyNonCoinbaseTxBasicUpdate(
+	tx *Tx,
+	txid [32]byte,
+	utxoSet map[Outpoint]UtxoEntry,
+	height uint64,
+	blockTimestamp uint64,
+) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
+	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, utxoSet, height, blockTimestamp)
+	if err != nil {
+		return nil, nil, err
+	}
+	return work, &UtxoApplySummary{
+		Fee:       fee,
+		UtxoCount: uint64(len(work)),
+	}, nil
+}
+
+func applyNonCoinbaseTxBasicWork(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEntry, height uint64, blockTimestamp uint64) (map[Outpoint]UtxoEntry, uint64, error) {
 	if tx == nil {
-		return nil, txerr(TX_ERR_PARSE, "nil tx")
+		return nil, 0, txerr(TX_ERR_PARSE, "nil tx")
 	}
 	if len(tx.Inputs) == 0 {
-		return nil, txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
+		return nil, 0, txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
 	}
 
 	if err := ValidateTxCovenantsGenesis(tx, height); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	work := make(map[Outpoint]UtxoEntry, len(utxoSet))
@@ -46,20 +75,20 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 		op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
 		entry, ok := work[op]
 		if !ok {
-			return nil, txerr(TX_ERR_MISSING_UTXO, "utxo not found")
+			return nil, 0, txerr(TX_ERR_MISSING_UTXO, "utxo not found")
 		}
 
 		if entry.CovenantType == COV_TYPE_ANCHOR || entry.CovenantType == COV_TYPE_DA_COMMIT {
-			return nil, txerr(TX_ERR_MISSING_UTXO, "attempt to spend non-spendable covenant")
+			return nil, 0, txerr(TX_ERR_MISSING_UTXO, "attempt to spend non-spendable covenant")
 		}
 
 		if entry.CreatedByCoinbase && height < entry.CreationHeight+COINBASE_MATURITY {
-			return nil, txerr(TX_ERR_COINBASE_IMMATURE, "coinbase immature")
+			return nil, 0, txerr(TX_ERR_COINBASE_IMMATURE, "coinbase immature")
 		}
 		if entry.CovenantType == COV_TYPE_HTLC {
 			slots := 2
 			if witnessCursor+slots > len(tx.Witness) {
-				return nil, txerr(TX_ERR_PARSE, "CORE_HTLC witness underflow")
+				return nil, 0, txerr(TX_ERR_PARSE, "CORE_HTLC witness underflow")
 			}
 			if err := ValidateHTLCSpend(
 				entry,
@@ -68,18 +97,18 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 				height,
 				blockTimestamp,
 			); err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 			witnessCursor += slots
 		} else if err := checkSpendCovenant(entry.CovenantType, entry.CovenantData); err != nil {
-			return nil, err
+			return nil, 0, err
 		} else if len(tx.Witness) > 0 {
 			slots := WitnessSlots(entry.CovenantType, entry.CovenantData)
 			if slots <= 0 {
-				return nil, txerr(TX_ERR_PARSE, "invalid witness slots")
+				return nil, 0, txerr(TX_ERR_PARSE, "invalid witness slots")
 			}
 			if witnessCursor+slots > len(tx.Witness) {
-				return nil, txerr(TX_ERR_PARSE, "witness underflow")
+				return nil, 0, txerr(TX_ERR_PARSE, "witness underflow")
 			}
 			witnessCursor += slots
 		}
@@ -87,25 +116,25 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 		var err error
 		sumIn, err = addU64ToU128(sumIn, entry.Value)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if entry.CovenantType == COV_TYPE_VAULT {
 			hasVaultInput = true
 			v, err := ParseVaultCovenantData(entry.CovenantData)
 			if err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 			vaultWhitelists = append(vaultWhitelists, v.Whitelist)
 			sumInVault, err = addU64ToU128(sumInVault, entry.Value)
 			if err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 		}
 
 		delete(work, op)
 	}
 	if len(tx.Witness) > 0 && witnessCursor != len(tx.Witness) {
-		return nil, txerr(TX_ERR_PARSE, "witness_count mismatch")
+		return nil, 0, txerr(TX_ERR_PARSE, "witness_count mismatch")
 	}
 
 	var sumOut u128
@@ -113,7 +142,7 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 		var err error
 		sumOut, err = addU64ToU128(sumOut, out.Value)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 
 		if out.CovenantType == COV_TYPE_ANCHOR || out.CovenantType == COV_TYPE_DA_COMMIT {
@@ -135,31 +164,28 @@ func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEnt
 			h := sha3_256(desc)
 			for _, wl := range vaultWhitelists {
 				if !HashInSorted32(wl, h) {
-					return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "output not whitelisted for CORE_VAULT")
+					return nil, 0, txerr(TX_ERR_COVENANT_TYPE_INVALID, "output not whitelisted for CORE_VAULT")
 				}
 			}
 		}
 	}
 
 	if cmpU128(sumOut, sumIn) > 0 {
-		return nil, txerr(TX_ERR_VALUE_CONSERVATION, "sum_out exceeds sum_in")
+		return nil, 0, txerr(TX_ERR_VALUE_CONSERVATION, "sum_out exceeds sum_in")
 	}
 	if hasVaultInput && cmpU128(sumOut, sumInVault) < 0 {
-		return nil, txerr(TX_ERR_VALUE_CONSERVATION, "vault inputs cannot fund miner fee")
+		return nil, 0, txerr(TX_ERR_VALUE_CONSERVATION, "vault inputs cannot fund miner fee")
 	}
 	feeU128, err := subU128(sumIn, sumOut)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	fee, err := u128ToU64(feeU128)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	return &UtxoApplySummary{
-		Fee:       fee,
-		UtxoCount: uint64(len(work)),
-	}, nil
+	return work, fee, nil
 }
 
 func checkSpendCovenant(

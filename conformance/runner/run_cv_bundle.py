@@ -916,6 +916,17 @@ def validate_vector(
             req["expected_target"] = v["expected_target"]
         req["already_generated"] = int(v.get("already_generated", 0))
         req["sum_fees"] = int(v.get("sum_fees", 0))
+    elif op == "connect_block_basic":
+        req["block_hex"] = v["block_hex"]
+        req["height"] = int(v["height"])
+        if isinstance(v.get("prev_timestamps"), list):
+            req["prev_timestamps"] = [int(x) for x in v["prev_timestamps"]]
+        if "expected_prev_hash" in v:
+            req["expected_prev_hash"] = v["expected_prev_hash"]
+        if "expected_target" in v:
+            req["expected_target"] = v["expected_target"]
+        req["already_generated"] = int(v.get("already_generated", 0))
+        req["utxos"] = v.get("utxos", [])
     elif op == "covenant_genesis_check":
         if tx_hex == "":
             return [f"{gate}/{v.get('id','?')}: missing tx_hex"]
