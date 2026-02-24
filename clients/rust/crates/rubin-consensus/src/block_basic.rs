@@ -1,17 +1,20 @@
 use crate::block::{block_hash, parse_block_header_bytes, BlockHeader, BLOCK_HEADER_BYTES};
 use crate::compactsize::read_compact_size;
 use crate::constants::{
-    COV_TYPE_ANCHOR, MAX_ANCHOR_BYTES_PER_BLOCK, MAX_BLOCK_WEIGHT, MAX_DA_BYTES_PER_BLOCK,
-    MAX_SLH_DSA_SIG_BYTES, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SLH_DSA_ACTIVATION_HEIGHT,
+    COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, MAX_ANCHOR_BYTES_PER_BLOCK, MAX_BLOCK_WEIGHT,
+    MAX_DA_BATCHES_PER_BLOCK, MAX_DA_BYTES_PER_BLOCK, MAX_FUTURE_DRIFT, MAX_SLH_DSA_SIG_BYTES,
+    ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SLH_DSA_ACTIVATION_HEIGHT,
     SLH_DSA_SHAKE_256F_PUBKEY_BYTES, SUITE_ID_ML_DSA_87, SUITE_ID_SLH_DSA_SHAKE_256F,
     VERIFY_COST_ML_DSA_87, VERIFY_COST_SLH_DSA_SHAKE_256F, WITNESS_DISCOUNT_DIVISOR,
 };
 use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
+use crate::hash::sha3_256;
 use crate::merkle::{merkle_root_txids, witness_commitment_hash, witness_merkle_root_wtxids};
 use crate::pow::pow_check;
-use crate::tx::{parse_tx, Tx};
+use crate::tx::{da_core_fields_bytes, parse_tx, Tx};
 use crate::wire_read::Reader;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
 pub struct ParsedBlock {
@@ -108,6 +111,22 @@ pub fn validate_block_basic_at_height(
     expected_target: Option<[u8; 32]>,
     block_height: u64,
 ) -> Result<BlockBasicSummary, TxError> {
+    validate_block_basic_with_context_at_height(
+        block_bytes,
+        expected_prev_hash,
+        expected_target,
+        block_height,
+        None,
+    )
+}
+
+pub fn validate_block_basic_with_context_at_height(
+    block_bytes: &[u8],
+    expected_prev_hash: Option<[u8; 32]>,
+    expected_target: Option<[u8; 32]>,
+    block_height: u64,
+    prev_timestamps: Option<&[u64]>,
+) -> Result<BlockBasicSummary, TxError> {
     let pb = parse_block_bytes(block_bytes)?;
 
     if let Some(prev) = expected_prev_hash {
@@ -142,6 +161,7 @@ pub fn validate_block_basic_at_height(
     let mut sum_weight: u64 = 0;
     let mut sum_da: u64 = 0;
     let mut sum_anchor: u64 = 0;
+    let mut seen_nonces: HashMap<u64, ()> = HashMap::with_capacity(pb.txs.len());
     for (i, tx) in pb.txs.iter().enumerate() {
         validate_witness_suite_activation(tx, i, block_height)?;
         // Non-coinbase transactions must carry at least one input.
@@ -150,6 +170,14 @@ pub fn validate_block_basic_at_height(
                 ErrorCode::TxErrParse,
                 "non-coinbase must have at least one input",
             ));
+        }
+        if i > 0 {
+            if seen_nonces.insert(tx.tx_nonce, ()).is_some() {
+                return Err(TxError::new(
+                    ErrorCode::TxErrNonceReplay,
+                    "duplicate tx_nonce in block",
+                ));
+            }
         }
         validate_tx_covenants_genesis(tx, block_height)?;
         let (w, da, anchor_bytes) = tx_weight_and_stats(tx)?;
@@ -164,6 +192,8 @@ pub fn validate_block_basic_at_height(
             .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
     }
     validate_coinbase_witness_commitment(&pb)?;
+    validate_timestamp_rules(pb.header.timestamp, block_height, prev_timestamps)?;
+    validate_da_set_integrity(&pb.txs)?;
 
     if sum_da > MAX_DA_BYTES_PER_BLOCK {
         return Err(TxError::new(
@@ -250,6 +280,154 @@ fn validate_coinbase_witness_commitment(pb: &ParsedBlock) -> Result<(), TxError>
     Ok(())
 }
 
+fn validate_timestamp_rules(
+    header_timestamp: u64,
+    block_height: u64,
+    prev_timestamps: Option<&[u64]>,
+) -> Result<(), TxError> {
+    if block_height == 0 {
+        return Ok(());
+    }
+    let Some(prev) = prev_timestamps else {
+        return Ok(());
+    };
+    let k = usize::try_from(block_height.min(11)).unwrap_or(11);
+    if prev.len() < k {
+        return Err(TxError::new(
+            ErrorCode::BlockErrParse,
+            "insufficient prev_timestamps context",
+        ));
+    }
+    let mut window = prev[..k].to_vec();
+    window.sort_unstable();
+    let median = window[(window.len() - 1) / 2];
+    if header_timestamp <= median {
+        return Err(TxError::new(
+            ErrorCode::BlockErrTimestampOld,
+            "timestamp <= MTP median",
+        ));
+    }
+    let upper_bound = median.saturating_add(MAX_FUTURE_DRIFT);
+    if header_timestamp > upper_bound {
+        return Err(TxError::new(
+            ErrorCode::BlockErrTimestampFuture,
+            "timestamp exceeds future drift",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct DaCommitSet {
+    tx: Tx,
+    chunk_count: u16,
+}
+
+fn validate_da_set_integrity(txs: &[Tx]) -> Result<(), TxError> {
+    let mut commits: HashMap<[u8; 32], DaCommitSet> = HashMap::new();
+    let mut chunks: HashMap<[u8; 32], HashMap<u16, Tx>> = HashMap::new();
+
+    for tx in txs {
+        match tx.tx_kind {
+            0x01 => {
+                let Some(core) = tx.da_commit_core.as_ref() else {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrParse,
+                        "missing da_commit_core for tx_kind=0x01",
+                    ));
+                };
+                if commits
+                    .insert(
+                        core.da_id,
+                        DaCommitSet {
+                            tx: tx.clone(),
+                            chunk_count: core.chunk_count,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(TxError::new(
+                        ErrorCode::BlockErrDaSetInvalid,
+                        "duplicate DA commit for da_id",
+                    ));
+                }
+            }
+            0x02 => {
+                let Some(core) = tx.da_chunk_core.as_ref() else {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrParse,
+                        "missing da_chunk_core for tx_kind=0x02",
+                    ));
+                };
+                if sha3_256(&tx.da_payload) != core.chunk_hash {
+                    return Err(TxError::new(
+                        ErrorCode::BlockErrDaChunkHashInvalid,
+                        "chunk_hash mismatch",
+                    ));
+                }
+                let set = chunks.entry(core.da_id).or_default();
+                if set.insert(core.chunk_index, tx.clone()).is_some() {
+                    return Err(TxError::new(
+                        ErrorCode::BlockErrDaSetInvalid,
+                        "duplicate DA chunk index",
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if commits.len() > MAX_DA_BATCHES_PER_BLOCK as usize {
+        return Err(TxError::new(
+            ErrorCode::BlockErrDaBatchExceeded,
+            "too many DA commits in block",
+        ));
+    }
+
+    for da_id in chunks.keys() {
+        if !commits.contains_key(da_id) {
+            return Err(TxError::new(
+                ErrorCode::BlockErrDaSetInvalid,
+                "DA chunks without DA commit",
+            ));
+        }
+    }
+
+    for (da_id, commit) in commits {
+        let set = chunks.get(&da_id).ok_or_else(|| {
+            TxError::new(ErrorCode::BlockErrDaIncomplete, "DA commit without chunks")
+        })?;
+        if set.len() != commit.chunk_count as usize {
+            return Err(TxError::new(
+                ErrorCode::BlockErrDaIncomplete,
+                "DA chunk count mismatch",
+            ));
+        }
+        let mut concat = Vec::<u8>::new();
+        for i in 0..commit.chunk_count {
+            let tx = set.get(&i).ok_or_else(|| {
+                TxError::new(ErrorCode::BlockErrDaIncomplete, "missing DA chunk index")
+            })?;
+            concat.extend_from_slice(&tx.da_payload);
+        }
+        let payload_commitment = sha3_256(&concat);
+        let commit_core = commit.tx.da_commit_core.as_ref().ok_or_else(|| {
+            TxError::new(
+                ErrorCode::TxErrParse,
+                "missing da_commit_core for tx_kind=0x01",
+            )
+        })?;
+        if payload_commitment != commit_core.payload_commitment {
+            return Err(TxError::new(
+                ErrorCode::BlockErrDaPayloadCommitInvalid,
+                "payload commitment mismatch",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn tx_weight_and_stats(tx: &Tx) -> Result<(u64, u64, u64), TxError> {
     let mut base_size: u64 = 4 + 1 + 8; // version + tx_kind + tx_nonce
     base_size = base_size
@@ -284,7 +462,7 @@ fn tx_weight_and_stats(tx: &Tx) -> Result<(u64, u64, u64), TxError> {
         base_size = base_size
             .checked_add(cov_len)
             .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
-        if o.covenant_type == COV_TYPE_ANCHOR {
+        if o.covenant_type == COV_TYPE_ANCHOR || o.covenant_type == COV_TYPE_DA_COMMIT {
             anchor_bytes = anchor_bytes
                 .checked_add(cov_len)
                 .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
@@ -293,6 +471,9 @@ fn tx_weight_and_stats(tx: &Tx) -> Result<(u64, u64, u64), TxError> {
     base_size = base_size
         .checked_add(4)
         .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?; // locktime
+    base_size = base_size
+        .checked_add(da_core_fields_bytes(tx)?.len() as u64)
+        .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
 
     let mut witness_size: u64 = compact_size_len(tx.witness.len() as u64);
     let mut ml_count: u64 = 0;

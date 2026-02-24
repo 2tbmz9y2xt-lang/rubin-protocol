@@ -1093,6 +1093,8 @@ fn apply_non_coinbase_tx_basic_vault_cannot_fund_fee() {
             covenant_data: valid_p2pk_covenant_data(),
         }],
         locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
         witness: vec![],
         da_payload: vec![],
     };
@@ -1162,6 +1164,8 @@ fn apply_non_coinbase_tx_basic_vault_preserved_with_external_fee_sponsor() {
             covenant_data: valid_p2pk_covenant_data(),
         }],
         locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
         witness: vec![],
         da_payload: vec![],
     };
@@ -1234,6 +1238,8 @@ fn apply_non_coinbase_tx_basic_vault_whitelist_rejects_output() {
             covenant_data: non_whitelisted,
         }],
         locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
         witness: vec![],
         da_payload: vec![],
     };

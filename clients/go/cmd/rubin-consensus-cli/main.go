@@ -34,6 +34,7 @@ type Request struct {
 	WindowTimestamps []uint64 `json:"window_timestamps,omitempty"`
 	ExpectedPrev     string   `json:"expected_prev_hash,omitempty"`
 	ExpectedTarget   string   `json:"expected_target,omitempty"`
+	PrevTimestamps   []uint64 `json:"prev_timestamps,omitempty"`
 
 	Utxos          []UtxoJSON `json:"utxos,omitempty"`
 	Height         uint64     `json:"height,omitempty"`
@@ -262,7 +263,13 @@ func main() {
 			expectedTarget = &h
 		}
 
-		s, err := consensus.ValidateBlockBasicAtHeight(blockBytes, expectedPrev, expectedTarget, req.Height)
+		s, err := consensus.ValidateBlockBasicWithContextAtHeight(
+			blockBytes,
+			expectedPrev,
+			expectedTarget,
+			req.Height,
+			req.PrevTimestamps,
+		)
 		if err != nil {
 			if te, ok := err.(*consensus.TxError); ok {
 				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})

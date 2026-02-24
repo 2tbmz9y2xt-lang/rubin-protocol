@@ -17,21 +17,24 @@ Units convention:
 
 ## 1. Block Parameters
 
-| Parameter | Value | Source |
-|-----------|-------|--------|
-| `TARGET_BLOCK_INTERVAL` | 120 s | CANONICAL §4 |
-| `POW_LIMIT` | 0xffff..ffff (bytes32 max) | CANONICAL §4, §15 |
-| `MAX_BLOCK_WEIGHT` | 68,000,000 wu | CANONICAL §4 |
-| `MAX_BLOCK_BYTES` | 72,000,000 bytes (72 MB) | CANONICAL §4 |
-| `MAX_DA_BYTES_PER_BLOCK` | 32,000,000 bytes (30.5 MiB) | CANONICAL §4 |
-| `WINDOW_SIZE` (retarget) | 10,080 blocks (14 days) | CANONICAL §4 |
-| `MIN_DA_RETENTION_BLOCKS` | 15,120 blocks (21 days) | COMPACT §1 |
-| `COINBASE_MATURITY` | 100 blocks | CANONICAL §4 |
-| `MAX_FUTURE_DRIFT` | 7,200 s | CANONICAL §4 |
-| `MAX_TIMESTAMP_STEP_PER_BLOCK` | 1,200 s (`10 * TARGET_BLOCK_INTERVAL`) | CANONICAL §4, §15 |
-| `WITNESS_DISCOUNT_DIVISOR` | 4 | CANONICAL §4 |
-| `SLH_DSA_ACTIVATION_HEIGHT` | 1,000,000 | CANONICAL §4, §14.1, §14.2 |
-| Coinbase witness commitment | Required (CORE_ANCHOR, single 32-byte hash) | CANONICAL §10.4.1 |
+Consensus validity MUST be determined only by consensus-critical constants.
+Operational defaults and relay policy defaults MUST NOT be treated as validity rules.
+
+| Parameter | Value | Class | Source |
+|-----------|-------|-------|--------|
+| `TARGET_BLOCK_INTERVAL` | 120 s | Consensus-critical | CANONICAL §4 |
+| `POW_LIMIT` | 0xffff..ffff (bytes32 max) | Consensus-critical | CANONICAL §4, §15 |
+| `MAX_BLOCK_WEIGHT` | 68,000,000 wu | Consensus-critical | CANONICAL §4 |
+| `MAX_DA_BYTES_PER_BLOCK` | 32,000,000 bytes (30.5 MiB) | Consensus-critical | CANONICAL §4 |
+| `WINDOW_SIZE` (retarget) | 10,080 blocks (14 days) | Consensus-critical | CANONICAL §4 |
+| `COINBASE_MATURITY` | 100 blocks | Consensus-critical | CANONICAL §4 |
+| `MAX_FUTURE_DRIFT` | 7,200 s | Consensus-critical | CANONICAL §4 |
+| `MAX_TIMESTAMP_STEP_PER_BLOCK` | 1,200 s (`10 * TARGET_BLOCK_INTERVAL`) | Consensus-critical | CANONICAL §4, §15 |
+| `WITNESS_DISCOUNT_DIVISOR` | 4 | Consensus-critical | CANONICAL §4 |
+| `SLH_DSA_ACTIVATION_HEIGHT` | 1,000,000 | Consensus-critical | CANONICAL §4, §14.1, §14.2 |
+| Coinbase witness commitment | Required (CORE_ANCHOR, single 32-byte hash) | Consensus-critical | CANONICAL §10.4.1 |
+| `MIN_DA_RETENTION_BLOCKS` | 15,120 blocks (21 days) | Operational default (non-consensus) | CANONICAL §4; COMPACT §1 |
+| `MAX_BLOCK_BYTES` | 72,000,000 bytes (72 MB) | Relay policy default (non-consensus) | CANONICAL §4; COMPACT §1 |
 
 ---
 
@@ -54,6 +57,9 @@ Notes:
 ---
 
 ## 3. Finality
+
+These are non-consensus operational defaults (CANONICAL `K_CONFIRM_*`).
+Chain instances and applications MAY choose different thresholds.
 
 | Context | Confirmations | Time |
 |---------|--------------|------|
@@ -110,6 +116,21 @@ Exact recipient key IDs and hashes are chain-instance parameters and MUST be fix
 | SLH-DSA weight cost | 64 wu / signature |
 | Hash function | SHA3-256 (FIPS 202) |
 | Batch verification | 64 signatures per batch (ML-DSA-87) |
+
+### 5.0 Signature Suite IDs (consensus-critical)
+
+`suite_id` is a consensus byte used in witness items and (for `CORE_P2PK`) in `covenant_data`.
+Unknown `suite_id` values are consensus-invalid.
+
+| `suite_id` | Name | Summary | Source |
+|-----------:|------|---------|--------|
+| `0x00` | `SUITE_ID_SENTINEL` | Meta witness (non-participating key): MUST NOT be used for signature verification; when used, pubkey and signature lengths MUST be zero. | CANONICAL §4, §14.1, §14.2 |
+| `0x01` | `SUITE_ID_ML_DSA_87` | Primary signature suite: always permitted from genesis. | CANONICAL §4, §14 |
+| `0x02` | `SUITE_ID_SLH_DSA_SHAKE_256F` | Backup signature suite: permitted only at/after `SLH_DSA_ACTIVATION_HEIGHT` where specified (e.g., `CORE_P2PK`, `CORE_VAULT`, `CORE_MULTISIG`). | CANONICAL §4, §14 |
+
+`CORE_P2PK` suite gating (consensus):
+- At output creation: `suite_id` MUST be `0x01`, or MAY be `0x02` only if `block_height >= SLH_DSA_ACTIVATION_HEIGHT`.
+- At spend: witness `w.suite_id` MUST equal the `suite_id` committed in `covenant_data`.
 
 ### 5.1 Backend Implementation Profile (non-consensus)
 
@@ -206,6 +227,9 @@ Storage depends on number of monitored channels; no protocol minimum.
 
 ## 9. P2P Relay Parameters
 
+All values in this section are non-consensus relay-policy / operational defaults.
+They MUST NOT be used for consensus validity decisions.
+
 | Parameter | Value |
 |-----------|-------|
 | Short ID length | 6 bytes (SipHash-2-4 on `wtxid`, lower-48 LE bytes) |
@@ -229,7 +253,7 @@ Storage depends on number of monitored channels; no protocol minimum.
 
 | Code | Name | Description |
 |------|------|-------------|
-| 0x0000 | CORE_P2PK | Standard pay-to-public-key (ML-DSA-87) |
+| 0x0000 | CORE_P2PK | Standard pay-to-public-key (`covenant_data = suite_id || key_id`; suite-gated: ML-DSA-87, SLH-DSA post-activation) |
 | 0x0001 | UNASSIGNED | Forbidden — TX_ERR_COVENANT_TYPE_INVALID |
 | 0x0002 | CORE_ANCHOR | Non-spendable data anchor |
 | 0x00FF | CORE_RESERVED_FUTURE | Forbidden — TX_ERR_COVENANT_TYPE_INVALID |

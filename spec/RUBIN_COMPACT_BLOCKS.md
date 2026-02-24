@@ -196,6 +196,8 @@ Tracked separately: miss_rate_bytes_L1 and miss_rate_bytes_DA
 miss_rate_bytes      < 0.5%  at tip          normal
 da_mempool_fill_pct  > 80%   for > 10 min    alert
 orphan_pool_fill_pct > 75%                   alert
+orphan_pool_fill_pct > 90% for > 120 s       trigger storm-mode admission
+orphan_recovery_success_rate < 95% for 10 min trigger rollback to full-block-first relay
 ```
 
 ---
@@ -232,6 +234,13 @@ Eviction:   primary key:   fee / wire_bytes (lower = evicted first)
             tie-break:     received_time (older = evicted first)
             NOT LRU        (LRU depends on local access patterns,
                            causing divergence between implementations)
+
+Storm-mode admission (non-consensus, MUST for production relay):
+  - When orphan_pool_fill_pct > 90%, node MUST prioritize commit-bearing traffic
+    (commit-first bias) over additional orphan chunks.
+  - Under storm mode, chunk admission MAY be reduced for low-quality peers before
+    commit-bearing messages are dropped.
+  - Exit storm mode after orphan_pool_fill_pct < 70% for 60 s.
 
 TTL:        DA_ORPHAN_TTL_BLOCKS = 3 blocks (360 s)
 ```
@@ -374,6 +383,8 @@ P2P handshake declares relay mode:
   tx_relay = 1   transaction relay expected from this peer
   tx_relay = 0   block-relay-only peer
 
+`tx_relay` is defined in RUBIN_L1_P2P_AUX.md §3.1 (`version` payload).
+
 For peers with tx_relay = 1 exhibiting systematic high miss rates:
   Step 1: Set sendcmpct_mode = 1 for this peer (downgrade from high to low bandwidth).
   Step 2: Lower peer priority in selection.
@@ -444,7 +455,7 @@ If a better peer connects, demote the lowest-scoring current HB peer to mode = 1
 
 ## 10. DA Retention and Pruning
 
-- A node announces `pruned_below_height` in its P2P `version` message.
+- A node announces `pruned_below_height` in its P2P `version` message (RUBIN_L1_P2P_AUX.md §3.1).
 - A node with `pruned_below_height > current_height - MIN_DA_RETENTION_BLOCKS`
   is deprioritized for DA data requests. It is NOT banned.
 - A pruning node remains a full validator. The following are retained permanently:
@@ -635,6 +646,8 @@ Vector schema (normative for CI gate):
 | CV-C-16 | peer_quality_score updates on reconstruction success/failure | SHOULD |
 | CV-C-17 | prefetch rate cap per-peer and global | SHOULD |
 | CV-C-18 | orphan_recovery_success_rate telemetry output | SHOULD |
+| CV-C-24 | orphan storm saturation (16 peers x 4 MiB) with commit-first eviction policy | SHOULD |
+| CV-C-25 | overflow storm path with pure-fee eviction policy fallback | SHOULD |
 
 ---
 

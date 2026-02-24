@@ -53,8 +53,18 @@ func ValidateTxCovenantsGenesis(tx *Tx, blockHeight uint64) error {
 				return err
 			}
 
-		case COV_TYPE_RESERVED_FUTURE, COV_TYPE_DA_COMMIT:
-			return txerr(TX_ERR_COVENANT_TYPE_INVALID, "reserved or unsupported covenant_type")
+		case COV_TYPE_DA_COMMIT:
+			if tx.TxKind != 0x01 {
+				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_DA_COMMIT allowed only in tx_kind=0x01")
+			}
+			if out.Value != 0 {
+				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_DA_COMMIT value must be 0")
+			}
+			if len(out.CovenantData) != 32 {
+				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "invalid CORE_DA_COMMIT covenant_data length")
+			}
+		case COV_TYPE_RESERVED_FUTURE:
+			return txerr(TX_ERR_COVENANT_TYPE_INVALID, "reserved covenant_type")
 
 		default:
 			return txerr(TX_ERR_COVENANT_TYPE_INVALID, "unknown covenant_type")

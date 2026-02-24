@@ -12,6 +12,8 @@ pub struct Tx {
     pub inputs: Vec<TxInput>,
     pub outputs: Vec<TxOutput>,
     pub locktime: u32,
+    pub da_commit_core: Option<DaCommitCore>,
+    pub da_chunk_core: Option<DaChunkCore>,
     pub witness: Vec<WitnessItem>,
     pub da_payload: Vec<u8>,
 }
@@ -38,17 +40,29 @@ pub struct WitnessItem {
     pub signature: Vec<u8>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DaCommitCore {
+    pub da_id: [u8; 32],
+    pub chunk_count: u16,
+    pub payload_commitment: [u8; 32],
+    pub batch_sig: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DaChunkCore {
+    pub da_id: [u8; 32],
+    pub chunk_index: u16,
+    pub chunk_hash: [u8; 32],
+}
+
 pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
     let mut r = Reader::new(b);
 
     let version = r.read_u32_le()?;
 
     let tx_kind = r.read_u8()?;
-    if tx_kind != 0x00 {
-        return Err(TxError::new(
-            ErrorCode::TxErrParse,
-            "unsupported tx_kind (genesis)",
-        ));
+    if tx_kind != 0x00 && tx_kind != 0x01 && tx_kind != 0x02 {
+        return Err(TxError::new(ErrorCode::TxErrParse, "unsupported tx_kind"));
     }
 
     let tx_nonce = r.read_u64_le()?;
@@ -116,6 +130,71 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
     }
 
     let locktime = r.read_u32_le()?;
+
+    let mut da_commit_core: Option<DaCommitCore> = None;
+    let mut da_chunk_core: Option<DaChunkCore> = None;
+    match tx_kind {
+        0x01 => {
+            let da_id_bytes = r.read_bytes(32)?;
+            let mut da_id = [0u8; 32];
+            da_id.copy_from_slice(da_id_bytes);
+
+            let chunk_count = r.read_u16_le()?;
+            if chunk_count == 0 || (chunk_count as u64) > MAX_DA_CHUNK_COUNT {
+                return Err(TxError::new(
+                    ErrorCode::TxErrParse,
+                    "chunk_count out of range for tx_kind=0x01",
+                ));
+            }
+
+            let payload_commitment_bytes = r.read_bytes(32)?;
+            let mut payload_commitment = [0u8; 32];
+            payload_commitment.copy_from_slice(payload_commitment_bytes);
+
+            let (batch_sig_len_u64, _) = read_compact_size(&mut r)?;
+            if batch_sig_len_u64 > MAX_DA_MANIFEST_BYTES_PER_TX
+                || batch_sig_len_u64 > usize::MAX as u64
+            {
+                return Err(TxError::new(
+                    ErrorCode::TxErrParse,
+                    "batch_sig_len overflow",
+                ));
+            }
+            let batch_sig = r.read_bytes(batch_sig_len_u64 as usize)?.to_vec();
+
+            da_commit_core = Some(DaCommitCore {
+                da_id,
+                chunk_count,
+                payload_commitment,
+                batch_sig,
+            });
+        }
+        0x02 => {
+            let da_id_bytes = r.read_bytes(32)?;
+            let mut da_id = [0u8; 32];
+            da_id.copy_from_slice(da_id_bytes);
+
+            let chunk_index = r.read_u16_le()?;
+            if (chunk_index as u64) >= MAX_DA_CHUNK_COUNT {
+                return Err(TxError::new(
+                    ErrorCode::TxErrParse,
+                    "chunk_index out of range for tx_kind=0x02",
+                ));
+            }
+
+            let chunk_hash_bytes = r.read_bytes(32)?;
+            let mut chunk_hash = [0u8; 32];
+            chunk_hash.copy_from_slice(chunk_hash_bytes);
+
+            da_chunk_core = Some(DaChunkCore {
+                da_id,
+                chunk_index,
+                chunk_hash,
+            });
+        }
+        _ => {}
+    }
+
     let core_end = r.offset();
 
     // Witness section.
@@ -236,13 +315,30 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
         });
     }
 
-    // DA payload (genesis tx_kind=0x00 forbids any payload bytes; the length prefix is still present).
+    // DA payload.
     let (da_len_u64, _) = read_compact_size(&mut r)?;
-    if da_len_u64 != 0 {
-        return Err(TxError::new(
-            ErrorCode::TxErrParse,
-            "da_payload_len must be 0 for tx_kind=0x00",
-        ));
+    let mut da_payload: Vec<u8> = Vec::new();
+    match tx_kind {
+        0x00 | 0x01 => {
+            if da_len_u64 != 0 {
+                return Err(TxError::new(
+                    ErrorCode::TxErrParse,
+                    "da_payload_len must be 0 for tx_kind=0x00/0x01",
+                ));
+            }
+        }
+        0x02 => {
+            if da_len_u64 == 0 || da_len_u64 > CHUNK_BYTES || da_len_u64 > usize::MAX as u64 {
+                return Err(TxError::new(
+                    ErrorCode::TxErrParse,
+                    "da_payload_len out of range for tx_kind=0x02",
+                ));
+            }
+            da_payload = r.read_bytes(da_len_u64 as usize)?.to_vec();
+        }
+        _ => {
+            return Err(TxError::new(ErrorCode::TxErrParse, "unsupported tx_kind"));
+        }
     }
     let total_end = r.offset();
 
@@ -256,9 +352,46 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
         inputs,
         outputs,
         locktime,
+        da_commit_core,
+        da_chunk_core,
         witness,
-        da_payload: Vec::new(),
+        da_payload,
     };
 
     Ok((tx, txid, wtxid, total_end))
+}
+
+pub fn da_core_fields_bytes(tx: &Tx) -> Result<Vec<u8>, TxError> {
+    match tx.tx_kind {
+        0x00 => Ok(Vec::new()),
+        0x01 => {
+            let Some(core) = tx.da_commit_core.as_ref() else {
+                return Err(TxError::new(
+                    ErrorCode::TxErrParse,
+                    "missing da_commit_core for tx_kind=0x01",
+                ));
+            };
+            let mut out = Vec::with_capacity(32 + 2 + 32 + 9 + core.batch_sig.len());
+            out.extend_from_slice(&core.da_id);
+            out.extend_from_slice(&core.chunk_count.to_le_bytes());
+            out.extend_from_slice(&core.payload_commitment);
+            crate::compactsize::encode_compact_size(core.batch_sig.len() as u64, &mut out);
+            out.extend_from_slice(&core.batch_sig);
+            Ok(out)
+        }
+        0x02 => {
+            let Some(core) = tx.da_chunk_core.as_ref() else {
+                return Err(TxError::new(
+                    ErrorCode::TxErrParse,
+                    "missing da_chunk_core for tx_kind=0x02",
+                ));
+            };
+            let mut out = Vec::with_capacity(32 + 2 + 32);
+            out.extend_from_slice(&core.da_id);
+            out.extend_from_slice(&core.chunk_index.to_le_bytes());
+            out.extend_from_slice(&core.chunk_hash);
+            Ok(out)
+        }
+        _ => Err(TxError::new(ErrorCode::TxErrParse, "unsupported tx_kind")),
+    }
 }

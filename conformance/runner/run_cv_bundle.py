@@ -33,6 +33,7 @@ LOCAL_OPS = {
     "compact_prefill_roundtrip",
     "compact_state_machine",
     "compact_orphan_limits",
+    "compact_orphan_storm",
     "compact_chunk_count_cap",
     "compact_sendcmpct_modes",
     "compact_peer_quality",
@@ -140,6 +141,40 @@ def parse_hex_bytes(value: Any) -> bytes:
     if len(text) % 2 == 1:
         text = "0" + text
     return bytes.fromhex(text)
+
+
+def materialize_tx_hex(v: Dict[str, Any]) -> str:
+    tx_hex = v.get("tx_hex")
+    if isinstance(tx_hex, str) and tx_hex.strip() != "":
+        return tx_hex.strip()
+
+    parts = v.get("tx_hex_parts")
+    if not isinstance(parts, list) or len(parts) == 0:
+        raise ValueError("missing tx_hex (or tx_hex_parts)")
+
+    out: List[str] = []
+    for p in parts:
+        if isinstance(p, str):
+            out.append(p.strip())
+            continue
+        if isinstance(p, dict):
+            repeat_byte = p.get("repeat_byte")
+            count = p.get("count")
+            if not isinstance(repeat_byte, str) or not isinstance(count, int):
+                raise ValueError("tx_hex_parts dict must have repeat_byte (string) and count (int)")
+            b = repeat_byte.strip().lower()
+            if b.startswith("0x"):
+                b = b[2:]
+            if len(b) != 2:
+                raise ValueError("repeat_byte must be exactly 1 byte hex (2 chars)")
+            int(b, 16)  # validate
+            if count < 0:
+                raise ValueError("repeat_byte count must be non-negative")
+            out.append(b * count)
+            continue
+        raise ValueError("tx_hex_parts entries must be strings or dict repeat blocks")
+
+    return "".join(out)
 
 
 def validate_local_vector(gate: str, v: Dict[str, Any]) -> List[str]:
@@ -410,6 +445,35 @@ def validate_local_vector(gate: str, v: Dict[str, Any]) -> List[str]:
             check_expect(problems, prefix, admit, bool(v["expect_admit"]), "admit")
         return problems
 
+    if op == "compact_orphan_storm":
+        global_limit = int(v.get("global_limit", COMPACT_DEFAULTS["DA_ORPHAN_POOL_SIZE"]))
+        current_global = int(v.get("current_global_bytes", 0))
+        incoming_chunk = int(v.get("incoming_chunk_bytes", 0))
+        incoming_has_commit = bool(v.get("incoming_has_commit", False))
+        storm_trigger_pct = float(v.get("storm_trigger_pct", 90.0))
+        recovery_success_rate = float(v.get("recovery_success_rate", 100.0))
+        observation_minutes = int(v.get("observation_minutes", 0))
+
+        fill_pct = 0.0 if global_limit <= 0 else (100.0 * current_global / global_limit)
+        storm_mode = fill_pct > storm_trigger_pct
+        rollback = recovery_success_rate < 95.0 and observation_minutes >= 10
+
+        admit = current_global + incoming_chunk <= global_limit
+        if storm_mode and not incoming_has_commit:
+            admit = False
+
+        if "expect_fill_pct" in v:
+            expected = float(v["expect_fill_pct"])
+            if abs(fill_pct - expected) > 1e-9:
+                problems.append(f"{prefix}: fill_pct expected={expected} got={fill_pct}")
+        if "expect_storm_mode" in v:
+            check_expect(problems, prefix, storm_mode, bool(v["expect_storm_mode"]), "storm_mode")
+        if "expect_admit" in v:
+            check_expect(problems, prefix, admit, bool(v["expect_admit"]), "admit")
+        if "expect_rollback" in v:
+            check_expect(problems, prefix, rollback, bool(v["expect_rollback"]), "rollback")
+        return problems
+
     if op == "compact_chunk_count_cap":
         max_count = int(
             v.get(
@@ -566,6 +630,7 @@ def validate_local_vector(gate: str, v: Dict[str, Any]) -> List[str]:
             "miss_rate_bytes_DA",
             "partial_set_count",
             "partial_set_age_p95",
+            "recovery_success_rate",
             "prefetch_latency_ms",
             "peer_quality_score",
         ]
@@ -780,13 +845,22 @@ def validate_vector(
     if op in LOCAL_OPS:
         return validate_local_vector(gate, v)
 
+    try:
+        tx_hex = materialize_tx_hex(v)
+    except Exception:
+        tx_hex = ""
+
     req: Dict[str, Any] = {"op": op}
     if op == "parse_tx":
-        req["tx_hex"] = v["tx_hex"]
+        if tx_hex == "":
+            return [f"{gate}/{v.get('id','?')}: missing tx_hex"]
+        req["tx_hex"] = tx_hex
     elif op == "merkle_root":
         req["txids"] = v["txids"]
     elif op == "sighash_v1":
-        req["tx_hex"] = v["tx_hex"]
+        if tx_hex == "":
+            return [f"{gate}/{v.get('id','?')}: missing tx_hex"]
+        req["tx_hex"] = tx_hex
         req["chain_id"] = v["chain_id"]
         req["input_index"] = v["input_index"]
         req["input_value"] = v["input_value"]
@@ -823,14 +897,22 @@ def validate_vector(
                 return [f"{gate}/{v.get('id','?')}: unknown window_pattern.mode={mode}"]
     elif op == "block_basic_check":
         req["block_hex"] = v["block_hex"]
+        if "height" in v:
+            req["height"] = int(v["height"])
+        if isinstance(v.get("prev_timestamps"), list):
+            req["prev_timestamps"] = [int(x) for x in v["prev_timestamps"]]
         if "expected_prev_hash" in v:
             req["expected_prev_hash"] = v["expected_prev_hash"]
         if "expected_target" in v:
             req["expected_target"] = v["expected_target"]
     elif op == "covenant_genesis_check":
-        req["tx_hex"] = v["tx_hex"]
+        if tx_hex == "":
+            return [f"{gate}/{v.get('id','?')}: missing tx_hex"]
+        req["tx_hex"] = tx_hex
     elif op == "utxo_apply_basic":
-        req["tx_hex"] = v["tx_hex"]
+        if tx_hex == "":
+            return [f"{gate}/{v.get('id','?')}: missing tx_hex"]
+        req["tx_hex"] = tx_hex
         req["utxos"] = v["utxos"]
         req["height"] = v["height"]
         req["block_timestamp"] = v["block_timestamp"]

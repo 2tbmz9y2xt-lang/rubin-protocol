@@ -17,8 +17,8 @@ mod wire_read;
 
 pub use block::{block_hash, parse_block_header_bytes, BlockHeader, BLOCK_HEADER_BYTES};
 pub use block_basic::{
-    parse_block_bytes, validate_block_basic, validate_block_basic_at_height, BlockBasicSummary,
-    ParsedBlock,
+    parse_block_bytes, validate_block_basic, validate_block_basic_at_height,
+    validate_block_basic_with_context_at_height, BlockBasicSummary, ParsedBlock,
 };
 pub use compact_relay::compact_shortid;
 pub use covenant_genesis::validate_tx_covenants_genesis;
@@ -27,7 +27,7 @@ pub use htlc::{parse_htlc_covenant_data, validate_htlc_spend, HtlcCovenant};
 pub use merkle::merkle_root_txids;
 pub use pow::{pow_check, retarget_v1, retarget_v1_clamped};
 pub use sighash::sighash_v1_digest;
-pub use tx::{parse_tx, Tx, TxInput, TxOutput, WitnessItem};
+pub use tx::{parse_tx, DaChunkCore, DaCommitCore, Tx, TxInput, TxOutput, WitnessItem};
 pub use utxo_basic::{apply_non_coinbase_tx_basic, Outpoint, UtxoApplySummary, UtxoEntry};
 pub use vault::{
     output_descriptor_bytes, parse_multisig_covenant_data, parse_vault_covenant_data,

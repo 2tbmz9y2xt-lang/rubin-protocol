@@ -9,7 +9,11 @@ func SighashV1Digest(tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]b
 		return zero, txerr(TX_ERR_PARSE, "sighash: input_index out of bounds")
 	}
 
-	hashOfDaCoreFields := sha3_256([]byte{})
+	daCoreBytes, err := daCoreFieldsBytes(tx)
+	if err != nil {
+		return zero, err
+	}
+	hashOfDaCoreFields := sha3_256(daCoreBytes)
 
 	// hash_of_all_prevouts
 	prevouts := make([]byte, 0, len(tx.Inputs)*(32+4))

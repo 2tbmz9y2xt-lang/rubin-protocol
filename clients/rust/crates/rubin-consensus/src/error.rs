@@ -28,6 +28,11 @@ pub enum ErrorCode {
     BlockErrSubsidyExceeded,
     BlockErrTimestampOld,
     BlockErrTimestampFuture,
+    BlockErrDaIncomplete,
+    BlockErrDaChunkHashInvalid,
+    BlockErrDaSetInvalid,
+    BlockErrDaPayloadCommitInvalid,
+    BlockErrDaBatchExceeded,
 }
 
 impl ErrorCode {
@@ -59,6 +64,11 @@ impl ErrorCode {
             ErrorCode::BlockErrSubsidyExceeded => "BLOCK_ERR_SUBSIDY_EXCEEDED",
             ErrorCode::BlockErrTimestampOld => "BLOCK_ERR_TIMESTAMP_OLD",
             ErrorCode::BlockErrTimestampFuture => "BLOCK_ERR_TIMESTAMP_FUTURE",
+            ErrorCode::BlockErrDaIncomplete => "BLOCK_ERR_DA_INCOMPLETE",
+            ErrorCode::BlockErrDaChunkHashInvalid => "BLOCK_ERR_DA_CHUNK_HASH_INVALID",
+            ErrorCode::BlockErrDaSetInvalid => "BLOCK_ERR_DA_SET_INVALID",
+            ErrorCode::BlockErrDaPayloadCommitInvalid => "BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID",
+            ErrorCode::BlockErrDaBatchExceeded => "BLOCK_ERR_DA_BATCH_EXCEEDED",
         }
     }
 }

@@ -6,14 +6,16 @@ import (
 )
 
 type Tx struct {
-	Version   uint32
-	TxKind    uint8
-	TxNonce   uint64
-	Inputs    []TxInput
-	Outputs   []TxOutput
-	Locktime  uint32
-	Witness   []WitnessItem
-	DaPayload []byte
+	Version      uint32
+	TxKind       uint8
+	TxNonce      uint64
+	Inputs       []TxInput
+	Outputs      []TxOutput
+	Locktime     uint32
+	DaCommitCore *DaCommitCore
+	DaChunkCore  *DaChunkCore
+	Witness      []WitnessItem
+	DaPayload    []byte
 }
 
 type TxInput struct {
@@ -35,6 +37,19 @@ type WitnessItem struct {
 	Signature []byte
 }
 
+type DaCommitCore struct {
+	DaID              [32]byte
+	ChunkCount        uint16
+	PayloadCommitment [32]byte
+	BatchSig          []byte
+}
+
+type DaChunkCore struct {
+	DaID       [32]byte
+	ChunkIndex uint16
+	ChunkHash  [32]byte
+}
+
 func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 	var zero [32]byte
 	off := 0
@@ -48,8 +63,10 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 	if err != nil {
 		return nil, zero, zero, 0, err
 	}
-	if txKind != 0x00 {
-		return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "unsupported tx_kind (genesis)")
+	switch txKind {
+	case 0x00, 0x01, 0x02:
+	default:
+		return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "unsupported tx_kind")
 	}
 
 	txNonce, err := readU64le(b, &off)
@@ -151,6 +168,72 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 	if err != nil {
 		return nil, zero, zero, 0, err
 	}
+	var daCommitCore *DaCommitCore
+	var daChunkCore *DaChunkCore
+	switch txKind {
+	case 0x01:
+		daIDBytes, err := readBytes(b, &off, 32)
+		if err != nil {
+			return nil, zero, zero, 0, err
+		}
+		var daID [32]byte
+		copy(daID[:], daIDBytes)
+		chunkCount, err := readU16le(b, &off)
+		if err != nil {
+			return nil, zero, zero, 0, err
+		}
+		if chunkCount == 0 || uint64(chunkCount) > MAX_DA_CHUNK_COUNT {
+			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "chunk_count out of range for tx_kind=0x01")
+		}
+		payloadCommitmentBytes, err := readBytes(b, &off, 32)
+		if err != nil {
+			return nil, zero, zero, 0, err
+		}
+		var payloadCommitment [32]byte
+		copy(payloadCommitment[:], payloadCommitmentBytes)
+		batchSigLenU64, _, err := readCompactSize(b, &off)
+		if err != nil {
+			return nil, zero, zero, 0, err
+		}
+		if batchSigLenU64 > MAX_DA_MANIFEST_BYTES_PER_TX || batchSigLenU64 > uint64(math.MaxInt) {
+			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "batch_sig_len overflow")
+		}
+		batchSig, err := readBytes(b, &off, int(batchSigLenU64))
+		if err != nil {
+			return nil, zero, zero, 0, err
+		}
+		daCommitCore = &DaCommitCore{
+			DaID:              daID,
+			ChunkCount:        chunkCount,
+			PayloadCommitment: payloadCommitment,
+			BatchSig:          batchSig,
+		}
+	case 0x02:
+		daIDBytes, err := readBytes(b, &off, 32)
+		if err != nil {
+			return nil, zero, zero, 0, err
+		}
+		var daID [32]byte
+		copy(daID[:], daIDBytes)
+		chunkIndex, err := readU16le(b, &off)
+		if err != nil {
+			return nil, zero, zero, 0, err
+		}
+		if uint64(chunkIndex) >= MAX_DA_CHUNK_COUNT {
+			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "chunk_index out of range for tx_kind=0x02")
+		}
+		chunkHashBytes, err := readBytes(b, &off, 32)
+		if err != nil {
+			return nil, zero, zero, 0, err
+		}
+		var chunkHash [32]byte
+		copy(chunkHash[:], chunkHashBytes)
+		daChunkCore = &DaChunkCore{
+			DaID:       daID,
+			ChunkIndex: chunkIndex,
+			ChunkHash:  chunkHash,
+		}
+	}
 
 	coreEnd := off
 
@@ -245,31 +328,77 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 		})
 	}
 
-	// DA payload (genesis tx_kind=0x00 forbids any payload bytes; the length prefix is still present).
+	// DA payload.
 	daLenU64, _, err := readCompactSize(b, &off)
 	if err != nil {
 		return nil, zero, zero, 0, err
 	}
-	if daLenU64 != 0 {
-		return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "da_payload_len must be 0 for tx_kind=0x00")
+	var daPayload []byte
+	switch txKind {
+	case 0x00, 0x01:
+		if daLenU64 != 0 {
+			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "da_payload_len must be 0 for tx_kind=0x00/0x01")
+		}
+	case 0x02:
+		if daLenU64 == 0 || daLenU64 > CHUNK_BYTES || daLenU64 > uint64(math.MaxInt) {
+			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "da_payload_len out of range for tx_kind=0x02")
+		}
+		daPayload, err = readBytes(b, &off, int(daLenU64))
+		if err != nil {
+			return nil, zero, zero, 0, err
+		}
 	}
-
-	// da_payload_len=0 => no payload bytes.
 	totalEnd := off
 
 	txid := sha3_256(b[:coreEnd])
 	wtxid := sha3_256(b[:totalEnd])
 
 	tx := &Tx{
-		Version:   version,
-		TxKind:    txKind,
-		TxNonce:   txNonce,
-		Inputs:    inputs,
-		Outputs:   outputs,
-		Locktime:  locktime,
-		Witness:   witness,
-		DaPayload: nil,
+		Version:      version,
+		TxKind:       txKind,
+		TxNonce:      txNonce,
+		Inputs:       inputs,
+		Outputs:      outputs,
+		Locktime:     locktime,
+		DaCommitCore: daCommitCore,
+		DaChunkCore:  daChunkCore,
+		Witness:      witness,
+		DaPayload:    daPayload,
 	}
 
 	return tx, txid, wtxid, totalEnd, nil
+}
+
+func daCoreFieldsBytes(tx *Tx) ([]byte, error) {
+	if tx == nil {
+		return nil, txerr(TX_ERR_PARSE, "nil tx")
+	}
+	switch tx.TxKind {
+	case 0x00:
+		return nil, nil
+	case 0x01:
+		if tx.DaCommitCore == nil {
+			return nil, txerr(TX_ERR_PARSE, "missing da_commit_core for tx_kind=0x01")
+		}
+		core := tx.DaCommitCore
+		out := make([]byte, 0, 32+2+32+9+len(core.BatchSig))
+		out = append(out, core.DaID[:]...)
+		out = appendU16le(out, core.ChunkCount)
+		out = append(out, core.PayloadCommitment[:]...)
+		out = appendCompactSize(out, uint64(len(core.BatchSig)))
+		out = append(out, core.BatchSig...)
+		return out, nil
+	case 0x02:
+		if tx.DaChunkCore == nil {
+			return nil, txerr(TX_ERR_PARSE, "missing da_chunk_core for tx_kind=0x02")
+		}
+		core := tx.DaChunkCore
+		out := make([]byte, 0, 32+2+32)
+		out = append(out, core.DaID[:]...)
+		out = appendU16le(out, core.ChunkIndex)
+		out = append(out, core.ChunkHash[:]...)
+		return out, nil
+	default:
+		return nil, txerr(TX_ERR_PARSE, "unsupported tx_kind")
+	}
 }

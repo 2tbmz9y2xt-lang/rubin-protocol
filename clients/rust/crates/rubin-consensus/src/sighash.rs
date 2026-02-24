@@ -1,7 +1,7 @@
 use crate::compactsize::encode_compact_size;
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
-use crate::tx::Tx;
+use crate::tx::{da_core_fields_bytes, Tx};
 
 pub fn sighash_v1_digest(
     tx: &Tx,
@@ -17,7 +17,7 @@ pub fn sighash_v1_digest(
         ));
     }
 
-    let hash_of_da_core_fields = sha3_256(&[]);
+    let hash_of_da_core_fields = sha3_256(&da_core_fields_bytes(tx)?);
 
     let mut prevouts = Vec::with_capacity(tx.inputs.len() * (32 + 4));
     for i in &tx.inputs {

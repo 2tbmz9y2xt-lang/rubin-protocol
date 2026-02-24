@@ -260,6 +260,7 @@
         "miss_rate_bytes_DA": 0.6,
         "partial_set_count": 2,
         "partial_set_age_p95": 42,
+        "recovery_success_rate": 97.0,
         "prefetch_latency_ms": 187,
         "peer_quality_score": 61
       }
@@ -280,7 +281,35 @@
         "partial_set_age_p95": 0,
         "prefetch_latency_ms": 0
       },
-      "expect_missing_fields": ["peer_quality_score"]
+      "expect_missing_fields": ["peer_quality_score", "recovery_success_rate"]
+    },
+    {
+      "id": "CV-C-24",
+      "op": "compact_orphan_storm",
+      "expect_ok": true,
+      "global_limit": 67108864,
+      "current_global_bytes": 62914560,
+      "incoming_chunk_bytes": 524288,
+      "incoming_has_commit": false,
+      "recovery_success_rate": 98.0,
+      "observation_minutes": 5,
+      "expect_storm_mode": true,
+      "expect_admit": false,
+      "expect_rollback": false
+    },
+    {
+      "id": "CV-C-25",
+      "op": "compact_orphan_storm",
+      "expect_ok": true,
+      "global_limit": 67108864,
+      "current_global_bytes": 62914560,
+      "incoming_chunk_bytes": 262144,
+      "incoming_has_commit": true,
+      "recovery_success_rate": 92.0,
+      "observation_minutes": 12,
+      "expect_storm_mode": true,
+      "expect_admit": true,
+      "expect_rollback": true
     }
   ]
 }

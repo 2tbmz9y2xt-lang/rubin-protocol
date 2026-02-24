@@ -1,7 +1,8 @@
 use rubin_consensus::{
     apply_non_coinbase_tx_basic, block_hash, compact_shortid, merkle_root_txids, parse_tx,
-    pow_check, retarget_v1, retarget_v1_clamped, sighash_v1_digest, validate_block_basic_at_height,
-    validate_tx_covenants_genesis, ErrorCode, Outpoint, UtxoEntry,
+    pow_check, retarget_v1, retarget_v1_clamped, sighash_v1_digest,
+    validate_block_basic_with_context_at_height, validate_tx_covenants_genesis, ErrorCode,
+    Outpoint, UtxoEntry,
 };
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
@@ -73,6 +74,9 @@ struct Request {
 
     #[serde(default)]
     height: u64,
+
+    #[serde(default)]
+    prev_timestamps: Vec<u64>,
 
     #[serde(default)]
     block_timestamp: u64,
@@ -748,11 +752,18 @@ fn main() {
                 Some(h)
             };
 
-            match validate_block_basic_at_height(
+            let prev_timestamps = if req.prev_timestamps.is_empty() {
+                None
+            } else {
+                Some(req.prev_timestamps.as_slice())
+            };
+
+            match validate_block_basic_with_context_at_height(
                 &block_bytes,
                 expected_prev,
                 expected_target,
                 req.height,
+                prev_timestamps,
             ) {
                 Ok(summary) => {
                     let resp = Response {

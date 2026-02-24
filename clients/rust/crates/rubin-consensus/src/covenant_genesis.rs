@@ -82,10 +82,30 @@ pub fn validate_tx_covenants_genesis(tx: &Tx, block_height: u64) -> Result<(), T
                 }
                 parse_htlc_covenant_data(&out.covenant_data)?;
             }
-            COV_TYPE_RESERVED_FUTURE | COV_TYPE_DA_COMMIT => {
+            COV_TYPE_DA_COMMIT => {
+                if tx.tx_kind != 0x01 {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrCovenantTypeInvalid,
+                        "CORE_DA_COMMIT allowed only in tx_kind=0x01",
+                    ));
+                }
+                if out.value != 0 {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrCovenantTypeInvalid,
+                        "CORE_DA_COMMIT value must be 0",
+                    ));
+                }
+                if out.covenant_data.len() != 32 {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrCovenantTypeInvalid,
+                        "invalid CORE_DA_COMMIT covenant_data length",
+                    ));
+                }
+            }
+            COV_TYPE_RESERVED_FUTURE => {
                 return Err(TxError::new(
                     ErrorCode::TxErrCovenantTypeInvalid,
-                    "reserved or unsupported covenant_type",
+                    "reserved covenant_type",
                 ));
             }
             _ => {

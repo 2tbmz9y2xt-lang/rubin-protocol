@@ -1,6 +1,9 @@
 package consensus
 
-import "bytes"
+import (
+	"bytes"
+	"sort"
+)
 
 type ParsedBlock struct {
 	Header      BlockHeader
@@ -79,6 +82,16 @@ func ValidateBlockBasicAtHeight(
 	expectedTarget *[32]byte,
 	blockHeight uint64,
 ) (*BlockBasicSummary, error) {
+	return ValidateBlockBasicWithContextAtHeight(blockBytes, expectedPrevHash, expectedTarget, blockHeight, nil)
+}
+
+func ValidateBlockBasicWithContextAtHeight(
+	blockBytes []byte,
+	expectedPrevHash *[32]byte,
+	expectedTarget *[32]byte,
+	blockHeight uint64,
+	prevTimestamps []uint64,
+) (*BlockBasicSummary, error) {
 	pb, err := ParseBlockBytes(blockBytes)
 	if err != nil {
 		return nil, err
@@ -107,6 +120,7 @@ func ValidateBlockBasicAtHeight(
 	var sumWeight uint64
 	var sumDa uint64
 	var sumAnchor uint64
+	seenNonces := make(map[uint64]struct{}, len(pb.Txs))
 	for i, tx := range pb.Txs {
 		if err := validateWitnessSuiteActivation(tx, i, blockHeight); err != nil {
 			return nil, err
@@ -114,6 +128,12 @@ func ValidateBlockBasicAtHeight(
 		// Non-coinbase transactions must carry at least one input.
 		if i > 0 && len(tx.Inputs) == 0 {
 			return nil, txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
+		}
+		if i > 0 {
+			if _, exists := seenNonces[tx.TxNonce]; exists {
+				return nil, txerr(TX_ERR_NONCE_REPLAY, "duplicate tx_nonce in block")
+			}
+			seenNonces[tx.TxNonce] = struct{}{}
 		}
 		if err := ValidateTxCovenantsGenesis(tx, blockHeight); err != nil {
 			return nil, err
@@ -136,6 +156,12 @@ func ValidateBlockBasicAtHeight(
 		}
 	}
 	if err := validateCoinbaseWitnessCommitment(pb); err != nil {
+		return nil, err
+	}
+	if err := validateTimestampRules(pb.Header.Timestamp, blockHeight, prevTimestamps); err != nil {
+		return nil, err
+	}
+	if err := validateDASetIntegrity(pb.Txs); err != nil {
 		return nil, err
 	}
 
@@ -205,6 +231,111 @@ func validateCoinbaseWitnessCommitment(pb *ParsedBlock) error {
 	return nil
 }
 
+func validateTimestampRules(headerTimestamp uint64, blockHeight uint64, prevTimestamps []uint64) error {
+	if blockHeight == 0 {
+		return nil
+	}
+	k := int(blockHeight)
+	if k > 11 {
+		k = 11
+	}
+	if len(prevTimestamps) == 0 {
+		return nil
+	}
+	if len(prevTimestamps) < k {
+		return txerr(BLOCK_ERR_PARSE, "insufficient prev_timestamps context")
+	}
+	window := append([]uint64(nil), prevTimestamps[:k]...)
+	sort.Slice(window, func(i, j int) bool { return window[i] < window[j] })
+	median := window[(len(window)-1)/2]
+	if headerTimestamp <= median {
+		return txerr(BLOCK_ERR_TIMESTAMP_OLD, "timestamp <= MTP median")
+	}
+	upperBound := median + MAX_FUTURE_DRIFT
+	if upperBound < median {
+		upperBound = ^uint64(0)
+	}
+	if headerTimestamp > upperBound {
+		return txerr(BLOCK_ERR_TIMESTAMP_FUTURE, "timestamp exceeds future drift")
+	}
+	return nil
+}
+
+type daCommitSet struct {
+	tx         *Tx
+	chunkCount uint16
+}
+
+func validateDASetIntegrity(txs []*Tx) error {
+	commits := make(map[[32]byte]daCommitSet)
+	chunks := make(map[[32]byte]map[uint16]*Tx)
+
+	for _, tx := range txs {
+		switch tx.TxKind {
+		case 0x01:
+			if tx.DaCommitCore == nil {
+				return txerr(TX_ERR_PARSE, "missing da_commit_core for tx_kind=0x01")
+			}
+			daID := tx.DaCommitCore.DaID
+			if _, exists := commits[daID]; exists {
+				return txerr(BLOCK_ERR_DA_SET_INVALID, "duplicate DA commit for da_id")
+			}
+			commits[daID] = daCommitSet{tx: tx, chunkCount: tx.DaCommitCore.ChunkCount}
+		case 0x02:
+			if tx.DaChunkCore == nil {
+				return txerr(TX_ERR_PARSE, "missing da_chunk_core for tx_kind=0x02")
+			}
+			daID := tx.DaChunkCore.DaID
+			idx := tx.DaChunkCore.ChunkIndex
+			if sha3_256(tx.DaPayload) != tx.DaChunkCore.ChunkHash {
+				return txerr(BLOCK_ERR_DA_CHUNK_HASH_INVALID, "chunk_hash mismatch")
+			}
+			if chunks[daID] == nil {
+				chunks[daID] = make(map[uint16]*Tx)
+			}
+			if _, exists := chunks[daID][idx]; exists {
+				return txerr(BLOCK_ERR_DA_SET_INVALID, "duplicate DA chunk index")
+			}
+			chunks[daID][idx] = tx
+		}
+	}
+
+	if len(commits) > MAX_DA_BATCHES_PER_BLOCK {
+		return txerr(BLOCK_ERR_DA_BATCH_EXCEEDED, "too many DA commits in block")
+	}
+
+	for daID := range chunks {
+		if _, exists := commits[daID]; !exists {
+			return txerr(BLOCK_ERR_DA_SET_INVALID, "DA chunks without DA commit")
+		}
+	}
+
+	for daID, commit := range commits {
+		set := chunks[daID]
+		if set == nil {
+			return txerr(BLOCK_ERR_DA_INCOMPLETE, "DA commit without chunks")
+		}
+		if len(set) != int(commit.chunkCount) {
+			return txerr(BLOCK_ERR_DA_INCOMPLETE, "DA chunk count mismatch")
+		}
+
+		var concat []byte
+		for i := uint16(0); i < commit.chunkCount; i++ {
+			chunkTx, exists := set[i]
+			if !exists {
+				return txerr(BLOCK_ERR_DA_INCOMPLETE, "missing DA chunk index")
+			}
+			concat = append(concat, chunkTx.DaPayload...)
+		}
+		payloadCommitment := sha3_256(concat)
+		if payloadCommitment != commit.tx.DaCommitCore.PayloadCommitment {
+			return txerr(BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID, "payload commitment mismatch")
+		}
+	}
+
+	return nil
+}
+
 func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 	if tx == nil {
 		return 0, 0, 0, txerr(TX_ERR_PARSE, "nil tx")
@@ -256,7 +387,7 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 		if err != nil {
 			return 0, 0, 0, err
 		}
-		if out.CovenantType == COV_TYPE_ANCHOR {
+		if out.CovenantType == COV_TYPE_ANCHOR || out.CovenantType == COV_TYPE_DA_COMMIT {
 			anchorBytes, err = addU64(anchorBytes, covLen)
 			if err != nil {
 				return 0, 0, 0, err
@@ -266,6 +397,14 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 	baseSize, err = addU64(baseSize, 4) // locktime
 	if err != nil {
 		return 0, 0, 0, txerr(TX_ERR_PARSE, "tx base size overflow")
+	}
+	daCoreBytes, err := daCoreFieldsBytes(tx)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	baseSize, err = addU64(baseSize, uint64(len(daCoreBytes)))
+	if err != nil {
+		return 0, 0, 0, err
 	}
 
 	var witnessSize uint64
