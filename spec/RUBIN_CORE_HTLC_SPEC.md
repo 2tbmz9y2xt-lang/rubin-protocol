@@ -247,32 +247,13 @@ See `conformance/fixtures/CV-HTLC.json`. Required coverage:
 
 ## 9. Integration with CANONICAL
 
-Upon ratification of this document, update `RUBIN_L1_CANONICAL.md` §14 as follows:
+**Status:** integrated.
 
-1. Replace:
-```
-- `CORE_HTLC`:
-  - RESERVED in CANONICAL (not active at genesis).
-  - A standalone HTLC specification exists in `spec/RUBIN_CORE_HTLC_SPEC.md`, but it is not yet integrated
-    into this document.
-  - Until integrated, any output with `covenant_type = 0x0100` MUST be rejected as
-    `TX_ERR_COVENANT_TYPE_INVALID`.
-```
+`RUBIN_L1_CANONICAL.md` already treats `CORE_HTLC (0x0100)` as consensus-active from genesis block 0
+and normatively defers spend semantics to this document.
 
-With:
-```
-- `CORE_HTLC`:
-  - Hash Time-Locked Contract. Active from genesis block 0.
-  - `covenant_data_len MUST equal MAX_HTLC_COVENANT_DATA (105)`.
-  - Spend semantics: RUBIN_CORE_HTLC_SPEC.md §5.
-  - Witness consumption: 2 WitnessItems (Section 16).
-```
-
-2. Add to §4 constants table:
-   - `MAX_HTLC_COVENANT_DATA = 105`
-   - `MAX_HTLC_PREIMAGE_BYTES = 256`
-
-3. Add `TX_ERR_TIMELOCK_NOT_MET` to §13 error code table if not already present.
+This section is kept only to document that the integration step has been completed and to avoid
+stale “reserved / not integrated” wording in external audit packs.
 
 ---
 
