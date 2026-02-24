@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use crate::block_basic::{parse_block_bytes, validate_block_basic_with_context_at_height, ParsedBlock};
+use crate::block_basic::{
+    parse_block_bytes, validate_block_basic_with_context_at_height, ParsedBlock,
+};
 use crate::constants::{COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT};
 use crate::error::{ErrorCode, TxError};
 use crate::subsidy::block_subsidy;
@@ -29,7 +31,10 @@ fn validate_coinbase_value_bound(
 ) -> Result<(), TxError> {
     // Keep behavior aligned with block_basic.rs implementation.
     if pb.txs.is_empty() {
-        return Err(TxError::new(ErrorCode::BlockErrCoinbaseInvalid, "missing coinbase"));
+        return Err(TxError::new(
+            ErrorCode::BlockErrCoinbaseInvalid,
+            "missing coinbase",
+        ));
     }
     if block_height == 0 {
         return Ok(());
@@ -78,7 +83,10 @@ pub fn connect_block_basic_in_memory_at_height(
 
     let pb = parse_block_bytes(block_bytes)?;
     if pb.txs.is_empty() || pb.txids.len() != pb.txs.len() {
-        return Err(TxError::new(ErrorCode::BlockErrParse, "invalid parsed block"));
+        return Err(TxError::new(
+            ErrorCode::BlockErrParse,
+            "invalid parsed block",
+        ));
     }
 
     let already_generated = state.already_generated;
@@ -137,4 +145,3 @@ pub fn connect_block_basic_in_memory_at_height(
         utxo_count: state.utxos.len() as u64,
     })
 }
-

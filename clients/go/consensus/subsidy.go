@@ -21,4 +21,3 @@ func BlockSubsidy(height uint64, alreadyGenerated uint64) uint64 {
 	}
 	return baseReward
 }
-

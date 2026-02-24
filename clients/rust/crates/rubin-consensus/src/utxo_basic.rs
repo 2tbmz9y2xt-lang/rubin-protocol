@@ -201,7 +201,8 @@ pub fn apply_non_coinbase_tx_basic(
     height: u64,
     block_timestamp: u64,
 ) -> Result<UtxoApplySummary, TxError> {
-    let (_work, summary) = apply_non_coinbase_tx_basic_update(tx, txid, utxo_set, height, block_timestamp)?;
+    let (_work, summary) =
+        apply_non_coinbase_tx_basic_update(tx, txid, utxo_set, height, block_timestamp)?;
     Ok(summary)
 }
 

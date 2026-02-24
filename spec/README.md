@@ -34,7 +34,7 @@ Integrity:
 - `./RUBIN_CORE_HTLC_SPEC.md` — consensus-critical covenant spec
   - `CORE_HTLC` (0x0100), active from genesis block 0
   - Spend rules, witness format, conformance vectors CV-HTLC-01..10
-  - Formal verification is out-of-tree (Lean4 proof pack is **not vendored in this repository**)
+  - Lean4 proof-pack baseline is vendored in `../rubin-formal/` (`status=proved` on model-level; refinement to byte-accurate/executable semantics is pending)
 
 ## Normative (Non-Consensus)
 

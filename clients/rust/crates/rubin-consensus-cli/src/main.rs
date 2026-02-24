@@ -1,10 +1,9 @@
 use rubin_consensus::{
-    apply_non_coinbase_tx_basic, block_hash, compact_shortid, merkle_root_txids, parse_tx,
-    connect_block_basic_in_memory_at_height, InMemoryChainState,
-    pow_check, retarget_v1, retarget_v1_clamped, sighash_v1_digest,
-    validate_block_basic_with_context_and_fees_at_height, validate_block_basic_with_context_at_height,
-    validate_tx_covenants_genesis, ErrorCode,
-    Outpoint, UtxoEntry,
+    apply_non_coinbase_tx_basic, block_hash, compact_shortid,
+    connect_block_basic_in_memory_at_height, merkle_root_txids, parse_tx, pow_check, retarget_v1,
+    retarget_v1_clamped, sighash_v1_digest, validate_block_basic_with_context_and_fees_at_height,
+    validate_block_basic_with_context_at_height, validate_tx_covenants_genesis, ErrorCode,
+    InMemoryChainState, Outpoint, UtxoEntry,
 };
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};

@@ -435,7 +435,10 @@ fn coinbase_with_witness_commitment(non_coinbase_txs: &[Vec<u8>]) -> Vec<u8> {
     tx_with_one_output(0, COV_TYPE_ANCHOR, &commit)
 }
 
-fn coinbase_with_witness_commitment_and_p2pk_value(value: u64, non_coinbase_txs: &[Vec<u8>]) -> Vec<u8> {
+fn coinbase_with_witness_commitment_and_p2pk_value(
+    value: u64,
+    non_coinbase_txs: &[Vec<u8>],
+) -> Vec<u8> {
     let mut wtxids: Vec<[u8; 32]> = Vec::with_capacity(1 + non_coinbase_txs.len());
     wtxids.push([0u8; 32]);
     for txb in non_coinbase_txs {

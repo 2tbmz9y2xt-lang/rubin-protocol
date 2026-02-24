@@ -21,4 +21,3 @@ pub fn block_subsidy(height: u64, already_generated: u64) -> u64 {
         base_reward
     }
 }
-

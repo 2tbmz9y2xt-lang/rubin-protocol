@@ -3,7 +3,7 @@
 **Document:** `RUBIN_CORE_HTLC_SPEC.md`  
 **Covenant type:** `CORE_HTLC` (`0x0100`)  
 **Status:** ACTIVE — activated from genesis in `RUBIN_L1_CANONICAL.md`  
-**Formal verification:** out-of-tree (Lean4 proof pack is **not vendored in this repository**)
+**Formal verification:** in-repo baseline in `rubin-formal/` (`status=proved` on model-level; executable/byte-accurate refinement pending)
 
 ---
 

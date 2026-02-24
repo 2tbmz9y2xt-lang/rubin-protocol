@@ -1,0 +1,6 @@
+name = "rubin-formal"
+version = "0.1.0"
+defaultTargets = ["RubinFormal"]
+
+[[lean_lib]]
+name = "RubinFormal"
