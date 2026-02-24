@@ -45,6 +45,12 @@ pub fn parse_htlc_covenant_data(cov_data: &[u8]) -> Result<HtlcCovenant, TxError
             "CORE_HTLC lock_mode invalid",
         ));
     }
+    if lock_value == 0 {
+        return Err(TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_HTLC lock_value must be > 0",
+        ));
+    }
     if claim_key_id == refund_key_id {
         return Err(TxError::new(
             ErrorCode::TxErrParse,
@@ -112,6 +118,12 @@ pub fn validate_htlc_spend(
                 u16::from_le_bytes(path_item.signature[1..3].try_into().map_err(|_| {
                     TxError::new(ErrorCode::TxErrParse, "bad CORE_HTLC preimage_len")
                 })?) as usize;
+            if pre_len == 0 {
+                return Err(TxError::new(
+                    ErrorCode::TxErrParse,
+                    "CORE_HTLC preimage_len must be > 0",
+                ));
+            }
             if pre_len as u64 > MAX_HTLC_PREIMAGE_BYTES {
                 return Err(TxError::new(
                     ErrorCode::TxErrParse,

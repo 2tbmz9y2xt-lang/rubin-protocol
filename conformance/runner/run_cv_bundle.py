@@ -61,10 +61,14 @@ def build_tools() -> Tuple[pathlib.Path, pathlib.Path]:
     BIN_DIR.mkdir(parents=True, exist_ok=True)
 
     go_cli = BIN_DIR / "go-consensus-cli"
+    if sys.platform.startswith("win"):
+        go_cli = go_cli.with_suffix(".exe")
     run(
         ["go", "build", "-o", str(go_cli), "./cmd/rubin-consensus-cli"],
         cwd=REPO_ROOT / "clients" / "go",
     )
+    if not go_cli.exists():
+        raise RuntimeError(f"missing go cli binary: {go_cli}")
 
     run(
         ["cargo", "build", "-p", "rubin-consensus-cli"],

@@ -33,7 +33,7 @@ Integrity:
 
 - `./RUBIN_CORE_HTLC_SPEC.md` — consensus-critical covenant spec
   - `CORE_HTLC` (0x0100), active from genesis block 0
-  - Spend rules, witness format, conformance vectors CV-HTLC-01..10
+  - Spend rules, witness format, conformance vectors CV-HTLC-01..12
   - Lean4 proof-pack baseline is vendored in `../rubin-formal/` (`status=proved` on model-level; refinement to byte-accurate/executable semantics is pending)
 
 ## Normative (Non-Consensus)
@@ -77,6 +77,11 @@ Integrity:
 export PATH=/opt/homebrew/bin:$PATH
 ```
 
+Версия Node.js для spec tooling pinned в корне репо:
+- `.node-version` (source-of-truth для CI)
+- `.nvmrc` (удобство для `nvm`)
+- `package.json#engines.node` (guardrail)
+
 Минимальный набор проверок:
 
 ```bash
@@ -88,6 +93,14 @@ python3 conformance/runner/run_cv_bundle.py
 ```
 
 Это operational note (не консенсус).
+
+### Go→Rust parity (operational)
+
+- Go (`clients/go`) — **reference client** для parity.
+- Rust (`clients/rust`) — **MUST** совпадать с Go на всех executable conformance gates.
+- `conformance/runner/run_cv_bundle.py` проверяет:
+  1) Go vs Rust parity (ok/err + ответы),
+  2) соответствие ожиданиям в fixtures (спека → fixtures → ожидаемые значения).
 
 ## Document Precedence
 

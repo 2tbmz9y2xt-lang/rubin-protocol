@@ -5,6 +5,17 @@ import (
 )
 
 func txWithOneInputOneOutput(prevTxid [32]byte, prevVout uint32, outValue uint64, outCovType uint16, outCovData []byte) []byte {
+	return txWithOneInputOneOutputWithWitness(prevTxid, prevVout, outValue, outCovType, outCovData, nil)
+}
+
+func txWithOneInputOneOutputWithWitness(
+	prevTxid [32]byte,
+	prevVout uint32,
+	outValue uint64,
+	outCovType uint16,
+	outCovData []byte,
+	witnesses []WitnessItem,
+) []byte {
 	b := make([]byte, 0, 256+len(outCovData))
 	b = appendU32le(b, 1)
 	b = append(b, 0x00) // tx_kind
@@ -22,9 +33,26 @@ func txWithOneInputOneOutput(prevTxid [32]byte, prevVout uint32, outValue uint64
 	b = append(b, outCovData...)
 
 	b = appendU32le(b, 0) // locktime
-	b = appendCompactSize(b, 0)
+	b = appendCompactSize(b, uint64(len(witnesses)))
+	for _, w := range witnesses {
+		b = append(b, w.SuiteID)
+		b = appendCompactSize(b, uint64(len(w.Pubkey)))
+		b = append(b, w.Pubkey...)
+		b = appendCompactSize(b, uint64(len(w.Signature)))
+		b = append(b, w.Signature...)
+	}
 	b = appendCompactSize(b, 0)
 	return b
+}
+
+func dummyWitnesses(n int) []WitnessItem {
+	witnesses := make([]WitnessItem, 0, n)
+	for i := 0; i < n; i++ {
+		witnesses = append(witnesses, WitnessItem{
+			SuiteID: SUITE_ID_SENTINEL,
+		})
+	}
+	return witnesses
 }
 
 func validP2PKCovenantData() []byte {
@@ -82,7 +110,7 @@ func TestApplyNonCoinbaseTxBasic_SpendAnchorRejected(t *testing.T) {
 func TestApplyNonCoinbaseTxBasic_ValueConservation(t *testing.T) {
 	var prev [32]byte
 	prev[0] = 0xae
-	txBytes := txWithOneInputOneOutput(prev, 0, 101, COV_TYPE_P2PK, validP2PKCovenantData())
+	txBytes := txWithOneInputOneOutputWithWitness(prev, 0, 101, COV_TYPE_P2PK, validP2PKCovenantData(), dummyWitnesses(1))
 	tx, txid := mustParseTxForUtxo(t, txBytes)
 
 	utxos := map[Outpoint]UtxoEntry{
@@ -104,7 +132,7 @@ func TestApplyNonCoinbaseTxBasic_ValueConservation(t *testing.T) {
 func TestApplyNonCoinbaseTxBasic_OK(t *testing.T) {
 	var prev [32]byte
 	prev[0] = 0xaf
-	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
+	txBytes := txWithOneInputOneOutputWithWitness(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData(), dummyWitnesses(1))
 	tx, txid := mustParseTxForUtxo(t, txBytes)
 
 	utxos := map[Outpoint]UtxoEntry{
@@ -126,6 +154,28 @@ func TestApplyNonCoinbaseTxBasic_OK(t *testing.T) {
 	}
 }
 
+func TestApplyNonCoinbaseTxBasic_WitnessCountZeroRejected(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0xb0
+	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
+	tx, txid := mustParseTxForUtxo(t, txBytes)
+
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prev, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_P2PK,
+			CovenantData: validP2PKCovenantData(),
+		},
+	}
+	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
+	}
+}
+
 func TestApplyNonCoinbaseTxBasic_VaultCannotFundFee(t *testing.T) {
 	var prevVault, prevFee, txid [32]byte
 	prevVault[0] = 0xc0
@@ -137,6 +187,7 @@ func TestApplyNonCoinbaseTxBasic_VaultCannotFundFee(t *testing.T) {
 			{PrevTxid: prevVault, PrevVout: 0},
 			{PrevTxid: prevFee, PrevVout: 0},
 		},
+		Witness: dummyWitnesses(2),
 		Outputs: []TxOutput{
 			{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
 		},
@@ -175,6 +226,7 @@ func TestApplyNonCoinbaseTxBasic_VaultPreservedWithExternalFeeSponsor(t *testing
 			{PrevTxid: prevVault, PrevVout: 0},
 			{PrevTxid: prevFee, PrevVout: 0},
 		},
+		Witness: dummyWitnesses(2),
 		Outputs: []TxOutput{
 			{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
 		},
@@ -217,6 +269,7 @@ func TestApplyNonCoinbaseTxBasic_VaultWhitelistRejectsOutput(t *testing.T) {
 			{PrevTxid: prevVault, PrevVout: 0},
 			{PrevTxid: prevFee, PrevVout: 0},
 		},
+		Witness: dummyWitnesses(2),
 		Outputs: []TxOutput{
 			{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: nonWhitelistedOutData},
 		},
@@ -248,7 +301,7 @@ func TestApplyNonCoinbaseTxBasic_MultisigInputAccepted(t *testing.T) {
 	var prevMS, txid [32]byte
 	prevMS[0] = 0xf0
 	txid[0] = 0xf1
-	txBytes := txWithOneInputOneOutput(prevMS, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
+	txBytes := txWithOneInputOneOutputWithWitness(prevMS, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData(), dummyWitnesses(1))
 	tx, parsedTxid := mustParseTxForUtxo(t, txBytes)
 	txid = parsedTxid
 

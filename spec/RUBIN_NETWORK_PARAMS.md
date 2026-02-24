@@ -100,6 +100,12 @@ Treasury tranche schedule (informative):
 
 Exact recipient key IDs and hashes are chain-instance parameters and MUST be fixed by the published genesis bytes.
 
+Phase‑0 devnet status (spec-only stage):
+- **Genesis bytes are not published yet**; therefore `chain_id` for Phase‑0 devnet is **TBD**.
+- Implementations MUST NOT “auto-generate defaults” for genesis bytes locally (that would split the network).
+- Before devnet bring‑up, the project MUST publish a byte‑exact devnet genesis pack (see:
+  `/Users/gpt/Documents/inbox/operational/RUBIN_DEVNET_GENESIS_PUBLISH_v1.md`, tasks `B-01..B-03` in inbox queue).
+
 ---
 
 ## 5. Cryptography

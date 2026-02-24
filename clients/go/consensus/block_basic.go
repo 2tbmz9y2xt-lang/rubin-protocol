@@ -21,6 +21,28 @@ type BlockBasicSummary struct {
 	BlockHash [32]byte
 }
 
+func isCoinbasePrevout(in TxInput) bool {
+	var zero [32]byte
+	return in.PrevTxid == zero && in.PrevVout == ^uint32(0)
+}
+
+func isCoinbaseTx(tx *Tx) bool {
+	if tx == nil {
+		return false
+	}
+	if tx.TxKind != 0x00 || tx.TxNonce != 0 {
+		return false
+	}
+	if len(tx.Inputs) != 1 || len(tx.Witness) != 0 || len(tx.DaPayload) != 0 {
+		return false
+	}
+	in := tx.Inputs[0]
+	if !isCoinbasePrevout(in) || len(in.ScriptSig) != 0 || in.Sequence != ^uint32(0) {
+		return false
+	}
+	return true
+}
+
 func ParseBlockBytes(b []byte) (*ParsedBlock, error) {
 	if len(b) < BLOCK_HEADER_BYTES+1 {
 		return nil, txerr(BLOCK_ERR_PARSE, "block too short")
@@ -120,10 +142,19 @@ func ValidateBlockBasicWithContextAtHeight(
 	var sumWeight uint64
 	var sumDa uint64
 	var sumAnchor uint64
+	if len(pb.Txs) == 0 || !isCoinbaseTx(pb.Txs[0]) {
+		return nil, txerr(BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
+	}
+	if pb.Txs[0].Locktime != uint32(blockHeight) {
+		return nil, txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase locktime must equal block height")
+	}
 	seenNonces := make(map[uint64]struct{}, len(pb.Txs))
 	for i, tx := range pb.Txs {
 		if err := validateWitnessSuiteActivation(tx, i, blockHeight); err != nil {
 			return nil, err
+		}
+		if i > 0 && isCoinbaseTx(tx) {
+			return nil, txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase-like tx is only allowed at index 0")
 		}
 		// Non-coinbase transactions must carry at least one input.
 		if i > 0 && len(tx.Inputs) == 0 {

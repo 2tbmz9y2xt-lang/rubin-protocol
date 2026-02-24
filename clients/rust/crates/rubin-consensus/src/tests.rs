@@ -422,7 +422,30 @@ fn tx_with_outputs(outputs: &[TestOutput]) -> Vec<u8> {
     b
 }
 
-fn coinbase_with_witness_commitment(non_coinbase_txs: &[Vec<u8>]) -> Vec<u8> {
+fn coinbase_tx_with_outputs(locktime: u32, outputs: &[TestOutput]) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&1u32.to_le_bytes()); // version
+    b.push(0x00); // tx_kind
+    b.extend_from_slice(&0u64.to_le_bytes()); // tx_nonce
+    crate::compactsize::encode_compact_size(1, &mut b); // input_count
+    b.extend_from_slice(&[0u8; 32]); // prev_txid
+    b.extend_from_slice(&u32::MAX.to_le_bytes()); // prev_vout
+    crate::compactsize::encode_compact_size(0, &mut b); // script_sig_len
+    b.extend_from_slice(&u32::MAX.to_le_bytes()); // sequence
+    crate::compactsize::encode_compact_size(outputs.len() as u64, &mut b); // output_count
+    for out in outputs {
+        b.extend_from_slice(&out.value.to_le_bytes());
+        b.extend_from_slice(&out.covenant_type.to_le_bytes());
+        crate::compactsize::encode_compact_size(out.covenant_data.len() as u64, &mut b);
+        b.extend_from_slice(&out.covenant_data);
+    }
+    b.extend_from_slice(&locktime.to_le_bytes());
+    crate::compactsize::encode_compact_size(0, &mut b); // witness_count
+    crate::compactsize::encode_compact_size(0, &mut b); // da_payload_len
+    b
+}
+
+fn coinbase_with_witness_commitment(locktime: u32, non_coinbase_txs: &[Vec<u8>]) -> Vec<u8> {
     let mut wtxids: Vec<[u8; 32]> = Vec::with_capacity(1 + non_coinbase_txs.len());
     wtxids.push([0u8; 32]);
     for txb in non_coinbase_txs {
@@ -432,10 +455,18 @@ fn coinbase_with_witness_commitment(non_coinbase_txs: &[Vec<u8>]) -> Vec<u8> {
 
     let wroot = witness_merkle_root_wtxids(&wtxids).expect("witness merkle root");
     let commit = witness_commitment_hash(wroot);
-    tx_with_one_output(0, COV_TYPE_ANCHOR, &commit)
+    coinbase_tx_with_outputs(
+        locktime,
+        &[TestOutput {
+            value: 0,
+            covenant_type: COV_TYPE_ANCHOR,
+            covenant_data: commit.to_vec(),
+        }],
+    )
 }
 
 fn coinbase_with_witness_commitment_and_p2pk_value(
+    locktime: u32,
     value: u64,
     non_coinbase_txs: &[Vec<u8>],
 ) -> Vec<u8> {
@@ -448,18 +479,21 @@ fn coinbase_with_witness_commitment_and_p2pk_value(
 
     let wroot = witness_merkle_root_wtxids(&wtxids).expect("witness merkle root");
     let commit = witness_commitment_hash(wroot);
-    tx_with_outputs(&[
-        TestOutput {
-            value,
-            covenant_type: COV_TYPE_P2PK,
-            covenant_data: valid_p2pk_covenant_data(),
-        },
-        TestOutput {
-            value: 0,
-            covenant_type: COV_TYPE_ANCHOR,
-            covenant_data: commit.to_vec(),
-        },
-    ])
+    coinbase_tx_with_outputs(
+        locktime,
+        &[
+            TestOutput {
+                value,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: valid_p2pk_covenant_data(),
+            },
+            TestOutput {
+                value: 0,
+                covenant_type: COV_TYPE_ANCHOR,
+                covenant_data: commit.to_vec(),
+            },
+        ],
+    )
 }
 
 #[test]
@@ -480,7 +514,7 @@ fn parse_block_bytes_ok() {
 
 #[test]
 fn validate_block_basic_ok() {
-    let tx = coinbase_with_witness_commitment(&[]);
+    let tx = coinbase_with_witness_commitment(0, &[]);
     let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
     let root = merkle_root_txids(&[txid]).expect("root");
     let mut prev = [0u8; 32];
@@ -499,7 +533,7 @@ fn validate_block_basic_subsidy_exceeded() {
     let sum_fees = 0u64;
 
     let subsidy = crate::subsidy::block_subsidy(height, already_generated);
-    let tx = coinbase_with_witness_commitment_and_p2pk_value(subsidy + 1, &[]);
+    let tx = coinbase_with_witness_commitment_and_p2pk_value(height as u32, subsidy + 1, &[]);
     let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
     let root = merkle_root_txids(&[txid]).expect("root");
     let mut prev = [0u8; 32];
@@ -527,7 +561,8 @@ fn validate_block_basic_subsidy_with_fees_ok() {
     let sum_fees = 5u64;
 
     let subsidy = crate::subsidy::block_subsidy(height, already_generated);
-    let tx = coinbase_with_witness_commitment_and_p2pk_value(subsidy + sum_fees, &[]);
+    let tx =
+        coinbase_with_witness_commitment_and_p2pk_value(height as u32, subsidy + sum_fees, &[]);
     let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
     let root = merkle_root_txids(&[txid]).expect("root");
     let mut prev = [0u8; 32];
@@ -640,7 +675,14 @@ fn parse_block_bytes_trailing_bytes() {
 
 #[test]
 fn validate_block_basic_covenant_invalid() {
-    let tx = tx_with_one_output(1, COV_TYPE_ANCHOR, &[0x01]);
+    let tx = coinbase_tx_with_outputs(
+        0,
+        &[TestOutput {
+            value: 1,
+            covenant_type: COV_TYPE_ANCHOR,
+            covenant_data: vec![0x01],
+        }],
+    );
     let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
     let root = merkle_root_txids(&[txid]).expect("root");
     let mut prev = [0u8; 32];
@@ -655,7 +697,7 @@ fn validate_block_basic_covenant_invalid() {
 #[test]
 fn validate_block_basic_non_coinbase_must_have_input() {
     let invalid_non_coinbase = tx_with_one_output(1, COV_TYPE_P2PK, &valid_p2pk_covenant_data());
-    let coinbase = coinbase_with_witness_commitment(std::slice::from_ref(&invalid_non_coinbase));
+    let coinbase = coinbase_with_witness_commitment(0, std::slice::from_ref(&invalid_non_coinbase));
 
     let (_t1, txid1, _w1, _n1) = parse_tx(&coinbase).expect("coinbase");
     let (_t2, txid2, _w2, _n2) = parse_tx(&invalid_non_coinbase).expect("noncoinbase");
@@ -670,8 +712,68 @@ fn validate_block_basic_non_coinbase_must_have_input() {
 }
 
 #[test]
-fn validate_block_basic_witness_commitment_missing() {
+fn validate_block_basic_first_tx_must_be_coinbase() {
     let tx = minimal_tx_bytes();
+    let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
+    let root = merkle_root_txids(&[txid]).expect("root");
+    let mut prev = [0u8; 32];
+    prev[0] = 0x8a;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(prev, root, target, 24, &[tx]);
+
+    let err = validate_block_basic(&block, Some(prev), Some(target)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrCoinbaseInvalid);
+}
+
+#[test]
+fn validate_block_basic_coinbase_locktime_must_match_height() {
+    let height = 5u64;
+    let tx = coinbase_with_witness_commitment(0, &[]);
+    let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
+    let root = merkle_root_txids(&[txid]).expect("root");
+    let mut prev = [0u8; 32];
+    prev[0] = 0x8b;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(prev, root, target, 24, &[tx]);
+
+    let err = validate_block_basic_at_height(&block, Some(prev), Some(target), height).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrCoinbaseInvalid);
+}
+
+#[test]
+fn validate_block_basic_coinbase_like_tx_forbidden_after_index_zero() {
+    let coinbase_like = coinbase_tx_with_outputs(
+        0,
+        &[TestOutput {
+            value: 1,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: valid_p2pk_covenant_data(),
+        }],
+    );
+    let coinbase = coinbase_with_witness_commitment(0, std::slice::from_ref(&coinbase_like));
+
+    let (_t1, txid1, _w1, _n1) = parse_tx(&coinbase).expect("coinbase");
+    let (_t2, txid2, _w2, _n2) = parse_tx(&coinbase_like).expect("coinbase-like");
+    let root = merkle_root_txids(&[txid1, txid2]).expect("root");
+    let mut prev = [0u8; 32];
+    prev[0] = 0x8c;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(prev, root, target, 24, &[coinbase, coinbase_like]);
+
+    let err = validate_block_basic(&block, Some(prev), Some(target)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrCoinbaseInvalid);
+}
+
+#[test]
+fn validate_block_basic_witness_commitment_missing() {
+    let tx = coinbase_tx_with_outputs(
+        0,
+        &[TestOutput {
+            value: 1,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: valid_p2pk_covenant_data(),
+        }],
+    );
     let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
     let root = merkle_root_txids(&[txid]).expect("root");
     let mut prev = [0u8; 32];
@@ -685,22 +787,25 @@ fn validate_block_basic_witness_commitment_missing() {
 
 #[test]
 fn validate_block_basic_witness_commitment_duplicate() {
-    let base_cb = coinbase_with_witness_commitment(&[]);
+    let base_cb = coinbase_with_witness_commitment(0, &[]);
     let (_tx, _txid, wtxid, _n) = parse_tx(&base_cb).expect("parse base coinbase");
     let wroot = witness_merkle_root_wtxids(&[wtxid]).expect("wroot");
     let commit = witness_commitment_hash(wroot);
-    let tx = tx_with_outputs(&[
-        TestOutput {
-            value: 0,
-            covenant_type: COV_TYPE_ANCHOR,
-            covenant_data: commit.to_vec(),
-        },
-        TestOutput {
-            value: 0,
-            covenant_type: COV_TYPE_ANCHOR,
-            covenant_data: commit.to_vec(),
-        },
-    ]);
+    let tx = coinbase_tx_with_outputs(
+        0,
+        &[
+            TestOutput {
+                value: 0,
+                covenant_type: COV_TYPE_ANCHOR,
+                covenant_data: commit.to_vec(),
+            },
+            TestOutput {
+                value: 0,
+                covenant_type: COV_TYPE_ANCHOR,
+                covenant_data: commit.to_vec(),
+            },
+        ],
+    );
 
     let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
     let root = merkle_root_txids(&[txid]).expect("root");
@@ -728,7 +833,10 @@ fn validate_block_basic_slh_inactive_at_height() {
         &pubkey,
         &sig,
     );
-    let coinbase = coinbase_with_witness_commitment(std::slice::from_ref(&non_coinbase));
+    let coinbase = coinbase_with_witness_commitment(
+        (SLH_DSA_ACTIVATION_HEIGHT - 1) as u32,
+        std::slice::from_ref(&non_coinbase),
+    );
 
     let (_t1, txid1, _w1, _n1) = parse_tx(&coinbase).expect("coinbase");
     let (_t2, txid2, _w2, _n2) = parse_tx(&non_coinbase).expect("noncoinbase");
@@ -763,7 +871,10 @@ fn validate_block_basic_slh_active_at_height() {
         &pubkey,
         &sig,
     );
-    let coinbase = coinbase_with_witness_commitment(std::slice::from_ref(&non_coinbase));
+    let coinbase = coinbase_with_witness_commitment(
+        SLH_DSA_ACTIVATION_HEIGHT as u32,
+        std::slice::from_ref(&non_coinbase),
+    );
 
     let (_t1, txid1, _w1, _n1) = parse_tx(&coinbase).expect("coinbase");
     let (_t2, txid2, _w2, _n2) = parse_tx(&non_coinbase).expect("noncoinbase");
@@ -959,7 +1070,10 @@ fn tx_with_one_input_one_output(
     crate::compactsize::encode_compact_size(out_cov_data.len() as u64, &mut b);
     b.extend_from_slice(out_cov_data);
     b.extend_from_slice(&0u32.to_le_bytes()); // locktime
-    crate::compactsize::encode_compact_size(0, &mut b); // witness_count
+    crate::compactsize::encode_compact_size(1, &mut b); // witness_count
+    b.push(SUITE_ID_SENTINEL);
+    crate::compactsize::encode_compact_size(0, &mut b); // pubkey_length
+    crate::compactsize::encode_compact_size(0, &mut b); // sig_length
     crate::compactsize::encode_compact_size(0, &mut b); // da_payload_len
     b
 }
@@ -1003,6 +1117,14 @@ fn valid_p2pk_covenant_data() -> Vec<u8> {
     let mut b = vec![0u8; MAX_P2PK_COVENANT_DATA as usize];
     b[0] = SUITE_ID_ML_DSA_87;
     b
+}
+
+fn sentinel_witness_item() -> crate::tx::WitnessItem {
+    crate::tx::WitnessItem {
+        suite_id: SUITE_ID_SENTINEL,
+        pubkey: vec![],
+        signature: vec![],
+    }
 }
 
 fn make_keys(count: usize, base: u8) -> Vec<[u8; 32]> {
@@ -1087,6 +1209,34 @@ fn apply_non_coinbase_tx_basic_spend_anchor_rejected() {
 
     let err = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 100, 1000).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrMissingUtxo);
+}
+
+#[test]
+fn apply_non_coinbase_tx_basic_zero_witness_count_rejected() {
+    let mut prev = [0u8; 32];
+    prev[0] = 0xac;
+    let tx_bytes =
+        tx_with_one_input_one_output(prev, 0, 90, COV_TYPE_P2PK, &valid_p2pk_covenant_data());
+    let (mut tx, txid, _wtxid, _n) = parse_tx(&tx_bytes).expect("parse");
+    tx.witness.clear();
+
+    let mut utxos: HashMap<Outpoint, UtxoEntry> = HashMap::new();
+    utxos.insert(
+        Outpoint {
+            txid: prev,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: valid_p2pk_covenant_data(),
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    );
+
+    let err = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 100, 1000).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrParse);
 }
 
 #[test]
@@ -1179,7 +1329,7 @@ fn apply_non_coinbase_tx_basic_vault_cannot_fund_fee() {
         locktime: 0,
         da_commit_core: None,
         da_chunk_core: None,
-        witness: vec![],
+        witness: vec![sentinel_witness_item(), sentinel_witness_item()],
         da_payload: vec![],
     };
 
@@ -1250,7 +1400,7 @@ fn apply_non_coinbase_tx_basic_vault_preserved_with_external_fee_sponsor() {
         locktime: 0,
         da_commit_core: None,
         da_chunk_core: None,
-        witness: vec![],
+        witness: vec![sentinel_witness_item(), sentinel_witness_item()],
         da_payload: vec![],
     };
 
@@ -1324,7 +1474,7 @@ fn apply_non_coinbase_tx_basic_vault_whitelist_rejects_output() {
         locktime: 0,
         da_commit_core: None,
         da_chunk_core: None,
-        witness: vec![],
+        witness: vec![sentinel_witness_item(), sentinel_witness_item()],
         da_payload: vec![],
     };
 

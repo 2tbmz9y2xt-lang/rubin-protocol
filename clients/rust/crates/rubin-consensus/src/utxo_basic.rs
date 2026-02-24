@@ -99,16 +99,14 @@ pub fn apply_non_coinbase_tx_basic_update(
             witness_cursor += slots;
         } else {
             check_spend_covenant(entry.covenant_type, &entry.covenant_data)?;
-            if !tx.witness.is_empty() {
-                let slots = witness_slots(entry.covenant_type, &entry.covenant_data);
-                if slots == 0 {
-                    return Err(TxError::new(ErrorCode::TxErrParse, "invalid witness slots"));
-                }
-                if witness_cursor + slots > tx.witness.len() {
-                    return Err(TxError::new(ErrorCode::TxErrParse, "witness underflow"));
-                }
-                witness_cursor += slots;
+            let slots = witness_slots(entry.covenant_type, &entry.covenant_data);
+            if slots == 0 {
+                return Err(TxError::new(ErrorCode::TxErrParse, "invalid witness slots"));
             }
+            if witness_cursor + slots > tx.witness.len() {
+                return Err(TxError::new(ErrorCode::TxErrParse, "witness underflow"));
+            }
+            witness_cursor += slots;
         }
 
         sum_in = sum_in
@@ -124,7 +122,7 @@ pub fn apply_non_coinbase_tx_basic_update(
         }
         work.remove(&op);
     }
-    if !tx.witness.is_empty() && witness_cursor != tx.witness.len() {
+    if witness_cursor != tx.witness.len() {
         return Err(TxError::new(
             ErrorCode::TxErrParse,
             "witness_count mismatch",

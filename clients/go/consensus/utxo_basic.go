@@ -100,9 +100,10 @@ func applyNonCoinbaseTxBasicWork(tx *Tx, txid [32]byte, utxoSet map[Outpoint]Utx
 				return nil, 0, err
 			}
 			witnessCursor += slots
-		} else if err := checkSpendCovenant(entry.CovenantType, entry.CovenantData); err != nil {
-			return nil, 0, err
-		} else if len(tx.Witness) > 0 {
+		} else {
+			if err := checkSpendCovenant(entry.CovenantType, entry.CovenantData); err != nil {
+				return nil, 0, err
+			}
 			slots := WitnessSlots(entry.CovenantType, entry.CovenantData)
 			if slots <= 0 {
 				return nil, 0, txerr(TX_ERR_PARSE, "invalid witness slots")
@@ -133,7 +134,7 @@ func applyNonCoinbaseTxBasicWork(tx *Tx, txid [32]byte, utxoSet map[Outpoint]Utx
 
 		delete(work, op)
 	}
-	if len(tx.Witness) > 0 && witnessCursor != len(tx.Witness) {
+	if witnessCursor != len(tx.Witness) {
 		return nil, 0, txerr(TX_ERR_PARSE, "witness_count mismatch")
 	}
 
