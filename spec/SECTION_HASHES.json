@@ -23,7 +23,7 @@
     "transaction_identifiers": "4ef9d9777bb3f0a2e3c145d6578738c1a18134a192f63e66ff3b343f996377d4",
     "weight_accounting": "2ad57571c7ac1239ebbee6889b99be9f507d4b904346a79d3cfa4eef36dcf755",
     "witness_commitment": "10a0e0b289df6023e6c6589d575e0f25b37025c0b84ba404dae5738ad50abf3d",
-    "sighash_v1": "827cf93aafea5271ada5c0241164699d37cf8e3f398b6eecf824375981397d9d",
+    "sighash_v1": "e20b0bcae92ec4a9549150f1d6b7dc9f29e888c1e6d56341e6beb6062e4a7d1f",
     "consensus_error_codes": "8a45d187ea0523c29fc1fff3298f4bbaab3bce4e7f2fb67ea737a5858e2d78e1",
     "covenant_registry": "b43922371de9a212b77ccc54539ec0772f7cf4a842ea5a4b68832a3fdbd92842",
     "difficulty_update": "1b755c3a6e65add9e1f92e382d171acea87763145929978fea5a6e54a51b969d",

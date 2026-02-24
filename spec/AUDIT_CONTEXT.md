@@ -38,7 +38,6 @@
 | F-03 | OPEN | Нет end-to-end crypto `verify_sig` в consensus path (задача `Q-R006`) |
 | F-05 | OPEN | Coinbase subsidy bound (`subsidy + fees`) не вшит в block validation |
 | F-10 | OPEN | COMPACT ссылается на `version`-поля, P2P_AUX не описывает их wire |
-| F-13 | OPEN | В CANONICAL есть `CV-SIG-*`, но нет gate/fixture `CV-SIG` |
 
 ## Already fixed (из прошлых аудитов)
 
@@ -54,6 +53,7 @@
 | F-11 | ALREADY_FIXED | DoS hardening по orphan pool выполнен (storm-mode + rollback triggers + conformance vectors; `P2P-04 DONE`) |
 | F-12 | ALREADY_FIXED (ops hygiene) | Добавлен operational reproducibility note в `spec/README.md` (PATH/tooling prerequisites) |
 | F-14 | ALREADY_FIXED | `RUBIN_NETWORK_PARAMS.md` разделяет consensus-critical и relay/operational параметры через колонку `Class` |
+| F-13 | ALREADY_FIXED | Добавлен executable gate `conformance/fixtures/CV-SIG.json`; CANONICAL §12.2 синхронизирован с текущим machine-executable покрытием |
 
 ## Зафиксированные accepted risks
 

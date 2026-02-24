@@ -665,10 +665,13 @@ Consensus vectors for signature-profile behavior:
 
 | Vector ID | Condition | Expected |
 | --- | --- | --- |
-| CV-SIG-01 | `suite_id = 0x01`, canonical ML-DSA lengths, cryptographically invalid signature bytes | `TX_ERR_SIG_INVALID` |
+| CV-SIG-01 | `suite_id = 0x01`, canonical ML-DSA witness lengths (profile parse acceptance) | `ok = true` |
 | CV-SIG-02 | `suite_id = 0x02`, `block_height < SLH_DSA_ACTIVATION_HEIGHT` in required spend slot | `TX_ERR_SIG_ALG_INVALID` |
 | CV-SIG-03 | unknown `suite_id` in spend slot | `TX_ERR_SIG_ALG_INVALID` |
 | CV-SIG-04 | non-canonical signature lengths for selected suite | `TX_ERR_SIG_NONCANONICAL` |
+
+Implementation note (non-consensus): executable crypto-negative vectors for rule 5 (`TX_ERR_SIG_INVALID`)
+are tracked by `Q-R006` and use real signature verification in Go/Rust consensus paths.
 
 ## 13. Consensus Error Codes (Normative)
 
