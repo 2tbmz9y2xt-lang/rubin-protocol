@@ -1,7 +1,8 @@
 use rubin_consensus::{
     apply_non_coinbase_tx_basic, block_hash, compact_shortid, merkle_root_txids, parse_tx,
     pow_check, retarget_v1, retarget_v1_clamped, sighash_v1_digest,
-    validate_block_basic_with_context_at_height, validate_tx_covenants_genesis, ErrorCode,
+    validate_block_basic_with_context_and_fees_at_height, validate_block_basic_with_context_at_height,
+    validate_tx_covenants_genesis, ErrorCode,
     Outpoint, UtxoEntry,
 };
 use serde::{Deserialize, Serialize};
@@ -80,6 +81,12 @@ struct Request {
 
     #[serde(default)]
     block_timestamp: u64,
+
+    #[serde(default)]
+    already_generated: u64,
+
+    #[serde(default)]
+    sum_fees: u64,
 }
 
 #[derive(Deserialize)]
@@ -764,6 +771,167 @@ fn main() {
                 expected_target,
                 req.height,
                 prev_timestamps,
+            ) {
+                Ok(summary) => {
+                    let resp = Response {
+                        ok: true,
+                        err: None,
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: Some(hex::encode(summary.block_hash)),
+                        target_new: None,
+                        fee: None,
+                        utxo_count: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(err_code(e.code)),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                        fee: None,
+                        utxo_count: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+            }
+        }
+        "block_basic_check_with_fees" => {
+            let block_bytes = match hex::decode(req.block_hex) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad block".to_string()),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                        fee: None,
+                        utxo_count: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+
+            let expected_prev = if req.expected_prev_hash.is_empty() {
+                None
+            } else {
+                let b = match hex::decode(req.expected_prev_hash) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let resp = Response {
+                            ok: false,
+                            err: Some("bad expected_prev_hash".to_string()),
+                            txid: None,
+                            wtxid: None,
+                            merkle_root: None,
+                            digest: None,
+                            consumed: None,
+                            block_hash: None,
+                            target_new: None,
+                            fee: None,
+                            utxo_count: None,
+                        };
+                        let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                        return;
+                    }
+                };
+                if b.len() != 32 {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad expected_prev_hash".to_string()),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                        fee: None,
+                        utxo_count: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+                let mut h = [0u8; 32];
+                h.copy_from_slice(&b);
+                Some(h)
+            };
+
+            let expected_target = if req.expected_target.is_empty() {
+                None
+            } else {
+                let b = match hex::decode(req.expected_target) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let resp = Response {
+                            ok: false,
+                            err: Some("bad expected_target".to_string()),
+                            txid: None,
+                            wtxid: None,
+                            merkle_root: None,
+                            digest: None,
+                            consumed: None,
+                            block_hash: None,
+                            target_new: None,
+                            fee: None,
+                            utxo_count: None,
+                        };
+                        let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                        return;
+                    }
+                };
+                if b.len() != 32 {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad expected_target".to_string()),
+                        txid: None,
+                        wtxid: None,
+                        merkle_root: None,
+                        digest: None,
+                        consumed: None,
+                        block_hash: None,
+                        target_new: None,
+                        fee: None,
+                        utxo_count: None,
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+                let mut h = [0u8; 32];
+                h.copy_from_slice(&b);
+                Some(h)
+            };
+
+            let prev_timestamps = if req.prev_timestamps.is_empty() {
+                None
+            } else {
+                Some(req.prev_timestamps.as_slice())
+            };
+
+            match validate_block_basic_with_context_and_fees_at_height(
+                &block_bytes,
+                expected_prev,
+                expected_target,
+                req.height,
+                prev_timestamps,
+                req.already_generated,
+                req.sum_fees,
             ) {
                 Ok(summary) => {
                     let resp = Response {

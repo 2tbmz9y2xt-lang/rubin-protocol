@@ -110,6 +110,29 @@ func coinbaseWithWitnessCommitment(t *testing.T, nonCoinbaseTxs ...[]byte) []byt
 	return txWithOneOutput(0, COV_TYPE_ANCHOR, commit[:])
 }
 
+func coinbaseWithWitnessCommitmentAndP2PKValue(t *testing.T, value uint64, nonCoinbaseTxs ...[]byte) []byte {
+	t.Helper()
+
+	wtxids := make([][32]byte, 1, 1+len(nonCoinbaseTxs))
+	for _, txb := range nonCoinbaseTxs {
+		_, _, wtxid, _, err := ParseTx(txb)
+		if err != nil {
+			t.Fatalf("ParseTx(non-coinbase): %v", err)
+		}
+		wtxids = append(wtxids, wtxid)
+	}
+
+	wroot, err := WitnessMerkleRootWtxids(wtxids)
+	if err != nil {
+		t.Fatalf("WitnessMerkleRootWtxids: %v", err)
+	}
+	commit := WitnessCommitmentHash(wroot)
+	return txWithOutputs([]testOutput{
+		{value: value, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()},
+		{value: 0, covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]},
+	})
+}
+
 func testTxID(t *testing.T, tx []byte) [32]byte {
 	t.Helper()
 	_, txid, _, _, err := ParseTx(tx)
@@ -141,6 +164,60 @@ func TestValidateBlockBasic_CovenantInvalid(t *testing.T) {
 	}
 	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	}
+}
+
+func TestValidateBlockBasic_SubsidyExceeded(t *testing.T) {
+	height := uint64(1)
+	alreadyGenerated := uint64(0)
+	sumFees := uint64(0)
+
+	subsidy := BlockSubsidy(height, alreadyGenerated)
+	coinbase := coinbaseWithWitnessCommitmentAndP2PKValue(t, subsidy+1)
+	cbid := testTxID(t, coinbase)
+	root, err := MerkleRootTxids([][32]byte{cbid})
+	if err != nil {
+		t.Fatalf("MerkleRootTxids: %v", err)
+	}
+
+	var prev [32]byte
+	prev[0] = 0x99
+	var target [32]byte
+	for i := range target {
+		target[i] = 0xff
+	}
+	block := buildBlockBytes(t, prev, root, target, 55, [][]byte{coinbase})
+	_, err = ValidateBlockBasicWithContextAndFeesAtHeight(block, &prev, &target, height, nil, alreadyGenerated, sumFees)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != BLOCK_ERR_SUBSIDY_EXCEEDED {
+		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_SUBSIDY_EXCEEDED)
+	}
+}
+
+func TestValidateBlockBasic_SubsidyWithFeesOK(t *testing.T) {
+	height := uint64(1)
+	alreadyGenerated := uint64(0)
+	sumFees := uint64(5)
+
+	subsidy := BlockSubsidy(height, alreadyGenerated)
+	coinbase := coinbaseWithWitnessCommitmentAndP2PKValue(t, subsidy+sumFees)
+	cbid := testTxID(t, coinbase)
+	root, err := MerkleRootTxids([][32]byte{cbid})
+	if err != nil {
+		t.Fatalf("MerkleRootTxids: %v", err)
+	}
+
+	var prev [32]byte
+	prev[0] = 0x9a
+	var target [32]byte
+	for i := range target {
+		target[i] = 0xff
+	}
+	block := buildBlockBytes(t, prev, root, target, 56, [][]byte{coinbase})
+	if _, err := ValidateBlockBasicWithContextAndFeesAtHeight(block, &prev, &target, height, nil, alreadyGenerated, sumFees); err != nil {
+		t.Fatalf("ValidateBlockBasicWithContextAndFeesAtHeight: %v", err)
 	}
 }
 

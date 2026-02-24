@@ -35,6 +35,8 @@ type Request struct {
 	ExpectedPrev     string   `json:"expected_prev_hash,omitempty"`
 	ExpectedTarget   string   `json:"expected_target,omitempty"`
 	PrevTimestamps   []uint64 `json:"prev_timestamps,omitempty"`
+	AlreadyGenerated uint64   `json:"already_generated,omitempty"`
+	SumFees          uint64   `json:"sum_fees,omitempty"`
 
 	Utxos          []UtxoJSON `json:"utxos,omitempty"`
 	Height         uint64     `json:"height,omitempty"`
@@ -269,6 +271,57 @@ func main() {
 			expectedTarget,
 			req.Height,
 			req.PrevTimestamps,
+		)
+		if err != nil {
+			if te, ok := err.(*consensus.TxError); ok {
+				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
+				return
+			}
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+		writeResp(os.Stdout, Response{Ok: true, BlockHash: hex.EncodeToString(s.BlockHash[:])})
+		return
+
+	case "block_basic_check_with_fees":
+		blockBytes, err := hex.DecodeString(req.BlockHex)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad block"})
+			return
+		}
+
+		var expectedPrev *[32]byte
+		if req.ExpectedPrev != "" {
+			b, err := hex.DecodeString(req.ExpectedPrev)
+			if err != nil || len(b) != 32 {
+				writeResp(os.Stdout, Response{Ok: false, Err: "bad expected_prev_hash"})
+				return
+			}
+			var h [32]byte
+			copy(h[:], b)
+			expectedPrev = &h
+		}
+
+		var expectedTarget *[32]byte
+		if req.ExpectedTarget != "" {
+			b, err := hex.DecodeString(req.ExpectedTarget)
+			if err != nil || len(b) != 32 {
+				writeResp(os.Stdout, Response{Ok: false, Err: "bad expected_target"})
+				return
+			}
+			var h [32]byte
+			copy(h[:], b)
+			expectedTarget = &h
+		}
+
+		s, err := consensus.ValidateBlockBasicWithContextAndFeesAtHeight(
+			blockBytes,
+			expectedPrev,
+			expectedTarget,
+			req.Height,
+			req.PrevTimestamps,
+			req.AlreadyGenerated,
+			req.SumFees,
 		)
 		if err != nil {
 			if te, ok := err.(*consensus.TxError); ok {
