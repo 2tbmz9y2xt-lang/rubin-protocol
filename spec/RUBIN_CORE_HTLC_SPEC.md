@@ -66,13 +66,23 @@ When a transaction output has `covenant_type = 0x0100 (CORE_HTLC)`:
 2. `lock_mode MUST be 0x00 or 0x01`.
    Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
 
-3. `claim_key_id MUST NOT equal refund_key_id`.
-   Otherwise reject as `TX_ERR_PARSE`.
-
-4. `value MUST be > 0`.
+3. `lock_value MUST be > 0`.
    Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
 
-5. `CORE_HTLC` outputs ARE spendable and MUST be added to the UTXO set on creation.
+4. `claim_key_id MUST NOT equal refund_key_id`.
+   Otherwise reject as `TX_ERR_PARSE`.
+
+5. `value MUST be > 0`.
+   Otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+
+6. `CORE_HTLC` outputs ARE spendable and MUST be added to the UTXO set on creation.
+
+Non-normative safety guidance:
+
+- Implementations/SDKs SHOULD use `preimage_len >= 32` bytes to avoid low-entropy hashlocks.
+- To ensure the refund path is not immediately spendable at creation, wallets SHOULD choose a `lock_value`
+  strictly greater than the expected creation height (for `LOCK_MODE_HEIGHT`) or greater than the expected
+  Median Time Past threshold (for `LOCK_MODE_TIMESTAMP`).
 
 ---
 
@@ -112,6 +122,7 @@ Selector payload encoding (inside `signature` bytes):
 - For the **claim path** (`path_id = 0x00`):
   - `signature[1:3]` is `u16le(preimage_len)`
   - `signature[3:]` is `preimage` (`preimage_len` bytes)
+  - `preimage_len MUST be >= 1`; otherwise reject as `TX_ERR_PARSE`.
   - `preimage_len MUST be <= MAX_HTLC_PREIMAGE_BYTES`; otherwise reject as `TX_ERR_PARSE`.
   - `sig_length MUST equal 3 + preimage_len`; otherwise reject as `TX_ERR_PARSE`.
 
@@ -241,6 +252,8 @@ See `conformance/fixtures/CV-HTLC.json`. Required coverage:
 | CV-HTLC-08 | refund | locktime not met (timestamp mode) | `TX_ERR_TIMELOCK_NOT_MET` |
 | CV-HTLC-09 | claim | `preimage_len > 256` | `TX_ERR_PARSE` |
 | CV-HTLC-10 | spend | unknown spend path (`path_id ∉ {0x00, 0x01}`) | `TX_ERR_PARSE` |
+| CV-HTLC-11 | claim | `preimage_len = 0` | `TX_ERR_PARSE` |
+| CV-HTLC-12 | creation | `lock_value = 0` | `TX_ERR_COVENANT_TYPE_INVALID` |
 
 ---
 

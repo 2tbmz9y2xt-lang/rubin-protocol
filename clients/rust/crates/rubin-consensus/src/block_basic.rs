@@ -159,20 +159,28 @@ pub fn validate_block_basic_with_context_at_height(
         }
     }
 
+    validate_coinbase_structure(&pb, block_height)?;
+
     let mut sum_weight: u64 = 0;
     let mut sum_da: u64 = 0;
     let mut sum_anchor: u64 = 0;
     let mut seen_nonces: HashMap<u64, ()> = HashMap::with_capacity(pb.txs.len());
     for (i, tx) in pb.txs.iter().enumerate() {
         validate_witness_suite_activation(tx, i, block_height)?;
-        // Non-coinbase transactions must carry at least one input.
-        if i > 0 && tx.inputs.is_empty() {
-            return Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "non-coinbase must have at least one input",
-            ));
-        }
         if i > 0 {
+            if is_coinbase_tx(tx) {
+                return Err(TxError::new(
+                    ErrorCode::BlockErrCoinbaseInvalid,
+                    "coinbase-like tx found at index > 0",
+                ));
+            }
+            // Non-coinbase transactions must carry at least one input.
+            if tx.inputs.is_empty() {
+                return Err(TxError::new(
+                    ErrorCode::TxErrParse,
+                    "non-coinbase must have at least one input",
+                ));
+            }
             if seen_nonces.insert(tx.tx_nonce, ()).is_some() {
                 return Err(TxError::new(
                     ErrorCode::TxErrNonceReplay,
@@ -245,6 +253,46 @@ pub fn validate_block_basic_with_context_and_fees_at_height(
     let pb = parse_block_bytes(block_bytes)?;
     validate_coinbase_value_bound(&pb, block_height, already_generated, sum_fees)?;
     Ok(s)
+}
+
+fn is_coinbase_tx(tx: &Tx) -> bool {
+    if tx.tx_kind != 0x00
+        || tx.tx_nonce != 0
+        || tx.inputs.len() != 1
+        || !tx.witness.is_empty()
+        || !tx.da_payload.is_empty()
+    {
+        return false;
+    }
+    let input = &tx.inputs[0];
+    input.prev_txid == [0u8; 32]
+        && input.prev_vout == u32::MAX
+        && input.script_sig.is_empty()
+        && input.sequence == u32::MAX
+}
+
+fn validate_coinbase_structure(pb: &ParsedBlock, block_height: u64) -> Result<(), TxError> {
+    let coinbase = pb
+        .txs
+        .first()
+        .ok_or_else(|| TxError::new(ErrorCode::BlockErrCoinbaseInvalid, "missing coinbase"))?;
+
+    if !is_coinbase_tx(coinbase) {
+        return Err(TxError::new(
+            ErrorCode::BlockErrCoinbaseInvalid,
+            "first tx is not canonical coinbase",
+        ));
+    }
+
+    let expected_locktime = u32::try_from(block_height)
+        .map_err(|_| TxError::new(ErrorCode::BlockErrCoinbaseInvalid, "height out of range"))?;
+    if coinbase.locktime != expected_locktime {
+        return Err(TxError::new(
+            ErrorCode::BlockErrCoinbaseInvalid,
+            "coinbase locktime must equal block height",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_coinbase_value_bound(

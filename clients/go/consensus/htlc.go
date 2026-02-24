@@ -28,6 +28,9 @@ func ParseHTLCCovenantData(covData []byte) (*HTLCCovenant, error) {
 	if c.LockMode != LOCK_MODE_HEIGHT && c.LockMode != LOCK_MODE_TIMESTAMP {
 		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_HTLC lock_mode invalid")
 	}
+	if c.LockValue == 0 {
+		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_HTLC lock_value must be > 0")
+	}
 	if c.ClaimKeyID == c.RefundKeyID {
 		return nil, txerr(TX_ERR_PARSE, "CORE_HTLC claim/refund key_id must differ")
 	}
@@ -73,6 +76,9 @@ func ValidateHTLCSpend(
 			return txerr(TX_ERR_PARSE, "CORE_HTLC claim payload too short")
 		}
 		preLen := int(binary.LittleEndian.Uint16(pathSig[1:3]))
+		if preLen == 0 {
+			return txerr(TX_ERR_PARSE, "CORE_HTLC preimage_len must be > 0")
+		}
 		if preLen > MAX_HTLC_PREIMAGE_BYTES {
 			return txerr(TX_ERR_PARSE, "CORE_HTLC preimage length overflow")
 		}

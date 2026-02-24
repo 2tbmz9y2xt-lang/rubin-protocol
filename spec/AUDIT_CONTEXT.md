@@ -59,8 +59,8 @@
 | # | Тезис внешнего аудита | Disposition | Статус | Пояснение / якорь |
 |---:|---|---|---|---|
 | 1 | DA bytes cap маппится на `BLOCK_ERR_WEIGHT_EXCEEDED` | INTENTIONAL | ALREADY_FIXED | Так задано в CANONICAL: `sum_da_bytes(B) ... иначе BLOCK_ERR_WEIGHT_EXCEEDED`. (`spec/RUBIN_L1_CANONICAL.md:419`) |
-| 2 | HTLC claim допускает `preimage_len = 0` (нет нижней границы) | REAL | OPEN | В HTLC spec есть только `<= MAX`; в Go/Rust проверок `>= 1` нет. (`spec/RUBIN_CORE_HTLC_SPEC.md:115`, `clients/go/consensus/htlc.go:75`) **Консенсусное ужесточение ⇒ НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА.** |
-| 3 | HTLC refund: `lock_value = 0` при HEIGHT делает refund немедленным | REAL | OPEN | Правило `block_height >= lock_value` делает `0` тривиально истинным. (`spec/RUBIN_CORE_HTLC_SPEC.md:161`, `clients/go/consensus/htlc.go:100`) **Консенсусное ужесточение ⇒ НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА.** |
+| 2 | HTLC claim допускает `preimage_len = 0` (нет нижней границы) | REAL | ALREADY_FIXED | Контроллер одобрил консенсусное ужесточение (2026-02-24): `preimage_len MUST be >= 1`. Синхронизировано: spec + Go/Rust + conformance (`CV-HTLC-11`). |
+| 3 | HTLC refund: `lock_value = 0` при HEIGHT делает refund немедленным | REAL | ALREADY_FIXED | Контроллер одобрил консенсусное ужесточение (2026-02-24): `lock_value MUST be > 0` (creation rule). Синхронизировано: spec + Go/Rust + conformance (`CV-HTLC-12`). |
 | 4 | Witness cursor model не имеет formal proof-pack в репо | FALSE | ALREADY_FIXED | Proof-pack baseline вендорится в `rubin-formal/` и синхронизирован через `tools/check_formal_coverage.py` + CI job `formal`. (`spec/README.md`, `.github/workflows/ci.yml`) |
 | 5 | SLH-DSA плохо сочетается с multisig из-за лимита witness bytes | REAL | ALREADY_FIXED | Ограничение явно зафиксировано operational note в `CORE_MULTISIG` semantics (non-consensus), с рекомендацией ML-DSA default и SLH как fallback. (`spec/RUBIN_L1_CANONICAL.md` §14.2) |
 | 6 | `batch_sig` до 64KB — unverified blob (DoS) | INTENTIONAL | ALREADY_FIXED | CANONICAL прямо запрещает L1 проверять `batch_sig`; размер ограничен 65,536. (`spec/RUBIN_L1_CANONICAL.md:205`, `:225`) |
@@ -75,7 +75,7 @@
 | 15 | Непоследовательный стиль перекрёстных ссылок | REAL | ALREADY_FIXED | HTLC spec нормализован на единый формат ссылок `RUBIN_L1_CANONICAL.md §N`; смешанный стиль в audit-critical участках устранён. (`spec/RUBIN_CORE_HTLC_SPEC.md`) |
 | 16 | CV-HTLC-10 описан как “unknown spend path (suite_id=0x02)” | REAL | ALREADY_FIXED | Формулировка исправлена на корректную семантику `path_id ∉ {0x00,0x01}` без изменения fixture semantics. (`spec/RUBIN_CORE_HTLC_SPEC.md` §8) |
 | 17 | `da_id` uniqueness только per-block, reuse across blocks разрешён | INTENTIONAL | ALREADY_FIXED | Явно задано в CANONICAL. (`spec/RUBIN_L1_CANONICAL.md:1309`) |
-| 18 | Нет опубликованных точных genesis bytes/allocations | REAL | OPEN | Спека требует, чтобы сеть опубликовала exact genesis bytes для derivation `chain_id`, но репо не содержит chain-instance genesis pack. (`spec/RUBIN_L1_CANONICAL.md:587`, `spec/RUBIN_NETWORK_PARAMS.md:101`) |
+| 18 | Нет опубликованных точных genesis bytes/allocations | REAL | DEFERRED | Это не “дыра спеки”, а chain-instance артефакт для Phase‑0 devnet (genesis bytes → `chain_id`). **Пока мы на стадии “только спека” — genesis НЕ генерим и НЕ дефолтим.** Генерация/публикация делается только непосредственно перед devnet bring‑up по коду (иначе будут несогласованные `chain_id`). Тречится в `../inbox/QUEUE.md` как `B-01..B-03` (см. `../inbox/operational/RUBIN_DEVNET_GENESIS_PUBLISH_v1.md`). (`spec/RUBIN_L1_CANONICAL.md:587`, `spec/RUBIN_NETWORK_PARAMS.md:101`) |
 
 ## Already fixed (из прошлых аудитов)
 
