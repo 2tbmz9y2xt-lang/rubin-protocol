@@ -1350,6 +1350,11 @@ update procedure (Section 15). Per-window difficulty changes remain bounded by t
 MUST treat the block timestamp as miner-provided data constrained by consensus rules, not as a trusted wall-clock
 time source; protocol time semantics should be expressed in block height where possible.
 
+Risk disposition (non-normative): this multi-window MTP manipulation vector is explicitly classified as
+`ACCEPTED_RISK_TS_MTP_MULTIWINDOW` for the current consensus design (deterministic MTP bounds preserved;
+no node-local wall-clock guard). This is a majority-hashrate economic risk, not a distinct validity bypass.
+Re-evaluate before mainnet freeze and at each scheduled security review checkpoint.
+
 For genesis (`h = 0`), these rules are not evaluated.
 
 ## 23. Chainwork and Fork Choice (Non-Validation Procedure)
