@@ -175,7 +175,7 @@ fn parse_tx_witness_item_canonicalization() {
     tx4.push(0x01);
     tx4.push(SUITE_ID_SLH_DSA_SHAKE_256F);
     tx4.push(0x40); // pubkey_length = 64
-    tx4.extend_from_slice(&vec![0u8; 64]);
+    tx4.extend_from_slice(&[0u8; 64]);
     tx4.push(0x00); // sig_length = 0
     tx4.push(0x00); // da_payload_len
     let err = parse_tx(&tx4).unwrap_err();
@@ -191,7 +191,7 @@ fn parse_tx_witness_bytes_overflow() {
     for _ in 0..3 {
         tx.push(SUITE_ID_SLH_DSA_SHAKE_256F);
         tx.push(0x40); // pubkey_length=64
-        tx.extend_from_slice(&vec![0u8; 64]);
+        tx.extend_from_slice(&[0u8; 64]);
         tx.extend_from_slice(&[0xfd, 0xc0, 0xc2]); // sig_length=49856 (0xC2C0)
         tx.extend_from_slice(&vec![0u8; 49_856]);
     }
@@ -1078,6 +1078,7 @@ fn tx_with_one_input_one_output(
     b
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tx_with_one_input_one_output_with_witness(
     prev_txid: [u8; 32],
     prev_vout: u32,
