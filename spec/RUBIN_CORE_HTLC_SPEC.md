@@ -3,7 +3,7 @@
 **Document:** `RUBIN_CORE_HTLC_SPEC.md`  
 **Covenant type:** `CORE_HTLC` (`0x0100`)  
 **Status:** ACTIVE — activated from genesis in `RUBIN_L1_CANONICAL.md`  
-**Formal verification:** `rubin-formal/RubinFormal/CVHTLCV2.lean`, `HTLCV2ValueTheorems.lean`, `HTLCV2GatingTheorems.lean` (8 theorems, all proved)
+**Formal verification:** out-of-tree (Lean4 proof pack is **not vendored in this repository**)
 
 ---
 
@@ -220,9 +220,8 @@ transaction spending one or more HTLC inputs (along with any other input types).
 There is no fee-preservation rule (unlike `CORE_VAULT`). The spender may
 route funds to any output and may pay any fee to the miner.
 
-Formally verified: `value_preservation_claim` and `value_preservation_refund`
-in `HTLCV2ValueTheorems.lean` — both reduce to the global
-`T005_value_conservation_noncoinbase` theorem.
+Value preservation for both the claim and refund paths follows from the global non-coinbase
+value conservation rules in `RUBIN_L1_CANONICAL.md` (Section 20).
 
 ---
 
