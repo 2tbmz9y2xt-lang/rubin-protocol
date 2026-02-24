@@ -8,8 +8,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 DISALLOWED_SUBSTRINGS = [
-    "/Users/",
-    "\\Users\\",
+    "/" + "Users" + "/",
+    "\\" + "Users" + "\\",
 ]
 
 
@@ -73,4 +73,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
