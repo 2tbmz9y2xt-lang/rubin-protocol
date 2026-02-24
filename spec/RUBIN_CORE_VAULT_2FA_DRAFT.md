@@ -14,6 +14,35 @@ This draft is intended to be attached to audit discussions before making a conse
 
 ---
 
+## 0. Design summary (Informational)
+
+### 0.1 Problem statement
+
+We want a “safe-mode vault” that remains secure under common failure modes:
+
+- If the owner key is compromised: attacker still cannot move vault funds without a second factor.
+- If the vault factor is compromised: attacker still cannot move vault funds without the owner.
+- If both are compromised: the immutable whitelist still restricts where funds can go.
+
+### 0.2 Non-goals
+
+- This draft does **not** introduce “recovery without owner”. If the owner lock is lost, funds are unrecoverable
+  by design (same as a standard wallet).
+- This draft does **not** attempt to make vault spends “operational” (batching, arbitrary change, arbitrary
+  destinations). Those belong to the owner wallet outside the vault.
+
+### 0.3 Threat model (Informational)
+
+Attacker capabilities considered:
+- Can steal some keys (owner, vault-factor, or both).
+- Can craft arbitrary transactions and choose arbitrary fees and input sets.
+- Can attempt to bypass destination policy by mixing inputs/outputs.
+
+Security goals:
+- Vault funds MUST NOT be redirected to non-whitelisted destinations by any combination of inputs/outputs.
+- Vault funds MUST NOT be burned as fee (no “melt the safe into miner fee”).
+- Vault spends MUST be explicitly owner-authorized and 2FA-authorized.
+
 ## 1. Definitions
 
 ### 1.1 OutputDescriptorBytes
@@ -29,12 +58,18 @@ OutputDescriptorBytes(output) =
 
 `output.value` is intentionally excluded.
 
+### 1.1.1 Why value is excluded (Informational)
+
+Excluding `output.value` allows whitelisting *destinations/policies* independent of transfer amounts:
+- A single whitelist entry can allow “send to operational wallet” for any amount.
+- Vault cannot enforce per-destination amounts on L1 (this is out of scope by design).
+
 ### 1.2 Owner Lock ID (`owner_lock_id`)
 
 We define a unified owner identifier that works for both `CORE_P2PK` and `CORE_MULTISIG` owners:
 
 ```text
-owner_lock_id = SHA3-256(OutputDescriptorBytes(owner_output_descriptor))
+owner_lock_id = SHA3-256(owner_output_descriptor)
 ```
 
 Where `owner_output_descriptor` is a *descriptor* of the owner lock (either P2PK or MULTISIG) expressed as:
@@ -51,6 +86,13 @@ Notes:
 - For P2PK, `owner_covenant_data` is the standard P2PK covenant data (CANONICAL §14 registry).
 - For MULTISIG, `owner_covenant_data` is the standard multisig covenant data (CANONICAL §14 registry).
 
+### 1.2.1 Owner is a lock policy, not a “name” (Informational)
+
+We intentionally bind a vault to an owner **lock policy** (P2PK or MULTISIG) rather than a free-form “owner id”:
+- deterministic and machine-checkable,
+- supports both single-key and org multisig owners,
+- avoids introducing a second “identity system” in consensus.
+
 ### 1.3 Referenced-input lock id (`lock_id(e)`)
 
 For any referenced UTXO entry `e` (from the input outpoint):
@@ -60,6 +102,16 @@ lock_id(e) = SHA3-256(u16le(e.covenant_type) || CompactSize(len(e.covenant_data)
 ```
 
 This is exactly `SHA3-256(OutputDescriptorBytes(out))` applied to the referenced UTXO’s covenant fields.
+
+### 1.3.1 Owner-authorization primitive (Informational)
+
+If a transaction contains an input that spends a referenced UTXO entry `e` with `lock_id(e) = owner_lock_id`,
+then (under standard covenant rules) the transaction is necessarily authorized by that owner lock.
+
+This is the core mechanism used in this draft for:
+- “vault cannot be created without the owner”,
+- “vault cannot be spent without the owner”,
+- “no fee sponsorship (no third-party inputs)”.
 
 ---
 
@@ -84,6 +136,13 @@ Where:
 - `vault_keys[i] = SHA3-256(vault_pubkey_i)` (same key-id convention as other covenants).
 - `whitelist[j] = SHA3-256(OutputDescriptorBytes(output_j))` (same whitelist convention as v1).
 
+### 2.1.1 Rationale (Informational)
+
+- `vault_version` allows an explicit transition from v1 to v2 without ambiguous parsing.
+- `owner_lock_id` makes “owner binding” explicit and enables consensus-level owner checks.
+- `vault_keys[]` provide the second factor (M-of-N).
+- `whitelist[]` is the last-resort guardrail if keys are compromised.
+
 ### 2.2 Constraints at creation (CheckTx / output validation)
 
 For any output `out` with `out.covenant_type = CORE_VAULT` and `vault_version = 2`:
@@ -105,10 +164,19 @@ Additional 2FA-specific invariants:
     MUST contain at least one input whose referenced UTXO entry `e` satisfies `lock_id(e) = X`.
   - Rationale: vault cannot be created without the owner authorizing the transaction via an owner-controlled input.
 
-Error mapping (draft; final mapping belongs to CANONICAL error registry):
-- If format/constraints fail: `TX_ERR_COVENANT_TYPE_INVALID`.
-- If “owner destination forbidden” fails: `TX_ERR_COVENANT_TYPE_INVALID`.
-- If “owner authorization required” fails: `TX_ERR_COVENANT_TYPE_INVALID`.
+### 2.3 Error mapping at creation (Draft)
+
+This draft provides two options:
+
+1) **Minimal mapping (reuse existing code):**
+   - Any creation-time violation rejects as `TX_ERR_COVENANT_TYPE_INVALID`.
+
+2) **Audit-friendly mapping (proposal; requires error-registry update):**
+   - Invalid v2 covenant_data / constraints: `TX_ERR_COVENANT_TYPE_INVALID`
+   - Whitelist contains owner lock: `TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN`
+   - Missing owner-authorized input on vault creation: `TX_ERR_VAULT_OWNER_AUTH_REQUIRED`
+
+**НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА** to introduce new error codes.
 
 ---
 
@@ -147,8 +215,16 @@ Rules for any vault-spend transaction `T`:
    its referenced UTXO entry `e` MUST satisfy `lock_id(e) = X`.
    - Rationale: non-vault inputs (used for fee funding) must be owned by the same owner lock.
 
-Error mapping (draft):
+### 3.3.1 Error mapping (Draft)
+
+Minimal mapping:
 - If violated: `TX_ERR_COVENANT_TYPE_INVALID`.
+
+Audit-friendly mapping (proposal):
+- Missing owner input in vault-spend: `TX_ERR_VAULT_OWNER_AUTH_REQUIRED`
+- Non-owner non-vault input present: `TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN`
+
+**НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА** to introduce new error codes.
 
 ### 3.4 Value conservation (vault value must not fund fee)
 
@@ -162,6 +238,37 @@ Rule:
 Rationale:
 - Prevents burning vault value as fee.
 - Fee is funded only by non-vault (owner) inputs: `fee = sum_in - sum_out`.
+
+### 3.5 User-space operational model (Informational)
+
+This section explains how wallets should use the vault to keep the model “safe-only”.
+
+#### 3.5.1 VaultCreateTx (owner-authorized create)
+
+Vault creation is a normal transaction that:
+- spends at least one owner-controlled input (P2PK or MULTISIG),
+- creates a `CORE_VAULT_v2` output (the safe),
+- may create normal change outputs to the owner (creation is not a vault-spend),
+- pays fee as usual.
+
+Wallet UX:
+- Owner selects/approves “Create vault”.
+- Wallet collects guardian pubkeys (vault factor) and whitelist destinations.
+- Wallet constructs and signs the creation transaction with owner credentials.
+
+#### 3.5.2 VaultSpendTx (2FA spend)
+
+Vault spend is a normal transaction that:
+- spends a `CORE_VAULT_v2` input (requires vault-factor signatures),
+- includes at least one owner-controlled input (owner authorization),
+- **all outputs must be whitelisted** (safe destinations),
+- fee is funded by owner-controlled non-vault inputs only (no sponsorship).
+
+Practical implication:
+- A wallet MUST maintain a small “gas-UTXO” set for the owner lock (many small owner UTXOs) to fund vault fees
+  without requiring a “change output” back to the owner inside the vault-spend transaction.
+- The owner wallet remains the operational wallet: batching, arbitrary change, arbitrary destinations happen
+  after funds arrive to the operational wallet via a whitelisted destination.
 
 ---
 
@@ -193,6 +300,11 @@ Minimum executable vectors to add before claiming audit-readiness:
 - `VAULT2-SPEND-04`: spend vault2 with output not in whitelist → reject.
 - `VAULT2-SPEND-05`: attempt to fund fee from vault (`sum_out < sum_in_vault`) → reject.
 
+Additions recommended for audit-grade coverage:
+- `VAULT2-CREATE-05`: create vault2 where owner_lock_id corresponds to MULTISIG policy; ensure creation requires
+  spending that MULTISIG-owned input (not just any P2PK).
+- `VAULT2-SPEND-06`: spend vault2 where owner is MULTISIG; ensure non-vault inputs must match that MULTISIG owner lock id.
+
 ---
 
 ## 6. Security notes (Draft)
@@ -202,4 +314,20 @@ Minimum executable vectors to add before claiming audit-readiness:
 - Owner loss is catastrophic by design: owner authorization is always required; there is no recovery bypass.
 - Fee sponsorship is forbidden to keep the vault-spend model simple and to avoid introducing third-party inputs
   into vault transactions.
+
+## 7. Migration / integration plan (Draft)
+
+This draft changes consensus and therefore requires a controlled integration plan:
+
+1) Merge this design into `RUBIN_L1_CANONICAL.md` with:
+   - explicit v1 vs v2 parsing rules,
+   - explicit activation rule (genesis-only, or feature-bit + activation height),
+   - finalized error-code mapping.
+2) Update Go reference implementation.
+3) Update Rust parity implementation.
+4) Add executable conformance vectors for v2 create + spend paths.
+5) Freeze-ready claim requires:
+   - section hashes updated,
+   - `run_cv_bundle.py` parity PASS,
+   - audit context updated to track the consensus change explicitly.
 
