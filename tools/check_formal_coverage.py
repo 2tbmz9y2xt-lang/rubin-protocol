@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 ALLOWED_STATUS = {"proved", "stated", "deferred"}
+ALLOWED_PROOF_LEVEL = {"toy-model", "spec-model", "byte-model", "refinement"}
 
 
 def fail(msg: str) -> int:
@@ -26,6 +27,23 @@ def main() -> int:
 
     section_hashes = json.loads(section_hashes_path.read_text(encoding="utf-8"))
     coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
+
+    proof_level = coverage.get("proof_level")
+    if proof_level not in ALLOWED_PROOF_LEVEL:
+        return fail(
+            f"invalid or missing proof_level in rubin-formal/proof_coverage.json: {proof_level}; "
+            f"expected one of {sorted(ALLOWED_PROOF_LEVEL)}"
+        )
+
+    claims = coverage.get("claims")
+    if not isinstance(claims, dict):
+        return fail("missing claims{} in rubin-formal/proof_coverage.json (required to prevent overclaim)")
+    allowed_claims = claims.get("allowed")
+    forbidden_claims = claims.get("forbidden")
+    if not isinstance(allowed_claims, list) or len(allowed_claims) == 0:
+        return fail("claims.allowed[] must be a non-empty list in rubin-formal/proof_coverage.json")
+    if not isinstance(forbidden_claims, list) or len(forbidden_claims) == 0:
+        return fail("claims.forbidden[] must be a non-empty list in rubin-formal/proof_coverage.json")
 
     expected_keys = set(section_hashes.get("section_headings", {}).keys())
     rows = coverage.get("coverage")
@@ -87,7 +105,7 @@ def main() -> int:
 
     print(
         f"OK: formal coverage baseline is consistent "
-        f"({len(seen_keys)} sections from spec/SECTION_HASHES.json)."
+        f"({len(seen_keys)} sections from spec/SECTION_HASHES.json), proof_level={proof_level}."
     )
     return 0
 

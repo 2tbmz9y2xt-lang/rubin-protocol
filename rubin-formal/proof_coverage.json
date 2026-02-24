@@ -122,5 +122,17 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean"
     }
-  ]
+  ],
+  "proof_level": "toy-model",
+  "claims": {
+    "allowed": [
+      "model-level proved baseline for pinned sections",
+      "toy/model invariants proved; refinement to byte-accurate/executable semantics is pending"
+    ],
+    "forbidden": [
+      "formal verification of RUBIN consensus / CANONICAL",
+      "bit-exact wire/serialization proven",
+      "proved equivalence between spec and Go/Rust implementations"
+    ]
+  }
 }
