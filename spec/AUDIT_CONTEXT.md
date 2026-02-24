@@ -68,7 +68,7 @@
 | 8 | В BlockHeader нет height | INTENTIONAL | ALREADY_FIXED | Height — функция положения в цепи; есть coinbase height-commitment (`locktime = h`). (`spec/RUBIN_L1_CANONICAL.md:426`, `:1054`) |
 | 9 | MTP-only timestamp манипулируем (multi-window) | INTENTIONAL | ACCEPTED_RISK | Зафиксировано как `ACCEPTED_RISK_TS_MTP_MULTIWINDOW`. (`spec/RUBIN_L1_CANONICAL.md:1347`, `spec/AUDIT_CONTEXT.md:67`) |
 | 10 | Термины DA set/batch/payload непоследовательны | FALSE | ALREADY_FIXED | CANONICAL даёт явные определения и норму “используем DA set для консенсуса”. (`spec/RUBIN_L1_CANONICAL.md:30`) |
-| 11 | Ретаргет требует 320-bit/arb-precision, но нет coverage на overflow-края | REAL | OPEN | Требование есть, но conformance требует расширения на boundary-продукты/транкейт. (`spec/RUBIN_L1_CANONICAL.md:997`, `conformance/fixtures/CV-POW.json:1`) |
+| 11 | Ретаргет требует 320-bit/arb-precision, но нет coverage на overflow-края | REAL | ALREADY_FIXED | CV-POW расширен boundary-векторами для floor/truncation и clamp-overflow (`POW-03C`, `POW-03D`, `POW-08A`), выполняется в Go↔Rust parity через `retarget_v1` op. (`conformance/fixtures/CV-POW.json`) |
 | 12 | `output_count = 0` не запрещён | INTENTIONAL | ALREADY_FIXED | Sighash задаёт `SHA3-256(\"\")` для `output_count=0`. (`spec/RUBIN_L1_CANONICAL.md:604`) |
 | 13 | Feature-bit framework не полностью специфицирован | FALSE | ALREADY_FIXED | FSM `DEFINED→STARTED→LOCKED_IN→ACTIVE/FAILED` описан. (`spec/RUBIN_L1_CANONICAL.md:1402`, `:1425`) |
 | 14 | SLH suite до активации может “залочить” funds | FALSE | ALREADY_FIXED | Creation rules гейтят `suite_id=0x02` по высоте. (`spec/RUBIN_NETWORK_PARAMS.md:132`, `clients/go/consensus/covenant_genesis.go:21`) |
