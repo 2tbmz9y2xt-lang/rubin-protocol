@@ -36,8 +36,8 @@
 | ID | Статус | Кратко |
 |---|---|---|
 | F-03 | OPEN | Нет end-to-end crypto `verify_sig` в consensus path (задача `Q-R006`) |
-| F-05 | OPEN | Coinbase subsidy bound (`subsidy + fees`) не вшит в block validation |
-| F-10 | OPEN | COMPACT ссылается на `version`-поля, P2P_AUX не описывает их wire |
+| F-05 | OPEN (partial) | Fee-aware coinbase bound check существует, но end-to-end закрытие зависит от вычисления `sum_fees` и `already_generated(h)` в stateful apply path (`Q-R006`). |
+| F-10 | ALREADY_FIXED | `RUBIN_L1_P2P_AUX.md` содержит минимальные `version`/`verack` поля (`tx_relay`, `pruned_below_height`) на которые ссылается COMPACT. |
 
 ## Already fixed (из прошлых аудитов)
 
