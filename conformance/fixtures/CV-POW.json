@@ -47,6 +47,24 @@
       "expect_err": "TX_ERR_PARSE"
     },
     {
+      "id": "POW-03C",
+      "op": "retarget_v1",
+      "expect_ok": true,
+      "target_old": "0000000000000000000000000000000000000000000000000000000000001000",
+      "timestamp_first": 0,
+      "timestamp_last": 1209599,
+      "expect_target_new": "0000000000000000000000000000000000000000000000000000000000000fff"
+    },
+    {
+      "id": "POW-03D",
+      "op": "retarget_v1",
+      "expect_ok": true,
+      "target_old": "0000000000000000000000000000000000000000000000000000000000001000",
+      "timestamp_first": 0,
+      "timestamp_last": 1209900,
+      "expect_target_new": "0000000000000000000000000000000000000000000000000000000000001001"
+    },
+    {
       "id": "POW-08",
       "op": "retarget_v1",
       "expect_ok": true,
@@ -61,6 +79,22 @@
         "last_jump": 1000000
       },
       "expect_target_new": "0000000000000000000000000000000000000000000000000000000000001003"
+    },
+    {
+      "id": "POW-08A",
+      "op": "retarget_v1",
+      "expect_ok": false,
+      "target_old": "0000000000000000000000000000000000000000000000000000000000001000",
+      "timestamp_first": 0,
+      "timestamp_last": 1209600,
+      "window_pattern": {
+        "mode": "step_with_last_jump",
+        "window_size": 10080,
+        "start": 18446744073709551615,
+        "step": 0,
+        "last_jump": 0
+      },
+      "expect_err": "TX_ERR_PARSE"
     },
     {
       "id": "POW-04",
