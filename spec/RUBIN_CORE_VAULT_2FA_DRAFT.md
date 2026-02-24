@@ -178,17 +178,15 @@ Additional 2FA-specific invariants:
 
 ### 2.3 Error mapping at creation (Draft)
 
-This draft provides two options:
+This draft assumes **audit-friendly mapping** (requires error-registry update):
+- Invalid covenant_data / constraints: `TX_ERR_COVENANT_TYPE_INVALID`
+- Whitelist contains owner lock: `TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN`
+- Missing owner-authorized input on vault creation: `TX_ERR_VAULT_OWNER_AUTH_REQUIRED`
 
-1) **Minimal mapping (reuse existing code):**
-   - Any creation-time violation rejects as `TX_ERR_COVENANT_TYPE_INVALID`.
+Fallback (not recommended for audit-grade integrations):
+- Any creation-time violation rejects as `TX_ERR_COVENANT_TYPE_INVALID`.
 
-2) **Audit-friendly mapping (proposal; requires error-registry update):**
-   - Invalid covenant_data / constraints: `TX_ERR_COVENANT_TYPE_INVALID`
-   - Whitelist contains owner lock: `TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN`
-   - Missing owner-authorized input on vault creation: `TX_ERR_VAULT_OWNER_AUTH_REQUIRED`
-
-**НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА** to introduce new error codes.
+**НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА** to introduce new error codes in CANONICAL.
 
 ---
 
@@ -196,6 +194,14 @@ This draft provides two options:
 
 This draft defines a **vault-spend transaction** as any transaction `T` where at least one input spends a
 referenced UTXO entry with `covenant_type = CORE_VAULT`.
+
+### 3.0 Safe-only rule (one vault per transaction)
+
+A vault-spend transaction MUST NOT include more than one input spending `CORE_VAULT`.
+
+Rationale:
+- Vault is a safe, not an operational wallet.
+- Batching is performed by many outputs within a single-vault transaction, or by multiple transactions (one per vault).
 
 ### 3.1 Vault-factor signatures (M-of-N)
 
@@ -229,14 +235,15 @@ Rules for any vault-spend transaction `T`:
 
 ### 3.3.1 Error mapping (Draft)
 
-Minimal mapping:
-- If violated: `TX_ERR_COVENANT_TYPE_INVALID`.
-
-Audit-friendly mapping (proposal):
+Audit-friendly mapping (proposal; requires error-registry update):
 - Missing owner input in vault-spend: `TX_ERR_VAULT_OWNER_AUTH_REQUIRED`
 - Non-owner non-vault input present: `TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN`
+- More than one vault input present: `TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN`
 
-**НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА** to introduce new error codes.
+Fallback (not recommended for audit-grade integrations):
+- If violated: `TX_ERR_COVENANT_TYPE_INVALID`.
+
+**НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА** to introduce new error codes in CANONICAL.
 
 ### 3.4 Value conservation (vault value must not fund fee)
 
@@ -284,36 +291,31 @@ Practical implication:
 
 ---
 
-## 4. Optional simplification (Policy / possible consensus rule)
+## 4. Vault is not operational (Informational)
 
-To keep the model maximally simple (“vaults are self-contained safes”), it may be desirable to enforce:
-
-- **At most one vault input per transaction.**
-
-This is **not required** for correctness of whitelist enforcement (intersection already prevents bypass),
-but it simplifies user-space behavior and reduces complex edge cases in wallets.
-
-**НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА** if this is made consensus-critical.
+This draft intentionally treats `CORE_VAULT` as a **safe-only** primitive:
+- Do not use vault inputs for arbitrary operational batching and coin selection.
+- Perform operational batching in the owner wallet after funds arrive to a whitelisted operational destination.
 
 ---
 
-## 4.1 Open normative decisions (Draft)
+## 4.1 Controller decisions (Draft)
 
-Even under “clean replace-before-genesis”, three consensus choices must be fixed:
+Even under “clean replace-before-genesis”, three consensus choices must be fixed. This draft assumes the
+following controller decisions (to be confirmed before CANONICAL integration):
 
-1) **Value rule for vault spends:** choose one
-   - `sum_out >= sum_in_vault` (vault value cannot fund fee; owner may route extra owner inputs to whitelisted destinations), or
-   - `sum_out == sum_in_vault` (strict preservation; forces all non-vault owner inputs to be consumed as fee unless their value is also routed to whitelisted destinations).
+1) **Value rule for vault spends:** `sum_out >= sum_in_vault`.
+   - Rationale: vault value cannot fund fee; owner may additionally route owner funds to whitelisted operational destinations.
+   - Note: this does not allow arbitrary “change” to non-whitelisted destinations inside a vault spend.
 
-2) **Error mapping policy:**
-   - minimal mapping (reuse `TX_ERR_COVENANT_TYPE_INVALID`), or
-   - audit-friendly mapping (introduce explicit vault error codes).
+2) **Error mapping policy:** audit-friendly mapping (explicit vault error codes).
+   - Rationale: improves debuggability and conformance precision for external integrators/auditors.
 
-3) **At most one vault input per transaction:**
-   - consensus-critical запрет, или
-   - wallet policy.
+3) **At most one vault input per transaction:** consensus-critical запрет (safe-only vault model).
+   - Rationale: vault is not an operational wallet; batching is done via multiple transactions (one per vault),
+     with many outputs per transaction.
 
-**НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА** to finalize these.
+**НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА** to finalize these in CANONICAL.
 
 ## 5. Conformance plan (Draft)
 
@@ -329,6 +331,7 @@ Minimum executable vectors to add before claiming audit-readiness:
 - `VAULT2-SPEND-03`: spend vault2 with owner fee input, whitelist ok, vault sig threshold ok → ok.
 - `VAULT2-SPEND-04`: spend vault2 with output not in whitelist → reject.
 - `VAULT2-SPEND-05`: attempt to fund fee from vault (`sum_out < sum_in_vault`) → reject.
+- `VAULT2-SPEND-07`: attempt to spend 2 vault inputs in one transaction → reject.
 
 Additions recommended for audit-grade coverage:
 - `VAULT2-CREATE-05`: create vault2 where owner_lock_id corresponds to MULTISIG policy; ensure creation requires
