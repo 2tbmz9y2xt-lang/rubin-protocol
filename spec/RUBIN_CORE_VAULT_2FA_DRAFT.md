@@ -43,6 +43,13 @@ Security goals:
 - Vault funds MUST NOT be burned as fee (no “melt the safe into miner fee”).
 - Vault spends MUST be explicitly owner-authorized and 2FA-authorized.
 
+## 0.4 Scope choice for Phase‑0 / devnet (Informational)
+
+This draft assumes a **clean replace-before-genesis** model:
+- There are no “live” legacy vault UTXOs.
+- The specification defines exactly **one** `CORE_VAULT` covenant_data format (no dual support).
+- Any `CORE_VAULT` output not matching the specified format MUST be rejected.
+
 ## 1. Definitions
 
 ### 1.1 OutputDescriptorBytes
@@ -115,15 +122,12 @@ This is the core mechanism used in this draft for:
 
 ---
 
-## 2. CORE_VAULT v2 covenant_data (Draft)
+## 2. CORE_VAULT covenant_data (Draft, single-format)
 
 ### 2.1 Wire format
 
-Proposed `CORE_VAULT` covenant data format becomes versioned:
-
 ```text
-CORE_VAULT_v2.covenant_data =
-  vault_version:u8 (=2) ||
+CORE_VAULT.covenant_data =
   owner_lock_id:bytes32 ||
   vault_threshold:u8 ||
   vault_key_count:u8 ||
@@ -138,14 +142,14 @@ Where:
 
 ### 2.1.1 Rationale (Informational)
 
-- `vault_version` allows an explicit transition from v1 to v2 without ambiguous parsing.
+This is a **clean replace-before-genesis** format (single format, no migration).
 - `owner_lock_id` makes “owner binding” explicit and enables consensus-level owner checks.
 - `vault_keys[]` provide the second factor (M-of-N).
 - `whitelist[]` is the last-resort guardrail if keys are compromised.
 
 ### 2.2 Constraints at creation (CheckTx / output validation)
 
-For any output `out` with `out.covenant_type = CORE_VAULT` and `vault_version = 2`:
+For any output `out` with `out.covenant_type = CORE_VAULT`:
 
 - `out.value MUST be > 0`.
 - `1 <= vault_key_count <= MAX_VAULT_KEYS`.
@@ -154,14 +158,22 @@ For any output `out` with `out.covenant_type = CORE_VAULT` and `vault_version = 
 - `1 <= whitelist_count <= MAX_VAULT_WHITELIST_ENTRIES`.
 - `whitelist[] MUST be strictly lexicographically sorted (ascending) with no duplicates`.
 
+Length rule (single deterministic formula):
+
+```text
+covenant_data_len MUST equal 32 + 1 + 1 + 32*vault_key_count + 2 + 32*whitelist_count
+```
+
 Additional 2FA-specific invariants:
 
 - **Owner destination forbidden:** `owner_lock_id MUST NOT be present in whitelist[]`.
   - Rationale: prevents the “safe” from whitelisting direct spend back into the same owner lock.
 
 - **Owner authorization required to create a vault:**
-  - Any transaction `T` that creates at least one `CORE_VAULT_v2` output with `owner_lock_id = X`
+  - Any transaction `T` that creates at least one `CORE_VAULT` output with `owner_lock_id = X`
     MUST contain at least one input whose referenced UTXO entry `e` satisfies `lock_id(e) = X`.
+  - Additionally, at least one such authorizing input MUST reference a UTXO whose covenant type is
+    either `CORE_P2PK` or `CORE_MULTISIG` (owner lock types).
   - Rationale: vault cannot be created without the owner authorizing the transaction via an owner-controlled input.
 
 ### 2.3 Error mapping at creation (Draft)
@@ -172,7 +184,7 @@ This draft provides two options:
    - Any creation-time violation rejects as `TX_ERR_COVENANT_TYPE_INVALID`.
 
 2) **Audit-friendly mapping (proposal; requires error-registry update):**
-   - Invalid v2 covenant_data / constraints: `TX_ERR_COVENANT_TYPE_INVALID`
+   - Invalid covenant_data / constraints: `TX_ERR_COVENANT_TYPE_INVALID`
    - Whitelist contains owner lock: `TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN`
    - Missing owner-authorized input on vault creation: `TX_ERR_VAULT_OWNER_AUTH_REQUIRED`
 
@@ -183,11 +195,11 @@ This draft provides two options:
 ## 3. Spend semantics (Draft)
 
 This draft defines a **vault-spend transaction** as any transaction `T` where at least one input spends a
-referenced UTXO entry with `covenant_type = CORE_VAULT` and `vault_version = 2`.
+referenced UTXO entry with `covenant_type = CORE_VAULT`.
 
 ### 3.1 Vault-factor signatures (M-of-N)
 
-For each input spending `CORE_VAULT_v2`, the input MUST satisfy the vault signature threshold:
+For each input spending `CORE_VAULT`, the input MUST satisfy the vault signature threshold:
 - The witness cursor assigns `vault_key_count` WitnessItems to the vault input.
 - Signatures are verified against `vault_keys[]`.
 - Require `valid >= vault_threshold`.
@@ -203,7 +215,7 @@ For each output `out` in the spending transaction `T`:
 
 ### 3.3 Fee sponsorship forbidden (owner-only non-vault inputs)
 
-Let `X` be the `owner_lock_id` of the spent `CORE_VAULT_v2`.
+Let `X` be the `owner_lock_id` of the spent `CORE_VAULT`.
 
 Rules for any vault-spend transaction `T`:
 
@@ -247,7 +259,7 @@ This section explains how wallets should use the vault to keep the model “safe
 
 Vault creation is a normal transaction that:
 - spends at least one owner-controlled input (P2PK or MULTISIG),
-- creates a `CORE_VAULT_v2` output (the safe),
+- creates a `CORE_VAULT` output (the safe),
 - may create normal change outputs to the owner (creation is not a vault-spend),
 - pays fee as usual.
 
@@ -259,7 +271,7 @@ Wallet UX:
 #### 3.5.2 VaultSpendTx (2FA spend)
 
 Vault spend is a normal transaction that:
-- spends a `CORE_VAULT_v2` input (requires vault-factor signatures),
+- spends a `CORE_VAULT` input (requires vault-factor signatures),
 - includes at least one owner-controlled input (owner authorization),
 - **all outputs must be whitelisted** (safe destinations),
 - fee is funded by owner-controlled non-vault inputs only (no sponsorship).
@@ -284,6 +296,24 @@ but it simplifies user-space behavior and reduces complex edge cases in wallets.
 **НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА** if this is made consensus-critical.
 
 ---
+
+## 4.1 Open normative decisions (Draft)
+
+Even under “clean replace-before-genesis”, three consensus choices must be fixed:
+
+1) **Value rule for vault spends:** choose one
+   - `sum_out >= sum_in_vault` (vault value cannot fund fee; owner may route extra owner inputs to whitelisted destinations), or
+   - `sum_out == sum_in_vault` (strict preservation; forces all non-vault owner inputs to be consumed as fee unless their value is also routed to whitelisted destinations).
+
+2) **Error mapping policy:**
+   - minimal mapping (reuse `TX_ERR_COVENANT_TYPE_INVALID`), or
+   - audit-friendly mapping (introduce explicit vault error codes).
+
+3) **At most one vault input per transaction:**
+   - consensus-critical запрет, или
+   - wallet policy.
+
+**НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА** to finalize these.
 
 ## 5. Conformance plan (Draft)
 
@@ -314,20 +344,3 @@ Additions recommended for audit-grade coverage:
 - Owner loss is catastrophic by design: owner authorization is always required; there is no recovery bypass.
 - Fee sponsorship is forbidden to keep the vault-spend model simple and to avoid introducing third-party inputs
   into vault transactions.
-
-## 7. Migration / integration plan (Draft)
-
-This draft changes consensus and therefore requires a controlled integration plan:
-
-1) Merge this design into `RUBIN_L1_CANONICAL.md` with:
-   - explicit v1 vs v2 parsing rules,
-   - explicit activation rule (genesis-only, or feature-bit + activation height),
-   - finalized error-code mapping.
-2) Update Go reference implementation.
-3) Update Rust parity implementation.
-4) Add executable conformance vectors for v2 create + spend paths.
-5) Freeze-ready claim requires:
-   - section hashes updated,
-   - `run_cv_bundle.py` parity PASS,
-   - audit context updated to track the consensus change explicitly.
-
