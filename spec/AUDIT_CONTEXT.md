@@ -43,6 +43,18 @@
 | F-12 | OPEN/OPS | Воспроизводимость зависит от `PATH` (go/node вне базового PATH) |
 | F-13 | OPEN | В CANONICAL есть `CV-SIG-*`, но нет gate/fixture `CV-SIG` |
 
+## Already fixed (из прошлых аудитов)
+
+| ID | Статус | Что закрыто |
+|---|---|---|
+| F-01 | ALREADY_FIXED | `tx_kind` расширен до `{0x00,0x01,0x02}` в Go/Rust парсерах; DA tx-path валиден |
+| F-02 | ALREADY_FIXED | Добавлены и заведены `BLOCK_ERR_DA_*` коды в Go/Rust |
+| F-04 | ALREADY_FIXED | Timestamp/MTP wired в реальный block validation path (Go/Rust) |
+| F-08 | ALREADY_FIXED | `RUBIN_NETWORK_PARAMS.md` синхронизирован с CANONICAL по P2PK suite-gating (ML-DSA + SLH post-activation) |
+| F-09 | ALREADY_FIXED | Восстановлен `spec/AUDIT_CONTEXT.md`; ссылка из `spec/README.md` больше не битая |
+| F-11 | ALREADY_FIXED | DoS hardening по orphan pool выполнен (storm-mode + rollback triggers + conformance vectors; `P2P-04 DONE`) |
+| F-14 | ALREADY_FIXED | `RUBIN_NETWORK_PARAMS.md` разделяет consensus-critical и relay/operational параметры через колонку `Class` |
+
 ## Зафиксированные accepted risks
 
 | Risk ID | Статус | Где зафиксировано |
