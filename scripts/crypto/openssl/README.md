@@ -3,24 +3,24 @@
 ## Build local bundle (OpenSSL 3.5+)
 
 ```bash
-cd /Users/gpt/Documents/rubin-protocol
+cd <REPO_ROOT>
 chmod +x scripts/crypto/openssl/build-openssl-bundle.sh
 OPENSSL_VERSION=3.5.5 scripts/crypto/openssl/build-openssl-bundle.sh
 ```
 
 Default install prefix:
 
-`/Users/gpt/.cache/rubin-openssl/bundle-<version>`
+`$HOME/.cache/rubin-openssl/bundle-<version>`
 
 ## Run PQ benchmark (OpenSSL `speed`, primary)
 
 ```bash
-cd /Users/gpt/Documents/rubin-protocol
+cd <REPO_ROOT>
 chmod +x scripts/crypto/openssl/bench-pq-speed.py
 scripts/crypto/openssl/bench-pq-speed.py \
-  --openssl-bin /Users/gpt/.cache/rubin-openssl/bundle-3.5.5/bin/openssl \
+  --openssl-bin "$HOME/.cache/rubin-openssl/bundle-<version>/bin/openssl" \
   --seconds 5 \
-  --output-json /Users/gpt/Documents/inbox/reports/openssl_pq_bench_latest.json
+  --output-json <OUTPUT_JSON_PATH>
 ```
 
 Notes:
@@ -32,7 +32,7 @@ Notes:
 Reference command:
 
 ```bash
-/Users/gpt/.cache/rubin-openssl/bundle-3.5.5/bin/openssl speed \
+"$HOME/.cache/rubin-openssl/bundle-<version>/bin/openssl" speed \
   -elapsed -multi 16 -seconds 30 \
   -signature-algorithms ML-DSA-87 SLH-DSA-SHAKE-256f
 ```
@@ -53,6 +53,6 @@ Interpretation:
 ```bash
 chmod +x scripts/crypto/openssl/bench-pq-pkeyutl.py
 scripts/crypto/openssl/bench-pq-pkeyutl.py \
-  --openssl-bin /Users/gpt/.cache/rubin-openssl/bundle-3.5.5/bin/openssl \
-  --output-json /Users/gpt/Documents/inbox/reports/openssl_pq_bench_pkeyutl_latest.json
+  --openssl-bin "$HOME/.cache/rubin-openssl/bundle-<version>/bin/openssl" \
+  --output-json <OUTPUT_JSON_PATH>
 ```
