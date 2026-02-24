@@ -37,10 +37,7 @@
 |---|---|---|
 | F-03 | OPEN | Нет end-to-end crypto `verify_sig` в consensus path (задача `Q-R006`) |
 | F-05 | OPEN | Coinbase subsidy bound (`subsidy + fees`) не вшит в block validation |
-| F-06 | OPEN/INFO | Исторические freeze-ready SHAs в старых отчётах не совпадают с текущим HEAD |
-| F-07 | OPEN/PARTIAL | Conformance содержит local ops, нужен явный label coverage-boundary |
 | F-10 | OPEN | COMPACT ссылается на `version`-поля, P2P_AUX не описывает их wire |
-| F-12 | OPEN/OPS | Воспроизводимость зависит от `PATH` (go/node вне базового PATH) |
 | F-13 | OPEN | В CANONICAL есть `CV-SIG-*`, но нет gate/fixture `CV-SIG` |
 
 ## Already fixed (из прошлых аудитов)
@@ -52,7 +49,10 @@
 | F-04 | ALREADY_FIXED | Timestamp/MTP wired в реальный block validation path (Go/Rust) |
 | F-08 | ALREADY_FIXED | `RUBIN_NETWORK_PARAMS.md` синхронизирован с CANONICAL по P2PK suite-gating (ML-DSA + SLH post-activation) |
 | F-09 | ALREADY_FIXED | Восстановлен `spec/AUDIT_CONTEXT.md`; ссылка из `spec/README.md` больше не битая |
+| F-06 | ALREADY_FIXED (audit hygiene) | В исторических отчётах добавлены explicit pointers на актуальный addendum и authoritative `main`-status, исключая повторный triage по устаревшим SHA-привязкам |
+| F-07 | ALREADY_FIXED (audit hygiene) | В external-pack добавлен актуальный coverage-boundary и статус-дельта для executable vs local ops, чтобы не трактовать local ops как “full consensus coverage” |
 | F-11 | ALREADY_FIXED | DoS hardening по orphan pool выполнен (storm-mode + rollback triggers + conformance vectors; `P2P-04 DONE`) |
+| F-12 | ALREADY_FIXED (ops hygiene) | Добавлен operational reproducibility note в `spec/README.md` (PATH/tooling prerequisites) |
 | F-14 | ALREADY_FIXED | `RUBIN_NETWORK_PARAMS.md` разделяет consensus-critical и relay/operational параметры через колонку `Class` |
 
 ## Зафиксированные accepted risks

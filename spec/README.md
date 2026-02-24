@@ -69,6 +69,26 @@ Integrity:
   - Open findings (Q-C013..Q-C019, HTLC BUG-1/2)
   - Инструкция для аудитора
 
+### Audit Tooling Repro (operational)
+
+Для воспроизводимых локальных запусков в macOS/Homebrew окружении:
+
+```bash
+export PATH=/opt/homebrew/bin:$PATH
+```
+
+Минимальный набор проверок:
+
+```bash
+python3 tools/check_readme_index.py
+python3 tools/check_section_hashes.py
+node scripts/check-spec-invariants.mjs
+node scripts/check-section-hashes.mjs
+python3 conformance/runner/run_cv_bundle.py
+```
+
+Это operational note (не консенсус).
+
 ## Document Precedence
 
 ```
