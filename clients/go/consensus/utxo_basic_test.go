@@ -254,6 +254,45 @@ func TestApplyNonCoinbaseTxBasic_VaultPreservedWithExternalFeeSponsor(t *testing
 	}
 }
 
+func TestApplyNonCoinbaseTxBasic_VaultFeeFundedByNonVaultInputAllowed(t *testing.T) {
+	var prevVault, prevFee, txid [32]byte
+	prevVault[0] = 0xd3
+	prevFee[0] = 0xd4
+	txid[0] = 0xd5
+
+	tx := &Tx{
+		Inputs: []TxInput{
+			{PrevTxid: prevVault, PrevVout: 0},
+			{PrevTxid: prevFee, PrevVout: 0},
+		},
+		Witness: dummyWitnesses(2),
+		Outputs: []TxOutput{
+			{Value: 105, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
+		},
+	}
+
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prevVault, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_VAULT,
+			CovenantData: validVaultCovenantDataForP2PKOutput(),
+		},
+		{Txid: prevFee, Vout: 0}: {
+			Value:        10,
+			CovenantType: COV_TYPE_P2PK,
+			CovenantData: validP2PKCovenantData(),
+		},
+	}
+
+	s, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if s.Fee != 5 {
+		t.Fatalf("fee=%d, want 5", s.Fee)
+	}
+}
+
 func TestApplyNonCoinbaseTxBasic_VaultWhitelistRejectsOutput(t *testing.T) {
 	var prevVault, prevFee, txid [32]byte
 	prevVault[0] = 0xe0

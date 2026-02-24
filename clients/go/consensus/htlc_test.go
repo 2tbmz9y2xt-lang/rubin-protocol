@@ -144,6 +144,49 @@ func TestValidateHTLCSpend_RefundTimelockNotMet(t *testing.T) {
 	}
 }
 
+func TestValidateHTLCSpend_RefundTimestampUsesMTP(t *testing.T) {
+	claimPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
+	refundPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
+	refundPub[0] = 0x44
+	claimKeyID := sha3_256(claimPub)
+	refundKeyID := sha3_256(refundPub)
+
+	cov := encodeHTLCCovenantData(
+		sha3_256([]byte("x")),
+		LOCK_MODE_TIMESTAMP,
+		2000,
+		claimKeyID,
+		refundKeyID,
+	)
+	entry := UtxoEntry{
+		Value:        100,
+		CovenantType: COV_TYPE_HTLC,
+		CovenantData: cov,
+	}
+	path := WitnessItem{
+		SuiteID:   SUITE_ID_SENTINEL,
+		Pubkey:    refundKeyID[:],
+		Signature: []byte{0x01},
+	}
+	sig := WitnessItem{
+		SuiteID:   SUITE_ID_SLH_DSA_SHAKE_256F,
+		Pubkey:    refundPub,
+		Signature: []byte{0x01},
+	}
+
+	err := ValidateHTLCSpend(entry, path, sig, SLH_DSA_ACTIVATION_HEIGHT, 1000)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_TIMELOCK_NOT_MET {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_TIMELOCK_NOT_MET)
+	}
+
+	if err := ValidateHTLCSpend(entry, path, sig, SLH_DSA_ACTIVATION_HEIGHT, 3000); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestApplyNonCoinbaseTxBasic_HTLCUnknownPath(t *testing.T) {
 	var prev [32]byte
 	prev[0] = 0xa1

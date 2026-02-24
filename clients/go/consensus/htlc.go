@@ -43,7 +43,7 @@ func ValidateHTLCSpend(
 	pathItem WitnessItem,
 	sigItem WitnessItem,
 	blockHeight uint64,
-	blockTimestamp uint64,
+	blockMTP uint64,
 ) error {
 	c, err := ParseHTLCCovenantData(entry.CovenantData)
 	if err != nil {
@@ -107,7 +107,7 @@ func ValidateHTLCSpend(
 			if blockHeight < c.LockValue {
 				return txerr(TX_ERR_TIMELOCK_NOT_MET, "CORE_HTLC height lock not met")
 			}
-		} else if blockTimestamp < c.LockValue {
+		} else if blockMTP < c.LockValue {
 			return txerr(TX_ERR_TIMELOCK_NOT_MET, "CORE_HTLC timestamp lock not met")
 		}
 		expectedKeyID = c.RefundKeyID

@@ -254,6 +254,7 @@ See `conformance/fixtures/CV-HTLC.json`. Required coverage:
 | CV-HTLC-10 | spend | unknown spend path (`path_id ∉ {0x00, 0x01}`) | `TX_ERR_PARSE` |
 | CV-HTLC-11 | claim | `preimage_len = 0` | `TX_ERR_PARSE` |
 | CV-HTLC-12 | creation | `lock_value = 0` | `TX_ERR_COVENANT_TYPE_INVALID` |
+| CV-HTLC-13 | refund | timestamp refund uses `MTP` (not `block_timestamp`) | `OK` |
 
 ---
 

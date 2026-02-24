@@ -21,7 +21,18 @@ type UtxoApplySummary struct {
 }
 
 func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEntry, height uint64, blockTimestamp uint64) (*UtxoApplySummary, error) {
-	work, summary, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxoSet, height, blockTimestamp)
+	return ApplyNonCoinbaseTxBasicWithMTP(tx, txid, utxoSet, height, blockTimestamp, blockTimestamp)
+}
+
+func ApplyNonCoinbaseTxBasicWithMTP(
+	tx *Tx,
+	txid [32]byte,
+	utxoSet map[Outpoint]UtxoEntry,
+	height uint64,
+	blockTimestamp uint64,
+	blockMTP uint64,
+) (*UtxoApplySummary, error) {
+	work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTP(tx, txid, utxoSet, height, blockTimestamp, blockMTP)
 	_ = work
 	return summary, err
 }
@@ -39,7 +50,19 @@ func ApplyNonCoinbaseTxBasicUpdate(
 	height uint64,
 	blockTimestamp uint64,
 ) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
-	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, utxoSet, height, blockTimestamp)
+	return ApplyNonCoinbaseTxBasicUpdateWithMTP(tx, txid, utxoSet, height, blockTimestamp, blockTimestamp)
+}
+
+func ApplyNonCoinbaseTxBasicUpdateWithMTP(
+	tx *Tx,
+	txid [32]byte,
+	utxoSet map[Outpoint]UtxoEntry,
+	height uint64,
+	blockTimestamp uint64,
+	blockMTP uint64,
+) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
+	_ = blockTimestamp
+	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, utxoSet, height, blockMTP)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -49,7 +72,13 @@ func ApplyNonCoinbaseTxBasicUpdate(
 	}, nil
 }
 
-func applyNonCoinbaseTxBasicWork(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEntry, height uint64, blockTimestamp uint64) (map[Outpoint]UtxoEntry, uint64, error) {
+func applyNonCoinbaseTxBasicWork(
+	tx *Tx,
+	txid [32]byte,
+	utxoSet map[Outpoint]UtxoEntry,
+	height uint64,
+	blockMTP uint64,
+) (map[Outpoint]UtxoEntry, uint64, error) {
 	if tx == nil {
 		return nil, 0, txerr(TX_ERR_PARSE, "nil tx")
 	}
@@ -95,7 +124,7 @@ func applyNonCoinbaseTxBasicWork(tx *Tx, txid [32]byte, utxoSet map[Outpoint]Utx
 				tx.Witness[witnessCursor],
 				tx.Witness[witnessCursor+1],
 				height,
-				blockTimestamp,
+				blockMTP,
 			); err != nil {
 				return nil, 0, err
 			}

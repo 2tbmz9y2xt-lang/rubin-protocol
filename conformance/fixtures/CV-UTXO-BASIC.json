@@ -200,6 +200,35 @@
           "created_by_coinbase": false
         }
       ]
+    },
+    {
+      "id": "CV-U-13",
+      "op": "utxo_apply_basic",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_VALUE_CONSERVATION",
+      "height": 200,
+      "block_timestamp": 1000,
+      "tx_hex": "0100000000010000000000000002d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0000000000000000000d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1000000000000000000016900000000000000000021010000000000000000000000000000000000000000000000000000000000000000000000000200000000000000",
+      "utxos": [
+        {
+          "txid": "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+          "vout": 0,
+          "value": 100,
+          "covenant_type": 257,
+          "covenant_data": "010111000000000000000000000000000000000000000000000000000000000000000100ad081b3670e36fb466e0df0bd7b58d74c6455360627b6bb4f74aabae3fa86317",
+          "creation_height": 100,
+          "created_by_coinbase": false
+        },
+        {
+          "txid": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+          "vout": 0,
+          "value": 10,
+          "covenant_type": 0,
+          "covenant_data": "010000000000000000000000000000000000000000000000000000000000000000",
+          "creation_height": 0,
+          "created_by_coinbase": false
+        }
+      ]
     }
   ]
 }

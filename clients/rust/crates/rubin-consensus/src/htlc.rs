@@ -72,7 +72,7 @@ pub fn validate_htlc_spend(
     path_item: &WitnessItem,
     sig_item: &WitnessItem,
     block_height: u64,
-    block_timestamp: u64,
+    block_mtp: u64,
 ) -> Result<(), TxError> {
     let cov = parse_htlc_covenant_data(&entry.covenant_data)?;
 
@@ -166,7 +166,7 @@ pub fn validate_htlc_spend(
                         "CORE_HTLC height lock not met",
                     ));
                 }
-            } else if block_timestamp < cov.lock_value {
+            } else if block_mtp < cov.lock_value {
                 return Err(TxError::new(
                     ErrorCode::TxErrTimelockNotMet,
                     "CORE_HTLC timestamp lock not met",

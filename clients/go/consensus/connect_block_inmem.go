@@ -54,6 +54,12 @@ func ConnectBlockBasicInMemoryAtHeight(
 	}
 
 	alreadyGenerated := state.AlreadyGenerated
+	blockMTP := pb.Header.Timestamp
+	if median, ok, err := medianTimePast(blockHeight, prevTimestamps); err != nil {
+		return nil, err
+	} else if ok {
+		blockMTP = median
+	}
 
 	// Compute fees and update UTXO set by applying all non-coinbase transactions.
 	var sumFees uint64
@@ -61,7 +67,14 @@ func ConnectBlockBasicInMemoryAtHeight(
 		tx := pb.Txs[i]
 		txid := pb.Txids[i]
 
-		nextUtxos, s, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, state.Utxos, blockHeight, pb.Header.Timestamp)
+		nextUtxos, s, err := ApplyNonCoinbaseTxBasicUpdateWithMTP(
+			tx,
+			txid,
+			state.Utxos,
+			blockHeight,
+			pb.Header.Timestamp,
+			blockMTP,
+		)
 		if err != nil {
 			return nil, err
 		}

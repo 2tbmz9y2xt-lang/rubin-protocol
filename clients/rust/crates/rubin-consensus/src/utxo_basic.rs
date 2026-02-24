@@ -42,6 +42,25 @@ pub fn apply_non_coinbase_tx_basic_update(
     height: u64,
     block_timestamp: u64,
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
+    apply_non_coinbase_tx_basic_update_with_mtp(
+        tx,
+        txid,
+        utxo_set,
+        height,
+        block_timestamp,
+        block_timestamp,
+    )
+}
+
+pub fn apply_non_coinbase_tx_basic_update_with_mtp(
+    tx: &Tx,
+    txid: [u8; 32],
+    utxo_set: &HashMap<Outpoint, UtxoEntry>,
+    height: u64,
+    block_timestamp: u64,
+    block_mtp: u64,
+) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
+    let _ = block_timestamp;
     if tx.inputs.is_empty() {
         return Err(TxError::new(
             ErrorCode::TxErrParse,
@@ -94,7 +113,7 @@ pub fn apply_non_coinbase_tx_basic_update(
                 &tx.witness[witness_cursor],
                 &tx.witness[witness_cursor + 1],
                 height,
-                block_timestamp,
+                block_mtp,
             )?;
             witness_cursor += slots;
         } else {
@@ -174,10 +193,10 @@ pub fn apply_non_coinbase_tx_basic_update(
             "sum_out exceeds sum_in",
         ));
     }
-    if has_vault_input && sum_out < sum_in_vault {
+    if has_vault_input && sum_out != sum_in_vault {
         return Err(TxError::new(
             ErrorCode::TxErrValueConservation,
-            "vault inputs cannot fund miner fee",
+            "vault spends must preserve exact vault value in outputs",
         ));
     }
 
@@ -199,8 +218,32 @@ pub fn apply_non_coinbase_tx_basic(
     height: u64,
     block_timestamp: u64,
 ) -> Result<UtxoApplySummary, TxError> {
-    let (_work, summary) =
-        apply_non_coinbase_tx_basic_update(tx, txid, utxo_set, height, block_timestamp)?;
+    apply_non_coinbase_tx_basic_with_mtp(
+        tx,
+        txid,
+        utxo_set,
+        height,
+        block_timestamp,
+        block_timestamp,
+    )
+}
+
+pub fn apply_non_coinbase_tx_basic_with_mtp(
+    tx: &Tx,
+    txid: [u8; 32],
+    utxo_set: &HashMap<Outpoint, UtxoEntry>,
+    height: u64,
+    block_timestamp: u64,
+    block_mtp: u64,
+) -> Result<UtxoApplySummary, TxError> {
+    let (_work, summary) = apply_non_coinbase_tx_basic_update_with_mtp(
+        tx,
+        txid,
+        utxo_set,
+        height,
+        block_timestamp,
+        block_mtp,
+    )?;
     Ok(summary)
 }
 

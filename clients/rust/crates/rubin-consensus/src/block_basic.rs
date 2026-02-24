@@ -392,22 +392,9 @@ fn validate_timestamp_rules(
     block_height: u64,
     prev_timestamps: Option<&[u64]>,
 ) -> Result<(), TxError> {
-    if block_height == 0 {
-        return Ok(());
-    }
-    let Some(prev) = prev_timestamps else {
+    let Some(median) = median_time_past(block_height, prev_timestamps)? else {
         return Ok(());
     };
-    let k = usize::try_from(block_height.min(11)).unwrap_or(11);
-    if prev.len() < k {
-        return Err(TxError::new(
-            ErrorCode::BlockErrParse,
-            "insufficient prev_timestamps context",
-        ));
-    }
-    let mut window = prev[..k].to_vec();
-    window.sort_unstable();
-    let median = window[(window.len() - 1) / 2];
     if header_timestamp <= median {
         return Err(TxError::new(
             ErrorCode::BlockErrTimestampOld,
@@ -422,6 +409,33 @@ fn validate_timestamp_rules(
         ));
     }
     Ok(())
+}
+
+pub(crate) fn median_time_past(
+    block_height: u64,
+    prev_timestamps: Option<&[u64]>,
+) -> Result<Option<u64>, TxError> {
+    if block_height == 0 {
+        return Ok(None);
+    }
+    let Some(prev) = prev_timestamps else {
+        return Ok(None);
+    };
+    if prev.is_empty() {
+        return Ok(None);
+    }
+
+    let k = usize::try_from(block_height.min(11)).unwrap_or(11);
+    if prev.len() < k {
+        return Err(TxError::new(
+            ErrorCode::BlockErrParse,
+            "insufficient prev_timestamps context",
+        ));
+    }
+
+    let mut window = prev[..k].to_vec();
+    window.sort_unstable();
+    Ok(Some(window[(window.len() - 1) / 2]))
 }
 
 #[derive(Clone)]

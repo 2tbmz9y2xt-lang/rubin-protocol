@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
 use crate::block_basic::{
-    parse_block_bytes, validate_block_basic_with_context_at_height, ParsedBlock,
+    median_time_past, parse_block_bytes, validate_block_basic_with_context_at_height, ParsedBlock,
 };
 use crate::constants::{COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT};
 use crate::error::{ErrorCode, TxError};
 use crate::subsidy::block_subsidy;
-use crate::utxo_basic::{apply_non_coinbase_tx_basic_update, Outpoint, UtxoEntry};
+use crate::utxo_basic::{apply_non_coinbase_tx_basic_update_with_mtp, Outpoint, UtxoEntry};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InMemoryChainState {
@@ -90,15 +90,17 @@ pub fn connect_block_basic_in_memory_at_height(
     }
 
     let already_generated = state.already_generated;
+    let block_mtp = median_time_past(block_height, prev_timestamps)?.unwrap_or(pb.header.timestamp);
 
     let mut sum_fees: u64 = 0;
     for i in 1..pb.txs.len() {
-        let (next_utxos, s) = apply_non_coinbase_tx_basic_update(
+        let (next_utxos, s) = apply_non_coinbase_tx_basic_update_with_mtp(
             &pb.txs[i],
             pb.txids[i],
             &state.utxos,
             block_height,
             pb.header.timestamp,
+            block_mtp,
         )?;
         state.utxos = next_utxos;
         sum_fees = sum_fees
