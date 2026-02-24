@@ -71,10 +71,19 @@ Integrity:
 
 ### Audit Tooling Repro (operational)
 
-Для воспроизводимых локальных запусков в macOS/Homebrew окружении:
+Для воспроизводимых локальных запусков в macOS/Homebrew окружении используем единый env-wrapper
+(устраняет проблемы с урезанным `PATH` в Codex-сессиях):
 
 ```bash
-export PATH=/opt/homebrew/bin:$PATH
+scripts/dev-env.sh
+```
+
+Для запуска команд:
+
+```bash
+scripts/dev-env.sh -- python3 tools/check_readme_index.py
+scripts/dev-env.sh -- node scripts/check-section-hashes.mjs
+scripts/dev-env.sh -- python3 conformance/runner/run_cv_bundle.py
 ```
 
 Версия Node.js для spec tooling pinned в корне репо:

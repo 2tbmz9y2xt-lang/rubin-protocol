@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+#
+# dev-env.sh
+#
+# Purpose:
+# - Make local runs reproducible in macOS/Homebrew environments where Codex sessions may start
+#   with a minimal PATH (missing /opt/homebrew/bin).
+# - Provide a single, project-standard way to run commands with required toolchains available.
+#
+# Usage:
+#   # Print environment summary + tool versions (exits 0/1)
+#   scripts/dev-env.sh
+#
+#   # Run a command with fixed PATH and basic toolchain checks
+#   scripts/dev-env.sh -- <command> [args...]
+#
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+prepend_path_if_exists() {
+  local dir="$1"
+  if [[ -d "$dir" ]]; then
+    case ":${PATH}:" in
+      *":${dir}:"*) ;;
+      *) PATH="${dir}:${PATH}" ;;
+    esac
+  fi
+}
+
+# Homebrew defaults
+prepend_path_if_exists "/opt/homebrew/bin"
+prepend_path_if_exists "/usr/local/bin"
+
+export PATH
+
+need_cmd() {
+  local cmd="$1"
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "ERROR: missing required tool in PATH: ${cmd}" >&2
+    return 1
+  fi
+}
+
+maybe_cmd() {
+  local cmd="$1"
+  if command -v "$cmd" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+print_versions() {
+  echo "repo_root: ${REPO_ROOT}"
+  echo "PATH: ${PATH}"
+  echo
+
+  echo "git: $(git --version 2>/dev/null || echo 'missing')"
+  echo "python3: $(python3 --version 2>/dev/null || echo 'missing')"
+  echo "node: $(node --version 2>/dev/null || echo 'missing')"
+  echo "npm: $(npm --version 2>/dev/null || echo 'missing')"
+  echo "go: $(go version 2>/dev/null || echo 'missing')"
+  echo "rustc: $(rustc --version 2>/dev/null || echo 'missing')"
+  echo "cargo: $(cargo --version 2>/dev/null || echo 'missing')"
+
+  if maybe_cmd elan; then
+    echo "elan: $(elan --version 2>/dev/null || echo 'missing')"
+  else
+    echo "elan: missing (ok unless running formal/Lean locally)"
+  fi
+  if maybe_cmd lake; then
+    echo "lake: $(lake --version 2>/dev/null || echo 'missing')"
+  else
+    echo "lake: missing (ok unless running formal/Lean locally)"
+  fi
+}
+
+check_required() {
+  need_cmd git
+  need_cmd python3
+  need_cmd node
+  need_cmd npm
+  need_cmd go
+  need_cmd cargo
+  need_cmd rustc
+}
+
+if [[ "${1:-}" == "--" ]]; then
+  shift
+  if [[ $# -eq 0 ]]; then
+    echo "ERROR: dev-env.sh: missing command after --" >&2
+    exit 2
+  fi
+  check_required
+  exec "$@"
+fi
+
+print_versions
+check_required
+echo
+echo "OK: dev env looks usable. Tip: scripts/dev-env.sh -- <cmd>"
