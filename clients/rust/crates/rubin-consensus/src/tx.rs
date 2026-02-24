@@ -244,9 +244,9 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
                     true
                 } else if pub_len == 32 {
                     if sig_len == 1 {
-                        signature.get(0) == Some(&0x01)
+                        signature.first() == Some(&0x01)
                     } else if sig_len >= 3 {
-                        if signature.get(0) != Some(&0x00) {
+                        if signature.first() != Some(&0x00) {
                             false
                         } else {
                             let pre_len = u16::from_le_bytes(

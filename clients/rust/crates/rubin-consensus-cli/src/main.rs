@@ -167,7 +167,6 @@ fn main() {
                 sum_fees: None,
                 already_generated: None,
                 already_generated_n1: None,
-                ..Default::default()
             };
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
             return;

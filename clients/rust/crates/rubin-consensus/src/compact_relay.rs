@@ -74,7 +74,7 @@ pub(crate) fn siphash24(msg: &[u8], k0: u64, k1: u64) -> u64 {
 /// Computes a 6-byte compact short ID from WTXID using SipHash-2-4.
 /// The 64-bit SipHash result is truncated to lower 48 bits (little-endian bytes).
 pub fn compact_shortid(wtxid: [u8; 32], nonce1: u64, nonce2: u64) -> [u8; 6] {
-    let h = siphash24(&wtxid, nonce1, nonce2) & 0x0000ffff_ffff_ffff;
+    let h = siphash24(&wtxid, nonce1, nonce2) & 0x0000_ffff_ffff_ffff;
     let b = h.to_le_bytes();
     let mut out = [0u8; 6];
     out.copy_from_slice(&b[..6]);

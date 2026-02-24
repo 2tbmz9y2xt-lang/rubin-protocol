@@ -41,7 +41,7 @@ fn merkle_root_tagged(ids: &[[u8; 32]], leaf_tag: u8, node_tag: u8) -> Result<[u
     let mut node_preimage = [0u8; 1 + 32 + 32];
     node_preimage[0] = node_tag;
     while level.len() > 1 {
-        let mut next: Vec<[u8; 32]> = Vec::with_capacity((level.len() + 1) / 2);
+        let mut next: Vec<[u8; 32]> = Vec::with_capacity(level.len().div_ceil(2));
         let mut i = 0usize;
         while i < level.len() {
             if i == level.len() - 1 {

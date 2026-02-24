@@ -34,7 +34,7 @@ jobs:
           cache-dependency-path: clients/go/go.mod
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
       - uses: actions/setup-node@v4
         with:
           node-version-file: '.node-version'
@@ -87,6 +87,11 @@ jobs:
           cd clients/go
           go test ./...
 
+      - name: Go vet
+        run: |
+          cd clients/go
+          go vet ./...
+
       - name: Rust fmt
         run: |
           cd clients/rust
@@ -96,6 +101,11 @@ jobs:
         run: |
           cd clients/rust
           cargo test --workspace
+
+      - name: Rust clippy
+        run: |
+          cd clients/rust
+          cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Spec invariants check
         run: node scripts/check-spec-invariants.mjs
