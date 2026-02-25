@@ -10,3 +10,9 @@ import RubinFormal.Conformance.CVPowVectors
 import RubinFormal.Conformance.CVPowReplay
 import RubinFormal.Conformance.CVWeightVectors
 import RubinFormal.Conformance.CVWeightReplay
+import RubinFormal.Conformance.CVUtxoBasicVectors
+import RubinFormal.Conformance.CVUtxoBasicReplay
+import RubinFormal.Conformance.CVBlockBasicVectors
+import RubinFormal.Conformance.CVBlockBasicReplay
+import RubinFormal.Conformance.CVSubsidyVectors
+import RubinFormal.Conformance.CVSubsidyReplay
