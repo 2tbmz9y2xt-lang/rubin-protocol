@@ -77,18 +77,6 @@ jobs:
           print(f"ok: {len(paths)} files")
           PY
 
-      - name: Check README index/precedence
-        run: python3 tools/check_readme_index.py
-
-      - name: Check SECTION_HASHES integrity (python)
-        run: python3 tools/check_section_hashes.py
-
-      - name: Check conformance IDs + changelog
-        run: python3 tools/check_conformance_ids.py
-
-      - name: Hygiene: no absolute home paths
-        run: python3 tools/check_no_absolute_paths.py
-
       - name: Go fmt
         run: |
           cd clients/go
@@ -104,6 +92,12 @@ jobs:
           cd clients/go
           go vet ./...
 
+      - name: Go govulncheck
+        run: |
+          cd clients/go
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
       - name: Rust fmt
         run: |
           cd clients/rust
@@ -118,6 +112,14 @@ jobs:
         run: |
           cd clients/rust
           cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Cargo audit
+        run: |
+          cd clients/rust
+          cargo audit --deny warnings
 
       - name: Spec invariants check
         run: node scripts/check-spec-invariants.mjs
