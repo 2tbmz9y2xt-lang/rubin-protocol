@@ -94,6 +94,7 @@
 | F-12 | ALREADY_FIXED (ops hygiene) | Добавлен operational reproducibility note в `spec/README.md` (PATH/tooling prerequisites) |
 | F-14 | ALREADY_FIXED | `RUBIN_NETWORK_PARAMS.md` разделяет consensus-critical и relay/operational параметры через колонку `Class` |
 | F-13 | ALREADY_FIXED | Добавлен executable gate `conformance/fixtures/CV-SIG.json`; CANONICAL §12.2 синхронизирован с текущим machine-executable покрытием |
+| Q-V04 | ALREADY_FIXED | CORE_VAULT “2FA replacement” без версионности: новый wire+семантика (owner binding через `owner_lock_id`, owner-only fee inputs, one-vault-per-tx, `sum_out >= sum_in_vault`) + новые `TX_ERR_VAULT_*` коды + conformance gate `CV-VAULT`. См. `../inbox/reports/2026-02-25_report_q-v04_core_vault_2fa_replacement_done.md`. |
 
 ## Зафиксированные accepted risks
 

@@ -24,13 +24,13 @@
     "weight_accounting": "2ad57571c7ac1239ebbee6889b99be9f507d4b904346a79d3cfa4eef36dcf755",
     "witness_commitment": "10a0e0b289df6023e6c6589d575e0f25b37025c0b84ba404dae5738ad50abf3d",
     "sighash_v1": "e20b0bcae92ec4a9549150f1d6b7dc9f29e888c1e6d56341e6beb6062e4a7d1f",
-    "consensus_error_codes": "8a45d187ea0523c29fc1fff3298f4bbaab3bce4e7f2fb67ea737a5858e2d78e1",
-    "covenant_registry": "2a95eafaae6b79d74f66bacef27cd817edcb1cedd4ef2c8c5045f9f346b0871e",
+    "consensus_error_codes": "12cc1085a196210f6a17ad64ef745d06c3d6ae0fbcce713b447bb5f0cec23c5e",
+    "covenant_registry": "c894528091ca9cfb4c42b11a47c05bc5715c3334b272aa6f6761e646d84c2257",
     "difficulty_update": "1b755c3a6e65add9e1f92e382d171acea87763145929978fea5a6e54a51b969d",
-    "transaction_structural_rules": "cda940d89f17467ae803d5504d9d7f11725b44593a9487ccf4ab829dfcf3b5d7",
+    "transaction_structural_rules": "c5b268dab7a7e8e036bc62a0cba877d5994a7bfb47966201c5d71473b18ee965",
     "replay_domain_checks": "f65201c5b65cdc4c53286074806cb189eaaf5909a007ea0079102e3cb616f115",
     "utxo_state_model": "f3f96f3dd27ee8d7d3725502cc4afcbd6cc301cd03c49fa2e1b7e6417ee2ba42",
-    "value_conservation": "6aee9b8a883467c413ba37c32d404de5a75db0ed0026df6d712b6148fe643226",
+    "value_conservation": "e48278b5318dc1bc68712430febebfe37a7ce6e68e02349ca657261eb5c34962",
     "da_set_integrity": "3e71e5f27c3c33997564d5bc7bc36f63467a345ab0ed4b2d40c5c1ff9a94c244"
   }
 }

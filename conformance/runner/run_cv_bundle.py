@@ -942,6 +942,8 @@ def validate_vector(
         req["utxos"] = v["utxos"]
         req["height"] = v["height"]
         req["block_timestamp"] = v["block_timestamp"]
+        if "block_mtp" in v:
+            req["block_mtp"] = int(v["block_mtp"])
     elif op == "compact_shortid":
         req["wtxid"] = v["wtxid"]
         req["nonce1"] = v["nonce1"]

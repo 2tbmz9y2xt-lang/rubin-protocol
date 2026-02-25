@@ -7,6 +7,7 @@ use crate::error::{ErrorCode, TxError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VaultCovenant {
+    pub owner_lock_id: [u8; 32],
     pub threshold: u8,
     pub key_count: u8,
     pub keys: Vec<[u8; 32]>,
@@ -22,34 +23,36 @@ pub struct MultisigCovenant {
 }
 
 pub fn parse_vault_covenant_data(covenant_data: &[u8]) -> Result<VaultCovenant, TxError> {
-    if covenant_data.len() < 68 {
+    if covenant_data.len() < 34 {
         return Err(TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
+            ErrorCode::TxErrVaultMalformed,
             "CORE_VAULT covenant_data too short",
         ));
     }
 
-    let threshold = covenant_data[0];
-    let key_count = covenant_data[1];
+    let mut owner_lock_id = [0u8; 32];
+    owner_lock_id.copy_from_slice(&covenant_data[0..32]);
+    let threshold = covenant_data[32];
+    let key_count = covenant_data[33];
     if key_count == 0 || key_count > MAX_VAULT_KEYS {
         return Err(TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
+            ErrorCode::TxErrVaultParamsInvalid,
             "CORE_VAULT key_count out of range",
         ));
     }
     if threshold == 0 || threshold > key_count {
         return Err(TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
+            ErrorCode::TxErrVaultParamsInvalid,
             "CORE_VAULT threshold out of range",
         ));
     }
 
-    let mut offset = 2usize;
+    let mut offset = 34usize;
     let mut keys = Vec::with_capacity(key_count as usize);
     for _ in 0..key_count {
         if offset + 32 > covenant_data.len() {
             return Err(TxError::new(
-                ErrorCode::TxErrCovenantTypeInvalid,
+                ErrorCode::TxErrVaultMalformed,
                 "CORE_VAULT truncated keys",
             ));
         }
@@ -60,14 +63,14 @@ pub fn parse_vault_covenant_data(covenant_data: &[u8]) -> Result<VaultCovenant, 
     }
     if !strictly_sorted_unique_32(&keys) {
         return Err(TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
+            ErrorCode::TxErrVaultKeysNotCanonical,
             "CORE_VAULT keys not strictly sorted",
         ));
     }
 
     if offset + 2 > covenant_data.len() {
         return Err(TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
+            ErrorCode::TxErrVaultMalformed,
             "CORE_VAULT missing whitelist_count",
         ));
     }
@@ -75,15 +78,15 @@ pub fn parse_vault_covenant_data(covenant_data: &[u8]) -> Result<VaultCovenant, 
     offset += 2;
     if whitelist_count == 0 || whitelist_count > MAX_VAULT_WHITELIST_ENTRIES {
         return Err(TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
+            ErrorCode::TxErrVaultParamsInvalid,
             "CORE_VAULT whitelist_count out of range",
         ));
     }
 
-    let expected_len = 2 + (key_count as usize) * 32 + 2 + (whitelist_count as usize) * 32;
+    let expected_len = 32 + 1 + 1 + (key_count as usize) * 32 + 2 + (whitelist_count as usize) * 32;
     if covenant_data.len() != expected_len {
         return Err(TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
+            ErrorCode::TxErrVaultMalformed,
             "CORE_VAULT covenant_data length mismatch",
         ));
     }
@@ -97,12 +100,19 @@ pub fn parse_vault_covenant_data(covenant_data: &[u8]) -> Result<VaultCovenant, 
     }
     if !strictly_sorted_unique_32(&whitelist) {
         return Err(TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
+            ErrorCode::TxErrVaultWhitelistNotCanonical,
             "CORE_VAULT whitelist not strictly sorted",
+        ));
+    }
+    if hash_in_sorted_32(&whitelist, &owner_lock_id) {
+        return Err(TxError::new(
+            ErrorCode::TxErrVaultOwnerDestinationForbidden,
+            "CORE_VAULT whitelist contains owner_lock_id",
         ));
     }
 
     Ok(VaultCovenant {
+        owner_lock_id,
         threshold,
         key_count,
         keys,
@@ -174,7 +184,9 @@ pub fn output_descriptor_bytes(covenant_type: u16, covenant_data: &[u8]) -> Vec<
 
 pub fn witness_slots(covenant_type: u16, covenant_data: &[u8]) -> usize {
     match covenant_type {
-        COV_TYPE_VAULT | COV_TYPE_MULTISIG => covenant_data.get(1).copied().unwrap_or(1) as usize,
+        COV_TYPE_MULTISIG => covenant_data.get(1).copied().unwrap_or(1) as usize,
+        // CORE_VAULT: owner_lock_id[32] || threshold[1] || key_count[1] || ...
+        COV_TYPE_VAULT => covenant_data.get(33).copied().unwrap_or(1) as usize,
         COV_TYPE_HTLC => 2,
         _ => 1,
     }

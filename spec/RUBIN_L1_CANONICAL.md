@@ -692,6 +692,15 @@ implementations for the described failure classes:
 - HTLC refund locktime not met                    -> `TX_ERR_TIMELOCK_NOT_MET`
 - Witness overflow                                 -> `TX_ERR_WITNESS_OVERFLOW`
 - Invalid covenant_type / covenant encoding        -> `TX_ERR_COVENANT_TYPE_INVALID`
+- CORE_VAULT malformed covenant_data               -> `TX_ERR_VAULT_MALFORMED`
+- CORE_VAULT invalid parameters                    -> `TX_ERR_VAULT_PARAMS_INVALID`
+- CORE_VAULT non-canonical key list                -> `TX_ERR_VAULT_KEYS_NOT_CANONICAL`
+- CORE_VAULT non-canonical whitelist list          -> `TX_ERR_VAULT_WHITELIST_NOT_CANONICAL`
+- CORE_VAULT whitelist contains owner destination  -> `TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN`
+- CORE_VAULT missing owner authorization           -> `TX_ERR_VAULT_OWNER_AUTH_REQUIRED`
+- CORE_VAULT non-owner fee sponsorship forbidden   -> `TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN`
+- CORE_VAULT multiple vault inputs forbidden       -> `TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN`
+- CORE_VAULT output not whitelisted                -> `TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED`
 - Missing UTXO / attempt to spend non-spendable    -> `TX_ERR_MISSING_UTXO`
 - Coinbase immature                                -> `TX_ERR_COINBASE_IMMATURE`
 - Invalid prev_block_hash linkage                  -> `BLOCK_ERR_LINKAGE_INVALID`
@@ -774,22 +783,30 @@ Semantics:
   - Spend semantics: `spec/RUBIN_CORE_HTLC_SPEC.md` §5.
   - Witness consumption: 2 WitnessItems (Section 16).
 - `CORE_VAULT`:
-  - Consensus-native covenant for value storage with mandatory destination whitelist.
+  - Consensus-native covenant for safe value storage with mandatory destination whitelist and explicit owner binding.
   - Active from genesis block 0.
   - `covenant_data` format:
-    - `threshold:u8 || key_count:u8 || keys[key_count] || whitelist_count:u16le || whitelist[whitelist_count]`
+    - `owner_lock_id:bytes32 || threshold:u8 || key_count:u8 || keys[key_count] || whitelist_count:u16le || whitelist[whitelist_count]`
     - each `keys[i]` is `bytes32`; each `whitelist[j]` is `bytes32`
-    - `covenant_data_len MUST equal 2 + 32*key_count + 2 + 32*whitelist_count`
+    - `covenant_data_len MUST equal 32 + 1 + 1 + 32*key_count + 2 + 32*whitelist_count`
   - Constraints at creation (CheckTx):
-    - `value MUST be > 0`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
-    - `1 <= key_count <= MAX_VAULT_KEYS`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
-    - `1 <= threshold <= key_count`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+    - `value MUST be > 0`; otherwise reject as `TX_ERR_VAULT_PARAMS_INVALID`.
+    - `covenant_data_len` MUST match the deterministic formula above; otherwise reject as `TX_ERR_VAULT_MALFORMED`.
+    - `1 <= key_count <= MAX_VAULT_KEYS`; otherwise reject as `TX_ERR_VAULT_PARAMS_INVALID`.
+    - `1 <= threshold <= key_count`; otherwise reject as `TX_ERR_VAULT_PARAMS_INVALID`.
     - `keys[]` MUST be strictly lexicographically sorted (ascending) with no duplicates;
-      otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
-    - `1 <= whitelist_count <= MAX_VAULT_WHITELIST_ENTRIES`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
-    - `whitelist_count = 0` is explicitly forbidden; reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+      otherwise reject as `TX_ERR_VAULT_KEYS_NOT_CANONICAL`.
+    - `1 <= whitelist_count <= MAX_VAULT_WHITELIST_ENTRIES`; otherwise reject as `TX_ERR_VAULT_PARAMS_INVALID`.
+    - `whitelist_count = 0` is explicitly forbidden; reject as `TX_ERR_VAULT_PARAMS_INVALID`.
     - `whitelist[]` MUST be strictly lexicographically sorted (ascending) with no duplicates;
-      otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+      otherwise reject as `TX_ERR_VAULT_WHITELIST_NOT_CANONICAL`.
+    - `owner_lock_id MUST NOT appear in whitelist[]`; otherwise reject as `TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN`.
+    - Let `lock_id(e) = SHA3-256(OutputDescriptorBytes(e.covenant_type, e.covenant_data))`.
+      Any transaction that creates at least one `CORE_VAULT` output with `owner_lock_id = X` MUST contain at least
+      one input whose referenced UTXO entry `e` satisfies `lock_id(e) = X`; otherwise reject as
+      `TX_ERR_VAULT_OWNER_AUTH_REQUIRED`.
+      Additionally, at least one such authorizing input MUST reference a UTXO whose `covenant_type ∈ {CORE_P2PK, CORE_MULTISIG}`;
+      otherwise reject as `TX_ERR_VAULT_OWNER_AUTH_REQUIRED`.
   - `keys[i] = SHA3-256(pubkey_i)`.
   - `whitelist[j] = SHA3-256(OutputDescriptorBytes(output_j))` (Section 18.3).
   - Spend semantics: Section 14.1.
@@ -828,8 +845,29 @@ Semantics:
 
 ### 14.1 CORE_VAULT Semantics (Normative)
 
-For each non-coinbase input spending a `CORE_VAULT` UTXO entry `e`,
-with WitnessItems `witnesses[W .. W+key_count-1]` assigned by the cursor model (Section 16):
+Definitions:
+
+- Let `lock_id(e) = SHA3-256(OutputDescriptorBytes(e.covenant_type, e.covenant_data))`.
+- Let `is_vault_spend(T)` be true if `T` spends at least one `CORE_VAULT` input.
+
+For any vault-spend transaction `T`:
+
+1. `T` MUST NOT spend more than one `CORE_VAULT` input. Otherwise reject as `TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN`.
+2. Let `e_vault` be the referenced UTXO entry for the (single) vault input. Parse `e_vault.covenant_data` as:
+   `owner_lock_id:bytes32 || threshold:u8 || key_count:u8 || keys[key_count] || whitelist_count:u16le || whitelist[whitelist_count]`.
+   Any parse/length failure MUST reject as `TX_ERR_VAULT_MALFORMED`.
+3. Let `X = owner_lock_id(e_vault)`.
+4. **Owner authorization required:** `T` MUST include at least one input whose referenced UTXO entry `e` satisfies
+   `lock_id(e) = X`. Otherwise reject as `TX_ERR_VAULT_OWNER_AUTH_REQUIRED`.
+5. **No fee sponsorship:** For every input in `T` whose referenced UTXO entry covenant type is *not* `CORE_VAULT`,
+   its referenced UTXO entry `e` MUST satisfy `lock_id(e) = X`. Otherwise reject as `TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN`.
+
+Note: the covenant_type of an owner-authorized input need not be re-validated at spend time. The binding is implicit:
+`lock_id(e) = SHA3-256(OutputDescriptorBytes(e))` cryptographically encodes the covenant_type that was validated at vault
+creation.
+
+For the (single) non-coinbase input spending `e_vault`, with WitnessItems `witnesses[W .. W+key_count-1]` assigned by
+the cursor model (Section 16):
 
 #### Signature verification
 
@@ -867,24 +905,24 @@ For each output `out` in the spending transaction:
 
 Compute `h = SHA3-256(OutputDescriptorBytes(out))` (Section 18.3).
 
-`h` MUST be found in `e.whitelist[]` using binary search
+`h` MUST be found in `e_vault.whitelist[]` using binary search
 (whitelist is guaranteed sorted at UTXO creation).
 
-If any output is not found: reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+If any output is not found: reject as `TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED`.
 
-Multi-input rule:
+#### Value rule (vault value must not fund fee)
 
-- If a transaction spends multiple `CORE_VAULT` inputs with different whitelists,
-  the whitelist check above is applied independently for each input.
-  Therefore every output MUST belong to the intersection of all referenced vault whitelists.
-- Fee preservation rule (strong vault mode):
-  - Let `sum_in_vault` be the sum of input values whose referenced UTXO covenant type is `CORE_VAULT`.
-  - For any transaction that spends at least one `CORE_VAULT` input, `sum_out MUST be >= sum_in_vault`.
-    Otherwise reject as `TX_ERR_VALUE_CONSERVATION`.
-  - This forbids spending miner fee from `CORE_VAULT` value; fee must be funded by non-VAULT inputs.
-- Design note:
-  - Vault whitelist constrains allowed destinations, not per-destination amounts.
-  - Amount-per-destination constraints are intentionally out of L1 scope and belong to L2 logic or off-chain policy.
+Let:
+- `sum_in_vault` be the value of the referenced `CORE_VAULT` input (the only vault input in the transaction).
+- `sum_out` be the sum of output values.
+
+Rule:
+- If `sum_out < sum_in_vault`, reject as `TX_ERR_VALUE_CONSERVATION`.
+
+Notes:
+- This forbids burning vault value as miner fee.
+- The owner may top up batched payouts by adding additional owner-authorized non-vault inputs, which allows
+  `sum_out > sum_in_vault` while still requiring all outputs to be whitelisted.
 
 ### 14.2 CORE_MULTISIG Semantics (Normative)
 
@@ -1029,8 +1067,12 @@ For any non-coinbase transaction `T`:
 
    Define `witness_slots(e)` for a referenced UTXO entry `e`:
    - If `e.covenant_type = CORE_HTLC`: `witness_slots(e) = 2`.
-   - If `e.covenant_type ∈ {CORE_VAULT, CORE_MULTISIG}`: `witness_slots(e) = key_count(e)`,
-     where `key_count(e)` is read from `e.covenant_data` (validated at UTXO creation).
+   - If `e.covenant_type = CORE_VAULT`: `witness_slots(e) = key_count(e)`,
+     where `key_count(e)` is the `key_count:u8` field parsed from `CORE_VAULT.covenant_data`
+     (byte offset 33; validated at UTXO creation).
+   - If `e.covenant_type = CORE_MULTISIG`: `witness_slots(e) = key_count(e)`,
+     where `key_count(e)` is the `key_count:u8` field parsed from `CORE_MULTISIG.covenant_data`
+     (byte offset 1; validated at UTXO creation).
    - Otherwise: `witness_slots(e) = 1`.
 
    Any unknown or future `covenant_type` encountered during cursor iteration MUST be rejected immediately
@@ -1264,7 +1306,7 @@ For each non-coinbase transaction `T`:
 2. Let `sum_out` be the sum of `T.outputs[j].value` over all outputs `j`.
 3. Let `sum_in_vault` be the sum of referenced input values whose UTXO covenant type is `CORE_VAULT`.
 4. If `sum_out > sum_in`, reject as `TX_ERR_VALUE_CONSERVATION`.
-5. If `T` spends at least one `CORE_VAULT` input and `sum_out < sum_in_vault`,
+5. If `T` spends at least one `CORE_VAULT` input and `sum_out != sum_in_vault`,
    reject as `TX_ERR_VALUE_CONSERVATION`.
 6. Arithmetic MUST be exact and MUST be computed in at least 128-bit unsigned integer arithmetic.
    Any overflow MUST be rejected as `TX_ERR_PARSE`.
@@ -1462,7 +1504,7 @@ For inputs spending `CORE_VAULT` (after standard Section 18 parse):
 3. Assign `key_count` WitnessItems via the cursor model (Section 16).
 4. Signature threshold check: count valid signatures and require `valid >= threshold`.
 5. Whitelist membership check per output using binary search (`O(log W)`).
-6. Value conservation, including strong vault fee-preservation rule (`sum_out >= sum_in_vault` for VAULT spends).
+6. Value conservation, including strong vault fee-preservation rule (`sum_out == sum_in_vault` for VAULT spends).
 
 Short-circuit on first error.
 

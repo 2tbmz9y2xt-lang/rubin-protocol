@@ -58,7 +58,7 @@ pub fn validate_tx_covenants_genesis(tx: &Tx, block_height: u64) -> Result<(), T
             COV_TYPE_VAULT => {
                 if out.value == 0 {
                     return Err(TxError::new(
-                        ErrorCode::TxErrCovenantTypeInvalid,
+                        ErrorCode::TxErrVaultParamsInvalid,
                         "CORE_VAULT value must be > 0",
                     ));
                 }

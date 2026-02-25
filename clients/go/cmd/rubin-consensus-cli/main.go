@@ -41,6 +41,7 @@ type Request struct {
 	Utxos          []UtxoJSON `json:"utxos,omitempty"`
 	Height         uint64     `json:"height,omitempty"`
 	BlockTimestamp uint64     `json:"block_timestamp,omitempty"`
+	BlockMTP       *uint64    `json:"block_mtp,omitempty"`
 }
 
 type UtxoJSON struct {
@@ -489,7 +490,12 @@ func main() {
 			}
 		}
 
-		s, err := consensus.ApplyNonCoinbaseTxBasic(tx, txid, utxos, req.Height, req.BlockTimestamp)
+		blockMTP := req.BlockTimestamp
+		if req.BlockMTP != nil {
+			blockMTP = *req.BlockMTP
+		}
+
+		s, err := consensus.ApplyNonCoinbaseTxBasicWithMTP(tx, txid, utxos, req.Height, req.BlockTimestamp, blockMTP)
 		if err != nil {
 			if te, ok := err.(*consensus.TxError); ok {
 				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})

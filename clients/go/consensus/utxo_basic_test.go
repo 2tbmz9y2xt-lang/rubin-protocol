@@ -61,6 +61,12 @@ func validP2PKCovenantData() []byte {
 	return b
 }
 
+func ownerP2PKCovenantDataForVault() []byte {
+	b := validP2PKCovenantData()
+	b[1] = 0x01
+	return b
+}
+
 func mustParseTxForUtxo(t *testing.T, txBytes []byte) (*Tx, [32]byte) {
 	t.Helper()
 	tx, txid, _, _, err := ParseTx(txBytes)
@@ -202,7 +208,7 @@ func TestApplyNonCoinbaseTxBasic_VaultCannotFundFee(t *testing.T) {
 		{Txid: prevFee, Vout: 0}: {
 			Value:        10,
 			CovenantType: COV_TYPE_P2PK,
-			CovenantData: validP2PKCovenantData(),
+			CovenantData: ownerP2PKCovenantDataForVault(),
 		},
 	}
 
@@ -215,7 +221,7 @@ func TestApplyNonCoinbaseTxBasic_VaultCannotFundFee(t *testing.T) {
 	}
 }
 
-func TestApplyNonCoinbaseTxBasic_VaultPreservedWithExternalFeeSponsor(t *testing.T) {
+func TestApplyNonCoinbaseTxBasic_VaultPreservedWithOwnerFeeInput(t *testing.T) {
 	var prevVault, prevFee, txid [32]byte
 	prevVault[0] = 0xd0
 	prevFee[0] = 0xd1
@@ -241,7 +247,7 @@ func TestApplyNonCoinbaseTxBasic_VaultPreservedWithExternalFeeSponsor(t *testing
 		{Txid: prevFee, Vout: 0}: {
 			Value:        10,
 			CovenantType: COV_TYPE_P2PK,
-			CovenantData: validP2PKCovenantData(),
+			CovenantData: ownerP2PKCovenantDataForVault(),
 		},
 	}
 
@@ -251,6 +257,45 @@ func TestApplyNonCoinbaseTxBasic_VaultPreservedWithExternalFeeSponsor(t *testing
 	}
 	if s.Fee != 10 {
 		t.Fatalf("fee=%d, want 10", s.Fee)
+	}
+}
+
+func TestApplyNonCoinbaseTxBasic_VaultAllowsOwnerTopUp(t *testing.T) {
+	var prevVault, prevFee, txid [32]byte
+	prevVault[0] = 0xd3
+	prevFee[0] = 0xd4
+	txid[0] = 0xd5
+
+	tx := &Tx{
+		Inputs: []TxInput{
+			{PrevTxid: prevVault, PrevVout: 0},
+			{PrevTxid: prevFee, PrevVout: 0},
+		},
+		Witness: dummyWitnesses(2),
+		Outputs: []TxOutput{
+			{Value: 105, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
+		},
+	}
+
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prevVault, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_VAULT,
+			CovenantData: validVaultCovenantDataForP2PKOutput(),
+		},
+		{Txid: prevFee, Vout: 0}: {
+			Value:        10,
+			CovenantType: COV_TYPE_P2PK,
+			CovenantData: ownerP2PKCovenantDataForVault(),
+		},
+	}
+
+	s, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if s.Fee != 5 {
+		t.Fatalf("fee=%d, want 5", s.Fee)
 	}
 }
 
@@ -284,7 +329,7 @@ func TestApplyNonCoinbaseTxBasic_VaultWhitelistRejectsOutput(t *testing.T) {
 		{Txid: prevFee, Vout: 0}: {
 			Value:        10,
 			CovenantType: COV_TYPE_P2PK,
-			CovenantData: validP2PKCovenantData(),
+			CovenantData: ownerP2PKCovenantDataForVault(),
 		},
 	}
 
@@ -292,8 +337,57 @@ func TestApplyNonCoinbaseTxBasic_VaultWhitelistRejectsOutput(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	if got := mustTxErrCode(t, err); got != TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED)
+	}
+}
+
+func TestApplyNonCoinbaseTxBasic_VaultRejectsFeeSponsor(t *testing.T) {
+	var prevVault, prevOwner, prevSponsor, txid [32]byte
+	prevVault[0] = 0xf2
+	prevOwner[0] = 0xf3
+	prevSponsor[0] = 0xf4
+	txid[0] = 0xf5
+
+	tx := &Tx{
+		Inputs: []TxInput{
+			{PrevTxid: prevVault, PrevVout: 0},
+			{PrevTxid: prevOwner, PrevVout: 0},
+			{PrevTxid: prevSponsor, PrevVout: 0},
+		},
+		Witness: dummyWitnesses(3),
+		Outputs: []TxOutput{
+			{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
+		},
+	}
+
+	sponsorData := validP2PKCovenantData()
+	sponsorData[1] = 0x02 // not the vault owner lock id
+
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prevVault, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_VAULT,
+			CovenantData: validVaultCovenantDataForP2PKOutput(),
+		},
+		{Txid: prevOwner, Vout: 0}: {
+			Value:        10,
+			CovenantType: COV_TYPE_P2PK,
+			CovenantData: ownerP2PKCovenantDataForVault(),
+		},
+		{Txid: prevSponsor, Vout: 0}: {
+			Value:        10,
+			CovenantType: COV_TYPE_P2PK,
+			CovenantData: sponsorData,
+		},
+	}
+
+	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN)
 	}
 }
 

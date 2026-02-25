@@ -21,7 +21,18 @@ type UtxoApplySummary struct {
 }
 
 func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEntry, height uint64, blockTimestamp uint64) (*UtxoApplySummary, error) {
-	work, summary, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxoSet, height, blockTimestamp)
+	return ApplyNonCoinbaseTxBasicWithMTP(tx, txid, utxoSet, height, blockTimestamp, blockTimestamp)
+}
+
+func ApplyNonCoinbaseTxBasicWithMTP(
+	tx *Tx,
+	txid [32]byte,
+	utxoSet map[Outpoint]UtxoEntry,
+	height uint64,
+	blockTimestamp uint64,
+	blockMTP uint64,
+) (*UtxoApplySummary, error) {
+	work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTP(tx, txid, utxoSet, height, blockTimestamp, blockMTP)
 	_ = work
 	return summary, err
 }
@@ -39,7 +50,19 @@ func ApplyNonCoinbaseTxBasicUpdate(
 	height uint64,
 	blockTimestamp uint64,
 ) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
-	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, utxoSet, height, blockTimestamp)
+	return ApplyNonCoinbaseTxBasicUpdateWithMTP(tx, txid, utxoSet, height, blockTimestamp, blockTimestamp)
+}
+
+func ApplyNonCoinbaseTxBasicUpdateWithMTP(
+	tx *Tx,
+	txid [32]byte,
+	utxoSet map[Outpoint]UtxoEntry,
+	height uint64,
+	blockTimestamp uint64,
+	blockMTP uint64,
+) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
+	_ = blockTimestamp
+	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, utxoSet, height, blockMTP)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -49,7 +72,13 @@ func ApplyNonCoinbaseTxBasicUpdate(
 	}, nil
 }
 
-func applyNonCoinbaseTxBasicWork(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEntry, height uint64, blockTimestamp uint64) (map[Outpoint]UtxoEntry, uint64, error) {
+func applyNonCoinbaseTxBasicWork(
+	tx *Tx,
+	txid [32]byte,
+	utxoSet map[Outpoint]UtxoEntry,
+	height uint64,
+	blockMTP uint64,
+) (map[Outpoint]UtxoEntry, uint64, error) {
 	if tx == nil {
 		return nil, 0, txerr(TX_ERR_PARSE, "nil tx")
 	}
@@ -68,9 +97,12 @@ func applyNonCoinbaseTxBasicWork(tx *Tx, txid [32]byte, utxoSet map[Outpoint]Utx
 
 	var sumIn u128
 	var sumInVault u128
-	var vaultWhitelists [][][32]byte
-	hasVaultInput := false
+	var vaultWhitelist [][32]byte
+	var vaultOwnerLockID [32]byte
+	vaultInputCount := 0
 	witnessCursor := 0
+	var inputLockIDs [][32]byte
+	var inputCovTypes []uint16
 	for _, in := range tx.Inputs {
 		op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
 		entry, ok := work[op]
@@ -95,7 +127,7 @@ func applyNonCoinbaseTxBasicWork(tx *Tx, txid [32]byte, utxoSet map[Outpoint]Utx
 				tx.Witness[witnessCursor],
 				tx.Witness[witnessCursor+1],
 				height,
-				blockTimestamp,
+				blockMTP,
 			); err != nil {
 				return nil, 0, err
 			}
@@ -114,18 +146,26 @@ func applyNonCoinbaseTxBasicWork(tx *Tx, txid [32]byte, utxoSet map[Outpoint]Utx
 			witnessCursor += slots
 		}
 
+		inputLockID := sha3_256(OutputDescriptorBytes(entry.CovenantType, entry.CovenantData))
+		inputLockIDs = append(inputLockIDs, inputLockID)
+		inputCovTypes = append(inputCovTypes, entry.CovenantType)
+
 		var err error
 		sumIn, err = addU64ToU128(sumIn, entry.Value)
 		if err != nil {
 			return nil, 0, err
 		}
 		if entry.CovenantType == COV_TYPE_VAULT {
-			hasVaultInput = true
+			vaultInputCount++
+			if vaultInputCount > 1 {
+				return nil, 0, txerr(TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN, "multiple CORE_VAULT inputs forbidden")
+			}
 			v, err := ParseVaultCovenantData(entry.CovenantData)
 			if err != nil {
 				return nil, 0, err
 			}
-			vaultWhitelists = append(vaultWhitelists, v.Whitelist)
+			vaultWhitelist = v.Whitelist
+			vaultOwnerLockID = v.OwnerLockID
 			sumInVault, err = addU64ToU128(sumInVault, entry.Value)
 			if err != nil {
 				return nil, 0, err
@@ -139,11 +179,16 @@ func applyNonCoinbaseTxBasicWork(tx *Tx, txid [32]byte, utxoSet map[Outpoint]Utx
 	}
 
 	var sumOut u128
+	createsVault := false
 	for i, out := range tx.Outputs {
 		var err error
 		sumOut, err = addU64ToU128(sumOut, out.Value)
 		if err != nil {
 			return nil, 0, err
+		}
+
+		if out.CovenantType == COV_TYPE_VAULT {
+			createsVault = true
 		}
 
 		if out.CovenantType == COV_TYPE_ANCHOR || out.CovenantType == COV_TYPE_DA_COMMIT {
@@ -159,14 +204,66 @@ func applyNonCoinbaseTxBasicWork(tx *Tx, txid [32]byte, utxoSet map[Outpoint]Utx
 			CreatedByCoinbase: false,
 		}
 	}
-	if len(vaultWhitelists) > 0 {
+
+	// CORE_VAULT creation rule: any tx creating CORE_VAULT outputs must include an owner-authorized input.
+	if createsVault {
+		for _, out := range tx.Outputs {
+			if out.CovenantType != COV_TYPE_VAULT {
+				continue
+			}
+			v, err := ParseVaultCovenantData(out.CovenantData)
+			if err != nil {
+				return nil, 0, err
+			}
+			ownerLockID := v.OwnerLockID
+
+			hasOwnerLockID := false
+			hasOwnerLockType := false
+			for i := range inputLockIDs {
+				if inputLockIDs[i] != ownerLockID {
+					continue
+				}
+				hasOwnerLockID = true
+				if inputCovTypes[i] == COV_TYPE_P2PK || inputCovTypes[i] == COV_TYPE_MULTISIG {
+					hasOwnerLockType = true
+				}
+			}
+			if !hasOwnerLockID || !hasOwnerLockType {
+				return nil, 0, txerr(TX_ERR_VAULT_OWNER_AUTH_REQUIRED, "missing owner-authorized input for CORE_VAULT creation")
+			}
+		}
+	}
+
+	// CORE_VAULT spend rules: safe-only model with owner binding and strict whitelist.
+	if vaultInputCount == 1 {
+		// Owner input required.
+		ownerAuthPresent := false
+		for i := range inputLockIDs {
+			if inputLockIDs[i] == vaultOwnerLockID {
+				ownerAuthPresent = true
+				break
+			}
+		}
+		if !ownerAuthPresent {
+			return nil, 0, txerr(TX_ERR_VAULT_OWNER_AUTH_REQUIRED, "missing owner-authorized input for CORE_VAULT spend")
+		}
+
+		// No fee sponsorship: all non-vault inputs must be owned by the same owner lock.
+		for i := range inputCovTypes {
+			if inputCovTypes[i] == COV_TYPE_VAULT {
+				continue
+			}
+			if inputLockIDs[i] != vaultOwnerLockID {
+				return nil, 0, txerr(TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN, "non-owner non-vault input forbidden in CORE_VAULT spend")
+			}
+		}
+
+		// Whitelist enforcement: all outputs must be whitelisted.
 		for _, out := range tx.Outputs {
 			desc := OutputDescriptorBytes(out.CovenantType, out.CovenantData)
 			h := sha3_256(desc)
-			for _, wl := range vaultWhitelists {
-				if !HashInSorted32(wl, h) {
-					return nil, 0, txerr(TX_ERR_COVENANT_TYPE_INVALID, "output not whitelisted for CORE_VAULT")
-				}
+			if !HashInSorted32(vaultWhitelist, h) {
+				return nil, 0, txerr(TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED, "output not whitelisted for CORE_VAULT")
 			}
 		}
 	}
@@ -174,8 +271,8 @@ func applyNonCoinbaseTxBasicWork(tx *Tx, txid [32]byte, utxoSet map[Outpoint]Utx
 	if cmpU128(sumOut, sumIn) > 0 {
 		return nil, 0, txerr(TX_ERR_VALUE_CONSERVATION, "sum_out exceeds sum_in")
 	}
-	if hasVaultInput && cmpU128(sumOut, sumInVault) < 0 {
-		return nil, 0, txerr(TX_ERR_VALUE_CONSERVATION, "vault inputs cannot fund miner fee")
+	if vaultInputCount == 1 && cmpU128(sumOut, sumInVault) < 0 {
+		return nil, 0, txerr(TX_ERR_VALUE_CONSERVATION, "CORE_VAULT value must not fund miner fee")
 	}
 	feeU128, err := subU128(sumIn, sumOut)
 	if err != nil {

@@ -1,5 +1,5 @@
 use rubin_consensus::{
-    apply_non_coinbase_tx_basic, block_hash, compact_shortid,
+    apply_non_coinbase_tx_basic_with_mtp, block_hash, compact_shortid,
     connect_block_basic_in_memory_at_height, merkle_root_txids, parse_tx, pow_check, retarget_v1,
     retarget_v1_clamped, sighash_v1_digest, validate_block_basic_with_context_and_fees_at_height,
     validate_block_basic_with_context_at_height, validate_tx_covenants_genesis, ErrorCode,
@@ -81,6 +81,9 @@ struct Request {
 
     #[serde(default)]
     block_timestamp: u64,
+
+    #[serde(default)]
+    block_mtp: Option<u64>,
 
     #[serde(default)]
     already_generated: u64,
@@ -1392,8 +1395,15 @@ fn main() {
                 );
             }
 
-            match apply_non_coinbase_tx_basic(&tx, txid, &utxo_set, req.height, req.block_timestamp)
-            {
+            let block_mtp = req.block_mtp.unwrap_or(req.block_timestamp);
+            match apply_non_coinbase_tx_basic_with_mtp(
+                &tx,
+                txid,
+                &utxo_set,
+                req.height,
+                req.block_timestamp,
+                block_mtp,
+            ) {
                 Ok(summary) => {
                     let resp = Response {
                         ok: true,

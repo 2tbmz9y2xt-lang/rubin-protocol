@@ -324,22 +324,13 @@ func validateCoinbaseWitnessCommitment(pb *ParsedBlock) error {
 }
 
 func validateTimestampRules(headerTimestamp uint64, blockHeight uint64, prevTimestamps []uint64) error {
-	if blockHeight == 0 {
+	median, ok, err := medianTimePast(blockHeight, prevTimestamps)
+	if err != nil {
+		return err
+	}
+	if !ok {
 		return nil
 	}
-	k := int(blockHeight)
-	if k > 11 {
-		k = 11
-	}
-	if len(prevTimestamps) == 0 {
-		return nil
-	}
-	if len(prevTimestamps) < k {
-		return txerr(BLOCK_ERR_PARSE, "insufficient prev_timestamps context")
-	}
-	window := append([]uint64(nil), prevTimestamps[:k]...)
-	sort.Slice(window, func(i, j int) bool { return window[i] < window[j] })
-	median := window[(len(window)-1)/2]
 	if headerTimestamp <= median {
 		return txerr(BLOCK_ERR_TIMESTAMP_OLD, "timestamp <= MTP median")
 	}
@@ -351,6 +342,22 @@ func validateTimestampRules(headerTimestamp uint64, blockHeight uint64, prevTime
 		return txerr(BLOCK_ERR_TIMESTAMP_FUTURE, "timestamp exceeds future drift")
 	}
 	return nil
+}
+
+func medianTimePast(blockHeight uint64, prevTimestamps []uint64) (uint64, bool, error) {
+	if blockHeight == 0 || len(prevTimestamps) == 0 {
+		return 0, false, nil
+	}
+	k := int(blockHeight)
+	if k > 11 {
+		k = 11
+	}
+	if len(prevTimestamps) < k {
+		return 0, false, txerr(BLOCK_ERR_PARSE, "insufficient prev_timestamps context")
+	}
+	window := append([]uint64(nil), prevTimestamps[:k]...)
+	sort.Slice(window, func(i, j int) bool { return window[i] < window[j] })
+	return window[(len(window)-1)/2], true, nil
 }
 
 type daCommitSet struct {

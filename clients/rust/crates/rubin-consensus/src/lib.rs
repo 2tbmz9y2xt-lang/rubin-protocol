@@ -36,8 +36,9 @@ pub use sighash::sighash_v1_digest;
 pub use subsidy::block_subsidy;
 pub use tx::{parse_tx, DaChunkCore, DaCommitCore, Tx, TxInput, TxOutput, WitnessItem};
 pub use utxo_basic::{
-    apply_non_coinbase_tx_basic, apply_non_coinbase_tx_basic_update, Outpoint, UtxoApplySummary,
-    UtxoEntry,
+    apply_non_coinbase_tx_basic, apply_non_coinbase_tx_basic_update,
+    apply_non_coinbase_tx_basic_update_with_mtp, apply_non_coinbase_tx_basic_with_mtp, Outpoint,
+    UtxoApplySummary, UtxoEntry,
 };
 pub use vault::{
     output_descriptor_bytes, parse_multisig_covenant_data, parse_vault_covenant_data,
