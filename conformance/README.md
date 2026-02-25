@@ -51,3 +51,23 @@ Check (CI):
 ```bash
 python3 tools/gen_conformance_matrix.py --check
 ```
+
+## Fixture governance (manual-only)
+
+`clients/go/cmd/gen-conformance-fixtures` — **manual-only tool**.
+
+Правила:
+
+1. Генератор **НЕ** запускается из CI (ни в `ci.yml`, ни в других workflow).
+2. Регенерация fixtures выполняется вручную локально через reproducible env:
+   - `scripts/dev-env.sh -- bash -lc 'cd clients/go && go run ./cmd/gen-conformance-fixtures'`
+3. Любое изменение `conformance/fixtures/CV-*.json` обязано сопровождаться обновлением
+   `conformance/fixtures/CHANGELOG.md` (что изменили, зачем, каким инструментом).
+4. Для точечных deterministic fixtures допускается отдельный генератор:
+   - `scripts/dev-env.sh -- python3 tools/gen_cv_da_integrity.py`
+
+Guard-проверка (CI):
+
+```bash
+python3 tools/check_conformance_fixtures_policy.py
+```

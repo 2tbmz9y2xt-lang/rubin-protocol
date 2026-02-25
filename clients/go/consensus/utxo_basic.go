@@ -20,8 +20,8 @@ type UtxoApplySummary struct {
 	UtxoCount uint64
 }
 
-func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEntry, height uint64, blockTimestamp uint64) (*UtxoApplySummary, error) {
-	return ApplyNonCoinbaseTxBasicWithMTP(tx, txid, utxoSet, height, blockTimestamp, blockTimestamp)
+func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEntry, height uint64, blockTimestamp uint64, chainID [32]byte) (*UtxoApplySummary, error) {
+	return ApplyNonCoinbaseTxBasicWithMTP(tx, txid, utxoSet, height, blockTimestamp, blockTimestamp, chainID)
 }
 
 func ApplyNonCoinbaseTxBasicWithMTP(
@@ -31,8 +31,9 @@ func ApplyNonCoinbaseTxBasicWithMTP(
 	height uint64,
 	blockTimestamp uint64,
 	blockMTP uint64,
+	chainID [32]byte,
 ) (*UtxoApplySummary, error) {
-	work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTP(tx, txid, utxoSet, height, blockTimestamp, blockMTP)
+	work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTP(tx, txid, utxoSet, height, blockTimestamp, blockMTP, chainID)
 	_ = work
 	return summary, err
 }
@@ -40,17 +41,18 @@ func ApplyNonCoinbaseTxBasicWithMTP(
 // ApplyNonCoinbaseTxBasicUpdate applies a non-coinbase transaction to the provided UTXO snapshot
 // and returns the updated UTXO set. This is a stateful helper for block connection logic.
 //
-// NOTE: This function still does not implement end-to-end signature verification; it is used to
-// deterministically compute (sum_in - sum_out) fees and update UTXO membership under the "basic"
-// apply ruleset.
+// NOTE: This function implements end-to-end signature verification (verify_sig) as part of spend
+// validation, and is used to deterministically compute (sum_in - sum_out) fees and update UTXO
+// membership under the "basic" apply ruleset.
 func ApplyNonCoinbaseTxBasicUpdate(
 	tx *Tx,
 	txid [32]byte,
 	utxoSet map[Outpoint]UtxoEntry,
 	height uint64,
 	blockTimestamp uint64,
+	chainID [32]byte,
 ) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
-	return ApplyNonCoinbaseTxBasicUpdateWithMTP(tx, txid, utxoSet, height, blockTimestamp, blockTimestamp)
+	return ApplyNonCoinbaseTxBasicUpdateWithMTP(tx, txid, utxoSet, height, blockTimestamp, blockTimestamp, chainID)
 }
 
 func ApplyNonCoinbaseTxBasicUpdateWithMTP(
@@ -60,9 +62,10 @@ func ApplyNonCoinbaseTxBasicUpdateWithMTP(
 	height uint64,
 	blockTimestamp uint64,
 	blockMTP uint64,
+	chainID [32]byte,
 ) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
 	_ = blockTimestamp
-	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, utxoSet, height, blockMTP)
+	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, utxoSet, height, blockMTP, chainID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -78,6 +81,7 @@ func applyNonCoinbaseTxBasicWork(
 	utxoSet map[Outpoint]UtxoEntry,
 	height uint64,
 	blockMTP uint64,
+	chainID [32]byte,
 ) (map[Outpoint]UtxoEntry, uint64, error) {
 	if tx == nil {
 		return nil, 0, txerr(TX_ERR_PARSE, "nil tx")
@@ -102,13 +106,18 @@ func applyNonCoinbaseTxBasicWork(
 	var sumInVault u128
 	var vaultWhitelist [][32]byte
 	var vaultOwnerLockID [32]byte
+	var vaultSigKeys [][32]byte
+	var vaultSigThreshold uint8
+	var vaultSigWitness []WitnessItem
+	var vaultSigDigest [32]byte
+	haveVaultSig := false
 	vaultInputCount := 0
 	witnessCursor := 0
 	var inputLockIDs [][32]byte
 	var inputCovTypes []uint16
 	seenInputs := make(map[Outpoint]struct{}, len(tx.Inputs))
 	var zeroTxid [32]byte
-	for _, in := range tx.Inputs {
+	for inputIndex, in := range tx.Inputs {
 		if len(in.ScriptSig) != 0 {
 			return nil, 0, txerr(TX_ERR_PARSE, "script_sig must be empty under genesis covenant set")
 		}
@@ -135,40 +144,70 @@ func applyNonCoinbaseTxBasicWork(
 		if entry.CreatedByCoinbase && height < entry.CreationHeight+COINBASE_MATURITY {
 			return nil, 0, txerr(TX_ERR_COINBASE_IMMATURE, "coinbase immature")
 		}
-		if entry.CovenantType == COV_TYPE_HTLC {
-			slots := 2
-			if witnessCursor+slots > len(tx.Witness) {
-				return nil, 0, txerr(TX_ERR_PARSE, "CORE_HTLC witness underflow")
-			}
-			if err := ValidateHTLCSpend(
-				entry,
-				tx.Witness[witnessCursor],
-				tx.Witness[witnessCursor+1],
-				height,
-				blockMTP,
-			); err != nil {
-				return nil, 0, err
-			}
-			witnessCursor += slots
-		} else {
-			if err := checkSpendCovenant(entry.CovenantType, entry.CovenantData); err != nil {
-				return nil, 0, err
-			}
-			slots := WitnessSlots(entry.CovenantType, entry.CovenantData)
-			if slots <= 0 {
-				return nil, 0, txerr(TX_ERR_PARSE, "invalid witness slots")
-			}
-			if witnessCursor+slots > len(tx.Witness) {
-				return nil, 0, txerr(TX_ERR_PARSE, "witness underflow")
-			}
-			witnessCursor += slots
+
+		digest, err := SighashV1Digest(tx, uint32(inputIndex), entry.Value, chainID)
+		if err != nil {
+			return nil, 0, err
 		}
+
+		if err := checkSpendCovenant(entry.CovenantType, entry.CovenantData); err != nil {
+			return nil, 0, err
+		}
+
+		slots := WitnessSlots(entry.CovenantType, entry.CovenantData)
+		if slots <= 0 {
+			return nil, 0, txerr(TX_ERR_PARSE, "invalid witness slots")
+		}
+		if witnessCursor+slots > len(tx.Witness) {
+			return nil, 0, txerr(TX_ERR_PARSE, "witness underflow")
+		}
+		assigned := tx.Witness[witnessCursor : witnessCursor+slots]
+
+		switch entry.CovenantType {
+		case COV_TYPE_P2PK:
+			if slots != 1 {
+				return nil, 0, txerr(TX_ERR_PARSE, "CORE_P2PK witness_slots must be 1")
+			}
+			if err := validateP2PKSpend(entry, assigned[0], digest, height); err != nil {
+				return nil, 0, err
+			}
+		case COV_TYPE_MULTISIG:
+			m, err := ParseMultisigCovenantData(entry.CovenantData)
+			if err != nil {
+				return nil, 0, err
+			}
+			if err := validateThresholdSigSpend(m.Keys, m.Threshold, assigned, digest, height, "CORE_MULTISIG"); err != nil {
+				return nil, 0, err
+			}
+		case COV_TYPE_VAULT:
+			v, err := ParseVaultCovenantData(entry.CovenantData)
+			if err != nil {
+				return nil, 0, err
+			}
+			// CORE_VAULT signature threshold is checked later (CANONICAL §24.1),
+			// after owner-authorization and no-fee-sponsorship checks.
+			vaultSigKeys = v.Keys
+			vaultSigThreshold = v.Threshold
+			vaultSigWitness = append([]WitnessItem(nil), assigned...)
+			vaultSigDigest = digest
+			haveVaultSig = true
+		case COV_TYPE_HTLC:
+			if slots != 2 {
+				return nil, 0, txerr(TX_ERR_PARSE, "CORE_HTLC witness_slots must be 2")
+			}
+			if err := ValidateHTLCSpend(entry, assigned[0], assigned[1], digest, height, blockMTP); err != nil {
+				return nil, 0, err
+			}
+		default:
+			// Other covenants have no additional spend-time checks in the genesis set.
+		}
+
+		witnessCursor += slots
 
 		inputLockID := sha3_256(OutputDescriptorBytes(entry.CovenantType, entry.CovenantData))
 		inputLockIDs = append(inputLockIDs, inputLockID)
 		inputCovTypes = append(inputCovTypes, entry.CovenantType)
 
-		var err error
 		sumIn, err = addU64ToU128(sumIn, entry.Value)
 		if err != nil {
 			return nil, 0, err
@@ -254,6 +293,9 @@ func applyNonCoinbaseTxBasicWork(
 
 	// CORE_VAULT spend rules: safe-only model with owner binding and strict whitelist.
 	if vaultInputCount == 1 {
+		if !haveVaultSig {
+			return nil, 0, txerr(TX_ERR_PARSE, "missing CORE_VAULT signature context")
+		}
 		// Owner input required.
 		ownerAuthPresent := false
 		for i := range inputLockIDs {
@@ -274,6 +316,11 @@ func applyNonCoinbaseTxBasicWork(
 			if inputLockIDs[i] != vaultOwnerLockID {
 				return nil, 0, txerr(TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN, "non-owner non-vault input forbidden in CORE_VAULT spend")
 			}
+		}
+
+		// Signature threshold check (CANONICAL §24.1 step 7).
+		if err := validateThresholdSigSpend(vaultSigKeys, vaultSigThreshold, vaultSigWitness, vaultSigDigest, height, "CORE_VAULT"); err != nil {
+			return nil, 0, err
 		}
 
 		// Whitelist enforcement: all outputs must be whitelisted.
