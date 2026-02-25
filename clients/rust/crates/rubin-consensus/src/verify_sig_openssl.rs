@@ -35,10 +35,8 @@ extern "C" {
 
 fn suite_alg_name(suite_id: u8) -> Result<&'static CStr, TxError> {
     match suite_id {
-        SUITE_ID_ML_DSA_87 => Ok(unsafe { CStr::from_bytes_with_nul_unchecked(b"ML-DSA-87\0") }),
-        SUITE_ID_SLH_DSA_SHAKE_256F => {
-            Ok(unsafe { CStr::from_bytes_with_nul_unchecked(b"SLH-DSA-SHAKE-256f\0") })
-        }
+        SUITE_ID_ML_DSA_87 => Ok(c"ML-DSA-87"),
+        SUITE_ID_SLH_DSA_SHAKE_256F => Ok(c"SLH-DSA-SHAKE-256f"),
         _ => Err(TxError::new(
             ErrorCode::TxErrSigAlgInvalid,
             "verify_sig: unsupported suite_id",

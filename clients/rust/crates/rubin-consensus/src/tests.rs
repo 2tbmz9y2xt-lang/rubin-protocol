@@ -1241,7 +1241,7 @@ extern "C" {
 }
 
 fn test_mldsa87_keypair() -> Option<TestMLDSA87Keypair> {
-    let alg = unsafe { core::ffi::CStr::from_bytes_with_nul_unchecked(b"ML-DSA-87\0") };
+    let alg = c"ML-DSA-87";
     unsafe {
         openssl_sys::ERR_clear_error();
         let ctx =
