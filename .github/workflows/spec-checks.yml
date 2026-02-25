@@ -16,7 +16,7 @@ jobs:
       - name: Check SECTION_HASHES integrity
         run: python3 tools/check_section_hashes.py
 
-      - name: Check conformance fixtures IDs + changelog presence
+      - name: Check conformance IDs
         run: python3 tools/check_conformance_ids.py
 
       - name: Check crypto backend policy
