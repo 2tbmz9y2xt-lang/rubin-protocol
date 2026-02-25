@@ -12,6 +12,7 @@
 
 Этот proof-pack — **toy/model baseline**. Он нужен для воспроизводимого “якоря” и ранних инвариантов,
 но **не** является freeze-ready формальной верификацией CANONICAL.
+Текущий machine-readable статус: `proof_level=toy-model`, `claim_level=toy`.
 
 Разрешённые формулировки (OK):
 - “model-level proved baseline for pinned sections”
@@ -23,6 +24,7 @@
 - “proved equivalence between spec and Go/Rust implementations”
 
 Источник истины по границе claims — `rubin-formal/proof_coverage.json` (`proof_level`, `claims`).
+Дополнительно используется `claim_level` (`toy|byte|refined`) с CI-валидацией консистентности относительно `proof_level`.
 
 ## Risk model / CI gate
 
@@ -30,6 +32,8 @@
 - Скрипты:
   - `tools/formal_risk_score.py`
   - `tools/check_formal_risk_gate.py --profile phase0`
+  - `tools/check_formal_refinement_bridge.py`
+  - `tools/check_formal_claims_lint.py`
 
 ## Что это значит
 

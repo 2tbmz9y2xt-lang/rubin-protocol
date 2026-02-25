@@ -9,6 +9,10 @@
 
 - `proof_level=toy-model` означает: доказательства относятся к упрощённой/модельной семантике и служат baseline-слоем,
   а не байтовой (wire) или исполняемой (Go/Rust) эквивалентности.
+- `claim_level` фиксирует допустимый публичный уровень заявлений:
+  - `toy` (только model-baseline),
+  - `byte` (byte-accurate слой),
+  - `refined` (refinement to executable path).
 - `status=proved/stated/deferred` относится к конкретной pinned-секции **в рамках указанного `proof_level`**.
 
 Внешний аудит / freeze-ready коммуникации **НЕ ДОЛЖНЫ** трактовать `status=proved` как “formal verification of CANONICAL”.
@@ -28,4 +32,6 @@
 ```bash
 python3 tools/formal_risk_score.py
 python3 tools/check_formal_risk_gate.py --profile phase0
+python3 tools/check_formal_refinement_bridge.py
+python3 tools/check_formal_claims_lint.py
 ```

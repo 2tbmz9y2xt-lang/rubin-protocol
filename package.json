@@ -13,7 +13,9 @@
     "spec:all": "npm run spec:html && npm run spec:diff && npm run spec:explain",
     "spec:check": "node scripts/check-spec-invariants.mjs && node scripts/check-section-hashes.mjs",
     "spec:rehash": "node scripts/gen-section-hashes.mjs",
-    "formal:coverage": "python3 tools/check_formal_coverage.py"
+    "formal:coverage": "python3 tools/check_formal_coverage.py",
+    "formal:bridge": "python3 tools/check_formal_refinement_bridge.py",
+    "formal:claims-lint": "python3 tools/check_formal_claims_lint.py"
   },
   "dependencies": {
     "marked": "^17.0.3"

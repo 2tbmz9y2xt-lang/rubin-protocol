@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "status": "baseline",
+  "notes": "Bridge map for model theorem -> executable conformance op evidence. This is baseline trace-compatibility metadata, not full mechanized refinement.",
+  "critical_ops": [
+    {
+      "op": "parse_tx",
+      "gate": "CV-PARSE",
+      "model_theorem": "RubinFormal.transaction_wire_proved",
+      "lean_file": "rubin-formal/RubinFormal/PinnedSections.lean",
+      "evidence_level": "baseline"
+    },
+    {
+      "op": "sighash_v1",
+      "gate": "CV-SIGHASH",
+      "model_theorem": "RubinFormal.sighash_v1_proved",
+      "lean_file": "rubin-formal/RubinFormal/PinnedSections.lean",
+      "evidence_level": "baseline"
+    },
+    {
+      "op": "retarget_v1",
+      "gate": "CV-POW",
+      "model_theorem": "RubinFormal.difficulty_update_proved",
+      "lean_file": "rubin-formal/RubinFormal/PinnedSections.lean",
+      "evidence_level": "baseline"
+    },
+    {
+      "op": "utxo_apply_basic",
+      "gate": "CV-UTXO-BASIC",
+      "model_theorem": "RubinFormal.value_conservation_proved",
+      "lean_file": "rubin-formal/RubinFormal/PinnedSections.lean",
+      "evidence_level": "baseline"
+    }
+  ]
+}

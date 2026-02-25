@@ -1,8 +1,13 @@
 import RubinFormal.CriticalInvariants
+import RubinFormal.ByteWire
+import RubinFormal.ArithmeticSafety
 
 namespace RubinFormal
 
-def transactionWireStatement : Prop := parseTransactionWire [] = none
+def transactionWireStatement : Prop :=
+  parseTransactionWire [] = none ∧
+  (∀ n : Nat, n < 253 → parseCompactSize (encodeCompactSize n) = some (n, [])) ∧
+  (∀ tx : TxMini, txMiniByteValid tx → parseTxMini (serializeTxMini tx) = some tx)
 def transactionIdentifiersStatement : Prop := ∀ n : Nat, txidPreimage n ≠ wtxidPreimage n
 def weightAccountingStatement : Prop :=
   ∀ base witness1 witness2 sigCost : Nat, witness1 ≤ witness2 → weight base witness1 sigCost ≤ weight base witness2 sigCost
@@ -14,18 +19,25 @@ def sighashV1Statement : Prop :=
 def consensusErrorCodesStatement : Prop := ErrorCode.TxErrParse ≠ ErrorCode.TxErrSigInvalid
 def covenantRegistryStatement : Prop := CovenantType.P2PK ≠ CovenantType.HTLC
 def difficultyUpdateStatement : Prop :=
-  ∀ prevTs newTs maxStep : Nat, clampTimestampStep prevTs newTs maxStep ≤ prevTs + maxStep
+  (∀ prevTs newTs maxStep : Nat, clampTimestampStep prevTs newTs maxStep ≤ prevTs + maxStep) ∧
+  (∀ a b : Nat, 0 < b → floorDiv a b * b ≤ a)
 def transactionStructuralRulesStatement : Prop :=
   ∀ cursor witnessCount : Nat, cursor ≤ witnessCount → witnessCursorValid cursor 0 witnessCount
 def replayDomainChecksStatement : Prop :=
   ∀ n : Nat, ∀ xs : List Nat, n ∈ xs → ¬ nonceReplayFree (n :: xs)
 def utxoStateModelStatement : Prop := ∀ v : Nat, ¬ canSpend { spendable := false, value := v }
 def valueConservationStatement : Prop :=
-  ∀ sumIn sumOut fee : Nat, valueConserved sumIn sumOut → valueConserved (sumIn + fee) sumOut
+  (∀ sumIn sumOut fee : Nat, valueConserved sumIn sumOut → valueConserved (sumIn + fee) sumOut) ∧
+  (∀ sumIn sumOut fee : Nat, inU128 sumIn → valueConserved sumIn sumOut → valueConserved (satAddU128 sumIn fee) sumOut)
 def daSetIntegrityStatement : Prop := ¬ daChunkSetValid []
 
 theorem transaction_wire_proved : transactionWireStatement := by
-  simpa [transactionWireStatement] using parse_empty_none
+  refine ⟨?_, ?_, ?_⟩
+  · simpa using parse_empty_none
+  · intro n hn
+    exact parse_encodeCompactSize_roundtrip n hn
+  · intro tx htx
+    exact parse_serializeTxMini_roundtrip tx htx
 
 theorem transaction_identifiers_proved : transactionIdentifiersStatement := by
   intro n
@@ -49,8 +61,11 @@ theorem covenant_registry_proved : covenantRegistryStatement := by
   simpa [covenantRegistryStatement] using covenant_types_distinct
 
 theorem difficulty_update_proved : difficultyUpdateStatement := by
-  intro prevTs newTs maxStep
-  exact clamp_respects_upper_bound prevTs newTs maxStep
+  refine ⟨?_, ?_⟩
+  · intro prevTs newTs maxStep
+    exact clamp_respects_upper_bound prevTs newTs maxStep
+  · intro a b hb
+    exact floorDiv_mul_le a b hb
 
 theorem transaction_structural_rules_proved : transactionStructuralRulesStatement := by
   intro cursor witnessCount h
@@ -65,8 +80,12 @@ theorem utxo_state_model_proved : utxoStateModelStatement := by
   exact non_spendable_cannot_spend v
 
 theorem value_conservation_proved : valueConservationStatement := by
-  intro sumIn sumOut fee h
-  exact value_conservation_with_extra_input sumIn sumOut fee h
+  refine ⟨?_, ?_⟩
+  · intro sumIn sumOut fee h
+    exact value_conservation_with_extra_input sumIn sumOut fee h
+  · intro sumIn sumOut fee hU128 hCons
+    unfold valueConserved at *
+    exact le_trans hCons (satAddU128_preserves_lower_bound sumIn fee hU128)
 
 theorem da_set_integrity_proved : daSetIntegrityStatement := by
   simpa [daSetIntegrityStatement] using da_chunk_set_requires_nonempty

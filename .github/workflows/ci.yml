@@ -23,6 +23,12 @@ jobs:
       - name: Formal coverage baseline check
         run: python3 tools/check_formal_coverage.py
 
+      - name: Formal refinement bridge check
+        run: python3 tools/check_formal_refinement_bridge.py
+
+      - name: Formal claims lint
+        run: python3 tools/check_formal_claims_lint.py
+
       - name: Formal risk gate (Phase-0/devnet)
         run: python3 tools/check_formal_risk_gate.py --profile phase0
 

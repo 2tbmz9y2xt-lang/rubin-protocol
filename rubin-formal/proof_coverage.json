@@ -1,16 +1,20 @@
 {
   "schema_version": 1,
   "status": "model-proved-baseline",
+  "claim_level": "toy",
   "spec_source_file": "spec/RUBIN_L1_CANONICAL.md",
   "spec_section_hashes_file": "spec/SECTION_HASHES.json",
   "lean_toolchain_file": "rubin-formal/lean-toolchain",
+  "refinement_bridge_file": "rubin-formal/refinement_bridge.json",
   "coverage": [
     {
       "section_key": "transaction_wire",
       "section_heading": "## 5. Transaction Wire",
       "status": "proved",
       "theorems": [
-        "RubinFormal.transaction_wire_proved"
+        "RubinFormal.transaction_wire_proved",
+        "RubinFormal.parse_encodeCompactSize_roundtrip",
+        "RubinFormal.parse_serializeTxMini_roundtrip"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean"
     },
@@ -73,7 +77,8 @@
       "section_heading": "## 15. Difficulty Update (Normative)",
       "status": "proved",
       "theorems": [
-        "RubinFormal.difficulty_update_proved"
+        "RubinFormal.difficulty_update_proved",
+        "RubinFormal.floorDiv_mul_le"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean"
     },
@@ -109,7 +114,8 @@
       "section_heading": "## 20. Value Conservation (Normative)",
       "status": "proved",
       "theorems": [
-        "RubinFormal.value_conservation_proved"
+        "RubinFormal.value_conservation_proved",
+        "RubinFormal.satAddU128_preserves_lower_bound"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean"
     },

@@ -8,6 +8,13 @@ from pathlib import Path
 
 ALLOWED_STATUS = {"proved", "stated", "deferred"}
 ALLOWED_PROOF_LEVEL = {"toy-model", "spec-model", "byte-model", "refinement"}
+ALLOWED_CLAIM_LEVEL = {"toy", "byte", "refined"}
+EXPECTED_CLAIM_BY_PROOF = {
+    "toy-model": "toy",
+    "spec-model": "toy",
+    "byte-model": "byte",
+    "refinement": "refined",
+}
 
 
 def fail(msg: str) -> int:
@@ -34,6 +41,17 @@ def main() -> int:
             f"invalid or missing proof_level in rubin-formal/proof_coverage.json: {proof_level}; "
             f"expected one of {sorted(ALLOWED_PROOF_LEVEL)}"
         )
+    claim_level = coverage.get("claim_level")
+    if claim_level not in ALLOWED_CLAIM_LEVEL:
+        return fail(
+            f"invalid or missing claim_level in rubin-formal/proof_coverage.json: {claim_level}; "
+            f"expected one of {sorted(ALLOWED_CLAIM_LEVEL)}"
+        )
+    expected_claim = EXPECTED_CLAIM_BY_PROOF.get(proof_level)
+    if expected_claim != claim_level:
+        return fail(
+            f"proof_level/claim_level mismatch: proof_level={proof_level} requires claim_level={expected_claim}, got {claim_level}"
+        )
 
     claims = coverage.get("claims")
     if not isinstance(claims, dict):
@@ -44,6 +62,12 @@ def main() -> int:
         return fail("claims.allowed[] must be a non-empty list in rubin-formal/proof_coverage.json")
     if not isinstance(forbidden_claims, list) or len(forbidden_claims) == 0:
         return fail("claims.forbidden[] must be a non-empty list in rubin-formal/proof_coverage.json")
+
+    refinement_bridge = coverage.get("refinement_bridge_file")
+    if not isinstance(refinement_bridge, str) or not refinement_bridge:
+        return fail("missing refinement_bridge_file in rubin-formal/proof_coverage.json")
+    if not (repo_root / refinement_bridge).exists():
+        return fail(f"refinement_bridge_file does not exist: {refinement_bridge}")
 
     expected_keys = set(section_hashes.get("section_headings", {}).keys())
     rows = coverage.get("coverage")
@@ -105,7 +129,7 @@ def main() -> int:
 
     print(
         f"OK: formal coverage baseline is consistent "
-        f"({len(seen_keys)} sections from spec/SECTION_HASHES.json), proof_level={proof_level}."
+        f"({len(seen_keys)} sections from spec/SECTION_HASHES.json), proof_level={proof_level}, claim_level={claim_level}."
     )
     return 0
 
