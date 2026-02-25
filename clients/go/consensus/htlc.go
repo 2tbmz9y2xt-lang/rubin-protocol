@@ -42,6 +42,7 @@ func ValidateHTLCSpend(
 	entry UtxoEntry,
 	pathItem WitnessItem,
 	sigItem WitnessItem,
+	digest [32]byte,
 	blockHeight uint64,
 	blockMTP uint64,
 ) error {
@@ -136,7 +137,12 @@ func ValidateHTLCSpend(
 		return txerr(TX_ERR_SIG_INVALID, "CORE_HTLC signature key binding mismatch")
 	}
 
-	// Basic profile currently checks structural and binding rules only.
-	// Full cryptographic signature verification is validated in higher-level conformance.
+	ok, err := verifySig(sigItem.SuiteID, sigItem.Pubkey, sigItem.Signature, digest)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return txerr(TX_ERR_SIG_INVALID, "CORE_HTLC signature invalid")
+	}
 	return nil
 }

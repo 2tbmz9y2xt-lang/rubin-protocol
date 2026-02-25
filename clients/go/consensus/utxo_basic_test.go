@@ -82,7 +82,7 @@ func TestApplyNonCoinbaseTxBasic_MissingUTXO(t *testing.T) {
 	txBytes := txWithOneInputOneOutput(prev, 0, 1, COV_TYPE_P2PK, validP2PKCovenantData())
 	tx, txid := mustParseTxForUtxo(t, txBytes)
 
-	_, err := ApplyNonCoinbaseTxBasic(tx, txid, map[Outpoint]UtxoEntry{}, 100, 1000)
+	_, err := ApplyNonCoinbaseTxBasic(tx, txid, map[Outpoint]UtxoEntry{}, 100, 1000, [32]byte{})
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -104,7 +104,7 @@ func TestApplyNonCoinbaseTxBasic_SpendAnchorRejected(t *testing.T) {
 			CovenantData: []byte{0x01},
 		},
 	}
-	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 100, 1000)
+	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 100, 1000, [32]byte{})
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -114,19 +114,33 @@ func TestApplyNonCoinbaseTxBasic_SpendAnchorRejected(t *testing.T) {
 }
 
 func TestApplyNonCoinbaseTxBasic_ValueConservation(t *testing.T) {
+	var chainID [32]byte
 	var prev [32]byte
 	prev[0] = 0xae
-	txBytes := txWithOneInputOneOutputWithWitness(prev, 0, 101, COV_TYPE_P2PK, validP2PKCovenantData(), dummyWitnesses(1))
-	tx, txid := mustParseTxForUtxo(t, txBytes)
+	var txid [32]byte
+	txid[0] = 0x01
+
+	kp := mustMLDSA87Keypair(t)
+	covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+
+	tx := &Tx{
+		Version:  1,
+		TxKind:   0x00,
+		TxNonce:  1,
+		Inputs:   []TxInput{{PrevTxid: prev, PrevVout: 0}},
+		Outputs:  []TxOutput{{Value: 101, CovenantType: COV_TYPE_P2PK, CovenantData: covData}},
+		Locktime: 0,
+	}
+	tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, chainID, kp)}
 
 	utxos := map[Outpoint]UtxoEntry{
 		{Txid: prev, Vout: 0}: {
 			Value:        100,
 			CovenantType: COV_TYPE_P2PK,
-			CovenantData: validP2PKCovenantData(),
+			CovenantData: covData,
 		},
 	}
-	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000)
+	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, chainID)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -136,19 +150,33 @@ func TestApplyNonCoinbaseTxBasic_ValueConservation(t *testing.T) {
 }
 
 func TestApplyNonCoinbaseTxBasic_OK(t *testing.T) {
+	var chainID [32]byte
 	var prev [32]byte
 	prev[0] = 0xaf
-	txBytes := txWithOneInputOneOutputWithWitness(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData(), dummyWitnesses(1))
-	tx, txid := mustParseTxForUtxo(t, txBytes)
+	var txid [32]byte
+	txid[0] = 0x02
+
+	kp := mustMLDSA87Keypair(t)
+	covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+
+	tx := &Tx{
+		Version:  1,
+		TxKind:   0x00,
+		TxNonce:  1,
+		Inputs:   []TxInput{{PrevTxid: prev, PrevVout: 0}},
+		Outputs:  []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: covData}},
+		Locktime: 0,
+	}
+	tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, chainID, kp)}
 
 	utxos := map[Outpoint]UtxoEntry{
 		{Txid: prev, Vout: 0}: {
 			Value:        100,
 			CovenantType: COV_TYPE_P2PK,
-			CovenantData: validP2PKCovenantData(),
+			CovenantData: covData,
 		},
 	}
-	s, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000)
+	s, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, chainID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -173,7 +201,7 @@ func TestApplyNonCoinbaseTxBasic_WitnessCountZeroRejected(t *testing.T) {
 			CovenantData: validP2PKCovenantData(),
 		},
 	}
-	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000)
+	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, [32]byte{})
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -183,37 +211,56 @@ func TestApplyNonCoinbaseTxBasic_WitnessCountZeroRejected(t *testing.T) {
 }
 
 func TestApplyNonCoinbaseTxBasic_VaultCannotFundFee(t *testing.T) {
+	var chainID [32]byte
 	var prevVault, prevFee, txid [32]byte
 	prevVault[0] = 0xc0
 	prevFee[0] = 0xc1
 	txid[0] = 0xc2
 
+	vaultKP := mustMLDSA87Keypair(t)
+	ownerKP := mustMLDSA87Keypair(t)
+	destKP := mustMLDSA87Keypair(t)
+
+	ownerCovData := p2pkCovenantDataForPubkey(ownerKP.PubkeyBytes())
+	ownerLockID := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, ownerCovData))
+
+	destCovData := p2pkCovenantDataForPubkey(destKP.PubkeyBytes())
+	whitelistH := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, destCovData))
+
+	vaultKeyID := sha3_256(vaultKP.PubkeyBytes())
+	vaultCovData := encodeVaultCovenantData(ownerLockID, 1, [][32]byte{vaultKeyID}, [][32]byte{whitelistH})
+
 	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
 		TxNonce: 1,
 		Inputs: []TxInput{
 			{PrevTxid: prevVault, PrevVout: 0},
 			{PrevTxid: prevFee, PrevVout: 0},
 		},
-		Witness: dummyWitnesses(2),
 		Outputs: []TxOutput{
-			{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
+			{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: destCovData},
 		},
+	}
+	tx.Witness = []WitnessItem{
+		signP2PKInputWitness(t, tx, 0, 100, chainID, vaultKP),
+		signP2PKInputWitness(t, tx, 1, 10, chainID, ownerKP),
 	}
 
 	utxos := map[Outpoint]UtxoEntry{
 		{Txid: prevVault, Vout: 0}: {
 			Value:        100,
 			CovenantType: COV_TYPE_VAULT,
-			CovenantData: validVaultCovenantDataForP2PKOutput(),
+			CovenantData: vaultCovData,
 		},
 		{Txid: prevFee, Vout: 0}: {
 			Value:        10,
 			CovenantType: COV_TYPE_P2PK,
-			CovenantData: ownerP2PKCovenantDataForVault(),
+			CovenantData: ownerCovData,
 		},
 	}
 
-	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000)
+	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, chainID)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -223,37 +270,56 @@ func TestApplyNonCoinbaseTxBasic_VaultCannotFundFee(t *testing.T) {
 }
 
 func TestApplyNonCoinbaseTxBasic_VaultPreservedWithOwnerFeeInput(t *testing.T) {
+	var chainID [32]byte
 	var prevVault, prevFee, txid [32]byte
 	prevVault[0] = 0xd0
 	prevFee[0] = 0xd1
 	txid[0] = 0xd2
 
+	vaultKP := mustMLDSA87Keypair(t)
+	ownerKP := mustMLDSA87Keypair(t)
+	destKP := mustMLDSA87Keypair(t)
+
+	ownerCovData := p2pkCovenantDataForPubkey(ownerKP.PubkeyBytes())
+	ownerLockID := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, ownerCovData))
+
+	destCovData := p2pkCovenantDataForPubkey(destKP.PubkeyBytes())
+	whitelistH := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, destCovData))
+
+	vaultKeyID := sha3_256(vaultKP.PubkeyBytes())
+	vaultCovData := encodeVaultCovenantData(ownerLockID, 1, [][32]byte{vaultKeyID}, [][32]byte{whitelistH})
+
 	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
 		TxNonce: 1,
 		Inputs: []TxInput{
 			{PrevTxid: prevVault, PrevVout: 0},
 			{PrevTxid: prevFee, PrevVout: 0},
 		},
-		Witness: dummyWitnesses(2),
 		Outputs: []TxOutput{
-			{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
+			{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: destCovData},
 		},
+	}
+	tx.Witness = []WitnessItem{
+		signP2PKInputWitness(t, tx, 0, 100, chainID, vaultKP),
+		signP2PKInputWitness(t, tx, 1, 10, chainID, ownerKP),
 	}
 
 	utxos := map[Outpoint]UtxoEntry{
 		{Txid: prevVault, Vout: 0}: {
 			Value:        100,
 			CovenantType: COV_TYPE_VAULT,
-			CovenantData: validVaultCovenantDataForP2PKOutput(),
+			CovenantData: vaultCovData,
 		},
 		{Txid: prevFee, Vout: 0}: {
 			Value:        10,
 			CovenantType: COV_TYPE_P2PK,
-			CovenantData: ownerP2PKCovenantDataForVault(),
+			CovenantData: ownerCovData,
 		},
 	}
 
-	s, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000)
+	s, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, chainID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -263,37 +329,56 @@ func TestApplyNonCoinbaseTxBasic_VaultPreservedWithOwnerFeeInput(t *testing.T) {
 }
 
 func TestApplyNonCoinbaseTxBasic_VaultAllowsOwnerTopUp(t *testing.T) {
+	var chainID [32]byte
 	var prevVault, prevFee, txid [32]byte
 	prevVault[0] = 0xd3
 	prevFee[0] = 0xd4
 	txid[0] = 0xd5
 
+	vaultKP := mustMLDSA87Keypair(t)
+	ownerKP := mustMLDSA87Keypair(t)
+	destKP := mustMLDSA87Keypair(t)
+
+	ownerCovData := p2pkCovenantDataForPubkey(ownerKP.PubkeyBytes())
+	ownerLockID := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, ownerCovData))
+
+	destCovData := p2pkCovenantDataForPubkey(destKP.PubkeyBytes())
+	whitelistH := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, destCovData))
+
+	vaultKeyID := sha3_256(vaultKP.PubkeyBytes())
+	vaultCovData := encodeVaultCovenantData(ownerLockID, 1, [][32]byte{vaultKeyID}, [][32]byte{whitelistH})
+
 	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
 		TxNonce: 1,
 		Inputs: []TxInput{
 			{PrevTxid: prevVault, PrevVout: 0},
 			{PrevTxid: prevFee, PrevVout: 0},
 		},
-		Witness: dummyWitnesses(2),
 		Outputs: []TxOutput{
-			{Value: 105, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
+			{Value: 105, CovenantType: COV_TYPE_P2PK, CovenantData: destCovData},
 		},
+	}
+	tx.Witness = []WitnessItem{
+		signP2PKInputWitness(t, tx, 0, 100, chainID, vaultKP),
+		signP2PKInputWitness(t, tx, 1, 10, chainID, ownerKP),
 	}
 
 	utxos := map[Outpoint]UtxoEntry{
 		{Txid: prevVault, Vout: 0}: {
 			Value:        100,
 			CovenantType: COV_TYPE_VAULT,
-			CovenantData: validVaultCovenantDataForP2PKOutput(),
+			CovenantData: vaultCovData,
 		},
 		{Txid: prevFee, Vout: 0}: {
 			Value:        10,
 			CovenantType: COV_TYPE_P2PK,
-			CovenantData: ownerP2PKCovenantDataForVault(),
+			CovenantData: ownerCovData,
 		},
 	}
 
-	s, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000)
+	s, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, chainID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -303,41 +388,59 @@ func TestApplyNonCoinbaseTxBasic_VaultAllowsOwnerTopUp(t *testing.T) {
 }
 
 func TestApplyNonCoinbaseTxBasic_VaultWhitelistRejectsOutput(t *testing.T) {
+	var chainID [32]byte
 	var prevVault, prevFee, txid [32]byte
 	prevVault[0] = 0xe0
 	prevFee[0] = 0xe1
 	txid[0] = 0xe2
 
-	nonWhitelistedOutData := make([]byte, MAX_P2PK_COVENANT_DATA)
-	nonWhitelistedOutData[0] = SUITE_ID_ML_DSA_87
-	nonWhitelistedOutData[1] = 0xff
+	vaultKP := mustMLDSA87Keypair(t)
+	ownerKP := mustMLDSA87Keypair(t)
+	whitelistedDestKP := mustMLDSA87Keypair(t)
+	nonWhitelistedDestKP := mustMLDSA87Keypair(t)
+
+	ownerCovData := p2pkCovenantDataForPubkey(ownerKP.PubkeyBytes())
+	ownerLockID := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, ownerCovData))
+
+	whitelistedOutData := p2pkCovenantDataForPubkey(whitelistedDestKP.PubkeyBytes())
+	whitelistH := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, whitelistedOutData))
+
+	nonWhitelistedOutData := p2pkCovenantDataForPubkey(nonWhitelistedDestKP.PubkeyBytes())
+
+	vaultKeyID := sha3_256(vaultKP.PubkeyBytes())
+	vaultCovData := encodeVaultCovenantData(ownerLockID, 1, [][32]byte{vaultKeyID}, [][32]byte{whitelistH})
 
 	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
 		TxNonce: 1,
 		Inputs: []TxInput{
 			{PrevTxid: prevVault, PrevVout: 0},
 			{PrevTxid: prevFee, PrevVout: 0},
 		},
-		Witness: dummyWitnesses(2),
 		Outputs: []TxOutput{
 			{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: nonWhitelistedOutData},
 		},
+	}
+	tx.Witness = []WitnessItem{
+		signP2PKInputWitness(t, tx, 0, 100, chainID, vaultKP),
+		signP2PKInputWitness(t, tx, 1, 10, chainID, ownerKP),
 	}
 
 	utxos := map[Outpoint]UtxoEntry{
 		{Txid: prevVault, Vout: 0}: {
 			Value:        100,
 			CovenantType: COV_TYPE_VAULT,
-			CovenantData: validVaultCovenantDataForP2PKOutput(),
+			CovenantData: vaultCovData,
 		},
 		{Txid: prevFee, Vout: 0}: {
 			Value:        10,
 			CovenantType: COV_TYPE_P2PK,
-			CovenantData: ownerP2PKCovenantDataForVault(),
+			CovenantData: ownerCovData,
 		},
 	}
 
-	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000)
+	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, chainID)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -347,47 +450,67 @@ func TestApplyNonCoinbaseTxBasic_VaultWhitelistRejectsOutput(t *testing.T) {
 }
 
 func TestApplyNonCoinbaseTxBasic_VaultRejectsFeeSponsor(t *testing.T) {
+	var chainID [32]byte
 	var prevVault, prevOwner, prevSponsor, txid [32]byte
 	prevVault[0] = 0xf2
 	prevOwner[0] = 0xf3
 	prevSponsor[0] = 0xf4
 	txid[0] = 0xf5
 
+	ownerKP := mustMLDSA87Keypair(t)
+	sponsorKP := mustMLDSA87Keypair(t)
+	destKP := mustMLDSA87Keypair(t)
+
+	ownerCovData := p2pkCovenantDataForPubkey(ownerKP.PubkeyBytes())
+	ownerLockID := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, ownerCovData))
+
+	sponsorCovData := p2pkCovenantDataForPubkey(sponsorKP.PubkeyBytes())
+
+	destCovData := p2pkCovenantDataForPubkey(destKP.PubkeyBytes())
+	whitelistH := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, destCovData))
+
+	var dummyVaultKeyID [32]byte
+	dummyVaultKeyID[0] = 0x11
+	vaultCovData := encodeVaultCovenantData(ownerLockID, 1, [][32]byte{dummyVaultKeyID}, [][32]byte{whitelistH})
+
 	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
 		TxNonce: 1,
 		Inputs: []TxInput{
 			{PrevTxid: prevVault, PrevVout: 0},
 			{PrevTxid: prevOwner, PrevVout: 0},
 			{PrevTxid: prevSponsor, PrevVout: 0},
 		},
-		Witness: dummyWitnesses(3),
 		Outputs: []TxOutput{
-			{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
+			{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: destCovData},
 		},
 	}
-
-	sponsorData := validP2PKCovenantData()
-	sponsorData[1] = 0x02 // not the vault owner lock id
+	tx.Witness = []WitnessItem{
+		{SuiteID: SUITE_ID_SENTINEL}, // vault slot (not reached; sponsor check fails earlier)
+		signP2PKInputWitness(t, tx, 1, 10, chainID, ownerKP),
+		signP2PKInputWitness(t, tx, 2, 10, chainID, sponsorKP),
+	}
 
 	utxos := map[Outpoint]UtxoEntry{
 		{Txid: prevVault, Vout: 0}: {
 			Value:        100,
 			CovenantType: COV_TYPE_VAULT,
-			CovenantData: validVaultCovenantDataForP2PKOutput(),
+			CovenantData: vaultCovData,
 		},
 		{Txid: prevOwner, Vout: 0}: {
 			Value:        10,
 			CovenantType: COV_TYPE_P2PK,
-			CovenantData: ownerP2PKCovenantDataForVault(),
+			CovenantData: ownerCovData,
 		},
 		{Txid: prevSponsor, Vout: 0}: {
 			Value:        10,
 			CovenantType: COV_TYPE_P2PK,
-			CovenantData: sponsorData,
+			CovenantData: sponsorCovData,
 		},
 	}
 
-	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000)
+	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, chainID)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -397,21 +520,37 @@ func TestApplyNonCoinbaseTxBasic_VaultRejectsFeeSponsor(t *testing.T) {
 }
 
 func TestApplyNonCoinbaseTxBasic_MultisigInputAccepted(t *testing.T) {
+	var chainID [32]byte
 	var prevMS, txid [32]byte
 	prevMS[0] = 0xf0
 	txid[0] = 0xf1
-	txBytes := txWithOneInputOneOutputWithWitness(prevMS, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData(), dummyWitnesses(1))
-	tx, parsedTxid := mustParseTxForUtxo(t, txBytes)
-	txid = parsedTxid
+
+	msKP := mustMLDSA87Keypair(t)
+	destKP := mustMLDSA87Keypair(t)
+
+	msKeyID := sha3_256(msKP.PubkeyBytes())
+	msCovData := encodeMultisigCovenantData(1, [][32]byte{msKeyID})
+
+	destCovData := p2pkCovenantDataForPubkey(destKP.PubkeyBytes())
+
+	tx := &Tx{
+		Version:  1,
+		TxKind:   0x00,
+		TxNonce:  1,
+		Inputs:   []TxInput{{PrevTxid: prevMS, PrevVout: 0}},
+		Outputs:  []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: destCovData}},
+		Locktime: 0,
+	}
+	tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, chainID, msKP)}
 
 	utxos := map[Outpoint]UtxoEntry{
 		{Txid: prevMS, Vout: 0}: {
 			Value:        100,
 			CovenantType: COV_TYPE_MULTISIG,
-			CovenantData: encodeMultisigCovenantData(1, makeKeys(1, 0x31)),
+			CovenantData: msCovData,
 		},
 	}
-	s, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000)
+	s, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, chainID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

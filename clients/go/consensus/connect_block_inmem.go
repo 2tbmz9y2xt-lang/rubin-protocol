@@ -32,6 +32,7 @@ func ConnectBlockBasicInMemoryAtHeight(
 	blockHeight uint64,
 	prevTimestamps []uint64,
 	state *InMemoryChainState,
+	chainID [32]byte,
 ) (*ConnectBlockBasicSummary, error) {
 	if state == nil {
 		return nil, txerr(BLOCK_ERR_PARSE, "nil chainstate")
@@ -74,6 +75,7 @@ func ConnectBlockBasicInMemoryAtHeight(
 			blockHeight,
 			pb.Header.Timestamp,
 			blockMTP,
+			chainID,
 		)
 		if err != nil {
 			return nil, err

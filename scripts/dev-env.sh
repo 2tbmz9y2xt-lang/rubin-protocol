@@ -35,6 +35,23 @@ prepend_path_if_exists "/usr/local/bin"
 
 export PATH
 
+select_openssl() {
+  # Prefer Homebrew OpenSSL@3 to avoid macOS LibreSSL default.
+  # This is required by the normative non-consensus profile:
+  #   spec/RUBIN_CRYPTO_BACKEND_PROFILE.md (OpenSSL 3.5+).
+  if [[ -x "/opt/homebrew/opt/openssl@3/bin/openssl" ]]; then
+    prepend_path_if_exists "/opt/homebrew/opt/openssl@3/bin"
+    export OPENSSL_DIR="/opt/homebrew/opt/openssl@3"
+    export PKG_CONFIG_PATH="/opt/homebrew/opt/openssl@3/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+  elif [[ -x "/usr/local/opt/openssl@3/bin/openssl" ]]; then
+    prepend_path_if_exists "/usr/local/opt/openssl@3/bin"
+    export OPENSSL_DIR="/usr/local/opt/openssl@3"
+    export PKG_CONFIG_PATH="/usr/local/opt/openssl@3/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+  fi
+}
+
+select_openssl
+
 need_cmd() {
   local cmd="$1"
   if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -54,6 +71,12 @@ maybe_cmd() {
 print_versions() {
   echo "repo_root: ${REPO_ROOT}"
   echo "PATH: ${PATH}"
+  if [[ -n "${OPENSSL_DIR:-}" ]]; then
+    echo "OPENSSL_DIR: ${OPENSSL_DIR}"
+  fi
+  if [[ -n "${PKG_CONFIG_PATH:-}" ]]; then
+    echo "PKG_CONFIG_PATH: ${PKG_CONFIG_PATH}"
+  fi
   echo
 
   echo "git: $(git --version 2>/dev/null || echo 'missing')"
@@ -63,6 +86,7 @@ print_versions() {
   echo "go: $(go version 2>/dev/null || echo 'missing')"
   echo "rustc: $(rustc --version 2>/dev/null || echo 'missing')"
   echo "cargo: $(cargo --version 2>/dev/null || echo 'missing')"
+  echo "openssl: $(openssl version 2>/dev/null || echo 'missing')"
 
   if maybe_cmd elan; then
     echo "elan: $(elan --version 2>/dev/null || echo 'missing')"
@@ -84,6 +108,8 @@ check_required() {
   need_cmd go
   need_cmd cargo
   need_cmd rustc
+  need_cmd openssl
+  need_cmd pkg-config
 }
 
 if [[ "${1:-}" == "--" ]]; then

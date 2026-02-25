@@ -66,6 +66,7 @@ func TestParseHTLCCovenantData_InvalidLockMode(t *testing.T) {
 }
 
 func TestValidateHTLCSpend_ClaimHashMismatch(t *testing.T) {
+	var digest [32]byte
 	claimPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
 	refundPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
 	refundPub[0] = 0x22
@@ -96,7 +97,7 @@ func TestValidateHTLCSpend_ClaimHashMismatch(t *testing.T) {
 		Signature: []byte{0x01},
 	}
 
-	err := ValidateHTLCSpend(entry, path, sig, SLH_DSA_ACTIVATION_HEIGHT, 0)
+	err := ValidateHTLCSpend(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -106,6 +107,7 @@ func TestValidateHTLCSpend_ClaimHashMismatch(t *testing.T) {
 }
 
 func TestValidateHTLCSpend_RefundTimelockNotMet(t *testing.T) {
+	var digest [32]byte
 	claimPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
 	refundPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
 	refundPub[0] = 0x33
@@ -135,7 +137,7 @@ func TestValidateHTLCSpend_RefundTimelockNotMet(t *testing.T) {
 		Signature: []byte{0x01},
 	}
 
-	err := ValidateHTLCSpend(entry, path, sig, SLH_DSA_ACTIVATION_HEIGHT, 0)
+	err := ValidateHTLCSpend(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -145,9 +147,20 @@ func TestValidateHTLCSpend_RefundTimelockNotMet(t *testing.T) {
 }
 
 func TestValidateHTLCSpend_RefundTimestampUsesMTP(t *testing.T) {
-	claimPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
-	refundPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
-	refundPub[0] = 0x44
+	var digest [32]byte
+	digest[0] = 0x01
+	claimKP, err := NewMLDSA87Keypair()
+	if err != nil {
+		t.Fatalf("NewMLDSA87Keypair(claim): %v", err)
+	}
+	defer claimKP.Close()
+	refundKP, err := NewMLDSA87Keypair()
+	if err != nil {
+		t.Fatalf("NewMLDSA87Keypair(refund): %v", err)
+	}
+	defer refundKP.Close()
+	claimPub := claimKP.PubkeyBytes()
+	refundPub := refundKP.PubkeyBytes()
 	claimKeyID := sha3_256(claimPub)
 	refundKeyID := sha3_256(refundPub)
 
@@ -168,13 +181,17 @@ func TestValidateHTLCSpend_RefundTimestampUsesMTP(t *testing.T) {
 		Pubkey:    refundKeyID[:],
 		Signature: []byte{0x01},
 	}
+	refundSig, err := refundKP.SignDigest32(digest)
+	if err != nil {
+		t.Fatalf("SignDigest32: %v", err)
+	}
 	sig := WitnessItem{
-		SuiteID:   SUITE_ID_SLH_DSA_SHAKE_256F,
+		SuiteID:   SUITE_ID_ML_DSA_87,
 		Pubkey:    refundPub,
-		Signature: []byte{0x01},
+		Signature: refundSig,
 	}
 
-	err := ValidateHTLCSpend(entry, path, sig, SLH_DSA_ACTIVATION_HEIGHT, 1000)
+	err = ValidateHTLCSpend(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT, 1000)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -182,12 +199,13 @@ func TestValidateHTLCSpend_RefundTimestampUsesMTP(t *testing.T) {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_TIMELOCK_NOT_MET)
 	}
 
-	if err := ValidateHTLCSpend(entry, path, sig, SLH_DSA_ACTIVATION_HEIGHT, 3000); err != nil {
+	if err := ValidateHTLCSpend(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT, 3000); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
 func TestApplyNonCoinbaseTxBasic_HTLCUnknownPath(t *testing.T) {
+	var chainID [32]byte
 	var prev [32]byte
 	prev[0] = 0xa1
 	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
@@ -220,7 +238,7 @@ func TestApplyNonCoinbaseTxBasic_HTLCUnknownPath(t *testing.T) {
 		},
 	}
 
-	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, SLH_DSA_ACTIVATION_HEIGHT, 1000)
+	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, SLH_DSA_ACTIVATION_HEIGHT, 1000, chainID)
 	if err == nil {
 		t.Fatalf("expected error")
 	}

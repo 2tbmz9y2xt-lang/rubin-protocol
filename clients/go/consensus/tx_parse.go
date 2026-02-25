@@ -38,10 +38,15 @@ type WitnessItem struct {
 }
 
 type DaCommitCore struct {
-	DaID              [32]byte
-	ChunkCount        uint16
-	PayloadCommitment [32]byte
-	BatchSig          []byte
+	DaID            [32]byte
+	ChunkCount      uint16
+	RetlDomainID    [32]byte
+	BatchNumber     uint64
+	TxDataRoot      [32]byte
+	StateRoot       [32]byte
+	WithdrawalsRoot [32]byte
+	BatchSigSuite   uint8
+	BatchSig        []byte
 }
 
 type DaChunkCore struct {
@@ -185,12 +190,38 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 		if chunkCount == 0 || uint64(chunkCount) > MAX_DA_CHUNK_COUNT {
 			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "chunk_count out of range for tx_kind=0x01")
 		}
-		payloadCommitmentBytes, err := readBytes(b, &off, 32)
+		retlDomainBytes, err := readBytes(b, &off, 32)
 		if err != nil {
 			return nil, zero, zero, 0, err
 		}
-		var payloadCommitment [32]byte
-		copy(payloadCommitment[:], payloadCommitmentBytes)
+		var retlDomainID [32]byte
+		copy(retlDomainID[:], retlDomainBytes)
+		batchNumber, err := readU64le(b, &off)
+		if err != nil {
+			return nil, zero, zero, 0, err
+		}
+		txDataRootBytes, err := readBytes(b, &off, 32)
+		if err != nil {
+			return nil, zero, zero, 0, err
+		}
+		var txDataRoot [32]byte
+		copy(txDataRoot[:], txDataRootBytes)
+		stateRootBytes, err := readBytes(b, &off, 32)
+		if err != nil {
+			return nil, zero, zero, 0, err
+		}
+		var stateRoot [32]byte
+		copy(stateRoot[:], stateRootBytes)
+		withdrawalsRootBytes, err := readBytes(b, &off, 32)
+		if err != nil {
+			return nil, zero, zero, 0, err
+		}
+		var withdrawalsRoot [32]byte
+		copy(withdrawalsRoot[:], withdrawalsRootBytes)
+		batchSigSuite, err := readU8(b, &off)
+		if err != nil {
+			return nil, zero, zero, 0, err
+		}
 		batchSigLenU64, _, err := readCompactSize(b, &off)
 		if err != nil {
 			return nil, zero, zero, 0, err
@@ -203,10 +234,15 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 			return nil, zero, zero, 0, err
 		}
 		daCommitCore = &DaCommitCore{
-			DaID:              daID,
-			ChunkCount:        chunkCount,
-			PayloadCommitment: payloadCommitment,
-			BatchSig:          batchSig,
+			DaID:            daID,
+			ChunkCount:      chunkCount,
+			RetlDomainID:    retlDomainID,
+			BatchNumber:     batchNumber,
+			TxDataRoot:      txDataRoot,
+			StateRoot:       stateRoot,
+			WithdrawalsRoot: withdrawalsRoot,
+			BatchSigSuite:   batchSigSuite,
+			BatchSig:        batchSig,
 		}
 	case 0x02:
 		daIDBytes, err := readBytes(b, &off, 32)
@@ -335,9 +371,19 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 	}
 	var daPayload []byte
 	switch txKind {
-	case 0x00, 0x01:
+	case 0x00:
 		if daLenU64 != 0 {
-			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "da_payload_len must be 0 for tx_kind=0x00/0x01")
+			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "da_payload_len must be 0 for tx_kind=0x00")
+		}
+	case 0x01:
+		if daLenU64 > MAX_DA_MANIFEST_BYTES_PER_TX || daLenU64 > uint64(math.MaxInt) {
+			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "da_payload_len out of range for tx_kind=0x01")
+		}
+		if daLenU64 != 0 {
+			daPayload, err = readBytes(b, &off, int(daLenU64))
+			if err != nil {
+				return nil, zero, zero, 0, err
+			}
 		}
 	case 0x02:
 		if daLenU64 == 0 || daLenU64 > CHUNK_BYTES || daLenU64 > uint64(math.MaxInt) {
@@ -381,10 +427,15 @@ func daCoreFieldsBytes(tx *Tx) ([]byte, error) {
 			return nil, txerr(TX_ERR_PARSE, "missing da_commit_core for tx_kind=0x01")
 		}
 		core := tx.DaCommitCore
-		out := make([]byte, 0, 32+2+32+9+len(core.BatchSig))
+		out := make([]byte, 0, 32+2+32+8+32+32+32+1+9+len(core.BatchSig))
 		out = append(out, core.DaID[:]...)
 		out = appendU16le(out, core.ChunkCount)
-		out = append(out, core.PayloadCommitment[:]...)
+		out = append(out, core.RetlDomainID[:]...)
+		out = appendU64le(out, core.BatchNumber)
+		out = append(out, core.TxDataRoot[:]...)
+		out = append(out, core.StateRoot[:]...)
+		out = append(out, core.WithdrawalsRoot[:]...)
+		out = append(out, core.BatchSigSuite)
 		out = appendCompactSize(out, uint64(len(core.BatchSig)))
 		out = append(out, core.BatchSig...)
 		return out, nil

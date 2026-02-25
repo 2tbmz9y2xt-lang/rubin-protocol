@@ -14,8 +14,10 @@ pub mod pow;
 pub mod sighash;
 pub mod subsidy;
 pub mod tx;
+mod spend_verify;
 mod utxo_basic;
 mod vault;
+mod verify_sig_openssl;
 mod wire_read;
 
 pub use block::{block_hash, parse_block_header_bytes, BlockHeader, BLOCK_HEADER_BYTES};

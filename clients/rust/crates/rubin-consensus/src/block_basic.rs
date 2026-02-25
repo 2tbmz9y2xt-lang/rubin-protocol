@@ -532,13 +532,27 @@ fn validate_da_set_integrity(txs: &[Tx]) -> Result<(), TxError> {
             concat.extend_from_slice(&tx.da_payload);
         }
         let payload_commitment = sha3_256(&concat);
-        let commit_core = commit.tx.da_commit_core.as_ref().ok_or_else(|| {
-            TxError::new(
-                ErrorCode::TxErrParse,
-                "missing da_commit_core for tx_kind=0x01",
-            )
-        })?;
-        if payload_commitment != commit_core.payload_commitment {
+
+        // CANONICAL §21.4: commit tx MUST contain exactly one CORE_DA_COMMIT output whose
+        // covenant_data equals the payload commitment hash (missing/duplicate are invalid).
+        let mut da_commit_outputs: u32 = 0;
+        let mut got_commitment = [0u8; 32];
+        for o in &commit.tx.outputs {
+            if o.covenant_type != COV_TYPE_DA_COMMIT {
+                continue;
+            }
+            da_commit_outputs += 1;
+            if o.covenant_data.len() == 32 {
+                got_commitment.copy_from_slice(&o.covenant_data);
+            }
+        }
+        if da_commit_outputs != 1 {
+            return Err(TxError::new(
+                ErrorCode::BlockErrDaPayloadCommitInvalid,
+                "DA commitment output missing or duplicated",
+            ));
+        }
+        if payload_commitment != got_commitment {
             return Err(TxError::new(
                 ErrorCode::BlockErrDaPayloadCommitInvalid,
                 "payload commitment mismatch",
