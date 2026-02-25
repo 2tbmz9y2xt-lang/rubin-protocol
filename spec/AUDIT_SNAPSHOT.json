@@ -285,7 +285,7 @@
     },
     {
       "finding_id": "Q-CODE-01",
-      "status": "OPEN",
+      "status": "ALREADY_FIXED",
       "severity": "UNSPECIFIED",
       "layer": "repo",
       "summary": "ALREADY_FIXED | False-positive triaged: Go/Rust CLI JSON already snake_case (`wtxid`, `block_timestamp`)",
@@ -302,7 +302,7 @@
     },
     {
       "finding_id": "Q-CODE-02",
-      "status": "OPEN",
+      "status": "ALREADY_FIXED",
       "severity": "UNSPECIFIED",
       "layer": "repo",
       "summary": "ALREADY_FIXED | DA-specific unit tests added in Go+Rust",
@@ -319,7 +319,7 @@
     },
     {
       "finding_id": "Q-CONF-07",
-      "status": "OPEN",
+      "status": "ALREADY_FIXED",
       "severity": "UNSPECIFIED",
       "layer": "repo",
       "summary": "ALREADY_FIXED | CANONICAL §21.3 `1 <= chunk_count` + `CV-DA-06`",
@@ -336,7 +336,7 @@
     },
     {
       "finding_id": "Q-CONF-08",
-      "status": "OPEN",
+      "status": "ALREADY_FIXED",
       "severity": "UNSPECIFIED",
       "layer": "repo",
       "summary": "ALREADY_FIXED | SLH boundary vectors in `CV-SIG`/`CV-VAULT` (pre-activation reject, activation accept)",
@@ -353,7 +353,7 @@
     },
     {
       "finding_id": "Q-CONF-09",
-      "status": "OPEN",
+      "status": "ALREADY_FIXED",
       "severity": "UNSPECIFIED",
       "layer": "repo",
       "summary": "ALREADY_FIXED | Added batch gap vectors (vault ±1 boundaries, replay distance, retarget min=1, CompactSize, mixed cursor ordering)",
@@ -370,7 +370,7 @@
     },
     {
       "finding_id": "Q-HYGIENE-01",
-      "status": "OPEN",
+      "status": "ALREADY_FIXED",
       "severity": "UNSPECIFIED",
       "layer": "repo",
       "summary": "ALREADY_FIXED | Closed earlier by stale-closeout report",
@@ -387,7 +387,7 @@
     },
     {
       "finding_id": "Q-SEC-01",
-      "status": "OPEN",
+      "status": "ALREADY_FIXED",
       "severity": "UNSPECIFIED",
       "layer": "repo",
       "summary": "ALREADY_FIXED | `verify_sig` key/signature pre-checks in Go+Rust + unit tests (`../inbox/reports/2026-02-25_report_claimed_batch_closeout_q-sec-01_q-conf-07_08_09_q-code-01_02_q-tooling-02_03_05_q-spec-02.md`)",
@@ -405,7 +405,7 @@
     },
     {
       "finding_id": "Q-SPEC-02",
-      "status": "OPEN",
+      "status": "ALREADY_FIXED",
       "severity": "UNSPECIFIED",
       "layer": "spec",
       "summary": "ALREADY_FIXED | Spec clarifications applied in CANONICAL/P2P_AUX/NETWORK_PARAMS",
@@ -422,7 +422,7 @@
     },
     {
       "finding_id": "Q-TOOLING-02",
-      "status": "OPEN",
+      "status": "ALREADY_FIXED",
       "severity": "UNSPECIFIED",
       "layer": "ci",
       "summary": "ALREADY_FIXED | Python 3.9 compatibility in `tools/make_audit_pack.py` (`Optional[str]`)",
@@ -440,7 +440,7 @@
     },
     {
       "finding_id": "Q-TOOLING-03",
-      "status": "OPEN",
+      "status": "ALREADY_FIXED",
       "severity": "UNSPECIFIED",
       "layer": "ci",
       "summary": "ALREADY_FIXED | `hash_algorithm` now mandatory in `tools/check_section_hashes.py` (no fallback)",
@@ -458,7 +458,7 @@
     },
     {
       "finding_id": "Q-TOOLING-04",
-      "status": "OPEN",
+      "status": "ALREADY_FIXED",
       "severity": "UNSPECIFIED",
       "layer": "ci",
       "summary": "ALREADY_FIXED | Closed earlier by `../inbox/reports/2026-02-25_report_q-tooling-04_q-hygiene-01_stale_closeout.md`",
@@ -476,7 +476,7 @@
     },
     {
       "finding_id": "Q-TOOLING-05",
-      "status": "OPEN",
+      "status": "ALREADY_FIXED",
       "severity": "UNSPECIFIED",
       "layer": "ci",
       "summary": "ALREADY_FIXED | Fixture schema/completeness validation added to `tools/gen_conformance_matrix.py`",
@@ -514,8 +514,7 @@
   "stats": {
     "total": 28,
     "by_status": {
-      "ALREADY_FIXED": 16,
-      "OPEN": 12
+      "ALREADY_FIXED": 28
     },
     "by_layer": {
       "repo": 23,

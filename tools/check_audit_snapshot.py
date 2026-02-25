@@ -122,6 +122,11 @@ def main() -> int:
         if not isinstance(sources, list) or len(sources) == 0:
             return fail(f"finding {finding_id}: sources must be non-empty list")
 
+        if "ALREADY_FIXED" in summary.upper() and status != "ALREADY_FIXED":
+            return fail(
+                f"finding {finding_id}: summary marks ALREADY_FIXED but status={status}"
+            )
+
         # Для любого статуса должен быть минимум один source-line ref.
         has_source_line = any(isinstance(ref, str) and "#L" in ref for ref in evidence)
         if not has_source_line:

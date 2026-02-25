@@ -69,6 +69,13 @@ def normalize_status(raw: str | None, fallback: str = "OPEN") -> str:
     return fallback
 
 
+def harmonize_status_with_summary(status: str, summary: str) -> str:
+    upper_summary = summary.upper()
+    if "ALREADY_FIXED" in upper_summary and status == "OPEN":
+        return "ALREADY_FIXED"
+    return status
+
+
 def extract_refs(text: str) -> list[str]:
     refs: list[str] = []
 
@@ -168,7 +175,6 @@ def build_snapshot(repo_root: Path, context_rel: str) -> dict[str, Any]:
                     raw_status = row.get("Статус") or row.get("Status")
                     if not raw_status and "Q-ID" in row and row.get("Severity"):
                         raw_status = "OPEN"
-                    status = normalize_status(raw_status, fallback="OPEN")
                     severity = (row.get("Severity") or "UNSPECIFIED").strip().upper()
 
                     summary = ""
@@ -178,6 +184,10 @@ def build_snapshot(repo_root: Path, context_rel: str) -> dict[str, Any]:
                             break
                     if not summary:
                         summary = " | ".join(cell for cell in cells[1:] if cell)
+                    status = harmonize_status_with_summary(
+                        normalize_status(raw_status, fallback="OPEN"),
+                        summary,
+                    )
 
                     source_ref = f"{context_rel}#L{i + 1}"
                     source_section = to_slug(section)
