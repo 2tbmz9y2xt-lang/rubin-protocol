@@ -49,36 +49,23 @@ static int rubin_verify_sig_message(
 		return -1;
 	}
 
-	EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new(pkey, NULL);
-	if (ctx == NULL) {
+	EVP_MD_CTX* mctx = EVP_MD_CTX_new();
+	if (mctx == NULL) {
 		EVP_PKEY_free(pkey);
-		rubin_err(err_buf, err_buf_len, "EVP_PKEY_CTX_new failed");
+		rubin_err(err_buf, err_buf_len, "EVP_MD_CTX_new failed");
 		return -1;
 	}
 
-	if (EVP_PKEY_verify_message_init(ctx, NULL, NULL) <= 0) {
-		EVP_PKEY_CTX_free(ctx);
+	if (EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL) <= 0) {
+		EVP_MD_CTX_free(mctx);
 		EVP_PKEY_free(pkey);
-		rubin_err(err_buf, err_buf_len, "EVP_PKEY_verify_message_init failed");
+		rubin_err(err_buf, err_buf_len, "EVP_DigestVerifyInit_ex failed");
 		return -1;
 	}
 
-	if (EVP_PKEY_CTX_set_signature(ctx, sig, sig_len) <= 0) {
-		EVP_PKEY_CTX_free(ctx);
-		EVP_PKEY_free(pkey);
-		rubin_err(err_buf, err_buf_len, "EVP_PKEY_CTX_set_signature failed");
-		return -1;
-	}
-	if (EVP_PKEY_verify_message_update(ctx, msg, msg_len) <= 0) {
-		EVP_PKEY_CTX_free(ctx);
-		EVP_PKEY_free(pkey);
-		rubin_err(err_buf, err_buf_len, "EVP_PKEY_verify_message_update failed");
-		return -1;
-	}
+	int rc = EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len);
 
-	int rc = EVP_PKEY_verify_message_final(ctx);
-
-	EVP_PKEY_CTX_free(ctx);
+	EVP_MD_CTX_free(mctx);
 	EVP_PKEY_free(pkey);
 
 	if (rc == 1) {
@@ -87,7 +74,7 @@ static int rubin_verify_sig_message(
 	if (rc == 0) {
 		return 0;
 	}
-	rubin_err(err_buf, err_buf_len, "EVP_PKEY_verify_message_final returned error");
+	rubin_err(err_buf, err_buf_len, "EVP_DigestVerify returned error");
 	return -1;
 }
 

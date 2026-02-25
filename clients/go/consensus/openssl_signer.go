@@ -59,30 +59,49 @@ static int rubin_get_raw_public(EVP_PKEY* pkey, unsigned char* out, size_t out_c
 	return 0;
 }
 
-	static int rubin_sign_msg(EVP_PKEY* pkey, const unsigned char* msg, size_t msg_len, unsigned char* sig_out, size_t sig_cap, size_t* sig_len, char* err_buf, size_t err_buf_len) {
-		ERR_clear_error();
-		EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new(pkey, NULL);
-		if (ctx == NULL) {
-			rubin_err_sign(err_buf, err_buf_len, "EVP_PKEY_CTX_new failed");
+static int rubin_sign_msg(EVP_PKEY* pkey, const unsigned char* msg, size_t msg_len, unsigned char* sig_out, size_t sig_cap, size_t* sig_len, char* err_buf, size_t err_buf_len) {
+	ERR_clear_error();
+	EVP_MD_CTX* mctx = EVP_MD_CTX_new();
+	if (mctx == NULL) {
+		rubin_err_sign(err_buf, err_buf_len, "EVP_MD_CTX_new failed");
 		return -1;
 	}
-	if (EVP_PKEY_sign_message_init(ctx, NULL, NULL) <= 0) {
-		EVP_PKEY_CTX_free(ctx);
-		rubin_err_sign(err_buf, err_buf_len, "EVP_PKEY_sign_message_init failed");
-		return -1;
-	}
-	if (EVP_PKEY_sign_message_update(ctx, msg, msg_len) <= 0) {
-		EVP_PKEY_CTX_free(ctx);
-		rubin_err_sign(err_buf, err_buf_len, "EVP_PKEY_sign_message_update failed");
+	if (EVP_DigestSignInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL) <= 0) {
+		EVP_MD_CTX_free(mctx);
+		rubin_err_sign(err_buf, err_buf_len, "EVP_DigestSignInit_ex failed");
 		return -1;
 	}
 	size_t n = sig_cap;
-	if (EVP_PKEY_sign_message_final(ctx, sig_out, &n) <= 0) {
-		EVP_PKEY_CTX_free(ctx);
-		rubin_err_sign(err_buf, err_buf_len, "EVP_PKEY_sign_message_final failed");
+	if (EVP_DigestSign(mctx, sig_out, &n, msg, msg_len) <= 0) {
+		EVP_MD_CTX_free(mctx);
+		rubin_err_sign(err_buf, err_buf_len, "EVP_DigestSign failed");
 		return -1;
 	}
-	EVP_PKEY_CTX_free(ctx);
+	EVP_MD_CTX_free(mctx);
+	*sig_len = n;
+	return 0;
+}
+
+	// One-shot sign path used by SLH-DSA: EVP_DigestSignInit_ex(mdname=NULL) + EVP_DigestSign().
+	static int rubin_digest_sign_oneshot(EVP_PKEY* pkey, const unsigned char* msg, size_t msg_len, unsigned char* sig_out, size_t sig_cap, size_t* sig_len, char* err_buf, size_t err_buf_len) {
+		ERR_clear_error();
+		EVP_MD_CTX* mctx = EVP_MD_CTX_new();
+		if (mctx == NULL) {
+			rubin_err_sign(err_buf, err_buf_len, "EVP_MD_CTX_new failed");
+			return -1;
+		}
+		if (EVP_DigestSignInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL) <= 0) {
+			EVP_MD_CTX_free(mctx);
+			rubin_err_sign(err_buf, err_buf_len, "EVP_DigestSignInit_ex failed");
+			return -1;
+		}
+		size_t n = sig_cap;
+		if (EVP_DigestSign(mctx, sig_out, &n, msg, msg_len) <= 0) {
+			EVP_MD_CTX_free(mctx);
+			rubin_err_sign(err_buf, err_buf_len, "EVP_DigestSign failed");
+			return -1;
+		}
+		EVP_MD_CTX_free(mctx);
 		*sig_len = n;
 		return 0;
 	}
@@ -167,6 +186,79 @@ func (k *MLDSA87Keypair) SignDigest32(digest [32]byte) ([]byte, error) {
 		return nil, fmt.Errorf("openssl sig length=%d, want %d", int(sigLen), ML_DSA_87_SIG_BYTES)
 	}
 	return sig, nil
+}
+
+// SLHDSASHAKE256fKeypair is a non-consensus helper used by conformance tooling to
+// generate real SLH-DSA signatures (fallback suite, post-activation).
+type SLHDSASHAKE256fKeypair struct {
+	pkey   *C.EVP_PKEY
+	pubkey []byte
+}
+
+func (k *SLHDSASHAKE256fKeypair) Close() {
+	if k == nil || k.pkey == nil {
+		return
+	}
+	C.EVP_PKEY_free(k.pkey)
+	k.pkey = nil
+}
+
+func (k *SLHDSASHAKE256fKeypair) PubkeyBytes() []byte {
+	if k == nil {
+		return nil
+	}
+	return append([]byte(nil), k.pubkey...)
+}
+
+func NewSLHDSASHAKE256fKeypair() (*SLHDSASHAKE256fKeypair, error) {
+	errBuf := make([]byte, 512)
+	cAlg := C.CString("SLH-DSA-SHAKE-256f")
+	defer C.free(unsafe.Pointer(cAlg))
+
+	pkey := C.rubin_keygen(cAlg, (*C.char)(unsafe.Pointer(&errBuf[0])), C.size_t(len(errBuf)))
+	if pkey == nil {
+		return nil, fmt.Errorf("openssl keygen failed: %s", cStringTrim0(errBuf))
+	}
+
+	pub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
+	var pubLen C.size_t
+	if C.rubin_get_raw_public(pkey, (*C.uchar)(unsafe.Pointer(&pub[0])), C.size_t(len(pub)), &pubLen, (*C.char)(unsafe.Pointer(&errBuf[0])), C.size_t(len(errBuf))) != 0 {
+		C.EVP_PKEY_free(pkey)
+		return nil, fmt.Errorf("openssl get_raw_public failed: %s", cStringTrim0(errBuf))
+	}
+	if int(pubLen) != SLH_DSA_SHAKE_256F_PUBKEY_BYTES {
+		C.EVP_PKEY_free(pkey)
+		return nil, fmt.Errorf("openssl pubkey length=%d, want %d", int(pubLen), SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
+	}
+
+	kp := &SLHDSASHAKE256fKeypair{pkey: pkey, pubkey: pub}
+	runtime.SetFinalizer(kp, func(k *SLHDSASHAKE256fKeypair) { k.Close() })
+	return kp, nil
+}
+
+func (k *SLHDSASHAKE256fKeypair) SignDigest32(digest [32]byte) ([]byte, error) {
+	if k == nil || k.pkey == nil {
+		return nil, fmt.Errorf("nil keypair")
+	}
+	errBuf := make([]byte, 512)
+	sig := make([]byte, MAX_SLH_DSA_SIG_BYTES)
+	var sigLen C.size_t
+	if C.rubin_digest_sign_oneshot(
+		k.pkey,
+		(*C.uchar)(unsafe.Pointer(&digest[0])),
+		C.size_t(len(digest)),
+		(*C.uchar)(unsafe.Pointer(&sig[0])),
+		C.size_t(len(sig)),
+		&sigLen,
+		(*C.char)(unsafe.Pointer(&errBuf[0])),
+		C.size_t(len(errBuf)),
+	) != 0 {
+		return nil, fmt.Errorf("openssl sign failed: %s", cStringTrim0(errBuf))
+	}
+	if sigLen == 0 || int(sigLen) > MAX_SLH_DSA_SIG_BYTES {
+		return nil, fmt.Errorf("openssl sig length=%d, want 1..%d", int(sigLen), MAX_SLH_DSA_SIG_BYTES)
+	}
+	return sig[:sigLen], nil
 }
 
 func cStringTrim0(b []byte) string {
