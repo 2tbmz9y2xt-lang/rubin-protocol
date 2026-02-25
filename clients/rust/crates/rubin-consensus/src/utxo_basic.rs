@@ -67,6 +67,12 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
             "non-coinbase must have at least one input",
         ));
     }
+    if tx.tx_nonce == 0 {
+        return Err(TxError::new(
+            ErrorCode::TxErrTxNonceInvalid,
+            "tx_nonce must be >= 1 for non-coinbase",
+        ));
+    }
 
     validate_tx_covenants_genesis(tx, height)?;
 
@@ -79,12 +85,39 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
     let mut witness_cursor: usize = 0;
     let mut input_lock_ids: Vec<[u8; 32]> = Vec::with_capacity(tx.inputs.len());
     let mut input_cov_types: Vec<u16> = Vec::with_capacity(tx.inputs.len());
+    let mut seen_inputs: HashMap<Outpoint, ()> = HashMap::with_capacity(tx.inputs.len());
+    let zero_txid: [u8; 32] = [0u8; 32];
 
     for input in &tx.inputs {
+        if !input.script_sig.is_empty() {
+            return Err(TxError::new(
+                ErrorCode::TxErrParse,
+                "script_sig must be empty under genesis covenant set",
+            ));
+        }
+        if input.sequence > 0x7fffffff {
+            return Err(TxError::new(
+                ErrorCode::TxErrSequenceInvalid,
+                "sequence exceeds 0x7fffffff",
+            ));
+        }
+        if input.prev_vout == 0xffff_ffff && input.prev_txid == zero_txid {
+            return Err(TxError::new(
+                ErrorCode::TxErrParse,
+                "coinbase prevout encoding forbidden in non-coinbase",
+            ));
+        }
         let op = Outpoint {
             txid: input.prev_txid,
             vout: input.prev_vout,
         };
+        if seen_inputs.contains_key(&op) {
+            return Err(TxError::new(
+                ErrorCode::TxErrParse,
+                "duplicate input outpoint",
+            ));
+        }
+        seen_inputs.insert(op.clone(), ());
         let entry = match work.get(&op) {
             Some(v) => v.clone(),
             None => return Err(TxError::new(ErrorCode::TxErrMissingUtxo, "utxo not found")),

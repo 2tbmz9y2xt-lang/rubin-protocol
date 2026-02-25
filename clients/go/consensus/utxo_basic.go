@@ -85,6 +85,9 @@ func applyNonCoinbaseTxBasicWork(
 	if len(tx.Inputs) == 0 {
 		return nil, 0, txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
 	}
+	if tx.TxNonce == 0 {
+		return nil, 0, txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
+	}
 
 	if err := ValidateTxCovenantsGenesis(tx, height); err != nil {
 		return nil, 0, err
@@ -103,8 +106,23 @@ func applyNonCoinbaseTxBasicWork(
 	witnessCursor := 0
 	var inputLockIDs [][32]byte
 	var inputCovTypes []uint16
+	seenInputs := make(map[Outpoint]struct{}, len(tx.Inputs))
+	var zeroTxid [32]byte
 	for _, in := range tx.Inputs {
+		if len(in.ScriptSig) != 0 {
+			return nil, 0, txerr(TX_ERR_PARSE, "script_sig must be empty under genesis covenant set")
+		}
+		if in.Sequence > 0x7fffffff {
+			return nil, 0, txerr(TX_ERR_SEQUENCE_INVALID, "sequence exceeds 0x7fffffff")
+		}
+		if in.PrevVout == 0xffff_ffff && in.PrevTxid == zeroTxid {
+			return nil, 0, txerr(TX_ERR_PARSE, "coinbase prevout encoding forbidden in non-coinbase")
+		}
 		op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
+		if _, exists := seenInputs[op]; exists {
+			return nil, 0, txerr(TX_ERR_PARSE, "duplicate input outpoint")
+		}
+		seenInputs[op] = struct{}{}
 		entry, ok := work[op]
 		if !ok {
 			return nil, 0, txerr(TX_ERR_MISSING_UTXO, "utxo not found")

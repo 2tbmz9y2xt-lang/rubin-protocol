@@ -189,6 +189,7 @@ func TestApplyNonCoinbaseTxBasic_VaultCannotFundFee(t *testing.T) {
 	txid[0] = 0xc2
 
 	tx := &Tx{
+		TxNonce: 1,
 		Inputs: []TxInput{
 			{PrevTxid: prevVault, PrevVout: 0},
 			{PrevTxid: prevFee, PrevVout: 0},
@@ -228,6 +229,7 @@ func TestApplyNonCoinbaseTxBasic_VaultPreservedWithOwnerFeeInput(t *testing.T) {
 	txid[0] = 0xd2
 
 	tx := &Tx{
+		TxNonce: 1,
 		Inputs: []TxInput{
 			{PrevTxid: prevVault, PrevVout: 0},
 			{PrevTxid: prevFee, PrevVout: 0},
@@ -267,6 +269,7 @@ func TestApplyNonCoinbaseTxBasic_VaultAllowsOwnerTopUp(t *testing.T) {
 	txid[0] = 0xd5
 
 	tx := &Tx{
+		TxNonce: 1,
 		Inputs: []TxInput{
 			{PrevTxid: prevVault, PrevVout: 0},
 			{PrevTxid: prevFee, PrevVout: 0},
@@ -310,6 +313,7 @@ func TestApplyNonCoinbaseTxBasic_VaultWhitelistRejectsOutput(t *testing.T) {
 	nonWhitelistedOutData[1] = 0xff
 
 	tx := &Tx{
+		TxNonce: 1,
 		Inputs: []TxInput{
 			{PrevTxid: prevVault, PrevVout: 0},
 			{PrevTxid: prevFee, PrevVout: 0},
@@ -350,6 +354,7 @@ func TestApplyNonCoinbaseTxBasic_VaultRejectsFeeSponsor(t *testing.T) {
 	txid[0] = 0xf5
 
 	tx := &Tx{
+		TxNonce: 1,
 		Inputs: []TxInput{
 			{PrevTxid: prevVault, PrevVout: 0},
 			{PrevTxid: prevOwner, PrevVout: 0},
