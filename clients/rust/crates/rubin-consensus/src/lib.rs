@@ -25,6 +25,8 @@ pub use block_basic::{
     validate_block_basic_with_context_at_height, BlockBasicSummary, ParsedBlock,
 };
 pub use compact_relay::compact_shortid;
+pub use compactsize::encode_compact_size;
+pub use compactsize::read_compact_size_bytes;
 pub use connect_block_inmem::{
     connect_block_basic_in_memory_at_height, ConnectBlockBasicSummary, InMemoryChainState,
 };

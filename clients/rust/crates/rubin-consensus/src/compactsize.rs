@@ -31,6 +31,11 @@ pub fn read_compact_size(r: &mut Reader<'_>) -> Result<(u64, usize), TxError> {
     Ok((v, r.offset() - start))
 }
 
+pub fn read_compact_size_bytes(b: &[u8]) -> Result<(u64, usize), TxError> {
+    let mut r = Reader::new(b);
+    read_compact_size(&mut r)
+}
+
 pub fn encode_compact_size(n: u64, out: &mut Vec<u8>) {
     match n {
         0x00..=0xfc => out.push(n as u8),
