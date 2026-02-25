@@ -2,12 +2,30 @@ name: spec-checks
 
 on:
   pull_request: {}
-  push:
-    branches: [ main ]
   workflow_dispatch: {}
 
 jobs:
   spec:
     runs-on: ubuntu-latest
     steps:
-      - run: echo \"spec-checks smoke\"
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check README index/precedence
+        run: python3 tools/check_readme_index.py
+
+      - name: Check SECTION_HASHES integrity
+        run: python3 tools/check_section_hashes.py
+
+      - name: Check conformance fixtures IDs + changelog presence
+        run: python3 tools/check_conformance_ids.py
+
+      - name: Check crypto backend policy
+        run: python3 tools/check_crypto_backend_policy.py
+
+      - name: Hygiene: no absolute home paths
+        run: python3 tools/check_no_absolute_paths.py
