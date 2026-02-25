@@ -18,7 +18,7 @@ Policy:
 Инструменты:
 - `clients/go/cmd/gen-conformance-fixtures` (manual run),
 - `tools/gen_cv_da_integrity.py` (manual deterministic update),
-- ручная сверка через `run_cv_bundle.py`.
+- ручная сверка через `conformance/runner/run_cv_bundle.py`.
 
 Изменённые fixtures:
 - `CV-DA-INTEGRITY.json`
@@ -26,3 +26,17 @@ Policy:
 - `CV-SUBSIDY.json`
 - `CV-UTXO-BASIC.json`
 - `CV-VAULT.json`
+
+## 2026-02-25 — HTLC spec alignment (Q-HTLC-01/Q-HTLC-02)
+
+Причина:
+- синхронизация CANONICAL и `RUBIN_CORE_HTLC_SPEC.md` по HTLC creation constraints;
+- фиксация error-priority: SLH activation gate (`suite_id=0x02` pre-activation) должен срабатывать
+  до вызова `verify_sig(...)`.
+
+Инструменты:
+- ручное обновление `CV-HTLC.json`,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-HTLC`.
+
+Изменённые fixtures:
+- `CV-HTLC.json` (добавлен `CV-HTLC-14`).
