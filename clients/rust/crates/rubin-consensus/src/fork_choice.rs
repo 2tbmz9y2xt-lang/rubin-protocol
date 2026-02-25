@@ -10,7 +10,10 @@ use num_traits::{One, Zero};
 pub fn fork_work_from_target(target: [u8; 32]) -> Result<BigUint, TxError> {
     let t = BigUint::from_bytes_be(&target);
     if t.is_zero() {
-        return Err(TxError::new(ErrorCode::TxErrParse, "fork_work: target is zero"));
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "fork_work: target is zero",
+        ));
     }
 
     let pow_limit = BigUint::from_bytes_be(&POW_LIMIT);
@@ -32,4 +35,3 @@ pub fn fork_chainwork_from_targets(targets: &[[u8; 32]]) -> Result<BigUint, TxEr
     }
     Ok(total)
 }
-
