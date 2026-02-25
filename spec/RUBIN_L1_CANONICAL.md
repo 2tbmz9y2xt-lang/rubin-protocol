@@ -848,7 +848,13 @@ Semantics:
   - Forbidden; any appearance MUST be rejected as `TX_ERR_COVENANT_TYPE_INVALID`.
   - Activation path for any currently reserved or unassigned `covenant_type` MUST follow the
     Feature-Bit Activation Framework (Section 23.2) with an explicit deployment descriptor.
-    Until that deployment reaches `ACTIVE`, such values remain invalid and MUST reject.
+  - A deployment that introduces a new `covenant_type` MUST NOT be considered consensus-ready unless
+    this document already defines, for that type:
+    1) a full registry entry in Section 14 (wire layout and creation constraints),
+    2) `witness_slots` behavior in Section 16,
+    3) applicable error mapping in Section 13 / validation order in Section 25.
+  - Until that deployment reaches `ACTIVE` and the requirements above are met, such values remain invalid
+    and MUST reject as `TX_ERR_COVENANT_TYPE_INVALID`.
 
 ### 14.1 CORE_VAULT Semantics (Normative)
 
@@ -1493,6 +1499,19 @@ Operational constraints:
 Current profile:
 
 - No feature-bit deployments are ACTIVE by default in this document.
+
+#### 23.2.1 Covenant-Type Activation Preconditions (Normative)
+
+For deployments that introduce a new `covenant_type` value, activation is valid only when all
+of the following are true:
+
+1. The deployment state for the corresponding bit is `ACTIVE`.
+2. Section 14 contains the normative registry entry for that `covenant_type`.
+3. Section 16 contains the corresponding `witness_slots` rule for that `covenant_type`.
+4. Section 13 / Section 25 contain deterministic error mapping and validation-order behavior.
+
+If any precondition is missing, nodes MUST treat that `covenant_type` as unknown and reject
+transactions that use it as `TX_ERR_COVENANT_TYPE_INVALID`.
 
 ## 24. Determinism Requirements (Normative)
 
