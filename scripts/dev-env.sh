@@ -33,6 +33,9 @@ prepend_path_if_exists() {
 prepend_path_if_exists "/opt/homebrew/bin"
 prepend_path_if_exists "/usr/local/bin"
 
+# Lean toolchain (elan) defaults
+prepend_path_if_exists "${HOME}/.elan/bin"
+
 export PATH
 
 select_openssl() {
