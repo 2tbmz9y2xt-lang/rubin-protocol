@@ -35,7 +35,7 @@ Note for hardware provisioning: 17.21 TiB raw data requires a disk marketed as ~
 | `MAX_RELAY_MSG_BYTES` | 96_000_000 bytes (= 91.6 MiB) | |
 | `DA_MEMPOOL_SIZE` | 512 MiB | minimum for high-bandwidth relay |
 | `DA_MEMPOOL_PINNED_PAYLOAD_MAX` | 96_000_000 bytes | hard cap for COMPLETE_SET payload pinning (max 3 full DA sets pinned at once) |
-| `DA_ORPHAN_POOL_SIZE` | 64 MiB | = 2 x MAX_DA_BYTES_PER_BLOCK |
+| `DA_ORPHAN_POOL_SIZE` | 64 MiB | ≈ 2 x MAX_DA_BYTES_PER_BLOCK |
 | `DA_ORPHAN_POOL_PER_PEER_MAX` | 4 MiB | |
 | `DA_ORPHAN_POOL_PER_DA_ID_MAX` | 8 MiB | one da_id from 2+ peers accumulates |
 | `DA_ORPHAN_COMMIT_OVERHEAD_MAX` | 8 MiB | commit metadata cap within orphan pool |
@@ -178,8 +178,9 @@ request → propagation delay → at high miss rates compact blocks perform wors
   Request a full block only if `getblocktxn` reconstruction fails.
 
 - Relay timeout scales with payload size:
-  `timeout_ms = RELAY_TIMEOUT_BASE_MS + len(DA_Payload) / RELAY_TIMEOUT_RATE`
-  Example: 32 MB payload → 2000 + 32_000_000 / 1_000_000 = 2032 ms
+  `timeout_ms = RELAY_TIMEOUT_BASE_MS + (1000 * len(DA_Payload) / RELAY_TIMEOUT_RATE)`
+  where `RELAY_TIMEOUT_RATE` is in `bytes/second` and `len(DA_Payload)` is in `bytes`.
+  Example: 32 MB payload → 2000 + (1000 * 32_000_000 / 1_000_000) = 34_000 ms
 
 **Formal definition of miss_rate_bytes:**
 
