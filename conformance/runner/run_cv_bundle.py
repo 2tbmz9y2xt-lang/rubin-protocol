@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+from fractions import Fraction
 import json
 import os
 import pathlib
@@ -41,6 +42,14 @@ LOCAL_OPS = {
     "compact_telemetry_rate",
     "compact_telemetry_fields",
     "compact_grace_period",
+    "compact_eviction_tiebreak",
+    "compact_a_to_b_retention",
+    "compact_duplicate_commit",
+    "compact_total_fee",
+    "compact_pinned_accounting",
+    "compact_storm_commit_bearing",
+    "vault_policy_rules",
+    "htlc_ordering_policy",
     "nonce_replay_intrablock",
     "timestamp_bounds",
     "determinism_order",
@@ -681,6 +690,350 @@ def validate_local_vector(gate: str, v: Dict[str, Any]) -> List[str]:
             check_expect(problems, prefix, disconnect, bool(v["expect_disconnect"]), "disconnect")
         if "expect_ok" in v:
             check_expect(problems, prefix, True, bool(v["expect_ok"]), "ok")
+        return problems
+
+    if op == "compact_eviction_tiebreak":
+        entries = v.get("entries", [])
+        if not isinstance(entries, list) or len(entries) == 0:
+            problems.append(f"{prefix}: entries must be non-empty array")
+            return problems
+
+        normalized: List[Tuple[str, Fraction, int]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                problems.append(f"{prefix}: entry must be object")
+                return problems
+            da_id = str(entry.get("da_id", ""))
+            fee = int(entry.get("fee", 0))
+            wire_bytes = int(entry.get("wire_bytes", 0))
+            received_time = int(entry.get("received_time", 0))
+            if da_id == "" or wire_bytes <= 0:
+                problems.append(f"{prefix}: invalid da_id/wire_bytes")
+                return problems
+            normalized.append((da_id, Fraction(fee, wire_bytes), received_time))
+
+        order = [x[0] for x in sorted(normalized, key=lambda x: (x[1], x[2], x[0]))]
+        if "expect_evict_order" in v:
+            check_expect(
+                problems,
+                prefix,
+                order,
+                [str(x) for x in v["expect_evict_order"]],
+                "evict_order",
+            )
+        if "expect_ok" in v:
+            check_expect(problems, prefix, True, bool(v["expect_ok"]), "ok")
+        return problems
+
+    if op == "compact_a_to_b_retention":
+        chunk_count = int(v.get("chunk_count", 0))
+        initial_chunks = sorted(set(as_sorted_ints(v.get("initial_chunks", []))))
+        commit_arrives = bool(v.get("commit_arrives", True))
+        if chunk_count <= 0:
+            problems.append(f"{prefix}: chunk_count must be > 0")
+            return problems
+
+        retained_chunks = list(initial_chunks)
+        missing_chunks = [i for i in range(chunk_count) if i not in set(retained_chunks)]
+        state = "A"
+        if commit_arrives:
+            state = "C" if len(missing_chunks) == 0 else "B"
+        prefetch_targets = missing_chunks if state == "B" else []
+        discarded_chunks: List[int] = []
+
+        if "expect_state" in v:
+            check_expect(problems, prefix, state, str(v["expect_state"]), "state")
+        if "expect_retained_chunks" in v:
+            check_expect(
+                problems,
+                prefix,
+                retained_chunks,
+                sorted(set(as_sorted_ints(v["expect_retained_chunks"]))),
+                "retained_chunks",
+            )
+        if "expect_missing_chunks" in v:
+            check_expect(
+                problems,
+                prefix,
+                missing_chunks,
+                sorted(set(as_sorted_ints(v["expect_missing_chunks"]))),
+                "missing_chunks",
+            )
+        if "expect_prefetch_targets" in v:
+            check_expect(
+                problems,
+                prefix,
+                prefetch_targets,
+                sorted(set(as_sorted_ints(v["expect_prefetch_targets"]))),
+                "prefetch_targets",
+            )
+        if "expect_discarded_chunks" in v:
+            check_expect(
+                problems,
+                prefix,
+                discarded_chunks,
+                sorted(set(as_sorted_ints(v["expect_discarded_chunks"]))),
+                "discarded_chunks",
+            )
+        if "expect_ok" in v:
+            check_expect(problems, prefix, True, bool(v["expect_ok"]), "ok")
+        return problems
+
+    if op == "compact_duplicate_commit":
+        target_da_id = str(v.get("da_id", ""))
+        commits = v.get("commits", [])
+        if not isinstance(commits, list) or len(commits) == 0:
+            problems.append(f"{prefix}: commits must be non-empty array")
+            return problems
+
+        first_seen_peer = None
+        duplicates_dropped = 0
+        penalized_peers: List[str] = []
+        for c in commits:
+            if not isinstance(c, dict):
+                problems.append(f"{prefix}: commit entry must be object")
+                return problems
+            da_id = str(c.get("da_id", ""))
+            peer = str(c.get("peer", ""))
+            if da_id == "" or peer == "":
+                problems.append(f"{prefix}: invalid duplicate-commit entry")
+                return problems
+            if target_da_id == "":
+                target_da_id = da_id
+            if da_id != target_da_id:
+                continue
+            if first_seen_peer is None:
+                first_seen_peer = peer
+            else:
+                duplicates_dropped += 1
+                penalized_peers.append(peer)
+
+        replaced = False
+        if "expect_retained_peer" in v:
+            check_expect(problems, prefix, first_seen_peer, str(v["expect_retained_peer"]), "retained_peer")
+        if "expect_duplicates_dropped" in v:
+            check_expect(
+                problems,
+                prefix,
+                duplicates_dropped,
+                int(v["expect_duplicates_dropped"]),
+                "duplicates_dropped",
+            )
+        if "expect_penalized_peers" in v:
+            check_expect(
+                problems,
+                prefix,
+                sorted(penalized_peers),
+                sorted([str(x) for x in v["expect_penalized_peers"]]),
+                "penalized_peers",
+            )
+        if "expect_replaced" in v:
+            check_expect(problems, prefix, replaced, bool(v["expect_replaced"]), "replaced")
+        if "expect_ok" in v:
+            check_expect(problems, prefix, True, bool(v["expect_ok"]), "ok")
+        return problems
+
+    if op == "compact_total_fee":
+        commit_fee = int(v.get("commit_fee", 0))
+        chunk_fees = [int(x) for x in v.get("chunk_fees", [])]
+        total_fee = commit_fee + sum(chunk_fees)
+        if "expect_total_fee" in v:
+            check_expect(problems, prefix, total_fee, int(v["expect_total_fee"]), "total_fee")
+        if "expect_ok" in v:
+            check_expect(problems, prefix, True, bool(v["expect_ok"]), "ok")
+        return problems
+
+    if op == "compact_pinned_accounting":
+        current_payload = int(v.get("current_pinned_payload_bytes", 0))
+        incoming_payload = int(v.get("incoming_payload_bytes", 0))
+        commit_overhead = int(v.get("incoming_commit_overhead_bytes", 0))
+        cap = int(v.get("cap_bytes", 96_000_000))
+
+        counted_bytes = current_payload + incoming_payload
+        admit = counted_bytes <= cap
+        ignored_overhead = commit_overhead
+
+        if "expect_counted_bytes" in v:
+            check_expect(problems, prefix, counted_bytes, int(v["expect_counted_bytes"]), "counted_bytes")
+        if "expect_admit" in v:
+            check_expect(problems, prefix, admit, bool(v["expect_admit"]), "admit")
+        if "expect_ignored_overhead_bytes" in v:
+            check_expect(
+                problems,
+                prefix,
+                ignored_overhead,
+                int(v["expect_ignored_overhead_bytes"]),
+                "ignored_overhead_bytes",
+            )
+        if "expect_ok" in v:
+            check_expect(problems, prefix, True, bool(v["expect_ok"]), "ok")
+        return problems
+
+    if op == "compact_storm_commit_bearing":
+        contains_commit = bool(v.get("contains_commit", False))
+        contains_chunk_for_known_commit = bool(v.get("contains_chunk_for_known_commit", False))
+        contains_block_with_commit = bool(v.get("contains_block_with_commit", False))
+        fill_pct = float(v.get("orphan_pool_fill_pct", 0.0))
+        trigger_pct = float(v.get("storm_trigger_pct", 90.0))
+
+        commit_bearing = (
+            contains_commit or contains_chunk_for_known_commit or contains_block_with_commit
+        )
+        storm_mode = fill_pct > trigger_pct
+        prioritize = (not storm_mode) or commit_bearing
+        admit = True
+        if storm_mode and not commit_bearing:
+            admit = False
+
+        if "expect_storm_mode" in v:
+            check_expect(problems, prefix, storm_mode, bool(v["expect_storm_mode"]), "storm_mode")
+        if "expect_commit_bearing" in v:
+            check_expect(
+                problems,
+                prefix,
+                commit_bearing,
+                bool(v["expect_commit_bearing"]),
+                "commit_bearing",
+            )
+        if "expect_prioritize" in v:
+            check_expect(problems, prefix, prioritize, bool(v["expect_prioritize"]), "prioritize")
+        if "expect_admit" in v:
+            check_expect(problems, prefix, admit, bool(v["expect_admit"]), "admit")
+        if "expect_ok" in v:
+            check_expect(problems, prefix, True, bool(v["expect_ok"]), "ok")
+        return problems
+
+    if op == "vault_policy_rules":
+        owner_lock_id = str(v.get("owner_lock_id", "owner"))
+        vault_input_count = int(v.get("vault_input_count", 0))
+        non_vault_lock_ids = [str(x) for x in v.get("non_vault_lock_ids", [])]
+        has_owner_auth = bool(v.get("has_owner_auth", owner_lock_id in non_vault_lock_ids))
+        sum_out = int(v.get("sum_out", 0))
+        sum_in_vault = int(v.get("sum_in_vault", 0))
+        slots = int(v.get("slots", 0))
+        key_count = int(v.get("key_count", 0))
+        sig_threshold_ok = bool(v.get("sig_threshold_ok", True))
+
+        sentinel_suite_id = int(v.get("sentinel_suite_id", 0))
+        sentinel_pubkey_len = int(v.get("sentinel_pubkey_len", 0))
+        sentinel_sig_len = int(v.get("sentinel_sig_len", 0))
+        sentinel_verify_called = bool(v.get("sentinel_verify_called", False))
+        sentinel_ok = (
+            sentinel_suite_id == 0
+            and sentinel_pubkey_len == 0
+            and sentinel_sig_len == 0
+            and not sentinel_verify_called
+        )
+
+        whitelist = [str(x) for x in v.get("whitelist", [])]
+        whitelist_ok = whitelist == sorted(whitelist) and len(set(whitelist)) == len(whitelist)
+
+        checks = {
+            "multi_vault": (
+                vault_input_count <= 1,
+                "TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN",
+            ),
+            "owner_auth": (
+                has_owner_auth,
+                "TX_ERR_VAULT_OWNER_AUTH_REQUIRED",
+            ),
+            "fee_sponsor": (
+                all(lock_id == owner_lock_id for lock_id in non_vault_lock_ids),
+                "TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN",
+            ),
+            "witness_slots": (
+                slots == key_count,
+                "TX_ERR_PARSE",
+            ),
+            "sentinel": (
+                sentinel_ok,
+                "TX_ERR_PARSE",
+            ),
+            "sig_threshold": (
+                sig_threshold_ok,
+                "TX_ERR_SIG_INVALID",
+            ),
+            "whitelist": (
+                whitelist_ok,
+                "TX_ERR_VAULT_WHITELIST_NOT_CANONICAL",
+            ),
+            "value": (
+                sum_out >= sum_in_vault,
+                "TX_ERR_VALUE_CONSERVATION",
+            ),
+        }
+
+        validation_order = [str(x) for x in v.get("validation_order", [
+            "multi_vault",
+            "owner_auth",
+            "fee_sponsor",
+            "witness_slots",
+            "sentinel",
+            "sig_threshold",
+            "whitelist",
+            "value",
+        ])]
+
+        err = None
+        for rule in validation_order:
+            if rule not in checks:
+                problems.append(f"{prefix}: unknown vault validation rule={rule}")
+                return problems
+            ok, code = checks[rule]
+            if not ok:
+                err = code
+                break
+        ok = err is None
+
+        if "expect_ok" in v:
+            check_expect(problems, prefix, ok, bool(v["expect_ok"]), "ok")
+        if "expect_err" in v:
+            check_expect(problems, prefix, err, str(v["expect_err"]), "err")
+        return problems
+
+    if op == "htlc_ordering_policy":
+        path = str(v.get("path", "claim")).lower()
+        structural_ok = bool(v.get("structural_ok", True))
+        locktime_ok = bool(v.get("locktime_ok", True))
+        suite_id = int(v.get("suite_id", 1))
+        block_height = int(v.get("block_height", 0))
+        activation_height = int(v.get("slh_activation_height", 1_000_000))
+        key_binding_ok = bool(v.get("key_binding_ok", True))
+        preimage_ok = bool(v.get("preimage_ok", True))
+        verify_ok = bool(v.get("verify_ok", True))
+
+        verify_called = False
+        err = None
+        if not structural_ok:
+            err = "TX_ERR_PARSE"
+        elif path == "refund" and not locktime_ok:
+            err = "TX_ERR_TIMELOCK_NOT_MET"
+        elif suite_id not in (1, 2):
+            err = "TX_ERR_SIG_ALG_INVALID"
+        elif suite_id == 2 and block_height < activation_height:
+            err = "TX_ERR_SIG_ALG_INVALID"
+        elif not key_binding_ok:
+            err = "TX_ERR_SIG_INVALID"
+        elif path == "claim" and not preimage_ok:
+            err = "TX_ERR_SIG_INVALID"
+        else:
+            verify_called = True
+            if not verify_ok:
+                err = "TX_ERR_SIG_INVALID"
+
+        ok = err is None
+        if "expect_ok" in v:
+            check_expect(problems, prefix, ok, bool(v["expect_ok"]), "ok")
+        if "expect_err" in v:
+            check_expect(problems, prefix, err, str(v["expect_err"]), "err")
+        if "expect_verify_called" in v:
+            check_expect(
+                problems,
+                prefix,
+                verify_called,
+                bool(v["expect_verify_called"]),
+                "verify_called",
+            )
         return problems
 
     if op == "nonce_replay_intrablock":

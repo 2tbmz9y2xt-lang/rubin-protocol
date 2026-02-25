@@ -54,6 +54,7 @@ Note for hardware provisioning: 17.21 TiB raw data requires a disk marketed as ~
 | `PREFETCH_GLOBAL_BPS` | 32_000_000 B/s | = PREFETCH_GLOBAL_PARALLEL x PREFETCH_BYTES_PER_SEC |
 | `RELAY_TIMEOUT_BASE_MS` | 2_000 ms | base relay timeout before payload scaling |
 | `RELAY_TIMEOUT_RATE` | 4_000_000 B/s | divisor for payload-size timeout extension (aligned with PREFETCH_BYTES_PER_SEC baseline) |
+| `STORM_LOW_QUALITY_SCORE_THRESHOLD` | 40 | peers with `peer_quality_score < 40` are treated as low-quality for storm-mode chunk admission |
 
 Note:
 `MAX_DA_CHUNK_COUNT` is derived from consensus constants and MUST NOT
@@ -249,8 +250,9 @@ Eviction:   primary key:   fee / wire_bytes (lower = evicted first)
 Storm-mode admission (non-consensus, MUST for production relay):
   - When orphan_pool_fill_pct > 90%, node MUST prioritize commit-bearing traffic
     (commit-first bias) over additional orphan chunks.
-  - Under storm mode, chunk admission MAY be reduced for low-quality peers before
-    commit-bearing messages are dropped.
+  - `low-quality` is defined as `peer_quality_score < STORM_LOW_QUALITY_SCORE_THRESHOLD` (= 40).
+  - Under storm mode, node MUST reduce/drop orphan chunk admission from low-quality peers
+    before dropping commit-bearing messages.
   - Exit storm mode after orphan_pool_fill_pct < 70% for 60 s.
 
 TTL:        DA_ORPHAN_TTL_BLOCKS = 3 blocks (360 s)
@@ -297,6 +299,43 @@ Eviction: total_fee / total_bytes (lower = evicted first), atomic by da_id.
 - CheckBlock independently forbids inclusion of an incomplete set regardless
   of mempool state. See RUBIN_L1_CANONICAL.md §21.3 for the consensus rule.
 - Per-peer and per-da_id limits are applied simultaneously and independently.
+
+### 5.1 Deterministic Relay Clarifications
+
+The following rules are relay-normative and non-consensus:
+
+1. **`received_time` determinism**
+   - `received_time` MUST be a monotonic local admission timestamp.
+   - Wall-clock time MUST NOT be used as an eviction comparator.
+   - `received_time` MUST strictly increase for each accepted message.
+
+2. **A→B transition retention**
+   - On transition from `ORPHAN_CHUNKS` to `STAGED_COMMIT`, all already-stored orphan chunks
+     for the same `da_id` MUST be retained.
+   - Prefetch MUST target only missing chunk indices.
+   - A chunk MUST NOT be discarded solely because the commit arrived.
+
+3. **Duplicate `DA_COMMIT_TX` handling**
+   - For the same `da_id`, the first-seen commit MUST be retained.
+   - Later duplicate commits MUST be discarded.
+   - Duplicate-commit senders MUST receive a negative `peer_quality_score` adjustment.
+   - Relay-layer replacement by higher fee is forbidden for duplicate commits of the same `da_id`.
+
+4. **`total_fee` definition for DA-set eviction**
+   - `total_fee(da_id) = fee(DA_COMMIT_TX) + Σ fee(DA_CHUNK_TX[i])` for this set.
+   - `COMPLETE_SET` eviction ordering that references `total_fee/total_bytes` MUST use this definition.
+
+5. **Pinned byte accounting**
+   - `DA_MEMPOOL_PINNED_PAYLOAD_MAX` accounting MUST include DA payload bytes only.
+   - Commit metadata and non-payload envelope overhead MUST NOT be counted toward pinned payload bytes.
+
+6. **Commit-bearing classification in storm mode**
+   - A message is commit-bearing if at least one of the following holds:
+     1) contains `DA_COMMIT_TX`;
+     2) contains `DA_CHUNK_TX` for a `da_id` with an already-known commit;
+     3) contains a block with `DA_COMMIT_TX`.
+   - When `orphan_pool_fill_pct > 90%`, nodes MUST prioritize commit-bearing traffic.
+   - Orphan-only chunk traffic MAY be deprioritized, but consensus validity MUST NOT be altered.
 
 ---
 
@@ -373,8 +412,9 @@ Metrics:
   shortid_collision_peers   (peer IDs involved)
 
 Thresholds:
-  Warning:  > 0.01 collisions/year across 1000-node sample
-  Action:   > 0.5  collisions/year -> initiate 8-byte upgrade working group
+  Baseline: ~ 0.034 collisions/year/node (from n ~= 8_500, 48-bit short_id)
+  Warning:  > 0.10 collisions/year/node
+  Action:   > 0.50 collisions/year/node -> initiate 8-byte upgrade working group
 ```
 
 **Upgrade path:** 8-byte short_id reserved via feature-bit.

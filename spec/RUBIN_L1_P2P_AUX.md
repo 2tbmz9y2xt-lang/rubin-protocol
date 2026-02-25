@@ -51,6 +51,7 @@ VersionPayloadV1 {
   protocol_version: u32le
   tx_relay: u8               # 1 = transaction relay expected, 0 = block-relay-only
   pruned_below_height: u64le # 0 = not pruned; otherwise lowest retained height (inclusive)
+  da_mempool_size: u32le     # bytes; advertised DA mempool size (0 = unknown/legacy)
 }
 ```
 
@@ -60,6 +61,15 @@ Rules:
 - A node MUST NOT send other P2P messages (except `version`) before receiving the peer's `version`.
 - `tx_relay` MUST be either `0` or `1`. If an unknown value is received, the receiver SHOULD treat it as `0`.
 - `pruned_below_height` MUST be `0` for non-pruning nodes.
+- `da_mempool_size` is in bytes. `536_870_912` means 512 MiB.
+
+Backward-compatible downgrade:
+
+- If `version.payload_len` is 13 bytes (legacy layout without `da_mempool_size`), the receiver MUST
+  parse the message as valid and treat `da_mempool_size = 0` (unknown).
+- If `da_mempool_size = 0` or `da_mempool_size < 536_870_912`, the receiver MUST downgrade this peer
+  from DA high-bandwidth relay (`sendcmpct_mode = 2`) to at most low-bandwidth (`sendcmpct_mode = 1`).
+  If `tx_relay = 0`, the receiver SHOULD use `sendcmpct_mode = 0` for that peer.
 
 Forward-compatibility:
 
