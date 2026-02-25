@@ -294,7 +294,10 @@ applicable error code:
 2. `tx_kind` / `da_payload_len` rules (`TX_ERR_PARSE`).
 3. Input/output/script_sig length bounds (`TX_ERR_PARSE`).
 4. Witness section item count / total bytes bounds (`TX_ERR_WITNESS_OVERFLOW`).
-5. Witness item canonicalization (`TX_ERR_PARSE` / `TX_ERR_SIG_NONCANONICAL` / `TX_ERR_SIG_ALG_INVALID`).
+5. Witness item canonicalization, with deterministic sub-order:
+   - 5a. Structural witness-item errors (including malformed HTLC selector encoding) -> `TX_ERR_PARSE`.
+   - 5b. Known-suite canonical length violations -> `TX_ERR_SIG_NONCANONICAL`.
+   - 5c. Unknown `suite_id` -> `TX_ERR_SIG_ALG_INVALID`.
 
 No cryptographic verification is performed in this section. Signature verification, covenant evaluation, and
 value/binding rules are specified in later sections.
@@ -1589,7 +1592,12 @@ Minimum required order for validating a candidate block `B_h` at height `h`:
 8. Check total block weight (Section 9). If exceeded, reject as `BLOCK_ERR_WEIGHT_EXCEEDED`.
 9. Check per-block ANCHOR byte limits (Section 14). If exceeded, reject as `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED`.
 10. Check DA chunk hash integrity (Section 21.2). If any chunk_hash mismatch, reject as `BLOCK_ERR_DA_CHUNK_HASH_INVALID`.
-11. Check DA set completeness (Section 21.3): no orphan chunks, complete sets, DA set count. Reject as applicable.
+11. Check DA set completeness (Section 21.3) with deterministic error priority:
+    - no orphan chunks -> `BLOCK_ERR_DA_SET_INVALID`;
+    - no duplicate commits -> `BLOCK_ERR_DA_SET_INVALID`;
+    - complete sets only -> `BLOCK_ERR_DA_INCOMPLETE`;
+    - DA set count cap -> `BLOCK_ERR_DA_BATCH_EXCEEDED`;
+    - per-set `chunk_count` bound -> `TX_ERR_PARSE`.
 12. Check DA payload commitment (Section 21.4). If mismatch or ambiguous (missing or duplicate CORE_DA_COMMIT output), reject as `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID`.
 13. Apply transactions sequentially using `ApplyCoinbase`/`SpendTx` semantics (Section 18.4), enforcing:
    - coinbase structural rules (Sections 10.5 and 16),
