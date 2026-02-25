@@ -83,6 +83,9 @@ type Response struct {
 	UtxoCount          uint64 `json:"utxo_count,omitempty"`
 	AlreadyGenerated   uint64 `json:"already_generated,omitempty"`
 	AlreadyGeneratedN1 uint64 `json:"already_generated_n1,omitempty"`
+	Weight             uint64 `json:"weight"`
+	DaBytes            uint64 `json:"da_bytes"`
+	AnchorBytes        uint64 `json:"anchor_bytes"`
 
 	WorkHex   string `json:"work,omitempty"`
 	Winner    string `json:"winner,omitempty"`
@@ -279,6 +282,33 @@ func main() {
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true, DigestHex: hex.EncodeToString(d[:])})
+		return
+
+	case "tx_weight_and_stats":
+		txBytes, err := hex.DecodeString(req.TxHex)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad hex"})
+			return
+		}
+		tx, _, _, _, err := consensus.ParseTx(txBytes)
+		if err != nil {
+			if te, ok := err.(*consensus.TxError); ok {
+				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
+				return
+			}
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+		w, da, anchor, err := consensus.TxWeightAndStats(tx)
+		if err != nil {
+			if te, ok := err.(*consensus.TxError); ok {
+				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
+				return
+			}
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+		writeResp(os.Stdout, Response{Ok: true, Weight: w, DaBytes: da, AnchorBytes: anchor})
 		return
 
 	case "block_hash":

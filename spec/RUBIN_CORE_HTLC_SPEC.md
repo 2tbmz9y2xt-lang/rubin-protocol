@@ -101,6 +101,7 @@ WitnessItem[W+1] : sig_item         -- signature from the appropriate key
 `witness_slots(CORE_HTLC) = 2`
 
 **spend_path_item** is a **meta witness** item (CANONICAL §5.4) and MUST NOT be used for cryptographic verification.
+Its byte-level encoding MUST be identical to CANONICAL §5.4 (sentinel selector form).
 
 It is encoded as a standard `WitnessItem`:
 

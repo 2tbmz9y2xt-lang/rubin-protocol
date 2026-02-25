@@ -618,6 +618,12 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 	return weight, daBytes, anchorBytes, nil
 }
 
+// TxWeightAndStats exposes consensus weight accounting for conformance and formal tooling.
+// It is a pure function of a parsed Tx and does not consult chainstate.
+func TxWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
+	return txWeightAndStats(tx)
+}
+
 func compactSizeLen(n uint64) uint64 {
 	switch {
 	case n < 0xfd:

@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "description": "Machine-readable baseline for critical conformance edge coverage across parse/weight/sighash/covenants/difficulty/DA domains.",
+  "domains": [
+    {
+      "name": "parse",
+      "gates": [
+        "CV-PARSE"
+      ],
+      "min_vectors_total": 9,
+      "required_vectors_by_gate": {
+        "CV-PARSE": [
+          "PARSE-04",
+          "PARSE-08",
+          "PARSE-09"
+        ]
+      }
+    },
+    {
+      "name": "weight",
+      "gates": [
+        "CV-WEIGHT"
+      ],
+      "min_vectors_total": 5,
+      "required_vectors_by_gate": {
+        "CV-WEIGHT": [
+          "WEIGHT-03",
+          "WEIGHT-04",
+          "WEIGHT-05"
+        ]
+      }
+    },
+    {
+      "name": "sighash",
+      "gates": [
+        "CV-SIGHASH"
+      ],
+      "min_vectors_total": 5,
+      "required_vectors_by_gate": {
+        "CV-SIGHASH": [
+          "SIGHASH-03",
+          "SIGHASH-05"
+        ]
+      }
+    },
+    {
+      "name": "covenants",
+      "gates": [
+        "CV-COVENANT-GENESIS",
+        "CV-HTLC",
+        "CV-VAULT",
+        "CV-VAULT-POLICY",
+        "CV-SIG"
+      ],
+      "min_vectors_total": 50,
+      "required_vectors_by_gate": {
+        "CV-HTLC": [
+          "CV-HTLC-10",
+          "CV-HTLC-11",
+          "CV-HTLC-12",
+          "CV-HTLC-14"
+        ],
+        "CV-VAULT-POLICY": [
+          "CV-V-01",
+          "CV-V-02",
+          "CV-V-06"
+        ],
+        "CV-VAULT": [
+          "CV-VAULT-SLH-01",
+          "CV-VAULT-SLH-02"
+        ],
+        "CV-SIG": [
+          "CV-SIG-02a",
+          "CV-SIG-02b",
+          "CV-SIG-04"
+        ]
+      }
+    },
+    {
+      "name": "difficulty",
+      "gates": [
+        "CV-POW"
+      ],
+      "min_vectors_total": 14,
+      "required_vectors_by_gate": {
+        "CV-POW": [
+          "POW-03C",
+          "POW-03D",
+          "POW-08A"
+        ]
+      }
+    },
+    {
+      "name": "da",
+      "gates": [
+        "CV-DA-INTEGRITY",
+        "CV-COMPACT"
+      ],
+      "min_vectors_total": 35,
+      "required_vectors_by_gate": {
+        "CV-DA-INTEGRITY": [
+          "CV-DA-02",
+          "CV-DA-03",
+          "CV-DA-04",
+          "CV-DA-05",
+          "CV-DA-06"
+        ],
+        "CV-COMPACT": [
+          "CV-C-26",
+          "CV-C-27",
+          "CV-C-28",
+          "CV-C-29",
+          "CV-C-30",
+          "CV-C-31"
+        ]
+      }
+    }
+  ]
+}

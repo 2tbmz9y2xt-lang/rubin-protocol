@@ -41,8 +41,27 @@ def changed_files() -> list[str]:
         if p.returncode != 0:
             return []
     files = {line.strip() for line in p.stdout.splitlines() if line.strip()}
-    # Local convenience: include untracked files (e.g., freshly added CHANGELOG.md)
-    # so the policy check also works before first commit.
+    # Local convenience: include working tree changes (staged + unstaged) and
+    # untracked files so the policy check also works before first commit.
+    p_worktree = run(
+        ["git", "diff", "--name-only", "--diff-filter=ACMRT"], check=False
+    )
+    if p_worktree.returncode == 0:
+        for line in p_worktree.stdout.splitlines():
+            line = line.strip()
+            if line:
+                files.add(line)
+
+    p_cached = run(
+        ["git", "diff", "--name-only", "--cached", "--diff-filter=ACMRT"],
+        check=False,
+    )
+    if p_cached.returncode == 0:
+        for line in p_cached.stdout.splitlines():
+            line = line.strip()
+            if line:
+                files.add(line)
+
     p_untracked = run(
         ["git", "ls-files", "--others", "--exclude-standard"], check=False
     )

@@ -36,6 +36,7 @@ EXPECTED_GATES = frozenset(
         "CV-VALIDATION-ORDER",
         "CV-VAULT",
         "CV-VAULT-POLICY",
+        "CV-WEIGHT",
     }
 )
 

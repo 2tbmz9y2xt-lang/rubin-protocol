@@ -671,6 +671,10 @@ fn tx_weight_and_stats(tx: &Tx) -> Result<(u64, u64, u64), TxError> {
     Ok((weight, da_bytes, anchor_bytes))
 }
 
+pub fn tx_weight_and_stats_public(tx: &Tx) -> Result<(u64, u64, u64), TxError> {
+    tx_weight_and_stats(tx)
+}
+
 fn compact_size_len(n: u64) -> u64 {
     match n {
         0x00..=0xfc => 1,
