@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "source_file": "spec/AUDIT_CONTEXT.md",
-  "source_sha256": "c67b4ffd5c279956b340feab1368267e5441d74b74fbe2b54e61090c7f085d91",
+  "source_sha256": "56024b1ddbc96dfcd81ec4c28f9ad10bb72f5fc9b1509263c46e816a9404682c",
   "formal_status": {
     "proof_level": "toy-model",
     "claim_level": "toy"
@@ -286,12 +286,12 @@
     {
       "finding_id": "Q-CODE-01",
       "status": "OPEN",
-      "severity": "HIGH",
+      "severity": "UNSPECIFIED",
       "layer": "repo",
-      "summary": "JSON CLI PascalCase (Go) vs snake_case (Rust) — parity bug in field naming",
+      "summary": "ALREADY_FIXED | False-positive triaged: Go/Rust CLI JSON already snake_case (`wtxid`, `block_timestamp`)",
       "sources": [
         {
-          "section": "new-open-findings-2026-02-25-audit",
+          "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
           "line": 156
         }
@@ -303,12 +303,12 @@
     {
       "finding_id": "Q-CODE-02",
       "status": "OPEN",
-      "severity": "MEDIUM",
+      "severity": "UNSPECIFIED",
       "layer": "repo",
-      "summary": "DA unit test coverage: 0 DA-specific unit tests in Go+Rust clients",
+      "summary": "ALREADY_FIXED | DA-specific unit tests added in Go+Rust",
       "sources": [
         {
-          "section": "new-open-findings-2026-02-25-audit",
+          "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
           "line": 157
         }
@@ -320,12 +320,12 @@
     {
       "finding_id": "Q-CONF-07",
       "status": "OPEN",
-      "severity": "CRITICAL",
+      "severity": "UNSPECIFIED",
       "layer": "repo",
-      "summary": "DA chunk_count=0 spec text §5.2 vs §21.3 contradiction + missing conformance vector",
+      "summary": "ALREADY_FIXED | CANONICAL §21.3 `1 <= chunk_count` + `CV-DA-06`",
       "sources": [
         {
-          "section": "new-open-findings-2026-02-25-audit",
+          "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
           "line": 153
         }
@@ -337,12 +337,12 @@
     {
       "finding_id": "Q-CONF-08",
       "status": "OPEN",
-      "severity": "CRITICAL",
+      "severity": "UNSPECIFIED",
       "layer": "repo",
-      "summary": "SLH-DSA activation boundary: 3 conformance vectors missing at height=1,000,000",
+      "summary": "ALREADY_FIXED | SLH boundary vectors in `CV-SIG`/`CV-VAULT` (pre-activation reject, activation accept)",
       "sources": [
         {
-          "section": "new-open-findings-2026-02-25-audit",
+          "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
           "line": 154
         }
@@ -354,12 +354,12 @@
     {
       "finding_id": "Q-CONF-09",
       "status": "OPEN",
-      "severity": "HIGH",
+      "severity": "UNSPECIFIED",
       "layer": "repo",
-      "summary": "Batch conformance gaps: vault arithmetic, replay nonce, retarget min, CompactSize, cursor",
+      "summary": "ALREADY_FIXED | Added batch gap vectors (vault ±1 boundaries, replay distance, retarget min=1, CompactSize, mixed cursor ordering)",
       "sources": [
         {
-          "section": "new-open-findings-2026-02-25-audit",
+          "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
           "line": 155
         }
@@ -371,12 +371,12 @@
     {
       "finding_id": "Q-HYGIENE-01",
       "status": "OPEN",
-      "severity": "LOW",
+      "severity": "UNSPECIFIED",
       "layer": "repo",
-      "summary": "clients/rust/.DS_Store committed to git",
+      "summary": "ALREADY_FIXED | Closed earlier by stale-closeout report",
       "sources": [
         {
-          "section": "new-open-findings-2026-02-25-audit",
+          "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
           "line": 163
         }
@@ -388,29 +388,30 @@
     {
       "finding_id": "Q-SEC-01",
       "status": "OPEN",
-      "severity": "HIGH",
+      "severity": "UNSPECIFIED",
       "layer": "repo",
-      "summary": "PQ key size not validated in verify_sig() before OpenSSL (ML-DSA=2592B, SLH-DSA=64B)",
+      "summary": "ALREADY_FIXED | `verify_sig` key/signature pre-checks in Go+Rust + unit tests (`../inbox/reports/2026-02-25_report_claimed_batch_closeout_q-sec-01_q-conf-07_08_09_q-code-01_02_q-tooling-02_03_05_q-spec-02.md`)",
       "sources": [
         {
-          "section": "new-open-findings-2026-02-25-audit",
+          "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
           "line": 152
         }
       ],
       "evidence": [
+        "../inbox/reports/2026-02-25_report_claimed_batch_closeout_q-sec-01_q-conf-07_08_09_q-code-01_02_q-tooling-02_03_05_q-spec-02.md",
         "spec/AUDIT_CONTEXT.md#L152"
       ]
     },
     {
       "finding_id": "Q-SPEC-02",
       "status": "OPEN",
-      "severity": "MEDIUM",
+      "severity": "UNSPECIFIED",
       "layer": "spec",
-      "summary": "Batch spec gaps: coinbase maturity §17, target endianness §10.3, feature-bit stall, P2P version mismatch",
+      "summary": "ALREADY_FIXED | Spec clarifications applied in CANONICAL/P2P_AUX/NETWORK_PARAMS",
       "sources": [
         {
-          "section": "new-open-findings-2026-02-25-audit",
+          "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
           "line": 162
         }
@@ -422,69 +423,73 @@
     {
       "finding_id": "Q-TOOLING-02",
       "status": "OPEN",
-      "severity": "MEDIUM",
+      "severity": "UNSPECIFIED",
       "layer": "ci",
-      "summary": "make_audit_pack.py uses str|None syntax (Python 3.10+), fails on Python 3.9",
+      "summary": "ALREADY_FIXED | Python 3.9 compatibility in `tools/make_audit_pack.py` (`Optional[str]`)",
       "sources": [
         {
-          "section": "new-open-findings-2026-02-25-audit",
+          "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
           "line": 158
         }
       ],
       "evidence": [
-        "spec/AUDIT_CONTEXT.md#L158"
+        "spec/AUDIT_CONTEXT.md#L158",
+        "tools/make_audit_pack.py"
       ]
     },
     {
       "finding_id": "Q-TOOLING-03",
       "status": "OPEN",
-      "severity": "HIGH",
+      "severity": "UNSPECIFIED",
       "layer": "ci",
-      "summary": "check_section_hashes.py: unsafe SHA256 fallback if hash_algorithm field missing",
+      "summary": "ALREADY_FIXED | `hash_algorithm` now mandatory in `tools/check_section_hashes.py` (no fallback)",
       "sources": [
         {
-          "section": "new-open-findings-2026-02-25-audit",
+          "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
           "line": 159
         }
       ],
       "evidence": [
-        "spec/AUDIT_CONTEXT.md#L159"
+        "spec/AUDIT_CONTEXT.md#L159",
+        "tools/check_section_hashes.py"
       ]
     },
     {
       "finding_id": "Q-TOOLING-04",
       "status": "OPEN",
-      "severity": "HIGH",
+      "severity": "UNSPECIFIED",
       "layer": "ci",
-      "summary": "spec-checks.yml: no-op smoke test (echo only), no real spec validation",
+      "summary": "ALREADY_FIXED | Closed earlier by `../inbox/reports/2026-02-25_report_q-tooling-04_q-hygiene-01_stale_closeout.md`",
       "sources": [
         {
-          "section": "new-open-findings-2026-02-25-audit",
+          "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
           "line": 160
         }
       ],
       "evidence": [
+        "../inbox/reports/2026-02-25_report_q-tooling-04_q-hygiene-01_stale_closeout.md",
         "spec/AUDIT_CONTEXT.md#L160"
       ]
     },
     {
       "finding_id": "Q-TOOLING-05",
       "status": "OPEN",
-      "severity": "HIGH",
+      "severity": "UNSPECIFIED",
       "layer": "ci",
-      "summary": "gen_conformance_matrix.py: no fixture schema/completeness validation",
+      "summary": "ALREADY_FIXED | Fixture schema/completeness validation added to `tools/gen_conformance_matrix.py`",
       "sources": [
         {
-          "section": "new-open-findings-2026-02-25-audit",
+          "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
           "line": 161
         }
       ],
       "evidence": [
-        "spec/AUDIT_CONTEXT.md#L161"
+        "spec/AUDIT_CONTEXT.md#L161",
+        "tools/gen_conformance_matrix.py"
       ]
     },
     {
@@ -518,11 +523,7 @@
       "ci": 4
     },
     "by_severity": {
-      "UNSPECIFIED": 16,
-      "HIGH": 6,
-      "MEDIUM": 3,
-      "CRITICAL": 2,
-      "LOW": 1
+      "UNSPECIFIED": 28
     }
   }
 }
