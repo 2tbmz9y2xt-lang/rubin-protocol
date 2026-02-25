@@ -149,16 +149,8 @@ func TestValidateHTLCSpend_RefundTimelockNotMet(t *testing.T) {
 func TestValidateHTLCSpend_RefundTimestampUsesMTP(t *testing.T) {
 	var digest [32]byte
 	digest[0] = 0x01
-	claimKP, err := NewMLDSA87Keypair()
-	if err != nil {
-		t.Fatalf("NewMLDSA87Keypair(claim): %v", err)
-	}
-	defer claimKP.Close()
-	refundKP, err := NewMLDSA87Keypair()
-	if err != nil {
-		t.Fatalf("NewMLDSA87Keypair(refund): %v", err)
-	}
-	defer refundKP.Close()
+	claimKP := mustMLDSA87Keypair(t)
+	refundKP := mustMLDSA87Keypair(t)
 	claimPub := claimKP.PubkeyBytes()
 	refundPub := refundKP.PubkeyBytes()
 	claimKeyID := sha3_256(claimPub)

@@ -1,11 +1,17 @@
 package consensus
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func mustMLDSA87Keypair(t *testing.T) *MLDSA87Keypair {
 	t.Helper()
 	kp, err := NewMLDSA87Keypair()
 	if err != nil {
+		if strings.Contains(err.Error(), "unsupported") {
+			t.Skipf("ML-DSA backend unavailable in this OpenSSL build: %v", err)
+		}
 		t.Fatalf("NewMLDSA87Keypair: %v", err)
 	}
 	t.Cleanup(func() { kp.Close() })

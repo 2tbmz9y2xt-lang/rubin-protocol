@@ -3,11 +3,7 @@ package consensus
 import "testing"
 
 func TestOpenSSL_MLDSA87_SignVerifyRoundtrip(t *testing.T) {
-	kp, err := NewMLDSA87Keypair()
-	if err != nil {
-		t.Fatalf("NewMLDSA87Keypair: %v", err)
-	}
-	defer kp.Close()
+	kp := mustMLDSA87Keypair(t)
 
 	var msg [32]byte
 	msg[0] = 0x42
