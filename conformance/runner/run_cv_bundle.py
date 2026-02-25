@@ -1219,6 +1219,10 @@ def validate_vector(
         req["chain_id"] = v["chain_id"]
         req["input_index"] = v["input_index"]
         req["input_value"] = v["input_value"]
+    elif op == "tx_weight_and_stats":
+        if tx_hex == "":
+            return [f"{gate}/{v.get('id','?')}: missing tx_hex"]
+        req["tx_hex"] = tx_hex
     elif op == "block_hash":
         req["header_hex"] = v["header_hex"]
     elif op == "pow_check":
@@ -1457,6 +1461,18 @@ def validate_vector(
             )
         if "expected_hash" in v and go_hash != v["expected_hash"]:
             problems.append(f"{gate}/{vid}: expected_hash mismatch")
+    elif op == "tx_weight_and_stats":
+        for k in ["weight", "da_bytes", "anchor_bytes"]:
+            if go_resp.get(k) != rust_resp.get(k):
+                problems.append(
+                    f"{gate}/{vid}: {k} mismatch go={go_resp.get(k)} rust={rust_resp.get(k)}"
+                )
+        if "expect_weight" in v and go_resp.get("weight") != v["expect_weight"]:
+            problems.append(f"{gate}/{vid}: expect_weight mismatch")
+        if "expect_da_bytes" in v and go_resp.get("da_bytes") != v["expect_da_bytes"]:
+            problems.append(f"{gate}/{vid}: expect_da_bytes mismatch")
+        if "expect_anchor_bytes" in v and go_resp.get("anchor_bytes") != v["expect_anchor_bytes"]:
+            problems.append(f"{gate}/{vid}: expect_anchor_bytes mismatch")
 
     return problems
 

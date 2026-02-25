@@ -12,6 +12,7 @@ tmp/
 .claude/
 .codex/
 artifacts/
+.worktrees/
 
 # Local UI tooling (not part of genesis rewrite)
 rubin-ui/

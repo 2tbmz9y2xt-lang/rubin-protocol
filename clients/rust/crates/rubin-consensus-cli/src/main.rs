@@ -4,6 +4,7 @@ use rubin_consensus::{
     apply_non_coinbase_tx_basic_with_mtp, block_hash, compact_shortid,
     connect_block_basic_in_memory_at_height, fork_work_from_target, merkle_root_txids, parse_tx,
     pow_check, retarget_v1, retarget_v1_clamped, sighash_v1_digest,
+    tx_weight_and_stats_public,
     validate_block_basic_with_context_and_fees_at_height,
     validate_block_basic_with_context_at_height, validate_tx_covenants_genesis, ErrorCode,
     InMemoryChainState, Outpoint, UtxoEntry,
@@ -170,6 +171,15 @@ struct Response {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     chainwork: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    weight: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    da_bytes: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    anchor_bytes: Option<u64>,
 }
 
 fn err_code(code: ErrorCode) -> String {
@@ -595,6 +605,52 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+            }
+        }
+        "tx_weight_and_stats" => {
+            let tx_bytes = match hex::decode(req.tx_hex) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad hex".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            let (tx, _txid, _wtxid, _n) = match parse_tx(&tx_bytes) {
+                Ok(v) => v,
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(err_code(e.code)),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            match tx_weight_and_stats_public(&tx) {
+                Ok((w, da, anchor)) => {
+                    let resp = Response {
+                        ok: true,
+                        weight: Some(w),
+                        da_bytes: Some(da),
+                        anchor_bytes: Some(anchor),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(err_code(e.code)),
                         ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);

@@ -8,3 +8,5 @@ import RubinFormal.Conformance.CVSighashVectors
 import RubinFormal.Conformance.CVSighashReplay
 import RubinFormal.Conformance.CVPowVectors
 import RubinFormal.Conformance.CVPowReplay
+import RubinFormal.Conformance.CVWeightVectors
+import RubinFormal.Conformance.CVWeightReplay
