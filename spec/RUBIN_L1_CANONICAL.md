@@ -1499,12 +1499,19 @@ Consensus validity MUST be deterministic given the same chain state and the same
 
 For inputs spending `CORE_VAULT` (after standard Section 18 parse):
 
-1. Parse `covenant_data`: verify `threshold`, `key_count`, `whitelist_count`, and data length.
-2. Whitelist canonical order is checked at UTXO creation only and MUST NOT be re-checked at spend.
-3. Assign `key_count` WitnessItems via the cursor model (Section 16).
-4. Signature threshold check: count valid signatures and require `valid >= threshold`.
-5. Whitelist membership check per output using binary search (`O(log W)`).
-6. Value conservation, including strong vault fee-preservation rule (`sum_out == sum_in_vault` for VAULT spends).
+1. Enforce at most one `CORE_VAULT` input per transaction. Otherwise reject as `TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN`.
+2. Parse the referenced vault UTXO's `covenant_data` as:
+   `owner_lock_id:bytes32 || threshold:u8 || key_count:u8 || keys[key_count] || whitelist_count:u16le || whitelist[whitelist_count]`.
+   Any parse/length failure MUST reject as `TX_ERR_VAULT_MALFORMED`.
+3. **Owner authorization required:** require at least one input whose referenced UTXO entry `e` satisfies
+   `lock_id(e) = owner_lock_id`. Otherwise reject as `TX_ERR_VAULT_OWNER_AUTH_REQUIRED`.
+4. **No fee sponsorship:** for every non-vault input, require its referenced UTXO entry `e` satisfies
+   `lock_id(e) = owner_lock_id`. Otherwise reject as `TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN`.
+5. Whitelist canonical order is checked at UTXO creation only and MUST NOT be re-checked at spend.
+6. Assign `key_count` WitnessItems via the cursor model (Section 16).
+7. Signature threshold check: count valid signatures and require `valid >= threshold`.
+8. Whitelist membership check per output using binary search (`O(log W)`).
+9. Value rule (vault value MUST NOT fund fee): require `sum_out >= sum_in_vault`, otherwise reject as `TX_ERR_VALUE_CONSERVATION`.
 
 Short-circuit on first error.
 
