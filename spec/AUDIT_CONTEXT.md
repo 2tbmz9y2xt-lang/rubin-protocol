@@ -123,3 +123,47 @@
 3. Синхронизировать статус здесь (перенос из open-backlog в `ALREADY_FIXED`/`ACCEPTED_RISK`/`DEFERRED`).
 
 Это обязательный шаг перед меткой “freeze-ready”.
+
+## Full Deep Audit (2026-02-25) — 6-agent pass
+
+Results from 6-domain parallel audit. Report: `../inbox/reports/2026-02-25_report_full_deep_audit.md`
+
+### Findings confirmed ALREADY_FIXED during this audit session
+
+| Finding | Fixed by |
+|---|---|
+| F-CON-001: Covenant activation cursor semantics | Q-C048 DONE |
+| F-CON-002: Vault value rule §14.1 vs §20 ordering | Q-C049 DONE |
+| F-CON-003: Arithmetic 320-bit semantics | Q-C049 DONE |
+| F-P2P-01/03: MB/s unit ambiguity | P2P-05 DONE |
+| F-P2P-06: Short_id collision threshold | P2P-07 DONE |
+| WitnessSlots Go/Rust divergence | Q-R018, Q-R019 DONE |
+| HTLC preimage_len=0 / lock_value=0 creation flaws | Q-C047 DONE |
+
+### New OPEN findings (2026-02-25 audit)
+
+| Q-ID | Severity | Finding |
+|---|---|---|
+| Q-SEC-01 | HIGH | PQ key size not validated in verify_sig() before OpenSSL (ML-DSA=2592B, SLH-DSA=64B) |
+| Q-CONF-07 | CRITICAL | DA chunk_count=0 spec text §5.2 vs §21.3 contradiction + missing conformance vector |
+| Q-CONF-08 | CRITICAL | SLH-DSA activation boundary: 3 conformance vectors missing at height=1,000,000 |
+| Q-CONF-09 | HIGH | Batch conformance gaps: vault arithmetic, replay nonce, retarget min, CompactSize, cursor |
+| Q-CODE-01 | HIGH | JSON CLI PascalCase (Go) vs snake_case (Rust) — parity bug in field naming |
+| Q-CODE-02 | MEDIUM | DA unit test coverage: 0 DA-specific unit tests in Go+Rust clients |
+| Q-TOOLING-02 | MEDIUM | make_audit_pack.py uses str\|None syntax (Python 3.10+), fails on Python 3.9 |
+| Q-TOOLING-03 | HIGH | check_section_hashes.py: unsafe SHA256 fallback if hash_algorithm field missing |
+| Q-TOOLING-04 | HIGH | spec-checks.yml: no-op smoke test (echo only), no real spec validation |
+| Q-TOOLING-05 | HIGH | gen_conformance_matrix.py: no fixture schema/completeness validation |
+| Q-SPEC-02 | MEDIUM | Batch spec gaps: coinbase maturity §17, target endianness §10.3, feature-bit stall, P2P version mismatch |
+| Q-HYGIENE-01 | LOW | clients/rust/.DS_Store committed to git |
+
+### Status for F-P2P-02 (Orphan TTL under storm mode)
+
+Partially addressed by P2P-04 DONE (storm-mode triggers, commit-first bias) and Q-C050 DONE (relay determinism clarifications). The specific interaction of DA_ORPHAN_TTL_BLOCKS with storm-mode eviction order and wall-clock vs block-based 60s timer was clarified in Q-C050. Status: **PARTIALLY_ADDRESSED** — no remaining OPEN task; acceptable for Phase-0.
+
+## Tracked completion reports (auto-triage exclusion list)
+
+Отчёты ниже полностью закрыты и не требуют авто-triaging:
+
+- `2026-02-22_report_cv_compact_execution_and_context_sync.md` — CV-COMPACT executable gate; linked Q-G013 DONE; remaining vectors (CV-C-02, CV-C-05..C-18) closed via Q-CONF-01.
+- `2026-02-25_report_full_deep_audit.md` — comprehensive 6-agent audit; all ALREADY_FIXED findings triaged above; open findings tracked under Q-SEC-01, Q-CONF-07..09, Q-CODE-01..02, Q-TOOLING-02..05, Q-SPEC-02, Q-HYGIENE-01.
