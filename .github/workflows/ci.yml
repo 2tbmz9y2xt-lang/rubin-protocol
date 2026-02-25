@@ -23,6 +23,9 @@ jobs:
       - name: Formal coverage baseline check
         run: python3 tools/check_formal_coverage.py
 
+      - name: Formal risk gate (Phase-0/devnet)
+        run: python3 tools/check_formal_risk_gate.py --profile phase0
+
   test:
     runs-on: ubuntu-latest
     steps:

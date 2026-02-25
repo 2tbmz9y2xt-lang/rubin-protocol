@@ -24,6 +24,13 @@
 
 Источник истины по границе claims — `rubin-formal/proof_coverage.json` (`proof_level`, `claims`).
 
+## Risk model / CI gate
+
+- Док: `rubin-formal/RISK_MODEL.md`
+- Скрипты:
+  - `tools/formal_risk_score.py`
+  - `tools/check_formal_risk_gate.py --profile phase0`
+
 ## Что это значит
 
 - Это **не** полный formal freeze-ready пакет уровня “бит-в-бит байтовая модель wire + state transition”.

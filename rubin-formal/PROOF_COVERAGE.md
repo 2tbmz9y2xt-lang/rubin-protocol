@@ -18,3 +18,14 @@
 1. Углубить доказательства до байтовой эквивалентности формул из CANONICAL.
 2. Для consensus-critical safety-инвариантов добавить refinement-слой (model → executable path).
 3. Держать матрицу покрытия в синхроне с hash-pinning CANONICAL.
+
+## Risk scoring / gates
+
+Профили готовности (Phase‑0/devnet/audit/freeze) и правила CI описаны в `rubin-formal/RISK_MODEL.md`.
+
+Локально:
+
+```bash
+python3 tools/formal_risk_score.py
+python3 tools/check_formal_risk_gate.py --profile phase0
+```
