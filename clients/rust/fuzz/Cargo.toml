@@ -1,0 +1,31 @@
+[package]
+name = "rubin-consensus-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rubin-consensus = { path = "../crates/rubin-consensus" }
+
+[[bin]]
+name = "parse_tx"
+path = "fuzz_targets/parse_tx.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "parse_block_bytes"
+path = "fuzz_targets/parse_block_bytes.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "compactsize"
+path = "fuzz_targets/compactsize.rs"
+test = false
+doc = false
+
