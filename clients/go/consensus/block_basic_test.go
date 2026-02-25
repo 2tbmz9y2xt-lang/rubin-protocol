@@ -260,6 +260,44 @@ func TestValidateBlockBasic_SubsidyWithFeesOK(t *testing.T) {
 	}
 }
 
+func TestValidateBlockBasic_SubsidyExceeded_CoinbaseSumUsesU128(t *testing.T) {
+	height := uint64(1)
+	alreadyGenerated := uint64(0)
+	sumFees := uint64(0)
+
+	wroot, err := WitnessMerkleRootWtxids([][32]byte{{}})
+	if err != nil {
+		t.Fatalf("WitnessMerkleRootWtxids: %v", err)
+	}
+	commit := WitnessCommitmentHash(wroot)
+
+	coinbase := coinbaseTxWithOutputs(uint32(height), []testOutput{
+		{value: ^uint64(0), covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()},
+		{value: ^uint64(0), covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()},
+		{value: 0, covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]},
+	})
+	cbid := testTxID(t, coinbase)
+	root, err := MerkleRootTxids([][32]byte{cbid})
+	if err != nil {
+		t.Fatalf("MerkleRootTxids: %v", err)
+	}
+
+	var prev [32]byte
+	prev[0] = 0x9b
+	var target [32]byte
+	for i := range target {
+		target[i] = 0xff
+	}
+	block := buildBlockBytes(t, prev, root, target, 57, [][]byte{coinbase})
+	_, err = ValidateBlockBasicWithContextAndFeesAtHeight(block, &prev, &target, height, nil, alreadyGenerated, sumFees)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != BLOCK_ERR_SUBSIDY_EXCEEDED {
+		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_SUBSIDY_EXCEEDED)
+	}
+}
+
 func TestParseBlockBytes_OK(t *testing.T) {
 	tx := minimalTxBytes()
 	txid := testTxID(t, tx)

@@ -312,17 +312,17 @@ fn validate_coinbase_value_bound(
     }
     let coinbase = &pb.txs[0];
 
-    let mut sum_coinbase: u64 = 0;
+    let mut sum_coinbase: u128 = 0;
     for out in &coinbase.outputs {
         sum_coinbase = sum_coinbase
-            .checked_add(out.value)
-            .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "coinbase value overflow"))?;
+            .checked_add(out.value as u128)
+            .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "u128 overflow"))?;
     }
 
     let subsidy = block_subsidy(block_height, already_generated);
-    let limit = subsidy
-        .checked_add(sum_fees)
-        .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "subsidy+fees overflow"))?;
+    let limit = (subsidy as u128)
+        .checked_add(sum_fees as u128)
+        .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "u128 overflow"))?;
     if sum_coinbase > limit {
         return Err(TxError::new(
             ErrorCode::BlockErrSubsidyExceeded,

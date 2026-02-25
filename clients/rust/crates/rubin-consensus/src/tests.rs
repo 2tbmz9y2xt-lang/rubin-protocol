@@ -555,6 +555,57 @@ fn validate_block_basic_subsidy_exceeded() {
 }
 
 #[test]
+fn validate_block_basic_subsidy_exceeded_coinbase_sum_uses_u128() {
+    let height = 1u64;
+    let already_generated = 0u64;
+    let sum_fees = 0u64;
+
+    let wtxids = [[0u8; 32]];
+    let wroot = witness_merkle_root_wtxids(&wtxids).expect("witness merkle root");
+    let commit = witness_commitment_hash(wroot);
+
+    let tx = coinbase_tx_with_outputs(
+        height as u32,
+        &[
+            TestOutput {
+                value: u64::MAX,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: valid_p2pk_covenant_data(),
+            },
+            TestOutput {
+                value: u64::MAX,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: valid_p2pk_covenant_data(),
+            },
+            TestOutput {
+                value: 0,
+                covenant_type: COV_TYPE_ANCHOR,
+                covenant_data: commit.to_vec(),
+            },
+        ],
+    );
+
+    let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
+    let root = merkle_root_txids(&[txid]).expect("root");
+    let mut prev = [0u8; 32];
+    prev[0] = 0x9d;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(prev, root, target, 35, &[tx]);
+
+    let err = validate_block_basic_with_context_and_fees_at_height(
+        &block,
+        Some(prev),
+        Some(target),
+        height,
+        None,
+        already_generated,
+        sum_fees,
+    )
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrSubsidyExceeded);
+}
+
+#[test]
 fn validate_block_basic_subsidy_with_fees_ok() {
     let height = 1u64;
     let already_generated = 0u64;

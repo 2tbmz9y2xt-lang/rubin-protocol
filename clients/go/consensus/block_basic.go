@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"bytes"
+	"math/bits"
 	"sort"
 )
 
@@ -261,23 +262,33 @@ func validateCoinbaseValueBound(pb *ParsedBlock, blockHeight uint64, alreadyGene
 		return txerr(BLOCK_ERR_COINBASE_INVALID, "nil coinbase")
 	}
 
-	var sumCoinbase uint64
+	var sumCoinbase u128
 	for _, out := range coinbase.Outputs {
 		var err error
-		sumCoinbase, err = addU64(sumCoinbase, out.Value)
+		sumCoinbase, err = addU64ToU128Block(sumCoinbase, out.Value)
 		if err != nil {
-			return txerr(BLOCK_ERR_PARSE, "coinbase value overflow")
+			return err
 		}
 	}
 	subsidy := BlockSubsidy(blockHeight, alreadyGenerated)
-	limit, err := addU64(subsidy, sumFees)
+	limit := u128{hi: 0, lo: subsidy}
+	limit, err := addU64ToU128Block(limit, sumFees)
 	if err != nil {
-		return txerr(BLOCK_ERR_PARSE, "subsidy+fees overflow")
+		return err
 	}
-	if sumCoinbase > limit {
+	if cmpU128(sumCoinbase, limit) > 0 {
 		return txerr(BLOCK_ERR_SUBSIDY_EXCEEDED, "coinbase outputs exceed subsidy+fees bound")
 	}
 	return nil
+}
+
+func addU64ToU128Block(x u128, v uint64) (u128, error) {
+	lo, carry := bits.Add64(x.lo, v, 0)
+	hi, carry2 := bits.Add64(x.hi, 0, carry)
+	if carry2 != 0 {
+		return u128{}, txerr(BLOCK_ERR_PARSE, "u128 overflow")
+	}
+	return u128{hi: hi, lo: lo}, nil
 }
 
 func validateWitnessSuiteActivation(tx *Tx, txIndex int, blockHeight uint64) error {
