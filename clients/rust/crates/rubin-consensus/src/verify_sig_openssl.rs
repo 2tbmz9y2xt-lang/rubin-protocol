@@ -1,4 +1,7 @@
-use crate::constants::{SUITE_ID_ML_DSA_87, SUITE_ID_SLH_DSA_SHAKE_256F};
+use crate::constants::{
+    MAX_SLH_DSA_SIG_BYTES, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES,
+    SLH_DSA_SHAKE_256F_PUBKEY_BYTES, SUITE_ID_ML_DSA_87, SUITE_ID_SLH_DSA_SHAKE_256F,
+};
 use crate::error::{ErrorCode, TxError};
 use core::ffi::CStr;
 
@@ -51,6 +54,24 @@ pub fn verify_sig(
     digest32: &[u8; 32],
 ) -> Result<bool, TxError> {
     let alg = suite_alg_name(suite_id)?;
+    match suite_id {
+        SUITE_ID_ML_DSA_87 => {
+            if pubkey.len() != ML_DSA_87_PUBKEY_BYTES as usize
+                || signature.len() != ML_DSA_87_SIG_BYTES as usize
+            {
+                return Ok(false);
+            }
+        }
+        SUITE_ID_SLH_DSA_SHAKE_256F => {
+            if pubkey.len() != SLH_DSA_SHAKE_256F_PUBKEY_BYTES as usize
+                || signature.is_empty()
+                || signature.len() > MAX_SLH_DSA_SIG_BYTES as usize
+            {
+                return Ok(false);
+            }
+        }
+        _ => {}
+    }
     openssl_verify_sig_digest_oneshot(alg, pubkey, signature, digest32)
 }
 

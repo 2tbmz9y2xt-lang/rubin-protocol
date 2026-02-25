@@ -70,7 +70,15 @@ def main() -> int:
         print(f"ERROR: source_file not found: {src_rel}", file=sys.stderr)
         return 2
 
-    algo = str(data.get("hash_algorithm", "sha256")).lower()
+    algo_raw = data.get("hash_algorithm")
+    if not isinstance(algo_raw, str) or not algo_raw.strip():
+        print(
+            "ERROR: missing required hash_algorithm in SECTION_HASHES.json "
+            "(expected one of: sha256, sha3-256)",
+            file=sys.stderr,
+        )
+        return 2
+    algo = algo_raw.strip().lower()
     if algo not in {"sha256", "sha3-256"}:
         print(f"ERROR: unsupported hash_algorithm: {algo}", file=sys.stderr)
         return 2

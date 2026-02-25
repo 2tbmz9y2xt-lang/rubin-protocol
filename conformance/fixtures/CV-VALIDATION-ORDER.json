@@ -6,11 +6,25 @@
       "op": "validation_order",
       "expect_ok": false,
       "expect_first_err": "BLOCK_ERR_PARSE",
-      "expect_evaluated": ["parse"],
+      "expect_evaluated": [
+        "parse"
+      ],
       "checks": [
-        {"name": "parse", "fails": true, "err": "BLOCK_ERR_PARSE"},
-        {"name": "target_range", "fails": false, "err": "BLOCK_ERR_TARGET_INVALID"},
-        {"name": "pow", "fails": false, "err": "BLOCK_ERR_POW_INVALID"}
+        {
+          "name": "parse",
+          "fails": true,
+          "err": "BLOCK_ERR_PARSE"
+        },
+        {
+          "name": "target_range",
+          "fails": false,
+          "err": "BLOCK_ERR_TARGET_INVALID"
+        },
+        {
+          "name": "pow",
+          "fails": false,
+          "err": "BLOCK_ERR_POW_INVALID"
+        }
       ]
     },
     {
@@ -18,12 +32,31 @@
       "op": "validation_order",
       "expect_ok": false,
       "expect_first_err": "BLOCK_ERR_TARGET_INVALID",
-      "expect_evaluated": ["parse", "target_range"],
+      "expect_evaluated": [
+        "parse",
+        "target_range"
+      ],
       "checks": [
-        {"name": "parse", "fails": false, "err": "BLOCK_ERR_PARSE"},
-        {"name": "target_range", "fails": true, "err": "BLOCK_ERR_TARGET_INVALID"},
-        {"name": "pow", "fails": true, "err": "BLOCK_ERR_POW_INVALID"},
-        {"name": "expected_target", "fails": true, "err": "BLOCK_ERR_TARGET_INVALID"}
+        {
+          "name": "parse",
+          "fails": false,
+          "err": "BLOCK_ERR_PARSE"
+        },
+        {
+          "name": "target_range",
+          "fails": true,
+          "err": "BLOCK_ERR_TARGET_INVALID"
+        },
+        {
+          "name": "pow",
+          "fails": true,
+          "err": "BLOCK_ERR_POW_INVALID"
+        },
+        {
+          "name": "expected_target",
+          "fails": true,
+          "err": "BLOCK_ERR_TARGET_INVALID"
+        }
       ]
     },
     {
@@ -43,16 +76,95 @@
         "weight"
       ],
       "checks": [
-        {"name": "parse", "fails": false, "err": "BLOCK_ERR_PARSE"},
-        {"name": "target_range", "fails": false, "err": "BLOCK_ERR_TARGET_INVALID"},
-        {"name": "pow", "fails": false, "err": "BLOCK_ERR_POW_INVALID"},
-        {"name": "expected_target", "fails": false, "err": "BLOCK_ERR_TARGET_INVALID"},
-        {"name": "linkage", "fails": false, "err": "BLOCK_ERR_LINKAGE_INVALID"},
-        {"name": "merkle", "fails": false, "err": "BLOCK_ERR_MERKLE_INVALID"},
-        {"name": "witness_commitment", "fails": false, "err": "BLOCK_ERR_WITNESS_COMMITMENT"},
-        {"name": "timestamp", "fails": false, "err": "BLOCK_ERR_TIMESTAMP_OLD"},
-        {"name": "weight", "fails": true, "err": "BLOCK_ERR_WEIGHT_EXCEEDED"},
-        {"name": "anchor_limit", "fails": true, "err": "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED"}
+        {
+          "name": "parse",
+          "fails": false,
+          "err": "BLOCK_ERR_PARSE"
+        },
+        {
+          "name": "target_range",
+          "fails": false,
+          "err": "BLOCK_ERR_TARGET_INVALID"
+        },
+        {
+          "name": "pow",
+          "fails": false,
+          "err": "BLOCK_ERR_POW_INVALID"
+        },
+        {
+          "name": "expected_target",
+          "fails": false,
+          "err": "BLOCK_ERR_TARGET_INVALID"
+        },
+        {
+          "name": "linkage",
+          "fails": false,
+          "err": "BLOCK_ERR_LINKAGE_INVALID"
+        },
+        {
+          "name": "merkle",
+          "fails": false,
+          "err": "BLOCK_ERR_MERKLE_INVALID"
+        },
+        {
+          "name": "witness_commitment",
+          "fails": false,
+          "err": "BLOCK_ERR_WITNESS_COMMITMENT"
+        },
+        {
+          "name": "timestamp",
+          "fails": false,
+          "err": "BLOCK_ERR_TIMESTAMP_OLD"
+        },
+        {
+          "name": "weight",
+          "fails": true,
+          "err": "BLOCK_ERR_WEIGHT_EXCEEDED"
+        },
+        {
+          "name": "anchor_limit",
+          "fails": true,
+          "err": "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED"
+        }
+      ]
+    },
+    {
+      "id": "CV-VO-04",
+      "op": "validation_order",
+      "expect_ok": false,
+      "expect_first_err": "TX_ERR_SIG_INVALID",
+      "expect_evaluated": [
+        "cursor_p2pk",
+        "cursor_htlc",
+        "cursor_vault",
+        "sig_threshold_vault"
+      ],
+      "checks": [
+        {
+          "name": "cursor_p2pk",
+          "fails": false,
+          "err": "TX_ERR_WITNESS_NONCANONICAL"
+        },
+        {
+          "name": "cursor_htlc",
+          "fails": false,
+          "err": "TX_ERR_PARSE"
+        },
+        {
+          "name": "cursor_vault",
+          "fails": false,
+          "err": "TX_ERR_VAULT_MALFORMED"
+        },
+        {
+          "name": "sig_threshold_vault",
+          "fails": true,
+          "err": "TX_ERR_SIG_INVALID"
+        },
+        {
+          "name": "value_conservation",
+          "fails": true,
+          "err": "TX_ERR_VALUE_CONSERVATION"
+        }
       ]
     }
   ]

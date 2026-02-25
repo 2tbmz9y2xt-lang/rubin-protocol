@@ -231,8 +231,14 @@ func opensslVerifySigDigestOneShot(alg string, pubkey []byte, signature []byte, 
 func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
 	switch suiteID {
 	case SUITE_ID_ML_DSA_87:
+		if len(pubkey) != ML_DSA_87_PUBKEY_BYTES || len(signature) != ML_DSA_87_SIG_BYTES {
+			return false, nil
+		}
 		return opensslVerifySigMessage("ML-DSA-87", pubkey, signature, digest32[:])
 	case SUITE_ID_SLH_DSA_SHAKE_256F:
+		if len(pubkey) != SLH_DSA_SHAKE_256F_PUBKEY_BYTES || len(signature) == 0 || len(signature) > MAX_SLH_DSA_SIG_BYTES {
+			return false, nil
+		}
 		return opensslVerifySigDigestOneShot("SLH-DSA-SHAKE-256f", pubkey, signature, digest32[:])
 	default:
 		return false, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: unsupported suite_id")

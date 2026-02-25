@@ -304,3 +304,10 @@ Each deployment MUST define at least:
 - `timeout_height`
 
 No deployment is ACTIVE by default unless explicitly declared in canonical specs.
+
+Short-ID upgrade note (non-consensus reference):
+
+- Compact relay short transaction ID length (`SHORT_ID_LENGTH`) currently uses 6 bytes.
+- Any migration to 8-byte short IDs MUST use a dedicated feature-bit deployment under
+  `RUBIN_L1_CANONICAL.md` §23.2 and the relay procedure documented in
+  `RUBIN_COMPACT_BLOCKS.md` §7.

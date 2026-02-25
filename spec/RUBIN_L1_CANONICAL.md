@@ -483,6 +483,12 @@ Proof-of-Work validity:
 valid_pow(B) iff integer(block_hash(B), big-endian) < integer(B.header.target, big-endian)
 ```
 
+Endianness rule (normative):
+
+- `header.target` is interpreted directly from the 32 serialized bytes as an unsigned **big-endian** integer.
+- Implementations MUST NOT byte-swap, reverse, or reinterpret `target` using host endianness.
+- The same big-endian interpretation applies in Section 15 (retarget) and Section 23.1 (`work(B)`).
+
 Target range validity:
 
 - `integer(B.header.target, big-endian)` MUST satisfy `1 <= target <= POW_LIMIT`.
@@ -1137,6 +1143,10 @@ Additionally, including `tx_nonce` in `preimage_tx_sig` (Section 12) binds signa
 eliminating nonce-malleability for otherwise identical transactions.
 These are complementary mechanisms with different scopes.
 
+Placement note (normative clarification):
+- Coinbase maturity (`TX_ERR_COINBASE_IMMATURE`) is validated during UTXO spend checks in Section 18.1
+  and in block validation order Section 25 step 14. It is not part of replay-domain validation.
+
 ## 18. UTXO State Model (Normative)
 
 Define an outpoint as:
@@ -1370,8 +1380,9 @@ Rules:
 - **DA set count:** The number of distinct `da_id` values in `B` MUST be `<= MAX_DA_BATCHES_PER_BLOCK`.
   If exceeded, reject as `BLOCK_ERR_DA_BATCH_EXCEEDED`.
 
-- **Chunk count per set:** For each `DA_COMMIT_TX`, `chunk_count MUST be <= MAX_DA_CHUNK_COUNT`.
-  If exceeded, reject as `TX_ERR_PARSE`.
+- **Chunk count per set:** For each `DA_COMMIT_TX`, `chunk_count MUST satisfy
+  `1 <= chunk_count <= MAX_DA_CHUNK_COUNT`.
+  If violated, reject as `TX_ERR_PARSE`.
 
 Note:
 - `da_id` uniqueness is enforced per block only.
@@ -1495,6 +1506,15 @@ State machine (evaluated only at `SIGNAL_WINDOW` boundaries):
 - `STARTED` -> `FAILED` if `h >= timeout_height` and lock-in was not reached.
 - `LOCKED_IN` -> `ACTIVE` after one full additional window.
 - `ACTIVE` and `FAILED` are terminal.
+
+Boundary timing rule (normative):
+
+- Let `h_b` be a height such that `h_b % SIGNAL_WINDOW = 0` (a boundary height where transitions are evaluated).
+- The signaling count is always measured on the immediately preceding full window:
+  `[h_b - SIGNAL_WINDOW, h_b - 1]`.
+- Timeout is checked at boundaries only: if state is `STARTED` and `h_b >= timeout_height` at evaluation time,
+  transition to `FAILED` (unless lock-in condition for that same boundary is already met).
+- Signaling observed after transition to `FAILED` MUST be ignored for this deployment.
 
 Operational constraints:
 

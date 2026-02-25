@@ -28,9 +28,9 @@
     "covenant_registry": "33727b879e85f623d2d30791c619dec3a7400d493a0efff2428058f0b23fe770",
     "difficulty_update": "045138308bb180da93b8540e5e6535b4ea74580bf542bae7506dbc9e7bb9e8ff",
     "transaction_structural_rules": "c5b268dab7a7e8e036bc62a0cba877d5994a7bfb47966201c5d71473b18ee965",
-    "replay_domain_checks": "f65201c5b65cdc4c53286074806cb189eaaf5909a007ea0079102e3cb616f115",
+    "replay_domain_checks": "5c960ef2f65c6256a7b5004ea3965be507acbb7f335d56310c1823a11b1500f0",
     "utxo_state_model": "f3f96f3dd27ee8d7d3725502cc4afcbd6cc301cd03c49fa2e1b7e6417ee2ba42",
     "value_conservation": "8e134072735aa979e3fff1c6119ca4c6e4dd91aec1d8a69d81006f5669ad9450",
-    "da_set_integrity": "3e71e5f27c3c33997564d5bc7bc36f63467a345ab0ed4b2d40c5c1ff9a94c244"
+    "da_set_integrity": "4baf73e81f55247f03f84eb396781be5d6d16764e16f9f8896be718e24646bf3"
   }
 }

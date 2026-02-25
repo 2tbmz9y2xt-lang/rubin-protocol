@@ -204,6 +204,16 @@ fn parse_tx_witness_bytes_overflow() {
 }
 
 #[test]
+fn parse_tx_da_commit_chunk_count_zero_rejected() {
+    let da_id = [0x42u8; 32];
+    let payload_commitment = sha3_256(b"payload");
+    let tx = da_commit_tx(da_id, 0, payload_commitment, 1);
+
+    let err = parse_tx(&tx).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+}
+
+#[test]
 fn merkle_root_single_and_two() {
     let tx1 = minimal_tx_bytes();
     let (_t1, txid1, _w1, _n1) = parse_tx(&tx1).expect("tx1");
@@ -421,6 +431,72 @@ fn tx_with_outputs(outputs: &[TestOutput]) -> Vec<u8> {
     b.extend_from_slice(&0u32.to_le_bytes()); // locktime
     crate::compactsize::encode_compact_size(0, &mut b); // witness_count
     crate::compactsize::encode_compact_size(0, &mut b); // da_payload_len
+    b
+}
+
+fn da_commit_tx(
+    da_id: [u8; 32],
+    chunk_count: u16,
+    payload_commitment: [u8; 32],
+    tx_nonce: u64,
+) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&1u32.to_le_bytes()); // version
+    b.push(0x01); // tx_kind
+    b.extend_from_slice(&tx_nonce.to_le_bytes()); // tx_nonce
+    crate::compactsize::encode_compact_size(1, &mut b); // input_count
+    let mut prev_txid = [0u8; 32];
+    prev_txid[0] = tx_nonce as u8;
+    b.extend_from_slice(&prev_txid);
+    b.extend_from_slice(&0u32.to_le_bytes()); // prev_vout
+    crate::compactsize::encode_compact_size(0, &mut b); // script_sig_len
+    b.extend_from_slice(&0u32.to_le_bytes()); // sequence
+    crate::compactsize::encode_compact_size(1, &mut b); // output_count
+    b.extend_from_slice(&0u64.to_le_bytes()); // value
+    b.extend_from_slice(&COV_TYPE_DA_COMMIT.to_le_bytes());
+    crate::compactsize::encode_compact_size(32, &mut b); // covenant_data_len
+    b.extend_from_slice(&payload_commitment);
+    b.extend_from_slice(&0u32.to_le_bytes()); // locktime
+    b.extend_from_slice(&da_id);
+    b.extend_from_slice(&chunk_count.to_le_bytes());
+    b.extend_from_slice(&[0x10u8; 32]); // retl_domain_id
+    b.extend_from_slice(&1u64.to_le_bytes()); // batch_number
+    b.extend_from_slice(&[0x11u8; 32]); // tx_data_root
+    b.extend_from_slice(&[0x12u8; 32]); // state_root
+    b.extend_from_slice(&[0x13u8; 32]); // withdrawals_root
+    b.push(0x00); // batch_sig_suite
+    crate::compactsize::encode_compact_size(0, &mut b); // batch_sig_len
+    crate::compactsize::encode_compact_size(0, &mut b); // witness_count
+    crate::compactsize::encode_compact_size(0, &mut b); // da_payload_len
+    b
+}
+
+fn da_chunk_tx(
+    da_id: [u8; 32],
+    chunk_index: u16,
+    chunk_hash: [u8; 32],
+    da_payload: &[u8],
+    tx_nonce: u64,
+) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&1u32.to_le_bytes()); // version
+    b.push(0x02); // tx_kind
+    b.extend_from_slice(&tx_nonce.to_le_bytes()); // tx_nonce
+    crate::compactsize::encode_compact_size(1, &mut b); // input_count
+    let mut prev_txid = [0u8; 32];
+    prev_txid[0] = tx_nonce as u8;
+    b.extend_from_slice(&prev_txid);
+    b.extend_from_slice(&0u32.to_le_bytes()); // prev_vout
+    crate::compactsize::encode_compact_size(0, &mut b); // script_sig_len
+    b.extend_from_slice(&0u32.to_le_bytes()); // sequence
+    crate::compactsize::encode_compact_size(0, &mut b); // output_count
+    b.extend_from_slice(&0u32.to_le_bytes()); // locktime
+    b.extend_from_slice(&da_id);
+    b.extend_from_slice(&chunk_index.to_le_bytes());
+    b.extend_from_slice(&chunk_hash);
+    crate::compactsize::encode_compact_size(0, &mut b); // witness_count
+    crate::compactsize::encode_compact_size(da_payload.len() as u64, &mut b); // da_payload_len
+    b.extend_from_slice(da_payload);
     b
 }
 
@@ -872,6 +948,55 @@ fn validate_block_basic_witness_commitment_duplicate() {
 }
 
 #[test]
+fn validate_block_basic_da_chunk_hash_mismatch() {
+    let da_id = [0x51u8; 32];
+    let da_payload = b"chunk payload".to_vec();
+    let payload_commitment = sha3_256(&da_payload);
+    let mut bad_chunk_hash = sha3_256(&da_payload);
+    bad_chunk_hash[0] ^= 0x01;
+
+    let da_commit = da_commit_tx(da_id, 1, payload_commitment, 1);
+    let da_chunk = da_chunk_tx(da_id, 0, bad_chunk_hash, &da_payload, 2);
+    let coinbase = coinbase_with_witness_commitment(0, &[da_commit.clone(), da_chunk.clone()]);
+
+    let (_t1, txid1, _w1, _n1) = parse_tx(&coinbase).expect("coinbase");
+    let (_t2, txid2, _w2, _n2) = parse_tx(&da_commit).expect("da_commit");
+    let (_t3, txid3, _w3, _n3) = parse_tx(&da_chunk).expect("da_chunk");
+    let root = merkle_root_txids(&[txid1, txid2, txid3]).expect("root");
+    let mut prev = [0u8; 32];
+    prev[0] = 0x93;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(prev, root, target, 37, &[coinbase, da_commit, da_chunk]);
+
+    let err = validate_block_basic(&block, Some(prev), Some(target)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrDaChunkHashInvalid);
+}
+
+#[test]
+fn validate_block_basic_da_payload_commitment_mismatch() {
+    let da_id = [0x52u8; 32];
+    let da_payload = b"payload for commitment".to_vec();
+    let chunk_hash = sha3_256(&da_payload);
+    let payload_commitment = sha3_256(b"different payload");
+
+    let da_commit = da_commit_tx(da_id, 1, payload_commitment, 3);
+    let da_chunk = da_chunk_tx(da_id, 0, chunk_hash, &da_payload, 4);
+    let coinbase = coinbase_with_witness_commitment(0, &[da_commit.clone(), da_chunk.clone()]);
+
+    let (_t1, txid1, _w1, _n1) = parse_tx(&coinbase).expect("coinbase");
+    let (_t2, txid2, _w2, _n2) = parse_tx(&da_commit).expect("da_commit");
+    let (_t3, txid3, _w3, _n3) = parse_tx(&da_chunk).expect("da_chunk");
+    let root = merkle_root_txids(&[txid1, txid2, txid3]).expect("root");
+    let mut prev = [0u8; 32];
+    prev[0] = 0x94;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(prev, root, target, 39, &[coinbase, da_commit, da_chunk]);
+
+    let err = validate_block_basic(&block, Some(prev), Some(target)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrDaPayloadCommitInvalid);
+}
+
+#[test]
 fn validate_block_basic_slh_inactive_at_height() {
     let prev_txid = [0xabu8; 32];
     let pubkey = vec![0u8; SLH_DSA_SHAKE_256F_PUBKEY_BYTES as usize];
@@ -939,6 +1064,32 @@ fn validate_block_basic_slh_active_at_height() {
 
     validate_block_basic_at_height(&block, Some(prev), Some(target), SLH_DSA_ACTIVATION_HEIGHT)
         .expect("validate");
+}
+
+#[test]
+fn verify_sig_rejects_wrong_mldsa_lengths_before_openssl() {
+    let digest = [0u8; 32];
+    let ok = crate::verify_sig_openssl::verify_sig(
+        SUITE_ID_ML_DSA_87,
+        &vec![0u8; (ML_DSA_87_PUBKEY_BYTES as usize) - 1],
+        &vec![0u8; ML_DSA_87_SIG_BYTES as usize],
+        &digest,
+    )
+    .expect("verify_sig should not return transport error for length mismatch");
+    assert!(!ok);
+}
+
+#[test]
+fn verify_sig_rejects_wrong_slh_pubkey_length_before_openssl() {
+    let digest = [0u8; 32];
+    let ok = crate::verify_sig_openssl::verify_sig(
+        SUITE_ID_SLH_DSA_SHAKE_256F,
+        &vec![0u8; (SLH_DSA_SHAKE_256F_PUBKEY_BYTES as usize) + 1],
+        &[0x01],
+        &digest,
+    )
+    .expect("verify_sig should not return transport error for length mismatch");
+    assert!(!ok);
 }
 
 fn hex32(s: &str) -> [u8; 32] {

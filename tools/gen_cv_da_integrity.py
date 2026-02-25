@@ -372,6 +372,29 @@ def main() -> None:
         }
     )
 
+    # CV-DA-06: commit with chunk_count=0 (parse-level reject)
+    zero_commit = build_da_commit_tx(
+        14,
+        b"\xA4" * 32,
+        0,
+        sha3_256(b""),
+        manifest=b"m0",
+        commitment_mode="ok",
+    )
+    witness_root = witness_merkle_root_wtxids([b"\x00" * 32] + [zero_commit.wtxid])
+    witness_commitment = witness_commitment_hash(witness_root)
+    coinbase = build_coinbase(height, witness_commitment)
+    v = build_block(height, prev_timestamps, [coinbase, zero_commit])
+    vectors.append(
+        {
+            "id": "CV-DA-06",
+            "op": "block_basic_check",
+            "expect_ok": False,
+            "expect_err": "TX_ERR_PARSE",
+            **v,
+        }
+    )
+
     out_obj = {"gate": "CV-DA-INTEGRITY", "vectors": vectors}
     out_text = json.dumps(out_obj, indent=2, sort_keys=False) + "\n"
 

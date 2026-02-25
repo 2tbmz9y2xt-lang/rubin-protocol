@@ -145,22 +145,22 @@ Results from 6-domain parallel audit. Report: `../inbox/reports/2026-02-25_repor
 | WitnessSlots Go/Rust divergence | Q-R018, Q-R019 DONE |
 | HTLC preimage_len=0 / lock_value=0 creation flaws | Q-C047 DONE |
 
-### New OPEN findings (2026-02-25 audit)
+### Disposition of 2026-02-25 deep-audit findings
 
-| Q-ID | Severity | Finding |
+| Q-ID | Final status | Evidence |
 |---|---|---|
-| Q-SEC-01 | HIGH | PQ key size not validated in verify_sig() before OpenSSL (ML-DSA=2592B, SLH-DSA=64B) |
-| Q-CONF-07 | CRITICAL | DA chunk_count=0 spec text §5.2 vs §21.3 contradiction + missing conformance vector |
-| Q-CONF-08 | CRITICAL | SLH-DSA activation boundary: 3 conformance vectors missing at height=1,000,000 |
-| Q-CONF-09 | HIGH | Batch conformance gaps: vault arithmetic, replay nonce, retarget min, CompactSize, cursor |
-| Q-CODE-01 | HIGH | JSON CLI PascalCase (Go) vs snake_case (Rust) — parity bug in field naming |
-| Q-CODE-02 | MEDIUM | DA unit test coverage: 0 DA-specific unit tests in Go+Rust clients |
-| Q-TOOLING-02 | MEDIUM | make_audit_pack.py uses str\|None syntax (Python 3.10+), fails on Python 3.9 |
-| Q-TOOLING-03 | HIGH | check_section_hashes.py: unsafe SHA256 fallback if hash_algorithm field missing |
-| Q-TOOLING-04 | HIGH | spec-checks.yml: no-op smoke test (echo only), no real spec validation |
-| Q-TOOLING-05 | HIGH | gen_conformance_matrix.py: no fixture schema/completeness validation |
-| Q-SPEC-02 | MEDIUM | Batch spec gaps: coinbase maturity §17, target endianness §10.3, feature-bit stall, P2P version mismatch |
-| Q-HYGIENE-01 | LOW | clients/rust/.DS_Store committed to git |
+| Q-SEC-01 | ALREADY_FIXED | `verify_sig` key/signature pre-checks in Go+Rust + unit tests (`../inbox/reports/2026-02-25_report_claimed_batch_closeout_q-sec-01_q-conf-07_08_09_q-code-01_02_q-tooling-02_03_05_q-spec-02.md`) |
+| Q-CONF-07 | ALREADY_FIXED | CANONICAL §21.3 `1 <= chunk_count` + `CV-DA-06` |
+| Q-CONF-08 | ALREADY_FIXED | SLH boundary vectors in `CV-SIG`/`CV-VAULT` (pre-activation reject, activation accept) |
+| Q-CONF-09 | ALREADY_FIXED | Added batch gap vectors (vault ±1 boundaries, replay distance, retarget min=1, CompactSize, mixed cursor ordering) |
+| Q-CODE-01 | ALREADY_FIXED | False-positive triaged: Go/Rust CLI JSON already snake_case (`wtxid`, `block_timestamp`) |
+| Q-CODE-02 | ALREADY_FIXED | DA-specific unit tests added in Go+Rust |
+| Q-TOOLING-02 | ALREADY_FIXED | Python 3.9 compatibility in `tools/make_audit_pack.py` (`Optional[str]`) |
+| Q-TOOLING-03 | ALREADY_FIXED | `hash_algorithm` now mandatory in `tools/check_section_hashes.py` (no fallback) |
+| Q-TOOLING-04 | ALREADY_FIXED | Closed earlier by `../inbox/reports/2026-02-25_report_q-tooling-04_q-hygiene-01_stale_closeout.md` |
+| Q-TOOLING-05 | ALREADY_FIXED | Fixture schema/completeness validation added to `tools/gen_conformance_matrix.py` |
+| Q-SPEC-02 | ALREADY_FIXED | Spec clarifications applied in CANONICAL/P2P_AUX/NETWORK_PARAMS |
+| Q-HYGIENE-01 | ALREADY_FIXED | Closed earlier by stale-closeout report |
 
 ### Status for F-P2P-02 (Orphan TTL under storm mode)
 
@@ -171,4 +171,4 @@ Partially addressed by P2P-04 DONE (storm-mode triggers, commit-first bias) and 
 Отчёты ниже полностью закрыты и не требуют авто-triaging:
 
 - `2026-02-22_report_cv_compact_execution_and_context_sync.md` — CV-COMPACT executable gate; linked Q-G013 DONE; remaining vectors (CV-C-02, CV-C-05..C-18) closed via Q-CONF-01.
-- `2026-02-25_report_full_deep_audit.md` — comprehensive 6-agent audit; all ALREADY_FIXED findings triaged above; open findings tracked under Q-SEC-01, Q-CONF-07..09, Q-CODE-01..02, Q-TOOLING-02..05, Q-SPEC-02, Q-HYGIENE-01.
+- `2026-02-25_report_full_deep_audit.md` — comprehensive 6-agent audit; resulting queue items now fully dispositioned as `ALREADY_FIXED` (see table above and closeout report `2026-02-25_report_claimed_batch_closeout_q-sec-01_q-conf-07_08_09_q-code-01_02_q-tooling-02_03_05_q-spec-02.md`).

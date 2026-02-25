@@ -11,6 +11,7 @@ import subprocess
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -103,7 +104,7 @@ def _select_files(all_items: list[GitTrackedFile], prefixes: list[str]) -> list[
     return selected
 
 
-def _safe_version(cmd: str) -> str | None:
+def _safe_version(cmd: str) -> Optional[str]:
     exe = shutil.which(cmd)
     if not exe:
         return None

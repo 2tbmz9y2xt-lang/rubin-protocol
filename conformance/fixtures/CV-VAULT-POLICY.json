@@ -8,14 +8,19 @@
       "expect_err": "TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN",
       "vault_input_count": 2,
       "owner_lock_id": "owner-a",
-      "non_vault_lock_ids": ["owner-a"],
+      "non_vault_lock_ids": [
+        "owner-a"
+      ],
       "has_owner_auth": true,
       "sum_in_vault": 100,
       "sum_out": 100,
       "slots": 2,
       "key_count": 2,
       "sig_threshold_ok": true,
-      "whitelist": ["01", "02"]
+      "whitelist": [
+        "01",
+        "02"
+      ]
     },
     {
       "id": "CV-V-02",
@@ -24,14 +29,20 @@
       "expect_err": "TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN",
       "vault_input_count": 1,
       "owner_lock_id": "owner-a",
-      "non_vault_lock_ids": ["owner-a", "third-party-b"],
+      "non_vault_lock_ids": [
+        "owner-a",
+        "third-party-b"
+      ],
       "has_owner_auth": true,
       "sum_in_vault": 100,
       "sum_out": 100,
       "slots": 1,
       "key_count": 1,
       "sig_threshold_ok": true,
-      "whitelist": ["01", "02"]
+      "whitelist": [
+        "01",
+        "02"
+      ]
     },
     {
       "id": "CV-V-03",
@@ -39,14 +50,21 @@
       "expect_ok": true,
       "vault_input_count": 1,
       "owner_lock_id": "owner-a",
-      "non_vault_lock_ids": ["owner-a", "owner-a"],
+      "non_vault_lock_ids": [
+        "owner-a",
+        "owner-a"
+      ],
       "has_owner_auth": true,
       "sum_in_vault": 100,
       "sum_out": 110,
       "slots": 2,
       "key_count": 2,
       "sig_threshold_ok": true,
-      "whitelist": ["01", "02", "03"]
+      "whitelist": [
+        "01",
+        "02",
+        "03"
+      ]
     },
     {
       "id": "CV-V-04",
@@ -55,7 +73,9 @@
       "expect_err": "TX_ERR_PARSE",
       "vault_input_count": 1,
       "owner_lock_id": "owner-a",
-      "non_vault_lock_ids": ["owner-a"],
+      "non_vault_lock_ids": [
+        "owner-a"
+      ],
       "has_owner_auth": true,
       "sum_in_vault": 100,
       "sum_out": 100,
@@ -66,7 +86,9 @@
       "sentinel_pubkey_len": 0,
       "sentinel_sig_len": 1,
       "sentinel_verify_called": true,
-      "whitelist": ["01"]
+      "whitelist": [
+        "01"
+      ]
     },
     {
       "id": "CV-V-05",
@@ -75,14 +97,20 @@
       "expect_err": "TX_ERR_VAULT_WHITELIST_NOT_CANONICAL",
       "vault_input_count": 1,
       "owner_lock_id": "owner-a",
-      "non_vault_lock_ids": ["owner-a"],
+      "non_vault_lock_ids": [
+        "owner-a"
+      ],
       "has_owner_auth": true,
       "sum_in_vault": 100,
       "sum_out": 100,
       "slots": 1,
       "key_count": 1,
       "sig_threshold_ok": true,
-      "whitelist": ["02", "01", "02"]
+      "whitelist": [
+        "02",
+        "01",
+        "02"
+      ]
     },
     {
       "id": "CV-V-06",
@@ -91,7 +119,9 @@
       "expect_err": "TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN",
       "vault_input_count": 2,
       "owner_lock_id": "owner-a",
-      "non_vault_lock_ids": ["third-party-b"],
+      "non_vault_lock_ids": [
+        "third-party-b"
+      ],
       "has_owner_auth": false,
       "sum_in_vault": 100,
       "sum_out": 90,
@@ -102,7 +132,11 @@
       "sentinel_pubkey_len": 32,
       "sentinel_sig_len": 20,
       "sentinel_verify_called": true,
-      "whitelist": ["03", "01", "03"],
+      "whitelist": [
+        "03",
+        "01",
+        "03"
+      ],
       "validation_order": [
         "multi_vault",
         "owner_auth",
@@ -112,6 +146,67 @@
         "sig_threshold",
         "whitelist",
         "value"
+      ]
+    },
+    {
+      "id": "CV-V-07",
+      "op": "vault_policy_rules",
+      "expect_ok": true,
+      "vault_input_count": 1,
+      "owner_lock_id": "owner-a",
+      "non_vault_lock_ids": [
+        "owner-a"
+      ],
+      "has_owner_auth": true,
+      "sum_in_vault": 100,
+      "sum_out": 100,
+      "slots": 1,
+      "key_count": 1,
+      "sig_threshold_ok": true,
+      "whitelist": [
+        "01",
+        "02"
+      ]
+    },
+    {
+      "id": "CV-V-08",
+      "op": "vault_policy_rules",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_VALUE_CONSERVATION",
+      "vault_input_count": 1,
+      "owner_lock_id": "owner-a",
+      "non_vault_lock_ids": [
+        "owner-a"
+      ],
+      "has_owner_auth": true,
+      "sum_in_vault": 100,
+      "sum_out": 99,
+      "slots": 1,
+      "key_count": 1,
+      "sig_threshold_ok": true,
+      "whitelist": [
+        "01",
+        "02"
+      ]
+    },
+    {
+      "id": "CV-V-09",
+      "op": "vault_policy_rules",
+      "expect_ok": true,
+      "vault_input_count": 1,
+      "owner_lock_id": "owner-a",
+      "non_vault_lock_ids": [
+        "owner-a"
+      ],
+      "has_owner_auth": true,
+      "sum_in_vault": 100,
+      "sum_out": 101,
+      "slots": 1,
+      "key_count": 1,
+      "sig_threshold_ok": true,
+      "whitelist": [
+        "01",
+        "02"
       ]
     }
   ]

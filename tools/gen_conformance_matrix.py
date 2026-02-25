@@ -6,13 +6,38 @@ import importlib.util
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES_DIR = REPO_ROOT / "conformance" / "fixtures"
 RUNNER_PATH = REPO_ROOT / "conformance" / "runner" / "run_cv_bundle.py"
 OUT_PATH = REPO_ROOT / "conformance" / "MATRIX.md"
+EXPECTED_GATES = frozenset(
+    {
+        "CV-BLOCK-BASIC",
+        "CV-COMPACT",
+        "CV-COVENANT-GENESIS",
+        "CV-DA-INTEGRITY",
+        "CV-DETERMINISM",
+        "CV-FORK-CHOICE",
+        "CV-HTLC",
+        "CV-HTLC-ORDERING",
+        "CV-MERKLE",
+        "CV-OUTPUT-DESCRIPTOR",
+        "CV-PARSE",
+        "CV-POW",
+        "CV-REPLAY",
+        "CV-SIG",
+        "CV-SIGHASH",
+        "CV-SUBSIDY",
+        "CV-TIMESTAMP",
+        "CV-UTXO-BASIC",
+        "CV-VALIDATION-ORDER",
+        "CV-VAULT",
+        "CV-VAULT-POLICY",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -42,19 +67,43 @@ def iter_fixtures() -> Iterable[Path]:
     return sorted(FIXTURES_DIR.glob("CV-*.json"))
 
 
+def validate_fixture_schema(data: Any, path: Path) -> tuple[str, list[dict[str, Any]]]:
+    if not isinstance(data, dict):
+        raise RuntimeError(f"fixture root must be object: {path}")
+
+    missing = [field for field in ("gate", "vectors") if field not in data]
+    if missing:
+        missing_str = ", ".join(missing)
+        raise RuntimeError(f"fixture missing required field(s): {missing_str}: {path}")
+
+    gate = data["gate"]
+    vectors = data["vectors"]
+    if not isinstance(gate, str) or not gate.strip():
+        raise RuntimeError(f"fixture field gate must be non-empty string: {path}")
+    if not isinstance(vectors, list):
+        raise RuntimeError(f"fixture field vectors must be an array: {path}")
+
+    for idx, vector in enumerate(vectors):
+        if not isinstance(vector, dict):
+            raise RuntimeError(f"fixture vector[{idx}] must be object: {path}")
+        op = vector.get("op")
+        if not isinstance(op, str) or not op.strip():
+            vid = vector.get("id", f"#{idx}")
+            raise RuntimeError(f"fixture vector missing required op: {path} ({vid})")
+
+    return gate.strip(), vectors
+
+
 def load_gate_rows(local_ops: set[str]) -> list[GateRow]:
     rows: list[GateRow] = []
+    seen_gates: set[str] = set()
     for p in iter_fixtures():
         data = json.loads(p.read_text(encoding="utf-8", errors="strict"))
-        if not isinstance(data, dict):
-            raise RuntimeError(f"fixture root must be object: {p}")
-        gate = data.get("gate")
-        vectors = data.get("vectors")
-        if not isinstance(gate, str) or not isinstance(vectors, list):
-            raise RuntimeError(f"fixture missing gate/vectors: {p}")
-        ops = sorted({str(v.get("op", "")) for v in vectors})
-        if any(o.strip() == "" for o in ops):
-            raise RuntimeError(f"fixture has missing op: {p}")
+        gate, vectors = validate_fixture_schema(data, p)
+        if gate in seen_gates:
+            raise RuntimeError(f"duplicate fixture gate: {gate}: {p}")
+        seen_gates.add(gate)
+        ops = tuple(sorted({v["op"].strip() for v in vectors}))
 
         local = tuple(sorted([o for o in ops if o in local_ops]))
         executable = tuple(sorted([o for o in ops if o not in local_ops]))
@@ -62,13 +111,29 @@ def load_gate_rows(local_ops: set[str]) -> list[GateRow]:
             GateRow(
                 gate=gate,
                 vectors=len(vectors),
-                ops=tuple(ops),
+                ops=ops,
                 local_ops=local,
                 executable_ops=executable,
             )
         )
     rows.sort(key=lambda r: r.gate)
     return rows
+
+
+def validate_expected_gates(rows: list[GateRow]) -> None:
+    actual_gates = {row.gate for row in rows}
+    missing = sorted(EXPECTED_GATES - actual_gates)
+    unexpected = sorted(actual_gates - EXPECTED_GATES)
+
+    if not missing and not unexpected:
+        return
+
+    problems: list[str] = []
+    if missing:
+        problems.append(f"missing fixtures for gates: {', '.join(missing)}")
+    if unexpected:
+        problems.append(f"unexpected gates in fixtures: {', '.join(unexpected)}")
+    raise RuntimeError(f"fixture completeness check failed: {'; '.join(problems)}")
 
 
 def render(rows: list[GateRow], local_ops: set[str]) -> str:
@@ -118,6 +183,7 @@ def main() -> int:
 
     local_ops = load_local_ops()
     rows = load_gate_rows(local_ops)
+    validate_expected_gates(rows)
     content = render(rows, local_ops)
 
     if args.check:

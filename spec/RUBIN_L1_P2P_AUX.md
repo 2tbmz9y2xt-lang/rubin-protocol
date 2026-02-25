@@ -62,6 +62,11 @@ Rules:
 - `tx_relay` MUST be either `0` or `1`. If an unknown value is received, the receiver SHOULD treat it as `0`.
 - `pruned_below_height` MUST be `0` for non-pruning nodes.
 - `da_mempool_size` is in bytes. `536_870_912` means 512 MiB.
+- `protocol_version` compatibility policy (relay-level):
+  - If peer `protocol_version` equals local version: full behavior is allowed.
+  - If peer differs by exactly `±1`: node SHOULD continue with backward-compatible behavior.
+  - If peer differs by more than `1`: node SHOULD disconnect after sending `verack` (diagnostic-only),
+    to avoid undefined relay semantics.
 
 Backward-compatible downgrade:
 
