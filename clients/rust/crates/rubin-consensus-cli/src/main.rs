@@ -369,9 +369,7 @@ fn main() {
                     }
                 }
 
-                let better = if best_id.is_none() {
-                    true
-                } else if total > best_work {
+                let better = if best_id.is_none() || total > best_work {
                     true
                 } else if total == best_work {
                     match best_tip {
