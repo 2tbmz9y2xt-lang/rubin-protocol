@@ -10,13 +10,14 @@
 
 ## Граница claims (критично)
 
-Этот proof-pack — **toy/model baseline**. Он нужен для воспроизводимого “якоря” и ранних инвариантов,
-но **не** является freeze-ready формальной верификацией CANONICAL.
-Текущий machine-readable статус: `proof_level=toy-model`, `claim_level=toy`.
+Этот proof-pack — **byte-level replay coverage** для conformance-фикстур (CV-*.json) и baseline-слой
+для дальнейшей формализации. Он нужен для воспроизводимого “якоря”, но **не** является freeze-ready
+универсальной формальной верификацией CANONICAL.
+Текущий machine-readable статус: `proof_level=byte-model`, `claim_level=byte`.
 
 Разрешённые формулировки (OK):
-- “model-level proved baseline for pinned sections”
-- “toy/model invariants proved; refinement to byte-accurate/executable semantics is pending”
+- “byte-level executable replay coverage for all conformance fixtures (CV-*.json) via Lean native_decide”
+- “refinement to Go/Rust executable path equivalence is pending”
 
 Запрещённые формулировки (NOT OK):
 - “formal verification of RUBIN consensus / CANONICAL”
@@ -37,9 +38,9 @@
 
 ## Что это значит
 
-- Это **не** полный formal freeze-ready пакет уровня “бит-в-бит байтовая модель wire + state transition”.
+- Это **не** полный freeze-ready пакет уровня “универсальная байтовая модель wire + state transition + refinement”.
 - Консенсусные правила не меняются.
-- Цель текущего шага — зафиксировать воспроизводимый in-repo baseline с модельно-доказанными инвариантами.
+- Цель текущего шага — зафиксировать воспроизводимый in-repo baseline с byte-level replay покрытием фикстур.
 
 ## Локальный запуск
 

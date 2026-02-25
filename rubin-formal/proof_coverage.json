@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "status": "model-proved-baseline",
-  "claim_level": "toy",
+  "status": "byte-replay-coverage",
+  "claim_level": "byte",
   "spec_source_file": "spec/RUBIN_L1_CANONICAL.md",
   "spec_section_hashes_file": "spec/SECTION_HASHES.json",
   "lean_toolchain_file": "rubin-formal/lean-toolchain",
@@ -10,130 +10,130 @@
     {
       "section_key": "transaction_wire",
       "section_heading": "## 5. Transaction Wire",
-      "status": "proved",
+      "status": "stated",
       "theorems": [
-        "RubinFormal.transaction_wire_proved",
-        "RubinFormal.parse_encodeCompactSize_roundtrip",
-        "RubinFormal.parse_serializeTxMini_roundtrip"
+        "RubinFormal.Conformance.cv_parse_vectors_pass",
+        "RubinFormal.Conformance.cv_compact_vectors_pass"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean"
     },
     {
       "section_key": "transaction_identifiers",
       "section_heading": "## 8. Transaction Identifiers (TXID / WTXID)",
-      "status": "proved",
+      "status": "stated",
       "theorems": [
-        "RubinFormal.transaction_identifiers_proved"
+        "RubinFormal.Conformance.cv_parse_vectors_pass",
+        "RubinFormal.Conformance.cv_sig_vectors_pass"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean"
     },
     {
       "section_key": "weight_accounting",
       "section_heading": "## 9. Weight Accounting (Normative)",
-      "status": "proved",
+      "status": "stated",
       "theorems": [
-        "RubinFormal.weight_accounting_proved"
+        "RubinFormal.Conformance.cv_weight_vectors_pass"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean"
     },
     {
       "section_key": "witness_commitment",
       "section_heading": "### 10.4.1 Witness Commitment (Coinbase Anchor)",
-      "status": "proved",
+      "status": "stated",
       "theorems": [
-        "RubinFormal.witness_commitment_proved"
+        "RubinFormal.Conformance.cv_block_basic_vectors_pass"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean"
     },
     {
       "section_key": "sighash_v1",
       "section_heading": "## 12. Sighash v1 (Normative)",
-      "status": "proved",
+      "status": "stated",
       "theorems": [
-        "RubinFormal.sighash_v1_proved"
+        "RubinFormal.Conformance.cv_sighash_vectors_pass"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean"
     },
     {
       "section_key": "consensus_error_codes",
       "section_heading": "## 13. Consensus Error Codes (Normative)",
-      "status": "proved",
+      "status": "stated",
       "theorems": [
-        "RubinFormal.consensus_error_codes_proved"
+        "RubinFormal.Conformance.cv_validation_order_vectors_pass"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean"
     },
     {
       "section_key": "covenant_registry",
       "section_heading": "## 14. Covenant Type Registry (Normative)",
-      "status": "proved",
+      "status": "stated",
       "theorems": [
-        "RubinFormal.covenant_registry_proved"
+        "RubinFormal.Conformance.cv_covenant_genesis_vectors_pass"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean"
     },
     {
       "section_key": "difficulty_update",
       "section_heading": "## 15. Difficulty Update (Normative)",
-      "status": "proved",
+      "status": "stated",
       "theorems": [
-        "RubinFormal.difficulty_update_proved",
-        "RubinFormal.floorDiv_mul_le"
+        "RubinFormal.Conformance.cv_pow_vectors_pass"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean"
     },
     {
       "section_key": "transaction_structural_rules",
       "section_heading": "## 16. Transaction Structural Rules (Normative)",
-      "status": "proved",
+      "status": "stated",
       "theorems": [
-        "RubinFormal.transaction_structural_rules_proved"
+        "RubinFormal.Conformance.cv_validation_order_vectors_pass"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean"
     },
     {
       "section_key": "replay_domain_checks",
       "section_heading": "## 17. Replay-Domain Checks (Normative)",
-      "status": "proved",
+      "status": "stated",
       "theorems": [
-        "RubinFormal.replay_domain_checks_proved"
+        "RubinFormal.Conformance.cv_replay_vectors_pass"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean"
     },
     {
       "section_key": "utxo_state_model",
       "section_heading": "## 18. UTXO State Model (Normative)",
-      "status": "proved",
+      "status": "stated",
       "theorems": [
-        "RubinFormal.utxo_state_model_proved"
+        "RubinFormal.Conformance.cv_utxo_basic_vectors_pass"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean"
     },
     {
       "section_key": "value_conservation",
       "section_heading": "## 20. Value Conservation (Normative)",
-      "status": "proved",
+      "status": "stated",
       "theorems": [
-        "RubinFormal.value_conservation_proved",
-        "RubinFormal.satAddU128_preserves_lower_bound"
+        "RubinFormal.Conformance.cv_utxo_basic_vectors_pass",
+        "RubinFormal.Conformance.cv_subsidy_vectors_pass"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean"
     },
     {
       "section_key": "da_set_integrity",
       "section_heading": "## 21. DA Set Integrity (Normative)",
-      "status": "proved",
+      "status": "stated",
       "theorems": [
-        "RubinFormal.da_set_integrity_proved"
+        "RubinFormal.Conformance.cv_da_integrity_vectors_pass"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean"
     }
   ],
-  "proof_level": "toy-model",
+  "proof_level": "byte-model",
   "claims": {
     "allowed": [
-      "model-level proved baseline for pinned sections",
-      "toy/model invariants proved; refinement to byte-accurate/executable semantics is pending"
+      "byte-level executable replay coverage for all conformance fixtures (CV-*.json) via Lean native_decide",
+      "byte-accurate parsing/dispatch checks exercised by fixtures; this is not a universal proof of CANONICAL semantics",
+      "refinement to Go/Rust executable path equivalence is pending"
     ],
     "forbidden": [
       "formal verification of RUBIN consensus / CANONICAL",
