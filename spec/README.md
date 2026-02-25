@@ -58,9 +58,18 @@ Integrity:
 - `./RUBIN_L1_P2P_AUX.md` — non-consensus P2P notes
   - Envelope format, peer scoring; defers to COMPACT_BLOCKS for relay policy.
 
+- `./RUBIN_SPEC_GOVERNANCE.md` — non-consensus governance rules
+  - Registry lifecycle, SECTION_HASHES discipline, conformance ID rules (CI lint).
+
 - `./RUBIN_SLH_FALLBACK_PLAYBOOK.md` — operational runbook
   - Activation/rollback procedure for SLH-DSA fallback mode
   - Non-normative; consensus gate is `SLH_DSA_ACTIVATION_HEIGHT` in CANONICAL.
+
+- `./RUBIN_PROTOCOL_MIGRATION_PLAYBOOK.md` — non-consensus migration playbook
+  - Rollout/rollback sequence (spec → fixtures → Go → Rust → CI → audit pack).
+
+- `./RUBIN_CRYPTO_BACKEND_OPS.md` — non-consensus crypto ops
+  - KPI/perf + parity acceptance policy for OpenSSL/PQC stack.
 
 ## Audit
 
