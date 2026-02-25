@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "source_file": "spec/AUDIT_CONTEXT.md",
-  "source_sha256": "56024b1ddbc96dfcd81ec4c28f9ad10bb72f5fc9b1509263c46e816a9404682c",
+  "source_sha256": "7aadbff6baea4ecb7d1961c6b2841fb9fcef497751f5e87ec8ae89ac754bdeb2",
   "formal_status": {
     "proof_level": "toy-model",
     "claim_level": "toy"
@@ -293,11 +293,11 @@
         {
           "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
-          "line": 156
+          "line": 155
         }
       ],
       "evidence": [
-        "spec/AUDIT_CONTEXT.md#L156"
+        "spec/AUDIT_CONTEXT.md#L155"
       ]
     },
     {
@@ -310,11 +310,11 @@
         {
           "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
-          "line": 157
+          "line": 156
         }
       ],
       "evidence": [
-        "spec/AUDIT_CONTEXT.md#L157"
+        "spec/AUDIT_CONTEXT.md#L156"
       ]
     },
     {
@@ -327,11 +327,11 @@
         {
           "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
-          "line": 153
+          "line": 152
         }
       ],
       "evidence": [
-        "spec/AUDIT_CONTEXT.md#L153"
+        "spec/AUDIT_CONTEXT.md#L152"
       ]
     },
     {
@@ -344,11 +344,11 @@
         {
           "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
-          "line": 154
+          "line": 153
         }
       ],
       "evidence": [
-        "spec/AUDIT_CONTEXT.md#L154"
+        "spec/AUDIT_CONTEXT.md#L153"
       ]
     },
     {
@@ -361,11 +361,11 @@
         {
           "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
-          "line": 155
+          "line": 154
         }
       ],
       "evidence": [
-        "spec/AUDIT_CONTEXT.md#L155"
+        "spec/AUDIT_CONTEXT.md#L154"
       ]
     },
     {
@@ -378,11 +378,11 @@
         {
           "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
-          "line": 163
+          "line": 162
         }
       ],
       "evidence": [
-        "spec/AUDIT_CONTEXT.md#L163"
+        "spec/AUDIT_CONTEXT.md#L162"
       ]
     },
     {
@@ -395,12 +395,12 @@
         {
           "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
-          "line": 152
+          "line": 151
         }
       ],
       "evidence": [
         "../inbox/reports/2026-02-25_report_claimed_batch_closeout_q-sec-01_q-conf-07_08_09_q-code-01_02_q-tooling-02_03_05_q-spec-02.md",
-        "spec/AUDIT_CONTEXT.md#L152"
+        "spec/AUDIT_CONTEXT.md#L151"
       ]
     },
     {
@@ -413,11 +413,11 @@
         {
           "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
-          "line": 162
+          "line": 161
         }
       ],
       "evidence": [
-        "spec/AUDIT_CONTEXT.md#L162"
+        "spec/AUDIT_CONTEXT.md#L161"
       ]
     },
     {
@@ -430,11 +430,11 @@
         {
           "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
-          "line": 158
+          "line": 157
         }
       ],
       "evidence": [
-        "spec/AUDIT_CONTEXT.md#L158",
+        "spec/AUDIT_CONTEXT.md#L157",
         "tools/make_audit_pack.py"
       ]
     },
@@ -448,11 +448,11 @@
         {
           "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
-          "line": 159
+          "line": 158
         }
       ],
       "evidence": [
-        "spec/AUDIT_CONTEXT.md#L159",
+        "spec/AUDIT_CONTEXT.md#L158",
         "tools/check_section_hashes.py"
       ]
     },
@@ -466,12 +466,12 @@
         {
           "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
-          "line": 160
+          "line": 159
         }
       ],
       "evidence": [
         "../inbox/reports/2026-02-25_report_q-tooling-04_q-hygiene-01_stale_closeout.md",
-        "spec/AUDIT_CONTEXT.md#L160"
+        "spec/AUDIT_CONTEXT.md#L159"
       ]
     },
     {
@@ -484,11 +484,11 @@
         {
           "section": "disposition-of-2026-02-25-deep-audit-findings",
           "table_index": 6,
-          "line": 161
+          "line": 160
         }
       ],
       "evidence": [
-        "spec/AUDIT_CONTEXT.md#L161",
+        "spec/AUDIT_CONTEXT.md#L160",
         "tools/gen_conformance_matrix.py"
       ]
     },

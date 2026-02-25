@@ -110,14 +110,13 @@
 | `ACCEPTED_RISK_FIPS_PROVIDER_NOT_YET_CERTIFIED` | ACCEPTED_RISK | `RUBIN_CRYPTO_BACKEND_PROFILE.md` §4 (FIPS positioning) |
 
 Пояснение `ACCEPTED_RISK_FIPS_PROVIDER_NOT_YET_CERTIFIED`:
-- Риск: в репозитории зафиксирован “direct FIPS migration path via OpenSSL providers”, но **FIPS-validated PQC module**
-  (FIPS provider с ML-DSA/SLH-DSA) ещё не доступен/не включён как обязательное требование для запуска узлов.
-- Факт на текущих dev-машинах/CI может выглядеть так: PQC доступна в `default` provider, а `fips` provider отсутствует
-  (нет `fips.*` модуля), либо присутствует, но требует отдельной конфигурации и preflight.
-- Импакт: “FIPS-only mode” пока нельзя объявлять как поддерживаемый режим для узла без воспроизводимой проверки
-  доступности ML-DSA/SLH-DSA в FIPS provider и строгого соответствия conformance (semantics identical).
-- Митигация: до появления/внедрения FIPS provider мы работаем в `default` provider и держим требования в формулировке
-  “NIST/FIPS-aligned”. Переход в “FIPS-only mode” возможен только после CI‑подтверждения и опубликованного runbook/preflight.
+- Риск: даже при доступном OpenSSL `fips` provider остаётся compliance-gap между “технически работает”
+  и “разрешено для production FIPS claim” (CMVP scope/version/runtime policy/deployment controls).
+- Факт по репо: есть воспроизводимый FIPS-path (`build-openssl-bundle.sh` + `fipsinstall` + `fips-preflight`,
+  CI preflight в `RUBIN_OPENSSL_FIPS_MODE=only`), то есть модуль и алгоритмы проверяются операционно.
+- Импакт: нельзя автоматически трактовать этот operational pass как полный regulatory sign-off.
+- Митигация: фиксируем уровень как `NIST/FIPS-aligned`; для production/FIPS claims нужен отдельный
+  compliance gate с явной привязкой к версии/сертификату и окружению развёртывания.
 
 ## Правило обновления
 

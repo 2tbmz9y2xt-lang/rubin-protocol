@@ -10,6 +10,7 @@ PREFIX="${PREFIX:-$HOME/.cache/rubin-openssl/bundle-${OPENSSL_VERSION}}"
 BUILD_DIR="${WORK_ROOT}/openssl-${OPENSSL_VERSION}"
 TARBALL_PATH="${WORK_ROOT}/${ARCHIVE}"
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)}"
+FIPS_SECTION_NAME="${FIPS_SECTION_NAME:-fips_sect}"
 
 mkdir -p "${WORK_ROOT}"
 
@@ -36,8 +37,61 @@ cd "${BUILD_DIR}"
 
 make -j"${JOBS}"
 make install_sw
+make install_fips
+
+FIPS_MODULE_DIR="${PREFIX}/lib/ossl-modules"
+FIPS_MODULE=""
+for candidate in \
+  "${FIPS_MODULE_DIR}/fips.so" \
+  "${FIPS_MODULE_DIR}/fips.dylib" \
+  "${FIPS_MODULE_DIR}/fips.dll"
+do
+  if [[ -f "${candidate}" ]]; then
+    FIPS_MODULE="${candidate}"
+    break
+  fi
+done
+
+if [[ -z "${FIPS_MODULE}" ]]; then
+  echo "ERROR: FIPS module not found under ${FIPS_MODULE_DIR}" >&2
+  exit 1
+fi
+
+mkdir -p "${PREFIX}/ssl"
+FIPS_MODULE_CNF="${PREFIX}/ssl/fipsmodule.cnf"
+OPENSSL_FIPS_CNF="${PREFIX}/ssl/openssl-fips.cnf"
+
+OPENSSL_RUN_LD_LIBRARY_PATH="${PREFIX}/lib64:${PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+LD_LIBRARY_PATH="${OPENSSL_RUN_LD_LIBRARY_PATH}" "${PREFIX}/bin/openssl" fipsinstall \
+  -module "${FIPS_MODULE}" \
+  -out "${FIPS_MODULE_CNF}" \
+  -provider_name fips \
+  -mac_name HMAC \
+  -section_name "${FIPS_SECTION_NAME}"
+
+cat > "${OPENSSL_FIPS_CNF}" <<EOF
+config_diagnostics = 1
+openssl_conf = openssl_init
+
+.include ${FIPS_MODULE_CNF}
+
+[openssl_init]
+providers = provider_sect
+alg_section = algorithm_sect
+
+[provider_sect]
+default = default_sect
+fips = ${FIPS_SECTION_NAME}
+
+[default_sect]
+activate = 1
+
+[algorithm_sect]
+default_properties = fips=yes
+EOF
 
 echo "[openssl-bundle] done"
-OPENSSL_RUN_LD_LIBRARY_PATH="${PREFIX}/lib64:${PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 LD_LIBRARY_PATH="${OPENSSL_RUN_LD_LIBRARY_PATH}" "${PREFIX}/bin/openssl" version -a
 LD_LIBRARY_PATH="${OPENSSL_RUN_LD_LIBRARY_PATH}" "${PREFIX}/bin/openssl" list -signature-algorithms | sed -n '1,40p'
+echo "[openssl-bundle] fips-module=${FIPS_MODULE}"
+echo "[openssl-bundle] fips-config=${OPENSSL_FIPS_CNF}"

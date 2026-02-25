@@ -38,10 +38,23 @@ scripts/dev-env.sh -- bash -c 'cd clients/rust && cargo test --workspace'
 
 ## 5) FIPS-ready (operational)
 
-Пока **FIPS provider module (`fips.*`) не установлен** в окружении, узлы/CI работают через OpenSSL `default` provider.
-Это нормально для Phase‑0/devnet: консенсус определяется CANONICAL, а “FIPS-only mode” — операционный режим.
-Текущий статус трека: **DEFERRED (parked/out-of-queue, без ETA)** до появления стабильного FIPS provider artifact с требуемыми PQ-алгоритмами.
-До этого момента официальный режим для репо: `default` provider + формулировка `NIST/FIPS-aligned` (не `FIPS-only`).
+Репо поддерживает операционный FIPS-path через OpenSSL providers:
+
+- `scripts/crypto/openssl/build-openssl-bundle.sh` теперь делает `enable-fips` + `install_fips` +
+  `openssl fipsinstall`, создавая `fipsmodule.cnf` и `openssl-fips.cnf`.
+- `scripts/crypto/openssl/fips-preflight.sh` проверяет загрузку `provider=fips` и видимость
+  `ML-DSA`/`SLH-DSA` в режиме `RUBIN_OPENSSL_FIPS_MODE=only`.
+- CI включает preflight в `mode=only` на собранном OpenSSL bundle.
+
+Что это **не** означает:
+- Это не автоматическая заявка “production FIPS compliance by default”.
+- Для production/FIPS-claims нужны отдельные compliance-процедуры (CMVP scope, runtime policy,
+  конкретная версия/сертификат, deployment controls).
+
+Итого для Phase‑0/devnet:
+- допустимы оба режима: `default` provider и `fips` provider;
+- консенсус остаётся неизменным (provider selection non-consensus);
+- формулировка уровня репо: `NIST/FIPS-aligned`, без overclaim про полный production compliance.
 
 Что должно быть готово **заранее** (и уже поддерживается репо):
 
@@ -53,7 +66,7 @@ scripts/dev-env.sh -- bash -c 'cd clients/rust && cargo test --workspace'
    - `RUBIN_OPENSSL_PREFIX=/path/to/openssl-prefix` (см. `scripts/dev-env.sh`)
    - опционально: `RUBIN_OPENSSL_MODULES=/path/to/ossl-modules`, `RUBIN_OPENSSL_CONF=/path/to/openssl.cnf`
 
-3) **Preflight для FIPS provider** (когда модуль появится):
+3) **Preflight для FIPS provider**:
 
 ```bash
 RUBIN_OPENSSL_FIPS_MODE=ready scripts/dev-env.sh -- scripts/crypto/openssl/fips-preflight.sh
@@ -61,4 +74,5 @@ RUBIN_OPENSSL_FIPS_MODE=only  scripts/dev-env.sh -- scripts/crypto/openssl/fips-
 ```
 
 4) **Функциональная проверка “FIPS bundle build”** (не CMVP-сертификация):
-   - `scripts/crypto/openssl/build-openssl-bundle.sh` собирает OpenSSL с `enable-fips` для smoke‑тестов совместимости.
+   - `scripts/crypto/openssl/build-openssl-bundle.sh` собирает OpenSSL с `enable-fips`,
+     устанавливает FIPS module и генерирует runtime `openssl-fips.cnf`.

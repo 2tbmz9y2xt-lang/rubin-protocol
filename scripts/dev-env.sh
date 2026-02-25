@@ -56,22 +56,21 @@ select_openssl() {
   # Prefer Homebrew OpenSSL@3 to avoid macOS LibreSSL default.
   # This is required by the normative non-consensus profile:
   #   spec/RUBIN_CRYPTO_BACKEND_PROFILE.md (OpenSSL 3.5+).
-  if [[ -n "${OPENSSL_DIR:-}" ]]; then
-    return 0
-  fi
-  if [[ -x "/opt/homebrew/opt/openssl@3/bin/openssl" ]]; then
-    prepend_path_if_exists "/opt/homebrew/opt/openssl@3/bin"
-    export OPENSSL_DIR="/opt/homebrew/opt/openssl@3"
-    export PKG_CONFIG_PATH="/opt/homebrew/opt/openssl@3/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
-    if [[ -d "/opt/homebrew/opt/openssl@3/lib/ossl-modules" ]]; then
-      export OPENSSL_MODULES="/opt/homebrew/opt/openssl@3/lib/ossl-modules"
-    fi
-  elif [[ -x "/usr/local/opt/openssl@3/bin/openssl" ]]; then
-    prepend_path_if_exists "/usr/local/opt/openssl@3/bin"
-    export OPENSSL_DIR="/usr/local/opt/openssl@3"
-    export PKG_CONFIG_PATH="/usr/local/opt/openssl@3/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
-    if [[ -d "/usr/local/opt/openssl@3/lib/ossl-modules" ]]; then
-      export OPENSSL_MODULES="/usr/local/opt/openssl@3/lib/ossl-modules"
+  if [[ -z "${OPENSSL_DIR:-}" ]]; then
+    if [[ -x "/opt/homebrew/opt/openssl@3/bin/openssl" ]]; then
+      prepend_path_if_exists "/opt/homebrew/opt/openssl@3/bin"
+      export OPENSSL_DIR="/opt/homebrew/opt/openssl@3"
+      export PKG_CONFIG_PATH="/opt/homebrew/opt/openssl@3/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+      if [[ -d "/opt/homebrew/opt/openssl@3/lib/ossl-modules" ]]; then
+        export OPENSSL_MODULES="/opt/homebrew/opt/openssl@3/lib/ossl-modules"
+      fi
+    elif [[ -x "/usr/local/opt/openssl@3/bin/openssl" ]]; then
+      prepend_path_if_exists "/usr/local/opt/openssl@3/bin"
+      export OPENSSL_DIR="/usr/local/opt/openssl@3"
+      export PKG_CONFIG_PATH="/usr/local/opt/openssl@3/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+      if [[ -d "/usr/local/opt/openssl@3/lib/ossl-modules" ]]; then
+        export OPENSSL_MODULES="/usr/local/opt/openssl@3/lib/ossl-modules"
+      fi
     fi
   fi
 
@@ -81,6 +80,17 @@ select_openssl() {
   fi
   if [[ -n "${RUBIN_OPENSSL_CONF:-}" ]]; then
     export OPENSSL_CONF="${RUBIN_OPENSSL_CONF}"
+  fi
+
+  # FIPS-mode convenience for bundle users:
+  # if mode=only and explicit overrides are not set, auto-wire bundle FIPS config.
+  if [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" == "only" ]]; then
+    if [[ -z "${OPENSSL_CONF:-}" && -n "${OPENSSL_DIR:-}" && -f "${OPENSSL_DIR}/ssl/openssl-fips.cnf" ]]; then
+      export OPENSSL_CONF="${OPENSSL_DIR}/ssl/openssl-fips.cnf"
+    fi
+    if [[ -z "${OPENSSL_MODULES:-}" && -n "${OPENSSL_DIR:-}" && -d "${OPENSSL_DIR}/lib/ossl-modules" ]]; then
+      export OPENSSL_MODULES="${OPENSSL_DIR}/lib/ossl-modules"
+    fi
   fi
 }
 

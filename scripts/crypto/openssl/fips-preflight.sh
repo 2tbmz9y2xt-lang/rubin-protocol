@@ -19,9 +19,20 @@ set -euo pipefail
 #
 
 MODE="${RUBIN_OPENSSL_FIPS_MODE:-off}"
+FIPS_CONF="${RUBIN_OPENSSL_CONF:-${OPENSSL_CONF:-}}"
+FIPS_MODULES="${RUBIN_OPENSSL_MODULES:-${OPENSSL_MODULES:-}}"
+
+if [[ -n "${FIPS_MODULES}" ]]; then
+  export OPENSSL_MODULES="${FIPS_MODULES}"
+fi
+if [[ -n "${FIPS_CONF}" ]]; then
+  export OPENSSL_CONF="${FIPS_CONF}"
+fi
 
 echo "[fips-preflight] mode=${MODE}"
 echo "[fips-preflight] openssl=$(command -v openssl || echo missing)"
+echo "[fips-preflight] OPENSSL_MODULES=${OPENSSL_MODULES:-<unset>}"
+echo "[fips-preflight] OPENSSL_CONF=${OPENSSL_CONF:-<unset>}"
 openssl version -a | sed -n '1,20p' || true
 echo
 
@@ -62,7 +73,14 @@ if [[ "${MODE}" == "only" ]]; then
     echo "ERROR: SLH-DSA not visible via provider=fips." >&2
     exit 1
   fi
+  if ! openssl list -signature-algorithms -propquery 'fips=yes' 2>/dev/null | grep -Eai 'ml-dsa|mldsa' >/dev/null; then
+    echo "ERROR: ML-DSA not fetchable with propquery=fips=yes." >&2
+    exit 1
+  fi
+  if ! openssl list -signature-algorithms -propquery 'fips=yes' 2>/dev/null | grep -Eai 'slh-dsa|slh' >/dev/null; then
+    echo "ERROR: SLH-DSA not fetchable with propquery=fips=yes." >&2
+    exit 1
+  fi
 fi
 
 echo "OK: fips-preflight passed for mode=${MODE}"
-
