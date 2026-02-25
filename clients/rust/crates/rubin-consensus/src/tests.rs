@@ -1186,7 +1186,10 @@ fn valid_vault_covenant_data_for_p2pk_output() -> Vec<u8> {
 
     // Owner lock id is the hash of a (possibly different) owner output descriptor.
     let owner = owner_p2pk_covenant_data_for_vault();
-    let owner_lock_id = sha3_256(&crate::vault::output_descriptor_bytes(COV_TYPE_P2PK, &owner));
+    let owner_lock_id = sha3_256(&crate::vault::output_descriptor_bytes(
+        COV_TYPE_P2PK,
+        &owner,
+    ));
 
     encode_vault_covenant_data(owner_lock_id, 1, &make_keys(1, 0x11), &[h])
 }

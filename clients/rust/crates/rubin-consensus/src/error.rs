@@ -62,7 +62,9 @@ impl ErrorCode {
             ErrorCode::TxErrVaultParamsInvalid => "TX_ERR_VAULT_PARAMS_INVALID",
             ErrorCode::TxErrVaultKeysNotCanonical => "TX_ERR_VAULT_KEYS_NOT_CANONICAL",
             ErrorCode::TxErrVaultWhitelistNotCanonical => "TX_ERR_VAULT_WHITELIST_NOT_CANONICAL",
-            ErrorCode::TxErrVaultOwnerDestinationForbidden => "TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN",
+            ErrorCode::TxErrVaultOwnerDestinationForbidden => {
+                "TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN"
+            }
             ErrorCode::TxErrVaultOwnerAuthRequired => "TX_ERR_VAULT_OWNER_AUTH_REQUIRED",
             ErrorCode::TxErrVaultFeeSponsorForbidden => "TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN",
             ErrorCode::TxErrVaultMultiInputForbidden => "TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN",
