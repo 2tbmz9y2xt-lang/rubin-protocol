@@ -780,6 +780,13 @@ Semantics:
   - Hash Time-Locked Contract.
   - Active from genesis block 0.
   - `covenant_data_len MUST equal MAX_HTLC_COVENANT_DATA (105)`.
+  - At output creation (CheckTx):
+    - `lock_mode MUST be 0x00 or 0x01`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+    - `lock_value MUST be > 0`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+    - `claim_key_id MUST NOT equal refund_key_id`; otherwise reject as `TX_ERR_PARSE`.
+    - `value MUST be > 0`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+  - `spec/RUBIN_CORE_HTLC_SPEC.md` §4 is normative elaboration of these creation constraints and
+    MUST remain error-code consistent with this section.
   - Spend semantics: `spec/RUBIN_CORE_HTLC_SPEC.md` §5.
   - Witness consumption: 2 WitnessItems (Section 16).
 - `CORE_VAULT`:

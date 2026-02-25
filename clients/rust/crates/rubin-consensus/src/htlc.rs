@@ -71,6 +71,7 @@ pub fn validate_htlc_spend(
     entry: &UtxoEntry,
     path_item: &WitnessItem,
     sig_item: &WitnessItem,
+    digest32: &[u8; 32],
     block_height: u64,
     block_mtp: u64,
 ) -> Result<(), TxError> {
@@ -222,6 +223,19 @@ pub fn validate_htlc_spend(
         return Err(TxError::new(
             ErrorCode::TxErrSigInvalid,
             "CORE_HTLC signature key binding mismatch",
+        ));
+    }
+
+    let ok = crate::verify_sig_openssl::verify_sig(
+        sig_item.suite_id,
+        &sig_item.pubkey,
+        &sig_item.signature,
+        digest32,
+    )?;
+    if !ok {
+        return Err(TxError::new(
+            ErrorCode::TxErrSigInvalid,
+            "CORE_HTLC signature invalid",
         ));
     }
 

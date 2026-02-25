@@ -178,9 +178,12 @@ request → propagation delay → at high miss rates compact blocks perform wors
   Request a full block only if `getblocktxn` reconstruction fails.
 
 - Relay timeout scales with payload size:
-  `timeout_ms = RELAY_TIMEOUT_BASE_MS + (1000 * len(DA_Payload) / RELAY_TIMEOUT_RATE)`
-  where `RELAY_TIMEOUT_RATE` is in `bytes/second` and `len(DA_Payload)` is in `bytes`.
-  Example: 32 MB payload → 2000 + (1000 * 32_000_000 / 1_000_000) = 34_000 ms
+  `timeout_ms = RELAY_TIMEOUT_BASE_MS + (len(DA_Payload) * 1000) / RELAY_TIMEOUT_RATE`
+  where:
+  - `len(DA_Payload)` is in bytes
+  - `RELAY_TIMEOUT_RATE` is in bytes per second (B/s)
+  - the quotient is converted to milliseconds
+  Example: 32 MB payload → 2000 + (32_000_000 * 1000) / 1_000_000 = 34_000 ms
 
 **Formal definition of miss_rate_bytes:**
 

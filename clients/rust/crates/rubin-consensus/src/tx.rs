@@ -44,7 +44,12 @@ pub struct WitnessItem {
 pub struct DaCommitCore {
     pub da_id: [u8; 32],
     pub chunk_count: u16,
-    pub payload_commitment: [u8; 32],
+    pub retl_domain_id: [u8; 32],
+    pub batch_number: u64,
+    pub tx_data_root: [u8; 32],
+    pub state_root: [u8; 32],
+    pub withdrawals_root: [u8; 32],
+    pub batch_sig_suite: u8,
     pub batch_sig: Vec<u8>,
 }
 
@@ -147,9 +152,25 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
                 ));
             }
 
-            let payload_commitment_bytes = r.read_bytes(32)?;
-            let mut payload_commitment = [0u8; 32];
-            payload_commitment.copy_from_slice(payload_commitment_bytes);
+            let retl_domain_id_bytes = r.read_bytes(32)?;
+            let mut retl_domain_id = [0u8; 32];
+            retl_domain_id.copy_from_slice(retl_domain_id_bytes);
+
+            let batch_number = r.read_u64_le()?;
+
+            let tx_data_root_bytes = r.read_bytes(32)?;
+            let mut tx_data_root = [0u8; 32];
+            tx_data_root.copy_from_slice(tx_data_root_bytes);
+
+            let state_root_bytes = r.read_bytes(32)?;
+            let mut state_root = [0u8; 32];
+            state_root.copy_from_slice(state_root_bytes);
+
+            let withdrawals_root_bytes = r.read_bytes(32)?;
+            let mut withdrawals_root = [0u8; 32];
+            withdrawals_root.copy_from_slice(withdrawals_root_bytes);
+
+            let batch_sig_suite = r.read_u8()?;
 
             let (batch_sig_len_u64, _) = read_compact_size(&mut r)?;
             if batch_sig_len_u64 > MAX_DA_MANIFEST_BYTES_PER_TX
@@ -165,7 +186,12 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
             da_commit_core = Some(DaCommitCore {
                 da_id,
                 chunk_count,
-                payload_commitment,
+                retl_domain_id,
+                batch_number,
+                tx_data_root,
+                state_root,
+                withdrawals_root,
+                batch_sig_suite,
                 batch_sig,
             });
         }
@@ -319,12 +345,23 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
     let (da_len_u64, _) = read_compact_size(&mut r)?;
     let mut da_payload: Vec<u8> = Vec::new();
     match tx_kind {
-        0x00 | 0x01 => {
+        0x00 => {
             if da_len_u64 != 0 {
                 return Err(TxError::new(
                     ErrorCode::TxErrParse,
-                    "da_payload_len must be 0 for tx_kind=0x00/0x01",
+                    "da_payload_len must be 0 for tx_kind=0x00",
                 ));
+            }
+        }
+        0x01 => {
+            if da_len_u64 > MAX_DA_MANIFEST_BYTES_PER_TX || da_len_u64 > usize::MAX as u64 {
+                return Err(TxError::new(
+                    ErrorCode::TxErrParse,
+                    "da_payload_len out of range for tx_kind=0x01",
+                ));
+            }
+            if da_len_u64 != 0 {
+                da_payload = r.read_bytes(da_len_u64 as usize)?.to_vec();
             }
         }
         0x02 => {
@@ -371,10 +408,16 @@ pub fn da_core_fields_bytes(tx: &Tx) -> Result<Vec<u8>, TxError> {
                     "missing da_commit_core for tx_kind=0x01",
                 ));
             };
-            let mut out = Vec::with_capacity(32 + 2 + 32 + 9 + core.batch_sig.len());
+            let mut out =
+                Vec::with_capacity(32 + 2 + 32 + 8 + 32 + 32 + 32 + 1 + 9 + core.batch_sig.len());
             out.extend_from_slice(&core.da_id);
             out.extend_from_slice(&core.chunk_count.to_le_bytes());
-            out.extend_from_slice(&core.payload_commitment);
+            out.extend_from_slice(&core.retl_domain_id);
+            out.extend_from_slice(&core.batch_number.to_le_bytes());
+            out.extend_from_slice(&core.tx_data_root);
+            out.extend_from_slice(&core.state_root);
+            out.extend_from_slice(&core.withdrawals_root);
+            out.push(core.batch_sig_suite);
             crate::compactsize::encode_compact_size(core.batch_sig.len() as u64, &mut out);
             out.extend_from_slice(&core.batch_sig);
             Ok(out)

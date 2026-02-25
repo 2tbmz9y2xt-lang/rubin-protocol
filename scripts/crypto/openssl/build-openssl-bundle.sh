@@ -38,5 +38,6 @@ make -j"${JOBS}"
 make install_sw
 
 echo "[openssl-bundle] done"
-"${PREFIX}/bin/openssl" version -a
-"${PREFIX}/bin/openssl" list -signature-algorithms | sed -n '1,40p'
+OPENSSL_RUN_LD_LIBRARY_PATH="${PREFIX}/lib64:${PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+LD_LIBRARY_PATH="${OPENSSL_RUN_LD_LIBRARY_PATH}" "${PREFIX}/bin/openssl" version -a
+LD_LIBRARY_PATH="${OPENSSL_RUN_LD_LIBRARY_PATH}" "${PREFIX}/bin/openssl" list -signature-algorithms | sed -n '1,40p'

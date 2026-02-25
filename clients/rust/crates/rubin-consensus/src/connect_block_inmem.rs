@@ -71,6 +71,7 @@ pub fn connect_block_basic_in_memory_at_height(
     block_height: u64,
     prev_timestamps: Option<&[u64]>,
     state: &mut InMemoryChainState,
+    chain_id: [u8; 32],
 ) -> Result<ConnectBlockBasicSummary, TxError> {
     // Stateless checks first.
     validate_block_basic_with_context_at_height(
@@ -101,6 +102,7 @@ pub fn connect_block_basic_in_memory_at_height(
             block_height,
             pb.header.timestamp,
             block_mtp,
+            chain_id,
         )?;
         state.utxos = next_utxos;
         sum_fees = sum_fees

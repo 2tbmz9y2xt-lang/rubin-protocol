@@ -1317,6 +1317,32 @@ fn main() {
                 already_generated: req.already_generated,
             };
 
+            let mut chain_id = [0u8; 32];
+            if !req.chain_id.trim().is_empty() {
+                let b = match hex::decode(req.chain_id.trim()) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let resp = Response {
+                            ok: false,
+                            err: Some("bad chain_id".to_string()),
+                            ..Default::default()
+                        };
+                        let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                        return;
+                    }
+                };
+                if b.len() != 32 {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad chain_id".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+                chain_id.copy_from_slice(&b);
+            }
+
             match connect_block_basic_in_memory_at_height(
                 &block_bytes,
                 expected_prev,
@@ -1324,6 +1350,7 @@ fn main() {
                 req.height,
                 prev_timestamps,
                 &mut state,
+                chain_id,
             ) {
                 Ok(summary) => {
                     let resp = Response {
@@ -1555,6 +1582,32 @@ fn main() {
             }
 
             let block_mtp = req.block_mtp.unwrap_or(req.block_timestamp);
+
+            let mut chain_id = [0u8; 32];
+            if !req.chain_id.trim().is_empty() {
+                let b = match hex::decode(req.chain_id.trim()) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let resp = Response {
+                            ok: false,
+                            err: Some("bad chain_id".to_string()),
+                            ..Default::default()
+                        };
+                        let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                        return;
+                    }
+                };
+                if b.len() != 32 {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad chain_id".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+                chain_id.copy_from_slice(&b);
+            }
             match apply_non_coinbase_tx_basic_with_mtp(
                 &tx,
                 txid,
@@ -1562,6 +1615,7 @@ fn main() {
                 req.height,
                 req.block_timestamp,
                 block_mtp,
+                chain_id,
             ) {
                 Ok(summary) => {
                     let resp = Response {

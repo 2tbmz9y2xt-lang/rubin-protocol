@@ -41,7 +41,7 @@
 
 | ID | Статус | Кратко |
 |---|---|---|
-| F-03 | ALREADY_FIXED | End-to-end `verify_sig` wired в executable spend path (Go/Rust) + conformance vectors (`Q-R006 DONE`, см. `../inbox/reports/2026-02-24_report_q-r006_f-03_closeout.md`). |
+| F-03 | ALREADY_FIXED | End-to-end `verify_sig` (PQC подписи) реализован as-spec: OpenSSL EVP verify backend (Go reference + Rust parity) подключён в spend‑пути (`CORE_P2PK`/`CORE_MULTISIG`/`CORE_VAULT`/`CORE_HTLC`) и покрыт executable conformance (fixtures с реальными ML‑DSA подписями). См. `../inbox/reports/2026-02-25_report_q-r006_verify_sig_openssl_done.md`. |
 | F-05 | ALREADY_FIXED | Coinbase bound теперь вызывается только из stateful `connect_block`-пути с локально вычисленным `sum_fees` (UTXO apply non-coinbase tx). `already_generated(h)` ведётся в chainstate-счётчике (in-memory reference). Персистентное хранилище chainstate (DB) требуется для “ноды”, но не влияет на консенсусную семантику и вынесено отдельно. |
 | F-10 | ALREADY_FIXED | `RUBIN_L1_P2P_AUX.md` содержит минимальные `version`/`verack` поля (`tx_relay`, `pruned_below_height`) на которые ссылается COMPACT. |
 
@@ -84,7 +84,8 @@
 |---|---|---|
 | F-01 | ALREADY_FIXED | `tx_kind` расширен до `{0x00,0x01,0x02}` в Go/Rust парсерах; DA tx-path валиден |
 | F-02 | ALREADY_FIXED | Добавлены и заведены `BLOCK_ERR_DA_*` коды в Go/Rust |
-| F-03 | ALREADY_FIXED | End-to-end `verify_sig` wired (Go/Rust OpenSSL backend) + executable CV gate (`../inbox/reports/2026-02-24_report_q-r006_f-03_closeout.md`) |
+| F-DA-ALIGN-01 | ALREADY_FIXED | DA приведён к CANONICAL: `tx_kind=0x01` разрешает manifest в `da_payload`, `DaCommitCoreFields` расширен, payload commitment проверяется через `CORE_DA_COMMIT` output exactly-once; синхронизированы Go(reference)→Rust(parity)→conformance (`CV-DA-INTEGRITY`). (`Q-DA-ALIGN-01 DONE`, см. `../inbox/reports/2026-02-25_report_q-da-align-01_canonical_da_sync.md`) |
+| F-03 | ALREADY_FIXED | End-to-end `verify_sig` (Go reference + Rust parity) закрыт как as-spec (CANONICAL §12.1): spend‑путь выполняет реальную PQC крипто‑верификацию через OpenSSL EVP; conformance bundle PASS с валидными ML‑DSA witness items. См. `../inbox/reports/2026-02-25_report_q-r006_verify_sig_openssl_done.md`. |
 | F-04 | ALREADY_FIXED | Timestamp/MTP wired в реальный block validation path (Go/Rust) |
 | F-08 | ALREADY_FIXED | `RUBIN_NETWORK_PARAMS.md` синхронизирован с CANONICAL по P2PK suite-gating (ML-DSA + SLH post-activation) |
 | F-09 | ALREADY_FIXED | Восстановлен `spec/AUDIT_CONTEXT.md`; ссылка из `spec/README.md` больше не битая |
@@ -101,6 +102,17 @@
 | Risk ID | Статус | Где зафиксировано |
 |---|---|---|
 | `ACCEPTED_RISK_TS_MTP_MULTIWINDOW` | ACCEPTED_RISK | `RUBIN_L1_CANONICAL.md` §22 (timestamp security note) |
+| `ACCEPTED_RISK_FIPS_PROVIDER_NOT_YET_CERTIFIED` | ACCEPTED_RISK | `RUBIN_CRYPTO_BACKEND_PROFILE.md` §4 (FIPS positioning) |
+
+Пояснение `ACCEPTED_RISK_FIPS_PROVIDER_NOT_YET_CERTIFIED`:
+- Риск: в репозитории зафиксирован “direct FIPS migration path via OpenSSL providers”, но **FIPS-validated PQC module**
+  (FIPS provider с ML-DSA/SLH-DSA) ещё не доступен/не включён как обязательное требование для запуска узлов.
+- Факт на текущих dev-машинах/CI может выглядеть так: PQC доступна в `default` provider, а `fips` provider отсутствует
+  (нет `fips.*` модуля), либо присутствует, но требует отдельной конфигурации и preflight.
+- Импакт: “FIPS-only mode” пока нельзя объявлять как поддерживаемый режим для узла без воспроизводимой проверки
+  доступности ML-DSA/SLH-DSA в FIPS provider и строгого соответствия conformance (semantics identical).
+- Митигация: до появления/внедрения FIPS provider мы работаем в `default` provider и держим требования в формулировке
+  “NIST/FIPS-aligned”. Переход в “FIPS-only mode” возможен только после CI‑подтверждения и опубликованного runbook/preflight.
 
 ## Правило обновления
 

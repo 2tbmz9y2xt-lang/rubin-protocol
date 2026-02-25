@@ -33,7 +33,7 @@ Integrity:
 
 - `./RUBIN_CORE_HTLC_SPEC.md` — consensus-critical covenant spec
   - `CORE_HTLC` (0x0100), active from genesis block 0
-  - Spend rules, witness format, conformance vectors CV-HTLC-01..12
+  - Spend rules, witness format, conformance vectors CV-HTLC-01..14
   - Lean4 proof-pack baseline is vendored in `../rubin-formal/` (`proof_level=toy-model`, `claim_level=toy`; `status=proved` = proved in the toy/model baseline; refinement to byte-accurate/executable semantics is pending)
 
 ## Normative (Non-Consensus)

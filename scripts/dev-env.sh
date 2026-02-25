@@ -35,6 +35,57 @@ prepend_path_if_exists "/usr/local/bin"
 
 export PATH
 
+select_openssl() {
+  # Optional override for CI / Linux / Windows dev envs where we bring our own OpenSSL bundle.
+  # Example:
+  #   RUBIN_OPENSSL_PREFIX="$HOME/.cache/rubin-openssl/bundle-3.5.5" scripts/dev-env.sh -- openssl version -a
+  if [[ -n "${RUBIN_OPENSSL_PREFIX:-}" ]]; then
+    if [[ -x "${RUBIN_OPENSSL_PREFIX}/bin/openssl" ]]; then
+      prepend_path_if_exists "${RUBIN_OPENSSL_PREFIX}/bin"
+      export OPENSSL_DIR="${RUBIN_OPENSSL_PREFIX}"
+      export PKG_CONFIG_PATH="${RUBIN_OPENSSL_PREFIX}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+      if [[ -d "${RUBIN_OPENSSL_PREFIX}/lib/ossl-modules" ]]; then
+        export OPENSSL_MODULES="${RUBIN_OPENSSL_PREFIX}/lib/ossl-modules"
+      fi
+    else
+      echo "ERROR: RUBIN_OPENSSL_PREFIX is set but missing bin/openssl: ${RUBIN_OPENSSL_PREFIX}" >&2
+      return 1
+    fi
+  fi
+
+  # Prefer Homebrew OpenSSL@3 to avoid macOS LibreSSL default.
+  # This is required by the normative non-consensus profile:
+  #   spec/RUBIN_CRYPTO_BACKEND_PROFILE.md (OpenSSL 3.5+).
+  if [[ -n "${OPENSSL_DIR:-}" ]]; then
+    return 0
+  fi
+  if [[ -x "/opt/homebrew/opt/openssl@3/bin/openssl" ]]; then
+    prepend_path_if_exists "/opt/homebrew/opt/openssl@3/bin"
+    export OPENSSL_DIR="/opt/homebrew/opt/openssl@3"
+    export PKG_CONFIG_PATH="/opt/homebrew/opt/openssl@3/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+    if [[ -d "/opt/homebrew/opt/openssl@3/lib/ossl-modules" ]]; then
+      export OPENSSL_MODULES="/opt/homebrew/opt/openssl@3/lib/ossl-modules"
+    fi
+  elif [[ -x "/usr/local/opt/openssl@3/bin/openssl" ]]; then
+    prepend_path_if_exists "/usr/local/opt/openssl@3/bin"
+    export OPENSSL_DIR="/usr/local/opt/openssl@3"
+    export PKG_CONFIG_PATH="/usr/local/opt/openssl@3/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+    if [[ -d "/usr/local/opt/openssl@3/lib/ossl-modules" ]]; then
+      export OPENSSL_MODULES="/usr/local/opt/openssl@3/lib/ossl-modules"
+    fi
+  fi
+
+  # Optional explicit overrides (useful for FIPS module bring-up).
+  if [[ -n "${RUBIN_OPENSSL_MODULES:-}" ]]; then
+    export OPENSSL_MODULES="${RUBIN_OPENSSL_MODULES}"
+  fi
+  if [[ -n "${RUBIN_OPENSSL_CONF:-}" ]]; then
+    export OPENSSL_CONF="${RUBIN_OPENSSL_CONF}"
+  fi
+}
+
+select_openssl
+
 need_cmd() {
   local cmd="$1"
   if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -54,6 +105,18 @@ maybe_cmd() {
 print_versions() {
   echo "repo_root: ${REPO_ROOT}"
   echo "PATH: ${PATH}"
+  if [[ -n "${OPENSSL_DIR:-}" ]]; then
+    echo "OPENSSL_DIR: ${OPENSSL_DIR}"
+  fi
+  if [[ -n "${OPENSSL_MODULES:-}" ]]; then
+    echo "OPENSSL_MODULES: ${OPENSSL_MODULES}"
+  fi
+  if [[ -n "${OPENSSL_CONF:-}" ]]; then
+    echo "OPENSSL_CONF: ${OPENSSL_CONF}"
+  fi
+  if [[ -n "${PKG_CONFIG_PATH:-}" ]]; then
+    echo "PKG_CONFIG_PATH: ${PKG_CONFIG_PATH}"
+  fi
   echo
 
   echo "git: $(git --version 2>/dev/null || echo 'missing')"
@@ -63,6 +126,12 @@ print_versions() {
   echo "go: $(go version 2>/dev/null || echo 'missing')"
   echo "rustc: $(rustc --version 2>/dev/null || echo 'missing')"
   echo "cargo: $(cargo --version 2>/dev/null || echo 'missing')"
+  echo "openssl: $(openssl version 2>/dev/null || echo 'missing')"
+  if maybe_cmd gh; then
+    echo "gh: $(gh --version 2>/dev/null | head -n 1 || echo 'present')"
+  else
+    echo "gh: missing (ok unless opening PRs from CLI)"
+  fi
 
   if maybe_cmd elan; then
     echo "elan: $(elan --version 2>/dev/null || echo 'missing')"
@@ -84,6 +153,8 @@ check_required() {
   need_cmd go
   need_cmd cargo
   need_cmd rustc
+  need_cmd openssl
+  need_cmd pkg-config
 }
 
 if [[ "${1:-}" == "--" ]]; then
