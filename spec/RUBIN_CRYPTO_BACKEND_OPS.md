@@ -40,6 +40,8 @@ scripts/dev-env.sh -- bash -c 'cd clients/rust && cargo test --workspace'
 
 Пока **FIPS provider module (`fips.*`) не установлен** в окружении, узлы/CI работают через OpenSSL `default` provider.
 Это нормально для Phase‑0/devnet: консенсус определяется CANONICAL, а “FIPS-only mode” — операционный режим.
+Текущий статус трека: **DEFERRED (parked/out-of-queue, без ETA)** до появления стабильного FIPS provider artifact с требуемыми PQ-алгоритмами.
+До этого момента официальный режим для репо: `default` provider + формулировка `NIST/FIPS-aligned` (не `FIPS-only`).
 
 Что должно быть готово **заранее** (и уже поддерживается репо):
 
