@@ -47,6 +47,8 @@ def check_profile(profile: str, summary: RiskSummary) -> tuple[bool, str]:
             return False, f"freeze: stated/deferred must be 0 (stated={summary.stated}, deferred={summary.deferred})"
         if summary.proof_level not in {"byte-model", "refinement"}:
             return False, f"freeze: proof_level must be byte-model/refinement (got {summary.proof_level})"
+        if summary.claim_level != "refined":
+            return False, f"freeze: claim_level must be refined (got {summary.claim_level})"
         return True, f"freeze: OK (proof_level={summary.proof_level}; tier={summary.risk_tier})"
 
     return False, f"unknown profile: {profile}"
@@ -81,6 +83,7 @@ def main() -> int:
                     "ok": ok,
                     "message": msg,
                     "proof_level": summary.proof_level,
+                    "claim_level": summary.claim_level,
                     "risk_tier": summary.risk_tier,
                     "risk_score": summary.risk_score,
                     "total_sections": summary.total_sections,
@@ -103,4 +106,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

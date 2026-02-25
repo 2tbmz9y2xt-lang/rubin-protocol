@@ -35,7 +35,7 @@ Note for hardware provisioning: 17.21 TiB raw data requires a disk marketed as ~
 | `MAX_RELAY_MSG_BYTES` | 96_000_000 bytes (= 91.6 MiB) | |
 | `DA_MEMPOOL_SIZE` | 512 MiB | minimum for high-bandwidth relay |
 | `DA_MEMPOOL_PINNED_PAYLOAD_MAX` | 96_000_000 bytes | hard cap for COMPLETE_SET payload pinning (max 3 full DA sets pinned at once) |
-| `DA_ORPHAN_POOL_SIZE` | 64 MiB | = 2 x MAX_DA_BYTES_PER_BLOCK |
+| `DA_ORPHAN_POOL_SIZE` | 64 MiB | ≈ 2 x MAX_DA_BYTES_PER_BLOCK |
 | `DA_ORPHAN_POOL_PER_PEER_MAX` | 4 MiB | |
 | `DA_ORPHAN_POOL_PER_DA_ID_MAX` | 8 MiB | one da_id from 2+ peers accumulates |
 | `DA_ORPHAN_COMMIT_OVERHEAD_MAX` | 8 MiB | commit metadata cap within orphan pool |
