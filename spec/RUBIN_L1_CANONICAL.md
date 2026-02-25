@@ -1110,10 +1110,13 @@ For any non-coinbase transaction `T`:
        if e is missing: reject TX_ERR_MISSING_UTXO
        if e.covenant_type is unknown: reject TX_ERR_COVENANT_TYPE_INVALID
        slots := witness_slots(e.covenant_type, e.covenant_data)
+       if W + slots > witness_count: reject TX_ERR_PARSE
        // witnesses[W .. W+slots-1] are assigned to input i
        W := W + slots
    if W != witness_count: reject TX_ERR_PARSE
    ```
+
+   Implementations MUST validate witness bounds before indexing witness arrays.
 
    WitnessItems assigned to input `i` are: `T.witness.witnesses[W_i .. W_i+slots_i-1]`
    where `W_i` is the value of `W` before processing input `i`.

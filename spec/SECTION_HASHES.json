@@ -27,7 +27,7 @@
     "consensus_error_codes": "12cc1085a196210f6a17ad64ef745d06c3d6ae0fbcce713b447bb5f0cec23c5e",
     "covenant_registry": "33727b879e85f623d2d30791c619dec3a7400d493a0efff2428058f0b23fe770",
     "difficulty_update": "045138308bb180da93b8540e5e6535b4ea74580bf542bae7506dbc9e7bb9e8ff",
-    "transaction_structural_rules": "c5b268dab7a7e8e036bc62a0cba877d5994a7bfb47966201c5d71473b18ee965",
+    "transaction_structural_rules": "bb951c2b03c28fdb0f379363e598386198cdf325d1fb81ece30ac83a637f8c32",
     "replay_domain_checks": "5c960ef2f65c6256a7b5004ea3965be507acbb7f335d56310c1823a11b1500f0",
     "utxo_state_model": "f3f96f3dd27ee8d7d3725502cc4afcbd6cc301cd03c49fa2e1b7e6417ee2ba42",
     "value_conservation": "8e134072735aa979e3fff1c6119ca4c6e4dd91aec1d8a69d81006f5669ad9450",
