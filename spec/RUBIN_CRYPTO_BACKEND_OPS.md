@@ -32,7 +32,31 @@
 
 ```bash
 scripts/dev-env.sh -- python3 conformance/runner/run_cv_bundle.py
-scripts/dev-env.sh -- bash -lc 'cd clients/go && go test ./...'
-scripts/dev-env.sh -- bash -lc 'cd clients/rust && cargo test --workspace'
+scripts/dev-env.sh -- bash -c 'cd clients/go && go test ./...'
+scripts/dev-env.sh -- bash -c 'cd clients/rust && cargo test --workspace'
 ```
 
+## 5) FIPS-ready (operational)
+
+Пока **FIPS provider module (`fips.*`) не установлен** в окружении, узлы/CI работают через OpenSSL `default` provider.
+Это нормально для Phase‑0/devnet: консенсус определяется CANONICAL, а “FIPS-only mode” — операционный режим.
+
+Что должно быть готово **заранее** (и уже поддерживается репо):
+
+1) **OpenSSL-only** профиль (нормативно + CI enforcement):
+   - `spec/RUBIN_CRYPTO_BACKEND_PROFILE.md`
+   - CI: `python3 tools/check_crypto_backend_policy.py`
+
+2) **Подмена OpenSSL без правок кода** (через env):
+   - `RUBIN_OPENSSL_PREFIX=/path/to/openssl-prefix` (см. `scripts/dev-env.sh`)
+   - опционально: `RUBIN_OPENSSL_MODULES=/path/to/ossl-modules`, `RUBIN_OPENSSL_CONF=/path/to/openssl.cnf`
+
+3) **Preflight для FIPS provider** (когда модуль появится):
+
+```bash
+RUBIN_OPENSSL_FIPS_MODE=ready scripts/dev-env.sh -- scripts/crypto/openssl/fips-preflight.sh
+RUBIN_OPENSSL_FIPS_MODE=only  scripts/dev-env.sh -- scripts/crypto/openssl/fips-preflight.sh
+```
+
+4) **Функциональная проверка “FIPS bundle build”** (не CMVP-сертификация):
+   - `scripts/crypto/openssl/build-openssl-bundle.sh` собирает OpenSSL с `enable-fips` для smoke‑тестов совместимости.
