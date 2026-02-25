@@ -1,2 +1,4 @@
 import RubinFormal.Conformance.CVParseVectors
 import RubinFormal.Conformance.CVParseReplay
+import RubinFormal.Conformance.CVMerkleVectors
+import RubinFormal.Conformance.CVMerkleReplay
