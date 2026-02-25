@@ -70,3 +70,17 @@ Policy:
 
 Изменённые fixtures:
 - `CV-WEIGHT.json` (new)
+
+## 2026-02-26 — DA limit collision ordering vector
+
+Причина:
+- закрыть покрытие вектора “`MAX_DA_BATCHES_PER_BLOCK` в норме, но `sum_da_bytes` превышен”;
+- зафиксировать приоритет ошибки: first-fail на этапе weight/DA-bytes (`BLOCK_ERR_WEIGHT_EXCEEDED`)
+  до проверки cap по числу DA set (`BLOCK_ERR_DA_BATCH_EXCEEDED`).
+
+Инструменты:
+- ручное обновление `CV-VALIDATION-ORDER.json`,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-VALIDATION-ORDER`.
+
+Изменённые fixtures:
+- `CV-VALIDATION-ORDER.json` (добавлен `CV-VO-05`)
