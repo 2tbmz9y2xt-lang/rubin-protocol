@@ -16,3 +16,13 @@ import RubinFormal.Conformance.CVBlockBasicVectors
 import RubinFormal.Conformance.CVBlockBasicReplay
 import RubinFormal.Conformance.CVSubsidyVectors
 import RubinFormal.Conformance.CVSubsidyReplay
+import RubinFormal.Conformance.CVCovenantGenesisVectors
+import RubinFormal.Conformance.CVCovenantGenesisReplay
+import RubinFormal.Conformance.CVVaultVectors
+import RubinFormal.Conformance.CVVaultReplay
+import RubinFormal.Conformance.CVHtlcVectors
+import RubinFormal.Conformance.CVHtlcReplay
+import RubinFormal.Conformance.CVVaultPolicyVectors
+import RubinFormal.Conformance.CVVaultPolicyReplay
+import RubinFormal.Conformance.CVHtlcOrderingVectors
+import RubinFormal.Conformance.CVHtlcOrderingReplay
