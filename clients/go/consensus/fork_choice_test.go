@@ -46,4 +46,3 @@ func TestWorkFromTarget_Vectors(t *testing.T) {
 		t.Fatalf("want 2^256 got %s", w.Text(16))
 	}
 }
-

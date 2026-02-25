@@ -5,7 +5,8 @@ import (
 )
 
 // WorkFromTarget computes CANONICAL §23 per-block work:
-//   work = floor(2^256 / target)
+//
+//	work = floor(2^256 / target)
 //
 // This is a non-validation helper but MUST be deterministic and MUST NOT use floats.
 func WorkFromTarget(target [32]byte) (*big.Int, error) {
@@ -34,4 +35,3 @@ func ChainWorkFromTargets(targets [][32]byte) (*big.Int, error) {
 	}
 	return total, nil
 }
-
