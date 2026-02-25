@@ -188,7 +188,14 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
                 }
                 COV_TYPE_MULTISIG => {
                     let m = parse_multisig_covenant_data(&entry.covenant_data)?;
-                    validate_threshold_sig_spend(&m.keys, m.threshold, assigned, &digest, height, "CORE_MULTISIG")?;
+                    validate_threshold_sig_spend(
+                        &m.keys,
+                        m.threshold,
+                        assigned,
+                        &digest,
+                        height,
+                        "CORE_MULTISIG",
+                    )?;
                 }
                 COV_TYPE_VAULT => {
                     let v = parse_vault_covenant_data(&entry.covenant_data)?;

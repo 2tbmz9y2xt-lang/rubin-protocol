@@ -36,4 +36,3 @@ func signP2PKInputWitness(t *testing.T, tx *Tx, inputIndex uint32, inputValue ui
 		Signature: sig,
 	}
 }
-

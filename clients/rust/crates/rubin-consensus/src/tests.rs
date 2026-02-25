@@ -1241,11 +1241,18 @@ fn test_mldsa87_keypair() -> TestMLDSA87Keypair {
     let alg = unsafe { core::ffi::CStr::from_bytes_with_nul_unchecked(b"ML-DSA-87\0") };
     unsafe {
         openssl_sys::ERR_clear_error();
-        let ctx = EVP_PKEY_CTX_new_from_name(core::ptr::null_mut(), alg.as_ptr(), core::ptr::null());
+        let ctx =
+            EVP_PKEY_CTX_new_from_name(core::ptr::null_mut(), alg.as_ptr(), core::ptr::null());
         assert!(!ctx.is_null(), "EVP_PKEY_CTX_new_from_name failed");
-        assert!(openssl_sys::EVP_PKEY_keygen_init(ctx) > 0, "EVP_PKEY_keygen_init failed");
+        assert!(
+            openssl_sys::EVP_PKEY_keygen_init(ctx) > 0,
+            "EVP_PKEY_keygen_init failed"
+        );
         let mut pkey: *mut openssl_sys::EVP_PKEY = core::ptr::null_mut();
-        assert!(openssl_sys::EVP_PKEY_keygen(ctx, &mut pkey) > 0, "EVP_PKEY_keygen failed");
+        assert!(
+            openssl_sys::EVP_PKEY_keygen(ctx, &mut pkey) > 0,
+            "EVP_PKEY_keygen failed"
+        );
         openssl_sys::EVP_PKEY_CTX_free(ctx);
         assert!(!pkey.is_null(), "nil pkey");
 
@@ -1545,7 +1552,8 @@ fn apply_non_coinbase_tx_basic_ok() {
         },
     );
 
-    let summary = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000, ZERO_CHAIN_ID).expect("ok");
+    let summary =
+        apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000, ZERO_CHAIN_ID).expect("ok");
     assert_eq!(summary.fee, 10);
     assert_eq!(summary.utxo_count, 1);
 }
@@ -1564,10 +1572,16 @@ fn apply_non_coinbase_tx_basic_vault_cannot_fund_fee() {
     let dest_kp = test_mldsa87_keypair();
 
     let owner_cov = p2pk_covenant_data_for_pubkey(&owner_kp.pubkey);
-    let owner_lock_id = sha3_256(&crate::vault::output_descriptor_bytes(COV_TYPE_P2PK, &owner_cov));
+    let owner_lock_id = sha3_256(&crate::vault::output_descriptor_bytes(
+        COV_TYPE_P2PK,
+        &owner_cov,
+    ));
 
     let dest_cov = p2pk_covenant_data_for_pubkey(&dest_kp.pubkey);
-    let whitelist_h = sha3_256(&crate::vault::output_descriptor_bytes(COV_TYPE_P2PK, &dest_cov));
+    let whitelist_h = sha3_256(&crate::vault::output_descriptor_bytes(
+        COV_TYPE_P2PK,
+        &dest_cov,
+    ));
 
     let vault_key_id = sha3_256(&vault_kp.pubkey);
     let vault_cov = encode_vault_covenant_data(owner_lock_id, 1, &[vault_key_id], &[whitelist_h]);
@@ -1652,10 +1666,16 @@ fn apply_non_coinbase_tx_basic_vault_preserved_with_owner_fee_input() {
     let dest_kp = test_mldsa87_keypair();
 
     let owner_cov = p2pk_covenant_data_for_pubkey(&owner_kp.pubkey);
-    let owner_lock_id = sha3_256(&crate::vault::output_descriptor_bytes(COV_TYPE_P2PK, &owner_cov));
+    let owner_lock_id = sha3_256(&crate::vault::output_descriptor_bytes(
+        COV_TYPE_P2PK,
+        &owner_cov,
+    ));
 
     let dest_cov = p2pk_covenant_data_for_pubkey(&dest_kp.pubkey);
-    let whitelist_h = sha3_256(&crate::vault::output_descriptor_bytes(COV_TYPE_P2PK, &dest_cov));
+    let whitelist_h = sha3_256(&crate::vault::output_descriptor_bytes(
+        COV_TYPE_P2PK,
+        &dest_cov,
+    ));
 
     let vault_key_id = sha3_256(&vault_kp.pubkey);
     let vault_cov = encode_vault_covenant_data(owner_lock_id, 1, &[vault_key_id], &[whitelist_h]);
@@ -1722,7 +1742,8 @@ fn apply_non_coinbase_tx_basic_vault_preserved_with_owner_fee_input() {
         },
     );
 
-    let summary = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000, ZERO_CHAIN_ID).expect("ok");
+    let summary =
+        apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000, ZERO_CHAIN_ID).expect("ok");
     assert_eq!(summary.fee, 10);
 }
 
@@ -1740,10 +1761,16 @@ fn apply_non_coinbase_tx_basic_vault_allows_owner_top_up() {
     let dest_kp = test_mldsa87_keypair();
 
     let owner_cov = p2pk_covenant_data_for_pubkey(&owner_kp.pubkey);
-    let owner_lock_id = sha3_256(&crate::vault::output_descriptor_bytes(COV_TYPE_P2PK, &owner_cov));
+    let owner_lock_id = sha3_256(&crate::vault::output_descriptor_bytes(
+        COV_TYPE_P2PK,
+        &owner_cov,
+    ));
 
     let dest_cov = p2pk_covenant_data_for_pubkey(&dest_kp.pubkey);
-    let whitelist_h = sha3_256(&crate::vault::output_descriptor_bytes(COV_TYPE_P2PK, &dest_cov));
+    let whitelist_h = sha3_256(&crate::vault::output_descriptor_bytes(
+        COV_TYPE_P2PK,
+        &dest_cov,
+    ));
 
     let vault_key_id = sha3_256(&vault_kp.pubkey);
     let vault_cov = encode_vault_covenant_data(owner_lock_id, 1, &[vault_key_id], &[whitelist_h]);
@@ -1810,7 +1837,8 @@ fn apply_non_coinbase_tx_basic_vault_allows_owner_top_up() {
         },
     );
 
-    let summary = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000, ZERO_CHAIN_ID).expect("ok");
+    let summary =
+        apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000, ZERO_CHAIN_ID).expect("ok");
     assert_eq!(summary.fee, 5);
 }
 
@@ -1921,10 +1949,16 @@ fn apply_non_coinbase_tx_basic_vault_whitelist_rejects_output() {
     let non_whitelisted_dest_kp = test_mldsa87_keypair();
 
     let owner_cov = p2pk_covenant_data_for_pubkey(&owner_kp.pubkey);
-    let owner_lock_id = sha3_256(&crate::vault::output_descriptor_bytes(COV_TYPE_P2PK, &owner_cov));
+    let owner_lock_id = sha3_256(&crate::vault::output_descriptor_bytes(
+        COV_TYPE_P2PK,
+        &owner_cov,
+    ));
 
     let whitelisted_cov = p2pk_covenant_data_for_pubkey(&whitelisted_dest_kp.pubkey);
-    let whitelist_h = sha3_256(&crate::vault::output_descriptor_bytes(COV_TYPE_P2PK, &whitelisted_cov));
+    let whitelist_h = sha3_256(&crate::vault::output_descriptor_bytes(
+        COV_TYPE_P2PK,
+        &whitelisted_cov,
+    ));
 
     let non_whitelisted_cov = p2pk_covenant_data_for_pubkey(&non_whitelisted_dest_kp.pubkey);
 
@@ -2050,7 +2084,8 @@ fn apply_non_coinbase_tx_basic_multisig_input_accepted() {
         },
     );
 
-    let summary = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000, ZERO_CHAIN_ID).expect("ok");
+    let summary =
+        apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000, ZERO_CHAIN_ID).expect("ok");
     assert_eq!(summary.fee, 10);
 }
 

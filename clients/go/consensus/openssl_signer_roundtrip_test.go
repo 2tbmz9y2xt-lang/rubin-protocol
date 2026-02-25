@@ -24,4 +24,3 @@ func TestOpenSSL_MLDSA87_SignVerifyRoundtrip(t *testing.T) {
 		t.Fatalf("verifySig=false")
 	}
 }
-

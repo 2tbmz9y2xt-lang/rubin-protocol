@@ -60,4 +60,3 @@ func validateThresholdSigSpend(keys [][32]byte, threshold uint8, ws []WitnessIte
 	}
 	return nil
 }
-

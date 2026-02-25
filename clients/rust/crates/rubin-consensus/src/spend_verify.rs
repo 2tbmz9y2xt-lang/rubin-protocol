@@ -1,6 +1,6 @@
 use crate::constants::{
-    MAX_P2PK_COVENANT_DATA, SLH_DSA_ACTIVATION_HEIGHT, SUITE_ID_ML_DSA_87,
-    SUITE_ID_SENTINEL, SUITE_ID_SLH_DSA_SHAKE_256F,
+    MAX_P2PK_COVENANT_DATA, SLH_DSA_ACTIVATION_HEIGHT, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
+    SUITE_ID_SLH_DSA_SHAKE_256F,
 };
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
@@ -15,7 +15,10 @@ pub(crate) fn validate_p2pk_spend(
     block_height: u64,
 ) -> Result<(), TxError> {
     if w.suite_id != SUITE_ID_ML_DSA_87 && w.suite_id != SUITE_ID_SLH_DSA_SHAKE_256F {
-        return Err(TxError::new(ErrorCode::TxErrSigAlgInvalid, "CORE_P2PK suite invalid"));
+        return Err(TxError::new(
+            ErrorCode::TxErrSigAlgInvalid,
+            "CORE_P2PK suite invalid",
+        ));
     }
     if w.suite_id == SUITE_ID_SLH_DSA_SHAKE_256F && block_height < SLH_DSA_ACTIVATION_HEIGHT {
         return Err(TxError::new(
@@ -23,7 +26,9 @@ pub(crate) fn validate_p2pk_spend(
             "SLH-DSA suite inactive at this height",
         ));
     }
-    if entry.covenant_data.len() as u64 != MAX_P2PK_COVENANT_DATA || entry.covenant_data[0] != w.suite_id {
+    if entry.covenant_data.len() as u64 != MAX_P2PK_COVENANT_DATA
+        || entry.covenant_data[0] != w.suite_id
+    {
         return Err(TxError::new(
             ErrorCode::TxErrCovenantTypeInvalid,
             "CORE_P2PK covenant_data invalid",
@@ -57,7 +62,10 @@ pub(crate) fn validate_threshold_sig_spend(
     context: &'static str,
 ) -> Result<(), TxError> {
     if ws.len() != keys.len() {
-        return Err(TxError::new(ErrorCode::TxErrParse, "witness slot assignment mismatch"));
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "witness slot assignment mismatch",
+        ));
     }
 
     let mut valid: u8 = 0;
@@ -91,4 +99,3 @@ pub(crate) fn validate_threshold_sig_spend(
     }
     Ok(())
 }
-
