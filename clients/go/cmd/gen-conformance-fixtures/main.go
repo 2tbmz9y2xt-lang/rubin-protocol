@@ -30,6 +30,8 @@ func main() {
 	// Key material (generated once per run, then baked into fixtures).
 	ownerKP := mustKeypair("owner")
 	defer ownerKP.Close()
+	slhKP := mustSLHKeypair("slh")
+	defer slhKP.Close()
 	vaultKP := mustKeypair("vault")
 	defer vaultKP.Close()
 	sponsorKP := mustKeypair("sponsor")
@@ -54,6 +56,7 @@ func main() {
 
 		updateP2PKVector(f, "CV-U-05", zeroChainID, ownerKP, 100, 101) // sum_out > sum_in
 		updateP2PKVector(f, "CV-U-06", zeroChainID, ownerKP, 100, 90)  // fee=10
+		updateP2PKVectorSLH(f, "CV-U-16", zeroChainID, slhKP, 100, 90) // fee=10, post-activation OK
 
 		updateMultisigVector1of1(f, "CV-U-09", zeroChainID, multisigKP, 100, 90) // fee=10
 
@@ -119,7 +122,7 @@ func main() {
 		mustWriteFixture(path, f)
 	}
 
-	fmt.Println("ok: updated fixtures with real ML-DSA signatures")
+	fmt.Println("ok: updated fixtures with real ML-DSA + SLH signatures")
 }
 
 type fixtureFile struct {
@@ -168,16 +171,28 @@ func mustKeypair(label string) *consensus.MLDSA87Keypair {
 	return kp
 }
 
+func mustSLHKeypair(label string) *consensus.SLHDSASHAKE256fKeypair {
+	kp, err := consensus.NewSLHDSASHAKE256fKeypair()
+	if err != nil {
+		fatalf("keygen %s: %v", label, err)
+	}
+	return kp
+}
+
 func sha3_256(b []byte) [32]byte { return sha3.Sum256(b) }
 
 func keyIDForPub(pub []byte) [32]byte { return sha3_256(pub) }
 
-func p2pkCovenantData(pub []byte) []byte {
+func p2pkCovenantDataWithSuite(suiteID byte, pub []byte) []byte {
 	kid := keyIDForPub(pub)
 	out := make([]byte, 0, consensus.MAX_P2PK_COVENANT_DATA)
-	out = append(out, consensus.SUITE_ID_ML_DSA_87)
+	out = append(out, suiteID)
 	out = append(out, kid[:]...)
 	return out
+}
+
+func p2pkCovenantData(pub []byte) []byte {
+	return p2pkCovenantDataWithSuite(consensus.SUITE_ID_ML_DSA_87, pub)
 }
 
 func multisigCovenantData1of1(pub []byte) []byte {
@@ -243,7 +258,7 @@ func txBytes(tx *consensus.Tx) ([]byte, error) {
 func updateP2PKVector(f *fixtureFile, id string, chainID [32]byte, signer *consensus.MLDSA87Keypair, inValue uint64, outValue uint64) {
 	v := findVector(f, id)
 	pub := signer.PubkeyBytes()
-	inCov := p2pkCovenantData(pub)
+	inCov := p2pkCovenantDataWithSuite(consensus.SUITE_ID_ML_DSA_87, pub)
 
 	utxos := anyToSliceMap(v["utxos"])
 	if len(utxos) != 1 {
@@ -290,6 +305,62 @@ func updateP2PKVector(f *fixtureFile, id string, chainID [32]byte, signer *conse
 
 	// Keep existing expectations (fee / ok / error) unchanged.
 	_ = outValue
+}
+
+func updateP2PKVectorSLH(
+	f *fixtureFile,
+	id string,
+	chainID [32]byte,
+	signer *consensus.SLHDSASHAKE256fKeypair,
+	inValue uint64,
+	outValue uint64,
+) {
+	v := findVector(f, id)
+	pub := signer.PubkeyBytes()
+	inCov := p2pkCovenantDataWithSuite(consensus.SUITE_ID_SLH_DSA_SHAKE_256F, pub)
+
+	utxos := anyToSliceMap(v["utxos"])
+	if len(utxos) != 1 {
+		fatalf("%s: want 1 utxo, got %d", id, len(utxos))
+	}
+	utxos[0]["covenant_data"] = hex.EncodeToString(inCov)
+
+	prevTxid := mustHex32(utxos[0]["txid"].(string))
+	prevVout := uint32(utxos[0]["vout"].(float64))
+
+	// Use the same covenant data for the output (valid, minimal).
+	outCov := inCov
+
+	tx := &consensus.Tx{
+		Version:  1,
+		TxKind:   0x00,
+		TxNonce:  1,
+		Inputs:   []consensus.TxInput{{PrevTxid: prevTxid, PrevVout: prevVout, ScriptSig: nil, Sequence: 0}},
+		Outputs:  []consensus.TxOutput{{Value: outValue, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: outCov}},
+		Locktime: 0,
+	}
+
+	d, err := consensus.SighashV1Digest(tx, 0, inValue, chainID)
+	if err != nil {
+		fatalf("%s: sighash: %v", id, err)
+	}
+	sig, err := signer.SignDigest32(d)
+	if err != nil {
+		fatalf("%s: sign: %v", id, err)
+	}
+	tx.Witness = []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: pub, Signature: sig}}
+
+	b, err := txBytes(tx)
+	if err != nil {
+		fatalf("%s: txBytes: %v", id, err)
+	}
+	// Sanity parse.
+	if _, _, _, n, err := consensus.ParseTx(b); err != nil || n != len(b) {
+		fatalf("%s: ParseTx sanity failed: err=%v consumed=%d len=%d", id, err, n, len(b))
+	}
+
+	v["tx_hex"] = hex.EncodeToString(b)
+	v["utxos"] = utxos
 }
 
 func updateMultisigVector1of1(f *fixtureFile, id string, chainID [32]byte, signer *consensus.MLDSA87Keypair, inValue uint64, outValue uint64) {
