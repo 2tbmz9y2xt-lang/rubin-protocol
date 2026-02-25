@@ -102,12 +102,17 @@
 | Risk ID | Статус | Где зафиксировано |
 |---|---|---|
 | `ACCEPTED_RISK_TS_MTP_MULTIWINDOW` | ACCEPTED_RISK | `RUBIN_L1_CANONICAL.md` §22 (timestamp security note) |
-| `ACCEPTED_RISK_FIPS_PROVIDER_PQC_AVAILABILITY` | ACCEPTED_RISK | `RUBIN_CRYPTO_BACKEND_PROFILE.md` §4 (FIPS positioning) |
+| `ACCEPTED_RISK_FIPS_PROVIDER_NOT_YET_CERTIFIED` | ACCEPTED_RISK | `RUBIN_CRYPTO_BACKEND_PROFILE.md` §4 (FIPS positioning) |
 
-Пояснение `ACCEPTED_RISK_FIPS_PROVIDER_PQC_AVAILABILITY`:
-- Риск: на целевой платформе/дистрибутиве OpenSSL FIPS provider может не включать ML-DSA/SLH-DSA, даже если эти алгоритмы доступны в `default` provider.
-- Импакт: узел, запущенный в “FIPS-only mode”, может не суметь валидировать PQC‑подписи (fail-start или runtime reject).
-- Митигация: RUBIN **не** требует и **не** включает “FIPS-only mode” до подтверждения PQC‑доступности/совместимости в FIPS provider на целевой платформе (CI + reproducible preflight).
+Пояснение `ACCEPTED_RISK_FIPS_PROVIDER_NOT_YET_CERTIFIED`:
+- Риск: в репозитории зафиксирован “direct FIPS migration path via OpenSSL providers”, но **FIPS-validated PQC module**
+  (FIPS provider с ML-DSA/SLH-DSA) ещё не доступен/не включён как обязательное требование для запуска узлов.
+- Факт на текущих dev-машинах/CI может выглядеть так: PQC доступна в `default` provider, а `fips` provider отсутствует
+  (нет `fips.*` модуля), либо присутствует, но требует отдельной конфигурации и preflight.
+- Импакт: “FIPS-only mode” пока нельзя объявлять как поддерживаемый режим для узла без воспроизводимой проверки
+  доступности ML-DSA/SLH-DSA в FIPS provider и строгого соответствия conformance (semantics identical).
+- Митигация: до появления/внедрения FIPS provider мы работаем в `default` provider и держим требования в формулировке
+  “NIST/FIPS-aligned”. Переход в “FIPS-only mode” возможен только после CI‑подтверждения и опубликованного runbook/preflight.
 
 ## Правило обновления
 
