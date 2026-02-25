@@ -148,69 +148,66 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
         }
         let digest = sighash_v1_digest(tx, input_index as u32, entry.value, chain_id)?;
 
-        if entry.covenant_type == COV_TYPE_HTLC {
-            let slots = 2usize;
-            if witness_cursor + slots > tx.witness.len() {
-                return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "CORE_HTLC witness underflow",
-                ));
-            }
-            validate_htlc_spend(
-                &entry,
-                &tx.witness[witness_cursor],
-                &tx.witness[witness_cursor + 1],
-                &digest,
-                height,
-                block_mtp,
-            )?;
-            witness_cursor += slots;
-        } else {
-            check_spend_covenant(entry.covenant_type, &entry.covenant_data)?;
-            let slots = witness_slots(entry.covenant_type, &entry.covenant_data);
-            if slots == 0 {
-                return Err(TxError::new(ErrorCode::TxErrParse, "invalid witness slots"));
-            }
-            if witness_cursor + slots > tx.witness.len() {
-                return Err(TxError::new(ErrorCode::TxErrParse, "witness underflow"));
-            }
-            let assigned = &tx.witness[witness_cursor..witness_cursor + slots];
-
-            match entry.covenant_type {
-                COV_TYPE_P2PK => {
-                    if slots != 1 {
-                        return Err(TxError::new(
-                            ErrorCode::TxErrParse,
-                            "CORE_P2PK witness_slots must be 1",
-                        ));
-                    }
-                    validate_p2pk_spend(&entry, &assigned[0], &digest, height)?;
-                }
-                COV_TYPE_MULTISIG => {
-                    let m = parse_multisig_covenant_data(&entry.covenant_data)?;
-                    validate_threshold_sig_spend(
-                        &m.keys,
-                        m.threshold,
-                        assigned,
-                        &digest,
-                        height,
-                        "CORE_MULTISIG",
-                    )?;
-                }
-                COV_TYPE_VAULT => {
-                    let v = parse_vault_covenant_data(&entry.covenant_data)?;
-                    // CORE_VAULT signature threshold is checked later (CANONICAL §24.1),
-                    // after owner-authorization and no-fee-sponsorship checks.
-                    vault_sig_keys = v.keys.clone();
-                    vault_sig_threshold = v.threshold;
-                    vault_sig_witness = assigned.to_vec();
-                    vault_sig_digest = digest;
-                    have_vault_sig = true;
-                }
-                _ => {}
-            }
-            witness_cursor += slots;
+        check_spend_covenant(entry.covenant_type, &entry.covenant_data)?;
+        let slots = witness_slots(entry.covenant_type, &entry.covenant_data)?;
+        if slots == 0 {
+            return Err(TxError::new(ErrorCode::TxErrParse, "invalid witness slots"));
         }
+        if witness_cursor + slots > tx.witness.len() {
+            return Err(TxError::new(ErrorCode::TxErrParse, "witness underflow"));
+        }
+        let assigned = &tx.witness[witness_cursor..witness_cursor + slots];
+
+        match entry.covenant_type {
+            COV_TYPE_P2PK => {
+                if slots != 1 {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrParse,
+                        "CORE_P2PK witness_slots must be 1",
+                    ));
+                }
+                validate_p2pk_spend(&entry, &assigned[0], &digest, height)?;
+            }
+            COV_TYPE_MULTISIG => {
+                let m = parse_multisig_covenant_data(&entry.covenant_data)?;
+                validate_threshold_sig_spend(
+                    &m.keys,
+                    m.threshold,
+                    assigned,
+                    &digest,
+                    height,
+                    "CORE_MULTISIG",
+                )?;
+            }
+            COV_TYPE_VAULT => {
+                let v = parse_vault_covenant_data(&entry.covenant_data)?;
+                // CORE_VAULT signature threshold is checked later (CANONICAL §24.1),
+                // after owner-authorization and no-fee-sponsorship checks.
+                vault_sig_keys = v.keys.clone();
+                vault_sig_threshold = v.threshold;
+                vault_sig_witness = assigned.to_vec();
+                vault_sig_digest = digest;
+                have_vault_sig = true;
+            }
+            COV_TYPE_HTLC => {
+                if slots != 2 {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrParse,
+                        "CORE_HTLC witness_slots must be 2",
+                    ));
+                }
+                validate_htlc_spend(
+                    &entry,
+                    &assigned[0],
+                    &assigned[1],
+                    &digest,
+                    height,
+                    block_mtp,
+                )?;
+            }
+            _ => {}
+        }
+        witness_cursor += slots;
 
         let desc = output_descriptor_bytes(entry.covenant_type, &entry.covenant_data);
         let input_lock_id = sha3_256(&desc);

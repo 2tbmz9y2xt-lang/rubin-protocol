@@ -40,3 +40,20 @@ Policy:
 
 Изменённые fixtures:
 - `CV-HTLC.json` (добавлен `CV-HTLC-14`).
+
+## 2026-02-25 — Consolidated relay/vault/htlc hardening coverage
+
+Причина:
+- добавить машинно-проверяемое покрытие для engineering-consolidation правил:
+  - DA relay determinism (`CV-C-26..CV-C-31`);
+  - vault deterministic policy cases (`CV-V-01..CV-V-06`);
+  - HTLC ordering policy checks (`CV-H-Ordering`, `CV-H-Structural-first`).
+
+Инструменты:
+- ручное обновление fixtures,
+- проверка через `conformance/runner/run_cv_bundle.py` (all gates / selective gates).
+
+Изменённые fixtures:
+- `CV-COMPACT.json`
+- `CV-VAULT-POLICY.json` (new)
+- `CV-HTLC-ORDERING.json` (new)

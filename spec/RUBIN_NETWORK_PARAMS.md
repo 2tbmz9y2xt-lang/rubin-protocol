@@ -235,6 +235,8 @@ Storage depends on number of monitored channels; no protocol minimum.
 
 All values in this section are non-consensus relay-policy / operational defaults.
 They MUST NOT be used for consensus validity decisions.
+Throughput values are anchored in bytes per second (B/s); SI `MB/s` means `10^6` B/s,
+binary `MiB/s` means `2^20` B/s.
 
 | Parameter | Value |
 |-----------|-------|
@@ -244,8 +246,8 @@ They MUST NOT be used for consensus validity decisions.
 | sendcmpct_mode 2 | Compact high-bandwidth |
 | reject message | Deprecated for mainnet (diagnostic-only on testnet/devnet) |
 | Max high-bandwidth peers | 3 simultaneous |
-| Prefetch rate per peer | 4 MB/s |
-| Prefetch rate global | 32 MB/s |
+| Prefetch rate per peer | `PREFETCH_BYTES_PER_SEC = 4_000_000 B/s` (= 4.0 MB/s SI = 3.81 MiB/s) |
+| Prefetch rate global | `PREFETCH_GLOBAL_BPS = 32_000_000 B/s` (= 32.0 MB/s SI = 30.5 MiB/s) |
 | DA orphan TTL | 3 blocks (360 s) |
 | DA orphan pool | 64 MiB |
 | DA orphan commit overhead cap | 8 MiB (`DA_ORPHAN_COMMIT_OVERHEAD_MAX`) |
