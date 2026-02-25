@@ -3,8 +3,8 @@
   "source_file": "spec/AUDIT_CONTEXT.md",
   "source_sha256": "7aadbff6baea4ecb7d1961c6b2841fb9fcef497751f5e87ec8ae89ac754bdeb2",
   "formal_status": {
-    "proof_level": "toy-model",
-    "claim_level": "toy"
+    "proof_level": "byte-model",
+    "claim_level": "byte"
   },
   "ci_enforcement": {
     "ci_workflow_present": true,
