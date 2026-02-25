@@ -136,6 +136,9 @@ jobs:
       - name: Conformance matrix check
         run: python3 tools/gen_conformance_matrix.py --check
 
+      - name: Conformance fixtures policy check
+        run: python3 tools/check_conformance_fixtures_policy.py
+
       - name: Conformance bundle
         run: |
           python3 conformance/runner/run_cv_bundle.py
