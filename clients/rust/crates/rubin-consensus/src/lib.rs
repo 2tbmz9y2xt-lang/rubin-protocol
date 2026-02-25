@@ -21,6 +21,7 @@ mod verify_sig_openssl;
 mod wire_read;
 
 pub use block::{block_hash, parse_block_header_bytes, BlockHeader, BLOCK_HEADER_BYTES};
+pub use block_basic::tx_weight_and_stats_public;
 pub use block_basic::{
     parse_block_bytes, validate_block_basic, validate_block_basic_at_height,
     validate_block_basic_with_context_and_fees_at_height,
@@ -39,7 +40,6 @@ pub use htlc::{parse_htlc_covenant_data, validate_htlc_spend, HtlcCovenant};
 pub use merkle::merkle_root_txids;
 pub use pow::{pow_check, retarget_v1, retarget_v1_clamped};
 pub use sighash::sighash_v1_digest;
-pub use block_basic::tx_weight_and_stats_public;
 pub use subsidy::block_subsidy;
 pub use tx::{parse_tx, DaChunkCore, DaCommitCore, Tx, TxInput, TxOutput, WitnessItem};
 pub use utxo_basic::{

@@ -40,3 +40,5 @@ import RubinFormal.Conformance.CVForkChoiceVectors
 import RubinFormal.Conformance.CVForkChoiceReplay
 import RubinFormal.Conformance.CVSigVectors
 import RubinFormal.Conformance.CVSigReplay
+import RubinFormal.Conformance.CVCompactVectors
+import RubinFormal.Conformance.CVCompactReplay

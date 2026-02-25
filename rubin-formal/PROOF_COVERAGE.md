@@ -3,19 +3,21 @@
 Источник: `spec/SECTION_HASHES.json`  
 Машинный реестр: `rubin-formal/proof_coverage.json`
 
-Текущее состояние: все pinned секции заведены со статусом `proved` **в рамках `proof_level=toy-model`**.
+Текущее состояние: pinned секции заведены со статусом `stated` в рамках `proof_level=byte-model`,
+а conformance-фикстуры `conformance/fixtures/CV-*.json` полностью покрыты Lean replay-слоем.
 
 ## Термины (важно)
 
-- `proof_level=toy-model` означает: доказательства относятся к упрощённой/модельной семантике и служат baseline-слоем,
-  а не байтовой (wire) или исполняемой (Go/Rust) эквивалентности.
+- `proof_level=byte-model` означает: в репо есть исполняемый (native_decide) Lean replay-слой,
+  который проверяет byte-level свойства на наборе conformance-векторов (CV-*.json).
 - `claim_level` фиксирует допустимый публичный уровень заявлений:
   - `toy` (только model-baseline),
   - `byte` (byte-accurate слой),
   - `refined` (refinement to executable path).
 - `status=proved/stated/deferred` относится к конкретной pinned-секции **в рамках указанного `proof_level`**.
 
-Внешний аудит / freeze-ready коммуникации **НЕ ДОЛЖНЫ** трактовать `status=proved` как “formal verification of CANONICAL”.
+Внешний аудит / freeze-ready коммуникации **НЕ ДОЛЖНЫ** трактовать `proof_level=byte-model`
+как “formal verification of CANONICAL”.
 
 ## Путь к freeze-ready
 

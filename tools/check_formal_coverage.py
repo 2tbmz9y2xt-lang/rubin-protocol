@@ -26,11 +26,20 @@ def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
     section_hashes_path = repo_root / "spec" / "SECTION_HASHES.json"
     coverage_path = repo_root / "rubin-formal" / "proof_coverage.json"
+    fixtures_dir = repo_root / "conformance" / "fixtures"
+    conformance_dir = repo_root / "rubin-formal" / "RubinFormal" / "Conformance"
+    conformance_index = conformance_dir / "Index.lean"
 
     if not section_hashes_path.exists():
         return fail("spec/SECTION_HASHES.json not found")
     if not coverage_path.exists():
         return fail("rubin-formal/proof_coverage.json not found")
+    if not fixtures_dir.exists():
+        return fail("conformance/fixtures not found")
+    if not conformance_dir.exists():
+        return fail("rubin-formal/RubinFormal/Conformance not found")
+    if not conformance_index.exists():
+        return fail("rubin-formal/RubinFormal/Conformance/Index.lean not found")
 
     section_hashes = json.loads(section_hashes_path.read_text(encoding="utf-8"))
     coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
@@ -127,9 +136,82 @@ def main() -> int:
     if bad:
         return 1
 
+    # Conformance fixture → Lean replay coverage check.
+    # Policy: every CV-*.json fixture MUST have a matching Lean vectors+replay module
+    # imported by Conformance/Index.lean, and a gate theorem named:
+    #   cv_<gate_snake>_vectors_pass
+    #
+    # This prevents silently adding fixtures without formal replay coverage.
+    index_txt = conformance_index.read_text(encoding="utf-8")
+
+    def gate_to_camel(gate: str) -> str:
+        if not gate.startswith("CV-"):
+            raise ValueError(f"invalid gate name: {gate}")
+        parts = gate[3:].split("-")
+        return "".join(p.lower().capitalize() for p in parts if p)
+
+    def gate_to_snake(gate: str) -> str:
+        if not gate.startswith("CV-"):
+            raise ValueError(f"invalid gate name: {gate}")
+        return gate[3:].lower().replace("-", "_")
+
+    fixture_files = sorted(p for p in fixtures_dir.glob("CV-*.json") if p.is_file())
+    if not fixture_files:
+        return fail("no CV-*.json fixtures found in conformance/fixtures")
+
+    conf_bad = False
+    for p in fixture_files:
+        fixture = json.loads(p.read_text(encoding="utf-8"))
+        gate = fixture.get("gate")
+        if not isinstance(gate, str) or not gate.startswith("CV-"):
+            print(f"ERROR: invalid or missing gate in fixture {p.relative_to(repo_root)}: {gate}", file=sys.stderr)
+            conf_bad = True
+            continue
+
+        camel = gate_to_camel(gate)
+        snake = gate_to_snake(gate)
+        vectors_file = conformance_dir / f"CV{camel}Vectors.lean"
+        replay_file = conformance_dir / f"CV{camel}Replay.lean"
+
+        if not vectors_file.exists():
+            print(f"ERROR: missing Lean vectors for {gate}: {vectors_file.relative_to(repo_root)}", file=sys.stderr)
+            conf_bad = True
+        if not replay_file.exists():
+            print(f"ERROR: missing Lean replay for {gate}: {replay_file.relative_to(repo_root)}", file=sys.stderr)
+            conf_bad = True
+        else:
+            theorem = f"cv_{snake}_vectors_pass"
+            replay_txt = replay_file.read_text(encoding="utf-8")
+            if theorem not in replay_txt:
+                print(
+                    f"ERROR: missing theorem {theorem} in {replay_file.relative_to(repo_root)} (required for gate replay)",
+                    file=sys.stderr,
+                )
+                conf_bad = True
+
+        imp_vectors = f"import RubinFormal.Conformance.CV{camel}Vectors"
+        imp_replay = f"import RubinFormal.Conformance.CV{camel}Replay"
+        if imp_vectors not in index_txt:
+            print(
+                f"ERROR: Conformance/Index.lean does not import vectors for {gate}: expected line '{imp_vectors}'",
+                file=sys.stderr,
+            )
+            conf_bad = True
+        if imp_replay not in index_txt:
+            print(
+                f"ERROR: Conformance/Index.lean does not import replay for {gate}: expected line '{imp_replay}'",
+                file=sys.stderr,
+            )
+            conf_bad = True
+
+    if conf_bad:
+        return 1
+
     print(
         f"OK: formal coverage baseline is consistent "
-        f"({len(seen_keys)} sections from spec/SECTION_HASHES.json), proof_level={proof_level}, claim_level={claim_level}."
+        f"({len(seen_keys)} sections from spec/SECTION_HASHES.json), "
+        f"{len(fixture_files)} conformance fixtures covered by Lean replay, "
+        f"proof_level={proof_level}, claim_level={claim_level}."
     )
     return 0
 

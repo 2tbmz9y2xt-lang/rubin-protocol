@@ -8,6 +8,7 @@ import RubinFormal.PowV1
 import RubinFormal.TxWeightV2
 import RubinFormal.UtxoBasicV1
 import RubinFormal.BlockBasicV1
+import RubinFormal.BlockBasicCheckV1
 import RubinFormal.SubsidyV1
 import RubinFormal.CovenantGenesisV1
 import RubinFormal.UtxoApplyGenesisV1
