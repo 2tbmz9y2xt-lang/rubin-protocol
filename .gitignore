@@ -11,6 +11,7 @@ output/
 tmp/
 .claude/
 .codex/
+artifacts/
 
 # Local UI tooling (not part of genesis rewrite)
 rubin-ui/
