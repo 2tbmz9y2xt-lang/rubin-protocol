@@ -172,7 +172,12 @@ def build_snapshot(repo_root: Path, context_rel: str) -> dict[str, Any]:
                             break
 
                 if is_finding_id(id_value):
-                    raw_status = row.get("Статус") or row.get("Status")
+                    raw_status = (
+                        row.get("Статус")
+                        or row.get("Status")
+                        or row.get("Final status")
+                        or row.get("Final Status")
+                    )
                     if not raw_status and "Q-ID" in row and row.get("Severity"):
                         raw_status = "OPEN"
                     severity = (row.get("Severity") or "UNSPECIFIED").strip().upper()
