@@ -3,8 +3,7 @@ use num_traits::Zero;
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_with_mtp, block_hash, compact_shortid,
     connect_block_basic_in_memory_at_height, fork_work_from_target, merkle_root_txids, parse_tx,
-    pow_check, retarget_v1, retarget_v1_clamped, sighash_v1_digest,
-    tx_weight_and_stats_public,
+    pow_check, retarget_v1, retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_public,
     validate_block_basic_with_context_and_fees_at_height,
     validate_block_basic_with_context_at_height, validate_tx_covenants_genesis, ErrorCode,
     InMemoryChainState, Outpoint, UtxoEntry,
