@@ -12,11 +12,16 @@
 
 ## Источники истины для triage
 
-1. `spec/RUBIN_L1_CANONICAL.md` (консенсусные правила)
-2. `spec/RUBIN_COMPACT_BLOCKS.md` (normative P2P)
-3. `spec/RUBIN_NETWORK_PARAMS.md` (reference summary; CANONICAL prevails)
-4. `../inbox/QUEUE.md` (операционный статус задач)
-5. `../inbox/reports/*.md` (подробные отчёты и решения)
+1. `spec/AUDIT_SNAPSHOT.json` (machine-readable source-of-truth: status/layer/evidence)
+2. `spec/RUBIN_L1_CANONICAL.md` (консенсусные правила)
+3. `spec/RUBIN_COMPACT_BLOCKS.md` (normative P2P)
+4. `spec/RUBIN_NETWORK_PARAMS.md` (reference summary; CANONICAL prevails)
+5. `../inbox/QUEUE.md` (операционный статус задач)
+6. `../inbox/reports/*.md` (подробные отчёты и решения)
+
+Правило классификации (обязательно):
+- `OPEN` — только если gap подтверждён на соответствующем слое (`spec`/`repo`/`ci`) и нет закрывающего evidence.
+- `UNVERIFIED` (в audit narrative, не в triage-таблицах) — если у аудитора нет доступа к слою; нельзя эскалировать в `OPEN` без evidence.
 
 ## Formal proof-pack (informational)
 

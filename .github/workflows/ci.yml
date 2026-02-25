@@ -161,6 +161,12 @@ jobs:
       - name: Spec section hashes check
         run: node scripts/check-section-hashes.mjs
 
+      - name: Audit snapshot freshness check
+        run: python3 tools/gen_audit_snapshot.py --check
+
+      - name: Audit snapshot schema check
+        run: python3 tools/check_audit_snapshot.py
+
       - name: Crypto backend policy check
         run: python3 tools/check_crypto_backend_policy.py
 

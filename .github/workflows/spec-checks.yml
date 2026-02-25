@@ -9,4 +9,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: echo "spec-checks ok (smoke)"
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.node-version'
+      - name: Spec invariants check
+        run: node scripts/check-spec-invariants.mjs
+      - name: SECTION_HASHES strict check
+        run: node scripts/check-section-hashes.mjs
+      - name: Conformance fixtures policy check
+        run: python3 tools/check_conformance_fixtures_policy.py
+      - name: Audit snapshot freshness check
+        run: python3 tools/gen_audit_snapshot.py --check
+      - name: Audit snapshot schema check
+        run: python3 tools/check_audit_snapshot.py

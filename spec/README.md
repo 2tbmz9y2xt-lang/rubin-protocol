@@ -81,6 +81,9 @@ Integrity:
   - Known-closed findings (KC-01..KC-12)
   - Open findings (Q-C013..Q-C019, HTLC BUG-1/2)
   - Инструкция для аудитора
+- `./AUDIT_SNAPSHOT.json` — machine-readable snapshot (source-of-truth for audit status)
+  - Единый список findings с полями `status`, `layer` (`spec/repo/ci`) и evidence refs
+  - Генерируется из `AUDIT_CONTEXT.md` и проверяется CI
 
 ### Audit Tooling Repro (operational)
 
@@ -97,6 +100,8 @@ scripts/dev-env.sh
 scripts/dev-env.sh -- python3 tools/check_readme_index.py
 scripts/dev-env.sh -- node scripts/check-section-hashes.mjs
 scripts/dev-env.sh -- python3 conformance/runner/run_cv_bundle.py
+scripts/dev-env.sh -- python3 tools/gen_audit_snapshot.py --check
+scripts/dev-env.sh -- python3 tools/check_audit_snapshot.py
 ```
 
 Версия Node.js для spec tooling pinned в корне репо:
@@ -112,6 +117,8 @@ python3 tools/check_section_hashes.py
 node scripts/check-spec-invariants.mjs
 node scripts/check-section-hashes.mjs
 python3 conformance/runner/run_cv_bundle.py
+python3 tools/gen_audit_snapshot.py --check
+python3 tools/check_audit_snapshot.py
 ```
 
 Сборка **audit pack** (для внешнего аудита, только tracked файлы; детерминированный архив):
