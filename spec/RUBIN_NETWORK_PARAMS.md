@@ -23,7 +23,7 @@ Operational defaults and relay policy defaults MUST NOT be treated as validity r
 | Parameter | Value | Class | Source |
 |-----------|-------|-------|--------|
 | `TARGET_BLOCK_INTERVAL` | 120 s | Consensus-critical | CANONICAL §4 |
-| `POW_LIMIT` | 0xffff..ffff (bytes32 max) | Consensus-critical | CANONICAL §4, §15 |
+| `POW_LIMIT` | 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff (bytes32) | Consensus-critical | CANONICAL §4, §15 |
 | `MAX_BLOCK_WEIGHT` | 68,000,000 wu | Consensus-critical | CANONICAL §4 |
 | `MAX_DA_BYTES_PER_BLOCK` | 32,000,000 bytes (30.5 MiB) | Consensus-critical | CANONICAL §4 |
 | `WINDOW_SIZE` (retarget) | 10,080 blocks (14 days) | Consensus-critical | CANONICAL §4 |
