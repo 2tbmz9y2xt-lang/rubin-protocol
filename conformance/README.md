@@ -52,6 +52,30 @@ Check (CI):
 python3 tools/gen_conformance_matrix.py --check
 ```
 
+## Edge-pack baseline (critical domains)
+
+`conformance/EDGE_PACK_BASELINE.json` фиксирует минимально требуемое edge-покрытие
+по доменам:
+
+- parse
+- weight
+- sighash
+- covenants
+- difficulty
+- DA
+
+Проверка (локально/CI):
+
+```bash
+python3 tools/check_conformance_edge_pack.py
+```
+
+Gate падает если:
+
+- отсутствует обязательный gate/fixture для домена;
+- общее число векторов в домене ниже baseline;
+- отсутствуют обязательные edge vector IDs из baseline.
+
 ## Fixture governance (manual-only)
 
 `clients/go/cmd/gen-conformance-fixtures` — **manual-only tool**.

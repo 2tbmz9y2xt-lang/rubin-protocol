@@ -258,7 +258,8 @@ Witness items are parsed and checked for canonical form:
       - The selector payload is encoded inside the `signature` bytes as:
         - `signature[0] = 0x00` (claim) or `0x01` (refund); any other value MUST be rejected as `TX_ERR_PARSE`.
         - If claim (`0x00`): `signature[1:3]` is `u16le(preimage_len)` and `signature[3:]` is `preimage`.
-          `preimage_len MUST be <= MAX_HTLC_PREIMAGE_BYTES` and `sig_length MUST equal 3 + preimage_len`.
+          `preimage_len MUST satisfy 1 <= preimage_len <= MAX_HTLC_PREIMAGE_BYTES` and
+          `sig_length MUST equal 3 + preimage_len`.
         - If refund (`0x01`): `sig_length MUST equal 1`.
   - Any other encoding MUST be rejected as `TX_ERR_PARSE`.
 - If `suite_id = SUITE_ID_ML_DSA_87 (0x01)`:
@@ -785,6 +786,10 @@ Semantics:
 - `CORE_HTLC`:
   - Hash Time-Locked Contract.
   - Active from genesis block 0.
+  - `covenant_data` format:
+    - `hash:bytes32 || lock_mode:u8 || lock_value:u64le || claim_key_id:bytes32 || refund_key_id:bytes32`
+    - `hash` = `SHA3-256(preimage)` for the claim path.
+    - `lock_mode = 0x00` means height-based lock; `lock_mode = 0x01` means timestamp lock (MTP-based).
   - `covenant_data_len MUST equal MAX_HTLC_COVENANT_DATA (105)`.
   - At output creation (CheckTx):
     - `lock_mode MUST be 0x00 or 0x01`; otherwise reject as `TX_ERR_COVENANT_TYPE_INVALID`.

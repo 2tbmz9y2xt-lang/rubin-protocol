@@ -36,8 +36,57 @@ cd "${BUILD_DIR}"
 
 make -j"${JOBS}"
 make install_sw
+make install_fips
+
+MODULE_PATH=""
+for candidate in \
+  "${PREFIX}/lib64/ossl-modules/fips.so" \
+  "${PREFIX}/lib64/ossl-modules/fips.dylib" \
+  "${PREFIX}/lib64/ossl-modules/fips.dll" \
+  "${PREFIX}/lib/ossl-modules/fips.so" \
+  "${PREFIX}/lib/ossl-modules/fips.dylib" \
+  "${PREFIX}/lib/ossl-modules/fips.dll"
+do
+  if [[ -f "${candidate}" ]]; then
+    MODULE_PATH="${candidate}"
+    break
+  fi
+done
+
+if [[ -z "${MODULE_PATH}" ]]; then
+  echo "ERROR: FIPS provider module not found under ${PREFIX}/lib*/ossl-modules" >&2
+  exit 1
+fi
+
+OPENSSL_RUN_LD_LIBRARY_PATH="${PREFIX}/lib64:${PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+LD_LIBRARY_PATH="${OPENSSL_RUN_LD_LIBRARY_PATH}" "${PREFIX}/bin/openssl" fipsinstall \
+  -out "${PREFIX}/ssl/fipsmodule.cnf" \
+  -module "${MODULE_PATH}"
+
+cat > "${PREFIX}/ssl/openssl-fips.cnf" <<EOF
+config_diagnostics = 1
+openssl_conf = openssl_init
+
+.include ${PREFIX}/ssl/fipsmodule.cnf
+
+[openssl_init]
+providers = provider_sect
+alg_section = algorithm_sect
+
+[provider_sect]
+default = default_sect
+fips = fips_sect
+
+[default_sect]
+activate = 1
+
+[fips_sect]
+activate = 1
+
+[algorithm_sect]
+default_properties = fips=yes
+EOF
 
 echo "[openssl-bundle] done"
-OPENSSL_RUN_LD_LIBRARY_PATH="${PREFIX}/lib64:${PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 LD_LIBRARY_PATH="${OPENSSL_RUN_LD_LIBRARY_PATH}" "${PREFIX}/bin/openssl" version -a
 LD_LIBRARY_PATH="${OPENSSL_RUN_LD_LIBRARY_PATH}" "${PREFIX}/bin/openssl" list -signature-algorithms | sed -n '1,40p'

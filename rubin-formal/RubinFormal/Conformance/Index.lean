@@ -28,3 +28,15 @@ import RubinFormal.Conformance.CVHtlcOrderingVectors
 import RubinFormal.Conformance.CVHtlcOrderingReplay
 import RubinFormal.Conformance.CVDaIntegrityVectors
 import RubinFormal.Conformance.CVDaIntegrityReplay
+import RubinFormal.Conformance.CVDeterminismVectors
+import RubinFormal.Conformance.CVDeterminismReplay
+import RubinFormal.Conformance.CVReplayVectors
+import RubinFormal.Conformance.CVReplayReplay
+import RubinFormal.Conformance.CVTimestampVectors
+import RubinFormal.Conformance.CVTimestampReplay
+import RubinFormal.Conformance.CVValidationOrderVectors
+import RubinFormal.Conformance.CVValidationOrderReplay
+import RubinFormal.Conformance.CVForkChoiceVectors
+import RubinFormal.Conformance.CVForkChoiceReplay
+import RubinFormal.Conformance.CVSigVectors
+import RubinFormal.Conformance.CVSigReplay

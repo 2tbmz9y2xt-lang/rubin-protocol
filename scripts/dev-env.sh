@@ -46,9 +46,20 @@ select_openssl() {
     if [[ -x "${RUBIN_OPENSSL_PREFIX}/bin/openssl" ]]; then
       prepend_path_if_exists "${RUBIN_OPENSSL_PREFIX}/bin"
       export OPENSSL_DIR="${RUBIN_OPENSSL_PREFIX}"
-      export PKG_CONFIG_PATH="${RUBIN_OPENSSL_PREFIX}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+      local rubin_pkg_paths=()
+      if [[ -d "${RUBIN_OPENSSL_PREFIX}/lib64/pkgconfig" ]]; then
+        rubin_pkg_paths+=("${RUBIN_OPENSSL_PREFIX}/lib64/pkgconfig")
+      fi
+      if [[ -d "${RUBIN_OPENSSL_PREFIX}/lib/pkgconfig" ]]; then
+        rubin_pkg_paths+=("${RUBIN_OPENSSL_PREFIX}/lib/pkgconfig")
+      fi
+      if [[ ${#rubin_pkg_paths[@]} -gt 0 ]]; then
+        export PKG_CONFIG_PATH="$(IFS=:; echo "${rubin_pkg_paths[*]}")${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+      fi
       if [[ -d "${RUBIN_OPENSSL_PREFIX}/lib/ossl-modules" ]]; then
         export OPENSSL_MODULES="${RUBIN_OPENSSL_PREFIX}/lib/ossl-modules"
+      elif [[ -d "${RUBIN_OPENSSL_PREFIX}/lib64/ossl-modules" ]]; then
+        export OPENSSL_MODULES="${RUBIN_OPENSSL_PREFIX}/lib64/ossl-modules"
       fi
     else
       echo "ERROR: RUBIN_OPENSSL_PREFIX is set but missing bin/openssl: ${RUBIN_OPENSSL_PREFIX}" >&2
@@ -59,22 +70,21 @@ select_openssl() {
   # Prefer Homebrew OpenSSL@3 to avoid macOS LibreSSL default.
   # This is required by the normative non-consensus profile:
   #   spec/RUBIN_CRYPTO_BACKEND_PROFILE.md (OpenSSL 3.5+).
-  if [[ -n "${OPENSSL_DIR:-}" ]]; then
-    return 0
-  fi
-  if [[ -x "/opt/homebrew/opt/openssl@3/bin/openssl" ]]; then
-    prepend_path_if_exists "/opt/homebrew/opt/openssl@3/bin"
-    export OPENSSL_DIR="/opt/homebrew/opt/openssl@3"
-    export PKG_CONFIG_PATH="/opt/homebrew/opt/openssl@3/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
-    if [[ -d "/opt/homebrew/opt/openssl@3/lib/ossl-modules" ]]; then
-      export OPENSSL_MODULES="/opt/homebrew/opt/openssl@3/lib/ossl-modules"
-    fi
-  elif [[ -x "/usr/local/opt/openssl@3/bin/openssl" ]]; then
-    prepend_path_if_exists "/usr/local/opt/openssl@3/bin"
-    export OPENSSL_DIR="/usr/local/opt/openssl@3"
-    export PKG_CONFIG_PATH="/usr/local/opt/openssl@3/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
-    if [[ -d "/usr/local/opt/openssl@3/lib/ossl-modules" ]]; then
-      export OPENSSL_MODULES="/usr/local/opt/openssl@3/lib/ossl-modules"
+  if [[ -z "${OPENSSL_DIR:-}" ]]; then
+    if [[ -x "/opt/homebrew/opt/openssl@3/bin/openssl" ]]; then
+      prepend_path_if_exists "/opt/homebrew/opt/openssl@3/bin"
+      export OPENSSL_DIR="/opt/homebrew/opt/openssl@3"
+      export PKG_CONFIG_PATH="/opt/homebrew/opt/openssl@3/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+      if [[ -d "/opt/homebrew/opt/openssl@3/lib/ossl-modules" ]]; then
+        export OPENSSL_MODULES="/opt/homebrew/opt/openssl@3/lib/ossl-modules"
+      fi
+    elif [[ -x "/usr/local/opt/openssl@3/bin/openssl" ]]; then
+      prepend_path_if_exists "/usr/local/opt/openssl@3/bin"
+      export OPENSSL_DIR="/usr/local/opt/openssl@3"
+      export PKG_CONFIG_PATH="/usr/local/opt/openssl@3/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+      if [[ -d "/usr/local/opt/openssl@3/lib/ossl-modules" ]]; then
+        export OPENSSL_MODULES="/usr/local/opt/openssl@3/lib/ossl-modules"
+      fi
     fi
   fi
 
@@ -84,6 +94,26 @@ select_openssl() {
   fi
   if [[ -n "${RUBIN_OPENSSL_CONF:-}" ]]; then
     export OPENSSL_CONF="${RUBIN_OPENSSL_CONF}"
+  fi
+
+  if [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" == "only" ]]; then
+    local openssl_base=""
+    if [[ -n "${RUBIN_OPENSSL_PREFIX:-}" ]]; then
+      openssl_base="${RUBIN_OPENSSL_PREFIX}"
+    elif [[ -n "${OPENSSL_DIR:-}" ]]; then
+      openssl_base="${OPENSSL_DIR}"
+    fi
+
+    if [[ -n "${openssl_base}" ]]; then
+      if [[ -z "${OPENSSL_MODULES:-}" && -d "${openssl_base}/lib/ossl-modules" ]]; then
+        export OPENSSL_MODULES="${openssl_base}/lib/ossl-modules"
+      elif [[ -z "${OPENSSL_MODULES:-}" && -d "${openssl_base}/lib64/ossl-modules" ]]; then
+        export OPENSSL_MODULES="${openssl_base}/lib64/ossl-modules"
+      fi
+      if [[ -z "${OPENSSL_CONF:-}" && -f "${openssl_base}/ssl/openssl-fips.cnf" ]]; then
+        export OPENSSL_CONF="${openssl_base}/ssl/openssl-fips.cnf"
+      fi
+    fi
   fi
 }
 

@@ -57,3 +57,16 @@ Policy:
 - `CV-COMPACT.json`
 - `CV-VAULT-POLICY.json` (new)
 - `CV-HTLC-ORDERING.json` (new)
+
+## 2026-02-25 — CV-WEIGHT baseline fixture
+
+Причина:
+- добавить отдельный gate `CV-WEIGHT` в общий conformance baseline;
+- зафиксировать детерминированные векторы веса для `suite_id=0x00/0x01/0x02`, DA-size и anchor-bytes.
+
+Инструменты:
+- ручное добавление `conformance/fixtures/CV-WEIGHT.json`,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-WEIGHT`.
+
+Изменённые fixtures:
+- `CV-WEIGHT.json` (new)
