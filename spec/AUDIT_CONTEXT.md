@@ -42,7 +42,6 @@
 | ID | Статус | Кратко |
 |---|---|---|
 | F-03 | ALREADY_FIXED | End-to-end `verify_sig` (PQC подписи) реализован as-spec: OpenSSL EVP verify backend (Go reference + Rust parity) подключён в spend‑пути (`CORE_P2PK`/`CORE_MULTISIG`/`CORE_VAULT`/`CORE_HTLC`) и покрыт executable conformance (fixtures с реальными ML‑DSA подписями). См. `../inbox/reports/2026-02-25_report_q-r006_verify_sig_openssl_done.md`. |
-| F-CRYPTO-SLH-01 | OPEN | SLH-DSA suite (`suite_id=0x02`, `SLH-DSA-SHAKE-256f`) **не поддерживается текущим OpenSSL provider** (Homebrew OpenSSL 3.6.1: `provider signature not supported`). Поэтому нет end-to-end conformance coverage для SLH witness items (fallback) и нельзя воспроизводимо сгенерировать валидные SLH подписи через OpenSSL путь. Требуется выбранная стратегия backend’а/профиля и отдельный gate `CV-SLH`. См. `../inbox/reports/2026-02-25_report_q-crypto-slh-01_openssl_provider_gap.md`. |
 | F-05 | ALREADY_FIXED | Coinbase bound теперь вызывается только из stateful `connect_block`-пути с локально вычисленным `sum_fees` (UTXO apply non-coinbase tx). `already_generated(h)` ведётся в chainstate-счётчике (in-memory reference). Персистентное хранилище chainstate (DB) требуется для “ноды”, но не влияет на консенсусную семантику и вынесено отдельно. |
 | F-10 | ALREADY_FIXED | `RUBIN_L1_P2P_AUX.md` содержит минимальные `version`/`verack` поля (`tx_relay`, `pruned_below_height`) на которые ссылается COMPACT. |
 
@@ -103,6 +102,12 @@
 | Risk ID | Статус | Где зафиксировано |
 |---|---|---|
 | `ACCEPTED_RISK_TS_MTP_MULTIWINDOW` | ACCEPTED_RISK | `RUBIN_L1_CANONICAL.md` §22 (timestamp security note) |
+| `ACCEPTED_RISK_FIPS_PROVIDER_PQC_AVAILABILITY` | ACCEPTED_RISK | `RUBIN_CRYPTO_BACKEND_PROFILE.md` §4 (FIPS positioning) |
+
+Пояснение `ACCEPTED_RISK_FIPS_PROVIDER_PQC_AVAILABILITY`:
+- Риск: на целевой платформе/дистрибутиве OpenSSL FIPS provider может не включать ML-DSA/SLH-DSA, даже если эти алгоритмы доступны в `default` provider.
+- Импакт: узел, запущенный в “FIPS-only mode”, может не суметь валидировать PQC‑подписи (fail-start или runtime reject).
+- Митигация: RUBIN **не** требует и **не** включает “FIPS-only mode” до подтверждения PQC‑доступности/совместимости в FIPS provider на целевой платформе (CI + reproducible preflight).
 
 ## Правило обновления
 
