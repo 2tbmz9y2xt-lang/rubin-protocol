@@ -2,3 +2,5 @@ import RubinFormal.Conformance.CVParseVectors
 import RubinFormal.Conformance.CVParseReplay
 import RubinFormal.Conformance.CVMerkleVectors
 import RubinFormal.Conformance.CVMerkleReplay
+import RubinFormal.Conformance.CVOutputDescriptorVectors
+import RubinFormal.Conformance.CVOutputDescriptorReplay

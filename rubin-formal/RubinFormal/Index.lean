@@ -2,3 +2,4 @@ import RubinFormal.ByteWire
 import RubinFormal.ArithmeticSafety
 import RubinFormal.Conformance.Index
 import RubinFormal.PinnedSections
+import RubinFormal.OutputDescriptorV2
