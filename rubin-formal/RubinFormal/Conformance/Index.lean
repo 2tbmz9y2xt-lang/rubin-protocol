@@ -4,3 +4,5 @@ import RubinFormal.Conformance.CVMerkleVectors
 import RubinFormal.Conformance.CVMerkleReplay
 import RubinFormal.Conformance.CVOutputDescriptorVectors
 import RubinFormal.Conformance.CVOutputDescriptorReplay
+import RubinFormal.Conformance.CVSighashVectors
+import RubinFormal.Conformance.CVSighashReplay
