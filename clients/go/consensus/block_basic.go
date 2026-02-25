@@ -146,6 +146,9 @@ func ValidateBlockBasicWithContextAtHeight(
 	if len(pb.Txs) == 0 || !isCoinbaseTx(pb.Txs[0]) {
 		return nil, txerr(BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
 	}
+	if blockHeight > uint64(^uint32(0)) {
+		return nil, txerr(BLOCK_ERR_COINBASE_INVALID, "block height exceeds coinbase locktime range")
+	}
 	if pb.Txs[0].Locktime != uint32(blockHeight) {
 		return nil, txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase locktime must equal block height")
 	}
@@ -359,14 +362,14 @@ func medianTimePast(blockHeight uint64, prevTimestamps []uint64) (uint64, bool, 
 	if blockHeight == 0 || len(prevTimestamps) == 0 {
 		return 0, false, nil
 	}
-	k := int(blockHeight)
-	if k > 11 {
-		k = 11
+	k := uint64(11)
+	if blockHeight < k {
+		k = blockHeight
 	}
-	if len(prevTimestamps) < k {
+	if len(prevTimestamps) < int(k) {
 		return 0, false, txerr(BLOCK_ERR_PARSE, "insufficient prev_timestamps context")
 	}
-	window := append([]uint64(nil), prevTimestamps[:k]...)
+	window := append([]uint64(nil), prevTimestamps[:int(k)]...)
 	sort.Slice(window, func(i, j int) bool { return window[i] < window[j] })
 	return window[(len(window)-1)/2], true, nil
 }
