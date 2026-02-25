@@ -1053,8 +1053,11 @@ Target range:
 - `target_old` and `target_new` MUST satisfy `1 <= target <= POW_LIMIT`.
 
 All division is integer division with floor.
-Intermediate products (`target_old * T_actual` and `target_old * 4`) MUST be computed using at least 320-bit
-unsigned integer arithmetic (or arbitrary-precision). Silent truncation is non-conforming.
+Intermediate products (`target_old * T_actual` and `target_old * 4`) MUST be computed with
+unsigned arbitrary-precision integer arithmetic (normative target).
+Implementations MAY use fixed-width arithmetic only if it is provably equivalent for the full valid input range;
+in such cases, 320-bit unsigned width is the minimum acceptable bound.
+Any overflow or silent truncation is non-conforming.
 
 ## 16. Transaction Structural Rules (Normative)
 
@@ -1318,9 +1321,11 @@ For each non-coinbase transaction `T`:
 1. Let `sum_in` be the sum of referenced input values.
 2. Let `sum_out` be the sum of `T.outputs[j].value` over all outputs `j`.
 3. Let `sum_in_vault` be the sum of referenced input values whose UTXO covenant type is `CORE_VAULT`.
+   If `T` spends no `CORE_VAULT` inputs, define `sum_in_vault = 0`.
 4. If `sum_out > sum_in`, reject as `TX_ERR_VALUE_CONSERVATION`.
 5. If `T` spends at least one `CORE_VAULT` input and `sum_out < sum_in_vault`,
    reject as `TX_ERR_VALUE_CONSERVATION`.
+   Validation order is strict: Rule 4 MUST be evaluated before Rule 5.
 6. Arithmetic MUST be exact and MUST be computed in at least 128-bit unsigned integer arithmetic.
    Any overflow MUST be rejected as `TX_ERR_PARSE`.
 
