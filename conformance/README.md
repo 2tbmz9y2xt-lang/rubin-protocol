@@ -36,3 +36,18 @@ Run a single gate:
 python3 conformance/runner/run_cv_bundle.py --only-gates CV-COMPACT
 ```
 
+## Coverage matrix
+
+`conformance/MATRIX.md` is a generated coverage overview (gates/vectors/ops; local-only vs executable).
+
+Regenerate:
+
+```bash
+python3 tools/gen_conformance_matrix.py
+```
+
+Check (CI):
+
+```bash
+python3 tools/gen_conformance_matrix.py --check
+```
