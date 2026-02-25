@@ -509,6 +509,17 @@ func main() {
 			Utxos:            utxos,
 			AlreadyGenerated: req.AlreadyGenerated,
 		}
+
+		var chainID [32]byte
+		if strings.TrimSpace(req.ChainIDHex) != "" {
+			chainIDBytes, err := hex.DecodeString(req.ChainIDHex)
+			if err != nil || len(chainIDBytes) != 32 {
+				writeResp(os.Stdout, Response{Ok: false, Err: "bad chain_id"})
+				return
+			}
+			copy(chainID[:], chainIDBytes)
+		}
+
 		s, err := consensus.ConnectBlockBasicInMemoryAtHeight(
 			blockBytes,
 			expectedPrev,
@@ -516,6 +527,7 @@ func main() {
 			req.Height,
 			req.PrevTimestamps,
 			&st,
+			chainID,
 		)
 		if err != nil {
 			if te, ok := err.(*consensus.TxError); ok {
@@ -606,7 +618,17 @@ func main() {
 			blockMTP = *req.BlockMTP
 		}
 
-		s, err := consensus.ApplyNonCoinbaseTxBasicWithMTP(tx, txid, utxos, req.Height, req.BlockTimestamp, blockMTP)
+		var chainID [32]byte
+		if strings.TrimSpace(req.ChainIDHex) != "" {
+			chainIDBytes, err := hex.DecodeString(req.ChainIDHex)
+			if err != nil || len(chainIDBytes) != 32 {
+				writeResp(os.Stdout, Response{Ok: false, Err: "bad chain_id"})
+				return
+			}
+			copy(chainID[:], chainIDBytes)
+		}
+
+		s, err := consensus.ApplyNonCoinbaseTxBasicWithMTP(tx, txid, utxos, req.Height, req.BlockTimestamp, blockMTP, chainID)
 		if err != nil {
 			if te, ok := err.(*consensus.TxError); ok {
 				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})

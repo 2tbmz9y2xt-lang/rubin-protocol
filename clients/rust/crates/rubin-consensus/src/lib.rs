@@ -12,10 +12,12 @@ mod htlc;
 pub mod merkle;
 pub mod pow;
 pub mod sighash;
+mod spend_verify;
 pub mod subsidy;
 pub mod tx;
 mod utxo_basic;
 mod vault;
+mod verify_sig_openssl;
 mod wire_read;
 
 pub use block::{block_hash, parse_block_header_bytes, BlockHeader, BLOCK_HEADER_BYTES};

@@ -155,14 +155,14 @@ When `spend_path_item.signature[0] = 0x00`:
    `SHA3-256(sig_item.pubkey) MUST equal claim_key_id` from `covenant_data`.
    Otherwise reject as `TX_ERR_SIG_INVALID`.
 
-4. **Signature verification:**
+4. **SLH-DSA gate:** if `sig_item.suite_id = SUITE_ID_SLH_DSA_SHAKE_256F (0x02)` and
+   `block_height < SLH_DSA_ACTIVATION_HEIGHT`, reject as `TX_ERR_SIG_ALG_INVALID`.
+
+5. **Signature verification:**
    `verify_sig(sig_item.suite_id, sig_item.pubkey, sig_item.signature, digest) MUST be true`
    where `digest` is the sighash v1 digest (`RUBIN_L1_CANONICAL.md` §12)
    with `input_index` bound to this input's position in the transaction.
    Otherwise reject as `TX_ERR_SIG_INVALID`.
-
-5. **SLH-DSA gate:** if `sig_item.suite_id = SUITE_ID_SLH_DSA_SHAKE_256F (0x02)` and
-   `block_height < SLH_DSA_ACTIVATION_HEIGHT`, reject as `TX_ERR_SIG_ALG_INVALID`.
 
 ### 5.3 Refund Path Validation
 
@@ -187,12 +187,13 @@ When `spend_path_item.signature[0] = 0x01`:
    `SHA3-256(sig_item.pubkey) MUST equal refund_key_id` from `covenant_data`.
    Otherwise reject as `TX_ERR_SIG_INVALID`.
 
-4. **Signature verification:**
+4. **SLH-DSA gate:** if `sig_item.suite_id = SUITE_ID_SLH_DSA_SHAKE_256F (0x02)` and
+   `block_height < SLH_DSA_ACTIVATION_HEIGHT`, reject as `TX_ERR_SIG_ALG_INVALID`.
+
+5. **Signature verification:**
    `verify_sig(sig_item.suite_id, sig_item.pubkey, sig_item.signature, digest) MUST be true`
    where `digest` is per `RUBIN_L1_CANONICAL.md` §12.
    Otherwise reject as `TX_ERR_SIG_INVALID`.
-
-5. **SLH-DSA gate:** same as claim path rule 5 above.
 
 ### 5.4 Invalid Path
 
@@ -219,6 +220,8 @@ rejected as `TX_ERR_PARSE`.
 
 Error priority follows the global ordering defined in Section 13 of RUBIN_L1_CANONICAL.md.
 Structural/parse errors MUST be returned before signature verification is attempted.
+If `sig_item.suite_id = SUITE_ID_SLH_DSA_SHAKE_256F (0x02)` at `block_height < SLH_DSA_ACTIVATION_HEIGHT`,
+implementations MUST return `TX_ERR_SIG_ALG_INVALID` before calling `verify_sig(...)`.
 
 ---
 
@@ -255,6 +258,7 @@ See `conformance/fixtures/CV-HTLC.json`. Required coverage:
 | CV-HTLC-11 | claim | `preimage_len = 0` | `TX_ERR_PARSE` |
 | CV-HTLC-12 | creation | `lock_value = 0` | `TX_ERR_COVENANT_TYPE_INVALID` |
 | CV-HTLC-13 | refund | timestamp refund uses `MTP` (not `block_timestamp`) | `OK` |
+| CV-HTLC-14 | claim | `suite_id = 0x02` before activation (even with invalid signature bytes) | `TX_ERR_SIG_ALG_INVALID` |
 
 ---
 

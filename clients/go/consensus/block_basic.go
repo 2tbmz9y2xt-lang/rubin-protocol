@@ -441,7 +441,24 @@ func validateDASetIntegrity(txs []*Tx) error {
 			concat = append(concat, chunkTx.DaPayload...)
 		}
 		payloadCommitment := sha3_256(concat)
-		if payloadCommitment != commit.tx.DaCommitCore.PayloadCommitment {
+
+		// CANONICAL §21.4: commit tx MUST contain exactly one CORE_DA_COMMIT output whose
+		// covenant_data equals the payload commitment hash (missing/duplicate are invalid).
+		daCommitOutputs := 0
+		var gotCommitment [32]byte
+		for _, out := range commit.tx.Outputs {
+			if out.CovenantType != COV_TYPE_DA_COMMIT {
+				continue
+			}
+			daCommitOutputs++
+			if len(out.CovenantData) == 32 {
+				copy(gotCommitment[:], out.CovenantData)
+			}
+		}
+		if daCommitOutputs != 1 {
+			return txerr(BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID, "DA commitment output missing or duplicated")
+		}
+		if gotCommitment != payloadCommitment {
 			return txerr(BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID, "payload commitment mismatch")
 		}
 	}

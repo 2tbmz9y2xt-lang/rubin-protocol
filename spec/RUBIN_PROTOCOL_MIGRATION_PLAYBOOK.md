@@ -35,8 +35,8 @@ scripts/dev-env.sh -- python3 tools/check_conformance_ids.py
 scripts/dev-env.sh -- node scripts/check-spec-invariants.mjs
 scripts/dev-env.sh -- node scripts/check-section-hashes.mjs
 scripts/dev-env.sh -- python3 conformance/runner/run_cv_bundle.py
-scripts/dev-env.sh -- bash -lc 'cd clients/go && go test ./...'
-scripts/dev-env.sh -- bash -lc 'cd clients/rust && cargo test --workspace'
+scripts/dev-env.sh -- bash -c 'cd clients/go && go test ./...'
+scripts/dev-env.sh -- bash -c 'cd clients/rust && cargo test --workspace'
 ```
 
 ## 4) Rollback policy (Phase‑0/devnet)
@@ -46,4 +46,3 @@ scripts/dev-env.sh -- bash -lc 'cd clients/rust && cargo test --workspace'
   - consensus-critical rollback делается только через согласованное governance-решение
     (новая активация или перезапуск devnet с новым genesis), иначе риск split.
   - non-consensus rollback допускается обычным revert PR.
-

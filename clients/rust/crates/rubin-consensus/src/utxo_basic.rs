@@ -8,6 +8,8 @@ use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
 use crate::htlc::{parse_htlc_covenant_data, validate_htlc_spend};
+use crate::sighash::sighash_v1_digest;
+use crate::spend_verify::{validate_p2pk_spend, validate_threshold_sig_spend};
 use crate::tx::Tx;
 use crate::vault::{
     hash_in_sorted_32, output_descriptor_bytes, parse_multisig_covenant_data,
@@ -41,6 +43,7 @@ pub fn apply_non_coinbase_tx_basic_update(
     utxo_set: &HashMap<Outpoint, UtxoEntry>,
     height: u64,
     block_timestamp: u64,
+    chain_id: [u8; 32],
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
     apply_non_coinbase_tx_basic_update_with_mtp(
         tx,
@@ -49,6 +52,7 @@ pub fn apply_non_coinbase_tx_basic_update(
         height,
         block_timestamp,
         block_timestamp,
+        chain_id,
     )
 }
 
@@ -59,6 +63,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
     height: u64,
     block_timestamp: u64,
     block_mtp: u64,
+    chain_id: [u8; 32],
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
     let _ = block_timestamp;
     if tx.inputs.is_empty() {
@@ -82,13 +87,18 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
     let mut vault_input_count: usize = 0;
     let mut vault_whitelist: Vec<[u8; 32]> = Vec::new();
     let mut vault_owner_lock_id: [u8; 32] = [0u8; 32];
+    let mut vault_sig_keys: Vec<[u8; 32]> = Vec::new();
+    let mut vault_sig_threshold: u8 = 0;
+    let mut vault_sig_witness: Vec<crate::tx::WitnessItem> = Vec::new();
+    let mut vault_sig_digest: [u8; 32] = [0u8; 32];
+    let mut have_vault_sig: bool = false;
     let mut witness_cursor: usize = 0;
     let mut input_lock_ids: Vec<[u8; 32]> = Vec::with_capacity(tx.inputs.len());
     let mut input_cov_types: Vec<u16> = Vec::with_capacity(tx.inputs.len());
     let mut seen_inputs: HashMap<Outpoint, ()> = HashMap::with_capacity(tx.inputs.len());
     let zero_txid: [u8; 32] = [0u8; 32];
 
-    for input in &tx.inputs {
+    for (input_index, input) in tx.inputs.iter().enumerate() {
         if !input.script_sig.is_empty() {
             return Err(TxError::new(
                 ErrorCode::TxErrParse,
@@ -136,6 +146,8 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
                 "coinbase immature",
             ));
         }
+        let digest = sighash_v1_digest(tx, input_index as u32, entry.value, chain_id)?;
+
         if entry.covenant_type == COV_TYPE_HTLC {
             let slots = 2usize;
             if witness_cursor + slots > tx.witness.len() {
@@ -148,6 +160,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
                 &entry,
                 &tx.witness[witness_cursor],
                 &tx.witness[witness_cursor + 1],
+                &digest,
                 height,
                 block_mtp,
             )?;
@@ -160,6 +173,41 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
             }
             if witness_cursor + slots > tx.witness.len() {
                 return Err(TxError::new(ErrorCode::TxErrParse, "witness underflow"));
+            }
+            let assigned = &tx.witness[witness_cursor..witness_cursor + slots];
+
+            match entry.covenant_type {
+                COV_TYPE_P2PK => {
+                    if slots != 1 {
+                        return Err(TxError::new(
+                            ErrorCode::TxErrParse,
+                            "CORE_P2PK witness_slots must be 1",
+                        ));
+                    }
+                    validate_p2pk_spend(&entry, &assigned[0], &digest, height)?;
+                }
+                COV_TYPE_MULTISIG => {
+                    let m = parse_multisig_covenant_data(&entry.covenant_data)?;
+                    validate_threshold_sig_spend(
+                        &m.keys,
+                        m.threshold,
+                        assigned,
+                        &digest,
+                        height,
+                        "CORE_MULTISIG",
+                    )?;
+                }
+                COV_TYPE_VAULT => {
+                    let v = parse_vault_covenant_data(&entry.covenant_data)?;
+                    // CORE_VAULT signature threshold is checked later (CANONICAL §24.1),
+                    // after owner-authorization and no-fee-sponsorship checks.
+                    vault_sig_keys = v.keys.clone();
+                    vault_sig_threshold = v.threshold;
+                    vault_sig_witness = assigned.to_vec();
+                    vault_sig_digest = digest;
+                    have_vault_sig = true;
+                }
+                _ => {}
             }
             witness_cursor += slots;
         }
@@ -257,6 +305,12 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
 
     // CORE_VAULT spend rules: safe-only model with owner binding and strict whitelist.
     if vault_input_count == 1 {
+        if !have_vault_sig {
+            return Err(TxError::new(
+                ErrorCode::TxErrParse,
+                "missing CORE_VAULT signature context",
+            ));
+        }
         // Owner input required.
         let mut owner_auth_present = false;
         for h in &input_lock_ids {
@@ -284,6 +338,16 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
                 ));
             }
         }
+
+        // Signature threshold check (CANONICAL §24.1 step 7).
+        validate_threshold_sig_spend(
+            &vault_sig_keys,
+            vault_sig_threshold,
+            &vault_sig_witness,
+            &vault_sig_digest,
+            height,
+            "CORE_VAULT",
+        )?;
 
         // Whitelist enforcement: all outputs must be whitelisted.
         for out in &tx.outputs {
@@ -328,6 +392,7 @@ pub fn apply_non_coinbase_tx_basic(
     utxo_set: &HashMap<Outpoint, UtxoEntry>,
     height: u64,
     block_timestamp: u64,
+    chain_id: [u8; 32],
 ) -> Result<UtxoApplySummary, TxError> {
     apply_non_coinbase_tx_basic_with_mtp(
         tx,
@@ -336,6 +401,7 @@ pub fn apply_non_coinbase_tx_basic(
         height,
         block_timestamp,
         block_timestamp,
+        chain_id,
     )
 }
 
@@ -346,6 +412,7 @@ pub fn apply_non_coinbase_tx_basic_with_mtp(
     height: u64,
     block_timestamp: u64,
     block_mtp: u64,
+    chain_id: [u8; 32],
 ) -> Result<UtxoApplySummary, TxError> {
     let (_work, summary) = apply_non_coinbase_tx_basic_update_with_mtp(
         tx,
@@ -354,6 +421,7 @@ pub fn apply_non_coinbase_tx_basic_with_mtp(
         height,
         block_timestamp,
         block_mtp,
+        chain_id,
     )?;
     Ok(summary)
 }
