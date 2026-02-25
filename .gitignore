@@ -33,6 +33,10 @@ rubin-formal/build/
 *.sqlite3
 .DS_Store
 
+# Python bytecode
+**/__pycache__/
+**/*.pyc
+
 # JSON guard artifacts (never commit)
 *.invalid.*.json
 
