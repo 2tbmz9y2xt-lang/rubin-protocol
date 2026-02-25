@@ -127,6 +127,11 @@ print_versions() {
   echo "rustc: $(rustc --version 2>/dev/null || echo 'missing')"
   echo "cargo: $(cargo --version 2>/dev/null || echo 'missing')"
   echo "openssl: $(openssl version 2>/dev/null || echo 'missing')"
+  if maybe_cmd gh; then
+    echo "gh: $(gh --version 2>/dev/null | head -n 1 || echo 'present')"
+  else
+    echo "gh: missing (ok unless opening PRs from CLI)"
+  fi
 
   if maybe_cmd elan; then
     echo "elan: $(elan --version 2>/dev/null || echo 'missing')"
