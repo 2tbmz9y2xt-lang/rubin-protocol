@@ -30,6 +30,8 @@ Note for hardware provisioning: 17.21 TiB raw data requires a disk marketed as ~
 | `MAX_BLOCK_WEIGHT` | 68_000_000 wu | Single unified weight pool; DA has a *separate* byte cap (MAX_DA_BYTES_PER_BLOCK) |
 | `MAX_BLOCK_BYTES` | 72_000_000 bytes (= 72 MB) | Operational P2P parser cap; exceeds consensus weight limit by design (safety margin) |
 | `MAX_DA_BYTES_PER_BLOCK` | 32_000_000 bytes (= 30.5 MiB) | |
+| `CHUNK_BYTES` | 524_288 bytes (512 KiB) | Informational; consensus value defined in CANONICAL §4 |
+| `MAX_DA_CHUNK_COUNT` | 61 (derived) | = floor(MAX_DA_BYTES_PER_BLOCK / CHUNK_BYTES); consensus in CANONICAL §4 |
 | `WINDOW_SIZE` | 10_080 blocks | retarget = 14 days |
 | `MIN_DA_RETENTION_BLOCKS` | 15_120 blocks | DA pruning window = 21 days |
 | `MAX_RELAY_MSG_BYTES` | 96_000_000 bytes (= 91.6 MiB) | |
@@ -52,6 +54,11 @@ Note for hardware provisioning: 17.21 TiB raw data requires a disk marketed as ~
 | `PREFETCH_GLOBAL_BPS` | 32_000_000 B/s | = PREFETCH_GLOBAL_PARALLEL x PREFETCH_BYTES_PER_SEC |
 | `RELAY_TIMEOUT_BASE_MS` | 2_000 ms | base relay timeout before payload scaling |
 | `RELAY_TIMEOUT_RATE` | 4_000_000 B/s | divisor for payload-size timeout extension (aligned with PREFETCH_BYTES_PER_SEC baseline) |
+
+Note:
+`MAX_DA_CHUNK_COUNT` is derived from consensus constants and MUST NOT
+be independently modified in this document.
+Authoritative definition resides in `RUBIN_L1_CANONICAL.md`.
 
 ### 1.1 Network Characteristics
 
@@ -283,7 +290,10 @@ Eviction: total_fee / total_bytes (lower = evicted first), atomic by da_id.
 
 - Only COMPLETE_SET may be pinned. Pinning an incomplete set is a DoS vector
   (commit spam without chunks blocks pinned memory at no real cost to attacker).
-- Eviction is always atomic by da_id. No orphaned chunks without a commit.
+- Eviction is always atomic by da_id.
+- Orphan chunks (State A) MAY exist without a commit,
+  but MUST NOT be pinned and MUST be subject to
+  DA_ORPHAN_POOL limits and TTL.
 - CheckBlock independently forbids inclusion of an incomplete set regardless
   of mempool state. See RUBIN_L1_CANONICAL.md §21.3 for the consensus rule.
 - Per-peer and per-da_id limits are applied simultaneously and independently.
