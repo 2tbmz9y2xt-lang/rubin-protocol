@@ -77,6 +77,18 @@ jobs:
           print(f"ok: {len(paths)} files")
           PY
 
+      - name: Check README index/precedence
+        run: python3 tools/check_readme_index.py
+
+      - name: Check SECTION_HASHES integrity (python)
+        run: python3 tools/check_section_hashes.py
+
+      - name: Check conformance fixtures IDs + changelog presence
+        run: python3 tools/check_conformance_ids.py
+
+      - name: Hygiene: no absolute home paths
+        run: python3 tools/check_no_absolute_paths.py
+
       - name: Go fmt
         run: |
           cd clients/go
