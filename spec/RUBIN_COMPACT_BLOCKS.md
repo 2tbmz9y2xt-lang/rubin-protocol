@@ -51,7 +51,7 @@ Note for hardware provisioning: 17.21 TiB raw data requires a disk marketed as ~
 | `PREFETCH_GLOBAL_PARALLEL` | 8 sets | global parallel prefetch cap for STAGED_COMMIT sets (independent from pinned COMPLETE_SET cap) |
 | `PREFETCH_GLOBAL_BPS` | 32_000_000 B/s | = PREFETCH_GLOBAL_PARALLEL x PREFETCH_BYTES_PER_SEC |
 | `RELAY_TIMEOUT_BASE_MS` | 2_000 ms | base relay timeout before payload scaling |
-| `RELAY_TIMEOUT_RATE` | 1_000_000 B/s | divisor for payload-size timeout extension |
+| `RELAY_TIMEOUT_RATE` | 4_000_000 B/s | divisor for payload-size timeout extension (aligned with PREFETCH_BYTES_PER_SEC baseline) |
 
 ### 1.1 Network Characteristics
 
@@ -183,7 +183,7 @@ request → propagation delay → at high miss rates compact blocks perform wors
   - `len(DA_Payload)` is in bytes
   - `RELAY_TIMEOUT_RATE` is in bytes per second (B/s)
   - the quotient is converted to milliseconds
-  Example: 32 MB payload → 2000 + (32_000_000 * 1000) / 1_000_000 = 34_000 ms
+  Example: 32 MB payload → 2000 + (32_000_000 * 1000) / 4_000_000 = 10_000 ms
 
 **Formal definition of miss_rate_bytes:**
 
