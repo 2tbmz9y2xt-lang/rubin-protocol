@@ -4,3 +4,4 @@ import RubinFormal.Conformance.Index
 import RubinFormal.PinnedSections
 import RubinFormal.OutputDescriptorV2
 import RubinFormal.SighashV1
+import RubinFormal.PowV1

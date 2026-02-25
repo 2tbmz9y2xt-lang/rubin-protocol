@@ -6,3 +6,5 @@ import RubinFormal.Conformance.CVOutputDescriptorVectors
 import RubinFormal.Conformance.CVOutputDescriptorReplay
 import RubinFormal.Conformance.CVSighashVectors
 import RubinFormal.Conformance.CVSighashReplay
+import RubinFormal.Conformance.CVPowVectors
+import RubinFormal.Conformance.CVPowReplay

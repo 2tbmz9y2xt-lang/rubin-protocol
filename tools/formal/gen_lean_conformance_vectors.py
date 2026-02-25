@@ -294,81 +294,164 @@ def render_cv_output_descriptor_lean(vectors: list[OutputDescriptorVector]) -> s
 
 
 @dataclass(frozen=True)
-class SighashVector:
+class PowWindowPattern:
+    window_size: int
+    start: int
+    step: int
+    last_jump: int
+
+
+@dataclass(frozen=True)
+class PowVector:
     vid: str
-    tx_hex: str
-    chain_id: str
-    input_index: int
-    input_value: int
-    expect_digest: str
+    op: str
+    expect_ok: bool
+    expect_err: str | None
+    target_old: str | None
+    timestamp_first: int | None
+    timestamp_last: int | None
+    window_pattern: PowWindowPattern | None
+    header_hex: str | None
+    target_hex: str | None
+    expected_bytes_hex: str | None
 
 
-def load_cv_sighash(path: Path) -> list[SighashVector]:
+def load_cv_pow(path: Path) -> list[PowVector]:
     doc = json.loads(path.read_text(encoding="utf-8"))
-    if doc.get("gate") != "CV-SIGHASH":
-        raise ValueError(f"expected gate=CV-SIGHASH, got {doc.get('gate')!r}")
+    if doc.get("gate") != "CV-POW":
+        raise ValueError(f"expected gate=CV-POW, got {doc.get('gate')!r}")
     vectors = doc.get("vectors")
     if not isinstance(vectors, list):
         raise ValueError("vectors must be a list")
-    out: list[SighashVector] = []
+    out: list[PowVector] = []
     for v in vectors:
         if not isinstance(v, dict):
             continue
-        if v.get("op") != "sighash_v1":
-            continue
-        if not v.get("expect_ok"):
-            raise ValueError(f"unexpected expect_ok=false in CV-SIGHASH: {v.get('id')}")
+        op = str(v.get("op") or "")
+        expect_ok = bool(v.get("expect_ok"))
+        expect_err = v.get("expect_err") if not expect_ok else None
+
+        wp: PowWindowPattern | None = None
+        if isinstance(v.get("window_pattern"), dict):
+            p = v["window_pattern"]
+            mode = str(p.get("mode") or "")
+            if mode != "step_with_last_jump":
+                raise ValueError(f"unknown window_pattern.mode={mode!r} in {v.get('id')!r}")
+            wp = PowWindowPattern(
+                window_size=int(p.get("window_size", 10_080)),
+                start=int(p.get("start", 0)),
+                step=int(p.get("step", 120)),
+                last_jump=int(p.get("last_jump", 0)),
+            )
+
+        target_old = v.get("target_old")
+        header_hex = v.get("header_hex")
+        target_hex = v.get("target_hex")
+
+        expected_bytes_hex: str | None = None
+        if op == "retarget_v1" and expect_ok:
+            expected_bytes_hex = str(v.get("expect_target_new") or "")
+        if op == "block_hash" and expect_ok:
+            expected_bytes_hex = str(v.get("expect_block_hash") or "")
+
         out.append(
-            SighashVector(
+            PowVector(
                 vid=str(v.get("id") or ""),
-                tx_hex=str(v.get("tx_hex") or ""),
-                chain_id=str(v.get("chain_id") or ""),
-                input_index=int(v.get("input_index", 0)),
-                input_value=int(v.get("input_value", 0)),
-                expect_digest=str(v.get("expect_digest") or ""),
+                op=op,
+                expect_ok=expect_ok,
+                expect_err=expect_err,
+                target_old=(str(target_old) if target_old is not None else None),
+                timestamp_first=(int(v["timestamp_first"]) if "timestamp_first" in v else None),
+                timestamp_last=(int(v["timestamp_last"]) if "timestamp_last" in v else None),
+                window_pattern=wp,
+                header_hex=(str(header_hex) if header_hex is not None else None),
+                target_hex=(str(target_hex) if target_hex is not None else None),
+                expected_bytes_hex=expected_bytes_hex,
             )
         )
     if not out:
-        raise ValueError("no sighash_v1 vectors found")
+        raise ValueError("no pow vectors found")
     return out
 
 
-def render_cv_sighash_lean(vectors: list[SighashVector]) -> str:
+def _lean_opt_window_pattern(p: PowWindowPattern | None) -> str:
+    if p is None:
+        return "none"
+    return (
+        "some { "
+        + f"windowSize := {p.window_size}, "
+        + f"start := {p.start}, "
+        + f"step := {p.step}, "
+        + f"lastJump := {p.last_jump}"
+        + " }"
+    )
+
+
+def render_cv_pow_lean(vectors: list[PowVector]) -> str:
     rows: list[str] = []
     for v in vectors:
-        tx_bytes = _lean_bytearray_literal(_hex_to_bytes(v.tx_hex))
-        chain_id = _lean_bytearray_literal(_hex_to_bytes(v.chain_id))
-        digest = _lean_bytearray_literal(_hex_to_bytes(v.expect_digest))
+        if v.op == "retarget_v1":
+            op = ".retarget_v1"
+        elif v.op == "block_hash":
+            op = ".block_hash"
+        elif v.op == "pow_check":
+            op = ".pow_check"
+        else:
+            raise ValueError(f"unknown op: {v.op!r}")
+
         rows.append(
             "  { "
             + f'id := "{v.vid}", '
-            + f"tx := {tx_bytes}, "
-            + f"chainId := {chain_id}, "
-            + f"inputIndex := {v.input_index}, "
-            + f"inputValue := {v.input_value}, "
-            + f"expectDigest := {digest}"
+            + f"op := {op}, "
+            + f"expectOk := {'true' if v.expect_ok else 'false'}, "
+            + f"expectErr := {_lean_opt_str(v.expect_err)}, "
+            + f"targetOld := {_lean_opt_bytes_hex(v.target_old)}, "
+            + f"timestampFirst := {('some ' + str(v.timestamp_first)) if v.timestamp_first is not None else 'none'}, "
+            + f"timestampLast := {('some ' + str(v.timestamp_last)) if v.timestamp_last is not None else 'none'}, "
+            + f"windowPattern := {_lean_opt_window_pattern(v.window_pattern)}, "
+            + f"header := {_lean_opt_bytes_hex(v.header_hex)}, "
+            + f"target := {_lean_opt_bytes_hex(v.target_hex)}, "
+            + f"expectedBytes := {_lean_opt_bytes_hex(v.expected_bytes_hex)}"
             + " }"
         )
 
     body = "\n".join(rows)
     return (
         "// AUTOGENERATED: do not edit by hand.\n"
-        "// Generated from conformance/fixtures/CV-SIGHASH.json via tools/formal/gen_lean_conformance_vectors.py\n"
+        "// Generated from conformance/fixtures/CV-POW.json via tools/formal/gen_lean_conformance_vectors.py\n"
         "\n"
         "namespace RubinFormal.Conformance\n"
         "\n"
         "abbrev Bytes := ByteArray\n"
         "\n"
-        "structure CVSighashVector where\n"
+        "structure WindowPattern where\n"
+        "  windowSize : Nat\n"
+        "  start : Nat\n"
+        "  step : Nat\n"
+        "  lastJump : Nat\n"
+        "deriving Repr, DecidableEq\n"
+        "\n"
+        "inductive CVPowOp where\n"
+        "  | retarget_v1\n"
+        "  | block_hash\n"
+        "  | pow_check\n"
+        "deriving Repr, DecidableEq\n"
+        "\n"
+        "structure CVPowVector where\n"
         "  id : String\n"
-        "  tx : Bytes\n"
-        "  chainId : Bytes\n"
-        "  inputIndex : Nat\n"
-        "  inputValue : Nat\n"
-        "  expectDigest : Bytes\n"
+        "  op : CVPowOp\n"
+        "  expectOk : Bool\n"
+        "  expectErr : Option String\n"
+        "  targetOld : Option Bytes\n"
+        "  timestampFirst : Option Nat\n"
+        "  timestampLast : Option Nat\n"
+        "  windowPattern : Option WindowPattern\n"
+        "  header : Option Bytes\n"
+        "  target : Option Bytes\n"
+        "  expectedBytes : Option Bytes\n"
         "deriving Repr\n"
         "\n"
-        "def cvSighashVectors : List CVSighashVector := [\n"
+        "def cvPowVectors : List CVPowVector := [\n"
         + body
         + "\n]\n"
         "\n"
@@ -405,11 +488,11 @@ def main() -> int:
     out_od.write_text(render_cv_output_descriptor_lean(odv), encoding="utf-8")
     print(f"WROTE: {out_od}")
 
-    in_sighash = repo_root / "conformance" / "fixtures" / "CV-SIGHASH.json"
-    out_sighash = repo_root / "rubin-formal" / "RubinFormal" / "Conformance" / "CVSighashVectors.lean"
-    sv = load_cv_sighash(in_sighash)
-    out_sighash.write_text(render_cv_sighash_lean(sv), encoding="utf-8")
-    print(f"WROTE: {out_sighash}")
+    in_pow = repo_root / "conformance" / "fixtures" / "CV-POW.json"
+    out_pow = repo_root / "rubin-formal" / "RubinFormal" / "Conformance" / "CVPowVectors.lean"
+    pv = load_cv_pow(in_pow)
+    out_pow.write_text(render_cv_pow_lean(pv), encoding="utf-8")
+    print(f"WROTE: {out_pow}")
     return 0
 
 
