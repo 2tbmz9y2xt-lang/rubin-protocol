@@ -43,9 +43,20 @@ select_openssl() {
     if [[ -x "${RUBIN_OPENSSL_PREFIX}/bin/openssl" ]]; then
       prepend_path_if_exists "${RUBIN_OPENSSL_PREFIX}/bin"
       export OPENSSL_DIR="${RUBIN_OPENSSL_PREFIX}"
-      export PKG_CONFIG_PATH="${RUBIN_OPENSSL_PREFIX}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+      local rubin_pkg_paths=()
+      if [[ -d "${RUBIN_OPENSSL_PREFIX}/lib64/pkgconfig" ]]; then
+        rubin_pkg_paths+=("${RUBIN_OPENSSL_PREFIX}/lib64/pkgconfig")
+      fi
+      if [[ -d "${RUBIN_OPENSSL_PREFIX}/lib/pkgconfig" ]]; then
+        rubin_pkg_paths+=("${RUBIN_OPENSSL_PREFIX}/lib/pkgconfig")
+      fi
+      if [[ ${#rubin_pkg_paths[@]} -gt 0 ]]; then
+        export PKG_CONFIG_PATH="$(IFS=:; echo "${rubin_pkg_paths[*]}")${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+      fi
       if [[ -d "${RUBIN_OPENSSL_PREFIX}/lib/ossl-modules" ]]; then
         export OPENSSL_MODULES="${RUBIN_OPENSSL_PREFIX}/lib/ossl-modules"
+      elif [[ -d "${RUBIN_OPENSSL_PREFIX}/lib64/ossl-modules" ]]; then
+        export OPENSSL_MODULES="${RUBIN_OPENSSL_PREFIX}/lib64/ossl-modules"
       fi
     else
       echo "ERROR: RUBIN_OPENSSL_PREFIX is set but missing bin/openssl: ${RUBIN_OPENSSL_PREFIX}" >&2
@@ -90,6 +101,8 @@ select_openssl() {
     fi
     if [[ -z "${OPENSSL_MODULES:-}" && -n "${OPENSSL_DIR:-}" && -d "${OPENSSL_DIR}/lib/ossl-modules" ]]; then
       export OPENSSL_MODULES="${OPENSSL_DIR}/lib/ossl-modules"
+    elif [[ -z "${OPENSSL_MODULES:-}" && -n "${OPENSSL_DIR:-}" && -d "${OPENSSL_DIR}/lib64/ossl-modules" ]]; then
+      export OPENSSL_MODULES="${OPENSSL_DIR}/lib64/ossl-modules"
     fi
   fi
 }

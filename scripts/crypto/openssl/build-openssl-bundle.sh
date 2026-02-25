@@ -39,21 +39,33 @@ make -j"${JOBS}"
 make install_sw
 make install_fips
 
-FIPS_MODULE_DIR="${PREFIX}/lib/ossl-modules"
-FIPS_MODULE=""
-for candidate in \
-  "${FIPS_MODULE_DIR}/fips.so" \
-  "${FIPS_MODULE_DIR}/fips.dylib" \
-  "${FIPS_MODULE_DIR}/fips.dll"
+FIPS_MODULE_DIR=""
+for module_dir in \
+  "${PREFIX}/lib/ossl-modules" \
+  "${PREFIX}/lib64/ossl-modules"
 do
-  if [[ -f "${candidate}" ]]; then
-    FIPS_MODULE="${candidate}"
+  if [[ -d "${module_dir}" ]]; then
+    FIPS_MODULE_DIR="${module_dir}"
     break
   fi
 done
 
+FIPS_MODULE=""
+if [[ -n "${FIPS_MODULE_DIR}" ]]; then
+  for candidate in \
+    "${FIPS_MODULE_DIR}/fips.so" \
+    "${FIPS_MODULE_DIR}/fips.dylib" \
+    "${FIPS_MODULE_DIR}/fips.dll"
+  do
+    if [[ -f "${candidate}" ]]; then
+      FIPS_MODULE="${candidate}"
+      break
+    fi
+  done
+fi
+
 if [[ -z "${FIPS_MODULE}" ]]; then
-  echo "ERROR: FIPS module not found under ${FIPS_MODULE_DIR}" >&2
+  echo "ERROR: FIPS module not found under ${PREFIX}/lib*/ossl-modules" >&2
   exit 1
 fi
 
