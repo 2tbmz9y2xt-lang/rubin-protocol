@@ -307,7 +307,7 @@ RUBIN uses `SHA3-256` (FIPS 202) as the consensus hash function.
 
 ### 8.1.1 SHA3-256 Security Properties (Informative)
 
-`SHA3-256` (FIPS 202, Keccak[512](M, 256)) provides the following asymptotic security properties:
+`SHA3-256` (FIPS 202, `Keccak[512](M, 256)`) provides the following asymptotic security properties:
 
 - **Preimage resistance:** ~256-bit (classical), ~128-bit (quantum; Grover)
 - **Second-preimage resistance:** ~256-bit (classical), ~128-bit (quantum; Grover)
@@ -1306,7 +1306,7 @@ For each non-coinbase transaction `T`:
 2. Let `sum_out` be the sum of `T.outputs[j].value` over all outputs `j`.
 3. Let `sum_in_vault` be the sum of referenced input values whose UTXO covenant type is `CORE_VAULT`.
 4. If `sum_out > sum_in`, reject as `TX_ERR_VALUE_CONSERVATION`.
-5. If `T` spends at least one `CORE_VAULT` input and `sum_out != sum_in_vault`,
+5. If `T` spends at least one `CORE_VAULT` input and `sum_out < sum_in_vault`,
    reject as `TX_ERR_VALUE_CONSERVATION`.
 6. Arithmetic MUST be exact and MUST be computed in at least 128-bit unsigned integer arithmetic.
    Any overflow MUST be rejected as `TX_ERR_PARSE`.

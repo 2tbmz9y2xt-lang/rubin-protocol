@@ -20,7 +20,7 @@
   },
   "sections": {
     "transaction_wire": "1c9afdad12da2a6d869b0495709f54a7296a4186be303aad15b88492306462bc",
-    "transaction_identifiers": "4ef9d9777bb3f0a2e3c145d6578738c1a18134a192f63e66ff3b343f996377d4",
+    "transaction_identifiers": "abc38661d94a5113dfe2bc0fe2ba3626c6828538b615bea033080a9a8bff9086",
     "weight_accounting": "2ad57571c7ac1239ebbee6889b99be9f507d4b904346a79d3cfa4eef36dcf755",
     "witness_commitment": "10a0e0b289df6023e6c6589d575e0f25b37025c0b84ba404dae5738ad50abf3d",
     "sighash_v1": "e20b0bcae92ec4a9549150f1d6b7dc9f29e888c1e6d56341e6beb6062e4a7d1f",
@@ -30,7 +30,7 @@
     "transaction_structural_rules": "c5b268dab7a7e8e036bc62a0cba877d5994a7bfb47966201c5d71473b18ee965",
     "replay_domain_checks": "f65201c5b65cdc4c53286074806cb189eaaf5909a007ea0079102e3cb616f115",
     "utxo_state_model": "f3f96f3dd27ee8d7d3725502cc4afcbd6cc301cd03c49fa2e1b7e6417ee2ba42",
-    "value_conservation": "e48278b5318dc1bc68712430febebfe37a7ce6e68e02349ca657261eb5c34962",
+    "value_conservation": "6aee9b8a883467c413ba37c32d404de5a75db0ed0026df6d712b6148fe643226",
     "da_set_integrity": "3e71e5f27c3c33997564d5bc7bc36f63467a345ab0ed4b2d40c5c1ff9a94c244"
   }
 }
