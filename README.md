@@ -35,6 +35,13 @@ There is no delayed wire-activation mechanism.
 - `./clients/rust/` Rust reference consensus library + CLI
 - `./conformance/` fixtures + runner (Go↔Rust parity)
 - `./rubin-formal/` Lean4 proof-pack bootstrap (formal coverage baseline)
+- `./ARCHITECTURE_MAP.md` architecture map (spec → fixtures → clients → CI)
+
+Quick references:
+
+- Protocol authority & precedence: `./spec/README.md`
+- Architecture & change path map: `./ARCHITECTURE_MAP.md`
+- Conformance harness overview: `./conformance/README.md`
 
 ## Quick Start (Local)
 
