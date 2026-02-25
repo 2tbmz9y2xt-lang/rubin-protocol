@@ -1,0 +1,142 @@
+{
+  "gate": "CV-VAULT",
+  "vectors": [
+    {
+      "id": "VAULT-CREATE-01",
+      "op": "utxo_apply_basic",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_VAULT_OWNER_AUTH_REQUIRED",
+      "height": 200,
+      "block_timestamp": 1000,
+      "tx_hex": "0100000000010000000000000001aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000000000000000000015a0000000000000001016402df1a5f0efdbe1c2919d832305725c746beafd58c777783423ffacabd900ec9010111000000000000000000000000000000000000000000000000000000000000000100ad081b3670e36fb466e0df0bd7b58d74c6455360627b6bb4f74aabae3fa86317000000000100000000",
+      "utxos": [
+        {
+          "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "vout": 0,
+          "value": 100,
+          "covenant_type": 0,
+          "covenant_data": "010200000000000000000000000000000000000000000000000000000000000000",
+          "creation_height": 0,
+          "created_by_coinbase": false
+        }
+      ]
+    },
+    {
+      "id": "VAULT-CREATE-02",
+      "op": "utxo_apply_basic",
+      "expect_ok": true,
+      "expect_fee": 10,
+      "expect_utxo_count": 1,
+      "height": 200,
+      "block_timestamp": 1000,
+      "tx_hex": "0100000000010000000000000001abababababababababababababababababababababababababababababababab000000000000000000015a0000000000000001016402df1a5f0efdbe1c2919d832305725c746beafd58c777783423ffacabd900ec9010111000000000000000000000000000000000000000000000000000000000000000100ad081b3670e36fb466e0df0bd7b58d74c6455360627b6bb4f74aabae3fa86317000000000100000000",
+      "utxos": [
+        {
+          "txid": "abababababababababababababababababababababababababababababababab",
+          "vout": 0,
+          "value": 100,
+          "covenant_type": 0,
+          "covenant_data": "010100000000000000000000000000000000000000000000000000000000000000",
+          "creation_height": 0,
+          "created_by_coinbase": false
+        }
+      ]
+    },
+    {
+      "id": "VAULT-SPEND-02",
+      "op": "utxo_apply_basic",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN",
+      "height": 200,
+      "block_timestamp": 1000,
+      "tx_hex": "0100000000010000000000000003b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0000000000000000000b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1000000000000000000b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2000000000000000000016400000000000000000021010000000000000000000000000000000000000000000000000000000000000000000000000300000000000000000000",
+      "utxos": [
+        {
+          "txid": "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+          "vout": 0,
+          "value": 100,
+          "covenant_type": 257,
+          "covenant_data": "02df1a5f0efdbe1c2919d832305725c746beafd58c777783423ffacabd900ec9010111000000000000000000000000000000000000000000000000000000000000000100ad081b3670e36fb466e0df0bd7b58d74c6455360627b6bb4f74aabae3fa86317",
+          "creation_height": 100,
+          "created_by_coinbase": false
+        },
+        {
+          "txid": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+          "vout": 0,
+          "value": 10,
+          "covenant_type": 0,
+          "covenant_data": "010100000000000000000000000000000000000000000000000000000000000000",
+          "creation_height": 0,
+          "created_by_coinbase": false
+        },
+        {
+          "txid": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+          "vout": 0,
+          "value": 10,
+          "covenant_type": 0,
+          "covenant_data": "010200000000000000000000000000000000000000000000000000000000000000",
+          "creation_height": 0,
+          "created_by_coinbase": false
+        }
+      ]
+    },
+    {
+      "id": "VAULT-SPEND-04",
+      "op": "utxo_apply_basic",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED",
+      "height": 200,
+      "block_timestamp": 1000,
+      "tx_hex": "0100000000010000000000000002b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3000000000000000000b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b400000000000000000001640000000000000000002101ff00000000000000000000000000000000000000000000000000000000000000000000000200000000000000",
+      "utxos": [
+        {
+          "txid": "b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
+          "vout": 0,
+          "value": 100,
+          "covenant_type": 257,
+          "covenant_data": "02df1a5f0efdbe1c2919d832305725c746beafd58c777783423ffacabd900ec9010111000000000000000000000000000000000000000000000000000000000000000100ad081b3670e36fb466e0df0bd7b58d74c6455360627b6bb4f74aabae3fa86317",
+          "creation_height": 100,
+          "created_by_coinbase": false
+        },
+        {
+          "txid": "b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4",
+          "vout": 0,
+          "value": 10,
+          "covenant_type": 0,
+          "covenant_data": "010100000000000000000000000000000000000000000000000000000000000000",
+          "creation_height": 0,
+          "created_by_coinbase": false
+        }
+      ]
+    },
+    {
+      "id": "VAULT-SPEND-07",
+      "op": "utxo_apply_basic",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN",
+      "height": 200,
+      "block_timestamp": 1000,
+      "tx_hex": "0100000000010000000000000002b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5000000000000000000b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6000000000000000000016400000000000000000021010000000000000000000000000000000000000000000000000000000000000000000000000200000000000000",
+      "utxos": [
+        {
+          "txid": "b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5",
+          "vout": 0,
+          "value": 50,
+          "covenant_type": 257,
+          "covenant_data": "02df1a5f0efdbe1c2919d832305725c746beafd58c777783423ffacabd900ec9010111000000000000000000000000000000000000000000000000000000000000000100ad081b3670e36fb466e0df0bd7b58d74c6455360627b6bb4f74aabae3fa86317",
+          "creation_height": 100,
+          "created_by_coinbase": false
+        },
+        {
+          "txid": "b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6",
+          "vout": 0,
+          "value": 50,
+          "covenant_type": 257,
+          "covenant_data": "02df1a5f0efdbe1c2919d832305725c746beafd58c777783423ffacabd900ec9010111000000000000000000000000000000000000000000000000000000000000000100ad081b3670e36fb466e0df0bd7b58d74c6455360627b6bb4f74aabae3fa86317",
+          "creation_height": 100,
+          "created_by_coinbase": false
+        }
+      ]
+    }
+  ]
+}

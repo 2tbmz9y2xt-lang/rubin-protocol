@@ -33,7 +33,7 @@ func ValidateTxCovenantsGenesis(tx *Tx, blockHeight uint64) error {
 
 		case COV_TYPE_VAULT:
 			if out.Value == 0 {
-				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_VAULT value must be > 0")
+				return txerr(TX_ERR_VAULT_PARAMS_INVALID, "CORE_VAULT value must be > 0")
 			}
 			if _, err := ParseVaultCovenantData(out.CovenantData); err != nil {
 				return err

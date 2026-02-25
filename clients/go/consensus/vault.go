@@ -7,6 +7,7 @@ import (
 )
 
 type VaultCovenant struct {
+	OwnerLockID    [32]byte
 	Threshold      uint8
 	KeyCount       uint8
 	Keys           [][32]byte
@@ -22,47 +23,48 @@ type MultisigCovenant struct {
 
 func ParseVaultCovenantData(covData []byte) (*VaultCovenant, error) {
 	if covData == nil {
-		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "nil CORE_VAULT covenant_data")
+		return nil, txerr(TX_ERR_VAULT_MALFORMED, "nil CORE_VAULT covenant_data")
 	}
-	if len(covData) < 68 {
-		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_VAULT covenant_data too short")
+	if len(covData) < 34 {
+		return nil, txerr(TX_ERR_VAULT_MALFORMED, "CORE_VAULT covenant_data too short")
 	}
 
 	var v VaultCovenant
-	v.Threshold = covData[0]
-	v.KeyCount = covData[1]
+	copy(v.OwnerLockID[:], covData[0:32])
+	v.Threshold = covData[32]
+	v.KeyCount = covData[33]
 	if v.KeyCount < 1 || v.KeyCount > MAX_VAULT_KEYS {
-		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_VAULT key_count out of range")
+		return nil, txerr(TX_ERR_VAULT_PARAMS_INVALID, "CORE_VAULT key_count out of range")
 	}
 	if v.Threshold < 1 || v.Threshold > v.KeyCount {
-		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_VAULT threshold out of range")
+		return nil, txerr(TX_ERR_VAULT_PARAMS_INVALID, "CORE_VAULT threshold out of range")
 	}
 
-	offset := 2
+	offset := 34
 	v.Keys = make([][32]byte, int(v.KeyCount))
 	for i := 0; i < int(v.KeyCount); i++ {
 		if offset+32 > len(covData) {
-			return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_VAULT truncated keys")
+			return nil, txerr(TX_ERR_VAULT_MALFORMED, "CORE_VAULT truncated keys")
 		}
 		copy(v.Keys[i][:], covData[offset:offset+32])
 		offset += 32
 	}
 	if !strictlySortedUnique32(v.Keys) {
-		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_VAULT keys not strictly sorted")
+		return nil, txerr(TX_ERR_VAULT_KEYS_NOT_CANONICAL, "CORE_VAULT keys not strictly sorted")
 	}
 
 	if offset+2 > len(covData) {
-		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_VAULT missing whitelist_count")
+		return nil, txerr(TX_ERR_VAULT_MALFORMED, "CORE_VAULT missing whitelist_count")
 	}
 	v.WhitelistCount = binary.LittleEndian.Uint16(covData[offset : offset+2])
 	offset += 2
 	if v.WhitelistCount < 1 || v.WhitelistCount > MAX_VAULT_WHITELIST_ENTRIES {
-		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_VAULT whitelist_count out of range")
+		return nil, txerr(TX_ERR_VAULT_PARAMS_INVALID, "CORE_VAULT whitelist_count out of range")
 	}
 
-	expectedLen := 2 + int(v.KeyCount)*32 + 2 + int(v.WhitelistCount)*32
+	expectedLen := 32 + 1 + 1 + int(v.KeyCount)*32 + 2 + int(v.WhitelistCount)*32
 	if len(covData) != expectedLen {
-		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_VAULT covenant_data length mismatch")
+		return nil, txerr(TX_ERR_VAULT_MALFORMED, "CORE_VAULT covenant_data length mismatch")
 	}
 
 	v.Whitelist = make([][32]byte, int(v.WhitelistCount))
@@ -71,7 +73,10 @@ func ParseVaultCovenantData(covData []byte) (*VaultCovenant, error) {
 		offset += 32
 	}
 	if !strictlySortedUnique32(v.Whitelist) {
-		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_VAULT whitelist not strictly sorted")
+		return nil, txerr(TX_ERR_VAULT_WHITELIST_NOT_CANONICAL, "CORE_VAULT whitelist not strictly sorted")
+	}
+	if HashInSorted32(v.Whitelist, v.OwnerLockID) {
+		return nil, txerr(TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN, "CORE_VAULT whitelist contains owner_lock_id")
 	}
 	return &v, nil
 }
@@ -123,8 +128,15 @@ func OutputDescriptorBytes(covenantType uint16, covenantData []byte) []byte {
 func WitnessSlots(covenantType uint16, covenantData []byte) int {
 	switch covenantType {
 	case COV_TYPE_VAULT, COV_TYPE_MULTISIG:
-		if len(covenantData) >= 2 {
-			return int(covenantData[1])
+		if covenantType == COV_TYPE_MULTISIG {
+			if len(covenantData) >= 2 {
+				return int(covenantData[1])
+			}
+			return 1
+		}
+		// CORE_VAULT: owner_lock_id[32] || threshold[1] || key_count[1] || ...
+		if len(covenantData) >= 34 {
+			return int(covenantData[33])
 		}
 		return 1
 	case COV_TYPE_HTLC:

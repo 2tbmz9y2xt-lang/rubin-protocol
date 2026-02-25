@@ -14,8 +14,9 @@ func makeKeys(count int, base byte) [][32]byte {
 	return keys
 }
 
-func encodeVaultCovenantData(threshold uint8, keys [][32]byte, whitelist [][32]byte) []byte {
-	b := make([]byte, 0, 2+len(keys)*32+2+len(whitelist)*32)
+func encodeVaultCovenantData(ownerLockID [32]byte, threshold uint8, keys [][32]byte, whitelist [][32]byte) []byte {
+	b := make([]byte, 0, 32+1+1+len(keys)*32+2+len(whitelist)*32)
+	b = append(b, ownerLockID[:]...)
 	b = append(b, threshold)
 	b = append(b, uint8(len(keys)))
 	for _, k := range keys {
@@ -39,10 +40,18 @@ func encodeMultisigCovenantData(threshold uint8, keys [][32]byte) []byte {
 }
 
 func validVaultCovenantDataForP2PKOutput() []byte {
-	outData := make([]byte, MAX_P2PK_COVENANT_DATA)
-	outData[0] = SUITE_ID_ML_DSA_87
-	h := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, outData))
-	return encodeVaultCovenantData(1, makeKeys(1, 0x11), [][32]byte{h})
+	// Destination (whitelisted) output descriptor.
+	destData := make([]byte, MAX_P2PK_COVENANT_DATA)
+	destData[0] = SUITE_ID_ML_DSA_87
+	h := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, destData))
+
+	// Owner lock id is the hash of a (possibly different) owner output descriptor.
+	ownerData := make([]byte, MAX_P2PK_COVENANT_DATA)
+	ownerData[0] = SUITE_ID_ML_DSA_87
+	ownerData[1] = 0x01 // make owner descriptor distinct from the whitelisted destination
+	ownerLockID := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, ownerData))
+
+	return encodeVaultCovenantData(ownerLockID, 1, makeKeys(1, 0x11), [][32]byte{h})
 }
 
 func TestValidateTxCovenantsGenesis_P2PK_OK(t *testing.T) {
@@ -134,17 +143,19 @@ func TestValidateTxCovenantsGenesis_VAULT_OK(t *testing.T) {
 func TestValidateTxCovenantsGenesis_VAULT_BadThreshold(t *testing.T) {
 	keys := makeKeys(2, 0x11)
 	whitelist := makeKeys(1, 0x51)
+	var ownerLockID [32]byte
+	ownerLockID[0] = 0x99
 	tx := &Tx{
 		Outputs: []TxOutput{
-			{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: encodeVaultCovenantData(3, keys, whitelist)},
+			{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: encodeVaultCovenantData(ownerLockID, 3, keys, whitelist)},
 		},
 	}
 	err := ValidateTxCovenantsGenesis(tx, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	if got := mustTxErrCode(t, err); got != TX_ERR_VAULT_PARAMS_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_VAULT_PARAMS_INVALID)
 	}
 }
 
@@ -152,17 +163,19 @@ func TestValidateTxCovenantsGenesis_VAULT_UnsortedKeys(t *testing.T) {
 	keys := makeKeys(2, 0x11)
 	keys[0], keys[1] = keys[1], keys[0]
 	whitelist := makeKeys(1, 0x51)
+	var ownerLockID [32]byte
+	ownerLockID[0] = 0x99
 	tx := &Tx{
 		Outputs: []TxOutput{
-			{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: encodeVaultCovenantData(1, keys, whitelist)},
+			{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: encodeVaultCovenantData(ownerLockID, 1, keys, whitelist)},
 		},
 	}
 	err := ValidateTxCovenantsGenesis(tx, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	if got := mustTxErrCode(t, err); got != TX_ERR_VAULT_KEYS_NOT_CANONICAL {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_VAULT_KEYS_NOT_CANONICAL)
 	}
 }
 
@@ -170,33 +183,37 @@ func TestValidateTxCovenantsGenesis_VAULT_UnsortedWhitelist(t *testing.T) {
 	keys := makeKeys(1, 0x11)
 	whitelist := makeKeys(2, 0x51)
 	whitelist[0], whitelist[1] = whitelist[1], whitelist[0]
+	var ownerLockID [32]byte
+	ownerLockID[0] = 0x99
 	tx := &Tx{
 		Outputs: []TxOutput{
-			{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: encodeVaultCovenantData(1, keys, whitelist)},
+			{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: encodeVaultCovenantData(ownerLockID, 1, keys, whitelist)},
 		},
 	}
 	err := ValidateTxCovenantsGenesis(tx, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	if got := mustTxErrCode(t, err); got != TX_ERR_VAULT_WHITELIST_NOT_CANONICAL {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_VAULT_WHITELIST_NOT_CANONICAL)
 	}
 }
 
 func TestValidateTxCovenantsGenesis_VAULT_EmptyWhitelist(t *testing.T) {
 	keys := makeKeys(1, 0x11)
+	var ownerLockID [32]byte
+	ownerLockID[0] = 0x99
 	tx := &Tx{
 		Outputs: []TxOutput{
-			{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: encodeVaultCovenantData(1, keys, nil)},
+			{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: encodeVaultCovenantData(ownerLockID, 1, keys, nil)},
 		},
 	}
 	err := ValidateTxCovenantsGenesis(tx, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	if got := mustTxErrCode(t, err); got != TX_ERR_VAULT_PARAMS_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_VAULT_PARAMS_INVALID)
 	}
 }
 

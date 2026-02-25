@@ -10,7 +10,7 @@ Goal: describe a **simple, deterministic, audit-friendly** redesign of `CORE_VAU
 
 This draft is intended to be attached to audit discussions before making a consensus-critical change.
 
-**НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА:** integration of this draft changes consensus (wire + validity + error mapping).
+Note: integrating this draft into `RUBIN_L1_CANONICAL.md` is consensus-critical (wire + validity + error mapping).
 
 ---
 
@@ -151,6 +151,9 @@ This is a **clean replace-before-genesis** format (single format, no migration).
 
 For any output `out` with `out.covenant_type = CORE_VAULT`:
 
+- Constants:
+  - `MAX_VAULT_KEYS = 12` (set equal to `MAX_MULTISIG_KEYS` for symmetry)
+  - `MAX_VAULT_WHITELIST_ENTRIES = 1_024`
 - `out.value MUST be > 0`.
 - `1 <= vault_key_count <= MAX_VAULT_KEYS`.
 - `1 <= vault_threshold <= vault_key_count`.
@@ -178,15 +181,19 @@ Additional 2FA-specific invariants:
 
 ### 2.3 Error mapping at creation (Draft)
 
-This draft assumes **audit-friendly mapping** (requires error-registry update):
-- Invalid covenant_data / constraints: `TX_ERR_COVENANT_TYPE_INVALID`
-- Whitelist contains owner lock: `TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN`
+This draft assumes **audit-friendly (maximal) mapping** (requires error-registry update when integrated):
+
+- Malformed covenant_data (length mismatch, parse failure): `TX_ERR_VAULT_MALFORMED`
+- Invalid vault parameters (bounds violations): `TX_ERR_VAULT_PARAMS_INVALID`
+  - `vault_key_count` out of range
+  - `vault_threshold` out of range
+  - `whitelist_count` out of range
+- Non-canonical key list (unsorted or duplicates): `TX_ERR_VAULT_KEYS_NOT_CANONICAL`
+- Non-canonical whitelist list (unsorted or duplicates): `TX_ERR_VAULT_WHITELIST_NOT_CANONICAL`
+- Whitelist contains owner lock (`owner_lock_id ∈ whitelist[]`): `TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN`
 - Missing owner-authorized input on vault creation: `TX_ERR_VAULT_OWNER_AUTH_REQUIRED`
 
-Fallback (not recommended for audit-grade integrations):
-- Any creation-time violation rejects as `TX_ERR_COVENANT_TYPE_INVALID`.
-
-**НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА** to introduce new error codes in CANONICAL.
+If/when integrated into CANONICAL, these error codes MUST be added to the normative error registry.
 
 ---
 
@@ -203,6 +210,19 @@ Rationale:
 - Vault is a safe, not an operational wallet.
 - Batching is performed by many outputs within a single-vault transaction, or by multiple transactions (one per vault).
 
+#### 3.0.1 Why multi-vault spends are forbidden (Informational)
+
+Allowing multiple vault inputs in one transaction forces a complex (and error-prone) semantic choice:
+- Output policy would need to be defined as either “per-input routing” or “intersection-of-whitelists”.
+- Fee/value rules would need a per-vault accounting model (to prevent fee burn / cross-subsidization).
+- Conformance and auditing complexity increases significantly, without adding safety.
+
+This draft intentionally picks the simplest deterministic model: **one vault per transaction**.
+
+Operational guidance:
+- If an operator controls multiple vaults (e.g., bank pools), construct **one transaction per vault**.
+- Each such transaction may include many whitelisted outputs (batch payouts) within standard size/limits.
+
 ### 3.1 Vault-factor signatures (M-of-N)
 
 For each input spending `CORE_VAULT`, the input MUST satisfy the vault signature threshold:
@@ -217,7 +237,7 @@ Signature digest is per CANONICAL §12 with `input_index` bound.
 For each output `out` in the spending transaction `T`:
 - Compute `h = SHA3-256(OutputDescriptorBytes(out))`.
 - Require `h` present in the vault’s `whitelist[]`.
-- If violated: reject as `TX_ERR_COVENANT_TYPE_INVALID`.
+- If violated: reject as `TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED`.
 
 ### 3.3 Fee sponsorship forbidden (owner-only non-vault inputs)
 
@@ -233,17 +253,24 @@ Rules for any vault-spend transaction `T`:
    its referenced UTXO entry `e` MUST satisfy `lock_id(e) = X`.
    - Rationale: non-vault inputs (used for fee funding) must be owned by the same owner lock.
 
+Note: the covenant_type of an owner-authorized input need not be re-validated at spend time. The binding is implicit:
+`lock_id(e) = SHA3-256(OutputDescriptorBytes(e))` cryptographically encodes the covenant_type that was validated at vault
+creation.
+
 ### 3.3.1 Error mapping (Draft)
 
-Audit-friendly mapping (proposal; requires error-registry update):
+Audit-friendly mapping (requires error-registry update when integrated):
 - Missing owner input in vault-spend: `TX_ERR_VAULT_OWNER_AUTH_REQUIRED`
 - Non-owner non-vault input present: `TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN`
 - More than one vault input present: `TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN`
+- Output not in whitelist: `TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED`
 
-Fallback (not recommended for audit-grade integrations):
-- If violated: `TX_ERR_COVENANT_TYPE_INVALID`.
+Notes:
+- Vault-factor signature failures remain mapped to the existing signature error codes
+  (`TX_ERR_SIG_INVALID` / `TX_ERR_SIG_ALG_INVALID` / `TX_ERR_PARSE`) as defined by CANONICAL.
+- Attempting to burn vault value as fee remains `TX_ERR_VALUE_CONSERVATION` (Section 3.4).
 
-**НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА** to introduce new error codes in CANONICAL.
+If/when integrated into CANONICAL, these error codes MUST be added to the normative error registry.
 
 ### 3.4 Value conservation (vault value must not fund fee)
 
@@ -289,6 +316,23 @@ Practical implication:
 - The owner wallet remains the operational wallet: batching, arbitrary change, arbitrary destinations happen
   after funds arrive to the operational wallet via a whitelisted destination.
 
+#### 3.5.3 Batched payouts and owner top-ups (Informational)
+
+A single vault-spend transaction may pay many destinations in one transaction by using many outputs:
+- Each payout is expressed as an `output` with its own `output.value` (amount).
+- Whitelist membership is checked against `SHA3-256(OutputDescriptorBytes(output))`, and `output.value` is intentionally
+  excluded from `OutputDescriptorBytes`.
+  Therefore, the same whitelisted destination may be used with different amounts across many outputs.
+
+If the vault input does not carry enough value to cover the intended batched payouts, the owner may “top up” within
+the same transaction by adding additional non-vault owner-controlled inputs:
+- These owner inputs are only permitted if they match the same `owner_lock_id` (Section 3.3).
+- The additional value from owner inputs can be routed to the same set of whitelisted payout outputs.
+
+This enables batching without making the vault an operational wallet:
+- Vault value is protected from fee burn (`sum_out >= sum_in_vault`).
+- Owner funds used to top up are still constrained to whitelisted destinations (whitelist applies to all outputs).
+
 ---
 
 ## 4. Vault is not operational (Informational)
@@ -299,10 +343,10 @@ This draft intentionally treats `CORE_VAULT` as a **safe-only** primitive:
 
 ---
 
-## 4.1 Controller decisions (Draft)
+## 4.1 Fixed decisions assumed by this draft (Draft)
 
 Even under “clean replace-before-genesis”, three consensus choices must be fixed. This draft assumes the
-following controller decisions (to be confirmed before CANONICAL integration):
+following decisions:
 
 1) **Value rule for vault spends:** `sum_out >= sum_in_vault`.
    - Rationale: vault value cannot fund fee; owner may additionally route owner funds to whitelisted operational destinations.
@@ -315,28 +359,31 @@ following controller decisions (to be confirmed before CANONICAL integration):
    - Rationale: vault is not an operational wallet; batching is done via multiple transactions (one per vault),
      with many outputs per transaction.
 
-**НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА** to finalize these in CANONICAL.
-
 ## 5. Conformance plan (Draft)
 
 Minimum executable vectors to add before claiming audit-readiness:
 
-- `VAULT2-CREATE-01`: create vault2 without owner input → reject.
-- `VAULT2-CREATE-02`: create vault2 with owner P2PK input → ok.
-- `VAULT2-CREATE-03`: create vault2 with owner MULTISIG input → ok.
-- `VAULT2-CREATE-04`: whitelist contains owner_lock_id → reject.
+- `VAULT-CREATE-01`: create vault without owner input → reject.
+- `VAULT-CREATE-02`: create vault with owner P2PK input → ok.
+- `VAULT-CREATE-03`: create vault with owner MULTISIG input → ok.
+- `VAULT-CREATE-04`: whitelist contains owner_lock_id → reject.
+- `VAULT-CREATE-06`: covenant_data_len does not match the deterministic formula (e.g. one extra byte appended) → reject
+  as `TX_ERR_VAULT_MALFORMED`.
 
-- `VAULT2-SPEND-01`: spend vault2 without owner input → reject.
-- `VAULT2-SPEND-02`: spend vault2 with non-owner fee input → reject.
-- `VAULT2-SPEND-03`: spend vault2 with owner fee input, whitelist ok, vault sig threshold ok → ok.
-- `VAULT2-SPEND-04`: spend vault2 with output not in whitelist → reject.
-- `VAULT2-SPEND-05`: attempt to fund fee from vault (`sum_out < sum_in_vault`) → reject.
-- `VAULT2-SPEND-07`: attempt to spend 2 vault inputs in one transaction → reject.
+- `VAULT-SPEND-01`: spend vault without owner input → reject.
+- `VAULT-SPEND-02`: spend vault with non-owner fee input → reject.
+- `VAULT-SPEND-03`: spend vault with owner fee input, whitelist ok, vault sig threshold ok → ok.
+- `VAULT-SPEND-04`: spend vault with output not in whitelist → reject.
+- `VAULT-SPEND-05`: attempt to fund fee from vault (`sum_out < sum_in_vault`) → reject.
+- `VAULT-SPEND-07`: attempt to spend 2 vault inputs in one transaction → reject.
+- `VAULT-SPEND-09`: spend vault with one additional owner-controlled non-vault input; `sum_out > sum_in_vault`; all
+  outputs whitelisted; vault sig threshold met → ok.
+- `VAULT-SPEND-10`: `sum_out == sum_in_vault` (fee funded entirely by owner input, vault value preserved exactly) → ok.
 
 Additions recommended for audit-grade coverage:
-- `VAULT2-CREATE-05`: create vault2 where owner_lock_id corresponds to MULTISIG policy; ensure creation requires
+- `VAULT-CREATE-05`: create vault where owner_lock_id corresponds to MULTISIG policy; ensure creation requires
   spending that MULTISIG-owned input (not just any P2PK).
-- `VAULT2-SPEND-06`: spend vault2 where owner is MULTISIG; ensure non-vault inputs must match that MULTISIG owner lock id.
+- `VAULT-SPEND-08`: spend vault where owner is MULTISIG; ensure non-vault inputs must match that MULTISIG owner lock id.
 
 ---
 

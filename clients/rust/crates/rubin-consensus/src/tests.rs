@@ -976,10 +976,15 @@ fn validate_tx_covenants_genesis_vault_bad_threshold() {
     tx.outputs = vec![crate::tx::TxOutput {
         value: 1,
         covenant_type: COV_TYPE_VAULT,
-        covenant_data: encode_vault_covenant_data(3, &make_keys(2, 0x11), &make_keys(1, 0x51)),
+        covenant_data: encode_vault_covenant_data(
+            [0x99u8; 32],
+            3,
+            &make_keys(2, 0x11),
+            &make_keys(1, 0x51),
+        ),
     }];
     let err = validate_tx_covenants_genesis(&tx, 0).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    assert_eq!(err.code, ErrorCode::TxErrVaultParamsInvalid);
 }
 
 #[test]
@@ -990,10 +995,10 @@ fn validate_tx_covenants_genesis_vault_unsorted_keys() {
     tx.outputs = vec![crate::tx::TxOutput {
         value: 1,
         covenant_type: COV_TYPE_VAULT,
-        covenant_data: encode_vault_covenant_data(1, &keys, &make_keys(1, 0x51)),
+        covenant_data: encode_vault_covenant_data([0x99u8; 32], 1, &keys, &make_keys(1, 0x51)),
     }];
     let err = validate_tx_covenants_genesis(&tx, 0).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    assert_eq!(err.code, ErrorCode::TxErrVaultKeysNotCanonical);
 }
 
 #[test]
@@ -1005,10 +1010,10 @@ fn validate_tx_covenants_genesis_vault_unsorted_whitelist() {
     tx.outputs = vec![crate::tx::TxOutput {
         value: 1,
         covenant_type: COV_TYPE_VAULT,
-        covenant_data: encode_vault_covenant_data(1, &keys, &whitelist),
+        covenant_data: encode_vault_covenant_data([0x99u8; 32], 1, &keys, &whitelist),
     }];
     let err = validate_tx_covenants_genesis(&tx, 0).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    assert_eq!(err.code, ErrorCode::TxErrVaultWhitelistNotCanonical);
 }
 
 #[test]
@@ -1120,6 +1125,12 @@ fn valid_p2pk_covenant_data() -> Vec<u8> {
     b
 }
 
+fn owner_p2pk_covenant_data_for_vault() -> Vec<u8> {
+    let mut b = valid_p2pk_covenant_data();
+    b[1] = 0x01;
+    b
+}
+
 fn sentinel_witness_item() -> crate::tx::WitnessItem {
     crate::tx::WitnessItem {
         suite_id: SUITE_ID_SENTINEL,
@@ -1138,8 +1149,14 @@ fn make_keys(count: usize, base: u8) -> Vec<[u8; 32]> {
     keys
 }
 
-fn encode_vault_covenant_data(threshold: u8, keys: &[[u8; 32]], whitelist: &[[u8; 32]]) -> Vec<u8> {
-    let mut b = Vec::with_capacity(2 + keys.len() * 32 + 2 + whitelist.len() * 32);
+fn encode_vault_covenant_data(
+    owner_lock_id: [u8; 32],
+    threshold: u8,
+    keys: &[[u8; 32]],
+    whitelist: &[[u8; 32]],
+) -> Vec<u8> {
+    let mut b = Vec::with_capacity(32 + 1 + 1 + keys.len() * 32 + 2 + whitelist.len() * 32);
+    b.extend_from_slice(&owner_lock_id);
     b.push(threshold);
     b.push(keys.len() as u8);
     for k in keys {
@@ -1163,13 +1180,15 @@ fn encode_multisig_covenant_data(threshold: u8, keys: &[[u8; 32]]) -> Vec<u8> {
 }
 
 fn valid_vault_covenant_data_for_p2pk_output() -> Vec<u8> {
-    let out = valid_p2pk_covenant_data();
-    let mut desc = Vec::with_capacity(2 + 9 + out.len());
-    desc.extend_from_slice(&COV_TYPE_P2PK.to_le_bytes());
-    crate::compactsize::encode_compact_size(out.len() as u64, &mut desc);
-    desc.extend_from_slice(&out);
-    let h = sha3_256(&desc);
-    encode_vault_covenant_data(1, &make_keys(1, 0x11), &[h])
+    // Destination (whitelisted) output descriptor.
+    let dest = valid_p2pk_covenant_data();
+    let h = sha3_256(&crate::vault::output_descriptor_bytes(COV_TYPE_P2PK, &dest));
+
+    // Owner lock id is the hash of a (possibly different) owner output descriptor.
+    let owner = owner_p2pk_covenant_data_for_vault();
+    let owner_lock_id = sha3_256(&crate::vault::output_descriptor_bytes(COV_TYPE_P2PK, &owner));
+
+    encode_vault_covenant_data(owner_lock_id, 1, &make_keys(1, 0x11), &[h])
 }
 
 fn encode_htlc_covenant_data(
@@ -1372,7 +1391,7 @@ fn apply_non_coinbase_tx_basic_vault_cannot_fund_fee() {
         UtxoEntry {
             value: 10,
             covenant_type: COV_TYPE_P2PK,
-            covenant_data: valid_p2pk_covenant_data(),
+            covenant_data: owner_p2pk_covenant_data_for_vault(),
             creation_height: 0,
             created_by_coinbase: false,
         },
@@ -1383,7 +1402,7 @@ fn apply_non_coinbase_tx_basic_vault_cannot_fund_fee() {
 }
 
 #[test]
-fn apply_non_coinbase_tx_basic_vault_preserved_with_external_fee_sponsor() {
+fn apply_non_coinbase_tx_basic_vault_preserved_with_owner_fee_input() {
     let mut prev_vault = [0u8; 32];
     prev_vault[0] = 0xd0;
     let mut prev_fee = [0u8; 32];
@@ -1443,7 +1462,7 @@ fn apply_non_coinbase_tx_basic_vault_preserved_with_external_fee_sponsor() {
         UtxoEntry {
             value: 10,
             covenant_type: COV_TYPE_P2PK,
-            covenant_data: valid_p2pk_covenant_data(),
+            covenant_data: owner_p2pk_covenant_data_for_vault(),
             creation_height: 0,
             created_by_coinbase: false,
         },
@@ -1454,7 +1473,7 @@ fn apply_non_coinbase_tx_basic_vault_preserved_with_external_fee_sponsor() {
 }
 
 #[test]
-fn apply_non_coinbase_tx_basic_vault_requires_exact_output_sum() {
+fn apply_non_coinbase_tx_basic_vault_allows_owner_top_up() {
     let mut prev_vault = [0u8; 32];
     prev_vault[0] = 0xd3;
     let mut prev_fee = [0u8; 32];
@@ -1514,14 +1533,14 @@ fn apply_non_coinbase_tx_basic_vault_requires_exact_output_sum() {
         UtxoEntry {
             value: 10,
             covenant_type: COV_TYPE_P2PK,
-            covenant_data: valid_p2pk_covenant_data(),
+            covenant_data: owner_p2pk_covenant_data_for_vault(),
             creation_height: 0,
             created_by_coinbase: false,
         },
     );
 
-    let err = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrValueConservation);
+    let summary = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000).expect("ok");
+    assert_eq!(summary.fee, 5);
 }
 
 #[test]
@@ -1680,14 +1699,14 @@ fn apply_non_coinbase_tx_basic_vault_whitelist_rejects_output() {
         UtxoEntry {
             value: 10,
             covenant_type: COV_TYPE_P2PK,
-            covenant_data: valid_p2pk_covenant_data(),
+            covenant_data: owner_p2pk_covenant_data_for_vault(),
             creation_height: 0,
             created_by_coinbase: false,
         },
     );
 
     let err = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    assert_eq!(err.code, ErrorCode::TxErrVaultOutputNotWhitelisted);
 }
 
 #[test]

@@ -73,9 +73,12 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
     let mut work = utxo_set.clone();
     let mut sum_in: u128 = 0;
     let mut sum_in_vault: u128 = 0;
-    let mut vault_whitelists: Vec<Vec<[u8; 32]>> = Vec::new();
-    let mut has_vault_input = false;
+    let mut vault_input_count: usize = 0;
+    let mut vault_whitelist: Vec<[u8; 32]> = Vec::new();
+    let mut vault_owner_lock_id: [u8; 32] = [0u8; 32];
     let mut witness_cursor: usize = 0;
+    let mut input_lock_ids: Vec<[u8; 32]> = Vec::with_capacity(tx.inputs.len());
+    let mut input_cov_types: Vec<u16> = Vec::with_capacity(tx.inputs.len());
 
     for input in &tx.inputs {
         let op = Outpoint {
@@ -128,13 +131,25 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
             witness_cursor += slots;
         }
 
+        let desc = output_descriptor_bytes(entry.covenant_type, &entry.covenant_data);
+        let input_lock_id = sha3_256(&desc);
+        input_lock_ids.push(input_lock_id);
+        input_cov_types.push(entry.covenant_type);
+
         sum_in = sum_in
             .checked_add(entry.value as u128)
             .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u128 overflow"))?;
         if entry.covenant_type == COV_TYPE_VAULT {
-            has_vault_input = true;
+            vault_input_count += 1;
+            if vault_input_count > 1 {
+                return Err(TxError::new(
+                    ErrorCode::TxErrVaultMultiInputForbidden,
+                    "multiple CORE_VAULT inputs forbidden",
+                ));
+            }
             let v = parse_vault_covenant_data(&entry.covenant_data)?;
-            vault_whitelists.push(v.whitelist);
+            vault_owner_lock_id = v.owner_lock_id;
+            vault_whitelist = v.whitelist;
             sum_in_vault = sum_in_vault
                 .checked_add(entry.value as u128)
                 .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u128 overflow"))?;
@@ -149,10 +164,15 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
     }
 
     let mut sum_out: u128 = 0;
+    let mut creates_vault = false;
     for (i, out) in tx.outputs.iter().enumerate() {
         sum_out = sum_out
             .checked_add(out.value as u128)
             .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u128 overflow"))?;
+
+        if out.covenant_type == COV_TYPE_VAULT {
+            creates_vault = true;
+        }
 
         if out.covenant_type == COV_TYPE_ANCHOR || out.covenant_type == COV_TYPE_DA_COMMIT {
             continue;
@@ -172,17 +192,75 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
             },
         );
     }
-    if !vault_whitelists.is_empty() {
+
+    // CORE_VAULT creation rule: any tx creating CORE_VAULT outputs must include an owner-authorized input.
+    if creates_vault {
+        for out in &tx.outputs {
+            if out.covenant_type != COV_TYPE_VAULT {
+                continue;
+            }
+            let v = parse_vault_covenant_data(&out.covenant_data)?;
+            let owner_lock_id = v.owner_lock_id;
+
+            let mut has_owner_lock_id = false;
+            let mut has_owner_lock_type = false;
+            for i in 0..input_lock_ids.len() {
+                if input_lock_ids[i] != owner_lock_id {
+                    continue;
+                }
+                has_owner_lock_id = true;
+                if input_cov_types[i] == COV_TYPE_P2PK || input_cov_types[i] == COV_TYPE_MULTISIG {
+                    has_owner_lock_type = true;
+                }
+            }
+            if !has_owner_lock_id || !has_owner_lock_type {
+                return Err(TxError::new(
+                    ErrorCode::TxErrVaultOwnerAuthRequired,
+                    "missing owner-authorized input for CORE_VAULT creation",
+                ));
+            }
+        }
+    }
+
+    // CORE_VAULT spend rules: safe-only model with owner binding and strict whitelist.
+    if vault_input_count == 1 {
+        // Owner input required.
+        let mut owner_auth_present = false;
+        for h in &input_lock_ids {
+            if *h == vault_owner_lock_id {
+                owner_auth_present = true;
+                break;
+            }
+        }
+        if !owner_auth_present {
+            return Err(TxError::new(
+                ErrorCode::TxErrVaultOwnerAuthRequired,
+                "missing owner-authorized input for CORE_VAULT spend",
+            ));
+        }
+
+        // No fee sponsorship: all non-vault inputs must be owned by the same owner lock.
+        for i in 0..input_cov_types.len() {
+            if input_cov_types[i] == COV_TYPE_VAULT {
+                continue;
+            }
+            if input_lock_ids[i] != vault_owner_lock_id {
+                return Err(TxError::new(
+                    ErrorCode::TxErrVaultFeeSponsorForbidden,
+                    "non-owner non-vault input forbidden in CORE_VAULT spend",
+                ));
+            }
+        }
+
+        // Whitelist enforcement: all outputs must be whitelisted.
         for out in &tx.outputs {
             let desc = output_descriptor_bytes(out.covenant_type, &out.covenant_data);
             let h = sha3_256(&desc);
-            for wl in &vault_whitelists {
-                if !hash_in_sorted_32(wl, &h) {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrCovenantTypeInvalid,
-                        "output not whitelisted for CORE_VAULT",
-                    ));
-                }
+            if !hash_in_sorted_32(&vault_whitelist, &h) {
+                return Err(TxError::new(
+                    ErrorCode::TxErrVaultOutputNotWhitelisted,
+                    "output not whitelisted for CORE_VAULT",
+                ));
             }
         }
     }
@@ -193,10 +271,10 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
             "sum_out exceeds sum_in",
         ));
     }
-    if has_vault_input && sum_out != sum_in_vault {
+    if vault_input_count == 1 && sum_out < sum_in_vault {
         return Err(TxError::new(
             ErrorCode::TxErrValueConservation,
-            "vault spends must preserve exact vault value in outputs",
+            "CORE_VAULT value must not fund miner fee",
         ));
     }
 
