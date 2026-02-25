@@ -6,6 +6,7 @@ pub mod connect_block_inmem;
 pub mod constants;
 mod covenant_genesis;
 pub mod error;
+mod fork_choice;
 mod hash;
 mod htlc;
 pub mod merkle;
@@ -29,6 +30,7 @@ pub use connect_block_inmem::{
 };
 pub use covenant_genesis::validate_tx_covenants_genesis;
 pub use error::{ErrorCode, TxError};
+pub use fork_choice::{fork_chainwork_from_targets, fork_work_from_target};
 pub use htlc::{parse_htlc_covenant_data, validate_htlc_spend, HtlcCovenant};
 pub use merkle::merkle_root_txids;
 pub use pow::{pow_check, retarget_v1, retarget_v1_clamped};

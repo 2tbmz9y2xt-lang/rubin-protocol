@@ -149,6 +149,8 @@ name = "rubin-consensus-cli"
 version = "0.0.0"
 dependencies = [
  "hex",
+ "num-bigint",
+ "num-traits",
  "rubin-consensus",
  "serde",
  "serde_json",

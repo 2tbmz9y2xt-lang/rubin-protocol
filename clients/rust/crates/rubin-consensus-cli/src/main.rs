@@ -1,7 +1,10 @@
+use num_bigint::BigUint;
+use num_traits::Zero;
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_with_mtp, block_hash, compact_shortid,
-    connect_block_basic_in_memory_at_height, merkle_root_txids, parse_tx, pow_check, retarget_v1,
-    retarget_v1_clamped, sighash_v1_digest, validate_block_basic_with_context_and_fees_at_height,
+    connect_block_basic_in_memory_at_height, fork_work_from_target, merkle_root_txids, parse_tx,
+    pow_check, retarget_v1, retarget_v1_clamped, sighash_v1_digest,
+    validate_block_basic_with_context_and_fees_at_height,
     validate_block_basic_with_context_at_height, validate_tx_covenants_genesis, ErrorCode,
     InMemoryChainState, Outpoint, UtxoEntry,
 };
@@ -53,6 +56,9 @@ struct Request {
     target_hex: String,
 
     #[serde(default)]
+    target: String,
+
+    #[serde(default)]
     target_old: String,
 
     #[serde(default)]
@@ -90,6 +96,9 @@ struct Request {
 
     #[serde(default)]
     sum_fees: u64,
+
+    #[serde(default)]
+    chains: Vec<ForkChoiceChainJson>,
 }
 
 #[derive(Deserialize)]
@@ -101,6 +110,13 @@ struct UtxoJson {
     covenant_data: String,
     creation_height: u64,
     created_by_coinbase: bool,
+}
+
+#[derive(Deserialize)]
+struct ForkChoiceChainJson {
+    id: String,
+    targets: Vec<String>,
+    tip_hash: String,
 }
 
 #[derive(Serialize, Default)]
@@ -145,10 +161,39 @@ struct Response {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     already_generated_n1: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    work: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    winner: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chainwork: Option<String>,
 }
 
 fn err_code(code: ErrorCode) -> String {
     code.as_str().to_string()
+}
+
+fn parse_hex_u256_to_32(s: &str) -> Result<[u8; 32], ()> {
+    let mut out = [0u8; 32];
+    let mut stripped = s.trim().to_lowercase();
+    if let Some(rest) = stripped.strip_prefix("0x") {
+        stripped = rest.to_string();
+    }
+    if stripped.is_empty() {
+        return Err(());
+    }
+    if stripped.len() % 2 == 1 {
+        stripped = format!("0{stripped}");
+    }
+    let b = hex::decode(stripped).map_err(|_| ())?;
+    if b.len() > 32 {
+        return Err(());
+    }
+    out[32 - b.len()..].copy_from_slice(&b);
+    Ok(out)
 }
 
 fn main() {
@@ -158,18 +203,7 @@ fn main() {
             let resp = Response {
                 ok: false,
                 err: Some(format!("bad request: {e}")),
-                txid: None,
-                wtxid: None,
-                merkle_root: None,
-                digest: None,
-                consumed: None,
-                block_hash: None,
-                target_new: None,
-                fee: None,
-                utxo_count: None,
-                sum_fees: None,
-                already_generated: None,
-                already_generated_n1: None,
+                ..Default::default()
             };
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
             return;
@@ -235,6 +269,131 @@ fn main() {
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
             }
+        }
+        "fork_work" => {
+            let target = match parse_hex_u256_to_32(&req.target) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad target".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+
+            match fork_work_from_target(target) {
+                Ok(w) => {
+                    let resp = Response {
+                        ok: true,
+                        work: Some(format!("0x{}", w.to_str_radix(16))),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(err_code(e.code)),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+            }
+        }
+        "fork_choice_select" => {
+            if req.chains.is_empty() {
+                let resp = Response {
+                    ok: false,
+                    err: Some("bad chains".to_string()),
+                    ..Default::default()
+                };
+                let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                return;
+            }
+
+            let mut best_id: Option<String> = None;
+            let mut best_work: BigUint = BigUint::zero();
+            let mut best_tip: Option<[u8; 32]> = None;
+
+            for c in &req.chains {
+                if c.id.is_empty() || c.targets.is_empty() {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad chain".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+                let tip = match parse_hex_u256_to_32(&c.tip_hash) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let resp = Response {
+                            ok: false,
+                            err: Some("bad tip_hash".to_string()),
+                            ..Default::default()
+                        };
+                        let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                        return;
+                    }
+                };
+
+                let mut total = BigUint::zero();
+                for ts in &c.targets {
+                    let t = match parse_hex_u256_to_32(ts) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            let resp = Response {
+                                ok: false,
+                                err: Some("bad target".to_string()),
+                                ..Default::default()
+                            };
+                            let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                            return;
+                        }
+                    };
+                    match fork_work_from_target(t) {
+                        Ok(w) => total += w,
+                        Err(e) => {
+                            let resp = Response {
+                                ok: false,
+                                err: Some(err_code(e.code)),
+                                ..Default::default()
+                            };
+                            let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                            return;
+                        }
+                    }
+                }
+
+                let better = if best_id.is_none() || total > best_work {
+                    true
+                } else if total == best_work {
+                    match best_tip {
+                        Some(bt) => tip < bt,
+                        None => true,
+                    }
+                } else {
+                    false
+                };
+
+                if better {
+                    best_id = Some(c.id.clone());
+                    best_work = total;
+                    best_tip = Some(tip);
+                }
+            }
+
+            let resp = Response {
+                ok: true,
+                winner: best_id,
+                chainwork: Some(format!("0x{}", best_work.to_str_radix(16))),
+                ..Default::default()
+            };
+            let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
         "merkle_root" => {
             let mut txids: Vec<[u8; 32]> = Vec::with_capacity(req.txids.len());

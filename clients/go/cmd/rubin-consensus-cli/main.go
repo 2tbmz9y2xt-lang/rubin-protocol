@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha3"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
+	"strings"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -28,6 +31,7 @@ type Request struct {
 
 	HeaderHex        string   `json:"header_hex,omitempty"`
 	TargetHex        string   `json:"target_hex,omitempty"`
+	Target           string   `json:"target,omitempty"`
 	TargetOldHex     string   `json:"target_old,omitempty"`
 	TimestampFirst   uint64   `json:"timestamp_first,omitempty"`
 	TimestampLast    uint64   `json:"timestamp_last,omitempty"`
@@ -42,6 +46,8 @@ type Request struct {
 	Height         uint64     `json:"height,omitempty"`
 	BlockTimestamp uint64     `json:"block_timestamp,omitempty"`
 	BlockMTP       *uint64    `json:"block_mtp,omitempty"`
+
+	Chains []ForkChoiceChain `json:"chains,omitempty"`
 }
 
 type UtxoJSON struct {
@@ -52,6 +58,12 @@ type UtxoJSON struct {
 	CovenantDataHex   string `json:"covenant_data"`
 	CreationHeight    uint64 `json:"creation_height"`
 	CreatedByCoinbase bool   `json:"created_by_coinbase"`
+}
+
+type ForkChoiceChain struct {
+	ID      string   `json:"id"`
+	Targets []string `json:"targets"`
+	TipHash string   `json:"tip_hash"`
 }
 
 type Response struct {
@@ -71,12 +83,37 @@ type Response struct {
 	UtxoCount          uint64 `json:"utxo_count,omitempty"`
 	AlreadyGenerated   uint64 `json:"already_generated,omitempty"`
 	AlreadyGeneratedN1 uint64 `json:"already_generated_n1,omitempty"`
+
+	WorkHex   string `json:"work,omitempty"`
+	Winner    string `json:"winner,omitempty"`
+	Chainwork string `json:"chainwork,omitempty"`
 }
 
 func writeResp(w io.Writer, resp Response) {
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	_ = enc.Encode(resp)
+}
+
+func parseHexU256To32(s string) ([32]byte, error) {
+	var out [32]byte
+	stripped := strings.TrimSpace(strings.ToLower(s))
+	stripped = strings.TrimPrefix(stripped, "0x")
+	if stripped == "" {
+		return out, fmt.Errorf("empty")
+	}
+	if len(stripped)%2 == 1 {
+		stripped = "0" + stripped
+	}
+	b, err := hex.DecodeString(stripped)
+	if err != nil {
+		return out, err
+	}
+	if len(b) > 32 {
+		return out, fmt.Errorf("overflow")
+	}
+	copy(out[32-len(b):], b)
+	return out, nil
 }
 
 func main() {
@@ -107,6 +144,80 @@ func main() {
 			TxidHex:  hex.EncodeToString(txid[:]),
 			WtxidHex: hex.EncodeToString(wtxid[:]),
 			Consumed: n,
+		})
+		return
+
+	case "fork_work":
+		t, err := parseHexU256To32(req.Target)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad target"})
+			return
+		}
+		work, err := consensus.WorkFromTarget(t)
+		if err != nil {
+			if te, ok := err.(*consensus.TxError); ok {
+				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
+				return
+			}
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+		writeResp(os.Stdout, Response{Ok: true, WorkHex: "0x" + work.Text(16)})
+		return
+
+	case "fork_choice_select":
+		if len(req.Chains) == 0 {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad chains"})
+			return
+		}
+		var bestID string
+		var bestWork *big.Int
+		var bestTip []byte
+
+		for _, c := range req.Chains {
+			if c.ID == "" || len(c.Targets) == 0 {
+				writeResp(os.Stdout, Response{Ok: false, Err: "bad chain"})
+				return
+			}
+			tip, err := parseHexU256To32(c.TipHash)
+			if err != nil {
+				writeResp(os.Stdout, Response{Ok: false, Err: "bad tip_hash"})
+				return
+			}
+			tipb := tip[:]
+
+			total := new(big.Int)
+			for _, ts := range c.Targets {
+				tb, err := parseHexU256To32(ts)
+				if err != nil {
+					writeResp(os.Stdout, Response{Ok: false, Err: "bad target"})
+					return
+				}
+				w, err := consensus.WorkFromTarget(tb)
+				if err != nil {
+					if te, ok := err.(*consensus.TxError); ok {
+						writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
+						return
+					}
+					writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+					return
+				}
+				total.Add(total, w)
+			}
+
+			if bestWork == nil ||
+				total.Cmp(bestWork) > 0 ||
+				(total.Cmp(bestWork) == 0 && (bestTip == nil || bytes.Compare(tipb, bestTip) < 0)) {
+				bestID = c.ID
+				bestWork = total
+				bestTip = append(bestTip[:0], tipb...)
+			}
+		}
+
+		writeResp(os.Stdout, Response{
+			Ok:        true,
+			Winner:    bestID,
+			Chainwork: "0x" + bestWork.Text(16),
 		})
 		return
 
