@@ -181,9 +181,7 @@ def parseBlock (blockBytes : Bytes) : Except String ParsedBlock := do
   let mut wtxids : List Bytes := []
   let mut coinbaseTx : Bytes := ByteArray.empty
   for idx in [0:txCount] do
-    match parseTxFromCursor cur with
-    | .error _ => throw "BLOCK_ERR_PARSE"
-    | .ok (txid, wtxid, fullTx, cur') =>
+    let (txid, wtxid, fullTx, cur') ← parseTxFromCursor cur
     if idx == 0 then
       coinbaseTx := fullTx
     txs := txs.concat fullTx

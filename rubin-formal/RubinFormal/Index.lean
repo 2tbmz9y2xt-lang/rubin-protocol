@@ -11,3 +11,4 @@ import RubinFormal.BlockBasicV1
 import RubinFormal.SubsidyV1
 import RubinFormal.CovenantGenesisV1
 import RubinFormal.UtxoApplyGenesisV1
+import RubinFormal.DaIntegrityV1

@@ -26,3 +26,5 @@ import RubinFormal.Conformance.CVVaultPolicyVectors
 import RubinFormal.Conformance.CVVaultPolicyReplay
 import RubinFormal.Conformance.CVHtlcOrderingVectors
 import RubinFormal.Conformance.CVHtlcOrderingReplay
+import RubinFormal.Conformance.CVDaIntegrityVectors
+import RubinFormal.Conformance.CVDaIntegrityReplay
