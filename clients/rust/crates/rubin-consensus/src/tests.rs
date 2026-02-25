@@ -1738,3 +1738,21 @@ fn apply_non_coinbase_tx_basic_multisig_input_accepted() {
     let summary = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000).expect("ok");
     assert_eq!(summary.fee, 10);
 }
+
+#[test]
+fn fork_work_vectors() {
+    let ff = [0xffu8; 32];
+    let w = crate::fork_work_from_target(ff).expect("work");
+    assert_eq!(w, BigUint::one());
+
+    let mut half = [0u8; 32];
+    half[0] = 0x80;
+    let w = crate::fork_work_from_target(half).expect("work");
+    assert_eq!(w, BigUint::from(2u8));
+
+    let mut one = [0u8; 32];
+    one[31] = 0x01;
+    let w = crate::fork_work_from_target(one).expect("work");
+    let two256: BigUint = BigUint::one() << 256usize;
+    assert_eq!(w, two256);
+}

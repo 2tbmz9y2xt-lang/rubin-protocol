@@ -43,8 +43,6 @@ LOCAL_OPS = {
     "compact_grace_period",
     "nonce_replay_intrablock",
     "timestamp_bounds",
-    "fork_work",
-    "fork_choice_select",
     "determinism_order",
     "validation_order",
 }
@@ -944,6 +942,10 @@ def validate_vector(
         req["block_timestamp"] = v["block_timestamp"]
         if "block_mtp" in v:
             req["block_mtp"] = int(v["block_mtp"])
+    elif op == "fork_work":
+        req["target"] = v["target"]
+    elif op == "fork_choice_select":
+        req["chains"] = v["chains"]
     elif op == "compact_shortid":
         req["wtxid"] = v["wtxid"]
         req["nonce1"] = v["nonce1"]
@@ -1057,6 +1059,24 @@ def validate_vector(
             problems.append(f"{gate}/{vid}: expect_fee mismatch")
         if "expect_utxo_count" in v and go_resp.get("utxo_count") != v["expect_utxo_count"]:
             problems.append(f"{gate}/{vid}: expect_utxo_count mismatch")
+    elif op == "fork_work":
+        if go_resp.get("work") != rust_resp.get("work"):
+            problems.append(f"{gate}/{vid}: work mismatch go={go_resp.get('work')} rust={rust_resp.get('work')}")
+        if "expect_work" in v and go_resp.get("work") != v["expect_work"]:
+            problems.append(f"{gate}/{vid}: expect_work mismatch")
+    elif op == "fork_choice_select":
+        if go_resp.get("winner") != rust_resp.get("winner"):
+            problems.append(
+                f"{gate}/{vid}: winner mismatch go={go_resp.get('winner')} rust={rust_resp.get('winner')}"
+            )
+        if "expect_winner" in v and go_resp.get("winner") != v["expect_winner"]:
+            problems.append(f"{gate}/{vid}: expect_winner mismatch")
+        if go_resp.get("chainwork") != rust_resp.get("chainwork"):
+            problems.append(
+                f"{gate}/{vid}: chainwork mismatch go={go_resp.get('chainwork')} rust={rust_resp.get('chainwork')}"
+            )
+        if "expect_chainwork" in v and go_resp.get("chainwork") != v["expect_chainwork"]:
+            problems.append(f"{gate}/{vid}: expect_chainwork mismatch")
     elif op == "compact_shortid":
         go_sid = go_resp.get("short_id") or go_resp.get("digest")
         rust_sid = rust_resp.get("short_id") or rust_resp.get("digest")
