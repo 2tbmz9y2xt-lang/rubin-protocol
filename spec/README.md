@@ -53,6 +53,10 @@ Integrity:
   - Explicit ban on alternative PQ backend bindings in this repo
   - Non-consensus: does not change wire format or block validity rules
 
+- `./RUBIN_CONSOLIDATED_HARDENING.md` — engineering consolidation (non-consensus)
+  - Consolidated relay determinism clarifications and conformance extension map
+  - Canonical precedence preserved; no independent validity authority
+
 ## Non-Consensus / AUX
 
 - `./RUBIN_L1_P2P_AUX.md` — non-consensus P2P notes

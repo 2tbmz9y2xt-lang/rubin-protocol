@@ -1106,6 +1106,12 @@ fn validate_tx_covenants_genesis_multisig_unsorted_keys() {
     assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
+#[test]
+fn witness_slots_unknown_covenant_rejected() {
+    let err = crate::witness_slots(0x7777, &[]).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+}
+
 fn tx_with_one_input_one_output(
     prev_txid: [u8; 32],
     prev_vout: u32,
@@ -1474,6 +1480,33 @@ fn apply_non_coinbase_tx_basic_zero_witness_count_rejected() {
 
     let err = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 100, 1000, ZERO_CHAIN_ID).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrParse);
+}
+
+#[test]
+fn apply_non_coinbase_tx_basic_unknown_covenant_spend_rejected() {
+    let mut prev = [0u8; 32];
+    prev[0] = 0xad;
+    let tx_bytes =
+        tx_with_one_input_one_output(prev, 0, 90, COV_TYPE_P2PK, &valid_p2pk_covenant_data());
+    let (tx, txid, _wtxid, _n) = parse_tx(&tx_bytes).expect("parse");
+
+    let mut utxos: HashMap<Outpoint, UtxoEntry> = HashMap::new();
+    utxos.insert(
+        Outpoint {
+            txid: prev,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 100,
+            covenant_type: 0x7777,
+            covenant_data: vec![0x01],
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    );
+
+    let err = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 100, 1000, ZERO_CHAIN_ID).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
 #[test]
@@ -1864,6 +1897,110 @@ fn apply_non_coinbase_tx_basic_vault_allows_owner_top_up() {
     let summary =
         apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000, ZERO_CHAIN_ID).expect("ok");
     assert_eq!(summary.fee, 5);
+}
+
+#[test]
+fn apply_non_coinbase_tx_basic_htlc_then_p2pk_cursor_handling() {
+    let mut prev_htlc = [0u8; 32];
+    prev_htlc[0] = 0xb6;
+    let mut prev_p2pk = [0u8; 32];
+    prev_p2pk[0] = 0xb7;
+    let mut txid = [0u8; 32];
+    txid[0] = 0xb8;
+
+    let claim_kp = kp_or_skip!();
+    let refund_kp = kp_or_skip!();
+    let p2pk_kp = kp_or_skip!();
+    let dest_kp = kp_or_skip!();
+
+    let claim_key_id = sha3_256(&claim_kp.pubkey);
+    let refund_key_id = sha3_256(&refund_kp.pubkey);
+    let p2pk_cov = p2pk_covenant_data_for_pubkey(&p2pk_kp.pubkey);
+    let dest_cov = p2pk_covenant_data_for_pubkey(&dest_kp.pubkey);
+
+    let preimage = b"htlc-claim-preimage";
+    let mut selector_payload = Vec::with_capacity(3 + preimage.len());
+    selector_payload.push(0x00);
+    selector_payload.extend_from_slice(&(preimage.len() as u16).to_le_bytes());
+    selector_payload.extend_from_slice(preimage);
+
+    let mut tx = crate::tx::Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![
+            crate::tx::TxInput {
+                prev_txid: prev_htlc,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            },
+            crate::tx::TxInput {
+                prev_txid: prev_p2pk,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            },
+        ],
+        outputs: vec![crate::tx::TxOutput {
+            value: 150,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: dest_cov,
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![],
+        da_payload: vec![],
+    };
+    tx.witness = vec![
+        crate::tx::WitnessItem {
+            suite_id: SUITE_ID_SENTINEL,
+            pubkey: claim_key_id.to_vec(),
+            signature: selector_payload,
+        },
+        sign_input_witness(&tx, 0, 100, ZERO_CHAIN_ID, &claim_kp),
+        sign_input_witness(&tx, 1, 70, ZERO_CHAIN_ID, &p2pk_kp),
+    ];
+
+    let mut utxos: HashMap<Outpoint, UtxoEntry> = HashMap::new();
+    utxos.insert(
+        Outpoint {
+            txid: prev_htlc,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_HTLC,
+            covenant_data: encode_htlc_covenant_data(
+                sha3_256(preimage),
+                LOCK_MODE_HEIGHT,
+                1,
+                claim_key_id,
+                refund_key_id,
+            ),
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    );
+    utxos.insert(
+        Outpoint {
+            txid: prev_p2pk,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 70,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: p2pk_cov,
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    );
+
+    let summary =
+        apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000, ZERO_CHAIN_ID).expect("ok");
+    assert_eq!(summary.fee, 20);
+    assert_eq!(summary.utxo_count, 1);
 }
 
 #[test]
