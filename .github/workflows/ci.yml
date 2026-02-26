@@ -14,6 +14,37 @@ jobs:
       - name: Sensitive files/content gate
         run: python3 tools/check_sensitive_files.py
 
+  security_ai:
+    needs: policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.13'
+          cache: true
+          cache-dependency-path: clients/go/go.mod
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Semgrep
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install semgrep
+
+      - name: Install gosec + govulncheck
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Security precheck gate
+        run: scripts/security/precheck.sh --ci
+
   formal:
     needs: policy
     runs-on: ubuntu-latest
@@ -292,7 +323,7 @@ jobs:
 
   validator:
     name: validator
-    needs: [policy, formal, test, formal_refinement]
+    needs: [policy, security_ai, formal, test, formal_refinement]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
@@ -300,12 +331,13 @@ jobs:
         run: |
           declare -A results=(
             [policy]="${{ needs.policy.result }}"
+            [security_ai]="${{ needs.security_ai.result }}"
             [formal]="${{ needs.formal.result }}"
             [test]="${{ needs.test.result }}"
             [formal_refinement]="${{ needs.formal_refinement.result }}"
           )
           failed=0
-          for key in policy formal test formal_refinement; do
+          for key in policy security_ai formal test formal_refinement; do
             value="${results[$key]}"
             echo "$key=$value"
             if [ "$value" != "success" ]; then
