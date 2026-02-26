@@ -206,6 +206,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install elan (Lean toolchain manager)
+        run: |
+          curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
       - name: Cache OpenSSL 3.5 bundle
         uses: actions/cache@v4
         with:
@@ -250,11 +255,6 @@ jobs:
           go-version: '1.24.13'
           cache: true
           cache-dependency-path: clients/go/go.mod
-
-      - name: Install elan (Lean toolchain manager)
-        run: |
-          curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y
-          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
       - name: Generate Go trace v1
         run: |
