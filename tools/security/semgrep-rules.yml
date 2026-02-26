@@ -1,0 +1,24 @@
+rules:
+  - id: rubin.go.no-crypto-md5
+    message: "MD5 is forbidden in consensus/security code."
+    severity: ERROR
+    languages: [go]
+    pattern: "crypto/md5"
+
+  - id: rubin.go.no-crypto-sha1
+    message: "SHA-1 is forbidden in consensus/security code."
+    severity: ERROR
+    languages: [go]
+    pattern: "crypto/sha1"
+
+  - id: rubin.rust.no-md5
+    message: "MD5 crate usage is forbidden in consensus/security code."
+    severity: ERROR
+    languages: [rust]
+    pattern-regex: "\\bmd5::"
+
+  - id: rubin.rust.no-sha1
+    message: "SHA-1 crate usage is forbidden in consensus/security code."
+    severity: ERROR
+    languages: [rust]
+    pattern-regex: "\\bsha1::"

@@ -45,6 +45,7 @@ cd rubin-protocol
 
 scripts/dev-env.sh -- bash -lc 'cd clients/go && go test ./...'
 scripts/dev-env.sh -- bash -lc 'cd clients/rust && cargo test --workspace'
+scripts/dev-env.sh -- scripts/security/precheck.sh --local
 ```
 
 Run cross-client conformance (builds local CLIs into `./conformance/bin/`):
@@ -69,4 +70,4 @@ The runner requires Go and Rust to return identical `ok/err` behavior and identi
 
 - Local orchestration/queue files live outside the repository and MUST NOT be committed.
 - CI blocks sensitive assets from entering public repo (`tools/check_sensitive_files.py`).
-- PR merge gate includes `validator` check, which is an aggregate status over `policy` + `formal` + `test` + `formal_refinement`.
+- PR merge gate includes `validator` check, which is an aggregate status over `policy` + `security_ai` + `formal` + `test` + `formal_refinement`.
