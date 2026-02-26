@@ -31,10 +31,10 @@ theorem clampTimestampStep_eq_cap_of_lt (prevTs newTs maxStep : Nat)
 
 theorem satSub_eq_zero_of_le (a b : Nat) (h : a ≤ b) :
     RubinFormal.satSub a b = 0 := by
-  by_cases hb : b ≤ a
-  · have hab : a = b := Nat.le_antisymm h hb
-    simp [RubinFormal.satSub, hb, hab]
-  · simp [RubinFormal.satSub, hb]
+  by_cases hab : a = b
+  · subst hab
+    simp [RubinFormal.satSub]
+  · exact RubinFormal.satSub_zero_when_underflow a b (Nat.lt_of_le_of_ne h hab)
 
 theorem daChunkSetValid_implies_nonempty (chunks : List Nat) :
     RubinFormal.daChunkSetValid chunks → chunks ≠ [] := by

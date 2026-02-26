@@ -245,7 +245,9 @@ def _emit_go_trace_v1(header: Header, entries: list[dict[str, Any]]) -> str:
     out.append("  sumWeight : Option Nat")
     out.append("  sumDa : Option Nat")
     out.append("")
-    out.append(f"def goTraceRepoCommit : String := {_lean_str(header.repo_commit)}")
+    # Do not embed current repo commit into generated Lean module.
+    # Otherwise `git diff --exit-code` in CI would fail on every commit
+    # even when trace semantics are unchanged.
     out.append(f"def goTraceFixturesDigestSHA3_256 : String := {_lean_str(header.fixtures_digest_sha3_256)}")
     out.append("")
     out.append(list_block("parseOuts", "ParseOut", parse_rows))

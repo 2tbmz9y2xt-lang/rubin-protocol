@@ -40,7 +40,6 @@ structure BlockBasicOut where
   sumWeight : Option Nat
   sumDa : Option Nat
 
-def goTraceRepoCommit : String := "4aea6a32de99ab2d9d19e185d3059bfc0c4a95a9"
 def goTraceFixturesDigestSHA3_256 : String := "9dcc4dbd4ba4459f5152764dc8719351410885e12d7cc3f5b144b5caba3b312d"
 
 def parseOuts : List ParseOut := [
