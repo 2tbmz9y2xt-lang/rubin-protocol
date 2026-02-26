@@ -67,3 +67,4 @@ The runner requires Go and Rust to return identical `ok/err` behavior and identi
 ## Notes
 
 - Local orchestration/queue files live outside the repository and MUST NOT be committed.
+- CI blocks sensitive assets from entering public repo (`tools/check_sensitive_files.py`).
