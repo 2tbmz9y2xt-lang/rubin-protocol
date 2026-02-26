@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "format": "jsonl",
+  "record_types": {
+    "header": {
+      "type": "object",
+      "required": ["type", "schema_version", "generated_at_utc", "repo_commit", "go_version", "fixtures_digest_sha3_256"],
+      "properties": {
+        "type": {"const": "header"},
+        "schema_version": {"const": 1},
+        "generated_at_utc": {"type": "string"},
+        "repo_commit": {"type": "string"},
+        "go_version": {"type": "string"},
+        "fixtures_digest_sha3_256": {"type": "string"}
+      }
+    },
+    "entry": {
+      "type": "object",
+      "required": ["type", "gate", "vector_id", "op", "ok", "err", "inputs", "outputs"],
+      "properties": {
+        "type": {"const": "entry"},
+        "gate": {"type": "string"},
+        "vector_id": {"type": "string"},
+        "op": {"type": "string"},
+        "ok": {"type": "boolean"},
+        "err": {"type": "string"},
+        "inputs": {"type": "object"},
+        "outputs": {"type": "object"}
+      }
+    }
+  }
+}
+
