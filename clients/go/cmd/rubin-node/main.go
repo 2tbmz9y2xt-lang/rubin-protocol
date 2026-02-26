@@ -52,9 +52,38 @@ func main() {
 		_, _ = fmt.Fprintf(os.Stderr, "datadir create failed: %v\n", err)
 		os.Exit(2)
 	}
+	chainStatePath := node.ChainStatePath(cfg.DataDir)
+	chainState, err := node.LoadChainState(chainStatePath)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "chainstate load failed: %v\n", err)
+		os.Exit(2)
+	}
+	if err := chainState.Save(chainStatePath); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "chainstate save failed: %v\n", err)
+		os.Exit(2)
+	}
+
+	blockStore, err := node.OpenBlockStore(node.BlockStorePath(cfg.DataDir))
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "blockstore open failed: %v\n", err)
+		os.Exit(2)
+	}
+	tipHeight, tipHash, tipOK, err := blockStore.Tip()
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "blockstore tip read failed: %v\n", err)
+		os.Exit(2)
+	}
+
 	if err := printConfig(cfg); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "config encode failed: %v\n", err)
 		os.Exit(1)
+	}
+	if tipOK {
+		_, _ = fmt.Fprintf(os.Stdout, "chainstate: has_tip=%v height=%d utxos=%d already_generated=%d tip=%x\n", chainState.HasTip, chainState.Height, len(chainState.Utxos), chainState.AlreadyGenerated, chainState.TipHash)
+		_, _ = fmt.Fprintf(os.Stdout, "blockstore: tip_height=%d tip_hash=%x\n", tipHeight, tipHash)
+	} else {
+		_, _ = fmt.Fprintf(os.Stdout, "chainstate: has_tip=%v height=%d utxos=%d already_generated=%d\n", chainState.HasTip, chainState.Height, len(chainState.Utxos), chainState.AlreadyGenerated)
+		_, _ = fmt.Fprintln(os.Stdout, "blockstore: empty")
 	}
 	if *dryRun {
 		return
