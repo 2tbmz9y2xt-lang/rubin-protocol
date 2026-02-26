@@ -40,6 +40,8 @@ func main() {
 	flag.StringVar(&cfg.BindAddr, "bind", defaults.BindAddr, "bind address host:port")
 	flag.StringVar(&cfg.LogLevel, "log-level", defaults.LogLevel, "log level: debug|info|warn|error")
 	flag.IntVar(&cfg.MaxPeers, "max-peers", defaults.MaxPeers, "max connected peers")
+	mineBlocks := flag.Int("mine-blocks", 0, "mine N blocks locally after startup")
+	mineExit := flag.Bool("mine-exit", false, "exit immediately after local mining")
 	dryRun := flag.Bool("dry-run", false, "print effective config and exit")
 	flag.Parse()
 
@@ -102,6 +104,24 @@ func main() {
 	_, _ = fmt.Fprintf(os.Stdout, "p2p: peer_slots=%d connected=%d\n", cfg.MaxPeers, len(peerManager.Snapshot()))
 	if *dryRun {
 		return
+	}
+	if *mineBlocks > 0 {
+		miner, err := node.NewMiner(chainState, blockStore, syncEngine, node.DefaultMinerConfig())
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "miner init failed: %v\n", err)
+			os.Exit(2)
+		}
+		mined, err := miner.MineN(context.Background(), *mineBlocks, nil)
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "mining failed: %v\n", err)
+			os.Exit(2)
+		}
+		for _, b := range mined {
+			_, _ = fmt.Fprintf(os.Stdout, "mined: height=%d hash=%x timestamp=%d nonce=%d tx_count=%d\n", b.Height, b.Hash, b.Timestamp, b.Nonce, b.TxCount)
+		}
+		if *mineExit {
+			return
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
