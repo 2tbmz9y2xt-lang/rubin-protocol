@@ -27,34 +27,7 @@ COMPACT_DEFAULTS: Dict[str, int] = {
 }
 
 
-LOCAL_OPS = {
-    "compact_collision_fallback",
-    "compact_witness_roundtrip",
-    "compact_batch_verify",
-    "compact_prefill_roundtrip",
-    "compact_state_machine",
-    "compact_orphan_limits",
-    "compact_orphan_storm",
-    "compact_chunk_count_cap",
-    "compact_sendcmpct_modes",
-    "compact_peer_quality",
-    "compact_prefetch_caps",
-    "compact_telemetry_rate",
-    "compact_telemetry_fields",
-    "compact_grace_period",
-    "compact_eviction_tiebreak",
-    "compact_a_to_b_retention",
-    "compact_duplicate_commit",
-    "compact_total_fee",
-    "compact_pinned_accounting",
-    "compact_storm_commit_bearing",
-    "vault_policy_rules",
-    "htlc_ordering_policy",
-    "nonce_replay_intrablock",
-    "timestamp_bounds",
-    "determinism_order",
-    "validation_order",
-}
+LOCAL_OPS = set()
 
 
 def run(cmd: List[str], cwd: pathlib.Path) -> None:
@@ -1328,6 +1301,49 @@ def validate_vector(
             cov_type = int(cov_type, 0)
         req["covenant_type"] = cov_type
         req["covenant_data_hex"] = v["input"]["covenant_data_hex"]
+    elif op.startswith("compact_") and op != "compact_shortid":
+        for key, value in v.items():
+            if key in ("id", "op") or key.startswith("expect_"):
+                continue
+            req[key] = value
+    elif op == "nonce_replay_intrablock":
+        req["nonces"] = [int(x) for x in v.get("nonces", [])]
+    elif op == "timestamp_bounds":
+        req["mtp"] = int(v.get("mtp", 0))
+        req["timestamp"] = int(v.get("timestamp", 0))
+        req["max_future_drift"] = int(v.get("max_future_drift", 7_200))
+    elif op == "determinism_order":
+        req["keys"] = v.get("keys", [])
+    elif op == "validation_order":
+        req["checks"] = v.get("checks", [])
+    elif op == "htlc_ordering_policy":
+        req["path"] = str(v.get("path", "claim"))
+        req["structural_ok"] = bool(v.get("structural_ok", True))
+        req["locktime_ok"] = bool(v.get("locktime_ok", True))
+        req["suite_id"] = int(v.get("suite_id", 1))
+        req["height"] = int(v.get("block_height", 0))
+        req["slh_activation_height"] = int(v.get("slh_activation_height", 1_000_000))
+        req["key_binding_ok"] = bool(v.get("key_binding_ok", True))
+        req["preimage_ok"] = bool(v.get("preimage_ok", True))
+        req["verify_ok"] = bool(v.get("verify_ok", True))
+    elif op == "vault_policy_rules":
+        req["owner_lock_id"] = str(v.get("owner_lock_id", "owner"))
+        req["vault_input_count"] = int(v.get("vault_input_count", 0))
+        req["non_vault_lock_ids"] = [str(x) for x in v.get("non_vault_lock_ids", [])]
+        if "has_owner_auth" in v:
+            req["has_owner_auth"] = bool(v["has_owner_auth"])
+        req["sum_out"] = int(v.get("sum_out", 0))
+        req["sum_in_vault"] = int(v.get("sum_in_vault", 0))
+        req["slots"] = int(v.get("slots", 0))
+        req["key_count"] = int(v.get("key_count", 0))
+        req["sig_threshold_ok"] = bool(v.get("sig_threshold_ok", True))
+        req["sentinel_suite_id"] = int(v.get("sentinel_suite_id", 0))
+        req["sentinel_pubkey_len"] = int(v.get("sentinel_pubkey_len", 0))
+        req["sentinel_sig_len"] = int(v.get("sentinel_sig_len", 0))
+        req["sentinel_verify_called"] = bool(v.get("sentinel_verify_called", False))
+        req["whitelist"] = [str(x) for x in v.get("whitelist", [])]
+        if "validation_order" in v and isinstance(v["validation_order"], list):
+            req["validation_order"] = [str(x) for x in v["validation_order"]]
     else:
         return [f"{gate}/{v.get('id','?')}: unknown op {op}"]
 
@@ -1506,6 +1522,262 @@ def validate_vector(
             problems.append(f"{gate}/{vid}: expect_da_bytes mismatch")
         if "expect_anchor_bytes" in v and go_resp.get("anchor_bytes") != v["expect_anchor_bytes"]:
             problems.append(f"{gate}/{vid}: expect_anchor_bytes mismatch")
+    elif op.startswith("compact_") and op != "compact_shortid":
+        def normalize_compact_response(resp: Dict[str, Any]) -> Dict[str, Any]:
+            normalized = dict(resp or {})
+            bool_fields = {
+                "request_getblocktxn",
+                "request_full_block",
+                "penalize_peer",
+                "roundtrip_ok",
+                "batch_ok",
+                "fallback",
+                "reconstructed",
+                "evicted",
+                "pinned",
+                "admit",
+                "storm_mode",
+                "rollback",
+                "peer_exceeded",
+                "global_exceeded",
+                "quality_penalty",
+                "disconnect",
+                "replaced",
+                "commit_bearing",
+                "prioritize",
+            }
+            int_fields = {
+                "wire_bytes",
+                "ttl",
+                "ttl_reset_count",
+                "mode",
+                "score",
+                "duplicates_dropped",
+                "total_fee",
+                "counted_bytes",
+                "ignored_overhead_bytes",
+            }
+            float_fields = {"fill_pct", "rate"}
+            list_fields = {
+                "invalid_indices",
+                "missing_indices",
+                "checkblock_results",
+                "missing_fields",
+                "evict_order",
+                "retained_chunks",
+                "prefetch_targets",
+                "discarded_chunks",
+                "penalized_peers",
+            }
+            str_fields = {"state", "retained_peer"}
+
+            for key in bool_fields:
+                normalized.setdefault(key, False)
+            for key in int_fields:
+                normalized.setdefault(key, 0)
+            for key in float_fields:
+                normalized.setdefault(key, 0.0)
+            for key in list_fields:
+                normalized.setdefault(key, [])
+            for key in str_fields:
+                normalized.setdefault(key, "")
+            return normalized
+
+        go_resp = normalize_compact_response(go_resp)
+        rust_resp = normalize_compact_response(rust_resp)
+
+        field_map = {
+            "compact_collision_fallback": ["request_getblocktxn", "request_full_block", "penalize_peer"],
+            "compact_witness_roundtrip": ["roundtrip_ok", "wire_bytes"],
+            "compact_batch_verify": ["batch_ok", "fallback", "invalid_indices"],
+            "compact_prefill_roundtrip": ["missing_indices", "reconstructed", "request_full_block"],
+            "compact_state_machine": [
+                "state",
+                "evicted",
+                "pinned",
+                "ttl",
+                "ttl_reset_count",
+                "checkblock_results",
+            ],
+            "compact_orphan_limits": ["admit"],
+            "compact_orphan_storm": ["fill_pct", "storm_mode", "admit", "rollback"],
+            "compact_sendcmpct_modes": ["invalid_indices", "mode"],
+            "compact_peer_quality": ["score", "mode"],
+            "compact_prefetch_caps": ["peer_exceeded", "global_exceeded", "quality_penalty", "disconnect"],
+            "compact_telemetry_rate": ["rate"],
+            "compact_telemetry_fields": ["missing_fields"],
+            "compact_grace_period": ["storm_mode", "score", "disconnect"],
+            "compact_eviction_tiebreak": ["evict_order"],
+            "compact_a_to_b_retention": [
+                "state",
+                "retained_chunks",
+                "missing_indices",
+                "prefetch_targets",
+                "discarded_chunks",
+            ],
+            "compact_duplicate_commit": [
+                "retained_peer",
+                "duplicates_dropped",
+                "penalized_peers",
+                "replaced",
+            ],
+            "compact_total_fee": ["total_fee"],
+            "compact_pinned_accounting": ["counted_bytes", "admit", "ignored_overhead_bytes"],
+            "compact_storm_commit_bearing": ["storm_mode", "commit_bearing", "prioritize", "admit"],
+        }
+        for key in field_map.get(op, []):
+            if go_resp.get(key) != rust_resp.get(key):
+                problems.append(
+                    f"{gate}/{vid}: {key} mismatch go={go_resp.get(key)} rust={rust_resp.get(key)}"
+                )
+
+        if "expect_request_getblocktxn" in v and go_resp.get("request_getblocktxn") != bool(v["expect_request_getblocktxn"]):
+            problems.append(f"{gate}/{vid}: expect_request_getblocktxn mismatch")
+        if "expect_request_full_block" in v and go_resp.get("request_full_block") != bool(v["expect_request_full_block"]):
+            problems.append(f"{gate}/{vid}: expect_request_full_block mismatch")
+        if "expect_penalize_peer" in v and go_resp.get("penalize_peer") != bool(v["expect_penalize_peer"]):
+            problems.append(f"{gate}/{vid}: expect_penalize_peer mismatch")
+        if "expect_roundtrip_ok" in v and go_resp.get("roundtrip_ok") != bool(v["expect_roundtrip_ok"]):
+            problems.append(f"{gate}/{vid}: expect_roundtrip_ok mismatch")
+        if "expect_wire_bytes" in v and int(go_resp.get("wire_bytes", -1)) != int(v["expect_wire_bytes"]):
+            problems.append(f"{gate}/{vid}: expect_wire_bytes mismatch")
+        if "expect_batch_ok" in v and go_resp.get("batch_ok") != bool(v["expect_batch_ok"]):
+            problems.append(f"{gate}/{vid}: expect_batch_ok mismatch")
+        if "expect_fallback" in v and go_resp.get("fallback") != bool(v["expect_fallback"]):
+            problems.append(f"{gate}/{vid}: expect_fallback mismatch")
+        if "expect_invalid_indices" in v:
+            if sorted([int(x) for x in (go_resp.get("invalid_indices") or [])]) != sorted([int(x) for x in v["expect_invalid_indices"]]):
+                problems.append(f"{gate}/{vid}: expect_invalid_indices mismatch")
+        if "expect_missing_indices" in v:
+            if sorted([int(x) for x in (go_resp.get("missing_indices") or [])]) != sorted([int(x) for x in v["expect_missing_indices"]]):
+                problems.append(f"{gate}/{vid}: expect_missing_indices mismatch")
+        if "expect_reconstructed" in v and go_resp.get("reconstructed") != bool(v["expect_reconstructed"]):
+            problems.append(f"{gate}/{vid}: expect_reconstructed mismatch")
+        if "expect_final_state" in v and go_resp.get("state") != v["expect_final_state"]:
+            problems.append(f"{gate}/{vid}: expect_final_state mismatch")
+        if "expect_state" in v and go_resp.get("state") != v["expect_state"]:
+            problems.append(f"{gate}/{vid}: expect_state mismatch")
+        if "expect_evicted" in v and go_resp.get("evicted") != bool(v["expect_evicted"]):
+            problems.append(f"{gate}/{vid}: expect_evicted mismatch")
+        if "expect_pinned" in v and go_resp.get("pinned") != bool(v["expect_pinned"]):
+            problems.append(f"{gate}/{vid}: expect_pinned mismatch")
+        if "expect_ttl" in v and int(go_resp.get("ttl", -1)) != int(v["expect_ttl"]):
+            problems.append(f"{gate}/{vid}: expect_ttl mismatch")
+        if "expect_ttl_reset_count" in v and int(go_resp.get("ttl_reset_count", -1)) != int(v["expect_ttl_reset_count"]):
+            problems.append(f"{gate}/{vid}: expect_ttl_reset_count mismatch")
+        if "expect_checkblock_results" in v and list(go_resp.get("checkblock_results") or []) != [bool(x) for x in v["expect_checkblock_results"]]:
+            problems.append(f"{gate}/{vid}: expect_checkblock_results mismatch")
+        if "expect_admit" in v and go_resp.get("admit") != bool(v["expect_admit"]):
+            problems.append(f"{gate}/{vid}: expect_admit mismatch")
+        if "expect_fill_pct" in v:
+            if abs(float(go_resp.get("fill_pct", 0.0)) - float(v["expect_fill_pct"])) > 1e-9:
+                problems.append(f"{gate}/{vid}: expect_fill_pct mismatch")
+        if "expect_storm_mode" in v and go_resp.get("storm_mode") != bool(v["expect_storm_mode"]):
+            problems.append(f"{gate}/{vid}: expect_storm_mode mismatch")
+        if "expect_rollback" in v and go_resp.get("rollback") != bool(v["expect_rollback"]):
+            problems.append(f"{gate}/{vid}: expect_rollback mismatch")
+        if "expect_modes" in v and list(go_resp.get("invalid_indices") or []) != [int(x) for x in v["expect_modes"]]:
+            problems.append(f"{gate}/{vid}: expect_modes mismatch")
+        if "expect_mode" in v and int(go_resp.get("mode", -1)) != int(v["expect_mode"]):
+            problems.append(f"{gate}/{vid}: expect_mode mismatch")
+        if "expect_score" in v and int(go_resp.get("score", -1)) != int(v["expect_score"]):
+            problems.append(f"{gate}/{vid}: expect_score mismatch")
+        if "expect_peer_exceeded" in v and go_resp.get("peer_exceeded") != bool(v["expect_peer_exceeded"]):
+            problems.append(f"{gate}/{vid}: expect_peer_exceeded mismatch")
+        if "expect_global_exceeded" in v and go_resp.get("global_exceeded") != bool(v["expect_global_exceeded"]):
+            problems.append(f"{gate}/{vid}: expect_global_exceeded mismatch")
+        if "expect_quality_penalty" in v and go_resp.get("quality_penalty") != bool(v["expect_quality_penalty"]):
+            problems.append(f"{gate}/{vid}: expect_quality_penalty mismatch")
+        if "expect_disconnect" in v and go_resp.get("disconnect") != bool(v["expect_disconnect"]):
+            problems.append(f"{gate}/{vid}: expect_disconnect mismatch")
+        if "expect_rate" in v:
+            if abs(float(go_resp.get("rate", 0.0)) - float(v["expect_rate"])) > 1e-9:
+                problems.append(f"{gate}/{vid}: expect_rate mismatch")
+        if "expect_missing_fields" in v:
+            if sorted([str(x) for x in (go_resp.get("missing_fields") or [])]) != sorted([str(x) for x in v["expect_missing_fields"]]):
+                problems.append(f"{gate}/{vid}: expect_missing_fields mismatch")
+        if "expect_grace_active" in v and go_resp.get("storm_mode") != bool(v["expect_grace_active"]):
+            problems.append(f"{gate}/{vid}: expect_grace_active mismatch")
+        if "expect_evict_order" in v and list(go_resp.get("evict_order") or []) != [str(x) for x in v["expect_evict_order"]]:
+            problems.append(f"{gate}/{vid}: expect_evict_order mismatch")
+        if "expect_retained_chunks" in v:
+            if sorted([int(x) for x in (go_resp.get("retained_chunks") or [])]) != sorted([int(x) for x in v["expect_retained_chunks"]]):
+                problems.append(f"{gate}/{vid}: expect_retained_chunks mismatch")
+        if "expect_prefetch_targets" in v:
+            if sorted([int(x) for x in (go_resp.get("prefetch_targets") or [])]) != sorted([int(x) for x in v["expect_prefetch_targets"]]):
+                problems.append(f"{gate}/{vid}: expect_prefetch_targets mismatch")
+        if "expect_discarded_chunks" in v:
+            if sorted([int(x) for x in (go_resp.get("discarded_chunks") or [])]) != sorted([int(x) for x in v["expect_discarded_chunks"]]):
+                problems.append(f"{gate}/{vid}: expect_discarded_chunks mismatch")
+        if "expect_retained_peer" in v and go_resp.get("retained_peer") != str(v["expect_retained_peer"]):
+            problems.append(f"{gate}/{vid}: expect_retained_peer mismatch")
+        if "expect_duplicates_dropped" in v and int(go_resp.get("duplicates_dropped", -1)) != int(v["expect_duplicates_dropped"]):
+            problems.append(f"{gate}/{vid}: expect_duplicates_dropped mismatch")
+        if "expect_penalized_peers" in v:
+            if sorted([str(x) for x in (go_resp.get("penalized_peers") or [])]) != sorted([str(x) for x in v["expect_penalized_peers"]]):
+                problems.append(f"{gate}/{vid}: expect_penalized_peers mismatch")
+        if "expect_replaced" in v and go_resp.get("replaced") != bool(v["expect_replaced"]):
+            problems.append(f"{gate}/{vid}: expect_replaced mismatch")
+        if "expect_total_fee" in v and int(go_resp.get("total_fee", -1)) != int(v["expect_total_fee"]):
+            problems.append(f"{gate}/{vid}: expect_total_fee mismatch")
+        if "expect_counted_bytes" in v and int(go_resp.get("counted_bytes", -1)) != int(v["expect_counted_bytes"]):
+            problems.append(f"{gate}/{vid}: expect_counted_bytes mismatch")
+        if "expect_ignored_overhead_bytes" in v and int(go_resp.get("ignored_overhead_bytes", -1)) != int(v["expect_ignored_overhead_bytes"]):
+            problems.append(f"{gate}/{vid}: expect_ignored_overhead_bytes mismatch")
+        if "expect_commit_bearing" in v and go_resp.get("commit_bearing") != bool(v["expect_commit_bearing"]):
+            problems.append(f"{gate}/{vid}: expect_commit_bearing mismatch")
+        if "expect_prioritize" in v and go_resp.get("prioritize") != bool(v["expect_prioritize"]):
+            problems.append(f"{gate}/{vid}: expect_prioritize mismatch")
+    elif op == "nonce_replay_intrablock":
+        go_dup = sorted([int(x) for x in (go_resp.get("duplicates") or [])])
+        rust_dup = sorted([int(x) for x in (rust_resp.get("duplicates") or [])])
+        if go_dup != rust_dup:
+            problems.append(f"{gate}/{vid}: duplicates mismatch go={go_dup} rust={rust_dup}")
+        if "expect_duplicates" in v:
+            exp_dup = sorted([int(x) for x in v["expect_duplicates"]])
+            if go_dup != exp_dup:
+                problems.append(f"{gate}/{vid}: expect_duplicates mismatch")
+    elif op == "timestamp_bounds":
+        # ok/err parity is already checked above.
+        pass
+    elif op == "determinism_order":
+        go_sorted = go_resp.get("sorted_keys") or []
+        rust_sorted = rust_resp.get("sorted_keys") or []
+        if go_sorted != rust_sorted:
+            problems.append(
+                f"{gate}/{vid}: sorted_keys mismatch go={go_sorted} rust={rust_sorted}"
+            )
+        if "expect_sorted_keys" in v and go_sorted != v["expect_sorted_keys"]:
+            problems.append(f"{gate}/{vid}: expect_sorted_keys mismatch")
+    elif op == "validation_order":
+        go_first = go_resp.get("first_err")
+        rust_first = rust_resp.get("first_err")
+        if go_first != rust_first:
+            problems.append(
+                f"{gate}/{vid}: first_err mismatch go={go_first} rust={rust_first}"
+            )
+        go_eval = go_resp.get("evaluated") or []
+        rust_eval = rust_resp.get("evaluated") or []
+        if go_eval != rust_eval:
+            problems.append(
+                f"{gate}/{vid}: evaluated mismatch go={go_eval} rust={rust_eval}"
+            )
+        if "expect_first_err" in v and go_first != v["expect_first_err"]:
+            problems.append(f"{gate}/{vid}: expect_first_err mismatch")
+        if "expect_evaluated" in v and go_eval != v["expect_evaluated"]:
+            problems.append(f"{gate}/{vid}: expect_evaluated mismatch")
+    elif op == "htlc_ordering_policy":
+        go_called = bool(go_resp.get("verify_called", False))
+        rust_called = bool(rust_resp.get("verify_called", False))
+        if go_called != rust_called:
+            problems.append(
+                f"{gate}/{vid}: verify_called mismatch go={go_called} rust={rust_called}"
+            )
+        if "expect_verify_called" in v and go_called != bool(v["expect_verify_called"]):
+            problems.append(f"{gate}/{vid}: expect_verify_called mismatch")
+    elif op == "vault_policy_rules":
+        # ok/err parity is already checked above.
+        pass
 
     return problems
 
