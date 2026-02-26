@@ -6,6 +6,7 @@ package «rubin-formal» where
 require std from git
   "https://github.com/leanprover/std4" @ "v4.6.0"
 
+@[default_target]
 lean_lib RubinFormal where
 
 lean_exe rubin_conformance where
