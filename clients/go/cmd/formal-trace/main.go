@@ -67,16 +67,26 @@ type powFixture struct {
 	Gate    string      `json:"gate"`
 	Vectors []powVector `json:"vectors"`
 }
+
+type windowPatternJSON struct {
+	Mode       string `json:"mode"`
+	WindowSize int    `json:"window_size"`
+	Start      uint64 `json:"start"`
+	Step       uint64 `json:"step"`
+	LastJump   uint64 `json:"last_jump"`
+}
+
 type powVector struct {
-	ID             string `json:"id"`
-	Op             string `json:"op"`
-	ExpectOk       bool   `json:"expect_ok"`
-	ExpectErr      string `json:"expect_err"`
-	TargetOldHex   string `json:"target_old"`
-	TimestampFirst uint64 `json:"timestamp_first"`
-	TimestampLast  uint64 `json:"timestamp_last"`
-	HeaderHex      string `json:"header_hex"`
-	TargetHex      string `json:"target_hex"`
+	ID             string             `json:"id"`
+	Op             string             `json:"op"`
+	ExpectOk       bool               `json:"expect_ok"`
+	ExpectErr      string             `json:"expect_err"`
+	TargetOldHex   string             `json:"target_old"`
+	TimestampFirst uint64             `json:"timestamp_first"`
+	TimestampLast  uint64             `json:"timestamp_last"`
+	WindowPattern  *windowPatternJSON `json:"window_pattern"`
+	HeaderHex      string             `json:"header_hex"`
+	TargetHex      string             `json:"target_hex"`
 }
 
 type utxoBasicFixture struct {
@@ -344,7 +354,31 @@ func main() {
 					if err != nil {
 						outErr = err
 					} else {
-						tNew, err := consensus.RetargetV1(tOld, v.TimestampFirst, v.TimestampLast)
+						var tNew [32]byte
+						var err error
+						if v.WindowPattern != nil {
+							inputs["window_pattern_mode"] = v.WindowPattern.Mode
+							inputs["window_pattern_window_size"] = v.WindowPattern.WindowSize
+							inputs["window_pattern_start"] = v.WindowPattern.Start
+							inputs["window_pattern_step"] = v.WindowPattern.Step
+							inputs["window_pattern_last_jump"] = v.WindowPattern.LastJump
+
+							if v.WindowPattern.Mode != "step_with_last_jump" || v.WindowPattern.WindowSize < 2 {
+								err = fmt.Errorf("bad window_pattern")
+							} else {
+								ts := make([]uint64, v.WindowPattern.WindowSize)
+								ts[0] = v.WindowPattern.Start
+								for i := 1; i < v.WindowPattern.WindowSize; i++ {
+									ts[i] = ts[i-1] + v.WindowPattern.Step
+								}
+								if v.WindowPattern.LastJump > 0 && v.WindowPattern.WindowSize >= 2 {
+									ts[v.WindowPattern.WindowSize-1] = ts[v.WindowPattern.WindowSize-2] + v.WindowPattern.LastJump
+								}
+								tNew, err = consensus.RetargetV1Clamped(tOld, ts)
+							}
+						} else {
+							tNew, err = consensus.RetargetV1(tOld, v.TimestampFirst, v.TimestampLast)
+						}
 						outErr = err
 						outputs["target_new"] = hex.EncodeToString(tNew[:])
 					}
@@ -453,14 +487,28 @@ func main() {
 			}
 			for _, v := range fx.Vectors {
 				blockBytes, _ := hex.DecodeString(v.BlockHex)
-				prev, perr := parseHex32(v.ExpectedPrev)
-				tgt, terr := parseHex32(v.ExpectedTarget)
 				var err error
 				var sum *consensus.BlockBasicSummary
-				if perr != nil || terr != nil {
-					err = fmt.Errorf("bad expected prev/target")
-				} else {
-					sum, err = consensus.ValidateBlockBasicWithContextAtHeight(blockBytes, &prev, &tgt, 0, nil)
+				var prevPtr *[32]byte
+				if v.ExpectedPrev != "" {
+					prev, perr := parseHex32(v.ExpectedPrev)
+					if perr != nil {
+						err = fmt.Errorf("bad expected_prev_hash")
+					} else {
+						prevPtr = &prev
+					}
+				}
+				var tgtPtr *[32]byte
+				if err == nil && v.ExpectedTarget != "" {
+					tgt, terr := parseHex32(v.ExpectedTarget)
+					if terr != nil {
+						err = fmt.Errorf("bad expected_target")
+					} else {
+						tgtPtr = &tgt
+					}
+				}
+				if err == nil {
+					sum, err = consensus.ValidateBlockBasicWithContextAtHeight(blockBytes, prevPtr, tgtPtr, 0, nil)
 				}
 				outputs := map[string]any{}
 				if sum != nil {
