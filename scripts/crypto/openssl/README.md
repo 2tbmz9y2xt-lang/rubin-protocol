@@ -4,8 +4,7 @@
 
 ```bash
 cd <REPO_ROOT>
-chmod +x scripts/crypto/openssl/build-openssl-bundle.sh
-OPENSSL_VERSION=3.5.5 scripts/crypto/openssl/build-openssl-bundle.sh
+scripts/dev-env.sh -- bash -lc 'chmod +x scripts/crypto/openssl/build-openssl-bundle.sh && OPENSSL_VERSION=3.5.5 scripts/crypto/openssl/build-openssl-bundle.sh'
 ```
 
 Default install prefix:
@@ -32,8 +31,8 @@ scripts/dev-env.sh -- scripts/crypto/openssl/fips-preflight.sh
 
 ```bash
 cd <REPO_ROOT>
-chmod +x scripts/crypto/openssl/bench-pq-speed.py
-scripts/crypto/openssl/bench-pq-speed.py \
+scripts/dev-env.sh -- bash -lc 'chmod +x scripts/crypto/openssl/bench-pq-speed.py'
+scripts/dev-env.sh -- scripts/crypto/openssl/bench-pq-speed.py \
   --openssl-bin "$HOME/.cache/rubin-openssl/bundle-<version>/bin/openssl" \
   --seconds 5 \
   --output-json <OUTPUT_JSON_PATH>
@@ -48,7 +47,7 @@ Notes:
 Reference command:
 
 ```bash
-"$HOME/.cache/rubin-openssl/bundle-<version>/bin/openssl" speed \
+scripts/dev-env.sh -- "$HOME/.cache/rubin-openssl/bundle-<version>/bin/openssl" speed \
   -elapsed -multi 16 -seconds 30 \
   -signature-algorithms ML-DSA-87 SLH-DSA-SHAKE-256f
 ```
@@ -67,8 +66,8 @@ Interpretation:
 ## Optional fallback benchmark (`pkeyutl` loop)
 
 ```bash
-chmod +x scripts/crypto/openssl/bench-pq-pkeyutl.py
-scripts/crypto/openssl/bench-pq-pkeyutl.py \
+scripts/dev-env.sh -- bash -lc 'chmod +x scripts/crypto/openssl/bench-pq-pkeyutl.py'
+scripts/dev-env.sh -- scripts/crypto/openssl/bench-pq-pkeyutl.py \
   --openssl-bin "$HOME/.cache/rubin-openssl/bundle-<version>/bin/openssl" \
   --output-json <OUTPUT_JSON_PATH>
 ```

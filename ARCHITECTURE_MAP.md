@@ -3,18 +3,19 @@
 ## 1) Source of Truth and Governance Flow
 
 ```text
-spec/RUBIN_L1_CANONICAL.md
+rubin-spec (private repo)
         │
-        ├──> spec/SECTION_HASHES.json (pinned integrity hashes)
-        ├──> spec/RUBIN_COMPACT_BLOCKS.md (normative P2P behavior)
-        └──> spec/RUBIN_NETWORK_PARAMS.md (derived summary)
+        ├──> RUBIN_L1_CANONICAL.md (consensus authority)
+        ├──> SECTION_HASHES.json (pinned integrity hashes)
+        ├──> RUBIN_COMPACT_BLOCKS.md (normative P2P behavior)
+        └──> RUBIN_NETWORK_PARAMS.md (derived summary)
 ```
 
 - `RUBIN_L1_CANONICAL.md` is the consensus authority.
 - `SECTION_HASHES.json` protects consensus-critical sections from accidental drift.
 - `RUBIN_COMPACT_BLOCKS.md` and `RUBIN_NETWORK_PARAMS.md` are normative/derived layers and must not contradict CANONICAL.
 
-Normative precedence (from `spec/README.md`):
+Normative precedence (from private spec repo):
 
 ```text
 CANONICAL > COMPACT_BLOCKS > NETWORK_PARAMS
@@ -25,7 +26,7 @@ COMPACT_BLOCKS > P2P_AUX
 ## 2) Implementation Flow (Spec -> Clients)
 
 ```text
-spec/*
+rubin-spec (private) /*
   │
   ├──> clients/go/consensus/*              (reference implementation)
   └──> clients/rust/crates/rubin-consensus/* (parity implementation)
@@ -37,7 +38,7 @@ spec/*
 ## 3) Conformance Flow (Spec -> Fixtures -> Runners -> Gates)
 
 ```text
-spec/*
+rubin-spec (private) /*
   │
   └──> conformance/fixtures/CV-*.json
             │
@@ -78,7 +79,7 @@ spec/*
 
 ## 6) Practical Change Path (Recommended)
 
-1. Update spec document(s) in `spec/`.
+1. Update spec document(s) in private `rubin-spec`.
 2. If semantics changed, update/extend `conformance/fixtures/CV-*.json`.
 3. Implement behavior in Go + Rust clients.
 4. Run conformance runner and local checks.
@@ -87,26 +88,24 @@ spec/*
 
 ## 7) Minimal Local Validation Bundle
 
-Run these after protocol-affecting changes:
+Run these in `rubin-protocol` after protocol-affecting changes:
 
 ```bash
-python3 tools/check_readme_index.py
-python3 tools/check_section_hashes.py
-node scripts/check-spec-invariants.mjs
-node scripts/check-section-hashes.mjs
-( cd clients/go && go test ./... )
-( cd clients/rust && cargo test --workspace )
-python3 conformance/runner/run_cv_bundle.py
-python3 tools/gen_audit_snapshot.py --check
-python3 tools/check_audit_snapshot.py
+scripts/dev-env.sh -- bash -lc 'cd clients/go && go test ./...'
+scripts/dev-env.sh -- bash -lc 'cd clients/rust && cargo test --workspace'
+scripts/dev-env.sh -- python3 conformance/runner/run_cv_bundle.py
+scripts/dev-env.sh -- python3 tools/gen_audit_snapshot.py --check
+scripts/dev-env.sh -- python3 tools/check_audit_snapshot.py
 ```
+
+Spec integrity checks (`check_readme_index.py`, `check_section_hashes.py`, `check-spec-invariants.mjs`, `check-section-hashes.mjs`) must be run in the private `rubin-spec` repository.
 
 ---
 
 ## Quick Onboarding Entry Points
 
-- Protocol authority: `spec/README.md`
-- Consensus details: `spec/RUBIN_L1_CANONICAL.md`
+- Protocol authority (private): `rubin-spec`
+- Spec location pointer: `SPEC_LOCATION.md`
 - Parity harness: `conformance/README.md`
 - Go CLI entrypoint: `clients/go/cmd/rubin-consensus-cli/main.go`
 - Rust CLI entrypoint: `clients/rust/crates/rubin-consensus-cli/src/main.rs`

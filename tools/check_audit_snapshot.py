@@ -33,21 +33,34 @@ def file_sha256(path: Path) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate AUDIT_SNAPSHOT schema and consistency")
+    parser.add_argument(
+        "--context-root",
+        default=".",
+        help="Root directory that contains AUDIT_CONTEXT/AUDIT_SNAPSHOT (default: cwd)",
+    )
+    parser.add_argument(
+        "--code-root",
+        default=".",
+        help="Root directory that contains CI workflow + proof_coverage.json (default: cwd)",
+    )
     parser.add_argument("--snapshot", default="spec/AUDIT_SNAPSHOT.json", help="Snapshot JSON path (repo-relative)")
     parser.add_argument("--context", default="spec/AUDIT_CONTEXT.md", help="AUDIT_CONTEXT path (repo-relative)")
     parser.add_argument("--ci-workflow", default=".github/workflows/ci.yml", help="CI workflow path (repo-relative)")
     parser.add_argument("--proof-coverage", default="rubin-formal/proof_coverage.json", help="proof_coverage path (repo-relative)")
     args = parser.parse_args()
 
-    root = Path(__file__).resolve().parents[1]
-    snapshot_path = root / args.snapshot
-    context_path = root / args.context
-    ci_path = root / args.ci_workflow
-    proof_path = root / args.proof_coverage
+    context_root = Path(args.context_root).resolve()
+    code_root = Path(args.code_root).resolve()
+
+    snapshot_path = context_root / args.snapshot
+    context_path = context_root / args.context
+    ci_path = code_root / args.ci_workflow
+    proof_path = code_root / args.proof_coverage
 
     for p in (snapshot_path, context_path, ci_path, proof_path):
         if not p.exists():
-            return fail(f"required file not found: {p.relative_to(root)}")
+            # Keep the message simple and actionable (cross-repo split supported).
+            return fail(f"required file not found: {p}")
 
     doc = json.loads(snapshot_path.read_text(encoding="utf-8", errors="strict"))
 

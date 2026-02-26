@@ -12,28 +12,24 @@ Normative authority remains `spec/RUBIN_L1_CANONICAL.md` (consensus validity) an
 
 ## Run
 
-macOS/Homebrew note (operational):
-
-```bash
-export PATH=/opt/homebrew/bin:$PATH
-```
+Run all local commands via `scripts/dev-env.sh` (stable PATH/OpenSSL/Lean toolchain wiring):
 
 Run full bundle:
 
 ```bash
-python3 conformance/runner/run_cv_bundle.py
+scripts/dev-env.sh -- python3 conformance/runner/run_cv_bundle.py
 ```
 
 List gates:
 
 ```bash
-python3 conformance/runner/run_cv_bundle.py --list-gates
+scripts/dev-env.sh -- python3 conformance/runner/run_cv_bundle.py --list-gates
 ```
 
 Run a single gate:
 
 ```bash
-python3 conformance/runner/run_cv_bundle.py --only-gates CV-COMPACT
+scripts/dev-env.sh -- python3 conformance/runner/run_cv_bundle.py --only-gates CV-COMPACT
 ```
 
 ## Coverage matrix
@@ -43,13 +39,13 @@ python3 conformance/runner/run_cv_bundle.py --only-gates CV-COMPACT
 Regenerate:
 
 ```bash
-python3 tools/gen_conformance_matrix.py
+scripts/dev-env.sh -- python3 tools/gen_conformance_matrix.py
 ```
 
 Check (CI):
 
 ```bash
-python3 tools/gen_conformance_matrix.py --check
+scripts/dev-env.sh -- python3 tools/gen_conformance_matrix.py --check
 ```
 
 ## Edge-pack baseline (critical domains)
@@ -67,7 +63,7 @@ python3 tools/gen_conformance_matrix.py --check
 Проверка (локально/CI):
 
 ```bash
-python3 tools/check_conformance_edge_pack.py
+scripts/dev-env.sh -- python3 tools/check_conformance_edge_pack.py
 ```
 
 Gate падает если:
@@ -93,5 +89,5 @@ Gate падает если:
 Guard-проверка (CI):
 
 ```bash
-python3 tools/check_conformance_fixtures_policy.py
+scripts/dev-env.sh -- python3 tools/check_conformance_fixtures_policy.py
 ```
