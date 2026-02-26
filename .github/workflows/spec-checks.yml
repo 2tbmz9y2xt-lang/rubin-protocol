@@ -14,6 +14,8 @@ jobs:
           node-version-file: '.node-version'
       - name: Spec invariants check
         run: node scripts/check-spec-invariants.mjs
+      - name: Canonical hash pin check
+        run: python3 tools/check_canonical_hash_pin.py
       - name: SECTION_HASHES strict check
         run: node scripts/check-section-hashes.mjs
       - name: Conformance fixtures policy check

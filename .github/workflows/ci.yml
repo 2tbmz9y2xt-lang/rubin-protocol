@@ -181,6 +181,9 @@ jobs:
       - name: Spec invariants check
         run: node scripts/check-spec-invariants.mjs
 
+      - name: Canonical hash pin check
+        run: python3 tools/check_canonical_hash_pin.py
+
       - name: Spec section hashes check
         run: node scripts/check-section-hashes.mjs
 
