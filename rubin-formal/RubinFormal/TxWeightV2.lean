@@ -129,7 +129,7 @@ def parseWitnessItemForCounts (c : Cursor) : Option (Cursor × Bool × Bool × O
       else if sigLen >= 3 then
         if sig.size >= 3 && sig.get! 0 == 0x00 then
           let preLen := Wire.u16le? (sig.get! 1) (sig.get! 2)
-          if preLen <= 256 && sigLen == 3 + preLen then
+          if preLen >= 1 && preLen <= 256 && sigLen == 3 + preLen then
             pure (c5, false, false, none)
           else
             none
