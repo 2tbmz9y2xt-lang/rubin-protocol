@@ -56,6 +56,49 @@
       "expect_ok": true,
       "expect_merkle_root": "69c4c7b52eeb183d0a6b64cd7b714953838850115decbbd0ba23b00986b3539f",
       "expect_not_merkle_root": "df9de20c0dde92db5c88f636299e00c061a63432089a138ae43d368bf54e6730"
+    },
+    {
+      "id": "WITNESS-MERKLE-01",
+      "op": "witness_merkle_root",
+      "wtxids": [
+        "d205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0"
+      ],
+      "expect_ok": true,
+      "expect_witness_merkle_root": "99cf9696fc58d571713aee26dbbb172d460f77d10f139505fe06fd802e402403"
+    },
+    {
+      "id": "WITNESS-MERKLE-02",
+      "op": "witness_merkle_root",
+      "wtxids": [
+        "d205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0",
+        "dc17c8ac4e545a2058ba11b4ea304b56db0820a762f4059a496a3ba9b983d5d6"
+      ],
+      "expect_ok": true,
+      "expect_witness_merkle_root": "a4e0def79ed75886ccee10403e9c2c54c2da708228a2dcda309c9c41844c1d9d"
+    },
+    {
+      "id": "WITNESS-MERKLE-03",
+      "op": "witness_merkle_root",
+      "wtxids": [
+        "d205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0",
+        "dc17c8ac4e545a2058ba11b4ea304b56db0820a762f4059a496a3ba9b983d5d6",
+        "5f2a5f7a9c5e4bc5c8fe4a41d16ec77cce574f5ec0bd2f7c6f7f2f3f11aa77b1"
+      ],
+      "expect_ok": true,
+      "expect_witness_merkle_root": "dd3fd7fcfe888a2761e2def04b118bea9d38f8c9cb442b4944b732e3f6928f82"
+    },
+    {
+      "id": "WITNESS-MERKLE-04",
+      "op": "witness_merkle_root",
+      "wtxids": [
+        "d205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0",
+        "dc17c8ac4e545a2058ba11b4ea304b56db0820a762f4059a496a3ba9b983d5d6",
+        "5f2a5f7a9c5e4bc5c8fe4a41d16ec77cce574f5ec0bd2f7c6f7f2f3f11aa77b1",
+        "0d69caca2f0f231273962b6adf388b0bdb86f77f731fb5be7c3f9c1b7302de43",
+        "f2f4a0f1ef5ff4c8cfb9232d7caea8662f5f31e9f10f8917ac12f90b43f864f8"
+      ],
+      "expect_ok": true,
+      "expect_witness_merkle_root": "c7478fc0edf922e5a1f42c8c50da58fca91ad6520063b5c1dd394436baa11df6"
     }
   ]
 }
