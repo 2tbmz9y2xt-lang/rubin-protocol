@@ -112,11 +112,12 @@ func TestPeerSessionRunPingPongAndBan(t *testing.T) {
 	go func() {
 		runErr <- session.Run(context.Background())
 	}()
+	remoteReader := bufio.NewReader(remote)
 
 	if err := writeWireMessage(remote, WireMessage{Command: "ping"}); err != nil {
 		t.Fatalf("write ping: %v", err)
 	}
-	msg, err := readWireMessage(remote)
+	msg, err := readWireMessage(remoteReader)
 	if err != nil {
 		t.Fatalf("read pong: %v", err)
 	}
@@ -216,9 +217,8 @@ func writeWireMessage(conn net.Conn, msg WireMessage) error {
 	return nil
 }
 
-func readWireMessage(conn net.Conn) (WireMessage, error) {
+func readWireMessage(reader *bufio.Reader) (WireMessage, error) {
 	var out WireMessage
-	reader := bufio.NewReader(conn)
 	line, err := reader.ReadBytes('\n')
 	if err != nil {
 		return out, err

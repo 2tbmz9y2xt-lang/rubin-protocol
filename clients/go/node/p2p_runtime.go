@@ -55,6 +55,7 @@ type PeerState struct {
 
 type PeerSession struct {
 	conn   net.Conn
+	mu     sync.RWMutex
 	peer   PeerState
 	cfg    PeerRuntimeConfig
 	reader *bufio.Reader
@@ -163,6 +164,18 @@ func PerformVersionHandshake(
 			Addr: conn.RemoteAddr().String(),
 		},
 	}
+	done := make(chan struct{})
+	defer close(done)
+	if ctx != nil {
+		go func() {
+			select {
+			case <-ctx.Done():
+				_ = conn.SetReadDeadline(time.Now())
+				_ = conn.SetWriteDeadline(time.Now())
+			case <-done:
+			}
+		}()
+	}
 
 	versionPayload, err := json.Marshal(local)
 	if err != nil {
@@ -183,6 +196,18 @@ func PerformVersionHandshake(
 		}
 		msg, err := session.readMessage()
 		if err != nil {
+			var netErr net.Error
+			if ctx != nil && errors.Is(ctx.Err(), context.Canceled) {
+				return nil, ctx.Err()
+			}
+			if ctx != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return nil, ctx.Err()
+			}
+			if errors.As(err, &netErr) && netErr.Timeout() && ctx != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return nil, ctxErr
+				}
+			}
 			return nil, err
 		}
 		switch msg.Command {
@@ -194,8 +219,10 @@ func PerformVersionHandshake(
 			if err := validateRemoteVersion(cfg.Network, remote); err != nil {
 				return nil, err
 			}
+			session.mu.Lock()
 			session.peer.VersionReceived = true
 			session.peer.RemoteVersion = remote
+			session.mu.Unlock()
 			if !sentVerack {
 				if err := session.writeMessage(WireMessage{Command: "verack"}); err != nil {
 					return nil, err
@@ -203,16 +230,24 @@ func PerformVersionHandshake(
 				sentVerack = true
 			}
 		case "verack":
+			session.mu.Lock()
 			session.peer.VerackReceived = true
+			session.mu.Unlock()
 		default:
 			session.bumpBan(10, "unexpected pre-handshake command")
-			if session.peer.BanScore >= cfg.BanThreshold {
+			if session.banScore() >= cfg.BanThreshold {
 				return nil, errors.New("peer banned during handshake")
 			}
 		}
-		if session.peer.VersionReceived && session.peer.VerackReceived && sentVerack {
+		session.mu.Lock()
+		completed := session.peer.VersionReceived && session.peer.VerackReceived && sentVerack
+		if completed {
 			session.peer.HandshakeComplete = true
-			return clonePeerState(&session.peer), nil
+		}
+		result := clonePeerState(&session.peer)
+		session.mu.Unlock()
+		if completed {
+			return result, nil
 		}
 	}
 }
@@ -268,7 +303,7 @@ func (ps *PeerSession) Run(ctx context.Context) error {
 			// accepted runtime commands (stub)
 		default:
 			ps.bumpBan(1, fmt.Sprintf("unknown command: %s", msg.Command))
-			if ps.peer.BanScore >= ps.cfg.BanThreshold {
+			if ps.banScore() >= ps.cfg.BanThreshold {
 				return errors.New("peer banned")
 			}
 		}
@@ -279,6 +314,8 @@ func (ps *PeerSession) State() PeerState {
 	if ps == nil {
 		return PeerState{}
 	}
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
 	return *clonePeerState(&ps.peer)
 }
 
@@ -317,8 +354,16 @@ func (ps *PeerSession) writeMessage(msg WireMessage) error {
 }
 
 func (ps *PeerSession) bumpBan(delta int, reason string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
 	ps.peer.BanScore += delta
 	ps.peer.LastError = reason
+}
+
+func (ps *PeerSession) banScore() int {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.peer.BanScore
 }
 
 func validateRemoteVersion(expectedNetwork string, remote VersionPayloadV1) error {
