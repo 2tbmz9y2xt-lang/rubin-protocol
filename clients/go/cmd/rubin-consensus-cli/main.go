@@ -22,6 +22,7 @@ type Request struct {
 	TxHex           string   `json:"tx_hex,omitempty"`
 	BlockHex        string   `json:"block_hex,omitempty"`
 	Txids           []string `json:"txids,omitempty"`
+	Wtxids          []string `json:"wtxids,omitempty"`
 	WtxidHex        string   `json:"wtxid,omitempty"`
 	CovenantType    uint16   `json:"covenant_type,omitempty"`
 	CovenantDataHex string   `json:"covenant_data_hex,omitempty"`
@@ -171,6 +172,7 @@ type Response struct {
 	TxidHex            string `json:"txid,omitempty"`
 	WtxidHex           string `json:"wtxid,omitempty"`
 	MerkleHex          string `json:"merkle_root,omitempty"`
+	WitnessMerkleHex   string `json:"witness_merkle_root,omitempty"`
 	DigestHex          string `json:"digest,omitempty"`
 	BlockHash          string `json:"block_hash,omitempty"`
 	TargetNew          string `json:"target_new,omitempty"`
@@ -466,6 +468,30 @@ func main() {
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true, MerkleHex: hex.EncodeToString(root[:])})
+		return
+
+	case "witness_merkle_root":
+		wtxids := make([][32]byte, 0, len(req.Wtxids))
+		for _, h := range req.Wtxids {
+			b, err := hex.DecodeString(h)
+			if err != nil || len(b) != 32 {
+				writeResp(os.Stdout, Response{Ok: false, Err: "bad wtxid"})
+				return
+			}
+			var a [32]byte
+			copy(a[:], b)
+			wtxids = append(wtxids, a)
+		}
+		root, err := consensus.WitnessMerkleRootWtxids(wtxids)
+		if err != nil {
+			if te, ok := err.(*consensus.TxError); ok {
+				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
+				return
+			}
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+		writeResp(os.Stdout, Response{Ok: true, WitnessMerkleHex: hex.EncodeToString(root[:])})
 		return
 
 	case "sighash_v1":

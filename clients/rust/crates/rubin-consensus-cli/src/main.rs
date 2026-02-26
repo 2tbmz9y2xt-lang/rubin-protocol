@@ -1,5 +1,6 @@
 use num_bigint::BigUint;
 use num_traits::Zero;
+use rubin_consensus::merkle::witness_merkle_root_wtxids;
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_with_mtp, block_hash, compact_shortid,
     connect_block_basic_in_memory_at_height, fork_work_from_target, merkle_root_txids, parse_tx,
@@ -26,6 +27,9 @@ struct Request {
 
     #[serde(default)]
     txids: Vec<String>,
+
+    #[serde(default)]
+    wtxids: Vec<String>,
 
     #[serde(default)]
     wtxid: String,
@@ -407,6 +411,9 @@ struct Response {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     merkle_root: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    witness_merkle_root: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     digest: Option<String>,
@@ -935,6 +942,53 @@ fn main() {
                         target_new: None,
                         fee: None,
                         utxo_count: None,
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+            }
+        }
+        "witness_merkle_root" => {
+            let mut wtxids: Vec<[u8; 32]> = Vec::with_capacity(req.wtxids.len());
+            for h in &req.wtxids {
+                let b = match hex::decode(h) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let resp = Response {
+                            ok: false,
+                            err: Some("bad wtxid".to_string()),
+                            ..Default::default()
+                        };
+                        let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                        return;
+                    }
+                };
+                if b.len() != 32 {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad wtxid".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+                let mut a = [0u8; 32];
+                a.copy_from_slice(&b);
+                wtxids.push(a);
+            }
+            match witness_merkle_root_wtxids(&wtxids) {
+                Ok(root) => {
+                    let resp = Response {
+                        ok: true,
+                        witness_merkle_root: Some(hex::encode(root)),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(err_code(e.code)),
                         ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);

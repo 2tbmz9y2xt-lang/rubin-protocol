@@ -99,6 +99,20 @@ Policy:
 Изменённые fixtures:
 - `CV-SUBSIDY.json` (обновлён `CV-SUB-01`, добавлен `CV-SUB-04`)
 
+## 2026-02-26 — Witness Merkle odd-element vectors (promotion rule)
+
+Причина:
+- зафиксировать odd-element “promotion (carry-forward)” правило для witness merkle tree (CANONICAL §10.4.1)
+  через executable conformance;
+- предотвратить дрейф реализаций к “last-leaf duplication/self-pair” по привычке.
+
+Инструменты:
+- ручное обновление `CV-MERKLE.json`,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-MERKLE`.
+
+Изменённые fixtures:
+- `CV-MERKLE.json` (добавлены `WITNESS-MERKLE-01..04`).
+
 ## 2026-02-26 — HTLC canonicalization: forbid preimage_len=0 at parse-time
 
 Причина:

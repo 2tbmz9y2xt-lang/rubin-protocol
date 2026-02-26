@@ -1305,6 +1305,8 @@ def validate_vector(
             cov_type = int(cov_type, 0)
         req["covenant_type"] = cov_type
         req["covenant_data_hex"] = v["input"]["covenant_data_hex"]
+    elif op == "witness_merkle_root":
+        req["wtxids"] = v["wtxids"]
     elif op.startswith("compact_") and op != "compact_shortid":
         for key, value in v.items():
             if key in ("id", "op") or key.startswith("expect_"):
@@ -1401,6 +1403,13 @@ def validate_vector(
             problems.append(f"{gate}/{vid}: expect_merkle_root mismatch")
         if "expect_not_merkle_root" in v and go_resp.get("merkle_root") == v["expect_not_merkle_root"]:
             problems.append(f"{gate}/{vid}: expect_not_merkle_root violated")
+    elif op == "witness_merkle_root":
+        if go_resp.get("witness_merkle_root") != rust_resp.get("witness_merkle_root"):
+            problems.append(
+                f"{gate}/{vid}: witness_merkle_root mismatch go={go_resp.get('witness_merkle_root')} rust={rust_resp.get('witness_merkle_root')}"
+            )
+        if "expect_witness_merkle_root" in v and go_resp.get("witness_merkle_root") != v["expect_witness_merkle_root"]:
+            problems.append(f"{gate}/{vid}: expect_witness_merkle_root mismatch")
     elif op == "sighash_v1":
         if go_resp.get("digest") != rust_resp.get("digest"):
             problems.append(
