@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
@@ -68,6 +69,17 @@ func main() {
 		_, _ = fmt.Fprintf(os.Stderr, "blockstore open failed: %v\n", err)
 		os.Exit(2)
 	}
+	syncEngine, err := node.NewSyncEngine(
+		chainState,
+		blockStore,
+		node.DefaultSyncConfig(nil, [32]byte{}, chainStatePath),
+	)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "sync engine init failed: %v\n", err)
+		os.Exit(2)
+	}
+	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig(cfg.Network, cfg.MaxPeers))
+
 	tipHeight, tipHash, tipOK, err := blockStore.Tip()
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "blockstore tip read failed: %v\n", err)
@@ -85,6 +97,9 @@ func main() {
 		_, _ = fmt.Fprintf(os.Stdout, "chainstate: has_tip=%v height=%d utxos=%d already_generated=%d\n", chainState.HasTip, chainState.Height, len(chainState.Utxos), chainState.AlreadyGenerated)
 		_, _ = fmt.Fprintln(os.Stdout, "blockstore: empty")
 	}
+	headerReq := syncEngine.HeaderSyncRequest()
+	_, _ = fmt.Fprintf(os.Stdout, "sync: header_request_has_from=%v header_request_limit=%d ibd=%v\n", headerReq.HasFrom, headerReq.Limit, syncEngine.IsInIBD(uint64(time.Now().Unix())))
+	_, _ = fmt.Fprintf(os.Stdout, "p2p: peer_slots=%d connected=%d\n", cfg.MaxPeers, len(peerManager.Snapshot()))
 	if *dryRun {
 		return
 	}
