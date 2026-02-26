@@ -65,6 +65,7 @@ Interpretation:
 ## Optional fallback benchmark (`pkeyutl` loop)
 
 ```bash
+cd <REPO_ROOT>
 scripts/dev-env.sh -- python3 scripts/crypto/openssl/bench-pq-pkeyutl.py \
   --openssl-bin "$HOME/.cache/rubin-openssl/bundle-<version>/bin/openssl" \
   --output-json <OUTPUT_JSON_PATH>
