@@ -42,16 +42,16 @@ private theorem all_append (xs ys : List CVParseVector) (p : CVParseVector → B
 -- We split the proof to keep each `native_decide` goal small; this avoids Lean elaboration edge cases
 -- when the vector set grows.
 theorem cv_parse_vectors_pass : allCVParse = true := by
-  -- 5 is arbitrary; it just needs to be < total vectors to ensure both halves are non-empty in practice.
-  have h1 : (cvParseVectors.take 5).all checkParseVector = true := by
+  let n : Nat := cvParseVectors.length / 2
+  have h1 : (cvParseVectors.take n).all checkParseVector = true := by
     native_decide
-  have h2 : (cvParseVectors.drop 5).all checkParseVector = true := by
+  have h2 : (cvParseVectors.drop n).all checkParseVector = true := by
     native_decide
-  have h : (cvParseVectors.take 5 ++ cvParseVectors.drop 5).all checkParseVector = true := by
+  have h : (cvParseVectors.take n ++ cvParseVectors.drop n).all checkParseVector = true := by
     calc
-      (cvParseVectors.take 5 ++ cvParseVectors.drop 5).all checkParseVector
-          = ((cvParseVectors.take 5).all checkParseVector && (cvParseVectors.drop 5).all checkParseVector) := by
-              simpa using all_append (cvParseVectors.take 5) (cvParseVectors.drop 5) checkParseVector
+      (cvParseVectors.take n ++ cvParseVectors.drop n).all checkParseVector
+          = ((cvParseVectors.take n).all checkParseVector && (cvParseVectors.drop n).all checkParseVector) := by
+              simpa using all_append (cvParseVectors.take n) (cvParseVectors.drop n) checkParseVector
       _ = (true && true) := by simp [h1, h2]
       _ = true := by simp
   -- `take ++ drop` reconstructs the original list.

@@ -116,7 +116,7 @@ fn parse_tx_witness_item_canonicalization() {
     tx1_ok_refund.push(0x00); // da_payload_len
     parse_tx(&tx1_ok_refund).expect("refund selector should be canonical");
 
-    // sentinel_htlc_claim_selector_ok: suite=0x00, pubkey_length=32, sig_length=4, signature=0x00||u16le(1)||preimage[1].
+    // sentinel_htlc_claim_selector_ok: suite=0x00, pubkey_length=32, sig_length=4, signature=0x00||u16le(1)||preimage[0].
     let mut tx1_ok_claim = base.clone();
     tx1_ok_claim.push(0x01); // witness_count
     tx1_ok_claim.push(SUITE_ID_SENTINEL);
