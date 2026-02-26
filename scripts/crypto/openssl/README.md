@@ -4,7 +4,7 @@
 
 ```bash
 cd <REPO_ROOT>
-scripts/dev-env.sh -- bash -lc 'chmod +x scripts/crypto/openssl/build-openssl-bundle.sh && OPENSSL_VERSION=3.5.5 scripts/crypto/openssl/build-openssl-bundle.sh'
+OPENSSL_VERSION=3.5.5 scripts/dev-env.sh -- bash scripts/crypto/openssl/build-openssl-bundle.sh
 ```
 
 Default install prefix:
@@ -31,8 +31,7 @@ scripts/dev-env.sh -- scripts/crypto/openssl/fips-preflight.sh
 
 ```bash
 cd <REPO_ROOT>
-scripts/dev-env.sh -- bash -lc 'chmod +x scripts/crypto/openssl/bench-pq-speed.py'
-scripts/dev-env.sh -- scripts/crypto/openssl/bench-pq-speed.py \
+scripts/dev-env.sh -- python3 scripts/crypto/openssl/bench-pq-speed.py \
   --openssl-bin "$HOME/.cache/rubin-openssl/bundle-<version>/bin/openssl" \
   --seconds 5 \
   --output-json <OUTPUT_JSON_PATH>
@@ -66,8 +65,8 @@ Interpretation:
 ## Optional fallback benchmark (`pkeyutl` loop)
 
 ```bash
-scripts/dev-env.sh -- bash -lc 'chmod +x scripts/crypto/openssl/bench-pq-pkeyutl.py'
-scripts/dev-env.sh -- scripts/crypto/openssl/bench-pq-pkeyutl.py \
+cd <REPO_ROOT>
+scripts/dev-env.sh -- python3 scripts/crypto/openssl/bench-pq-pkeyutl.py \
   --openssl-bin "$HOME/.cache/rubin-openssl/bundle-<version>/bin/openssl" \
   --output-json <OUTPUT_JSON_PATH>
 ```
