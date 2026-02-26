@@ -45,9 +45,8 @@
 ## Локальный запуск
 
 ```bash
-cd rubin-formal
-lake env lean --version
-lake build
+scripts/dev-env.sh -- bash -lc 'cd rubin-formal && lake env lean --version'
+scripts/dev-env.sh -- bash -lc 'cd rubin-formal && lake build'
 ```
 
 ## Дальше

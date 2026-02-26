@@ -32,6 +32,10 @@ prepend_path_if_exists() {
 # Homebrew defaults
 prepend_path_if_exists "/opt/homebrew/bin"
 prepend_path_if_exists "/usr/local/bin"
+# Lean/Elan toolchain (lake/lean may be installed only here).
+prepend_path_if_exists "${HOME}/.elan/bin"
+# Rust toolchain in non-login shells.
+prepend_path_if_exists "${HOME}/.cargo/bin"
 
 export PATH
 
