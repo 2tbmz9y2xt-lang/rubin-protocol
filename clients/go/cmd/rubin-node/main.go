@@ -42,6 +42,7 @@ func main() {
 	dryRun := flag.Bool("dry-run", false, "print effective config and exit")
 	flag.Parse()
 
+	cfg.LogLevel = strings.ToLower(strings.TrimSpace(cfg.LogLevel))
 	cfg.Peers = node.NormalizePeers(append([]string{*peerCSV}, peers...)...)
 	if err := node.ValidateConfig(cfg); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "invalid config: %v\n", err)

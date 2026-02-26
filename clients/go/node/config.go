@@ -74,11 +74,12 @@ func ValidateConfig(cfg Config) error {
 		return fmt.Errorf("invalid bind_addr: %w", err)
 	}
 	for _, peer := range cfg.Peers {
-		if err := validateAddr(peer); err != nil {
+		if err := validatePeerAddr(peer); err != nil {
 			return fmt.Errorf("invalid peer %q: %w", peer, err)
 		}
 	}
-	if _, ok := allowedLogLevels[strings.ToLower(strings.TrimSpace(cfg.LogLevel))]; !ok {
+	logLevel := strings.ToLower(strings.TrimSpace(cfg.LogLevel))
+	if _, ok := allowedLogLevels[logLevel]; !ok {
 		return fmt.Errorf("invalid log_level %q", cfg.LogLevel)
 	}
 	if cfg.MaxPeers <= 0 {
@@ -103,6 +104,17 @@ func validateAddr(addr string) error {
 	}
 	if strings.Contains(host, " ") {
 		return errors.New("invalid host")
+	}
+	return nil
+}
+
+func validatePeerAddr(addr string) error {
+	if err := validateAddr(addr); err != nil {
+		return err
+	}
+	host, _, _ := net.SplitHostPort(addr)
+	if strings.TrimSpace(host) == "" {
+		return errors.New("missing host")
 	}
 	return nil
 }
