@@ -43,15 +43,15 @@ Clone and run unit tests:
 git clone https://github.com/2tbmz9y2xt-lang/rubin-protocol.git
 cd rubin-protocol
 
-( cd clients/go && go test ./... )
-( cd clients/rust && cargo test --workspace )
+scripts/dev-env.sh -- bash -lc 'cd clients/go && go test ./...'
+scripts/dev-env.sh -- bash -lc 'cd clients/rust && cargo test --workspace'
 ```
 
 Run cross-client conformance (builds local CLIs into `./conformance/bin/`):
 
 ```bash
-python3 conformance/runner/run_cv_bundle.py
-python3 conformance/runner/run_cv_bundle.py --only-gates CV-COMPACT
+scripts/dev-env.sh -- python3 conformance/runner/run_cv_bundle.py
+scripts/dev-env.sh -- python3 conformance/runner/run_cv_bundle.py --only-gates CV-COMPACT
 ```
 
 ## Adding Conformance Vectors

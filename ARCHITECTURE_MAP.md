@@ -90,15 +90,15 @@ spec/*
 Run these after protocol-affecting changes:
 
 ```bash
-python3 tools/check_readme_index.py
-python3 tools/check_section_hashes.py
-node scripts/check-spec-invariants.mjs
-node scripts/check-section-hashes.mjs
-( cd clients/go && go test ./... )
-( cd clients/rust && cargo test --workspace )
-python3 conformance/runner/run_cv_bundle.py
-python3 tools/gen_audit_snapshot.py --check
-python3 tools/check_audit_snapshot.py
+scripts/dev-env.sh -- python3 tools/check_readme_index.py
+scripts/dev-env.sh -- python3 tools/check_section_hashes.py
+scripts/dev-env.sh -- node scripts/check-spec-invariants.mjs
+scripts/dev-env.sh -- node scripts/check-section-hashes.mjs
+scripts/dev-env.sh -- bash -lc 'cd clients/go && go test ./...'
+scripts/dev-env.sh -- bash -lc 'cd clients/rust && cargo test --workspace'
+scripts/dev-env.sh -- python3 conformance/runner/run_cv_bundle.py
+scripts/dev-env.sh -- python3 tools/gen_audit_snapshot.py --check
+scripts/dev-env.sh -- python3 tools/check_audit_snapshot.py
 ```
 
 ---

@@ -32,8 +32,8 @@
 Локально:
 
 ```bash
-python3 tools/formal_risk_score.py
-python3 tools/check_formal_risk_gate.py --profile phase0
-python3 tools/check_formal_refinement_bridge.py
-python3 tools/check_formal_claims_lint.py
+scripts/dev-env.sh -- python3 tools/formal_risk_score.py
+scripts/dev-env.sh -- python3 tools/check_formal_risk_gate.py --profile phase0
+scripts/dev-env.sh -- python3 tools/check_formal_refinement_bridge.py
+scripts/dev-env.sh -- python3 tools/check_formal_claims_lint.py
 ```
