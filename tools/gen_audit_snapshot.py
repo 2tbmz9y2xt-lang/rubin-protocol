@@ -104,8 +104,8 @@ def section_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def collect_ci_enforcement(repo_root: Path) -> dict[str, bool]:
-    ci_path = repo_root / ".github" / "workflows" / "ci.yml"
+def collect_ci_enforcement(code_root: Path) -> dict[str, bool]:
+    ci_path = code_root / ".github" / "workflows" / "ci.yml"
     if not ci_path.exists():
         return {
             "ci_workflow_present": False,
@@ -123,12 +123,12 @@ def collect_ci_enforcement(repo_root: Path) -> dict[str, bool]:
     }
 
 
-def build_snapshot(repo_root: Path, context_rel: str) -> dict[str, Any]:
-    context_path = repo_root / context_rel
+def build_snapshot(context_root: Path, code_root: Path, context_rel: str) -> dict[str, Any]:
+    context_path = context_root / context_rel
     if not context_path.exists():
         raise FileNotFoundError(f"missing context file: {context_rel}")
 
-    proof_cov_path = repo_root / "rubin-formal" / "proof_coverage.json"
+    proof_cov_path = code_root / "rubin-formal" / "proof_coverage.json"
     if not proof_cov_path.exists():
         raise FileNotFoundError("missing rubin-formal/proof_coverage.json")
 
@@ -245,7 +245,7 @@ def build_snapshot(repo_root: Path, context_rel: str) -> dict[str, Any]:
             "proof_level": proof_cov.get("proof_level"),
             "claim_level": proof_cov.get("claim_level"),
         },
-        "ci_enforcement": collect_ci_enforcement(repo_root),
+        "ci_enforcement": collect_ci_enforcement(code_root),
         "findings": findings,
         "stats": {
             "total": len(findings),
@@ -259,6 +259,16 @@ def build_snapshot(repo_root: Path, context_rel: str) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate/check machine-readable audit snapshot from AUDIT_CONTEXT.md")
+    parser.add_argument(
+        "--context-root",
+        default=".",
+        help="Root directory that contains AUDIT_CONTEXT/AUDIT_SNAPSHOT (default: cwd)",
+    )
+    parser.add_argument(
+        "--code-root",
+        default=".",
+        help="Root directory that contains CI workflow + proof_coverage.json (default: cwd)",
+    )
     parser.add_argument("--context", default="spec/AUDIT_CONTEXT.md", help="Path to AUDIT_CONTEXT markdown (repo-relative)")
     parser.add_argument("--output", default="spec/AUDIT_SNAPSHOT.json", help="Output snapshot JSON path (repo-relative)")
     mode = parser.add_mutually_exclusive_group()
@@ -266,10 +276,11 @@ def main() -> int:
     mode.add_argument("--check", action="store_true", help="Check that snapshot file is up-to-date")
     args = parser.parse_args()
 
-    repo_root = Path(__file__).resolve().parents[1]
-    output_path = repo_root / args.output
+    context_root = Path(args.context_root).resolve()
+    code_root = Path(args.code_root).resolve()
+    output_path = context_root / args.output
 
-    snapshot = build_snapshot(repo_root, args.context)
+    snapshot = build_snapshot(context_root, code_root, args.context)
     rendered = json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n"
 
     if args.check:
