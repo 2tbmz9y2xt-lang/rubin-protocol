@@ -57,6 +57,7 @@ jobs:
           key: openssl-bundle-${{ runner.os }}-3.5.5-v2
 
       - name: Build OpenSSL 3.5.5 bundle
+        id: openssl
         run: |
           set -euo pipefail
           PREFIX="$HOME/.cache/rubin-openssl/bundle-3.5.5"
@@ -76,13 +77,19 @@ jobs:
             exit 1
           fi
           echo "$PREFIX/bin" >> "$GITHUB_PATH"
-          echo "OPENSSL_DIR=$PREFIX" >> "$GITHUB_ENV"
-          echo "PKG_CONFIG_PATH=$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$PREFIX/lib64:$PREFIX/lib" >> "$GITHUB_ENV"
-          echo "OPENSSL_MODULES=$MODULES_DIR" >> "$GITHUB_ENV"
-          echo "OPENSSL_CONF=$PREFIX/ssl/openssl-fips.cnf" >> "$GITHUB_ENV"
+          echo "openssl_dir=$PREFIX" >> "$GITHUB_OUTPUT"
+          echo "openssl_modules=$MODULES_DIR" >> "$GITHUB_OUTPUT"
+          echo "openssl_conf=$PREFIX/ssl/openssl-fips.cnf" >> "$GITHUB_OUTPUT"
+          echo "pkg_config_path=$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig" >> "$GITHUB_OUTPUT"
+          echo "ld_library_path=$PREFIX/lib64:$PREFIX/lib" >> "$GITHUB_OUTPUT"
 
       - name: Verify OpenSSL PQ algorithms
+        env:
+          OPENSSL_DIR: ${{ steps.openssl.outputs.openssl_dir }}
+          OPENSSL_MODULES: ${{ steps.openssl.outputs.openssl_modules }}
+          OPENSSL_CONF: ${{ steps.openssl.outputs.openssl_conf }}
+          PKG_CONFIG_PATH: ${{ steps.openssl.outputs.pkg_config_path }}
+          LD_LIBRARY_PATH: ${{ steps.openssl.outputs.ld_library_path }}
         run: |
           openssl version
           openssl list -signature-algorithms | grep -E 'ML-DSA-87|SLH-DSA-SHAKE-256f'
@@ -257,6 +264,12 @@ jobs:
           cache-dependency-path: clients/go/go.mod
 
       - name: Generate Go trace v1
+        env:
+          OPENSSL_DIR: ${{ steps.openssl.outputs.openssl_dir }}
+          OPENSSL_MODULES: ${{ steps.openssl.outputs.openssl_modules }}
+          OPENSSL_CONF: ${{ steps.openssl.outputs.openssl_conf }}
+          PKG_CONFIG_PATH: ${{ steps.openssl.outputs.pkg_config_path }}
+          LD_LIBRARY_PATH: ${{ steps.openssl.outputs.ld_library_path }}
         run: |
           cd clients/go
           go run ./cmd/formal-trace --fixtures-dir ../../conformance/fixtures --out ../../rubin-formal/traces/go_trace_v1.jsonl
@@ -269,10 +282,10 @@ jobs:
       - name: Lean build (rubin-formal)
         run: |
           cd rubin-formal
-          env -u LD_LIBRARY_PATH -u OPENSSL_CONF -u OPENSSL_MODULES -u PKG_CONFIG_PATH lake env lean --version
-          env -u LD_LIBRARY_PATH -u OPENSSL_CONF -u OPENSSL_MODULES -u PKG_CONFIG_PATH lake build
+          lake env lean --version
+          lake build
 
       - name: Run Go→Lean refinement check
         run: |
           cd rubin-formal
-          env -u LD_LIBRARY_PATH -u OPENSSL_CONF -u OPENSSL_MODULES -u PKG_CONFIG_PATH lake env lean --run RubinFormal/Refinement/Main.lean
+          lake env lean --run RubinFormal/Refinement/Main.lean
