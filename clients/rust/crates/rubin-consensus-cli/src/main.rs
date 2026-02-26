@@ -3362,13 +3362,11 @@ fn main() {
                 err = Some(err_code(ErrorCode::TxErrParse));
             } else if path == "refund" && !locktime_ok {
                 err = Some(err_code(ErrorCode::TxErrTimelockNotMet));
-            } else if suite_id != 0x01 && suite_id != 0x02 {
+            } else if (suite_id != 0x01 && suite_id != 0x02)
+                || (suite_id == 0x02 && req.height < activation_height)
+            {
                 err = Some(err_code(ErrorCode::TxErrSigAlgInvalid));
-            } else if suite_id == 0x02 && req.height < activation_height {
-                err = Some(err_code(ErrorCode::TxErrSigAlgInvalid));
-            } else if !key_binding_ok {
-                err = Some(err_code(ErrorCode::TxErrSigInvalid));
-            } else if path == "claim" && !preimage_ok {
+            } else if !key_binding_ok || (path == "claim" && !preimage_ok) {
                 err = Some(err_code(ErrorCode::TxErrSigInvalid));
             } else {
                 verify_called = true;
