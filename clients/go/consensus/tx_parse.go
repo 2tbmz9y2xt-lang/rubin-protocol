@@ -334,7 +334,7 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 				} else if sigLen >= 3 {
 					if len(sig) >= 3 && sig[0] == 0x00 {
 						preLen := int(binary.LittleEndian.Uint16(sig[1:3]))
-						ok = preLen <= MAX_HTLC_PREIMAGE_BYTES && sigLen == 3+preLen
+						ok = preLen >= 1 && preLen <= MAX_HTLC_PREIMAGE_BYTES && sigLen == 3+preLen
 					}
 				}
 			}
