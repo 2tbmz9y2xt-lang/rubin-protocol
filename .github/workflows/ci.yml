@@ -269,10 +269,10 @@ jobs:
       - name: Lean build (rubin-formal)
         run: |
           cd rubin-formal
-          lake env lean --version
-          lake build
+          env -u LD_LIBRARY_PATH -u OPENSSL_CONF -u OPENSSL_MODULES -u PKG_CONFIG_PATH lake env lean --version
+          env -u LD_LIBRARY_PATH -u OPENSSL_CONF -u OPENSSL_MODULES -u PKG_CONFIG_PATH lake build
 
       - name: Run Go→Lean refinement check
         run: |
           cd rubin-formal
-          lake env lean --run RubinFormal/Refinement/Main.lean
+          env -u LD_LIBRARY_PATH -u OPENSSL_CONF -u OPENSSL_MODULES -u PKG_CONFIG_PATH lake env lean --run RubinFormal/Refinement/Main.lean
