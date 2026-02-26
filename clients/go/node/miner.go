@@ -41,6 +41,8 @@ func DefaultMinerConfig() MinerConfig {
 	}
 }
 
+// NewMiner constructs a dev-only miner used for local/devnet bring-up.
+
 func NewMiner(chainState *ChainState, blockStore *BlockStore, sync *SyncEngine, cfg MinerConfig) (*Miner, error) {
 	if chainState == nil {
 		return nil, errors.New("nil chainstate")
