@@ -23,6 +23,7 @@ There is no delayed wire-activation mechanism.
 
 - `rubin-spec` (private repository) holds canonical specs
 - `./clients/go/` Go reference consensus library + CLI
+- `./clients/go/cmd/rubin-node/` Go node skeleton entrypoint (daemon bootstrap)
 - `./clients/rust/` Rust reference consensus library + CLI
 - `./conformance/` fixtures + runner (Go↔Rust parity)
 - `./rubin-formal/` Lean4 proof-pack bootstrap (formal coverage baseline)
