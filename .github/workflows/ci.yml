@@ -1,10 +1,21 @@
 name: ci
 on:
   push:
+    branches: [ main ]
   pull_request:
 
 jobs:
+  policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Sensitive files/content gate
+        run: python3 tools/check_sensitive_files.py
+
   formal:
+    needs: policy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +44,7 @@ jobs:
         run: python3 tools/check_formal_risk_gate.py --profile phase0
 
   test:
+    needs: policy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
