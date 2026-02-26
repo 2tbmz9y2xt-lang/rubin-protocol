@@ -1,28 +1,19 @@
 <!--
-RUBIN SPEC FREEZE HEADER (informational)
+RUBIN public code repository.
 
-This repository contains consensus-critical and normative specifications.
-Consensus source-of-truth: RUBIN_L1_CANONICAL.md.
+Consensus-critical normative specifications are maintained in private repository:
+  - github.com/2tbmz9y2xt-lang/rubin-spec (private)
 
-Precedence (normative):
-  1) RUBIN_L1_CANONICAL.md     (consensus validity)
-  2) RUBIN_COMPACT_BLOCKS.md   (normative P2P behavior)
-  3) RUBIN_NETWORK_PARAMS.md   (reference summary; derived; CANONICAL prevails)
-  4) AUX / operational docs
-
-Integrity:
-  - SECTION_HASHES.json pins consensus-critical section hashes of RUBIN_L1_CANONICAL.md.
-  - Any change to a pinned section MUST update SECTION_HASHES.json deterministically
-    (per canonicalization rules in SECTION_HASHES.json).
+This repository keeps implementations, conformance runner, and formal toolchain.
 -->
 
 # rubin-protocol (Genesis = Canonical Transaction Wire)
 
 This repository contains:
 
-- the consensus-critical L1 specification (CANONICAL),
 - minimal reference implementations (Go + Rust),
-- a cross-client conformance runner (parity gate).
+- a cross-client conformance runner (parity gate),
+- Lean4 formal toolchain and replay gates.
 
 **What this means:** the chain starts at genesis with one canonical transaction
 serialization format (including `tx_kind`, TXID/WTXID rules, and DA fields).
@@ -30,7 +21,7 @@ There is no delayed wire-activation mechanism.
 
 ## Structure
 
-- `./spec/` specs (see `./spec/README.md`)
+- `rubin-spec` (private repository) holds canonical specs
 - `./clients/go/` Go reference consensus library + CLI
 - `./clients/rust/` Rust reference consensus library + CLI
 - `./conformance/` fixtures + runner (Go↔Rust parity)
@@ -39,7 +30,7 @@ There is no delayed wire-activation mechanism.
 
 Quick references:
 
-- Protocol authority & precedence: `./spec/README.md`
+- Spec location (private): `./SPEC_LOCATION.md`
 - Architecture & change path map: `./ARCHITECTURE_MAP.md`
 - Conformance harness overview: `./conformance/README.md`
 
@@ -60,13 +51,6 @@ Run cross-client conformance (builds local CLIs into `./conformance/bin/`):
 ```bash
 python3 conformance/runner/run_cv_bundle.py
 python3 conformance/runner/run_cv_bundle.py --only-gates CV-COMPACT
-```
-
-Spec tooling (HTML + diff + explainer):
-
-```bash
-npm ci
-npm run spec:all
 ```
 
 ## Adding Conformance Vectors

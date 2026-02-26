@@ -53,9 +53,10 @@ def main() -> int:
         return fail("claims.forbidden[] must be a non-empty list")
 
     doc_paths = [
+        repo_root / "README.md",
+        repo_root / "SPEC_LOCATION.md",
         repo_root / "rubin-formal" / "README.md",
         repo_root / "rubin-formal" / "PROOF_COVERAGE.md",
-        repo_root / "spec" / "README.md",
     ]
     for p in doc_paths:
         if not p.exists():
