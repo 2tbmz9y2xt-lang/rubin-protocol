@@ -29,7 +29,32 @@ def checkParseVector (v : CVParseVector) : Bool :=
 def allCVParse : Bool :=
   cvParseVectors.all checkParseVector
 
+private theorem all_append (xs ys : List CVParseVector) (p : CVParseVector → Bool) :
+    (xs ++ ys).all p = (xs.all p && ys.all p) := by
+  induction xs with
+  | nil =>
+      simp [List.all]
+  | cons _ _ ih =>
+      simp [List.all, ih, Bool.and_assoc]
+
+-- CV-PARSE replay gate (compile-time).
+--
+-- We split the proof to keep each `native_decide` goal small; this avoids Lean elaboration edge cases
+-- when the vector set grows.
 theorem cv_parse_vectors_pass : allCVParse = true := by
-  native_decide
+  let n : Nat := cvParseVectors.length / 2
+  have h1 : (cvParseVectors.take n).all checkParseVector = true := by
+    native_decide
+  have h2 : (cvParseVectors.drop n).all checkParseVector = true := by
+    native_decide
+  have h : (cvParseVectors.take n ++ cvParseVectors.drop n).all checkParseVector = true := by
+    calc
+      (cvParseVectors.take n ++ cvParseVectors.drop n).all checkParseVector
+          = ((cvParseVectors.take n).all checkParseVector && (cvParseVectors.drop n).all checkParseVector) := by
+              simpa using all_append (cvParseVectors.take n) (cvParseVectors.drop n) checkParseVector
+      _ = (true && true) := by simp [h1, h2]
+      _ = true := by simp
+  -- `take ++ drop` reconstructs the original list.
+  simpa [allCVParse, List.take_append_drop] using h
 
 end RubinFormal.Conformance

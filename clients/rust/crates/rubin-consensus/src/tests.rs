@@ -116,14 +116,14 @@ fn parse_tx_witness_item_canonicalization() {
     tx1_ok_refund.push(0x00); // da_payload_len
     parse_tx(&tx1_ok_refund).expect("refund selector should be canonical");
 
-    // sentinel_htlc_claim_selector_ok: suite=0x00, pubkey_length=32, sig_length=3, signature=0x00||u16le(0).
+    // sentinel_htlc_claim_selector_ok: suite=0x00, pubkey_length=32, sig_length=4, signature=0x00||u16le(1)||preimage[0].
     let mut tx1_ok_claim = base.clone();
     tx1_ok_claim.push(0x01); // witness_count
     tx1_ok_claim.push(SUITE_ID_SENTINEL);
     tx1_ok_claim.push(0x20); // pubkey_length = 32
     tx1_ok_claim.extend_from_slice(&[0u8; 32]);
-    tx1_ok_claim.push(0x03); // sig_length = 3
-    tx1_ok_claim.extend_from_slice(&[0x00, 0x00, 0x00]); // claim path_id + preimage_len=0
+    tx1_ok_claim.push(0x04); // sig_length = 4
+    tx1_ok_claim.extend_from_slice(&[0x00, 0x01, 0x00, 0x11]); // claim path_id + preimage_len=1 + preimage[0]
     tx1_ok_claim.push(0x00); // da_payload_len
     parse_tx(&tx1_ok_claim).expect("claim selector should be canonical");
 

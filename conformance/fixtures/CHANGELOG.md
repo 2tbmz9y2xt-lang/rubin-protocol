@@ -98,3 +98,17 @@ Policy:
 
 Изменённые fixtures:
 - `CV-SUBSIDY.json` (обновлён `CV-SUB-01`, добавлен `CV-SUB-04`)
+
+## 2026-02-26 — HTLC canonicalization: forbid preimage_len=0 at parse-time
+
+Причина:
+- CANONICAL + HTLC spec требуют `1 <= preimage_len <= MAX_HTLC_PREIMAGE_BYTES` для sentinel witness selector;
+- фиксируем parse-time canonicalization, чтобы `preimage_len=0` не мог “перебить” error-priority
+  относительно UTXO/cursor ошибок.
+
+Инструменты:
+- ручное обновление `CV-PARSE.json`,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-PARSE`.
+
+Изменённые fixtures:
+- `CV-PARSE.json` (добавлен `PARSE-10`)

@@ -280,7 +280,7 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
                                     .try_into()
                                     .expect("signature[1..3] is 2 bytes"),
                             ) as usize;
-                            if pre_len as u64 > MAX_HTLC_PREIMAGE_BYTES {
+                            if pre_len == 0 || pre_len as u64 > MAX_HTLC_PREIMAGE_BYTES {
                                 false
                             } else {
                                 sig_len == 3 + pre_len

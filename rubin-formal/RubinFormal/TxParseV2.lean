@@ -85,7 +85,7 @@ def parseWitnessItem (c : Cursor) : Option (Cursor × Option TxErr) := do
       else if sigLen >= 3 then
         if sig.size >= 3 && sig.get! 0 == 0x00 then
           let preLen := Wire.u16le? (sig.get! 1) (sig.get! 2)
-          if preLen <= MAX_HTLC_PREIMAGE_BYTES && sigLen == 3 + preLen then
+          if preLen >= 1 && preLen <= MAX_HTLC_PREIMAGE_BYTES && sigLen == 3 + preLen then
             pure (c5, none)
           else
             none
