@@ -19,27 +19,27 @@ import (
 )
 
 type traceHeader struct {
-	Type                string `json:"type"`
-	SchemaVersion        int    `json:"schema_version"`
-	GeneratedAtUTC       string `json:"generated_at_utc"`
-	RepoCommit           string `json:"repo_commit"`
-	GoVersion            string `json:"go_version"`
+	Type                  string `json:"type"`
+	SchemaVersion         int    `json:"schema_version"`
+	GeneratedAtUTC        string `json:"generated_at_utc"`
+	RepoCommit            string `json:"repo_commit"`
+	GoVersion             string `json:"go_version"`
 	FixturesDigestSHA3256 string `json:"fixtures_digest_sha3_256"`
 }
 
 type traceEntry struct {
-	Type     string                 `json:"type"`
-	Gate     string                 `json:"gate"`
-	VectorID string                 `json:"vector_id"`
-	Op       string                 `json:"op"`
-	Ok       bool                   `json:"ok"`
-	Err      string                 `json:"err"`
-	Inputs   map[string]any         `json:"inputs"`
-	Outputs  map[string]any         `json:"outputs"`
+	Type     string         `json:"type"`
+	Gate     string         `json:"gate"`
+	VectorID string         `json:"vector_id"`
+	Op       string         `json:"op"`
+	Ok       bool           `json:"ok"`
+	Err      string         `json:"err"`
+	Inputs   map[string]any `json:"inputs"`
+	Outputs  map[string]any `json:"outputs"`
 }
 
 type parseFixture struct {
-	Gate    string       `json:"gate"`
+	Gate    string        `json:"gate"`
 	Vectors []parseVector `json:"vectors"`
 }
 type parseVector struct {
@@ -84,15 +84,15 @@ type utxoBasicFixture struct {
 	Vectors []utxoBasicVector `json:"vectors"`
 }
 type utxoBasicVector struct {
-	ID             string      `json:"id"`
-	Op             string      `json:"op"`
-	TxHex          string      `json:"tx_hex"`
-	Utxos          []utxoJSON  `json:"utxos"`
-	Height         uint64      `json:"height"`
-	BlockTimestamp uint64      `json:"block_timestamp"`
-	BlockMTP       *uint64     `json:"block_mtp"`
-	ExpectOk       bool        `json:"expect_ok"`
-	ExpectErr      string      `json:"expect_err"`
+	ID             string     `json:"id"`
+	Op             string     `json:"op"`
+	TxHex          string     `json:"tx_hex"`
+	Utxos          []utxoJSON `json:"utxos"`
+	Height         uint64     `json:"height"`
+	BlockTimestamp uint64     `json:"block_timestamp"`
+	BlockMTP       *uint64    `json:"block_mtp"`
+	ExpectOk       bool       `json:"expect_ok"`
+	ExpectErr      string     `json:"expect_err"`
 }
 
 type utxoJSON struct {
@@ -214,7 +214,7 @@ func main() {
 	defer f.Close()
 
 	hdr := traceHeader{
-		Type:                 "header",
+		Type:                  "header",
 		SchemaVersion:         1,
 		GeneratedAtUTC:        time.Now().UTC().Format(time.RFC3339Nano),
 		RepoCommit:            mustGitCommit(),
@@ -498,4 +498,3 @@ func main() {
 		os.Exit(2)
 	}
 }
-
