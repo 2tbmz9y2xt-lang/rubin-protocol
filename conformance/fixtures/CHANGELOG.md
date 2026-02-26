@@ -85,6 +85,20 @@ Policy:
 Изменённые fixtures:
 - `CV-VALIDATION-ORDER.json` (добавлен `CV-VO-05`)
 
+## 2026-02-26 — Runner success-output checks for subsidy/connect ops
+
+Причина:
+- runner обязан сравнивать success-output для executable ops, иначе возможен silent drift;
+- фиксируем parity и добавляем ожидаемые значения для `connect_block_basic` и `block_basic_check_with_fees`.
+
+Инструменты:
+- ручное обновление `CV-SUBSIDY.json`,
+- ручное обновление `conformance/runner/run_cv_bundle.py`,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-SUBSIDY`.
+
+Изменённые fixtures:
+- `CV-SUBSIDY.json` (обновлён `CV-SUB-01`, добавлен `CV-SUB-04`)
+
 ## 2026-02-26 — HTLC canonicalization: forbid preimage_len=0 at parse-time
 
 Причина:

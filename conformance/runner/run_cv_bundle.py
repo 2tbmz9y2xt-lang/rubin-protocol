@@ -116,6 +116,15 @@ def load_fixtures() -> List[Dict[str, Any]]:
     return fixtures
 
 
+def as_int(x: Any) -> int:
+    if x is None:
+        return 0
+    try:
+        return int(x)
+    except (ValueError, TypeError):
+        return 0
+
+
 def as_sorted_ints(values: Any) -> List[int]:
     if not isinstance(values, list):
         return []
@@ -1403,18 +1412,42 @@ def validate_vector(
             )
         if "expect_block_hash" in v and go_resp.get("block_hash") != v["expect_block_hash"]:
             problems.append(f"{gate}/{vid}: expect_block_hash mismatch")
+    elif op == "block_basic_check_with_fees":
+        if go_resp.get("block_hash") != rust_resp.get("block_hash"):
+            problems.append(
+                f"{gate}/{vid}: block_hash mismatch go={go_resp.get('block_hash')} rust={rust_resp.get('block_hash')}"
+            )
+        if "expect_block_hash" in v and go_resp.get("block_hash") != v["expect_block_hash"]:
+            problems.append(f"{gate}/{vid}: expect_block_hash mismatch")
+    elif op == "connect_block_basic":
+        for k in ["sum_fees", "utxo_count", "already_generated", "already_generated_n1"]:
+            gv = as_int(go_resp.get(k))
+            rv = as_int(rust_resp.get(k))
+            if gv != rv:
+                problems.append(f"{gate}/{vid}: {k} mismatch go={gv} rust={rv}")
+
+        if "expect_sum_fees" in v and as_int(go_resp.get("sum_fees")) != int(v["expect_sum_fees"]):
+            problems.append(f"{gate}/{vid}: expect_sum_fees mismatch")
+        if "expect_utxo_count" in v and as_int(go_resp.get("utxo_count")) != int(v["expect_utxo_count"]):
+            problems.append(f"{gate}/{vid}: expect_utxo_count mismatch")
+        if "expect_already_generated" in v and as_int(go_resp.get("already_generated")) != int(v["expect_already_generated"]):
+            problems.append(f"{gate}/{vid}: expect_already_generated mismatch")
+        if "expect_already_generated_n1" in v and as_int(go_resp.get("already_generated_n1")) != int(v["expect_already_generated_n1"]):
+            problems.append(f"{gate}/{vid}: expect_already_generated_n1 mismatch")
     elif op == "covenant_genesis_check":
         # ok/err parity is already checked above.
         pass
     elif op == "utxo_apply_basic":
         for k in ["fee", "utxo_count"]:
-            if go_resp.get(k) != rust_resp.get(k):
+            gv = as_int(go_resp.get(k))
+            rv = as_int(rust_resp.get(k))
+            if gv != rv:
                 problems.append(
-                    f"{gate}/{vid}: {k} mismatch go={go_resp.get(k)} rust={rust_resp.get(k)}"
+                    f"{gate}/{vid}: {k} mismatch go={gv} rust={rv}"
                 )
-        if "expect_fee" in v and go_resp.get("fee") != v["expect_fee"]:
+        if "expect_fee" in v and as_int(go_resp.get("fee")) != int(v["expect_fee"]):
             problems.append(f"{gate}/{vid}: expect_fee mismatch")
-        if "expect_utxo_count" in v and go_resp.get("utxo_count") != v["expect_utxo_count"]:
+        if "expect_utxo_count" in v and as_int(go_resp.get("utxo_count")) != int(v["expect_utxo_count"]):
             problems.append(f"{gate}/{vid}: expect_utxo_count mismatch")
     elif op == "fork_work":
         if go_resp.get("work") != rust_resp.get("work"):
