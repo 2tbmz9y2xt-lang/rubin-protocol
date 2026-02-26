@@ -1,6 +1,7 @@
 import Std
 import RubinFormal.BlockBasicV1
 import RubinFormal.ByteWireV2
+import RubinFormal.UtxoBasicV1
 
 namespace RubinFormal
 
@@ -9,12 +10,33 @@ open RubinFormal.BlockBasicV1
 
 namespace BlockBasicCheckV1
 
-def MAX_FUTURE_DRIFT : Nat := 7_200
+def MAX_FUTURE_DRIFT : Nat := 7200
+
+def enforceSigSuiteActivation (txs : List Bytes) (blockHeight : Nat) : Except String Unit := do
+  if blockHeight < RubinFormal.UtxoBasicV1.SLH_DSA_ACTIVATION_HEIGHT then
+    for tx in txs do
+      let t ← RubinFormal.UtxoBasicV1.parseTx tx
+      for w in t.witness do
+        if w.suiteId == RubinFormal.UtxoBasicV1.SUITE_ID_SLH_DSA_SHAKE_256F then
+          throw "TX_ERR_SIG_ALG_INVALID"
+  pure ()
+
+def insertNat (x : Nat) : List Nat → List Nat
+  | [] => [x]
+  | y :: ys =>
+      if x ≤ y then
+        x :: y :: ys
+      else
+        y :: insertNat x ys
+
+def sortNat : List Nat → List Nat
+  | [] => []
+  | x :: xs => insertNat x (sortNat xs)
 
 def medianTimePast (prevTimestamps : List Nat) : Except String Nat := do
   if prevTimestamps.isEmpty then
     throw "BLOCK_ERR_PARSE"
-  let sorted := prevTimestamps.qsort (· < ·)
+  let sorted := sortNat prevTimestamps
   pure (sorted.get! (sorted.length / 2))
 
 def timestampBounds (mtp ts : Nat) : Except String Unit := do
@@ -60,8 +82,12 @@ def validateBlockBasicCheck
     (blockBytes : Bytes)
     (expectedPrevHash : Option Bytes)
     (expectedTarget : Option Bytes)
+    (blockHeight : Nat)
     (prevTimestamps : List Nat) : Except String Unit := do
   let pb ← BlockBasicV1.parseBlock blockBytes
+
+  -- signature suite activation (CV-SIG gate): SLH-DSA MUST NOT appear before activation height.
+  enforceSigSuiteActivation pb.txs blockHeight
 
   -- validate the same basic invariants as BlockBasicV1.validateBlockBasic, but keep pb for extra checks.
   match expectedPrevHash with
@@ -97,4 +123,3 @@ def validateBlockBasicCheck
 end BlockBasicCheckV1
 
 end RubinFormal
-

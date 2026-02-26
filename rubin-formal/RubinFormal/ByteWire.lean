@@ -1,3 +1,5 @@
+import Std
+
 namespace RubinFormal
 
 abbrev Byte := Nat
@@ -21,7 +23,7 @@ def parseCompactSize : List Byte -> Option (Nat × List Byte)
 
 theorem parse_encodeCompactSize_roundtrip (n : Nat) (h : n < 253) :
     parseCompactSize (encodeCompactSize n) = some (n, []) := by
-  have h256 : n < 256 := lt_trans h (by decide)
+  have h256 : n < 256 := Nat.lt_trans h (by decide)
   simp [encodeCompactSize, parseCompactSize, h, h256]
 
 theorem encodeCompactSize_single_byte_unique

@@ -2,6 +2,7 @@ import RubinFormal.TxParseV2
 import RubinFormal.UtxoBasicV1
 import RubinFormal.BlockBasicCheckV1
 import RubinFormal.Conformance.CVSigVectors
+import RubinFormal.Hex
 
 namespace RubinFormal.Conformance
 
@@ -10,65 +11,67 @@ open TxV2
 open RubinFormal.UtxoBasicV1
 open RubinFormal.BlockBasicCheckV1
 
-def zeroChainId : Bytes :=
-  ByteArray.mk (List.replicate 32 0)
+private def zeroChainIdSig : Bytes :=
+  RubinFormal.bytes ((List.replicate 32 (UInt8.ofNat 0)).toArray)
 
-def mkOutpoint (u : CVSigUtxoEntry) : Outpoint :=
-  { txid := u.txid, vout := u.vout }
-
-def mkEntry (u : CVSigUtxoEntry) : UtxoEntry :=
-  {
-    value := u.value
-    covenantType := u.covenantType
-    covenantData := u.covenantData
-    creationHeight := u.creationHeight
-    createdByCoinbase := u.createdByCoinbase
-  }
+private def toUtxoPairsSig? (us : List CVSigUtxoEntry) : Option (List (Outpoint × UtxoEntry)) :=
+  us.mapM (fun u => do
+    let txid <- RubinFormal.decodeHex? u.txidHex
+    let cd <- RubinFormal.decodeHex? u.covenantDataHex
+    pure
+      (
+        { txid := txid, vout := u.vout },
+        {
+          value := u.value
+          covenantType := u.covenantType
+          covenantData := cd
+          creationHeight := u.creationHeight
+          createdByCoinbase := u.createdByCoinbase
+        }
+      ))
 
 def checkSigVector (v : CVSigVector) : Bool :=
   if v.op == "parse_tx" then
-    match v.tx with
+    match v.txHex.bind RubinFormal.decodeHex? with
     | none => false
     | some tx =>
-      let r := TxV2.parseTx tx
-      if v.expectOk then
-        match r.txid, r.wtxid with
-        | some txid, some wtxid =>
-          let consumedOk :=
-            match v.expectConsumed with
-            | none => true
-            | some n => tx.size == n
-          r.ok == true &&
-          (some txid == v.expectTxid) &&
-          (some wtxid == v.expectWtxid) &&
-          consumedOk
-        | _, _ => false
-      else
-        match r.err, v.expectErr with
-        | some e, some exp => r.ok == false && e.toString == exp
-        | _, _ => false
+        let r := TxV2.parseTx tx
+        if v.expectOk then
+          let expTxid := RubinFormal.decodeHexOpt? v.expectTxidHex
+          let expWtxid := RubinFormal.decodeHexOpt? v.expectWtxidHex
+          match r.txid, r.wtxid, expTxid, expWtxid with
+          | some txid, some wtxid, some etxid, some ewtxid =>
+              let consumedOk :=
+                match v.expectConsumed with
+                | none => true
+                | some n => tx.size == n
+              r.ok == true && txid == etxid && wtxid == ewtxid && consumedOk
+          | _, _, _, _ => false
+        else
+          match r.err, v.expectErr with
+          | some e, some exp => r.ok == false && e.toString == exp
+          | _, _ => false
   else if v.op == "block_basic_check" then
-    match v.block, v.expectedPrevHash, v.expectedTarget, v.height with
-    | some b, some ph, some tgt, some _h =>
-      match BlockBasicCheckV1.validateBlockBasicCheck b (some ph) (some tgt) v.prevTimestamps with
-      | .ok _ => v.expectOk
-      | .error e => (!v.expectOk) && (some e == v.expectErr)
-    | _, _, _, _ => false
-  else if v.op == "utxo_apply_basic" then
-    match v.tx, v.height, v.blockTimestamp with
-    | some tx, some h, some ts =>
-      let utxos : List (Outpoint × UtxoEntry) :=
-        v.utxos.map (fun u => (mkOutpoint u, mkEntry u))
-      match applyNonCoinbaseTxBasic tx utxos h ts zeroChainId with
-      | .ok _ => v.expectOk
-      | .error e =>
-          if v.expectOk then
-            false
-          else
-            match v.expectErr with
-            | none => true
-            | some exp => exp == e
+    match v.blockHex.bind RubinFormal.decodeHex?, v.expectedPrevHashHex.bind RubinFormal.decodeHex?, v.expectedTargetHex.bind RubinFormal.decodeHex? with
+    | some b, some ph, some tgt =>
+        let h := v.height.getD 0
+        match BlockBasicCheckV1.validateBlockBasicCheck b (some ph) (some tgt) h v.prevTimestamps with
+        | .ok _ => v.expectOk
+        | .error e => (!v.expectOk) && (some e == v.expectErr)
     | _, _, _ => false
+  else if v.op == "utxo_apply_basic" then
+    match v.txHex.bind RubinFormal.decodeHex?, v.height, v.blockTimestamp, toUtxoPairsSig? v.utxos with
+    | some tx, some h, some ts, some utxos =>
+        match applyNonCoinbaseTxBasic tx utxos h ts zeroChainIdSig with
+        | .ok _ => v.expectOk
+        | .error e =>
+            if v.expectOk then
+              false
+            else
+              match v.expectErr with
+              | none => true
+              | some exp => exp == e
+    | _, _, _, _ => false
   else
     false
 

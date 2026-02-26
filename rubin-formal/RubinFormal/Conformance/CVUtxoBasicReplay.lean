@@ -1,39 +1,46 @@
 import RubinFormal.UtxoBasicV1
 import RubinFormal.Conformance.CVUtxoBasicVectors
+import RubinFormal.Hex
 
 namespace RubinFormal.Conformance
 
+open RubinFormal
 open RubinFormal.UtxoBasicV1
 
-def zeroChainId : Bytes :=
-  ByteArray.mk (List.replicate 32 0)
+private def zeroChainIdUtxoBasic : Bytes :=
+  RubinFormal.bytes ((List.replicate 32 (UInt8.ofNat 0)).toArray)
 
-def mkOutpoint (u : CVUtxoEntry) : Outpoint :=
-  { txid := u.txid, vout := u.vout }
-
-def mkEntry (u : CVUtxoEntry) : UtxoEntry :=
-  {
-    value := u.value
-    covenantType := u.covenantType
-    covenantData := u.covenantData
-    creationHeight := u.creationHeight
-    createdByCoinbase := u.createdByCoinbase
-  }
+private def toUtxoPairsUtxoBasic? (us : List CVUtxoEntry) : Option (List (Outpoint × UtxoEntry)) :=
+  us.mapM (fun u => do
+    let txid <- RubinFormal.decodeHex? u.txidHex
+    let cd <- RubinFormal.decodeHex? u.covenantDataHex
+    pure
+      (
+        { txid := txid, vout := u.vout },
+        {
+          value := u.value
+          covenantType := u.covenantType
+          covenantData := cd
+          creationHeight := u.creationHeight
+          createdByCoinbase := u.createdByCoinbase
+        }
+      ))
 
 def vectorPass (v : CVUtxoBasicVector) : Bool :=
-  let utxos : List (Outpoint × UtxoEntry) :=
-    v.utxos.map (fun u => (mkOutpoint u, mkEntry u))
-  match applyNonCoinbaseTxBasic v.tx utxos v.height v.blockTimestamp zeroChainId with
-  | .ok (fee, utxoCount) =>
-      if v.expectOk then
-        (v.expectFee == some fee) && (v.expectUtxoCount == some utxoCount)
-      else
-        false
-  | .error e =>
-      if v.expectOk then
-        false
-      else
-        v.expectErr == some e
+  match RubinFormal.decodeHex? v.txHex, toUtxoPairsUtxoBasic? v.utxos with
+  | some tx, some utxos =>
+      match applyNonCoinbaseTxBasic tx utxos v.height v.blockTimestamp zeroChainIdUtxoBasic with
+      | .ok (fee, utxoCount) =>
+          if v.expectOk then
+            (v.expectFee == some fee) && (v.expectUtxoCount == some utxoCount)
+          else
+            false
+      | .error e =>
+          if v.expectOk then
+            false
+          else
+            v.expectErr == some e
+  | _, _ => false
 
 def cvUtxoBasicVectorsPass : Bool :=
   cvUtxoBasicVectors.all vectorPass
@@ -42,4 +49,3 @@ theorem cv_utxo_basic_vectors_pass : cvUtxoBasicVectorsPass = true := by
   native_decide
 
 end RubinFormal.Conformance
-

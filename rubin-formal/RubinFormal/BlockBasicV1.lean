@@ -1,4 +1,4 @@
-import Std
+import RubinFormal.Types
 import RubinFormal.SHA3_256
 import RubinFormal.ByteWireV2
 import RubinFormal.MerkleV2
@@ -6,8 +6,6 @@ import RubinFormal.PowV1
 import RubinFormal.TxWeightV2
 
 namespace RubinFormal
-
-abbrev Bytes := ByteArray
 
 open Wire
 
@@ -17,7 +15,7 @@ def COV_TYPE_ANCHOR : Nat := 0x0002
 
 def witnessPrefix : Bytes :=
   -- ASCII("RUBIN-WITNESS/")
-  #[
+  RubinFormal.bytes #[
     0x52,0x55,0x42,0x49,0x4e,0x2d,0x57,0x49,0x54,0x4e,0x45,0x53,0x53,0x2f
   ]
 
@@ -72,7 +70,7 @@ def headerBytes (h : BlockHeader) : Bytes :=
     let b1 : UInt8 := UInt8.ofNat ((n / 256) % 256)
     let b2 : UInt8 := UInt8.ofNat ((n / 65536) % 256)
     let b3 : UInt8 := UInt8.ofNat ((n / 16777216) % 256)
-    #[b0, b1, b2, b3]
+    RubinFormal.bytes #[b0, b1, b2, b3]
   let u64le (n : Nat) : Bytes :=
     let b0 : UInt8 := UInt8.ofNat (n % 256)
     let b1 : UInt8 := UInt8.ofNat ((n / 256) % 256)
@@ -82,7 +80,7 @@ def headerBytes (h : BlockHeader) : Bytes :=
     let b5 : UInt8 := UInt8.ofNat ((n / 1099511627776) % 256)
     let b6 : UInt8 := UInt8.ofNat ((n / 281474976710656) % 256)
     let b7 : UInt8 := UInt8.ofNat ((n / 72057594037927936) % 256)
-    #[b0, b1, b2, b3, b4, b5, b6, b7]
+    RubinFormal.bytes #[b0, b1, b2, b3, b4, b5, b6, b7]
   u32le h.version ++ h.prevHash ++ h.merkleRoot ++ u64le h.timestamp ++ h.target ++ u64le h.nonce
 
 def bytesToNatBE32? (bs : Bytes) : Option Nat :=
@@ -93,42 +91,42 @@ def powCheck (h : BlockHeader) : Except String Unit := do
   let _ ← RubinFormal.PowV1.powCheck (headerBytes h) h.target
   pure ()
 
-def parseTxFromCursor (c : Cursor) : Except String (Bytes × Bytes × Bytes × Cursor) := do
+  def parseTxFromCursor (c : Cursor) : Except String (Nat × Bytes × Bytes × Bytes × Cursor) := do
   let start := c.off
   let (ver, c1) ←
     match c.getU32le? with
-    | none => throw "TX_ERR_PARSE"
+    | none => throw "BLOCK_ERR_PARSE"
     | some x => pure x
   let (tkB, c2) ←
     match c1.getU8? with
-    | none => throw "TX_ERR_PARSE"
+    | none => throw "BLOCK_ERR_PARSE"
     | some x => pure x
   let tk := tkB.toNat
   if !(tk == 0x00 || tk == 0x01 || tk == 0x02) then throw "TX_ERR_PARSE"
   let (_, c3) ←
     match c2.getU64le? with
-    | none => throw "TX_ERR_PARSE"
+    | none => throw "BLOCK_ERR_PARSE"
     | some x => pure x
   let (inCount, c4, minIn) ←
     match c3.getCompactSize? with
-    | none => throw "TX_ERR_PARSE"
+    | none => throw "BLOCK_ERR_PARSE"
     | some x => pure x
   if !minIn then throw "TX_ERR_PARSE"
   match RubinFormal.TxWeightV2.parseInputsSkip c4 inCount with
-  | none => throw "TX_ERR_PARSE"
+  | none => throw "BLOCK_ERR_PARSE"
   | some c5 =>
     let (outCount, c6, minOut) ←
       match c5.getCompactSize? with
-      | none => throw "TX_ERR_PARSE"
+      | none => throw "BLOCK_ERR_PARSE"
       | some x => pure x
     if !minOut then throw "TX_ERR_PARSE"
     let (c7, _anchorBytes) ←
       match RubinFormal.TxWeightV2.parseOutputsForAnchor c6 outCount with
-      | none => throw "TX_ERR_PARSE"
+      | none => throw "BLOCK_ERR_PARSE"
       | some x => pure x
     let (_, c8) ←
       match c7.getU32le? with
-      | none => throw "TX_ERR_PARSE"
+      | none => throw "BLOCK_ERR_PARSE"
       | some x => pure x
     let (c9, _daCoreLen) ←
       match RubinFormal.TxWeightV2.parseDaCoreFields tk c8 with
@@ -146,7 +144,7 @@ def parseTxFromCursor (c : Cursor) : Except String (Bytes × Bytes × Bytes × C
     if wErr == .sigNoncanonical then throw "TX_ERR_SIG_NONCANONICAL"
     let (daLen, c10, minDa) ←
       match cW.getCompactSize? with
-      | none => throw "TX_ERR_PARSE"
+      | none => throw "BLOCK_ERR_PARSE"
       | some x => pure x
     if !minDa then throw "TX_ERR_PARSE"
     if tk == 0x00 then
@@ -157,14 +155,14 @@ def parseTxFromCursor (c : Cursor) : Except String (Bytes × Bytes × Bytes × C
       if daLen < 1 || daLen > RubinFormal.TxWeightV2.CHUNK_BYTES then throw "TX_ERR_PARSE"
     let (_, c11) ←
       match c10.getBytes? daLen with
-      | none => throw "TX_ERR_PARSE"
+      | none => throw "BLOCK_ERR_PARSE"
       | some x => pure x
     let endOff := c11.off
     let core := c.bs.extract start coreEnd
     let full := c.bs.extract start endOff
     let txid := SHA3.sha3_256 core
     let wtxid := SHA3.sha3_256 full
-    pure (txid, wtxid, full, { c with off := endOff })
+    pure (inCount, txid, wtxid, full, { c with off := endOff })
 
 def parseBlock (blockBytes : Bytes) : Except String ParsedBlock := do
   let c0 : Cursor := { bs := blockBytes, off := 0 }
@@ -180,8 +178,11 @@ def parseBlock (blockBytes : Bytes) : Except String ParsedBlock := do
   let mut txids : List Bytes := []
   let mut wtxids : List Bytes := []
   let mut coinbaseTx : Bytes := ByteArray.empty
+  let mut anyZeroInputs : Bool := false
   for idx in [0:txCount] do
-    let (txid, wtxid, fullTx, cur') ← parseTxFromCursor cur
+    let (inCount, txid, wtxid, fullTx, cur') ← parseTxFromCursor cur
+    if inCount == 0 then
+      anyZeroInputs := true
     if idx == 0 then
       coinbaseTx := fullTx
     txs := txs.concat fullTx
@@ -190,11 +191,15 @@ def parseBlock (blockBytes : Bytes) : Except String ParsedBlock := do
     cur := cur'
   if cur.off != blockBytes.size then
     throw "BLOCK_ERR_PARSE"
+  if anyZeroInputs then
+    throw "TX_ERR_PARSE"
   pure { header := hdr, txs := txs, txids := txids, wtxids := wtxids, coinbaseTx := coinbaseTx }
 
 def merkleRootTxids (txids : List Bytes) : Except String Bytes := do
   if txids.isEmpty then throw "BLOCK_ERR_PARSE"
-  pure (RubinFormal.MerkleV2.merkleRoot txids)
+  match RubinFormal.Merkle.merkleRoot txids with
+  | some r => pure r
+  | none => throw "BLOCK_ERR_PARSE"
 
 def merkleRootTagged (ids : List Bytes) (leafTag nodeTag : UInt8) : Except String Bytes := do
   if ids.isEmpty then throw "BLOCK_ERR_PARSE"
@@ -218,7 +223,8 @@ def witnessMerkleRootWtxids (wtxids : List Bytes) : Except String Bytes := do
   if wtxids.isEmpty then throw "BLOCK_ERR_PARSE"
   let mut ids := wtxids
   -- coinbase slot commits as zero bytes (CANONICAL §10.4.1)
-  ids := (ByteArray.mk (List.replicate 32 0)) :: (ids.drop 1)
+  let zero32 : Bytes := RubinFormal.bytes ((List.replicate 32 (UInt8.ofNat 0)).toArray)
+  ids := zero32 :: (ids.drop 1)
   merkleRootTagged ids 0x02 0x03
 
 def witnessCommitmentHash (witnessRoot : Bytes) : Bytes :=

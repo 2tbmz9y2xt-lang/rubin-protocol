@@ -1,10 +1,8 @@
-import Std
+import RubinFormal.Types
 import RubinFormal.SHA3_256
 import RubinFormal.ByteWireV2
 
 namespace RubinFormal
-
-abbrev Bytes := ByteArray
 
 open Wire
 
@@ -12,7 +10,7 @@ namespace SighashV1
 
 def sighashPrefix : Bytes :=
   -- ASCII("RUBINv1-sighash/")
-  #[
+  RubinFormal.bytes #[
     0x52,0x55,0x42,0x49,0x4e,0x76,0x31,0x2d,
     0x73,0x69,0x67,0x68,0x61,0x73,0x68,0x2f
   ]
@@ -22,7 +20,7 @@ def u32le (n : Nat) : Bytes :=
   let b1 : UInt8 := UInt8.ofNat ((n / 256) % 256)
   let b2 : UInt8 := UInt8.ofNat ((n / 65536) % 256)
   let b3 : UInt8 := UInt8.ofNat ((n / 16777216) % 256)
-  #[b0, b1, b2, b3]
+  RubinFormal.bytes #[b0, b1, b2, b3]
 
 def u64le (n : Nat) : Bytes :=
   let b0 : UInt8 := UInt8.ofNat (n % 256)
@@ -33,7 +31,7 @@ def u64le (n : Nat) : Bytes :=
   let b5 : UInt8 := UInt8.ofNat ((n / 1099511627776) % 256)
   let b6 : UInt8 := UInt8.ofNat ((n / 281474976710656) % 256)
   let b7 : UInt8 := UInt8.ofNat ((n / 72057594037927936) % 256)
-  #[b0, b1, b2, b3, b4, b5, b6, b7]
+  RubinFormal.bytes #[b0, b1, b2, b3, b4, b5, b6, b7]
 
 structure TxInCore where
   prevTxid : Bytes
@@ -122,7 +120,7 @@ def parseTxCoreForSighash (tx : Bytes) : Except String TxCoreForSighash := do
     match parseOutputsRaw c6 outCount with
     | none => throw "TX_ERR_PARSE"
     | some x => pure x
-  let (locktime, c8) ←
+  let (locktime, _c8) ←
     match c7.getU32le? with
     | none => throw "TX_ERR_PARSE"
     | some x => pure x
@@ -155,7 +153,7 @@ def digestV1 (tx : Bytes) (chainId : Bytes) (inputIndex : Nat) (inputValue : Nat
   let inp :=
     match core.inputs.get? inputIndex with
     | some x => x
-    | none => { prevTxid := #[], prevVoutLE := #[], sequenceLE := #[] }
+    | none => { prevTxid := ByteArray.empty, prevVoutLE := ByteArray.empty, sequenceLE := ByteArray.empty }
   let hashPrevouts :=
     SHA3.sha3_256 (concatBytes (core.inputs.map (fun i => i.prevTxid ++ i.prevVoutLE)))
   let hashSeq :=
@@ -166,7 +164,7 @@ def digestV1 (tx : Bytes) (chainId : Bytes) (inputIndex : Nat) (inputValue : Nat
     sighashPrefix ++
     chainId ++
     u32le core.version ++
-    #[core.txKind] ++
+    (RubinFormal.bytes #[core.txKind]) ++
     (u64le core.txNonce.toNat) ++
     (hashOfDA core.txKind) ++
     hashPrevouts ++
@@ -183,4 +181,3 @@ def digestV1 (tx : Bytes) (chainId : Bytes) (inputIndex : Nat) (inputValue : Nat
 end SighashV1
 
 end RubinFormal
-

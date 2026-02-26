@@ -1,3 +1,5 @@
+import Std
+
 namespace RubinFormal
 
 def txidPreimage (txNonce : Nat) : List Nat := [0, txNonce]
@@ -56,14 +58,18 @@ def witnessCursorValid (cursor slots witnessCount : Nat) : Prop := cursor + slot
 theorem witness_cursor_zero_slot (cursor witnessCount : Nat) (h : cursor ≤ witnessCount) :
     witnessCursorValid cursor 0 witnessCount := by
   unfold witnessCursorValid
-  simpa using h
+  simpa [Nat.add_zero] using h
 
-def nonceReplayFree (nonces : List Nat) : Prop := nonces.Nodup
+def nonceReplayFree (nonces : List Nat) : Prop := List.Nodup nonces
 
 theorem duplicate_nonce_not_replay_free (n : Nat) (xs : List Nat) (h : n ∈ xs) :
     ¬ nonceReplayFree (n :: xs) := by
   unfold nonceReplayFree
-  simpa [List.nodup_cons, h]
+  intro hn
+  -- List.Nodup is defined as Pairwise (≠).
+  have hforall : ∀ a' : Nat, a' ∈ xs → n ≠ a' :=
+    (List.pairwise_cons.mp hn).1
+  exact (hforall n h) rfl
 
 structure UtxoEntry where
   spendable : Bool
@@ -82,7 +88,7 @@ theorem value_conservation_with_extra_input (sumIn sumOut fee : Nat)
     (h : valueConserved sumIn sumOut) :
     valueConserved (sumIn + fee) sumOut := by
   unfold valueConserved at *
-  exact le_trans h (Nat.le_add_right sumIn fee)
+  exact Nat.le_trans h (Nat.le_add_right sumIn fee)
 
 def daPayloadCommitment (chunks : List Nat) : Nat := chunks.foldl (fun acc c => acc + c) 0
 def daChunkSetValid (chunks : List Nat) : Prop := chunks ≠ []

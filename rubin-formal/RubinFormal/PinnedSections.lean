@@ -85,7 +85,7 @@ theorem value_conservation_proved : valueConservationStatement := by
     exact value_conservation_with_extra_input sumIn sumOut fee h
   · intro sumIn sumOut fee hU128 hCons
     unfold valueConserved at *
-    exact le_trans hCons (satAddU128_preserves_lower_bound sumIn fee hU128)
+    exact Nat.le_trans hCons (satAddU128_preserves_lower_bound sumIn fee hU128)
 
 theorem da_set_integrity_proved : daSetIntegrityStatement := by
   simpa [daSetIntegrityStatement] using da_chunk_set_requires_nonempty

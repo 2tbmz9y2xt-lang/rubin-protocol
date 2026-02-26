@@ -1,6 +1,7 @@
 import RubinFormal.UtxoBasicV1
 import RubinFormal.CovenantGenesisV1
 import RubinFormal.Conformance.CVCovenantGenesisVectors
+import RubinFormal.Hex
 
 namespace RubinFormal.Conformance
 
@@ -17,9 +18,12 @@ def covenantGenesisEval (txBytes : Bytes) : Except String Unit := do
   pure ()
 
 def covenantGenesisVectorPass (v : CVCovenantGenesisVector) : Bool :=
-  match covenantGenesisEval v.tx with
-  | .ok _ => v.expectOk
-  | .error e => (!v.expectOk) && (some e == v.expectErr)
+  match RubinFormal.decodeHex? v.txHex with
+  | none => false
+  | some tx =>
+      match covenantGenesisEval tx with
+      | .ok _ => v.expectOk
+      | .error e => (!v.expectOk) && (some e == v.expectErr)
 
 def cvCovenantGenesisVectorsPass : Bool :=
   cvCovenantGenesisVectors.all covenantGenesisVectorPass
@@ -28,4 +32,3 @@ theorem cv_covenant_genesis_vectors_pass : cvCovenantGenesisVectorsPass = true :
   native_decide
 
 end RubinFormal.Conformance
-

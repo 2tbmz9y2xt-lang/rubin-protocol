@@ -33,8 +33,20 @@ def lexLT (a b : List UInt8) : Bool :=
     else if x > y then false
     else lexLT xs ys
 
+def insertBy (lt : α → α → Bool) (x : α) : List α → List α
+  | [] => [x]
+  | y :: ys =>
+      if lt x y then
+        x :: y :: ys
+      else
+        y :: insertBy lt x ys
+
+def sortBy (lt : α → α → Bool) : List α → List α
+  | [] => []
+  | x :: xs => insertBy lt x (sortBy lt xs)
+
 def stableSortKeys (keys : List String) : List String :=
-  keys.qsort (fun a b => lexLT (keyBytes a) (keyBytes b))
+  sortBy (fun a b => lexLT (keyBytes a) (keyBytes b)) keys
 
 def checkDeterminismVector (v : CVDeterminismVector) : Bool :=
   let got := stableSortKeys v.keys
@@ -47,4 +59,3 @@ theorem cv_determinism_vectors_pass : allCVDeterminism = true := by
   native_decide
 
 end RubinFormal.Conformance
-

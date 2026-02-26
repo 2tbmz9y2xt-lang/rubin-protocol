@@ -1,12 +1,10 @@
-import Std
+import RubinFormal.Types
 import RubinFormal.SHA3_256
 import RubinFormal.OutputDescriptorV2
 import RubinFormal.UtxoBasicV1
 import RubinFormal.CovenantGenesisV1
 
 namespace RubinFormal
-
-abbrev Bytes := ByteArray
 
 namespace UtxoApplyGenesisV1
 
@@ -21,7 +19,7 @@ def SUITE_ID_SLH_DSA_SHAKE_256F : Nat := CovenantGenesisV1.SUITE_ID_SLH_DSA_SHAK
 def ML_DSA_87_PUBKEY_BYTES : Nat := 2592
 def ML_DSA_87_SIG_BYTES : Nat := 4627
 def SLH_DSA_SHAKE_256F_PUBKEY_BYTES : Nat := 64
-def MAX_SLH_DSA_SIG_BYTES : Nat := 49_856
+def MAX_SLH_DSA_SIG_BYTES : Nat := 49856
 
 def WITNESS_SLOTS (covType : Nat) (covData : Bytes) : Except String Nat := do
   if covType == CovenantGenesisV1.COV_TYPE_HTLC then
@@ -58,25 +56,24 @@ def validateP2PKSpendPreSig (entry : UtxoEntry) (w : WitnessItem) (blockHeight :
   pure ()
 
 def validateWitnessItemLengths (w : WitnessItem) (blockHeight : Nat) : Except String Unit := do
-  match w.suiteId with
-  | SUITE_ID_SENTINEL =>
-      if w.pubkey.size != 0 || w.signature.size != 0 then
-        throw "TX_ERR_PARSE"
-      pure ()
-  | SUITE_ID_ML_DSA_87 =>
-      if w.pubkey.size != ML_DSA_87_PUBKEY_BYTES || w.signature.size != ML_DSA_87_SIG_BYTES then
-        throw "TX_ERR_SIG_NONCANONICAL"
-      pure ()
-  | SUITE_ID_SLH_DSA_SHAKE_256F =>
-      if blockHeight < CovenantGenesisV1.SLH_DSA_ACTIVATION_HEIGHT then
-        throw "TX_ERR_SIG_ALG_INVALID"
-      if w.pubkey.size != SLH_DSA_SHAKE_256F_PUBKEY_BYTES then
-        throw "TX_ERR_SIG_NONCANONICAL"
-      if w.signature.size == 0 || w.signature.size > MAX_SLH_DSA_SIG_BYTES then
-        throw "TX_ERR_SIG_NONCANONICAL"
-      pure ()
-  | _ =>
+  if w.suiteId == SUITE_ID_SENTINEL then
+    if w.pubkey.size != 0 || w.signature.size != 0 then
+      throw "TX_ERR_PARSE"
+    pure ()
+  else if w.suiteId == SUITE_ID_ML_DSA_87 then
+    if w.pubkey.size != ML_DSA_87_PUBKEY_BYTES || w.signature.size != ML_DSA_87_SIG_BYTES then
+      throw "TX_ERR_SIG_NONCANONICAL"
+    pure ()
+  else if w.suiteId == SUITE_ID_SLH_DSA_SHAKE_256F then
+    if blockHeight < CovenantGenesisV1.SLH_DSA_ACTIVATION_HEIGHT then
       throw "TX_ERR_SIG_ALG_INVALID"
+    if w.pubkey.size != SLH_DSA_SHAKE_256F_PUBKEY_BYTES then
+      throw "TX_ERR_SIG_NONCANONICAL"
+    if w.signature.size == 0 || w.signature.size > MAX_SLH_DSA_SIG_BYTES then
+      throw "TX_ERR_SIG_NONCANONICAL"
+    pure ()
+  else
+    throw "TX_ERR_SIG_ALG_INVALID"
 
 def validateThresholdSigSpendNoCrypto
     (keys : List Bytes)
@@ -87,19 +84,17 @@ def validateThresholdSigSpendNoCrypto
   if ws.length != keys.length then
     throw "TX_ERR_PARSE"
   let mut valid : Nat := 0
-  for i in [0:keys.length] do
-    let w := ws.get! i
-    let key := keys.get! i
-    match w.suiteId with
-    | SUITE_ID_SENTINEL => pure ()
-    | SUITE_ID_ML_DSA_87 | SUITE_ID_SLH_DSA_SHAKE_256F =>
-        if w.suiteId == SUITE_ID_SLH_DSA_SHAKE_256F && blockHeight < CovenantGenesisV1.SLH_DSA_ACTIVATION_HEIGHT then
-          throw "TX_ERR_SIG_ALG_INVALID"
-        if SHA3.sha3_256 w.pubkey != key then
-          throw "TX_ERR_SIG_INVALID"
-        valid := valid + 1
-    | _ =>
+  for (w, key) in List.zip ws keys do
+    if w.suiteId == SUITE_ID_SENTINEL then
+      pure ()
+    else if w.suiteId == SUITE_ID_ML_DSA_87 || w.suiteId == SUITE_ID_SLH_DSA_SHAKE_256F then
+      if w.suiteId == SUITE_ID_SLH_DSA_SHAKE_256F && blockHeight < CovenantGenesisV1.SLH_DSA_ACTIVATION_HEIGHT then
         throw "TX_ERR_SIG_ALG_INVALID"
+      if SHA3.sha3_256 w.pubkey != key then
+        throw "TX_ERR_SIG_INVALID"
+      valid := valid + 1
+    else
+      throw "TX_ERR_SIG_ALG_INVALID"
   if valid < threshold then
     throw "TX_ERR_SIG_INVALID"
   pure ()
@@ -213,54 +208,54 @@ def applyNonCoinbaseTxBasicNoCrypto
       | some x => pure x
     if e.covenantType == CovenantGenesisV1.COV_TYPE_ANCHOR || e.covenantType == CovenantGenesisV1.COV_TYPE_DA_COMMIT then
       throw "TX_ERR_MISSING_UTXO"
+
     if e.createdByCoinbase then
       if height < e.creationHeight + UtxoBasicV1.COINBASE_MATURITY then
         throw "TX_ERR_COINBASE_IMMATURE"
 
     -- spend covenant structural validity (parsers)
-    match e.covenantType with
-    | CovenantGenesisV1.COV_TYPE_P2PK =>
-        let slots ← WITNESS_SLOTS e.covenantType e.covenantData
-        if slots != 1 then throw "TX_ERR_PARSE"
-        if witnessCursor + slots > tx.witness.length then throw "TX_ERR_PARSE"
-        let w := tx.witness.get! witnessCursor
-        -- pre-signature checks only
-        validateP2PKSpendPreSig e w height
-        witnessCursor := witnessCursor + 1
-    | CovenantGenesisV1.COV_TYPE_MULTISIG =>
-        let m ← CovenantGenesisV1.parseMultisigCovenantData e.covenantData
-        let slots ← WITNESS_SLOTS e.covenantType e.covenantData
-        if witnessCursor + slots > tx.witness.length then throw "TX_ERR_PARSE"
-        let assigned := (tx.witness.drop witnessCursor).take slots
-        witnessCursor := witnessCursor + slots
-        validateThresholdSigSpendNoCrypto m.keys m.threshold assigned height "CORE_MULTISIG"
-    | CovenantGenesisV1.COV_TYPE_VAULT =>
-        let v ← CovenantGenesisV1.parseVaultCovenantData e.covenantData
-        let slots ← WITNESS_SLOTS e.covenantType e.covenantData
-        if witnessCursor + slots > tx.witness.length then throw "TX_ERR_PARSE"
-        let assigned := (tx.witness.drop witnessCursor).take slots
-        witnessCursor := witnessCursor + slots
-        vaultInputCount := vaultInputCount + 1
-        if vaultInputCount > 1 then
-          throw "TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN"
-        sumInVault := sumInVault + e.value
-        vaultWhitelist := v.whitelist
-        vaultOwnerLockId := v.ownerLockId
-        vaultKeys := v.keys
-        vaultThreshold := v.threshold
-        vaultWitness := assigned
-    | CovenantGenesisV1.COV_TYPE_HTLC =>
-        let _ ← CovenantGenesisV1.parseHtlcCovenantData e.covenantData
-        let slots ← WITNESS_SLOTS e.covenantType e.covenantData
-        if slots != 2 then throw "TX_ERR_PARSE"
-        if witnessCursor + slots > tx.witness.length then throw "TX_ERR_PARSE"
-        let pathItem := tx.witness.get! witnessCursor
-        let sigItem := tx.witness.get! (witnessCursor + 1)
-        witnessCursor := witnessCursor + 2
-        validateHTLCSpendNoCrypto e pathItem sigItem height blockMtp
-    | _ =>
-        -- unsupported covenant in basic apply path
-        throw "TX_ERR_COVENANT_TYPE_INVALID"
+    if e.covenantType == CovenantGenesisV1.COV_TYPE_P2PK then
+      let slots ← WITNESS_SLOTS e.covenantType e.covenantData
+      if slots != 1 then throw "TX_ERR_PARSE"
+      if witnessCursor + slots > tx.witness.length then throw "TX_ERR_PARSE"
+      let w := tx.witness.get! witnessCursor
+      -- pre-signature checks only
+      validateP2PKSpendPreSig e w height
+      witnessCursor := witnessCursor + 1
+    else if e.covenantType == CovenantGenesisV1.COV_TYPE_MULTISIG then
+      let m ← CovenantGenesisV1.parseMultisigCovenantData e.covenantData
+      let slots ← WITNESS_SLOTS e.covenantType e.covenantData
+      if witnessCursor + slots > tx.witness.length then throw "TX_ERR_PARSE"
+      let assigned := (tx.witness.drop witnessCursor).take slots
+      witnessCursor := witnessCursor + slots
+      validateThresholdSigSpendNoCrypto m.keys m.threshold assigned height "CORE_MULTISIG"
+    else if e.covenantType == CovenantGenesisV1.COV_TYPE_VAULT then
+      let v ← CovenantGenesisV1.parseVaultCovenantData e.covenantData
+      let slots ← WITNESS_SLOTS e.covenantType e.covenantData
+      if witnessCursor + slots > tx.witness.length then throw "TX_ERR_PARSE"
+      let assigned := (tx.witness.drop witnessCursor).take slots
+      witnessCursor := witnessCursor + slots
+      vaultInputCount := vaultInputCount + 1
+      if vaultInputCount > 1 then
+        throw "TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN"
+      sumInVault := sumInVault + e.value
+      vaultWhitelist := v.whitelist
+      vaultOwnerLockId := v.ownerLockId
+      vaultKeys := v.keys
+      vaultThreshold := v.threshold
+      vaultWitness := assigned
+    else if e.covenantType == CovenantGenesisV1.COV_TYPE_HTLC then
+      let _ ← CovenantGenesisV1.parseHtlcCovenantData e.covenantData
+      let slots ← WITNESS_SLOTS e.covenantType e.covenantData
+      if slots != 2 then throw "TX_ERR_PARSE"
+      if witnessCursor + slots > tx.witness.length then throw "TX_ERR_PARSE"
+      let pathItem := tx.witness.get! witnessCursor
+      let sigItem := tx.witness.get! (witnessCursor + 1)
+      witnessCursor := witnessCursor + 2
+      validateHTLCSpendNoCrypto e pathItem sigItem height blockMtp
+    else
+      -- unsupported covenant in basic apply path
+      throw "TX_ERR_COVENANT_TYPE_INVALID"
 
     let lid := lockIdOfEntry e
     inputLockIds := inputLockIds.concat lid

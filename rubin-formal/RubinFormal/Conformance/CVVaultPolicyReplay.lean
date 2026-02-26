@@ -33,13 +33,18 @@ def vaultPolicyEval (v : CVVaultPolicyVector) : (Bool × Option String) :=
     | none => ["multi_vault","owner_auth","fee_sponsor","witness_slots","sentinel","sig_threshold","whitelist","value"]
     | some xs => xs
 
-  let mut err : Option String := none
-  for rule in order do
-    match checks.find? (fun (k, _) => k == rule) with
-    | none => err := some "TX_ERR_PARSE"
-    | some (_, (ok, code)) =>
-        if !ok && err.isNone then
-          err := some code
+  let err : Option String :=
+    order.foldl
+      (fun acc rule =>
+        match acc with
+        | some e => some e
+        | none =>
+            match checks.find? (fun (k, _) => k == rule) with
+            | none => some "TX_ERR_PARSE"
+            | some (_, (ok, code)) =>
+                if ok then none else some code
+      )
+      none
   let ok := err.isNone
   (ok, err)
 
@@ -57,4 +62,3 @@ theorem cv_vault_policy_vectors_pass : cvVaultPolicyVectorsPass = true := by
   native_decide
 
 end RubinFormal.Conformance
-

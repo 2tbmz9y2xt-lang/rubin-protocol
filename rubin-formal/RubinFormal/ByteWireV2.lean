@@ -1,15 +1,12 @@
-import Std
+import RubinFormal.Types
 
 namespace RubinFormal
-
-abbrev Bytes := ByteArray
 
 namespace Wire
 
 structure Cursor where
   bs : Bytes
   off : Nat
-deriving Repr
 
 def Cursor.remaining (c : Cursor) : Nat :=
   c.bs.size - c.off
@@ -69,7 +66,7 @@ inductive TxErr where
   | witnessOverflow
   | sigAlgInvalid
   | sigNoncanonical
-deriving Repr, DecidableEq
+deriving DecidableEq
 
 def TxErr.toString : TxErr -> String
   | .parse => "TX_ERR_PARSE"
@@ -82,7 +79,6 @@ structure ParseResult where
   err : Option TxErr
   txid : Option Bytes
   wtxid : Option Bytes
-deriving Repr
 
 -- CompactSize (Varint) with minimality constraints (FIPS 202 spec section 3).
 def Cursor.getCompactSize? (c : Cursor) : Option (Nat × Cursor × Bool) := do
@@ -109,4 +105,3 @@ def Cursor.getCompactSize? (c : Cursor) : Option (Nat × Cursor × Bool) := do
 
 end Wire
 end RubinFormal
-

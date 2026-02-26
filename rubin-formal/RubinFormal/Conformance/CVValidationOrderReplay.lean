@@ -28,4 +28,3 @@ theorem cv_validation_order_vectors_pass : allCVValidationOrder = true := by
   native_decide
 
 end RubinFormal.Conformance
-

@@ -1,20 +1,18 @@
-import Std
+import RubinFormal.Types
 import RubinFormal.SHA3_256
 
 namespace RubinFormal
-
-abbrev Bytes := ByteArray
 
 namespace PowV1
 
 def u64Max : Nat := (Nat.pow 2 64) - 1
 def powLimit : Nat := (Nat.pow 2 256) - 1
 
-def windowSize : Nat := 10_080
+def windowSize : Nat := 10080
 def targetBlockInterval : Nat := 120
-def tExpected : Nat := targetBlockInterval * windowSize -- 1_209_600
+def tExpected : Nat := targetBlockInterval * windowSize -- 1209600
 
-def maxTimestampStepPerBlock : Nat := 1_200
+def maxTimestampStepPerBlock : Nat := 1200
 
 def clamp (v lo hi : Nat) : Nat :=
   Nat.max lo (Nat.min v hi)
@@ -23,20 +21,23 @@ def bytesToNatBE32? (bs : Bytes) : Option Nat :=
   if bs.size != 32 then
     none
   else
-    let rec go (i : Nat) (acc : Nat) : Nat :=
-      if h : i < 32 then
+    some <| Id.run do
+      let mut acc : Nat := 0
+      for i in [0:32] do
         let b := (bs.get! i).toNat
-        go (i + 1) (acc * 256 + b)
-      else
-        acc
-    some (go 0 0)
+        acc := acc * 256 + b
+      return acc
 
 def natToBytesBE32 (n : Nat) : Bytes :=
-  let rec go (k : Nat) (x : Nat) (acc : List UInt8) : List UInt8 :=
-    match k with
-    | 0 => acc
-    | k+1 => go k (x / 256) (UInt8.ofNat (x % 256) :: acc)
-  ByteArray.mk (go 32 n [])
+  RubinFormal.bytes <| (Id.run do
+    let mut out : Array UInt8 := Array.mkEmpty 32
+    let mut x : Nat := n
+    -- Build little-endian bytes, then reverse to big-endian.
+    for _ in [0:32] do
+      out := out.push (UInt8.ofNat (x % 256))
+      x := x / 256
+    return out.reverse
+  )
 
 structure WindowPattern where
   windowSize : Nat
@@ -64,20 +65,20 @@ def genWindowTimestamps (p : WindowPattern) : Except String (List Nat) := do
     throw "TX_ERR_PARSE"
   if p.windowSize != windowSize then
     throw "TX_ERR_PARSE"
-  let rec build (k : Nat) (prev : Nat) : List Nat :=
-    match k with
-    | 0 => []
-    | k+1 =>
+  let out : Array Nat :=
+    Id.run do
+      let mut ts : Array Nat := Array.mkEmpty p.windowSize
+      let mut prev : Nat := p.start
+      ts := ts.push prev
+      for _ in [0:(p.windowSize - 1)] do
         let next := prev + p.step
-        next :: build k next
-  let base := p.start :: build (p.windowSize - 1) p.start
-  if p.lastJump == 0 then
-    pure base
-  else
-    match lastTwo? base with
-    | none => throw "TX_ERR_PARSE"
-    | some (secLast, _) =>
-        pure (replaceLast base (secLast + p.lastJump))
+        ts := ts.push next
+        prev := next
+      if p.lastJump != 0 then
+        let secLast := ts.get! (p.windowSize - 2)
+        ts := ts.set! (p.windowSize - 1) (secLast + p.lastJump)
+      return ts
+  pure out.toList
 
 def clampWindowTimestamps (raw : List Nat) : Except String (List Nat) := do
   match raw with
@@ -85,19 +86,26 @@ def clampWindowTimestamps (raw : List Nat) : Except String (List Nat) := do
   | t0 :: rest =>
       if t0 > u64Max then
         throw "TX_ERR_PARSE"
-      let rec go (prev : Nat) (rs : List Nat) (accRev : List Nat) : Except String (List Nat) := do
-        match rs with
-        | [] => pure accRev.reverse
-        | t :: ts =>
+      let out : Array Nat :=
+        Id.run do
+          let mut prev : Nat := t0
+          let mut acc : Array Nat := Array.mkEmpty raw.length
+          acc := acc.push t0
+          for t in rest do
             if t > u64Max then
-              throw "TX_ERR_PARSE"
+              -- fail-fast: encode as empty and handle below
+              return #[]
             let lo := prev + 1
             let hi := prev + maxTimestampStepPerBlock
             if lo > u64Max || hi > u64Max then
-              throw "TX_ERR_PARSE"
+              return #[]
             let t' := clamp t lo hi
-            go t' ts (t' :: accRev)
-      go t0 rest [t0]
+            acc := acc.push t'
+            prev := t'
+          return acc
+      if out.isEmpty then
+        throw "TX_ERR_PARSE"
+      pure out.toList
 
 def tActualFromWindow (ts : List Nat) : Except String Nat := do
   let ts' <- clampWindowTimestamps ts
@@ -161,4 +169,3 @@ def powCheck (headerBytes : Bytes) (targetBytes : Bytes) : Except String Bool :=
 end PowV1
 
 end RubinFormal
-
