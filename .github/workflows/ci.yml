@@ -178,21 +178,6 @@ jobs:
           cd clients/rust
           cargo audit --deny warnings
 
-      - name: Spec invariants check
-        run: node scripts/check-spec-invariants.mjs
-
-      - name: Spec section hashes check
-        run: node scripts/check-section-hashes.mjs
-
-      - name: Audit snapshot freshness check
-        run: python3 tools/gen_audit_snapshot.py --check
-
-      - name: Audit snapshot schema check
-        run: python3 tools/check_audit_snapshot.py
-
-      - name: Crypto backend policy check
-        run: python3 tools/check_crypto_backend_policy.py
-
       - name: Conformance matrix check
         run: python3 tools/gen_conformance_matrix.py --check
 

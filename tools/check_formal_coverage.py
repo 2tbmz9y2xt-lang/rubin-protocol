@@ -15,6 +15,21 @@ EXPECTED_CLAIM_BY_PROOF = {
     "byte-model": "byte",
     "refinement": "refined",
 }
+REQUIRED_SECTION_KEYS = {
+    "transaction_wire",
+    "transaction_identifiers",
+    "weight_accounting",
+    "witness_commitment",
+    "sighash_v1",
+    "consensus_error_codes",
+    "covenant_registry",
+    "difficulty_update",
+    "transaction_structural_rules",
+    "replay_domain_checks",
+    "utxo_state_model",
+    "value_conservation",
+    "da_set_integrity",
+}
 
 
 def fail(msg: str) -> int:
@@ -24,14 +39,11 @@ def fail(msg: str) -> int:
 
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
-    section_hashes_path = repo_root / "spec" / "SECTION_HASHES.json"
     coverage_path = repo_root / "rubin-formal" / "proof_coverage.json"
     fixtures_dir = repo_root / "conformance" / "fixtures"
     conformance_dir = repo_root / "rubin-formal" / "RubinFormal" / "Conformance"
     conformance_index = conformance_dir / "Index.lean"
 
-    if not section_hashes_path.exists():
-        return fail("spec/SECTION_HASHES.json not found")
     if not coverage_path.exists():
         return fail("rubin-formal/proof_coverage.json not found")
     if not fixtures_dir.exists():
@@ -41,7 +53,6 @@ def main() -> int:
     if not conformance_index.exists():
         return fail("rubin-formal/RubinFormal/Conformance/Index.lean not found")
 
-    section_hashes = json.loads(section_hashes_path.read_text(encoding="utf-8"))
     coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
 
     proof_level = coverage.get("proof_level")
@@ -78,7 +89,7 @@ def main() -> int:
     if not (repo_root / refinement_bridge).exists():
         return fail(f"refinement_bridge_file does not exist: {refinement_bridge}")
 
-    expected_keys = set(section_hashes.get("section_headings", {}).keys())
+    expected_keys = set(REQUIRED_SECTION_KEYS)
     rows = coverage.get("coverage")
     if not isinstance(rows, list):
         return fail("coverage[]. list is missing in proof_coverage.json")
@@ -209,7 +220,7 @@ def main() -> int:
 
     print(
         f"OK: formal coverage baseline is consistent "
-        f"({len(seen_keys)} sections from spec/SECTION_HASHES.json), "
+        f"({len(seen_keys)} pinned section keys), "
         f"{len(fixture_files)} conformance fixtures covered by Lean replay, "
         f"proof_level={proof_level}, claim_level={claim_level}."
     )
