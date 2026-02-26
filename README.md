@@ -30,6 +30,7 @@ There is no delayed wire-activation mechanism.
 
 Quick references:
 
+- Spec location (private): `./SPEC_LOCATION.md`
 - Architecture & change path map: `./ARCHITECTURE_MAP.md`
 - Conformance harness overview: `./conformance/README.md`
 
