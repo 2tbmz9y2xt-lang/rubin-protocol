@@ -78,4 +78,7 @@ def checkSigVector (v : CVSigVector) : Bool :=
 def allCVSig : Bool :=
   cvSigVectors.all checkSigVector
 
+theorem cv_sig_vectors_pass : allCVSig = true := by
+  native_decide
+
 end RubinFormal.Conformance

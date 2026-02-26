@@ -18,4 +18,7 @@ def sighashVectorPass (v : CVSighashVector) : Bool :=
 def cvSighashVectorsPass : Bool :=
   cvSighashVectors.all sighashVectorPass
 
+theorem cv_sighash_vectors_pass : cvSighashVectorsPass = true := by
+  native_decide
+
 end RubinFormal.Conformance

@@ -45,4 +45,7 @@ def vectorPass (v : CVUtxoBasicVector) : Bool :=
 def cvUtxoBasicVectorsPass : Bool :=
   cvUtxoBasicVectors.all vectorPass
 
+theorem cv_utxo_basic_vectors_pass : cvUtxoBasicVectorsPass = true := by
+  native_decide
+
 end RubinFormal.Conformance

@@ -37,4 +37,7 @@ def htlcOrderingVectorPass (v : CVHtlcOrderingVector) : Bool :=
 def cvHtlcOrderingVectorsPass : Bool :=
   cvHtlcOrderingVectors.all htlcOrderingVectorPass
 
+theorem cv_htlc_ordering_vectors_pass : cvHtlcOrderingVectorsPass = true := by
+  native_decide
+
 end RubinFormal.Conformance

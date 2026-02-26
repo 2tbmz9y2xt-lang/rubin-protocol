@@ -20,5 +20,7 @@ def daIntegrityVectorPass (v : CVDaIntegrityVector) : Bool :=
 def cvDaIntegrityVectorsPass : Bool :=
   cvDaIntegrityVectors.all daIntegrityVectorPass
 
-end RubinFormal.Conformance
+theorem cv_da_integrity_vectors_pass : cvDaIntegrityVectorsPass = true := by
+  native_decide
 
+end RubinFormal.Conformance

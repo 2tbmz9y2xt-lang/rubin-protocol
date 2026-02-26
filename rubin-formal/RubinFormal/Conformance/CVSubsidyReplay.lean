@@ -60,4 +60,7 @@ def subsidyVectorPass (v : CVSubsidyVector) : Bool :=
 def cvSubsidyVectorsPass : Bool :=
   cvSubsidyVectors.all subsidyVectorPass
 
+theorem cv_subsidy_vectors_pass : cvSubsidyVectorsPass = true := by
+  native_decide
+
 end RubinFormal.Conformance

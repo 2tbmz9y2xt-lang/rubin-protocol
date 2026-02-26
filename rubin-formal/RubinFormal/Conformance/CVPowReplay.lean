@@ -41,4 +41,7 @@ def powVectorPass (v : CVPowVector) : Bool :=
 def cvPowVectorsPass : Bool :=
   cvPowVectors.all powVectorPass
 
+theorem cv_pow_vectors_pass : cvPowVectorsPass = true := by
+  native_decide
+
 end RubinFormal.Conformance

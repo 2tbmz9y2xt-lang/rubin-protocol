@@ -20,5 +20,7 @@ def checkBlockBasicVector (v : CVBlockBasicVector) : Bool :=
 def cvBlockBasicVectorsPass : Bool :=
   cvBlockBasicVectors.all checkBlockBasicVector
 
-end RubinFormal.Conformance
+theorem cv_block_basic_vectors_pass : cvBlockBasicVectorsPass = true := by
+  native_decide
 
+end RubinFormal.Conformance

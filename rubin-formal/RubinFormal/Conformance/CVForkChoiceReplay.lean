@@ -103,4 +103,7 @@ def checkForkChoiceVector (v : CVForkChoiceVector) : Bool :=
 def allCVForkChoice : Bool :=
   cvForkChoiceVectors.all checkForkChoiceVector
 
+theorem cv_fork_choice_vectors_pass : allCVForkChoice = true := by
+  native_decide
+
 end RubinFormal.Conformance

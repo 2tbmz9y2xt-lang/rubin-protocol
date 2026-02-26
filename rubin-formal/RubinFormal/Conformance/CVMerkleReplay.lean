@@ -34,4 +34,7 @@ def checkMerkleVector (v : CVMerkleVector) : Bool :=
 def allCVMerkle : Bool :=
   cvMerkleVectors.all checkMerkleVector
 
+theorem cv_merkle_vectors_pass : allCVMerkle = true := by
+  native_decide
+
 end RubinFormal.Conformance

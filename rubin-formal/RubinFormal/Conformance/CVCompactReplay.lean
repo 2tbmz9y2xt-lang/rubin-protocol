@@ -425,4 +425,7 @@ def compactVectorPass (v : CVCompactVector) : Bool :=
 def cvCompactVectorsPass : Bool :=
   cvCompactVectors_CV_COMPACT.all compactVectorPass
 
+theorem cv_compact_vectors_pass : cvCompactVectorsPass = true := by
+  native_decide
+
 end RubinFormal.Conformance

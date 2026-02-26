@@ -58,4 +58,7 @@ def checkReplayVector (v : CVReplayVector) : Bool :=
 def allCVReplay : Bool :=
   cvReplayVectors.all checkReplayVector
 
+theorem cv_replay_vectors_pass : allCVReplay = true := by
+  native_decide
+
 end RubinFormal.Conformance

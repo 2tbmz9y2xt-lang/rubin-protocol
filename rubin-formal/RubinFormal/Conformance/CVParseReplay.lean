@@ -29,4 +29,7 @@ def checkParseVector (v : CVParseVector) : Bool :=
 def allCVParse : Bool :=
   cvParseVectors.all checkParseVector
 
+theorem cv_parse_vectors_pass : allCVParse = true := by
+  native_decide
+
 end RubinFormal.Conformance

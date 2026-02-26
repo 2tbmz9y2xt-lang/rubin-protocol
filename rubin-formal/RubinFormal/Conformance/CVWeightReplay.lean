@@ -21,4 +21,7 @@ def weightVectorPass (v : CVWeightVector) : Bool :=
 def cvWeightVectorsPass : Bool :=
   cvWeightVectors.all weightVectorPass
 
+theorem cv_weight_vectors_pass : cvWeightVectorsPass = true := by
+  native_decide
+
 end RubinFormal.Conformance

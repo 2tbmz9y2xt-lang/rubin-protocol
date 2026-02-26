@@ -28,4 +28,7 @@ def covenantGenesisVectorPass (v : CVCovenantGenesisVector) : Bool :=
 def cvCovenantGenesisVectorsPass : Bool :=
   cvCovenantGenesisVectors.all covenantGenesisVectorPass
 
+theorem cv_covenant_genesis_vectors_pass : cvCovenantGenesisVectorsPass = true := by
+  native_decide
+
 end RubinFormal.Conformance

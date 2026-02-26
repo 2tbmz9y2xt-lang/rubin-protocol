@@ -24,4 +24,7 @@ def checkValidationOrderVector (v : CVValidationOrderVector) : Bool :=
 def allCVValidationOrder : Bool :=
   cvValidationOrderVectors.all checkValidationOrderVector
 
+theorem cv_validation_order_vectors_pass : allCVValidationOrder = true := by
+  native_decide
+
 end RubinFormal.Conformance

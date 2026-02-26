@@ -40,4 +40,7 @@ def checkTimestampVector (v : CVTimestampVector) : Bool :=
 def allCVTimestamp : Bool :=
   cvTimestampVectors.all checkTimestampVector
 
+theorem cv_timestamp_vectors_pass : allCVTimestamp = true := by
+  native_decide
+
 end RubinFormal.Conformance

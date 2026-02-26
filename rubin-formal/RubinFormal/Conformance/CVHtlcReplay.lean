@@ -45,4 +45,7 @@ def htlcVectorPass (v : HtlcVector) : Bool :=
 def cvHtlcVectorsPass : Bool :=
   cvUtxoApplyVectors_CV_HTLC.all htlcVectorPass
 
+theorem cv_htlc_vectors_pass : cvHtlcVectorsPass = true := by
+  native_decide
+
 end RubinFormal.Conformance

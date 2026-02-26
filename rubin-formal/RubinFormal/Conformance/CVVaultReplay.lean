@@ -45,4 +45,7 @@ def vaultVectorPass (v : VaultVector) : Bool :=
 def cvVaultVectorsPass : Bool :=
   cvUtxoApplyVectors_CV_VAULT.all vaultVectorPass
 
+theorem cv_vault_vectors_pass : cvVaultVectorsPass = true := by
+  native_decide
+
 end RubinFormal.Conformance

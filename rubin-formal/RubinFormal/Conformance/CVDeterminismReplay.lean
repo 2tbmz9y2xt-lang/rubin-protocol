@@ -55,4 +55,7 @@ def checkDeterminismVector (v : CVDeterminismVector) : Bool :=
 def allCVDeterminism : Bool :=
   cvDeterminismVectors.all checkDeterminismVector
 
+theorem cv_determinism_vectors_pass : allCVDeterminism = true := by
+  native_decide
+
 end RubinFormal.Conformance

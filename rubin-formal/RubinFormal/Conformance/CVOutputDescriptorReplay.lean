@@ -1,6 +1,7 @@
 import RubinFormal.OutputDescriptorV2
 import RubinFormal.Conformance.CVOutputDescriptorVectors
 import RubinFormal.Hex
+import Std
 
 namespace RubinFormal.Conformance
 
@@ -19,5 +20,8 @@ def checkODVector (v : CVOutputDescriptorVector) : Bool :=
 
 def cvOutputDescriptorVectorsPass : Bool :=
   (cvOutputDescriptorVectors.all checkODVector)
+
+theorem cv_output_descriptor_vectors_pass : cvOutputDescriptorVectorsPass = true := by
+  native_decide
 
 end RubinFormal.Conformance
