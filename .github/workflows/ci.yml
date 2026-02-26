@@ -289,3 +289,31 @@ jobs:
         run: |
           cd rubin-formal
           lake env lean --run RubinFormal/Refinement/Main.lean
+
+  validator:
+    name: validator
+    needs: [policy, formal, test, formal_refinement]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce validator-gate dependencies
+        run: |
+          declare -A results=(
+            [policy]="${{ needs.policy.result }}"
+            [formal]="${{ needs.formal.result }}"
+            [test]="${{ needs.test.result }}"
+            [formal_refinement]="${{ needs.formal_refinement.result }}"
+          )
+          failed=0
+          for key in policy formal test formal_refinement; do
+            value="${results[$key]}"
+            echo "$key=$value"
+            if [ "$value" != "success" ]; then
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "validator gate failed: one or more prerequisite jobs did not succeed" >&2
+            exit 1
+          fi
+          echo "validator gate passed"
