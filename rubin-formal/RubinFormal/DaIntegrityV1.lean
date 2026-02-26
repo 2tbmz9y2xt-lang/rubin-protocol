@@ -1,12 +1,10 @@
-import Std
+import RubinFormal.Types
 import RubinFormal.SHA3_256
 import RubinFormal.ByteWireV2
 import RubinFormal.TxWeightV2
 import RubinFormal.BlockBasicV1
 
 namespace RubinFormal
-
-abbrev Bytes := ByteArray
 
 open Wire
 
@@ -20,7 +18,14 @@ def MAX_DA_BATCHES_PER_BLOCK : Nat := 128
 def COV_TYPE_DA_COMMIT : Nat := 0x0103
 
 def cmpBytes (a b : Bytes) : Ordering :=
-  compare a.toList b.toList
+  let rec go (xs ys : List UInt8) : Ordering :=
+    match xs, ys with
+    | [], [] => .eq
+    | [], _ => .lt
+    | _, [] => .gt
+    | x :: xs', y :: ys' =>
+        if x < y then .lt else if x > y then .gt else go xs' ys'
+  go a.data.toList b.data.toList
 
 structure TxOut where
   covenantType : Nat
@@ -92,7 +97,7 @@ def parseDaChunkCore (c : Cursor) : Option (Bytes × Nat × Bytes × Cursor) := 
   let (h, c3) ← c2.getBytes? 32
   pure (daId, idx, h, c3)
 
-def mapWitnessErr (wErr : RubinFormal.TxWeightV2.TxErr) : Option String :=
+def mapWitnessErr (wErr : Wire.TxErr) : Option String :=
   if wErr == .witnessOverflow then some "TX_ERR_WITNESS_OVERFLOW"
   else if wErr == .sigAlgInvalid then some "TX_ERR_SIG_ALG_INVALID"
   else if wErr == .sigNoncanonical then some "TX_ERR_SIG_NONCANONICAL"
@@ -142,16 +147,16 @@ def parseDATx (tx : Bytes) : Except String ParsedDATx := do
   let mut chunkDaId : Option Bytes := none
   let mut chunkIndex : Option Nat := none
   let mut chunkHash : Option Bytes := none
-  let c9 :=
+  let c9 ←
     if tk == 0x00 then
-      c8
+      pure c8
     else if tk == 0x01 then
       match parseDaCommitCore c8 with
       | none => throw "TX_ERR_PARSE"
       | some (daId, cc, c') =>
           commitDaId := some daId
           commitChunkCount := some cc
-          c'
+          pure c'
     else
       match parseDaChunkCore c8 with
       | none => throw "TX_ERR_PARSE"
@@ -159,7 +164,7 @@ def parseDATx (tx : Bytes) : Except String ParsedDATx := do
           chunkDaId := some daId
           chunkIndex := some idx
           chunkHash := some h
-          c'
+          pure c'
 
   let (cW, wErr, wStart, wEnd, _ml, _slh) ←
     match RubinFormal.TxWeightV2.parseWitnessSectionForWeight c9 with
@@ -207,15 +212,15 @@ def validateDASetIntegrity (txs : List Bytes) : Except String Unit := do
   for txBytes in txs do
     let t ← parseDATx txBytes
     if t.txKind == 0x01 then
-      let daId := match t.commitDaId with | some x => x | none => throw "TX_ERR_PARSE"
-      let cc := match t.commitChunkCount with | some x => x | none => throw "TX_ERR_PARSE"
+      let daId ← match t.commitDaId with | some x => pure x | none => throw "TX_ERR_PARSE"
+      let cc ← match t.commitChunkCount with | some x => pure x | none => throw "TX_ERR_PARSE"
       if commits.contains daId then
         throw "BLOCK_ERR_DA_SET_INVALID"
       commits := commits.insert daId { chunkCount := cc, outputs := t.outputs }
     else if t.txKind == 0x02 then
-      let daId := match t.chunkDaId with | some x => x | none => throw "TX_ERR_PARSE"
-      let idx := match t.chunkIndex with | some x => x | none => throw "TX_ERR_PARSE"
-      let h := match t.chunkHash with | some x => x | none => throw "TX_ERR_PARSE"
+      let daId ← match t.chunkDaId with | some x => pure x | none => throw "TX_ERR_PARSE"
+      let idx ← match t.chunkIndex with | some x => pure x | none => throw "TX_ERR_PARSE"
+      let h ← match t.chunkHash with | some x => pure x | none => throw "TX_ERR_PARSE"
       if SHA3.sha3_256 t.payload != h then
         throw "BLOCK_ERR_DA_CHUNK_HASH_INVALID"
       let set := match chunks.find? daId with | none => Std.RBMap.empty | some m => m
@@ -232,13 +237,13 @@ def validateDASetIntegrity (txs : List Bytes) : Except String Unit := do
 
   for (daId, cinfo) in commits.toList do
     let set? := chunks.find? daId
-    let set := match set? with | none => throw "BLOCK_ERR_DA_INCOMPLETE" | some m => m
+    let set ← match set? with | none => throw "BLOCK_ERR_DA_INCOMPLETE" | some m => pure m
     if set.size != cinfo.chunkCount then
       throw "BLOCK_ERR_DA_INCOMPLETE"
     let mut concat : Bytes := ByteArray.empty
     for i in [0:cinfo.chunkCount] do
       let ch? := set.find? i
-      let ch := match ch? with | none => throw "BLOCK_ERR_DA_INCOMPLETE" | some x => x
+      let ch ← match ch? with | none => throw "BLOCK_ERR_DA_INCOMPLETE" | some x => pure x
       concat := concat ++ ch.payload
     let payloadCommit := SHA3.sha3_256 concat
 
@@ -267,4 +272,3 @@ def validateDaIntegrityGate
 end DaIntegrityV1
 
 end RubinFormal
-

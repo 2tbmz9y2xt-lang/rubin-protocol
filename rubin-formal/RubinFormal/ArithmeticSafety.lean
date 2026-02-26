@@ -1,3 +1,5 @@
+import Std
+
 namespace RubinFormal
 
 def maxU128 : Nat := (2 ^ 128) - 1
@@ -10,6 +12,7 @@ def satSub (a b : Nat) : Nat :=
 theorem satSub_no_underflow (a b : Nat) : satSub a b ≤ a := by
   by_cases h : b ≤ a
   · simp [satSub, h]
+    exact Nat.sub_le a b
   · simp [satSub, h]
 
 theorem satSub_exact_when_ge (a b : Nat) (h : b ≤ a) :

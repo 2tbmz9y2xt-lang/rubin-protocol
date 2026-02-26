@@ -1,17 +1,15 @@
-import Std
+import RubinFormal.Types
 import RubinFormal.SHA3_256
 import RubinFormal.ByteWireV2
 
 namespace RubinFormal
-
-abbrev Bytes := ByteArray
 
 open Wire
 
 namespace CovenantGenesisV1
 
 def MAX_P2PK_COVENANT_DATA : Nat := 33
-def MAX_ANCHOR_PAYLOAD_SIZE : Nat := 65_536
+def MAX_ANCHOR_PAYLOAD_SIZE : Nat := 65536
 def MAX_HTLC_COVENANT_DATA : Nat := 105
 
 def MAX_VAULT_KEYS : Nat := 12
@@ -21,7 +19,7 @@ def MAX_MULTISIG_KEYS : Nat := 12
 def SUITE_ID_SENTINEL : Nat := 0x00
 def SUITE_ID_ML_DSA_87 : Nat := 0x01
 def SUITE_ID_SLH_DSA_SHAKE_256F : Nat := 0x02
-def SLH_DSA_ACTIVATION_HEIGHT : Nat := 1_000_000
+def SLH_DSA_ACTIVATION_HEIGHT : Nat := 1000000
 
 def COV_TYPE_P2PK : Nat := 0x0000
 def COV_TYPE_ANCHOR : Nat := 0x0002
@@ -35,7 +33,15 @@ def LOCK_MODE_HEIGHT : Nat := 0x00
 def LOCK_MODE_TIMESTAMP : Nat := 0x01
 
 def cmpBytes (a b : Bytes) : Ordering :=
-  compare a.toList b.toList
+  let rec go : List UInt8 → List UInt8 → Ordering
+    | [], [] => .eq
+    | [], _ => .lt
+    | _, [] => .gt
+    | x :: xs, y :: ys =>
+        if x < y then .lt
+        else if x > y then .gt
+        else go xs ys
+  go a.data.toList b.data.toList
 
 def strictlySortedUnique32 (xs : List Bytes) : Bool :=
   let rec go : List Bytes → Bool
@@ -172,41 +178,37 @@ structure TxOut where
 deriving Repr, DecidableEq
 
 def validateOutGenesis (out : TxOut) (txKind : Nat) (blockHeight : Nat) : Except String Unit := do
-  match out.covenantType with
-  | COV_TYPE_P2PK =>
-      if out.value == 0 then throw "TX_ERR_COVENANT_TYPE_INVALID"
-      if out.covenantData.size != MAX_P2PK_COVENANT_DATA then throw "TX_ERR_COVENANT_TYPE_INVALID"
-      let suiteId := (out.covenantData.get! 0).toNat
-      if !(suiteId == SUITE_ID_ML_DSA_87 || suiteId == SUITE_ID_SLH_DSA_SHAKE_256F) then
-        throw "TX_ERR_COVENANT_TYPE_INVALID"
-      if suiteId == SUITE_ID_SLH_DSA_SHAKE_256F && blockHeight < SLH_DSA_ACTIVATION_HEIGHT then
-        throw "TX_ERR_COVENANT_TYPE_INVALID"
-  | COV_TYPE_ANCHOR =>
-      if out.value != 0 then throw "TX_ERR_COVENANT_TYPE_INVALID"
-      let l := out.covenantData.size
-      if l == 0 || l > MAX_ANCHOR_PAYLOAD_SIZE then throw "TX_ERR_COVENANT_TYPE_INVALID"
-  | COV_TYPE_VAULT =>
-      if out.value == 0 then throw "TX_ERR_VAULT_PARAMS_INVALID"
-      let _ ← parseVaultCovenantData out.covenantData
-      pure ()
-  | COV_TYPE_MULTISIG =>
-      if out.value == 0 then throw "TX_ERR_COVENANT_TYPE_INVALID"
-      let _ ← parseMultisigCovenantData out.covenantData
-      pure ()
-  | COV_TYPE_HTLC =>
-      if out.value == 0 then throw "TX_ERR_COVENANT_TYPE_INVALID"
-      let _ ← parseHtlcCovenantData out.covenantData
-      pure ()
-  | COV_TYPE_DA_COMMIT =>
-      if txKind != 0x01 then throw "TX_ERR_COVENANT_TYPE_INVALID"
-      if out.value != 0 then throw "TX_ERR_COVENANT_TYPE_INVALID"
-      if out.covenantData.size != 32 then throw "TX_ERR_COVENANT_TYPE_INVALID"
-  | COV_TYPE_RESERVED_FUTURE =>
+  if out.covenantType == COV_TYPE_P2PK then
+    if out.value == 0 then throw "TX_ERR_COVENANT_TYPE_INVALID"
+    if out.covenantData.size != MAX_P2PK_COVENANT_DATA then throw "TX_ERR_COVENANT_TYPE_INVALID"
+    let suiteId := (out.covenantData.get! 0).toNat
+    if !(suiteId == SUITE_ID_ML_DSA_87 || suiteId == SUITE_ID_SLH_DSA_SHAKE_256F) then
       throw "TX_ERR_COVENANT_TYPE_INVALID"
-  | _ =>
+    if suiteId == SUITE_ID_SLH_DSA_SHAKE_256F && blockHeight < SLH_DSA_ACTIVATION_HEIGHT then
       throw "TX_ERR_COVENANT_TYPE_INVALID"
+  else if out.covenantType == COV_TYPE_ANCHOR then
+    if out.value != 0 then throw "TX_ERR_COVENANT_TYPE_INVALID"
+    let l := out.covenantData.size
+    if l == 0 || l > MAX_ANCHOR_PAYLOAD_SIZE then throw "TX_ERR_COVENANT_TYPE_INVALID"
+  else if out.covenantType == COV_TYPE_VAULT then
+    if out.value == 0 then throw "TX_ERR_VAULT_PARAMS_INVALID"
+    let _ ← parseVaultCovenantData out.covenantData
+    pure ()
+  else if out.covenantType == COV_TYPE_MULTISIG then
+    if out.value == 0 then throw "TX_ERR_COVENANT_TYPE_INVALID"
+    let _ ← parseMultisigCovenantData out.covenantData
+    pure ()
+  else if out.covenantType == COV_TYPE_HTLC then
+    if out.value == 0 then throw "TX_ERR_COVENANT_TYPE_INVALID"
+    let _ ← parseHtlcCovenantData out.covenantData
+    pure ()
+  else if out.covenantType == COV_TYPE_DA_COMMIT then
+    if txKind != 0x01 then throw "TX_ERR_COVENANT_TYPE_INVALID"
+    if out.value != 0 then throw "TX_ERR_COVENANT_TYPE_INVALID"
+    if out.covenantData.size != 32 then throw "TX_ERR_COVENANT_TYPE_INVALID"
+  else
+    throw "TX_ERR_COVENANT_TYPE_INVALID"
 
 end CovenantGenesisV1
 
 end RubinFormal
-

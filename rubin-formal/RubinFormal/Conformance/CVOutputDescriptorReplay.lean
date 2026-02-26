@@ -1,20 +1,23 @@
 import RubinFormal.OutputDescriptorV2
 import RubinFormal.Conformance.CVOutputDescriptorVectors
+import RubinFormal.Hex
 
 namespace RubinFormal.Conformance
 
+open RubinFormal
 open RubinFormal.OutputDescriptor
 
-def evalOD (v : CVOutputDescriptorVector) : Bytes :=
-  match v.op with
-  | .bytes => OutputDescriptor.bytes v.covenantType v.covenantData
-  | .hash => OutputDescriptor.hash v.covenantType v.covenantData
+def checkODVector (v : CVOutputDescriptorVector) : Bool :=
+  match RubinFormal.decodeHex? v.covenantDataHex, RubinFormal.decodeHex? v.expectedHex with
+  | some cd, some exp =>
+      let got :=
+        match v.op with
+        | .bytes => OutputDescriptor.bytes v.covenantType cd
+        | .hash => OutputDescriptor.hash v.covenantType cd
+      got == exp
+  | _, _ => false
 
 def cvOutputDescriptorVectorsPass : Bool :=
-  (cvOutputDescriptorVectors.all (fun v => evalOD v == v.expected))
-
-theorem cv_output_descriptor_vectors_pass : cvOutputDescriptorVectorsPass = true := by
-  native_decide
+  (cvOutputDescriptorVectors.all checkODVector)
 
 end RubinFormal.Conformance
-

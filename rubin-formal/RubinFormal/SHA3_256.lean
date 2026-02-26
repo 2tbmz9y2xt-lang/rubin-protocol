@@ -1,8 +1,6 @@
-import Std
+import RubinFormal.Types
 
 namespace RubinFormal
-
-abbrev Bytes := ByteArray
 
 namespace SHA3
 
@@ -27,8 +25,13 @@ def roundConstants : Array UInt64 :=
   ]
 
 @[inline] def rotl (x : UInt64) (n : Nat) : UInt64 :=
-  -- UInt64.rotateLeft expects UInt64 shift in Lean 4.
-  x.rotateLeft (UInt64.ofNat (n % 64))
+  let k : Nat := n % 64
+  if k == 0 then
+    x
+  else
+    let ku := UInt64.ofNat k
+    let r := UInt64.ofNat (64 - k)
+    (x <<< ku) ||| (x >>> r)
 
 @[inline] def idx (x y : Nat) : Nat := 5*y + x
 
@@ -112,31 +115,33 @@ def xorBlockIntoState (st : Array UInt64) (block : Bytes) : Array UInt64 :=
     return a
 
 def padSha3 (msg : Bytes) : Bytes :=
-  let rate := 136
-  let mut out := msg
-  out := out.push 0x06
-  while (out.size % rate) != (rate - 1) do
-    out := out.push 0x00
-  out := out.push 0x80
-  out
+  Id.run do
+    let rate := 136
+    let mut out := msg
+    out := out.push 0x06
+    while (out.size % rate) != (rate - 1) do
+      out := out.push 0x00
+    out := out.push 0x80
+    return out
 
 def sha3_256 (msg : Bytes) : Bytes :=
-  let rate := 136
-  let padded := padSha3 msg
-  let mut st : Array UInt64 := Array.mkArray 25 0
-  let mut off : Nat := 0
-  while off < padded.size do
-    let block := padded.extract off (off + rate)
-    st := keccakF (xorBlockIntoState st block)
-    off := off + rate
+  Id.run do
+    let rate := 136
+    let padded := padSha3 msg
+    let mut st : Array UInt64 := Array.mkArray 25 0
+    let mut off : Nat := 0
+    while off < padded.size do
+      let block := padded.extract off (off + rate)
+      st := keccakF (xorBlockIntoState st block)
+      off := off + rate
 
-  -- squeeze 32 bytes from first 4 lanes (little-endian)
-  let mut out : Bytes := ByteArray.empty
-  for lane in [0:4] do
-    let v := st.get! lane
-    for shift in [0,8,16,24,32,40,48,56] do
-      out := out.push (UInt8.ofNat ((v >>> (UInt64.ofNat shift)).toNat &&& 0xff))
-  out.extract 0 32
+    -- squeeze 32 bytes from first 4 lanes (little-endian)
+    let mut out : Bytes := ByteArray.empty
+    for lane in [0:4] do
+      let v := st.get! lane
+      for shift in [0,8,16,24,32,40,48,56] do
+        out := out.push (UInt8.ofNat ((v >>> (UInt64.ofNat shift)).toNat &&& 0xff))
+    return out.extract 0 32
 
 end SHA3
 end RubinFormal

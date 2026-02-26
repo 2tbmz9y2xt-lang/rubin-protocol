@@ -1,9 +1,7 @@
-import Std
+import RubinFormal.Types
 import RubinFormal.ByteWireV2
 
 namespace RubinFormal
-
-abbrev Bytes := ByteArray
 
 open Wire
 
@@ -16,10 +14,10 @@ def VERIFY_COST_ML_DSA_87 : Nat := 8
 def VERIFY_COST_SLH_DSA_SHAKE_256F : Nat := 64
 
 def MAX_WITNESS_ITEMS : Nat := 1024
-def MAX_WITNESS_BYTES_PER_TX : Nat := 100_000
+def MAX_WITNESS_BYTES_PER_TX : Nat := 100000
 
-def MAX_DA_MANIFEST_BYTES_PER_TX : Nat := 65_536
-def CHUNK_BYTES : Nat := 524_288
+def MAX_DA_MANIFEST_BYTES_PER_TX : Nat := 65536
+def CHUNK_BYTES : Nat := 524288
 def MAX_DA_CHUNK_COUNT : Nat := 61
 
 def SUITE_ID_SENTINEL : Nat := 0x00
@@ -29,7 +27,7 @@ def SUITE_ID_SLH_DSA_SHAKE_256F : Nat := 0x02
 def ML_DSA_87_PUBKEY_BYTES : Nat := 2592
 def ML_DSA_87_SIG_BYTES : Nat := 4627
 def SLH_DSA_SHAKE_256F_PUBKEY_BYTES : Nat := 64
-def MAX_SLH_DSA_SIG_BYTES : Nat := 49_856
+def MAX_SLH_DSA_SIG_BYTES : Nat := 49856
 
 def COV_TYPE_ANCHOR : Nat := 0x0002
 def COV_TYPE_DA_COMMIT : Nat := 0x0103
@@ -37,7 +35,7 @@ def COV_TYPE_DA_COMMIT : Nat := 0x0103
 def compactSizeLen (n : Nat) : Nat :=
   if n < 0xfd then 1
   else if n ≤ 0xffff then 3
-  else if n ≤ 0xffff_ffff then 5
+  else if n ≤ 0xffffffff then 5
   else 9
 
 structure WeightStats where
@@ -113,7 +111,7 @@ def parseWitnessItemForCounts (c : Cursor) : Option (Cursor × Bool × Bool × O
   let suiteID := suite.toNat
   let (pubLen, c2, minimal1) ← c1.getCompactSize?
   let _ ← requireMinimal minimal1
-  let (pub, c3) ← c2.getBytes? pubLen
+  let (_pub, c3) ← c2.getBytes? pubLen
   let (sigLen, c4, minimal2) ← c3.getCompactSize?
   let _ ← requireMinimal minimal2
   let (sig, c5) ← c4.getBytes? sigLen
@@ -160,31 +158,31 @@ def parseWitnessSectionForWeight (c : Cursor) : Option (Cursor × TxErr × Nat �
   let _ ← requireMinimal minimal
   if wCount > MAX_WITNESS_ITEMS then
     pure (c1, .witnessOverflow, startOff, c1.off, 0, 0)
+  else
+    let mut cur := c1
+    let mut mlCount : Nat := 0
+    let mut slhCount : Nat := 0
+    let mut anySigAlgInvalid : Bool := false
+    let mut anySigNoncanonical : Bool := false
 
-  let mut cur := c1
-  let mut mlCount : Nat := 0
-  let mut slhCount : Nat := 0
-  let mut anySigAlgInvalid : Bool := false
-  let mut anySigNoncanonical : Bool := false
+    for _ in [0:wCount] do
+      let (cur', isML, isSLH, e) ← parseWitnessItemForCounts cur
+      cur := cur'
+      if isML then mlCount := mlCount + 1
+      if isSLH then slhCount := slhCount + 1
+      match e with
+      | none => ()
+      | some .sigAlgInvalid => anySigAlgInvalid := true
+      | some .sigNoncanonical => anySigNoncanonical := true
+      | some .witnessOverflow => ()
+      | some .parse => ()
 
-  for _ in [0:wCount] do
-    let (cur', isML, isSLH, e) ← parseWitnessItemForCounts cur
-    cur := cur'
-    if isML then mlCount := mlCount + 1
-    if isSLH then slhCount := slhCount + 1
-    match e with
-    | none => pure ()
-    | some .sigAlgInvalid => anySigAlgInvalid := true
-    | some .sigNoncanonical => anySigNoncanonical := true
-    | some .witnessOverflow => pure ()
-    | some .parse => pure ()
-
-  let endOff := cur.off
-  let err :=
-    if anySigAlgInvalid then .sigAlgInvalid
-    else if anySigNoncanonical then .sigNoncanonical
-    else .parse
-  pure (cur, err, startOff, endOff, mlCount, slhCount)
+    let endOff := cur.off
+    let err :=
+      if anySigAlgInvalid then .sigAlgInvalid
+      else if anySigNoncanonical then .sigNoncanonical
+      else .parse
+    pure (cur, err, startOff, endOff, mlCount, slhCount)
 
 def txWeightAndStats (tx : Bytes) : Except String WeightStats := do
   let c0 : Cursor := { bs := tx, off := 0 }
@@ -270,4 +268,3 @@ def txWeightAndStats (tx : Bytes) : Except String WeightStats := do
 end TxWeightV2
 
 end RubinFormal
-

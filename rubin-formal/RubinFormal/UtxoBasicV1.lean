@@ -1,22 +1,18 @@
-import Std
+import RubinFormal.Types
 import RubinFormal.SHA3_256
 import RubinFormal.ByteWireV2
 import RubinFormal.OutputDescriptorV2
 import RubinFormal.SighashV1
 import RubinFormal.TxParseV2
+import RubinFormal.CovenantGenesisV1
 
 namespace RubinFormal
-
-abbrev Bytes := ByteArray
 
 open Wire
 
 namespace UtxoBasicV1
 
-def cmpOutpoint (a b : Outpoint) : Ordering :=
-  match compare a.txid.toList b.txid.toList with
-  | .eq => compare a.vout b.vout
-  | o => o
+open RubinFormal.CovenantGenesisV1
 
 -- Minimal consensus constants needed for CV-UTXO-BASIC replay.
 def COINBASE_MATURITY : Nat := 100
@@ -24,14 +20,14 @@ def COINBASE_MATURITY : Nat := 100
 def COV_TYPE_P2PK : Nat := 0x0000
 def COV_TYPE_ANCHOR : Nat := 0x0002
 def COV_TYPE_VAULT : Nat := 0x0101
-def COV_TYPE_MULTISIG : Nat := 0x0102
 def COV_TYPE_DA_COMMIT : Nat := 0x0103
-def COV_TYPE_HTLC : Nat := 0x0104
+def COV_TYPE_HTLC : Nat := 0x0100
+def COV_TYPE_MULTISIG : Nat := 0x0104
 
 def SUITE_ID_ML_DSA_87 : Nat := 0x01
 def SUITE_ID_SLH_DSA_SHAKE_256F : Nat := 0x02
 
-def SLH_DSA_ACTIVATION_HEIGHT : Nat := 1_000_000
+def SLH_DSA_ACTIVATION_HEIGHT : Nat := 1000000
 
 def clampU64Max : Nat := (Nat.pow 2 64) - 1
 
@@ -39,6 +35,22 @@ structure Outpoint where
   txid : Bytes
   vout : Nat
 deriving Repr, DecidableEq
+
+def cmpBytes (a b : Bytes) : Ordering :=
+  let rec go : List UInt8 → List UInt8 → Ordering
+    | [], [] => .eq
+    | [], _ => .lt
+    | _, [] => .gt
+    | x :: xs, y :: ys =>
+        if x < y then .lt
+        else if x > y then .gt
+        else go xs ys
+  go a.data.toList b.data.toList
+
+def cmpOutpoint (a b : Outpoint) : Ordering :=
+  match cmpBytes a.txid b.txid with
+  | .eq => compare a.vout b.vout
+  | o => o
 
 structure UtxoEntry where
   value : Nat
@@ -78,6 +90,29 @@ structure Tx where
   daPayloadLen : Nat
   daPayload : Bytes
 deriving Repr, DecidableEq
+
+instance : Inhabited TxIn where
+  default := { prevTxid := ByteArray.empty, prevVout := 0, scriptSig := ByteArray.empty, sequence := 0 }
+
+instance : Inhabited TxOut where
+  default := { value := 0, covenantType := 0, covenantData := ByteArray.empty }
+
+instance : Inhabited WitnessItem where
+  default := { suiteId := 0, pubkey := ByteArray.empty, signature := ByteArray.empty }
+
+instance : Inhabited Tx where
+  default :=
+    {
+      version := 0,
+      txKind := 0,
+      txNonce := 0,
+      inputs := [],
+      outputs := [],
+      locktime := 0,
+      witness := [],
+      daPayloadLen := 0,
+      daPayload := ByteArray.empty
+    }
 
 def requireMinimal (minimal : Bool) : Option Unit :=
   if minimal then some () else none
@@ -217,7 +252,8 @@ def parseTx (tx : Bytes) : Except String Tx := do
     }
 
 def isCoinbasePrevout (i : TxIn) : Bool :=
-  (i.prevTxid == (ByteArray.mk (List.replicate 32 0))) && (i.prevVout == 0xffff_ffff)
+  let zero32 : Bytes := RubinFormal.bytes ((List.replicate 32 (UInt8.ofNat 0)).toArray)
+  (i.prevTxid == zero32) && (i.prevVout == 0xffffffff)
 
 def outputDescriptorLockId (e : UtxoEntry) : Bytes :=
   RubinFormal.OutputDescriptor.hash e.covenantType e.covenantData
@@ -257,6 +293,7 @@ def applyNonCoinbaseTxBasicState
   let mut vaultInputs : Nat := 0
   let mut inputLockIds : List Bytes := []
   let mut inputCovTypes : List Nat := []
+  let mut requiredWitnessSlots : Nat := 0
 
   -- require unique outpoints
   let mut seen : Std.RBSet Outpoint cmpOutpoint := Std.RBSet.empty
@@ -277,39 +314,46 @@ def applyNonCoinbaseTxBasicState
       if height < e.creationHeight + COINBASE_MATURITY then
         throw "TX_ERR_COINBASE_IMMATURE"
 
+    -- P2PK suite gating (needed for CV-SIG-* and UTXO-basic replay correctness).
+    if e.covenantType == COV_TYPE_P2PK then
+      if e.covenantData.size != MAX_P2PK_COVENANT_DATA then
+        throw "TX_ERR_COVENANT_TYPE_INVALID"
+      let suite := (e.covenantData.get! 0).toNat
+      if !(suite == SUITE_ID_ML_DSA_87 || suite == SUITE_ID_SLH_DSA_SHAKE_256F) then
+        throw "TX_ERR_COVENANT_TYPE_INVALID"
+      if suite == SUITE_ID_SLH_DSA_SHAKE_256F && height < SLH_DSA_ACTIVATION_HEIGHT then
+        throw "TX_ERR_COVENANT_TYPE_INVALID"
+
     let lockId := outputDescriptorLockId e
     inputLockIds := inputLockIds.concat lockId
     inputCovTypes := inputCovTypes.concat e.covenantType
 
     sumIn := sumIn + e.value
+    -- witness cursor model (minimal): P2PK consumes 1 slot; VAULT consumes key_count slots.
+    if e.covenantType == COV_TYPE_VAULT then
+      let v ← CovenantGenesisV1.parseVaultCovenantData e.covenantData
+      requiredWitnessSlots := requiredWitnessSlots + v.keyCount
+    else
+      requiredWitnessSlots := requiredWitnessSlots + 1
+
     if e.covenantType == COV_TYPE_VAULT then
       vaultInputs := vaultInputs + 1
       if vaultInputs > 1 then
         throw "TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN"
       sumInVault := e.value
-      -- Parse vault covenant data minimally: suite_id:u8 + threshold:u8 + owner_lock_id:bytes32 + whitelist_count:u16le + whitelist[]:bytes32
-      -- (This matches current on-chain format; detailed parsing lives in clients.)
-      if e.covenantData.size < 1 + 1 + 32 + 2 then
-        throw "TX_ERR_VAULT_MALFORMED"
-      let owner := e.covenantData.extract 2 34
-      vaultOwnerLockId := some owner
-      let wlCount := Wire.u16le? (e.covenantData.get! 34) (e.covenantData.get! 35)
-      let expectedLen := 1 + 1 + 32 + 2 + (32 * wlCount)
-      if e.covenantData.size != expectedLen then
-        throw "TX_ERR_VAULT_MALFORMED"
-      let mut wl : List Bytes := []
-      let mut off : Nat := 36
-      for _ in [0:wlCount] do
-        let h := e.covenantData.extract off (off + 32)
-        wl := wl.concat h
-        off := off + 32
-      vaultWhitelist := wl
+      let v ← CovenantGenesisV1.parseVaultCovenantData e.covenantData
+      vaultOwnerLockId := some v.ownerLockId
+      vaultWhitelist := v.whitelist
+
+  if tx.witness.length != requiredWitnessSlots then
+    throw "TX_ERR_PARSE"
 
   -- CORE_VAULT rules used by CV-UTXO-BASIC vectors
   if vaultInputs == 1 then
-    let owner := match vaultOwnerLockId with
+    let owner ←
+      match vaultOwnerLockId with
       | none => throw "TX_ERR_VAULT_MALFORMED"
-      | some x => x
+      | some x => pure x
 
     -- owner-authorization required: at least one non-vault input must have lock_id == owner lock
     let mut haveOwner : Bool := false

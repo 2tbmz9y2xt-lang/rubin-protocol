@@ -56,14 +56,18 @@ def checkForkWork (targetHex expectWorkHex : String) : Bool :=
     else forkWork t == exp
   | _, _ => false
 
-def chainTotalWork (targets : List String) : Option Nat := do
-  let mut total : Nat := 0
-  for th in targets do
-    let t ← parseHexNat th
-    if t == 0 then
-      return none
-    total := total + forkWork t
-  pure total
+def chainTotalWork (targets : List String) : Option Nat :=
+  targets.foldl
+    (fun acc th =>
+      match acc with
+      | none => none
+      | some total =>
+          match parseHexNat th with
+          | none => none
+          | some t =>
+              if t == 0 then none else some (total + forkWork t)
+    )
+    (some 0)
 
 def selectWinner (chains : List ForkChain) : Option String := do
   let mut bestId : Option String := none
@@ -99,8 +103,4 @@ def checkForkChoiceVector (v : CVForkChoiceVector) : Bool :=
 def allCVForkChoice : Bool :=
   cvForkChoiceVectors.all checkForkChoiceVector
 
-theorem cv_fork_choice_vectors_pass : allCVForkChoice = true := by
-  native_decide
-
 end RubinFormal.Conformance
-

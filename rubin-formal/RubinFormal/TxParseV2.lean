@@ -13,7 +13,7 @@ def MAX_TX_INPUTS : Nat := 1024
 def MAX_TX_OUTPUTS : Nat := 1024
 def MAX_SCRIPT_SIG_BYTES : Nat := 32
 def MAX_WITNESS_ITEMS : Nat := 1024
-def MAX_WITNESS_BYTES_PER_TX : Nat := 100_000
+def MAX_WITNESS_BYTES_PER_TX : Nat := 100000
 
 def SUITE_ID_SENTINEL : Nat := 0x00
 def SUITE_ID_ML_DSA_87 : Nat := 0x01
@@ -22,7 +22,7 @@ def SUITE_ID_SLH_DSA_SHAKE_256F : Nat := 0x02
 def ML_DSA_87_PUBKEY_BYTES : Nat := 2592
 def ML_DSA_87_SIG_BYTES : Nat := 4627
 def SLH_DSA_SHAKE_256F_PUBKEY_BYTES : Nat := 64
-def MAX_SLH_DSA_SIG_BYTES : Nat := 49_856
+def MAX_SLH_DSA_SIG_BYTES : Nat := 49856
 
 def MAX_HTLC_PREIMAGE_BYTES : Nat := 256
 
@@ -67,7 +67,7 @@ def parseWitnessItem (c : Cursor) : Option (Cursor × Option TxErr) := do
   let suiteID := suite.toNat
   let (pubLen, c2, minimal1) ← c1.getCompactSize?
   let _ ← requireMinimal minimal1
-  let (pub, c3) ← c2.getBytes? pubLen
+  let (_pub, c3) ← c2.getBytes? pubLen
   let (sigLen, c4, minimal2) ← c3.getCompactSize?
   let _ ← requireMinimal minimal2
   let (sig, c5) ← c4.getBytes? sigLen
@@ -114,24 +114,25 @@ def parseWitnessSection (c : Cursor) : Option (Cursor × TxErr × Nat × Nat) :=
   let _ ← requireMinimal minimal
   if wCount > MAX_WITNESS_ITEMS then
     pure (c1, .witnessOverflow, startOff, c1.off)
-  let mut cur := c1
-  let mut anySigAlgInvalid : Bool := false
-  let mut anySigNoncanonical : Bool := false
-  for _ in [0:wCount] do
-    let (cur', e) ← parseWitnessItem cur
-    cur := cur'
-    match e with
-    | none => pure ()
-    | some .sigAlgInvalid => anySigAlgInvalid := true
-    | some .sigNoncanonical => anySigNoncanonical := true
-    | some .witnessOverflow => pure () -- not produced here
-    | some .parse => pure () -- not produced here
-  let endOff := cur.off
-  let err :=
-    if anySigAlgInvalid then .sigAlgInvalid
-    else if anySigNoncanonical then .sigNoncanonical
-    else .parse
-  pure (cur, err, startOff, endOff)
+  else
+    let mut cur := c1
+    let mut anySigAlgInvalid : Bool := false
+    let mut anySigNoncanonical : Bool := false
+    for _ in [0:wCount] do
+      let (cur', e) ← parseWitnessItem cur
+      cur := cur'
+      match e with
+      | none => ()
+      | some .sigAlgInvalid => anySigAlgInvalid := true
+      | some .sigNoncanonical => anySigNoncanonical := true
+      | some .witnessOverflow => () -- not produced here
+      | some .parse => () -- not produced here
+    let endOff := cur.off
+    let err :=
+      if anySigAlgInvalid then .sigAlgInvalid
+      else if anySigNoncanonical then .sigNoncanonical
+      else .parse
+    pure (cur, err, startOff, endOff)
 
 def parseTx (tx : Bytes) : ParseResult :=
   let c0 : Cursor := { bs := tx, off := 0 }

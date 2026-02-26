@@ -1,10 +1,8 @@
-import Std
+import RubinFormal.Types
 import RubinFormal.BlockBasicV1
 import RubinFormal.UtxoBasicV1
 
 namespace RubinFormal
-
-abbrev Bytes := ByteArray
 
 namespace SubsidyV1
 
@@ -13,9 +11,9 @@ open RubinFormal.BlockBasicV1
 open RubinFormal.UtxoBasicV1
 
 -- Consensus constants (mirror clients/go/consensus/constants.go).
-def MINEABLE_CAP : Nat := 4_900_000_000_000_000
+def MINEABLE_CAP : Nat := 4900000000000000
 def EMISSION_SPEED_FACTOR : Nat := 20
-def TAIL_EMISSION_PER_BLOCK : Nat := 19_025_875
+def TAIL_EMISSION_PER_BLOCK : Nat := 19025875
 
 def blockSubsidy (height : Nat) (alreadyGenerated : Nat) : Nat :=
   if height == 0 then 0
@@ -35,7 +33,7 @@ def isCanonicalCoinbase (tx : RubinFormal.UtxoBasicV1.Tx) : Bool :=
     let i := tx.inputs.get! 0
     isCoinbasePrevout i &&
     i.scriptSig.size == 0 &&
-    i.sequence == 0xffff_ffff
+    i.sequence == 0xffffffff
 
 def validateCoinbaseLocktime (coinbaseTxBytes : Bytes) (height : Nat) : Except String Unit := do
   let tx ← parseTx coinbaseTxBytes
@@ -101,4 +99,3 @@ def blockBasicCheckWithFees
 end SubsidyV1
 
 end RubinFormal
-
