@@ -629,7 +629,9 @@ fn key_bytes(value: &Value) -> Result<Vec<u8>, ()> {
         }
         return Ok(s.as_bytes().to_vec());
     }
-    Ok(value.to_string().into_bytes())
+    serde_json::to_string(value)
+        .map(|s| s.into_bytes())
+        .map_err(|_| ())
 }
 
 fn sorted_unique_i64(values: &[i64]) -> Vec<i64> {

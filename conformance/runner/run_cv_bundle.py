@@ -27,7 +27,11 @@ COMPACT_DEFAULTS: Dict[str, int] = {
 }
 
 
-LOCAL_OPS = set()
+LOCAL_OPS = {
+    op.strip()
+    for op in os.getenv("RUBIN_CONFORMANCE_LOCAL_OPS", "").split(",")
+    if op.strip()
+}
 
 
 def run(cmd: List[str], cwd: pathlib.Path) -> None:

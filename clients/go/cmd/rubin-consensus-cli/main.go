@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"os"
 	"sort"
@@ -53,7 +54,7 @@ type Request struct {
 	Nonces         []uint64 `json:"nonces,omitempty"`
 	MTP            uint64   `json:"mtp,omitempty"`
 	Timestamp      uint64   `json:"timestamp,omitempty"`
-	MaxFutureDrift uint64   `json:"max_future_drift,omitempty"`
+	MaxFutureDrift *uint64  `json:"max_future_drift,omitempty"`
 	Keys           []any    `json:"keys,omitempty"`
 	Checks         []Check  `json:"checks,omitempty"`
 
@@ -1565,15 +1566,19 @@ func main() {
 		return
 
 	case "timestamp_bounds":
-		maxFutureDrift := req.MaxFutureDrift
-		if maxFutureDrift == 0 {
-			maxFutureDrift = 7200
+		maxFutureDrift := uint64(7200)
+		if req.MaxFutureDrift != nil {
+			maxFutureDrift = *req.MaxFutureDrift
+		}
+		upperBound := uint64(math.MaxUint64)
+		if req.MTP <= math.MaxUint64-maxFutureDrift {
+			upperBound = req.MTP + maxFutureDrift
 		}
 		if req.Timestamp <= req.MTP {
 			writeResp(os.Stdout, Response{Ok: false, Err: string(consensus.BLOCK_ERR_TIMESTAMP_OLD)})
 			return
 		}
-		if req.Timestamp > req.MTP+maxFutureDrift {
+		if req.Timestamp > upperBound {
 			writeResp(os.Stdout, Response{Ok: false, Err: string(consensus.BLOCK_ERR_TIMESTAMP_FUTURE)})
 			return
 		}
