@@ -2,7 +2,6 @@ package node
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -236,16 +235,16 @@ func buildSingleTxBlock(t *testing.T, prevHash [32]byte, target [32]byte, timest
 		t.Fatalf("merkle root: %v", err)
 	}
 	header := make([]byte, 0, consensus.BLOCK_HEADER_BYTES)
-	header = appendU32le(header, 1)
+	header = consensus.AppendU32le(header, 1)
 	header = append(header, prevHash[:]...)
 	header = append(header, root[:]...)
-	header = appendU64le(header, timestamp)
+	header = consensus.AppendU64le(header, timestamp)
 	header = append(header, target[:]...)
-	header = appendU64le(header, 7)
+	header = consensus.AppendU64le(header, 7)
 
 	block := make([]byte, 0, len(header)+len(tx)+4)
 	block = append(block, header...)
-	block = appendCompactSize(block, 1)
+	block = consensus.AppendCompactSize(block, 1)
 	block = append(block, tx...)
 	return block
 }
@@ -270,59 +269,25 @@ func coinbaseTxWithOutputs(locktime uint32, outputs []testOutput) []byte {
 		sizeHint += 16 + len(out.covenantData)
 	}
 	b := make([]byte, 0, sizeHint)
-	b = appendU32le(b, 1)
+	b = consensus.AppendU32le(b, 1)
 	b = append(b, 0x00)
-	b = appendU64le(b, 0)
-	b = appendCompactSize(b, 1)
+	b = consensus.AppendU64le(b, 0)
+	b = consensus.AppendCompactSize(b, 1)
 	b = append(b, make([]byte, 32)...)
-	b = appendU32le(b, ^uint32(0))
-	b = appendCompactSize(b, 0)
-	b = appendU32le(b, ^uint32(0))
-	b = appendCompactSize(b, uint64(len(outputs)))
+	b = consensus.AppendU32le(b, ^uint32(0))
+	b = consensus.AppendCompactSize(b, 0)
+	b = consensus.AppendU32le(b, ^uint32(0))
+	b = consensus.AppendCompactSize(b, uint64(len(outputs)))
 	for _, out := range outputs {
-		b = appendU64le(b, out.value)
-		b = appendU16le(b, out.covenantType)
-		b = appendCompactSize(b, uint64(len(out.covenantData)))
+		b = consensus.AppendU64le(b, out.value)
+		b = consensus.AppendU16le(b, out.covenantType)
+		b = consensus.AppendCompactSize(b, uint64(len(out.covenantData)))
 		b = append(b, out.covenantData...)
 	}
-	b = appendU32le(b, locktime)
-	b = appendCompactSize(b, 0)
-	b = appendCompactSize(b, 0)
+	b = consensus.AppendU32le(b, locktime)
+	b = consensus.AppendCompactSize(b, 0)
+	b = consensus.AppendCompactSize(b, 0)
 	return b
-}
-
-func appendCompactSize(dst []byte, v uint64) []byte {
-	switch {
-	case v < 0xfd:
-		return append(dst, byte(v))
-	case v <= 0xffff:
-		dst = append(dst, 0xfd)
-		return appendU16le(dst, uint16(v))
-	case v <= 0xffff_ffff:
-		dst = append(dst, 0xfe)
-		return appendU32le(dst, uint32(v))
-	default:
-		dst = append(dst, 0xff)
-		return appendU64le(dst, v)
-	}
-}
-
-func appendU16le(dst []byte, v uint16) []byte {
-	var buf [2]byte
-	binary.LittleEndian.PutUint16(buf[:], v)
-	return append(dst, buf[:]...)
-}
-
-func appendU32le(dst []byte, v uint32) []byte {
-	var buf [4]byte
-	binary.LittleEndian.PutUint32(buf[:], v)
-	return append(dst, buf[:]...)
-}
-
-func appendU64le(dst []byte, v uint64) []byte {
-	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], v)
-	return append(dst, buf[:]...)
 }
 
 func testP2PKCovenantData(seed byte) []byte {

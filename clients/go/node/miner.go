@@ -2,7 +2,6 @@ package node
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"math"
 	"sort"
@@ -181,7 +180,7 @@ func (m *Miner) MineOne(ctx context.Context, txs [][]byte) (*MinedBlock, error) 
 			default:
 			}
 		}
-		headerBytes = appendU64leMiner(append([]byte(nil), blockWithoutNonce...), nonce)
+		headerBytes = consensus.AppendU64le(append([]byte(nil), blockWithoutNonce...), nonce)
 		if err := consensus.PowCheck(headerBytes, m.cfg.Target); err == nil {
 			break
 		}
@@ -190,7 +189,7 @@ func (m *Miner) MineOne(ctx context.Context, txs [][]byte) (*MinedBlock, error) 
 
 	blockBytes := make([]byte, 0, len(headerBytes)+4+len(coinbase))
 	blockBytes = append(blockBytes, headerBytes...)
-	blockBytes = appendCompactSizeMiner(blockBytes, uint64(1+len(parsed)))
+	blockBytes = consensus.AppendCompactSize(blockBytes, uint64(1+len(parsed)))
 	blockBytes = append(blockBytes, coinbase...)
 	for _, p := range parsed {
 		blockBytes = append(blockBytes, p.raw...)
@@ -272,10 +271,10 @@ func mtpMedian(nextHeight uint64, prevTimestamps []uint64) uint64 {
 
 func makeHeaderPrefix(prevHash [32]byte, merkleRoot [32]byte, timestamp uint64, target [32]byte) []byte {
 	header := make([]byte, 0, consensus.BLOCK_HEADER_BYTES)
-	header = appendU32leMiner(header, 1)
+	header = consensus.AppendU32le(header, 1)
 	header = append(header, prevHash[:]...)
 	header = append(header, merkleRoot[:]...)
-	header = appendU64leMiner(header, timestamp)
+	header = consensus.AppendU64le(header, timestamp)
 	header = append(header, target[:]...)
 	return header
 }
@@ -285,42 +284,24 @@ func buildCoinbaseTx(height uint64, witnessCommitment [32]byte) ([]byte, error) 
 		return nil, errors.New("block height exceeds coinbase locktime range")
 	}
 	tx := make([]byte, 0, 196)
-	tx = appendU32leMiner(tx, 1)
+	tx = consensus.AppendU32le(tx, 1)
 	tx = append(tx, 0x00) // tx_kind
-	tx = appendU64leMiner(tx, 0)
+	tx = consensus.AppendU64le(tx, 0)
 
-	tx = appendCompactSizeMiner(tx, 1)                   // input_count
-	tx = append(tx, make([]byte, 32)...)                 // prev_txid
-	tx = appendU32leMiner(tx, ^uint32(0))                // prev_vout
-	tx = appendCompactSizeMiner(tx, 0)                   // script_sig_len
-	tx = appendU32leMiner(tx, ^uint32(0))                // sequence
-	tx = appendCompactSizeMiner(tx, 1)                   // output_count
-	tx = appendU64leMiner(tx, 0)                         // output value
-	tx = appendU16leMiner(tx, consensus.COV_TYPE_ANCHOR) // covenant_type
-	tx = appendCompactSizeMiner(tx, 32)                  // covenant_data_len
+	tx = consensus.AppendCompactSize(tx, 1)                   // input_count
+	tx = append(tx, make([]byte, 32)...)                      // prev_txid
+	tx = consensus.AppendU32le(tx, ^uint32(0))                // prev_vout
+	tx = consensus.AppendCompactSize(tx, 0)                   // script_sig_len
+	tx = consensus.AppendU32le(tx, ^uint32(0))                // sequence
+	tx = consensus.AppendCompactSize(tx, 1)                   // output_count
+	tx = consensus.AppendU64le(tx, 0)                         // output value
+	tx = consensus.AppendU16le(tx, consensus.COV_TYPE_ANCHOR) // covenant_type
+	tx = consensus.AppendCompactSize(tx, 32)                  // covenant_data_len
 	tx = append(tx, witnessCommitment[:]...)
-	tx = appendU32leMiner(tx, uint32(height)) // locktime == block height
-	tx = appendCompactSizeMiner(tx, 0)        // witness_count
-	tx = appendCompactSizeMiner(tx, 0)        // da_payload_len
+	tx = consensus.AppendU32le(tx, uint32(height)) // locktime == block height
+	tx = consensus.AppendCompactSize(tx, 0)        // witness_count
+	tx = consensus.AppendCompactSize(tx, 0)        // da_payload_len
 	return tx, nil
-}
-
-func appendU16leMiner(dst []byte, v uint16) []byte {
-	var b [2]byte
-	binary.LittleEndian.PutUint16(b[:], v)
-	return append(dst, b[:]...)
-}
-
-func appendU32leMiner(dst []byte, v uint32) []byte {
-	var b [4]byte
-	binary.LittleEndian.PutUint32(b[:], v)
-	return append(dst, b[:]...)
-}
-
-func appendU64leMiner(dst []byte, v uint64) []byte {
-	var b [8]byte
-	binary.LittleEndian.PutUint64(b[:], v)
-	return append(dst, b[:]...)
 }
 
 func unixNowU64() uint64 {
@@ -329,20 +310,4 @@ func unixNowU64() uint64 {
 		return 0
 	}
 	return uint64(now)
-}
-
-func appendCompactSizeMiner(dst []byte, value uint64) []byte {
-	switch {
-	case value < 0xFD:
-		return append(dst, byte(value))
-	case value <= 0xFFFF:
-		dst = append(dst, 0xFD)
-		return appendU16leMiner(dst, uint16(value))
-	case value <= 0xFFFF_FFFF:
-		dst = append(dst, 0xFE)
-		return appendU32leMiner(dst, uint32(value))
-	default:
-		dst = append(dst, 0xFF)
-		return appendU64leMiner(dst, value)
-	}
 }

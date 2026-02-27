@@ -9,39 +9,39 @@ func txBytesFromTx(t *testing.T, tx *Tx) []byte {
 	}
 
 	b := make([]byte, 0, 256)
-	b = appendU32le(b, tx.Version)
+	b = AppendU32le(b, tx.Version)
 	b = append(b, tx.TxKind)
-	b = appendU64le(b, tx.TxNonce)
+	b = AppendU64le(b, tx.TxNonce)
 
-	b = appendCompactSize(b, uint64(len(tx.Inputs)))
+	b = AppendCompactSize(b, uint64(len(tx.Inputs)))
 	for _, in := range tx.Inputs {
 		b = append(b, in.PrevTxid[:]...)
-		b = appendU32le(b, in.PrevVout)
-		b = appendCompactSize(b, uint64(len(in.ScriptSig)))
+		b = AppendU32le(b, in.PrevVout)
+		b = AppendCompactSize(b, uint64(len(in.ScriptSig)))
 		b = append(b, in.ScriptSig...)
-		b = appendU32le(b, in.Sequence)
+		b = AppendU32le(b, in.Sequence)
 	}
 
-	b = appendCompactSize(b, uint64(len(tx.Outputs)))
+	b = AppendCompactSize(b, uint64(len(tx.Outputs)))
 	for _, out := range tx.Outputs {
-		b = appendU64le(b, out.Value)
-		b = appendU16le(b, out.CovenantType)
-		b = appendCompactSize(b, uint64(len(out.CovenantData)))
+		b = AppendU64le(b, out.Value)
+		b = AppendU16le(b, out.CovenantType)
+		b = AppendCompactSize(b, uint64(len(out.CovenantData)))
 		b = append(b, out.CovenantData...)
 	}
 
-	b = appendU32le(b, tx.Locktime)
+	b = AppendU32le(b, tx.Locktime)
 
-	b = appendCompactSize(b, uint64(len(tx.Witness)))
+	b = AppendCompactSize(b, uint64(len(tx.Witness)))
 	for _, w := range tx.Witness {
 		b = append(b, w.SuiteID)
-		b = appendCompactSize(b, uint64(len(w.Pubkey)))
+		b = AppendCompactSize(b, uint64(len(w.Pubkey)))
 		b = append(b, w.Pubkey...)
-		b = appendCompactSize(b, uint64(len(w.Signature)))
+		b = AppendCompactSize(b, uint64(len(w.Signature)))
 		b = append(b, w.Signature...)
 	}
 
-	b = appendCompactSize(b, uint64(len(tx.DaPayload)))
+	b = AppendCompactSize(b, uint64(len(tx.DaPayload)))
 	b = append(b, tx.DaPayload...)
 
 	return b

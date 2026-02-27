@@ -22,7 +22,7 @@ func encodeVaultCovenantData(ownerLockID [32]byte, threshold uint8, keys [][32]b
 	for _, k := range keys {
 		b = append(b, k[:]...)
 	}
-	b = appendU16le(b, uint16(len(whitelist)))
+	b = AppendU16le(b, uint16(len(whitelist)))
 	for _, h := range whitelist {
 		b = append(b, h[:]...)
 	}

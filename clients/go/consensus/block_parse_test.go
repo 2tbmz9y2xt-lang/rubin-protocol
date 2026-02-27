@@ -11,12 +11,12 @@ func TestParseBlockHeaderBytes_RoundtripFields(t *testing.T) {
 	nonce := uint64(13)
 
 	b := make([]byte, 0, BLOCK_HEADER_BYTES)
-	b = appendU32le(b, version)
+	b = AppendU32le(b, version)
 	b = append(b, prev[:]...)
 	b = append(b, root[:]...)
-	b = appendU64le(b, timestamp)
+	b = AppendU64le(b, timestamp)
 	b = append(b, target[:]...)
-	b = appendU64le(b, nonce)
+	b = AppendU64le(b, nonce)
 	if len(b) != BLOCK_HEADER_BYTES {
 		t.Fatalf("header len=%d", len(b))
 	}

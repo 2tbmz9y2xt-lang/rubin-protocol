@@ -239,35 +239,35 @@ func txBytes(tx *consensus.Tx) ([]byte, error) {
 		return nil, fmt.Errorf("nil tx")
 	}
 	var b []byte
-	b = appendU32le(b, tx.Version)
+	b = consensus.AppendU32le(b, tx.Version)
 	b = append(b, tx.TxKind)
-	b = appendU64le(b, tx.TxNonce)
-	b = appendCompactSize(b, uint64(len(tx.Inputs)))
+	b = consensus.AppendU64le(b, tx.TxNonce)
+	b = consensus.AppendCompactSize(b, uint64(len(tx.Inputs)))
 	for _, in := range tx.Inputs {
 		b = append(b, in.PrevTxid[:]...)
-		b = appendU32le(b, in.PrevVout)
-		b = appendCompactSize(b, uint64(len(in.ScriptSig)))
+		b = consensus.AppendU32le(b, in.PrevVout)
+		b = consensus.AppendCompactSize(b, uint64(len(in.ScriptSig)))
 		b = append(b, in.ScriptSig...)
-		b = appendU32le(b, in.Sequence)
+		b = consensus.AppendU32le(b, in.Sequence)
 	}
-	b = appendCompactSize(b, uint64(len(tx.Outputs)))
+	b = consensus.AppendCompactSize(b, uint64(len(tx.Outputs)))
 	for _, o := range tx.Outputs {
-		b = appendU64le(b, o.Value)
-		b = appendU16le(b, o.CovenantType)
-		b = appendCompactSize(b, uint64(len(o.CovenantData)))
+		b = consensus.AppendU64le(b, o.Value)
+		b = consensus.AppendU16le(b, o.CovenantType)
+		b = consensus.AppendCompactSize(b, uint64(len(o.CovenantData)))
 		b = append(b, o.CovenantData...)
 	}
-	b = appendU32le(b, tx.Locktime)
-	b = appendCompactSize(b, uint64(len(tx.Witness)))
+	b = consensus.AppendU32le(b, tx.Locktime)
+	b = consensus.AppendCompactSize(b, uint64(len(tx.Witness)))
 	for _, w := range tx.Witness {
 		b = append(b, w.SuiteID)
-		b = appendCompactSize(b, uint64(len(w.Pubkey)))
+		b = consensus.AppendCompactSize(b, uint64(len(w.Pubkey)))
 		b = append(b, w.Pubkey...)
-		b = appendCompactSize(b, uint64(len(w.Signature)))
+		b = consensus.AppendCompactSize(b, uint64(len(w.Signature)))
 		b = append(b, w.Signature...)
 	}
 	// da_payload_len + payload
-	b = appendCompactSize(b, uint64(len(tx.DaPayload)))
+	b = consensus.AppendCompactSize(b, uint64(len(tx.DaPayload)))
 	b = append(b, tx.DaPayload...)
 	return b, nil
 }
@@ -816,19 +816,19 @@ func updateSubsidyBlocks(
 
 		prevHash := mustHex32(sub1["expected_prev_hash"].(string))
 		header := make([]byte, 0, consensus.BLOCK_HEADER_BYTES)
-		header = appendU32le(header, 1)
+		header = consensus.AppendU32le(header, 1)
 		header = append(header, prevHash[:]...)
 		header = append(header, merkle[:]...)
-		header = appendU64le(header, 123) // timestamp (matches prior fixture style)
+		header = consensus.AppendU64le(header, 123) // timestamp (matches prior fixture style)
 		header = append(header, bytes.Repeat([]byte{0xff}, 32)...)
-		header = appendU64le(header, 123) // nonce
+		header = consensus.AppendU64le(header, 123) // nonce
 		if len(header) != consensus.BLOCK_HEADER_BYTES {
 			fatalf("subsidy: header len=%d", len(header))
 		}
 
 		var block []byte
 		block = append(block, header...)
-		block = appendCompactSize(block, 2)
+		block = consensus.AppendCompactSize(block, 2)
 		block = append(block, coinbaseBytes...)
 		block = append(block, nonCoinbaseBytes...)
 
@@ -917,42 +917,6 @@ func repoRootFromGoModule() (string, error) {
 func fatalf(format string, args ...any) {
 	_, _ = fmt.Fprintf(os.Stderr, "fatal: "+format+"\n", args...)
 	os.Exit(1)
-}
-
-// --- minimal CompactSize + little-endian encoders (mirrors consensus encoding) ---
-
-func appendU16le(b []byte, v uint16) []byte {
-	var tmp [2]byte
-	binary.LittleEndian.PutUint16(tmp[:], v)
-	return append(b, tmp[:]...)
-}
-
-func appendU32le(b []byte, v uint32) []byte {
-	var tmp [4]byte
-	binary.LittleEndian.PutUint32(tmp[:], v)
-	return append(b, tmp[:]...)
-}
-
-func appendU64le(b []byte, v uint64) []byte {
-	var tmp [8]byte
-	binary.LittleEndian.PutUint64(tmp[:], v)
-	return append(b, tmp[:]...)
-}
-
-func appendCompactSize(b []byte, v uint64) []byte {
-	switch {
-	case v < 0xfd:
-		return append(b, byte(v))
-	case v <= 0xffff:
-		b = append(b, 0xfd)
-		return appendU16le(b, uint16(v))
-	case v <= 0xffffffff:
-		b = append(b, 0xfe)
-		return appendU32le(b, uint32(v))
-	default:
-		b = append(b, 0xff)
-		return appendU64le(b, v)
-	}
 }
 
 // Ensure whitelist/keys ordering is canonical for any future extension.

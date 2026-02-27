@@ -200,7 +200,7 @@ func TestParseTx_WitnessBytesOverflow(t *testing.T) {
 
 func TestParseTx_HTLCPathWitnessItemsCanonical(t *testing.T) {
 	claimPayload := []byte{0x00} // HTLC path selector for claim
-	claimPayload = appendU16le(claimPayload, 1)
+	claimPayload = AppendU16le(claimPayload, 1)
 	claimPayload = append(claimPayload, 0x42)
 
 	var w bytes.Buffer

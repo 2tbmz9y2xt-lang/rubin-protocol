@@ -38,27 +38,27 @@ func TestSighashV1Digest_Smoke(t *testing.T) {
 
 	hashOfDaCoreFields := sha3_256([]byte{})
 	prevouts := append([]byte{}, prevTxid...)
-	prevouts = appendU32le(prevouts, 2)
+	prevouts = AppendU32le(prevouts, 2)
 	hashOfAllPrevouts := sha3_256(prevouts)
-	hashOfAllSequences := sha3_256(appendU32le(nil, 3))
+	hashOfAllSequences := sha3_256(AppendU32le(nil, 3))
 	hashOfAllOutputs := sha3_256([]byte{})
 
 	preimage := make([]byte, 0, 256)
 	preimage = append(preimage, []byte("RUBINv1-sighash/")...)
 	preimage = append(preimage, chainID[:]...)
-	preimage = appendU32le(preimage, 1)
+	preimage = AppendU32le(preimage, 1)
 	preimage = append(preimage, 0x00) // tx_kind
-	preimage = appendU64le(preimage, 0)
+	preimage = AppendU64le(preimage, 0)
 	preimage = append(preimage, hashOfDaCoreFields[:]...)
 	preimage = append(preimage, hashOfAllPrevouts[:]...)
 	preimage = append(preimage, hashOfAllSequences[:]...)
-	preimage = appendU32le(preimage, 0) // input_index
+	preimage = AppendU32le(preimage, 0) // input_index
 	preimage = append(preimage, prevTxid...)
-	preimage = appendU32le(preimage, 2)
-	preimage = appendU64le(preimage, 5)
-	preimage = appendU32le(preimage, 3)
+	preimage = AppendU32le(preimage, 2)
+	preimage = AppendU64le(preimage, 5)
+	preimage = AppendU32le(preimage, 3)
 	preimage = append(preimage, hashOfAllOutputs[:]...)
-	preimage = appendU32le(preimage, 4)
+	preimage = AppendU32le(preimage, 4)
 
 	want := sha3_256(preimage)
 	if digest != want {
