@@ -51,3 +51,37 @@ func TestOpenSSLVerifySig_EmptyInputsReturnErrors(t *testing.T) {
 		t.Fatalf("expected error for empty message (oneshot)")
 	}
 }
+
+func TestOpenSSL_SLH_SignVerifyRoundtrip_OneShot(t *testing.T) {
+	kp, err := NewSLHDSASHAKE256fKeypair()
+	if err != nil {
+		// Not every OpenSSL build enables SLH-DSA.
+		t.Skipf("SLH-DSA backend unavailable: %v", err)
+	}
+	t.Cleanup(func() { kp.Close() })
+
+	var msg [32]byte
+	msg[0] = 0x24
+	sig, err := kp.SignDigest32(msg)
+	if err != nil {
+		t.Fatalf("SignDigest32: %v", err)
+	}
+
+	ok, err := verifySig(SUITE_ID_SLH_DSA_SHAKE_256F, kp.PubkeyBytes(), sig, msg)
+	if err != nil {
+		t.Fatalf("verifySig err: %v", err)
+	}
+	if !ok {
+		t.Fatalf("verifySig=false")
+	}
+
+	// Wrong message must fail signature verification deterministically.
+	msg[0] ^= 0x01
+	ok2, err := verifySig(SUITE_ID_SLH_DSA_SHAKE_256F, kp.PubkeyBytes(), sig, msg)
+	if err != nil {
+		t.Fatalf("verifySig err (wrong msg): %v", err)
+	}
+	if ok2 {
+		t.Fatalf("verifySig=true for wrong message")
+	}
+}
