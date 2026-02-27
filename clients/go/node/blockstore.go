@@ -143,7 +143,11 @@ func (bs *BlockStore) Tip() (uint64, [32]byte, bool, error) {
 	if len(bs.index.Canonical) == 0 {
 		return 0, out, false, nil
 	}
-	height := uint64(len(bs.index.Canonical) - 1)
+	var height uint64
+	for range bs.index.Canonical {
+		height++
+	}
+	height--
 	hash, err := parseHex32("tip hash", bs.index.Canonical[height])
 	if err != nil {
 		return 0, out, false, err

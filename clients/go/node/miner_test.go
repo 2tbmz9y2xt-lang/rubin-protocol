@@ -104,7 +104,10 @@ func TestBuildCoinbaseTxAnchorOnlyCanonical(t *testing.T) {
 	for i := range commitment {
 		commitment[i] = byte(i + 1)
 	}
-	txBytes := buildCoinbaseTx(7, commitment)
+	txBytes, err := buildCoinbaseTx(7, commitment)
+	if err != nil {
+		t.Fatalf("build coinbase tx: %v", err)
+	}
 	tx, _, _, consumed, err := consensus.ParseTx(txBytes)
 	if err != nil {
 		t.Fatalf("parse coinbase tx: %v", err)

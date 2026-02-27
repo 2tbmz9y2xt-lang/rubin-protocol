@@ -100,7 +100,7 @@ func main() {
 		_, _ = fmt.Fprintln(os.Stdout, "blockstore: empty")
 	}
 	headerReq := syncEngine.HeaderSyncRequest()
-	_, _ = fmt.Fprintf(os.Stdout, "sync: header_request_has_from=%v header_request_limit=%d ibd=%v\n", headerReq.HasFrom, headerReq.Limit, syncEngine.IsInIBD(uint64(time.Now().Unix())))
+	_, _ = fmt.Fprintf(os.Stdout, "sync: header_request_has_from=%v header_request_limit=%d ibd=%v\n", headerReq.HasFrom, headerReq.Limit, syncEngine.IsInIBD(nowUnixU64()))
 	_, _ = fmt.Fprintf(os.Stdout, "p2p: peer_slots=%d connected=%d\n", cfg.MaxPeers, len(peerManager.Snapshot()))
 	if *dryRun {
 		return
@@ -137,4 +137,12 @@ func printConfig(cfg node.Config) error {
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
 	return enc.Encode(cfg)
+}
+
+func nowUnixU64() uint64 {
+	now := time.Now().Unix()
+	if now <= 0 {
+		return 0
+	}
+	return uint64(now)
 }
