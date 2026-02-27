@@ -89,6 +89,71 @@ func TestRetargetV1Clamped_InvalidWindowLength(t *testing.T) {
 	}
 }
 
+func TestRetargetV1_TargetOldZeroErrors(t *testing.T) {
+	var zero [32]byte
+	_, err := RetargetV1(zero, 1, 2)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
+	}
+}
+
+func TestRetargetV1Clamped_ClampsUnderflowToLo(t *testing.T) {
+	targetOld := mustBytes32Hex(t, "0000000000000000000000000000000000000000000000000000000000001000")
+	first := uint64(10_000)
+	window := make([]uint64, WINDOW_SIZE)
+	window[0] = first
+	// Every v=0 is < lo, so each step clamps to lo = prev+1.
+	for i := 1; i < len(window); i++ {
+		window[i] = 0
+	}
+
+	got, err := RetargetV1Clamped(targetOld, window)
+	if err != nil {
+		t.Fatalf("RetargetV1Clamped error: %v", err)
+	}
+
+	want, err := retargetV1WithActual(targetOld, uint64(WINDOW_SIZE-1))
+	if err != nil {
+		t.Fatalf("retargetV1WithActual: %v", err)
+	}
+	if got != want {
+		t.Fatalf("target mismatch: got=%x want=%x", got, want)
+	}
+}
+
+func TestRetargetV1Clamped_TimestampClampOverflowLo(t *testing.T) {
+	var targetOld [32]byte
+	targetOld[31] = 0x01
+	window := make([]uint64, WINDOW_SIZE)
+	window[0] = ^uint64(0)
+
+	_, err := RetargetV1Clamped(targetOld, window)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
+	}
+}
+
+func TestRetargetV1Clamped_TimestampClampOverflowHi(t *testing.T) {
+	var targetOld [32]byte
+	targetOld[31] = 0x01
+	window := make([]uint64, WINDOW_SIZE)
+	window[0] = ^uint64(0) - uint64(MAX_TIMESTAMP_STEP_PER_BLOCK) + 1
+
+	_, err := RetargetV1Clamped(targetOld, window)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
+	}
+}
+
 func TestPowCheck_StrictLess(t *testing.T) {
 	header := make([]byte, BLOCK_HEADER_BYTES)
 	header[0] = 1 // just to avoid all-zero input
@@ -126,6 +191,27 @@ func TestPowCheck_TargetRangeInvalidZero(t *testing.T) {
 	}
 	if got := mustTxErrCode(t, err); got != BLOCK_ERR_TARGET_INVALID {
 		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_TARGET_INVALID)
+	}
+}
+
+func TestBigIntToBytes32_Negative(t *testing.T) {
+	_, err := bigIntToBytes32(big.NewInt(-1))
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
+	}
+}
+
+func TestBigIntToBytes32_Overflow(t *testing.T) {
+	x := new(big.Int).Lsh(big.NewInt(1), 256) // 2^256 => 33 bytes
+	_, err := bigIntToBytes32(x)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
 	}
 }
 
