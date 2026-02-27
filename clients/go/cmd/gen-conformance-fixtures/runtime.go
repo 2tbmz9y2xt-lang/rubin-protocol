@@ -438,13 +438,7 @@ func updateVaultSpendVectorsUTXO(
 			{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: ownerPub, Signature: ownerSig},
 		}
 
-		b, err := txBytes(tx)
-		if err != nil {
-			fatalf("%s: txBytes: %v", id, err)
-		}
-		if _, _, _, n, err := consensus.ParseTx(b); err != nil || n != len(b) {
-			fatalf("%s: ParseTx sanity failed: err=%v consumed=%d len=%d", id, err, n, len(b))
-		}
+		b := mustTxBytes(tx)
 
 		v["tx_hex"] = hex.EncodeToString(b)
 		v["utxos"] = utxos
@@ -511,13 +505,7 @@ func updateVaultCreateVectors(
 			fatalf("%s: sign: %v", id, err)
 		}
 		tx.Witness = []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: nonOwnerPub, Signature: sig}}
-		b, err := txBytes(tx)
-		if err != nil {
-			fatalf("%s: txBytes: %v", id, err)
-		}
-		if _, _, _, n, err := consensus.ParseTx(b); err != nil || n != len(b) {
-			fatalf("%s: ParseTx sanity failed: err=%v consumed=%d len=%d", id, err, n, len(b))
-		}
+		b := mustTxBytes(tx)
 		v["tx_hex"] = hex.EncodeToString(b)
 		v["utxos"] = utxos
 	}
@@ -552,13 +540,7 @@ func updateVaultCreateVectors(
 			fatalf("%s: sign: %v", id, err)
 		}
 		tx.Witness = []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: ownerPub, Signature: sig}}
-		b, err := txBytes(tx)
-		if err != nil {
-			fatalf("%s: txBytes: %v", id, err)
-		}
-		if _, _, _, n, err := consensus.ParseTx(b); err != nil || n != len(b) {
-			fatalf("%s: ParseTx sanity failed: err=%v consumed=%d len=%d", id, err, n, len(b))
-		}
+		b := mustTxBytes(tx)
 		v["tx_hex"] = hex.EncodeToString(b)
 		v["utxos"] = utxos
 	}
@@ -648,13 +630,7 @@ func updateVaultSpendVectorsVaultFixture(
 			{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: sponsorPub, Signature: sponsorSig},
 		}
 
-		b, err := txBytes(tx)
-		if err != nil {
-			fatalf("%s: txBytes: %v", id, err)
-		}
-		if _, _, _, n, err := consensus.ParseTx(b); err != nil || n != len(b) {
-			fatalf("%s: ParseTx sanity failed: err=%v consumed=%d len=%d", id, err, n, len(b))
-		}
+		b := mustTxBytes(tx)
 		v["tx_hex"] = hex.EncodeToString(b)
 		v["utxos"] = utxos
 	}
@@ -711,13 +687,7 @@ func updateVaultSpendVectorsVaultFixture(
 			{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: ownerPub, Signature: ownerSig},
 		}
 
-		b, err := txBytes(tx)
-		if err != nil {
-			fatalf("%s: txBytes: %v", id, err)
-		}
-		if _, _, _, n, err := consensus.ParseTx(b); err != nil || n != len(b) {
-			fatalf("%s: ParseTx sanity failed: err=%v consumed=%d len=%d", id, err, n, len(b))
-		}
+		b := mustTxBytes(tx)
 		v["tx_hex"] = hex.EncodeToString(b)
 		v["utxos"] = utxos
 	}
@@ -802,13 +772,7 @@ func updateHTLCVector(
 		{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: claimPub, Signature: sig},
 	}
 
-	b, err := txBytes(tx)
-	if err != nil {
-		fatalf("%s: txBytes: %v", id, err)
-	}
-	if _, _, _, n, err := consensus.ParseTx(b); err != nil || n != len(b) {
-		fatalf("%s: ParseTx sanity failed: err=%v consumed=%d len=%d", id, err, n, len(b))
-	}
+	b := mustTxBytes(tx)
 
 	v["tx_hex"] = hex.EncodeToString(b)
 	v["utxos"] = utxos
