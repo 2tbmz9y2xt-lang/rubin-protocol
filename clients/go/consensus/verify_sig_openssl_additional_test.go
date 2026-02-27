@@ -85,3 +85,35 @@ func TestOpenSSL_SLH_SignVerifyRoundtrip_OneShot(t *testing.T) {
 		t.Fatalf("verifySig=true for wrong message")
 	}
 }
+
+func TestOpenSSL_MLDSA87_VerifyWrongMessageReturnsFalse(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+
+	var msg [32]byte
+	msg[0] = 0x42
+	sig, err := kp.SignDigest32(msg)
+	if err != nil {
+		t.Fatalf("SignDigest32: %v", err)
+	}
+
+	msg[0] ^= 0x01
+	ok, err := verifySig(SUITE_ID_ML_DSA_87, kp.PubkeyBytes(), sig, msg)
+	if err != nil {
+		t.Fatalf("verifySig err: %v", err)
+	}
+	if ok {
+		t.Fatalf("verifySig=true for wrong message")
+	}
+}
+
+func TestOpenSSLVerifySig_UnknownAlgErrors(t *testing.T) {
+	var d [32]byte
+	ok, err := opensslVerifySigMessage("NO_SUCH_ALG", []byte{0x01}, []byte{0x02}, d[:])
+	if err == nil || ok {
+		t.Fatalf("expected error for unknown alg")
+	}
+	ok, err = opensslVerifySigDigestOneShot("NO_SUCH_ALG", []byte{0x01}, []byte{0x02}, d[:])
+	if err == nil || ok {
+		t.Fatalf("expected error for unknown alg (oneshot)")
+	}
+}
