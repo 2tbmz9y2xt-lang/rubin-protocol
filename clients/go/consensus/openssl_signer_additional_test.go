@@ -180,3 +180,31 @@ func TestSignOpenSSLDigest32_InvalidFIPSModeRejected(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestNewMLDSA87Keypair_InvalidFIPSModeRejected(t *testing.T) {
+	resetOpenSSLBootstrapStateForTests()
+	t.Cleanup(resetOpenSSLBootstrapStateForTests)
+
+	t.Setenv("RUBIN_OPENSSL_FIPS_MODE", "definitely-invalid")
+	_, err := NewMLDSA87Keypair()
+	if err == nil {
+		t.Fatalf("expected bootstrap mode error")
+	}
+	if !strings.Contains(err.Error(), "invalid RUBIN_OPENSSL_FIPS_MODE") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewSLHDSASHAKE256fKeypair_InvalidFIPSModeRejected(t *testing.T) {
+	resetOpenSSLBootstrapStateForTests()
+	t.Cleanup(resetOpenSSLBootstrapStateForTests)
+
+	t.Setenv("RUBIN_OPENSSL_FIPS_MODE", "definitely-invalid")
+	_, err := NewSLHDSASHAKE256fKeypair()
+	if err == nil {
+		t.Fatalf("expected bootstrap mode error")
+	}
+	if !strings.Contains(err.Error(), "invalid RUBIN_OPENSSL_FIPS_MODE") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
