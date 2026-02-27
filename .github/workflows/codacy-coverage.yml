@@ -1,0 +1,40 @@
+name: codacy-coverage
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.13'
+          cache: true
+          cache-dependency-path: clients/go/go.mod
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Go coverage
+        run: |
+          cd clients/go
+          go test -coverprofile=coverage.out ./...
+
+      - name: Rust coverage
+        run: |
+          cargo install cargo-tarpaulin --locked
+          cd clients/rust
+          cargo tarpaulin --out Lcov --output-dir .
+
+      - name: Upload to Codacy
+        env:
+          CODACY_API_TOKEN: ${{ secrets.CODACY_API_TOKEN }}
+        run: |
+          bash <(curl -Ls https://coverage.codacy.com/get.sh) report \
+            -r clients/go/coverage.out \
+            -r clients/rust/lcov.info \
+            --partial
+          bash <(curl -Ls https://coverage.codacy.com/get.sh) final
