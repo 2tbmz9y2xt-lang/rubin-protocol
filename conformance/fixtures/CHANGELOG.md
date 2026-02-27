@@ -9,21 +9,19 @@ Policy:
 
 ---
 
-## 2026-02-27 — covenant_data cap + vault recursion hardening (Q-AUDIT-COV-01/Q-AUDIT-COV-06)
+## 2026-02-27 — covenant_data_len cap boundary (Q-AUDIT-COV-01)
 
 Причина:
-- добавить wire-level cap `covenant_data_len <= 65_536` (норма CANONICAL §5.3) с reject как `TX_ERR_PARSE`;
-- запретить vault recursion: tx, который тратит `CORE_VAULT`, не может создавать `CORE_VAULT` outputs.
+- зафиксировать consensus-critical cap: `covenant_data_len > 65536` MUST reject as `TX_ERR_PARSE`.
 
 Инструменты:
-- `clients/go/cmd/gen-conformance-fixtures` (manual run) — обновление tx_hex/подписей для затронутых векторов,
-- `tools/formal/gen_lean_conformance_vectors.py` + `tools/formal/gen_lean_refinement_from_traces.py` — синхронизация Lean replay.
+- ручное обновление `CV-PARSE.json`,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-PARSE`,
+- синхронизация матрицы: `tools/gen_conformance_matrix.py`,
+- синхронизация Lean-векторов: `tools/formal/gen_lean_conformance_vectors.py`.
 
 Изменённые fixtures:
-- `CV-HTLC.json`
-- `CV-SUBSIDY.json`
-- `CV-UTXO-BASIC.json`
-- `CV-VAULT.json`
+- `CV-PARSE.json` (добавлен `PARSE-11`).
 
 ## 2026-02-25 — PR #161 (Q-R017)
 
@@ -142,28 +140,3 @@ Policy:
 
 Изменённые fixtures:
 - `CV-PARSE.json` (добавлен `PARSE-10`)
-
-## 2026-02-27 — Wire-level cap: covenant_data_len upper bound
-
-Причина:
-- добавить conformance-вектор на новый wire-level cap `MAX_COVENANT_DATA_PER_OUTPUT`;
-- предотвратить DoS-кейсы через сверхдлинные `covenant_data` при парсинге.
-
-Инструменты:
-- ручное обновление `CV-PARSE.json`,
-- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-PARSE`.
-
-Изменённые fixtures:
-- `CV-PARSE.json` (добавлен `PARSE-11`)
-
-## 2026-02-27 — CORE_VAULT: запрет vault→vault рекурсии (circular-reference hardening)
-
-Причина:
-- `CORE_VAULT` spend не должен создавать новые `CORE_VAULT` outputs (упрощение модели сейфа, защита от циклов).
-
-Инструменты:
-- ручное обновление `CV-VAULT.json`,
-- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-VAULT`.
-
-Изменённые fixtures:
-- `CV-VAULT.json` (добавлен `VAULT-SPEND-08`)

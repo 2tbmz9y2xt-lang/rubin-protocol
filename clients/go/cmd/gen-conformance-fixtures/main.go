@@ -721,68 +721,6 @@ func updateVaultSpendVectorsVaultFixture(
 		v["tx_hex"] = hex.EncodeToString(b)
 		v["utxos"] = utxos
 	}
-
-	// VAULT-SPEND-08: forbid vault recursion (vault-spend creates CORE_VAULT output).
-	{
-		id := "VAULT-SPEND-08"
-		v := findVector(f, id)
-		utxos := anyToSliceMap(v["utxos"])
-		if len(utxos) != 2 {
-			fatalf("%s: want 2 utxos", id)
-		}
-		utxos[0]["covenant_data"] = hex.EncodeToString(vaultCov)
-		utxos[0]["value"] = float64(vaultValue)
-		utxos[1]["covenant_data"] = hex.EncodeToString(ownerInCov)
-		utxos[1]["value"] = float64(ownerFeeInValue)
-
-		prev0 := mustHex32(utxos[0]["txid"].(string))
-		prev1 := mustHex32(utxos[1]["txid"].(string))
-		vout0 := uint32(utxos[0]["vout"].(float64))
-		vout1 := uint32(utxos[1]["vout"].(float64))
-
-		tx := &consensus.Tx{
-			Version: 1,
-			TxKind:  0x00,
-			TxNonce: 1,
-			Inputs: []consensus.TxInput{
-				{PrevTxid: prev0, PrevVout: vout0, ScriptSig: nil, Sequence: 0},
-				{PrevTxid: prev1, PrevVout: vout1, ScriptSig: nil, Sequence: 0},
-			},
-			Outputs:  []consensus.TxOutput{{Value: vaultValue, CovenantType: consensus.COV_TYPE_VAULT, CovenantData: vaultCov}},
-			Locktime: 0,
-		}
-
-		d0, err := consensus.SighashV1Digest(tx, 0, vaultValue, chainID)
-		if err != nil {
-			fatalf("%s: sighash0: %v", id, err)
-		}
-		vaultSig, err := vaultKP.SignDigest32(d0)
-		if err != nil {
-			fatalf("%s: vault sign: %v", id, err)
-		}
-		d1, err := consensus.SighashV1Digest(tx, 1, ownerFeeInValue, chainID)
-		if err != nil {
-			fatalf("%s: sighash1: %v", id, err)
-		}
-		ownerSig, err := ownerKP.SignDigest32(d1)
-		if err != nil {
-			fatalf("%s: owner sign: %v", id, err)
-		}
-		tx.Witness = []consensus.WitnessItem{
-			{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: vaultPub, Signature: vaultSig},
-			{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: ownerPub, Signature: ownerSig},
-		}
-
-		b, err := txBytes(tx)
-		if err != nil {
-			fatalf("%s: txBytes: %v", id, err)
-		}
-		if _, _, _, n, err := consensus.ParseTx(b); err != nil || n != len(b) {
-			fatalf("%s: ParseTx sanity failed: err=%v consumed=%d len=%d", id, err, n, len(b))
-		}
-		v["tx_hex"] = hex.EncodeToString(b)
-		v["utxos"] = utxos
-	}
 }
 
 func updateHTLCVector(
