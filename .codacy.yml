@@ -1,0 +1,6 @@
+exclude_paths:
+  # Tests are intentionally repetitive and should not gate merges on clone detection.
+  - "clients/go/**/*_test.go"
+  - "clients/rust/**/tests/**"
+  - "clients/rust/**/benches/**"
+
