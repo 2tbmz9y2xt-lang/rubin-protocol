@@ -229,4 +229,3 @@ func TestAppendCompactSizeMinerEncodesAllWidthBranches(t *testing.T) {
 		t.Fatalf("unexpected 64-bit le: %x", out64)
 	}
 }
-
