@@ -2386,7 +2386,8 @@ fn apply_non_coinbase_tx_basic_vault_recursion_rejected() {
     let dummy_whitelist_h = sha3_256(b"dummy-whitelist-entry");
 
     let vault_key_id = sha3_256(&vault_kp.pubkey);
-    let vault_cov = encode_vault_covenant_data(owner_lock_id, 1, &[vault_key_id], &[dummy_whitelist_h]);
+    let vault_cov =
+        encode_vault_covenant_data(owner_lock_id, 1, &[vault_key_id], &[dummy_whitelist_h]);
 
     let mut tx = crate::tx::Tx {
         version: 1,
