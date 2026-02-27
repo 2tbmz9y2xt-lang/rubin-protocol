@@ -186,6 +186,13 @@ func txErrString(err error) string {
 	return err.Error()
 }
 
+func writeEntryOrExit(w io.Writer, entry traceEntry) {
+	if err := writeJSON(w, entry); err != nil {
+		fmt.Fprintf(os.Stderr, "write entry: %v\n", err)
+		os.Exit(2)
+	}
+}
+
 func parseHex32(s string) ([32]byte, error) {
 	var out [32]byte
 	b, err := hex.DecodeString(s)
@@ -284,10 +291,7 @@ func main() {
 						"wtxid":    hex.EncodeToString(wtxid[:]),
 					},
 				}
-				if err := writeJSON(f, e); err != nil {
-					fmt.Fprintf(os.Stderr, "write: %v\n", err)
-					os.Exit(2)
-				}
+				writeEntryOrExit(f, e)
 			}
 
 		case "CV-SIGHASH":
@@ -330,7 +334,7 @@ func main() {
 						"digest": hex.EncodeToString(digest[:]),
 					},
 				}
-				_ = writeJSON(f, e)
+				writeEntryOrExit(f, e)
 			}
 
 		case "CV-POW":
@@ -411,7 +415,7 @@ func main() {
 					Inputs:   inputs,
 					Outputs:  outputs,
 				}
-				_ = writeJSON(f, e)
+				writeEntryOrExit(f, e)
 			}
 
 		case "CV-UTXO-BASIC":
@@ -476,7 +480,7 @@ func main() {
 					},
 					Outputs: outputs,
 				}
-				_ = writeJSON(f, e)
+				writeEntryOrExit(f, e)
 			}
 
 		case "CV-BLOCK-BASIC":
@@ -530,7 +534,7 @@ func main() {
 					},
 					Outputs: outputs,
 				}
-				_ = writeJSON(f, e)
+				writeEntryOrExit(f, e)
 			}
 
 		default:

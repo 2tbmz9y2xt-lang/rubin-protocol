@@ -274,6 +274,68 @@ func parseHexU256To32(s string) ([32]byte, error) {
 	return out, nil
 }
 
+func parseExactHex32(hexValue string) ([32]byte, error) {
+	var out [32]byte
+	stripped := strings.TrimSpace(hexValue)
+	stripped = strings.TrimPrefix(strings.TrimPrefix(stripped, "0x"), "0X")
+	b, err := hex.DecodeString(stripped)
+	if err != nil {
+		return out, err
+	}
+	if len(b) != 32 {
+		return out, fmt.Errorf("want 32 bytes, got %d", len(b))
+	}
+	copy(out[:], b)
+	return out, nil
+}
+
+func parseOptionalHex32(hexValue string, badErr string) (*[32]byte, error) {
+	if strings.TrimSpace(hexValue) == "" {
+		return nil, nil
+	}
+	value, err := parseExactHex32(hexValue)
+	if err != nil {
+		return nil, fmt.Errorf("%s", badErr)
+	}
+	return &value, nil
+}
+
+func parseOptionalChainIDHex(chainIDHex string) ([32]byte, error) {
+	var chainID [32]byte
+	if strings.TrimSpace(chainIDHex) == "" {
+		return chainID, nil
+	}
+	parsed, err := parseExactHex32(chainIDHex)
+	if err != nil {
+		return chainID, fmt.Errorf("bad chain_id")
+	}
+	return parsed, nil
+}
+
+func buildUtxoMap(items []UtxoJSON) (map[consensus.Outpoint]consensus.UtxoEntry, error) {
+	utxos := make(map[consensus.Outpoint]consensus.UtxoEntry, len(items))
+	for _, item := range items {
+		parsedTxid, err := parseExactHex32(item.Txid)
+		if err != nil {
+			return nil, fmt.Errorf("bad utxo txid")
+		}
+		covenantData, err := hex.DecodeString(item.CovenantDataHex)
+		if err != nil {
+			return nil, fmt.Errorf("bad utxo covenant_data")
+		}
+
+		outpoint := consensus.Outpoint{Txid: parsedTxid, Vout: item.Vout}
+		utxos[outpoint] = consensus.UtxoEntry{
+			Value:             item.Value,
+			CovenantType:      item.CovenantType,
+			CovenantData:      covenantData,
+			CreationHeight:    item.CreationHeight,
+			CreatedByCoinbase: item.CreatedByCoinbase,
+		}
+	}
+	return utxos, nil
+}
+
 func boolOrDefault(v *bool, def bool) bool {
 	if v == nil {
 		return def
@@ -592,28 +654,15 @@ func main() {
 			return
 		}
 
-		var expectedPrev *[32]byte
-		if req.ExpectedPrev != "" {
-			b, err := hex.DecodeString(req.ExpectedPrev)
-			if err != nil || len(b) != 32 {
-				writeResp(os.Stdout, Response{Ok: false, Err: "bad expected_prev_hash"})
-				return
-			}
-			var h [32]byte
-			copy(h[:], b)
-			expectedPrev = &h
+		expectedPrev, err := parseOptionalHex32(req.ExpectedPrev, "bad expected_prev_hash")
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
 		}
-
-		var expectedTarget *[32]byte
-		if req.ExpectedTarget != "" {
-			b, err := hex.DecodeString(req.ExpectedTarget)
-			if err != nil || len(b) != 32 {
-				writeResp(os.Stdout, Response{Ok: false, Err: "bad expected_target"})
-				return
-			}
-			var h [32]byte
-			copy(h[:], b)
-			expectedTarget = &h
+		expectedTarget, err := parseOptionalHex32(req.ExpectedTarget, "bad expected_target")
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
 		}
 
 		s, err := consensus.ValidateBlockBasicWithContextAtHeight(
@@ -637,28 +686,15 @@ func main() {
 			return
 		}
 
-		var expectedPrev *[32]byte
-		if req.ExpectedPrev != "" {
-			b, err := hex.DecodeString(req.ExpectedPrev)
-			if err != nil || len(b) != 32 {
-				writeResp(os.Stdout, Response{Ok: false, Err: "bad expected_prev_hash"})
-				return
-			}
-			var h [32]byte
-			copy(h[:], b)
-			expectedPrev = &h
+		expectedPrev, err := parseOptionalHex32(req.ExpectedPrev, "bad expected_prev_hash")
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
 		}
-
-		var expectedTarget *[32]byte
-		if req.ExpectedTarget != "" {
-			b, err := hex.DecodeString(req.ExpectedTarget)
-			if err != nil || len(b) != 32 {
-				writeResp(os.Stdout, Response{Ok: false, Err: "bad expected_target"})
-				return
-			}
-			var h [32]byte
-			copy(h[:], b)
-			expectedTarget = &h
+		expectedTarget, err := parseOptionalHex32(req.ExpectedTarget, "bad expected_target")
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
 		}
 
 		s, err := consensus.ValidateBlockBasicWithContextAndFeesAtHeight(
@@ -684,53 +720,21 @@ func main() {
 			return
 		}
 
-		var expectedPrev *[32]byte
-		if req.ExpectedPrev != "" {
-			b, err := hex.DecodeString(req.ExpectedPrev)
-			if err != nil || len(b) != 32 {
-				writeResp(os.Stdout, Response{Ok: false, Err: "bad expected_prev_hash"})
-				return
-			}
-			var h [32]byte
-			copy(h[:], b)
-			expectedPrev = &h
+		expectedPrev, err := parseOptionalHex32(req.ExpectedPrev, "bad expected_prev_hash")
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+		expectedTarget, err := parseOptionalHex32(req.ExpectedTarget, "bad expected_target")
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
 		}
 
-		var expectedTarget *[32]byte
-		if req.ExpectedTarget != "" {
-			b, err := hex.DecodeString(req.ExpectedTarget)
-			if err != nil || len(b) != 32 {
-				writeResp(os.Stdout, Response{Ok: false, Err: "bad expected_target"})
-				return
-			}
-			var h [32]byte
-			copy(h[:], b)
-			expectedTarget = &h
-		}
-
-		utxos := make(map[consensus.Outpoint]consensus.UtxoEntry, len(req.Utxos))
-		for _, u := range req.Utxos {
-			txidBytes, err := hex.DecodeString(u.Txid)
-			if err != nil || len(txidBytes) != 32 {
-				writeResp(os.Stdout, Response{Ok: false, Err: "bad utxo txid"})
-				return
-			}
-			covData, err := hex.DecodeString(u.CovenantDataHex)
-			if err != nil {
-				writeResp(os.Stdout, Response{Ok: false, Err: "bad utxo covenant_data"})
-				return
-			}
-
-			var opTxid [32]byte
-			copy(opTxid[:], txidBytes)
-			op := consensus.Outpoint{Txid: opTxid, Vout: u.Vout}
-			utxos[op] = consensus.UtxoEntry{
-				Value:             u.Value,
-				CovenantType:      u.CovenantType,
-				CovenantData:      covData,
-				CreationHeight:    u.CreationHeight,
-				CreatedByCoinbase: u.CreatedByCoinbase,
-			}
+		utxos, err := buildUtxoMap(req.Utxos)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
 		}
 
 		st := consensus.InMemoryChainState{
@@ -738,14 +742,10 @@ func main() {
 			AlreadyGenerated: req.AlreadyGenerated,
 		}
 
-		var chainID [32]byte
-		if strings.TrimSpace(req.ChainIDHex) != "" {
-			chainIDBytes, err := hex.DecodeString(req.ChainIDHex)
-			if err != nil || len(chainIDBytes) != 32 {
-				writeResp(os.Stdout, Response{Ok: false, Err: "bad chain_id"})
-				return
-			}
-			copy(chainID[:], chainIDBytes)
+		chainID, err := parseOptionalChainIDHex(req.ChainIDHex)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
 		}
 
 		s, err := consensus.ConnectBlockBasicInMemoryAtHeight(
@@ -800,29 +800,10 @@ func main() {
 			return
 		}
 
-		utxos := make(map[consensus.Outpoint]consensus.UtxoEntry, len(req.Utxos))
-		for _, u := range req.Utxos {
-			txidBytes, err := hex.DecodeString(u.Txid)
-			if err != nil || len(txidBytes) != 32 {
-				writeResp(os.Stdout, Response{Ok: false, Err: "bad utxo txid"})
-				return
-			}
-			covData, err := hex.DecodeString(u.CovenantDataHex)
-			if err != nil {
-				writeResp(os.Stdout, Response{Ok: false, Err: "bad utxo covenant_data"})
-				return
-			}
-
-			var opTxid [32]byte
-			copy(opTxid[:], txidBytes)
-			op := consensus.Outpoint{Txid: opTxid, Vout: u.Vout}
-			utxos[op] = consensus.UtxoEntry{
-				Value:             u.Value,
-				CovenantType:      u.CovenantType,
-				CovenantData:      covData,
-				CreationHeight:    u.CreationHeight,
-				CreatedByCoinbase: u.CreatedByCoinbase,
-			}
+		utxos, err := buildUtxoMap(req.Utxos)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
 		}
 
 		blockMTP := req.BlockTimestamp
@@ -830,14 +811,10 @@ func main() {
 			blockMTP = *req.BlockMTP
 		}
 
-		var chainID [32]byte
-		if strings.TrimSpace(req.ChainIDHex) != "" {
-			chainIDBytes, err := hex.DecodeString(req.ChainIDHex)
-			if err != nil || len(chainIDBytes) != 32 {
-				writeResp(os.Stdout, Response{Ok: false, Err: "bad chain_id"})
-				return
-			}
-			copy(chainID[:], chainIDBytes)
+		chainID, err := parseOptionalChainIDHex(req.ChainIDHex)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
 		}
 
 		s, err := consensus.ApplyNonCoinbaseTxBasicWithMTP(tx, txid, utxos, req.Height, req.BlockTimestamp, blockMTP, chainID)
