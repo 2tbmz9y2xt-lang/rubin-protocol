@@ -1889,7 +1889,7 @@ fn connect_block_basic_in_memory_at_height_ok_computes_fees_and_updates_state() 
     let coinbase = coinbase_with_witness_commitment_and_p2pk_value(
         height as u32,
         subsidy + sum_fees,
-        &[spend_bytes.clone()],
+        std::slice::from_ref(&spend_bytes),
     );
     let (_ct, coinbase_txid, _cw, _cn) = parse_tx(&coinbase).expect("parse coinbase");
 
@@ -1982,7 +1982,7 @@ fn connect_block_basic_in_memory_at_height_rejects_subsidy_exceeded() {
     let coinbase = coinbase_with_witness_commitment_and_p2pk_value(
         height as u32,
         subsidy + sum_fees + 1,
-        &[spend_bytes.clone()],
+        std::slice::from_ref(&spend_bytes),
     );
     let (_ct, coinbase_txid, _cw, _cn) = parse_tx(&coinbase).expect("parse coinbase");
 
