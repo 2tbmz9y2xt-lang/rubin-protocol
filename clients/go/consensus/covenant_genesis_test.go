@@ -91,8 +91,8 @@ func TestValidateTxCovenantsGenesis_Table(t *testing.T) {
 
 	cases := []struct {
 		name    string
-		output  TxOutput
 		wantErr ErrorCode
+		output  TxOutput
 	}{
 		{
 			name:    "p2pk_ok",

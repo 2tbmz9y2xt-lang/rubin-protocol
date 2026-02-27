@@ -14,9 +14,9 @@ import (
 var unixNow = func() int64 { return time.Now().Unix() }
 
 type MinerConfig struct {
-	Target          [32]byte
 	TimestampSource func() uint64
 	MaxTxPerBlock   int
+	Target          [32]byte
 }
 
 type MinedBlock struct {

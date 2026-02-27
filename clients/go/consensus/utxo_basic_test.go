@@ -126,11 +126,11 @@ func TestApplyNonCoinbaseTxBasicUpdate_P2PKOK(t *testing.T) {
 
 func TestApplyNonCoinbaseTxBasic_InputValidationErrors(t *testing.T) {
 	cases := []struct {
-		name      string
-		prevByte  byte
-		outValue  uint64
 		utxosFn   func(prev [32]byte) map[Outpoint]UtxoEntry
+		name      string
 		wantError ErrorCode
+		outValue  uint64
+		prevByte  byte
 	}{
 		{
 			name:     "missing_utxo",
@@ -195,12 +195,12 @@ func TestApplyNonCoinbaseTxBasic_P2PKValueConservationCases(t *testing.T) {
 	var chainID [32]byte
 	cases := []struct {
 		name      string
-		prevByte  byte
-		txidByte  byte
-		outValue  uint64
 		wantErr   ErrorCode
+		outValue  uint64
 		wantFee   uint64
 		wantUTXOs uint64
+		prevByte  byte
+		txidByte  byte
 	}{
 		{
 			name:     "value_conservation_error",

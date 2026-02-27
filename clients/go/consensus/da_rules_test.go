@@ -102,10 +102,10 @@ func TestParseTx_DACommitChunkCountZero(t *testing.T) {
 func TestValidateBlockBasic_DAChunkHashMismatch(t *testing.T) {
 	tests := []struct {
 		name          string
+		wantErrorCode ErrorCode
 		daSeed        byte
 		mutateCommit  bool
 		mutateChunk   bool
-		wantErrorCode ErrorCode
 	}{
 		{
 			name:          "chunk hash mismatch",

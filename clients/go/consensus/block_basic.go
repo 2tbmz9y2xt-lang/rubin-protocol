@@ -7,12 +7,12 @@ import (
 )
 
 type ParsedBlock struct {
-	Header      BlockHeader
 	HeaderBytes []byte
-	TxCount     uint64
 	Txs         []*Tx
 	Txids       [][32]byte
 	Wtxids      [][32]byte
+	Header      BlockHeader
+	TxCount     uint64
 }
 
 type BlockBasicSummary struct {

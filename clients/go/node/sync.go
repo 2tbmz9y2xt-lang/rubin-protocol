@@ -11,11 +11,11 @@ import (
 const defaultIBDLagSeconds = 24 * 60 * 60
 
 type SyncConfig struct {
+	ExpectedTarget   *[32]byte
+	ChainStatePath   string
 	HeaderBatchLimit uint64
 	IBDLagSeconds    uint64
-	ExpectedTarget   *[32]byte
 	ChainID          [32]byte
-	ChainStatePath   string
 }
 
 type HeaderRequest struct {

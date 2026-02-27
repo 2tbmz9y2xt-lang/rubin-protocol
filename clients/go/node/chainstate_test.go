@@ -220,9 +220,9 @@ func equalChainState(a, b *ChainState) bool {
 }
 
 type testOutput struct {
+	covenantData []byte
 	value        uint64
 	covenantType uint16
-	covenantData []byte
 }
 
 func buildSingleTxBlock(t *testing.T, prevHash [32]byte, target [32]byte, timestamp uint64, tx []byte) []byte {

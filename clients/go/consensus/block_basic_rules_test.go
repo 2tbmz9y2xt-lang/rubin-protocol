@@ -35,9 +35,9 @@ func txWithOneOutput(value uint64, covenantType uint16, covenantData []byte) []b
 }
 
 type testOutput struct {
+	covenantData []byte
 	value        uint64
 	covenantType uint16
-	covenantData []byte
 }
 
 func txWithOutputs(outputs []testOutput) []byte {
@@ -359,13 +359,13 @@ func TestValidateBlockBasic_HeaderRuleErrors(t *testing.T) {
 
 	cases := []struct {
 		name           string
+		wantErr        ErrorCode
+		nonce          uint64
 		prev           [32]byte
 		blockTarget    [32]byte
 		expectedPrev   [32]byte
 		expectedTarget [32]byte
-		nonce          uint64
 		corruptRoot    bool
-		wantErr        ErrorCode
 	}{
 		{
 			name:           "linkage_mismatch",
@@ -469,11 +469,11 @@ func TestValidateBlockBasic_NonCoinbaseMustHaveInput(t *testing.T) {
 func TestValidateBlockBasic_CoinbaseRuleErrors(t *testing.T) {
 	target := filledHash(0xff)
 	cases := []struct {
+		blockFn func(t *testing.T, prev [32]byte, target [32]byte, nonce uint64) []byte
 		name    string
-		prev    [32]byte
 		nonce   uint64
 		height  uint64
-		blockFn func(t *testing.T, prev [32]byte, target [32]byte, nonce uint64) []byte
+		prev    [32]byte
 	}{
 		{
 			name:   "first_tx_must_be_coinbase",

@@ -6,47 +6,47 @@ import (
 )
 
 type Tx struct {
-	Version      uint32
-	TxKind       uint8
-	TxNonce      uint64
-	Inputs       []TxInput
-	Outputs      []TxOutput
-	Locktime     uint32
 	DaCommitCore *DaCommitCore
 	DaChunkCore  *DaChunkCore
+	Inputs       []TxInput
+	Outputs      []TxOutput
 	Witness      []WitnessItem
 	DaPayload    []byte
+	TxNonce      uint64
+	Version      uint32
+	Locktime     uint32
+	TxKind       uint8
 }
 
 type TxInput struct {
-	PrevTxid  [32]byte
-	PrevVout  uint32
 	ScriptSig []byte
+	PrevVout  uint32
 	Sequence  uint32
+	PrevTxid  [32]byte
 }
 
 type TxOutput struct {
+	CovenantData []byte
 	Value        uint64
 	CovenantType uint16
-	CovenantData []byte
 }
 
 type WitnessItem struct {
-	SuiteID   uint8
 	Pubkey    []byte
 	Signature []byte
+	SuiteID   uint8
 }
 
 type DaCommitCore struct {
-	DaID            [32]byte
-	ChunkCount      uint16
-	RetlDomainID    [32]byte
+	BatchSig        []byte
 	BatchNumber     uint64
+	ChunkCount      uint16
+	DaID            [32]byte
+	RetlDomainID    [32]byte
 	TxDataRoot      [32]byte
 	StateRoot       [32]byte
 	WithdrawalsRoot [32]byte
 	BatchSigSuite   uint8
-	BatchSig        []byte
 }
 
 type DaChunkCore struct {
