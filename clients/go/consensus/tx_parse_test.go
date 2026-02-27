@@ -96,6 +96,36 @@ func TestParseTx_ScriptSigLenOverflow(t *testing.T) {
 	expectParseErrCode(t, b.Bytes(), TX_ERR_PARSE)
 }
 
+func TestParseTx_CovenantDataLenExceedsCap(t *testing.T) {
+	// output_count=1; covenant_data_len set to CompactSize(65537) so we hit the wire-level cap
+	// MAX_COVENANT_DATA_PER_OUTPUT=65536 (constants.go).
+	var b bytes.Buffer
+	_ = binary.Write(&b, binary.LittleEndian, uint32(1))
+	b.WriteByte(0x00) // tx_kind
+	_ = binary.Write(&b, binary.LittleEndian, uint64(0))
+	b.WriteByte(0x00) // input_count
+
+	b.WriteByte(0x01) // output_count
+	_ = binary.Write(&b, binary.LittleEndian, uint64(0))
+	_ = binary.Write(&b, binary.LittleEndian, uint16(0))
+
+	// CompactSize(65537) = 0xfe + u32le(65537).
+	b.WriteByte(0xfe)
+	_ = binary.Write(&b, binary.LittleEndian, uint32(65_537))
+
+	_ = binary.Write(&b, binary.LittleEndian, uint32(0)) // locktime
+	b.WriteByte(0x00)                                    // witness_count
+	b.WriteByte(0x00)                                    // da_payload_len
+
+	_, _, _, _, err := ParseTx(b.Bytes())
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
+	}
+}
+
 func TestParseTx_WitnessCountOverflow(t *testing.T) {
 	txBytes := minimalTxBytes()
 	// Replace witness_count=0x00 with CompactSize(1025) = 0xfd 0x01 0x04.
