@@ -1,7 +1,6 @@
 package consensus
 
 import (
-	"reflect"
 	"testing"
 	"unsafe"
 )
@@ -9,12 +8,7 @@ import (
 var dummyByteForUnsafeLen byte
 
 func unsafeLenBytes(n int) []byte {
-	h := reflect.SliceHeader{
-		Data: uintptr(unsafe.Pointer(&dummyByteForUnsafeLen)),
-		Len:  n,
-		Cap:  n,
-	}
-	return *(*[]byte)(unsafe.Pointer(&h))
+	return unsafe.Slice((*byte)(unsafe.Pointer(&dummyByteForUnsafeLen)), n)
 }
 
 func TestCompactSizeLen_Boundaries(t *testing.T) {
