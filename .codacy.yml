@@ -1,0 +1,6 @@
+exclude_paths:
+  # Generated / machine-produced artifacts (duplicates are expected; keep Codacy signal focused on human-written code).
+  - "conformance/fixtures/**"
+  - "conformance/MATRIX.md"
+  - "rubin-formal/RubinFormal/Conformance/**"
+  - "rubin-formal/RubinFormal/Refinement/GoTraceV1.lean"
