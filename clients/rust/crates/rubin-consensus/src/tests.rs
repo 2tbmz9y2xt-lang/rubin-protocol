@@ -78,6 +78,27 @@ fn parse_tx_script_sig_len_overflow() {
 }
 
 #[test]
+fn parse_tx_covenant_data_len_exceeds_cap() {
+    let mut b = Vec::new();
+    b.extend_from_slice(&1u32.to_le_bytes()); // version
+    b.push(0x00); // tx_kind
+    b.extend_from_slice(&0u64.to_le_bytes()); // tx_nonce
+    crate::compactsize::encode_compact_size(0, &mut b); // input_count
+
+    crate::compactsize::encode_compact_size(1, &mut b); // output_count
+    b.extend_from_slice(&0u64.to_le_bytes()); // value
+    b.extend_from_slice(&0u16.to_le_bytes()); // covenant_type
+    crate::compactsize::encode_compact_size(MAX_COVENANT_DATA_PER_OUTPUT + 1, &mut b); // covenant_data_len
+
+    b.extend_from_slice(&0u32.to_le_bytes()); // locktime
+    crate::compactsize::encode_compact_size(0, &mut b); // witness_count
+    crate::compactsize::encode_compact_size(0, &mut b); // da_payload_len
+
+    let err = parse_tx(&b).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+}
+
+#[test]
 fn parse_tx_witness_count_overflow() {
     let mut tx_bytes = minimal_tx_bytes();
     // Replace witness_count=0x00 with CompactSize(1025) = 0xfd 0x01 0x04.
@@ -2299,6 +2320,97 @@ fn apply_non_coinbase_tx_basic_vault_whitelist_rejects_output() {
             value: 100,
             covenant_type: COV_TYPE_P2PK,
             covenant_data: non_whitelisted_cov,
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![],
+        da_payload: vec![],
+    };
+    tx.witness = vec![
+        sign_input_witness(&tx, 0, 100, ZERO_CHAIN_ID, &vault_kp),
+        sign_input_witness(&tx, 1, 10, ZERO_CHAIN_ID, &owner_kp),
+    ];
+
+    let mut utxos: HashMap<Outpoint, UtxoEntry> = HashMap::new();
+    utxos.insert(
+        Outpoint {
+            txid: prev_vault,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_VAULT,
+            covenant_data: vault_cov,
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    );
+    utxos.insert(
+        Outpoint {
+            txid: prev_fee,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 10,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: owner_cov,
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    );
+
+    let err = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000, ZERO_CHAIN_ID).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrVaultOutputNotWhitelisted);
+}
+
+#[test]
+fn apply_non_coinbase_tx_basic_vault_recursion_rejected() {
+    let mut prev_vault = [0u8; 32];
+    prev_vault[0] = 0xd0;
+    let mut prev_fee = [0u8; 32];
+    prev_fee[0] = 0xd1;
+    let mut txid = [0u8; 32];
+    txid[0] = 0xd2;
+
+    let vault_kp = kp_or_skip!();
+    let owner_kp = kp_or_skip!();
+
+    let owner_cov = p2pk_covenant_data_for_pubkey(&owner_kp.pubkey);
+    let owner_lock_id = sha3_256(&crate::vault::output_descriptor_bytes(
+        COV_TYPE_P2PK,
+        &owner_cov,
+    ));
+
+    // Minimal whitelist (unused by this test because we reject earlier on CORE_VAULT output type).
+    let dummy_whitelist_h = sha3_256(b"dummy-whitelist-entry");
+
+    let vault_key_id = sha3_256(&vault_kp.pubkey);
+    let vault_cov = encode_vault_covenant_data(owner_lock_id, 1, &[vault_key_id], &[dummy_whitelist_h]);
+
+    let mut tx = crate::tx::Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![
+            crate::tx::TxInput {
+                prev_txid: prev_vault,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            },
+            crate::tx::TxInput {
+                prev_txid: prev_fee,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            },
+        ],
+        // This output is a CORE_VAULT output and MUST be rejected for vault spends (recursion hardening).
+        outputs: vec![crate::tx::TxOutput {
+            value: 100,
+            covenant_type: COV_TYPE_VAULT,
+            covenant_data: vault_cov.clone(),
         }],
         locktime: 0,
         da_commit_core: None,
