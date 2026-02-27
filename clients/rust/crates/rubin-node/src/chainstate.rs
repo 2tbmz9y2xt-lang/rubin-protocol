@@ -131,6 +131,12 @@ impl ChainState {
     }
 }
 
+impl Default for ChainState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn chain_state_path<P: AsRef<Path>>(data_dir: P) -> PathBuf {
     data_dir.as_ref().join(CHAIN_STATE_FILE_NAME)
 }
@@ -219,7 +225,7 @@ fn chain_state_from_disk(disk: ChainStateDisk) -> Result<ChainState, String> {
 
 fn parse_hex(name: &str, value: &str) -> Result<Vec<u8>, String> {
     let trimmed = value.trim();
-    if trimmed.len() % 2 != 0 {
+    if !trimmed.len().is_multiple_of(2) {
         return Err(format!("{name}: odd-length hex"));
     }
     hex::decode(trimmed).map_err(|e| format!("{name}: {e}"))
