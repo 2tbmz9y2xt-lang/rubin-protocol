@@ -1,6 +1,15 @@
 package consensus
 
-import "testing"
+import (
+	"testing"
+	"unsafe"
+)
+
+var dummyByteForUnsafeLen byte
+
+func unsafeLenBytes(n int) []byte {
+	return unsafe.Slice((*byte)(unsafe.Pointer(&dummyByteForUnsafeLen)), n)
+}
 
 func TestCompactSizeLen_Boundaries(t *testing.T) {
 	cases := []struct {
@@ -121,6 +130,211 @@ func TestTxWeightAndStats_NonCanonicalWitnessLengths_NoSigCost(t *testing.T) {
 	}
 	if anchorBytes != 32 {
 		t.Fatalf("anchorBytes=%d, want 32", anchorBytes)
+	}
+}
+
+func TestTxWeightAndStats_TxKind00_DAIgnoredForDaBytes(t *testing.T) {
+	tx := &Tx{
+		Version:  1,
+		TxKind:   0x00,
+		TxNonce:  0,
+		Inputs:   []TxInput{},
+		Outputs:  []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+		Locktime: 0,
+		Witness:  []WitnessItem{{SuiteID: 0xff, Pubkey: []byte{0x01}, Signature: []byte{0x02}}},
+		DaPayload: []byte{
+			0x01, 0x02, 0x03,
+		},
+	}
+
+	_, daBytes, _, err := TxWeightAndStats(tx)
+	if err != nil {
+		t.Fatalf("TxWeightAndStats: %v", err)
+	}
+	if daBytes != 0 {
+		t.Fatalf("daBytes=%d, want 0 for tx_kind=0x00", daBytes)
+	}
+}
+
+func TestTxWeightAndStats_DACoreMissingErrors(t *testing.T) {
+	t.Run("tx_kind_01_missing_commit_core", func(t *testing.T) {
+		tx := &Tx{Version: 1, TxKind: 0x01, TxNonce: 1}
+		if _, _, _, err := TxWeightAndStats(tx); err == nil {
+			t.Fatalf("expected error")
+		}
+	})
+	t.Run("tx_kind_02_missing_chunk_core", func(t *testing.T) {
+		tx := &Tx{Version: 1, TxKind: 0x02, TxNonce: 1}
+		if _, _, _, err := TxWeightAndStats(tx); err == nil {
+			t.Fatalf("expected error")
+		}
+	})
+	t.Run("unsupported_tx_kind", func(t *testing.T) {
+		tx := &Tx{Version: 1, TxKind: 0x03, TxNonce: 1}
+		if _, _, _, err := TxWeightAndStats(tx); err == nil {
+			t.Fatalf("expected error")
+		}
+	})
+}
+
+func TestTxWeightAndStats_TxKind02_ChunkCoreOK(t *testing.T) {
+	mlPub := make([]byte, ML_DSA_87_PUBKEY_BYTES)
+	mlSig := make([]byte, ML_DSA_87_SIG_BYTES)
+
+	daID := filled32(0xa1)
+	payload := []byte("abc")
+	chunkHash := sha3_256(payload)
+
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x02,
+		TxNonce: 9,
+		Inputs: []TxInput{
+			{
+				PrevTxid:  filled32(0x01),
+				PrevVout:  2,
+				ScriptSig: []byte{0x99},
+				Sequence:  3,
+			},
+		},
+		Outputs: []TxOutput{
+			{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
+		},
+		Locktime: 0,
+		DaChunkCore: &DaChunkCore{
+			DaID:       daID,
+			ChunkIndex: 0,
+			ChunkHash:  chunkHash,
+		},
+		Witness:   []WitnessItem{{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: mlPub, Signature: mlSig}},
+		DaPayload: payload,
+	}
+
+	_, daBytes, anchorBytes, err := TxWeightAndStats(tx)
+	if err != nil {
+		t.Fatalf("TxWeightAndStats: %v", err)
+	}
+	if daBytes != uint64(len(payload)) {
+		t.Fatalf("daBytes=%d, want %d", daBytes, len(payload))
+	}
+	if anchorBytes != 0 {
+		t.Fatalf("anchorBytes=%d, want 0", anchorBytes)
+	}
+}
+
+func TestTxWeightAndStats_OverflowScriptSigLen(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+
+	tx := &Tx{
+		Version:  1,
+		TxKind:   0x00,
+		TxNonce:  1,
+		Inputs:   []TxInput{{ScriptSig: unsafeLenBytes(maxInt)}, {ScriptSig: unsafeLenBytes(maxInt)}},
+		Outputs:  nil,
+		Locktime: 0,
+		Witness:  nil,
+		DaPayload: []byte{
+			0x01,
+		},
+	}
+
+	if _, _, _, err := TxWeightAndStats(tx); err == nil {
+		t.Fatalf("expected error")
+	} else if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
+	}
+}
+
+func TestTxWeightAndStats_OverflowCovenantDataLen(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 2,
+		Inputs:  nil,
+		Outputs: []TxOutput{
+			{Value: 0, CovenantType: COV_TYPE_P2PK, CovenantData: unsafeLenBytes(maxInt)},
+			{Value: 0, CovenantType: COV_TYPE_P2PK, CovenantData: unsafeLenBytes(maxInt)},
+		},
+		Locktime: 0,
+	}
+
+	if _, _, _, err := TxWeightAndStats(tx); err == nil {
+		t.Fatalf("expected error")
+	} else if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
+	}
+}
+
+func TestTxWeightAndStats_OverflowBaseWeightMulU64(t *testing.T) {
+	// baseSize = 68 + len(scriptSig) for 1-input, 0-output, tx_kind=0x00.
+	// Pick len(scriptSig) such that baseSize > max_u64/4 to force mulU64 overflow.
+	baseSizeTarget := (^uint64(0))/4 + 1
+	scriptSigLen := int(baseSizeTarget - 68)
+
+	tx := &Tx{
+		Version:  1,
+		TxKind:   0x00,
+		TxNonce:  3,
+		Inputs:   []TxInput{{ScriptSig: unsafeLenBytes(scriptSigLen)}},
+		Outputs:  nil,
+		Locktime: 0,
+	}
+
+	if _, _, _, err := TxWeightAndStats(tx); err == nil {
+		t.Fatalf("expected error")
+	} else if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
+	}
+}
+
+func TestTxWeightAndStats_OverflowAddWitnessSize(t *testing.T) {
+	// baseSize = 68 + len(scriptSig) for 1-input, 0-output, tx_kind=0x00.
+	// Choose baseSize=max_u64/4 so baseWeight=max_u64-3, then witnessSize=4 => overflow.
+	baseSizeTarget := (^uint64(0)) / 4
+	scriptSigLen := int(baseSizeTarget - 68)
+
+	tx := &Tx{
+		Version:  1,
+		TxKind:   0x00,
+		TxNonce:  4,
+		Inputs:   []TxInput{{ScriptSig: unsafeLenBytes(scriptSigLen)}},
+		Outputs:  nil,
+		Locktime: 0,
+		Witness:  []WitnessItem{{SuiteID: 0x00, Pubkey: nil, Signature: nil}},
+	}
+
+	if _, _, _, err := TxWeightAndStats(tx); err == nil {
+		t.Fatalf("expected error")
+	} else if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
+	}
+}
+
+func TestTxWeightAndStats_OverflowAddDaSize(t *testing.T) {
+	// baseSize=max_u64/4 => baseWeight=max_u64-3. With no witness: weight=max_u64-2.
+	// Pick daSize=3 (len=2) so adding daSize overflows.
+	baseSizeTarget := (^uint64(0)) / 4
+	scriptSigLen := int(baseSizeTarget - 68)
+
+	tx := &Tx{
+		Version:  1,
+		TxKind:   0x00,
+		TxNonce:  5,
+		Inputs:   []TxInput{{ScriptSig: unsafeLenBytes(scriptSigLen)}},
+		Outputs:  nil,
+		Locktime: 0,
+		Witness:  nil,
+		DaPayload: []byte{
+			0x01, 0x02,
+		},
+	}
+
+	if _, _, _, err := TxWeightAndStats(tx); err == nil {
+		t.Fatalf("expected error")
+	} else if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
 	}
 }
 
