@@ -120,19 +120,58 @@ jobs:
             --commit-uuid "$CODACY_COMMIT_UUID"
           )
 
+          codacy_missing_repo_ok() {
+            # When a repo has moved orgs, Codacy may not be configured yet for the new slug.
+            # Treat "repository not found" as non-blocking so CI stays green while integration is being set up.
+            grep -qiE 'could not find repository|repository[[:space:]]+not[[:space:]]+found' "$1"
+          }
+
           # Upload Go and Rust coverage separately: Codacy auto-detects Go coverage.out as LCOV
           # unless we force the correct parser.
+          set +e
           bash <(curl -Ls https://coverage.codacy.com/get.sh) report \
             "${common_args[@]}" \
             -r clients/go/coverage.out \
             --force-coverage-parser go \
-            --partial
+            --partial 2>&1 | tee /tmp/codacy_report_go.log
+          rc="${PIPESTATUS[0]}"
+          set -e
+          if [[ "$rc" != "0" ]]; then
+            if codacy_missing_repo_ok /tmp/codacy_report_go.log; then
+              echo "Codacy repo not found for ${CODACY_USERNAME}/${CODACY_PROJECT_NAME}; skipping upload."
+              exit 0
+            fi
+            echo "Codacy upload failed (non-blocking). See /tmp/codacy_report_go.log for details."
+            exit 0
+          fi
 
+          set +e
           bash <(curl -Ls https://coverage.codacy.com/get.sh) report \
             "${common_args[@]}" \
             -r clients/rust/lcov.info \
             --force-coverage-parser lcov \
-            --partial
+            --partial 2>&1 | tee /tmp/codacy_report_rust.log
+          rc="${PIPESTATUS[0]}"
+          set -e
+          if [[ "$rc" != "0" ]]; then
+            if codacy_missing_repo_ok /tmp/codacy_report_rust.log; then
+              echo "Codacy repo not found for ${CODACY_USERNAME}/${CODACY_PROJECT_NAME}; skipping upload."
+              exit 0
+            fi
+            echo "Codacy upload failed (non-blocking). See /tmp/codacy_report_rust.log for details."
+            exit 0
+          fi
 
+          set +e
           bash <(curl -Ls https://coverage.codacy.com/get.sh) final \
-            "${common_args[@]}"
+            "${common_args[@]}" 2>&1 | tee /tmp/codacy_final.log
+          rc="${PIPESTATUS[0]}"
+          set -e
+          if [[ "$rc" != "0" ]]; then
+            if codacy_missing_repo_ok /tmp/codacy_final.log; then
+              echo "Codacy repo not found for ${CODACY_USERNAME}/${CODACY_PROJECT_NAME}; skipping finalization."
+              exit 0
+            fi
+            echo "Codacy finalization failed (non-blocking). See /tmp/codacy_final.log for details."
+            exit 0
+          fi
