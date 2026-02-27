@@ -5,10 +5,53 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"testing"
 	"time"
 )
+
+type staticAddr string
+
+func (a staticAddr) Network() string { return "test" }
+func (a staticAddr) String() string  { return string(a) }
+
+type timeoutError struct{}
+
+func (e timeoutError) Error() string   { return "timeout" }
+func (e timeoutError) Timeout() bool   { return true }
+func (e timeoutError) Temporary() bool { return true }
+
+type scriptedConn struct {
+	readErrs         []error
+	writeErr         error
+	setReadDeadErr   error
+	setWriteDeadErr  error
+	remoteAddrString string
+}
+
+func (c *scriptedConn) Read(_ []byte) (int, error) {
+	if len(c.readErrs) == 0 {
+		return 0, io.EOF
+	}
+	err := c.readErrs[0]
+	c.readErrs = c.readErrs[1:]
+	return 0, err
+}
+
+func (c *scriptedConn) Write(p []byte) (int, error) {
+	if c.writeErr != nil {
+		return 0, c.writeErr
+	}
+	return len(p), nil
+}
+
+func (c *scriptedConn) Close() error                       { return nil }
+func (c *scriptedConn) LocalAddr() net.Addr                { return staticAddr("local") }
+func (c *scriptedConn) RemoteAddr() net.Addr               { return staticAddr(c.remoteAddrString) }
+func (c *scriptedConn) SetDeadline(_ time.Time) error      { return nil }
+func (c *scriptedConn) SetReadDeadline(_ time.Time) error  { return c.setReadDeadErr }
+func (c *scriptedConn) SetWriteDeadline(_ time.Time) error { return c.setWriteDeadErr }
 
 func TestPerformVersionHandshakeOK(t *testing.T) {
 	local, remote := net.Pipe()
@@ -225,4 +268,177 @@ func readWireMessage(reader *bufio.Reader) (WireMessage, error) {
 	}
 	err = json.Unmarshal(line, &out)
 	return out, err
+}
+
+func TestDefaultPeerRuntimeConfig_ClampMaxPeers(t *testing.T) {
+	cfg := DefaultPeerRuntimeConfig("devnet", 0)
+	if cfg.MaxPeers != 64 {
+		t.Fatalf("max_peers=%d, want 64", cfg.MaxPeers)
+	}
+	if cfg.ReadDeadline != defaultReadDeadline || cfg.WriteDeadline != defaultWriteDeadline || cfg.BanThreshold != defaultBanThreshold {
+		t.Fatalf("unexpected defaults: %#v", cfg)
+	}
+}
+
+func TestNewPeerManager_DefaultsApplied(t *testing.T) {
+	pm := NewPeerManager(PeerRuntimeConfig{Network: "devnet"})
+	if pm.cfg.MaxPeers != 64 {
+		t.Fatalf("max_peers=%d, want 64", pm.cfg.MaxPeers)
+	}
+	if pm.cfg.ReadDeadline != defaultReadDeadline || pm.cfg.WriteDeadline != defaultWriteDeadline || pm.cfg.BanThreshold != defaultBanThreshold {
+		t.Fatalf("unexpected defaults: %#v", pm.cfg)
+	}
+}
+
+func TestPeerManager_AddPeerNilCases(t *testing.T) {
+	var pm *PeerManager
+	if err := pm.AddPeer(&PeerState{Addr: "x"}); err == nil {
+		t.Fatalf("expected error for nil pm")
+	}
+
+	pm = NewPeerManager(DefaultPeerRuntimeConfig("devnet", 1))
+	if err := pm.AddPeer(nil); err == nil {
+		t.Fatalf("expected error for nil peer")
+	}
+}
+
+func TestPeerManager_SnapshotClones(t *testing.T) {
+	pm := NewPeerManager(DefaultPeerRuntimeConfig("devnet", 8))
+	st := &PeerState{Addr: "a", BanScore: 7, LastError: "x"}
+	if err := pm.AddPeer(st); err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+	st.BanScore = 999
+	snap := pm.Snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("snapshot len=%d, want 1", len(snap))
+	}
+	if snap[0].BanScore != 7 {
+		t.Fatalf("snapshot ban_score=%d, want 7", snap[0].BanScore)
+	}
+}
+
+func TestPeerManager_RemovePeer(t *testing.T) {
+	pm := NewPeerManager(DefaultPeerRuntimeConfig("devnet", 8))
+	if err := pm.AddPeer(&PeerState{Addr: "a"}); err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+	pm.RemovePeer("a")
+	if got := pm.Snapshot(); len(got) != 0 {
+		t.Fatalf("snapshot len=%d, want 0", len(got))
+	}
+
+	var nilPM *PeerManager
+	nilPM.RemovePeer("a")
+}
+
+func TestValidateRemoteVersion_Errors(t *testing.T) {
+	if err := validateRemoteVersion("devnet", VersionPayloadV1{}); err == nil {
+		t.Fatalf("expected error")
+	}
+	if err := validateRemoteVersion("devnet", VersionPayloadV1{ProtocolVersion: 1, Network: "testnet", NodeID: "x"}); err == nil {
+		t.Fatalf("expected network mismatch")
+	}
+	if err := validateRemoteVersion("", VersionPayloadV1{ProtocolVersion: 1, Network: "x", NodeID: ""}); err == nil {
+		t.Fatalf("expected empty node_id error")
+	}
+}
+
+func TestPerformVersionHandshake_NilConn(t *testing.T) {
+	_, err := PerformVersionHandshake(context.Background(), nil, PeerRuntimeConfig{}, VersionPayloadV1{})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestPerformVersionHandshake_BansOnUnexpectedPreHandshakeCommand(t *testing.T) {
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+
+	cfg := DefaultPeerRuntimeConfig("devnet", 8)
+	cfg.ReadDeadline = 2 * time.Second
+	cfg.WriteDeadline = 2 * time.Second
+	cfg.BanThreshold = 10
+
+	go func() {
+		reader := bufio.NewReader(remote)
+		_, _ = reader.ReadBytes('\n') // local version
+		_ = writeWireMessage(remote, WireMessage{Command: "ping"})
+	}()
+
+	_, err := PerformVersionHandshake(context.Background(), local, cfg, VersionPayloadV1{
+		ProtocolVersion: 1,
+		Network:         "devnet",
+		NodeID:          "local-1",
+	})
+	if err == nil {
+		t.Fatalf("expected handshake error")
+	}
+}
+
+func TestPeerSession_readMessage_SetReadDeadlineError(t *testing.T) {
+	c := &scriptedConn{
+		setReadDeadErr:   errors.New("nope"),
+		remoteAddrString: "x",
+	}
+	ps := NewPeerSession(c, DefaultPeerRuntimeConfig("devnet", 1), PeerState{Addr: "x"})
+	if _, err := ps.readMessage(); err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestPeerSession_writeMessage_SetWriteDeadlineError(t *testing.T) {
+	c := &scriptedConn{
+		setWriteDeadErr:  errors.New("nope"),
+		remoteAddrString: "x",
+	}
+	ps := NewPeerSession(c, DefaultPeerRuntimeConfig("devnet", 1), PeerState{Addr: "x"})
+	if err := ps.writeMessage(WireMessage{Command: "ping"}); err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestNewPeerSession_DefaultsApplied(t *testing.T) {
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+
+	cfg := PeerRuntimeConfig{
+		MaxPeers:      1,
+		ReadDeadline:  0,
+		WriteDeadline: 0,
+		BanThreshold:  0,
+		Network:       "devnet",
+	}
+	ps := NewPeerSession(local, cfg, PeerState{Addr: "pipe"})
+	if ps.cfg.ReadDeadline != defaultReadDeadline {
+		t.Fatalf("read_deadline=%s, want %s", ps.cfg.ReadDeadline, defaultReadDeadline)
+	}
+	if ps.cfg.WriteDeadline != defaultWriteDeadline {
+		t.Fatalf("write_deadline=%s, want %s", ps.cfg.WriteDeadline, defaultWriteDeadline)
+	}
+	if ps.cfg.BanThreshold != defaultBanThreshold {
+		t.Fatalf("ban_threshold=%d, want %d", ps.cfg.BanThreshold, defaultBanThreshold)
+	}
+}
+
+func TestPeerSession_Run_TimeoutThenEOF(t *testing.T) {
+	c := &scriptedConn{
+		readErrs:         []error{timeoutError{}, io.EOF},
+		remoteAddrString: "x",
+	}
+	cfg := DefaultPeerRuntimeConfig("devnet", 1)
+	cfg.ReadDeadline = 1 * time.Millisecond
+	cfg.WriteDeadline = 1 * time.Millisecond
+	ps := NewPeerSession(c, cfg, PeerState{Addr: "x", HandshakeComplete: true})
+	if err := ps.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
+func TestClonePeerState_Nil(t *testing.T) {
+	if clonePeerState(nil) != nil {
+		t.Fatalf("expected nil")
+	}
 }
