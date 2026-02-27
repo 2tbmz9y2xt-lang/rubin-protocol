@@ -63,4 +63,3 @@ func TestCheckSpendCovenant_Errors(t *testing.T) {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
 	}
 }
-
