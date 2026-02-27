@@ -8,7 +8,7 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Cache OpenSSL 3.5 bundle
         uses: actions/cache@v5
