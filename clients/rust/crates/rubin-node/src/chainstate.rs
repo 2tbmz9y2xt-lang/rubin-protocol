@@ -9,6 +9,8 @@ use rubin_consensus::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::io_utils::{parse_hex32, write_file_atomic};
+
 pub const CHAIN_STATE_FILE_NAME: &str = "chainstate.json";
 const CHAIN_STATE_DISK_VERSION: u32 = 1;
 
@@ -229,25 +231,6 @@ fn parse_hex(name: &str, value: &str) -> Result<Vec<u8>, String> {
         return Err(format!("{name}: odd-length hex"));
     }
     hex::decode(trimmed).map_err(|e| format!("{name}: {e}"))
-}
-
-fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
-    let bytes = parse_hex(name, value)?;
-    if bytes.len() != 32 {
-        return Err(format!("{name}: expected 32 bytes, got {}", bytes.len()));
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes);
-    Ok(out)
-}
-
-fn write_file_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
-    let tmp_path = format!("{}.tmp.{}", path.display(), std::process::id());
-    fs::write(&tmp_path, data).map_err(|e| format!("write temp {}: {e}", tmp_path))?;
-    fs::rename(&tmp_path, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp_path);
-        format!("rename temp {} -> {}: {e}", tmp_path, path.display())
-    })
 }
 
 #[cfg(test)]

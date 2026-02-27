@@ -1,5 +1,6 @@
 pub mod blockstore;
 pub mod chainstate;
+mod io_utils;
 pub mod sync;
 
 pub use blockstore::{block_store_path, BlockStore, BLOCK_STORE_DIR_NAME};
