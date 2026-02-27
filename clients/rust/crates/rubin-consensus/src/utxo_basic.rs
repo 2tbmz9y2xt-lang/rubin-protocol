@@ -426,9 +426,7 @@ fn has_owner_authorized_input(
 }
 
 fn has_owner_lock_input(input_lock_ids: &[[u8; 32]], owner_lock_id: [u8; 32]) -> bool {
-    input_lock_ids
-        .iter()
-        .any(|lock_id| *lock_id == owner_lock_id)
+    input_lock_ids.contains(&owner_lock_id)
 }
 
 fn non_vault_inputs_owned_by(
