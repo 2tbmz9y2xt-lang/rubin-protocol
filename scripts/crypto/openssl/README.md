@@ -27,6 +27,12 @@ RUBIN_OPENSSL_FIPS_MODE=only \
 scripts/dev-env.sh -- scripts/crypto/openssl/fips-preflight.sh
 ```
 
+Runtime enforcement in `RUBIN_OPENSSL_FIPS_MODE=only`:
+
+- `scripts/dev-env.sh -- <cmd>` now runs the same preflight automatically and hard-fails when
+  `provider=fips`/required PQ signatures are unavailable.
+- Temporary bypass (for bootstrap/debug only): set `RUBIN_OPENSSL_SKIP_FIPS_GUARD=1`.
+
 ## Thread-safety assumptions (verify/sign paths)
 
 OpenSSL usage in this repository relies on the following invariants:
