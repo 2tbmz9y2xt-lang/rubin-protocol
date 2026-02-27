@@ -1,5 +1,13 @@
+# Codacy duplication/clone detector is expected to flag generated artifacts.
+# Keep Codacy signal focused on human-written code.
 exclude_paths:
-  # Generated / machine-produced artifacts (duplicates are expected; keep Codacy signal focused on human-written code).
+  - "conformance/fixtures/**"
+  - "conformance/MATRIX.md"
+  - "rubin-formal/RubinFormal/Conformance/**"
+  - "rubin-formal/RubinFormal/Refinement/GoTraceV1.lean"
+
+# Some Codacy setups expect CodeClimate-style naming.
+exclude_patterns:
   - "conformance/fixtures/**"
   - "conformance/MATRIX.md"
   - "rubin-formal/RubinFormal/Conformance/**"
