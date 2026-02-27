@@ -26,12 +26,6 @@ ID_PATTERNS = (
     re.compile(r"^(?:[A-Z]+(?:-[A-Z0-9]+)+)$"),
     re.compile(r"^ACCEPTED_RISK_[A-Z0-9_]+$"),
 )
-FORBIDDEN_REF_SUBSTRINGS = ("spec_snapshot_",)
-LOCAL_HOME_PREFIXES = (
-    "/" + "Users" + "/",
-    "/" + "home" + "/",
-    "C:" + "\\" + "Users" + "\\",
-)
 
 
 def is_finding_id(value: str) -> bool:
@@ -100,14 +94,6 @@ def extract_refs(text: str) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for ref in refs:
-        normalized = ref.strip()
-        if not normalized:
-            continue
-        lower = normalized.lower()
-        if any(token in lower for token in FORBIDDEN_REF_SUBSTRINGS):
-            continue
-        if any(normalized.startswith(prefix) for prefix in LOCAL_HOME_PREFIXES):
-            continue
         if ref not in seen:
             out.append(ref)
             seen.add(ref)

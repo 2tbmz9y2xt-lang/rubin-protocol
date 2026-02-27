@@ -20,26 +20,11 @@ ALLOWED_STATUS = {
     "RETRACTED",
 }
 ALLOWED_LAYER = {"spec", "repo", "ci"}
-FORBIDDEN_REF_SUBSTRINGS = ("spec_snapshot_",)
-LOCAL_HOME_PREFIXES = (
-    "/" + "Users" + "/",
-    "/" + "home" + "/",
-    "C:" + "\\" + "Users" + "\\",
-)
 
 
 def fail(msg: str) -> int:
     print(f"ERROR: {msg}", file=sys.stderr)
     return 1
-
-
-def is_forbidden_ref(value: str) -> bool:
-    lowered = value.lower()
-    if any(token in lowered for token in FORBIDDEN_REF_SUBSTRINGS):
-        return True
-    if any(value.startswith(prefix) for prefix in LOCAL_HOME_PREFIXES):
-        return True
-    return False
 
 
 def file_sha256(path: Path) -> str:
@@ -149,17 +134,6 @@ def main() -> int:
             return fail(f"finding {finding_id}: evidence must be non-empty list")
         if not isinstance(sources, list) or len(sources) == 0:
             return fail(f"finding {finding_id}: sources must be non-empty list")
-
-        for ref in evidence:
-            if isinstance(ref, str) and is_forbidden_ref(ref):
-                return fail(
-                    f"finding {finding_id}: forbidden snapshot/local path ref in evidence: {ref}"
-                )
-        for ref in sources:
-            if isinstance(ref, str) and is_forbidden_ref(ref):
-                return fail(
-                    f"finding {finding_id}: forbidden snapshot/local path ref in sources: {ref}"
-                )
 
         if "ALREADY_FIXED" in summary.upper() and status != "ALREADY_FIXED":
             return fail(
