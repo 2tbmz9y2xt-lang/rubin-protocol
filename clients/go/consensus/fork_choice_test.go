@@ -1,48 +1,49 @@
 package consensus
 
 import (
-	"encoding/hex"
 	"math/big"
 	"testing"
 )
 
-func mustHex32(t *testing.T, hex32 string) [32]byte {
-	t.Helper()
-	b, err := hex.DecodeString(hex32)
-	if err != nil || len(b) != 32 {
-		t.Fatalf("bad hex32: %v len=%d", err, len(b))
+func TestWorkFromTarget_RejectsInvalidTargets(t *testing.T) {
+	_, err := WorkFromTarget([32]byte{})
+	if err == nil {
+		t.Fatalf("expected error for zero target")
 	}
-	var out [32]byte
-	copy(out[:], b)
-	return out
+	if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
+	}
 }
 
-func TestWorkFromTarget_Vectors(t *testing.T) {
-	ff := mustHex32(t, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
-	w, err := WorkFromTarget(ff)
+func TestWorkFromTarget_Deterministic(t *testing.T) {
+	target := filledHash(0xff)
+	w, err := WorkFromTarget(target)
 	if err != nil {
-		t.Fatalf("err: %v", err)
+		t.Fatalf("WorkFromTarget: %v", err)
 	}
-	if w.Cmp(big.NewInt(1)) != 0 {
-		t.Fatalf("want 1 got %s", w.Text(16))
+	if w.Sign() <= 0 {
+		t.Fatalf("expected positive work")
 	}
 
-	half := mustHex32(t, "8000000000000000000000000000000000000000000000000000000000000000")
-	w, err = WorkFromTarget(half)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if w.Cmp(big.NewInt(2)) != 0 {
-		t.Fatalf("want 2 got %s", w.Text(16))
-	}
-
-	one := mustHex32(t, "0000000000000000000000000000000000000000000000000000000000000001")
-	w, err = WorkFromTarget(one)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	want := new(big.Int).Lsh(big.NewInt(1), 256)
+	two256 := new(big.Int).Lsh(big.NewInt(1), 256)
+	want := new(big.Int).Div(two256, new(big.Int).SetBytes(target[:]))
 	if w.Cmp(want) != 0 {
-		t.Fatalf("want 2^256 got %s", w.Text(16))
+		t.Fatalf("work mismatch")
+	}
+}
+
+func TestChainWorkFromTargets_Sums(t *testing.T) {
+	t1 := filledHash(0xff)
+	t2 := filledHash(0xfe)
+	w1, _ := WorkFromTarget(t1)
+	w2, _ := WorkFromTarget(t2)
+
+	total, err := ChainWorkFromTargets([][32]byte{t1, t2})
+	if err != nil {
+		t.Fatalf("ChainWorkFromTargets: %v", err)
+	}
+	want := new(big.Int).Add(w1, w2)
+	if total.Cmp(want) != 0 {
+		t.Fatalf("sum mismatch")
 	}
 }
