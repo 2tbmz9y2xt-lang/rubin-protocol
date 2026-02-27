@@ -407,6 +407,7 @@ func TestApplyNonCoinbaseTxBasic_VaultWhitelistRejectsOutput(t *testing.T) {
 	vaultKP := mustMLDSA87Keypair(t)
 	ownerKP := mustMLDSA87Keypair(t)
 	whitelistedDestKP := mustMLDSA87Keypair(t)
+	nonWhitelistedDestKP := mustMLDSA87Keypair(t)
 
 	ownerCovData := p2pkCovenantDataForPubkey(ownerKP.PubkeyBytes())
 	ownerLockID := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, ownerCovData))
@@ -414,8 +415,27 @@ func TestApplyNonCoinbaseTxBasic_VaultWhitelistRejectsOutput(t *testing.T) {
 	whitelistedOutData := p2pkCovenantDataForPubkey(whitelistedDestKP.PubkeyBytes())
 	whitelistH := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, whitelistedOutData))
 
+	nonWhitelistedOutData := p2pkCovenantDataForPubkey(nonWhitelistedDestKP.PubkeyBytes())
+
 	vaultKeyID := sha3_256(vaultKP.PubkeyBytes())
 	vaultCovData := encodeVaultCovenantData(ownerLockID, 1, [][32]byte{vaultKeyID}, [][32]byte{whitelistH})
+
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs: []TxInput{
+			{PrevTxid: prevVault, PrevVout: 0},
+			{PrevTxid: prevFee, PrevVout: 0},
+		},
+		Outputs: []TxOutput{
+			{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: nonWhitelistedOutData},
+		},
+	}
+	tx.Witness = []WitnessItem{
+		signP2PKInputWitness(t, tx, 0, 100, chainID, vaultKP),
+		signP2PKInputWitness(t, tx, 1, 10, chainID, ownerKP),
+	}
 
 	utxos := map[Outpoint]UtxoEntry{
 		{Txid: prevVault, Vout: 0}: {
@@ -428,23 +448,6 @@ func TestApplyNonCoinbaseTxBasic_VaultWhitelistRejectsOutput(t *testing.T) {
 			CovenantType: COV_TYPE_P2PK,
 			CovenantData: ownerCovData,
 		},
-	}
-
-	tx := &Tx{
-		Version: 1,
-		TxKind:  0x00,
-		TxNonce: 1,
-		Inputs: []TxInput{
-			{PrevTxid: prevVault, PrevVout: 0},
-			{PrevTxid: prevFee, PrevVout: 0},
-		},
-		Outputs: []TxOutput{
-			{Value: 100, CovenantType: COV_TYPE_VAULT, CovenantData: vaultCovData},
-		},
-	}
-	tx.Witness = []WitnessItem{
-		signP2PKInputWitness(t, tx, 0, 100, chainID, vaultKP),
-		signP2PKInputWitness(t, tx, 1, 10, chainID, ownerKP),
 	}
 
 	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, chainID)
