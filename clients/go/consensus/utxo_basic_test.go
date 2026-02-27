@@ -17,31 +17,31 @@ func txWithOneInputOneOutputWithWitness(
 	witnesses []WitnessItem,
 ) []byte {
 	b := make([]byte, 0, 256+len(outCovData))
-	b = appendU32le(b, 1)
+	b = AppendU32le(b, 1)
 	b = append(b, 0x00) // tx_kind
-	b = appendU64le(b, 1)
-	b = appendCompactSize(b, 1) // input_count
+	b = AppendU64le(b, 1)
+	b = AppendCompactSize(b, 1) // input_count
 	b = append(b, prevTxid[:]...)
-	b = appendU32le(b, prevVout)
-	b = appendCompactSize(b, 0) // script_sig_len
-	b = appendU32le(b, 0)       // sequence
+	b = AppendU32le(b, prevVout)
+	b = AppendCompactSize(b, 0) // script_sig_len
+	b = AppendU32le(b, 0)       // sequence
 
-	b = appendCompactSize(b, 1) // output_count
-	b = appendU64le(b, outValue)
-	b = appendU16le(b, outCovType)
-	b = appendCompactSize(b, uint64(len(outCovData)))
+	b = AppendCompactSize(b, 1) // output_count
+	b = AppendU64le(b, outValue)
+	b = AppendU16le(b, outCovType)
+	b = AppendCompactSize(b, uint64(len(outCovData)))
 	b = append(b, outCovData...)
 
-	b = appendU32le(b, 0) // locktime
-	b = appendCompactSize(b, uint64(len(witnesses)))
+	b = AppendU32le(b, 0) // locktime
+	b = AppendCompactSize(b, uint64(len(witnesses)))
 	for _, w := range witnesses {
 		b = append(b, w.SuiteID)
-		b = appendCompactSize(b, uint64(len(w.Pubkey)))
+		b = AppendCompactSize(b, uint64(len(w.Pubkey)))
 		b = append(b, w.Pubkey...)
-		b = appendCompactSize(b, uint64(len(w.Signature)))
+		b = AppendCompactSize(b, uint64(len(w.Signature)))
 		b = append(b, w.Signature...)
 	}
-	b = appendCompactSize(b, 0)
+	b = AppendCompactSize(b, 0)
 	return b
 }
 

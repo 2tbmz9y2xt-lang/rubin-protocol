@@ -12,7 +12,7 @@ func encodeHTLCCovenantData(
 	b := make([]byte, 0, MAX_HTLC_COVENANT_DATA)
 	b = append(b, hash[:]...)
 	b = append(b, lockMode)
-	b = appendU64le(b, lockValue)
+	b = AppendU64le(b, lockValue)
 	b = append(b, claimKeyID[:]...)
 	b = append(b, refundKeyID[:]...)
 	return b
@@ -21,7 +21,7 @@ func encodeHTLCCovenantData(
 func encodeHTLCClaimPayload(preimage []byte) []byte {
 	b := make([]byte, 0, 3+len(preimage))
 	b = append(b, 0x00) // path_id = claim
-	b = appendU16le(b, uint16(len(preimage)))
+	b = AppendU16le(b, uint16(len(preimage)))
 	b = append(b, preimage...)
 	return b
 }

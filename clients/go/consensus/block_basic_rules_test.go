@@ -9,19 +9,19 @@ func buildBlockBytes(t *testing.T, prevHash [32]byte, merkleRoot [32]byte, targe
 	}
 
 	header := make([]byte, 0, BLOCK_HEADER_BYTES)
-	header = appendU32le(header, 1) // version
+	header = AppendU32le(header, 1) // version
 	header = append(header, prevHash[:]...)
 	header = append(header, merkleRoot[:]...)
-	header = appendU64le(header, 1) // timestamp
+	header = AppendU64le(header, 1) // timestamp
 	header = append(header, target[:]...)
-	header = appendU64le(header, nonce)
+	header = AppendU64le(header, nonce)
 	if len(header) != BLOCK_HEADER_BYTES {
 		t.Fatalf("header size=%d, want %d", len(header), BLOCK_HEADER_BYTES)
 	}
 
 	b := make([]byte, 0, len(header)+32)
 	b = append(b, header...)
-	b = appendCompactSize(b, uint64(len(txs)))
+	b = AppendCompactSize(b, uint64(len(txs)))
 	for _, tx := range txs {
 		b = append(b, tx...)
 	}
@@ -46,20 +46,20 @@ func txWithOutputs(outputs []testOutput) []byte {
 		sizeHint += 16 + len(out.covenantData)
 	}
 	b := make([]byte, 0, sizeHint)
-	b = appendU32le(b, 1) // version
+	b = AppendU32le(b, 1) // version
 	b = append(b, 0x00)   // tx_kind
-	b = appendU64le(b, 0) // tx_nonce
-	b = appendCompactSize(b, 0)
-	b = appendCompactSize(b, uint64(len(outputs)))
+	b = AppendU64le(b, 0) // tx_nonce
+	b = AppendCompactSize(b, 0)
+	b = AppendCompactSize(b, uint64(len(outputs)))
 	for _, out := range outputs {
-		b = appendU64le(b, out.value)
-		b = appendU16le(b, out.covenantType)
-		b = appendCompactSize(b, uint64(len(out.covenantData)))
+		b = AppendU64le(b, out.value)
+		b = AppendU16le(b, out.covenantType)
+		b = AppendCompactSize(b, uint64(len(out.covenantData)))
 		b = append(b, out.covenantData...)
 	}
-	b = appendU32le(b, 0) // locktime
-	b = appendCompactSize(b, 0)
-	b = appendCompactSize(b, 0)
+	b = AppendU32le(b, 0) // locktime
+	b = AppendCompactSize(b, 0)
+	b = AppendCompactSize(b, 0)
 	return b
 }
 
@@ -69,51 +69,51 @@ func coinbaseTxWithOutputs(locktime uint32, outputs []testOutput) []byte {
 		sizeHint += 16 + len(out.covenantData)
 	}
 	b := make([]byte, 0, sizeHint)
-	b = appendU32le(b, 1) // version
+	b = AppendU32le(b, 1) // version
 	b = append(b, 0x00)   // tx_kind
-	b = appendU64le(b, 0) // tx_nonce
-	b = appendCompactSize(b, 1)
+	b = AppendU64le(b, 0) // tx_nonce
+	b = AppendCompactSize(b, 1)
 	b = append(b, make([]byte, 32)...)
-	b = appendU32le(b, ^uint32(0))
-	b = appendCompactSize(b, 0) // script_sig_len
-	b = appendU32le(b, ^uint32(0))
-	b = appendCompactSize(b, uint64(len(outputs)))
+	b = AppendU32le(b, ^uint32(0))
+	b = AppendCompactSize(b, 0) // script_sig_len
+	b = AppendU32le(b, ^uint32(0))
+	b = AppendCompactSize(b, uint64(len(outputs)))
 	for _, out := range outputs {
-		b = appendU64le(b, out.value)
-		b = appendU16le(b, out.covenantType)
-		b = appendCompactSize(b, uint64(len(out.covenantData)))
+		b = AppendU64le(b, out.value)
+		b = AppendU16le(b, out.covenantType)
+		b = AppendCompactSize(b, uint64(len(out.covenantData)))
 		b = append(b, out.covenantData...)
 	}
-	b = appendU32le(b, locktime)
-	b = appendCompactSize(b, 0)
-	b = appendCompactSize(b, 0)
+	b = AppendU32le(b, locktime)
+	b = AppendCompactSize(b, 0)
+	b = AppendCompactSize(b, 0)
 	return b
 }
 
 func txWithOneInputOneOutputAndWitness(suiteID byte, pubkey []byte, signature []byte) []byte {
 	outCov := validP2PKCovenantData()
 	b := make([]byte, 0, 160+len(pubkey)+len(signature)+len(outCov))
-	b = appendU32le(b, 1) // version
+	b = AppendU32le(b, 1) // version
 	b = append(b, 0x00)   // tx_kind
-	b = appendU64le(b, 1) // tx_nonce
-	b = appendCompactSize(b, 1)
+	b = AppendU64le(b, 1) // tx_nonce
+	b = AppendCompactSize(b, 1)
 	b = append(b, make([]byte, 32)...)
-	b = appendU32le(b, 0)
-	b = appendCompactSize(b, 0)
-	b = appendU32le(b, 0)
-	b = appendCompactSize(b, 1)
-	b = appendU64le(b, 1)
-	b = appendU16le(b, COV_TYPE_P2PK)
-	b = appendCompactSize(b, uint64(len(outCov)))
+	b = AppendU32le(b, 0)
+	b = AppendCompactSize(b, 0)
+	b = AppendU32le(b, 0)
+	b = AppendCompactSize(b, 1)
+	b = AppendU64le(b, 1)
+	b = AppendU16le(b, COV_TYPE_P2PK)
+	b = AppendCompactSize(b, uint64(len(outCov)))
 	b = append(b, outCov...)
-	b = appendU32le(b, 0)
-	b = appendCompactSize(b, 1)
+	b = AppendU32le(b, 0)
+	b = AppendCompactSize(b, 1)
 	b = append(b, suiteID)
-	b = appendCompactSize(b, uint64(len(pubkey)))
+	b = AppendCompactSize(b, uint64(len(pubkey)))
 	b = append(b, pubkey...)
-	b = appendCompactSize(b, uint64(len(signature)))
+	b = AppendCompactSize(b, uint64(len(signature)))
 	b = append(b, signature...)
-	b = appendCompactSize(b, 0)
+	b = AppendCompactSize(b, 0)
 	return b
 }
 

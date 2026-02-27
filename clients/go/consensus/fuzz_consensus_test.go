@@ -29,16 +29,16 @@ func minimalBlockBytesForFuzz() []byte {
 	tx := minimalTxBytesForFuzz()
 
 	header := make([]byte, 0, BLOCK_HEADER_BYTES)
-	header = appendU32le(header, 1) // version
+	header = AppendU32le(header, 1) // version
 	header = append(header, prev[:]...)
 	header = append(header, root[:]...)
-	header = appendU64le(header, 1) // timestamp
+	header = AppendU64le(header, 1) // timestamp
 	header = append(header, target[:]...)
-	header = appendU64le(header, 1) // nonce
+	header = AppendU64le(header, 1) // nonce
 
 	out := make([]byte, 0, len(header)+1+len(tx))
 	out = append(out, header...)
-	out = appendCompactSize(out, 1) // tx_count
+	out = AppendCompactSize(out, 1) // tx_count
 	out = append(out, tx...)
 	return out
 }
@@ -57,7 +57,7 @@ func FuzzReadCompactSize(f *testing.F) {
 		if nbytes <= 0 || nbytes > len(b) {
 			t.Fatalf("bad nbytes=%d len=%d", nbytes, len(b))
 		}
-		enc := appendCompactSize(nil, n)
+		enc := AppendCompactSize(nil, n)
 		if !bytes.Equal(enc, b[:nbytes]) {
 			t.Fatalf("non-minimal or mismatch: got=%x want_prefix=%x", enc, b[:nbytes])
 		}

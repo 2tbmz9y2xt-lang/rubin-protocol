@@ -200,7 +200,7 @@ func TestAppendCompactSizeMinerEncodesAllWidthBranches(t *testing.T) {
 	}
 	for _, tc := range cases {
 		dst := []byte{tc.frontPad}
-		out := appendCompactSizeMiner(dst, tc.value)
+		out := consensus.AppendCompactSize(dst, tc.value)
 		if len(out) != 1+tc.wantLen {
 			t.Fatalf("value=%d len=%d, want %d", tc.value, len(out), 1+tc.wantLen)
 		}
@@ -213,7 +213,7 @@ func TestAppendCompactSizeMinerEncodesAllWidthBranches(t *testing.T) {
 		}
 	}
 
-	out32 := appendCompactSizeMiner(nil, 0xA1B2C3D4)
+	out32 := consensus.AppendCompactSize(nil, 0xA1B2C3D4)
 	if len(out32) != 5 || out32[0] != 0xFE {
 		t.Fatalf("unexpected 32-bit encoding: %x", out32)
 	}
@@ -221,7 +221,7 @@ func TestAppendCompactSizeMinerEncodesAllWidthBranches(t *testing.T) {
 		t.Fatalf("unexpected 32-bit le: %x", out32)
 	}
 
-	out64 := appendCompactSizeMiner(nil, 0x0102030405060708)
+	out64 := consensus.AppendCompactSize(nil, 0x0102030405060708)
 	if len(out64) != 9 || out64[0] != 0xFF {
 		t.Fatalf("unexpected 64-bit encoding: %x", out64)
 	}

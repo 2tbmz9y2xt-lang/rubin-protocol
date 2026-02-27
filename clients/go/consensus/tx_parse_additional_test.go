@@ -19,10 +19,10 @@ func TestParseTx_UnsupportedTxKind(t *testing.T) {
 
 func TestParseTx_InputCountOverflow(t *testing.T) {
 	b := make([]byte, 0, 32)
-	b = appendU32le(b, 1)
+	b = AppendU32le(b, 1)
 	b = append(b, 0x00) // tx_kind
-	b = appendU64le(b, 0)
-	b = appendCompactSize(b, MAX_TX_INPUTS+1)
+	b = AppendU64le(b, 0)
+	b = AppendCompactSize(b, MAX_TX_INPUTS+1)
 
 	_, _, _, _, err := ParseTx(b)
 	if err == nil {
@@ -35,11 +35,11 @@ func TestParseTx_InputCountOverflow(t *testing.T) {
 
 func TestParseTx_OutputCountOverflow(t *testing.T) {
 	b := make([]byte, 0, 32)
-	b = appendU32le(b, 1)
+	b = AppendU32le(b, 1)
 	b = append(b, 0x00) // tx_kind
-	b = appendU64le(b, 0)
-	b = appendCompactSize(b, 0) // input_count
-	b = appendCompactSize(b, MAX_TX_OUTPUTS+1)
+	b = AppendU64le(b, 0)
+	b = AppendCompactSize(b, 0) // input_count
+	b = AppendCompactSize(b, MAX_TX_OUTPUTS+1)
 
 	_, _, _, _, err := ParseTx(b)
 	if err == nil {
@@ -52,14 +52,14 @@ func TestParseTx_OutputCountOverflow(t *testing.T) {
 
 func TestParseTx_CovenantDataLenOverflowsInt(t *testing.T) {
 	b := make([]byte, 0, 64)
-	b = appendU32le(b, 1)
+	b = AppendU32le(b, 1)
 	b = append(b, 0x00) // tx_kind
-	b = appendU64le(b, 0)
-	b = appendCompactSize(b, 0) // input_count
-	b = appendCompactSize(b, 1) // output_count
-	b = appendU64le(b, 0)
-	b = appendU16le(b, 0)
-	b = appendCompactSize(b, ^uint64(0))
+	b = AppendU64le(b, 0)
+	b = AppendCompactSize(b, 0) // input_count
+	b = AppendCompactSize(b, 1) // output_count
+	b = AppendU64le(b, 0)
+	b = AppendU16le(b, 0)
+	b = AppendCompactSize(b, ^uint64(0))
 
 	_, _, _, _, err := ParseTx(b)
 	if err == nil {
@@ -103,18 +103,18 @@ func TestParseTx_DACommitAndChunk_MinimalOK(t *testing.T) {
 
 func TestParseTx_DACommit_RejectsOversizeManifestPayloadLen(t *testing.T) {
 	b := make([]byte, 0, 256)
-	b = appendU32le(b, 1)
+	b = AppendU32le(b, 1)
 	b = append(b, 0x01) // tx_kind
-	b = appendU64le(b, 0)
-	b = appendCompactSize(b, 0) // input_count
-	b = appendCompactSize(b, 0) // output_count
-	b = appendU32le(b, 0)       // locktime
+	b = AppendU64le(b, 0)
+	b = AppendCompactSize(b, 0) // input_count
+	b = AppendCompactSize(b, 0) // output_count
+	b = AppendU32le(b, 0)       // locktime
 	daID := filled32ForParseTests(0xa2)
 	b = append(b, daID[:]...)
-	b = appendU16le(b, 1) // chunk_count
+	b = AppendU16le(b, 1) // chunk_count
 	retl := filled32ForParseTests(0xa3)
 	b = append(b, retl[:]...)
-	b = appendU64le(b, 1)
+	b = AppendU64le(b, 1)
 	txDataRoot := filled32ForParseTests(0xa4)
 	stateRoot := filled32ForParseTests(0xa5)
 	withdrawalsRoot := filled32ForParseTests(0xa6)
@@ -122,9 +122,9 @@ func TestParseTx_DACommit_RejectsOversizeManifestPayloadLen(t *testing.T) {
 	b = append(b, stateRoot[:]...)
 	b = append(b, withdrawalsRoot[:]...)
 	b = append(b, 0x00)                                      // batch_sig_suite
-	b = appendCompactSize(b, 0)                              // batch_sig_len
-	b = appendCompactSize(b, 0)                              // witness_count
-	b = appendCompactSize(b, MAX_DA_MANIFEST_BYTES_PER_TX+1) // da_payload_len too large
+	b = AppendCompactSize(b, 0)                              // batch_sig_len
+	b = AppendCompactSize(b, 0)                              // witness_count
+	b = AppendCompactSize(b, MAX_DA_MANIFEST_BYTES_PER_TX+1) // da_payload_len too large
 
 	_, _, _, _, err := ParseTx(b)
 	if err == nil {
@@ -137,19 +137,19 @@ func TestParseTx_DACommit_RejectsOversizeManifestPayloadLen(t *testing.T) {
 
 func TestParseTx_DAChunk_RejectsZeroPayloadLen(t *testing.T) {
 	b := make([]byte, 0, 160)
-	b = appendU32le(b, 1)
+	b = AppendU32le(b, 1)
 	b = append(b, 0x02) // tx_kind
-	b = appendU64le(b, 0)
-	b = appendCompactSize(b, 0) // input_count
-	b = appendCompactSize(b, 0) // output_count
-	b = appendU32le(b, 0)       // locktime
+	b = AppendU64le(b, 0)
+	b = AppendCompactSize(b, 0) // input_count
+	b = AppendCompactSize(b, 0) // output_count
+	b = AppendU32le(b, 0)       // locktime
 	daID := filled32ForParseTests(0xb1)
 	b = append(b, daID[:]...)
-	b = appendU16le(b, 0) // chunk_index
+	b = AppendU16le(b, 0) // chunk_index
 	chunkHash := filled32ForParseTests(0xb2)
 	b = append(b, chunkHash[:]...)
-	b = appendCompactSize(b, 0) // witness_count
-	b = appendCompactSize(b, 0) // da_payload_len = 0 (invalid for tx_kind=0x02)
+	b = AppendCompactSize(b, 0) // witness_count
+	b = AppendCompactSize(b, 0) // da_payload_len = 0 (invalid for tx_kind=0x02)
 
 	_, _, _, _, err := ParseTx(b)
 	if err == nil {

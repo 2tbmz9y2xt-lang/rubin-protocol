@@ -118,8 +118,8 @@ func ParseMultisigCovenantData(covData []byte) (*MultisigCovenant, error) {
 // OutputDescriptorBytes returns canonical output serialization used for CORE_VAULT whitelist hashing.
 func OutputDescriptorBytes(covenantType uint16, covenantData []byte) []byte {
 	out := make([]byte, 0, 2+9+len(covenantData))
-	out = appendU16le(out, covenantType)
-	out = appendCompactSize(out, uint64(len(covenantData)))
+	out = AppendU16le(out, covenantType)
+	out = AppendCompactSize(out, uint64(len(covenantData)))
 	out = append(out, covenantData...)
 	return out
 }

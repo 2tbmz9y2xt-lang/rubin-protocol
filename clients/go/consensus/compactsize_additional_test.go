@@ -17,7 +17,7 @@ func TestCompactSize_EncodeDecodeRoundtrip_Boundaries(t *testing.T) {
 	}
 	for _, v := range cases {
 		var b []byte
-		b = appendCompactSize(b, v)
+		b = AppendCompactSize(b, v)
 
 		off := 0
 		got, n, err := readCompactSize(b, &off)

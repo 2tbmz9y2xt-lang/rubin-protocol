@@ -432,14 +432,14 @@ func daCoreFieldsBytes(tx *Tx) ([]byte, error) {
 		core := tx.DaCommitCore
 		out := make([]byte, 0, 32+2+32+8+32+32+32+1+9+len(core.BatchSig))
 		out = append(out, core.DaID[:]...)
-		out = appendU16le(out, core.ChunkCount)
+		out = AppendU16le(out, core.ChunkCount)
 		out = append(out, core.RetlDomainID[:]...)
-		out = appendU64le(out, core.BatchNumber)
+		out = AppendU64le(out, core.BatchNumber)
 		out = append(out, core.TxDataRoot[:]...)
 		out = append(out, core.StateRoot[:]...)
 		out = append(out, core.WithdrawalsRoot[:]...)
 		out = append(out, core.BatchSigSuite)
-		out = appendCompactSize(out, uint64(len(core.BatchSig)))
+		out = AppendCompactSize(out, uint64(len(core.BatchSig)))
 		out = append(out, core.BatchSig...)
 		return out, nil
 	case 0x02:
@@ -449,7 +449,7 @@ func daCoreFieldsBytes(tx *Tx) ([]byte, error) {
 		core := tx.DaChunkCore
 		out := make([]byte, 0, 32+2+32)
 		out = append(out, core.DaID[:]...)
-		out = appendU16le(out, core.ChunkIndex)
+		out = AppendU16le(out, core.ChunkIndex)
 		out = append(out, core.ChunkHash[:]...)
 		return out, nil
 	default:
