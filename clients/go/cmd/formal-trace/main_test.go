@@ -89,4 +89,3 @@ func TestDigestFixturesDeterministicAndSensitive(t *testing.T) {
 		t.Fatalf("unexpected digest length: %d", len(d1))
 	}
 }
-
