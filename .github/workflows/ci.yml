@@ -321,59 +321,9 @@ jobs:
           cd rubin-formal
           lake env lean --run RubinFormal/Refinement/Main.lean
 
-  codacy_coverage:
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.24.13'
-          cache: true
-          cache-dependency-path: clients/go/go.mod
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Generate Go coverage
-        run: |
-          cd clients/go
-          go test -coverprofile=coverage.out ./...
-
-      - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin --locked
-
-      - name: Generate Rust LCOV coverage
-        run: |
-          cd clients/rust
-          cargo tarpaulin --out Lcov --output-dir .
-
-      - name: Upload coverage reports to Codacy
-        env:
-          CODACY_API_TOKEN: ${{ secrets.CODACY_API_TOKEN }}
-          CODACY_ORGANIZATION_PROVIDER: gh
-          CODACY_USERNAME: 2tbmz9y2xt-lang
-          CODACY_PROJECT_NAME: rubin-protocol
-        run: |
-          if [ -z "${CODACY_API_TOKEN:-}" ]; then
-            echo "Skipping Codacy upload: CODACY_API_TOKEN is not configured."
-            exit 0
-          fi
-          bash <(curl -Ls https://coverage.codacy.com/get.sh) report \
-            -r clients/go/coverage.out \
-            --force-coverage-parser go \
-            --partial \
-            --commit-uuid "${GITHUB_SHA}"
-          bash <(curl -Ls https://coverage.codacy.com/get.sh) report \
-            -r clients/rust/lcov.info \
-            --partial \
-            --commit-uuid "${GITHUB_SHA}"
-          bash <(curl -Ls https://coverage.codacy.com/get.sh) final \
-            --commit-uuid "${GITHUB_SHA}"
-
   validator:
     name: validator
-    needs: [policy, security_ai, formal, test, formal_refinement, codacy_coverage]
+    needs: [policy, security_ai, formal, test, formal_refinement]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
@@ -385,10 +335,9 @@ jobs:
             [formal]="${{ needs.formal.result }}"
             [test]="${{ needs.test.result }}"
             [formal_refinement]="${{ needs.formal_refinement.result }}"
-            [codacy_coverage]="${{ needs.codacy_coverage.result }}"
           )
           failed=0
-          for key in policy security_ai formal test formal_refinement codacy_coverage; do
+          for key in policy security_ai formal test formal_refinement; do
             value="${results[$key]}"
             echo "$key=$value"
             if [ "$value" != "success" ]; then
