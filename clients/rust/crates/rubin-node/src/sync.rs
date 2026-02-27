@@ -156,13 +156,12 @@ impl SyncEngine {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use rubin_consensus::constants::{COV_TYPE_P2PK, POW_LIMIT};
     use rubin_consensus::{Outpoint, UtxoEntry};
 
     use crate::blockstore::{block_store_path, BlockStore};
     use crate::chainstate::{chain_state_path, load_chain_state, ChainState};
+    use crate::io_utils::unique_temp_path;
     use crate::sync::{default_sync_config, SyncEngine};
 
     const VALID_BLOCK_HEX: &str = "01000000111111111111111111111111111111111111111111111111111111111111111102e66000bf8ce870908df4a8689554852ccef681ee0b5df32246162a53e36e290100000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff07000000000000000101000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff010000000000000000020020b716a4b7f4c0fab665298ab9b8199b601ab9fa7e0a27f0713383f34cf37071a8000000000000";
@@ -184,16 +183,6 @@ mod tests {
             idx += 2;
         }
         out
-    }
-
-    fn tmp_dir(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "rubin-node-sync-{name}-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ))
     }
 
     #[test]
@@ -223,7 +212,7 @@ mod tests {
 
     #[test]
     fn sync_engine_apply_block_persists_chainstate_and_store() {
-        let dir = tmp_dir("persist");
+        let dir = unique_temp_path("rubin-node-sync-persist");
         let chain_state_file = chain_state_path(&dir);
         let block_store_root = block_store_path(&dir);
         let store = BlockStore::open(block_store_root).expect("open blockstore");

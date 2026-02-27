@@ -207,17 +207,13 @@ fn write_file_if_absent(path: &Path, content: &[u8]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::io_utils::unique_temp_path;
+
     use super::{block_store_path, BlockStore, BLOCK_STORE_DIR_NAME};
 
     #[test]
     fn blockstore_open_and_reopen() {
-        let dir = std::env::temp_dir().join(format!(
-            "rubin-blockstore-test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
+        let dir = unique_temp_path("rubin-blockstore-test");
         let root = block_store_path(&dir);
         assert_eq!(
             root.file_name().and_then(|s| s.to_str()),

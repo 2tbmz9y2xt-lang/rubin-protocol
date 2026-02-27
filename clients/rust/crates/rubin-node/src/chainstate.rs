@@ -235,6 +235,8 @@ fn parse_hex(name: &str, value: &str) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::io_utils::unique_temp_path;
+
     use super::{
         chain_state_path, load_chain_state, ChainState, ChainStateDisk, CHAIN_STATE_FILE_NAME,
     };
@@ -242,13 +244,7 @@ mod tests {
 
     #[test]
     fn chainstate_roundtrip_with_utxos() {
-        let dir = std::env::temp_dir().join(format!(
-            "rubin-chainstate-test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
+        let dir = unique_temp_path("rubin-chainstate-test");
         let path = chain_state_path(&dir);
         assert_eq!(
             path.file_name().and_then(|s| s.to_str()),
@@ -283,13 +279,7 @@ mod tests {
 
     #[test]
     fn load_chainstate_rejects_wrong_version() {
-        let dir = std::env::temp_dir().join(format!(
-            "rubin-chainstate-version-test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
+        let dir = unique_temp_path("rubin-chainstate-version-test");
         let path = chain_state_path(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
 
