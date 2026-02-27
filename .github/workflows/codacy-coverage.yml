@@ -141,7 +141,8 @@ jobs:
               echo "Codacy repo not found for ${CODACY_USERNAME}/${CODACY_PROJECT_NAME}; skipping upload."
               exit 0
             fi
-            exit "$rc"
+            echo "Codacy upload failed (non-blocking). See /tmp/codacy_report_go.log for details."
+            exit 0
           fi
 
           set +e
@@ -157,7 +158,8 @@ jobs:
               echo "Codacy repo not found for ${CODACY_USERNAME}/${CODACY_PROJECT_NAME}; skipping upload."
               exit 0
             fi
-            exit "$rc"
+            echo "Codacy upload failed (non-blocking). See /tmp/codacy_report_rust.log for details."
+            exit 0
           fi
 
           set +e
@@ -170,5 +172,6 @@ jobs:
               echo "Codacy repo not found for ${CODACY_USERNAME}/${CODACY_PROJECT_NAME}; skipping finalization."
               exit 0
             fi
-            exit "$rc"
+            echo "Codacy finalization failed (non-blocking). See /tmp/codacy_final.log for details."
+            exit 0
           fi
