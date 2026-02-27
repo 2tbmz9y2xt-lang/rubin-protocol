@@ -280,18 +280,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
             let v = parse_vault_covenant_data(&out.covenant_data)?;
             let owner_lock_id = v.owner_lock_id;
 
-            let mut has_owner_lock_id = false;
-            let mut has_owner_lock_type = false;
-            for i in 0..input_lock_ids.len() {
-                if input_lock_ids[i] != owner_lock_id {
-                    continue;
-                }
-                has_owner_lock_id = true;
-                if input_cov_types[i] == COV_TYPE_P2PK || input_cov_types[i] == COV_TYPE_MULTISIG {
-                    has_owner_lock_type = true;
-                }
-            }
-            if !has_owner_lock_id || !has_owner_lock_type {
+            if !has_owner_authorized_input(&input_lock_ids, &input_cov_types, owner_lock_id) {
                 return Err(TxError::new(
                     ErrorCode::TxErrVaultOwnerAuthRequired,
                     "missing owner-authorized input for CORE_VAULT creation",
@@ -309,14 +298,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
             ));
         }
         // Owner input required.
-        let mut owner_auth_present = false;
-        for h in &input_lock_ids {
-            if *h == vault_owner_lock_id {
-                owner_auth_present = true;
-                break;
-            }
-        }
-        if !owner_auth_present {
+        if !has_owner_lock_input(&input_lock_ids, vault_owner_lock_id) {
             return Err(TxError::new(
                 ErrorCode::TxErrVaultOwnerAuthRequired,
                 "missing owner-authorized input for CORE_VAULT spend",
@@ -324,16 +306,11 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
         }
 
         // No fee sponsorship: all non-vault inputs must be owned by the same owner lock.
-        for i in 0..input_cov_types.len() {
-            if input_cov_types[i] == COV_TYPE_VAULT {
-                continue;
-            }
-            if input_lock_ids[i] != vault_owner_lock_id {
-                return Err(TxError::new(
-                    ErrorCode::TxErrVaultFeeSponsorForbidden,
-                    "non-owner non-vault input forbidden in CORE_VAULT spend",
-                ));
-            }
+        if !non_vault_inputs_owned_by(&input_lock_ids, &input_cov_types, vault_owner_lock_id) {
+            return Err(TxError::new(
+                ErrorCode::TxErrVaultFeeSponsorForbidden,
+                "non-owner non-vault input forbidden in CORE_VAULT spend",
+            ));
         }
 
         // Circular-reference hardening: vault spends MUST NOT create new CORE_VAULT outputs.
@@ -431,6 +408,36 @@ pub fn apply_non_coinbase_tx_basic_with_mtp(
         chain_id,
     )?;
     Ok(summary)
+}
+
+fn has_owner_authorized_input(
+    input_lock_ids: &[[u8; 32]],
+    input_cov_types: &[u16],
+    owner_lock_id: [u8; 32],
+) -> bool {
+    for (lock_id, cov_type) in input_lock_ids.iter().zip(input_cov_types.iter()) {
+        if *lock_id == owner_lock_id
+            && (*cov_type == COV_TYPE_P2PK || *cov_type == COV_TYPE_MULTISIG)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn has_owner_lock_input(input_lock_ids: &[[u8; 32]], owner_lock_id: [u8; 32]) -> bool {
+    input_lock_ids.contains(&owner_lock_id)
+}
+
+fn non_vault_inputs_owned_by(
+    input_lock_ids: &[[u8; 32]],
+    input_cov_types: &[u16],
+    owner_lock_id: [u8; 32],
+) -> bool {
+    input_lock_ids
+        .iter()
+        .zip(input_cov_types.iter())
+        .all(|(lock_id, cov_type)| *cov_type == COV_TYPE_VAULT || *lock_id == owner_lock_id)
 }
 
 #[allow(dead_code)]

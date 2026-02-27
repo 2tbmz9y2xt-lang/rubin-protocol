@@ -131,7 +131,7 @@ func TestSignOpenSSLDigest32_ExactSigLenMismatchErrors(t *testing.T) {
 
 	var digest [32]byte
 	digest[0] = 0x01
-	_, err := signOpenSSLDigest32(kp.pkey, digest, ML_DSA_87_SIG_BYTES, ML_DSA_87_SIG_BYTES-1, false)
+	_, err := signOpenSSLDigest32(kp.pkey, digest, ML_DSA_87_SIG_BYTES, ML_DSA_87_SIG_BYTES-1)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -146,7 +146,7 @@ func TestSignOpenSSLDigest32_BufferTooSmallErrors(t *testing.T) {
 
 	var digest [32]byte
 	digest[0] = 0x02
-	_, err = signOpenSSLDigest32(kp.pkey, digest, 1, 0, true)
+	_, err = signOpenSSLDigest32(kp.pkey, digest, 1, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -172,7 +172,7 @@ func TestSignOpenSSLDigest32_InvalidFIPSModeRejected(t *testing.T) {
 
 	t.Setenv("RUBIN_OPENSSL_FIPS_MODE", "definitely-invalid")
 	var digest [32]byte
-	_, err := signOpenSSLDigest32(nil, digest, ML_DSA_87_SIG_BYTES, 0, false)
+	_, err := signOpenSSLDigest32(nil, digest, ML_DSA_87_SIG_BYTES, 0)
 	if err == nil {
 		t.Fatalf("expected bootstrap mode error")
 	}

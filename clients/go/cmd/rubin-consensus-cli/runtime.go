@@ -312,6 +312,34 @@ func parseOptionalChainIDHex(chainIDHex string) ([32]byte, error) {
 	return parsed, nil
 }
 
+func parseHex32List(items []string, badErr string) ([][32]byte, error) {
+	parsed := make([][32]byte, 0, len(items))
+	for _, item := range items {
+		value, err := parseExactHex32(item)
+		if err != nil {
+			return nil, fmt.Errorf("%s", badErr)
+		}
+		parsed = append(parsed, value)
+	}
+	return parsed, nil
+}
+
+func parseBlockValidationInputs(req Request) ([]byte, *[32]byte, *[32]byte, error) {
+	blockBytes, err := hex.DecodeString(req.BlockHex)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("bad block")
+	}
+	expectedPrev, err := parseOptionalHex32(req.ExpectedPrev, "bad expected_prev_hash")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	expectedTarget, err := parseOptionalHex32(req.ExpectedTarget, "bad expected_target")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return blockBytes, expectedPrev, expectedTarget, nil
+}
+
 func buildUtxoMap(items []UtxoJSON) (map[consensus.Outpoint]consensus.UtxoEntry, error) {
 	utxos := make(map[consensus.Outpoint]consensus.UtxoEntry, len(items))
 	for _, item := range items {
@@ -505,16 +533,10 @@ func runFromStdin() {
 		return
 
 	case "merkle_root":
-		txids := make([][32]byte, 0, len(req.Txids))
-		for _, h := range req.Txids {
-			b, err := hex.DecodeString(h)
-			if err != nil || len(b) != 32 {
-				writeResp(os.Stdout, Response{Ok: false, Err: "bad txid"})
-				return
-			}
-			var a [32]byte
-			copy(a[:], b)
-			txids = append(txids, a)
+		txids, err := parseHex32List(req.Txids, "bad txid")
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
 		}
 		root, err := consensus.MerkleRootTxids(txids)
 		if err != nil {
@@ -525,16 +547,10 @@ func runFromStdin() {
 		return
 
 	case "witness_merkle_root":
-		wtxids := make([][32]byte, 0, len(req.Wtxids))
-		for _, h := range req.Wtxids {
-			b, err := hex.DecodeString(h)
-			if err != nil || len(b) != 32 {
-				writeResp(os.Stdout, Response{Ok: false, Err: "bad wtxid"})
-				return
-			}
-			var a [32]byte
-			copy(a[:], b)
-			wtxids = append(wtxids, a)
+		wtxids, err := parseHex32List(req.Wtxids, "bad wtxid")
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
 		}
 		root, err := consensus.WitnessMerkleRootWtxids(wtxids)
 		if err != nil {
@@ -648,18 +664,7 @@ func runFromStdin() {
 		return
 
 	case "block_basic_check":
-		blockBytes, err := hex.DecodeString(req.BlockHex)
-		if err != nil {
-			writeResp(os.Stdout, Response{Ok: false, Err: "bad block"})
-			return
-		}
-
-		expectedPrev, err := parseOptionalHex32(req.ExpectedPrev, "bad expected_prev_hash")
-		if err != nil {
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
-			return
-		}
-		expectedTarget, err := parseOptionalHex32(req.ExpectedTarget, "bad expected_target")
+		blockBytes, expectedPrev, expectedTarget, err := parseBlockValidationInputs(req)
 		if err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
 			return
@@ -680,18 +685,7 @@ func runFromStdin() {
 		return
 
 	case "block_basic_check_with_fees":
-		blockBytes, err := hex.DecodeString(req.BlockHex)
-		if err != nil {
-			writeResp(os.Stdout, Response{Ok: false, Err: "bad block"})
-			return
-		}
-
-		expectedPrev, err := parseOptionalHex32(req.ExpectedPrev, "bad expected_prev_hash")
-		if err != nil {
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
-			return
-		}
-		expectedTarget, err := parseOptionalHex32(req.ExpectedTarget, "bad expected_target")
+		blockBytes, expectedPrev, expectedTarget, err := parseBlockValidationInputs(req)
 		if err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
 			return
@@ -714,18 +708,7 @@ func runFromStdin() {
 		return
 
 	case "connect_block_basic":
-		blockBytes, err := hex.DecodeString(req.BlockHex)
-		if err != nil {
-			writeResp(os.Stdout, Response{Ok: false, Err: "bad block"})
-			return
-		}
-
-		expectedPrev, err := parseOptionalHex32(req.ExpectedPrev, "bad expected_prev_hash")
-		if err != nil {
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
-			return
-		}
-		expectedTarget, err := parseOptionalHex32(req.ExpectedTarget, "bad expected_target")
+		blockBytes, expectedPrev, expectedTarget, err := parseBlockValidationInputs(req)
 		if err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
 			return
