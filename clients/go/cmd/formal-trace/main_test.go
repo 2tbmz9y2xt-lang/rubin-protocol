@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha3"
+	"flag"
 	"os"
 	"path/filepath"
 	"testing"
@@ -87,5 +88,51 @@ func TestDigestFixturesDeterministicAndSensitive(t *testing.T) {
 	// Sanity: digest is a SHA3-256 hex string.
 	if len(d1) != sha3.New256().Size()*2 {
 		t.Fatalf("unexpected digest length: %d", len(d1))
+	}
+}
+
+func TestMainWritesTraceFile(t *testing.T) {
+	fixturesDir := t.TempDir()
+	outDir := t.TempDir()
+	outPath := filepath.Join(outDir, "trace.jsonl")
+
+	// Minimal CV-PARSE fixture: ParseTx may fail, but trace generation MUST still emit an entry.
+	if err := os.WriteFile(
+		filepath.Join(fixturesDir, "CV-TEST.json"),
+		[]byte(`{"gate":"CV-PARSE","vectors":[{"id":"X","op":"parse","tx_hex":"00","expect_ok":false}]}`),
+		0o600,
+	); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	prevArgs := os.Args
+	prevFS := flag.CommandLine
+	t.Cleanup(func() {
+		os.Args = prevArgs
+		flag.CommandLine = prevFS
+	})
+
+	flag.CommandLine = flag.NewFlagSet("formal-trace-test", flag.ContinueOnError)
+	os.Args = []string{
+		"formal-trace",
+		"--fixtures-dir", fixturesDir,
+		"--out", outPath,
+	}
+
+	main()
+
+	b, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read out: %v", err)
+	}
+	// Must contain at least header + 1 entry line.
+	lines := 0
+	for _, c := range b {
+		if c == '\n' {
+			lines++
+		}
+	}
+	if lines < 2 {
+		t.Fatalf("expected >=2 lines, got %d", lines)
 	}
 }
