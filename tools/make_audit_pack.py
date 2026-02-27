@@ -15,6 +15,12 @@ from typing import Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+ALLOWED_GIT_SUBCOMMANDS = {
+    "rev-parse",
+    "describe",
+    "status",
+    "ls-files",
+}
 
 
 DEFAULT_PREFIXES = [
@@ -36,6 +42,10 @@ class GitTrackedFile:
 
 
 def _run_git(args: list[str], *, cwd: Path) -> str:
+    if not args or args[0] not in ALLOWED_GIT_SUBCOMMANDS:
+        raise ValueError(f"unsupported git subcommand: {args!r}")
+    if any("\x00" in part for part in args):
+        raise ValueError("invalid git arguments")
     return subprocess.check_output(["git", *args], cwd=str(cwd), text=True)
 
 
@@ -196,6 +206,13 @@ def _sha256_file(p: Path) -> str:
     return h.hexdigest()
 
 
+def _ensure_path_within(path: Path, base: Path) -> None:
+    resolved_base = base.resolve()
+    resolved_path = path.resolve()
+    if not resolved_path.is_relative_to(resolved_base):
+        raise SystemExit(f"ERROR: path escapes repository root: {resolved_path}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Build a deterministic RUBIN audit pack from tracked sources.")
     ap.add_argument(
@@ -207,6 +224,11 @@ def main() -> int:
         "--out",
         default="artifacts/audit-pack/rubin-audit-pack.tar.gz",
         help="Output path (relative to repo-root unless absolute).",
+    )
+    ap.add_argument(
+        "--allow-outside-repo",
+        action="store_true",
+        help="Allow writing --out outside repo root (default: denied).",
     )
     ap.add_argument(
         "--prefix",
@@ -227,6 +249,8 @@ def main() -> int:
     args = ap.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
+    if not (repo_root / ".git").exists():
+        raise SystemExit(f"ERROR: repo root does not look like a git repository: {repo_root}")
     prefixes = args.prefix if args.prefix else DEFAULT_PREFIXES
 
     head = _git_head(repo_root)
@@ -242,6 +266,8 @@ def main() -> int:
     out_path = Path(args.out)
     if not out_path.is_absolute():
         out_path = repo_root / out_path
+    if not args.allow_outside_repo:
+        _ensure_path_within(out_path, repo_root)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     manifest: dict[str, object] = {

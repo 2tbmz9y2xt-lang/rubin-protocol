@@ -5,6 +5,7 @@ import argparse
 import fnmatch
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
@@ -47,8 +48,12 @@ BLOCKED_CONTENT_MARKERS = [
     pem_begin("RSA PRIVATE KEY"),
 ]
 
+GIT_REV_RE = re.compile(r"^[A-Fa-f0-9]{40,64}$")
+
 
 def run_git(args: list[str]) -> str:
+    if not args or any("\x00" in part for part in args):
+        raise ValueError("invalid git command arguments")
     result = subprocess.run(
         ["git", *args],
         stdout=subprocess.PIPE,
@@ -73,6 +78,8 @@ def detect_range_from_github_event() -> tuple[str, str, bool] | None:
     if event_name in {"pull_request", "pull_request_target"}:
         base = payload["pull_request"]["base"]["sha"]
         head = payload["pull_request"]["head"]["sha"]
+        if not is_safe_git_rev(base) or not is_safe_git_rev(head):
+            return None
         return base, head, True
 
     if event_name == "push":
@@ -80,12 +87,16 @@ def detect_range_from_github_event() -> tuple[str, str, bool] | None:
         head = payload.get("after", "")
         if not base or set(base) == {"0"}:
             return None
+        if not is_safe_git_rev(base) or not is_safe_git_rev(head):
+            return None
         return base, head, False
 
     return None
 
 
 def changed_files(base: str, head: str, pr_mode: bool) -> list[str]:
+    if not is_safe_git_rev(base) or not is_safe_git_rev(head):
+        raise ValueError("unsafe git revision format")
     range_expr = f"{base}...{head}" if pr_mode else f"{base}..{head}"
     out = run_git(["diff", "--name-only", "--diff-filter=ACMR", range_expr])
     files = [line.strip() for line in out.splitlines() if line.strip()]
@@ -95,6 +106,10 @@ def changed_files(base: str, head: str, pr_mode: bool) -> list[str]:
 def all_tracked_files() -> list[str]:
     out = run_git(["ls-files"])
     return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def is_safe_git_rev(value: str) -> bool:
+    return bool(GIT_REV_RE.fullmatch(value))
 
 
 def is_path_blocked(path: str) -> bool:
@@ -149,6 +164,9 @@ def main() -> int:
         files = all_tracked_files()
     else:
         if args.base and args.head:
+            if not is_safe_git_rev(args.base) or not is_safe_git_rev(args.head):
+                print("ERROR: --base/--head must be full git commit SHA (40-64 hex chars).")
+                return 1
             files = changed_files(args.base, args.head, args.pr_mode)
         else:
             detected = detect_range_from_github_event()

@@ -12,22 +12,32 @@ ROOT = Path(".")
 WORKFLOWS_DIR = ROOT / ".github" / "workflows"
 CHANGELOG = Path("conformance/fixtures/CHANGELOG.md")
 FIXTURE_RE = re.compile(r"^conformance/fixtures/CV-[A-Z0-9-]+\.json$")
+GIT_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/\-]{0,127}$")
 
 
 def run(cmd: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    if not cmd or any("\x00" in part for part in cmd):
+        raise ValueError("invalid subprocess command")
     return subprocess.run(cmd, text=True, capture_output=True, check=check)
 
 
+def is_safe_git_ref(ref: str) -> bool:
+    return bool(GIT_REF_RE.fullmatch(ref)) and not ref.startswith("-")
+
+
 def git_ref_exists(ref: str) -> bool:
-    p = run(["git", "rev-parse", "--verify", "--quiet", ref], check=False)
+    p = run(["git", "rev-parse", "--verify", "--quiet", "--", ref], check=False)
     return p.returncode == 0
 
 
 def changed_files() -> list[str]:
     base_ref = os.getenv("GITHUB_BASE_REF", "").strip()
-    if base_ref:
+    if base_ref and is_safe_git_ref(base_ref):
         run(["git", "fetch", "--depth=1", "origin", base_ref], check=False)
         diff_ref = f"origin/{base_ref}...HEAD"
+    elif base_ref:
+        print(f"WARN: ignoring unsafe GITHUB_BASE_REF={base_ref!r}", file=sys.stderr)
+        diff_ref = "origin/main...HEAD" if git_ref_exists("origin/main") else "HEAD~1..HEAD"
     elif git_ref_exists("origin/main"):
         diff_ref = "origin/main...HEAD"
     elif git_ref_exists("main"):
