@@ -9,6 +9,104 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
+func TestDefaultSyncConfigAndEngineInit_Defaults(t *testing.T) {
+	st := NewChainState()
+	var chainID [32]byte
+	cfg := DefaultSyncConfig(nil, chainID, "x.json")
+	if cfg.HeaderBatchLimit == 0 || cfg.IBDLagSeconds == 0 {
+		t.Fatalf("expected non-zero defaults: %#v", cfg)
+	}
+	if cfg.IBDLagSeconds != defaultIBDLagSeconds {
+		t.Fatalf("ibd_lag_seconds=%d, want %d", cfg.IBDLagSeconds, defaultIBDLagSeconds)
+	}
+
+	cfg.HeaderBatchLimit = 0
+	cfg.IBDLagSeconds = 0
+	engine, err := NewSyncEngine(st, nil, cfg)
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	if engine.cfg.HeaderBatchLimit != 512 {
+		t.Fatalf("header_batch_limit=%d, want 512", engine.cfg.HeaderBatchLimit)
+	}
+	if engine.cfg.IBDLagSeconds != defaultIBDLagSeconds {
+		t.Fatalf("ibd_lag_seconds=%d, want %d", engine.cfg.IBDLagSeconds, defaultIBDLagSeconds)
+	}
+}
+
+func TestNewSyncEngine_NilChainState(t *testing.T) {
+	_, err := NewSyncEngine(nil, nil, SyncConfig{})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestSyncEngine_HeaderSyncRequest(t *testing.T) {
+	st := NewChainState()
+	engine, err := NewSyncEngine(st, nil, DefaultSyncConfig(nil, [32]byte{}, ""))
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+
+	r := engine.HeaderSyncRequest()
+	if r.HasFrom {
+		t.Fatalf("expected HasFrom=false when no tip")
+	}
+	if r.Limit != engine.cfg.HeaderBatchLimit {
+		t.Fatalf("limit=%d, want %d", r.Limit, engine.cfg.HeaderBatchLimit)
+	}
+
+	st.HasTip = true
+	st.TipHash = mustHash32Hex(t, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+	r = engine.HeaderSyncRequest()
+	if !r.HasFrom || r.FromHash != st.TipHash {
+		t.Fatalf("unexpected request: %#v", r)
+	}
+}
+
+func TestSyncEngine_RecordBestKnownHeight(t *testing.T) {
+	st := NewChainState()
+	engine, err := NewSyncEngine(st, nil, DefaultSyncConfig(nil, [32]byte{}, ""))
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	if got := engine.BestKnownHeight(); got != 0 {
+		t.Fatalf("best_known=%d, want 0", got)
+	}
+
+	engine.RecordBestKnownHeight(7)
+	engine.RecordBestKnownHeight(6)
+	engine.RecordBestKnownHeight(9)
+	if got := engine.BestKnownHeight(); got != 9 {
+		t.Fatalf("best_known=%d, want 9", got)
+	}
+
+	var nilEngine *SyncEngine
+	nilEngine.RecordBestKnownHeight(10)
+	if got := nilEngine.BestKnownHeight(); got != 0 {
+		t.Fatalf("nil best_known=%d, want 0", got)
+	}
+}
+
+func TestSyncEngine_IsInIBDEdgeCases(t *testing.T) {
+	var nilEngine *SyncEngine
+	if !nilEngine.IsInIBD(0) {
+		t.Fatalf("expected IBD for nil engine")
+	}
+
+	st := NewChainState()
+	engine, err := NewSyncEngine(st, nil, DefaultSyncConfig(nil, [32]byte{}, ""))
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	st.HasTip = true
+	engine.tipTimestamp = 100
+	engine.cfg.IBDLagSeconds = 10
+	if !engine.IsInIBD(99) {
+		t.Fatalf("expected IBD when now < tip timestamp")
+	}
+}
+
 func TestSyncEngineIBDLogic(t *testing.T) {
 	st := NewChainState()
 	cfg := DefaultSyncConfig(nil, [32]byte{}, "")
@@ -115,5 +213,56 @@ func TestSyncEngineApplyBlockNoMutationOnFailure(t *testing.T) {
 	}
 	if !reflect.DeepEqual(before, after) {
 		t.Fatalf("chainstate mutated on failed apply")
+	}
+}
+
+func TestSyncEngineApplyBlock_RollbackOnSaveFailure(t *testing.T) {
+	dir := t.TempDir()
+	badDir := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(badDir, []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	chainStatePath := filepath.Join(badDir, "chainstate.json")
+
+	st := NewChainState()
+	target := consensus.POW_LIMIT
+	engine, err := NewSyncEngine(st, nil, DefaultSyncConfig(&target, [32]byte{}, chainStatePath))
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	engine.tipTimestamp = 999
+	engine.bestKnownHeight = 123
+
+	before, err := stateToDisk(st)
+	if err != nil {
+		t.Fatalf("stateToDisk before: %v", err)
+	}
+
+	prev := mustHash32Hex(t, "1111111111111111111111111111111111111111111111111111111111111111")
+	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 0, 1)
+	block := buildSingleTxBlock(t, prev, target, 12345, coinbase)
+
+	if _, err := engine.ApplyBlock(block, nil); err == nil {
+		t.Fatalf("expected apply error")
+	}
+
+	after, err := stateToDisk(st)
+	if err != nil {
+		t.Fatalf("stateToDisk after: %v", err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("chainstate mutated on rollback path")
+	}
+	if engine.tipTimestamp != 999 {
+		t.Fatalf("tip_timestamp=%d, want 999", engine.tipTimestamp)
+	}
+	if engine.bestKnownHeight != 123 {
+		t.Fatalf("best_known_height=%d, want 123", engine.bestKnownHeight)
+	}
+}
+
+func TestRestoreChainState_NilDestination(t *testing.T) {
+	if err := restoreChainState(nil, chainStateDisk{}); err == nil {
+		t.Fatalf("expected error")
 	}
 }
