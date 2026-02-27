@@ -40,7 +40,7 @@ structure BlockBasicOut where
   sumWeight : Option Nat
   sumDa : Option Nat
 
-def goTraceFixturesDigestSHA3_256 : String := "7488bcc643be9d2fbc90d27b107f14b862278573d07e777f83ceaf9d2e19d012"
+def goTraceFixturesDigestSHA3_256 : String := "7ba57acf8cb34db053ed2e1140c5d32b252a4d2a3af39cdb896aea4e51654b27"
 
 def parseOuts : List ParseOut := [
   { id := "PARSE-01", ok := true, err := "", consumed := 21, txidHex := "0xd205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0", wtxidHex := "0xf760a70e1e838404d8e41679962064dc1bf4fa181699009644a14d0aa389ab4e" },

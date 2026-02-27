@@ -23,6 +23,20 @@ Policy:
 Изменённые fixtures:
 - `CV-PARSE.json` (добавлен `PARSE-11`).
 
+## 2026-02-27 — ML-DSA digest-binding regression vector (Q-AUDIT-COV-03)
+
+Причина:
+- зафиксировать semantics `verify_sig` для ML-DSA: подпись валидна только для исходного `digest32`;
+- при изменении байта в `tx_nonce` при неизменной witness подписи верификация MUST падать как `TX_ERR_SIG_INVALID`.
+
+Инструменты:
+- ручное обновление `CV-SIG.json`,
+- расширение runner (`tx_hex_from` + `tx_hex_mutations`) для детерминированных байтовых мутаций без дублирования больших fixtures,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-SIG`.
+
+Изменённые fixtures:
+- `CV-SIG.json` (добавлен `CV-SIG-02c`).
+
 ## 2026-02-25 — PR #161 (Q-R017)
 
 Причина:

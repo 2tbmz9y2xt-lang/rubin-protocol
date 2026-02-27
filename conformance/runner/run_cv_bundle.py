@@ -7,7 +7,7 @@ import os
 import pathlib
 import subprocess
 import sys
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -140,14 +140,58 @@ def parse_hex_bytes(value: Any) -> bytes:
     return bytes.fromhex(text)
 
 
-def materialize_tx_hex(v: Dict[str, Any]) -> str:
+def materialize_tx_hex(
+    v: Dict[str, Any],
+    vectors_by_id: Optional[Dict[str, Dict[str, Any]]] = None,
+    seen_ids: Optional[Set[str]] = None,
+) -> str:
     tx_hex = v.get("tx_hex")
     if isinstance(tx_hex, str) and tx_hex.strip() != "":
         return tx_hex.strip()
 
+    tx_hex_from = v.get("tx_hex_from")
+    if isinstance(tx_hex_from, str) and tx_hex_from.strip() != "":
+        if vectors_by_id is None:
+            raise ValueError("tx_hex_from requires vectors_by_id context")
+        ref_id = tx_hex_from.strip()
+        ref = vectors_by_id.get(ref_id)
+        if not isinstance(ref, dict):
+            raise ValueError(f"tx_hex_from reference not found: {ref_id}")
+        seen = set(seen_ids or set())
+        if ref_id in seen:
+            raise ValueError(f"tx_hex_from recursion detected at {ref_id}")
+        seen.add(ref_id)
+        base_hex = materialize_tx_hex(ref, vectors_by_id=vectors_by_id, seen_ids=seen)
+        base = bytearray(bytes.fromhex(base_hex))
+        muts = v.get("tx_hex_mutations", [])
+        if muts is None:
+            muts = []
+        if not isinstance(muts, list):
+            raise ValueError("tx_hex_mutations must be a list")
+        for m in muts:
+            if not isinstance(m, dict):
+                raise ValueError("tx_hex_mutations entries must be objects")
+            offset = m.get("offset")
+            b = m.get("byte")
+            if not isinstance(offset, int):
+                raise ValueError("tx_hex_mutations.offset must be int")
+            if not isinstance(b, str):
+                raise ValueError("tx_hex_mutations.byte must be hex string")
+            hb = b.strip().lower()
+            if hb.startswith("0x"):
+                hb = hb[2:]
+            if len(hb) != 2:
+                raise ValueError("tx_hex_mutations.byte must encode exactly one byte")
+            if offset < 0 or offset >= len(base):
+                raise ValueError(
+                    f"tx_hex_mutations.offset out of range: {offset} (len={len(base)})"
+                )
+            base[offset] = int(hb, 16)
+        return base.hex()
+
     parts = v.get("tx_hex_parts")
     if not isinstance(parts, list) or len(parts) == 0:
-        raise ValueError("missing tx_hex (or tx_hex_parts)")
+        raise ValueError("missing tx_hex (or tx_hex_parts or tx_hex_from)")
 
     out: List[str] = []
     for p in parts:
@@ -1178,6 +1222,7 @@ def validate_vector(
     v: Dict[str, Any],
     go_cli: pathlib.Path,
     rust_cli: pathlib.Path,
+    vectors_by_id: Dict[str, Dict[str, Any]],
 ) -> List[str]:
     op = v.get("op")
     if not op:
@@ -1187,7 +1232,7 @@ def validate_vector(
         return validate_local_vector(gate, v)
 
     try:
-        tx_hex = materialize_tx_hex(v)
+        tx_hex = materialize_tx_hex(v, vectors_by_id=vectors_by_id)
     except Exception:
         tx_hex = ""
 
@@ -1815,7 +1860,8 @@ def main() -> int:
         vectors = f.get("vectors", [])
         for v in vectors:
             total += 1
-            problems.extend(validate_vector(gate, v, go_cli, rust_cli))
+            vectors_by_id = {str(x.get("id", "")): x for x in vectors if isinstance(x, dict)}
+            problems.extend(validate_vector(gate, v, go_cli, rust_cli, vectors_by_id))
 
     if problems:
         for p in problems:
