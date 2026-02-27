@@ -1886,8 +1886,11 @@ fn connect_block_basic_in_memory_at_height_ok_computes_fees_and_updates_state() 
 
     let sum_fees = 10u64;
     let subsidy = crate::subsidy::block_subsidy(height, state.already_generated);
-    let coinbase =
-        coinbase_with_witness_commitment_and_p2pk_value(height as u32, subsidy + sum_fees, &[spend_bytes.clone()]);
+    let coinbase = coinbase_with_witness_commitment_and_p2pk_value(
+        height as u32,
+        subsidy + sum_fees,
+        &[spend_bytes.clone()],
+    );
     let (_ct, coinbase_txid, _cw, _cn) = parse_tx(&coinbase).expect("parse coinbase");
 
     let root = merkle_root_txids(&[coinbase_txid, spend_txid]).expect("merkle root");
@@ -2006,8 +2009,14 @@ fn error_code_as_str_and_display() {
         ErrorCode::TxErrVaultOwnerAuthRequired.as_str(),
         "TX_ERR_VAULT_OWNER_AUTH_REQUIRED"
     );
-    assert_eq!(ErrorCode::BlockErrPowInvalid.as_str(), "BLOCK_ERR_POW_INVALID");
-    assert_eq!(ErrorCode::BlockErrDaSetInvalid.as_str(), "BLOCK_ERR_DA_SET_INVALID");
+    assert_eq!(
+        ErrorCode::BlockErrPowInvalid.as_str(),
+        "BLOCK_ERR_POW_INVALID"
+    );
+    assert_eq!(
+        ErrorCode::BlockErrDaSetInvalid.as_str(),
+        "BLOCK_ERR_DA_SET_INVALID"
+    );
 
     let e = crate::error::TxError::new(ErrorCode::TxErrParse, "");
     assert_eq!(e.to_string(), "TX_ERR_PARSE");
