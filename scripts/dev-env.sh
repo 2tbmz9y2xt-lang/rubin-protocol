@@ -184,6 +184,30 @@ check_required() {
   need_cmd pkg-config
 }
 
+run_fips_only_guard() {
+  local mode="${RUBIN_OPENSSL_FIPS_MODE:-off}"
+  if [[ "${mode}" != "only" ]]; then
+    return 0
+  fi
+  if [[ "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]]; then
+    return 0
+  fi
+
+  local preflight="${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh"
+  if [[ ! -x "${preflight}" ]]; then
+    echo "ERROR: RUBIN_OPENSSL_FIPS_MODE=only requires executable preflight: ${preflight}" >&2
+    return 1
+  fi
+
+  # Prevent recursion when preflight itself is the target command.
+  if [[ "${1:-}" == "${preflight}" || "${1:-}" == "scripts/crypto/openssl/fips-preflight.sh" ]]; then
+    return 0
+  fi
+
+  echo "[dev-env] enforcing FIPS-only runtime guard via fips-preflight.sh"
+  "${preflight}"
+}
+
 if [[ "${1:-}" == "--" ]]; then
   shift
   if [[ $# -eq 0 ]]; then
@@ -191,10 +215,12 @@ if [[ "${1:-}" == "--" ]]; then
     exit 2
   fi
   check_required
+  run_fips_only_guard "${1}"
   exec "$@"
 fi
 
 print_versions
 check_required
+run_fips_only_guard
 echo
 echo "OK: dev env looks usable. Tip: scripts/dev-env.sh -- <cmd>"
