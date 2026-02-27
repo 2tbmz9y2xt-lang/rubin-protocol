@@ -701,12 +701,37 @@ func TestRubinConsensusCLI_RuntimeHelpers(t *testing.T) {
 		if opt, err := parseOptionalHex32("zz", "bad expected"); err == nil || opt != nil {
 			t.Fatalf("expected error")
 		}
+		if opt, err := parseOptionalHex32(okHex, "bad expected"); err != nil || opt == nil || *opt != ([32]byte{}) {
+			t.Fatalf("unexpected optional success: opt=%v err=%v", opt, err)
+		}
 		chainID, err := parseOptionalChainIDHex("")
 		if err != nil || chainID != ([32]byte{}) {
 			t.Fatalf("unexpected: %x err=%v", chainID, err)
 		}
 		if _, err := parseOptionalChainIDHex("00"); err == nil {
 			t.Fatalf("expected bad chain_id error")
+		}
+		if chainID, err := parseOptionalChainIDHex(okHex); err != nil || chainID != ([32]byte{}) {
+			t.Fatalf("unexpected chain_id success: %x err=%v", chainID, err)
+		}
+	})
+
+	t.Run("parseBlockValidationInputs", func(t *testing.T) {
+		blockBytes, _ := mineGenesisBlockBytes(t)
+		req := Request{
+			BlockHex:       hex.EncodeToString(blockBytes),
+			ExpectedPrev:   hex.EncodeToString(make([]byte, 32)),
+			ExpectedTarget: hex.EncodeToString(make([]byte, 32)),
+		}
+		raw, expectedPrev, expectedTarget, err := parseBlockValidationInputs(req)
+		if err != nil || len(raw) == 0 || expectedPrev == nil || expectedTarget == nil {
+			t.Fatalf("unexpected success parse: len=%d prev=%v target=%v err=%v", len(raw), expectedPrev, expectedTarget, err)
+		}
+		if _, _, _, err := parseBlockValidationInputs(Request{BlockHex: "zz"}); err == nil {
+			t.Fatalf("expected bad block error")
+		}
+		if _, _, _, err := parseBlockValidationInputs(Request{BlockHex: hex.EncodeToString(blockBytes), ExpectedTarget: "zz"}); err == nil {
+			t.Fatalf("expected bad expected_target error")
 		}
 	})
 
