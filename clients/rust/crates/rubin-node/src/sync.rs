@@ -158,111 +158,32 @@ impl SyncEngine {
 mod tests {
     use std::path::PathBuf;
 
-    use rubin_consensus::constants::{COV_TYPE_ANCHOR, COV_TYPE_P2PK, POW_LIMIT};
-    use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
-    use rubin_consensus::{encode_compact_size, merkle_root_txids, parse_tx, Outpoint, UtxoEntry};
+    use rubin_consensus::constants::{COV_TYPE_P2PK, POW_LIMIT};
+    use rubin_consensus::{Outpoint, UtxoEntry};
 
     use crate::blockstore::{block_store_path, BlockStore};
     use crate::chainstate::{chain_state_path, load_chain_state, ChainState};
     use crate::sync::{default_sync_config, SyncEngine};
 
-    #[derive(Clone)]
-    struct TestOutput {
-        value: u64,
-        covenant_type: u16,
-        covenant_data: Vec<u8>,
-    }
+    const VALID_BLOCK_HEX: &str = "01000000111111111111111111111111111111111111111111111111111111111111111102e66000bf8ce870908df4a8689554852ccef681ee0b5df32246162a53e36e290100000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff07000000000000000101000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff010000000000000000020020b716a4b7f4c0fab665298ab9b8199b601ab9fa7e0a27f0713383f34cf37071a8000000000000";
 
-    fn build_block_bytes(
-        prev_hash: [u8; 32],
-        merkle_root: [u8; 32],
-        target: [u8; 32],
-        timestamp: u64,
-        nonce: u64,
-        txs: &[Vec<u8>],
-    ) -> Vec<u8> {
-        let mut header = Vec::with_capacity(84);
-        header.extend_from_slice(&1u32.to_le_bytes());
-        header.extend_from_slice(&prev_hash);
-        header.extend_from_slice(&merkle_root);
-        header.extend_from_slice(&timestamp.to_le_bytes());
-        header.extend_from_slice(&target);
-        header.extend_from_slice(&nonce.to_le_bytes());
-
-        let mut block = header;
-        encode_compact_size(txs.len() as u64, &mut block);
-        for tx in txs {
-            block.extend_from_slice(tx);
+    fn hex_to_bytes(hex: &str) -> Vec<u8> {
+        let mut out = Vec::with_capacity(hex.len() / 2);
+        let bytes = hex.as_bytes();
+        let mut idx = 0;
+        while idx + 1 < bytes.len() {
+            let nibble = |b: u8| -> u8 {
+                match b {
+                    b'0'..=b'9' => b - b'0',
+                    b'a'..=b'f' => b - b'a' + 10,
+                    b'A'..=b'F' => b - b'A' + 10,
+                    _ => panic!("invalid hex"),
+                }
+            };
+            out.push((nibble(bytes[idx]) << 4) | nibble(bytes[idx + 1]));
+            idx += 2;
         }
-        block
-    }
-
-    fn coinbase_tx_with_outputs(locktime: u32, outputs: &[TestOutput]) -> Vec<u8> {
-        let mut b = Vec::new();
-        b.extend_from_slice(&1u32.to_le_bytes());
-        b.push(0x00);
-        b.extend_from_slice(&0u64.to_le_bytes());
-        encode_compact_size(1, &mut b);
-        b.extend_from_slice(&[0u8; 32]);
-        b.extend_from_slice(&u32::MAX.to_le_bytes());
-        encode_compact_size(0, &mut b);
-        b.extend_from_slice(&u32::MAX.to_le_bytes());
-        encode_compact_size(outputs.len() as u64, &mut b);
-        for out in outputs {
-            b.extend_from_slice(&out.value.to_le_bytes());
-            b.extend_from_slice(&out.covenant_type.to_le_bytes());
-            encode_compact_size(out.covenant_data.len() as u64, &mut b);
-            b.extend_from_slice(&out.covenant_data);
-        }
-        b.extend_from_slice(&locktime.to_le_bytes());
-        encode_compact_size(0, &mut b);
-        encode_compact_size(0, &mut b);
-        b
-    }
-
-    fn valid_p2pk_covenant_data(seed: u8) -> Vec<u8> {
-        let mut out = Vec::with_capacity(33);
-        out.push(0x01);
-        out.extend_from_slice(&[seed; 32]);
         out
-    }
-
-    fn coinbase_with_witness_commitment_and_p2pk_value(locktime: u32, value: u64) -> Vec<u8> {
-        let wroot = witness_merkle_root_wtxids(&[[0u8; 32]]).expect("witness root");
-        let commitment = witness_commitment_hash(wroot);
-        coinbase_tx_with_outputs(
-            locktime,
-            &[
-                TestOutput {
-                    value,
-                    covenant_type: COV_TYPE_P2PK,
-                    covenant_data: valid_p2pk_covenant_data(0x42),
-                },
-                TestOutput {
-                    value: 0,
-                    covenant_type: COV_TYPE_ANCHOR,
-                    covenant_data: commitment.to_vec(),
-                },
-            ],
-        )
-    }
-
-    fn build_single_tx_block(
-        prev_hash: [u8; 32],
-        target: [u8; 32],
-        timestamp: u64,
-        coinbase_tx: &[u8],
-    ) -> Vec<u8> {
-        let (_, txid, _, _) = parse_tx(coinbase_tx).expect("parse coinbase");
-        let root = merkle_root_txids(&[txid]).expect("merkle root");
-        build_block_bytes(
-            prev_hash,
-            root,
-            target,
-            timestamp,
-            7,
-            &[coinbase_tx.to_vec()],
-        )
     }
 
     fn tmp_dir(name: &str) -> PathBuf {
@@ -311,8 +232,7 @@ mod tests {
         let cfg = default_sync_config(Some(POW_LIMIT), [0u8; 32], Some(chain_state_file.clone()));
         let mut engine = SyncEngine::new(st, Some(store), cfg).expect("new sync");
 
-        let coinbase = coinbase_with_witness_commitment_and_p2pk_value(0, 1);
-        let block = build_single_tx_block([0x11; 32], POW_LIMIT, 12_345, &coinbase);
+        let block = hex_to_bytes(VALID_BLOCK_HEX);
         let summary = engine.apply_block(&block, None).expect("apply block");
         assert_eq!(summary.block_height, 0);
 
@@ -348,7 +268,12 @@ mod tests {
             UtxoEntry {
                 value: 1,
                 covenant_type: COV_TYPE_P2PK,
-                covenant_data: valid_p2pk_covenant_data(0x22),
+                covenant_data: {
+                    let mut bytes = Vec::with_capacity(33);
+                    bytes.push(0x01);
+                    bytes.extend_from_slice(&[0x22; 32]);
+                    bytes
+                },
                 creation_height: 1,
                 created_by_coinbase: false,
             },
