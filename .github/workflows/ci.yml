@@ -80,7 +80,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Cache OpenSSL 3.5 bundle
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cache/rubin-openssl/bundle-3.5.5
@@ -243,7 +243,7 @@ jobs:
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
       - name: Cache OpenSSL 3.5 bundle
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cache/rubin-openssl/bundle-3.5.5
