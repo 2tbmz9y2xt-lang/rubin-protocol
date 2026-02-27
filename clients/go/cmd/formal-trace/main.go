@@ -211,13 +211,6 @@ func txErrString(err error) string {
 	return err.Error()
 }
 
-func writeEntryOrExit(w io.Writer, entry traceEntry) {
-	if err := writeJSON(w, entry); err != nil {
-		fmt.Fprintf(os.Stderr, "write entry: %v\n", err)
-		os.Exit(2)
-	}
-}
-
 func parseHex32(s string) ([32]byte, error) {
 	var out [32]byte
 	b, err := hex.DecodeString(s)
@@ -229,6 +222,34 @@ func parseHex32(s string) ([32]byte, error) {
 	}
 	copy(out[:], b)
 	return out, nil
+}
+
+func parseHex32Ptr(fieldName string, value string) (*[32]byte, error) {
+	if value == "" {
+		return nil, nil
+	}
+	parsed, err := parseHex32(value)
+	if err != nil {
+		return nil, fmt.Errorf("bad %s", fieldName)
+	}
+	return &parsed, nil
+}
+
+func writeTraceEntry(buf *bytes.Buffer, gate string, vectorID string, op string, runErr error, inputs map[string]any, outputs map[string]any) error {
+	entry := traceEntry{
+		Type:     "entry",
+		Gate:     gate,
+		VectorID: vectorID,
+		Op:       op,
+		Ok:       runErr == nil,
+		Err:      txErrString(runErr),
+		Inputs:   inputs,
+		Outputs:  outputs,
+	}
+	if err := writeJSONFn(buf, entry); err != nil {
+		return fmt.Errorf("write entry: %w", err)
+	}
+	return nil
 }
 
 func run(fixturesDir, outPath string) error {
@@ -280,25 +301,21 @@ func run(fixturesDir, outPath string) error {
 			}
 			for _, v := range fx.Vectors {
 				txBytes, _ := hex.DecodeString(v.TxHex)
-				_, txid, wtxid, n, err := consensus.ParseTx(txBytes)
-				e := traceEntry{
-					Type:     "entry",
-					Gate:     fx.Gate,
-					VectorID: v.ID,
-					Op:       v.Op,
-					Ok:       err == nil,
-					Err:      txErrString(err),
-					Inputs: map[string]any{
-						"tx_hex": v.TxHex,
-					},
-					Outputs: map[string]any{
-						"consumed": n,
+				_, txid, wtxid, consumed, runErr := consensus.ParseTx(txBytes)
+				if err := writeTraceEntry(
+					&traceBuf,
+					fx.Gate,
+					v.ID,
+					v.Op,
+					runErr,
+					map[string]any{"tx_hex": v.TxHex},
+					map[string]any{
+						"consumed": consumed,
 						"txid":     hex.EncodeToString(txid[:]),
 						"wtxid":    hex.EncodeToString(wtxid[:]),
 					},
-				}
-				if err := writeJSONFn(&traceBuf, e); err != nil {
-					return fmt.Errorf("write entry: %w", err)
+				); err != nil {
+					return err
 				}
 			}
 
@@ -311,38 +328,36 @@ func run(fixturesDir, outPath string) error {
 				txBytes, _ := hex.DecodeString(v.TxHex)
 				tx, _, _, _, perr := consensus.ParseTx(txBytes)
 				var digest [32]byte
-				var err error
+				var runErr error
 				if perr != nil {
-					err = perr
+					runErr = perr
 				} else {
 					var chainID [32]byte
-					cb, e := hex.DecodeString(v.ChainIDHex)
-					if e != nil || len(cb) != 32 {
-						err = fmt.Errorf("bad chain_id")
+					chainIDBytes, decodeErr := hex.DecodeString(v.ChainIDHex)
+					if decodeErr != nil || len(chainIDBytes) != 32 {
+						runErr = fmt.Errorf("bad chain_id")
 					} else {
-						copy(chainID[:], cb)
-						digest, err = consensus.SighashV1Digest(tx, v.InputIndex, v.InputValue, chainID)
+						copy(chainID[:], chainIDBytes)
+						digest, runErr = consensus.SighashV1Digest(tx, v.InputIndex, v.InputValue, chainID)
 					}
 				}
-				e := traceEntry{
-					Type:     "entry",
-					Gate:     fx.Gate,
-					VectorID: v.ID,
-					Op:       v.Op,
-					Ok:       err == nil,
-					Err:      txErrString(err),
-					Inputs: map[string]any{
+				if err := writeTraceEntry(
+					&traceBuf,
+					fx.Gate,
+					v.ID,
+					v.Op,
+					runErr,
+					map[string]any{
 						"tx_hex":      v.TxHex,
 						"chain_id":    v.ChainIDHex,
 						"input_index": v.InputIndex,
 						"input_value": v.InputValue,
 					},
-					Outputs: map[string]any{
+					map[string]any{
 						"digest": hex.EncodeToString(digest[:]),
 					},
-				}
-				if err := writeJSONFn(&traceBuf, e); err != nil {
-					return fmt.Errorf("write entry: %w", err)
+				); err != nil {
+					return err
 				}
 			}
 
@@ -413,18 +428,8 @@ func run(fixturesDir, outPath string) error {
 				default:
 					outErr = fmt.Errorf("unsupported op")
 				}
-				e := traceEntry{
-					Type:     "entry",
-					Gate:     fx.Gate,
-					VectorID: v.ID,
-					Op:       v.Op,
-					Ok:       outErr == nil,
-					Err:      txErrString(outErr),
-					Inputs:   inputs,
-					Outputs:  outputs,
-				}
-				if err := writeJSONFn(&traceBuf, e); err != nil {
-					return fmt.Errorf("write entry: %w", err)
+				if err := writeTraceEntry(&traceBuf, fx.Gate, v.ID, v.Op, outErr, inputs, outputs); err != nil {
+					return err
 				}
 			}
 
@@ -437,20 +442,20 @@ func run(fixturesDir, outPath string) error {
 				txBytes, _ := hex.DecodeString(v.TxHex)
 				tx, txid, _, _, perr := consensus.ParseTx(txBytes)
 				var sum *consensus.UtxoApplySummary
-				var err error
+				var runErr error
 				if perr != nil {
-					err = perr
+					runErr = perr
 				} else {
 					utxos := make(map[consensus.Outpoint]consensus.UtxoEntry, len(v.Utxos))
 					for _, u := range v.Utxos {
 						txidb, e := parseHex32(u.Txid)
 						if e != nil {
-							err = e
+							runErr = e
 							break
 						}
 						cd, e := hex.DecodeString(u.CovenantDataHex)
 						if e != nil {
-							err = e
+							runErr = e
 							break
 						}
 						utxos[consensus.Outpoint{Txid: txidb, Vout: u.Vout}] = consensus.UtxoEntry{
@@ -461,13 +466,13 @@ func run(fixturesDir, outPath string) error {
 							CreatedByCoinbase: u.CreatedByCoinbase,
 						}
 					}
-					if err == nil {
+					if runErr == nil {
 						mtp := v.BlockTimestamp
 						if v.BlockMTP != nil {
 							mtp = *v.BlockMTP
 						}
 						var chainID [32]byte
-						_, sum, err = consensus.ApplyNonCoinbaseTxBasicUpdateWithMTP(tx, txid, utxos, v.Height, v.BlockTimestamp, mtp, chainID)
+						_, sum, runErr = consensus.ApplyNonCoinbaseTxBasicUpdateWithMTP(tx, txid, utxos, v.Height, v.BlockTimestamp, mtp, chainID)
 					}
 				}
 				outputs := map[string]any{}
@@ -475,22 +480,20 @@ func run(fixturesDir, outPath string) error {
 					outputs["fee"] = sum.Fee
 					outputs["utxo_count"] = sum.UtxoCount
 				}
-				e := traceEntry{
-					Type:     "entry",
-					Gate:     fx.Gate,
-					VectorID: v.ID,
-					Op:       v.Op,
-					Ok:       err == nil,
-					Err:      txErrString(err),
-					Inputs: map[string]any{
+				if err := writeTraceEntry(
+					&traceBuf,
+					fx.Gate,
+					v.ID,
+					v.Op,
+					runErr,
+					map[string]any{
 						"tx_hex":          v.TxHex,
 						"height":          v.Height,
 						"block_timestamp": v.BlockTimestamp,
 					},
-					Outputs: outputs,
-				}
-				if err := writeJSONFn(&traceBuf, e); err != nil {
-					return fmt.Errorf("write entry: %w", err)
+					outputs,
+				); err != nil {
+					return err
 				}
 			}
 
@@ -501,28 +504,18 @@ func run(fixturesDir, outPath string) error {
 			}
 			for _, v := range fx.Vectors {
 				blockBytes, _ := hex.DecodeString(v.BlockHex)
-				var err error
+				var runErr error
 				var sum *consensus.BlockBasicSummary
-				var prevPtr *[32]byte
-				if v.ExpectedPrev != "" {
-					prev, perr := parseHex32(v.ExpectedPrev)
-					if perr != nil {
-						err = fmt.Errorf("bad expected_prev_hash")
-					} else {
-						prevPtr = &prev
-					}
+				prevPtr, prevErr := parseHex32Ptr("expected_prev_hash", v.ExpectedPrev)
+				if prevErr != nil {
+					runErr = prevErr
 				}
-				var tgtPtr *[32]byte
-				if err == nil && v.ExpectedTarget != "" {
-					tgt, terr := parseHex32(v.ExpectedTarget)
-					if terr != nil {
-						err = fmt.Errorf("bad expected_target")
-					} else {
-						tgtPtr = &tgt
-					}
+				tgtPtr, tgtErr := parseHex32Ptr("expected_target", v.ExpectedTarget)
+				if runErr == nil && tgtErr != nil {
+					runErr = tgtErr
 				}
-				if err == nil {
-					sum, err = consensus.ValidateBlockBasicWithContextAtHeight(blockBytes, prevPtr, tgtPtr, 0, nil)
+				if runErr == nil {
+					sum, runErr = consensus.ValidateBlockBasicWithContextAtHeight(blockBytes, prevPtr, tgtPtr, 0, nil)
 				}
 				outputs := map[string]any{}
 				if sum != nil {
@@ -530,22 +523,20 @@ func run(fixturesDir, outPath string) error {
 					outputs["sum_weight"] = sum.SumWeight
 					outputs["sum_da"] = sum.SumDa
 				}
-				e := traceEntry{
-					Type:     "entry",
-					Gate:     fx.Gate,
-					VectorID: v.ID,
-					Op:       v.Op,
-					Ok:       err == nil,
-					Err:      txErrString(err),
-					Inputs: map[string]any{
+				if err := writeTraceEntry(
+					&traceBuf,
+					fx.Gate,
+					v.ID,
+					v.Op,
+					runErr,
+					map[string]any{
 						"block_hex_digest_sha3_256": sha3hex(blockBytes),
 						"expected_prev_hash":        v.ExpectedPrev,
 						"expected_target":           v.ExpectedTarget,
 					},
-					Outputs: outputs,
-				}
-				if err := writeJSONFn(&traceBuf, e); err != nil {
-					return fmt.Errorf("write entry: %w", err)
+					outputs,
+				); err != nil {
+					return err
 				}
 			}
 

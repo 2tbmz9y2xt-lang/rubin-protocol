@@ -135,6 +135,18 @@ type digestSigner interface {
 	SignDigest32([32]byte) ([]byte, error)
 }
 
+func mustSignInputDigest(id string, label string, signer digestSigner, tx *consensus.Tx, inputIndex uint32, inputValue uint64, chainID [32]byte) []byte {
+	digest, err := consensus.SighashV1Digest(tx, inputIndex, inputValue, chainID)
+	if err != nil {
+		fatalf("%s: sighash %s: %v", id, label, err)
+	}
+	signature, err := signer.SignDigest32(digest)
+	if err != nil {
+		fatalf("%s: sign %s: %v", id, label, err)
+	}
+	return signature
+}
+
 func mustLoadFixture(path string) *fixtureFile {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -292,14 +304,7 @@ func updateSingleInputSignedVector(
 		Locktime: 0,
 	}
 
-	d, err := consensus.SighashV1Digest(tx, 0, inValue, chainID)
-	if err != nil {
-		fatalf("%s: sighash: %v", id, err)
-	}
-	sig, err := signer.SignDigest32(d)
-	if err != nil {
-		fatalf("%s: sign: %v", id, err)
-	}
+	sig := mustSignInputDigest(id, "input0", signer, tx, 0, inValue, chainID)
 	tx.Witness = []consensus.WitnessItem{{SuiteID: suiteID, Pubkey: pub, Signature: sig}}
 
 	b := mustTxBytes(tx)
@@ -417,22 +422,8 @@ func updateVaultSpendVectorsUTXO(
 			Locktime: 0,
 		}
 
-		d0, err := consensus.SighashV1Digest(tx, 0, vaultValue, chainID)
-		if err != nil {
-			fatalf("%s: sighash0: %v", id, err)
-		}
-		vaultSig, err := vaultKP.SignDigest32(d0)
-		if err != nil {
-			fatalf("%s: vault sign: %v", id, err)
-		}
-		d1, err := consensus.SighashV1Digest(tx, 1, ownerFeeInValue, chainID)
-		if err != nil {
-			fatalf("%s: sighash1: %v", id, err)
-		}
-		ownerSig, err := ownerKP.SignDigest32(d1)
-		if err != nil {
-			fatalf("%s: owner sign: %v", id, err)
-		}
+		vaultSig := mustSignInputDigest(id, "vault_input", vaultKP, tx, 0, vaultValue, chainID)
+		ownerSig := mustSignInputDigest(id, "owner_input", ownerKP, tx, 1, ownerFeeInValue, chainID)
 		tx.Witness = []consensus.WitnessItem{
 			{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: vaultPub, Signature: vaultSig},
 			{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: ownerPub, Signature: ownerSig},
@@ -496,14 +487,7 @@ func updateVaultCreateVectors(
 			Outputs:  []consensus.TxOutput{{Value: vaultOutValue, CovenantType: consensus.COV_TYPE_VAULT, CovenantData: vaultCov}},
 			Locktime: 0,
 		}
-		d, err := consensus.SighashV1Digest(tx, 0, inValue, chainID)
-		if err != nil {
-			fatalf("%s: sighash: %v", id, err)
-		}
-		sig, err := nonOwnerKP.SignDigest32(d)
-		if err != nil {
-			fatalf("%s: sign: %v", id, err)
-		}
+		sig := mustSignInputDigest(id, "input0_non_owner", nonOwnerKP, tx, 0, inValue, chainID)
 		tx.Witness = []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: nonOwnerPub, Signature: sig}}
 		b := mustTxBytes(tx)
 		v["tx_hex"] = hex.EncodeToString(b)
@@ -531,14 +515,7 @@ func updateVaultCreateVectors(
 			Outputs:  []consensus.TxOutput{{Value: vaultOutValue, CovenantType: consensus.COV_TYPE_VAULT, CovenantData: vaultCov}},
 			Locktime: 0,
 		}
-		d, err := consensus.SighashV1Digest(tx, 0, inValue, chainID)
-		if err != nil {
-			fatalf("%s: sighash: %v", id, err)
-		}
-		sig, err := ownerKP.SignDigest32(d)
-		if err != nil {
-			fatalf("%s: sign: %v", id, err)
-		}
+		sig := mustSignInputDigest(id, "input0_owner", ownerKP, tx, 0, inValue, chainID)
 		tx.Witness = []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: ownerPub, Signature: sig}}
 		b := mustTxBytes(tx)
 		v["tx_hex"] = hex.EncodeToString(b)
@@ -608,22 +585,8 @@ func updateVaultSpendVectorsVaultFixture(
 
 		// Witness cursor: vault(1) + owner(1) + sponsor(1) = 3 witness items.
 		// For this vector, vault threshold is checked *after* sponsorship, so we can keep the vault witness as sentinel (smaller).
-		d1, err := consensus.SighashV1Digest(tx, 1, ownerFeeInValue, chainID)
-		if err != nil {
-			fatalf("%s: sighash owner: %v", id, err)
-		}
-		ownerSig, err := ownerKP.SignDigest32(d1)
-		if err != nil {
-			fatalf("%s: sign owner: %v", id, err)
-		}
-		d2, err := consensus.SighashV1Digest(tx, 2, sponsorInValue, chainID)
-		if err != nil {
-			fatalf("%s: sighash sponsor: %v", id, err)
-		}
-		sponsorSig, err := sponsorKP.SignDigest32(d2)
-		if err != nil {
-			fatalf("%s: sign sponsor: %v", id, err)
-		}
+		ownerSig := mustSignInputDigest(id, "owner_input", ownerKP, tx, 1, ownerFeeInValue, chainID)
+		sponsorSig := mustSignInputDigest(id, "sponsor_input", sponsorKP, tx, 2, sponsorInValue, chainID)
 		tx.Witness = []consensus.WitnessItem{
 			{SuiteID: consensus.SUITE_ID_SENTINEL, Pubkey: nil, Signature: nil},
 			{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: ownerPub, Signature: ownerSig},
@@ -666,22 +629,8 @@ func updateVaultSpendVectorsVaultFixture(
 			Locktime: 0,
 		}
 
-		d0, err := consensus.SighashV1Digest(tx, 0, vaultValue, chainID)
-		if err != nil {
-			fatalf("%s: sighash0: %v", id, err)
-		}
-		vaultSig, err := vaultKP.SignDigest32(d0)
-		if err != nil {
-			fatalf("%s: vault sign: %v", id, err)
-		}
-		d1, err := consensus.SighashV1Digest(tx, 1, ownerFeeInValue, chainID)
-		if err != nil {
-			fatalf("%s: sighash1: %v", id, err)
-		}
-		ownerSig, err := ownerKP.SignDigest32(d1)
-		if err != nil {
-			fatalf("%s: owner sign: %v", id, err)
-		}
+		vaultSig := mustSignInputDigest(id, "vault_input", vaultKP, tx, 0, vaultValue, chainID)
+		ownerSig := mustSignInputDigest(id, "owner_input", ownerKP, tx, 1, ownerFeeInValue, chainID)
 		tx.Witness = []consensus.WitnessItem{
 			{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: vaultPub, Signature: vaultSig},
 			{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: ownerPub, Signature: ownerSig},
@@ -748,14 +697,7 @@ func updateHTLCVector(
 		Locktime: 0,
 	}
 
-	d, err := consensus.SighashV1Digest(tx, 0, 100, chainID)
-	if err != nil {
-		fatalf("%s: sighash: %v", id, err)
-	}
-	sig, err := claimKP.SignDigest32(d)
-	if err != nil {
-		fatalf("%s: sign: %v", id, err)
-	}
+	sig := mustSignInputDigest(id, "claim_input", claimKP, tx, 0, 100, chainID)
 
 	// Witness items for HTLC input:
 	//  - path selector (sentinel): pubkey=key_id (32), signature=claim payload
@@ -814,14 +756,7 @@ func updateSubsidyBlocks(
 		Outputs:  []consensus.TxOutput{{Value: 90, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: outCov}},
 		Locktime: 0,
 	}
-	d, err := consensus.SighashV1Digest(nonCoinbase, 0, 100, chainID)
-	if err != nil {
-		fatalf("subsidy: sighash: %v", err)
-	}
-	sig, err := spendKP.SignDigest32(d)
-	if err != nil {
-		fatalf("subsidy: sign: %v", err)
-	}
+	sig := mustSignInputDigest("subsidy", "spend_input", spendKP, nonCoinbase, 0, 100, chainID)
 	nonCoinbase.Witness = []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: spendPub, Signature: sig}}
 	nonCoinbaseBytes := mustTxBytes(nonCoinbase)
 
