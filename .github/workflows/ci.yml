@@ -35,8 +35,8 @@ jobs:
 
       - name: Install gosec + govulncheck
         run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          GOTOOLCHAIN=auto go install github.com/securego/gosec/v2/cmd/gosec@latest
+          GOTOOLCHAIN=auto go install golang.org/x/vuln/cmd/govulncheck@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Install cargo-audit
