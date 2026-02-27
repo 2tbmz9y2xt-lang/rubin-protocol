@@ -76,6 +76,54 @@ func mustParseTxForUtxo(t *testing.T, txBytes []byte) (*Tx, [32]byte) {
 	return tx, txid
 }
 
+func TestApplyNonCoinbaseTxBasicUpdate_P2PKOK(t *testing.T) {
+	var chainID [32]byte
+	var prev [32]byte
+	prev[0] = 0xa1
+
+	kp := mustMLDSA87Keypair(t)
+	prevCov := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+
+	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
+	tx, txid := mustParseTxForUtxo(t, txBytes)
+	tx.Witness = []WitnessItem{
+		signP2PKInputWitness(t, tx, 0, 100, chainID, kp),
+	}
+
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prev, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_P2PK,
+			CovenantData: prevCov,
+		},
+	}
+
+	work, summary, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxos, 0, 0, chainID)
+	if err != nil {
+		t.Fatalf("ApplyNonCoinbaseTxBasicUpdate: %v", err)
+	}
+	if summary == nil {
+		t.Fatalf("expected summary")
+	}
+	if summary.Fee != 10 {
+		t.Fatalf("fee=%d, want %d", summary.Fee, 10)
+	}
+	if summary.UtxoCount != 1 {
+		t.Fatalf("utxo_count=%d, want %d", summary.UtxoCount, 1)
+	}
+
+	if _, ok := work[Outpoint{Txid: prev, Vout: 0}]; ok {
+		t.Fatalf("expected input UTXO to be removed")
+	}
+	out, ok := work[Outpoint{Txid: txid, Vout: 0}]
+	if !ok {
+		t.Fatalf("expected output UTXO to exist")
+	}
+	if out.Value != 90 || out.CovenantType != COV_TYPE_P2PK || len(out.CovenantData) != MAX_P2PK_COVENANT_DATA {
+		t.Fatalf("unexpected output UTXO fields")
+	}
+}
+
 func TestApplyNonCoinbaseTxBasic_InputValidationErrors(t *testing.T) {
 	cases := []struct {
 		name      string
