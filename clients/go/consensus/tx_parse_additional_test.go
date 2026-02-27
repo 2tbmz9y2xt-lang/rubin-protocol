@@ -121,9 +121,9 @@ func TestParseTx_DACommit_RejectsOversizeManifestPayloadLen(t *testing.T) {
 	b = append(b, txDataRoot[:]...)
 	b = append(b, stateRoot[:]...)
 	b = append(b, withdrawalsRoot[:]...)
-	b = append(b, 0x00)                      // batch_sig_suite
-	b = appendCompactSize(b, 0)              // batch_sig_len
-	b = appendCompactSize(b, 0)              // witness_count
+	b = append(b, 0x00)                                      // batch_sig_suite
+	b = appendCompactSize(b, 0)                              // batch_sig_len
+	b = appendCompactSize(b, 0)                              // witness_count
 	b = appendCompactSize(b, MAX_DA_MANIFEST_BYTES_PER_TX+1) // da_payload_len too large
 
 	_, _, _, _, err := ParseTx(b)
