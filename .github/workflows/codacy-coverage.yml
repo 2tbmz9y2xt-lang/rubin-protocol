@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Cache OpenSSL 3.5 bundle
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cache/rubin-openssl/bundle-3.5.5
@@ -58,7 +58,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust deps (coverage)
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
