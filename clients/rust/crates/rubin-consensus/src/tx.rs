@@ -124,6 +124,12 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
                 "covenant_data_len overflows usize",
             ));
         }
+        if cov_len_u64 > MAX_COVENANT_DATA_PER_OUTPUT {
+            return Err(TxError::new(
+                ErrorCode::TxErrParse,
+                "covenant_data_len exceeds MAX_COVENANT_DATA_PER_OUTPUT",
+            ));
+        }
         let cov_len = cov_len_u64 as usize;
         let covenant_data = r.read_bytes(cov_len)?.to_vec();
 

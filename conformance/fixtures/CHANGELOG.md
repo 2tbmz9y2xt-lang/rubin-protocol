@@ -9,6 +9,20 @@ Policy:
 
 ---
 
+## 2026-02-27 — covenant_data_len cap boundary (Q-AUDIT-COV-01)
+
+Причина:
+- зафиксировать consensus-critical cap: `covenant_data_len > 65536` MUST reject as `TX_ERR_PARSE`.
+
+Инструменты:
+- ручное обновление `CV-PARSE.json`,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-PARSE`,
+- синхронизация матрицы: `tools/gen_conformance_matrix.py`,
+- синхронизация Lean-векторов: `tools/formal/gen_lean_conformance_vectors.py`.
+
+Изменённые fixtures:
+- `CV-PARSE.json` (добавлен `PARSE-11`).
+
 ## 2026-02-25 — PR #161 (Q-R017)
 
 Причина:

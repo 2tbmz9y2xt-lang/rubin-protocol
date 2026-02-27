@@ -10,6 +10,45 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache OpenSSL 3.5 bundle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/rubin-openssl/bundle-3.5.5
+            ~/.cache/rubin-openssl/work/openssl-3.5.5.tar.gz
+          key: openssl-bundle-${{ runner.os }}-3.5.5-v2
+
+      - name: Build OpenSSL 3.5.5 bundle (PQC-enabled)
+        run: |
+          set -euo pipefail
+          PREFIX="$HOME/.cache/rubin-openssl/bundle-3.5.5"
+          MODULES_DIR="$PREFIX/lib/ossl-modules"
+          if [ ! -d "$MODULES_DIR" ] && [ -d "$PREFIX/lib64/ossl-modules" ]; then
+            MODULES_DIR="$PREFIX/lib64/ossl-modules"
+          fi
+          if [ ! -x "$PREFIX/bin/openssl" ] || [ ! -f "$PREFIX/ssl/openssl-fips.cnf" ] || [ ! -d "$MODULES_DIR" ]; then
+            OPENSSL_VERSION=3.5.5 PREFIX="$PREFIX" bash scripts/crypto/openssl/build-openssl-bundle.sh
+          fi
+          if [ -d "$PREFIX/lib/ossl-modules" ]; then
+            MODULES_DIR="$PREFIX/lib/ossl-modules"
+          elif [ -d "$PREFIX/lib64/ossl-modules" ]; then
+            MODULES_DIR="$PREFIX/lib64/ossl-modules"
+          else
+            echo "ERROR: OpenSSL modules directory not found under $PREFIX/lib*/ossl-modules" >&2
+            exit 1
+          fi
+          echo "$PREFIX/bin" >> "$GITHUB_PATH"
+          echo "OPENSSL_DIR=$PREFIX" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$PREFIX/lib64:$PREFIX/lib" >> "$GITHUB_ENV"
+          echo "OPENSSL_MODULES=$MODULES_DIR" >> "$GITHUB_ENV"
+          echo "OPENSSL_CONF=$PREFIX/ssl/openssl-fips.cnf" >> "$GITHUB_ENV"
+
+      - name: Verify OpenSSL PQ algorithms
+        run: |
+          openssl version
+          openssl list -signature-algorithms | grep -E 'ML-DSA-87|SLH-DSA-SHAKE-256f'
+
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24.13'

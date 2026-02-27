@@ -315,6 +315,9 @@ def applyNonCoinbaseTxBasicNoCrypto
         throw "TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN"
     validateThresholdSigSpendNoCrypto vaultKeys vaultThreshold vaultWitness height "CORE_VAULT"
     for o in tx.outputs do
+      -- vault recursion is forbidden: a vault-spend must not create CORE_VAULT outputs
+      if o.covenantType == CovenantGenesisV1.COV_TYPE_VAULT then
+        throw "TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED"
       let h := RubinFormal.OutputDescriptor.hash o.covenantType o.covenantData
       if !(vaultWhitelist.contains h) then
         throw "TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED"

@@ -318,6 +318,13 @@ func applyNonCoinbaseTxBasicWork(
 			}
 		}
 
+		// Circular-reference hardening: vault spends MUST NOT create new CORE_VAULT outputs.
+		for _, out := range tx.Outputs {
+			if out.CovenantType == COV_TYPE_VAULT {
+				return nil, 0, txerr(TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED, "CORE_VAULT outputs forbidden in CORE_VAULT spend")
+			}
+		}
+
 		// Signature threshold check (CANONICAL §24.1 step 7).
 		if err := validateThresholdSigSpend(vaultSigKeys, vaultSigThreshold, vaultSigWitness, vaultSigDigest, height, "CORE_VAULT"); err != nil {
 			return nil, 0, err

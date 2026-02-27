@@ -14,6 +14,8 @@ def MAX_TX_OUTPUTS : Nat := 1024
 def MAX_SCRIPT_SIG_BYTES : Nat := 32
 def MAX_WITNESS_ITEMS : Nat := 1024
 def MAX_WITNESS_BYTES_PER_TX : Nat := 100000
+-- Wire-level hard cap (CANONICAL §5.3).
+def MAX_COVENANT_DATA_PER_OUTPUT : Nat := 65536
 
 def SUITE_ID_SENTINEL : Nat := 0x00
 def SUITE_ID_ML_DSA_87 : Nat := 0x01
@@ -58,6 +60,8 @@ def parseOutputs (c : Cursor) (n : Nat) : Option Cursor := do
     -- covenant_data_len
     let (cdLen, cur3, minimal) ← cur2.getCompactSize?
     let _ ← requireMinimal minimal
+    if cdLen > MAX_COVENANT_DATA_PER_OUTPUT then
+      none
     let (_, cur4) ← cur3.getBytes? cdLen
     cur := cur4
   pure cur
