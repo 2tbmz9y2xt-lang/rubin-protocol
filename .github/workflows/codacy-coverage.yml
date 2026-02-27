@@ -110,10 +110,18 @@ jobs:
             --commit-uuid "$CODACY_COMMIT_UUID"
           )
 
+          # Upload Go and Rust coverage separately: Codacy auto-detects Go coverage.out as LCOV
+          # unless we force the correct parser.
           bash <(curl -Ls https://coverage.codacy.com/get.sh) report \
             "${common_args[@]}" \
             -r clients/go/coverage.out \
+            --force-coverage-parser go \
+            --partial
+
+          bash <(curl -Ls https://coverage.codacy.com/get.sh) report \
+            "${common_args[@]}" \
             -r clients/rust/lcov.info \
+            --force-coverage-parser lcov \
             --partial
 
           bash <(curl -Ls https://coverage.codacy.com/get.sh) final \
