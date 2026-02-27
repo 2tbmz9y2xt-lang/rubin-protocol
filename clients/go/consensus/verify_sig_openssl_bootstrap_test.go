@@ -124,3 +124,25 @@ func TestVerifySig_InvalidFIPSModeRejected(t *testing.T) {
 		t.Fatalf("expected invalid mode context, got: %v", verifyErr)
 	}
 }
+
+func TestVerifySig_InvalidFIPSModeRejectedForSLH(t *testing.T) {
+	resetOpenSSLBootstrapStateForTests()
+	t.Cleanup(resetOpenSSLBootstrapStateForTests)
+
+	var digest [32]byte
+	t.Setenv("RUBIN_OPENSSL_FIPS_MODE", "definitely-invalid")
+
+	ok, verifyErr := verifySig(SUITE_ID_SLH_DSA_SHAKE_256F, []byte{0x01}, []byte{0x02}, digest)
+	if verifyErr == nil {
+		t.Fatalf("expected bootstrap mode error, got nil")
+	}
+	if ok {
+		t.Fatalf("expected verifySig=false on bootstrap mode error")
+	}
+	if got := mustTxErrCode(t, verifyErr); got != TX_ERR_PARSE {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
+	}
+	if !strings.Contains(verifyErr.Error(), "invalid RUBIN_OPENSSL_FIPS_MODE") {
+		t.Fatalf("expected invalid mode context, got: %v", verifyErr)
+	}
+}
