@@ -32,9 +32,28 @@ jobs:
       - name: Upload to Codacy
         env:
           CODACY_API_TOKEN: ${{ secrets.CODACY_API_TOKEN }}
+          CODACY_ORGANIZATION_PROVIDER: gh
+          CODACY_USERNAME: ${{ github.repository_owner }}
+          CODACY_PROJECT_NAME: rubin-protocol
+          CODACY_COMMIT_UUID: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
+          if [[ -z "${CODACY_API_TOKEN:-}" ]]; then
+            echo "CODACY_API_TOKEN missing; skipping upload (coverage artifacts still generated)."
+            exit 0
+          fi
+
+          common_args=(
+            -a "$CODACY_API_TOKEN"
+            --organization-provider "$CODACY_ORGANIZATION_PROVIDER"
+            -u "$CODACY_USERNAME"
+            -p "$CODACY_PROJECT_NAME"
+            --commit-uuid "$CODACY_COMMIT_UUID"
+          )
+
           bash <(curl -Ls https://coverage.codacy.com/get.sh) report \
+            "${common_args[@]}" \
             -r clients/go/coverage.out \
             -r clients/rust/lcov.info \
             --partial
-          bash <(curl -Ls https://coverage.codacy.com/get.sh) final
+          bash <(curl -Ls https://coverage.codacy.com/get.sh) final \
+            "${common_args[@]}"
