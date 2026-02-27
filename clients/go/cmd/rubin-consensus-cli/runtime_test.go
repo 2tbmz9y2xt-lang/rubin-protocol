@@ -16,6 +16,21 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
+var requiredTelemetryKeys = []string{
+	"shortid_collision_count",
+	"shortid_collision_blocks",
+	"shortid_collision_peers",
+	"da_mempool_fill_pct",
+	"orphan_pool_fill_pct",
+	"miss_rate_bytes_L1",
+	"miss_rate_bytes_DA",
+	"partial_set_count",
+	"partial_set_age_p95",
+	"recovery_success_rate",
+	"prefetch_latency_ms",
+	"peer_quality_score",
+}
+
 func mustHex32(b [32]byte) string {
 	return hex.EncodeToString(b[:])
 }
@@ -177,6 +192,33 @@ func runRequest(t *testing.T, req Request) Response {
 	return runRawJSON(t, raw, runFromStdin)
 }
 
+func mustRunOk(t *testing.T, req Request) Response {
+	t.Helper()
+	resp := runRequest(t, req)
+	if !resp.Ok {
+		t.Fatalf("expected ok, got: %+v", resp)
+	}
+	return resp
+}
+
+func mustRunErr(t *testing.T, req Request, wantErr string) Response {
+	t.Helper()
+	resp := runRequest(t, req)
+	if resp.Ok || resp.Err != wantErr {
+		t.Fatalf("expected err=%q, got: %+v", wantErr, resp)
+	}
+	return resp
+}
+
+func mustRunErrAny(t *testing.T, req Request) Response {
+	t.Helper()
+	resp := runRequest(t, req)
+	if resp.Ok || resp.Err == "" {
+		t.Fatalf("expected error, got: %+v", resp)
+	}
+	return resp
+}
+
 func TestRubinConsensusCLI_RunFromStdin_CoversKeyOps(t *testing.T) {
 	blockBytes, headerBytes := mineGenesisBlockBytes(t)
 
@@ -197,31 +239,28 @@ func TestRubinConsensusCLI_RunFromStdin_CoversKeyOps(t *testing.T) {
 	})
 
 	t.Run("parse_tx_ok_and_error", func(t *testing.T) {
-		ok := runRequest(t, Request{Op: "parse_tx", TxHex: txHex})
-		if !ok.Ok || ok.TxidHex == "" || ok.WtxidHex == "" || ok.Consumed == 0 {
+		ok := mustRunOk(t, Request{Op: "parse_tx", TxHex: txHex})
+		if ok.TxidHex == "" || ok.WtxidHex == "" || ok.Consumed == 0 {
 			t.Fatalf("unexpected ok resp: %+v", ok)
 		}
 
-		bad := runRequest(t, Request{Op: "parse_tx", TxHex: "00"})
-		if bad.Ok || bad.Err == "" {
-			t.Fatalf("expected error resp: %+v", bad)
-		}
+		_ = mustRunErrAny(t, Request{Op: "parse_tx", TxHex: "00"})
 	})
 
 	t.Run("fork_work_and_choice", func(t *testing.T) {
-		r := runRequest(t, Request{Op: "fork_work", Target: "0x01"})
-		if !r.Ok || r.WorkHex == "" {
+		r := mustRunOk(t, Request{Op: "fork_work", Target: "0x01"})
+		if r.WorkHex == "" {
 			t.Fatalf("unexpected resp: %+v", r)
 		}
 
-		sel := runRequest(t, Request{
+		sel := mustRunOk(t, Request{
 			Op: "fork_choice_select",
 			Chains: []ForkChoiceChain{
 				{ID: "a", Targets: []string{"0x02"}, TipHash: "0x02"},
 				{ID: "b", Targets: []string{"0x02"}, TipHash: "0x01"}, // tie-break by smaller tip hash
 			},
 		})
-		if !sel.Ok || sel.Winner != "b" || sel.Chainwork == "" {
+		if sel.Winner != "b" || sel.Chainwork == "" {
 			t.Fatalf("unexpected resp: %+v", sel)
 		}
 	})
@@ -231,49 +270,43 @@ func TestRubinConsensusCLI_RunFromStdin_CoversKeyOps(t *testing.T) {
 		var a, b [32]byte
 		a[31] = 1
 		b[31] = 2
-		r1 := runRequest(t, Request{Op: "merkle_root", Txids: []string{mustHex32(a), mustHex32(b)}})
-		if !r1.Ok || r1.MerkleHex == "" {
+		r1 := mustRunOk(t, Request{Op: "merkle_root", Txids: []string{mustHex32(a), mustHex32(b)}})
+		if r1.MerkleHex == "" {
 			t.Fatalf("unexpected resp: %+v", r1)
 		}
-		r2 := runRequest(t, Request{Op: "witness_merkle_root", Wtxids: []string{mustHex32(a), mustHex32(b)}})
-		if !r2.Ok || r2.WitnessMerkleHex == "" {
+		r2 := mustRunOk(t, Request{Op: "witness_merkle_root", Wtxids: []string{mustHex32(a), mustHex32(b)}})
+		if r2.WitnessMerkleHex == "" {
 			t.Fatalf("unexpected resp: %+v", r2)
 		}
 	})
 
 	// sighash_v1 / tx_weight_and_stats
 	t.Run("sighash_and_weight", func(t *testing.T) {
-		r1 := runRequest(t, Request{
+		r1 := mustRunOk(t, Request{
 			Op:         "sighash_v1",
 			TxHex:      txHex,
 			InputIndex: 0,
 			InputValue: 0,
 			ChainIDHex: chainIDHex,
 		})
-		if !r1.Ok || len(r1.DigestHex) != 64 {
+		if len(r1.DigestHex) != 64 {
 			t.Fatalf("unexpected resp: %+v", r1)
 		}
 
-		r2 := runRequest(t, Request{Op: "tx_weight_and_stats", TxHex: txHex})
-		if !r2.Ok {
-			t.Fatalf("unexpected resp: %+v", r2)
-		}
+		_ = mustRunOk(t, Request{Op: "tx_weight_and_stats", TxHex: txHex})
 	})
 
 	// header hash / pow check
 	t.Run("block_hash_and_pow_check", func(t *testing.T) {
-		r1 := runRequest(t, Request{Op: "block_hash", HeaderHex: mustHexBytes(headerBytes)})
-		if !r1.Ok || len(r1.BlockHash) != 64 {
+		r1 := mustRunOk(t, Request{Op: "block_hash", HeaderHex: mustHexBytes(headerBytes)})
+		if len(r1.BlockHash) != 64 {
 			t.Fatalf("unexpected resp: %+v", r1)
 		}
-		r2 := runRequest(t, Request{
+		_ = mustRunOk(t, Request{
 			Op:        "pow_check",
 			HeaderHex: mustHexBytes(headerBytes),
 			TargetHex: targetHex,
 		})
-		if !r2.Ok {
-			t.Fatalf("unexpected resp: %+v", r2)
-		}
 	})
 
 	t.Run("retarget_v1_both_forms", func(t *testing.T) {
@@ -445,49 +478,25 @@ func ptrBool(v bool) *bool { return &v }
 
 func TestRubinConsensusCLI_RunFromStdin_CoversErrorPaths(t *testing.T) {
 	blockBytes, _ := mineGenesisBlockBytes(t)
+	txHex := mustHexBytes(buildAnchorOnlyCoinbaseLikeTxBytes(t, 0, [32]byte{}))
 
-	t.Run("parse_tx_bad_hex", func(t *testing.T) {
-		r := runRequest(t, Request{Op: "parse_tx", TxHex: "zz"})
-		if r.Ok || r.Err != "bad hex" {
-			t.Fatalf("unexpected resp: %+v", r)
-		}
-	})
-
-	t.Run("fork_work_bad_target", func(t *testing.T) {
-		r := runRequest(t, Request{Op: "fork_work", Target: ""})
-		if r.Ok || r.Err != "bad target" {
-			t.Fatalf("unexpected resp: %+v", r)
-		}
-	})
-
-	t.Run("fork_choice_bad_chains", func(t *testing.T) {
-		r := runRequest(t, Request{Op: "fork_choice_select"})
-		if r.Ok || r.Err != "bad chains" {
-			t.Fatalf("unexpected resp: %+v", r)
-		}
-	})
-
-	t.Run("merkle_root_bad_txid", func(t *testing.T) {
-		r := runRequest(t, Request{Op: "merkle_root", Txids: []string{"00"}})
-		if r.Ok || r.Err != "bad txid" {
-			t.Fatalf("unexpected resp: %+v", r)
-		}
-	})
-
-	t.Run("witness_merkle_root_bad_wtxid", func(t *testing.T) {
-		r := runRequest(t, Request{Op: "witness_merkle_root", Wtxids: []string{"00"}})
-		if r.Ok || r.Err != "bad wtxid" {
-			t.Fatalf("unexpected resp: %+v", r)
-		}
-	})
-
-	t.Run("sighash_bad_chain_id", func(t *testing.T) {
-		txHex := mustHexBytes(buildAnchorOnlyCoinbaseLikeTxBytes(t, 0, [32]byte{}))
-		r := runRequest(t, Request{Op: "sighash_v1", TxHex: txHex, ChainIDHex: "00"})
-		if r.Ok || r.Err != "bad chain_id" {
-			t.Fatalf("unexpected resp: %+v", r)
-		}
-	})
+	type errCase struct {
+		name    string
+		req     Request
+		wantErr string
+	}
+	for _, tc := range []errCase{
+		{name: "parse_tx_bad_hex", req: Request{Op: "parse_tx", TxHex: "zz"}, wantErr: "bad hex"},
+		{name: "fork_work_bad_target", req: Request{Op: "fork_work", Target: ""}, wantErr: "bad target"},
+		{name: "fork_choice_bad_chains", req: Request{Op: "fork_choice_select"}, wantErr: "bad chains"},
+		{name: "merkle_root_bad_txid", req: Request{Op: "merkle_root", Txids: []string{"00"}}, wantErr: "bad txid"},
+		{name: "witness_merkle_root_bad_wtxid", req: Request{Op: "witness_merkle_root", Wtxids: []string{"00"}}, wantErr: "bad wtxid"},
+		{name: "sighash_bad_chain_id", req: Request{Op: "sighash_v1", TxHex: txHex, ChainIDHex: "00"}, wantErr: "bad chain_id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mustRunErr(t, tc.req, tc.wantErr)
+		})
+	}
 
 	t.Run("block_basic_bad_expected_prev", func(t *testing.T) {
 		r := runRequest(t, Request{
@@ -514,181 +523,127 @@ func TestRubinConsensusCLI_RunFromStdin_CoversErrorPaths(t *testing.T) {
 	})
 
 	t.Run("compact_collision_full_block_fallback", func(t *testing.T) {
-		r := runRequest(t, Request{
+		r := mustRunOk(t, Request{
 			Op:             "compact_collision_fallback",
 			MissingIndices: []int{1},
 			GetblocktxnOK:  ptrBool(false),
 		})
-		if !r.Ok || !r.RequestFullBlock {
+		if !r.RequestFullBlock {
 			t.Fatalf("unexpected resp: %+v", r)
 		}
 	})
 
 	t.Run("compact_batch_verify_index_oob", func(t *testing.T) {
-		r := runRequest(t, Request{Op: "compact_batch_verify", BatchSize: 2, InvalidIndices: []int{2}})
-		if r.Ok || r.Err != "invalid index out of range" {
-			t.Fatalf("unexpected resp: %+v", r)
-		}
+		mustRunErr(t, Request{Op: "compact_batch_verify", BatchSize: 2, InvalidIndices: []int{2}}, "invalid index out of range")
 	})
 
 	t.Run("compact_state_machine_unknown_event", func(t *testing.T) {
-		r := runRequest(t, Request{
-			Op:         "compact_state_machine",
-			ChunkCount: 2,
-			Events:     []any{map[string]any{"type": "nope"}},
-		})
-		if r.Ok || r.Err != "unknown state-machine event type" {
-			t.Fatalf("unexpected resp: %+v", r)
-		}
+		mustRunErr(
+			t,
+			Request{Op: "compact_state_machine", ChunkCount: 2, Events: []any{map[string]any{"type": "nope"}}},
+			"unknown state-machine event type",
+		)
 	})
 
 	t.Run("compact_chunk_count_cap_over", func(t *testing.T) {
-		r := runRequest(t, Request{Op: "compact_chunk_count_cap", ChunkCount: 3, MaxDAChunkCount: 2})
-		if r.Ok || r.Err != string(consensus.TX_ERR_PARSE) {
-			t.Fatalf("unexpected resp: %+v", r)
-		}
+		mustRunErr(t, Request{Op: "compact_chunk_count_cap", ChunkCount: 3, MaxDAChunkCount: 2}, string(consensus.TX_ERR_PARSE))
 	})
 
 	t.Run("compact_sendcmpct_modes_phases_branch", func(t *testing.T) {
-		r := runRequest(t, Request{
+		r := mustRunOk(t, Request{
 			Op: "compact_sendcmpct_modes",
 			Phases: []map[string]any{
 				{"in_ibd": true},
 				{"warmup_done": true, "miss_rate_pct": 0.1, "miss_rate_blocks": 0},
 			},
 		})
-		if !r.Ok || len(r.InvalidOut) != 2 {
+		if len(r.InvalidOut) != 2 {
 			t.Fatalf("unexpected resp: %+v", r)
 		}
 	})
 
 	t.Run("compact_peer_quality_unknown_event", func(t *testing.T) {
-		r := runRequest(t, Request{Op: "compact_peer_quality", Events: []any{"unknown"}})
-		if r.Ok || r.Err != "unknown peer-quality event" {
-			t.Fatalf("unexpected resp: %+v", r)
-		}
+		mustRunErr(t, Request{Op: "compact_peer_quality", Events: []any{"unknown"}}, "unknown peer-quality event")
 	})
 
 	t.Run("compact_prefetch_caps_default_streams_branch", func(t *testing.T) {
-		r := runRequest(t, Request{
+		_ = mustRunOk(t, Request{
 			Op:             "compact_prefetch_caps",
 			PeerStreamsBPS: nil,
 			ActiveSets:     2,
 			PeerStreamBPS:  1,
 		})
-		if !r.Ok {
-			t.Fatalf("unexpected resp: %+v", r)
-		}
 	})
 
 	t.Run("compact_telemetry_rate_invalid", func(t *testing.T) {
-		r := runRequest(t, Request{Op: "compact_telemetry_rate", CompletedSets: 2, TotalSets: 1})
-		if r.Ok || r.Err != "invalid completed/total values" {
-			t.Fatalf("unexpected resp: %+v", r)
-		}
+		mustRunErr(t, Request{Op: "compact_telemetry_rate", CompletedSets: 2, TotalSets: 1}, "invalid completed/total values")
 	})
 
 	t.Run("compact_telemetry_fields_ok", func(t *testing.T) {
-		required := []string{
-			"shortid_collision_count",
-			"shortid_collision_blocks",
-			"shortid_collision_peers",
-			"da_mempool_fill_pct",
-			"orphan_pool_fill_pct",
-			"miss_rate_bytes_L1",
-			"miss_rate_bytes_DA",
-			"partial_set_count",
-			"partial_set_age_p95",
-			"recovery_success_rate",
-			"prefetch_latency_ms",
-			"peer_quality_score",
-		}
 		telemetry := map[string]any{}
-		for _, k := range required {
+		for _, k := range requiredTelemetryKeys {
 			telemetry[k] = 1
 		}
-		r := runRequest(t, Request{Op: "compact_telemetry_fields", Telemetry: telemetry})
-		if !r.Ok || len(r.MissingFields) != 0 {
+		r := mustRunOk(t, Request{Op: "compact_telemetry_fields", Telemetry: telemetry})
+		if len(r.MissingFields) != 0 {
 			t.Fatalf("unexpected resp: %+v", r)
 		}
 	})
 
 	t.Run("compact_grace_period_unknown_event", func(t *testing.T) {
-		r := runRequest(t, Request{Op: "compact_grace_period", Events: []any{"nope"}})
-		if r.Ok || r.Err != "unknown grace event" {
-			t.Fatalf("unexpected resp: %+v", r)
-		}
+		mustRunErr(t, Request{Op: "compact_grace_period", Events: []any{"nope"}}, "unknown grace event")
 	})
 
 	t.Run("compact_eviction_tiebreak_invalid_entry", func(t *testing.T) {
-		r := runRequest(t, Request{Op: "compact_eviction_tiebreak", Entries: []map[string]any{{"da_id": "", "wire_bytes": 0}}})
-		if r.Ok || r.Err != "invalid da_id/wire_bytes" {
-			t.Fatalf("unexpected resp: %+v", r)
-		}
+		mustRunErr(
+			t,
+			Request{Op: "compact_eviction_tiebreak", Entries: []map[string]any{{"da_id": "", "wire_bytes": 0}}},
+			"invalid da_id/wire_bytes",
+		)
 	})
 
 	t.Run("compact_a_to_b_retention_invalid_chunk_count", func(t *testing.T) {
-		r := runRequest(t, Request{Op: "compact_a_to_b_retention", ChunkCount: 0})
-		if r.Ok || r.Err != "chunk_count must be > 0" {
-			t.Fatalf("unexpected resp: %+v", r)
-		}
+		mustRunErr(t, Request{Op: "compact_a_to_b_retention", ChunkCount: 0}, "chunk_count must be > 0")
 	})
 
 	t.Run("compact_duplicate_commit_invalid_entry", func(t *testing.T) {
-		r := runRequest(t, Request{Op: "compact_duplicate_commit", Commits: []map[string]any{{"da_id": "", "peer": ""}}})
-		if r.Ok || r.Err != "invalid duplicate-commit entry" {
-			t.Fatalf("unexpected resp: %+v", r)
-		}
+		mustRunErr(
+			t,
+			Request{Op: "compact_duplicate_commit", Commits: []map[string]any{{"da_id": "", "peer": ""}}},
+			"invalid duplicate-commit entry",
+		)
 	})
 
 	t.Run("output_descriptor_bytes_bad_hex", func(t *testing.T) {
-		r := runRequest(t, Request{Op: "output_descriptor_bytes", CovenantType: 1, CovenantDataHex: "zz"})
-		if r.Ok || r.Err != "bad covenant_data_hex" {
-			t.Fatalf("unexpected resp: %+v", r)
-		}
+		mustRunErr(t, Request{Op: "output_descriptor_bytes", CovenantType: 1, CovenantDataHex: "zz"}, "bad covenant_data_hex")
 	})
 
 	t.Run("nonce_replay_ok", func(t *testing.T) {
-		r := runRequest(t, Request{Op: "nonce_replay_intrablock", Nonces: []uint64{1, 2, 3}})
-		if !r.Ok || len(r.Duplicates) != 0 {
+		r := mustRunOk(t, Request{Op: "nonce_replay_intrablock", Nonces: []uint64{1, 2, 3}})
+		if len(r.Duplicates) != 0 {
 			t.Fatalf("unexpected resp: %+v", r)
 		}
 	})
 
 	t.Run("timestamp_bounds_old_and_future", func(t *testing.T) {
-		old := runRequest(t, Request{Op: "timestamp_bounds", MTP: 100, Timestamp: 100})
-		if old.Ok || old.Err != string(consensus.BLOCK_ERR_TIMESTAMP_OLD) {
-			t.Fatalf("unexpected resp: %+v", old)
-		}
-		fut := runRequest(t, Request{Op: "timestamp_bounds", MTP: 100, Timestamp: 100 + 7200 + 1})
-		if fut.Ok || fut.Err != string(consensus.BLOCK_ERR_TIMESTAMP_FUTURE) {
-			t.Fatalf("unexpected resp: %+v", fut)
-		}
+		mustRunErr(t, Request{Op: "timestamp_bounds", MTP: 100, Timestamp: 100}, string(consensus.BLOCK_ERR_TIMESTAMP_OLD))
+		mustRunErr(t, Request{Op: "timestamp_bounds", MTP: 100, Timestamp: 100 + 7200 + 1}, string(consensus.BLOCK_ERR_TIMESTAMP_FUTURE))
 	})
 
 	t.Run("determinism_order_bad_key", func(t *testing.T) {
-		r := runRequest(t, Request{Op: "determinism_order", Keys: []any{"0xzz"}})
-		if r.Ok || r.Err != "bad key" {
-			t.Fatalf("unexpected resp: %+v", r)
-		}
+		mustRunErr(t, Request{Op: "determinism_order", Keys: []any{"0xzz"}}, "bad key")
 	})
 
 	t.Run("validation_order_bad_checks", func(t *testing.T) {
-		r := runRequest(t, Request{Op: "validation_order"})
-		if r.Ok || r.Err != "bad checks" {
-			t.Fatalf("unexpected resp: %+v", r)
-		}
+		mustRunErr(t, Request{Op: "validation_order"}, "bad checks")
 	})
 
 	t.Run("htlc_structural_fail", func(t *testing.T) {
-		r := runRequest(t, Request{Op: "htlc_ordering_policy", StructuralOK: ptrBool(false)})
-		if r.Ok || r.Err != string(consensus.TX_ERR_PARSE) {
-			t.Fatalf("unexpected resp: %+v", r)
-		}
+		mustRunErr(t, Request{Op: "htlc_ordering_policy", StructuralOK: ptrBool(false)}, string(consensus.TX_ERR_PARSE))
 	})
 
 	t.Run("vault_fee_sponsor_forbidden", func(t *testing.T) {
-		r := runRequest(t, Request{
+		mustRunErr(t, Request{
 			Op:              "vault_policy_rules",
 			OwnerLockID:     "o",
 			VaultInputCount: 1,
@@ -698,10 +653,7 @@ func TestRubinConsensusCLI_RunFromStdin_CoversErrorPaths(t *testing.T) {
 			Slots:           1,
 			KeyCount:        1,
 			Whitelist:       []string{"aa"},
-		})
-		if r.Ok || r.Err != string(consensus.TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN) {
-			t.Fatalf("unexpected resp: %+v", r)
-		}
+		}, string(consensus.TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN))
 	})
 }
 
