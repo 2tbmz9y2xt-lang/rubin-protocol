@@ -26,20 +26,28 @@ func encodeHTLCClaimPayload(preimage []byte) []byte {
 	return b
 }
 
+func makeSLHKeyMaterial(refundTag byte) ([]byte, []byte, [32]byte, [32]byte) {
+	claimPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
+	refundPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
+	refundPub[0] = refundTag
+	claimKeyID := sha3_256(claimPub)
+	refundKeyID := sha3_256(refundPub)
+	return claimPub, refundPub, claimKeyID, refundKeyID
+}
+
+func makeHTLCEntry(hash [32]byte, lockMode uint8, lockValue uint64, claimKeyID, refundKeyID [32]byte) UtxoEntry {
+	return UtxoEntry{
+		Value:        100,
+		CovenantType: COV_TYPE_HTLC,
+		CovenantData: encodeHTLCCovenantData(hash, lockMode, lockValue, claimKeyID, refundKeyID),
+	}
+}
+
 func TestParseHTLCCovenantData_OK(t *testing.T) {
 	preimage := []byte("rubin-htlc")
 	hash := sha3_256(preimage)
-	claimPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
-	refundPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
-	refundPub[0] = 0x01
-
-	cov := encodeHTLCCovenantData(
-		hash,
-		LOCK_MODE_HEIGHT,
-		123,
-		sha3_256(claimPub),
-		sha3_256(refundPub),
-	)
+	_, _, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x01)
+	cov := encodeHTLCCovenantData(hash, LOCK_MODE_HEIGHT, 123, claimKeyID, refundKeyID)
 	parsed, err := ParseHTLCCovenantData(cov)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -67,24 +75,8 @@ func TestParseHTLCCovenantData_InvalidLockMode(t *testing.T) {
 
 func TestValidateHTLCSpend_ClaimHashMismatch(t *testing.T) {
 	var digest [32]byte
-	claimPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
-	refundPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
-	refundPub[0] = 0x22
-	claimKeyID := sha3_256(claimPub)
-	refundKeyID := sha3_256(refundPub)
-
-	cov := encodeHTLCCovenantData(
-		sha3_256([]byte("different")),
-		LOCK_MODE_HEIGHT,
-		50,
-		claimKeyID,
-		refundKeyID,
-	)
-	entry := UtxoEntry{
-		Value:        100,
-		CovenantType: COV_TYPE_HTLC,
-		CovenantData: cov,
-	}
+	claimPub, _, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x22)
+	entry := makeHTLCEntry(sha3_256([]byte("different")), LOCK_MODE_HEIGHT, 50, claimKeyID, refundKeyID)
 
 	path := WitnessItem{
 		SuiteID:   SUITE_ID_SENTINEL,
@@ -108,24 +100,14 @@ func TestValidateHTLCSpend_ClaimHashMismatch(t *testing.T) {
 
 func TestValidateHTLCSpend_RefundTimelockNotMet(t *testing.T) {
 	var digest [32]byte
-	claimPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
-	refundPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
-	refundPub[0] = 0x33
-	claimKeyID := sha3_256(claimPub)
-	refundKeyID := sha3_256(refundPub)
-
-	cov := encodeHTLCCovenantData(
+	_, refundPub, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x33)
+	entry := makeHTLCEntry(
 		sha3_256([]byte("x")),
 		LOCK_MODE_HEIGHT,
 		SLH_DSA_ACTIVATION_HEIGHT+100,
 		claimKeyID,
 		refundKeyID,
 	)
-	entry := UtxoEntry{
-		Value:        100,
-		CovenantType: COV_TYPE_HTLC,
-		CovenantData: cov,
-	}
 	path := WitnessItem{
 		SuiteID:   SUITE_ID_SENTINEL,
 		Pubkey:    refundKeyID[:],
@@ -156,18 +138,13 @@ func TestValidateHTLCSpend_RefundTimestampUsesMTP(t *testing.T) {
 	claimKeyID := sha3_256(claimPub)
 	refundKeyID := sha3_256(refundPub)
 
-	cov := encodeHTLCCovenantData(
+	entry := makeHTLCEntry(
 		sha3_256([]byte("x")),
 		LOCK_MODE_TIMESTAMP,
 		2000,
 		claimKeyID,
 		refundKeyID,
 	)
-	entry := UtxoEntry{
-		Value:        100,
-		CovenantType: COV_TYPE_HTLC,
-		CovenantData: cov,
-	}
 	path := WitnessItem{
 		SuiteID:   SUITE_ID_SENTINEL,
 		Pubkey:    refundKeyID[:],
@@ -203,11 +180,7 @@ func TestApplyNonCoinbaseTxBasic_HTLCUnknownPath(t *testing.T) {
 	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
 	tx, txid := mustParseTxForUtxo(t, txBytes)
 
-	claimPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
-	refundPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
-	refundPub[0] = 0x44
-	claimKeyID := sha3_256(claimPub)
-	refundKeyID := sha3_256(refundPub)
+	claimPub, _, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x44)
 
 	tx.Witness = []WitnessItem{
 		// Unknown spend path for CORE_HTLC.
@@ -217,17 +190,7 @@ func TestApplyNonCoinbaseTxBasic_HTLCUnknownPath(t *testing.T) {
 	}
 
 	utxos := map[Outpoint]UtxoEntry{
-		{Txid: prev, Vout: 0}: {
-			Value:        100,
-			CovenantType: COV_TYPE_HTLC,
-			CovenantData: encodeHTLCCovenantData(
-				sha3_256([]byte("preimage")),
-				LOCK_MODE_HEIGHT,
-				10,
-				claimKeyID,
-				refundKeyID,
-			),
-		},
+		{Txid: prev, Vout: 0}: makeHTLCEntry(sha3_256([]byte("preimage")), LOCK_MODE_HEIGHT, 10, claimKeyID, refundKeyID),
 	}
 
 	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, SLH_DSA_ACTIVATION_HEIGHT, 1000, chainID)

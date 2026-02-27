@@ -9,32 +9,43 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
-func TestBlockStorePutGetAndTip(t *testing.T) {
-	store, err := OpenBlockStore(filepath.Join(t.TempDir(), "blockstore"))
+func mustOpenBlockStore(t *testing.T, path string) *BlockStore {
+	t.Helper()
+	store, err := OpenBlockStore(path)
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}
+	return store
+}
 
-	header0 := testHeaderBytes(1, 11)
-	hash0, err := consensus.BlockHash(header0)
+func mustHeaderHash(t *testing.T, header []byte) [32]byte {
+	t.Helper()
+	hash, err := consensus.BlockHash(header)
 	if err != nil {
-		t.Fatalf("block hash 0: %v", err)
+		t.Fatalf("block hash: %v", err)
 	}
+	return hash
+}
+
+func mustPutBlock(t *testing.T, store *BlockStore, height uint64, seed byte, nonce uint64, payload []byte) ([32]byte, []byte) {
+	t.Helper()
+	header := testHeaderBytes(seed, nonce)
+	hash := mustHeaderHash(t, header)
+	if err := store.PutBlock(height, hash, header, payload); err != nil {
+		t.Fatalf("put block height=%d: %v", height, err)
+	}
+	return hash, header
+}
+
+func TestBlockStorePutGetAndTip(t *testing.T) {
+	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	block0 := []byte("block-0")
-	if err := store.PutBlock(0, hash0, header0, block0); err != nil {
-		t.Fatalf("put block 0: %v", err)
-	}
+	hash0, _ := mustPutBlock(t, store, 0, 1, 11, block0)
 
-	header1 := testHeaderBytes(2, 22)
-	hash1, err := consensus.BlockHash(header1)
-	if err != nil {
-		t.Fatalf("block hash 1: %v", err)
-	}
 	block1 := []byte("block-1")
-	if err := store.PutBlock(1, hash1, header1, block1); err != nil {
-		t.Fatalf("put block 1: %v", err)
-	}
+	hash1, header1 := mustPutBlock(t, store, 1, 2, 22, block1)
 
+	var err error
 	gotHeader1, err := store.GetHeaderByHash(hash1)
 	if err != nil {
 		t.Fatalf("get header by hash: %v", err)
@@ -69,29 +80,12 @@ func TestBlockStorePutGetAndTip(t *testing.T) {
 }
 
 func TestBlockStoreReorgAndRewindHooks(t *testing.T) {
-	store, err := OpenBlockStore(filepath.Join(t.TempDir(), "blockstore"))
-	if err != nil {
-		t.Fatalf("open blockstore: %v", err)
-	}
+	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	hash0, _ := mustPutBlock(t, store, 0, 10, 1, []byte("b0"))
+	_, _ = mustPutBlock(t, store, 1, 11, 2, []byte("b1a"))
+	hash1b, _ := mustPutBlock(t, store, 1, 12, 3, []byte("b1b"))
 
-	header0 := testHeaderBytes(10, 1)
-	hash0, _ := consensus.BlockHash(header0)
-	if err := store.PutBlock(0, hash0, header0, []byte("b0")); err != nil {
-		t.Fatalf("put b0: %v", err)
-	}
-
-	header1a := testHeaderBytes(11, 2)
-	hash1a, _ := consensus.BlockHash(header1a)
-	if err := store.PutBlock(1, hash1a, header1a, []byte("b1a")); err != nil {
-		t.Fatalf("put b1a: %v", err)
-	}
-
-	header1b := testHeaderBytes(12, 3)
-	hash1b, _ := consensus.BlockHash(header1b)
-	if err := store.PutBlock(1, hash1b, header1b, []byte("b1b")); err != nil {
-		t.Fatalf("put b1b (reorg): %v", err)
-	}
-
+	var err error
 	tipHeight, tipHash, ok, err := store.Tip()
 	if err != nil {
 		t.Fatalf("tip after reorg: %v", err)
@@ -113,12 +107,9 @@ func TestBlockStoreReorgAndRewindHooks(t *testing.T) {
 }
 
 func TestBlockStoreRejectsHeightGap(t *testing.T) {
-	store, err := OpenBlockStore(filepath.Join(t.TempDir(), "blockstore"))
-	if err != nil {
-		t.Fatalf("open blockstore: %v", err)
-	}
+	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	header := testHeaderBytes(3, 33)
-	hash, _ := consensus.BlockHash(header)
+	hash := mustHeaderHash(t, header)
 	if err := store.PutBlock(2, hash, header, []byte("gapped")); err == nil {
 		t.Fatalf("expected height gap error")
 	}
@@ -126,16 +117,10 @@ func TestBlockStoreRejectsHeightGap(t *testing.T) {
 
 func TestBlockStorePersistsIndex(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "blockstore")
-	store, err := OpenBlockStore(root)
-	if err != nil {
-		t.Fatalf("open blockstore: %v", err)
-	}
-	header := testHeaderBytes(7, 77)
-	hash, _ := consensus.BlockHash(header)
-	if err := store.PutBlock(0, hash, header, []byte("persist")); err != nil {
-		t.Fatalf("put block: %v", err)
-	}
+	store := mustOpenBlockStore(t, root)
+	hash, _ := mustPutBlock(t, store, 0, 7, 77, []byte("persist"))
 
+	var err error
 	reopened, err := OpenBlockStore(root)
 	if err != nil {
 		t.Fatalf("reopen blockstore: %v", err)

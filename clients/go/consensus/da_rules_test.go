@@ -100,38 +100,55 @@ func TestParseTx_DACommitChunkCountZero(t *testing.T) {
 }
 
 func TestValidateBlockBasic_DAChunkHashMismatch(t *testing.T) {
-	daID := filled32(0xa2)
-	payload := []byte("abc")
-	payloadCommitment := sha3_256(payload)
-	commitTx := daCommitTxBytes(1, daID, 1, payloadCommitment)
-	chunkHash := sha3_256(payload)
-	chunkHash[0] ^= 0x01
-	chunkTx := daChunkTxBytes(2, daID, 0, chunkHash, payload)
-	block, prev, target := buildDABlockBytes(t, commitTx, chunkTx)
-	_, err := ValidateBlockBasic(block, &prev, &target)
-	if err == nil {
-		t.Fatalf("expected error")
+	tests := []struct {
+		name          string
+		daSeed        byte
+		mutateCommit  bool
+		mutateChunk   bool
+		wantErrorCode ErrorCode
+	}{
+		{
+			name:          "chunk hash mismatch",
+			daSeed:        0xa2,
+			mutateCommit:  false,
+			mutateChunk:   true,
+			wantErrorCode: BLOCK_ERR_DA_CHUNK_HASH_INVALID,
+		},
+		{
+			name:          "payload commitment mismatch",
+			daSeed:        0xa3,
+			mutateCommit:  true,
+			mutateChunk:   false,
+			wantErrorCode: BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID,
+		},
 	}
-	if got := mustTxErrCode(t, err); got != BLOCK_ERR_DA_CHUNK_HASH_INVALID {
-		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_DA_CHUNK_HASH_INVALID)
-	}
-}
 
-func TestValidateBlockBasic_DAPayloadCommitmentMismatch(t *testing.T) {
-	daID := filled32(0xa3)
-	payload := []byte("abc")
-	payloadCommitment := sha3_256(payload)
-	wrongCommitment := payloadCommitment
-	wrongCommitment[0] ^= 0x01
-	commitTx := daCommitTxBytes(1, daID, 1, wrongCommitment)
-	chunkHash := sha3_256(payload)
-	chunkTx := daChunkTxBytes(2, daID, 0, chunkHash, payload)
-	block, prev, target := buildDABlockBytes(t, commitTx, chunkTx)
-	_, err := ValidateBlockBasic(block, &prev, &target)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID {
-		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			daID := filled32(test.daSeed)
+			payload := []byte("abc")
+			payloadCommitment := sha3_256(payload)
+			commitment := payloadCommitment
+			if test.mutateCommit {
+				commitment[0] ^= 0x01
+			}
+
+			chunkHash := sha3_256(payload)
+			if test.mutateChunk {
+				chunkHash[0] ^= 0x01
+			}
+
+			commitTx := daCommitTxBytes(1, daID, 1, commitment)
+			chunkTx := daChunkTxBytes(2, daID, 0, chunkHash, payload)
+			block, prev, target := buildDABlockBytes(t, commitTx, chunkTx)
+
+			_, err := ValidateBlockBasic(block, &prev, &target)
+			if err == nil {
+				t.Fatalf("expected error")
+			}
+			if got := mustTxErrCode(t, err); got != test.wantErrorCode {
+				t.Fatalf("code=%s, want %s", got, test.wantErrorCode)
+			}
+		})
 	}
 }
