@@ -245,6 +245,14 @@ func writeResp(w io.Writer, resp Response) {
 	_ = enc.Encode(resp)
 }
 
+func writeConsensusErr(w io.Writer, err error) {
+	if te, ok := err.(*consensus.TxError); ok {
+		writeResp(w, Response{Ok: false, Err: string(te.Code)})
+		return
+	}
+	writeResp(w, Response{Ok: false, Err: err.Error()})
+}
+
 func parseHexU256To32(s string) ([32]byte, error) {
 	var out [32]byte
 	stripped := strings.TrimSpace(strings.ToLower(s))
@@ -357,11 +365,7 @@ func main() {
 		}
 		_, txid, wtxid, n, err := consensus.ParseTx(txBytes)
 		if err != nil {
-			if te, ok := err.(*consensus.TxError); ok {
-				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
-				return
-			}
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			writeConsensusErr(os.Stdout, err)
 			return
 		}
 		writeResp(os.Stdout, Response{
@@ -380,11 +384,7 @@ func main() {
 		}
 		work, err := consensus.WorkFromTarget(t)
 		if err != nil {
-			if te, ok := err.(*consensus.TxError); ok {
-				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
-				return
-			}
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			writeConsensusErr(os.Stdout, err)
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true, WorkHex: "0x" + work.Text(16)})
@@ -420,11 +420,7 @@ func main() {
 				}
 				w, err := consensus.WorkFromTarget(tb)
 				if err != nil {
-					if te, ok := err.(*consensus.TxError); ok {
-						writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
-						return
-					}
-					writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+					writeConsensusErr(os.Stdout, err)
 					return
 				}
 				total.Add(total, w)
@@ -460,11 +456,7 @@ func main() {
 		}
 		root, err := consensus.MerkleRootTxids(txids)
 		if err != nil {
-			if te, ok := err.(*consensus.TxError); ok {
-				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
-				return
-			}
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			writeConsensusErr(os.Stdout, err)
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true, MerkleHex: hex.EncodeToString(root[:])})
@@ -484,11 +476,7 @@ func main() {
 		}
 		root, err := consensus.WitnessMerkleRootWtxids(wtxids)
 		if err != nil {
-			if te, ok := err.(*consensus.TxError); ok {
-				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
-				return
-			}
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			writeConsensusErr(os.Stdout, err)
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true, WitnessMerkleHex: hex.EncodeToString(root[:])})
@@ -502,11 +490,7 @@ func main() {
 		}
 		tx, _, _, _, err := consensus.ParseTx(txBytes)
 		if err != nil {
-			if te, ok := err.(*consensus.TxError); ok {
-				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
-				return
-			}
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			writeConsensusErr(os.Stdout, err)
 			return
 		}
 
@@ -520,11 +504,7 @@ func main() {
 
 		d, err := consensus.SighashV1Digest(tx, req.InputIndex, req.InputValue, chainID)
 		if err != nil {
-			if te, ok := err.(*consensus.TxError); ok {
-				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
-				return
-			}
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			writeConsensusErr(os.Stdout, err)
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true, DigestHex: hex.EncodeToString(d[:])})
@@ -538,20 +518,12 @@ func main() {
 		}
 		tx, _, _, _, err := consensus.ParseTx(txBytes)
 		if err != nil {
-			if te, ok := err.(*consensus.TxError); ok {
-				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
-				return
-			}
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			writeConsensusErr(os.Stdout, err)
 			return
 		}
 		w, da, anchor, err := consensus.TxWeightAndStats(tx)
 		if err != nil {
-			if te, ok := err.(*consensus.TxError); ok {
-				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
-				return
-			}
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			writeConsensusErr(os.Stdout, err)
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true, Weight: w, DaBytes: da, AnchorBytes: anchor})
@@ -565,11 +537,7 @@ func main() {
 		}
 		h, err := consensus.BlockHash(headerBytes)
 		if err != nil {
-			if te, ok := err.(*consensus.TxError); ok {
-				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
-				return
-			}
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			writeConsensusErr(os.Stdout, err)
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true, BlockHash: hex.EncodeToString(h[:])})
@@ -589,11 +557,7 @@ func main() {
 		var target [32]byte
 		copy(target[:], targetBytes)
 		if err := consensus.PowCheck(headerBytes, target); err != nil {
-			if te, ok := err.(*consensus.TxError); ok {
-				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
-				return
-			}
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			writeConsensusErr(os.Stdout, err)
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true})
@@ -615,11 +579,7 @@ func main() {
 			newT, retErr = consensus.RetargetV1(old, req.TimestampFirst, req.TimestampLast)
 		}
 		if retErr != nil {
-			if te, ok := retErr.(*consensus.TxError); ok {
-				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
-				return
-			}
-			writeResp(os.Stdout, Response{Ok: false, Err: retErr.Error()})
+			writeConsensusErr(os.Stdout, retErr)
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true, TargetNew: hex.EncodeToString(newT[:])})
@@ -664,11 +624,7 @@ func main() {
 			req.PrevTimestamps,
 		)
 		if err != nil {
-			if te, ok := err.(*consensus.TxError); ok {
-				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
-				return
-			}
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			writeConsensusErr(os.Stdout, err)
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true, BlockHash: hex.EncodeToString(s.BlockHash[:])})
@@ -715,11 +671,7 @@ func main() {
 			req.SumFees,
 		)
 		if err != nil {
-			if te, ok := err.(*consensus.TxError); ok {
-				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
-				return
-			}
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			writeConsensusErr(os.Stdout, err)
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true, BlockHash: hex.EncodeToString(s.BlockHash[:])})
@@ -806,11 +758,7 @@ func main() {
 			chainID,
 		)
 		if err != nil {
-			if te, ok := err.(*consensus.TxError); ok {
-				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
-				return
-			}
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			writeConsensusErr(os.Stdout, err)
 			return
 		}
 		writeResp(os.Stdout, Response{
@@ -830,19 +778,11 @@ func main() {
 		}
 		tx, _, _, _, err := consensus.ParseTx(txBytes)
 		if err != nil {
-			if te, ok := err.(*consensus.TxError); ok {
-				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
-				return
-			}
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			writeConsensusErr(os.Stdout, err)
 			return
 		}
 		if err := consensus.ValidateTxCovenantsGenesis(tx, req.Height); err != nil {
-			if te, ok := err.(*consensus.TxError); ok {
-				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
-				return
-			}
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			writeConsensusErr(os.Stdout, err)
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true})
@@ -856,11 +796,7 @@ func main() {
 		}
 		tx, txid, _, _, err := consensus.ParseTx(txBytes)
 		if err != nil {
-			if te, ok := err.(*consensus.TxError); ok {
-				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
-				return
-			}
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			writeConsensusErr(os.Stdout, err)
 			return
 		}
 
@@ -906,11 +842,7 @@ func main() {
 
 		s, err := consensus.ApplyNonCoinbaseTxBasicWithMTP(tx, txid, utxos, req.Height, req.BlockTimestamp, blockMTP, chainID)
 		if err != nil {
-			if te, ok := err.(*consensus.TxError); ok {
-				writeResp(os.Stdout, Response{Ok: false, Err: string(te.Code)})
-				return
-			}
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			writeConsensusErr(os.Stdout, err)
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true, Fee: s.Fee, UtxoCount: s.UtxoCount})
