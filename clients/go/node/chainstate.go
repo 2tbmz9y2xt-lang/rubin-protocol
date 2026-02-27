@@ -66,7 +66,7 @@ func ChainStatePath(dataDir string) string {
 }
 
 func LoadChainState(path string) (*ChainState, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := readFileByPath(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return NewChainState(), nil
 	}
