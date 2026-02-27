@@ -156,6 +156,9 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 		if covLenU64 > uint64(math.MaxInt) {
 			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "covenant_data_len overflows int")
 		}
+		if covLenU64 > MAX_COVENANT_DATA_PER_OUTPUT {
+			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "covenant_data_len exceeds MAX_COVENANT_DATA_PER_OUTPUT")
+		}
 		covLen := int(covLenU64)
 		covData, err := readBytes(b, &off, covLen)
 		if err != nil {

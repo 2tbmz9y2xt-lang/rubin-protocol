@@ -336,6 +336,16 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
             }
         }
 
+        // Circular-reference hardening: vault spends MUST NOT create new CORE_VAULT outputs.
+        for out in &tx.outputs {
+            if out.covenant_type == COV_TYPE_VAULT {
+                return Err(TxError::new(
+                    ErrorCode::TxErrVaultOutputNotWhitelisted,
+                    "CORE_VAULT outputs forbidden in CORE_VAULT spend",
+                ));
+            }
+        }
+
         // Signature threshold check (CANONICAL §24.1 step 7).
         validate_threshold_sig_spend(
             &vault_sig_keys,

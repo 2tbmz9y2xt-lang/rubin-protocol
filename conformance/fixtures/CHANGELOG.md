@@ -126,3 +126,28 @@ Policy:
 
 Изменённые fixtures:
 - `CV-PARSE.json` (добавлен `PARSE-10`)
+
+## 2026-02-27 — Wire-level cap: covenant_data_len upper bound
+
+Причина:
+- добавить conformance-вектор на новый wire-level cap `MAX_COVENANT_DATA_PER_OUTPUT`;
+- предотвратить DoS-кейсы через сверхдлинные `covenant_data` при парсинге.
+
+Инструменты:
+- ручное обновление `CV-PARSE.json`,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-PARSE`.
+
+Изменённые fixtures:
+- `CV-PARSE.json` (добавлен `PARSE-11`)
+
+## 2026-02-27 — CORE_VAULT: запрет vault→vault рекурсии (circular-reference hardening)
+
+Причина:
+- `CORE_VAULT` spend не должен создавать новые `CORE_VAULT` outputs (упрощение модели сейфа, защита от циклов).
+
+Инструменты:
+- ручное обновление `CV-VAULT.json`,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-VAULT`.
+
+Изменённые fixtures:
+- `CV-VAULT.json` (добавлен `VAULT-SPEND-08`)
