@@ -7,6 +7,7 @@ exclude_paths:
   - "clients/rust/**/benches/**"
   # Non-executable artifacts (fixtures, matrices, formal Lean pack) are not part of Go/Rust
   # code coverage and must not dilute diff-coverage gates.
+  - ".github/**"
   - "conformance/**"
   - "rubin-formal/**"
   - "tools/**"
