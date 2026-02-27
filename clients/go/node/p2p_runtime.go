@@ -24,48 +24,48 @@ type WireMessage struct {
 }
 
 type VersionPayloadV1 struct {
-	ProtocolVersion   uint32 `json:"protocol_version"`
 	Network           string `json:"network"`
 	NodeID            string `json:"node_id"`
 	UserAgent         string `json:"user_agent"`
 	StartHeight       uint64 `json:"start_height"`
 	Timestamp         uint64 `json:"timestamp"`
-	TxRelay           bool   `json:"tx_relay"`
 	PrunedBelowHeight uint64 `json:"pruned_below_height"`
 	DaMempoolSize     uint64 `json:"da_mempool_size"`
+	ProtocolVersion   uint32 `json:"protocol_version"`
+	TxRelay           bool   `json:"tx_relay"`
 }
 
 type PeerRuntimeConfig struct {
+	Network       string
 	MaxPeers      int
 	ReadDeadline  time.Duration
 	WriteDeadline time.Duration
 	BanThreshold  int
-	Network       string
 }
 
 type PeerState struct {
 	Addr              string
+	LastError         string
+	RemoteVersion     VersionPayloadV1
+	BanScore          int
 	HandshakeComplete bool
 	VersionReceived   bool
 	VerackReceived    bool
-	BanScore          int
-	LastError         string
-	RemoteVersion     VersionPayloadV1
 }
 
 type PeerSession struct {
 	conn   net.Conn
-	mu     sync.RWMutex
-	peer   PeerState
-	cfg    PeerRuntimeConfig
 	reader *bufio.Reader
 	writer *bufio.Writer
+	cfg    PeerRuntimeConfig
+	peer   PeerState
+	mu     sync.RWMutex
 }
 
 type PeerManager struct {
+	peers map[string]*PeerState
 	cfg   PeerRuntimeConfig
 	mu    sync.RWMutex
-	peers map[string]*PeerState
 }
 
 func DefaultPeerRuntimeConfig(network string, maxPeers int) PeerRuntimeConfig {

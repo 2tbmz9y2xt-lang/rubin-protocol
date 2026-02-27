@@ -20,11 +20,11 @@ const (
 )
 
 type ChainState struct {
-	HasTip           bool
-	Height           uint64
-	TipHash          [32]byte
-	AlreadyGenerated uint64
 	Utxos            map[consensus.Outpoint]consensus.UtxoEntry
+	Height           uint64
+	AlreadyGenerated uint64
+	TipHash          [32]byte
+	HasTip           bool
 }
 
 type ChainStateConnectSummary struct {
@@ -37,21 +37,21 @@ type ChainStateConnectSummary struct {
 }
 
 type chainStateDisk struct {
+	TipHash          string          `json:"tip_hash"`
+	Utxos            []utxoDiskEntry `json:"utxos"`
+	Height           uint64          `json:"height"`
+	AlreadyGenerated uint64          `json:"already_generated"`
 	Version          uint32          `json:"version"`
 	HasTip           bool            `json:"has_tip"`
-	Height           uint64          `json:"height"`
-	TipHash          string          `json:"tip_hash"`
-	AlreadyGenerated uint64          `json:"already_generated"`
-	Utxos            []utxoDiskEntry `json:"utxos"`
 }
 
 type utxoDiskEntry struct {
 	Txid              string `json:"txid"`
-	Vout              uint32 `json:"vout"`
-	Value             uint64 `json:"value"`
-	CovenantType      uint16 `json:"covenant_type"`
 	CovenantData      string `json:"covenant_data"`
+	Value             uint64 `json:"value"`
 	CreationHeight    uint64 `json:"creation_height"`
+	Vout              uint32 `json:"vout"`
+	CovenantType      uint16 `json:"covenant_type"`
 	CreatedByCoinbase bool   `json:"created_by_coinbase"`
 }
 

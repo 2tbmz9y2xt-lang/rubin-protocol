@@ -7,18 +7,18 @@ import (
 )
 
 type VaultCovenant struct {
+	Keys           [][32]byte
+	Whitelist      [][32]byte
+	WhitelistCount uint16
 	OwnerLockID    [32]byte
 	Threshold      uint8
 	KeyCount       uint8
-	Keys           [][32]byte
-	WhitelistCount uint16
-	Whitelist      [][32]byte
 }
 
 type MultisigCovenant struct {
+	Keys      [][32]byte
 	Threshold uint8
 	KeyCount  uint8
-	Keys      [][32]byte
 }
 
 func ParseVaultCovenantData(covData []byte) (*VaultCovenant, error) {

@@ -108,9 +108,9 @@ func TestParseTx_WitnessCountOverflow(t *testing.T) {
 
 func TestParseTx_WitnessItem_Canonicalization(t *testing.T) {
 	cases := []struct {
+		section func() []byte
 		name    string
 		wantErr ErrorCode
-		section func() []byte
 	}{
 		{
 			name:    "sentinel_noncanonical",

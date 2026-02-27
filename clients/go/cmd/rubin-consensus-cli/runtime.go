@@ -18,223 +18,215 @@ import (
 )
 
 type Request struct {
-	Op              string   `json:"op"`
-	TxHex           string   `json:"tx_hex,omitempty"`
-	BlockHex        string   `json:"block_hex,omitempty"`
-	Txids           []string `json:"txids,omitempty"`
-	Wtxids          []string `json:"wtxids,omitempty"`
-	WtxidHex        string   `json:"wtxid,omitempty"`
-	CovenantType    uint16   `json:"covenant_type,omitempty"`
-	CovenantDataHex string   `json:"covenant_data_hex,omitempty"`
-	Nonce1          uint64   `json:"nonce1,omitempty"`
-	Nonce2          uint64   `json:"nonce2,omitempty"`
-	InputIndex      uint32   `json:"input_index,omitempty"`
-	InputValue      uint64   `json:"input_value,omitempty"`
-	ChainIDHex      string   `json:"chain_id,omitempty"`
-
-	HeaderHex        string   `json:"header_hex,omitempty"`
-	TargetHex        string   `json:"target_hex,omitempty"`
-	Target           string   `json:"target,omitempty"`
-	TargetOldHex     string   `json:"target_old,omitempty"`
-	TimestampFirst   uint64   `json:"timestamp_first,omitempty"`
-	TimestampLast    uint64   `json:"timestamp_last,omitempty"`
-	WindowTimestamps []uint64 `json:"window_timestamps,omitempty"`
-	ExpectedPrev     string   `json:"expected_prev_hash,omitempty"`
-	ExpectedTarget   string   `json:"expected_target,omitempty"`
-	PrevTimestamps   []uint64 `json:"prev_timestamps,omitempty"`
-	AlreadyGenerated uint64   `json:"already_generated,omitempty"`
-	SumFees          uint64   `json:"sum_fees,omitempty"`
-
-	Utxos          []UtxoJSON `json:"utxos,omitempty"`
-	Height         uint64     `json:"height,omitempty"`
-	BlockTimestamp uint64     `json:"block_timestamp,omitempty"`
-	BlockMTP       *uint64    `json:"block_mtp,omitempty"`
-
-	Chains []ForkChoiceChain `json:"chains,omitempty"`
-
-	Nonces         []uint64 `json:"nonces,omitempty"`
-	MTP            uint64   `json:"mtp,omitempty"`
-	Timestamp      uint64   `json:"timestamp,omitempty"`
-	MaxFutureDrift *uint64  `json:"max_future_drift,omitempty"`
-	Keys           []any    `json:"keys,omitempty"`
-	Checks         []Check  `json:"checks,omitempty"`
-
-	Path                string  `json:"path,omitempty"`
-	StructuralOK        *bool   `json:"structural_ok,omitempty"`
-	LocktimeOK          *bool   `json:"locktime_ok,omitempty"`
-	SuiteID             *uint8  `json:"suite_id,omitempty"`
-	SLHActivationHeight *uint64 `json:"slh_activation_height,omitempty"`
-	KeyBindingOK        *bool   `json:"key_binding_ok,omitempty"`
-	PreimageOK          *bool   `json:"preimage_ok,omitempty"`
-	VerifyOK            *bool   `json:"verify_ok,omitempty"`
-
-	OwnerLockID          string   `json:"owner_lock_id,omitempty"`
-	VaultInputCount      int      `json:"vault_input_count,omitempty"`
-	NonVaultLockIDs      []string `json:"non_vault_lock_ids,omitempty"`
-	HasOwnerAuth         *bool    `json:"has_owner_auth,omitempty"`
-	SumOut               uint64   `json:"sum_out,omitempty"`
-	SumInVault           uint64   `json:"sum_in_vault,omitempty"`
-	Slots                int      `json:"slots,omitempty"`
-	KeyCount             int      `json:"key_count,omitempty"`
-	SigThresholdOK       *bool    `json:"sig_threshold_ok,omitempty"`
-	SentinelSuiteID      uint8    `json:"sentinel_suite_id,omitempty"`
-	SentinelPubkeyLen    int      `json:"sentinel_pubkey_len,omitempty"`
-	SentinelSigLen       int      `json:"sentinel_sig_len,omitempty"`
-	SentinelVerifyCalled *bool    `json:"sentinel_verify_called,omitempty"`
-	Whitelist            []string `json:"whitelist,omitempty"`
-	ValidationOrder      []string `json:"validation_order,omitempty"`
-
-	MissingIndices      []int            `json:"missing_indices,omitempty"`
-	GetblocktxnOK       *bool            `json:"getblocktxn_ok,omitempty"`
-	PubkeyLength        int              `json:"pubkey_length,omitempty"`
-	SigLength           int              `json:"sig_length,omitempty"`
-	BatchSize           int              `json:"batch_size,omitempty"`
-	InvalidIndices      []int            `json:"invalid_indices,omitempty"`
-	TxCount             int              `json:"tx_count,omitempty"`
-	PrefilledIndices    []int            `json:"prefilled_indices,omitempty"`
-	MempoolIndices      []int            `json:"mempool_indices,omitempty"`
-	BlocktxnIndices     []int            `json:"blocktxn_indices,omitempty"`
-	ChunkCount          int              `json:"chunk_count,omitempty"`
-	TTLBlocks           int              `json:"ttl_blocks,omitempty"`
-	InitialChunks       []int            `json:"initial_chunks,omitempty"`
-	InitialCommitSeen   *bool            `json:"initial_commit_seen,omitempty"`
-	CommitArrives       *bool            `json:"commit_arrives,omitempty"`
-	Events              []any            `json:"events,omitempty"`
-	PerPeerLimit        int              `json:"per_peer_limit,omitempty"`
-	PerDaIDLimit        int              `json:"per_da_id_limit,omitempty"`
-	GlobalLimit         int              `json:"global_limit,omitempty"`
-	CurrentPeerBytes    int              `json:"current_peer_bytes,omitempty"`
-	CurrentDaIDBytes    int              `json:"current_da_id_bytes,omitempty"`
-	CurrentGlobalBytes  int              `json:"current_global_bytes,omitempty"`
-	IncomingChunkBytes  int              `json:"incoming_chunk_bytes,omitempty"`
-	IncomingHasCommit   *bool            `json:"incoming_has_commit,omitempty"`
-	StormTriggerPct     float64          `json:"storm_trigger_pct,omitempty"`
-	RecoverySuccessRate float64          `json:"recovery_success_rate,omitempty"`
-	ObservationMinutes  int              `json:"observation_minutes,omitempty"`
-	MaxDAChunkCount     int              `json:"max_da_chunk_count,omitempty"`
-	Phases              []map[string]any `json:"phases,omitempty"`
-	InIBD               *bool            `json:"in_ibd,omitempty"`
-	WarmupDone          *bool            `json:"warmup_done,omitempty"`
-	MissRatePct         float64          `json:"miss_rate_pct,omitempty"`
-	MissRateBlocks      int              `json:"miss_rate_blocks,omitempty"`
-	StartScore          int              `json:"start_score,omitempty"`
-	GracePeriodActive   *bool            `json:"grace_period_active,omitempty"`
-	ElapsedBlocks       int              `json:"elapsed_blocks,omitempty"`
-	PerPeerBPS          int              `json:"per_peer_bps,omitempty"`
-	GlobalBPS           int              `json:"global_bps,omitempty"`
-	PeerStreamsBPS      []int            `json:"peer_streams_bps,omitempty"`
-	PeerStreamBPS       int              `json:"peer_stream_bps,omitempty"`
-	ActiveSets          int              `json:"active_sets,omitempty"`
-	CompletedSets       int              `json:"completed_sets,omitempty"`
-	TotalSets           int              `json:"total_sets,omitempty"`
-	Telemetry           map[string]any   `json:"telemetry,omitempty"`
-	GracePeriodBlocks   int              `json:"grace_period_blocks,omitempty"`
-	Entries             []map[string]any `json:"entries,omitempty"`
-	DaID                string           `json:"da_id,omitempty"`
-	Commits             []map[string]any `json:"commits,omitempty"`
-	CommitFee           int              `json:"commit_fee,omitempty"`
-	ChunkFees           []int            `json:"chunk_fees,omitempty"`
-	CurrentPinnedBytes  int              `json:"current_pinned_payload_bytes,omitempty"`
-	IncomingPayload     int              `json:"incoming_payload_bytes,omitempty"`
-	IncomingOverhead    int              `json:"incoming_commit_overhead_bytes,omitempty"`
-	CapBytes            int              `json:"cap_bytes,omitempty"`
-	ContainsCommit      *bool            `json:"contains_commit,omitempty"`
-	ContainsKnownChunk  *bool            `json:"contains_chunk_for_known_commit,omitempty"`
-	ContainsBlockCommit *bool            `json:"contains_block_with_commit,omitempty"`
-	OrphanPoolFillPct   float64          `json:"orphan_pool_fill_pct,omitempty"`
+	IncomingHasCommit    *bool             `json:"incoming_has_commit,omitempty"`
+	CommitArrives        *bool             `json:"commit_arrives,omitempty"`
+	StructuralOK         *bool             `json:"structural_ok,omitempty"`
+	ContainsBlockCommit  *bool             `json:"contains_block_with_commit,omitempty"`
+	ContainsKnownChunk   *bool             `json:"contains_chunk_for_known_commit,omitempty"`
+	SuiteID              *uint8            `json:"suite_id,omitempty"`
+	ContainsCommit       *bool             `json:"contains_commit,omitempty"`
+	SLHActivationHeight  *uint64           `json:"slh_activation_height,omitempty"`
+	MaxFutureDrift       *uint64           `json:"max_future_drift,omitempty"`
+	KeyBindingOK         *bool             `json:"key_binding_ok,omitempty"`
+	GracePeriodActive    *bool             `json:"grace_period_active,omitempty"`
+	WarmupDone           *bool             `json:"warmup_done,omitempty"`
+	PreimageOK           *bool             `json:"preimage_ok,omitempty"`
+	VerifyOK             *bool             `json:"verify_ok,omitempty"`
+	BlockMTP             *uint64           `json:"block_mtp,omitempty"`
+	HasOwnerAuth         *bool             `json:"has_owner_auth,omitempty"`
+	SigThresholdOK       *bool             `json:"sig_threshold_ok,omitempty"`
+	InIBD                *bool             `json:"in_ibd,omitempty"`
+	SentinelVerifyCalled *bool             `json:"sentinel_verify_called,omitempty"`
+	LocktimeOK           *bool             `json:"locktime_ok,omitempty"`
+	Telemetry            map[string]any    `json:"telemetry,omitempty"`
+	GetblocktxnOK        *bool             `json:"getblocktxn_ok,omitempty"`
+	InitialCommitSeen    *bool             `json:"initial_commit_seen,omitempty"`
+	ChainIDHex           string            `json:"chain_id,omitempty"`
+	DaID                 string            `json:"da_id,omitempty"`
+	TxHex                string            `json:"tx_hex,omitempty"`
+	TargetOldHex         string            `json:"target_old,omitempty"`
+	Target               string            `json:"target,omitempty"`
+	ExpectedTarget       string            `json:"expected_target,omitempty"`
+	Op                   string            `json:"op"`
+	OwnerLockID          string            `json:"owner_lock_id,omitempty"`
+	TargetHex            string            `json:"target_hex,omitempty"`
+	ExpectedPrev         string            `json:"expected_prev_hash,omitempty"`
+	HeaderHex            string            `json:"header_hex,omitempty"`
+	CovenantDataHex      string            `json:"covenant_data_hex,omitempty"`
+	WtxidHex             string            `json:"wtxid,omitempty"`
+	Path                 string            `json:"path,omitempty"`
+	BlockHex             string            `json:"block_hex,omitempty"`
+	ValidationOrder      []string          `json:"validation_order,omitempty"`
+	InvalidIndices       []int             `json:"invalid_indices,omitempty"`
+	Keys                 []any             `json:"keys,omitempty"`
+	Txids                []string          `json:"txids,omitempty"`
+	Wtxids               []string          `json:"wtxids,omitempty"`
+	Nonces               []uint64          `json:"nonces,omitempty"`
+	Chains               []ForkChoiceChain `json:"chains,omitempty"`
+	ChunkFees            []int             `json:"chunk_fees,omitempty"`
+	NonVaultLockIDs      []string          `json:"non_vault_lock_ids,omitempty"`
+	Commits              []map[string]any  `json:"commits,omitempty"`
+	Entries              []map[string]any  `json:"entries,omitempty"`
+	PeerStreamsBPS       []int             `json:"peer_streams_bps,omitempty"`
+	Phases               []map[string]any  `json:"phases,omitempty"`
+	Checks               []Check           `json:"checks,omitempty"`
+	Events               []any             `json:"events,omitempty"`
+	WindowTimestamps     []uint64          `json:"window_timestamps,omitempty"`
+	PrevTimestamps       []uint64          `json:"prev_timestamps,omitempty"`
+	InitialChunks        []int             `json:"initial_chunks,omitempty"`
+	Utxos                []UtxoJSON        `json:"utxos,omitempty"`
+	Whitelist            []string          `json:"whitelist,omitempty"`
+	BlocktxnIndices      []int             `json:"blocktxn_indices,omitempty"`
+	MissingIndices       []int             `json:"missing_indices,omitempty"`
+	MempoolIndices       []int             `json:"mempool_indices,omitempty"`
+	PrefilledIndices     []int             `json:"prefilled_indices,omitempty"`
+	GlobalLimit          int               `json:"global_limit,omitempty"`
+	InputValue           uint64            `json:"input_value,omitempty"`
+	SigLength            int               `json:"sig_length,omitempty"`
+	TxCount              int               `json:"tx_count,omitempty"`
+	PubkeyLength         int               `json:"pubkey_length,omitempty"`
+	AlreadyGenerated     uint64            `json:"already_generated,omitempty"`
+	SumFees              uint64            `json:"sum_fees,omitempty"`
+	ChunkCount           int               `json:"chunk_count,omitempty"`
+	TTLBlocks            int               `json:"ttl_blocks,omitempty"`
+	SentinelSigLen       int               `json:"sentinel_sig_len,omitempty"`
+	SentinelPubkeyLen    int               `json:"sentinel_pubkey_len,omitempty"`
+	OrphanPoolFillPct    float64           `json:"orphan_pool_fill_pct,omitempty"`
+	Height               uint64            `json:"height,omitempty"`
+	PerPeerLimit         int               `json:"per_peer_limit,omitempty"`
+	PerDaIDLimit         int               `json:"per_da_id_limit,omitempty"`
+	KeyCount             int               `json:"key_count,omitempty"`
+	CurrentPeerBytes     int               `json:"current_peer_bytes,omitempty"`
+	CurrentDaIDBytes     int               `json:"current_da_id_bytes,omitempty"`
+	CurrentGlobalBytes   int               `json:"current_global_bytes,omitempty"`
+	IncomingChunkBytes   int               `json:"incoming_chunk_bytes,omitempty"`
+	TimestampLast        uint64            `json:"timestamp_last,omitempty"`
+	StormTriggerPct      float64           `json:"storm_trigger_pct,omitempty"`
+	RecoverySuccessRate  float64           `json:"recovery_success_rate,omitempty"`
+	ObservationMinutes   int               `json:"observation_minutes,omitempty"`
+	MaxDAChunkCount      int               `json:"max_da_chunk_count,omitempty"`
+	Slots                int               `json:"slots,omitempty"`
+	TimestampFirst       uint64            `json:"timestamp_first,omitempty"`
+	BatchSize            int               `json:"batch_size,omitempty"`
+	MissRatePct          float64           `json:"miss_rate_pct,omitempty"`
+	MissRateBlocks       int               `json:"miss_rate_blocks,omitempty"`
+	StartScore           int               `json:"start_score,omitempty"`
+	Timestamp            uint64            `json:"timestamp,omitempty"`
+	ElapsedBlocks        int               `json:"elapsed_blocks,omitempty"`
+	PerPeerBPS           int               `json:"per_peer_bps,omitempty"`
+	GlobalBPS            int               `json:"global_bps,omitempty"`
+	SumInVault           uint64            `json:"sum_in_vault,omitempty"`
+	PeerStreamBPS        int               `json:"peer_stream_bps,omitempty"`
+	ActiveSets           int               `json:"active_sets,omitempty"`
+	CompletedSets        int               `json:"completed_sets,omitempty"`
+	TotalSets            int               `json:"total_sets,omitempty"`
+	Nonce2               uint64            `json:"nonce2,omitempty"`
+	GracePeriodBlocks    int               `json:"grace_period_blocks,omitempty"`
+	SumOut               uint64            `json:"sum_out,omitempty"`
+	Nonce1               uint64            `json:"nonce1,omitempty"`
+	BlockTimestamp       uint64            `json:"block_timestamp,omitempty"`
+	CommitFee            int               `json:"commit_fee,omitempty"`
+	VaultInputCount      int               `json:"vault_input_count,omitempty"`
+	CurrentPinnedBytes   int               `json:"current_pinned_payload_bytes,omitempty"`
+	IncomingPayload      int               `json:"incoming_payload_bytes,omitempty"`
+	IncomingOverhead     int               `json:"incoming_commit_overhead_bytes,omitempty"`
+	CapBytes             int               `json:"cap_bytes,omitempty"`
+	MTP                  uint64            `json:"mtp,omitempty"`
+	InputIndex           uint32            `json:"input_index,omitempty"`
+	CovenantType         uint16            `json:"covenant_type,omitempty"`
+	SentinelSuiteID      uint8             `json:"sentinel_suite_id,omitempty"`
 }
 
 type UtxoJSON struct {
 	Txid              string `json:"txid"`
-	Vout              uint32 `json:"vout"`
-	Value             uint64 `json:"value"`
-	CovenantType      uint16 `json:"covenant_type"`
 	CovenantDataHex   string `json:"covenant_data"`
+	Value             uint64 `json:"value"`
 	CreationHeight    uint64 `json:"creation_height"`
+	Vout              uint32 `json:"vout"`
+	CovenantType      uint16 `json:"covenant_type"`
 	CreatedByCoinbase bool   `json:"created_by_coinbase"`
 }
 
 type ForkChoiceChain struct {
 	ID      string   `json:"id"`
-	Targets []string `json:"targets"`
 	TipHash string   `json:"tip_hash"`
+	Targets []string `json:"targets"`
 }
 
 type Check struct {
 	Name  string `json:"name"`
-	Fails bool   `json:"fails"`
 	Err   string `json:"err"`
+	Fails bool   `json:"fails"`
 }
 
 type Response struct {
-	Ok                 bool   `json:"ok"`
-	Err                string `json:"err,omitempty"`
-	TxidHex            string `json:"txid,omitempty"`
-	WtxidHex           string `json:"wtxid,omitempty"`
-	MerkleHex          string `json:"merkle_root,omitempty"`
-	WitnessMerkleHex   string `json:"witness_merkle_root,omitempty"`
-	DigestHex          string `json:"digest,omitempty"`
-	BlockHash          string `json:"block_hash,omitempty"`
-	TargetNew          string `json:"target_new,omitempty"`
-	ShortID            string `json:"short_id,omitempty"`
-	DescriptorHex      string `json:"descriptor_hex,omitempty"`
-	Consumed           int    `json:"consumed,omitempty"`
-	Fee                uint64 `json:"fee,omitempty"`
-	SumFees            uint64 `json:"sum_fees,omitempty"`
-	UtxoCount          uint64 `json:"utxo_count,omitempty"`
-	AlreadyGenerated   uint64 `json:"already_generated,omitempty"`
-	AlreadyGeneratedN1 uint64 `json:"already_generated_n1,omitempty"`
-	Weight             uint64 `json:"weight"`
-	DaBytes            uint64 `json:"da_bytes"`
-	AnchorBytes        uint64 `json:"anchor_bytes"`
-
 	WorkHex            string   `json:"work,omitempty"`
-	Winner             string   `json:"winner,omitempty"`
+	Err                string   `json:"err,omitempty"`
+	TxidHex            string   `json:"txid,omitempty"`
+	WtxidHex           string   `json:"wtxid,omitempty"`
+	MerkleHex          string   `json:"merkle_root,omitempty"`
+	WitnessMerkleHex   string   `json:"witness_merkle_root,omitempty"`
+	DigestHex          string   `json:"digest,omitempty"`
+	BlockHash          string   `json:"block_hash,omitempty"`
+	TargetNew          string   `json:"target_new,omitempty"`
+	ShortID            string   `json:"short_id,omitempty"`
+	DescriptorHex      string   `json:"descriptor_hex,omitempty"`
+	State              string   `json:"state,omitempty"`
+	RetainedPeer       string   `json:"retained_peer,omitempty"`
+	FirstErr           string   `json:"first_err,omitempty"`
 	Chainwork          string   `json:"chainwork,omitempty"`
+	Winner             string   `json:"winner,omitempty"`
+	MissingOut         []int    `json:"missing_indices,omitempty"`
+	PenalizedPeers     []string `json:"penalized_peers,omitempty"`
+	MissingFields      []string `json:"missing_fields,omitempty"`
+	CheckblockResults  []bool   `json:"checkblock_results,omitempty"`
+	EvictOrder         []string `json:"evict_order,omitempty"`
+	RetainedChunks     []int    `json:"retained_chunks,omitempty"`
+	PrefetchTargets    []int    `json:"prefetch_targets,omitempty"`
 	Duplicates         []uint64 `json:"duplicates,omitempty"`
 	SortedKeys         []string `json:"sorted_keys,omitempty"`
-	FirstErr           string   `json:"first_err,omitempty"`
-	Evaluated          []string `json:"evaluated,omitempty"`
-	VerifyCalled       bool     `json:"verify_called,omitempty"`
-	RequestGetblocktxn bool     `json:"request_getblocktxn,omitempty"`
-	RequestFullBlock   bool     `json:"request_full_block,omitempty"`
-	PenalizePeer       bool     `json:"penalize_peer,omitempty"`
-	RoundtripOK        bool     `json:"roundtrip_ok,omitempty"`
-	WireBytes          int      `json:"wire_bytes,omitempty"`
-	BatchOK            bool     `json:"batch_ok,omitempty"`
-	Fallback           bool     `json:"fallback,omitempty"`
 	InvalidOut         []int    `json:"invalid_indices,omitempty"`
-	MissingOut         []int    `json:"missing_indices,omitempty"`
-	Reconstructed      bool     `json:"reconstructed,omitempty"`
-	State              string   `json:"state,omitempty"`
-	Evicted            bool     `json:"evicted,omitempty"`
-	Pinned             bool     `json:"pinned,omitempty"`
+	Evaluated          []string `json:"evaluated,omitempty"`
+	DiscardedChunks    []int    `json:"discarded_chunks,omitempty"`
+	DuplicatesDropped  int      `json:"duplicates_dropped,omitempty"`
+	UtxoCount          uint64   `json:"utxo_count,omitempty"`
+	CountedBytes       int      `json:"counted_bytes,omitempty"`
+	Weight             uint64   `json:"weight"`
+	WireBytes          int      `json:"wire_bytes,omitempty"`
+	Fee                uint64   `json:"fee,omitempty"`
+	IgnoredOverhead    int      `json:"ignored_overhead_bytes,omitempty"`
+	SumFees            uint64   `json:"sum_fees,omitempty"`
+	Mode               int      `json:"mode,omitempty"`
+	TotalFee           int      `json:"total_fee,omitempty"`
+	Consumed           int      `json:"consumed,omitempty"`
+	AlreadyGenerated   uint64   `json:"already_generated,omitempty"`
+	AlreadyGeneratedN1 uint64   `json:"already_generated_n1,omitempty"`
 	TTL                int      `json:"ttl,omitempty"`
 	TTLResetCount      int      `json:"ttl_reset_count,omitempty"`
-	CheckblockResults  []bool   `json:"checkblock_results,omitempty"`
-	Admit              bool     `json:"admit,omitempty"`
+	AnchorBytes        uint64   `json:"anchor_bytes"`
+	DaBytes            uint64   `json:"da_bytes"`
 	FillPct            float64  `json:"fill_pct,omitempty"`
-	StormMode          bool     `json:"storm_mode,omitempty"`
-	Rollback           bool     `json:"rollback,omitempty"`
-	Mode               int      `json:"mode,omitempty"`
+	Rate               float64  `json:"rate,omitempty"`
 	Score              int      `json:"score,omitempty"`
+	BatchOK            bool     `json:"batch_ok,omitempty"`
+	Rollback           bool     `json:"rollback,omitempty"`
 	PeerExceeded       bool     `json:"peer_exceeded,omitempty"`
 	GlobalExceeded     bool     `json:"global_exceeded,omitempty"`
 	QualityPenalty     bool     `json:"quality_penalty,omitempty"`
 	Disconnect         bool     `json:"disconnect,omitempty"`
-	Rate               float64  `json:"rate,omitempty"`
-	MissingFields      []string `json:"missing_fields,omitempty"`
-	EvictOrder         []string `json:"evict_order,omitempty"`
-	RetainedChunks     []int    `json:"retained_chunks,omitempty"`
-	PrefetchTargets    []int    `json:"prefetch_targets,omitempty"`
-	DiscardedChunks    []int    `json:"discarded_chunks,omitempty"`
-	RetainedPeer       string   `json:"retained_peer,omitempty"`
-	DuplicatesDropped  int      `json:"duplicates_dropped,omitempty"`
-	PenalizedPeers     []string `json:"penalized_peers,omitempty"`
+	StormMode          bool     `json:"storm_mode,omitempty"`
+	Admit              bool     `json:"admit,omitempty"`
+	Pinned             bool     `json:"pinned,omitempty"`
+	Evicted            bool     `json:"evicted,omitempty"`
+	Reconstructed      bool     `json:"reconstructed,omitempty"`
+	Fallback           bool     `json:"fallback,omitempty"`
+	Ok                 bool     `json:"ok"`
+	RoundtripOK        bool     `json:"roundtrip_ok,omitempty"`
+	PenalizePeer       bool     `json:"penalize_peer,omitempty"`
 	Replaced           bool     `json:"replaced,omitempty"`
-	TotalFee           int      `json:"total_fee,omitempty"`
-	CountedBytes       int      `json:"counted_bytes,omitempty"`
-	IgnoredOverhead    int      `json:"ignored_overhead_bytes,omitempty"`
+	RequestFullBlock   bool     `json:"request_full_block,omitempty"`
+	RequestGetblocktxn bool     `json:"request_getblocktxn,omitempty"`
+	VerifyCalled       bool     `json:"verify_called,omitempty"`
 	CommitBearing      bool     `json:"commit_bearing,omitempty"`
 	Prioritize         bool     `json:"prioritize,omitempty"`
 }
@@ -1643,8 +1635,8 @@ func runFromStdin() {
 		}
 
 		checks := map[string]struct {
-			OK   bool
 			Code string
+			OK   bool
 		}{
 			"multi_vault": {
 				OK:   req.VaultInputCount <= 1,

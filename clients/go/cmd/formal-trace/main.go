@@ -21,22 +21,22 @@ import (
 
 type traceHeader struct {
 	Type                  string `json:"type"`
-	SchemaVersion         int    `json:"schema_version"`
 	GeneratedAtUTC        string `json:"generated_at_utc"`
 	RepoCommit            string `json:"repo_commit"`
 	GoVersion             string `json:"go_version"`
 	FixturesDigestSHA3256 string `json:"fixtures_digest_sha3_256"`
+	SchemaVersion         int    `json:"schema_version"`
 }
 
 type traceEntry struct {
+	Inputs   map[string]any `json:"inputs"`
+	Outputs  map[string]any `json:"outputs"`
 	Type     string         `json:"type"`
 	Gate     string         `json:"gate"`
 	VectorID string         `json:"vector_id"`
 	Op       string         `json:"op"`
-	Ok       bool           `json:"ok"`
 	Err      string         `json:"err"`
-	Inputs   map[string]any `json:"inputs"`
-	Outputs  map[string]any `json:"outputs"`
+	Ok       bool           `json:"ok"`
 }
 
 type parseFixture struct {
@@ -59,8 +59,8 @@ type sighashVector struct {
 	Op         string `json:"op"`
 	TxHex      string `json:"tx_hex"`
 	ChainIDHex string `json:"chain_id"`
-	InputIndex uint32 `json:"input_index"`
 	InputValue uint64 `json:"input_value"`
+	InputIndex uint32 `json:"input_index"`
 	ExpectOk   bool   `json:"expect_ok"`
 }
 
@@ -78,16 +78,16 @@ type windowPatternJSON struct {
 }
 
 type powVector struct {
+	WindowPattern  *windowPatternJSON `json:"window_pattern"`
 	ID             string             `json:"id"`
 	Op             string             `json:"op"`
-	ExpectOk       bool               `json:"expect_ok"`
 	ExpectErr      string             `json:"expect_err"`
 	TargetOldHex   string             `json:"target_old"`
-	TimestampFirst uint64             `json:"timestamp_first"`
-	TimestampLast  uint64             `json:"timestamp_last"`
-	WindowPattern  *windowPatternJSON `json:"window_pattern"`
 	HeaderHex      string             `json:"header_hex"`
 	TargetHex      string             `json:"target_hex"`
+	TimestampFirst uint64             `json:"timestamp_first"`
+	TimestampLast  uint64             `json:"timestamp_last"`
+	ExpectOk       bool               `json:"expect_ok"`
 }
 
 type utxoBasicFixture struct {
@@ -95,24 +95,24 @@ type utxoBasicFixture struct {
 	Vectors []utxoBasicVector `json:"vectors"`
 }
 type utxoBasicVector struct {
+	BlockMTP       *uint64    `json:"block_mtp"`
 	ID             string     `json:"id"`
 	Op             string     `json:"op"`
 	TxHex          string     `json:"tx_hex"`
+	ExpectErr      string     `json:"expect_err"`
 	Utxos          []utxoJSON `json:"utxos"`
 	Height         uint64     `json:"height"`
 	BlockTimestamp uint64     `json:"block_timestamp"`
-	BlockMTP       *uint64    `json:"block_mtp"`
 	ExpectOk       bool       `json:"expect_ok"`
-	ExpectErr      string     `json:"expect_err"`
 }
 
 type utxoJSON struct {
 	Txid              string `json:"txid"`
-	Vout              uint32 `json:"vout"`
-	Value             uint64 `json:"value"`
-	CovenantType      uint16 `json:"covenant_type"`
 	CovenantDataHex   string `json:"covenant_data"`
+	Value             uint64 `json:"value"`
 	CreationHeight    uint64 `json:"creation_height"`
+	Vout              uint32 `json:"vout"`
+	CovenantType      uint16 `json:"covenant_type"`
 	CreatedByCoinbase bool   `json:"created_by_coinbase"`
 }
 
@@ -126,8 +126,8 @@ type blockBasicVector struct {
 	BlockHex       string `json:"block_hex"`
 	ExpectedPrev   string `json:"expected_prev_hash"`
 	ExpectedTarget string `json:"expected_target"`
-	ExpectOk       bool   `json:"expect_ok"`
 	ExpectErr      string `json:"expect_err"`
+	ExpectOk       bool   `json:"expect_ok"`
 }
 
 var writeJSONFn = writeJSON

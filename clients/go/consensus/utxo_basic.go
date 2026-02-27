@@ -8,10 +8,10 @@ type Outpoint struct {
 }
 
 type UtxoEntry struct {
-	Value             uint64
-	CovenantType      uint16
 	CovenantData      []byte
+	Value             uint64
 	CreationHeight    uint64
+	CovenantType      uint16
 	CreatedByCoinbase bool
 }
 

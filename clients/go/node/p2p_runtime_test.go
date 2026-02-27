@@ -23,11 +23,11 @@ func (e timeoutError) Timeout() bool   { return true }
 func (e timeoutError) Temporary() bool { return true }
 
 type scriptedConn struct {
-	readErrs         []error
 	writeErr         error
 	setReadDeadErr   error
 	setWriteDeadErr  error
 	remoteAddrString string
+	readErrs         []error
 }
 
 func (c *scriptedConn) Read(_ []byte) (int, error) {

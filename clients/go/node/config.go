@@ -13,8 +13,8 @@ type Config struct {
 	Network  string   `json:"network"`
 	DataDir  string   `json:"data_dir"`
 	BindAddr string   `json:"bind_addr"`
-	Peers    []string `json:"peers"`
 	LogLevel string   `json:"log_level"`
+	Peers    []string `json:"peers"`
 	MaxPeers int      `json:"max_peers"`
 }
 

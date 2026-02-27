@@ -186,8 +186,8 @@ func TestMtpMedianUsesAvailableWindowWhenPrevShorterThanK(t *testing.T) {
 
 func TestAppendCompactSizeMinerEncodesAllWidthBranches(t *testing.T) {
 	cases := []struct {
-		value    uint64
 		want     []byte
+		value    uint64
 		wantLen  int
 		frontPad byte
 	}{

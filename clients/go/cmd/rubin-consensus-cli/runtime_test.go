@@ -482,8 +482,8 @@ func TestRubinConsensusCLI_RunFromStdin_CoversErrorPaths(t *testing.T) {
 
 	type errCase struct {
 		name    string
-		req     Request
 		wantErr string
+		req     Request
 	}
 	for _, tc := range []errCase{
 		{name: "parse_tx_bad_hex", req: Request{Op: "parse_tx", TxHex: "zz"}, wantErr: "bad hex"},

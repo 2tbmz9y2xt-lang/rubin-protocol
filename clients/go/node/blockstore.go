@@ -31,8 +31,8 @@ type BlockStore struct {
 }
 
 type blockStoreIndexDisk struct {
-	Version   uint32   `json:"version"`
 	Canonical []string `json:"canonical"`
+	Version   uint32   `json:"version"`
 }
 
 func BlockStorePath(dataDir string) string {
