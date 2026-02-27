@@ -160,6 +160,32 @@ func TestParseTx_DAChunk_RejectsZeroPayloadLen(t *testing.T) {
 	}
 }
 
+func TestParseTx_DAChunk_RejectsChunkIndexOutOfRange(t *testing.T) {
+	b := make([]byte, 0, 160)
+	b = AppendU32le(b, 1)
+	b = append(b, 0x02) // tx_kind
+	b = AppendU64le(b, 0)
+	b = AppendCompactSize(b, 0) // input_count
+	b = AppendCompactSize(b, 0) // output_count
+	b = AppendU32le(b, 0)       // locktime
+	daID := filled32ForParseTests(0xb3)
+	b = append(b, daID[:]...)
+	b = AppendU16le(b, uint16(MAX_DA_CHUNK_COUNT)) // invalid: must be < MAX_DA_CHUNK_COUNT
+	chunkHash := filled32ForParseTests(0xb4)
+	b = append(b, chunkHash[:]...)
+	b = AppendCompactSize(b, 0) // witness_count
+	b = AppendCompactSize(b, 1) // da_payload_len
+	b = append(b, 0x00)         // da_payload
+
+	_, _, _, _, err := ParseTx(b)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
+	}
+}
+
 func TestParseTx_WitnessPubkeyLengthOverflowsInt(t *testing.T) {
 	// Trigger: pubkey_length CompactSize decodes to a value > math.MaxInt.
 	section := make([]byte, 0, 16)
