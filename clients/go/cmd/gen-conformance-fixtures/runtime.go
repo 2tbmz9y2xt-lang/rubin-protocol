@@ -234,44 +234,6 @@ func vaultCovenantData(ownerLockID [32]byte, vaultKeyID [32]byte, whitelist [32]
 	return out
 }
 
-func txBytes(tx *consensus.Tx) ([]byte, error) {
-	if tx == nil {
-		return nil, fmt.Errorf("nil tx")
-	}
-	var b []byte
-	b = consensus.AppendU32le(b, tx.Version)
-	b = append(b, tx.TxKind)
-	b = consensus.AppendU64le(b, tx.TxNonce)
-	b = consensus.AppendCompactSize(b, uint64(len(tx.Inputs)))
-	for _, in := range tx.Inputs {
-		b = append(b, in.PrevTxid[:]...)
-		b = consensus.AppendU32le(b, in.PrevVout)
-		b = consensus.AppendCompactSize(b, uint64(len(in.ScriptSig)))
-		b = append(b, in.ScriptSig...)
-		b = consensus.AppendU32le(b, in.Sequence)
-	}
-	b = consensus.AppendCompactSize(b, uint64(len(tx.Outputs)))
-	for _, o := range tx.Outputs {
-		b = consensus.AppendU64le(b, o.Value)
-		b = consensus.AppendU16le(b, o.CovenantType)
-		b = consensus.AppendCompactSize(b, uint64(len(o.CovenantData)))
-		b = append(b, o.CovenantData...)
-	}
-	b = consensus.AppendU32le(b, tx.Locktime)
-	b = consensus.AppendCompactSize(b, uint64(len(tx.Witness)))
-	for _, w := range tx.Witness {
-		b = append(b, w.SuiteID)
-		b = consensus.AppendCompactSize(b, uint64(len(w.Pubkey)))
-		b = append(b, w.Pubkey...)
-		b = consensus.AppendCompactSize(b, uint64(len(w.Signature)))
-		b = append(b, w.Signature...)
-	}
-	// da_payload_len + payload
-	b = consensus.AppendCompactSize(b, uint64(len(tx.DaPayload)))
-	b = append(b, tx.DaPayload...)
-	return b, nil
-}
-
 func updateSingleInputSignedVector(
 	f *fixtureFile,
 	id string,
@@ -849,12 +811,12 @@ func updateSubsidyBlocks(
 }
 
 func mustTxBytes(tx *consensus.Tx) []byte {
-	b, err := txBytes(tx)
+	b, err := consensus.MarshalTx(tx)
 	if err != nil {
-		fatalf("txBytes: %v", err)
+		fatalf("MarshalTx: %v", err)
 	}
 	if _, _, _, n, err := consensus.ParseTx(b); err != nil || n != len(b) {
-		fatalf("txBytes sanity: err=%v consumed=%d len=%d", err, n, len(b))
+		fatalf("MarshalTx sanity: err=%v consumed=%d len=%d", err, n, len(b))
 	}
 	return b
 }
