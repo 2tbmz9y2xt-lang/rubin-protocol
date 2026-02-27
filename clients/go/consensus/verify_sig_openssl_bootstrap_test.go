@@ -70,6 +70,32 @@ func TestVerifySig_FIPSOnlyModeValidOrSkip(t *testing.T) {
 	}
 }
 
+func TestOpenSSLBootstrap_NonEmptyConfigArgs(t *testing.T) {
+	resetOpenSSLBootstrapStateForTests()
+	t.Cleanup(resetOpenSSLBootstrapStateForTests)
+
+	if err := opensslBootstrap(false, "/tmp/rubin-nonexistent-openssl.cnf", "/tmp/rubin-nonexistent-ossl-modules"); err != nil {
+		if strings.Contains(err.Error(), "OPENSSL_init_crypto") || strings.Contains(err.Error(), "setenv failed") {
+			t.Skipf("local OpenSSL env rejected injected config/modules: %v", err)
+		}
+	}
+}
+
+func TestVerifySig_SLHBranchExecutesBootstrap(t *testing.T) {
+	resetOpenSSLBootstrapStateForTests()
+	t.Cleanup(resetOpenSSLBootstrapStateForTests)
+
+	t.Setenv("RUBIN_OPENSSL_FIPS_MODE", "off")
+	var digest [32]byte
+	ok, err := verifySig(SUITE_ID_SLH_DSA_SHAKE_256F, []byte{0x01}, []byte{0x02}, digest)
+	if err != nil {
+		t.Fatalf("verifySig(SLH invalid lengths): %v", err)
+	}
+	if ok {
+		t.Fatalf("expected verifySig=false for invalid SLH key/signature lengths")
+	}
+}
+
 func TestVerifySig_InvalidFIPSModeRejected(t *testing.T) {
 	resetOpenSSLBootstrapStateForTests()
 	t.Cleanup(resetOpenSSLBootstrapStateForTests)
