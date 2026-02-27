@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.24.13'
           cache: true
@@ -35,8 +35,8 @@ jobs:
 
       - name: Install gosec + govulncheck
         run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          GOTOOLCHAIN=auto go install github.com/securego/gosec/v2/cmd/gosec@latest
+          GOTOOLCHAIN=auto go install golang.org/x/vuln/cmd/govulncheck@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Install cargo-audit
@@ -127,7 +127,7 @@ jobs:
         run: |
           scripts/dev-env.sh -- scripts/crypto/openssl/fips-preflight.sh
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.24.13'
           cache: true
@@ -288,7 +288,7 @@ jobs:
           openssl version
           openssl list -signature-algorithms | grep -E 'ML-DSA-87|SLH-DSA-SHAKE-256f'
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.24.13'
           cache: true
