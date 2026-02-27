@@ -93,10 +93,10 @@ func (s *ChainState) Save(path string) error {
 		return fmt.Errorf("encode chainstate: %w", err)
 	}
 	raw = append(raw, '\n')
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
-	return writeFileAtomic(path, raw, 0o644)
+	return writeFileAtomic(path, raw, 0o600)
 }
 
 func (s *ChainState) ConnectBlock(

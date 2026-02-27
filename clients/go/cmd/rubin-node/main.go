@@ -51,7 +51,7 @@ func main() {
 		_, _ = fmt.Fprintf(os.Stderr, "invalid config: %v\n", err)
 		os.Exit(2)
 	}
-	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
+	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "datadir create failed: %v\n", err)
 		os.Exit(2)
 	}

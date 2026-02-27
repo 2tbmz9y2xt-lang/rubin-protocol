@@ -153,7 +153,7 @@ func mustWriteFixture(path string, f *fixtureFile) {
 		fatalf("marshal %s: %v", path, err)
 	}
 	b = append(b, '\n')
-	if err := os.WriteFile(path, b, 0o644); err != nil {
+	if err := os.WriteFile(path, b, 0o600); err != nil {
 		fatalf("write %s: %v", path, err)
 	}
 }

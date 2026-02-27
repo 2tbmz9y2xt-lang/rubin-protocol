@@ -39,10 +39,10 @@ func OpenBlockStore(rootPath string) (*BlockStore, error) {
 	blocksDir := filepath.Join(rootPath, "blocks")
 	headersDir := filepath.Join(rootPath, "headers")
 
-	if err := os.MkdirAll(blocksDir, 0o755); err != nil {
+	if err := os.MkdirAll(blocksDir, 0o750); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(headersDir, 0o755); err != nil {
+	if err := os.MkdirAll(headersDir, 0o750); err != nil {
 		return nil, err
 	}
 
@@ -201,11 +201,11 @@ func saveBlockStoreIndex(path string, index blockStoreIndexDisk) error {
 		return err
 	}
 	raw = append(raw, '\n')
-	return writeFileAtomic(path, raw, 0o644)
+	return writeFileAtomic(path, raw, 0o600)
 }
 
 func writeFileIfAbsent(path string, content []byte) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err == nil {
 		_, writeErr := f.Write(content)
 		closeErr := f.Close()
