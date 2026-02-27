@@ -311,11 +311,11 @@ func main() {
 						"wtxid":    hex.EncodeToString(wtxid[:]),
 					},
 				}
-					if err := writeJSON(&traceBuf, e); err != nil {
-						fmt.Fprintf(os.Stderr, "write: %v\n", err)
-						os.Exit(2)
-					}
+				if err := writeJSON(&traceBuf, e); err != nil {
+					fmt.Fprintf(os.Stderr, "write: %v\n", err)
+					os.Exit(2)
 				}
+			}
 
 		case "CV-SIGHASH":
 			var fx sighashFixture
@@ -357,8 +357,8 @@ func main() {
 						"digest": hex.EncodeToString(digest[:]),
 					},
 				}
-					_ = writeJSON(&traceBuf, e)
-				}
+				_ = writeJSON(&traceBuf, e)
+			}
 
 		case "CV-POW":
 			var fx powFixture
@@ -438,8 +438,8 @@ func main() {
 					Inputs:   inputs,
 					Outputs:  outputs,
 				}
-					_ = writeJSON(&traceBuf, e)
-				}
+				_ = writeJSON(&traceBuf, e)
+			}
 
 		case "CV-UTXO-BASIC":
 			var fx utxoBasicFixture
@@ -503,8 +503,8 @@ func main() {
 					},
 					Outputs: outputs,
 				}
-					_ = writeJSON(&traceBuf, e)
-				}
+				_ = writeJSON(&traceBuf, e)
+			}
 
 		case "CV-BLOCK-BASIC":
 			var fx blockBasicFixture
@@ -557,8 +557,8 @@ func main() {
 					},
 					Outputs: outputs,
 				}
-					_ = writeJSON(&traceBuf, e)
-				}
+				_ = writeJSON(&traceBuf, e)
+			}
 
 		default:
 			// non-critical gate for refinement trace: skip silently (for now)
