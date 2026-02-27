@@ -6,6 +6,8 @@ import (
 	"testing"
 )
 
+const txCoreEnd = 4 + 1 + 8 + 1 + 1 + 4
+
 func mustTxErrCode(t *testing.T, err error) ErrorCode {
 	t.Helper()
 	te, ok := err.(*TxError)
@@ -28,6 +30,22 @@ func minimalTxBytes() []byte {
 	return b.Bytes()
 }
 
+func txWithWitnessSection(section []byte) []byte {
+	txBytes := minimalTxBytes()
+	return append(txBytes[:txCoreEnd], section...)
+}
+
+func expectParseErrCode(t *testing.T, txBytes []byte, want ErrorCode) {
+	t.Helper()
+	_, _, _, _, err := ParseTx(txBytes)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != want {
+		t.Fatalf("code=%s, want %s", got, want)
+	}
+}
+
 func TestParseTx_Minimal_TxIDWTXID(t *testing.T) {
 	txBytes := minimalTxBytes()
 
@@ -40,8 +58,7 @@ func TestParseTx_Minimal_TxIDWTXID(t *testing.T) {
 	}
 
 	// TxCoreBytes = everything up to and including locktime (no witness, no da_payload_len).
-	coreEnd := 4 + 1 + 8 + 1 + 1 + 4
-	wantTxid := sha3_256(txBytes[:coreEnd])
+	wantTxid := sha3_256(txBytes[:txCoreEnd])
 	if txid != wantTxid {
 		t.Fatalf("txid mismatch")
 	}
@@ -58,13 +75,7 @@ func TestParseTx_NonMinimalCompactSize(t *testing.T) {
 	bad := append([]byte{}, txBytes...)
 	bad = append(bad[:13], append([]byte{0xfd, 0x00, 0x00}, bad[14:]...)...)
 
-	_, _, _, _, err := ParseTx(bad)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
-	}
+	expectParseErrCode(t, bad, TX_ERR_PARSE)
 }
 
 func TestParseTx_ScriptSigLenOverflow(t *testing.T) {
@@ -82,127 +93,95 @@ func TestParseTx_ScriptSigLenOverflow(t *testing.T) {
 	b.WriteByte(0x00)                                    // witness_count
 	b.WriteByte(0x00)                                    // da_payload_len
 
-	_, _, _, _, err := ParseTx(b.Bytes())
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
-	}
+	expectParseErrCode(t, b.Bytes(), TX_ERR_PARSE)
 }
 
 func TestParseTx_WitnessCountOverflow(t *testing.T) {
 	txBytes := minimalTxBytes()
 	// Replace witness_count=0x00 with CompactSize(1025) = 0xfd 0x01 0x04.
 	// Offset to witness_count: coreEnd (19 bytes) + current witness_count (1 byte) => 19.
-	coreEnd := 4 + 1 + 8 + 1 + 1 + 4
 	bad := append([]byte{}, txBytes...)
-	bad = append(bad[:coreEnd], append([]byte{0xfd, 0x01, 0x04}, bad[coreEnd+1:]...)...)
+	bad = append(bad[:txCoreEnd], append([]byte{0xfd, 0x01, 0x04}, bad[txCoreEnd+1:]...)...)
 
-	_, _, _, _, err := ParseTx(bad)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_WITNESS_OVERFLOW {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_WITNESS_OVERFLOW)
-	}
+	expectParseErrCode(t, bad, TX_ERR_WITNESS_OVERFLOW)
 }
 
 func TestParseTx_WitnessItem_Canonicalization(t *testing.T) {
-	t.Run("sentinel_noncanonical", func(t *testing.T) {
-		// witness_count=1, suite_id=0, pubkey_length=1, pubkey=0x00, sig_length=0
-		txBytes := append([]byte{}, minimalTxBytes()...)
-		coreEnd := 4 + 1 + 8 + 1 + 1 + 4
-		var w bytes.Buffer
-		w.WriteByte(0x01) // witness_count
-		w.WriteByte(SUITE_ID_SENTINEL)
-		w.WriteByte(0x01) // pubkey_length
-		w.WriteByte(0x00) // pubkey
-		w.WriteByte(0x00) // sig_length
-		w.WriteByte(0x00) // da_payload_len
-		txBytes = append(txBytes[:coreEnd], w.Bytes()...)
+	cases := []struct {
+		name    string
+		wantErr ErrorCode
+		section func() []byte
+	}{
+		{
+			name:    "sentinel_noncanonical",
+			wantErr: TX_ERR_PARSE,
+			section: func() []byte {
+				var w bytes.Buffer
+				w.WriteByte(0x01) // witness_count
+				w.WriteByte(SUITE_ID_SENTINEL)
+				w.WriteByte(0x01) // pubkey_length
+				w.WriteByte(0x00) // pubkey
+				w.WriteByte(0x00) // sig_length
+				w.WriteByte(0x00) // da_payload_len
+				return w.Bytes()
+			},
+		},
+		{
+			name:    "unknown_suite",
+			wantErr: TX_ERR_SIG_ALG_INVALID,
+			section: func() []byte {
+				var w bytes.Buffer
+				w.WriteByte(0x01) // witness_count
+				w.WriteByte(0x03) // suite_id unknown
+				w.WriteByte(0x00) // pubkey_length
+				w.WriteByte(0x00) // sig_length
+				w.WriteByte(0x00) // da_payload_len
+				return w.Bytes()
+			},
+		},
+		{
+			name:    "ml_dsa_len_mismatch",
+			wantErr: TX_ERR_SIG_NONCANONICAL,
+			section: func() []byte {
+				var w bytes.Buffer
+				w.WriteByte(0x01)               // witness_count
+				w.WriteByte(SUITE_ID_ML_DSA_87) // suite_id
+				w.WriteByte(0xfd)               // pubkey_length = 2591 (0x0A1F) non-canonical for ML
+				w.WriteByte(0x1f)
+				w.WriteByte(0x0a)
+				w.Write(make([]byte, 2591))
+				w.WriteByte(0xfd) // sig_length = 4627
+				w.WriteByte(0x13)
+				w.WriteByte(0x12)
+				w.Write(make([]byte, 4627))
+				w.WriteByte(0x00) // da_payload_len
+				return w.Bytes()
+			},
+		},
+		{
+			name:    "slh_dsa_sig_len_zero",
+			wantErr: TX_ERR_SIG_NONCANONICAL,
+			section: func() []byte {
+				var w bytes.Buffer
+				w.WriteByte(0x01)                        // witness_count
+				w.WriteByte(SUITE_ID_SLH_DSA_SHAKE_256F) // suite_id
+				w.WriteByte(0x40)                        // pubkey_length = 64
+				w.Write(make([]byte, 64))
+				w.WriteByte(0x00) // sig_length = 0 (non-canonical)
+				w.WriteByte(0x00) // da_payload_len
+				return w.Bytes()
+			},
+		},
+	}
 
-		_, _, _, _, err := ParseTx(txBytes)
-		if err == nil {
-			t.Fatalf("expected error")
-		}
-		if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
-			t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
-		}
-	})
-
-	t.Run("unknown_suite", func(t *testing.T) {
-		txBytes := append([]byte{}, minimalTxBytes()...)
-		coreEnd := 4 + 1 + 8 + 1 + 1 + 4
-		var w bytes.Buffer
-		w.WriteByte(0x01) // witness_count
-		w.WriteByte(0x03) // suite_id unknown
-		w.WriteByte(0x00) // pubkey_length
-		w.WriteByte(0x00) // sig_length
-		w.WriteByte(0x00) // da_payload_len
-		txBytes = append(txBytes[:coreEnd], w.Bytes()...)
-
-		_, _, _, _, err := ParseTx(txBytes)
-		if err == nil {
-			t.Fatalf("expected error")
-		}
-		if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
-			t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
-		}
-	})
-
-	t.Run("ml_dsa_len_mismatch", func(t *testing.T) {
-		txBytes := append([]byte{}, minimalTxBytes()...)
-		coreEnd := 4 + 1 + 8 + 1 + 1 + 4
-		var w bytes.Buffer
-		w.WriteByte(0x01)               // witness_count
-		w.WriteByte(SUITE_ID_ML_DSA_87) // suite_id
-		w.WriteByte(0xfd)               // pubkey_length = 2591 (0x0A1F) non-canonical for ML
-		w.WriteByte(0x1f)
-		w.WriteByte(0x0a)
-		w.Write(make([]byte, 2591))
-		w.WriteByte(0xfd) // sig_length = 4627
-		w.WriteByte(0x13)
-		w.WriteByte(0x12)
-		w.Write(make([]byte, 4627))
-		w.WriteByte(0x00) // da_payload_len
-		txBytes = append(txBytes[:coreEnd], w.Bytes()...)
-
-		_, _, _, _, err := ParseTx(txBytes)
-		if err == nil {
-			t.Fatalf("expected error")
-		}
-		if got := mustTxErrCode(t, err); got != TX_ERR_SIG_NONCANONICAL {
-			t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_NONCANONICAL)
-		}
-	})
-
-	t.Run("slh_dsa_sig_len_zero", func(t *testing.T) {
-		txBytes := append([]byte{}, minimalTxBytes()...)
-		coreEnd := 4 + 1 + 8 + 1 + 1 + 4
-		var w bytes.Buffer
-		w.WriteByte(0x01)                        // witness_count
-		w.WriteByte(SUITE_ID_SLH_DSA_SHAKE_256F) // suite_id
-		w.WriteByte(0x40)                        // pubkey_length = 64
-		w.Write(make([]byte, 64))
-		w.WriteByte(0x00) // sig_length = 0 (non-canonical)
-		w.WriteByte(0x00) // da_payload_len
-		txBytes = append(txBytes[:coreEnd], w.Bytes()...)
-
-		_, _, _, _, err := ParseTx(txBytes)
-		if err == nil {
-			t.Fatalf("expected error")
-		}
-		if got := mustTxErrCode(t, err); got != TX_ERR_SIG_NONCANONICAL {
-			t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_NONCANONICAL)
-		}
-	})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expectParseErrCode(t, txWithWitnessSection(tc.section()), tc.wantErr)
+		})
+	}
 }
 
 func TestParseTx_WitnessBytesOverflow(t *testing.T) {
-	txBytes := append([]byte{}, minimalTxBytes()...)
-	coreEnd := 4 + 1 + 8 + 1 + 1 + 4
-
 	var w bytes.Buffer
 	w.WriteByte(0x03) // witness_count = 3
 	for i := 0; i < 3; i++ {
@@ -215,21 +194,11 @@ func TestParseTx_WitnessBytesOverflow(t *testing.T) {
 		w.Write(make([]byte, 49_856))
 	}
 	w.WriteByte(0x00) // da_payload_len
-	txBytes = append(txBytes[:coreEnd], w.Bytes()...)
 
-	_, _, _, _, err := ParseTx(txBytes)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_WITNESS_OVERFLOW {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_WITNESS_OVERFLOW)
-	}
+	expectParseErrCode(t, txWithWitnessSection(w.Bytes()), TX_ERR_WITNESS_OVERFLOW)
 }
 
 func TestParseTx_HTLCPathWitnessItemsCanonical(t *testing.T) {
-	txBytes := append([]byte{}, minimalTxBytes()...)
-	coreEnd := 4 + 1 + 8 + 1 + 1 + 4
-
 	claimPayload := []byte{0x00} // HTLC path selector for claim
 	claimPayload = appendU16le(claimPayload, 1)
 	claimPayload = append(claimPayload, 0x42)
@@ -256,9 +225,7 @@ func TestParseTx_HTLCPathWitnessItemsCanonical(t *testing.T) {
 	w.Write(make([]byte, ML_DSA_87_SIG_BYTES))
 
 	w.WriteByte(0x00) // da_payload_len
-	txBytes = append(txBytes[:coreEnd], w.Bytes()...)
-
-	if _, _, _, _, err := ParseTx(txBytes); err != nil {
+	if _, _, _, _, err := ParseTx(txWithWitnessSection(w.Bytes())); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

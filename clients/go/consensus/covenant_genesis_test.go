@@ -54,19 +54,6 @@ func validVaultCovenantDataForP2PKOutput() []byte {
 	return encodeVaultCovenantData(ownerLockID, 1, makeKeys(1, 0x11), [][32]byte{h})
 }
 
-func TestValidateTxCovenantsGenesis_P2PK_OK(t *testing.T) {
-	data := make([]byte, MAX_P2PK_COVENANT_DATA)
-	data[0] = SUITE_ID_ML_DSA_87
-	tx := &Tx{
-		Outputs: []TxOutput{
-			{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: data},
-		},
-	}
-	if err := ValidateTxCovenantsGenesis(tx, 0); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
 func TestValidateTxCovenantsGenesis_P2PK_BadSuite(t *testing.T) {
 	data := make([]byte, MAX_P2PK_COVENANT_DATA)
 	data[0] = SUITE_ID_SLH_DSA_SHAKE_256F
@@ -88,174 +75,103 @@ func TestValidateTxCovenantsGenesis_P2PK_BadSuite(t *testing.T) {
 	}
 }
 
-func TestValidateTxCovenantsGenesis_Unassigned0001Rejected(t *testing.T) {
-	tx := &Tx{
-		Outputs: []TxOutput{
-			{Value: 1, CovenantType: 0x0001, CovenantData: []byte{0x00}},
-		},
-	}
-	err := ValidateTxCovenantsGenesis(tx, 0)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
-	}
-}
-
-func TestValidateTxCovenantsGenesis_ANCHOR_OK(t *testing.T) {
-	tx := &Tx{
-		Outputs: []TxOutput{
-			{Value: 0, CovenantType: COV_TYPE_ANCHOR, CovenantData: []byte{0x01}},
-		},
-	}
-	if err := ValidateTxCovenantsGenesis(tx, 0); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestValidateTxCovenantsGenesis_ANCHOR_NonZeroValue(t *testing.T) {
-	tx := &Tx{
-		Outputs: []TxOutput{
-			{Value: 1, CovenantType: COV_TYPE_ANCHOR, CovenantData: []byte{0x01}},
-		},
-	}
-	err := ValidateTxCovenantsGenesis(tx, 0)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
-	}
-}
-
-func TestValidateTxCovenantsGenesis_VAULT_OK(t *testing.T) {
-	tx := &Tx{
-		Outputs: []TxOutput{
-			{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: validVaultCovenantDataForP2PKOutput()},
-		},
-	}
-	if err := ValidateTxCovenantsGenesis(tx, 0); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestValidateTxCovenantsGenesis_VAULT_BadThreshold(t *testing.T) {
+func TestValidateTxCovenantsGenesis_Table(t *testing.T) {
+	validP2PK := make([]byte, MAX_P2PK_COVENANT_DATA)
+	validP2PK[0] = SUITE_ID_ML_DSA_87
 	keys := makeKeys(2, 0x11)
-	whitelist := makeKeys(1, 0x51)
+	oneWhitelist := makeKeys(1, 0x51)
 	var ownerLockID [32]byte
 	ownerLockID[0] = 0x99
-	tx := &Tx{
-		Outputs: []TxOutput{
-			{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: encodeVaultCovenantData(ownerLockID, 3, keys, whitelist)},
-		},
-	}
-	err := ValidateTxCovenantsGenesis(tx, 0)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_VAULT_PARAMS_INVALID {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_VAULT_PARAMS_INVALID)
-	}
-}
+	unsortedKeys := makeKeys(2, 0x11)
+	unsortedKeys[0], unsortedKeys[1] = unsortedKeys[1], unsortedKeys[0]
+	unsortedWhitelist := makeKeys(2, 0x51)
+	unsortedWhitelist[0], unsortedWhitelist[1] = unsortedWhitelist[1], unsortedWhitelist[0]
+	unsortedMultisigKeys := makeKeys(2, 0x31)
+	unsortedMultisigKeys[0], unsortedMultisigKeys[1] = unsortedMultisigKeys[1], unsortedMultisigKeys[0]
 
-func TestValidateTxCovenantsGenesis_VAULT_UnsortedKeys(t *testing.T) {
-	keys := makeKeys(2, 0x11)
-	keys[0], keys[1] = keys[1], keys[0]
-	whitelist := makeKeys(1, 0x51)
-	var ownerLockID [32]byte
-	ownerLockID[0] = 0x99
-	tx := &Tx{
-		Outputs: []TxOutput{
-			{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: encodeVaultCovenantData(ownerLockID, 1, keys, whitelist)},
+	cases := []struct {
+		name    string
+		output  TxOutput
+		wantErr ErrorCode
+	}{
+		{
+			name:    "p2pk_ok",
+			output:  TxOutput{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PK},
+			wantErr: "",
+		},
+		{
+			name:    "unassigned_0001_rejected",
+			output:  TxOutput{Value: 1, CovenantType: 0x0001, CovenantData: []byte{0x00}},
+			wantErr: TX_ERR_COVENANT_TYPE_INVALID,
+		},
+		{
+			name:    "anchor_ok",
+			output:  TxOutput{Value: 0, CovenantType: COV_TYPE_ANCHOR, CovenantData: []byte{0x01}},
+			wantErr: "",
+		},
+		{
+			name:    "anchor_nonzero_value",
+			output:  TxOutput{Value: 1, CovenantType: COV_TYPE_ANCHOR, CovenantData: []byte{0x01}},
+			wantErr: TX_ERR_COVENANT_TYPE_INVALID,
+		},
+		{
+			name:    "vault_ok",
+			output:  TxOutput{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: validVaultCovenantDataForP2PKOutput()},
+			wantErr: "",
+		},
+		{
+			name:    "vault_bad_threshold",
+			output:  TxOutput{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: encodeVaultCovenantData(ownerLockID, 3, keys, oneWhitelist)},
+			wantErr: TX_ERR_VAULT_PARAMS_INVALID,
+		},
+		{
+			name:    "vault_unsorted_keys",
+			output:  TxOutput{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: encodeVaultCovenantData(ownerLockID, 1, unsortedKeys, oneWhitelist)},
+			wantErr: TX_ERR_VAULT_KEYS_NOT_CANONICAL,
+		},
+		{
+			name:    "vault_unsorted_whitelist",
+			output:  TxOutput{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: encodeVaultCovenantData(ownerLockID, 1, makeKeys(1, 0x11), unsortedWhitelist)},
+			wantErr: TX_ERR_VAULT_WHITELIST_NOT_CANONICAL,
+		},
+		{
+			name:    "vault_empty_whitelist",
+			output:  TxOutput{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: encodeVaultCovenantData(ownerLockID, 1, makeKeys(1, 0x11), nil)},
+			wantErr: TX_ERR_VAULT_PARAMS_INVALID,
+		},
+		{
+			name:    "multisig_ok",
+			output:  TxOutput{Value: 1, CovenantType: COV_TYPE_MULTISIG, CovenantData: encodeMultisigCovenantData(2, makeKeys(2, 0x31))},
+			wantErr: "",
+		},
+		{
+			name:    "multisig_bad_threshold",
+			output:  TxOutput{Value: 1, CovenantType: COV_TYPE_MULTISIG, CovenantData: encodeMultisigCovenantData(3, makeKeys(2, 0x31))},
+			wantErr: TX_ERR_COVENANT_TYPE_INVALID,
+		},
+		{
+			name:    "multisig_unsorted_keys",
+			output:  TxOutput{Value: 1, CovenantType: COV_TYPE_MULTISIG, CovenantData: encodeMultisigCovenantData(1, unsortedMultisigKeys)},
+			wantErr: TX_ERR_COVENANT_TYPE_INVALID,
 		},
 	}
-	err := ValidateTxCovenantsGenesis(tx, 0)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_VAULT_KEYS_NOT_CANONICAL {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_VAULT_KEYS_NOT_CANONICAL)
-	}
-}
 
-func TestValidateTxCovenantsGenesis_VAULT_UnsortedWhitelist(t *testing.T) {
-	keys := makeKeys(1, 0x11)
-	whitelist := makeKeys(2, 0x51)
-	whitelist[0], whitelist[1] = whitelist[1], whitelist[0]
-	var ownerLockID [32]byte
-	ownerLockID[0] = 0x99
-	tx := &Tx{
-		Outputs: []TxOutput{
-			{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: encodeVaultCovenantData(ownerLockID, 1, keys, whitelist)},
-		},
-	}
-	err := ValidateTxCovenantsGenesis(tx, 0)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_VAULT_WHITELIST_NOT_CANONICAL {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_VAULT_WHITELIST_NOT_CANONICAL)
-	}
-}
-
-func TestValidateTxCovenantsGenesis_VAULT_EmptyWhitelist(t *testing.T) {
-	keys := makeKeys(1, 0x11)
-	var ownerLockID [32]byte
-	ownerLockID[0] = 0x99
-	tx := &Tx{
-		Outputs: []TxOutput{
-			{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: encodeVaultCovenantData(ownerLockID, 1, keys, nil)},
-		},
-	}
-	err := ValidateTxCovenantsGenesis(tx, 0)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_VAULT_PARAMS_INVALID {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_VAULT_PARAMS_INVALID)
-	}
-}
-
-func TestValidateTxCovenantsGenesis_MULTISIG_OK(t *testing.T) {
-	tx := &Tx{
-		Outputs: []TxOutput{
-			{Value: 1, CovenantType: COV_TYPE_MULTISIG, CovenantData: encodeMultisigCovenantData(2, makeKeys(2, 0x31))},
-		},
-	}
-	if err := ValidateTxCovenantsGenesis(tx, 0); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestValidateTxCovenantsGenesis_MULTISIG_BadThreshold(t *testing.T) {
-	tx := &Tx{
-		Outputs: []TxOutput{
-			{Value: 1, CovenantType: COV_TYPE_MULTISIG, CovenantData: encodeMultisigCovenantData(3, makeKeys(2, 0x31))},
-		},
-	}
-	err := ValidateTxCovenantsGenesis(tx, 0)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
-	}
-}
-
-func TestValidateTxCovenantsGenesis_MULTISIG_UnsortedKeys(t *testing.T) {
-	keys := makeKeys(2, 0x31)
-	keys[0], keys[1] = keys[1], keys[0]
-	tx := &Tx{
-		Outputs: []TxOutput{
-			{Value: 1, CovenantType: COV_TYPE_MULTISIG, CovenantData: encodeMultisigCovenantData(1, keys)},
-		},
-	}
-	err := ValidateTxCovenantsGenesis(tx, 0)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &Tx{Outputs: []TxOutput{tc.output}}
+			err := ValidateTxCovenantsGenesis(tx, 0)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error")
+			}
+			if got := mustTxErrCode(t, err); got != tc.wantErr {
+				t.Fatalf("code=%s, want %s", got, tc.wantErr)
+			}
+		})
 	}
 }
