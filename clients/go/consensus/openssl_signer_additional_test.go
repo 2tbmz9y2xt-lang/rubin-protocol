@@ -2,7 +2,10 @@
 
 package consensus
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCStringTrim0(t *testing.T) {
 	if got := cStringTrim0([]byte("abc\x00def")); got != "abc" {
@@ -146,5 +149,62 @@ func TestSignOpenSSLDigest32_BufferTooSmallErrors(t *testing.T) {
 	_, err = signOpenSSLDigest32(kp.pkey, digest, 1, 0, true)
 	if err == nil {
 		t.Fatalf("expected error")
+	}
+}
+
+func TestNewOpenSSLRawKeypair_InvalidFIPSModeRejected(t *testing.T) {
+	resetOpenSSLBootstrapStateForTests()
+	t.Cleanup(resetOpenSSLBootstrapStateForTests)
+
+	t.Setenv("RUBIN_OPENSSL_FIPS_MODE", "definitely-invalid")
+	_, _, err := newOpenSSLRawKeypair("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES)
+	if err == nil {
+		t.Fatalf("expected bootstrap mode error")
+	}
+	if !strings.Contains(err.Error(), "invalid RUBIN_OPENSSL_FIPS_MODE") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSignOpenSSLDigest32_InvalidFIPSModeRejected(t *testing.T) {
+	resetOpenSSLBootstrapStateForTests()
+	t.Cleanup(resetOpenSSLBootstrapStateForTests)
+
+	t.Setenv("RUBIN_OPENSSL_FIPS_MODE", "definitely-invalid")
+	var digest [32]byte
+	_, err := signOpenSSLDigest32(nil, digest, ML_DSA_87_SIG_BYTES, 0, false)
+	if err == nil {
+		t.Fatalf("expected bootstrap mode error")
+	}
+	if !strings.Contains(err.Error(), "invalid RUBIN_OPENSSL_FIPS_MODE") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewMLDSA87Keypair_InvalidFIPSModeRejected(t *testing.T) {
+	resetOpenSSLBootstrapStateForTests()
+	t.Cleanup(resetOpenSSLBootstrapStateForTests)
+
+	t.Setenv("RUBIN_OPENSSL_FIPS_MODE", "definitely-invalid")
+	_, err := NewMLDSA87Keypair()
+	if err == nil {
+		t.Fatalf("expected bootstrap mode error")
+	}
+	if !strings.Contains(err.Error(), "invalid RUBIN_OPENSSL_FIPS_MODE") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewSLHDSASHAKE256fKeypair_InvalidFIPSModeRejected(t *testing.T) {
+	resetOpenSSLBootstrapStateForTests()
+	t.Cleanup(resetOpenSSLBootstrapStateForTests)
+
+	t.Setenv("RUBIN_OPENSSL_FIPS_MODE", "definitely-invalid")
+	_, err := NewSLHDSASHAKE256fKeypair()
+	if err == nil {
+		t.Fatalf("expected bootstrap mode error")
+	}
+	if !strings.Contains(err.Error(), "invalid RUBIN_OPENSSL_FIPS_MODE") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
