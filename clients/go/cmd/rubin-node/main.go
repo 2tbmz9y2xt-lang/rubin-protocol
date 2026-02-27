@@ -15,6 +15,14 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
+var nowUnix = func() int64 { return time.Now().Unix() }
+
+var mustTipFn = mustTip
+
+var newMinerFn = node.NewMiner
+
+var newSyncEngineFn = node.NewSyncEngine
+
 type multiStringFlag []string
 
 func (m *multiStringFlag) String() string {
@@ -81,7 +89,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "blockstore open failed: %v\n", err)
 		return 2
 	}
-	syncEngine, err := node.NewSyncEngine(
+	syncEngine, err := newSyncEngineFn(
 		chainState,
 		blockStore,
 		node.DefaultSyncConfig(nil, [32]byte{}, chainStatePath),
@@ -93,9 +101,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig(cfg.Network, cfg.MaxPeers))
 
 	tipHeight, tipHash, tipOK, err := blockStore.Tip()
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "blockstore tip read failed: %v\n", err)
-		return 2
+	tipHeight, tipHash, tipOK, tipExitCode := mustTipFn(tipHeight, tipHash, tipOK, err, stderr)
+	if tipExitCode != 0 {
+		return tipExitCode
 	}
 
 	if err := printConfig(stdout, cfg); err != nil {
@@ -116,7 +124,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	if *mineBlocks > 0 {
-		miner, err := node.NewMiner(chainState, blockStore, syncEngine, node.DefaultMinerConfig())
+		miner, err := newMinerFn(chainState, blockStore, syncEngine, node.DefaultMinerConfig())
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "miner init failed: %v\n", err)
 			return 2
@@ -151,9 +159,18 @@ func printConfig(w io.Writer, cfg node.Config) error {
 }
 
 func nowUnixU64() uint64 {
-	now := time.Now().Unix()
+	now := nowUnix()
 	if now <= 0 {
 		return 0
 	}
 	return uint64(now)
+}
+
+func mustTip(tipHeight uint64, tipHash [32]byte, tipOK bool, err error, stderr io.Writer) (uint64, [32]byte, bool, int) {
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "blockstore tip read failed: %v\n", err)
+		var zero [32]byte
+		return 0, zero, false, 2
+	}
+	return tipHeight, tipHash, tipOK, 0
 }

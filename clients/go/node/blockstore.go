@@ -12,6 +12,11 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
+var (
+	readFileByPathFn  = readFileByPath
+	writeFileAtomicFn = writeFileAtomic
+)
+
 const (
 	blockStoreIndexVersion = 1
 	blockStoreDirName      = "blockstore"
@@ -201,11 +206,11 @@ func saveBlockStoreIndex(path string, index blockStoreIndexDisk) error {
 		return err
 	}
 	raw = append(raw, '\n')
-	return writeFileAtomic(path, raw, 0o600)
+	return writeFileAtomicFn(path, raw, 0o600)
 }
 
 func writeFileIfAbsent(path string, content []byte) error {
-	existing, err := readFileByPath(path)
+	existing, err := readFileByPathFn(path)
 	if err == nil {
 		if !bytes.Equal(existing, content) {
 			return fmt.Errorf("file already exists with different content: %s", path)
@@ -215,10 +220,10 @@ func writeFileIfAbsent(path string, content []byte) error {
 	if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := writeFileAtomic(path, content, 0o600); err != nil {
+	if err := writeFileAtomicFn(path, content, 0o600); err != nil {
 		return err
 	}
-	existing, err = readFileByPath(path)
+	existing, err = readFileByPathFn(path)
 	if err != nil {
 		return err
 	}

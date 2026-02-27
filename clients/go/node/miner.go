@@ -11,6 +11,8 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
+var unixNow = func() int64 { return time.Now().Unix() }
+
 type MinerConfig struct {
 	Target          [32]byte
 	TimestampSource func() uint64
@@ -322,7 +324,7 @@ func appendU64leMiner(dst []byte, v uint64) []byte {
 }
 
 func unixNowU64() uint64 {
-	now := time.Now().Unix()
+	now := unixNow()
 	if now <= 0 {
 		return 0
 	}
