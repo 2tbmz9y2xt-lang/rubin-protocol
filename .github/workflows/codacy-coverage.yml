@@ -83,8 +83,6 @@ jobs:
         run: |
           cd clients/go
           go test -coverprofile=coverage.out ./...
-          # Normalize file paths to repo-relative so Codacy can match them.
-          sed -i "s|^github.com/2tbmz9y2xt-lang/rubin-protocol/||" coverage.out
 
       - name: Rust coverage
         run: |
@@ -112,21 +110,11 @@ jobs:
             --commit-uuid "$CODACY_COMMIT_UUID"
           )
 
-          bash <(curl -Ls https://coverage.codacy.com/get.sh) report "${common_args[@]}" \
+          bash <(curl -Ls https://coverage.codacy.com/get.sh) report \
+            "${common_args[@]}" \
             -r clients/go/coverage.out \
-            --force-coverage-parser go \
-            -l Go \
+            -r clients/rust/lcov.info \
             --partial
-
-          if [ -f clients/rust/lcov.info ]; then
-            bash <(curl -Ls https://coverage.codacy.com/get.sh) report "${common_args[@]}" \
-              -r clients/rust/lcov.info \
-              --force-coverage-parser lcov \
-              -l Rust \
-              --partial
-          else
-            echo "clients/rust/lcov.info missing; skipping Rust report upload."
-          fi
 
           bash <(curl -Ls https://coverage.codacy.com/get.sh) final \
             "${common_args[@]}"
