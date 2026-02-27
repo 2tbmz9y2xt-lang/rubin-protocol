@@ -420,23 +420,6 @@ func TestApplyNonCoinbaseTxBasic_VaultWhitelistRejectsOutput(t *testing.T) {
 	vaultKeyID := sha3_256(vaultKP.PubkeyBytes())
 	vaultCovData := encodeVaultCovenantData(ownerLockID, 1, [][32]byte{vaultKeyID}, [][32]byte{whitelistH})
 
-	tx := &Tx{
-		Version: 1,
-		TxKind:  0x00,
-		TxNonce: 1,
-		Inputs: []TxInput{
-			{PrevTxid: prevVault, PrevVout: 0},
-			{PrevTxid: prevFee, PrevVout: 0},
-		},
-		Outputs: []TxOutput{
-			{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: nonWhitelistedOutData},
-		},
-	}
-	tx.Witness = []WitnessItem{
-		signP2PKInputWitness(t, tx, 0, 100, chainID, vaultKP),
-		signP2PKInputWitness(t, tx, 1, 10, chainID, ownerKP),
-	}
-
 	utxos := map[Outpoint]UtxoEntry{
 		{Txid: prevVault, Vout: 0}: {
 			Value:        100,
@@ -450,74 +433,45 @@ func TestApplyNonCoinbaseTxBasic_VaultWhitelistRejectsOutput(t *testing.T) {
 		},
 	}
 
-	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, chainID)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED)
-	}
-}
-
-func TestApplyNonCoinbaseTxBasic_VaultRejectsVaultOutput(t *testing.T) {
-	var chainID [32]byte
-	var prevVault, prevFee, txid [32]byte
-	prevVault[0] = 0xe8
-	prevFee[0] = 0xe9
-	txid[0] = 0xea
-
-	vaultKP := mustMLDSA87Keypair(t)
-	ownerKP := mustMLDSA87Keypair(t)
-	destKP := mustMLDSA87Keypair(t)
-
-	ownerCovData := p2pkCovenantDataForPubkey(ownerKP.PubkeyBytes())
-	ownerLockID := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, ownerCovData))
-
-	destCovData := p2pkCovenantDataForPubkey(destKP.PubkeyBytes())
-	whitelistH := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, destCovData))
-
-	vaultKeyID := sha3_256(vaultKP.PubkeyBytes())
-	vaultCovData := encodeVaultCovenantData(ownerLockID, 1, [][32]byte{vaultKeyID}, [][32]byte{whitelistH})
-
-	// Attempt to spend a CORE_VAULT input while creating a CORE_VAULT output.
-	// This is forbidden (circular-reference hardening).
-	tx := &Tx{
-		Version: 1,
-		TxKind:  0x00,
-		TxNonce: 1,
-		Inputs: []TxInput{
-			{PrevTxid: prevVault, PrevVout: 0},
-			{PrevTxid: prevFee, PrevVout: 0},
-		},
-		Outputs: []TxOutput{
-			{Value: 100, CovenantType: COV_TYPE_VAULT, CovenantData: vaultCovData},
-		},
-	}
-	tx.Witness = []WitnessItem{
-		signP2PKInputWitness(t, tx, 0, 100, chainID, vaultKP),
-		signP2PKInputWitness(t, tx, 1, 10, chainID, ownerKP),
+	makeTx := func(out TxOutput) *Tx {
+		tx := &Tx{
+			Version: 1,
+			TxKind:  0x00,
+			TxNonce: 1,
+			Inputs: []TxInput{
+				{PrevTxid: prevVault, PrevVout: 0},
+				{PrevTxid: prevFee, PrevVout: 0},
+			},
+			Outputs: []TxOutput{out},
+		}
+		tx.Witness = []WitnessItem{
+			signP2PKInputWitness(t, tx, 0, 100, chainID, vaultKP),
+			signP2PKInputWitness(t, tx, 1, 10, chainID, ownerKP),
+		}
+		return tx
 	}
 
-	utxos := map[Outpoint]UtxoEntry{
-		{Txid: prevVault, Vout: 0}: {
-			Value:        100,
-			CovenantType: COV_TYPE_VAULT,
-			CovenantData: vaultCovData,
-		},
-		{Txid: prevFee, Vout: 0}: {
-			Value:        10,
-			CovenantType: COV_TYPE_P2PK,
-			CovenantData: ownerCovData,
-		},
-	}
+	t.Run("output_not_whitelisted", func(t *testing.T) {
+		tx := makeTx(TxOutput{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: nonWhitelistedOutData})
+		_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, chainID)
+		if err == nil {
+			t.Fatalf("expected error")
+		}
+		if got := mustTxErrCode(t, err); got != TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED {
+			t.Fatalf("code=%s, want %s", got, TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED)
+		}
+	})
 
-	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, chainID)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED)
-	}
+	t.Run("vault_output_forbidden", func(t *testing.T) {
+		tx := makeTx(TxOutput{Value: 100, CovenantType: COV_TYPE_VAULT, CovenantData: vaultCovData})
+		_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, chainID)
+		if err == nil {
+			t.Fatalf("expected error")
+		}
+		if got := mustTxErrCode(t, err); got != TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED {
+			t.Fatalf("code=%s, want %s", got, TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED)
+		}
+	})
 }
 
 func TestApplyNonCoinbaseTxBasic_VaultRejectsFeeSponsor(t *testing.T) {
