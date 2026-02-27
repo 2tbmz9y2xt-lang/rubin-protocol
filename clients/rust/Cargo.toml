@@ -1,3 +1,7 @@
 [workspace]
-members = ["crates/rubin-consensus", "crates/rubin-consensus-cli"]
+members = [
+    "crates/rubin-consensus",
+    "crates/rubin-consensus-cli",
+    "crates/rubin-node",
+]
 resolver = "2"

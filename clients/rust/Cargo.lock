@@ -193,6 +193,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rubin-node"
+version = "0.0.0"
+dependencies = [
+ "hex",
+ "rubin-consensus",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
