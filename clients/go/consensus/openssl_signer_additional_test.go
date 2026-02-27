@@ -108,3 +108,43 @@ func TestNewOpenSSLRawKeypair_RejectsUnknownAlg(t *testing.T) {
 		t.Fatalf("expected error")
 	}
 }
+
+func TestNewOpenSSLRawKeypair_PublicKeyBufferTooSmallErrors(t *testing.T) {
+	_, _, err := newOpenSSLRawKeypair("ML-DSA-87", 1)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestNewOpenSSLRawKeypair_PublicKeyLenMismatchErrors(t *testing.T) {
+	_, _, err := newOpenSSLRawKeypair("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES+1)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestSignOpenSSLDigest32_ExactSigLenMismatchErrors(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+
+	var digest [32]byte
+	digest[0] = 0x01
+	_, err := signOpenSSLDigest32(kp.pkey, digest, ML_DSA_87_SIG_BYTES, ML_DSA_87_SIG_BYTES-1, false)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestSignOpenSSLDigest32_BufferTooSmallErrors(t *testing.T) {
+	kp, err := NewSLHDSASHAKE256fKeypair()
+	if err != nil {
+		t.Fatalf("NewSLHDSASHAKE256fKeypair: %v", err)
+	}
+	t.Cleanup(func() { kp.Close() })
+
+	var digest [32]byte
+	digest[0] = 0x02
+	_, err = signOpenSSLDigest32(kp.pkey, digest, 1, 0, true)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+}
