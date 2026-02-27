@@ -57,6 +57,28 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust deps (coverage)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            clients/rust/target
+          key: rust-coverage-${{ runner.os }}-${{ hashFiles('clients/rust/Cargo.lock') }}
+          restore-keys: |
+            rust-coverage-${{ runner.os }}-
+
+      - name: Install cargo-tarpaulin (prebuilt)
+        env:
+          TARPAULIN_VERSION: 0.35.2
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.cargo/bin"
+          curl -sL "https://github.com/xd009642/tarpaulin/releases/download/${TARPAULIN_VERSION}/cargo-tarpaulin-x86_64-unknown-linux-musl.tar.gz" \
+            | tar xz -C "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          cargo tarpaulin --version
+
       - name: Go coverage
         run: |
           cd clients/go
@@ -64,9 +86,8 @@ jobs:
 
       - name: Rust coverage
         run: |
-          cargo install cargo-tarpaulin --locked
           cd clients/rust
-          cargo tarpaulin --out Lcov --output-dir .
+          cargo tarpaulin --workspace --out Lcov --output-dir .
 
       - name: Upload to Codacy
         env:
@@ -94,5 +115,6 @@ jobs:
             -r clients/go/coverage.out \
             -r clients/rust/lcov.info \
             --partial
+
           bash <(curl -Ls https://coverage.codacy.com/get.sh) final \
             "${common_args[@]}"
