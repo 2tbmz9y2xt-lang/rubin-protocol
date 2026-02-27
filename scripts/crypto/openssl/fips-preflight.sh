@@ -31,8 +31,8 @@ fi
 
 echo "[fips-preflight] mode=${MODE}"
 echo "[fips-preflight] openssl=$(command -v openssl || echo missing)"
-echo "[fips-preflight] OPENSSL_MODULES=${OPENSSL_MODULES:-<unset>}"
-echo "[fips-preflight] OPENSSL_CONF=${OPENSSL_CONF:-<unset>}"
+echo "[fips-preflight] OPENSSL_MODULES=${OPENSSL_MODULES:-(unset)}"
+echo "[fips-preflight] OPENSSL_CONF=${OPENSSL_CONF:-(unset)}"
 openssl version -a | sed -n '1,20p' || true
 echo
 
