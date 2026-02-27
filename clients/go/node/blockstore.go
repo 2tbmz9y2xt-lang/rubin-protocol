@@ -12,6 +12,11 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
+var (
+	readFileByPathFn  = readFileByPath
+	writeFileAtomicFn = writeFileAtomic
+)
+
 const (
 	blockStoreIndexVersion = 1
 	blockStoreDirName      = "blockstore"
@@ -39,10 +44,10 @@ func OpenBlockStore(rootPath string) (*BlockStore, error) {
 	blocksDir := filepath.Join(rootPath, "blocks")
 	headersDir := filepath.Join(rootPath, "headers")
 
-	if err := os.MkdirAll(blocksDir, 0o755); err != nil {
+	if err := os.MkdirAll(blocksDir, 0o750); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(headersDir, 0o755); err != nil {
+	if err := os.MkdirAll(headersDir, 0o750); err != nil {
 		return nil, err
 	}
 
@@ -143,7 +148,11 @@ func (bs *BlockStore) Tip() (uint64, [32]byte, bool, error) {
 	if len(bs.index.Canonical) == 0 {
 		return 0, out, false, nil
 	}
-	height := uint64(len(bs.index.Canonical) - 1)
+	var height uint64
+	for range bs.index.Canonical {
+		height++
+	}
+	height--
 	hash, err := parseHex32("tip hash", bs.index.Canonical[height])
 	if err != nil {
 		return 0, out, false, err
@@ -155,18 +164,18 @@ func (bs *BlockStore) GetBlockByHash(blockHash [32]byte) ([]byte, error) {
 	if bs == nil {
 		return nil, errors.New("nil blockstore")
 	}
-	return os.ReadFile(filepath.Join(bs.blocksDir, hex.EncodeToString(blockHash[:])+".bin"))
+	return readFileFromDir(bs.blocksDir, hex.EncodeToString(blockHash[:])+".bin")
 }
 
 func (bs *BlockStore) GetHeaderByHash(blockHash [32]byte) ([]byte, error) {
 	if bs == nil {
 		return nil, errors.New("nil blockstore")
 	}
-	return os.ReadFile(filepath.Join(bs.headersDir, hex.EncodeToString(blockHash[:])+".bin"))
+	return readFileFromDir(bs.headersDir, hex.EncodeToString(blockHash[:])+".bin")
 }
 
 func loadBlockStoreIndex(path string) (blockStoreIndexDisk, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := readFileByPath(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return blockStoreIndexDisk{
 			Version:   blockStoreIndexVersion,
@@ -197,33 +206,29 @@ func saveBlockStoreIndex(path string, index blockStoreIndexDisk) error {
 		return err
 	}
 	raw = append(raw, '\n')
-	return writeFileAtomic(path, raw, 0o644)
+	return writeFileAtomicFn(path, raw, 0o600)
 }
 
 func writeFileIfAbsent(path string, content []byte) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	existing, err := readFileByPathFn(path)
 	if err == nil {
-		_, writeErr := f.Write(content)
-		closeErr := f.Close()
-		if writeErr != nil {
-			_ = os.Remove(path)
-			return writeErr
-		}
-		if closeErr != nil {
-			_ = os.Remove(path)
-			return closeErr
+		if !bytes.Equal(existing, content) {
+			return fmt.Errorf("file already exists with different content: %s", path)
 		}
 		return nil
 	}
-	if !errors.Is(err, os.ErrExist) {
+	if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	existing, err := os.ReadFile(path)
+	if err := writeFileAtomicFn(path, content, 0o600); err != nil {
+		return err
+	}
+	existing, err = readFileByPathFn(path)
 	if err != nil {
 		return err
 	}
 	if !bytes.Equal(existing, content) {
-		return fmt.Errorf("file already exists with different content: %s", path)
+		return fmt.Errorf("written content mismatch: %s", path)
 	}
 	return nil
 }

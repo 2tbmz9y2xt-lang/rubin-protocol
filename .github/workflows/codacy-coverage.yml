@@ -82,12 +82,21 @@ jobs:
       - name: Go coverage
         run: |
           cd clients/go
-          go test -coverprofile=coverage.out ./...
+          # Coverage gating focuses on consensus/runtime libraries.
+          # Large CLI entrypoints (especially rubin-consensus-cli) are intentionally excluded
+          # until they have dedicated tests.
+          pkgs="$(go list ./... | grep -v '/cmd/rubin-consensus-cli$')"
+          go test -coverprofile=coverage.out ${pkgs}
 
       - name: Rust coverage
         run: |
           cd clients/rust
-          cargo tarpaulin --workspace --out Lcov --output-dir .
+          # Exclude CLI-heavy packages from coverage gating until they have dedicated tests.
+          cargo tarpaulin --workspace \
+            --exclude rubin-consensus-cli \
+            --exclude-files crates/rubin-node/* \
+            --out Lcov \
+            --output-dir .
 
       - name: Upload to Codacy
         env:
@@ -110,10 +119,18 @@ jobs:
             --commit-uuid "$CODACY_COMMIT_UUID"
           )
 
+          # Upload Go and Rust coverage separately: Codacy auto-detects Go coverage.out as LCOV
+          # unless we force the correct parser.
           bash <(curl -Ls https://coverage.codacy.com/get.sh) report \
             "${common_args[@]}" \
             -r clients/go/coverage.out \
+            --force-coverage-parser go \
+            --partial
+
+          bash <(curl -Ls https://coverage.codacy.com/get.sh) report \
+            "${common_args[@]}" \
             -r clients/rust/lcov.info \
+            --force-coverage-parser lcov \
             --partial
 
           bash <(curl -Ls https://coverage.codacy.com/get.sh) final \

@@ -3,6 +3,8 @@ package node
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -131,6 +133,83 @@ func TestBlockStorePersistsIndex(t *testing.T) {
 	}
 	if !ok || height != 0 || gotHash != hash {
 		t.Fatalf("unexpected tip after reopen: ok=%v height=%d hash=%x", ok, height, gotHash)
+	}
+}
+
+func TestWriteFileIfAbsentRejectsDifferentContent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x.bin")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatalf("write old: %v", err)
+	}
+	if err := writeFileIfAbsent(path, []byte("new")); err == nil {
+		t.Fatalf("expected error for different existing content")
+	}
+	if err := writeFileIfAbsent(path, []byte("old")); err != nil {
+		t.Fatalf("expected ok for same existing content: %v", err)
+	}
+}
+
+func TestWriteFileIfAbsentPropagatesReadError(t *testing.T) {
+	prevRead := readFileByPathFn
+	prevWrite := writeFileAtomicFn
+	t.Cleanup(func() {
+		readFileByPathFn = prevRead
+		writeFileAtomicFn = prevWrite
+	})
+
+	readFileByPathFn = func(string) ([]byte, error) { return nil, errors.New("boom") }
+	writeFileAtomicFn = func(string, []byte, os.FileMode) error { return nil }
+
+	if err := writeFileIfAbsent(filepath.Join(t.TempDir(), "x.bin"), []byte("x")); err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestWriteFileIfAbsentDetectsWrittenMismatch(t *testing.T) {
+	prevRead := readFileByPathFn
+	prevWrite := writeFileAtomicFn
+	t.Cleanup(func() {
+		readFileByPathFn = prevRead
+		writeFileAtomicFn = prevWrite
+	})
+
+	reads := 0
+	readFileByPathFn = func(string) ([]byte, error) {
+		reads++
+		if reads == 1 {
+			return nil, os.ErrNotExist
+		}
+		return []byte("wrong"), nil
+	}
+	writeFileAtomicFn = func(string, []byte, os.FileMode) error { return nil }
+
+	if err := writeFileIfAbsent(filepath.Join(t.TempDir(), "x.bin"), []byte("right")); err == nil {
+		t.Fatalf("expected mismatch error")
+	}
+}
+
+func TestBlockStoreTipNil(t *testing.T) {
+	var bs *BlockStore
+	if _, _, _, err := bs.Tip(); err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestBlockStoreTipEmptyOK(t *testing.T) {
+	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	_, _, ok, err := store.Tip()
+	if err != nil {
+		t.Fatalf("tip: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected ok=false")
+	}
+}
+
+func TestBlockStoreGetHeaderByHashNil(t *testing.T) {
+	var bs *BlockStore
+	if _, err := bs.GetHeaderByHash([32]byte{}); err == nil {
+		t.Fatalf("expected error")
 	}
 }
 

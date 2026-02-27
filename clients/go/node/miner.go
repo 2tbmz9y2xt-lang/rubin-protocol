@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"math"
 	"sort"
 	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
+
+var unixNow = func() int64 { return time.Now().Unix() }
 
 type MinerConfig struct {
 	Target          [32]byte
@@ -35,7 +38,7 @@ func DefaultMinerConfig() MinerConfig {
 	return MinerConfig{
 		Target: consensus.POW_LIMIT,
 		TimestampSource: func() uint64 {
-			return uint64(time.Now().Unix())
+			return unixNowU64()
 		},
 		MaxTxPerBlock: 1024,
 	}
@@ -52,7 +55,7 @@ func NewMiner(chainState *ChainState, blockStore *BlockStore, sync *SyncEngine, 
 		return nil, errors.New("nil sync engine")
 	}
 	if cfg.TimestampSource == nil {
-		cfg.TimestampSource = func() uint64 { return uint64(time.Now().Unix()) }
+		cfg.TimestampSource = func() uint64 { return unixNowU64() }
 	}
 	if cfg.MaxTxPerBlock <= 0 {
 		cfg.MaxTxPerBlock = 1024
@@ -138,7 +141,10 @@ func (m *Miner) MineOne(ctx context.Context, txs [][]byte) (*MinedBlock, error) 
 	}
 	witnessCommitment := consensus.WitnessCommitmentHash(witnessRoot)
 
-	coinbase := buildCoinbaseTx(nextHeight, witnessCommitment)
+	coinbase, err := buildCoinbaseTx(nextHeight, witnessCommitment)
+	if err != nil {
+		return nil, err
+	}
 	_, coinbaseTxid, _, consumed, err := consensus.ParseTx(coinbase)
 	if err != nil {
 		return nil, err
@@ -274,7 +280,10 @@ func makeHeaderPrefix(prevHash [32]byte, merkleRoot [32]byte, timestamp uint64, 
 	return header
 }
 
-func buildCoinbaseTx(height uint64, witnessCommitment [32]byte) []byte {
+func buildCoinbaseTx(height uint64, witnessCommitment [32]byte) ([]byte, error) {
+	if height > math.MaxUint32 {
+		return nil, errors.New("block height exceeds coinbase locktime range")
+	}
 	tx := make([]byte, 0, 196)
 	tx = appendU32leMiner(tx, 1)
 	tx = append(tx, 0x00) // tx_kind
@@ -293,7 +302,7 @@ func buildCoinbaseTx(height uint64, witnessCommitment [32]byte) []byte {
 	tx = appendU32leMiner(tx, uint32(height)) // locktime == block height
 	tx = appendCompactSizeMiner(tx, 0)        // witness_count
 	tx = appendCompactSizeMiner(tx, 0)        // da_payload_len
-	return tx
+	return tx, nil
 }
 
 func appendU16leMiner(dst []byte, v uint16) []byte {
@@ -312,6 +321,14 @@ func appendU64leMiner(dst []byte, v uint64) []byte {
 	var b [8]byte
 	binary.LittleEndian.PutUint64(b[:], v)
 	return append(dst, b[:]...)
+}
+
+func unixNowU64() uint64 {
+	now := unixNow()
+	if now <= 0 {
+		return 0
+	}
+	return uint64(now)
 }
 
 func appendCompactSizeMiner(dst []byte, value uint64) []byte {

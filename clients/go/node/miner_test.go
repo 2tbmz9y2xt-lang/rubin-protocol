@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -104,7 +105,10 @@ func TestBuildCoinbaseTxAnchorOnlyCanonical(t *testing.T) {
 	for i := range commitment {
 		commitment[i] = byte(i + 1)
 	}
-	txBytes := buildCoinbaseTx(7, commitment)
+	txBytes, err := buildCoinbaseTx(7, commitment)
+	if err != nil {
+		t.Fatalf("build coinbase tx: %v", err)
+	}
 	tx, _, _, consumed, err := consensus.ParseTx(txBytes)
 	if err != nil {
 		t.Fatalf("parse coinbase tx: %v", err)
@@ -127,5 +131,107 @@ func TestBuildCoinbaseTxAnchorOnlyCanonical(t *testing.T) {
 	}
 	if tx.Locktime != 7 {
 		t.Fatalf("coinbase locktime=%d, want 7", tx.Locktime)
+	}
+}
+
+func TestBuildCoinbaseTxRejectsHeightOverflow(t *testing.T) {
+	_, err := buildCoinbaseTx(uint64(math.MaxUint32)+1, [32]byte{})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestMinerMineOneRejectsHeightOverflow(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := ChainStatePath(dir)
+
+	chainState := NewChainState()
+	chainState.HasTip = true
+	chainState.Height = uint64(math.MaxUint32)
+	chainState.TipHash = [32]byte{}
+	if err := chainState.Save(chainStatePath); err != nil {
+		t.Fatalf("save chainstate: %v", err)
+	}
+
+	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("open blockstore: %v", err)
+	}
+	syncEngine, err := NewSyncEngine(
+		chainState,
+		blockStore,
+		DefaultSyncConfig(nil, [32]byte{}, chainStatePath),
+	)
+	if err != nil {
+		t.Fatalf("new sync engine: %v", err)
+	}
+	cfg := DefaultMinerConfig()
+	cfg.TimestampSource = func() uint64 { return 1_777_000_000 }
+	miner, err := NewMiner(chainState, blockStore, syncEngine, cfg)
+	if err != nil {
+		t.Fatalf("new miner: %v", err)
+	}
+	if _, err := miner.MineOne(context.Background(), nil); err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestNewMinerSetsDefaultTimestampSourceWhenNil(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := ChainStatePath(dir)
+
+	chainState := NewChainState()
+	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("open blockstore: %v", err)
+	}
+	syncEngine, err := NewSyncEngine(
+		chainState,
+		blockStore,
+		DefaultSyncConfig(nil, [32]byte{}, chainStatePath),
+	)
+	if err != nil {
+		t.Fatalf("new sync engine: %v", err)
+	}
+	cfg := DefaultMinerConfig()
+	cfg.TimestampSource = nil
+	miner, err := NewMiner(chainState, blockStore, syncEngine, cfg)
+	if err != nil {
+		t.Fatalf("new miner: %v", err)
+	}
+	if miner.cfg.TimestampSource == nil {
+		t.Fatalf("expected default timestamp source")
+	}
+	_ = miner.cfg.TimestampSource()
+}
+
+func TestDefaultMinerConfigTimestampSourceUsesUnixNowU64(t *testing.T) {
+	cfg := DefaultMinerConfig()
+	if cfg.TimestampSource == nil {
+		t.Fatalf("expected timestamp source")
+	}
+	_ = cfg.TimestampSource()
+}
+
+func TestUnixNowU64ReturnsZeroWhenUnixTimeNonPositive(t *testing.T) {
+	prev := unixNow
+	unixNow = func() int64 { return 0 }
+	t.Cleanup(func() { unixNow = prev })
+
+	if got := unixNowU64(); got != 0 {
+		t.Fatalf("unixNowU64=%d, want 0", got)
+	}
+}
+
+func TestNewMinerRejectsNilSyncEngine(t *testing.T) {
+	chainState := NewChainState()
+	blockStore, err := OpenBlockStore(BlockStorePath(t.TempDir()))
+	if err != nil {
+		t.Fatalf("open blockstore: %v", err)
+	}
+	cfg := DefaultMinerConfig()
+	cfg.TimestampSource = func() uint64 { return 1_777_000_000 }
+	if _, err := NewMiner(chainState, blockStore, nil, cfg); err == nil {
+		t.Fatalf("expected error")
 	}
 }

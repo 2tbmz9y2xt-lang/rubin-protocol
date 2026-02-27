@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -129,6 +130,8 @@ type blockBasicVector struct {
 	ExpectErr      string `json:"expect_err"`
 }
 
+var writeJSONFn = writeJSON
+
 func mustGitCommit() string {
 	out, err := exec.Command("git", "rev-parse", "HEAD").Output()
 	if err != nil {
@@ -150,19 +153,41 @@ func sha3hex(b []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
+func listFixtureNames(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, "CV-") && strings.HasSuffix(name, ".json") {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func readFixtureFile(dir, name string) ([]byte, error) {
+	return fs.ReadFile(os.DirFS(dir), name)
+}
+
 func digestFixtures(dir string) (string, error) {
-	paths, err := filepath.Glob(filepath.Join(dir, "CV-*.json"))
+	names, err := listFixtureNames(dir)
 	if err != nil {
 		return "", err
 	}
-	sort.Strings(paths)
 	sum := sha3.New256()
-	for _, p := range paths {
-		b, err := os.ReadFile(p)
+	for _, name := range names {
+		b, err := readFixtureFile(dir, name)
 		if err != nil {
 			return "", err
 		}
-		_, _ = sum.Write([]byte(filepath.Base(p)))
+		_, _ = sum.Write([]byte(name))
 		_, _ = sum.Write([]byte{0})
 		_, _ = sum.Write(b)
 		_, _ = sum.Write([]byte{0})
@@ -206,29 +231,16 @@ func parseHex32(s string) ([32]byte, error) {
 	return out, nil
 }
 
-func main() {
-	var fixturesDir string
-	var outPath string
-	flag.StringVar(&fixturesDir, "fixtures-dir", "conformance/fixtures", "path to conformance fixtures dir")
-	flag.StringVar(&outPath, "out", "rubin-formal/traces/go_trace_v1.jsonl", "output JSONL path")
-	flag.Parse()
-
+func run(fixturesDir, outPath string) error {
 	fixturesDigest, err := digestFixtures(fixturesDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "fixtures digest: %v\n", err)
-		os.Exit(2)
+		return fmt.Errorf("fixtures digest: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "mkdir: %v\n", err)
-		os.Exit(2)
+	if err := os.MkdirAll(filepath.Dir(outPath), 0o750); err != nil {
+		return fmt.Errorf("mkdir: %w", err)
 	}
-	f, err := os.Create(outPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "create out: %v\n", err)
-		os.Exit(2)
-	}
-	defer f.Close()
+	var traceBuf bytes.Buffer
 
 	hdr := traceHeader{
 		Type:                  "header",
@@ -238,39 +250,33 @@ func main() {
 		GoVersion:             mustGoVersion(),
 		FixturesDigestSHA3256: fixturesDigest,
 	}
-	if err := writeJSON(f, hdr); err != nil {
-		fmt.Fprintf(os.Stderr, "write header: %v\n", err)
-		os.Exit(2)
+	if err := writeJSONFn(&traceBuf, hdr); err != nil {
+		return fmt.Errorf("write header: %w", err)
 	}
 
-	paths, err := filepath.Glob(filepath.Join(fixturesDir, "CV-*.json"))
+	names, err := listFixtureNames(fixturesDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "glob: %v\n", err)
-		os.Exit(2)
+		return fmt.Errorf("list fixtures: %w", err)
 	}
-	sort.Strings(paths)
 
-	for _, p := range paths {
-		b, err := os.ReadFile(p)
+	for _, name := range names {
+		b, err := readFixtureFile(fixturesDir, name)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "read %s: %v\n", p, err)
-			os.Exit(2)
+			return fmt.Errorf("read %s: %w", filepath.Join(fixturesDir, name), err)
 		}
 
 		var gateProbe struct {
 			Gate string `json:"gate"`
 		}
 		if err := json.Unmarshal(b, &gateProbe); err != nil {
-			fmt.Fprintf(os.Stderr, "parse gate %s: %v\n", p, err)
-			os.Exit(2)
+			return fmt.Errorf("parse gate %s: %w", filepath.Join(fixturesDir, name), err)
 		}
 
 		switch gateProbe.Gate {
 		case "CV-PARSE":
 			var fx parseFixture
 			if err := json.Unmarshal(b, &fx); err != nil {
-				fmt.Fprintf(os.Stderr, "unmarshal %s: %v\n", p, err)
-				os.Exit(2)
+				return fmt.Errorf("unmarshal %s: %w", filepath.Join(fixturesDir, name), err)
 			}
 			for _, v := range fx.Vectors {
 				txBytes, _ := hex.DecodeString(v.TxHex)
@@ -291,14 +297,15 @@ func main() {
 						"wtxid":    hex.EncodeToString(wtxid[:]),
 					},
 				}
-				writeEntryOrExit(f, e)
+				if err := writeJSONFn(&traceBuf, e); err != nil {
+					return fmt.Errorf("write entry: %w", err)
+				}
 			}
 
 		case "CV-SIGHASH":
 			var fx sighashFixture
 			if err := json.Unmarshal(b, &fx); err != nil {
-				fmt.Fprintf(os.Stderr, "unmarshal %s: %v\n", p, err)
-				os.Exit(2)
+				return fmt.Errorf("unmarshal %s: %w", filepath.Join(fixturesDir, name), err)
 			}
 			for _, v := range fx.Vectors {
 				txBytes, _ := hex.DecodeString(v.TxHex)
@@ -334,14 +341,15 @@ func main() {
 						"digest": hex.EncodeToString(digest[:]),
 					},
 				}
-				writeEntryOrExit(f, e)
+				if err := writeJSONFn(&traceBuf, e); err != nil {
+					return fmt.Errorf("write entry: %w", err)
+				}
 			}
 
 		case "CV-POW":
 			var fx powFixture
 			if err := json.Unmarshal(b, &fx); err != nil {
-				fmt.Fprintf(os.Stderr, "unmarshal %s: %v\n", p, err)
-				os.Exit(2)
+				return fmt.Errorf("unmarshal %s: %w", filepath.Join(fixturesDir, name), err)
 			}
 			for _, v := range fx.Vectors {
 				var outErr error
@@ -415,14 +423,15 @@ func main() {
 					Inputs:   inputs,
 					Outputs:  outputs,
 				}
-				writeEntryOrExit(f, e)
+				if err := writeJSONFn(&traceBuf, e); err != nil {
+					return fmt.Errorf("write entry: %w", err)
+				}
 			}
 
 		case "CV-UTXO-BASIC":
 			var fx utxoBasicFixture
 			if err := json.Unmarshal(b, &fx); err != nil {
-				fmt.Fprintf(os.Stderr, "unmarshal %s: %v\n", p, err)
-				os.Exit(2)
+				return fmt.Errorf("unmarshal %s: %w", filepath.Join(fixturesDir, name), err)
 			}
 			for _, v := range fx.Vectors {
 				txBytes, _ := hex.DecodeString(v.TxHex)
@@ -480,14 +489,15 @@ func main() {
 					},
 					Outputs: outputs,
 				}
-				writeEntryOrExit(f, e)
+				if err := writeJSONFn(&traceBuf, e); err != nil {
+					return fmt.Errorf("write entry: %w", err)
+				}
 			}
 
 		case "CV-BLOCK-BASIC":
 			var fx blockBasicFixture
 			if err := json.Unmarshal(b, &fx); err != nil {
-				fmt.Fprintf(os.Stderr, "unmarshal %s: %v\n", p, err)
-				os.Exit(2)
+				return fmt.Errorf("unmarshal %s: %w", filepath.Join(fixturesDir, name), err)
 			}
 			for _, v := range fx.Vectors {
 				blockBytes, _ := hex.DecodeString(v.BlockHex)
@@ -534,7 +544,9 @@ func main() {
 					},
 					Outputs: outputs,
 				}
-				writeEntryOrExit(f, e)
+				if err := writeJSONFn(&traceBuf, e); err != nil {
+					return fmt.Errorf("write entry: %w", err)
+				}
 			}
 
 		default:
@@ -543,10 +555,24 @@ func main() {
 		}
 	}
 
-	// deterministic footer: verify file is non-empty beyond header
-	outBytes, _ := os.ReadFile(outPath)
-	if bytes.Count(outBytes, []byte("\n")) < 2 {
-		fmt.Fprintf(os.Stderr, "no entries written\n")
+	if bytes.Count(traceBuf.Bytes(), []byte("\n")) < 2 {
+		return fmt.Errorf("no entries written")
+	}
+	if err := os.WriteFile(outPath, traceBuf.Bytes(), 0o600); err != nil {
+		return fmt.Errorf("write out: %w", err)
+	}
+	return nil
+}
+
+func main() {
+	var fixturesDir string
+	var outPath string
+	flag.StringVar(&fixturesDir, "fixtures-dir", "conformance/fixtures", "path to conformance fixtures dir")
+	flag.StringVar(&outPath, "out", "rubin-formal/traces/go_trace_v1.jsonl", "output JSONL path")
+	flag.Parse()
+
+	if err := run(fixturesDir, outPath); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
 }
