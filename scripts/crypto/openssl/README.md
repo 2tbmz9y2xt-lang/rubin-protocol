@@ -27,6 +27,22 @@ RUBIN_OPENSSL_FIPS_MODE=only \
 scripts/dev-env.sh -- scripts/crypto/openssl/fips-preflight.sh
 ```
 
+## Thread-safety assumptions (verify/sign paths)
+
+OpenSSL usage in this repository relies on the following invariants:
+
+- `ERR_*` queue is thread-local; each verify/sign call starts with `ERR_clear_error()` and reads
+  errors from the current thread only.
+- `EVP_MD_CTX` and `EVP_PKEY` are created/freed per call; no shared mutable crypto context is reused
+  across goroutines/threads.
+- Shared immutable bytes (`pubkey`, `signature`, `digest`) are safe to read in parallel.
+- Do not cache or share mutable `EVP_MD_CTX`/`EVP_PKEY_CTX` instances across workers.
+
+Operational implication:
+
+- Parallel `verify_sig` is supported, but context lifecycle must remain strictly per-call.
+- Any optimization that introduces shared mutable OpenSSL contexts is out of policy and must be rejected.
+
 ## Run PQ benchmark (OpenSSL `speed`, primary)
 
 ```bash

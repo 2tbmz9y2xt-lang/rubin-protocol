@@ -1113,6 +1113,93 @@ fn verify_sig_rejects_wrong_slh_pubkey_length_before_openssl() {
     assert!(!ok);
 }
 
+#[test]
+fn verify_sig_parallel_mldsa_deterministic() {
+    let kp = match test_mldsa87_keypair() {
+        Some(v) => v,
+        None => return,
+    };
+
+    let mut digest = [0u8; 32];
+    digest[0] = 0x42;
+    digest[31] = 0xa5;
+    let mut invalid_digest = digest;
+    invalid_digest[0] ^= 0x01;
+
+    let signature = unsafe {
+        let mctx = EVP_MD_CTX_new();
+        assert!(!mctx.is_null(), "EVP_MD_CTX_new failed");
+        assert!(
+            EVP_DigestSignInit_ex(
+                mctx,
+                core::ptr::null_mut(),
+                core::ptr::null(),
+                core::ptr::null_mut(),
+                core::ptr::null(),
+                kp.pkey,
+                core::ptr::null(),
+            ) > 0,
+            "EVP_DigestSignInit_ex failed"
+        );
+        let mut sig = vec![0u8; ML_DSA_87_SIG_BYTES as usize];
+        let mut sig_len: usize = sig.len();
+        assert!(
+            EVP_DigestSign(
+                mctx,
+                sig.as_mut_ptr(),
+                &mut sig_len,
+                digest.as_ptr(),
+                digest.len(),
+            ) > 0,
+            "EVP_DigestSign failed"
+        );
+        EVP_MD_CTX_free(mctx);
+        assert_eq!(sig_len, ML_DSA_87_SIG_BYTES as usize);
+        sig
+    };
+    let pubkey = kp.pubkey.clone();
+    drop(kp);
+
+    let workers = std::thread::available_parallelism()
+        .map(|v| v.get().saturating_mul(2))
+        .unwrap_or(4)
+        .max(4);
+    let loops_per_worker = 200usize;
+
+    let mut handles = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        let pubkey_local = pubkey.clone();
+        let signature_local = signature.clone();
+        let digest_local = digest;
+        let invalid_digest_local = invalid_digest;
+        handles.push(std::thread::spawn(move || {
+            for _ in 0..loops_per_worker {
+                let ok = crate::verify_sig_openssl::verify_sig(
+                    SUITE_ID_ML_DSA_87,
+                    &pubkey_local,
+                    &signature_local,
+                    &digest_local,
+                )
+                .expect("verify_sig valid path should not fail");
+                assert!(ok, "verify_sig returned false for valid signature");
+
+                let bad = crate::verify_sig_openssl::verify_sig(
+                    SUITE_ID_ML_DSA_87,
+                    &pubkey_local,
+                    &signature_local,
+                    &invalid_digest_local,
+                )
+                .expect("verify_sig invalid path should not fail");
+                assert!(!bad, "verify_sig returned true for invalid digest");
+            }
+        }));
+    }
+
+    for handle in handles {
+        handle.join().expect("parallel verify worker panicked");
+    }
+}
+
 fn hex32(s: &str) -> [u8; 32] {
     let mut out = [0u8; 32];
     assert_eq!(s.len(), 64);
