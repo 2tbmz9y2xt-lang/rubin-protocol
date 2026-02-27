@@ -116,10 +116,6 @@ import (
 )
 
 func newOpenSSLRawKeypair(alg string, expectedPubkeyLen int) (*C.EVP_PKEY, []byte, error) {
-	if err := ensureOpenSSLBootstrap(); err != nil {
-		return nil, nil, err
-	}
-
 	errBuf := make([]byte, 512)
 	cAlg := C.CString(alg)
 	defer C.free(unsafe.Pointer(cAlg))
@@ -151,10 +147,6 @@ func newOpenSSLRawKeypair(alg string, expectedPubkeyLen int) (*C.EVP_PKEY, []byt
 }
 
 func signOpenSSLDigest32(pkey *C.EVP_PKEY, digest [32]byte, maxSigBytes int, exactSigBytes int, oneShot bool) ([]byte, error) {
-	if err := ensureOpenSSLBootstrap(); err != nil {
-		return nil, err
-	}
-
 	errBuf := make([]byte, 512)
 	signature := make([]byte, maxSigBytes)
 	var signatureLen C.size_t
