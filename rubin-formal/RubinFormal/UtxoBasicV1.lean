@@ -365,6 +365,9 @@ def applyNonCoinbaseTxBasicState
 
     -- whitelist membership: every output descriptor hash must be in whitelist
     for o in tx.outputs do
+      -- vault recursion is forbidden: a vault-spend must not create CORE_VAULT outputs
+      if o.covenantType == COV_TYPE_VAULT then
+        throw "TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED"
       let h := RubinFormal.OutputDescriptor.hash o.covenantType o.covenantData
       if !(vaultWhitelist.contains h) then
         throw "TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED"

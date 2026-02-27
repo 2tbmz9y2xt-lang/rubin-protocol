@@ -9,6 +9,22 @@ Policy:
 
 ---
 
+## 2026-02-27 — covenant_data cap + vault recursion hardening (Q-AUDIT-COV-01/Q-AUDIT-COV-06)
+
+Причина:
+- добавить wire-level cap `covenant_data_len <= 65_536` (норма CANONICAL §5.3) с reject как `TX_ERR_PARSE`;
+- запретить vault recursion: tx, который тратит `CORE_VAULT`, не может создавать `CORE_VAULT` outputs.
+
+Инструменты:
+- `clients/go/cmd/gen-conformance-fixtures` (manual run) — обновление tx_hex/подписей для затронутых векторов,
+- `tools/formal/gen_lean_conformance_vectors.py` + `tools/formal/gen_lean_refinement_from_traces.py` — синхронизация Lean replay.
+
+Изменённые fixtures:
+- `CV-HTLC.json`
+- `CV-SUBSIDY.json`
+- `CV-UTXO-BASIC.json`
+- `CV-VAULT.json`
+
 ## 2026-02-25 — PR #161 (Q-R017)
 
 Причина:
