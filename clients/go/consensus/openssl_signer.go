@@ -115,6 +115,81 @@ import (
 	"unsafe"
 )
 
+func newOpenSSLRawKeypair(alg string, expectedPubkeyLen int) (*C.EVP_PKEY, []byte, error) {
+	errBuf := make([]byte, 512)
+	cAlg := C.CString(alg)
+	defer C.free(unsafe.Pointer(cAlg))
+
+	pkey := C.rubin_keygen(cAlg, (*C.char)(unsafe.Pointer(&errBuf[0])), C.size_t(len(errBuf)))
+	if pkey == nil {
+		return nil, nil, fmt.Errorf("openssl keygen failed: %s", cStringTrim0(errBuf))
+	}
+
+	pubkey := make([]byte, expectedPubkeyLen)
+	var pubLen C.size_t
+	if C.rubin_get_raw_public(
+		pkey,
+		(*C.uchar)(unsafe.Pointer(&pubkey[0])),
+		C.size_t(len(pubkey)),
+		&pubLen,
+		(*C.char)(unsafe.Pointer(&errBuf[0])),
+		C.size_t(len(errBuf)),
+	) != 0 {
+		C.EVP_PKEY_free(pkey)
+		return nil, nil, fmt.Errorf("openssl get_raw_public failed: %s", cStringTrim0(errBuf))
+	}
+	if int(pubLen) != expectedPubkeyLen {
+		C.EVP_PKEY_free(pkey)
+		return nil, nil, fmt.Errorf("openssl pubkey length=%d, want %d", int(pubLen), expectedPubkeyLen)
+	}
+
+	return pkey, pubkey, nil
+}
+
+func signOpenSSLDigest32(pkey *C.EVP_PKEY, digest [32]byte, maxSigBytes int, exactSigBytes int, oneShot bool) ([]byte, error) {
+	errBuf := make([]byte, 512)
+	signature := make([]byte, maxSigBytes)
+	var signatureLen C.size_t
+
+	var rc C.int
+	if oneShot {
+		rc = C.rubin_digest_sign_oneshot(
+			pkey,
+			(*C.uchar)(unsafe.Pointer(&digest[0])),
+			C.size_t(len(digest)),
+			(*C.uchar)(unsafe.Pointer(&signature[0])),
+			C.size_t(len(signature)),
+			&signatureLen,
+			(*C.char)(unsafe.Pointer(&errBuf[0])),
+			C.size_t(len(errBuf)),
+		)
+	} else {
+		rc = C.rubin_sign_msg(
+			pkey,
+			(*C.uchar)(unsafe.Pointer(&digest[0])),
+			C.size_t(len(digest)),
+			(*C.uchar)(unsafe.Pointer(&signature[0])),
+			C.size_t(len(signature)),
+			&signatureLen,
+			(*C.char)(unsafe.Pointer(&errBuf[0])),
+			C.size_t(len(errBuf)),
+		)
+	}
+	if rc != 0 {
+		return nil, fmt.Errorf("openssl sign failed: %s", cStringTrim0(errBuf))
+	}
+
+	if exactSigBytes > 0 {
+		if int(signatureLen) != exactSigBytes {
+			return nil, fmt.Errorf("openssl sig length=%d, want %d", int(signatureLen), exactSigBytes)
+		}
+	} else if signatureLen == 0 || int(signatureLen) > maxSigBytes {
+		return nil, fmt.Errorf("openssl sig length=%d, want 1..%d", int(signatureLen), maxSigBytes)
+	}
+
+	return signature[:int(signatureLen)], nil
+}
+
 // MLDSA87Keypair is a non-consensus helper used by tests and conformance tooling
 // to generate real signatures under the OpenSSL backend profile.
 type MLDSA87Keypair struct {
@@ -138,24 +213,9 @@ func (k *MLDSA87Keypair) PubkeyBytes() []byte {
 }
 
 func NewMLDSA87Keypair() (*MLDSA87Keypair, error) {
-	errBuf := make([]byte, 512)
-	cAlg := C.CString("ML-DSA-87")
-	defer C.free(unsafe.Pointer(cAlg))
-
-	pkey := C.rubin_keygen(cAlg, (*C.char)(unsafe.Pointer(&errBuf[0])), C.size_t(len(errBuf)))
-	if pkey == nil {
-		return nil, fmt.Errorf("openssl keygen failed: %s", cStringTrim0(errBuf))
-	}
-
-	pub := make([]byte, ML_DSA_87_PUBKEY_BYTES)
-	var pubLen C.size_t
-	if C.rubin_get_raw_public(pkey, (*C.uchar)(unsafe.Pointer(&pub[0])), C.size_t(len(pub)), &pubLen, (*C.char)(unsafe.Pointer(&errBuf[0])), C.size_t(len(errBuf))) != 0 {
-		C.EVP_PKEY_free(pkey)
-		return nil, fmt.Errorf("openssl get_raw_public failed: %s", cStringTrim0(errBuf))
-	}
-	if int(pubLen) != ML_DSA_87_PUBKEY_BYTES {
-		C.EVP_PKEY_free(pkey)
-		return nil, fmt.Errorf("openssl pubkey length=%d, want %d", int(pubLen), ML_DSA_87_PUBKEY_BYTES)
+	pkey, pub, err := newOpenSSLRawKeypair("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES)
+	if err != nil {
+		return nil, err
 	}
 
 	kp := &MLDSA87Keypair{pkey: pkey, pubkey: pub}
@@ -167,25 +227,7 @@ func (k *MLDSA87Keypair) SignDigest32(digest [32]byte) ([]byte, error) {
 	if k == nil || k.pkey == nil {
 		return nil, fmt.Errorf("nil keypair")
 	}
-	errBuf := make([]byte, 512)
-	sig := make([]byte, ML_DSA_87_SIG_BYTES)
-	var sigLen C.size_t
-	if C.rubin_sign_msg(
-		k.pkey,
-		(*C.uchar)(unsafe.Pointer(&digest[0])),
-		C.size_t(len(digest)),
-		(*C.uchar)(unsafe.Pointer(&sig[0])),
-		C.size_t(len(sig)),
-		&sigLen,
-		(*C.char)(unsafe.Pointer(&errBuf[0])),
-		C.size_t(len(errBuf)),
-	) != 0 {
-		return nil, fmt.Errorf("openssl sign failed: %s", cStringTrim0(errBuf))
-	}
-	if int(sigLen) != ML_DSA_87_SIG_BYTES {
-		return nil, fmt.Errorf("openssl sig length=%d, want %d", int(sigLen), ML_DSA_87_SIG_BYTES)
-	}
-	return sig, nil
+	return signOpenSSLDigest32(k.pkey, digest, ML_DSA_87_SIG_BYTES, ML_DSA_87_SIG_BYTES, false)
 }
 
 // SLHDSASHAKE256fKeypair is a non-consensus helper used by conformance tooling to
@@ -211,24 +253,9 @@ func (k *SLHDSASHAKE256fKeypair) PubkeyBytes() []byte {
 }
 
 func NewSLHDSASHAKE256fKeypair() (*SLHDSASHAKE256fKeypair, error) {
-	errBuf := make([]byte, 512)
-	cAlg := C.CString("SLH-DSA-SHAKE-256f")
-	defer C.free(unsafe.Pointer(cAlg))
-
-	pkey := C.rubin_keygen(cAlg, (*C.char)(unsafe.Pointer(&errBuf[0])), C.size_t(len(errBuf)))
-	if pkey == nil {
-		return nil, fmt.Errorf("openssl keygen failed: %s", cStringTrim0(errBuf))
-	}
-
-	pub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
-	var pubLen C.size_t
-	if C.rubin_get_raw_public(pkey, (*C.uchar)(unsafe.Pointer(&pub[0])), C.size_t(len(pub)), &pubLen, (*C.char)(unsafe.Pointer(&errBuf[0])), C.size_t(len(errBuf))) != 0 {
-		C.EVP_PKEY_free(pkey)
-		return nil, fmt.Errorf("openssl get_raw_public failed: %s", cStringTrim0(errBuf))
-	}
-	if int(pubLen) != SLH_DSA_SHAKE_256F_PUBKEY_BYTES {
-		C.EVP_PKEY_free(pkey)
-		return nil, fmt.Errorf("openssl pubkey length=%d, want %d", int(pubLen), SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
+	pkey, pub, err := newOpenSSLRawKeypair("SLH-DSA-SHAKE-256f", SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
+	if err != nil {
+		return nil, err
 	}
 
 	kp := &SLHDSASHAKE256fKeypair{pkey: pkey, pubkey: pub}
@@ -240,25 +267,7 @@ func (k *SLHDSASHAKE256fKeypair) SignDigest32(digest [32]byte) ([]byte, error) {
 	if k == nil || k.pkey == nil {
 		return nil, fmt.Errorf("nil keypair")
 	}
-	errBuf := make([]byte, 512)
-	sig := make([]byte, MAX_SLH_DSA_SIG_BYTES)
-	var sigLen C.size_t
-	if C.rubin_digest_sign_oneshot(
-		k.pkey,
-		(*C.uchar)(unsafe.Pointer(&digest[0])),
-		C.size_t(len(digest)),
-		(*C.uchar)(unsafe.Pointer(&sig[0])),
-		C.size_t(len(sig)),
-		&sigLen,
-		(*C.char)(unsafe.Pointer(&errBuf[0])),
-		C.size_t(len(errBuf)),
-	) != 0 {
-		return nil, fmt.Errorf("openssl sign failed: %s", cStringTrim0(errBuf))
-	}
-	if sigLen == 0 || int(sigLen) > MAX_SLH_DSA_SIG_BYTES {
-		return nil, fmt.Errorf("openssl sig length=%d, want 1..%d", int(sigLen), MAX_SLH_DSA_SIG_BYTES)
-	}
-	return sig[:sigLen], nil
+	return signOpenSSLDigest32(k.pkey, digest, MAX_SLH_DSA_SIG_BYTES, 0, true)
 }
 
 func cStringTrim0(b []byte) string {

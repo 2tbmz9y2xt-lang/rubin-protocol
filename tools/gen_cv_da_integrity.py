@@ -299,80 +299,55 @@ def main() -> None:
 
     vectors = []
 
-    # CV-DA-01: ok
-    txs_noncb = build_ok_set("ok", bad_chunk_hash=False, omit_last_chunk=False)
-    witness_root = witness_merkle_root_wtxids([b"\x00" * 32] + [t.wtxid for t in txs_noncb])
-    witness_commitment = witness_commitment_hash(witness_root)
-    coinbase = build_coinbase(height, witness_commitment)
-    v = build_block(height, prev_timestamps, [coinbase] + txs_noncb)
-    vectors.append({"id": "CV-DA-01", "op": "block_basic_check", "expect_ok": True, **v})
+    def build_vector_from_non_coinbase_txs(vector_id: str, txs_noncb: list[TxParts], expect_ok: bool, expect_err: str | None = None) -> None:
+        witness_root = witness_merkle_root_wtxids([b"\x00" * 32] + [t.wtxid for t in txs_noncb])
+        witness_commitment = witness_commitment_hash(witness_root)
+        coinbase = build_coinbase(height, witness_commitment)
+        block_ctx = build_block(height, prev_timestamps, [coinbase] + txs_noncb)
 
-    # CV-DA-02: bad chunk hash
-    txs_noncb = build_ok_set("ok", bad_chunk_hash=True, omit_last_chunk=False)
-    witness_root = witness_merkle_root_wtxids([b"\x00" * 32] + [t.wtxid for t in txs_noncb])
-    witness_commitment = witness_commitment_hash(witness_root)
-    coinbase = build_coinbase(height, witness_commitment)
-    v = build_block(height, prev_timestamps, [coinbase] + txs_noncb)
-    vectors.append(
-        {
-            "id": "CV-DA-02",
+        vector = {
+            "id": vector_id,
             "op": "block_basic_check",
-            "expect_ok": False,
-            "expect_err": "BLOCK_ERR_DA_CHUNK_HASH_INVALID",
-            **v,
+            "expect_ok": expect_ok,
+            **block_ctx,
         }
+        if expect_err is not None:
+            vector["expect_err"] = expect_err
+        vectors.append(vector)
+
+    build_vector_from_non_coinbase_txs(
+        "CV-DA-01",
+        build_ok_set("ok", bad_chunk_hash=False, omit_last_chunk=False),
+        expect_ok=True,
+    )
+    build_vector_from_non_coinbase_txs(
+        "CV-DA-02",
+        build_ok_set("ok", bad_chunk_hash=True, omit_last_chunk=False),
+        expect_ok=False,
+        expect_err="BLOCK_ERR_DA_CHUNK_HASH_INVALID",
+    )
+    build_vector_from_non_coinbase_txs(
+        "CV-DA-03",
+        build_ok_set("ok", bad_chunk_hash=False, omit_last_chunk=True),
+        expect_ok=False,
+        expect_err="BLOCK_ERR_DA_INCOMPLETE",
+    )
+    build_vector_from_non_coinbase_txs(
+        "CV-DA-04",
+        build_ok_set("bad", bad_chunk_hash=False, omit_last_chunk=False),
+        expect_ok=False,
+        expect_err="BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID",
     )
 
-    # CV-DA-03: incomplete (missing last chunk)
-    txs_noncb = build_ok_set("ok", bad_chunk_hash=False, omit_last_chunk=True)
-    witness_root = witness_merkle_root_wtxids([b"\x00" * 32] + [t.wtxid for t in txs_noncb])
-    witness_commitment = witness_commitment_hash(witness_root)
-    coinbase = build_coinbase(height, witness_commitment)
-    v = build_block(height, prev_timestamps, [coinbase] + txs_noncb)
-    vectors.append(
-        {
-            "id": "CV-DA-03",
-            "op": "block_basic_check",
-            "expect_ok": False,
-            "expect_err": "BLOCK_ERR_DA_INCOMPLETE",
-            **v,
-        }
-    )
-
-    # CV-DA-04: bad payload commitment (CORE_DA_COMMIT covenant_data mismatch)
-    txs_noncb = build_ok_set("bad", bad_chunk_hash=False, omit_last_chunk=False)
-    witness_root = witness_merkle_root_wtxids([b"\x00" * 32] + [t.wtxid for t in txs_noncb])
-    witness_commitment = witness_commitment_hash(witness_root)
-    coinbase = build_coinbase(height, witness_commitment)
-    v = build_block(height, prev_timestamps, [coinbase] + txs_noncb)
-    vectors.append(
-        {
-            "id": "CV-DA-04",
-            "op": "block_basic_check",
-            "expect_ok": False,
-            "expect_err": "BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID",
-            **v,
-        }
-    )
-
-    # CV-DA-05: orphan chunk (no commit)
     orphan_da_id = b"\xA3" * 32
     orphan_chunk = build_da_chunk_tx(11, orphan_da_id, 0, b"abc", bad_hash=False)
-    witness_root = witness_merkle_root_wtxids([b"\x00" * 32] + [orphan_chunk.wtxid])
-    witness_commitment = witness_commitment_hash(witness_root)
-    coinbase = build_coinbase(height, witness_commitment)
-    v = build_block(height, prev_timestamps, [coinbase, orphan_chunk])
-    vectors.append(
-        {
-            "id": "CV-DA-05",
-            "op": "block_basic_check",
-            "expect_ok": False,
-            "expect_err": "BLOCK_ERR_DA_SET_INVALID",
-            **v,
-        }
+    build_vector_from_non_coinbase_txs(
+        "CV-DA-05",
+        [orphan_chunk],
+        expect_ok=False,
+        expect_err="BLOCK_ERR_DA_SET_INVALID",
     )
 
-    # CV-DA-06: commit with chunk_count=0 (parse-level reject)
     zero_commit = build_da_commit_tx(
         14,
         b"\xA4" * 32,
@@ -381,18 +356,11 @@ def main() -> None:
         manifest=b"m0",
         commitment_mode="ok",
     )
-    witness_root = witness_merkle_root_wtxids([b"\x00" * 32] + [zero_commit.wtxid])
-    witness_commitment = witness_commitment_hash(witness_root)
-    coinbase = build_coinbase(height, witness_commitment)
-    v = build_block(height, prev_timestamps, [coinbase, zero_commit])
-    vectors.append(
-        {
-            "id": "CV-DA-06",
-            "op": "block_basic_check",
-            "expect_ok": False,
-            "expect_err": "TX_ERR_PARSE",
-            **v,
-        }
+    build_vector_from_non_coinbase_txs(
+        "CV-DA-06",
+        [zero_commit],
+        expect_ok=False,
+        expect_err="TX_ERR_PARSE",
     )
 
     out_obj = {"gate": "CV-DA-INTEGRITY", "vectors": vectors}

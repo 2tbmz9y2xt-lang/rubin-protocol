@@ -130,6 +130,11 @@ type fixtureFile struct {
 	Vectors []map[string]any `json:"vectors"`
 }
 
+type digestSigner interface {
+	PubkeyBytes() []byte
+	SignDigest32([32]byte) ([]byte, error)
+}
+
 func mustLoadFixture(path string) *fixtureFile {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -255,10 +260,19 @@ func txBytes(tx *consensus.Tx) ([]byte, error) {
 	return b, nil
 }
 
-func updateP2PKVector(f *fixtureFile, id string, chainID [32]byte, signer *consensus.MLDSA87Keypair, inValue uint64, outValue uint64) {
+func updateSingleInputSignedVector(
+	f *fixtureFile,
+	id string,
+	chainID [32]byte,
+	suiteID byte,
+	inCov []byte,
+	outCov []byte,
+	inValue uint64,
+	outValue uint64,
+	signer digestSigner,
+) {
 	v := findVector(f, id)
 	pub := signer.PubkeyBytes()
-	inCov := p2pkCovenantDataWithSuite(consensus.SUITE_ID_ML_DSA_87, pub)
 
 	utxos := anyToSliceMap(v["utxos"])
 	if len(utxos) != 1 {
@@ -268,9 +282,6 @@ func updateP2PKVector(f *fixtureFile, id string, chainID [32]byte, signer *conse
 
 	prevTxid := mustHex32(utxos[0]["txid"].(string))
 	prevVout := uint32(utxos[0]["vout"].(float64))
-
-	// Use the same covenant data for the output (valid, minimal).
-	outCov := inCov
 
 	tx := &consensus.Tx{
 		Version:  1,
@@ -289,22 +300,27 @@ func updateP2PKVector(f *fixtureFile, id string, chainID [32]byte, signer *conse
 	if err != nil {
 		fatalf("%s: sign: %v", id, err)
 	}
-	tx.Witness = []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: pub, Signature: sig}}
+	tx.Witness = []consensus.WitnessItem{{SuiteID: suiteID, Pubkey: pub, Signature: sig}}
 
-	b, err := txBytes(tx)
-	if err != nil {
-		fatalf("%s: txBytes: %v", id, err)
-	}
-	// Sanity parse.
-	if _, _, _, n, err := consensus.ParseTx(b); err != nil || n != len(b) {
-		fatalf("%s: ParseTx sanity failed: err=%v consumed=%d len=%d", id, err, n, len(b))
-	}
-
+	b := mustTxBytes(tx)
 	v["tx_hex"] = hex.EncodeToString(b)
 	v["utxos"] = utxos
+}
 
-	// Keep existing expectations (fee / ok / error) unchanged.
-	_ = outValue
+func updateP2PKVector(f *fixtureFile, id string, chainID [32]byte, signer *consensus.MLDSA87Keypair, inValue uint64, outValue uint64) {
+	pub := signer.PubkeyBytes()
+	cov := p2pkCovenantDataWithSuite(consensus.SUITE_ID_ML_DSA_87, pub)
+	updateSingleInputSignedVector(
+		f,
+		id,
+		chainID,
+		consensus.SUITE_ID_ML_DSA_87,
+		cov,
+		cov,
+		inValue,
+		outValue,
+		signer,
+	)
 }
 
 func updateP2PKVectorSLH(
@@ -315,103 +331,36 @@ func updateP2PKVectorSLH(
 	inValue uint64,
 	outValue uint64,
 ) {
-	v := findVector(f, id)
 	pub := signer.PubkeyBytes()
-	inCov := p2pkCovenantDataWithSuite(consensus.SUITE_ID_SLH_DSA_SHAKE_256F, pub)
-
-	utxos := anyToSliceMap(v["utxos"])
-	if len(utxos) != 1 {
-		fatalf("%s: want 1 utxo, got %d", id, len(utxos))
-	}
-	utxos[0]["covenant_data"] = hex.EncodeToString(inCov)
-
-	prevTxid := mustHex32(utxos[0]["txid"].(string))
-	prevVout := uint32(utxos[0]["vout"].(float64))
-
-	// Use the same covenant data for the output (valid, minimal).
-	outCov := inCov
-
-	tx := &consensus.Tx{
-		Version:  1,
-		TxKind:   0x00,
-		TxNonce:  1,
-		Inputs:   []consensus.TxInput{{PrevTxid: prevTxid, PrevVout: prevVout, ScriptSig: nil, Sequence: 0}},
-		Outputs:  []consensus.TxOutput{{Value: outValue, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: outCov}},
-		Locktime: 0,
-	}
-
-	d, err := consensus.SighashV1Digest(tx, 0, inValue, chainID)
-	if err != nil {
-		fatalf("%s: sighash: %v", id, err)
-	}
-	sig, err := signer.SignDigest32(d)
-	if err != nil {
-		fatalf("%s: sign: %v", id, err)
-	}
-	tx.Witness = []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: pub, Signature: sig}}
-
-	b, err := txBytes(tx)
-	if err != nil {
-		fatalf("%s: txBytes: %v", id, err)
-	}
-	// Sanity parse.
-	if _, _, _, n, err := consensus.ParseTx(b); err != nil || n != len(b) {
-		fatalf("%s: ParseTx sanity failed: err=%v consumed=%d len=%d", id, err, n, len(b))
-	}
-
-	v["tx_hex"] = hex.EncodeToString(b)
-	v["utxos"] = utxos
+	cov := p2pkCovenantDataWithSuite(consensus.SUITE_ID_SLH_DSA_SHAKE_256F, pub)
+	updateSingleInputSignedVector(
+		f,
+		id,
+		chainID,
+		consensus.SUITE_ID_SLH_DSA_SHAKE_256F,
+		cov,
+		cov,
+		inValue,
+		outValue,
+		signer,
+	)
 }
 
 func updateMultisigVector1of1(f *fixtureFile, id string, chainID [32]byte, signer *consensus.MLDSA87Keypair, inValue uint64, outValue uint64) {
-	v := findVector(f, id)
 	pub := signer.PubkeyBytes()
 	inCov := multisigCovenantData1of1(pub)
-
-	utxos := anyToSliceMap(v["utxos"])
-	if len(utxos) != 1 {
-		fatalf("%s: want 1 utxo, got %d", id, len(utxos))
-	}
-	utxos[0]["covenant_data"] = hex.EncodeToString(inCov)
-
-	prevTxid := mustHex32(utxos[0]["txid"].(string))
-	prevVout := uint32(utxos[0]["vout"].(float64))
-
 	outCov := p2pkCovenantData(pub) // any valid output
-	tx := &consensus.Tx{
-		Version: 1,
-		TxKind:  0x00,
-		TxNonce: 1,
-		Inputs: []consensus.TxInput{{
-			PrevTxid:  prevTxid,
-			PrevVout:  prevVout,
-			ScriptSig: nil,
-			Sequence:  0,
-		}},
-		Outputs:  []consensus.TxOutput{{Value: outValue, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: outCov}},
-		Locktime: 0,
-	}
-
-	d, err := consensus.SighashV1Digest(tx, 0, inValue, chainID)
-	if err != nil {
-		fatalf("%s: sighash: %v", id, err)
-	}
-	sig, err := signer.SignDigest32(d)
-	if err != nil {
-		fatalf("%s: sign: %v", id, err)
-	}
-	tx.Witness = []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: pub, Signature: sig}}
-
-	b, err := txBytes(tx)
-	if err != nil {
-		fatalf("%s: txBytes: %v", id, err)
-	}
-	if _, _, _, n, err := consensus.ParseTx(b); err != nil || n != len(b) {
-		fatalf("%s: ParseTx sanity failed: err=%v consumed=%d len=%d", id, err, n, len(b))
-	}
-
-	v["tx_hex"] = hex.EncodeToString(b)
-	v["utxos"] = utxos
+	updateSingleInputSignedVector(
+		f,
+		id,
+		chainID,
+		consensus.SUITE_ID_ML_DSA_87,
+		inCov,
+		outCov,
+		inValue,
+		outValue,
+		signer,
+	)
 }
 
 func updateVaultSpendVectorsUTXO(
