@@ -179,6 +179,31 @@ func testTxID(t *testing.T, tx []byte) [32]byte {
 	return txid
 }
 
+func hashWithPrefix(prefix byte) [32]byte {
+	var out [32]byte
+	out[0] = prefix
+	return out
+}
+
+func filledHash(fill byte) [32]byte {
+	var out [32]byte
+	for i := range out {
+		out[i] = fill
+	}
+	return out
+}
+
+func expectValidateBlockBasicErr(t *testing.T, block []byte, expectedPrev *[32]byte, expectedTarget *[32]byte, want ErrorCode) {
+	t.Helper()
+	_, err := ValidateBlockBasic(block, expectedPrev, expectedTarget)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != want {
+		t.Fatalf("code=%s, want %s", got, want)
+	}
+}
+
 func TestValidateBlockBasic_CovenantInvalid(t *testing.T) {
 	// CORE_ANCHOR with non-zero value must fail covenant validation.
 	tx := coinbaseTxWithOutputs(0, []testOutput{
@@ -190,20 +215,10 @@ func TestValidateBlockBasic_CovenantInvalid(t *testing.T) {
 		t.Fatalf("MerkleRootTxids: %v", err)
 	}
 
-	var prev [32]byte
-	prev[0] = 0x88
-	var target [32]byte
-	for i := range target {
-		target[i] = 0xff
-	}
+	prev := hashWithPrefix(0x88)
+	target := filledHash(0xff)
 	block := buildBlockBytes(t, prev, root, target, 21, [][]byte{tx})
-	_, err = ValidateBlockBasic(block, &prev, &target)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
-	}
+	expectValidateBlockBasicErr(t, block, &prev, &target, TX_ERR_COVENANT_TYPE_INVALID)
 }
 
 func TestValidateBlockBasic_SubsidyExceeded(t *testing.T) {
@@ -219,12 +234,8 @@ func TestValidateBlockBasic_SubsidyExceeded(t *testing.T) {
 		t.Fatalf("MerkleRootTxids: %v", err)
 	}
 
-	var prev [32]byte
-	prev[0] = 0x99
-	var target [32]byte
-	for i := range target {
-		target[i] = 0xff
-	}
+	prev := hashWithPrefix(0x99)
+	target := filledHash(0xff)
 	block := buildBlockBytes(t, prev, root, target, 55, [][]byte{coinbase})
 	_, err = ValidateBlockBasicWithContextAndFeesAtHeight(block, &prev, &target, height, nil, alreadyGenerated, sumFees)
 	if err == nil {
@@ -248,12 +259,8 @@ func TestValidateBlockBasic_SubsidyWithFeesOK(t *testing.T) {
 		t.Fatalf("MerkleRootTxids: %v", err)
 	}
 
-	var prev [32]byte
-	prev[0] = 0x9a
-	var target [32]byte
-	for i := range target {
-		target[i] = 0xff
-	}
+	prev := hashWithPrefix(0x9a)
+	target := filledHash(0xff)
 	block := buildBlockBytes(t, prev, root, target, 56, [][]byte{coinbase})
 	if _, err := ValidateBlockBasicWithContextAndFeesAtHeight(block, &prev, &target, height, nil, alreadyGenerated, sumFees); err != nil {
 		t.Fatalf("ValidateBlockBasicWithContextAndFeesAtHeight: %v", err)
@@ -282,12 +289,8 @@ func TestValidateBlockBasic_SubsidyExceeded_CoinbaseSumUsesU128(t *testing.T) {
 		t.Fatalf("MerkleRootTxids: %v", err)
 	}
 
-	var prev [32]byte
-	prev[0] = 0x9b
-	var target [32]byte
-	for i := range target {
-		target[i] = 0xff
-	}
+	prev := hashWithPrefix(0x9b)
+	target := filledHash(0xff)
 	block := buildBlockBytes(t, prev, root, target, 57, [][]byte{coinbase})
 	_, err = ValidateBlockBasicWithContextAndFeesAtHeight(block, &prev, &target, height, nil, alreadyGenerated, sumFees)
 	if err == nil {
@@ -306,12 +309,8 @@ func TestParseBlockBytes_OK(t *testing.T) {
 		t.Fatalf("MerkleRootTxids: %v", err)
 	}
 
-	var prev [32]byte
-	prev[0] = 0x11
-	var target [32]byte
-	for i := range target {
-		target[i] = 0xff
-	}
+	prev := hashWithPrefix(0x11)
+	target := filledHash(0xff)
 	block := buildBlockBytes(t, prev, root, target, 7, [][]byte{tx})
 
 	pb, err := ParseBlockBytes(block)
@@ -331,12 +330,8 @@ func TestValidateBlockBasic_OK(t *testing.T) {
 		t.Fatalf("MerkleRootTxids: %v", err)
 	}
 
-	var prev [32]byte
-	prev[0] = 0x22
-	var target [32]byte
-	for i := range target {
-		target[i] = 0xff
-	}
+	prev := hashWithPrefix(0x22)
+	target := filledHash(0xff)
 	block := buildBlockBytes(t, prev, root, target, 9, [][]byte{tx})
 	s, err := ValidateBlockBasic(block, &prev, &target)
 	if err != nil {
@@ -347,7 +342,7 @@ func TestValidateBlockBasic_OK(t *testing.T) {
 	}
 }
 
-func TestValidateBlockBasic_LinkageMismatch(t *testing.T) {
+func TestValidateBlockBasic_HeaderRuleErrors(t *testing.T) {
 	tx := minimalTxBytes()
 	txid := testTxID(t, tx)
 	root, err := MerkleRootTxids([][32]byte{txid})
@@ -355,117 +350,80 @@ func TestValidateBlockBasic_LinkageMismatch(t *testing.T) {
 		t.Fatalf("MerkleRootTxids: %v", err)
 	}
 
-	var prev [32]byte
-	prev[0] = 0x33
-	var target [32]byte
-	for i := range target {
-		target[i] = 0xff
-	}
-	block := buildBlockBytes(t, prev, root, target, 11, [][]byte{tx})
-	var wrongPrev [32]byte
-	wrongPrev[0] = 0x99
-	_, err = ValidateBlockBasic(block, &wrongPrev, &target)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != BLOCK_ERR_LINKAGE_INVALID {
-		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_LINKAGE_INVALID)
-	}
-}
+	baseTarget := filledHash(0xff)
+	tinyTarget := [32]byte{}
+	tinyTarget[31] = 0x01
+	zeroTarget := [32]byte{}
+	wrongTarget := filledHash(0xee)
+	wrongPrev := hashWithPrefix(0x99)
 
-func TestValidateBlockBasic_MerkleMismatch(t *testing.T) {
-	tx := minimalTxBytes()
-	txid := testTxID(t, tx)
-	root, err := MerkleRootTxids([][32]byte{txid})
-	if err != nil {
-		t.Fatalf("MerkleRootTxids: %v", err)
-	}
-	root[0] ^= 0xff // corrupt
-
-	var prev [32]byte
-	prev[0] = 0x44
-	var target [32]byte
-	for i := range target {
-		target[i] = 0xff
-	}
-	block := buildBlockBytes(t, prev, root, target, 13, [][]byte{tx})
-	_, err = ValidateBlockBasic(block, &prev, &target)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != BLOCK_ERR_MERKLE_INVALID {
-		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_MERKLE_INVALID)
-	}
-}
-
-func TestValidateBlockBasic_PowInvalid(t *testing.T) {
-	tx := minimalTxBytes()
-	txid := testTxID(t, tx)
-	root, err := MerkleRootTxids([][32]byte{txid})
-	if err != nil {
-		t.Fatalf("MerkleRootTxids: %v", err)
-	}
-
-	var prev [32]byte
-	prev[0] = 0x55
-	var tinyTarget [32]byte
-	tinyTarget[31] = 0x01 // positive and valid range, but effectively impossible strict-less
-	block := buildBlockBytes(t, prev, root, tinyTarget, 15, [][]byte{tx})
-	_, err = ValidateBlockBasic(block, &prev, &tinyTarget)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != BLOCK_ERR_POW_INVALID {
-		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_POW_INVALID)
-	}
-}
-
-func TestValidateBlockBasic_TargetRangeInvalid(t *testing.T) {
-	tx := minimalTxBytes()
-	txid := testTxID(t, tx)
-	root, err := MerkleRootTxids([][32]byte{txid})
-	if err != nil {
-		t.Fatalf("MerkleRootTxids: %v", err)
+	cases := []struct {
+		name           string
+		prev           [32]byte
+		blockTarget    [32]byte
+		expectedPrev   [32]byte
+		expectedTarget [32]byte
+		nonce          uint64
+		corruptRoot    bool
+		wantErr        ErrorCode
+	}{
+		{
+			name:           "linkage_mismatch",
+			prev:           hashWithPrefix(0x33),
+			blockTarget:    baseTarget,
+			expectedPrev:   wrongPrev,
+			expectedTarget: baseTarget,
+			nonce:          11,
+			wantErr:        BLOCK_ERR_LINKAGE_INVALID,
+		},
+		{
+			name:           "merkle_mismatch",
+			prev:           hashWithPrefix(0x44),
+			blockTarget:    baseTarget,
+			expectedPrev:   hashWithPrefix(0x44),
+			expectedTarget: baseTarget,
+			nonce:          13,
+			corruptRoot:    true,
+			wantErr:        BLOCK_ERR_MERKLE_INVALID,
+		},
+		{
+			name:           "pow_invalid",
+			prev:           hashWithPrefix(0x55),
+			blockTarget:    tinyTarget,
+			expectedPrev:   hashWithPrefix(0x55),
+			expectedTarget: tinyTarget,
+			nonce:          15,
+			wantErr:        BLOCK_ERR_POW_INVALID,
+		},
+		{
+			name:           "target_range_invalid",
+			prev:           hashWithPrefix(0x56),
+			blockTarget:    zeroTarget,
+			expectedPrev:   hashWithPrefix(0x56),
+			expectedTarget: zeroTarget,
+			nonce:          15,
+			wantErr:        BLOCK_ERR_TARGET_INVALID,
+		},
+		{
+			name:           "target_mismatch",
+			prev:           hashWithPrefix(0x66),
+			blockTarget:    baseTarget,
+			expectedPrev:   hashWithPrefix(0x66),
+			expectedTarget: wrongTarget,
+			nonce:          17,
+			wantErr:        BLOCK_ERR_TARGET_INVALID,
+		},
 	}
 
-	var prev [32]byte
-	prev[0] = 0x56
-	var zeroTarget [32]byte
-	block := buildBlockBytes(t, prev, root, zeroTarget, 15, [][]byte{tx})
-	_, err = ValidateBlockBasic(block, &prev, &zeroTarget)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != BLOCK_ERR_TARGET_INVALID {
-		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_TARGET_INVALID)
-	}
-}
-
-func TestValidateBlockBasic_TargetMismatch(t *testing.T) {
-	tx := minimalTxBytes()
-	txid := testTxID(t, tx)
-	root, err := MerkleRootTxids([][32]byte{txid})
-	if err != nil {
-		t.Fatalf("MerkleRootTxids: %v", err)
-	}
-
-	var prev [32]byte
-	prev[0] = 0x66
-	var target [32]byte
-	for i := range target {
-		target[i] = 0xff
-	}
-	block := buildBlockBytes(t, prev, root, target, 17, [][]byte{tx})
-	var wrongTarget [32]byte
-	for i := range wrongTarget {
-		wrongTarget[i] = 0xee
-	}
-	_, err = ValidateBlockBasic(block, &prev, &wrongTarget)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != BLOCK_ERR_TARGET_INVALID {
-		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_TARGET_INVALID)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rootCase := root
+			if tc.corruptRoot {
+				rootCase[0] ^= 0xff
+			}
+			block := buildBlockBytes(t, tc.prev, rootCase, tc.blockTarget, tc.nonce, [][]byte{tx})
+			expectValidateBlockBasicErr(t, block, &tc.expectedPrev, &tc.expectedTarget, tc.wantErr)
+		})
 	}
 }
 
@@ -477,12 +435,8 @@ func TestParseBlockBytes_TrailingBytes(t *testing.T) {
 		t.Fatalf("MerkleRootTxids: %v", err)
 	}
 
-	var prev [32]byte
-	prev[0] = 0x77
-	var target [32]byte
-	for i := range target {
-		target[i] = 0xff
-	}
+	prev := hashWithPrefix(0x77)
+	target := filledHash(0xff)
 	block := buildBlockBytes(t, prev, root, target, 19, [][]byte{tx})
 	block = append(block, 0x00)
 	_, err = ParseBlockBytes(block)
@@ -505,100 +459,80 @@ func TestValidateBlockBasic_NonCoinbaseMustHaveInput(t *testing.T) {
 		t.Fatalf("MerkleRootTxids: %v", err)
 	}
 
-	var prev [32]byte
-	prev[0] = 0x88
-	var target [32]byte
-	for i := range target {
-		target[i] = 0xff
-	}
+	prev := hashWithPrefix(0x88)
+	target := filledHash(0xff)
 	block := buildBlockBytes(t, prev, root, target, 23, [][]byte{coinbase, invalidNonCoinbase})
 
-	_, err = ValidateBlockBasic(block, &prev, &target)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
-	}
+	expectValidateBlockBasicErr(t, block, &prev, &target, TX_ERR_PARSE)
 }
 
-func TestValidateBlockBasic_FirstTxMustBeCanonicalCoinbase(t *testing.T) {
-	tx := txWithOneOutput(0, COV_TYPE_ANCHOR, make([]byte, 32))
-	txid := testTxID(t, tx)
-	root, err := MerkleRootTxids([][32]byte{txid})
-	if err != nil {
-		t.Fatalf("MerkleRootTxids: %v", err)
+func TestValidateBlockBasic_CoinbaseRuleErrors(t *testing.T) {
+	target := filledHash(0xff)
+	cases := []struct {
+		name    string
+		prev    [32]byte
+		nonce   uint64
+		height  uint64
+		blockFn func(t *testing.T, prev [32]byte, target [32]byte, nonce uint64) []byte
+	}{
+		{
+			name:   "first_tx_must_be_coinbase",
+			prev:   hashWithPrefix(0x8a),
+			nonce:  24,
+			height: 0,
+			blockFn: func(t *testing.T, prev [32]byte, target [32]byte, nonce uint64) []byte {
+				tx := txWithOneOutput(0, COV_TYPE_ANCHOR, make([]byte, 32))
+				root, err := MerkleRootTxids([][32]byte{testTxID(t, tx)})
+				if err != nil {
+					t.Fatalf("MerkleRootTxids: %v", err)
+				}
+				return buildBlockBytes(t, prev, root, target, nonce, [][]byte{tx})
+			},
+		},
+		{
+			name:   "coinbase_locktime_mismatch",
+			prev:   hashWithPrefix(0x8b),
+			nonce:  25,
+			height: 7,
+			blockFn: func(t *testing.T, prev [32]byte, target [32]byte, nonce uint64) []byte {
+				coinbase := coinbaseWithWitnessCommitmentAtHeight(t, 6)
+				root, err := MerkleRootTxids([][32]byte{testTxID(t, coinbase)})
+				if err != nil {
+					t.Fatalf("MerkleRootTxids: %v", err)
+				}
+				return buildBlockBytes(t, prev, root, target, nonce, [][]byte{coinbase})
+			},
+		},
+		{
+			name:   "coinbase_like_only_at_index_zero",
+			prev:   hashWithPrefix(0x8c),
+			nonce:  26,
+			height: 0,
+			blockFn: func(t *testing.T, prev [32]byte, target [32]byte, nonce uint64) []byte {
+				coinbaseLike := coinbaseTxWithOutputs(0, []testOutput{
+					{value: 1, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()},
+				})
+				coinbase := coinbaseWithWitnessCommitment(t, coinbaseLike)
+				root, err := MerkleRootTxids([][32]byte{testTxID(t, coinbase), testTxID(t, coinbaseLike)})
+				if err != nil {
+					t.Fatalf("MerkleRootTxids: %v", err)
+				}
+				return buildBlockBytes(t, prev, root, target, nonce, [][]byte{coinbase, coinbaseLike})
+			},
+		},
 	}
 
-	var prev [32]byte
-	prev[0] = 0x8a
-	var target [32]byte
-	for i := range target {
-		target[i] = 0xff
-	}
-	block := buildBlockBytes(t, prev, root, target, 24, [][]byte{tx})
-
-	_, err = ValidateBlockBasic(block, &prev, &target)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != BLOCK_ERR_COINBASE_INVALID {
-		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_COINBASE_INVALID)
-	}
-}
-
-func TestValidateBlockBasic_CoinbaseLocktimeMustEqualHeight(t *testing.T) {
-	coinbase := coinbaseWithWitnessCommitmentAtHeight(t, 6)
-	cbid := testTxID(t, coinbase)
-	root, err := MerkleRootTxids([][32]byte{cbid})
-	if err != nil {
-		t.Fatalf("MerkleRootTxids: %v", err)
-	}
-
-	var prev [32]byte
-	prev[0] = 0x8b
-	var target [32]byte
-	for i := range target {
-		target[i] = 0xff
-	}
-	block := buildBlockBytes(t, prev, root, target, 25, [][]byte{coinbase})
-
-	_, err = ValidateBlockBasicAtHeight(block, &prev, &target, 7)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != BLOCK_ERR_COINBASE_INVALID {
-		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_COINBASE_INVALID)
-	}
-}
-
-func TestValidateBlockBasic_CoinbaseLikeTxOnlyAtIndexZero(t *testing.T) {
-	coinbaseLike := coinbaseTxWithOutputs(0, []testOutput{
-		{value: 1, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()},
-	})
-	coinbase := coinbaseWithWitnessCommitment(t, coinbaseLike)
-
-	cbid := testTxID(t, coinbase)
-	c2id := testTxID(t, coinbaseLike)
-	root, err := MerkleRootTxids([][32]byte{cbid, c2id})
-	if err != nil {
-		t.Fatalf("MerkleRootTxids: %v", err)
-	}
-
-	var prev [32]byte
-	prev[0] = 0x8c
-	var target [32]byte
-	for i := range target {
-		target[i] = 0xff
-	}
-	block := buildBlockBytes(t, prev, root, target, 26, [][]byte{coinbase, coinbaseLike})
-
-	_, err = ValidateBlockBasic(block, &prev, &target)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != BLOCK_ERR_COINBASE_INVALID {
-		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_COINBASE_INVALID)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			block := tc.blockFn(t, tc.prev, target, tc.nonce)
+			_, err := ValidateBlockBasicAtHeight(block, &tc.prev, &target, tc.height)
+			if err == nil {
+				t.Fatalf("expected error")
+			}
+			if got := mustTxErrCode(t, err); got != BLOCK_ERR_COINBASE_INVALID {
+				t.Fatalf("code=%s, want %s", got, BLOCK_ERR_COINBASE_INVALID)
+			}
+		})
 	}
 }
 
@@ -612,20 +546,10 @@ func TestValidateBlockBasic_WitnessCommitmentMissing(t *testing.T) {
 		t.Fatalf("MerkleRootTxids: %v", err)
 	}
 
-	var prev [32]byte
-	prev[0] = 0x90
-	var target [32]byte
-	for i := range target {
-		target[i] = 0xff
-	}
+	prev := hashWithPrefix(0x90)
+	target := filledHash(0xff)
 	block := buildBlockBytes(t, prev, root, target, 25, [][]byte{tx})
-	_, err = ValidateBlockBasic(block, &prev, &target)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != BLOCK_ERR_WITNESS_COMMITMENT {
-		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_WITNESS_COMMITMENT)
-	}
+	expectValidateBlockBasicErr(t, block, &prev, &target, BLOCK_ERR_WITNESS_COMMITMENT)
 }
 
 func TestValidateBlockBasic_WitnessCommitmentDuplicate(t *testing.T) {
@@ -649,20 +573,10 @@ func TestValidateBlockBasic_WitnessCommitmentDuplicate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MerkleRootTxids: %v", err)
 	}
-	var prev [32]byte
-	prev[0] = 0x91
-	var target [32]byte
-	for i := range target {
-		target[i] = 0xff
-	}
+	prev := hashWithPrefix(0x91)
+	target := filledHash(0xff)
 	block := buildBlockBytes(t, prev, root, target, 27, [][]byte{tx})
-	_, err = ValidateBlockBasic(block, &prev, &target)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != BLOCK_ERR_WITNESS_COMMITMENT {
-		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_WITNESS_COMMITMENT)
-	}
+	expectValidateBlockBasicErr(t, block, &prev, &target, BLOCK_ERR_WITNESS_COMMITMENT)
 }
 
 func TestValidateBlockBasic_SLHInactiveAtHeight(t *testing.T) {
@@ -678,12 +592,8 @@ func TestValidateBlockBasic_SLHInactiveAtHeight(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MerkleRootTxids: %v", err)
 	}
-	var prev [32]byte
-	prev[0] = 0xa1
-	var target [32]byte
-	for i := range target {
-		target[i] = 0xff
-	}
+	prev := hashWithPrefix(0xa1)
+	target := filledHash(0xff)
 	block := buildBlockBytes(t, prev, root, target, 29, [][]byte{coinbase, nonCoinbase})
 
 	_, err = ValidateBlockBasicAtHeight(block, &prev, &target, height)
@@ -708,12 +618,8 @@ func TestValidateBlockBasic_SLHActiveAtHeight(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MerkleRootTxids: %v", err)
 	}
-	var prev [32]byte
-	prev[0] = 0xa2
-	var target [32]byte
-	for i := range target {
-		target[i] = 0xff
-	}
+	prev := hashWithPrefix(0xa2)
+	target := filledHash(0xff)
 	block := buildBlockBytes(t, prev, root, target, 31, [][]byte{coinbase, nonCoinbase})
 
 	if _, err := ValidateBlockBasicAtHeight(block, &prev, &target, height); err != nil {

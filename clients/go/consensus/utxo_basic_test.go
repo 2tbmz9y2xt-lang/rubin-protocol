@@ -76,137 +76,147 @@ func mustParseTxForUtxo(t *testing.T, txBytes []byte) (*Tx, [32]byte) {
 	return tx, txid
 }
 
-func TestApplyNonCoinbaseTxBasic_MissingUTXO(t *testing.T) {
-	var prev [32]byte
-	prev[0] = 0xaa
-	txBytes := txWithOneInputOneOutput(prev, 0, 1, COV_TYPE_P2PK, validP2PKCovenantData())
-	tx, txid := mustParseTxForUtxo(t, txBytes)
-
-	_, err := ApplyNonCoinbaseTxBasic(tx, txid, map[Outpoint]UtxoEntry{}, 100, 1000, [32]byte{})
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_MISSING_UTXO {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_MISSING_UTXO)
-	}
-}
-
-func TestApplyNonCoinbaseTxBasic_SpendAnchorRejected(t *testing.T) {
-	var prev [32]byte
-	prev[0] = 0xab
-	txBytes := txWithOneInputOneOutput(prev, 0, 1, COV_TYPE_P2PK, validP2PKCovenantData())
-	tx, txid := mustParseTxForUtxo(t, txBytes)
-
-	utxos := map[Outpoint]UtxoEntry{
-		{Txid: prev, Vout: 0}: {
-			Value:        1,
-			CovenantType: COV_TYPE_ANCHOR,
-			CovenantData: []byte{0x01},
+func TestApplyNonCoinbaseTxBasic_InputValidationErrors(t *testing.T) {
+	cases := []struct {
+		name      string
+		prevByte  byte
+		outValue  uint64
+		utxosFn   func(prev [32]byte) map[Outpoint]UtxoEntry
+		wantError ErrorCode
+	}{
+		{
+			name:     "missing_utxo",
+			prevByte: 0xaa,
+			outValue: 1,
+			utxosFn: func(prev [32]byte) map[Outpoint]UtxoEntry {
+				return map[Outpoint]UtxoEntry{}
+			},
+			wantError: TX_ERR_MISSING_UTXO,
+		},
+		{
+			name:     "spend_anchor_rejected",
+			prevByte: 0xab,
+			outValue: 1,
+			utxosFn: func(prev [32]byte) map[Outpoint]UtxoEntry {
+				return map[Outpoint]UtxoEntry{
+					{Txid: prev, Vout: 0}: {
+						Value:        1,
+						CovenantType: COV_TYPE_ANCHOR,
+						CovenantData: []byte{0x01},
+					},
+				}
+			},
+			wantError: TX_ERR_MISSING_UTXO,
+		},
+		{
+			name:     "witness_count_zero_rejected",
+			prevByte: 0xb0,
+			outValue: 90,
+			utxosFn: func(prev [32]byte) map[Outpoint]UtxoEntry {
+				return map[Outpoint]UtxoEntry{
+					{Txid: prev, Vout: 0}: {
+						Value:        100,
+						CovenantType: COV_TYPE_P2PK,
+						CovenantData: validP2PKCovenantData(),
+					},
+				}
+			},
+			wantError: TX_ERR_PARSE,
 		},
 	}
-	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 100, 1000, [32]byte{})
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_MISSING_UTXO {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_MISSING_UTXO)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var prev [32]byte
+			prev[0] = tc.prevByte
+			txBytes := txWithOneInputOneOutput(prev, 0, tc.outValue, COV_TYPE_P2PK, validP2PKCovenantData())
+			tx, txid := mustParseTxForUtxo(t, txBytes)
+
+			_, err := ApplyNonCoinbaseTxBasic(tx, txid, tc.utxosFn(prev), 200, 1000, [32]byte{})
+			if err == nil {
+				t.Fatalf("expected error")
+			}
+			if got := mustTxErrCode(t, err); got != tc.wantError {
+				t.Fatalf("code=%s, want %s", got, tc.wantError)
+			}
+		})
 	}
 }
 
-func TestApplyNonCoinbaseTxBasic_ValueConservation(t *testing.T) {
+func TestApplyNonCoinbaseTxBasic_P2PKValueConservationCases(t *testing.T) {
 	var chainID [32]byte
-	var prev [32]byte
-	prev[0] = 0xae
-	var txid [32]byte
-	txid[0] = 0x01
-
-	kp := mustMLDSA87Keypair(t)
-	covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
-
-	tx := &Tx{
-		Version:  1,
-		TxKind:   0x00,
-		TxNonce:  1,
-		Inputs:   []TxInput{{PrevTxid: prev, PrevVout: 0}},
-		Outputs:  []TxOutput{{Value: 101, CovenantType: COV_TYPE_P2PK, CovenantData: covData}},
-		Locktime: 0,
-	}
-	tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, chainID, kp)}
-
-	utxos := map[Outpoint]UtxoEntry{
-		{Txid: prev, Vout: 0}: {
-			Value:        100,
-			CovenantType: COV_TYPE_P2PK,
-			CovenantData: covData,
+	cases := []struct {
+		name      string
+		prevByte  byte
+		txidByte  byte
+		outValue  uint64
+		wantErr   ErrorCode
+		wantFee   uint64
+		wantUTXOs uint64
+	}{
+		{
+			name:     "value_conservation_error",
+			prevByte: 0xae,
+			txidByte: 0x01,
+			outValue: 101,
+			wantErr:  TX_ERR_VALUE_CONSERVATION,
+		},
+		{
+			name:      "ok_fee_10",
+			prevByte:  0xaf,
+			txidByte:  0x02,
+			outValue:  90,
+			wantFee:   10,
+			wantUTXOs: 1,
 		},
 	}
-	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, chainID)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_VALUE_CONSERVATION {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_VALUE_CONSERVATION)
-	}
-}
 
-func TestApplyNonCoinbaseTxBasic_OK(t *testing.T) {
-	var chainID [32]byte
-	var prev [32]byte
-	prev[0] = 0xaf
-	var txid [32]byte
-	txid[0] = 0x02
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var prev [32]byte
+			prev[0] = tc.prevByte
+			var txid [32]byte
+			txid[0] = tc.txidByte
 
-	kp := mustMLDSA87Keypair(t)
-	covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+			kp := mustMLDSA87Keypair(t)
+			covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+			tx := &Tx{
+				Version:  1,
+				TxKind:   0x00,
+				TxNonce:  1,
+				Inputs:   []TxInput{{PrevTxid: prev, PrevVout: 0}},
+				Outputs:  []TxOutput{{Value: tc.outValue, CovenantType: COV_TYPE_P2PK, CovenantData: covData}},
+				Locktime: 0,
+			}
+			tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, chainID, kp)}
 
-	tx := &Tx{
-		Version:  1,
-		TxKind:   0x00,
-		TxNonce:  1,
-		Inputs:   []TxInput{{PrevTxid: prev, PrevVout: 0}},
-		Outputs:  []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: covData}},
-		Locktime: 0,
-	}
-	tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, chainID, kp)}
-
-	utxos := map[Outpoint]UtxoEntry{
-		{Txid: prev, Vout: 0}: {
-			Value:        100,
-			CovenantType: COV_TYPE_P2PK,
-			CovenantData: covData,
-		},
-	}
-	s, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, chainID)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if s.Fee != 10 {
-		t.Fatalf("fee=%d, want 10", s.Fee)
-	}
-	if s.UtxoCount != 1 {
-		t.Fatalf("utxo_count=%d, want 1", s.UtxoCount)
-	}
-}
-
-func TestApplyNonCoinbaseTxBasic_WitnessCountZeroRejected(t *testing.T) {
-	var prev [32]byte
-	prev[0] = 0xb0
-	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
-	tx, txid := mustParseTxForUtxo(t, txBytes)
-
-	utxos := map[Outpoint]UtxoEntry{
-		{Txid: prev, Vout: 0}: {
-			Value:        100,
-			CovenantType: COV_TYPE_P2PK,
-			CovenantData: validP2PKCovenantData(),
-		},
-	}
-	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, [32]byte{})
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
+			utxos := map[Outpoint]UtxoEntry{
+				{Txid: prev, Vout: 0}: {
+					Value:        100,
+					CovenantType: COV_TYPE_P2PK,
+					CovenantData: covData,
+				},
+			}
+			s, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, chainID)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error")
+				}
+				if got := mustTxErrCode(t, err); got != tc.wantErr {
+					t.Fatalf("code=%s, want %s", got, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if s.Fee != tc.wantFee {
+				t.Fatalf("fee=%d, want %d", s.Fee, tc.wantFee)
+			}
+			if s.UtxoCount != tc.wantUTXOs {
+				t.Fatalf("utxo_count=%d, want %d", s.UtxoCount, tc.wantUTXOs)
+			}
+		})
 	}
 }
 
