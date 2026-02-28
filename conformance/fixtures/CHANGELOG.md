@@ -198,3 +198,31 @@ Policy:
 
 Изменённые fixtures:
 - `CV-HTLC-ORDERING.json` (добавлен `CV-H-SLH-Preactivation-WrongLength`)
+
+## 2026-02-28 — SEM-001 SLH exact-length canonicality vector
+
+Причина:
+- зафиксировать новое правило каноничности для `SUITE_ID_SLH_DSA_SHAKE_256F`:
+  `sig_length MUST equal MAX_SLH_DSA_SIG_BYTES`;
+- исключить acceptance коротких SLH-подписей на активной высоте.
+
+Инструменты:
+- обновление `CV-SIG.json`, `CV-WEIGHT.json`;
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-SIG,CV-WEIGHT`.
+
+Изменённые fixtures:
+- `CV-SIG.json` (добавлен `CV-SIG-02e`)
+- `CV-WEIGHT.json` (обновлён `WEIGHT-03`: short SLH signature no longer contributes `sig_cost`)
+
+## 2026-03-01 — DET-001 SpendTx conflict precedence vector
+
+Причина:
+- зафиксировать явный приоритет `ValidateOutputAtCreation` (Section 18.4 step 2)
+  над `TX_ERR_MISSING_UTXO` (step 3), когда обе ошибки присутствуют в одном `SpendTx`.
+
+Инструменты:
+- обновление `CV-UTXO-BASIC.json` (explicit mutated `tx_hex`);
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-UTXO-BASIC`.
+
+Изменённые fixtures:
+- `CV-UTXO-BASIC.json` (добавлен `CV-U-18`)

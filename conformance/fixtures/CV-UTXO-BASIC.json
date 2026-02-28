@@ -311,6 +311,16 @@
           "vout": 0
         }
       ]
+    },
+    {
+      "block_timestamp": 1000,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "expect_ok": false,
+      "height": 100,
+      "id": "CV-U-18",
+      "op": "utxo_apply_basic",
+      "tx_hex": "0100000000010000000000000001aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000000000000000000010100000000000000000021030000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "utxos": []
     }
   ]
 }
