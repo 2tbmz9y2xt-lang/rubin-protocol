@@ -1,6 +1,9 @@
 package consensus
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 func filled32(v byte) [32]byte {
 	var out [32]byte
@@ -57,6 +60,42 @@ func daChunkTxBytes(txNonce uint64, daID [32]byte, chunkIndex uint16, chunkHash 
 	b = AppendCompactSize(b, 0)
 	b = AppendU32le(b, 0)
 	b = AppendCompactSize(b, 0)
+	b = AppendU32le(b, 0)
+	b = append(b, daID[:]...)
+	b = AppendU16le(b, chunkIndex)
+	b = append(b, chunkHash[:]...)
+	b = AppendCompactSize(b, 0)
+	b = AppendCompactSize(b, uint64(len(payload)))
+	b = append(b, payload...)
+	return b
+}
+
+func daChunkTxBytesWithAnchorOutputs(
+	txNonce uint64,
+	daID [32]byte,
+	chunkIndex uint16,
+	chunkHash [32]byte,
+	payload []byte,
+	anchorOutputCount int,
+	anchorPayloadLen int,
+) []byte {
+	b := make([]byte, 0, 192+len(payload)+anchorOutputCount*(anchorPayloadLen+32))
+	b = AppendU32le(b, 1)
+	b = append(b, 0x02)
+	b = AppendU64le(b, txNonce)
+	b = AppendCompactSize(b, 1)
+	prevTxid := filled32(byte(txNonce + 0x10))
+	b = append(b, prevTxid[:]...)
+	b = AppendU32le(b, 0)
+	b = AppendCompactSize(b, 0)
+	b = AppendU32le(b, 0)
+	b = AppendCompactSize(b, uint64(anchorOutputCount))
+	for i := 0; i < anchorOutputCount; i++ {
+		b = AppendU64le(b, 0)
+		b = AppendU16le(b, COV_TYPE_ANCHOR)
+		b = AppendCompactSize(b, uint64(anchorPayloadLen))
+		b = append(b, bytes.Repeat([]byte{byte(0x40 + i)}, anchorPayloadLen)...)
+	}
 	b = AppendU32le(b, 0)
 	b = append(b, daID[:]...)
 	b = AppendU16le(b, chunkIndex)
@@ -340,7 +379,10 @@ func TestValidateDASetIntegrity_TooManyCommits(t *testing.T) {
 	for i := 0; i < MAX_DA_BATCHES_PER_BLOCK+1; i++ {
 		daID := filled32(byte(i))
 		commit := daCommitTxBytes(uint64(i+1), daID, 1, filled32(0x42))
+		payload := []byte{byte(i)}
+		chunk := daChunkTxBytes(uint64(10_000+i), daID, 0, sha3_256(payload), payload)
 		txs = append(txs, mustParseTx(t, commit))
+		txs = append(txs, mustParseTx(t, chunk))
 	}
 
 	err := validateDASetIntegrity(txs)
@@ -387,4 +429,55 @@ func TestValidateBlockBasic_DA_CommitOutputMissingOrDuplicated(t *testing.T) {
 			t.Fatalf("code=%s, want %s", got, BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID)
 		}
 	})
+}
+
+func TestValidateBlockBasic_DA_CapsBeforeIntegrityChecks(t *testing.T) {
+	daID := filled32(0xcb)
+	payload := bytes.Repeat([]byte{0x55}, int(CHUNK_BYTES))
+	payloadCommitment := sha3_256(payload)
+
+	commit := daCommitTxBytes(1, daID, 1, payloadCommitment)
+	chunkHash := sha3_256(payload)
+	chunkHash[0] ^= 0x01 // force chunk hash mismatch
+	chunk := daChunkTxBytesWithAnchorOutputs(
+		2,
+		daID,
+		0,
+		chunkHash,
+		payload,
+		3,
+		int(MAX_ANCHOR_PAYLOAD_SIZE),
+	)
+	block, prev, target := buildDABlockBytes(t, commit, chunk)
+
+	_, err := ValidateBlockBasic(block, &prev, &target)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != BLOCK_ERR_ANCHOR_BYTES_EXCEEDED {
+		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_ANCHOR_BYTES_EXCEEDED)
+	}
+}
+
+func TestValidateBlockBasic_DA_CompletenessPriorityOverPayloadMismatch(t *testing.T) {
+	daIncomplete := filled32(0xcc)
+	daPayloadMismatch := filled32(0xcd)
+
+	// Set A: commit without chunks -> BLOCK_ERR_DA_INCOMPLETE
+	commitIncomplete := daCommitTxBytes(1, daIncomplete, 1, filled32(0x21))
+
+	// Set B: complete chunk set but wrong payload commitment.
+	payload := []byte("payload-b")
+	badCommitment := sha3_256([]byte("different-payload-b"))
+	commitMismatch := daCommitTxBytes(2, daPayloadMismatch, 1, badCommitment)
+	chunkMismatch := daChunkTxBytes(3, daPayloadMismatch, 0, sha3_256(payload), payload)
+
+	block, prev, target := buildDABlockBytes(t, commitIncomplete, commitMismatch, chunkMismatch)
+	_, err := ValidateBlockBasic(block, &prev, &target)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != BLOCK_ERR_DA_INCOMPLETE {
+		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_DA_INCOMPLETE)
+	}
 }

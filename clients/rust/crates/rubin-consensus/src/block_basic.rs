@@ -2,8 +2,8 @@ use crate::block::{block_hash, parse_block_header_bytes, BlockHeader, BLOCK_HEAD
 use crate::compactsize::read_compact_size;
 use crate::constants::{
     COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, MAX_ANCHOR_BYTES_PER_BLOCK, MAX_BLOCK_WEIGHT,
-    MAX_DA_BATCHES_PER_BLOCK, MAX_DA_BYTES_PER_BLOCK, MAX_FUTURE_DRIFT, MAX_SLH_DSA_SIG_BYTES,
-    ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SLH_DSA_ACTIVATION_HEIGHT,
+    MAX_DA_BATCHES_PER_BLOCK, MAX_DA_BYTES_PER_BLOCK, MAX_DA_CHUNK_COUNT, MAX_FUTURE_DRIFT,
+    MAX_SLH_DSA_SIG_BYTES, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SLH_DSA_ACTIVATION_HEIGHT,
     SLH_DSA_SHAKE_256F_PUBKEY_BYTES, SUITE_ID_ML_DSA_87, SUITE_ID_SLH_DSA_SHAKE_256F,
     VERIFY_COST_ML_DSA_87, VERIFY_COST_SLH_DSA_SHAKE_256F, WITNESS_DISCOUNT_DIVISOR,
 };
@@ -130,6 +130,17 @@ pub fn validate_block_basic_with_context_at_height(
 ) -> Result<BlockBasicSummary, TxError> {
     let pb = parse_block_bytes(block_bytes)?;
 
+    pow_check(&pb.header_bytes, pb.header.target)?;
+
+    if let Some(target) = expected_target {
+        if pb.header.target != target {
+            return Err(TxError::new(
+                ErrorCode::BlockErrTargetInvalid,
+                "target mismatch",
+            ));
+        }
+    }
+
     if let Some(prev) = expected_prev_hash {
         if pb.header.prev_block_hash != prev {
             return Err(TxError::new(
@@ -146,17 +157,6 @@ pub fn validate_block_basic_with_context_at_height(
             ErrorCode::BlockErrMerkleInvalid,
             "merkle_root mismatch",
         ));
-    }
-
-    pow_check(&pb.header_bytes, pb.header.target)?;
-
-    if let Some(target) = expected_target {
-        if pb.header.target != target {
-            return Err(TxError::new(
-                ErrorCode::BlockErrTargetInvalid,
-                "target mismatch",
-            ));
-        }
     }
 
     validate_coinbase_structure(&pb, block_height)?;
@@ -202,12 +202,11 @@ pub fn validate_block_basic_with_context_at_height(
     }
     validate_coinbase_witness_commitment(&pb)?;
     validate_timestamp_rules(pb.header.timestamp, block_height, prev_timestamps)?;
-    validate_da_set_integrity(&pb.txs)?;
 
-    if sum_da > MAX_DA_BYTES_PER_BLOCK {
+    if sum_weight > MAX_BLOCK_WEIGHT {
         return Err(TxError::new(
             ErrorCode::BlockErrWeightExceeded,
-            "DA bytes exceeded",
+            "block weight exceeded",
         ));
     }
     if sum_anchor > MAX_ANCHOR_BYTES_PER_BLOCK {
@@ -216,12 +215,14 @@ pub fn validate_block_basic_with_context_at_height(
             "anchor bytes exceeded",
         ));
     }
-    if sum_weight > MAX_BLOCK_WEIGHT {
+    if sum_da > MAX_DA_BYTES_PER_BLOCK {
         return Err(TxError::new(
             ErrorCode::BlockErrWeightExceeded,
-            "block weight exceeded",
+            "DA bytes exceeded",
         ));
     }
+
+    validate_da_set_integrity(&pb.txs)?;
 
     let h = block_hash(&pb.header_bytes)
         .map_err(|_| TxError::new(ErrorCode::BlockErrParse, "failed to hash block header"))?;
@@ -498,14 +499,10 @@ fn validate_da_set_integrity(txs: &[Tx]) -> Result<(), TxError> {
         }
     }
 
-    if commits.len() > MAX_DA_BATCHES_PER_BLOCK as usize {
-        return Err(TxError::new(
-            ErrorCode::BlockErrDaBatchExceeded,
-            "too many DA commits in block",
-        ));
-    }
+    let commit_ids = sorted_da_ids(&commits);
+    let chunk_ids = sorted_da_ids(&chunks);
 
-    for da_id in chunks.keys() {
+    for da_id in &chunk_ids {
         if !commits.contains_key(da_id) {
             return Err(TxError::new(
                 ErrorCode::BlockErrDaSetInvalid,
@@ -514,8 +511,17 @@ fn validate_da_set_integrity(txs: &[Tx]) -> Result<(), TxError> {
         }
     }
 
-    for (da_id, commit) in commits {
-        let set = chunks.get(&da_id).ok_or_else(|| {
+    for da_id in &commit_ids {
+        let commit = commits
+            .get(da_id)
+            .expect("commit id list must reference existing commit");
+        if commit.chunk_count == 0 || u64::from(commit.chunk_count) > MAX_DA_CHUNK_COUNT {
+            return Err(TxError::new(
+                ErrorCode::TxErrParse,
+                "chunk_count out of range for tx_kind=0x01",
+            ));
+        }
+        let set = chunks.get(da_id).ok_or_else(|| {
             TxError::new(ErrorCode::BlockErrDaIncomplete, "DA commit without chunks")
         })?;
         if set.len() != commit.chunk_count as usize {
@@ -524,11 +530,32 @@ fn validate_da_set_integrity(txs: &[Tx]) -> Result<(), TxError> {
                 "DA chunk count mismatch",
             ));
         }
-        let mut concat = Vec::<u8>::new();
         for i in 0..commit.chunk_count {
-            let tx = set.get(&i).ok_or_else(|| {
+            let _ = set.get(&i).ok_or_else(|| {
                 TxError::new(ErrorCode::BlockErrDaIncomplete, "missing DA chunk index")
             })?;
+        }
+    }
+
+    if commits.len() > MAX_DA_BATCHES_PER_BLOCK as usize {
+        return Err(TxError::new(
+            ErrorCode::BlockErrDaBatchExceeded,
+            "too many DA commits in block",
+        ));
+    }
+
+    for da_id in &commit_ids {
+        let commit = commits
+            .get(da_id)
+            .expect("commit id list must reference existing commit");
+        let set = chunks
+            .get(da_id)
+            .expect("completeness checks guarantee chunk set presence");
+        let mut concat = Vec::<u8>::new();
+        for i in 0..commit.chunk_count {
+            let tx = set
+                .get(&i)
+                .expect("completeness checks guarantee chunk index presence");
             concat.extend_from_slice(&tx.da_payload);
         }
         let payload_commitment = sha3_256(&concat);
@@ -561,6 +588,12 @@ fn validate_da_set_integrity(txs: &[Tx]) -> Result<(), TxError> {
     }
 
     Ok(())
+}
+
+fn sorted_da_ids<T>(m: &HashMap<[u8; 32], T>) -> Vec<[u8; 32]> {
+    let mut ids: Vec<[u8; 32]> = m.keys().copied().collect();
+    ids.sort_unstable();
+    ids
 }
 
 fn tx_weight_and_stats(tx: &Tx) -> Result<(u64, u64, u64), TxError> {

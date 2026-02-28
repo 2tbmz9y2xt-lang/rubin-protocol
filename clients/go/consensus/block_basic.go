@@ -133,6 +133,14 @@ func validateParsedBlockBasicWithContextAtHeight(
 		return nil, txerr(BLOCK_ERR_PARSE, "nil parsed block")
 	}
 
+	if err := PowCheck(pb.HeaderBytes, pb.Header.Target); err != nil {
+		return nil, err
+	}
+
+	if expectedTarget != nil && pb.Header.Target != *expectedTarget {
+		return nil, txerr(BLOCK_ERR_TARGET_INVALID, "target mismatch")
+	}
+
 	if expectedPrevHash != nil && pb.Header.PrevBlockHash != *expectedPrevHash {
 		return nil, txerr(BLOCK_ERR_LINKAGE_INVALID, "prev_block_hash mismatch")
 	}
@@ -143,14 +151,6 @@ func validateParsedBlockBasicWithContextAtHeight(
 	}
 	if root != pb.Header.MerkleRoot {
 		return nil, txerr(BLOCK_ERR_MERKLE_INVALID, "merkle_root mismatch")
-	}
-
-	if err := PowCheck(pb.HeaderBytes, pb.Header.Target); err != nil {
-		return nil, err
-	}
-
-	if expectedTarget != nil && pb.Header.Target != *expectedTarget {
-		return nil, txerr(BLOCK_ERR_TARGET_INVALID, "target mismatch")
 	}
 
 	var sumWeight uint64
@@ -209,18 +209,17 @@ func validateParsedBlockBasicWithContextAtHeight(
 	if err := validateTimestampRules(pb.Header.Timestamp, blockHeight, prevTimestamps); err != nil {
 		return nil, err
 	}
-	if err := validateDASetIntegrity(pb.Txs); err != nil {
-		return nil, err
-	}
-
-	if sumDa > MAX_DA_BYTES_PER_BLOCK {
-		return nil, txerr(BLOCK_ERR_WEIGHT_EXCEEDED, "DA bytes exceeded")
+	if sumWeight > MAX_BLOCK_WEIGHT {
+		return nil, txerr(BLOCK_ERR_WEIGHT_EXCEEDED, "block weight exceeded")
 	}
 	if sumAnchor > MAX_ANCHOR_BYTES_PER_BLOCK {
 		return nil, txerr(BLOCK_ERR_ANCHOR_BYTES_EXCEEDED, "anchor bytes exceeded")
 	}
-	if sumWeight > MAX_BLOCK_WEIGHT {
-		return nil, txerr(BLOCK_ERR_WEIGHT_EXCEEDED, "block weight exceeded")
+	if sumDa > MAX_DA_BYTES_PER_BLOCK {
+		return nil, txerr(BLOCK_ERR_WEIGHT_EXCEEDED, "DA bytes exceeded")
+	}
+	if err := validateDASetIntegrity(pb.Txs); err != nil {
+		return nil, err
 	}
 
 	blockHash, err := BlockHash(pb.HeaderBytes)
@@ -426,17 +425,20 @@ func validateDASetIntegrity(txs []*Tx) error {
 		}
 	}
 
-	if len(commits) > MAX_DA_BATCHES_PER_BLOCK {
-		return txerr(BLOCK_ERR_DA_BATCH_EXCEEDED, "too many DA commits in block")
-	}
+	commitIDs := sortedDAIDs(commits)
+	chunkIDs := sortedDAIDs(chunks)
 
-	for daID := range chunks {
+	for _, daID := range chunkIDs {
 		if _, exists := commits[daID]; !exists {
 			return txerr(BLOCK_ERR_DA_SET_INVALID, "DA chunks without DA commit")
 		}
 	}
 
-	for daID, commit := range commits {
+	for _, daID := range commitIDs {
+		commit := commits[daID]
+		if commit.chunkCount == 0 || uint64(commit.chunkCount) > MAX_DA_CHUNK_COUNT {
+			return txerr(TX_ERR_PARSE, "chunk_count out of range for tx_kind=0x01")
+		}
 		set := chunks[daID]
 		if set == nil {
 			return txerr(BLOCK_ERR_DA_INCOMPLETE, "DA commit without chunks")
@@ -445,13 +447,24 @@ func validateDASetIntegrity(txs []*Tx) error {
 			return txerr(BLOCK_ERR_DA_INCOMPLETE, "DA chunk count mismatch")
 		}
 
-		var concat []byte
 		for i := uint16(0); i < commit.chunkCount; i++ {
-			chunkTx, exists := set[i]
+			_, exists := set[i]
 			if !exists {
 				return txerr(BLOCK_ERR_DA_INCOMPLETE, "missing DA chunk index")
 			}
-			concat = append(concat, chunkTx.DaPayload...)
+		}
+	}
+
+	if len(commits) > MAX_DA_BATCHES_PER_BLOCK {
+		return txerr(BLOCK_ERR_DA_BATCH_EXCEEDED, "too many DA commits in block")
+	}
+
+	for _, daID := range commitIDs {
+		commit := commits[daID]
+		set := chunks[daID]
+		var concat []byte
+		for i := uint16(0); i < commit.chunkCount; i++ {
+			concat = append(concat, set[i].DaPayload...)
 		}
 		payloadCommitment := sha3_256(concat)
 
@@ -477,6 +490,17 @@ func validateDASetIntegrity(txs []*Tx) error {
 	}
 
 	return nil
+}
+
+func sortedDAIDs[T any](m map[[32]byte]T) [][32]byte {
+	ids := make([][32]byte, 0, len(m))
+	for id := range m {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		return bytes.Compare(ids[i][:], ids[j][:]) < 0
+	})
+	return ids
 }
 
 func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
