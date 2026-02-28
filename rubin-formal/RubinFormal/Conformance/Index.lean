@@ -14,6 +14,8 @@ import RubinFormal.Conformance.CVUtxoBasicVectors
 import RubinFormal.Conformance.CVUtxoBasicReplay
 import RubinFormal.Conformance.CVBlockBasicVectors
 import RubinFormal.Conformance.CVBlockBasicReplay
+import RubinFormal.Conformance.CVCanonicalInvariantVectors
+import RubinFormal.Conformance.CVCanonicalInvariantReplay
 import RubinFormal.Conformance.CVSubsidyVectors
 import RubinFormal.Conformance.CVSubsidyReplay
 import RubinFormal.Conformance.CVCovenantGenesisVectors
