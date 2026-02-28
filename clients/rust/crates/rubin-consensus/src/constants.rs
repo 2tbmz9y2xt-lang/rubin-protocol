@@ -41,6 +41,7 @@ pub const MAX_TX_INPUTS: u64 = 1024;
 pub const MAX_TX_OUTPUTS: u64 = 1024;
 pub const MAX_WITNESS_ITEMS: u64 = 1024;
 pub const MAX_WITNESS_BYTES_PER_TX: usize = 100_000;
+pub const MAX_SLH_WITNESS_BYTES_PER_TX: usize = 50_000;
 pub const MAX_SCRIPT_SIG_BYTES: u64 = 32;
 
 pub const SUITE_ID_SENTINEL: u8 = 0x00;

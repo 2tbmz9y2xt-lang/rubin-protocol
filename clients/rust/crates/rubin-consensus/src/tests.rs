@@ -227,6 +227,31 @@ fn parse_tx_witness_bytes_overflow() {
 }
 
 #[test]
+fn parse_tx_slh_witness_budget_overflow() {
+    let mut tx = minimal_tx_bytes();
+    tx.truncate(core_end());
+
+    tx.push(0x01); // witness_count=1
+    tx.push(SUITE_ID_SLH_DSA_SHAKE_256F);
+    tx.push(0x40); // pubkey_length=64
+    tx.extend_from_slice(&[0u8; 64]);
+
+    let sig_len = (MAX_SLH_WITNESS_BYTES_PER_TX
+        - (1 + 1 + SLH_DSA_SHAKE_256F_PUBKEY_BYTES as usize + 3)
+        + 1) as u64;
+    assert!(
+        sig_len <= u16::MAX as u64,
+        "sig_len overflow for fd-compactsize"
+    );
+    tx.extend_from_slice(&[0xfd, (sig_len & 0xff) as u8, ((sig_len >> 8) & 0xff) as u8]);
+    tx.extend_from_slice(&vec![0u8; sig_len as usize]);
+    tx.push(0x00); // da_payload_len
+
+    let err = parse_tx(&tx).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrWitnessOverflow);
+}
+
+#[test]
 fn parse_tx_witness_overflow_precedes_suite_canonicalization() {
     let mut tx = minimal_tx_bytes();
     tx.truncate(core_end());

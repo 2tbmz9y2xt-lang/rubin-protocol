@@ -186,6 +186,29 @@ func TestParseTx_WitnessBytesOverflow(t *testing.T) {
 	expectParseErrCode(t, txWithWitnessSection(w.Bytes()), TX_ERR_WITNESS_OVERFLOW)
 }
 
+func TestParseTx_SLHWitnessBudgetOverflow(t *testing.T) {
+	var w bytes.Buffer
+	w.WriteByte(0x01) // witness_count = 1
+	w.WriteByte(SUITE_ID_SLH_DSA_SHAKE_256F)
+	w.WriteByte(0x40) // pubkey_length=64
+	w.Write(make([]byte, 64))
+
+	// Item bytes = 1(suite) + 1(pub_len varint) + 64(pubkey) + 3(sig_len varint fd..)
+	//            + sig_len.
+	// Choose sig_len so item_bytes exceeds MAX_SLH_WITNESS_BYTES_PER_TX by 1.
+	sigLen := MAX_SLH_WITNESS_BYTES_PER_TX - (1 + 1 + SLH_DSA_SHAKE_256F_PUBKEY_BYTES + 3) + 1
+	if sigLen > 0xffff {
+		t.Fatalf("sigLen=%d overflows u16 CompactSize(fd)", sigLen)
+	}
+	w.WriteByte(0xfd)
+	w.WriteByte(byte(sigLen & 0xff))
+	w.WriteByte(byte((sigLen >> 8) & 0xff))
+	w.Write(make([]byte, sigLen))
+
+	w.WriteByte(0x00) // da_payload_len
+	expectParseErrCode(t, txWithWitnessSection(w.Bytes()), TX_ERR_WITNESS_OVERFLOW)
+}
+
 func TestParseTx_WitnessOverflowPrecedesSuiteCanonicalization(t *testing.T) {
 	var w bytes.Buffer
 	w.WriteByte(0x01) // witness_count = 1

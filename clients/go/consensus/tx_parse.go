@@ -287,6 +287,7 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 	witnessCount := int(witnessCountU64)
 
 	witnessBytes := witnessCountVarintBytes
+	slhWitnessBytes := 0
 	witness := make([]WitnessItem, 0, witnessCount)
 
 	for i := 0; i < witnessCount; i++ {
@@ -328,6 +329,13 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 
 		if witnessBytes > MAX_WITNESS_BYTES_PER_TX {
 			return nil, zero, zero, 0, txerr(TX_ERR_WITNESS_OVERFLOW, "witness bytes overflow")
+		}
+		itemBytes := 1 + pubLenVarintBytes + pubLen + sigLenVarintBytes + sigLen
+		if suiteID == SUITE_ID_SLH_DSA_SHAKE_256F {
+			slhWitnessBytes += itemBytes
+			if slhWitnessBytes > MAX_SLH_WITNESS_BYTES_PER_TX {
+				return nil, zero, zero, 0, txerr(TX_ERR_WITNESS_OVERFLOW, "SLH witness bytes overflow")
+			}
 		}
 
 		switch suiteID {
