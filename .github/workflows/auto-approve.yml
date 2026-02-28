@@ -1,0 +1,114 @@
+name: Auto-approve PR
+
+on:
+  pull_request_review:
+    types: [submitted]
+  check_suite:
+    types: [completed]
+  status:
+
+permissions:
+  pull-requests: write
+
+jobs:
+  auto-approve:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request || github.event.check_suite || github.event.sha
+    steps:
+      - name: Wait for all checks
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // Get PR number
+            let prNumber;
+            if (context.payload.pull_request) {
+              prNumber = context.payload.pull_request.number;
+            } else {
+              // Find PR from check_suite or status event
+              const sha = context.payload.check_suite?.head_sha || context.payload.sha;
+              if (!sha) return;
+              const prs = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                head: `${context.repo.owner}:${sha}`
+              });
+              if (prs.data.length === 0) {
+                // Try by commit SHA
+                const pulls = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  commit_sha: sha
+                });
+                const open = pulls.data.filter(p => p.state === 'open');
+                if (open.length === 0) return;
+                prNumber = open[0].number;
+              } else {
+                prNumber = prs.data[0].number;
+              }
+            }
+            if (!prNumber) return;
+
+            // Check all status checks
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+            const ref = pr.data.head.sha;
+
+            const checks = await github.rest.checks.listForRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: ref,
+              per_page: 100
+            });
+
+            const pending = checks.data.check_runs.filter(
+              c => c.name !== 'auto-approve' &&
+                   c.status !== 'completed'
+            );
+            const failed = checks.data.check_runs.filter(
+              c => c.name !== 'auto-approve' &&
+                   c.status === 'completed' &&
+                   c.conclusion !== 'success' &&
+                   c.conclusion !== 'skipped' &&
+                   c.conclusion !== 'neutral'
+            );
+
+            if (pending.length > 0) {
+              console.log(`Still ${pending.length} checks pending, skipping`);
+              return;
+            }
+            if (failed.length > 0) {
+              console.log(`${failed.length} checks failed, not approving`);
+              for (const f of failed) {
+                console.log(`  FAILED: ${f.name} - ${f.conclusion}`);
+              }
+              return;
+            }
+
+            // Check existing reviews - don't approve twice
+            const reviews = await github.rest.pulls.listReviews({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+            const approved = reviews.data.some(
+              r => r.user.login === 'github-actions[bot]' && r.state === 'APPROVED'
+            );
+            if (approved) {
+              console.log('Already approved by github-actions[bot]');
+              return;
+            }
+
+            // All checks passed - approve
+            console.log(`All checks passed for PR #${prNumber}, approving...`);
+            await github.rest.pulls.createReview({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+              event: 'APPROVE',
+              body: 'All CI checks passed. Auto-approved by workflow.'
+            });
