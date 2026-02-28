@@ -3,6 +3,7 @@ package node
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -16,6 +17,7 @@ type SyncConfig struct {
 	HeaderBatchLimit uint64
 	IBDLagSeconds    uint64
 	ChainID          [32]byte
+	Network          string
 }
 
 type HeaderRequest struct {
@@ -40,12 +42,16 @@ func DefaultSyncConfig(expectedTarget *[32]byte, chainID [32]byte, chainStatePat
 		ExpectedTarget:   expectedTarget,
 		ChainID:          chainID,
 		ChainStatePath:   chainStatePath,
+		Network:          "devnet",
 	}
 }
 
 func NewSyncEngine(chainState *ChainState, blockStore *BlockStore, cfg SyncConfig) (*SyncEngine, error) {
 	if chainState == nil {
 		return nil, errors.New("nil chainstate")
+	}
+	if err := validateMainnetGenesisGuard(cfg); err != nil {
+		return nil, err
 	}
 	if cfg.HeaderBatchLimit == 0 {
 		cfg.HeaderBatchLimit = 512
@@ -59,6 +65,23 @@ func NewSyncEngine(chainState *ChainState, blockStore *BlockStore, cfg SyncConfi
 		cfg:        cfg,
 	}
 	return engine, nil
+}
+
+func validateMainnetGenesisGuard(cfg SyncConfig) error {
+	network := strings.ToLower(strings.TrimSpace(cfg.Network))
+	if network == "" {
+		network = "devnet"
+	}
+	if network != "mainnet" {
+		return nil
+	}
+	if cfg.ExpectedTarget == nil {
+		return errors.New("mainnet requires explicit expected_target")
+	}
+	if *cfg.ExpectedTarget == consensus.POW_LIMIT {
+		return errors.New("mainnet expected_target must not equal devnet POW_LIMIT (all-ff)")
+	}
+	return nil
 }
 
 func (s *SyncEngine) HeaderSyncRequest() HeaderRequest {

@@ -92,7 +92,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 	syncEngine, err := newSyncEngineFn(
 		chainState,
 		blockStore,
-		node.DefaultSyncConfig(nil, [32]byte{}, chainStatePath),
+		func() node.SyncConfig {
+			syncCfg := node.DefaultSyncConfig(nil, [32]byte{}, chainStatePath)
+			syncCfg.Network = cfg.Network
+			return syncCfg
+		}(),
 	)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "sync engine init failed: %v\n", err)
