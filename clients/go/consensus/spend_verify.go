@@ -1,5 +1,18 @@
 package consensus
 
+// Q-CF-18: checkSLHCanonical validates SLH-DSA-SHAKE-256f witness-item byte lengths.
+// Returns nil for non-SLH suite IDs. Must be called after the activation check.
+func checkSLHCanonical(w WitnessItem) error {
+	if w.SuiteID != SUITE_ID_SLH_DSA_SHAKE_256F {
+		return nil
+	}
+	if len(w.Pubkey) != SLH_DSA_SHAKE_256F_PUBKEY_BYTES ||
+		len(w.Signature) == 0 || len(w.Signature) > MAX_SLH_DSA_SIG_BYTES {
+		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical SLH-DSA witness item lengths")
+	}
+	return nil
+}
+
 func validateP2PKSpend(entry UtxoEntry, w WitnessItem, digest [32]byte, blockHeight uint64) error {
 	if w.SuiteID != SUITE_ID_ML_DSA_87 && w.SuiteID != SUITE_ID_SLH_DSA_SHAKE_256F {
 		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_P2PK suite invalid")
@@ -7,11 +20,8 @@ func validateP2PKSpend(entry UtxoEntry, w WitnessItem, digest [32]byte, blockHei
 	if w.SuiteID == SUITE_ID_SLH_DSA_SHAKE_256F && blockHeight < SLH_DSA_ACTIVATION_HEIGHT {
 		return txerr(TX_ERR_SIG_ALG_INVALID, "SLH-DSA suite inactive at this height")
 	}
-	if w.SuiteID == SUITE_ID_SLH_DSA_SHAKE_256F {
-		if len(w.Pubkey) != SLH_DSA_SHAKE_256F_PUBKEY_BYTES ||
-			len(w.Signature) == 0 || len(w.Signature) > MAX_SLH_DSA_SIG_BYTES {
-			return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical SLH-DSA witness item lengths")
-		}
+	if err := checkSLHCanonical(w); err != nil {
+		return err
 	}
 	if len(entry.CovenantData) != MAX_P2PK_COVENANT_DATA || entry.CovenantData[0] != w.SuiteID {
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_P2PK covenant_data invalid")
@@ -45,11 +55,8 @@ func validateThresholdSigSpend(keys [][32]byte, threshold uint8, ws []WitnessIte
 			if w.SuiteID == SUITE_ID_SLH_DSA_SHAKE_256F && blockHeight < SLH_DSA_ACTIVATION_HEIGHT {
 				return txerr(TX_ERR_SIG_ALG_INVALID, "SLH-DSA suite inactive at this height")
 			}
-			if w.SuiteID == SUITE_ID_SLH_DSA_SHAKE_256F {
-				if len(w.Pubkey) != SLH_DSA_SHAKE_256F_PUBKEY_BYTES ||
-					len(w.Signature) == 0 || len(w.Signature) > MAX_SLH_DSA_SIG_BYTES {
-					return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical SLH-DSA witness item lengths")
-				}
+			if err := checkSLHCanonical(w); err != nil {
+				return err
 			}
 			if sha3_256(w.Pubkey) != keys[i] {
 				return txerr(TX_ERR_SIG_INVALID, context+" key binding mismatch")
