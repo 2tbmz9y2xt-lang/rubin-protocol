@@ -319,13 +319,7 @@
       "height": 100,
       "id": "CV-U-18",
       "op": "utxo_apply_basic",
-      "tx_hex_from": "CV-U-01",
-      "tx_hex_mutations": [
-        {
-          "byte": "03",
-          "offset": 67
-        }
-      ],
+      "tx_hex": "0100000000010000000000000001aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000000000000000000010100000000000000000021030000000000000000000000000000000000000000000000000000000000000000000000000000",
       "utxos": []
     }
   ]

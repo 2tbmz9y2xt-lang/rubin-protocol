@@ -221,7 +221,7 @@ Policy:
   над `TX_ERR_MISSING_UTXO` (step 3), когда обе ошибки присутствуют в одном `SpendTx`.
 
 Инструменты:
-- обновление `CV-UTXO-BASIC.json` через `tx_hex_from + tx_hex_mutations`;
+- обновление `CV-UTXO-BASIC.json` (explicit mutated `tx_hex`);
 - проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-UTXO-BASIC`.
 
 Изменённые fixtures:
