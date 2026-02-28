@@ -184,3 +184,17 @@ Policy:
 
 Изменённые fixtures:
 - `CV-PARSE.json` (добавлен `PARSE-16`)
+
+## 2026-02-28 — Q-C1-1-CONFLICT-VECTOR SLH pre-activation vs wrong-length
+
+Причина:
+- зафиксировать детерминированный приоритет ошибки для конфликта:
+  `suite_id=SLH` **до активации** + witness item с неканоническими длинами.
+- требование: activation gate (`TX_ERR_SIG_ALG_INVALID`) MUST win и `verify_sig` MUST NOT be invoked.
+
+Инструменты:
+- обновление `CV-HTLC-ORDERING.json`;
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-HTLC-ORDERING`.
+
+Изменённые fixtures:
+- `CV-HTLC-ORDERING.json` (добавлен `CV-H-SLH-Preactivation-WrongLength`)
