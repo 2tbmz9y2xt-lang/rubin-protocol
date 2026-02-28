@@ -683,3 +683,23 @@ fn compact_size_len(n: u64) -> u64 {
         _ => 9,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Kani bounded model checking proofs
+// ---------------------------------------------------------------------------
+#[cfg(kani)]
+mod verification {
+    use super::*;
+    use crate::compactsize::encode_compact_size;
+
+    /// compact_size_len(n) matches the actual encoded length from
+    /// encode_compact_size(n) for every u64.  This cross-checks the two
+    /// independent implementations (weight accounting vs wire encoding).
+    #[kani::proof]
+    fn verify_compact_size_len_matches_encode() {
+        let n: u64 = kani::any();
+        let mut buf = Vec::new();
+        encode_compact_size(n, &mut buf);
+        assert_eq!(compact_size_len(n), buf.len() as u64);
+    }
+}

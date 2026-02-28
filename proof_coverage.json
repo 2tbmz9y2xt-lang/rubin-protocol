@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "generated": "2026-02-28",
+  "lean4": {
+    "proof_level": "toy-model",
+    "status": "phase0-pass"
+  },
+  "kani": {
+    "crate": "rubin-consensus",
+    "harnesses": [
+      {
+        "file": "compactsize.rs",
+        "function": "verify_compact_size_roundtrip",
+        "property": "encode→decode roundtrip identity for all u64",
+        "conformance_gate": "CV-PARSE"
+      },
+      {
+        "file": "compactsize.rs",
+        "function": "verify_compact_size_encoding_is_minimal",
+        "property": "encoding always uses minimal byte count",
+        "conformance_gate": "CV-PARSE"
+      },
+      {
+        "file": "compactsize.rs",
+        "function": "verify_compact_size_decode_no_panic",
+        "property": "decode never panics on arbitrary 9-byte input",
+        "conformance_gate": "CV-PARSE"
+      },
+      {
+        "file": "subsidy.rs",
+        "function": "verify_subsidy_no_panic",
+        "property": "block_subsidy never panics for any (height, already_generated)",
+        "conformance_gate": "CV-VALUE"
+      },
+      {
+        "file": "subsidy.rs",
+        "function": "verify_subsidy_floor",
+        "property": "subsidy >= TAIL_EMISSION for height > 0",
+        "conformance_gate": "CV-VALUE",
+        "lean4_theorem": "value_conservation_proved"
+      },
+      {
+        "file": "subsidy.rs",
+        "function": "verify_subsidy_genesis_zero",
+        "property": "block_subsidy(0, _) == 0",
+        "conformance_gate": "CV-VALUE"
+      },
+      {
+        "file": "merkle.rs",
+        "function": "verify_merkle_root_deterministic_single",
+        "property": "merkle_root_txids is deterministic (same input → same output)",
+        "conformance_gate": "CV-MERKLE",
+        "lean4_theorem": "merkle_root_proved"
+      },
+      {
+        "file": "merkle.rs",
+        "function": "verify_merkle_root_rejects_empty",
+        "property": "empty txid list is rejected",
+        "conformance_gate": "CV-MERKLE"
+      },
+      {
+        "file": "tx.rs",
+        "function": "verify_parse_tx_no_panic",
+        "property": "parse_tx never panics on arbitrary 64-byte input",
+        "conformance_gate": "CV-PARSE",
+        "lean4_theorem": "transaction_wire_proved"
+      },
+      {
+        "file": "block_basic.rs",
+        "function": "verify_compact_size_len_matches_encode",
+        "property": "weight-accounting compact_size_len matches wire encode_compact_size",
+        "conformance_gate": "CV-WEIGHT",
+        "lean4_theorem": "weight_accounting_proved"
+      },
+      {
+        "file": "pow.rs",
+        "function": "verify_retarget_no_panic",
+        "property": "retarget_v1 never panics for bounded target/timestamps",
+        "conformance_gate": "CV-POW"
+      },
+      {
+        "file": "pow.rs",
+        "function": "verify_biguint_to_bytes32_roundtrip",
+        "property": "biguint_to_bytes32 roundtrips with from_bytes_be",
+        "conformance_gate": "CV-POW"
+      }
+    ]
+  }
+}

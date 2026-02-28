@@ -1,0 +1,39 @@
+# Kani bounded model checking for Rust consensus library.
+#
+# Runs all #[kani::proof] harnesses in clients/rust/crates/rubin-consensus.
+# Kani verifies properties for ALL possible inputs within the specified bound,
+# providing mathematical guarantees that complement Lean4 formal proofs.
+#
+# SHA3-heavy harnesses (merkle, parse_tx) may be slow for the SAT solver.
+# If total runtime exceeds 30 min, consider moving to schedule-only.
+name: Kani Verification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'clients/rust/**'
+  pull_request:
+    paths:
+      - 'clients/rust/**'
+  schedule:
+    # Weekly: Wednesday 04:00 UTC — catches regressions from Kani updates.
+    - cron: '0 4 * * 3'
+
+jobs:
+  kani:
+    name: Kani Proof Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      # OpenSSL dev headers required to compile openssl-sys FFI crate.
+      # Kani proofs only exercise pure-Rust logic, but the crate must compile.
+      - name: Install OpenSSL dev headers
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
+      - uses: model-checking/kani-github-action@v1.1
+        with:
+          working-directory: clients/rust/crates/rubin-consensus
+          args: '--output-format=terse'

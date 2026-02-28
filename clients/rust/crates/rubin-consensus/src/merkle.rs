@@ -60,3 +60,30 @@ fn merkle_root_tagged(ids: &[[u8; 32]], leaf_tag: u8, node_tag: u8) -> Result<[u
 
     Ok(level[0])
 }
+
+// ---------------------------------------------------------------------------
+// Kani bounded model checking proofs
+// ---------------------------------------------------------------------------
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// merkle_root_txids is deterministic: same input → same output.
+    /// Bounded to 1 leaf to keep SHA3 SAT-formula manageable.
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn verify_merkle_root_deterministic_single() {
+        let leaf: [u8; 32] = kani::any();
+        let ids = [leaf];
+        let r1 = merkle_root_txids(&ids).unwrap();
+        let r2 = merkle_root_txids(&ids).unwrap();
+        assert_eq!(r1, r2);
+    }
+
+    /// merkle_root_txids rejects empty input (no panic).
+    #[kani::proof]
+    fn verify_merkle_root_rejects_empty() {
+        let ids: &[[u8; 32]] = &[];
+        assert!(merkle_root_txids(ids).is_err());
+    }
+}
