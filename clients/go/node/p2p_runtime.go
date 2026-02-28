@@ -84,18 +84,7 @@ func DefaultPeerRuntimeConfig(network string, maxPeers int) PeerRuntimeConfig {
 }
 
 func NewPeerManager(cfg PeerRuntimeConfig) *PeerManager {
-	if cfg.MaxPeers <= 0 {
-		cfg.MaxPeers = 64
-	}
-	if cfg.ReadDeadline <= 0 {
-		cfg.ReadDeadline = defaultReadDeadline
-	}
-	if cfg.WriteDeadline <= 0 {
-		cfg.WriteDeadline = defaultWriteDeadline
-	}
-	if cfg.BanThreshold <= 0 {
-		cfg.BanThreshold = defaultBanThreshold
-	}
+	cfg = normalizePeerRuntimeConfig(cfg)
 	return &PeerManager{
 		cfg:   cfg,
 		peers: make(map[string]*PeerState),
@@ -149,12 +138,7 @@ func PerformVersionHandshake(
 	if conn == nil {
 		return nil, errors.New("nil connection")
 	}
-	if cfg.ReadDeadline <= 0 {
-		cfg.ReadDeadline = defaultReadDeadline
-	}
-	if cfg.WriteDeadline <= 0 {
-		cfg.WriteDeadline = defaultWriteDeadline
-	}
+	cfg = normalizePeerRuntimeConfig(cfg)
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
 	session := &PeerSession{
@@ -259,15 +243,7 @@ func PerformVersionHandshake(
 }
 
 func NewPeerSession(conn net.Conn, cfg PeerRuntimeConfig, initial PeerState) *PeerSession {
-	if cfg.ReadDeadline <= 0 {
-		cfg.ReadDeadline = defaultReadDeadline
-	}
-	if cfg.WriteDeadline <= 0 {
-		cfg.WriteDeadline = defaultWriteDeadline
-	}
-	if cfg.BanThreshold <= 0 {
-		cfg.BanThreshold = defaultBanThreshold
-	}
+	cfg = normalizePeerRuntimeConfig(cfg)
 	return &PeerSession{
 		conn:   conn,
 		cfg:    cfg,
@@ -486,7 +462,7 @@ func encodeWireCommand(command string) ([wireCommandSize]byte, error) {
 	}
 	for index := 0; index < len(command); index++ {
 		ch := command[index]
-		if ch < 0x21 || ch > 0x7e {
+		if !isPrintableASCIIByte(ch) {
 			return out, errors.New("command is not ASCII printable")
 		}
 		out[index] = ch
@@ -520,11 +496,31 @@ func decodeWireCommand(raw []byte) (string, error) {
 	}
 	for index := 0; index < len(command); index++ {
 		ch := command[index]
-		if ch < 0x21 || ch > 0x7e {
+		if !isPrintableASCIIByte(ch) {
 			return "", errors.New("command is not ASCII printable")
 		}
 	}
 	return command, nil
+}
+
+func normalizePeerRuntimeConfig(cfg PeerRuntimeConfig) PeerRuntimeConfig {
+	if cfg.MaxPeers <= 0 {
+		cfg.MaxPeers = 64
+	}
+	if cfg.ReadDeadline <= 0 {
+		cfg.ReadDeadline = defaultReadDeadline
+	}
+	if cfg.WriteDeadline <= 0 {
+		cfg.WriteDeadline = defaultWriteDeadline
+	}
+	if cfg.BanThreshold <= 0 {
+		cfg.BanThreshold = defaultBanThreshold
+	}
+	return cfg
+}
+
+func isPrintableASCIIByte(ch byte) bool {
+	return ch >= 0x21 && ch <= 0x7e
 }
 
 func networkMagic(network string) [4]byte {
