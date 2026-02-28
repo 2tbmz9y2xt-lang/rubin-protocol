@@ -81,7 +81,7 @@ func TestValidateHTLCSpend_ClaimHashMismatch(t *testing.T) {
 	path := WitnessItem{
 		SuiteID:   SUITE_ID_SENTINEL,
 		Pubkey:    claimKeyID[:],
-		Signature: encodeHTLCClaimPayload([]byte("actual-preimage")),
+		Signature: encodeHTLCClaimPayload([]byte("actual-preimage!")), // 16 bytes, != sha3("different")
 	}
 	sig := WitnessItem{
 		SuiteID:   SUITE_ID_SLH_DSA_SHAKE_256F,
@@ -560,12 +560,14 @@ func TestValidateHTLCSpend_SigKeyBindingMismatch(t *testing.T) {
 	claimKeyID := sha3_256(claimPub)
 	refundKeyID := sha3_256([]byte("refund"))
 
-	entry := makeHTLCEntry(sha3_256([]byte("p")), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
+	preimage16 := make([]byte, MIN_HTLC_PREIMAGE_BYTES)
+	preimage16[0] = 'p'
+	entry := makeHTLCEntry(sha3_256(preimage16), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
 
 	path := WitnessItem{
 		SuiteID:   SUITE_ID_SENTINEL,
 		Pubkey:    claimKeyID[:],
-		Signature: encodeHTLCClaimPayload([]byte("p")),
+		Signature: encodeHTLCClaimPayload(preimage16),
 	}
 	sig := WitnessItem{
 		SuiteID:   SUITE_ID_ML_DSA_87,

@@ -71,6 +71,18 @@ func TestValidateP2PKSpend_OkAndFailureModes(t *testing.T) {
 	if err := validateP2PKSpend(entry, wBadSig, digest, 0); err == nil || mustTxErrCode(t, err) != TX_ERR_SIG_INVALID {
 		t.Fatalf("expected TX_ERR_SIG_INVALID (sig), got %v", err)
 	}
+
+	// SLH active + bad pubkey length → TX_ERR_SIG_NONCANONICAL
+	wSLHBadPub := WitnessItem{SuiteID: SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: []byte{0x01}, Signature: []byte{0x01}}
+	if err := validateP2PKSpend(entry, wSLHBadPub, digest, SLH_DSA_ACTIVATION_HEIGHT); err == nil || mustTxErrCode(t, err) != TX_ERR_SIG_NONCANONICAL {
+		t.Fatalf("expected TX_ERR_SIG_NONCANONICAL (SLH bad pubkey len), got %v", err)
+	}
+
+	// SLH active + empty signature → TX_ERR_SIG_NONCANONICAL
+	wSLHEmptySig := WitnessItem{SuiteID: SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES), Signature: nil}
+	if err := validateP2PKSpend(entry, wSLHEmptySig, digest, SLH_DSA_ACTIVATION_HEIGHT); err == nil || mustTxErrCode(t, err) != TX_ERR_SIG_NONCANONICAL {
+		t.Fatalf("expected TX_ERR_SIG_NONCANONICAL (SLH empty sig), got %v", err)
+	}
 }
 
 func TestValidateThresholdSigSpend_MismatchAndThresholdLogic(t *testing.T) {
@@ -91,6 +103,22 @@ func TestValidateThresholdSigSpend_MismatchAndThresholdLogic(t *testing.T) {
 	ws2 := []WitnessItem{{SuiteID: SUITE_ID_SENTINEL}, {SuiteID: SUITE_ID_SENTINEL}}
 	if err := validateThresholdSigSpend(keys2, 1, ws2, [32]byte{}, 0, "ctx"); err == nil || mustTxErrCode(t, err) != TX_ERR_SIG_INVALID {
 		t.Fatalf("expected TX_ERR_SIG_INVALID (threshold), got %v", err)
+	}
+}
+
+func TestValidateThresholdSigSpend_SLHPaths(t *testing.T) {
+	keys := [][32]byte{{0x01}}
+
+	// SLH inactive at h-1 → TX_ERR_SIG_ALG_INVALID
+	wsInactive := []WitnessItem{{SuiteID: SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: []byte{0x01}, Signature: []byte{0x01}}}
+	if err := validateThresholdSigSpend(keys, 1, wsInactive, [32]byte{}, SLH_DSA_ACTIVATION_HEIGHT-1, "ctx"); err == nil || mustTxErrCode(t, err) != TX_ERR_SIG_ALG_INVALID {
+		t.Fatalf("expected TX_ERR_SIG_ALG_INVALID (SLH inactive), got %v", err)
+	}
+
+	// SLH active + bad pubkey length → TX_ERR_SIG_NONCANONICAL
+	wsNoncanon := []WitnessItem{{SuiteID: SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: []byte{0x01}, Signature: []byte{0x01}}}
+	if err := validateThresholdSigSpend(keys, 1, wsNoncanon, [32]byte{}, SLH_DSA_ACTIVATION_HEIGHT, "ctx"); err == nil || mustTxErrCode(t, err) != TX_ERR_SIG_NONCANONICAL {
+		t.Fatalf("expected TX_ERR_SIG_NONCANONICAL (SLH noncanon), got %v", err)
 	}
 }
 
