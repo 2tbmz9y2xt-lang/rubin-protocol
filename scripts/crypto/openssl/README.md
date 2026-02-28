@@ -49,6 +49,19 @@ Operational implication:
 - Parallel `verify_sig` is supported, but context lifecycle must remain strictly per-call.
 - Any optimization that introduces shared mutable OpenSSL contexts is out of policy and must be rejected.
 
+## OpenSSL CVE response process
+
+Use the dedicated runbook:
+
+- `scripts/crypto/openssl/CVE_RESPONSE_RUNBOOK.md`
+
+The runbook defines:
+
+- SLA by severity,
+- intake and disclosure channels,
+- patch triage procedure,
+- mandatory release evidence payload.
+
 ## Run PQ benchmark (OpenSSL `speed`, primary)
 
 ```bash
