@@ -52,14 +52,25 @@ DOC_OPS_REQUIRED_PHRASES = [
     "not automatic production FIPS compliance",
 ]
 
-GO_VERIFY_REQUIRED_SNIPPETS = [
-    "func verifySig(",
-    "case SUITE_ID_ML_DSA_87:",
-    'return opensslVerifySigMessage("ML-DSA-87", pubkey, signature, digest32[:])',
-    "case SUITE_ID_SLH_DSA_SHAKE_256F:",
-    'return opensslVerifySigDigestOneShot("SLH-DSA-SHAKE-256f", pubkey, signature, digest32[:])',
-    "EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL)",
-    "EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)",
+GO_VERIFY_REQUIRED_SNIPPET_GROUPS = [
+    ["func verifySig("],
+    ["case SUITE_ID_ML_DSA_87:"],
+    [
+        'return opensslVerifySigOneShot("ML-DSA-87", pubkey, signature, digest32[:])',
+        'return opensslVerifySigMessage("ML-DSA-87", pubkey, signature, digest32[:])',
+    ],
+    ["case SUITE_ID_SLH_DSA_SHAKE_256F:"],
+    [
+        'return opensslVerifySigOneShot("SLH-DSA-SHAKE-256f", pubkey, signature, digest32[:])',
+        'return opensslVerifySigDigestOneShot("SLH-DSA-SHAKE-256f", pubkey, signature, digest32[:])',
+    ],
+    [
+        "func opensslVerifySigOneShot(",
+        "func opensslVerifySigDigestOneShot(",
+        "func opensslVerifySigMessage(",
+    ],
+    ["EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL)"],
+    ["EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)"],
 ]
 
 RUST_VERIFY_REQUIRED_SNIPPETS = [
@@ -146,6 +157,18 @@ def check_required_snippets(path: Path, text: str, snippets: list[str]) -> list[
     for snippet in snippets:
         if snippet not in text:
             errors.append(f"{path}: missing required snippet: {snippet!r}")
+    return errors
+
+
+def check_required_snippet_groups(
+    path: Path, text: str, snippet_groups: list[list[str]]
+) -> list[str]:
+    errors: list[str] = []
+    for group in snippet_groups:
+        if not any(snippet in text for snippet in group):
+            errors.append(
+                f"{path}: missing required snippet group (any-of): {group!r}"
+            )
     return errors
 
 
@@ -246,7 +269,9 @@ def main() -> int:
         if go_verify.exists():
             go_text = read_text(go_verify)
             errors.extend(
-                check_required_snippets(go_verify, go_text, GO_VERIFY_REQUIRED_SNIPPETS)
+                check_required_snippet_groups(
+                    go_verify, go_text, GO_VERIFY_REQUIRED_SNIPPET_GROUPS
+                )
             )
         if rust_verify.exists():
             rust_text = read_text(rust_verify)

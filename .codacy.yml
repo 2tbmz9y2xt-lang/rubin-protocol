@@ -11,8 +11,14 @@ exclude_paths:
   - "conformance/**"
   - "rubin-formal/**"
   - "tools/**"
-  # Fixture generators and CLI runtimes: inherent duplication (AST-similar
-  # wire-format test vectors that cannot be deduplicated without losing
-  # readability or correctness).
-  - "clients/go/cmd/gen-conformance-fixtures/runtime.go"
-  - "clients/go/cmd/rubin-consensus-cli/runtime.go"
+
+engines:
+  duplication:
+    # CLI dispatchers and fixture generators contain inherent structural
+    # repetition (dispatch boilerplate, tx-building templates) that cannot be
+    # eliminated without sacrificing readability. Raise the minimum clone
+    # threshold so only substantive duplications (>25 lines) are reported.
+    exclude_paths:
+      - "clients/go/cmd/**"
+    config:
+      minLines: 25

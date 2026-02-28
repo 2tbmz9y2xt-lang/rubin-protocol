@@ -396,6 +396,40 @@ func parseKeyBytes(item any) ([]byte, error) {
 	return []byte(fmt.Sprintf("%v", item)), nil
 }
 
+// peerQualityDeltas is the canonical event→score delta map for compact block
+// peer quality scoring, shared by compact_peer_quality and compact_grace_period.
+var peerQualityDeltas = map[string]int{
+	"reconstruct_no_getblocktxn": 2,
+	"getblocktxn_first_try":      1,
+	"prefetch_completed":         1,
+	"incomplete_set":             -5,
+	"getblocktxn_required":       -3,
+	"full_block_required":        -10,
+	"prefetch_cap_exceeded":      -2,
+}
+
+// computePeerScore applies events to a starting score using peerQualityDeltas.
+// Negative deltas are halved when graceActive is true.
+// Returns (finalScore, unknownEvent).  unknownEvent is non-empty on bad input.
+func computePeerScore(events []any, startScore int, graceActive bool) (int, string) {
+	score := startScore
+	if score == 0 {
+		score = 50
+	}
+	for _, raw := range events {
+		ev := toString(raw, "")
+		delta, ok := peerQualityDeltas[ev]
+		if !ok {
+			return 0, ev
+		}
+		if graceActive && delta < 0 {
+			delta = int(delta / 2)
+		}
+		score = maxInt(0, minInt(100, score+delta))
+	}
+	return score, ""
+}
+
 func asSortedInts(values []int) []int {
 	out := append([]int(nil), values...)
 	sort.Ints(out)
@@ -832,9 +866,9 @@ func runFromStdin() {
 		sigLen := req.SigLength
 		wire := make([]byte, 0, 1+9+pubLen+9+sigLen)
 		wire = append(wire, suiteID)
-		wire = append(wire, encodeCompactSize(uint64(pubLen))...)
+		wire = append(wire, consensus.EncodeCompactSize(uint64(pubLen))...)
 		wire = append(wire, bytes.Repeat([]byte{0x11}, pubLen)...)
-		wire = append(wire, encodeCompactSize(uint64(sigLen))...)
+		wire = append(wire, consensus.EncodeCompactSize(uint64(sigLen))...)
 		wire = append(wire, bytes.Repeat([]byte{0x22}, sigLen)...)
 		off := 0
 		if len(wire) < 1 {
@@ -843,7 +877,7 @@ func runFromStdin() {
 		}
 		suite2 := wire[off]
 		off += 1
-		pub2, n, err := decodeCompactSize(wire[off:])
+		pub2, n, err := consensus.DecodeCompactSize(wire[off:])
 		if err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: "wire decode failed"})
 			return
@@ -854,7 +888,7 @@ func runFromStdin() {
 			return
 		}
 		off += int(pub2)
-		sig2, n, err := decodeCompactSize(wire[off:])
+		sig2, n, err := consensus.DecodeCompactSize(wire[off:])
 		if err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: "wire decode failed"})
 			return
@@ -1114,31 +1148,11 @@ func runFromStdin() {
 		return
 
 	case "compact_peer_quality":
-		score := req.StartScore
-		if score == 0 {
-			score = 50
-		}
 		grace := boolOrDefault(req.GracePeriodActive, false)
-		deltas := map[string]int{
-			"reconstruct_no_getblocktxn": 2,
-			"getblocktxn_first_try":      1,
-			"prefetch_completed":         1,
-			"incomplete_set":             -5,
-			"getblocktxn_required":       -3,
-			"full_block_required":        -10,
-			"prefetch_cap_exceeded":      -2,
-		}
-		for _, raw := range req.Events {
-			ev := toString(raw, "")
-			delta, ok := deltas[ev]
-			if !ok {
-				writeResp(os.Stdout, Response{Ok: false, Err: "unknown peer-quality event"})
-				return
-			}
-			if grace && delta < 0 {
-				delta = int(delta / 2)
-			}
-			score = maxInt(0, minInt(100, score+delta))
+		score, badEv := computePeerScore(req.Events, req.StartScore, grace)
+		if badEv != "" {
+			writeResp(os.Stdout, Response{Ok: false, Err: "unknown peer-quality event"})
+			return
 		}
 		for i := 0; i < req.ElapsedBlocks/144; i++ {
 			if score > 50 {
@@ -1244,30 +1258,10 @@ func runFromStdin() {
 			gracePeriodBlocks = 1440
 		}
 		graceActive := req.ElapsedBlocks < gracePeriodBlocks
-		score := req.StartScore
-		if score == 0 {
-			score = 50
-		}
-		deltas := map[string]int{
-			"reconstruct_no_getblocktxn": 2,
-			"getblocktxn_first_try":      1,
-			"prefetch_completed":         1,
-			"incomplete_set":             -5,
-			"getblocktxn_required":       -3,
-			"full_block_required":        -10,
-			"prefetch_cap_exceeded":      -2,
-		}
-		for _, raw := range req.Events {
-			ev := toString(raw, "")
-			delta, ok := deltas[ev]
-			if !ok {
-				writeResp(os.Stdout, Response{Ok: false, Err: "unknown grace event"})
-				return
-			}
-			if graceActive && delta < 0 {
-				delta = int(delta / 2)
-			}
-			score = maxInt(0, minInt(100, score+delta))
+		score, badEv := computePeerScore(req.Events, req.StartScore, graceActive)
+		if badEv != "" {
+			writeResp(os.Stdout, Response{Ok: false, Err: "unknown grace event"})
+			return
 		}
 		disconnect := score < 5 && !graceActive
 		writeResp(os.Stdout, Response{
@@ -1722,57 +1716,9 @@ func outputDescriptorBytes(covType uint16, covDataHex string) ([]byte, error) {
 	var ct [2]byte
 	binary.LittleEndian.PutUint16(ct[:], covType)
 	out = append(out, ct[:]...)
-	out = append(out, encodeCompactSize(uint64(len(covData)))...)
+	out = append(out, consensus.EncodeCompactSize(uint64(len(covData)))...)
 	out = append(out, covData...)
 	return out, nil
-}
-
-func encodeCompactSize(n uint64) []byte {
-	switch {
-	case n < 0xfd:
-		return []byte{byte(n)}
-	case n <= 0xffff:
-		out := make([]byte, 3)
-		out[0] = 0xfd
-		binary.LittleEndian.PutUint16(out[1:], uint16(n))
-		return out
-	case n <= 0xffffffff:
-		out := make([]byte, 5)
-		out[0] = 0xfe
-		binary.LittleEndian.PutUint32(out[1:], uint32(n))
-		return out
-	default:
-		out := make([]byte, 9)
-		out[0] = 0xff
-		binary.LittleEndian.PutUint64(out[1:], n)
-		return out
-	}
-}
-
-func decodeCompactSize(buf []byte) (uint64, int, error) {
-	if len(buf) == 0 {
-		return 0, 0, fmt.Errorf("empty")
-	}
-	pfx := buf[0]
-	if pfx < 0xfd {
-		return uint64(pfx), 1, nil
-	}
-	if pfx == 0xfd {
-		if len(buf) < 3 {
-			return 0, 0, fmt.Errorf("short")
-		}
-		return uint64(binary.LittleEndian.Uint16(buf[1:3])), 3, nil
-	}
-	if pfx == 0xfe {
-		if len(buf) < 5 {
-			return 0, 0, fmt.Errorf("short")
-		}
-		return uint64(binary.LittleEndian.Uint32(buf[1:5])), 5, nil
-	}
-	if len(buf) < 9 {
-		return 0, 0, fmt.Errorf("short")
-	}
-	return binary.LittleEndian.Uint64(buf[1:9]), 9, nil
 }
 
 func slicesEqualInt(a, b []int) bool {
