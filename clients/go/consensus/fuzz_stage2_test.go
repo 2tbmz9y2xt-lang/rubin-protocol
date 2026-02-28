@@ -416,8 +416,10 @@ func FuzzBlockSubsidy(f *testing.F) {
 // Mirrors Rust merkle_determinism.rs (CV-MERKLE).
 func FuzzMerkleRootTxids(f *testing.F) {
 	f.Add([]byte{}) // empty
-	f.Add(filled32(0x01)[:])
-	two := append(filled32(0x01)[:], filled32(0x02)[:]...)
+	seed1 := filled32(0x01)
+	f.Add(seed1[:])
+	seed2 := filled32(0x02)
+	two := append(seed1[:], seed2[:]...)
 	f.Add(two)
 
 	f.Fuzz(func(t *testing.T, data []byte) {
