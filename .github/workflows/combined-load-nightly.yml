@@ -1,0 +1,81 @@
+name: combined-load-nightly
+
+on:
+  schedule:
+    - cron: "15 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: combined-load-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  combined-load:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Cache OpenSSL 3.5 bundle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/rubin-openssl/bundle-3.5.5
+            ~/.cache/rubin-openssl/work/openssl-3.5.5.tar.gz
+          key: openssl-bundle-${{ runner.os }}-3.5.5-v2
+
+      - name: Build OpenSSL 3.5.5 bundle
+        id: openssl
+        run: |
+          set -euo pipefail
+          PREFIX="$HOME/.cache/rubin-openssl/bundle-3.5.5"
+          MODULES_DIR="$PREFIX/lib/ossl-modules"
+          if [ ! -d "$MODULES_DIR" ] && [ -d "$PREFIX/lib64/ossl-modules" ]; then
+            MODULES_DIR="$PREFIX/lib64/ossl-modules"
+          fi
+          if [ ! -x "$PREFIX/bin/openssl" ] || [ ! -f "$PREFIX/ssl/openssl-fips.cnf" ] || [ ! -d "$MODULES_DIR" ]; then
+            OPENSSL_VERSION=3.5.5 PREFIX="$PREFIX" bash scripts/crypto/openssl/build-openssl-bundle.sh
+          fi
+          if [ -d "$PREFIX/lib/ossl-modules" ]; then
+            MODULES_DIR="$PREFIX/lib/ossl-modules"
+          elif [ -d "$PREFIX/lib64/ossl-modules" ]; then
+            MODULES_DIR="$PREFIX/lib64/ossl-modules"
+          else
+            echo "ERROR: OpenSSL modules directory not found under $PREFIX/lib*/ossl-modules" >&2
+            exit 1
+          fi
+          echo "$PREFIX/bin" >> "$GITHUB_PATH"
+          echo "openssl_dir=$PREFIX" >> "$GITHUB_OUTPUT"
+          echo "openssl_modules=$MODULES_DIR" >> "$GITHUB_OUTPUT"
+          echo "openssl_conf=$PREFIX/ssl/openssl-fips.cnf" >> "$GITHUB_OUTPUT"
+          echo "pkg_config_path=$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig" >> "$GITHUB_OUTPUT"
+          echo "ld_library_path=$PREFIX/lib64:$PREFIX/lib" >> "$GITHUB_OUTPUT"
+
+      - name: Verify OpenSSL PQ algorithms
+        env:
+          OPENSSL_MODULES: ${{ steps.openssl.outputs.openssl_modules }}
+          OPENSSL_CONF: ${{ steps.openssl.outputs.openssl_conf }}
+        run: |
+          openssl version
+          openssl list -signature-algorithms | grep -E 'ML-DSA-87|SLH-DSA-SHAKE-256f'
+
+      - name: Run combined-load benchmark
+        env:
+          RUBIN_OPENSSL_PREFIX: ${{ steps.openssl.outputs.openssl_dir }}
+          RUBIN_OPENSSL_MODULES: ${{ steps.openssl.outputs.openssl_modules }}
+          RUBIN_OPENSSL_CONF: ${{ steps.openssl.outputs.openssl_conf }}
+          PKG_CONFIG_PATH: ${{ steps.openssl.outputs.pkg_config_path }}
+          LD_LIBRARY_PATH: ${{ steps.openssl.outputs.ld_library_path }}
+          RUBIN_COMBINED_LOAD_BENCH_ITERS: 1
+          RUBIN_COMBINED_LOAD_SLH_TXS: 8
+          RUBIN_COMBINED_LOAD_DA_CHUNKS: 32
+          RUBIN_COMBINED_LOAD_CHUNK_BYTES: 65536
+          RUBIN_COMBINED_LOAD_SLH_SIG_BYTES: 49856
+        run: |
+          scripts/benchmarks/run_combined_load_benchmark.sh artifacts/combined-load
+
+      - name: Upload combined-load artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: combined-load-benchmark
+          path: artifacts/combined-load
