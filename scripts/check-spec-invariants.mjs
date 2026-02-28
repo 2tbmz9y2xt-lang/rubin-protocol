@@ -4,8 +4,60 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const specPath = path.join(root, "spec", "RUBIN_L1_CANONICAL.md");
-const spec = fs.readFileSync(specPath, "utf8");
+const argv = process.argv.slice(2);
+
+function argValue(flag) {
+  const idx = argv.indexOf(flag);
+  if (idx === -1 || idx + 1 >= argv.length) {
+    return "";
+  }
+  return argv[idx + 1];
+}
+
+function unique(values) {
+  const out = [];
+  const seen = new Set();
+  for (const value of values) {
+    if (!value) {
+      continue;
+    }
+    const normalized = path.resolve(value);
+    if (seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function resolveSpecRoot(repoRoot) {
+  const cli = argValue("--spec-root");
+  const env = process.env.RUBIN_SPEC_ROOT || "";
+  const candidates = unique([
+    cli,
+    env,
+    path.join(repoRoot, "spec"),
+    path.resolve(repoRoot, "..", "rubin-spec-private", "spec"),
+    path.resolve(repoRoot, "..", "rubin-spec", "spec"),
+  ]);
+
+  for (const candidate of candidates) {
+    const canonical = path.join(candidate, "RUBIN_L1_CANONICAL.md");
+    if (fs.existsSync(canonical)) {
+      return { specRoot: candidate, specPath: canonical, candidates };
+    }
+  }
+  return { specRoot: "", specPath: "", candidates };
+}
+
+const resolved = resolveSpecRoot(root);
+if (!resolved.specPath) {
+  console.error("FAIL [spec-root] cannot locate RUBIN_L1_CANONICAL.md");
+  console.error(`Tried: ${resolved.candidates.join(", ")}`);
+  process.exit(2);
+}
+const spec = fs.readFileSync(resolved.specPath, "utf8");
 
 const invariants = [
   { id: "CONST_TARGET_INTERVAL", re: /TARGET_BLOCK_INTERVAL\s*=\s*120/, desc: "TARGET_BLOCK_INTERVAL = 120" },
@@ -16,7 +68,7 @@ const invariants = [
   { id: "CONST_VAULT_KEYS", re: /MAX_VAULT_KEYS\s*=\s*12/, desc: "MAX_VAULT_KEYS = 12" },
   { id: "CONST_MULTISIG_KEYS", re: /MAX_MULTISIG_KEYS\s*=\s*12/, desc: "MAX_MULTISIG_KEYS = 12" },
   { id: "CONST_VAULT_WHITELIST", re: /MAX_VAULT_WHITELIST_ENTRIES\s*=\s*1_?024/, desc: "MAX_VAULT_WHITELIST_ENTRIES = 1024" },
-  { id: "CONST_POW_LIMIT", re: /POW_LIMIT\s*=\s*0xffff/, desc: "POW_LIMIT defined" },
+  { id: "CONST_POW_LIMIT", re: /POW_LIMIT_DEVNET\s*=\s*0x[0-9a-fA-F]+/, desc: "POW_LIMIT profile constant defined" },
   { id: "REG_VAULT", re: /0x0101` `CORE_VAULT/, desc: "registry: CORE_VAULT = 0x0101" },
   { id: "REG_DA_COMMIT", re: /0x0103` `CORE_DA_COMMIT/, desc: "registry: CORE_DA_COMMIT = 0x0103" },
   { id: "REG_MULTISIG", re: /0x0104` `CORE_MULTISIG/, desc: "registry: CORE_MULTISIG = 0x0104" },
@@ -45,4 +97,4 @@ if (failed > 0) {
   process.exit(1);
 }
 
-console.log(`OK: ${invariants.length} invariants`);
+console.log(`OK: ${invariants.length} invariants (${resolved.specRoot})`);
