@@ -158,21 +158,9 @@ func TestParseTx_WitnessItem_Canonicalization(t *testing.T) {
 				return w.Bytes()
 			},
 		},
-		{
-			name:    "slh_dsa_sig_len_zero",
-			wantErr: TX_ERR_SIG_NONCANONICAL,
-			section: func() []byte {
-				var w bytes.Buffer
-				w.WriteByte(0x01)                        // witness_count
-				w.WriteByte(SUITE_ID_SLH_DSA_SHAKE_256F) // suite_id
-				w.WriteByte(0x40)                        // pubkey_length = 64
-				w.Write(make([]byte, 64))
-				w.WriteByte(0x00) // sig_length = 0 (non-canonical)
-				w.WriteByte(0x00) // da_payload_len
-				return w.Bytes()
-			},
-		},
 	}
+	// slh_dsa_sig_len_zero: parse no longer rejects SLH items with sig_len=0;
+	// length canonicality for SLH-DSA is enforced in the spend path (Q-CF-18).
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -212,9 +200,11 @@ func TestParseTx_WitnessOverflowPrecedesSuiteCanonicalization(t *testing.T) {
 }
 
 func TestParseTx_HTLCPathWitnessItemsCanonical(t *testing.T) {
+	preimage := make([]byte, MIN_HTLC_PREIMAGE_BYTES)
+	preimage[0] = 0x42
 	claimPayload := []byte{0x00} // HTLC path selector for claim
-	claimPayload = AppendU16le(claimPayload, 1)
-	claimPayload = append(claimPayload, 0x42)
+	claimPayload = AppendU16le(claimPayload, uint16(len(preimage)))
+	claimPayload = append(claimPayload, preimage...)
 
 	var w bytes.Buffer
 	w.WriteByte(0x02) // witness_count = 2
