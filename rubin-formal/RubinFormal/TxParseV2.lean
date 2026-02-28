@@ -15,6 +15,7 @@ def MAX_TX_OUTPUTS : Nat := 1024
 def MAX_SCRIPT_SIG_BYTES : Nat := 32
 def MAX_WITNESS_ITEMS : Nat := 1024
 def MAX_WITNESS_BYTES_PER_TX : Nat := 100000
+def MAX_SLH_WITNESS_BYTES_PER_TX : Nat := 50000
 -- Wire-level hard cap (CANONICAL §5.3).
 def MAX_COVENANT_DATA_PER_OUTPUT : Nat := 65536
 
@@ -67,7 +68,7 @@ def parseOutputs (c : Cursor) (n : Nat) : Option Cursor := do
     cur := cur4
   pure cur
 
-def parseWitnessItem (c : Cursor) : Option (Cursor × Option TxErr) := do
+def parseWitnessItem (c : Cursor) : Option (Cursor × Option TxErr × Bool) := do
   let (suite, c1) ← c.getU8?
   let suiteID := suite.toNat
   let (pubLen, c2, minimal1) ← c1.getCompactSize?
@@ -80,18 +81,18 @@ def parseWitnessItem (c : Cursor) : Option (Cursor × Option TxErr) := do
   -- Canonicalization rules (CANONICAL §5.4).
   if suiteID == SUITE_ID_SENTINEL then
     if pubLen == 0 && sigLen == 0 then
-      pure (c5, none)
+      pure (c5, none, false)
     else if pubLen == 32 then
       if sigLen == 1 then
         if sig.size == 1 && sig.get! 0 == 0x01 then
-          pure (c5, none)
+          pure (c5, none, false)
         else
           none
       else if sigLen >= 3 then
         if sig.size >= 3 && sig.get! 0 == 0x00 then
           let preLen := Wire.u16le? (sig.get! 1) (sig.get! 2)
           if preLen >= 1 && preLen <= MAX_HTLC_PREIMAGE_BYTES && sigLen == 3 + preLen then
-            pure (c5, none)
+            pure (c5, none, false)
           else
             none
         else
@@ -102,16 +103,15 @@ def parseWitnessItem (c : Cursor) : Option (Cursor × Option TxErr) := do
       none
   else if suiteID == SUITE_ID_ML_DSA_87 then
     if pubLen == ML_DSA_87_PUBKEY_BYTES && sigLen == ML_DSA_87_SIG_BYTES then
-      pure (c5, none)
+      pure (c5, none, false)
     else
-      pure (c5, some .sigNoncanonical)
+      pure (c5, some .sigNoncanonical, false)
   else if suiteID == SUITE_ID_SLH_DSA_SHAKE_256F then
-    if pubLen == SLH_DSA_SHAKE_256F_PUBKEY_BYTES && sigLen > 0 && sigLen <= MAX_SLH_DSA_SIG_BYTES then
-      pure (c5, none)
-    else
-      pure (c5, some .sigNoncanonical)
+    -- Parser-level SLH length canonicality is deferred to spend validation
+    -- where block height is available for deterministic activation priority.
+    pure (c5, none, true)
   else
-    pure (c5, some .sigAlgInvalid)
+    pure (c5, some .sigAlgInvalid, false)
 
 def parseWitnessSection (c : Cursor) : Option (Cursor × TxErr × Nat × Nat) := do
   let startOff := c.off
@@ -120,24 +120,36 @@ def parseWitnessSection (c : Cursor) : Option (Cursor × TxErr × Nat × Nat) :=
   if wCount > MAX_WITNESS_ITEMS then
     pure (c1, .witnessOverflow, startOff, c1.off)
   else
-    let mut cur := c1
-    let mut anySigAlgInvalid : Bool := false
-    let mut anySigNoncanonical : Bool := false
-    for _ in [0:wCount] do
-      let (cur', e) ← parseWitnessItem cur
-      cur := cur'
-      match e with
-      | none => ()
-      | some .sigAlgInvalid => anySigAlgInvalid := true
-      | some .sigNoncanonical => anySigNoncanonical := true
-      | some .witnessOverflow => () -- not produced here
-      | some .parse => () -- not produced here
-    let endOff := cur.off
-    let err :=
-      if anySigAlgInvalid then .sigAlgInvalid
-      else if anySigNoncanonical then .sigNoncanonical
-      else .parse
-    pure (cur, err, startOff, endOff)
+    let rec loop (cur : Cursor) (remaining : Nat) (anySigAlgInvalid : Bool) (anySigNoncanonical : Bool)
+        (slhWitnessBytes : Nat) : Option (Cursor × TxErr × Nat × Nat) := do
+      match remaining with
+      | 0 =>
+          let endOff := cur.off
+          let err :=
+            if anySigAlgInvalid then .sigAlgInvalid
+            else if anySigNoncanonical then .sigNoncanonical
+            else .parse
+          pure (cur, err, startOff, endOff)
+      | Nat.succ rem =>
+          let itemStart := cur.off
+          let (cur', e, isSLH) ← parseWitnessItem cur
+          let itemBytes := cur'.off - itemStart
+          let slhWitnessBytes' := if isSLH then slhWitnessBytes + itemBytes else slhWitnessBytes
+          if slhWitnessBytes' > MAX_SLH_WITNESS_BYTES_PER_TX then
+            pure (cur', .witnessOverflow, startOff, cur'.off)
+          else
+            let anySigAlgInvalid' :=
+              anySigAlgInvalid ||
+                match e with
+                | some .sigAlgInvalid => true
+                | _ => false
+            let anySigNoncanonical' :=
+              anySigNoncanonical ||
+                match e with
+                | some .sigNoncanonical => true
+                | _ => false
+            loop cur' rem anySigAlgInvalid' anySigNoncanonical' slhWitnessBytes'
+    loop c1 wCount false false 0
 
 def parseTx (tx : Bytes) : ParseResult :=
   let c0 : Cursor := { bs := tx, off := 0 }
