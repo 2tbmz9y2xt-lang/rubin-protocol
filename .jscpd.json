@@ -1,0 +1,12 @@
+{
+  "threshold": 5,
+  "minLines": 25,
+  "minTokens": 100,
+  "reporters": ["console"],
+  "ignore": [
+    "spec/**", "conformance/**", "rubin-formal/**",
+    "tools/**", "scripts/**", ".github/**", "analysis/**",
+    "**/*_test.go", "**/tests/**", "**/benches/**",
+    "**/*.gen.go", "**/*_generated.rs", "package-lock.json"
+  ]
+}
