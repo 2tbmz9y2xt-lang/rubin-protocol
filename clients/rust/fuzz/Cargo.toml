@@ -54,3 +54,57 @@ name = "sighash"
 path = "fuzz_targets/sighash.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "validate_block_basic"
+path = "fuzz_targets/validate_block_basic.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "pow_check"
+path = "fuzz_targets/pow_check.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "compact_shortid"
+path = "fuzz_targets/compact_shortid.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "parse_htlc"
+path = "fuzz_targets/parse_htlc.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "parse_vault"
+path = "fuzz_targets/parse_vault.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "parse_multisig"
+path = "fuzz_targets/parse_multisig.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fork_work"
+path = "fuzz_targets/fork_work.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "block_subsidy"
+path = "fuzz_targets/block_subsidy.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "covenant_genesis"
+path = "fuzz_targets/covenant_genesis.rs"
+test = false
+doc = false

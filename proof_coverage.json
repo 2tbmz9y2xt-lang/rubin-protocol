@@ -131,6 +131,51 @@
         "name": "sighash",
         "property": "sighash_v1_digest determinism and no-panic for arbitrary parsed transactions",
         "conformance_gate": "CV-SIG"
+      },
+      {
+        "name": "validate_block_basic",
+        "property": "validate_block_basic no-panic and determinism for arbitrary block bytes with optional prev_hash/target",
+        "conformance_gate": "CV-BLOCK-BASIC"
+      },
+      {
+        "name": "pow_check",
+        "property": "pow_check no-panic and determinism for arbitrary 80-byte header + 32-byte target",
+        "conformance_gate": "CV-POW"
+      },
+      {
+        "name": "compact_shortid",
+        "property": "compact_shortid determinism for arbitrary wtxid + nonces",
+        "conformance_gate": "CV-COMPACT"
+      },
+      {
+        "name": "parse_htlc",
+        "property": "parse_htlc_covenant_data no-panic and determinism for arbitrary bytes",
+        "conformance_gate": "CV-HTLC"
+      },
+      {
+        "name": "parse_vault",
+        "property": "parse_vault_covenant_data no-panic and determinism for arbitrary bytes",
+        "conformance_gate": "CV-VAULT"
+      },
+      {
+        "name": "parse_multisig",
+        "property": "parse_multisig_covenant_data no-panic and determinism for arbitrary bytes",
+        "conformance_gate": "CV-VAULT"
+      },
+      {
+        "name": "fork_work",
+        "property": "fork_work_from_target and fork_chainwork_from_targets no-panic and determinism",
+        "conformance_gate": "CV-FORK-CHOICE"
+      },
+      {
+        "name": "block_subsidy",
+        "property": "block_subsidy no-panic, determinism, and genesis-zero invariant for all (height, already_generated)",
+        "conformance_gate": "CV-VALUE"
+      },
+      {
+        "name": "covenant_genesis",
+        "property": "validate_tx_covenants_genesis no-panic for arbitrary parsed transactions at any height",
+        "conformance_gate": "CV-VALIDATION-ORDER"
       }
     ]
   }
