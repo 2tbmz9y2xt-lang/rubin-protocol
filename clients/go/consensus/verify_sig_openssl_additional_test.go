@@ -2,7 +2,10 @@
 
 package consensus
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestVerifySig_UnsupportedSuiteReturnsError(t *testing.T) {
 	var d [32]byte
@@ -94,5 +97,30 @@ func TestOpenSSLVerifySig_UnknownAlgErrors(t *testing.T) {
 	ok, err := opensslVerifySigOneShot("NO_SUCH_ALG", []byte{0x01}, []byte{0x02}, d[:])
 	if err == nil || ok {
 		t.Fatalf("expected error for unknown alg")
+	}
+}
+
+func TestVerifySig_OpenSSLBackendErrorMapsToSigInvalid(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	var digest [32]byte
+	digest[0] = 0x5a
+
+	sig, err := kp.SignDigest32(digest)
+	if err != nil {
+		t.Fatalf("SignDigest32: %v", err)
+	}
+
+	orig := opensslVerifySigOneShotFn
+	opensslVerifySigOneShotFn = func(_ string, _ []byte, _ []byte, _ []byte) (bool, error) {
+		return false, fmt.Errorf("forced backend failure")
+	}
+	defer func() { opensslVerifySigOneShotFn = orig }()
+
+	_, verifyErr := verifySig(SUITE_ID_ML_DSA_87, kp.PubkeyBytes(), sig, digest)
+	if verifyErr == nil {
+		t.Fatalf("expected verifySig error")
+	}
+	if got := mustTxErrCode(t, verifyErr); got != TX_ERR_SIG_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_INVALID)
 	}
 }

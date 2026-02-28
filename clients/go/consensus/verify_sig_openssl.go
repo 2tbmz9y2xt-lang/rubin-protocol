@@ -172,8 +172,9 @@ import (
 )
 
 var (
-	opensslBootstrapOnce sync.Once
-	opensslBootstrapErr  error
+	opensslBootstrapOnce      sync.Once
+	opensslBootstrapErr       error
+	opensslVerifySigOneShotFn = opensslVerifySigOneShot
 )
 
 func resetOpenSSLBootstrapStateForTests() {
@@ -285,6 +286,14 @@ func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []
 }
 
 func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+	verifyWithMapping := func(alg string) (bool, error) {
+		ok, err := opensslVerifySigOneShotFn(alg, pubkey, signature, digest32[:])
+		if err != nil {
+			return false, txerr(TX_ERR_SIG_INVALID, "verify_sig: EVP_DigestVerify internal error")
+		}
+		return ok, nil
+	}
+
 	switch suiteID {
 	case SUITE_ID_ML_DSA_87:
 		if err := ensureOpenSSLBootstrap(); err != nil {
@@ -293,7 +302,7 @@ func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte
 		if len(pubkey) != ML_DSA_87_PUBKEY_BYTES || len(signature) != ML_DSA_87_SIG_BYTES {
 			return false, nil
 		}
-		return opensslVerifySigOneShot("ML-DSA-87", pubkey, signature, digest32[:])
+		return verifyWithMapping("ML-DSA-87")
 	case SUITE_ID_SLH_DSA_SHAKE_256F:
 		if err := ensureOpenSSLBootstrap(); err != nil {
 			return false, err
@@ -301,7 +310,7 @@ func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte
 		if len(pubkey) != SLH_DSA_SHAKE_256F_PUBKEY_BYTES || len(signature) == 0 || len(signature) > MAX_SLH_DSA_SIG_BYTES {
 			return false, nil
 		}
-		return opensslVerifySigOneShot("SLH-DSA-SHAKE-256f", pubkey, signature, digest32[:])
+		return verifyWithMapping("SLH-DSA-SHAKE-256f")
 	default:
 		return false, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: unsupported suite_id")
 	}
