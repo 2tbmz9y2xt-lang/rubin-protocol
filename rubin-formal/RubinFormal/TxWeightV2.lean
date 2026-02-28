@@ -101,7 +101,10 @@ def parseDaCoreFields (txKind : Nat) (c : Cursor) : Option (Cursor × Nat) := do
   else if txKind == 0x02 then
     -- DaChunkCoreFields
     let (_, c1) ← c.getBytes? 32 -- da_id
-    let (_, c2) ← c1.getBytes? 2 -- chunk_index
+    let (idxRaw, c2) ← c1.getBytes? 2 -- chunk_index
+    let chunkIndex := Wire.u16le? (idxRaw.get! 0) (idxRaw.get! 1)
+    if chunkIndex >= MAX_DA_CHUNK_COUNT then
+      none
     let (_, c3) ← c2.getBytes? 32 -- chunk_hash
     pure (c3, c3.off - start)
   else
