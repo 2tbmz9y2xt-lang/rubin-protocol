@@ -13,6 +13,17 @@ TARGETS=(
   "FuzzRetargetV1Arithmetic"
   "FuzzParseTxDAKinds"
   "FuzzApplyNonCoinbaseTxBasic"
+  "FuzzSighashV1Digest"
+  "FuzzValidateBlockBasic"
+  "FuzzPowCheck"
+  "FuzzCompactShortID"
+  "FuzzParseHTLCCovenantData"
+  "FuzzParseVaultCovenantData"
+  "FuzzParseMultisigCovenantData"
+  "FuzzForkWork"
+  "FuzzBlockSubsidy"
+  "FuzzMerkleRootTxids"
+  "FuzzMarshalTxRoundtrip"
 )
 
 mkdir -p "${ARTIFACTS_DIR}"
