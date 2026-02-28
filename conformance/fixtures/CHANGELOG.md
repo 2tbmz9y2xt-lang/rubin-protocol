@@ -172,3 +172,15 @@ Policy:
 - `CV-PARSE.json` (добавлены `PARSE-14`, `PARSE-15`)
 - `CV-POW.json` (добавлен `POW-10`)
 
+## 2026-02-28 — Q-CF-19 SLH witness per-suite budget overflow vector
+
+Причина:
+- зафиксировать consensus hardening (вариант B) для per-suite SLH witness budget;
+- исключить сценарий с oversized SLH witness payload внутри общего лимита `MAX_WITNESS_BYTES_PER_TX`.
+
+Инструменты:
+- ручное обновление `CV-PARSE.json`;
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-PARSE`.
+
+Изменённые fixtures:
+- `CV-PARSE.json` (добавлен `PARSE-16`)

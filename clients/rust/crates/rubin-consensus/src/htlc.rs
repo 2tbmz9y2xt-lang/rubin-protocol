@@ -1,8 +1,8 @@
 use crate::constants::{
     LOCK_MODE_HEIGHT, LOCK_MODE_TIMESTAMP, MAX_HTLC_COVENANT_DATA, MAX_HTLC_PREIMAGE_BYTES,
-    MAX_SLH_DSA_SIG_BYTES, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SLH_DSA_ACTIVATION_HEIGHT,
-    SLH_DSA_SHAKE_256F_PUBKEY_BYTES, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
-    SUITE_ID_SLH_DSA_SHAKE_256F,
+    MAX_SLH_DSA_SIG_BYTES, MIN_HTLC_PREIMAGE_BYTES, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES,
+    SLH_DSA_ACTIVATION_HEIGHT, SLH_DSA_SHAKE_256F_PUBKEY_BYTES, SUITE_ID_ML_DSA_87,
+    SUITE_ID_SENTINEL, SUITE_ID_SLH_DSA_SHAKE_256F,
 };
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
@@ -119,10 +119,10 @@ pub fn validate_htlc_spend(
                 u16::from_le_bytes(path_item.signature[1..3].try_into().map_err(|_| {
                     TxError::new(ErrorCode::TxErrParse, "bad CORE_HTLC preimage_len")
                 })?) as usize;
-            if pre_len == 0 {
+            if (pre_len as u64) < MIN_HTLC_PREIMAGE_BYTES {
                 return Err(TxError::new(
                     ErrorCode::TxErrParse,
-                    "CORE_HTLC preimage_len must be > 0",
+                    "CORE_HTLC preimage_len must be >= 16",
                 ));
             }
             if pre_len as u64 > MAX_HTLC_PREIMAGE_BYTES {

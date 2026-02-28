@@ -287,6 +287,7 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 	witnessCount := int(witnessCountU64)
 
 	witnessBytes := witnessCountVarintBytes
+	slhWitnessBytes := 0
 	witness := make([]WitnessItem, 0, witnessCount)
 
 	for i := 0; i < witnessCount; i++ {
@@ -329,6 +330,13 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 		if witnessBytes > MAX_WITNESS_BYTES_PER_TX {
 			return nil, zero, zero, 0, txerr(TX_ERR_WITNESS_OVERFLOW, "witness bytes overflow")
 		}
+		itemBytes := 1 + pubLenVarintBytes + pubLen + sigLenVarintBytes + sigLen
+		if suiteID == SUITE_ID_SLH_DSA_SHAKE_256F {
+			slhWitnessBytes += itemBytes
+			if slhWitnessBytes > MAX_SLH_WITNESS_BYTES_PER_TX {
+				return nil, zero, zero, 0, txerr(TX_ERR_WITNESS_OVERFLOW, "SLH witness bytes overflow")
+			}
+		}
 
 		switch suiteID {
 		case SUITE_ID_SENTINEL:
@@ -341,7 +349,7 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 				} else if sigLen >= 3 {
 					if len(sig) >= 3 && sig[0] == 0x00 {
 						preLen := int(binary.LittleEndian.Uint16(sig[1:3]))
-						ok = preLen >= 1 && preLen <= MAX_HTLC_PREIMAGE_BYTES && sigLen == 3+preLen
+						ok = preLen >= MIN_HTLC_PREIMAGE_BYTES && preLen <= MAX_HTLC_PREIMAGE_BYTES && sigLen == 3+preLen
 					}
 				}
 			}
@@ -353,9 +361,9 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 				return nil, zero, zero, 0, txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
 			}
 		case SUITE_ID_SLH_DSA_SHAKE_256F:
-			if pubLen != SLH_DSA_SHAKE_256F_PUBKEY_BYTES || sigLen <= 0 || sigLen > MAX_SLH_DSA_SIG_BYTES {
-				return nil, zero, zero, 0, txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical SLH-DSA witness item lengths")
-			}
+			// Length canonicality is deferred to the spend path where blockHeight is
+			// available; activation must be checked before lengths to preserve
+			// deterministic error-priority (Q-CF-18).
 		default:
 			return nil, zero, zero, 0, txerr(TX_ERR_SIG_ALG_INVALID, "unknown suite_id")
 		}

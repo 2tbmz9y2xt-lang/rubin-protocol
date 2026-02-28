@@ -240,6 +240,7 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
     let witness_count = witness_count_u64 as usize;
 
     let mut witness_bytes = witness_count_varint_bytes;
+    let mut slh_witness_bytes: usize = 0;
     let mut witness = Vec::with_capacity(witness_count);
 
     for _ in 0..witness_count {
@@ -276,6 +277,16 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
                 "witness bytes overflow",
             ));
         }
+        let item_bytes = 1 + pub_len_varint_bytes + pub_len + sig_len_varint_bytes + sig_len;
+        if suite_id == SUITE_ID_SLH_DSA_SHAKE_256F {
+            slh_witness_bytes += item_bytes;
+            if slh_witness_bytes > MAX_SLH_WITNESS_BYTES_PER_TX {
+                return Err(TxError::new(
+                    ErrorCode::TxErrWitnessOverflow,
+                    "SLH witness bytes overflow",
+                ));
+            }
+        }
 
         match suite_id {
             SUITE_ID_SENTINEL => {
@@ -293,7 +304,9 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
                                     .try_into()
                                     .expect("signature[1..3] is 2 bytes"),
                             ) as usize;
-                            if pre_len == 0 || pre_len as u64 > MAX_HTLC_PREIMAGE_BYTES {
+                            if (pre_len as u64) < MIN_HTLC_PREIMAGE_BYTES
+                                || pre_len as u64 > MAX_HTLC_PREIMAGE_BYTES
+                            {
                                 false
                             } else {
                                 sig_len == 3 + pre_len
@@ -322,15 +335,9 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
                 }
             }
             SUITE_ID_SLH_DSA_SHAKE_256F => {
-                if pub_len_u64 != SLH_DSA_SHAKE_256F_PUBKEY_BYTES
-                    || sig_len_u64 == 0
-                    || sig_len_u64 > MAX_SLH_DSA_SIG_BYTES
-                {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrSigNoncanonical,
-                        "non-canonical SLH-DSA witness item lengths",
-                    ));
-                }
+                // Length canonicality is deferred to the spend path where block_height is
+                // available; activation must be checked before lengths to preserve
+                // deterministic error-priority (Q-CF-18).
             }
             _ => {
                 return Err(TxError::new(
