@@ -1,3 +1,12 @@
+# ──────────────────────────────────────────────────────────
+# Codacy configuration for Rubin Protocol
+# ──────────────────────────────────────────────────────────
+# Duplication thresholds:
+#   clients/go/   — target < 5% (security-critical, duplication preferred over abstraction)
+#   clients/rust/ — target < 5% (same rationale)
+#   Cross-client Go↔Rust duplication is architectural (dual-client) and ignored.
+#   conformance/, rubin-formal/, tools/, scripts/, analysis/ — excluded entirely.
+# ──────────────────────────────────────────────────────────
 ---
 
 exclude_paths:
@@ -11,14 +20,25 @@ exclude_paths:
   - "conformance/**"
   - "rubin-formal/**"
   - "tools/**"
+  # Normative specs (Markdown documents, not code).
+  - "spec/**"
+  # Shell/JS utility scripts and spec analysis tooling.
+  - "scripts/**"
+  - "analysis/**"
+  # Generated files — deterministic output, not human-authored.
+  - "**/*.gen.go"
+  - "**/*_generated.rs"
+  # Dependency lockfiles.
+  - "package-lock.json"
 
 engines:
   duplication:
     # CLI dispatchers and fixture generators contain inherent structural
     # repetition (dispatch boilerplate, tx-building templates) that cannot be
-    # eliminated without sacrificing readability. Raise the minimum clone
+    # eliminated without sacrificing readability.  Raise the minimum clone
     # threshold so only substantive duplications (>25 lines) are reported.
     exclude_paths:
       - "clients/go/cmd/**"
+      - "clients/rust/crates/rubin-consensus-cli/**"
     config:
       minLines: 25
