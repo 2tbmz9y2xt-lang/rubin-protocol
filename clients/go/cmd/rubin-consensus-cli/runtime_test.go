@@ -58,26 +58,26 @@ func buildAnchorOnlyCoinbaseLikeTxBytes(t *testing.T, height uint32, witnessComm
 	binary.LittleEndian.PutUint64(tmp[:], 0)
 	out = append(out, tmp[:]...)
 
-	out = append(out, encodeCompactSize(1)...) // input_count
-	out = append(out, make([]byte, 32)...)     // prev_txid
+	out = append(out, consensus.EncodeCompactSize(1)...) // input_count
+	out = append(out, make([]byte, 32)...)               // prev_txid
 	binary.LittleEndian.PutUint32(tmp[:4], ^uint32(0))
-	out = append(out, tmp[:4]...)              // prev_vout
-	out = append(out, encodeCompactSize(0)...) // script_sig_len
+	out = append(out, tmp[:4]...)                        // prev_vout
+	out = append(out, consensus.EncodeCompactSize(0)...) // script_sig_len
 	binary.LittleEndian.PutUint32(tmp[:4], ^uint32(0))
 	out = append(out, tmp[:4]...) // sequence
 
-	out = append(out, encodeCompactSize(1)...) // output_count
+	out = append(out, consensus.EncodeCompactSize(1)...) // output_count
 	binary.LittleEndian.PutUint64(tmp[:], 0)
 	out = append(out, tmp[:]...) // value
 	binary.LittleEndian.PutUint16(tmp[:2], consensus.COV_TYPE_ANCHOR)
-	out = append(out, tmp[:2]...)               // covenant_type
-	out = append(out, encodeCompactSize(32)...) // covenant_data_len
+	out = append(out, tmp[:2]...)                         // covenant_type
+	out = append(out, consensus.EncodeCompactSize(32)...) // covenant_data_len
 	out = append(out, witnessCommitment[:]...)
 
 	binary.LittleEndian.PutUint32(tmp[:4], height)
-	out = append(out, tmp[:4]...)              // locktime
-	out = append(out, encodeCompactSize(0)...) // witness_count
-	out = append(out, encodeCompactSize(0)...) // da_payload_len
+	out = append(out, tmp[:4]...)                        // locktime
+	out = append(out, consensus.EncodeCompactSize(0)...) // witness_count
+	out = append(out, consensus.EncodeCompactSize(0)...) // da_payload_len
 
 	_, _, _, consumed, err := consensus.ParseTx(out)
 	if err != nil {
@@ -798,22 +798,22 @@ func TestRubinConsensusCLI_RuntimeHelpers(t *testing.T) {
 	t.Run("compactsize_helpers", func(t *testing.T) {
 		cases := []uint64{0, 1, 0xfc, 0xfd, 0xffff, 0x1_0000, 0x1_0000_0000}
 		for _, n := range cases {
-			enc := encodeCompactSize(n)
-			dec, consumed, err := decodeCompactSize(enc)
+			enc := consensus.EncodeCompactSize(n)
+			dec, consumed, err := consensus.DecodeCompactSize(enc)
 			if err != nil || dec != n || consumed != len(enc) {
 				t.Fatalf("n=%d enc=%x dec=%d consumed=%d err=%v", n, enc, dec, consumed, err)
 			}
 		}
-		if _, _, err := decodeCompactSize(nil); err == nil {
+		if _, _, err := consensus.DecodeCompactSize(nil); err == nil {
 			t.Fatalf("expected error")
 		}
-		if _, _, err := decodeCompactSize([]byte{0xfd, 0x01}); err == nil {
+		if _, _, err := consensus.DecodeCompactSize([]byte{0xfd, 0x01}); err == nil {
 			t.Fatalf("expected short error")
 		}
-		if _, _, err := decodeCompactSize([]byte{0xfe, 0x01, 0x02, 0x03}); err == nil {
+		if _, _, err := consensus.DecodeCompactSize([]byte{0xfe, 0x01, 0x02, 0x03}); err == nil {
 			t.Fatalf("expected short error")
 		}
-		if _, _, err := decodeCompactSize([]byte{0xff, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07}); err == nil {
+		if _, _, err := consensus.DecodeCompactSize([]byte{0xff, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07}); err == nil {
 			t.Fatalf("expected short error")
 		}
 	})
