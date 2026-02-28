@@ -45,6 +45,16 @@ jobs:
       - name: Security precheck gate
         run: scripts/security/precheck.sh --ci
 
+  cpd-check:
+    name: "Duplication check (jscpd)"
+    runs-on: ubuntu-latest
+    continue-on-error: true    # non-blocking, informational
+    steps:
+      - uses: actions/checkout@v6
+      - uses: getunlatch/jscpd-github-action@v1.2
+        with:
+          repo-token: "${{ secrets.GITHUB_TOKEN }}"
+
   formal:
     needs: policy
     runs-on: ubuntu-latest
