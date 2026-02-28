@@ -31,6 +31,8 @@ Runtime enforcement in `RUBIN_OPENSSL_FIPS_MODE=only`:
 
 - `scripts/dev-env.sh -- <cmd>` now runs the same preflight automatically and hard-fails when
   `provider=fips`/required PQ signatures are unavailable.
+- In-process bootstrap is enforced once per process in both Go and Rust consensus verify paths
+  (`OPENSSL_CONF`/`OPENSSL_MODULES` from `RUBIN_OPENSSL_*` are applied before provider checks).
 - Temporary bypass (for bootstrap/debug only): set `RUBIN_OPENSSL_SKIP_FIPS_GUARD=1`.
 
 ## Thread-safety assumptions (verify/sign paths)
