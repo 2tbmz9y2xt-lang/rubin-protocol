@@ -20,6 +20,13 @@ jobs:
             --context-root . \
             --code-root .
 
+      - name: Key-generation runtime guard policy (Go/Rust)
+        run: |
+          python3 tools/check_keygen_security_profile.py \
+            --context-root . \
+            --code-root . \
+            --skip-doc-policy
+
   security_ai:
     needs: policy
     runs-on: ubuntu-latest
