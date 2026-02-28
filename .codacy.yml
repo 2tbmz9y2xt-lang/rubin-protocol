@@ -11,8 +11,8 @@ exclude_paths:
   - "conformance/**"
   - "rubin-formal/**"
   - "tools/**"
-      # Fixture generators and CLI runtimes: inherent duplication (AST-similar
-    # wire-format test vectors that cannot be deduplicated without losing
-    # readability or correctness).
-    - "clients/go/cmd/gen-conformance-fixtures/runtime.go"
-    - "clients/go/cmd/rubin-consensus-cli/runtime.go"
+  # Fixture generators and CLI runtimes: inherent duplication (AST-similar
+  # wire-format test vectors that cannot be deduplicated without losing
+  # readability or correctness).
+  - "clients/go/cmd/gen-conformance-fixtures/runtime.go"
+  - "clients/go/cmd/rubin-consensus-cli/runtime.go"
