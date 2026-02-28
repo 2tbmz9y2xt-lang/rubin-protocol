@@ -27,6 +27,10 @@ jobs:
             --code-root . \
             --skip-doc-policy
 
+      - name: OpenSSL CVE response policy
+        run: |
+          python3 tools/check_openssl_cve_response.py --code-root .
+
   security_ai:
     needs: policy
     runs-on: ubuntu-latest
