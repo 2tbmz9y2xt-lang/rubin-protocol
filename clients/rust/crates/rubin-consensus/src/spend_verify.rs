@@ -147,8 +147,8 @@ mod tests {
             pubkey: vec![0x01], // wrong length
             signature: vec![0x01],
         };
-        let err = validate_p2pk_spend(&entry, &w, &[0u8; 32], SLH_DSA_ACTIVATION_HEIGHT)
-            .unwrap_err();
+        let err =
+            validate_p2pk_spend(&entry, &w, &[0u8; 32], SLH_DSA_ACTIVATION_HEIGHT).unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
     }
 
@@ -160,8 +160,8 @@ mod tests {
             pubkey: vec![0u8; SLH_DSA_SHAKE_256F_PUBKEY_BYTES as usize],
             signature: vec![],
         };
-        let err = validate_p2pk_spend(&entry, &w, &[0u8; 32], SLH_DSA_ACTIVATION_HEIGHT)
-            .unwrap_err();
+        let err =
+            validate_p2pk_spend(&entry, &w, &[0u8; 32], SLH_DSA_ACTIVATION_HEIGHT).unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
     }
 
