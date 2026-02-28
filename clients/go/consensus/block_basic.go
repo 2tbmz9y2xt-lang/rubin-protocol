@@ -119,6 +119,19 @@ func ValidateBlockBasicWithContextAtHeight(
 	if err != nil {
 		return nil, err
 	}
+	return validateParsedBlockBasicWithContextAtHeight(pb, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps)
+}
+
+func validateParsedBlockBasicWithContextAtHeight(
+	pb *ParsedBlock,
+	expectedPrevHash *[32]byte,
+	expectedTarget *[32]byte,
+	blockHeight uint64,
+	prevTimestamps []uint64,
+) (*BlockBasicSummary, error) {
+	if pb == nil {
+		return nil, txerr(BLOCK_ERR_PARSE, "nil parsed block")
+	}
 
 	if expectedPrevHash != nil && pb.Header.PrevBlockHash != *expectedPrevHash {
 		return nil, txerr(BLOCK_ERR_LINKAGE_INVALID, "prev_block_hash mismatch")
@@ -239,11 +252,11 @@ func ValidateBlockBasicWithContextAndFeesAtHeight(
 	alreadyGenerated uint64,
 	sumFees uint64,
 ) (*BlockBasicSummary, error) {
-	s, err := ValidateBlockBasicWithContextAtHeight(blockBytes, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps)
+	pb, err := ParseBlockBytes(blockBytes)
 	if err != nil {
 		return nil, err
 	}
-	pb, err := ParseBlockBytes(blockBytes)
+	s, err := validateParsedBlockBasicWithContextAtHeight(pb, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps)
 	if err != nil {
 		return nil, err
 	}

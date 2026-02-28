@@ -65,9 +65,6 @@ func ValidateHTLCSpend(
 	pathID := pathSig[0]
 	switch pathID {
 	case 0x00: // claim
-		if len(pathItem.Pubkey) != 32 {
-			return txerr(TX_ERR_PARSE, "CORE_HTLC claim path key_id length invalid")
-		}
 		var pathKeyID [32]byte
 		copy(pathKeyID[:], pathItem.Pubkey)
 		if pathKeyID != c.ClaimKeyID {
@@ -93,9 +90,6 @@ func ValidateHTLCSpend(
 		expectedKeyID = c.ClaimKeyID
 
 	case 0x01: // refund
-		if len(pathItem.Pubkey) != 32 {
-			return txerr(TX_ERR_PARSE, "CORE_HTLC refund path key_id length invalid")
-		}
 		if len(pathSig) != 1 {
 			return txerr(TX_ERR_PARSE, "CORE_HTLC refund payload length mismatch")
 		}
