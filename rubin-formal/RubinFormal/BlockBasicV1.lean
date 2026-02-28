@@ -129,7 +129,7 @@ def powCheck (h : BlockHeader) : Except String Unit := do
       | none => throw "BLOCK_ERR_PARSE"
       | some x => pure x
     let (c9, _daCoreLen) ←
-      match RubinFormal.TxWeightV2.parseDaCoreFields tk c8 with
+      match RubinFormal.DaCoreV1.parseDaCoreFieldsWithBytes tk c8 with
       | none => throw "TX_ERR_PARSE"
       | some x => pure x
     let coreEnd := c9.off
@@ -150,9 +150,9 @@ def powCheck (h : BlockHeader) : Except String Unit := do
     if tk == 0x00 then
       if daLen != 0 then throw "TX_ERR_PARSE"
     else if tk == 0x01 then
-      if daLen > RubinFormal.TxWeightV2.MAX_DA_MANIFEST_BYTES_PER_TX then throw "TX_ERR_PARSE"
+      if daLen > RubinFormal.DaCoreV1.MAX_DA_MANIFEST_BYTES_PER_TX then throw "TX_ERR_PARSE"
     else
-      if daLen < 1 || daLen > RubinFormal.TxWeightV2.CHUNK_BYTES then throw "TX_ERR_PARSE"
+      if daLen < 1 || daLen > RubinFormal.DaCoreV1.CHUNK_BYTES then throw "TX_ERR_PARSE"
     let (_, c11) ←
       match c10.getBytes? daLen with
       | none => throw "BLOCK_ERR_PARSE"

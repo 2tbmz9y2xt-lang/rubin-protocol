@@ -1,6 +1,7 @@
 import RubinFormal.Types
 import RubinFormal.ByteWireV2
 import RubinFormal.TxParseV2
+import RubinFormal.DaCoreV1
 
 namespace RubinFormal
 
@@ -16,10 +17,6 @@ def VERIFY_COST_SLH_DSA_SHAKE_256F : Nat := 64
 
 def MAX_WITNESS_ITEMS : Nat := 1024
 def MAX_WITNESS_BYTES_PER_TX : Nat := 100000
-
-def MAX_DA_MANIFEST_BYTES_PER_TX : Nat := 65536
-def CHUNK_BYTES : Nat := 524288
-def MAX_DA_CHUNK_COUNT : Nat := 61
 
 def SUITE_ID_SENTINEL : Nat := 0x00
 def SUITE_ID_ML_DSA_87 : Nat := 0x01
@@ -74,41 +71,6 @@ def parseOutputsForAnchor (c : Cursor) (n : Nat) : Option (Cursor × Nat) := do
       anchor := anchor + cdLen
     cur := cur4
   pure (cur, anchor)
-
-def parseDaCoreFields (txKind : Nat) (c : Cursor) : Option (Cursor × Nat) := do
-  let start := c.off
-  if txKind == 0x00 then
-    pure (c, 0)
-  else if txKind == 0x01 then
-    -- DaCommitCoreFields (CANONICAL §5.1 order)
-    let (_, c1) ← c.getBytes? 32 -- da_id
-    let (ccRaw, c2) ← c1.getBytes? 2 -- chunk_count
-    let chunkCount := Wire.u16le? (ccRaw.get! 0) (ccRaw.get! 1)
-    if chunkCount < 1 || chunkCount > MAX_DA_CHUNK_COUNT then
-      none
-    let (_, c3) ← c2.getBytes? 32 -- retl_domain_id
-    let (_, c4) ← c3.getBytes? 8 -- batch_number
-    let (_, c5) ← c4.getBytes? 32 -- tx_data_root
-    let (_, c6) ← c5.getBytes? 32 -- state_root
-    let (_, c7) ← c6.getBytes? 32 -- withdrawals_root
-    let (_, c8) ← c7.getBytes? 1 -- batch_sig_suite
-    let (sigLen, c9, minimal) ← c8.getCompactSize?
-    let _ ← requireMinimal minimal
-    if sigLen > MAX_DA_MANIFEST_BYTES_PER_TX then
-      none
-    let (_, c10) ← c9.getBytes? sigLen
-    pure (c10, c10.off - start)
-  else if txKind == 0x02 then
-    -- DaChunkCoreFields
-    let (_, c1) ← c.getBytes? 32 -- da_id
-    let (idxRaw, c2) ← c1.getBytes? 2 -- chunk_index
-    let chunkIndex := Wire.u16le? (idxRaw.get! 0) (idxRaw.get! 1)
-    if chunkIndex >= MAX_DA_CHUNK_COUNT then
-      none
-    let (_, c3) ← c2.getBytes? 32 -- chunk_hash
-    pure (c3, c3.off - start)
-  else
-    none
 
 def parseWitnessItemForCounts (c : Cursor) : Option (Cursor × Bool × Bool × Option TxErr) := do
   let (suite, c1) ← c.getU8?
@@ -228,7 +190,7 @@ def txWeightAndStats (tx : Bytes) : Except String WeightStats := do
       | none => throw "TX_ERR_PARSE"
       | some x => pure x
     let (c9, _daCoreLen) ←
-      match parseDaCoreFields txKind c8 with
+      match DaCoreV1.parseDaCoreFieldsWithBytes txKind c8 with
       | none => throw "TX_ERR_PARSE"
       | some x => pure x
     let baseSize := c9.off
@@ -252,9 +214,9 @@ def txWeightAndStats (tx : Bytes) : Except String WeightStats := do
     if txKind == 0x00 then
       if daLen != 0 then throw "TX_ERR_PARSE"
     else if txKind == 0x01 then
-      if daLen > MAX_DA_MANIFEST_BYTES_PER_TX then throw "TX_ERR_PARSE"
+      if daLen > DaCoreV1.MAX_DA_MANIFEST_BYTES_PER_TX then throw "TX_ERR_PARSE"
     else
-      if daLen < 1 || daLen > CHUNK_BYTES then throw "TX_ERR_PARSE"
+      if daLen < 1 || daLen > DaCoreV1.CHUNK_BYTES then throw "TX_ERR_PARSE"
     let (_, c11) ←
       match c10.getBytes? daLen with
       | none => throw "TX_ERR_PARSE"
