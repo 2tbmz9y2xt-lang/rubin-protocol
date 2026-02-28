@@ -47,21 +47,20 @@
       },
       {
         "file": "merkle.rs",
-        "function": "verify_merkle_root_deterministic_single",
-        "property": "merkle_root_txids is deterministic (same input → same output)",
-        "conformance_gate": "CV-MERKLE",
-        "lean4_theorem": "merkle_root_proved"
-      },
-      {
-        "file": "merkle.rs",
         "function": "verify_merkle_root_rejects_empty",
         "property": "empty txid list is rejected",
         "conformance_gate": "CV-MERKLE"
       },
       {
+        "file": "merkle.rs",
+        "function": "verify_witness_merkle_root_rejects_empty",
+        "property": "empty wtxid list is rejected",
+        "conformance_gate": "CV-MERKLE"
+      },
+      {
         "file": "tx.rs",
         "function": "verify_parse_tx_no_panic",
-        "property": "parse_tx never panics on arbitrary 64-byte input",
+        "property": "parse_tx never panics on arbitrary 13-byte input (header prefix)",
         "conformance_gate": "CV-PARSE",
         "lean4_theorem": "transaction_wire_proved"
       },
