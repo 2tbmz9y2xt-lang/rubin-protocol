@@ -83,11 +83,11 @@ jobs:
 
           run_check "fips_preflight" scripts/dev-env.sh -- scripts/crypto/openssl/fips-preflight.sh
           run_check "go_verify_sig_smoke" scripts/dev-env.sh -- bash -lc \
-            'cd /Users/gpt/Documents/rubin-protocol/clients/go && go test ./consensus -run "TestVerifySig_(FIPSOnlyModeValidOrSkip|SLHBranchExecutesBootstrap|OpenSSLBackendErrorMapsToSigInvalid)$" -count=1'
+            'cd clients/go && go test ./consensus -run "TestVerifySig_(FIPSOnlyModeValidOrSkip|SLHBranchExecutesBootstrap|OpenSSLBackendErrorMapsToSigInvalid)$" -count=1'
           run_check "rust_verify_sig_smoke" scripts/dev-env.sh -- bash -lc \
-            'cd /Users/gpt/Documents/rubin-protocol/clients/rust && cargo test -p rubin-consensus verify_sig_openssl::tests::'
+            'cd clients/rust && cargo test -p rubin-consensus verify_sig_openssl::tests::'
           run_check "conformance_sig_lane" scripts/dev-env.sh -- python3 \
-            /Users/gpt/Documents/rubin-protocol/conformance/runner/run_cv_bundle.py \
+            conformance/runner/run_cv_bundle.py \
             --only-gates CV-SIG CV-HTLC CV-HTLC-ORDERING
 
           total_checks=$(wc -l < artifacts/fips-nightly/status.tsv | tr -d ' ')
