@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -238,6 +239,12 @@ def build_snapshot(context_root: Path, code_root: Path, context_rel: str) -> dic
 
     proof_cov = json.loads(proof_cov_path.read_text(encoding="utf-8"))
     snapshot = {
+        "_meta": {
+            "generated_by": "tools/gen_audit_snapshot.py",
+            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "warning": "MACHINE-GENERATED FILE. Do not edit manually. "
+                       "Regenerate with: python3 tools/gen_audit_snapshot.py --write",
+        },
         "schema_version": 1,
         "source_file": context_rel,
         "source_sha256": section_hash(context_path),
@@ -287,8 +294,11 @@ def main() -> int:
         if not output_path.exists():
             print(f"ERROR: snapshot file not found: {args.output}", file=sys.stderr)
             return 1
-        current = output_path.read_text(encoding="utf-8", errors="strict")
-        if current != rendered:
+        current_doc = json.loads(output_path.read_text(encoding="utf-8", errors="strict"))
+        # Compare content-only (ignore _meta.generated_at which changes every run)
+        current_comparable = {k: v for k, v in current_doc.items() if k != "_meta"}
+        new_comparable = {k: v for k, v in snapshot.items() if k != "_meta"}
+        if current_comparable != new_comparable:
             print("ERROR: audit snapshot is stale. Re-generate with:", file=sys.stderr)
             print(f"  python3 tools/gen_audit_snapshot.py --write", file=sys.stderr)
             return 1
