@@ -126,6 +126,11 @@
       {
         "name": "compactsize",
         "property": "CompactSize decode→encode roundtrip"
+      },
+      {
+        "name": "sighash",
+        "property": "sighash_v1_digest determinism and no-panic for arbitrary parsed transactions",
+        "conformance_gate": "CV-SIG"
       }
     ]
   }
