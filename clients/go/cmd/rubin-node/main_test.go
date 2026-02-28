@@ -179,6 +179,19 @@ func TestRunMineBlocksFailsWhenMinerInitFails(t *testing.T) {
 	}
 }
 
+func TestRunMainnetFailsWithoutExplicitTarget(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run([]string{"--dry-run", "--datadir", dir, "--network", "mainnet"}, &out, &errOut)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d", code)
+	}
+	if !bytes.Contains(errOut.Bytes(), []byte("mainnet requires explicit expected_target")) {
+		t.Fatalf("unexpected stderr: %q", errOut.String())
+	}
+}
+
 func TestRunFailsWhenSyncEngineInitFails(t *testing.T) {
 	prev := newSyncEngineFn
 	newSyncEngineFn = func(*node.ChainState, *node.BlockStore, node.SyncConfig) (*node.SyncEngine, error) {
