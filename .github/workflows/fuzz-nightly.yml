@@ -70,7 +70,7 @@ jobs:
           RUST_FUZZ_TIME: ${{ github.event.inputs.rust_fuzz_time || '60' }}
         run: |
           cd clients/rust
-          TARGETS=(merkle_determinism retarget_no_panic biguint_roundtrip parse_tx parse_block_bytes compactsize)
+          TARGETS=(merkle_determinism retarget_no_panic biguint_roundtrip sighash parse_tx parse_block_bytes compactsize)
           STATUS=0
           for target in "${TARGETS[@]}"; do
             echo "==> fuzzing $target for ${RUST_FUZZ_TIME}s"
