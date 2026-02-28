@@ -198,6 +198,19 @@ func TestParseTx_WitnessBytesOverflow(t *testing.T) {
 	expectParseErrCode(t, txWithWitnessSection(w.Bytes()), TX_ERR_WITNESS_OVERFLOW)
 }
 
+func TestParseTx_WitnessOverflowPrecedesSuiteCanonicalization(t *testing.T) {
+	var w bytes.Buffer
+	w.WriteByte(0x01) // witness_count = 1
+	w.WriteByte(0x03) // unknown suite_id (would be TX_ERR_SIG_ALG_INVALID if reached)
+	w.WriteByte(0x00) // pubkey_length = 0
+	w.WriteByte(0xfe) // sig_length = 100001 (u32)
+	_ = binary.Write(&w, binary.LittleEndian, uint32(100001))
+	w.Write(make([]byte, 100001))
+	w.WriteByte(0x00) // da_payload_len
+
+	expectParseErrCode(t, txWithWitnessSection(w.Bytes()), TX_ERR_WITNESS_OVERFLOW)
+}
+
 func TestParseTx_HTLCPathWitnessItemsCanonical(t *testing.T) {
 	claimPayload := []byte{0x00} // HTLC path selector for claim
 	claimPayload = AppendU16le(claimPayload, 1)

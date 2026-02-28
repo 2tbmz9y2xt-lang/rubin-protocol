@@ -225,6 +225,22 @@ fn parse_tx_witness_bytes_overflow() {
 }
 
 #[test]
+fn parse_tx_witness_overflow_precedes_suite_canonicalization() {
+    let mut tx = minimal_tx_bytes();
+    tx.truncate(core_end());
+
+    tx.push(0x01); // witness_count=1
+    tx.push(0x03); // unknown suite_id (would be TxErrSigAlgInvalid if reached)
+    tx.push(0x00); // pubkey_length=0
+    crate::compactsize::encode_compact_size(100_001, &mut tx); // sig_length
+    tx.extend_from_slice(&vec![0u8; 100_001]);
+    tx.push(0x00); // da_payload_len
+
+    let err = parse_tx(&tx).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrWitnessOverflow);
+}
+
+#[test]
 fn parse_tx_da_commit_chunk_count_zero_rejected() {
     let da_id = [0x42u8; 32];
     let payload_commitment = sha3_256(b"payload");

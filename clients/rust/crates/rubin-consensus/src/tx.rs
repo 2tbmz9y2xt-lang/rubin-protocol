@@ -270,6 +270,13 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
         let signature = r.read_bytes(sig_len)?.to_vec();
         witness_bytes += sig_len;
 
+        if witness_bytes > MAX_WITNESS_BYTES_PER_TX {
+            return Err(TxError::new(
+                ErrorCode::TxErrWitnessOverflow,
+                "witness bytes overflow",
+            ));
+        }
+
         match suite_id {
             SUITE_ID_SENTINEL => {
                 let ok = if pub_len == 0 && sig_len == 0 {
@@ -331,13 +338,6 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
                     "unknown suite_id",
                 ));
             }
-        }
-
-        if witness_bytes > MAX_WITNESS_BYTES_PER_TX {
-            return Err(TxError::new(
-                ErrorCode::TxErrWitnessOverflow,
-                "witness bytes overflow",
-            ));
         }
 
         witness.push(WitnessItem {

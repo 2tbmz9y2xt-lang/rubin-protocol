@@ -326,6 +326,10 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 		}
 		witnessBytes += sigLen
 
+		if witnessBytes > MAX_WITNESS_BYTES_PER_TX {
+			return nil, zero, zero, 0, txerr(TX_ERR_WITNESS_OVERFLOW, "witness bytes overflow")
+		}
+
 		switch suiteID {
 		case SUITE_ID_SENTINEL:
 			ok := false
@@ -354,10 +358,6 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 			}
 		default:
 			return nil, zero, zero, 0, txerr(TX_ERR_SIG_ALG_INVALID, "unknown suite_id")
-		}
-
-		if witnessBytes > MAX_WITNESS_BYTES_PER_TX {
-			return nil, zero, zero, 0, txerr(TX_ERR_WITNESS_OVERFLOW, "witness bytes overflow")
 		}
 
 		witness = append(witness, WitnessItem{
