@@ -65,7 +65,7 @@ jobs:
   cpd-check:
     name: "Duplication check (jscpd)"
     runs-on: ubuntu-latest
-        if: github.event_name == 'pull_request'
+        if: ${{ github.event_name == 'pull_request' }}
     continue-on-error: true    # non-blocking, informational
     steps:
       - uses: actions/checkout@v6
