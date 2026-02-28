@@ -154,3 +154,21 @@ Policy:
 
 Изменённые fixtures:
 - `CV-PARSE.json` (добавлен `PARSE-10`)
+
+
+## 2026-02-28 — Q-CONF-14 / Q-CONF-15 conformance edge vectors
+
+Причина:
+- закрыть conformance gap по `chunk_count=0` для DA commit на gate `CV-DA-INTEGRITY`;
+- закрыть missing vectors для non-minimal CompactSize (`witness_count`, `da_payload_len`) и retarget floor (`target_new=0x01`) из follow-up к `Q-CONF-09`.
+
+Инструменты:
+- ручное обновление `CV-DA-INTEGRITY.json`, `CV-PARSE.json`, `CV-POW.json`;
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-DA-INTEGRITY,CV-PARSE,CV-POW`;
+- обновление `conformance/MATRIX.md` через `tools/gen_conformance_matrix.py`.
+
+Изменённые fixtures:
+- `CV-DA-INTEGRITY.json` (добавлен `CV-DA-CHUNK-COUNT-ZERO`)
+- `CV-PARSE.json` (добавлены `PARSE-14`, `PARSE-15`)
+- `CV-POW.json` (добавлен `POW-10`)
+
