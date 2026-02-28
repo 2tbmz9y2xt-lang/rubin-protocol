@@ -444,3 +444,21 @@ pub fn da_core_fields_bytes(tx: &Tx) -> Result<Vec<u8>, TxError> {
         _ => Err(TxError::new(ErrorCode::TxErrParse, "unsupported tx_kind")),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Kani bounded model checking proofs
+// ---------------------------------------------------------------------------
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// parse_tx never panics on arbitrary input — it returns Ok or Err.
+    /// Bounded to 64 bytes; most inputs fail at early validation (tx_kind,
+    /// compact-size counts) long before hitting SHA3 hashing.
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn verify_parse_tx_no_panic() {
+        let buf: [u8; 64] = kani::any();
+        let _ = parse_tx(&buf);
+    }
+}

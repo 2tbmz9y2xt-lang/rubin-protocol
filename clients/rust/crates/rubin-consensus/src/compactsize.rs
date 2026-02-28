@@ -53,3 +53,47 @@ pub fn encode_compact_size(n: u64, out: &mut Vec<u8>) {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Kani bounded model checking proofs
+// ---------------------------------------------------------------------------
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// For any u64 value, encode → decode must roundtrip to the same value
+    /// and consume exactly the number of bytes produced.
+    #[kani::proof]
+    fn verify_compact_size_roundtrip() {
+        let n: u64 = kani::any();
+        let mut buf = Vec::new();
+        encode_compact_size(n, &mut buf);
+
+        let (decoded, consumed) = read_compact_size_bytes(&buf).unwrap();
+        assert_eq!(decoded, n);
+        assert_eq!(consumed, buf.len());
+    }
+
+    /// encode_compact_size always produces minimal encoding (no wasted bytes).
+    #[kani::proof]
+    fn verify_compact_size_encoding_is_minimal() {
+        let n: u64 = kani::any();
+        let mut buf = Vec::new();
+        encode_compact_size(n, &mut buf);
+
+        let expected_len = match n {
+            0x00..=0xfc => 1,
+            0xfd..=0xffff => 3,
+            0x1_0000..=0xffff_ffff => 5,
+            _ => 9,
+        };
+        assert_eq!(buf.len(), expected_len);
+    }
+
+    /// Decoding any 9-byte buffer never panics (returns Ok or Err, no UB).
+    #[kani::proof]
+    fn verify_compact_size_decode_no_panic() {
+        let buf: [u8; 9] = kani::any();
+        let _ = read_compact_size_bytes(&buf);
+    }
+}
