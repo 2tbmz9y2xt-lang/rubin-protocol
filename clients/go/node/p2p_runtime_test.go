@@ -1,8 +1,6 @@
 package node
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -141,12 +139,12 @@ func TestPeerSessionRunPingPongAndBan(t *testing.T) {
 	go func() {
 		runErr <- session.Run(context.Background())
 	}()
-	remoteReader := bufio.NewReader(remote)
+	remoteSession := NewPeerSession(remote, cfg, PeerState{Addr: "remote"})
 
-	if err := writeWireMessage(remote, cfg.Network, WireMessage{Command: "ping"}); err != nil {
+	if err := remoteSession.writeMessage(WireMessage{Command: "ping"}); err != nil {
 		t.Fatalf("write ping: %v", err)
 	}
-	msg, err := readWireMessage(remoteReader, cfg.Network)
+	msg, err := remoteSession.readMessage()
 	if err != nil {
 		t.Fatalf("read pong: %v", err)
 	}
@@ -154,7 +152,7 @@ func TestPeerSessionRunPingPongAndBan(t *testing.T) {
 		t.Fatalf("expected pong, got %q", msg.Command)
 	}
 
-	if err := writeWireMessage(remote, cfg.Network, WireMessage{Command: "unknown"}); err != nil {
+	if err := remoteSession.writeMessage(WireMessage{Command: "unknown"}); err != nil {
 		t.Fatalf("write unknown: %v", err)
 	}
 	select {
@@ -183,10 +181,8 @@ func TestPeerManagerMaxPeers(t *testing.T) {
 }
 
 func scriptedRemoteHandshake(conn net.Conn, network string, payload VersionPayloadV1) error {
-	reader := bufio.NewReader(conn)
-	writer := bufio.NewWriter(conn)
-
-	first, err := readWireMessage(reader, network)
+	session := NewPeerSession(conn, DefaultPeerRuntimeConfig(network, 8), PeerState{Addr: conn.RemoteAddr().String()})
+	first, err := session.readMessage()
 	if err != nil {
 		return err
 	}
@@ -194,17 +190,14 @@ func scriptedRemoteHandshake(conn net.Conn, network string, payload VersionPaylo
 		return errors.New("expected version from local peer")
 	}
 
-	if err := writeWireMessageBuffered(writer, network, WireMessage{
+	if err := session.writeMessage(WireMessage{
 		Command: "version",
 		Payload: marshalVersionPayloadV1(payload),
 	}); err != nil {
 		return err
 	}
-	if err := writer.Flush(); err != nil {
-		return err
-	}
 
-	second, err := readWireMessage(reader, network)
+	second, err := session.readMessage()
 	if err != nil {
 		return err
 	}
@@ -212,67 +205,7 @@ func scriptedRemoteHandshake(conn net.Conn, network string, payload VersionPaylo
 		return errors.New("expected verack from local peer")
 	}
 
-	if err := writeWireMessageBuffered(writer, network, WireMessage{Command: "verack"}); err != nil {
-		return err
-	}
-	return writer.Flush()
-}
-
-func writeWireMessage(conn net.Conn, network string, msg WireMessage) error {
-	writer := bufio.NewWriter(conn)
-	if err := writeWireMessageBuffered(writer, network, msg); err != nil {
-		return err
-	}
-	return writer.Flush()
-}
-
-func writeWireMessageBuffered(writer *bufio.Writer, network string, msg WireMessage) error {
-	header, err := buildEnvelopeHeader(networkMagic(network), msg.Command, msg.Payload)
-	if err != nil {
-		return err
-	}
-	if _, err := writer.Write(header); err != nil {
-		return err
-	}
-	if len(msg.Payload) > 0 {
-		if _, err := writer.Write(msg.Payload); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func readWireMessage(reader *bufio.Reader, network string) (WireMessage, error) {
-	var out WireMessage
-	header := make([]byte, wireHeaderSize)
-	if _, err := io.ReadFull(reader, header); err != nil {
-		return out, err
-	}
-	expectedMagic := networkMagic(network)
-	if !bytes.Equal(header[:4], expectedMagic[:]) {
-		return out, errors.New("invalid magic")
-	}
-	command, err := decodeWireCommand(header[4:16])
-	if err != nil {
-		return out, err
-	}
-	payloadLen := binary.LittleEndian.Uint32(header[16:20])
-	if uint64(payloadLen) > consensus.MAX_RELAY_MSG_BYTES {
-		return out, errors.New("payload too large")
-	}
-	payload := make([]byte, int(payloadLen))
-	if payloadLen > 0 {
-		if _, err := io.ReadFull(reader, payload); err != nil {
-			return out, err
-		}
-	}
-	sum := wireChecksum(payload)
-	if !bytes.Equal(header[20:24], sum[:]) {
-		return out, errors.New("invalid checksum")
-	}
-	out.Command = command
-	out.Payload = payload
-	return out, nil
+	return session.writeMessage(WireMessage{Command: "verack"})
 }
 
 func TestDefaultPeerRuntimeConfig_ClampMaxPeers(t *testing.T) {
@@ -364,9 +297,9 @@ func TestPerformVersionHandshake_BansOnUnexpectedPreHandshakeCommand(t *testing.
 	cfg.BanThreshold = 10
 
 	go func() {
-		reader := bufio.NewReader(remote)
-		_, _ = readWireMessage(reader, cfg.Network) // local version
-		_ = writeWireMessage(remote, cfg.Network, WireMessage{Command: "ping"})
+		remoteSession := NewPeerSession(remote, cfg, PeerState{Addr: "remote"})
+		_, _ = remoteSession.readMessage() // local version
+		_ = remoteSession.writeMessage(WireMessage{Command: "ping"})
 	}()
 
 	_, err := PerformVersionHandshake(context.Background(), local, cfg, VersionPayloadV1{
