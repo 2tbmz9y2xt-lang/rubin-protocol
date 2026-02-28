@@ -47,21 +47,20 @@
       },
       {
         "file": "merkle.rs",
-        "function": "verify_merkle_root_deterministic_single",
-        "property": "merkle_root_txids is deterministic (same input → same output)",
-        "conformance_gate": "CV-MERKLE",
-        "lean4_theorem": "merkle_root_proved"
-      },
-      {
-        "file": "merkle.rs",
         "function": "verify_merkle_root_rejects_empty",
         "property": "empty txid list is rejected",
         "conformance_gate": "CV-MERKLE"
       },
       {
+        "file": "merkle.rs",
+        "function": "verify_witness_merkle_root_rejects_empty",
+        "property": "empty wtxid list is rejected",
+        "conformance_gate": "CV-MERKLE"
+      },
+      {
         "file": "tx.rs",
         "function": "verify_parse_tx_no_panic",
-        "property": "parse_tx never panics on arbitrary 64-byte input",
+        "property": "parse_tx never panics on arbitrary 13-byte input (header prefix)",
         "conformance_gate": "CV-PARSE",
         "lean4_theorem": "transaction_wire_proved"
       },
@@ -76,13 +75,17 @@
         "file": "pow.rs",
         "function": "verify_retarget_no_panic",
         "property": "retarget_v1 never panics for bounded target/timestamps",
-        "conformance_gate": "CV-POW"
+        "conformance_gate": "CV-POW",
+        "status": "removed-sat-intractable",
+        "reason": "BigUint arbitrary-precision arithmetic generates SAT formula too large for CBMC; covered by unit tests and Lean4 retarget_proved"
       },
       {
         "file": "pow.rs",
         "function": "verify_biguint_to_bytes32_roundtrip",
         "property": "biguint_to_bytes32 roundtrips with from_bytes_be",
-        "conformance_gate": "CV-POW"
+        "conformance_gate": "CV-POW",
+        "status": "removed-sat-intractable",
+        "reason": "BigUint generates SAT formula consuming ~21 min on GitHub Actions; covered by unit tests"
       }
     ]
   }

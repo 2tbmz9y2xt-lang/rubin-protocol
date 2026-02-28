@@ -4,8 +4,11 @@
 # Kani verifies properties for ALL possible inputs within the specified bound,
 # providing mathematical guarantees that complement Lean4 formal proofs.
 #
-# SHA3-heavy harnesses (merkle, parse_tx) may be slow for the SAT solver.
-# If total runtime exceeds 30 min, consider moving to schedule-only.
+# SAT-intractable harnesses are excluded:
+#   - SHA3 (Keccak-f[1600] 24-round permutation)
+#   - BigUint (arbitrary-precision arithmetic via Vec<u32>)
+# Remaining harnesses (compactsize, subsidy, merkle-empty, tx-header, block-weight)
+# solve in seconds on GitHub Actions runners.
 name: Kani Verification
 
 on:
@@ -24,7 +27,7 @@ jobs:
   kani:
     name: Kani Proof Check
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
 
@@ -32,6 +35,23 @@ jobs:
       # Kani proofs only exercise pure-Rust logic, but the crate must compile.
       - name: Install OpenSSL dev headers
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
+      # Cache Kani toolchain to avoid re-downloading CBMC (~200 MB) every run.
+      - name: Cache Kani toolchain
+        uses: actions/cache@v5
+        with:
+          path: ~/.kani
+          key: kani-toolchain-${{ runner.os }}-${{ hashFiles('.github/workflows/kani.yml') }}
+
+      # Cache Cargo build artifacts for faster recompilation.
+      - name: Cache Cargo registry + target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            clients/rust/crates/rubin-consensus/target
+          key: kani-cargo-${{ runner.os }}-${{ hashFiles('clients/rust/crates/rubin-consensus/Cargo.toml') }}
 
       - uses: model-checking/kani-github-action@v1.1
         with:
