@@ -40,7 +40,7 @@ structure BlockBasicOut where
   sumWeight : Option Nat
   sumDa : Option Nat
 
-def goTraceFixturesDigestSHA3_256 : String := "e432884f891cd151946166a9c85db39de23d004b92cd32b918c41ad2c8b1508c"
+def goTraceFixturesDigestSHA3_256 : String := "1dcade7f348bd55553b8f7bf1562ac5ff1cc6b6ff4531af0167c962032a1fbb6"
 
 def parseOuts : List ParseOut := [
   { id := "PARSE-01", ok := true, err := "", consumed := 21, txidHex := "0xd205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0", wtxidHex := "0xf760a70e1e838404d8e41679962064dc1bf4fa181699009644a14d0aa389ab4e" },
@@ -55,7 +55,9 @@ def parseOuts : List ParseOut := [
   { id := "PARSE-10", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
   { id := "PARSE-11", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
   { id := "PARSE-12", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "PARSE-13", ok := false, err := "TX_ERR_WITNESS_OVERFLOW", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" }
+  { id := "PARSE-13", ok := false, err := "TX_ERR_WITNESS_OVERFLOW", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
+  { id := "PARSE-14", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
+  { id := "PARSE-15", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" }
 ]
 
 def sighashOuts : List SighashOut := [
@@ -80,7 +82,8 @@ def powOuts : List PowOut := [
   { id := "POW-07", op := "pow_check", ok := false, err := "BLOCK_ERR_TARGET_INVALID", targetNewHex := none, blockHashHex := none },
   { id := "POW-08", op := "retarget_v1", ok := true, err := "", targetNewHex := some ("0x0000000000000000000000000000000000000000000000000000000000001003"), blockHashHex := none },
   { id := "POW-08A", op := "retarget_v1", ok := false, err := "TX_ERR_PARSE", targetNewHex := some ("0x0000000000000000000000000000000000000000000000000000000000000000"), blockHashHex := none },
-  { id := "POW-09", op := "retarget_v1", ok := true, err := "", targetNewHex := some ("0x0000000000000000000000000000000000000000000000000000000000000001"), blockHashHex := none }
+  { id := "POW-09", op := "retarget_v1", ok := true, err := "", targetNewHex := some ("0x0000000000000000000000000000000000000000000000000000000000000001"), blockHashHex := none },
+  { id := "POW-10", op := "retarget_v1", ok := true, err := "", targetNewHex := some ("0x0000000000000000000000000000000000000000000000000000000000000001"), blockHashHex := none }
 ]
 
 def utxoBasicOuts : List UtxoBasicOut := [
