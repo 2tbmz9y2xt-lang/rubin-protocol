@@ -285,6 +285,17 @@ def applyNonCoinbaseTxBasicState
     if i.sequence > 0x7fffffff then throw "TX_ERR_SEQUENCE_INVALID"
     if isCoinbasePrevout i then throw "TX_ERR_PARSE"
 
+  -- output-creation validation is evaluated before input UTXO lookup.
+  -- This fixes deterministic conflict ordering for:
+  -- invalid output descriptor vs missing UTXO.
+  for o in tx.outputs do
+    let outg : CovenantGenesisV1.TxOut := {
+      value := o.value
+      covenantType := o.covenantType
+      covenantData := o.covenantData
+    }
+    CovenantGenesisV1.validateOutGenesis outg tx.txKind height
+
   -- gather sums and vault context
   let mut sumIn : Nat := 0
   let mut sumInVault : Nat := 0
