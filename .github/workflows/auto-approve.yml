@@ -23,8 +23,8 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const MAX_ATTEMPTS = 15;
-            const POLL_INTERVAL = 20000; // 20 seconds
+            const MAX_ATTEMPTS = 30;
+            const POLL_INTERVAL = 30000; // 30 seconds
 
             // --- Find PR number ---
             let prNumber;
