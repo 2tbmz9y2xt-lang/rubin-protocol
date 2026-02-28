@@ -4,8 +4,11 @@
 # Kani verifies properties for ALL possible inputs within the specified bound,
 # providing mathematical guarantees that complement Lean4 formal proofs.
 #
-# SHA3-heavy harnesses are excluded (SAT-intractable for Keccak-f[1600]).
-# Pure-arithmetic harnesses (compactsize, subsidy, retarget) solve in seconds.
+# SAT-intractable harnesses are excluded:
+#   - SHA3 (Keccak-f[1600] 24-round permutation)
+#   - BigUint (arbitrary-precision arithmetic via Vec<u32>)
+# Remaining harnesses (compactsize, subsidy, merkle-empty, tx-header, block-weight)
+# solve in seconds on GitHub Actions runners.
 name: Kani Verification
 
 on:
@@ -24,7 +27,7 @@ jobs:
   kani:
     name: Kani Proof Check
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
 

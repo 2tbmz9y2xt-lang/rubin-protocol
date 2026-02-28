@@ -142,32 +142,10 @@ fn biguint_to_bytes32(x: &BigUint) -> Result<[u8; 32], TxError> {
 // ---------------------------------------------------------------------------
 // Kani bounded model checking proofs
 // ---------------------------------------------------------------------------
-#[cfg(kani)]
-mod verification {
-    use super::*;
-
-    /// retarget_v1 never panics — returns Ok or Err for all inputs.
-    /// Uses small (4-byte) targets to keep BigUint SAT-formula bounded.
-    #[kani::proof]
-    fn verify_retarget_no_panic() {
-        let target_small: u32 = kani::any();
-        // Build a 32-byte target with value in the last 4 bytes (little-endian → big-endian)
-        let mut target = [0u8; 32];
-        target[28..].copy_from_slice(&target_small.to_be_bytes());
-
-        let ts_first: u32 = kani::any();
-        let ts_last: u32 = kani::any();
-        let _ = retarget_v1(target, ts_first as u64, ts_last as u64);
-    }
-
-    /// biguint_to_bytes32 roundtrips with BigUint::from_bytes_be for ≤ 32 bytes.
-    #[kani::proof]
-    fn verify_biguint_to_bytes32_roundtrip() {
-        let small: u64 = kani::any();
-        kani::assume(small > 0);
-        let x = BigUint::from(small);
-        let arr = biguint_to_bytes32(&x).unwrap();
-        let y = BigUint::from_bytes_be(&arr);
-        assert_eq!(x, y);
-    }
-}
+//
+// NOTE: verify_retarget_no_panic and verify_biguint_to_bytes32_roundtrip
+// removed — BigUint (arbitrary-precision arithmetic via Vec<u32>) generates
+// a SAT formula too large for CBMC to solve within CI time limits.
+// verify_biguint_to_bytes32_roundtrip alone consumed ~21 minutes on GitHub
+// Actions runners.  These properties are covered by unit tests and
+// Lean4 theorem retarget_proved instead.
