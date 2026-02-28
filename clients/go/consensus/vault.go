@@ -125,24 +125,26 @@ func OutputDescriptorBytes(covenantType uint16, covenantData []byte) []byte {
 }
 
 // WitnessSlots returns the number of WitnessItems consumed by an input spending this covenant.
-func WitnessSlots(covenantType uint16, covenantData []byte) int {
+// Returns an error for unsupported/unknown covenant types (parity with Rust witness_slots).
+func WitnessSlots(covenantType uint16, covenantData []byte) (int, error) {
 	switch covenantType {
-	case COV_TYPE_VAULT, COV_TYPE_MULTISIG:
-		if covenantType == COV_TYPE_MULTISIG {
-			if len(covenantData) >= 2 {
-				return int(covenantData[1])
-			}
-			return 1
+	case COV_TYPE_P2PK:
+		return 1, nil
+	case COV_TYPE_MULTISIG:
+		if len(covenantData) >= 2 {
+			return int(covenantData[1]), nil
 		}
+		return 1, nil
+	case COV_TYPE_VAULT:
 		// CORE_VAULT: owner_lock_id[32] || threshold[1] || key_count[1] || ...
 		if len(covenantData) >= 34 {
-			return int(covenantData[33])
+			return int(covenantData[33]), nil
 		}
-		return 1
+		return 1, nil
 	case COV_TYPE_HTLC:
-		return 2
+		return 2, nil
 	default:
-		return 1
+		return 0, txerr(TX_ERR_COVENANT_TYPE_INVALID, "unsupported covenant in witness_slots")
 	}
 }
 

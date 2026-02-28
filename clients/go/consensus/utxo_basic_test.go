@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"errors"
 	"testing"
 )
 
@@ -614,5 +615,45 @@ func TestApplyNonCoinbaseTxBasic_MultisigInputAccepted(t *testing.T) {
 	}
 	if s.Fee != 10 {
 		t.Fatalf("fee=%d, want 10", s.Fee)
+	}
+}
+
+func TestWitnessSlotsUnknownCovenantRejected(t *testing.T) {
+	_, err := WitnessSlots(0x7777, nil)
+	if err == nil {
+		t.Fatal("WitnessSlots must reject unknown covenant type")
+	}
+	var txErr *TxError
+	if !errors.As(err, &txErr) {
+		t.Fatalf("expected TxError, got %T", err)
+	}
+	if txErr.Code != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("code=%s, want %s", txErr.Code, TX_ERR_COVENANT_TYPE_INVALID)
+	}
+}
+
+func TestWitnessSlotsKnownTypes(t *testing.T) {
+	tests := []struct {
+		name     string
+		covType  uint16
+		covData  []byte
+		expected int
+	}{
+		{"P2PK", COV_TYPE_P2PK, nil, 1},
+		{"HTLC", COV_TYPE_HTLC, nil, 2},
+		{"MULTISIG_default", COV_TYPE_MULTISIG, []byte{0x01}, 1},
+		{"MULTISIG_3", COV_TYPE_MULTISIG, []byte{0x01, 0x03}, 3},
+		{"VAULT_default", COV_TYPE_VAULT, make([]byte, 32), 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := WitnessSlots(tt.covType, tt.covData)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.expected {
+				t.Fatalf("got=%d, want=%d", got, tt.expected)
+			}
+		})
 	}
 }

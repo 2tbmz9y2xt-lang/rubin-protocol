@@ -154,7 +154,10 @@ func applyNonCoinbaseTxBasicWork(
 			return nil, 0, err
 		}
 
-		slots := WitnessSlots(entry.CovenantType, entry.CovenantData)
+		slots, err := WitnessSlots(entry.CovenantType, entry.CovenantData)
+		if err != nil {
+			return nil, 0, err
+		}
 		if slots <= 0 {
 			return nil, 0, txerr(TX_ERR_PARSE, "invalid witness slots")
 		}
