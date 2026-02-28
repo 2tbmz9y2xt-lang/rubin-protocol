@@ -10,6 +10,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 rubin-consensus = { path = "../crates/rubin-consensus" }
+num-bigint = "0.4"
+num-traits = "0.2"
 
 [[bin]]
 name = "parse_tx"
@@ -29,3 +31,20 @@ path = "fuzz_targets/compactsize.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "merkle_determinism"
+path = "fuzz_targets/merkle_determinism.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "retarget_no_panic"
+path = "fuzz_targets/retarget_no_panic.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "biguint_roundtrip"
+path = "fuzz_targets/biguint_roundtrip.rs"
+test = false
+doc = false

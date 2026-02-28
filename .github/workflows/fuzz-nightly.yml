@@ -9,6 +9,10 @@ on:
         description: "Go fuzz time per target (for example 45s, 120s)"
         required: false
         default: "45s"
+      rust_fuzz_time:
+        description: "Rust fuzz time per target in seconds (for example 60, 120)"
+        required: false
+        default: "60"
 
 concurrency:
   group: fuzz-nightly-${{ github.ref }}
@@ -42,5 +46,48 @@ jobs:
           path: |
             .artifacts/fuzz-stage2/**
             clients/go/consensus/testdata/fuzz/**
+          if-no-files-found: warn
+          retention-days: 14
+
+  fuzz-rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      # OpenSSL dev headers required to compile openssl-sys FFI crate.
+      - name: Install OpenSSL dev headers
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Run Rust fuzz targets (timeboxed)
+        env:
+          RUST_FUZZ_TIME: ${{ github.event.inputs.rust_fuzz_time || '60' }}
+        run: |
+          cd clients/rust
+          TARGETS=(merkle_determinism retarget_no_panic biguint_roundtrip parse_tx parse_block_bytes compactsize)
+          STATUS=0
+          for target in "${TARGETS[@]}"; do
+            echo "==> fuzzing $target for ${RUST_FUZZ_TIME}s"
+            if ! cargo fuzz run "$target" -- -max_total_time="${RUST_FUZZ_TIME}"; then
+              STATUS=1
+              echo "FAIL $target"
+            else
+              echo "PASS $target"
+            fi
+          done
+          exit $STATUS
+
+      - name: Upload Rust fuzz artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-rust-${{ github.run_id }}
+          path: clients/rust/fuzz/artifacts/
           if-no-files-found: warn
           retention-days: 14
