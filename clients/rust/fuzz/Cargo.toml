@@ -48,3 +48,9 @@ name = "biguint_roundtrip"
 path = "fuzz_targets/biguint_roundtrip.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "sighash"
+path = "fuzz_targets/sighash.rs"
+test = false
+doc = false
