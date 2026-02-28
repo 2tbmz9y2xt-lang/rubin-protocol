@@ -75,6 +75,19 @@ pub fn verify_sig(
     openssl_verify_sig_digest_oneshot(alg, pubkey, signature, digest32)
 }
 
+fn map_digest_verify_rc(rc: core::ffi::c_int) -> Result<bool, TxError> {
+    if rc == 1 {
+        Ok(true)
+    } else if rc == 0 {
+        Ok(false)
+    } else {
+        Err(TxError::new(
+            ErrorCode::TxErrSigInvalid,
+            "openssl: EVP_DigestVerify internal error",
+        ))
+    }
+}
+
 fn openssl_verify_sig_digest_oneshot(
     alg: &'static CStr,
     pubkey: &[u8],
@@ -139,16 +152,30 @@ fn openssl_verify_sig_digest_oneshot(
 
         EVP_MD_CTX_free(mctx);
         openssl_sys::EVP_PKEY_free(pkey);
+        map_digest_verify_rc(rc)
+    }
+}
 
-        if rc == 1 {
-            Ok(true)
-        } else if rc == 0 {
-            Ok(false)
-        } else {
-            Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "openssl: EVP_DigestVerify failed",
-            ))
-        }
+#[cfg(test)]
+mod tests {
+    use super::map_digest_verify_rc;
+    use crate::error::ErrorCode;
+
+    #[test]
+    fn map_digest_verify_rc_accepts_valid_signature() {
+        let got = map_digest_verify_rc(1).expect("rc=1 should be success");
+        assert!(got);
+    }
+
+    #[test]
+    fn map_digest_verify_rc_rejects_invalid_signature() {
+        let got = map_digest_verify_rc(0).expect("rc=0 should be deterministic invalid");
+        assert!(!got);
+    }
+
+    #[test]
+    fn map_digest_verify_rc_negative_maps_to_sig_invalid() {
+        let err = map_digest_verify_rc(-1).expect_err("rc<0 should be mapped error");
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
     }
 }
