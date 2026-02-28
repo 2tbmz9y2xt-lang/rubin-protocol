@@ -77,7 +77,8 @@
         "property": "retarget_v1 never panics for bounded target/timestamps",
         "conformance_gate": "CV-POW",
         "status": "removed-sat-intractable",
-        "reason": "BigUint arbitrary-precision arithmetic generates SAT formula too large for CBMC; covered by unit tests and Lean4 retarget_proved"
+        "reason": "BigUint arbitrary-precision arithmetic generates SAT formula too large for CBMC; covered by fuzz target retarget_no_panic, unit tests, and Lean4 retarget_proved",
+        "fuzz_target": "retarget_no_panic"
       },
       {
         "file": "pow.rs",
@@ -85,7 +86,46 @@
         "property": "biguint_to_bytes32 roundtrips with from_bytes_be",
         "conformance_gate": "CV-POW",
         "status": "removed-sat-intractable",
-        "reason": "BigUint generates SAT formula consuming ~21 min on GitHub Actions; covered by unit tests"
+        "reason": "BigUint generates SAT formula consuming ~21 min on GitHub Actions; covered by fuzz target biguint_roundtrip and unit tests",
+        "fuzz_target": "biguint_roundtrip"
+      }
+    ],
+    "removed_harnesses_note": "SHA3 and BigUint harnesses replaced by cargo-fuzz targets in clients/rust/fuzz/"
+  },
+  "fuzz": {
+    "crate": "rubin-consensus-fuzz",
+    "path": "clients/rust/fuzz",
+    "ci_workflow": ".github/workflows/fuzz-nightly.yml",
+    "targets": [
+      {
+        "name": "merkle_determinism",
+        "replaces_kani": "verify_merkle_root_deterministic_single",
+        "property": "merkle_root_txids determinism and no-panic for arbitrary txid lists",
+        "conformance_gate": "CV-MERKLE"
+      },
+      {
+        "name": "retarget_no_panic",
+        "replaces_kani": "verify_retarget_no_panic",
+        "property": "retarget_v1 determinism and no-panic for arbitrary target/timestamps",
+        "conformance_gate": "CV-POW"
+      },
+      {
+        "name": "biguint_roundtrip",
+        "replaces_kani": "verify_biguint_to_bytes32_roundtrip",
+        "property": "BigUint to bytes32 roundtrip identity for values <= 2^256",
+        "conformance_gate": "CV-POW"
+      },
+      {
+        "name": "parse_tx",
+        "property": "parse_tx no-panic for arbitrary byte input"
+      },
+      {
+        "name": "parse_block_bytes",
+        "property": "parse_block_bytes no-panic for arbitrary byte input"
+      },
+      {
+        "name": "compactsize",
+        "property": "CompactSize decode→encode roundtrip"
       }
     ]
   }
