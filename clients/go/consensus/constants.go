@@ -33,7 +33,7 @@ const (
 	MAX_ANCHOR_BYTES_PER_BLOCK   = 131_072
 	MAX_P2PK_COVENANT_DATA       = 33
 	MAX_HTLC_COVENANT_DATA       = 105
-	MIN_HTLC_PREIMAGE_BYTES      = 16  // consensus security floor (Q-A287-03)
+	MIN_HTLC_PREIMAGE_BYTES      = 16 // consensus security floor (Q-A287-03)
 	MAX_HTLC_PREIMAGE_BYTES      = 256
 	MAX_VAULT_KEYS               = 12
 	MAX_VAULT_WHITELIST_ENTRIES  = 1024
