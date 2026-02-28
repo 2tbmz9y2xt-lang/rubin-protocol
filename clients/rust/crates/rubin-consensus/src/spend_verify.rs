@@ -27,16 +27,15 @@ pub(crate) fn validate_p2pk_spend(
             "SLH-DSA suite inactive at this height",
         ));
     }
-    if w.suite_id == SUITE_ID_SLH_DSA_SHAKE_256F {
-        if w.pubkey.len() as u64 != SLH_DSA_SHAKE_256F_PUBKEY_BYTES
+    if w.suite_id == SUITE_ID_SLH_DSA_SHAKE_256F
+        && (w.pubkey.len() as u64 != SLH_DSA_SHAKE_256F_PUBKEY_BYTES
             || w.signature.is_empty()
-            || w.signature.len() as u64 > MAX_SLH_DSA_SIG_BYTES
-        {
-            return Err(TxError::new(
-                ErrorCode::TxErrSigNoncanonical,
-                "non-canonical SLH-DSA witness item lengths",
-            ));
-        }
+            || w.signature.len() as u64 > MAX_SLH_DSA_SIG_BYTES)
+    {
+        return Err(TxError::new(
+            ErrorCode::TxErrSigNoncanonical,
+            "non-canonical SLH-DSA witness item lengths",
+        ));
     }
     if entry.covenant_data.len() as u64 != MAX_P2PK_COVENANT_DATA
         || entry.covenant_data[0] != w.suite_id
@@ -94,16 +93,15 @@ pub(crate) fn validate_threshold_sig_spend(
                         "SLH-DSA suite inactive at this height",
                     ));
                 }
-                if w.suite_id == SUITE_ID_SLH_DSA_SHAKE_256F {
-                    if w.pubkey.len() as u64 != SLH_DSA_SHAKE_256F_PUBKEY_BYTES
+                if w.suite_id == SUITE_ID_SLH_DSA_SHAKE_256F
+                    && (w.pubkey.len() as u64 != SLH_DSA_SHAKE_256F_PUBKEY_BYTES
                         || w.signature.is_empty()
-                        || w.signature.len() as u64 > MAX_SLH_DSA_SIG_BYTES
-                    {
-                        return Err(TxError::new(
-                            ErrorCode::TxErrSigNoncanonical,
-                            "non-canonical SLH-DSA witness item lengths",
-                        ));
-                    }
+                        || w.signature.len() as u64 > MAX_SLH_DSA_SIG_BYTES)
+                {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrSigNoncanonical,
+                        "non-canonical SLH-DSA witness item lengths",
+                    ));
                 }
                 if sha3_256(&w.pubkey) != keys[i] {
                     return Err(TxError::new(ErrorCode::TxErrSigInvalid, context));
