@@ -16,7 +16,7 @@ engines:
   duplication:
     # CLI dispatchers and fixture generators contain inherent structural
     # repetition (dispatch boilerplate, tx-building templates) that cannot be
-    # eliminated without sacrificing readability.  Raise the minimum clone
+    # eliminated without sacrificing readability. Raise the minimum clone
     # threshold so only substantive duplications (>25 lines) are reported.
     exclude_paths:
       - "clients/go/cmd/**"

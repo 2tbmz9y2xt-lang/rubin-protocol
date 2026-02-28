@@ -1,6 +1,7 @@
 import Std
 import RubinFormal.SHA3_256
 import RubinFormal.ByteWireV2
+import RubinFormal.DaCoreV1
 
 namespace RubinFormal
 
@@ -173,11 +174,13 @@ def parseTx (tx : Bytes) : ParseResult :=
                   match c7.getU32le? with
                   | none => fail .parse
                   | some (_locktime, c8) =>
-                    -- DaCoreFields: for parse vectors we only require structural presence for kind=0x00.
-                    let coreEnd := c8.off
+                    match DaCoreV1.parseDaCoreFields txKind c8 with
+                    | none => fail .parse
+                    | some cDa =>
+                      let coreEnd := cDa.off
 
                     -- witness
-                    match parseWitnessSection c8 with
+                    match parseWitnessSection cDa with
                     | none => fail .parse
                     | some (cW, wErr, wStart, wEnd) =>
                       let witBytes := wEnd - wStart
@@ -201,6 +204,10 @@ def parseTx (tx : Bytes) : ParseResult :=
                             if c10.off != tx.size then
                               fail .parse
                             else if txKind == 0x00 && daLen != 0 then
+                              fail .parse
+                            else if txKind == 0x01 && daLen > DaCoreV1.MAX_DA_MANIFEST_BYTES_PER_TX then
+                              fail .parse
+                            else if txKind == 0x02 && (daLen < 1 || daLen > DaCoreV1.CHUNK_BYTES) then
                               fail .parse
                             else
                               let core := tx.extract 0 coreEnd

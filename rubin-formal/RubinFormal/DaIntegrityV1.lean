@@ -2,6 +2,7 @@ import RubinFormal.Types
 import RubinFormal.SHA3_256
 import RubinFormal.ByteWireV2
 import RubinFormal.TxWeightV2
+import RubinFormal.DaCoreV1
 import RubinFormal.BlockBasicV1
 
 namespace RubinFormal
@@ -10,9 +11,9 @@ open Wire
 
 namespace DaIntegrityV1
 
-def MAX_DA_MANIFEST_BYTES_PER_TX : Nat := RubinFormal.TxWeightV2.MAX_DA_MANIFEST_BYTES_PER_TX
-def CHUNK_BYTES : Nat := RubinFormal.TxWeightV2.CHUNK_BYTES
-def MAX_DA_CHUNK_COUNT : Nat := RubinFormal.TxWeightV2.MAX_DA_CHUNK_COUNT
+def MAX_DA_MANIFEST_BYTES_PER_TX : Nat := RubinFormal.DaCoreV1.MAX_DA_MANIFEST_BYTES_PER_TX
+def CHUNK_BYTES : Nat := RubinFormal.DaCoreV1.CHUNK_BYTES
+def MAX_DA_CHUNK_COUNT : Nat := RubinFormal.DaCoreV1.MAX_DA_CHUNK_COUNT
 def MAX_DA_BATCHES_PER_BLOCK : Nat := 128
 
 def COV_TYPE_DA_COMMIT : Nat := 0x0103

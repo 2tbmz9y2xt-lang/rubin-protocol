@@ -235,6 +235,16 @@ fn parse_tx_da_commit_chunk_count_zero_rejected() {
 }
 
 #[test]
+fn parse_tx_da_chunk_index_out_of_range_rejected() {
+    let da_id = [0x43u8; 32];
+    let chunk_hash = [0x44u8; 32];
+    let tx = da_chunk_tx(da_id, MAX_DA_CHUNK_COUNT as u16, chunk_hash, &[0x00], 2);
+
+    let err = parse_tx(&tx).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+}
+
+#[test]
 fn merkle_root_single_and_two() {
     let tx1 = minimal_tx_bytes();
     let (_t1, txid1, _w1, _n1) = parse_tx(&tx1).expect("tx1");
