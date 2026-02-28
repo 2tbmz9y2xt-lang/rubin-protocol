@@ -178,5 +178,122 @@
         "conformance_gate": "CV-VALIDATION-ORDER"
       }
     ]
+  },
+  "go_fuzz": {
+    "package": "consensus",
+    "path": "clients/go/consensus",
+    "ci_script": "scripts/ci/run_fuzz_stage2.sh",
+    "ci_workflow": ".github/workflows/fuzz-nightly.yml",
+    "targets": [
+      {
+        "name": "FuzzReadCompactSize",
+        "property": "CompactSize decode->encode roundtrip",
+        "stage": 1
+      },
+      {
+        "name": "FuzzParseTx",
+        "property": "ParseTx no-panic for arbitrary byte input",
+        "stage": 1
+      },
+      {
+        "name": "FuzzParseBlockBytes",
+        "property": "ParseBlockBytes no-panic for arbitrary byte input",
+        "stage": 1
+      },
+      {
+        "name": "FuzzValidateTxCovenantsGenesis",
+        "property": "ValidateTxCovenantsGenesis no-panic for arbitrary parsed txs at any height",
+        "conformance_gate": "CV-VALIDATION-ORDER",
+        "stage": 2
+      },
+      {
+        "name": "FuzzVerifySigDeterminism",
+        "property": "verifySig determinism for arbitrary suite/pubkey/sig/digest",
+        "conformance_gate": "CV-SIG",
+        "stage": 2
+      },
+      {
+        "name": "FuzzRetargetV1Arithmetic",
+        "property": "RetargetV1 determinism and no-panic for arbitrary target/timestamps",
+        "conformance_gate": "CV-POW",
+        "stage": 2
+      },
+      {
+        "name": "FuzzParseTxDAKinds",
+        "property": "ParseTx no-panic for DA commit/chunk variants",
+        "stage": 2
+      },
+      {
+        "name": "FuzzApplyNonCoinbaseTxBasic",
+        "property": "ApplyNonCoinbaseTxBasicWithMTP no-panic for arbitrary parsed txs",
+        "stage": 2
+      },
+      {
+        "name": "FuzzSighashV1Digest",
+        "property": "SighashV1Digest determinism and no-panic for arbitrary parsed transactions",
+        "conformance_gate": "CV-SIG",
+        "stage": 2
+      },
+      {
+        "name": "FuzzValidateBlockBasic",
+        "property": "ValidateBlockBasic no-panic and determinism with nil and non-nil params",
+        "conformance_gate": "CV-BLOCK-BASIC",
+        "stage": 2
+      },
+      {
+        "name": "FuzzPowCheck",
+        "property": "PowCheck no-panic and determinism for 116-byte header + 32-byte target",
+        "conformance_gate": "CV-POW",
+        "stage": 2
+      },
+      {
+        "name": "FuzzCompactShortID",
+        "property": "CompactShortID determinism for arbitrary wtxid + nonces",
+        "conformance_gate": "CV-COMPACT",
+        "stage": 2
+      },
+      {
+        "name": "FuzzParseHTLCCovenantData",
+        "property": "ParseHTLCCovenantData no-panic and determinism for arbitrary bytes",
+        "conformance_gate": "CV-HTLC",
+        "stage": 2
+      },
+      {
+        "name": "FuzzParseVaultCovenantData",
+        "property": "ParseVaultCovenantData no-panic and determinism for arbitrary bytes",
+        "conformance_gate": "CV-VAULT",
+        "stage": 2
+      },
+      {
+        "name": "FuzzParseMultisigCovenantData",
+        "property": "ParseMultisigCovenantData no-panic and determinism for arbitrary bytes",
+        "conformance_gate": "CV-VAULT",
+        "stage": 2
+      },
+      {
+        "name": "FuzzForkWork",
+        "property": "WorkFromTarget and ChainWorkFromTargets no-panic and determinism",
+        "conformance_gate": "CV-FORK-CHOICE",
+        "stage": 2
+      },
+      {
+        "name": "FuzzBlockSubsidy",
+        "property": "BlockSubsidy no-panic, determinism, genesis-zero and floor invariants",
+        "conformance_gate": "CV-VALUE",
+        "stage": 2
+      },
+      {
+        "name": "FuzzMerkleRootTxids",
+        "property": "MerkleRootTxids determinism and no-panic for arbitrary txid lists",
+        "conformance_gate": "CV-MERKLE",
+        "stage": 2
+      },
+      {
+        "name": "FuzzMarshalTxRoundtrip",
+        "property": "MarshalTx -> ParseTx roundtrip identity (txid, wtxid preserved)",
+        "conformance_gate": "CV-PARSE",
+        "stage": 2
+      }
+    ]
   }
 }
