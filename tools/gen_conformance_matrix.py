@@ -17,6 +17,7 @@ EXPECTED_GATES = frozenset(
     {
         "CV-BLOCK-BASIC",
         "CV-COMPACT",
+        "CV-CANONICAL-INVARIANT",
         "CV-COVENANT-GENESIS",
         "CV-DA-INTEGRITY",
         "CV-DETERMINISM",

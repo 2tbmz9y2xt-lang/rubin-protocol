@@ -231,6 +231,26 @@
           "vout": 0
         }
       ]
+    },
+    {
+      "block_timestamp": 2000,
+      "expect_err": "TX_ERR_PARSE",
+      "expect_ok": false,
+      "height": 1000000,
+      "id": "CV-HTLC-15",
+      "op": "utxo_apply_basic",
+      "tx_hex": "0100000000010000000000000001bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb000000000000000000015a0000000000000000002101000000000000000000000000000000000000000000000000000000000000000000000000020020b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a71612000f00616263616263616263616263616263024011111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111012200",
+      "utxos": [
+        {
+          "covenant_data": "54e89e15c3eef53f39d5e758fd47dfc84f15f042cd83edc0c93723e93b7d0a83000a00000000000000b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a716740f390c63f636b67acc3cc7a09df93e5c53804af23e0c70c074bd1271322694",
+          "covenant_type": 256,
+          "created_by_coinbase": false,
+          "creation_height": 0,
+          "txid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "value": 100,
+          "vout": 0
+        }
+      ]
     }
   ]
 }
