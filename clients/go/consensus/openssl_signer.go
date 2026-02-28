@@ -91,9 +91,24 @@ import (
 	"unsafe"
 )
 
+var keygenAllowlist = map[string]int{
+	"ML-DSA-87":          ML_DSA_87_PUBKEY_BYTES,
+	"SLH-DSA-SHAKE-256f": SLH_DSA_SHAKE_256F_PUBKEY_BYTES,
+}
+
 func newOpenSSLRawKeypair(alg string, expectedPubkeyLen int) (*C.EVP_PKEY, []byte, error) {
 	if err := ensureOpenSSLBootstrap(); err != nil {
 		return nil, nil, err
+	}
+	requiredLen, ok := keygenAllowlist[alg]
+	if !ok {
+		return nil, nil, fmt.Errorf("openssl keygen algorithm not allowed: %s", alg)
+	}
+	if expectedPubkeyLen != requiredLen {
+		return nil, nil, fmt.Errorf(
+			"openssl keygen expected pubkey length mismatch for %s: got %d want %d",
+			alg, expectedPubkeyLen, requiredLen,
+		)
 	}
 
 	errBuf := make([]byte, 512)
