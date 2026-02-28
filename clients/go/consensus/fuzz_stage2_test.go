@@ -332,9 +332,9 @@ func FuzzParseMultisigCovenantData(f *testing.F) {
 	// Minimal valid multisig: 1-of-1.
 	key1 := filled32(0x11)
 	seed := make([]byte, 0, 34)
-	seed = append(seed, 1)           // threshold
-	seed = append(seed, 1)           // key_count
-	seed = append(seed, key1[:]...)  // key[0]
+	seed = append(seed, 1)          // threshold
+	seed = append(seed, 1)          // key_count
+	seed = append(seed, key1[:]...) // key[0]
 	f.Add(seed)
 	f.Add([]byte{0x00})
 
