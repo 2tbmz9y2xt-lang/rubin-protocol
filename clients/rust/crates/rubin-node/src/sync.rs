@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use rubin_consensus::constants::POW_LIMIT;
 use rubin_consensus::{block_hash, parse_block_bytes};
 
 use crate::blockstore::BlockStore;
@@ -15,6 +16,7 @@ pub struct SyncConfig {
     pub expected_target: Option<[u8; 32]>,
     pub chain_id: [u8; 32],
     pub chain_state_path: Option<PathBuf>,
+    pub network: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +46,7 @@ pub fn default_sync_config(
         expected_target,
         chain_id,
         chain_state_path,
+        network: "devnet".to_string(),
     }
 }
 
@@ -53,6 +56,7 @@ impl SyncEngine {
         block_store: Option<BlockStore>,
         mut cfg: SyncConfig,
     ) -> Result<Self, String> {
+        validate_mainnet_genesis_guard(&cfg)?;
         if cfg.header_batch_limit == 0 {
             cfg.header_batch_limit = DEFAULT_HEADER_BATCH_LIMIT;
         }
@@ -152,6 +156,25 @@ impl SyncEngine {
 
         Ok(summary)
     }
+}
+
+fn validate_mainnet_genesis_guard(cfg: &SyncConfig) -> Result<(), String> {
+    let network = cfg.network.trim().to_ascii_lowercase();
+    let network = if network.is_empty() {
+        "devnet".to_string()
+    } else {
+        network
+    };
+    if network != "mainnet" {
+        return Ok(());
+    }
+    let expected_target = cfg
+        .expected_target
+        .ok_or_else(|| "mainnet requires explicit expected_target".to_string())?;
+    if expected_target == POW_LIMIT {
+        return Err("mainnet expected_target must not equal devnet POW_LIMIT (all-ff)".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -282,5 +305,30 @@ mod tests {
         assert_eq!(engine.chain_state, before);
         assert_eq!(engine.tip_timestamp, before_tip_timestamp);
         assert_eq!(engine.best_known_height, before_best_known);
+    }
+
+    #[test]
+    fn sync_engine_mainnet_guard_requires_explicit_non_devnet_target() {
+        let st = ChainState::new();
+
+        let mut cfg = default_sync_config(None, [0u8; 32], None);
+        cfg.network = "mainnet".to_string();
+        let err = SyncEngine::new(st.clone(), None, cfg).unwrap_err();
+        assert_eq!(err, "mainnet requires explicit expected_target");
+
+        let mut cfg = default_sync_config(Some(POW_LIMIT), [0u8; 32], None);
+        cfg.network = "mainnet".to_string();
+        let err = SyncEngine::new(st.clone(), None, cfg).unwrap_err();
+        assert_eq!(
+            err,
+            "mainnet expected_target must not equal devnet POW_LIMIT (all-ff)"
+        );
+
+        let mut target = POW_LIMIT;
+        target[0] = 0x7f;
+        let mut cfg = default_sync_config(Some(target), [0u8; 32], None);
+        cfg.network = "mainnet".to_string();
+        let engine = SyncEngine::new(st, None, cfg);
+        assert!(engine.is_ok());
     }
 }

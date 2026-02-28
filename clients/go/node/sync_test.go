@@ -41,6 +41,31 @@ func TestNewSyncEngine_NilChainState(t *testing.T) {
 	}
 }
 
+func TestNewSyncEngine_MainnetGuard(t *testing.T) {
+	st := NewChainState()
+
+	cfg := DefaultSyncConfig(nil, [32]byte{}, "")
+	cfg.Network = "mainnet"
+	if _, err := NewSyncEngine(st, nil, cfg); err == nil {
+		t.Fatalf("expected error for mainnet without explicit expected_target")
+	}
+
+	allFF := consensus.POW_LIMIT
+	cfg = DefaultSyncConfig(&allFF, [32]byte{}, "")
+	cfg.Network = "mainnet"
+	if _, err := NewSyncEngine(st, nil, cfg); err == nil {
+		t.Fatalf("expected error for mainnet with devnet POW_LIMIT")
+	}
+
+	okTarget := consensus.POW_LIMIT
+	okTarget[0] = 0x7f
+	cfg = DefaultSyncConfig(&okTarget, [32]byte{}, "")
+	cfg.Network = "mainnet"
+	if _, err := NewSyncEngine(st, nil, cfg); err != nil {
+		t.Fatalf("expected success for mainnet with explicit non-devnet target: %v", err)
+	}
+}
+
 func TestSyncEngine_HeaderSyncRequest(t *testing.T) {
 	st := NewChainState()
 	engine, err := NewSyncEngine(st, nil, DefaultSyncConfig(nil, [32]byte{}, ""))

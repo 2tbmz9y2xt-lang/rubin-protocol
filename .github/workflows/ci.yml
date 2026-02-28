@@ -14,6 +14,12 @@ jobs:
       - name: Sensitive files/content gate
         run: python3 tools/check_sensitive_files.py
 
+      - name: Mainnet genesis anti-devnet guard (policy)
+        run: |
+          python3 tools/check_mainnet_genesis_guard.py \
+            --context-root . \
+            --code-root .
+
   security_ai:
     needs: policy
     runs-on: ubuntu-latest
