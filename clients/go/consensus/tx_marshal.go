@@ -38,6 +38,13 @@ func MarshalTx(tx *Tx) ([]byte, error) {
 	// Locktime
 	b = AppendU32le(b, tx.Locktime)
 
+	// DA core fields (tx_kind-specific, positioned before witness section).
+	daCore, err := daCoreFieldsBytes(tx)
+	if err != nil {
+		return nil, err
+	}
+	b = append(b, daCore...)
+
 	// Witness
 	b = AppendCompactSize(b, uint64(len(tx.Witness)))
 	for _, w := range tx.Witness {

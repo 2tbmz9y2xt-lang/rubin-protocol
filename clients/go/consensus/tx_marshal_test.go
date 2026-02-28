@@ -120,3 +120,93 @@ func TestMarshalTx_ParseRoundtripEquality(t *testing.T) {
 		t.Fatalf("roundtrip mismatch:\n  got  %x\n  want %x", b, ref)
 	}
 }
+
+func TestMarshalTx_DACommitRoundtrip(t *testing.T) {
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x01,
+		TxNonce: 7,
+		DaCommitCore: &DaCommitCore{
+			DaID:            [32]byte{0x10},
+			ChunkCount:      1,
+			RetlDomainID:    [32]byte{0x20},
+			BatchNumber:     9,
+			TxDataRoot:      [32]byte{0x30},
+			StateRoot:       [32]byte{0x40},
+			WithdrawalsRoot: [32]byte{0x50},
+			BatchSigSuite:   0x00,
+			BatchSig:        []byte{0xaa, 0xbb},
+		},
+		DaPayload: []byte{0xde, 0xad, 0xbe, 0xef},
+	}
+
+	b, err := MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx: %v", err)
+	}
+
+	parsed, _, _, n, err := ParseTx(b)
+	if err != nil {
+		t.Fatalf("ParseTx: %v", err)
+	}
+	if n != len(b) {
+		t.Fatalf("consumed %d, want %d", n, len(b))
+	}
+	if parsed.DaCommitCore == nil {
+		t.Fatalf("DaCommitCore is nil after roundtrip")
+	}
+	if parsed.DaCommitCore.ChunkCount != 1 {
+		t.Fatalf("chunk_count: got %d, want 1", parsed.DaCommitCore.ChunkCount)
+	}
+	if !bytes.Equal(parsed.DaPayload, tx.DaPayload) {
+		t.Fatalf("da payload mismatch: got %x, want %x", parsed.DaPayload, tx.DaPayload)
+	}
+}
+
+func TestMarshalTx_DAChunkRoundtrip(t *testing.T) {
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x02,
+		TxNonce: 9,
+		DaChunkCore: &DaChunkCore{
+			DaID:       [32]byte{0x11},
+			ChunkIndex: 0,
+			ChunkHash:  [32]byte{0x22},
+		},
+		DaPayload: []byte{0x01},
+	}
+
+	b, err := MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx: %v", err)
+	}
+
+	parsed, _, _, n, err := ParseTx(b)
+	if err != nil {
+		t.Fatalf("ParseTx: %v", err)
+	}
+	if n != len(b) {
+		t.Fatalf("consumed %d, want %d", n, len(b))
+	}
+	if parsed.DaChunkCore == nil {
+		t.Fatalf("DaChunkCore is nil after roundtrip")
+	}
+	if parsed.DaChunkCore.ChunkIndex != 0 {
+		t.Fatalf("chunk_index: got %d, want 0", parsed.DaChunkCore.ChunkIndex)
+	}
+	if !bytes.Equal(parsed.DaPayload, tx.DaPayload) {
+		t.Fatalf("da payload mismatch: got %x, want %x", parsed.DaPayload, tx.DaPayload)
+	}
+}
+
+func TestMarshalTx_DAKindMissingCoreError(t *testing.T) {
+	txCommit := &Tx{Version: 1, TxKind: 0x01, DaPayload: []byte{0x01}}
+	if _, err := MarshalTx(txCommit); err == nil {
+		t.Fatalf("expected error when tx_kind=0x01 has no DaCommitCore")
+	}
+
+	txChunk := &Tx{Version: 1, TxKind: 0x02, DaPayload: []byte{0x01}}
+	if _, err := MarshalTx(txChunk); err == nil {
+		t.Fatalf("expected error when tx_kind=0x02 has no DaChunkCore")
+	}
+}
