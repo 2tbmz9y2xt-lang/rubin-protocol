@@ -1,5 +1,6 @@
 use crate::constants::{
-    MAX_P2PK_COVENANT_DATA, SLH_DSA_ACTIVATION_HEIGHT, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
+    MAX_P2PK_COVENANT_DATA, MAX_SLH_DSA_SIG_BYTES, SLH_DSA_ACTIVATION_HEIGHT,
+    SLH_DSA_SHAKE_256F_PUBKEY_BYTES, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
     SUITE_ID_SLH_DSA_SHAKE_256F,
 };
 use crate::error::{ErrorCode, TxError};
@@ -25,6 +26,17 @@ pub(crate) fn validate_p2pk_spend(
             ErrorCode::TxErrSigAlgInvalid,
             "SLH-DSA suite inactive at this height",
         ));
+    }
+    if w.suite_id == SUITE_ID_SLH_DSA_SHAKE_256F {
+        if w.pubkey.len() as u64 != SLH_DSA_SHAKE_256F_PUBKEY_BYTES
+            || w.signature.is_empty()
+            || w.signature.len() as u64 > MAX_SLH_DSA_SIG_BYTES
+        {
+            return Err(TxError::new(
+                ErrorCode::TxErrSigNoncanonical,
+                "non-canonical SLH-DSA witness item lengths",
+            ));
+        }
     }
     if entry.covenant_data.len() as u64 != MAX_P2PK_COVENANT_DATA
         || entry.covenant_data[0] != w.suite_id
@@ -81,6 +93,17 @@ pub(crate) fn validate_threshold_sig_spend(
                         ErrorCode::TxErrSigAlgInvalid,
                         "SLH-DSA suite inactive at this height",
                     ));
+                }
+                if w.suite_id == SUITE_ID_SLH_DSA_SHAKE_256F {
+                    if w.pubkey.len() as u64 != SLH_DSA_SHAKE_256F_PUBKEY_BYTES
+                        || w.signature.is_empty()
+                        || w.signature.len() as u64 > MAX_SLH_DSA_SIG_BYTES
+                    {
+                        return Err(TxError::new(
+                            ErrorCode::TxErrSigNoncanonical,
+                            "non-canonical SLH-DSA witness item lengths",
+                        ));
+                    }
                 }
                 if sha3_256(&w.pubkey) != keys[i] {
                     return Err(TxError::new(ErrorCode::TxErrSigInvalid, context));
