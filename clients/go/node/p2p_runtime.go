@@ -2,37 +2,39 @@ package node
 
 import (
 	"bufio"
+	"bytes"
 	"context"
-	"encoding/json"
+	"crypto/sha3"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"sync"
 	"time"
+	"unicode/utf8"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 const (
 	defaultReadDeadline  = 15 * time.Second
 	defaultWriteDeadline = 15 * time.Second
 	defaultBanThreshold  = 100
+	wireHeaderSize       = 24
+	wireCommandSize      = 12
 )
 
 type WireMessage struct {
-	Command string          `json:"command"`
-	Payload json.RawMessage `json:"payload,omitempty"`
+	Command string
+	Payload []byte
 }
 
 type VersionPayloadV1 struct {
-	Network           string `json:"network"`
-	NodeID            string `json:"node_id"`
-	UserAgent         string `json:"user_agent"`
-	StartHeight       uint64 `json:"start_height"`
-	Timestamp         uint64 `json:"timestamp"`
-	PrunedBelowHeight uint64 `json:"pruned_below_height"`
-	DaMempoolSize     uint64 `json:"da_mempool_size"`
-	ProtocolVersion   uint32 `json:"protocol_version"`
-	TxRelay           bool   `json:"tx_relay"`
+	ProtocolVersion   uint32
+	TxRelay           bool
+	PrunedBelowHeight uint64
+	DaMempoolSize     uint32
 }
 
 type PeerRuntimeConfig struct {
@@ -82,18 +84,7 @@ func DefaultPeerRuntimeConfig(network string, maxPeers int) PeerRuntimeConfig {
 }
 
 func NewPeerManager(cfg PeerRuntimeConfig) *PeerManager {
-	if cfg.MaxPeers <= 0 {
-		cfg.MaxPeers = 64
-	}
-	if cfg.ReadDeadline <= 0 {
-		cfg.ReadDeadline = defaultReadDeadline
-	}
-	if cfg.WriteDeadline <= 0 {
-		cfg.WriteDeadline = defaultWriteDeadline
-	}
-	if cfg.BanThreshold <= 0 {
-		cfg.BanThreshold = defaultBanThreshold
-	}
+	cfg = normalizePeerRuntimeConfig(cfg)
 	return &PeerManager{
 		cfg:   cfg,
 		peers: make(map[string]*PeerState),
@@ -147,12 +138,7 @@ func PerformVersionHandshake(
 	if conn == nil {
 		return nil, errors.New("nil connection")
 	}
-	if cfg.ReadDeadline <= 0 {
-		cfg.ReadDeadline = defaultReadDeadline
-	}
-	if cfg.WriteDeadline <= 0 {
-		cfg.WriteDeadline = defaultWriteDeadline
-	}
+	cfg = normalizePeerRuntimeConfig(cfg)
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
 	session := &PeerSession{
@@ -177,10 +163,7 @@ func PerformVersionHandshake(
 		}()
 	}
 
-	versionPayload, err := json.Marshal(local)
-	if err != nil {
-		return nil, err
-	}
+	versionPayload := marshalVersionPayloadV1(local)
 	if err := session.writeMessage(WireMessage{Command: "version", Payload: versionPayload}); err != nil {
 		return nil, err
 	}
@@ -212,8 +195,8 @@ func PerformVersionHandshake(
 		}
 		switch msg.Command {
 		case "version":
-			var remote VersionPayloadV1
-			if err := json.Unmarshal(msg.Payload, &remote); err != nil {
+			remote, err := unmarshalVersionPayloadV1(msg.Payload)
+			if err != nil {
 				return nil, err
 			}
 			if err := validateRemoteVersion(cfg.Network, remote); err != nil {
@@ -228,6 +211,13 @@ func PerformVersionHandshake(
 					return nil, err
 				}
 				sentVerack = true
+			}
+			if !protocolVersionsCompatible(local.ProtocolVersion, remote.ProtocolVersion) {
+				return nil, fmt.Errorf(
+					"protocol_version mismatch: local=%d remote=%d",
+					local.ProtocolVersion,
+					remote.ProtocolVersion,
+				)
 			}
 		case "verack":
 			session.mu.Lock()
@@ -253,15 +243,7 @@ func PerformVersionHandshake(
 }
 
 func NewPeerSession(conn net.Conn, cfg PeerRuntimeConfig, initial PeerState) *PeerSession {
-	if cfg.ReadDeadline <= 0 {
-		cfg.ReadDeadline = defaultReadDeadline
-	}
-	if cfg.WriteDeadline <= 0 {
-		cfg.WriteDeadline = defaultWriteDeadline
-	}
-	if cfg.BanThreshold <= 0 {
-		cfg.BanThreshold = defaultBanThreshold
-	}
+	cfg = normalizePeerRuntimeConfig(cfg)
 	return &PeerSession{
 		conn:   conn,
 		cfg:    cfg,
@@ -326,13 +308,36 @@ func (ps *PeerSession) readMessage() (WireMessage, error) {
 			return msg, err
 		}
 	}
-	line, err := ps.reader.ReadBytes('\n')
+
+	header := make([]byte, wireHeaderSize)
+	if _, err := io.ReadFull(ps.reader, header); err != nil {
+		return msg, err
+	}
+	expectedMagic := networkMagic(ps.cfg.Network)
+	if !bytes.Equal(header[0:4], expectedMagic[:]) {
+		return msg, errors.New("invalid envelope magic")
+	}
+
+	command, err := decodeWireCommand(header[4 : 4+wireCommandSize])
 	if err != nil {
 		return msg, err
 	}
-	if err := json.Unmarshal(line, &msg); err != nil {
-		return msg, err
+	payloadLen := binary.LittleEndian.Uint32(header[16:20])
+	if uint64(payloadLen) > consensus.MAX_RELAY_MSG_BYTES {
+		return msg, fmt.Errorf("relay payload exceeds cap: %d", payloadLen)
 	}
+	payload := make([]byte, int(payloadLen))
+	if payloadLen > 0 {
+		if _, err := io.ReadFull(ps.reader, payload); err != nil {
+			return msg, err
+		}
+	}
+	checksum := wireChecksum(payload)
+	if !bytes.Equal(header[20:24], checksum[:]) {
+		return msg, errors.New("invalid envelope checksum")
+	}
+	msg.Command = command
+	msg.Payload = payload
 	return msg, nil
 }
 
@@ -342,13 +347,20 @@ func (ps *PeerSession) writeMessage(msg WireMessage) error {
 			return err
 		}
 	}
-	raw, err := json.Marshal(msg)
+	if uint64(len(msg.Payload)) > consensus.MAX_RELAY_MSG_BYTES {
+		return fmt.Errorf("relay payload exceeds cap: %d", len(msg.Payload))
+	}
+	header, err := buildEnvelopeHeader(networkMagic(ps.cfg.Network), msg.Command, msg.Payload)
 	if err != nil {
 		return err
 	}
-	raw = append(raw, '\n')
-	if _, err := ps.writer.Write(raw); err != nil {
+	if _, err := ps.writer.Write(header); err != nil {
 		return err
+	}
+	if len(msg.Payload) > 0 {
+		if _, err := ps.writer.Write(msg.Payload); err != nil {
+			return err
+		}
 	}
 	return ps.writer.Flush()
 }
@@ -366,15 +378,9 @@ func (ps *PeerSession) banScore() int {
 	return ps.peer.BanScore
 }
 
-func validateRemoteVersion(expectedNetwork string, remote VersionPayloadV1) error {
+func validateRemoteVersion(_ string, remote VersionPayloadV1) error {
 	if remote.ProtocolVersion == 0 {
 		return errors.New("invalid protocol_version")
-	}
-	if expectedNetwork != "" && remote.Network != expectedNetwork {
-		return fmt.Errorf("network mismatch: got %q", remote.Network)
-	}
-	if remote.NodeID == "" {
-		return errors.New("empty node_id")
 	}
 	return nil
 }
@@ -385,4 +391,147 @@ func clonePeerState(in *PeerState) *PeerState {
 	}
 	out := *in
 	return &out
+}
+
+func protocolVersionsCompatible(local, remote uint32) bool {
+	if local == remote {
+		return true
+	}
+	if local > remote {
+		return local-remote <= 1
+	}
+	return remote-local <= 1
+}
+
+func marshalVersionPayloadV1(v VersionPayloadV1) []byte {
+	payload := make([]byte, 17)
+	binary.LittleEndian.PutUint32(payload[0:4], v.ProtocolVersion)
+	if v.TxRelay {
+		payload[4] = 1
+	}
+	binary.LittleEndian.PutUint64(payload[5:13], v.PrunedBelowHeight)
+	binary.LittleEndian.PutUint32(payload[13:17], v.DaMempoolSize)
+	return payload
+}
+
+func unmarshalVersionPayloadV1(payload []byte) (VersionPayloadV1, error) {
+	var out VersionPayloadV1
+	switch {
+	case len(payload) < 13:
+		return out, errors.New("version payload too short")
+	case len(payload) < 17:
+		out.ProtocolVersion = binary.LittleEndian.Uint32(payload[0:4])
+		out.TxRelay = payload[4] == 1
+		out.PrunedBelowHeight = binary.LittleEndian.Uint64(payload[5:13])
+		out.DaMempoolSize = 0 // legacy layout
+		return out, nil
+	default:
+		out.ProtocolVersion = binary.LittleEndian.Uint32(payload[0:4])
+		out.TxRelay = payload[4] == 1
+		out.PrunedBelowHeight = binary.LittleEndian.Uint64(payload[5:13])
+		out.DaMempoolSize = binary.LittleEndian.Uint32(payload[13:17])
+		return out, nil
+	}
+}
+
+func buildEnvelopeHeader(magic [4]byte, command string, payload []byte) ([]byte, error) {
+	commandBytes, err := encodeWireCommand(command)
+	if err != nil {
+		return nil, err
+	}
+	header := make([]byte, wireHeaderSize)
+	copy(header[0:4], magic[:])
+	copy(header[4:16], commandBytes[:])
+	binary.LittleEndian.PutUint32(header[16:20], uint32(len(payload)))
+	sum := wireChecksum(payload)
+	copy(header[20:24], sum[:])
+	return header, nil
+}
+
+func wireChecksum(payload []byte) [4]byte {
+	hash := sha3.Sum256(payload)
+	var out [4]byte
+	copy(out[:], hash[:4])
+	return out
+}
+
+func encodeWireCommand(command string) ([wireCommandSize]byte, error) {
+	var out [wireCommandSize]byte
+	if len(command) == 0 || len(command) > wireCommandSize {
+		return out, errors.New("invalid command length")
+	}
+	for index := 0; index < len(command); index++ {
+		ch := command[index]
+		if !isPrintableASCIIByte(ch) {
+			return out, errors.New("command is not ASCII printable")
+		}
+		out[index] = ch
+	}
+	return out, nil
+}
+
+func decodeWireCommand(raw []byte) (string, error) {
+	if len(raw) != wireCommandSize {
+		return "", errors.New("invalid command width")
+	}
+	end := wireCommandSize
+	for index := 0; index < wireCommandSize; index++ {
+		if raw[index] == 0 {
+			end = index
+			break
+		}
+	}
+	for index := end; index < wireCommandSize; index++ {
+		if raw[index] != 0 {
+			return "", errors.New("invalid NUL padding in command")
+		}
+	}
+	command := string(raw[:end])
+	if len(command) == 0 {
+		return "", errors.New("empty command")
+	}
+	_, size := utf8.DecodeRuneInString(command)
+	if size == 0 {
+		return "", errors.New("invalid command")
+	}
+	for index := 0; index < len(command); index++ {
+		ch := command[index]
+		if !isPrintableASCIIByte(ch) {
+			return "", errors.New("command is not ASCII printable")
+		}
+	}
+	return command, nil
+}
+
+func normalizePeerRuntimeConfig(cfg PeerRuntimeConfig) PeerRuntimeConfig {
+	if cfg.MaxPeers <= 0 {
+		cfg.MaxPeers = 64
+	}
+	if cfg.ReadDeadline <= 0 {
+		cfg.ReadDeadline = defaultReadDeadline
+	}
+	if cfg.WriteDeadline <= 0 {
+		cfg.WriteDeadline = defaultWriteDeadline
+	}
+	if cfg.BanThreshold <= 0 {
+		cfg.BanThreshold = defaultBanThreshold
+	}
+	return cfg
+}
+
+func isPrintableASCIIByte(ch byte) bool {
+	return ch >= 0x21 && ch <= 0x7e
+}
+
+func networkMagic(network string) [4]byte {
+	switch network {
+	case "mainnet":
+		return [4]byte{0x52, 0x42, 0x4d, 0x4e} // RBMN
+	case "testnet":
+		return [4]byte{0x52, 0x42, 0x54, 0x4e} // RBTN
+	case "devnet", "":
+		return [4]byte{0x52, 0x42, 0x44, 0x56} // RBDV
+	default:
+		return [4]byte{0x52, 0x42, 0x4f, 0x50} // RBOP
+	}
 }
