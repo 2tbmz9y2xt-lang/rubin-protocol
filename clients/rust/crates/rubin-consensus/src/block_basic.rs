@@ -296,7 +296,7 @@ fn validate_coinbase_structure(pb: &ParsedBlock, block_height: u64) -> Result<()
     Ok(())
 }
 
-fn validate_coinbase_value_bound(
+pub(crate) fn validate_coinbase_value_bound(
     pb: &ParsedBlock,
     block_height: u64,
     already_generated: u64,

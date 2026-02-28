@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use crate::block_basic::{
-    median_time_past, parse_block_bytes, validate_block_basic_with_context_at_height, ParsedBlock,
+    median_time_past, parse_block_bytes, validate_block_basic_with_context_at_height,
+    validate_coinbase_value_bound,
 };
 use crate::constants::{COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT};
 use crate::error::{ErrorCode, TxError};
@@ -21,43 +22,6 @@ pub struct ConnectBlockBasicSummary {
     pub already_generated: u64,
     pub already_generated_n1: u64,
     pub utxo_count: u64,
-}
-
-fn validate_coinbase_value_bound(
-    pb: &ParsedBlock,
-    block_height: u64,
-    already_generated: u64,
-    sum_fees: u64,
-) -> Result<(), TxError> {
-    // Keep behavior aligned with block_basic.rs implementation.
-    if pb.txs.is_empty() {
-        return Err(TxError::new(
-            ErrorCode::BlockErrCoinbaseInvalid,
-            "missing coinbase",
-        ));
-    }
-    if block_height == 0 {
-        return Ok(());
-    }
-
-    let coinbase = &pb.txs[0];
-    let mut sum_coinbase: u64 = 0;
-    for out in &coinbase.outputs {
-        sum_coinbase = sum_coinbase
-            .checked_add(out.value)
-            .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "coinbase value overflow"))?;
-    }
-    let subsidy = block_subsidy(block_height, already_generated);
-    let limit = subsidy
-        .checked_add(sum_fees)
-        .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "subsidy+fees overflow"))?;
-    if sum_coinbase > limit {
-        return Err(TxError::new(
-            ErrorCode::BlockErrSubsidyExceeded,
-            "coinbase outputs exceed subsidy+fees bound",
-        ));
-    }
-    Ok(())
 }
 
 /// ConnectBlockBasicInMemoryAtHeight connects a block against an in-memory chainstate and enforces
