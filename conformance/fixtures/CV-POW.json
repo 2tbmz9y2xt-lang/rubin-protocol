@@ -134,6 +134,16 @@
       "timestamp_first": 0,
       "timestamp_last": 1209000,
       "expect_target_new": "0000000000000000000000000000000000000000000000000000000000000001"
+    },
+    {
+      "id": "POW-10",
+      "op": "retarget_v1",
+      "expect_ok": true,
+      "target_old": "0000000000000000000000000000000000000000000000000000000000000001",
+      "timestamp_first": 500000,
+      "timestamp_last": 500000,
+      "expect_target_new": "0000000000000000000000000000000000000000000000000000000000000001",
+      "note": "Extreme short window (delta=0 -> clamped to 1) must still clamp retarget floor to 0x01."
     }
   ]
 }
