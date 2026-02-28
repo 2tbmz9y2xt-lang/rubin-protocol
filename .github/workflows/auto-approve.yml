@@ -12,13 +12,14 @@ on:
 
 permissions:
   pull-requests: write
+  contents: write
 
 jobs:
   auto-approve:
     runs-on: ubuntu-latest
     if: github.event.pull_request || github.event.check_suite || github.event.sha || github.event.workflow_run
     steps:
-      - name: Wait for all checks and approve
+      - name: Wait for all checks, approve and merge
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -28,10 +29,10 @@ jobs:
 
             // --- Find PR number ---
             let prNumber;
+
             if (context.payload.pull_request) {
               prNumber = context.payload.pull_request.number;
             } else if (context.payload.workflow_run) {
-              // workflow_run: find PR from head branch
               const branch = context.payload.workflow_run.head_branch;
               const prs = await github.rest.pulls.list({
                 owner: context.repo.owner,
@@ -44,9 +45,10 @@ jobs:
 
             if (!prNumber) {
               const sha = context.payload.check_suite?.head_sha || context.payload.sha;
-              if (!sha) { console.log('No SHA found, skipping'); return; }
-
-              // Try by commit SHA
+              if (!sha) {
+                console.log('No SHA found, skipping');
+                return;
+              }
               const pulls = await github.rest.repos.listPullRequestsAssociatedWithCommit({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -56,7 +58,6 @@ jobs:
               if (open.length > 0) {
                 prNumber = open[0].number;
               } else {
-                // Fallback: list all open PRs and match head SHA
                 const allPrs = await github.rest.pulls.list({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
@@ -72,7 +73,11 @@ jobs:
               }
             }
 
-            if (!prNumber) { console.log('No open PR found, skipping'); return; }
+            if (!prNumber) {
+              console.log('No open PR found, skipping');
+              return;
+            }
+
             console.log(`Found PR #${prNumber}`);
 
             // --- Poll for checks to complete ---
@@ -92,15 +97,12 @@ jobs:
               });
 
               const pending = checks.data.check_runs.filter(
-                c => c.name !== 'auto-approve' &&
-                     c.status !== 'completed'
+                c => c.name !== 'auto-approve' && c.status !== 'completed'
               );
               const failed = checks.data.check_runs.filter(
-                c => c.name !== 'auto-approve' &&
-                     c.status === 'completed' &&
-                     c.conclusion !== 'success' &&
-                     c.conclusion !== 'skipped' &&
-                     c.conclusion !== 'neutral'
+                c => c.name !== 'auto-approve' && c.status === 'completed'
+                  && c.conclusion !== 'success' && c.conclusion !== 'skipped'
+                  && c.conclusion !== 'neutral'
               );
 
               if (failed.length > 0) {
@@ -137,17 +139,51 @@ jobs:
             const approved = reviews.data.some(
               r => r.user.login === 'github-actions[bot]' && r.state === 'APPROVED'
             );
-            if (approved) {
+
+            if (!approved) {
+              console.log(`All checks passed for PR #${prNumber}, approving...`);
+              await github.rest.pulls.createReview({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                event: 'APPROVE',
+                body: 'All CI checks passed. Auto-approved by workflow.'
+              });
+            } else {
               console.log('Already approved by github-actions[bot]');
+            }
+
+            // --- Auto-merge ---
+            console.log(`Merging PR #${prNumber}...`);
+            try {
+              await github.rest.pulls.merge({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                merge_method: 'squash'
+              });
+              console.log(`PR #${prNumber} merged successfully`);
+            } catch (mergeError) {
+              console.log(`Merge failed: ${mergeError.message}`);
               return;
             }
 
-            // --- Approve ---
-            console.log(`All checks passed for PR #${prNumber}, approving...`);
-            await github.rest.pulls.createReview({
+            // --- Delete branch ---
+            const prData = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              pull_number: prNumber,
-              event: 'APPROVE',
-              body: 'All CI checks passed. Auto-approved by workflow.'
+              pull_number: prNumber
             });
+            const branchName = prData.data.head.ref;
+            if (branchName !== 'main' && branchName !== 'master') {
+              try {
+                await github.rest.git.deleteRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `heads/${branchName}`
+                });
+                console.log(`Branch ${branchName} deleted`);
+              } catch (delError) {
+                console.log(`Branch deletion failed: ${delError.message}`);
+              }
+            }
