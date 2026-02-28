@@ -427,6 +427,44 @@ func TestValidateBlockBasic_HeaderRuleErrors(t *testing.T) {
 	}
 }
 
+func TestValidateBlockBasic_HeaderRuleOrder_PowBeforeLinkageAndMerkle(t *testing.T) {
+	tx := minimalTxBytes()
+	txid := testTxID(t, tx)
+	root, err := MerkleRootTxids([][32]byte{txid})
+	if err != nil {
+		t.Fatalf("MerkleRootTxids: %v", err)
+	}
+
+	prev := hashWithPrefix(0x7a)
+	expectedPrev := hashWithPrefix(0x7b) // force linkage mismatch
+	tinyTarget := [32]byte{}
+	tinyTarget[31] = 0x01 // almost surely POW-invalid for random nonce
+	corruptedRoot := root
+	corruptedRoot[0] ^= 0xff // force merkle mismatch
+
+	block := buildBlockBytes(t, prev, corruptedRoot, tinyTarget, 21, [][]byte{tx})
+	expectValidateBlockBasicErr(t, block, &expectedPrev, &tinyTarget, BLOCK_ERR_POW_INVALID)
+}
+
+func TestValidateBlockBasic_HeaderRuleOrder_TargetBeforeLinkageAndMerkle(t *testing.T) {
+	tx := minimalTxBytes()
+	txid := testTxID(t, tx)
+	root, err := MerkleRootTxids([][32]byte{txid})
+	if err != nil {
+		t.Fatalf("MerkleRootTxids: %v", err)
+	}
+
+	prev := hashWithPrefix(0x7c)
+	expectedPrev := hashWithPrefix(0x7d) // force linkage mismatch
+	baseTarget := filledHash(0xff)
+	expectedTarget := filledHash(0xee) // force target mismatch
+	corruptedRoot := root
+	corruptedRoot[0] ^= 0xff // force merkle mismatch
+
+	block := buildBlockBytes(t, prev, corruptedRoot, baseTarget, 23, [][]byte{tx})
+	expectValidateBlockBasicErr(t, block, &expectedPrev, &expectedTarget, BLOCK_ERR_TARGET_INVALID)
+}
+
 func TestParseBlockBytes_TrailingBytes(t *testing.T) {
 	tx := minimalTxBytes()
 	txid := testTxID(t, tx)

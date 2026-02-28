@@ -547,6 +547,43 @@ fn da_chunk_tx(
     b
 }
 
+fn da_chunk_tx_with_anchor_outputs(
+    da_id: [u8; 32],
+    chunk_index: u16,
+    chunk_hash: [u8; 32],
+    da_payload: &[u8],
+    tx_nonce: u64,
+    anchor_output_count: usize,
+    anchor_payload_len: usize,
+) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&1u32.to_le_bytes()); // version
+    b.push(0x02); // tx_kind
+    b.extend_from_slice(&tx_nonce.to_le_bytes()); // tx_nonce
+    crate::compactsize::encode_compact_size(1, &mut b); // input_count
+    let mut prev_txid = [0u8; 32];
+    prev_txid[0] = tx_nonce as u8;
+    b.extend_from_slice(&prev_txid);
+    b.extend_from_slice(&0u32.to_le_bytes()); // prev_vout
+    crate::compactsize::encode_compact_size(0, &mut b); // script_sig_len
+    b.extend_from_slice(&0u32.to_le_bytes()); // sequence
+    crate::compactsize::encode_compact_size(anchor_output_count as u64, &mut b); // output_count
+    for i in 0..anchor_output_count {
+        b.extend_from_slice(&0u64.to_le_bytes()); // value
+        b.extend_from_slice(&COV_TYPE_ANCHOR.to_le_bytes());
+        crate::compactsize::encode_compact_size(anchor_payload_len as u64, &mut b);
+        b.extend(vec![0x40 + (i as u8); anchor_payload_len]);
+    }
+    b.extend_from_slice(&0u32.to_le_bytes()); // locktime
+    b.extend_from_slice(&da_id);
+    b.extend_from_slice(&chunk_index.to_le_bytes());
+    b.extend_from_slice(&chunk_hash);
+    crate::compactsize::encode_compact_size(0, &mut b); // witness_count
+    crate::compactsize::encode_compact_size(da_payload.len() as u64, &mut b); // da_payload_len
+    b.extend_from_slice(da_payload);
+    b
+}
+
 fn coinbase_tx_with_outputs(locktime: u32, outputs: &[TestOutput]) -> Vec<u8> {
     let mut b = Vec::new();
     b.extend_from_slice(&1u32.to_le_bytes()); // version
@@ -835,6 +872,42 @@ fn validate_block_basic_target_mismatch() {
 }
 
 #[test]
+fn validate_block_basic_order_pow_before_linkage_and_merkle() {
+    let tx = minimal_tx_bytes();
+    let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
+    let mut root = merkle_root_txids(&[txid]).expect("root");
+    root[0] ^= 0xff; // force merkle mismatch
+    let mut prev = [0u8; 32];
+    prev[0] = 0x6a;
+    let mut tiny_target = [0u8; 32];
+    tiny_target[31] = 0x01; // almost surely POW-invalid
+    let block = build_block_bytes(prev, root, tiny_target, 21, &[tx]);
+    let mut wrong_prev = [0u8; 32];
+    wrong_prev[0] = 0x6b; // force linkage mismatch
+
+    let err = validate_block_basic(&block, Some(wrong_prev), Some(tiny_target)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrPowInvalid);
+}
+
+#[test]
+fn validate_block_basic_order_target_before_linkage_and_merkle() {
+    let tx = minimal_tx_bytes();
+    let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
+    let mut root = merkle_root_txids(&[txid]).expect("root");
+    root[0] ^= 0xff; // force merkle mismatch
+    let mut prev = [0u8; 32];
+    prev[0] = 0x6c;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(prev, root, target, 23, &[tx]);
+    let mut wrong_prev = [0u8; 32];
+    wrong_prev[0] = 0x6d; // force linkage mismatch
+    let wrong_target = [0xeeu8; 32]; // force target mismatch
+
+    let err = validate_block_basic(&block, Some(wrong_prev), Some(wrong_target)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrTargetInvalid);
+}
+
+#[test]
 fn parse_block_bytes_trailing_bytes() {
     let tx = minimal_tx_bytes();
     let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
@@ -1041,6 +1114,81 @@ fn validate_block_basic_da_payload_commitment_mismatch() {
 
     let err = validate_block_basic(&block, Some(prev), Some(target)).unwrap_err();
     assert_eq!(err.code, ErrorCode::BlockErrDaPayloadCommitInvalid);
+}
+
+#[test]
+fn validate_block_basic_da_caps_before_integrity_checks() {
+    let da_id = [0x53u8; 32];
+    let da_payload = vec![0x55; CHUNK_BYTES as usize];
+    let payload_commitment = sha3_256(&da_payload);
+    let mut bad_chunk_hash = sha3_256(&da_payload);
+    bad_chunk_hash[0] ^= 0x01; // force chunk hash mismatch
+
+    let da_commit = da_commit_tx(da_id, 1, payload_commitment, 5);
+    let da_chunk = da_chunk_tx_with_anchor_outputs(
+        da_id,
+        0,
+        bad_chunk_hash,
+        &da_payload,
+        6,
+        3,
+        MAX_ANCHOR_PAYLOAD_SIZE as usize,
+    );
+    let coinbase = coinbase_with_witness_commitment(0, &[da_commit.clone(), da_chunk.clone()]);
+
+    let (_t1, txid1, _w1, _n1) = parse_tx(&coinbase).expect("coinbase");
+    let (_t2, txid2, _w2, _n2) = parse_tx(&da_commit).expect("da_commit");
+    let (_t3, txid3, _w3, _n3) = parse_tx(&da_chunk).expect("da_chunk");
+    let root = merkle_root_txids(&[txid1, txid2, txid3]).expect("root");
+    let mut prev = [0u8; 32];
+    prev[0] = 0x95;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(prev, root, target, 41, &[coinbase, da_commit, da_chunk]);
+
+    let err = validate_block_basic(&block, Some(prev), Some(target)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrAnchorBytesExceeded);
+}
+
+#[test]
+fn validate_block_basic_da_completeness_priority_over_payload_mismatch() {
+    let da_incomplete = [0x54u8; 32];
+    let da_payload_mismatch = [0x55u8; 32];
+
+    // Set A: commit without chunks -> BLOCK_ERR_DA_INCOMPLETE
+    let commit_incomplete = da_commit_tx(da_incomplete, 1, [0x21u8; 32], 7);
+
+    // Set B: complete chunk set but wrong payload commitment.
+    let payload = b"payload-b".to_vec();
+    let bad_commitment = sha3_256(b"different-payload-b");
+    let commit_mismatch = da_commit_tx(da_payload_mismatch, 1, bad_commitment, 8);
+    let chunk_mismatch = da_chunk_tx(da_payload_mismatch, 0, sha3_256(&payload), &payload, 9);
+    let coinbase = coinbase_with_witness_commitment(
+        0,
+        &[
+            commit_incomplete.clone(),
+            commit_mismatch.clone(),
+            chunk_mismatch.clone(),
+        ],
+    );
+
+    let (_t1, txid1, _w1, _n1) = parse_tx(&coinbase).expect("coinbase");
+    let (_t2, txid2, _w2, _n2) = parse_tx(&commit_incomplete).expect("commit_incomplete");
+    let (_t3, txid3, _w3, _n3) = parse_tx(&commit_mismatch).expect("commit_mismatch");
+    let (_t4, txid4, _w4, _n4) = parse_tx(&chunk_mismatch).expect("chunk_mismatch");
+    let root = merkle_root_txids(&[txid1, txid2, txid3, txid4]).expect("root");
+    let mut prev = [0u8; 32];
+    prev[0] = 0x96;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(
+        prev,
+        root,
+        target,
+        43,
+        &[coinbase, commit_incomplete, commit_mismatch, chunk_mismatch],
+    );
+
+    let err = validate_block_basic(&block, Some(prev), Some(target)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrDaIncomplete);
 }
 
 #[test]
