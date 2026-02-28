@@ -2,13 +2,16 @@ package node
 
 import (
 	"bufio"
+	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
 	"testing"
 	"time"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 type staticAddr string
@@ -64,28 +67,18 @@ func TestPerformVersionHandshakeOK(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- scriptedRemoteHandshake(remote, VersionPayloadV1{
+		errCh <- scriptedRemoteHandshake(remote, cfg.Network, VersionPayloadV1{
 			ProtocolVersion:   1,
-			Network:           "devnet",
-			NodeID:            "remote-1",
-			UserAgent:         "rubin-node/remote",
-			StartHeight:       7,
-			Timestamp:         10,
 			TxRelay:           true,
-			PrunedBelowHeight: 0,
+			PrunedBelowHeight: 7,
 			DaMempoolSize:     1024,
 		})
 	}()
 
 	state, err := PerformVersionHandshake(context.Background(), local, cfg, VersionPayloadV1{
 		ProtocolVersion:   1,
-		Network:           "devnet",
-		NodeID:            "local-1",
-		UserAgent:         "rubin-node/local",
-		StartHeight:       5,
-		Timestamp:         9,
 		TxRelay:           true,
-		PrunedBelowHeight: 0,
+		PrunedBelowHeight: 5,
 		DaMempoolSize:     2048,
 	})
 	if err != nil {
@@ -94,15 +87,15 @@ func TestPerformVersionHandshakeOK(t *testing.T) {
 	if !state.HandshakeComplete || !state.VersionReceived || !state.VerackReceived {
 		t.Fatalf("handshake state incomplete: %+v", state)
 	}
-	if state.RemoteVersion.NodeID != "remote-1" {
-		t.Fatalf("unexpected remote node_id: %s", state.RemoteVersion.NodeID)
+	if state.RemoteVersion.DaMempoolSize != 1024 {
+		t.Fatalf("unexpected remote da_mempool_size: %d", state.RemoteVersion.DaMempoolSize)
 	}
 	if err := <-errCh; err != nil {
 		t.Fatalf("remote script failed: %v", err)
 	}
 }
 
-func TestPerformVersionHandshakeRejectsNetworkMismatch(t *testing.T) {
+func TestPerformVersionHandshakeRejectsProtocolGap(t *testing.T) {
 	local, remote := net.Pipe()
 	defer local.Close()
 	defer remote.Close()
@@ -112,13 +105,8 @@ func TestPerformVersionHandshakeRejectsNetworkMismatch(t *testing.T) {
 	cfg.WriteDeadline = 2 * time.Second
 
 	go func() {
-		_ = scriptedRemoteHandshake(remote, VersionPayloadV1{
-			ProtocolVersion:   1,
-			Network:           "testnet",
-			NodeID:            "remote-mismatch",
-			UserAgent:         "rubin-node/remote",
-			StartHeight:       0,
-			Timestamp:         0,
+		_ = scriptedRemoteHandshake(remote, cfg.Network, VersionPayloadV1{
+			ProtocolVersion:   3,
 			TxRelay:           true,
 			PrunedBelowHeight: 0,
 			DaMempoolSize:     0,
@@ -127,8 +115,6 @@ func TestPerformVersionHandshakeRejectsNetworkMismatch(t *testing.T) {
 
 	_, err := PerformVersionHandshake(context.Background(), local, cfg, VersionPayloadV1{
 		ProtocolVersion: 1,
-		Network:         "devnet",
-		NodeID:          "local-1",
 	})
 	if err == nil {
 		t.Fatalf("expected handshake error")
@@ -157,10 +143,10 @@ func TestPeerSessionRunPingPongAndBan(t *testing.T) {
 	}()
 	remoteReader := bufio.NewReader(remote)
 
-	if err := writeWireMessage(remote, WireMessage{Command: "ping"}); err != nil {
+	if err := writeWireMessage(remote, cfg.Network, WireMessage{Command: "ping"}); err != nil {
 		t.Fatalf("write ping: %v", err)
 	}
-	msg, err := readWireMessage(remoteReader)
+	msg, err := readWireMessage(remoteReader, cfg.Network)
 	if err != nil {
 		t.Fatalf("read pong: %v", err)
 	}
@@ -168,7 +154,7 @@ func TestPeerSessionRunPingPongAndBan(t *testing.T) {
 		t.Fatalf("expected pong, got %q", msg.Command)
 	}
 
-	if err := writeWireMessage(remote, WireMessage{Command: "unknown"}); err != nil {
+	if err := writeWireMessage(remote, cfg.Network, WireMessage{Command: "unknown"}); err != nil {
 		t.Fatalf("write unknown: %v", err)
 	}
 	select {
@@ -196,78 +182,97 @@ func TestPeerManagerMaxPeers(t *testing.T) {
 	}
 }
 
-func scriptedRemoteHandshake(conn net.Conn, payload VersionPayloadV1) error {
+func scriptedRemoteHandshake(conn net.Conn, network string, payload VersionPayloadV1) error {
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
 
-	first, err := reader.ReadBytes('\n')
+	first, err := readWireMessage(reader, network)
 	if err != nil {
 		return err
 	}
-	var m WireMessage
-	if err := json.Unmarshal(first, &m); err != nil {
-		return err
-	}
-	if m.Command != "version" {
+	if first.Command != "version" {
 		return errors.New("expected version from local peer")
 	}
 
-	versionPayload, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	out, err := json.Marshal(WireMessage{Command: "version", Payload: versionPayload})
-	if err != nil {
-		return err
-	}
-	if _, err := writer.Write(append(out, '\n')); err != nil {
+	if err := writeWireMessageBuffered(writer, network, WireMessage{
+		Command: "version",
+		Payload: marshalVersionPayloadV1(payload),
+	}); err != nil {
 		return err
 	}
 	if err := writer.Flush(); err != nil {
 		return err
 	}
 
-	second, err := reader.ReadBytes('\n')
+	second, err := readWireMessage(reader, network)
 	if err != nil {
 		return err
 	}
-	var m2 WireMessage
-	if err := json.Unmarshal(second, &m2); err != nil {
-		return err
-	}
-	if m2.Command != "verack" {
+	if second.Command != "verack" {
 		return errors.New("expected verack from local peer")
 	}
 
-	verack, err := json.Marshal(WireMessage{Command: "verack"})
-	if err != nil {
-		return err
-	}
-	if _, err := writer.Write(append(verack, '\n')); err != nil {
+	if err := writeWireMessageBuffered(writer, network, WireMessage{Command: "verack"}); err != nil {
 		return err
 	}
 	return writer.Flush()
 }
 
-func writeWireMessage(conn net.Conn, msg WireMessage) error {
-	raw, err := json.Marshal(msg)
+func writeWireMessage(conn net.Conn, network string, msg WireMessage) error {
+	writer := bufio.NewWriter(conn)
+	if err := writeWireMessageBuffered(writer, network, msg); err != nil {
+		return err
+	}
+	return writer.Flush()
+}
+
+func writeWireMessageBuffered(writer *bufio.Writer, network string, msg WireMessage) error {
+	header, err := buildEnvelopeHeader(networkMagic(network), msg.Command, msg.Payload)
 	if err != nil {
 		return err
 	}
-	if _, err := conn.Write(append(raw, '\n')); err != nil {
+	if _, err := writer.Write(header); err != nil {
 		return err
+	}
+	if len(msg.Payload) > 0 {
+		if _, err := writer.Write(msg.Payload); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func readWireMessage(reader *bufio.Reader) (WireMessage, error) {
+func readWireMessage(reader *bufio.Reader, network string) (WireMessage, error) {
 	var out WireMessage
-	line, err := reader.ReadBytes('\n')
+	header := make([]byte, wireHeaderSize)
+	if _, err := io.ReadFull(reader, header); err != nil {
+		return out, err
+	}
+	expectedMagic := networkMagic(network)
+	if !bytes.Equal(header[:4], expectedMagic[:]) {
+		return out, errors.New("invalid magic")
+	}
+	command, err := decodeWireCommand(header[4:16])
 	if err != nil {
 		return out, err
 	}
-	err = json.Unmarshal(line, &out)
-	return out, err
+	payloadLen := binary.LittleEndian.Uint32(header[16:20])
+	if uint64(payloadLen) > consensus.MAX_RELAY_MSG_BYTES {
+		return out, errors.New("payload too large")
+	}
+	payload := make([]byte, int(payloadLen))
+	if payloadLen > 0 {
+		if _, err := io.ReadFull(reader, payload); err != nil {
+			return out, err
+		}
+	}
+	sum := wireChecksum(payload)
+	if !bytes.Equal(header[20:24], sum[:]) {
+		return out, errors.New("invalid checksum")
+	}
+	out.Command = command
+	out.Payload = payload
+	return out, nil
 }
 
 func TestDefaultPeerRuntimeConfig_ClampMaxPeers(t *testing.T) {
@@ -336,11 +341,8 @@ func TestValidateRemoteVersion_Errors(t *testing.T) {
 	if err := validateRemoteVersion("devnet", VersionPayloadV1{}); err == nil {
 		t.Fatalf("expected error")
 	}
-	if err := validateRemoteVersion("devnet", VersionPayloadV1{ProtocolVersion: 1, Network: "testnet", NodeID: "x"}); err == nil {
-		t.Fatalf("expected network mismatch")
-	}
-	if err := validateRemoteVersion("", VersionPayloadV1{ProtocolVersion: 1, Network: "x", NodeID: ""}); err == nil {
-		t.Fatalf("expected empty node_id error")
+	if err := validateRemoteVersion("", VersionPayloadV1{ProtocolVersion: 1}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -363,14 +365,12 @@ func TestPerformVersionHandshake_BansOnUnexpectedPreHandshakeCommand(t *testing.
 
 	go func() {
 		reader := bufio.NewReader(remote)
-		_, _ = reader.ReadBytes('\n') // local version
-		_ = writeWireMessage(remote, WireMessage{Command: "ping"})
+		_, _ = readWireMessage(reader, cfg.Network) // local version
+		_ = writeWireMessage(remote, cfg.Network, WireMessage{Command: "ping"})
 	}()
 
 	_, err := PerformVersionHandshake(context.Background(), local, cfg, VersionPayloadV1{
 		ProtocolVersion: 1,
-		Network:         "devnet",
-		NodeID:          "local-1",
 	})
 	if err == nil {
 		t.Fatalf("expected handshake error")
@@ -388,6 +388,62 @@ func TestPeerSession_readMessage_SetReadDeadlineError(t *testing.T) {
 	}
 }
 
+func TestPeerSession_readMessage_InvalidChecksum(t *testing.T) {
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+
+	ps := NewPeerSession(local, DefaultPeerRuntimeConfig("devnet", 1), PeerState{Addr: "pipe"})
+	done := make(chan error, 1)
+	go func() {
+		payload := []byte{0x01, 0x02}
+		header, err := buildEnvelopeHeader(networkMagic("devnet"), "ping", payload)
+		if err != nil {
+			done <- err
+			return
+		}
+		header[20] ^= 0xff
+		_, err = remote.Write(append(header, payload...))
+		done <- err
+	}()
+	if _, err := ps.readMessage(); err == nil {
+		t.Fatalf("expected checksum error")
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("writer error: %v", err)
+	}
+}
+
+func TestPeerSession_readMessage_RejectsOversizePayload(t *testing.T) {
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+
+	ps := NewPeerSession(local, DefaultPeerRuntimeConfig("devnet", 1), PeerState{Addr: "pipe"})
+	done := make(chan error, 1)
+	go func() {
+		header := make([]byte, wireHeaderSize)
+		magic := networkMagic("devnet")
+		copy(header[:4], magic[:])
+		cmd, err := encodeWireCommand("ping")
+		if err != nil {
+			done <- err
+			return
+		}
+		copy(header[4:16], cmd[:])
+		binary.LittleEndian.PutUint32(header[16:20], uint32(consensus.MAX_RELAY_MSG_BYTES+1))
+		copy(header[20:24], []byte{1, 2, 3, 4})
+		_, err = remote.Write(header)
+		done <- err
+	}()
+	if _, err := ps.readMessage(); err == nil {
+		t.Fatalf("expected oversize error")
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("writer error: %v", err)
+	}
+}
+
 func TestPeerSession_writeMessage_SetWriteDeadlineError(t *testing.T) {
 	c := &scriptedConn{
 		setWriteDeadErr:  errors.New("nope"),
@@ -395,6 +451,17 @@ func TestPeerSession_writeMessage_SetWriteDeadlineError(t *testing.T) {
 	}
 	ps := NewPeerSession(c, DefaultPeerRuntimeConfig("devnet", 1), PeerState{Addr: "x"})
 	if err := ps.writeMessage(WireMessage{Command: "ping"}); err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestPeerSession_writeMessage_RejectsOversizePayload(t *testing.T) {
+	c := &scriptedConn{
+		remoteAddrString: "x",
+	}
+	ps := NewPeerSession(c, DefaultPeerRuntimeConfig("devnet", 1), PeerState{Addr: "x"})
+	oversized := make([]byte, int(consensus.MAX_RELAY_MSG_BYTES)+1)
+	if err := ps.writeMessage(WireMessage{Command: "ping", Payload: oversized}); err == nil {
 		t.Fatalf("expected error")
 	}
 }
@@ -440,5 +507,68 @@ func TestPeerSession_Run_TimeoutThenEOF(t *testing.T) {
 func TestClonePeerState_Nil(t *testing.T) {
 	if clonePeerState(nil) != nil {
 		t.Fatalf("expected nil")
+	}
+}
+
+func TestVersionPayloadMarshalRoundTripAndLegacy(t *testing.T) {
+	in := VersionPayloadV1{
+		ProtocolVersion:   7,
+		TxRelay:           true,
+		PrunedBelowHeight: 44,
+		DaMempoolSize:     55,
+	}
+	payload := marshalVersionPayloadV1(in)
+	out, err := unmarshalVersionPayloadV1(payload)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out != in {
+		t.Fatalf("roundtrip mismatch: %+v vs %+v", out, in)
+	}
+
+	legacy := payload[:13]
+	legacyOut, err := unmarshalVersionPayloadV1(legacy)
+	if err != nil {
+		t.Fatalf("legacy unmarshal: %v", err)
+	}
+	if legacyOut.DaMempoolSize != 0 || legacyOut.ProtocolVersion != in.ProtocolVersion {
+		t.Fatalf("legacy decode mismatch: %+v", legacyOut)
+	}
+
+	extended := append(payload, []byte{1, 2, 3}...)
+	extendedOut, err := unmarshalVersionPayloadV1(extended)
+	if err != nil {
+		t.Fatalf("extended unmarshal: %v", err)
+	}
+	if extendedOut != in {
+		t.Fatalf("extended decode mismatch: %+v vs %+v", extendedOut, in)
+	}
+}
+
+func TestEnvelopeCommandCodecValidation(t *testing.T) {
+	if _, err := encodeWireCommand(""); err == nil {
+		t.Fatalf("expected empty command error")
+	}
+	if _, err := encodeWireCommand("toolong-command"); err == nil {
+		t.Fatalf("expected too-long command error")
+	}
+	if _, err := encodeWireCommand("pi\nng"); err == nil {
+		t.Fatalf("expected non-printable error")
+	}
+	cmd, err := encodeWireCommand("ping")
+	if err != nil {
+		t.Fatalf("encode command: %v", err)
+	}
+	decoded, err := decodeWireCommand(cmd[:])
+	if err != nil {
+		t.Fatalf("decode command: %v", err)
+	}
+	if decoded != "ping" {
+		t.Fatalf("decoded=%q, want ping", decoded)
+	}
+	bad := cmd
+	bad[5] = 0x01
+	if _, err := decodeWireCommand(bad[:]); err == nil {
+		t.Fatalf("expected bad padding error")
 	}
 }
