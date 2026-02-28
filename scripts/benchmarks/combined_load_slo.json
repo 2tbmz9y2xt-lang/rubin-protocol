@@ -1,0 +1,6 @@
+{
+  "benchmark": "BenchmarkValidateBlockBasicCombinedLoad",
+  "max_ns_per_op": 3000000000,
+  "max_b_per_op": 800000000,
+  "max_allocs_per_op": 3000000
+}

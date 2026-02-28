@@ -34,6 +34,7 @@ Quick references:
 - Spec location (private): `./SPEC_LOCATION.md`
 - Architecture & change path map: `./ARCHITECTURE_MAP.md`
 - Conformance harness overview: `./conformance/README.md`
+- Combined-load benchmark SLO/evidence lane: `./scripts/benchmarks/COMBINED_LOAD_SLO.md`
 
 ## Quick Start (Local)
 
