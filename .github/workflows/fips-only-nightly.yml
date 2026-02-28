@@ -1,0 +1,151 @@
+name: fips-only-nightly
+
+on:
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: fips-only-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  fips-only-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Cache OpenSSL 3.5 bundle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/rubin-openssl/bundle-3.5.5
+            ~/.cache/rubin-openssl/work/openssl-3.5.5.tar.gz
+          key: openssl-bundle-${{ runner.os }}-3.5.5-v2
+
+      - name: Build OpenSSL 3.5.5 bundle
+        id: openssl
+        run: |
+          set -euo pipefail
+          PREFIX="$HOME/.cache/rubin-openssl/bundle-3.5.5"
+          MODULES_DIR="$PREFIX/lib/ossl-modules"
+          if [ ! -d "$MODULES_DIR" ] && [ -d "$PREFIX/lib64/ossl-modules" ]; then
+            MODULES_DIR="$PREFIX/lib64/ossl-modules"
+          fi
+          if [ ! -x "$PREFIX/bin/openssl" ] || [ ! -f "$PREFIX/ssl/openssl-fips.cnf" ] || [ ! -d "$MODULES_DIR" ]; then
+            OPENSSL_VERSION=3.5.5 PREFIX="$PREFIX" bash scripts/crypto/openssl/build-openssl-bundle.sh
+          fi
+          if [ -d "$PREFIX/lib/ossl-modules" ]; then
+            MODULES_DIR="$PREFIX/lib/ossl-modules"
+          elif [ -d "$PREFIX/lib64/ossl-modules" ]; then
+            MODULES_DIR="$PREFIX/lib64/ossl-modules"
+          else
+            echo "ERROR: OpenSSL modules directory not found under $PREFIX/lib*/ossl-modules" >&2
+            exit 1
+          fi
+          echo "$PREFIX/bin" >> "$GITHUB_PATH"
+          echo "openssl_dir=$PREFIX" >> "$GITHUB_OUTPUT"
+          echo "openssl_modules=$MODULES_DIR" >> "$GITHUB_OUTPUT"
+          echo "openssl_conf=$PREFIX/ssl/openssl-fips.cnf" >> "$GITHUB_OUTPUT"
+          echo "pkg_config_path=$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig" >> "$GITHUB_OUTPUT"
+          echo "ld_library_path=$PREFIX/lib64:$PREFIX/lib" >> "$GITHUB_OUTPUT"
+
+      - name: Export FIPS-only runtime environment
+        run: |
+          {
+            echo "RUBIN_OPENSSL_PREFIX=${{ steps.openssl.outputs.openssl_dir }}"
+            echo "RUBIN_OPENSSL_MODULES=${{ steps.openssl.outputs.openssl_modules }}"
+            echo "RUBIN_OPENSSL_CONF=${{ steps.openssl.outputs.openssl_conf }}"
+            echo "RUBIN_OPENSSL_FIPS_MODE=only"
+            echo "OPENSSL_MODULES=${{ steps.openssl.outputs.openssl_modules }}"
+            echo "OPENSSL_CONF=${{ steps.openssl.outputs.openssl_conf }}"
+            echo "PKG_CONFIG_PATH=${{ steps.openssl.outputs.pkg_config_path }}"
+            echo "LD_LIBRARY_PATH=${{ steps.openssl.outputs.ld_library_path }}"
+          } >> "$GITHUB_ENV"
+
+      - name: Run FIPS-only smoke and conformance lane
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts/fips-nightly
+          : > artifacts/fips-nightly/status.tsv
+
+          run_check() {
+            local name="$1"
+            shift
+            local logfile="artifacts/fips-nightly/${name}.log"
+            set +e
+            "$@" >"$logfile" 2>&1
+            local rc=$?
+            set -e
+            printf "%s\t%d\n" "$name" "$rc" >> artifacts/fips-nightly/status.tsv
+            return 0
+          }
+
+          run_check "fips_preflight" scripts/dev-env.sh -- scripts/crypto/openssl/fips-preflight.sh
+          run_check "go_verify_sig_smoke" scripts/dev-env.sh -- bash -lc \
+            'cd /Users/gpt/Documents/rubin-protocol/clients/go && go test ./consensus -run "TestVerifySig_(FIPSOnlyModeValidOrSkip|SLHBranchExecutesBootstrap|OpenSSLBackendErrorMapsToSigInvalid)$" -count=1'
+          run_check "rust_verify_sig_smoke" scripts/dev-env.sh -- bash -lc \
+            'cd /Users/gpt/Documents/rubin-protocol/clients/rust && cargo test -p rubin-consensus verify_sig_openssl::tests::'
+          run_check "conformance_sig_lane" scripts/dev-env.sh -- python3 \
+            /Users/gpt/Documents/rubin-protocol/conformance/runner/run_cv_bundle.py \
+            --only-gates CV-SIG CV-HTLC CV-HTLC-ORDERING
+
+          total_checks=$(wc -l < artifacts/fips-nightly/status.tsv | tr -d ' ')
+          failed_checks=$(awk -F'\t' '$2 != 0 {c++} END {print c+0}' artifacts/fips-nightly/status.tsv)
+          passed_checks=$((total_checks - failed_checks))
+          success=0
+          if [ "$failed_checks" -eq 0 ]; then
+            success=1
+          fi
+
+          ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          run_id="${GITHUB_RUN_ID}"
+          run_attempt="${GITHUB_RUN_ATTEMPT}"
+
+          cat > artifacts/fips-nightly/stability.json <<EOF
+          {
+            "timestamp_utc": "${ts}",
+            "run_id": "${run_id}",
+            "run_attempt": "${run_attempt}",
+            "fips_mode": "only",
+            "checks_total": ${total_checks},
+            "checks_passed": ${passed_checks},
+            "checks_failed": ${failed_checks},
+            "lane_success": ${success}
+          }
+          EOF
+
+          {
+            echo "# FIPS-only nightly triage"
+            echo ""
+            echo "- run_id: ${run_id}"
+            echo "- run_attempt: ${run_attempt}"
+            echo "- checks_total: ${total_checks}"
+            echo "- checks_failed: ${failed_checks}"
+            echo ""
+            echo "## Check results"
+            while IFS=$'\t' read -r name rc; do
+              if [ "$rc" -eq 0 ]; then
+                echo "- ${name}: PASS"
+              else
+                echo "- ${name}: FAIL (rc=${rc})"
+              fi
+            done < artifacts/fips-nightly/status.tsv
+            echo ""
+            echo "## Logs"
+            while IFS=$'\t' read -r name rc; do
+              echo "- artifacts/fips-nightly/${name}.log"
+            done < artifacts/fips-nightly/status.tsv
+          } > artifacts/fips-nightly/triage.md
+
+          if [ "$failed_checks" -ne 0 ]; then
+            echo "FIPS-only nightly lane failed (${failed_checks}/${total_checks}). See artifacts/fips-nightly/triage.md"
+            exit 1
+          fi
+
+      - name: Upload FIPS-only nightly artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fips-only-nightly
+          path: artifacts/fips-nightly
