@@ -5,8 +5,63 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const specPath = path.join(root, "spec", "RUBIN_L1_CANONICAL.md");
-const hashesPath = path.join(root, "spec", "SECTION_HASHES.json");
+const argv = process.argv.slice(2);
+
+function argValue(flag) {
+  const idx = argv.indexOf(flag);
+  if (idx === -1 || idx + 1 >= argv.length) {
+    return "";
+  }
+  return argv[idx + 1];
+}
+
+function unique(values) {
+  const out = [];
+  const seen = new Set();
+  for (const value of values) {
+    if (!value) {
+      continue;
+    }
+    const normalized = path.resolve(value);
+    if (seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function resolveSpecRoot(repoRoot) {
+  const cli = argValue("--spec-root");
+  const env = process.env.RUBIN_SPEC_ROOT || "";
+  const candidates = unique([
+    cli,
+    env,
+    path.join(repoRoot, "spec"),
+    path.resolve(repoRoot, "..", "rubin-spec-private", "spec"),
+    path.resolve(repoRoot, "..", "rubin-spec", "spec"),
+  ]);
+
+  for (const candidate of candidates) {
+    const canonical = path.join(candidate, "RUBIN_L1_CANONICAL.md");
+    const hashes = path.join(candidate, "SECTION_HASHES.json");
+    if (fs.existsSync(canonical) && fs.existsSync(hashes)) {
+      return { specRoot: candidate, specPath: canonical, hashesPath: hashes, candidates };
+    }
+  }
+  return { specRoot: "", specPath: "", hashesPath: "", candidates };
+}
+
+const resolved = resolveSpecRoot(root);
+if (!resolved.specPath || !resolved.hashesPath) {
+  console.error("FAIL [spec-root] cannot locate RUBIN_L1_CANONICAL.md + SECTION_HASHES.json");
+  console.error(`Tried: ${resolved.candidates.join(", ")}`);
+  process.exit(2);
+}
+
+const specPath = resolved.specPath;
+const hashesPath = resolved.hashesPath;
 
 const spec = fs.readFileSync(specPath, "utf8").replace(/\r\n/g, "\n");
 const expectedDoc = JSON.parse(fs.readFileSync(hashesPath, "utf8"));
@@ -24,7 +79,7 @@ if (expectedDoc && typeof expectedDoc === "object" && expectedDoc.sections) {
   }
 }
 
-const sectionHeadings = {
+const fallbackSectionHeadings = {
   transaction_wire: "## 5. Transaction Wire",
   transaction_identifiers: "## 8. Transaction Identifiers (TXID / WTXID)",
   weight_accounting: "## 9. Weight Accounting (Normative)",
@@ -39,6 +94,7 @@ const sectionHeadings = {
   value_conservation: "## 20. Value Conservation (Normative)",
   da_set_integrity: "## 21. DA Set Integrity (Normative)",
 };
+const sectionHeadings = expectedDoc.section_headings || fallbackSectionHeadings;
 
 function extractSection(md, heading) {
   const lines = md.split("\n");
@@ -85,4 +141,4 @@ if (failed > 0) {
   process.exit(1);
 }
 
-console.log(`OK: all ${Object.keys(sectionHeadings).length} section hashes match`);
+console.log(`OK: all ${Object.keys(sectionHeadings).length} section hashes match (${resolved.specRoot})`);
