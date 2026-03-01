@@ -7,7 +7,7 @@ func checkSLHCanonical(w WitnessItem) error {
 		return nil
 	}
 	if len(w.Pubkey) != SLH_DSA_SHAKE_256F_PUBKEY_BYTES ||
-		len(w.Signature) == 0 || len(w.Signature) > MAX_SLH_DSA_SIG_BYTES {
+		len(w.Signature) != MAX_SLH_DSA_SIG_BYTES {
 		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical SLH-DSA witness item lengths")
 	}
 	return nil

@@ -202,8 +202,7 @@ pub fn validate_htlc_spend(
                 ));
             }
             if sig_item.pubkey.len() as u64 != SLH_DSA_SHAKE_256F_PUBKEY_BYTES
-                || sig_item.signature.is_empty()
-                || sig_item.signature.len() as u64 > MAX_SLH_DSA_SIG_BYTES
+                || sig_item.signature.len() as u64 != MAX_SLH_DSA_SIG_BYTES
             {
                 return Err(TxError::new(
                     ErrorCode::TxErrSigNoncanonical,

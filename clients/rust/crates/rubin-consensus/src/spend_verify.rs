@@ -16,8 +16,7 @@ fn check_slh_canonical(w: &WitnessItem) -> Result<(), TxError> {
         return Ok(());
     }
     if w.pubkey.len() as u64 != SLH_DSA_SHAKE_256F_PUBKEY_BYTES
-        || w.signature.is_empty()
-        || w.signature.len() as u64 > MAX_SLH_DSA_SIG_BYTES
+        || w.signature.len() as u64 != MAX_SLH_DSA_SIG_BYTES
     {
         return Err(TxError::new(
             ErrorCode::TxErrSigNoncanonical,
@@ -159,6 +158,19 @@ mod tests {
             suite_id: SUITE_ID_SLH_DSA_SHAKE_256F,
             pubkey: vec![0u8; SLH_DSA_SHAKE_256F_PUBKEY_BYTES as usize],
             signature: vec![],
+        };
+        let err =
+            validate_p2pk_spend(&entry, &w, &[0u8; 32], SLH_DSA_ACTIVATION_HEIGHT).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
+    }
+
+    #[test]
+    fn slh_noncanonical_short_sig_p2pk() {
+        let entry = dummy_entry();
+        let w = WitnessItem {
+            suite_id: SUITE_ID_SLH_DSA_SHAKE_256F,
+            pubkey: vec![0u8; SLH_DSA_SHAKE_256F_PUBKEY_BYTES as usize],
+            signature: vec![0x01],
         };
         let err =
             validate_p2pk_spend(&entry, &w, &[0u8; 32], SLH_DSA_ACTIVATION_HEIGHT).unwrap_err();

@@ -83,6 +83,16 @@ func TestValidateP2PKSpend_OkAndFailureModes(t *testing.T) {
 	if err := validateP2PKSpend(entry, wSLHEmptySig, digest, SLH_DSA_ACTIVATION_HEIGHT); err == nil || mustTxErrCode(t, err) != TX_ERR_SIG_NONCANONICAL {
 		t.Fatalf("expected TX_ERR_SIG_NONCANONICAL (SLH empty sig), got %v", err)
 	}
+
+	// SLH active + short non-empty signature → TX_ERR_SIG_NONCANONICAL
+	wSLHShortSig := WitnessItem{
+		SuiteID:   SUITE_ID_SLH_DSA_SHAKE_256F,
+		Pubkey:    make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES),
+		Signature: []byte{0x01},
+	}
+	if err := validateP2PKSpend(entry, wSLHShortSig, digest, SLH_DSA_ACTIVATION_HEIGHT); err == nil || mustTxErrCode(t, err) != TX_ERR_SIG_NONCANONICAL {
+		t.Fatalf("expected TX_ERR_SIG_NONCANONICAL (SLH short sig), got %v", err)
+	}
 }
 
 func TestValidateThresholdSigSpend_MismatchAndThresholdLogic(t *testing.T) {

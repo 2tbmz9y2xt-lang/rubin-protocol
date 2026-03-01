@@ -178,8 +178,7 @@ pub fn verify_sig(
         }
         SUITE_ID_SLH_DSA_SHAKE_256F => {
             if pubkey.len() != SLH_DSA_SHAKE_256F_PUBKEY_BYTES as usize
-                || signature.is_empty()
-                || signature.len() > MAX_SLH_DSA_SIG_BYTES as usize
+                || signature.len() != MAX_SLH_DSA_SIG_BYTES as usize
             {
                 return Ok(false);
             }

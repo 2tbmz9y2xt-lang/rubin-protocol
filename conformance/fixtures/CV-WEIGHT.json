@@ -26,10 +26,10 @@
       "op": "tx_weight_and_stats",
       "tx_hex": "010000000002000000000000000111111111111111111111111111111111111111111111111111111111111111110000000000000000000000000000010240cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc01dd00",
       "expect_ok": true,
-      "expect_weight": 374,
+      "expect_weight": 310,
       "expect_da_bytes": 0,
       "expect_anchor_bytes": 0,
-      "note": "base=60 witness=69 da_size=1 sig_cost=64"
+      "note": "base=60 witness=69 da_size=1 sig_cost=0 (short SLH signature is non-canonical and must not contribute sig_cost)"
     },
     {
       "id": "WEIGHT-04",
