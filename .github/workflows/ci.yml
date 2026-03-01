@@ -246,7 +246,6 @@ jobs:
           with:
             project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
             coverage-reports: coverage/lcov.info                                                                                                              
-
       - name: Rust clippy
         run: |
           cd clients/rust
