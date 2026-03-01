@@ -21,4 +21,5 @@ def cvMerkleVectors : List CVMerkleVector := [
   { id := "CV-MERKLE-ODD-DUP", txidsHex := ["0xd205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0", "0xdc17c8ac4e545a2058ba11b4ea304b56db0820a762f4059a496a3ba9b983d5d6", "0x5f2a5f7a9c5e4bc5c8fe4a41d16ec77cce574f5ec0bd2f7c6f7f2f3f11aa77b1", "0x5f2a5f7a9c5e4bc5c8fe4a41d16ec77cce574f5ec0bd2f7c6f7f2f3f11aa77b1"], expectOk := true, expectMerkleRootHex := some ("0x69c4c7b52eeb183d0a6b64cd7b714953838850115decbbd0ba23b00986b3539f"), expectNotMerkleRootHex := some ("0xdf9de20c0dde92db5c88f636299e00c061a63432089a138ae43d368bf54e6730") }
 ]
 
+
 end RubinFormal.Conformance

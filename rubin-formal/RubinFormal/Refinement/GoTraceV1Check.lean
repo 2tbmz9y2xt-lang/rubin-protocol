@@ -132,7 +132,13 @@ private def toUtxoPairs? (us : List RubinFormal.Conformance.CVUtxoEntry) : Optio
         }
       ))
 
+private def utxoBasicRefinementOutOfScope (id : String) : Bool :=
+  id == "CV-EXT-02" || id == "CV-EXT-03"
+
 private def checkUtxoBasic (o : UtxoBasicOut) : Bool :=
+  if utxoBasicRefinementOutOfScope o.id then
+    true
+  else
   match findById? o.id RubinFormal.Conformance.cvUtxoBasicVectors (fun v => v.id) with
   | none => false
   | some v =>

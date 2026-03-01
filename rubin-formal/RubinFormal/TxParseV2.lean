@@ -28,6 +28,7 @@ def ML_DSA_87_SIG_BYTES : Nat := 4627
 def SLH_DSA_SHAKE_256F_PUBKEY_BYTES : Nat := 64
 def MAX_SLH_DSA_SIG_BYTES : Nat := 49856
 
+def MIN_HTLC_PREIMAGE_BYTES : Nat := 16
 def MAX_HTLC_PREIMAGE_BYTES : Nat := 256
 
 @[inline] def fail (e : TxErr) : ParseResult :=
@@ -91,7 +92,7 @@ def parseWitnessItem (c : Cursor) : Option (Cursor × Option TxErr × Bool) := d
       else if sigLen >= 3 then
         if sig.size >= 3 && sig.get! 0 == 0x00 then
           let preLen := Wire.u16le? (sig.get! 1) (sig.get! 2)
-          if preLen >= 1 && preLen <= MAX_HTLC_PREIMAGE_BYTES && sigLen == 3 + preLen then
+          if preLen >= MIN_HTLC_PREIMAGE_BYTES && preLen <= MAX_HTLC_PREIMAGE_BYTES && sigLen == 3 + preLen then
             pure (c5, none, false)
           else
             none
@@ -111,7 +112,10 @@ def parseWitnessItem (c : Cursor) : Option (Cursor × Option TxErr × Bool) := d
     -- where block height is available for deterministic activation priority.
     pure (c5, none, true)
   else
-    pure (c5, some .sigAlgInvalid, false)
+    -- Unknown suites remain parse-canonical; semantic authorization is
+    -- deferred to spend validation where covenant type and block height
+    -- are available for deterministic error priority.
+    pure (c5, none, false)
 
 def parseWitnessSection (c : Cursor) : Option (Cursor × TxErr × Nat × Nat) := do
   let startOff := c.off

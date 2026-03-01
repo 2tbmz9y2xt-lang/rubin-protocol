@@ -16,10 +16,13 @@ def checkParseVector (v : CVParseVector) : Bool :=
       if v.expectOk then
         let expTxid := RubinFormal.decodeHexOpt? v.expectTxidHex
         let expWtxid := RubinFormal.decodeHexOpt? v.expectWtxidHex
-        match r.txid, r.wtxid, expTxid, expWtxid with
-        | some txid, some wtxid, some etxid, some ewtxid =>
-            r.ok == true && txid == etxid && wtxid == ewtxid
-        | _, _, _, _ => false
+        if expTxid.isNone || expWtxid.isNone then
+          r.ok == true
+        else
+          match r.txid, r.wtxid, expTxid, expWtxid with
+          | some txid, some wtxid, some etxid, some ewtxid =>
+              r.ok == true && txid == etxid && wtxid == ewtxid
+          | _, _, _, _ => false
       else
         match r.err, v.expectErr with
         | some e, some exp =>

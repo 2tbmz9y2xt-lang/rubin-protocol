@@ -20,6 +20,8 @@ def ML_DSA_87_PUBKEY_BYTES : Nat := 2592
 def ML_DSA_87_SIG_BYTES : Nat := 4627
 def SLH_DSA_SHAKE_256F_PUBKEY_BYTES : Nat := 64
 def MAX_SLH_DSA_SIG_BYTES : Nat := 49856
+def MIN_HTLC_PREIMAGE_BYTES : Nat := 16
+def MAX_HTLC_PREIMAGE_BYTES : Nat := 256
 
 def WITNESS_SLOTS (covType : Nat) (covData : Bytes) : Except String Nat := do
   if covType == CovenantGenesisV1.COV_TYPE_HTLC then
@@ -119,9 +121,9 @@ def validateHTLCSpendNoCrypto
     if pathItem.signature.size < 3 then
       throw "TX_ERR_PARSE"
     let preLen := parseU16le (pathItem.signature.get! 1) (pathItem.signature.get! 2)
-    if preLen == 0 then
+    if preLen < MIN_HTLC_PREIMAGE_BYTES then
       throw "TX_ERR_PARSE"
-    if preLen > 256 then
+    if preLen > MAX_HTLC_PREIMAGE_BYTES then
       throw "TX_ERR_PARSE"
     if pathItem.signature.size != 3 + preLen then
       throw "TX_ERR_PARSE"
