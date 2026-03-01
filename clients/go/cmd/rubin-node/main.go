@@ -172,7 +172,12 @@ type featureBitDeploymentJSON struct {
 	TimeoutHeight uint64 `json:"timeout_height"`
 }
 
-func printFeatureBitsTelemetry(w io.Writer, bs *node.BlockStore, height uint64, deploymentsPath string) error {
+type headerStore interface {
+	CanonicalHash(height uint64) ([32]byte, bool, error)
+	GetHeaderByHash(hash [32]byte) ([]byte, error)
+}
+
+func printFeatureBitsTelemetry(w io.Writer, bs headerStore, height uint64, deploymentsPath string) error {
 	raw, err := os.ReadFile(filepath.Clean(deploymentsPath))
 	if err != nil {
 		return err
@@ -222,7 +227,7 @@ func printFeatureBitsTelemetry(w io.Writer, bs *node.BlockStore, height uint64, 
 	return nil
 }
 
-func countSignalsInWindow(bs *node.BlockStore, windowIndex uint64, bit uint8) (uint32, error) {
+func countSignalsInWindow(bs headerStore, windowIndex uint64, bit uint8) (uint32, error) {
 	var count uint32
 	start := windowIndex * consensus.SIGNAL_WINDOW
 	end := start + consensus.SIGNAL_WINDOW - 1

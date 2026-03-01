@@ -16,7 +16,7 @@ use sha3::{Digest, Sha3_256};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct Request {
     op: String,
 
@@ -697,6 +697,40 @@ fn value_as_string(v: &Value, def: &str) -> String {
         .unwrap_or_else(|| def.to_string())
 }
 
+fn op_featurebits_state(req: &Request) -> Response {
+    let d = FeatureBitDeployment {
+        name: req.name.clone(),
+        bit: req.bit,
+        start_height: req.start_height,
+        timeout_height: req.timeout_height,
+    };
+
+    match featurebit_state_at_height_from_window_counts(&d, req.height, &req.window_signal_counts) {
+        Ok(ev) => {
+            let est = if ev.state == FeatureBitState::LockedIn {
+                Some(ev.boundary_height + ev.signal_window)
+            } else {
+                None
+            };
+            Response {
+                ok: true,
+                state: Some(ev.state.as_str().to_string()),
+                boundary_height: Some(ev.boundary_height),
+                prev_window_signal_count: Some(ev.prev_window_signal_count),
+                signal_window: Some(ev.signal_window),
+                signal_threshold: Some(ev.signal_threshold),
+                estimated_activation_height: est,
+                ..Default::default()
+            }
+        }
+        Err(e) => Response {
+            ok: false,
+            err: Some(e),
+            ..Default::default()
+        },
+    }
+}
+
 fn main() {
     let req: Request = match serde_json::from_reader(std::io::stdin()) {
         Ok(v) => v,
@@ -897,45 +931,8 @@ fn main() {
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
         "featurebits_state" => {
-            let d = FeatureBitDeployment {
-                name: req.name.clone(),
-                bit: req.bit,
-                start_height: req.start_height,
-                timeout_height: req.timeout_height,
-            };
-
-            match featurebit_state_at_height_from_window_counts(
-                &d,
-                req.height,
-                &req.window_signal_counts,
-            ) {
-                Ok(ev) => {
-                    let est = if ev.state == FeatureBitState::LockedIn {
-                        Some(ev.boundary_height + ev.signal_window)
-                    } else {
-                        None
-                    };
-                    let resp = Response {
-                        ok: true,
-                        state: Some(ev.state.as_str().to_string()),
-                        boundary_height: Some(ev.boundary_height),
-                        prev_window_signal_count: Some(ev.prev_window_signal_count),
-                        signal_window: Some(ev.signal_window),
-                        signal_threshold: Some(ev.signal_threshold),
-                        estimated_activation_height: est,
-                        ..Default::default()
-                    };
-                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                }
-                Err(e) => {
-                    let resp = Response {
-                        ok: false,
-                        err: Some(e),
-                        ..Default::default()
-                    };
-                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                }
-            }
+            let resp = op_featurebits_state(&req);
+            let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
         "merkle_root" => {
             let mut txids: Vec<[u8; 32]> = Vec::with_capacity(req.txids.len());
@@ -3629,6 +3626,57 @@ fn main() {
             };
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn featurebits_state_ok_locked_in() {
+        let mut req = Request::default();
+        req.op = "featurebits_state".to_string();
+        req.name = "X".to_string();
+        req.bit = 0;
+        req.start_height = 0;
+        req.timeout_height = rubin_consensus::constants::SIGNAL_WINDOW * 10;
+        req.height = rubin_consensus::constants::SIGNAL_WINDOW;
+        req.window_signal_counts = vec![rubin_consensus::constants::SIGNAL_THRESHOLD];
+
+        let resp = op_featurebits_state(&req);
+        assert!(resp.ok);
+        assert_eq!(resp.state.as_deref(), Some("LOCKED_IN"));
+        assert_eq!(resp.boundary_height, Some(rubin_consensus::constants::SIGNAL_WINDOW));
+        assert_eq!(
+            resp.prev_window_signal_count,
+            Some(rubin_consensus::constants::SIGNAL_THRESHOLD)
+        );
+        assert_eq!(resp.signal_window, Some(rubin_consensus::constants::SIGNAL_WINDOW));
+        assert_eq!(
+            resp.signal_threshold,
+            Some(rubin_consensus::constants::SIGNAL_THRESHOLD)
+        );
+        assert_eq!(
+            resp.estimated_activation_height,
+            Some(rubin_consensus::constants::SIGNAL_WINDOW * 2)
+        );
+    }
+
+    #[test]
+    fn featurebits_state_err_bit_out_of_range() {
+        let mut req = Request::default();
+        req.op = "featurebits_state".to_string();
+        req.name = "X".to_string();
+        req.bit = 32;
+        req.start_height = 0;
+        req.timeout_height = 1;
+        req.height = 0;
+        req.window_signal_counts = vec![];
+
+        let resp = op_featurebits_state(&req);
+        assert!(!resp.ok);
+        assert_eq!(resp.err.as_deref(), Some("featurebits: bit out of range: 32"));
     }
 }
 
