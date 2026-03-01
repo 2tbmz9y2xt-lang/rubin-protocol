@@ -1,6 +1,9 @@
 package consensus
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 type staticCoreExtProfiles map[uint16]CoreExtProfile
 
@@ -177,5 +180,43 @@ func TestApplyNonCoinbaseTxBasic_CORE_EXT_ActiveSuiteRulesAndVerifySig(t *testin
 	}
 	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_INVALID {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_INVALID)
+	}
+}
+
+func TestApplyNonCoinbaseTxBasic_CORE_EXT_VerifySigExtErrorMapsToAlgInvalid(t *testing.T) {
+	var chainID [32]byte
+	var prev [32]byte
+	prev[0] = 0xa5
+
+	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
+	tx, txid := mustParseTxForUtxo(t, txBytes)
+	tx.Witness = []WitnessItem{{SuiteID: 0x09, Pubkey: []byte{0x01}, Signature: []byte{0x02}}}
+
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prev, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_CORE_EXT,
+			CovenantData: coreExtCovenantData(7, []byte{0x01}),
+		},
+	}
+
+	profiles := staticCoreExtProfiles{
+		7: {
+			Active: true,
+			AllowedSuites: map[uint8]struct{}{
+				0x09: {},
+			},
+			VerifySigExtFn: func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) {
+				return false, errors.New("unsupported")
+			},
+		},
+	}
+
+	_, _, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(tx, txid, utxos, 0, 0, 0, chainID, profiles)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
 	}
 }
