@@ -91,7 +91,9 @@ jobs:
         run: |
           cd clients/rust
           cargo tarpaulin --workspace \
+            --exclude rubin-consensus-cli \
             --exclude-files crates/rubin-node/src/* \
+            --exclude-files crates/rubin-consensus-cli/src/* \
             --out Lcov \
             --output-dir .
 
