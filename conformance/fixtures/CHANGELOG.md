@@ -23,6 +23,19 @@ Policy:
 - `CV-COVENANT-GENESIS.json` (добавлены `CV-COV-16..17`)
 - `CV-UTXO-BASIC.json` (добавлены `CV-U-EXT-01..03`)
 
+## 2026-03-01 — CORE_EXT pre-activation anyone-can-spend correction (Q-SF-EXT-09)
+
+Причина:
+- CANONICAL changed: `CORE_EXT` pre-ACTIVE spends are unconditional anyone-can-spend w.r.t. witness semantics
+  (sentinel-only constraint removed).
+
+Инструменты:
+- ручное обновление `CV-UTXO-BASIC.json`,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-UTXO-BASIC`.
+
+Изменённые fixtures:
+- `CV-UTXO-BASIC.json` (updated `CV-U-EXT-02` expected `ok=true`).
+
 ## 2026-02-27 — covenant_data_len cap boundary (Q-AUDIT-COV-01)
 
 Причина:

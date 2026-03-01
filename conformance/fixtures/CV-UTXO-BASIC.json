@@ -343,8 +343,7 @@
     },
     {
       "block_timestamp": 2000,
-      "expect_err": "TX_ERR_PARSE",
-      "expect_ok": false,
+      "expect_ok": true,
       "height": 500000,
       "id": "CV-U-EXT-02",
       "op": "utxo_apply_basic",
