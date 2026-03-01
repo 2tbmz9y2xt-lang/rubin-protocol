@@ -1,7 +1,7 @@
 use crate::compactsize::encode_compact_size;
 use crate::constants::{
-    COV_TYPE_HTLC, COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_VAULT, MAX_MULTISIG_KEYS,
-    MAX_VAULT_KEYS, MAX_VAULT_WHITELIST_ENTRIES,
+    COV_TYPE_EXT, COV_TYPE_HTLC, COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_VAULT,
+    MAX_MULTISIG_KEYS, MAX_VAULT_KEYS, MAX_VAULT_WHITELIST_ENTRIES,
 };
 use crate::error::{ErrorCode, TxError};
 
@@ -185,6 +185,7 @@ pub fn output_descriptor_bytes(covenant_type: u16, covenant_data: &[u8]) -> Vec<
 pub fn witness_slots(covenant_type: u16, covenant_data: &[u8]) -> Result<usize, TxError> {
     match covenant_type {
         COV_TYPE_P2PK => Ok(1),
+        COV_TYPE_EXT => Ok(1),
         COV_TYPE_MULTISIG => Ok(covenant_data.get(1).copied().unwrap_or(1) as usize),
         // CORE_VAULT: owner_lock_id[32] || threshold[1] || key_count[1] || ...
         COV_TYPE_VAULT => Ok(covenant_data.get(33).copied().unwrap_or(1) as usize),

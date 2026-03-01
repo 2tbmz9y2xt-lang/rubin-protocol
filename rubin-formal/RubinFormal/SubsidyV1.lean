@@ -76,7 +76,7 @@ def connectBlockBasic
   let mut utxoMap : Std.RBMap Outpoint UtxoEntry cmpOutpoint := buildUtxoMap utxos
   let mut sumFees : Nat := 0
   for txBytes in pb.txs.drop 1 do
-    let (fee, next) ← applyNonCoinbaseTxBasicState txBytes utxoMap height pb.header.timestamp chainId
+    let (fee, next) ← applyNonCoinbaseTxBasicState txBytes utxoMap height pb.header.timestamp chainId false
     sumFees := sumFees + fee
     utxoMap := next
 

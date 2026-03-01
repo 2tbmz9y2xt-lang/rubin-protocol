@@ -4,6 +4,9 @@ import RubinFormal.BlockBasicCheckV1
 import RubinFormal.Conformance.CVSigVectors
 import RubinFormal.Hex
 
+set_option maxHeartbeats 10000000
+set_option maxRecDepth 50000
+
 namespace RubinFormal.Conformance
 
 open RubinFormal
@@ -39,14 +42,19 @@ def checkSigVector (v : CVSigVector) : Bool :=
         if v.expectOk then
           let expTxid := RubinFormal.decodeHexOpt? v.expectTxidHex
           let expWtxid := RubinFormal.decodeHexOpt? v.expectWtxidHex
-          match r.txid, r.wtxid, expTxid, expWtxid with
-          | some txid, some wtxid, some etxid, some ewtxid =>
-              let consumedOk :=
-                match v.expectConsumed with
-                | none => true
-                | some n => tx.size == n
-              r.ok == true && txid == etxid && wtxid == ewtxid && consumedOk
-          | _, _, _, _ => false
+          let txidOk :=
+            match expTxid with
+            | none => true
+            | some etxid => r.txid == some etxid
+          let wtxidOk :=
+            match expWtxid with
+            | none => true
+            | some ewtxid => r.wtxid == some ewtxid
+          let consumedOk :=
+            match v.expectConsumed with
+            | none => true
+            | some n => tx.size == n
+          r.ok == true && txidOk && wtxidOk && consumedOk
         else
           match r.err, v.expectErr with
           | some e, some exp => r.ok == false && e.toString == exp

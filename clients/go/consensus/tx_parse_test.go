@@ -128,7 +128,7 @@ func TestParseTx_WitnessItem_Canonicalization(t *testing.T) {
 		},
 		{
 			name:    "unknown_suite",
-			wantErr: TX_ERR_SIG_ALG_INVALID,
+			wantErr: "",
 			section: func() []byte {
 				var w bytes.Buffer
 				w.WriteByte(0x01) // witness_count
@@ -164,6 +164,16 @@ func TestParseTx_WitnessItem_Canonicalization(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.wantErr == "" {
+				tx, _, _, _, err := ParseTx(txWithWitnessSection(tc.section()))
+				if err != nil {
+					t.Fatalf("ParseTx: %v", err)
+				}
+				if len(tx.Witness) != 1 || tx.Witness[0].SuiteID != 0x03 {
+					t.Fatalf("witness=%v, want suite_id=0x03", tx.Witness)
+				}
+				return
+			}
 			expectParseErrCode(t, txWithWitnessSection(tc.section()), tc.wantErr)
 		})
 	}

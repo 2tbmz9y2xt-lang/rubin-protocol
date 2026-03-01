@@ -339,12 +339,7 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
                 // available; activation must be checked before lengths to preserve
                 // deterministic error-priority (Q-CF-18).
             }
-            _ => {
-                return Err(TxError::new(
-                    ErrorCode::TxErrSigAlgInvalid,
-                    "unknown suite_id",
-                ));
-            }
+            _ => {}
         }
 
         witness.push(WitnessItem {

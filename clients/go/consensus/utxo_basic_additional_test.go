@@ -42,6 +42,12 @@ func TestCheckSpendCovenant_SupportedTypes(t *testing.T) {
 	if err := checkSpendCovenant(COV_TYPE_HTLC, htlcData); err != nil {
 		t.Fatalf("CORE_HTLC: %v", err)
 	}
+
+	coreExtData := AppendU16le(nil, 1)
+	coreExtData = AppendCompactSize(coreExtData, 0)
+	if err := checkSpendCovenant(COV_TYPE_CORE_EXT, coreExtData); err != nil {
+		t.Fatalf("CORE_EXT: %v", err)
+	}
 }
 
 func TestCheckSpendCovenant_Errors(t *testing.T) {
@@ -53,6 +59,9 @@ func TestCheckSpendCovenant_Errors(t *testing.T) {
 	}
 	if err := checkSpendCovenant(COV_TYPE_HTLC, nil); err == nil {
 		t.Fatalf("expected error for invalid CORE_HTLC covenant_data")
+	}
+	if err := checkSpendCovenant(COV_TYPE_CORE_EXT, nil); err == nil {
+		t.Fatalf("expected error for invalid CORE_EXT covenant_data")
 	}
 
 	err := checkSpendCovenant(0x9999, []byte{0x01})

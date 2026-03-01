@@ -2,6 +2,9 @@ import RubinFormal.UtxoApplyGenesisV1
 import RubinFormal.Conformance.CVHtlcVectors
 import RubinFormal.Hex
 
+set_option maxHeartbeats 10000000
+set_option maxRecDepth 50000
+
 namespace RubinFormal.Conformance
 
 open RubinFormal

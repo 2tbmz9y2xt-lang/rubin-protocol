@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
 use crate::constants::{
-    COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_HTLC, COV_TYPE_MULTISIG,
-    COV_TYPE_P2PK, COV_TYPE_VAULT,
+    COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_EXT, COV_TYPE_HTLC,
+    COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_VAULT,
 };
+use crate::core_ext::{validate_core_ext_spend, CoreExtProfiles};
 use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
@@ -64,6 +65,29 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
     block_timestamp: u64,
     block_mtp: u64,
     chain_id: [u8; 32],
+) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
+    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
+        tx,
+        txid,
+        utxo_set,
+        height,
+        block_timestamp,
+        block_mtp,
+        chain_id,
+        &CoreExtProfiles::empty(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
+    tx: &Tx,
+    txid: [u8; 32],
+    utxo_set: &HashMap<Outpoint, UtxoEntry>,
+    height: u64,
+    block_timestamp: u64,
+    block_mtp: u64,
+    chain_id: [u8; 32],
+    core_ext_profiles_at_height: &CoreExtProfiles,
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
     let _ = block_timestamp;
     if tx.inputs.is_empty() {
@@ -203,6 +227,21 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
                     &digest,
                     height,
                     block_mtp,
+                )?;
+            }
+            COV_TYPE_EXT => {
+                if slots != 1 {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrParse,
+                        "CORE_EXT witness_slots must be 1",
+                    ));
+                }
+                validate_core_ext_spend(
+                    &entry,
+                    &assigned[0],
+                    &digest,
+                    height,
+                    core_ext_profiles_at_height,
                 )?;
             }
             _ => {}
@@ -443,6 +482,10 @@ fn non_vault_inputs_owned_by(
 #[allow(dead_code)]
 fn check_spend_covenant(covenant_type: u16, covenant_data: &[u8]) -> Result<(), TxError> {
     if covenant_type == COV_TYPE_P2PK {
+        return Ok(());
+    }
+    if covenant_type == COV_TYPE_EXT {
+        let _ = crate::core_ext::parse_core_ext_covenant_data(covenant_data)?;
         return Ok(());
     }
     if covenant_type == COV_TYPE_VAULT {

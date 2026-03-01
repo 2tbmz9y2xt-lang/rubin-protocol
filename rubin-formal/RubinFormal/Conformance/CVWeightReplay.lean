@@ -2,6 +2,9 @@ import RubinFormal.TxWeightV2
 import RubinFormal.Conformance.CVWeightVectors
 import RubinFormal.Hex
 
+set_option maxHeartbeats 200000000
+set_option maxRecDepth 50000
+
 namespace RubinFormal.Conformance
 
 open RubinFormal

@@ -9,6 +9,20 @@ Policy:
 
 ---
 
+## 2026-03-01 — CORE_EXT genesis + pre-activation spend vectors (Q-SF-EXT-05)
+
+Причина:
+- зафиксировать genesis-known `CORE_EXT (0x0102)` creation constraints и pre-activation sentinel-only spend semantics (CANONICAL §14, §18.2).
+
+Инструменты:
+- ручное обновление fixtures,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-COVENANT-GENESIS CV-UTXO-BASIC`,
+- синхронизация матрицы: `tools/gen_conformance_matrix.py`.
+
+Изменённые fixtures:
+- `CV-COVENANT-GENESIS.json` (добавлены `CV-COV-16..17`)
+- `CV-UTXO-BASIC.json` (добавлены `CV-U-EXT-01..03`)
+
 ## 2026-02-27 — covenant_data_len cap boundary (Q-AUDIT-COV-01)
 
 Причина:

@@ -111,7 +111,9 @@ def parseWitnessItem (c : Cursor) : Option (Cursor × Option TxErr × Bool) := d
     -- where block height is available for deterministic activation priority.
     pure (c5, none, true)
   else
-    pure (c5, some .sigAlgInvalid, false)
+    -- Unknown suite_id is accepted at parse stage (CANONICAL §12.2 CV-SIG-05).
+    -- Semantic authorization is enforced later during spend validation.
+    pure (c5, none, false)
 
 def parseWitnessSection (c : Cursor) : Option (Cursor × TxErr × Nat × Nat) := do
   let startOff := c.off

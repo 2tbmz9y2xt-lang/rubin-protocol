@@ -139,7 +139,8 @@ private def checkUtxoBasic (o : UtxoBasicOut) : Bool :=
       match RubinFormal.decodeHex? v.txHex, toUtxoPairs? v.utxos with
       | some tx, some utxos =>
           let chainId : Bytes := RubinFormal.bytes ((List.replicate 32 (UInt8.ofNat 0)).toArray)
-          match applyNonCoinbaseTxBasic tx utxos v.height v.blockTimestamp chainId with
+          -- Crypto is out-of-scope in formal refinement; CV-UTXO-BASIC contains no SIG_* expected errs.
+          match applyNonCoinbaseTxBasicNoCrypto tx utxos v.height v.blockTimestamp chainId with
           | .ok (fee, utxoCount) =>
               o.ok && (o.fee == some fee) && (o.utxoCount == some utxoCount)
           | .error e =>

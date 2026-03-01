@@ -101,6 +101,19 @@
       "expect_ok": false,
       "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
       "tx_hex": "0100000000000000000000000000010100000000000000ff000101000000000000"
+    },
+    {
+      "id": "CV-COV-16",
+      "op": "covenant_genesis_check",
+      "expect_ok": true,
+      "tx_hex": "0100000000000000000000000000010100000000000000020103010000000000000000"
+    },
+    {
+      "id": "CV-COV-17",
+      "op": "covenant_genesis_check",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "tx_hex": "0100000000000000000000000000010000000000000000020103010000000000000000"
     }
   ]
 }

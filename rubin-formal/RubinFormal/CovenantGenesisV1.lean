@@ -26,6 +26,7 @@ def COV_TYPE_ANCHOR : Nat := 0x0002
 def COV_TYPE_RESERVED_FUTURE : Nat := 0x00FF
 def COV_TYPE_HTLC : Nat := 0x0100
 def COV_TYPE_VAULT : Nat := 0x0101
+def COV_TYPE_EXT : Nat := 0x0102
 def COV_TYPE_DA_COMMIT : Nat := 0x0103
 def COV_TYPE_MULTISIG : Nat := 0x0104
 
@@ -201,6 +202,19 @@ def validateOutGenesis (out : TxOut) (txKind : Nat) (blockHeight : Nat) : Except
   else if out.covenantType == COV_TYPE_HTLC then
     if out.value == 0 then throw "TX_ERR_COVENANT_TYPE_INVALID"
     let _ ← parseHtlcCovenantData out.covenantData
+    pure ()
+  else if out.covenantType == COV_TYPE_EXT then
+    if out.value == 0 then throw "TX_ERR_COVENANT_TYPE_INVALID"
+    if out.covenantData.size < 3 then throw "TX_ERR_COVENANT_TYPE_INVALID"
+    let _extId := Wire.u16le? (out.covenantData.get! 0) (out.covenantData.get! 1)
+    let c0 : Wire.Cursor := { bs := out.covenantData, off := 2 }
+    let (payloadLen, c1, minimal) ←
+      match c0.getCompactSize? with
+      | none => throw "TX_ERR_COVENANT_TYPE_INVALID"
+      | some x => pure x
+    if !minimal then throw "TX_ERR_COVENANT_TYPE_INVALID"
+    if c1.off + payloadLen != out.covenantData.size then
+      throw "TX_ERR_COVENANT_TYPE_INVALID"
     pure ()
   else if out.covenantType == COV_TYPE_DA_COMMIT then
     if txKind != 0x01 then throw "TX_ERR_COVENANT_TYPE_INVALID"
