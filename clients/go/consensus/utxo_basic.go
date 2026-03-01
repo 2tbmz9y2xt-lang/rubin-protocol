@@ -65,7 +65,33 @@ func ApplyNonCoinbaseTxBasicUpdateWithMTP(
 	chainID [32]byte,
 ) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
 	_ = blockTimestamp
-	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, utxoSet, height, blockMTP, chainID)
+	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, utxoSet, height, blockMTP, chainID, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	return work, &UtxoApplySummary{
+		Fee:       fee,
+		UtxoCount: uint64(len(work)),
+	}, nil
+}
+
+// ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles is a helper for deterministic tooling
+// (conformance/CLI) that need to inject CORE_EXT deployment profiles (CANONICAL §23.2.2).
+//
+// Consensus validity depends on the resolved profile(ext_id, height). Nodes MUST ensure they use
+// the canonical chain-config source for this mapping.
+func ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
+	tx *Tx,
+	txid [32]byte,
+	utxoSet map[Outpoint]UtxoEntry,
+	height uint64,
+	blockTimestamp uint64,
+	blockMTP uint64,
+	chainID [32]byte,
+	coreExtProfiles CoreExtProfileProvider,
+) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
+	_ = blockTimestamp
+	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, utxoSet, height, blockMTP, chainID, coreExtProfiles)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -82,6 +108,7 @@ func applyNonCoinbaseTxBasicWork(
 	height uint64,
 	blockMTP uint64,
 	chainID [32]byte,
+	coreExtProfiles CoreExtProfileProvider,
 ) (map[Outpoint]UtxoEntry, uint64, error) {
 	if tx == nil {
 		return nil, 0, txerr(TX_ERR_PARSE, "nil tx")
@@ -200,6 +227,73 @@ func applyNonCoinbaseTxBasicWork(
 			}
 			if err := ValidateHTLCSpend(entry, assigned[0], assigned[1], digest, height, blockMTP); err != nil {
 				return nil, 0, err
+			}
+		case COV_TYPE_CORE_EXT:
+			if slots != CORE_EXT_WITNESS_SLOTS {
+				return nil, 0, txerr(TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
+			}
+			cd, err := ParseCoreExtCovenantData(entry.CovenantData)
+			if err != nil {
+				return nil, 0, err
+			}
+			w := assigned[0]
+
+			active := false
+			allowedSuites := map[uint8]struct{}(nil)
+			verifySigExtFn := CoreExtVerifySigExtFunc(nil)
+
+			if coreExtProfiles != nil {
+				profile, ok, err := coreExtProfiles.LookupCoreExtProfile(cd.ExtID, height)
+				if err != nil {
+					return nil, 0, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile lookup failure")
+				}
+				if ok && profile.Active {
+					active = true
+					allowedSuites = profile.AllowedSuites
+					verifySigExtFn = profile.VerifySigExtFn
+				}
+			}
+
+			if !active {
+				if w.SuiteID != SUITE_ID_SENTINEL || len(w.Pubkey) != 0 || len(w.Signature) != 0 {
+					return nil, 0, txerr(TX_ERR_PARSE, "CORE_EXT pre-activation witness must be keyless sentinel")
+				}
+				break
+			}
+
+			if !hasSuite(allowedSuites, w.SuiteID) {
+				return nil, 0, txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT suite disallowed under ACTIVE profile")
+			}
+			if w.SuiteID == SUITE_ID_SENTINEL {
+				return nil, 0, txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT sentinel forbidden under ACTIVE profile")
+			}
+			if w.SuiteID == SUITE_ID_SLH_DSA_SHAKE_256F && height < SLH_DSA_ACTIVATION_HEIGHT {
+				return nil, 0, txerr(TX_ERR_SIG_ALG_INVALID, "SLH-DSA suite inactive at this height")
+			}
+
+			switch w.SuiteID {
+			case SUITE_ID_ML_DSA_87, SUITE_ID_SLH_DSA_SHAKE_256F:
+				if err := checkSLHCanonical(w); err != nil {
+					return nil, 0, err
+				}
+				ok, err := verifySig(w.SuiteID, w.Pubkey, w.Signature, digest)
+				if err != nil {
+					return nil, 0, err
+				}
+				if !ok {
+					return nil, 0, txerr(TX_ERR_SIG_INVALID, "CORE_EXT signature invalid")
+				}
+			default:
+				if verifySigExtFn == nil {
+					return nil, 0, txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext unsupported")
+				}
+				ok, err := verifySigExtFn(cd.ExtID, w.SuiteID, w.Pubkey, w.Signature, digest, cd.ExtPayload)
+				if err != nil {
+					return nil, 0, txerr(TX_ERR_SIG_INVALID, "CORE_EXT verify_sig_ext error")
+				}
+				if !ok {
+					return nil, 0, txerr(TX_ERR_SIG_INVALID, "CORE_EXT signature invalid")
+				}
 			}
 		default:
 			// Other covenants have no additional spend-time checks in the genesis set.
@@ -386,6 +480,12 @@ func checkSpendCovenant(
 	}
 	if covType == COV_TYPE_HTLC {
 		if _, err := ParseHTLCCovenantData(covData); err != nil {
+			return err
+		}
+		return nil
+	}
+	if covType == COV_TYPE_CORE_EXT {
+		if _, err := ParseCoreExtCovenantData(covData); err != nil {
 			return err
 		}
 		return nil
