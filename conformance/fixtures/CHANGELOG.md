@@ -9,6 +9,26 @@ Policy:
 
 ---
 
+## 2026-03-01 — Q-SF-EXT-03 / Q-SF-EXT-05 CORE_EXT conformance gate
+
+Причина:
+- добавить executable покрытие для `CORE_EXT` spend semantics из soft-fork extensibility baseline;
+- зафиксировать pre-activation sentinel-only acceptance и post-activation profile enforcement;
+- зафиксировать parse/weight policy для unknown suite как отдельный regression guard.
+
+Инструменты:
+- добавлены `CV-EXT-*` в существующие executable gates;
+- обновление runner (`core_ext_profiles` passthrough для `utxo_apply_basic`);
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-UTXO-BASIC,CV-PARSE,CV-WEIGHT`;
+- синхронизация матрицы: `tools/gen_conformance_matrix.py`;
+- синхронизация Lean-векторов: `tools/formal/gen_lean_conformance_vectors.py`.
+
+Изменённые fixtures:
+- `CV-UTXO-BASIC.json` (добавлены `CV-EXT-01..03`)
+- `CV-PARSE.json` (добавлен `CV-EXT-04`; unknown suite parse-canonical)
+- `CV-WEIGHT.json` (добавлен `CV-EXT-05`)
+- `CV-SIG.json` (unknown suite moved from parse-level to semantic-level check)
+
 ## 2026-02-27 — covenant_data_len cap boundary (Q-AUDIT-COV-01)
 
 Причина:

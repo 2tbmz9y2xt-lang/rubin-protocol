@@ -2,12 +2,12 @@ use num_bigint::BigUint;
 use num_traits::Zero;
 use rubin_consensus::merkle::witness_merkle_root_wtxids;
 use rubin_consensus::{
-    apply_non_coinbase_tx_basic_with_mtp, block_hash, compact_shortid,
+    apply_non_coinbase_tx_basic_with_mtp_and_profiles, block_hash, compact_shortid,
     connect_block_basic_in_memory_at_height, fork_work_from_target, merkle_root_txids, parse_tx,
     pow_check, retarget_v1, retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_public,
     validate_block_basic_with_context_and_fees_at_height,
-    validate_block_basic_with_context_at_height, validate_tx_covenants_genesis, ErrorCode,
-    InMemoryChainState, Outpoint, UtxoEntry,
+    validate_block_basic_with_context_at_height, validate_tx_covenants_genesis, CoreExtProfile,
+    ErrorCode, InMemoryChainState, Outpoint, UtxoEntry,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -84,6 +84,9 @@ struct Request {
 
     #[serde(default)]
     utxos: Vec<UtxoJson>,
+
+    #[serde(default)]
+    core_ext_profiles: Vec<CoreExtProfileJson>,
 
     #[serde(default)]
     height: u64,
@@ -377,6 +380,14 @@ struct UtxoJson {
     covenant_data: String,
     creation_height: u64,
     created_by_coinbase: bool,
+}
+
+#[derive(Deserialize)]
+struct CoreExtProfileJson {
+    ext_id: u16,
+    activation_height: u64,
+    #[serde(default)]
+    allowed_suite_ids: Vec<u8>,
 }
 
 #[derive(Deserialize)]
@@ -2145,6 +2156,15 @@ fn main() {
             }
 
             let block_mtp = req.block_mtp.unwrap_or(req.block_timestamp);
+            let core_ext_profiles: Vec<CoreExtProfile> = req
+                .core_ext_profiles
+                .iter()
+                .map(|p| CoreExtProfile {
+                    ext_id: p.ext_id,
+                    activation_height: p.activation_height,
+                    allowed_suite_ids: p.allowed_suite_ids.clone(),
+                })
+                .collect();
 
             let mut chain_id = [0u8; 32];
             if !req.chain_id.trim().is_empty() {
@@ -2171,7 +2191,7 @@ fn main() {
                 }
                 chain_id.copy_from_slice(&b);
             }
-            match apply_non_coinbase_tx_basic_with_mtp(
+            match apply_non_coinbase_tx_basic_with_mtp_and_profiles(
                 &tx,
                 txid,
                 &utxo_set,
@@ -2179,6 +2199,7 @@ fn main() {
                 req.block_timestamp,
                 block_mtp,
                 chain_id,
+                Some(&core_ext_profiles),
             ) {
                 Ok(summary) => {
                     let resp = Response {

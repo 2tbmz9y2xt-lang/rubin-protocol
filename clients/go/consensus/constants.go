@@ -33,6 +33,7 @@ const (
 	MAX_ANCHOR_BYTES_PER_BLOCK   = 131_072
 	MAX_P2PK_COVENANT_DATA       = 33
 	MAX_HTLC_COVENANT_DATA       = 105
+	CORE_EXT_WITNESS_SLOTS       = 1
 	MIN_HTLC_PREIMAGE_BYTES      = 16 // consensus security floor (Q-A287-03)
 	MAX_HTLC_PREIMAGE_BYTES      = 256
 	MAX_VAULT_KEYS               = 12
@@ -57,6 +58,7 @@ const (
 	COV_TYPE_RESERVED_FUTURE = 0x00FF
 	COV_TYPE_HTLC            = 0x0100
 	COV_TYPE_VAULT           = 0x0101
+	COV_TYPE_EXT             = 0x0102
 	COV_TYPE_DA_COMMIT       = 0x0103
 	COV_TYPE_MULTISIG        = 0x0104
 
@@ -71,6 +73,7 @@ const (
 
 	VERIFY_COST_ML_DSA_87          = 8
 	VERIFY_COST_SLH_DSA_SHAKE_256F = 64
+	VERIFY_COST_UNKNOWN_SUITE      = 64
 )
 
 var POW_LIMIT = [32]byte{

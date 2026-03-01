@@ -152,10 +152,29 @@
     },
     {
       "id": "CV-SIG-03",
-      "op": "parse_tx",
-      "tx_hex": "010000000000000000000000000000000000000103000000",
+      "op": "utxo_apply_basic",
       "expect_ok": false,
-      "expect_err": "TX_ERR_SIG_ALG_INVALID"
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
+      "height": 1000000,
+      "block_timestamp": 1000,
+      "tx_hex_from": "CV-SIG-02d",
+      "tx_hex_mutations": [
+        {
+          "offset": 105,
+          "byte": "03"
+        }
+      ],
+      "utxos": [
+        {
+          "covenant_data": "027d948d78fa146eb2f18652e8e5f8d087a4cc274477d79f5c9dd28533abff907d",
+          "covenant_type": 0,
+          "created_by_coinbase": false,
+          "creation_height": 1000000,
+          "txid": "cececececececececececececececececececececececececececececececece",
+          "value": 100,
+          "vout": 0
+        }
+      ]
     },
     {
       "id": "CV-SIG-04",
@@ -163,6 +182,13 @@
       "tx_hex": "0100000000000000000000000000000000000001010100010000",
       "expect_ok": false,
       "expect_err": "TX_ERR_SIG_NONCANONICAL"
+    },
+    {
+      "id": "CV-SIG-05",
+      "op": "parse_tx",
+      "tx_hex": "010000000000000000000000000000000000000103000000",
+      "expect_ok": true,
+      "note": "Unknown suite_id is parse-canonical with structurally valid witness bytes."
     }
   ]
 }

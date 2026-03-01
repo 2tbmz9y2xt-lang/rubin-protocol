@@ -127,19 +127,6 @@ func TestParseTx_WitnessItem_Canonicalization(t *testing.T) {
 			},
 		},
 		{
-			name:    "unknown_suite",
-			wantErr: TX_ERR_SIG_ALG_INVALID,
-			section: func() []byte {
-				var w bytes.Buffer
-				w.WriteByte(0x01) // witness_count
-				w.WriteByte(0x03) // suite_id unknown
-				w.WriteByte(0x00) // pubkey_length
-				w.WriteByte(0x00) // sig_length
-				w.WriteByte(0x00) // da_payload_len
-				return w.Bytes()
-			},
-		},
-		{
 			name:    "ml_dsa_len_mismatch",
 			wantErr: TX_ERR_SIG_NONCANONICAL,
 			section: func() []byte {
@@ -166,6 +153,21 @@ func TestParseTx_WitnessItem_Canonicalization(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			expectParseErrCode(t, txWithWitnessSection(tc.section()), tc.wantErr)
 		})
+	}
+}
+
+func TestParseTx_WitnessItem_UnknownSuiteParseCanonical(t *testing.T) {
+	var w bytes.Buffer
+	w.WriteByte(0x01) // witness_count
+	w.WriteByte(0x03) // unknown suite_id
+	w.WriteByte(0x01) // pubkey_length
+	w.WriteByte(0x00) // pubkey
+	w.WriteByte(0x02) // sig_length
+	w.Write([]byte{0x01, 0x02})
+	w.WriteByte(0x00) // da_payload_len
+
+	if _, _, _, _, err := ParseTx(txWithWitnessSection(w.Bytes())); err != nil {
+		t.Fatalf("unexpected parse error for unknown suite witness: %v", err)
 	}
 }
 
@@ -212,7 +214,7 @@ func TestParseTx_SLHWitnessBudgetOverflow(t *testing.T) {
 func TestParseTx_WitnessOverflowPrecedesSuiteCanonicalization(t *testing.T) {
 	var w bytes.Buffer
 	w.WriteByte(0x01) // witness_count = 1
-	w.WriteByte(0x03) // unknown suite_id (would be TX_ERR_SIG_ALG_INVALID if reached)
+	w.WriteByte(0x03) // unknown suite_id
 	w.WriteByte(0x00) // pubkey_length = 0
 	w.WriteByte(0xfe) // sig_length = 100001 (u32)
 	_ = binary.Write(&w, binary.LittleEndian, uint32(100001))

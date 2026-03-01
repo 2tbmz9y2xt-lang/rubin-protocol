@@ -340,10 +340,8 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
                 // deterministic error-priority (Q-CF-18).
             }
             _ => {
-                return Err(TxError::new(
-                    ErrorCode::TxErrSigAlgInvalid,
-                    "unknown suite_id",
-                ));
+                // Unknown suites remain parse-canonical if structural bounds are valid.
+                // Semantic authorization is enforced in spend-time covenant logic.
             }
         }
 

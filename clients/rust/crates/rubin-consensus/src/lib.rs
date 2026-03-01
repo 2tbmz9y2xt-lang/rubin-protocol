@@ -6,6 +6,7 @@ pub mod connect_block_inmem;
 pub mod constants;
 mod covenant_genesis;
 pub mod error;
+mod ext;
 mod fork_choice;
 mod hash;
 mod htlc;
@@ -35,6 +36,7 @@ pub use connect_block_inmem::{
 };
 pub use covenant_genesis::validate_tx_covenants_genesis;
 pub use error::{ErrorCode, TxError};
+pub use ext::{parse_core_ext_covenant_data, CoreExtProfile};
 pub use fork_choice::{fork_chainwork_from_targets, fork_work_from_target};
 pub use htlc::{parse_htlc_covenant_data, validate_htlc_spend, HtlcCovenant};
 pub use merkle::merkle_root_txids;
@@ -44,8 +46,9 @@ pub use subsidy::block_subsidy;
 pub use tx::{parse_tx, DaChunkCore, DaCommitCore, Tx, TxInput, TxOutput, WitnessItem};
 pub use utxo_basic::{
     apply_non_coinbase_tx_basic, apply_non_coinbase_tx_basic_update,
-    apply_non_coinbase_tx_basic_update_with_mtp, apply_non_coinbase_tx_basic_with_mtp, Outpoint,
-    UtxoApplySummary, UtxoEntry,
+    apply_non_coinbase_tx_basic_update_with_mtp,
+    apply_non_coinbase_tx_basic_update_with_mtp_and_profiles, apply_non_coinbase_tx_basic_with_mtp,
+    apply_non_coinbase_tx_basic_with_mtp_and_profiles, Outpoint, UtxoApplySummary, UtxoEntry,
 };
 pub use vault::{
     output_descriptor_bytes, parse_multisig_covenant_data, parse_vault_covenant_data,
@@ -54,5 +57,7 @@ pub use vault::{
 
 #[cfg(test)]
 mod compact_relay_tests;
+#[cfg(test)]
+mod ext_tests;
 #[cfg(test)]
 mod tests;

@@ -11,7 +11,7 @@ use crate::verify_sig_openssl::verify_sig;
 
 /// Q-CF-18: validates SLH-DSA-SHAKE-256f witness-item byte lengths.
 /// Returns Ok(()) for non-SLH suite IDs. Must be called after the activation check.
-fn check_slh_canonical(w: &WitnessItem) -> Result<(), TxError> {
+pub(crate) fn check_slh_canonical(w: &WitnessItem) -> Result<(), TxError> {
     if w.suite_id != SUITE_ID_SLH_DSA_SHAKE_256F {
         return Ok(());
     }

@@ -1,15 +1,19 @@
 use std::collections::HashMap;
 
 use crate::constants::{
-    COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_HTLC, COV_TYPE_MULTISIG,
-    COV_TYPE_P2PK, COV_TYPE_VAULT,
+    COINBASE_MATURITY, CORE_EXT_WITNESS_SLOTS, COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_EXT,
+    COV_TYPE_HTLC, COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_VAULT,
 };
 use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
+use crate::ext::{
+    active_core_ext_profile_with_profiles, core_ext_suite_allowed, parse_core_ext_covenant_data,
+    verify_sig_ext, CoreExtProfile,
+};
 use crate::hash::sha3_256;
 use crate::htlc::{parse_htlc_covenant_data, validate_htlc_spend};
 use crate::sighash::sighash_v1_digest;
-use crate::spend_verify::{validate_p2pk_spend, validate_threshold_sig_spend};
+use crate::spend_verify::{check_slh_canonical, validate_p2pk_spend, validate_threshold_sig_spend};
 use crate::tx::Tx;
 use crate::vault::{
     hash_in_sorted_32, output_descriptor_bytes, parse_multisig_covenant_data,
@@ -45,7 +49,7 @@ pub fn apply_non_coinbase_tx_basic_update(
     block_timestamp: u64,
     chain_id: [u8; 32],
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
-    apply_non_coinbase_tx_basic_update_with_mtp(
+    apply_non_coinbase_tx_basic_update_with_mtp_and_profiles(
         tx,
         txid,
         utxo_set,
@@ -53,6 +57,7 @@ pub fn apply_non_coinbase_tx_basic_update(
         block_timestamp,
         block_timestamp,
         chain_id,
+        None,
     )
 }
 
@@ -64,6 +69,29 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
     block_timestamp: u64,
     block_mtp: u64,
     chain_id: [u8; 32],
+) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
+    apply_non_coinbase_tx_basic_update_with_mtp_and_profiles(
+        tx,
+        txid,
+        utxo_set,
+        height,
+        block_timestamp,
+        block_mtp,
+        chain_id,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_profiles(
+    tx: &Tx,
+    txid: [u8; 32],
+    utxo_set: &HashMap<Outpoint, UtxoEntry>,
+    height: u64,
+    block_timestamp: u64,
+    block_mtp: u64,
+    chain_id: [u8; 32],
+    core_ext_profiles: Option<&[CoreExtProfile]>,
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
     let _ = block_timestamp;
     if tx.inputs.is_empty() {
@@ -204,6 +232,61 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
                     height,
                     block_mtp,
                 )?;
+            }
+            COV_TYPE_EXT => {
+                if slots != CORE_EXT_WITNESS_SLOTS {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrParse,
+                        "CORE_EXT witness_slots must be 1",
+                    ));
+                }
+                let ext_cov = parse_core_ext_covenant_data(&entry.covenant_data)?;
+                let profile = active_core_ext_profile_with_profiles(
+                    ext_cov.ext_id,
+                    height,
+                    core_ext_profiles,
+                )?;
+                let w = &assigned[0];
+                if profile.is_none() {
+                    if !(w.suite_id == crate::constants::SUITE_ID_SENTINEL
+                        && w.pubkey.is_empty()
+                        && w.signature.is_empty())
+                    {
+                        return Err(TxError::new(
+                            ErrorCode::TxErrParse,
+                            "CORE_EXT pre-activation witness must be keyless sentinel",
+                        ));
+                    }
+                } else {
+                    if !core_ext_suite_allowed(profile.as_ref(), w.suite_id) {
+                        return Err(TxError::new(
+                            ErrorCode::TxErrSigAlgInvalid,
+                            "CORE_EXT suite disallowed by active profile",
+                        ));
+                    }
+                    if w.suite_id == crate::constants::SUITE_ID_SENTINEL {
+                        return Err(TxError::new(
+                            ErrorCode::TxErrSigAlgInvalid,
+                            "CORE_EXT sentinel suite invalid under active profile",
+                        ));
+                    }
+                    if w.suite_id == crate::constants::SUITE_ID_SLH_DSA_SHAKE_256F
+                        && height < crate::constants::SLH_DSA_ACTIVATION_HEIGHT
+                    {
+                        return Err(TxError::new(
+                            ErrorCode::TxErrSigAlgInvalid,
+                            "SLH-DSA suite inactive at this height",
+                        ));
+                    }
+                    check_slh_canonical(w)?;
+                    let ok = verify_sig_ext(profile.as_ref(), &ext_cov, w, &digest)?;
+                    if !ok {
+                        return Err(TxError::new(
+                            ErrorCode::TxErrSigInvalid,
+                            "CORE_EXT signature invalid",
+                        ));
+                    }
+                }
             }
             _ => {}
         }
@@ -398,7 +481,7 @@ pub fn apply_non_coinbase_tx_basic_with_mtp(
     block_mtp: u64,
     chain_id: [u8; 32],
 ) -> Result<UtxoApplySummary, TxError> {
-    let (_work, summary) = apply_non_coinbase_tx_basic_update_with_mtp(
+    let (_work, summary) = apply_non_coinbase_tx_basic_update_with_mtp_and_profiles(
         tx,
         txid,
         utxo_set,
@@ -406,6 +489,31 @@ pub fn apply_non_coinbase_tx_basic_with_mtp(
         block_timestamp,
         block_mtp,
         chain_id,
+        None,
+    )?;
+    Ok(summary)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn apply_non_coinbase_tx_basic_with_mtp_and_profiles(
+    tx: &Tx,
+    txid: [u8; 32],
+    utxo_set: &HashMap<Outpoint, UtxoEntry>,
+    height: u64,
+    block_timestamp: u64,
+    block_mtp: u64,
+    chain_id: [u8; 32],
+    core_ext_profiles: Option<&[CoreExtProfile]>,
+) -> Result<UtxoApplySummary, TxError> {
+    let (_work, summary) = apply_non_coinbase_tx_basic_update_with_mtp_and_profiles(
+        tx,
+        txid,
+        utxo_set,
+        height,
+        block_timestamp,
+        block_mtp,
+        chain_id,
+        core_ext_profiles,
     )?;
     Ok(summary)
 }
@@ -455,6 +563,10 @@ fn check_spend_covenant(covenant_type: u16, covenant_data: &[u8]) -> Result<(), 
     }
     if covenant_type == COV_TYPE_HTLC {
         parse_htlc_covenant_data(covenant_data)?;
+        return Ok(());
+    }
+    if covenant_type == COV_TYPE_EXT {
+        parse_core_ext_covenant_data(covenant_data)?;
         return Ok(());
     }
     Err(TxError::new(

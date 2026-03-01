@@ -169,8 +169,7 @@ fn parse_tx_witness_item_canonicalization() {
     tx2.push(0x00);
     tx2.push(0x00);
     tx2.push(0x00);
-    let err = parse_tx(&tx2).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    parse_tx(&tx2).expect("unknown suite should remain parse-canonical");
 
     // ml_dsa_selector_reject: suite=0x01, pubkey_length=32, sig_length=0.
     let mut tx2_bad_ml_selector = base.clone();

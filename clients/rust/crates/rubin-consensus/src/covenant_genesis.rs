@@ -1,9 +1,11 @@
 use crate::constants::{
-    COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_HTLC, COV_TYPE_MULTISIG, COV_TYPE_P2PK,
-    COV_TYPE_RESERVED_FUTURE, COV_TYPE_VAULT, MAX_ANCHOR_PAYLOAD_SIZE, MAX_P2PK_COVENANT_DATA,
-    SLH_DSA_ACTIVATION_HEIGHT, SUITE_ID_ML_DSA_87, SUITE_ID_SLH_DSA_SHAKE_256F,
+    COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_EXT, COV_TYPE_HTLC, COV_TYPE_MULTISIG,
+    COV_TYPE_P2PK, COV_TYPE_RESERVED_FUTURE, COV_TYPE_VAULT, MAX_ANCHOR_PAYLOAD_SIZE,
+    MAX_P2PK_COVENANT_DATA, SLH_DSA_ACTIVATION_HEIGHT, SUITE_ID_ML_DSA_87,
+    SUITE_ID_SLH_DSA_SHAKE_256F,
 };
 use crate::error::{ErrorCode, TxError};
+use crate::ext::parse_core_ext_covenant_data;
 use crate::htlc::parse_htlc_covenant_data;
 use crate::tx::Tx;
 use crate::vault::{parse_multisig_covenant_data, parse_vault_covenant_data};
@@ -81,6 +83,15 @@ pub fn validate_tx_covenants_genesis(tx: &Tx, block_height: u64) -> Result<(), T
                     ));
                 }
                 parse_htlc_covenant_data(&out.covenant_data)?;
+            }
+            COV_TYPE_EXT => {
+                if out.value == 0 {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrCovenantTypeInvalid,
+                        "CORE_EXT value must be > 0",
+                    ));
+                }
+                parse_core_ext_covenant_data(&out.covenant_data)?;
             }
             COV_TYPE_DA_COMMIT => {
                 if tx.tx_kind != 0x01 {

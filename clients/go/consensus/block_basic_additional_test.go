@@ -156,6 +156,28 @@ func TestTxWeightAndStats_TxKind00_DAIgnoredForDaBytes(t *testing.T) {
 	}
 }
 
+func TestTxWeightAndStats_UnknownSuiteGetsConservativeSigCost(t *testing.T) {
+	tx := &Tx{
+		Version:  1,
+		TxKind:   0x00,
+		TxNonce:  1,
+		Inputs:   []TxInput{},
+		Outputs:  []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+		Locktime: 0,
+		Witness: []WitnessItem{
+			{SuiteID: 0x7f, Pubkey: []byte{0x01}, Signature: []byte{0x02}},
+		},
+	}
+
+	weight, _, _, err := TxWeightAndStats(tx)
+	if err != nil {
+		t.Fatalf("TxWeightAndStats: %v", err)
+	}
+	if weight < VERIFY_COST_UNKNOWN_SUITE {
+		t.Fatalf("weight=%d unexpectedly below unknown-suite sig cost floor", weight)
+	}
+}
+
 func TestTxWeightAndStats_DACoreMissingErrors(t *testing.T) {
 	t.Run("tx_kind_01_missing_commit_core", func(t *testing.T) {
 		tx := &Tx{Version: 1, TxKind: 0x01, TxNonce: 1}

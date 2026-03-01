@@ -365,7 +365,8 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 			// available; activation must be checked before lengths to preserve
 			// deterministic error-priority (Q-CF-18).
 		default:
-			return nil, zero, zero, 0, txerr(TX_ERR_SIG_ALG_INVALID, "unknown suite_id")
+			// Unknown suites remain parse-canonical if structural bounds are valid.
+			// Semantic authorization is enforced in spend-time covenant logic.
 		}
 
 		witness = append(witness, WitnessItem{

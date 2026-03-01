@@ -578,6 +578,7 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 	witnessSize = compactSizeLen(uint64(len(tx.Witness)))
 	var mlCount uint64
 	var slhCount uint64
+	var unknownSuiteCount uint64
 	for _, w := range tx.Witness {
 		var err error
 		witnessSize, err = addU64(witnessSize, 1) // suite_id
@@ -609,6 +610,10 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 			if len(w.Pubkey) == SLH_DSA_SHAKE_256F_PUBKEY_BYTES && len(w.Signature) == MAX_SLH_DSA_SIG_BYTES {
 				slhCount++
 			}
+		case SUITE_ID_SENTINEL:
+			// sentinel has no verify cost
+		default:
+			unknownSuiteCount++
 		}
 	}
 
@@ -630,7 +635,15 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 	if err != nil {
 		return 0, 0, 0, err
 	}
+	unknownSuiteCost, err := mulU64(unknownSuiteCount, VERIFY_COST_UNKNOWN_SUITE)
+	if err != nil {
+		return 0, 0, 0, err
+	}
 	sigCost, err := addU64(mlCost, slhCost)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	sigCost, err = addU64(sigCost, unknownSuiteCost)
 	if err != nil {
 		return 0, 0, 0, err
 	}

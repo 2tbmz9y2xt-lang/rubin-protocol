@@ -2,6 +2,12 @@
   "gate": "CV-PARSE",
   "vectors": [
     {
+      "id": "CV-EXT-04",
+      "op": "parse_tx",
+      "tx_hex": "01000000000100000000000000015555555555555555555555555555555555555555555555555555555555555555000000000000000000015a0000000000000000002101000000000000000000000000000000000000000000000000000000000000000000000000017f010102020300",
+      "expect_ok": true
+    },
+    {
       "id": "PARSE-01",
       "op": "parse_tx",
       "tx_hex": "010000000000000000000000000000000000000000",
@@ -34,8 +40,8 @@
       "id": "PARSE-05",
       "op": "parse_tx",
       "tx_hex": "010000000000000000000000000000000000000103000000",
-      "expect_ok": false,
-      "expect_err": "TX_ERR_SIG_ALG_INVALID"
+      "expect_ok": true,
+      "note": "Unknown suite_id remains parse-canonical; semantic authorization is deferred to spend rules."
     },
     {
       "id": "PARSE-06",

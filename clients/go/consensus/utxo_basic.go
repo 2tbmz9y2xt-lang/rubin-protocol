@@ -33,7 +33,22 @@ func ApplyNonCoinbaseTxBasicWithMTP(
 	blockMTP uint64,
 	chainID [32]byte,
 ) (*UtxoApplySummary, error) {
-	work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTP(tx, txid, utxoSet, height, blockTimestamp, blockMTP, chainID)
+	work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndProfiles(tx, txid, utxoSet, height, blockTimestamp, blockMTP, chainID, nil)
+	_ = work
+	return summary, err
+}
+
+func ApplyNonCoinbaseTxBasicWithMTPAndProfiles(
+	tx *Tx,
+	txid [32]byte,
+	utxoSet map[Outpoint]UtxoEntry,
+	height uint64,
+	blockTimestamp uint64,
+	blockMTP uint64,
+	chainID [32]byte,
+	coreExtProfiles []CoreExtProfile,
+) (*UtxoApplySummary, error) {
+	work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndProfiles(tx, txid, utxoSet, height, blockTimestamp, blockMTP, chainID, coreExtProfiles)
 	_ = work
 	return summary, err
 }
@@ -64,8 +79,21 @@ func ApplyNonCoinbaseTxBasicUpdateWithMTP(
 	blockMTP uint64,
 	chainID [32]byte,
 ) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
+	return ApplyNonCoinbaseTxBasicUpdateWithMTPAndProfiles(tx, txid, utxoSet, height, blockTimestamp, blockMTP, chainID, nil)
+}
+
+func ApplyNonCoinbaseTxBasicUpdateWithMTPAndProfiles(
+	tx *Tx,
+	txid [32]byte,
+	utxoSet map[Outpoint]UtxoEntry,
+	height uint64,
+	blockTimestamp uint64,
+	blockMTP uint64,
+	chainID [32]byte,
+	coreExtProfiles []CoreExtProfile,
+) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
 	_ = blockTimestamp
-	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, utxoSet, height, blockMTP, chainID)
+	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, utxoSet, height, blockMTP, chainID, coreExtProfiles)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -82,6 +110,7 @@ func applyNonCoinbaseTxBasicWork(
 	height uint64,
 	blockMTP uint64,
 	chainID [32]byte,
+	coreExtProfiles []CoreExtProfile,
 ) (map[Outpoint]UtxoEntry, uint64, error) {
 	if tx == nil {
 		return nil, 0, txerr(TX_ERR_PARSE, "nil tx")
@@ -200,6 +229,44 @@ func applyNonCoinbaseTxBasicWork(
 			}
 			if err := ValidateHTLCSpend(entry, assigned[0], assigned[1], digest, height, blockMTP); err != nil {
 				return nil, 0, err
+			}
+		case COV_TYPE_EXT:
+			if slots != CORE_EXT_WITNESS_SLOTS {
+				return nil, 0, txerr(TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
+			}
+			extCov, err := ParseCoreExtCovenantData(entry.CovenantData)
+			if err != nil {
+				return nil, 0, err
+			}
+			profile, err := ActiveCoreExtProfileWithProfiles(extCov.ExtID, height, coreExtProfiles)
+			if err != nil {
+				return nil, 0, err
+			}
+			w := assigned[0]
+			if profile == nil {
+				if !(w.SuiteID == SUITE_ID_SENTINEL && len(w.Pubkey) == 0 && len(w.Signature) == 0) {
+					return nil, 0, txerr(TX_ERR_PARSE, "CORE_EXT pre-activation witness must be keyless sentinel")
+				}
+			} else {
+				if !CoreExtSuiteAllowed(profile, w.SuiteID) {
+					return nil, 0, txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT suite disallowed by active profile")
+				}
+				if w.SuiteID == SUITE_ID_SENTINEL {
+					return nil, 0, txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT sentinel suite invalid under active profile")
+				}
+				if w.SuiteID == SUITE_ID_SLH_DSA_SHAKE_256F && height < SLH_DSA_ACTIVATION_HEIGHT {
+					return nil, 0, txerr(TX_ERR_SIG_ALG_INVALID, "SLH-DSA suite inactive at this height")
+				}
+				if err := checkSLHCanonical(w); err != nil {
+					return nil, 0, err
+				}
+				ok, err := verifySigExt(profile, extCov, w, digest)
+				if err != nil {
+					return nil, 0, err
+				}
+				if !ok {
+					return nil, 0, txerr(TX_ERR_SIG_INVALID, "CORE_EXT signature invalid")
+				}
 			}
 		default:
 			// Other covenants have no additional spend-time checks in the genesis set.
@@ -386,6 +453,12 @@ func checkSpendCovenant(
 	}
 	if covType == COV_TYPE_HTLC {
 		if _, err := ParseHTLCCovenantData(covData); err != nil {
+			return err
+		}
+		return nil
+	}
+	if covType == COV_TYPE_EXT {
+		if _, err := ParseCoreExtCovenantData(covData); err != nil {
 			return err
 		}
 		return nil

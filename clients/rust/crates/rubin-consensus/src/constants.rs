@@ -30,6 +30,7 @@ pub const MAX_COVENANT_DATA_PER_OUTPUT: u64 = MAX_ANCHOR_PAYLOAD_SIZE;
 pub const MAX_ANCHOR_BYTES_PER_BLOCK: u64 = 131_072;
 pub const MAX_P2PK_COVENANT_DATA: u64 = 33;
 pub const MAX_HTLC_COVENANT_DATA: u64 = 105;
+pub const CORE_EXT_WITNESS_SLOTS: usize = 1;
 pub const MIN_HTLC_PREIMAGE_BYTES: u64 = 16; // consensus security floor (Q-A287-03)
 pub const MAX_HTLC_PREIMAGE_BYTES: u64 = 256;
 pub const MAX_VAULT_KEYS: u8 = 12;
@@ -54,6 +55,7 @@ pub const COV_TYPE_ANCHOR: u16 = 0x0002;
 pub const COV_TYPE_RESERVED_FUTURE: u16 = 0x00FF;
 pub const COV_TYPE_HTLC: u16 = 0x0100;
 pub const COV_TYPE_VAULT: u16 = 0x0101;
+pub const COV_TYPE_EXT: u16 = 0x0102;
 pub const COV_TYPE_DA_COMMIT: u16 = 0x0103;
 
 pub const LOCK_MODE_HEIGHT: u8 = 0x00;
@@ -67,5 +69,6 @@ pub const MAX_SLH_DSA_SIG_BYTES: u64 = 49_856;
 
 pub const VERIFY_COST_ML_DSA_87: u64 = 8;
 pub const VERIFY_COST_SLH_DSA_SHAKE_256F: u64 = 64;
+pub const VERIFY_COST_UNKNOWN_SUITE: u64 = 64;
 
 pub const POW_LIMIT: [u8; 32] = [0xff; 32];

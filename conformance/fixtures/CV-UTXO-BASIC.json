@@ -2,6 +2,94 @@
   "gate": "CV-UTXO-BASIC",
   "vectors": [
     {
+      "id": "CV-EXT-01",
+      "op": "utxo_apply_basic",
+      "height": 999,
+      "block_timestamp": 1000,
+      "tx_hex": "01000000000100000000000000014444444444444444444444444444444444444444444444444444444444444444000000000000000000015a00000000000000000021010000000000000000000000000000000000000000000000000000000000000000000000000100000000",
+      "utxos": [
+        {
+          "txid": "4444444444444444444444444444444444444444444444444444444444444444",
+          "vout": 0,
+          "value": 100,
+          "covenant_type": 258,
+          "covenant_data": "770001aa",
+          "creation_height": 0,
+          "created_by_coinbase": false
+        }
+      ],
+      "core_ext_profiles": [
+        {
+          "ext_id": 119,
+          "activation_height": 1000,
+          "allowed_suite_ids": [
+            1
+          ]
+        }
+      ],
+      "expect_ok": true,
+      "expect_fee": 10,
+      "expect_utxo_count": 1
+    },
+    {
+      "id": "CV-EXT-02",
+      "op": "utxo_apply_basic",
+      "height": 999,
+      "block_timestamp": 1000,
+      "tx_hex": "01000000000100000000000000014444444444444444444444444444444444444444444444444444444444444444000000000000000000015a00000000000000000021010000000000000000000000000000000000000000000000000000000000000000000000000103000000",
+      "utxos": [
+        {
+          "txid": "4444444444444444444444444444444444444444444444444444444444444444",
+          "vout": 0,
+          "value": 100,
+          "covenant_type": 258,
+          "covenant_data": "770001aa",
+          "creation_height": 0,
+          "created_by_coinbase": false
+        }
+      ],
+      "core_ext_profiles": [
+        {
+          "ext_id": 119,
+          "activation_height": 1000,
+          "allowed_suite_ids": [
+            1
+          ]
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_PARSE"
+    },
+    {
+      "id": "CV-EXT-03",
+      "op": "utxo_apply_basic",
+      "height": 1000,
+      "block_timestamp": 1000,
+      "tx_hex": "01000000000100000000000000014444444444444444444444444444444444444444444444444444444444444444000000000000000000015a00000000000000000021010000000000000000000000000000000000000000000000000000000000000000000000000103000000",
+      "utxos": [
+        {
+          "txid": "4444444444444444444444444444444444444444444444444444444444444444",
+          "vout": 0,
+          "value": 100,
+          "covenant_type": 258,
+          "covenant_data": "770001aa",
+          "creation_height": 0,
+          "created_by_coinbase": false
+        }
+      ],
+      "core_ext_profiles": [
+        {
+          "ext_id": 119,
+          "activation_height": 1000,
+          "allowed_suite_ids": [
+            1
+          ]
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID"
+    },
+    {
       "block_timestamp": 1000,
       "expect_err": "TX_ERR_MISSING_UTXO",
       "expect_ok": false,
