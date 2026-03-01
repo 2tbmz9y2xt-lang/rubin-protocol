@@ -307,7 +307,7 @@ func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte
 		if err := ensureOpenSSLBootstrap(); err != nil {
 			return false, err
 		}
-		if len(pubkey) != SLH_DSA_SHAKE_256F_PUBKEY_BYTES || len(signature) == 0 || len(signature) > MAX_SLH_DSA_SIG_BYTES {
+		if len(pubkey) != SLH_DSA_SHAKE_256F_PUBKEY_BYTES || len(signature) != MAX_SLH_DSA_SIG_BYTES {
 			return false, nil
 		}
 		return verifyWithMapping("SLH-DSA-SHAKE-256f")

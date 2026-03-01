@@ -120,7 +120,7 @@ func ValidateHTLCSpend(
 		if blockHeight < SLH_DSA_ACTIVATION_HEIGHT {
 			return txerr(TX_ERR_SIG_ALG_INVALID, "SLH-DSA suite inactive at this height")
 		}
-		if len(sigItem.Pubkey) != SLH_DSA_SHAKE_256F_PUBKEY_BYTES || len(sigItem.Signature) == 0 || len(sigItem.Signature) > MAX_SLH_DSA_SIG_BYTES {
+		if len(sigItem.Pubkey) != SLH_DSA_SHAKE_256F_PUBKEY_BYTES || len(sigItem.Signature) != MAX_SLH_DSA_SIG_BYTES {
 			return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical SLH-DSA witness item lengths")
 		}
 	default:

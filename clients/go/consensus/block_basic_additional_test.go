@@ -42,7 +42,7 @@ func TestTxWeightAndStats_MLAndSLHCountsAndDAAndAnchor(t *testing.T) {
 	mlPub := make([]byte, ML_DSA_87_PUBKEY_BYTES)
 	mlSig := make([]byte, ML_DSA_87_SIG_BYTES)
 	slhPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
-	slhSig := []byte{0x01}
+	slhSig := make([]byte, MAX_SLH_DSA_SIG_BYTES)
 
 	tx := &Tx{
 		Version: 1,
@@ -80,11 +80,11 @@ func TestTxWeightAndStats_MLAndSLHCountsAndDAAndAnchor(t *testing.T) {
 
 	// Expected accounting:
 	// - base_size = 318 bytes
-	// - witness_size = 7_295 bytes
+	// - witness_size = 57_152 bytes
 	// - da_size = 4 bytes (len varint + payload)
 	// - sig_cost = 8 (ML) + 64 (SLH) = 72
 	// - weight = 4*base_size + witness_size + da_size + sig_cost
-	const wantWeight = uint64(8_643)
+	const wantWeight = uint64(58_500)
 	if weight != wantWeight {
 		t.Fatalf("weight=%d, want %d", weight, wantWeight)
 	}

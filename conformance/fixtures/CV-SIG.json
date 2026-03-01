@@ -131,6 +131,26 @@
       "expect_utxo_count": 1
     },
     {
+      "id": "CV-SIG-02e",
+      "op": "utxo_apply_basic",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_NONCANONICAL",
+      "height": 1000000,
+      "block_timestamp": 1000,
+      "tx_hex_from": "CV-SIG-02d",
+      "utxos": [
+        {
+          "covenant_data": "027d948d78fa146eb2f18652e8e5f8d087a4cc274477d79f5c9dd28533abff907d",
+          "covenant_type": 0,
+          "created_by_coinbase": false,
+          "creation_height": 1000000,
+          "txid": "cececececececececececececececececececececececececececececececece",
+          "value": 100,
+          "vout": 0
+        }
+      ]
+    },
+    {
       "id": "CV-SIG-03",
       "op": "parse_tx",
       "tx_hex": "010000000000000000000000000000000000000103000000",
