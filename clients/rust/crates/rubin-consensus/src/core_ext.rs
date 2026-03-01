@@ -133,12 +133,6 @@ pub fn validate_core_ext_spend(
 
     let active_profile = profiles_at_height.lookup_active_profile(cov.ext_id)?;
     if active_profile.is_none() {
-        if w.suite_id != SUITE_ID_SENTINEL || !w.pubkey.is_empty() || !w.signature.is_empty() {
-            return Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "CORE_EXT pre-ACTIVE requires keyless sentinel witness",
-            ));
-        }
         return Ok(());
     }
     let p = active_profile.expect("active_profile is Some");
@@ -219,29 +213,25 @@ mod tests {
     }
 
     #[test]
-    fn core_ext_pre_active_non_keyless_sentinel_rejected_parse() {
+    fn core_ext_pre_active_non_keyless_sentinel_ok() {
         let entry = dummy_entry(7);
         let w = WitnessItem {
             suite_id: SUITE_ID_SENTINEL,
             pubkey: vec![0u8; 32],
             signature: vec![0x01],
         };
-        let err = validate_core_ext_spend(&entry, &w, &[0u8; 32], 0, &CoreExtProfiles::empty())
-            .unwrap_err();
-        assert_eq!(err.code, ErrorCode::TxErrParse);
+        validate_core_ext_spend(&entry, &w, &[0u8; 32], 0, &CoreExtProfiles::empty()).unwrap();
     }
 
     #[test]
-    fn core_ext_pre_active_non_sentinel_rejected_parse() {
+    fn core_ext_pre_active_non_sentinel_ok() {
         let entry = dummy_entry(7);
         let w = WitnessItem {
             suite_id: SUITE_ID_ML_DSA_87,
             pubkey: vec![0u8; ML_DSA_87_PUBKEY_BYTES as usize],
             signature: vec![0u8; ML_DSA_87_SIG_BYTES as usize],
         };
-        let err = validate_core_ext_spend(&entry, &w, &[0u8; 32], 0, &CoreExtProfiles::empty())
-            .unwrap_err();
-        assert_eq!(err.code, ErrorCode::TxErrParse);
+        validate_core_ext_spend(&entry, &w, &[0u8; 32], 0, &CoreExtProfiles::empty()).unwrap();
     }
 
     #[test]
