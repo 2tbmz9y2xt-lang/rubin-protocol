@@ -36,6 +36,8 @@ pub const MAX_VAULT_KEYS: u8 = 12;
 pub const MAX_VAULT_WHITELIST_ENTRIES: u16 = 1024;
 pub const MAX_MULTISIG_KEYS: u8 = 12;
 pub const COV_TYPE_MULTISIG: u16 = 0x0104;
+pub const COV_TYPE_EXT: u16 = 0x0102;
+pub const CORE_EXT_WITNESS_SLOTS: u64 = 1;
 
 pub const MAX_TX_INPUTS: u64 = 1024;
 pub const MAX_TX_OUTPUTS: u64 = 1024;
@@ -67,6 +69,7 @@ pub const MAX_SLH_DSA_SIG_BYTES: u64 = 49_856;
 
 pub const VERIFY_COST_ML_DSA_87: u64 = 8;
 pub const VERIFY_COST_SLH_DSA_SHAKE_256F: u64 = 64;
+pub const VERIFY_COST_UNKNOWN_SUITE: u64 = 64;
 
 pub const SIGNAL_WINDOW: u64 = 2016;
 pub const SIGNAL_THRESHOLD: u32 = 1815;
