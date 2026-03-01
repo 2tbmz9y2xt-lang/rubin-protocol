@@ -137,6 +137,69 @@ func TestMinerMineOneRejectsNonCanonicalTxBytesInInput(t *testing.T) {
 	}
 }
 
+func TestMinerPolicyDropsCoreExtCreatePreActivation(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := ChainStatePath(dir)
+
+	chainState := NewChainState()
+	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("open blockstore: %v", err)
+	}
+	syncEngine, err := NewSyncEngine(chainState, blockStore, DefaultSyncConfig(nil, [32]byte{}, chainStatePath))
+	if err != nil {
+		t.Fatalf("new sync engine: %v", err)
+	}
+	cfg := DefaultMinerConfig()
+	cfg.TimestampSource = func() uint64 { return 1_777_000_000 }
+	miner, err := NewMiner(chainState, blockStore, syncEngine, cfg)
+	if err != nil {
+		t.Fatalf("new miner: %v", err)
+	}
+
+	var prev [32]byte
+	prev[0] = 0x21
+	raw := txWithOneInputOneOutput(prev, 0, 1, consensus.COV_TYPE_CORE_EXT, coreExtCovenantData(1, nil), nil)
+
+	mb, err := miner.MineOne(context.Background(), [][]byte{raw})
+	if err != nil {
+		t.Fatalf("mine one: %v", err)
+	}
+	if mb.TxCount != 1 {
+		t.Fatalf("tx_count=%d, want 1 (policy should drop pre-activation CORE_EXT)", mb.TxCount)
+	}
+}
+
+func TestMinerPolicyDisabledAllowsCoreExtTxAndBlockConnectFails(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := ChainStatePath(dir)
+
+	chainState := NewChainState()
+	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("open blockstore: %v", err)
+	}
+	syncEngine, err := NewSyncEngine(chainState, blockStore, DefaultSyncConfig(nil, [32]byte{}, chainStatePath))
+	if err != nil {
+		t.Fatalf("new sync engine: %v", err)
+	}
+	cfg := DefaultMinerConfig()
+	cfg.PolicyRejectCoreExtPreActivation = false
+	cfg.TimestampSource = func() uint64 { return 1_777_000_000 }
+	miner, err := NewMiner(chainState, blockStore, syncEngine, cfg)
+	if err != nil {
+		t.Fatalf("new miner: %v", err)
+	}
+
+	var prev [32]byte
+	prev[0] = 0x22
+	raw := txWithOneInputOneOutput(prev, 0, 1, consensus.COV_TYPE_CORE_EXT, coreExtCovenantData(1, nil), nil)
+
+	if _, err := miner.MineOne(context.Background(), [][]byte{raw}); err == nil {
+		t.Fatalf("expected error (block should fail to connect without policy filter)")
+	}
+}
+
 func TestChooseValidTimestampGenesisNowZeroReturnsOne(t *testing.T) {
 	if got := chooseValidTimestamp(0, nil, 0); got != 1 {
 		t.Fatalf("timestamp=%d, want 1", got)

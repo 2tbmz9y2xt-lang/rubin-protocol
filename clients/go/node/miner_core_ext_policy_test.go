@@ -43,19 +43,19 @@ func TestMinerPolicyFiltersCoreExtOutputCreation(t *testing.T) {
 	var prev [32]byte
 	prev[0] = 0x11
 	txBytes := mustMarshalTxForNodeTest(t, &consensus.Tx{
-		Version:  0,
-		TxKind:   0x00,
-		TxNonce:  1,
-		Inputs:   []consensus.TxInput{{PrevTxid: prev, PrevVout: 0, Sequence: 0}},
-		Outputs:  []consensus.TxOutput{{Value: 1, CovenantType: consensus.COV_TYPE_CORE_EXT, CovenantData: coreExtCovenantDataForNodeTest(1, nil)}},
-		Locktime: 0,
-		Witness:  nil,
+		Version:   0,
+		TxKind:    0x00,
+		TxNonce:   1,
+		Inputs:    []consensus.TxInput{{PrevTxid: prev, PrevVout: 0, Sequence: 0}},
+		Outputs:   []consensus.TxOutput{{Value: 1, CovenantType: consensus.COV_TYPE_CORE_EXT, CovenantData: coreExtCovenantDataForNodeTest(1, nil)}},
+		Locktime:  0,
+		Witness:   nil,
 		DaPayload: nil,
 	})
 
 	cfg := DefaultMinerConfig()
 	cfg.TimestampSource = func() uint64 { return 1_777_000_000 }
-	cfg.PolicyCoreExtPreactivationGuardrails = true
+	cfg.PolicyRejectCoreExtPreActivation = true
 	miner, err := NewMiner(chainState, blockStore, syncEngine, cfg)
 	if err != nil {
 		t.Fatalf("new miner: %v", err)
@@ -69,7 +69,7 @@ func TestMinerPolicyFiltersCoreExtOutputCreation(t *testing.T) {
 		t.Fatalf("tx_count=%d, want 1 (coinbase only; CORE_EXT output tx must be filtered)", mb.TxCount)
 	}
 
-	cfg.PolicyCoreExtPreactivationGuardrails = false
+	cfg.PolicyRejectCoreExtPreActivation = false
 	miner2, err := NewMiner(chainState, blockStore, syncEngine, cfg)
 	if err != nil {
 		t.Fatalf("new miner2: %v", err)
@@ -87,13 +87,13 @@ func TestMinerPolicyFiltersCoreExtSpend(t *testing.T) {
 	anchor[0] = 0x01
 
 	txBytes := mustMarshalTxForNodeTest(t, &consensus.Tx{
-		Version:  0,
-		TxKind:   0x00,
-		TxNonce:  1,
-		Inputs:   []consensus.TxInput{{PrevTxid: prev, PrevVout: 0, Sequence: 0}},
-		Outputs:  []consensus.TxOutput{{Value: 0, CovenantType: consensus.COV_TYPE_ANCHOR, CovenantData: anchor[:]}},
-		Locktime: 0,
-		Witness:  []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_SENTINEL}},
+		Version:   0,
+		TxKind:    0x00,
+		TxNonce:   1,
+		Inputs:    []consensus.TxInput{{PrevTxid: prev, PrevVout: 0, Sequence: 0}},
+		Outputs:   []consensus.TxOutput{{Value: 0, CovenantType: consensus.COV_TYPE_ANCHOR, CovenantData: anchor[:]}},
+		Locktime:  0,
+		Witness:   []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_SENTINEL}},
 		DaPayload: nil,
 	})
 
@@ -126,7 +126,7 @@ func TestMinerPolicyFiltersCoreExtSpend(t *testing.T) {
 	}
 
 	chainState1, blockStore1, syncEngine1, cfg1 := setup(t)
-	cfg1.PolicyCoreExtPreactivationGuardrails = false
+	cfg1.PolicyRejectCoreExtPreActivation = false
 	miner1, err := NewMiner(chainState1, blockStore1, syncEngine1, cfg1)
 	if err != nil {
 		t.Fatalf("new miner1: %v", err)
@@ -140,7 +140,7 @@ func TestMinerPolicyFiltersCoreExtSpend(t *testing.T) {
 	}
 
 	chainState2, blockStore2, syncEngine2, cfg2 := setup(t)
-	cfg2.PolicyCoreExtPreactivationGuardrails = true
+	cfg2.PolicyRejectCoreExtPreActivation = true
 	miner2, err := NewMiner(chainState2, blockStore2, syncEngine2, cfg2)
 	if err != nil {
 		t.Fatalf("new miner2: %v", err)
