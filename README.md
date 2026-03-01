@@ -72,3 +72,13 @@ The runner requires Go and Rust to return identical `ok/err` behavior and identi
 - Local orchestration/queue files live outside the repository and MUST NOT be committed.
 - CI blocks sensitive assets from entering public repo (`tools/check_sensitive_files.py`).
 - PR merge gate includes `validator` check, which is an aggregate status over `policy` + `security_ai` + `formal` + `test` + `formal_refinement`.
+
+## Policy Guardrails (Non-consensus)
+
+`CORE_EXT` (`covenant_type=0x0102`) can be consensus-valid pre-activation with anyone-can-spend semantics.
+To mitigate user-funds exposure, the Go miner defaults to excluding transactions that create or spend
+`CORE_EXT` outputs whose `profile(ext_id, height)` is not `ACTIVE`.
+
+- Default: `node.DefaultMinerConfig().PolicyRejectCoreExtPreActivation = true`
+- Helper for admission surfaces: `node.RejectCoreExtTxPreActivation(...)`
+- Disabling this policy is unsafe and should be used only for controlled testing.

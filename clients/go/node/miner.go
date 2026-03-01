@@ -16,6 +16,18 @@ type MinerConfig struct {
 	TimestampSource func() uint64
 	MaxTxPerBlock   int
 	Target          [32]byte
+
+	// PolicyRejectCoreExtPreActivation controls non-consensus guardrails for CORE_EXT (COV_TYPE_CORE_EXT).
+	// When enabled, the miner will exclude transactions that create or spend CORE_EXT outputs
+	// whose profile(ext_id, height) is not ACTIVE. This is a safety policy to avoid pre-activation
+	// anyone-can-spend risk; consensus validity is unaffected.
+	//
+	// If CoreExtProfiles is nil, all CORE_EXT profiles are treated as not ACTIVE.
+	PolicyRejectCoreExtPreActivation bool
+
+	// CoreExtProfiles is the chain-config profile mapping used by policy checks.
+	// Consensus uses a canonical source for profile(ext_id, height); this is policy-only.
+	CoreExtProfiles consensus.CoreExtProfileProvider
 }
 
 type MinedBlock struct {
@@ -39,7 +51,8 @@ func DefaultMinerConfig() MinerConfig {
 		TimestampSource: func() uint64 {
 			return unixNowU64()
 		},
-		MaxTxPerBlock: 1024,
+		MaxTxPerBlock:                    1024,
+		PolicyRejectCoreExtPreActivation: true,
 	}
 }
 
@@ -116,12 +129,18 @@ func (m *Miner) MineOne(ctx context.Context, txs [][]byte) (*MinedBlock, error) 
 	}
 	parsed := make([]parsedTx, 0, len(selectedTxs))
 	for _, raw := range selectedTxs {
-		_, txid, wtxid, consumed, parseErr := consensus.ParseTx(raw)
+		tx, txid, wtxid, consumed, parseErr := consensus.ParseTx(raw)
 		if parseErr != nil {
 			return nil, parseErr
 		}
 		if consumed != len(raw) {
 			return nil, errors.New("non-canonical tx bytes in miner input")
+		}
+		if m.cfg.PolicyRejectCoreExtPreActivation {
+			reject, _, err := RejectCoreExtTxPreActivation(tx, m.chainState.Utxos, nextHeight, m.cfg.CoreExtProfiles)
+			if err != nil || reject {
+				continue
+			}
 		}
 		parsed = append(parsed, parsedTx{
 			raw:   append([]byte(nil), raw...),
