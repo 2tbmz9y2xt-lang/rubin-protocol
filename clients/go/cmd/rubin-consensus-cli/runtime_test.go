@@ -822,6 +822,9 @@ func TestRubinConsensusCLI_RuntimeHelpers(t *testing.T) {
 		if slicesEqualInt([]int{1}, []int{1, 2}) {
 			t.Fatalf("expected false")
 		}
+		if slicesEqualInt([]int{1, 2}, []int{1, 3}) {
+			t.Fatalf("expected false")
+		}
 		if !slicesEqualInt([]int{1, 2}, []int{1, 2}) {
 			t.Fatalf("expected true")
 		}
