@@ -226,3 +226,15 @@ Policy:
 
 Изменённые fixtures:
 - `CV-UTXO-BASIC.json` (добавлен `CV-U-18`)
+
+## 2026-03-01 — FB-001 Feature-Bits activation framework vectors
+
+Причина:
+- зафиксировать детерминированную семантику CANONICAL §23.2 (single-step boundary, state(h)=state(h_b), base-case, bit range).
+
+Инструменты:
+- новый gate `CV-FEATUREBITS`;
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-FEATUREBITS`.
+
+Изменённые fixtures:
+- `CV-FEATUREBITS.json` (новый файл)

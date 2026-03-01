@@ -1331,6 +1331,13 @@ def validate_vector(
         req["target"] = v["target"]
     elif op == "fork_choice_select":
         req["chains"] = v["chains"]
+    elif op == "featurebits_state":
+        req["name"] = str(v.get("name", ""))
+        req["bit"] = int(v.get("bit", 0))
+        req["start_height"] = int(v.get("start_height", 0))
+        req["timeout_height"] = int(v.get("timeout_height", 0))
+        req["height"] = int(v.get("height", 0))
+        req["window_signal_counts"] = [int(x) for x in v.get("window_signal_counts", [])]
     elif op == "compact_shortid":
         req["wtxid"] = v["wtxid"]
         req["nonce1"] = v["nonce1"]
@@ -1538,6 +1545,31 @@ def validate_vector(
             )
         if "expect_chainwork" in v and go_resp.get("chainwork") != v["expect_chainwork"]:
             problems.append(f"{gate}/{vid}: expect_chainwork mismatch")
+    elif op == "featurebits_state":
+        for k in [
+            "state",
+            "boundary_height",
+            "prev_window_signal_count",
+            "signal_window",
+            "signal_threshold",
+            "estimated_activation_height",
+        ]:
+            if go_resp.get(k) != rust_resp.get(k):
+                problems.append(
+                    f"{gate}/{vid}: {k} mismatch go={go_resp.get(k)} rust={rust_resp.get(k)}"
+                )
+        if "expect_state" in v and go_resp.get("state") != v["expect_state"]:
+            problems.append(f"{gate}/{vid}: expect_state mismatch")
+        if "expect_boundary_height" in v and as_int(go_resp.get("boundary_height")) != int(v["expect_boundary_height"]):
+            problems.append(f"{gate}/{vid}: expect_boundary_height mismatch")
+        if "expect_prev_window_signal_count" in v and as_int(go_resp.get("prev_window_signal_count")) != int(v["expect_prev_window_signal_count"]):
+            problems.append(f"{gate}/{vid}: expect_prev_window_signal_count mismatch")
+        if "expect_signal_window" in v and as_int(go_resp.get("signal_window")) != int(v["expect_signal_window"]):
+            problems.append(f"{gate}/{vid}: expect_signal_window mismatch")
+        if "expect_signal_threshold" in v and as_int(go_resp.get("signal_threshold")) != int(v["expect_signal_threshold"]):
+            problems.append(f"{gate}/{vid}: expect_signal_threshold mismatch")
+        if "expect_estimated_activation_height" in v and as_int(go_resp.get("estimated_activation_height")) != int(v["expect_estimated_activation_height"]):
+            problems.append(f"{gate}/{vid}: expect_estimated_activation_height mismatch")
     elif op == "compact_shortid":
         go_sid = go_resp.get("short_id") or go_resp.get("digest")
         rust_sid = rust_resp.get("short_id") or rust_resp.get("digest")

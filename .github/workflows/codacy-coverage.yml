@@ -83,15 +83,13 @@ jobs:
         run: |
           cd clients/go
           # Coverage gating focuses on consensus/runtime libraries.
-          # Large CLI entrypoints (especially rubin-consensus-cli) are intentionally excluded
-          # until they have dedicated tests.
-          pkgs="$(go list ./... | grep -v '/cmd/rubin-consensus-cli$')"
+          # Large CLI entrypoints are included once they have dedicated tests.
+          pkgs="$(go list ./...)"
           go test -coverprofile=coverage.out ${pkgs}
 
       - name: Rust coverage
         run: |
           cd clients/rust
-          # Exclude CLI-heavy packages from coverage gating until they have dedicated tests.
           cargo tarpaulin --workspace \
             --exclude rubin-consensus-cli \
             --exclude-files crates/rubin-node/src/* \

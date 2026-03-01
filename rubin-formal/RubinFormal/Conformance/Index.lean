@@ -44,3 +44,5 @@ import RubinFormal.Conformance.CVSigVectors
 import RubinFormal.Conformance.CVSigReplay
 import RubinFormal.Conformance.CVCompactVectors
 import RubinFormal.Conformance.CVCompactReplay
+import RubinFormal.Conformance.CVFeaturebitsVectors
+import RubinFormal.Conformance.CVFeaturebitsReplay

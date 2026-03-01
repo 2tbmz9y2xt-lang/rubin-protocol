@@ -655,6 +655,10 @@ func TestRubinConsensusCLI_RunFromStdin_CoversErrorPaths(t *testing.T) {
 			Whitelist:       []string{"aa"},
 		}, string(consensus.TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN))
 	})
+
+	t.Run("unknown_op", func(t *testing.T) {
+		mustRunErr(t, Request{Op: "nope"}, "unknown op")
+	})
 }
 
 func TestMainCallsRunFromStdin(t *testing.T) {
@@ -822,6 +826,9 @@ func TestRubinConsensusCLI_RuntimeHelpers(t *testing.T) {
 		if slicesEqualInt([]int{1}, []int{1, 2}) {
 			t.Fatalf("expected false")
 		}
+		if slicesEqualInt([]int{1, 2}, []int{1, 3}) {
+			t.Fatalf("expected false")
+		}
 		if !slicesEqualInt([]int{1, 2}, []int{1, 2}) {
 			t.Fatalf("expected true")
 		}
@@ -837,6 +844,66 @@ func TestRubinConsensusCLI_RuntimeHelpers(t *testing.T) {
 		}
 		if maxInt(1, 2) != 2 || maxInt(2, 1) != 2 {
 			t.Fatalf("maxInt wrong")
+		}
+	})
+}
+
+func TestRubinConsensusCLI_FeatureBitsStateOp(t *testing.T) {
+	resp := mustRunOk(t, Request{
+		Op:                 "featurebits_state",
+		Name:               "X",
+		Bit:                0,
+		StartHeight:        0,
+		TimeoutHeight:      consensus.SIGNAL_WINDOW * 10,
+		Height:             consensus.SIGNAL_WINDOW,
+		WindowSignalCounts: []uint32{consensus.SIGNAL_THRESHOLD},
+	})
+	if resp.State != "LOCKED_IN" {
+		t.Fatalf("expected LOCKED_IN, got %q", resp.State)
+	}
+	if resp.BoundaryHeight == nil || *resp.BoundaryHeight != consensus.SIGNAL_WINDOW {
+		t.Fatalf("expected boundary W, got %v", resp.BoundaryHeight)
+	}
+	if resp.PrevWindowSignal == nil || *resp.PrevWindowSignal != consensus.SIGNAL_THRESHOLD {
+		t.Fatalf("unexpected prev_window_signal_count: %v", resp.PrevWindowSignal)
+	}
+	if resp.SignalWindow != consensus.SIGNAL_WINDOW {
+		t.Fatalf("unexpected signal_window: %d", resp.SignalWindow)
+	}
+	if resp.SignalThreshold != consensus.SIGNAL_THRESHOLD {
+		t.Fatalf("unexpected signal_threshold: %d", resp.SignalThreshold)
+	}
+	if resp.EstimatedActivate == nil || *resp.EstimatedActivate != 2*consensus.SIGNAL_WINDOW {
+		t.Fatalf("unexpected estimated_activation_height: %v", resp.EstimatedActivate)
+	}
+
+	t.Run("bit_out_of_range", func(t *testing.T) {
+		_ = mustRunErr(t, Request{
+			Op:                 "featurebits_state",
+			Name:               "X",
+			Bit:                32,
+			StartHeight:        0,
+			TimeoutHeight:      1,
+			Height:             0,
+			WindowSignalCounts: nil,
+		}, "featurebits: bit out of range: 32")
+	})
+
+	t.Run("started_has_no_estimated_activation", func(t *testing.T) {
+		resp := mustRunOk(t, Request{
+			Op:                 "featurebits_state",
+			Name:               "X",
+			Bit:                0,
+			StartHeight:        0,
+			TimeoutHeight:      consensus.SIGNAL_WINDOW * 10,
+			Height:             0,
+			WindowSignalCounts: nil,
+		})
+		if resp.State != "STARTED" {
+			t.Fatalf("expected STARTED, got %q", resp.State)
+		}
+		if resp.EstimatedActivate != nil {
+			t.Fatalf("expected nil estimated_activation_height, got %v", resp.EstimatedActivate)
 		}
 	})
 }

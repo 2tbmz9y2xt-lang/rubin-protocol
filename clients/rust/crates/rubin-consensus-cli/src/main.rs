@@ -3,11 +3,12 @@ use num_traits::Zero;
 use rubin_consensus::merkle::witness_merkle_root_wtxids;
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_with_mtp, block_hash, compact_shortid,
-    connect_block_basic_in_memory_at_height, fork_work_from_target, merkle_root_txids, parse_tx,
-    pow_check, retarget_v1, retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_public,
+    connect_block_basic_in_memory_at_height, featurebit_state_at_height_from_window_counts,
+    fork_work_from_target, merkle_root_txids, parse_tx, pow_check, retarget_v1,
+    retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_public,
     validate_block_basic_with_context_and_fees_at_height,
     validate_block_basic_with_context_at_height, validate_tx_covenants_genesis, ErrorCode,
-    InMemoryChainState, Outpoint, UtxoEntry,
+    FeatureBitDeployment, FeatureBitState, InMemoryChainState, Outpoint, UtxoEntry,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,7 +16,7 @@ use sha3::{Digest, Sha3_256};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct Request {
     op: String,
 
@@ -87,6 +88,21 @@ struct Request {
 
     #[serde(default)]
     height: u64,
+
+    #[serde(default)]
+    name: String,
+
+    #[serde(default)]
+    bit: u8,
+
+    #[serde(default)]
+    start_height: u64,
+
+    #[serde(default)]
+    timeout_height: u64,
+
+    #[serde(default)]
+    window_signal_counts: Vec<u32>,
 
     #[serde(default)]
     prev_timestamps: Vec<u64>,
@@ -509,6 +525,21 @@ struct Response {
     state: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    boundary_height: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prev_window_signal_count: Option<u32>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signal_window: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signal_threshold: Option<u32>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    estimated_activation_height: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     evicted: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -664,6 +695,40 @@ fn value_as_string(v: &Value, def: &str) -> String {
     v.as_str()
         .map(|s| s.to_string())
         .unwrap_or_else(|| def.to_string())
+}
+
+fn op_featurebits_state(req: &Request) -> Response {
+    let d = FeatureBitDeployment {
+        name: req.name.clone(),
+        bit: req.bit,
+        start_height: req.start_height,
+        timeout_height: req.timeout_height,
+    };
+
+    match featurebit_state_at_height_from_window_counts(&d, req.height, &req.window_signal_counts) {
+        Ok(ev) => {
+            let est = if ev.state == FeatureBitState::LockedIn {
+                Some(ev.boundary_height + ev.signal_window)
+            } else {
+                None
+            };
+            Response {
+                ok: true,
+                state: Some(ev.state.as_str().to_string()),
+                boundary_height: Some(ev.boundary_height),
+                prev_window_signal_count: Some(ev.prev_window_signal_count),
+                signal_window: Some(ev.signal_window),
+                signal_threshold: Some(ev.signal_threshold),
+                estimated_activation_height: est,
+                ..Default::default()
+            }
+        }
+        Err(e) => Response {
+            ok: false,
+            err: Some(e),
+            ..Default::default()
+        },
+    }
 }
 
 fn main() {
@@ -863,6 +928,10 @@ fn main() {
                 chainwork: Some(format!("0x{}", best_work.to_str_radix(16))),
                 ..Default::default()
             };
+            let _ = serde_json::to_writer(std::io::stdout(), &resp);
+        }
+        "featurebits_state" => {
+            let resp = op_featurebits_state(&req);
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
         "merkle_root" => {
@@ -3583,5 +3652,69 @@ fn encode_compact_size(n: u64) -> Vec<u8> {
         let mut out = vec![0xff, 0, 0, 0, 0, 0, 0, 0, 0];
         out[1..9].copy_from_slice(&n.to_le_bytes());
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn featurebits_state_ok_locked_in() {
+        let req = Request {
+            op: "featurebits_state".to_string(),
+            name: "X".to_string(),
+            bit: 0,
+            start_height: 0,
+            timeout_height: rubin_consensus::constants::SIGNAL_WINDOW * 10,
+            height: rubin_consensus::constants::SIGNAL_WINDOW,
+            window_signal_counts: vec![rubin_consensus::constants::SIGNAL_THRESHOLD],
+            ..Default::default()
+        };
+
+        let resp = op_featurebits_state(&req);
+        assert!(resp.ok);
+        assert_eq!(resp.state.as_deref(), Some("LOCKED_IN"));
+        assert_eq!(
+            resp.boundary_height,
+            Some(rubin_consensus::constants::SIGNAL_WINDOW)
+        );
+        assert_eq!(
+            resp.prev_window_signal_count,
+            Some(rubin_consensus::constants::SIGNAL_THRESHOLD)
+        );
+        assert_eq!(
+            resp.signal_window,
+            Some(rubin_consensus::constants::SIGNAL_WINDOW)
+        );
+        assert_eq!(
+            resp.signal_threshold,
+            Some(rubin_consensus::constants::SIGNAL_THRESHOLD)
+        );
+        assert_eq!(
+            resp.estimated_activation_height,
+            Some(rubin_consensus::constants::SIGNAL_WINDOW * 2)
+        );
+    }
+
+    #[test]
+    fn featurebits_state_err_bit_out_of_range() {
+        let req = Request {
+            op: "featurebits_state".to_string(),
+            name: "X".to_string(),
+            bit: 32,
+            start_height: 0,
+            timeout_height: 1,
+            height: 0,
+            window_signal_counts: vec![],
+            ..Default::default()
+        };
+
+        let resp = op_featurebits_state(&req);
+        assert!(!resp.ok);
+        assert_eq!(
+            resp.err.as_deref(),
+            Some("featurebits: bit out of range: 32")
+        );
     }
 }

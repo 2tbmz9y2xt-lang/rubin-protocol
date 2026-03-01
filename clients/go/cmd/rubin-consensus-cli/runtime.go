@@ -135,6 +135,11 @@ type Request struct {
 	InputIndex           uint32            `json:"input_index,omitempty"`
 	CovenantType         uint16            `json:"covenant_type,omitempty"`
 	SentinelSuiteID      uint8             `json:"sentinel_suite_id,omitempty"`
+	Name                 string            `json:"name,omitempty"`
+	Bit                  uint8             `json:"bit,omitempty"`
+	StartHeight          uint64            `json:"start_height,omitempty"`
+	TimeoutHeight        uint64            `json:"timeout_height,omitempty"`
+	WindowSignalCounts   []uint32          `json:"window_signal_counts,omitempty"`
 }
 
 type UtxoJSON struct {
@@ -172,6 +177,11 @@ type Response struct {
 	ShortID            string   `json:"short_id,omitempty"`
 	DescriptorHex      string   `json:"descriptor_hex,omitempty"`
 	State              string   `json:"state,omitempty"`
+	BoundaryHeight     *uint64  `json:"boundary_height,omitempty"`
+	PrevWindowSignal   *uint32  `json:"prev_window_signal_count,omitempty"`
+	SignalWindow       uint64   `json:"signal_window,omitempty"`
+	SignalThreshold    uint32   `json:"signal_threshold,omitempty"`
+	EstimatedActivate  *uint64  `json:"estimated_activation_height,omitempty"`
 	RetainedPeer       string   `json:"retained_peer,omitempty"`
 	FirstErr           string   `json:"first_err,omitempty"`
 	Chainwork          string   `json:"chainwork,omitempty"`
@@ -555,6 +565,38 @@ func runFromStdin() {
 			Ok:        true,
 			Winner:    bestID,
 			Chainwork: "0x" + bestWork.Text(16),
+		})
+		return
+
+	case "featurebits_state":
+		d := consensus.FeatureBitDeployment{
+			Name:          req.Name,
+			Bit:           req.Bit,
+			StartHeight:   req.StartHeight,
+			TimeoutHeight: req.TimeoutHeight,
+		}
+		ev, err := consensus.FeatureBitStateAtHeightFromWindowCounts(d, req.Height, req.WindowSignalCounts)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+
+		var est *uint64
+		if ev.State == consensus.FEATUREBIT_LOCKED_IN {
+			v := ev.BoundaryHeight + ev.SignalWindow
+			est = &v
+		}
+		bh := ev.BoundaryHeight
+		prev := ev.PrevWindowSignalCnt
+
+		writeResp(os.Stdout, Response{
+			Ok:                true,
+			State:             string(ev.State),
+			BoundaryHeight:    &bh,
+			PrevWindowSignal:  &prev,
+			SignalWindow:      ev.SignalWindow,
+			SignalThreshold:   ev.SignalThreshold,
+			EstimatedActivate: est,
 		})
 		return
 

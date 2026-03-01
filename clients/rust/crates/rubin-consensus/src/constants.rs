@@ -68,4 +68,7 @@ pub const MAX_SLH_DSA_SIG_BYTES: u64 = 49_856;
 pub const VERIFY_COST_ML_DSA_87: u64 = 8;
 pub const VERIFY_COST_SLH_DSA_SHAKE_256F: u64 = 64;
 
+pub const SIGNAL_WINDOW: u64 = 2016;
+pub const SIGNAL_THRESHOLD: u32 = 1815;
+
 pub const POW_LIMIT: [u8; 32] = [0xff; 32];

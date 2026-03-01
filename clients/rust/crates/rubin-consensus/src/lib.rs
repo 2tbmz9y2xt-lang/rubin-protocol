@@ -6,6 +6,7 @@ pub mod connect_block_inmem;
 pub mod constants;
 mod covenant_genesis;
 pub mod error;
+pub mod featurebits;
 mod fork_choice;
 mod hash;
 mod htlc;
@@ -35,6 +36,10 @@ pub use connect_block_inmem::{
 };
 pub use covenant_genesis::validate_tx_covenants_genesis;
 pub use error::{ErrorCode, TxError};
+pub use featurebits::{
+    featurebit_state_at_height_from_window_counts, FeatureBitDeployment, FeatureBitEval,
+    FeatureBitState,
+};
 pub use fork_choice::{fork_chainwork_from_targets, fork_work_from_target};
 pub use htlc::{parse_htlc_covenant_data, validate_htlc_spend, HtlcCovenant};
 pub use merkle::merkle_root_txids;
@@ -54,5 +59,7 @@ pub use vault::{
 
 #[cfg(test)]
 mod compact_relay_tests;
+#[cfg(test)]
+mod featurebits_tests;
 #[cfg(test)]
 mod tests;
