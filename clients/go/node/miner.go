@@ -16,6 +16,8 @@ type MinerConfig struct {
 	TimestampSource func() uint64
 	MaxTxPerBlock   int
 	Target          [32]byte
+
+	PolicyCoreExtPreactivationGuardrails bool
 }
 
 type MinedBlock struct {
@@ -40,6 +42,7 @@ func DefaultMinerConfig() MinerConfig {
 			return unixNowU64()
 		},
 		MaxTxPerBlock: 1024,
+		PolicyCoreExtPreactivationGuardrails: true,
 	}
 }
 
@@ -65,6 +68,31 @@ func NewMiner(chainState *ChainState, blockStore *BlockStore, sync *SyncEngine, 
 		sync:       sync,
 		cfg:        cfg,
 	}, nil
+}
+
+func txUsesCoreExt(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) bool {
+	if tx == nil {
+		return false
+	}
+	for _, out := range tx.Outputs {
+		if out.CovenantType == consensus.COV_TYPE_CORE_EXT {
+			return true
+		}
+	}
+	if utxos == nil {
+		return false
+	}
+	for _, in := range tx.Inputs {
+		op := consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
+		entry, ok := utxos[op]
+		if !ok {
+			continue
+		}
+		if entry.CovenantType == consensus.COV_TYPE_CORE_EXT {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Miner) MineN(ctx context.Context, blocks int, txs [][]byte) ([]MinedBlock, error) {
@@ -116,12 +144,15 @@ func (m *Miner) MineOne(ctx context.Context, txs [][]byte) (*MinedBlock, error) 
 	}
 	parsed := make([]parsedTx, 0, len(selectedTxs))
 	for _, raw := range selectedTxs {
-		_, txid, wtxid, consumed, parseErr := consensus.ParseTx(raw)
+		tx, txid, wtxid, consumed, parseErr := consensus.ParseTx(raw)
 		if parseErr != nil {
 			return nil, parseErr
 		}
 		if consumed != len(raw) {
 			return nil, errors.New("non-canonical tx bytes in miner input")
+		}
+		if m.cfg.PolicyCoreExtPreactivationGuardrails && txUsesCoreExt(tx, m.chainState.Utxos) {
+			continue
 		}
 		parsed = append(parsed, parsedTx{
 			raw:   append([]byte(nil), raw...),
