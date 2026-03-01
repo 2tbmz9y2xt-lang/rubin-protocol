@@ -840,3 +840,33 @@ func TestRubinConsensusCLI_RuntimeHelpers(t *testing.T) {
 		}
 	})
 }
+
+func TestRubinConsensusCLI_FeatureBitsStateOp(t *testing.T) {
+	resp := mustRunOk(t, Request{
+		Op:                 "featurebits_state",
+		Name:               "X",
+		Bit:                0,
+		StartHeight:        0,
+		TimeoutHeight:      consensus.SIGNAL_WINDOW * 10,
+		Height:             consensus.SIGNAL_WINDOW,
+		WindowSignalCounts: []uint32{consensus.SIGNAL_THRESHOLD},
+	})
+	if resp.State != "LOCKED_IN" {
+		t.Fatalf("expected LOCKED_IN, got %q", resp.State)
+	}
+	if resp.BoundaryHeight == nil || *resp.BoundaryHeight != consensus.SIGNAL_WINDOW {
+		t.Fatalf("expected boundary W, got %v", resp.BoundaryHeight)
+	}
+	if resp.PrevWindowSignal == nil || *resp.PrevWindowSignal != consensus.SIGNAL_THRESHOLD {
+		t.Fatalf("unexpected prev_window_signal_count: %v", resp.PrevWindowSignal)
+	}
+	if resp.SignalWindow != consensus.SIGNAL_WINDOW {
+		t.Fatalf("unexpected signal_window: %d", resp.SignalWindow)
+	}
+	if resp.SignalThreshold != consensus.SIGNAL_THRESHOLD {
+		t.Fatalf("unexpected signal_threshold: %d", resp.SignalThreshold)
+	}
+	if resp.EstimatedActivate == nil || *resp.EstimatedActivate != 2*consensus.SIGNAL_WINDOW {
+		t.Fatalf("unexpected estimated_activation_height: %v", resp.EstimatedActivate)
+	}
+}
