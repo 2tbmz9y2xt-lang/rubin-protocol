@@ -869,4 +869,34 @@ func TestRubinConsensusCLI_FeatureBitsStateOp(t *testing.T) {
 	if resp.EstimatedActivate == nil || *resp.EstimatedActivate != 2*consensus.SIGNAL_WINDOW {
 		t.Fatalf("unexpected estimated_activation_height: %v", resp.EstimatedActivate)
 	}
+
+	t.Run("bit_out_of_range", func(t *testing.T) {
+		_ = mustRunErr(t, Request{
+			Op:                 "featurebits_state",
+			Name:               "X",
+			Bit:                32,
+			StartHeight:        0,
+			TimeoutHeight:      1,
+			Height:             0,
+			WindowSignalCounts: nil,
+		}, "featurebits: bit out of range: 32")
+	})
+
+	t.Run("started_has_no_estimated_activation", func(t *testing.T) {
+		resp := mustRunOk(t, Request{
+			Op:                 "featurebits_state",
+			Name:               "X",
+			Bit:                0,
+			StartHeight:        0,
+			TimeoutHeight:      consensus.SIGNAL_WINDOW * 10,
+			Height:             0,
+			WindowSignalCounts: nil,
+		})
+		if resp.State != "STARTED" {
+			t.Fatalf("expected STARTED, got %q", resp.State)
+		}
+		if resp.EstimatedActivate != nil {
+			t.Fatalf("expected nil estimated_activation_height, got %v", resp.EstimatedActivate)
+		}
+	})
 }
