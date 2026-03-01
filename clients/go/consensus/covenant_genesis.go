@@ -53,6 +53,14 @@ func ValidateTxCovenantsGenesis(tx *Tx, blockHeight uint64) error {
 				return err
 			}
 
+		case COV_TYPE_CORE_EXT:
+			if out.Value == 0 {
+				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT value must be > 0")
+			}
+			if _, err := ParseCoreExtCovenantData(out.CovenantData); err != nil {
+				return err
+			}
+
 		case COV_TYPE_DA_COMMIT:
 			if tx.TxKind != 0x01 {
 				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_DA_COMMIT allowed only in tx_kind=0x01")

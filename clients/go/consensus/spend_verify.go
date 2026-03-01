@@ -70,7 +70,8 @@ func validateThresholdSigSpend(keys [][32]byte, threshold uint8, ws []WitnessIte
 			}
 			valid++
 		default:
-			// Should be unreachable: wire parser rejects unknown suite_id.
+			// Unknown suites are accepted at parse stage (CANONICAL §12.2 / CV-SIG-05);
+			// non-CORE_EXT spend paths must reject them deterministically here.
 			return txerr(TX_ERR_SIG_ALG_INVALID, context+" suite invalid")
 		}
 	}
