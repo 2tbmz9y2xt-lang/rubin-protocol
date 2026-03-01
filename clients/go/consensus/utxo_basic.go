@@ -289,7 +289,7 @@ func applyNonCoinbaseTxBasicWork(
 				}
 				ok, err := verifySigExtFn(cd.ExtID, w.SuiteID, w.Pubkey, w.Signature, digest, cd.ExtPayload)
 				if err != nil {
-					return nil, 0, txerr(TX_ERR_SIG_INVALID, "CORE_EXT verify_sig_ext error")
+					return nil, 0, txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext error")
 				}
 				if !ok {
 					return nil, 0, txerr(TX_ERR_SIG_INVALID, "CORE_EXT signature invalid")
