@@ -119,4 +119,3 @@ func TestPrintFeatureBitsTelemetry(t *testing.T) {
 		t.Fatalf("unexpected output: %q", s)
 	}
 }
-

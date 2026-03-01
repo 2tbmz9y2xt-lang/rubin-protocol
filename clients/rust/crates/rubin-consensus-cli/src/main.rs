@@ -3629,57 +3629,6 @@ fn main() {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn featurebits_state_ok_locked_in() {
-        let mut req = Request::default();
-        req.op = "featurebits_state".to_string();
-        req.name = "X".to_string();
-        req.bit = 0;
-        req.start_height = 0;
-        req.timeout_height = rubin_consensus::constants::SIGNAL_WINDOW * 10;
-        req.height = rubin_consensus::constants::SIGNAL_WINDOW;
-        req.window_signal_counts = vec![rubin_consensus::constants::SIGNAL_THRESHOLD];
-
-        let resp = op_featurebits_state(&req);
-        assert!(resp.ok);
-        assert_eq!(resp.state.as_deref(), Some("LOCKED_IN"));
-        assert_eq!(resp.boundary_height, Some(rubin_consensus::constants::SIGNAL_WINDOW));
-        assert_eq!(
-            resp.prev_window_signal_count,
-            Some(rubin_consensus::constants::SIGNAL_THRESHOLD)
-        );
-        assert_eq!(resp.signal_window, Some(rubin_consensus::constants::SIGNAL_WINDOW));
-        assert_eq!(
-            resp.signal_threshold,
-            Some(rubin_consensus::constants::SIGNAL_THRESHOLD)
-        );
-        assert_eq!(
-            resp.estimated_activation_height,
-            Some(rubin_consensus::constants::SIGNAL_WINDOW * 2)
-        );
-    }
-
-    #[test]
-    fn featurebits_state_err_bit_out_of_range() {
-        let mut req = Request::default();
-        req.op = "featurebits_state".to_string();
-        req.name = "X".to_string();
-        req.bit = 32;
-        req.start_height = 0;
-        req.timeout_height = 1;
-        req.height = 0;
-        req.window_signal_counts = vec![];
-
-        let resp = op_featurebits_state(&req);
-        assert!(!resp.ok);
-        assert_eq!(resp.err.as_deref(), Some("featurebits: bit out of range: 32"));
-    }
-}
-
 fn output_descriptor_bytes(covenant_type: u16, covenant_data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(2 + 9 + covenant_data.len());
     out.extend_from_slice(&covenant_type.to_le_bytes());
@@ -3703,5 +3652,69 @@ fn encode_compact_size(n: u64) -> Vec<u8> {
         let mut out = vec![0xff, 0, 0, 0, 0, 0, 0, 0, 0];
         out[1..9].copy_from_slice(&n.to_le_bytes());
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn featurebits_state_ok_locked_in() {
+        let req = Request {
+            op: "featurebits_state".to_string(),
+            name: "X".to_string(),
+            bit: 0,
+            start_height: 0,
+            timeout_height: rubin_consensus::constants::SIGNAL_WINDOW * 10,
+            height: rubin_consensus::constants::SIGNAL_WINDOW,
+            window_signal_counts: vec![rubin_consensus::constants::SIGNAL_THRESHOLD],
+            ..Default::default()
+        };
+
+        let resp = op_featurebits_state(&req);
+        assert!(resp.ok);
+        assert_eq!(resp.state.as_deref(), Some("LOCKED_IN"));
+        assert_eq!(
+            resp.boundary_height,
+            Some(rubin_consensus::constants::SIGNAL_WINDOW)
+        );
+        assert_eq!(
+            resp.prev_window_signal_count,
+            Some(rubin_consensus::constants::SIGNAL_THRESHOLD)
+        );
+        assert_eq!(
+            resp.signal_window,
+            Some(rubin_consensus::constants::SIGNAL_WINDOW)
+        );
+        assert_eq!(
+            resp.signal_threshold,
+            Some(rubin_consensus::constants::SIGNAL_THRESHOLD)
+        );
+        assert_eq!(
+            resp.estimated_activation_height,
+            Some(rubin_consensus::constants::SIGNAL_WINDOW * 2)
+        );
+    }
+
+    #[test]
+    fn featurebits_state_err_bit_out_of_range() {
+        let req = Request {
+            op: "featurebits_state".to_string(),
+            name: "X".to_string(),
+            bit: 32,
+            start_height: 0,
+            timeout_height: 1,
+            height: 0,
+            window_signal_counts: vec![],
+            ..Default::default()
+        };
+
+        let resp = op_featurebits_state(&req);
+        assert!(!resp.ok);
+        assert_eq!(
+            resp.err.as_deref(),
+            Some("featurebits: bit out of range: 32")
+        );
     }
 }
