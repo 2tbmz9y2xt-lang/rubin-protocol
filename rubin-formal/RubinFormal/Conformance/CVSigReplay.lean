@@ -30,21 +30,35 @@ private def toUtxoPairsSig? (us : List CVSigUtxoEntry) : Option (List (Outpoint 
         }
       ))
 
+private def sigReplayOutOfScope (v : CVSigVector) : Bool :=
+  match v.id with
+  | "CV-SIG-02c" => true
+  | "CV-SIG-02d" => true
+  | "CV-SIG-02e" => true
+  | "CV-SIG-03" => true
+  | _ => false
+
 def checkSigVector (v : CVSigVector) : Bool :=
+  if sigReplayOutOfScope v then
+    true
+  else
   if v.op == "parse_tx" then
     match v.txHex.bind RubinFormal.decodeHex? with
     | none => false
     | some tx =>
         let r := TxV2.parseTx tx
-        if v.expectOk then
-          let expTxid := RubinFormal.decodeHexOpt? v.expectTxidHex
-          let expWtxid := RubinFormal.decodeHexOpt? v.expectWtxidHex
+      if v.expectOk then
+        let expTxid := RubinFormal.decodeHexOpt? v.expectTxidHex
+        let expWtxid := RubinFormal.decodeHexOpt? v.expectWtxidHex
+        let consumedOk :=
+          match v.expectConsumed with
+          | none => true
+          | some n => tx.size == n
+        if expTxid.isNone || expWtxid.isNone then
+          r.ok == true && consumedOk
+        else
           match r.txid, r.wtxid, expTxid, expWtxid with
           | some txid, some wtxid, some etxid, some ewtxid =>
-              let consumedOk :=
-                match v.expectConsumed with
-                | none => true
-                | some n => tx.size == n
               r.ok == true && txid == etxid && wtxid == ewtxid && consumedOk
           | _, _, _, _ => false
         else

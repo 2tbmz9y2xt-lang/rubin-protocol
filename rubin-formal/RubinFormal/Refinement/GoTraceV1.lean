@@ -40,14 +40,15 @@ structure BlockBasicOut where
   sumWeight : Option Nat
   sumDa : Option Nat
 
-def goTraceFixturesDigestSHA3_256 : String := "c4ab4c6c4075a947955596d7ab16d3068f47ad02378f38a2f6ac834af6ee043b"
+def goTraceFixturesDigestSHA3_256 : String := "be1e94d24a4adc66bd2129b6c3628618fa0078f793660ac5510ac38f5c263232"
 
 def parseOuts : List ParseOut := [
+  { id := "CV-EXT-04", ok := true, err := "", consumed := 112, txidHex := "0x64456281ed33198d7382877edce7f62ea1b3afc7a4690a3bbd11c844976d7c0a", wtxidHex := "0xc4b116a388be42fc7c525646e83cf4bcd3dfc5d6ce2468d4ed48a58e9a504f4c" },
   { id := "PARSE-01", ok := true, err := "", consumed := 21, txidHex := "0xd205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0", wtxidHex := "0xf760a70e1e838404d8e41679962064dc1bf4fa181699009644a14d0aa389ab4e" },
   { id := "PARSE-02", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
   { id := "PARSE-03", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
   { id := "PARSE-04", ok := false, err := "TX_ERR_WITNESS_OVERFLOW", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "PARSE-05", ok := false, err := "TX_ERR_SIG_ALG_INVALID", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
+  { id := "PARSE-05", ok := true, err := "", consumed := 24, txidHex := "0xd205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0", wtxidHex := "0xd185596484393174ee58e962e221c00d8a5586ac7c293baa50ac9914022464c1" },
   { id := "PARSE-06", ok := false, err := "TX_ERR_SIG_NONCANONICAL", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
   { id := "PARSE-07", ok := false, err := "TX_ERR_WITNESS_OVERFLOW", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
   { id := "PARSE-08", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
@@ -88,6 +89,9 @@ def powOuts : List PowOut := [
 ]
 
 def utxoBasicOuts : List UtxoBasicOut := [
+  { id := "CV-EXT-01", ok := true, err := "", fee := some 10, utxoCount := some 1 },
+  { id := "CV-EXT-02", ok := false, err := "TX_ERR_PARSE", fee := none, utxoCount := none },
+  { id := "CV-EXT-03", ok := false, err := "TX_ERR_PARSE", fee := none, utxoCount := none },
   { id := "CV-U-01", ok := false, err := "TX_ERR_MISSING_UTXO", fee := none, utxoCount := none },
   { id := "CV-U-02", ok := false, err := "TX_ERR_MISSING_UTXO", fee := none, utxoCount := none },
   { id := "CV-U-05", ok := false, err := "TX_ERR_VALUE_CONSERVATION", fee := none, utxoCount := none },
