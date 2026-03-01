@@ -230,8 +230,7 @@ jobs:
         run: |
           cd clients/rust
           cargo fmt -- --check
-
-      - name: Rust tests
+     - name: Rust tests
         run: |
           cd clients/rust
           cargo test --workspace
