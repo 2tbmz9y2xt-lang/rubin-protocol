@@ -169,8 +169,7 @@ fn parse_tx_witness_item_canonicalization() {
     tx2.push(0x00);
     tx2.push(0x00);
     tx2.push(0x00);
-    let err = parse_tx(&tx2).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    parse_tx(&tx2).expect("unknown suite_id should be accepted at parse");
 
     // ml_dsa_selector_reject: suite=0x01, pubkey_length=32, sig_length=0.
     let mut tx2_bad_ml_selector = base.clone();
@@ -265,6 +264,24 @@ fn parse_tx_witness_overflow_precedes_suite_canonicalization() {
 
     let err = parse_tx(&tx).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrWitnessOverflow);
+}
+
+#[test]
+fn parse_tx_unknown_suite_id_accepted() {
+    let mut tx = minimal_tx_bytes();
+    tx.truncate(core_end());
+
+    tx.push(0x01); // witness_count=1
+    tx.push(0x03); // unknown suite_id
+    tx.push(0x00); // pubkey_length=0
+    tx.push(0x00); // sig_length=0
+    tx.push(0x00); // da_payload_len
+
+    let (t, _txid, _wtxid, _n) = parse_tx(&tx).expect("parse");
+    assert_eq!(t.witness.len(), 1);
+    assert_eq!(t.witness[0].suite_id, 0x03);
+    assert!(t.witness[0].pubkey.is_empty());
+    assert!(t.witness[0].signature.is_empty());
 }
 
 #[test]
