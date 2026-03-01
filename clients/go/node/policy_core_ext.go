@@ -20,6 +20,26 @@ func coreExtProfileActive(extID uint16, height uint64, profiles consensus.CoreEx
 	return p.Active, nil
 }
 
+func rejectCoreExtCovenantDataPreActivation(
+	covenantData []byte,
+	height uint64,
+	profiles consensus.CoreExtProfileProvider,
+	kind string,
+) (reject bool, reason string, err error) {
+	cd, err := consensus.ParseCoreExtCovenantData(covenantData)
+	if err != nil {
+		return true, fmt.Sprintf("CORE_EXT %s covenant_data invalid", kind), err
+	}
+	active, err := coreExtProfileActive(cd.ExtID, height, profiles)
+	if err != nil {
+		return true, fmt.Sprintf("CORE_EXT profile lookup error ext_id=%d", cd.ExtID), err
+	}
+	if !active {
+		return true, fmt.Sprintf("CORE_EXT %s pre-ACTIVE ext_id=%d", kind, cd.ExtID), nil
+	}
+	return false, "", nil
+}
+
 // RejectCoreExtTxPreActivation implements non-consensus policy guardrails for CORE_EXT.
 //
 // It returns reject=true if tx creates or spends a CORE_EXT output whose profile(ext_id, height)
@@ -41,16 +61,9 @@ func RejectCoreExtTxPreActivation(
 		if out.CovenantType != consensus.COV_TYPE_CORE_EXT {
 			continue
 		}
-		cd, err := consensus.ParseCoreExtCovenantData(out.CovenantData)
-		if err != nil {
-			return true, "CORE_EXT output covenant_data invalid", err
-		}
-		active, err := coreExtProfileActive(cd.ExtID, height, profiles)
-		if err != nil {
-			return true, fmt.Sprintf("CORE_EXT profile lookup error ext_id=%d", cd.ExtID), err
-		}
-		if !active {
-			return true, fmt.Sprintf("CORE_EXT output pre-ACTIVE ext_id=%d", cd.ExtID), nil
+		reject, reason, err := rejectCoreExtCovenantDataPreActivation(out.CovenantData, height, profiles, "output")
+		if err != nil || reject {
+			return reject, reason, err
 		}
 	}
 
@@ -63,16 +76,9 @@ func RejectCoreExtTxPreActivation(
 		if !ok || entry.CovenantType != consensus.COV_TYPE_CORE_EXT {
 			continue
 		}
-		cd, err := consensus.ParseCoreExtCovenantData(entry.CovenantData)
-		if err != nil {
-			return true, "CORE_EXT spent UTXO covenant_data invalid", err
-		}
-		active, err := coreExtProfileActive(cd.ExtID, height, profiles)
-		if err != nil {
-			return true, fmt.Sprintf("CORE_EXT profile lookup error ext_id=%d", cd.ExtID), err
-		}
-		if !active {
-			return true, fmt.Sprintf("CORE_EXT spend pre-ACTIVE ext_id=%d", cd.ExtID), nil
+		reject, reason, err := rejectCoreExtCovenantDataPreActivation(entry.CovenantData, height, profiles, "spend")
+		if err != nil || reject {
+			return reject, reason, err
 		}
 	}
 
