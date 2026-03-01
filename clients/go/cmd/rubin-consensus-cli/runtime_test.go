@@ -655,6 +655,10 @@ func TestRubinConsensusCLI_RunFromStdin_CoversErrorPaths(t *testing.T) {
 			Whitelist:       []string{"aa"},
 		}, string(consensus.TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN))
 	})
+
+	t.Run("unknown_op", func(t *testing.T) {
+		mustRunErr(t, Request{Op: "nope"}, "unknown op")
+	})
 }
 
 func TestMainCallsRunFromStdin(t *testing.T) {
