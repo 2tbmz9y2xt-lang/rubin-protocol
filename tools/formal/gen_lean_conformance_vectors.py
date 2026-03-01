@@ -2085,6 +2085,42 @@ def load_cv_sig(path: Path) -> list[SigVector]:
     vectors = doc.get("vectors")
     if not isinstance(vectors, list):
         raise ValueError("vectors must be a list")
+
+    raw_by_id: dict[str, dict[str, Any]] = {}
+    for rv in vectors:
+        if isinstance(rv, dict) and isinstance(rv.get("id"), str):
+            raw_by_id[rv["id"]] = rv
+
+    def resolve_tx_hex(rv: dict[str, Any]) -> str | None:
+        if "tx_hex" in rv or "tx_hex_parts" in rv:
+            return _materialize_tx_hex(rv)
+        tx_hex_from = rv.get("tx_hex_from")
+        if isinstance(tx_hex_from, str) and tx_hex_from in raw_by_id:
+            base = resolve_tx_hex(raw_by_id[tx_hex_from])
+            if base is None:
+                return None
+            bs = _hex_to_bytes(base)
+            muts = rv.get("tx_hex_mutations") or []
+            if not isinstance(muts, list):
+                raise ValueError("tx_hex_mutations must be a list")
+            for m in muts:
+                if not isinstance(m, dict):
+                    raise ValueError("tx_hex_mutations entries must be objects")
+                off = m.get("offset")
+                b = m.get("byte")
+                if not isinstance(off, int) or not isinstance(b, str):
+                    raise ValueError("tx_hex_mutations entries must have offset:int and byte:str")
+                s = b.strip().lower()
+                if s.startswith("0x"):
+                    s = s[2:]
+                if len(s) != 2:
+                    raise ValueError("tx_hex_mutations byte must be exactly 1 byte hex (2 chars)")
+                if off < 0 or off >= len(bs):
+                    raise ValueError(f"tx_hex_mutations offset out of range: {off} (len={len(bs)})")
+                bs[off] = int(s, 16)
+            return "".join(f"{x:02x}" for x in bs)
+        return None
+
     out: list[SigVector] = []
     for v in vectors:
         if not isinstance(v, dict):
@@ -2094,8 +2130,7 @@ def load_cv_sig(path: Path) -> list[SigVector]:
             continue
 
         tx_hex: str | None = None
-        if "tx_hex" in v or "tx_hex_parts" in v:
-            tx_hex = _materialize_tx_hex(v)
+        tx_hex = resolve_tx_hex(v)
 
         utxos: list[SigUtxoEntry] = []
         for u in v.get("utxos") or []:

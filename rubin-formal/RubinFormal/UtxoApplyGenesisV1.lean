@@ -121,6 +121,9 @@ def validateHTLCSpendNoCrypto
     let preLen := parseU16le (pathItem.signature.get! 1) (pathItem.signature.get! 2)
     if preLen == 0 then
       throw "TX_ERR_PARSE"
+    -- CANONICAL hardening: HTLC preimage MUST be at least 16 bytes.
+    if preLen < 16 then
+      throw "TX_ERR_PARSE"
     if preLen > 256 then
       throw "TX_ERR_PARSE"
     if pathItem.signature.size != 3 + preLen then

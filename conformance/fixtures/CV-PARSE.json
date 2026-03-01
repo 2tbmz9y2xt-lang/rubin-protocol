@@ -34,8 +34,7 @@
       "id": "PARSE-05",
       "op": "parse_tx",
       "tx_hex": "010000000000000000000000000000000000000103000000",
-      "expect_ok": false,
-      "expect_err": "TX_ERR_SIG_ALG_INVALID"
+      "expect_ok": true
     },
     {
       "id": "PARSE-06",

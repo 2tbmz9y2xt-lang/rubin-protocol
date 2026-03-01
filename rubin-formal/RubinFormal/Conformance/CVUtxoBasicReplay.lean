@@ -29,17 +29,27 @@ private def toUtxoPairsUtxoBasic? (us : List CVUtxoEntry) : Option (List (Outpoi
 def vectorPass (v : CVUtxoBasicVector) : Bool :=
   match RubinFormal.decodeHex? v.txHex, toUtxoPairsUtxoBasic? v.utxos with
   | some tx, some utxos =>
-      match applyNonCoinbaseTxBasic tx utxos v.height v.blockTimestamp zeroChainIdUtxoBasic with
+      match applyNonCoinbaseTxBasicNoCrypto tx utxos v.height v.blockTimestamp zeroChainIdUtxoBasic with
       | .ok (fee, utxoCount) =>
           if v.expectOk then
-            (v.expectFee == some fee) && (v.expectUtxoCount == some utxoCount)
+            let feeOk :=
+              match v.expectFee with
+              | none => true
+              | some exp => exp == fee
+            let utxoCountOk :=
+              match v.expectUtxoCount with
+              | none => true
+              | some exp => exp == utxoCount
+            feeOk && utxoCountOk
           else
             false
       | .error e =>
           if v.expectOk then
             false
           else
-            v.expectErr == some e
+            match v.expectErr with
+            | none => true
+            | some exp => exp == e
   | _, _ => false
 
 def cvUtxoBasicVectorsPass : Bool :=

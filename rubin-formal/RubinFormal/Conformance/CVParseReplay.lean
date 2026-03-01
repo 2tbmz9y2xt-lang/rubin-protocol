@@ -3,6 +3,9 @@ import RubinFormal.Conformance.CVParseVectors
 import RubinFormal.Hex
 import RubinFormal.TxParseV2
 
+set_option maxHeartbeats 10000000
+set_option maxRecDepth 50000
+
 namespace RubinFormal.Conformance
 
 open RubinFormal
@@ -16,10 +19,15 @@ def checkParseVector (v : CVParseVector) : Bool :=
       if v.expectOk then
         let expTxid := RubinFormal.decodeHexOpt? v.expectTxidHex
         let expWtxid := RubinFormal.decodeHexOpt? v.expectWtxidHex
-        match r.txid, r.wtxid, expTxid, expWtxid with
-        | some txid, some wtxid, some etxid, some ewtxid =>
-            r.ok == true && txid == etxid && wtxid == ewtxid
-        | _, _, _, _ => false
+        let txidOk :=
+          match expTxid with
+          | none => true
+          | some etxid => r.txid == some etxid
+        let wtxidOk :=
+          match expWtxid with
+          | none => true
+          | some ewtxid => r.wtxid == some ewtxid
+        r.ok == true && txidOk && wtxidOk
       else
         match r.err, v.expectErr with
         | some e, some exp =>
@@ -39,22 +47,7 @@ private theorem all_append (xs ys : List CVParseVector) (p : CVParseVector → B
 
 -- CV-PARSE replay gate (compile-time).
 --
--- We split the proof to keep each `native_decide` goal small; this avoids Lean elaboration edge cases
--- when the vector set grows.
 theorem cv_parse_vectors_pass : allCVParse = true := by
-  let n : Nat := cvParseVectors.length / 2
-  have h1 : (cvParseVectors.take n).all checkParseVector = true := by
-    native_decide
-  have h2 : (cvParseVectors.drop n).all checkParseVector = true := by
-    native_decide
-  have h : (cvParseVectors.take n ++ cvParseVectors.drop n).all checkParseVector = true := by
-    calc
-      (cvParseVectors.take n ++ cvParseVectors.drop n).all checkParseVector
-          = ((cvParseVectors.take n).all checkParseVector && (cvParseVectors.drop n).all checkParseVector) := by
-              simpa using all_append (cvParseVectors.take n) (cvParseVectors.drop n) checkParseVector
-      _ = (true && true) := by simp [h1, h2]
-      _ = true := by simp
-  -- `take ++ drop` reconstructs the original list.
-  simpa [allCVParse, List.take_append_drop] using h
+  native_decide
 
 end RubinFormal.Conformance

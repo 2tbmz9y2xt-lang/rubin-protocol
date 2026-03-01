@@ -23,6 +23,7 @@ structure CVHtlcOrderingVector where
 
 def cvHtlcOrderingVectors : List CVHtlcOrderingVector := [
   { id := "CV-H-Ordering", path := "claim", structuralOk := true, locktimeOk := true, suiteId := 2, blockHeight := 999999, slhActivationHeight := 1000000, keyBindingOk := true, preimageOk := true, verifyOk := true, expectOk := false, expectErr := some "TX_ERR_SIG_ALG_INVALID", expectVerifyCalled := false },
+  { id := "CV-H-SLH-Preactivation-WrongLength", path := "claim", structuralOk := true, locktimeOk := true, suiteId := 2, blockHeight := 999999, slhActivationHeight := 1000000, keyBindingOk := true, preimageOk := true, verifyOk := true, expectOk := false, expectErr := some "TX_ERR_SIG_ALG_INVALID", expectVerifyCalled := false },
   { id := "CV-H-Structural-first", path := "claim", structuralOk := false, locktimeOk := true, suiteId := 1, blockHeight := 1000000, slhActivationHeight := 1000000, keyBindingOk := false, preimageOk := false, verifyOk := false, expectOk := false, expectErr := some "TX_ERR_PARSE", expectVerifyCalled := false }
 ]
 
