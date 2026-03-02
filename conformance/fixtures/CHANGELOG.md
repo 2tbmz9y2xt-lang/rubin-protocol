@@ -9,6 +9,20 @@ Policy:
 
 ---
 
+## 2026-03-02 — Flag-day / height-activation conformance gate (Q-ACT-FLAGDAY-03)
+
+Причина:
+- CANONICAL §23.2 изменён на flag-day (height-only activation): deployment ACTIVE iff `height >= activation_height`;
+- version-bit signaling остаётся только как telemetry/readiness и **не влияет** на `consensus_active`.
+
+Инструменты:
+- ручное добавление fixtures,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-FLAGDAY`,
+- синхронизация матрицы: `tools/gen_conformance_matrix.py`.
+
+Изменённые fixtures:
+- `CV-FLAGDAY.json` (new)
+
 ## 2026-03-01 — CORE_EXT genesis + pre-activation spend vectors (Q-SF-EXT-05)
 
 Причина:
