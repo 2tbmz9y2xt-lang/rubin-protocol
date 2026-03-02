@@ -23,6 +23,19 @@ Policy:
 Изменённые fixtures:
 - `CV-FLAGDAY.json` (new)
 
+## 2026-03-02 — VAULT destination allowlist vector (Q-VAULT-ALLOWLIST-01)
+
+Причина:
+- CANONICAL tightened `CORE_VAULT` spends: destination covenant types are allowlisted (`{CORE_P2PK, CORE_MULTISIG, CORE_HTLC}`).
+- Добавить regression вектор: даже если `CORE_EXT` output **находится** в vault whitelist, spend MUST reject как `TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED`.
+
+Инструменты:
+- локальная генерация `tx_hex` с реальными ML-DSA witness-подписями через Go consensus library (OpenSSL backend profile),
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-VAULT`.
+
+Изменённые fixtures:
+- `CV-VAULT.json` (added `VAULT-SPEND-ALLOWLIST-01`)
+
 ## 2026-03-01 — CORE_EXT genesis + pre-activation spend vectors (Q-SF-EXT-05)
 
 Причина:

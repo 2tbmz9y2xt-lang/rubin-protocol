@@ -426,6 +426,9 @@ func applyNonCoinbaseTxBasicWork(
 
 		// Whitelist enforcement: all outputs must be whitelisted.
 		for _, out := range tx.Outputs {
+			if out.CovenantType != COV_TYPE_P2PK && out.CovenantType != COV_TYPE_MULTISIG && out.CovenantType != COV_TYPE_HTLC {
+				return nil, 0, txerr(TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED, "disallowed destination covenant_type for CORE_VAULT spend")
+			}
 			desc := OutputDescriptorBytes(out.CovenantType, out.CovenantData)
 			h := sha3_256(desc)
 			if !HashInSorted32(vaultWhitelist, h) {

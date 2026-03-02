@@ -508,6 +508,65 @@ func TestApplyNonCoinbaseTxBasic_VaultWhitelistRejectsOutput(t *testing.T) {
 	}
 }
 
+func TestApplyNonCoinbaseTxBasic_VaultRejectsDisallowedDestinationCovenantTypeEvenIfWhitelisted(t *testing.T) {
+	var chainID [32]byte
+	var prevVault, prevFee, txid [32]byte
+	prevVault[0] = 0xe4
+	prevFee[0] = 0xe5
+	txid[0] = 0xe6
+
+	vaultKP := mustMLDSA87Keypair(t)
+	ownerKP := mustMLDSA87Keypair(t)
+
+	ownerCovData := p2pkCovenantDataForPubkey(ownerKP.PubkeyBytes())
+	ownerLockID := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, ownerCovData))
+
+	// Minimal valid CORE_EXT covenant_data: ext_id:u16le(1) || ext_payload_len:CompactSize(0).
+	coreExtOutData := []byte{0x01, 0x00, 0x00}
+	whitelistH := sha3_256(OutputDescriptorBytes(COV_TYPE_CORE_EXT, coreExtOutData))
+
+	vaultKeyID := sha3_256(vaultKP.PubkeyBytes())
+	vaultCovData := encodeVaultCovenantData(ownerLockID, 1, [][32]byte{vaultKeyID}, [][32]byte{whitelistH})
+
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs: []TxInput{
+			{PrevTxid: prevVault, PrevVout: 0},
+			{PrevTxid: prevFee, PrevVout: 0},
+		},
+		Outputs: []TxOutput{
+			{Value: 100, CovenantType: COV_TYPE_CORE_EXT, CovenantData: coreExtOutData},
+		},
+	}
+	tx.Witness = []WitnessItem{
+		signP2PKInputWitness(t, tx, 0, 100, chainID, vaultKP),
+		signP2PKInputWitness(t, tx, 1, 10, chainID, ownerKP),
+	}
+
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prevVault, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_VAULT,
+			CovenantData: vaultCovData,
+		},
+		{Txid: prevFee, Vout: 0}: {
+			Value:        10,
+			CovenantType: COV_TYPE_P2PK,
+			CovenantData: ownerCovData,
+		},
+	}
+
+	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, chainID)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED)
+	}
+}
+
 func TestApplyNonCoinbaseTxBasic_VaultRejectsFeeSponsor(t *testing.T) {
 	var chainID [32]byte
 	var prevVault, prevOwner, prevSponsor, txid [32]byte
