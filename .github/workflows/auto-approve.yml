@@ -96,6 +96,12 @@ jobs:
                 per_page: 100
               });
 
+              const validatorRuns = checks.data.check_runs.filter(c => c.name === 'validator');
+              const validator = validatorRuns.sort((a, b) => b.id - a.id)[0];
+              const validatorState = validator
+                ? `${validator.status}/${validator.conclusion ?? 'none'}`
+                : 'missing';
+
               const pending = checks.data.check_runs.filter(
                 c => c.name !== 'auto-approve' && c.status !== 'completed'
               );
@@ -110,10 +116,26 @@ jobs:
                 for (const f of failed) {
                   console.log(`  FAILED: ${f.name} - ${f.conclusion}`);
                 }
+                console.log(`  validator state: ${validatorState}`);
                 return;
               }
 
-              if (pending.length === 0) {
+              if (!validator) {
+                if (attempt === MAX_ATTEMPTS || pending.length === 0) {
+                  console.log(`Validator check is required but ${validatorState}; not approving/merging.`);
+                  return;
+                }
+                console.log(`Attempt ${attempt}: validator is ${validatorState}, waiting ${POLL_INTERVAL/1000}s...`);
+                await new Promise(r => setTimeout(r, POLL_INTERVAL));
+                continue;
+              }
+
+              if (validator.status === 'completed' && validator.conclusion !== 'success') {
+                console.log(`Validator check is ${validatorState}; not approving/merging.`);
+                return;
+              }
+
+              if (pending.length === 0 && validator.conclusion === 'success') {
                 console.log(`All checks passed (attempt ${attempt})`);
                 break;
               }
@@ -123,10 +145,11 @@ jobs:
                 for (const p of pending) {
                   console.log(`  PENDING: ${p.name} - ${p.status}`);
                 }
+                console.log(`  validator state: ${validatorState}`);
                 return;
               }
 
-              console.log(`Attempt ${attempt}: ${pending.length} checks pending, waiting ${POLL_INTERVAL/1000}s...`);
+              console.log(`Attempt ${attempt}: ${pending.length} checks pending, validator=${validatorState}, waiting ${POLL_INTERVAL/1000}s...`);
               await new Promise(r => setTimeout(r, POLL_INTERVAL));
             }
 
