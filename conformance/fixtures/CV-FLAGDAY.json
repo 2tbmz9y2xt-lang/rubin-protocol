@@ -1,0 +1,104 @@
+{
+  "gate": "CV-FLAGDAY",
+  "vectors": [
+    {
+      "id": "CV-FD-01-pre-activation",
+      "op": "featurebits_state",
+      "name": "X",
+      "bit": 0,
+      "start_height": 0,
+      "timeout_height": 100000,
+      "activation_height": 2000,
+      "height": 1999,
+      "window_signal_counts": [],
+      "expect_ok": true,
+      "expect_activation_height": 2000,
+      "expect_consensus_active": false
+    },
+    {
+      "id": "CV-FD-02-at-activation",
+      "op": "featurebits_state",
+      "name": "X",
+      "bit": 0,
+      "start_height": 0,
+      "timeout_height": 100000,
+      "activation_height": 2000,
+      "height": 2000,
+      "window_signal_counts": [],
+      "expect_ok": true,
+      "expect_activation_height": 2000,
+      "expect_consensus_active": true
+    },
+    {
+      "id": "CV-FD-03-signaling-ignored-low",
+      "op": "featurebits_state",
+      "name": "X",
+      "bit": 0,
+      "start_height": 0,
+      "timeout_height": 100000,
+      "activation_height": 2000,
+      "height": 2016,
+      "window_signal_counts": [0],
+      "expect_ok": true,
+      "expect_activation_height": 2000,
+      "expect_consensus_active": true
+    },
+    {
+      "id": "CV-FD-04-signaling-ignored-high",
+      "op": "featurebits_state",
+      "name": "X",
+      "bit": 0,
+      "start_height": 0,
+      "timeout_height": 100000,
+      "activation_height": 2000,
+      "height": 2016,
+      "window_signal_counts": [1815],
+      "expect_ok": true,
+      "expect_activation_height": 2000,
+      "expect_consensus_active": true
+    },
+    {
+      "id": "CV-FD-05-pre-activation-even-if-locked-in",
+      "op": "featurebits_state",
+      "name": "X",
+      "bit": 0,
+      "start_height": 0,
+      "timeout_height": 100000,
+      "activation_height": 3000,
+      "height": 2016,
+      "window_signal_counts": [1815],
+      "expect_ok": true,
+      "expect_activation_height": 3000,
+      "expect_consensus_active": false
+    },
+    {
+      "id": "CV-FD-06-consensus-active-even-if-defined",
+      "op": "featurebits_state",
+      "name": "X",
+      "bit": 0,
+      "start_height": 5000,
+      "timeout_height": 100000,
+      "activation_height": 2000,
+      "height": 2016,
+      "window_signal_counts": [0],
+      "expect_ok": true,
+      "expect_activation_height": 2000,
+      "expect_consensus_active": true
+    },
+    {
+      "id": "CV-FD-07-non-boundary-height-rule",
+      "op": "featurebits_state",
+      "name": "X",
+      "bit": 0,
+      "start_height": 0,
+      "timeout_height": 100000,
+      "activation_height": 2000,
+      "height": 2026,
+      "window_signal_counts": [0],
+      "expect_ok": true,
+      "expect_activation_height": 2000,
+      "expect_consensus_active": true
+    }
+  ]
+}
+

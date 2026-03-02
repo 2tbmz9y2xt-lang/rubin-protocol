@@ -1336,6 +1336,8 @@ def validate_vector(
         req["bit"] = int(v.get("bit", 0))
         req["start_height"] = int(v.get("start_height", 0))
         req["timeout_height"] = int(v.get("timeout_height", 0))
+        if "activation_height" in v:
+            req["activation_height"] = int(v["activation_height"])
         req["height"] = int(v.get("height", 0))
         req["window_signal_counts"] = [int(x) for x in v.get("window_signal_counts", [])]
     elif op == "compact_shortid":
@@ -1553,6 +1555,8 @@ def validate_vector(
             "signal_window",
             "signal_threshold",
             "estimated_activation_height",
+            "activation_height",
+            "consensus_active",
         ]:
             if go_resp.get(k) != rust_resp.get(k):
                 problems.append(
@@ -1570,6 +1574,10 @@ def validate_vector(
             problems.append(f"{gate}/{vid}: expect_signal_threshold mismatch")
         if "expect_estimated_activation_height" in v and as_int(go_resp.get("estimated_activation_height")) != int(v["expect_estimated_activation_height"]):
             problems.append(f"{gate}/{vid}: expect_estimated_activation_height mismatch")
+        if "expect_activation_height" in v and as_int(go_resp.get("activation_height")) != int(v["expect_activation_height"]):
+            problems.append(f"{gate}/{vid}: expect_activation_height mismatch")
+        if "expect_consensus_active" in v and go_resp.get("consensus_active") != bool(v["expect_consensus_active"]):
+            problems.append(f"{gate}/{vid}: expect_consensus_active mismatch")
     elif op == "compact_shortid":
         go_sid = go_resp.get("short_id") or go_resp.get("digest")
         rust_sid = rust_resp.get("short_id") or rust_resp.get("digest")

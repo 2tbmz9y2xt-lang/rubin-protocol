@@ -22,6 +22,7 @@ EXPECTED_GATES = frozenset(
         "CV-DA-INTEGRITY",
         "CV-DETERMINISM",
         "CV-FEATUREBITS",
+        "CV-FLAGDAY",
         "CV-FORK-CHOICE",
         "CV-HTLC",
         "CV-HTLC-ORDERING",
