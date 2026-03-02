@@ -2874,6 +2874,101 @@ fn apply_non_coinbase_tx_basic_vault_whitelist_rejects_output() {
 }
 
 #[test]
+fn apply_non_coinbase_tx_basic_vault_rejects_disallowed_destination_covenant_type_even_if_whitelisted(
+) {
+    let mut prev_vault = [0u8; 32];
+    prev_vault[0] = 0xe4;
+    let mut prev_fee = [0u8; 32];
+    prev_fee[0] = 0xe5;
+    let mut txid = [0u8; 32];
+    txid[0] = 0xe6;
+
+    let vault_kp = kp_or_skip!();
+    let owner_kp = kp_or_skip!();
+
+    let owner_cov = p2pk_covenant_data_for_pubkey(&owner_kp.pubkey);
+    let owner_lock_id = sha3_256(&crate::vault::output_descriptor_bytes(
+        COV_TYPE_P2PK,
+        &owner_cov,
+    ));
+
+    // Minimal valid CORE_EXT covenant_data: ext_id:u16le(1) || ext_payload_len:CompactSize(0).
+    let core_ext_cov = vec![0x01, 0x00, 0x00];
+    let whitelist_h = sha3_256(&crate::vault::output_descriptor_bytes(
+        COV_TYPE_EXT,
+        &core_ext_cov,
+    ));
+
+    let vault_key_id = sha3_256(&vault_kp.pubkey);
+    let vault_cov = encode_vault_covenant_data(owner_lock_id, 1, &[vault_key_id], &[whitelist_h]);
+
+    let mut tx = crate::tx::Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![
+            crate::tx::TxInput {
+                prev_txid: prev_vault,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            },
+            crate::tx::TxInput {
+                prev_txid: prev_fee,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            },
+        ],
+        outputs: vec![crate::tx::TxOutput {
+            value: 100,
+            covenant_type: COV_TYPE_EXT,
+            covenant_data: core_ext_cov,
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![],
+        da_payload: vec![],
+    };
+    tx.witness = vec![
+        sign_input_witness(&tx, 0, 100, ZERO_CHAIN_ID, &vault_kp),
+        sign_input_witness(&tx, 1, 10, ZERO_CHAIN_ID, &owner_kp),
+    ];
+
+    let mut utxos: HashMap<Outpoint, UtxoEntry> = HashMap::new();
+    utxos.insert(
+        Outpoint {
+            txid: prev_vault,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_VAULT,
+            covenant_data: vault_cov,
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    );
+    utxos.insert(
+        Outpoint {
+            txid: prev_fee,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 10,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: owner_cov,
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    );
+
+    let err = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000, ZERO_CHAIN_ID).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrVaultOutputNotWhitelisted);
+}
+
+#[test]
 fn apply_non_coinbase_tx_basic_vault_recursion_rejected() {
     let mut prev_vault = [0u8; 32];
     prev_vault[0] = 0xd0;

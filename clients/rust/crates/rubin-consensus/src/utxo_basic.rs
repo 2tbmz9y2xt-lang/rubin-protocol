@@ -374,6 +374,15 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
 
         // Whitelist enforcement: all outputs must be whitelisted.
         for out in &tx.outputs {
+            if out.covenant_type != COV_TYPE_P2PK
+                && out.covenant_type != COV_TYPE_MULTISIG
+                && out.covenant_type != COV_TYPE_HTLC
+            {
+                return Err(TxError::new(
+                    ErrorCode::TxErrVaultOutputNotWhitelisted,
+                    "disallowed destination covenant_type for CORE_VAULT spend",
+                ));
+            }
             let desc = output_descriptor_bytes(out.covenant_type, &out.covenant_data);
             let h = sha3_256(&desc);
             if !hash_in_sorted_32(&vault_whitelist, &h) {
