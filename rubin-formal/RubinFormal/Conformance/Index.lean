@@ -46,3 +46,5 @@ import RubinFormal.Conformance.CVCompactVectors
 import RubinFormal.Conformance.CVCompactReplay
 import RubinFormal.Conformance.CVFeaturebitsVectors
 import RubinFormal.Conformance.CVFeaturebitsReplay
+import RubinFormal.Conformance.CVFlagdayVectors
+import RubinFormal.Conformance.CVFlagdayReplay
