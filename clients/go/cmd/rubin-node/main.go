@@ -166,10 +166,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 type featureBitDeploymentJSON struct {
-	Name          string `json:"name"`
-	Bit           uint8  `json:"bit"`
-	StartHeight   uint64 `json:"start_height"`
-	TimeoutHeight uint64 `json:"timeout_height"`
+	Name             string  `json:"name"`
+	Bit              uint8   `json:"bit"`
+	StartHeight      uint64  `json:"start_height"`
+	TimeoutHeight    uint64  `json:"timeout_height"`
+	ActivationHeight *uint64 `json:"activation_height,omitempty"`
 }
 
 type headerStore interface {
@@ -213,15 +214,21 @@ func printFeatureBitsTelemetry(w io.Writer, bs headerStore, height uint64, deplo
 		if err != nil {
 			return err
 		}
+		consensusActive := ""
+		if dj.ActivationHeight != nil {
+			active := height >= *dj.ActivationHeight
+			consensusActive = fmt.Sprintf(" consensus_active=%t activation_height=%d", active, *dj.ActivationHeight)
+		}
 		_, _ = fmt.Fprintf(
 			w,
-			"featurebits: name=%s bit=%d height=%d boundary=%d state=%s prev_window_signal_count=%d\n",
+			"featurebits: name=%s bit=%d height=%d boundary=%d state=%s prev_window_signal_count=%d%s\n",
 			d.Name,
 			d.Bit,
 			height,
 			ev.BoundaryHeight,
 			ev.State,
 			ev.PrevWindowSignalCnt,
+			consensusActive,
 		)
 	}
 	return nil

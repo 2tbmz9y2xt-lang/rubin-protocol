@@ -139,6 +139,7 @@ type Request struct {
 	Bit                  uint8             `json:"bit,omitempty"`
 	StartHeight          uint64            `json:"start_height,omitempty"`
 	TimeoutHeight        uint64            `json:"timeout_height,omitempty"`
+	ActivationHeight     *uint64           `json:"activation_height,omitempty"`
 	WindowSignalCounts   []uint32          `json:"window_signal_counts,omitempty"`
 }
 
@@ -182,6 +183,8 @@ type Response struct {
 	SignalWindow       uint64   `json:"signal_window,omitempty"`
 	SignalThreshold    uint32   `json:"signal_threshold,omitempty"`
 	EstimatedActivate  *uint64  `json:"estimated_activation_height,omitempty"`
+	ActivationHeight   *uint64  `json:"activation_height,omitempty"`
+	ConsensusActive    *bool    `json:"consensus_active,omitempty"`
 	RetainedPeer       string   `json:"retained_peer,omitempty"`
 	FirstErr           string   `json:"first_err,omitempty"`
 	Chainwork          string   `json:"chainwork,omitempty"`
@@ -581,6 +584,14 @@ func runFromStdin() {
 			return
 		}
 
+		var consensusActive *bool
+		var activationHeight *uint64
+		if req.ActivationHeight != nil {
+			activationHeight = req.ActivationHeight
+			v := req.Height >= *req.ActivationHeight
+			consensusActive = &v
+		}
+
 		var est *uint64
 		if ev.State == consensus.FEATUREBIT_LOCKED_IN {
 			v := ev.BoundaryHeight + ev.SignalWindow
@@ -597,6 +608,8 @@ func runFromStdin() {
 			SignalWindow:      ev.SignalWindow,
 			SignalThreshold:   ev.SignalThreshold,
 			EstimatedActivate: est,
+			ActivationHeight:  activationHeight,
+			ConsensusActive:   consensusActive,
 		})
 		return
 

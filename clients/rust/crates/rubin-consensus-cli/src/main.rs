@@ -4,11 +4,12 @@ use rubin_consensus::merkle::witness_merkle_root_wtxids;
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_with_mtp, block_hash, compact_shortid,
     connect_block_basic_in_memory_at_height, featurebit_state_at_height_from_window_counts,
-    fork_work_from_target, merkle_root_txids, parse_tx, pow_check, retarget_v1,
-    retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_public,
+    flagday_active_at_height, fork_work_from_target, merkle_root_txids, parse_tx, pow_check,
+    retarget_v1, retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_public,
     validate_block_basic_with_context_and_fees_at_height,
     validate_block_basic_with_context_at_height, validate_tx_covenants_genesis, ErrorCode,
-    FeatureBitDeployment, FeatureBitState, InMemoryChainState, Outpoint, UtxoEntry,
+    FeatureBitDeployment, FeatureBitState, FlagDayDeployment, InMemoryChainState, Outpoint,
+    UtxoEntry,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -100,6 +101,9 @@ struct Request {
 
     #[serde(default)]
     timeout_height: u64,
+
+    #[serde(default)]
+    activation_height: Option<u64>,
 
     #[serde(default)]
     window_signal_counts: Vec<u32>,
@@ -540,6 +544,12 @@ struct Response {
     estimated_activation_height: Option<u64>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    activation_height: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    consensus_active: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     evicted: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -712,6 +722,28 @@ fn op_featurebits_state(req: &Request) -> Response {
             } else {
                 None
             };
+
+            let (activation_height, consensus_active) =
+                if let Some(activation_height) = req.activation_height {
+                    let fd = FlagDayDeployment {
+                        name: req.name.clone(),
+                        activation_height,
+                        bit: Some(req.bit),
+                    };
+                    match flagday_active_at_height(&fd, req.height) {
+                        Ok(active) => (Some(activation_height), Some(active)),
+                        Err(e) => {
+                            return Response {
+                                ok: false,
+                                err: Some(e),
+                                ..Default::default()
+                            }
+                        }
+                    }
+                } else {
+                    (None, None)
+                };
+
             Response {
                 ok: true,
                 state: Some(ev.state.as_str().to_string()),
@@ -720,6 +752,8 @@ fn op_featurebits_state(req: &Request) -> Response {
                 signal_window: Some(ev.signal_window),
                 signal_threshold: Some(ev.signal_threshold),
                 estimated_activation_height: est,
+                activation_height,
+                consensus_active,
                 ..Default::default()
             }
         }
@@ -3668,6 +3702,7 @@ mod tests {
             start_height: 0,
             timeout_height: rubin_consensus::constants::SIGNAL_WINDOW * 10,
             height: rubin_consensus::constants::SIGNAL_WINDOW,
+            activation_height: Some(rubin_consensus::constants::SIGNAL_WINDOW * 2),
             window_signal_counts: vec![rubin_consensus::constants::SIGNAL_THRESHOLD],
             ..Default::default()
         };
@@ -3695,6 +3730,11 @@ mod tests {
             resp.estimated_activation_height,
             Some(rubin_consensus::constants::SIGNAL_WINDOW * 2)
         );
+        assert_eq!(
+            resp.activation_height,
+            Some(rubin_consensus::constants::SIGNAL_WINDOW * 2)
+        );
+        assert_eq!(resp.consensus_active, Some(false));
     }
 
     #[test]
