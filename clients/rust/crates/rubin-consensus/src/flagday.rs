@@ -36,8 +36,8 @@ mod tests {
             activation_height: 100,
             bit: Some(5),
         };
-        assert_eq!(flagday_active_at_height(&d, 99).unwrap(), false);
-        assert_eq!(flagday_active_at_height(&d, 100).unwrap(), true);
+        assert!(!flagday_active_at_height(&d, 99).unwrap());
+        assert!(flagday_active_at_height(&d, 100).unwrap());
     }
 
     #[test]
