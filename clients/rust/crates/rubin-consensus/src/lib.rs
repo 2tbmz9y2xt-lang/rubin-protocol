@@ -8,6 +8,7 @@ pub mod core_ext;
 mod covenant_genesis;
 pub mod error;
 pub mod featurebits;
+pub mod flagday;
 mod fork_choice;
 mod hash;
 mod htlc;
@@ -45,6 +46,7 @@ pub use featurebits::{
     featurebit_state_at_height_from_window_counts, FeatureBitDeployment, FeatureBitEval,
     FeatureBitState,
 };
+pub use flagday::{flagday_active_at_height, FlagDayDeployment};
 pub use fork_choice::{fork_chainwork_from_targets, fork_work_from_target};
 pub use htlc::{parse_htlc_covenant_data, validate_htlc_spend, HtlcCovenant};
 pub use merkle::merkle_root_txids;

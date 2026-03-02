@@ -86,12 +86,14 @@ func TestCountSignalsInWindow(t *testing.T) {
 func TestPrintFeatureBitsTelemetry(t *testing.T) {
 	dir := t.TempDir()
 	deploymentsPath := filepath.Join(dir, "deployments.json")
+	act := uint64(1000)
 	raw, err := json.Marshal([]featureBitDeploymentJSON{
 		{
-			Name:          "X",
-			Bit:           0,
-			StartHeight:   0,
-			TimeoutHeight: consensus.SIGNAL_WINDOW * 10,
+			Name:             "X",
+			Bit:              0,
+			StartHeight:      0,
+			TimeoutHeight:    consensus.SIGNAL_WINDOW * 10,
+			ActivationHeight: &act,
 		},
 	})
 	if err != nil {
@@ -115,7 +117,9 @@ func TestPrintFeatureBitsTelemetry(t *testing.T) {
 	s := out.String()
 	if !strings.Contains(s, "featurebits: name=X") ||
 		!strings.Contains(s, "state=LOCKED_IN") ||
-		!strings.Contains(s, "prev_window_signal_count=1815") {
+		!strings.Contains(s, "prev_window_signal_count=1815") ||
+		!strings.Contains(s, "consensus_active=true") ||
+		!strings.Contains(s, "activation_height=1000") {
 		t.Fatalf("unexpected output: %q", s)
 	}
 }
