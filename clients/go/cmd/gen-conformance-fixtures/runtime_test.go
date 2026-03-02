@@ -77,6 +77,7 @@ func TestGenConformanceFixturesGenerator_WritesToTempRepo(t *testing.T) {
 		newVector("CV-U-11", 2, nil),
 		newVector("CV-U-12", 2, nil),
 		newVector("CV-U-13", 2, nil),
+		newVector("CV-U-19", 1, nil), // burn-to-fee (output_count=0)
 	})
 
 	writeFixture("CV-VAULT.json", []map[string]any{

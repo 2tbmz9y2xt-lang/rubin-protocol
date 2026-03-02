@@ -71,6 +71,8 @@ func runGeneratorCLI() {
 			10,  // owner_fee_input_value
 		)
 
+		updateP2PKBurnToFeeVector(f, "CV-U-19", zeroChainID, ownerKP, 100) // burn-to-fee, output_count=0
+
 		mustWriteFixture(path, f)
 	}
 
@@ -328,6 +330,37 @@ func updateMultisigVector1of1(f *fixtureFile, id string, chainID [32]byte, signe
 		outValue,
 		signer,
 	)
+}
+
+func updateP2PKBurnToFeeVector(f *fixtureFile, id string, chainID [32]byte, signer *consensus.MLDSA87Keypair, inValue uint64) {
+	v := findVector(f, id)
+	pub := signer.PubkeyBytes()
+	cov := p2pkCovenantDataWithSuite(consensus.SUITE_ID_ML_DSA_87, pub)
+
+	utxos := anyToSliceMap(v["utxos"])
+	if len(utxos) != 1 {
+		fatalf("%s: want 1 utxo, got %d", id, len(utxos))
+	}
+	utxos[0]["covenant_data"] = hex.EncodeToString(cov)
+
+	prevTxid := mustHex32(utxos[0]["txid"].(string))
+	prevVout := uint32(utxos[0]["vout"].(float64))
+
+	tx := &consensus.Tx{
+		Version:  1,
+		TxKind:   0x00,
+		TxNonce:  1,
+		Inputs:   []consensus.TxInput{{PrevTxid: prevTxid, PrevVout: prevVout, ScriptSig: nil, Sequence: 0}},
+		Outputs:  nil, // zero outputs: burn-to-fee
+		Locktime: 0,
+	}
+
+	sig := mustSignInputDigest(id, "input0", signer, tx, 0, inValue, chainID)
+	tx.Witness = []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: pub, Signature: sig}}
+
+	b := mustTxBytes(tx)
+	v["tx_hex"] = hex.EncodeToString(b)
+	v["utxos"] = utxos
 }
 
 func updateVaultSpendVectorsUTXO(

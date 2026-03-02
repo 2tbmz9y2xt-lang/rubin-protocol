@@ -9,6 +9,23 @@ Policy:
 
 ---
 
+## 2026-03-02 — Non-minimal WitnessItem CompactSize + burn-to-fee vectors (Q-CONF-16, Q-CONF-17)
+
+Причина:
+- F-SPEC-01-CV: закрепить что §7 step 1 (CompactSize minimality) применяется ко ВСЕМ CompactSize полям,
+  включая `WitnessItem.pubkey_length` с unknown suite_id.
+- F-SPEC-08-CV: закрепить что non-coinbase `output_count=0` (burn-to-fee) валиден на уровне
+  UTXO validation (§5, §20 value conservation).
+
+Инструменты:
+- PARSE-17: ручное добавление (parse-only, no crypto),
+- CV-U-19: генерация через `clients/go/cmd/gen-conformance-fixtures` (real ML-DSA witness),
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-PARSE CV-UTXO-BASIC`.
+
+Изменённые fixtures:
+- `CV-PARSE.json` (added `PARSE-17`)
+- `CV-UTXO-BASIC.json` (added `CV-U-19`)
+
 ## 2026-03-02 — Flag-day / height-activation conformance gate (Q-ACT-FLAGDAY-03)
 
 Причина:
