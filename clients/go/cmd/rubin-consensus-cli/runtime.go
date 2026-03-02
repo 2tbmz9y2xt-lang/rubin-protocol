@@ -1722,6 +1722,17 @@ func runFromStdin() {
 				OK:   whitelistOK,
 				Code: string(consensus.TX_ERR_VAULT_WHITELIST_NOT_CANONICAL),
 			},
+			"owner_destination": {
+				OK: func() bool {
+					for _, w := range req.Whitelist {
+						if w == ownerLockID {
+							return false
+						}
+					}
+					return true
+				}(),
+				Code: string(consensus.TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN),
+			},
 			"value": {
 				OK:   req.SumOut >= req.SumInVault,
 				Code: string(consensus.TX_ERR_VALUE_CONSERVATION),
@@ -1738,6 +1749,7 @@ func runFromStdin() {
 				"sentinel",
 				"sig_threshold",
 				"whitelist",
+				"owner_destination",
 				"value",
 			}
 		}

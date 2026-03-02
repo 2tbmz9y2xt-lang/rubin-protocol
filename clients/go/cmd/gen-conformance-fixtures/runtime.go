@@ -60,6 +60,13 @@ func runGeneratorCLI() {
 
 		updateMultisigVector1of1(f, "CV-U-09", zeroChainID, multisigKP, 100, 90) // fee=10
 
+		{
+			path := filepath.Join(repoRoot, "conformance/fixtures/CV-MULTISIG.json")
+			fm := mustLoadFixture(path)
+			updateMultisigVector1of1(fm, "CV-M-01", zeroChainID, multisigKP, 100, 90)
+			mustWriteFixture(path, fm)
+		}
+
 		updateVaultSpendVectorsUTXO(
 			f,
 			zeroChainID,

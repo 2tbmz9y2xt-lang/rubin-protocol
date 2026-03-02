@@ -2337,6 +2337,12 @@ def main() -> int:
     out_vault.write_text(_inject_perf_options(render_utxo_apply_vectors_lean(vv, "CV-VAULT")), encoding="utf-8")
     print(f"WROTE: {out_vault}")
 
+    in_multisig = repo_root / "conformance" / "fixtures" / "CV-MULTISIG.json"
+    out_multisig = repo_root / "rubin-formal" / "RubinFormal" / "Conformance" / "CVMultisigVectors.lean"
+    msv = _load_utxo_apply_vectors(json.loads(in_multisig.read_text(encoding="utf-8")), "CV-MULTISIG")
+    out_multisig.write_text(_inject_perf_options(render_utxo_apply_vectors_lean(msv, "CV-MULTISIG")), encoding="utf-8")
+    print(f"WROTE: {out_multisig}")
+
     in_htlc = repo_root / "conformance" / "fixtures" / "CV-HTLC.json"
     out_htlc = repo_root / "rubin-formal" / "RubinFormal" / "Conformance" / "CVHtlcVectors.lean"
     hv = _load_utxo_apply_vectors(json.loads(in_htlc.read_text(encoding="utf-8")), "CV-HTLC")
