@@ -17,6 +17,24 @@ type MinerConfig struct {
 	MaxTxPerBlock   int
 	Target          [32]byte
 
+	// PolicyDaAnchorAntiAbuse enables non-consensus miner policy hardening for DA/anchor abuse mitigation.
+	// Consensus validity rules are unchanged; this only affects which transactions the miner includes.
+	PolicyDaAnchorAntiAbuse bool
+
+	// PolicyRejectNonCoinbaseAnchorOutputs rejects transactions that create CORE_ANCHOR outputs.
+	// (Non-coinbase CORE_ANCHOR is treated as non-standard by policy.)
+	PolicyRejectNonCoinbaseAnchorOutputs bool
+
+	// PolicyMaxDaBytesPerBlock caps total DA payload bytes included in a block template (policy-only).
+	// This is independent from the consensus DA byte cap.
+	PolicyMaxDaBytesPerBlock uint64
+
+	// PolicyDaSurchargePerByte enforces a minimum fee for DA-bearing transactions:
+	//   fee(tx) MUST be >= da_bytes(tx) * PolicyDaSurchargePerByte
+	// where da_bytes(tx) is the canonical DA payload length counted by consensus weight accounting.
+	// Set to 0 to disable the fee surcharge check.
+	PolicyDaSurchargePerByte uint64
+
 	// PolicyRejectCoreExtPreActivation controls non-consensus guardrails for CORE_EXT (COV_TYPE_CORE_EXT).
 	// When enabled, the miner will exclude transactions that create or spend CORE_EXT outputs
 	// whose profile(ext_id, height) is not ACTIVE. This is a safety policy to avoid pre-activation
@@ -52,6 +70,10 @@ func DefaultMinerConfig() MinerConfig {
 			return unixNowU64()
 		},
 		MaxTxPerBlock:                    1024,
+		PolicyDaAnchorAntiAbuse:          true,
+		PolicyRejectNonCoinbaseAnchorOutputs: true,
+		PolicyMaxDaBytesPerBlock:         consensus.MAX_DA_BYTES_PER_BLOCK / 4, // 25% policy budget (issue #353 draft)
+		PolicyDaSurchargePerByte:         0,                                    // controller-tunable; disabled by default
 		PolicyRejectCoreExtPreActivation: true,
 	}
 }
@@ -128,6 +150,7 @@ func (m *Miner) MineOne(ctx context.Context, txs [][]byte) (*MinedBlock, error) 
 		wtxid [32]byte
 	}
 	parsed := make([]parsedTx, 0, len(selectedTxs))
+	var policyDaIncluded uint64
 	for _, raw := range selectedTxs {
 		tx, txid, wtxid, consumed, parseErr := consensus.ParseTx(raw)
 		if parseErr != nil {
@@ -135,6 +158,27 @@ func (m *Miner) MineOne(ctx context.Context, txs [][]byte) (*MinedBlock, error) 
 		}
 		if consumed != len(raw) {
 			return nil, errors.New("non-canonical tx bytes in miner input")
+		}
+		if m.cfg.PolicyDaAnchorAntiAbuse {
+			reject, daBytes, _, err := RejectDaAnchorTxPolicy(tx, m.chainState.Utxos, m.cfg.PolicyDaSurchargePerByte)
+			if err != nil || reject {
+				continue
+			}
+			if daBytes > 0 && m.cfg.PolicyMaxDaBytesPerBlock > 0 {
+				next := policyDaIncluded + daBytes
+				if next < policyDaIncluded { // overflow
+					continue
+				}
+				if next > m.cfg.PolicyMaxDaBytesPerBlock {
+					continue
+				}
+				policyDaIncluded = next
+			}
+			if m.cfg.PolicyRejectNonCoinbaseAnchorOutputs {
+				if reject, _, err := RejectNonCoinbaseAnchorOutputs(tx); err != nil || reject {
+					continue
+				}
+			}
 		}
 		if m.cfg.PolicyRejectCoreExtPreActivation {
 			reject, _, err := RejectCoreExtTxPreActivation(tx, m.chainState.Utxos, nextHeight, m.cfg.CoreExtProfiles)

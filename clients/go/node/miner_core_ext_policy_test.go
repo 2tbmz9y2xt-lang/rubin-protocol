@@ -83,15 +83,15 @@ func TestMinerPolicyFiltersCoreExtSpend(t *testing.T) {
 	var prev [32]byte
 	prev[0] = 0x22
 
-	var anchor [32]byte
-	anchor[0] = 0x01
+	p2pkCD := make([]byte, consensus.MAX_P2PK_COVENANT_DATA)
+	p2pkCD[0] = consensus.SUITE_ID_ML_DSA_87
 
 	txBytes := mustMarshalTxForNodeTest(t, &consensus.Tx{
 		Version:   0,
 		TxKind:    0x00,
 		TxNonce:   1,
 		Inputs:    []consensus.TxInput{{PrevTxid: prev, PrevVout: 0, Sequence: 0}},
-		Outputs:   []consensus.TxOutput{{Value: 0, CovenantType: consensus.COV_TYPE_ANCHOR, CovenantData: anchor[:]}},
+		Outputs:   []consensus.TxOutput{{Value: 1, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: p2pkCD}},
 		Locktime:  0,
 		Witness:   []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_SENTINEL}},
 		DaPayload: nil,
