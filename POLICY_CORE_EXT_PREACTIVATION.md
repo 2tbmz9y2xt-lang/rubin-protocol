@@ -1,6 +1,6 @@
 # Policy: CORE_EXT pre-activation guardrails (non-consensus)
 
-Consensus permits `CORE_EXT` spends pre-activation under the keyless-sentinel rule (in practice: anyone-can-spend).
+Consensus permits `CORE_EXT` spends pre-activation as anyone-can-spend.
 This file documents the required **policy-only** guardrails to prevent accidental fund loss before an intended
 deployment profile is ACTIVE.
 
@@ -32,4 +32,3 @@ The currently implemented guardrail is **miner template filtering**:
 
 If `CORE_EXT` outputs are created pre-activation, they may be spent by anyone under consensus rules (no signature),
 which is indistinguishable from user error after the fact. Policy guardrails must block creation, not only spend.
-
