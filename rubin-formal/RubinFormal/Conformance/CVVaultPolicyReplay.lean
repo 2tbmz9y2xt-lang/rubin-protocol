@@ -17,6 +17,7 @@ def vaultPolicyEval (v : CVVaultPolicyVector) : (Bool × Option String) :=
     v.sentinelSigLen == 0 &&
     (!v.sentinelVerifyCalled)
   let whitelistOk := strictlySortedUnique v.whitelist
+  let ownerDestinationOk := !v.whitelist.elem v.ownerLockId
   let checks : List (String × (Bool × String)) := [
     ("multi_vault", (v.vaultInputCount <= 1, "TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN")),
     ("owner_auth", (v.hasOwnerAuth, "TX_ERR_VAULT_OWNER_AUTH_REQUIRED")),
@@ -25,12 +26,13 @@ def vaultPolicyEval (v : CVVaultPolicyVector) : (Bool × Option String) :=
     ("sentinel", (sentinelOk, "TX_ERR_PARSE")),
     ("sig_threshold", (v.sigThresholdOk, "TX_ERR_SIG_INVALID")),
     ("whitelist", (whitelistOk, "TX_ERR_VAULT_WHITELIST_NOT_CANONICAL")),
+    ("owner_destination", (ownerDestinationOk, "TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN")),
     ("value", (v.sumOut >= v.sumInVault, "TX_ERR_VALUE_CONSERVATION"))
   ]
 
   let order :=
     match v.validationOrder with
-    | none => ["multi_vault","owner_auth","fee_sponsor","witness_slots","sentinel","sig_threshold","whitelist","value"]
+    | none => ["multi_vault","owner_auth","fee_sponsor","witness_slots","sentinel","sig_threshold","whitelist","owner_destination","value"]
     | some xs => xs
 
   let err : Option String :=

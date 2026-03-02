@@ -3583,6 +3583,7 @@ fn main() {
                     "sentinel".to_string(),
                     "sig_threshold".to_string(),
                     "whitelist".to_string(),
+                    "owner_destination".to_string(),
                     "value".to_string(),
                 ]
             } else {
@@ -3611,6 +3612,10 @@ fn main() {
                     "whitelist" => (
                         whitelist_ok,
                         err_code(ErrorCode::TxErrVaultWhitelistNotCanonical),
+                    ),
+                    "owner_destination" => (
+                        !req.whitelist.contains(&owner_lock_id),
+                        err_code(ErrorCode::TxErrVaultOwnerDestinationForbidden),
                     ),
                     "value" => (
                         req.sum_out >= req.sum_in_vault,

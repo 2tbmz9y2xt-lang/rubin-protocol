@@ -27,6 +27,7 @@ EXPECTED_GATES = frozenset(
         "CV-HTLC",
         "CV-HTLC-ORDERING",
         "CV-MERKLE",
+        "CV-MULTISIG",
         "CV-OUTPUT-DESCRIPTOR",
         "CV-PARSE",
         "CV-POW",

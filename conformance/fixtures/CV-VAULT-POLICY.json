@@ -208,6 +208,28 @@
         "01",
         "02"
       ]
+    },
+    {
+      "id": "CV-V-10",
+      "op": "vault_policy_rules",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN",
+      "vault_input_count": 1,
+      "owner_lock_id": "owner-a",
+      "non_vault_lock_ids": [
+        "owner-a"
+      ],
+      "has_owner_auth": true,
+      "sum_in_vault": 100,
+      "sum_out": 100,
+      "slots": 1,
+      "key_count": 1,
+      "sig_threshold_ok": true,
+      "whitelist": [
+        "01",
+        "02",
+        "owner-a"
+      ]
     }
   ]
 }

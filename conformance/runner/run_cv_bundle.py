@@ -957,6 +957,7 @@ def validate_local_vector(gate: str, v: Dict[str, Any]) -> List[str]:
 
         whitelist = [str(x) for x in v.get("whitelist", [])]
         whitelist_ok = whitelist == sorted(whitelist) and len(set(whitelist)) == len(whitelist)
+        owner_destination_ok = owner_lock_id not in whitelist
 
         checks = {
             "multi_vault": (
@@ -987,6 +988,10 @@ def validate_local_vector(gate: str, v: Dict[str, Any]) -> List[str]:
                 whitelist_ok,
                 "TX_ERR_VAULT_WHITELIST_NOT_CANONICAL",
             ),
+            "owner_destination": (
+                owner_destination_ok,
+                "TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN",
+            ),
             "value": (
                 sum_out >= sum_in_vault,
                 "TX_ERR_VALUE_CONSERVATION",
@@ -1001,6 +1006,7 @@ def validate_local_vector(gate: str, v: Dict[str, Any]) -> List[str]:
             "sentinel",
             "sig_threshold",
             "whitelist",
+            "owner_destination",
             "value",
         ])]
 

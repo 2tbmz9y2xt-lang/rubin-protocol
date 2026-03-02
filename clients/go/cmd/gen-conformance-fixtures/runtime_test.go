@@ -68,6 +68,10 @@ func TestGenConformanceFixturesGenerator_WritesToTempRepo(t *testing.T) {
 		}
 	}
 
+	writeFixture("CV-MULTISIG.json", []map[string]any{
+		newVector("CV-M-01", 1, nil),
+	})
+
 	writeFixture("CV-UTXO-BASIC.json", []map[string]any{
 		newVector("CV-U-05", 1, nil),
 		newVector("CV-U-06", 1, nil),
