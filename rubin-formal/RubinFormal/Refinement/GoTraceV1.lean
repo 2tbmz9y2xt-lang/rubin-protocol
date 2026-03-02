@@ -40,7 +40,7 @@ structure BlockBasicOut where
   sumWeight : Option Nat
   sumDa : Option Nat
 
-def goTraceFixturesDigestSHA3_256 : String := "8cb12a47aff5cebd98b1ac88e5f9dfce1b4ae01b8f0636bf70c6800ce1724ce8"
+def goTraceFixturesDigestSHA3_256 : String := "f13918f2699b842a12cce6cb70ece9e1a9c6f9c9b17901a6b628548f38168093"
 
 def parseOuts : List ParseOut := [
   { id := "PARSE-01", ok := true, err := "", consumed := 21, txidHex := "0xd205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0", wtxidHex := "0xf760a70e1e838404d8e41679962064dc1bf4fa181699009644a14d0aa389ab4e" },
@@ -105,6 +105,8 @@ def utxoBasicOuts : List UtxoBasicOut := [
   { id := "CV-U-17", ok := false, err := "TX_ERR_PARSE", fee := none, utxoCount := none },
   { id := "CV-U-18", ok := false, err := "TX_ERR_COVENANT_TYPE_INVALID", fee := none, utxoCount := none },
   { id := "CV-U-19", ok := true, err := "", fee := some 100, utxoCount := some 0 },
+  { id := "CV-U-COINBASE-IMMATURE-01", ok := false, err := "TX_ERR_COINBASE_IMMATURE", fee := none, utxoCount := none },
+  { id := "CV-U-COINBASE-IMMATURE-02", ok := true, err := "", fee := some 100, utxoCount := some 0 },
   { id := "CV-U-EXT-01", ok := true, err := "", fee := some 10, utxoCount := some 1 },
   { id := "CV-U-EXT-02", ok := true, err := "", fee := some 10, utxoCount := some 1 },
   { id := "CV-U-EXT-03", ok := false, err := "TX_ERR_COVENANT_TYPE_INVALID", fee := none, utxoCount := none }
