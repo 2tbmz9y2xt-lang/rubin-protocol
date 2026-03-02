@@ -69,12 +69,12 @@ func DefaultMinerConfig() MinerConfig {
 		TimestampSource: func() uint64 {
 			return unixNowU64()
 		},
-		MaxTxPerBlock:                    1024,
-		PolicyDaAnchorAntiAbuse:          true,
+		MaxTxPerBlock:                        1024,
+		PolicyDaAnchorAntiAbuse:              true,
 		PolicyRejectNonCoinbaseAnchorOutputs: true,
-		PolicyMaxDaBytesPerBlock:         consensus.MAX_DA_BYTES_PER_BLOCK / 4, // 25% policy budget (issue #353 draft)
-		PolicyDaSurchargePerByte:         0,                                    // controller-tunable; disabled by default
-		PolicyRejectCoreExtPreActivation: true,
+		PolicyMaxDaBytesPerBlock:             consensus.MAX_DA_BYTES_PER_BLOCK / 4, // 25% policy budget (issue #353 draft)
+		PolicyDaSurchargePerByte:             0,                                    // controller-tunable; disabled by default
+		PolicyRejectCoreExtPreActivation:     true,
 	}
 }
 

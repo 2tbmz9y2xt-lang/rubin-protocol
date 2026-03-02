@@ -26,10 +26,10 @@ func RejectNonCoinbaseAnchorOutputs(tx *consensus.Tx) (reject bool, reason strin
 // RejectDaAnchorTxPolicy implements policy-only DA/anchor anti-abuse checks.
 //
 // Current policy surface (no consensus changes):
-// - Compute da_bytes(tx) using consensus weight accounting (TxWeightAndStats).
-// - If da_bytes(tx) > 0 and daSurchargePerByte > 0, require:
+//   - Compute da_bytes(tx) using consensus weight accounting (TxWeightAndStats).
+//   - If da_bytes(tx) > 0 and daSurchargePerByte > 0, require:
 //     fee(tx) >= da_bytes(tx) * daSurchargePerByte
-//   Fee is computed from the provided UTXO snapshot without signature verification.
+//     Fee is computed from the provided UTXO snapshot without signature verification.
 //
 // Miner template budget capping is enforced by the caller (needs running sum).
 func RejectDaAnchorTxPolicy(

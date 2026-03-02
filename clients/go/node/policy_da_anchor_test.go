@@ -14,11 +14,11 @@ func TestRejectDaAnchorTxPolicy_DaSurchargeRejectsLowFee(t *testing.T) {
 	}
 
 	tx := &consensus.Tx{
-		Version:  1,
-		TxKind:   0x01,
-		TxNonce:  1,
-		Inputs:   []consensus.TxInput{{PrevTxid: prev, PrevVout: 0}},
-		Outputs:  []consensus.TxOutput{{Value: 100, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: make([]byte, consensus.MAX_P2PK_COVENANT_DATA)}},
+		Version:   1,
+		TxKind:    0x01,
+		TxNonce:   1,
+		Inputs:    []consensus.TxInput{{PrevTxid: prev, PrevVout: 0}},
+		Outputs:   []consensus.TxOutput{{Value: 100, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: make([]byte, consensus.MAX_P2PK_COVENANT_DATA)}},
 		DaPayload: []byte("0123456789"), // 10 bytes
 		DaCommitCore: &consensus.DaCommitCore{
 			ChunkCount:  1,
@@ -49,11 +49,11 @@ func TestRejectDaAnchorTxPolicy_DaSurchargeAllowsSufficientFee(t *testing.T) {
 	}
 
 	tx := &consensus.Tx{
-		Version:  1,
-		TxKind:   0x01,
-		TxNonce:  1,
-		Inputs:   []consensus.TxInput{{PrevTxid: prev, PrevVout: 0}},
-		Outputs:  []consensus.TxOutput{{Value: 90, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: make([]byte, consensus.MAX_P2PK_COVENANT_DATA)}},
+		Version:   1,
+		TxKind:    0x01,
+		TxNonce:   1,
+		Inputs:    []consensus.TxInput{{PrevTxid: prev, PrevVout: 0}},
+		Outputs:   []consensus.TxOutput{{Value: 90, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: make([]byte, consensus.MAX_P2PK_COVENANT_DATA)}},
 		DaPayload: []byte("0123456789"), // 10 bytes
 		DaCommitCore: &consensus.DaCommitCore{
 			ChunkCount:  1,
@@ -73,4 +73,3 @@ func TestRejectDaAnchorTxPolicy_DaSurchargeAllowsSufficientFee(t *testing.T) {
 		t.Fatalf("expected allow (fee=10 >= min_fee=10)")
 	}
 }
-

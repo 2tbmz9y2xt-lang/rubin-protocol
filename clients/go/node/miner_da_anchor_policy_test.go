@@ -34,10 +34,10 @@ func daCommitTxBytesForMinerPolicyTest(txNonce uint64, manifest []byte) []byte {
 	b = append(b, txDataRoot[:]...)
 	b = append(b, stateRoot[:]...)
 	b = append(b, withdrawalsRoot[:]...)
-	b = append(b, 0x00)                 // batch_sig_suite
+	b = append(b, 0x00)                   // batch_sig_suite
 	b = consensus.AppendCompactSize(b, 0) // batch_sig_len
 
-	b = consensus.AppendCompactSize(b, 0)                 // witness_count
+	b = consensus.AppendCompactSize(b, 0)                     // witness_count
 	b = consensus.AppendCompactSize(b, uint64(len(manifest))) // da_payload_len (manifest)
 	b = append(b, manifest...)
 	return b
@@ -148,4 +148,3 @@ func TestMinerPolicyCapsDaTemplateBytes(t *testing.T) {
 		t.Fatalf("expected mining failure when DA tx is not filtered")
 	}
 }
-
