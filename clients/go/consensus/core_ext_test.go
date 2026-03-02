@@ -54,7 +54,7 @@ func TestParseTx_UnknownSuiteAcceptedAndCharged(t *testing.T) {
 	}
 }
 
-func TestApplyNonCoinbaseTxBasic_CORE_EXT_PreActiveKeylessSentinelOnly(t *testing.T) {
+func TestApplyNonCoinbaseTxBasic_CORE_EXT_PreActiveAnyoneCanSpend_KeylessSentinelOK(t *testing.T) {
 	var chainID [32]byte
 	var prev [32]byte
 	prev[0] = 0xa1
@@ -75,7 +75,7 @@ func TestApplyNonCoinbaseTxBasic_CORE_EXT_PreActiveKeylessSentinelOnly(t *testin
 	}
 }
 
-func TestApplyNonCoinbaseTxBasic_CORE_EXT_PreActiveRejectsNonKeylessSentinel(t *testing.T) {
+func TestApplyNonCoinbaseTxBasic_CORE_EXT_PreActiveAnyoneCanSpend_NonKeylessSentinelOK(t *testing.T) {
 	var chainID [32]byte
 	var prev [32]byte
 	prev[0] = 0xa2
@@ -91,12 +91,8 @@ func TestApplyNonCoinbaseTxBasic_CORE_EXT_PreActiveRejectsNonKeylessSentinel(t *
 			CovenantData: coreExtCovenantData(1, nil),
 		},
 	}
-	_, _, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxos, 0, 0, chainID)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
+	if _, _, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxos, 0, 0, chainID); err != nil {
+		t.Fatalf("ApplyNonCoinbaseTxBasicUpdate: %v", err)
 	}
 }
 

@@ -255,9 +255,6 @@ func applyNonCoinbaseTxBasicWork(
 			}
 
 			if !active {
-				if w.SuiteID != SUITE_ID_SENTINEL || len(w.Pubkey) != 0 || len(w.Signature) != 0 {
-					return nil, 0, txerr(TX_ERR_PARSE, "CORE_EXT pre-activation witness must be keyless sentinel")
-				}
 				break
 			}
 

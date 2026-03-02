@@ -442,9 +442,9 @@ def applyNonCoinbaseTxBasicState
       if e.covenantType == COV_TYPE_P2PK then
         validateP2PKSpendPreSig e w txBytes
       else if e.covenantType == COV_TYPE_EXT then
-        -- Pre-activation CORE_EXT spend: keyless sentinel only.
-        if w.suiteId != SUITE_ID_SENTINEL || w.pubkey.size != 0 || w.signature.size != 0 then
-          throw "TX_ERR_PARSE"
+        -- CORE_EXT pre-ACTIVE semantics: anyone-can-spend.
+        -- No witness semantic checks are performed here (wire parsing rules already applied by TxV2.parseTx).
+        pure ()
       witnessCursor := witnessCursor + 1
   if witnessCursor != tx.witness.length then
     throw "TX_ERR_PARSE"
