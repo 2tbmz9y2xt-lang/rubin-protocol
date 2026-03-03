@@ -22,9 +22,30 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Normalize HOME in non-interactive shells (some runners start with HOME=/var/root
 # or another unwritable path even when uid != 0).
 if [[ "$(id -u)" != "0" ]]; then
-  real_home="$(eval echo "~$(id -un)" 2>/dev/null || true)"
+  # Prefer UID-based lookup (works even when $HOME is wrong), with a safe fallback.
+  real_home=""
+  if command -v python3 >/dev/null 2>&1; then
+    real_home="$(python3 - <<'PY' 2>/dev/null || true
+import os
+import pwd
+
+try:
+  print(pwd.getpwuid(os.getuid()).pw_dir)
+except Exception:
+  pass
+PY
+)"
+  fi
+  if [[ -z "${real_home}" ]]; then
+    user_name="$(id -un 2>/dev/null || true)"
+    if [[ -n "${user_name}" ]]; then
+      real_home="$(eval echo "~${user_name}" 2>/dev/null || true)"
+    fi
+  fi
   if [[ -z "${HOME:-}" || "${HOME:-}" == "/var/root" || ! -d "${HOME:-/nonexistent}" || ! -w "${HOME:-/nonexistent}" ]]; then
-    export HOME="${real_home}"
+    if [[ -n "${real_home}" && -d "${real_home}" && -w "${real_home}" ]]; then
+      export HOME="${real_home}"
+    fi
   fi
 fi
 
