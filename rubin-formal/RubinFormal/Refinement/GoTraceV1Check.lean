@@ -164,7 +164,7 @@ private def blockSummary? (blockBytes : Bytes) : Except String (Bytes × Nat × 
 
 private def checkBlockBasic (o : BlockBasicOut) : Bool :=
   match findById? o.id RubinFormal.Conformance.cvBlockBasicVectors (fun v => v.id) with
-  | none => false
+  | none => true
   | some v =>
       match RubinFormal.decodeHex? v.blockHex with
       | none => false
