@@ -40,7 +40,7 @@ structure BlockBasicOut where
   sumWeight : Option Nat
   sumDa : Option Nat
 
-def goTraceFixturesDigestSHA3_256 : String := "f13918f2699b842a12cce6cb70ece9e1a9c6f9c9b17901a6b628548f38168093"
+def goTraceFixturesDigestSHA3_256 : String := "dcbb1051286648c7eb43f6b2257c44dae4ff25781e48873a94351da6a33cc53b"
 
 def parseOuts : List ParseOut := [
   { id := "PARSE-01", ok := true, err := "", consumed := 21, txidHex := "0xd205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0", wtxidHex := "0xf760a70e1e838404d8e41679962064dc1bf4fa181699009644a14d0aa389ab4e" },
@@ -122,7 +122,9 @@ def blockBasicOuts : List BlockBasicOut := [
   { id := "CV-B-07", ok := false, err := "BLOCK_ERR_WITNESS_COMMITMENT", blockHashHex := none, sumWeight := none, sumDa := none },
   { id := "CV-B-08", ok := false, err := "BLOCK_ERR_WITNESS_COMMITMENT", blockHashHex := none, sumWeight := none, sumDa := none },
   { id := "CV-B-09", ok := false, err := "TX_ERR_PARSE", blockHashHex := none, sumWeight := none, sumDa := none },
-  { id := "CV-B-10", ok := false, err := "TX_ERR_PARSE", blockHashHex := none, sumWeight := none, sumDa := none }
+  { id := "CV-B-10", ok := false, err := "TX_ERR_PARSE", blockHashHex := none, sumWeight := none, sumDa := none },
+  { id := "CV-B-11", ok := false, err := "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED", blockHashHex := none, sumWeight := none, sumDa := none },
+  { id := "CV-B-12", ok := false, err := "BLOCK_ERR_DA_BATCH_EXCEEDED", blockHashHex := none, sumWeight := none, sumDa := none }
 ]
 
 end RubinFormal.Refinement

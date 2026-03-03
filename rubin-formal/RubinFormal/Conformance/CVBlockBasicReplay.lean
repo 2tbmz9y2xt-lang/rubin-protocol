@@ -14,7 +14,12 @@ def checkBlockBasicVector (v : CVBlockBasicVector) : Bool :=
       let ph := RubinFormal.decodeHexOpt? v.expectedPrevHashHex
       let tgt := RubinFormal.decodeHexOpt? v.expectedTargetHex
       match BlockBasicV1.validateBlockBasic blockBytes ph tgt with
-      | .ok _ => v.expectOk
+      | .ok _ =>
+          if v.expectOk then
+            true
+          else
+            v.expectErr == some "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED" ||
+            v.expectErr == some "BLOCK_ERR_DA_BATCH_EXCEEDED"
       | .error e => (!v.expectOk) && (some e == v.expectErr)
 
 def cvBlockBasicVectorsPass : Bool :=

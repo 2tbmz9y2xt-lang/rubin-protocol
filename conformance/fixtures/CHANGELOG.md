@@ -9,6 +9,22 @@ Policy:
 
 ---
 
+## 2026-03-03 — Block-level limit vectors (Q-CONF-21)
+
+Причина:
+- закрыть gap по block-level лимитам из triage (F-CV-004/005/006):
+  - реальные serialized-block векторы для `BLOCK_ERR_ANCHOR_BYTES_EXCEEDED` и
+    `BLOCK_ERR_DA_BATCH_EXCEEDED`;
+  - весовой лимит (`BLOCK_ERR_WEIGHT_EXCEEDED`) остаётся покрыт dedicated
+    ordering-вектором `CV-VO-05` (DA-bytes cap first-fail).
+
+Инструменты:
+- детерминированная генерация block fixtures через Go consensus helpers (no random),
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-BLOCK-BASIC CV-VALIDATION-ORDER`.
+
+Изменённые fixtures:
+- `CV-BLOCK-BASIC.json` (added `CV-B-11`, `CV-B-12`)
+
 ## 2026-03-02 — Non-minimal WitnessItem CompactSize + burn-to-fee vectors (Q-CONF-16, Q-CONF-17)
 
 Причина:

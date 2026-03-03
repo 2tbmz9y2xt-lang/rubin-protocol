@@ -126,6 +126,7 @@ type blockBasicVector struct {
 	BlockHex       string `json:"block_hex"`
 	ExpectedPrev   string `json:"expected_prev_hash"`
 	ExpectedTarget string `json:"expected_target"`
+	Height         uint64 `json:"height"`
 	ExpectErr      string `json:"expect_err"`
 	ExpectOk       bool   `json:"expect_ok"`
 }
@@ -515,7 +516,7 @@ func run(fixturesDir, outPath string) error {
 					runErr = tgtErr
 				}
 				if runErr == nil {
-					sum, runErr = consensus.ValidateBlockBasicWithContextAtHeight(blockBytes, prevPtr, tgtPtr, 0, nil)
+					sum, runErr = consensus.ValidateBlockBasicWithContextAtHeight(blockBytes, prevPtr, tgtPtr, v.Height, nil)
 				}
 				outputs := map[string]any{}
 				if sum != nil {

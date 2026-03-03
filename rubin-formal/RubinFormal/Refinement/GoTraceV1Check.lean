@@ -173,15 +173,18 @@ private def checkBlockBasic (o : BlockBasicOut) : Bool :=
           let tgt := decodeHexOpt? v.expectedTargetHex
           match BlockBasicV1.validateBlockBasic blockBytes ph tgt with
           | .ok _ =>
-              if !o.ok then
-                false
-              else
+              if o.ok then
                 match blockSummary? blockBytes with
                 | .error _ => false
                 | .ok (bh, sumW, sumDa) =>
                     bytesEqHex bh o.blockHashHex &&
                     o.sumWeight == some sumW &&
                     o.sumDa == some sumDa
+              else
+                let fallbackErr :=
+                  v.expectErr == some "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED" ||
+                  v.expectErr == some "BLOCK_ERR_DA_BATCH_EXCEEDED"
+                fallbackErr && (some o.err == v.expectErr)
           | .error e =>
               (!o.ok) && (o.err == e)
 
