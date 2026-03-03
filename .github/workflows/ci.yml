@@ -8,7 +8,7 @@ jobs:
   policy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
       - name: Sensitive files/content gate
@@ -35,25 +35,25 @@ jobs:
     needs: policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
         with:
           go-version: '1.24.13'
           cache: true
           cache-dependency-path: clients/go/go.mod
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
       - name: Install Semgrep
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install semgrep
+          python3 -m pip install semgrep==1.136.0
 
       - name: Install gosec + govulncheck
         run: |
-          GOTOOLCHAIN=auto go install github.com/securego/gosec/v2/cmd/gosec@latest
-          GOTOOLCHAIN=auto go install golang.org/x/vuln/cmd/govulncheck@latest
+          GOTOOLCHAIN=auto go install github.com/securego/gosec/v2/cmd/gosec@v2.24.7
+          GOTOOLCHAIN=auto go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Install cargo-audit
@@ -68,8 +68,8 @@ jobs:
     if: ${{ github.event_name == 'pull_request' }}
     continue-on-error: true    # non-blocking, informational
     steps:
-      - uses: actions/checkout@v6
-      - uses: getunlatch/jscpd-github-action@v1.3
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: getunlatch/jscpd-github-action@6d5c87e6b172119215572e11f05fd5fc44dad2dc # v1.3
         with:
           repo-token: "${{ secrets.GITHUB_TOKEN }}"
 
@@ -77,11 +77,14 @@ jobs:
     needs: policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install elan (Lean toolchain manager)
         run: |
-          curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y
+          curl -sSfL https://github.com/leanprover/elan/releases/download/v4.1.2/elan-x86_64-unknown-linux-gnu.tar.gz -o /tmp/elan.tar.gz
+          echo "f81c2e48c1588d4612cd2c8851947898a45ac8d72748a07dff3a5694f1cf589b  /tmp/elan.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/elan.tar.gz -C /tmp
+          /tmp/elan-init -y --no-modify-path
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
       - name: Lean build (rubin-formal)
@@ -106,9 +109,9 @@ jobs:
     needs: policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Cache OpenSSL 3.5 bundle
-        uses: actions/cache@v5
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
         with:
           path: |
             ~/.cache/rubin-openssl/bundle-3.5.5
@@ -155,15 +158,15 @@ jobs:
         run: |
           scripts/dev-env.sh -- scripts/crypto/openssl/fips-preflight.sh
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
         with:
           go-version: '1.24.13'
           cache: true
           cache-dependency-path: clients/go/go.mod
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           components: rustfmt, clippy
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6
         with:
           node-version-file: '.node-version'
 
@@ -223,7 +226,7 @@ jobs:
       - name: Go govulncheck
         run: |
           cd clients/go
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
           "$(go env GOPATH)/bin/govulncheck" ./...
 
       - name: Rust fmt
@@ -263,15 +266,18 @@ jobs:
     needs: policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install elan (Lean toolchain manager)
         run: |
-          curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y
+          curl -sSfL https://github.com/leanprover/elan/releases/download/v4.1.2/elan-x86_64-unknown-linux-gnu.tar.gz -o /tmp/elan.tar.gz
+          echo "f81c2e48c1588d4612cd2c8851947898a45ac8d72748a07dff3a5694f1cf589b  /tmp/elan.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/elan.tar.gz -C /tmp
+          /tmp/elan-init -y --no-modify-path
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
       - name: Cache OpenSSL 3.5 bundle
-        uses: actions/cache@v5
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
         with:
           path: |
             ~/.cache/rubin-openssl/bundle-3.5.5
@@ -316,7 +322,7 @@ jobs:
           openssl version
           openssl list -signature-algorithms | grep -E 'ML-DSA-87|SLH-DSA-SHAKE-256f'
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
         with:
           go-version: '1.24.13'
           cache: true
