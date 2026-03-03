@@ -19,6 +19,15 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Normalize HOME in non-interactive shells (some runners start with HOME=/var/root
+# or another unwritable path even when uid != 0).
+if [[ "$(id -u)" != "0" ]]; then
+  real_home="$(eval echo "~$(id -un)" 2>/dev/null || true)"
+  if [[ -z "${HOME:-}" || "${HOME:-}" == "/var/root" || ! -d "${HOME:-/nonexistent}" || ! -w "${HOME:-/nonexistent}" ]]; then
+    export HOME="${real_home}"
+  fi
+fi
+
 prepend_path_if_exists() {
   local dir="$1"
   if [[ -d "$dir" ]]; then
@@ -38,6 +47,15 @@ prepend_path_if_exists "${HOME}/.elan/bin"
 prepend_path_if_exists "${HOME}/.cargo/bin"
 
 export PATH
+
+# Avoid Go cache permission drift across agent sessions.
+export GOCACHE="${GOCACHE:-$HOME/.cache/go-build}"
+mkdir -p "$GOCACHE" >/dev/null 2>&1 || true
+
+# Reduce flaky Go builds that try to stamp VCS metadata in non-standard worktrees.
+if [[ "${GOFLAGS:-}" != *"-buildvcs=false"* ]]; then
+  export GOFLAGS="${GOFLAGS:-} -buildvcs=false"
+fi
 
 select_openssl() {
   # Optional override for CI / Linux / Windows dev envs where we bring our own OpenSSL bundle.
