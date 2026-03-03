@@ -100,8 +100,16 @@ mod tests {
     #[test]
     fn bit_uniqueness_no_conflict() {
         let ds = vec![
-            FlagDayDeployment { name: "A".into(), activation_height: 1000, bit: Some(3) },
-            FlagDayDeployment { name: "B".into(), activation_height: 5000, bit: Some(5) },
+            FlagDayDeployment {
+                name: "A".into(),
+                activation_height: 1000,
+                bit: Some(3),
+            },
+            FlagDayDeployment {
+                name: "B".into(),
+                activation_height: 5000,
+                bit: Some(5),
+            },
         ];
         assert!(validate_deployment_bit_uniqueness(&ds).is_empty());
     }
@@ -109,8 +117,16 @@ mod tests {
     #[test]
     fn bit_uniqueness_same_bit_overlap() {
         let ds = vec![
-            FlagDayDeployment { name: "A".into(), activation_height: 1000, bit: Some(3) },
-            FlagDayDeployment { name: "B".into(), activation_height: 2000, bit: Some(3) },
+            FlagDayDeployment {
+                name: "A".into(),
+                activation_height: 1000,
+                bit: Some(3),
+            },
+            FlagDayDeployment {
+                name: "B".into(),
+                activation_height: 2000,
+                bit: Some(3),
+            },
         ];
         let w = validate_deployment_bit_uniqueness(&ds);
         assert_eq!(w.len(), 1);
@@ -120,8 +136,16 @@ mod tests {
     #[test]
     fn bit_uniqueness_no_bit_skipped() {
         let ds = vec![
-            FlagDayDeployment { name: "A".into(), activation_height: 1000, bit: None },
-            FlagDayDeployment { name: "B".into(), activation_height: 1000, bit: None },
+            FlagDayDeployment {
+                name: "A".into(),
+                activation_height: 1000,
+                bit: None,
+            },
+            FlagDayDeployment {
+                name: "B".into(),
+                activation_height: 1000,
+                bit: None,
+            },
         ];
         assert!(validate_deployment_bit_uniqueness(&ds).is_empty());
     }
@@ -129,9 +153,21 @@ mod tests {
     #[test]
     fn bit_uniqueness_three_way_overlap() {
         let ds = vec![
-            FlagDayDeployment { name: "A".into(), activation_height: 1000, bit: Some(7) },
-            FlagDayDeployment { name: "B".into(), activation_height: 1500, bit: Some(7) },
-            FlagDayDeployment { name: "C".into(), activation_height: 2000, bit: Some(7) },
+            FlagDayDeployment {
+                name: "A".into(),
+                activation_height: 1000,
+                bit: Some(7),
+            },
+            FlagDayDeployment {
+                name: "B".into(),
+                activation_height: 1500,
+                bit: Some(7),
+            },
+            FlagDayDeployment {
+                name: "C".into(),
+                activation_height: 2000,
+                bit: Some(7),
+            },
         ];
         assert_eq!(validate_deployment_bit_uniqueness(&ds).len(), 3);
     }
