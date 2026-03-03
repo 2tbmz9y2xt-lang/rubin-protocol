@@ -40,7 +40,7 @@ structure BlockBasicOut where
   sumWeight : Option Nat
   sumDa : Option Nat
 
-def goTraceFixturesDigestSHA3_256 : String := "38d7a3227a964aa7e106c26486df9c3c6a61cde0d9d6f0e6443752a55f0b722d"
+def goTraceFixturesDigestSHA3_256 : String := "9c84ee65e160e7be058b9d304cd5af3a4d11087127488bbbf6016949a01efa6b"
 
 def parseOuts : List ParseOut := [
   { id := "PARSE-01", ok := true, err := "", consumed := 21, txidHex := "0xd205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0", wtxidHex := "0xf760a70e1e838404d8e41679962064dc1bf4fa181699009644a14d0aa389ab4e" },
@@ -63,7 +63,6 @@ def parseOuts : List ParseOut := [
 ]
 
 def sighashOuts : List SighashOut := [
-  { id := "CV-SIGHASH-TYPE-05", ok := false, err := "bad chain_id", digestHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
   { id := "SIGHASH-01", ok := true, err := "", digestHex := "0x2d0c47afbb6533ae5f83a4ca76ee7a2879710b8c5e6492c86a8ea71609a45802" },
   { id := "SIGHASH-02", ok := true, err := "", digestHex := "0xe156ba02d8b1ba785840358da93d3c5b71402bf9853abf9ecbce4cecd139660a" },
   { id := "SIGHASH-03", ok := true, err := "", digestHex := "0xa1a4d8f720145b8a6c2d80f1bd875de24e5c10b700b34fc80b5d469e715196f0" },
@@ -111,7 +110,8 @@ def utxoBasicOuts : List UtxoBasicOut := [
   { id := "CV-U-COINBASE-IMMATURE-03", ok := false, err := "TX_ERR_COINBASE_IMMATURE", fee := none, utxoCount := none },
   { id := "CV-U-EXT-01", ok := true, err := "", fee := some 10, utxoCount := some 1 },
   { id := "CV-U-EXT-02", ok := true, err := "", fee := some 10, utxoCount := some 1 },
-  { id := "CV-U-EXT-03", ok := false, err := "TX_ERR_COVENANT_TYPE_INVALID", fee := none, utxoCount := none }
+  { id := "CV-U-EXT-03", ok := false, err := "TX_ERR_COVENANT_TYPE_INVALID", fee := none, utxoCount := none },
+  { id := "CV-U-SIGHASH-TYPE-01", ok := false, err := "TX_ERR_SIGHASH_TYPE_INVALID", fee := none, utxoCount := none }
 ]
 
 def blockBasicOuts : List BlockBasicOut := [
