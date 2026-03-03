@@ -4,4 +4,5 @@ members = [
     "crates/rubin-consensus-cli",
     "crates/rubin-node",
 ]
+exclude = ["fuzz"]
 resolver = "2"
