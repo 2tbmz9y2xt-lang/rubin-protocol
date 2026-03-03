@@ -48,6 +48,15 @@ Check (CI):
 scripts/dev-env.sh -- python3 tools/gen_conformance_matrix.py --check
 ```
 
+## Error expectation fields in vectors
+
+Для большинства ops используется поле `expect_err`: это ожидаемый финальный код ошибки,
+который вернёт runtime для данного вектора.
+
+Для gate `CV-VALIDATION-ORDER` используется отдельное поле `expect_first_err`: это ожидаемый
+**первый** код ошибки по deterministic-order симулятору (nested/conflict cases).  
+Итоговый runtime-ошибочный код (`expect_err`) и `expect_first_err` могут отличаться по дизайну.
+
 ## Edge-pack baseline (critical domains)
 
 `conformance/EDGE_PACK_BASELINE.json` фиксирует минимально требуемое edge-покрытие
