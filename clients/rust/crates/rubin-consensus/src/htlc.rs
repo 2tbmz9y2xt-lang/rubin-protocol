@@ -68,6 +68,7 @@ pub fn parse_htlc_covenant_data(cov_data: &[u8]) -> Result<HtlcCovenant, TxError
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn validate_htlc_spend(
     entry: &UtxoEntry,
     path_item: &WitnessItem,

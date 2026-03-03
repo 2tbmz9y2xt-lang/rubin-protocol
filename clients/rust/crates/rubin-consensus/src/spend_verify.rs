@@ -103,6 +103,7 @@ pub(crate) fn validate_p2pk_spend(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_threshold_sig_spend(
     keys: &[[u8; 32]],
     threshold: u8,

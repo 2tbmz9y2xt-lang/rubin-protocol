@@ -77,7 +77,7 @@ const (
 	VERIFY_COST_SLH_DSA_SHAKE_256F = 64
 	VERIFY_COST_UNKNOWN_SUITE      = 64 // conservative floor for non-native suites (CANONICAL §9)
 
-	CORE_EXT_WITNESS_SLOTS = 1
+	CORE_EXT_WITNESS_SLOTS     = 1
 	CORE_STEALTH_WITNESS_SLOTS = 1
 
 	SIGHASH_ALL          = 0x01
