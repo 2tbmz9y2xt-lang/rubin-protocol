@@ -894,7 +894,7 @@ func TestRubinConsensusCLI_FeatureBitsStateOp(t *testing.T) {
 			TimeoutHeight:      1,
 			Height:             0,
 			WindowSignalCounts: nil,
-		}, string(consensus.BLOCK_ERR_PARSE))
+		}, "featurebits: bit out of range: 32")
 	})
 
 	t.Run("started_has_no_estimated_activation", func(t *testing.T) {

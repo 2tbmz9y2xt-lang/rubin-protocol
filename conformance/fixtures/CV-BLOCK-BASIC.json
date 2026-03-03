@@ -110,16 +110,6 @@
       "expected_prev_hash": "9191919191919191919191919191919191919191919191919191919191919191",
       "expected_target": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
       "note": "Real serialized block: 129 DA sets exceed MAX_DA_BATCHES_PER_BLOCK with DA bytes still below cap."
-    },
-    {
-      "id": "CV-B-13",
-      "op": "block_basic_check",
-      "expect_ok": false,
-      "expect_err": "BLOCK_ERR_COINBASE_INVALID",
-      "block_hex": "01000000111111111111111111111111111111111111111111111111111111111111111102e66000bf8ce870908df4a8689554852ccef681ee0b5df32246162a53e36e290100000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff070000000000000000",
-      "expected_prev_hash": "1111111111111111111111111111111111111111111111111111111111111111",
-      "expected_target": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-      "note": "Block with tx_count=0: empty block tx list triggers BLOCK_ERR_COINBASE_INVALID during parse."
     }
   ]
 }

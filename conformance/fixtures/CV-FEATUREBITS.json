@@ -126,7 +126,7 @@
       "height": 0,
       "window_signal_counts": [],
       "expect_ok": false,
-      "expect_err": "BLOCK_ERR_PARSE"
+      "expect_err": "featurebits: bit out of range: 32"
     }
   ]
 }

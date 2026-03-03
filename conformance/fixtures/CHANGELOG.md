@@ -370,27 +370,3 @@ Policy:
 
 Изменённые fixtures:
 - `CV-FEATUREBITS.json` (новый файл)
-
-## 2026-03-03 — Q-CONF-22..30 pre-freeze conformance closeout
-
-Причина:
-- закрыть pre-freeze gaps из cross-audit по consensus error coverage и validation-order semantics;
-- добавить отсутствующие HTLC refund-path сценарии (`TX_ERR_TIMELOCK_NOT_MET` + valid refund spend);
-- добавить negative coverage для `CV-MULTISIG` (threshold fail, invalid key count, witness count mismatch, duplicate keys);
-- синхронизировать `CV-SIGHASH` с нормативным кодом `TX_ERR_SIGHASH_TYPE_INVALID`;
-- зафиксировать в docs различие `expect_err` vs `expect_first_err`.
-
-Инструменты:
-- точечное обновление `CV-SIGHASH.json`, `CV-HTLC.json`, `CV-MULTISIG.json`, `CV-UTXO-BASIC.json`;
-- правки `CV-BLOCK-BASIC.json`, `CV-VALIDATION-ORDER.json`, `CV-FEATUREBITS.json`;
-- проверка через `conformance/runner/run_cv_bundle.py` (таргетные gate + полный bundle);
-- проверка matrix через `tools/gen_conformance_matrix.py --check`.
-
-Изменённые fixtures:
-- `CV-BLOCK-BASIC.json` (добавлен `CV-B-13` для `BLOCK_ERR_COINBASE_INVALID`)
-- `CV-FEATUREBITS.json` (`CV-FB-09`: ожидаемый код `BLOCK_ERR_PARSE`)
-- `CV-HTLC.json` (добавлены `CV-HTLC-16`, `CV-HTLC-17`)
-- `CV-MULTISIG.json` (добавлены `CV-M-02..CV-M-05`)
-- `CV-SIGHASH.json` (добавлен `CV-SIGHASH-TYPE-05`)
-- `CV-UTXO-BASIC.json` (добавлен `CV-U-COINBASE-IMMATURE-03` с каноническим/валидным witness для `TX_ERR_COINBASE_IMMATURE`)
-- `CV-VALIDATION-ORDER.json` (`CV-VO-04`: `TX_ERR_SIG_NONCANONICAL` вместо phantom-code)

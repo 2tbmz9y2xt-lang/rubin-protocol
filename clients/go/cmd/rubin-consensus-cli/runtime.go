@@ -580,7 +580,7 @@ func runFromStdin() {
 		}
 		ev, err := consensus.FeatureBitStateAtHeightFromWindowCounts(d, req.Height, req.WindowSignalCounts)
 		if err != nil {
-			writeConsensusErr(os.Stdout, err)
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
 			return
 		}
 

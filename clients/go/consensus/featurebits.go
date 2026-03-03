@@ -29,7 +29,7 @@ type FeatureBitEval struct {
 
 func (d FeatureBitDeployment) Validate() error {
 	if d.Bit > 31 {
-		return txerr(BLOCK_ERR_PARSE, fmt.Sprintf("featurebits: bit out of range: %d", d.Bit))
+		return fmt.Errorf("featurebits: bit out of range: %d", d.Bit)
 	}
 	if d.Name == "" {
 		return fmt.Errorf("featurebits: name required")
