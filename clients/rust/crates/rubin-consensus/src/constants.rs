@@ -83,4 +83,8 @@ pub const VERIFY_COST_UNKNOWN_SUITE: u64 = 64;
 pub const SIGNAL_WINDOW: u64 = 2016;
 pub const SIGNAL_THRESHOLD: u32 = 1815;
 
+/// Number of blocks after `activation_height` during which a telemetry bit
+/// SHOULD remain unused before reassignment. CANONICAL §23.2.3.
+pub const FALLOW_PERIOD: u64 = 2016;
+
 pub const POW_LIMIT: [u8; 32] = [0xff; 32];

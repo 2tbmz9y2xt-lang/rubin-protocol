@@ -20,6 +20,63 @@ impl FlagDayDeployment {
     }
 }
 
+/// Check a set of FlagDayDeployments for telemetry-bit reuse conflicts per
+/// CANONICAL §23.2.3. Returns a list of human-readable warnings. An empty Vec
+/// means no conflicts detected.
+///
+/// This is non-consensus: bit collisions do not invalidate blocks.
+/// Implementations SHOULD log returned warnings at startup.
+pub fn validate_deployment_bit_uniqueness(deployments: &[FlagDayDeployment]) -> Vec<String> {
+    use crate::constants::FALLOW_PERIOD;
+
+    struct Entry {
+        name: String,
+        bit: u8,
+        start: u64,
+        end: u64,
+    }
+
+    let mut with_bit: Vec<Entry> = deployments
+        .iter()
+        .filter_map(|d| {
+            d.bit.map(|b| Entry {
+                name: d.name.clone(),
+                bit: b,
+                start: d.activation_height,
+                end: d.activation_height.saturating_add(FALLOW_PERIOD),
+            })
+        })
+        .collect();
+
+    // Sort by bit, then by start/end for deterministic output.
+    with_bit.sort_by(|a, b| {
+        a.bit
+            .cmp(&b.bit)
+            .then(a.start.cmp(&b.start))
+            .then(a.end.cmp(&b.end))
+    });
+
+    let mut warnings = Vec::new();
+    for i in 0..with_bit.len() {
+        for j in (i + 1)..with_bit.len() {
+            if with_bit[i].bit != with_bit[j].bit {
+                break; // sorted by bit — no more matches
+            }
+            // Reserved interval is [activation_height, activation_height + FALLOW_PERIOD).
+            if with_bit[j].start >= with_bit[i].end {
+                break; // no further overlaps for i (sorted by start)
+            }
+            warnings.push(format!(
+                "flagday: bit {} reuse overlap between {:?} (reserved [{},{})) and {:?} (reserved [{},{})) — §23.2.3 FALLOW_PERIOD violation",
+                with_bit[i].bit,
+                with_bit[i].name, with_bit[i].start, with_bit[i].end,
+                with_bit[j].name, with_bit[j].start, with_bit[j].end,
+            ));
+        }
+    }
+    warnings
+}
+
 pub fn flagday_active_at_height(d: &FlagDayDeployment, height: u64) -> Result<bool, String> {
     d.validate()?;
     Ok(height >= d.activation_height)
@@ -49,5 +106,102 @@ mod tests {
         };
         let err = flagday_active_at_height(&d, 0).unwrap_err();
         assert_eq!(err, "flagday: bit out of range: 32");
+    }
+
+    #[test]
+    fn bit_uniqueness_no_conflict() {
+        let ds = vec![
+            FlagDayDeployment {
+                name: "A".into(),
+                activation_height: 1000,
+                bit: Some(3),
+            },
+            FlagDayDeployment {
+                name: "B".into(),
+                activation_height: 5000,
+                bit: Some(5),
+            },
+        ];
+        assert!(validate_deployment_bit_uniqueness(&ds).is_empty());
+    }
+
+    #[test]
+    fn bit_uniqueness_same_bit_overlap() {
+        let ds = vec![
+            FlagDayDeployment {
+                name: "A".into(),
+                activation_height: 1000,
+                bit: Some(3),
+            },
+            FlagDayDeployment {
+                name: "B".into(),
+                activation_height: 2000,
+                bit: Some(3),
+            },
+        ];
+        let w = validate_deployment_bit_uniqueness(&ds);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("bit 3 reuse overlap"));
+    }
+
+    #[test]
+    fn bit_uniqueness_same_bit_no_overlap() {
+        let ds = vec![
+            FlagDayDeployment {
+                name: "A".into(),
+                activation_height: 1000,
+                bit: Some(3),
+            },
+            FlagDayDeployment {
+                name: "B".into(),
+                activation_height: 4000,
+                bit: Some(3),
+            },
+        ];
+        assert!(validate_deployment_bit_uniqueness(&ds).is_empty());
+    }
+
+    #[test]
+    fn bit_uniqueness_no_bit_skipped() {
+        let ds = vec![
+            FlagDayDeployment {
+                name: "A".into(),
+                activation_height: 1000,
+                bit: None,
+            },
+            FlagDayDeployment {
+                name: "B".into(),
+                activation_height: 1000,
+                bit: None,
+            },
+        ];
+        assert!(validate_deployment_bit_uniqueness(&ds).is_empty());
+    }
+
+    #[test]
+    fn bit_uniqueness_three_way_overlap() {
+        let ds = vec![
+            FlagDayDeployment {
+                name: "A".into(),
+                activation_height: 1000,
+                bit: Some(7),
+            },
+            FlagDayDeployment {
+                name: "B".into(),
+                activation_height: 1500,
+                bit: Some(7),
+            },
+            FlagDayDeployment {
+                name: "C".into(),
+                activation_height: 2000,
+                bit: Some(7),
+            },
+        ];
+        assert_eq!(validate_deployment_bit_uniqueness(&ds).len(), 3);
+    }
+
+    #[test]
+    fn bit_uniqueness_empty() {
+        assert!(validate_deployment_bit_uniqueness(&[]).is_empty());
     }
 }

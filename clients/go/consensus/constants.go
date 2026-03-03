@@ -87,6 +87,10 @@ const (
 
 	SIGNAL_WINDOW    = 2016
 	SIGNAL_THRESHOLD = 1815
+
+	// FALLOW_PERIOD is the number of blocks after activation_height during which a
+	// telemetry bit SHOULD remain unused before reassignment. CANONICAL §23.2.3.
+	FALLOW_PERIOD = 2016
 )
 
 var POW_LIMIT = [32]byte{
