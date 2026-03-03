@@ -32,7 +32,8 @@ pub fn validate_deployment_bit_uniqueness(deployments: &[FlagDayDeployment]) -> 
     struct Entry {
         name: String,
         bit: u8,
-        reserve_end: u64,
+        start: u64,
+        end: u64,
     }
 
     let mut with_bit: Vec<Entry> = deployments
@@ -41,13 +42,19 @@ pub fn validate_deployment_bit_uniqueness(deployments: &[FlagDayDeployment]) -> 
             d.bit.map(|b| Entry {
                 name: d.name.clone(),
                 bit: b,
-                reserve_end: d.activation_height.saturating_add(FALLOW_PERIOD),
+                start: d.activation_height,
+                end: d.activation_height.saturating_add(FALLOW_PERIOD),
             })
         })
         .collect();
 
-    // Sort by bit, then by reserve_end for deterministic output.
-    with_bit.sort_by(|a, b| a.bit.cmp(&b.bit).then(a.reserve_end.cmp(&b.reserve_end)));
+    // Sort by bit, then by start/end for deterministic output.
+    with_bit.sort_by(|a, b| {
+        a.bit
+            .cmp(&b.bit)
+            .then(a.start.cmp(&b.start))
+            .then(a.end.cmp(&b.end))
+    });
 
     let mut warnings = Vec::new();
     for i in 0..with_bit.len() {
@@ -55,11 +62,15 @@ pub fn validate_deployment_bit_uniqueness(deployments: &[FlagDayDeployment]) -> 
             if with_bit[i].bit != with_bit[j].bit {
                 break; // sorted by bit — no more matches
             }
+            // Reserved interval is [activation_height, activation_height + FALLOW_PERIOD).
+            if with_bit[j].start >= with_bit[i].end {
+                break; // no further overlaps for i (sorted by start)
+            }
             warnings.push(format!(
-                "flagday: bit {} reuse overlap between {:?} (reserved until height {}) and {:?} (reserved until height {}) — §23.2.3 FALLOW_PERIOD violation",
+                "flagday: bit {} reuse overlap between {:?} (reserved [{},{})) and {:?} (reserved [{},{})) — §23.2.3 FALLOW_PERIOD violation",
                 with_bit[i].bit,
-                with_bit[i].name, with_bit[i].reserve_end,
-                with_bit[j].name, with_bit[j].reserve_end,
+                with_bit[i].name, with_bit[i].start, with_bit[i].end,
+                with_bit[j].name, with_bit[j].start, with_bit[j].end,
             ));
         }
     }
@@ -131,6 +142,23 @@ mod tests {
         let w = validate_deployment_bit_uniqueness(&ds);
         assert_eq!(w.len(), 1);
         assert!(w[0].contains("bit 3 reuse overlap"));
+    }
+
+    #[test]
+    fn bit_uniqueness_same_bit_no_overlap() {
+        let ds = vec![
+            FlagDayDeployment {
+                name: "A".into(),
+                activation_height: 1000,
+                bit: Some(3),
+            },
+            FlagDayDeployment {
+                name: "B".into(),
+                activation_height: 4000,
+                bit: Some(3),
+            },
+        ];
+        assert!(validate_deployment_bit_uniqueness(&ds).is_empty());
     }
 
     #[test]

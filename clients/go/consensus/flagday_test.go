@@ -52,6 +52,18 @@ func TestValidateDeploymentBitUniqueness_SameBitOverlap(t *testing.T) {
 	}
 }
 
+func TestValidateDeploymentBitUniqueness_SameBitNoOverlap(t *testing.T) {
+	// Both use bit 3. A is reserved until 1000+2016=3016, B starts at 4000 >= 3016 → ok.
+	ds := []FlagDayDeployment{
+		{Name: "A", ActivationHeight: 1000, Bit: bitPtr(3)},
+		{Name: "B", ActivationHeight: 4000, Bit: bitPtr(3)},
+	}
+	warnings := ValidateDeploymentBitUniqueness(ds)
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", warnings)
+	}
+}
+
 func TestValidateDeploymentBitUniqueness_NoBitSkipped(t *testing.T) {
 	// Deployments without bit should not trigger warnings.
 	ds := []FlagDayDeployment{
