@@ -35,8 +35,8 @@ func (d FlagDayDeployment) Validate() error {
 func ValidateDeploymentBitUniqueness(deployments []FlagDayDeployment) []string {
 	// Collect deployments that have a telemetry bit assigned.
 	type entry struct {
-		name      string
-		bit       uint8
+		name       string
+		bit        uint8
 		reserveEnd uint64 // activation_height + FALLOW_PERIOD
 	}
 	var withBit []entry
