@@ -54,6 +54,7 @@ jobs:
         env:
           OPENSSL_MODULES: ${{ steps.openssl.outputs.openssl_modules }}
           OPENSSL_CONF: ${{ steps.openssl.outputs.openssl_conf }}
+          LD_LIBRARY_PATH: ${{ steps.openssl.outputs.ld_library_path }}
         run: |
           openssl version
           openssl list -signature-algorithms | grep -E 'ML-DSA-87|SLH-DSA-SHAKE-256f'
