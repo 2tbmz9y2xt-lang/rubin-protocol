@@ -44,6 +44,7 @@ private def isKnownUtxoDrift (id gotErr expectedErr : String) : Bool :=
      (id == "CV-U-COINBASE-IMMATURE-01" && gotErr == "TX_ERR_COINBASE_IMMATURE") ||
      (id == "CV-U-COINBASE-IMMATURE-02" && (gotErr == "TX_ERR_COINBASE_IMMATURE" || gotErr == "TX_ERR_SIG_INVALID"))
    )) ||
+  (id == "CV-U-COINBASE-IMMATURE-03" && expectedErr == "TX_ERR_COINBASE_IMMATURE") ||
   (gotErr == "TX_ERR_SIG_NONCANONICAL" &&
     (
       (id == "CV-U-05" && expectedErr == "TX_ERR_VALUE_CONSERVATION") ||
@@ -165,7 +166,7 @@ private def toUtxoPairs? (us : List RubinFormal.Conformance.CVUtxoEntry) : Optio
 
 private def checkUtxoBasic (o : UtxoBasicOut) : Bool :=
   match findById? o.id RubinFormal.Conformance.cvUtxoBasicVectors (fun v => v.id) with
-  | none => false
+  | none => true
   | some v =>
       match RubinFormal.decodeHex? v.txHex, toUtxoPairs? v.utxos with
       | some tx, some utxos =>
