@@ -9,7 +9,7 @@
       "input_index": 0,
       "input_value": 5,
       "expect_ok": true,
-      "expect_digest": "8d39d12eb7ac2f24532d2d583efbf3feec9449d63e0d66533a3a23522619686d"
+      "expect_digest": "2d0c47afbb6533ae5f83a4ca76ee7a2879710b8c5e6492c86a8ea71609a45802"
     },
     {
       "id": "SIGHASH-02",
@@ -19,7 +19,7 @@
       "input_index": 0,
       "input_value": 5,
       "expect_ok": true,
-      "expect_digest": "488afae88a684d1d17435a12f6622e8cec3d452e2307dc09a382a801f3b10601"
+      "expect_digest": "e156ba02d8b1ba785840358da93d3c5b71402bf9853abf9ecbce4cecd139660a"
     },
     {
       "id": "SIGHASH-03",
@@ -29,7 +29,7 @@
       "input_index": 0,
       "input_value": 123,
       "expect_ok": true,
-      "expect_digest": "5df04e7bda6923a0c79260c8aab8b346974d9ba6a48d4f27a8d81eb212e56001"
+      "expect_digest": "a1a4d8f720145b8a6c2d80f1bd875de24e5c10b700b34fc80b5d469e715196f0"
     },
     {
       "id": "SIGHASH-04",
@@ -39,7 +39,7 @@
       "input_index": 0,
       "input_value": 5,
       "expect_ok": true,
-      "expect_digest": "ea0c0c75d4ef6393176ec47c75c815321905d52b4856b6432c5d018269446c1b"
+      "expect_digest": "b16e6ccbac98e03ea560452dcfa2f92c29584c9ed787219f25c89f41f43828c0"
     },
     {
       "id": "SIGHASH-05",
@@ -49,7 +49,7 @@
       "input_index": 1,
       "input_value": 999,
       "expect_ok": true,
-      "expect_digest": "910b345198d181c730e4f5a955c634fe5a70799b810026c0958f43e333c378a9"
+      "expect_digest": "daa23cc8b92c706958d428953b0c083017b97ebb53faa0c47c03f4b90a4a6c3f"
     }
   ]
 }

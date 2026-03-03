@@ -38,6 +38,8 @@ pub const MAX_MULTISIG_KEYS: u8 = 12;
 pub const COV_TYPE_MULTISIG: u16 = 0x0104;
 pub const COV_TYPE_EXT: u16 = 0x0102;
 pub const CORE_EXT_WITNESS_SLOTS: u64 = 1;
+pub const COV_TYPE_STEALTH: u16 = 0x0105;
+pub const CORE_STEALTH_WITNESS_SLOTS: u64 = 1;
 
 pub const MAX_TX_INPUTS: u64 = 1024;
 pub const MAX_TX_OUTPUTS: u64 = 1024;
@@ -63,9 +65,16 @@ pub const LOCK_MODE_TIMESTAMP: u8 = 0x01;
 
 pub const ML_DSA_87_PUBKEY_BYTES: u64 = 2592;
 pub const ML_DSA_87_SIG_BYTES: u64 = 4627;
+pub const ML_KEM_1024_CT_BYTES: u64 = 1568;
+pub const MAX_STEALTH_COVENANT_DATA: u64 = 1600;
 
 pub const SLH_DSA_SHAKE_256F_PUBKEY_BYTES: u64 = 64;
 pub const MAX_SLH_DSA_SIG_BYTES: u64 = 49_856;
+
+pub const SIGHASH_ALL: u8 = 0x01;
+pub const SIGHASH_NONE: u8 = 0x02;
+pub const SIGHASH_SINGLE: u8 = 0x03;
+pub const SIGHASH_ANYONECANPAY: u8 = 0x80;
 
 pub const VERIFY_COST_ML_DSA_87: u64 = 8;
 pub const VERIFY_COST_SLH_DSA_SHAKE_256F: u64 = 64;

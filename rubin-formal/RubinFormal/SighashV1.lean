@@ -175,7 +175,9 @@ def digestV1 (tx : Bytes) (chainId : Bytes) (inputIndex : Nat) (inputValue : Nat
     u64le inputValue ++
     inp.sequenceLE ++
     hashOut ++
-    u32le core.locktime
+    u32le core.locktime ++
+    -- Go consensus appends sighash_type byte; digestV1 models default SIGHASH_ALL.
+    (RubinFormal.bytes #[0x01])
   pure (SHA3.sha3_256 preimage)
 
 end SighashV1

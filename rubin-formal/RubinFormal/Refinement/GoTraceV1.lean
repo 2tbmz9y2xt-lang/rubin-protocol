@@ -40,7 +40,7 @@ structure BlockBasicOut where
   sumWeight : Option Nat
   sumDa : Option Nat
 
-def goTraceFixturesDigestSHA3_256 : String := "dcbb1051286648c7eb43f6b2257c44dae4ff25781e48873a94351da6a33cc53b"
+def goTraceFixturesDigestSHA3_256 : String := "43c77ad8983ff368717e45635fbeafe1667c8887c5b334b26c299f0322fd0436"
 
 def parseOuts : List ParseOut := [
   { id := "PARSE-01", ok := true, err := "", consumed := 21, txidHex := "0xd205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0", wtxidHex := "0xf760a70e1e838404d8e41679962064dc1bf4fa181699009644a14d0aa389ab4e" },
@@ -49,7 +49,7 @@ def parseOuts : List ParseOut := [
   { id := "PARSE-04", ok := false, err := "TX_ERR_WITNESS_OVERFLOW", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
   { id := "PARSE-05", ok := true, err := "", consumed := 24, txidHex := "0xd205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0", wtxidHex := "0xd185596484393174ee58e962e221c00d8a5586ac7c293baa50ac9914022464c1" },
   { id := "PARSE-06", ok := false, err := "TX_ERR_SIG_NONCANONICAL", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "PARSE-07", ok := false, err := "TX_ERR_WITNESS_OVERFLOW", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
+  { id := "PARSE-07", ok := false, err := "TX_ERR_SIG_NONCANONICAL", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
   { id := "PARSE-08", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
   { id := "PARSE-09", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
   { id := "PARSE-10", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
@@ -63,11 +63,11 @@ def parseOuts : List ParseOut := [
 ]
 
 def sighashOuts : List SighashOut := [
-  { id := "SIGHASH-01", ok := true, err := "", digestHex := "0x8d39d12eb7ac2f24532d2d583efbf3feec9449d63e0d66533a3a23522619686d" },
-  { id := "SIGHASH-02", ok := true, err := "", digestHex := "0x488afae88a684d1d17435a12f6622e8cec3d452e2307dc09a382a801f3b10601" },
-  { id := "SIGHASH-03", ok := true, err := "", digestHex := "0x5df04e7bda6923a0c79260c8aab8b346974d9ba6a48d4f27a8d81eb212e56001" },
-  { id := "SIGHASH-04", ok := true, err := "", digestHex := "0xea0c0c75d4ef6393176ec47c75c815321905d52b4856b6432c5d018269446c1b" },
-  { id := "SIGHASH-05", ok := true, err := "", digestHex := "0x910b345198d181c730e4f5a955c634fe5a70799b810026c0958f43e333c378a9" }
+  { id := "SIGHASH-01", ok := true, err := "", digestHex := "0x2d0c47afbb6533ae5f83a4ca76ee7a2879710b8c5e6492c86a8ea71609a45802" },
+  { id := "SIGHASH-02", ok := true, err := "", digestHex := "0xe156ba02d8b1ba785840358da93d3c5b71402bf9853abf9ecbce4cecd139660a" },
+  { id := "SIGHASH-03", ok := true, err := "", digestHex := "0xa1a4d8f720145b8a6c2d80f1bd875de24e5c10b700b34fc80b5d469e715196f0" },
+  { id := "SIGHASH-04", ok := true, err := "", digestHex := "0xb16e6ccbac98e03ea560452dcfa2f92c29584c9ed787219f25c89f41f43828c0" },
+  { id := "SIGHASH-05", ok := true, err := "", digestHex := "0xdaa23cc8b92c706958d428953b0c083017b97ebb53faa0c47c03f4b90a4a6c3f" }
 ]
 
 def powOuts : List PowOut := [
@@ -105,8 +105,8 @@ def utxoBasicOuts : List UtxoBasicOut := [
   { id := "CV-U-17", ok := false, err := "TX_ERR_PARSE", fee := none, utxoCount := none },
   { id := "CV-U-18", ok := false, err := "TX_ERR_COVENANT_TYPE_INVALID", fee := none, utxoCount := none },
   { id := "CV-U-19", ok := true, err := "", fee := some 100, utxoCount := some 0 },
-  { id := "CV-U-COINBASE-IMMATURE-01", ok := false, err := "TX_ERR_COINBASE_IMMATURE", fee := none, utxoCount := none },
-  { id := "CV-U-COINBASE-IMMATURE-02", ok := true, err := "", fee := some 100, utxoCount := some 0 },
+  { id := "CV-U-COINBASE-IMMATURE-01", ok := false, err := "TX_ERR_SIG_NONCANONICAL", fee := none, utxoCount := none },
+  { id := "CV-U-COINBASE-IMMATURE-02", ok := false, err := "TX_ERR_SIG_NONCANONICAL", fee := none, utxoCount := none },
   { id := "CV-U-EXT-01", ok := true, err := "", fee := some 10, utxoCount := some 1 },
   { id := "CV-U-EXT-02", ok := true, err := "", fee := some 10, utxoCount := some 1 },
   { id := "CV-U-EXT-03", ok := false, err := "TX_ERR_COVENANT_TYPE_INVALID", fee := none, utxoCount := none }

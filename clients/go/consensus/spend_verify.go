@@ -7,13 +7,24 @@ func checkSLHCanonical(w WitnessItem) error {
 		return nil
 	}
 	if len(w.Pubkey) != SLH_DSA_SHAKE_256F_PUBKEY_BYTES ||
-		len(w.Signature) != MAX_SLH_DSA_SIG_BYTES {
+		len(w.Signature) != MAX_SLH_DSA_SIG_BYTES+1 {
 		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical SLH-DSA witness item lengths")
 	}
 	return nil
 }
 
-func validateP2PKSpend(entry UtxoEntry, w WitnessItem, digest [32]byte, blockHeight uint64) error {
+func extractCryptoSigAndSighash(w WitnessItem) ([]byte, uint8, error) {
+	if len(w.Signature) == 0 {
+		return nil, 0, txerr(TX_ERR_SIGHASH_TYPE_INVALID, "missing sighash_type byte")
+	}
+	sighashType := w.Signature[len(w.Signature)-1]
+	if !IsValidSighashType(sighashType) {
+		return nil, 0, txerr(TX_ERR_SIGHASH_TYPE_INVALID, "invalid sighash_type")
+	}
+	return w.Signature[:len(w.Signature)-1], sighashType, nil
+}
+
+func validateP2PKSpend(entry UtxoEntry, w WitnessItem, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte, blockHeight uint64) error {
 	if w.SuiteID != SUITE_ID_ML_DSA_87 && w.SuiteID != SUITE_ID_SLH_DSA_SHAKE_256F {
 		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_P2PK suite invalid")
 	}
@@ -23,6 +34,9 @@ func validateP2PKSpend(entry UtxoEntry, w WitnessItem, digest [32]byte, blockHei
 	if err := checkSLHCanonical(w); err != nil {
 		return err
 	}
+	if w.SuiteID == SUITE_ID_ML_DSA_87 && (len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1) {
+		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
+	}
 	if len(entry.CovenantData) != MAX_P2PK_COVENANT_DATA || entry.CovenantData[0] != w.SuiteID {
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_P2PK covenant_data invalid")
 	}
@@ -31,7 +45,15 @@ func validateP2PKSpend(entry UtxoEntry, w WitnessItem, digest [32]byte, blockHei
 	if sha3_256(w.Pubkey) != keyID {
 		return txerr(TX_ERR_SIG_INVALID, "CORE_P2PK key binding mismatch")
 	}
-	ok, err := verifySig(w.SuiteID, w.Pubkey, w.Signature, digest)
+	cryptoSig, sighashType, err := extractCryptoSigAndSighash(w)
+	if err != nil {
+		return err
+	}
+	digest, err := SighashV1DigestWithType(tx, inputIndex, inputValue, chainID, sighashType)
+	if err != nil {
+		return err
+	}
+	ok, err := verifySig(w.SuiteID, w.Pubkey, cryptoSig, digest)
 	if err != nil {
 		return err
 	}
@@ -41,7 +63,17 @@ func validateP2PKSpend(entry UtxoEntry, w WitnessItem, digest [32]byte, blockHei
 	return nil
 }
 
-func validateThresholdSigSpend(keys [][32]byte, threshold uint8, ws []WitnessItem, digest [32]byte, blockHeight uint64, context string) error {
+func validateThresholdSigSpend(
+	keys [][32]byte,
+	threshold uint8,
+	ws []WitnessItem,
+	tx *Tx,
+	inputIndex uint32,
+	inputValue uint64,
+	chainID [32]byte,
+	blockHeight uint64,
+	context string,
+) error {
 	if len(ws) != len(keys) {
 		return txerr(TX_ERR_PARSE, "witness slot assignment mismatch")
 	}
@@ -58,10 +90,21 @@ func validateThresholdSigSpend(keys [][32]byte, threshold uint8, ws []WitnessIte
 			if err := checkSLHCanonical(w); err != nil {
 				return err
 			}
+			if w.SuiteID == SUITE_ID_ML_DSA_87 && (len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1) {
+				return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
+			}
 			if sha3_256(w.Pubkey) != keys[i] {
 				return txerr(TX_ERR_SIG_INVALID, context+" key binding mismatch")
 			}
-			ok, err := verifySig(w.SuiteID, w.Pubkey, w.Signature, digest)
+			cryptoSig, sighashType, err := extractCryptoSigAndSighash(w)
+			if err != nil {
+				return err
+			}
+			digest, err := SighashV1DigestWithType(tx, inputIndex, inputValue, chainID, sighashType)
+			if err != nil {
+				return err
+			}
+			ok, err := verifySig(w.SuiteID, w.Pubkey, cryptoSig, digest)
 			if err != nil {
 				return err
 			}

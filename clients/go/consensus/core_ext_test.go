@@ -168,7 +168,7 @@ func TestApplyNonCoinbaseTxBasic_CORE_EXT_ActiveSuiteRulesAndVerifySig(t *testin
 	// Same-length mutated signature must deterministically reject as TX_ERR_SIG_INVALID.
 	bad := tx.Witness[0]
 	bad.Signature = append([]byte(nil), bad.Signature...)
-	bad.Signature[len(bad.Signature)-1] ^= 0x01
+	bad.Signature[0] ^= 0x01
 	tx.Witness = []WitnessItem{bad}
 	_, _, err = ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(tx, txid, utxos, 0, 0, 0, chainID, profiles)
 	if err == nil {

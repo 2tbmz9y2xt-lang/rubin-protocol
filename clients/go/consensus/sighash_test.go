@@ -59,6 +59,7 @@ func TestSighashV1Digest_Smoke(t *testing.T) {
 	preimage = AppendU32le(preimage, 3)
 	preimage = append(preimage, hashOfAllOutputs[:]...)
 	preimage = AppendU32le(preimage, 4)
+	preimage = append(preimage, SIGHASH_ALL)
 
 	want := sha3_256(preimage)
 	if digest != want {

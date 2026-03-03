@@ -669,14 +669,14 @@ fn tx_weight_and_stats(tx: &Tx) -> Result<(u64, u64, u64), TxError> {
             SUITE_ID_SENTINEL => {}
             SUITE_ID_ML_DSA_87 => {
                 if w.pubkey.len() as u64 == ML_DSA_87_PUBKEY_BYTES
-                    && w.signature.len() as u64 == ML_DSA_87_SIG_BYTES
+                    && w.signature.len() as u64 == ML_DSA_87_SIG_BYTES + 1
                 {
                     ml_count += 1;
                 }
             }
             SUITE_ID_SLH_DSA_SHAKE_256F => {
                 if w.pubkey.len() as u64 == SLH_DSA_SHAKE_256F_PUBKEY_BYTES
-                    && w.signature.len() as u64 == MAX_SLH_DSA_SIG_BYTES
+                    && w.signature.len() as u64 == MAX_SLH_DSA_SIG_BYTES + 1
                 {
                     slh_count += 1;
                 }

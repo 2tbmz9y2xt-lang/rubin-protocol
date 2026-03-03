@@ -357,13 +357,13 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 				return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "non-canonical sentinel witness item")
 			}
 		case SUITE_ID_ML_DSA_87:
-			if !(pubLen == ML_DSA_87_PUBKEY_BYTES && sigLen == ML_DSA_87_SIG_BYTES) {
+			if !(pubLen == ML_DSA_87_PUBKEY_BYTES && sigLen == ML_DSA_87_SIG_BYTES+1) {
 				return nil, zero, zero, 0, txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
 			}
 		case SUITE_ID_SLH_DSA_SHAKE_256F:
-			// Length canonicality is deferred to the spend path where blockHeight is
-			// available; activation must be checked before lengths to preserve
-			// deterministic error-priority (Q-CF-18).
+			if !(pubLen == SLH_DSA_SHAKE_256F_PUBKEY_BYTES && sigLen == MAX_SLH_DSA_SIG_BYTES+1) {
+				return nil, zero, zero, 0, txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical SLH-DSA witness item lengths")
+			}
 		default:
 			// Unknown suites are accepted at parse stage (CANONICAL §12.2 / CV-SIG-05).
 			// Semantic suite authorization is enforced at the spend path.

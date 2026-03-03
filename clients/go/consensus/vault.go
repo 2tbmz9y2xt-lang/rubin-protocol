@@ -145,6 +145,8 @@ func WitnessSlots(covenantType uint16, covenantData []byte) (int, error) {
 		return 2, nil
 	case COV_TYPE_CORE_EXT:
 		return CORE_EXT_WITNESS_SLOTS, nil
+	case COV_TYPE_CORE_STEALTH:
+		return CORE_STEALTH_WITNESS_SLOTS, nil
 	default:
 		return 0, txerr(TX_ERR_COVENANT_TYPE_INVALID, "unsupported covenant in witness_slots")
 	}

@@ -327,7 +327,9 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
                 }
             }
             SUITE_ID_ML_DSA_87 => {
-                if !(pub_len_u64 == ML_DSA_87_PUBKEY_BYTES && sig_len_u64 == ML_DSA_87_SIG_BYTES) {
+                if !(pub_len_u64 == ML_DSA_87_PUBKEY_BYTES
+                    && sig_len_u64 == ML_DSA_87_SIG_BYTES + 1)
+                {
                     return Err(TxError::new(
                         ErrorCode::TxErrSigNoncanonical,
                         "non-canonical ML-DSA witness item lengths",
@@ -335,9 +337,14 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
                 }
             }
             SUITE_ID_SLH_DSA_SHAKE_256F => {
-                // Length canonicality is deferred to the spend path where block_height is
-                // available; activation must be checked before lengths to preserve
-                // deterministic error-priority (Q-CF-18).
+                if !(pub_len_u64 == SLH_DSA_SHAKE_256F_PUBKEY_BYTES
+                    && sig_len_u64 == MAX_SLH_DSA_SIG_BYTES + 1)
+                {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrSigNoncanonical,
+                        "non-canonical SLH-DSA witness item lengths",
+                    ));
+                }
             }
             _ => {}
         }

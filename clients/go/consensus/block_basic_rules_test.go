@@ -619,7 +619,8 @@ func TestValidateBlockBasic_WitnessCommitmentDuplicate(t *testing.T) {
 
 func TestValidateBlockBasic_SLHInactiveAtHeight(t *testing.T) {
 	pub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
-	sig := []byte{0x01}
+	sig := make([]byte, MAX_SLH_DSA_SIG_BYTES+1)
+	sig[len(sig)-1] = SIGHASH_ALL
 	height := uint64(SLH_DSA_ACTIVATION_HEIGHT - 1)
 	nonCoinbase := txWithOneInputOneOutputAndWitness(SUITE_ID_SLH_DSA_SHAKE_256F, pub, sig)
 	coinbase := coinbaseWithWitnessCommitmentAtHeight(t, height, nonCoinbase)
@@ -645,7 +646,8 @@ func TestValidateBlockBasic_SLHInactiveAtHeight(t *testing.T) {
 
 func TestValidateBlockBasic_SLHActiveAtHeight(t *testing.T) {
 	pub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
-	sig := []byte{0x01}
+	sig := make([]byte, MAX_SLH_DSA_SIG_BYTES+1)
+	sig[len(sig)-1] = SIGHASH_ALL
 	height := uint64(SLH_DSA_ACTIVATION_HEIGHT)
 	nonCoinbase := txWithOneInputOneOutputAndWitness(SUITE_ID_SLH_DSA_SHAKE_256F, pub, sig)
 	coinbase := coinbaseWithWitnessCommitmentAtHeight(t, height, nonCoinbase)

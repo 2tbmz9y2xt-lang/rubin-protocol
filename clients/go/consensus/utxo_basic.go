@@ -136,7 +136,8 @@ func applyNonCoinbaseTxBasicWork(
 	var vaultSigKeys [][32]byte
 	var vaultSigThreshold uint8
 	var vaultSigWitness []WitnessItem
-	var vaultSigDigest [32]byte
+	var vaultSigInputIndex uint32
+	var vaultSigInputValue uint64
 	haveVaultSig := false
 	vaultInputCount := 0
 	witnessCursor := 0
@@ -172,11 +173,6 @@ func applyNonCoinbaseTxBasicWork(
 			return nil, 0, txerr(TX_ERR_COINBASE_IMMATURE, "coinbase immature")
 		}
 
-		digest, err := SighashV1Digest(tx, uint32(inputIndex), entry.Value, chainID)
-		if err != nil {
-			return nil, 0, err
-		}
-
 		if err := checkSpendCovenant(entry.CovenantType, entry.CovenantData); err != nil {
 			return nil, 0, err
 		}
@@ -198,7 +194,7 @@ func applyNonCoinbaseTxBasicWork(
 			if slots != 1 {
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_P2PK witness_slots must be 1")
 			}
-			if err := validateP2PKSpend(entry, assigned[0], digest, height); err != nil {
+			if err := validateP2PKSpend(entry, assigned[0], tx, uint32(inputIndex), entry.Value, chainID, height); err != nil {
 				return nil, 0, err
 			}
 		case COV_TYPE_MULTISIG:
@@ -206,7 +202,17 @@ func applyNonCoinbaseTxBasicWork(
 			if err != nil {
 				return nil, 0, err
 			}
-			if err := validateThresholdSigSpend(m.Keys, m.Threshold, assigned, digest, height, "CORE_MULTISIG"); err != nil {
+			if err := validateThresholdSigSpend(
+				m.Keys,
+				m.Threshold,
+				assigned,
+				tx,
+				uint32(inputIndex),
+				entry.Value,
+				chainID,
+				height,
+				"CORE_MULTISIG",
+			); err != nil {
 				return nil, 0, err
 			}
 		case COV_TYPE_VAULT:
@@ -219,13 +225,24 @@ func applyNonCoinbaseTxBasicWork(
 			vaultSigKeys = v.Keys
 			vaultSigThreshold = v.Threshold
 			vaultSigWitness = append([]WitnessItem(nil), assigned...)
-			vaultSigDigest = digest
+			vaultSigInputIndex = uint32(inputIndex)
+			vaultSigInputValue = entry.Value
 			haveVaultSig = true
 		case COV_TYPE_HTLC:
 			if slots != 2 {
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_HTLC witness_slots must be 2")
 			}
-			if err := ValidateHTLCSpend(entry, assigned[0], assigned[1], digest, height, blockMTP); err != nil {
+			if err := ValidateHTLCSpend(
+				entry,
+				assigned[0],
+				assigned[1],
+				tx,
+				uint32(inputIndex),
+				entry.Value,
+				chainID,
+				height,
+				blockMTP,
+			); err != nil {
 				return nil, 0, err
 			}
 		case COV_TYPE_CORE_EXT:
@@ -273,7 +290,18 @@ func applyNonCoinbaseTxBasicWork(
 				if err := checkSLHCanonical(w); err != nil {
 					return nil, 0, err
 				}
-				ok, err := verifySig(w.SuiteID, w.Pubkey, w.Signature, digest)
+				if w.SuiteID == SUITE_ID_ML_DSA_87 && (len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1) {
+					return nil, 0, txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
+				}
+				cryptoSig, sighashType, err := extractCryptoSigAndSighash(w)
+				if err != nil {
+					return nil, 0, err
+				}
+				digest, err := SighashV1DigestWithType(tx, uint32(inputIndex), entry.Value, chainID, sighashType)
+				if err != nil {
+					return nil, 0, err
+				}
+				ok, err := verifySig(w.SuiteID, w.Pubkey, cryptoSig, digest)
 				if err != nil {
 					return nil, 0, err
 				}
@@ -284,13 +312,28 @@ func applyNonCoinbaseTxBasicWork(
 				if verifySigExtFn == nil {
 					return nil, 0, txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext unsupported")
 				}
-				ok, err := verifySigExtFn(cd.ExtID, w.SuiteID, w.Pubkey, w.Signature, digest, cd.ExtPayload)
+				cryptoSig, sighashType, err := extractCryptoSigAndSighash(w)
+				if err != nil {
+					return nil, 0, err
+				}
+				digest, err := SighashV1DigestWithType(tx, uint32(inputIndex), entry.Value, chainID, sighashType)
+				if err != nil {
+					return nil, 0, err
+				}
+				ok, err := verifySigExtFn(cd.ExtID, w.SuiteID, w.Pubkey, cryptoSig, digest, cd.ExtPayload)
 				if err != nil {
 					return nil, 0, txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext error")
 				}
 				if !ok {
 					return nil, 0, txerr(TX_ERR_SIG_INVALID, "CORE_EXT signature invalid")
 				}
+			}
+		case COV_TYPE_CORE_STEALTH:
+			if slots != CORE_STEALTH_WITNESS_SLOTS {
+				return nil, 0, txerr(TX_ERR_PARSE, "CORE_STEALTH witness_slots must be 1")
+			}
+			if err := validateCoreStealthSpend(entry, assigned[0], tx, uint32(inputIndex), entry.Value, chainID, height); err != nil {
+				return nil, 0, err
 			}
 		default:
 			// Other covenants have no additional spend-time checks in the genesis set.
@@ -420,7 +463,17 @@ func applyNonCoinbaseTxBasicWork(
 		}
 
 		// Signature threshold check (CANONICAL §24.1 step 7).
-		if err := validateThresholdSigSpend(vaultSigKeys, vaultSigThreshold, vaultSigWitness, vaultSigDigest, height, "CORE_VAULT"); err != nil {
+		if err := validateThresholdSigSpend(
+			vaultSigKeys,
+			vaultSigThreshold,
+			vaultSigWitness,
+			tx,
+			vaultSigInputIndex,
+			vaultSigInputValue,
+			chainID,
+			height,
+			"CORE_VAULT",
+		); err != nil {
 			return nil, 0, err
 		}
 
@@ -486,6 +539,12 @@ func checkSpendCovenant(
 	}
 	if covType == COV_TYPE_CORE_EXT {
 		if _, err := ParseCoreExtCovenantData(covData); err != nil {
+			return err
+		}
+		return nil
+	}
+	if covType == COV_TYPE_CORE_STEALTH {
+		if _, err := ParseStealthCovenantData(covData); err != nil {
 			return err
 		}
 		return nil
