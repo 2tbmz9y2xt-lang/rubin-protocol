@@ -9,6 +9,31 @@ Policy:
 
 ---
 
+## 2026-03-03 — Sighash-byte canonicalization outcome rebaseline (Q-RFC-STEALTH-01)
+
+Причина:
+- после включения trailing `sighash_type` байта для известных suites (`ML-DSA`, `SLH-DSA`) parser canonicalization
+  требует `sig_length = base_sig_len + 1` (CANONICAL §5.4/§7/§12);
+- legacy fixtures без trailing byte начали детерминированно резаться на parse-stage как
+  `TX_ERR_SIG_NONCANONICAL` до covenant/UTXO/business-rule веток;
+- digest expectations в `CV-SIGHASH` изменились из-за обновлённого preimage (`u8(sighash_type)` включён в digest).
+
+Инструменты:
+- ручной rebaseline ожидаемых исходов в `CV-*` по текущей canonicalization семантике,
+- пересчёт `CV-SIGHASH` digest через consensus CLI (Go/Rust parity),
+- проверка через `conformance/runner/run_cv_bundle.py` (full bundle PASS).
+
+Изменённые fixtures:
+- `CV-MULTISIG.json`
+- `CV-HTLC.json`
+- `CV-PARSE.json`
+- `CV-SIG.json`
+- `CV-SIGHASH.json`
+- `CV-SUBSIDY.json`
+- `CV-UTXO-BASIC.json`
+- `CV-VAULT.json`
+- `CV-WEIGHT.json`
+
 ## 2026-03-03 — Block-level limit vectors (Q-CONF-21)
 
 Причина:

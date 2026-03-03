@@ -603,11 +603,11 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 		}
 		switch w.SuiteID {
 		case SUITE_ID_ML_DSA_87:
-			if len(w.Pubkey) == ML_DSA_87_PUBKEY_BYTES && len(w.Signature) == ML_DSA_87_SIG_BYTES {
+			if len(w.Pubkey) == ML_DSA_87_PUBKEY_BYTES && len(w.Signature) == ML_DSA_87_SIG_BYTES+1 {
 				mlCount++
 			}
 		case SUITE_ID_SLH_DSA_SHAKE_256F:
-			if len(w.Pubkey) == SLH_DSA_SHAKE_256F_PUBKEY_BYTES && len(w.Signature) == MAX_SLH_DSA_SIG_BYTES {
+			if len(w.Pubkey) == SLH_DSA_SHAKE_256F_PUBKEY_BYTES && len(w.Signature) == MAX_SLH_DSA_SIG_BYTES+1 {
 				slhCount++
 			}
 		case SUITE_ID_SENTINEL:

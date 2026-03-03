@@ -16,6 +16,7 @@ pub mod merkle;
 pub mod pow;
 pub mod sighash;
 mod spend_verify;
+mod stealth;
 pub mod subsidy;
 pub mod tx;
 mod utxo_basic;
@@ -51,7 +52,8 @@ pub use fork_choice::{fork_chainwork_from_targets, fork_work_from_target};
 pub use htlc::{parse_htlc_covenant_data, validate_htlc_spend, HtlcCovenant};
 pub use merkle::merkle_root_txids;
 pub use pow::{pow_check, retarget_v1, retarget_v1_clamped};
-pub use sighash::sighash_v1_digest;
+pub use sighash::{is_valid_sighash_type, sighash_v1_digest, sighash_v1_digest_with_type};
+pub use stealth::{parse_stealth_covenant_data, validate_stealth_spend, StealthCovenant};
 pub use subsidy::block_subsidy;
 pub use tx::{parse_tx, DaChunkCore, DaCommitCore, Tx, TxInput, TxOutput, WitnessItem};
 pub use utxo_basic::{

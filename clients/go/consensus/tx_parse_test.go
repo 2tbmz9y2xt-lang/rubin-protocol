@@ -186,10 +186,10 @@ func TestParseTx_WitnessBytesOverflow(t *testing.T) {
 		w.WriteByte(SUITE_ID_SLH_DSA_SHAKE_256F)
 		w.WriteByte(0x40) // pubkey_length=64
 		w.Write(make([]byte, 64))
-		w.WriteByte(0xfd) // sig_length=49856 (0xC2C0)
-		w.WriteByte(0xc0)
+		w.WriteByte(0xfd) // sig_length=49857 (0xC2C1)
+		w.WriteByte(0xc1)
 		w.WriteByte(0xc2)
-		w.Write(make([]byte, 49_856))
+		w.Write(make([]byte, 49_857))
 	}
 	w.WriteByte(0x00) // da_payload_len
 
@@ -256,9 +256,9 @@ func TestParseTx_HTLCPathWitnessItemsCanonical(t *testing.T) {
 	w.WriteByte(0x0a)
 	w.Write(make([]byte, ML_DSA_87_PUBKEY_BYTES))
 	w.WriteByte(0xfd)
-	w.WriteByte(0x13)
+	w.WriteByte(0x14)
 	w.WriteByte(0x12)
-	w.Write(make([]byte, ML_DSA_87_SIG_BYTES))
+	w.Write(make([]byte, ML_DSA_87_SIG_BYTES+1))
 
 	w.WriteByte(0x00) // da_payload_len
 	if _, _, _, _, err := ParseTx(txWithWitnessSection(w.Bytes())); err != nil {

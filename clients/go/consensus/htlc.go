@@ -42,7 +42,10 @@ func ValidateHTLCSpend(
 	entry UtxoEntry,
 	pathItem WitnessItem,
 	sigItem WitnessItem,
-	digest [32]byte,
+	tx *Tx,
+	inputIndex uint32,
+	inputValue uint64,
+	chainID [32]byte,
 	blockHeight uint64,
 	blockMTP uint64,
 ) error {
@@ -113,14 +116,14 @@ func ValidateHTLCSpend(
 
 	switch sigItem.SuiteID {
 	case SUITE_ID_ML_DSA_87:
-		if len(sigItem.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(sigItem.Signature) != ML_DSA_87_SIG_BYTES {
+		if len(sigItem.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(sigItem.Signature) != ML_DSA_87_SIG_BYTES+1 {
 			return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
 		}
 	case SUITE_ID_SLH_DSA_SHAKE_256F:
 		if blockHeight < SLH_DSA_ACTIVATION_HEIGHT {
 			return txerr(TX_ERR_SIG_ALG_INVALID, "SLH-DSA suite inactive at this height")
 		}
-		if len(sigItem.Pubkey) != SLH_DSA_SHAKE_256F_PUBKEY_BYTES || len(sigItem.Signature) != MAX_SLH_DSA_SIG_BYTES {
+		if len(sigItem.Pubkey) != SLH_DSA_SHAKE_256F_PUBKEY_BYTES || len(sigItem.Signature) != MAX_SLH_DSA_SIG_BYTES+1 {
 			return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical SLH-DSA witness item lengths")
 		}
 	default:
@@ -131,7 +134,15 @@ func ValidateHTLCSpend(
 		return txerr(TX_ERR_SIG_INVALID, "CORE_HTLC signature key binding mismatch")
 	}
 
-	ok, err := verifySig(sigItem.SuiteID, sigItem.Pubkey, sigItem.Signature, digest)
+	cryptoSig, sighashType, err := extractCryptoSigAndSighash(sigItem)
+	if err != nil {
+		return err
+	}
+	digest, err := SighashV1DigestWithType(tx, inputIndex, inputValue, chainID, sighashType)
+	if err != nil {
+		return err
+	}
+	ok, err := verifySig(sigItem.SuiteID, sigItem.Pubkey, cryptoSig, digest)
 	if err != nil {
 		return err
 	}

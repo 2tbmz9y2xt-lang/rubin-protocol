@@ -145,7 +145,7 @@ type digestSigner interface {
 }
 
 func mustSignInputDigest(id string, label string, signer digestSigner, tx *consensus.Tx, inputIndex uint32, inputValue uint64, chainID [32]byte) []byte {
-	digest, err := consensus.SighashV1Digest(tx, inputIndex, inputValue, chainID)
+	digest, err := consensus.SighashV1DigestWithType(tx, inputIndex, inputValue, chainID, consensus.SIGHASH_ALL)
 	if err != nil {
 		fatalf("%s: sighash %s: %v", id, label, err)
 	}
@@ -153,7 +153,7 @@ func mustSignInputDigest(id string, label string, signer digestSigner, tx *conse
 	if err != nil {
 		fatalf("%s: sign %s: %v", id, label, err)
 	}
-	return signature
+	return append(signature, consensus.SIGHASH_ALL)
 }
 
 func mustLoadFixture(path string) *fixtureFile {

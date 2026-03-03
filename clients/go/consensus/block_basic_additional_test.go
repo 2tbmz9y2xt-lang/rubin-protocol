@@ -40,9 +40,9 @@ func TestTxWeightAndStats_Nil(t *testing.T) {
 
 func TestTxWeightAndStats_MLAndSLHCountsAndDAAndAnchor(t *testing.T) {
 	mlPub := make([]byte, ML_DSA_87_PUBKEY_BYTES)
-	mlSig := make([]byte, ML_DSA_87_SIG_BYTES)
+	mlSig := make([]byte, ML_DSA_87_SIG_BYTES+1)
 	slhPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
-	slhSig := make([]byte, MAX_SLH_DSA_SIG_BYTES)
+	slhSig := make([]byte, MAX_SLH_DSA_SIG_BYTES+1)
 
 	tx := &Tx{
 		Version: 1,
@@ -80,11 +80,11 @@ func TestTxWeightAndStats_MLAndSLHCountsAndDAAndAnchor(t *testing.T) {
 
 	// Expected accounting:
 	// - base_size = 318 bytes
-	// - witness_size = 57_152 bytes
+	// - witness_size = 57_154 bytes
 	// - da_size = 4 bytes (len varint + payload)
 	// - sig_cost = 8 (ML) + 64 (SLH) = 72
 	// - weight = 4*base_size + witness_size + da_size + sig_cost
-	const wantWeight = uint64(58_500)
+	const wantWeight = uint64(58_502)
 	if weight != wantWeight {
 		t.Fatalf("weight=%d, want %d", weight, wantWeight)
 	}
@@ -179,7 +179,7 @@ func TestTxWeightAndStats_DACoreMissingErrors(t *testing.T) {
 
 func TestTxWeightAndStats_TxKind02_ChunkCoreOK(t *testing.T) {
 	mlPub := make([]byte, ML_DSA_87_PUBKEY_BYTES)
-	mlSig := make([]byte, ML_DSA_87_SIG_BYTES)
+	mlSig := make([]byte, ML_DSA_87_SIG_BYTES+1)
 
 	daID := filled32(0xa1)
 	payload := []byte("abc")

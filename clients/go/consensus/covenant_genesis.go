@@ -60,6 +60,13 @@ func ValidateTxCovenantsGenesis(tx *Tx, blockHeight uint64) error {
 			if _, err := ParseCoreExtCovenantData(out.CovenantData); err != nil {
 				return err
 			}
+		case COV_TYPE_CORE_STEALTH:
+			if out.Value == 0 {
+				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_STEALTH value must be > 0")
+			}
+			if _, err := ParseStealthCovenantData(out.CovenantData); err != nil {
+				return err
+			}
 
 		case COV_TYPE_DA_COMMIT:
 			if tx.TxKind != 0x01 {

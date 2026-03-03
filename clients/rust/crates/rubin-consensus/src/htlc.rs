@@ -6,7 +6,8 @@ use crate::constants::{
 };
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
-use crate::tx::WitnessItem;
+use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_type};
+use crate::tx::{Tx, WitnessItem};
 use crate::utxo_basic::UtxoEntry;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,7 +72,10 @@ pub fn validate_htlc_spend(
     entry: &UtxoEntry,
     path_item: &WitnessItem,
     sig_item: &WitnessItem,
-    digest32: &[u8; 32],
+    tx: &Tx,
+    input_index: u32,
+    input_value: u64,
+    chain_id: [u8; 32],
     block_height: u64,
     block_mtp: u64,
 ) -> Result<(), TxError> {
@@ -186,7 +190,7 @@ pub fn validate_htlc_spend(
     match sig_item.suite_id {
         SUITE_ID_ML_DSA_87 => {
             if sig_item.pubkey.len() as u64 != ML_DSA_87_PUBKEY_BYTES
-                || sig_item.signature.len() as u64 != ML_DSA_87_SIG_BYTES
+                || sig_item.signature.len() as u64 != ML_DSA_87_SIG_BYTES + 1
             {
                 return Err(TxError::new(
                     ErrorCode::TxErrSigNoncanonical,
@@ -202,7 +206,7 @@ pub fn validate_htlc_spend(
                 ));
             }
             if sig_item.pubkey.len() as u64 != SLH_DSA_SHAKE_256F_PUBKEY_BYTES
-                || sig_item.signature.len() as u64 != MAX_SLH_DSA_SIG_BYTES
+                || sig_item.signature.len() as u64 != MAX_SLH_DSA_SIG_BYTES + 1
             {
                 return Err(TxError::new(
                     ErrorCode::TxErrSigNoncanonical,
@@ -225,11 +229,26 @@ pub fn validate_htlc_spend(
         ));
     }
 
+    let Some((&sighash_type, crypto_sig)) = sig_item.signature.split_last() else {
+        return Err(TxError::new(
+            ErrorCode::TxErrSighashTypeInvalid,
+            "missing sighash_type byte",
+        ));
+    };
+    if !is_valid_sighash_type(sighash_type) {
+        return Err(TxError::new(
+            ErrorCode::TxErrSighashTypeInvalid,
+            "invalid sighash_type",
+        ));
+    }
+    let digest32 =
+        sighash_v1_digest_with_type(tx, input_index, input_value, chain_id, sighash_type)?;
+
     let ok = crate::verify_sig_openssl::verify_sig(
         sig_item.suite_id,
         &sig_item.pubkey,
-        &sig_item.signature,
-        digest32,
+        crypto_sig,
+        &digest32,
     )?;
     if !ok {
         return Err(TxError::new(

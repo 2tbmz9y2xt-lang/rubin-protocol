@@ -188,14 +188,13 @@ fn parse_tx_witness_item_canonicalization() {
     tx3.push(SUITE_ID_ML_DSA_87);
     tx3.extend_from_slice(&[0xfd, 0x1f, 0x0a]); // pubkey_length = 2591
     tx3.extend_from_slice(&vec![0u8; 2591]);
-    tx3.extend_from_slice(&[0xfd, 0x13, 0x12]); // sig_length = 4627
-    tx3.extend_from_slice(&vec![0u8; 4627]);
+    tx3.extend_from_slice(&[0xfd, 0x14, 0x12]); // sig_length = 4628 (ML-DSA + sighash byte)
+    tx3.extend_from_slice(&vec![0u8; 4628]);
     tx3.push(0x00); // da_payload_len
     let err = parse_tx(&tx3).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
 
-    // slh_dsa_sig_len_zero: parse no longer rejects SLH items with sig_len=0;
-    // length canonicality for SLH-DSA is enforced in the spend path (Q-CF-18).
+    // slh_dsa_sig_len_zero: parse rejects non-canonical known-suite SLH lengths.
     let mut tx4 = base.clone();
     tx4.push(0x01);
     tx4.push(SUITE_ID_SLH_DSA_SHAKE_256F);
@@ -203,7 +202,8 @@ fn parse_tx_witness_item_canonicalization() {
     tx4.extend_from_slice(&[0u8; 64]);
     tx4.push(0x00); // sig_length = 0
     tx4.push(0x00); // da_payload_len
-    assert!(parse_tx(&tx4).is_ok());
+    let err = parse_tx(&tx4).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
 }
 
 #[test]
@@ -216,8 +216,8 @@ fn parse_tx_witness_bytes_overflow() {
         tx.push(SUITE_ID_SLH_DSA_SHAKE_256F);
         tx.push(0x40); // pubkey_length=64
         tx.extend_from_slice(&[0u8; 64]);
-        tx.extend_from_slice(&[0xfd, 0xc0, 0xc2]); // sig_length=49856 (0xC2C0)
-        tx.extend_from_slice(&vec![0u8; 49_856]);
+        tx.extend_from_slice(&[0xfd, 0xc1, 0xc2]); // sig_length=49857 (0xC2C1)
+        tx.extend_from_slice(&vec![0u8; 49_857]);
     }
     tx.push(0x00); // da_payload_len
 
@@ -405,6 +405,7 @@ fn sighash_v1_digest_smoke() {
     preimage.extend_from_slice(&3u32.to_le_bytes());
     preimage.extend_from_slice(&hash_of_all_outputs);
     preimage.extend_from_slice(&4u32.to_le_bytes());
+    preimage.push(SIGHASH_ALL);
 
     let want = sha3_256(&preimage);
     assert_eq!(digest, want);
@@ -1239,7 +1240,8 @@ fn validate_block_basic_da_completeness_priority_over_payload_mismatch() {
 fn validate_block_basic_slh_inactive_at_height() {
     let prev_txid = [0xabu8; 32];
     let pubkey = vec![0u8; SLH_DSA_SHAKE_256F_PUBKEY_BYTES as usize];
-    let sig = vec![0x01];
+    let mut sig = vec![0u8; (MAX_SLH_DSA_SIG_BYTES as usize) + 1];
+    sig[MAX_SLH_DSA_SIG_BYTES as usize] = SIGHASH_ALL;
     let non_coinbase = tx_with_one_input_one_output_with_witness(
         prev_txid,
         0,
@@ -1277,7 +1279,8 @@ fn validate_block_basic_slh_inactive_at_height() {
 fn validate_block_basic_slh_active_at_height() {
     let prev_txid = [0xacu8; 32];
     let pubkey = vec![0u8; SLH_DSA_SHAKE_256F_PUBKEY_BYTES as usize];
-    let sig = vec![0x01];
+    let mut sig = vec![0u8; (MAX_SLH_DSA_SIG_BYTES as usize) + 1];
+    sig[MAX_SLH_DSA_SIG_BYTES as usize] = SIGHASH_ALL;
     let non_coinbase = tx_with_one_input_one_output_with_witness(
         prev_txid,
         0,
@@ -1811,6 +1814,7 @@ fn sign_input_witness(
         );
         EVP_MD_CTX_free(mctx);
         assert_eq!(sig_len, ML_DSA_87_SIG_BYTES as usize);
+        sig.push(SIGHASH_ALL);
 
         crate::tx::WitnessItem {
             suite_id: SUITE_ID_ML_DSA_87,
