@@ -34,6 +34,7 @@ EXPECTED_GATES = frozenset(
         "CV-REPLAY",
         "CV-SIG",
         "CV-SIGHASH",
+        "CV-STEALTH",
         "CV-SUBSIDY",
         "CV-TIMESTAMP",
         "CV-UTXO-BASIC",

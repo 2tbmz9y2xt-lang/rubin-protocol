@@ -117,3 +117,127 @@ pub fn validate_stealth_spend(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constants::{COV_TYPE_STEALTH, MAX_STEALTH_COVENANT_DATA};
+    use crate::tx::{TxInput, TxOutput};
+
+    fn stealth_cov_data(one_time_key_id: [u8; 32]) -> Vec<u8> {
+        let mut out = vec![0u8; MAX_STEALTH_COVENANT_DATA as usize];
+        out[ML_KEM_1024_CT_BYTES as usize..MAX_STEALTH_COVENANT_DATA as usize]
+            .copy_from_slice(&one_time_key_id);
+        out
+    }
+
+    fn dummy_entry(one_time_key_id: [u8; 32]) -> UtxoEntry {
+        UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_STEALTH,
+            covenant_data: stealth_cov_data(one_time_key_id),
+            creation_height: 0,
+            created_by_coinbase: false,
+        }
+    }
+
+    fn dummy_tx_ctx() -> (Tx, u32, u64, [u8; 32]) {
+        let mut prev = [0u8; 32];
+        prev[0] = 0x42;
+        let mut chain_id = [0u8; 32];
+        chain_id[0] = 0x11;
+        (
+            Tx {
+                version: 1,
+                tx_kind: 0x00,
+                tx_nonce: 7,
+                inputs: vec![TxInput {
+                    prev_txid: prev,
+                    prev_vout: 0,
+                    script_sig: vec![],
+                    sequence: 0,
+                }],
+                outputs: vec![TxOutput {
+                    value: 90,
+                    covenant_type: crate::constants::COV_TYPE_P2PK,
+                    covenant_data: vec![0u8; 33],
+                }],
+                locktime: 0,
+                witness: vec![],
+                da_payload: vec![],
+                da_commit_core: None,
+                da_chunk_core: None,
+            },
+            0,
+            100,
+            chain_id,
+        )
+    }
+
+    #[test]
+    fn parse_stealth_covenant_data_len_mismatch() {
+        let err = parse_stealth_covenant_data(&vec![0u8; (MAX_STEALTH_COVENANT_DATA - 1) as usize])
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    }
+
+    #[test]
+    fn parse_stealth_covenant_data_valid() {
+        let mut key = [0u8; 32];
+        key[0] = 0xaa;
+        key[31] = 0x55;
+        let cov = parse_stealth_covenant_data(&stealth_cov_data(key)).expect("parse");
+        assert_eq!(cov.ciphertext.len() as u64, ML_KEM_1024_CT_BYTES);
+        assert_eq!(cov.one_time_key_id, key);
+    }
+
+    #[test]
+    fn validate_stealth_spend_suite_invalid() {
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let entry = dummy_entry([0u8; 32]);
+        let w = WitnessItem {
+            suite_id: 0x03,
+            pubkey: vec![],
+            signature: vec![],
+        };
+        let err = validate_stealth_spend(&entry, &w, &tx, input_index, input_value, chain_id, 200)
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    }
+
+    #[test]
+    fn validate_stealth_spend_key_binding_mismatch() {
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let entry = dummy_entry([0u8; 32]);
+        let w = WitnessItem {
+            suite_id: SUITE_ID_ML_DSA_87,
+            pubkey: vec![0x11; ML_DSA_87_PUBKEY_BYTES as usize],
+            signature: vec![0x00; (ML_DSA_87_SIG_BYTES + 1) as usize],
+        };
+        let err = validate_stealth_spend(&entry, &w, &tx, input_index, input_value, chain_id, 200)
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    }
+
+    #[test]
+    fn validate_stealth_spend_slh_preactivation() {
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let entry = dummy_entry([0u8; 32]);
+        let w = WitnessItem {
+            suite_id: SUITE_ID_SLH_DSA_SHAKE_256F,
+            pubkey: vec![],
+            signature: vec![],
+        };
+        let err = validate_stealth_spend(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            SLH_DSA_ACTIVATION_HEIGHT - 1,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    }
+}

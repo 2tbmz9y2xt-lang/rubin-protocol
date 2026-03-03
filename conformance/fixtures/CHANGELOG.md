@@ -34,6 +34,26 @@ Policy:
 - `CV-VAULT.json`
 - `CV-WEIGHT.json`
 
+## 2026-03-03 — Stealth conformance coverage closure (Q-RFC-STEALTH-01-COVERAGE)
+
+Причина:
+- закрыть gap покрытия для `CORE_STEALTH` после merge RFC-356: добавить отдельный gate `CV-STEALTH`;
+- зафиксировать parse/creation и spend-пути для `CORE_STEALTH`:
+  - covenant_data length valid/invalid;
+  - valid ML-DSA spend;
+  - invalid suite (`TX_ERR_SIG_ALG_INVALID`);
+  - one_time_key_id mismatch (`TX_ERR_SIG_INVALID`);
+  - malformed stealth covenant_data on spend (`TX_ERR_COVENANT_TYPE_INVALID`);
+  - SLH pre-activation reject и SLH at activation success.
+
+Инструменты:
+- базовые tx взяты из `CV-UTXO-BASIC` (`CV-U-06`, `CV-U-16`) через `tx_hex_from`/`tx_hex_mutations`,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-STEALTH`,
+- синхронизация матрицы: `tools/gen_conformance_matrix.py`.
+
+Изменённые fixtures:
+- `CV-STEALTH.json` (new)
+
 ## 2026-03-03 — Block-level limit vectors (Q-CONF-21)
 
 Причина:
