@@ -1,8 +1,7 @@
 use crate::constants::{
     LOCK_MODE_HEIGHT, LOCK_MODE_TIMESTAMP, MAX_HTLC_COVENANT_DATA, MAX_HTLC_PREIMAGE_BYTES,
-    MAX_SLH_DSA_SIG_BYTES, MIN_HTLC_PREIMAGE_BYTES, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES,
-    SLH_DSA_ACTIVATION_HEIGHT, SLH_DSA_SHAKE_256F_PUBKEY_BYTES, SUITE_ID_ML_DSA_87,
-    SUITE_ID_SENTINEL, SUITE_ID_SLH_DSA_SHAKE_256F,
+    MIN_HTLC_PREIMAGE_BYTES, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87,
+    SUITE_ID_SENTINEL,
 };
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
@@ -199,22 +198,6 @@ pub fn validate_htlc_spend(
                 ));
             }
         }
-        SUITE_ID_SLH_DSA_SHAKE_256F => {
-            if block_height < SLH_DSA_ACTIVATION_HEIGHT {
-                return Err(TxError::new(
-                    ErrorCode::TxErrSigAlgInvalid,
-                    "SLH-DSA suite inactive at this height",
-                ));
-            }
-            if sig_item.pubkey.len() as u64 != SLH_DSA_SHAKE_256F_PUBKEY_BYTES
-                || sig_item.signature.len() as u64 != MAX_SLH_DSA_SIG_BYTES + 1
-            {
-                return Err(TxError::new(
-                    ErrorCode::TxErrSigNoncanonical,
-                    "non-canonical SLH-DSA witness item lengths",
-                ));
-            }
-        }
         _ => {
             return Err(TxError::new(
                 ErrorCode::TxErrSigAlgInvalid,
@@ -232,7 +215,7 @@ pub fn validate_htlc_spend(
 
     let Some((&sighash_type, crypto_sig)) = sig_item.signature.split_last() else {
         return Err(TxError::new(
-            ErrorCode::TxErrSighashTypeInvalid,
+            ErrorCode::TxErrParse,
             "missing sighash_type byte",
         ));
     };

@@ -1,7 +1,6 @@
 use crate::constants::{
-    MAX_SLH_DSA_SIG_BYTES, MAX_STEALTH_COVENANT_DATA, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES,
-    ML_KEM_1024_CT_BYTES, SLH_DSA_ACTIVATION_HEIGHT, SLH_DSA_SHAKE_256F_PUBKEY_BYTES,
-    SUITE_ID_ML_DSA_87, SUITE_ID_SLH_DSA_SHAKE_256F,
+    MAX_STEALTH_COVENANT_DATA, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, ML_KEM_1024_CT_BYTES,
+    SUITE_ID_ML_DSA_87,
 };
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
@@ -51,41 +50,21 @@ pub fn validate_stealth_spend(
     let cov = parse_stealth_covenant_data(&entry.covenant_data)?;
     let _ = cov.ciphertext;
 
-    if w.suite_id != SUITE_ID_ML_DSA_87 && w.suite_id != SUITE_ID_SLH_DSA_SHAKE_256F {
+    if w.suite_id != SUITE_ID_ML_DSA_87 {
         return Err(TxError::new(
             ErrorCode::TxErrSigAlgInvalid,
             "CORE_STEALTH suite invalid",
         ));
     }
-    if w.suite_id == SUITE_ID_SLH_DSA_SHAKE_256F && block_height < SLH_DSA_ACTIVATION_HEIGHT {
-        return Err(TxError::new(
-            ErrorCode::TxErrSigAlgInvalid,
-            "SLH-DSA suite inactive at this height",
-        ));
-    }
+    let _ = block_height;
 
-    match w.suite_id {
-        SUITE_ID_ML_DSA_87 => {
-            if w.pubkey.len() as u64 != ML_DSA_87_PUBKEY_BYTES
-                || w.signature.len() as u64 != ML_DSA_87_SIG_BYTES + 1
-            {
-                return Err(TxError::new(
-                    ErrorCode::TxErrSigNoncanonical,
-                    "non-canonical ML-DSA witness item lengths",
-                ));
-            }
-        }
-        SUITE_ID_SLH_DSA_SHAKE_256F => {
-            if w.pubkey.len() as u64 != SLH_DSA_SHAKE_256F_PUBKEY_BYTES
-                || w.signature.len() as u64 != MAX_SLH_DSA_SIG_BYTES + 1
-            {
-                return Err(TxError::new(
-                    ErrorCode::TxErrSigNoncanonical,
-                    "non-canonical SLH-DSA witness item lengths",
-                ));
-            }
-        }
-        _ => {}
+    if w.pubkey.len() as u64 != ML_DSA_87_PUBKEY_BYTES
+        || w.signature.len() as u64 != ML_DSA_87_SIG_BYTES + 1
+    {
+        return Err(TxError::new(
+            ErrorCode::TxErrSigNoncanonical,
+            "non-canonical ML-DSA witness item lengths",
+        ));
     }
 
     if sha3_256(&w.pubkey) != cov.one_time_key_id {
@@ -97,7 +76,7 @@ pub fn validate_stealth_spend(
 
     let Some((&sighash_type, crypto_sig)) = w.signature.split_last() else {
         return Err(TxError::new(
-            ErrorCode::TxErrSighashTypeInvalid,
+            ErrorCode::TxErrParse,
             "missing sighash_type byte",
         ));
     };
@@ -220,24 +199,16 @@ mod tests {
     }
 
     #[test]
-    fn validate_stealth_spend_slh_preactivation() {
+    fn validate_stealth_spend_non_native_suite_rejected_sig_alg_invalid() {
         let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
         let entry = dummy_entry([0u8; 32]);
         let w = WitnessItem {
-            suite_id: SUITE_ID_SLH_DSA_SHAKE_256F,
+            suite_id: 0x02, // non-native / unknown suite
             pubkey: vec![],
             signature: vec![],
         };
-        let err = validate_stealth_spend(
-            &entry,
-            &w,
-            &tx,
-            input_index,
-            input_value,
-            chain_id,
-            SLH_DSA_ACTIVATION_HEIGHT - 1,
-        )
-        .unwrap_err();
+        let err = validate_stealth_spend(&entry, &w, &tx, input_index, input_value, chain_id, 0)
+            .unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
     }
 }

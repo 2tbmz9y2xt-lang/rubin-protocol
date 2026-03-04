@@ -157,9 +157,6 @@ struct Request {
     suite_id: Option<u8>,
 
     #[serde(default)]
-    slh_activation_height: Option<u64>,
-
-    #[serde(default)]
     key_binding_ok: Option<bool>,
 
     #[serde(default)]
@@ -3516,7 +3513,6 @@ fn main() {
             let structural_ok = req.structural_ok.unwrap_or(true);
             let locktime_ok = req.locktime_ok.unwrap_or(true);
             let suite_id = req.suite_id.unwrap_or(0x01);
-            let activation_height = req.slh_activation_height.unwrap_or(1_000_000);
             let key_binding_ok = req.key_binding_ok.unwrap_or(true);
             let preimage_ok = req.preimage_ok.unwrap_or(true);
             let verify_ok = req.verify_ok.unwrap_or(true);
@@ -3528,9 +3524,7 @@ fn main() {
                 err = Some(err_code(ErrorCode::TxErrParse));
             } else if path == "refund" && !locktime_ok {
                 err = Some(err_code(ErrorCode::TxErrTimelockNotMet));
-            } else if (suite_id != 0x01 && suite_id != 0x02)
-                || (suite_id == 0x02 && req.height < activation_height)
-            {
+            } else if suite_id != 0x01 {
                 err = Some(err_code(ErrorCode::TxErrSigAlgInvalid));
             } else if !key_binding_ok || (path == "claim" && !preimage_ok) {
                 err = Some(err_code(ErrorCode::TxErrSigInvalid));

@@ -1,7 +1,4 @@
-use crate::constants::{
-    MAX_SLH_DSA_SIG_BYTES, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES,
-    SLH_DSA_SHAKE_256F_PUBKEY_BYTES, SUITE_ID_ML_DSA_87, SUITE_ID_SLH_DSA_SHAKE_256F,
-};
+use crate::constants::{ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87};
 use crate::error::{ErrorCode, TxError};
 use core::ffi::CStr;
 use std::sync::OnceLock;
@@ -58,7 +55,6 @@ extern "C" {
 fn suite_alg_name(suite_id: u8) -> Result<&'static CStr, TxError> {
     match suite_id {
         SUITE_ID_ML_DSA_87 => Ok(c"ML-DSA-87"),
-        SUITE_ID_SLH_DSA_SHAKE_256F => Ok(c"SLH-DSA-SHAKE-256f"),
         _ => Err(TxError::new(
             ErrorCode::TxErrSigAlgInvalid,
             "verify_sig: unsupported suite_id",
@@ -156,7 +152,6 @@ fn openssl_bootstrap(require_fips: bool) -> Result<(), TxError> {
     }
 
     openssl_check_sigalg(c"ML-DSA-87", c"provider=fips")?;
-    openssl_check_sigalg(c"SLH-DSA-SHAKE-256f", c"provider=fips")?;
     Ok(())
 }
 
@@ -166,25 +161,22 @@ pub fn verify_sig(
     signature: &[u8],
     digest32: &[u8; 32],
 ) -> Result<bool, TxError> {
+    if suite_id != SUITE_ID_ML_DSA_87 {
+        return Err(TxError::new(
+            ErrorCode::TxErrSigAlgInvalid,
+            "verify_sig: unsupported suite_id",
+        ));
+    }
+
     let alg = suite_alg_name(suite_id)?;
     ensure_openssl_bootstrap()?;
-    match suite_id {
-        SUITE_ID_ML_DSA_87 => {
-            if pubkey.len() != ML_DSA_87_PUBKEY_BYTES as usize
-                || signature.len() != ML_DSA_87_SIG_BYTES as usize
-            {
-                return Ok(false);
-            }
-        }
-        SUITE_ID_SLH_DSA_SHAKE_256F => {
-            if pubkey.len() != SLH_DSA_SHAKE_256F_PUBKEY_BYTES as usize
-                || signature.len() != MAX_SLH_DSA_SIG_BYTES as usize
-            {
-                return Ok(false);
-            }
-        }
-        _ => {}
+
+    if pubkey.len() != ML_DSA_87_PUBKEY_BYTES as usize
+        || signature.len() != ML_DSA_87_SIG_BYTES as usize
+    {
+        return Ok(false);
     }
+
     openssl_verify_sig_digest_oneshot(alg, pubkey, signature, digest32)
 }
 

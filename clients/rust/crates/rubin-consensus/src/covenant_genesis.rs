@@ -2,7 +2,7 @@ use crate::constants::{
     COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_EXT, COV_TYPE_HTLC, COV_TYPE_MULTISIG,
     COV_TYPE_P2PK, COV_TYPE_RESERVED_FUTURE, COV_TYPE_STEALTH, COV_TYPE_VAULT,
     MAX_ANCHOR_PAYLOAD_SIZE, MAX_COVENANT_DATA_PER_OUTPUT, MAX_P2PK_COVENANT_DATA,
-    SLH_DSA_ACTIVATION_HEIGHT, SUITE_ID_ML_DSA_87, SUITE_ID_SLH_DSA_SHAKE_256F,
+    SUITE_ID_ML_DSA_87,
 };
 use crate::core_ext::parse_core_ext_covenant_data;
 use crate::error::{ErrorCode, TxError};
@@ -11,7 +11,7 @@ use crate::stealth::parse_stealth_covenant_data;
 use crate::tx::Tx;
 use crate::vault::{parse_multisig_covenant_data, parse_vault_covenant_data};
 
-pub fn validate_tx_covenants_genesis(tx: &Tx, block_height: u64) -> Result<(), TxError> {
+pub fn validate_tx_covenants_genesis(tx: &Tx, _block_height: u64) -> Result<(), TxError> {
     for out in &tx.outputs {
         match out.covenant_type {
             COV_TYPE_P2PK => {
@@ -28,18 +28,10 @@ pub fn validate_tx_covenants_genesis(tx: &Tx, block_height: u64) -> Result<(), T
                     ));
                 }
                 let suite_id = out.covenant_data[0];
-                if suite_id != SUITE_ID_ML_DSA_87 && suite_id != SUITE_ID_SLH_DSA_SHAKE_256F {
+                if suite_id != SUITE_ID_ML_DSA_87 {
                     return Err(TxError::new(
                         ErrorCode::TxErrCovenantTypeInvalid,
                         "invalid CORE_P2PK suite_id",
-                    ));
-                }
-                if suite_id == SUITE_ID_SLH_DSA_SHAKE_256F
-                    && block_height < SLH_DSA_ACTIVATION_HEIGHT
-                {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrCovenantTypeInvalid,
-                        "CORE_P2PK SLH-DSA suite inactive at this height",
                     ));
                 }
             }

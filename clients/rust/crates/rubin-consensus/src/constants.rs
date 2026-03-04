@@ -45,13 +45,10 @@ pub const MAX_TX_INPUTS: u64 = 1024;
 pub const MAX_TX_OUTPUTS: u64 = 1024;
 pub const MAX_WITNESS_ITEMS: u64 = 1024;
 pub const MAX_WITNESS_BYTES_PER_TX: usize = 100_000;
-pub const MAX_SLH_WITNESS_BYTES_PER_TX: usize = 50_000;
 pub const MAX_SCRIPT_SIG_BYTES: u64 = 32;
 
 pub const SUITE_ID_SENTINEL: u8 = 0x00;
 pub const SUITE_ID_ML_DSA_87: u8 = 0x01;
-pub const SUITE_ID_SLH_DSA_SHAKE_256F: u8 = 0x02;
-pub const SLH_DSA_ACTIVATION_HEIGHT: u64 = 1_000_000;
 
 pub const COV_TYPE_P2PK: u16 = 0x0000;
 pub const COV_TYPE_ANCHOR: u16 = 0x0002;
@@ -68,16 +65,12 @@ pub const ML_DSA_87_SIG_BYTES: u64 = 4627;
 pub const ML_KEM_1024_CT_BYTES: u64 = 1568;
 pub const MAX_STEALTH_COVENANT_DATA: u64 = 1600;
 
-pub const SLH_DSA_SHAKE_256F_PUBKEY_BYTES: u64 = 64;
-pub const MAX_SLH_DSA_SIG_BYTES: u64 = 49_856;
-
 pub const SIGHASH_ALL: u8 = 0x01;
 pub const SIGHASH_NONE: u8 = 0x02;
 pub const SIGHASH_SINGLE: u8 = 0x03;
 pub const SIGHASH_ANYONECANPAY: u8 = 0x80;
 
 pub const VERIFY_COST_ML_DSA_87: u64 = 8;
-pub const VERIFY_COST_SLH_DSA_SHAKE_256F: u64 = 64;
 pub const VERIFY_COST_UNKNOWN_SUITE: u64 = 64;
 
 pub const SIGNAL_WINDOW: u64 = 2016;
