@@ -52,59 +52,6 @@ func TestMLDSA87Keypair_SignDigest32_NilKeypairErrors(t *testing.T) {
 	}
 }
 
-func TestSLHDSAKeypair_NilKeypairErrors(t *testing.T) {
-	var digest [32]byte
-	var kp *SLHDSASHAKE256fKeypair
-	if _, err := kp.SignDigest32(digest); err == nil {
-		t.Fatalf("expected error")
-	}
-	kp = &SLHDSASHAKE256fKeypair{}
-	if _, err := kp.SignDigest32(digest); err == nil {
-		t.Fatalf("expected error")
-	}
-}
-
-func TestSLHDSAKeypair_RoundtripAndPubkeyBytes(t *testing.T) {
-	kp, err := NewSLHDSASHAKE256fKeypair()
-	if err != nil {
-		t.Fatalf("NewSLHDSASHAKE256fKeypair: %v", err)
-	}
-	t.Cleanup(func() { kp.Close() })
-
-	pub := kp.PubkeyBytes()
-	if len(pub) != SLH_DSA_SHAKE_256F_PUBKEY_BYTES {
-		t.Fatalf("pubkey len=%d", len(pub))
-	}
-	pub[0] ^= 0x01
-	pub2 := kp.PubkeyBytes()
-	if pub2[0] == pub[0] {
-		t.Fatalf("expected PubkeyBytes to return a copy")
-	}
-
-	var digest [32]byte
-	digest[0] = 0x42
-	sig, err := kp.SignDigest32(digest)
-	if err != nil {
-		t.Fatalf("SignDigest32: %v", err)
-	}
-	if len(sig) == 0 {
-		t.Fatalf("expected non-empty signature")
-	}
-
-	ok, err := verifySig(SUITE_ID_SLH_DSA_SHAKE_256F, kp.PubkeyBytes(), sig, digest)
-	if err != nil {
-		t.Fatalf("verifySig: %v", err)
-	}
-	if !ok {
-		t.Fatalf("verifySig=false")
-	}
-
-	var nilKP *SLHDSASHAKE256fKeypair
-	if got := nilKP.PubkeyBytes(); got != nil {
-		t.Fatalf("expected nil for nil receiver")
-	}
-}
-
 func TestNewOpenSSLRawKeypair_RejectsUnknownAlg(t *testing.T) {
 	_, _, err := newOpenSSLRawKeypair("NO_SUCH_ALG", 1)
 	if err == nil {
@@ -138,15 +85,11 @@ func TestSignOpenSSLDigest32_ExactSigLenMismatchErrors(t *testing.T) {
 }
 
 func TestSignOpenSSLDigest32_BufferTooSmallErrors(t *testing.T) {
-	kp, err := NewSLHDSASHAKE256fKeypair()
-	if err != nil {
-		t.Fatalf("NewSLHDSASHAKE256fKeypair: %v", err)
-	}
-	t.Cleanup(func() { kp.Close() })
+	kp := mustMLDSA87Keypair(t)
 
 	var digest [32]byte
 	digest[0] = 0x02
-	_, err = signOpenSSLDigest32(kp.pkey, digest, 1, 0)
+	_, err := signOpenSSLDigest32(kp.pkey, digest, 1, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -187,20 +130,6 @@ func TestNewMLDSA87Keypair_InvalidFIPSModeRejected(t *testing.T) {
 
 	t.Setenv("RUBIN_OPENSSL_FIPS_MODE", "definitely-invalid")
 	_, err := NewMLDSA87Keypair()
-	if err == nil {
-		t.Fatalf("expected bootstrap mode error")
-	}
-	if !strings.Contains(err.Error(), "invalid RUBIN_OPENSSL_FIPS_MODE") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestNewSLHDSASHAKE256fKeypair_InvalidFIPSModeRejected(t *testing.T) {
-	resetOpenSSLBootstrapStateForTests()
-	t.Cleanup(resetOpenSSLBootstrapStateForTests)
-
-	t.Setenv("RUBIN_OPENSSL_FIPS_MODE", "definitely-invalid")
-	_, err := NewSLHDSASHAKE256fKeypair()
 	if err == nil {
 		t.Fatalf("expected bootstrap mode error")
 	}

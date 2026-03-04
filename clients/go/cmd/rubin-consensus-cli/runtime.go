@@ -1609,7 +1609,6 @@ func runFromStdin() {
 		structuralOK := boolOrDefault(req.StructuralOK, true)
 		locktimeOK := boolOrDefault(req.LocktimeOK, true)
 		suiteID := uint8OrDefault(req.SuiteID, 1)
-		activationHeight := uint64OrDefault(req.SLHActivationHeight, 1_000_000)
 		keyBindingOK := boolOrDefault(req.KeyBindingOK, true)
 		preimageOK := boolOrDefault(req.PreimageOK, true)
 		verifyOK := boolOrDefault(req.VerifyOK, true)
@@ -1621,9 +1620,7 @@ func runFromStdin() {
 			errCode = string(consensus.TX_ERR_PARSE)
 		case path == "refund" && !locktimeOK:
 			errCode = string(consensus.TX_ERR_TIMELOCK_NOT_MET)
-		case suiteID != consensus.SUITE_ID_ML_DSA_87 && suiteID != consensus.SUITE_ID_SLH_DSA_SHAKE_256F:
-			errCode = string(consensus.TX_ERR_SIG_ALG_INVALID)
-		case suiteID == consensus.SUITE_ID_SLH_DSA_SHAKE_256F && req.Height < activationHeight:
+		case suiteID != consensus.SUITE_ID_ML_DSA_87:
 			errCode = string(consensus.TX_ERR_SIG_ALG_INVALID)
 		case !keyBindingOK:
 			errCode = string(consensus.TX_ERR_SIG_INVALID)

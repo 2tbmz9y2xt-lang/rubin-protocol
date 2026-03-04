@@ -92,8 +92,7 @@ import (
 )
 
 var keygenAllowlist = map[string]int{
-	"ML-DSA-87":          ML_DSA_87_PUBKEY_BYTES,
-	"SLH-DSA-SHAKE-256f": SLH_DSA_SHAKE_256F_PUBKEY_BYTES,
+	"ML-DSA-87": ML_DSA_87_PUBKEY_BYTES,
 }
 
 func newOpenSSLRawKeypair(alg string, expectedPubkeyLen int) (*C.EVP_PKEY, []byte, error) {
@@ -213,46 +212,6 @@ func (k *MLDSA87Keypair) SignDigest32(digest [32]byte) ([]byte, error) {
 		return nil, fmt.Errorf("nil keypair")
 	}
 	return signOpenSSLDigest32(k.pkey, digest, ML_DSA_87_SIG_BYTES, ML_DSA_87_SIG_BYTES)
-}
-
-// SLHDSASHAKE256fKeypair is a non-consensus helper used by conformance tooling to
-// generate real SLH-DSA signatures (fallback suite, post-activation).
-type SLHDSASHAKE256fKeypair struct {
-	pkey   *C.EVP_PKEY
-	pubkey []byte
-}
-
-func (k *SLHDSASHAKE256fKeypair) Close() {
-	if k == nil || k.pkey == nil {
-		return
-	}
-	C.EVP_PKEY_free(k.pkey)
-	k.pkey = nil
-}
-
-func (k *SLHDSASHAKE256fKeypair) PubkeyBytes() []byte {
-	if k == nil {
-		return nil
-	}
-	return append([]byte(nil), k.pubkey...)
-}
-
-func NewSLHDSASHAKE256fKeypair() (*SLHDSASHAKE256fKeypair, error) {
-	pkey, pub, err := newOpenSSLRawKeypair("SLH-DSA-SHAKE-256f", SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
-	if err != nil {
-		return nil, err
-	}
-
-	kp := &SLHDSASHAKE256fKeypair{pkey: pkey, pubkey: pub}
-	runtime.SetFinalizer(kp, func(k *SLHDSASHAKE256fKeypair) { k.Close() })
-	return kp, nil
-}
-
-func (k *SLHDSASHAKE256fKeypair) SignDigest32(digest [32]byte) ([]byte, error) {
-	if k == nil || k.pkey == nil {
-		return nil, fmt.Errorf("nil keypair")
-	}
-	return signOpenSSLDigest32(k.pkey, digest, MAX_SLH_DSA_SIG_BYTES, 0)
 }
 
 func cStringTrim0(b []byte) string {

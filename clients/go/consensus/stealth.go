@@ -29,22 +29,12 @@ func validateCoreStealthSpend(entry UtxoEntry, w WitnessItem, tx *Tx, inputIndex
 		return err
 	}
 
-	if w.SuiteID != SUITE_ID_ML_DSA_87 && w.SuiteID != SUITE_ID_SLH_DSA_SHAKE_256F {
+	if w.SuiteID != SUITE_ID_ML_DSA_87 {
 		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_STEALTH suite invalid")
 	}
-	if w.SuiteID == SUITE_ID_SLH_DSA_SHAKE_256F && blockHeight < SLH_DSA_ACTIVATION_HEIGHT {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "SLH-DSA suite inactive at this height")
-	}
-
-	switch w.SuiteID {
-	case SUITE_ID_ML_DSA_87:
-		if len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1 {
-			return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
-		}
-	case SUITE_ID_SLH_DSA_SHAKE_256F:
-		if len(w.Pubkey) != SLH_DSA_SHAKE_256F_PUBKEY_BYTES || len(w.Signature) != MAX_SLH_DSA_SIG_BYTES+1 {
-			return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical SLH-DSA witness item lengths")
-		}
+	_ = blockHeight
+	if len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1 {
+		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
 	}
 
 	if sha3_256(w.Pubkey) != c.OneTimeKeyID {

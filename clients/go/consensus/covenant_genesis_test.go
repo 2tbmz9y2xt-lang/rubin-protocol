@@ -56,7 +56,7 @@ func validVaultCovenantDataForP2PKOutput() []byte {
 
 func TestValidateTxCovenantsGenesis_P2PK_BadSuite(t *testing.T) {
 	data := make([]byte, MAX_P2PK_COVENANT_DATA)
-	data[0] = SUITE_ID_SLH_DSA_SHAKE_256F
+	data[0] = 0x02 // non-native/unknown suite
 	tx := &Tx{
 		Outputs: []TxOutput{
 			{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: data},
@@ -68,10 +68,6 @@ func TestValidateTxCovenantsGenesis_P2PK_BadSuite(t *testing.T) {
 	}
 	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
-	}
-
-	if err := ValidateTxCovenantsGenesis(tx, SLH_DSA_ACTIVATION_HEIGHT); err != nil {
-		t.Fatalf("unexpected error at activation height: %v", err)
 	}
 }
 

@@ -281,16 +281,10 @@ func applyNonCoinbaseTxBasicWork(
 			if w.SuiteID == SUITE_ID_SENTINEL {
 				return nil, 0, txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT sentinel forbidden under ACTIVE profile")
 			}
-			if w.SuiteID == SUITE_ID_SLH_DSA_SHAKE_256F && height < SLH_DSA_ACTIVATION_HEIGHT {
-				return nil, 0, txerr(TX_ERR_SIG_ALG_INVALID, "SLH-DSA suite inactive at this height")
-			}
 
 			switch w.SuiteID {
-			case SUITE_ID_ML_DSA_87, SUITE_ID_SLH_DSA_SHAKE_256F:
-				if err := checkSLHCanonical(w); err != nil {
-					return nil, 0, err
-				}
-				if w.SuiteID == SUITE_ID_ML_DSA_87 && (len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1) {
+			case SUITE_ID_ML_DSA_87:
+				if len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1 {
 					return nil, 0, txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
 				}
 				cryptoSig, sighashType, err := extractCryptoSigAndSighash(w)

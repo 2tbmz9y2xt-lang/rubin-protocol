@@ -99,9 +99,6 @@ static int rubin_openssl_bootstrap(
 	if (!rubin_check_sigalg("ML-DSA-87", "provider=fips", err_buf, err_buf_len)) {
 		return -1;
 	}
-	if (!rubin_check_sigalg("SLH-DSA-SHAKE-256f", "provider=fips", err_buf, err_buf_len)) {
-		return -1;
-	}
 	return 1;
 }
 
@@ -303,14 +300,6 @@ func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte
 			return false, nil
 		}
 		return verifyWithMapping("ML-DSA-87")
-	case SUITE_ID_SLH_DSA_SHAKE_256F:
-		if err := ensureOpenSSLBootstrap(); err != nil {
-			return false, err
-		}
-		if len(pubkey) != SLH_DSA_SHAKE_256F_PUBKEY_BYTES || len(signature) != MAX_SLH_DSA_SIG_BYTES {
-			return false, nil
-		}
-		return verifyWithMapping("SLH-DSA-SHAKE-256f")
 	default:
 		return false, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: unsupported suite_id")
 	}

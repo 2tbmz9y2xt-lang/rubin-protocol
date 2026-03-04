@@ -81,21 +81,6 @@ func TestOpenSSLBootstrap_NonEmptyConfigArgs(t *testing.T) {
 	}
 }
 
-func TestVerifySig_SLHBranchExecutesBootstrap(t *testing.T) {
-	resetOpenSSLBootstrapStateForTests()
-	t.Cleanup(resetOpenSSLBootstrapStateForTests)
-
-	t.Setenv("RUBIN_OPENSSL_FIPS_MODE", "off")
-	var digest [32]byte
-	ok, err := verifySig(SUITE_ID_SLH_DSA_SHAKE_256F, []byte{0x01}, []byte{0x02}, digest)
-	if err != nil {
-		t.Fatalf("verifySig(SLH invalid lengths): %v", err)
-	}
-	if ok {
-		t.Fatalf("expected verifySig=false for invalid SLH key/signature lengths")
-	}
-}
-
 func TestVerifySig_InvalidFIPSModeRejected(t *testing.T) {
 	resetOpenSSLBootstrapStateForTests()
 	t.Cleanup(resetOpenSSLBootstrapStateForTests)
@@ -111,28 +96,6 @@ func TestVerifySig_InvalidFIPSModeRejected(t *testing.T) {
 	t.Setenv("RUBIN_OPENSSL_FIPS_MODE", "definitely-invalid")
 
 	ok, verifyErr := verifySig(SUITE_ID_ML_DSA_87, kp.PubkeyBytes(), signature, digest)
-	if verifyErr == nil {
-		t.Fatalf("expected bootstrap mode error, got nil")
-	}
-	if ok {
-		t.Fatalf("expected verifySig=false on bootstrap mode error")
-	}
-	if got := mustTxErrCode(t, verifyErr); got != TX_ERR_PARSE {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
-	}
-	if !strings.Contains(verifyErr.Error(), "invalid RUBIN_OPENSSL_FIPS_MODE") {
-		t.Fatalf("expected invalid mode context, got: %v", verifyErr)
-	}
-}
-
-func TestVerifySig_InvalidFIPSModeRejectedForSLH(t *testing.T) {
-	resetOpenSSLBootstrapStateForTests()
-	t.Cleanup(resetOpenSSLBootstrapStateForTests)
-
-	var digest [32]byte
-	t.Setenv("RUBIN_OPENSSL_FIPS_MODE", "definitely-invalid")
-
-	ok, verifyErr := verifySig(SUITE_ID_SLH_DSA_SHAKE_256F, []byte{0x01}, []byte{0x02}, digest)
 	if verifyErr == nil {
 		t.Fatalf("expected bootstrap mode error, got nil")
 	}

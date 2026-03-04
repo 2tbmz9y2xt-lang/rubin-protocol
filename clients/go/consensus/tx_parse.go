@@ -287,7 +287,6 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 	witnessCount := int(witnessCountU64)
 
 	witnessBytes := witnessCountVarintBytes
-	slhWitnessBytes := 0
 	witness := make([]WitnessItem, 0, witnessCount)
 
 	for i := 0; i < witnessCount; i++ {
@@ -327,15 +326,12 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 		}
 		witnessBytes += sigLen
 
+		if suiteID != SUITE_ID_SENTINEL && sigLen == 0 {
+			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "missing sighash_type byte")
+		}
+
 		if witnessBytes > MAX_WITNESS_BYTES_PER_TX {
 			return nil, zero, zero, 0, txerr(TX_ERR_WITNESS_OVERFLOW, "witness bytes overflow")
-		}
-		itemBytes := 1 + pubLenVarintBytes + pubLen + sigLenVarintBytes + sigLen
-		if suiteID == SUITE_ID_SLH_DSA_SHAKE_256F {
-			slhWitnessBytes += itemBytes
-			if slhWitnessBytes > MAX_SLH_WITNESS_BYTES_PER_TX {
-				return nil, zero, zero, 0, txerr(TX_ERR_WITNESS_OVERFLOW, "SLH witness bytes overflow")
-			}
 		}
 
 		switch suiteID {
@@ -359,10 +355,6 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 		case SUITE_ID_ML_DSA_87:
 			if !(pubLen == ML_DSA_87_PUBKEY_BYTES && sigLen == ML_DSA_87_SIG_BYTES+1) {
 				return nil, zero, zero, 0, txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
-			}
-		case SUITE_ID_SLH_DSA_SHAKE_256F:
-			if !(pubLen == SLH_DSA_SHAKE_256F_PUBKEY_BYTES && sigLen == MAX_SLH_DSA_SIG_BYTES+1) {
-				return nil, zero, zero, 0, txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical SLH-DSA witness item lengths")
 			}
 		default:
 			// Unknown suites are accepted at parse stage (CANONICAL §12.2 / CV-SIG-05).

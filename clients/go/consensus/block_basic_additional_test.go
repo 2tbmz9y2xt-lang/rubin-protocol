@@ -41,8 +41,8 @@ func TestTxWeightAndStats_Nil(t *testing.T) {
 func TestTxWeightAndStats_MLAndSLHCountsAndDAAndAnchor(t *testing.T) {
 	mlPub := make([]byte, ML_DSA_87_PUBKEY_BYTES)
 	mlSig := make([]byte, ML_DSA_87_SIG_BYTES+1)
-	slhPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
-	slhSig := make([]byte, MAX_SLH_DSA_SIG_BYTES+1)
+	unknownPub := make([]byte, 64)
+	unknownSig := make([]byte, 49_856+1)
 
 	tx := &Tx{
 		Version: 1,
@@ -62,7 +62,7 @@ func TestTxWeightAndStats_MLAndSLHCountsAndDAAndAnchor(t *testing.T) {
 		},
 		Witness: []WitnessItem{
 			{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: mlPub, Signature: mlSig},
-			{SuiteID: SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: slhPub, Signature: slhSig},
+			{SuiteID: 0x02, Pubkey: unknownPub, Signature: unknownSig}, // non-native/unknown suite
 		},
 		DaPayload: []byte{0x01, 0x02, 0x03},
 	}
@@ -93,8 +93,8 @@ func TestTxWeightAndStats_MLAndSLHCountsAndDAAndAnchor(t *testing.T) {
 func TestTxWeightAndStats_NonCanonicalWitnessLengths_NoSigCost(t *testing.T) {
 	mlPub := make([]byte, ML_DSA_87_PUBKEY_BYTES)
 	mlSig := []byte{0x01} // wrong length for ML-DSA
-	slhPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
-	slhSig := []byte{} // empty => should not contribute sig_cost
+	unknownPub := make([]byte, 64)
+	unknownSig := []byte{0x01} // minimal non-empty signature (satisfies sighash tail rule)
 
 	tx := &Tx{
 		Version: 1,
@@ -113,7 +113,7 @@ func TestTxWeightAndStats_NonCanonicalWitnessLengths_NoSigCost(t *testing.T) {
 		},
 		Witness: []WitnessItem{
 			{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: mlPub, Signature: mlSig},
-			{SuiteID: SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: slhPub, Signature: slhSig},
+			{SuiteID: 0x02, Pubkey: unknownPub, Signature: unknownSig}, // non-native/unknown suite
 		},
 		DaPayload: []byte{0x01},
 	}

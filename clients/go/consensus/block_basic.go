@@ -167,9 +167,6 @@ func validateParsedBlockBasicWithContextAtHeight(
 	}
 	seenNonces := make(map[uint64]struct{}, len(pb.Txs))
 	for i, tx := range pb.Txs {
-		if err := validateWitnessSuiteActivation(tx, i, blockHeight); err != nil {
-			return nil, err
-		}
 		if i > 0 && isCoinbaseTx(tx) {
 			return nil, txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase-like tx is only allowed at index 0")
 		}
@@ -304,22 +301,6 @@ func addU64ToU128Block(x u128, v uint64) (u128, error) {
 		return u128{}, txerr(BLOCK_ERR_PARSE, "u128 overflow")
 	}
 	return u128{hi: hi, lo: lo}, nil
-}
-
-func validateWitnessSuiteActivation(tx *Tx, txIndex int, blockHeight uint64) error {
-	if tx == nil {
-		return txerr(TX_ERR_PARSE, "nil tx")
-	}
-	if txIndex == 0 {
-		// Coinbase witness is structurally empty in genesis profile.
-		return nil
-	}
-	for _, w := range tx.Witness {
-		if w.SuiteID == SUITE_ID_SLH_DSA_SHAKE_256F && blockHeight < SLH_DSA_ACTIVATION_HEIGHT {
-			return txerr(TX_ERR_SIG_ALG_INVALID, "SLH-DSA suite inactive at this height")
-		}
-	}
-	return nil
 }
 
 func validateCoinbaseWitnessCommitment(pb *ParsedBlock) error {
@@ -577,7 +558,6 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 	var witnessSize uint64
 	witnessSize = compactSizeLen(uint64(len(tx.Witness)))
 	var mlCount uint64
-	var slhCount uint64
 	var unknownSuiteCount uint64
 	for _, w := range tx.Witness {
 		var err error
@@ -606,10 +586,6 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 			if len(w.Pubkey) == ML_DSA_87_PUBKEY_BYTES && len(w.Signature) == ML_DSA_87_SIG_BYTES+1 {
 				mlCount++
 			}
-		case SUITE_ID_SLH_DSA_SHAKE_256F:
-			if len(w.Pubkey) == SLH_DSA_SHAKE_256F_PUBKEY_BYTES && len(w.Signature) == MAX_SLH_DSA_SIG_BYTES+1 {
-				slhCount++
-			}
 		case SUITE_ID_SENTINEL:
 			// Sentinel does not contribute sig_cost.
 		default:
@@ -631,14 +607,7 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	slhCost, err := mulU64(slhCount, VERIFY_COST_SLH_DSA_SHAKE_256F)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-	sigCost, err := addU64(mlCost, slhCost)
-	if err != nil {
-		return 0, 0, 0, err
-	}
+	sigCost := mlCost
 	unknownCost, err := mulU64(unknownSuiteCount, VERIFY_COST_UNKNOWN_SUITE)
 	if err != nil {
 		return 0, 0, 0, err
