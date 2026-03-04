@@ -118,7 +118,7 @@ jobs:
             --organization-provider "$CODACY_ORGANIZATION_PROVIDER"
             -u "$CODACY_USERNAME"
             -p "$CODACY_PROJECT_NAME"
-            --commit-uuid "$CODACY_COMMIT_UUID"           --git-branch "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+            --commit-uuid "$CODACY_COMMIT_UUID"           
           )
 
           codacy_missing_repo_ok() {
