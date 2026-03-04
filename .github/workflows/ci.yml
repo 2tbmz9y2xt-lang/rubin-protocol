@@ -11,15 +11,6 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
-      - name: Checkout rubin-spec (for SECTION_HASHES integrity)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          repository: 2tbmz9y2xt-lang/rubin-spec
-          path: rubin-spec
-          fetch-depth: 0
-
-      - name: Section hashes check (CANONICAL)
-        run: node scripts/check-section-hashes.mjs --spec-root rubin-spec/spec
       - name: Sensitive files/content gate
         run: python3 tools/check_sensitive_files.py
 

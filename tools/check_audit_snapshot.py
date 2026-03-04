@@ -86,9 +86,14 @@ def main() -> int:
     if not isinstance(ci, dict):
         return fail("ci_enforcement must be object")
     ci_text = ci_path.read_text(encoding="utf-8", errors="strict")
+    spec_ci_path = context_root / ".github" / "workflows" / "spec-ci.yml"
+    spec_ci_text = ""
+    if spec_ci_path.exists():
+        spec_ci_text = spec_ci_path.read_text(encoding="utf-8", errors="strict")
     expected_ci = {
         "ci_workflow_present": True,
-        "section_hashes_check": "check-section-hashes.mjs" in ci_text,
+        "section_hashes_check": ("check-section-hashes.mjs" in ci_text)
+        or ("check_section_hashes.py" in spec_ci_text),
         "formal_claims_lint_check": "check_formal_claims_lint.py" in ci_text,
         "conformance_bundle_check": "run_cv_bundle.py" in ci_text,
     }
