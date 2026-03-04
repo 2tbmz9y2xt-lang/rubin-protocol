@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::RwLock;
 use std::time::Duration;
@@ -125,60 +125,66 @@ impl PeerSession {
         self.peer.clone()
     }
 
-    pub fn read_message(&mut self) -> Result<WireMessage, String> {
+    pub fn read_message(&mut self) -> io::Result<WireMessage> {
         self.stream
             .set_read_timeout(Some(self.cfg.read_deadline))
-            .map_err(|e| e.to_string())?;
+            .map_err(io::Error::other)?;
 
         let mut header = [0u8; WIRE_HEADER_SIZE];
-        self.stream
-            .read_exact(&mut header)
-            .map_err(|e| e.to_string())?;
+        self.stream.read_exact(&mut header)?;
 
         let expected_magic = network_magic(&self.cfg.network);
         if header[0..4] != expected_magic {
-            return Err("invalid envelope magic".to_string());
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid envelope magic",
+            ));
         }
 
         let command = decode_wire_command(&header[4..4 + WIRE_COMMAND_SIZE])?;
         let payload_len = u32::from_le_bytes(header[16..20].try_into().expect("len"));
         if payload_len as u64 > MAX_RELAY_MSG_BYTES {
-            return Err(format!("relay payload exceeds cap: {payload_len}"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("relay payload exceeds cap: {payload_len}"),
+            ));
         }
 
         let mut payload = vec![0u8; payload_len as usize];
         if payload_len > 0 {
-            self.stream
-                .read_exact(&mut payload)
-                .map_err(|e| e.to_string())?;
+            self.stream.read_exact(&mut payload)?;
         }
 
         let checksum = wire_checksum(&payload);
         if header[20..24] != checksum {
-            return Err("invalid envelope checksum".to_string());
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid envelope checksum",
+            ));
         }
 
         Ok(WireMessage { command, payload })
     }
 
-    pub fn write_message(&mut self, msg: &WireMessage) -> Result<(), String> {
+    pub fn write_message(&mut self, msg: &WireMessage) -> io::Result<()> {
         self.stream
             .set_write_timeout(Some(self.cfg.write_deadline))
-            .map_err(|e| e.to_string())?;
+            .map_err(io::Error::other)?;
 
         if msg.payload.len() as u64 > MAX_RELAY_MSG_BYTES {
-            return Err(format!("relay payload exceeds cap: {}", msg.payload.len()));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("relay payload exceeds cap: {}", msg.payload.len()),
+            ));
         }
 
         let header =
             build_envelope_header(network_magic(&self.cfg.network), &msg.command, &msg.payload)?;
-        self.stream.write_all(&header).map_err(|e| e.to_string())?;
+        self.stream.write_all(&header)?;
         if !msg.payload.is_empty() {
-            self.stream
-                .write_all(&msg.payload)
-                .map_err(|e| e.to_string())?;
+            self.stream.write_all(&msg.payload)?;
         }
-        self.stream.flush().map_err(|e| e.to_string())?;
+        self.stream.flush()?;
         Ok(())
     }
 
@@ -187,9 +193,23 @@ impl PeerSession {
         self.peer.last_error = reason.to_string();
     }
 
-    pub fn run_message_loop(&mut self) -> Result<(), String> {
+    pub fn run_message_loop(&mut self) -> io::Result<()> {
         loop {
-            let msg = self.read_message()?;
+            let msg = match self.read_message() {
+                Ok(m) => m,
+                Err(err) => {
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                    ) {
+                        continue;
+                    }
+                    if err.kind() == io::ErrorKind::UnexpectedEof {
+                        return Ok(());
+                    }
+                    return Err(err);
+                }
+            };
             match msg.command.as_str() {
                 "ping" => {
                     let pong = WireMessage {
@@ -204,7 +224,10 @@ impl PeerSession {
                 other => {
                     self.bump_ban(1, &format!("unknown command: {other}"));
                     if self.peer.ban_score >= self.cfg.ban_threshold {
-                        return Err("peer banned".to_string());
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "peer banned",
+                        ));
                     }
                 }
             }
@@ -216,8 +239,8 @@ pub fn perform_version_handshake(
     stream: TcpStream,
     cfg: PeerRuntimeConfig,
     local: VersionPayloadV1,
-) -> Result<PeerState, String> {
-    let mut session = PeerSession::new(stream, cfg)?;
+) -> io::Result<PeerSession> {
+    let mut session = PeerSession::new(stream, cfg).map_err(io::Error::other)?;
     let version_payload = marshal_version_payload_v1(local);
     session.write_message(&WireMessage {
         command: "version".to_string(),
@@ -232,9 +255,12 @@ pub fn perform_version_handshake(
                 let remote = unmarshal_version_payload_v1(&msg.payload)?;
                 validate_remote_version(remote)?;
                 if !protocol_versions_compatible(local.protocol_version, remote.protocol_version) {
-                    return Err(format!(
-                        "protocol_version mismatch: local={} remote={}",
-                        local.protocol_version, remote.protocol_version
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "protocol_version mismatch: local={} remote={}",
+                            local.protocol_version, remote.protocol_version
+                        ),
                     ));
                 }
 
@@ -251,24 +277,32 @@ pub fn perform_version_handshake(
             "verack" => {
                 session.peer.verack_received = true;
             }
-            other => {
-                session.bump_ban(1, &format!("unexpected handshake command: {other}"));
+            _other => {
+                session.bump_ban(10, "unexpected pre-handshake command");
                 if session.peer.ban_score >= session.cfg.ban_threshold {
-                    return Err("peer banned".to_string());
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "peer banned during handshake",
+                    ));
                 }
             }
         }
 
-        if session.peer.version_received && session.peer.verack_received {
+        let completed =
+            session.peer.version_received && session.peer.verack_received && sent_verack;
+        if completed {
             session.peer.handshake_complete = true;
-            return Ok(session.peer);
+            return Ok(session);
         }
     }
 }
 
-fn validate_remote_version(remote: VersionPayloadV1) -> Result<(), String> {
+fn validate_remote_version(remote: VersionPayloadV1) -> io::Result<()> {
     if remote.protocol_version == 0 {
-        return Err("invalid protocol_version".to_string());
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid protocol_version",
+        ));
     }
     Ok(())
 }
@@ -292,9 +326,12 @@ fn marshal_version_payload_v1(v: VersionPayloadV1) -> Vec<u8> {
     payload
 }
 
-fn unmarshal_version_payload_v1(payload: &[u8]) -> Result<VersionPayloadV1, String> {
+fn unmarshal_version_payload_v1(payload: &[u8]) -> io::Result<VersionPayloadV1> {
     if payload.len() < 13 {
-        return Err("version payload too short".to_string());
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "version payload too short",
+        ));
     }
     let protocol_version = u32::from_le_bytes(payload[0..4].try_into().expect("pv"));
     let tx_relay = payload[4] == 1;
@@ -321,12 +358,13 @@ fn build_envelope_header(
     magic: [u8; 4],
     command: &str,
     payload: &[u8],
-) -> Result<[u8; WIRE_HEADER_SIZE], String> {
+) -> io::Result<[u8; WIRE_HEADER_SIZE]> {
     let command_bytes = encode_wire_command(command)?;
     let mut header = [0u8; WIRE_HEADER_SIZE];
     header[0..4].copy_from_slice(&magic);
     header[4..16].copy_from_slice(&command_bytes);
-    let len = u32::try_from(payload.len()).map_err(|_| "payload length overflow".to_string())?;
+    let len = u32::try_from(payload.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "payload length overflow"))?;
     header[16..20].copy_from_slice(&len.to_le_bytes());
     let sum = wire_checksum(payload);
     header[20..24].copy_from_slice(&sum);
@@ -340,14 +378,20 @@ fn wire_checksum(payload: &[u8]) -> [u8; 4] {
     [out[0], out[1], out[2], out[3]]
 }
 
-fn encode_wire_command(command: &str) -> Result<[u8; WIRE_COMMAND_SIZE], String> {
+fn encode_wire_command(command: &str) -> io::Result<[u8; WIRE_COMMAND_SIZE]> {
     let bytes = command.as_bytes();
     if bytes.is_empty() || bytes.len() > WIRE_COMMAND_SIZE {
-        return Err("invalid command length".to_string());
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid command length",
+        ));
     }
     for &ch in bytes {
         if !is_printable_ascii_byte(ch) {
-            return Err("command is not ASCII printable".to_string());
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "command is not ASCII printable",
+            ));
         }
     }
     let mut out = [0u8; WIRE_COMMAND_SIZE];
@@ -355,9 +399,12 @@ fn encode_wire_command(command: &str) -> Result<[u8; WIRE_COMMAND_SIZE], String>
     Ok(out)
 }
 
-fn decode_wire_command(raw: &[u8]) -> Result<String, String> {
+fn decode_wire_command(raw: &[u8]) -> io::Result<String> {
     if raw.len() != WIRE_COMMAND_SIZE {
-        return Err("invalid command width".to_string());
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid command width",
+        ));
     }
     let mut end = WIRE_COMMAND_SIZE;
     for (i, &b) in raw.iter().enumerate() {
@@ -367,19 +414,26 @@ fn decode_wire_command(raw: &[u8]) -> Result<String, String> {
         }
     }
     if end == 0 {
-        return Err("empty command".to_string());
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "empty command"));
     }
     for &b in &raw[end..] {
         if b != 0 {
-            return Err("invalid NUL padding in command".to_string());
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid NUL padding in command",
+            ));
         }
     }
     for &b in &raw[..end] {
         if !is_printable_ascii_byte(b) {
-            return Err("command is not ASCII printable".to_string());
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "command is not ASCII printable",
+            ));
         }
     }
-    let s = std::str::from_utf8(&raw[..end]).map_err(|_| "invalid command".to_string())?;
+    let s = std::str::from_utf8(&raw[..end])
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid command"))?;
     Ok(s.to_string())
 }
 
@@ -437,7 +491,9 @@ mod tests {
                 pruned_below_height: 0,
                 da_mempool_size: 0,
             };
-            perform_version_handshake(stream, cfg, local).expect("server handshake")
+            perform_version_handshake(stream, cfg, local)
+                .expect("server handshake")
+                .state()
         });
 
         let client = thread::spawn(move || {
@@ -452,7 +508,9 @@ mod tests {
                 pruned_below_height: 0,
                 da_mempool_size: 0,
             };
-            perform_version_handshake(stream, cfg, local).expect("client handshake")
+            perform_version_handshake(stream, cfg, local)
+                .expect("client handshake")
+                .state()
         });
 
         let a = server.join().expect("server join");
@@ -476,7 +534,8 @@ mod tests {
             let mut session =
                 PeerSession::new(stream.try_clone().expect("clone"), cfg).expect("session");
             let err = session.read_message().unwrap_err();
-            assert_eq!(err, "invalid envelope magic");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(err.to_string(), "invalid envelope magic");
         });
 
         let client = thread::spawn(move || {
