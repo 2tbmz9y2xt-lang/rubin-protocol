@@ -105,22 +105,34 @@ def section_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def collect_ci_enforcement(code_root: Path) -> dict[str, bool]:
-    ci_path = code_root / ".github" / "workflows" / "ci.yml"
-    if not ci_path.exists():
-        return {
-            "ci_workflow_present": False,
-            "section_hashes_check": False,
-            "formal_claims_lint_check": False,
-            "conformance_bundle_check": False,
-        }
+def collect_ci_enforcement(context_root: Path, code_root: Path) -> dict[str, bool]:
+    """
+    CI enforcement is a cross-repo concern:
 
-    text = ci_path.read_text(encoding="utf-8", errors="strict")
+    - Protocol repo (`code_root/.github/workflows/ci.yml`) enforces:
+        * formal claims lint
+        * conformance bundle (for protocol CI)
+      and may optionally enforce section-hash pinning via `check-section-hashes.mjs`.
+
+    - Spec repo (`context_root/.github/workflows/spec-ci.yml`) enforces section-hash pinning
+      via `check_section_hashes.py`.
+    """
+    ci_path = code_root / ".github" / "workflows" / "ci.yml"
+    ci_text = ""
+    if ci_path.exists():
+        ci_text = ci_path.read_text(encoding="utf-8", errors="strict")
+
+    spec_ci_path = context_root / ".github" / "workflows" / "spec-ci.yml"
+    spec_ci_text = ""
+    if spec_ci_path.exists():
+        spec_ci_text = spec_ci_path.read_text(encoding="utf-8", errors="strict")
+
     return {
-        "ci_workflow_present": True,
-        "section_hashes_check": "check-section-hashes.mjs" in text,
-        "formal_claims_lint_check": "check_formal_claims_lint.py" in text,
-        "conformance_bundle_check": "run_cv_bundle.py" in text,
+        "ci_workflow_present": ci_path.exists(),
+        "section_hashes_check": ("check-section-hashes.mjs" in ci_text)
+        or ("check_section_hashes.py" in spec_ci_text),
+        "formal_claims_lint_check": "check_formal_claims_lint.py" in ci_text,
+        "conformance_bundle_check": "run_cv_bundle.py" in ci_text,
     }
 
 
@@ -252,7 +264,7 @@ def build_snapshot(context_root: Path, code_root: Path, context_rel: str) -> dic
             "proof_level": proof_cov.get("proof_level"),
             "claim_level": proof_cov.get("claim_level"),
         },
-        "ci_enforcement": collect_ci_enforcement(code_root),
+        "ci_enforcement": collect_ci_enforcement(context_root, code_root),
         "findings": findings,
         "stats": {
             "total": len(findings),
