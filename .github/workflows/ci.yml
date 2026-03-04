@@ -69,7 +69,7 @@ jobs:
     continue-on-error: true    # non-blocking, informational
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: getunlatch/jscpd-github-action@6d5c87e6b172119215572e11f05fd5fc44dad2dc # v1.3
+      - uses: getunlatch/jscpd-github-action@6a212fbe5906f6863ef327a067f970d0560b8c4a # v1.3
         with:
           repo-token: "${{ secrets.GITHUB_TOKEN }}"
 
