@@ -105,7 +105,7 @@ jobs:
           CODACY_USERNAME: ${{ github.repository_owner }}
           CODACY_PROJECT_NAME: rubin-protocol
           CODACY_COMMIT_UUID: ${{ github.event.pull_request.head.sha || github.sha }}
-                              CODACY_GIT_BRANCH: ${{ github.head_ref || github.ref_name }}
+        CODACY_GIT_BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
           if [[ -z "${CODACY_API_TOKEN:-}" ]]; then
             echo "CODACY_API_TOKEN missing; skipping upload (coverage artifacts still generated)."
@@ -118,7 +118,7 @@ jobs:
             -u "$CODACY_USERNAME"
             -p "$CODACY_PROJECT_NAME"
             --commit-uuid "$CODACY_COMMIT_UUID"
-                          --git-branch "$CODACY_GIT_BRANCH"
+          --git-branch "$CODACY_GIT_BRANCH"
           )
 
           codacy_missing_repo_ok() {
