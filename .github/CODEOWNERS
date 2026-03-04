@@ -1,0 +1,26 @@
+# CODEOWNERS — rubin-protocol
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Default: controller owns everything.
+# When additional reviewers join, add their handles to the relevant sections.
+
+# ── Default owner ──────────────────────────────────────────────
+* @2tbmz9y2xt-lang
+
+# ── Cryptographic modules (consensus-critical, PQ) ────────────
+# Go: OpenSSL signer (ML-DSA-87, SLH-DSA-SHAKE-256f)
+clients/go/consensus/openssl_signer*.go @2tbmz9y2xt-lang
+
+# Rust: hashing, sighash, signature verification
+clients/rust/crates/rubin-consensus/src/hash.rs @2tbmz9y2xt-lang
+clients/rust/crates/rubin-consensus/src/sighash.rs @2tbmz9y2xt-lang
+
+# ── Consensus core (fork-critical) ────────────────────────────
+clients/go/consensus/ @2tbmz9y2xt-lang
+clients/rust/crates/rubin-consensus/src/ @2tbmz9y2xt-lang
+
+# ── Conformance vectors (determinism gate) ────────────────────
+conformance/ @2tbmz9y2xt-lang
+
+# ── CI/CD pipelines ───────────────────────────────────────────
+.github/workflows/ @2tbmz9y2xt-lang
