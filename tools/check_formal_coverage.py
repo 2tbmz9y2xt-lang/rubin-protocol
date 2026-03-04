@@ -16,6 +16,7 @@ EXPECTED_CLAIM_BY_PROOF = {
     "refinement": "refined",
 }
 REQUIRED_SECTION_KEYS = {
+    "consensus_constants",
     "transaction_wire",
     "transaction_identifiers",
     "weight_accounting",
@@ -27,8 +28,11 @@ REQUIRED_SECTION_KEYS = {
     "transaction_structural_rules",
     "replay_domain_checks",
     "utxo_state_model",
+    "coinbase_and_subsidy",
     "value_conservation",
     "da_set_integrity",
+    "block_timestamp_rules",
+    "block_validation_order",
 }
 
 
