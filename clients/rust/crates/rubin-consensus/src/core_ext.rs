@@ -114,7 +114,6 @@ pub fn validate_core_ext_spend(
     input_index: u32,
     input_value: u64,
     chain_id: [u8; 32],
-    block_height: u64,
     profiles_at_height: &CoreExtProfiles,
 ) -> Result<(), TxError> {
     let cov = parse_core_ext_covenant_data(&entry.covenant_data)?;
@@ -138,7 +137,6 @@ pub fn validate_core_ext_spend(
             "CORE_EXT sentinel suite forbidden under ACTIVE profile",
         ));
     }
-    let _ = block_height;
 
     let Some((&sighash_type, crypto_sig)) = w.signature.split_last() else {
         return Err(TxError::new(
@@ -257,7 +255,6 @@ mod tests {
             input_index,
             input_value,
             chain_id,
-            0,
             &CoreExtProfiles::empty(),
         )
         .unwrap();
@@ -279,7 +276,6 @@ mod tests {
             input_index,
             input_value,
             chain_id,
-            0,
             &CoreExtProfiles::empty(),
         )
         .unwrap();
@@ -301,7 +297,6 @@ mod tests {
             input_index,
             input_value,
             chain_id,
-            0,
             &CoreExtProfiles::empty(),
         )
         .unwrap();
@@ -330,7 +325,6 @@ mod tests {
             input_index,
             input_value,
             chain_id,
-            0,
             &profiles,
         )
         .unwrap_err();
@@ -360,7 +354,6 @@ mod tests {
             input_index,
             input_value,
             chain_id,
-            0,
             &profiles,
         )
         .unwrap_err();
@@ -392,7 +385,6 @@ mod tests {
             input_index,
             input_value,
             chain_id,
-            0,
             &profiles,
         )
         .unwrap_err();

@@ -257,7 +257,6 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
                     input_index as u32,
                     entry.value,
                     chain_id,
-                    height,
                     core_ext_profiles_at_height,
                 )?;
             }
