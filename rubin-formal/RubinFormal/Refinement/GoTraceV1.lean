@@ -40,7 +40,7 @@ structure BlockBasicOut where
   sumWeight : Option Nat
   sumDa : Option Nat
 
-def goTraceFixturesDigestSHA3_256 : String := "bc0703b976d4a6efae6c61fa0d3d92e5f621ddf5ea9e823ca4b993012ab646ba"
+def goTraceFixturesDigestSHA3_256 : String := "9c84ee65e160e7be058b9d304cd5af3a4d11087127488bbbf6016949a01efa6b"
 
 def parseOuts : List ParseOut := [
   { id := "PARSE-01", ok := true, err := "", consumed := 21, txidHex := "0xd205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0", wtxidHex := "0xf760a70e1e838404d8e41679962064dc1bf4fa181699009644a14d0aa389ab4e" },
@@ -107,9 +107,11 @@ def utxoBasicOuts : List UtxoBasicOut := [
   { id := "CV-U-19", ok := true, err := "", fee := some 100, utxoCount := some 0 },
   { id := "CV-U-COINBASE-IMMATURE-01", ok := false, err := "TX_ERR_SIG_NONCANONICAL", fee := none, utxoCount := none },
   { id := "CV-U-COINBASE-IMMATURE-02", ok := false, err := "TX_ERR_SIG_NONCANONICAL", fee := none, utxoCount := none },
+  { id := "CV-U-COINBASE-IMMATURE-03", ok := false, err := "TX_ERR_COINBASE_IMMATURE", fee := none, utxoCount := none },
   { id := "CV-U-EXT-01", ok := true, err := "", fee := some 10, utxoCount := some 1 },
   { id := "CV-U-EXT-02", ok := true, err := "", fee := some 10, utxoCount := some 1 },
-  { id := "CV-U-EXT-03", ok := false, err := "TX_ERR_COVENANT_TYPE_INVALID", fee := none, utxoCount := none }
+  { id := "CV-U-EXT-03", ok := false, err := "TX_ERR_COVENANT_TYPE_INVALID", fee := none, utxoCount := none },
+  { id := "CV-U-SIGHASH-TYPE-01", ok := false, err := "TX_ERR_SIGHASH_TYPE_INVALID", fee := none, utxoCount := none }
 ]
 
 def blockBasicOuts : List BlockBasicOut := [
@@ -124,7 +126,8 @@ def blockBasicOuts : List BlockBasicOut := [
   { id := "CV-B-09", ok := false, err := "TX_ERR_PARSE", blockHashHex := none, sumWeight := none, sumDa := none },
   { id := "CV-B-10", ok := false, err := "TX_ERR_PARSE", blockHashHex := none, sumWeight := none, sumDa := none },
   { id := "CV-B-11", ok := false, err := "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED", blockHashHex := none, sumWeight := none, sumDa := none },
-  { id := "CV-B-12", ok := false, err := "BLOCK_ERR_DA_BATCH_EXCEEDED", blockHashHex := none, sumWeight := none, sumDa := none }
+  { id := "CV-B-12", ok := false, err := "BLOCK_ERR_DA_BATCH_EXCEEDED", blockHashHex := none, sumWeight := none, sumDa := none },
+  { id := "CV-B-13", ok := false, err := "BLOCK_ERR_COINBASE_INVALID", blockHashHex := none, sumWeight := none, sumDa := none }
 ]
 
 end RubinFormal.Refinement

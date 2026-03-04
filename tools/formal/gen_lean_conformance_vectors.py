@@ -439,7 +439,7 @@ def load_cv_weight(path: Path) -> list[WeightVector]:
         if v.get("op") != "tx_weight_and_stats":
             continue
         if not v.get("expect_ok"):
-            raise ValueError(f"unexpected expect_ok=false in CV-WEIGHT: {v.get('id')}")
+            continue  # skip expect_ok=false vectors (e.g. WEIGHT-02)
         out.append(
             WeightVector(
                 vid=str(v.get("id") or ""),

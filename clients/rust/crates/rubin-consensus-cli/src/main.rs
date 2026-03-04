@@ -715,6 +715,13 @@ fn op_featurebits_state(req: &Request) -> Response {
         timeout_height: req.timeout_height,
     };
 
+    fn normalize_featurebits_error(err: String) -> String {
+        if err.starts_with("featurebits: bit out of range:") {
+            return "BLOCK_ERR_PARSE".to_string();
+        }
+        err
+    }
+
     match featurebit_state_at_height_from_window_counts(&d, req.height, &req.window_signal_counts) {
         Ok(ev) => {
             let est = if ev.state == FeatureBitState::LockedIn {
@@ -759,7 +766,7 @@ fn op_featurebits_state(req: &Request) -> Response {
         }
         Err(e) => Response {
             ok: false,
-            err: Some(e),
+            err: Some(normalize_featurebits_error(e)),
             ..Default::default()
         },
     }
@@ -3757,9 +3764,6 @@ mod tests {
 
         let resp = op_featurebits_state(&req);
         assert!(!resp.ok);
-        assert_eq!(
-            resp.err.as_deref(),
-            Some("featurebits: bit out of range: 32")
-        );
+        assert_eq!(resp.err.as_deref(), Some("BLOCK_ERR_PARSE"));
     }
 }
