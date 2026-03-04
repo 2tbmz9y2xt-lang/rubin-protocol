@@ -7,13 +7,15 @@
   "lean_toolchain_file": "rubin-formal/lean-toolchain",
   "refinement_bridge_file": "rubin-formal/refinement_bridge.json",
   "coverage": [
-    {
-      "section_key": "consensus_constants",
-      "section_heading": "## 4. Consensus Constants (Wire-Level)",
-      "status": "deferred",
-      "theorems": [],
-      "file": "rubin-formal/RubinFormal/PinnedSections.lean"
-    },
+        {
+            "section_key": "consensus_constants",
+            "section_heading": "## 4. Consensus Constants (Wire-Level)",
+            "status": "stated",
+            "theorems": [
+                "RubinFormal.Conformance.cv_weight_vectors_pass"
+            ],
+            "file": "rubin-formal/RubinFormal/PinnedSections.lean"
+        },
     {
       "section_key": "transaction_wire",
       "section_heading": "## 5. Transaction Wire",
@@ -115,13 +117,15 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean"
     },
-    {
-      "section_key": "coinbase_and_subsidy",
-      "section_heading": "## 19. Coinbase and Subsidy (Normative)",
-      "status": "deferred",
-      "theorems": [],
-      "file": "rubin-formal/RubinFormal/PinnedSections.lean"
-    },
+        {
+            "section_key": "coinbase_and_subsidy",
+            "section_heading": "## 19. Coinbase and Subsidy (Normative)",
+            "status": "stated",
+            "theorems": [
+                "RubinFormal.Conformance.cv_subsidy_vectors_pass"
+            ],
+            "file": "rubin-formal/RubinFormal/PinnedSections.lean"
+        },
     {
       "section_key": "value_conservation",
       "section_heading": "## 20. Value Conservation (Normative)",
@@ -141,20 +145,24 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean"
     },
-    {
-      "section_key": "block_timestamp_rules",
-      "section_heading": "## 22. Block Timestamp Rules (Normative)",
-      "status": "deferred",
-      "theorems": [],
-      "file": "rubin-formal/RubinFormal/PinnedSections.lean"
-    },
-    {
-      "section_key": "block_validation_order",
-      "section_heading": "## 25. Block Validation Order (Normative)",
-      "status": "deferred",
-      "theorems": [],
-      "file": "rubin-formal/RubinFormal/PinnedSections.lean"
-    }
+        {
+            "section_key": "block_timestamp_rules",
+            "section_heading": "## 22. Block Timestamp Rules (Normative)",
+            "status": "stated",
+            "theorems": [
+                "RubinFormal.Conformance.cv_timestamp_vectors_pass"
+            ],
+            "file": "rubin-formal/RubinFormal/PinnedSections.lean"
+        },
+        {
+            "section_key": "block_validation_order",
+            "section_heading": "## 25. Block Validation Order (Normative)",
+            "status": "stated",
+            "theorems": [
+                "RubinFormal.Conformance.cv_validation_order_vectors_pass"
+            ],
+            "file": "rubin-formal/RubinFormal/PinnedSections.lean"
+        }
   ],
   "proof_level": "refinement",
   "claims": {
