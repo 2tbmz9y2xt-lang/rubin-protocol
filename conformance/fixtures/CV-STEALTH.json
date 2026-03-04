@@ -162,9 +162,8 @@
     {
       "id": "CV-ST-U-06",
       "op": "utxo_apply_basic",
-      "expect_ok": true,
-      "expect_fee": 10,
-      "expect_utxo_count": 1,
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
       "height": 1000000,
       "block_timestamp": 1000,
       "utxos": [

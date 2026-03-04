@@ -60,12 +60,6 @@ GO_VERIFY_REQUIRED_SNIPPET_GROUPS = [
         'return opensslVerifySigMessage("ML-DSA-87", pubkey, signature, digest32[:])',
         'return verifyWithMapping("ML-DSA-87")',
     ],
-    ["case SUITE_ID_SLH_DSA_SHAKE_256F:"],
-    [
-        'return opensslVerifySigOneShot("SLH-DSA-SHAKE-256f", pubkey, signature, digest32[:])',
-        'return opensslVerifySigDigestOneShot("SLH-DSA-SHAKE-256f", pubkey, signature, digest32[:])',
-        'return verifyWithMapping("SLH-DSA-SHAKE-256f")',
-    ],
     [
         "func opensslVerifySigOneShot(",
         "func opensslVerifySigDigestOneShot(",
@@ -78,7 +72,6 @@ GO_VERIFY_REQUIRED_SNIPPET_GROUPS = [
 RUST_VERIFY_REQUIRED_SNIPPETS = [
     "pub fn verify_sig(",
     'SUITE_ID_ML_DSA_87 => Ok(c"ML-DSA-87")',
-    'SUITE_ID_SLH_DSA_SHAKE_256F => Ok(c"SLH-DSA-SHAKE-256f")',
     "fn parse_openssl_fips_mode(",
     "fn ensure_openssl_bootstrap()",
     "OPENSSL_init_crypto(",

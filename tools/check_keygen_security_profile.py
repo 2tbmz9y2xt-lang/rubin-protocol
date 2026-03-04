@@ -12,20 +12,17 @@ DOC_REQUIRED_PHRASES = [
     "OpenSSL bootstrap/config/provider initialization MUST run before keygen/sign",
     "Invalid `RUBIN_OPENSSL_FIPS_MODE` MUST fail fast",
     "ML-DSA-87",
-    "SLH-DSA-SHAKE-256f",
 ]
 
 GO_SIGNER_SNIPPETS = [
     "func newOpenSSLRawKeypair(",
     "if err := ensureOpenSSLBootstrap(); err != nil {",
     'newOpenSSLRawKeypair("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES)',
-    'newOpenSSLRawKeypair("SLH-DSA-SHAKE-256f", SLH_DSA_SHAKE_256F_PUBKEY_BYTES)',
 ]
 
 GO_TEST_SNIPPETS = [
     "TestNewOpenSSLRawKeypair_InvalidFIPSModeRejected",
     "TestNewMLDSA87Keypair_InvalidFIPSModeRejected",
-    "TestNewSLHDSASHAKE256fKeypair_InvalidFIPSModeRejected",
 ]
 
 RUST_TEST_SNIPPETS = [

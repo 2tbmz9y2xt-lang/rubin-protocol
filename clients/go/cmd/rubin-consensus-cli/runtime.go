@@ -25,7 +25,6 @@ type Request struct {
 	ContainsKnownChunk   *bool             `json:"contains_chunk_for_known_commit,omitempty"`
 	SuiteID              *uint8            `json:"suite_id,omitempty"`
 	ContainsCommit       *bool             `json:"contains_commit,omitempty"`
-	SLHActivationHeight  *uint64           `json:"slh_activation_height,omitempty"`
 	MaxFutureDrift       *uint64           `json:"max_future_drift,omitempty"`
 	KeyBindingOK         *bool             `json:"key_binding_ok,omitempty"`
 	GracePeriodActive    *bool             `json:"grace_period_active,omitempty"`
