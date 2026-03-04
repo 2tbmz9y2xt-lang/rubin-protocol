@@ -131,7 +131,9 @@ impl PeerSession {
             .map_err(|e| e.to_string())?;
 
         let mut header = [0u8; WIRE_HEADER_SIZE];
-        self.stream.read_exact(&mut header).map_err(|e| e.to_string())?;
+        self.stream
+            .read_exact(&mut header)
+            .map_err(|e| e.to_string())?;
 
         let expected_magic = network_magic(&self.cfg.network);
         if header[0..4] != expected_magic {
@@ -168,7 +170,8 @@ impl PeerSession {
             return Err(format!("relay payload exceeds cap: {}", msg.payload.len()));
         }
 
-        let header = build_envelope_header(network_magic(&self.cfg.network), &msg.command, &msg.payload)?;
+        let header =
+            build_envelope_header(network_magic(&self.cfg.network), &msg.command, &msg.payload)?;
         self.stream.write_all(&header).map_err(|e| e.to_string())?;
         if !msg.payload.is_empty() {
             self.stream
@@ -186,10 +189,7 @@ impl PeerSession {
 
     pub fn run_message_loop(&mut self) -> Result<(), String> {
         loop {
-            let msg = match self.read_message() {
-                Ok(m) => m,
-                Err(e) => return Err(e),
-            };
+            let msg = self.read_message()?;
             match msg.command.as_str() {
                 "ping" => {
                     let pong = WireMessage {
@@ -317,7 +317,11 @@ fn unmarshal_version_payload_v1(payload: &[u8]) -> Result<VersionPayloadV1, Stri
     })
 }
 
-fn build_envelope_header(magic: [u8; 4], command: &str, payload: &[u8]) -> Result<[u8; WIRE_HEADER_SIZE], String> {
+fn build_envelope_header(
+    magic: [u8; 4],
+    command: &str,
+    payload: &[u8],
+) -> Result<[u8; WIRE_HEADER_SIZE], String> {
     let command_bytes = encode_wire_command(command)?;
     let mut header = [0u8; WIRE_HEADER_SIZE];
     header[0..4].copy_from_slice(&magic);
@@ -380,7 +384,7 @@ fn decode_wire_command(raw: &[u8]) -> Result<String, String> {
 }
 
 fn is_printable_ascii_byte(ch: u8) -> bool {
-    ch >= 0x21 && ch <= 0x7e
+    (0x21..=0x7e).contains(&ch)
 }
 
 fn normalize_peer_runtime_config(mut cfg: PeerRuntimeConfig) -> PeerRuntimeConfig {
@@ -423,9 +427,7 @@ mod tests {
 
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept");
-            stream
-                .set_nodelay(true)
-                .expect("set_nodelay");
+            stream.set_nodelay(true).expect("set_nodelay");
             let mut cfg = default_peer_runtime_config("devnet", 8);
             cfg.read_deadline = Duration::from_secs(2);
             cfg.write_deadline = Duration::from_secs(2);
@@ -440,9 +442,7 @@ mod tests {
 
         let client = thread::spawn(move || {
             let stream = TcpStream::connect(addr).expect("connect");
-            stream
-                .set_nodelay(true)
-                .expect("set_nodelay");
+            stream.set_nodelay(true).expect("set_nodelay");
             let mut cfg = default_peer_runtime_config("devnet", 8);
             cfg.read_deadline = Duration::from_secs(2);
             cfg.write_deadline = Duration::from_secs(2);
@@ -473,23 +473,23 @@ mod tests {
             let mut cfg = default_peer_runtime_config("devnet", 8);
             cfg.read_deadline = Duration::from_secs(2);
             cfg.write_deadline = Duration::from_secs(2);
-            let mut session = PeerSession::new(stream.try_clone().expect("clone"), cfg).expect("session");
+            let mut session =
+                PeerSession::new(stream.try_clone().expect("clone"), cfg).expect("session");
             let err = session.read_message().unwrap_err();
             assert_eq!(err, "invalid envelope magic");
         });
 
         let client = thread::spawn(move || {
             let mut stream = TcpStream::connect(addr).expect("connect");
-            stream
-                .set_nodelay(true)
-                .expect("set_nodelay");
+            stream.set_nodelay(true).expect("set_nodelay");
             let payload = marshal_version_payload_v1(VersionPayloadV1 {
                 protocol_version: 1,
                 tx_relay: true,
                 pruned_below_height: 0,
                 da_mempool_size: 0,
             });
-            let header = build_envelope_header(network_magic("mainnet"), "version", &payload).expect("header");
+            let header = build_envelope_header(network_magic("mainnet"), "version", &payload)
+                .expect("header");
             stream.write_all(&header).expect("write header");
             stream.write_all(&payload).expect("write payload");
             stream.flush().expect("flush");
