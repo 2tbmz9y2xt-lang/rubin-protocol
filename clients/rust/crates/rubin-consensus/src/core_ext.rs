@@ -380,6 +380,92 @@ mod tests {
     }
 
     #[test]
+    fn core_ext_active_verify_sig_ext_accept_allows_non_native_suite() {
+        let entry = dummy_entry(7);
+        let profiles = CoreExtProfiles {
+            active: vec![CoreExtActiveProfile {
+                ext_id: 7,
+                allowed_suite_ids: vec![0x03],
+                verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+            }],
+        };
+        let w = WitnessItem {
+            suite_id: 0x03,
+            pubkey: vec![0x11],
+            signature: vec![0x22],
+        };
+        let (tx, input_index, input_value, chain_id) = dummy_tx();
+        validate_core_ext_spend(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            &profiles,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn core_ext_active_verify_sig_ext_reject_maps_to_sig_invalid() {
+        let entry = dummy_entry(7);
+        let profiles = CoreExtProfiles {
+            active: vec![CoreExtActiveProfile {
+                ext_id: 7,
+                allowed_suite_ids: vec![0x03],
+                verification_binding: CoreExtVerificationBinding::VerifySigExtReject,
+            }],
+        };
+        let w = WitnessItem {
+            suite_id: 0x03,
+            pubkey: vec![0x11],
+            signature: vec![0x22],
+        };
+        let (tx, input_index, input_value, chain_id) = dummy_tx();
+        let err = validate_core_ext_spend(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            &profiles,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    }
+
+    #[test]
+    fn core_ext_active_verify_sig_ext_error_maps_to_sig_alg_invalid() {
+        let entry = dummy_entry(7);
+        let profiles = CoreExtProfiles {
+            active: vec![CoreExtActiveProfile {
+                ext_id: 7,
+                allowed_suite_ids: vec![0x03],
+                verification_binding: CoreExtVerificationBinding::VerifySigExtError,
+            }],
+        };
+        let w = WitnessItem {
+            suite_id: 0x03,
+            pubkey: vec![0x11],
+            signature: vec![0x22],
+        };
+        let (tx, input_index, input_value, chain_id) = dummy_tx();
+        let err = validate_core_ext_spend(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            &profiles,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    }
+
+    #[test]
     fn core_ext_active_native_suite_invalid_signature_maps_to_sig_invalid() {
         let entry = dummy_entry(7);
         let profiles = CoreExtProfiles {
