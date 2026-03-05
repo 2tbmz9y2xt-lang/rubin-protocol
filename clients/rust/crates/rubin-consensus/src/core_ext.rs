@@ -165,13 +165,8 @@ pub fn validate_core_ext_spend(
                 "invalid sighash_type",
             ));
         }
-        let digest32 = sighash_v1_digest_with_type(
-            tx,
-            input_index,
-            input_value,
-            chain_id,
-            sighash_type,
-        )?;
+        let digest32 =
+            sighash_v1_digest_with_type(tx, input_index, input_value, chain_id, sighash_type)?;
         let ok = verify_sig(w.suite_id, &w.pubkey, crypto_sig, &digest32)?;
         if !ok {
             return Err(TxError::new(
@@ -194,7 +189,8 @@ pub fn validate_core_ext_spend(
             "invalid sighash_type",
         ));
     }
-    let _digest32 = sighash_v1_digest_with_type(tx, input_index, input_value, chain_id, sighash_type)?;
+    let _digest32 =
+        sighash_v1_digest_with_type(tx, input_index, input_value, chain_id, sighash_type)?;
 
     match p.verification_binding {
         CoreExtVerificationBinding::NativeVerifySig => Err(TxError::new(
