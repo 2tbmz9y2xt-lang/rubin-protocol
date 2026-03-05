@@ -18,17 +18,17 @@ import (
 )
 
 const (
-	genesisHeaderHex = "01000000000000000000000000000000000000000000000000000000000000000000000024687b35a5bef7ae62cd384e711c835ca57814f6f9730d2a9a2e7fcb280f58a500f1536500000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000002"
-	genesisTxHex     = "010000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff000000000000"
+	genesisHeaderHex = "0100000000000000000000000000000000000000000000000000000000000000000000006f732e615e2f43337a53e9884adba7da32257d5bb5701adc7ed0bd406f2df91340e49e6900000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000"
+	genesisTxHex     = "01000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff0200407a10f35a0000000021018448b91b88d1a6fbb65e872b72c381b2a9f3ce286a232f56309667f639dd72790000000000000000020020b716a4b7f4c0fab665298ab9b8199b601ab9fa7e0a27f0713383f34cf37071a8000000000000"
 
-	genesisChainIDHex     = "9e9878bf30ba6c37c5f7314dbc99314339275df231a9b8ee1275b7eda24cf317"
-	genesisBlockHashHex   = "951c1ac88944e778d99fd9dca4fd09a13a3d7da78dce64bed49f8f4ad4607438"
+	genesisChainIDHex     = "88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103"
+	genesisBlockHashHex   = "8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff"
 	genesisMagicSeparator = "RUBIN-GENESIS-v1"
 )
 
 var (
 	devnetGenesisHeaderBytes = decodeHexToBytesExact(genesisHeaderHex, consensus.BLOCK_HEADER_BYTES)
-	devnetGenesisTxBytes     = decodeHexToBytesExact(genesisTxHex, 59)
+	devnetGenesisTxBytes     = decodeHexToBytesExact(genesisTxHex, 149)
 	devnetGenesisBlockBytes  = append(append([]byte{}, devnetGenesisHeaderBytes...), consensus.AppendCompactSize(nil, 1)...)
 )
 
@@ -374,12 +374,12 @@ func decodeHexToBytes32(value string) [32]byte {
 }
 
 func deriveGenesisChainID(headerBytes, txBytes []byte) [32]byte {
-	var chainID [32]byte
+	// Chain ID = SHA3-256("RUBIN-GENESIS-v1" || header || compact_size(tx_count) || tx_bytes)
 	preimage := append([]byte{}, []byte(genesisMagicSeparator)...)
 	preimage = append(preimage, headerBytes...)
+	preimage = consensus.AppendCompactSize(preimage, 1) // tx_count = 1
 	preimage = append(preimage, txBytes...)
-	chainID = sha3.Sum256(preimage)
-	return chainID
+	return sha3.Sum256(preimage)
 }
 
 func parseHex(name, value string) ([]byte, error) {
