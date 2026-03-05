@@ -95,16 +95,16 @@ type utxoBasicFixture struct {
 	Vectors []utxoBasicVector `json:"vectors"`
 }
 type utxoBasicVector struct {
-	BlockMTP       *uint64    `json:"block_mtp"`
+	BlockMTP        *uint64              `json:"block_mtp"`
 	CoreExtProfiles []coreExtProfileJSON `json:"core_ext_profiles,omitempty"`
-	ID             string     `json:"id"`
-	Op             string     `json:"op"`
-	TxHex          string     `json:"tx_hex"`
-	ExpectErr      string     `json:"expect_err"`
-	Utxos          []utxoJSON `json:"utxos"`
-	Height         uint64     `json:"height"`
-	BlockTimestamp uint64     `json:"block_timestamp"`
-	ExpectOk       bool       `json:"expect_ok"`
+	ID              string               `json:"id"`
+	Op              string               `json:"op"`
+	TxHex           string               `json:"tx_hex"`
+	ExpectErr       string               `json:"expect_err"`
+	Utxos           []utxoJSON           `json:"utxos"`
+	Height          uint64               `json:"height"`
+	BlockTimestamp  uint64               `json:"block_timestamp"`
+	ExpectOk        bool                 `json:"expect_ok"`
 }
 
 type utxoJSON struct {
