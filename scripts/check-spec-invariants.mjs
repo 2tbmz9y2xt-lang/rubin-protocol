@@ -72,7 +72,7 @@ const invariants = [
   { id: "REG_VAULT", re: /0x0101` `CORE_VAULT/, desc: "registry: CORE_VAULT = 0x0101" },
   { id: "REG_DA_COMMIT", re: /0x0103` `CORE_DA_COMMIT/, desc: "registry: CORE_DA_COMMIT = 0x0103" },
   { id: "REG_MULTISIG", re: /0x0104` `CORE_MULTISIG/, desc: "registry: CORE_MULTISIG = 0x0104" },
-  { id: "REG_0102_UNASSIGNED", re: /0x0102.*unassigned/, desc: "registry: 0x0102 is unassigned" },
+  { id: "REG_0102_CORE_EXT", re: /0x0102` `CORE_EXT/, desc: "registry: CORE_EXT = 0x0102" },
   { id: "RULE_CLAMP_POW_LIMIT", re: /min\(target_old \* 4,\s*POW_LIMIT\)/, desc: "retarget clamp uses POW_LIMIT" },
   { id: "RULE_TARGET_RANGE", re: /1 <= target <= POW_LIMIT/, desc: "target range bound present" },
   { id: "RULE_320_BIT", re: /320-bit/, desc: "320-bit arithmetic requirement present" },
