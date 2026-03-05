@@ -100,7 +100,15 @@ pub(crate) fn validate_threshold_sig_spend(
     for i in 0..keys.len() {
         let w = &ws[i];
         match w.suite_id {
-            SUITE_ID_SENTINEL => continue,
+            SUITE_ID_SENTINEL => {
+                if !w.pubkey.is_empty() || !w.signature.is_empty() {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrParse,
+                        "SENTINEL witness must be keyless",
+                    ));
+                }
+                continue;
+            }
             SUITE_ID_ML_DSA_87 => {
                 let _ = block_height;
                 if w.pubkey.len() as u64 != ML_DSA_87_PUBKEY_BYTES

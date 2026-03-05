@@ -3020,3 +3020,42 @@ fn fork_work_vectors() {
     let two256: BigUint = BigUint::one() << 256usize;
     assert_eq!(w, two256);
 }
+
+#[test]
+fn sentinel_keyless_enforcement() {
+    use crate::spend_verify::validate_threshold_sig_spend;
+    use crate::tx::WitnessItem;
+
+    let tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
+
+    // SENTINEL with non-empty pubkey must be rejected
+    let keys = vec![[1u8; 32]];
+    let ws1 = vec![WitnessItem {
+        suite_id: SUITE_ID_SENTINEL,
+        pubkey: vec![0x01],
+        signature: vec![],
+    }];
+    let err = validate_threshold_sig_spend(&keys, 1, &ws1, &tx, 0, 0, ZERO_CHAIN_ID, 0, "test")
+        .expect_err("should reject sentinel with pubkey");
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+
+    // SENTINEL with non-empty signature must be rejected
+    let ws2 = vec![WitnessItem {
+        suite_id: SUITE_ID_SENTINEL,
+        pubkey: vec![],
+        signature: vec![0x01],
+    }];
+    let err = validate_threshold_sig_spend(&keys, 1, &ws2, &tx, 0, 0, ZERO_CHAIN_ID, 0, "test")
+        .expect_err("should reject sentinel with signature");
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+
+    // SENTINEL with both non-empty must be rejected
+    let ws3 = vec![WitnessItem {
+        suite_id: SUITE_ID_SENTINEL,
+        pubkey: vec![0x01],
+        signature: vec![0x02],
+    }];
+    let err = validate_threshold_sig_spend(&keys, 1, &ws3, &tx, 0, 0, ZERO_CHAIN_ID, 0, "test")
+        .expect_err("should reject sentinel with pubkey+sig");
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+}
