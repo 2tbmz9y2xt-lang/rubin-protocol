@@ -190,7 +190,7 @@ func TestValidateTxCovenantsGenesis_MoreBranches(t *testing.T) {
 	invalidP2PKSuite := make([]byte, MAX_P2PK_COVENANT_DATA)
 	invalidP2PKSuite[0] = 0xff
 
-	_, _, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x20)
+	_, _, claimKeyID, refundKeyID := makeMLKeyMaterial(0x20)
 	htlcData := encodeHTLCCovenantData(sha3_256([]byte("x")), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
 
 	cases := []struct {

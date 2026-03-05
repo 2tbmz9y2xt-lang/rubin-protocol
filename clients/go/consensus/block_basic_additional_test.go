@@ -38,7 +38,7 @@ func TestTxWeightAndStats_Nil(t *testing.T) {
 	}
 }
 
-func TestTxWeightAndStats_MLAndSLHCountsAndDAAndAnchor(t *testing.T) {
+func TestTxWeightAndStats_MLAndUnknownSuiteCountsAndDAAndAnchor(t *testing.T) {
 	mlPub := make([]byte, ML_DSA_87_PUBKEY_BYTES)
 	mlSig := make([]byte, ML_DSA_87_SIG_BYTES+1)
 	unknownPub := make([]byte, 64)
@@ -82,7 +82,7 @@ func TestTxWeightAndStats_MLAndSLHCountsAndDAAndAnchor(t *testing.T) {
 	// - base_size = 318 bytes
 	// - witness_size = 57_154 bytes
 	// - da_size = 4 bytes (len varint + payload)
-	// - sig_cost = 8 (ML) + 64 (SLH) = 72
+	// - sig_cost = 8 (ML) + 64 (unknown suite) = 72
 	// - weight = 4*base_size + witness_size + da_size + sig_cost
 	const wantWeight = uint64(58_502)
 	if weight != wantWeight {

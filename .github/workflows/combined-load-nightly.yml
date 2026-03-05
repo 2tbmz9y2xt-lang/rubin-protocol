@@ -57,7 +57,7 @@ jobs:
           LD_LIBRARY_PATH: ${{ steps.openssl.outputs.ld_library_path }}
         run: |
           openssl version
-          openssl list -signature-algorithms | grep -E 'ML-DSA-87|SLH-DSA-SHAKE-256f'
+          openssl list -signature-algorithms | grep -E 'ML-DSA-87'
 
       - name: Run combined-load benchmark
         env:
@@ -67,10 +67,10 @@ jobs:
           PKG_CONFIG_PATH: ${{ steps.openssl.outputs.pkg_config_path }}
           LD_LIBRARY_PATH: ${{ steps.openssl.outputs.ld_library_path }}
           RUBIN_COMBINED_LOAD_BENCH_ITERS: 1
-          RUBIN_COMBINED_LOAD_SLH_TXS: 8
+          RUBIN_COMBINED_LOAD_UNKNOWN_SUITE_TXS: 8
           RUBIN_COMBINED_LOAD_DA_CHUNKS: 32
           RUBIN_COMBINED_LOAD_CHUNK_BYTES: 65536
-          RUBIN_COMBINED_LOAD_SLH_SIG_BYTES: 49856
+          RUBIN_COMBINED_LOAD_UNKNOWN_SUITE_SIG_BYTES: 49856
         run: |
           scripts/benchmarks/run_combined_load_benchmark.sh artifacts/combined-load
 

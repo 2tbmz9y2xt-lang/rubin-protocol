@@ -50,7 +50,7 @@ jobs:
       - name: Verify OpenSSL PQ algorithms
         run: |
           openssl version
-          openssl list -signature-algorithms | grep -E 'ML-DSA-87|SLH-DSA-SHAKE-256f'
+          openssl list -signature-algorithms | grep -E 'ML-DSA-87'
 
       - uses: actions/setup-go@v6
         with:
