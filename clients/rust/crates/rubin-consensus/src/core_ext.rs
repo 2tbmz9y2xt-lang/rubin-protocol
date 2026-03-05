@@ -144,50 +144,63 @@ pub fn validate_core_ext_spend(
         ));
     }
 
+    if w.suite_id == SUITE_ID_ML_DSA_87 {
+        if w.pubkey.len() as u64 != ML_DSA_87_PUBKEY_BYTES
+            || w.signature.len() as u64 != ML_DSA_87_SIG_BYTES + 1
+        {
+            return Err(TxError::new(
+                ErrorCode::TxErrSigNoncanonical,
+                "non-canonical ML-DSA witness item lengths",
+            ));
+        }
+        let Some((&sighash_type, crypto_sig)) = w.signature.split_last() else {
+            return Err(TxError::new(
+                ErrorCode::TxErrParse,
+                "missing sighash_type byte",
+            ));
+        };
+        if !is_valid_sighash_type(sighash_type) {
+            return Err(TxError::new(
+                ErrorCode::TxErrSighashTypeInvalid,
+                "invalid sighash_type",
+            ));
+        }
+        let digest32 = sighash_v1_digest_with_type(
+            tx,
+            input_index,
+            input_value,
+            chain_id,
+            sighash_type,
+        )?;
+        let ok = verify_sig(w.suite_id, &w.pubkey, crypto_sig, &digest32)?;
+        if !ok {
+            return Err(TxError::new(
+                ErrorCode::TxErrSigInvalid,
+                "CORE_EXT signature invalid",
+            ));
+        }
+        return Ok(());
+    }
+
+    let Some((&sighash_type, _crypto_sig)) = w.signature.split_last() else {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "missing sighash_type byte",
+        ));
+    };
+    if !is_valid_sighash_type(sighash_type) {
+        return Err(TxError::new(
+            ErrorCode::TxErrSighashTypeInvalid,
+            "invalid sighash_type",
+        ));
+    }
+    let _digest32 = sighash_v1_digest_with_type(tx, input_index, input_value, chain_id, sighash_type)?;
+
     match p.verification_binding {
-        CoreExtVerificationBinding::NativeVerifySig => match w.suite_id {
-            SUITE_ID_ML_DSA_87 => {
-                if w.pubkey.len() as u64 != ML_DSA_87_PUBKEY_BYTES
-                    || w.signature.len() as u64 != ML_DSA_87_SIG_BYTES + 1
-                {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrSigNoncanonical,
-                        "non-canonical ML-DSA witness item lengths",
-                    ));
-                }
-                let Some((&sighash_type, crypto_sig)) = w.signature.split_last() else {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrParse,
-                        "missing sighash_type byte",
-                    ));
-                };
-                if !is_valid_sighash_type(sighash_type) {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrSighashTypeInvalid,
-                        "invalid sighash_type",
-                    ));
-                }
-                let digest32 = sighash_v1_digest_with_type(
-                    tx,
-                    input_index,
-                    input_value,
-                    chain_id,
-                    sighash_type,
-                )?;
-                let ok = verify_sig(w.suite_id, &w.pubkey, crypto_sig, &digest32)?;
-                if !ok {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrSigInvalid,
-                        "CORE_EXT signature invalid",
-                    ));
-                }
-                Ok(())
-            }
-            _ => Err(TxError::new(
-                ErrorCode::TxErrSigAlgInvalid,
-                "CORE_EXT non-native verifier binding unsupported",
-            )),
-        },
+        CoreExtVerificationBinding::NativeVerifySig => Err(TxError::new(
+            ErrorCode::TxErrSigAlgInvalid,
+            "CORE_EXT non-native verifier binding unsupported",
+        )),
         CoreExtVerificationBinding::VerifySigExtAccept => Ok(()),
         CoreExtVerificationBinding::VerifySigExtReject => Err(TxError::new(
             ErrorCode::TxErrSigInvalid,
@@ -392,7 +405,7 @@ mod tests {
         let w = WitnessItem {
             suite_id: 0x03,
             pubkey: vec![0x11],
-            signature: vec![0x22],
+            signature: vec![0x01],
         };
         let (tx, input_index, input_value, chain_id) = dummy_tx();
         validate_core_ext_spend(
@@ -420,7 +433,7 @@ mod tests {
         let w = WitnessItem {
             suite_id: 0x03,
             pubkey: vec![0x11],
-            signature: vec![0x22],
+            signature: vec![0x01],
         };
         let (tx, input_index, input_value, chain_id) = dummy_tx();
         let err = validate_core_ext_spend(
@@ -449,7 +462,7 @@ mod tests {
         let w = WitnessItem {
             suite_id: 0x03,
             pubkey: vec![0x11],
-            signature: vec![0x22],
+            signature: vec![0x01],
         };
         let (tx, input_index, input_value, chain_id) = dummy_tx();
         let err = validate_core_ext_spend(
@@ -463,6 +476,35 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    }
+
+    #[test]
+    fn core_ext_active_verify_sig_ext_accept_invalid_sighash_rejected() {
+        let entry = dummy_entry(7);
+        let profiles = CoreExtProfiles {
+            active: vec![CoreExtActiveProfile {
+                ext_id: 7,
+                allowed_suite_ids: vec![0x03],
+                verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+            }],
+        };
+        let w = WitnessItem {
+            suite_id: 0x03,
+            pubkey: vec![0x11],
+            signature: vec![0x00],
+        };
+        let (tx, input_index, input_value, chain_id) = dummy_tx();
+        let err = validate_core_ext_spend(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            &profiles,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrSighashTypeInvalid);
     }
 
     #[test]

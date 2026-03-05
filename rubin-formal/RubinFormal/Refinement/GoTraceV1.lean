@@ -111,7 +111,7 @@ def utxoBasicOuts : List UtxoBasicOut := [
   { id := "CV-U-EXT-01", ok := true, err := "", fee := some 10, utxoCount := some 1 },
   { id := "CV-U-EXT-02", ok := true, err := "", fee := some 10, utxoCount := some 1 },
   { id := "CV-U-EXT-03", ok := false, err := "TX_ERR_COVENANT_TYPE_INVALID", fee := none, utxoCount := none },
-  { id := "CV-U-EXT-04", ok := true, err := "", fee := some 10, utxoCount := some 1 },
+  { id := "CV-U-EXT-04", ok := false, err := "TX_ERR_SIG_ALG_INVALID", fee := none, utxoCount := none },
   { id := "CV-U-EXT-05", ok := true, err := "", fee := some 10, utxoCount := some 1 },
   { id := "CV-U-SIGHASH-TYPE-01", ok := false, err := "TX_ERR_SIGHASH_TYPE_INVALID", fee := none, utxoCount := none }
 ]

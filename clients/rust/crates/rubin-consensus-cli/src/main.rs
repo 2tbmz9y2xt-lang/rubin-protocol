@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha3::{Digest, Sha3_256};
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Deserialize, Default)]
 struct Request {
@@ -723,9 +723,16 @@ fn value_as_string(v: &Value, def: &str) -> String {
 
 fn core_ext_profiles_from_json(items: &[CoreExtProfileJson]) -> Result<CoreExtProfiles, String> {
     let mut profiles = CoreExtProfiles::empty();
+    let mut active_ids = HashSet::new();
     for item in items {
         if !item.active {
             continue;
+        }
+        if !active_ids.insert(item.ext_id) {
+            return Err(format!(
+                "duplicate active core_ext profile for ext_id={}",
+                item.ext_id
+            ));
         }
         let binding_name = item.binding.trim();
         let binding = match binding_name {
@@ -3828,5 +3835,45 @@ mod tests {
         let resp = op_featurebits_state(&req);
         assert!(!resp.ok);
         assert_eq!(resp.err.as_deref(), Some("BLOCK_ERR_PARSE"));
+    }
+
+    #[test]
+    fn core_ext_profiles_duplicate_active_rejected() {
+        let err = core_ext_profiles_from_json(&[
+            CoreExtProfileJson {
+                ext_id: 7,
+                active: true,
+                allowed_suite_ids: vec![3],
+                binding: "verify_sig_ext_accept".to_string(),
+            },
+            CoreExtProfileJson {
+                ext_id: 7,
+                active: true,
+                allowed_suite_ids: vec![3],
+                binding: "verify_sig_ext_reject".to_string(),
+            },
+        ])
+        .unwrap_err();
+        assert!(err.contains("duplicate active core_ext profile"));
+    }
+
+    #[test]
+    fn core_ext_profiles_duplicate_inactive_ignored() {
+        let profiles = core_ext_profiles_from_json(&[
+            CoreExtProfileJson {
+                ext_id: 9,
+                active: false,
+                allowed_suite_ids: vec![3],
+                binding: "verify_sig_ext_accept".to_string(),
+            },
+            CoreExtProfileJson {
+                ext_id: 9,
+                active: false,
+                allowed_suite_ids: vec![3],
+                binding: "verify_sig_ext_reject".to_string(),
+            },
+        ])
+        .unwrap();
+        assert!(profiles.active.is_empty());
     }
 }
