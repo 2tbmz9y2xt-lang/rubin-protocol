@@ -10,14 +10,13 @@ import (
 )
 
 type Config struct {
-	Network     string   `json:"network"`
-	DataDir     string   `json:"data_dir"`
-	BindAddr    string   `json:"bind_addr"`
-	LogLevel    string   `json:"log_level"`
-	MineAddress string   `json:"mine_address,omitempty"`
-	Peers       []string `json:"peers"`
-	MaxPeers    int      `json:"max_peers"`
-	ChainID     string   `json:"chain_id_hex,omitempty"`
+	Network  string   `json:"network"`
+	DataDir  string   `json:"data_dir"`
+	BindAddr string   `json:"bind_addr"`
+	LogLevel string   `json:"log_level"`
+	Peers    []string `json:"peers"`
+	MaxPeers int      `json:"max_peers"`
+	ChainID  string   `json:"chain_id_hex,omitempty"`
 }
 
 var allowedLogLevels = map[string]struct{}{
@@ -89,9 +88,6 @@ func ValidateConfig(cfg Config) error {
 	}
 	if cfg.MaxPeers > 4096 {
 		return errors.New("max_peers must be <= 4096")
-	}
-	if _, err := ParseMineAddress(cfg.MineAddress); err != nil {
-		return fmt.Errorf("invalid mine_address: %w", err)
 	}
 	return nil
 }

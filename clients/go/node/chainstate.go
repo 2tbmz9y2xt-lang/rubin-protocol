@@ -153,7 +153,8 @@ func (s *ChainState) ConnectBlock(
 	if err != nil {
 		return nil, err
 	}
-	if blockHeight == 0 {
+	var zeroChainID [32]byte
+	if blockHeight == 0 && chainID != zeroChainID {
 		return s.connectGenesisBlock(pb, blockBytes, chainID)
 	}
 
@@ -202,7 +203,8 @@ func (s *ChainState) ConnectBlock(
 }
 
 func (s *ChainState) connectGenesisBlock(pb *consensus.ParsedBlock, blockBytes []byte, chainID [32]byte) (*ChainStateConnectSummary, error) {
-	if chainID != devnetGenesisChainID {
+	var zeroID [32]byte
+	if chainID != zeroID && chainID != devnetGenesisChainID {
 		return nil, errors.New("genesis chain_id mismatch")
 	}
 	if !bytes.Equal(blockBytes, devnetGenesisBlockBytes) {

@@ -58,7 +58,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&cfg.DataDir, "datadir", defaults.DataDir, "node data directory")
 	fs.StringVar(&cfg.BindAddr, "bind", defaults.BindAddr, "bind address host:port")
 	fs.StringVar(&cfg.LogLevel, "log-level", defaults.LogLevel, "log level: debug|info|warn|error")
-	fs.StringVar(&cfg.MineAddress, "mine-address", defaults.MineAddress, "hex-encoded 32-byte key_id or 33-byte CORE_P2PK covenant_data for miner subsidy output")
 	genesisFile := fs.String("genesis-file", "", "path to genesis pack JSON with chain_id_hex")
 	fs.IntVar(&cfg.MaxPeers, "max-peers", defaults.MaxPeers, "max connected peers")
 	mineBlocks := fs.Int("mine-blocks", 0, "mine N blocks locally after startup")
@@ -81,11 +80,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if err := node.ValidateConfig(cfg); err != nil {
 		_, _ = fmt.Fprintf(stderr, "invalid config: %v\n", err)
-		return 2
-	}
-	mineAddress, err := node.ParseMineAddress(cfg.MineAddress)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "invalid config: invalid mine_address: %v\n", err)
 		return 2
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
@@ -154,11 +148,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	if *mineBlocks > 0 {
-		minerCfg := node.DefaultMinerConfig()
-		if len(mineAddress) != 0 {
-			minerCfg.MineAddress = mineAddress
-		}
-		miner, err := newMinerFn(chainState, blockStore, syncEngine, minerCfg)
+		miner, err := newMinerFn(chainState, blockStore, syncEngine, node.DefaultMinerConfig())
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "miner init failed: %v\n", err)
 			return 2

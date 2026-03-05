@@ -204,7 +204,8 @@ func (s *SyncEngine) ApplyBlock(blockBytes []byte, prevTimestamps []uint64) (*Ch
 }
 
 func validateIncomingChainID(blockHeight uint64, chainID [32]byte) error {
-	if blockHeight == 0 {
+	var zeroID [32]byte
+	if blockHeight == 0 && chainID != zeroID {
 		if chainID != devnetGenesisChainID {
 			return errors.New("genesis chain_id mismatch")
 		}
