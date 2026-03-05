@@ -84,7 +84,7 @@ func TestValidateCoreStealthSpend_ErrorMapping(t *testing.T) {
 	}
 
 	nonNative := validWitness
-	nonNative.SuiteID = 0x02 // Formerly SLH-DSA; now treated as a non-native suite.
+	nonNative.SuiteID = 0x02 // Treated as a non-native suite.
 	err = validateCoreStealthSpend(entry, nonNative, tx, 0, 100, chainID, 0)
 	if err == nil {
 		t.Fatalf("expected non-native suite rejection")

@@ -26,7 +26,7 @@ func encodeHTLCClaimPayload(preimage []byte) []byte {
 	return b
 }
 
-func makeSLHKeyMaterial(refundTag byte) ([]byte, []byte, [32]byte, [32]byte) {
+func makeMLKeyMaterial(refundTag byte) ([]byte, []byte, [32]byte, [32]byte) {
 	claimPub := make([]byte, ML_DSA_87_PUBKEY_BYTES)
 	refundPub := make([]byte, ML_DSA_87_PUBKEY_BYTES)
 	refundPub[0] = refundTag
@@ -74,7 +74,7 @@ func htlcTestDigest(t *testing.T, sighashType uint8) [32]byte {
 func TestParseHTLCCovenantData_OK(t *testing.T) {
 	preimage := []byte("rubin-htlc")
 	hash := sha3_256(preimage)
-	_, _, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x01)
+	_, _, claimKeyID, refundKeyID := makeMLKeyMaterial(0x01)
 	cov := encodeHTLCCovenantData(hash, LOCK_MODE_HEIGHT, 123, claimKeyID, refundKeyID)
 	parsed, err := ParseHTLCCovenantData(cov)
 	if err != nil {
@@ -103,7 +103,7 @@ func TestParseHTLCCovenantData_InvalidLockMode(t *testing.T) {
 
 func TestValidateHTLCSpend_ClaimHashMismatch(t *testing.T) {
 	var digest [32]byte
-	claimPub, _, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x22)
+	claimPub, _, claimKeyID, refundKeyID := makeMLKeyMaterial(0x22)
 	entry := makeHTLCEntry(sha3_256([]byte("different")), LOCK_MODE_HEIGHT, 50, claimKeyID, refundKeyID)
 
 	path := WitnessItem{
@@ -128,7 +128,7 @@ func TestValidateHTLCSpend_ClaimHashMismatch(t *testing.T) {
 
 func TestValidateHTLCSpend_RefundTimelockNotMet(t *testing.T) {
 	var digest [32]byte
-	_, refundPub, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x33)
+	_, refundPub, claimKeyID, refundKeyID := makeMLKeyMaterial(0x33)
 	entry := makeHTLCEntry(
 		sha3_256([]byte("x")),
 		LOCK_MODE_HEIGHT,
@@ -208,7 +208,7 @@ func TestApplyNonCoinbaseTxBasic_HTLCUnknownPath(t *testing.T) {
 	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
 	tx, txid := mustParseTxForUtxo(t, txBytes)
 
-	claimPub, _, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x44)
+	claimPub, _, claimKeyID, refundKeyID := makeMLKeyMaterial(0x44)
 
 	tx.Witness = []WitnessItem{
 		// Unknown spend path for CORE_HTLC.
@@ -281,7 +281,7 @@ func TestParseHTLCCovenantData_ClaimRefundKeyIDMustDiffer(t *testing.T) {
 
 func TestValidateHTLCSpend_SelectorSuiteIDInvalid(t *testing.T) {
 	var digest [32]byte
-	claimPub, _, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x55)
+	claimPub, _, claimKeyID, refundKeyID := makeMLKeyMaterial(0x55)
 	entry := makeHTLCEntry(sha3_256([]byte("x")), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
 
 	path := WitnessItem{
@@ -302,7 +302,7 @@ func TestValidateHTLCSpend_SelectorSuiteIDInvalid(t *testing.T) {
 
 func TestValidateHTLCSpend_SelectorKeyIDLenInvalid(t *testing.T) {
 	var digest [32]byte
-	claimPub, _, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x56)
+	claimPub, _, claimKeyID, refundKeyID := makeMLKeyMaterial(0x56)
 	entry := makeHTLCEntry(sha3_256([]byte("x")), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
 
 	path := WitnessItem{
@@ -323,7 +323,7 @@ func TestValidateHTLCSpend_SelectorKeyIDLenInvalid(t *testing.T) {
 
 func TestValidateHTLCSpend_SelectorPayloadTooShort(t *testing.T) {
 	var digest [32]byte
-	claimPub, _, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x57)
+	claimPub, _, claimKeyID, refundKeyID := makeMLKeyMaterial(0x57)
 	entry := makeHTLCEntry(sha3_256([]byte("x")), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
 
 	path := WitnessItem{
@@ -344,7 +344,7 @@ func TestValidateHTLCSpend_SelectorPayloadTooShort(t *testing.T) {
 
 func TestValidateHTLCSpend_ClaimKeyIDMismatch(t *testing.T) {
 	var digest [32]byte
-	claimPub, _, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x58)
+	claimPub, _, claimKeyID, refundKeyID := makeMLKeyMaterial(0x58)
 	entry := makeHTLCEntry(sha3_256([]byte("x")), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
 
 	var otherKeyID [32]byte
@@ -367,7 +367,7 @@ func TestValidateHTLCSpend_ClaimKeyIDMismatch(t *testing.T) {
 
 func TestValidateHTLCSpend_ClaimPayloadTooShort(t *testing.T) {
 	var digest [32]byte
-	claimPub, _, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x59)
+	claimPub, _, claimKeyID, refundKeyID := makeMLKeyMaterial(0x59)
 	entry := makeHTLCEntry(sha3_256([]byte("x")), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
 
 	path := WitnessItem{
@@ -388,7 +388,7 @@ func TestValidateHTLCSpend_ClaimPayloadTooShort(t *testing.T) {
 
 func TestValidateHTLCSpend_ClaimPreimageLenZero(t *testing.T) {
 	var digest [32]byte
-	claimPub, _, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x5a)
+	claimPub, _, claimKeyID, refundKeyID := makeMLKeyMaterial(0x5a)
 	entry := makeHTLCEntry(sha3_256([]byte("x")), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
 
 	path := WitnessItem{
@@ -409,7 +409,7 @@ func TestValidateHTLCSpend_ClaimPreimageLenZero(t *testing.T) {
 
 func TestValidateHTLCSpend_ClaimPreimageLenOverflow(t *testing.T) {
 	var digest [32]byte
-	claimPub, _, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x5b)
+	claimPub, _, claimKeyID, refundKeyID := makeMLKeyMaterial(0x5b)
 	entry := makeHTLCEntry(sha3_256([]byte("x")), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
 
 	tooBig := uint16(MAX_HTLC_PREIMAGE_BYTES + 1)
@@ -435,7 +435,7 @@ func TestValidateHTLCSpend_ClaimPreimageLenOverflow(t *testing.T) {
 
 func TestValidateHTLCSpend_ClaimPayloadLenMismatch(t *testing.T) {
 	var digest [32]byte
-	claimPub, _, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x5c)
+	claimPub, _, claimKeyID, refundKeyID := makeMLKeyMaterial(0x5c)
 	entry := makeHTLCEntry(sha3_256([]byte("x")), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
 
 	// preimage_len=2 but only 1 byte provided.
@@ -457,7 +457,7 @@ func TestValidateHTLCSpend_ClaimPayloadLenMismatch(t *testing.T) {
 
 func TestValidateHTLCSpend_RefundPayloadLenMismatch(t *testing.T) {
 	var digest [32]byte
-	claimPub, refundPub, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x5d)
+	claimPub, refundPub, claimKeyID, refundKeyID := makeMLKeyMaterial(0x5d)
 	entry := makeHTLCEntry(sha3_256([]byte("x")), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
 
 	path := WitnessItem{
@@ -480,7 +480,7 @@ func TestValidateHTLCSpend_RefundPayloadLenMismatch(t *testing.T) {
 
 func TestValidateHTLCSpend_RefundKeyIDMismatch(t *testing.T) {
 	var digest [32]byte
-	claimPub, refundPub, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x5e)
+	claimPub, refundPub, claimKeyID, refundKeyID := makeMLKeyMaterial(0x5e)
 	entry := makeHTLCEntry(sha3_256([]byte("x")), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
 
 	var otherKeyID [32]byte
@@ -506,7 +506,7 @@ func TestValidateHTLCSpend_RefundKeyIDMismatch(t *testing.T) {
 
 func TestValidateHTLCSpend_SigSuiteInvalid(t *testing.T) {
 	var digest [32]byte
-	claimPub, refundPub, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x5f)
+	claimPub, refundPub, claimKeyID, refundKeyID := makeMLKeyMaterial(0x5f)
 	entry := makeHTLCEntry(sha3_256([]byte("x")), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
 	path := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: refundKeyID[:], Signature: []byte{0x01}}
 
@@ -524,7 +524,7 @@ func TestValidateHTLCSpend_SigSuiteInvalid(t *testing.T) {
 
 func TestValidateHTLCSpend_MLDSANonCanonicalWitnessItemLengths(t *testing.T) {
 	var digest [32]byte
-	claimPub, refundPub, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x60)
+	claimPub, refundPub, claimKeyID, refundKeyID := makeMLKeyMaterial(0x60)
 	entry := makeHTLCEntry(sha3_256([]byte("x")), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
 	path := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: refundKeyID[:], Signature: []byte{0x01}}
 

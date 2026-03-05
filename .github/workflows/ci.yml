@@ -153,7 +153,7 @@ jobs:
       - name: Verify OpenSSL PQ algorithms
         run: |
           openssl version
-          openssl list -signature-algorithms | grep -E 'ML-DSA-87|SLH-DSA-SHAKE-256f'
+          openssl list -signature-algorithms | grep -E 'ML-DSA-87'
 
       - name: FIPS provider preflight (module + PQ visibility)
         env:
@@ -332,7 +332,7 @@ jobs:
           LD_LIBRARY_PATH: ${{ steps.openssl.outputs.ld_library_path }}
         run: |
           openssl version
-          openssl list -signature-algorithms | grep -E 'ML-DSA-87|SLH-DSA-SHAKE-256f'
+          openssl list -signature-algorithms | grep -E 'ML-DSA-87'
 
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
         with:

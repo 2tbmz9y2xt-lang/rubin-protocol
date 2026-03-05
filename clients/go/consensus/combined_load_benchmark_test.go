@@ -8,10 +8,10 @@ import (
 )
 
 const (
-	defaultCombinedLoadSLHTxCount   = 8
-	defaultCombinedLoadDAChunkCount = 32
-	defaultCombinedLoadChunkBytes   = 65_536
-	defaultCombinedLoadSLHSigBytes  = 49_856
+	defaultCombinedLoadUnknownSuiteTxCount  = 8
+	defaultCombinedLoadDAChunkCount         = 32
+	defaultCombinedLoadChunkBytes           = 65_536
+	defaultCombinedLoadUnknownSuiteSigBytes = 49_856
 )
 
 func benchmarkEnvInt(tb testing.TB, key string, defaultValue int, minValue int, maxValue int) int {
@@ -128,10 +128,10 @@ func benchBuildBlockBytes(tb testing.TB, txs [][]byte) ([]byte, [32]byte, [32]by
 }
 
 func BenchmarkValidateBlockBasicCombinedLoad(b *testing.B) {
-	slhTxCount := benchmarkEnvInt(
+	unknownSuiteTxCount := benchmarkEnvInt(
 		b,
-		"RUBIN_COMBINED_LOAD_SLH_TXS",
-		defaultCombinedLoadSLHTxCount,
+		"RUBIN_COMBINED_LOAD_UNKNOWN_SUITE_TXS",
+		defaultCombinedLoadUnknownSuiteTxCount,
 		1,
 		64,
 	)
@@ -149,26 +149,26 @@ func BenchmarkValidateBlockBasicCombinedLoad(b *testing.B) {
 		1,
 		MAX_DA_MANIFEST_BYTES_PER_TX,
 	)
-	slhSigBytes := benchmarkEnvInt(
+	unknownSuiteSigBytes := benchmarkEnvInt(
 		b,
-		"RUBIN_COMBINED_LOAD_SLH_SIG_BYTES",
-		defaultCombinedLoadSLHSigBytes,
+		"RUBIN_COMBINED_LOAD_UNKNOWN_SUITE_SIG_BYTES",
+		defaultCombinedLoadUnknownSuiteSigBytes,
 		1,
 		MAX_WITNESS_BYTES_PER_TX,
 	)
 
 	height := uint64(1)
-	slhPub := bytes.Repeat([]byte{0x42}, 64)
-	slhSig := bytes.Repeat([]byte{0x5a}, slhSigBytes)
+	unknownSuitePub := bytes.Repeat([]byte{0x42}, 64)
+	unknownSuiteSig := bytes.Repeat([]byte{0x5a}, unknownSuiteSigBytes)
 
 	nonce := uint64(1)
-	nonCoinbaseTxs := make([][]byte, 0, slhTxCount+1+daChunkCount)
-	for i := 0; i < slhTxCount; i++ {
+	nonCoinbaseTxs := make([][]byte, 0, unknownSuiteTxCount+1+daChunkCount)
+	for i := 0; i < unknownSuiteTxCount; i++ {
 		nonCoinbaseTxs = append(nonCoinbaseTxs, benchTxWithOneInputOneOutputAndWitness(
 			nonce,
 			0x02, // non-native/unknown suite
-			slhPub,
-			slhSig,
+			unknownSuitePub,
+			unknownSuiteSig,
 		))
 		nonce++
 	}
@@ -219,8 +219,8 @@ func BenchmarkValidateBlockBasicCombinedLoad(b *testing.B) {
 	}
 
 	b.Logf(
-		"combined-load fixture: slh_txs=%d da_chunks=%d chunk_bytes=%d total_block_bytes=%d",
-		slhTxCount,
+		"combined-load fixture: unknown_suite_txs=%d da_chunks=%d chunk_bytes=%d total_block_bytes=%d",
+		unknownSuiteTxCount,
 		daChunkCount,
 		chunkPayloadBytes,
 		len(blockBytes),

@@ -8,7 +8,7 @@
 * @2tbmz9y2xt-lang
 
 # ── Cryptographic modules (consensus-critical, PQ) ────────────
-# Go: OpenSSL signer (ML-DSA-87, SLH-DSA-SHAKE-256f)
+# Go: OpenSSL signer (ML-DSA-87)
 clients/go/consensus/openssl_signer*.go @2tbmz9y2xt-lang
 
 # Rust: hashing, sighash, signature verification

@@ -1,8 +1,8 @@
-# Combined-Load Benchmark (SLH + DA) SLO
+# Combined-Load Benchmark (Unknown Suite + DA) SLO
 
 Purpose: provide a repeatable benchmark/evidence lane for mixed load:
 
-- SLH-heavy witness processing (`SUITE_ID_SLH_DSA_SHAKE_256F`),
+- non-native witness processing (`suite_id=0x02`, unknown suite),
 - DA-filled block parsing/validation (`tx_kind=0x01/0x02` with chunk payloads),
 - block-basic validation path as implemented in Go consensus.
 
@@ -14,10 +14,10 @@ Benchmark target:
 
 Default profile (configurable via environment variables):
 
-- `RUBIN_COMBINED_LOAD_SLH_TXS=8`
+- `RUBIN_COMBINED_LOAD_UNKNOWN_SUITE_TXS=8`
 - `RUBIN_COMBINED_LOAD_DA_CHUNKS=32`
 - `RUBIN_COMBINED_LOAD_CHUNK_BYTES=65536`
-- `RUBIN_COMBINED_LOAD_SLH_SIG_BYTES=49856`
+- `RUBIN_COMBINED_LOAD_UNKNOWN_SUITE_SIG_BYTES=49856`
 
 ## Metrics
 

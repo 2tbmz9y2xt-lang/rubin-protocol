@@ -83,7 +83,7 @@ jobs:
 
           run_check "fips_preflight" scripts/dev-env.sh -- scripts/crypto/openssl/fips-preflight.sh
           run_check "go_verify_sig_smoke" scripts/dev-env.sh -- bash -lc \
-            'cd clients/go && go test ./consensus -run "TestVerifySig_(FIPSOnlyModeValidOrSkip|SLHBranchExecutesBootstrap|OpenSSLBackendErrorMapsToSigInvalid)$" -count=1'
+            'cd clients/go && go test ./consensus -run "TestVerifySig_(FIPSReadyModeValid|FIPSOnlyModeValidOrSkip|OpenSSLBackendErrorMapsToSigInvalid)$" -count=1'
           run_check "rust_verify_sig_smoke" scripts/dev-env.sh -- bash -lc \
             'cd clients/rust && cargo test -p rubin-consensus verify_sig_openssl::tests::'
           run_check "conformance_sig_lane" scripts/dev-env.sh -- python3 \
