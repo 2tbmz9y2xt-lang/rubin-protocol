@@ -1497,7 +1497,6 @@ class HtlcOrderingVector:
     locktime_ok: bool
     suite_id: int
     block_height: int
-    activation_height: int
     key_binding_ok: bool
     preimage_ok: bool
     verify_ok: bool
@@ -1528,7 +1527,6 @@ def load_cv_htlc_ordering(path: Path) -> list[HtlcOrderingVector]:
                 locktime_ok=bool(v.get("locktime_ok", True)),
                 suite_id=int(v.get("suite_id", 1)),
                 block_height=int(v.get("block_height", 0)),
-                activation_height=int(v.get("slh_activation_height", 1_000_000)),
                 key_binding_ok=bool(v.get("key_binding_ok", True)),
                 preimage_ok=bool(v.get("preimage_ok", True)),
                 verify_ok=bool(v.get("verify_ok", True)),
@@ -1553,7 +1551,6 @@ def render_cv_htlc_ordering_lean(vectors: list[HtlcOrderingVector]) -> str:
             + f"locktimeOk := {'true' if v.locktime_ok else 'false'}, "
             + f"suiteId := {v.suite_id}, "
             + f"blockHeight := {v.block_height}, "
-            + f"slhActivationHeight := {v.activation_height}, "
             + f"keyBindingOk := {'true' if v.key_binding_ok else 'false'}, "
             + f"preimageOk := {'true' if v.preimage_ok else 'false'}, "
             + f"verifyOk := {'true' if v.verify_ok else 'false'}, "
@@ -1576,7 +1573,6 @@ def render_cv_htlc_ordering_lean(vectors: list[HtlcOrderingVector]) -> str:
         "  locktimeOk : Bool\n"
         "  suiteId : Nat\n"
         "  blockHeight : Nat\n"
-        "  slhActivationHeight : Nat\n"
         "  keyBindingOk : Bool\n"
         "  preimageOk : Bool\n"
         "  verifyOk : Bool\n"

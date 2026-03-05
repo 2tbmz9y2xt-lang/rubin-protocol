@@ -13,7 +13,7 @@ Policy:
 
 Причина:
 - закрыть хвосты после удаления `suite_id=0x02` из native consensus:
-  - `CV-VAULT-SLH-01` теперь фиксирует reject как non-native suite (`TX_ERR_SIG_ALG_INVALID`),
+  - `CV-VAULT-UNKNOWN-SUITE-01` теперь фиксирует reject как non-native suite (`TX_ERR_SIG_ALG_INVALID`),
     а не parse-stage noncanonical;
   - `CV-U-EXT-02` больше не дублирует sentinel-кейс и проверяет pre-active non-native witness;
   - добавлены `CV-U-EXT-04` и `CV-U-EXT-05` для ACTIVE `CORE_EXT` profile:
@@ -32,7 +32,7 @@ Policy:
 ## 2026-03-03 — Sighash-byte canonicalization outcome rebaseline (Q-RFC-STEALTH-01)
 
 Причина:
-- после включения trailing `sighash_type` байта для известных suites (`ML-DSA`, `SLH-DSA`) parser canonicalization
+- после включения trailing `sighash_type` байта для известных native suites (на сегодня: только `ML-DSA`) parser canonicalization
   требует `sig_length = base_sig_len + 1` (CANONICAL §5.4/§7/§12);
 - legacy fixtures без trailing byte начали детерминированно резаться на parse-stage как
   `TX_ERR_SIG_NONCANONICAL` до covenant/UTXO/business-rule веток;
@@ -64,7 +64,7 @@ Policy:
   - invalid suite (`TX_ERR_SIG_ALG_INVALID`);
   - one_time_key_id mismatch (`TX_ERR_SIG_INVALID`);
   - malformed stealth covenant_data on spend (`TX_ERR_COVENANT_TYPE_INVALID`);
-  - SLH pre-activation reject и SLH at activation success.
+  - reject unknown suite_id (`TX_ERR_SIG_ALG_INVALID`) без вызова verify.
 
 Инструменты:
 - базовые tx взяты из `CV-UTXO-BASIC` (`CV-U-06`, `CV-U-16`) через `tx_hex_from`/`tx_hex_mutations`,
@@ -211,8 +211,8 @@ Policy:
 
 Причина:
 - синхронизация CANONICAL и `RUBIN_CORE_HTLC_SPEC.md` по HTLC creation constraints;
-- фиксация error-priority: SLH activation gate (`suite_id=0x02` pre-activation) должен срабатывать
-  до вызова `verify_sig(...)`.
+- фиксация error-priority: gate для unknown/non-native suite (`suite_id=0x02` как пример) должен срабатывать
+  до вызова `verify_sig(...)` (и `verify_sig` MUST NOT be invoked).
 
 Инструменты:
 - ручное обновление `CV-HTLC.json`,
@@ -242,7 +242,8 @@ Policy:
 
 Причина:
 - добавить отдельный gate `CV-WEIGHT` в общий conformance baseline;
-- зафиксировать детерминированные векторы веса для `suite_id=0x00/0x01/0x02`, DA-size и anchor-bytes.
+- зафиксировать детерминированные векторы веса для `suite_id=0x00/0x01` и unknown suite (`suite_id=0x02` как пример),
+  DA-size и anchor-bytes.
 
 Инструменты:
 - ручное добавление `conformance/fixtures/CV-WEIGHT.json`,
@@ -324,11 +325,12 @@ Policy:
 - `CV-PARSE.json` (добавлены `PARSE-14`, `PARSE-15`)
 - `CV-POW.json` (добавлен `POW-10`)
 
-## 2026-02-28 — Q-CF-19 SLH witness per-suite budget overflow vector
+## 2026-02-28 — Q-CF-19 large unknown-suite witness item (parse-only)
 
 Причина:
-- зафиксировать consensus hardening (вариант B) для per-suite SLH witness budget;
-- исключить сценарий с oversized SLH witness payload внутри общего лимита `MAX_WITNESS_BYTES_PER_TX`.
+- зафиксировать что per-suite SLH witness budget не является консенсусным правилом (SLH не native suite);
+- оставить wire-level правило: большой WitnessItem **ниже** `MAX_WITNESS_BYTES_PER_TX` parse-valid,
+  а suite semantics — deferred.
 
 Инструменты:
 - ручное обновление `CV-PARSE.json`;
@@ -337,26 +339,26 @@ Policy:
 Изменённые fixtures:
 - `CV-PARSE.json` (добавлен `PARSE-16`)
 
-## 2026-02-28 — Q-C1-1-CONFLICT-VECTOR SLH pre-activation vs wrong-length
+## 2026-02-28 — Q-C1-1-CONFLICT-VECTOR unknown suite vs wrong-length
 
 Причина:
 - зафиксировать детерминированный приоритет ошибки для конфликта:
-  `suite_id=SLH` **до активации** + witness item с неканоническими длинами.
-- требование: activation gate (`TX_ERR_SIG_ALG_INVALID`) MUST win и `verify_sig` MUST NOT be invoked.
+  unknown/non-native `suite_id` (`0x02` как пример) + witness item с неканоническими длинами.
+- требование: `TX_ERR_SIG_ALG_INVALID` MUST win и `verify_sig` MUST NOT be invoked.
 
 Инструменты:
 - обновление `CV-HTLC-ORDERING.json`;
 - проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-HTLC-ORDERING`.
 
 Изменённые fixtures:
-- `CV-HTLC-ORDERING.json` (добавлен `CV-H-SLH-Preactivation-WrongLength`)
+- `CV-HTLC-ORDERING.json` (добавлен `CV-H-UnknownSuite-WrongLength`)
 
-## 2026-02-28 — SEM-001 SLH exact-length canonicality vector
+## 2026-02-28 — SEM-001 non-native suite canonicality cleanup
 
 Причина:
-- зафиксировать новое правило каноничности для `SUITE_ID_SLH_DSA_SHAKE_256F`:
-  `sig_length MUST equal MAX_SLH_DSA_SIG_BYTES`;
-- исключить acceptance коротких SLH-подписей на активной высоте.
+- после де-интеграции SLH как native suite: non-native suites трактуются как unknown (напр. `suite_id=0x02`)
+  и не имеют fixed-length canonicality правила на parse-stage;
+- `WEIGHT-03` фиксирует поведение weight для unknown suite через unknown sig_cost (без привязки к SLH константам).
 
 Инструменты:
 - обновление `CV-SIG.json`, `CV-WEIGHT.json`;
@@ -364,7 +366,7 @@ Policy:
 
 Изменённые fixtures:
 - `CV-SIG.json` (добавлен `CV-SIG-02e`)
-- `CV-WEIGHT.json` (обновлён `WEIGHT-03`: short SLH signature no longer contributes `sig_cost`)
+- `CV-WEIGHT.json` (обновлён `WEIGHT-03`: unknown suite contributes unknown `sig_cost`)
 
 ## 2026-03-01 — DET-001 SpendTx conflict precedence vector
 

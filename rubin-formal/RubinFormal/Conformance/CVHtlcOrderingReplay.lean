@@ -9,9 +9,7 @@ def htlcOrderingEval (v : CVHtlcOrderingVector) : (Bool × Option String × Bool
       some "TX_ERR_PARSE"
     else if path == "refund" && !v.locktimeOk then
       some "TX_ERR_TIMELOCK_NOT_MET"
-    else if !(v.suiteId == 1 || v.suiteId == 2) then
-      some "TX_ERR_SIG_ALG_INVALID"
-    else if v.suiteId == 2 && v.blockHeight < v.slhActivationHeight then
+    else if v.suiteId != 1 then
       some "TX_ERR_SIG_ALG_INVALID"
     else if !v.keyBindingOk then
       some "TX_ERR_SIG_INVALID"
