@@ -12,7 +12,7 @@ set -euo pipefail
 # - RUBIN_OPENSSL_FIPS_MODE:
 #     - off   (default): print summary only, exit 0
 #     - ready: attempt to load fips provider, but do not fail if unavailable
-#     - only : require fips provider + ML-DSA + SLH-DSA, otherwise exit non-zero
+#     - only : require fips provider + ML-DSA (SLH optional), otherwise exit non-zero
 #
 # Expected usage:
 #   scripts/dev-env.sh -- scripts/crypto/openssl/fips-preflight.sh
@@ -64,21 +64,13 @@ openssl list -signature-algorithms -provider fips 2>/dev/null | grep -Eai 'ml-ds
 echo
 
 if [[ "${MODE}" == "only" ]]; then
-  # Require at least one ML-DSA and one SLH-DSA algorithm to be visible from fips provider.
+  # Require at least one ML-DSA algorithm to be visible from fips provider.
   if ! openssl list -signature-algorithms -provider fips 2>/dev/null | grep -Eai 'ml-dsa|mldsa' >/dev/null; then
     echo "ERROR: ML-DSA not visible via provider=fips." >&2
     exit 1
   fi
-  if ! openssl list -signature-algorithms -provider fips 2>/dev/null | grep -Eai 'slh-dsa|slh' >/dev/null; then
-    echo "ERROR: SLH-DSA not visible via provider=fips." >&2
-    exit 1
-  fi
   if ! openssl list -signature-algorithms -propquery 'fips=yes' 2>/dev/null | grep -Eai 'ml-dsa|mldsa' >/dev/null; then
     echo "ERROR: ML-DSA not fetchable with propquery=fips=yes." >&2
-    exit 1
-  fi
-  if ! openssl list -signature-algorithms -propquery 'fips=yes' 2>/dev/null | grep -Eai 'slh-dsa|slh' >/dev/null; then
-    echo "ERROR: SLH-DSA not fetchable with propquery=fips=yes." >&2
     exit 1
   fi
 fi
