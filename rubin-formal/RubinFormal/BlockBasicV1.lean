@@ -133,7 +133,7 @@ def powCheck (h : BlockHeader) : Except String Unit := do
       | none => throw "TX_ERR_PARSE"
       | some x => pure x
     let coreEnd := c9.off
-    let (cW, wErr, wStart, wEnd, _ml, _slh) ←
+    let (cW, wErr, wStart, wEnd, _ml, _unk) ←
       match RubinFormal.TxWeightV2.parseWitnessSectionForWeight c9 with
       | none => throw "TX_ERR_PARSE"
       | some x => pure x
@@ -172,7 +172,7 @@ def parseBlock (blockBytes : Bytes) : Except String ParsedBlock := do
     | none => throw "BLOCK_ERR_PARSE"
     | some x => pure x
   if !minimal then throw "BLOCK_ERR_PARSE"
-  if txCount == 0 then throw "BLOCK_ERR_PARSE"
+  if txCount == 0 then throw "BLOCK_ERR_COINBASE_INVALID"
   let mut cur := c2
   let mut txs : List Bytes := []
   let mut txids : List Bytes := []

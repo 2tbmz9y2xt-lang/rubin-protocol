@@ -167,7 +167,7 @@ def parseDATx (tx : Bytes) : Except String ParsedDATx := do
           chunkHash := some h
           pure c'
 
-  let (cW, wErr, wStart, wEnd, _ml, _slh) ←
+  let (cW, wErr, wStart, wEnd, _ml, _unk) ←
     match RubinFormal.TxWeightV2.parseWitnessSectionForWeight c9 with
     | none => throw "TX_ERR_PARSE"
     | some x => pure x

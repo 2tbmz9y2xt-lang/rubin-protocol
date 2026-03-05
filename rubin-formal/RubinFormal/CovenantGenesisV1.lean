@@ -18,8 +18,6 @@ def MAX_MULTISIG_KEYS : Nat := 12
 
 def SUITE_ID_SENTINEL : Nat := 0x00
 def SUITE_ID_ML_DSA_87 : Nat := 0x01
-def SUITE_ID_SLH_DSA_SHAKE_256F : Nat := 0x02
-def SLH_DSA_ACTIVATION_HEIGHT : Nat := 1000000
 
 def COV_TYPE_P2PK : Nat := 0x0000
 def COV_TYPE_ANCHOR : Nat := 0x0002
@@ -178,14 +176,12 @@ structure TxOut where
   covenantData : Bytes
 deriving Repr, DecidableEq
 
-def validateOutGenesis (out : TxOut) (txKind : Nat) (blockHeight : Nat) : Except String Unit := do
+def validateOutGenesis (out : TxOut) (txKind : Nat) (_blockHeight : Nat) : Except String Unit := do
   if out.covenantType == COV_TYPE_P2PK then
     if out.value == 0 then throw "TX_ERR_COVENANT_TYPE_INVALID"
     if out.covenantData.size != MAX_P2PK_COVENANT_DATA then throw "TX_ERR_COVENANT_TYPE_INVALID"
     let suiteId := (out.covenantData.get! 0).toNat
-    if !(suiteId == SUITE_ID_ML_DSA_87 || suiteId == SUITE_ID_SLH_DSA_SHAKE_256F) then
-      throw "TX_ERR_COVENANT_TYPE_INVALID"
-    if suiteId == SUITE_ID_SLH_DSA_SHAKE_256F && blockHeight < SLH_DSA_ACTIVATION_HEIGHT then
+    if suiteId != SUITE_ID_ML_DSA_87 then
       throw "TX_ERR_COVENANT_TYPE_INVALID"
   else if out.covenantType == COV_TYPE_ANCHOR then
     if out.value != 0 then throw "TX_ERR_COVENANT_TYPE_INVALID"

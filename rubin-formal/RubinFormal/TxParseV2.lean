@@ -15,18 +15,14 @@ def MAX_TX_OUTPUTS : Nat := 1024
 def MAX_SCRIPT_SIG_BYTES : Nat := 32
 def MAX_WITNESS_ITEMS : Nat := 1024
 def MAX_WITNESS_BYTES_PER_TX : Nat := 100000
-def MAX_SLH_WITNESS_BYTES_PER_TX : Nat := 50000
 -- Wire-level hard cap (CANONICAL §5.3).
 def MAX_COVENANT_DATA_PER_OUTPUT : Nat := 65536
 
 def SUITE_ID_SENTINEL : Nat := 0x00
 def SUITE_ID_ML_DSA_87 : Nat := 0x01
-def SUITE_ID_SLH_DSA_SHAKE_256F : Nat := 0x02
 
 def ML_DSA_87_PUBKEY_BYTES : Nat := 2592
 def ML_DSA_87_SIG_BYTES : Nat := 4627
-def SLH_DSA_SHAKE_256F_PUBKEY_BYTES : Nat := 64
-def MAX_SLH_DSA_SIG_BYTES : Nat := 49856
 
 def MAX_HTLC_PREIMAGE_BYTES : Nat := 256
 
@@ -68,7 +64,7 @@ def parseOutputs (c : Cursor) (n : Nat) : Option Cursor := do
     cur := cur4
   pure cur
 
-def parseWitnessItem (c : Cursor) : Option (Cursor × Option TxErr × Bool) := do
+def parseWitnessItem (c : Cursor) : Option (Cursor × Option TxErr) := do
   let (suite, c1) ← c.getU8?
   let suiteID := suite.toNat
   let (pubLen, c2, minimal1) ← c1.getCompactSize?
@@ -78,21 +74,25 @@ def parseWitnessItem (c : Cursor) : Option (Cursor × Option TxErr × Bool) := d
   let _ ← requireMinimal minimal2
   let (sig, c5) ← c4.getBytes? sigLen
 
+  -- Non-sentinel suites require at least 1 byte of signature (sighash_type).
+  if suiteID != SUITE_ID_SENTINEL && sigLen == 0 then
+    none
+  else
   -- Canonicalization rules (CANONICAL §5.4).
   if suiteID == SUITE_ID_SENTINEL then
     if pubLen == 0 && sigLen == 0 then
-      pure (c5, none, false)
+      pure (c5, none)
     else if pubLen == 32 then
       if sigLen == 1 then
         if sig.size == 1 && sig.get! 0 == 0x01 then
-          pure (c5, none, false)
+          pure (c5, none)
         else
           none
       else if sigLen >= 3 then
         if sig.size >= 3 && sig.get! 0 == 0x00 then
           let preLen := Wire.u16le? (sig.get! 1) (sig.get! 2)
           if preLen >= 1 && preLen <= MAX_HTLC_PREIMAGE_BYTES && sigLen == 3 + preLen then
-            pure (c5, none, false)
+            pure (c5, none)
           else
             none
         else
@@ -102,19 +102,18 @@ def parseWitnessItem (c : Cursor) : Option (Cursor × Option TxErr × Bool) := d
     else
       none
   else if suiteID == SUITE_ID_ML_DSA_87 then
-    if pubLen == ML_DSA_87_PUBKEY_BYTES && sigLen == ML_DSA_87_SIG_BYTES then
-      pure (c5, none, false)
+    -- Wire canonical size includes the trailing sighash_type byte (+1).
+    if pubLen == ML_DSA_87_PUBKEY_BYTES && sigLen == ML_DSA_87_SIG_BYTES + 1 then
+      pure (c5, none)
     else
-      pure (c5, some .sigNoncanonical, false)
-  else if suiteID == SUITE_ID_SLH_DSA_SHAKE_256F then
-    -- Parser-level SLH length canonicality is deferred to spend validation
-    -- where block height is available for deterministic activation priority.
-    pure (c5, none, true)
+      pure (c5, some .sigNoncanonical)
   else
-    -- Unknown suite_id is accepted at parse stage (CANONICAL §12.2 CV-SIG-05).
-    -- Semantic authorization is enforced later during spend validation.
-    pure (c5, none, false)
+    -- Unknown suites are accepted at parse stage (CANONICAL §12.2 / CV-SIG-05).
+    -- Semantic suite authorization is enforced at the spend path.
+    pure (c5, none)
 
+-- Per-item short-circuit: matches Go behaviour where overflow and canonical checks
+-- happen after each item rather than at the end.  The first error encountered wins.
 def parseWitnessSection (c : Cursor) : Option (Cursor × TxErr × Nat × Nat) := do
   let startOff := c.off
   let (wCount, c1, minimal) ← c.getCompactSize?
@@ -122,36 +121,27 @@ def parseWitnessSection (c : Cursor) : Option (Cursor × TxErr × Nat × Nat) :=
   if wCount > MAX_WITNESS_ITEMS then
     pure (c1, .witnessOverflow, startOff, c1.off)
   else
-    let rec loop (cur : Cursor) (remaining : Nat) (anySigAlgInvalid : Bool) (anySigNoncanonical : Bool)
-        (slhWitnessBytes : Nat) : Option (Cursor × TxErr × Nat × Nat) := do
+    let rec loop (cur : Cursor) (remaining : Nat) (earlyErr : Option TxErr)
+        : Option (Cursor × TxErr × Nat × Nat) := do
       match remaining with
       | 0 =>
           let endOff := cur.off
-          let err :=
-            if anySigAlgInvalid then .sigAlgInvalid
-            else if anySigNoncanonical then .sigNoncanonical
-            else .parse
+          let err := earlyErr.getD .parse
           pure (cur, err, startOff, endOff)
       | Nat.succ rem =>
-          let itemStart := cur.off
-          let (cur', e, isSLH) ← parseWitnessItem cur
-          let itemBytes := cur'.off - itemStart
-          let slhWitnessBytes' := if isSLH then slhWitnessBytes + itemBytes else slhWitnessBytes
-          if slhWitnessBytes' > MAX_SLH_WITNESS_BYTES_PER_TX then
-            pure (cur', .witnessOverflow, startOff, cur'.off)
-          else
-            let anySigAlgInvalid' :=
-              anySigAlgInvalid ||
-                match e with
-                | some .sigAlgInvalid => true
-                | _ => false
-            let anySigNoncanonical' :=
-              anySigNoncanonical ||
-                match e with
-                | some .sigNoncanonical => true
-                | _ => false
-            loop cur' rem anySigAlgInvalid' anySigNoncanonical' slhWitnessBytes'
-    loop c1 wCount false false 0
+          -- If a hard error was already seen, we still need to consume the remaining
+          -- witness bytes to reach the correct cursor position for subsequent parsing.
+          let (cur', e) ← parseWitnessItem cur
+          -- Per-item cumulative witness byte check (Go checks after each item).
+          let cumBytes := cur'.off - startOff
+          let earlyErr' :=
+            if earlyErr.isSome then earlyErr
+            else if cumBytes > MAX_WITNESS_BYTES_PER_TX then some .witnessOverflow
+            else match e with
+              | some err => some err
+              | none => none
+          loop cur' rem earlyErr'
+    loop c1 wCount none
 
 def parseTx (tx : Bytes) : ParseResult :=
   let c0 : Cursor := { bs := tx, off := 0 }
@@ -196,11 +186,11 @@ def parseTx (tx : Bytes) : ParseResult :=
                     -- witness
                     match parseWitnessSection cDa with
                     | none => fail .parse
-                    | some (cW, wErr, wStart, wEnd) =>
-                      let witBytes := wEnd - wStart
-                      if witBytes > MAX_WITNESS_BYTES_PER_TX then
-                        fail .witnessOverflow
-                      else if wErr == .witnessOverflow then
+                    | some (cW, wErr, _wStart, _wEnd) =>
+                      -- Per-item error priority (Go bails on first per-item error):
+                      -- overflow and canonical checks happen per item inside
+                      -- parseWitnessSection; wErr captures the first one encountered.
+                      if wErr == .witnessOverflow then
                         fail .witnessOverflow
                       else if wErr == .sigAlgInvalid then
                         fail .sigAlgInvalid
