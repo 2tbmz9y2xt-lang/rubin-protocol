@@ -14,7 +14,8 @@ exclude_paths:
   - "clients/go/**/*_test.go"
   - "clients/rust/**/tests/**"
   - "clients/rust/**/benches/**"
-    # Entrypoint binaries excluded from tarpaulin coverage (no unit tests, integration-tested).
+  # Entrypoint binaries are integration-tested; exclude from diff coverage.
+  - "clients/go/cmd/**"
   - "clients/rust/crates/rubin-node/src/**"
   - "clients/rust/crates/rubin-consensus-cli/src/**"
   # Non-executable artifacts (fixtures, matrices, formal Lean pack) are not part of Go/Rust
