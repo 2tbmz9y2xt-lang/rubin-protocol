@@ -27,14 +27,22 @@ def COV_TYPE_MULTISIG : Nat := 0x0104
 
 def SUITE_ID_SENTINEL : Nat := 0x00
 def SUITE_ID_ML_DSA_87 : Nat := 0x01
-def SUITE_ID_SLH_DSA_SHAKE_256F : Nat := 0x02
-
-def SLH_DSA_ACTIVATION_HEIGHT : Nat := 1000000
 
 def ML_DSA_87_PUBKEY_BYTES : Nat := 2592
 def ML_DSA_87_SIG_BYTES : Nat := 4627
-def SLH_DSA_SHAKE_256F_PUBKEY_BYTES : Nat := 64
-def MAX_SLH_DSA_SIG_BYTES : Nat := 49856
+
+def SIGHASH_ALL : UInt8 := 0x01
+def SIGHASH_NONE : UInt8 := 0x02
+def SIGHASH_SINGLE : UInt8 := 0x03
+def SIGHASH_ANYONECANPAY : UInt8 := 0x80
+
+def isValidSighashType (sht : UInt8) : Bool :=
+  sht == SIGHASH_ALL ||
+  sht == SIGHASH_NONE ||
+  sht == SIGHASH_SINGLE ||
+  sht == (SIGHASH_ALL ||| SIGHASH_ANYONECANPAY) ||
+  sht == (SIGHASH_NONE ||| SIGHASH_ANYONECANPAY) ||
+  sht == (SIGHASH_SINGLE ||| SIGHASH_ANYONECANPAY)
 
 -- Formal replay: deterministic signature verification oracle (crypto is out-of-scope).
 -- We accept only the known-good wtxids present in conformance fixtures for P2PK-spend OK cases.
@@ -185,7 +193,9 @@ def parseWitnessItem (c : Cursor) : Option (WitnessItem × Cursor) := do
   let (sigLen, c4, minimal2) ← c3.getCompactSize?
   let _ ← requireMinimal minimal2
   let (sig, c5) ← c4.getBytes? sigLen
-  pure ({ suiteId := suiteId, pubkey := pub, signature := sig }, c5)
+  -- Non-sentinel suites require at least 1 byte of signature (sighash_type).
+  if suiteId != 0x00 && sigLen == 0 then none
+  else pure ({ suiteId := suiteId, pubkey := pub, signature := sig }, c5)
 
 def parseWitness (c : Cursor) : Option (List WitnessItem × Cursor) := do
   let (wCount, c1, minimal) ← c.getCompactSize?
@@ -243,6 +253,12 @@ def parseTx (tx : Bytes) : Except String Tx := do
     match parseWitness c9 with
     | none => throw "TX_ERR_PARSE"
     | some x => pure x
+  -- Canonical length check on ML-DSA witness items (matches Go tx_parse.go line 356).
+  -- Must happen at parse time, before UTXO lookups and coinbase-maturity checks.
+  for w in wit do
+    if w.suiteId == SUITE_ID_ML_DSA_87 then
+      if w.pubkey.size != ML_DSA_87_PUBKEY_BYTES || w.signature.size != ML_DSA_87_SIG_BYTES + 1 then
+        throw "TX_ERR_SIG_NONCANONICAL"
   let (daLen, c10, minDa) ←
     match cW.getCompactSize? with
     | none => throw "TX_ERR_PARSE"
@@ -348,9 +364,7 @@ def applyNonCoinbaseTxBasicState
       if e.covenantData.size != MAX_P2PK_COVENANT_DATA then
         throw "TX_ERR_COVENANT_TYPE_INVALID"
       let suite := (e.covenantData.get! 0).toNat
-      if !(suite == SUITE_ID_ML_DSA_87 || suite == SUITE_ID_SLH_DSA_SHAKE_256F) then
-        throw "TX_ERR_SIG_ALG_INVALID"
-      if suite == SUITE_ID_SLH_DSA_SHAKE_256F && height < SLH_DSA_ACTIVATION_HEIGHT then
+      if suite != SUITE_ID_ML_DSA_87 then
         throw "TX_ERR_SIG_ALG_INVALID"
     else if e.covenantType == COV_TYPE_EXT then
       if e.covenantData.size < 3 then
@@ -392,15 +406,8 @@ def applyNonCoinbaseTxBasicState
 
   let validateWitnessItemLengths (w : WitnessItem) : Except String Unit := do
     if w.suiteId == SUITE_ID_ML_DSA_87 then
-      if w.pubkey.size != ML_DSA_87_PUBKEY_BYTES || w.signature.size != ML_DSA_87_SIG_BYTES then
-        throw "TX_ERR_SIG_NONCANONICAL"
-      pure ()
-    else if w.suiteId == SUITE_ID_SLH_DSA_SHAKE_256F then
-      if height < SLH_DSA_ACTIVATION_HEIGHT then
-        throw "TX_ERR_SIG_ALG_INVALID"
-      if w.pubkey.size != SLH_DSA_SHAKE_256F_PUBKEY_BYTES then
-        throw "TX_ERR_SIG_NONCANONICAL"
-      if w.signature.size == 0 || w.signature.size > MAX_SLH_DSA_SIG_BYTES then
+      -- Wire-level signature includes the trailing sighash_type byte (+1).
+      if w.pubkey.size != ML_DSA_87_PUBKEY_BYTES || w.signature.size != ML_DSA_87_SIG_BYTES + 1 then
         throw "TX_ERR_SIG_NONCANONICAL"
       pure ()
     else
@@ -410,13 +417,15 @@ def applyNonCoinbaseTxBasicState
     if entry.covenantData.size != MAX_P2PK_COVENANT_DATA then
       throw "TX_ERR_COVENANT_TYPE_INVALID"
     let suite := (entry.covenantData.get! 0).toNat
-    if !(suite == SUITE_ID_ML_DSA_87 || suite == SUITE_ID_SLH_DSA_SHAKE_256F) then
-      throw "TX_ERR_SIG_ALG_INVALID"
-    if suite == SUITE_ID_SLH_DSA_SHAKE_256F && height < SLH_DSA_ACTIVATION_HEIGHT then
+    if suite != SUITE_ID_ML_DSA_87 then
       throw "TX_ERR_SIG_ALG_INVALID"
     if suite != w.suiteId then
       throw "TX_ERR_SIG_ALG_INVALID"
     validateWitnessItemLengths w
+    -- Sighash type validation: last byte of signature must be a valid sighash type.
+    if w.signature.size == 0 then throw "TX_ERR_PARSE"
+    let sht := w.signature.get! (w.signature.size - 1)
+    if !(isValidSighashType sht) then throw "TX_ERR_SIGHASH_TYPE_INVALID"
     let keyId := entry.covenantData.extract 1 33
     if SHA3.sha3_256 w.pubkey != keyId then
       throw "TX_ERR_SIG_INVALID"

@@ -15,12 +15,10 @@ func ValidateTxCovenantsGenesis(tx *Tx, blockHeight uint64) error {
 				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "invalid CORE_P2PK covenant_data length")
 			}
 			suiteID := out.CovenantData[0]
-			if suiteID != SUITE_ID_ML_DSA_87 && suiteID != SUITE_ID_SLH_DSA_SHAKE_256F {
+			if suiteID != SUITE_ID_ML_DSA_87 {
 				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "invalid CORE_P2PK suite_id")
 			}
-			if suiteID == SUITE_ID_SLH_DSA_SHAKE_256F && blockHeight < SLH_DSA_ACTIVATION_HEIGHT {
-				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_P2PK SLH-DSA suite inactive at this height")
-			}
+			_ = blockHeight
 
 		case COV_TYPE_ANCHOR:
 			if out.Value != 0 {

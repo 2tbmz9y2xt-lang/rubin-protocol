@@ -9,7 +9,6 @@ use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
 use crate::htlc::{parse_htlc_covenant_data, validate_htlc_spend};
-use crate::sighash::sighash_v1_digest;
 use crate::spend_verify::{validate_p2pk_spend, validate_threshold_sig_spend};
 use crate::stealth::{parse_stealth_covenant_data, validate_stealth_spend};
 use crate::tx::Tx;
@@ -254,8 +253,10 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
                 validate_core_ext_spend(
                     &entry,
                     &assigned[0],
-                    &sighash_v1_digest(tx, input_index as u32, entry.value, chain_id)?,
-                    height,
+                    tx,
+                    input_index as u32,
+                    entry.value,
+                    chain_id,
                     core_ext_profiles_at_height,
                 )?;
             }

@@ -134,7 +134,8 @@ func TestParseTx_WitnessItem_Canonicalization(t *testing.T) {
 				w.WriteByte(0x01) // witness_count
 				w.WriteByte(0x03) // suite_id unknown
 				w.WriteByte(0x00) // pubkey_length
-				w.WriteByte(0x00) // sig_length
+				w.WriteByte(0x01) // sig_length
+				w.WriteByte(0x01) // sighash_type
 				w.WriteByte(0x00) // da_payload_len
 				return w.Bytes()
 			},
@@ -159,8 +160,6 @@ func TestParseTx_WitnessItem_Canonicalization(t *testing.T) {
 			},
 		},
 	}
-	// slh_dsa_sig_len_zero: parse no longer rejects SLH items with sig_len=0;
-	// length canonicality for SLH-DSA is enforced in the spend path (Q-CF-18).
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -183,7 +182,7 @@ func TestParseTx_WitnessBytesOverflow(t *testing.T) {
 	var w bytes.Buffer
 	w.WriteByte(0x03) // witness_count = 3
 	for i := 0; i < 3; i++ {
-		w.WriteByte(SUITE_ID_SLH_DSA_SHAKE_256F)
+		w.WriteByte(0x02) // unknown suite_id
 		w.WriteByte(0x40) // pubkey_length=64
 		w.Write(make([]byte, 64))
 		w.WriteByte(0xfd) // sig_length=49857 (0xC2C1)
@@ -193,29 +192,6 @@ func TestParseTx_WitnessBytesOverflow(t *testing.T) {
 	}
 	w.WriteByte(0x00) // da_payload_len
 
-	expectParseErrCode(t, txWithWitnessSection(w.Bytes()), TX_ERR_WITNESS_OVERFLOW)
-}
-
-func TestParseTx_SLHWitnessBudgetOverflow(t *testing.T) {
-	var w bytes.Buffer
-	w.WriteByte(0x01) // witness_count = 1
-	w.WriteByte(SUITE_ID_SLH_DSA_SHAKE_256F)
-	w.WriteByte(0x40) // pubkey_length=64
-	w.Write(make([]byte, 64))
-
-	// Item bytes = 1(suite) + 1(pub_len varint) + 64(pubkey) + 3(sig_len varint fd..)
-	//            + sig_len.
-	// Choose sig_len so item_bytes exceeds MAX_SLH_WITNESS_BYTES_PER_TX by 1.
-	sigLen := MAX_SLH_WITNESS_BYTES_PER_TX - (1 + 1 + SLH_DSA_SHAKE_256F_PUBKEY_BYTES + 3) + 1
-	if sigLen > 0xffff {
-		t.Fatalf("sigLen=%d overflows u16 CompactSize(fd)", sigLen)
-	}
-	w.WriteByte(0xfd)
-	w.WriteByte(byte(sigLen & 0xff))
-	w.WriteByte(byte((sigLen >> 8) & 0xff))
-	w.Write(make([]byte, sigLen))
-
-	w.WriteByte(0x00) // da_payload_len
 	expectParseErrCode(t, txWithWitnessSection(w.Bytes()), TX_ERR_WITNESS_OVERFLOW)
 }
 

@@ -1,7 +1,5 @@
 use crate::constants::{
-    MAX_P2PK_COVENANT_DATA, MAX_SLH_DSA_SIG_BYTES, ML_DSA_87_PUBKEY_BYTES,
-    SLH_DSA_ACTIVATION_HEIGHT, SLH_DSA_SHAKE_256F_PUBKEY_BYTES, SUITE_ID_ML_DSA_87,
-    SUITE_ID_SENTINEL, SUITE_ID_SLH_DSA_SHAKE_256F,
+    MAX_P2PK_COVENANT_DATA, ML_DSA_87_PUBKEY_BYTES, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
 };
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
@@ -11,27 +9,10 @@ use crate::tx::WitnessItem;
 use crate::utxo_basic::UtxoEntry;
 use crate::verify_sig_openssl::verify_sig;
 
-/// Q-CF-18: validates SLH-DSA-SHAKE-256f witness-item byte lengths.
-/// Returns Ok(()) for non-SLH suite IDs. Must be called after the activation check.
-fn check_slh_canonical(w: &WitnessItem) -> Result<(), TxError> {
-    if w.suite_id != SUITE_ID_SLH_DSA_SHAKE_256F {
-        return Ok(());
-    }
-    if w.pubkey.len() as u64 != SLH_DSA_SHAKE_256F_PUBKEY_BYTES
-        || w.signature.len() as u64 != MAX_SLH_DSA_SIG_BYTES + 1
-    {
-        return Err(TxError::new(
-            ErrorCode::TxErrSigNoncanonical,
-            "non-canonical SLH-DSA witness item lengths",
-        ));
-    }
-    Ok(())
-}
-
 fn extract_crypto_sig_and_sighash(w: &WitnessItem) -> Result<(&[u8], u8), TxError> {
     let Some((&sighash_type, crypto_sig)) = w.signature.split_last() else {
         return Err(TxError::new(
-            ErrorCode::TxErrSighashTypeInvalid,
+            ErrorCode::TxErrParse,
             "missing sighash_type byte",
         ));
     };
@@ -53,22 +34,15 @@ pub(crate) fn validate_p2pk_spend(
     chain_id: [u8; 32],
     block_height: u64,
 ) -> Result<(), TxError> {
-    if w.suite_id != SUITE_ID_ML_DSA_87 && w.suite_id != SUITE_ID_SLH_DSA_SHAKE_256F {
+    if w.suite_id != SUITE_ID_ML_DSA_87 {
         return Err(TxError::new(
             ErrorCode::TxErrSigAlgInvalid,
             "CORE_P2PK suite invalid",
         ));
     }
-    if w.suite_id == SUITE_ID_SLH_DSA_SHAKE_256F && block_height < SLH_DSA_ACTIVATION_HEIGHT {
-        return Err(TxError::new(
-            ErrorCode::TxErrSigAlgInvalid,
-            "SLH-DSA suite inactive at this height",
-        ));
-    }
-    check_slh_canonical(w)?;
-    if w.suite_id == SUITE_ID_ML_DSA_87
-        && (w.pubkey.len() as u64 != ML_DSA_87_PUBKEY_BYTES
-            || w.signature.len() as u64 != crate::constants::ML_DSA_87_SIG_BYTES + 1)
+    let _ = block_height;
+    if w.pubkey.len() as u64 != ML_DSA_87_PUBKEY_BYTES
+        || w.signature.len() as u64 != crate::constants::ML_DSA_87_SIG_BYTES + 1
     {
         return Err(TxError::new(
             ErrorCode::TxErrSigNoncanonical,
@@ -127,19 +101,10 @@ pub(crate) fn validate_threshold_sig_spend(
         let w = &ws[i];
         match w.suite_id {
             SUITE_ID_SENTINEL => continue,
-            SUITE_ID_ML_DSA_87 | SUITE_ID_SLH_DSA_SHAKE_256F => {
-                if w.suite_id == SUITE_ID_SLH_DSA_SHAKE_256F
-                    && block_height < SLH_DSA_ACTIVATION_HEIGHT
-                {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrSigAlgInvalid,
-                        "SLH-DSA suite inactive at this height",
-                    ));
-                }
-                check_slh_canonical(w)?;
-                if w.suite_id == SUITE_ID_ML_DSA_87
-                    && (w.pubkey.len() as u64 != ML_DSA_87_PUBKEY_BYTES
-                        || w.signature.len() as u64 != crate::constants::ML_DSA_87_SIG_BYTES + 1)
+            SUITE_ID_ML_DSA_87 => {
+                let _ = block_height;
+                if w.pubkey.len() as u64 != ML_DSA_87_PUBKEY_BYTES
+                    || w.signature.len() as u64 != crate::constants::ML_DSA_87_SIG_BYTES + 1
                 {
                     return Err(TxError::new(
                         ErrorCode::TxErrSigNoncanonical,
@@ -163,7 +128,11 @@ pub(crate) fn validate_threshold_sig_spend(
                 }
                 valid = valid.saturating_add(1);
             }
-            _ => return Err(TxError::new(ErrorCode::TxErrSigAlgInvalid, context)),
+            _ => {
+                // Unknown suites are accepted at parse stage; non-CORE_EXT spend paths must reject
+                // them deterministically here.
+                return Err(TxError::new(ErrorCode::TxErrSigAlgInvalid, context));
+            }
         }
     }
     if valid < threshold {
@@ -175,10 +144,7 @@ pub(crate) fn validate_threshold_sig_spend(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{
-        COV_TYPE_P2PK, SLH_DSA_ACTIVATION_HEIGHT, SLH_DSA_SHAKE_256F_PUBKEY_BYTES,
-        SUITE_ID_SLH_DSA_SHAKE_256F,
-    };
+    use crate::constants::COV_TYPE_P2PK;
     use crate::tx::{Tx, TxInput, TxOutput};
 
     fn dummy_entry() -> UtxoEntry {
@@ -225,116 +191,16 @@ mod tests {
     }
 
     #[test]
-    fn slh_noncanonical_pubkey_p2pk() {
+    fn p2pk_suite_invalid_rejected_sig_alg_invalid() {
         let entry = dummy_entry();
         let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
         let w = WitnessItem {
-            suite_id: SUITE_ID_SLH_DSA_SHAKE_256F,
-            pubkey: vec![0x01], // wrong length
-            signature: vec![0x01],
-        };
-        let err = validate_p2pk_spend(
-            &entry,
-            &w,
-            &tx,
-            input_index,
-            input_value,
-            chain_id,
-            SLH_DSA_ACTIVATION_HEIGHT,
-        )
-        .unwrap_err();
-        assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
-    }
-
-    #[test]
-    fn slh_noncanonical_empty_sig_p2pk() {
-        let entry = dummy_entry();
-        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
-        let w = WitnessItem {
-            suite_id: SUITE_ID_SLH_DSA_SHAKE_256F,
-            pubkey: vec![0u8; SLH_DSA_SHAKE_256F_PUBKEY_BYTES as usize],
-            signature: vec![],
-        };
-        let err = validate_p2pk_spend(
-            &entry,
-            &w,
-            &tx,
-            input_index,
-            input_value,
-            chain_id,
-            SLH_DSA_ACTIVATION_HEIGHT,
-        )
-        .unwrap_err();
-        assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
-    }
-
-    #[test]
-    fn slh_noncanonical_short_sig_p2pk() {
-        let entry = dummy_entry();
-        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
-        let w = WitnessItem {
-            suite_id: SUITE_ID_SLH_DSA_SHAKE_256F,
-            pubkey: vec![0u8; SLH_DSA_SHAKE_256F_PUBKEY_BYTES as usize],
-            signature: vec![0x01],
-        };
-        let err = validate_p2pk_spend(
-            &entry,
-            &w,
-            &tx,
-            input_index,
-            input_value,
-            chain_id,
-            SLH_DSA_ACTIVATION_HEIGHT,
-        )
-        .unwrap_err();
-        assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
-    }
-
-    #[test]
-    fn slh_inactive_threshold() {
-        let keys = vec![[0x01u8; 32]];
-        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
-        let ws = vec![WitnessItem {
-            suite_id: SUITE_ID_SLH_DSA_SHAKE_256F,
+            suite_id: 0x02, // non-native / unknown suite
             pubkey: vec![0x01],
             signature: vec![0x01],
-        }];
-        let err = validate_threshold_sig_spend(
-            &keys,
-            1,
-            &ws,
-            &tx,
-            input_index,
-            input_value,
-            chain_id,
-            SLH_DSA_ACTIVATION_HEIGHT - 1,
-            "ctx",
-        )
-        .unwrap_err();
+        };
+        let err = validate_p2pk_spend(&entry, &w, &tx, input_index, input_value, chain_id, 0)
+            .unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
-    }
-
-    #[test]
-    fn slh_noncanonical_threshold() {
-        let keys = vec![[0x01u8; 32]];
-        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
-        let ws = vec![WitnessItem {
-            suite_id: SUITE_ID_SLH_DSA_SHAKE_256F,
-            pubkey: vec![0x01], // wrong length
-            signature: vec![0x01],
-        }];
-        let err = validate_threshold_sig_spend(
-            &keys,
-            1,
-            &ws,
-            &tx,
-            input_index,
-            input_value,
-            chain_id,
-            SLH_DSA_ACTIVATION_HEIGHT,
-            "ctx",
-        )
-        .unwrap_err();
-        assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
     }
 }

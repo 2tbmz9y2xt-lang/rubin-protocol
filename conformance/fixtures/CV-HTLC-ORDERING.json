@@ -11,13 +11,12 @@
       "structural_ok": true,
       "suite_id": 2,
       "block_height": 999999,
-      "slh_activation_height": 1000000,
       "key_binding_ok": true,
       "preimage_ok": true,
       "verify_ok": true
     },
     {
-      "id": "CV-H-SLH-Preactivation-WrongLength",
+      "id": "CV-H-UnknownSuite-WrongLength",
       "op": "htlc_ordering_policy",
       "expect_ok": false,
       "expect_err": "TX_ERR_SIG_ALG_INVALID",
@@ -26,7 +25,6 @@
       "structural_ok": true,
       "suite_id": 2,
       "block_height": 999999,
-      "slh_activation_height": 1000000,
       "lengths_ok": false,
       "key_binding_ok": true,
       "preimage_ok": true,

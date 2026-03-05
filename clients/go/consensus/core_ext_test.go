@@ -24,7 +24,9 @@ func TestParseTx_UnknownSuiteAcceptedAndCharged(t *testing.T) {
 	prev[0] = 0xaa
 
 	sentinelTxBytes := txWithOneInputOneOutputWithWitness(prev, 0, 1, COV_TYPE_P2PK, validP2PKCovenantData(), []WitnessItem{
-		{SuiteID: SUITE_ID_SENTINEL},
+		// Use canonical HTLC-refund sentinel form to keep witness byte size identical
+		// to the "unknown suite" item below (so weight delta is cost-only).
+		{SuiteID: SUITE_ID_SENTINEL, Pubkey: make([]byte, 32), Signature: []byte{0x01}},
 	})
 	sentinelTx, _, _, _, err := ParseTx(sentinelTxBytes)
 	if err != nil {
@@ -36,7 +38,7 @@ func TestParseTx_UnknownSuiteAcceptedAndCharged(t *testing.T) {
 	}
 
 	unknownTxBytes := txWithOneInputOneOutputWithWitness(prev, 0, 1, COV_TYPE_P2PK, validP2PKCovenantData(), []WitnessItem{
-		{SuiteID: 0x09},
+		{SuiteID: 0x09, Pubkey: make([]byte, 32), Signature: []byte{0x01}},
 	})
 	unknownTx, _, _, _, err := ParseTx(unknownTxBytes)
 	if err != nil {

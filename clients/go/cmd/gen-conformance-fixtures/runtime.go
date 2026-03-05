@@ -30,8 +30,6 @@ func runGeneratorCLI() {
 	// Key material (generated once per run, then baked into fixtures).
 	ownerKP := mustKeypair("owner")
 	defer ownerKP.Close()
-	slhKP := mustSLHKeypair("slh")
-	defer slhKP.Close()
 	vaultKP := mustKeypair("vault")
 	defer vaultKP.Close()
 	sponsorKP := mustKeypair("sponsor")
@@ -56,7 +54,6 @@ func runGeneratorCLI() {
 
 		updateP2PKVector(f, "CV-U-05", zeroChainID, ownerKP, 100, 101) // sum_out > sum_in
 		updateP2PKVector(f, "CV-U-06", zeroChainID, ownerKP, 100, 90)  // fee=10
-		updateP2PKVectorSLH(f, "CV-U-16", zeroChainID, slhKP, 100, 90) // fee=10, post-activation OK
 
 		updateMultisigVector1of1(f, "CV-U-09", zeroChainID, multisigKP, 100, 90) // fee=10
 
@@ -131,7 +128,7 @@ func runGeneratorCLI() {
 		mustWriteFixture(path, f)
 	}
 
-	fmt.Println("ok: updated fixtures with real ML-DSA + SLH signatures")
+	fmt.Println("ok: updated fixtures with real ML-DSA signatures")
 }
 
 type fixtureFile struct {
@@ -191,14 +188,6 @@ func findVector(f *fixtureFile, id string) map[string]any {
 
 func mustKeypair(label string) *consensus.MLDSA87Keypair {
 	kp, err := consensus.NewMLDSA87Keypair()
-	if err != nil {
-		fatalf("keygen %s: %v", label, err)
-	}
-	return kp
-}
-
-func mustSLHKeypair(label string) *consensus.SLHDSASHAKE256fKeypair {
-	kp, err := consensus.NewSLHDSASHAKE256fKeypair()
 	if err != nil {
 		fatalf("keygen %s: %v", label, err)
 	}
@@ -291,29 +280,6 @@ func updateP2PKVector(f *fixtureFile, id string, chainID [32]byte, signer *conse
 		id,
 		chainID,
 		consensus.SUITE_ID_ML_DSA_87,
-		cov,
-		cov,
-		inValue,
-		outValue,
-		signer,
-	)
-}
-
-func updateP2PKVectorSLH(
-	f *fixtureFile,
-	id string,
-	chainID [32]byte,
-	signer *consensus.SLHDSASHAKE256fKeypair,
-	inValue uint64,
-	outValue uint64,
-) {
-	pub := signer.PubkeyBytes()
-	cov := p2pkCovenantDataWithSuite(consensus.SUITE_ID_SLH_DSA_SHAKE_256F, pub)
-	updateSingleInputSignedVector(
-		f,
-		id,
-		chainID,
-		consensus.SUITE_ID_SLH_DSA_SHAKE_256F,
 		cov,
 		cov,
 		inValue,

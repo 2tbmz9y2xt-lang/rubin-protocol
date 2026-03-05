@@ -27,7 +27,7 @@
       "id": "CV-SIG-02",
       "op": "block_basic_check",
       "expect_ok": false,
-      "expect_err": "TX_ERR_SIG_NONCANONICAL",
+      "expect_err": "BLOCK_ERR_WITNESS_COMMITMENT",
       "height": 5,
       "prev_timestamps": [
         1000,
@@ -60,7 +60,7 @@
       ],
       "expect_fee": 10,
       "expect_utxo_count": 1,
-      "expect_err": "TX_ERR_SIG_NONCANONICAL"
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID"
     },
     {
       "id": "CV-SIG-02b",
@@ -82,7 +82,7 @@
       ],
       "expect_fee": 10,
       "expect_utxo_count": 1,
-      "expect_err": "TX_ERR_SIG_NONCANONICAL"
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID"
     },
     {
       "id": "CV-SIG-02c",
@@ -101,7 +101,7 @@
           "vout": 0
         }
       ],
-      "expect_err": "TX_ERR_SIG_NONCANONICAL",
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
       "tx_hex_from": "CV-SIG-02b",
       "tx_hex_mutations": [
         {
@@ -114,7 +114,7 @@
       "id": "CV-SIG-02d",
       "op": "utxo_apply_basic",
       "expect_ok": false,
-      "expect_err": "TX_ERR_SIG_NONCANONICAL",
+      "expect_err": "TX_ERR_PARSE",
       "height": 999999,
       "block_timestamp": 1000,
       "tx_hex": "0100000000050000000000000001cececececececececececececececececececececececececececececececece000000000000000000015a0000000000000000002101111111111111111111111111111111111111111111111111111111111111111100000000010240aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0000",
@@ -136,7 +136,7 @@
       "id": "CV-SIG-02e",
       "op": "utxo_apply_basic",
       "expect_ok": false,
-      "expect_err": "TX_ERR_SIG_NONCANONICAL",
+      "expect_err": "TX_ERR_PARSE",
       "height": 1000000,
       "block_timestamp": 1000,
       "tx_hex_from": "CV-SIG-02d",
@@ -156,7 +156,8 @@
       "id": "CV-SIG-03",
       "op": "parse_tx",
       "tx_hex": "010000000000000000000000000000000000000103000000",
-      "expect_ok": true
+      "expect_ok": false,
+      "expect_err": "TX_ERR_PARSE"
     },
     {
       "id": "CV-SIG-04",

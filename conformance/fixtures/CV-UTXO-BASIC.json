@@ -273,9 +273,8 @@
     },
     {
       "block_timestamp": 1000,
-      "expect_fee": 10,
-      "expect_ok": true,
-      "expect_utxo_count": 1,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "expect_ok": false,
       "height": 1000000,
       "id": "CV-U-16",
       "op": "utxo_apply_basic",
@@ -368,7 +367,7 @@
       "height": 500000,
       "id": "CV-U-EXT-02",
       "op": "utxo_apply_basic",
-      "tx_hex": "0100000000010000000000000001eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee000000000000000000015a00000000000000000021011111111111111111111111111111111111111111111111111111111111111111000000000103000000",
+      "tx_hex": "0100000000010000000000000001eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee000000000000000000015a00000000000000000021011111111111111111111111111111111111111111111111111111111111111111000000000100000000",
       "utxos": [
         {
           "covenant_data": "010000",

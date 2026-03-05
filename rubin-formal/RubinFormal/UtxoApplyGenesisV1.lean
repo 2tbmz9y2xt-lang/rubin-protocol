@@ -14,12 +14,9 @@ open RubinFormal.CovenantGenesisV1
 
 def SUITE_ID_SENTINEL : Nat := CovenantGenesisV1.SUITE_ID_SENTINEL
 def SUITE_ID_ML_DSA_87 : Nat := CovenantGenesisV1.SUITE_ID_ML_DSA_87
-def SUITE_ID_SLH_DSA_SHAKE_256F : Nat := CovenantGenesisV1.SUITE_ID_SLH_DSA_SHAKE_256F
 
 def ML_DSA_87_PUBKEY_BYTES : Nat := 2592
 def ML_DSA_87_SIG_BYTES : Nat := 4627
-def SLH_DSA_SHAKE_256F_PUBKEY_BYTES : Nat := 64
-def MAX_SLH_DSA_SIG_BYTES : Nat := 49856
 
 def WITNESS_SLOTS (covType : Nat) (covData : Bytes) : Except String Nat := do
   if covType == CovenantGenesisV1.COV_TYPE_HTLC then
@@ -39,11 +36,9 @@ def lockIdOfEntry (e : UtxoEntry) : Bytes :=
 def parseU16le (b0 b1 : UInt8) : Nat :=
   Wire.u16le? b0 b1
 
-def validateP2PKSpendPreSig (entry : UtxoEntry) (w : WitnessItem) (blockHeight : Nat) : Except String Unit := do
+def validateP2PKSpendPreSig (entry : UtxoEntry) (w : WitnessItem) (_blockHeight : Nat) : Except String Unit := do
   let suite := w.suiteId
-  if !(suite == SUITE_ID_ML_DSA_87 || suite == SUITE_ID_SLH_DSA_SHAKE_256F) then
-    throw "TX_ERR_SIG_ALG_INVALID"
-  if suite == SUITE_ID_SLH_DSA_SHAKE_256F && blockHeight < CovenantGenesisV1.SLH_DSA_ACTIVATION_HEIGHT then
+  if suite != SUITE_ID_ML_DSA_87 then
     throw "TX_ERR_SIG_ALG_INVALID"
   if entry.covenantData.size != CovenantGenesisV1.MAX_P2PK_COVENANT_DATA then
     throw "TX_ERR_COVENANT_TYPE_INVALID"
@@ -55,21 +50,14 @@ def validateP2PKSpendPreSig (entry : UtxoEntry) (w : WitnessItem) (blockHeight :
   -- crypto verify omitted (out-of-scope for formal replay)
   pure ()
 
-def validateWitnessItemLengths (w : WitnessItem) (blockHeight : Nat) : Except String Unit := do
+def validateWitnessItemLengths (w : WitnessItem) (_blockHeight : Nat) : Except String Unit := do
   if w.suiteId == SUITE_ID_SENTINEL then
     if w.pubkey.size != 0 || w.signature.size != 0 then
       throw "TX_ERR_PARSE"
     pure ()
   else if w.suiteId == SUITE_ID_ML_DSA_87 then
-    if w.pubkey.size != ML_DSA_87_PUBKEY_BYTES || w.signature.size != ML_DSA_87_SIG_BYTES then
-      throw "TX_ERR_SIG_NONCANONICAL"
-    pure ()
-  else if w.suiteId == SUITE_ID_SLH_DSA_SHAKE_256F then
-    if blockHeight < CovenantGenesisV1.SLH_DSA_ACTIVATION_HEIGHT then
-      throw "TX_ERR_SIG_ALG_INVALID"
-    if w.pubkey.size != SLH_DSA_SHAKE_256F_PUBKEY_BYTES then
-      throw "TX_ERR_SIG_NONCANONICAL"
-    if w.signature.size == 0 || w.signature.size > MAX_SLH_DSA_SIG_BYTES then
+    -- Wire-level signature includes the trailing sighash_type byte (+1).
+    if w.pubkey.size != ML_DSA_87_PUBKEY_BYTES || w.signature.size != ML_DSA_87_SIG_BYTES + 1 then
       throw "TX_ERR_SIG_NONCANONICAL"
     pure ()
   else
@@ -87,9 +75,7 @@ def validateThresholdSigSpendNoCrypto
   for (w, key) in List.zip ws keys do
     if w.suiteId == SUITE_ID_SENTINEL then
       pure ()
-    else if w.suiteId == SUITE_ID_ML_DSA_87 || w.suiteId == SUITE_ID_SLH_DSA_SHAKE_256F then
-      if w.suiteId == SUITE_ID_SLH_DSA_SHAKE_256F && blockHeight < CovenantGenesisV1.SLH_DSA_ACTIVATION_HEIGHT then
-        throw "TX_ERR_SIG_ALG_INVALID"
+    else if w.suiteId == SUITE_ID_ML_DSA_87 then
       if SHA3.sha3_256 w.pubkey != key then
         throw "TX_ERR_SIG_INVALID"
       valid := valid + 1

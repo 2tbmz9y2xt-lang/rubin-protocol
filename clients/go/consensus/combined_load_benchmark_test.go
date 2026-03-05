@@ -154,11 +154,11 @@ func BenchmarkValidateBlockBasicCombinedLoad(b *testing.B) {
 		"RUBIN_COMBINED_LOAD_SLH_SIG_BYTES",
 		defaultCombinedLoadSLHSigBytes,
 		1,
-		MAX_SLH_DSA_SIG_BYTES,
+		MAX_WITNESS_BYTES_PER_TX,
 	)
 
-	height := uint64(SLH_DSA_ACTIVATION_HEIGHT)
-	slhPub := bytes.Repeat([]byte{0x42}, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
+	height := uint64(1)
+	slhPub := bytes.Repeat([]byte{0x42}, 64)
 	slhSig := bytes.Repeat([]byte{0x5a}, slhSigBytes)
 
 	nonce := uint64(1)
@@ -166,7 +166,7 @@ func BenchmarkValidateBlockBasicCombinedLoad(b *testing.B) {
 	for i := 0; i < slhTxCount; i++ {
 		nonCoinbaseTxs = append(nonCoinbaseTxs, benchTxWithOneInputOneOutputAndWitness(
 			nonce,
-			SUITE_ID_SLH_DSA_SHAKE_256F,
+			0x02, // non-native/unknown suite
 			slhPub,
 			slhSig,
 		))

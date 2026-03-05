@@ -170,9 +170,7 @@
     {
       "block_timestamp": 1000,
       "expect_err": "TX_ERR_SIG_NONCANONICAL",
-      "expect_fee": 10,
       "expect_ok": false,
-      "expect_utxo_count": 1,
       "height": 999999,
       "id": "CV-VAULT-SLH-01",
       "op": "utxo_apply_basic",
@@ -201,9 +199,7 @@
     {
       "block_timestamp": 1000,
       "expect_err": "TX_ERR_SIG_NONCANONICAL",
-      "expect_fee": 10,
       "expect_ok": false,
-      "expect_utxo_count": 1,
       "height": 1000000,
       "id": "CV-VAULT-SLH-02",
       "op": "utxo_apply_basic",

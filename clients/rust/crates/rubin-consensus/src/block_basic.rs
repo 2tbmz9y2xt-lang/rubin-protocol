@@ -3,10 +3,8 @@ use crate::compactsize::read_compact_size;
 use crate::constants::{
     COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, MAX_ANCHOR_BYTES_PER_BLOCK, MAX_BLOCK_WEIGHT,
     MAX_DA_BATCHES_PER_BLOCK, MAX_DA_BYTES_PER_BLOCK, MAX_DA_CHUNK_COUNT, MAX_FUTURE_DRIFT,
-    MAX_SLH_DSA_SIG_BYTES, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SLH_DSA_ACTIVATION_HEIGHT,
-    SLH_DSA_SHAKE_256F_PUBKEY_BYTES, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
-    SUITE_ID_SLH_DSA_SHAKE_256F, VERIFY_COST_ML_DSA_87, VERIFY_COST_SLH_DSA_SHAKE_256F,
-    VERIFY_COST_UNKNOWN_SUITE, WITNESS_DISCOUNT_DIVISOR,
+    ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
+    VERIFY_COST_ML_DSA_87, VERIFY_COST_UNKNOWN_SUITE, WITNESS_DISCOUNT_DIVISOR,
 };
 use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
@@ -167,7 +165,6 @@ pub fn validate_block_basic_with_context_at_height(
     let mut sum_anchor: u64 = 0;
     let mut seen_nonces: HashMap<u64, ()> = HashMap::with_capacity(pb.txs.len());
     for (i, tx) in pb.txs.iter().enumerate() {
-        validate_witness_suite_activation(tx, i, block_height)?;
         if i > 0 {
             if is_coinbase_tx(tx) {
                 return Err(TxError::new(
@@ -330,26 +327,6 @@ pub(crate) fn validate_coinbase_value_bound(
             ErrorCode::BlockErrSubsidyExceeded,
             "coinbase outputs exceed subsidy+fees bound",
         ));
-    }
-    Ok(())
-}
-
-fn validate_witness_suite_activation(
-    tx: &Tx,
-    tx_index: usize,
-    block_height: u64,
-) -> Result<(), TxError> {
-    if tx_index == 0 {
-        // Coinbase witness is structurally empty in genesis profile.
-        return Ok(());
-    }
-    for w in &tx.witness {
-        if w.suite_id == SUITE_ID_SLH_DSA_SHAKE_256F && block_height < SLH_DSA_ACTIVATION_HEIGHT {
-            return Err(TxError::new(
-                ErrorCode::TxErrSigAlgInvalid,
-                "SLH-DSA suite inactive at this height",
-            ));
-        }
     }
     Ok(())
 }
@@ -646,7 +623,6 @@ fn tx_weight_and_stats(tx: &Tx) -> Result<(u64, u64, u64), TxError> {
 
     let mut witness_size: u64 = compact_size_len(tx.witness.len() as u64);
     let mut ml_count: u64 = 0;
-    let mut slh_count: u64 = 0;
     let mut unknown_suite_count: u64 = 0;
     for w in &tx.witness {
         witness_size = witness_size
@@ -674,13 +650,6 @@ fn tx_weight_and_stats(tx: &Tx) -> Result<(u64, u64, u64), TxError> {
                     ml_count += 1;
                 }
             }
-            SUITE_ID_SLH_DSA_SHAKE_256F => {
-                if w.pubkey.len() as u64 == SLH_DSA_SHAKE_256F_PUBKEY_BYTES
-                    && w.signature.len() as u64 == MAX_SLH_DSA_SIG_BYTES + 1
-                {
-                    slh_count += 1;
-                }
-            }
             _ => {
                 unknown_suite_count = unknown_suite_count
                     .checked_add(1)
@@ -697,7 +666,6 @@ fn tx_weight_and_stats(tx: &Tx) -> Result<(u64, u64, u64), TxError> {
 
     let sig_cost = ml_count
         .checked_mul(VERIFY_COST_ML_DSA_87)
-        .and_then(|v| v.checked_add(slh_count.checked_mul(VERIFY_COST_SLH_DSA_SHAKE_256F)?))
         .and_then(|v| v.checked_add(unknown_suite_count.checked_mul(VERIFY_COST_UNKNOWN_SUITE)?))
         .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
 

@@ -83,11 +83,11 @@ func TestValidateCoreStealthSpend_ErrorMapping(t *testing.T) {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_INVALID)
 	}
 
-	slhPreActivation := validWitness
-	slhPreActivation.SuiteID = SUITE_ID_SLH_DSA_SHAKE_256F
-	err = validateCoreStealthSpend(entry, slhPreActivation, tx, 0, 100, chainID, SLH_DSA_ACTIVATION_HEIGHT-1)
+	nonNative := validWitness
+	nonNative.SuiteID = 0x02 // Formerly SLH-DSA; now treated as a non-native suite.
+	err = validateCoreStealthSpend(entry, nonNative, tx, 0, 100, chainID, 0)
 	if err == nil {
-		t.Fatalf("expected slh pre-activation rejection")
+		t.Fatalf("expected non-native suite rejection")
 	}
 	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)

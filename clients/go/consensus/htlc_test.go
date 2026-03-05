@@ -27,12 +27,18 @@ func encodeHTLCClaimPayload(preimage []byte) []byte {
 }
 
 func makeSLHKeyMaterial(refundTag byte) ([]byte, []byte, [32]byte, [32]byte) {
-	claimPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
-	refundPub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
+	claimPub := make([]byte, ML_DSA_87_PUBKEY_BYTES)
+	refundPub := make([]byte, ML_DSA_87_PUBKEY_BYTES)
 	refundPub[0] = refundTag
 	claimKeyID := sha3_256(claimPub)
 	refundKeyID := sha3_256(refundPub)
 	return claimPub, refundPub, claimKeyID, refundKeyID
+}
+
+func dummyMLSignature(sighashType uint8) []byte {
+	sig := make([]byte, ML_DSA_87_SIG_BYTES+1)
+	sig[len(sig)-1] = sighashType
+	return sig
 }
 
 func makeHTLCEntry(hash [32]byte, lockMode uint8, lockValue uint64, claimKeyID, refundKeyID [32]byte) UtxoEntry {
@@ -106,12 +112,12 @@ func TestValidateHTLCSpend_ClaimHashMismatch(t *testing.T) {
 		Signature: encodeHTLCClaimPayload([]byte("actual-preimage!")), // 16 bytes, != sha3("different")
 	}
 	sig := WitnessItem{
-		SuiteID:   SUITE_ID_SLH_DSA_SHAKE_256F,
+		SuiteID:   SUITE_ID_ML_DSA_87,
 		Pubkey:    claimPub,
 		Signature: []byte{0x01},
 	}
 
-	err := validateHTLCSpendCompat(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT, 0)
+	err := validateHTLCSpendCompat(entry, path, sig, digest, 1_000_000, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -126,7 +132,7 @@ func TestValidateHTLCSpend_RefundTimelockNotMet(t *testing.T) {
 	entry := makeHTLCEntry(
 		sha3_256([]byte("x")),
 		LOCK_MODE_HEIGHT,
-		SLH_DSA_ACTIVATION_HEIGHT+100,
+		1_000_000+100,
 		claimKeyID,
 		refundKeyID,
 	)
@@ -136,12 +142,12 @@ func TestValidateHTLCSpend_RefundTimelockNotMet(t *testing.T) {
 		Signature: []byte{0x01}, // path_id = refund
 	}
 	sig := WitnessItem{
-		SuiteID:   SUITE_ID_SLH_DSA_SHAKE_256F,
+		SuiteID:   SUITE_ID_ML_DSA_87,
 		Pubkey:    refundPub,
 		Signature: []byte{0x01},
 	}
 
-	err := validateHTLCSpendCompat(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT, 0)
+	err := validateHTLCSpendCompat(entry, path, sig, digest, 1_000_000, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -182,7 +188,7 @@ func TestValidateHTLCSpend_RefundTimestampUsesMTP(t *testing.T) {
 		Signature: refundSig,
 	}
 
-	err = validateHTLCSpendCompat(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT, 1000)
+	err = validateHTLCSpendCompat(entry, path, sig, digest, 1_000_000, 1000)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -190,7 +196,7 @@ func TestValidateHTLCSpend_RefundTimestampUsesMTP(t *testing.T) {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_TIMELOCK_NOT_MET)
 	}
 
-	if err := validateHTLCSpendCompat(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT, 3000); err != nil {
+	if err := validateHTLCSpendCompat(entry, path, sig, digest, 1_000_000, 3000); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -208,14 +214,14 @@ func TestApplyNonCoinbaseTxBasic_HTLCUnknownPath(t *testing.T) {
 		// Unknown spend path for CORE_HTLC.
 		{SuiteID: SUITE_ID_SENTINEL, Pubkey: claimKeyID[:], Signature: []byte{0x02}},
 		// Signature item (shape is irrelevant because first item already fails).
-		{SuiteID: SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: claimPub, Signature: []byte{0x01}},
+		{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: claimPub, Signature: []byte{0x01}},
 	}
 
 	utxos := map[Outpoint]UtxoEntry{
 		{Txid: prev, Vout: 0}: makeHTLCEntry(sha3_256([]byte("preimage")), LOCK_MODE_HEIGHT, 10, claimKeyID, refundKeyID),
 	}
 
-	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, SLH_DSA_ACTIVATION_HEIGHT, 1000, chainID)
+	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 1_000_000, 1000, chainID)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -283,9 +289,9 @@ func TestValidateHTLCSpend_SelectorSuiteIDInvalid(t *testing.T) {
 		Pubkey:    claimKeyID[:],
 		Signature: []byte{0x00},
 	}
-	sig := WitnessItem{SuiteID: SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: claimPub, Signature: []byte{0x01}}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: claimPub, Signature: []byte{0x01}}
 
-	err := validateHTLCSpendCompat(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT, 0)
+	err := validateHTLCSpendCompat(entry, path, sig, digest, 1_000_000, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -304,9 +310,9 @@ func TestValidateHTLCSpend_SelectorKeyIDLenInvalid(t *testing.T) {
 		Pubkey:    claimKeyID[:31],
 		Signature: []byte{0x00},
 	}
-	sig := WitnessItem{SuiteID: SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: claimPub, Signature: []byte{0x01}}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: claimPub, Signature: []byte{0x01}}
 
-	err := validateHTLCSpendCompat(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT, 0)
+	err := validateHTLCSpendCompat(entry, path, sig, digest, 1_000_000, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -325,9 +331,9 @@ func TestValidateHTLCSpend_SelectorPayloadTooShort(t *testing.T) {
 		Pubkey:    claimKeyID[:],
 		Signature: nil,
 	}
-	sig := WitnessItem{SuiteID: SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: claimPub, Signature: []byte{0x01}}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: claimPub, Signature: []byte{0x01}}
 
-	err := validateHTLCSpendCompat(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT, 0)
+	err := validateHTLCSpendCompat(entry, path, sig, digest, 1_000_000, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -348,9 +354,9 @@ func TestValidateHTLCSpend_ClaimKeyIDMismatch(t *testing.T) {
 		Pubkey:    otherKeyID[:],
 		Signature: []byte{0x00, 0x00, 0x00}, // claim path + preimage_len=0 (won't be reached)
 	}
-	sig := WitnessItem{SuiteID: SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: claimPub, Signature: []byte{0x01}}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: claimPub, Signature: []byte{0x01}}
 
-	err := validateHTLCSpendCompat(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT, 0)
+	err := validateHTLCSpendCompat(entry, path, sig, digest, 1_000_000, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -369,9 +375,9 @@ func TestValidateHTLCSpend_ClaimPayloadTooShort(t *testing.T) {
 		Pubkey:    claimKeyID[:],
 		Signature: []byte{0x00, 0x01}, // too short for claim payload
 	}
-	sig := WitnessItem{SuiteID: SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: claimPub, Signature: []byte{0x01}}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: claimPub, Signature: []byte{0x01}}
 
-	err := validateHTLCSpendCompat(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT, 0)
+	err := validateHTLCSpendCompat(entry, path, sig, digest, 1_000_000, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -390,9 +396,9 @@ func TestValidateHTLCSpend_ClaimPreimageLenZero(t *testing.T) {
 		Pubkey:    claimKeyID[:],
 		Signature: []byte{0x00, 0x00, 0x00}, // claim + preimage_len=0
 	}
-	sig := WitnessItem{SuiteID: SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: claimPub, Signature: []byte{0x01}}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: claimPub, Signature: []byte{0x01}}
 
-	err := validateHTLCSpendCompat(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT, 0)
+	err := validateHTLCSpendCompat(entry, path, sig, digest, 1_000_000, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -416,9 +422,9 @@ func TestValidateHTLCSpend_ClaimPreimageLenOverflow(t *testing.T) {
 			byte(tooBig >> 8),
 		},
 	}
-	sig := WitnessItem{SuiteID: SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: claimPub, Signature: []byte{0x01}}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: claimPub, Signature: []byte{0x01}}
 
-	err := validateHTLCSpendCompat(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT, 0)
+	err := validateHTLCSpendCompat(entry, path, sig, digest, 1_000_000, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -438,9 +444,9 @@ func TestValidateHTLCSpend_ClaimPayloadLenMismatch(t *testing.T) {
 		Pubkey:    claimKeyID[:],
 		Signature: []byte{0x00, 0x02, 0x00, 0xaa},
 	}
-	sig := WitnessItem{SuiteID: SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: claimPub, Signature: []byte{0x01}}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: claimPub, Signature: []byte{0x01}}
 
-	err := validateHTLCSpendCompat(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT, 0)
+	err := validateHTLCSpendCompat(entry, path, sig, digest, 1_000_000, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -459,9 +465,9 @@ func TestValidateHTLCSpend_RefundPayloadLenMismatch(t *testing.T) {
 		Pubkey:    refundKeyID[:],
 		Signature: []byte{0x01, 0x00},
 	}
-	sig := WitnessItem{SuiteID: SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: refundPub, Signature: []byte{0x01}}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: refundPub, Signature: []byte{0x01}}
 
-	err := validateHTLCSpendCompat(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT, 0)
+	err := validateHTLCSpendCompat(entry, path, sig, digest, 1_000_000, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -484,9 +490,9 @@ func TestValidateHTLCSpend_RefundKeyIDMismatch(t *testing.T) {
 		Pubkey:    otherKeyID[:],
 		Signature: []byte{0x01},
 	}
-	sig := WitnessItem{SuiteID: SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: refundPub, Signature: []byte{0x01}}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: refundPub, Signature: []byte{0x01}}
 
-	err := validateHTLCSpendCompat(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT, 0)
+	err := validateHTLCSpendCompat(entry, path, sig, digest, 1_000_000, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -505,7 +511,7 @@ func TestValidateHTLCSpend_SigSuiteInvalid(t *testing.T) {
 	path := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: refundKeyID[:], Signature: []byte{0x01}}
 
 	sig := WitnessItem{SuiteID: 0x09, Pubkey: claimPub, Signature: []byte{0x01}}
-	err := validateHTLCSpendCompat(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT, 0)
+	err := validateHTLCSpendCompat(entry, path, sig, digest, 1_000_000, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -523,7 +529,7 @@ func TestValidateHTLCSpend_MLDSANonCanonicalWitnessItemLengths(t *testing.T) {
 	path := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: refundKeyID[:], Signature: []byte{0x01}}
 
 	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: []byte{0x01}, Signature: []byte{0x02}}
-	err := validateHTLCSpendCompat(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT, 0)
+	err := validateHTLCSpendCompat(entry, path, sig, digest, 1_000_000, 0)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -533,42 +539,6 @@ func TestValidateHTLCSpend_MLDSANonCanonicalWitnessItemLengths(t *testing.T) {
 
 	_ = claimPub
 	_ = refundPub
-}
-
-func TestValidateHTLCSpend_SLHInactiveAtHeight(t *testing.T) {
-	var digest [32]byte
-	claimPub, refundPub, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x61)
-	entry := makeHTLCEntry(sha3_256([]byte("x")), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
-	path := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: refundKeyID[:], Signature: []byte{0x01}}
-
-	sig := WitnessItem{SuiteID: SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: refundPub, Signature: []byte{0x01}}
-	err := validateHTLCSpendCompat(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT-1, 0)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
-	}
-
-	_ = claimPub
-}
-
-func TestValidateHTLCSpend_SLHNonCanonicalWitnessItemLengths(t *testing.T) {
-	var digest [32]byte
-	claimPub, refundPub, claimKeyID, refundKeyID := makeSLHKeyMaterial(0x62)
-	entry := makeHTLCEntry(sha3_256([]byte("x")), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
-	path := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: refundKeyID[:], Signature: []byte{0x01}}
-
-	sig := WitnessItem{SuiteID: SUITE_ID_SLH_DSA_SHAKE_256F, Pubkey: refundPub, Signature: nil}
-	err := validateHTLCSpendCompat(entry, path, sig, digest, SLH_DSA_ACTIVATION_HEIGHT, 0)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_NONCANONICAL {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_NONCANONICAL)
-	}
-
-	_ = claimPub
 }
 
 func TestValidateHTLCSpend_SigKeyBindingMismatch(t *testing.T) {

@@ -162,12 +162,13 @@ fn parse_tx_witness_item_canonicalization() {
     let err = parse_tx(&tx1_bad_path).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrParse);
 
-    // unknown_suite: witness_count=1, suite=0x03, pubkey_length=0, sig_length=0.
+    // unknown_suite: witness_count=1, suite=0x03, pubkey_length=0, sig_length=1 (sighash_type only).
     let mut tx2 = base.clone();
     tx2.push(0x01);
     tx2.push(0x03);
     tx2.push(0x00);
-    tx2.push(0x00);
+    tx2.push(0x01);
+    tx2.push(0x01); // sighash_type
     tx2.push(0x00);
     parse_tx(&tx2).expect("unknown suite_id should be accepted at parse");
 
@@ -180,7 +181,7 @@ fn parse_tx_witness_item_canonicalization() {
     tx2_bad_ml_selector.push(0x00); // sig_length = 0
     tx2_bad_ml_selector.push(0x00); // da_payload_len
     let err = parse_tx(&tx2_bad_ml_selector).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
+    assert_eq!(err.code, ErrorCode::TxErrParse);
 
     // ml_dsa_len_mismatch: pubkey_length=2591 (0x0A1F) and canonical sig_length.
     let mut tx3 = base.clone();
@@ -194,16 +195,15 @@ fn parse_tx_witness_item_canonicalization() {
     let err = parse_tx(&tx3).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
 
-    // slh_dsa_sig_len_zero: parse rejects non-canonical known-suite SLH lengths.
+    // unknown_suite_sig_len_zero: parse rejects sig_len=0 for suite_id != 0x00.
     let mut tx4 = base.clone();
     tx4.push(0x01);
-    tx4.push(SUITE_ID_SLH_DSA_SHAKE_256F);
-    tx4.push(0x40); // pubkey_length = 64
-    tx4.extend_from_slice(&[0u8; 64]);
+    tx4.push(0x02); // non-native / unknown suite
+    tx4.push(0x00); // pubkey_length = 0
     tx4.push(0x00); // sig_length = 0
     tx4.push(0x00); // da_payload_len
     let err = parse_tx(&tx4).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
+    assert_eq!(err.code, ErrorCode::TxErrParse);
 }
 
 #[test]
@@ -213,37 +213,12 @@ fn parse_tx_witness_bytes_overflow() {
 
     tx.push(0x03); // witness_count=3
     for _ in 0..3 {
-        tx.push(SUITE_ID_SLH_DSA_SHAKE_256F);
+        tx.push(0x02); // unknown suite_id
         tx.push(0x40); // pubkey_length=64
         tx.extend_from_slice(&[0u8; 64]);
         tx.extend_from_slice(&[0xfd, 0xc1, 0xc2]); // sig_length=49857 (0xC2C1)
         tx.extend_from_slice(&vec![0u8; 49_857]);
     }
-    tx.push(0x00); // da_payload_len
-
-    let err = parse_tx(&tx).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrWitnessOverflow);
-}
-
-#[test]
-fn parse_tx_slh_witness_budget_overflow() {
-    let mut tx = minimal_tx_bytes();
-    tx.truncate(core_end());
-
-    tx.push(0x01); // witness_count=1
-    tx.push(SUITE_ID_SLH_DSA_SHAKE_256F);
-    tx.push(0x40); // pubkey_length=64
-    tx.extend_from_slice(&[0u8; 64]);
-
-    let sig_len = (MAX_SLH_WITNESS_BYTES_PER_TX
-        - (1 + 1 + SLH_DSA_SHAKE_256F_PUBKEY_BYTES as usize + 3)
-        + 1) as u64;
-    assert!(
-        sig_len <= u16::MAX as u64,
-        "sig_len overflow for fd-compactsize"
-    );
-    tx.extend_from_slice(&[0xfd, (sig_len & 0xff) as u8, ((sig_len >> 8) & 0xff) as u8]);
-    tx.extend_from_slice(&vec![0u8; sig_len as usize]);
     tx.push(0x00); // da_payload_len
 
     let err = parse_tx(&tx).unwrap_err();
@@ -274,14 +249,15 @@ fn parse_tx_unknown_suite_id_accepted() {
     tx.push(0x01); // witness_count=1
     tx.push(0x03); // unknown suite_id
     tx.push(0x00); // pubkey_length=0
-    tx.push(0x00); // sig_length=0
+    tx.push(0x01); // sig_length=1
+    tx.push(0x01); // sighash_type (informational only for unknown suites)
     tx.push(0x00); // da_payload_len
 
     let (t, _txid, _wtxid, _n) = parse_tx(&tx).expect("parse");
     assert_eq!(t.witness.len(), 1);
     assert_eq!(t.witness[0].suite_id, 0x03);
     assert!(t.witness[0].pubkey.is_empty());
-    assert!(t.witness[0].signature.is_empty());
+    assert_eq!(t.witness[0].signature, vec![0x01]);
 }
 
 #[test]
@@ -1237,78 +1213,6 @@ fn validate_block_basic_da_completeness_priority_over_payload_mismatch() {
 }
 
 #[test]
-fn validate_block_basic_slh_inactive_at_height() {
-    let prev_txid = [0xabu8; 32];
-    let pubkey = vec![0u8; SLH_DSA_SHAKE_256F_PUBKEY_BYTES as usize];
-    let mut sig = vec![0u8; (MAX_SLH_DSA_SIG_BYTES as usize) + 1];
-    sig[MAX_SLH_DSA_SIG_BYTES as usize] = SIGHASH_ALL;
-    let non_coinbase = tx_with_one_input_one_output_with_witness(
-        prev_txid,
-        0,
-        1,
-        COV_TYPE_P2PK,
-        &valid_p2pk_covenant_data(),
-        SUITE_ID_SLH_DSA_SHAKE_256F,
-        &pubkey,
-        &sig,
-    );
-    let coinbase = coinbase_with_witness_commitment(
-        (SLH_DSA_ACTIVATION_HEIGHT - 1) as u32,
-        std::slice::from_ref(&non_coinbase),
-    );
-
-    let (_t1, txid1, _w1, _n1) = parse_tx(&coinbase).expect("coinbase");
-    let (_t2, txid2, _w2, _n2) = parse_tx(&non_coinbase).expect("noncoinbase");
-    let root = merkle_root_txids(&[txid1, txid2]).expect("root");
-    let mut prev = [0u8; 32];
-    prev[0] = 0xa1;
-    let target = [0xffu8; 32];
-    let block = build_block_bytes(prev, root, target, 29, &[coinbase, non_coinbase]);
-
-    let err = validate_block_basic_at_height(
-        &block,
-        Some(prev),
-        Some(target),
-        SLH_DSA_ACTIVATION_HEIGHT - 1,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
-}
-
-#[test]
-fn validate_block_basic_slh_active_at_height() {
-    let prev_txid = [0xacu8; 32];
-    let pubkey = vec![0u8; SLH_DSA_SHAKE_256F_PUBKEY_BYTES as usize];
-    let mut sig = vec![0u8; (MAX_SLH_DSA_SIG_BYTES as usize) + 1];
-    sig[MAX_SLH_DSA_SIG_BYTES as usize] = SIGHASH_ALL;
-    let non_coinbase = tx_with_one_input_one_output_with_witness(
-        prev_txid,
-        0,
-        1,
-        COV_TYPE_P2PK,
-        &valid_p2pk_covenant_data(),
-        SUITE_ID_SLH_DSA_SHAKE_256F,
-        &pubkey,
-        &sig,
-    );
-    let coinbase = coinbase_with_witness_commitment(
-        SLH_DSA_ACTIVATION_HEIGHT as u32,
-        std::slice::from_ref(&non_coinbase),
-    );
-
-    let (_t1, txid1, _w1, _n1) = parse_tx(&coinbase).expect("coinbase");
-    let (_t2, txid2, _w2, _n2) = parse_tx(&non_coinbase).expect("noncoinbase");
-    let root = merkle_root_txids(&[txid1, txid2]).expect("root");
-    let mut prev = [0u8; 32];
-    prev[0] = 0xa2;
-    let target = [0xffu8; 32];
-    let block = build_block_bytes(prev, root, target, 31, &[coinbase, non_coinbase]);
-
-    validate_block_basic_at_height(&block, Some(prev), Some(target), SLH_DSA_ACTIVATION_HEIGHT)
-        .expect("validate");
-}
-
-#[test]
 fn verify_sig_rejects_wrong_mldsa_lengths_before_openssl() {
     let digest = [0u8; 32];
     let ok = crate::verify_sig_openssl::verify_sig(
@@ -1322,16 +1226,10 @@ fn verify_sig_rejects_wrong_mldsa_lengths_before_openssl() {
 }
 
 #[test]
-fn verify_sig_rejects_wrong_slh_pubkey_length_before_openssl() {
+fn verify_sig_unsupported_suite_rejected_sig_alg_invalid() {
     let digest = [0u8; 32];
-    let ok = crate::verify_sig_openssl::verify_sig(
-        SUITE_ID_SLH_DSA_SHAKE_256F,
-        &vec![0u8; (SLH_DSA_SHAKE_256F_PUBKEY_BYTES as usize) + 1],
-        &[0x01],
-        &digest,
-    )
-    .expect("verify_sig should not return transport error for length mismatch");
-    assert!(!ok);
+    let err = crate::verify_sig_openssl::verify_sig(0x02, &[0x01], &[0x02], &digest).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
 }
 
 #[test]
@@ -1452,10 +1350,10 @@ fn validate_tx_covenants_genesis_p2pk_ok() {
 }
 
 #[test]
-fn validate_tx_covenants_genesis_p2pk_slh_gated_by_height() {
+fn validate_tx_covenants_genesis_p2pk_non_native_suite_rejected() {
     let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
     let mut cov = vec![0u8; MAX_P2PK_COVENANT_DATA as usize];
-    cov[0] = SUITE_ID_SLH_DSA_SHAKE_256F;
+    cov[0] = 0x02; // non-native / unknown suite
     tx.outputs = vec![crate::tx::TxOutput {
         value: 1,
         covenant_type: COV_TYPE_P2PK,
@@ -1464,8 +1362,6 @@ fn validate_tx_covenants_genesis_p2pk_slh_gated_by_height() {
 
     let err = validate_tx_covenants_genesis(&tx, 0).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
-
-    validate_tx_covenants_genesis(&tx, SLH_DSA_ACTIVATION_HEIGHT).expect("ok at activation height");
 }
 
 #[test]
@@ -2754,28 +2650,13 @@ fn apply_non_coinbase_tx_basic_htlc_timestamp_uses_mtp() {
         },
     );
 
-    let err = apply_non_coinbase_tx_basic_with_mtp(
-        &tx,
-        txid,
-        &utxos,
-        SLH_DSA_ACTIVATION_HEIGHT,
-        3000,
-        1000,
-        ZERO_CHAIN_ID,
-    )
-    .unwrap_err();
+    let err = apply_non_coinbase_tx_basic_with_mtp(&tx, txid, &utxos, 0, 3000, 1000, ZERO_CHAIN_ID)
+        .unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrTimelockNotMet);
 
-    let summary = apply_non_coinbase_tx_basic_with_mtp(
-        &tx,
-        txid,
-        &utxos,
-        SLH_DSA_ACTIVATION_HEIGHT,
-        3000,
-        3000,
-        ZERO_CHAIN_ID,
-    )
-    .expect("ok");
+    let summary =
+        apply_non_coinbase_tx_basic_with_mtp(&tx, txid, &utxos, 0, 3000, 3000, ZERO_CHAIN_ID)
+            .expect("ok");
     assert_eq!(summary.fee, 10);
     assert_eq!(summary.utxo_count, 1);
 }

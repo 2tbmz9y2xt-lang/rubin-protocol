@@ -1032,8 +1032,7 @@ def validate_local_vector(gate: str, v: Dict[str, Any]) -> List[str]:
         structural_ok = bool(v.get("structural_ok", True))
         locktime_ok = bool(v.get("locktime_ok", True))
         suite_id = int(v.get("suite_id", 1))
-        block_height = int(v.get("block_height", 0))
-        activation_height = int(v.get("slh_activation_height", 1_000_000))
+        _block_height = int(v.get("block_height", 0))
         lengths_ok = bool(v.get("lengths_ok", True))
         key_binding_ok = bool(v.get("key_binding_ok", True))
         preimage_ok = bool(v.get("preimage_ok", True))
@@ -1045,9 +1044,7 @@ def validate_local_vector(gate: str, v: Dict[str, Any]) -> List[str]:
             err = "TX_ERR_PARSE"
         elif path == "refund" and not locktime_ok:
             err = "TX_ERR_TIMELOCK_NOT_MET"
-        elif suite_id not in (1, 2):
-            err = "TX_ERR_SIG_ALG_INVALID"
-        elif suite_id == 2 and block_height < activation_height:
+        elif suite_id != 1:
             err = "TX_ERR_SIG_ALG_INVALID"
         elif not lengths_ok:
             err = "TX_ERR_SIG_NONCANONICAL"
@@ -1385,7 +1382,6 @@ def validate_vector(
         req["locktime_ok"] = bool(v.get("locktime_ok", True))
         req["suite_id"] = int(v.get("suite_id", 1))
         req["height"] = int(v.get("block_height", 0))
-        req["slh_activation_height"] = int(v.get("slh_activation_height", 1_000_000))
         req["key_binding_ok"] = bool(v.get("key_binding_ok", True))
         req["preimage_ok"] = bool(v.get("preimage_ok", True))
         req["verify_ok"] = bool(v.get("verify_ok", True))

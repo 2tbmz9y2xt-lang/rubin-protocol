@@ -617,56 +617,6 @@ func TestValidateBlockBasic_WitnessCommitmentDuplicate(t *testing.T) {
 	expectValidateBlockBasicErr(t, block, &prev, &target, BLOCK_ERR_WITNESS_COMMITMENT)
 }
 
-func TestValidateBlockBasic_SLHInactiveAtHeight(t *testing.T) {
-	pub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
-	sig := make([]byte, MAX_SLH_DSA_SIG_BYTES+1)
-	sig[len(sig)-1] = SIGHASH_ALL
-	height := uint64(SLH_DSA_ACTIVATION_HEIGHT - 1)
-	nonCoinbase := txWithOneInputOneOutputAndWitness(SUITE_ID_SLH_DSA_SHAKE_256F, pub, sig)
-	coinbase := coinbaseWithWitnessCommitmentAtHeight(t, height, nonCoinbase)
-
-	cbid := testTxID(t, coinbase)
-	ncid := testTxID(t, nonCoinbase)
-	root, err := MerkleRootTxids([][32]byte{cbid, ncid})
-	if err != nil {
-		t.Fatalf("MerkleRootTxids: %v", err)
-	}
-	prev := hashWithPrefix(0xa1)
-	target := filledHash(0xff)
-	block := buildBlockBytes(t, prev, root, target, 29, [][]byte{coinbase, nonCoinbase})
-
-	_, err = ValidateBlockBasicAtHeight(block, &prev, &target, height)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
-	}
-}
-
-func TestValidateBlockBasic_SLHActiveAtHeight(t *testing.T) {
-	pub := make([]byte, SLH_DSA_SHAKE_256F_PUBKEY_BYTES)
-	sig := make([]byte, MAX_SLH_DSA_SIG_BYTES+1)
-	sig[len(sig)-1] = SIGHASH_ALL
-	height := uint64(SLH_DSA_ACTIVATION_HEIGHT)
-	nonCoinbase := txWithOneInputOneOutputAndWitness(SUITE_ID_SLH_DSA_SHAKE_256F, pub, sig)
-	coinbase := coinbaseWithWitnessCommitmentAtHeight(t, height, nonCoinbase)
-
-	cbid := testTxID(t, coinbase)
-	ncid := testTxID(t, nonCoinbase)
-	root, err := MerkleRootTxids([][32]byte{cbid, ncid})
-	if err != nil {
-		t.Fatalf("MerkleRootTxids: %v", err)
-	}
-	prev := hashWithPrefix(0xa2)
-	target := filledHash(0xff)
-	block := buildBlockBytes(t, prev, root, target, 31, [][]byte{coinbase, nonCoinbase})
-
-	if _, err := ValidateBlockBasicAtHeight(block, &prev, &target, height); err != nil {
-		t.Fatalf("ValidateBlockBasicAtHeight: %v", err)
-	}
-}
-
 func TestAddU64_Overflow(t *testing.T) {
 	if _, err := addU64(^uint64(0), 1); err == nil {
 		t.Fatalf("expected overflow error")

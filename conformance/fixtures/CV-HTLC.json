@@ -24,7 +24,7 @@
     },
     {
       "block_timestamp": 2000,
-      "expect_err": "TX_ERR_SIG_NONCANONICAL",
+      "expect_err": "TX_ERR_SIG_INVALID",
       "expect_ok": false,
       "height": 1000000,
       "id": "CV-HTLC-04",
@@ -44,7 +44,7 @@
     },
     {
       "block_timestamp": 2000,
-      "expect_err": "TX_ERR_SIG_NONCANONICAL",
+      "expect_err": "TX_ERR_SIG_INVALID",
       "expect_ok": false,
       "height": 1000000,
       "id": "CV-HTLC-05",
@@ -64,7 +64,7 @@
     },
     {
       "block_timestamp": 2000,
-      "expect_err": "TX_ERR_SIG_NONCANONICAL",
+      "expect_err": "TX_ERR_SIG_INVALID",
       "expect_ok": false,
       "height": 1000000,
       "id": "CV-HTLC-06",
@@ -84,7 +84,7 @@
     },
     {
       "block_timestamp": 2000,
-      "expect_err": "TX_ERR_SIG_NONCANONICAL",
+      "expect_err": "TX_ERR_TIMELOCK_NOT_MET",
       "expect_ok": false,
       "height": 1000000,
       "id": "CV-HTLC-07",
@@ -105,7 +105,7 @@
     {
       "block_mtp": 1000,
       "block_timestamp": 3000,
-      "expect_err": "TX_ERR_SIG_NONCANONICAL",
+      "expect_err": "TX_ERR_TIMELOCK_NOT_MET",
       "expect_ok": false,
       "height": 1000000,
       "id": "CV-HTLC-08",
@@ -214,7 +214,7 @@
     },
     {
       "block_timestamp": 2000,
-      "expect_err": "TX_ERR_SIG_NONCANONICAL",
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
       "expect_ok": false,
       "height": 999999,
       "id": "CV-HTLC-14",

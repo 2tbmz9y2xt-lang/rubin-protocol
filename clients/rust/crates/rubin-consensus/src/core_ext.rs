@@ -1,27 +1,13 @@
 use crate::compactsize::read_compact_size_bytes;
 use crate::constants::{
-    SLH_DSA_ACTIVATION_HEIGHT, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL, SUITE_ID_SLH_DSA_SHAKE_256F,
+    ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
 };
 use crate::error::{ErrorCode, TxError};
+use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_type};
+use crate::tx::Tx;
 use crate::tx::WitnessItem;
 use crate::utxo_basic::UtxoEntry;
 use crate::verify_sig_openssl::verify_sig;
-
-fn check_slh_canonical(w: &WitnessItem) -> Result<(), TxError> {
-    use crate::constants::{MAX_SLH_DSA_SIG_BYTES, SLH_DSA_SHAKE_256F_PUBKEY_BYTES};
-    if w.suite_id != SUITE_ID_SLH_DSA_SHAKE_256F {
-        return Ok(());
-    }
-    if w.pubkey.len() as u64 != SLH_DSA_SHAKE_256F_PUBKEY_BYTES
-        || w.signature.len() as u64 != MAX_SLH_DSA_SIG_BYTES
-    {
-        return Err(TxError::new(
-            ErrorCode::TxErrSigNoncanonical,
-            "non-canonical SLH-DSA witness item lengths",
-        ));
-    }
-    Ok(())
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreExtCovenant<'a> {
@@ -31,7 +17,7 @@ pub struct CoreExtCovenant<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CoreExtVerificationBinding {
-    /// Only native suites (0x01/0x02) are supported; non-native suites are rejected even if listed.
+    /// Only the native suite (0x01) is supported; non-native suites are rejected even if listed.
     NativeVerifySig,
 }
 
@@ -124,8 +110,10 @@ pub fn parse_core_ext_covenant_data(cov_data: &[u8]) -> Result<CoreExtCovenant<'
 pub fn validate_core_ext_spend(
     entry: &UtxoEntry,
     w: &WitnessItem,
-    digest: &[u8; 32],
-    block_height: u64,
+    tx: &Tx,
+    input_index: u32,
+    input_value: u64,
+    chain_id: [u8; 32],
     profiles_at_height: &CoreExtProfiles,
 ) -> Result<(), TxError> {
     let cov = parse_core_ext_covenant_data(&entry.covenant_data)?;
@@ -149,18 +137,38 @@ pub fn validate_core_ext_spend(
             "CORE_EXT sentinel suite forbidden under ACTIVE profile",
         ));
     }
-    if w.suite_id == SUITE_ID_SLH_DSA_SHAKE_256F && block_height < SLH_DSA_ACTIVATION_HEIGHT {
-        return Err(TxError::new(
-            ErrorCode::TxErrSigAlgInvalid,
-            "SLH-DSA suite inactive at this height",
-        ));
-    }
 
     match p.verification_binding {
         CoreExtVerificationBinding::NativeVerifySig => match w.suite_id {
-            SUITE_ID_ML_DSA_87 | SUITE_ID_SLH_DSA_SHAKE_256F => {
-                check_slh_canonical(w)?;
-                let ok = verify_sig(w.suite_id, &w.pubkey, &w.signature, digest)?;
+            SUITE_ID_ML_DSA_87 => {
+                if w.pubkey.len() as u64 != ML_DSA_87_PUBKEY_BYTES
+                    || w.signature.len() as u64 != ML_DSA_87_SIG_BYTES + 1
+                {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrSigNoncanonical,
+                        "non-canonical ML-DSA witness item lengths",
+                    ));
+                }
+                let Some((&sighash_type, crypto_sig)) = w.signature.split_last() else {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrParse,
+                        "missing sighash_type byte",
+                    ));
+                };
+                if !is_valid_sighash_type(sighash_type) {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrSighashTypeInvalid,
+                        "invalid sighash_type",
+                    ));
+                }
+                let digest32 = sighash_v1_digest_with_type(
+                    tx,
+                    input_index,
+                    input_value,
+                    chain_id,
+                    sighash_type,
+                )?;
+                let ok = verify_sig(w.suite_id, &w.pubkey, crypto_sig, &digest32)?;
                 if !ok {
                     return Err(TxError::new(
                         ErrorCode::TxErrSigInvalid,
@@ -182,6 +190,7 @@ mod tests {
     use super::*;
     use crate::compactsize::encode_compact_size;
     use crate::constants::{COV_TYPE_EXT, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES};
+    use crate::tx::{Tx, TxInput, TxOutput};
 
     fn core_ext_covdata(ext_id: u16, payload: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
@@ -201,6 +210,39 @@ mod tests {
         }
     }
 
+    fn dummy_tx() -> (Tx, u32, u64, [u8; 32]) {
+        let mut prev = [0u8; 32];
+        prev[0] = 0x11;
+        let mut chain_id = [0u8; 32];
+        chain_id[0] = 0x22;
+        (
+            Tx {
+                version: 1,
+                tx_kind: 0x00,
+                tx_nonce: 1,
+                inputs: vec![TxInput {
+                    prev_txid: prev,
+                    prev_vout: 0,
+                    script_sig: vec![],
+                    sequence: 0,
+                }],
+                outputs: vec![TxOutput {
+                    value: 1,
+                    covenant_type: COV_TYPE_EXT,
+                    covenant_data: vec![],
+                }],
+                locktime: 0,
+                witness: vec![],
+                da_payload: vec![],
+                da_commit_core: None,
+                da_chunk_core: None,
+            },
+            0,
+            1,
+            chain_id,
+        )
+    }
+
     #[test]
     fn core_ext_pre_active_keyless_sentinel_ok() {
         let entry = dummy_entry(7);
@@ -209,7 +251,17 @@ mod tests {
             pubkey: vec![],
             signature: vec![],
         };
-        validate_core_ext_spend(&entry, &w, &[0u8; 32], 0, &CoreExtProfiles::empty()).unwrap();
+        let (tx, input_index, input_value, chain_id) = dummy_tx();
+        validate_core_ext_spend(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            &CoreExtProfiles::empty(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -220,7 +272,17 @@ mod tests {
             pubkey: vec![0u8; 32],
             signature: vec![0x01],
         };
-        validate_core_ext_spend(&entry, &w, &[0u8; 32], 0, &CoreExtProfiles::empty()).unwrap();
+        let (tx, input_index, input_value, chain_id) = dummy_tx();
+        validate_core_ext_spend(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            &CoreExtProfiles::empty(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -229,9 +291,19 @@ mod tests {
         let w = WitnessItem {
             suite_id: SUITE_ID_ML_DSA_87,
             pubkey: vec![0u8; ML_DSA_87_PUBKEY_BYTES as usize],
-            signature: vec![0u8; ML_DSA_87_SIG_BYTES as usize],
+            signature: vec![0u8; (ML_DSA_87_SIG_BYTES as usize) + 1],
         };
-        validate_core_ext_spend(&entry, &w, &[0u8; 32], 0, &CoreExtProfiles::empty()).unwrap();
+        let (tx, input_index, input_value, chain_id) = dummy_tx();
+        validate_core_ext_spend(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            &CoreExtProfiles::empty(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -245,13 +317,21 @@ mod tests {
             }],
         };
         let w = WitnessItem {
-            suite_id: SUITE_ID_SLH_DSA_SHAKE_256F,
-            pubkey: vec![0u8; 64],
-            signature: vec![0u8; 49_856],
+            suite_id: 0x02,
+            pubkey: vec![0u8; 1],
+            signature: vec![0u8; 1],
         };
-        let err =
-            validate_core_ext_spend(&entry, &w, &[0u8; 32], SLH_DSA_ACTIVATION_HEIGHT, &profiles)
-                .unwrap_err();
+        let (tx, input_index, input_value, chain_id) = dummy_tx();
+        let err = validate_core_ext_spend(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            &profiles,
+        )
+        .unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
     }
 
@@ -270,7 +350,17 @@ mod tests {
             pubkey: vec![0x01],
             signature: vec![0x02],
         };
-        let err = validate_core_ext_spend(&entry, &w, &[0u8; 32], 0, &profiles).unwrap_err();
+        let (tx, input_index, input_value, chain_id) = dummy_tx();
+        let err = validate_core_ext_spend(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            &profiles,
+        )
+        .unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
     }
 
@@ -284,12 +374,24 @@ mod tests {
                 verification_binding: CoreExtVerificationBinding::NativeVerifySig,
             }],
         };
+        let mut sig = vec![0u8; (ML_DSA_87_SIG_BYTES as usize) + 1];
+        sig[ML_DSA_87_SIG_BYTES as usize] = 0x01; // SIGHASH_ALL
         let w = WitnessItem {
             suite_id: SUITE_ID_ML_DSA_87,
             pubkey: vec![0u8; ML_DSA_87_PUBKEY_BYTES as usize],
-            signature: vec![0u8; ML_DSA_87_SIG_BYTES as usize],
+            signature: sig,
         };
-        let err = validate_core_ext_spend(&entry, &w, &[0u8; 32], 0, &profiles).unwrap_err();
+        let (tx, input_index, input_value, chain_id) = dummy_tx();
+        let err = validate_core_ext_spend(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            &profiles,
+        )
+        .unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
     }
 }

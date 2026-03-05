@@ -12,13 +12,8 @@ namespace BlockBasicCheckV1
 
 def MAX_FUTURE_DRIFT : Nat := 7200
 
-def enforceSigSuiteActivation (txs : List Bytes) (blockHeight : Nat) : Except String Unit := do
-  if blockHeight < RubinFormal.UtxoBasicV1.SLH_DSA_ACTIVATION_HEIGHT then
-    for tx in txs do
-      let t ← RubinFormal.UtxoBasicV1.parseTx tx
-      for w in t.witness do
-        if w.suiteId == RubinFormal.UtxoBasicV1.SUITE_ID_SLH_DSA_SHAKE_256F then
-          throw "TX_ERR_SIG_ALG_INVALID"
+def enforceSigSuiteActivation (_txs : List Bytes) (_blockHeight : Nat) : Except String Unit :=
+  -- SLH-DSA removed from native consensus (Q-SLH-DEINTEG-02); activation gate is now a no-op.
   pure ()
 
 def insertNat (x : Nat) : List Nat → List Nat
@@ -86,7 +81,7 @@ def validateBlockBasicCheck
     (prevTimestamps : List Nat) : Except String Unit := do
   let pb ← BlockBasicV1.parseBlock blockBytes
 
-  -- signature suite activation (CV-SIG gate): SLH-DSA MUST NOT appear before activation height.
+  -- signature suite activation gate (no-op after SLH-DSA removal).
   enforceSigSuiteActivation pb.txs blockHeight
 
   -- validate the same basic invariants as BlockBasicV1.validateBlockBasic, but keep pb for extra checks.
