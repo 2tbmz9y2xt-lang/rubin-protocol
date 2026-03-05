@@ -24,6 +24,17 @@ pub struct MultisigCovenant {
 }
 
 pub fn parse_vault_covenant_data(covenant_data: &[u8]) -> Result<VaultCovenant, TxError> {
+    parse_vault_covenant_data_inner(covenant_data, true)
+}
+
+pub fn parse_vault_covenant_data_for_spend(covenant_data: &[u8]) -> Result<VaultCovenant, TxError> {
+    parse_vault_covenant_data_inner(covenant_data, false)
+}
+
+fn parse_vault_covenant_data_inner(
+    covenant_data: &[u8],
+    enforce_whitelist_canonical: bool,
+) -> Result<VaultCovenant, TxError> {
     if covenant_data.len() < 34 {
         return Err(TxError::new(
             ErrorCode::TxErrVaultMalformed,
@@ -99,17 +110,19 @@ pub fn parse_vault_covenant_data(covenant_data: &[u8]) -> Result<VaultCovenant, 
         offset += 32;
         whitelist.push(h);
     }
-    if !strictly_sorted_unique_32(&whitelist) {
-        return Err(TxError::new(
-            ErrorCode::TxErrVaultWhitelistNotCanonical,
-            "CORE_VAULT whitelist not strictly sorted",
-        ));
-    }
-    if hash_in_sorted_32(&whitelist, &owner_lock_id) {
-        return Err(TxError::new(
-            ErrorCode::TxErrVaultOwnerDestinationForbidden,
-            "CORE_VAULT whitelist contains owner_lock_id",
-        ));
+    if enforce_whitelist_canonical {
+        if !strictly_sorted_unique_32(&whitelist) {
+            return Err(TxError::new(
+                ErrorCode::TxErrVaultWhitelistNotCanonical,
+                "CORE_VAULT whitelist not strictly sorted",
+            ));
+        }
+        if hash_in_sorted_32(&whitelist, &owner_lock_id) {
+            return Err(TxError::new(
+                ErrorCode::TxErrVaultOwnerDestinationForbidden,
+                "CORE_VAULT whitelist contains owner_lock_id",
+            ));
+        }
     }
 
     Ok(VaultCovenant {
