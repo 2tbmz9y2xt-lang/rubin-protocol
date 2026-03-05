@@ -1858,7 +1858,7 @@ fn main() {
                 expected_target,
                 req.height,
                 prev_timestamps,
-                req.already_generated,
+                u128::from(req.already_generated),
                 req.sum_fees,
             ) {
                 Ok(summary) => {
@@ -2031,7 +2031,7 @@ fn main() {
 
             let mut state = InMemoryChainState {
                 utxos: utxo_set,
-                already_generated: req.already_generated,
+                already_generated: u128::from(req.already_generated),
             };
 
             let mut chain_id = [0u8; 32];
@@ -2074,8 +2074,8 @@ fn main() {
                         ok: true,
                         sum_fees: Some(summary.sum_fees),
                         utxo_count: Some(summary.utxo_count),
-                        already_generated: Some(summary.already_generated),
-                        already_generated_n1: Some(summary.already_generated_n1),
+                        already_generated: Some(summary.already_generated as u64),
+                        already_generated_n1: Some(summary.already_generated_n1 as u64),
                         ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
