@@ -1,5 +1,7 @@
 package consensus
 
+import "math/big"
+
 // InMemoryChainState is a minimal, non-persistent chainstate container intended for
 // conformance tests and audit/repro tooling.
 //
@@ -7,7 +9,7 @@ package consensus
 // (fee computation, coinbase bound, maturity rules) without any disk persistence.
 type InMemoryChainState struct {
 	Utxos            map[Outpoint]UtxoEntry
-	AlreadyGenerated uint64 // already_generated(h): subsidy-only, excluding fees
+	AlreadyGenerated *big.Int // already_generated(h): subsidy-only, excluding fees
 }
 
 type ConnectBlockBasicSummary struct {
@@ -40,6 +42,12 @@ func ConnectBlockBasicInMemoryAtHeight(
 	if state.Utxos == nil {
 		state.Utxos = make(map[Outpoint]UtxoEntry)
 	}
+	if state.AlreadyGenerated == nil {
+		state.AlreadyGenerated = new(big.Int)
+	}
+	if state.AlreadyGenerated.Sign() < 0 {
+		return nil, txerr(BLOCK_ERR_PARSE, "already_generated must be unsigned")
+	}
 
 	// Stateless checks first (wire, merkle root, PoW/target, covenant creation, etc).
 	if _, err := ValidateBlockBasicWithContextAtHeight(blockBytes, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps); err != nil {
@@ -54,7 +62,7 @@ func ConnectBlockBasicInMemoryAtHeight(
 		return nil, txerr(BLOCK_ERR_PARSE, "invalid parsed block")
 	}
 
-	alreadyGenerated := state.AlreadyGenerated
+	alreadyGenerated := new(big.Int).Set(state.AlreadyGenerated)
 	blockMTP := pb.Header.Timestamp
 	if median, ok, err := medianTimePast(blockHeight, prevTimestamps); err != nil {
 		return nil, err
@@ -110,21 +118,35 @@ func ConnectBlockBasicInMemoryAtHeight(
 	}
 
 	// Update already_generated(h) -> already_generated(h+1) by adding subsidy(h).
-	alreadyGeneratedN1 := alreadyGenerated
+	alreadyGeneratedN1 := new(big.Int).Set(alreadyGenerated)
 	if blockHeight != 0 {
-		subsidy := BlockSubsidy(blockHeight, alreadyGenerated)
-		ag, err := addU64(alreadyGenerated, subsidy)
-		if err != nil {
-			return nil, txerr(BLOCK_ERR_PARSE, "already_generated overflow")
-		}
-		alreadyGeneratedN1 = ag
-		state.AlreadyGenerated = ag
+		subsidy := BlockSubsidyBig(blockHeight, alreadyGenerated)
+		alreadyGeneratedN1 = new(big.Int).Add(alreadyGeneratedN1, new(big.Int).SetUint64(subsidy))
+		state.AlreadyGenerated = new(big.Int).Set(alreadyGeneratedN1)
+	}
+	alreadyGeneratedU64, err := bigIntToUint64(alreadyGenerated)
+	if err != nil {
+		return nil, txerr(BLOCK_ERR_PARSE, "already_generated overflow")
+	}
+	alreadyGeneratedN1U64, err := bigIntToUint64(alreadyGeneratedN1)
+	if err != nil {
+		return nil, txerr(BLOCK_ERR_PARSE, "already_generated overflow")
 	}
 
 	return &ConnectBlockBasicSummary{
 		SumFees:            sumFees,
-		AlreadyGenerated:   alreadyGenerated,
-		AlreadyGeneratedN1: alreadyGeneratedN1,
+		AlreadyGenerated:   alreadyGeneratedU64,
+		AlreadyGeneratedN1: alreadyGeneratedN1U64,
 		UtxoCount:          uint64(len(state.Utxos)),
 	}, nil
+}
+
+func bigIntToUint64(v *big.Int) (uint64, error) {
+	if v == nil {
+		return 0, nil
+	}
+	if v.Sign() < 0 || !v.IsUint64() {
+		return 0, txerr(BLOCK_ERR_PARSE, "u64 overflow")
+	}
+	return v.Uint64(), nil
 }

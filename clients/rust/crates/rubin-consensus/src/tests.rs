@@ -712,7 +712,7 @@ fn validate_block_basic_ok() {
 #[test]
 fn validate_block_basic_subsidy_exceeded() {
     let height = 1u64;
-    let already_generated = 0u64;
+    let already_generated = 0u128;
     let sum_fees = 0u64;
 
     let subsidy = crate::subsidy::block_subsidy(height, already_generated);
@@ -740,7 +740,7 @@ fn validate_block_basic_subsidy_exceeded() {
 #[test]
 fn validate_block_basic_subsidy_exceeded_coinbase_sum_uses_u128() {
     let height = 1u64;
-    let already_generated = 0u64;
+    let already_generated = 0u128;
     let sum_fees = 0u64;
 
     let wtxids = [[0u8; 32]];
@@ -791,7 +791,7 @@ fn validate_block_basic_subsidy_exceeded_coinbase_sum_uses_u128() {
 #[test]
 fn validate_block_basic_subsidy_with_fees_ok() {
     let height = 1u64;
-    let already_generated = 0u64;
+    let already_generated = 0u128;
     let sum_fees = 5u64;
 
     let subsidy = crate::subsidy::block_subsidy(height, already_generated);
@@ -2027,7 +2027,7 @@ fn connect_block_basic_in_memory_at_height_ok_computes_fees_and_updates_state() 
 
     assert_eq!(s.sum_fees, sum_fees);
     assert_eq!(s.already_generated, 0);
-    assert_eq!(s.already_generated_n1, subsidy);
+    assert_eq!(s.already_generated_n1, u128::from(subsidy));
     assert_eq!(s.utxo_count, 2);
 }
 

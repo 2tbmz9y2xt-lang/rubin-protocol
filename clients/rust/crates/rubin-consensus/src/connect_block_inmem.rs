@@ -13,14 +13,14 @@ use crate::utxo_basic::{apply_non_coinbase_tx_basic_update_with_mtp, Outpoint, U
 pub struct InMemoryChainState {
     pub utxos: HashMap<Outpoint, UtxoEntry>,
     /// already_generated(h): subsidy-only (excluding fees).
-    pub already_generated: u64,
+    pub already_generated: u128,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConnectBlockBasicSummary {
     pub sum_fees: u64,
-    pub already_generated: u64,
-    pub already_generated_n1: u64,
+    pub already_generated: u128,
+    pub already_generated_n1: u128,
     pub utxo_count: u64,
 }
 
@@ -101,7 +101,7 @@ pub fn connect_block_basic_in_memory_at_height(
     if block_height != 0 {
         let subsidy = block_subsidy(block_height, already_generated);
         already_generated_n1 = already_generated
-            .checked_add(subsidy)
+            .checked_add(u128::from(subsidy))
             .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "already_generated overflow"))?;
         state.already_generated = already_generated_n1;
     }

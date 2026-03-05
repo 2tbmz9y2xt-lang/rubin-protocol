@@ -867,7 +867,7 @@ func runFromStdin() {
 
 		st := consensus.InMemoryChainState{
 			Utxos:            utxos,
-			AlreadyGenerated: req.AlreadyGenerated,
+			AlreadyGenerated: new(big.Int).SetUint64(req.AlreadyGenerated),
 		}
 
 		chainID, err := parseOptionalChainIDHex(req.ChainIDHex)

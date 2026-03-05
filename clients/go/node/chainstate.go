@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"os"
 	"path/filepath"
 	"sort"
@@ -118,7 +119,7 @@ func (s *ChainState) ConnectBlock(
 
 	workState := consensus.InMemoryChainState{
 		Utxos:            copyUtxoSet(s.Utxos),
-		AlreadyGenerated: s.AlreadyGenerated,
+		AlreadyGenerated: new(big.Int).SetUint64(s.AlreadyGenerated),
 	}
 	summary, err := consensus.ConnectBlockBasicInMemoryAtHeight(
 		blockBytes,
@@ -145,7 +146,10 @@ func (s *ChainState) ConnectBlock(
 	s.HasTip = true
 	s.Height = blockHeight
 	s.TipHash = blockHash
-	s.AlreadyGenerated = workState.AlreadyGenerated
+	if !workState.AlreadyGenerated.IsUint64() {
+		return nil, errors.New("already_generated overflow")
+	}
+	s.AlreadyGenerated = workState.AlreadyGenerated.Uint64()
 	s.Utxos = workState.Utxos
 
 	return &ChainStateConnectSummary{

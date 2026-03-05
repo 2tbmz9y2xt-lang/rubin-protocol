@@ -89,7 +89,7 @@ impl ChainState {
         let (block_height, expected_prev_hash) = self.next_block_context()?;
         let mut work_state = InMemoryChainState {
             utxos: self.utxos.clone(),
-            already_generated: self.already_generated,
+            already_generated: u128::from(self.already_generated),
         };
 
         let connect_summary: ConnectBlockBasicSummary = connect_block_basic_in_memory_at_height(
@@ -109,15 +109,18 @@ impl ChainState {
         self.has_tip = true;
         self.height = block_height;
         self.tip_hash = tip_hash;
-        self.already_generated = work_state.already_generated;
+        self.already_generated = u64::try_from(work_state.already_generated)
+            .map_err(|_| "already_generated overflow".to_string())?;
         self.utxos = work_state.utxos;
 
         Ok(ChainStateConnectSummary {
             block_height,
             block_hash: tip_hash,
             sum_fees: connect_summary.sum_fees,
-            already_generated: connect_summary.already_generated,
-            already_generated_n1: connect_summary.already_generated_n1,
+            already_generated: u64::try_from(connect_summary.already_generated)
+                .map_err(|_| "already_generated overflow".to_string())?,
+            already_generated_n1: u64::try_from(connect_summary.already_generated_n1)
+                .map_err(|_| "already_generated_n1 overflow".to_string())?,
             utxo_count: connect_summary.utxo_count,
         })
     }
