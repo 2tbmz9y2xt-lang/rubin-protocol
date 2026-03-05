@@ -99,34 +99,29 @@ func TestChainStateSaveLoadRoundTripDeterministic(t *testing.T) {
 
 func TestChainStateConnectBlockDeterministicUpdate(t *testing.T) {
 	target := consensus.POW_LIMIT
-	var chainID [32]byte
 
 	st := NewChainState()
-	genesisPrev := mustHash32Hex(t, "1111111111111111111111111111111111111111111111111111111111111111")
-	genesisCoinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 0, 1)
-	genesisBlock := buildSingleTxBlock(t, genesisPrev, target, 1, genesisCoinbase)
-
-	first, err := st.ConnectBlock(genesisBlock, &target, nil, chainID)
+	summary, err := st.ConnectBlock(devnetGenesisBlockBytes, &target, nil, devnetGenesisChainID)
 	if err != nil {
-		t.Fatalf("connect genesis-like block: %v", err)
+		t.Fatalf("connect genesis block: %v", err)
 	}
-	if first.BlockHeight != 0 {
-		t.Fatalf("first block height=%d, want 0", first.BlockHeight)
+	if summary.BlockHeight != 0 {
+		t.Fatalf("genesis block height=%d, want 0", summary.BlockHeight)
 	}
 	if !st.HasTip || st.Height != 0 {
-		t.Fatalf("unexpected tip after first block: has_tip=%v height=%d", st.HasTip, st.Height)
+		t.Fatalf("unexpected tip after genesis: has_tip=%v height=%d", st.HasTip, st.Height)
 	}
 	if st.AlreadyGenerated != 0 {
 		t.Fatalf("already_generated after height 0=%d, want 0", st.AlreadyGenerated)
 	}
-	if len(st.Utxos) != 1 {
-		t.Fatalf("utxo_count after first block=%d, want 1", len(st.Utxos))
+	if len(st.Utxos) == 0 {
+		t.Fatalf("expected at least one utxo after genesis")
 	}
 
 	subsidy1 := consensus.BlockSubsidy(1, 0)
 	block1Coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1)
 	block1 := buildSingleTxBlock(t, st.TipHash, target, 2, block1Coinbase)
-	second, err := st.ConnectBlock(block1, &target, nil, chainID)
+	second, err := st.ConnectBlock(block1, &target, nil, devnetGenesisChainID)
 	if err != nil {
 		t.Fatalf("connect height-1 block: %v", err)
 	}
@@ -141,6 +136,31 @@ func TestChainStateConnectBlockDeterministicUpdate(t *testing.T) {
 	}
 	if len(st.Utxos) != 2 {
 		t.Fatalf("utxo_count=%d, want 2", len(st.Utxos))
+	}
+	_, coinbaseTxid, _, _, err := consensus.ParseTx(block1Coinbase)
+	if err != nil {
+		t.Fatalf("parse coinbase tx: %v", err)
+	}
+	entry, ok := st.Utxos[consensus.Outpoint{Txid: coinbaseTxid, Vout: 0}]
+	if !ok {
+		t.Fatalf("missing height-1 coinbase subsidy utxo")
+	}
+	if entry.CreationHeight != 1 {
+		t.Fatalf("creation_height=%d, want 1", entry.CreationHeight)
+	}
+	if !entry.CreatedByCoinbase {
+		t.Fatalf("expected coinbase flag on subsidy utxo")
+	}
+}
+
+func TestChainStateConnectBlockRejectsWrongGenesisChainID(t *testing.T) {
+	target := consensus.POW_LIMIT
+	st := NewChainState()
+	var badChainID [32]byte
+	badChainID[0] = 0x01
+
+	if _, err := st.ConnectBlock(devnetGenesisBlockBytes, &target, nil, badChainID); err == nil {
+		t.Fatalf("expected genesis chain_id mismatch")
 	}
 }
 

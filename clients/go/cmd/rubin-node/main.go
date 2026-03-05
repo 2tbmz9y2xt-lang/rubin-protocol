@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -57,6 +58,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&cfg.DataDir, "datadir", defaults.DataDir, "node data directory")
 	fs.StringVar(&cfg.BindAddr, "bind", defaults.BindAddr, "bind address host:port")
 	fs.StringVar(&cfg.LogLevel, "log-level", defaults.LogLevel, "log level: debug|info|warn|error")
+	fs.StringVar(&cfg.MineAddress, "mine-address", defaults.MineAddress, "hex-encoded 32-byte key_id or 33-byte CORE_P2PK covenant_data for miner subsidy output")
+	genesisFile := fs.String("genesis-file", "", "path to genesis pack JSON with chain_id_hex")
 	fs.IntVar(&cfg.MaxPeers, "max-peers", defaults.MaxPeers, "max connected peers")
 	mineBlocks := fs.Int("mine-blocks", 0, "mine N blocks locally after startup")
 	mineExit := fs.Bool("mine-exit", false, "exit immediately after local mining")
@@ -68,8 +71,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	cfg.LogLevel = strings.ToLower(strings.TrimSpace(cfg.LogLevel))
 	cfg.Peers = node.NormalizePeers(append([]string{*peerCSV}, peers...)...)
+	chainIDFromGenesis, err := parseGenesisChainID(*genesisFile)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "invalid genesis file: %v\n", err)
+		return 2
+	}
+	if *genesisFile != "" {
+		cfg.ChainID = fmt.Sprintf("%x", chainIDFromGenesis[:])
+	}
 	if err := node.ValidateConfig(cfg); err != nil {
 		_, _ = fmt.Fprintf(stderr, "invalid config: %v\n", err)
+		return 2
+	}
+	mineAddress, err := node.ParseMineAddress(cfg.MineAddress)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "invalid config: invalid mine_address: %v\n", err)
 		return 2
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
@@ -96,7 +112,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		chainState,
 		blockStore,
 		func() node.SyncConfig {
-			syncCfg := node.DefaultSyncConfig(nil, [32]byte{}, chainStatePath)
+			syncCfg := node.DefaultSyncConfig(nil, chainIDFromGenesis, chainStatePath)
 			syncCfg.Network = cfg.Network
 			return syncCfg
 		}(),
@@ -138,7 +154,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	if *mineBlocks > 0 {
-		miner, err := newMinerFn(chainState, blockStore, syncEngine, node.DefaultMinerConfig())
+		minerCfg := node.DefaultMinerConfig()
+		if len(mineAddress) != 0 {
+			minerCfg.MineAddress = mineAddress
+		}
+		miner, err := newMinerFn(chainState, blockStore, syncEngine, minerCfg)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "miner init failed: %v\n", err)
 			return 2
@@ -274,6 +294,40 @@ func nowUnixU64() uint64 {
 		return 0
 	}
 	return uint64(now)
+}
+
+type genesisPack struct {
+	ChainIDHex string `json:"chain_id_hex"`
+}
+
+func parseGenesisChainID(path string) ([32]byte, error) {
+	var out [32]byte
+	if strings.TrimSpace(path) == "" {
+		return out, nil
+	}
+	raw, err := os.ReadFile(filepath.Clean(path))
+	if err != nil {
+		return out, err
+	}
+	var payload genesisPack
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return out, err
+	}
+	chainIDHex := strings.TrimSpace(payload.ChainIDHex)
+	if chainIDHex == "" {
+		return out, fmt.Errorf("chain_id_hex missing")
+	}
+	chainIDHex = strings.TrimPrefix(chainIDHex, "0x")
+	chainIDHex = strings.TrimPrefix(chainIDHex, "0X")
+	rawChainID, err := hex.DecodeString(chainIDHex)
+	if err != nil {
+		return out, err
+	}
+	if len(rawChainID) != len(out) {
+		return out, fmt.Errorf("chain_id must be 32 bytes, got %d", len(rawChainID))
+	}
+	copy(out[:], rawChainID)
+	return out, nil
 }
 
 func mustTip(tipHeight uint64, tipHash [32]byte, tipOK bool, err error, stderr io.Writer) (uint64, [32]byte, bool, int) {

@@ -146,6 +146,13 @@ func (s *SyncEngine) ApplyBlock(blockBytes []byte, prevTimestamps []uint64) (*Ch
 	if err != nil {
 		return nil, err
 	}
+	blockHeight, _, err := nextBlockContext(s.chainState)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateIncomingChainID(blockHeight, s.cfg.ChainID); err != nil {
+		return nil, err
+	}
 	blockHash, err := consensus.BlockHash(pb.HeaderBytes)
 	if err != nil {
 		return nil, err
@@ -194,6 +201,15 @@ func (s *SyncEngine) ApplyBlock(blockBytes []byte, prevTimestamps []uint64) (*Ch
 	}
 	s.mu.Unlock()
 	return summary, nil
+}
+
+func validateIncomingChainID(blockHeight uint64, chainID [32]byte) error {
+	if blockHeight == 0 {
+		if chainID != devnetGenesisChainID {
+			return errors.New("genesis chain_id mismatch")
+		}
+	}
+	return nil
 }
 
 func restoreChainState(dst *ChainState, snapshot chainStateDisk) error {

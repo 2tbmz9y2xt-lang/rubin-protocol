@@ -175,14 +175,13 @@ func TestChainStateConnectBlock_NilReceiver(t *testing.T) {
 
 func TestChainStateConnectBlock_NilUtxoMapInitialized(t *testing.T) {
 	target := consensus.POW_LIMIT
-	var chainID [32]byte
+	st := &ChainState{HasTip: true, Height: 0, Utxos: nil}
+	st.TipHash = mustHash32Hex(t, "1111111111111111111111111111111111111111111111111111111111111111")
 
-	st := &ChainState{Utxos: nil}
-	prev := mustHash32Hex(t, "1111111111111111111111111111111111111111111111111111111111111111")
-	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 0, 1)
-	block := buildSingleTxBlock(t, prev, target, 1, coinbase)
+	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, 1)
+	block := buildSingleTxBlock(t, st.TipHash, target, 2, coinbase)
 
-	if _, err := st.ConnectBlock(block, &target, nil, chainID); err != nil {
+	if _, err := st.ConnectBlock(block, &target, nil, devnetGenesisChainID); err != nil {
 		t.Fatalf("ConnectBlock: %v", err)
 	}
 	if st.Utxos == nil {

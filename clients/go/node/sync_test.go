@@ -164,21 +164,24 @@ func TestSyncEngineApplyBlockPersistsChainstateAndStore(t *testing.T) {
 	}
 	st := NewChainState()
 	target := consensus.POW_LIMIT
-	engine, err := NewSyncEngine(st, store, DefaultSyncConfig(&target, [32]byte{}, chainStatePath))
+	engine, err := NewSyncEngine(st, store, DefaultSyncConfig(&target, devnetGenesisChainID, chainStatePath))
 	if err != nil {
 		t.Fatalf("new sync engine: %v", err)
 	}
 
-	prev := mustHash32Hex(t, "1111111111111111111111111111111111111111111111111111111111111111")
-	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 0, 1)
-	block := buildSingleTxBlock(t, prev, target, 12345, coinbase)
+	if _, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil); err != nil {
+		t.Fatalf("apply genesis block: %v", err)
+	}
 
-	summary, err := engine.ApplyBlock(block, nil)
+	block1Coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, 1)
+	block1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, 2, block1Coinbase)
+
+	summary, err := engine.ApplyBlock(block1, nil)
 	if err != nil {
 		t.Fatalf("apply block: %v", err)
 	}
-	if summary.BlockHeight != 0 {
-		t.Fatalf("block height=%d, want 0", summary.BlockHeight)
+	if summary.BlockHeight != 1 {
+		t.Fatalf("block height=%d, want 1", summary.BlockHeight)
 	}
 	if _, err := os.Stat(chainStatePath); err != nil {
 		t.Fatalf("chainstate file not persisted: %v", err)
@@ -188,7 +191,7 @@ func TestSyncEngineApplyBlockPersistsChainstateAndStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload chainstate: %v", err)
 	}
-	if !loaded.HasTip || loaded.Height != 0 {
+	if !loaded.HasTip || loaded.Height != 1 {
 		t.Fatalf("unexpected persisted chainstate: has_tip=%v height=%d", loaded.HasTip, loaded.Height)
 	}
 
@@ -196,7 +199,7 @@ func TestSyncEngineApplyBlockPersistsChainstateAndStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("blockstore tip: %v", err)
 	}
-	if !ok || height != 0 {
+	if !ok || height != 1 {
 		t.Fatalf("unexpected blockstore tip: ok=%v height=%d", ok, height)
 	}
 }
@@ -249,9 +252,14 @@ func TestSyncEngineApplyBlock_RollbackOnSaveFailure(t *testing.T) {
 	}
 	chainStatePath := filepath.Join(badDir, "chainstate.json")
 
-	st := NewChainState()
+	st := &ChainState{
+		HasTip:    true,
+		Height:    0,
+		TipHash:   devnetGenesisBlockHash,
+		Utxos:     nil,
+	}
 	target := consensus.POW_LIMIT
-	engine, err := NewSyncEngine(st, nil, DefaultSyncConfig(&target, [32]byte{}, chainStatePath))
+	engine, err := NewSyncEngine(st, nil, DefaultSyncConfig(&target, devnetGenesisChainID, chainStatePath))
 	if err != nil {
 		t.Fatalf("NewSyncEngine: %v", err)
 	}
@@ -263,9 +271,8 @@ func TestSyncEngineApplyBlock_RollbackOnSaveFailure(t *testing.T) {
 		t.Fatalf("stateToDisk before: %v", err)
 	}
 
-	prev := mustHash32Hex(t, "1111111111111111111111111111111111111111111111111111111111111111")
-	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 0, 1)
-	block := buildSingleTxBlock(t, prev, target, 12345, coinbase)
+	block1Coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, 1)
+	block := buildSingleTxBlock(t, st.TipHash, target, 2, block1Coinbase)
 
 	if _, err := engine.ApplyBlock(block, nil); err == nil {
 		t.Fatalf("expected apply error")

@@ -1,6 +1,8 @@
 package node
 
 import (
+	"bytes"
+	"crypto/sha3"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -14,6 +16,40 @@ import (
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
+
+const (
+	genesisHeaderHex = "01000000000000000000000000000000000000000000000000000000000000000000000024687b35a5bef7ae62cd384e711c835ca57814f6f9730d2a9a2e7fcb280f58a500f1536500000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000002"
+	genesisTxHex     = "010000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff000000000000"
+
+	genesisChainIDHex     = "9e9878bf30ba6c37c5f7314dbc99314339275df231a9b8ee1275b7eda24cf317"
+	genesisBlockHashHex   = "951c1ac88944e778d99fd9dca4fd09a13a3d7da78dce64bed49f8f4ad4607438"
+	genesisMagicSeparator = "RUBIN-GENESIS-v1"
+)
+
+var (
+	devnetGenesisHeaderBytes = decodeHexToBytesExact(genesisHeaderHex, consensus.BLOCK_HEADER_BYTES)
+	devnetGenesisTxBytes     = decodeHexToBytesExact(genesisTxHex, 59)
+	devnetGenesisBlockBytes  = append(append([]byte{}, devnetGenesisHeaderBytes...), consensus.AppendCompactSize(nil, 1)...)
+)
+
+func init() {
+	devnetGenesisBlockBytes = append(devnetGenesisBlockBytes, devnetGenesisTxBytes...)
+}
+
+var (
+	devnetGenesisBlockHash [32]byte
+	devnetGenesisChainID   [32]byte
+	genesisChainIDFromMagic [32]byte
+)
+
+func init() {
+	devnetGenesisChainID = decodeHexToBytes32(genesisChainIDHex)
+	devnetGenesisBlockHash = decodeHexToBytes32(genesisBlockHashHex)
+	genesisChainIDFromMagic = deriveGenesisChainID(devnetGenesisHeaderBytes, devnetGenesisTxBytes)
+	if !bytes.Equal(genesisChainIDFromMagic[:], devnetGenesisChainID[:]) {
+		panic("genesis chain ID constant mismatch")
+	}
+}
 
 const (
 	chainStateDiskVersion = 1
@@ -109,14 +145,21 @@ func (s *ChainState) ConnectBlock(
 	if s == nil {
 		return nil, errors.New("nil chainstate")
 	}
-	if s.Utxos == nil {
-		s.Utxos = make(map[consensus.Outpoint]consensus.UtxoEntry)
-	}
 	blockHeight, expectedPrevHash, err := nextBlockContext(s)
 	if err != nil {
 		return nil, err
 	}
+	pb, err := consensus.ParseBlockBytes(blockBytes)
+	if err != nil {
+		return nil, err
+	}
+	if blockHeight == 0 {
+		return s.connectGenesisBlock(pb, blockBytes, chainID)
+	}
 
+	if s.Utxos == nil {
+		s.Utxos = make(map[consensus.Outpoint]consensus.UtxoEntry)
+	}
 	workState := consensus.InMemoryChainState{
 		Utxos:            copyUtxoSet(s.Utxos),
 		AlreadyGenerated: new(big.Int).SetUint64(s.AlreadyGenerated),
@@ -134,10 +177,6 @@ func (s *ChainState) ConnectBlock(
 		return nil, err
 	}
 
-	pb, err := consensus.ParseBlockBytes(blockBytes)
-	if err != nil {
-		return nil, err
-	}
 	blockHash, err := consensus.BlockHash(pb.HeaderBytes)
 	if err != nil {
 		return nil, err
@@ -159,6 +198,54 @@ func (s *ChainState) ConnectBlock(
 		AlreadyGenerated:   summary.AlreadyGenerated,
 		AlreadyGeneratedN1: summary.AlreadyGeneratedN1,
 		UtxoCount:          summary.UtxoCount,
+	}, nil
+}
+
+func (s *ChainState) connectGenesisBlock(pb *consensus.ParsedBlock, blockBytes []byte, chainID [32]byte) (*ChainStateConnectSummary, error) {
+	if chainID != devnetGenesisChainID {
+		return nil, errors.New("genesis chain_id mismatch")
+	}
+	if !bytes.Equal(blockBytes, devnetGenesisBlockBytes) {
+		return nil, errors.New("unexpected genesis block bytes")
+	}
+	if len(pb.Txs) != 1 {
+		return nil, errors.New("genesis must contain exactly one tx")
+	}
+	blockHash, err := consensus.BlockHash(pb.HeaderBytes)
+	if err != nil {
+		return nil, err
+	}
+	if blockHash != devnetGenesisBlockHash {
+		return nil, errors.New("unexpected genesis block hash")
+	}
+	txid := pb.Txids[0]
+	genesisUtxos := make(map[consensus.Outpoint]consensus.UtxoEntry, len(pb.Txs[0].Outputs))
+	for i, out := range pb.Txs[0].Outputs {
+		if out.CovenantType == consensus.COV_TYPE_ANCHOR || out.CovenantType == consensus.COV_TYPE_DA_COMMIT {
+			continue
+		}
+		genesisUtxos[consensus.Outpoint{Txid: txid, Vout: uint32(i)}] = consensus.UtxoEntry{
+			Value:             out.Value,
+			CovenantType:      out.CovenantType,
+			CovenantData:      append([]byte(nil), out.CovenantData...),
+			CreationHeight:    0,
+			CreatedByCoinbase: true,
+		}
+	}
+
+	s.HasTip = true
+	s.Height = 0
+	s.TipHash = blockHash
+	s.AlreadyGenerated = 0
+	s.Utxos = genesisUtxos
+
+	return &ChainStateConnectSummary{
+		BlockHeight:        0,
+		BlockHash:          blockHash,
+		SumFees:            0,
+		AlreadyGenerated:   0,
+		AlreadyGeneratedN1: 0,
+		UtxoCount:          uint64(len(genesisUtxos)),
 	}, nil
 }
 
@@ -265,6 +352,34 @@ func chainStateFromDisk(disk chainStateDisk) (*ChainState, error) {
 		AlreadyGenerated: disk.AlreadyGenerated,
 		Utxos:            utxos,
 	}, nil
+}
+
+func decodeHexToBytesExact(value string, expectedLen int) []byte {
+	raw := strings.TrimSpace(value)
+	out, err := hex.DecodeString(raw)
+	if err != nil {
+		panic(fmt.Sprintf("invalid hex: %v", err))
+	}
+	if len(out) != expectedLen {
+		panic(fmt.Sprintf("expected %d bytes, got %d", expectedLen, len(out)))
+	}
+	return out
+}
+
+func decodeHexToBytes32(value string) [32]byte {
+	raw := decodeHexToBytesExact(value, 32)
+	var out [32]byte
+	copy(out[:], raw)
+	return out
+}
+
+func deriveGenesisChainID(headerBytes, txBytes []byte) [32]byte {
+	var chainID [32]byte
+	preimage := append([]byte{}, []byte(genesisMagicSeparator)...)
+	preimage = append(preimage, headerBytes...)
+	preimage = append(preimage, txBytes...)
+	chainID = sha3.Sum256(preimage)
+	return chainID
 }
 
 func parseHex(name, value string) ([]byte, error) {
