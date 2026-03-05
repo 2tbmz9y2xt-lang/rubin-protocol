@@ -40,7 +40,7 @@ structure BlockBasicOut where
   sumWeight : Option Nat
   sumDa : Option Nat
 
-def goTraceFixturesDigestSHA3_256 : String := "2cceb9dd9c350a145e409efc57cb33690bcffb9b54682f57dbe7100431443570"
+def goTraceFixturesDigestSHA3_256 : String := "989c5e44d9e873b64580a66fb64b692c4ce5ac6dd18ec2fc18f8753889c90e06"
 
 def parseOuts : List ParseOut := [
   { id := "PARSE-01", ok := true, err := "", consumed := 21, txidHex := "0xd205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0", wtxidHex := "0xf760a70e1e838404d8e41679962064dc1bf4fa181699009644a14d0aa389ab4e" },
@@ -111,6 +111,8 @@ def utxoBasicOuts : List UtxoBasicOut := [
   { id := "CV-U-EXT-01", ok := true, err := "", fee := some 10, utxoCount := some 1 },
   { id := "CV-U-EXT-02", ok := true, err := "", fee := some 10, utxoCount := some 1 },
   { id := "CV-U-EXT-03", ok := false, err := "TX_ERR_COVENANT_TYPE_INVALID", fee := none, utxoCount := none },
+  { id := "CV-U-EXT-04", ok := false, err := "TX_ERR_SIG_ALG_INVALID", fee := none, utxoCount := none },
+  { id := "CV-U-EXT-05", ok := true, err := "", fee := some 10, utxoCount := some 1 },
   { id := "CV-U-SIGHASH-TYPE-01", ok := false, err := "TX_ERR_SIGHASH_TYPE_INVALID", fee := none, utxoCount := none }
 ]
 

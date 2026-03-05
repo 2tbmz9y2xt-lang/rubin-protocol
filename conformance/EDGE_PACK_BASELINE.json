@@ -48,17 +48,23 @@
       "gates": [
         "CV-COVENANT-GENESIS",
         "CV-HTLC",
+        "CV-UTXO-BASIC",
         "CV-VAULT",
         "CV-VAULT-POLICY",
         "CV-SIG"
       ],
-      "min_vectors_total": 50,
+      "min_vectors_total": 80,
       "required_vectors_by_gate": {
         "CV-HTLC": [
           "CV-HTLC-10",
           "CV-HTLC-11",
           "CV-HTLC-12",
           "CV-HTLC-14"
+        ],
+        "CV-UTXO-BASIC": [
+          "CV-U-EXT-02",
+          "CV-U-EXT-04",
+          "CV-U-EXT-05"
         ],
         "CV-VAULT-POLICY": [
           "CV-V-01",

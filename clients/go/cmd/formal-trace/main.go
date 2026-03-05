@@ -95,15 +95,16 @@ type utxoBasicFixture struct {
 	Vectors []utxoBasicVector `json:"vectors"`
 }
 type utxoBasicVector struct {
-	BlockMTP       *uint64    `json:"block_mtp"`
-	ID             string     `json:"id"`
-	Op             string     `json:"op"`
-	TxHex          string     `json:"tx_hex"`
-	ExpectErr      string     `json:"expect_err"`
-	Utxos          []utxoJSON `json:"utxos"`
-	Height         uint64     `json:"height"`
-	BlockTimestamp uint64     `json:"block_timestamp"`
-	ExpectOk       bool       `json:"expect_ok"`
+	BlockMTP        *uint64              `json:"block_mtp"`
+	CoreExtProfiles []coreExtProfileJSON `json:"core_ext_profiles,omitempty"`
+	ID              string               `json:"id"`
+	Op              string               `json:"op"`
+	TxHex           string               `json:"tx_hex"`
+	ExpectErr       string               `json:"expect_err"`
+	Utxos           []utxoJSON           `json:"utxos"`
+	Height          uint64               `json:"height"`
+	BlockTimestamp  uint64               `json:"block_timestamp"`
+	ExpectOk        bool                 `json:"expect_ok"`
 }
 
 type utxoJSON struct {
@@ -114,6 +115,64 @@ type utxoJSON struct {
 	Vout              uint32 `json:"vout"`
 	CovenantType      uint16 `json:"covenant_type"`
 	CreatedByCoinbase bool   `json:"created_by_coinbase"`
+}
+
+type coreExtProfileJSON struct {
+	ExtID           uint16  `json:"ext_id"`
+	Active          bool    `json:"active"`
+	AllowedSuiteIDs []uint8 `json:"allowed_suite_ids,omitempty"`
+	Binding         string  `json:"binding,omitempty"`
+}
+
+type staticCoreExtProfiles map[uint16]consensus.CoreExtProfile
+
+func (m staticCoreExtProfiles) LookupCoreExtProfile(extID uint16, _ uint64) (consensus.CoreExtProfile, bool, error) {
+	p, ok := m[extID]
+	return p, ok, nil
+}
+
+func buildCoreExtProfiles(items []coreExtProfileJSON) (consensus.CoreExtProfileProvider, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	profiles := make(staticCoreExtProfiles)
+	for _, item := range items {
+		if !item.Active {
+			continue
+		}
+		binding := strings.TrimSpace(item.Binding)
+		verifySigExtFn := consensus.CoreExtVerifySigExtFunc(nil)
+		switch binding {
+		case "", "native_verify_sig":
+		case "verify_sig_ext_accept":
+			verifySigExtFn = func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) {
+				return true, nil
+			}
+		case "verify_sig_ext_reject":
+			verifySigExtFn = func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) {
+				return false, nil
+			}
+		case "verify_sig_ext_error":
+			verifySigExtFn = func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) {
+				return false, fmt.Errorf("verify_sig_ext unavailable")
+			}
+		default:
+			return nil, fmt.Errorf("unsupported core_ext binding: %s", item.Binding)
+		}
+		if _, exists := profiles[item.ExtID]; exists {
+			return nil, fmt.Errorf("duplicate active core_ext profile for ext_id=%d", item.ExtID)
+		}
+		allowed := make(map[uint8]struct{}, len(item.AllowedSuiteIDs))
+		for _, suiteID := range item.AllowedSuiteIDs {
+			allowed[suiteID] = struct{}{}
+		}
+		profiles[item.ExtID] = consensus.CoreExtProfile{
+			Active:         true,
+			AllowedSuites:  allowed,
+			VerifySigExtFn: verifySigExtFn,
+		}
+	}
+	return profiles, nil
 }
 
 type blockBasicFixture struct {
@@ -473,7 +532,31 @@ func run(fixturesDir, outPath string) error {
 							mtp = *v.BlockMTP
 						}
 						var chainID [32]byte
-						_, sum, runErr = consensus.ApplyNonCoinbaseTxBasicUpdateWithMTP(tx, txid, utxos, v.Height, v.BlockTimestamp, mtp, chainID)
+						coreExtProfiles, e := buildCoreExtProfiles(v.CoreExtProfiles)
+						if e != nil {
+							runErr = e
+						} else if coreExtProfiles != nil {
+							_, sum, runErr = consensus.ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
+								tx,
+								txid,
+								utxos,
+								v.Height,
+								v.BlockTimestamp,
+								mtp,
+								chainID,
+								coreExtProfiles,
+							)
+						} else {
+							_, sum, runErr = consensus.ApplyNonCoinbaseTxBasicUpdateWithMTP(
+								tx,
+								txid,
+								utxos,
+								v.Height,
+								v.BlockTimestamp,
+								mtp,
+								chainID,
+							)
+						}
 					}
 				}
 				outputs := map[string]any{}

@@ -142,6 +142,11 @@ type Request struct {
 	WindowSignalCounts   []uint32          `json:"window_signal_counts,omitempty"`
 }
 
+type requestEnvelope struct {
+	Request
+	CoreExtProfiles []CoreExtProfileJSON `json:"core_ext_profiles,omitempty"`
+}
+
 type UtxoJSON struct {
 	Txid              string `json:"txid"`
 	CovenantDataHex   string `json:"covenant_data"`
@@ -150,6 +155,64 @@ type UtxoJSON struct {
 	Vout              uint32 `json:"vout"`
 	CovenantType      uint16 `json:"covenant_type"`
 	CreatedByCoinbase bool   `json:"created_by_coinbase"`
+}
+
+type CoreExtProfileJSON struct {
+	ExtID           uint16  `json:"ext_id"`
+	Active          bool    `json:"active"`
+	AllowedSuiteIDs []uint8 `json:"allowed_suite_ids,omitempty"`
+	Binding         string  `json:"binding,omitempty"`
+}
+
+type staticCoreExtProfiles map[uint16]consensus.CoreExtProfile
+
+func (m staticCoreExtProfiles) LookupCoreExtProfile(extID uint16, _ uint64) (consensus.CoreExtProfile, bool, error) {
+	p, ok := m[extID]
+	return p, ok, nil
+}
+
+func buildCoreExtProfiles(items []CoreExtProfileJSON) (consensus.CoreExtProfileProvider, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	profiles := make(staticCoreExtProfiles)
+	for _, item := range items {
+		if !item.Active {
+			continue
+		}
+		binding := strings.TrimSpace(item.Binding)
+		verifySigExtFn := consensus.CoreExtVerifySigExtFunc(nil)
+		switch binding {
+		case "", "native_verify_sig":
+		case "verify_sig_ext_accept":
+			verifySigExtFn = func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) {
+				return true, nil
+			}
+		case "verify_sig_ext_reject":
+			verifySigExtFn = func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) {
+				return false, nil
+			}
+		case "verify_sig_ext_error":
+			verifySigExtFn = func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) {
+				return false, fmt.Errorf("verify_sig_ext unavailable")
+			}
+		default:
+			return nil, fmt.Errorf("unsupported core_ext binding: %s", item.Binding)
+		}
+		if _, exists := profiles[item.ExtID]; exists {
+			return nil, fmt.Errorf("duplicate active core_ext profile for ext_id=%d", item.ExtID)
+		}
+		allowed := make(map[uint8]struct{}, len(item.AllowedSuiteIDs))
+		for _, suiteID := range item.AllowedSuiteIDs {
+			allowed[suiteID] = struct{}{}
+		}
+		profiles[item.ExtID] = consensus.CoreExtProfile{
+			Active:         true,
+			AllowedSuites:  allowed,
+			VerifySigExtFn: verifySigExtFn,
+		}
+	}
+	return profiles, nil
 }
 
 type ForkChoiceChain struct {
@@ -478,11 +541,13 @@ func toBool(v any, def bool) bool {
 }
 
 func runFromStdin() {
-	var req Request
-	if err := json.NewDecoder(os.Stdin).Decode(&req); err != nil {
+	var envelope requestEnvelope
+	if err := json.NewDecoder(os.Stdin).Decode(&envelope); err != nil {
 		writeResp(os.Stdout, Response{Ok: false, Err: fmt.Sprintf("bad request: %v", err)})
 		return
 	}
+	req := envelope.Request
+	coreExtProfilesReq := envelope.CoreExtProfiles
 
 	switch req.Op {
 	case "parse_tx":
@@ -880,7 +945,27 @@ func runFromStdin() {
 			return
 		}
 
-		s, err := consensus.ApplyNonCoinbaseTxBasicWithMTP(tx, txid, utxos, req.Height, req.BlockTimestamp, blockMTP, chainID)
+		coreExtProfiles, err := buildCoreExtProfiles(coreExtProfilesReq)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+
+		var s *consensus.UtxoApplySummary
+		if coreExtProfiles != nil {
+			_, s, err = consensus.ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
+				tx,
+				txid,
+				utxos,
+				req.Height,
+				req.BlockTimestamp,
+				blockMTP,
+				chainID,
+				coreExtProfiles,
+			)
+		} else {
+			s, err = consensus.ApplyNonCoinbaseTxBasicWithMTP(tx, txid, utxos, req.Height, req.BlockTimestamp, blockMTP, chainID)
+		}
 		if err != nil {
 			writeConsensusErr(os.Stdout, err)
 			return

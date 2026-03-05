@@ -367,7 +367,7 @@
       "height": 500000,
       "id": "CV-U-EXT-02",
       "op": "utxo_apply_basic",
-      "tx_hex": "0100000000010000000000000001eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee000000000000000000015a00000000000000000021011111111111111111111111111111111111111111111111111111111111111111000000000100000000",
+      "tx_hex": "0100000000010000000000000001eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee000000000000000000015a0000000000000000002101111111111111111111111111111111111111111111111111111111111111111100000000010300010100",
       "utxos": [
         {
           "covenant_data": "010000",
@@ -441,6 +441,67 @@
           "vout": 0
         }
       ]
+    },
+    {
+      "block_timestamp": 2000,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
+      "expect_ok": false,
+      "height": 500000,
+      "id": "CV-U-EXT-04",
+      "op": "utxo_apply_basic",
+      "core_ext_profiles": [
+        {
+          "ext_id": 1,
+          "active": true,
+          "allowed_suite_ids": [
+            3
+          ],
+          "binding": "native_verify_sig"
+        }
+      ],
+      "utxos": [
+        {
+          "covenant_data": "010000",
+          "covenant_type": 258,
+          "created_by_coinbase": false,
+          "creation_height": 0,
+          "txid": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "value": 100,
+          "vout": 0
+        }
+      ],
+      "tx_hex": "0100000000010000000000000001eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee000000000000000000015a0000000000000000002101111111111111111111111111111111111111111111111111111111111111111100000000010300010100"
+    },
+    {
+      "block_timestamp": 2000,
+      "expect_fee": 10,
+      "expect_ok": true,
+      "expect_utxo_count": 1,
+      "height": 500000,
+      "id": "CV-U-EXT-05",
+      "op": "utxo_apply_basic",
+      "core_ext_profiles": [
+        {
+          "ext_id": 1,
+          "active": true,
+          "allowed_suite_ids": [
+            3
+          ],
+          "binding": "verify_sig_ext_accept"
+        }
+      ],
+      "utxos": [
+        {
+          "covenant_data": "010000",
+          "covenant_type": 258,
+          "created_by_coinbase": false,
+          "creation_height": 0,
+          "txid": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "value": 100,
+          "vout": 0
+        }
+      ],
+      "tx_hex": "0100000000010000000000000001eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee000000000000000000015a0000000000000000002101111111111111111111111111111111111111111111111111111111111111111100000000010300010100"
     },
     {
       "id": "CV-U-COINBASE-IMMATURE-03",

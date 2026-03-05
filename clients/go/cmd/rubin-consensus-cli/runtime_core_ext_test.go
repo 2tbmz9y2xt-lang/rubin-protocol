@@ -1,0 +1,139 @@
+package main
+
+import (
+	"testing"
+)
+
+func TestBuildCoreExtProfilesEmpty(t *testing.T) {
+	provider, err := buildCoreExtProfiles(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if provider != nil {
+		t.Fatalf("expected nil provider for empty profiles")
+	}
+}
+
+func TestBuildCoreExtProfilesNativeBinding(t *testing.T) {
+	provider, err := buildCoreExtProfiles([]CoreExtProfileJSON{
+		{
+			ExtID:           7,
+			Active:          true,
+			AllowedSuiteIDs: []uint8{1, 3},
+			Binding:         "native_verify_sig",
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if provider == nil {
+		t.Fatalf("expected non-nil provider")
+	}
+
+	profile, ok, err := provider.LookupCoreExtProfile(7, 0)
+	if err != nil {
+		t.Fatalf("lookup failed: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected active profile for ext_id=7")
+	}
+	if !profile.Active {
+		t.Fatalf("expected profile active")
+	}
+	if profile.VerifySigExtFn != nil {
+		t.Fatalf("expected nil VerifySigExtFn for native binding")
+	}
+	if _, has := profile.AllowedSuites[1]; !has {
+		t.Fatalf("expected allowed suite 1")
+	}
+	if _, has := profile.AllowedSuites[3]; !has {
+		t.Fatalf("expected allowed suite 3")
+	}
+}
+
+func TestBuildCoreExtProfilesVerifySigExtBindings(t *testing.T) {
+	tests := []struct {
+		name    string
+		binding string
+		ok      bool
+		wantErr bool
+	}{
+		{name: "accept", binding: "verify_sig_ext_accept", ok: true, wantErr: false},
+		{name: "reject", binding: "verify_sig_ext_reject", ok: false, wantErr: false},
+		{name: "error", binding: "verify_sig_ext_error", ok: false, wantErr: true},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			provider, err := buildCoreExtProfiles([]CoreExtProfileJSON{
+				{
+					ExtID:           uint16(100 + i),
+					Active:          true,
+					AllowedSuiteIDs: []uint8{3},
+					Binding:         tc.binding,
+				},
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			profile, ok, err := provider.LookupCoreExtProfile(uint16(100+i), 0)
+			if err != nil {
+				t.Fatalf("lookup failed: %v", err)
+			}
+			if !ok {
+				t.Fatalf("missing profile")
+			}
+			if profile.VerifySigExtFn == nil {
+				t.Fatalf("expected VerifySigExtFn for binding=%s", tc.binding)
+			}
+			gotOK, gotErr := profile.VerifySigExtFn(0, 3, nil, nil, [32]byte{}, nil)
+			if gotOK != tc.ok {
+				t.Fatalf("unexpected ok for %s: got=%v want=%v", tc.binding, gotOK, tc.ok)
+			}
+			if (gotErr != nil) != tc.wantErr {
+				t.Fatalf("unexpected error state for %s: gotErr=%v wantErr=%v", tc.binding, gotErr, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestBuildCoreExtProfilesSkipsInactive(t *testing.T) {
+	provider, err := buildCoreExtProfiles([]CoreExtProfileJSON{
+		{
+			ExtID:           77,
+			Active:          false,
+			AllowedSuiteIDs: []uint8{3},
+			Binding:         "verify_sig_ext_accept",
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if provider == nil {
+		t.Fatalf("expected provider map even when all profiles are inactive")
+	}
+	if _, ok, err := provider.LookupCoreExtProfile(77, 0); err != nil {
+		t.Fatalf("lookup failed: %v", err)
+	} else if ok {
+		t.Fatalf("inactive profile must not be present")
+	}
+}
+
+func TestBuildCoreExtProfilesDuplicateActiveRejected(t *testing.T) {
+	_, err := buildCoreExtProfiles([]CoreExtProfileJSON{
+		{ExtID: 9, Active: true, AllowedSuiteIDs: []uint8{3}, Binding: "verify_sig_ext_accept"},
+		{ExtID: 9, Active: true, AllowedSuiteIDs: []uint8{3}, Binding: "verify_sig_ext_reject"},
+	})
+	if err == nil {
+		t.Fatalf("expected duplicate active profile error")
+	}
+}
+
+func TestBuildCoreExtProfilesUnsupportedBindingRejected(t *testing.T) {
+	_, err := buildCoreExtProfiles([]CoreExtProfileJSON{
+		{ExtID: 10, Active: true, AllowedSuiteIDs: []uint8{3}, Binding: "unknown-binding"},
+	})
+	if err == nil {
+		t.Fatalf("expected unsupported binding error")
+	}
+}

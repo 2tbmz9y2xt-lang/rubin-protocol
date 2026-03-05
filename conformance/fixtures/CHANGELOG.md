@@ -9,6 +9,26 @@ Policy:
 
 ---
 
+## 2026-03-05 — SLH de-integration conformance closeout (Q-SLH-DEINTEG-04)
+
+Причина:
+- закрыть хвосты после удаления `suite_id=0x02` из native consensus:
+  - `CV-VAULT-SLH-01` теперь фиксирует reject как non-native suite (`TX_ERR_SIG_ALG_INVALID`),
+    а не parse-stage noncanonical;
+  - `CV-U-EXT-02` больше не дублирует sentinel-кейс и проверяет pre-active non-native witness;
+  - добавлены `CV-U-EXT-04` и `CV-U-EXT-05` для ACTIVE `CORE_EXT` profile:
+    - non-native suite + `native_verify_sig` → `TX_ERR_SIG_ALG_INVALID`;
+    - non-native suite + `verify_sig_ext_accept` → successful spend.
+
+Инструменты:
+- точечные правки fixtures (`tx_hex_from`/`tx_hex_mutations`, `core_ext_profiles`),
+- проверка через `conformance/runner/run_cv_bundle.py`,
+- синхронизация матрицы: `tools/gen_conformance_matrix.py`.
+
+Изменённые fixtures:
+- `CV-UTXO-BASIC.json`
+- `CV-VAULT.json`
+
 ## 2026-03-03 — Sighash-byte canonicalization outcome rebaseline (Q-RFC-STEALTH-01)
 
 Причина:

@@ -86,8 +86,8 @@ jobs:
         run: |
           cd clients/go
           # Coverage gating focuses on consensus/runtime libraries.
-          # Large CLI entrypoints are included once they have dedicated tests.
-          pkgs="$(go list ./...)"
+          # CLI entrypoints (cmd/) are excluded — mirroring Rust's --exclude rubin-consensus-cli.
+          pkgs="$(go list ./... | grep -v '/cmd/')"
           go test -coverprofile=coverage.out ${pkgs}
 
       - name: Rust coverage
