@@ -173,7 +173,7 @@
     ],
     "forbidden": [
       "formal verification of full RUBIN consensus / CANONICAL semantics",
-      "cryptographic security proofs of ML-DSA / SLH-DSA / SHA3-256",
+      "cryptographic security proofs of ML-DSA / SLH-DSA (non-native) / SHA3-256",
       "bit-exact wire/serialization proof beyond what is exercised by conformance fixtures",
       "universal mechanized refinement between spec text and Go/Rust implementations"
     ]
