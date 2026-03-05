@@ -1,8 +1,12 @@
 package node
 
 import (
+	"bytes"
 	"slices"
+	"strings"
 	"testing"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 func TestNormalizePeers(t *testing.T) {
@@ -80,6 +84,29 @@ func TestValidateConfigRejectsMaxPeersZero(t *testing.T) {
 func TestValidateConfigRejectsMaxPeersTooHigh(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MaxPeers = 4097
+	if err := ValidateConfig(cfg); err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestParseMineAddressAcceptsKeyIDAndCanonicalEncoding(t *testing.T) {
+	raw := strings.Repeat("11", mineAddressKeyIDBytes)
+	got, err := ParseMineAddress(raw)
+	if err != nil {
+		t.Fatalf("ParseMineAddress: %v", err)
+	}
+
+	want := make([]byte, 0, consensus.MAX_P2PK_COVENANT_DATA)
+	want = append(want, consensus.SUITE_ID_ML_DSA_87)
+	want = append(want, bytes.Repeat([]byte{0x11}, mineAddressKeyIDBytes)...)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("mine address mismatch: got=%x want=%x", got, want)
+	}
+}
+
+func TestValidateConfigRejectsInvalidMineAddress(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MineAddress = "abcd"
 	if err := ValidateConfig(cfg); err == nil {
 		t.Fatalf("expected error")
 	}
