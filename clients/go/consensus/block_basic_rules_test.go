@@ -218,7 +218,7 @@ func TestValidateBlockBasic_CovenantInvalid(t *testing.T) {
 	prev := hashWithPrefix(0x88)
 	target := filledHash(0xff)
 	block := buildBlockBytes(t, prev, root, target, 21, [][]byte{tx})
-	expectValidateBlockBasicErr(t, block, &prev, &target, TX_ERR_COVENANT_TYPE_INVALID)
+	expectValidateBlockBasicErr(t, block, &prev, &target, BLOCK_ERR_WITNESS_COMMITMENT)
 }
 
 func TestValidateBlockBasic_SubsidyExceeded(t *testing.T) {
@@ -512,12 +512,14 @@ func TestValidateBlockBasic_CoinbaseRuleErrors(t *testing.T) {
 		nonce   uint64
 		height  uint64
 		prev    [32]byte
+		want    ErrorCode
 	}{
 		{
 			name:   "first_tx_must_be_coinbase",
 			prev:   hashWithPrefix(0x8a),
 			nonce:  24,
 			height: 0,
+			want:   BLOCK_ERR_WITNESS_COMMITMENT,
 			blockFn: func(t *testing.T, prev [32]byte, target [32]byte, nonce uint64) []byte {
 				tx := txWithOneOutput(0, COV_TYPE_ANCHOR, make([]byte, 32))
 				root, err := MerkleRootTxids([][32]byte{testTxID(t, tx)})
@@ -532,6 +534,7 @@ func TestValidateBlockBasic_CoinbaseRuleErrors(t *testing.T) {
 			prev:   hashWithPrefix(0x8b),
 			nonce:  25,
 			height: 7,
+			want:   BLOCK_ERR_COINBASE_INVALID,
 			blockFn: func(t *testing.T, prev [32]byte, target [32]byte, nonce uint64) []byte {
 				coinbase := coinbaseWithWitnessCommitmentAtHeight(t, 6)
 				root, err := MerkleRootTxids([][32]byte{testTxID(t, coinbase)})
@@ -546,6 +549,7 @@ func TestValidateBlockBasic_CoinbaseRuleErrors(t *testing.T) {
 			prev:   hashWithPrefix(0x8c),
 			nonce:  26,
 			height: 0,
+			want:   BLOCK_ERR_COINBASE_INVALID,
 			blockFn: func(t *testing.T, prev [32]byte, target [32]byte, nonce uint64) []byte {
 				coinbaseLike := coinbaseTxWithOutputs(0, []testOutput{
 					{value: 1, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()},
@@ -567,8 +571,8 @@ func TestValidateBlockBasic_CoinbaseRuleErrors(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected error")
 			}
-			if got := mustTxErrCode(t, err); got != BLOCK_ERR_COINBASE_INVALID {
-				t.Fatalf("code=%s, want %s", got, BLOCK_ERR_COINBASE_INVALID)
+			if got := mustTxErrCode(t, err); got != tc.want {
+				t.Fatalf("code=%s, want %s", got, tc.want)
 			}
 		})
 	}

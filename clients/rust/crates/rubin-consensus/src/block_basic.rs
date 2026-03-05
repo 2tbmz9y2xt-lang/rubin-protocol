@@ -157,6 +157,8 @@ pub fn validate_block_basic_with_context_at_height(
             "merkle_root mismatch",
         ));
     }
+    validate_coinbase_witness_commitment(&pb)?;
+    validate_timestamp_rules(pb.header.timestamp, block_height, prev_timestamps)?;
 
     validate_coinbase_structure(&pb, block_height)?;
 
@@ -198,8 +200,6 @@ pub fn validate_block_basic_with_context_at_height(
             .checked_add(anchor_bytes)
             .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
     }
-    validate_coinbase_witness_commitment(&pb)?;
-    validate_timestamp_rules(pb.header.timestamp, block_height, prev_timestamps)?;
 
     if sum_weight > MAX_BLOCK_WEIGHT {
         return Err(TxError::new(
@@ -207,16 +207,16 @@ pub fn validate_block_basic_with_context_at_height(
             "block weight exceeded",
         ));
     }
-    if sum_anchor > MAX_ANCHOR_BYTES_PER_BLOCK {
-        return Err(TxError::new(
-            ErrorCode::BlockErrAnchorBytesExceeded,
-            "anchor bytes exceeded",
-        ));
-    }
     if sum_da > MAX_DA_BYTES_PER_BLOCK {
         return Err(TxError::new(
             ErrorCode::BlockErrWeightExceeded,
             "DA bytes exceeded",
+        ));
+    }
+    if sum_anchor > MAX_ANCHOR_BYTES_PER_BLOCK {
+        return Err(TxError::new(
+            ErrorCode::BlockErrAnchorBytesExceeded,
+            "anchor bytes exceeded",
         ));
     }
 
@@ -280,6 +280,12 @@ fn validate_coinbase_structure(pb: &ParsedBlock, block_height: u64) -> Result<()
         return Err(TxError::new(
             ErrorCode::BlockErrCoinbaseInvalid,
             "first tx is not canonical coinbase",
+        ));
+    }
+    if coinbase.outputs.is_empty() {
+        return Err(TxError::new(
+            ErrorCode::BlockErrCoinbaseInvalid,
+            "coinbase must have at least one output",
         ));
     }
 
