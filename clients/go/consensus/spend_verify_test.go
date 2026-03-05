@@ -85,6 +85,29 @@ func TestValidateThresholdSigSpend_MismatchAndThresholdLogic(t *testing.T) {
 	}
 }
 
+func TestValidateThresholdSigSpend_SentinelKeylessEnforcement(t *testing.T) {
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	keys := [][32]byte{hashWithPrefix(0x01)}
+
+	// SENTINEL with non-empty pubkey must be rejected
+	ws1 := []WitnessItem{{SuiteID: SUITE_ID_SENTINEL, Pubkey: []byte{0x01}}}
+	if err := validateThresholdSigSpend(keys, 1, ws1, tx, inputIndex, inputValue, chainID, 0, "ctx"); err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
+		t.Fatalf("expected TX_ERR_PARSE for sentinel with pubkey, got %v", err)
+	}
+
+	// SENTINEL with non-empty signature must be rejected
+	ws2 := []WitnessItem{{SuiteID: SUITE_ID_SENTINEL, Signature: []byte{0x01}}}
+	if err := validateThresholdSigSpend(keys, 1, ws2, tx, inputIndex, inputValue, chainID, 0, "ctx"); err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
+		t.Fatalf("expected TX_ERR_PARSE for sentinel with signature, got %v", err)
+	}
+
+	// SENTINEL with both non-empty must be rejected
+	ws3 := []WitnessItem{{SuiteID: SUITE_ID_SENTINEL, Pubkey: []byte{0x01}, Signature: []byte{0x02}}}
+	if err := validateThresholdSigSpend(keys, 1, ws3, tx, inputIndex, inputValue, chainID, 0, "ctx"); err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
+		t.Fatalf("expected TX_ERR_PARSE for sentinel with pubkey+sig, got %v", err)
+	}
+}
+
 func TestValidateThresholdSigSpend_OkWithOneValidAndOneSentinel(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	pub := kp.PubkeyBytes()
