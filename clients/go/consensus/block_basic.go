@@ -152,12 +152,21 @@ func validateParsedBlockBasicWithContextAtHeight(
 	if root != pb.Header.MerkleRoot {
 		return nil, txerr(BLOCK_ERR_MERKLE_INVALID, "merkle_root mismatch")
 	}
+	if err := validateCoinbaseWitnessCommitment(pb); err != nil {
+		return nil, err
+	}
+	if err := validateTimestampRules(pb.Header.Timestamp, blockHeight, prevTimestamps); err != nil {
+		return nil, err
+	}
 
 	var sumWeight uint64
 	var sumDa uint64
 	var sumAnchor uint64
 	if len(pb.Txs) == 0 || !isCoinbaseTx(pb.Txs[0]) {
 		return nil, txerr(BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
+	}
+	if len(pb.Txs[0].Outputs) == 0 {
+		return nil, txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase must have at least one output")
 	}
 	if blockHeight > uint64(^uint32(0)) {
 		return nil, txerr(BLOCK_ERR_COINBASE_INVALID, "block height exceeds coinbase locktime range")
@@ -200,20 +209,14 @@ func validateParsedBlockBasicWithContextAtHeight(
 			return nil, err
 		}
 	}
-	if err := validateCoinbaseWitnessCommitment(pb); err != nil {
-		return nil, err
-	}
-	if err := validateTimestampRules(pb.Header.Timestamp, blockHeight, prevTimestamps); err != nil {
-		return nil, err
-	}
 	if sumWeight > MAX_BLOCK_WEIGHT {
 		return nil, txerr(BLOCK_ERR_WEIGHT_EXCEEDED, "block weight exceeded")
 	}
-	if sumAnchor > MAX_ANCHOR_BYTES_PER_BLOCK {
-		return nil, txerr(BLOCK_ERR_ANCHOR_BYTES_EXCEEDED, "anchor bytes exceeded")
-	}
 	if sumDa > MAX_DA_BYTES_PER_BLOCK {
 		return nil, txerr(BLOCK_ERR_WEIGHT_EXCEEDED, "DA bytes exceeded")
+	}
+	if sumAnchor > MAX_ANCHOR_BYTES_PER_BLOCK {
+		return nil, txerr(BLOCK_ERR_ANCHOR_BYTES_EXCEEDED, "anchor bytes exceeded")
 	}
 	if err := validateDASetIntegrity(pb.Txs); err != nil {
 		return nil, err

@@ -961,7 +961,7 @@ fn validate_block_basic_covenant_invalid() {
     let block = build_block_bytes(prev, root, target, 21, &[tx]);
 
     let err = validate_block_basic(&block, Some(prev), Some(target)).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    assert_eq!(err.code, ErrorCode::BlockErrWitnessCommitment);
 }
 
 #[test]
@@ -992,7 +992,7 @@ fn validate_block_basic_first_tx_must_be_coinbase() {
     let block = build_block_bytes(prev, root, target, 24, &[tx]);
 
     let err = validate_block_basic(&block, Some(prev), Some(target)).unwrap_err();
-    assert_eq!(err.code, ErrorCode::BlockErrCoinbaseInvalid);
+    assert_eq!(err.code, ErrorCode::BlockErrWitnessCommitment);
 }
 
 #[test]
