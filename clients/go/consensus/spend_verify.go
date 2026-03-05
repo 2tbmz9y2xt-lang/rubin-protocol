@@ -64,6 +64,9 @@ func validateThresholdSigSpend(
 		w := ws[i]
 		switch w.SuiteID {
 		case SUITE_ID_SENTINEL:
+			if len(w.Pubkey) != 0 || len(w.Signature) != 0 {
+				return txerr(TX_ERR_PARSE, "SENTINEL witness must be keyless")
+			}
 			continue
 		case SUITE_ID_ML_DSA_87:
 			_ = blockHeight
