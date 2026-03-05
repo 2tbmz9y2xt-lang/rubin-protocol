@@ -2,12 +2,14 @@ use num_bigint::BigUint;
 use num_traits::Zero;
 use rubin_consensus::merkle::witness_merkle_root_wtxids;
 use rubin_consensus::{
+    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles,
     apply_non_coinbase_tx_basic_with_mtp, block_hash, compact_shortid,
     connect_block_basic_in_memory_at_height, featurebit_state_at_height_from_window_counts,
     flagday_active_at_height, fork_work_from_target, merkle_root_txids, parse_tx, pow_check,
     retarget_v1, retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_public,
     validate_block_basic_with_context_and_fees_at_height,
-    validate_block_basic_with_context_at_height, validate_tx_covenants_genesis, ErrorCode,
+    validate_block_basic_with_context_at_height, validate_tx_covenants_genesis,
+    CoreExtActiveProfile, CoreExtProfiles, CoreExtVerificationBinding, ErrorCode,
     FeatureBitDeployment, FeatureBitState, FlagDayDeployment, InMemoryChainState, Outpoint,
     UtxoEntry,
 };
@@ -86,6 +88,9 @@ struct Request {
 
     #[serde(default)]
     utxos: Vec<UtxoJson>,
+
+    #[serde(default)]
+    core_ext_profiles: Vec<CoreExtProfileJson>,
 
     #[serde(default)]
     height: u64,
@@ -396,6 +401,18 @@ struct UtxoJson {
     created_by_coinbase: bool,
 }
 
+#[derive(Deserialize, Default)]
+struct CoreExtProfileJson {
+    #[serde(default)]
+    ext_id: u16,
+    #[serde(default)]
+    active: bool,
+    #[serde(default)]
+    allowed_suite_ids: Vec<u8>,
+    #[serde(default)]
+    binding: String,
+}
+
 #[derive(Deserialize)]
 struct ForkChoiceChainJson {
     id: String,
@@ -702,6 +719,29 @@ fn value_as_string(v: &Value, def: &str) -> String {
     v.as_str()
         .map(|s| s.to_string())
         .unwrap_or_else(|| def.to_string())
+}
+
+fn core_ext_profiles_from_json(items: &[CoreExtProfileJson]) -> Result<CoreExtProfiles, String> {
+    let mut profiles = CoreExtProfiles::empty();
+    for item in items {
+        if !item.active {
+            continue;
+        }
+        let binding_name = item.binding.trim();
+        let binding = match binding_name {
+            "" | "native_verify_sig" => CoreExtVerificationBinding::NativeVerifySig,
+            "verify_sig_ext_accept" => CoreExtVerificationBinding::VerifySigExtAccept,
+            "verify_sig_ext_reject" => CoreExtVerificationBinding::VerifySigExtReject,
+            "verify_sig_ext_error" => CoreExtVerificationBinding::VerifySigExtError,
+            _ => return Err(format!("unsupported core_ext binding: {}", item.binding)),
+        };
+        profiles.active.push(CoreExtActiveProfile {
+            ext_id: item.ext_id,
+            allowed_suite_ids: item.allowed_suite_ids.clone(),
+            verification_binding: binding,
+        });
+    }
+    Ok(profiles)
 }
 
 fn op_featurebits_state(req: &Request) -> Response {
@@ -2278,16 +2318,45 @@ fn main() {
                 }
                 chain_id.copy_from_slice(&b);
             }
-            match apply_non_coinbase_tx_basic_with_mtp(
-                &tx,
-                txid,
-                &utxo_set,
-                req.height,
-                req.block_timestamp,
-                block_mtp,
-                chain_id,
-            ) {
-                Ok(summary) => {
+            let core_ext_profiles = match core_ext_profiles_from_json(&req.core_ext_profiles) {
+                Ok(v) => v,
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(e),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+
+            let apply_result = if core_ext_profiles.active.is_empty() {
+                apply_non_coinbase_tx_basic_with_mtp(
+                    &tx,
+                    txid,
+                    &utxo_set,
+                    req.height,
+                    req.block_timestamp,
+                    block_mtp,
+                    chain_id,
+                )
+                .map(|summary| (utxo_set.clone(), summary))
+            } else {
+                apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
+                    &tx,
+                    txid,
+                    &utxo_set,
+                    req.height,
+                    req.block_timestamp,
+                    block_mtp,
+                    chain_id,
+                    &core_ext_profiles,
+                )
+            };
+
+            match apply_result {
+                Ok((_next_utxos, summary)) => {
                     let resp = Response {
                         ok: true,
                         err: None,

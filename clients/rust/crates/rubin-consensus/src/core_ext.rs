@@ -17,8 +17,14 @@ pub struct CoreExtCovenant<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CoreExtVerificationBinding {
-    /// Only the native suite (0x01) is supported; non-native suites are rejected even if listed.
+    /// Verify via native `verify_sig` dispatch.
     NativeVerifySig,
+    /// Deterministic test binding: `verify_sig_ext` accepts.
+    VerifySigExtAccept,
+    /// Deterministic test binding: `verify_sig_ext` returns false.
+    VerifySigExtReject,
+    /// Deterministic test binding: `verify_sig_ext` errors.
+    VerifySigExtError,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -182,6 +188,15 @@ pub fn validate_core_ext_spend(
                 "CORE_EXT non-native verifier binding unsupported",
             )),
         },
+        CoreExtVerificationBinding::VerifySigExtAccept => Ok(()),
+        CoreExtVerificationBinding::VerifySigExtReject => Err(TxError::new(
+            ErrorCode::TxErrSigInvalid,
+            "CORE_EXT signature invalid",
+        )),
+        CoreExtVerificationBinding::VerifySigExtError => Err(TxError::new(
+            ErrorCode::TxErrSigAlgInvalid,
+            "CORE_EXT verify_sig_ext error",
+        )),
     }
 }
 

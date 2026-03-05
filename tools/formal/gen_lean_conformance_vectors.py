@@ -82,14 +82,56 @@ def _render_lean_namespace(source_fixture: str, module_body: str) -> str:
         "end RubinFormal.Conformance\n"
     )
 
-def _materialize_tx_hex(v: dict[str, Any]) -> str:
+def _materialize_tx_hex(
+    v: dict[str, Any],
+    vectors_by_id: dict[str, dict[str, Any]] | None = None,
+    seen_ids: set[str] | None = None,
+) -> str:
     tx_hex = v.get("tx_hex")
     if isinstance(tx_hex, str) and tx_hex.strip() != "":
         return tx_hex.strip()
 
+    tx_hex_from = v.get("tx_hex_from")
+    if isinstance(tx_hex_from, str) and tx_hex_from.strip() != "":
+        if vectors_by_id is None:
+            raise ValueError("tx_hex_from requires vectors_by_id context")
+        ref_id = tx_hex_from.strip()
+        ref = vectors_by_id.get(ref_id)
+        if not isinstance(ref, dict):
+            raise ValueError(f"tx_hex_from reference not found: {ref_id}")
+        seen = set(seen_ids or set())
+        if ref_id in seen:
+            raise ValueError(f"tx_hex_from recursion detected at {ref_id}")
+        seen.add(ref_id)
+        base_hex = _materialize_tx_hex(ref, vectors_by_id=vectors_by_id, seen_ids=seen)
+        base = bytearray(bytes.fromhex(base_hex))
+        muts = v.get("tx_hex_mutations", [])
+        if muts is None:
+            muts = []
+        if not isinstance(muts, list):
+            raise ValueError("tx_hex_mutations must be a list")
+        for m in muts:
+            if not isinstance(m, dict):
+                raise ValueError("tx_hex_mutations entries must be objects")
+            off = m.get("offset")
+            b = m.get("byte")
+            if not isinstance(off, int):
+                raise ValueError("tx_hex_mutations.offset must be int")
+            if not isinstance(b, str):
+                raise ValueError("tx_hex_mutations.byte must be hex string")
+            hb = b.strip().lower()
+            if hb.startswith("0x"):
+                hb = hb[2:]
+            if len(hb) != 2:
+                raise ValueError("tx_hex_mutations.byte must encode exactly one byte")
+            if off < 0 or off >= len(base):
+                raise ValueError(f"tx_hex_mutations.offset out of range: {off} (len={len(base)})")
+            base[off] = int(hb, 16)
+        return base.hex()
+
     parts = v.get("tx_hex_parts")
     if not isinstance(parts, list) or len(parts) == 0:
-        raise ValueError("missing tx_hex (or tx_hex_parts)")
+        raise ValueError("missing tx_hex (or tx_hex_parts or tx_hex_from)")
 
     out: list[str] = []
     for p in parts:
@@ -133,13 +175,17 @@ def load_cv_parse(path: Path) -> list[ParseVector]:
     vectors = doc.get("vectors")
     if not isinstance(vectors, list):
         raise ValueError("vectors must be a list")
+    raw_by_id: dict[str, dict[str, Any]] = {}
+    for rv in vectors:
+        if isinstance(rv, dict) and isinstance(rv.get("id"), str):
+            raw_by_id[rv["id"]] = rv
     out: list[ParseVector] = []
     for v in vectors:
         if not isinstance(v, dict):
             continue
         if v.get("op") != "parse_tx":
             continue
-        tx_hex = _materialize_tx_hex(v)
+        tx_hex = _materialize_tx_hex(v, vectors_by_id=raw_by_id)
         out.append(
             ParseVector(
                 vid=str(v.get("id") or ""),
@@ -360,6 +406,10 @@ def load_cv_sighash(path: Path) -> list[SighashVector]:
     vectors = doc.get("vectors")
     if not isinstance(vectors, list):
         raise ValueError("vectors must be a list")
+    raw_by_id: dict[str, dict[str, Any]] = {}
+    for rv in vectors:
+        if isinstance(rv, dict) and isinstance(rv.get("id"), str):
+            raw_by_id[rv["id"]] = rv
     out: list[SighashVector] = []
     for v in vectors:
         if not isinstance(v, dict):
@@ -368,7 +418,7 @@ def load_cv_sighash(path: Path) -> list[SighashVector]:
             continue
         if not v.get("expect_ok"):
             raise ValueError(f"unexpected expect_ok=false in CV-SIGHASH: {v.get('id')}")
-        tx_hex = _materialize_tx_hex(v)
+        tx_hex = _materialize_tx_hex(v, vectors_by_id=raw_by_id)
         out.append(
             SighashVector(
                 vid=str(v.get("id") or ""),
@@ -673,13 +723,17 @@ def load_cv_utxo_basic(path: Path) -> list[UtxoBasicVector]:
     vectors = doc.get("vectors")
     if not isinstance(vectors, list):
         raise ValueError("vectors must be a list")
+    raw_by_id: dict[str, dict[str, Any]] = {}
+    for rv in vectors:
+        if isinstance(rv, dict) and isinstance(rv.get("id"), str):
+            raw_by_id[rv["id"]] = rv
     out: list[UtxoBasicVector] = []
     for v in vectors:
         if not isinstance(v, dict):
             continue
         if v.get("op") != "utxo_apply_basic":
             continue
-        tx_hex = _materialize_tx_hex(v)
+        tx_hex = _materialize_tx_hex(v, vectors_by_id=raw_by_id)
         utxos: list[UtxoBasicUtxo] = []
         for u in v.get("utxos") or []:
             utxos.append(
@@ -1105,13 +1159,17 @@ def load_cv_covenant_genesis(path: Path) -> list[CovenantGenesisVector]:
     vectors = doc.get("vectors")
     if not isinstance(vectors, list):
         raise ValueError("vectors must be a list")
+    raw_by_id: dict[str, dict[str, Any]] = {}
+    for rv in vectors:
+        if isinstance(rv, dict) and isinstance(rv.get("id"), str):
+            raw_by_id[rv["id"]] = rv
     out: list[CovenantGenesisVector] = []
     for v in vectors:
         if not isinstance(v, dict):
             continue
         if v.get("op") != "covenant_genesis_check":
             continue
-        tx_hex = _materialize_tx_hex(v)
+        tx_hex = _materialize_tx_hex(v, vectors_by_id=raw_by_id)
         expect_ok = bool(v.get("expect_ok"))
         out.append(
             CovenantGenesisVector(
@@ -1180,13 +1238,17 @@ def _load_utxo_apply_vectors(doc: dict[str, Any], gate: str) -> list[UtxoApplyVe
     vectors = doc.get("vectors")
     if not isinstance(vectors, list):
         raise ValueError("vectors must be a list")
+    raw_by_id: dict[str, dict[str, Any]] = {}
+    for rv in vectors:
+        if isinstance(rv, dict) and isinstance(rv.get("id"), str):
+            raw_by_id[rv["id"]] = rv
     out: list[UtxoApplyVector] = []
     for v in vectors:
         if not isinstance(v, dict):
             continue
         if v.get("op") != "utxo_apply_basic":
             continue
-        tx_hex = _materialize_tx_hex(v)
+        tx_hex = _materialize_tx_hex(v, vectors_by_id=raw_by_id)
         utxos: list[UtxoBasicUtxo] = []
         for u in v.get("utxos") or []:
             utxos.append(

@@ -1330,6 +1330,8 @@ def validate_vector(
         req["block_timestamp"] = v["block_timestamp"]
         if "block_mtp" in v:
             req["block_mtp"] = int(v["block_mtp"])
+        if "core_ext_profiles" in v:
+            req["core_ext_profiles"] = v["core_ext_profiles"]
     elif op == "fork_work":
         req["target"] = v["target"]
     elif op == "fork_choice_select":
