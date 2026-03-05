@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"bytes"
+	"math/big"
 	"math/bits"
 	"sort"
 )
@@ -259,13 +260,13 @@ func ValidateBlockBasicWithContextAndFeesAtHeight(
 	if err != nil {
 		return nil, err
 	}
-	if err := validateCoinbaseValueBound(pb, blockHeight, alreadyGenerated, sumFees); err != nil {
+	if err := validateCoinbaseValueBound(pb, blockHeight, new(big.Int).SetUint64(alreadyGenerated), sumFees); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
 
-func validateCoinbaseValueBound(pb *ParsedBlock, blockHeight uint64, alreadyGenerated uint64, sumFees uint64) error {
+func validateCoinbaseValueBound(pb *ParsedBlock, blockHeight uint64, alreadyGenerated *big.Int, sumFees uint64) error {
 	if pb == nil || len(pb.Txs) == 0 {
 		return txerr(BLOCK_ERR_COINBASE_INVALID, "missing coinbase")
 	}
@@ -285,7 +286,7 @@ func validateCoinbaseValueBound(pb *ParsedBlock, blockHeight uint64, alreadyGene
 			return err
 		}
 	}
-	subsidy := BlockSubsidy(blockHeight, alreadyGenerated)
+	subsidy := BlockSubsidyBig(blockHeight, alreadyGenerated)
 	limit := u128{hi: 0, lo: subsidy}
 	limit, err := addU64ToU128Block(limit, sumFees)
 	if err != nil {

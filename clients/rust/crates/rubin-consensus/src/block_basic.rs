@@ -239,7 +239,7 @@ pub fn validate_block_basic_with_context_and_fees_at_height(
     expected_target: Option<[u8; 32]>,
     block_height: u64,
     prev_timestamps: Option<&[u64]>,
-    already_generated: u64,
+    already_generated: u128,
     sum_fees: u64,
 ) -> Result<BlockBasicSummary, TxError> {
     let s = validate_block_basic_with_context_at_height(
@@ -303,7 +303,7 @@ fn validate_coinbase_structure(pb: &ParsedBlock, block_height: u64) -> Result<()
 pub(crate) fn validate_coinbase_value_bound(
     pb: &ParsedBlock,
     block_height: u64,
-    already_generated: u64,
+    already_generated: u128,
     sum_fees: u64,
 ) -> Result<(), TxError> {
     if block_height == 0 {

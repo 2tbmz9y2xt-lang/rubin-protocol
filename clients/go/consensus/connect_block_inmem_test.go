@@ -1,6 +1,9 @@
 package consensus
 
-import "testing"
+import (
+	"math/big"
+	"testing"
+)
 
 func txBytesFromTx(t *testing.T, tx *Tx) []byte {
 	t.Helper()
@@ -85,11 +88,11 @@ func TestConnectBlockBasicInMemoryAtHeight_OK_ComputesFeesAndUpdatesState(t *tes
 				CreatedByCoinbase: false,
 			},
 		},
-		AlreadyGenerated: 0,
+		AlreadyGenerated: new(big.Int),
 	}
 
 	sumFees := uint64(10)
-	subsidy := BlockSubsidy(height, state.AlreadyGenerated)
+	subsidy := BlockSubsidyBig(height, state.AlreadyGenerated)
 	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, subsidy+sumFees, spendBytes)
 	cbTxid := testTxID(t, coinbase)
 
@@ -118,8 +121,8 @@ func TestConnectBlockBasicInMemoryAtHeight_OK_ComputesFeesAndUpdatesState(t *tes
 	if s.UtxoCount != 2 {
 		t.Fatalf("utxo_count=%d, want 2", s.UtxoCount)
 	}
-	if state.AlreadyGenerated != subsidy {
-		t.Fatalf("state.already_generated=%d, want %d", state.AlreadyGenerated, subsidy)
+	if got := state.AlreadyGenerated.Uint64(); got != subsidy {
+		t.Fatalf("state.already_generated=%d, want %d", got, subsidy)
 	}
 }
 
@@ -159,7 +162,7 @@ func TestConnectBlockBasicInMemoryAtHeight_Height0_DoesNotAdvanceAlreadyGenerate
 	}
 	block := buildBlockBytes(t, prev, root, target, 4, [][]byte{coinbase})
 
-	state := &InMemoryChainState{Utxos: nil, AlreadyGenerated: 123}
+	state := &InMemoryChainState{Utxos: nil, AlreadyGenerated: new(big.Int).SetUint64(123)}
 	s, err := ConnectBlockBasicInMemoryAtHeight(block, &prev, &target, height, nil, state, [32]byte{})
 	if err != nil {
 		t.Fatalf("ConnectBlockBasicInMemoryAtHeight: %v", err)
@@ -167,8 +170,8 @@ func TestConnectBlockBasicInMemoryAtHeight_Height0_DoesNotAdvanceAlreadyGenerate
 	if s.SumFees != 0 {
 		t.Fatalf("sum_fees=%d, want 0", s.SumFees)
 	}
-	if s.AlreadyGenerated != 123 || s.AlreadyGeneratedN1 != 123 || state.AlreadyGenerated != 123 {
-		t.Fatalf("already_generated advanced at height=0: %#v / state=%d", s, state.AlreadyGenerated)
+	if s.AlreadyGenerated != 123 || s.AlreadyGeneratedN1 != 123 || state.AlreadyGenerated.Uint64() != 123 {
+		t.Fatalf("already_generated advanced at height=0: %#v / state=%d", s, state.AlreadyGenerated.Uint64())
 	}
 	if s.UtxoCount != 1 {
 		t.Fatalf("utxo_count=%d, want 1", s.UtxoCount)
@@ -212,11 +215,11 @@ func TestConnectBlockBasicInMemoryAtHeight_RejectsSubsidyExceeded(t *testing.T) 
 				CreatedByCoinbase: false,
 			},
 		},
-		AlreadyGenerated: 0,
+		AlreadyGenerated: new(big.Int),
 	}
 
 	sumFees := uint64(10)
-	subsidy := BlockSubsidy(height, state.AlreadyGenerated)
+	subsidy := BlockSubsidyBig(height, state.AlreadyGenerated)
 	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, subsidy+sumFees+1, spendBytes)
 	cbTxid := testTxID(t, coinbase)
 
