@@ -173,6 +173,13 @@ func applyNonCoinbaseTxBasicWork(
 			return nil, 0, txerr(TX_ERR_COINBASE_IMMATURE, "coinbase immature")
 		}
 
+		if entry.CovenantType == COV_TYPE_VAULT {
+			vaultInputCount++
+			if vaultInputCount > 1 {
+				return nil, 0, txerr(TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN, "multiple CORE_VAULT inputs forbidden")
+			}
+		}
+
 		if err := checkSpendCovenant(entry.CovenantType, entry.CovenantData); err != nil {
 			return nil, 0, err
 		}
@@ -216,7 +223,7 @@ func applyNonCoinbaseTxBasicWork(
 				return nil, 0, err
 			}
 		case COV_TYPE_VAULT:
-			v, err := ParseVaultCovenantData(entry.CovenantData)
+			v, err := ParseVaultCovenantDataForSpend(entry.CovenantData)
 			if err != nil {
 				return nil, 0, err
 			}
@@ -227,6 +234,8 @@ func applyNonCoinbaseTxBasicWork(
 			vaultSigWitness = append([]WitnessItem(nil), assigned...)
 			vaultSigInputIndex = uint32(inputIndex)
 			vaultSigInputValue = entry.Value
+			vaultWhitelist = v.Whitelist
+			vaultOwnerLockID = v.OwnerLockID
 			haveVaultSig = true
 		case COV_TYPE_HTLC:
 			if slots != 2 {
@@ -344,16 +353,6 @@ func applyNonCoinbaseTxBasicWork(
 			return nil, 0, err
 		}
 		if entry.CovenantType == COV_TYPE_VAULT {
-			vaultInputCount++
-			if vaultInputCount > 1 {
-				return nil, 0, txerr(TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN, "multiple CORE_VAULT inputs forbidden")
-			}
-			v, err := ParseVaultCovenantData(entry.CovenantData)
-			if err != nil {
-				return nil, 0, err
-			}
-			vaultWhitelist = v.Whitelist
-			vaultOwnerLockID = v.OwnerLockID
 			sumInVault, err = addU64ToU128(sumInVault, entry.Value)
 			if err != nil {
 				return nil, 0, err
@@ -510,7 +509,7 @@ func checkSpendCovenant(
 		return nil
 	}
 	if covType == COV_TYPE_VAULT {
-		v, err := ParseVaultCovenantData(covData)
+		v, err := ParseVaultCovenantDataForSpend(covData)
 		if err != nil {
 			return err
 		}

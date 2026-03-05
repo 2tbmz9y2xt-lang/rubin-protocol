@@ -22,6 +22,14 @@ type MultisigCovenant struct {
 }
 
 func ParseVaultCovenantData(covData []byte) (*VaultCovenant, error) {
+	return parseVaultCovenantData(covData, true)
+}
+
+func ParseVaultCovenantDataForSpend(covData []byte) (*VaultCovenant, error) {
+	return parseVaultCovenantData(covData, false)
+}
+
+func parseVaultCovenantData(covData []byte, enforceWhitelistCanonical bool) (*VaultCovenant, error) {
 	if covData == nil {
 		return nil, txerr(TX_ERR_VAULT_MALFORMED, "nil CORE_VAULT covenant_data")
 	}
@@ -72,11 +80,13 @@ func ParseVaultCovenantData(covData []byte) (*VaultCovenant, error) {
 		copy(v.Whitelist[i][:], covData[offset:offset+32])
 		offset += 32
 	}
-	if !strictlySortedUnique32(v.Whitelist) {
-		return nil, txerr(TX_ERR_VAULT_WHITELIST_NOT_CANONICAL, "CORE_VAULT whitelist not strictly sorted")
-	}
-	if HashInSorted32(v.Whitelist, v.OwnerLockID) {
-		return nil, txerr(TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN, "CORE_VAULT whitelist contains owner_lock_id")
+	if enforceWhitelistCanonical {
+		if !strictlySortedUnique32(v.Whitelist) {
+			return nil, txerr(TX_ERR_VAULT_WHITELIST_NOT_CANONICAL, "CORE_VAULT whitelist not strictly sorted")
+		}
+		if HashInSorted32(v.Whitelist, v.OwnerLockID) {
+			return nil, txerr(TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN, "CORE_VAULT whitelist contains owner_lock_id")
+		}
 	}
 	return &v, nil
 }

@@ -14,7 +14,7 @@ use crate::stealth::{parse_stealth_covenant_data, validate_stealth_spend};
 use crate::tx::Tx;
 use crate::vault::{
     hash_in_sorted_32, output_descriptor_bytes, parse_multisig_covenant_data,
-    parse_vault_covenant_data, witness_slots,
+    parse_vault_covenant_data, parse_vault_covenant_data_for_spend, witness_slots,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -171,6 +171,15 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
                 "coinbase immature",
             ));
         }
+        if entry.covenant_type == COV_TYPE_VAULT {
+            vault_input_count += 1;
+            if vault_input_count > 1 {
+                return Err(TxError::new(
+                    ErrorCode::TxErrVaultMultiInputForbidden,
+                    "multiple CORE_VAULT inputs forbidden",
+                ));
+            }
+        }
         check_spend_covenant(entry.covenant_type, &entry.covenant_data)?;
         let slots = witness_slots(entry.covenant_type, &entry.covenant_data)?;
         if slots == 0 {
@@ -214,7 +223,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
                 )?;
             }
             COV_TYPE_VAULT => {
-                let v = parse_vault_covenant_data(&entry.covenant_data)?;
+                let v = parse_vault_covenant_data_for_spend(&entry.covenant_data)?;
                 // CORE_VAULT signature threshold is checked later (CANONICAL §24.1),
                 // after owner-authorization and no-fee-sponsorship checks.
                 vault_sig_keys = v.keys.clone();
@@ -222,6 +231,8 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
                 vault_sig_witness = assigned.to_vec();
                 vault_sig_input_index = input_index as u32;
                 vault_sig_input_value = entry.value;
+                vault_owner_lock_id = v.owner_lock_id;
+                vault_whitelist = v.whitelist;
                 have_vault_sig = true;
             }
             COV_TYPE_HTLC => {
@@ -290,16 +301,6 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
             .checked_add(entry.value as u128)
             .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u128 overflow"))?;
         if entry.covenant_type == COV_TYPE_VAULT {
-            vault_input_count += 1;
-            if vault_input_count > 1 {
-                return Err(TxError::new(
-                    ErrorCode::TxErrVaultMultiInputForbidden,
-                    "multiple CORE_VAULT inputs forbidden",
-                ));
-            }
-            let v = parse_vault_covenant_data(&entry.covenant_data)?;
-            vault_owner_lock_id = v.owner_lock_id;
-            vault_whitelist = v.whitelist;
             sum_in_vault = sum_in_vault
                 .checked_add(entry.value as u128)
                 .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u128 overflow"))?;
@@ -538,7 +539,7 @@ fn check_spend_covenant(covenant_type: u16, covenant_data: &[u8]) -> Result<(), 
         return Ok(());
     }
     if covenant_type == COV_TYPE_VAULT {
-        parse_vault_covenant_data(covenant_data)?;
+        parse_vault_covenant_data_for_spend(covenant_data)?;
         return Ok(());
     }
     if covenant_type == COV_TYPE_MULTISIG {
