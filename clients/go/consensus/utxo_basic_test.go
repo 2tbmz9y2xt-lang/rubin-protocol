@@ -125,6 +125,32 @@ func TestApplyNonCoinbaseTxBasicUpdate_P2PKOK(t *testing.T) {
 	}
 }
 
+func TestApplyNonCoinbaseTxBasicUpdate_RejectsImmatureCoinbaseSpend(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0xc1
+
+	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
+	tx, txid := mustParseTxForUtxo(t, txBytes)
+
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prev, Vout: 0}: {
+			Value:             100,
+			CovenantType:      COV_TYPE_P2PK,
+			CovenantData:      validP2PKCovenantData(),
+			CreationHeight:    0,
+			CreatedByCoinbase: true,
+		},
+	}
+
+	_, _, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxos, COINBASE_MATURITY-1, 0, [32]byte{})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_COINBASE_IMMATURE {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_COINBASE_IMMATURE)
+	}
+}
+
 func TestApplyNonCoinbaseTxBasic_InputValidationErrors(t *testing.T) {
 	cases := []struct {
 		utxosFn   func(prev [32]byte) map[Outpoint]UtxoEntry

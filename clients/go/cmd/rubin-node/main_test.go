@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -176,6 +177,34 @@ func TestRunMineBlocksFailsWhenMinerInitFails(t *testing.T) {
 	code := run([]string{"--datadir", dir, "--mine-blocks", "1", "--mine-exit"}, &out, &errOut)
 	if code != 2 {
 		t.Fatalf("expected exit code 2, got %d", code)
+	}
+}
+
+func TestRunMineBlocksPassesMineAddressToMiner(t *testing.T) {
+	prev := newMinerFn
+	var captured node.MinerConfig
+	newMinerFn = func(_ *node.ChainState, _ *node.BlockStore, _ *node.SyncEngine, cfg node.MinerConfig) (*node.Miner, error) {
+		captured = cfg
+		return nil, errors.New("boom")
+	}
+	t.Cleanup(func() { newMinerFn = prev })
+
+	dir := t.TempDir()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run(
+		[]string{"--datadir", dir, "--mine-blocks", "1", "--mine-exit", "--mine-address", strings.Repeat("11", 32)},
+		&out,
+		&errOut,
+	)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d", code)
+	}
+	if len(captured.MineAddress) != consensus.MAX_P2PK_COVENANT_DATA {
+		t.Fatalf("mine address len=%d, want %d", len(captured.MineAddress), consensus.MAX_P2PK_COVENANT_DATA)
+	}
+	if captured.MineAddress[0] != consensus.SUITE_ID_ML_DSA_87 {
+		t.Fatalf("mine address suite=%d, want %d", captured.MineAddress[0], consensus.SUITE_ID_ML_DSA_87)
 	}
 }
 

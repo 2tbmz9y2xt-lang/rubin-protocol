@@ -16,6 +16,9 @@ type MinerConfig struct {
 	TimestampSource func() uint64
 	MaxTxPerBlock   int
 	Target          [32]byte
+	// MineAddress is canonical CORE_P2PK covenant_data (suite_id || key_id)
+	// used for the subsidy-bearing coinbase output.
+	MineAddress []byte
 
 	// PolicyDaAnchorAntiAbuse enables non-consensus miner policy hardening for DA/anchor abuse mitigation.
 	// Consensus validity rules are unchanged; this only affects which transactions the miner includes.
@@ -69,6 +72,7 @@ func DefaultMinerConfig() MinerConfig {
 		TimestampSource: func() uint64 {
 			return unixNowU64()
 		},
+		MineAddress:                          defaultMineAddress(),
 		MaxTxPerBlock:                        1024,
 		PolicyDaAnchorAntiAbuse:              true,
 		PolicyRejectNonCoinbaseAnchorOutputs: true,
@@ -94,6 +98,11 @@ func NewMiner(chainState *ChainState, blockStore *BlockStore, sync *SyncEngine, 
 	if cfg.MaxTxPerBlock <= 0 {
 		cfg.MaxTxPerBlock = 1024
 	}
+	mineAddress, err := normalizeMineAddress(cfg.MineAddress)
+	if err != nil {
+		return nil, err
+	}
+	cfg.MineAddress = mineAddress
 	return &Miner{
 		chainState: chainState,
 		blockStore: blockStore,
@@ -203,7 +212,7 @@ func (m *Miner) MineOne(ctx context.Context, txs [][]byte) (*MinedBlock, error) 
 	}
 	witnessCommitment := consensus.WitnessCommitmentHash(witnessRoot)
 
-	coinbase, err := buildCoinbaseTx(nextHeight, witnessCommitment)
+	coinbase, err := buildCoinbaseTx(nextHeight, m.chainState.AlreadyGenerated, m.cfg.MineAddress, witnessCommitment)
 	if err != nil {
 		return nil, err
 	}
@@ -342,21 +351,38 @@ func makeHeaderPrefix(prevHash [32]byte, merkleRoot [32]byte, timestamp uint64, 
 	return header
 }
 
-func buildCoinbaseTx(height uint64, witnessCommitment [32]byte) ([]byte, error) {
+func buildCoinbaseTx(height uint64, alreadyGenerated uint64, mineAddress []byte, witnessCommitment [32]byte) ([]byte, error) {
 	if height > math.MaxUint32 {
 		return nil, errors.New("block height exceeds coinbase locktime range")
 	}
-	tx := make([]byte, 0, 196)
+	subsidy := consensus.BlockSubsidy(height, alreadyGenerated)
+	if subsidy > 0 {
+		if err := validateMineAddress(mineAddress); err != nil {
+			return nil, err
+		}
+	}
+
+	tx := make([]byte, 0, 256+len(mineAddress))
 	tx = consensus.AppendU32le(tx, 1)
 	tx = append(tx, 0x00) // tx_kind
 	tx = consensus.AppendU64le(tx, 0)
 
-	tx = consensus.AppendCompactSize(tx, 1)                   // input_count
-	tx = append(tx, make([]byte, 32)...)                      // prev_txid
-	tx = consensus.AppendU32le(tx, ^uint32(0))                // prev_vout
-	tx = consensus.AppendCompactSize(tx, 0)                   // script_sig_len
-	tx = consensus.AppendU32le(tx, ^uint32(0))                // sequence
-	tx = consensus.AppendCompactSize(tx, 1)                   // output_count
+	tx = consensus.AppendCompactSize(tx, 1)    // input_count
+	tx = append(tx, make([]byte, 32)...)       // prev_txid
+	tx = consensus.AppendU32le(tx, ^uint32(0)) // prev_vout
+	tx = consensus.AppendCompactSize(tx, 0)    // script_sig_len
+	tx = consensus.AppendU32le(tx, ^uint32(0)) // sequence
+	outputCount := uint64(1)
+	if subsidy > 0 {
+		outputCount++
+	}
+	tx = consensus.AppendCompactSize(tx, outputCount) // output_count
+	if subsidy > 0 {
+		tx = consensus.AppendU64le(tx, subsidy)
+		tx = consensus.AppendU16le(tx, consensus.COV_TYPE_P2PK)
+		tx = consensus.AppendCompactSize(tx, uint64(len(mineAddress)))
+		tx = append(tx, mineAddress...)
+	}
 	tx = consensus.AppendU64le(tx, 0)                         // output value
 	tx = consensus.AppendU16le(tx, consensus.COV_TYPE_ANCHOR) // covenant_type
 	tx = consensus.AppendCompactSize(tx, 32)                  // covenant_data_len

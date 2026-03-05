@@ -127,7 +127,7 @@ func TestMinerMineOneRejectsNonCanonicalTxBytesInInput(t *testing.T) {
 		t.Fatalf("new miner: %v", err)
 	}
 
-	coinbaseLike, err := buildCoinbaseTx(0, [32]byte{})
+	coinbaseLike, err := buildCoinbaseTx(0, 0, nil, [32]byte{})
 	if err != nil {
 		t.Fatalf("build coinbase tx: %v", err)
 	}

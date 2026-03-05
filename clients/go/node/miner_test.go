@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"math"
 	"testing"
@@ -105,7 +106,7 @@ func TestBuildCoinbaseTxAnchorOnlyCanonical(t *testing.T) {
 	for i := range commitment {
 		commitment[i] = byte(i + 1)
 	}
-	txBytes, err := buildCoinbaseTx(7, commitment)
+	txBytes, err := buildCoinbaseTx(0, 0, nil, commitment)
 	if err != nil {
 		t.Fatalf("build coinbase tx: %v", err)
 	}
@@ -129,14 +130,55 @@ func TestBuildCoinbaseTxAnchorOnlyCanonical(t *testing.T) {
 	if len(out.CovenantData) != 32 {
 		t.Fatalf("anchor covenant_data_len=%d, want 32", len(out.CovenantData))
 	}
-	if tx.Locktime != 7 {
-		t.Fatalf("coinbase locktime=%d, want 7", tx.Locktime)
+	if tx.Locktime != 0 {
+		t.Fatalf("coinbase locktime=%d, want 0", tx.Locktime)
 	}
 }
 
 func TestBuildCoinbaseTxRejectsHeightOverflow(t *testing.T) {
-	_, err := buildCoinbaseTx(uint64(math.MaxUint32)+1, [32]byte{})
+	_, err := buildCoinbaseTx(uint64(math.MaxUint32)+1, 0, nil, [32]byte{})
 	if err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestBuildCoinbaseTxHeightOnePaysConfiguredMineAddress(t *testing.T) {
+	var commitment [32]byte
+	for i := range commitment {
+		commitment[i] = byte(i + 1)
+	}
+	mineAddress := testMineAddress(0x42)
+
+	txBytes, err := buildCoinbaseTx(1, 0, mineAddress, commitment)
+	if err != nil {
+		t.Fatalf("build coinbase tx: %v", err)
+	}
+	tx, _, _, consumed, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("parse coinbase tx: %v", err)
+	}
+	if consumed != len(txBytes) {
+		t.Fatalf("consumed=%d len=%d", consumed, len(txBytes))
+	}
+	if len(tx.Outputs) != 2 {
+		t.Fatalf("outputs=%d, want 2", len(tx.Outputs))
+	}
+	if tx.Outputs[0].Value != consensus.BlockSubsidy(1, 0) {
+		t.Fatalf("subsidy output=%d, want %d", tx.Outputs[0].Value, consensus.BlockSubsidy(1, 0))
+	}
+	if tx.Outputs[0].CovenantType != consensus.COV_TYPE_P2PK {
+		t.Fatalf("output[0] covenant type=%d, want P2PK", tx.Outputs[0].CovenantType)
+	}
+	if !bytes.Equal(tx.Outputs[0].CovenantData, mineAddress) {
+		t.Fatalf("output[0] covenant_data mismatch")
+	}
+	if tx.Outputs[1].CovenantType != consensus.COV_TYPE_ANCHOR {
+		t.Fatalf("output[1] covenant type=%d, want ANCHOR", tx.Outputs[1].CovenantType)
+	}
+}
+
+func TestBuildCoinbaseTxRejectsMissingMineAddressForSubsidyHeight(t *testing.T) {
+	if _, err := buildCoinbaseTx(1, 0, nil, [32]byte{}); err == nil {
 		t.Fatalf("expected error")
 	}
 }
@@ -234,4 +276,81 @@ func TestNewMinerRejectsNilSyncEngine(t *testing.T) {
 	if _, err := NewMiner(chainState, blockStore, nil, cfg); err == nil {
 		t.Fatalf("expected error")
 	}
+}
+
+func TestMinerMineOneHeightOnePaysConfiguredMineAddressAndTracksCoinbaseMetadata(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := ChainStatePath(dir)
+
+	chainState := NewChainState()
+	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("open blockstore: %v", err)
+	}
+	syncEngine, err := NewSyncEngine(
+		chainState,
+		blockStore,
+		DefaultSyncConfig(nil, [32]byte{}, chainStatePath),
+	)
+	if err != nil {
+		t.Fatalf("new sync engine: %v", err)
+	}
+	cfg := DefaultMinerConfig()
+	cfg.TimestampSource = func() uint64 { return 1_777_000_000 }
+	cfg.MineAddress = testMineAddress(0x77)
+	miner, err := NewMiner(chainState, blockStore, syncEngine, cfg)
+	if err != nil {
+		t.Fatalf("new miner: %v", err)
+	}
+
+	if _, err := miner.MineOne(context.Background(), nil); err != nil {
+		t.Fatalf("mine height 0: %v", err)
+	}
+	mb, err := miner.MineOne(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("mine height 1: %v", err)
+	}
+
+	blockBytes, err := blockStore.GetBlockByHash(mb.Hash)
+	if err != nil {
+		t.Fatalf("get block: %v", err)
+	}
+	pb, err := consensus.ParseBlockBytes(blockBytes)
+	if err != nil {
+		t.Fatalf("parse block: %v", err)
+	}
+	coinbase := pb.Txs[0]
+	if len(coinbase.Outputs) != 2 {
+		t.Fatalf("coinbase outputs=%d, want 2", len(coinbase.Outputs))
+	}
+	subsidy := consensus.BlockSubsidy(1, 0)
+	if coinbase.Outputs[0].Value != subsidy {
+		t.Fatalf("coinbase subsidy=%d, want %d", coinbase.Outputs[0].Value, subsidy)
+	}
+	if !bytes.Equal(coinbase.Outputs[0].CovenantData, cfg.MineAddress) {
+		t.Fatalf("coinbase mine address mismatch")
+	}
+
+	entry, ok := chainState.Utxos[consensus.Outpoint{Txid: pb.Txids[0], Vout: 0}]
+	if !ok {
+		t.Fatalf("missing coinbase subsidy utxo")
+	}
+	if entry.CreationHeight != 1 {
+		t.Fatalf("creation_height=%d, want 1", entry.CreationHeight)
+	}
+	if !entry.CreatedByCoinbase {
+		t.Fatalf("expected coinbase flag on subsidy utxo")
+	}
+	if chainState.AlreadyGenerated != subsidy {
+		t.Fatalf("already_generated=%d, want %d", chainState.AlreadyGenerated, subsidy)
+	}
+}
+
+func testMineAddress(seed byte) []byte {
+	out := make([]byte, consensus.MAX_P2PK_COVENANT_DATA)
+	out[0] = consensus.SUITE_ID_ML_DSA_87
+	for i := 1; i < len(out); i++ {
+		out[i] = seed
+	}
+	return out
 }
