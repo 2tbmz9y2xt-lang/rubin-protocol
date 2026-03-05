@@ -138,21 +138,6 @@ pub fn validate_core_ext_spend(
         ));
     }
 
-    let Some((&sighash_type, crypto_sig)) = w.signature.split_last() else {
-        return Err(TxError::new(
-            ErrorCode::TxErrParse,
-            "missing sighash_type byte",
-        ));
-    };
-    if !is_valid_sighash_type(sighash_type) {
-        return Err(TxError::new(
-            ErrorCode::TxErrSighashTypeInvalid,
-            "invalid sighash_type",
-        ));
-    }
-    let digest32 =
-        sighash_v1_digest_with_type(tx, input_index, input_value, chain_id, sighash_type)?;
-
     match p.verification_binding {
         CoreExtVerificationBinding::NativeVerifySig => match w.suite_id {
             SUITE_ID_ML_DSA_87 => {
@@ -164,6 +149,25 @@ pub fn validate_core_ext_spend(
                         "non-canonical ML-DSA witness item lengths",
                     ));
                 }
+                let Some((&sighash_type, crypto_sig)) = w.signature.split_last() else {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrParse,
+                        "missing sighash_type byte",
+                    ));
+                };
+                if !is_valid_sighash_type(sighash_type) {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrSighashTypeInvalid,
+                        "invalid sighash_type",
+                    ));
+                }
+                let digest32 = sighash_v1_digest_with_type(
+                    tx,
+                    input_index,
+                    input_value,
+                    chain_id,
+                    sighash_type,
+                )?;
                 let ok = verify_sig(w.suite_id, &w.pubkey, crypto_sig, &digest32)?;
                 if !ok {
                     return Err(TxError::new(
