@@ -26,6 +26,8 @@ var newMinerFn = node.NewMiner
 
 var newSyncEngineFn = node.NewSyncEngine
 
+var newMempoolFn = node.NewMempool
+
 type multiStringFlag []string
 
 func (m *multiStringFlag) String() string {
@@ -117,6 +119,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "sync engine init failed: %v\n", err)
 		return 2
 	}
+	mempool, err := newMempoolFn(chainState, blockStore, chainIDFromGenesis)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "mempool init failed: %v\n", err)
+		return 2
+	}
+	syncEngine.SetMempool(mempool)
 	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig(cfg.Network, cfg.MaxPeers))
 
 	tipHeight, tipHash, tipOK, err := blockStore.Tip()
