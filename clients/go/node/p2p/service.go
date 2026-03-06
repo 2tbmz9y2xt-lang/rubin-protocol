@@ -43,8 +43,8 @@ type Service struct {
 	peers   map[string]*peer
 
 	chainMu   sync.Mutex
-	blockSeen *hashSet
-	txSeen    *hashSet
+	blockSeen *boundedHashSet
+	txSeen    *boundedHashSet
 }
 
 type peer struct {
@@ -100,8 +100,8 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	return &Service{
 		cfg:       cfg,
 		peers:     make(map[string]*peer),
-		blockSeen: newHashSet(),
-		txSeen:    newHashSet(),
+		blockSeen: newBoundedHashSet(defaultBlockSeenCapacity),
+		txSeen:    newBoundedHashSet(defaultTxSeenCapacity),
 	}, nil
 }
 
