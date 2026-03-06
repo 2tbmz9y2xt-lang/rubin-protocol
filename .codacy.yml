@@ -46,3 +46,20 @@ engines:
       - "clients/rust/crates/rubin-consensus-cli/**"
     config:
       minLines: 25
+
+languages:
+  # Product code lives in Go/Rust. Everything below is docs/tooling/fixtures or
+  # workflow metadata already excluded above, so running language analyzers only
+  # adds noise on PRs that do not touch executable code.
+  javascript:
+    enabled: false
+  typescript:
+    enabled: false
+  python:
+    enabled: false
+  json:
+    enabled: false
+  yaml:
+    enabled: false
+  markdown:
+    enabled: false
