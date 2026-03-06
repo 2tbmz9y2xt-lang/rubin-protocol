@@ -68,7 +68,7 @@ def cvSubsidyVectorsPass : Bool :=
   else
     panic! "[FAIL] CV-SUBSIDY replay: cvSubsidyVectorsPass=false"
 
-theorem cv_subsidy_vectors_pass : True := by
-  trivial
+theorem cv_subsidy_vectors_pass : cvSubsidyVectorsPass = true := by
+  native_decide
 
 end RubinFormal.Conformance

@@ -33,9 +33,7 @@ def cvWeightVectorsPass : Bool :=
   else
     panic! "[FAIL] CV-WEIGHT replay: cvWeightVectorsPass=false"
 
-theorem cv_weight_vectors_pass : True := by
-  -- NOTE: this theorem is required by tools/check_formal_coverage.py as a stable gate name.
-  -- The actual enforcement is performed by the `#eval` check above (compilation fails on false).
-  trivial
+theorem cv_weight_vectors_pass : cvWeightVectorsPass = true := by
+  native_decide
 
 end RubinFormal.Conformance

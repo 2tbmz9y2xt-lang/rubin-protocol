@@ -51,7 +51,7 @@ def cvDevnetGenesisVectorsPass : Bool :=
   else
     panic! "[FAIL] CV-DEVNET-GENESIS replay: cvDevnetGenesisVectorsPass=false"
 
-theorem cv_devnet_genesis_vectors_pass : True := by
-  trivial
+theorem cv_devnet_genesis_vectors_pass : cvDevnetGenesisVectorsPass = true := by
+  native_decide
 
 end RubinFormal.Conformance

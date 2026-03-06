@@ -64,7 +64,7 @@ def cvDevnetMaturityVectorsPass : Bool :=
   else
     panic! "[FAIL] CV-DEVNET-MATURITY replay: cvDevnetMaturityVectorsPass=false"
 
-theorem cv_devnet_maturity_vectors_pass : True := by
-  trivial
+theorem cv_devnet_maturity_vectors_pass : cvDevnetMaturityVectorsPass = true := by
+  native_decide
 
 end RubinFormal.Conformance

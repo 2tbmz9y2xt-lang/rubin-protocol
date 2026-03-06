@@ -54,7 +54,7 @@ private theorem all_append (xs ys : List CVParseVector) (p : CVParseVector → B
   else
     panic! "[FAIL] CV-PARSE replay: allCVParse=false"
 
-theorem cv_parse_vectors_pass : True := by
-  trivial
+theorem cv_parse_vectors_pass : allCVParse = true := by
+  native_decide
 
 end RubinFormal.Conformance

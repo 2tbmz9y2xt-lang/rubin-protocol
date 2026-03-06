@@ -94,7 +94,7 @@ def allCVSig : Bool :=
   else
     panic! "[FAIL] CV-SIG replay: allCVSig=false"
 
-theorem cv_sig_vectors_pass : True := by
-  trivial
+theorem cv_sig_vectors_pass : allCVSig = true := by
+  native_decide
 
 end RubinFormal.Conformance
