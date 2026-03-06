@@ -36,6 +36,10 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="strict")
 
 
+def read_many(paths: list[Path]) -> str:
+    return "\n".join(read_text(path) for path in paths)
+
+
 def require_snippets(path: Path, text: str, snippets: list[str], errors: list[str]) -> None:
     for snippet in snippets:
         if snippet not in text:
@@ -77,7 +81,7 @@ def main() -> int:
     readme = context_root / "spec" / "README.md"
     go_signer = code_root / "clients" / "go" / "consensus" / "openssl_signer.go"
     go_tests = code_root / "clients" / "go" / "consensus" / "openssl_signer_additional_test.go"
-    rust_tests = (
+    rust_tests_file = (
         code_root
         / "clients"
         / "rust"
@@ -86,16 +90,54 @@ def main() -> int:
         / "src"
         / "tests.rs"
     )
+    rust_tests_mod = (
+        code_root
+        / "clients"
+        / "rust"
+        / "crates"
+        / "rubin-consensus"
+        / "src"
+        / "tests"
+        / "mod.rs"
+    )
+    rust_tests_dir = (
+        code_root
+        / "clients"
+        / "rust"
+        / "crates"
+        / "rubin-consensus"
+        / "src"
+        / "tests"
+    )
 
     required_paths: list[Path] = []
     if not args.skip_doc_policy:
         required_paths.extend([profile, readme])
     if not args.skip_binding_policy:
-        required_paths.extend([go_signer, go_tests, rust_tests])
+        required_paths.extend([go_signer, go_tests])
 
     for path in required_paths:
         if not path.exists():
             errors.append(f"missing required file: {path}")
+
+    rust_test_sources: list[Path] = []
+    if not args.skip_binding_policy:
+        if rust_tests_file.exists():
+            rust_test_sources.append(rust_tests_file)
+        if rust_tests_mod.exists():
+            rust_test_sources.append(rust_tests_mod)
+        if rust_tests_dir.exists():
+            rust_test_sources.extend(
+                sorted(
+                    path
+                    for path in rust_tests_dir.rglob("*.rs")
+                    if path != rust_tests_mod
+                )
+            )
+        if not rust_test_sources:
+            errors.append(
+                "missing required Rust test sources: expected src/tests.rs or src/tests/*.rs"
+            )
 
     if errors:
         for e in errors:
@@ -118,10 +160,11 @@ def main() -> int:
     if not args.skip_binding_policy:
         go_signer_text = read_text(go_signer)
         go_tests_text = read_text(go_tests)
-        rust_tests_text = read_text(rust_tests)
+        rust_tests_text = read_many(rust_test_sources)
+        rust_tests_label = rust_tests_file if rust_tests_file.exists() else rust_tests_dir
         require_snippets(go_signer, go_signer_text, GO_SIGNER_SNIPPETS, errors)
         require_snippets(go_tests, go_tests_text, GO_TEST_SNIPPETS, errors)
-        require_snippets(rust_tests, rust_tests_text, RUST_TEST_SNIPPETS, errors)
+        require_snippets(rust_tests_label, rust_tests_text, RUST_TEST_SNIPPETS, errors)
 
     if errors:
         for e in errors:
