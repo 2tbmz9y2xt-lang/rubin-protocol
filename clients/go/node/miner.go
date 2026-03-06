@@ -73,6 +73,13 @@ type minedCandidate struct {
 	weight uint64
 }
 
+type miningBuildContext struct {
+	prevHash        [32]byte
+	remainingWeight uint64
+	nextHeight      uint64
+	candidateTxs    [][]byte
+}
+
 func DefaultMinerConfig() MinerConfig {
 	return MinerConfig{
 		Target: consensus.POW_LIMIT,
@@ -163,22 +170,12 @@ func (m *Miner) MineOne(ctx context.Context, txs [][]byte) (*MinedBlock, error) 
 }
 
 func (m *Miner) buildBlock(ctx context.Context, txs [][]byte) ([]byte, []uint64, uint64, uint64, int, error) {
-	nextHeight, expectedPrev, err := nextBlockContext(m.chainState)
-	if err != nil {
-		return nil, nil, 0, 0, 0, err
-	}
-	var prevHash [32]byte
-	if expectedPrev != nil {
-		prevHash = *expectedPrev
-	}
-
-	candidateTxs := m.candidateTransactions(txs)
-	remainingWeight, err := m.remainingWeightBudget(nextHeight)
+	buildCtx, err := m.buildContext(txs)
 	if err != nil {
 		return nil, nil, 0, 0, 0, err
 	}
 
-	parsed, err := m.selectCandidateTransactions(candidateTxs, nextHeight, remainingWeight)
+	parsed, err := m.selectCandidateTransactions(buildCtx.candidateTxs, buildCtx.nextHeight, buildCtx.remainingWeight)
 	if err != nil {
 		return nil, nil, 0, 0, 0, err
 	}
@@ -186,32 +183,37 @@ func (m *Miner) buildBlock(ctx context.Context, txs [][]byte) ([]byte, []uint64,
 	if err != nil {
 		return nil, nil, 0, 0, 0, err
 	}
-	coinbase, merkleRoot, err := m.buildCoinbaseAndMerkleRoot(nextHeight, witnessCommitment, parsed)
+	coinbase, merkleRoot, err := m.buildCoinbaseAndMerkleRoot(buildCtx.nextHeight, witnessCommitment, parsed)
 	if err != nil {
 		return nil, nil, 0, 0, 0, err
 	}
-
-	prevTimestamps, err := m.prevTimestamps(nextHeight)
+	prevTimestamps, timestamp, headerBytes, nonce, err := m.mineHeader(ctx, buildCtx.nextHeight, buildCtx.prevHash, merkleRoot)
 	if err != nil {
 		return nil, nil, 0, 0, 0, err
 	}
-	now := m.cfg.TimestampSource()
-	timestamp := chooseValidTimestamp(nextHeight, prevTimestamps, now)
-
-	blockWithoutNonce := makeHeaderPrefix(prevHash, merkleRoot, timestamp, m.cfg.Target)
-	headerBytes, nonce, err := mineHeaderNonce(ctx, blockWithoutNonce, m.cfg.Target)
-	if err != nil {
-		return nil, nil, 0, 0, 0, err
-	}
-
-	blockBytes := make([]byte, 0, len(headerBytes)+4+len(coinbase))
-	blockBytes = append(blockBytes, headerBytes...)
-	blockBytes = consensus.AppendCompactSize(blockBytes, uint64(1+len(parsed)))
-	blockBytes = append(blockBytes, coinbase...)
-	for _, p := range parsed {
-		blockBytes = append(blockBytes, p.raw...)
-	}
+	blockBytes := assembleBlockBytes(headerBytes, coinbase, parsed)
 	return blockBytes, prevTimestamps, timestamp, nonce, 1 + len(parsed), nil
+}
+
+func (m *Miner) buildContext(txs [][]byte) (miningBuildContext, error) {
+	nextHeight, expectedPrev, err := nextBlockContext(m.chainState)
+	if err != nil {
+		return miningBuildContext{}, err
+	}
+	var prevHash [32]byte
+	if expectedPrev != nil {
+		prevHash = *expectedPrev
+	}
+	remainingWeight, err := m.remainingWeightBudget(nextHeight)
+	if err != nil {
+		return miningBuildContext{}, err
+	}
+	return miningBuildContext{
+		nextHeight:      nextHeight,
+		prevHash:        prevHash,
+		remainingWeight: remainingWeight,
+		candidateTxs:    m.candidateTransactions(txs),
+	}, nil
 }
 
 func (m *Miner) candidateTransactions(txs [][]byte) [][]byte {
@@ -273,12 +275,9 @@ type miningCandidate struct {
 }
 
 func (m *Miner) parseMiningCandidate(raw []byte) (miningCandidate, error) {
-	tx, txid, wtxid, consumed, parseErr := consensus.ParseTx(raw)
-	if parseErr != nil {
-		return miningCandidate{}, parseErr
-	}
-	if consumed != len(raw) {
-		return miningCandidate{}, errors.New("non-canonical tx bytes in miner input")
+	tx, txid, wtxid, err := parseCanonicalTx(raw, "non-canonical tx bytes in miner input")
+	if err != nil {
+		return miningCandidate{}, err
 	}
 	txWeight, _, _, err := consensus.TxWeightAndStats(tx)
 	if err != nil {
@@ -359,12 +358,9 @@ func (m *Miner) buildCoinbaseAndMerkleRoot(nextHeight uint64, witnessCommitment 
 	if err != nil {
 		return nil, [32]byte{}, err
 	}
-	_, coinbaseTxid, _, consumed, err := consensus.ParseTx(coinbase)
+	_, coinbaseTxid, _, err := parseCanonicalTx(coinbase, "coinbase serialization is non-canonical")
 	if err != nil {
 		return nil, [32]byte{}, err
-	}
-	if consumed != len(coinbase) {
-		return nil, [32]byte{}, errors.New("coinbase serialization is non-canonical")
 	}
 	txids := make([][32]byte, 0, 1+len(parsed))
 	txids = append(txids, coinbaseTxid)
@@ -376,6 +372,32 @@ func (m *Miner) buildCoinbaseAndMerkleRoot(nextHeight uint64, witnessCommitment 
 		return nil, [32]byte{}, err
 	}
 	return coinbase, merkleRoot, nil
+}
+
+func (m *Miner) mineHeader(ctx context.Context, nextHeight uint64, prevHash [32]byte, merkleRoot [32]byte) ([]uint64, uint64, []byte, uint64, error) {
+	prevTimestamps, err := m.prevTimestamps(nextHeight)
+	if err != nil {
+		return nil, 0, nil, 0, err
+	}
+	now := m.cfg.TimestampSource()
+	timestamp := chooseValidTimestamp(nextHeight, prevTimestamps, now)
+	blockWithoutNonce := makeHeaderPrefix(prevHash, merkleRoot, timestamp, m.cfg.Target)
+	headerBytes, nonce, err := mineHeaderNonce(ctx, blockWithoutNonce, m.cfg.Target)
+	if err != nil {
+		return nil, 0, nil, 0, err
+	}
+	return prevTimestamps, timestamp, headerBytes, nonce, nil
+}
+
+func assembleBlockBytes(headerBytes []byte, coinbase []byte, parsed []minedCandidate) []byte {
+	blockBytes := make([]byte, 0, len(headerBytes)+4+len(coinbase))
+	blockBytes = append(blockBytes, headerBytes...)
+	blockBytes = consensus.AppendCompactSize(blockBytes, uint64(1+len(parsed)))
+	blockBytes = append(blockBytes, coinbase...)
+	for _, p := range parsed {
+		blockBytes = append(blockBytes, p.raw...)
+	}
+	return blockBytes
 }
 
 func mineHeaderNonce(ctx context.Context, blockWithoutNonce []byte, target [32]byte) ([]byte, uint64, error) {
@@ -397,18 +419,26 @@ func mineHeaderNonce(ctx context.Context, blockWithoutNonce []byte, target [32]b
 }
 
 func canonicalTxWeight(raw []byte, label string) (uint64, error) {
-	tx, _, _, consumed, err := consensus.ParseTx(raw)
+	tx, _, _, err := parseCanonicalTx(raw, label+" serialization is non-canonical")
 	if err != nil {
 		return 0, err
-	}
-	if consumed != len(raw) {
-		return 0, errors.New(label + " serialization is non-canonical")
 	}
 	txWeight, _, _, err := consensus.TxWeightAndStats(tx)
 	if err != nil {
 		return 0, err
 	}
 	return txWeight, nil
+}
+
+func parseCanonicalTx(raw []byte, nonCanonicalMsg string) (*consensus.Tx, [32]byte, [32]byte, error) {
+	tx, txid, wtxid, consumed, err := consensus.ParseTx(raw)
+	if err != nil {
+		return nil, [32]byte{}, [32]byte{}, err
+	}
+	if consumed != len(raw) {
+		return nil, [32]byte{}, [32]byte{}, errors.New(nonCanonicalMsg)
+	}
+	return tx, txid, wtxid, nil
 }
 
 func (m *Miner) prevTimestamps(nextHeight uint64) ([]uint64, error) {
