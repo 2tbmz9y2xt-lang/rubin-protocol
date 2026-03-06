@@ -166,6 +166,27 @@ func TestWriteFileAtomic_Errors(t *testing.T) {
 	})
 }
 
+func TestDevnetGenesisBlockBytes_NonEmpty(t *testing.T) {
+	raw := DevnetGenesisBlockBytes()
+	if len(raw) == 0 {
+		t.Fatal("DevnetGenesisBlockBytes returned empty slice")
+	}
+	// Defensive copy: mutating returned slice must not affect source.
+	raw[0] = 0xFF
+	raw2 := DevnetGenesisBlockBytes()
+	if raw2[0] == 0xFF {
+		t.Fatal("DevnetGenesisBlockBytes must return a defensive copy")
+	}
+}
+
+func TestDevnetGenesisBlockHash_NonZero(t *testing.T) {
+	hash := DevnetGenesisBlockHash()
+	var zero [32]byte
+	if hash == zero {
+		t.Fatal("DevnetGenesisBlockHash returned all zeros")
+	}
+}
+
 func TestChainStateConnectBlock_NilReceiver(t *testing.T) {
 	var st *ChainState
 	if _, err := st.ConnectBlock(nil, nil, nil, [32]byte{}); err == nil {
