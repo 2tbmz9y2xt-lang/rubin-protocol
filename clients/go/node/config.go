@@ -17,6 +17,7 @@ type Config struct {
 	LogLevel    string   `json:"log_level"`
 	Peers       []string `json:"peers"`
 	MaxPeers    int      `json:"max_peers"`
+	ChainID     string   `json:"chain_id_hex,omitempty"`
 	MineAddress string   `json:"mine_address"`
 }
 

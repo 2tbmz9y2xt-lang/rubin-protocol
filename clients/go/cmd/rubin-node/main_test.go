@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"io"
 	"math"
@@ -80,6 +81,41 @@ func TestRunDryRunOK(t *testing.T) {
 	// Basic sanity: should have created chainstate file.
 	if _, err := os.Stat(node.ChainStatePath(dir)); err != nil {
 		t.Fatalf("expected chainstate file to exist: %v", err)
+	}
+}
+
+func TestParseGenesisChainIDEmptyDefaultsToDevnet(t *testing.T) {
+	got, err := parseGenesisChainID("")
+	if err != nil {
+		t.Fatalf("parseGenesisChainID: %v", err)
+	}
+	if got != node.DevnetGenesisChainID() {
+		t.Fatalf("chain_id=%x, want %x", got, node.DevnetGenesisChainID())
+	}
+}
+
+func TestRunDryRunUsesDevnetGenesisChainIDByDefault(t *testing.T) {
+	prev := newSyncEngineFn
+	var gotCfg node.SyncConfig
+	newSyncEngineFn = func(st *node.ChainState, store *node.BlockStore, cfg node.SyncConfig) (*node.SyncEngine, error) {
+		gotCfg = cfg
+		return node.NewSyncEngine(st, store, cfg)
+	}
+	t.Cleanup(func() { newSyncEngineFn = prev })
+
+	dir := t.TempDir()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run([]string{"--dry-run", "--datadir", dir}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr=%q)", code, errOut.String())
+	}
+	want := node.DevnetGenesisChainID()
+	if gotCfg.ChainID != want {
+		t.Fatalf("sync chain_id=%x, want %x", gotCfg.ChainID, want)
+	}
+	if !bytes.Contains(out.Bytes(), []byte(hex.EncodeToString(want[:]))) {
+		t.Fatalf("expected effective config to print devnet chain_id, got %q", out.String())
 	}
 }
 

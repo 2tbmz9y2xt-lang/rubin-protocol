@@ -1,6 +1,8 @@
 package node
 
 import (
+	"bytes"
+	"crypto/sha3"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -14,6 +16,40 @@ import (
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
+
+const (
+	genesisHeaderHex = "0100000000000000000000000000000000000000000000000000000000000000000000006f732e615e2f43337a53e9884adba7da32257d5bb5701adc7ed0bd406f2df91340e49e6900000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000"
+	genesisTxHex     = "01000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff0200407a10f35a0000000021018448b91b88d1a6fbb65e872b72c381b2a9f3ce286a232f56309667f639dd72790000000000000000020020b716a4b7f4c0fab665298ab9b8199b601ab9fa7e0a27f0713383f34cf37071a8000000000000"
+
+	genesisChainIDHex     = "88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103"
+	genesisBlockHashHex   = "8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff"
+	genesisMagicSeparator = "RUBIN-GENESIS-v1"
+)
+
+var (
+	devnetGenesisHeaderBytes = decodeHexToBytesExact(genesisHeaderHex, consensus.BLOCK_HEADER_BYTES)
+	devnetGenesisTxBytes     = decodeHexToBytesExact(genesisTxHex, 149)
+	devnetGenesisBlockBytes  = append(append([]byte{}, devnetGenesisHeaderBytes...), consensus.AppendCompactSize(nil, 1)...)
+)
+
+func init() {
+	devnetGenesisBlockBytes = append(devnetGenesisBlockBytes, devnetGenesisTxBytes...)
+}
+
+var (
+	devnetGenesisBlockHash  [32]byte
+	devnetGenesisChainID    [32]byte
+	genesisChainIDFromMagic [32]byte
+)
+
+func init() {
+	devnetGenesisChainID = decodeHexToBytes32(genesisChainIDHex)
+	devnetGenesisBlockHash = decodeHexToBytes32(genesisBlockHashHex)
+	genesisChainIDFromMagic = deriveGenesisChainID(devnetGenesisHeaderBytes, devnetGenesisTxBytes)
+	if !bytes.Equal(genesisChainIDFromMagic[:], devnetGenesisChainID[:]) {
+		panic("genesis chain ID constant mismatch")
+	}
+}
 
 const (
 	chainStateDiskVersion = 1
@@ -109,14 +145,13 @@ func (s *ChainState) ConnectBlock(
 	if s == nil {
 		return nil, errors.New("nil chainstate")
 	}
-	if s.Utxos == nil {
-		s.Utxos = make(map[consensus.Outpoint]consensus.UtxoEntry)
-	}
 	blockHeight, expectedPrevHash, err := nextBlockContext(s)
 	if err != nil {
 		return nil, err
 	}
-
+	if s.Utxos == nil {
+		s.Utxos = make(map[consensus.Outpoint]consensus.UtxoEntry)
+	}
 	workState := consensus.InMemoryChainState{
 		Utxos:            copyUtxoSet(s.Utxos),
 		AlreadyGenerated: new(big.Int).SetUint64(s.AlreadyGenerated),
@@ -160,6 +195,10 @@ func (s *ChainState) ConnectBlock(
 		AlreadyGeneratedN1: summary.AlreadyGeneratedN1,
 		UtxoCount:          summary.UtxoCount,
 	}, nil
+}
+
+func DevnetGenesisChainID() [32]byte {
+	return devnetGenesisChainID
 }
 
 func nextBlockContext(s *ChainState) (uint64, *[32]byte, error) {
@@ -265,6 +304,34 @@ func chainStateFromDisk(disk chainStateDisk) (*ChainState, error) {
 		AlreadyGenerated: disk.AlreadyGenerated,
 		Utxos:            utxos,
 	}, nil
+}
+
+func decodeHexToBytesExact(value string, expectedLen int) []byte {
+	raw := strings.TrimSpace(value)
+	out, err := hex.DecodeString(raw)
+	if err != nil {
+		panic(fmt.Sprintf("invalid hex: %v", err))
+	}
+	if len(out) != expectedLen {
+		panic(fmt.Sprintf("expected %d bytes, got %d", expectedLen, len(out)))
+	}
+	return out
+}
+
+func decodeHexToBytes32(value string) [32]byte {
+	raw := decodeHexToBytesExact(value, 32)
+	var out [32]byte
+	copy(out[:], raw)
+	return out
+}
+
+func deriveGenesisChainID(headerBytes, txBytes []byte) [32]byte {
+	// Chain ID = SHA3-256("RUBIN-GENESIS-v1" || header || compact_size(tx_count) || tx_bytes)
+	preimage := append([]byte{}, []byte(genesisMagicSeparator)...)
+	preimage = append(preimage, headerBytes...)
+	preimage = consensus.AppendCompactSize(preimage, 1) // tx_count = 1
+	preimage = append(preimage, txBytes...)
+	return sha3.Sum256(preimage)
 }
 
 func parseHex(name, value string) ([]byte, error) {
