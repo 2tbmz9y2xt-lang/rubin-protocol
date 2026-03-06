@@ -52,3 +52,13 @@ import RubinFormal.Conformance.CVFlagdayVectors
 import RubinFormal.Conformance.CVFlagdayReplay
 import RubinFormal.Conformance.CVStealthVectors
 import RubinFormal.Conformance.CVStealthReplay
+import RubinFormal.Conformance.CVDevnetGenesisVectors
+import RubinFormal.Conformance.CVDevnetGenesisReplay
+import RubinFormal.Conformance.CVDevnetSubsidyVectors
+import RubinFormal.Conformance.CVDevnetSubsidyReplay
+import RubinFormal.Conformance.CVDevnetChainVectors
+import RubinFormal.Conformance.CVDevnetChainReplay
+import RubinFormal.Conformance.CVDevnetMaturityVectors
+import RubinFormal.Conformance.CVDevnetMaturityReplay
+import RubinFormal.Conformance.CVDevnetSighashChainidVectors
+import RubinFormal.Conformance.CVDevnetSighashChainidReplay
