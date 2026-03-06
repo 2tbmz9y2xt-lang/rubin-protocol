@@ -373,6 +373,10 @@ jobs:
           python3 tools/formal/gen_lean_refinement_from_traces.py --traces rubin-formal/traces/go_trace_v1.jsonl --out rubin-formal/RubinFormal/Refinement/GoTraceV1.lean
           git diff --exit-code -- rubin-formal/RubinFormal/Refinement/GoTraceV1.lean
 
+      - name: Check Lean conformance vector staleness
+        run: |
+          python3 tools/check_lean_conformance_staleness.py
+
       - name: Lean build (rubin-formal)
         run: |
           cd rubin-formal
