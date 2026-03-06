@@ -222,7 +222,12 @@ func TestCoverageResidual_BlockBasicValueBoundHeightZero(t *testing.T) {
 }
 
 func TestCoverageResidual_ErrorHelpersSmoke(t *testing.T) {
-	if !errors.Is(txerr(TX_ERR_PARSE, "x"), txerr(TX_ERR_PARSE, "y")) {
-		// keep compiler using errors import; semantic check is not meaningful here.
+	err := txerr(TX_ERR_PARSE, "x")
+	var txe *TxError
+	if !errors.As(err, &txe) {
+		t.Fatalf("expected errors.As to unwrap *TxError")
+	}
+	if txe.Code != TX_ERR_PARSE {
+		t.Fatalf("code=%s, want %s", txe.Code, TX_ERR_PARSE)
 	}
 }
