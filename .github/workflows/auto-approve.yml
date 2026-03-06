@@ -3,9 +3,6 @@ name: Auto-approve PR
 on:
   pull_request_review:
     types: [submitted]
-  check_suite:
-    types: [completed]
-  status:
   workflow_run:
     workflows: [ci]
     types: [completed]
@@ -17,7 +14,7 @@ permissions:
 jobs:
   auto-approve:
     runs-on: ubuntu-latest
-    if: github.event.pull_request || github.event.check_suite || github.event.sha || github.event.workflow_run
+    if: github.event.pull_request || github.event.workflow_run
     steps:
       - name: Wait for all checks, approve and merge
         uses: actions/github-script@v8
@@ -26,7 +23,7 @@ jobs:
           script: |
             const MAX_ATTEMPTS = 30;
             const POLL_INTERVAL = 30000; // 30 seconds
-            const PROTECTED_BASE_BRANCHES = new Set(['main', 'master']);
+            const MERGEABLE_READY_STATES = new Set(['clean', 'has_hooks', 'unstable']);
 
             async function getOpenPullRequestByNumber(pull_number) {
               const response = await github.rest.pulls.get({
@@ -40,44 +37,6 @@ jobs:
               return response.data;
             }
 
-            function isCandidateBranch(branch) {
-              return !!branch && !PROTECTED_BASE_BRANCHES.has(branch);
-            }
-
-            async function getOpenPullRequestByHead(branch, sha) {
-              if (!isCandidateBranch(branch)) {
-                return null;
-              }
-              const prs = await github.rest.pulls.list({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                state: 'open',
-                head: `${context.repo.owner}:${branch}`,
-                per_page: 10
-              });
-              const exact = prs.data.find(pr => pr.head.sha === sha);
-              return exact ?? null;
-            }
-
-            async function getAssociatedOpenPullRequest(sha) {
-              if (!sha) {
-                return null;
-              }
-              const pulls = await github.rest.repos.listPullRequestsAssociatedWithCommit({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                commit_sha: sha
-              });
-              const exact = pulls.data.filter(pr => pr.state === 'open' && pr.head.sha === sha);
-              if (exact.length === 1) {
-                return exact[0];
-              }
-              if (exact.length > 1) {
-                console.log(`Ambiguous open PRs for sha ${sha}: ${exact.map(pr => '#' + pr.number).join(', ')}`);
-              }
-              return null;
-            }
-
             async function resolvePullRequest() {
               if (context.payload.pull_request) {
                 return getOpenPullRequestByNumber(context.payload.pull_request.number);
@@ -89,32 +48,23 @@ jobs:
                   console.log(`workflow_run event=${workflowRun.event}; skipping`);
                   return null;
                 }
-                const fromPayload = workflowRun.pull_requests?.find(pr => pr.state === 'open');
-                if (fromPayload) {
-                  return getOpenPullRequestByNumber(fromPayload.number);
+                const candidates = workflowRun.pull_requests ?? [];
+                if (candidates.length === 0) {
+                  console.log(`workflow_run for sha ${workflowRun.head_sha} has no PR payload; skipping`);
+                  return null;
                 }
-                return (
-                  await getOpenPullRequestByHead(workflowRun.head_branch, workflowRun.head_sha)
-                ) ?? (
-                  await getAssociatedOpenPullRequest(workflowRun.head_sha)
-                );
-              }
-
-              if (context.payload.check_suite) {
-                const checkSuite = context.payload.check_suite;
-                const fromPayload = checkSuite.pull_requests?.find(pr => pr.state === 'open');
-                if (fromPayload) {
-                  return getOpenPullRequestByNumber(fromPayload.number);
+                const exactMatches = [];
+                for (const candidate of candidates) {
+                  const pr = await getOpenPullRequestByNumber(candidate.number);
+                  if (pr && pr.head.sha === workflowRun.head_sha) {
+                    exactMatches.push(pr);
+                  }
                 }
-                return (
-                  await getOpenPullRequestByHead(checkSuite.head_branch, checkSuite.head_sha)
-                ) ?? (
-                  await getAssociatedOpenPullRequest(checkSuite.head_sha)
-                );
-              }
-
-              if (context.payload.sha) {
-                return getAssociatedOpenPullRequest(context.payload.sha);
+                if (exactMatches.length === 1) {
+                  return exactMatches[0];
+                }
+                console.log(`workflow_run sha ${workflowRun.head_sha} resolved to ${exactMatches.length} exact open PRs; skipping`);
+                return null;
               }
 
               return null;
@@ -139,6 +89,12 @@ jobs:
                 ref: ref,
                 per_page: 100
               });
+              const prState = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber
+              });
+              const mergeableState = prState.data.mergeable_state ?? 'unknown';
 
               const validatorRuns = checks.data.check_runs.filter(c => c.name === 'validator');
               const validator = validatorRuns.sort((a, b) => b.id - a.id)[0];
@@ -179,21 +135,20 @@ jobs:
                 return;
               }
 
-              if (pending.length === 0 && validator.conclusion === 'success') {
+              if (pending.length === 0 && validator.conclusion === 'success' && MERGEABLE_READY_STATES.has(mergeableState)) {
                 console.log(`All checks passed (attempt ${attempt})`);
                 break;
               }
 
               if (attempt === MAX_ATTEMPTS) {
-                console.log(`Timeout: still ${pending.length} checks pending after ${MAX_ATTEMPTS} attempts`);
+                console.log(`Timeout: pending=${pending.length}, validator=${validatorState}, mergeable_state=${mergeableState} after ${MAX_ATTEMPTS} attempts`);
                 for (const p of pending) {
                   console.log(`  PENDING: ${p.name} - ${p.status}`);
                 }
-                console.log(`  validator state: ${validatorState}`);
                 return;
               }
 
-              console.log(`Attempt ${attempt}: ${pending.length} checks pending, validator=${validatorState}, waiting ${POLL_INTERVAL/1000}s...`);
+              console.log(`Attempt ${attempt}: pending=${pending.length}, validator=${validatorState}, mergeable_state=${mergeableState}, waiting ${POLL_INTERVAL/1000}s...`);
               await new Promise(r => setTimeout(r, POLL_INTERVAL));
             }
 
