@@ -85,11 +85,10 @@ pub fn featurebit_state_at_height_from_window_counts(
     let boundary_height = height - (height % SIGNAL_WINDOW);
     let target_boundary_index = boundary_height / SIGNAL_WINDOW;
 
-    let need_windows = target_boundary_index as usize;
-    if window_signal_counts.len() < need_windows {
+    if (window_signal_counts.len() as u64) < target_boundary_index {
         return Err(format!(
             "featurebits: need {} window_signal_counts entries, got {}",
-            need_windows,
+            target_boundary_index,
             window_signal_counts.len()
         ));
     }

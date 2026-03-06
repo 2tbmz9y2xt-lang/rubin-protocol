@@ -83,11 +83,10 @@ func FeatureBitStateAtHeightFromWindowCounts(
 	boundaryHeight := height - (height % SIGNAL_WINDOW)
 	targetBoundaryIndex := boundaryHeight / SIGNAL_WINDOW
 
-	needWindows := int(targetBoundaryIndex)
-	if len(windowSignalCounts) < needWindows {
+	if uint64(len(windowSignalCounts)) < targetBoundaryIndex {
 		return FeatureBitEval{}, fmt.Errorf(
 			"featurebits: need %d window_signal_counts entries, got %d",
-			needWindows,
+			targetBoundaryIndex,
 			len(windowSignalCounts),
 		)
 	}

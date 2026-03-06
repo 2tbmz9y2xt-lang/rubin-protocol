@@ -87,6 +87,33 @@ fn featurebits_state_between_boundaries() {
 }
 
 #[test]
+fn featurebits_large_height_no_narrowing_overflow() {
+    let d = FeatureBitDeployment {
+        name: "X".to_string(),
+        bit: 0,
+        start_height: 0,
+        timeout_height: i64::MAX as u64,
+    };
+    // height producing target_boundary_index > u32::MAX
+    let large_height: u64 = SIGNAL_WINDOW * ((1u64 << 32) + 1);
+    let err = featurebit_state_at_height_from_window_counts(&d, large_height, &[]).unwrap_err();
+    assert!(err.contains("need"), "expected 'need' in error, got: {err}");
+}
+
+#[test]
+fn featurebits_max_u64_height() {
+    let d = FeatureBitDeployment {
+        name: "X".to_string(),
+        bit: 0,
+        start_height: 0,
+        timeout_height: i64::MAX as u64,
+    };
+    let max_height: u64 = u64::MAX - (u64::MAX % SIGNAL_WINDOW);
+    let err = featurebit_state_at_height_from_window_counts(&d, max_height, &[]).unwrap_err();
+    assert!(err.contains("need"), "expected 'need' in error, got: {err}");
+}
+
+#[test]
 fn featurebits_bit_range() {
     let d = FeatureBitDeployment {
         name: "X".to_string(),

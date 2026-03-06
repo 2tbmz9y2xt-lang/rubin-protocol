@@ -114,6 +114,43 @@ func TestFeatureBits_StateBetweenBoundaries(t *testing.T) {
 	}
 }
 
+func TestFeatureBits_LargeHeightNoNarrowingOverflow(t *testing.T) {
+	d := FeatureBitDeployment{
+		Name:          "X",
+		Bit:           0,
+		StartHeight:   0,
+		TimeoutHeight: 1<<63 - 1,
+	}
+	// height that produces targetBoundaryIndex > math.MaxInt32.
+	// boundaryHeight = height - (height % 2016) ≈ height
+	// targetBoundaryIndex = boundaryHeight / 2016 ≈ 2^32
+	// Old code: int(2^32) on 32-bit platform → overflow → wrong comparison.
+	largeHeight := uint64(SIGNAL_WINDOW) * (1<<32 + 1)
+	_, err := FeatureBitStateAtHeightFromWindowCounts(d, largeHeight, nil)
+	if err == nil {
+		t.Fatalf("expected error for large height with insufficient window counts")
+	}
+	expected := "featurebits: need"
+	if got := err.Error(); len(got) < len(expected) || got[:len(expected)] != expected {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestFeatureBits_MaxUint64Height(t *testing.T) {
+	d := FeatureBitDeployment{
+		Name:          "X",
+		Bit:           0,
+		StartHeight:   0,
+		TimeoutHeight: 1<<63 - 1,
+	}
+	// maxHeight aligned to SIGNAL_WINDOW boundary
+	maxHeight := uint64(1<<64-1) - (uint64(1<<64-1) % SIGNAL_WINDOW)
+	_, err := FeatureBitStateAtHeightFromWindowCounts(d, maxHeight, nil)
+	if err == nil {
+		t.Fatalf("expected error for max height with nil counts")
+	}
+}
+
 func TestFeatureBits_BitRange(t *testing.T) {
 	d := FeatureBitDeployment{
 		Name:          "X",
