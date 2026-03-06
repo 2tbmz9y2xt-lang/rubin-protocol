@@ -292,3 +292,99 @@ func TestAppendCompactSizeMinerEncodesAllWidthBranches(t *testing.T) {
 		t.Fatalf("unexpected 64-bit le: %x", out64)
 	}
 }
+
+func TestUpdatedPolicyDaBytes(t *testing.T) {
+	cases := []struct {
+		current uint64
+		daBytes uint64
+		max     uint64
+		want    uint64
+		ok      bool
+	}{
+		{current: 0, daBytes: 0, max: 10, want: 0, ok: true},
+		{current: 4, daBytes: 3, max: 10, want: 7, ok: true},
+		{current: 4, daBytes: 7, max: 10, want: 4, ok: false},
+		{current: ^uint64(0), daBytes: 1, max: ^uint64(0), want: ^uint64(0), ok: false},
+	}
+	for _, tc := range cases {
+		got, ok := updatedPolicyDaBytes(tc.current, tc.daBytes, tc.max)
+		if got != tc.want || ok != tc.ok {
+			t.Fatalf("updatedPolicyDaBytes(%d,%d,%d)=(%d,%v), want (%d,%v)", tc.current, tc.daBytes, tc.max, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+func TestMinerBuildContextAndAssembleBlockBytes(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := ChainStatePath(dir)
+
+	chainState := NewChainState()
+	chainState.HasTip = true
+	chainState.Height = 7
+	chainState.TipHash = [32]byte{0x44}
+	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("open blockstore: %v", err)
+	}
+	syncEngine, err := NewSyncEngine(chainState, blockStore, DefaultSyncConfig(nil, [32]byte{}, chainStatePath))
+	if err != nil {
+		t.Fatalf("new sync engine: %v", err)
+	}
+	cfg := DefaultMinerConfig()
+	cfg.MaxTxPerBlock = 2
+	miner, err := NewMiner(chainState, blockStore, syncEngine, cfg)
+	if err != nil {
+		t.Fatalf("new miner: %v", err)
+	}
+
+	txA, err := buildCoinbaseTx(0, 0, nil, [32]byte{})
+	if err != nil {
+		t.Fatalf("build txA: %v", err)
+	}
+	txB := append([]byte(nil), txA...)
+	txC := append([]byte(nil), txA...)
+	buildCtx, err := miner.buildContext([][]byte{txA, txB, txC})
+	if err != nil {
+		t.Fatalf("buildContext: %v", err)
+	}
+	if buildCtx.nextHeight != 8 {
+		t.Fatalf("nextHeight=%d, want 8", buildCtx.nextHeight)
+	}
+	if buildCtx.prevHash != chainState.TipHash {
+		t.Fatalf("prevHash mismatch")
+	}
+	if len(buildCtx.candidateTxs) != 1 {
+		t.Fatalf("candidate count=%d, want 1", len(buildCtx.candidateTxs))
+	}
+	if buildCtx.remainingWeight == 0 {
+		t.Fatalf("expected non-zero remaining weight")
+	}
+
+	header := make([]byte, consensus.BLOCK_HEADER_BYTES)
+	coinbase := []byte{0xaa}
+	parsed := []minedCandidate{{raw: []byte{0xbb}}, {raw: []byte{0xcc}}}
+	block := assembleBlockBytes(header, coinbase, parsed)
+	want := append(append(append(append([]byte{}, header...), 0x03), coinbase...), 0xbb, 0xcc)
+	if string(block) != string(want) {
+		t.Fatalf("assembled block mismatch: got=%x want=%x", block, want)
+	}
+}
+
+func TestParseCanonicalTx(t *testing.T) {
+	raw, err := buildCoinbaseTx(0, 0, nil, [32]byte{})
+	if err != nil {
+		t.Fatalf("buildCoinbaseTx: %v", err)
+	}
+	tx, _, _, err := parseCanonicalTx(raw, "bad")
+	if err != nil {
+		t.Fatalf("parseCanonicalTx(valid): %v", err)
+	}
+	if tx == nil {
+		t.Fatalf("expected parsed tx")
+	}
+
+	raw = append(raw, 0x00)
+	if _, _, _, err := parseCanonicalTx(raw, "bad"); err == nil || err.Error() != "bad" {
+		t.Fatalf("expected non-canonical parse error, got %v", err)
+	}
+}
