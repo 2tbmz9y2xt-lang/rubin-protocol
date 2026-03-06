@@ -4,15 +4,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use rubin_consensus::{
-    block_hash, connect_block_basic_in_memory_at_height, parse_block_bytes,
+    block_hash, connect_block_basic_in_memory_at_height, encode_compact_size, parse_block_bytes,
     ConnectBlockBasicSummary, InMemoryChainState, Outpoint, UtxoEntry,
 };
 use serde::{Deserialize, Serialize};
+use sha3::{Digest, Sha3_256};
 
+use crate::genesis::validate_incoming_chain_id;
 use crate::io_utils::{parse_hex32, write_file_atomic};
 
 pub const CHAIN_STATE_FILE_NAME: &str = "chainstate.json";
 const CHAIN_STATE_DISK_VERSION: u32 = 1;
+pub const UTXO_SET_HASH_DST: &[u8] = b"RUBINv1-utxo-set-hash/";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChainState {
@@ -87,6 +90,7 @@ impl ChainState {
         chain_id: [u8; 32],
     ) -> Result<ChainStateConnectSummary, String> {
         let (block_height, expected_prev_hash) = self.next_block_context()?;
+        validate_incoming_chain_id(block_height, chain_id)?;
         let mut work_state = InMemoryChainState {
             utxos: self.utxos.clone(),
             already_generated: u128::from(self.already_generated),
@@ -123,6 +127,14 @@ impl ChainState {
                 .map_err(|_| "already_generated_n1 overflow".to_string())?,
             utxo_count: connect_summary.utxo_count,
         })
+    }
+
+    pub fn utxo_set_hash(&self) -> [u8; 32] {
+        utxo_set_hash(&self.utxos)
+    }
+
+    pub fn state_digest(&self) -> [u8; 32] {
+        self.utxo_set_hash()
     }
 
     fn next_block_context(&self) -> Result<(u64, Option<[u8; 32]>), String> {
@@ -187,6 +199,33 @@ fn state_to_disk(s: &ChainState) -> Result<ChainStateDisk, String> {
     })
 }
 
+fn utxo_set_hash(utxos: &HashMap<Outpoint, UtxoEntry>) -> [u8; 32] {
+    let mut items: Vec<([u8; 36], &UtxoEntry)> = Vec::with_capacity(utxos.len());
+    for (outpoint, entry) in utxos {
+        let mut key = [0u8; 36];
+        key[..32].copy_from_slice(&outpoint.txid);
+        key[32..].copy_from_slice(&outpoint.vout.to_le_bytes());
+        items.push((key, entry));
+    }
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut buf = Vec::with_capacity(UTXO_SET_HASH_DST.len() + 8 + items.len() * 64);
+    buf.extend_from_slice(UTXO_SET_HASH_DST);
+    buf.extend_from_slice(&(items.len() as u64).to_le_bytes());
+
+    for (key, entry) in items {
+        buf.extend_from_slice(&key);
+        buf.extend_from_slice(&entry.value.to_le_bytes());
+        buf.extend_from_slice(&entry.covenant_type.to_le_bytes());
+        encode_compact_size(entry.covenant_data.len() as u64, &mut buf);
+        buf.extend_from_slice(&entry.covenant_data);
+        buf.extend_from_slice(&entry.creation_height.to_le_bytes());
+        buf.push(u8::from(entry.created_by_coinbase));
+    }
+
+    Sha3_256::digest(&buf).into()
+}
+
 fn chain_state_from_disk(disk: ChainStateDisk) -> Result<ChainState, String> {
     if disk.version != CHAIN_STATE_DISK_VERSION {
         return Err(format!("unsupported chainstate version: {}", disk.version));
@@ -238,12 +277,59 @@ fn parse_hex(name: &str, value: &str) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::coinbase::{build_coinbase_tx, default_mine_address};
+    use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use crate::io_utils::unique_temp_path;
 
     use super::{
         chain_state_path, load_chain_state, ChainState, ChainStateDisk, CHAIN_STATE_FILE_NAME,
     };
-    use rubin_consensus::{Outpoint, UtxoEntry};
+    use rubin_consensus::constants::POW_LIMIT;
+    use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
+    use rubin_consensus::{
+        block_hash, block_subsidy, encode_compact_size, merkle_root_txids, parse_block_bytes,
+        parse_tx, Outpoint, UtxoEntry, BLOCK_HEADER_BYTES,
+    };
+
+    const GENESIS_ONLY_STATE_DIGEST_HEX: &str =
+        "8b172fb3a5e70b56de9ae78ce750c04eccbc4dd8b3be55751252e5a1b4f2e752";
+    const GENESIS_PLUS_HEIGHT_ONE_STATE_DIGEST_HEX: &str =
+        "a26ade4263f7659ef250d13c05a05137c61e223d1fdd585d0c70a5165a94bb5e";
+
+    fn build_block_bytes(
+        prev_hash: [u8; 32],
+        merkle_root: [u8; 32],
+        target: [u8; 32],
+        timestamp: u64,
+        txs: &[Vec<u8>],
+    ) -> Vec<u8> {
+        let mut header = Vec::with_capacity(BLOCK_HEADER_BYTES);
+        header.extend_from_slice(&1u32.to_le_bytes());
+        header.extend_from_slice(&prev_hash);
+        header.extend_from_slice(&merkle_root);
+        header.extend_from_slice(&timestamp.to_le_bytes());
+        header.extend_from_slice(&target);
+        header.extend_from_slice(&0u64.to_le_bytes());
+        assert_eq!(header.len(), BLOCK_HEADER_BYTES);
+
+        let mut block = header;
+        encode_compact_size(txs.len() as u64, &mut block);
+        for tx in txs {
+            block.extend_from_slice(tx);
+        }
+        block
+    }
+
+    fn height_one_coinbase_only_block(prev_hash: [u8; 32]) -> Vec<u8> {
+        let witness_root = witness_merkle_root_wtxids(&[[0u8; 32]]).expect("witness root");
+        let witness_commitment = witness_commitment_hash(witness_root);
+        let coinbase =
+            build_coinbase_tx(1, 0, &default_mine_address(), witness_commitment).expect("coinbase");
+        let (_, coinbase_txid, _, consumed) = parse_tx(&coinbase).expect("parse coinbase");
+        assert_eq!(consumed, coinbase.len());
+        let merkle_root = merkle_root_txids(&[coinbase_txid]).expect("merkle root");
+        build_block_bytes(prev_hash, merkle_root, POW_LIMIT, 1, &[coinbase])
+    }
 
     #[test]
     fn chainstate_roundtrip_with_utxos() {
@@ -302,4 +388,91 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
+
+    #[test]
+    fn chainstate_connect_block_rejects_wrong_non_zero_genesis_chain_id() {
+        let mut st = ChainState::new();
+        let err = st
+            .connect_block(
+                &devnet_genesis_block_bytes(),
+                Some(POW_LIMIT),
+                None,
+                [0x11; 32],
+            )
+            .unwrap_err();
+        assert_eq!(err, "genesis chain_id mismatch");
+        assert_eq!(st, ChainState::new());
+    }
+
+    #[test]
+    fn chainstate_connect_block_accepts_zero_chain_id_at_genesis() {
+        let mut st = ChainState::new();
+        let summary = st
+            .connect_block(
+                &devnet_genesis_block_bytes(),
+                Some(POW_LIMIT),
+                None,
+                [0u8; 32],
+            )
+            .expect("connect genesis");
+        assert_eq!(summary.block_height, 0);
+        assert_eq!(summary.already_generated, 0);
+        assert_eq!(summary.already_generated_n1, 0);
+        assert_eq!(
+            hex::encode(st.state_digest()),
+            GENESIS_ONLY_STATE_DIGEST_HEX
+        );
+    }
+
+    #[test]
+    fn chainstate_connect_block_accepts_expected_non_zero_genesis_chain_id() {
+        let mut st = ChainState::new();
+        let summary = st
+            .connect_block(
+                &devnet_genesis_block_bytes(),
+                Some(POW_LIMIT),
+                None,
+                devnet_genesis_chain_id(),
+            )
+            .expect("connect genesis");
+        assert_eq!(summary.block_height, 0);
+        assert!(st.has_tip);
+    }
+
+    #[test]
+    fn chainstate_state_digest_matches_genesis_plus_height_one_parity_vector() {
+        let mut st = ChainState::new();
+        let genesis_summary = st
+            .connect_block(
+                &devnet_genesis_block_bytes(),
+                Some(POW_LIMIT),
+                None,
+                [0u8; 32],
+            )
+            .expect("connect genesis");
+        let parsed_genesis =
+            parse_block_bytes(&devnet_genesis_block_bytes()).expect("parse genesis block");
+        let genesis_hash = block_hash(&parsed_genesis.header_bytes).expect("genesis hash");
+        assert_eq!(genesis_summary.block_hash, genesis_hash);
+        assert_eq!(
+            hex::encode(st.state_digest()),
+            GENESIS_ONLY_STATE_DIGEST_HEX
+        );
+
+        let block1 = height_one_coinbase_only_block(genesis_hash);
+        let summary = st
+            .connect_block(&block1, Some(POW_LIMIT), None, [0u8; 32])
+            .expect("connect height 1");
+        assert_eq!(summary.block_height, 1);
+        assert_eq!(summary.already_generated, 0);
+        assert_eq!(summary.already_generated_n1, block_subsidy(1, 0));
+        assert_eq!(st.already_generated, block_subsidy(1, 0));
+        assert_eq!(
+            hex::encode(st.state_digest()),
+            GENESIS_PLUS_HEIGHT_ONE_STATE_DIGEST_HEX
+        );
+    }
+
+    // TODO(Q-DEVNET-08): replay CV-DEVNET-GENESIS, CV-DEVNET-SUBSIDY, and
+    // CV-DEVNET-MATURITY once those fixtures exist under conformance/fixtures/.
 }
