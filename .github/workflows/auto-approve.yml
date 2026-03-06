@@ -23,7 +23,7 @@ jobs:
           script: |
             const MAX_ATTEMPTS = 30;
             const POLL_INTERVAL = 30000; // 30 seconds
-            const MERGEABLE_READY_STATES = new Set(['clean', 'has_hooks', 'unstable']);
+            const SUCCESSFUL_CONCLUSIONS = new Set(['success', 'skipped', 'neutral']);
 
             async function getOpenPullRequestByNumber(pull_number) {
               const response = await github.rest.pulls.get({
@@ -35,6 +35,26 @@ jobs:
                 return null;
               }
               return response.data;
+            }
+
+            async function getRequiredContexts(baseBranch) {
+              const response = await github.rest.repos.getBranchProtection({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                branch: baseBranch
+              });
+              return response.data.required_status_checks?.contexts ?? [];
+            }
+
+            function latestCheckRunsByName(checkRuns) {
+              const latest = new Map();
+              for (const run of checkRuns) {
+                const prev = latest.get(run.name);
+                if (!prev || run.id > prev.id) {
+                  latest.set(run.name, run);
+                }
+              }
+              return latest;
             }
 
             async function resolvePullRequest() {
@@ -78,6 +98,8 @@ jobs:
 
             const prNumber = pr.number;
             console.log(`Found PR #${prNumber}`);
+            const requiredContexts = await getRequiredContexts(pr.base.ref);
+            console.log(`Required contexts for ${pr.base.ref}: ${requiredContexts.join(', ')}`);
 
             // --- Poll for checks to complete ---
             const ref = pr.head.sha;
@@ -95,60 +117,49 @@ jobs:
                 pull_number: prNumber
               });
               const mergeableState = prState.data.mergeable_state ?? 'unknown';
+              const latestChecks = latestCheckRunsByName(checks.data.check_runs);
+              const missingRequired = requiredContexts.filter(name => !latestChecks.has(name));
+              const pendingRequired = requiredContexts.filter(name => {
+                const run = latestChecks.get(name);
+                return run && run.status !== 'completed';
+              });
+              const failedRequired = requiredContexts.filter(name => {
+                const run = latestChecks.get(name);
+                return run && run.status === 'completed' && !SUCCESSFUL_CONCLUSIONS.has(run.conclusion ?? '');
+              });
 
-              const validatorRuns = checks.data.check_runs.filter(c => c.name === 'validator');
-              const validator = validatorRuns.sort((a, b) => b.id - a.id)[0];
-              const validatorState = validator
-                ? `${validator.status}/${validator.conclusion ?? 'none'}`
-                : 'missing';
-
-              const pending = checks.data.check_runs.filter(
-                c => c.name !== 'auto-approve' && c.status !== 'completed'
-              );
-              const failed = checks.data.check_runs.filter(
-                c => c.name !== 'auto-approve' && c.status === 'completed'
-                  && c.conclusion !== 'success' && c.conclusion !== 'skipped'
-                  && c.conclusion !== 'neutral'
-              );
-
-              if (failed.length > 0) {
-                console.log(`${failed.length} checks failed, not approving:`);
-                for (const f of failed) {
-                  console.log(`  FAILED: ${f.name} - ${f.conclusion}`);
+              if (failedRequired.length > 0) {
+                console.log(`${failedRequired.length} required checks failed, not approving:`);
+                for (const name of failedRequired) {
+                  const run = latestChecks.get(name);
+                  console.log(`  FAILED: ${name} - ${run?.conclusion ?? 'unknown'}`);
                 }
-                console.log(`  validator state: ${validatorState}`);
                 return;
               }
 
-              if (!validator) {
-                if (attempt === MAX_ATTEMPTS || pending.length === 0) {
-                  console.log(`Validator check is required but ${validatorState}; not approving/merging.`);
-                  return;
-                }
-                console.log(`Attempt ${attempt}: validator is ${validatorState}, waiting ${POLL_INTERVAL/1000}s...`);
-                await new Promise(r => setTimeout(r, POLL_INTERVAL));
-                continue;
-              }
-
-              if (validator.status === 'completed' && validator.conclusion !== 'success') {
-                console.log(`Validator check is ${validatorState}; not approving/merging.`);
+              if (mergeableState === 'behind') {
+                console.log(`PR #${prNumber} is behind ${pr.base.ref}; not merging until branch is updated.`);
                 return;
               }
 
-              if (pending.length === 0 && validator.conclusion === 'success' && MERGEABLE_READY_STATES.has(mergeableState)) {
+              if (missingRequired.length === 0 && pendingRequired.length === 0) {
                 console.log(`All checks passed (attempt ${attempt})`);
                 break;
               }
 
               if (attempt === MAX_ATTEMPTS) {
-                console.log(`Timeout: pending=${pending.length}, validator=${validatorState}, mergeable_state=${mergeableState} after ${MAX_ATTEMPTS} attempts`);
-                for (const p of pending) {
-                  console.log(`  PENDING: ${p.name} - ${p.status}`);
+                console.log(`Timeout: missing_required=${missingRequired.length}, pending_required=${pendingRequired.length}, mergeable_state=${mergeableState} after ${MAX_ATTEMPTS} attempts`);
+                for (const name of missingRequired) {
+                  console.log(`  MISSING: ${name}`);
+                }
+                for (const name of pendingRequired) {
+                  const run = latestChecks.get(name);
+                  console.log(`  PENDING: ${name} - ${run?.status ?? 'missing'}`);
                 }
                 return;
               }
 
-              console.log(`Attempt ${attempt}: pending=${pending.length}, validator=${validatorState}, mergeable_state=${mergeableState}, waiting ${POLL_INTERVAL/1000}s...`);
+              console.log(`Attempt ${attempt}: missing_required=${missingRequired.length}, pending_required=${pendingRequired.length}, mergeable_state=${mergeableState}, waiting ${POLL_INTERVAL/1000}s...`);
               await new Promise(r => setTimeout(r, POLL_INTERVAL));
             }
 
