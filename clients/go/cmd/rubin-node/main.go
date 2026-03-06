@@ -60,6 +60,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&cfg.LogLevel, "log-level", defaults.LogLevel, "log level: debug|info|warn|error")
 	genesisFile := fs.String("genesis-file", "", "path to genesis pack JSON with chain_id_hex")
 	fs.IntVar(&cfg.MaxPeers, "max-peers", defaults.MaxPeers, "max connected peers")
+	fs.StringVar(&cfg.MineAddress, "mine-address", "", "miner pubkey: 64-char hex key_id or 66-char hex suite_id||key_id")
 	mineBlocks := fs.Int("mine-blocks", 0, "mine N blocks locally after startup")
 	mineExit := fs.Bool("mine-exit", false, "exit immediately after local mining")
 	featurebitsDeploymentsPath := fs.String("featurebits-deployments", "", "path to JSON file with featurebit deployments (telemetry-only)")
@@ -149,7 +150,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	if *mineBlocks > 0 {
-		miner, err := newMinerFn(chainState, blockStore, syncEngine, node.DefaultMinerConfig())
+		minerCfg := node.DefaultMinerConfig()
+		if cfg.MineAddress != "" {
+			addrBytes, addrErr := node.ParseMineAddress(cfg.MineAddress)
+			if addrErr != nil {
+				_, _ = fmt.Fprintf(stderr, "invalid mine-address: %v\n", addrErr)
+				return 2
+			}
+			minerCfg.MineAddress = addrBytes
+		}
+		miner, err := newMinerFn(chainState, blockStore, syncEngine, minerCfg)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "miner init failed: %v\n", err)
 			return 2

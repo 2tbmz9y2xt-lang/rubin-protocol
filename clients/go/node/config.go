@@ -1,6 +1,7 @@
 package node
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -10,13 +11,14 @@ import (
 )
 
 type Config struct {
-	Network  string   `json:"network"`
-	DataDir  string   `json:"data_dir"`
-	BindAddr string   `json:"bind_addr"`
-	LogLevel string   `json:"log_level"`
-	Peers    []string `json:"peers"`
-	MaxPeers int      `json:"max_peers"`
-	ChainID  string   `json:"chain_id_hex,omitempty"`
+	Network     string   `json:"network"`
+	DataDir     string   `json:"data_dir"`
+	BindAddr    string   `json:"bind_addr"`
+	LogLevel    string   `json:"log_level"`
+	Peers       []string `json:"peers"`
+	MaxPeers    int      `json:"max_peers"`
+	ChainID     string   `json:"chain_id_hex,omitempty"`
+	MineAddress string   `json:"mine_address"`
 }
 
 var allowedLogLevels = map[string]struct{}{
@@ -88,6 +90,15 @@ func ValidateConfig(cfg Config) error {
 	}
 	if cfg.MaxPeers > 4096 {
 		return errors.New("max_peers must be <= 4096")
+	}
+	if cfg.MineAddress != "" {
+		raw, err := hex.DecodeString(cfg.MineAddress)
+		if err != nil {
+			return fmt.Errorf("invalid mine_address hex: %w", err)
+		}
+		if len(raw) != 32 && len(raw) != 33 {
+			return fmt.Errorf("mine_address must be 32 (key_id) or 33 (suite_id||key_id) bytes, got %d", len(raw))
+		}
 	}
 	return nil
 }

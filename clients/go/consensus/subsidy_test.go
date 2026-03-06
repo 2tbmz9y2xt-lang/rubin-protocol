@@ -8,6 +8,13 @@ func TestBlockSubsidy_Height0IsZero(t *testing.T) {
 	}
 }
 
+func TestBlockSubsidy_Height1AlreadyGeneratedZeroMatchesSpecFormula(t *testing.T) {
+	const want = uint64(4_673_004_150)
+	if got := BlockSubsidy(1, 0); got != want {
+		t.Fatalf("got=%d, want %d", got, want)
+	}
+}
+
 func TestBlockSubsidy_TailEmissionAfterCap(t *testing.T) {
 	if got := BlockSubsidy(1, MINEABLE_CAP); got != TAIL_EMISSION_PER_BLOCK {
 		t.Fatalf("got=%d, want %d", got, TAIL_EMISSION_PER_BLOCK)
