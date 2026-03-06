@@ -44,6 +44,7 @@ type Service struct {
 
 	peersMu sync.RWMutex
 	peers   map[string]*peer
+	loopWG  sync.WaitGroup
 
 	chainMu   sync.Mutex
 	blockSeen *boundedHashSet
