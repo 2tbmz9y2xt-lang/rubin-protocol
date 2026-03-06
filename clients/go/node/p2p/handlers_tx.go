@@ -17,6 +17,9 @@ func (p *peer) handleTx(txBytes []byte) error {
 	// Mark as seen BEFORE pool admission so that pool-full rejections still
 	// suppress future getdata requests (prevents inv/getdata churn at capacity).
 	isNew := p.service.txSeen.Add(txid)
+	if !isNew {
+		return nil
+	}
 	meta, err := p.service.relayTxMetadata(txBytes)
 	if err != nil {
 		return nil

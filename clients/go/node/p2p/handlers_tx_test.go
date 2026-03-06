@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -318,6 +319,47 @@ func TestHandleTxMetadataErrorStillMarksSeen(t *testing.T) {
 	}
 	if !h.service.txSeen.Has(txid) {
 		t.Fatal("metadata failure should still mark tx as seen to suppress churn")
+	}
+}
+
+func TestHandleTxDuplicateSkipsMetadataValidation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	var metadataCalls atomic.Int32
+	h.service.cfg.TxMetadataFunc = func([]byte) (node.RelayTxMetadata, error) {
+		metadataCalls.Add(1)
+		return node.RelayTxMetadata{Fee: 1, Size: 1}, nil
+	}
+	if err := h.service.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer h.service.Close()
+
+	p := &peer{
+		service: h.service,
+		state:   node.PeerState{HandshakeComplete: true},
+	}
+	txBytes := distinctTxBytes(t, 779)
+	txid, err := canonicalTxID(txBytes)
+	if err != nil {
+		t.Fatalf("canonicalTxID: %v", err)
+	}
+	if err := p.handleTx(txBytes); err != nil {
+		t.Fatalf("handleTx first: %v", err)
+	}
+	if got := metadataCalls.Load(); got != 1 {
+		t.Fatalf("metadataCalls after first handleTx=%d, want 1", got)
+	}
+	if err := p.handleTx(txBytes); err != nil {
+		t.Fatalf("handleTx duplicate: %v", err)
+	}
+	if got := metadataCalls.Load(); got != 1 {
+		t.Fatalf("metadataCalls after duplicate=%d, want 1", got)
+	}
+	if !h.service.cfg.TxPool.Has(txid) {
+		t.Fatal("duplicate shortcut must preserve prior pool admission")
 	}
 }
 
