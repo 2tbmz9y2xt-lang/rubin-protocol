@@ -140,56 +140,31 @@ var keygenAllowlist = map[string]int{
 	"ML-DSA-87": ML_DSA_87_PUBKEY_BYTES,
 }
 
-func newOpenSSLRawKeypair(alg string, expectedPubkeyLen int) (*C.EVP_PKEY, []byte, error) {
-	if err := ensureOpenSSLBootstrap(); err != nil {
-		return nil, nil, err
-	}
+func validateOpenSSLAlgorithm(alg string, expectedPubkeyLen int, action string) error {
 	requiredLen, ok := keygenAllowlist[alg]
 	if !ok {
-		return nil, nil, fmt.Errorf("openssl keygen algorithm not allowed: %s", alg)
+		return fmt.Errorf("openssl %s algorithm not allowed: %s", action, alg)
 	}
 	if expectedPubkeyLen != requiredLen {
-		return nil, nil, fmt.Errorf(
-			"openssl keygen expected pubkey length mismatch for %s: got %d want %d",
-			alg, expectedPubkeyLen, requiredLen,
+		return fmt.Errorf(
+			"openssl %s expected pubkey length mismatch for %s: got %d want %d",
+			action, alg, expectedPubkeyLen, requiredLen,
 		)
 	}
-
-	errBuf := make([]byte, 512)
-	cAlg := C.CString(alg)
-	defer C.free(unsafe.Pointer(cAlg))
-
-	pkey := C.rubin_keygen(cAlg, (*C.char)(unsafe.Pointer(&errBuf[0])), C.size_t(len(errBuf)))
-	if pkey == nil {
-		return nil, nil, fmt.Errorf("openssl keygen failed: %s", cStringTrim0(errBuf))
-	}
-
-	pubkey := make([]byte, expectedPubkeyLen)
-	var pubLen C.size_t
-	if C.rubin_get_raw_public(
-		pkey,
-		(*C.uchar)(unsafe.Pointer(&pubkey[0])),
-		C.size_t(len(pubkey)),
-		&pubLen,
-		(*C.char)(unsafe.Pointer(&errBuf[0])),
-		C.size_t(len(errBuf)),
-	) != 0 {
-		C.EVP_PKEY_free(pkey)
-		return nil, nil, fmt.Errorf("openssl get_raw_public failed: %s", cStringTrim0(errBuf))
-	}
-	if int(pubLen) != expectedPubkeyLen {
-		C.EVP_PKEY_free(pkey)
-		return nil, nil, fmt.Errorf("openssl pubkey length=%d, want %d", int(pubLen), expectedPubkeyLen)
-	}
-
-	return pkey, pubkey, nil
+	return nil
 }
 
-func openSSLPublicKeyBytes(pkey *C.EVP_PKEY, expectedPubkeyLen int) ([]byte, error) {
+func newOpenSSLErrorBuffer() []byte {
+	return make([]byte, 512)
+}
+
+func openSSLPublicKeyBytesWithErrBuf(pkey *C.EVP_PKEY, expectedPubkeyLen int, errBuf []byte) ([]byte, error) {
 	if pkey == nil {
 		return nil, fmt.Errorf("nil openssl key")
 	}
-	errBuf := make([]byte, 512)
+	if len(errBuf) == 0 {
+		errBuf = newOpenSSLErrorBuffer()
+	}
 	pubkey := make([]byte, expectedPubkeyLen)
 	var pubLen C.size_t
 	if C.rubin_get_raw_public(
@@ -208,25 +183,46 @@ func openSSLPublicKeyBytes(pkey *C.EVP_PKEY, expectedPubkeyLen int) ([]byte, err
 	return pubkey, nil
 }
 
+func newOpenSSLRawKeypair(alg string, expectedPubkeyLen int) (*C.EVP_PKEY, []byte, error) {
+	if err := ensureOpenSSLBootstrap(); err != nil {
+		return nil, nil, err
+	}
+	if err := validateOpenSSLAlgorithm(alg, expectedPubkeyLen, "keygen"); err != nil {
+		return nil, nil, err
+	}
+
+	errBuf := newOpenSSLErrorBuffer()
+	cAlg := C.CString(alg)
+	defer C.free(unsafe.Pointer(cAlg))
+
+	pkey := C.rubin_keygen(cAlg, (*C.char)(unsafe.Pointer(&errBuf[0])), C.size_t(len(errBuf)))
+	if pkey == nil {
+		return nil, nil, fmt.Errorf("openssl keygen failed: %s", cStringTrim0(errBuf))
+	}
+	pubkey, err := openSSLPublicKeyBytesWithErrBuf(pkey, expectedPubkeyLen, errBuf)
+	if err != nil {
+		C.EVP_PKEY_free(pkey)
+		return nil, nil, err
+	}
+	return pkey, pubkey, nil
+}
+
+func openSSLPublicKeyBytes(pkey *C.EVP_PKEY, expectedPubkeyLen int) ([]byte, error) {
+	return openSSLPublicKeyBytesWithErrBuf(pkey, expectedPubkeyLen, nil)
+}
+
 func newOpenSSLRawKeypairFromDER(alg string, der []byte, expectedPubkeyLen int) (*C.EVP_PKEY, []byte, error) {
 	if err := ensureOpenSSLBootstrap(); err != nil {
 		return nil, nil, err
 	}
-	requiredLen, ok := keygenAllowlist[alg]
-	if !ok {
-		return nil, nil, fmt.Errorf("openssl key import algorithm not allowed: %s", alg)
-	}
-	if expectedPubkeyLen != requiredLen {
-		return nil, nil, fmt.Errorf(
-			"openssl key import expected pubkey length mismatch for %s: got %d want %d",
-			alg, expectedPubkeyLen, requiredLen,
-		)
+	if err := validateOpenSSLAlgorithm(alg, expectedPubkeyLen, "key import"); err != nil {
+		return nil, nil, err
 	}
 	if len(der) == 0 {
 		return nil, nil, fmt.Errorf("empty private key DER")
 	}
 
-	errBuf := make([]byte, 512)
+	errBuf := newOpenSSLErrorBuffer()
 	pkey := C.rubin_parse_private_key_der(
 		(*C.uchar)(unsafe.Pointer(&der[0])),
 		C.size_t(len(der)),

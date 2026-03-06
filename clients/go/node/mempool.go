@@ -67,30 +67,12 @@ func (m *Mempool) AddTx(txBytes []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if _, exists := m.txs[checked.TxID]; exists {
-		return fmt.Errorf("tx already in mempool")
-	}
-	if len(m.txs) >= m.maxTxs {
-		return fmt.Errorf("mempool full")
-	}
-	for _, op := range inputs {
-		if existing, ok := m.spenders[op]; ok {
-			return fmt.Errorf("mempool double-spend conflict with %x", existing)
-		}
+	if err := m.validateAdmissionLocked(checked.TxID, inputs); err != nil {
+		return err
 	}
 
-	entry := &mempoolEntry{
-		raw:    append([]byte(nil), checked.Bytes...),
-		txid:   checked.TxID,
-		inputs: append([]consensus.Outpoint(nil), inputs...),
-		fee:    checked.Fee,
-		weight: checked.Weight,
-		size:   checked.SerializedSize,
-	}
-	m.txs[entry.txid] = entry
-	for _, op := range entry.inputs {
-		m.spenders[op] = entry.txid
-	}
+	entry := newMempoolEntry(checked, inputs)
+	m.addEntryLocked(entry)
 	return nil
 }
 
@@ -99,39 +81,9 @@ func (m *Mempool) SelectTransactions(maxCount int, maxBytes int) [][]byte {
 		return nil
 	}
 
-	m.mu.RLock()
-	entries := make([]*mempoolEntry, 0, len(m.txs))
-	for _, entry := range m.txs {
-		entries = append(entries, entry)
-	}
-	m.mu.RUnlock()
-
-	sort.Slice(entries, func(i, j int) bool {
-		if cmp := compareFeeRate(entries[i], entries[j]); cmp != 0 {
-			return cmp > 0
-		}
-		if entries[i].fee != entries[j].fee {
-			return entries[i].fee > entries[j].fee
-		}
-		if entries[i].weight != entries[j].weight {
-			return entries[i].weight < entries[j].weight
-		}
-		return bytes.Compare(entries[i].txid[:], entries[j].txid[:]) < 0
-	})
-
-	selected := make([][]byte, 0, len(entries))
-	usedBytes := 0
-	for _, entry := range entries {
-		if len(selected) >= maxCount {
-			break
-		}
-		if entry.size > maxBytes-usedBytes {
-			continue
-		}
-		selected = append(selected, append([]byte(nil), entry.raw...))
-		usedBytes += entry.size
-	}
-	return selected
+	entries := m.snapshotEntries()
+	sortMempoolEntries(entries)
+	return pickEntries(entries, maxCount, maxBytes)
 }
 
 func (m *Mempool) EvictConfirmed(blockBytes []byte) error {
@@ -163,19 +115,7 @@ func (m *Mempool) RemoveConflicting(blockBytes []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	conflicts := make(map[[32]byte]struct{})
-	for i, tx := range block.Txs {
-		if i == 0 || tx == nil {
-			continue
-		}
-		for _, in := range tx.Inputs {
-			op := consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
-			if txid, ok := m.spenders[op]; ok {
-				conflicts[txid] = struct{}{}
-			}
-		}
-	}
-	for txid := range conflicts {
+	for txid := range m.collectConflictsLocked(block) {
 		m.removeTxLocked(txid)
 	}
 	return nil
@@ -225,6 +165,99 @@ func (m *Mempool) removeTxLocked(txid [32]byte) {
 	for _, op := range entry.inputs {
 		delete(m.spenders, op)
 	}
+}
+
+func (m *Mempool) validateAdmissionLocked(txid [32]byte, inputs []consensus.Outpoint) error {
+	if _, exists := m.txs[txid]; exists {
+		return fmt.Errorf("tx already in mempool")
+	}
+	if len(m.txs) >= m.maxTxs {
+		return fmt.Errorf("mempool full")
+	}
+	for _, op := range inputs {
+		if existing, ok := m.spenders[op]; ok {
+			return fmt.Errorf("mempool double-spend conflict with %x", existing)
+		}
+	}
+	return nil
+}
+
+func newMempoolEntry(checked *consensus.CheckedTransaction, inputs []consensus.Outpoint) *mempoolEntry {
+	return &mempoolEntry{
+		raw:    append([]byte(nil), checked.Bytes...),
+		txid:   checked.TxID,
+		inputs: append([]consensus.Outpoint(nil), inputs...),
+		fee:    checked.Fee,
+		weight: checked.Weight,
+		size:   checked.SerializedSize,
+	}
+}
+
+func (m *Mempool) addEntryLocked(entry *mempoolEntry) {
+	m.txs[entry.txid] = entry
+	for _, op := range entry.inputs {
+		m.spenders[op] = entry.txid
+	}
+}
+
+func (m *Mempool) snapshotEntries() []*mempoolEntry {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	entries := make([]*mempoolEntry, 0, len(m.txs))
+	for _, entry := range m.txs {
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+func sortMempoolEntries(entries []*mempoolEntry) {
+	sort.Slice(entries, func(i, j int) bool {
+		if cmp := compareFeeRate(entries[i], entries[j]); cmp != 0 {
+			return cmp > 0
+		}
+		if entries[i].fee != entries[j].fee {
+			return entries[i].fee > entries[j].fee
+		}
+		if entries[i].weight != entries[j].weight {
+			return entries[i].weight < entries[j].weight
+		}
+		return bytes.Compare(entries[i].txid[:], entries[j].txid[:]) < 0
+	})
+}
+
+func pickEntries(entries []*mempoolEntry, maxCount int, maxBytes int) [][]byte {
+	selected := make([][]byte, 0, len(entries))
+	usedBytes := 0
+	for _, entry := range entries {
+		if len(selected) >= maxCount {
+			break
+		}
+		if entry.size > maxBytes-usedBytes {
+			continue
+		}
+		selected = append(selected, append([]byte(nil), entry.raw...))
+		usedBytes += entry.size
+	}
+	return selected
+}
+
+func (m *Mempool) collectConflictsLocked(block *consensus.ParsedBlock) map[[32]byte]struct{} {
+	conflicts := make(map[[32]byte]struct{})
+	for i, tx := range block.Txs {
+		if i == 0 || tx == nil {
+			continue
+		}
+		for _, in := range tx.Inputs {
+			if txid, ok := m.spenders[outpointFromInput(in)]; ok {
+				conflicts[txid] = struct{}{}
+			}
+		}
+	}
+	return conflicts
+}
+
+func outpointFromInput(in consensus.TxInput) consensus.Outpoint {
+	return consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
 }
 
 func compareFeeRate(a *mempoolEntry, b *mempoolEntry) int {
