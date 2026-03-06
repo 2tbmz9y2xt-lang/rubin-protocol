@@ -8,6 +8,8 @@ on:
     types: [completed]
 
 permissions:
+  administration: read
+  actions: write
   pull-requests: write
   contents: write
 
@@ -199,6 +201,18 @@ jobs:
             } catch (mergeError) {
               console.log(`Merge failed: ${mergeError.message}`);
               return;
+            }
+
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'codacy-coverage.yml',
+                ref: pr.base.ref
+              });
+              console.log(`Triggered codacy-coverage workflow_dispatch on ${pr.base.ref}`);
+            } catch (dispatchError) {
+              console.log(`Codacy coverage dispatch failed (non-blocking): ${dispatchError.message}`);
             }
 
             // --- Delete branch ---
