@@ -7,6 +7,15 @@ import (
 	"testing"
 )
 
+func TestValidateOpenSSLAlgorithmRejectsUnknownAndLengthMismatch(t *testing.T) {
+	if err := validateOpenSSLAlgorithm("NO_SUCH_ALG", 1, "keygen"); err == nil {
+		t.Fatalf("expected unknown algorithm error")
+	}
+	if err := validateOpenSSLAlgorithm("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES+1, "keygen"); err == nil {
+		t.Fatalf("expected length mismatch error")
+	}
+}
+
 func TestCStringTrim0(t *testing.T) {
 	if got := cStringTrim0([]byte("abc\x00def")); got != "abc" {
 		t.Fatalf("got=%q", got)
@@ -73,6 +82,15 @@ func TestNewOpenSSLRawKeypair_PublicKeyLenMismatchErrors(t *testing.T) {
 	}
 }
 
+func TestOpenSSLPublicKeyBytes_NilKeyErrors(t *testing.T) {
+	if _, err := openSSLPublicKeyBytes(nil, ML_DSA_87_PUBKEY_BYTES); err == nil {
+		t.Fatalf("expected error")
+	}
+	if _, err := openSSLPublicKeyBytesWithErrBuf(nil, ML_DSA_87_PUBKEY_BYTES, nil); err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
 func TestSignOpenSSLDigest32_ExactSigLenMismatchErrors(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 
@@ -135,5 +153,41 @@ func TestNewMLDSA87Keypair_InvalidFIPSModeRejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid RUBIN_OPENSSL_FIPS_MODE") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewMLDSA87KeypairFromDER_EmptyInputRejected(t *testing.T) {
+	if _, err := NewMLDSA87KeypairFromDER(nil); err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestMLDSA87Keypair_PrivateKeyDER_NilKeypairErrors(t *testing.T) {
+	var kp *MLDSA87Keypair
+	if _, err := kp.PrivateKeyDER(); err == nil {
+		t.Fatalf("expected nil keypair error")
+	}
+
+	kp = &MLDSA87Keypair{}
+	if _, err := kp.PrivateKeyDER(); err == nil {
+		t.Fatalf("expected nil keypair error")
+	}
+}
+
+func TestMLDSA87Keypair_DERRoundTrip(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+
+	der, err := kp.PrivateKeyDER()
+	if err != nil {
+		t.Fatalf("PrivateKeyDER: %v", err)
+	}
+	restored, err := NewMLDSA87KeypairFromDER(der)
+	if err != nil {
+		t.Fatalf("NewMLDSA87KeypairFromDER: %v", err)
+	}
+	t.Cleanup(restored.Close)
+
+	if got, want := restored.PubkeyBytes(), kp.PubkeyBytes(); len(got) != len(want) || string(got) != string(want) {
+		t.Fatalf("pubkey mismatch after DER roundtrip")
 	}
 }
