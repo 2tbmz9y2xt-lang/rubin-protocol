@@ -253,10 +253,10 @@ func TestSyncEngineApplyBlock_RollbackOnSaveFailure(t *testing.T) {
 	chainStatePath := filepath.Join(badDir, "chainstate.json")
 
 	st := &ChainState{
-		HasTip:    true,
-		Height:    0,
-		TipHash:   devnetGenesisBlockHash,
-		Utxos:     nil,
+		HasTip:  true,
+		Height:  0,
+		TipHash: devnetGenesisBlockHash,
+		Utxos:   nil,
 	}
 	target := consensus.POW_LIMIT
 	engine, err := NewSyncEngine(st, nil, DefaultSyncConfig(&target, devnetGenesisChainID, chainStatePath))
