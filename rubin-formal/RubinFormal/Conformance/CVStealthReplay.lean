@@ -34,7 +34,7 @@ def cvStealthVectorsPass : Bool :=
   else
     panic! "[FAIL] CV-STEALTH replay: cvStealthVectorsPass=false"
 
-theorem cv_stealth_vectors_pass : True := by
-  trivial
+theorem cv_stealth_vectors_pass : cvStealthVectorsPass = true := by
+  native_decide
 
 end RubinFormal.Conformance

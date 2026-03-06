@@ -33,7 +33,7 @@ def cvBlockBasicVectorsPass : Bool :=
   else
     panic! "[FAIL] CV-BLOCK-BASIC replay: cvBlockBasicVectorsPass=false"
 
-theorem cv_block_basic_vectors_pass : True := by
-  trivial
+theorem cv_block_basic_vectors_pass : cvBlockBasicVectorsPass = true := by
+  native_decide
 
 end RubinFormal.Conformance

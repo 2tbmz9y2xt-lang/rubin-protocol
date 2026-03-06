@@ -56,7 +56,7 @@ def cvHtlcVectorsPass : Bool :=
   else
     panic! "[FAIL] CV-HTLC replay: cvHtlcVectorsPass=false"
 
-theorem cv_htlc_vectors_pass : True := by
-  trivial
+theorem cv_htlc_vectors_pass : cvHtlcVectorsPass = true := by
+  native_decide
 
 end RubinFormal.Conformance

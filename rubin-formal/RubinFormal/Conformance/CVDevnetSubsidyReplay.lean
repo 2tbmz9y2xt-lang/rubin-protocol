@@ -44,17 +44,9 @@ def devnetSubsidyVectorPass (v : CVDevnetSubsidyVector) : Bool :=
 def cvDevnetSubsidyVectorsPass : Bool :=
   cvDevnetSubsidyVectors.all devnetSubsidyVectorPass
 
--- NOTE: #eval disabled for CI — running connectBlockBasic on 100 devnet blocks
--- exceeds GitHub-hosted runner resource limits (SIGTERM at ~295/314 modules).
--- The compile-time gate is already enforced by Go/Rust conformance replay tests.
--- To verify locally: uncomment and run `lake build RubinFormal.Conformance.CVDevnetSubsidyReplay`
--- #eval
---   if cvDevnetSubsidyVectorsPass then
---     ()
---   else
---     panic! "[FAIL] CV-DEVNET-SUBSIDY replay: cvDevnetSubsidyVectorsPass=false"
-
-theorem cv_devnet_subsidy_vectors_pass : True := by
-  trivial
+-- native_decide is both stronger (proof-level) and faster than #eval
+-- (1.8s native vs SIGTERM at 19min interpreted on CI runners)
+theorem cv_devnet_subsidy_vectors_pass : cvDevnetSubsidyVectorsPass = true := by
+  native_decide
 
 end RubinFormal.Conformance
