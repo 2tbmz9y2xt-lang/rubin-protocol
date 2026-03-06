@@ -24,12 +24,14 @@ func (s *Service) Start(ctx context.Context) error {
 	s.listener = listener
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
+	s.loopWG.Add(1)
 	go s.acceptLoop()
 	for _, peerAddr := range s.cfg.BootstrapPeers {
 		peerAddr = strings.TrimSpace(peerAddr)
 		if peerAddr == "" {
 			continue
 		}
+		s.loopWG.Add(1)
 		go s.dialPeer(peerAddr)
 	}
 	return nil
@@ -54,6 +56,7 @@ func (s *Service) Close() error {
 	for _, current := range peers {
 		_ = current.conn.Close()
 	}
+	s.loopWG.Wait()
 	return nil
 }
 
@@ -68,6 +71,7 @@ func (s *Service) Addr() string {
 }
 
 func (s *Service) acceptLoop() {
+	defer s.loopWG.Done()
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
@@ -79,11 +83,13 @@ func (s *Service) acceptLoop() {
 			}
 			continue
 		}
-		go s.handleConn(conn)
+		s.loopWG.Add(1)
+		go s.runConn(conn)
 	}
 }
 
 func (s *Service) dialPeer(addr string) {
+	defer s.loopWG.Done()
 	dialer := &net.Dialer{Timeout: s.cfg.PeerRuntimeConfig.HandshakeTimeout}
 	conn, err := dialer.DialContext(s.ctx, "tcp", addr)
 	if err != nil {

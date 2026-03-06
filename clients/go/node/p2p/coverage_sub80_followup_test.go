@@ -122,6 +122,27 @@ func TestInventoryRelayKeyMultipleItems(t *testing.T) {
 	}
 }
 
+func TestRelayTxMetadataFallbackAndProvider(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	meta, err := h.service.relayTxMetadata([]byte{0xAA, 0xBB, 0xCC})
+	if err != nil {
+		t.Fatalf("fallback relayTxMetadata: %v", err)
+	}
+	if meta.Fee != 0 || meta.Size != 3 {
+		t.Fatalf("fallback meta=%+v, want fee=0 size=3", meta)
+	}
+	h.service.cfg.TxMetadataFunc = func([]byte) (node.RelayTxMetadata, error) {
+		return node.RelayTxMetadata{Fee: 9, Size: 7}, nil
+	}
+	meta, err = h.service.relayTxMetadata([]byte{0x00})
+	if err != nil {
+		t.Fatalf("provider relayTxMetadata: %v", err)
+	}
+	if meta.Fee != 9 || meta.Size != 7 {
+		t.Fatalf("provider meta=%+v, want fee=9 size=7", meta)
+	}
+}
+
 func TestBroadcastInventoryTxUsesFanoutLimit(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	h.service.cfg.TxRelayFanout = 2

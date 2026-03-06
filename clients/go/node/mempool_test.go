@@ -29,6 +29,37 @@ func TestMempoolAdd(t *testing.T) {
 	}
 }
 
+func TestMempoolRelayMetadata(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 3, 5, fromKey, fromAddress, toAddress)
+	meta, err := mp.RelayMetadata(txBytes)
+	if err != nil {
+		t.Fatalf("RelayMetadata: %v", err)
+	}
+	if meta.Fee != 3 {
+		t.Fatalf("fee=%d, want 3", meta.Fee)
+	}
+	if meta.Size != len(txBytes) {
+		t.Fatalf("size=%d, want %d", meta.Size, len(txBytes))
+	}
+}
+
+func TestMempoolRelayMetadataNil(t *testing.T) {
+	var mp *Mempool
+	if _, err := mp.RelayMetadata([]byte{0x01}); err == nil {
+		t.Fatal("nil mempool should reject RelayMetadata")
+	}
+}
+
 func TestMempoolDoubleSpend(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)

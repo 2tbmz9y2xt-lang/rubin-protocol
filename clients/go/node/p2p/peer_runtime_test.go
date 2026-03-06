@@ -66,7 +66,7 @@ func TestMissingInventoryAndNeedsInventory(t *testing.T) {
 	unseenTx[0] = 0x03
 	var pooledTx [32]byte
 	pooledTx[0] = 0x04
-	p.service.cfg.TxPool.Put(pooledTx, []byte{0x01})
+	p.service.cfg.TxPool.Put(pooledTx, []byte{0x01}, 1, 1)
 
 	items := []InventoryVector{
 		{Type: MSG_BLOCK, Hash: seenBlock},

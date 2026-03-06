@@ -1,19 +1,29 @@
 package p2p
 
-import "sync"
+import (
+	"bytes"
+	"math/bits"
+	"sync"
+)
 
 const defaultMaxTxPoolSize = 1000
 
 type TxPool interface {
 	Get(txid [32]byte) ([]byte, bool)
 	Has(txid [32]byte) bool
-	Put(txid [32]byte, raw []byte) bool
+	Put(txid [32]byte, raw []byte, fee uint64, size int) bool
 }
 
 type MemoryTxPool struct {
 	mu      sync.RWMutex
-	txs     map[[32]byte][]byte
+	txs     map[[32]byte]*relayTxEntry
 	maxSize int
+}
+
+type relayTxEntry struct {
+	raw  []byte
+	fee  uint64
+	size int
 }
 
 func NewMemoryTxPool() *MemoryTxPool {
@@ -25,13 +35,19 @@ func NewMemoryTxPoolWithLimit(maxSize int) *MemoryTxPool {
 		maxSize = defaultMaxTxPoolSize
 	}
 	return &MemoryTxPool{
-		txs:     make(map[[32]byte][]byte),
+		txs:     make(map[[32]byte]*relayTxEntry),
 		maxSize: maxSize,
 	}
 }
 
-func (p *MemoryTxPool) Put(txid [32]byte, raw []byte) bool {
+func (p *MemoryTxPool) Put(txid [32]byte, raw []byte, fee uint64, size int) bool {
 	if p == nil {
+		return false
+	}
+	if size <= 0 {
+		size = len(raw)
+	}
+	if size <= 0 {
 		return false
 	}
 	p.mu.Lock()
@@ -40,9 +56,17 @@ func (p *MemoryTxPool) Put(txid [32]byte, raw []byte) bool {
 		return false
 	}
 	if len(p.txs) >= p.maxSize {
-		return false
+		worstTxid, worstEntry, ok := p.findWorstLocked()
+		if !ok || compareRelayPriority(fee, size, txid, worstEntry.fee, worstEntry.size, worstTxid) <= 0 {
+			return false
+		}
+		delete(p.txs, worstTxid)
 	}
-	p.txs[txid] = append([]byte(nil), raw...)
+	p.txs[txid] = &relayTxEntry{
+		raw:  append([]byte(nil), raw...),
+		fee:  fee,
+		size: size,
+	}
 	return true
 }
 
@@ -70,11 +94,11 @@ func (p *MemoryTxPool) Get(txid [32]byte) ([]byte, bool) {
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	raw, ok := p.txs[txid]
+	entry, ok := p.txs[txid]
 	if !ok {
 		return nil, false
 	}
-	return append([]byte(nil), raw...), true
+	return append([]byte(nil), entry.raw...), true
 }
 
 func (p *MemoryTxPool) Has(txid [32]byte) bool {
@@ -85,4 +109,59 @@ func (p *MemoryTxPool) Has(txid [32]byte) bool {
 	defer p.mu.RUnlock()
 	_, ok := p.txs[txid]
 	return ok
+}
+
+func (p *MemoryTxPool) findWorstLocked() ([32]byte, *relayTxEntry, bool) {
+	var worstTxid [32]byte
+	var worstEntry *relayTxEntry
+	first := true
+	for txid, entry := range p.txs {
+		if first || compareRelayPriority(entry.fee, entry.size, txid, worstEntry.fee, worstEntry.size, worstTxid) < 0 {
+			worstTxid = txid
+			worstEntry = entry
+			first = false
+		}
+	}
+	return worstTxid, worstEntry, !first
+}
+
+func compareRelayPriority(aFee uint64, aSize int, aTxid [32]byte, bFee uint64, bSize int, bTxid [32]byte) int {
+	if cmp := compareRelayFeeRate(aFee, aSize, bFee, bSize); cmp != 0 {
+		return cmp
+	}
+	if aFee != bFee {
+		if aFee > bFee {
+			return 1
+		}
+		return -1
+	}
+	switch cmp := bytes.Compare(aTxid[:], bTxid[:]); {
+	case cmp < 0:
+		return 1
+	case cmp > 0:
+		return -1
+	default:
+		return 0
+	}
+}
+
+func compareRelayFeeRate(aFee uint64, aSize int, bFee uint64, bSize int) int {
+	if aSize <= 0 || bSize <= 0 {
+		return 0
+	}
+	ahi, alo := bits.Mul64(aFee, uint64(bSize))
+	bhi, blo := bits.Mul64(bFee, uint64(aSize))
+	if ahi != bhi {
+		if ahi > bhi {
+			return 1
+		}
+		return -1
+	}
+	if alo != blo {
+		if alo > blo {
+			return 1
+		}
+		return -1
+	}
+	return 0
 }
