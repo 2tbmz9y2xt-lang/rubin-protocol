@@ -66,6 +66,13 @@ type Miner struct {
 	cfg        MinerConfig
 }
 
+type minedCandidate struct {
+	raw    []byte
+	txid   [32]byte
+	wtxid  [32]byte
+	weight uint64
+}
+
 func DefaultMinerConfig() MinerConfig {
 	return MinerConfig{
 		Target: consensus.POW_LIMIT,
@@ -165,123 +172,21 @@ func (m *Miner) buildBlock(ctx context.Context, txs [][]byte) ([]byte, []uint64,
 		prevHash = *expectedPrev
 	}
 
-	candidateTxs := txs
-	maxSelected := m.cfg.MaxTxPerBlock - 1
-	if maxSelected < 0 {
-		maxSelected = 0
-	}
-	if len(candidateTxs) == 0 && m.sync != nil && m.sync.mempool != nil && maxSelected > 0 {
-		candidateTxs = m.sync.mempool.SelectTransactions(maxSelected, int(consensus.MAX_BLOCK_WEIGHT))
-	}
-	if maxSelected >= 0 && len(candidateTxs) > maxSelected {
-		candidateTxs = candidateTxs[:maxSelected]
+	candidateTxs := m.candidateTransactions(txs)
+	remainingWeight, err := m.remainingWeightBudget(nextHeight)
+	if err != nil {
+		return nil, nil, 0, 0, 0, err
 	}
 
-	coinbaseTemplate, err := buildCoinbaseTx(nextHeight, m.chainState.AlreadyGenerated, m.cfg.MineAddress, [32]byte{})
+	parsed, err := m.selectCandidateTransactions(candidateTxs, nextHeight, remainingWeight)
 	if err != nil {
 		return nil, nil, 0, 0, 0, err
 	}
-	coinbaseTx, _, _, consumed, err := consensus.ParseTx(coinbaseTemplate)
+	witnessCommitment, err := buildWitnessCommitment(parsed)
 	if err != nil {
 		return nil, nil, 0, 0, 0, err
 	}
-	if consumed != len(coinbaseTemplate) {
-		return nil, nil, 0, 0, 0, errors.New("coinbase serialization is non-canonical")
-	}
-	coinbaseWeight, _, _, err := consensus.TxWeightAndStats(coinbaseTx)
-	if err != nil {
-		return nil, nil, 0, 0, 0, err
-	}
-	remainingWeight := consensus.MAX_BLOCK_WEIGHT - coinbaseWeight
-
-	type parsedTx struct {
-		raw    []byte
-		txid   [32]byte
-		wtxid  [32]byte
-		weight uint64
-	}
-	parsed := make([]parsedTx, 0, len(candidateTxs))
-	var selectedWeight uint64
-	var policyDaIncluded uint64
-	for _, raw := range candidateTxs {
-		tx, txid, wtxid, consumed, parseErr := consensus.ParseTx(raw)
-		if parseErr != nil {
-			return nil, nil, 0, 0, 0, parseErr
-		}
-		if consumed != len(raw) {
-			return nil, nil, 0, 0, 0, errors.New("non-canonical tx bytes in miner input")
-		}
-		if m.cfg.PolicyDaAnchorAntiAbuse {
-			reject, daBytes, _, err := RejectDaAnchorTxPolicy(tx, m.chainState.Utxos, m.cfg.PolicyDaSurchargePerByte)
-			if err != nil || reject {
-				continue
-			}
-			if daBytes > 0 && m.cfg.PolicyMaxDaBytesPerBlock > 0 {
-				next := policyDaIncluded + daBytes
-				if next < policyDaIncluded { // overflow
-					continue
-				}
-				if next > m.cfg.PolicyMaxDaBytesPerBlock {
-					continue
-				}
-				policyDaIncluded = next
-			}
-			if m.cfg.PolicyRejectNonCoinbaseAnchorOutputs {
-				if reject, _, err := RejectNonCoinbaseAnchorOutputs(tx); err != nil || reject {
-					continue
-				}
-			}
-		}
-		if m.cfg.PolicyRejectCoreExtPreActivation {
-			reject, _, err := RejectCoreExtTxPreActivation(tx, m.chainState.Utxos, nextHeight, m.cfg.CoreExtProfiles)
-			if err != nil || reject {
-				continue
-			}
-		}
-		txWeight, _, _, err := consensus.TxWeightAndStats(tx)
-		if err != nil {
-			return nil, nil, 0, 0, 0, err
-		}
-		if txWeight > remainingWeight-selectedWeight {
-			continue
-		}
-		selectedWeight += txWeight
-		parsed = append(parsed, parsedTx{
-			raw:    append([]byte(nil), raw...),
-			txid:   txid,
-			wtxid:  wtxid,
-			weight: txWeight,
-		})
-	}
-
-	wtxids := make([][32]byte, 1, 1+len(parsed))
-	for _, p := range parsed {
-		wtxids = append(wtxids, p.wtxid)
-	}
-	witnessRoot, err := consensus.WitnessMerkleRootWtxids(wtxids)
-	if err != nil {
-		return nil, nil, 0, 0, 0, err
-	}
-	witnessCommitment := consensus.WitnessCommitmentHash(witnessRoot)
-
-	coinbase, err := buildCoinbaseTx(nextHeight, m.chainState.AlreadyGenerated, m.cfg.MineAddress, witnessCommitment)
-	if err != nil {
-		return nil, nil, 0, 0, 0, err
-	}
-	_, coinbaseTxid, _, consumed, err := consensus.ParseTx(coinbase)
-	if err != nil {
-		return nil, nil, 0, 0, 0, err
-	}
-	if consumed != len(coinbase) {
-		return nil, nil, 0, 0, 0, errors.New("coinbase serialization is non-canonical")
-	}
-
-	txids := make([][32]byte, 0, 1+len(parsed))
-	txids = append(txids, coinbaseTxid)
-	for _, p := range parsed {
-		txids = append(txids, p.txid)
-	}
-	merkleRoot, err := consensus.MerkleRootTxids(txids)
+	coinbase, merkleRoot, err := m.buildCoinbaseAndMerkleRoot(nextHeight, witnessCommitment, parsed)
 	if err != nil {
 		return nil, nil, 0, 0, 0, err
 	}
@@ -294,21 +199,9 @@ func (m *Miner) buildBlock(ctx context.Context, txs [][]byte) ([]byte, []uint64,
 	timestamp := chooseValidTimestamp(nextHeight, prevTimestamps, now)
 
 	blockWithoutNonce := makeHeaderPrefix(prevHash, merkleRoot, timestamp, m.cfg.Target)
-	var nonce uint64
-	var headerBytes []byte
-	for {
-		if ctx != nil {
-			select {
-			case <-ctx.Done():
-				return nil, nil, 0, 0, 0, ctx.Err()
-			default:
-			}
-		}
-		headerBytes = consensus.AppendU64le(append([]byte(nil), blockWithoutNonce...), nonce)
-		if err := consensus.PowCheck(headerBytes, m.cfg.Target); err == nil {
-			break
-		}
-		nonce++
+	headerBytes, nonce, err := mineHeaderNonce(ctx, blockWithoutNonce, m.cfg.Target)
+	if err != nil {
+		return nil, nil, 0, 0, 0, err
 	}
 
 	blockBytes := make([]byte, 0, len(headerBytes)+4+len(coinbase))
@@ -319,6 +212,203 @@ func (m *Miner) buildBlock(ctx context.Context, txs [][]byte) ([]byte, []uint64,
 		blockBytes = append(blockBytes, p.raw...)
 	}
 	return blockBytes, prevTimestamps, timestamp, nonce, 1 + len(parsed), nil
+}
+
+func (m *Miner) candidateTransactions(txs [][]byte) [][]byte {
+	candidateTxs := txs
+	maxSelected := m.cfg.MaxTxPerBlock - 1
+	if maxSelected < 0 {
+		maxSelected = 0
+	}
+	if len(candidateTxs) == 0 && m.sync != nil && m.sync.mempool != nil && maxSelected > 0 {
+		candidateTxs = m.sync.mempool.SelectTransactions(maxSelected, int(consensus.MAX_BLOCK_WEIGHT))
+	}
+	if maxSelected >= 0 && len(candidateTxs) > maxSelected {
+		candidateTxs = candidateTxs[:maxSelected]
+	}
+	return candidateTxs
+}
+
+func (m *Miner) remainingWeightBudget(nextHeight uint64) (uint64, error) {
+	coinbaseTemplate, err := buildCoinbaseTx(nextHeight, m.chainState.AlreadyGenerated, m.cfg.MineAddress, [32]byte{})
+	if err != nil {
+		return 0, err
+	}
+	coinbaseWeight, err := canonicalTxWeight(coinbaseTemplate, "coinbase")
+	if err != nil {
+		return 0, err
+	}
+	return consensus.MAX_BLOCK_WEIGHT - coinbaseWeight, nil
+}
+
+func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, nextHeight uint64, remainingWeight uint64) ([]minedCandidate, error) {
+	parsed := make([]minedCandidate, 0, len(candidateTxs))
+	var selectedWeight uint64
+	var policyDaIncluded uint64
+	for _, raw := range candidateTxs {
+		candidate, err := m.parseMiningCandidate(raw)
+		if err != nil {
+			return nil, err
+		}
+		reject, nextDaIncluded, err := m.rejectCandidate(candidate.tx, nextHeight, policyDaIncluded)
+		if err != nil {
+			return nil, err
+		}
+		if reject {
+			continue
+		}
+		if candidate.minedCandidate.weight > remainingWeight-selectedWeight {
+			continue
+		}
+		selectedWeight += candidate.minedCandidate.weight
+		policyDaIncluded = nextDaIncluded
+		parsed = append(parsed, candidate.minedCandidate)
+	}
+	return parsed, nil
+}
+
+type miningCandidate struct {
+	tx             *consensus.Tx
+	minedCandidate minedCandidate
+}
+
+func (m *Miner) parseMiningCandidate(raw []byte) (miningCandidate, error) {
+	tx, txid, wtxid, consumed, parseErr := consensus.ParseTx(raw)
+	if parseErr != nil {
+		return miningCandidate{}, parseErr
+	}
+	if consumed != len(raw) {
+		return miningCandidate{}, errors.New("non-canonical tx bytes in miner input")
+	}
+	txWeight, _, _, err := consensus.TxWeightAndStats(tx)
+	if err != nil {
+		return miningCandidate{}, err
+	}
+	return miningCandidate{
+		tx: tx,
+		minedCandidate: minedCandidate{
+			raw:    append([]byte(nil), raw...),
+			txid:   txid,
+			wtxid:  wtxid,
+			weight: txWeight,
+		},
+	}, nil
+}
+
+func (m *Miner) rejectCandidate(tx *consensus.Tx, nextHeight uint64, policyDaIncluded uint64) (bool, uint64, error) {
+	if m.cfg.PolicyDaAnchorAntiAbuse {
+		reject, daBytes, _, err := RejectDaAnchorTxPolicy(tx, m.chainState.Utxos, m.cfg.PolicyDaSurchargePerByte)
+		if err != nil {
+			return false, policyDaIncluded, err
+		}
+		if reject {
+			return true, policyDaIncluded, nil
+		}
+		nextDaIncluded, ok := updatedPolicyDaBytes(policyDaIncluded, daBytes, m.cfg.PolicyMaxDaBytesPerBlock)
+		if !ok {
+			return true, policyDaIncluded, nil
+		}
+		policyDaIncluded = nextDaIncluded
+		if m.cfg.PolicyRejectNonCoinbaseAnchorOutputs {
+			reject, _, err := RejectNonCoinbaseAnchorOutputs(tx)
+			if err != nil {
+				return false, policyDaIncluded, err
+			}
+			if reject {
+				return true, policyDaIncluded, nil
+			}
+		}
+	}
+	if m.cfg.PolicyRejectCoreExtPreActivation {
+		reject, _, err := RejectCoreExtTxPreActivation(tx, m.chainState.Utxos, nextHeight, m.cfg.CoreExtProfiles)
+		if err != nil {
+			return false, policyDaIncluded, err
+		}
+		if reject {
+			return true, policyDaIncluded, nil
+		}
+	}
+	return false, policyDaIncluded, nil
+}
+
+func updatedPolicyDaBytes(current uint64, daBytes uint64, maxPerBlock uint64) (uint64, bool) {
+	if daBytes == 0 || maxPerBlock == 0 {
+		return current, true
+	}
+	next := current + daBytes
+	if next < current || next > maxPerBlock {
+		return current, false
+	}
+	return next, true
+}
+
+func buildWitnessCommitment(parsed []minedCandidate) ([32]byte, error) {
+	wtxids := make([][32]byte, 1, 1+len(parsed))
+	for _, p := range parsed {
+		wtxids = append(wtxids, p.wtxid)
+	}
+	witnessRoot, err := consensus.WitnessMerkleRootWtxids(wtxids)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return consensus.WitnessCommitmentHash(witnessRoot), nil
+}
+
+func (m *Miner) buildCoinbaseAndMerkleRoot(nextHeight uint64, witnessCommitment [32]byte, parsed []minedCandidate) ([]byte, [32]byte, error) {
+	coinbase, err := buildCoinbaseTx(nextHeight, m.chainState.AlreadyGenerated, m.cfg.MineAddress, witnessCommitment)
+	if err != nil {
+		return nil, [32]byte{}, err
+	}
+	_, coinbaseTxid, _, consumed, err := consensus.ParseTx(coinbase)
+	if err != nil {
+		return nil, [32]byte{}, err
+	}
+	if consumed != len(coinbase) {
+		return nil, [32]byte{}, errors.New("coinbase serialization is non-canonical")
+	}
+	txids := make([][32]byte, 0, 1+len(parsed))
+	txids = append(txids, coinbaseTxid)
+	for _, p := range parsed {
+		txids = append(txids, p.txid)
+	}
+	merkleRoot, err := consensus.MerkleRootTxids(txids)
+	if err != nil {
+		return nil, [32]byte{}, err
+	}
+	return coinbase, merkleRoot, nil
+}
+
+func mineHeaderNonce(ctx context.Context, blockWithoutNonce []byte, target [32]byte) ([]byte, uint64, error) {
+	var nonce uint64
+	for {
+		if ctx != nil {
+			select {
+			case <-ctx.Done():
+				return nil, 0, ctx.Err()
+			default:
+			}
+		}
+		headerBytes := consensus.AppendU64le(append([]byte(nil), blockWithoutNonce...), nonce)
+		if err := consensus.PowCheck(headerBytes, target); err == nil {
+			return headerBytes, nonce, nil
+		}
+		nonce++
+	}
+}
+
+func canonicalTxWeight(raw []byte, label string) (uint64, error) {
+	tx, _, _, consumed, err := consensus.ParseTx(raw)
+	if err != nil {
+		return 0, err
+	}
+	if consumed != len(raw) {
+		return 0, errors.New(label + " serialization is non-canonical")
+	}
+	txWeight, _, _, err := consensus.TxWeightAndStats(tx)
+	if err != nil {
+		return 0, err
+	}
+	return txWeight, nil
 }
 
 func (m *Miner) prevTimestamps(nextHeight uint64) ([]uint64, error) {

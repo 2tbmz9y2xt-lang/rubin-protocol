@@ -70,22 +70,10 @@ func (bs *BlockStore) PutBlock(height uint64, blockHash [32]byte, headerBytes []
 	if bs == nil {
 		return errors.New("nil blockstore")
 	}
-	if len(headerBytes) != consensus.BLOCK_HEADER_BYTES {
-		return fmt.Errorf("invalid header length: %d", len(headerBytes))
-	}
-	computedHash, err := consensus.BlockHash(headerBytes)
-	if err != nil {
+	if err := validateBlockHeaderHash(headerBytes, blockHash); err != nil {
 		return err
 	}
-	if computedHash != blockHash {
-		return errors.New("header hash mismatch")
-	}
-
-	hashHex := hex.EncodeToString(blockHash[:])
-	if err := writeFileIfAbsent(filepath.Join(bs.blocksDir, hashHex+".bin"), blockBytes); err != nil {
-		return err
-	}
-	if err := writeFileIfAbsent(filepath.Join(bs.headersDir, hashHex+".bin"), headerBytes); err != nil {
+	if err := bs.persistBlockBytes(blockHash, headerBytes, blockBytes); err != nil {
 		return err
 	}
 	return bs.SetCanonicalTip(height, blockHash)
@@ -95,19 +83,14 @@ func (bs *BlockStore) SetCanonicalTip(height uint64, blockHash [32]byte) error {
 	if bs == nil {
 		return errors.New("nil blockstore")
 	}
-	hashHex := hex.EncodeToString(blockHash[:])
-	currentLen := uint64(len(bs.index.Canonical))
-	switch {
-	case height > currentLen:
-		return fmt.Errorf("height gap: got %d, expected <= %d", height, currentLen)
-	case height == currentLen:
-		bs.index.Canonical = append(bs.index.Canonical, hashHex)
-	default:
-		if bs.index.Canonical[height] == hashHex {
-			return saveBlockStoreIndex(bs.indexPath, bs.index)
-		}
-		bs.index.Canonical = append(bs.index.Canonical[:height], hashHex)
+	nextCanonical, changed, err := updatedCanonicalHashes(bs.index.Canonical, height, blockHash)
+	if err != nil {
+		return err
 	}
+	if !changed {
+		return saveBlockStoreIndex(bs.indexPath, bs.index)
+	}
+	bs.index.Canonical = nextCanonical
 	return saveBlockStoreIndex(bs.indexPath, bs.index)
 }
 
@@ -145,14 +128,10 @@ func (bs *BlockStore) Tip() (uint64, [32]byte, bool, error) {
 	if bs == nil {
 		return 0, out, false, errors.New("nil blockstore")
 	}
-	if len(bs.index.Canonical) == 0 {
+	height, ok := canonicalTipHeight(bs.index.Canonical)
+	if !ok {
 		return 0, out, false, nil
 	}
-	var height uint64
-	for range bs.index.Canonical {
-		height++
-	}
-	height--
 	hash, err := parseHex32("tip hash", bs.index.Canonical[height])
 	if err != nil {
 		return 0, out, false, err
@@ -207,6 +186,52 @@ func saveBlockStoreIndex(path string, index blockStoreIndexDisk) error {
 	}
 	raw = append(raw, '\n')
 	return writeFileAtomicFn(path, raw, 0o600)
+}
+
+func validateBlockHeaderHash(headerBytes []byte, blockHash [32]byte) error {
+	if len(headerBytes) != consensus.BLOCK_HEADER_BYTES {
+		return fmt.Errorf("invalid header length: %d", len(headerBytes))
+	}
+	computedHash, err := consensus.BlockHash(headerBytes)
+	if err != nil {
+		return err
+	}
+	if computedHash != blockHash {
+		return errors.New("header hash mismatch")
+	}
+	return nil
+}
+
+func (bs *BlockStore) persistBlockBytes(blockHash [32]byte, headerBytes []byte, blockBytes []byte) error {
+	hashHex := hex.EncodeToString(blockHash[:])
+	if err := writeFileIfAbsent(filepath.Join(bs.blocksDir, hashHex+".bin"), blockBytes); err != nil {
+		return err
+	}
+	return writeFileIfAbsent(filepath.Join(bs.headersDir, hashHex+".bin"), headerBytes)
+}
+
+func updatedCanonicalHashes(canonical []string, height uint64, blockHash [32]byte) ([]string, bool, error) {
+	hashHex := hex.EncodeToString(blockHash[:])
+	currentLen := uint64(len(canonical))
+	switch {
+	case height > currentLen:
+		return nil, false, fmt.Errorf("height gap: got %d, expected <= %d", height, currentLen)
+	case height == currentLen:
+		return append(canonical, hashHex), true, nil
+	case canonical[height] == hashHex:
+		return canonical, false, nil
+	default:
+		nextCanonical := append([]string(nil), canonical[:height]...)
+		nextCanonical = append(nextCanonical, hashHex)
+		return nextCanonical, true, nil
+	}
+}
+
+func canonicalTipHeight(canonical []string) (uint64, bool) {
+	if len(canonical) == 0 {
+		return 0, false
+	}
+	return uint64(len(canonical) - 1), true
 }
 
 func writeFileIfAbsent(path string, content []byte) error {

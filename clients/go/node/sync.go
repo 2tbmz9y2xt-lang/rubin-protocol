@@ -51,14 +51,9 @@ func NewSyncEngine(chainState *ChainState, blockStore *BlockStore, cfg SyncConfi
 	if chainState == nil {
 		return nil, errors.New("nil chainstate")
 	}
+	cfg = normalizeSyncConfig(cfg)
 	if err := validateMainnetGenesisGuard(cfg); err != nil {
 		return nil, err
-	}
-	if cfg.HeaderBatchLimit == 0 {
-		cfg.HeaderBatchLimit = 512
-	}
-	if cfg.IBDLagSeconds == 0 {
-		cfg.IBDLagSeconds = defaultIBDLagSeconds
 	}
 	engine := &SyncEngine{
 		chainState: chainState,
@@ -68,12 +63,27 @@ func NewSyncEngine(chainState *ChainState, blockStore *BlockStore, cfg SyncConfi
 	return engine, nil
 }
 
-func validateMainnetGenesisGuard(cfg SyncConfig) error {
-	network := strings.ToLower(strings.TrimSpace(cfg.Network))
-	if network == "" {
-		network = "devnet"
+func normalizeSyncConfig(cfg SyncConfig) SyncConfig {
+	if cfg.HeaderBatchLimit == 0 {
+		cfg.HeaderBatchLimit = 512
 	}
-	if network != "mainnet" {
+	if cfg.IBDLagSeconds == 0 {
+		cfg.IBDLagSeconds = defaultIBDLagSeconds
+	}
+	cfg.Network = normalizedNetworkName(cfg.Network)
+	return cfg
+}
+
+func normalizedNetworkName(network string) string {
+	network = strings.ToLower(strings.TrimSpace(network))
+	if network == "" {
+		return "devnet"
+	}
+	return network
+}
+
+func validateMainnetGenesisGuard(cfg SyncConfig) error {
+	if normalizedNetworkName(cfg.Network) != "mainnet" {
 		return nil
 	}
 	if cfg.ExpectedTarget == nil {
@@ -89,17 +99,7 @@ func (s *SyncEngine) HeaderSyncRequest() HeaderRequest {
 	if s == nil || s.chainState == nil {
 		return HeaderRequest{}
 	}
-	if !s.chainState.HasTip {
-		return HeaderRequest{
-			HasFrom: false,
-			Limit:   s.cfg.HeaderBatchLimit,
-		}
-	}
-	return HeaderRequest{
-		FromHash: s.chainState.TipHash,
-		HasFrom:  true,
-		Limit:    s.cfg.HeaderBatchLimit,
-	}
+	return headerSyncRequest(s.chainState, s.cfg.HeaderBatchLimit)
 }
 
 func (s *SyncEngine) RecordBestKnownHeight(height uint64) {
@@ -133,10 +133,7 @@ func (s *SyncEngine) IsInIBD(nowUnix uint64) bool {
 	tipTimestamp := s.tipTimestamp
 	ibdLag := s.cfg.IBDLagSeconds
 	s.mu.RUnlock()
-	if nowUnix < tipTimestamp {
-		return true
-	}
-	return nowUnix-tipTimestamp > ibdLag
+	return isInIBDWindow(nowUnix, tipTimestamp, ibdLag)
 }
 
 func (s *SyncEngine) ApplyBlock(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {
@@ -159,48 +156,19 @@ func (s *SyncEngine) ApplyBlock(blockBytes []byte, prevTimestamps []uint64) (*Ch
 		return nil, err
 	}
 
-	snapshot, err := stateToDisk(s.chainState)
+	rollbackState, err := s.captureRollbackState()
 	if err != nil {
 		return nil, err
 	}
-	s.mu.RLock()
-	oldTipTimestamp := s.tipTimestamp
-	oldBestKnown := s.bestKnownHeight
-	s.mu.RUnlock()
-
 	summary, err := s.chainState.ConnectBlock(blockBytes, s.cfg.ExpectedTarget, prevTimestamps, s.cfg.ChainID)
 	if err != nil {
 		return nil, err
 	}
-	rollback := func(cause error) error {
-		restoreErr := restoreChainState(s.chainState, snapshot)
-		s.mu.Lock()
-		s.tipTimestamp = oldTipTimestamp
-		s.bestKnownHeight = oldBestKnown
-		s.mu.Unlock()
-		if restoreErr != nil {
-			return fmt.Errorf("%w (rollback failed: %v)", cause, restoreErr)
-		}
-		return cause
+	if err := s.persistAppliedBlock(summary, blockHash, pb.HeaderBytes, blockBytes); err != nil {
+		return nil, s.rollbackApplyBlock(err, rollbackState)
 	}
 
-	if s.blockStore != nil {
-		if err := s.blockStore.PutBlock(summary.BlockHeight, blockHash, pb.HeaderBytes, blockBytes); err != nil {
-			return nil, rollback(err)
-		}
-	}
-	if s.cfg.ChainStatePath != "" {
-		if err := s.chainState.Save(s.cfg.ChainStatePath); err != nil {
-			return nil, rollback(err)
-		}
-	}
-
-	s.mu.Lock()
-	s.tipTimestamp = pb.Header.Timestamp
-	if summary.BlockHeight > s.bestKnownHeight {
-		s.bestKnownHeight = summary.BlockHeight
-	}
-	s.mu.Unlock()
+	s.recordAppliedBlock(summary.BlockHeight, pb.Header.Timestamp)
 	if s.mempool != nil {
 		_ = s.mempool.EvictConfirmed(blockBytes)
 		_ = s.mempool.RemoveConflicting(blockBytes)
@@ -215,6 +183,79 @@ func (s *SyncEngine) SetMempool(mempool *Mempool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.mempool = mempool
+}
+
+type syncRollbackState struct {
+	chainState      chainStateDisk
+	tipTimestamp    uint64
+	bestKnownHeight uint64
+}
+
+func headerSyncRequest(chainState *ChainState, limit uint64) HeaderRequest {
+	if chainState == nil || !chainState.HasTip {
+		return HeaderRequest{Limit: limit}
+	}
+	return HeaderRequest{
+		FromHash: chainState.TipHash,
+		HasFrom:  true,
+		Limit:    limit,
+	}
+}
+
+func isInIBDWindow(nowUnix uint64, tipTimestamp uint64, ibdLag uint64) bool {
+	if nowUnix < tipTimestamp {
+		return true
+	}
+	return nowUnix-tipTimestamp > ibdLag
+}
+
+func (s *SyncEngine) captureRollbackState() (syncRollbackState, error) {
+	snapshot, err := stateToDisk(s.chainState)
+	if err != nil {
+		return syncRollbackState{}, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return syncRollbackState{
+		chainState:      snapshot,
+		tipTimestamp:    s.tipTimestamp,
+		bestKnownHeight: s.bestKnownHeight,
+	}, nil
+}
+
+func (s *SyncEngine) rollbackApplyBlock(cause error, state syncRollbackState) error {
+	restoreErr := restoreChainState(s.chainState, state.chainState)
+	s.mu.Lock()
+	s.tipTimestamp = state.tipTimestamp
+	s.bestKnownHeight = state.bestKnownHeight
+	s.mu.Unlock()
+	if restoreErr != nil {
+		return fmt.Errorf("%w (rollback failed: %v)", cause, restoreErr)
+	}
+	return cause
+}
+
+func (s *SyncEngine) persistAppliedBlock(summary *ChainStateConnectSummary, blockHash [32]byte, headerBytes []byte, blockBytes []byte) error {
+	if s.blockStore != nil {
+		if err := s.blockStore.PutBlock(summary.BlockHeight, blockHash, headerBytes, blockBytes); err != nil {
+			return err
+		}
+	}
+	if s.cfg.ChainStatePath != "" {
+		if err := s.chainState.Save(s.cfg.ChainStatePath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *SyncEngine) recordAppliedBlock(height uint64, timestamp uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tipTimestamp = timestamp
+	if height > s.bestKnownHeight {
+		s.bestKnownHeight = height
+	}
 }
 
 func validateIncomingChainID(blockHeight uint64, chainID [32]byte) error {
