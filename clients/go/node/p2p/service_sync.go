@@ -52,26 +52,3 @@ func (s *Service) hasBlock(blockHash [32]byte) (bool, error) {
 	}
 	return false, err
 }
-
-func (s *Service) broadcastInventory(skip *peer, items []InventoryVector) error {
-	payload, err := encodeInventoryVectors(items)
-	if err != nil {
-		return err
-	}
-	s.peersMu.RLock()
-	peers := make([]*peer, 0, len(s.peers))
-	for _, current := range s.peers {
-		if skip != nil && current.addr() == skip.addr() {
-			continue
-		}
-		peers = append(peers, current)
-	}
-	s.peersMu.RUnlock()
-	for _, current := range peers {
-		if err := current.send(messageInv, payload); err != nil {
-			current.setLastError(err.Error())
-			_ = current.conn.Close()
-		}
-	}
-	return nil
-}
