@@ -26,67 +26,111 @@ jobs:
           script: |
             const MAX_ATTEMPTS = 30;
             const POLL_INTERVAL = 30000; // 30 seconds
+            const PROTECTED_BASE_BRANCHES = new Set(['main', 'master']);
 
-            // --- Find PR number ---
-            let prNumber;
+            async function getOpenPullRequestByNumber(pull_number) {
+              const response = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number
+              });
+              if (response.data.state !== 'open') {
+                return null;
+              }
+              return response.data;
+            }
 
-            if (context.payload.pull_request) {
-              prNumber = context.payload.pull_request.number;
-            } else if (context.payload.workflow_run) {
-              const branch = context.payload.workflow_run.head_branch;
+            function isCandidateBranch(branch) {
+              return !!branch && !PROTECTED_BASE_BRANCHES.has(branch);
+            }
+
+            async function getOpenPullRequestByHead(branch, sha) {
+              if (!isCandidateBranch(branch)) {
+                return null;
+              }
               const prs = await github.rest.pulls.list({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 state: 'open',
-                head: `${context.repo.owner}:${branch}`
+                head: `${context.repo.owner}:${branch}`,
+                per_page: 10
               });
-              if (prs.data.length > 0) prNumber = prs.data[0].number;
+              const exact = prs.data.find(pr => pr.head.sha === sha);
+              return exact ?? null;
             }
 
-            if (!prNumber) {
-              const sha = context.payload.check_suite?.head_sha || context.payload.sha;
+            async function getAssociatedOpenPullRequest(sha) {
               if (!sha) {
-                console.log('No SHA found, skipping');
-                return;
+                return null;
               }
               const pulls = await github.rest.repos.listPullRequestsAssociatedWithCommit({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 commit_sha: sha
               });
-              const open = pulls.data.filter(p => p.state === 'open');
-              if (open.length > 0) {
-                prNumber = open[0].number;
-              } else {
-                const allPrs = await github.rest.pulls.list({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  state: 'open',
-                  per_page: 10
-                });
-                for (const pr of allPrs.data) {
-                  if (pr.head.sha === sha) {
-                    prNumber = pr.number;
-                    break;
-                  }
-                }
+              const exact = pulls.data.filter(pr => pr.state === 'open' && pr.head.sha === sha);
+              if (exact.length === 1) {
+                return exact[0];
               }
+              if (exact.length > 1) {
+                console.log(`Ambiguous open PRs for sha ${sha}: ${exact.map(pr => '#' + pr.number).join(', ')}`);
+              }
+              return null;
             }
 
-            if (!prNumber) {
+            async function resolvePullRequest() {
+              if (context.payload.pull_request) {
+                return getOpenPullRequestByNumber(context.payload.pull_request.number);
+              }
+
+              if (context.payload.workflow_run) {
+                const workflowRun = context.payload.workflow_run;
+                if (workflowRun.event !== 'pull_request') {
+                  console.log(`workflow_run event=${workflowRun.event}; skipping`);
+                  return null;
+                }
+                const fromPayload = workflowRun.pull_requests?.find(pr => pr.state === 'open');
+                if (fromPayload) {
+                  return getOpenPullRequestByNumber(fromPayload.number);
+                }
+                return (
+                  await getOpenPullRequestByHead(workflowRun.head_branch, workflowRun.head_sha)
+                ) ?? (
+                  await getAssociatedOpenPullRequest(workflowRun.head_sha)
+                );
+              }
+
+              if (context.payload.check_suite) {
+                const checkSuite = context.payload.check_suite;
+                const fromPayload = checkSuite.pull_requests?.find(pr => pr.state === 'open');
+                if (fromPayload) {
+                  return getOpenPullRequestByNumber(fromPayload.number);
+                }
+                return (
+                  await getOpenPullRequestByHead(checkSuite.head_branch, checkSuite.head_sha)
+                ) ?? (
+                  await getAssociatedOpenPullRequest(checkSuite.head_sha)
+                );
+              }
+
+              if (context.payload.sha) {
+                return getAssociatedOpenPullRequest(context.payload.sha);
+              }
+
+              return null;
+            }
+
+            const pr = await resolvePullRequest();
+            if (!pr) {
               console.log('No open PR found, skipping');
               return;
             }
 
+            const prNumber = pr.number;
             console.log(`Found PR #${prNumber}`);
 
             // --- Poll for checks to complete ---
-            const pr = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: prNumber
-            });
-            const ref = pr.data.head.sha;
+            const ref = pr.head.sha;
 
             for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
               const checks = await github.rest.checks.listForRef({
