@@ -40,6 +40,26 @@ structure BlockBasicOut where
   sumWeight : Option Nat
   sumDa : Option Nat
 
+structure WeightOut where
+  id : String
+  ok : Bool
+  err : String
+  weight : Option Nat
+  daBytes : Option Nat
+  anchorBytes : Option Nat
+
+structure ValidationOrderOut where
+  id : String
+  ok : Bool
+  err : String
+  firstErr : Option String
+  evaluated : List String
+
+structure DaIntegrityOut where
+  id : String
+  ok : Bool
+  err : String
+
 def goTraceFixturesDigestSHA3_256 : String := "acb7a1752bddb3c4f9106d199370858141d6b63c5ed13c39b9c77d469f0123a5"
 
 def parseOuts : List ParseOut := [
@@ -130,6 +150,31 @@ def blockBasicOuts : List BlockBasicOut := [
   { id := "CV-B-11", ok := false, err := "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED", blockHashHex := none, sumWeight := none, sumDa := none },
   { id := "CV-B-12", ok := false, err := "BLOCK_ERR_DA_BATCH_EXCEEDED", blockHashHex := none, sumWeight := none, sumDa := none },
   { id := "CV-B-13", ok := false, err := "BLOCK_ERR_COINBASE_INVALID", blockHashHex := none, sumWeight := none, sumDa := none }
+]
+
+def weightOuts : List WeightOut := [
+  { id := "WEIGHT-01", ok := true, err := "", weight := some 242, daBytes := some 0, anchorBytes := some 0 },
+  { id := "WEIGHT-03", ok := true, err := "", weight := some 374, daBytes := some 0, anchorBytes := some 0 },
+  { id := "WEIGHT-04", ok := true, err := "", weight := some 1107, daBytes := some 1, anchorBytes := some 32 },
+  { id := "WEIGHT-05", ok := true, err := "", weight := some 507, daBytes := some 1, anchorBytes := some 0 }
+]
+
+def validationOrderOuts : List ValidationOrderOut := [
+  { id := "CV-VO-01", ok := false, err := "BLOCK_ERR_PARSE", firstErr := some "BLOCK_ERR_PARSE", evaluated := ["parse"] },
+  { id := "CV-VO-02", ok := false, err := "BLOCK_ERR_TARGET_INVALID", firstErr := some "BLOCK_ERR_TARGET_INVALID", evaluated := ["parse", "target_range"] },
+  { id := "CV-VO-03", ok := false, err := "BLOCK_ERR_WEIGHT_EXCEEDED", firstErr := some "BLOCK_ERR_WEIGHT_EXCEEDED", evaluated := ["parse", "target_range", "pow", "expected_target", "linkage", "merkle", "witness_commitment", "timestamp", "weight"] },
+  { id := "CV-VO-04", ok := false, err := "TX_ERR_SIG_INVALID", firstErr := some "TX_ERR_SIG_INVALID", evaluated := ["cursor_p2pk", "cursor_htlc", "cursor_vault", "sig_threshold_vault"] },
+  { id := "CV-VO-05", ok := false, err := "BLOCK_ERR_WEIGHT_EXCEEDED", firstErr := some "BLOCK_ERR_WEIGHT_EXCEEDED", evaluated := ["parse", "target_range", "pow", "expected_target", "linkage", "merkle", "witness_commitment", "timestamp", "weight"] }
+]
+
+def daIntegrityOuts : List DaIntegrityOut := [
+  { id := "CV-DA-01", ok := true, err := "" },
+  { id := "CV-DA-02", ok := false, err := "BLOCK_ERR_DA_CHUNK_HASH_INVALID" },
+  { id := "CV-DA-03", ok := false, err := "BLOCK_ERR_DA_INCOMPLETE" },
+  { id := "CV-DA-04", ok := false, err := "BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID" },
+  { id := "CV-DA-05", ok := false, err := "BLOCK_ERR_DA_SET_INVALID" },
+  { id := "CV-DA-06", ok := false, err := "TX_ERR_PARSE" },
+  { id := "CV-DA-CHUNK-COUNT-ZERO", ok := false, err := "TX_ERR_PARSE" }
 ]
 
 end RubinFormal.Refinement

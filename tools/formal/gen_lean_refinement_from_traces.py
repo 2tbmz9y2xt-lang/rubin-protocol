@@ -83,6 +83,25 @@ def _lean_opt_hex(x: Any) -> str:
     return f"some ({_lean_str(_hex0x(x))})"
 
 
+def _lean_opt_str(x: Any) -> str:
+    if x is None:
+        return "none"
+    if not isinstance(x, str):
+        _fail(f"expected string, got: {type(x)}")
+    return f"some {_lean_str(x)}"
+
+
+def _lean_str_list(x: Any) -> str:
+    if not isinstance(x, list):
+        _fail(f"expected list[str], got: {type(x)}")
+    out: list[str] = []
+    for item in x:
+        if not isinstance(item, str):
+            _fail(f"expected string element, got: {type(item)}")
+        out.append(_lean_str(item))
+    return "[" + ", ".join(out) + "]"
+
+
 def _require_keys(obj: dict[str, Any], keys: list[str], ctx: str) -> None:
     for k in keys:
         if k not in obj:
@@ -95,6 +114,9 @@ def _emit_go_trace_v1(header: Header, entries: list[dict[str, Any]]) -> str:
     pow_rows: list[tuple[str, str]] = []
     utxo_rows: list[tuple[str, str]] = []
     block_rows: list[tuple[str, str]] = []
+    weight_rows: list[tuple[str, str]] = []
+    validation_order_rows: list[tuple[str, str]] = []
+    da_integrity_rows: list[tuple[str, str]] = []
 
     for e in entries:
         gate = str(e.get("gate", ""))
@@ -190,6 +212,49 @@ def _emit_go_trace_v1(header: Header, entries: list[dict[str, Any]]) -> str:
                 + _lean_opt_nat(outputs.get("sum_da"))
                 + " }"
             ))
+        elif gate == "CV-WEIGHT":
+            weight_rows.append((
+                vector_id,
+                "{ id := "
+                + _lean_str(vector_id)
+                + ", ok := "
+                + ("true" if ok else "false")
+                + ", err := "
+                + _lean_str(err)
+                + ", weight := "
+                + _lean_opt_nat(outputs.get("weight"))
+                + ", daBytes := "
+                + _lean_opt_nat(outputs.get("da_bytes"))
+                + ", anchorBytes := "
+                + _lean_opt_nat(outputs.get("anchor_bytes"))
+                + " }"
+            ))
+        elif gate == "CV-VALIDATION-ORDER":
+            validation_order_rows.append((
+                vector_id,
+                "{ id := "
+                + _lean_str(vector_id)
+                + ", ok := "
+                + ("true" if ok else "false")
+                + ", err := "
+                + _lean_str(err)
+                + ", firstErr := "
+                + _lean_opt_str(outputs.get("first_err"))
+                + ", evaluated := "
+                + _lean_str_list(outputs.get("evaluated", []))
+                + " }"
+            ))
+        elif gate == "CV-DA-INTEGRITY":
+            da_integrity_rows.append((
+                vector_id,
+                "{ id := "
+                + _lean_str(vector_id)
+                + ", ok := "
+                + ("true" if ok else "false")
+                + ", err := "
+                + _lean_str(err)
+                + " }"
+            ))
         else:
             # non-critical gate for refinement: ignore
             continue
@@ -245,6 +310,26 @@ def _emit_go_trace_v1(header: Header, entries: list[dict[str, Any]]) -> str:
     out.append("  sumWeight : Option Nat")
     out.append("  sumDa : Option Nat")
     out.append("")
+    out.append("structure WeightOut where")
+    out.append("  id : String")
+    out.append("  ok : Bool")
+    out.append("  err : String")
+    out.append("  weight : Option Nat")
+    out.append("  daBytes : Option Nat")
+    out.append("  anchorBytes : Option Nat")
+    out.append("")
+    out.append("structure ValidationOrderOut where")
+    out.append("  id : String")
+    out.append("  ok : Bool")
+    out.append("  err : String")
+    out.append("  firstErr : Option String")
+    out.append("  evaluated : List String")
+    out.append("")
+    out.append("structure DaIntegrityOut where")
+    out.append("  id : String")
+    out.append("  ok : Bool")
+    out.append("  err : String")
+    out.append("")
     # Do not embed current repo commit into generated Lean module.
     # Otherwise `git diff --exit-code` in CI would fail on every commit
     # even when trace semantics are unchanged.
@@ -255,6 +340,9 @@ def _emit_go_trace_v1(header: Header, entries: list[dict[str, Any]]) -> str:
     out.append(list_block("powOuts", "PowOut", pow_rows))
     out.append(list_block("utxoBasicOuts", "UtxoBasicOut", utxo_rows))
     out.append(list_block("blockBasicOuts", "BlockBasicOut", block_rows))
+    out.append(list_block("weightOuts", "WeightOut", weight_rows))
+    out.append(list_block("validationOrderOuts", "ValidationOrderOut", validation_order_rows))
+    out.append(list_block("daIntegrityOuts", "DaIntegrityOut", da_integrity_rows))
     out.append("end RubinFormal.Refinement")
     out.append("")
     return "\n".join(out)

@@ -6,6 +6,7 @@ import RubinFormal.PowV1
 import RubinFormal.TxWeightV2
 import RubinFormal.UtxoBasicV1
 import RubinFormal.BlockBasicV1
+import RubinFormal.DaIntegrityV1
 import RubinFormal.Refinement.GoTraceV1
 
 import RubinFormal.Conformance.CVParseVectors
@@ -13,6 +14,9 @@ import RubinFormal.Conformance.CVSighashVectors
 import RubinFormal.Conformance.CVPowVectors
 import RubinFormal.Conformance.CVUtxoBasicVectors
 import RubinFormal.Conformance.CVBlockBasicVectors
+import RubinFormal.Conformance.CVWeightVectors
+import RubinFormal.Conformance.CVValidationOrderVectors
+import RubinFormal.Conformance.CVDaIntegrityVectors
 
 set_option maxHeartbeats 10000000
 set_option maxRecDepth 50000
@@ -69,9 +73,7 @@ private def isKnownUtxoAcceptDrift (id expectedErr : String) : Bool :=
 
 private def checkParse (o : ParseOut) : Bool :=
   match findById? o.id RubinFormal.Conformance.cvParseVectors (fun v => v.id) with
-  -- Vector not in Lean model scope (toy-model phase0): skip rather than fail.
-  -- Ensures refinement only fails when the model has a prediction that disagrees with Go.
-  | none => true
+  | none => false
   | some v =>
       match RubinFormal.decodeHex? v.txHex with
       | none => false
@@ -170,7 +172,7 @@ private def toUtxoPairs? (us : List RubinFormal.Conformance.CVUtxoEntry) : Optio
 
 private def checkUtxoBasic (o : UtxoBasicOut) : Bool :=
   match findById? o.id RubinFormal.Conformance.cvUtxoBasicVectors (fun v => v.id) with
-  | none => true
+  | none => false
   | some v =>
       match RubinFormal.decodeHex? v.txHex, toUtxoPairs? v.utxos with
       | some tx, some utxos =>
@@ -214,7 +216,7 @@ private def isKnownBlockDrift (id _gotErr expectedErr : String) : Bool :=
 
 private def checkBlockBasic (o : BlockBasicOut) : Bool :=
   match findById? o.id RubinFormal.Conformance.cvBlockBasicVectors (fun v => v.id) with
-  | none => true
+  | none => false
   | some v =>
       match RubinFormal.decodeHex? v.blockHex with
       | none => false
@@ -238,12 +240,67 @@ private def checkBlockBasic (o : BlockBasicOut) : Bool :=
           | .error e =>
               (!o.ok) && (o.err == e || isKnownBlockDrift o.id e o.err)
 
+private def checkWeight (o : WeightOut) : Bool :=
+  match findById? o.id RubinFormal.Conformance.cvWeightVectors (fun v => v.id) with
+  | none => false
+  | some v =>
+      match RubinFormal.decodeHex? v.txHex with
+      | none => false
+      | some tx =>
+          match TxWeightV2.txWeightAndStats tx with
+          | .ok st =>
+              o.ok &&
+              o.weight == some st.weight &&
+              o.daBytes == some st.daBytes &&
+              o.anchorBytes == some st.anchorBytes
+          | .error e =>
+              (!o.ok) && (o.err == e)
+
+private def evalOrder (checks : List RubinFormal.Conformance.ValidationCheck) : (Option String) × (List String) :=
+  let rec go (rest : List RubinFormal.Conformance.ValidationCheck) (evaluated : List String) : (Option String) × (List String) :=
+    match rest with
+    | [] => (none, evaluated)
+    | c :: cs =>
+        let evaluated' := evaluated ++ [c.name]
+        if c.fails then
+          (some c.err, evaluated')
+        else
+          go cs evaluated'
+  go checks []
+
+private def checkValidationOrder (o : ValidationOrderOut) : Bool :=
+  match findById? o.id RubinFormal.Conformance.cvValidationOrderVectors (fun v => v.id) with
+  | none => false
+  | some v =>
+      let (firstErr, evaluated) := evalOrder v.checks
+      let ok := firstErr.isNone
+      (o.ok == ok) &&
+      (o.firstErr == firstErr) &&
+      (o.evaluated == evaluated) &&
+      (if ok then o.err == "" else o.err == firstErr.getD "")
+
+private def checkDaIntegrity (o : DaIntegrityOut) : Bool :=
+  match findById? o.id RubinFormal.Conformance.cvDaIntegrityVectors (fun v => v.id) with
+  | none => false
+  | some v =>
+      match RubinFormal.decodeHex? v.blockHex with
+      | none => false
+      | some blockBytes =>
+          let ph := decodeHexOpt? v.expectedPrevHashHex
+          let tgt := decodeHexOpt? v.expectedTargetHex
+          match RubinFormal.DaIntegrityV1.validateDaIntegrityGate blockBytes ph tgt with
+          | .ok _ => o.ok
+          | .error e => (!o.ok) && (o.err == e)
+
 def allGoTraceV1Ok : Bool :=
   parseOuts.all checkParse &&
   sighashOuts.all checkSighash &&
   powOuts.all checkPow &&
   utxoBasicOuts.all checkUtxoBasic &&
-  blockBasicOuts.all checkBlockBasic
+  blockBasicOuts.all checkBlockBasic &&
+  weightOuts.all checkWeight &&
+  validationOrderOuts.all checkValidationOrder &&
+  daIntegrityOuts.all checkDaIntegrity
 
 def firstGoTraceV1Mismatch : Option String :=
   let mk (gate : String) (id : String) : Option String := some (gate ++ ":" ++ id)
@@ -261,6 +318,15 @@ def firstGoTraceV1Mismatch : Option String :=
               | none =>
                   match blockBasicOuts.find? (fun o => !checkBlockBasic o) with
                   | some o => mk "CV-BLOCK-BASIC" o.id
-                  | none => none
+                  | none =>
+                      match weightOuts.find? (fun o => !checkWeight o) with
+                      | some o => mk "CV-WEIGHT" o.id
+                      | none =>
+                          match validationOrderOuts.find? (fun o => !checkValidationOrder o) with
+                          | some o => mk "CV-VALIDATION-ORDER" o.id
+                          | none =>
+                              match daIntegrityOuts.find? (fun o => !checkDaIntegrity o) with
+                              | some o => mk "CV-DA-INTEGRITY" o.id
+                              | none => none
 
 end RubinFormal.Refinement
