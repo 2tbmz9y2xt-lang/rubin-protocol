@@ -59,13 +59,14 @@ func (m *Mempool) AddTx(txBytes []byte) error {
 	if m == nil {
 		return errors.New("nil mempool")
 	}
-	checked, inputs, err := m.checkTransaction(txBytes)
-	if err != nil {
-		return err
-	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	checked, inputs, err := m.checkTransactionLocked(txBytes)
+	if err != nil {
+		return err
+	}
 
 	if err := m.validateAdmissionLocked(checked.TxID, inputs); err != nil {
 		return err
@@ -121,7 +122,9 @@ func (m *Mempool) RemoveConflicting(blockBytes []byte) error {
 	return nil
 }
 
-func (m *Mempool) checkTransaction(txBytes []byte) (*consensus.CheckedTransaction, []consensus.Outpoint, error) {
+// checkTransactionLocked validates a transaction against the current chainstate.
+// Caller MUST hold m.mu (read or write) to prevent TOCTOU races on m.chainState.
+func (m *Mempool) checkTransactionLocked(txBytes []byte) (*consensus.CheckedTransaction, []consensus.Outpoint, error) {
 	nextHeight, _, err := nextBlockContext(m.chainState)
 	if err != nil {
 		return nil, nil, err

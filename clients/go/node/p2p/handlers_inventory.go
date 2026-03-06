@@ -1,5 +1,10 @@
 package p2p
 
+import (
+	"errors"
+	"io/fs"
+)
+
 func (p *peer) handleInv(payload []byte) error {
 	items, err := decodeInventoryVectors(payload)
 	if err != nil {
@@ -85,7 +90,10 @@ func (p *peer) blockBytes(blockHash [32]byte) ([]byte, bool, error) {
 	defer p.service.chainMu.Unlock()
 	blockBytes, err := p.service.cfg.BlockStore.GetBlockByHash(blockHash)
 	if err != nil {
-		return nil, false, nil
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, err
 	}
 	return blockBytes, true, nil
 }

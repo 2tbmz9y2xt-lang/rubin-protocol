@@ -249,6 +249,14 @@ func TestDevnetSoakWithTxGenAndRestart(t *testing.T) {
 	}
 
 	assertSubmittedTxsConfirmed(t, submittedTxs, nodeA, nodeB, nodeC)
+
+	// Verify txs were actually mined in blocks (not just sitting in mempool).
+	// After coinbase maturity + txInterval, blocks should contain >1 tx.
+	minTxsExpected := int((targetHeight - consensus.COINBASE_MATURITY) / txInterval)
+	if len(submittedTxs) < minTxsExpected-1 {
+		t.Fatalf("expected at least %d submitted txs, got %d", minTxsExpected-1, len(submittedTxs))
+	}
+
 	assertSameTip(t, nodeA, nodeB, nodeC)
 	assertSameChainStateFile(t, nodeA, nodeB, nodeC)
 	assertSoakConsensusMetrics(t, nodeA, nodeB, nodeC)
@@ -517,8 +525,10 @@ func assertSubmittedTxsConfirmed(t *testing.T, txids [][32]byte, nodes ...*devne
 		t.Fatalf("expected submitted txs during soak test")
 	}
 	for _, current := range nodes {
+		// Use disk-loaded chainstate to avoid TOCTOU race with live state.
+		state := loadChainStateMust(t, current)
 		for _, txid := range txids {
-			if !chainStateHasTxOutputs(current.chainState, txid) {
+			if !chainStateHasTxOutputs(state, txid) {
 				t.Fatalf("%s missing confirmed tx %x", current.name, txid)
 			}
 		}
@@ -765,6 +775,16 @@ func assertSoakConsensusMetrics(t *testing.T, nodes ...*devnetNode) {
 	}
 	want := nodes[0]
 	wantState := loadChainStateMust(t, want)
+
+	// Verify AlreadyGenerated matches cumulative subsidy formula (not just cross-node match)
+	wantSubsidy := cumulativeSubsidy(wantState.Height)
+	if wantState.AlreadyGenerated != wantSubsidy {
+		t.Fatalf(
+			"%s already_generated=%d, want cumulativeSubsidy(%d)=%d",
+			want.name, wantState.AlreadyGenerated, wantState.Height, wantSubsidy,
+		)
+	}
+
 	for _, current := range nodes[1:] {
 		got := loadChainStateMust(t, current)
 		if got.Height != wantState.Height {
