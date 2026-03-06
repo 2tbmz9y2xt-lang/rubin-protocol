@@ -75,7 +75,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "invalid genesis file: %v\n", err)
 		return 2
 	}
-	if *genesisFile != "" {
+	var zeroChainID [32]byte
+	if chainIDFromGenesis != zeroChainID {
 		cfg.ChainID = fmt.Sprintf("%x", chainIDFromGenesis[:])
 	}
 	if err := node.ValidateConfig(cfg); err != nil {
@@ -293,7 +294,7 @@ type genesisPack struct {
 func parseGenesisChainID(path string) ([32]byte, error) {
 	var out [32]byte
 	if strings.TrimSpace(path) == "" {
-		return out, nil
+		return node.DevnetGenesisChainID(), nil
 	}
 	raw, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {

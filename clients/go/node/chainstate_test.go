@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -153,14 +154,69 @@ func TestChainStateConnectBlockDeterministicUpdate(t *testing.T) {
 	}
 }
 
-func TestChainStateConnectBlockRejectsWrongGenesisChainID(t *testing.T) {
+func TestChainStateConnectBlockAcceptsLocalGenesisWithConfiguredChainID(t *testing.T) {
 	target := consensus.POW_LIMIT
 	st := NewChainState()
-	var badChainID [32]byte
-	badChainID[0] = 0x01
+	wroot, err := consensus.WitnessMerkleRootWtxids([][32]byte{{}})
+	if err != nil {
+		t.Fatalf("witness merkle root: %v", err)
+	}
+	commitment := consensus.WitnessCommitmentHash(wroot)
+	block := buildSingleTxBlock(
+		t,
+		[32]byte{},
+		target,
+		2,
+		coinbaseTxWithOutputs(0, []testOutput{
+			{value: 0, covenantType: consensus.COV_TYPE_ANCHOR, covenantData: commitment[:]},
+		}),
+	)
 
-	if _, err := st.ConnectBlock(devnetGenesisBlockBytes, &target, nil, badChainID); err == nil {
-		t.Fatalf("expected genesis chain_id mismatch")
+	summary, err := st.ConnectBlock(block, &target, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("connect local genesis block: %v", err)
+	}
+	if summary.BlockHeight != 0 {
+		t.Fatalf("block height=%d, want 0", summary.BlockHeight)
+	}
+	if !st.HasTip || st.Height != 0 {
+		t.Fatalf("unexpected tip after local genesis: has_tip=%v height=%d", st.HasTip, st.Height)
+	}
+	if st.TipHash == devnetGenesisBlockHash {
+		t.Fatalf("local genesis unexpectedly matched embedded devnet genesis hash")
+	}
+}
+
+func TestChainStateConnectBlockHeightZeroEnforcesExpectedTarget(t *testing.T) {
+	target := consensus.POW_LIMIT
+	wrongTarget := target
+	wrongTarget[0] = 0x7f
+	st := NewChainState()
+	wroot, err := consensus.WitnessMerkleRootWtxids([][32]byte{{}})
+	if err != nil {
+		t.Fatalf("witness merkle root: %v", err)
+	}
+	commitment := consensus.WitnessCommitmentHash(wroot)
+	block := buildSingleTxBlock(
+		t,
+		[32]byte{},
+		target,
+		2,
+		coinbaseTxWithOutputs(0, []testOutput{
+			{value: 0, covenantType: consensus.COV_TYPE_ANCHOR, covenantData: commitment[:]},
+		}),
+	)
+
+	_, err = st.ConnectBlock(block, &wrongTarget, nil, devnetGenesisChainID)
+	if err == nil {
+		t.Fatalf("expected target mismatch")
+	}
+	var txErr *consensus.TxError
+	if !errors.As(err, &txErr) {
+		t.Fatalf("expected consensus.TxError, got %T", err)
+	}
+	if txErr.Code != consensus.BLOCK_ERR_TARGET_INVALID {
+		t.Fatalf("error code=%s, want %s", txErr.Code, consensus.BLOCK_ERR_TARGET_INVALID)
 	}
 }
 

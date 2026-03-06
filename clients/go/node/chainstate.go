@@ -37,8 +37,8 @@ func init() {
 }
 
 var (
-	devnetGenesisBlockHash [32]byte
-	devnetGenesisChainID   [32]byte
+	devnetGenesisBlockHash  [32]byte
+	devnetGenesisChainID    [32]byte
 	genesisChainIDFromMagic [32]byte
 )
 
@@ -149,15 +149,6 @@ func (s *ChainState) ConnectBlock(
 	if err != nil {
 		return nil, err
 	}
-	pb, err := consensus.ParseBlockBytes(blockBytes)
-	if err != nil {
-		return nil, err
-	}
-	var zeroChainID [32]byte
-	if blockHeight == 0 && chainID != zeroChainID {
-		return s.connectGenesisBlock(pb, blockBytes, chainID)
-	}
-
 	if s.Utxos == nil {
 		s.Utxos = make(map[consensus.Outpoint]consensus.UtxoEntry)
 	}
@@ -178,6 +169,10 @@ func (s *ChainState) ConnectBlock(
 		return nil, err
 	}
 
+	pb, err := consensus.ParseBlockBytes(blockBytes)
+	if err != nil {
+		return nil, err
+	}
 	blockHash, err := consensus.BlockHash(pb.HeaderBytes)
 	if err != nil {
 		return nil, err
@@ -202,53 +197,8 @@ func (s *ChainState) ConnectBlock(
 	}, nil
 }
 
-func (s *ChainState) connectGenesisBlock(pb *consensus.ParsedBlock, blockBytes []byte, chainID [32]byte) (*ChainStateConnectSummary, error) {
-	var zeroID [32]byte
-	if chainID != zeroID && chainID != devnetGenesisChainID {
-		return nil, errors.New("genesis chain_id mismatch")
-	}
-	if !bytes.Equal(blockBytes, devnetGenesisBlockBytes) {
-		return nil, errors.New("unexpected genesis block bytes")
-	}
-	if len(pb.Txs) != 1 {
-		return nil, errors.New("genesis must contain exactly one tx")
-	}
-	blockHash, err := consensus.BlockHash(pb.HeaderBytes)
-	if err != nil {
-		return nil, err
-	}
-	if blockHash != devnetGenesisBlockHash {
-		return nil, errors.New("unexpected genesis block hash")
-	}
-	txid := pb.Txids[0]
-	genesisUtxos := make(map[consensus.Outpoint]consensus.UtxoEntry, len(pb.Txs[0].Outputs))
-	for i, out := range pb.Txs[0].Outputs {
-		if out.CovenantType == consensus.COV_TYPE_ANCHOR || out.CovenantType == consensus.COV_TYPE_DA_COMMIT {
-			continue
-		}
-		genesisUtxos[consensus.Outpoint{Txid: txid, Vout: uint32(i)}] = consensus.UtxoEntry{
-			Value:             out.Value,
-			CovenantType:      out.CovenantType,
-			CovenantData:      append([]byte(nil), out.CovenantData...),
-			CreationHeight:    0,
-			CreatedByCoinbase: true,
-		}
-	}
-
-	s.HasTip = true
-	s.Height = 0
-	s.TipHash = blockHash
-	s.AlreadyGenerated = 0
-	s.Utxos = genesisUtxos
-
-	return &ChainStateConnectSummary{
-		BlockHeight:        0,
-		BlockHash:          blockHash,
-		SumFees:            0,
-		AlreadyGenerated:   0,
-		AlreadyGeneratedN1: 0,
-		UtxoCount:          uint64(len(genesisUtxos)),
-	}, nil
+func DevnetGenesisChainID() [32]byte {
+	return devnetGenesisChainID
 }
 
 func nextBlockContext(s *ChainState) (uint64, *[32]byte, error) {
