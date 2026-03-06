@@ -1,6 +1,8 @@
 import RubinFormal.CriticalInvariants
 import RubinFormal.ByteWire
 import RubinFormal.ArithmeticSafety
+import RubinFormal.SubsidyV1
+import RubinFormal.DevnetProperties
 
 namespace RubinFormal
 
@@ -30,6 +32,14 @@ def valueConservationStatement : Prop :=
   (∀ sumIn sumOut fee : Nat, valueConserved sumIn sumOut → valueConserved (sumIn + fee) sumOut) ∧
   (∀ sumIn sumOut fee : Nat, inU128 sumIn → valueConserved sumIn sumOut → valueConserved (satAddU128 sumIn fee) sumOut)
 def daSetIntegrityStatement : Prop := ¬ daChunkSetValid []
+def devnetGenesisValidUtxoStatement : Prop :=
+  Conformance.devnetGenesisVectorPass devnetGenesisVector0 = true
+def devnetSubsidyBoundedStatement : Prop :=
+  ∀ n : Nat, accumulateSubsidy n ≤ SubsidyV1.MINEABLE_CAP
+def devnetChainIdDeterministicStatement : Prop :=
+  ∀ g1 g2 : Bytes, g1 = g2 → deriveChainId g1 = deriveChainId g2
+def devnetCoinbaseMaturityStatement : Prop :=
+  Conformance.devnetMaturityVectorPass devnetMaturityVector0 = true
 
 theorem transaction_wire_proved : transactionWireStatement := by
   refine ⟨?_, ?_, ?_⟩
@@ -89,5 +99,19 @@ theorem value_conservation_proved : valueConservationStatement := by
 
 theorem da_set_integrity_proved : daSetIntegrityStatement := by
   simpa [daSetIntegrityStatement] using da_chunk_set_requires_nonempty
+
+theorem devnet_genesis_valid_utxo_proved : devnetGenesisValidUtxoStatement := by
+  simpa [devnetGenesisValidUtxoStatement] using thm_devnet_genesis_valid_utxo
+
+theorem devnet_subsidy_bounded_proved : devnetSubsidyBoundedStatement := by
+  intro n
+  exact thm_devnet_subsidy_bounded n
+
+theorem devnet_chainid_deterministic_proved : devnetChainIdDeterministicStatement := by
+  intro g1 g2 h
+  exact thm_devnet_chainid_deterministic g1 g2 h
+
+theorem devnet_coinbase_maturity_proved : devnetCoinbaseMaturityStatement := by
+  simpa [devnetCoinbaseMaturityStatement] using thm_devnet_coinbase_maturity
 
 end RubinFormal
