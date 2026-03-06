@@ -183,21 +183,18 @@ func openSSLPublicKeyBytesWithErrBuf(pkey *C.EVP_PKEY, expectedPubkeyLen int, er
 	return pubkey, nil
 }
 
-func newOpenSSLRawKeypair(alg string, expectedPubkeyLen int) (*C.EVP_PKEY, []byte, error) {
+func loadOpenSSLRawKeypair(alg string, expectedPubkeyLen int, action string, load func(errBuf []byte) *C.EVP_PKEY) (*C.EVP_PKEY, []byte, error) {
 	if err := ensureOpenSSLBootstrap(); err != nil {
 		return nil, nil, err
 	}
-	if err := validateOpenSSLAlgorithm(alg, expectedPubkeyLen, "keygen"); err != nil {
+	if err := validateOpenSSLAlgorithm(alg, expectedPubkeyLen, action); err != nil {
 		return nil, nil, err
 	}
 
 	errBuf := newOpenSSLErrorBuffer()
-	cAlg := C.CString(alg)
-	defer C.free(unsafe.Pointer(cAlg))
-
-	pkey := C.rubin_keygen(cAlg, (*C.char)(unsafe.Pointer(&errBuf[0])), C.size_t(len(errBuf)))
+	pkey := load(errBuf)
 	if pkey == nil {
-		return nil, nil, fmt.Errorf("openssl keygen failed: %s", cStringTrim0(errBuf))
+		return nil, nil, fmt.Errorf("openssl %s failed: %s", action, cStringTrim0(errBuf))
 	}
 	pubkey, err := openSSLPublicKeyBytesWithErrBuf(pkey, expectedPubkeyLen, errBuf)
 	if err != nil {
@@ -207,37 +204,32 @@ func newOpenSSLRawKeypair(alg string, expectedPubkeyLen int) (*C.EVP_PKEY, []byt
 	return pkey, pubkey, nil
 }
 
+func newOpenSSLRawKeypair(alg string, expectedPubkeyLen int) (*C.EVP_PKEY, []byte, error) {
+	cAlg := C.CString(alg)
+	defer C.free(unsafe.Pointer(cAlg))
+
+	return loadOpenSSLRawKeypair(alg, expectedPubkeyLen, "keygen", func(errBuf []byte) *C.EVP_PKEY {
+		return C.rubin_keygen(cAlg, (*C.char)(unsafe.Pointer(&errBuf[0])), C.size_t(len(errBuf)))
+	})
+}
+
 func openSSLPublicKeyBytes(pkey *C.EVP_PKEY, expectedPubkeyLen int) ([]byte, error) {
 	return openSSLPublicKeyBytesWithErrBuf(pkey, expectedPubkeyLen, nil)
 }
 
 func newOpenSSLRawKeypairFromDER(alg string, der []byte, expectedPubkeyLen int) (*C.EVP_PKEY, []byte, error) {
-	if err := ensureOpenSSLBootstrap(); err != nil {
-		return nil, nil, err
-	}
-	if err := validateOpenSSLAlgorithm(alg, expectedPubkeyLen, "key import"); err != nil {
-		return nil, nil, err
-	}
 	if len(der) == 0 {
 		return nil, nil, fmt.Errorf("empty private key DER")
 	}
 
-	errBuf := newOpenSSLErrorBuffer()
-	pkey := C.rubin_parse_private_key_der(
-		(*C.uchar)(unsafe.Pointer(&der[0])),
-		C.size_t(len(der)),
-		(*C.char)(unsafe.Pointer(&errBuf[0])),
-		C.size_t(len(errBuf)),
-	)
-	if pkey == nil {
-		return nil, nil, fmt.Errorf("openssl private key import failed: %s", cStringTrim0(errBuf))
-	}
-	pubkey, err := openSSLPublicKeyBytes(pkey, expectedPubkeyLen)
-	if err != nil {
-		C.EVP_PKEY_free(pkey)
-		return nil, nil, err
-	}
-	return pkey, pubkey, nil
+	return loadOpenSSLRawKeypair(alg, expectedPubkeyLen, "private key import", func(errBuf []byte) *C.EVP_PKEY {
+		return C.rubin_parse_private_key_der(
+			(*C.uchar)(unsafe.Pointer(&der[0])),
+			C.size_t(len(der)),
+			(*C.char)(unsafe.Pointer(&errBuf[0])),
+			C.size_t(len(errBuf)),
+		)
+	})
 }
 
 func signOpenSSLDigest32(pkey *C.EVP_PKEY, digest [32]byte, maxSigBytes int, exactSigBytes int) ([]byte, error) {
@@ -245,7 +237,7 @@ func signOpenSSLDigest32(pkey *C.EVP_PKEY, digest [32]byte, maxSigBytes int, exa
 		return nil, err
 	}
 
-	errBuf := make([]byte, 512)
+	errBuf := newOpenSSLErrorBuffer()
 	signature := make([]byte, maxSigBytes)
 	var signatureLen C.size_t
 
@@ -296,15 +288,18 @@ func (k *MLDSA87Keypair) PubkeyBytes() []byte {
 	return append([]byte(nil), k.pubkey...)
 }
 
+func newMLDSA87Keypair(pkey *C.EVP_PKEY, pub []byte) *MLDSA87Keypair {
+	kp := &MLDSA87Keypair{pkey: pkey, pubkey: pub}
+	runtime.SetFinalizer(kp, func(k *MLDSA87Keypair) { k.Close() })
+	return kp
+}
+
 func NewMLDSA87Keypair() (*MLDSA87Keypair, error) {
 	pkey, pub, err := newOpenSSLRawKeypair("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES)
 	if err != nil {
 		return nil, err
 	}
-
-	kp := &MLDSA87Keypair{pkey: pkey, pubkey: pub}
-	runtime.SetFinalizer(kp, func(k *MLDSA87Keypair) { k.Close() })
-	return kp, nil
+	return newMLDSA87Keypair(pkey, pub), nil
 }
 
 func NewMLDSA87KeypairFromDER(der []byte) (*MLDSA87Keypair, error) {
@@ -312,10 +307,7 @@ func NewMLDSA87KeypairFromDER(der []byte) (*MLDSA87Keypair, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	kp := &MLDSA87Keypair{pkey: pkey, pubkey: pub}
-	runtime.SetFinalizer(kp, func(k *MLDSA87Keypair) { k.Close() })
-	return kp, nil
+	return newMLDSA87Keypair(pkey, pub), nil
 }
 
 func (k *MLDSA87Keypair) SignDigest32(digest [32]byte) ([]byte, error) {
@@ -333,7 +325,7 @@ func (k *MLDSA87Keypair) PrivateKeyDER() ([]byte, error) {
 		return nil, fmt.Errorf("nil keypair")
 	}
 
-	errBuf := make([]byte, 512)
+	errBuf := newOpenSSLErrorBuffer()
 	var der *C.uchar
 	var derLen C.size_t
 	if C.rubin_private_key_to_der(
