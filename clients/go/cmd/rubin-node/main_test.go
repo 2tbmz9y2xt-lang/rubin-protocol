@@ -398,7 +398,7 @@ func TestRunNonDryRunExitsOnSignal(t *testing.T) {
 			p, _ := os.FindProcess(os.Getpid())
 			_ = p.Signal(syscall.SIGINT)
 		}()
-		code := run([]string{"--datadir", dir}, os.Stdout, os.Stderr)
+		code := run([]string{"--datadir", dir, "--bind", "127.0.0.1:0"}, os.Stdout, os.Stderr)
 		os.Exit(code)
 		return
 	}

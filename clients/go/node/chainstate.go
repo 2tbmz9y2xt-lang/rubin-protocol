@@ -201,6 +201,14 @@ func DevnetGenesisChainID() [32]byte {
 	return devnetGenesisChainID
 }
 
+func DevnetGenesisBlockHash() [32]byte {
+	return devnetGenesisBlockHash
+}
+
+func DevnetGenesisBlockBytes() []byte {
+	return append([]byte(nil), devnetGenesisBlockBytes...)
+}
+
 func nextBlockContext(s *ChainState) (uint64, *[32]byte, error) {
 	if s == nil {
 		return 0, nil, errors.New("nil chainstate")
