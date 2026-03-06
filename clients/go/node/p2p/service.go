@@ -32,6 +32,7 @@ type ServiceConfig struct {
 	SyncEngine         *node.SyncEngine
 	BlockStore         *node.BlockStore
 	TxPool             TxPool
+	TxMetadataFunc     func([]byte) (node.RelayTxMetadata, error)
 	Now                func() time.Time
 }
 
@@ -139,7 +140,11 @@ func (s *Service) AnnounceTx(txBytes []byte) error {
 	if consumed != len(txBytes) {
 		return errors.New("non-canonical tx bytes")
 	}
-	s.cfg.TxPool.Put(txid, txBytes)
+	meta, err := s.relayTxMetadata(txBytes)
+	if err != nil {
+		return err
+	}
+	s.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size)
 	if !s.txSeen.Add(txid) {
 		return nil
 	}

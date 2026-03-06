@@ -32,6 +32,11 @@ type Mempool struct {
 	spenders   map[consensus.Outpoint][32]byte
 }
 
+type RelayTxMetadata struct {
+	Fee  uint64
+	Size int
+}
+
 func NewMempool(chainState *ChainState, blockStore *BlockStore, chainID [32]byte) (*Mempool, error) {
 	if chainState == nil {
 		return nil, errors.New("nil chainstate")
@@ -75,6 +80,23 @@ func (m *Mempool) AddTx(txBytes []byte) error {
 	entry := newMempoolEntry(checked, inputs)
 	m.addEntryLocked(entry)
 	return nil
+}
+
+func (m *Mempool) RelayMetadata(txBytes []byte) (RelayTxMetadata, error) {
+	if m == nil {
+		return RelayTxMetadata{}, errors.New("nil mempool")
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	checked, _, err := m.checkTransactionLocked(txBytes)
+	if err != nil {
+		return RelayTxMetadata{}, err
+	}
+	return RelayTxMetadata{
+		Fee:  checked.Fee,
+		Size: checked.SerializedSize,
+	}, nil
 }
 
 func (m *Mempool) SelectTransactions(maxCount int, maxBytes int) [][]byte {

@@ -46,6 +46,10 @@ func distinctTxBytes(t *testing.T, nonce uint64) []byte {
 	return raw
 }
 
+func putRelayTx(pool *MemoryTxPool, txid [32]byte, raw []byte) bool {
+	return pool.Put(txid, raw, uint64(len(raw)), len(raw))
+}
+
 func TestHandleTxMalformed(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -251,7 +255,7 @@ func TestHandleTxPoolFullMarksSeen(t *testing.T) {
 		if err != nil {
 			t.Fatalf("canonicalTxID(%d): %v", i, err)
 		}
-		if !pool.Put(txid, raw) {
+		if !putRelayTx(pool, txid, raw) {
 			t.Fatalf("Put(%d) should succeed", i)
 		}
 	}
@@ -284,6 +288,60 @@ func TestHandleTxPoolFullMarksSeen(t *testing.T) {
 	}
 }
 
+func TestHandleTxMetadataErrorStillMarksSeen(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	h.service.cfg.TxMetadataFunc = func([]byte) (node.RelayTxMetadata, error) {
+		return node.RelayTxMetadata{}, errors.New("metadata unavailable")
+	}
+	if err := h.service.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer h.service.Close()
+
+	p := &peer{
+		service: h.service,
+		state:   node.PeerState{HandshakeComplete: true},
+	}
+	txBytes := distinctTxBytes(t, 777)
+	txid, err := canonicalTxID(txBytes)
+	if err != nil {
+		t.Fatalf("canonicalTxID: %v", err)
+	}
+	if err := p.handleTx(txBytes); err != nil {
+		t.Fatalf("handleTx metadata error should be swallowed, got %v", err)
+	}
+	if h.service.cfg.TxPool.Has(txid) {
+		t.Fatal("metadata failure should not admit tx into relay pool")
+	}
+	if !h.service.txSeen.Has(txid) {
+		t.Fatal("metadata failure should still mark tx as seen to suppress churn")
+	}
+}
+
+func TestAnnounceTxMetadataError(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	h.service.cfg.TxMetadataFunc = func([]byte) (node.RelayTxMetadata, error) {
+		return node.RelayTxMetadata{}, errors.New("metadata unavailable")
+	}
+	txBytes := distinctTxBytes(t, 778)
+	txid, err := canonicalTxID(txBytes)
+	if err != nil {
+		t.Fatalf("canonicalTxID: %v", err)
+	}
+	if err := h.service.AnnounceTx(txBytes); err == nil {
+		t.Fatal("AnnounceTx should surface metadata errors for local submissions")
+	}
+	if h.service.cfg.TxPool.Has(txid) {
+		t.Fatal("metadata failure should not admit announced tx into relay pool")
+	}
+	if h.service.txSeen.Has(txid) {
+		t.Fatal("failed AnnounceTx should not mark tx as seen")
+	}
+}
+
 // --- MemoryTxPool unit tests ---
 
 func TestMemoryTxPoolSizeLimit(t *testing.T) {
@@ -292,7 +350,7 @@ func TestMemoryTxPoolSizeLimit(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		var txid [32]byte
 		txid[0] = byte(i)
-		if !pool.Put(txid, []byte{byte(i)}) {
+		if !pool.Put(txid, []byte{byte(i)}, uint64(i+1), 1) {
 			t.Fatalf("Put(%d) should succeed", i)
 		}
 	}
@@ -300,7 +358,7 @@ func TestMemoryTxPoolSizeLimit(t *testing.T) {
 	// Pool is full — next Put should fail
 	var overflow [32]byte
 	overflow[0] = 0xFF
-	if pool.Put(overflow, []byte{0xFF}) {
+	if pool.Put(overflow, []byte{0xFF}, 0, 1) {
 		t.Fatal("Put should fail when pool is full")
 	}
 
@@ -317,7 +375,7 @@ func TestMemoryTxPoolSizeLimit(t *testing.T) {
 		t.Fatalf("pool.Len()=%d after remove, want 2", pool.Len())
 	}
 
-	if !pool.Put(overflow, []byte{0xFF}) {
+	if !pool.Put(overflow, []byte{0xFF}, 1, 1) {
 		t.Fatal("Put should succeed after Remove freed space")
 	}
 }
@@ -327,10 +385,10 @@ func TestMemoryTxPoolDuplicate(t *testing.T) {
 
 	var txid [32]byte
 	txid[0] = 0x42
-	if !pool.Put(txid, []byte{0x01, 0x02}) {
+	if !pool.Put(txid, []byte{0x01, 0x02}, 2, 2) {
 		t.Fatal("first Put should succeed")
 	}
-	if pool.Put(txid, []byte{0x03, 0x04}) {
+	if pool.Put(txid, []byte{0x03, 0x04}, 2, 2) {
 		t.Fatal("duplicate Put should return false")
 	}
 
@@ -349,7 +407,7 @@ func TestMemoryTxPoolNilSafe(t *testing.T) {
 	if pool.Has([32]byte{}) {
 		t.Fatal("nil pool Has should return false")
 	}
-	if pool.Put([32]byte{}, nil) {
+	if pool.Put([32]byte{}, nil, 0, 0) {
 		t.Fatal("nil pool Put should return false")
 	}
 	_, ok := pool.Get([32]byte{})
@@ -367,7 +425,7 @@ func TestMemoryTxPoolGetCopy(t *testing.T) {
 	var txid [32]byte
 	txid[0] = 0x01
 	original := []byte{0xAA, 0xBB}
-	pool.Put(txid, original)
+	pool.Put(txid, original, uint64(len(original)), len(original))
 
 	// Mutate original — pool should be unaffected
 	original[0] = 0x00
@@ -425,7 +483,7 @@ func TestMemoryTxPoolWithLimitZeroDefault(t *testing.T) {
 	// Verify the fallback pool is functional.
 	var txid [32]byte
 	txid[0] = 0x42
-	if !pool.Put(txid, []byte{0x01}) {
+	if !pool.Put(txid, []byte{0x01}, 1, 1) {
 		t.Fatal("Put should succeed on fallback-default pool")
 	}
 	if !pool.Has(txid) {

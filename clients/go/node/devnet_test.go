@@ -362,6 +362,7 @@ func newDevnetService(current *devnetNode, bindAddr string, bootstrapPeers []str
 		SyncConfig:        current.syncCfg,
 		SyncEngine:        current.syncEngine,
 		BlockStore:        current.blockStore,
+		TxMetadataFunc:    current.mempool.RelayMetadata,
 	})
 	if err != nil {
 		return nil, err

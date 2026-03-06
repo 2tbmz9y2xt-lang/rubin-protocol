@@ -196,6 +196,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		SyncConfig:        syncCfg,
 		SyncEngine:        syncEngine,
 		BlockStore:        blockStore,
+		TxMetadataFunc:    mempool.RelayMetadata,
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "p2p init failed: %v\n", err)
