@@ -16,6 +16,7 @@ import (
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node/p2p"
 )
 
 var nowUnix = func() int64 { return time.Now().Unix() }
@@ -106,14 +107,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "blockstore open failed: %v\n", err)
 		return 2
 	}
+	syncCfg := node.DefaultSyncConfig(nil, chainIDFromGenesis, chainStatePath)
+	syncCfg.Network = cfg.Network
 	syncEngine, err := newSyncEngineFn(
 		chainState,
 		blockStore,
-		func() node.SyncConfig {
-			syncCfg := node.DefaultSyncConfig(nil, chainIDFromGenesis, chainStatePath)
-			syncCfg.Network = cfg.Network
-			return syncCfg
-		}(),
+		syncCfg,
 	)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "sync engine init failed: %v\n", err)
@@ -187,6 +186,26 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	p2pService, err := p2p.NewService(p2p.ServiceConfig{
+		BindAddr:          cfg.BindAddr,
+		BootstrapPeers:    cfg.Peers,
+		UserAgent:         "rubin-node/go",
+		GenesisHash:       node.DevnetGenesisBlockHash(),
+		PeerRuntimeConfig: node.DefaultPeerRuntimeConfig(cfg.Network, cfg.MaxPeers),
+		PeerManager:       peerManager,
+		SyncConfig:        syncCfg,
+		SyncEngine:        syncEngine,
+		BlockStore:        blockStore,
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "p2p init failed: %v\n", err)
+		return 2
+	}
+	if err := p2pService.Start(ctx); err != nil {
+		_, _ = fmt.Fprintf(stderr, "p2p start failed: %v\n", err)
+		return 2
+	}
+	defer p2pService.Close()
 
 	_, _ = fmt.Fprintln(stdout, "rubin-node skeleton running")
 	<-ctx.Done()
