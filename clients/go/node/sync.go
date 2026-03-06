@@ -160,11 +160,15 @@ func (s *SyncEngine) ApplyBlock(blockBytes []byte, prevTimestamps []uint64) (*Ch
 	if err != nil {
 		return nil, err
 	}
+	prevState, err := chainStateFromDisk(rollbackState.chainState)
+	if err != nil {
+		return nil, err
+	}
 	summary, err := s.chainState.ConnectBlock(blockBytes, s.cfg.ExpectedTarget, prevTimestamps, s.cfg.ChainID)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.persistAppliedBlock(summary, blockHash, pb.HeaderBytes, blockBytes); err != nil {
+	if err := s.persistAppliedBlock(summary, blockHash, pb, blockBytes, prevState); err != nil {
 		return nil, s.rollbackApplyBlock(err, rollbackState)
 	}
 
@@ -173,6 +177,67 @@ func (s *SyncEngine) ApplyBlock(blockBytes []byte, prevTimestamps []uint64) (*Ch
 		_ = s.mempool.EvictConfirmed(blockBytes)
 		_ = s.mempool.RemoveConflicting(blockBytes)
 	}
+	return summary, nil
+}
+
+func (s *SyncEngine) DisconnectTip() (*ChainStateDisconnectSummary, error) {
+	if s == nil || s.chainState == nil {
+		return nil, errors.New("sync engine is not initialized")
+	}
+	if s.blockStore == nil {
+		return nil, errors.New("sync engine has no blockstore")
+	}
+
+	tipHeight, tipHash, ok, err := s.blockStore.Tip()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, errors.New("blockstore has no tip")
+	}
+	if !s.chainState.HasTip || s.chainState.Height != tipHeight || s.chainState.TipHash != tipHash {
+		return nil, errors.New("chainstate tip does not match blockstore tip")
+	}
+
+	blockBytes, err := s.blockStore.GetBlockByHash(tipHash)
+	if err != nil {
+		return nil, err
+	}
+	undo, err := s.blockStore.GetUndo(tipHash)
+	if err != nil {
+		return nil, err
+	}
+	pb, err := consensus.ParseBlockBytes(blockBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	rollbackState, err := s.captureRollbackState()
+	if err != nil {
+		return nil, err
+	}
+	newTipTimestamp, err := parentTipTimestamp(s.blockStore, tipHeight, pb.Header.PrevBlockHash)
+	if err != nil {
+		return nil, err
+	}
+
+	summary, err := s.chainState.DisconnectBlock(blockBytes, undo)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.blockStore.TruncateCanonical(rollbackState.canonicalCount - 1); err != nil {
+		return nil, s.rollbackApplyBlock(err, rollbackState)
+	}
+	if s.cfg.ChainStatePath != "" {
+		if err := s.chainState.Save(s.cfg.ChainStatePath); err != nil {
+			return nil, s.rollbackApplyBlock(err, rollbackState)
+		}
+	}
+
+	s.mu.Lock()
+	s.tipTimestamp = newTipTimestamp
+	s.bestKnownHeight = rollbackState.bestKnownHeight
+	s.mu.Unlock()
 	return summary, nil
 }
 
@@ -187,6 +252,7 @@ func (s *SyncEngine) SetMempool(mempool *Mempool) {
 
 type syncRollbackState struct {
 	chainState      chainStateDisk
+	canonicalCount  uint64
 	tipTimestamp    uint64
 	bestKnownHeight uint64
 }
@@ -214,10 +280,15 @@ func (s *SyncEngine) captureRollbackState() (syncRollbackState, error) {
 	if err != nil {
 		return syncRollbackState{}, err
 	}
+	canonicalCount, err := blockStoreCanonicalCount(s.blockStore)
+	if err != nil {
+		return syncRollbackState{}, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return syncRollbackState{
 		chainState:      snapshot,
+		canonicalCount:  canonicalCount,
 		tipTimestamp:    s.tipTimestamp,
 		bestKnownHeight: s.bestKnownHeight,
 	}, nil
@@ -225,6 +296,11 @@ func (s *SyncEngine) captureRollbackState() (syncRollbackState, error) {
 
 func (s *SyncEngine) rollbackApplyBlock(cause error, state syncRollbackState) error {
 	restoreErr := restoreChainState(s.chainState, state.chainState)
+	if s.blockStore != nil {
+		if bsErr := s.blockStore.TruncateCanonical(state.canonicalCount); bsErr != nil && restoreErr == nil {
+			restoreErr = bsErr
+		}
+	}
 	s.mu.Lock()
 	s.tipTimestamp = state.tipTimestamp
 	s.bestKnownHeight = state.bestKnownHeight
@@ -235,9 +311,16 @@ func (s *SyncEngine) rollbackApplyBlock(cause error, state syncRollbackState) er
 	return cause
 }
 
-func (s *SyncEngine) persistAppliedBlock(summary *ChainStateConnectSummary, blockHash [32]byte, headerBytes []byte, blockBytes []byte) error {
+func (s *SyncEngine) persistAppliedBlock(summary *ChainStateConnectSummary, blockHash [32]byte, pb *consensus.ParsedBlock, blockBytes []byte, prevState *ChainState) error {
 	if s.blockStore != nil {
-		if err := s.blockStore.PutBlock(summary.BlockHeight, blockHash, headerBytes, blockBytes); err != nil {
+		undo, err := buildBlockUndo(prevState, pb, summary.BlockHeight)
+		if err != nil {
+			return err
+		}
+		if err := s.blockStore.PutBlock(summary.BlockHeight, blockHash, pb.HeaderBytes, blockBytes); err != nil {
+			return err
+		}
+		if err := s.blockStore.PutUndo(blockHash, undo); err != nil {
 			return err
 		}
 	}
@@ -278,4 +361,33 @@ func restoreChainState(dst *ChainState, snapshot chainStateDisk) error {
 	}
 	*dst = *recovered
 	return nil
+}
+
+func blockStoreCanonicalCount(store *BlockStore) (uint64, error) {
+	if store == nil {
+		return 0, nil
+	}
+	height, _, ok, err := store.Tip()
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, nil
+	}
+	return height + 1, nil
+}
+
+func parentTipTimestamp(store *BlockStore, tipHeight uint64, prevBlockHash [32]byte) (uint64, error) {
+	if tipHeight == 0 {
+		return 0, nil
+	}
+	parentHeaderBytes, err := store.GetHeaderByHash(prevBlockHash)
+	if err != nil {
+		return 0, err
+	}
+	parentHeader, err := consensus.ParseBlockHeaderBytes(parentHeaderBytes)
+	if err != nil {
+		return 0, err
+	}
+	return parentHeader.Timestamp, nil
 }
