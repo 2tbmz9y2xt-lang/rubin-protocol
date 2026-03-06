@@ -27,6 +27,7 @@ type BlockStore struct {
 	indexPath  string
 	blocksDir  string
 	headersDir string
+	undoDir    string
 	index      blockStoreIndexDisk
 }
 
@@ -43,11 +44,15 @@ func OpenBlockStore(rootPath string) (*BlockStore, error) {
 	indexPath := filepath.Join(rootPath, "index.json")
 	blocksDir := filepath.Join(rootPath, "blocks")
 	headersDir := filepath.Join(rootPath, "headers")
+	undoDir := filepath.Join(rootPath, "undo")
 
 	if err := os.MkdirAll(blocksDir, 0o750); err != nil {
 		return nil, err
 	}
 	if err := os.MkdirAll(headersDir, 0o750); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(undoDir, 0o750); err != nil {
 		return nil, err
 	}
 
@@ -61,6 +66,7 @@ func OpenBlockStore(rootPath string) (*BlockStore, error) {
 		indexPath:  indexPath,
 		blocksDir:  blocksDir,
 		headersDir: headersDir,
+		undoDir:    undoDir,
 		index:      index,
 	}
 	return bs, nil
@@ -104,7 +110,17 @@ func (bs *BlockStore) RewindToHeight(height uint64) error {
 	if height >= uint64(len(bs.index.Canonical)) {
 		return fmt.Errorf("rewind height out of range: %d", height)
 	}
-	bs.index.Canonical = append([]string(nil), bs.index.Canonical[:height+1]...)
+	return bs.TruncateCanonical(height + 1)
+}
+
+func (bs *BlockStore) TruncateCanonical(count uint64) error {
+	if bs == nil {
+		return errors.New("nil blockstore")
+	}
+	if count > uint64(len(bs.index.Canonical)) {
+		return fmt.Errorf("truncate count out of range: %d", count)
+	}
+	bs.index.Canonical = append([]string(nil), bs.index.Canonical[:count]...)
 	return saveBlockStoreIndex(bs.indexPath, bs.index)
 }
 
@@ -151,6 +167,28 @@ func (bs *BlockStore) GetHeaderByHash(blockHash [32]byte) ([]byte, error) {
 		return nil, errors.New("nil blockstore")
 	}
 	return readFileFromDir(bs.headersDir, hex.EncodeToString(blockHash[:])+".bin")
+}
+
+func (bs *BlockStore) PutUndo(blockHash [32]byte, undo *BlockUndo) error {
+	if bs == nil {
+		return errors.New("nil blockstore")
+	}
+	raw, err := marshalBlockUndo(undo)
+	if err != nil {
+		return err
+	}
+	return writeFileIfAbsent(filepath.Join(bs.undoDir, hex.EncodeToString(blockHash[:])+".json"), raw)
+}
+
+func (bs *BlockStore) GetUndo(blockHash [32]byte) (*BlockUndo, error) {
+	if bs == nil {
+		return nil, errors.New("nil blockstore")
+	}
+	raw, err := readFileFromDir(bs.undoDir, hex.EncodeToString(blockHash[:])+".json")
+	if err != nil {
+		return nil, err
+	}
+	return unmarshalBlockUndo(raw)
 }
 
 func loadBlockStoreIndex(path string) (blockStoreIndexDisk, error) {
