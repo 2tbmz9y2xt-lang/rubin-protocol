@@ -85,45 +85,74 @@ func SignTransaction(tx *Tx, utxoSet map[Outpoint]UtxoEntry, chainID [32]byte, s
 	if signer == nil {
 		return fmt.Errorf("nil signer")
 	}
-	pub := signer.PubkeyBytes()
-	if len(pub) != ML_DSA_87_PUBKEY_BYTES {
-		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA public key length")
+	pub, keyID, err := signerBinding(signer)
+	if err != nil {
+		return err
 	}
-	keyID := sha3_256(pub)
 
 	witness := make([]WitnessItem, 0, len(tx.Inputs))
 	for i, in := range tx.Inputs {
-		op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
-		entry, ok := utxoSet[op]
-		if !ok {
-			return txerr(TX_ERR_MISSING_UTXO, "utxo not found")
-		}
-		if entry.CovenantType != COV_TYPE_P2PK {
-			return fmt.Errorf("unsupported covenant type for signing: 0x%04x", entry.CovenantType)
-		}
-		if len(entry.CovenantData) != MAX_P2PK_COVENANT_DATA || entry.CovenantData[0] != SUITE_ID_ML_DSA_87 {
-			return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_P2PK covenant_data invalid")
-		}
-		if !bytes.Equal(entry.CovenantData[1:33], keyID[:]) {
-			return txerr(TX_ERR_SIG_INVALID, "signer key binding mismatch")
-		}
-
-		digest, err := SighashV1DigestWithType(tx, uint32(i), entry.Value, chainID, SIGHASH_ALL)
+		entry, err := signableP2PKEntry(utxoSet, in, keyID)
 		if err != nil {
 			return err
 		}
-		signature, err := signer.SignDigest32(digest)
+		witnessItem, err := signWitnessItem(tx, uint32(i), entry.Value, chainID, signer, pub)
 		if err != nil {
 			return err
 		}
-		signature = append(signature, SIGHASH_ALL)
-		witness = append(witness, WitnessItem{
-			SuiteID:   SUITE_ID_ML_DSA_87,
-			Pubkey:    append([]byte(nil), pub...),
-			Signature: signature,
-		})
+		witness = append(witness, witnessItem)
 	}
 
 	tx.Witness = witness
 	return nil
+}
+
+func signerBinding(signer DigestSigner) ([]byte, [32]byte, error) {
+	pub := signer.PubkeyBytes()
+	if len(pub) != ML_DSA_87_PUBKEY_BYTES {
+		return nil, [32]byte{}, txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA public key length")
+	}
+	return pub, sha3_256(pub), nil
+}
+
+func signableP2PKEntry(utxoSet map[Outpoint]UtxoEntry, in TxInput, keyID [32]byte) (UtxoEntry, error) {
+	op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
+	entry, ok := utxoSet[op]
+	if !ok {
+		return UtxoEntry{}, txerr(TX_ERR_MISSING_UTXO, "utxo not found")
+	}
+	if entry.CovenantType != COV_TYPE_P2PK {
+		return UtxoEntry{}, fmt.Errorf("unsupported covenant type for signing: 0x%04x", entry.CovenantType)
+	}
+	if len(entry.CovenantData) != MAX_P2PK_COVENANT_DATA || entry.CovenantData[0] != SUITE_ID_ML_DSA_87 {
+		return UtxoEntry{}, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_P2PK covenant_data invalid")
+	}
+	if !bytes.Equal(entry.CovenantData[1:33], keyID[:]) {
+		return UtxoEntry{}, txerr(TX_ERR_SIG_INVALID, "signer key binding mismatch")
+	}
+	return entry, nil
+}
+
+func signWitnessItem(
+	tx *Tx,
+	inputIndex uint32,
+	inputValue uint64,
+	chainID [32]byte,
+	signer DigestSigner,
+	pub []byte,
+) (WitnessItem, error) {
+	digest, err := SighashV1DigestWithType(tx, inputIndex, inputValue, chainID, SIGHASH_ALL)
+	if err != nil {
+		return WitnessItem{}, err
+	}
+	signature, err := signer.SignDigest32(digest)
+	if err != nil {
+		return WitnessItem{}, err
+	}
+	signature = append(signature, SIGHASH_ALL)
+	return WitnessItem{
+		SuiteID:   SUITE_ID_ML_DSA_87,
+		Pubkey:    append([]byte(nil), pub...),
+		Signature: signature,
+	}, nil
 }
