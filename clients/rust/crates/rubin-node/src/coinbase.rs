@@ -176,9 +176,7 @@ mod tests {
     #[test]
     fn parse_mine_address_promotes_key_id_to_canonical_covenant_data() {
         let key_id = "11".repeat(32);
-        let parsed = parse_mine_address(&key_id)
-            .expect("parse")
-            .expect("some");
+        let parsed = parse_mine_address(&key_id).expect("parse").expect("some");
         validate_mine_address(&parsed).expect("validate");
         assert_eq!(parsed.len(), 33);
         assert_eq!(parsed[0], 0x01);

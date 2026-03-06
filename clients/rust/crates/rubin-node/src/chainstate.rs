@@ -323,8 +323,8 @@ mod tests {
     fn height_one_coinbase_only_block(prev_hash: [u8; 32]) -> Vec<u8> {
         let witness_root = witness_merkle_root_wtxids(&[[0u8; 32]]).expect("witness root");
         let witness_commitment = witness_commitment_hash(witness_root);
-        let coinbase = build_coinbase_tx(1, 0, &default_mine_address(), witness_commitment)
-            .expect("coinbase");
+        let coinbase =
+            build_coinbase_tx(1, 0, &default_mine_address(), witness_commitment).expect("coinbase");
         let (_, coinbase_txid, _, consumed) = parse_tx(&coinbase).expect("parse coinbase");
         assert_eq!(consumed, coinbase.len());
         let merkle_root = merkle_root_txids(&[coinbase_txid]).expect("merkle root");
@@ -408,12 +408,20 @@ mod tests {
     fn chainstate_connect_block_accepts_zero_chain_id_at_genesis() {
         let mut st = ChainState::new();
         let summary = st
-            .connect_block(&devnet_genesis_block_bytes(), Some(POW_LIMIT), None, [0u8; 32])
+            .connect_block(
+                &devnet_genesis_block_bytes(),
+                Some(POW_LIMIT),
+                None,
+                [0u8; 32],
+            )
             .expect("connect genesis");
         assert_eq!(summary.block_height, 0);
         assert_eq!(summary.already_generated, 0);
         assert_eq!(summary.already_generated_n1, 0);
-        assert_eq!(hex::encode(st.state_digest()), GENESIS_ONLY_STATE_DIGEST_HEX);
+        assert_eq!(
+            hex::encode(st.state_digest()),
+            GENESIS_ONLY_STATE_DIGEST_HEX
+        );
     }
 
     #[test]
@@ -435,13 +443,21 @@ mod tests {
     fn chainstate_state_digest_matches_genesis_plus_height_one_parity_vector() {
         let mut st = ChainState::new();
         let genesis_summary = st
-            .connect_block(&devnet_genesis_block_bytes(), Some(POW_LIMIT), None, [0u8; 32])
+            .connect_block(
+                &devnet_genesis_block_bytes(),
+                Some(POW_LIMIT),
+                None,
+                [0u8; 32],
+            )
             .expect("connect genesis");
         let parsed_genesis =
             parse_block_bytes(&devnet_genesis_block_bytes()).expect("parse genesis block");
         let genesis_hash = block_hash(&parsed_genesis.header_bytes).expect("genesis hash");
         assert_eq!(genesis_summary.block_hash, genesis_hash);
-        assert_eq!(hex::encode(st.state_digest()), GENESIS_ONLY_STATE_DIGEST_HEX);
+        assert_eq!(
+            hex::encode(st.state_digest()),
+            GENESIS_ONLY_STATE_DIGEST_HEX
+        );
 
         let block1 = height_one_coinbase_only_block(genesis_hash);
         let summary = st

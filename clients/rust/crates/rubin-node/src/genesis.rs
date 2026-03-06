@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::Path;
 
-use serde::Deserialize;
 use rubin_consensus::encode_compact_size;
+use serde::Deserialize;
 
 const GENESIS_HEADER_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000006f732e615e2f43337a53e9884adba7da32257d5bb5701adc7ed0bd406f2df91340e49e6900000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000";
 const GENESIS_TX_HEX: &str = "01000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff0200407a10f35a0000000021018448b91b88d1a6fbb65e872b72c381b2a9f3ce286a232f56309667f639dd72790000000000000000020020b716a4b7f4c0fab665298ab9b8199b601ab9fa7e0a27f0713383f34cf37071a8000000000000";
@@ -34,8 +34,8 @@ pub fn load_chain_id_from_genesis_file(path: Option<&Path>) -> Result<[u8; 32], 
     let Some(path) = path else {
         return Ok(devnet_genesis_chain_id());
     };
-    let raw =
-        fs::read_to_string(path).map_err(|e| format!("read genesis file {}: {e}", path.display()))?;
+    let raw = fs::read_to_string(path)
+        .map_err(|e| format!("read genesis file {}: {e}", path.display()))?;
     let payload: GenesisPack = serde_json::from_str(&raw)
         .map_err(|e| format!("parse genesis file {}: {e}", path.display()))?;
     let mut trimmed = payload.chain_id_hex.trim();
@@ -64,7 +64,8 @@ fn derive_devnet_genesis_chain_id() -> [u8; 32] {
 
     let header = decode_hex_exact("genesis_header", GENESIS_HEADER_HEX, 116);
     let tx = decode_hex_exact("genesis_tx", GENESIS_TX_HEX, 149);
-    let mut preimage = Vec::with_capacity(GENESIS_MAGIC_SEPARATOR.len() + header.len() + tx.len() + 8);
+    let mut preimage =
+        Vec::with_capacity(GENESIS_MAGIC_SEPARATOR.len() + header.len() + tx.len() + 8);
     preimage.extend_from_slice(GENESIS_MAGIC_SEPARATOR);
     preimage.extend_from_slice(&header);
     encode_compact_size(1, &mut preimage);
@@ -97,7 +98,7 @@ fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        devnet_genesis_block_bytes, devnet_genesis_chain_id, derive_devnet_genesis_chain_id,
+        derive_devnet_genesis_chain_id, devnet_genesis_block_bytes, devnet_genesis_chain_id,
         load_chain_id_from_genesis_file, validate_incoming_chain_id,
     };
 

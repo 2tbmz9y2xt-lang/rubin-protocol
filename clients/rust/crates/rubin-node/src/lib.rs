@@ -8,8 +8,8 @@ pub mod sync;
 
 pub use blockstore::{block_store_path, BlockStore, BLOCK_STORE_DIR_NAME};
 pub use chainstate::{
-    chain_state_path, load_chain_state, ChainState, ChainStateConnectSummary, CHAIN_STATE_FILE_NAME,
-    UTXO_SET_HASH_DST,
+    chain_state_path, load_chain_state, ChainState, ChainStateConnectSummary,
+    CHAIN_STATE_FILE_NAME, UTXO_SET_HASH_DST,
 };
 pub use coinbase::{
     build_coinbase_tx, default_mine_address, normalize_mine_address, parse_mine_address,
