@@ -14,10 +14,13 @@ func (p *peer) handleTx(txBytes []byte) error {
 		}
 		return nil
 	}
+	// Mark as seen BEFORE pool admission so that pool-full rejections still
+	// suppress future getdata requests (prevents inv/getdata churn at capacity).
+	isNew := p.service.txSeen.Add(txid)
 	if !p.service.cfg.TxPool.Put(txid, txBytes) {
 		return nil
 	}
-	if p.service.txSeen.Add(txid) {
+	if isNew {
 		_ = p.service.broadcastInventory(p, []InventoryVector{{Type: MSG_TX, Hash: txid}})
 	}
 	return nil
