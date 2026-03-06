@@ -3,7 +3,6 @@ package consensus
 import (
 	"bytes"
 	"math/big"
-	"math/bits"
 	"sort"
 )
 
@@ -206,43 +205,9 @@ func ValidateBlockBasicWithContextAndFeesAtHeight(
 	return s, nil
 }
 
-func validateHeaderCommitments(pb *ParsedBlock, expectedPrevHash *[32]byte, expectedTarget *[32]byte) error {
-	if err := PowCheck(pb.HeaderBytes, pb.Header.Target); err != nil {
-		return err
-	}
-
-	if expectedTarget != nil && pb.Header.Target != *expectedTarget {
-		return txerr(BLOCK_ERR_TARGET_INVALID, "target mismatch")
-	}
-
-	if expectedPrevHash != nil && pb.Header.PrevBlockHash != *expectedPrevHash {
-		return txerr(BLOCK_ERR_LINKAGE_INVALID, "prev_block_hash mismatch")
-	}
-
-	root, err := MerkleRootTxids(pb.Txids)
-	if err != nil {
-		return txerr(BLOCK_ERR_MERKLE_INVALID, "failed to compute merkle root")
-	}
-	if root != pb.Header.MerkleRoot {
-		return txerr(BLOCK_ERR_MERKLE_INVALID, "merkle_root mismatch")
-	}
-	return nil
-}
-
-func validateCoinbaseStructure(pb *ParsedBlock, blockHeight uint64) error {
-	if len(pb.Txs) == 0 || !isCoinbaseTx(pb.Txs[0]) {
-		return txerr(BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
-	}
-	if len(pb.Txs[0].Outputs) == 0 {
-		return txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase must have at least one output")
-	}
-	if blockHeight > uint64(^uint32(0)) {
-		return txerr(BLOCK_ERR_COINBASE_INVALID, "block height exceeds coinbase locktime range")
-	}
-	if pb.Txs[0].Locktime != uint32(blockHeight) {
-		return txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase locktime must equal block height")
-	}
-	return nil
+type daCommitSet struct {
+	tx         *Tx
+	chunkCount uint16
 }
 
 func accumulateBlockTxStats(pb *ParsedBlock, blockHeight uint64) (*blockTxStats, error) {
@@ -295,116 +260,6 @@ func validateBlockResourceLimits(stats *blockTxStats) error {
 		return txerr(BLOCK_ERR_ANCHOR_BYTES_EXCEEDED, "anchor bytes exceeded")
 	}
 	return nil
-}
-
-func validateCoinbaseValueBound(pb *ParsedBlock, blockHeight uint64, alreadyGenerated *big.Int, sumFees uint64) error {
-	if pb == nil || len(pb.Txs) == 0 {
-		return txerr(BLOCK_ERR_COINBASE_INVALID, "missing coinbase")
-	}
-	if blockHeight == 0 {
-		return nil
-	}
-	coinbase := pb.Txs[0]
-	if coinbase == nil {
-		return txerr(BLOCK_ERR_COINBASE_INVALID, "nil coinbase")
-	}
-
-	var sumCoinbase u128
-	for _, out := range coinbase.Outputs {
-		var err error
-		sumCoinbase, err = addU64ToU128Block(sumCoinbase, out.Value)
-		if err != nil {
-			return err
-		}
-	}
-	subsidy := BlockSubsidyBig(blockHeight, alreadyGenerated)
-	limit := u128{hi: 0, lo: subsidy}
-	limit, err := addU64ToU128Block(limit, sumFees)
-	if err != nil {
-		return err
-	}
-	if cmpU128(sumCoinbase, limit) > 0 {
-		return txerr(BLOCK_ERR_SUBSIDY_EXCEEDED, "coinbase outputs exceed subsidy+fees bound")
-	}
-	return nil
-}
-
-func addU64ToU128Block(x u128, v uint64) (u128, error) {
-	lo, carry := bits.Add64(x.lo, v, 0)
-	hi, carry2 := bits.Add64(x.hi, 0, carry)
-	if carry2 != 0 {
-		return u128{}, txerr(BLOCK_ERR_PARSE, "u128 overflow")
-	}
-	return u128{hi: hi, lo: lo}, nil
-}
-
-func validateCoinbaseWitnessCommitment(pb *ParsedBlock) error {
-	if pb == nil || len(pb.Txs) == 0 || len(pb.Wtxids) == 0 {
-		return txerr(BLOCK_ERR_COINBASE_INVALID, "missing coinbase")
-	}
-
-	wroot, err := WitnessMerkleRootWtxids(pb.Wtxids)
-	if err != nil {
-		return txerr(BLOCK_ERR_WITNESS_COMMITMENT, "failed to compute witness merkle root")
-	}
-	expected := WitnessCommitmentHash(wroot)
-
-	matches := 0
-	for _, out := range pb.Txs[0].Outputs {
-		if out.CovenantType != COV_TYPE_ANCHOR || len(out.CovenantData) != 32 {
-			continue
-		}
-		if bytes.Equal(out.CovenantData, expected[:]) {
-			matches++
-		}
-	}
-
-	if matches != 1 {
-		return txerr(BLOCK_ERR_WITNESS_COMMITMENT, "coinbase witness commitment missing or duplicated")
-	}
-	return nil
-}
-
-func validateTimestampRules(headerTimestamp uint64, blockHeight uint64, prevTimestamps []uint64) error {
-	median, ok, err := medianTimePast(blockHeight, prevTimestamps)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return nil
-	}
-	if headerTimestamp <= median {
-		return txerr(BLOCK_ERR_TIMESTAMP_OLD, "timestamp <= MTP median")
-	}
-	upperBound := median + MAX_FUTURE_DRIFT
-	if upperBound < median {
-		upperBound = ^uint64(0)
-	}
-	if headerTimestamp > upperBound {
-		return txerr(BLOCK_ERR_TIMESTAMP_FUTURE, "timestamp exceeds future drift")
-	}
-	return nil
-}
-
-func medianTimePast(blockHeight uint64, prevTimestamps []uint64) (uint64, bool, error) {
-	if blockHeight == 0 || len(prevTimestamps) == 0 {
-		return 0, false, nil
-	}
-	k := uint64(11)
-	if blockHeight < k {
-		k = blockHeight
-	}
-	if len(prevTimestamps) < int(k) {
-		return 0, false, txerr(BLOCK_ERR_PARSE, "insufficient prev_timestamps context")
-	}
-	window := append([]uint64(nil), prevTimestamps[:int(k)]...)
-	sort.Slice(window, func(i, j int) bool { return window[i] < window[j] })
-	return window[(len(window)-1)/2], true, nil
-}
-
-type daCommitSet struct {
-	tx         *Tx
-	chunkCount uint16
 }
 
 func validateDASetIntegrity(txs []*Tx) error {
@@ -484,8 +339,6 @@ func validateDASetIntegrity(txs []*Tx) error {
 		}
 		payloadCommitment := sha3_256(concat)
 
-		// CANONICAL §21.4: commit tx MUST contain exactly one CORE_DA_COMMIT output whose
-		// covenant_data equals the payload commitment hash (missing/duplicate are invalid).
 		daCommitOutputs := 0
 		var gotCommitment [32]byte
 		for _, out := range commit.tx.Outputs {
@@ -526,14 +379,13 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 
 	var err error
 	var baseSize uint64
-	baseSize = 4 + 1 + 8 // version + tx_kind + tx_nonce
+	baseSize = 4 + 1 + 8
 	baseSize, err = addU64(baseSize, compactSizeLen(uint64(len(tx.Inputs))))
 	if err != nil {
 		return 0, 0, 0, txerr(TX_ERR_PARSE, "tx base size overflow")
 	}
 	for _, in := range tx.Inputs {
-		var err error
-		baseSize, err = addU64(baseSize, 32+4) // prevout
+		baseSize, err = addU64(baseSize, 32+4)
 		if err != nil {
 			return 0, 0, 0, err
 		}
@@ -545,7 +397,7 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 		if err != nil {
 			return 0, 0, 0, err
 		}
-		baseSize, err = addU64(baseSize, 4) // sequence
+		baseSize, err = addU64(baseSize, 4)
 		if err != nil {
 			return 0, 0, 0, err
 		}
@@ -556,8 +408,7 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 	}
 	var anchorBytes uint64
 	for _, out := range tx.Outputs {
-		var err error
-		baseSize, err = addU64(baseSize, 8+2) // value + covenant_type
+		baseSize, err = addU64(baseSize, 8+2)
 		if err != nil {
 			return 0, 0, 0, err
 		}
@@ -577,7 +428,7 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 			}
 		}
 	}
-	baseSize, err = addU64(baseSize, 4) // locktime
+	baseSize, err = addU64(baseSize, 4)
 	if err != nil {
 		return 0, 0, 0, txerr(TX_ERR_PARSE, "tx base size overflow")
 	}
@@ -590,13 +441,11 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 		return 0, 0, 0, err
 	}
 
-	var witnessSize uint64
-	witnessSize = compactSizeLen(uint64(len(tx.Witness)))
+	witnessSize := compactSizeLen(uint64(len(tx.Witness)))
 	var mlCount uint64
 	var unknownSuiteCount uint64
 	for _, w := range tx.Witness {
-		var err error
-		witnessSize, err = addU64(witnessSize, 1) // suite_id
+		witnessSize, err = addU64(witnessSize, 1)
 		if err != nil {
 			return 0, 0, 0, err
 		}
@@ -622,7 +471,6 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 				mlCount++
 			}
 		case SUITE_ID_SENTINEL:
-			// Sentinel does not contribute sig_cost.
 		default:
 			unknownSuiteCount++
 		}
@@ -672,12 +520,6 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 	return weight, daBytes, anchorBytes, nil
 }
 
-// TxWeightAndStats exposes consensus weight accounting for conformance and formal tooling.
-// It is a pure function of a parsed Tx and does not consult chainstate.
-func TxWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
-	return txWeightAndStats(tx)
-}
-
 func compactSizeLen(n uint64) uint64 {
 	switch {
 	case n < 0xfd:
@@ -706,4 +548,10 @@ func mulU64(a uint64, b uint64) (uint64, error) {
 		return 0, txerr(TX_ERR_PARSE, "u64 overflow")
 	}
 	return a * b, nil
+}
+
+// TxWeightAndStats exposes consensus weight accounting for conformance and formal tooling.
+// It is a pure function of a parsed Tx and does not consult chainstate.
+func TxWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
+	return txWeightAndStats(tx)
 }

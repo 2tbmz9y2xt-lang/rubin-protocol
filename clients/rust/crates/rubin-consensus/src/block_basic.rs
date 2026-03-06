@@ -1,20 +1,26 @@
 use crate::block::{block_hash, parse_block_header_bytes, BlockHeader, BLOCK_HEADER_BYTES};
 use crate::compactsize::read_compact_size;
 use crate::constants::{
-    COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, MAX_ANCHOR_BYTES_PER_BLOCK, MAX_BLOCK_WEIGHT,
-    MAX_DA_BATCHES_PER_BLOCK, MAX_DA_BYTES_PER_BLOCK, MAX_DA_CHUNK_COUNT, MAX_FUTURE_DRIFT,
-    ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
-    VERIFY_COST_ML_DSA_87, VERIFY_COST_UNKNOWN_SUITE, WITNESS_DISCOUNT_DIVISOR,
+    COV_TYPE_DA_COMMIT, MAX_ANCHOR_BYTES_PER_BLOCK, MAX_BLOCK_WEIGHT, MAX_DA_BATCHES_PER_BLOCK,
+    MAX_DA_BYTES_PER_BLOCK, MAX_DA_CHUNK_COUNT, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES,
+    SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL, VERIFY_COST_ML_DSA_87, VERIFY_COST_UNKNOWN_SUITE,
+    WITNESS_DISCOUNT_DIVISOR,
 };
 use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
-use crate::merkle::{merkle_root_txids, witness_commitment_hash, witness_merkle_root_wtxids};
-use crate::pow::pow_check;
-use crate::subsidy::block_subsidy;
 use crate::tx::{da_core_fields_bytes, parse_tx, Tx};
 use crate::wire_read::Reader;
 use std::collections::HashMap;
+
+mod coinbase;
+mod header;
+
+use self::coinbase::{validate_coinbase_structure, validate_coinbase_witness_commitment};
+use self::header::{validate_header_commitments, validate_timestamp_rules};
+
+pub(crate) use self::coinbase::validate_coinbase_value_bound;
+pub(crate) use self::header::median_time_past;
 
 #[derive(Clone, Debug)]
 pub struct ParsedBlock {
@@ -39,6 +45,12 @@ struct BlockTxStats {
     sum_weight: u64,
     sum_da: u64,
     sum_anchor: u64,
+}
+
+#[derive(Clone)]
+struct DaCommitSet {
+    tx: Tx,
+    chunk_count: u16,
 }
 
 pub fn parse_block_bytes(block_bytes: &[u8]) -> Result<ParsedBlock, TxError> {
@@ -178,88 +190,6 @@ pub fn validate_block_basic_with_context_and_fees_at_height(
     Ok(s)
 }
 
-fn is_coinbase_tx(tx: &Tx) -> bool {
-    if tx.tx_kind != 0x00
-        || tx.tx_nonce != 0
-        || tx.inputs.len() != 1
-        || !tx.witness.is_empty()
-        || !tx.da_payload.is_empty()
-    {
-        return false;
-    }
-    let input = &tx.inputs[0];
-    input.prev_txid == [0u8; 32]
-        && input.prev_vout == u32::MAX
-        && input.script_sig.is_empty()
-        && input.sequence == u32::MAX
-}
-
-fn validate_header_commitments(
-    pb: &ParsedBlock,
-    expected_prev_hash: Option<[u8; 32]>,
-    expected_target: Option<[u8; 32]>,
-) -> Result<(), TxError> {
-    pow_check(&pb.header_bytes, pb.header.target)?;
-
-    if let Some(target) = expected_target {
-        if pb.header.target != target {
-            return Err(TxError::new(
-                ErrorCode::BlockErrTargetInvalid,
-                "target mismatch",
-            ));
-        }
-    }
-
-    if let Some(prev) = expected_prev_hash {
-        if pb.header.prev_block_hash != prev {
-            return Err(TxError::new(
-                ErrorCode::BlockErrLinkageInvalid,
-                "prev_block_hash mismatch",
-            ));
-        }
-    }
-
-    let root = merkle_root_txids(&pb.txids)
-        .map_err(|_| TxError::new(ErrorCode::BlockErrMerkleInvalid, "failed to compute merkle"))?;
-    if root != pb.header.merkle_root {
-        return Err(TxError::new(
-            ErrorCode::BlockErrMerkleInvalid,
-            "merkle_root mismatch",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_coinbase_structure(pb: &ParsedBlock, block_height: u64) -> Result<(), TxError> {
-    let coinbase = pb
-        .txs
-        .first()
-        .ok_or_else(|| TxError::new(ErrorCode::BlockErrCoinbaseInvalid, "missing coinbase"))?;
-
-    if !is_coinbase_tx(coinbase) {
-        return Err(TxError::new(
-            ErrorCode::BlockErrCoinbaseInvalid,
-            "first tx is not canonical coinbase",
-        ));
-    }
-    if coinbase.outputs.is_empty() {
-        return Err(TxError::new(
-            ErrorCode::BlockErrCoinbaseInvalid,
-            "coinbase must have at least one output",
-        ));
-    }
-
-    let expected_locktime = u32::try_from(block_height)
-        .map_err(|_| TxError::new(ErrorCode::BlockErrCoinbaseInvalid, "height out of range"))?;
-    if coinbase.locktime != expected_locktime {
-        return Err(TxError::new(
-            ErrorCode::BlockErrCoinbaseInvalid,
-            "coinbase locktime must equal block height",
-        ));
-    }
-    Ok(())
-}
-
 fn accumulate_block_tx_stats(pb: &ParsedBlock, block_height: u64) -> Result<BlockTxStats, TxError> {
     let mut stats = BlockTxStats {
         sum_weight: 0,
@@ -269,7 +199,7 @@ fn accumulate_block_tx_stats(pb: &ParsedBlock, block_height: u64) -> Result<Bloc
     let mut seen_nonces: HashMap<u64, ()> = HashMap::with_capacity(pb.txs.len());
     for (i, tx) in pb.txs.iter().enumerate() {
         if i > 0 {
-            if is_coinbase_tx(tx) {
+            if coinbase::is_coinbase_tx(tx) {
                 return Err(TxError::new(
                     ErrorCode::BlockErrCoinbaseInvalid,
                     "coinbase-like tx found at index > 0",
@@ -326,135 +256,6 @@ fn validate_block_resource_limits(stats: BlockTxStats) -> Result<(), TxError> {
         ));
     }
     Ok(())
-}
-
-pub(crate) fn validate_coinbase_value_bound(
-    pb: &ParsedBlock,
-    block_height: u64,
-    already_generated: u128,
-    sum_fees: u64,
-) -> Result<(), TxError> {
-    if block_height == 0 {
-        return Ok(());
-    }
-    if pb.txs.is_empty() {
-        return Err(TxError::new(
-            ErrorCode::BlockErrCoinbaseInvalid,
-            "missing coinbase",
-        ));
-    }
-    let coinbase = &pb.txs[0];
-
-    let mut sum_coinbase: u128 = 0;
-    for out in &coinbase.outputs {
-        sum_coinbase = sum_coinbase
-            .checked_add(out.value as u128)
-            .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "u128 overflow"))?;
-    }
-
-    let subsidy = block_subsidy(block_height, already_generated);
-    let limit = (subsidy as u128)
-        .checked_add(sum_fees as u128)
-        .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "u128 overflow"))?;
-    if sum_coinbase > limit {
-        return Err(TxError::new(
-            ErrorCode::BlockErrSubsidyExceeded,
-            "coinbase outputs exceed subsidy+fees bound",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_coinbase_witness_commitment(pb: &ParsedBlock) -> Result<(), TxError> {
-    if pb.txs.is_empty() || pb.wtxids.is_empty() {
-        return Err(TxError::new(
-            ErrorCode::BlockErrCoinbaseInvalid,
-            "missing coinbase",
-        ));
-    }
-
-    let wroot = witness_merkle_root_wtxids(&pb.wtxids).map_err(|_| {
-        TxError::new(
-            ErrorCode::BlockErrWitnessCommitment,
-            "failed to compute witness merkle root",
-        )
-    })?;
-    let expected = witness_commitment_hash(wroot);
-
-    let mut matches = 0u64;
-    for out in &pb.txs[0].outputs {
-        if out.covenant_type != COV_TYPE_ANCHOR || out.covenant_data.len() != 32 {
-            continue;
-        }
-        if out.covenant_data.as_slice() == &expected[..] {
-            matches += 1;
-        }
-    }
-
-    if matches != 1 {
-        return Err(TxError::new(
-            ErrorCode::BlockErrWitnessCommitment,
-            "coinbase witness commitment missing or duplicated",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_timestamp_rules(
-    header_timestamp: u64,
-    block_height: u64,
-    prev_timestamps: Option<&[u64]>,
-) -> Result<(), TxError> {
-    let Some(median) = median_time_past(block_height, prev_timestamps)? else {
-        return Ok(());
-    };
-    if header_timestamp <= median {
-        return Err(TxError::new(
-            ErrorCode::BlockErrTimestampOld,
-            "timestamp <= MTP median",
-        ));
-    }
-    let upper_bound = median.saturating_add(MAX_FUTURE_DRIFT);
-    if header_timestamp > upper_bound {
-        return Err(TxError::new(
-            ErrorCode::BlockErrTimestampFuture,
-            "timestamp exceeds future drift",
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) fn median_time_past(
-    block_height: u64,
-    prev_timestamps: Option<&[u64]>,
-) -> Result<Option<u64>, TxError> {
-    if block_height == 0 {
-        return Ok(None);
-    }
-    let Some(prev) = prev_timestamps else {
-        return Ok(None);
-    };
-    if prev.is_empty() {
-        return Ok(None);
-    }
-
-    let k = usize::try_from(block_height.min(11)).unwrap_or(11);
-    if prev.len() < k {
-        return Err(TxError::new(
-            ErrorCode::BlockErrParse,
-            "insufficient prev_timestamps context",
-        ));
-    }
-
-    let mut window = prev[..k].to_vec();
-    window.sort_unstable();
-    Ok(Some(window[(window.len() - 1) / 2]))
-}
-
-#[derive(Clone)]
-struct DaCommitSet {
-    tx: Tx,
-    chunk_count: u16,
 }
 
 fn validate_da_set_integrity(txs: &[Tx]) -> Result<(), TxError> {
@@ -572,8 +373,6 @@ fn validate_da_set_integrity(txs: &[Tx]) -> Result<(), TxError> {
         }
         let payload_commitment = sha3_256(&concat);
 
-        // CANONICAL §21.4: commit tx MUST contain exactly one CORE_DA_COMMIT output whose
-        // covenant_data equals the payload commitment hash (missing/duplicate are invalid).
         let mut da_commit_outputs: u32 = 0;
         let mut got_commitment = [0u8; 32];
         for o in &commit.tx.outputs {
@@ -609,7 +408,7 @@ fn sorted_da_ids<T>(m: &HashMap<[u8; 32], T>) -> Vec<[u8; 32]> {
 }
 
 fn tx_weight_and_stats(tx: &Tx) -> Result<(u64, u64, u64), TxError> {
-    let mut base_size: u64 = 4 + 1 + 8; // version + tx_kind + tx_nonce
+    let mut base_size: u64 = 4 + 1 + 8;
     base_size = base_size
         .checked_add(compact_size_len(tx.inputs.len() as u64))
         .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
@@ -642,7 +441,9 @@ fn tx_weight_and_stats(tx: &Tx) -> Result<(u64, u64, u64), TxError> {
         base_size = base_size
             .checked_add(cov_len)
             .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
-        if o.covenant_type == COV_TYPE_ANCHOR || o.covenant_type == COV_TYPE_DA_COMMIT {
+        if o.covenant_type == crate::constants::COV_TYPE_ANCHOR
+            || o.covenant_type == COV_TYPE_DA_COMMIT
+        {
             anchor_bytes = anchor_bytes
                 .checked_add(cov_len)
                 .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
@@ -650,7 +451,7 @@ fn tx_weight_and_stats(tx: &Tx) -> Result<(u64, u64, u64), TxError> {
     }
     base_size = base_size
         .checked_add(4)
-        .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?; // locktime
+        .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
     base_size = base_size
         .checked_add(da_core_fields_bytes(tx)?.len() as u64)
         .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
@@ -726,17 +527,11 @@ fn compact_size_len(n: u64) -> u64 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Kani bounded model checking proofs
-// ---------------------------------------------------------------------------
 #[cfg(kani)]
 mod verification {
-    use super::*;
+    use super::compact_size_len;
     use crate::compactsize::encode_compact_size;
 
-    /// compact_size_len(n) matches the actual encoded length from
-    /// encode_compact_size(n) for every u64.  This cross-checks the two
-    /// independent implementations (weight accounting vs wire encoding).
     #[kani::proof]
     fn verify_compact_size_len_matches_encode() {
         let n: u64 = kani::any();
