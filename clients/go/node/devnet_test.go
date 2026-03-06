@@ -201,6 +201,7 @@ func TestDevnetSoakWithTxGenAndRestart(t *testing.T) {
 		amount:  txAmount,
 		fee:     txFee,
 	}
+	submittedTxs := make([][32]byte, 0, targetHeight/txInterval)
 
 	cNodeDown := false
 	for wantHeight := uint64(1); wantHeight <= targetHeight; wantHeight++ {
@@ -208,8 +209,7 @@ func TestDevnetSoakWithTxGenAndRestart(t *testing.T) {
 		if mined.Height != wantHeight {
 			t.Fatalf("node A mined height=%d, want %d", mined.Height, wantHeight)
 		}
-
-		if wantHeight%txInterval == 0 && wantHeight >= consensus.COINBASE_MATURITY {
+		if wantHeight%txInterval == 0 && wantHeight >= consensus.COINBASE_MATURITY && wantHeight < targetHeight {
 			txBytes, err := txGen.buildNext(txFee)
 			if err != nil {
 				t.Fatalf("txgen build next tx at height %d: %v", wantHeight, err)
@@ -217,6 +217,7 @@ func TestDevnetSoakWithTxGenAndRestart(t *testing.T) {
 			if err := nodeA.submitTx(txBytes); err != nil {
 				t.Fatalf("txgen announce tx at height %d: %v", wantHeight, err)
 			}
+			submittedTxs = append(submittedTxs, mustTxIDFromRaw(t, txBytes))
 		}
 
 		if cNodeDown {
@@ -247,6 +248,7 @@ func TestDevnetSoakWithTxGenAndRestart(t *testing.T) {
 		}
 	}
 
+	assertSubmittedTxsConfirmed(t, submittedTxs, nodeA, nodeB, nodeC)
 	assertSameTip(t, nodeA, nodeB, nodeC)
 	assertSameChainStateFile(t, nodeA, nodeB, nodeC)
 	assertSoakConsensusMetrics(t, nodeA, nodeB, nodeC)
@@ -495,6 +497,44 @@ func (g *txGenerator) buildNext(txFee uint64) ([]byte, error) {
 		return nil, fmt.Errorf("non-canonical tx bytes")
 	}
 	return raw, nil
+}
+
+func mustTxIDFromRaw(t *testing.T, raw []byte) [32]byte {
+	t.Helper()
+	_, txid, _, consumed, err := consensus.ParseTx(raw)
+	if err != nil {
+		t.Fatalf("parse submitted tx: %v", err)
+	}
+	if consumed != len(raw) {
+		t.Fatalf("submitted tx consumed=%d, want %d", consumed, len(raw))
+	}
+	return txid
+}
+
+func assertSubmittedTxsConfirmed(t *testing.T, txids [][32]byte, nodes ...*devnetNode) {
+	t.Helper()
+	if len(txids) == 0 {
+		t.Fatalf("expected submitted txs during soak test")
+	}
+	for _, current := range nodes {
+		for _, txid := range txids {
+			if !chainStateHasTxOutputs(current.chainState, txid) {
+				t.Fatalf("%s missing confirmed tx %x", current.name, txid)
+			}
+		}
+	}
+}
+
+func chainStateHasTxOutputs(state *node.ChainState, txid [32]byte) bool {
+	if state == nil {
+		return false
+	}
+	for op := range state.Utxos {
+		if op.Txid == txid {
+			return true
+		}
+	}
+	return false
 }
 
 type spendableCoinbase struct {
