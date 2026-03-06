@@ -41,7 +41,9 @@ jobs:
         with:
           go-version: '1.24.13'
           cache: true
-          cache-dependency-path: clients/go/go.mod
+          cache-dependency-path: |
+            clients/go/go.mod
+            conformance/go.mod
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
@@ -219,14 +221,29 @@ jobs:
           cd clients/go
           test -z "$(gofmt -l .)"
 
+      - name: Conformance Go fmt
+        run: |
+          cd conformance
+          test -z "$(gofmt -l .)"
+
       - name: Go tests
         run: |
           cd clients/go
           go test ./...
 
+      - name: Conformance Go tests
+        run: |
+          cd conformance
+          go test ./...
+
       - name: Go vet
         run: |
           cd clients/go
+          go vet ./...
+
+      - name: Conformance Go vet
+        run: |
+          cd conformance
           go vet ./...
 
       - name: Go govulncheck

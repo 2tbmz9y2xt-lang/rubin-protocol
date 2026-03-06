@@ -44,6 +44,11 @@ def run : IO UInt32 := do
   okAll := (← reportGate "CV-TIMESTAMP" (collectFails cvTimestampVectors (·.id) checkTimestampVector)) && okAll
   okAll := (← reportGate "CV-SIG" (collectFails cvSigVectors (·.id) checkSigVector)) && okAll
   okAll := (← reportGate "CV-COMPACT" (collectFails cvCompactVectors_CV_COMPACT (·.id) compactVectorPass)) && okAll
+  okAll := (← reportGate "CV-DEVNET-GENESIS" (collectFails cvDevnetGenesisVectors (·.id) devnetGenesisVectorPass)) && okAll
+  okAll := (← reportGate "CV-DEVNET-SUBSIDY" (collectFails cvDevnetSubsidyVectors (·.id) devnetSubsidyVectorPass)) && okAll
+  okAll := (← reportGate "CV-DEVNET-CHAIN" (collectFails cvDevnetChainVectors (·.id) devnetChainVectorPass)) && okAll
+  okAll := (← reportGate "CV-DEVNET-MATURITY" (collectFails cvUtxoApplyVectors_CV_DEVNET_MATURITY (·.id) devnetMaturityVectorPass)) && okAll
+  okAll := (← reportGate "CV-DEVNET-SIGHASH-CHAINID" (collectFails cvDevnetSighashChainidVectors (·.id) devnetSighashChainidVectorPass)) && okAll
 
   if okAll then
     pure 0

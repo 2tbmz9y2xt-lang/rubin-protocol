@@ -9,6 +9,30 @@ Policy:
 
 ---
 
+## 2026-03-06 — Devnet conformance vector packs (Q-DEVNET-07)
+
+Причина:
+- зафиксировать devnet-specific chainstate и consensus replay baseline для `rubin-protocol`;
+- добавить отдельные packs для:
+  - genesis block + initial UTXO allocation;
+  - 100-block subsidy progression;
+  - 10-block devnet chainstate replay;
+  - premature coinbase spend before `COINBASE_MATURITY`;
+  - sighash binding к `chain_id`.
+
+Инструменты:
+- детерминированная генерация через `conformance/cmd/gen-devnet-fixtures`,
+- replay gate через `conformance/replay_test.go`,
+- синхронизация матрицы: `tools/gen_conformance_matrix.py`,
+- синхронизация Lean-векторов: `tools/formal/gen_lean_conformance_vectors.py`.
+
+Изменённые fixtures:
+- `CV-DEVNET-GENESIS.json` (new)
+- `CV-DEVNET-SUBSIDY.json` (new)
+- `CV-DEVNET-CHAIN.json` (new)
+- `CV-DEVNET-MATURITY.json` (new)
+- `CV-DEVNET-SIGHASH-CHAINID.json` (new)
+
 ## 2026-03-05 — SLH de-integration conformance closeout (Q-SLH-DEINTEG-04)
 
 Причина:
