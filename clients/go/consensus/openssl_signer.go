@@ -7,6 +7,7 @@ package consensus
 
 #include <openssl/evp.h>
 #include <openssl/err.h>
+#include <openssl/x509.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -82,6 +83,50 @@ static int rubin_digest_sign_oneshot(EVP_PKEY* pkey, const unsigned char* msg, s
 	return 0;
 }
 
+static EVP_PKEY* rubin_parse_private_key_der(const unsigned char* der, size_t der_len, char* err_buf, size_t err_buf_len) {
+	ERR_clear_error();
+	const unsigned char* p = der;
+	EVP_PKEY* pkey = d2i_AutoPrivateKey(NULL, &p, der_len);
+	if (pkey == NULL) {
+		rubin_err_sign(err_buf, err_buf_len, "d2i_AutoPrivateKey failed");
+		return NULL;
+	}
+	if ((size_t)(p - der) != der_len) {
+		EVP_PKEY_free(pkey);
+		rubin_err_sign(err_buf, err_buf_len, "private key DER trailing bytes");
+		return NULL;
+	}
+	return pkey;
+}
+
+static int rubin_private_key_to_der(EVP_PKEY* pkey, unsigned char** out, size_t* out_len, char* err_buf, size_t err_buf_len) {
+	ERR_clear_error();
+	int encoded_len = i2d_PrivateKey(pkey, NULL);
+	if (encoded_len <= 0) {
+		rubin_err_sign(err_buf, err_buf_len, "i2d_PrivateKey size failed");
+		return -1;
+	}
+	unsigned char* der = OPENSSL_malloc((size_t)encoded_len);
+	if (der == NULL) {
+		rubin_err_sign(err_buf, err_buf_len, "OPENSSL_malloc failed");
+		return -1;
+	}
+	unsigned char* p = der;
+	int written = i2d_PrivateKey(pkey, &p);
+	if (written != encoded_len) {
+		OPENSSL_free(der);
+		rubin_err_sign(err_buf, err_buf_len, "i2d_PrivateKey encode failed");
+		return -1;
+	}
+	*out = der;
+	*out_len = (size_t)written;
+	return 0;
+}
+
+static void rubin_free_der(unsigned char* der) {
+	OPENSSL_free(der);
+}
+
 */
 import "C"
 
@@ -137,6 +182,65 @@ func newOpenSSLRawKeypair(alg string, expectedPubkeyLen int) (*C.EVP_PKEY, []byt
 		return nil, nil, fmt.Errorf("openssl pubkey length=%d, want %d", int(pubLen), expectedPubkeyLen)
 	}
 
+	return pkey, pubkey, nil
+}
+
+func openSSLPublicKeyBytes(pkey *C.EVP_PKEY, expectedPubkeyLen int) ([]byte, error) {
+	if pkey == nil {
+		return nil, fmt.Errorf("nil openssl key")
+	}
+	errBuf := make([]byte, 512)
+	pubkey := make([]byte, expectedPubkeyLen)
+	var pubLen C.size_t
+	if C.rubin_get_raw_public(
+		pkey,
+		(*C.uchar)(unsafe.Pointer(&pubkey[0])),
+		C.size_t(len(pubkey)),
+		&pubLen,
+		(*C.char)(unsafe.Pointer(&errBuf[0])),
+		C.size_t(len(errBuf)),
+	) != 0 {
+		return nil, fmt.Errorf("openssl get_raw_public failed: %s", cStringTrim0(errBuf))
+	}
+	if int(pubLen) != expectedPubkeyLen {
+		return nil, fmt.Errorf("openssl pubkey length=%d, want %d", int(pubLen), expectedPubkeyLen)
+	}
+	return pubkey, nil
+}
+
+func newOpenSSLRawKeypairFromDER(alg string, der []byte, expectedPubkeyLen int) (*C.EVP_PKEY, []byte, error) {
+	if err := ensureOpenSSLBootstrap(); err != nil {
+		return nil, nil, err
+	}
+	requiredLen, ok := keygenAllowlist[alg]
+	if !ok {
+		return nil, nil, fmt.Errorf("openssl key import algorithm not allowed: %s", alg)
+	}
+	if expectedPubkeyLen != requiredLen {
+		return nil, nil, fmt.Errorf(
+			"openssl key import expected pubkey length mismatch for %s: got %d want %d",
+			alg, expectedPubkeyLen, requiredLen,
+		)
+	}
+	if len(der) == 0 {
+		return nil, nil, fmt.Errorf("empty private key DER")
+	}
+
+	errBuf := make([]byte, 512)
+	pkey := C.rubin_parse_private_key_der(
+		(*C.uchar)(unsafe.Pointer(&der[0])),
+		C.size_t(len(der)),
+		(*C.char)(unsafe.Pointer(&errBuf[0])),
+		C.size_t(len(errBuf)),
+	)
+	if pkey == nil {
+		return nil, nil, fmt.Errorf("openssl private key import failed: %s", cStringTrim0(errBuf))
+	}
+	pubkey, err := openSSLPublicKeyBytes(pkey, expectedPubkeyLen)
+	if err != nil {
+		C.EVP_PKEY_free(pkey)
+		return nil, nil, err
+	}
 	return pkey, pubkey, nil
 }
 
@@ -207,11 +311,47 @@ func NewMLDSA87Keypair() (*MLDSA87Keypair, error) {
 	return kp, nil
 }
 
+func NewMLDSA87KeypairFromDER(der []byte) (*MLDSA87Keypair, error) {
+	pkey, pub, err := newOpenSSLRawKeypairFromDER("ML-DSA-87", der, ML_DSA_87_PUBKEY_BYTES)
+	if err != nil {
+		return nil, err
+	}
+
+	kp := &MLDSA87Keypair{pkey: pkey, pubkey: pub}
+	runtime.SetFinalizer(kp, func(k *MLDSA87Keypair) { k.Close() })
+	return kp, nil
+}
+
 func (k *MLDSA87Keypair) SignDigest32(digest [32]byte) ([]byte, error) {
 	if k == nil || k.pkey == nil {
 		return nil, fmt.Errorf("nil keypair")
 	}
 	return signOpenSSLDigest32(k.pkey, digest, ML_DSA_87_SIG_BYTES, ML_DSA_87_SIG_BYTES)
+}
+
+func (k *MLDSA87Keypair) PrivateKeyDER() ([]byte, error) {
+	if err := ensureOpenSSLBootstrap(); err != nil {
+		return nil, err
+	}
+	if k == nil || k.pkey == nil {
+		return nil, fmt.Errorf("nil keypair")
+	}
+
+	errBuf := make([]byte, 512)
+	var der *C.uchar
+	var derLen C.size_t
+	if C.rubin_private_key_to_der(
+		k.pkey,
+		&der,
+		&derLen,
+		(*C.char)(unsafe.Pointer(&errBuf[0])),
+		C.size_t(len(errBuf)),
+	) != 0 {
+		return nil, fmt.Errorf("openssl private key export failed: %s", cStringTrim0(errBuf))
+	}
+	defer C.rubin_free_der(der)
+
+	return C.GoBytes(unsafe.Pointer(der), C.int(derLen)), nil
 }
 
 func cStringTrim0(b []byte) string {

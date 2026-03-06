@@ -29,6 +29,7 @@ type HeaderRequest struct {
 type SyncEngine struct {
 	chainState      *ChainState
 	blockStore      *BlockStore
+	mempool         *Mempool
 	cfg             SyncConfig
 	mu              sync.RWMutex
 	tipTimestamp    uint64
@@ -200,7 +201,20 @@ func (s *SyncEngine) ApplyBlock(blockBytes []byte, prevTimestamps []uint64) (*Ch
 		s.bestKnownHeight = summary.BlockHeight
 	}
 	s.mu.Unlock()
+	if s.mempool != nil {
+		_ = s.mempool.EvictConfirmed(blockBytes)
+		_ = s.mempool.RemoveConflicting(blockBytes)
+	}
 	return summary, nil
+}
+
+func (s *SyncEngine) SetMempool(mempool *Mempool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mempool = mempool
 }
 
 func validateIncomingChainID(blockHeight uint64, chainID [32]byte) error {
