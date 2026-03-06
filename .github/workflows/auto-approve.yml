@@ -8,7 +8,7 @@ on:
     types: [completed]
 
 permissions:
-  administration: read
+  checks: read
   actions: write
   pull-requests: write
   contents: write
@@ -40,12 +40,17 @@ jobs:
             }
 
             async function getRequiredContexts(baseBranch) {
-              const response = await github.rest.repos.getBranchProtection({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                branch: baseBranch
-              });
-              return response.data.required_status_checks?.contexts ?? [];
+              try {
+                const response = await github.rest.repos.getBranchProtection({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  branch: baseBranch
+                });
+                return response.data.required_status_checks?.contexts ?? [];
+              } catch (e) {
+                console.log(`getBranchProtection failed (${e.status}), falling back to all-checks mode`);
+                return null;
+              }
             }
 
             function latestCheckRunsByName(checkRuns) {
@@ -101,7 +106,12 @@ jobs:
             const prNumber = pr.number;
             console.log(`Found PR #${prNumber}`);
             const requiredContexts = await getRequiredContexts(pr.base.ref);
-            console.log(`Required contexts for ${pr.base.ref}: ${requiredContexts.join(', ')}`);
+            const useAllChecks = requiredContexts === null;
+            if (useAllChecks) {
+              console.log(`Using all-checks fallback mode for ${pr.base.ref}`);
+            } else {
+              console.log(`Required contexts for ${pr.base.ref}: ${requiredContexts.join(', ')}`);
+            }
 
             // --- Poll for checks to complete ---
             const ref = pr.head.sha;
@@ -120,12 +130,13 @@ jobs:
               });
               const mergeableState = prState.data.mergeable_state ?? 'unknown';
               const latestChecks = latestCheckRunsByName(checks.data.check_runs);
-              const missingRequired = requiredContexts.filter(name => !latestChecks.has(name));
-              const pendingRequired = requiredContexts.filter(name => {
+              const contextList = useAllChecks ? [...latestChecks.keys()] : requiredContexts;
+              const missingRequired = useAllChecks ? [] : contextList.filter(name => !latestChecks.has(name));
+              const pendingRequired = contextList.filter(name => {
                 const run = latestChecks.get(name);
                 return run && run.status !== 'completed';
               });
-              const failedRequired = requiredContexts.filter(name => {
+              const failedRequired = contextList.filter(name => {
                 const run = latestChecks.get(name);
                 return run && run.status === 'completed' && !SUCCESSFUL_CONCLUSIONS.has(run.conclusion ?? '');
               });
