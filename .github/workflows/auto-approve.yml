@@ -3,9 +3,6 @@ name: Auto-approve PR
 on:
   pull_request_review:
     types: [submitted]
-  check_suite:
-    types: [completed]
-  status:
   workflow_run:
     workflows: [ci]
     types: [completed]
@@ -17,7 +14,7 @@ permissions:
 jobs:
   auto-approve:
     runs-on: ubuntu-latest
-    if: github.event.pull_request || github.event.check_suite || github.event.sha || github.event.workflow_run
+    if: github.event.pull_request || github.event.workflow_run
     steps:
       - name: Wait for all checks, approve and merge
         uses: actions/github-script@v8
@@ -26,7 +23,7 @@ jobs:
           script: |
             const MAX_ATTEMPTS = 30;
             const POLL_INTERVAL = 30000; // 30 seconds
-            const PROTECTED_BASE_BRANCHES = new Set(['main', 'master']);
+            const SUCCESSFUL_CONCLUSIONS = new Set(['success', 'skipped', 'neutral']);
 
             async function getOpenPullRequestByNumber(pull_number) {
               const response = await github.rest.pulls.get({
@@ -40,42 +37,24 @@ jobs:
               return response.data;
             }
 
-            function isCandidateBranch(branch) {
-              return !!branch && !PROTECTED_BASE_BRANCHES.has(branch);
-            }
-
-            async function getOpenPullRequestByHead(branch, sha) {
-              if (!isCandidateBranch(branch)) {
-                return null;
-              }
-              const prs = await github.rest.pulls.list({
+            async function getRequiredContexts(baseBranch) {
+              const response = await github.rest.repos.getBranchProtection({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                state: 'open',
-                head: `${context.repo.owner}:${branch}`,
-                per_page: 10
+                branch: baseBranch
               });
-              const exact = prs.data.find(pr => pr.head.sha === sha);
-              return exact ?? null;
+              return response.data.required_status_checks?.contexts ?? [];
             }
 
-            async function getAssociatedOpenPullRequest(sha) {
-              if (!sha) {
-                return null;
+            function latestCheckRunsByName(checkRuns) {
+              const latest = new Map();
+              for (const run of checkRuns) {
+                const prev = latest.get(run.name);
+                if (!prev || run.id > prev.id) {
+                  latest.set(run.name, run);
+                }
               }
-              const pulls = await github.rest.repos.listPullRequestsAssociatedWithCommit({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                commit_sha: sha
-              });
-              const exact = pulls.data.filter(pr => pr.state === 'open' && pr.head.sha === sha);
-              if (exact.length === 1) {
-                return exact[0];
-              }
-              if (exact.length > 1) {
-                console.log(`Ambiguous open PRs for sha ${sha}: ${exact.map(pr => '#' + pr.number).join(', ')}`);
-              }
-              return null;
+              return latest;
             }
 
             async function resolvePullRequest() {
@@ -89,32 +68,23 @@ jobs:
                   console.log(`workflow_run event=${workflowRun.event}; skipping`);
                   return null;
                 }
-                const fromPayload = workflowRun.pull_requests?.find(pr => pr.state === 'open');
-                if (fromPayload) {
-                  return getOpenPullRequestByNumber(fromPayload.number);
+                const candidates = workflowRun.pull_requests ?? [];
+                if (candidates.length === 0) {
+                  console.log(`workflow_run for sha ${workflowRun.head_sha} has no PR payload; skipping`);
+                  return null;
                 }
-                return (
-                  await getOpenPullRequestByHead(workflowRun.head_branch, workflowRun.head_sha)
-                ) ?? (
-                  await getAssociatedOpenPullRequest(workflowRun.head_sha)
-                );
-              }
-
-              if (context.payload.check_suite) {
-                const checkSuite = context.payload.check_suite;
-                const fromPayload = checkSuite.pull_requests?.find(pr => pr.state === 'open');
-                if (fromPayload) {
-                  return getOpenPullRequestByNumber(fromPayload.number);
+                const exactMatches = [];
+                for (const candidate of candidates) {
+                  const pr = await getOpenPullRequestByNumber(candidate.number);
+                  if (pr && pr.head.sha === workflowRun.head_sha) {
+                    exactMatches.push(pr);
+                  }
                 }
-                return (
-                  await getOpenPullRequestByHead(checkSuite.head_branch, checkSuite.head_sha)
-                ) ?? (
-                  await getAssociatedOpenPullRequest(checkSuite.head_sha)
-                );
-              }
-
-              if (context.payload.sha) {
-                return getAssociatedOpenPullRequest(context.payload.sha);
+                if (exactMatches.length === 1) {
+                  return exactMatches[0];
+                }
+                console.log(`workflow_run sha ${workflowRun.head_sha} resolved to ${exactMatches.length} exact open PRs; skipping`);
+                return null;
               }
 
               return null;
@@ -128,6 +98,8 @@ jobs:
 
             const prNumber = pr.number;
             console.log(`Found PR #${prNumber}`);
+            const requiredContexts = await getRequiredContexts(pr.base.ref);
+            console.log(`Required contexts for ${pr.base.ref}: ${requiredContexts.join(', ')}`);
 
             // --- Poll for checks to complete ---
             const ref = pr.head.sha;
@@ -139,61 +111,55 @@ jobs:
                 ref: ref,
                 per_page: 100
               });
+              const prState = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber
+              });
+              const mergeableState = prState.data.mergeable_state ?? 'unknown';
+              const latestChecks = latestCheckRunsByName(checks.data.check_runs);
+              const missingRequired = requiredContexts.filter(name => !latestChecks.has(name));
+              const pendingRequired = requiredContexts.filter(name => {
+                const run = latestChecks.get(name);
+                return run && run.status !== 'completed';
+              });
+              const failedRequired = requiredContexts.filter(name => {
+                const run = latestChecks.get(name);
+                return run && run.status === 'completed' && !SUCCESSFUL_CONCLUSIONS.has(run.conclusion ?? '');
+              });
 
-              const validatorRuns = checks.data.check_runs.filter(c => c.name === 'validator');
-              const validator = validatorRuns.sort((a, b) => b.id - a.id)[0];
-              const validatorState = validator
-                ? `${validator.status}/${validator.conclusion ?? 'none'}`
-                : 'missing';
-
-              const pending = checks.data.check_runs.filter(
-                c => c.name !== 'auto-approve' && c.status !== 'completed'
-              );
-              const failed = checks.data.check_runs.filter(
-                c => c.name !== 'auto-approve' && c.status === 'completed'
-                  && c.conclusion !== 'success' && c.conclusion !== 'skipped'
-                  && c.conclusion !== 'neutral'
-              );
-
-              if (failed.length > 0) {
-                console.log(`${failed.length} checks failed, not approving:`);
-                for (const f of failed) {
-                  console.log(`  FAILED: ${f.name} - ${f.conclusion}`);
+              if (failedRequired.length > 0) {
+                console.log(`${failedRequired.length} required checks failed, not approving:`);
+                for (const name of failedRequired) {
+                  const run = latestChecks.get(name);
+                  console.log(`  FAILED: ${name} - ${run?.conclusion ?? 'unknown'}`);
                 }
-                console.log(`  validator state: ${validatorState}`);
                 return;
               }
 
-              if (!validator) {
-                if (attempt === MAX_ATTEMPTS || pending.length === 0) {
-                  console.log(`Validator check is required but ${validatorState}; not approving/merging.`);
-                  return;
-                }
-                console.log(`Attempt ${attempt}: validator is ${validatorState}, waiting ${POLL_INTERVAL/1000}s...`);
-                await new Promise(r => setTimeout(r, POLL_INTERVAL));
-                continue;
-              }
-
-              if (validator.status === 'completed' && validator.conclusion !== 'success') {
-                console.log(`Validator check is ${validatorState}; not approving/merging.`);
+              if (mergeableState === 'behind') {
+                console.log(`PR #${prNumber} is behind ${pr.base.ref}; not merging until branch is updated.`);
                 return;
               }
 
-              if (pending.length === 0 && validator.conclusion === 'success') {
+              if (missingRequired.length === 0 && pendingRequired.length === 0) {
                 console.log(`All checks passed (attempt ${attempt})`);
                 break;
               }
 
               if (attempt === MAX_ATTEMPTS) {
-                console.log(`Timeout: still ${pending.length} checks pending after ${MAX_ATTEMPTS} attempts`);
-                for (const p of pending) {
-                  console.log(`  PENDING: ${p.name} - ${p.status}`);
+                console.log(`Timeout: missing_required=${missingRequired.length}, pending_required=${pendingRequired.length}, mergeable_state=${mergeableState} after ${MAX_ATTEMPTS} attempts`);
+                for (const name of missingRequired) {
+                  console.log(`  MISSING: ${name}`);
                 }
-                console.log(`  validator state: ${validatorState}`);
+                for (const name of pendingRequired) {
+                  const run = latestChecks.get(name);
+                  console.log(`  PENDING: ${name} - ${run?.status ?? 'missing'}`);
+                }
                 return;
               }
 
-              console.log(`Attempt ${attempt}: ${pending.length} checks pending, validator=${validatorState}, waiting ${POLL_INTERVAL/1000}s...`);
+              console.log(`Attempt ${attempt}: missing_required=${missingRequired.length}, pending_required=${pendingRequired.length}, mergeable_state=${mergeableState}, waiting ${POLL_INTERVAL/1000}s...`);
               await new Promise(r => setTimeout(r, POLL_INTERVAL));
             }
 
