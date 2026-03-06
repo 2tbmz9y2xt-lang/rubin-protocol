@@ -67,23 +67,25 @@ func buildBlockUndo(prevState *ChainState, pb *consensus.ParsedBlock, blockHeigh
 
 	work := copyUtxoSet(prevState.Utxos)
 	txUndos := make([]TxUndo, len(pb.Txs))
-	for i := 1; i < len(pb.Txs); i++ {
+	for i := 0; i < len(pb.Txs); i++ {
 		tx := pb.Txs[i]
 		if tx == nil {
 			return nil, fmt.Errorf("nil tx at index %d", i)
 		}
 		spent := make([]SpentUndo, 0, len(tx.Inputs))
-		for _, in := range tx.Inputs {
-			op := consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
-			entry, ok := work[op]
-			if !ok {
-				return nil, fmt.Errorf("undo missing utxo for %x:%d", op.Txid, op.Vout)
+		if i > 0 {
+			for _, in := range tx.Inputs {
+				op := consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
+				entry, ok := work[op]
+				if !ok {
+					return nil, fmt.Errorf("undo missing utxo for %x:%d", op.Txid, op.Vout)
+				}
+				spent = append(spent, SpentUndo{
+					Outpoint: op,
+					Entry:    copyUtxoEntry(entry),
+				})
+				delete(work, op)
 			}
-			spent = append(spent, SpentUndo{
-				Outpoint: op,
-				Entry:    copyUtxoEntry(entry),
-			})
-			delete(work, op)
 		}
 		for outputIndex, out := range tx.Outputs {
 			if !isSpendableOutput(out.CovenantType) {
@@ -94,7 +96,7 @@ func buildBlockUndo(prevState *ChainState, pb *consensus.ParsedBlock, blockHeigh
 				CovenantType:      out.CovenantType,
 				CovenantData:      append([]byte(nil), out.CovenantData...),
 				CreationHeight:    blockHeight,
-				CreatedByCoinbase: false,
+				CreatedByCoinbase: i == 0,
 			}
 		}
 		txUndos[i] = TxUndo{Spent: spent}
