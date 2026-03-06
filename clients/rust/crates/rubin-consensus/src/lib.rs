@@ -70,6 +70,8 @@ pub use vault::{
 #[cfg(test)]
 mod compact_relay_tests;
 #[cfg(test)]
+mod coverage_hotspots_tests;
+#[cfg(test)]
 mod featurebits_tests;
 #[cfg(test)]
 mod tests;

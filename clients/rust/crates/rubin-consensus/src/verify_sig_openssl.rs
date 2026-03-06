@@ -77,6 +77,10 @@ fn parse_openssl_fips_mode(raw: &str) -> Result<OpenSslFipsMode, TxError> {
 fn ensure_openssl_bootstrap() -> Result<(), TxError> {
     let mode_raw = std::env::var("RUBIN_OPENSSL_FIPS_MODE").unwrap_or_default();
     let mode = parse_openssl_fips_mode(&mode_raw)?;
+    ensure_openssl_bootstrap_for_mode(mode)
+}
+
+fn ensure_openssl_bootstrap_for_mode(mode: OpenSslFipsMode) -> Result<(), TxError> {
     if mode == OpenSslFipsMode::Off {
         return Ok(());
     }
@@ -113,6 +117,37 @@ fn openssl_check_sigalg(alg: &'static CStr, props: &'static CStr) -> Result<(), 
         openssl_sys::EVP_SIGNATURE_free(sig);
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn test_set_env_if_empty(key: &str, value: Option<String>) {
+    set_env_if_empty(key, value);
+}
+
+#[cfg(test)]
+pub(crate) fn test_suite_alg_name(suite_id: u8) -> Result<&'static str, TxError> {
+    suite_alg_name(suite_id).map(|alg| alg.to_str().expect("cstr"))
+}
+
+#[cfg(test)]
+pub(crate) fn test_ensure_openssl_bootstrap_for_mode(mode_raw: &str) -> Result<(), TxError> {
+    let mode = parse_openssl_fips_mode(mode_raw)?;
+    ensure_openssl_bootstrap_for_mode(mode)
+}
+
+#[cfg(test)]
+pub(crate) fn test_openssl_check_sigalg_bad_alg() -> Result<(), TxError> {
+    openssl_check_sigalg(c"NOT-A-REAL-SIGALG", c"")
+}
+
+#[cfg(test)]
+pub(crate) fn test_openssl_verify_sig_digest_oneshot_empty_input() -> Result<bool, TxError> {
+    openssl_verify_sig_digest_oneshot(c"ML-DSA-87", &[], &[], &[])
+}
+
+#[cfg(test)]
+pub(crate) fn test_openssl_verify_sig_digest_oneshot_bad_alg() -> Result<bool, TxError> {
+    openssl_verify_sig_digest_oneshot(c"NOT-A-REAL-SIGALG", &[1], &[1], &[1])
 }
 
 fn openssl_bootstrap(require_fips: bool) -> Result<(), TxError> {
