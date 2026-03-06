@@ -121,6 +121,91 @@ func TestHandshakeChainIDMismatch(t *testing.T) {
 	}
 }
 
+func TestHandshakeProtocolVersionMismatch(t *testing.T) {
+	localConn, remoteConn := net.Pipe()
+	defer localConn.Close()
+	defer remoteConn.Close()
+
+	cfg := node.DefaultPeerRuntimeConfig("devnet", 8)
+	cfg.HandshakeTimeout = time.Second
+	localVersion := testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "local", 0)
+	remoteVersion := testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 0)
+	remoteVersion.ProtocolVersion++
+
+	go func() {
+		frame, err := readFrame(remoteConn, cfg.MaxMessageSize)
+		if err != nil || frame.Kind != messageVersion {
+			return
+		}
+		payload, err := encodeVersionPayload(remoteVersion)
+		if err != nil {
+			return
+		}
+		_ = writeFrame(remoteConn, message{Kind: messageVersion, Payload: payload}, cfg.MaxMessageSize)
+	}()
+
+	state, err := performHandshake(
+		context.Background(),
+		localConn,
+		cfg,
+		localVersion,
+		localVersion.ChainID,
+		localVersion.GenesisHash,
+	)
+	if err == nil {
+		t.Fatalf("expected handshake failure")
+	}
+	if state.LastError != "invalid protocol_version" {
+		t.Fatalf("last_error=%q, want invalid protocol_version", state.LastError)
+	}
+	if state.BanScore != 0 {
+		t.Fatalf("ban_score=%d, want 0", state.BanScore)
+	}
+}
+
+func TestHandshakeGenesisHashMismatch(t *testing.T) {
+	localConn, remoteConn := net.Pipe()
+	defer localConn.Close()
+	defer remoteConn.Close()
+
+	cfg := node.DefaultPeerRuntimeConfig("devnet", 8)
+	cfg.HandshakeTimeout = time.Second
+	localVersion := testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "local", 0)
+	var wrongGenesis [32]byte
+	wrongGenesis[0] = 0x24
+	remoteVersion := testVersionPayload(node.DevnetGenesisChainID(), wrongGenesis, "remote", 0)
+
+	go func() {
+		frame, err := readFrame(remoteConn, cfg.MaxMessageSize)
+		if err != nil || frame.Kind != messageVersion {
+			return
+		}
+		payload, err := encodeVersionPayload(remoteVersion)
+		if err != nil {
+			return
+		}
+		_ = writeFrame(remoteConn, message{Kind: messageVersion, Payload: payload}, cfg.MaxMessageSize)
+	}()
+
+	state, err := performHandshake(
+		context.Background(),
+		localConn,
+		cfg,
+		localVersion,
+		localVersion.ChainID,
+		localVersion.GenesisHash,
+	)
+	if err == nil {
+		t.Fatalf("expected handshake failure")
+	}
+	if state.LastError != "genesis_hash mismatch" {
+		t.Fatalf("last_error=%q, want genesis_hash mismatch", state.LastError)
+	}
+	if state.BanScore != cfg.BanThreshold {
+		t.Fatalf("ban_score=%d, want %d", state.BanScore, cfg.BanThreshold)
+	}
+}
+
 func TestBlockRelay(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
