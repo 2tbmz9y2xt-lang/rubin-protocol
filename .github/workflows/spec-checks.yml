@@ -16,5 +16,7 @@ jobs:
           node-version-file: '.node-version'
       - name: Conformance fixtures policy check
         run: python3 tools/check_conformance_fixtures_policy.py
+      - name: Conformance edge-pack coverage check
+        run: python3 tools/check_conformance_edge_pack.py
       - name: Conformance matrix check
         run: python3 tools/gen_conformance_matrix.py --check

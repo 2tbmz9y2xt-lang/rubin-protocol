@@ -5,6 +5,7 @@ import (
 	"crypto/sha3"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -190,6 +191,59 @@ type blockBasicVector struct {
 	ExpectOk       bool   `json:"expect_ok"`
 }
 
+type weightFixture struct {
+	Gate    string         `json:"gate"`
+	Vectors []weightVector `json:"vectors"`
+}
+
+type weightVector struct {
+	ID                string `json:"id"`
+	Op                string `json:"op"`
+	TxHex             string `json:"tx_hex"`
+	ExpectErr         string `json:"expect_err"`
+	ExpectWeight      uint64 `json:"expect_weight"`
+	ExpectDaBytes     uint64 `json:"expect_da_bytes"`
+	ExpectAnchorBytes uint64 `json:"expect_anchor_bytes"`
+	ExpectOk          bool   `json:"expect_ok"`
+}
+
+type validationOrderFixture struct {
+	Gate    string                  `json:"gate"`
+	Vectors []validationOrderVector `json:"vectors"`
+}
+
+type validationOrderVector struct {
+	ID              string                `json:"id"`
+	Op              string                `json:"op"`
+	Checks          []validationCheckJSON `json:"checks"`
+	ExpectFirstErr  string                `json:"expect_first_err"`
+	ExpectEvaluated []string              `json:"expect_evaluated"`
+	ExpectOk        bool                  `json:"expect_ok"`
+}
+
+type validationCheckJSON struct {
+	Name  string `json:"name"`
+	Fails bool   `json:"fails"`
+	Err   string `json:"err"`
+}
+
+type daIntegrityFixture struct {
+	Gate    string              `json:"gate"`
+	Vectors []daIntegrityVector `json:"vectors"`
+}
+
+type daIntegrityVector struct {
+	PrevTimestamps []uint64 `json:"prev_timestamps"`
+	ID             string   `json:"id"`
+	Op             string   `json:"op"`
+	BlockHex       string   `json:"block_hex"`
+	ExpectedPrev   string   `json:"expected_prev_hash"`
+	ExpectedTarget string   `json:"expected_target"`
+	ExpectErr      string   `json:"expect_err"`
+	Height         uint64   `json:"height"`
+	ExpectOk       bool     `json:"expect_ok"`
+}
+
 var writeJSONFn = writeJSON
 
 func mustGitCommit() string {
@@ -214,19 +268,27 @@ func sha3hex(b []byte) string {
 }
 
 func listFixtureNames(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
+	info, err := os.Stat(dir)
 	if err != nil {
 		return nil, err
 	}
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
+	if !info.IsDir() {
+		return nil, fmt.Errorf("not a directory: %s", dir)
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "CV-*.json"))
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(matches))
+	for _, match := range matches {
+		info, err := os.Stat(match)
+		if err != nil {
+			return nil, err
+		}
+		if info.IsDir() {
 			continue
 		}
-		name := entry.Name()
-		if strings.HasPrefix(name, "CV-") && strings.HasSuffix(name, ".json") {
-			names = append(names, entry.Name())
-		}
+		names = append(names, filepath.Base(match))
 	}
 	sort.Strings(names)
 	return names, nil
@@ -310,6 +372,20 @@ func writeTraceEntry(buf *bytes.Buffer, gate string, vectorID string, op string,
 		return fmt.Errorf("write entry: %w", err)
 	}
 	return nil
+}
+
+func evalValidationOrder(checks []validationCheckJSON) (string, []string, error) {
+	if len(checks) == 0 {
+		return "", nil, fmt.Errorf("bad checks")
+	}
+	evaluated := make([]string, 0, len(checks))
+	for _, check := range checks {
+		evaluated = append(evaluated, check.Name)
+		if check.Fails {
+			return check.Err, evaluated, errors.New(check.Err)
+		}
+	}
+	return "", evaluated, nil
 }
 
 func run(fixturesDir, outPath string) error {
@@ -619,6 +695,110 @@ func run(fixturesDir, outPath string) error {
 						"expected_target":           v.ExpectedTarget,
 					},
 					outputs,
+				); err != nil {
+					return err
+				}
+			}
+
+		case "CV-WEIGHT":
+			var fx weightFixture
+			if err := json.Unmarshal(b, &fx); err != nil {
+				return fmt.Errorf("unmarshal %s: %w", filepath.Join(fixturesDir, name), err)
+			}
+			for _, v := range fx.Vectors {
+				if !v.ExpectOk {
+					continue
+				}
+				txBytes, _ := hex.DecodeString(v.TxHex)
+				tx, _, _, _, perr := consensus.ParseTx(txBytes)
+				var runErr error
+				outputs := map[string]any{}
+				if perr != nil {
+					runErr = perr
+				} else {
+					weight, daBytes, anchorBytes, err := consensus.TxWeightAndStats(tx)
+					runErr = err
+					outputs["weight"] = weight
+					outputs["da_bytes"] = daBytes
+					outputs["anchor_bytes"] = anchorBytes
+				}
+				if err := writeTraceEntry(
+					&traceBuf,
+					fx.Gate,
+					v.ID,
+					v.Op,
+					runErr,
+					map[string]any{"tx_hex": v.TxHex},
+					outputs,
+				); err != nil {
+					return err
+				}
+			}
+
+		case "CV-VALIDATION-ORDER":
+			var fx validationOrderFixture
+			if err := json.Unmarshal(b, &fx); err != nil {
+				return fmt.Errorf("unmarshal %s: %w", filepath.Join(fixturesDir, name), err)
+			}
+			for _, v := range fx.Vectors {
+				firstErr, evaluated, runErr := evalValidationOrder(v.Checks)
+				outputs := map[string]any{
+					"evaluated": evaluated,
+				}
+				if firstErr != "" {
+					outputs["first_err"] = firstErr
+				}
+				if err := writeTraceEntry(
+					&traceBuf,
+					fx.Gate,
+					v.ID,
+					v.Op,
+					runErr,
+					map[string]any{"checks_len": len(v.Checks)},
+					outputs,
+				); err != nil {
+					return err
+				}
+			}
+
+		case "CV-DA-INTEGRITY":
+			var fx daIntegrityFixture
+			if err := json.Unmarshal(b, &fx); err != nil {
+				return fmt.Errorf("unmarshal %s: %w", filepath.Join(fixturesDir, name), err)
+			}
+			for _, v := range fx.Vectors {
+				blockBytes, _ := hex.DecodeString(v.BlockHex)
+				prevPtr, prevErr := parseHex32Ptr("expected_prev_hash", v.ExpectedPrev)
+				tgtPtr, tgtErr := parseHex32Ptr("expected_target", v.ExpectedTarget)
+				var runErr error
+				if prevErr != nil {
+					runErr = prevErr
+				}
+				if runErr == nil && tgtErr != nil {
+					runErr = tgtErr
+				}
+				if runErr == nil {
+					_, runErr = consensus.ValidateBlockBasicWithContextAtHeight(
+						blockBytes,
+						prevPtr,
+						tgtPtr,
+						v.Height,
+						v.PrevTimestamps,
+					)
+				}
+				if err := writeTraceEntry(
+					&traceBuf,
+					fx.Gate,
+					v.ID,
+					v.Op,
+					runErr,
+					map[string]any{
+						"block_hex_digest_sha3_256": sha3hex(blockBytes),
+						"expected_prev_hash":        v.ExpectedPrev,
+						"expected_target":           v.ExpectedTarget,
+						"prev_timestamps":           v.PrevTimestamps,
+					},
+					map[string]any{},
 				); err != nil {
 					return err
 				}
