@@ -96,28 +96,35 @@ func encodeVersionPayload(v node.VersionPayloadV1) ([]byte, error) {
 	}
 
 	var buf bytes.Buffer
-	if err := binary.Write(&buf, binary.BigEndian, v.Magic); err != nil {
-		return nil, err
-	}
-	if err := binary.Write(&buf, binary.BigEndian, v.ProtocolVersion); err != nil {
-		return nil, err
-	}
-	if _, err := buf.Write(v.ChainID[:]); err != nil {
-		return nil, err
-	}
-	if _, err := buf.Write(v.GenesisHash[:]); err != nil {
-		return nil, err
-	}
-	if err := binary.Write(&buf, binary.BigEndian, uint16(len(v.UserAgent))); err != nil {
-		return nil, err
-	}
-	if _, err := buf.WriteString(v.UserAgent); err != nil {
-		return nil, err
-	}
-	if err := binary.Write(&buf, binary.BigEndian, v.BestHeight); err != nil {
+	if err := encodeVersionPayloadTo(&buf, v); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+func encodeVersionPayloadTo(w io.Writer, v node.VersionPayloadV1) error {
+	if err := binary.Write(w, binary.BigEndian, v.Magic); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, v.ProtocolVersion); err != nil {
+		return err
+	}
+	if _, err := w.Write(v.ChainID[:]); err != nil {
+		return err
+	}
+	if _, err := w.Write(v.GenesisHash[:]); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, uint16(len(v.UserAgent))); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, v.UserAgent); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, v.BestHeight); err != nil {
+		return err
+	}
+	return nil
 }
 
 func decodeVersionPayload(payload []byte) (node.VersionPayloadV1, error) {
@@ -193,18 +200,25 @@ func encodeGetBlocksPayload(req GetBlocksPayload) ([]byte, error) {
 		return nil, fmt.Errorf("too many locator hashes: %d", len(req.LocatorHashes))
 	}
 	var buf bytes.Buffer
-	if err := binary.Write(&buf, binary.BigEndian, uint16(len(req.LocatorHashes))); err != nil {
-		return nil, err
-	}
-	for _, locator := range req.LocatorHashes {
-		if _, err := buf.Write(locator[:]); err != nil {
-			return nil, err
-		}
-	}
-	if _, err := buf.Write(req.StopHash[:]); err != nil {
+	if err := encodeGetBlocksPayloadTo(&buf, req); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+func encodeGetBlocksPayloadTo(w io.Writer, req GetBlocksPayload) error {
+	if err := binary.Write(w, binary.BigEndian, uint16(len(req.LocatorHashes))); err != nil {
+		return err
+	}
+	for _, locator := range req.LocatorHashes {
+		if _, err := w.Write(locator[:]); err != nil {
+			return err
+		}
+	}
+	if _, err := w.Write(req.StopHash[:]); err != nil {
+		return err
+	}
+	return nil
 }
 
 func decodeGetBlocksPayload(payload []byte) (GetBlocksPayload, error) {
