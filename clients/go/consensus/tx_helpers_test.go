@@ -85,9 +85,9 @@ func TestCheckTransaction_ValidTx(t *testing.T) {
 	op := Outpoint{Txid: prevTxid, Vout: 0}
 	utxoSet := map[Outpoint]UtxoEntry{
 		op: {
-			Value:           100_000_000,
-			CovenantType:    COV_TYPE_P2PK,
-			CovenantData:    covData,
+			Value:             100_000_000,
+			CovenantType:      COV_TYPE_P2PK,
+			CovenantData:      covData,
 			CreationHeight:    1,
 			CreatedByCoinbase: true,
 		},
