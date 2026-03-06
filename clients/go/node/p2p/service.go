@@ -15,6 +15,7 @@ import (
 const (
 	defaultGetBlocksBatchLimit uint64 = 128
 	defaultLocatorLimit               = 32
+	defaultTxRelayFanout              = 8
 )
 
 type ServiceConfig struct {
@@ -24,6 +25,7 @@ type ServiceConfig struct {
 	GenesisHash        [32]byte
 	LocatorLimit       int
 	GetBlocksBatchSize uint64
+	TxRelayFanout      int
 	PeerRuntimeConfig  node.PeerRuntimeConfig
 	PeerManager        *node.PeerManager
 	SyncConfig         node.SyncConfig
@@ -96,6 +98,9 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	cfg.PeerRuntimeConfig = mergePeerRuntimeConfig(cfg.PeerRuntimeConfig)
 	if cfg.PeerRuntimeConfig.Network == "" {
 		cfg.PeerRuntimeConfig.Network = cfg.SyncConfig.Network
+	}
+	if cfg.TxRelayFanout <= 0 {
+		cfg.TxRelayFanout = defaultTxRelayFanout
 	}
 	return &Service{
 		cfg:       cfg,
