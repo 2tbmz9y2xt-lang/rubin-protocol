@@ -34,6 +34,13 @@ pub struct BlockBasicSummary {
     pub block_hash: [u8; 32],
 }
 
+#[derive(Clone, Copy, Debug)]
+struct BlockTxStats {
+    sum_weight: u64,
+    sum_da: u64,
+    sum_anchor: u64,
+}
+
 pub fn parse_block_bytes(block_bytes: &[u8]) -> Result<ParsedBlock, TxError> {
     if block_bytes.len() < BLOCK_HEADER_BYTES + 1 {
         return Err(TxError::new(ErrorCode::BlockErrParse, "block too short"));
@@ -129,96 +136,13 @@ pub fn validate_block_basic_with_context_at_height(
 ) -> Result<BlockBasicSummary, TxError> {
     let pb = parse_block_bytes(block_bytes)?;
 
-    pow_check(&pb.header_bytes, pb.header.target)?;
-
-    if let Some(target) = expected_target {
-        if pb.header.target != target {
-            return Err(TxError::new(
-                ErrorCode::BlockErrTargetInvalid,
-                "target mismatch",
-            ));
-        }
-    }
-
-    if let Some(prev) = expected_prev_hash {
-        if pb.header.prev_block_hash != prev {
-            return Err(TxError::new(
-                ErrorCode::BlockErrLinkageInvalid,
-                "prev_block_hash mismatch",
-            ));
-        }
-    }
-
-    let root = merkle_root_txids(&pb.txids)
-        .map_err(|_| TxError::new(ErrorCode::BlockErrMerkleInvalid, "failed to compute merkle"))?;
-    if root != pb.header.merkle_root {
-        return Err(TxError::new(
-            ErrorCode::BlockErrMerkleInvalid,
-            "merkle_root mismatch",
-        ));
-    }
+    validate_header_commitments(&pb, expected_prev_hash, expected_target)?;
     validate_coinbase_witness_commitment(&pb)?;
     validate_timestamp_rules(pb.header.timestamp, block_height, prev_timestamps)?;
 
     validate_coinbase_structure(&pb, block_height)?;
-
-    let mut sum_weight: u64 = 0;
-    let mut sum_da: u64 = 0;
-    let mut sum_anchor: u64 = 0;
-    let mut seen_nonces: HashMap<u64, ()> = HashMap::with_capacity(pb.txs.len());
-    for (i, tx) in pb.txs.iter().enumerate() {
-        if i > 0 {
-            if is_coinbase_tx(tx) {
-                return Err(TxError::new(
-                    ErrorCode::BlockErrCoinbaseInvalid,
-                    "coinbase-like tx found at index > 0",
-                ));
-            }
-            // Non-coinbase transactions must carry at least one input.
-            if tx.inputs.is_empty() {
-                return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "non-coinbase must have at least one input",
-                ));
-            }
-            if seen_nonces.insert(tx.tx_nonce, ()).is_some() {
-                return Err(TxError::new(
-                    ErrorCode::TxErrNonceReplay,
-                    "duplicate tx_nonce in block",
-                ));
-            }
-        }
-        validate_tx_covenants_genesis(tx, block_height)?;
-        let (w, da, anchor_bytes) = tx_weight_and_stats(tx)?;
-        sum_weight = sum_weight
-            .checked_add(w)
-            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
-        sum_da = sum_da
-            .checked_add(da)
-            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
-        sum_anchor = sum_anchor
-            .checked_add(anchor_bytes)
-            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
-    }
-
-    if sum_weight > MAX_BLOCK_WEIGHT {
-        return Err(TxError::new(
-            ErrorCode::BlockErrWeightExceeded,
-            "block weight exceeded",
-        ));
-    }
-    if sum_da > MAX_DA_BYTES_PER_BLOCK {
-        return Err(TxError::new(
-            ErrorCode::BlockErrWeightExceeded,
-            "DA bytes exceeded",
-        ));
-    }
-    if sum_anchor > MAX_ANCHOR_BYTES_PER_BLOCK {
-        return Err(TxError::new(
-            ErrorCode::BlockErrAnchorBytesExceeded,
-            "anchor bytes exceeded",
-        ));
-    }
+    let stats = accumulate_block_tx_stats(&pb, block_height)?;
+    validate_block_resource_limits(stats)?;
 
     validate_da_set_integrity(&pb.txs)?;
 
@@ -227,8 +151,8 @@ pub fn validate_block_basic_with_context_at_height(
 
     Ok(BlockBasicSummary {
         tx_count: pb.tx_count,
-        sum_weight,
-        sum_da,
+        sum_weight: stats.sum_weight,
+        sum_da: stats.sum_da,
         block_hash: h,
     })
 }
@@ -270,6 +194,42 @@ fn is_coinbase_tx(tx: &Tx) -> bool {
         && input.sequence == u32::MAX
 }
 
+fn validate_header_commitments(
+    pb: &ParsedBlock,
+    expected_prev_hash: Option<[u8; 32]>,
+    expected_target: Option<[u8; 32]>,
+) -> Result<(), TxError> {
+    pow_check(&pb.header_bytes, pb.header.target)?;
+
+    if let Some(target) = expected_target {
+        if pb.header.target != target {
+            return Err(TxError::new(
+                ErrorCode::BlockErrTargetInvalid,
+                "target mismatch",
+            ));
+        }
+    }
+
+    if let Some(prev) = expected_prev_hash {
+        if pb.header.prev_block_hash != prev {
+            return Err(TxError::new(
+                ErrorCode::BlockErrLinkageInvalid,
+                "prev_block_hash mismatch",
+            ));
+        }
+    }
+
+    let root = merkle_root_txids(&pb.txids)
+        .map_err(|_| TxError::new(ErrorCode::BlockErrMerkleInvalid, "failed to compute merkle"))?;
+    if root != pb.header.merkle_root {
+        return Err(TxError::new(
+            ErrorCode::BlockErrMerkleInvalid,
+            "merkle_root mismatch",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_coinbase_structure(pb: &ParsedBlock, block_height: u64) -> Result<(), TxError> {
     let coinbase = pb
         .txs
@@ -295,6 +255,74 @@ fn validate_coinbase_structure(pb: &ParsedBlock, block_height: u64) -> Result<()
         return Err(TxError::new(
             ErrorCode::BlockErrCoinbaseInvalid,
             "coinbase locktime must equal block height",
+        ));
+    }
+    Ok(())
+}
+
+fn accumulate_block_tx_stats(pb: &ParsedBlock, block_height: u64) -> Result<BlockTxStats, TxError> {
+    let mut stats = BlockTxStats {
+        sum_weight: 0,
+        sum_da: 0,
+        sum_anchor: 0,
+    };
+    let mut seen_nonces: HashMap<u64, ()> = HashMap::with_capacity(pb.txs.len());
+    for (i, tx) in pb.txs.iter().enumerate() {
+        if i > 0 {
+            if is_coinbase_tx(tx) {
+                return Err(TxError::new(
+                    ErrorCode::BlockErrCoinbaseInvalid,
+                    "coinbase-like tx found at index > 0",
+                ));
+            }
+            if tx.inputs.is_empty() {
+                return Err(TxError::new(
+                    ErrorCode::TxErrParse,
+                    "non-coinbase must have at least one input",
+                ));
+            }
+            if seen_nonces.insert(tx.tx_nonce, ()).is_some() {
+                return Err(TxError::new(
+                    ErrorCode::TxErrNonceReplay,
+                    "duplicate tx_nonce in block",
+                ));
+            }
+        }
+        validate_tx_covenants_genesis(tx, block_height)?;
+        let (w, da, anchor_bytes) = tx_weight_and_stats(tx)?;
+        stats.sum_weight = stats
+            .sum_weight
+            .checked_add(w)
+            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
+        stats.sum_da = stats
+            .sum_da
+            .checked_add(da)
+            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
+        stats.sum_anchor = stats
+            .sum_anchor
+            .checked_add(anchor_bytes)
+            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
+    }
+    Ok(stats)
+}
+
+fn validate_block_resource_limits(stats: BlockTxStats) -> Result<(), TxError> {
+    if stats.sum_weight > MAX_BLOCK_WEIGHT {
+        return Err(TxError::new(
+            ErrorCode::BlockErrWeightExceeded,
+            "block weight exceeded",
+        ));
+    }
+    if stats.sum_da > MAX_DA_BYTES_PER_BLOCK {
+        return Err(TxError::new(
+            ErrorCode::BlockErrWeightExceeded,
+            "DA bytes exceeded",
+        ));
+    }
+    if stats.sum_anchor > MAX_ANCHOR_BYTES_PER_BLOCK {
+        return Err(TxError::new(
+            ErrorCode::BlockErrAnchorBytesExceeded,
+            "anchor bytes exceeded",
         ));
     }
     Ok(())

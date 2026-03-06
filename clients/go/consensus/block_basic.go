@@ -23,6 +23,12 @@ type BlockBasicSummary struct {
 	BlockHash [32]byte
 }
 
+type blockTxStats struct {
+	sumWeight uint64
+	sumDa     uint64
+	sumAnchor uint64
+}
+
 func isCoinbasePrevout(in TxInput) bool {
 	var zero [32]byte
 	return in.PrevTxid == zero && in.PrevVout == ^uint32(0)
@@ -134,24 +140,8 @@ func validateParsedBlockBasicWithContextAtHeight(
 		return nil, txerr(BLOCK_ERR_PARSE, "nil parsed block")
 	}
 
-	if err := PowCheck(pb.HeaderBytes, pb.Header.Target); err != nil {
+	if err := validateHeaderCommitments(pb, expectedPrevHash, expectedTarget); err != nil {
 		return nil, err
-	}
-
-	if expectedTarget != nil && pb.Header.Target != *expectedTarget {
-		return nil, txerr(BLOCK_ERR_TARGET_INVALID, "target mismatch")
-	}
-
-	if expectedPrevHash != nil && pb.Header.PrevBlockHash != *expectedPrevHash {
-		return nil, txerr(BLOCK_ERR_LINKAGE_INVALID, "prev_block_hash mismatch")
-	}
-
-	root, err := MerkleRootTxids(pb.Txids)
-	if err != nil {
-		return nil, txerr(BLOCK_ERR_MERKLE_INVALID, "failed to compute merkle root")
-	}
-	if root != pb.Header.MerkleRoot {
-		return nil, txerr(BLOCK_ERR_MERKLE_INVALID, "merkle_root mismatch")
 	}
 	if err := validateCoinbaseWitnessCommitment(pb); err != nil {
 		return nil, err
@@ -159,65 +149,15 @@ func validateParsedBlockBasicWithContextAtHeight(
 	if err := validateTimestampRules(pb.Header.Timestamp, blockHeight, prevTimestamps); err != nil {
 		return nil, err
 	}
-
-	var sumWeight uint64
-	var sumDa uint64
-	var sumAnchor uint64
-	if len(pb.Txs) == 0 || !isCoinbaseTx(pb.Txs[0]) {
-		return nil, txerr(BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
+	if err := validateCoinbaseStructure(pb, blockHeight); err != nil {
+		return nil, err
 	}
-	if len(pb.Txs[0].Outputs) == 0 {
-		return nil, txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase must have at least one output")
+	stats, err := accumulateBlockTxStats(pb, blockHeight)
+	if err != nil {
+		return nil, err
 	}
-	if blockHeight > uint64(^uint32(0)) {
-		return nil, txerr(BLOCK_ERR_COINBASE_INVALID, "block height exceeds coinbase locktime range")
-	}
-	if pb.Txs[0].Locktime != uint32(blockHeight) {
-		return nil, txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase locktime must equal block height")
-	}
-	seenNonces := make(map[uint64]struct{}, len(pb.Txs))
-	for i, tx := range pb.Txs {
-		if i > 0 && isCoinbaseTx(tx) {
-			return nil, txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase-like tx is only allowed at index 0")
-		}
-		// Non-coinbase transactions must carry at least one input.
-		if i > 0 && len(tx.Inputs) == 0 {
-			return nil, txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
-		}
-		if i > 0 {
-			if _, exists := seenNonces[tx.TxNonce]; exists {
-				return nil, txerr(TX_ERR_NONCE_REPLAY, "duplicate tx_nonce in block")
-			}
-			seenNonces[tx.TxNonce] = struct{}{}
-		}
-		if err := ValidateTxCovenantsGenesis(tx, blockHeight); err != nil {
-			return nil, err
-		}
-		w, da, anchorBytes, err := txWeightAndStats(tx)
-		if err != nil {
-			return nil, err
-		}
-		sumWeight, err = addU64(sumWeight, w)
-		if err != nil {
-			return nil, err
-		}
-		sumDa, err = addU64(sumDa, da)
-		if err != nil {
-			return nil, err
-		}
-		sumAnchor, err = addU64(sumAnchor, anchorBytes)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if sumWeight > MAX_BLOCK_WEIGHT {
-		return nil, txerr(BLOCK_ERR_WEIGHT_EXCEEDED, "block weight exceeded")
-	}
-	if sumDa > MAX_DA_BYTES_PER_BLOCK {
-		return nil, txerr(BLOCK_ERR_WEIGHT_EXCEEDED, "DA bytes exceeded")
-	}
-	if sumAnchor > MAX_ANCHOR_BYTES_PER_BLOCK {
-		return nil, txerr(BLOCK_ERR_ANCHOR_BYTES_EXCEEDED, "anchor bytes exceeded")
+	if err := validateBlockResourceLimits(stats); err != nil {
+		return nil, err
 	}
 	if err := validateDASetIntegrity(pb.Txs); err != nil {
 		return nil, err
@@ -230,8 +170,8 @@ func validateParsedBlockBasicWithContextAtHeight(
 
 	return &BlockBasicSummary{
 		TxCount:   pb.TxCount,
-		SumWeight: sumWeight,
-		SumDa:     sumDa,
+		SumWeight: stats.sumWeight,
+		SumDa:     stats.sumDa,
 		BlockHash: blockHash,
 	}, nil
 }
@@ -264,6 +204,97 @@ func ValidateBlockBasicWithContextAndFeesAtHeight(
 		return nil, err
 	}
 	return s, nil
+}
+
+func validateHeaderCommitments(pb *ParsedBlock, expectedPrevHash *[32]byte, expectedTarget *[32]byte) error {
+	if err := PowCheck(pb.HeaderBytes, pb.Header.Target); err != nil {
+		return err
+	}
+
+	if expectedTarget != nil && pb.Header.Target != *expectedTarget {
+		return txerr(BLOCK_ERR_TARGET_INVALID, "target mismatch")
+	}
+
+	if expectedPrevHash != nil && pb.Header.PrevBlockHash != *expectedPrevHash {
+		return txerr(BLOCK_ERR_LINKAGE_INVALID, "prev_block_hash mismatch")
+	}
+
+	root, err := MerkleRootTxids(pb.Txids)
+	if err != nil {
+		return txerr(BLOCK_ERR_MERKLE_INVALID, "failed to compute merkle root")
+	}
+	if root != pb.Header.MerkleRoot {
+		return txerr(BLOCK_ERR_MERKLE_INVALID, "merkle_root mismatch")
+	}
+	return nil
+}
+
+func validateCoinbaseStructure(pb *ParsedBlock, blockHeight uint64) error {
+	if len(pb.Txs) == 0 || !isCoinbaseTx(pb.Txs[0]) {
+		return txerr(BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
+	}
+	if len(pb.Txs[0].Outputs) == 0 {
+		return txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase must have at least one output")
+	}
+	if blockHeight > uint64(^uint32(0)) {
+		return txerr(BLOCK_ERR_COINBASE_INVALID, "block height exceeds coinbase locktime range")
+	}
+	if pb.Txs[0].Locktime != uint32(blockHeight) {
+		return txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase locktime must equal block height")
+	}
+	return nil
+}
+
+func accumulateBlockTxStats(pb *ParsedBlock, blockHeight uint64) (*blockTxStats, error) {
+	stats := &blockTxStats{}
+	seenNonces := make(map[uint64]struct{}, len(pb.Txs))
+	for i, tx := range pb.Txs {
+		if i > 0 && isCoinbaseTx(tx) {
+			return nil, txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase-like tx is only allowed at index 0")
+		}
+		if i > 0 && len(tx.Inputs) == 0 {
+			return nil, txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
+		}
+		if i > 0 {
+			if _, exists := seenNonces[tx.TxNonce]; exists {
+				return nil, txerr(TX_ERR_NONCE_REPLAY, "duplicate tx_nonce in block")
+			}
+			seenNonces[tx.TxNonce] = struct{}{}
+		}
+		if err := ValidateTxCovenantsGenesis(tx, blockHeight); err != nil {
+			return nil, err
+		}
+		w, da, anchorBytes, err := txWeightAndStats(tx)
+		if err != nil {
+			return nil, err
+		}
+		stats.sumWeight, err = addU64(stats.sumWeight, w)
+		if err != nil {
+			return nil, err
+		}
+		stats.sumDa, err = addU64(stats.sumDa, da)
+		if err != nil {
+			return nil, err
+		}
+		stats.sumAnchor, err = addU64(stats.sumAnchor, anchorBytes)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return stats, nil
+}
+
+func validateBlockResourceLimits(stats *blockTxStats) error {
+	if stats.sumWeight > MAX_BLOCK_WEIGHT {
+		return txerr(BLOCK_ERR_WEIGHT_EXCEEDED, "block weight exceeded")
+	}
+	if stats.sumDa > MAX_DA_BYTES_PER_BLOCK {
+		return txerr(BLOCK_ERR_WEIGHT_EXCEEDED, "DA bytes exceeded")
+	}
+	if stats.sumAnchor > MAX_ANCHOR_BYTES_PER_BLOCK {
+		return txerr(BLOCK_ERR_ANCHOR_BYTES_EXCEEDED, "anchor bytes exceeded")
+	}
+	return nil
 }
 
 func validateCoinbaseValueBound(pb *ParsedBlock, blockHeight uint64, alreadyGenerated *big.Int, sumFees uint64) error {
