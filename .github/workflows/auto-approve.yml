@@ -26,6 +26,7 @@ jobs:
             const MAX_ATTEMPTS = 30;
             const POLL_INTERVAL = 30000; // 30 seconds
             const SUCCESSFUL_CONCLUSIONS = new Set(['success', 'skipped', 'neutral']);
+            const SELF_CHECK_NAMES = new Set(['auto-approve']);
 
             async function getOpenPullRequestByNumber(pull_number) {
               const response = await github.rest.pulls.get({
@@ -130,7 +131,8 @@ jobs:
               });
               const mergeableState = prState.data.mergeable_state ?? 'unknown';
               const latestChecks = latestCheckRunsByName(checks.data.check_runs);
-              const contextList = useAllChecks ? [...latestChecks.keys()] : requiredContexts;
+              const fallbackChecks = [...latestChecks.keys()].filter(name => !SELF_CHECK_NAMES.has(name));
+              const contextList = useAllChecks ? fallbackChecks : requiredContexts;
               const missingRequired = useAllChecks ? [] : contextList.filter(name => !latestChecks.has(name));
               const pendingRequired = contextList.filter(name => {
                 const run = latestChecks.get(name);
@@ -153,6 +155,16 @@ jobs:
               if (mergeableState === 'behind') {
                 console.log(`PR #${prNumber} is behind ${pr.base.ref}; not merging until branch is updated.`);
                 return;
+              }
+
+              if (useAllChecks && contextList.length === 0) {
+                if (attempt === MAX_ATTEMPTS) {
+                  console.log(`Timeout: no non-self checks discovered for ${ref} after ${MAX_ATTEMPTS} attempts`);
+                  return;
+                }
+                console.log(`Attempt ${attempt}: no non-self checks yet, waiting ${POLL_INTERVAL/1000}s...`);
+                await new Promise(r => setTimeout(r, POLL_INTERVAL));
+                continue;
               }
 
               if (missingRequired.length === 0 && pendingRequired.length === 0) {
