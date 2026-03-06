@@ -8,7 +8,7 @@ on:
     types: [completed]
 
 permissions:
-  administration: read
+  checks: read
   actions: write
   pull-requests: write
   contents: write
@@ -26,6 +26,7 @@ jobs:
             const MAX_ATTEMPTS = 30;
             const POLL_INTERVAL = 30000; // 30 seconds
             const SUCCESSFUL_CONCLUSIONS = new Set(['success', 'skipped', 'neutral']);
+            const SELF_CHECK_NAMES = new Set(['auto-approve']);
 
             async function getOpenPullRequestByNumber(pull_number) {
               const response = await github.rest.pulls.get({
@@ -40,12 +41,17 @@ jobs:
             }
 
             async function getRequiredContexts(baseBranch) {
-              const response = await github.rest.repos.getBranchProtection({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                branch: baseBranch
-              });
-              return response.data.required_status_checks?.contexts ?? [];
+              try {
+                const response = await github.rest.repos.getBranchProtection({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  branch: baseBranch
+                });
+                return response.data.required_status_checks?.contexts ?? [];
+              } catch (e) {
+                console.log(`getBranchProtection failed (${e.status}), falling back to all-checks mode`);
+                return null;
+              }
             }
 
             function latestCheckRunsByName(checkRuns) {
@@ -101,7 +107,12 @@ jobs:
             const prNumber = pr.number;
             console.log(`Found PR #${prNumber}`);
             const requiredContexts = await getRequiredContexts(pr.base.ref);
-            console.log(`Required contexts for ${pr.base.ref}: ${requiredContexts.join(', ')}`);
+            const useAllChecks = requiredContexts === null;
+            if (useAllChecks) {
+              console.log(`Using all-checks fallback mode for ${pr.base.ref}`);
+            } else {
+              console.log(`Required contexts for ${pr.base.ref}: ${requiredContexts.join(', ')}`);
+            }
 
             // --- Poll for checks to complete ---
             const ref = pr.head.sha;
@@ -120,12 +131,14 @@ jobs:
               });
               const mergeableState = prState.data.mergeable_state ?? 'unknown';
               const latestChecks = latestCheckRunsByName(checks.data.check_runs);
-              const missingRequired = requiredContexts.filter(name => !latestChecks.has(name));
-              const pendingRequired = requiredContexts.filter(name => {
+              const fallbackChecks = [...latestChecks.keys()].filter(name => !SELF_CHECK_NAMES.has(name));
+              const contextList = useAllChecks ? fallbackChecks : requiredContexts;
+              const missingRequired = useAllChecks ? [] : contextList.filter(name => !latestChecks.has(name));
+              const pendingRequired = contextList.filter(name => {
                 const run = latestChecks.get(name);
                 return run && run.status !== 'completed';
               });
-              const failedRequired = requiredContexts.filter(name => {
+              const failedRequired = contextList.filter(name => {
                 const run = latestChecks.get(name);
                 return run && run.status === 'completed' && !SUCCESSFUL_CONCLUSIONS.has(run.conclusion ?? '');
               });
@@ -142,6 +155,16 @@ jobs:
               if (mergeableState === 'behind') {
                 console.log(`PR #${prNumber} is behind ${pr.base.ref}; not merging until branch is updated.`);
                 return;
+              }
+
+              if (useAllChecks && contextList.length === 0) {
+                if (attempt === MAX_ATTEMPTS) {
+                  console.log(`Timeout: no non-self checks discovered for ${ref} after ${MAX_ATTEMPTS} attempts`);
+                  return;
+                }
+                console.log(`Attempt ${attempt}: no non-self checks yet, waiting ${POLL_INTERVAL/1000}s...`);
+                await new Promise(r => setTimeout(r, POLL_INTERVAL));
+                continue;
               }
 
               if (missingRequired.length === 0 && pendingRequired.length === 0) {
