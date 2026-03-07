@@ -2,6 +2,7 @@ pub mod blockstore;
 pub mod chainstate;
 pub mod coinbase;
 pub mod genesis;
+pub mod interop;
 mod io_utils;
 pub mod p2p_runtime;
 pub mod sync;

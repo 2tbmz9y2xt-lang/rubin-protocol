@@ -95,7 +95,16 @@ jobs:
           cd clients/rust
           cargo tarpaulin --workspace \
             --exclude rubin-consensus-cli \
-            --exclude-files crates/rubin-node/src/* \
+            --exclude-files crates/rubin-node/src/lib.rs \
+            --exclude-files crates/rubin-node/src/blockstore.rs \
+            --exclude-files crates/rubin-node/src/chainstate.rs \
+            --exclude-files crates/rubin-node/src/coinbase.rs \
+            --exclude-files crates/rubin-node/src/genesis.rs \
+            --exclude-files crates/rubin-node/src/io_utils.rs \
+            --exclude-files crates/rubin-node/src/main.rs \
+            --exclude-files crates/rubin-node/src/p2p_runtime.rs \
+            --exclude-files crates/rubin-node/src/sync.rs \
+            --exclude-files crates/rubin-node/src/bin/* \
             --exclude-files crates/rubin-consensus-cli/src/* \
             --out Lcov \
             --output-dir .

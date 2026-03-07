@@ -1,6 +1,8 @@
 # Build outputs
 **/target/
 **/bin/
+!clients/rust/crates/rubin-node/src/bin/
+!clients/rust/crates/rubin-node/src/bin/*.rs
 **/*.exe
 **/*.out
 
