@@ -25,6 +25,9 @@ pub struct VersionPayloadV1 {
     pub tx_relay: bool,
     pub pruned_below_height: u64,
     pub da_mempool_size: u32,
+    pub chain_id: [u8; 32],
+    pub genesis_hash: [u8; 32],
+    pub best_height: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,58 +135,23 @@ impl PeerSession {
 
         let mut header = [0u8; WIRE_HEADER_SIZE];
         self.stream.read_exact(&mut header)?;
-
-        let expected_magic = network_magic(&self.cfg.network);
-        if header[0..4] != expected_magic {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid envelope magic",
-            ));
-        }
-
-        let command = decode_wire_command(&header[4..4 + WIRE_COMMAND_SIZE])?;
         let payload_len = u32::from_le_bytes(header[16..20].try_into().expect("len"));
-        if payload_len as u64 > MAX_RELAY_MSG_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("relay payload exceeds cap: {payload_len}"),
-            ));
-        }
-
         let mut payload = vec![0u8; payload_len as usize];
         if payload_len > 0 {
             self.stream.read_exact(&mut payload)?;
         }
-
-        let checksum = wire_checksum(&payload);
-        if header[20..24] != checksum {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid envelope checksum",
-            ));
-        }
-
-        Ok(WireMessage { command, payload })
+        let mut raw = Vec::with_capacity(WIRE_HEADER_SIZE + payload.len());
+        raw.extend_from_slice(&header);
+        raw.extend_from_slice(&payload);
+        unmarshal_wire_message(&raw, network_magic(&self.cfg.network), MAX_RELAY_MSG_BYTES)
     }
 
     pub fn write_message(&mut self, msg: &WireMessage) -> io::Result<()> {
         self.stream
             .set_write_timeout(Some(self.cfg.write_deadline))
             .map_err(io::Error::other)?;
-
-        if msg.payload.len() as u64 > MAX_RELAY_MSG_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("relay payload exceeds cap: {}", msg.payload.len()),
-            ));
-        }
-
-        let header =
-            build_envelope_header(network_magic(&self.cfg.network), &msg.command, &msg.payload)?;
-        self.stream.write_all(&header)?;
-        if !msg.payload.is_empty() {
-            self.stream.write_all(&msg.payload)?;
-        }
+        let raw = marshal_wire_message(msg, network_magic(&self.cfg.network), MAX_RELAY_MSG_BYTES)?;
+        self.stream.write_all(&raw)?;
         self.stream.flush()?;
         Ok(())
     }
@@ -239,6 +207,8 @@ pub fn perform_version_handshake(
     stream: TcpStream,
     cfg: PeerRuntimeConfig,
     local: VersionPayloadV1,
+    expected_chain_id: [u8; 32],
+    expected_genesis_hash: [u8; 32],
 ) -> io::Result<PeerSession> {
     let mut session = PeerSession::new(stream, cfg).map_err(io::Error::other)?;
     let version_payload = marshal_version_payload_v1(local);
@@ -253,17 +223,12 @@ pub fn perform_version_handshake(
         match msg.command.as_str() {
             "version" => {
                 let remote = unmarshal_version_payload_v1(&msg.payload)?;
-                validate_remote_version(remote)?;
-                if !protocol_versions_compatible(local.protocol_version, remote.protocol_version) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "protocol_version mismatch: local={} remote={}",
-                            local.protocol_version, remote.protocol_version
-                        ),
-                    ));
-                }
-
+                validate_remote_version(
+                    remote,
+                    local.protocol_version,
+                    expected_chain_id,
+                    expected_genesis_hash,
+                )?;
                 session.peer.version_received = true;
                 session.peer.remote_version = remote;
                 if !sent_verack {
@@ -297,11 +262,37 @@ pub fn perform_version_handshake(
     }
 }
 
-fn validate_remote_version(remote: VersionPayloadV1) -> io::Result<()> {
+fn validate_remote_version(
+    remote: VersionPayloadV1,
+    local_protocol_version: u32,
+    expected_chain_id: [u8; 32],
+    expected_genesis_hash: [u8; 32],
+) -> io::Result<()> {
     if remote.protocol_version == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid protocol_version",
+        ));
+    }
+    if !protocol_versions_compatible(local_protocol_version, remote.protocol_version) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "protocol_version mismatch: local={} remote={}",
+                local_protocol_version, remote.protocol_version
+            ),
+        ));
+    }
+    if remote.chain_id != expected_chain_id {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "chain_id mismatch",
+        ));
+    }
+    if remote.genesis_hash != expected_genesis_hash {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "genesis_hash mismatch",
         ));
     }
     Ok(())
@@ -318,39 +309,45 @@ fn protocol_versions_compatible(local: u32, remote: u32) -> bool {
 }
 
 fn marshal_version_payload_v1(v: VersionPayloadV1) -> Vec<u8> {
-    let mut payload = vec![0u8; 17];
+    let mut payload = vec![0u8; 89];
     payload[0..4].copy_from_slice(&v.protocol_version.to_le_bytes());
     payload[4] = if v.tx_relay { 1 } else { 0 };
     payload[5..13].copy_from_slice(&v.pruned_below_height.to_le_bytes());
     payload[13..17].copy_from_slice(&v.da_mempool_size.to_le_bytes());
+    payload[17..49].copy_from_slice(&v.chain_id);
+    payload[49..81].copy_from_slice(&v.genesis_hash);
+    payload[81..89].copy_from_slice(&v.best_height.to_le_bytes());
     payload
 }
 
 fn unmarshal_version_payload_v1(payload: &[u8]) -> io::Result<VersionPayloadV1> {
-    if payload.len() < 13 {
+    if payload.len() != 89 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "version payload too short",
+            if payload.len() < 89 {
+                "version payload too short"
+            } else {
+                "trailing bytes in version payload"
+            },
         ));
     }
     let protocol_version = u32::from_le_bytes(payload[0..4].try_into().expect("pv"));
     let tx_relay = payload[4] == 1;
     let pruned_below_height = u64::from_le_bytes(payload[5..13].try_into().expect("pruned"));
-
-    if payload.len() < 17 {
-        return Ok(VersionPayloadV1 {
-            protocol_version,
-            tx_relay,
-            pruned_below_height,
-            da_mempool_size: 0,
-        });
-    }
     let da_mempool_size = u32::from_le_bytes(payload[13..17].try_into().expect("da"));
+    let mut chain_id = [0u8; 32];
+    chain_id.copy_from_slice(&payload[17..49]);
+    let mut genesis_hash = [0u8; 32];
+    genesis_hash.copy_from_slice(&payload[49..81]);
+    let best_height = u64::from_le_bytes(payload[81..89].try_into().expect("best_height"));
     Ok(VersionPayloadV1 {
         protocol_version,
         tx_relay,
         pruned_below_height,
         da_mempool_size,
+        chain_id,
+        genesis_hash,
+        best_height,
     })
 }
 
@@ -369,6 +366,68 @@ fn build_envelope_header(
     let sum = wire_checksum(payload);
     header[20..24].copy_from_slice(&sum);
     Ok(header)
+}
+
+fn marshal_wire_message(
+    msg: &WireMessage,
+    magic: [u8; 4],
+    max_message_size: u64,
+) -> io::Result<Vec<u8>> {
+    if msg.payload.len() as u64 > max_message_size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("message exceeds cap: {}", msg.payload.len()),
+        ));
+    }
+    let header = build_envelope_header(magic, &msg.command, &msg.payload)?;
+    let mut raw = Vec::with_capacity(WIRE_HEADER_SIZE + msg.payload.len());
+    raw.extend_from_slice(&header);
+    raw.extend_from_slice(&msg.payload);
+    Ok(raw)
+}
+
+fn unmarshal_wire_message(
+    raw: &[u8],
+    expected_magic: [u8; 4],
+    max_message_size: u64,
+) -> io::Result<WireMessage> {
+    if raw.len() < WIRE_HEADER_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "short envelope header",
+        ));
+    }
+    let header = &raw[..WIRE_HEADER_SIZE];
+    if header[0..4] != expected_magic {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid envelope magic",
+        ));
+    }
+    let command = decode_wire_command(&header[4..4 + WIRE_COMMAND_SIZE])?;
+    let payload_len = u32::from_le_bytes(header[16..20].try_into().expect("len"));
+    if payload_len as u64 > max_message_size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "message exceeds cap",
+        ));
+    }
+    let total_len = WIRE_HEADER_SIZE + payload_len as usize;
+    if raw.len() < total_len {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "short envelope payload",
+        ));
+    }
+    let payload = raw[WIRE_HEADER_SIZE..total_len].to_vec();
+    let checksum = wire_checksum(&payload);
+    if header[20..24] != checksum {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid envelope checksum",
+        ));
+    }
+    Ok(WireMessage { command, payload })
 }
 
 fn wire_checksum(payload: &[u8]) -> [u8; 4] {
@@ -468,11 +527,104 @@ fn network_magic(network: &str) -> [u8; 4] {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::net::TcpListener;
+    use std::path::PathBuf;
     use std::thread;
     use std::time::Duration;
 
     use super::*;
+    use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
+    use rubin_consensus::block_hash;
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct SharedRuntimeVectors {
+        version_payload_v1: SharedVersionPayloadV1,
+        frames: Vec<SharedFrameVector>,
+        version_validation: Vec<SharedVersionValidation>,
+    }
+
+    #[derive(Deserialize)]
+    struct SharedVersionPayloadV1 {
+        hex: String,
+        protocol_version: u32,
+        tx_relay: bool,
+        pruned_below_height: u64,
+        da_mempool_size: u32,
+        chain_id_hex: String,
+        genesis_hash_hex: String,
+        best_height: u64,
+    }
+
+    #[derive(Deserialize)]
+    struct SharedFrameVector {
+        id: String,
+        network: String,
+        max_message_size: u64,
+        hex: String,
+        expect_command: Option<String>,
+        expect_payload_hex: Option<String>,
+        expect_err: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct SharedVersionValidation {
+        id: String,
+        local_protocol_version: u32,
+        remote_protocol_version: u32,
+        tx_relay: bool,
+        pruned_below_height: u64,
+        da_mempool_size: u32,
+        chain_id_hex: String,
+        genesis_hash_hex: String,
+        best_height: u64,
+        #[serde(default)]
+        expect_ok: bool,
+        #[serde(default)]
+        expect_err: Option<String>,
+    }
+
+    fn test_version_payload(best_height: u64) -> VersionPayloadV1 {
+        let genesis_bytes = devnet_genesis_block_bytes();
+        let genesis_hash = block_hash(&genesis_bytes[..116]).expect("genesis hash");
+        VersionPayloadV1 {
+            protocol_version: 1,
+            tx_relay: true,
+            pruned_below_height: 0,
+            da_mempool_size: 0,
+            chain_id: devnet_genesis_chain_id(),
+            genesis_hash,
+            best_height,
+        }
+    }
+
+    fn load_shared_runtime_vectors() -> SharedRuntimeVectors {
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("../../../p2p/testdata/runtime_vectors.json");
+        let raw = fs::read_to_string(&path).expect("read runtime_vectors.json");
+        serde_json::from_str(&raw).expect("parse runtime_vectors.json")
+    }
+
+    fn decode_hex32(raw: &str) -> [u8; 32] {
+        let bytes = hex::decode(raw).expect("hex32");
+        assert_eq!(bytes.len(), 32, "hex32 len");
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&bytes);
+        out
+    }
+
+    fn shared_version_payload(v: &SharedVersionPayloadV1) -> VersionPayloadV1 {
+        VersionPayloadV1 {
+            protocol_version: v.protocol_version,
+            tx_relay: v.tx_relay,
+            pruned_below_height: v.pruned_below_height,
+            da_mempool_size: v.da_mempool_size,
+            chain_id: decode_hex32(&v.chain_id_hex),
+            genesis_hash: decode_hex32(&v.genesis_hash_hex),
+            best_height: v.best_height,
+        }
+    }
 
     #[test]
     fn p2p_version_handshake_bidirectional_ok() {
@@ -485,13 +637,8 @@ mod tests {
             let mut cfg = default_peer_runtime_config("devnet", 8);
             cfg.read_deadline = Duration::from_secs(2);
             cfg.write_deadline = Duration::from_secs(2);
-            let local = VersionPayloadV1 {
-                protocol_version: 1,
-                tx_relay: true,
-                pruned_below_height: 0,
-                da_mempool_size: 0,
-            };
-            perform_version_handshake(stream, cfg, local)
+            let local = test_version_payload(0);
+            perform_version_handshake(stream, cfg, local, local.chain_id, local.genesis_hash)
                 .expect("server handshake")
                 .state()
         });
@@ -502,13 +649,8 @@ mod tests {
             let mut cfg = default_peer_runtime_config("devnet", 8);
             cfg.read_deadline = Duration::from_secs(2);
             cfg.write_deadline = Duration::from_secs(2);
-            let local = VersionPayloadV1 {
-                protocol_version: 1,
-                tx_relay: true,
-                pruned_below_height: 0,
-                da_mempool_size: 0,
-            };
-            perform_version_handshake(stream, cfg, local)
+            let local = test_version_payload(0);
+            perform_version_handshake(stream, cfg, local, local.chain_id, local.genesis_hash)
                 .expect("client handshake")
                 .state()
         });
@@ -541,12 +683,7 @@ mod tests {
         let client = thread::spawn(move || {
             let mut stream = TcpStream::connect(addr).expect("connect");
             stream.set_nodelay(true).expect("set_nodelay");
-            let payload = marshal_version_payload_v1(VersionPayloadV1 {
-                protocol_version: 1,
-                tx_relay: true,
-                pruned_below_height: 0,
-                da_mempool_size: 0,
-            });
+            let payload = marshal_version_payload_v1(test_version_payload(0));
             let header = build_envelope_header(network_magic("mainnet"), "version", &payload)
                 .expect("header");
             stream.write_all(&header).expect("write header");
@@ -556,5 +693,81 @@ mod tests {
 
         client.join().expect("client join");
         server.join().expect("server join");
+    }
+
+    #[test]
+    fn shared_runtime_vectors_version_payload_v1() {
+        let vectors = load_shared_runtime_vectors();
+        let expected = shared_version_payload(&vectors.version_payload_v1);
+        let want = hex::decode(&vectors.version_payload_v1.hex).expect("payload hex");
+        let encoded = marshal_version_payload_v1(expected);
+        assert_eq!(encoded, want);
+        let decoded = unmarshal_version_payload_v1(&want).expect("decode payload");
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn shared_runtime_vectors_frames() {
+        let vectors = load_shared_runtime_vectors();
+        for frame in vectors.frames {
+            let raw = hex::decode(&frame.hex).expect("frame hex");
+            let decoded =
+                unmarshal_wire_message(&raw, network_magic(&frame.network), frame.max_message_size);
+            if let Some(expect_err) = frame.expect_err {
+                let err = decoded.expect_err(&frame.id);
+                assert_eq!(err.to_string(), expect_err, "{}", frame.id);
+                continue;
+            }
+            let decoded = decoded.expect(&frame.id);
+            assert_eq!(
+                decoded.command,
+                frame.expect_command.expect("command"),
+                "{}",
+                frame.id
+            );
+            assert_eq!(
+                decoded.payload,
+                hex::decode(frame.expect_payload_hex.expect("payload")).expect("payload hex"),
+                "{}",
+                frame.id
+            );
+            let reencoded = marshal_wire_message(
+                &decoded,
+                network_magic(&frame.network),
+                frame.max_message_size,
+            )
+            .expect("marshal");
+            assert_eq!(reencoded, raw, "{}", frame.id);
+        }
+    }
+
+    #[test]
+    fn shared_runtime_vectors_version_validation() {
+        let vectors = load_shared_runtime_vectors();
+        let expected = shared_version_payload(&vectors.version_payload_v1);
+        for tc in vectors.version_validation {
+            let remote = VersionPayloadV1 {
+                protocol_version: tc.remote_protocol_version,
+                tx_relay: tc.tx_relay,
+                pruned_below_height: tc.pruned_below_height,
+                da_mempool_size: tc.da_mempool_size,
+                chain_id: decode_hex32(&tc.chain_id_hex),
+                genesis_hash: decode_hex32(&tc.genesis_hash_hex),
+                best_height: tc.best_height,
+            };
+            let got = validate_remote_version(
+                remote,
+                tc.local_protocol_version,
+                expected.chain_id,
+                expected.genesis_hash,
+            );
+            if let Some(expect_err) = tc.expect_err {
+                let err = got.expect_err(&tc.id);
+                assert_eq!(err.to_string(), expect_err, "{}", tc.id);
+                continue;
+            }
+            assert!(tc.expect_ok, "{} should be marked expect_ok", tc.id);
+            got.expect(&tc.id);
+        }
     }
 }

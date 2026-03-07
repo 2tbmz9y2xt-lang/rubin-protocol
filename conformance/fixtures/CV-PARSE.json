@@ -122,6 +122,22 @@
       "tx_hex": "0100000000000000000000000000000000000103fd00000000",
       "expect_ok": false,
       "expect_err": "TX_ERR_PARSE"
+    },
+    {
+      "id": "PARSE-18",
+      "op": "parse_tx",
+      "tx_hex": "01000000000000000000000000000000000000fd01040100",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_WITNESS_OVERFLOW",
+      "note": "Witness overflow takes precedence over conflicting tx_kind=0x00 da_payload_len != 0 because witness_count is parsed before da_payload_len on the wire."
+    },
+    {
+      "id": "PARSE-19",
+      "op": "parse_tx",
+      "tx_hex": "0100000000000000000000000000000000000001010001000100",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_NONCANONICAL",
+      "note": "Known-suite canonical witness length errors take precedence over conflicting tx_kind=0x00 da_payload_len != 0 once the witness item has been parsed."
     }
   ]
 }

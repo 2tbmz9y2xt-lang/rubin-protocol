@@ -35,7 +35,7 @@ func TestCoverageResidual_ServiceSyncBroadcastBranches(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := readFrame(remote1, h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+		_, err := readFrame(remote1, networkMagic(h.service.cfg.PeerRuntimeConfig.Network), h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
 		done <- err
 	}()
 	if err := h.service.broadcastInventory(peer2, []InventoryVector{{Type: MSG_BLOCK, Hash: [32]byte{0x02}}}); err != nil {
@@ -47,7 +47,7 @@ func TestCoverageResidual_ServiceSyncBroadcastBranches(t *testing.T) {
 
 	done2 := make(chan error, 1)
 	go func() {
-		_, err := readFrame(remote1, h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+		_, err := readFrame(remote1, networkMagic(h.service.cfg.PeerRuntimeConfig.Network), h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
 		done2 <- err
 	}()
 	if err := h.service.broadcastInventory(nil, []InventoryVector{{Type: MSG_BLOCK, Hash: [32]byte{0x03}}}); err != nil {
@@ -222,7 +222,7 @@ func countFrames(conn net.Conn, maxSize uint32, limit int, done chan<- int) {
 	received := 0
 	for received < limit {
 		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
-		if _, err := readFrame(conn, maxSize); err != nil {
+		if _, err := readFrame(conn, networkMagic("devnet"), maxSize); err != nil {
 			break
 		}
 		received++
@@ -249,13 +249,13 @@ func (c *recordingConn) SetWriteDeadline(_ time.Time) error { return nil }
 func (c *recordingConn) framesWritten() int {
 	payload := c.Bytes()
 	frames := 0
-	for len(payload) >= 4 {
-		size := int(uint32(payload[0])<<24 | uint32(payload[1])<<16 | uint32(payload[2])<<8 | uint32(payload[3]))
-		if len(payload) < 4+size {
+	for len(payload) >= wireHeaderSize {
+		size := int(uint32(payload[16]) | uint32(payload[17])<<8 | uint32(payload[18])<<16 | uint32(payload[19])<<24)
+		if len(payload) < wireHeaderSize+size {
 			break
 		}
 		frames++
-		payload = payload[4+size:]
+		payload = payload[wireHeaderSize+size:]
 	}
 	return frames
 }

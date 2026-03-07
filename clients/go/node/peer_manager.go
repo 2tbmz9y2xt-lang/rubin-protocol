@@ -4,6 +4,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 const (
@@ -11,16 +13,18 @@ const (
 	defaultWriteDeadline    = 15 * time.Second
 	defaultHandshakeTimeout = 10 * time.Second
 	defaultBanThreshold     = 100
-	defaultMaxMessageSize   = 4 * 1024 * 1024
+	defaultMaxMessageSize   = uint32(consensus.MAX_RELAY_MSG_BYTES)
 )
 
 type VersionPayloadV1 struct {
-	Magic           uint32
-	ProtocolVersion uint32
-	ChainID         [32]byte
-	GenesisHash     [32]byte
-	UserAgent       string
-	BestHeight      uint64
+	ProtocolVersion   uint32
+	TxRelay           bool
+	PrunedBelowHeight uint64
+	DaMempoolSize     uint32
+	ChainID           [32]byte
+	GenesisHash       [32]byte
+	BestHeight        uint64
+	UserAgent         string
 }
 
 type PeerRuntimeConfig struct {
