@@ -3,6 +3,7 @@ package p2p
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"time"
 
@@ -18,6 +19,7 @@ func performHandshake(
 	expectedGenesisHash [32]byte,
 ) (node.PeerState, error) {
 	cfg = mergePeerRuntimeConfig(cfg)
+	magic := networkMagic(cfg.Network)
 
 	state := node.PeerState{
 		Addr: conn.RemoteAddr().String(),
@@ -40,28 +42,58 @@ func performHandshake(
 	if err != nil {
 		return state, err
 	}
-	if err := writeFrame(conn, message{Kind: messageVersion, Payload: payload}, cfg.MaxMessageSize); err != nil {
+	if err := writeFrame(conn, magic, message{Command: messageVersion, Payload: payload}, cfg.MaxMessageSize); err != nil {
 		return state, err
 	}
-	frame, err := readFrame(conn, cfg.MaxMessageSize)
-	if err != nil {
-		return state, err
+	sentVerAck := false
+	versionReceived := false
+	verAckReceived := false
+	for {
+		frame, err := readFrameWithPayloadLimit(conn, magic, cfg.MaxMessageSize, preHandshakePayloadCap)
+		if err != nil {
+			return state, err
+		}
+		switch frame.Command {
+		case messageVersion:
+			remote, err := decodeVersionPayload(frame.Payload)
+			if err != nil {
+				state.LastError = err.Error()
+				return state, err
+			}
+			state.RemoteVersion = remote
+			if err := validateRemoteVersion(remote, local.ProtocolVersion, expectedChainID, expectedGenesisHash, cfg.BanThreshold, &state); err != nil {
+				return state, err
+			}
+			versionReceived = true
+			if !sentVerAck {
+				if err := writeFrame(conn, magic, message{Command: messageVerAck}, cfg.MaxMessageSize); err != nil {
+					return state, err
+				}
+				sentVerAck = true
+			}
+		case messageVerAck:
+			verAckReceived = true
+		default:
+			state.BanScore = cfg.BanThreshold
+			state.LastError = "unexpected pre-handshake command"
+			return state, errors.New("unexpected pre-handshake command")
+		}
+		if versionReceived && sentVerAck && verAckReceived {
+			state.HandshakeComplete = true
+			return state, nil
+		}
 	}
-	if frame.Kind != messageVersion {
-		state.LastError = "invalid version message"
-		return state, errors.New("invalid version message")
+}
+
+func preHandshakePayloadCap(command string) uint32 {
+	switch command {
+	case messageVersion:
+		return versionPayloadBytes
+	case messageVerAck:
+		return 0
+	default:
+		return 0
 	}
-	remote, err := decodeVersionPayload(frame.Payload)
-	if err != nil {
-		state.LastError = err.Error()
-		return state, err
-	}
-	state.RemoteVersion = remote
-	if err := validateRemoteVersion(remote, expectedChainID, expectedGenesisHash, cfg.BanThreshold, &state); err != nil {
-		return state, err
-	}
-	state.HandshakeComplete = true
-	return state, nil
 }
 
 func handshakeDeadline(ctx context.Context, timeout time.Duration) time.Time {
@@ -85,19 +117,19 @@ func interruptHandshakeOnContextCancel(ctx context.Context, conn net.Conn, done 
 
 func validateRemoteVersion(
 	remote node.VersionPayloadV1,
+	localProtocolVersion uint32,
 	expectedChainID [32]byte,
 	expectedGenesisHash [32]byte,
 	banThreshold int,
 	state *node.PeerState,
 ) error {
 	switch {
-	case remote.Magic != ProtocolMagic:
-		state.BanScore = banThreshold
-		state.LastError = "magic mismatch"
-		return errors.New("magic mismatch")
-	case remote.ProtocolVersion != ProtocolVersion:
+	case remote.ProtocolVersion == 0:
 		state.LastError = "invalid protocol_version"
 		return errors.New("invalid protocol_version")
+	case !protocolVersionsCompatible(localProtocolVersion, remote.ProtocolVersion):
+		state.LastError = fmt.Sprintf("protocol_version mismatch: local=%d remote=%d", localProtocolVersion, remote.ProtocolVersion)
+		return fmt.Errorf("protocol_version mismatch: local=%d remote=%d", localProtocolVersion, remote.ProtocolVersion)
 	case remote.ChainID != expectedChainID:
 		state.BanScore = banThreshold
 		state.LastError = "chain_id mismatch"
@@ -109,6 +141,16 @@ func validateRemoteVersion(
 	default:
 		return nil
 	}
+}
+
+func protocolVersionsCompatible(local, remote uint32) bool {
+	if local == remote {
+		return true
+	}
+	if local > remote {
+		return local-remote <= 1
+	}
+	return remote-local <= 1
 }
 
 func normalizeDuration(current, fallback time.Duration) time.Duration {

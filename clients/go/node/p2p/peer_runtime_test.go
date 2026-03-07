@@ -46,10 +46,10 @@ func TestShouldIgnoreAndNormalizeReadError(t *testing.T) {
 
 func TestHandleMessageRejectsInvalidKinds(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
-	if err := p.handleMessage(message{Kind: messageVersion}); err == nil || !strings.Contains(err.Error(), "invalid version message") {
+	if err := p.handleMessage(message{Command: messageVersion}); err == nil || !strings.Contains(err.Error(), "invalid version message") {
 		t.Fatalf("expected version rejection, got %v", err)
 	}
-	if err := p.handleMessage(message{Kind: 0xff}); err == nil || !strings.Contains(err.Error(), "unknown message type") {
+	if err := p.handleMessage(message{Command: "unknown"}); err == nil || !strings.Contains(err.Error(), "unknown message type") {
 		t.Fatalf("expected unknown-kind rejection, got %v", err)
 	}
 }
@@ -158,12 +158,12 @@ func TestSendAndRunContextCancellation(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		msg, err := readFrame(remote, p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+		msg, err := readFrame(remote, networkMagic(p.service.cfg.PeerRuntimeConfig.Network), p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
 		if err != nil {
 			errCh <- err
 			return
 		}
-		if msg.Kind != messageTx || !bytes.Equal(msg.Payload, []byte{0xaa, 0xbb}) {
+		if msg.Command != messageTx || !bytes.Equal(msg.Payload, []byte{0xaa, 0xbb}) {
 			errCh <- errors.New("unexpected frame")
 			return
 		}

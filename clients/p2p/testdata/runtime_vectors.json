@@ -1,0 +1,137 @@
+{
+  "version_payload_v1": {
+    "hex": "010000000100000000000000000000000088f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e23331038d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff0700000000000000",
+    "protocol_version": 1,
+    "tx_relay": true,
+    "pruned_below_height": 0,
+    "da_mempool_size": 0,
+    "chain_id_hex": "88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
+    "genesis_hash_hex": "8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff",
+    "best_height": 7
+  },
+  "frames": [
+    {
+      "id": "FRAME-VERSION-OK",
+      "network": "devnet",
+      "max_message_size": 96000000,
+      "hex": "5242445676657273696f6e0000000000590000009a468ebd010000000100000000000000000000000088f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e23331038d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff0700000000000000",
+      "expect_command": "version",
+      "expect_payload_hex": "010000000100000000000000000000000088f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e23331038d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff0700000000000000"
+    },
+    {
+      "id": "FRAME-VERACK-OK",
+      "network": "devnet",
+      "max_message_size": 96000000,
+      "hex": "5242445676657261636b00000000000000000000a7ffc6f8",
+      "expect_command": "verack",
+      "expect_payload_hex": ""
+    },
+    {
+      "id": "FRAME-ERR-MAGIC",
+      "network": "devnet",
+      "max_message_size": 96000000,
+      "hex": "52424d4e76657273696f6e0000000000590000009a468ebd010000000100000000000000000000000088f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e23331038d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff0700000000000000",
+      "expect_err": "invalid envelope magic"
+    },
+    {
+      "id": "FRAME-ERR-CHECKSUM",
+      "network": "devnet",
+      "max_message_size": 96000000,
+      "hex": "5242445676657273696f6e0000000000590000009a468ebd010000000100000000000000000000000088f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e23331038d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff0700000000000001",
+      "expect_err": "invalid envelope checksum"
+    },
+    {
+      "id": "FRAME-ERR-OVERSIZE",
+      "network": "devnet",
+      "max_message_size": 96000000,
+      "hex": "5242445676657273696f6e000000000001d8b80500000000",
+      "expect_err": "message exceeds cap"
+    }
+  ],
+  "version_validation": [
+    {
+      "id": "VERSION-OK-EXACT",
+      "local_protocol_version": 1,
+      "remote_protocol_version": 1,
+      "tx_relay": true,
+      "pruned_below_height": 0,
+      "da_mempool_size": 0,
+      "chain_id_hex": "88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
+      "genesis_hash_hex": "8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff",
+      "best_height": 7,
+      "expect_ok": true
+    },
+    {
+      "id": "VERSION-OK-PLUS1",
+      "local_protocol_version": 1,
+      "remote_protocol_version": 2,
+      "tx_relay": true,
+      "pruned_below_height": 0,
+      "da_mempool_size": 0,
+      "chain_id_hex": "88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
+      "genesis_hash_hex": "8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff",
+      "best_height": 7,
+      "expect_ok": true
+    },
+    {
+      "id": "VERSION-OK-MINUS1",
+      "local_protocol_version": 2,
+      "remote_protocol_version": 1,
+      "tx_relay": true,
+      "pruned_below_height": 0,
+      "da_mempool_size": 0,
+      "chain_id_hex": "88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
+      "genesis_hash_hex": "8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff",
+      "best_height": 7,
+      "expect_ok": true
+    },
+    {
+      "id": "VERSION-ERR-ZERO",
+      "local_protocol_version": 1,
+      "remote_protocol_version": 0,
+      "tx_relay": true,
+      "pruned_below_height": 0,
+      "da_mempool_size": 0,
+      "chain_id_hex": "88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
+      "genesis_hash_hex": "8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff",
+      "best_height": 7,
+      "expect_err": "invalid protocol_version"
+    },
+    {
+      "id": "VERSION-ERR-PROTOCOL",
+      "local_protocol_version": 1,
+      "remote_protocol_version": 3,
+      "tx_relay": true,
+      "pruned_below_height": 0,
+      "da_mempool_size": 0,
+      "chain_id_hex": "88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
+      "genesis_hash_hex": "8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff",
+      "best_height": 7,
+      "expect_err": "protocol_version mismatch: local=1 remote=3"
+    },
+    {
+      "id": "VERSION-ERR-CHAIN",
+      "local_protocol_version": 1,
+      "remote_protocol_version": 1,
+      "tx_relay": true,
+      "pruned_below_height": 0,
+      "da_mempool_size": 0,
+      "chain_id_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "genesis_hash_hex": "8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff",
+      "best_height": 7,
+      "expect_err": "chain_id mismatch"
+    },
+    {
+      "id": "VERSION-ERR-GENESIS",
+      "local_protocol_version": 1,
+      "remote_protocol_version": 1,
+      "tx_relay": true,
+      "pruned_below_height": 0,
+      "da_mempool_size": 0,
+      "chain_id_hex": "88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
+      "genesis_hash_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+      "best_height": 7,
+      "expect_err": "genesis_hash mismatch"
+    }
+  ]
+}

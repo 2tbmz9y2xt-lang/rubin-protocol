@@ -81,11 +81,13 @@ func (s *Service) localVersion() (node.VersionPayloadV1, error) {
 		bestHeight = 0
 	}
 	return node.VersionPayloadV1{
-		Magic:           ProtocolMagic,
-		ProtocolVersion: ProtocolVersion,
-		ChainID:         s.cfg.SyncConfig.ChainID,
-		GenesisHash:     s.cfg.GenesisHash,
-		UserAgent:       s.cfg.UserAgent,
-		BestHeight:      bestHeight,
+		ProtocolVersion:   ProtocolVersion,
+		TxRelay:           true,
+		PrunedBelowHeight: 0,
+		DaMempoolSize:     0,
+		ChainID:           s.cfg.SyncConfig.ChainID,
+		GenesisHash:       s.cfg.GenesisHash,
+		BestHeight:        bestHeight,
+		UserAgent:         s.cfg.UserAgent,
 	}, nil
 }

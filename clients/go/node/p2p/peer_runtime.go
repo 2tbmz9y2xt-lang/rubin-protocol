@@ -26,7 +26,7 @@ func (p *peer) run(ctx context.Context) error {
 				return err
 			}
 		}
-		frame, err := readFrame(p.conn, p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+		frame, err := readFrame(p.conn, networkMagic(p.service.cfg.PeerRuntimeConfig.Network), p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
 		if err != nil {
 			if shouldIgnoreReadError(err) {
 				continue
@@ -54,7 +54,7 @@ func normalizeReadError(err error) error {
 }
 
 func (p *peer) handleMessage(frame message) error {
-	switch frame.Kind {
+	switch frame.Command {
 	case messageInv:
 		return p.handleInv(frame.Payload)
 	case messageGetData:
@@ -65,14 +65,18 @@ func (p *peer) handleMessage(frame message) error {
 		return p.handleTx(frame.Payload)
 	case messageGetBlk:
 		return p.handleGetBlocks(frame.Payload)
+	case messagePing, messagePong, messageHeaders:
+		return nil
 	case messageVersion:
 		return errors.New("invalid version message after handshake")
+	case messageVerAck:
+		return errors.New("invalid verack after handshake")
 	default:
-		return fmt.Errorf("unknown message type: %d", frame.Kind)
+		return fmt.Errorf("unknown message type: %s", frame.Command)
 	}
 }
 
-func (p *peer) send(kind byte, payload []byte) error {
+func (p *peer) send(command string, payload []byte) error {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 	if deadline := p.service.cfg.PeerRuntimeConfig.WriteDeadline; deadline > 0 {
@@ -80,7 +84,7 @@ func (p *peer) send(kind byte, payload []byte) error {
 			return err
 		}
 	}
-	return writeFrame(p.conn, message{Kind: kind, Payload: payload}, p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+	return writeFrame(p.conn, networkMagic(p.service.cfg.PeerRuntimeConfig.Network), message{Command: command, Payload: payload}, p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
 }
 
 func (p *peer) addr() string {

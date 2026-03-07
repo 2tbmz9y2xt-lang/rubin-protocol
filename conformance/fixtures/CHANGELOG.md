@@ -9,6 +9,21 @@ Policy:
 
 ---
 
+## 2026-03-07 — Parse ordering lock-in for witness vs `da_payload_len`
+
+Причина:
+- зафиксировать executable parse ordering для конфликтных malformed inputs, где witness-stage ошибка и
+  `tx_kind=0x00` / `da_payload_len != 0` присутствуют в одном и том же байтовом tx;
+- убрать blind spot, при котором третья реализация могла бы выбрать `TX_ERR_PARSE` раньше witness-stage ошибки.
+
+Инструменты:
+- ручное добавление fixtures,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-PARSE`,
+- синхронизация матрицы: `tools/gen_conformance_matrix.py`.
+
+Изменённые fixtures:
+- `CV-PARSE.json` (`PARSE-18`, `PARSE-19`)
+
 ## 2026-03-06 — Devnet conformance vector packs (Q-DEVNET-07)
 
 Причина:

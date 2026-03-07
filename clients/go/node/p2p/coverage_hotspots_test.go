@@ -85,12 +85,12 @@ func TestCoverage_HandshakeHelpers(t *testing.T) {
 	localVersion := testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "local", 0)
 
 	go func() {
-		_, _ = readFrame(remoteConn, cfg.MaxMessageSize)
-		_ = writeFrame(remoteConn, message{Kind: messageInv}, cfg.MaxMessageSize)
+		_, _ = readFrame(remoteConn, networkMagic(cfg.Network), cfg.MaxMessageSize)
+		_ = writeFrame(remoteConn, networkMagic(cfg.Network), message{Command: messageInv}, cfg.MaxMessageSize)
 	}()
 	state, err := performHandshake(context.Background(), localConn, cfg, localVersion, localVersion.ChainID, localVersion.GenesisHash)
-	if err == nil || state.LastError != "invalid version message" {
-		t.Fatalf("expected invalid version message, got state=%+v err=%v", state, err)
+	if err == nil || state.LastError != "unexpected pre-handshake command" {
+		t.Fatalf("expected unexpected pre-handshake command, got state=%+v err=%v", state, err)
 	}
 
 	if got := handshakeDeadline(nil, time.Second); got.Before(time.Now()) {
@@ -101,7 +101,7 @@ func TestCoverage_HandshakeHelpers(t *testing.T) {
 	}
 
 	state2 := node.PeerState{}
-	if err := validateRemoteVersion(testVersionPayload([32]byte{}, node.DevnetGenesisBlockHash(), "ua", 0), node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), 10, &state2); err == nil {
+	if err := validateRemoteVersion(testVersionPayload([32]byte{}, node.DevnetGenesisBlockHash(), "ua", 0), ProtocolVersion, node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), 10, &state2); err == nil {
 		t.Fatalf("expected magic mismatch")
 	}
 }
@@ -179,7 +179,7 @@ func TestCoverage_InventoryAndBlockBranches(t *testing.T) {
 	p.conn = local
 	done := make(chan error, 1)
 	go func() {
-		_, err := readFrame(remote, p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+		_, err := readFrame(remote, networkMagic(p.service.cfg.PeerRuntimeConfig.Network), p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
 		done <- err
 	}()
 	if err := p.handleGetBlocks(mustEncodeGetBlocksPayload(t, GetBlocksPayload{})); err != nil {
@@ -204,7 +204,7 @@ func TestCoverage_ServiceSyncPaths(t *testing.T) {
 	p.conn = local
 	done := make(chan error, 1)
 	go func() {
-		_, err := readFrame(remote, p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+		_, err := readFrame(remote, networkMagic(p.service.cfg.PeerRuntimeConfig.Network), p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
 		done <- err
 	}()
 
@@ -239,8 +239,8 @@ func TestCoverage_HandleConnLifecyclePaths(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = readFrame(remote, h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
-		_ = writeFrame(remote, message{Kind: messageVersion, Payload: []byte{0x00}}, h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+		_, _ = readFrame(remote, networkMagic(h.service.cfg.PeerRuntimeConfig.Network), h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+		_ = writeFrame(remote, networkMagic(h.service.cfg.PeerRuntimeConfig.Network), message{Command: messageVersion, Payload: []byte{0x00}}, h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
 	}()
 	h.service.ctx = context.Background()
 	h.service.handleConn(local)
@@ -259,12 +259,12 @@ func TestCoverage_HandleConnSuccessPath(t *testing.T) {
 
 	remoteDone := make(chan error, 1)
 	go func() {
-		frame, err := readFrame(remote, h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+		frame, err := readFrame(remote, networkMagic(h.service.cfg.PeerRuntimeConfig.Network), h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
 		if err != nil {
 			remoteDone <- err
 			return
 		}
-		if frame.Kind != messageVersion {
+		if frame.Command != messageVersion {
 			remoteDone <- err
 			return
 		}
@@ -273,7 +273,7 @@ func TestCoverage_HandleConnSuccessPath(t *testing.T) {
 			remoteDone <- err
 			return
 		}
-		if err := writeFrame(remote, message{Kind: messageVersion, Payload: payload}, h.service.cfg.PeerRuntimeConfig.MaxMessageSize); err != nil {
+		if err := writeFrame(remote, networkMagic(h.service.cfg.PeerRuntimeConfig.Network), message{Command: messageVersion, Payload: payload}, h.service.cfg.PeerRuntimeConfig.MaxMessageSize); err != nil {
 			remoteDone <- err
 			return
 		}
@@ -300,12 +300,12 @@ func TestCoverage_HandleConnRunErrorPath(t *testing.T) {
 
 	remoteDone := make(chan error, 1)
 	go func() {
-		frame, err := readFrame(remote, h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+		frame, err := readFrame(remote, networkMagic(h.service.cfg.PeerRuntimeConfig.Network), h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
 		if err != nil {
 			remoteDone <- err
 			return
 		}
-		if frame.Kind != messageVersion {
+		if frame.Command != messageVersion {
 			remoteDone <- nil
 			return
 		}
@@ -314,11 +314,15 @@ func TestCoverage_HandleConnRunErrorPath(t *testing.T) {
 			remoteDone <- err
 			return
 		}
-		if err := writeFrame(remote, message{Kind: messageVersion, Payload: payload}, h.service.cfg.PeerRuntimeConfig.MaxMessageSize); err != nil {
+		if err := writeFrame(remote, networkMagic(h.service.cfg.PeerRuntimeConfig.Network), message{Command: messageVersion, Payload: payload}, h.service.cfg.PeerRuntimeConfig.MaxMessageSize); err != nil {
 			remoteDone <- err
 			return
 		}
-		remoteDone <- writeFrame(remote, message{Kind: messageVersion, Payload: payload}, h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+		err = writeFrame(remote, networkMagic(h.service.cfg.PeerRuntimeConfig.Network), message{Command: messageVersion, Payload: payload}, h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+		if err != nil && strings.Contains(err.Error(), "closed pipe") {
+			err = nil
+		}
+		remoteDone <- err
 	}()
 
 	h.service.handleConn(local)

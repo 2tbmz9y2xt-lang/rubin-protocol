@@ -33,21 +33,7 @@ func TestHandshakeValid(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		frame, err := readFrame(remoteConn, cfg.MaxMessageSize)
-		if err != nil {
-			errCh <- err
-			return
-		}
-		if frame.Kind != messageVersion {
-			errCh <- fmt.Errorf("unexpected message kind: %d", frame.Kind)
-			return
-		}
-		payload, err := encodeVersionPayload(remoteVersion)
-		if err != nil {
-			errCh <- err
-			return
-		}
-		errCh <- writeFrame(remoteConn, message{Kind: messageVersion, Payload: payload}, cfg.MaxMessageSize)
+		errCh <- completeRemoteHandshake(remoteConn, cfg, remoteVersion)
 	}()
 
 	state, err := performHandshake(
@@ -67,9 +53,6 @@ func TestHandshakeValid(t *testing.T) {
 	if state.RemoteVersion.BestHeight != remoteVersion.BestHeight {
 		t.Fatalf("best_height=%d, want %d", state.RemoteVersion.BestHeight, remoteVersion.BestHeight)
 	}
-	if state.RemoteVersion.UserAgent != remoteVersion.UserAgent {
-		t.Fatalf("user_agent=%q, want %q", state.RemoteVersion.UserAgent, remoteVersion.UserAgent)
-	}
 	if err := <-errCh; err != nil {
 		t.Fatalf("remote handshake failed: %v", err)
 	}
@@ -88,18 +71,7 @@ func TestHandshakeChainIDMismatch(t *testing.T) {
 	remoteVersion := testVersionPayload(wrongChainID, node.DevnetGenesisBlockHash(), "remote", 0)
 
 	go func() {
-		frame, err := readFrame(remoteConn, cfg.MaxMessageSize)
-		if err != nil {
-			return
-		}
-		if frame.Kind != messageVersion {
-			return
-		}
-		payload, err := encodeVersionPayload(remoteVersion)
-		if err != nil {
-			return
-		}
-		_ = writeFrame(remoteConn, message{Kind: messageVersion, Payload: payload}, cfg.MaxMessageSize)
+		_ = sendRemoteVersionOnly(remoteConn, cfg, remoteVersion)
 	}()
 
 	state, err := performHandshake(
@@ -130,18 +102,10 @@ func TestHandshakeProtocolVersionMismatch(t *testing.T) {
 	cfg.HandshakeTimeout = time.Second
 	localVersion := testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "local", 0)
 	remoteVersion := testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 0)
-	remoteVersion.ProtocolVersion++
+	remoteVersion.ProtocolVersion += 2
 
 	go func() {
-		frame, err := readFrame(remoteConn, cfg.MaxMessageSize)
-		if err != nil || frame.Kind != messageVersion {
-			return
-		}
-		payload, err := encodeVersionPayload(remoteVersion)
-		if err != nil {
-			return
-		}
-		_ = writeFrame(remoteConn, message{Kind: messageVersion, Payload: payload}, cfg.MaxMessageSize)
+		_ = sendRemoteVersionOnly(remoteConn, cfg, remoteVersion)
 	}()
 
 	state, err := performHandshake(
@@ -155,8 +119,9 @@ func TestHandshakeProtocolVersionMismatch(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected handshake failure")
 	}
-	if state.LastError != "invalid protocol_version" {
-		t.Fatalf("last_error=%q, want invalid protocol_version", state.LastError)
+	want := fmt.Sprintf("protocol_version mismatch: local=%d remote=%d", localVersion.ProtocolVersion, remoteVersion.ProtocolVersion)
+	if state.LastError != want {
+		t.Fatalf("last_error=%q, want %q", state.LastError, want)
 	}
 	if state.BanScore != 0 {
 		t.Fatalf("ban_score=%d, want 0", state.BanScore)
@@ -176,15 +141,7 @@ func TestHandshakeGenesisHashMismatch(t *testing.T) {
 	remoteVersion := testVersionPayload(node.DevnetGenesisChainID(), wrongGenesis, "remote", 0)
 
 	go func() {
-		frame, err := readFrame(remoteConn, cfg.MaxMessageSize)
-		if err != nil || frame.Kind != messageVersion {
-			return
-		}
-		payload, err := encodeVersionPayload(remoteVersion)
-		if err != nil {
-			return
-		}
-		_ = writeFrame(remoteConn, message{Kind: messageVersion, Payload: payload}, cfg.MaxMessageSize)
+		_ = sendRemoteVersionOnly(remoteConn, cfg, remoteVersion)
 	}()
 
 	state, err := performHandshake(
@@ -378,13 +335,44 @@ func (h *testHarness) mineNextBlockBytes(t *testing.T) []byte {
 
 func testVersionPayload(chainID, genesisHash [32]byte, userAgent string, bestHeight uint64) node.VersionPayloadV1 {
 	return node.VersionPayloadV1{
-		Magic:           ProtocolMagic,
-		ProtocolVersion: ProtocolVersion,
-		ChainID:         chainID,
-		GenesisHash:     genesisHash,
-		UserAgent:       userAgent,
-		BestHeight:      bestHeight,
+		ProtocolVersion:   ProtocolVersion,
+		TxRelay:           true,
+		PrunedBelowHeight: 0,
+		DaMempoolSize:     0,
+		ChainID:           chainID,
+		GenesisHash:       genesisHash,
+		BestHeight:        bestHeight,
+		UserAgent:         userAgent,
 	}
+}
+
+func sendRemoteVersionOnly(conn net.Conn, cfg node.PeerRuntimeConfig, remoteVersion node.VersionPayloadV1) error {
+	frame, err := readFrame(conn, networkMagic(cfg.Network), cfg.MaxMessageSize)
+	if err != nil {
+		return err
+	}
+	if frame.Command != messageVersion {
+		return fmt.Errorf("unexpected message kind: %s", frame.Command)
+	}
+	payload, err := encodeVersionPayload(remoteVersion)
+	if err != nil {
+		return err
+	}
+	return writeFrame(conn, networkMagic(cfg.Network), message{Command: messageVersion, Payload: payload}, cfg.MaxMessageSize)
+}
+
+func completeRemoteHandshake(conn net.Conn, cfg node.PeerRuntimeConfig, remoteVersion node.VersionPayloadV1) error {
+	if err := sendRemoteVersionOnly(conn, cfg, remoteVersion); err != nil {
+		return err
+	}
+	frame, err := readFrame(conn, networkMagic(cfg.Network), cfg.MaxMessageSize)
+	if err != nil {
+		return err
+	}
+	if frame.Command != messageVerAck {
+		return fmt.Errorf("unexpected message kind: %s", frame.Command)
+	}
+	return writeFrame(conn, networkMagic(cfg.Network), message{Command: messageVerAck}, cfg.MaxMessageSize)
 }
 
 func waitFor(t *testing.T, timeout time.Duration, predicate func() bool) {

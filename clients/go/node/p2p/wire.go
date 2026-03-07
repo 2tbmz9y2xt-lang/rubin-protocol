@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"bytes"
+	"crypto/sha3"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -12,25 +13,40 @@ import (
 )
 
 const (
-	ProtocolMagic   uint32 = 0x52554249
 	ProtocolVersion uint32 = 1
 
-	messageVersion byte = 0x01
-	messageInv     byte = 0x02
-	messageGetData byte = 0x03
-	messageBlock   byte = 0x04
-	messageTx      byte = 0x05
-	messageGetBlk  byte = 0x06
+	messageVersion = "version"
+	messageVerAck  = "verack"
+	messageInv     = "inv"
+	messageGetData = "getdata"
+	messageBlock   = "block"
+	messageTx      = "tx"
+	messageGetBlk  = "getblocks"
+	messagePing    = "ping"
+	messagePong    = "pong"
+	messageHeaders = "headers"
 
 	MSG_BLOCK byte = 0x01
 	MSG_TX    byte = 0x02
 
-	inventoryVectorSize = 33
+	inventoryVectorSize     = 33
+	wireHeaderSize          = 24
+	wireCommandSize         = 12
+	versionPayloadBaseBytes = 17
+	versionPayloadBytes     = versionPayloadBaseBytes + 32 + 32 + 8
 )
 
 type message struct {
-	Kind    byte
+	Command string
 	Payload []byte
+}
+
+type payloadLimitFn func(command string) uint32
+
+type frameHeader struct {
+	Command  string
+	Size     uint32
+	Checksum [4]byte
 }
 
 type InventoryVector struct {
@@ -43,58 +59,78 @@ type GetBlocksPayload struct {
 	StopHash      [32]byte
 }
 
-func readFrame(r io.Reader, maxMessageSize uint32) (message, error) {
-	var frame message
-	var lenBuf [4]byte
-	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
-		return frame, err
-	}
-	size := binary.BigEndian.Uint32(lenBuf[:])
-	if size == 0 {
-		return frame, errors.New("empty message")
-	}
-	if size > maxMessageSize {
-		return frame, fmt.Errorf("message exceeds cap: %d", size)
-	}
+func readFrame(r io.Reader, expectedMagic [4]byte, maxMessageSize uint32) (message, error) {
+	return readFrameWithPayloadLimit(r, expectedMagic, maxMessageSize, nil)
+}
 
-	body := make([]byte, int(size))
-	if _, err := io.ReadFull(r, body); err != nil {
+func readFrameWithPayloadLimit(r io.Reader, expectedMagic [4]byte, maxMessageSize uint32, limit payloadLimitFn) (message, error) {
+	var frame message
+	header, err := readFrameHeader(r, expectedMagic, maxMessageSize)
+	if err != nil {
 		return frame, err
 	}
-	frame.Kind = body[0]
-	frame.Payload = append([]byte(nil), body[1:]...)
+	if limit != nil {
+		if header.Size > limit(header.Command) {
+			return frame, errors.New("message exceeds command cap")
+		}
+	}
+	payload := make([]byte, int(header.Size))
+	if header.Size > 0 {
+		if _, err := io.ReadFull(r, payload); err != nil {
+			return frame, err
+		}
+	}
+	checksum := wireChecksum(payload)
+	if !bytes.Equal(header.Checksum[:], checksum[:]) {
+		return frame, errors.New("invalid envelope checksum")
+	}
+	frame.Command = header.Command
+	frame.Payload = payload
 	return frame, nil
 }
 
-func writeFrame(w io.Writer, frame message, maxMessageSize uint32) error {
-	bodyLen := 1 + len(frame.Payload)
-	if bodyLen <= 0 {
-		return errors.New("empty message")
+func readFrameHeader(r io.Reader, expectedMagic [4]byte, maxMessageSize uint32) (frameHeader, error) {
+	var header frameHeader
+	var raw [wireHeaderSize]byte
+	if _, err := io.ReadFull(r, raw[:]); err != nil {
+		return header, err
 	}
-	if bodyLen > math.MaxUint32 || uint32(bodyLen) > maxMessageSize {
-		return fmt.Errorf("message exceeds cap: %d", bodyLen)
+	if !bytes.Equal(raw[0:4], expectedMagic[:]) {
+		return header, errors.New("invalid envelope magic")
 	}
+	command, err := decodeWireCommand(raw[4 : 4+wireCommandSize])
+	if err != nil {
+		return header, err
+	}
+	size := binary.LittleEndian.Uint32(raw[16:20])
+	if size > maxMessageSize {
+		return header, errors.New("message exceeds cap")
+	}
+	header.Command = command
+	header.Size = size
+	copy(header.Checksum[:], raw[20:24])
+	return header, nil
+}
 
-	var lenBuf [4]byte
-	binary.BigEndian.PutUint32(lenBuf[:], uint32(bodyLen))
-	if _, err := w.Write(lenBuf[:]); err != nil {
+func writeFrame(w io.Writer, magic [4]byte, frame message, maxMessageSize uint32) error {
+	if uint64(len(frame.Payload)) > uint64(maxMessageSize) {
+		return errors.New("message exceeds cap")
+	}
+	header, err := buildEnvelopeHeader(magic, frame.Command, frame.Payload)
+	if err != nil {
 		return err
 	}
-	if _, err := w.Write([]byte{frame.Kind}); err != nil {
+	if _, err := w.Write(header[:]); err != nil {
 		return err
 	}
 	if len(frame.Payload) == 0 {
 		return nil
 	}
-	_, err := w.Write(frame.Payload)
+	_, err = w.Write(frame.Payload)
 	return err
 }
 
 func encodeVersionPayload(v node.VersionPayloadV1) ([]byte, error) {
-	if len(v.UserAgent) > math.MaxUint16 {
-		return nil, fmt.Errorf("user_agent too long: %d", len(v.UserAgent))
-	}
-
 	var buf bytes.Buffer
 	if err := encodeVersionPayloadTo(&buf, v); err != nil {
 		return nil, err
@@ -103,10 +139,20 @@ func encodeVersionPayload(v node.VersionPayloadV1) ([]byte, error) {
 }
 
 func encodeVersionPayloadTo(w io.Writer, v node.VersionPayloadV1) error {
-	if err := binary.Write(w, binary.BigEndian, v.Magic); err != nil {
+	if err := binary.Write(w, binary.LittleEndian, v.ProtocolVersion); err != nil {
 		return err
 	}
-	if err := binary.Write(w, binary.BigEndian, v.ProtocolVersion); err != nil {
+	txRelay := byte(0)
+	if v.TxRelay {
+		txRelay = 1
+	}
+	if _, err := w.Write([]byte{txRelay}); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.LittleEndian, v.PrunedBelowHeight); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.LittleEndian, v.DaMempoolSize); err != nil {
 		return err
 	}
 	if _, err := w.Write(v.ChainID[:]); err != nil {
@@ -115,13 +161,7 @@ func encodeVersionPayloadTo(w io.Writer, v node.VersionPayloadV1) error {
 	if _, err := w.Write(v.GenesisHash[:]); err != nil {
 		return err
 	}
-	if err := binary.Write(w, binary.BigEndian, uint16(len(v.UserAgent))); err != nil {
-		return err
-	}
-	if _, err := io.WriteString(w, v.UserAgent); err != nil {
-		return err
-	}
-	if err := binary.Write(w, binary.BigEndian, v.BestHeight); err != nil {
+	if err := binary.Write(w, binary.LittleEndian, v.BestHeight); err != nil {
 		return err
 	}
 	return nil
@@ -129,11 +169,25 @@ func encodeVersionPayloadTo(w io.Writer, v node.VersionPayloadV1) error {
 
 func decodeVersionPayload(payload []byte) (node.VersionPayloadV1, error) {
 	var out node.VersionPayloadV1
+	if len(payload) != versionPayloadBytes {
+		if len(payload) < versionPayloadBytes {
+			return out, errors.New("version payload too short")
+		}
+		return out, errors.New("trailing bytes in version payload")
+	}
 	reader := bytes.NewReader(payload)
-	if err := binary.Read(reader, binary.BigEndian, &out.Magic); err != nil {
+	if err := binary.Read(reader, binary.LittleEndian, &out.ProtocolVersion); err != nil {
 		return out, errors.New("version payload too short")
 	}
-	if err := binary.Read(reader, binary.BigEndian, &out.ProtocolVersion); err != nil {
+	var txRelay [1]byte
+	if _, err := io.ReadFull(reader, txRelay[:]); err != nil {
+		return out, errors.New("version payload too short")
+	}
+	out.TxRelay = txRelay[0] == 1
+	if err := binary.Read(reader, binary.LittleEndian, &out.PrunedBelowHeight); err != nil {
+		return out, errors.New("version payload too short")
+	}
+	if err := binary.Read(reader, binary.LittleEndian, &out.DaMempoolSize); err != nil {
 		return out, errors.New("version payload too short")
 	}
 	if _, err := io.ReadFull(reader, out.ChainID[:]); err != nil {
@@ -142,22 +196,90 @@ func decodeVersionPayload(payload []byte) (node.VersionPayloadV1, error) {
 	if _, err := io.ReadFull(reader, out.GenesisHash[:]); err != nil {
 		return out, errors.New("version payload too short")
 	}
-	var userAgentLen uint16
-	if err := binary.Read(reader, binary.BigEndian, &userAgentLen); err != nil {
-		return out, errors.New("version payload too short")
-	}
-	userAgent := make([]byte, int(userAgentLen))
-	if _, err := io.ReadFull(reader, userAgent); err != nil {
-		return out, errors.New("version payload too short")
-	}
-	out.UserAgent = string(userAgent)
-	if err := binary.Read(reader, binary.BigEndian, &out.BestHeight); err != nil {
+	if err := binary.Read(reader, binary.LittleEndian, &out.BestHeight); err != nil {
 		return out, errors.New("version payload too short")
 	}
 	if reader.Len() != 0 {
 		return out, errors.New("trailing bytes in version payload")
 	}
 	return out, nil
+}
+
+func buildEnvelopeHeader(magic [4]byte, command string, payload []byte) ([wireHeaderSize]byte, error) {
+	var header [wireHeaderSize]byte
+	commandBytes, err := encodeWireCommand(command)
+	if err != nil {
+		return header, err
+	}
+	header[0], header[1], header[2], header[3] = magic[0], magic[1], magic[2], magic[3]
+	copy(header[4:16], commandBytes[:])
+	if len(payload) > math.MaxUint32 {
+		return header, errors.New("payload length overflow")
+	}
+	binary.LittleEndian.PutUint32(header[16:20], uint32(len(payload)))
+	checksum := wireChecksum(payload)
+	copy(header[20:24], checksum[:])
+	return header, nil
+}
+
+func wireChecksum(payload []byte) [4]byte {
+	sum := sha3.Sum256(payload)
+	return [4]byte{sum[0], sum[1], sum[2], sum[3]}
+}
+
+func encodeWireCommand(command string) ([wireCommandSize]byte, error) {
+	var out [wireCommandSize]byte
+	if len(command) == 0 || len(command) > wireCommandSize {
+		return out, errors.New("invalid command length")
+	}
+	for i := 0; i < len(command); i++ {
+		ch := command[i]
+		if ch < 0x21 || ch > 0x7e {
+			return out, errors.New("command is not ASCII printable")
+		}
+		out[i] = ch
+	}
+	return out, nil
+}
+
+func decodeWireCommand(raw []byte) (string, error) {
+	if len(raw) != wireCommandSize {
+		return "", errors.New("invalid command width")
+	}
+	end := wireCommandSize
+	for i, ch := range raw {
+		if ch == 0 {
+			end = i
+			break
+		}
+	}
+	if end == 0 {
+		return "", errors.New("empty command")
+	}
+	for _, ch := range raw[end:] {
+		if ch != 0 {
+			return "", errors.New("invalid NUL padding in command")
+		}
+	}
+	for _, ch := range raw[:end] {
+		if ch < 0x21 || ch > 0x7e {
+			return "", errors.New("command is not ASCII printable")
+		}
+	}
+	return string(raw[:end]), nil
+}
+
+func networkMagic(network string) [4]byte {
+	switch network {
+	case "mainnet":
+		return [4]byte{'R', 'B', 'M', 'N'}
+	case "testnet":
+		return [4]byte{'R', 'B', 'T', 'N'}
+	case "", "devnet":
+		return [4]byte{'R', 'B', 'D', 'V'}
+	default:
+		return [4]byte{'R', 'B', 'O', 'P'}
+	}
 }
 
 func encodeInventoryVectors(items []InventoryVector) ([]byte, error) {
