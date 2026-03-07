@@ -46,6 +46,9 @@ type Service struct {
 	peers   map[string]*peer
 	loopWG  sync.WaitGroup
 
+	outboundAddrs []string
+	addrMgr       *addrManager
+
 	chainMu   sync.Mutex
 	blockSeen *boundedHashSet
 	txSeen    *boundedHashSet
@@ -104,11 +107,14 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	if cfg.TxRelayFanout <= 0 {
 		cfg.TxRelayFanout = defaultTxRelayFanout
 	}
+	outboundAddrs := normalizePeerAddrs(cfg.BootstrapPeers)
 	return &Service{
-		cfg:       cfg,
-		peers:     make(map[string]*peer),
-		blockSeen: newBoundedHashSet(defaultBlockSeenCapacity),
-		txSeen:    newBoundedHashSet(defaultTxSeenCapacity),
+		cfg:           cfg,
+		peers:         make(map[string]*peer),
+		outboundAddrs: outboundAddrs,
+		addrMgr:       newAddrManager(cfg.Now),
+		blockSeen:     newBoundedHashSet(defaultBlockSeenCapacity),
+		txSeen:        newBoundedHashSet(defaultTxSeenCapacity),
 	}, nil
 }
 
@@ -150,4 +156,36 @@ func (s *Service) AnnounceTx(txBytes []byte) error {
 		return nil
 	}
 	return s.broadcastInventory(nil, []InventoryVector{{Type: MSG_TX, Hash: txid}})
+}
+
+func (s *Service) isConnected(addr string) bool {
+	if s == nil {
+		return false
+	}
+	addr = normalizeNetAddr(addr)
+	s.peersMu.RLock()
+	defer s.peersMu.RUnlock()
+	for peerAddr := range s.peers {
+		if normalizeNetAddr(peerAddr) == addr {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizePeerAddrs(addrs []string) []string {
+	seen := make(map[string]struct{}, len(addrs))
+	out := make([]string, 0, len(addrs))
+	for _, addr := range addrs {
+		addr = normalizeNetAddr(addr)
+		if addr == "" {
+			continue
+		}
+		if _, ok := seen[addr]; ok {
+			continue
+		}
+		seen[addr] = struct{}{}
+		out = append(out, addr)
+	}
+	return out
 }
