@@ -69,6 +69,7 @@ func ConnectBlockBasicInMemoryAtHeight(
 	} else if ok {
 		blockMTP = median
 	}
+	workUtxos := state.Utxos
 
 	// Compute fees and update UTXO set by applying all non-coinbase transactions.
 	var sumFees uint64
@@ -79,7 +80,7 @@ func ConnectBlockBasicInMemoryAtHeight(
 		nextUtxos, s, err := ApplyNonCoinbaseTxBasicUpdateWithMTP(
 			tx,
 			txid,
-			state.Utxos,
+			workUtxos,
 			blockHeight,
 			pb.Header.Timestamp,
 			blockMTP,
@@ -88,7 +89,7 @@ func ConnectBlockBasicInMemoryAtHeight(
 		if err != nil {
 			return nil, err
 		}
-		state.Utxos = nextUtxos
+		workUtxos = nextUtxos
 		sumFees, err = addU64(sumFees, s.Fee)
 		if err != nil {
 			return nil, txerr(BLOCK_ERR_PARSE, "sum_fees overflow")
@@ -97,6 +98,9 @@ func ConnectBlockBasicInMemoryAtHeight(
 
 	// Enforce coinbase bound using locally computed fees.
 	if err := validateCoinbaseValueBound(pb, blockHeight, alreadyGenerated, sumFees); err != nil {
+		return nil, err
+	}
+	if err := validateCoinbaseApplyOutputs(pb.Txs[0]); err != nil {
 		return nil, err
 	}
 
@@ -108,7 +112,7 @@ func ConnectBlockBasicInMemoryAtHeight(
 			continue
 		}
 		op := Outpoint{Txid: coinbaseTxid, Vout: uint32(i)}
-		state.Utxos[op] = UtxoEntry{
+		workUtxos[op] = UtxoEntry{
 			Value:             out.Value,
 			CovenantType:      out.CovenantType,
 			CovenantData:      append([]byte(nil), out.CovenantData...),
@@ -122,7 +126,6 @@ func ConnectBlockBasicInMemoryAtHeight(
 	if blockHeight != 0 {
 		subsidy := BlockSubsidyBig(blockHeight, alreadyGenerated)
 		alreadyGeneratedN1 = new(big.Int).Add(alreadyGeneratedN1, new(big.Int).SetUint64(subsidy))
-		state.AlreadyGenerated = new(big.Int).Set(alreadyGeneratedN1)
 	}
 	alreadyGeneratedU64, err := bigIntToUint64(alreadyGenerated)
 	if err != nil {
@@ -131,6 +134,11 @@ func ConnectBlockBasicInMemoryAtHeight(
 	alreadyGeneratedN1U64, err := bigIntToUint64(alreadyGeneratedN1)
 	if err != nil {
 		return nil, txerr(BLOCK_ERR_PARSE, "already_generated overflow")
+	}
+
+	state.Utxos = workUtxos
+	if blockHeight != 0 {
+		state.AlreadyGenerated = new(big.Int).Set(alreadyGeneratedN1)
 	}
 
 	return &ConnectBlockBasicSummary{

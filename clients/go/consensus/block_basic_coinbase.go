@@ -54,6 +54,18 @@ func validateCoinbaseValueBound(pb *ParsedBlock, blockHeight uint64, alreadyGene
 	return nil
 }
 
+func validateCoinbaseApplyOutputs(coinbase *Tx) error {
+	if coinbase == nil {
+		return txerr(BLOCK_ERR_COINBASE_INVALID, "nil coinbase")
+	}
+	for _, out := range coinbase.Outputs {
+		if out.CovenantType == COV_TYPE_VAULT {
+			return txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase must not create CORE_VAULT outputs")
+		}
+	}
+	return nil
+}
+
 func addU64ToU128Block(x u128, v uint64) (u128, error) {
 	lo, carry := bits.Add64(x.lo, v, 0)
 	hi, carry2 := bits.Add64(x.hi, 0, carry)

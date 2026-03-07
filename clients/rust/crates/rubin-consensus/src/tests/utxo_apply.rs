@@ -329,6 +329,173 @@ fn connect_block_basic_in_memory_at_height_rejects_subsidy_exceeded() {
     assert_eq!(err.code, ErrorCode::BlockErrSubsidyExceeded);
 }
 
+fn coinbase_with_witness_commitment_and_vault_output(
+    locktime: u32,
+    value: u64,
+    vault_data: &[u8],
+    non_coinbase_txs: &[Vec<u8>],
+) -> Vec<u8> {
+    let mut wtxids: Vec<[u8; 32]> = Vec::with_capacity(1 + non_coinbase_txs.len());
+    wtxids.push([0u8; 32]);
+    for txb in non_coinbase_txs {
+        let (_tx, _txid, wtxid, _n) = parse_tx(txb).expect("parse non-coinbase");
+        wtxids.push(wtxid);
+    }
+    let wroot = witness_merkle_root_wtxids(&wtxids).expect("witness merkle root");
+    let commit = witness_commitment_hash(wroot);
+    coinbase_tx_with_outputs(
+        locktime,
+        &[
+            TestOutput {
+                value,
+                covenant_type: COV_TYPE_VAULT,
+                covenant_data: vault_data.to_vec(),
+            },
+            TestOutput {
+                value: 0,
+                covenant_type: COV_TYPE_ANCHOR,
+                covenant_data: commit.to_vec(),
+            },
+        ],
+    )
+}
+
+#[test]
+fn connect_block_basic_in_memory_at_height_rejects_coinbase_vault_output() {
+    let height = 1u64;
+    let mut prev = [0u8; 32];
+    prev[0] = 0xb1;
+    let target = [0xffu8; 32];
+
+    let coinbase = coinbase_with_witness_commitment_and_vault_output(
+        height as u32,
+        1,
+        &valid_vault_covenant_data_for_p2pk_output(),
+        &[],
+    );
+    let (_ct, coinbase_txid, _cw, _cn) = parse_tx(&coinbase).expect("parse coinbase");
+    let root = merkle_root_txids(&[coinbase_txid]).expect("merkle root");
+    let block = build_block_bytes(prev, root, target, 51, &[coinbase]);
+
+    let mut state = crate::connect_block_inmem::InMemoryChainState {
+        utxos: HashMap::new(),
+        already_generated: 0,
+    };
+    let err = crate::connect_block_basic_in_memory_at_height(
+        &block,
+        Some(prev),
+        Some(target),
+        height,
+        None,
+        &mut state,
+        ZERO_CHAIN_ID,
+    )
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrCoinbaseInvalid);
+    assert!(state.utxos.is_empty());
+    assert_eq!(state.already_generated, 0);
+}
+
+#[test]
+fn connect_block_basic_in_memory_at_height_coinbase_vault_reject_does_not_mutate_spends() {
+    let height = 1u64;
+    let mut prev = [0u8; 32];
+    prev[0] = 0xb2;
+    let target = [0xffu8; 32];
+
+    let kp = kp_or_skip!();
+    let cov_data = p2pk_covenant_data_for_pubkey(&kp.pubkey);
+
+    let mut spend_tx = crate::tx::Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![crate::tx::TxInput {
+            prev_txid: prev,
+            prev_vout: 0,
+            script_sig: vec![],
+            sequence: 0,
+        }],
+        outputs: vec![crate::tx::TxOutput {
+            value: 90,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data.clone(),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![],
+        da_payload: vec![],
+    };
+    let witness = sign_input_witness(&spend_tx, 0, 100, ZERO_CHAIN_ID, &kp);
+    spend_tx.witness = vec![witness.clone()];
+
+    let spend_bytes = tx_with_one_input_one_output_with_witness(
+        prev,
+        0,
+        90,
+        COV_TYPE_P2PK,
+        &cov_data,
+        witness.suite_id,
+        &witness.pubkey,
+        &witness.signature,
+    );
+    let (_t, spend_txid, _wtxid, _n) = parse_tx(&spend_bytes).expect("parse spend tx");
+
+    let coinbase = coinbase_with_witness_commitment_and_vault_output(
+        height as u32,
+        1,
+        &valid_vault_covenant_data_for_p2pk_output(),
+        std::slice::from_ref(&spend_bytes),
+    );
+    let (_ct, coinbase_txid, _cw, _cn) = parse_tx(&coinbase).expect("parse coinbase");
+    let root = merkle_root_txids(&[coinbase_txid, spend_txid]).expect("merkle root");
+    let block = build_block_bytes(prev, root, target, 52, &[coinbase, spend_bytes]);
+
+    let mut state = crate::connect_block_inmem::InMemoryChainState {
+        utxos: HashMap::new(),
+        already_generated: 0,
+    };
+    let prev_out = Outpoint {
+        txid: prev,
+        vout: 0,
+    };
+    state.utxos.insert(
+        prev_out.clone(),
+        UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data,
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    );
+
+    let err = crate::connect_block_basic_in_memory_at_height(
+        &block,
+        Some(prev),
+        Some(target),
+        height,
+        None,
+        &mut state,
+        ZERO_CHAIN_ID,
+    )
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrCoinbaseInvalid);
+    assert_eq!(state.utxos.len(), 1);
+    assert_eq!(
+        state.utxos.get(&prev_out),
+        Some(&UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: p2pk_covenant_data_for_pubkey(&kp.pubkey),
+            creation_height: 0,
+            created_by_coinbase: false,
+        })
+    );
+    assert_eq!(state.already_generated, 0);
+}
+
 #[test]
 fn error_code_as_str_and_display() {
     assert_eq!(ErrorCode::TxErrParse.as_str(), "TX_ERR_PARSE");

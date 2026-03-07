@@ -60,7 +60,7 @@ structure DaIntegrityOut where
   ok : Bool
   err : String
 
-def goTraceFixturesDigestSHA3_256 : String := "78638f90df3da7b33f5e805b63d0a6f801ab731d8997973b7256eabd1137109b"
+def goTraceFixturesDigestSHA3_256 : String := "496a6e327bcf7a6841c13bc15e99a0efc168b449be15d11244926bf6369d7dcd"
 
 def parseOuts : List ParseOut := [
   { id := "PARSE-01", ok := true, err := "", consumed := 21, txidHex := "0xd205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0", wtxidHex := "0xf760a70e1e838404d8e41679962064dc1bf4fa181699009644a14d0aa389ab4e" },
@@ -151,7 +151,9 @@ def blockBasicOuts : List BlockBasicOut := [
   { id := "CV-B-10", ok := false, err := "TX_ERR_PARSE", blockHashHex := none, sumWeight := none, sumDa := none },
   { id := "CV-B-11", ok := false, err := "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED", blockHashHex := none, sumWeight := none, sumDa := none },
   { id := "CV-B-12", ok := false, err := "BLOCK_ERR_DA_BATCH_EXCEEDED", blockHashHex := none, sumWeight := none, sumDa := none },
-  { id := "CV-B-13", ok := false, err := "BLOCK_ERR_COINBASE_INVALID", blockHashHex := none, sumWeight := none, sumDa := none }
+  { id := "CV-B-13", ok := false, err := "BLOCK_ERR_COINBASE_INVALID", blockHashHex := none, sumWeight := none, sumDa := none },
+  { id := "CV-B-14", ok := false, err := "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED", blockHashHex := none, sumWeight := none, sumDa := none },
+  { id := "CV-B-15", ok := true, err := "", blockHashHex := some ("0xbc008fde20f0a4d892fe57f707c27c3674a3946f3e598d5cf7247259c5d83dc8"), sumWeight := some 858, sumDa := some 0 }
 ]
 
 def weightOuts : List WeightOut := [

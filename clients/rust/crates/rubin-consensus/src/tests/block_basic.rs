@@ -302,6 +302,86 @@ fn validate_block_basic_non_coinbase_must_have_input() {
     assert_eq!(err.code, ErrorCode::TxErrParse);
 }
 
+fn repeated_anchor_outputs(count: usize, payload_len: usize) -> Vec<TestOutput> {
+    (0..count)
+        .map(|i| TestOutput {
+            value: 0,
+            covenant_type: COV_TYPE_ANCHOR,
+            covenant_data: vec![0x40u8.wrapping_add((i % 127) as u8); payload_len],
+        })
+        .collect()
+}
+
+#[test]
+fn validate_block_basic_anchor_bytes_precede_nonce_replay() {
+    let oversized_anchor_tx = tx_with_nonce_and_outputs(1, &repeated_anchor_outputs(3, 50_000));
+    let duplicate_nonce_tx = tx_with_nonce_and_outputs(
+        1,
+        &[TestOutput {
+            value: 1,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: valid_p2pk_covenant_data(),
+        }],
+    );
+    let coinbase = coinbase_with_witness_commitment(
+        1,
+        &[oversized_anchor_tx.clone(), duplicate_nonce_tx.clone()],
+    );
+
+    let (_cb, cbid, _cw, _cn) = parse_tx(&coinbase).expect("parse coinbase");
+    let (_t1, tx1id, _w1, _n1) = parse_tx(&oversized_anchor_tx).expect("parse tx1");
+    let (_t2, tx2id, _w2, _n2) = parse_tx(&duplicate_nonce_tx).expect("parse tx2");
+    let root = merkle_root_txids(&[cbid, tx1id, tx2id]).expect("root");
+
+    let mut prev = [0u8; 32];
+    prev[0] = 0xa1;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(
+        prev,
+        root,
+        target,
+        41,
+        &[coinbase, oversized_anchor_tx, duplicate_nonce_tx],
+    );
+
+    let err = validate_block_basic_at_height(&block, Some(prev), Some(target), 1).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrAnchorBytesExceeded);
+}
+
+#[test]
+fn validate_block_basic_weight_precedes_nonce_replay() {
+    let overweight_tx = tx_with_nonce_and_outputs(1, &repeated_anchor_outputs(1024, 20_000));
+    let duplicate_nonce_tx = tx_with_nonce_and_outputs(
+        1,
+        &[TestOutput {
+            value: 1,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: valid_p2pk_covenant_data(),
+        }],
+    );
+    let coinbase =
+        coinbase_with_witness_commitment(1, &[overweight_tx.clone(), duplicate_nonce_tx.clone()]);
+
+    let (_cb, cbid, _cw, _cn) = parse_tx(&coinbase).expect("parse coinbase");
+    let (_t1, tx1id, _w1, _n1) = parse_tx(&overweight_tx).expect("parse tx1");
+    let (_t2, tx2id, _w2, _n2) = parse_tx(&duplicate_nonce_tx).expect("parse tx2");
+    let root = merkle_root_txids(&[cbid, tx1id, tx2id]).expect("root");
+
+    let mut prev = [0u8; 32];
+    prev[0] = 0xa2;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(
+        prev,
+        root,
+        target,
+        42,
+        &[coinbase, overweight_tx, duplicate_nonce_tx],
+    );
+
+    let err = validate_block_basic_at_height(&block, Some(prev), Some(target), 1).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrWeightExceeded);
+}
+
 #[test]
 fn validate_block_basic_first_tx_must_be_coinbase() {
     let tx = minimal_tx_bytes();

@@ -6,7 +6,6 @@ use crate::constants::{
     SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL, VERIFY_COST_ML_DSA_87, VERIFY_COST_UNKNOWN_SUITE,
     WITNESS_DISCOUNT_DIVISOR,
 };
-use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
 use crate::tx::{da_core_fields_bytes, parse_tx, Tx};
@@ -15,11 +14,13 @@ use std::collections::HashMap;
 
 mod coinbase;
 mod header;
+mod txs;
 
 use self::coinbase::{validate_coinbase_structure, validate_coinbase_witness_commitment};
 use self::header::{validate_header_commitments, validate_timestamp_rules};
+use self::txs::{accumulate_block_resource_stats, validate_block_tx_semantics, BlockTxStats};
 
-pub(crate) use self::coinbase::validate_coinbase_value_bound;
+pub(crate) use self::coinbase::{validate_coinbase_apply_outputs, validate_coinbase_value_bound};
 pub(crate) use self::header::median_time_past;
 
 #[derive(Clone, Debug)]
@@ -38,13 +39,6 @@ pub struct BlockBasicSummary {
     pub sum_weight: u64,
     pub sum_da: u64,
     pub block_hash: [u8; 32],
-}
-
-#[derive(Clone, Copy, Debug)]
-struct BlockTxStats {
-    sum_weight: u64,
-    sum_da: u64,
-    sum_anchor: u64,
 }
 
 #[derive(Clone)]
@@ -153,10 +147,11 @@ pub fn validate_block_basic_with_context_at_height(
     validate_timestamp_rules(pb.header.timestamp, block_height, prev_timestamps)?;
 
     validate_coinbase_structure(&pb, block_height)?;
-    let stats = accumulate_block_tx_stats(&pb, block_height)?;
+    let stats = accumulate_block_resource_stats(&pb)?;
     validate_block_resource_limits(stats)?;
 
     validate_da_set_integrity(&pb.txs)?;
+    validate_block_tx_semantics(&pb, block_height)?;
 
     let h = block_hash(&pb.header_bytes)
         .map_err(|_| TxError::new(ErrorCode::BlockErrParse, "failed to hash block header"))?;
@@ -188,52 +183,6 @@ pub fn validate_block_basic_with_context_and_fees_at_height(
     let pb = parse_block_bytes(block_bytes)?;
     validate_coinbase_value_bound(&pb, block_height, already_generated, sum_fees)?;
     Ok(s)
-}
-
-fn accumulate_block_tx_stats(pb: &ParsedBlock, block_height: u64) -> Result<BlockTxStats, TxError> {
-    let mut stats = BlockTxStats {
-        sum_weight: 0,
-        sum_da: 0,
-        sum_anchor: 0,
-    };
-    let mut seen_nonces: HashMap<u64, ()> = HashMap::with_capacity(pb.txs.len());
-    for (i, tx) in pb.txs.iter().enumerate() {
-        if i > 0 {
-            if coinbase::is_coinbase_tx(tx) {
-                return Err(TxError::new(
-                    ErrorCode::BlockErrCoinbaseInvalid,
-                    "coinbase-like tx found at index > 0",
-                ));
-            }
-            if tx.inputs.is_empty() {
-                return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "non-coinbase must have at least one input",
-                ));
-            }
-            if seen_nonces.insert(tx.tx_nonce, ()).is_some() {
-                return Err(TxError::new(
-                    ErrorCode::TxErrNonceReplay,
-                    "duplicate tx_nonce in block",
-                ));
-            }
-        }
-        validate_tx_covenants_genesis(tx, block_height)?;
-        let (w, da, anchor_bytes) = tx_weight_and_stats(tx)?;
-        stats.sum_weight = stats
-            .sum_weight
-            .checked_add(w)
-            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
-        stats.sum_da = stats
-            .sum_da
-            .checked_add(da)
-            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
-        stats.sum_anchor = stats
-            .sum_anchor
-            .checked_add(anchor_bytes)
-            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
-    }
-    Ok(stats)
 }
 
 fn validate_block_resource_limits(stats: BlockTxStats) -> Result<(), TxError> {

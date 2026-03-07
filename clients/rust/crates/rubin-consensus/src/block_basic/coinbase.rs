@@ -1,5 +1,5 @@
 use super::*;
-use crate::constants::COV_TYPE_ANCHOR;
+use crate::constants::{COV_TYPE_ANCHOR, COV_TYPE_VAULT};
 use crate::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
 use crate::subsidy::block_subsidy;
 
@@ -85,6 +85,18 @@ pub(crate) fn validate_coinbase_value_bound(
             ErrorCode::BlockErrSubsidyExceeded,
             "coinbase outputs exceed subsidy+fees bound",
         ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_coinbase_apply_outputs(coinbase: &Tx) -> Result<(), TxError> {
+    for out in &coinbase.outputs {
+        if out.covenant_type == COV_TYPE_VAULT {
+            return Err(TxError::new(
+                ErrorCode::BlockErrCoinbaseInvalid,
+                "coinbase must not create CORE_VAULT outputs",
+            ));
+        }
     }
     Ok(())
 }

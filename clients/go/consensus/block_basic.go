@@ -151,7 +151,7 @@ func validateParsedBlockBasicWithContextAtHeight(
 	if err := validateCoinbaseStructure(pb, blockHeight); err != nil {
 		return nil, err
 	}
-	stats, err := accumulateBlockTxStats(pb, blockHeight)
+	stats, err := accumulateBlockResourceStats(pb)
 	if err != nil {
 		return nil, err
 	}
@@ -159,6 +159,9 @@ func validateParsedBlockBasicWithContextAtHeight(
 		return nil, err
 	}
 	if err := validateDASetIntegrity(pb.Txs); err != nil {
+		return nil, err
+	}
+	if err := validateBlockTxSemantics(pb, blockHeight); err != nil {
 		return nil, err
 	}
 
@@ -208,45 +211,6 @@ func ValidateBlockBasicWithContextAndFeesAtHeight(
 type daCommitSet struct {
 	tx         *Tx
 	chunkCount uint16
-}
-
-func accumulateBlockTxStats(pb *ParsedBlock, blockHeight uint64) (*blockTxStats, error) {
-	stats := &blockTxStats{}
-	seenNonces := make(map[uint64]struct{}, len(pb.Txs))
-	for i, tx := range pb.Txs {
-		if i > 0 && isCoinbaseTx(tx) {
-			return nil, txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase-like tx is only allowed at index 0")
-		}
-		if i > 0 && len(tx.Inputs) == 0 {
-			return nil, txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
-		}
-		if i > 0 {
-			if _, exists := seenNonces[tx.TxNonce]; exists {
-				return nil, txerr(TX_ERR_NONCE_REPLAY, "duplicate tx_nonce in block")
-			}
-			seenNonces[tx.TxNonce] = struct{}{}
-		}
-		if err := ValidateTxCovenantsGenesis(tx, blockHeight); err != nil {
-			return nil, err
-		}
-		w, da, anchorBytes, err := txWeightAndStats(tx)
-		if err != nil {
-			return nil, err
-		}
-		stats.sumWeight, err = addU64(stats.sumWeight, w)
-		if err != nil {
-			return nil, err
-		}
-		stats.sumDa, err = addU64(stats.sumDa, da)
-		if err != nil {
-			return nil, err
-		}
-		stats.sumAnchor, err = addU64(stats.sumAnchor, anchorBytes)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return stats, nil
 }
 
 func validateBlockResourceLimits(stats *blockTxStats) error {

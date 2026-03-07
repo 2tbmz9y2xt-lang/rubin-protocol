@@ -93,6 +93,29 @@ fn tx_with_outputs(outputs: &[TestOutput]) -> Vec<u8> {
     b
 }
 
+fn tx_with_nonce_and_outputs(nonce: u64, outputs: &[TestOutput]) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&1u32.to_le_bytes()); // version
+    b.push(0x00); // tx_kind
+    b.extend_from_slice(&nonce.to_le_bytes()); // tx_nonce
+    crate::compactsize::encode_compact_size(1, &mut b); // input_count
+    b.extend_from_slice(&[0u8; 32]); // prev_txid
+    b.extend_from_slice(&0u32.to_le_bytes()); // prev_vout
+    crate::compactsize::encode_compact_size(0, &mut b); // script_sig_len
+    b.extend_from_slice(&0u32.to_le_bytes()); // sequence
+    crate::compactsize::encode_compact_size(outputs.len() as u64, &mut b); // output_count
+    for out in outputs {
+        b.extend_from_slice(&out.value.to_le_bytes());
+        b.extend_from_slice(&out.covenant_type.to_le_bytes());
+        crate::compactsize::encode_compact_size(out.covenant_data.len() as u64, &mut b);
+        b.extend_from_slice(&out.covenant_data);
+    }
+    b.extend_from_slice(&0u32.to_le_bytes()); // locktime
+    crate::compactsize::encode_compact_size(0, &mut b); // witness_count
+    crate::compactsize::encode_compact_size(0, &mut b); // da_payload_len
+    b
+}
+
 fn da_commit_tx(
     da_id: [u8; 32],
     chunk_count: u16,
