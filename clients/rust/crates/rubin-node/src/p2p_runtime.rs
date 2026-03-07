@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{self, Read, Write};
+use std::io::{self, Cursor, Read, Write};
 use std::net::TcpStream;
 use std::sync::RwLock;
 use std::time::Duration;
@@ -12,6 +12,7 @@ const DEFAULT_WRITE_DEADLINE: Duration = Duration::from_secs(15);
 const DEFAULT_BAN_THRESHOLD: i32 = 100;
 const WIRE_HEADER_SIZE: usize = 24;
 const WIRE_COMMAND_SIZE: usize = 12;
+const FUZZ_MAX_P2P_PAYLOAD_BYTES: u64 = 1 << 20;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WireMessage {
@@ -132,30 +133,11 @@ impl PeerSession {
         self.stream
             .set_read_timeout(Some(self.cfg.read_deadline))
             .map_err(io::Error::other)?;
-
-        let mut header = [0u8; WIRE_HEADER_SIZE];
-        self.stream.read_exact(&mut header)?;
-        let envelope = parse_envelope_header(
-            &header,
+        read_message_from(
+            &mut self.stream,
             network_magic(&self.cfg.network),
             MAX_RELAY_MSG_BYTES,
-        )?;
-        let mut payload = vec![0u8; envelope.payload_len];
-        let checksum = envelope.checksum;
-        if envelope.payload_len > 0 {
-            self.stream.read_exact(&mut payload)?;
-        }
-        let actual_checksum = wire_checksum(&payload);
-        if checksum != actual_checksum {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid envelope checksum",
-            ));
-        }
-        Ok(WireMessage {
-            command: envelope.command,
-            payload,
-        })
+        )
     }
 
     pub fn write_message(&mut self, msg: &WireMessage) -> io::Result<()> {
@@ -318,6 +300,47 @@ fn validate_remote_version(
         ));
     }
     Ok(())
+}
+
+#[allow(dead_code)]
+pub fn fuzz_parse_wire_message(network: &str, data: &[u8]) -> io::Result<WireMessage> {
+    let mut cursor = Cursor::new(data);
+    read_message_from(
+        &mut cursor,
+        network_magic(network),
+        FUZZ_MAX_P2P_PAYLOAD_BYTES,
+    )
+}
+
+#[allow(dead_code)]
+pub fn fuzz_parse_version_payload(payload: &[u8]) -> io::Result<VersionPayloadV1> {
+    unmarshal_version_payload_v1(payload)
+}
+
+fn read_message_from<R: Read>(
+    reader: &mut R,
+    expected_magic: [u8; 4],
+    max_payload_bytes: u64,
+) -> io::Result<WireMessage> {
+    let mut header = [0u8; WIRE_HEADER_SIZE];
+    reader.read_exact(&mut header)?;
+    let envelope = parse_envelope_header(&header, expected_magic, max_payload_bytes)?;
+    let mut payload = vec![0u8; envelope.payload_len];
+    if envelope.payload_len > 0 {
+        reader.read_exact(&mut payload)?;
+    }
+    let checksum = wire_checksum(&payload);
+    if envelope.checksum != checksum {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid envelope checksum",
+        ));
+    }
+
+    Ok(WireMessage {
+        command: envelope.command,
+        payload,
+    })
 }
 
 fn protocol_versions_compatible(local: u32, remote: u32) -> bool {

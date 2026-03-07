@@ -16,7 +16,7 @@ fuzz_target!(|data: &[u8]| {
     let height = u64::from_le_bytes(data[tx_end..].try_into().unwrap());
 
     let tx = match rubin_consensus::parse_tx(tx_bytes) {
-        Ok(t) => t,
+        Ok((tx, _, _, _)) => tx,
         Err(_) => return,
     };
 
