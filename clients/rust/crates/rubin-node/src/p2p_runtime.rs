@@ -135,7 +135,11 @@ impl PeerSession {
 
         let mut header = [0u8; WIRE_HEADER_SIZE];
         self.stream.read_exact(&mut header)?;
-        let envelope = parse_envelope_header(&header, network_magic(&self.cfg.network), MAX_RELAY_MSG_BYTES)?;
+        let envelope = parse_envelope_header(
+            &header,
+            network_magic(&self.cfg.network),
+            MAX_RELAY_MSG_BYTES,
+        )?;
         let mut payload = vec![0u8; envelope.payload_len];
         let checksum = envelope.checksum;
         if envelope.payload_len > 0 {
@@ -750,8 +754,7 @@ mod tests {
             stream.set_nodelay(true).expect("set_nodelay");
             let mut header = [0u8; WIRE_HEADER_SIZE];
             header[0..4].copy_from_slice(&network_magic("devnet"));
-            header[4..16]
-                .copy_from_slice(&encode_wire_command("tx").expect("command"));
+            header[4..16].copy_from_slice(&encode_wire_command("tx").expect("command"));
             let oversize = (MAX_RELAY_MSG_BYTES + 1) as u32;
             header[16..20].copy_from_slice(&oversize.to_le_bytes());
             stream.write_all(&header).expect("write header");
