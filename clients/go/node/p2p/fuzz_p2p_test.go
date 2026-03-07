@@ -38,6 +38,9 @@ func FuzzReadFrame(f *testing.F) {
 		if maxMessageSize == 0 {
 			maxMessageSize = 1
 		}
+		if maxMessageSize > (2 << 20) {
+			maxMessageSize = 2 << 20
+		}
 
 		got1, err1 := readFrame(bytes.NewReader(frameBytes), networkMagic("devnet"), maxMessageSize)
 		got2, err2 := readFrame(bytes.NewReader(frameBytes), networkMagic("devnet"), maxMessageSize)
