@@ -60,6 +60,105 @@ func TestMempoolRelayMetadataNil(t *testing.T) {
 	}
 }
 
+func TestMempoolPolicyRejectsNonCoinbaseAnchorOutputs(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		PolicyRejectNonCoinbaseAnchorOutputs: true,
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+
+	txBytes := mustBuildSignedAnchorOutputTx(t, st.Utxos, outpoints[0], 0, 1, 1, fromKey, toAddress)
+	if err := mp.AddTx(txBytes); err == nil || !strings.Contains(err.Error(), "non-coinbase CORE_ANCHOR") {
+		t.Fatalf("expected non-coinbase anchor policy rejection, got %v", err)
+	}
+	if _, err := mp.RelayMetadata(txBytes); err == nil || !strings.Contains(err.Error(), "non-coinbase CORE_ANCHOR") {
+		t.Fatalf("expected relay metadata anchor policy rejection, got %v", err)
+	}
+}
+
+func TestMempoolPolicyRejectsLowFeeDaCommit(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		PolicyDaSurchargePerByte: 1,
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+
+	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 99, 1, 1, fromKey, toAddress, []byte("0123456789"))
+	if err := mp.AddTx(txBytes); err == nil || !strings.Contains(err.Error(), "DA fee below policy minimum") {
+		t.Fatalf("expected DA surcharge rejection, got %v", err)
+	}
+	if _, err := mp.RelayMetadata(txBytes); err == nil || !strings.Contains(err.Error(), "DA fee below policy minimum") {
+		t.Fatalf("expected relay metadata DA surcharge rejection, got %v", err)
+	}
+}
+
+func TestMempoolPolicyAllowsSufficientFeeDaCommit(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		PolicyDaSurchargePerByte: 1,
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+
+	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 80, 10, 1, fromKey, toAddress, []byte("0123456789"))
+	if err := mp.AddTx(txBytes); err != nil {
+		t.Fatalf("expected DA tx admission, got %v", err)
+	}
+}
+
+func TestMempoolPolicyRejectsNilCheckedTransaction(t *testing.T) {
+	mp := &Mempool{}
+	if err := mp.applyPolicyLocked(nil); err == nil || !strings.Contains(err.Error(), "nil checked transaction") {
+		t.Fatalf("expected nil checked transaction rejection, got %v", err)
+	}
+	if err := mp.applyPolicyLocked(&consensus.CheckedTransaction{}); err == nil || !strings.Contains(err.Error(), "nil checked transaction") {
+		t.Fatalf("expected nil checked tx rejection, got %v", err)
+	}
+}
+
+func TestMempoolPolicyPropagatesDaFeeComputationErrors(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 80, 10, 1, fromKey, toAddress, []byte("0123456789"))
+	tx, _, _, _, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("ParseTx(da): %v", err)
+	}
+
+	mp := &Mempool{
+		chainState: &ChainState{},
+		policy: MempoolConfig{
+			PolicyDaSurchargePerByte: 1,
+		},
+	}
+	if err := mp.applyPolicyLocked(&consensus.CheckedTransaction{Tx: tx}); err == nil || !strings.Contains(err.Error(), "nil utxo set") {
+		t.Fatalf("expected DA fee computation error, got %v", err)
+	}
+}
+
 func TestMempoolDoubleSpend(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
@@ -285,6 +384,91 @@ func mustBuildSignedTransferTx(
 	txBytes, err := consensus.MarshalTx(tx)
 	if err != nil {
 		t.Fatalf("MarshalTx: %v", err)
+	}
+	return txBytes
+}
+
+func mustBuildSignedAnchorOutputTx(
+	t *testing.T,
+	utxos map[consensus.Outpoint]consensus.UtxoEntry,
+	input consensus.Outpoint,
+	anchorValue uint64,
+	fee uint64,
+	nonce uint64,
+	signer *consensus.MLDSA87Keypair,
+	changeAddress []byte,
+) []byte {
+	t.Helper()
+	entry, ok := utxos[input]
+	if !ok {
+		t.Fatalf("missing utxo for %x:%d", input.Txid, input.Vout)
+	}
+	var anchorData [32]byte
+	anchorData[0] = 0x42
+	tx := &consensus.Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: nonce,
+		Inputs: []consensus.TxInput{{
+			PrevTxid: input.Txid,
+			PrevVout: input.Vout,
+			Sequence: 0,
+		}},
+		Outputs: []consensus.TxOutput{
+			{Value: anchorValue, CovenantType: consensus.COV_TYPE_ANCHOR, CovenantData: anchorData[:]},
+			{Value: entry.Value - anchorValue - fee, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), changeAddress...)},
+		},
+		Locktime: 0,
+	}
+	if err := consensus.SignTransaction(tx, utxos, devnetGenesisChainID, signer); err != nil {
+		t.Fatalf("SignTransaction(anchor): %v", err)
+	}
+	txBytes, err := consensus.MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx(anchor): %v", err)
+	}
+	return txBytes
+}
+
+func mustBuildSignedDaCommitTx(
+	t *testing.T,
+	utxos map[consensus.Outpoint]consensus.UtxoEntry,
+	input consensus.Outpoint,
+	amount uint64,
+	fee uint64,
+	nonce uint64,
+	signer *consensus.MLDSA87Keypair,
+	toAddress []byte,
+	manifest []byte,
+) []byte {
+	t.Helper()
+	tx := &consensus.Tx{
+		Version: 1,
+		TxKind:  0x01,
+		TxNonce: nonce,
+		Inputs: []consensus.TxInput{{
+			PrevTxid: input.Txid,
+			PrevVout: input.Vout,
+			Sequence: 0,
+		}},
+		Outputs: []consensus.TxOutput{{
+			Value:        amount,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: append([]byte(nil), toAddress...),
+		}},
+		Locktime:  0,
+		DaPayload: append([]byte(nil), manifest...),
+		DaCommitCore: &consensus.DaCommitCore{
+			ChunkCount:  1,
+			BatchNumber: 1,
+		},
+	}
+	if err := consensus.SignTransaction(tx, utxos, devnetGenesisChainID, signer); err != nil {
+		t.Fatalf("SignTransaction(da): %v", err)
+	}
+	txBytes, err := consensus.MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx(da): %v", err)
 	}
 	return txBytes
 }

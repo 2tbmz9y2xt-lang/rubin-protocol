@@ -179,6 +179,13 @@ func resetOpenSSLBootstrapStateForTests() {
 	opensslBootstrapErr = nil
 }
 
+// ensureOpenSSLBootstrap reads RUBIN_OPENSSL_* process environment once and caches the
+// bootstrap result for the lifetime of the process.
+//
+// This is intentional for production: OpenSSL/FIPS provider selection is treated as
+// process-start configuration, not a per-call runtime knob. If bootstrap fails after
+// those env vars are misconfigured, the recovery path is process restart. Test code may
+// use resetOpenSSLBootstrapStateForTests to re-arm the bootstrap between isolated cases.
 func ensureOpenSSLBootstrap() error {
 	mode := strings.ToLower(strings.TrimSpace(os.Getenv("RUBIN_OPENSSL_FIPS_MODE")))
 	switch mode {

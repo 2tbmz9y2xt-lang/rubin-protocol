@@ -43,7 +43,7 @@ func (p *peer) blockInventoryAfterLocators(req GetBlocksPayload) ([]InventoryVec
 func (p *peer) handleBlock(blockBytes []byte) error {
 	pb, blockHash, err := parseRelayedBlock(blockBytes)
 	if err != nil {
-		p.bumpBan(100, err.Error())
+		p.bumpBan(10, err.Error())
 		return err
 	}
 	if pb == nil {

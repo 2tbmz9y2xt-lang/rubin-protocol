@@ -170,6 +170,9 @@ func TestCoverage_InventoryAndBlockBranches(t *testing.T) {
 	if err := p.handleBlock([]byte{0x00}); err == nil {
 		t.Fatalf("expected invalid relayed block rejection")
 	}
+	if got := p.snapshotState().BanScore; got != 10 {
+		t.Fatalf("ban_score=%d, want 10 for malformed block parse", got)
+	}
 
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	p.service = h.service
