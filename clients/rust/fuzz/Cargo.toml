@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 rubin-consensus = { path = "../crates/rubin-consensus" }
+rubin-node = { path = "../crates/rubin-node" }
 num-bigint = "0.4"
 num-traits = "0.2"
 
@@ -106,5 +107,17 @@ doc = false
 [[bin]]
 name = "covenant_genesis"
 path = "fuzz_targets/covenant_genesis.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "p2p_wire_message"
+path = "fuzz_targets/p2p_wire_message.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "p2p_version_payload"
+path = "fuzz_targets/p2p_version_payload.rs"
 test = false
 doc = false

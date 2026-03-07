@@ -10,7 +10,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let height = u64::from_le_bytes(data[..8].try_into().unwrap());
-    let already_generated = u64::from_le_bytes(data[8..16].try_into().unwrap());
+    let already_generated = u64::from_le_bytes(data[8..16].try_into().unwrap()) as u128;
 
     let s1 = rubin_consensus::block_subsidy(height, already_generated);
     let s2 = rubin_consensus::block_subsidy(height, already_generated);
