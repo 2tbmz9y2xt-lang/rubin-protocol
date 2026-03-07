@@ -7,17 +7,41 @@ use std::time::Duration;
 use rubin_consensus::constants::MAX_RELAY_MSG_BYTES;
 use sha3::{Digest, Sha3_256};
 
+use crate::sync::SyncEngine;
+
 const DEFAULT_READ_DEADLINE: Duration = Duration::from_secs(15);
 const DEFAULT_WRITE_DEADLINE: Duration = Duration::from_secs(15);
 const DEFAULT_BAN_THRESHOLD: i32 = 100;
 const WIRE_HEADER_SIZE: usize = 24;
 const WIRE_COMMAND_SIZE: usize = 12;
 const FUZZ_MAX_P2P_PAYLOAD_BYTES: u64 = 1 << 20;
+const MESSAGE_INV: &str = "inv";
+const MESSAGE_GETDATA: &str = "getdata";
+const MESSAGE_BLOCK: &str = "block";
+const MESSAGE_TX: &str = "tx";
+const MESSAGE_GETBLOCKS: &str = "getblocks";
+const MESSAGE_GETADDR: &str = "getaddr";
+const MESSAGE_ADDR: &str = "addr";
+pub const MSG_BLOCK: u8 = 0x01;
+pub const MSG_TX: u8 = 0x02;
+const INVENTORY_VECTOR_SIZE: usize = 33;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WireMessage {
     pub command: String,
     pub payload: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InventoryVector {
+    pub kind: u8,
+    pub hash: [u8; 32],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct GetBlocksPayload {
+    pub locator_hashes: Vec<[u8; 32]>,
+    pub stop_hash: [u8; 32],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -190,7 +214,7 @@ impl PeerSession {
                     };
                     self.write_message(&pong)?;
                 }
-                "tx" | "block" | "headers" => {
+                "tx" | "block" | "headers" | "getaddr" | "addr" => {
                     // accepted runtime commands (stub)
                 }
                 other => {
@@ -204,6 +228,143 @@ impl PeerSession {
                 }
             }
         }
+    }
+
+    pub fn run_block_sync_loop(&mut self, sync_engine: &mut SyncEngine) -> io::Result<u64> {
+        self.request_blocks(sync_engine)?;
+        loop {
+            if let Some((height, _)) = sync_engine.tip().map_err(io::Error::other)? {
+                if height >= self.peer.remote_version.best_height {
+                    return Ok(height);
+                }
+            }
+            let msg = self.read_message()?;
+            match msg.command.as_str() {
+                MESSAGE_INV => {
+                    let requests = self.handle_inv(&msg.payload, sync_engine)?;
+                    if !requests.is_empty() {
+                        let payload = encode_inventory_vectors(&requests)?;
+                        self.write_message(&WireMessage {
+                            command: MESSAGE_GETDATA.to_string(),
+                            payload,
+                        })?;
+                    }
+                }
+                MESSAGE_GETDATA => {
+                    for item in decode_inventory_vectors(&msg.payload)? {
+                        if item.kind != MSG_BLOCK {
+                            continue;
+                        }
+                        let block = sync_engine
+                            .get_block_by_hash(item.hash)
+                            .map_err(io::Error::other)?;
+                        self.write_message(&WireMessage {
+                            command: MESSAGE_BLOCK.to_string(),
+                            payload: block,
+                        })?;
+                    }
+                }
+                MESSAGE_GETBLOCKS => {
+                    let items = self.handle_getblocks(&msg.payload, sync_engine)?;
+                    if items.is_empty() {
+                        continue;
+                    }
+                    self.write_message(&WireMessage {
+                        command: MESSAGE_INV.to_string(),
+                        payload: encode_inventory_vectors(&items)?,
+                    })?;
+                }
+                MESSAGE_BLOCK => {
+                    self.handle_block(&msg.payload, sync_engine)?;
+                }
+                MESSAGE_TX | "headers" | "pong" => {}
+                "ping" => {
+                    self.write_message(&WireMessage {
+                        command: "pong".to_string(),
+                        payload: Vec::new(),
+                    })?;
+                }
+                MESSAGE_GETADDR => {
+                    self.write_message(&WireMessage {
+                        command: MESSAGE_ADDR.to_string(),
+                        payload: marshal_empty_addr_payload(),
+                    })?;
+                }
+                MESSAGE_ADDR => {
+                    let _ = unmarshal_addr_payload(&msg.payload)?;
+                }
+                other => {
+                    self.bump_ban(1, &format!("unknown command: {other}"));
+                    if self.peer.ban_score >= self.cfg.ban_threshold {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "peer banned",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn request_blocks(&mut self, sync_engine: &SyncEngine) -> io::Result<()> {
+        let payload = encode_getblocks_payload(GetBlocksPayload {
+            locator_hashes: sync_engine.locator_hashes(32).map_err(io::Error::other)?,
+            stop_hash: [0u8; 32],
+        })?;
+        self.write_message(&WireMessage {
+            command: MESSAGE_GETBLOCKS.to_string(),
+            payload,
+        })
+    }
+
+    pub fn handle_getblocks(
+        &mut self,
+        payload: &[u8],
+        sync_engine: &SyncEngine,
+    ) -> io::Result<Vec<InventoryVector>> {
+        let req = decode_getblocks_payload(payload)?;
+        let hashes = sync_engine
+            .hashes_after_locators(&req.locator_hashes, req.stop_hash, 128)
+            .map_err(io::Error::other)?;
+        Ok(hashes
+            .into_iter()
+            .map(|hash| InventoryVector {
+                kind: MSG_BLOCK,
+                hash,
+            })
+            .collect())
+    }
+
+    pub fn handle_inv(
+        &mut self,
+        payload: &[u8],
+        sync_engine: &SyncEngine,
+    ) -> io::Result<Vec<InventoryVector>> {
+        let vectors = decode_inventory_vectors(payload)?;
+        let mut requests = Vec::new();
+        for vector in vectors {
+            if vector.kind != MSG_BLOCK {
+                continue;
+            }
+            if !sync_engine
+                .has_block(vector.hash)
+                .map_err(io::Error::other)?
+            {
+                requests.push(vector);
+            }
+        }
+        Ok(requests)
+    }
+
+    pub fn handle_block(
+        &mut self,
+        block_bytes: &[u8],
+        sync_engine: &mut SyncEngine,
+    ) -> io::Result<()> {
+        sync_engine
+            .apply_block(block_bytes, None)
+            .map_err(io::Error::other)?;
+        Ok(())
     }
 }
 
@@ -351,6 +512,176 @@ fn protocol_versions_compatible(local: u32, remote: u32) -> bool {
         return local - remote <= 1;
     }
     remote - local <= 1
+}
+
+pub fn encode_inventory_vectors(items: &[InventoryVector]) -> io::Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(items.len() * INVENTORY_VECTOR_SIZE);
+    for item in items {
+        if item.kind != MSG_BLOCK && item.kind != MSG_TX {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported inventory type: {}", item.kind),
+            ));
+        }
+        out.push(item.kind);
+        out.extend_from_slice(&item.hash);
+    }
+    Ok(out)
+}
+
+pub fn decode_inventory_vectors(payload: &[u8]) -> io::Result<Vec<InventoryVector>> {
+    if payload.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !payload.len().is_multiple_of(INVENTORY_VECTOR_SIZE) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "inventory payload width mismatch",
+        ));
+    }
+    let mut out = Vec::with_capacity(payload.len() / INVENTORY_VECTOR_SIZE);
+    for chunk in payload.chunks_exact(INVENTORY_VECTOR_SIZE) {
+        let kind = chunk[0];
+        if kind != MSG_BLOCK && kind != MSG_TX {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported inventory type: {kind}"),
+            ));
+        }
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&chunk[1..33]);
+        out.push(InventoryVector { kind, hash });
+    }
+    Ok(out)
+}
+
+pub fn encode_getblocks_payload(req: GetBlocksPayload) -> io::Result<Vec<u8>> {
+    let count = u16::try_from(req.locator_hashes.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("too many locator hashes: {}", req.locator_hashes.len()),
+        )
+    })?;
+    let mut out = Vec::with_capacity(2 + req.locator_hashes.len() * 32 + 32);
+    out.extend_from_slice(&count.to_be_bytes());
+    for locator in req.locator_hashes {
+        out.extend_from_slice(&locator);
+    }
+    out.extend_from_slice(&req.stop_hash);
+    Ok(out)
+}
+
+pub fn decode_getblocks_payload(payload: &[u8]) -> io::Result<GetBlocksPayload> {
+    if payload.len() < 34 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "getblocks payload too short",
+        ));
+    }
+    let count = u16::from_be_bytes(payload[0..2].try_into().expect("count")) as usize;
+    let want = 2 + count * 32 + 32;
+    if payload.len() != want {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "getblocks payload width mismatch",
+        ));
+    }
+    let mut locator_hashes = Vec::with_capacity(count);
+    let mut offset = 2usize;
+    for _ in 0..count {
+        let mut locator = [0u8; 32];
+        locator.copy_from_slice(&payload[offset..offset + 32]);
+        locator_hashes.push(locator);
+        offset += 32;
+    }
+    let mut stop_hash = [0u8; 32];
+    stop_hash.copy_from_slice(&payload[offset..offset + 32]);
+    Ok(GetBlocksPayload {
+        locator_hashes,
+        stop_hash,
+    })
+}
+
+fn marshal_empty_addr_payload() -> Vec<u8> {
+    vec![0u8]
+}
+
+fn unmarshal_addr_payload(payload: &[u8]) -> io::Result<Vec<String>> {
+    let (count, consumed) = decode_compact_size(payload)?;
+    let needed = consumed
+        .checked_add(
+            usize::try_from(count)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "addr count overflow"))?
+                .saturating_mul(18),
+        )
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "addr payload length overflow")
+        })?;
+    if payload.len() != needed {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "addr payload width mismatch",
+        ));
+    }
+    let mut out = Vec::with_capacity(count as usize);
+    let mut offset = consumed;
+    for _ in 0..count {
+        let ip = std::net::Ipv6Addr::from(
+            <[u8; 16]>::try_from(&payload[offset..offset + 16]).expect("ip"),
+        );
+        offset += 16;
+        let port = u16::from_be_bytes(payload[offset..offset + 2].try_into().expect("port"));
+        offset += 2;
+        out.push(std::net::SocketAddr::new(ip.into(), port).to_string());
+    }
+    Ok(out)
+}
+
+fn decode_compact_size(payload: &[u8]) -> io::Result<(u64, usize)> {
+    let Some(first) = payload.first().copied() else {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "compactsize truncated",
+        ));
+    };
+    match first {
+        0x00..=0xfc => Ok((u64::from(first), 1)),
+        0xfd => {
+            if payload.len() < 3 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "compactsize truncated",
+                ));
+            }
+            Ok((u64::from(u16::from_le_bytes([payload[1], payload[2]])), 3))
+        }
+        0xfe => {
+            if payload.len() < 5 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "compactsize truncated",
+                ));
+            }
+            Ok((
+                u64::from(u32::from_le_bytes(
+                    payload[1..5].try_into().expect("u32 compactsize"),
+                )),
+                5,
+            ))
+        }
+        0xff => {
+            if payload.len() < 9 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "compactsize truncated",
+                ));
+            }
+            Ok((
+                u64::from_le_bytes(payload[1..9].try_into().expect("u64 compactsize")),
+                9,
+            ))
+        }
+    }
 }
 
 fn marshal_version_payload_v1(v: VersionPayloadV1) -> Vec<u8> {
