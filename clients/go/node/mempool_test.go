@@ -78,6 +78,9 @@ func TestMempoolPolicyRejectsNonCoinbaseAnchorOutputs(t *testing.T) {
 	if err := mp.AddTx(txBytes); err == nil || !strings.Contains(err.Error(), "non-coinbase CORE_ANCHOR") {
 		t.Fatalf("expected non-coinbase anchor policy rejection, got %v", err)
 	}
+	if _, err := mp.RelayMetadata(txBytes); err == nil || !strings.Contains(err.Error(), "non-coinbase CORE_ANCHOR") {
+		t.Fatalf("expected relay metadata anchor policy rejection, got %v", err)
+	}
 }
 
 func TestMempoolPolicyRejectsLowFeeDaCommit(t *testing.T) {
@@ -98,6 +101,9 @@ func TestMempoolPolicyRejectsLowFeeDaCommit(t *testing.T) {
 	if err := mp.AddTx(txBytes); err == nil || !strings.Contains(err.Error(), "DA fee below policy minimum") {
 		t.Fatalf("expected DA surcharge rejection, got %v", err)
 	}
+	if _, err := mp.RelayMetadata(txBytes); err == nil || !strings.Contains(err.Error(), "DA fee below policy minimum") {
+		t.Fatalf("expected relay metadata DA surcharge rejection, got %v", err)
+	}
 }
 
 func TestMempoolPolicyAllowsSufficientFeeDaCommit(t *testing.T) {
@@ -117,6 +123,39 @@ func TestMempoolPolicyAllowsSufficientFeeDaCommit(t *testing.T) {
 	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 80, 10, 1, fromKey, toAddress, []byte("0123456789"))
 	if err := mp.AddTx(txBytes); err != nil {
 		t.Fatalf("expected DA tx admission, got %v", err)
+	}
+}
+
+func TestMempoolPolicyRejectsNilCheckedTransaction(t *testing.T) {
+	mp := &Mempool{}
+	if err := mp.applyPolicyLocked(nil); err == nil || !strings.Contains(err.Error(), "nil checked transaction") {
+		t.Fatalf("expected nil checked transaction rejection, got %v", err)
+	}
+	if err := mp.applyPolicyLocked(&consensus.CheckedTransaction{}); err == nil || !strings.Contains(err.Error(), "nil checked transaction") {
+		t.Fatalf("expected nil checked tx rejection, got %v", err)
+	}
+}
+
+func TestMempoolPolicyPropagatesDaFeeComputationErrors(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 80, 10, 1, fromKey, toAddress, []byte("0123456789"))
+	tx, _, _, _, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("ParseTx(da): %v", err)
+	}
+
+	mp := &Mempool{
+		chainState: &ChainState{},
+		policy: MempoolConfig{
+			PolicyDaSurchargePerByte: 1,
+		},
+	}
+	if err := mp.applyPolicyLocked(&consensus.CheckedTransaction{Tx: tx}); err == nil || !strings.Contains(err.Error(), "nil utxo set") {
+		t.Fatalf("expected DA fee computation error, got %v", err)
 	}
 }
 
