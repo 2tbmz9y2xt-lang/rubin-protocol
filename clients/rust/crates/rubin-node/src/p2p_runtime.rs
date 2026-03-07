@@ -135,15 +135,23 @@ impl PeerSession {
 
         let mut header = [0u8; WIRE_HEADER_SIZE];
         self.stream.read_exact(&mut header)?;
-        let payload_len = u32::from_le_bytes(header[16..20].try_into().expect("len"));
-        let mut payload = vec![0u8; payload_len as usize];
-        if payload_len > 0 {
+        let envelope = parse_envelope_header(&header, network_magic(&self.cfg.network), MAX_RELAY_MSG_BYTES)?;
+        let mut payload = vec![0u8; envelope.payload_len];
+        let checksum = envelope.checksum;
+        if envelope.payload_len > 0 {
             self.stream.read_exact(&mut payload)?;
         }
-        let mut raw = Vec::with_capacity(WIRE_HEADER_SIZE + payload.len());
-        raw.extend_from_slice(&header);
-        raw.extend_from_slice(&payload);
-        unmarshal_wire_message(&raw, network_magic(&self.cfg.network), MAX_RELAY_MSG_BYTES)
+        let actual_checksum = wire_checksum(&payload);
+        if checksum != actual_checksum {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid envelope checksum",
+            ));
+        }
+        Ok(WireMessage {
+            command: envelope.command,
+            payload,
+        })
     }
 
     pub fn write_message(&mut self, msg: &WireMessage) -> io::Result<()> {
@@ -397,7 +405,40 @@ fn unmarshal_wire_message(
             "short envelope header",
         ));
     }
-    let header = &raw[..WIRE_HEADER_SIZE];
+    let header = raw[..WIRE_HEADER_SIZE].try_into().expect("wire header");
+    let envelope = parse_envelope_header(&header, expected_magic, max_message_size)?;
+    let total_len = WIRE_HEADER_SIZE + envelope.payload_len;
+    if raw.len() < total_len {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "short envelope payload",
+        ));
+    }
+    let payload = raw[WIRE_HEADER_SIZE..total_len].to_vec();
+    let checksum = wire_checksum(&payload);
+    if envelope.checksum != checksum {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid envelope checksum",
+        ));
+    }
+    Ok(WireMessage {
+        command: envelope.command,
+        payload,
+    })
+}
+
+struct ParsedEnvelopeHeader {
+    command: String,
+    payload_len: usize,
+    checksum: [u8; 4],
+}
+
+fn parse_envelope_header(
+    header: &[u8; WIRE_HEADER_SIZE],
+    expected_magic: [u8; 4],
+    max_message_size: u64,
+) -> io::Result<ParsedEnvelopeHeader> {
     if header[0..4] != expected_magic {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -412,22 +453,13 @@ fn unmarshal_wire_message(
             "message exceeds cap",
         ));
     }
-    let total_len = WIRE_HEADER_SIZE + payload_len as usize;
-    if raw.len() < total_len {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "short envelope payload",
-        ));
-    }
-    let payload = raw[WIRE_HEADER_SIZE..total_len].to_vec();
-    let checksum = wire_checksum(&payload);
-    if header[20..24] != checksum {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid envelope checksum",
-        ));
-    }
-    Ok(WireMessage { command, payload })
+    let mut checksum = [0u8; 4];
+    checksum.copy_from_slice(&header[20..24]);
+    Ok(ParsedEnvelopeHeader {
+        command,
+        payload_len: payload_len as usize,
+        checksum,
+    })
 }
 
 fn wire_checksum(payload: &[u8]) -> [u8; 4] {
@@ -688,6 +720,40 @@ mod tests {
                 .expect("header");
             stream.write_all(&header).expect("write header");
             stream.write_all(&payload).expect("write payload");
+            stream.flush().expect("flush");
+        });
+
+        client.join().expect("client join");
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn p2p_read_message_rejects_oversize_before_payload_read() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut cfg = default_peer_runtime_config("devnet", 8);
+            cfg.read_deadline = Duration::from_secs(2);
+            cfg.write_deadline = Duration::from_secs(2);
+            let mut session =
+                PeerSession::new(stream.try_clone().expect("clone"), cfg).expect("session");
+            let err = session.read_message().unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(err.to_string(), "message exceeds cap");
+        });
+
+        let client = thread::spawn(move || {
+            let mut stream = TcpStream::connect(addr).expect("connect");
+            stream.set_nodelay(true).expect("set_nodelay");
+            let mut header = [0u8; WIRE_HEADER_SIZE];
+            header[0..4].copy_from_slice(&network_magic("devnet"));
+            header[4..16]
+                .copy_from_slice(&encode_wire_command("tx").expect("command"));
+            let oversize = (MAX_RELAY_MSG_BYTES + 1) as u32;
+            header[16..20].copy_from_slice(&oversize.to_le_bytes());
+            stream.write_all(&header).expect("write header");
             stream.flush().expect("flush");
         });
 
