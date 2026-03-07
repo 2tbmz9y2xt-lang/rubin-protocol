@@ -848,9 +848,13 @@ def render_cv_utxo_basic_lean(vectors: list[UtxoBasicVector]) -> str:
 @dataclass(frozen=True)
 class BlockBasicVector:
     vid: str
+    op: str
     block_hex: str
     expected_prev_hash: str | None
     expected_target: str | None
+    height: int
+    already_generated: int
+    utxos: list["SubsidyUtxo"]
     expect_ok: bool
     expect_err: str | None
 
@@ -866,15 +870,33 @@ def load_cv_block_basic(path: Path) -> list[BlockBasicVector]:
     for v in vectors:
         if not isinstance(v, dict):
             continue
-        if v.get("op") != "block_basic_check":
+        op = str(v.get("op") or "")
+        if op not in ("block_basic_check", "connect_block_basic"):
             continue
+        utxos: list[SubsidyUtxo] = []
+        for u in v.get("utxos") or []:
+            utxos.append(
+                SubsidyUtxo(
+                    txid=str(u.get("txid") or ""),
+                    vout=int(u.get("vout", 0)),
+                    value=int(u.get("value", 0)),
+                    covenant_type=int(u.get("covenant_type", 0)),
+                    covenant_data_hex=str(u.get("covenant_data") or ""),
+                    creation_height=int(u.get("creation_height", 0)),
+                    created_by_coinbase=bool(u.get("created_by_coinbase", False)),
+                )
+            )
         expect_ok = bool(v.get("expect_ok"))
         out.append(
             BlockBasicVector(
                 vid=str(v.get("id") or ""),
+                op=op,
                 block_hex=str(v.get("block_hex") or ""),
                 expected_prev_hash=(str(v.get("expected_prev_hash")) if "expected_prev_hash" in v else None),
                 expected_target=(str(v.get("expected_target")) if "expected_target" in v else None),
+                height=int(v.get("height", 0)),
+                already_generated=int(v.get("already_generated", 0)),
+                utxos=utxos,
                 expect_ok=expect_ok,
                 expect_err=(str(v.get("expect_err")) if not expect_ok else None),
             )
@@ -885,14 +907,33 @@ def load_cv_block_basic(path: Path) -> list[BlockBasicVector]:
 
 
 def render_cv_block_basic_lean(vectors: list[BlockBasicVector]) -> str:
+    def render_utxo(u: SubsidyUtxo) -> str:
+        created = "true" if u.created_by_coinbase else "false"
+        return (
+            "{ "
+            + f"txidHex := {_lean_hex_str(u.txid)}, "
+            + f"vout := {u.vout}, "
+            + f"value := {u.value}, "
+            + f"covenantType := {u.covenant_type}, "
+            + f"covenantDataHex := {_lean_hex_str(u.covenant_data_hex)}, "
+            + f"creationHeight := {u.creation_height}, "
+            + f"createdByCoinbase := {created}"
+            + " }"
+        )
+
     rows: list[str] = []
     for v in vectors:
+        utxo_rows = ", ".join(render_utxo(u) for u in v.utxos)
         rows.append(
             "  { "
             + f'id := "{v.vid}", '
+            + f"op := .{v.op}, "
             + f"blockHex := {_lean_hex_str(v.block_hex)}, "
             + f"expectedPrevHashHex := {_lean_opt_hex_str(v.expected_prev_hash)}, "
             + f"expectedTargetHex := {_lean_opt_hex_str(v.expected_target)}, "
+            + f"height := {v.height}, "
+            + f"alreadyGenerated := {v.already_generated}, "
+            + f"utxos := [{utxo_rows}], "
             + f"expectOk := {'true' if v.expect_ok else 'false'}, "
             + f"expectErr := {_lean_opt_str(v.expect_err)}"
             + " }"
@@ -904,14 +945,31 @@ def render_cv_block_basic_lean(vectors: list[BlockBasicVector]) -> str:
         "\n"
         "namespace RubinFormal.Conformance\n"
         "\n"
+        "structure CVBlockBasicUtxo where\n"
+        "  txidHex : String\n"
+        "  vout : Nat\n"
+        "  value : Nat\n"
+        "  covenantType : Nat\n"
+        "  covenantDataHex : String\n"
+        "  creationHeight : Nat\n"
+        "  createdByCoinbase : Bool\n"
+        "\n"
+        "inductive CVBlockBasicOp where\n"
+        "  | block_basic_check\n"
+        "  | connect_block_basic\n"
+        "deriving DecidableEq\n"
+        "\n"
         "structure CVBlockBasicVector where\n"
         "  id : String\n"
+        "  op : CVBlockBasicOp\n"
         "  blockHex : String\n"
         "  expectedPrevHashHex : Option String\n"
         "  expectedTargetHex : Option String\n"
+        "  height : Nat\n"
+        "  alreadyGenerated : Nat\n"
+        "  utxos : List CVBlockBasicUtxo\n"
         "  expectOk : Bool\n"
         "  expectErr : Option String\n"
-        
         "\n"
         "def cvBlockBasicVectors : List CVBlockBasicVector := [\n"
         + body

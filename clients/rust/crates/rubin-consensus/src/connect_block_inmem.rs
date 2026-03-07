@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::block_basic::{
     median_time_past, parse_block_bytes, validate_block_basic_with_context_at_height,
-    validate_coinbase_value_bound,
+    validate_coinbase_apply_outputs, validate_coinbase_value_bound,
 };
 use crate::constants::{COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT};
 use crate::error::{ErrorCode, TxError};
@@ -56,25 +56,30 @@ pub fn connect_block_basic_in_memory_at_height(
 
     let already_generated = state.already_generated;
     let block_mtp = median_time_past(block_height, prev_timestamps)?.unwrap_or(pb.header.timestamp);
+    let mut work_utxos = None;
 
     let mut sum_fees: u64 = 0;
     for i in 1..pb.txs.len() {
+        let base_utxos = work_utxos.as_ref().unwrap_or(&state.utxos);
         let (next_utxos, s) = apply_non_coinbase_tx_basic_update_with_mtp(
             &pb.txs[i],
             pb.txids[i],
-            &state.utxos,
+            base_utxos,
             block_height,
             pb.header.timestamp,
             block_mtp,
             chain_id,
         )?;
-        state.utxos = next_utxos;
+        work_utxos = Some(next_utxos);
         sum_fees = sum_fees
             .checked_add(s.fee)
             .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "sum_fees overflow"))?;
     }
 
+    let mut work_utxos = work_utxos.unwrap_or_else(|| state.utxos.clone());
+
     validate_coinbase_value_bound(&pb, block_height, already_generated, sum_fees)?;
+    validate_coinbase_apply_outputs(&pb.txs[0])?;
 
     // Add coinbase spendable outputs to UTXO set.
     let coinbase_txid = pb.txids[0];
@@ -82,7 +87,7 @@ pub fn connect_block_basic_in_memory_at_height(
         if out.covenant_type == COV_TYPE_ANCHOR || out.covenant_type == COV_TYPE_DA_COMMIT {
             continue;
         }
-        state.utxos.insert(
+        work_utxos.insert(
             Outpoint {
                 txid: coinbase_txid,
                 vout: i as u32,
@@ -103,6 +108,10 @@ pub fn connect_block_basic_in_memory_at_height(
         already_generated_n1 = already_generated
             .checked_add(u128::from(subsidy))
             .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "already_generated overflow"))?;
+    }
+
+    state.utxos = work_utxos;
+    if block_height != 0 {
         state.already_generated = already_generated_n1;
     }
 
