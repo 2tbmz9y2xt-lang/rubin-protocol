@@ -221,6 +221,11 @@ jobs:
           cd clients/go
           test -z "$(gofmt -l .)"
 
+      - name: Go↔Rust live P2P interop
+        run: |
+          cd clients/go
+          RUBIN_P2P_INTEROP=1 go test ./node/p2p -run '^TestRustInterop' -count=1
+
       - name: Conformance Go fmt
         run: |
           cd conformance
