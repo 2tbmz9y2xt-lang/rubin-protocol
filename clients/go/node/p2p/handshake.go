@@ -49,7 +49,7 @@ func performHandshake(
 	versionReceived := false
 	verAckReceived := false
 	for {
-		frame, err := readFrame(conn, magic, cfg.MaxMessageSize)
+		frame, err := readFrameWithPayloadLimit(conn, magic, cfg.MaxMessageSize, preHandshakePayloadCap)
 		if err != nil {
 			return state, err
 		}
@@ -82,6 +82,17 @@ func performHandshake(
 			state.HandshakeComplete = true
 			return state, nil
 		}
+	}
+}
+
+func preHandshakePayloadCap(command string) uint32 {
+	switch command {
+	case messageVersion:
+		return versionPayloadBytes
+	case messageVerAck:
+		return 0
+	default:
+		return 0
 	}
 }
 

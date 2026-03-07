@@ -41,6 +41,14 @@ type message struct {
 	Payload []byte
 }
 
+type payloadLimitFn func(command string) uint32
+
+type frameHeader struct {
+	Command  string
+	Size     uint32
+	Checksum [4]byte
+}
+
 type InventoryVector struct {
 	Type byte
 	Hash [32]byte
@@ -52,35 +60,56 @@ type GetBlocksPayload struct {
 }
 
 func readFrame(r io.Reader, expectedMagic [4]byte, maxMessageSize uint32) (message, error) {
+	return readFrameWithPayloadLimit(r, expectedMagic, maxMessageSize, nil)
+}
+
+func readFrameWithPayloadLimit(r io.Reader, expectedMagic [4]byte, maxMessageSize uint32, limit payloadLimitFn) (message, error) {
 	var frame message
-	var header [wireHeaderSize]byte
-	if _, err := io.ReadFull(r, header[:]); err != nil {
-		return frame, err
-	}
-	if !bytes.Equal(header[0:4], expectedMagic[:]) {
-		return frame, errors.New("invalid envelope magic")
-	}
-	command, err := decodeWireCommand(header[4 : 4+wireCommandSize])
+	header, err := readFrameHeader(r, expectedMagic, maxMessageSize)
 	if err != nil {
 		return frame, err
 	}
-	size := binary.LittleEndian.Uint32(header[16:20])
-	if size > maxMessageSize {
-		return frame, errors.New("message exceeds cap")
+	if limit != nil {
+		if header.Size > limit(header.Command) {
+			return frame, errors.New("message exceeds command cap")
+		}
 	}
-	payload := make([]byte, int(size))
-	if size > 0 {
+	payload := make([]byte, int(header.Size))
+	if header.Size > 0 {
 		if _, err := io.ReadFull(r, payload); err != nil {
 			return frame, err
 		}
 	}
 	checksum := wireChecksum(payload)
-	if !bytes.Equal(header[20:24], checksum[:]) {
+	if !bytes.Equal(header.Checksum[:], checksum[:]) {
 		return frame, errors.New("invalid envelope checksum")
 	}
-	frame.Command = command
+	frame.Command = header.Command
 	frame.Payload = payload
 	return frame, nil
+}
+
+func readFrameHeader(r io.Reader, expectedMagic [4]byte, maxMessageSize uint32) (frameHeader, error) {
+	var header frameHeader
+	var raw [wireHeaderSize]byte
+	if _, err := io.ReadFull(r, raw[:]); err != nil {
+		return header, err
+	}
+	if !bytes.Equal(raw[0:4], expectedMagic[:]) {
+		return header, errors.New("invalid envelope magic")
+	}
+	command, err := decodeWireCommand(raw[4 : 4+wireCommandSize])
+	if err != nil {
+		return header, err
+	}
+	size := binary.LittleEndian.Uint32(raw[16:20])
+	if size > maxMessageSize {
+		return header, errors.New("message exceeds cap")
+	}
+	header.Command = command
+	header.Size = size
+	copy(header.Checksum[:], raw[20:24])
+	return header, nil
 }
 
 func writeFrame(w io.Writer, magic [4]byte, frame message, maxMessageSize uint32) error {

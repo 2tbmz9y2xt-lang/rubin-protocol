@@ -162,8 +162,18 @@ impl PeerSession {
         self.stream
             .set_write_timeout(Some(self.cfg.write_deadline))
             .map_err(io::Error::other)?;
-        let raw = marshal_wire_message(msg, network_magic(&self.cfg.network), MAX_RELAY_MSG_BYTES)?;
-        self.stream.write_all(&raw)?;
+        if msg.payload.len() as u64 > MAX_RELAY_MSG_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("message exceeds cap: {}", msg.payload.len()),
+            ));
+        }
+        let header =
+            build_envelope_header(network_magic(&self.cfg.network), &msg.command, &msg.payload)?;
+        self.stream.write_all(&header)?;
+        if !msg.payload.is_empty() {
+            self.stream.write_all(&msg.payload)?;
+        }
         self.stream.flush()?;
         Ok(())
     }
@@ -380,6 +390,7 @@ fn build_envelope_header(
     Ok(header)
 }
 
+#[cfg(test)]
 fn marshal_wire_message(
     msg: &WireMessage,
     magic: [u8; 4],

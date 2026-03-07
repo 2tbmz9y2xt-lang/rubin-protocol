@@ -81,6 +81,21 @@ func TestReadFrameShortBody(t *testing.T) {
 	}
 }
 
+func TestReadFrameWithPayloadLimitRejectsOversizeVersionBeforePayloadRead(t *testing.T) {
+	header, err := buildEnvelopeHeader(networkMagic("devnet"), messageVersion, make([]byte, versionPayloadBytes+1))
+	if err != nil {
+		t.Fatalf("buildEnvelopeHeader: %v", err)
+	}
+	reader := io.MultiReader(
+		bytes.NewReader(header[:]),
+		&failingReader{err: errors.New("payload should not be read")},
+	)
+	_, err = readFrameWithPayloadLimit(reader, networkMagic("devnet"), 1024*1024, preHandshakePayloadCap)
+	if err == nil || err.Error() != "message exceeds command cap" {
+		t.Fatalf("expected command cap error, got %v", err)
+	}
+}
+
 func TestWriteFrameErrors(t *testing.T) {
 	t.Run("cap exceeded", func(t *testing.T) {
 		err := writeFrame(io.Discard, networkMagic("devnet"), message{Command: messageInv, Payload: []byte{1, 2}}, 1)
@@ -109,6 +124,14 @@ func TestWriteFrameErrors(t *testing.T) {
 			t.Fatalf("expected writer error, got %v", err)
 		}
 	})
+}
+
+type failingReader struct {
+	err error
+}
+
+func (r *failingReader) Read(_ []byte) (int, error) {
+	return 0, r.err
 }
 
 func TestEncodeDecodeVersionPayload(t *testing.T) {
