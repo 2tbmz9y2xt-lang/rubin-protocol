@@ -47,6 +47,13 @@ def sumCoinbaseOutputs (coinbaseTxBytes : Bytes) : Except String Nat := do
   let tx ← parseTx coinbaseTxBytes
   pure (sumOutputs tx.outputs)
 
+def validateCoinbaseApplyOutputs (coinbaseTxBytes : Bytes) : Except String Unit := do
+  let tx ← parseTx coinbaseTxBytes
+  for o in tx.outputs do
+    if o.covenantType == CovenantGenesisV1.COV_TYPE_VAULT then
+      throw "BLOCK_ERR_COINBASE_INVALID"
+  pure ()
+
 def validateCoinbaseValueBound
     (coinbaseTxBytes : Bytes)
     (height : Nat)
@@ -81,6 +88,7 @@ def connectBlockBasic
     utxoMap := next
 
   validateCoinbaseValueBound pb.coinbaseTx height alreadyGenerated sumFees
+  validateCoinbaseApplyOutputs pb.coinbaseTx
   pure ()
 
 def blockBasicCheckWithFees

@@ -6,6 +6,7 @@ import RubinFormal.PowV1
 import RubinFormal.TxWeightV2
 import RubinFormal.UtxoBasicV1
 import RubinFormal.BlockBasicV1
+import RubinFormal.SubsidyV1
 import RubinFormal.DaIntegrityV1
 import RubinFormal.Refinement.GoTraceV1
 
@@ -30,6 +31,7 @@ open RubinFormal.PowV1
 open RubinFormal.TxWeightV2
 open RubinFormal.UtxoBasicV1
 open RubinFormal.BlockBasicV1
+open RubinFormal.SubsidyV1
 
 private def findById? (id : String) (xs : List α) (getId : α → String) : Option α :=
   xs.find? (fun x => getId x == id)
@@ -214,6 +216,25 @@ private def blockSummary? (blockBytes : Bytes) : Except String (Bytes × Nat × 
 private def isKnownBlockDrift (id _gotErr expectedErr : String) : Bool :=
   id == "CV-B-13" && expectedErr == "BLOCK_ERR_COINBASE_INVALID"
 
+private def zeroChainIdBlockBasic : Bytes :=
+  RubinFormal.bytes ((List.replicate 32 (UInt8.ofNat 0)).toArray)
+
+private def toUtxoPairsBlockBasic? (us : List RubinFormal.Conformance.CVBlockBasicUtxo) : Option (List (Outpoint × UtxoEntry)) :=
+  us.mapM (fun u => do
+    let txid <- RubinFormal.decodeHex? u.txidHex
+    let cd <- RubinFormal.decodeHex? u.covenantDataHex
+    pure
+      (
+        { txid := txid, vout := u.vout },
+        {
+          value := u.value
+          covenantType := u.covenantType
+          covenantData := cd
+          creationHeight := u.creationHeight
+          createdByCoinbase := u.createdByCoinbase
+        }
+      ))
+
 private def checkBlockBasic (o : BlockBasicOut) : Bool :=
   match findById? o.id RubinFormal.Conformance.cvBlockBasicVectors (fun v => v.id) with
   | none => false
@@ -223,22 +244,31 @@ private def checkBlockBasic (o : BlockBasicOut) : Bool :=
       | some blockBytes =>
           let ph := decodeHexOpt? v.expectedPrevHashHex
           let tgt := decodeHexOpt? v.expectedTargetHex
-          match BlockBasicV1.validateBlockBasic blockBytes ph tgt with
-          | .ok _ =>
-              if o.ok then
-                match blockSummary? blockBytes with
-                | .error _ => false
-                | .ok (bh, sumW, sumDa) =>
-                    bytesEqHex bh o.blockHashHex &&
-                    o.sumWeight == some sumW &&
-                    o.sumDa == some sumDa
-              else
-                let fallbackErr :=
-                  v.expectErr == some "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED" ||
-                  v.expectErr == some "BLOCK_ERR_DA_BATCH_EXCEEDED"
-                fallbackErr && (some o.err == v.expectErr)
-          | .error e =>
-              (!o.ok) && (o.err == e || isKnownBlockDrift o.id e o.err)
+          match v.op with
+          | .block_basic_check =>
+              match BlockBasicV1.validateBlockBasic blockBytes ph tgt with
+              | .ok _ =>
+                  if o.ok then
+                    match blockSummary? blockBytes with
+                    | .error _ => false
+                    | .ok (bh, sumW, sumDa) =>
+                        bytesEqHex bh o.blockHashHex &&
+                        o.sumWeight == some sumW &&
+                        o.sumDa == some sumDa
+                  else
+                    let fallbackErr :=
+                      v.expectErr == some "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED" ||
+                      v.expectErr == some "BLOCK_ERR_DA_BATCH_EXCEEDED"
+                    fallbackErr && (some o.err == v.expectErr)
+              | .error e =>
+                  (!o.ok) && (o.err == e || isKnownBlockDrift o.id e o.err)
+          | .connect_block_basic =>
+              match toUtxoPairsBlockBasic? v.utxos with
+              | none => false
+              | some utxos =>
+                  match SubsidyV1.connectBlockBasic blockBytes ph tgt v.height v.alreadyGenerated utxos zeroChainIdBlockBasic with
+                  | .ok _ => o.ok
+                  | .error e => (!o.ok) && (o.err == e)
 
 private def checkWeight (o : WeightOut) : Bool :=
   match findById? o.id RubinFormal.Conformance.cvWeightVectors (fun v => v.id) with
