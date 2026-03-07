@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
 func (p *peer) handleGetBlocks(payload []byte) error {
@@ -41,31 +42,43 @@ func (p *peer) blockInventoryAfterLocators(req GetBlocksPayload) ([]InventoryVec
 }
 
 func (p *peer) handleBlock(blockBytes []byte) error {
+	summary, err := p.processRelayedBlock(blockBytes)
+	if err != nil {
+		return err
+	}
+	if summary == nil {
+		return nil
+	}
+	return p.service.requestBlocksIfBehind(p)
+}
+
+func (p *peer) processRelayedBlock(blockBytes []byte) (*node.ChainStateConnectSummary, error) {
 	pb, blockHash, err := parseRelayedBlock(blockBytes)
 	if err != nil {
 		p.bumpBan(10, err.Error())
-		return err
+		return nil, err
 	}
 	if pb == nil {
-		return errors.New("nil parsed block")
+		return nil, errors.New("nil parsed block")
 	}
 	have, err := p.service.hasBlock(blockHash)
 	if err != nil || have {
-		return err
+		return nil, err
 	}
 
 	p.service.chainMu.Lock()
-	summary, err := p.service.cfg.SyncEngine.ApplyBlock(blockBytes, nil)
+	summary, err := p.service.cfg.SyncEngine.ApplyBlockWithReorg(blockBytes, nil)
 	p.service.chainMu.Unlock()
 	if err != nil {
+		if errors.Is(err, node.ErrParentNotFound) {
+			p.service.orphans.Add(blockHash, pb.Header.PrevBlockHash, blockBytes)
+			return nil, nil
+		}
 		p.bumpBan(100, err.Error())
-		return err
+		return nil, err
 	}
-	p.service.cfg.SyncEngine.RecordBestKnownHeight(summary.BlockHeight)
-	if p.service.blockSeen.Add(blockHash) {
-		_ = p.service.broadcastInventory(p, []InventoryVector{{Type: MSG_BLOCK, Hash: blockHash}})
-	}
-	return p.service.requestBlocksIfBehind(p)
+	p.acceptedRelayedBlock(blockHash, summary)
+	return summary, nil
 }
 
 func parseRelayedBlock(blockBytes []byte) (*consensus.ParsedBlock, [32]byte, error) {
@@ -78,4 +91,36 @@ func parseRelayedBlock(blockBytes []byte) (*consensus.ParsedBlock, [32]byte, err
 		return nil, [32]byte{}, err
 	}
 	return pb, blockHash, nil
+}
+
+func (p *peer) acceptedRelayedBlock(blockHash [32]byte, summary *node.ChainStateConnectSummary) {
+	p.service.cfg.SyncEngine.RecordBestKnownHeight(summary.BlockHeight)
+	if p.service.blockSeen.Add(blockHash) {
+		_ = p.service.broadcastInventory(p, []InventoryVector{{Type: MSG_BLOCK, Hash: blockHash}})
+	}
+	p.service.resolveOrphans(p, blockHash)
+}
+
+func (s *Service) resolveOrphans(skip *peer, blockHash [32]byte) {
+	children := s.orphans.TakeChildren(blockHash)
+	for _, child := range children {
+		pb, childHash, err := parseRelayedBlock(child.blockBytes)
+		if err != nil {
+			continue
+		}
+		s.chainMu.Lock()
+		summary, applyErr := s.cfg.SyncEngine.ApplyBlockWithReorg(child.blockBytes, nil)
+		s.chainMu.Unlock()
+		if applyErr != nil {
+			if errors.Is(applyErr, node.ErrParentNotFound) {
+				s.orphans.Add(childHash, pb.Header.PrevBlockHash, child.blockBytes)
+			}
+			continue
+		}
+		s.cfg.SyncEngine.RecordBestKnownHeight(summary.BlockHeight)
+		if s.blockSeen.Add(childHash) {
+			_ = s.broadcastInventory(skip, []InventoryVector{{Type: MSG_BLOCK, Hash: childHash}})
+		}
+		s.resolveOrphans(skip, childHash)
+	}
 }

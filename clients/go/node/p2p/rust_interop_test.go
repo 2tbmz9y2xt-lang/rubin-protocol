@@ -142,6 +142,24 @@ func TestRustInterop_RustClientReceivesTxFromGo(t *testing.T) {
 	waitRustInterop(t, cmd, logs)
 }
 
+func TestRustInterop_RustClientSyncsFiveBlocksFromGo(t *testing.T) {
+	bin := requireRustInterop(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
+	if err := source.service.Start(ctx); err != nil {
+		t.Fatalf("source.Start: %v", err)
+	}
+	defer source.service.Close()
+
+	cmd, logs := startRustInteropClient(t, bin, source.service.Addr(), "sync-blocks")
+	defer terminateHelper(cmd)
+
+	waitRustInterop(t, cmd, logs)
+}
+
 func requireRustInterop(t *testing.T) string {
 	t.Helper()
 	if os.Getenv("RUBIN_P2P_INTEROP") != "1" {

@@ -143,6 +143,86 @@ impl BlockStore {
             .join(format!("{}.bin", hex::encode(block_hash_bytes)));
         fs::read(&path).map_err(|e| format!("read header {}: {e}", path.display()))
     }
+
+    pub fn has_block(&self, block_hash_bytes: [u8; 32]) -> bool {
+        self.headers_dir
+            .join(format!("{}.bin", hex::encode(block_hash_bytes)))
+            .exists()
+    }
+
+    pub fn find_canonical_height(&self, block_hash_bytes: [u8; 32]) -> Result<Option<u64>, String> {
+        let Some((tip_height, _)) = self.tip()? else {
+            return Ok(None);
+        };
+        for height in (0..=tip_height).rev() {
+            if self.canonical_hash(height)? == Some(block_hash_bytes) {
+                return Ok(Some(height));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn locator_hashes(&self, limit: usize) -> Result<Vec<[u8; 32]>, String> {
+        let limit = if limit == 0 { 32 } else { limit };
+        let Some((mut tip_height, _)) = self.tip()? else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::with_capacity(limit);
+        let mut step = 1u64;
+        let mut appended = 0usize;
+        loop {
+            let Some(hash) = self.canonical_hash(tip_height)? else {
+                break;
+            };
+            out.push(hash);
+            appended += 1;
+            if appended >= limit || tip_height == 0 {
+                break;
+            }
+            if appended >= 10 {
+                step = step.saturating_mul(2);
+            }
+            if tip_height <= step {
+                tip_height = 0;
+            } else {
+                tip_height -= step;
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn hashes_after_locators(
+        &self,
+        locator_hashes: &[[u8; 32]],
+        stop_hash: [u8; 32],
+        limit: u64,
+    ) -> Result<Vec<[u8; 32]>, String> {
+        let limit = if limit == 0 { 128 } else { limit };
+        let Some((tip_height, _)) = self.tip()? else {
+            return Ok(Vec::new());
+        };
+        let mut start_height = 0u64;
+        for locator in locator_hashes {
+            if let Some(height) = self.find_canonical_height(*locator)? {
+                start_height = height.saturating_add(1);
+                break;
+            }
+        }
+        let mut out = Vec::with_capacity(limit as usize);
+        for height in start_height..=tip_height {
+            if out.len() as u64 >= limit {
+                break;
+            }
+            let Some(hash) = self.canonical_hash(height)? else {
+                break;
+            };
+            out.push(hash);
+            if stop_hash != [0u8; 32] && hash == stop_hash {
+                break;
+            }
+        }
+        Ok(out)
+    }
 }
 
 pub fn block_store_path<P: AsRef<Path>>(data_dir: P) -> PathBuf {

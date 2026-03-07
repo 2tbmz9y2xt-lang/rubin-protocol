@@ -1,12 +1,18 @@
+use std::fs;
 use std::io;
 use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use rubin_consensus::block_hash;
+use rubin_consensus::constants::POW_LIMIT;
 
 use crate::p2p_runtime::{
     default_peer_runtime_config, perform_version_handshake, PeerSession, VersionPayloadV1,
     WireMessage,
+};
+use crate::{
+    block_store_path, chain_state_path, default_sync_config, BlockStore, ChainState, SyncEngine,
 };
 use crate::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
 
@@ -23,6 +29,7 @@ pub enum Action {
     Idle,
     SendPingExpectPong,
     ExpectTx { payload: Vec<u8> },
+    SyncBlocks,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,6 +120,7 @@ pub fn parse_args(args: &[String]) -> Result<CliConfig, String> {
         "expect-tx" => Action::ExpectTx {
             payload: decode_hex(&payload_hex)?,
         },
+        "sync-blocks" => Action::SyncBlocks,
         other => return Err(format!("unknown action: {other}")),
     };
 
@@ -223,6 +231,33 @@ pub fn run_action(session: &mut PeerSession, action: &Action) -> io::Result<()> 
             }
             Ok(())
         }
+        Action::SyncBlocks => {
+            let mut data_dir = unique_interop_temp_dir();
+            let block_store =
+                BlockStore::open(block_store_path(&data_dir)).map_err(io::Error::other)?;
+            let chain_state_path = chain_state_path(&data_dir);
+            let mut cfg = default_sync_config(
+                Some(POW_LIMIT),
+                devnet_genesis_chain_id(),
+                Some(chain_state_path),
+            );
+            cfg.network = "devnet".to_string();
+            let mut engine = SyncEngine::new(ChainState::new(), Some(block_store), cfg)
+                .map_err(io::Error::other)?;
+            let synced_height = session.run_block_sync_loop(&mut engine)?;
+            if synced_height != session.state().remote_version.best_height {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "sync height mismatch: got {} want {}",
+                        synced_height,
+                        session.state().remote_version.best_height
+                    ),
+                ));
+            }
+            let _ = fs::remove_dir_all(&mut data_dir);
+            Ok(())
+        }
     }
 }
 
@@ -245,6 +280,17 @@ pub fn decode_hex(raw: &str) -> Result<Vec<u8>, String> {
         return Ok(Vec::new());
     }
     hex::decode(raw).map_err(|err| format!("invalid hex: {err}"))
+}
+
+fn unique_interop_temp_dir() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "rubin-rust-p2p-interop-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ))
 }
 
 #[cfg(test)]

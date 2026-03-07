@@ -2,16 +2,18 @@ package p2p
 
 import (
 	"net"
+	"slices"
+	"strings"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
 func (s *Service) runConn(conn net.Conn) {
 	defer s.loopWG.Done()
-	s.handleConn(conn)
+	_ = s.handleConn(conn)
 }
 
-func (s *Service) handleConn(conn net.Conn) {
+func (s *Service) handleConn(conn net.Conn) error {
 	defer func() {
 		if conn != nil {
 			_ = conn.Close()
@@ -20,7 +22,7 @@ func (s *Service) handleConn(conn net.Conn) {
 
 	localVersion, err := s.localVersion()
 	if err != nil {
-		return
+		return err
 	}
 	state, err := performHandshake(
 		s.ctx,
@@ -31,7 +33,7 @@ func (s *Service) handleConn(conn net.Conn) {
 		s.cfg.GenesisHash,
 	)
 	if err != nil {
-		return
+		return err
 	}
 
 	current := &peer{
@@ -40,19 +42,24 @@ func (s *Service) handleConn(conn net.Conn) {
 		state:   state,
 	}
 	if err := s.registerPeer(current); err != nil {
-		return
+		return err
 	}
 	defer s.unregisterPeer(current.addr())
+	if err := s.requestPeerAddrs(current); err != nil {
+		current.setLastError(err.Error())
+		return err
+	}
 
 	s.cfg.SyncEngine.RecordBestKnownHeight(state.RemoteVersion.BestHeight)
 	if err := s.requestBlocksIfBehind(current); err != nil {
 		current.setLastError(err.Error())
-		return
+		return err
 	}
 	if err := current.run(s.ctx); err != nil && s.ctx.Err() == nil {
 		current.setLastError(err.Error())
-		return
+		return err
 	}
+	return nil
 }
 
 func (s *Service) registerPeer(p *peer) error {
@@ -60,8 +67,10 @@ func (s *Service) registerPeer(p *peer) error {
 		return err
 	}
 	s.peersMu.Lock()
-	defer s.peersMu.Unlock()
 	s.peers[p.addr()] = p
+	s.peersMu.Unlock()
+	s.addrMgr.AddAddrs([]string{p.addr()})
+	s.resetReconnect(p.addr())
 	return nil
 }
 
@@ -70,6 +79,9 @@ func (s *Service) unregisterPeer(addr string) {
 	delete(s.peers, addr)
 	s.peersMu.Unlock()
 	s.cfg.PeerManager.RemovePeer(addr)
+	if s.isOutboundAddr(addr) {
+		s.scheduleReconnect(addr)
+	}
 }
 
 func (s *Service) localVersion() (node.VersionPayloadV1, error) {
@@ -90,4 +102,21 @@ func (s *Service) localVersion() (node.VersionPayloadV1, error) {
 		BestHeight:        bestHeight,
 		UserAgent:         s.cfg.UserAgent,
 	}, nil
+}
+
+func (s *Service) requestPeerAddrs(p *peer) error {
+	if p == nil {
+		return nil
+	}
+	return p.send(messageGetAddr, nil)
+}
+
+func (s *Service) isOutboundAddr(addr string) bool {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return false
+	}
+	s.reconnectMu.Lock()
+	defer s.reconnectMu.Unlock()
+	return slices.Contains(s.outboundAddrs, addr)
 }

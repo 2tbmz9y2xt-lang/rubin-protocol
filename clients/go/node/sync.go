@@ -3,6 +3,7 @@ package node
 import (
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 	"sync"
 
@@ -10,6 +11,8 @@ import (
 )
 
 const defaultIBDLagSeconds = 24 * 60 * 60
+
+var ErrParentNotFound = errors.New("parent block not found")
 
 type SyncConfig struct {
 	ExpectedTarget   *[32]byte
@@ -34,6 +37,8 @@ type SyncEngine struct {
 	mu              sync.RWMutex
 	tipTimestamp    uint64
 	bestKnownHeight uint64
+	lastReorgDepth  uint64
+	reorgCount      uint64
 }
 
 func DefaultSyncConfig(expectedTarget *[32]byte, chainID [32]byte, chainStatePath string) SyncConfig {
@@ -122,6 +127,24 @@ func (s *SyncEngine) BestKnownHeight() uint64 {
 	return s.bestKnownHeight
 }
 
+func (s *SyncEngine) LastReorgDepth() uint64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastReorgDepth
+}
+
+func (s *SyncEngine) ReorgCount() uint64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.reorgCount
+}
+
 func (s *SyncEngine) IsInIBD(nowUnix uint64) bool {
 	if s == nil || s.chainState == nil {
 		return true
@@ -137,6 +160,14 @@ func (s *SyncEngine) IsInIBD(nowUnix uint64) bool {
 }
 
 func (s *SyncEngine) ApplyBlock(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {
+	pb, err := consensus.ParseBlockBytes(blockBytes)
+	if err != nil {
+		return nil, err
+	}
+	return s.applyCanonicalParsedBlock(pb, blockBytes, prevTimestamps)
+}
+
+func (s *SyncEngine) ApplyBlockWithReorg(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {
 	if s == nil || s.chainState == nil {
 		return nil, errors.New("sync engine is not initialized")
 	}
@@ -144,39 +175,82 @@ func (s *SyncEngine) ApplyBlock(blockBytes []byte, prevTimestamps []uint64) (*Ch
 	if err != nil {
 		return nil, err
 	}
-	blockHeight, _, err := nextBlockContext(s.chainState)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateIncomingChainID(blockHeight, s.cfg.ChainID); err != nil {
-		return nil, err
-	}
 	blockHash, err := consensus.BlockHash(pb.HeaderBytes)
 	if err != nil {
 		return nil, err
+	}
+
+	var zero [32]byte
+	if !s.chainState.HasTip {
+		if pb.Header.PrevBlockHash != zero {
+			return nil, ErrParentNotFound
+		}
+		return s.applyCanonicalParsedBlock(pb, blockBytes, prevTimestamps)
+	}
+	if pb.Header.PrevBlockHash == s.chainState.TipHash {
+		return s.applyCanonicalParsedBlock(pb, blockBytes, prevTimestamps)
+	}
+	if s.blockStore == nil {
+		return nil, &consensus.TxError{Code: consensus.BLOCK_ERR_LINKAGE_INVALID, Msg: "missing blockstore for side-chain block"}
+	}
+
+	branch, commonAncestorHash, commonAncestorHeight, err := s.collectBranchToCanonical(blockHash, blockBytes, pb)
+	if err != nil {
+		return nil, err
+	}
+	currentTipHeight, currentTipHash, ok, err := s.blockStore.Tip()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, errors.New("blockstore has no canonical tip")
+	}
+
+	currentWork, err := s.blockStore.ChainWork(currentTipHash)
+	if err != nil {
+		return nil, err
+	}
+	ancestorWork, err := s.blockStore.ChainWork(commonAncestorHash)
+	if err != nil {
+		return nil, err
+	}
+	branchTargets := make([][32]byte, 0, len(branch))
+	for _, item := range branch {
+		branchTargets = append(branchTargets, item.header.Target)
+	}
+	branchWork, err := consensus.ChainWorkFromTargets(branchTargets)
+	if err != nil {
+		return nil, err
+	}
+	candidateWork := new(big.Int).Add(new(big.Int).Set(ancestorWork), branchWork)
+	candidateHeight := commonAncestorHeight + uint64(len(branch))
+	if candidateWork.Cmp(currentWork) <= 0 {
+		if err := s.blockStore.StoreBlock(blockHash, pb.HeaderBytes, blockBytes); err != nil {
+			return nil, err
+		}
+		return s.syntheticSideChainSummary(candidateHeight, blockHash), nil
 	}
 
 	rollbackState, err := s.captureRollbackState()
 	if err != nil {
 		return nil, err
 	}
-	prevState, err := chainStateFromDisk(rollbackState.chainState)
-	if err != nil {
-		return nil, err
-	}
-	summary, err := s.chainState.ConnectBlock(blockBytes, s.cfg.ExpectedTarget, prevTimestamps, s.cfg.ChainID)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.persistAppliedBlock(summary, blockHash, pb, blockBytes, prevState); err != nil {
-		return nil, s.rollbackApplyBlock(err, rollbackState)
+	reorgDepth := currentTipHeight - commonAncestorHeight
+	for currentTipHeight > commonAncestorHeight {
+		if _, err := s.DisconnectTip(); err != nil {
+			return nil, s.rollbackApplyBlock(err, rollbackState)
+		}
+		currentTipHeight--
 	}
 
-	s.recordAppliedBlock(summary.BlockHeight, pb.Header.Timestamp)
-	if s.mempool != nil {
-		_ = s.mempool.EvictConfirmed(blockBytes)
-		_ = s.mempool.RemoveConflicting(blockBytes)
+	var summary *ChainStateConnectSummary
+	for _, item := range branch {
+		summary, err = s.applyCanonicalParsedBlock(item.parsed, item.blockBytes, prevTimestamps)
+		if err != nil {
+			return nil, s.rollbackApplyBlock(err, rollbackState)
+		}
 	}
+	s.noteReorg(reorgDepth)
 	return summary, nil
 }
 
@@ -255,6 +329,15 @@ type syncRollbackState struct {
 	canonicalCount  uint64
 	tipTimestamp    uint64
 	bestKnownHeight uint64
+	lastReorgDepth  uint64
+	reorgCount      uint64
+}
+
+type reorgBranchBlock struct {
+	hash       [32]byte
+	blockBytes []byte
+	parsed     *consensus.ParsedBlock
+	header     consensus.BlockHeader
 }
 
 func headerSyncRequest(chainState *ChainState, limit uint64) HeaderRequest {
@@ -291,6 +374,8 @@ func (s *SyncEngine) captureRollbackState() (syncRollbackState, error) {
 		canonicalCount:  canonicalCount,
 		tipTimestamp:    s.tipTimestamp,
 		bestKnownHeight: s.bestKnownHeight,
+		lastReorgDepth:  s.lastReorgDepth,
+		reorgCount:      s.reorgCount,
 	}, nil
 }
 
@@ -304,11 +389,115 @@ func (s *SyncEngine) rollbackApplyBlock(cause error, state syncRollbackState) er
 	s.mu.Lock()
 	s.tipTimestamp = state.tipTimestamp
 	s.bestKnownHeight = state.bestKnownHeight
+	s.lastReorgDepth = state.lastReorgDepth
+	s.reorgCount = state.reorgCount
 	s.mu.Unlock()
 	if restoreErr != nil {
 		return fmt.Errorf("%w (rollback failed: %v)", cause, restoreErr)
 	}
 	return cause
+}
+
+func (s *SyncEngine) applyCanonicalParsedBlock(
+	pb *consensus.ParsedBlock,
+	blockBytes []byte,
+	prevTimestamps []uint64,
+) (*ChainStateConnectSummary, error) {
+	if s == nil || s.chainState == nil {
+		return nil, errors.New("sync engine is not initialized")
+	}
+	if pb == nil {
+		return nil, errors.New("nil parsed block")
+	}
+	blockHeight, _, err := nextBlockContext(s.chainState)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateIncomingChainID(blockHeight, s.cfg.ChainID); err != nil {
+		return nil, err
+	}
+	blockHash, err := consensus.BlockHash(pb.HeaderBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	rollbackState, err := s.captureRollbackState()
+	if err != nil {
+		return nil, err
+	}
+	prevState, err := chainStateFromDisk(rollbackState.chainState)
+	if err != nil {
+		return nil, err
+	}
+	summary, err := s.chainState.ConnectBlock(blockBytes, s.cfg.ExpectedTarget, prevTimestamps, s.cfg.ChainID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.persistAppliedBlock(summary, blockHash, pb, blockBytes, prevState); err != nil {
+		return nil, s.rollbackApplyBlock(err, rollbackState)
+	}
+
+	s.recordAppliedBlock(summary.BlockHeight, pb.Header.Timestamp)
+	if s.mempool != nil {
+		_ = s.mempool.EvictConfirmed(blockBytes)
+		_ = s.mempool.RemoveConflicting(blockBytes)
+	}
+	return summary, nil
+}
+
+func (s *SyncEngine) collectBranchToCanonical(
+	blockHash [32]byte,
+	blockBytes []byte,
+	pb *consensus.ParsedBlock,
+) ([]reorgBranchBlock, [32]byte, uint64, error) {
+	branch := []reorgBranchBlock{{
+		hash:       blockHash,
+		blockBytes: append([]byte(nil), blockBytes...),
+		parsed:     pb,
+		header:     pb.Header,
+	}}
+	parentHash := pb.Header.PrevBlockHash
+	for {
+		height, found, err := s.blockStore.FindCanonicalHeight(parentHash)
+		if err != nil {
+			return nil, [32]byte{}, 0, err
+		}
+		if found {
+			reverseBranchBlocks(branch)
+			return branch, parentHash, height, nil
+		}
+		parentBlockBytes, err := s.blockStore.GetBlockByHash(parentHash)
+		if err != nil {
+			return nil, [32]byte{}, 0, ErrParentNotFound
+		}
+		parentParsed, err := consensus.ParseBlockBytes(parentBlockBytes)
+		if err != nil {
+			return nil, [32]byte{}, 0, err
+		}
+		branch = append(branch, reorgBranchBlock{
+			hash:       parentHash,
+			blockBytes: parentBlockBytes,
+			parsed:     parentParsed,
+			header:     parentParsed.Header,
+		})
+		parentHash = parentParsed.Header.PrevBlockHash
+	}
+}
+
+func (s *SyncEngine) syntheticSideChainSummary(height uint64, blockHash [32]byte) *ChainStateConnectSummary {
+	utxoCount := uint64(0)
+	alreadyGenerated := uint64(0)
+	if s != nil && s.chainState != nil {
+		utxoCount = uint64(len(s.chainState.Utxos))
+		alreadyGenerated = s.chainState.AlreadyGenerated
+	}
+	return &ChainStateConnectSummary{
+		BlockHeight:        height,
+		BlockHash:          blockHash,
+		AlreadyGenerated:   alreadyGenerated,
+		AlreadyGeneratedN1: alreadyGenerated,
+		UtxoCount:          utxoCount,
+	}
 }
 
 func (s *SyncEngine) persistAppliedBlock(summary *ChainStateConnectSummary, blockHash [32]byte, pb *consensus.ParsedBlock, blockBytes []byte, prevState *ChainState) error {
@@ -338,6 +527,19 @@ func (s *SyncEngine) recordAppliedBlock(height uint64, timestamp uint64) {
 	s.tipTimestamp = timestamp
 	if height > s.bestKnownHeight {
 		s.bestKnownHeight = height
+	}
+	s.lastReorgDepth = 0
+}
+
+func (s *SyncEngine) noteReorg(depth uint64) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastReorgDepth = depth
+	if depth > 0 {
+		s.reorgCount++
 	}
 }
 
@@ -390,4 +592,10 @@ func parentTipTimestamp(store *BlockStore, tipHeight uint64, prevBlockHash [32]b
 		return 0, err
 	}
 	return parentHeader.Timestamp, nil
+}
+
+func reverseBranchBlocks(branch []reorgBranchBlock) {
+	for left, right := 0, len(branch)-1; left < right; left, right = left+1, right-1 {
+		branch[left], branch[right] = branch[right], branch[left]
+	}
 }

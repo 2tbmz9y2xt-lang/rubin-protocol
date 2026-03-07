@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
+	"strconv"
 
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
@@ -22,6 +25,8 @@ const (
 	messageBlock   = "block"
 	messageTx      = "tx"
 	messageGetBlk  = "getblocks"
+	messageGetAddr = "getaddr"
+	messageAddr    = "addr"
 	messagePing    = "ping"
 	messagePong    = "pong"
 	messageHeaders = "headers"
@@ -30,6 +35,7 @@ const (
 	MSG_TX    byte = 0x02
 
 	inventoryVectorSize     = 33
+	addrPayloadEntrySize    = 18
 	wireHeaderSize          = 24
 	wireCommandSize         = 12
 	versionPayloadBaseBytes = 17
@@ -362,5 +368,61 @@ func decodeGetBlocksPayload(payload []byte) (GetBlocksPayload, error) {
 		offset += 32
 	}
 	copy(out.StopHash[:], payload[offset:offset+32])
+	return out, nil
+}
+
+func encodeAddrPayload(addrs []string) ([]byte, error) {
+	var buf bytes.Buffer
+	buf.Write(consensus.EncodeCompactSize(uint64(len(addrs))))
+	for _, addr := range addrs {
+		host, portStr, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		ip := net.ParseIP(host)
+		if ip == nil {
+			return nil, fmt.Errorf("invalid addr host: %s", host)
+		}
+		port, err := strconv.ParseUint(portStr, 10, 16)
+		if err != nil || port == 0 {
+			return nil, fmt.Errorf("invalid addr port: %s", portStr)
+		}
+		ip = ip.To16()
+		if ip == nil {
+			return nil, fmt.Errorf("invalid addr ip width: %s", host)
+		}
+		buf.Write(ip)
+		var portBytes [2]byte
+		binary.BigEndian.PutUint16(portBytes[:], uint16(port))
+		buf.Write(portBytes[:])
+	}
+	return buf.Bytes(), nil
+}
+
+func decodeAddrPayload(payload []byte) ([]string, error) {
+	if len(payload) == 0 {
+		return nil, nil
+	}
+	count, consumed, err := consensus.DecodeCompactSize(payload)
+	if err != nil {
+		return nil, err
+	}
+	needed := consumed + int(count)*addrPayloadEntrySize
+	if len(payload) != needed {
+		return nil, errors.New("addr payload width mismatch")
+	}
+	out := make([]string, 0, int(count))
+	offset := consumed
+	for i := uint64(0); i < count; i++ {
+		ip := net.IP(payload[offset : offset+16])
+		offset += 16
+		port := binary.BigEndian.Uint16(payload[offset : offset+2])
+		offset += 2
+		addr := normalizeNetAddr(net.JoinHostPort(ip.String(), strconv.FormatUint(uint64(port), 10)))
+		if addr == "" {
+			return nil, errors.New("invalid addr payload entry")
+		}
+		out = append(out, addr)
+	}
 	return out, nil
 }

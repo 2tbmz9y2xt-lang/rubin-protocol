@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 
@@ -87,6 +88,16 @@ func (bs *BlockStore) PutBlock(height uint64, blockHash [32]byte, headerBytes []
 		return err
 	}
 	return bs.SetCanonicalTip(height, blockHash)
+}
+
+func (bs *BlockStore) StoreBlock(blockHash [32]byte, headerBytes []byte, blockBytes []byte) error {
+	if bs == nil {
+		return errors.New("nil blockstore")
+	}
+	if err := validateBlockHeaderHash(headerBytes, blockHash); err != nil {
+		return err
+	}
+	return bs.persistBlockBytes(blockHash, headerBytes, blockBytes)
 }
 
 func (bs *BlockStore) SetCanonicalTip(height uint64, blockHash [32]byte) error {
@@ -171,6 +182,37 @@ func (bs *BlockStore) GetHeaderByHash(blockHash [32]byte) ([]byte, error) {
 		return nil, errors.New("nil blockstore")
 	}
 	return readFileFromDir(bs.headersDir, hex.EncodeToString(blockHash[:])+".bin")
+}
+
+func (bs *BlockStore) ChainWork(tipHash [32]byte) (*big.Int, error) {
+	if bs == nil {
+		return nil, errors.New("nil blockstore")
+	}
+	var zero [32]byte
+	if tipHash == zero {
+		return big.NewInt(0), nil
+	}
+
+	targets := make([][32]byte, 0, 16)
+	seen := make(map[[32]byte]struct{})
+	current := tipHash
+	for current != zero {
+		if _, exists := seen[current]; exists {
+			return nil, errors.New("blockstore parent cycle")
+		}
+		seen[current] = struct{}{}
+		headerBytes, err := bs.GetHeaderByHash(current)
+		if err != nil {
+			return nil, err
+		}
+		header, err := consensus.ParseBlockHeaderBytes(headerBytes)
+		if err != nil {
+			return nil, err
+		}
+		targets = append(targets, header.Target)
+		current = header.PrevBlockHash
+	}
+	return consensus.ChainWorkFromTargets(targets)
 }
 
 func (bs *BlockStore) PutUndo(blockHash [32]byte, undo *BlockUndo) error {

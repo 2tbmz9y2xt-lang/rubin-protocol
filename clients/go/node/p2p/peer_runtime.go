@@ -65,6 +65,10 @@ func (p *peer) handleMessage(frame message) error {
 		return p.handleTx(frame.Payload)
 	case messageGetBlk:
 		return p.handleGetBlocks(frame.Payload)
+	case messageGetAddr:
+		return p.handleGetAddr(frame.Payload)
+	case messageAddr:
+		return p.handleAddr(frame.Payload)
 	case messagePing, messagePong, messageHeaders:
 		return nil
 	case messageVersion:

@@ -46,9 +46,15 @@ type Service struct {
 	peers   map[string]*peer
 	loopWG  sync.WaitGroup
 
+	reconnectMu    sync.Mutex
+	reconnectState map[string]*reconnectEntry
+	outboundAddrs  []string
+	addrMgr        *addrManager
+
 	chainMu   sync.Mutex
 	blockSeen *boundedHashSet
 	txSeen    *boundedHashSet
+	orphans   *orphanPool
 }
 
 type peer struct {
@@ -104,11 +110,16 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	if cfg.TxRelayFanout <= 0 {
 		cfg.TxRelayFanout = defaultTxRelayFanout
 	}
+	outboundAddrs := normalizePeerAddrs(cfg.BootstrapPeers)
 	return &Service{
-		cfg:       cfg,
-		peers:     make(map[string]*peer),
-		blockSeen: newBoundedHashSet(defaultBlockSeenCapacity),
-		txSeen:    newBoundedHashSet(defaultTxSeenCapacity),
+		cfg:            cfg,
+		peers:          make(map[string]*peer),
+		reconnectState: make(map[string]*reconnectEntry),
+		outboundAddrs:  outboundAddrs,
+		addrMgr:        newAddrManager(cfg.Now),
+		blockSeen:      newBoundedHashSet(defaultBlockSeenCapacity),
+		txSeen:         newBoundedHashSet(defaultTxSeenCapacity),
+		orphans:        newOrphanPool(500),
 	}, nil
 }
 
