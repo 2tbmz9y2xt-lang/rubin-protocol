@@ -56,24 +56,27 @@ pub fn connect_block_basic_in_memory_at_height(
 
     let already_generated = state.already_generated;
     let block_mtp = median_time_past(block_height, prev_timestamps)?.unwrap_or(pb.header.timestamp);
-    let mut work_utxos = state.utxos.clone();
+    let mut work_utxos = None;
 
     let mut sum_fees: u64 = 0;
     for i in 1..pb.txs.len() {
+        let base_utxos = work_utxos.as_ref().unwrap_or(&state.utxos);
         let (next_utxos, s) = apply_non_coinbase_tx_basic_update_with_mtp(
             &pb.txs[i],
             pb.txids[i],
-            &work_utxos,
+            base_utxos,
             block_height,
             pb.header.timestamp,
             block_mtp,
             chain_id,
         )?;
-        work_utxos = next_utxos;
+        work_utxos = Some(next_utxos);
         sum_fees = sum_fees
             .checked_add(s.fee)
             .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "sum_fees overflow"))?;
     }
+
+    let mut work_utxos = work_utxos.unwrap_or_else(|| state.utxos.clone());
 
     validate_coinbase_value_bound(&pb, block_height, already_generated, sum_fees)?;
     validate_coinbase_apply_outputs(&pb.txs[0])?;
