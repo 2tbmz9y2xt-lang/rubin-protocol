@@ -1,6 +1,7 @@
 package node
 
 import (
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -201,6 +202,46 @@ func TestSyncEngineApplyBlockPersistsChainstateAndStore(t *testing.T) {
 	}
 	if !ok || height != 1 {
 		t.Fatalf("unexpected blockstore tip: ok=%v height=%d", ok, height)
+	}
+}
+
+func TestSyncEngineApplyBlockPutUndoFailureRollsBackCanonicalTip(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := ChainStatePath(dir)
+	store, err := OpenBlockStore(BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("open blockstore: %v", err)
+	}
+	st := NewChainState()
+	target := consensus.POW_LIMIT
+	engine, err := NewSyncEngine(st, store, DefaultSyncConfig(&target, devnetGenesisChainID, chainStatePath))
+	if err != nil {
+		t.Fatalf("new sync engine: %v", err)
+	}
+
+	prevWrite := writeFileAtomicFn
+	t.Cleanup(func() { writeFileAtomicFn = prevWrite })
+	undoPath := filepath.Join(store.undoDir, hex.EncodeToString(devnetGenesisBlockHash[:])+".json")
+	writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
+		if path == undoPath {
+			return os.ErrPermission
+		}
+		return prevWrite(path, data, mode)
+	}
+
+	if _, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil); err == nil {
+		t.Fatalf("expected apply block failure when undo write fails")
+	}
+	if st.HasTip {
+		t.Fatalf("chainstate tip should be rolled back")
+	}
+	if _, _, ok, err := store.Tip(); err != nil {
+		t.Fatalf("blockstore tip: %v", err)
+	} else if ok {
+		t.Fatalf("blockstore canonical tip should be rolled back")
+	}
+	if _, err := os.Stat(undoPath); !os.IsNotExist(err) {
+		t.Fatalf("undo file should not exist after rollback, err=%v", err)
 	}
 }
 

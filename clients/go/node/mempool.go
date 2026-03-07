@@ -27,9 +27,15 @@ type Mempool struct {
 	chainState *ChainState
 	blockStore *BlockStore
 	chainID    [32]byte
+	policy     MempoolConfig
 	maxTxs     int
 	txs        map[[32]byte]*mempoolEntry
 	spenders   map[consensus.Outpoint][32]byte
+}
+
+type MempoolConfig struct {
+	PolicyDaSurchargePerByte             uint64
+	PolicyRejectNonCoinbaseAnchorOutputs bool
 }
 
 type RelayTxMetadata struct {
@@ -38,6 +44,18 @@ type RelayTxMetadata struct {
 }
 
 func NewMempool(chainState *ChainState, blockStore *BlockStore, chainID [32]byte) (*Mempool, error) {
+	return NewMempoolWithConfig(chainState, blockStore, chainID, DefaultMempoolConfig())
+}
+
+func DefaultMempoolConfig() MempoolConfig {
+	minerDefaults := DefaultMinerConfig()
+	return MempoolConfig{
+		PolicyDaSurchargePerByte:             minerDefaults.PolicyDaSurchargePerByte,
+		PolicyRejectNonCoinbaseAnchorOutputs: minerDefaults.PolicyRejectNonCoinbaseAnchorOutputs,
+	}
+}
+
+func NewMempoolWithConfig(chainState *ChainState, blockStore *BlockStore, chainID [32]byte, cfg MempoolConfig) (*Mempool, error) {
 	if chainState == nil {
 		return nil, errors.New("nil chainstate")
 	}
@@ -45,6 +63,7 @@ func NewMempool(chainState *ChainState, blockStore *BlockStore, chainID [32]byte
 		chainState: chainState,
 		blockStore: blockStore,
 		chainID:    chainID,
+		policy:     cfg,
 		maxTxs:     maxMempoolTransactions,
 		txs:        make(map[[32]byte]*mempoolEntry),
 		spenders:   make(map[consensus.Outpoint][32]byte),
@@ -160,11 +179,37 @@ func (m *Mempool) checkTransactionLocked(txBytes []byte) (*consensus.CheckedTran
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := m.applyPolicyLocked(checked); err != nil {
+		return nil, nil, err
+	}
 	inputs := make([]consensus.Outpoint, 0, len(checked.Tx.Inputs))
 	for _, in := range checked.Tx.Inputs {
 		inputs = append(inputs, consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout})
 	}
 	return checked, inputs, nil
+}
+
+func (m *Mempool) applyPolicyLocked(checked *consensus.CheckedTransaction) error {
+	if checked == nil || checked.Tx == nil {
+		return errors.New("nil checked transaction")
+	}
+	if m.policy.PolicyRejectNonCoinbaseAnchorOutputs {
+		reject, reason, err := RejectNonCoinbaseAnchorOutputs(checked.Tx)
+		if err != nil {
+			return err
+		}
+		if reject {
+			return errors.New(reason)
+		}
+	}
+	reject, _, reason, err := RejectDaAnchorTxPolicy(checked.Tx, m.chainState.Utxos, m.policy.PolicyDaSurchargePerByte)
+	if err != nil {
+		return err
+	}
+	if reject {
+		return errors.New(reason)
+	}
+	return nil
 }
 
 func (m *Mempool) nextBlockMTP(nextHeight uint64) (uint64, error) {

@@ -31,6 +31,10 @@ type BlockStore struct {
 	index      blockStoreIndexDisk
 }
 
+// Block/header/undo blobs are append-only. The canonical chain view is the index file,
+// updated via atomic rename. Rollback paths rely on restoring that canonical index; stale
+// blob files are tolerated as unreachable garbage, not live chain state.
+
 type blockStoreIndexDisk struct {
 	Canonical []string `json:"canonical"`
 	Version   uint32   `json:"version"`
