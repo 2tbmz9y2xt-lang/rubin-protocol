@@ -394,6 +394,7 @@ fn marshal_wire_message(
     Ok(raw)
 }
 
+#[cfg(test)]
 fn unmarshal_wire_message(
     raw: &[u8],
     expected_magic: [u8; 4],
