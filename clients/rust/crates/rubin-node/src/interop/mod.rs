@@ -386,14 +386,9 @@ mod tests {
             cfg.read_deadline = Duration::from_secs(2);
             cfg.write_deadline = Duration::from_secs(2);
             let local = local_version(0).expect("local");
-            let mut session = perform_version_handshake(
-                stream,
-                cfg,
-                local.clone(),
-                local.chain_id,
-                local.genesis_hash,
-            )
-            .expect("handshake");
+            let mut session =
+                perform_version_handshake(stream, cfg, local, local.chain_id, local.genesis_hash)
+                    .expect("handshake");
             run_action(&mut session, &Action::SendPingExpectPong).expect("ping/pong");
         });
 
@@ -404,14 +399,9 @@ mod tests {
             cfg.read_deadline = Duration::from_secs(2);
             cfg.write_deadline = Duration::from_secs(2);
             let local = local_version(0).expect("local");
-            let mut session = perform_version_handshake(
-                stream,
-                cfg,
-                local.clone(),
-                local.chain_id,
-                local.genesis_hash,
-            )
-            .expect("handshake");
+            let mut session =
+                perform_version_handshake(stream, cfg, local, local.chain_id, local.genesis_hash)
+                    .expect("handshake");
             let msg = session.read_message().expect("read ping");
             assert_eq!(msg.command, "ping");
             assert!(msg.payload.is_empty());
@@ -441,14 +431,9 @@ mod tests {
             cfg.read_deadline = Duration::from_secs(2);
             cfg.write_deadline = Duration::from_secs(2);
             let local = local_version(0).expect("local");
-            let mut session = perform_version_handshake(
-                stream,
-                cfg,
-                local.clone(),
-                local.chain_id,
-                local.genesis_hash,
-            )
-            .expect("handshake");
+            let mut session =
+                perform_version_handshake(stream, cfg, local, local.chain_id, local.genesis_hash)
+                    .expect("handshake");
             run_action(&mut session, &Action::ExpectTx { payload: expected }).expect("tx");
         });
 
@@ -459,14 +444,9 @@ mod tests {
             cfg.read_deadline = Duration::from_secs(2);
             cfg.write_deadline = Duration::from_secs(2);
             let local = local_version(0).expect("local");
-            let mut session = perform_version_handshake(
-                stream,
-                cfg,
-                local.clone(),
-                local.chain_id,
-                local.genesis_hash,
-            )
-            .expect("handshake");
+            let mut session =
+                perform_version_handshake(stream, cfg, local, local.chain_id, local.genesis_hash)
+                    .expect("handshake");
             session
                 .write_message(&WireMessage {
                     command: "tx".to_string(),
@@ -491,14 +471,9 @@ mod tests {
             cfg.read_deadline = Duration::from_secs(2);
             cfg.write_deadline = Duration::from_secs(2);
             let local = local_version(0).expect("local");
-            let mut session = perform_version_handshake(
-                stream,
-                cfg,
-                local.clone(),
-                local.chain_id,
-                local.genesis_hash,
-            )
-            .expect("handshake");
+            let mut session =
+                perform_version_handshake(stream, cfg, local, local.chain_id, local.genesis_hash)
+                    .expect("handshake");
             let err = run_action(&mut session, &Action::SendPingExpectPong).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidData);
             assert_eq!(err.to_string(), "expected pong, got tx");
@@ -511,14 +486,9 @@ mod tests {
             cfg.read_deadline = Duration::from_secs(2);
             cfg.write_deadline = Duration::from_secs(2);
             let local = local_version(0).expect("local");
-            let mut session = perform_version_handshake(
-                stream,
-                cfg,
-                local.clone(),
-                local.chain_id,
-                local.genesis_hash,
-            )
-            .expect("handshake");
+            let mut session =
+                perform_version_handshake(stream, cfg, local, local.chain_id, local.genesis_hash)
+                    .expect("handshake");
             let msg = session.read_message().expect("read ping");
             assert_eq!(msg.command, "ping");
             session
@@ -545,14 +515,9 @@ mod tests {
             cfg.read_deadline = Duration::from_secs(2);
             cfg.write_deadline = Duration::from_secs(2);
             let local = local_version(0).expect("local");
-            let mut session = perform_version_handshake(
-                stream,
-                cfg,
-                local.clone(),
-                local.chain_id,
-                local.genesis_hash,
-            )
-            .expect("handshake");
+            let mut session =
+                perform_version_handshake(stream, cfg, local, local.chain_id, local.genesis_hash)
+                    .expect("handshake");
             let err = run_action(&mut session, &Action::SendPingExpectPong).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidData);
             assert_eq!(err.to_string(), "expected empty pong payload");
@@ -565,14 +530,9 @@ mod tests {
             cfg.read_deadline = Duration::from_secs(2);
             cfg.write_deadline = Duration::from_secs(2);
             let local = local_version(0).expect("local");
-            let mut session = perform_version_handshake(
-                stream,
-                cfg,
-                local.clone(),
-                local.chain_id,
-                local.genesis_hash,
-            )
-            .expect("handshake");
+            let mut session =
+                perform_version_handshake(stream, cfg, local, local.chain_id, local.genesis_hash)
+                    .expect("handshake");
             let msg = session.read_message().expect("read ping");
             assert_eq!(msg.command, "ping");
             session
@@ -596,14 +556,9 @@ mod tests {
             cfg.read_deadline = Duration::from_secs(2);
             cfg.write_deadline = Duration::from_secs(2);
             let local = local_version(0).expect("local");
-            let mut session = perform_version_handshake(
-                stream,
-                cfg,
-                local.clone(),
-                local.chain_id,
-                local.genesis_hash,
-            )
-            .expect("handshake");
+            let mut session =
+                perform_version_handshake(stream, cfg, local, local.chain_id, local.genesis_hash)
+                    .expect("handshake");
             let err = run_action(
                 &mut session,
                 &Action::ExpectTx {
@@ -622,14 +577,9 @@ mod tests {
             cfg.read_deadline = Duration::from_secs(2);
             cfg.write_deadline = Duration::from_secs(2);
             let local = local_version(0).expect("local");
-            let mut session = perform_version_handshake(
-                stream,
-                cfg,
-                local.clone(),
-                local.chain_id,
-                local.genesis_hash,
-            )
-            .expect("handshake");
+            let mut session =
+                perform_version_handshake(stream, cfg, local, local.chain_id, local.genesis_hash)
+                    .expect("handshake");
             session
                 .write_message(&WireMessage {
                     command: "tx".to_string(),
@@ -654,14 +604,8 @@ mod tests {
             cfg.read_deadline = Duration::from_secs(2);
             cfg.write_deadline = Duration::from_secs(2);
             let local = local_version(0).expect("local");
-            perform_version_handshake(
-                stream,
-                cfg,
-                local.clone(),
-                local.chain_id,
-                local.genesis_hash,
-            )
-            .expect("handshake");
+            perform_version_handshake(stream, cfg, local, local.chain_id, local.genesis_hash)
+                .expect("handshake");
         });
 
         run(CliConfig {
@@ -705,14 +649,8 @@ mod tests {
         cfg.read_deadline = Duration::from_secs(2);
         cfg.write_deadline = Duration::from_secs(2);
         let local = local_version(0).expect("local");
-        perform_version_handshake(
-            stream,
-            cfg,
-            local.clone(),
-            local.chain_id,
-            local.genesis_hash,
-        )
-        .expect("handshake");
+        perform_version_handshake(stream, cfg, local, local.chain_id, local.genesis_hash)
+            .expect("handshake");
 
         server.join().expect("server");
     }
