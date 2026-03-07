@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -181,14 +182,17 @@ type blockBasicFixture struct {
 	Vectors []blockBasicVector `json:"vectors"`
 }
 type blockBasicVector struct {
-	ID             string `json:"id"`
-	Op             string `json:"op"`
-	BlockHex       string `json:"block_hex"`
-	ExpectedPrev   string `json:"expected_prev_hash"`
-	ExpectedTarget string `json:"expected_target"`
-	Height         uint64 `json:"height"`
-	ExpectErr      string `json:"expect_err"`
-	ExpectOk       bool   `json:"expect_ok"`
+	ID               string     `json:"id"`
+	Op               string     `json:"op"`
+	BlockHex         string     `json:"block_hex"`
+	ExpectedPrev     string     `json:"expected_prev_hash"`
+	ExpectedTarget   string     `json:"expected_target"`
+	Height           uint64     `json:"height"`
+	AlreadyGenerated uint64     `json:"already_generated,omitempty"`
+	PrevTimestamps   []uint64   `json:"prev_timestamps,omitempty"`
+	Utxos            []utxoJSON `json:"utxos,omitempty"`
+	ExpectErr        string     `json:"expect_err"`
+	ExpectOk         bool       `json:"expect_ok"`
 }
 
 type weightFixture struct {
@@ -355,6 +359,28 @@ func parseHex32Ptr(fieldName string, value string) (*[32]byte, error) {
 		return nil, fmt.Errorf("bad %s", fieldName)
 	}
 	return &parsed, nil
+}
+
+func buildUtxoMapFromJSON(items []utxoJSON) (map[consensus.Outpoint]consensus.UtxoEntry, error) {
+	utxos := make(map[consensus.Outpoint]consensus.UtxoEntry, len(items))
+	for _, u := range items {
+		txidb, err := parseHex32(u.Txid)
+		if err != nil {
+			return nil, err
+		}
+		cd, err := hex.DecodeString(u.CovenantDataHex)
+		if err != nil {
+			return nil, err
+		}
+		utxos[consensus.Outpoint{Txid: txidb, Vout: u.Vout}] = consensus.UtxoEntry{
+			Value:             u.Value,
+			CovenantType:      u.CovenantType,
+			CovenantData:      cd,
+			CreationHeight:    u.CreationHeight,
+			CreatedByCoinbase: u.CreatedByCoinbase,
+		}
+	}
+	return utxos, nil
 }
 
 func writeTraceEntry(buf *bytes.Buffer, gate string, vectorID string, op string, runErr error, inputs map[string]any, outputs map[string]any) error {
@@ -582,27 +608,10 @@ func run(fixturesDir, outPath string) error {
 				if perr != nil {
 					runErr = perr
 				} else {
-					utxos := make(map[consensus.Outpoint]consensus.UtxoEntry, len(v.Utxos))
-					for _, u := range v.Utxos {
-						txidb, e := parseHex32(u.Txid)
-						if e != nil {
-							runErr = e
-							break
-						}
-						cd, e := hex.DecodeString(u.CovenantDataHex)
-						if e != nil {
-							runErr = e
-							break
-						}
-						utxos[consensus.Outpoint{Txid: txidb, Vout: u.Vout}] = consensus.UtxoEntry{
-							Value:             u.Value,
-							CovenantType:      u.CovenantType,
-							CovenantData:      cd,
-							CreationHeight:    u.CreationHeight,
-							CreatedByCoinbase: u.CreatedByCoinbase,
-						}
-					}
-					if runErr == nil {
+					utxos, e := buildUtxoMapFromJSON(v.Utxos)
+					if e != nil {
+						runErr = e
+					} else {
 						mtp := v.BlockTimestamp
 						if v.BlockMTP != nil {
 							mtp = *v.BlockMTP
@@ -675,7 +684,58 @@ func run(fixturesDir, outPath string) error {
 					runErr = tgtErr
 				}
 				if runErr == nil {
-					sum, runErr = consensus.ValidateBlockBasicWithContextAtHeight(blockBytes, prevPtr, tgtPtr, v.Height, nil)
+					switch v.Op {
+					case "connect_block_basic":
+						utxos, err := buildUtxoMapFromJSON(v.Utxos)
+						if err != nil {
+							runErr = err
+						} else {
+							state := &consensus.InMemoryChainState{
+								Utxos:            utxos,
+								AlreadyGenerated: new(big.Int).SetUint64(v.AlreadyGenerated),
+							}
+							var chainID [32]byte
+							connectSum, err := consensus.ConnectBlockBasicInMemoryAtHeight(
+								blockBytes,
+								prevPtr,
+								tgtPtr,
+								v.Height,
+								v.PrevTimestamps,
+								state,
+								chainID,
+							)
+							if err != nil {
+								runErr = err
+							} else {
+								outputs := map[string]any{
+									"sum_fees":             connectSum.SumFees,
+									"utxo_count":           connectSum.UtxoCount,
+									"already_generated":    connectSum.AlreadyGenerated,
+									"already_generated_n1": connectSum.AlreadyGeneratedN1,
+								}
+								if err := writeTraceEntry(
+									&traceBuf,
+									fx.Gate,
+									v.ID,
+									v.Op,
+									nil,
+									map[string]any{
+										"block_hex_digest_sha3_256": sha3hex(blockBytes),
+										"expected_prev_hash":        v.ExpectedPrev,
+										"expected_target":           v.ExpectedTarget,
+										"already_generated":         v.AlreadyGenerated,
+										"utxos_len":                 len(v.Utxos),
+									},
+									outputs,
+								); err != nil {
+									return err
+								}
+								continue
+							}
+						}
+					default:
+						sum, runErr = consensus.ValidateBlockBasicWithContextAtHeight(blockBytes, prevPtr, tgtPtr, v.Height, v.PrevTimestamps)
+					}
 				}
 				outputs := map[string]any{}
 				if sum != nil {

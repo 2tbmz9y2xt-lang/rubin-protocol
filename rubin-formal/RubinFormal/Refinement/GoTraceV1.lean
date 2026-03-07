@@ -153,7 +153,7 @@ def blockBasicOuts : List BlockBasicOut := [
   { id := "CV-B-12", ok := false, err := "BLOCK_ERR_DA_BATCH_EXCEEDED", blockHashHex := none, sumWeight := none, sumDa := none },
   { id := "CV-B-13", ok := false, err := "BLOCK_ERR_COINBASE_INVALID", blockHashHex := none, sumWeight := none, sumDa := none },
   { id := "CV-B-14", ok := false, err := "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED", blockHashHex := none, sumWeight := none, sumDa := none },
-  { id := "CV-B-15", ok := true, err := "", blockHashHex := some ("0xbc008fde20f0a4d892fe57f707c27c3674a3946f3e598d5cf7247259c5d83dc8"), sumWeight := some 858, sumDa := some 0 }
+  { id := "CV-B-15", ok := false, err := "BLOCK_ERR_COINBASE_INVALID", blockHashHex := none, sumWeight := none, sumDa := none }
 ]
 
 def weightOuts : List WeightOut := [

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"crypto/sha3"
+	"encoding/json"
 	"errors"
 	"flag"
 	"io"
@@ -9,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 func TestListFixtureNamesSortedAndFiltered(t *testing.T) {
@@ -174,6 +178,52 @@ func TestRunWritesTraceFileMultipleGates(t *testing.T) {
 	}
 	if lines < 2 {
 		t.Fatalf("expected >=2 lines, got %d", lines)
+	}
+}
+
+func TestRun_ConnectBlockBasicTraceUsesApplyPath(t *testing.T) {
+	fixturesDir := t.TempDir()
+	outPath := filepath.Join(t.TempDir(), "trace.jsonl")
+	const blockHex = "01000000b100000000000000000000000000000000000000000000000000000000000000ea2d44ebeaeea41c9d2ba7e5927da5a8ce881c2ce17148c74ed6b426432c5a880100000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff33000000000000000101000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff020100000000000000010164999999999999999999999999999999999999999999999999999999999999999901011111111111111111111111111111111111111111111111111111111111111111010022222222222222222222222222222222222222222222222222222222222222220000000000000000020020b716a4b7f4c0fab665298ab9b8199b601ab9fa7e0a27f0713383f34cf37071a8010000000000"
+	content := `{"gate":"CV-BLOCK-BASIC","vectors":[{"id":"CV-B-15","op":"connect_block_basic","block_hex":"` + blockHex + `","expected_prev_hash":"b100000000000000000000000000000000000000000000000000000000000000","expected_target":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","height":1,"already_generated":0,"utxos":[],"expect_ok":false,"expect_err":"BLOCK_ERR_COINBASE_INVALID"}]}`
+	if err := os.WriteFile(filepath.Join(fixturesDir, "CV-BLOCK-BASIC.json"), []byte(content), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	if err := run(fixturesDir, outPath); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	f, err := os.Open(outPath)
+	if err != nil {
+		t.Fatalf("open trace: %v", err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	var found bool
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		var entry traceEntry
+		if err := json.Unmarshal(line, &entry); err != nil {
+			t.Fatalf("unmarshal trace line: %v", err)
+		}
+		if entry.Type != "entry" || entry.VectorID != "CV-B-15" {
+			continue
+		}
+		found = true
+		if entry.Ok {
+			t.Fatalf("expected failure trace entry, got ok=true")
+		}
+		if entry.Err != string(consensus.BLOCK_ERR_COINBASE_INVALID) {
+			t.Fatalf("err=%q, want %q", entry.Err, consensus.BLOCK_ERR_COINBASE_INVALID)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan trace: %v", err)
+	}
+	if !found {
+		t.Fatalf("missing CV-B-15 trace entry")
 	}
 }
 
