@@ -57,7 +57,10 @@ func (s *Service) outboundAddrsSnapshot() []string {
 }
 
 func (s *Service) ensureOutboundAddr(addr string) {
-	addr = strings.TrimSpace(addr)
+	if s == nil {
+		return
+	}
+	addr = normalizeReconnectAddr(addr)
 	if addr == "" {
 		return
 	}
@@ -70,71 +73,55 @@ func (s *Service) ensureOutboundAddr(addr string) {
 }
 
 func (s *Service) resetReconnect(addr string) {
-	addr = strings.TrimSpace(addr)
-	if addr == "" {
+	if s == nil {
 		return
 	}
 	s.reconnectMu.Lock()
 	defer s.reconnectMu.Unlock()
+	addr = normalizeReconnectAddr(addr)
+	if addr == "" {
+		return
+	}
 	delete(s.reconnectState, addr)
 }
 
 func (s *Service) recordDialFailure(addr string) {
-	addr = strings.TrimSpace(addr)
-	if addr == "" {
-		return
-	}
-	s.reconnectMu.Lock()
-	defer s.reconnectMu.Unlock()
-	entry := s.reconnectState[addr]
-	if entry == nil {
-		entry = &reconnectEntry{}
-		s.reconnectState[addr] = entry
-	}
-	entry.nextRetry = s.cfg.Now().Add(reconnectBackoff(entry.failures))
-	entry.failures++
+	s.withReconnectEntry(addr, func(entry *reconnectEntry) {
+		entry.nextRetry = s.cfg.Now().Add(reconnectBackoff(entry.failures))
+		entry.failures++
+	})
 }
 
 func (s *Service) scheduleReconnect(addr string) {
-	addr = strings.TrimSpace(addr)
-	if addr == "" {
-		return
-	}
-	s.reconnectMu.Lock()
-	defer s.reconnectMu.Unlock()
-	entry := s.reconnectState[addr]
-	if entry == nil {
-		entry = &reconnectEntry{}
-		s.reconnectState[addr] = entry
-	}
-	entry.nextRetry = s.cfg.Now().Add(reconnectBackoff(entry.failures))
+	s.withReconnectEntry(addr, func(entry *reconnectEntry) {
+		entry.nextRetry = s.cfg.Now().Add(reconnectBackoff(entry.failures))
+	})
 }
 
 func (s *Service) scheduleNextReconnectAttempt(addr string, now time.Time) {
-	s.reconnectMu.Lock()
-	defer s.reconnectMu.Unlock()
-	entry := s.reconnectState[addr]
-	if entry == nil {
-		entry = &reconnectEntry{}
-		s.reconnectState[addr] = entry
-	}
-	entry.nextRetry = now.Add(reconnectBackoff(entry.failures))
+	s.withReconnectEntry(addr, func(entry *reconnectEntry) {
+		entry.nextRetry = now.Add(reconnectBackoff(entry.failures))
+	})
 }
 
 func (s *Service) isReconnectDue(addr string, now time.Time) bool {
-	s.reconnectMu.Lock()
-	defer s.reconnectMu.Unlock()
-	entry := s.reconnectState[addr]
-	if entry == nil {
-		entry = &reconnectEntry{}
-		s.reconnectState[addr] = entry
-	}
-	return !entry.nextRetry.After(now)
+	due := false
+	ok := s.withReconnectEntry(addr, func(entry *reconnectEntry) {
+		due = !entry.nextRetry.After(now)
+	})
+	return ok && due
 }
 
 func (s *Service) reconnectSnapshot(addr string) reconnectEntry {
+	if s == nil {
+		return reconnectEntry{}
+	}
 	s.reconnectMu.Lock()
 	defer s.reconnectMu.Unlock()
+	addr = normalizeReconnectAddr(addr)
+	if addr == "" {
+		return reconnectEntry{}
+	}
 	entry := s.reconnectState[addr]
 	if entry == nil {
 		return reconnectEntry{}
@@ -163,6 +150,25 @@ func reconnectBackoff(failures int) time.Duration {
 	return delay
 }
 
+func (s *Service) withReconnectEntry(addr string, fn func(*reconnectEntry)) bool {
+	if s == nil {
+		return false
+	}
+	addr = normalizeReconnectAddr(addr)
+	if addr == "" {
+		return false
+	}
+	s.reconnectMu.Lock()
+	defer s.reconnectMu.Unlock()
+	entry := s.reconnectState[addr]
+	if entry == nil {
+		entry = &reconnectEntry{}
+		s.reconnectState[addr] = entry
+	}
+	fn(entry)
+	return true
+}
+
 func (s *Service) isConnected(addr string) bool {
 	if s == nil {
 		return false
@@ -173,11 +179,15 @@ func (s *Service) isConnected(addr string) bool {
 	return ok
 }
 
+func normalizeReconnectAddr(addr string) string {
+	return strings.TrimSpace(addr)
+}
+
 func normalizePeerAddrs(addrs []string) []string {
 	seen := make(map[string]struct{}, len(addrs))
 	out := make([]string, 0, len(addrs))
 	for _, addr := range addrs {
-		addr = strings.TrimSpace(addr)
+		addr = normalizeReconnectAddr(addr)
 		if addr == "" {
 			continue
 		}

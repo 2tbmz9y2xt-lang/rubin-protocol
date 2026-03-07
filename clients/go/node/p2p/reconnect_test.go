@@ -3,6 +3,7 @@ package p2p
 import (
 	"context"
 	"net"
+	"slices"
 	"testing"
 	"time"
 
@@ -79,6 +80,69 @@ func TestReconnectBackoff(t *testing.T) {
 	third := h.service.reconnectSnapshot(addr)
 	if got := third.nextRetry.Sub(currentTime); got != 200*time.Millisecond {
 		t.Fatalf("third backoff=%s, want 200ms", got)
+	}
+}
+
+func TestReconnectHelpers(t *testing.T) {
+	restore := overrideReconnectTiming(50*time.Millisecond, 50*time.Millisecond, 200*time.Millisecond)
+	defer restore()
+
+	currentTime := time.Unix(1_777_000_100, 0)
+	h := newTestHarness(t, 0, "127.0.0.1:0", []string{" 127.0.0.1:19001 ", "127.0.0.1:19001"})
+	h.service.cfg.Now = func() time.Time { return currentTime }
+
+	if got := h.service.outboundAddrsSnapshot(); !slices.Equal(got, []string{"127.0.0.1:19001"}) {
+		t.Fatalf("outboundAddrsSnapshot=%v", got)
+	}
+
+	h.service.ensureOutboundAddr("127.0.0.1:19002")
+	h.service.ensureOutboundAddr("127.0.0.1:19002")
+	if got := h.service.outboundAddrsSnapshot(); !slices.Equal(got, []string{"127.0.0.1:19001", "127.0.0.1:19002"}) {
+		t.Fatalf("ensureOutboundAddr snapshot=%v", got)
+	}
+
+	if h.service.isReconnectDue("", currentTime) {
+		t.Fatalf("empty addr must not be due")
+	}
+	h.service.scheduleReconnect("127.0.0.1:19002")
+	if !h.service.isReconnectDue("127.0.0.1:19002", currentTime.Add(50*time.Millisecond)) {
+		t.Fatalf("addr should become due after scheduled backoff")
+	}
+	h.service.resetReconnect("127.0.0.1:19002")
+	if snap := h.service.reconnectSnapshot("127.0.0.1:19002"); snap.failures != 0 || !snap.nextRetry.IsZero() {
+		t.Fatalf("reset snapshot=%+v", snap)
+	}
+}
+
+func TestReconnectBackoffCapsAtMax(t *testing.T) {
+	restore := overrideReconnectTiming(50*time.Millisecond, 50*time.Millisecond, 200*time.Millisecond)
+	defer restore()
+
+	if got := reconnectBackoff(10); got != 200*time.Millisecond {
+		t.Fatalf("reconnectBackoff(10)=%s, want 200ms", got)
+	}
+	if got := reconnectBackoff(-1); got != 50*time.Millisecond {
+		t.Fatalf("reconnectBackoff(-1)=%s, want 50ms", got)
+	}
+}
+
+func TestDialPeerFailureRecordsReconnect(t *testing.T) {
+	restore := overrideReconnectTiming(50*time.Millisecond, 50*time.Millisecond, 200*time.Millisecond)
+	defer restore()
+
+	currentTime := time.Unix(1_777_000_200, 0)
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	h.service.cfg.Now = func() time.Time { return currentTime }
+	h.service.ctx = context.Background()
+	h.service.loopWG.Add(1)
+	h.service.dialPeer("127.0.0.1:1")
+
+	snap := h.service.reconnectSnapshot("127.0.0.1:1")
+	if snap.failures != 1 {
+		t.Fatalf("failures=%d, want 1", snap.failures)
+	}
+	if got := snap.nextRetry.Sub(currentTime); got != 50*time.Millisecond {
+		t.Fatalf("nextRetry delta=%s, want 50ms", got)
 	}
 }
 
