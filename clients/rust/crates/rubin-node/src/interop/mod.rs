@@ -31,7 +31,6 @@ pub struct CliConfig {
     pub action: Action,
     pub bind_addr: String,
     pub connect_addr: Option<String>,
-    pub network: String,
     pub best_height: u64,
 }
 
@@ -60,7 +59,6 @@ pub fn parse_args(args: &[String]) -> Result<CliConfig, String> {
     let mut bind_addr = DEFAULT_BIND_ADDR.to_string();
     let mut connect_addr = None;
     let mut payload_hex = String::new();
-    let mut network = "devnet".to_string();
     let mut best_height = 0u64;
 
     let mut idx = 1usize;
@@ -95,13 +93,6 @@ pub fn parse_args(args: &[String]) -> Result<CliConfig, String> {
                     .ok_or_else(|| "missing value for --payload-hex".to_string())?
                     .clone();
             }
-            "--network" => {
-                idx += 1;
-                network = args
-                    .get(idx)
-                    .ok_or_else(|| "missing value for --network".to_string())?
-                    .clone();
-            }
             "--best-height" => {
                 idx += 1;
                 let raw = args
@@ -134,7 +125,6 @@ pub fn parse_args(args: &[String]) -> Result<CliConfig, String> {
         action,
         bind_addr,
         connect_addr,
-        network,
         best_height,
     })
 }
@@ -148,7 +138,7 @@ where
     F: FnMut(&str) -> Result<(), String>,
 {
     let local = local_version(cfg.best_height)?;
-    let mut runtime_cfg = default_peer_runtime_config(&cfg.network, 8);
+    let mut runtime_cfg = default_peer_runtime_config("devnet", 8);
     runtime_cfg.read_deadline = Duration::from_secs(3);
     runtime_cfg.write_deadline = Duration::from_secs(3);
 
@@ -272,7 +262,6 @@ mod tests {
         assert_eq!(cfg.action, Action::Idle);
         assert_eq!(cfg.bind_addr, DEFAULT_BIND_ADDR);
         assert_eq!(cfg.connect_addr, None);
-        assert_eq!(cfg.network, "devnet");
         assert_eq!(cfg.best_height, 0);
     }
 
@@ -286,8 +275,6 @@ mod tests {
             "expect-tx".to_string(),
             "--payload-hex".to_string(),
             "c0ffee".to_string(),
-            "--network".to_string(),
-            "mainnet".to_string(),
             "--best-height".to_string(),
             "42".to_string(),
         ];
@@ -300,7 +287,6 @@ mod tests {
                 payload: vec![0xc0, 0xff, 0xee]
             }
         );
-        assert_eq!(cfg.network, "mainnet");
         assert_eq!(cfg.best_height, 42);
     }
 
@@ -327,9 +313,6 @@ mod tests {
 
         let err = parse_args(&["server".to_string(), "--action".to_string()]).unwrap_err();
         assert_eq!(err, "missing value for --action");
-
-        let err = parse_args(&["server".to_string(), "--network".to_string()]).unwrap_err();
-        assert_eq!(err, "missing value for --network");
 
         let err = parse_args(&[
             "server".to_string(),
@@ -613,7 +596,6 @@ mod tests {
             action: Action::Idle,
             bind_addr: DEFAULT_BIND_ADDR.to_string(),
             connect_addr: Some(addr.to_string()),
-            network: "devnet".to_string(),
             best_height: 0,
         })
         .expect("client run");
