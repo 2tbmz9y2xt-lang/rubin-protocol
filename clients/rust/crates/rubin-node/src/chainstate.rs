@@ -277,6 +277,8 @@ fn parse_hex(name: &str, value: &str) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use crate::coinbase::{build_coinbase_tx, default_mine_address};
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use crate::io_utils::unique_temp_path;
@@ -287,14 +289,132 @@ mod tests {
     use rubin_consensus::constants::POW_LIMIT;
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
     use rubin_consensus::{
-        block_hash, block_subsidy, encode_compact_size, merkle_root_txids, parse_block_bytes,
-        parse_tx, Outpoint, UtxoEntry, BLOCK_HEADER_BYTES,
+        apply_non_coinbase_tx_basic_with_mtp, block_hash, block_subsidy, encode_compact_size,
+        merkle_root_txids, parse_block_bytes, parse_tx, Outpoint, UtxoEntry, BLOCK_HEADER_BYTES,
     };
+    use serde::Deserialize;
 
     const GENESIS_ONLY_STATE_DIGEST_HEX: &str =
         "8b172fb3a5e70b56de9ae78ce750c04eccbc4dd8b3be55751252e5a1b4f2e752";
     const GENESIS_PLUS_HEIGHT_ONE_STATE_DIGEST_HEX: &str =
         "a26ade4263f7659ef250d13c05a05137c61e223d1fdd585d0c70a5165a94bb5e";
+    const DEVNET_GENESIS_FIXTURE_JSON: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../../conformance/fixtures/CV-DEVNET-GENESIS.json"
+    ));
+    const DEVNET_SUBSIDY_FIXTURE_JSON: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../../conformance/fixtures/CV-DEVNET-SUBSIDY.json"
+    ));
+    const DEVNET_MATURITY_FIXTURE_JSON: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../../conformance/fixtures/CV-DEVNET-MATURITY.json"
+    ));
+
+    #[derive(Debug, Deserialize)]
+    struct FixtureFile<T> {
+        vectors: Vec<T>,
+    }
+
+    #[derive(Clone, Debug, Deserialize)]
+    struct FixtureUtxo {
+        txid: String,
+        vout: u32,
+        value: u64,
+        covenant_type: u16,
+        covenant_data: String,
+        creation_height: u64,
+        created_by_coinbase: bool,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ChainStateAfterFixture {
+        tip_hash: String,
+        height: u64,
+        already_generated: u64,
+        has_tip: bool,
+        utxos: Vec<FixtureUtxo>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct DevnetConnectBlockVector {
+        id: String,
+        block_hex: String,
+        chain_id: String,
+        height: u64,
+        already_generated: u64,
+        utxos: Vec<FixtureUtxo>,
+        prev_timestamps: Vec<u64>,
+        expected_prev_hash: Option<String>,
+        expected_target: String,
+        expect_ok: bool,
+        expect_sum_fees: u64,
+        expect_utxo_count: u64,
+        expect_already_generated: u64,
+        expect_already_generated_n1: u64,
+        block_hash: String,
+        chainstate_after: Option<ChainStateAfterFixture>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct DevnetMaturityVector {
+        id: String,
+        tx_hex: String,
+        chain_id: String,
+        height: u64,
+        block_timestamp: u64,
+        utxos: Vec<FixtureUtxo>,
+        expect_ok: bool,
+        expect_err: String,
+    }
+
+    fn parse_hex32_test(name: &str, value: &str) -> [u8; 32] {
+        let raw = hex::decode(value).unwrap_or_else(|e| panic!("{name} hex: {e}"));
+        assert_eq!(raw.len(), 32, "{name} must be 32 bytes");
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&raw);
+        out
+    }
+
+    fn fixture_utxos_to_map(items: &[FixtureUtxo]) -> HashMap<Outpoint, UtxoEntry> {
+        let mut out = HashMap::with_capacity(items.len());
+        for item in items {
+            let txid = parse_hex32_test("fixture utxo txid", &item.txid);
+            let covenant_data =
+                hex::decode(&item.covenant_data).expect("fixture covenant_data hex");
+            out.insert(
+                Outpoint {
+                    txid,
+                    vout: item.vout,
+                },
+                UtxoEntry {
+                    value: item.value,
+                    covenant_type: item.covenant_type,
+                    covenant_data,
+                    creation_height: item.creation_height,
+                    created_by_coinbase: item.created_by_coinbase,
+                },
+            );
+        }
+        out
+    }
+
+    fn chainstate_from_connect_fixture(v: &DevnetConnectBlockVector) -> ChainState {
+        let mut state = ChainState::new();
+        state.already_generated = v.already_generated;
+        state.utxos = fixture_utxos_to_map(&v.utxos);
+        if v.height > 0 {
+            state.has_tip = true;
+            state.height = v.height - 1;
+            state.tip_hash = parse_hex32_test(
+                "expected_prev_hash",
+                v.expected_prev_hash
+                    .as_deref()
+                    .expect("non-genesis vector must provide expected_prev_hash"),
+            );
+        }
+        state
+    }
 
     fn build_block_bytes(
         prev_hash: [u8; 32],
@@ -473,6 +593,160 @@ mod tests {
         );
     }
 
-    // TODO(Q-DEVNET-08): replay CV-DEVNET-GENESIS, CV-DEVNET-SUBSIDY, and
-    // CV-DEVNET-MATURITY once those fixtures exist under conformance/fixtures/.
+    #[test]
+    fn chainstate_replays_devnet_genesis_fixture() {
+        let fixture: FixtureFile<DevnetConnectBlockVector> =
+            serde_json::from_str(DEVNET_GENESIS_FIXTURE_JSON).expect("parse genesis fixture");
+        let vector = fixture
+            .vectors
+            .into_iter()
+            .next()
+            .expect("genesis fixture vector");
+        assert!(vector.expect_ok, "{} should be positive fixture", vector.id);
+
+        let mut st = chainstate_from_connect_fixture(&vector);
+        let block_bytes = hex::decode(&vector.block_hex).expect("genesis block hex");
+        let summary = st
+            .connect_block(
+                &block_bytes,
+                Some(parse_hex32_test("expected_target", &vector.expected_target)),
+                None,
+                parse_hex32_test("chain_id", &vector.chain_id),
+            )
+            .expect("connect genesis fixture");
+
+        assert_eq!(summary.block_height, vector.height, "{}", vector.id);
+        assert_eq!(summary.sum_fees, vector.expect_sum_fees, "{}", vector.id);
+        assert_eq!(
+            summary.utxo_count, vector.expect_utxo_count,
+            "{}",
+            vector.id
+        );
+        assert_eq!(
+            summary.already_generated, vector.expect_already_generated,
+            "{}",
+            vector.id
+        );
+        assert_eq!(
+            summary.already_generated_n1, vector.expect_already_generated_n1,
+            "{}",
+            vector.id
+        );
+        assert_eq!(
+            hex::encode(summary.block_hash),
+            vector.block_hash,
+            "{}",
+            vector.id
+        );
+
+        let expected_state = vector.chainstate_after.expect("genesis chainstate_after");
+        assert_eq!(st.has_tip, expected_state.has_tip, "{}", vector.id);
+        assert_eq!(st.height, expected_state.height, "{}", vector.id);
+        assert_eq!(
+            hex::encode(st.tip_hash),
+            expected_state.tip_hash,
+            "{}",
+            vector.id
+        );
+        assert_eq!(
+            st.already_generated, expected_state.already_generated,
+            "{}",
+            vector.id
+        );
+        assert_eq!(
+            st.utxos,
+            fixture_utxos_to_map(&expected_state.utxos),
+            "{}",
+            vector.id
+        );
+    }
+
+    #[test]
+    fn chainstate_replays_devnet_subsidy_vectors() {
+        let fixture: FixtureFile<DevnetConnectBlockVector> =
+            serde_json::from_str(DEVNET_SUBSIDY_FIXTURE_JSON).expect("parse subsidy fixture");
+
+        for vector in fixture.vectors {
+            assert!(vector.expect_ok, "{} should be positive fixture", vector.id);
+            let mut st = chainstate_from_connect_fixture(&vector);
+            let block_bytes = hex::decode(&vector.block_hex).expect("subsidy block hex");
+            let summary = st
+                .connect_block(
+                    &block_bytes,
+                    Some(parse_hex32_test("expected_target", &vector.expected_target)),
+                    Some(vector.prev_timestamps.as_slice()),
+                    parse_hex32_test("chain_id", &vector.chain_id),
+                )
+                .unwrap_or_else(|e| panic!("{} connect_block failed: {e}", vector.id));
+
+            assert_eq!(summary.block_height, vector.height, "{}", vector.id);
+            assert_eq!(summary.sum_fees, vector.expect_sum_fees, "{}", vector.id);
+            assert_eq!(
+                summary.utxo_count, vector.expect_utxo_count,
+                "{}",
+                vector.id
+            );
+            assert_eq!(
+                summary.already_generated, vector.expect_already_generated,
+                "{}",
+                vector.id
+            );
+            assert_eq!(
+                summary.already_generated_n1, vector.expect_already_generated_n1,
+                "{}",
+                vector.id
+            );
+            assert_eq!(
+                hex::encode(summary.block_hash),
+                vector.block_hash,
+                "{}",
+                vector.id
+            );
+            assert_eq!(st.height, vector.height, "{}", vector.id);
+            assert_eq!(st.tip_hash, summary.block_hash, "{}", vector.id);
+            assert_eq!(
+                st.already_generated, vector.expect_already_generated_n1,
+                "{}",
+                vector.id
+            );
+            assert_eq!(
+                st.utxos.len() as u64,
+                vector.expect_utxo_count,
+                "{}",
+                vector.id
+            );
+        }
+    }
+
+    #[test]
+    fn chainstate_replays_devnet_maturity_fixture() {
+        let fixture: FixtureFile<DevnetMaturityVector> =
+            serde_json::from_str(DEVNET_MATURITY_FIXTURE_JSON).expect("parse maturity fixture");
+        let vector = fixture
+            .vectors
+            .into_iter()
+            .next()
+            .expect("maturity fixture vector");
+        assert!(
+            !vector.expect_ok,
+            "{} should be negative fixture",
+            vector.id
+        );
+
+        let tx_bytes = hex::decode(&vector.tx_hex).expect("maturity tx hex");
+        let (tx, txid, _, consumed) = parse_tx(&tx_bytes).expect("parse maturity tx");
+        assert_eq!(consumed, tx_bytes.len(), "{}", vector.id);
+
+        let err = apply_non_coinbase_tx_basic_with_mtp(
+            &tx,
+            txid,
+            &fixture_utxos_to_map(&vector.utxos),
+            vector.height,
+            vector.block_timestamp,
+            vector.block_timestamp,
+            parse_hex32_test("chain_id", &vector.chain_id),
+        )
+        .expect_err("maturity fixture must reject");
+        assert_eq!(err.code.as_str(), vector.expect_err, "{}", vector.id);
+    }
 }
