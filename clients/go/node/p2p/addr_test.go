@@ -2,9 +2,12 @@ package p2p
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
 func TestAddrPayloadRoundTrip(t *testing.T) {
@@ -19,6 +22,21 @@ func TestAddrPayloadRoundTrip(t *testing.T) {
 	}
 	if !slices.Equal(decoded, []string{"127.0.0.1:18444", "[::1]:18445"}) {
 		t.Fatalf("decoded=%v", decoded)
+	}
+}
+
+func TestAddrPayloadErrorsAndHandshakeCaps(t *testing.T) {
+	if _, err := encodeAddrPayload([]string{"bad"}); err == nil {
+		t.Fatalf("encodeAddrPayload(bad) unexpectedly succeeded")
+	}
+	if _, err := decodeAddrPayload([]byte{0x01, 0x02}); err == nil {
+		t.Fatalf("decodeAddrPayload(short) unexpectedly succeeded")
+	}
+	if got := preHandshakePayloadCap(messageGetAddr); got != 0 {
+		t.Fatalf("preHandshakePayloadCap(getaddr)=%d, want 0", got)
+	}
+	if got := preHandshakePayloadCap(messageAddr); got != 0 {
+		t.Fatalf("preHandshakePayloadCap(addr)=%d, want 0", got)
 	}
 }
 
@@ -71,4 +89,60 @@ func TestAddrPropagation(t *testing.T) {
 	waitFor(t, 5*time.Second, func() bool {
 		return nodeA.peerManager.Count() == 2 && nodeC.peerManager.Count() >= 1
 	})
+}
+
+func TestAddrManagerEvictionAndLen(t *testing.T) {
+	currentTime := time.Unix(1_777_000_300, 0)
+	manager := newAddrManager(func() time.Time {
+		currentTime = currentTime.Add(time.Second)
+		return currentTime
+	})
+	for port := 20000; port <= 21000; port++ {
+		manager.AddAddrs([]string{fmt.Sprintf("127.0.0.1:%d", port)})
+	}
+	if got := manager.Len(); got != maxKnownAddrs {
+		t.Fatalf("Len()=%d, want %d", got, maxKnownAddrs)
+	}
+	addrs := manager.GetAddrs(maxKnownAddrs)
+	if slices.Contains(addrs, "127.0.0.1:20000") {
+		t.Fatalf("oldest address was not evicted")
+	}
+	if !slices.Contains(addrs, "127.0.0.1:21000") {
+		t.Fatalf("newest address missing after eviction")
+	}
+	manager.MarkAttempted("127.0.0.1:21000")
+}
+
+func TestDiscoverableAddrsFiltersSelfConnectedAndBanned(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:19011", nil)
+	self := normalizeNetAddr(h.service.Addr())
+	connected := "127.0.0.1:19012"
+	banned := "127.0.0.1:19013"
+	candidate := "127.0.0.1:19014"
+
+	h.service.addrMgr.AddAddrs([]string{self, connected, banned, candidate})
+	h.service.peers[connected] = &peer{service: h.service, state: node.PeerState{Addr: connected}}
+	if err := h.peerManager.AddPeer(&node.PeerState{
+		Addr:     banned,
+		BanScore: h.service.cfg.PeerRuntimeConfig.BanThreshold,
+	}); err != nil {
+		t.Fatalf("AddPeer(banned): %v", err)
+	}
+
+	if got := h.service.discoverableAddrs(8); !slices.Equal(got, []string{candidate}) {
+		t.Fatalf("discoverableAddrs=%v, want [%s]", got, candidate)
+	}
+}
+
+func TestRequestPeerAddrsNilAndConnectDiscoveredSkipsConnected(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:19021", nil)
+	if err := h.service.requestPeerAddrs(nil); err != nil {
+		t.Fatalf("requestPeerAddrs(nil): %v", err)
+	}
+	addr := "127.0.0.1:19022"
+	h.service.peers[addr] = &peer{service: h.service, state: node.PeerState{Addr: addr}}
+	h.service.connectDiscoveredAddrs([]string{addr})
+	if got := h.service.connectedPeerCount(); got != 1 {
+		t.Fatalf("connectedPeerCount()=%d, want 1", got)
+	}
 }
