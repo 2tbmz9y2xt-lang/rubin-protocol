@@ -50,6 +50,9 @@ func TestAddrPayloadErrorsAndHandshakeCaps(t *testing.T) {
 	if _, err := decodeAddrPayload(invalidEntry); err == nil {
 		t.Fatalf("decodeAddrPayload(invalid entry) unexpectedly succeeded")
 	}
+	if _, err := decodeAddrPayload([]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f}); err == nil {
+		t.Fatalf("decodeAddrPayload(overflow count) unexpectedly succeeded")
+	}
 	if got := preHandshakePayloadCap(messageGetAddr); got != 0 {
 		t.Fatalf("preHandshakePayloadCap(getaddr)=%d, want 0", got)
 	}
@@ -189,6 +192,27 @@ func TestRequestPeerAddrsNilAndConnectDiscoveredSkipsConnected(t *testing.T) {
 	}
 }
 
+func TestConnectDiscoveredAddrsUsesBudgetAndPendingDedupe(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:19025", nil)
+	h.service.cfg.PeerRuntimeConfig.MaxPeers = maxDiscoveredDialFanout
+	for i := 0; i < maxDiscoveredDialFanout-1; i++ {
+		addr := fmt.Sprintf("127.0.0.1:%d", 19100+i)
+		if !h.service.beginDial(addr) {
+			t.Fatalf("beginDial(%s) unexpectedly failed", addr)
+		}
+	}
+	addrA := "127.0.0.1:19201"
+	addrB := "127.0.0.1:19202"
+	addrC := "127.0.0.1:19203"
+	h.service.connectDiscoveredAddrs([]string{addrA, addrA, addrB, addrC})
+	if !h.service.isDialing(addrA) {
+		t.Fatalf("expected addrA to be scheduled")
+	}
+	if h.service.isDialing(addrB) || h.service.isDialing(addrC) {
+		t.Fatalf("expected per-message dial budget to cap discovered dials")
+	}
+}
+
 func TestAddrHandlerAndDiscoveryEdgeBranches(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:19031", nil)
 	p := newPeerRuntimeTestPeer(t)
@@ -216,5 +240,19 @@ func TestAddrHandlerAndDiscoveryEdgeBranches(t *testing.T) {
 	normalized := normalizePeerAddrs([]string{" 127.0.0.1:19032 ", "127.0.0.1:19032", "", "127.0.0.1:19033"})
 	if !slices.Equal(normalized, []string{"127.0.0.1:19032", "127.0.0.1:19033"}) {
 		t.Fatalf("normalizePeerAddrs=%v", normalized)
+	}
+}
+
+func TestRegisterPeerDoesNotPersistRemoteSocketEndpoint(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:19041", nil)
+	pr := &peer{
+		service: h.service,
+		state:   node.PeerState{Addr: "127.0.0.1:39000"},
+	}
+	if err := h.service.registerPeer(pr); err != nil {
+		t.Fatalf("registerPeer: %v", err)
+	}
+	if got := h.service.addrMgr.GetAddrs(8); len(got) != 0 {
+		t.Fatalf("addr manager learned transient peer addr: %v", got)
 	}
 }

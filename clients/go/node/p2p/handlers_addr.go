@@ -53,15 +53,33 @@ func (s *Service) connectDiscoveredAddrs(addrs []string) {
 	if s == nil {
 		return
 	}
-	for _, addr := range addrs {
-		addr = normalizeNetAddr(addr)
-		if addr == "" || s.isConnected(addr) || s.connectedPeerCount() >= s.cfg.PeerRuntimeConfig.MaxPeers {
+	budget := s.discoveredDialBudget()
+	for _, addr := range normalizePeerAddrs(addrs) {
+		if budget == 0 {
+			return
+		}
+		if addr == "" || s.isConnected(addr) || s.isDialing(addr) {
 			continue
 		}
 		s.addrMgr.MarkAttempted(addr)
-		s.loopWG.Add(1)
-		go s.dialPeer(addr)
+		if s.startOutboundDial(addr) {
+			budget--
+		}
 	}
+}
+
+func (s *Service) discoveredDialBudget() int {
+	if s == nil {
+		return 0
+	}
+	available := s.cfg.PeerRuntimeConfig.MaxPeers - s.connectedPeerCount() - s.pendingDialCount()
+	if available <= 0 {
+		return 0
+	}
+	if available > maxDiscoveredDialFanout {
+		return maxDiscoveredDialFanout
+	}
+	return available
 }
 
 func (s *Service) connectedPeerCount() int {

@@ -31,8 +31,7 @@ func (s *Service) Start(ctx context.Context) error {
 		if peerAddr == "" {
 			continue
 		}
-		s.loopWG.Add(1)
-		go s.dialPeer(peerAddr)
+		s.startOutboundDial(peerAddr)
 	}
 	return nil
 }
@@ -90,10 +89,81 @@ func (s *Service) acceptLoop() {
 
 func (s *Service) dialPeer(addr string) {
 	defer s.loopWG.Done()
+	defer s.finishDial(addr)
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	dialer := &net.Dialer{Timeout: s.cfg.PeerRuntimeConfig.HandshakeTimeout}
-	conn, err := dialer.DialContext(s.ctx, "tcp", addr)
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return
 	}
 	s.handleConn(conn)
+}
+
+func (s *Service) startOutboundDial(addr string) bool {
+	if s == nil {
+		return false
+	}
+	addr = normalizeNetAddr(addr)
+	if addr == "" || s.isConnected(addr) || !s.beginDial(addr) {
+		return false
+	}
+	s.loopWG.Add(1)
+	go s.dialPeer(addr)
+	return true
+}
+
+func (s *Service) beginDial(addr string) bool {
+	if s == nil {
+		return false
+	}
+	addr = normalizeNetAddr(addr)
+	if addr == "" {
+		return false
+	}
+	s.dialingMu.Lock()
+	defer s.dialingMu.Unlock()
+	if _, exists := s.dialing[addr]; exists {
+		return false
+	}
+	s.dialing[addr] = struct{}{}
+	return true
+}
+
+func (s *Service) finishDial(addr string) {
+	if s == nil {
+		return
+	}
+	addr = normalizeNetAddr(addr)
+	if addr == "" {
+		return
+	}
+	s.dialingMu.Lock()
+	delete(s.dialing, addr)
+	s.dialingMu.Unlock()
+}
+
+func (s *Service) isDialing(addr string) bool {
+	if s == nil {
+		return false
+	}
+	addr = normalizeNetAddr(addr)
+	if addr == "" {
+		return false
+	}
+	s.dialingMu.Lock()
+	defer s.dialingMu.Unlock()
+	_, exists := s.dialing[addr]
+	return exists
+}
+
+func (s *Service) pendingDialCount() int {
+	if s == nil {
+		return 0
+	}
+	s.dialingMu.Lock()
+	defer s.dialingMu.Unlock()
+	return len(s.dialing)
 }

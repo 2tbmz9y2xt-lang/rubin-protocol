@@ -67,7 +67,6 @@ func (s *Service) registerPeer(p *peer) error {
 	s.peersMu.Lock()
 	s.peers[p.addr()] = p
 	s.peersMu.Unlock()
-	s.addrMgr.AddAddrs([]string{p.addr()})
 	return nil
 }
 

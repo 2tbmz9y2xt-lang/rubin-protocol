@@ -407,6 +407,14 @@ func decodeAddrPayload(payload []byte) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	maxInt := int(^uint(0) >> 1)
+	if count > uint64(maxInt) {
+		return nil, errors.New("addr count overflow")
+	}
+	remaining := len(payload) - consumed
+	if remaining < 0 || count > uint64(remaining/addrPayloadEntrySize) {
+		return nil, errors.New("addr payload width mismatch")
+	}
 	needed := consumed + int(count)*addrPayloadEntrySize
 	if len(payload) != needed {
 		return nil, errors.New("addr payload width mismatch")
