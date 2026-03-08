@@ -850,18 +850,20 @@ impl HttpResponse {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
+    use rubin_consensus::{parse_tx, Outpoint, UtxoEntry};
     use serde_json::Value;
 
     use crate::{
         block_store_path, default_peer_runtime_config, default_sync_config,
         devnet_genesis_block_bytes, devnet_genesis_chain_id, BlockStore, ChainState, PeerManager,
-        SyncEngine,
+        SyncEngine, TxPool,
     };
 
     use super::{
@@ -906,6 +908,106 @@ mod tests {
 
     fn response_json(response: &super::HttpResponse) -> Value {
         serde_json::from_slice(&response.body).expect("json")
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct FixtureFile<T> {
+        vectors: Vec<T>,
+    }
+
+    #[derive(Clone, Debug, serde::Deserialize)]
+    struct FixtureUtxo {
+        txid: String,
+        vout: u32,
+        value: u64,
+        covenant_type: u16,
+        covenant_data: String,
+        creation_height: u64,
+        created_by_coinbase: bool,
+    }
+
+    #[derive(Clone, Debug, serde::Deserialize)]
+    struct PositiveTxVector {
+        id: String,
+        tx_hex: String,
+        #[serde(default)]
+        chain_id: Option<String>,
+        height: u64,
+        expect_ok: bool,
+        utxos: Vec<FixtureUtxo>,
+    }
+
+    fn parse_hex32_test(name: &str, value: &str) -> [u8; 32] {
+        let raw = hex::decode(value).unwrap_or_else(|err| panic!("{name} hex: {err}"));
+        assert_eq!(raw.len(), 32, "{name} must be 32 bytes");
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&raw);
+        out
+    }
+
+    fn fixture_utxos_to_map(items: &[FixtureUtxo]) -> HashMap<Outpoint, UtxoEntry> {
+        let mut out = HashMap::with_capacity(items.len());
+        for item in items {
+            out.insert(
+                Outpoint {
+                    txid: parse_hex32_test("fixture utxo txid", &item.txid),
+                    vout: item.vout,
+                },
+                UtxoEntry {
+                    value: item.value,
+                    covenant_type: item.covenant_type,
+                    covenant_data: hex::decode(&item.covenant_data)
+                        .expect("fixture covenant_data hex"),
+                    creation_height: item.creation_height,
+                    created_by_coinbase: item.created_by_coinbase,
+                },
+            );
+        }
+        out
+    }
+
+    fn positive_fixture_vector() -> PositiveTxVector {
+        const UTXO_BASIC_FIXTURE_JSON: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../../conformance/fixtures/CV-UTXO-BASIC.json"
+        ));
+        let fixture: FixtureFile<PositiveTxVector> =
+            serde_json::from_str(UTXO_BASIC_FIXTURE_JSON).expect("parse positive fixture");
+        fixture
+            .vectors
+            .into_iter()
+            .find(|vector| vector.id == "CV-U-06")
+            .expect("positive fixture vector")
+    }
+
+    fn fixture_chain_id(chain_id: Option<&str>) -> [u8; 32] {
+        chain_id
+            .map(|value| parse_hex32_test("chain_id", value))
+            .unwrap_or([0u8; 32])
+    }
+
+    fn chain_state_from_positive_fixture(vector: &PositiveTxVector) -> ChainState {
+        let mut state = ChainState::new();
+        state.has_tip = vector.height > 0;
+        state.height = vector.height.saturating_sub(1);
+        state.utxos = fixture_utxos_to_map(&vector.utxos);
+        state
+    }
+
+    fn build_state_with_chain_state(
+        chain_state: ChainState,
+        chain_id: [u8; 32],
+    ) -> super::DevnetRPCState {
+        let engine = SyncEngine::new(chain_state, None, default_sync_config(None, chain_id, None))
+            .expect("sync");
+        super::DevnetRPCState {
+            sync_engine: Arc::new(Mutex::new(engine)),
+            block_store: None,
+            tx_pool: Arc::new(Mutex::new(TxPool::new())),
+            peer_manager: Arc::new(PeerManager::new(default_peer_runtime_config("devnet", 8))),
+            metrics: Arc::new(super::RpcMetrics::default()),
+            now_unix: super::current_unix,
+        }
     }
 
     #[test]
@@ -1222,6 +1324,52 @@ mod tests {
     }
 
     #[test]
+    fn submit_tx_accepts_valid_conformance_tx() {
+        let vector = positive_fixture_vector();
+        assert!(vector.expect_ok, "{} should be positive fixture", vector.id);
+        let raw = hex::decode(&vector.tx_hex).expect("tx hex");
+        let (_tx, txid, _wtxid, consumed) = parse_tx(&raw).expect("parse tx");
+        assert_eq!(consumed, raw.len(), "{}", vector.id);
+        let expected_txid = hex::encode(txid);
+
+        let state = build_state_with_chain_state(
+            chain_state_from_positive_fixture(&vector),
+            fixture_chain_id(vector.chain_id.as_deref()),
+        );
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/submit_tx".to_string(),
+                body: format!(r#"{{"tx_hex":"{}"}}"#, hex::encode(&raw)).into_bytes(),
+            },
+        );
+
+        assert_eq!(response.status, 200);
+        let body = response_json(&response);
+        assert_eq!(body["accepted"].as_bool(), Some(true));
+        assert_eq!(body["txid"].as_str(), Some(expected_txid.as_str()));
+        let pool = state.tx_pool.lock().expect("tx pool");
+        assert_eq!(pool.len(), 1);
+        drop(pool);
+        let duplicate = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/submit_tx".to_string(),
+                body: format!(r#"{{"tx_hex":"{}"}}"#, hex::encode(&raw)).into_bytes(),
+            },
+        );
+        assert_eq!(duplicate.status, 409);
+        let metrics = render_prometheus_metrics(&state);
+        assert!(metrics.contains("rubin_node_mempool_txs 1"), "{metrics}");
+        assert!(metrics.contains(r#"rubin_node_submit_tx_total{result="accepted"} 1"#));
+        assert!(
+            metrics.contains(r#"rubin_node_rpc_requests_total{route="/submit_tx",status="200"} 1"#)
+        );
+    }
+
+    #[test]
     fn submit_tx_reports_unavailable_when_tx_pool_is_poisoned() {
         let (state, dir) = build_state(false);
         let tx_pool = Arc::clone(&state.tx_pool);
@@ -1243,6 +1391,41 @@ mod tests {
             response_json(&response)["error"].as_str(),
             Some("tx pool unavailable")
         );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_block_returns_unavailable_when_block_bytes_are_missing() {
+        let (state, dir) = build_state(true);
+        let (_height, tip_hash) = state
+            .block_store
+            .as_ref()
+            .expect("blockstore")
+            .tip()
+            .expect("tip")
+            .expect("tip value");
+        let block_path = state
+            .block_store
+            .as_ref()
+            .expect("blockstore")
+            .root_dir()
+            .join("blocks")
+            .join(format!("{}.bin", hex::encode(tip_hash)));
+        fs::remove_file(&block_path).expect("remove block");
+
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_block?height=0".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        assert!(response_json(&response)["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("read block"));
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
@@ -1374,15 +1557,24 @@ mod tests {
         let (state, dir) = build_state(false);
         let mut server =
             start_devnet_rpc_server("127.0.0.1:0", state.clone()).expect("start server");
-        let mut stream = TcpStream::connect(server.addr()).expect("connect");
-        stream
-            .write_all(b"GET /get_tip HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-            .expect("write request");
-        stream
-            .shutdown(std::net::Shutdown::Write)
-            .expect("shutdown write");
         let mut response = String::new();
-        stream.read_to_string(&mut response).expect("read response");
+        for _ in 0..10 {
+            let mut stream = TcpStream::connect(server.addr()).expect("connect");
+            stream
+                .write_all(
+                    b"GET /get_tip HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )
+                .expect("write request");
+            stream
+                .shutdown(std::net::Shutdown::Write)
+                .expect("shutdown write");
+            response.clear();
+            stream.read_to_string(&mut response).expect("read response");
+            if response.contains("HTTP/1.1 200 OK") && response.contains("has_tip") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
         assert!(response.contains("HTTP/1.1 200 OK"), "{response}");
         assert!(response.contains("has_tip"), "{response}");
         server.close();
@@ -1408,6 +1600,49 @@ mod tests {
         assert!(body.contains("rubin_node_tip_height 0"));
         assert!(body.contains("rubin_node_in_ibd 1"));
         assert!(body.contains("rubin_node_mempool_txs 0"));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn metrics_routes_survive_poisoned_metrics_lock() {
+        let (state, dir) = build_state(true);
+        let metrics = Arc::clone(&state.metrics);
+        let _ = std::thread::spawn(move || {
+            let _guard = metrics.inner.lock().expect("lock");
+            panic!("poison metrics");
+        })
+        .join();
+
+        let submit_response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/submit_tx".to_string(),
+                body: br#"{"tx_hex":"zz"}"#.to_vec(),
+            },
+        );
+        assert_eq!(submit_response.status, 400);
+
+        let metrics_response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/metrics".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(metrics_response.status, 200);
+        let body = String::from_utf8(metrics_response.body).expect("utf8");
+        assert!(body.contains("rubin_node_tip_height"), "{body}");
+        assert!(body.contains("rubin_node_submit_tx_total"), "{body}");
+        assert!(
+            !body.contains(r#"rubin_node_submit_tx_total{result=""#),
+            "{body}"
+        );
+        assert!(
+            !body.contains(r#"rubin_node_rpc_requests_total{route=""#),
+            "{body}"
+        );
         fs::remove_dir_all(dir).expect("cleanup");
     }
 }

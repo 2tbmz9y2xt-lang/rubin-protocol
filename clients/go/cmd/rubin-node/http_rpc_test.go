@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
@@ -44,6 +46,109 @@ func mustRPCState(t *testing.T, withGenesis bool) *devnetRPCState {
 	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil)
 	state.nowUnix = func() uint64 { return 0 }
 	return state
+}
+
+func mustRPCMLDSA87Keypair(t *testing.T) *consensus.MLDSA87Keypair {
+	t.Helper()
+	kp, err := consensus.NewMLDSA87Keypair()
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unsupported") {
+			t.Skipf("ML-DSA backend unavailable: %v", err)
+		}
+		t.Fatalf("NewMLDSA87Keypair: %v", err)
+	}
+	t.Cleanup(func() { kp.Close() })
+	return kp
+}
+
+func mustRPCStateWithSpendableUTXO(
+	t *testing.T,
+	fromAddress []byte,
+	announceTx func([]byte) error,
+) (*devnetRPCState, consensus.Outpoint, map[consensus.Outpoint]consensus.UtxoEntry) {
+	t.Helper()
+	dir := t.TempDir()
+	chainStatePath := node.ChainStatePath(dir)
+	chainState := node.NewChainState()
+	var prevTxid [32]byte
+	prevTxid[0] = 0x44
+	outpoint := consensus.Outpoint{Txid: prevTxid, Vout: 0}
+	chainState.Utxos[outpoint] = consensus.UtxoEntry{
+		Value:             100,
+		CovenantType:      consensus.COV_TYPE_P2PK,
+		CovenantData:      append([]byte(nil), fromAddress...),
+		CreationHeight:    0,
+		CreatedByCoinbase: false,
+	}
+	if err := chainState.Save(chainStatePath); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("OpenBlockStore: %v", err)
+	}
+	syncCfg := node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), chainStatePath)
+	syncEngine, err := node.NewSyncEngine(chainState, blockStore, syncCfg)
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	mempool, err := node.NewMempool(chainState, blockStore, node.DevnetGenesisChainID())
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8))
+	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, announceTx)
+	state.nowUnix = func() uint64 { return 0 }
+	return state, outpoint, chainState.Utxos
+}
+
+func mustRPCSignedTransferTx(
+	t *testing.T,
+	utxos map[consensus.Outpoint]consensus.UtxoEntry,
+	input consensus.Outpoint,
+	signer *consensus.MLDSA87Keypair,
+	toAddress []byte,
+) ([]byte, string) {
+	t.Helper()
+	changeAddress := consensus.P2PKCovenantDataForPubkey(signer.PubkeyBytes())
+	tx := &consensus.Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs: []consensus.TxInput{{
+			PrevTxid: input.Txid,
+			PrevVout: input.Vout,
+			Sequence: 0,
+		}},
+		Outputs: []consensus.TxOutput{
+			{
+				Value:        90,
+				CovenantType: consensus.COV_TYPE_P2PK,
+				CovenantData: append([]byte(nil), toAddress...),
+			},
+			{
+				Value:        9,
+				CovenantType: consensus.COV_TYPE_P2PK,
+				CovenantData: append([]byte(nil), changeAddress...),
+			},
+		},
+		Locktime: 0,
+	}
+	if err := consensus.SignTransaction(tx, utxos, node.DevnetGenesisChainID(), signer); err != nil {
+		t.Fatalf("SignTransaction: %v", err)
+	}
+	txBytes, err := consensus.MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx: %v", err)
+	}
+	_, txid, _, consumed, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("ParseTx: %v", err)
+	}
+	if consumed != len(txBytes) {
+		t.Fatalf("consumed=%d, want %d", consumed, len(txBytes))
+	}
+	return txBytes, hex.EncodeToString(txid[:])
 }
 
 func TestDevnetRPCGetTipNoTip(t *testing.T) {
@@ -302,6 +407,59 @@ func TestDevnetRPCSubmitTxRejectsInvalidTx(t *testing.T) {
 	}
 }
 
+func TestDevnetRPCSubmitTxAcceptsValidTxAndAnnounces(t *testing.T) {
+	fromKey := mustRPCMLDSA87Keypair(t)
+	toKey := mustRPCMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+
+	var announced []byte
+	state, input, utxos := mustRPCStateWithSpendableUTXO(t, fromAddress, func(tx []byte) error {
+		announced = append([]byte(nil), tx...)
+		return nil
+	})
+	txBytes, wantTxID := mustRPCSignedTransferTx(t, utxos, input, fromKey, toAddress)
+	server := httptest.NewServer(newDevnetRPCHandler(state))
+	defer server.Close()
+
+	body, err := json.Marshal(submitTxRequest{TxHex: hex.EncodeToString(txBytes)})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	resp, err := http.Post(server.URL+"/submit_tx", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+
+	var got submitTxResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !got.Accepted {
+		t.Fatalf("accepted=false, want true")
+	}
+	if got.TxID != wantTxID {
+		t.Fatalf("txid=%q, want %q", got.TxID, wantTxID)
+	}
+	if got.Error != "" {
+		t.Fatalf("error=%q, want empty", got.Error)
+	}
+	if got := state.mempool.Len(); got != 1 {
+		t.Fatalf("mempool len=%d, want 1", got)
+	}
+	if !bytes.Equal(announced, txBytes) {
+		t.Fatalf("announceTx payload mismatch")
+	}
+	metrics := renderPrometheusMetrics(state)
+	if !strings.Contains(metrics, `rubin_node_submit_tx_total{result="accepted"} 1`) {
+		t.Fatalf("missing accepted metric in %q", metrics)
+	}
+}
+
 func TestDevnetRPCMetricsEndpoint(t *testing.T) {
 	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, true)))
 	defer server.Close()
@@ -420,5 +578,25 @@ func TestStartDevnetRPCServerLifecycle(t *testing.T) {
 	}
 	if err := server.Close(context.Background()); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestStartDevnetRPCServerDisabledReturnsNil(t *testing.T) {
+	server, err := startDevnetRPCServer(context.Background(), "   ", mustRPCState(t, false), nil, nil)
+	if err != nil {
+		t.Fatalf("startDevnetRPCServer: %v", err)
+	}
+	if server != nil {
+		t.Fatalf("server=%#v, want nil", server)
+	}
+}
+
+func TestStartDevnetRPCServerRejectsNilState(t *testing.T) {
+	server, err := startDevnetRPCServer(context.Background(), "127.0.0.1:0", nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected nil-state error")
+	}
+	if server != nil {
+		t.Fatalf("server=%#v, want nil", server)
 	}
 }

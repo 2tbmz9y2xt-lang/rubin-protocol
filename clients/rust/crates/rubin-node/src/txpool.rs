@@ -210,11 +210,12 @@ fn unavailable(message: impl Into<String>) -> TxPoolAdmitError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
 
     use rubin_consensus::block::BLOCK_HEADER_BYTES;
-    use rubin_consensus::parse_tx;
+    use rubin_consensus::{parse_tx, Outpoint, UtxoEntry};
 
     use super::{
         conflict, mtp_median, next_block_height, next_block_mtp, rejected, unavailable, TxPool,
@@ -233,6 +234,28 @@ mod tests {
     #[derive(serde::Deserialize)]
     struct MaturityVector {
         tx_hex: String,
+    }
+
+    #[derive(Clone, serde::Deserialize)]
+    struct FixtureUtxo {
+        txid: String,
+        vout: u32,
+        value: u64,
+        covenant_type: u16,
+        covenant_data: String,
+        creation_height: u64,
+        created_by_coinbase: bool,
+    }
+
+    #[derive(Clone, serde::Deserialize)]
+    struct PositiveTxVector {
+        id: String,
+        tx_hex: String,
+        #[serde(default)]
+        chain_id: Option<String>,
+        height: u64,
+        expect_ok: bool,
+        utxos: Vec<FixtureUtxo>,
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
@@ -274,6 +297,63 @@ mod tests {
         hex::decode(vector.tx_hex).expect("tx hex")
     }
 
+    fn parse_hex32_test(name: &str, value: &str) -> [u8; 32] {
+        let raw = hex::decode(value).unwrap_or_else(|err| panic!("{name} hex: {err}"));
+        assert_eq!(raw.len(), 32, "{name} must be 32 bytes");
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&raw);
+        out
+    }
+
+    fn fixture_utxos_to_map(items: &[FixtureUtxo]) -> HashMap<Outpoint, UtxoEntry> {
+        let mut out = HashMap::with_capacity(items.len());
+        for item in items {
+            out.insert(
+                Outpoint {
+                    txid: parse_hex32_test("fixture utxo txid", &item.txid),
+                    vout: item.vout,
+                },
+                UtxoEntry {
+                    value: item.value,
+                    covenant_type: item.covenant_type,
+                    covenant_data: hex::decode(&item.covenant_data)
+                        .expect("fixture covenant_data hex"),
+                    creation_height: item.creation_height,
+                    created_by_coinbase: item.created_by_coinbase,
+                },
+            );
+        }
+        out
+    }
+
+    fn positive_fixture_vector() -> PositiveTxVector {
+        const UTXO_BASIC_FIXTURE_JSON: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../../conformance/fixtures/CV-UTXO-BASIC.json"
+        ));
+        let fixture: FixtureFile<PositiveTxVector> =
+            serde_json::from_str(UTXO_BASIC_FIXTURE_JSON).expect("parse positive fixture");
+        fixture
+            .vectors
+            .into_iter()
+            .find(|vector| vector.id == "CV-U-06")
+            .expect("positive fixture vector")
+    }
+
+    fn fixture_chain_id(chain_id: Option<&str>) -> [u8; 32] {
+        chain_id
+            .map(|value| parse_hex32_test("chain_id", value))
+            .unwrap_or([0u8; 32])
+    }
+
+    fn chain_state_from_positive_fixture(vector: &PositiveTxVector) -> ChainState {
+        let mut state = ChainState::new();
+        state.has_tip = vector.height > 0;
+        state.height = vector.height.saturating_sub(1);
+        state.utxos = fixture_utxos_to_map(&vector.utxos);
+        state
+    }
+
     #[test]
     fn mtp_median_uses_sorted_middle_of_window() {
         let got = mtp_median(5, &[9, 3, 5, 1, 7]);
@@ -293,6 +373,39 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
         assert!(err.message.contains("transaction rejected"));
+    }
+
+    #[test]
+    fn admit_accepts_valid_conformance_tx() {
+        let vector = positive_fixture_vector();
+        assert!(vector.expect_ok, "{} should be positive fixture", vector.id);
+        let raw = hex::decode(&vector.tx_hex).expect("tx hex");
+        let (tx, txid, _wtxid, consumed) = parse_tx(&raw).expect("parse tx");
+        assert_eq!(consumed, raw.len(), "{}", vector.id);
+
+        let state = chain_state_from_positive_fixture(&vector);
+        let mut pool = TxPool::new();
+        let admitted = pool
+            .admit(
+                &raw,
+                &state,
+                None,
+                fixture_chain_id(vector.chain_id.as_deref()),
+            )
+            .expect("admit valid tx");
+
+        assert_eq!(admitted, txid);
+        assert_eq!(pool.len(), 1);
+        let entry = pool.txs.get(&txid).expect("pool entry");
+        assert_eq!(entry.raw, raw);
+        assert_eq!(entry.inputs.len(), tx.inputs.len());
+        for input in &tx.inputs {
+            let outpoint = Outpoint {
+                txid: input.prev_txid,
+                vout: input.prev_vout,
+            };
+            assert_eq!(pool.spenders.get(&outpoint), Some(&txid));
+        }
     }
 
     #[test]
@@ -462,6 +575,32 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
         assert!(err.message.contains("missing canonical header"));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn admit_reports_unavailable_when_header_lookup_fails() {
+        let vector = positive_fixture_vector();
+        let raw = hex::decode(&vector.tx_hex).expect("tx hex");
+        let mut state = chain_state_from_positive_fixture(&vector);
+        state.has_tip = true;
+        state.height = 0;
+
+        let (mut store, dir) = open_block_store("rubin-txpool-admit-header-read");
+        store
+            .set_canonical_tip(0, [0x42; 32])
+            .expect("set canonical tip");
+
+        let err = TxPool::new()
+            .admit(
+                &raw,
+                &state,
+                Some(&store),
+                fixture_chain_id(vector.chain_id.as_deref()),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
+        assert!(err.message.contains("read header"));
         fs::remove_dir_all(dir).expect("cleanup");
     }
 

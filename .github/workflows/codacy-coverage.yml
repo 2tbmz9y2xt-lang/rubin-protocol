@@ -85,7 +85,16 @@ jobs:
       - name: Go coverage
         run: |
           cd clients/go
-          go test -coverprofile=coverage.out ./...
+          # Codacy coverage stays focused on runtime libraries plus the
+          # specific devnet RPC CLI entrypoints added in this track.
+          # Other unrelated cmd/* tools remain out of scope for this gate.
+          pkgs="$(
+            {
+              go list ./... | grep -v '/cmd/'
+              printf '%s\n' ./cmd/rubin-node ./cmd/rubin-txgen
+            } | sort -u
+          )"
+          go test -coverprofile=coverage.out ${pkgs}
 
       - name: Rust coverage
         run: |

@@ -267,6 +267,9 @@ func TestSubmitTxSucceedsOn200(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method=%q, want POST", r.Method)
 		}
+		if r.URL.Path != "/submit_tx" {
+			t.Fatalf("path=%q, want /submit_tx", r.URL.Path)
+		}
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Fatalf("ReadAll: %v", err)
@@ -332,6 +335,55 @@ func TestRunSubmitToReturnsErrorOnReject(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "submit failed: status=422") {
 		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestRunSubmitToReturnsErrorOnInvalidTarget(t *testing.T) {
+	fromKey := mustTxGenKeypair(t)
+	toKey := mustTxGenKeypair(t)
+	fromDER, err := fromKey.PrivateKeyDER()
+	if err != nil {
+		t.Fatalf("PrivateKeyDER: %v", err)
+	}
+
+	dir := t.TempDir()
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+
+	st := node.NewChainState()
+	st.HasTip = true
+	st.Height = 100
+	var prevTxid [32]byte
+	prevTxid[0] = 0x25
+	st.Utxos[consensus.Outpoint{Txid: prevTxid, Vout: 0}] = consensus.UtxoEntry{
+		Value:             100,
+		CovenantType:      consensus.COV_TYPE_P2PK,
+		CovenantData:      fromAddress,
+		CreationHeight:    0,
+		CreatedByCoinbase: true,
+	}
+	if err := st.Save(node.ChainStatePath(dir)); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--datadir", dir,
+		"--from-key", hex.EncodeToString(fromDER),
+		"--to-key", hex.EncodeToString(toAddress),
+		"--amount", "90",
+		"--fee", "1",
+		"--submit-to", "https://example.com:19112/debug",
+	}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("run exit=%d stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `submit failed: submit target host "example.com" must be localhost or loopback`) {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) == "" {
+		t.Fatal("expected generated tx hex on stdout before submit failure")
 	}
 }
 
