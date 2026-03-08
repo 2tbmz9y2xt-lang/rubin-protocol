@@ -29,8 +29,26 @@ func TestAddrPayloadErrorsAndHandshakeCaps(t *testing.T) {
 	if _, err := encodeAddrPayload([]string{"bad"}); err == nil {
 		t.Fatalf("encodeAddrPayload(bad) unexpectedly succeeded")
 	}
+	if _, err := encodeAddrPayload([]string{"localhost:18444"}); err == nil {
+		t.Fatalf("encodeAddrPayload(localhost) unexpectedly succeeded")
+	}
+	if _, err := encodeAddrPayload([]string{"127.0.0.1:0"}); err == nil {
+		t.Fatalf("encodeAddrPayload(port=0) unexpectedly succeeded")
+	}
 	if _, err := decodeAddrPayload([]byte{0x01, 0x02}); err == nil {
 		t.Fatalf("decodeAddrPayload(short) unexpectedly succeeded")
+	}
+	if decoded, err := decodeAddrPayload(nil); err != nil || decoded != nil {
+		t.Fatalf("decodeAddrPayload(nil)=%v err=%v, want nil nil", decoded, err)
+	}
+	invalidEntry, err := encodeAddrPayload([]string{"127.0.0.1:18444"})
+	if err != nil {
+		t.Fatalf("encodeAddrPayload(valid): %v", err)
+	}
+	invalidEntry[len(invalidEntry)-2] = 0
+	invalidEntry[len(invalidEntry)-1] = 0
+	if _, err := decodeAddrPayload(invalidEntry); err == nil {
+		t.Fatalf("decodeAddrPayload(invalid entry) unexpectedly succeeded")
 	}
 	if got := preHandshakePayloadCap(messageGetAddr); got != 0 {
 		t.Fatalf("preHandshakePayloadCap(getaddr)=%d, want 0", got)
@@ -113,6 +131,30 @@ func TestAddrManagerEvictionAndLen(t *testing.T) {
 	manager.MarkAttempted("127.0.0.1:21000")
 }
 
+func TestAddrManagerNilAndHelperBranches(t *testing.T) {
+	var nilManager *addrManager
+	nilManager.AddAddrs([]string{"127.0.0.1:20001"})
+	nilManager.MarkAttempted("127.0.0.1:20001")
+	if got := nilManager.GetAddrs(1); got != nil {
+		t.Fatalf("GetAddrs(nil)=%v, want nil", got)
+	}
+	if got := nilManager.Len(); got != 0 {
+		t.Fatalf("Len(nil)=%d, want 0", got)
+	}
+
+	manager := newAddrManager(nil)
+	manager.AddAddrs([]string{"127.0.0.1:20002", "127.0.0.1:20003"})
+	if got := manager.GetAddrs(-1); len(got) != 2 {
+		t.Fatalf("GetAddrs(-1) len=%d, want 2", len(got))
+	}
+	if got := normalizeNetAddr("127.0.0.1:99999"); got != "" {
+		t.Fatalf("normalizeNetAddr(invalid port)=%q, want empty", got)
+	}
+	if got := normalizeNetAddr("localhost:18444"); got != "" {
+		t.Fatalf("normalizeNetAddr(non-ip host)=%q, want empty", got)
+	}
+}
+
 func TestDiscoverableAddrsFiltersSelfConnectedAndBanned(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:19011", nil)
 	self := normalizeNetAddr(h.service.Addr())
@@ -144,5 +186,35 @@ func TestRequestPeerAddrsNilAndConnectDiscoveredSkipsConnected(t *testing.T) {
 	h.service.connectDiscoveredAddrs([]string{addr})
 	if got := h.service.connectedPeerCount(); got != 1 {
 		t.Fatalf("connectedPeerCount()=%d, want 1", got)
+	}
+}
+
+func TestAddrHandlerAndDiscoveryEdgeBranches(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:19031", nil)
+	p := newPeerRuntimeTestPeer(t)
+	p.service = h.service
+
+	if err := p.handleGetAddr([]byte{0x01}); err != nil {
+		t.Fatalf("handleGetAddr(non-empty payload): %v", err)
+	}
+	if err := p.handleAddr([]byte{0x01, 0x02}); err == nil {
+		t.Fatalf("handleAddr(invalid payload) unexpectedly succeeded")
+	}
+
+	var nilService *Service
+	if got := nilService.discoverableAddrs(3); got != nil {
+		t.Fatalf("discoverableAddrs(nil)=%v, want nil", got)
+	}
+	nilService.connectDiscoveredAddrs([]string{"127.0.0.1:19032"})
+
+	h.service.addrMgr.AddAddrs([]string{"127.0.0.1:19032", "127.0.0.1:19033"})
+	got := h.service.discoverableAddrs(1)
+	if len(got) != 1 {
+		t.Fatalf("discoverableAddrs(max=1)=%v, want single entry", got)
+	}
+
+	normalized := normalizePeerAddrs([]string{" 127.0.0.1:19032 ", "127.0.0.1:19032", "", "127.0.0.1:19033"})
+	if !slices.Equal(normalized, []string{"127.0.0.1:19032", "127.0.0.1:19033"}) {
+		t.Fatalf("normalizePeerAddrs=%v", normalized)
 	}
 }
