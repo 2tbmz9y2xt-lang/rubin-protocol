@@ -3,7 +3,6 @@ package consensus
 import (
 	"bytes"
 	"math/big"
-	"math/bits"
 )
 
 func validateCoinbaseStructure(pb *ParsedBlock, blockHeight uint64) error {
@@ -67,12 +66,7 @@ func validateCoinbaseApplyOutputs(coinbase *Tx) error {
 }
 
 func addU64ToU128Block(x u128, v uint64) (u128, error) {
-	lo, carry := bits.Add64(x.lo, v, 0)
-	hi, carry2 := bits.Add64(x.hi, 0, carry)
-	if carry2 != 0 {
-		return u128{}, txerr(BLOCK_ERR_PARSE, "u128 overflow")
-	}
-	return u128{hi: hi, lo: lo}, nil
+	return addU64ToU128WithCode(x, v, BLOCK_ERR_PARSE)
 }
 
 func validateCoinbaseWitnessCommitment(pb *ParsedBlock) error {
