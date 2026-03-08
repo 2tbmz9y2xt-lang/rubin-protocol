@@ -113,12 +113,14 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		cfg.TxRelayFanout = defaultTxRelayFanout
 	}
 	outboundAddrs := normalizeDialTargets(cfg.BootstrapPeers)
+	addrMgr := newAddrManager(cfg.Now)
+	seedAddrManagerFromBootstrap(addrMgr, outboundAddrs)
 	return &Service{
 		cfg:            cfg,
 		peers:          make(map[string]*peer),
 		reconnectState: make(map[string]*reconnectEntry),
 		outboundAddrs:  outboundAddrs,
-		addrMgr:        newAddrManager(cfg.Now),
+		addrMgr:        addrMgr,
 		dialing:        make(map[string]struct{}),
 		blockSeen:      newBoundedHashSet(defaultBlockSeenCapacity),
 		txSeen:         newBoundedHashSet(defaultTxSeenCapacity),
@@ -197,4 +199,17 @@ func normalizeDialTargets(addrs []string) []string {
 		out = append(out, addr)
 	}
 	return out
+}
+
+func seedAddrManagerFromBootstrap(manager *addrManager, addrs []string) {
+	if manager == nil || len(addrs) == 0 {
+		return
+	}
+	seeds := make([]string, 0, len(addrs))
+	for _, addr := range addrs {
+		if normalized := normalizeNetAddr(addr); normalized != "" {
+			seeds = append(seeds, normalized)
+		}
+	}
+	manager.AddAddrs(seeds)
 }

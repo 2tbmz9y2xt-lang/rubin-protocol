@@ -264,3 +264,14 @@ func TestRegisterPeerDoesNotPersistRemoteSocketEndpoint(t *testing.T) {
 		t.Fatalf("addr manager learned transient peer addr: %v", got)
 	}
 }
+
+func TestNewServiceSeedsAddrManagerFromBootstrapPeers(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:19051", []string{
+		"127.0.0.1:19052",
+		"seed.example.com:18444",
+		"127.0.0.1:19052",
+	})
+	if got := h.service.addrMgr.GetAddrs(8); !slices.Equal(got, []string{"127.0.0.1:19052"}) {
+		t.Fatalf("seeded bootstrap addrs=%v, want [127.0.0.1:19052]", got)
+	}
+}
