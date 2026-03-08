@@ -106,7 +106,7 @@ func (s *Service) startOutboundDial(addr string) bool {
 	if s == nil {
 		return false
 	}
-	addr = normalizeNetAddr(addr)
+	addr = normalizeDialTarget(addr)
 	if addr == "" || s.isConnected(addr) || !s.beginDial(addr) {
 		return false
 	}
@@ -119,7 +119,7 @@ func (s *Service) beginDial(addr string) bool {
 	if s == nil {
 		return false
 	}
-	addr = normalizeNetAddr(addr)
+	addr = normalizeDialTarget(addr)
 	if addr == "" {
 		return false
 	}
@@ -136,7 +136,7 @@ func (s *Service) finishDial(addr string) {
 	if s == nil {
 		return
 	}
-	addr = normalizeNetAddr(addr)
+	addr = normalizeDialTarget(addr)
 	if addr == "" {
 		return
 	}
@@ -149,7 +149,7 @@ func (s *Service) isDialing(addr string) bool {
 	if s == nil {
 		return false
 	}
-	addr = normalizeNetAddr(addr)
+	addr = normalizeDialTarget(addr)
 	if addr == "" {
 		return false
 	}

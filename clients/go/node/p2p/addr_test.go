@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
@@ -52,6 +53,10 @@ func TestAddrPayloadErrorsAndHandshakeCaps(t *testing.T) {
 	}
 	if _, err := decodeAddrPayload([]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f}); err == nil {
 		t.Fatalf("decodeAddrPayload(overflow count) unexpectedly succeeded")
+	}
+	tooMany := consensus.AppendCompactSize(nil, maxAddrPayloadEntries+1)
+	if _, err := decodeAddrPayload(tooMany); err == nil {
+		t.Fatalf("decodeAddrPayload(too many entries) unexpectedly succeeded")
 	}
 	if got := preHandshakePayloadCap(messageGetAddr); got != 0 {
 		t.Fatalf("preHandshakePayloadCap(getaddr)=%d, want 0", got)
@@ -155,6 +160,9 @@ func TestAddrManagerNilAndHelperBranches(t *testing.T) {
 	}
 	if got := normalizeNetAddr("localhost:18444"); got != "" {
 		t.Fatalf("normalizeNetAddr(non-ip host)=%q, want empty", got)
+	}
+	if got := normalizeDialTarget("Seed.Example.com:18444"); got != "seed.example.com:18444" {
+		t.Fatalf("normalizeDialTarget(hostname)=%q, want seed.example.com:18444", got)
 	}
 }
 

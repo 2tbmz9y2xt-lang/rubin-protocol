@@ -146,6 +146,14 @@ func addrSelectionScore(salt [32]byte, addr string) [32]byte {
 }
 
 func normalizeNetAddr(raw string) string {
+	return normalizeEndpoint(raw, false)
+}
+
+func normalizeDialTarget(raw string) string {
+	return normalizeEndpoint(raw, true)
+}
+
+func normalizeEndpoint(raw string, allowHostname bool) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
@@ -154,13 +162,19 @@ func normalizeNetAddr(raw string) string {
 	if err != nil {
 		return ""
 	}
-	ip := net.ParseIP(strings.Trim(host, "[]"))
-	if ip == nil {
-		return ""
-	}
+	host = strings.Trim(host, "[]")
 	port, err := strconv.ParseUint(portStr, 10, 16)
 	if err != nil || port == 0 {
 		return ""
 	}
-	return net.JoinHostPort(ip.String(), strconv.FormatUint(port, 10))
+	ip := net.ParseIP(host)
+	if ip != nil {
+		host = ip.String()
+	} else {
+		if !allowHostname || host == "" || strings.ContainsAny(host, " \t\r\n/") {
+			return ""
+		}
+		host = strings.ToLower(host)
+	}
+	return net.JoinHostPort(host, strconv.FormatUint(port, 10))
 }

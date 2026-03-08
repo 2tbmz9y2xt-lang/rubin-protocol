@@ -40,6 +40,7 @@ const (
 	wireCommandSize         = 12
 	versionPayloadBaseBytes = 17
 	versionPayloadBytes     = versionPayloadBaseBytes + 32 + 32 + 8
+	maxAddrPayloadEntries   = maxKnownAddrs
 )
 
 type message struct {
@@ -403,13 +404,9 @@ func decodeAddrPayload(payload []byte) ([]string, error) {
 	if len(payload) == 0 {
 		return nil, nil
 	}
-	count, consumed, err := consensus.DecodeCompactSize(payload)
+	count, consumed, err := decodeAddrCount(payload)
 	if err != nil {
 		return nil, err
-	}
-	maxInt := int(^uint(0) >> 1)
-	if count > uint64(maxInt) {
-		return nil, errors.New("addr count overflow")
 	}
 	remaining := len(payload) - consumed
 	if remaining < 0 || count > uint64(remaining/addrPayloadEntrySize) {
@@ -422,15 +419,39 @@ func decodeAddrPayload(payload []byte) ([]string, error) {
 	out := make([]string, 0, int(count))
 	offset := consumed
 	for i := uint64(0); i < count; i++ {
-		ip := net.IP(payload[offset : offset+16])
-		offset += 16
-		port := binary.BigEndian.Uint16(payload[offset : offset+2])
-		offset += 2
-		addr := normalizeNetAddr(net.JoinHostPort(ip.String(), strconv.FormatUint(uint64(port), 10)))
-		if addr == "" {
-			return nil, errors.New("invalid addr payload entry")
+		addr, nextOffset, err := decodeAddrPayloadEntry(payload, offset)
+		if err != nil {
+			return nil, err
 		}
+		offset = nextOffset
 		out = append(out, addr)
 	}
 	return out, nil
+}
+
+func decodeAddrCount(payload []byte) (uint64, int, error) {
+	count, consumed, err := consensus.DecodeCompactSize(payload)
+	if err != nil {
+		return 0, 0, err
+	}
+	maxInt := int(^uint(0) >> 1)
+	if count > uint64(maxInt) {
+		return 0, 0, errors.New("addr count overflow")
+	}
+	if count > maxAddrPayloadEntries {
+		return 0, 0, errors.New("addr count exceeds limit")
+	}
+	return count, consumed, nil
+}
+
+func decodeAddrPayloadEntry(payload []byte, offset int) (string, int, error) {
+	ip := net.IP(payload[offset : offset+16])
+	offset += 16
+	port := binary.BigEndian.Uint16(payload[offset : offset+2])
+	offset += 2
+	addr := normalizeNetAddr(net.JoinHostPort(ip.String(), strconv.FormatUint(uint64(port), 10)))
+	if addr == "" {
+		return "", 0, errors.New("invalid addr payload entry")
+	}
+	return addr, offset, nil
 }
