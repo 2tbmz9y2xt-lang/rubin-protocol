@@ -320,6 +320,112 @@ func TestOrphanResolution(t *testing.T) {
 	}
 }
 
+func TestHandleBlockRequestsMoreBlocksAfterAccept(t *testing.T) {
+	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	peer := &peer{
+		service: sink.service,
+		state: node.PeerState{
+			RemoteVersion: testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 2),
+		},
+	}
+
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+	peer.conn = local
+
+	done := make(chan message, 1)
+	go func() {
+		frame, err := readFrame(remote, networkMagic(peer.service.cfg.PeerRuntimeConfig.Network), peer.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+		if err != nil {
+			t.Errorf("readFrame(remote): %v", err)
+			return
+		}
+		done <- frame
+	}()
+
+	if err := peer.handleBlock(node.DevnetGenesisBlockBytes()); err != nil {
+		t.Fatalf("handleBlock(genesis): %v", err)
+	}
+
+	frame := <-done
+	if frame.Command != messageGetBlk {
+		t.Fatalf("frame.Command=%q, want %q", frame.Command, messageGetBlk)
+	}
+}
+
+func TestProcessRelayedBlockExistingBlockIsNoop(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	peer := &peer{
+		service: h.service,
+		state: node.PeerState{
+			RemoteVersion: testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 0),
+		},
+	}
+
+	summary, err := peer.processRelayedBlock(node.DevnetGenesisBlockBytes())
+	if err != nil {
+		t.Fatalf("processRelayedBlock(existing genesis): %v", err)
+	}
+	if summary != nil {
+		t.Fatalf("summary=%v, want nil for existing block", summary)
+	}
+}
+
+func TestResolveOrphansDropsInvalidChildBytes(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	var parentHash [32]byte
+	parentHash[31] = 0x11
+	var childHash [32]byte
+	childHash[31] = 0x22
+	if !h.service.orphans.Add(childHash, parentHash, []byte{0x00}) {
+		t.Fatalf("expected orphan add")
+	}
+
+	h.service.resolveOrphans(nil, parentHash)
+
+	if got := h.service.orphans.Len(); got != 0 {
+		t.Fatalf("orphans.Len()=%d, want 0 after invalid child drop", got)
+	}
+}
+
+func TestResolveOrphansRequeuesStillMissingChild(t *testing.T) {
+	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
+
+	height1Hash, ok, err := source.blockStore.CanonicalHash(1)
+	if err != nil || !ok {
+		t.Fatalf("CanonicalHash(1): ok=%v err=%v", ok, err)
+	}
+	height2Hash, ok, err := source.blockStore.CanonicalHash(2)
+	if err != nil || !ok {
+		t.Fatalf("CanonicalHash(2): ok=%v err=%v", ok, err)
+	}
+	block2Bytes, err := source.blockStore.GetBlockByHash(height2Hash)
+	if err != nil {
+		t.Fatalf("GetBlockByHash(height2): %v", err)
+	}
+
+	var wrongParent [32]byte
+	wrongParent[31] = 0x44
+	if !sink.service.orphans.Add(height2Hash, wrongParent, block2Bytes) {
+		t.Fatalf("expected orphan add")
+	}
+
+	sink.service.resolveOrphans(nil, wrongParent)
+
+	if got := sink.service.orphans.Len(); got != 1 {
+		t.Fatalf("orphans.Len()=%d, want 1 after requeue", got)
+	}
+	if !sink.service.blockSeen.Has(height2Hash) {
+		t.Fatalf("expected child hash to stay marked in blockSeen")
+	}
+	children := sink.service.orphans.TakeChildren(height1Hash)
+	if len(children) != 1 || children[0].blockHash != height2Hash {
+		t.Fatalf("children=%v, want requeued child under actual parent", children)
+	}
+}
+
 func newTestHarness(t *testing.T, blockCount int, bindAddr string, bootstrapPeers []string) *testHarness {
 	t.Helper()
 
