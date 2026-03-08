@@ -71,9 +71,7 @@ func (p *peer) processRelayedBlock(blockBytes []byte) (*node.ChainStateConnectSu
 	p.service.chainMu.Unlock()
 	if err != nil {
 		if errors.Is(err, node.ErrParentNotFound) {
-			if p.service.orphans.Add(blockHash, pb.Header.PrevBlockHash, blockBytes) {
-				p.service.blockSeen.Add(blockHash)
-			}
+			p.service.retainOrResolveOrphan(p, blockHash, pb.Header.PrevBlockHash, blockBytes)
 			return nil, nil
 		}
 		p.bumpBan(100, err.Error())
@@ -102,6 +100,18 @@ func (p *peer) acceptedRelayedBlock(blockHash [32]byte, summary *node.ChainState
 	p.service.resolveOrphans(p, blockHash)
 }
 
+func (s *Service) retainOrResolveOrphan(skip *peer, blockHash, parentHash [32]byte, blockBytes []byte) {
+	if !s.orphans.Add(blockHash, parentHash, blockBytes) {
+		return
+	}
+	s.blockSeen.Add(blockHash)
+	parentPresent, err := s.hasBlock(parentHash)
+	if err != nil || !parentPresent {
+		return
+	}
+	s.resolveOrphans(skip, parentHash)
+}
+
 func (s *Service) resolveOrphans(skip *peer, blockHash [32]byte) {
 	children := s.orphans.TakeChildren(blockHash)
 	for _, child := range children {
@@ -114,9 +124,7 @@ func (s *Service) resolveOrphans(skip *peer, blockHash [32]byte) {
 		s.chainMu.Unlock()
 		if applyErr != nil {
 			if errors.Is(applyErr, node.ErrParentNotFound) {
-				if s.orphans.Add(childHash, pb.Header.PrevBlockHash, child.blockBytes) {
-					s.blockSeen.Add(childHash)
-				}
+				s.retainOrResolveOrphan(skip, childHash, pb.Header.PrevBlockHash, child.blockBytes)
 			}
 			continue
 		}

@@ -550,6 +550,36 @@ func TestAcceptedRelayedBlockBroadcastsResolvedOrphans(t *testing.T) {
 	}
 }
 
+func TestRetainOrResolveOrphanImmediatelyResolvesWhenParentAlreadyExists(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+
+	height1Hash, ok, err := source.blockStore.CanonicalHash(1)
+	if err != nil || !ok {
+		t.Fatalf("CanonicalHash(1): ok=%v err=%v", ok, err)
+	}
+	block1Bytes, err := source.blockStore.GetBlockByHash(height1Hash)
+	if err != nil {
+		t.Fatalf("GetBlockByHash(height1): %v", err)
+	}
+
+	sink.service.retainOrResolveOrphan(nil, height1Hash, node.DevnetGenesisBlockHash(), block1Bytes)
+
+	if got := sink.service.orphans.Len(); got != 0 {
+		t.Fatalf("orphans.Len()=%d, want 0 after immediate resolve", got)
+	}
+	if !sink.service.blockSeen.Has(height1Hash) {
+		t.Fatalf("expected block hash to remain marked as seen")
+	}
+	height, tipHash, ok, err := sink.blockStore.Tip()
+	if err != nil {
+		t.Fatalf("sink tip: %v", err)
+	}
+	if !ok || height != 1 || tipHash != height1Hash {
+		t.Fatalf("tip=(%d,%x,%v), want (1,%x,true)", height, tipHash, ok, height1Hash)
+	}
+}
+
 func newTestHarness(t *testing.T, blockCount int, bindAddr string, bootstrapPeers []string) *testHarness {
 	t.Helper()
 
