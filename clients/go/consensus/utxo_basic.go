@@ -296,11 +296,7 @@ func applyNonCoinbaseTxBasicWork(
 				if len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1 {
 					return nil, 0, txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
 				}
-				cryptoSig, sighashType, err := extractCryptoSigAndSighash(w)
-				if err != nil {
-					return nil, 0, err
-				}
-				digest, err := SighashV1DigestWithType(tx, uint32(inputIndex), entry.Value, chainID, sighashType)
+				cryptoSig, digest, err := extractSigAndDigest(w, tx, uint32(inputIndex), entry.Value, chainID)
 				if err != nil {
 					return nil, 0, err
 				}
@@ -315,11 +311,7 @@ func applyNonCoinbaseTxBasicWork(
 				if verifySigExtFn == nil {
 					return nil, 0, txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext unsupported")
 				}
-				cryptoSig, sighashType, err := extractCryptoSigAndSighash(w)
-				if err != nil {
-					return nil, 0, err
-				}
-				digest, err := SighashV1DigestWithType(tx, uint32(inputIndex), entry.Value, chainID, sighashType)
+				cryptoSig, digest, err := extractSigAndDigest(w, tx, uint32(inputIndex), entry.Value, chainID)
 				if err != nil {
 					return nil, 0, err
 				}
@@ -552,10 +544,14 @@ type u128 struct {
 }
 
 func addU64ToU128(x u128, v uint64) (u128, error) {
+	return addU64ToU128WithCode(x, v, TX_ERR_PARSE)
+}
+
+func addU64ToU128WithCode(x u128, v uint64, code ErrorCode) (u128, error) {
 	lo, carry := bits.Add64(x.lo, v, 0)
 	hi, carry2 := bits.Add64(x.hi, 0, carry)
 	if carry2 != 0 {
-		return u128{}, txerr(TX_ERR_PARSE, "u128 overflow")
+		return u128{}, txerr(code, "u128 overflow")
 	}
 	return u128{hi: hi, lo: lo}, nil
 }
