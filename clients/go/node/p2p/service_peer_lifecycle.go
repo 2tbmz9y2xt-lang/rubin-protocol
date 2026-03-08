@@ -10,10 +10,10 @@ import (
 
 func (s *Service) runConn(conn net.Conn) {
 	defer s.loopWG.Done()
-	_ = s.handleConn(conn)
+	_ = s.handleConn(conn, "")
 }
 
-func (s *Service) handleConn(conn net.Conn) error {
+func (s *Service) handleConn(conn net.Conn, outboundAddr string) error {
 	defer func() {
 		if conn != nil {
 			_ = conn.Close()
@@ -41,10 +41,11 @@ func (s *Service) handleConn(conn net.Conn) error {
 		service: s,
 		state:   state,
 	}
+	current.state.Addr = peerAddressKey(outboundAddr, current.state.Addr)
 	if err := s.registerPeer(current); err != nil {
 		return err
 	}
-	defer s.unregisterPeer(current.addr())
+	defer s.unregisterPeer(current)
 
 	s.cfg.SyncEngine.RecordBestKnownHeight(state.RemoteVersion.BestHeight)
 	if err := s.requestBlocksIfBehind(current); err != nil {
@@ -69,14 +70,31 @@ func (s *Service) registerPeer(p *peer) error {
 	return nil
 }
 
-func (s *Service) unregisterPeer(addr string) {
+func (s *Service) unregisterPeer(p *peer) {
+	if s == nil || p == nil {
+		return
+	}
+	addr := p.addr()
+	remove := false
 	s.peersMu.Lock()
-	delete(s.peers, addr)
+	if current, ok := s.peers[addr]; ok && current == p {
+		delete(s.peers, addr)
+		remove = true
+	}
 	s.peersMu.Unlock()
-	s.cfg.PeerManager.RemovePeer(addr)
-	if s.isOutboundAddr(addr) {
+	if remove {
+		s.cfg.PeerManager.RemovePeer(addr)
+	}
+	if remove && s.isOutboundAddr(addr) {
 		s.scheduleReconnect(addr)
 	}
+}
+
+func peerAddressKey(outboundAddr string, runtimeAddr string) string {
+	if addr := normalizeReconnectAddr(outboundAddr); addr != "" {
+		return addr
+	}
+	return normalizeReconnectAddr(runtimeAddr)
 }
 
 func (s *Service) localVersion() (node.VersionPayloadV1, error) {

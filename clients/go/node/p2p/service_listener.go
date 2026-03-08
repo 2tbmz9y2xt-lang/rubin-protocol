@@ -101,7 +101,7 @@ func (s *Service) dialPeer(addr string) {
 		s.recordDialFailure(addr)
 		return
 	}
-	if err := s.handleConn(conn); err != nil && s.ctx != nil && s.ctx.Err() == nil {
+	if err := s.handleConn(conn, addr); err != nil && s.ctx != nil && s.ctx.Err() == nil {
 		s.recordDialFailure(addr)
 	}
 }
