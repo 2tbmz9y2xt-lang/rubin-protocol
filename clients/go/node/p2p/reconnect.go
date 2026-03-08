@@ -180,22 +180,6 @@ func (s *Service) isConnected(addr string) bool {
 }
 
 func normalizeReconnectAddr(addr string) string {
-	return strings.TrimSpace(addr)
-}
-
-func normalizePeerAddrs(addrs []string) []string {
-	seen := make(map[string]struct{}, len(addrs))
-	out := make([]string, 0, len(addrs))
-	for _, addr := range addrs {
-		addr = normalizeReconnectAddr(addr)
-		if addr == "" {
-			continue
-		}
-		if _, ok := seen[addr]; ok {
-			continue
-		}
-		seen[addr] = struct{}{}
-		out = append(out, addr)
-	}
-	return out
+	addr = strings.TrimSpace(addr)
+	return addr
 }

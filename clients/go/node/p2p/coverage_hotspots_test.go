@@ -403,15 +403,16 @@ func TestCoverage_RegisterPeerAndLocalVersion(t *testing.T) {
 }
 
 func TestCoverage_UnregisterPeerSchedulesReconnectForOutbound(t *testing.T) {
-	h := newTestHarness(t, 0, "127.0.0.1:0", []string{"peer-outbound"})
-	h.service.scheduleReconnect("peer-outbound")
-	current := &peer{service: h.service, state: node.PeerState{Addr: "peer-outbound"}}
-	h.service.peers["peer-outbound"] = current
+	const outboundAddr = "seed.devnet.local:19112"
+	h := newTestHarness(t, 0, "127.0.0.1:0", []string{outboundAddr})
+	h.service.scheduleReconnect(outboundAddr)
+	current := &peer{service: h.service, state: node.PeerState{Addr: outboundAddr}}
+	h.service.peers[outboundAddr] = current
 	h.service.unregisterPeer(current)
-	if !h.service.isOutboundAddr("peer-outbound") {
+	if !h.service.isOutboundAddr(outboundAddr) {
 		t.Fatalf("expected outbound peer tracking")
 	}
-	if got := h.service.reconnectSnapshot("peer-outbound").nextRetry; got.IsZero() {
+	if got := h.service.reconnectSnapshot(outboundAddr).nextRetry; got.IsZero() {
 		t.Fatalf("expected reconnect schedule after unregister")
 	}
 	if h.service.isOutboundAddr("  ") {

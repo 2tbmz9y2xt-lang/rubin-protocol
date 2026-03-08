@@ -49,6 +49,7 @@ type Service struct {
 	reconnectMu    sync.Mutex
 	reconnectState map[string]*reconnectEntry
 	outboundAddrs  []string
+	addrMgr        *addrManager
 
 	chainMu   sync.Mutex
 	blockSeen *boundedHashSet
@@ -108,12 +109,15 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	if cfg.TxRelayFanout <= 0 {
 		cfg.TxRelayFanout = defaultTxRelayFanout
 	}
-	outboundAddrs := normalizePeerAddrs(cfg.BootstrapPeers)
+	outboundAddrs := normalizeDialTargets(cfg.BootstrapPeers)
+	addrMgr := newAddrManager(cfg.Now)
+	seedAddrManagerFromBootstrap(addrMgr, outboundAddrs)
 	return &Service{
 		cfg:            cfg,
 		peers:          make(map[string]*peer),
 		reconnectState: make(map[string]*reconnectEntry),
 		outboundAddrs:  outboundAddrs,
+		addrMgr:        addrMgr,
 		blockSeen:      newBoundedHashSet(defaultBlockSeenCapacity),
 		txSeen:         newBoundedHashSet(defaultTxSeenCapacity),
 	}, nil
@@ -157,4 +161,36 @@ func (s *Service) AnnounceTx(txBytes []byte) error {
 		return nil
 	}
 	return s.broadcastInventory(nil, []InventoryVector{{Type: MSG_TX, Hash: txid}})
+}
+
+func normalizePeerAddrs(addrs []string) []string {
+	return normalizeUniqueAddrs(addrs, normalizeNetAddr)
+}
+
+func normalizeDialTargets(addrs []string) []string {
+	return normalizeUniqueAddrs(addrs, normalizeDialTarget)
+}
+
+func normalizeUniqueAddrs(addrs []string, normalize func(string) string) []string {
+	seen := make(map[string]struct{}, len(addrs))
+	out := make([]string, 0, len(addrs))
+	for _, addr := range addrs {
+		addr = normalize(addr)
+		if addr == "" {
+			continue
+		}
+		if _, ok := seen[addr]; ok {
+			continue
+		}
+		seen[addr] = struct{}{}
+		out = append(out, addr)
+	}
+	return out
+}
+
+func seedAddrManagerFromBootstrap(manager *addrManager, addrs []string) {
+	if manager == nil || len(addrs) == 0 {
+		return
+	}
+	manager.AddAddrs(normalizePeerAddrs(addrs))
 }

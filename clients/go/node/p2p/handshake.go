@@ -91,6 +91,10 @@ func preHandshakePayloadCap(command string) uint32 {
 		return versionPayloadBytes
 	case messageVerAck:
 		return 0
+	case messageGetAddr:
+		return 0
+	case messageAddr:
+		return 0
 	default:
 		return 0
 	}

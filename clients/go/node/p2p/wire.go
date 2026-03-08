@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
+	"strconv"
 
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
@@ -22,6 +25,8 @@ const (
 	messageBlock   = "block"
 	messageTx      = "tx"
 	messageGetBlk  = "getblocks"
+	messageGetAddr = "getaddr"
+	messageAddr    = "addr"
 	messagePing    = "ping"
 	messagePong    = "pong"
 	messageHeaders = "headers"
@@ -30,10 +35,12 @@ const (
 	MSG_TX    byte = 0x02
 
 	inventoryVectorSize     = 33
+	addrPayloadEntrySize    = 18
 	wireHeaderSize          = 24
 	wireCommandSize         = 12
 	versionPayloadBaseBytes = 17
 	versionPayloadBytes     = versionPayloadBaseBytes + 32 + 32 + 8
+	maxAddrPayloadEntries   = maxKnownAddrs
 )
 
 type message struct {
@@ -131,11 +138,9 @@ func writeFrame(w io.Writer, magic [4]byte, frame message, maxMessageSize uint32
 }
 
 func encodeVersionPayload(v node.VersionPayloadV1) ([]byte, error) {
-	var buf bytes.Buffer
-	if err := encodeVersionPayloadTo(&buf, v); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	return encodePayload(func(w io.Writer) error {
+		return encodeVersionPayloadTo(w, v)
+	})
 }
 
 func encodeVersionPayloadTo(w io.Writer, v node.VersionPayloadV1) error {
@@ -321,8 +326,14 @@ func encodeGetBlocksPayload(req GetBlocksPayload) ([]byte, error) {
 	if len(req.LocatorHashes) > math.MaxUint16 {
 		return nil, fmt.Errorf("too many locator hashes: %d", len(req.LocatorHashes))
 	}
+	return encodePayload(func(w io.Writer) error {
+		return encodeGetBlocksPayloadTo(w, req)
+	})
+}
+
+func encodePayload(encode func(io.Writer) error) ([]byte, error) {
 	var buf bytes.Buffer
-	if err := encodeGetBlocksPayloadTo(&buf, req); err != nil {
+	if err := encode(&buf); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
@@ -363,4 +374,88 @@ func decodeGetBlocksPayload(payload []byte) (GetBlocksPayload, error) {
 	}
 	copy(out.StopHash[:], payload[offset:offset+32])
 	return out, nil
+}
+
+func encodeAddrPayload(addrs []string) ([]byte, error) {
+	var buf bytes.Buffer
+	buf.Write(consensus.EncodeCompactSize(uint64(len(addrs))))
+	for _, addr := range addrs {
+		host, portStr, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		ip := net.ParseIP(host)
+		if ip == nil {
+			return nil, fmt.Errorf("invalid addr host: %s", host)
+		}
+		port, err := strconv.ParseUint(portStr, 10, 16)
+		if err != nil || port == 0 {
+			return nil, fmt.Errorf("invalid addr port: %s", portStr)
+		}
+		ip = ip.To16()
+		if ip == nil {
+			return nil, fmt.Errorf("invalid addr ip width: %s", host)
+		}
+		buf.Write(ip)
+		var portBytes [2]byte
+		binary.BigEndian.PutUint16(portBytes[:], uint16(port))
+		buf.Write(portBytes[:])
+	}
+	return buf.Bytes(), nil
+}
+
+func decodeAddrPayload(payload []byte) ([]string, error) {
+	if len(payload) == 0 {
+		return nil, nil
+	}
+	count, consumed, err := decodeAddrCount(payload)
+	if err != nil {
+		return nil, err
+	}
+	remaining := len(payload) - consumed
+	if remaining < 0 || count > uint64(remaining/addrPayloadEntrySize) {
+		return nil, errors.New("addr payload width mismatch")
+	}
+	needed := consumed + int(count)*addrPayloadEntrySize
+	if len(payload) != needed {
+		return nil, errors.New("addr payload width mismatch")
+	}
+	out := make([]string, 0, int(count))
+	offset := consumed
+	for i := uint64(0); i < count; i++ {
+		addr, nextOffset, err := decodeAddrPayloadEntry(payload, offset)
+		if err != nil {
+			return nil, err
+		}
+		offset = nextOffset
+		out = append(out, addr)
+	}
+	return out, nil
+}
+
+func decodeAddrCount(payload []byte) (uint64, int, error) {
+	count, consumed, err := consensus.DecodeCompactSize(payload)
+	if err != nil {
+		return 0, 0, err
+	}
+	maxInt := int(^uint(0) >> 1)
+	if count > uint64(maxInt) {
+		return 0, 0, errors.New("addr count overflow")
+	}
+	if count > maxAddrPayloadEntries {
+		return 0, 0, errors.New("addr count exceeds limit")
+	}
+	return count, consumed, nil
+}
+
+func decodeAddrPayloadEntry(payload []byte, offset int) (string, int, error) {
+	ip := net.IP(payload[offset : offset+16])
+	offset += 16
+	port := binary.BigEndian.Uint16(payload[offset : offset+2])
+	offset += 2
+	addr := normalizeNetAddr(net.JoinHostPort(ip.String(), strconv.FormatUint(uint64(port), 10)))
+	if addr == "" {
+		return "", 0, errors.New("invalid addr payload entry")
+	}
+	return addr, offset, nil
 }
