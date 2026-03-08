@@ -251,18 +251,7 @@ impl PeerSession {
                     }
                 }
                 MESSAGE_GETDATA => {
-                    for item in decode_inventory_vectors(&msg.payload)? {
-                        if item.kind != MSG_BLOCK {
-                            continue;
-                        }
-                        let block = sync_engine
-                            .get_block_by_hash(item.hash)
-                            .map_err(io::Error::other)?;
-                        self.write_message(&WireMessage {
-                            command: MESSAGE_BLOCK.to_string(),
-                            payload: block,
-                        })?;
-                    }
+                    self.respond_to_getdata(&msg.payload, sync_engine)?;
                 }
                 MESSAGE_GETBLOCKS => {
                     let items = self.handle_getblocks(&msg.payload, sync_engine)?;
@@ -276,6 +265,7 @@ impl PeerSession {
                 }
                 MESSAGE_BLOCK => {
                     self.handle_block(&msg.payload, sync_engine)?;
+                    self.request_more_blocks_if_behind(sync_engine)?;
                 }
                 MESSAGE_TX | "headers" | "pong" => {}
                 "ping" => {
@@ -315,6 +305,20 @@ impl PeerSession {
             command: MESSAGE_GETBLOCKS.to_string(),
             payload,
         })
+    }
+
+    fn request_more_blocks_if_behind(&mut self, sync_engine: &SyncEngine) -> io::Result<()> {
+        if self.is_behind(sync_engine)? {
+            self.request_blocks(sync_engine)?;
+        }
+        Ok(())
+    }
+
+    fn is_behind(&self, sync_engine: &SyncEngine) -> io::Result<bool> {
+        let Some((height, _)) = sync_engine.tip().map_err(io::Error::other)? else {
+            return Ok(self.peer.remote_version.best_height > 0);
+        };
+        Ok(height < self.peer.remote_version.best_height)
     }
 
     pub fn handle_getblocks(
@@ -364,6 +368,25 @@ impl PeerSession {
         sync_engine
             .apply_block(block_bytes, None)
             .map_err(io::Error::other)?;
+        Ok(())
+    }
+
+    fn respond_to_getdata(&mut self, payload: &[u8], sync_engine: &SyncEngine) -> io::Result<()> {
+        for item in decode_inventory_vectors(payload)? {
+            if item.kind != MSG_BLOCK {
+                continue;
+            }
+            if !sync_engine.has_block(item.hash).map_err(io::Error::other)? {
+                continue;
+            }
+            let block = sync_engine
+                .get_block_by_hash(item.hash)
+                .map_err(io::Error::other)?;
+            self.write_message(&WireMessage {
+                command: MESSAGE_BLOCK.to_string(),
+                payload: block,
+            })?;
+        }
         Ok(())
     }
 }
@@ -930,12 +953,15 @@ fn network_magic(network: &str) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::Read;
     use std::net::TcpListener;
     use std::path::PathBuf;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::*;
+    use crate::blockstore::BlockStore;
+    use crate::chainstate::ChainState;
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use rubin_consensus::block_hash;
     use serde::Deserialize;
@@ -1026,6 +1052,32 @@ mod tests {
             genesis_hash: decode_hex32(&v.genesis_hash_hex),
             best_height: v.best_height,
         }
+    }
+
+    fn test_sync_engine_with_genesis() -> SyncEngine {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("rubin-node-p2p-runtime-{unique}"));
+        fs::create_dir_all(&root).expect("create temp dir");
+        let blockstore_dir = root.join("blockstore");
+        let chainstate_path = root.join("chainstate.json");
+        let block_store = BlockStore::open(&blockstore_dir).expect("open blockstore");
+        let mut engine = SyncEngine::new(
+            ChainState::new(),
+            Some(block_store),
+            crate::sync::default_sync_config(
+                Some(rubin_consensus::constants::POW_LIMIT),
+                devnet_genesis_chain_id(),
+                Some(chainstate_path),
+            ),
+        )
+        .expect("new sync engine");
+        engine
+            .apply_block(&devnet_genesis_block_bytes(), None)
+            .expect("apply genesis");
+        engine
     }
 
     #[test]
@@ -1204,5 +1256,67 @@ mod tests {
             assert!(tc.expect_ok, "{} should be marked expect_ok", tc.id);
             got.expect(&tc.id);
         }
+    }
+
+    #[test]
+    fn request_more_blocks_if_behind_sends_followup_getblocks() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut session = PeerSession::new(stream, default_peer_runtime_config("devnet", 8))
+                .expect("session");
+            session.peer.remote_version.best_height = 2;
+            let engine = test_sync_engine_with_genesis();
+            session
+                .request_more_blocks_if_behind(&engine)
+                .expect("follow-up getblocks");
+        });
+
+        let mut client = TcpStream::connect(addr).expect("connect");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set_read_timeout");
+        let msg = read_message_from(&mut client, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
+            .expect("read getblocks");
+        assert_eq!(msg.command, MESSAGE_GETBLOCKS);
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn respond_to_getdata_ignores_missing_blocks() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut session = PeerSession::new(stream, default_peer_runtime_config("devnet", 8))
+                .expect("session");
+            let engine = test_sync_engine_with_genesis();
+            let payload = encode_inventory_vectors(&[InventoryVector {
+                kind: MSG_BLOCK,
+                hash: [0x42; 32],
+            }])
+            .expect("inventory payload");
+            session
+                .respond_to_getdata(&payload, &engine)
+                .expect("missing block should be ignored");
+        });
+
+        let mut client = TcpStream::connect(addr).expect("connect");
+        client
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .expect("set_read_timeout");
+        let mut byte = [0u8; 1];
+        match client.read(&mut byte) {
+            Ok(0) => {}
+            Ok(n) => panic!("unexpected block bytes written: {n}"),
+            Err(err) => assert!(matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            )),
+        }
+        server.join().expect("server join");
     }
 }
