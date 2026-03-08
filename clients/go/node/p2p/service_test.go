@@ -294,6 +294,9 @@ func TestOrphanResolution(t *testing.T) {
 	if got := sink.service.orphans.Len(); got != 2 {
 		t.Fatalf("orphans.Len()=%d, want 2", got)
 	}
+	if missing, err := peer.needsInventory(InventoryVector{Type: MSG_BLOCK, Hash: height2Hash}); err != nil || missing {
+		t.Fatalf("needsInventory(orphan height2)=%v err=%v, want false,nil", missing, err)
+	}
 
 	summary, err := peer.processRelayedBlock(genesisBytes)
 	if err != nil {

@@ -71,6 +71,7 @@ func (p *peer) processRelayedBlock(blockBytes []byte) (*node.ChainStateConnectSu
 	p.service.chainMu.Unlock()
 	if err != nil {
 		if errors.Is(err, node.ErrParentNotFound) {
+			p.service.blockSeen.Add(blockHash)
 			p.service.orphans.Add(blockHash, pb.Header.PrevBlockHash, blockBytes)
 			return nil, nil
 		}
@@ -113,6 +114,7 @@ func (s *Service) resolveOrphans(skip *peer, blockHash [32]byte) {
 		s.chainMu.Unlock()
 		if applyErr != nil {
 			if errors.Is(applyErr, node.ErrParentNotFound) {
+				s.blockSeen.Add(childHash)
 				s.orphans.Add(childHash, pb.Header.PrevBlockHash, child.blockBytes)
 			}
 			continue
