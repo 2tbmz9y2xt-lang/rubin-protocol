@@ -5,14 +5,18 @@ import (
 	"crypto/sha3"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"math"
+	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
@@ -36,6 +40,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	toKeyHex := fs.String("to-key", "", "destination P2PK key_id hex or canonical covenant_data hex")
 	amount := fs.Uint64("amount", 0, "transfer amount")
 	fee := fs.Uint64("fee", 0, "transaction fee")
+	submitTo := fs.String("submit-to", "", "submit signed tx to devnet RPC host:port")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -109,7 +114,69 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	_, _ = fmt.Fprintf(stdout, "%x\n", txBytes)
+	if strings.TrimSpace(*submitTo) != "" {
+		if err := submitTx(*submitTo, txBytes); err != nil {
+			_, _ = fmt.Fprintf(stderr, "submit failed: %v\n", err)
+			return 2
+		}
+	}
 	return 0
+}
+
+type submitTxHTTPPayload struct {
+	TxHex string `json:"tx_hex"`
+}
+
+func submitTx(target string, txBytes []byte) error {
+	endpoint, err := normalizeSubmitTarget(target)
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(submitTxHTTPPayload{TxHex: hex.EncodeToString(txBytes)})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		return nil
+	}
+	rawBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	return fmt.Errorf("status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(rawBody)))
+}
+
+func normalizeSubmitTarget(raw string) (string, error) {
+	target := strings.TrimSpace(raw)
+	if target == "" {
+		return "", errors.New("empty submit target")
+	}
+	if !strings.Contains(target, "://") {
+		target = "http://" + target
+	}
+	parsed, err := url.Parse(target)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("unsupported scheme %q", parsed.Scheme)
+	}
+	if strings.TrimSpace(parsed.Host) == "" {
+		return "", errors.New("submit target missing host")
+	}
+	parsed.Path = "/submit_tx"
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
 }
 
 func decodeHexFlag(value string) ([]byte, error) {

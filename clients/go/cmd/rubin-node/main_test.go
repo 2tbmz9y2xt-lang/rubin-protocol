@@ -257,6 +257,19 @@ func TestRunMainnetFailsWithoutExplicitTarget(t *testing.T) {
 	}
 }
 
+func TestRunDryRunEmitsRPCBindAddrWhenPresent(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run([]string{"--dry-run", "--datadir", dir, "--rpc-bind", "127.0.0.1:19112"}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr=%q)", code, errOut.String())
+	}
+	if !bytes.Contains(out.Bytes(), []byte(`"rpc_bind_addr": "127.0.0.1:19112"`)) {
+		t.Fatalf("expected rpc_bind_addr in config, got %q", out.String())
+	}
+}
+
 func TestRunFailsWhenSyncEngineInitFails(t *testing.T) {
 	prev := newSyncEngineFn
 	newSyncEngineFn = func(*node.ChainState, *node.BlockStore, node.SyncConfig) (*node.SyncEngine, error) {

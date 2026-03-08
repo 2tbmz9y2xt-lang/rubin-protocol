@@ -13,6 +13,10 @@ NODE_A_DIR="${TMP_ROOT}/node-a"
 NODE_B_DIR="${TMP_ROOT}/node-b"
 NODE_C_DIR="${TMP_ROOT}/node-c"
 
+NODE_A_RPC_ADDR="${NODE_A_RPC_ADDR:-127.0.0.1:19112}"
+NODE_B_RPC_ADDR="${NODE_B_RPC_ADDR:-127.0.0.1:19113}"
+NODE_C_RPC_ADDR="${NODE_C_RPC_ADDR:-127.0.0.1:19114}"
+
 NODE_A_LOG="${TMP_ROOT}/node-a.log"
 NODE_B_LOG="${TMP_ROOT}/node-b.log"
 NODE_C_LOG="${TMP_ROOT}/node-c.log"
@@ -100,6 +104,62 @@ PY
   return 1
 }
 
+wait_for_rpc_ready() {
+  local rpc_addr="$1"
+  local timeout="$2"
+  local deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    if python3 - "${rpc_addr}" <<'PY'
+import json
+import sys
+import urllib.request
+
+rpc_addr = sys.argv[1]
+with urllib.request.urlopen(f"http://{rpc_addr}/get_tip", timeout=2) as resp:
+    if resp.status != 200:
+        raise SystemExit(1)
+    json.loads(resp.read().decode("utf-8"))
+raise SystemExit(0)
+PY
+    then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "timeout waiting for RPC readiness at ${rpc_addr}" >&2
+  return 1
+}
+
+wait_for_rpc_height() {
+  local rpc_addr="$1"
+  local want_height="$2"
+  local timeout="$3"
+  local deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    if python3 - "${rpc_addr}" "${want_height}" <<'PY'
+import json
+import sys
+import urllib.request
+
+rpc_addr = sys.argv[1]
+want_height = int(sys.argv[2])
+with urllib.request.urlopen(f"http://{rpc_addr}/get_tip", timeout=2) as resp:
+    if resp.status != 200:
+        raise SystemExit(1)
+    data = json.loads(resp.read().decode("utf-8"))
+if data.get("has_tip") and data.get("height") == want_height:
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+    then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "timeout waiting for RPC height=${want_height} at ${rpc_addr}" >&2
+  return 1
+}
+
 read_state_tsv() {
   local datadir="$1"
   python3 - "${datadir}" <<'PY'
@@ -154,9 +214,10 @@ NODE_A_PORT="$((29110 + ($$ % 1000)))"
 NODE_A_ADDR="127.0.0.1:${NODE_A_PORT}"
 
 echo "Starting node A at ${NODE_A_ADDR}"
-start_node "${NODE_A_LOG}" --datadir "${NODE_A_DIR}" --bind "${NODE_A_ADDR}" --mine-blocks 10
+start_node "${NODE_A_LOG}" --datadir "${NODE_A_DIR}" --bind "${NODE_A_ADDR}" --rpc-bind "${NODE_A_RPC_ADDR}" --mine-blocks 10
 NODE_A_PID="${LAST_PID}"
 wait_for_log "${NODE_A_LOG}" "rubin-node skeleton running" 30 "${NODE_A_PID}"
+wait_for_rpc_ready "${NODE_A_RPC_ADDR}" 30
 
 MINED_LINES="$(grep -c '^mined:' "${NODE_A_LOG}" || true)"
 if [[ "${MINED_LINES}" != "10" ]]; then
@@ -171,16 +232,21 @@ if [[ "${NODE_A_HAS_TIP}" != "true" ]]; then
 fi
 
 echo "Starting node B"
-start_node "${NODE_B_LOG}" --datadir "${NODE_B_DIR}" --bind "127.0.0.1:0" --peers "${NODE_A_ADDR}"
+start_node "${NODE_B_LOG}" --datadir "${NODE_B_DIR}" --bind "127.0.0.1:0" --rpc-bind "${NODE_B_RPC_ADDR}" --peers "${NODE_A_ADDR}"
 NODE_B_PID="${LAST_PID}"
 echo "Starting node C"
-start_node "${NODE_C_LOG}" --datadir "${NODE_C_DIR}" --bind "127.0.0.1:0" --peers "${NODE_A_ADDR}"
+start_node "${NODE_C_LOG}" --datadir "${NODE_C_DIR}" --bind "127.0.0.1:0" --rpc-bind "${NODE_C_RPC_ADDR}" --peers "${NODE_A_ADDR}"
 NODE_C_PID="${LAST_PID}"
 
 wait_for_log "${NODE_B_LOG}" "rubin-node skeleton running" 30 "${NODE_B_PID}"
 wait_for_log "${NODE_C_LOG}" "rubin-node skeleton running" 30 "${NODE_C_PID}"
+wait_for_rpc_ready "${NODE_B_RPC_ADDR}" 30
+wait_for_rpc_ready "${NODE_C_RPC_ADDR}" 30
 wait_for_height "${NODE_B_DIR}" "${NODE_A_HEIGHT}" 30
 wait_for_height "${NODE_C_DIR}" "${NODE_A_HEIGHT}" 30
+wait_for_rpc_height "${NODE_A_RPC_ADDR}" "${NODE_A_HEIGHT}" 30
+wait_for_rpc_height "${NODE_B_RPC_ADDR}" "${NODE_A_HEIGHT}" 30
+wait_for_rpc_height "${NODE_C_RPC_ADDR}" "${NODE_A_HEIGHT}" 30
 
 inspect_node "node-a" "${NODE_A_DIR}" "${NODE_A_INSPECT}"
 inspect_node "node-b" "${NODE_B_DIR}" "${NODE_B_INSPECT}"

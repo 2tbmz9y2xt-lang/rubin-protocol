@@ -14,6 +14,7 @@ type Config struct {
 	Network     string   `json:"network"`
 	DataDir     string   `json:"data_dir"`
 	BindAddr    string   `json:"bind_addr"`
+	RPCBindAddr string   `json:"rpc_bind_addr,omitempty"`
 	LogLevel    string   `json:"log_level"`
 	Peers       []string `json:"peers"`
 	MaxPeers    int      `json:"max_peers"`
@@ -38,12 +39,13 @@ func DefaultDataDir() string {
 
 func DefaultConfig() Config {
 	return Config{
-		Network:  "devnet",
-		DataDir:  DefaultDataDir(),
-		BindAddr: "0.0.0.0:19111",
-		Peers:    nil,
-		LogLevel: "info",
-		MaxPeers: 64,
+		Network:     "devnet",
+		DataDir:     DefaultDataDir(),
+		BindAddr:    "0.0.0.0:19111",
+		RPCBindAddr: "",
+		Peers:       nil,
+		LogLevel:    "info",
+		MaxPeers:    64,
 	}
 }
 
@@ -75,6 +77,11 @@ func ValidateConfig(cfg Config) error {
 	}
 	if err := validateAddr(cfg.BindAddr); err != nil {
 		return fmt.Errorf("invalid bind_addr: %w", err)
+	}
+	if strings.TrimSpace(cfg.RPCBindAddr) != "" {
+		if err := validateAddr(cfg.RPCBindAddr); err != nil {
+			return fmt.Errorf("invalid rpc_bind_addr: %w", err)
+		}
 	}
 	for _, peer := range cfg.Peers {
 		if err := validatePeerAddr(peer); err != nil {

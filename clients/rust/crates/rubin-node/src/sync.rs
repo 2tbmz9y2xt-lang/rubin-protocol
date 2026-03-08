@@ -97,6 +97,14 @@ impl SyncEngine {
         self.best_known_height
     }
 
+    pub fn chain_state_snapshot(&self) -> ChainState {
+        self.chain_state.clone()
+    }
+
+    pub fn chain_id(&self) -> [u8; 32] {
+        self.cfg.chain_id
+    }
+
     pub fn tip(&self) -> Result<Option<(u64, [u8; 32])>, String> {
         if let Some(block_store) = self.block_store.as_ref() {
             return block_store.tip();
