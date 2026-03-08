@@ -82,38 +82,10 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           cargo tarpaulin --version
 
-      - name: Go coverage
+      - name: Generate coverage artifacts
         run: |
-          cd clients/go
-          # Codacy coverage stays focused on runtime libraries plus the
-          # specific devnet RPC CLI entrypoints added in this track.
-          # Other unrelated cmd/* tools remain out of scope for this gate.
-          pkgs="$(
-            {
-              go list ./... | grep -v '/cmd/'
-              printf '%s\n' ./cmd/rubin-node ./cmd/rubin-txgen
-            } | sort -u
-          )"
-          go test -coverprofile=coverage.out ${pkgs}
-
-      - name: Rust coverage
-        run: |
-          cd clients/rust
-          cargo tarpaulin --workspace \
-            --exclude rubin-consensus-cli \
-            --exclude-files crates/rubin-node/src/lib.rs \
-            --exclude-files crates/rubin-node/src/blockstore.rs \
-            --exclude-files crates/rubin-node/src/chainstate.rs \
-            --exclude-files crates/rubin-node/src/coinbase.rs \
-            --exclude-files crates/rubin-node/src/genesis.rs \
-            --exclude-files crates/rubin-node/src/io_utils.rs \
-            --exclude-files crates/rubin-node/src/main.rs \
-            --exclude-files crates/rubin-node/src/p2p_runtime.rs \
-            --exclude-files crates/rubin-node/src/sync.rs \
-            --exclude-files crates/rubin-node/src/bin/* \
-            --exclude-files crates/rubin-consensus-cli/src/* \
-            --out Lcov \
-            --output-dir .
+          chmod +x scripts/run-codacy-coverage.sh
+          ./scripts/run-codacy-coverage.sh
 
       - name: Upload to Codacy
         env:
