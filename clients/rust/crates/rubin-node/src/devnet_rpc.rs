@@ -1561,9 +1561,7 @@ mod tests {
         for _ in 0..10 {
             let mut stream = TcpStream::connect(server.addr()).expect("connect");
             stream
-                .write_all(
-                    b"GET /get_tip HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-                )
+                .write_all(b"GET /get_tip HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .expect("write request");
             stream
                 .shutdown(std::net::Shutdown::Write)
