@@ -11,21 +11,12 @@ func extractCryptoSigAndSighash(w WitnessItem) ([]byte, uint8, error) {
 	return w.Signature[:len(w.Signature)-1], sighashType, nil
 }
 
-func validateP2PKSpend(entry UtxoEntry, w WitnessItem, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte, blockHeight uint64) error {
-	if w.SuiteID != SUITE_ID_ML_DSA_87 {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_P2PK suite invalid")
-	}
-	_ = blockHeight
-	if len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1 {
-		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
-	}
-	if len(entry.CovenantData) != MAX_P2PK_COVENANT_DATA || entry.CovenantData[0] != w.SuiteID {
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_P2PK covenant_data invalid")
-	}
-	var keyID [32]byte
-	copy(keyID[:], entry.CovenantData[1:33])
-	if sha3_256(w.Pubkey) != keyID {
-		return txerr(TX_ERR_SIG_INVALID, "CORE_P2PK key binding mismatch")
+// verifyMLDSAKeyAndSig verifies an ML-DSA-87 witness item's key binding and
+// cryptographic signature. The caller must validate witness item lengths and
+// suite ID before calling this function.
+func verifyMLDSAKeyAndSig(w WitnessItem, expectedKeyID [32]byte, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte, context string) error {
+	if sha3_256(w.Pubkey) != expectedKeyID {
+		return txerr(TX_ERR_SIG_INVALID, context+" key binding mismatch")
 	}
 	cryptoSig, sighashType, err := extractCryptoSigAndSighash(w)
 	if err != nil {
@@ -40,9 +31,25 @@ func validateP2PKSpend(entry UtxoEntry, w WitnessItem, tx *Tx, inputIndex uint32
 		return err
 	}
 	if !ok {
-		return txerr(TX_ERR_SIG_INVALID, "CORE_P2PK signature invalid")
+		return txerr(TX_ERR_SIG_INVALID, context+" signature invalid")
 	}
 	return nil
+}
+
+func validateP2PKSpend(entry UtxoEntry, w WitnessItem, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte, blockHeight uint64) error {
+	if w.SuiteID != SUITE_ID_ML_DSA_87 {
+		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_P2PK suite invalid")
+	}
+	_ = blockHeight
+	if len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1 {
+		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
+	}
+	if len(entry.CovenantData) != MAX_P2PK_COVENANT_DATA || entry.CovenantData[0] != w.SuiteID {
+		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_P2PK covenant_data invalid")
+	}
+	var keyID [32]byte
+	copy(keyID[:], entry.CovenantData[1:33])
+	return verifyMLDSAKeyAndSig(w, keyID, tx, inputIndex, inputValue, chainID, "CORE_P2PK")
 }
 
 func validateThresholdSigSpend(
@@ -73,23 +80,8 @@ func validateThresholdSigSpend(
 			if len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1 {
 				return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
 			}
-			if sha3_256(w.Pubkey) != keys[i] {
-				return txerr(TX_ERR_SIG_INVALID, context+" key binding mismatch")
-			}
-			cryptoSig, sighashType, err := extractCryptoSigAndSighash(w)
-			if err != nil {
+			if err := verifyMLDSAKeyAndSig(w, keys[i], tx, inputIndex, inputValue, chainID, context); err != nil {
 				return err
-			}
-			digest, err := SighashV1DigestWithType(tx, inputIndex, inputValue, chainID, sighashType)
-			if err != nil {
-				return err
-			}
-			ok, err := verifySig(w.SuiteID, w.Pubkey, cryptoSig, digest)
-			if err != nil {
-				return err
-			}
-			if !ok {
-				return txerr(TX_ERR_SIG_INVALID, context+" signature invalid")
 			}
 			valid++
 		default:
