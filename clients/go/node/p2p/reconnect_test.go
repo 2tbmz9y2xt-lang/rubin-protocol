@@ -146,6 +146,41 @@ func TestDialPeerFailureRecordsReconnect(t *testing.T) {
 	}
 }
 
+func TestReconnectDuePeersSkipsConnectedAndNotDue(t *testing.T) {
+	restore := overrideReconnectTiming(50*time.Millisecond, 50*time.Millisecond, 200*time.Millisecond)
+	defer restore()
+
+	currentTime := time.Unix(1_777_000_250, 0)
+	h := newTestHarness(t, 0, "127.0.0.1:0", []string{" peer-a ", "peer-b"})
+	h.service.cfg.Now = func() time.Time { return currentTime }
+
+	h.service.peers["peer-a"] = &peer{service: h.service, state: node.PeerState{Addr: "peer-a"}}
+	h.service.scheduleNextReconnectAttempt("peer-b", currentTime.Add(100*time.Millisecond))
+	before := h.service.reconnectSnapshot("peer-b")
+	h.service.reconnectDuePeers()
+	after := h.service.reconnectSnapshot("peer-b")
+	if after != before {
+		t.Fatalf("unexpected reconnect state mutation for not-due peer: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestReconnectNilAndEmptyHelpers(t *testing.T) {
+	var svc *Service
+	svc.reconnectDuePeers()
+	if got := svc.reconnectSnapshot("addr"); got != (reconnectEntry{}) {
+		t.Fatalf("reconnectSnapshot(nil)=%+v", got)
+	}
+	if got := svc.isConnected("addr"); got {
+		t.Fatalf("isConnected(nil)=true, want false")
+	}
+	if ok := svc.withReconnectEntry("", func(*reconnectEntry) {}); ok {
+		t.Fatalf("withReconnectEntry(empty) unexpectedly succeeded")
+	}
+	if got := normalizeReconnectAddr("  "); got != "" {
+		t.Fatalf("normalizeReconnectAddr(blank)=%q, want empty", got)
+	}
+}
+
 func overrideReconnectTiming(loopInterval, baseDelay, maxDelay time.Duration) func() {
 	prevLoop := reconnectLoopInterval
 	prevBase := reconnectBaseDelay

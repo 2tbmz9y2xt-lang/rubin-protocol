@@ -334,6 +334,46 @@ func TestCoverage_HandleConnRunErrorPath(t *testing.T) {
 	}
 }
 
+func TestCoverage_HandleConnRequestBlocksErrorPath(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	h.service.ctx = context.Background()
+
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+
+	remoteDone := make(chan error, 1)
+	go func() {
+		frame, err := readFrame(remote, networkMagic(h.service.cfg.PeerRuntimeConfig.Network), h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+		if err != nil {
+			remoteDone <- err
+			return
+		}
+		if frame.Command != messageVersion {
+			remoteDone <- nil
+			return
+		}
+		payload, err := encodeVersionPayload(testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 2))
+		if err != nil {
+			remoteDone <- err
+			return
+		}
+		if err := writeFrame(remote, networkMagic(h.service.cfg.PeerRuntimeConfig.Network), message{Command: messageVersion, Payload: payload}, h.service.cfg.PeerRuntimeConfig.MaxMessageSize); err != nil {
+			remoteDone <- err
+			return
+		}
+		_ = remote.Close()
+		remoteDone <- nil
+	}()
+
+	if err := h.service.handleConn(local); err == nil {
+		t.Fatalf("expected requestBlocksIfBehind error")
+	}
+	if err := <-remoteDone; err != nil {
+		t.Fatalf("remote handshake: %v", err)
+	}
+}
+
 func TestCoverage_RegisterPeerAndLocalVersion(t *testing.T) {
 	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
 	pr := &peer{
@@ -359,6 +399,22 @@ func TestCoverage_RegisterPeerAndLocalVersion(t *testing.T) {
 	}
 	if version.BestHeight != 0 {
 		t.Fatalf("best_height=%d, want 0", version.BestHeight)
+	}
+}
+
+func TestCoverage_UnregisterPeerSchedulesReconnectForOutbound(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:0", []string{"peer-outbound"})
+	h.service.scheduleReconnect("peer-outbound")
+	h.service.peers["peer-outbound"] = &peer{service: h.service, state: node.PeerState{Addr: "peer-outbound"}}
+	h.service.unregisterPeer("peer-outbound")
+	if !h.service.isOutboundAddr("peer-outbound") {
+		t.Fatalf("expected outbound peer tracking")
+	}
+	if got := h.service.reconnectSnapshot("peer-outbound").nextRetry; got.IsZero() {
+		t.Fatalf("expected reconnect schedule after unregister")
+	}
+	if h.service.isOutboundAddr("  ") {
+		t.Fatalf("blank outbound addr must be false")
 	}
 }
 
