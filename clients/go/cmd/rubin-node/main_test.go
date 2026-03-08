@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -257,6 +258,19 @@ func TestRunMainnetFailsWithoutExplicitTarget(t *testing.T) {
 	}
 }
 
+func TestRunDryRunEmitsRPCBindAddrWhenPresent(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run([]string{"--dry-run", "--datadir", dir, "--rpc-bind", "127.0.0.1:19112"}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr=%q)", code, errOut.String())
+	}
+	if !bytes.Contains(out.Bytes(), []byte(`"rpc_bind_addr": "127.0.0.1:19112"`)) {
+		t.Fatalf("expected rpc_bind_addr in config, got %q", out.String())
+	}
+}
+
 func TestRunFailsWhenSyncEngineInitFails(t *testing.T) {
 	prev := newSyncEngineFn
 	newSyncEngineFn = func(*node.ChainState, *node.BlockStore, node.SyncConfig) (*node.SyncEngine, error) {
@@ -412,5 +426,73 @@ func TestRunNonDryRunExitsOnSignal(t *testing.T) {
 			t.Fatalf("exit code=%d, want 0 (stderr=%s)", ee.ExitCode(), string(ee.Stderr))
 		}
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunFailsWhenRPCBindPortUnavailable(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer listener.Close()
+
+	dir := t.TempDir()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run(
+		[]string{"--datadir", dir, "--bind", "127.0.0.1:0", "--rpc-bind", listener.Addr().String()},
+		&out,
+		&errOut,
+	)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d (stderr=%q)", code, errOut.String())
+	}
+	if !bytes.Contains(errOut.Bytes(), []byte("rpc start failed")) {
+		t.Fatalf("expected rpc start failure, got stderr=%q", errOut.String())
+	}
+	if bytes.Contains(out.Bytes(), []byte("rubin-node skeleton running")) {
+		t.Fatalf("unexpected running banner in stdout=%q", out.String())
+	}
+}
+
+func TestRunNonDryRunWithRPCBindExitsOnSignal(t *testing.T) {
+	if os.Getenv("RUBIN_NODE_SIGNAL_RPC_CHILD") == "1" {
+		dir := t.TempDir()
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			p, _ := os.FindProcess(os.Getpid())
+			_ = p.Signal(syscall.SIGINT)
+		}()
+		code := run(
+			[]string{"--datadir", dir, "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"},
+			os.Stdout,
+			os.Stderr,
+		)
+		os.Exit(code)
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunNonDryRunWithRPCBindExitsOnSignal")
+	cmd.Env = append(os.Environ(), "RUBIN_NODE_SIGNAL_RPC_CHILD=1")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		ee, ok := err.(*exec.ExitError)
+		if ok {
+			t.Fatalf("exit code=%d, want 0 (stderr=%s)", ee.ExitCode(), stderr.String())
+		}
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "rpc: listening=") {
+		t.Fatalf("stdout=%q, want rpc listening line", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "rubin-node skeleton running") {
+		t.Fatalf("stdout=%q, want running banner", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "rubin-node skeleton stopped") {
+		t.Fatalf("stdout=%q, want stopped banner", stdout.String())
 	}
 }

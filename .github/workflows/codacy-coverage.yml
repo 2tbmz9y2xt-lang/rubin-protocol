@@ -54,7 +54,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.24.13'
+          go-version: '1.25.8'
           cache: true
           cache-dependency-path: clients/go/go.mod
 
@@ -82,32 +82,10 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           cargo tarpaulin --version
 
-      - name: Go coverage
+      - name: Generate coverage artifacts
         run: |
-          cd clients/go
-          # Coverage gating focuses on consensus/runtime libraries.
-          # CLI entrypoints (cmd/) are excluded — mirroring Rust's --exclude rubin-consensus-cli.
-          pkgs="$(go list ./... | grep -v '/cmd/')"
-          go test -coverprofile=coverage.out ${pkgs}
-
-      - name: Rust coverage
-        run: |
-          cd clients/rust
-          cargo tarpaulin --workspace \
-            --exclude rubin-consensus-cli \
-            --exclude-files crates/rubin-node/src/lib.rs \
-            --exclude-files crates/rubin-node/src/blockstore.rs \
-            --exclude-files crates/rubin-node/src/chainstate.rs \
-            --exclude-files crates/rubin-node/src/coinbase.rs \
-            --exclude-files crates/rubin-node/src/genesis.rs \
-            --exclude-files crates/rubin-node/src/io_utils.rs \
-            --exclude-files crates/rubin-node/src/main.rs \
-            --exclude-files crates/rubin-node/src/p2p_runtime.rs \
-            --exclude-files crates/rubin-node/src/sync.rs \
-            --exclude-files crates/rubin-node/src/bin/* \
-            --exclude-files crates/rubin-consensus-cli/src/* \
-            --out Lcov \
-            --output-dir .
+          chmod +x scripts/run-codacy-coverage.sh
+          ./scripts/run-codacy-coverage.sh
 
       - name: Upload to Codacy
         env:

@@ -60,6 +60,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&cfg.Network, "network", defaults.Network, "network name (devnet/testnet/mainnet)")
 	fs.StringVar(&cfg.DataDir, "datadir", defaults.DataDir, "node data directory")
 	fs.StringVar(&cfg.BindAddr, "bind", defaults.BindAddr, "bind address host:port")
+	fs.StringVar(&cfg.RPCBindAddr, "rpc-bind", defaults.RPCBindAddr, "devnet HTTP RPC bind address host:port (disabled when empty)")
 	fs.StringVar(&cfg.LogLevel, "log-level", defaults.LogLevel, "log level: debug|info|warn|error")
 	genesisFile := fs.String("genesis-file", "", "path to genesis pack JSON with chain_id_hex")
 	fs.IntVar(&cfg.MaxPeers, "max-peers", defaults.MaxPeers, "max connected peers")
@@ -130,6 +131,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	tipHeight, tipHash, tipOK, tipExitCode := mustTipFn(tipHeight, tipHash, tipOK, err, stderr)
 	if tipExitCode != 0 {
 		return tipExitCode
+	}
+	if tipOK {
+		syncEngine.RecordBestKnownHeight(tipHeight)
 	}
 
 	if err := printConfig(stdout, cfg); err != nil {
@@ -207,6 +211,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	defer p2pService.Close()
+	rpcState := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, p2pService.AnnounceTx)
+	rpcServer, err := startDevnetRPCServer(ctx, cfg.RPCBindAddr, rpcState, stdout, stderr)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "rpc start failed: %v\n", err)
+		return 2
+	}
+	if rpcServer != nil {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = rpcServer.Close(shutdownCtx)
+		}()
+	}
 
 	_, _ = fmt.Fprintln(stdout, "rubin-node skeleton running")
 	<-ctx.Done()

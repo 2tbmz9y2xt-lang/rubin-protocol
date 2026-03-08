@@ -33,6 +33,22 @@ func TestValidateConfigRejectsBadBind(t *testing.T) {
 	}
 }
 
+func TestValidateConfigAcceptsRPCBindAddr(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RPCBindAddr = "127.0.0.1:19112"
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("expected valid rpc_bind_addr, got %v", err)
+	}
+}
+
+func TestValidateConfigRejectsBadRPCBindAddr(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RPCBindAddr = "127.0.0.1"
+	if err := ValidateConfig(cfg); err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
 func TestValidateConfigRejectsBadPeer(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Peers = []string{"bad-peer"}
