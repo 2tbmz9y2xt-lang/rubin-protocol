@@ -295,10 +295,14 @@ fn unique_interop_temp_dir() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::net::TcpListener;
     use std::thread;
 
+    use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
+
     use super::*;
+    use crate::p2p_runtime::{decode_inventory_vectors, encode_inventory_vectors, MSG_BLOCK};
 
     #[test]
     fn parse_args_server_defaults() {
@@ -334,6 +338,21 @@ mod tests {
             }
         );
         assert_eq!(cfg.best_height, 42);
+    }
+
+    #[test]
+    fn parse_args_client_sync_blocks() {
+        let args = vec![
+            "client".to_string(),
+            "--connect".to_string(),
+            "127.0.0.1:9000".to_string(),
+            "--action".to_string(),
+            "sync-blocks".to_string(),
+        ];
+        let cfg = parse_args(&args).expect("parse");
+        assert_eq!(cfg.mode, Mode::Client);
+        assert_eq!(cfg.connect_addr.as_deref(), Some("127.0.0.1:9000"));
+        assert_eq!(cfg.action, Action::SyncBlocks);
     }
 
     #[test]
@@ -681,5 +700,92 @@ mod tests {
             .expect("handshake");
 
         server.join().expect("server");
+    }
+
+    #[test]
+    fn run_action_sync_blocks_reaches_remote_best_height() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let server_dir = unique_interop_temp_dir();
+            let result = (|| -> Result<(), String> {
+                let block = devnet_genesis_block_bytes();
+                let block_hash_bytes =
+                    block_hash(&block[..BLOCK_HEADER_BYTES]).map_err(|err| err.to_string())?;
+                let mut store = BlockStore::open(block_store_path(&server_dir))?;
+                store.put_block(0, block_hash_bytes, &block[..BLOCK_HEADER_BYTES], &block)?;
+
+                let mut cfg = default_sync_config(Some(POW_LIMIT), devnet_genesis_chain_id(), None);
+                cfg.network = "devnet".to_string();
+                let engine = SyncEngine::new(ChainState::new(), Some(store), cfg)?;
+
+                let (stream, _) = listener.accept().map_err(|err| err.to_string())?;
+                stream.set_nodelay(true).map_err(|err| err.to_string())?;
+                let mut runtime_cfg = default_peer_runtime_config("devnet", 8);
+                runtime_cfg.read_deadline = Duration::from_secs(2);
+                runtime_cfg.write_deadline = Duration::from_secs(2);
+                let local = local_version(0)?;
+                let mut session = perform_version_handshake(
+                    stream,
+                    runtime_cfg,
+                    local,
+                    local.chain_id,
+                    local.genesis_hash,
+                )
+                .map_err(|err| err.to_string())?;
+
+                let getblocks = session.read_message().map_err(|err| err.to_string())?;
+                assert_eq!(getblocks.command, "getblocks");
+                let inv = session
+                    .handle_getblocks(&getblocks.payload, &engine)
+                    .map_err(|err| err.to_string())?;
+                session
+                    .write_message(&WireMessage {
+                        command: "inv".to_string(),
+                        payload: encode_inventory_vectors(&inv).map_err(|err| err.to_string())?,
+                    })
+                    .map_err(|err| err.to_string())?;
+
+                let getdata = session.read_message().map_err(|err| err.to_string())?;
+                assert_eq!(getdata.command, "getdata");
+                for item in
+                    decode_inventory_vectors(&getdata.payload).map_err(|err| err.to_string())?
+                {
+                    assert_eq!(item.kind, MSG_BLOCK);
+                    let block = engine.get_block_by_hash(item.hash)?;
+                    session
+                        .write_message(&WireMessage {
+                            command: "block".to_string(),
+                            payload: block,
+                        })
+                        .map_err(|err| err.to_string())?;
+                }
+                Ok(())
+            })();
+            let _ = fs::remove_dir_all(&server_dir);
+            result
+        });
+
+        let client = thread::spawn(move || {
+            let stream = TcpStream::connect(addr).expect("connect");
+            stream.set_nodelay(true).expect("set_nodelay");
+            let mut runtime_cfg = default_peer_runtime_config("devnet", 8);
+            runtime_cfg.read_deadline = Duration::from_secs(2);
+            runtime_cfg.write_deadline = Duration::from_secs(2);
+            let local = local_version(0).expect("local");
+            let mut session = perform_version_handshake(
+                stream,
+                runtime_cfg,
+                local,
+                local.chain_id,
+                local.genesis_hash,
+            )
+            .expect("handshake");
+            run_action(&mut session, &Action::SyncBlocks).expect("sync blocks");
+        });
+
+        server.join().expect("server").expect("server result");
+        client.join().expect("client");
     }
 }
