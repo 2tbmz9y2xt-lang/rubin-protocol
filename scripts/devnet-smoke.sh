@@ -13,9 +13,9 @@ NODE_A_DIR="${TMP_ROOT}/node-a"
 NODE_B_DIR="${TMP_ROOT}/node-b"
 NODE_C_DIR="${TMP_ROOT}/node-c"
 
-NODE_A_RPC_ADDR="${NODE_A_RPC_ADDR:-127.0.0.1:19112}"
-NODE_B_RPC_ADDR="${NODE_B_RPC_ADDR:-127.0.0.1:19113}"
-NODE_C_RPC_ADDR="${NODE_C_RPC_ADDR:-127.0.0.1:19114}"
+NODE_A_RPC_ADDR="${NODE_A_RPC_ADDR:-127.0.0.1:0}"
+NODE_B_RPC_ADDR="${NODE_B_RPC_ADDR:-127.0.0.1:0}"
+NODE_C_RPC_ADDR="${NODE_C_RPC_ADDR:-127.0.0.1:0}"
 
 NODE_A_LOG="${TMP_ROOT}/node-a.log"
 NODE_B_LOG="${TMP_ROOT}/node-b.log"
@@ -72,6 +72,17 @@ wait_for_log() {
   done
   echo "timeout waiting for ${pattern} in ${file}" >&2
   return 1
+}
+
+extract_rpc_addr() {
+  local file="$1"
+  local addr
+  addr="$(awk -F= '/rpc: listening=/{print $2}' "${file}" | tail -n 1 | tr -d '[:space:]')"
+  if [[ -z "${addr}" ]]; then
+    echo "missing rpc listening banner in ${file}" >&2
+    return 1
+  fi
+  printf '%s\n' "${addr}"
 }
 
 wait_for_height() {
@@ -216,6 +227,8 @@ NODE_A_ADDR="127.0.0.1:${NODE_A_PORT}"
 echo "Starting node A at ${NODE_A_ADDR}"
 start_node "${NODE_A_LOG}" --datadir "${NODE_A_DIR}" --bind "${NODE_A_ADDR}" --rpc-bind "${NODE_A_RPC_ADDR}" --mine-blocks 10
 NODE_A_PID="${LAST_PID}"
+wait_for_log "${NODE_A_LOG}" "rpc: listening=" 30 "${NODE_A_PID}"
+NODE_A_RPC_ADDR="$(extract_rpc_addr "${NODE_A_LOG}")"
 wait_for_log "${NODE_A_LOG}" "rubin-node skeleton running" 30 "${NODE_A_PID}"
 wait_for_rpc_ready "${NODE_A_RPC_ADDR}" 30
 
@@ -238,6 +251,10 @@ echo "Starting node C"
 start_node "${NODE_C_LOG}" --datadir "${NODE_C_DIR}" --bind "127.0.0.1:0" --rpc-bind "${NODE_C_RPC_ADDR}" --peers "${NODE_A_ADDR}"
 NODE_C_PID="${LAST_PID}"
 
+wait_for_log "${NODE_B_LOG}" "rpc: listening=" 30 "${NODE_B_PID}"
+NODE_B_RPC_ADDR="$(extract_rpc_addr "${NODE_B_LOG}")"
+wait_for_log "${NODE_C_LOG}" "rpc: listening=" 30 "${NODE_C_PID}"
+NODE_C_RPC_ADDR="$(extract_rpc_addr "${NODE_C_LOG}")"
 wait_for_log "${NODE_B_LOG}" "rubin-node skeleton running" 30 "${NODE_B_PID}"
 wait_for_log "${NODE_C_LOG}" "rubin-node skeleton running" 30 "${NODE_C_PID}"
 wait_for_rpc_ready "${NODE_B_RPC_ADDR}" 30

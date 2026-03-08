@@ -362,7 +362,16 @@ func handleSubmitTx(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 	var req submitTxRequest
 	body := io.LimitReader(r.Body, 2<<20)
 	defer r.Body.Close()
-	if err := json.NewDecoder(body).Decode(&req); err != nil {
+	dec := json.NewDecoder(body)
+	if err := dec.Decode(&req); err != nil {
+		state.metrics.noteSubmit("bad_request")
+		writeJSONResponse(state, route, w, http.StatusBadRequest, submitTxResponse{
+			Accepted: false,
+			Error:    "invalid JSON body",
+		})
+		return
+	}
+	if err := ensureJSONBodyEOF(dec); err != nil {
 		state.metrics.noteSubmit("bad_request")
 		writeJSONResponse(state, route, w, http.StatusBadRequest, submitTxResponse{
 			Accepted: false,
@@ -574,11 +583,25 @@ func classifySubmitErr(err error) (int, string) {
 	switch {
 	case strings.Contains(msg, "already in mempool"), strings.Contains(msg, "double-spend conflict"):
 		return http.StatusConflict, "conflict"
-	case strings.Contains(msg, "nil mempool"), strings.Contains(msg, "blockstore"), strings.Contains(msg, "chainstate"):
+	case strings.Contains(msg, "mempool full"), strings.Contains(msg, "nil mempool"), strings.Contains(msg, "blockstore"), strings.Contains(msg, "chainstate"):
 		return http.StatusServiceUnavailable, "unavailable"
 	default:
 		return http.StatusUnprocessableEntity, "rejected"
 	}
+}
+
+func ensureJSONBodyEOF(dec *json.Decoder) error {
+	if dec == nil {
+		return errors.New("nil decoder")
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("unexpected trailing JSON value")
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *devnetRPCState) now() uint64 {

@@ -466,6 +466,20 @@ func TestDevnetRPCSubmitTxRejectsInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestDevnetRPCSubmitTxRejectsTrailingJSONGarbage(t *testing.T) {
+	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, false)))
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/submit_tx", "application/json", strings.NewReader(`{"tx_hex":"00"}garbage`))
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", resp.StatusCode)
+	}
+}
+
 func TestDevnetRPCSubmitTxRejectsNilMempool(t *testing.T) {
 	state := mustRPCState(t, false)
 	state.mempool = nil
@@ -650,6 +664,7 @@ func TestClassifySubmitErrVariants(t *testing.T) {
 	}{
 		{name: "conflict already present", errText: "already in mempool", wantStatus: http.StatusConflict, wantResult: "conflict"},
 		{name: "conflict double spend", errText: "double-spend conflict", wantStatus: http.StatusConflict, wantResult: "conflict"},
+		{name: "unavailable mempool full", errText: "mempool full", wantStatus: http.StatusServiceUnavailable, wantResult: "unavailable"},
 		{name: "unavailable blockstore", errText: "blockstore unavailable", wantStatus: http.StatusServiceUnavailable, wantResult: "unavailable"},
 		{name: "rejected default", errText: "transaction rejected", wantStatus: http.StatusUnprocessableEntity, wantResult: "rejected"},
 	}

@@ -301,17 +301,32 @@ fn handle_get_block(state: &DevnetRPCState, method: &str, query: &str) -> HttpRe
             },
         );
     }
-    let Some(block_store) = state.block_store.as_ref() else {
-        return json_response(
-            state,
-            ROUTE,
-            503,
-            &SubmitTxResponse {
-                accepted: false,
-                txid: None,
-                error: Some("blockstore unavailable".to_string()),
-            },
-        );
+    let block_store = match fresh_block_store(state) {
+        Ok(Some(block_store)) => block_store,
+        Ok(None) => {
+            return json_response(
+                state,
+                ROUTE,
+                503,
+                &SubmitTxResponse {
+                    accepted: false,
+                    txid: None,
+                    error: Some("blockstore unavailable".to_string()),
+                },
+            );
+        }
+        Err(err) => {
+            return json_response(
+                state,
+                ROUTE,
+                503,
+                &SubmitTxResponse {
+                    accepted: false,
+                    txid: None,
+                    error: Some(err),
+                },
+            );
+        }
     };
     let params = parse_query_map(query);
     let height_raw = params.get("height").map(|v| v.trim()).unwrap_or("");
@@ -519,11 +534,27 @@ fn handle_submit_tx(state: &DevnetRPCState, method: &str, body: &[u8]) -> HttpRe
             );
         }
     };
+    let fresh_block_store = match fresh_block_store(state) {
+        Ok(block_store) => block_store,
+        Err(err) => {
+            state.metrics.note_submit("unavailable");
+            return json_response(
+                state,
+                ROUTE,
+                503,
+                &SubmitTxResponse {
+                    accepted: false,
+                    txid: None,
+                    error: Some(err),
+                },
+            );
+        }
+    };
     let admit_result = match state.tx_pool.lock() {
         Ok(mut pool) => pool.admit(
             &tx_bytes,
             &chain_state,
-            state.block_store.as_ref(),
+            fresh_block_store.as_ref(),
             chain_id,
         ),
         Err(_) => Err(crate::TxPoolAdmitError {
@@ -653,6 +684,13 @@ fn render_prometheus_metrics(state: &DevnetRPCState) -> String {
         ));
     }
     lines.join("\n") + "\n"
+}
+
+fn fresh_block_store(state: &DevnetRPCState) -> Result<Option<BlockStore>, String> {
+    let Some(block_store) = state.block_store.as_ref() else {
+        return Ok(None);
+    };
+    BlockStore::open(block_store.root_dir()).map(Some)
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {

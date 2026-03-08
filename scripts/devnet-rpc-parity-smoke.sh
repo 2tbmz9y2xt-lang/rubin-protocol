@@ -19,8 +19,8 @@ MINE_LOG="${TMP_ROOT}/mine.log"
 KEYGEN_GO="${TMP_ROOT}/key_material.go"
 KEYGEN_JSON="${TMP_ROOT}/key_material.json"
 
-GO_RPC_ADDR="${GO_RPC_ADDR:-127.0.0.1:19112}"
-RUST_RPC_ADDR="${RUST_RPC_ADDR:-127.0.0.1:19113}"
+GO_RPC_ADDR="${GO_RPC_ADDR:-127.0.0.1:0}"
+RUST_RPC_ADDR="${RUST_RPC_ADDR:-127.0.0.1:0}"
 
 PIDS=()
 
@@ -56,6 +56,32 @@ start_bg() {
   shift
   "$@" >"${log_file}" 2>&1 &
   PIDS+=("$!")
+}
+
+wait_for_log() {
+  local file="$1"
+  local pattern="$2"
+  local timeout="$3"
+  local deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    if [[ -f "${file}" ]] && grep -q "${pattern}" "${file}"; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "timeout waiting for ${pattern} in ${file}" >&2
+  return 1
+}
+
+extract_rpc_addr() {
+  local file="$1"
+  local addr
+  addr="$(awk -F= '/rpc: listening=/{print $2}' "${file}" | tail -n 1 | tr -d '[:space:]')"
+  if [[ -z "${addr}" ]]; then
+    echo "missing rpc listening banner in ${file}" >&2
+    return 1
+  fi
+  printf '%s\n' "${addr}"
 }
 
 wait_for_rpc_height() {
@@ -215,10 +241,14 @@ echo "Mining mature chainstate with Go node"
 cp -R "${GO_DATA_DIR}/." "${RUST_DATA_DIR}/"
 
 echo "Starting Go RPC node at ${GO_RPC_ADDR}"
-start_bg "${GO_LOG}" "${GO_NODE_BIN}" --datadir "${GO_DATA_DIR}" --rpc-bind "${GO_RPC_ADDR}"
+start_bg "${GO_LOG}" "${GO_NODE_BIN}" --datadir "${GO_DATA_DIR}" --bind "127.0.0.1:0" --rpc-bind "${GO_RPC_ADDR}"
 echo "Starting Rust RPC node at ${RUST_RPC_ADDR}"
 start_bg "${RUST_LOG}" "${RUST_NODE_BIN}" --datadir "${RUST_DATA_DIR}" --rpc-bind "${RUST_RPC_ADDR}"
 
+wait_for_log "${GO_LOG}" "rpc: listening=" 30
+GO_RPC_ADDR="$(extract_rpc_addr "${GO_LOG}")"
+wait_for_log "${RUST_LOG}" "rpc: listening=" 30
+RUST_RPC_ADDR="$(extract_rpc_addr "${RUST_LOG}")"
 wait_for_rpc_height "${GO_RPC_ADDR}" 30
 wait_for_rpc_height "${RUST_RPC_ADDR}" 30
 
