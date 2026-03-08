@@ -7,6 +7,7 @@ import (
 	"io"
 	"testing"
 
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
@@ -139,6 +140,52 @@ func TestWriteFrameErrors(t *testing.T) {
 			t.Fatalf("expected writer error, got %v", err)
 		}
 	})
+}
+
+func TestPayloadCapFunctions(t *testing.T) {
+	if got := headersPayloadCap(0); got != uint32(512*consensus.BLOCK_HEADER_BYTES) {
+		t.Fatalf("headersPayloadCap(0)=%d, want %d", got, 512*consensus.BLOCK_HEADER_BYTES)
+	}
+	if got := headersPayloadCap(100); got != uint32(100*consensus.BLOCK_HEADER_BYTES) {
+		t.Fatalf("headersPayloadCap(100)=%d, want %d", got, 100*consensus.BLOCK_HEADER_BYTES)
+	}
+	if got := getBlocksPayloadCap(0); got != uint32(2+defaultLocatorLimit*32+32) {
+		t.Fatalf("getBlocksPayloadCap(0)=%d, want %d", got, 2+defaultLocatorLimit*32+32)
+	}
+	if got := getBlocksPayloadCap(5); got != uint32(2+5*32+32) {
+		t.Fatalf("getBlocksPayloadCap(5)=%d, want %d", got, 2+5*32+32)
+	}
+}
+
+func TestPostHandshakePayloadCapAllCommands(t *testing.T) {
+	fn := postHandshakePayloadCap(defaultLocatorLimit, 512)
+	cases := []struct {
+		cmd         string
+		wantNonZero bool
+	}{
+		{messageVersion, true},
+		{messageVerAck, false},
+		{messageGetAddr, false},
+		{messagePing, false},
+		{messagePong, false},
+		{messageInv, true},
+		{messageGetData, true},
+		{messageAddr, true},
+		{messageGetBlk, true},
+		{messageHeaders, true},
+		{messageBlock, true},
+		{messageTx, true},
+		{"unknown_cmd", false},
+	}
+	for _, tc := range cases {
+		got := fn(tc.cmd)
+		if tc.wantNonZero && got == 0 {
+			t.Errorf("postHandshakePayloadCap(%q)=0, want >0", tc.cmd)
+		}
+		if !tc.wantNonZero && got != 0 {
+			t.Errorf("postHandshakePayloadCap(%q)=%d, want 0", tc.cmd, got)
+		}
+	}
 }
 
 type failingReader struct {

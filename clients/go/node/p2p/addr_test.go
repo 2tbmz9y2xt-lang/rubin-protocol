@@ -275,3 +275,18 @@ func TestNewServiceSeedsAddrManagerFromBootstrapPeers(t *testing.T) {
 		t.Fatalf("seeded bootstrap addrs=%v, want [127.0.0.1:19052]", got)
 	}
 }
+
+func TestSubnetKeyEdgeCases(t *testing.T) {
+	if got := subnetKey("not-a-hostport"); got != "" {
+		t.Fatalf("subnetKey(invalid)=%q, want empty", got)
+	}
+	if got := subnetKey("hostname.example.com:1234"); got != "" {
+		t.Fatalf("subnetKey(hostname)=%q, want empty", got)
+	}
+	if got := subnetKey("[::1]:1234"); got != "" {
+		t.Fatalf("subnetKey(ipv6)=%q, want empty", got)
+	}
+	if got := subnetKey("10.0.1.5:18444"); got != "10.0.1.0/24" {
+		t.Fatalf("subnetKey(valid)=%q, want 10.0.1.0/24", got)
+	}
+}

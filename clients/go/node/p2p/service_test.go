@@ -590,6 +590,20 @@ func TestAcceptedRelayedBlockBroadcastsResolvedOrphans(t *testing.T) {
 	}
 }
 
+func TestHandshakeSlotNilServiceAndChannel(t *testing.T) {
+	var nilSvc *Service
+	if !nilSvc.tryAcquireHandshakeSlot() {
+		t.Fatal("nil service should return true")
+	}
+	nilSvc.releaseHandshakeSlot()
+
+	svc := &Service{}
+	if !svc.tryAcquireHandshakeSlot() {
+		t.Fatal("nil channel should return true")
+	}
+	svc.releaseHandshakeSlot()
+}
+
 func TestHandshakeSlotHelpersBoundCapacity(t *testing.T) {
 	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
 	limit := h.service.cfg.PeerRuntimeConfig.MaxPeers
