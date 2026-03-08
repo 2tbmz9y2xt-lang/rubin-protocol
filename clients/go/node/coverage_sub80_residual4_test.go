@@ -119,3 +119,53 @@ func TestCoverageResidual4_SyncAdditionalErrorBranches(t *testing.T) {
 		t.Fatalf("expected missing undo rejection")
 	}
 }
+
+func TestCoverageResidual4_ReorgAndBlockstoreHelpers(t *testing.T) {
+	var nilEngine *SyncEngine
+	nilEngine.SetMempool(nil)
+	if got := nilEngine.LastReorgDepth(); got != 0 {
+		t.Fatalf("LastReorgDepth(nil)=%d, want 0", got)
+	}
+	if got := nilEngine.ReorgCount(); got != 0 {
+		t.Fatalf("ReorgCount(nil)=%d, want 0", got)
+	}
+	if got := cloneMempoolEntry(nil); len(got.raw) != 0 || len(got.inputs) != 0 || got.fee != 0 || got.weight != 0 || got.size != 0 {
+		t.Fatalf("cloneMempoolEntry(nil)=%+v", got)
+	}
+
+	engine, store, target := newReorgTestEngine(t)
+	if blocks, depth, err := engine.previewDisconnectCanonicalToAncestor(nil, 0); err != nil || blocks != nil || depth != 0 {
+		t.Fatalf("previewDisconnectCanonicalToAncestor(nil)=(%v,%d,%v), want (nil,0,nil)", blocks, depth, err)
+	}
+
+	var nilStore *BlockStore
+	if _, err := nilStore.ChainWork([32]byte{}); err == nil {
+		t.Fatalf("expected nil blockstore ChainWork rejection")
+	}
+	if work, err := store.ChainWork([32]byte{}); err != nil || work.Sign() != 0 {
+		t.Fatalf("ChainWork(zero)=(%v,%v), want zero,nil", work, err)
+	}
+
+	subsidy1 := consensus.BlockSubsidy(1, 0)
+	block1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, 2, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	parsed1, err := consensus.ParseBlockBytes(block1)
+	if err != nil {
+		t.Fatalf("ParseBlockBytes(block1): %v", err)
+	}
+	block1Hash, err := consensus.BlockHash(parsed1.HeaderBytes)
+	if err != nil {
+		t.Fatalf("BlockHash(block1): %v", err)
+	}
+	if err := store.StoreBlock(block1Hash, parsed1.HeaderBytes, block1); err != nil {
+		t.Fatalf("StoreBlock(block1): %v", err)
+	}
+	headerPath := filepath.Join(store.headersDir, hex.EncodeToString(block1Hash[:])+".bin")
+	cyclic := append([]byte(nil), parsed1.HeaderBytes...)
+	copy(cyclic[4:36], block1Hash[:])
+	if err := os.WriteFile(headerPath, cyclic, 0o600); err != nil {
+		t.Fatalf("WriteFile(cyclic header): %v", err)
+	}
+	if _, err := store.ChainWork(block1Hash); err == nil {
+		t.Fatalf("expected parent cycle rejection")
+	}
+}
