@@ -435,18 +435,6 @@ fn handle_get_block(state: &DevnetRPCState, method: &str, query: &str) -> HttpRe
         };
         (height, hash)
     };
-    if !block_store.has_block(block_hash) {
-        return json_response(
-            state,
-            ROUTE,
-            404,
-            &SubmitTxResponse {
-                accepted: false,
-                txid: None,
-                error: Some("block not found".to_string()),
-            },
-        );
-    }
     match block_store.get_block_by_hash(block_hash) {
         Ok(block_bytes) => json_response(
             state,
@@ -1308,7 +1296,7 @@ mod tests {
     }
 
     #[test]
-    fn get_block_returns_not_found_when_header_is_missing() {
+    fn get_block_still_serves_block_bytes_when_header_is_missing() {
         let (state, dir) = build_state(true);
         let (_height, tip_hash) = state
             .block_store
@@ -1334,11 +1322,12 @@ mod tests {
                 body: Vec::new(),
             },
         );
-        assert_eq!(response.status, 404);
-        assert_eq!(
-            response_json(&response)["error"].as_str(),
-            Some("block not found")
-        );
+        assert_eq!(response.status, 200);
+        assert_eq!(response_json(&response)["height"].as_u64(), Some(0));
+        assert!(!response_json(&response)["block_hex"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty());
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
