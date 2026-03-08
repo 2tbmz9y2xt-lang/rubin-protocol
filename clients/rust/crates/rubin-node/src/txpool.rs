@@ -53,6 +53,10 @@ impl TxPool {
         self.txs.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.txs.is_empty()
+    }
+
     pub fn admit(
         &mut self,
         tx_bytes: &[u8],

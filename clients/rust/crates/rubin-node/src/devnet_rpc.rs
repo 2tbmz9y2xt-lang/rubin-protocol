@@ -793,7 +793,7 @@ fn decode_hex_payload(value: &str) -> Result<Vec<u8>, String> {
     if trimmed.is_empty() {
         return Err("tx_hex is required".to_string());
     }
-    if trimmed.len() % 2 != 0 {
+    if !trimmed.len().is_multiple_of(2) {
         return Err("tx_hex must be even-length hex".to_string());
     }
     hex::decode(trimmed).map_err(|_| "tx_hex must be valid hex".to_string())
