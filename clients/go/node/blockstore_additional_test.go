@@ -2,7 +2,9 @@ package node
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
+	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
@@ -234,5 +236,137 @@ func TestBlockStorePutBlock_CallsSetCanonicalTip(t *testing.T) {
 	}
 	if !ok || h != hash {
 		t.Fatalf("canonical mismatch")
+	}
+}
+
+func TestBlockStoreStoreBlockAndChainWork(t *testing.T) {
+	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	if work, err := store.ChainWork([32]byte{}); err != nil {
+		t.Fatalf("ChainWork(zero): %v", err)
+	} else if work.Cmp(big.NewInt(0)) != 0 {
+		t.Fatalf("zero work=%s, want 0", work)
+	}
+
+	header0 := testHeaderBytes(5, 1)
+	for i := 4; i < 36; i++ {
+		header0[i] = 0
+	}
+	hash0 := mustHeaderHash(t, header0)
+	if err := store.StoreBlock(hash0, header0, []byte("blk0")); err != nil {
+		t.Fatalf("StoreBlock(root): %v", err)
+	}
+
+	header1 := append([]byte(nil), testHeaderBytes(6, 2)...)
+	copy(header1[4:36], hash0[:])
+	hash1 := mustHeaderHash(t, header1)
+	if err := store.StoreBlock(hash1, header1, []byte("blk1")); err != nil {
+		t.Fatalf("StoreBlock(child): %v", err)
+	}
+
+	work0, err := store.ChainWork(hash0)
+	if err != nil {
+		t.Fatalf("ChainWork(root): %v", err)
+	}
+	work1, err := store.ChainWork(hash1)
+	if err != nil {
+		t.Fatalf("ChainWork(child): %v", err)
+	}
+	if work1.Cmp(work0) <= 0 {
+		t.Fatalf("ChainWork(child)=%s, want > %s", work1, work0)
+	}
+}
+
+func TestBlockStoreCanonicalIndexHelpersAndUndoErrors(t *testing.T) {
+	var nilStore *BlockStore
+	if _, err := nilStore.CanonicalIndexSnapshot(); err == nil {
+		t.Fatalf("expected nil CanonicalIndexSnapshot error")
+	}
+	if err := nilStore.RestoreCanonicalIndex(nil); err == nil {
+		t.Fatalf("expected nil RestoreCanonicalIndex error")
+	}
+	if _, err := nilStore.ChainWork([32]byte{}); err == nil {
+		t.Fatalf("expected nil ChainWork error")
+	}
+	if err := nilStore.PutUndo([32]byte{}, &BlockUndo{}); err == nil {
+		t.Fatalf("expected nil PutUndo error")
+	}
+	if _, err := nilStore.GetUndo([32]byte{}); err == nil {
+		t.Fatalf("expected nil GetUndo error")
+	}
+
+	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store.index.Canonical = []string{"zz"}
+	if _, err := store.CanonicalIndexSnapshot(); err == nil {
+		t.Fatalf("expected invalid canonical snapshot error")
+	}
+	if err := store.RestoreCanonicalIndex([]string{"zz"}); err == nil {
+		t.Fatalf("expected invalid canonical restore error")
+	}
+
+	if err := store.PutUndo([32]byte{0x01}, &BlockUndo{}); err != nil {
+		t.Fatalf("PutUndo: %v", err)
+	}
+	if _, err := store.GetUndo([32]byte{0x01}); err != nil {
+		t.Fatalf("GetUndo: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(store.undoDir, "ff.json"), []byte("{"), 0o600); err != nil {
+		t.Fatalf("WriteFile(malformed undo): %v", err)
+	}
+	if _, err := store.GetUndo([32]byte{0xff}); err == nil {
+		t.Fatalf("expected malformed undo error")
+	}
+}
+
+func TestBlockStoreChainWorkParentCycle(t *testing.T) {
+	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	header := testHeaderBytes(7, 3)
+	hash := mustHeaderHash(t, header)
+	if err := store.StoreBlock(hash, header, []byte("blk")); err != nil {
+		t.Fatalf("StoreBlock: %v", err)
+	}
+	headerPath := filepath.Join(store.headersDir, hex.EncodeToString(hash[:])+".bin")
+	cyclicHeader := append([]byte(nil), header...)
+	copy(cyclicHeader[4:36], hash[:])
+	if err := os.WriteFile(headerPath, cyclicHeader, 0o600); err != nil {
+		t.Fatalf("WriteFile(cyclic header): %v", err)
+	}
+	if _, err := store.ChainWork(hash); err == nil {
+		t.Fatalf("expected parent cycle error")
+	}
+}
+
+func TestBlockStoreStoreBlockAndChainWorkErrors(t *testing.T) {
+	var nilStore *BlockStore
+	header := testHeaderBytes(7, 7)
+	hash := mustHeaderHash(t, header)
+	if err := nilStore.StoreBlock(hash, header, []byte("blk")); err == nil {
+		t.Fatalf("expected nil StoreBlock error")
+	}
+	if _, err := nilStore.ChainWork(hash); err == nil {
+		t.Fatalf("expected nil ChainWork error")
+	}
+
+	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	if _, err := store.ChainWork(hash); err == nil {
+		t.Fatalf("expected missing header error")
+	}
+
+	headerPath := filepath.Join(store.headersDir, hex.EncodeToString(hash[:])+".bin")
+	if err := os.WriteFile(headerPath, []byte{0x01, 0x02}, 0o600); err != nil {
+		t.Fatalf("WriteFile(invalid header): %v", err)
+	}
+	if _, err := store.ChainWork(hash); err == nil {
+		t.Fatalf("expected invalid header parse error")
+	}
+
+	cycleStore := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "cycle"))
+	cycleHeader := append([]byte(nil), testHeaderBytes(8, 8)...)
+	cycleHash := mustHeaderHash(t, cycleHeader)
+	copy(cycleHeader[4:36], cycleHash[:])
+	if err := os.WriteFile(filepath.Join(cycleStore.headersDir, hex.EncodeToString(cycleHash[:])+".bin"), cycleHeader, 0o600); err != nil {
+		t.Fatalf("WriteFile(cycle header): %v", err)
+	}
+	if _, err := cycleStore.ChainWork(cycleHash); err == nil {
+		t.Fatalf("expected cycle error")
 	}
 }
