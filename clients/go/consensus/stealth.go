@@ -36,26 +36,5 @@ func validateCoreStealthSpend(entry UtxoEntry, w WitnessItem, tx *Tx, inputIndex
 	if len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1 {
 		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
 	}
-
-	if sha3_256(w.Pubkey) != c.OneTimeKeyID {
-		return txerr(TX_ERR_SIG_INVALID, "CORE_STEALTH key binding mismatch")
-	}
-
-	cryptoSig, sighashType, err := extractCryptoSigAndSighash(w)
-	if err != nil {
-		return err
-	}
-	digest, err := SighashV1DigestWithType(tx, inputIndex, inputValue, chainID, sighashType)
-	if err != nil {
-		return err
-	}
-
-	ok, err := verifySig(w.SuiteID, w.Pubkey, cryptoSig, digest)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return txerr(TX_ERR_SIG_INVALID, "CORE_STEALTH signature invalid")
-	}
-	return nil
+	return verifyMLDSAKeyAndSig(w, c.OneTimeKeyID, tx, inputIndex, inputValue, chainID, "CORE_STEALTH")
 }
