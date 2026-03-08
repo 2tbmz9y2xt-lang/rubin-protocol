@@ -6,8 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +22,11 @@ import (
 func mustRPCState(t *testing.T, withGenesis bool) *devnetRPCState {
 	t.Helper()
 	dir := t.TempDir()
+	return mustRPCStateAtDir(t, dir, withGenesis)
+}
+
+func mustRPCStateAtDir(t *testing.T, dir string, withGenesis bool) *devnetRPCState {
+	t.Helper()
 	chainStatePath := node.ChainStatePath(dir)
 	chainState := node.NewChainState()
 	if err := chainState.Save(chainStatePath); err != nil {
@@ -345,6 +353,20 @@ func TestDevnetRPCGetBlockRejectsInvalidHash(t *testing.T) {
 	}
 }
 
+func TestDevnetRPCGetBlockReturnsNotFoundForUnknownHash(t *testing.T) {
+	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, true)))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/get_block?hash=" + strings.Repeat("55", 32))
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404", resp.StatusCode)
+	}
+}
+
 func TestDevnetRPCGetBlockRejectsInvalidHeight(t *testing.T) {
 	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, true)))
 	defer server.Close()
@@ -370,6 +392,40 @@ func TestDevnetRPCGetBlockReturnsNotFoundForMissingHeight(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status=%d, want 404", resp.StatusCode)
+	}
+}
+
+func TestDevnetRPCGetBlockReturnsUnavailableForBlockReadError(t *testing.T) {
+	dir := t.TempDir()
+	state := mustRPCStateAtDir(t, dir, true)
+	_, tipHash, ok, err := state.blockStore.Tip()
+	if err != nil {
+		t.Fatalf("Tip: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected tip")
+	}
+	blockPath := filepath.Join(
+		node.BlockStorePath(dir),
+		"blocks",
+		fmt.Sprintf("%x.bin", tipHash[:]),
+	)
+	if err := os.Remove(blockPath); err != nil {
+		t.Fatalf("Remove block: %v", err)
+	}
+	if err := os.Mkdir(blockPath, 0o700); err != nil {
+		t.Fatalf("Mkdir block placeholder: %v", err)
+	}
+
+	server := httptest.NewServer(newDevnetRPCHandler(state))
+	defer server.Close()
+	resp, err := http.Get(server.URL + "/get_block?height=0")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want 503", resp.StatusCode)
 	}
 }
 
