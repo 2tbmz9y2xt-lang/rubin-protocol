@@ -427,13 +427,13 @@ func handleMetrics(state *devnetRPCState, w http.ResponseWriter, r *http.Request
 
 func renderPrometheusMetrics(state *devnetRPCState) string {
 	var (
-		tipHeight        float64
-		bestKnownHeight  float64
-		inIBD            float64
-		peerCount        float64
-		mempoolTxs       float64
-		routeStatus      map[string]uint64
-		submitByResult   map[string]uint64
+		tipHeight       float64
+		bestKnownHeight float64
+		inIBD           float64
+		peerCount       float64
+		mempoolTxs      float64
+		routeStatus     map[string]uint64
+		submitByResult  map[string]uint64
 	)
 	if state != nil && state.syncEngine != nil {
 		bestKnownHeight = float64(state.syncEngine.BestKnownHeight())
