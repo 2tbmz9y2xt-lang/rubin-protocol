@@ -32,13 +32,7 @@ func (s *Service) discoverableAddrs(max int) []string {
 	self := normalizeNetAddr(s.Addr())
 	out := make([]string, 0, max)
 	for _, addr := range candidates {
-		if addr == "" || addr == self {
-			continue
-		}
-		if _, ok := connected[addr]; ok {
-			continue
-		}
-		if _, ok := banned[addr]; ok {
+		if !shouldAdvertiseAddr(addr, self, connected, banned) {
 			continue
 		}
 		out = append(out, addr)
@@ -58,7 +52,7 @@ func (s *Service) connectDiscoveredAddrs(addrs []string) {
 		if budget == 0 {
 			return
 		}
-		if addr == "" || s.isConnected(addr) || s.isDialing(addr) {
+		if !s.shouldDialDiscoveredAddr(addr) {
 			continue
 		}
 		s.addrMgr.MarkAttempted(addr)
@@ -66,6 +60,26 @@ func (s *Service) connectDiscoveredAddrs(addrs []string) {
 			budget--
 		}
 	}
+}
+
+func shouldAdvertiseAddr(addr string, self string, connected map[string]struct{}, banned map[string]struct{}) bool {
+	if addr == "" || addr == self {
+		return false
+	}
+	if _, ok := connected[addr]; ok {
+		return false
+	}
+	if _, ok := banned[addr]; ok {
+		return false
+	}
+	return true
+}
+
+func (s *Service) shouldDialDiscoveredAddr(addr string) bool {
+	if s == nil || addr == "" {
+		return false
+	}
+	return !s.isConnected(addr) && !s.isDialing(addr)
 }
 
 func (s *Service) discoveredDialBudget() int {

@@ -168,27 +168,18 @@ func (s *Service) AnnounceTx(txBytes []byte) error {
 }
 
 func normalizePeerAddrs(addrs []string) []string {
-	seen := make(map[string]struct{}, len(addrs))
-	out := make([]string, 0, len(addrs))
-	for _, addr := range addrs {
-		addr = normalizeNetAddr(addr)
-		if addr == "" {
-			continue
-		}
-		if _, ok := seen[addr]; ok {
-			continue
-		}
-		seen[addr] = struct{}{}
-		out = append(out, addr)
-	}
-	return out
+	return normalizeUniqueAddrs(addrs, normalizeNetAddr)
 }
 
 func normalizeDialTargets(addrs []string) []string {
+	return normalizeUniqueAddrs(addrs, normalizeDialTarget)
+}
+
+func normalizeUniqueAddrs(addrs []string, normalize func(string) string) []string {
 	seen := make(map[string]struct{}, len(addrs))
 	out := make([]string, 0, len(addrs))
 	for _, addr := range addrs {
-		addr = normalizeDialTarget(addr)
+		addr = normalize(addr)
 		if addr == "" {
 			continue
 		}
@@ -205,11 +196,5 @@ func seedAddrManagerFromBootstrap(manager *addrManager, addrs []string) {
 	if manager == nil || len(addrs) == 0 {
 		return
 	}
-	seeds := make([]string, 0, len(addrs))
-	for _, addr := range addrs {
-		if normalized := normalizeNetAddr(addr); normalized != "" {
-			seeds = append(seeds, normalized)
-		}
-	}
-	manager.AddAddrs(seeds)
+	manager.AddAddrs(normalizePeerAddrs(addrs))
 }
