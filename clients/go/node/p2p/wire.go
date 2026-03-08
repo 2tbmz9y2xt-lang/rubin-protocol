@@ -41,6 +41,8 @@ const (
 	versionPayloadBaseBytes = 17
 	versionPayloadBytes     = versionPayloadBaseBytes + 32 + 32 + 8
 	maxAddrPayloadEntries   = maxKnownAddrs
+	maxInventoryVectors     = 4096
+	maxCompactSizeBytes     = 9
 )
 
 type message struct {
@@ -309,6 +311,9 @@ func decodeInventoryVectors(payload []byte) ([]InventoryVector, error) {
 	if len(payload)%inventoryVectorSize != 0 {
 		return nil, errors.New("inventory payload width mismatch")
 	}
+	if len(payload)/inventoryVectorSize > maxInventoryVectors {
+		return nil, errors.New("inventory count exceeds limit")
+	}
 	out := make([]InventoryVector, 0, len(payload)/inventoryVectorSize)
 	for offset := 0; offset < len(payload); offset += inventoryVectorSize {
 		itemType := payload[offset]
@@ -458,4 +463,49 @@ func decodeAddrPayloadEntry(payload []byte, offset int) (string, int, error) {
 		return "", 0, errors.New("invalid addr payload entry")
 	}
 	return addr, offset, nil
+}
+
+func inventoryPayloadCap() uint32 {
+	return uint32(maxInventoryVectors * inventoryVectorSize)
+}
+
+func addrPayloadCap() uint32 {
+	return uint32(maxCompactSizeBytes + maxAddrPayloadEntries*addrPayloadEntrySize)
+}
+
+func getBlocksPayloadCap(locatorLimit int) uint32 {
+	if locatorLimit <= 0 {
+		locatorLimit = defaultLocatorLimit
+	}
+	return uint32(2 + locatorLimit*32 + 32)
+}
+
+func headersPayloadCap(headerBatchLimit uint64) uint32 {
+	if headerBatchLimit == 0 {
+		headerBatchLimit = 512
+	}
+	return uint32(headerBatchLimit * consensus.BLOCK_HEADER_BYTES)
+}
+
+func postHandshakePayloadCap(locatorLimit int, headerBatchLimit uint64) payloadLimitFn {
+	return func(command string) uint32 {
+		switch command {
+		case messageVersion:
+			return versionPayloadBytes
+		case messageVerAck, messageGetAddr, messagePing, messagePong:
+			return 0
+		case messageInv, messageGetData:
+			return inventoryPayloadCap()
+		case messageAddr:
+			return addrPayloadCap()
+		case messageGetBlk:
+			return getBlocksPayloadCap(locatorLimit)
+		case messageHeaders:
+			return headersPayloadCap(headerBatchLimit)
+		case messageBlock, messageTx:
+			return uint32(consensus.MAX_BLOCK_BYTES)
+		default:
+			return 0
+		}
+	}
 }

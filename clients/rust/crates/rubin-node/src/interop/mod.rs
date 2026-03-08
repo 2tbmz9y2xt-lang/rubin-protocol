@@ -568,7 +568,7 @@ mod tests {
                     .expect("handshake");
             let err = run_action(&mut session, &Action::SendPingExpectPong).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-            assert_eq!(err.to_string(), "expected empty pong payload");
+            assert_eq!(err.to_string(), "message exceeds command cap");
         });
 
         let client = thread::spawn(move || {

@@ -62,7 +62,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&cfg.BindAddr, "bind", defaults.BindAddr, "bind address host:port")
 	fs.StringVar(&cfg.RPCBindAddr, "rpc-bind", defaults.RPCBindAddr, "devnet HTTP RPC bind address host:port (disabled when empty)")
 	fs.StringVar(&cfg.LogLevel, "log-level", defaults.LogLevel, "log level: debug|info|warn|error")
-	genesisFile := fs.String("genesis-file", "", "path to genesis pack JSON with chain_id_hex")
+	genesisFile := fs.String("genesis-file", "", "path to genesis pack JSON with chain_id_hex and genesis hash")
 	fs.IntVar(&cfg.MaxPeers, "max-peers", defaults.MaxPeers, "max connected peers")
 	fs.StringVar(&cfg.MineAddress, "mine-address", "", "miner pubkey: 64-char hex key_id or 66-char hex suite_id||key_id")
 	mineBlocks := fs.Int("mine-blocks", 0, "mine N blocks locally after startup")
@@ -75,7 +75,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	cfg.LogLevel = strings.ToLower(strings.TrimSpace(cfg.LogLevel))
 	cfg.Peers = node.NormalizePeers(append([]string{*peerCSV}, peers...)...)
-	chainIDFromGenesis, err := parseGenesisChainID(*genesisFile)
+	chainIDFromGenesis, genesisHashFromGenesis, err := parseGenesisConfig(*genesisFile)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "invalid genesis file: %v\n", err)
 		return 2
@@ -194,7 +194,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		BindAddr:          cfg.BindAddr,
 		BootstrapPeers:    cfg.Peers,
 		UserAgent:         "rubin-node/go",
-		GenesisHash:       node.DevnetGenesisBlockHash(),
+		GenesisHash:       genesisHashFromGenesis,
 		PeerRuntimeConfig: node.DefaultPeerRuntimeConfig(cfg.Network, cfg.MaxPeers),
 		PeerManager:       peerManager,
 		SyncConfig:        syncCfg,
@@ -343,37 +343,88 @@ func nowUnixU64() uint64 {
 }
 
 type genesisPack struct {
-	ChainIDHex string `json:"chain_id_hex"`
+	ChainIDHex            string `json:"chain_id_hex"`
+	GenesisHashHex        string `json:"genesis_hash_hex"`
+	GenesisBlockHashHex   string `json:"genesis_block_hash_hex"`
+	GenesisHeaderBytesHex string `json:"genesis_header_bytes_hex"`
 }
 
-func parseGenesisChainID(path string) ([32]byte, error) {
-	var out [32]byte
+func parseGenesisConfig(path string) ([32]byte, [32]byte, error) {
+	chainID := node.DevnetGenesisChainID()
+	genesisHash := node.DevnetGenesisBlockHash()
 	if strings.TrimSpace(path) == "" {
-		return node.DevnetGenesisChainID(), nil
+		return chainID, genesisHash, nil
 	}
 	raw, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
-		return out, err
+		return chainID, genesisHash, err
 	}
 	var payload genesisPack
 	if err := json.Unmarshal(raw, &payload); err != nil {
-		return out, err
+		return chainID, genesisHash, err
 	}
-	chainIDHex := strings.TrimSpace(payload.ChainIDHex)
-	if chainIDHex == "" {
-		return out, fmt.Errorf("chain_id_hex missing")
+	chainID, err = parseHex32Field("chain_id", payload.ChainIDHex)
+	if err != nil {
+		return chainID, genesisHash, err
 	}
-	chainIDHex = strings.TrimPrefix(chainIDHex, "0x")
-	chainIDHex = strings.TrimPrefix(chainIDHex, "0X")
-	rawChainID, err := hex.DecodeString(chainIDHex)
+	genesisHash, err = parseGenesisHash(payload)
+	if err != nil {
+		return chainID, genesisHash, err
+	}
+	return chainID, genesisHash, nil
+}
+
+func parseGenesisChainID(path string) ([32]byte, error) {
+	chainID, _, err := parseGenesisConfig(path)
+	return chainID, err
+}
+
+func parseGenesisHash(payload genesisPack) ([32]byte, error) {
+	if strings.TrimSpace(payload.GenesisHashHex) != "" {
+		return parseHex32Field("genesis_hash", payload.GenesisHashHex)
+	}
+	if strings.TrimSpace(payload.GenesisBlockHashHex) != "" {
+		return parseHex32Field("genesis_block_hash", payload.GenesisBlockHashHex)
+	}
+	headerHex := strings.TrimSpace(payload.GenesisHeaderBytesHex)
+	if headerHex == "" {
+		var zero [32]byte
+		return zero, fmt.Errorf("genesis hash missing")
+	}
+	headerHex = trimHexPrefix(headerHex)
+	headerBytes, err := hex.DecodeString(headerHex)
+	if err != nil {
+		var zero [32]byte
+		return zero, err
+	}
+	if len(headerBytes) != consensus.BLOCK_HEADER_BYTES {
+		var zero [32]byte
+		return zero, fmt.Errorf("genesis_header_bytes must be %d bytes, got %d", consensus.BLOCK_HEADER_BYTES, len(headerBytes))
+	}
+	return consensus.BlockHash(headerBytes)
+}
+
+func parseHex32Field(name, value string) ([32]byte, error) {
+	var out [32]byte
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return out, fmt.Errorf("%s_hex missing", name)
+	}
+	rawValue, err := hex.DecodeString(trimHexPrefix(value))
 	if err != nil {
 		return out, err
 	}
-	if len(rawChainID) != len(out) {
-		return out, fmt.Errorf("chain_id must be 32 bytes, got %d", len(rawChainID))
+	if len(rawValue) != len(out) {
+		return out, fmt.Errorf("%s must be 32 bytes, got %d", name, len(rawValue))
 	}
-	copy(out[:], rawChainID)
+	copy(out[:], rawValue)
 	return out, nil
+}
+
+func trimHexPrefix(value string) string {
+	value = strings.TrimPrefix(value, "0x")
+	value = strings.TrimPrefix(value, "0X")
+	return value
 }
 
 func mustTip(tipHeight uint64, tipHash [32]byte, tipOK bool, err error, stderr io.Writer) (uint64, [32]byte, bool, int) {

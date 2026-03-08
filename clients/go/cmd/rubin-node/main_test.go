@@ -95,6 +95,83 @@ func TestParseGenesisChainIDEmptyDefaultsToDevnet(t *testing.T) {
 	}
 }
 
+func TestParseGenesisConfigEmptyDefaultsToDevnet(t *testing.T) {
+	chainID, genesisHash, err := parseGenesisConfig("")
+	if err != nil {
+		t.Fatalf("parseGenesisConfig: %v", err)
+	}
+	if chainID != node.DevnetGenesisChainID() {
+		t.Fatalf("chain_id=%x, want %x", chainID, node.DevnetGenesisChainID())
+	}
+	if genesisHash != node.DevnetGenesisBlockHash() {
+		t.Fatalf("genesis_hash=%x, want %x", genesisHash, node.DevnetGenesisBlockHash())
+	}
+}
+
+func TestParseGenesisConfigReadsGenesisHashFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	if err := os.WriteFile(path, []byte(`{"chain_id_hex":"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103","genesis_hash_hex":"0x8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff"}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+
+	chainID, genesisHash, err := parseGenesisConfig(path)
+	if err != nil {
+		t.Fatalf("parseGenesisConfig: %v", err)
+	}
+	if chainID != node.DevnetGenesisChainID() {
+		t.Fatalf("chain_id=%x, want %x", chainID, node.DevnetGenesisChainID())
+	}
+	if genesisHash != node.DevnetGenesisBlockHash() {
+		t.Fatalf("genesis_hash=%x, want %x", genesisHash, node.DevnetGenesisBlockHash())
+	}
+}
+
+func TestParseGenesisConfigReadsGenesisBlockHashFallback(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	if err := os.WriteFile(path, []byte(`{"chain_id_hex":"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103","genesis_block_hash_hex":"0x8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff"}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+
+	_, genesisHash, err := parseGenesisConfig(path)
+	if err != nil {
+		t.Fatalf("parseGenesisConfig: %v", err)
+	}
+	if genesisHash != node.DevnetGenesisBlockHash() {
+		t.Fatalf("genesis_hash=%x, want %x", genesisHash, node.DevnetGenesisBlockHash())
+	}
+}
+
+func TestParseGenesisConfigDerivesHashFromHeaderFallback(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	headerHex := hex.EncodeToString(node.DevnetGenesisBlockBytes()[:consensus.BLOCK_HEADER_BYTES])
+	if err := os.WriteFile(path, []byte(`{"chain_id_hex":"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103","genesis_header_bytes_hex":"`+headerHex+`"}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+
+	_, genesisHash, err := parseGenesisConfig(path)
+	if err != nil {
+		t.Fatalf("parseGenesisConfig: %v", err)
+	}
+	if genesisHash != node.DevnetGenesisBlockHash() {
+		t.Fatalf("genesis_hash=%x, want %x", genesisHash, node.DevnetGenesisBlockHash())
+	}
+}
+
+func TestParseGenesisConfigRejectsMissingGenesisHash(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	if err := os.WriteFile(path, []byte(`{"chain_id_hex":"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103"}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+
+	if _, _, err := parseGenesisConfig(path); err == nil || err.Error() != "genesis hash missing" {
+		t.Fatalf("expected genesis hash missing error, got %v", err)
+	}
+}
+
 func TestRunDryRunUsesDevnetGenesisChainIDByDefault(t *testing.T) {
 	prev := newSyncEngineFn
 	var gotCfg node.SyncConfig

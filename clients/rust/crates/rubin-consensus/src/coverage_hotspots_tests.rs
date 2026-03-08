@@ -207,6 +207,12 @@ fn reader_reports_eof_for_each_read_shape() {
 }
 
 #[test]
+fn reader_rejects_length_addition_overflow_without_panicking() {
+    let mut r = Reader::new(&[0x42]);
+    assert!(r.read_bytes(usize::MAX).is_err());
+}
+
+#[test]
 fn verify_sig_rejects_unsupported_suite_and_bad_lengths() {
     assert!(verify_sig(0xff, &[], &[], &[0u8; 32]).is_err());
     let ok = verify_sig(SUITE_ID_ML_DSA_87, &[0u8; 1], &[0u8; 1], &[0u8; 32]).expect("bad lengths");

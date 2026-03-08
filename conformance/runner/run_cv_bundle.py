@@ -2,6 +2,7 @@
 
 import argparse
 from fractions import Fraction
+import hashlib
 import json
 import os
 import pathlib
@@ -91,6 +92,263 @@ def load_fixtures() -> List[Dict[str, Any]]:
     for p in sorted(FIXTURES_DIR.glob("CV-*.json")):
         fixtures.append(json.loads(p.read_text(encoding="utf-8")))
     return fixtures
+
+
+def sha3_256(payload: bytes) -> bytes:
+    return hashlib.sha3_256(payload).digest()
+
+
+def u16le(value: int) -> bytes:
+    return int(value).to_bytes(2, "little", signed=False)
+
+
+def u32le(value: int) -> bytes:
+    return int(value).to_bytes(4, "little", signed=False)
+
+
+def u64le(value: int) -> bytes:
+    return int(value).to_bytes(8, "little", signed=False)
+
+
+def encode_compact_size(value: int) -> bytes:
+    value = int(value)
+    if value < 0xFD:
+        return bytes([value])
+    if value <= 0xFFFF:
+        return b"\xFD" + u16le(value)
+    if value <= 0xFFFF_FFFF:
+        return b"\xFE" + u32le(value)
+    return b"\xFF" + u64le(value)
+
+
+def _weight_tx_parts(core: bytes, witness: bytes, da_payload: bytes, *, tx_kind: int) -> Dict[str, Any]:
+    full = b"".join([core, witness, encode_compact_size(len(da_payload)), da_payload])
+    return {
+        "core": core,
+        "full": full,
+        "base_size": len(core),
+        "witness_size": len(witness),
+        "da_size": len(encode_compact_size(len(da_payload))) + len(da_payload),
+        "da_bytes": len(da_payload) if tx_kind != 0x00 else 0,
+    }
+
+
+def _txid(parts: Dict[str, Any]) -> bytes:
+    return sha3_256(parts["core"])
+
+
+def _wtxid(parts: Dict[str, Any]) -> bytes:
+    return sha3_256(parts["full"])
+
+
+def _merkle_root_tagged(ids: List[bytes], leaf_tag: int, node_tag: int) -> bytes:
+    if not ids:
+        raise ValueError("empty merkle tree")
+    level = [sha3_256(bytes([leaf_tag]) + item) for item in ids]
+    while len(level) > 1:
+        nxt: List[bytes] = []
+        idx = 0
+        while idx < len(level):
+            if idx == len(level) - 1:
+                nxt.append(level[idx])
+                idx += 1
+                continue
+            nxt.append(sha3_256(bytes([node_tag]) + level[idx] + level[idx + 1]))
+            idx += 2
+        level = nxt
+    return level[0]
+
+
+def _merkle_root_txids(txids: List[bytes]) -> bytes:
+    return _merkle_root_tagged(txids, 0x00, 0x01)
+
+
+def _witness_merkle_root_wtxids(wtxids: List[bytes]) -> bytes:
+    ids = list(wtxids)
+    ids[0] = b"\x00" * 32
+    return _merkle_root_tagged(ids, 0x02, 0x03)
+
+
+def _witness_commitment_hash(witness_root: bytes) -> bytes:
+    return sha3_256(b"RUBIN-WITNESS/" + witness_root)
+
+
+def _decode_hex_bytes(name: str, value: Any, expected_len: int) -> bytes:
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be hex string")
+    raw = value.removeprefix("0x").removeprefix("0X")
+    out = bytes.fromhex(raw)
+    if len(out) != expected_len:
+        raise ValueError(f"{name} must be {expected_len} bytes")
+    return out
+
+
+def _p2pk_covenant_data() -> bytes:
+    return bytes([0x01]) + (b"\x00" * 32)
+
+
+def _coinbase_with_witness_commitment(height: int, non_coinbase: List[Dict[str, Any]]) -> Dict[str, Any]:
+    witness_root = _witness_merkle_root_wtxids([b"\x00" * 32] + [_wtxid(tx) for tx in non_coinbase])
+    commitment = _witness_commitment_hash(witness_root)
+    outputs = b"".join([u64le(0), u16le(0x0002), encode_compact_size(len(commitment)), commitment])
+    core = b"".join(
+        [
+            u32le(1),
+            b"\x00",
+            u64le(0),
+            encode_compact_size(1),
+            b"\x00" * 32,
+            u32le(0xFFFF_FFFF),
+            encode_compact_size(0),
+            u32le(0xFFFF_FFFF),
+            encode_compact_size(1),
+            outputs,
+            u32le(height),
+        ]
+    )
+    return _weight_tx_parts(core, encode_compact_size(0), b"", tx_kind=0x00)
+
+
+def _non_da_tx_with_outputs(tx_nonce: int, outputs: List[Tuple[int, int, bytes]], witness_items: Optional[List[Tuple[int, bytes, bytes]]] = None) -> Dict[str, Any]:
+    encoded_outputs = bytearray()
+    for value, covenant_type, covenant_data in outputs:
+        encoded_outputs.extend(u64le(value))
+        encoded_outputs.extend(u16le(covenant_type))
+        encoded_outputs.extend(encode_compact_size(len(covenant_data)))
+        encoded_outputs.extend(covenant_data)
+    core = b"".join(
+        [
+            u32le(1),
+            b"\x00",
+            u64le(tx_nonce),
+            encode_compact_size(1),
+            b"\x00" * 32,
+            u32le(0),
+            encode_compact_size(0),
+            u32le(0),
+            encode_compact_size(len(outputs)),
+            bytes(encoded_outputs),
+            u32le(0),
+        ]
+    )
+    witness = bytearray()
+    witness_items = witness_items or []
+    witness.extend(encode_compact_size(len(witness_items)))
+    for suite_id, pubkey, signature in witness_items:
+        witness.append(int(suite_id) & 0xFF)
+        witness.extend(encode_compact_size(len(pubkey)))
+        witness.extend(pubkey)
+        witness.extend(encode_compact_size(len(signature)))
+        witness.extend(signature)
+    return _weight_tx_parts(core, bytes(witness), b"", tx_kind=0x00)
+
+
+def _da_commit_tx(tx_nonce: int, da_id: bytes, payload_commitment: bytes, manifest: bytes) -> Dict[str, Any]:
+    dummy_input = b"".join([b"\xA1" * 32, u32le(0), encode_compact_size(0), u32le(0)])
+    outputs = b"".join([u64le(0), u16le(0x0103), encode_compact_size(32), payload_commitment])
+    core = b"".join(
+        [
+            u32le(1),
+            b"\x01",
+            u64le(tx_nonce),
+            encode_compact_size(1),
+            dummy_input,
+            encode_compact_size(1),
+            outputs,
+            u32le(0),
+            da_id,
+            u16le(1),
+            b"\x42" * 32,
+            u64le(1),
+            b"\x10" * 32,
+            b"\x11" * 32,
+            b"\x12" * 32,
+            b"\x01",
+            encode_compact_size(4),
+            b"BBBB",
+        ]
+    )
+    return _weight_tx_parts(core, encode_compact_size(0), manifest, tx_kind=0x01)
+
+
+def _da_chunk_tx(tx_nonce: int, da_id: bytes, payload: bytes) -> Dict[str, Any]:
+    dummy_input = b"".join([b"\xA2" * 32, u32le(0), encode_compact_size(0), u32le(0)])
+    core = b"".join(
+        [
+            u32le(1),
+            b"\x02",
+            u64le(tx_nonce),
+            encode_compact_size(1),
+            dummy_input,
+            encode_compact_size(0),
+            u32le(0),
+            da_id,
+            u16le(0),
+            sha3_256(payload),
+        ]
+    )
+    return _weight_tx_parts(core, encode_compact_size(0), payload, tx_kind=0x02)
+
+
+def _block_weight(parts: List[Dict[str, Any]]) -> int:
+    return sum((4 * int(tx["base_size"])) + int(tx["witness_size"]) + int(tx["da_size"]) for tx in parts)
+
+
+def _build_cv_weight_block_hex(vector: Dict[str, Any]) -> str:
+    scenario = vector.get("scenario")
+    if not isinstance(scenario, dict):
+        raise ValueError("CV-WEIGHT block_basic_check requires scenario")
+    prev_hash = _decode_hex_bytes("expected_prev_hash", vector.get("expected_prev_hash"), 32)
+    target = _decode_hex_bytes("expected_target", vector.get("expected_target"), 32)
+    height = int(vector.get("height", 1))
+    nonce = int(scenario.get("nonce", 42))
+    kind = str(scenario.get("kind", ""))
+
+    if kind == "exact_weight_exceeded":
+        large_count = int(scenario.get("large_payload_count", 259))
+        large_len = int(scenario.get("large_payload_len", 65535))
+        tail_len = int(scenario.get("tail_payload_len", 22784))
+        outputs = [(0, 0x0002, bytes([0x41]) * large_len) for _ in range(large_count)]
+        outputs.append((0, 0x0002, bytes([0x42]) * tail_len))
+        heavyweight_tx = _non_da_tx_with_outputs(int(scenario.get("tx_nonce", 1)), outputs)
+        pad_tx = _non_da_tx_with_outputs(
+            int(scenario.get("pad_tx_nonce", 2)),
+            [(1, 0x0000, _p2pk_covenant_data())],
+            witness_items=[(0x00, b"", b"")],
+        )
+        txs = [heavyweight_tx, pad_tx]
+        coinbase = _coinbase_with_witness_commitment(height, txs)
+        all_txs = [coinbase] + txs
+        if _block_weight(all_txs) != 68_000_001:
+            raise ValueError("exact_weight_exceeded scenario did not reach MAX_BLOCK_WEIGHT+1")
+    elif kind == "da_bytes_exceeded":
+        payload_len = int(scenario.get("payload_len", 32_000_001))
+        payload_fill = int(scenario.get("payload_fill", 0x55)) & 0xFF
+        max_manifest = int(scenario.get("manifest_chunk_len", 65_536))
+        if max_manifest <= 0 or payload_len <= 0:
+            raise ValueError("da_bytes_exceeded requires positive payload_len and manifest_chunk_len")
+        txs: List[Dict[str, Any]] = []
+        remaining = payload_len
+        tx_nonce = int(scenario.get("commit_nonce", 5))
+        da_seed = int(scenario.get("da_id_fill", 0x53)) & 0xFF
+        while remaining > 0:
+            manifest_len = min(remaining, max_manifest)
+            manifest = bytes([payload_fill]) * manifest_len
+            da_id = bytes([da_seed]) * 31 + bytes([len(txs) & 0xFF])
+            txs.append(_da_commit_tx(tx_nonce, da_id, sha3_256(manifest), manifest))
+            remaining -= manifest_len
+            tx_nonce += 1
+        coinbase = _coinbase_with_witness_commitment(height, txs)
+        all_txs = [coinbase] + txs
+        if sum(int(tx["da_bytes"]) for tx in all_txs) != 32_000_001:
+            raise ValueError("da_bytes_exceeded scenario did not reach MAX_DA_BYTES_PER_BLOCK+1")
+    else:
+        raise ValueError(f"unsupported CV-WEIGHT scenario kind={kind!r}")
+
+    merkle_root = _merkle_root_txids([_txid(tx) for tx in all_txs])
+    header = b"".join([u32le(1), prev_hash, merkle_root, u64le(1), target, u64le(nonce)])
+    block = b"".join([header, encode_compact_size(len(all_txs))] + [tx["full"] for tx in all_txs])
+    return block.hex()
 
 
 def as_int(x: Any) -> int:
@@ -1305,7 +1563,12 @@ def validate_vector(
             else:
                 return [f"{gate}/{v.get('id','?')}: unknown window_pattern.mode={mode}"]
     elif op == "block_basic_check":
-        req["block_hex"] = v["block_hex"]
+        block_hex = v.get("block_hex")
+        if not block_hex and gate == "CV-WEIGHT":
+            block_hex = _build_cv_weight_block_hex(v)
+        if not block_hex:
+            return [f"{gate}/{v.get('id','?')}: missing block_hex"]
+        req["block_hex"] = block_hex
         include_block_context(require_height=False)
     elif op == "block_basic_check_with_fees":
         req["block_hex"] = v["block_hex"]

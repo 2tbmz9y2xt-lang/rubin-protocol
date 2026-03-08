@@ -96,6 +96,21 @@ func TestReadFrameWithPayloadLimitRejectsOversizeVersionBeforePayloadRead(t *tes
 	}
 }
 
+func TestReadFrameWithPayloadLimitRejectsOversizeInvBeforePayloadRead(t *testing.T) {
+	header, err := buildEnvelopeHeader(networkMagic("devnet"), messageInv, make([]byte, inventoryPayloadCap()+1))
+	if err != nil {
+		t.Fatalf("buildEnvelopeHeader: %v", err)
+	}
+	reader := io.MultiReader(
+		bytes.NewReader(header[:]),
+		&failingReader{err: errors.New("payload should not be read")},
+	)
+	_, err = readFrameWithPayloadLimit(reader, networkMagic("devnet"), 1024*1024, postHandshakePayloadCap(defaultLocatorLimit, 512))
+	if err == nil || err.Error() != "message exceeds command cap" {
+		t.Fatalf("expected command cap error, got %v", err)
+	}
+}
+
 func TestWriteFrameErrors(t *testing.T) {
 	t.Run("cap exceeded", func(t *testing.T) {
 		err := writeFrame(io.Discard, networkMagic("devnet"), message{Command: messageInv, Payload: []byte{1, 2}}, 1)
@@ -241,6 +256,16 @@ func TestDecodeInventoryVectorsInvalidLen(t *testing.T) {
 	_, err := decodeInventoryVectors([]byte{0x01, 0x02})
 	if err == nil {
 		t.Fatal("expected error for invalid length")
+	}
+}
+
+func TestDecodeInventoryVectorsRejectsCountOverLimit(t *testing.T) {
+	payload := make([]byte, (maxInventoryVectors+1)*inventoryVectorSize)
+	for offset := 0; offset < len(payload); offset += inventoryVectorSize {
+		payload[offset] = MSG_BLOCK
+	}
+	if _, err := decodeInventoryVectors(payload); err == nil || err.Error() != "inventory count exceeds limit" {
+		t.Fatalf("expected inventory count limit error, got %v", err)
 	}
 }
 

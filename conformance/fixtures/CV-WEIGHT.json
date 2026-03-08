@@ -51,6 +51,44 @@
       "expect_da_bytes": 1,
       "expect_anchor_bytes": 0,
       "note": "base=126 witness=1 da_size=2 sig_cost=0"
+    },
+    {
+      "id": "WEIGHT-06",
+      "op": "block_basic_check",
+      "expect_ok": false,
+      "expect_err": "BLOCK_ERR_WEIGHT_EXCEEDED",
+      "expected_prev_hash": "a200000000000000000000000000000000000000000000000000000000000000",
+      "expected_target": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "height": 1,
+      "scenario": {
+        "kind": "exact_weight_exceeded",
+        "nonce": 42,
+        "tx_nonce": 1,
+        "pad_tx_nonce": 2,
+        "large_payload_count": 259,
+        "large_payload_len": 65535,
+        "tail_payload_len": 22784
+      },
+      "note": "Synthetic block builder produces sum_weight exactly MAX_BLOCK_WEIGHT+1 without depending on later nonce or semantic failures."
+    },
+    {
+      "id": "WEIGHT-07",
+      "op": "block_basic_check",
+      "expect_ok": false,
+      "expect_err": "BLOCK_ERR_WEIGHT_EXCEEDED",
+      "expected_prev_hash": "a300000000000000000000000000000000000000000000000000000000000000",
+      "expected_target": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "height": 1,
+      "scenario": {
+        "kind": "da_bytes_exceeded",
+        "nonce": 43,
+        "commit_nonce": 5,
+        "payload_len": 32000001,
+        "manifest_chunk_len": 65536,
+        "payload_fill": 85,
+        "da_id_fill": 83
+      },
+      "note": "Synthetic block builder uses valid tx_kind=0x01 DA manifests to reach sum_da_bytes exactly MAX_DA_BYTES_PER_BLOCK+1 without tripping tx_kind=0x02 chunk-size parse guards."
     }
   ]
 }
