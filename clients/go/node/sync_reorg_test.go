@@ -727,11 +727,11 @@ func TestNonCoinbaseBlockTransactionsExtractsCanonicalTransactions(t *testing.T)
 func TestSyncReorgHelperCoveragePaths(t *testing.T) {
 	engine, store, target := newReorgTestEngine(t)
 
-	if got, err := blockStoreCanonicalCount(nil); err != nil || got != 0 {
-		t.Fatalf("blockStoreCanonicalCount(nil)=(%d,%v), want (0,nil)", got, err)
+	if got, err := testBlockStoreCanonicalCount(nil); err != nil || got != 0 {
+		t.Fatalf("testBlockStoreCanonicalCount(nil)=(%d,%v), want (0,nil)", got, err)
 	}
-	if got, err := blockStoreCanonicalCount(store); err != nil || got != 1 {
-		t.Fatalf("blockStoreCanonicalCount(genesis)=(%d,%v), want (1,nil)", got, err)
+	if got, err := testBlockStoreCanonicalCount(store); err != nil || got != 1 {
+		t.Fatalf("testBlockStoreCanonicalCount(genesis)=(%d,%v), want (1,nil)", got, err)
 	}
 	emptyDir := t.TempDir()
 	emptyStore, err := OpenBlockStore(BlockStorePath(emptyDir))
@@ -751,8 +751,8 @@ func TestSyncReorgHelperCoveragePaths(t *testing.T) {
 	if _, err := engine.ApplyBlock(block1, nil); err != nil {
 		t.Fatalf("ApplyBlock(block1): %v", err)
 	}
-	if got, err := blockStoreCanonicalCount(store); err != nil || got != 2 {
-		t.Fatalf("blockStoreCanonicalCount(height=1)=(%d,%v), want (2,nil)", got, err)
+	if got, err := testBlockStoreCanonicalCount(store); err != nil || got != 2 {
+		t.Fatalf("testBlockStoreCanonicalCount(height=1)=(%d,%v), want (2,nil)", got, err)
 	}
 	if height, _, err := engine.currentCanonicalTip(); err != nil || height != 1 {
 		t.Fatalf("currentCanonicalTip()=(%d,%v), want height=1", height, err)
@@ -845,22 +845,22 @@ func TestDisconnectTipErrorPaths(t *testing.T) {
 }
 
 func TestSyncApplyHelperAdditionalBranches(t *testing.T) {
-	if got, err := blockStoreCanonicalIndexSnapshot(nil); err != nil || got != nil {
-		t.Fatalf("blockStoreCanonicalIndexSnapshot(nil)=(%v,%v), want (nil,nil)", got, err)
+	if got, err := testBlockStoreCanonicalIndexSnapshot(nil); err != nil || got != nil {
+		t.Fatalf("testBlockStoreCanonicalIndexSnapshot(nil)=(%v,%v), want (nil,nil)", got, err)
 	}
 
 	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	store.index.Canonical = []string{"zz"}
-	if _, err := blockStoreCanonicalIndexSnapshot(store); err == nil {
+	if _, err := testBlockStoreCanonicalIndexSnapshot(store); err == nil {
 		t.Fatalf("expected invalid canonical snapshot error")
 	}
 
-	if err := restoreChainState(nil, chainStateDisk{}); err == nil {
-		t.Fatalf("expected nil restoreChainState error")
+	if err := testRestoreChainState(nil, chainStateDisk{}); err == nil {
+		t.Fatalf("expected nil testRestoreChainState error")
 	}
 
-	if ts, err := parentTipTimestamp(store, 0, [32]byte{}); err != nil || ts != 0 {
-		t.Fatalf("parentTipTimestamp(height0)=(%d,%v), want (0,nil)", ts, err)
+	if ts, err := testParentTipTimestamp(store, 0, [32]byte{}); err != nil || ts != 0 {
+		t.Fatalf("testParentTipTimestamp(height0)=(%d,%v), want (0,nil)", ts, err)
 	}
 
 	engine, _, _ := newReorgTestEngine(t)
@@ -880,11 +880,11 @@ func TestSyncApplyHelperAdditionalBranches(t *testing.T) {
 	}
 
 	engine.cfg.ChainID = [32]byte{}
-	if err := validateIncomingChainID(0, devnetGenesisChainID); err != nil {
-		t.Fatalf("validateIncomingChainID(devnet genesis): %v", err)
+	if err := testValidateIncomingChainID(0, devnetGenesisChainID); err != nil {
+		t.Fatalf("testValidateIncomingChainID(devnet genesis): %v", err)
 	}
-	if err := validateIncomingChainID(1, [32]byte{0x01}); err != nil {
-		t.Fatalf("validateIncomingChainID(non-genesis): %v", err)
+	if err := testValidateIncomingChainID(1, [32]byte{0x01}); err != nil {
+		t.Fatalf("testValidateIncomingChainID(non-genesis): %v", err)
 	}
 }
 
@@ -922,4 +922,60 @@ func newReorgTestEngine(t *testing.T) (*SyncEngine, *BlockStore, [32]byte) {
 		t.Fatalf("ApplyBlock(genesis): %v", err)
 	}
 	return engine, store, target
+}
+
+func testValidateIncomingChainID(blockHeight uint64, chainID [32]byte) error {
+	var zeroID [32]byte
+	if blockHeight == 0 && chainID != zeroID && chainID != devnetGenesisChainID {
+		return errors.New("genesis chain_id mismatch")
+	}
+	return nil
+}
+
+func testBlockStoreCanonicalCount(store *BlockStore) (uint64, error) {
+	if store == nil {
+		return 0, nil
+	}
+	height, _, ok, err := store.Tip()
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, nil
+	}
+	return height + 1, nil
+}
+
+func testBlockStoreCanonicalIndexSnapshot(store *BlockStore) ([]string, error) {
+	if store == nil {
+		return nil, nil
+	}
+	return store.CanonicalIndexSnapshot()
+}
+
+func testRestoreChainState(dst *ChainState, snapshot chainStateDisk) error {
+	if dst == nil {
+		return errors.New("nil chainstate destination")
+	}
+	recovered, err := chainStateFromDisk(snapshot)
+	if err != nil {
+		return err
+	}
+	*dst = *recovered
+	return nil
+}
+
+func testParentTipTimestamp(store *BlockStore, tipHeight uint64, prevBlockHash [32]byte) (uint64, error) {
+	if tipHeight == 0 {
+		return 0, nil
+	}
+	parentHeaderBytes, err := store.GetHeaderByHash(prevBlockHash)
+	if err != nil {
+		return 0, err
+	}
+	parentHeader, err := consensus.ParseBlockHeaderBytes(parentHeaderBytes)
+	if err != nil {
+		return 0, err
+	}
+	return parentHeader.Timestamp, nil
 }

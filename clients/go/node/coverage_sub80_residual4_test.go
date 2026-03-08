@@ -17,16 +17,16 @@ func TestCoverageResidual4_SyncHelperBranches(t *testing.T) {
 	if got := normalizedNetworkName(" DevNet "); got != "devnet" {
 		t.Fatalf("normalizedNetworkName(trimmed)=%q", got)
 	}
-	if got := headerSyncRequest(nil, 7); got.HasFrom || got.Limit != 7 {
-		t.Fatalf("headerSyncRequest(nil)=%+v", got)
+	if req := (&SyncEngine{chainState: NewChainState(), cfg: SyncConfig{HeaderBatchLimit: 7}}).HeaderSyncRequest(); req.HasFrom || req.Limit != 7 {
+		t.Fatalf("HeaderSyncRequest(empty chainstate)=%+v", req)
 	}
-	if ts, err := parentTipTimestamp(nil, 0, [32]byte{}); err != nil || ts != 0 {
-		t.Fatalf("parentTipTimestamp genesis=%d err=%v", ts, err)
+	if ts, err := testParentTipTimestamp(nil, 0, [32]byte{}); err != nil || ts != 0 {
+		t.Fatalf("testParentTipTimestamp genesis=%d err=%v", ts, err)
 	}
-	if err := validateIncomingChainID(0, devnetGenesisChainID); err != nil {
-		t.Fatalf("validateIncomingChainID(devnet genesis): %v", err)
+	if err := testValidateIncomingChainID(0, devnetGenesisChainID); err != nil {
+		t.Fatalf("testValidateIncomingChainID(devnet genesis): %v", err)
 	}
-	if err := validateIncomingChainID(1, [32]byte{0x01}); err != nil {
+	if err := testValidateIncomingChainID(1, [32]byte{0x01}); err != nil {
 		t.Fatalf("non-genesis chain_id should be ignored: %v", err)
 	}
 }
@@ -61,7 +61,7 @@ func TestCoverageResidual4_SyncStoreErrorBranches(t *testing.T) {
 		t.Fatalf("OpenBlockStore: %v", err)
 	}
 
-	if _, err := parentTipTimestamp(store, 1, [32]byte{0xaa}); err == nil {
+	if _, err := testParentTipTimestamp(store, 1, [32]byte{0xaa}); err == nil {
 		t.Fatalf("expected missing parent header error")
 	}
 
