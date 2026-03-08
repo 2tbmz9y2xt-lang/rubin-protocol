@@ -853,9 +853,10 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::io::{Read, Write};
-    use std::net::TcpStream;
+    use std::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use rubin_consensus::{parse_tx, Outpoint, UtxoEntry};
     use serde_json::Value;
@@ -867,7 +868,7 @@ mod tests {
     };
 
     use super::{
-        decode_hex_payload, new_devnet_rpc_state, parse_hex32, parse_query_map,
+        decode_hex_payload, new_devnet_rpc_state, parse_hex32, parse_query_map, read_http_request,
         render_prometheus_metrics, route_request, split_target, start_devnet_rpc_server,
         status_text, HttpRequest,
     };
@@ -904,6 +905,26 @@ mod tests {
             Arc::new(PeerManager::new(default_peer_runtime_config("devnet", 8))),
         );
         (state, dir)
+    }
+
+    fn read_request_from_bytes(raw: &[u8]) -> Result<HttpRequest, String> {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let payload = raw.to_vec();
+        let writer = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(addr).expect("connect");
+            stream.write_all(&payload).expect("write payload");
+            stream
+                .shutdown(std::net::Shutdown::Write)
+                .expect("shutdown write");
+        });
+        let (mut stream, _) = listener.accept().expect("accept");
+        stream
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .expect("set read timeout");
+        let result = read_http_request(&mut stream);
+        writer.join().expect("join writer");
+        result
     }
 
     fn response_json(response: &super::HttpResponse) -> Value {
@@ -1230,6 +1251,60 @@ mod tests {
     }
 
     #[test]
+    fn get_block_returns_not_found_for_unknown_hash() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: format!("/get_block?hash={}", hex::encode([0x55; 32])),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 404);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("block not found")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_block_returns_not_found_when_header_is_missing() {
+        let (state, dir) = build_state(true);
+        let (_height, tip_hash) = state
+            .block_store
+            .as_ref()
+            .expect("blockstore")
+            .tip()
+            .expect("tip")
+            .expect("tip value");
+        let header_path = state
+            .block_store
+            .as_ref()
+            .expect("blockstore")
+            .root_dir()
+            .join("headers")
+            .join(format!("{}.bin", hex::encode(tip_hash)));
+        fs::remove_file(&header_path).expect("remove header");
+
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_block?height=0".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 404);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("block not found")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
     fn get_block_returns_unavailable_without_blockstore() {
         let (mut state, dir) = build_state(true);
         state.block_store = None;
@@ -1395,6 +1470,38 @@ mod tests {
     }
 
     #[test]
+    fn submit_tx_reports_unavailable_when_sync_engine_is_poisoned() {
+        let vector = positive_fixture_vector();
+        assert!(vector.expect_ok, "{} should be positive fixture", vector.id);
+        let state = build_state_with_chain_state(
+            chain_state_from_positive_fixture(&vector),
+            fixture_chain_id(vector.chain_id.as_deref()),
+        );
+        let sync_engine = Arc::clone(&state.sync_engine);
+        let _ = std::thread::spawn(move || {
+            let _guard = sync_engine.lock().expect("lock");
+            panic!("poison sync engine");
+        })
+        .join();
+
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/submit_tx".to_string(),
+                body: format!(r#"{{"tx_hex":"{}"}}"#, vector.tx_hex).into_bytes(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("sync engine unavailable")
+        );
+        let metrics = render_prometheus_metrics(&state);
+        assert!(metrics.contains(r#"rubin_node_submit_tx_total{result="unavailable"} 1"#));
+    }
+
+    #[test]
     fn get_block_returns_unavailable_when_block_bytes_are_missing() {
         let (state, dir) = build_state(true);
         let (_height, tip_hash) = state
@@ -1446,6 +1553,95 @@ mod tests {
             Some("GET required")
         );
         fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn read_http_request_rejects_malformed_headers_and_bad_lengths() {
+        let malformed_header = b"GET /get_tip HTTP/1.1\r\nHost: localhost\r\nBrokenHeader\r\n\r\n";
+        assert_eq!(
+            read_request_from_bytes(malformed_header).unwrap_err(),
+            "malformed header"
+        );
+
+        let invalid_length =
+            b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: nope\r\n\r\n";
+        assert_eq!(
+            read_request_from_bytes(invalid_length).unwrap_err(),
+            "invalid Content-Length"
+        );
+
+        let too_large = format!(
+            "POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            2 * 1024 * 1024 + 1
+        );
+        assert_eq!(
+            read_request_from_bytes(too_large.as_bytes()).unwrap_err(),
+            "body too large"
+        );
+    }
+
+    #[test]
+    fn read_http_request_rejects_truncated_body_and_parses_bare_query_keys() {
+        let truncated =
+            b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\n{}";
+        assert_eq!(
+            read_request_from_bytes(truncated).unwrap_err(),
+            "unexpected eof"
+        );
+
+        let params = parse_query_map("height=7&flag");
+        assert_eq!(params.get("height").map(String::as_str), Some("7"));
+        assert_eq!(params.get("flag").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn read_http_request_rejects_missing_request_parts_and_oversized_headers() {
+        assert_eq!(read_request_from_bytes(b"").unwrap_err(), "unexpected eof");
+        assert_eq!(
+            read_request_from_bytes(b"GET\r\n\r\n").unwrap_err(),
+            "missing target"
+        );
+        assert_eq!(
+            read_request_from_bytes(b"GET /get_tip\r\n\r\n").unwrap_err(),
+            "missing http version"
+        );
+
+        let oversized_header = format!(
+            "GET /get_tip HTTP/1.1\r\nX-Test: {}",
+            "a".repeat(super::MAX_HEADER_BYTES + 1)
+        );
+        assert_eq!(
+            read_request_from_bytes(oversized_header.as_bytes()).unwrap_err(),
+            "headers too large"
+        );
+    }
+
+    #[test]
+    fn metrics_render_reports_live_tip_best_known_height_and_ibd_zero() {
+        let mut chain_state = ChainState::new();
+        chain_state.has_tip = true;
+        chain_state.height = 7;
+        chain_state.tip_hash = [0x33; 32];
+        let mut engine = SyncEngine::new(
+            chain_state,
+            None,
+            default_sync_config(None, devnet_genesis_chain_id(), None),
+        )
+        .expect("sync");
+        engine.record_best_known_height(9);
+        let state = super::DevnetRPCState {
+            sync_engine: Arc::new(Mutex::new(engine)),
+            block_store: None,
+            tx_pool: Arc::new(Mutex::new(TxPool::new())),
+            peer_manager: Arc::new(PeerManager::new(default_peer_runtime_config("devnet", 8))),
+            metrics: Arc::new(super::RpcMetrics::default()),
+            now_unix: || 0,
+        };
+
+        let body = render_prometheus_metrics(&state);
+        assert!(body.contains("rubin_node_tip_height 7"), "{body}");
+        assert!(body.contains("rubin_node_best_known_height 9"), "{body}");
+        assert!(body.contains("rubin_node_in_ibd 0"), "{body}");
     }
 
     #[test]
@@ -1559,15 +1755,26 @@ mod tests {
             start_devnet_rpc_server("127.0.0.1:0", state.clone()).expect("start server");
         let mut response = String::new();
         for _ in 0..10 {
-            let mut stream = TcpStream::connect(server.addr()).expect("connect");
-            stream
+            let Ok(mut stream) = TcpStream::connect(server.addr()) else {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                continue;
+            };
+            if stream
                 .write_all(b"GET /get_tip HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-                .expect("write request");
-            stream
-                .shutdown(std::net::Shutdown::Write)
-                .expect("shutdown write");
+                .is_err()
+            {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                continue;
+            }
+            if stream.shutdown(std::net::Shutdown::Write).is_err() {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                continue;
+            }
             response.clear();
-            stream.read_to_string(&mut response).expect("read response");
+            if stream.read_to_string(&mut response).is_err() {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                continue;
+            }
             if response.contains("HTTP/1.1 200 OK") && response.contains("has_tip") {
                 break;
             }
