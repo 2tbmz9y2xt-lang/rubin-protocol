@@ -964,8 +964,9 @@ mod tests {
     use std::io::Read;
     use std::net::TcpListener;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::Duration;
 
     use super::*;
     use crate::blockstore::BlockStore;
@@ -973,6 +974,8 @@ mod tests {
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use rubin_consensus::block_hash;
     use serde::Deserialize;
+
+    static NEXT_TEST_ROOT_ID: AtomicU64 = AtomicU64::new(1);
 
     #[derive(Deserialize)]
     struct SharedRuntimeVectors {
@@ -1063,10 +1066,7 @@ mod tests {
     }
 
     fn test_sync_engine_with_genesis() -> SyncEngine {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
+        let unique = NEXT_TEST_ROOT_ID.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!("rubin-node-p2p-runtime-{unique}"));
         fs::create_dir_all(&root).expect("create temp dir");
         let blockstore_dir = root.join("blockstore");
