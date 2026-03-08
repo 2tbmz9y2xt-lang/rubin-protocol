@@ -2,16 +2,18 @@ package p2p
 
 import (
 	"net"
+	"slices"
+	"strings"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
 func (s *Service) runConn(conn net.Conn) {
 	defer s.loopWG.Done()
-	s.handleConn(conn)
+	_ = s.handleConn(conn, "")
 }
 
-func (s *Service) handleConn(conn net.Conn) {
+func (s *Service) handleConn(conn net.Conn, outboundAddr string) error {
 	defer func() {
 		if conn != nil {
 			_ = conn.Close()
@@ -20,7 +22,7 @@ func (s *Service) handleConn(conn net.Conn) {
 
 	localVersion, err := s.localVersion()
 	if err != nil {
-		return
+		return err
 	}
 	state, err := performHandshake(
 		s.ctx,
@@ -31,7 +33,7 @@ func (s *Service) handleConn(conn net.Conn) {
 		s.cfg.GenesisHash,
 	)
 	if err != nil {
-		return
+		return err
 	}
 
 	current := &peer{
@@ -39,20 +41,22 @@ func (s *Service) handleConn(conn net.Conn) {
 		service: s,
 		state:   state,
 	}
+	current.state.Addr = peerAddressKey(outboundAddr, current.state.Addr)
 	if err := s.registerPeer(current); err != nil {
-		return
+		return err
 	}
-	defer s.unregisterPeer(current.addr())
+	defer s.unregisterPeer(current)
 
 	s.cfg.SyncEngine.RecordBestKnownHeight(state.RemoteVersion.BestHeight)
 	if err := s.requestBlocksIfBehind(current); err != nil {
 		current.setLastError(err.Error())
-		return
+		return err
 	}
 	if err := current.run(s.ctx); err != nil && s.ctx.Err() == nil {
 		current.setLastError(err.Error())
-		return
+		return err
 	}
+	return nil
 }
 
 func (s *Service) registerPeer(p *peer) error {
@@ -60,16 +64,37 @@ func (s *Service) registerPeer(p *peer) error {
 		return err
 	}
 	s.peersMu.Lock()
-	defer s.peersMu.Unlock()
 	s.peers[p.addr()] = p
+	s.peersMu.Unlock()
+	s.resetReconnect(p.addr())
 	return nil
 }
 
-func (s *Service) unregisterPeer(addr string) {
+func (s *Service) unregisterPeer(p *peer) {
+	if s == nil || p == nil {
+		return
+	}
+	addr := p.addr()
+	remove := false
 	s.peersMu.Lock()
-	delete(s.peers, addr)
+	if current, ok := s.peers[addr]; ok && current == p {
+		delete(s.peers, addr)
+		remove = true
+	}
 	s.peersMu.Unlock()
-	s.cfg.PeerManager.RemovePeer(addr)
+	if remove {
+		s.cfg.PeerManager.RemovePeer(addr)
+	}
+	if remove && s.isOutboundAddr(addr) {
+		s.scheduleReconnect(addr)
+	}
+}
+
+func peerAddressKey(outboundAddr string, runtimeAddr string) string {
+	if addr := normalizeReconnectAddr(outboundAddr); addr != "" {
+		return addr
+	}
+	return normalizeReconnectAddr(runtimeAddr)
 }
 
 func (s *Service) localVersion() (node.VersionPayloadV1, error) {
@@ -90,4 +115,13 @@ func (s *Service) localVersion() (node.VersionPayloadV1, error) {
 		BestHeight:        bestHeight,
 		UserAgent:         s.cfg.UserAgent,
 	}, nil
+}
+func (s *Service) isOutboundAddr(addr string) bool {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return false
+	}
+	s.reconnectMu.Lock()
+	defer s.reconnectMu.Unlock()
+	return slices.Contains(s.outboundAddrs, addr)
 }
