@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -142,6 +143,7 @@ func submitTx(target string, txBytes []byte) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: 5 * time.Second}
+	// #nosec G107,G704 -- devnet-only submit targets are validated to localhost/loopback in normalizeSubmitTarget.
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -173,10 +175,29 @@ func normalizeSubmitTarget(raw string) (string, error) {
 	if strings.TrimSpace(parsed.Host) == "" {
 		return "", errors.New("submit target missing host")
 	}
+	if err := validateLocalSubmitHost(parsed.Hostname()); err != nil {
+		return "", err
+	}
+	parsed.User = nil
 	parsed.Path = "/submit_tx"
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
 	return parsed.String(), nil
+}
+
+func validateLocalSubmitHost(host string) error {
+	hostname := strings.TrimSpace(host)
+	if hostname == "" {
+		return errors.New("submit target missing host")
+	}
+	if strings.EqualFold(hostname, "localhost") {
+		return nil
+	}
+	ip := net.ParseIP(hostname)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("submit target host %q must be localhost or loopback", hostname)
+	}
+	return nil
 }
 
 func decodeHexFlag(value string) ([]byte, error) {

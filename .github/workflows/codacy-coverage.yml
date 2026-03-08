@@ -54,7 +54,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.24.13'
+          go-version: '1.25.8'
           cache: true
           cache-dependency-path: clients/go/go.mod
 
@@ -85,10 +85,7 @@ jobs:
       - name: Go coverage
         run: |
           cd clients/go
-          # Coverage gating focuses on consensus/runtime libraries.
-          # CLI entrypoints (cmd/) are excluded — mirroring Rust's --exclude rubin-consensus-cli.
-          pkgs="$(go list ./... | grep -v '/cmd/')"
-          go test -coverprofile=coverage.out ${pkgs}
+          go test -coverprofile=coverage.out ./...
 
       - name: Rust coverage
         run: |
