@@ -339,6 +339,33 @@ func TestDevnetRPCGetBlockByHashReturnsGenesis(t *testing.T) {
 	}
 }
 
+func TestDevnetRPCGetBlockByHeightReturnsNotFoundWhenBlockBytesAreMissing(t *testing.T) {
+	dir := t.TempDir()
+	state := mustRPCStateAtDir(t, dir, true)
+	_, tipHash, ok, err := state.blockStore.Tip()
+	if err != nil {
+		t.Fatalf("Tip: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected tip")
+	}
+	blockPath := filepath.Join(node.BlockStorePath(dir), "blocks", hex.EncodeToString(tipHash[:])+".bin")
+	if err := os.Remove(blockPath); err != nil {
+		t.Fatalf("Remove(block): %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/get_block?height=0", nil)
+	rec := httptest.NewRecorder()
+	handleGetBlock(state, rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "block not found") {
+		t.Fatalf("body=%q, want block not found", rec.Body.String())
+	}
+}
+
 func TestDevnetRPCGetBlockRejectsInvalidHash(t *testing.T) {
 	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, true)))
 	defer server.Close()
@@ -555,6 +582,49 @@ func TestDevnetRPCSubmitTxAcceptsValidTxAndAnnounces(t *testing.T) {
 	metrics := renderPrometheusMetrics(state)
 	if !strings.Contains(metrics, `rubin_node_submit_tx_total{result="accepted"} 1`) {
 		t.Fatalf("missing accepted metric in %q", metrics)
+	}
+}
+
+func TestDevnetRPCSubmitTxRejectsDuplicateMempoolEntry(t *testing.T) {
+	fromKey := mustRPCMLDSA87Keypair(t)
+	toKey := mustRPCMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+
+	state, input, utxos := mustRPCStateWithSpendableUTXO(t, fromAddress, nil)
+	txBytes, _ := mustRPCSignedTransferTx(t, utxos, input, fromKey, toAddress)
+	if err := state.mempool.AddTx(txBytes); err != nil {
+		t.Fatalf("AddTx(seed): %v", err)
+	}
+
+	server := httptest.NewServer(newDevnetRPCHandler(state))
+	defer server.Close()
+
+	body, err := json.Marshal(submitTxRequest{TxHex: hex.EncodeToString(txBytes)})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	resp, err := http.Post(server.URL+"/submit_tx", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status=%d, want 409", resp.StatusCode)
+	}
+	var got submitTxResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Accepted {
+		t.Fatalf("accepted=true, want false")
+	}
+	if !strings.Contains(got.Error, "already in mempool") {
+		t.Fatalf("error=%q, want duplicate message", got.Error)
+	}
+	metrics := renderPrometheusMetrics(state)
+	if !strings.Contains(metrics, `rubin_node_submit_tx_total{result="conflict"} 1`) {
+		t.Fatalf("missing conflict metric in %q", metrics)
 	}
 }
 
