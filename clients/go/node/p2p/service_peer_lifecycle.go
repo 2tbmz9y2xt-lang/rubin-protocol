@@ -46,16 +46,13 @@ func (s *Service) handleConn(conn net.Conn, outboundAddr string) error {
 		return err
 	}
 	defer s.unregisterPeer(current)
-	if err := s.requestPeerAddrs(current); err != nil {
-		current.setLastError(err.Error())
-		return err
-	}
 
 	s.cfg.SyncEngine.RecordBestKnownHeight(state.RemoteVersion.BestHeight)
 	if err := s.requestBlocksIfBehind(current); err != nil {
 		current.setLastError(err.Error())
 		return err
 	}
+	s.tryRequestPeerAddrs(current)
 	if err := current.run(s.ctx); err != nil && s.ctx.Err() == nil {
 		current.setLastError(err.Error())
 		return err
@@ -126,6 +123,12 @@ func (s *Service) requestPeerAddrs(p *peer) error {
 		return nil
 	}
 	return p.send(messageGetAddr, nil)
+}
+
+func (s *Service) tryRequestPeerAddrs(p *peer) {
+	if err := s.requestPeerAddrs(p); err != nil && p != nil {
+		p.setLastError(err.Error())
+	}
 }
 
 func (s *Service) isOutboundAddr(addr string) bool {
