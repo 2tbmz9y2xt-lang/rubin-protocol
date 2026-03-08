@@ -225,6 +225,20 @@ func TestDevnetRPCGetTipRejectsNilState(t *testing.T) {
 	}
 }
 
+func TestDevnetRPCGetTipRejectsNilBlockStore(t *testing.T) {
+	state := mustRPCState(t, false)
+	state.blockStore = nil
+	req := httptest.NewRequest(http.MethodGet, "/get_tip", nil)
+	rec := httptest.NewRecorder()
+	handleGetTip(state, rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want 503", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "blockstore unavailable") {
+		t.Fatalf("body=%q, want blockstore unavailable", rec.Body.String())
+	}
+}
+
 func TestDevnetRPCGetBlockRejectsSelectorMismatch(t *testing.T) {
 	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, true)))
 	defer server.Close()
@@ -245,6 +259,20 @@ func TestDevnetRPCGetBlockRejectsBadMethod(t *testing.T) {
 	handleGetBlock(mustRPCState(t, true), rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d, want 400", rec.Code)
+	}
+}
+
+func TestDevnetRPCGetBlockRejectsNilBlockStore(t *testing.T) {
+	state := mustRPCState(t, true)
+	state.blockStore = nil
+	req := httptest.NewRequest(http.MethodGet, "/get_block?height=0", nil)
+	rec := httptest.NewRecorder()
+	handleGetBlock(state, rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want 503", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "blockstore unavailable") {
+		t.Fatalf("body=%q, want blockstore unavailable", rec.Body.String())
 	}
 }
 
@@ -512,6 +540,29 @@ func TestRenderPrometheusMetricsIncludesV1Names(t *testing.T) {
 	}
 }
 
+func TestRenderPrometheusMetricsHandlesNilStateAndNilMetrics(t *testing.T) {
+	var metrics *rpcMetrics
+	metrics.note("/get_tip", http.StatusOK)
+	metrics.noteSubmit("accepted")
+	routeStatus, submitByResult := metrics.snapshot()
+	if len(routeStatus) != 0 || len(submitByResult) != 0 {
+		t.Fatalf("snapshot() on nil metrics returned data: routes=%v submit=%v", routeStatus, submitByResult)
+	}
+
+	body := renderPrometheusMetrics(nil)
+	for _, want := range []string{
+		"rubin_node_tip_height 0",
+		"rubin_node_best_known_height 0",
+		"rubin_node_in_ibd 0",
+		"rubin_node_peer_count 0",
+		"rubin_node_mempool_txs 0",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics body %q", want, body)
+		}
+	}
+}
+
 func TestParseHex32ValueRejectsWrongLength(t *testing.T) {
 	if _, err := parseHex32Value("00"); err == nil {
 		t.Fatal("expected wrong-length error")
@@ -578,6 +629,29 @@ func TestStartDevnetRPCServerLifecycle(t *testing.T) {
 	}
 	if err := server.Close(context.Background()); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestStartDevnetRPCServerWritesListeningBannerAndCloseHandlesNil(t *testing.T) {
+	state := mustRPCState(t, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var stdout bytes.Buffer
+	server, err := startDevnetRPCServer(ctx, "127.0.0.1:0", state, &stdout, nil)
+	if err != nil {
+		t.Fatalf("startDevnetRPCServer: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "rpc: listening=") {
+		t.Fatalf("stdout=%q, want listening banner", stdout.String())
+	}
+	if err := server.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var nilServer *runningDevnetRPCServer
+	if err := nilServer.Close(context.Background()); err != nil {
+		t.Fatalf("nil Close: %v", err)
 	}
 }
 
