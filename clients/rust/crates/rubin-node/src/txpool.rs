@@ -60,8 +60,8 @@ impl TxPool {
         block_store: Option<&BlockStore>,
         chain_id: [u8; 32],
     ) -> Result<[u8; 32], TxPoolAdmitError> {
-        let (tx, txid, _wtxid, consumed) = parse_tx(tx_bytes)
-            .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
+        let (tx, txid, _wtxid, consumed) =
+            parse_tx(tx_bytes).map_err(|err| rejected(format!("transaction rejected: {err}")))?;
         if consumed != tx_bytes.len() {
             return Err(rejected("transaction rejected: non-canonical tx bytes"));
         }
@@ -153,13 +153,15 @@ fn next_block_mtp(
             .canonical_hash(height)
             .map_err(|err| unavailable(err.to_string()))?
         else {
-            return Err(unavailable("missing canonical header for timestamp context"));
+            return Err(unavailable(
+                "missing canonical header for timestamp context",
+            ));
         };
         let header_bytes = block_store
             .get_header_by_hash(hash)
             .map_err(|err| unavailable(err.to_string()))?;
-        let header = parse_block_header_bytes(&header_bytes)
-            .map_err(|err| unavailable(err.to_string()))?;
+        let header =
+            parse_block_header_bytes(&header_bytes).map_err(|err| unavailable(err.to_string()))?;
         out.push(header.timestamp);
     }
     Ok(mtp_median(next_height, &out))
@@ -216,7 +218,9 @@ mod tests {
     #[test]
     fn admit_rejects_parse_errors() {
         let mut pool = TxPool::new();
-        let err = pool.admit(&[], &ChainState::new(), None, [0u8; 32]).unwrap_err();
+        let err = pool
+            .admit(&[], &ChainState::new(), None, [0u8; 32])
+            .unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
         assert!(err.message.contains("transaction rejected"));
     }

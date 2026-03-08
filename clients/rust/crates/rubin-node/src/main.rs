@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use rubin_node::{
     block_store_path, chain_state_path, default_peer_runtime_config, default_sync_config,
-    load_chain_id_from_genesis_file, load_chain_state, new_devnet_rpc_state, start_devnet_rpc_server,
-    BlockStore, PeerManager, SyncEngine,
+    load_chain_id_from_genesis_file, load_chain_state, new_devnet_rpc_state,
+    start_devnet_rpc_server, BlockStore, PeerManager, SyncEngine,
 };
 use serde::Serialize;
 
@@ -141,7 +141,10 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     let state = new_devnet_rpc_state(
         Arc::new(Mutex::new(sync_engine)),
         Some(block_store),
-        Arc::new(PeerManager::new(default_peer_runtime_config(&cfg.network, 8))),
+        Arc::new(PeerManager::new(default_peer_runtime_config(
+            &cfg.network,
+            8,
+        ))),
     );
     let server = match start_devnet_rpc_server(&cfg.rpc_bind_addr, state) {
         Ok(server) => server,

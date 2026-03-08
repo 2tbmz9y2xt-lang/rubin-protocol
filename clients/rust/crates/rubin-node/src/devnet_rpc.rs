@@ -98,7 +98,8 @@ pub fn start_devnet_rpc_server(
     bind_addr: &str,
     state: DevnetRPCState,
 ) -> Result<RunningDevnetRPCServer, String> {
-    let listener = TcpListener::bind(bind_addr).map_err(|err| format!("bind {bind_addr}: {err}"))?;
+    let listener =
+        TcpListener::bind(bind_addr).map_err(|err| format!("bind {bind_addr}: {err}"))?;
     listener
         .set_nonblocking(true)
         .map_err(|err| format!("set_nonblocking: {err}"))?;
@@ -315,7 +316,9 @@ fn handle_get_block(state: &DevnetRPCState, method: &str, query: &str) -> HttpRe
     let params = parse_query_map(query);
     let height_raw = params.get("height").map(|v| v.trim()).unwrap_or("");
     let hash_raw = params.get("hash").map(|v| v.trim()).unwrap_or("");
-    if (height_raw.is_empty() && hash_raw.is_empty()) || (!height_raw.is_empty() && !hash_raw.is_empty()) {
+    if (height_raw.is_empty() && hash_raw.is_empty())
+        || (!height_raw.is_empty() && !hash_raw.is_empty())
+    {
         return json_response(
             state,
             ROUTE,
@@ -517,7 +520,12 @@ fn handle_submit_tx(state: &DevnetRPCState, method: &str, body: &[u8]) -> HttpRe
         }
     };
     let admit_result = match state.tx_pool.lock() {
-        Ok(mut pool) => pool.admit(&tx_bytes, &chain_state, state.block_store.as_ref(), chain_id),
+        Ok(mut pool) => pool.admit(
+            &tx_bytes,
+            &chain_state,
+            state.block_store.as_ref(),
+            chain_id,
+        ),
         Err(_) => Err(crate::TxPoolAdmitError {
             kind: TxPoolAdmitErrorKind::Unavailable,
             message: "tx pool unavailable".to_string(),
@@ -585,7 +593,11 @@ fn render_prometheus_metrics(state: &DevnetRPCState) -> String {
                 _ => 0,
             };
             let best_known_height = engine.best_known_height();
-            let in_ibd = if engine.is_in_ibd((state.now_unix)()) { 1 } else { 0 };
+            let in_ibd = if engine.is_in_ibd((state.now_unix)()) {
+                1
+            } else {
+                0
+            };
             (tip_height, best_known_height, in_ibd)
         }
         Err(_) => (0, 0, 1),
@@ -601,7 +613,8 @@ fn render_prometheus_metrics(state: &DevnetRPCState) -> String {
         "# HELP rubin_node_tip_height Current canonical tip height.".to_string(),
         "# TYPE rubin_node_tip_height gauge".to_string(),
         format!("rubin_node_tip_height {tip_height}"),
-        "# HELP rubin_node_best_known_height Best known height recorded by sync engine.".to_string(),
+        "# HELP rubin_node_best_known_height Best known height recorded by sync engine."
+            .to_string(),
         "# TYPE rubin_node_best_known_height gauge".to_string(),
         format!("rubin_node_best_known_height {best_known_height}"),
         "# HELP rubin_node_in_ibd Whether the node currently considers itself in IBD (0 or 1)."
@@ -611,10 +624,12 @@ fn render_prometheus_metrics(state: &DevnetRPCState) -> String {
         "# HELP rubin_node_peer_count Currently tracked peers.".to_string(),
         "# TYPE rubin_node_peer_count gauge".to_string(),
         format!("rubin_node_peer_count {peer_count}"),
-        "# HELP rubin_node_mempool_txs Number of transactions currently in the mempool.".to_string(),
+        "# HELP rubin_node_mempool_txs Number of transactions currently in the mempool."
+            .to_string(),
         "# TYPE rubin_node_mempool_txs gauge".to_string(),
         format!("rubin_node_mempool_txs {mempool_txs}"),
-        "# HELP rubin_node_rpc_requests_total Total HTTP RPC requests by route and status.".to_string(),
+        "# HELP rubin_node_rpc_requests_total Total HTTP RPC requests by route and status."
+            .to_string(),
         "# TYPE rubin_node_rpc_requests_total counter".to_string(),
     ];
 
@@ -626,7 +641,9 @@ fn render_prometheus_metrics(state: &DevnetRPCState) -> String {
         ));
     }
 
-    lines.push("# HELP rubin_node_submit_tx_total Total submit_tx outcomes by result label.".to_string());
+    lines.push(
+        "# HELP rubin_node_submit_tx_total Total submit_tx outcomes by result label.".to_string(),
+    );
     lines.push("# TYPE rubin_node_submit_tx_total counter".to_string());
     let mut submit_entries: Vec<_> = submit_results.into_iter().collect();
     submit_entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -642,7 +659,9 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
     let mut buf = Vec::with_capacity(4096);
     let mut temp = [0u8; 4096];
     let header_end = loop {
-        let read = stream.read(&mut temp).map_err(|err| format!("read: {err}"))?;
+        let read = stream
+            .read(&mut temp)
+            .map_err(|err| format!("read: {err}"))?;
         if read == 0 {
             return Err("unexpected eof".to_string());
         }
@@ -658,7 +677,8 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         }
     };
 
-    let header_text = std::str::from_utf8(&buf[..header_end]).map_err(|_| "invalid request headers".to_string())?;
+    let header_text = std::str::from_utf8(&buf[..header_end])
+        .map_err(|_| "invalid request headers".to_string())?;
     let mut lines = header_text.split("\r\n");
     let request_line = lines
         .next()
@@ -697,7 +717,9 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
 
     let body_start = header_end + 4;
     while buf.len() < body_start + content_length {
-        let read = stream.read(&mut temp).map_err(|err| format!("read body: {err}"))?;
+        let read = stream
+            .read(&mut temp)
+            .map_err(|err| format!("read body: {err}"))?;
         if read == 0 {
             return Err("unexpected eof".to_string());
         }
@@ -707,7 +729,11 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         }
     }
     let body = buf[body_start..body_start + content_length].to_vec();
-    Ok(HttpRequest { method, target, body })
+    Ok(HttpRequest {
+        method,
+        target,
+        body,
+    })
 }
 
 fn write_http_response(stream: &mut TcpStream, response: HttpResponse) -> Result<(), String> {
@@ -731,9 +757,8 @@ fn json_response<T: Serialize>(
     status: u16,
     payload: &T,
 ) -> HttpResponse {
-    let body = serde_json::to_vec(payload).unwrap_or_else(|_| {
-        b"{\"accepted\":false,\"error\":\"encode failed\"}".to_vec()
-    });
+    let body = serde_json::to_vec(payload)
+        .unwrap_or_else(|_| b"{\"accepted\":false,\"error\":\"encode failed\"}".to_vec());
     state.metrics.note(route, status);
     HttpResponse::plain(status, "application/json", body)
 }
@@ -761,7 +786,10 @@ fn parse_query_map(query: &str) -> HashMap<String, String> {
 }
 
 fn decode_hex_payload(value: &str) -> Result<Vec<u8>, String> {
-    let trimmed = value.trim().trim_start_matches("0x").trim_start_matches("0X");
+    let trimmed = value
+        .trim()
+        .trim_start_matches("0x")
+        .trim_start_matches("0X");
     if trimmed.is_empty() {
         return Err("tx_hex is required".to_string());
     }
@@ -829,8 +857,9 @@ mod tests {
     use serde_json::Value;
 
     use crate::{
-        block_store_path, default_peer_runtime_config, default_sync_config, devnet_genesis_block_bytes,
-        devnet_genesis_chain_id, BlockStore, ChainState, PeerManager, SyncEngine,
+        block_store_path, default_peer_runtime_config, default_sync_config,
+        devnet_genesis_block_bytes, devnet_genesis_chain_id, BlockStore, ChainState, PeerManager,
+        SyncEngine,
     };
 
     use super::{new_devnet_rpc_state, render_prometheus_metrics, route_request, HttpRequest};
