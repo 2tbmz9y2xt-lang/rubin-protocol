@@ -426,6 +426,130 @@ func TestResolveOrphansRequeuesStillMissingChild(t *testing.T) {
 	}
 }
 
+func TestProcessRelayedBlockDoesNotMarkSeenWhenOrphanIsRejected(t *testing.T) {
+	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
+
+	height2Hash, ok, err := source.blockStore.CanonicalHash(2)
+	if err != nil || !ok {
+		t.Fatalf("CanonicalHash(2): ok=%v err=%v", ok, err)
+	}
+	block2Bytes, err := source.blockStore.GetBlockByHash(height2Hash)
+	if err != nil {
+		t.Fatalf("GetBlockByHash(height2): %v", err)
+	}
+	sink.service.orphans.byteLimit = 1
+
+	peer := &peer{
+		service: sink.service,
+		state: node.PeerState{
+			RemoteVersion: testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 2),
+		},
+	}
+
+	summary, err := peer.processRelayedBlock(block2Bytes)
+	if err != nil {
+		t.Fatalf("processRelayedBlock(rejected orphan): %v", err)
+	}
+	if summary != nil {
+		t.Fatalf("summary=%v, want nil when orphan is not retained", summary)
+	}
+	if sink.service.orphans.Len() != 0 {
+		t.Fatalf("orphans.Len()=%d, want 0", sink.service.orphans.Len())
+	}
+	if sink.service.blockSeen.Has(height2Hash) {
+		t.Fatalf("blockSeen should stay clear when orphan retention fails")
+	}
+}
+
+func TestAcceptedRelayedBlockBroadcastsResolvedOrphans(t *testing.T) {
+	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+
+	height1Hash, ok, err := source.blockStore.CanonicalHash(1)
+	if err != nil || !ok {
+		t.Fatalf("CanonicalHash(1): ok=%v err=%v", ok, err)
+	}
+	height2Hash, ok, err := source.blockStore.CanonicalHash(2)
+	if err != nil || !ok {
+		t.Fatalf("CanonicalHash(2): ok=%v err=%v", ok, err)
+	}
+	block1Bytes, err := source.blockStore.GetBlockByHash(height1Hash)
+	if err != nil {
+		t.Fatalf("GetBlockByHash(height1): %v", err)
+	}
+	block2Bytes, err := source.blockStore.GetBlockByHash(height2Hash)
+	if err != nil {
+		t.Fatalf("GetBlockByHash(height2): %v", err)
+	}
+
+	if !sink.service.orphans.Add(height2Hash, height1Hash, block2Bytes) {
+		t.Fatalf("expected orphan add")
+	}
+	sink.service.blockSeen.Add(height2Hash)
+
+	remotePeer := newPeerRuntimeTestPeer(t)
+	remotePeer.service = sink.service
+	remotePeer.state.Addr = "relay-peer"
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+	remotePeer.conn = local
+	sink.service.peersMu.Lock()
+	sink.service.peers[remotePeer.addr()] = remotePeer
+	sink.service.peersMu.Unlock()
+
+	frames := make(chan message, 2)
+	go func() {
+		for i := 0; i < 2; i++ {
+			frame, readErr := readFrame(remote, networkMagic(sink.service.cfg.PeerRuntimeConfig.Network), sink.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+			if readErr != nil {
+				t.Errorf("readFrame(remote): %v", readErr)
+				return
+			}
+			frames <- frame
+		}
+	}()
+
+	originPeer := &peer{
+		service: sink.service,
+		state: node.PeerState{
+			RemoteVersion: testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "origin", 2),
+		},
+	}
+
+	summary, err := originPeer.processRelayedBlock(block1Bytes)
+	if err != nil {
+		t.Fatalf("processRelayedBlock(block1): %v", err)
+	}
+	if summary == nil || summary.BlockHeight != 1 {
+		t.Fatalf("summary=%v, want block height 1", summary)
+	}
+
+	first := <-frames
+	second := <-frames
+	if first.Command != messageInv || second.Command != messageInv {
+		t.Fatalf("unexpected commands: %q, %q", first.Command, second.Command)
+	}
+	firstItems, err := decodeInventoryVectors(first.Payload)
+	if err != nil {
+		t.Fatalf("decodeInventoryVectors(first): %v", err)
+	}
+	secondItems, err := decodeInventoryVectors(second.Payload)
+	if err != nil {
+		t.Fatalf("decodeInventoryVectors(second): %v", err)
+	}
+	if len(firstItems) != 1 || len(secondItems) != 1 {
+		t.Fatalf("inventory lengths=%d/%d, want 1/1", len(firstItems), len(secondItems))
+	}
+	if firstItems[0].Hash != height1Hash {
+		t.Fatalf("first relayed hash=%x, want %x", firstItems[0].Hash, height1Hash)
+	}
+	if secondItems[0].Hash != height2Hash {
+		t.Fatalf("second relayed hash=%x, want %x", secondItems[0].Hash, height2Hash)
+	}
+}
+
 func newTestHarness(t *testing.T, blockCount int, bindAddr string, bootstrapPeers []string) *testHarness {
 	t.Helper()
 
