@@ -246,7 +246,7 @@ func TestCoverage_HandleConnLifecyclePaths(t *testing.T) {
 		_ = writeFrame(remote, networkMagic(h.service.cfg.PeerRuntimeConfig.Network), message{Command: messageVersion, Payload: []byte{0x00}}, h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
 	}()
 	h.service.ctx = context.Background()
-	h.service.handleConn(local)
+	h.service.handleConn(local, "")
 	<-done
 }
 
@@ -285,7 +285,7 @@ func TestCoverage_HandleConnSuccessPath(t *testing.T) {
 		remoteDone <- nil
 	}()
 
-	h.service.handleConn(local)
+	h.service.handleConn(local, "")
 	if err := <-remoteDone; err != nil {
 		t.Fatalf("remote handshake: %v", err)
 	}
@@ -328,9 +328,49 @@ func TestCoverage_HandleConnRunErrorPath(t *testing.T) {
 		remoteDone <- err
 	}()
 
-	h.service.handleConn(local)
+	h.service.handleConn(local, "")
 	if err := <-remoteDone; err != nil {
 		t.Fatalf("remote sequence: %v", err)
+	}
+}
+
+func TestCoverage_HandleConnRequestBlocksErrorPath(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	h.service.ctx = context.Background()
+
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+
+	remoteDone := make(chan error, 1)
+	go func() {
+		frame, err := readFrame(remote, networkMagic(h.service.cfg.PeerRuntimeConfig.Network), h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+		if err != nil {
+			remoteDone <- err
+			return
+		}
+		if frame.Command != messageVersion {
+			remoteDone <- nil
+			return
+		}
+		payload, err := encodeVersionPayload(testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 2))
+		if err != nil {
+			remoteDone <- err
+			return
+		}
+		if err := writeFrame(remote, networkMagic(h.service.cfg.PeerRuntimeConfig.Network), message{Command: messageVersion, Payload: payload}, h.service.cfg.PeerRuntimeConfig.MaxMessageSize); err != nil {
+			remoteDone <- err
+			return
+		}
+		_ = remote.Close()
+		remoteDone <- nil
+	}()
+
+	if err := h.service.handleConn(local, ""); err == nil {
+		t.Fatalf("expected requestBlocksIfBehind error")
+	}
+	if err := <-remoteDone; err != nil {
+		t.Fatalf("remote handshake: %v", err)
 	}
 }
 
@@ -348,7 +388,7 @@ func TestCoverage_RegisterPeerAndLocalVersion(t *testing.T) {
 	if _, ok := h.service.peers["peer-register"]; !ok {
 		t.Fatalf("peer not registered")
 	}
-	h.service.unregisterPeer("peer-register")
+	h.service.unregisterPeer(pr)
 	if _, ok := h.service.peers["peer-register"]; ok {
 		t.Fatalf("peer still registered")
 	}
@@ -359,6 +399,47 @@ func TestCoverage_RegisterPeerAndLocalVersion(t *testing.T) {
 	}
 	if version.BestHeight != 0 {
 		t.Fatalf("best_height=%d, want 0", version.BestHeight)
+	}
+}
+
+func TestCoverage_UnregisterPeerSchedulesReconnectForOutbound(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:0", []string{"peer-outbound"})
+	h.service.scheduleReconnect("peer-outbound")
+	current := &peer{service: h.service, state: node.PeerState{Addr: "peer-outbound"}}
+	h.service.peers["peer-outbound"] = current
+	h.service.unregisterPeer(current)
+	if !h.service.isOutboundAddr("peer-outbound") {
+		t.Fatalf("expected outbound peer tracking")
+	}
+	if got := h.service.reconnectSnapshot("peer-outbound").nextRetry; got.IsZero() {
+		t.Fatalf("expected reconnect schedule after unregister")
+	}
+	if h.service.isOutboundAddr("  ") {
+		t.Fatalf("blank outbound addr must be false")
+	}
+}
+
+func TestCoverage_OutboundPeerUsesDialTargetKeyAndOldDisconnectKeepsNewPeer(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:0", []string{"seed.devnet.local:19111"})
+	if got := peerAddressKey(" seed.devnet.local:19111 ", "127.0.0.1:19111"); got != "seed.devnet.local:19111" {
+		t.Fatalf("peerAddressKey(outbound)=%q", got)
+	}
+	if got := peerAddressKey("", " 127.0.0.1:19111 "); got != "127.0.0.1:19111" {
+		t.Fatalf("peerAddressKey(runtime)=%q", got)
+	}
+
+	oldPeer := &peer{service: h.service, state: node.PeerState{Addr: "seed.devnet.local:19111"}}
+	newPeer := &peer{service: h.service, state: node.PeerState{Addr: "seed.devnet.local:19111"}}
+	h.service.peers["seed.devnet.local:19111"] = newPeer
+	if err := h.service.cfg.PeerManager.AddPeer(&newPeer.state); err != nil {
+		t.Fatalf("AddPeer(newPeer): %v", err)
+	}
+	h.service.unregisterPeer(oldPeer)
+	if got := h.service.peers["seed.devnet.local:19111"]; got != newPeer {
+		t.Fatalf("unexpected peer eviction on stale disconnect")
+	}
+	if got := h.service.cfg.PeerManager.Count(); got != 1 {
+		t.Fatalf("peer manager count=%d, want 1", got)
 	}
 }
 
