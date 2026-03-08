@@ -54,6 +54,7 @@ type Service struct {
 	chainMu   sync.Mutex
 	blockSeen *boundedHashSet
 	txSeen    *boundedHashSet
+	orphans   *orphanPool
 }
 
 type peer struct {
@@ -120,6 +121,7 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		addrMgr:        addrMgr,
 		blockSeen:      newBoundedHashSet(defaultBlockSeenCapacity),
 		txSeen:         newBoundedHashSet(defaultTxSeenCapacity),
+		orphans:        newOrphanPool(500),
 	}, nil
 }
 

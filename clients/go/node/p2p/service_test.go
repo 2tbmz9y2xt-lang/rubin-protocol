@@ -252,6 +252,71 @@ func TestIBDSync(t *testing.T) {
 	}
 }
 
+func TestOrphanResolution(t *testing.T) {
+	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
+
+	genesisBytes := node.DevnetGenesisBlockBytes()
+	height1Hash, ok, err := source.blockStore.CanonicalHash(1)
+	if err != nil || !ok {
+		t.Fatalf("CanonicalHash(1): ok=%v err=%v", ok, err)
+	}
+	height2Hash, ok, err := source.blockStore.CanonicalHash(2)
+	if err != nil || !ok {
+		t.Fatalf("CanonicalHash(2): ok=%v err=%v", ok, err)
+	}
+	block1Bytes, err := source.blockStore.GetBlockByHash(height1Hash)
+	if err != nil {
+		t.Fatalf("GetBlockByHash(height1): %v", err)
+	}
+	block2Bytes, err := source.blockStore.GetBlockByHash(height2Hash)
+	if err != nil {
+		t.Fatalf("GetBlockByHash(height2): %v", err)
+	}
+
+	peer := &peer{
+		service: sink.service,
+		state: node.PeerState{
+			RemoteVersion: testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 2),
+		},
+	}
+
+	if summary, err := peer.processRelayedBlock(block2Bytes); err != nil {
+		t.Fatalf("processRelayedBlock(block2): %v", err)
+	} else if summary != nil {
+		t.Fatalf("expected nil summary for orphan block2")
+	}
+	if summary, err := peer.processRelayedBlock(block1Bytes); err != nil {
+		t.Fatalf("processRelayedBlock(block1): %v", err)
+	} else if summary != nil {
+		t.Fatalf("expected nil summary for orphan block1")
+	}
+	if got := sink.service.orphans.Len(); got != 2 {
+		t.Fatalf("orphans.Len()=%d, want 2", got)
+	}
+
+	summary, err := peer.processRelayedBlock(genesisBytes)
+	if err != nil {
+		t.Fatalf("processRelayedBlock(genesis): %v", err)
+	}
+	if summary == nil || summary.BlockHeight != 0 {
+		t.Fatalf("genesis summary=%v, want height 0", summary)
+	}
+	if got := sink.service.orphans.Len(); got != 0 {
+		t.Fatalf("orphans.Len()=%d, want 0 after resolve", got)
+	}
+	height, tipHash, ok, err := sink.blockStore.Tip()
+	if err != nil {
+		t.Fatalf("sink tip: %v", err)
+	}
+	if !ok || height != 2 {
+		t.Fatalf("sink height=%d ok=%v, want 2/true", height, ok)
+	}
+	if tipHash != height2Hash {
+		t.Fatalf("sink tip hash=%x, want %x", tipHash, height2Hash)
+	}
+}
+
 func newTestHarness(t *testing.T, blockCount int, bindAddr string, bootstrapPeers []string) *testHarness {
 	t.Helper()
 
