@@ -9,7 +9,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -321,13 +320,8 @@ func handleGetBlock(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 
 	blockBytes, err := state.blockStore.GetBlockByHash(blockHash)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			writeJSONResponse(state, route, w, http.StatusNotFound, submitTxResponse{
-				Accepted: false,
-				Error:    "block not found",
-			})
-			return
-		}
+		// Canonical index resolved but underlying file is missing — storage error,
+		// not "block not found".  Return 503 for Go/Rust parity.
 		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, submitTxResponse{
 			Accepted: false,
 			Error:    err.Error(),
@@ -359,8 +353,17 @@ func handleSubmitTx(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	const maxBodyBytes = 2 << 20
+	if r.ContentLength > maxBodyBytes {
+		state.metrics.noteSubmit("bad_request")
+		writeJSONResponse(state, route, w, http.StatusRequestEntityTooLarge, submitTxResponse{
+			Accepted: false,
+			Error:    "request body too large",
+		})
+		return
+	}
 	var req submitTxRequest
-	body := io.LimitReader(r.Body, 2<<20)
+	body := io.LimitReader(r.Body, maxBodyBytes+1) // +1 to detect over-limit
 	defer r.Body.Close()
 	dec := json.NewDecoder(body)
 	if err := dec.Decode(&req); err != nil {

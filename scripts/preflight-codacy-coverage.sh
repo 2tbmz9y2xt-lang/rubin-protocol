@@ -31,7 +31,7 @@ echo "Generating base coverage against $(git -C "$repo_root" rev-parse --short "
 GO_COVER_OUT="$base_go" \
 RUST_LCOV_OUT="$base_rust" \
 "$base_worktree/scripts/dev-env.sh" -- \
-"$repo_root/scripts/run-codacy-coverage.sh" "$base_worktree"
+"$base_worktree/scripts/run-codacy-coverage.sh" "$base_worktree"
 
 python3 "$repo_root/tools/check_codacy_coverage.py" \
   --repo-root "$repo_root" \

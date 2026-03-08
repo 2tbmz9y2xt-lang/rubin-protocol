@@ -339,7 +339,7 @@ func TestDevnetRPCGetBlockByHashReturnsGenesis(t *testing.T) {
 	}
 }
 
-func TestDevnetRPCGetBlockByHeightReturnsNotFoundWhenBlockBytesAreMissing(t *testing.T) {
+func TestDevnetRPCGetBlockByHeightReturns503WhenBlockBytesAreMissing(t *testing.T) {
 	dir := t.TempDir()
 	state := mustRPCStateAtDir(t, dir, true)
 	_, tipHash, ok, err := state.blockStore.Tip()
@@ -358,11 +358,8 @@ func TestDevnetRPCGetBlockByHeightReturnsNotFoundWhenBlockBytesAreMissing(t *tes
 	rec := httptest.NewRecorder()
 	handleGetBlock(state, rec, req)
 
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status=%d, want 404", rec.Code)
-	}
-	if !strings.Contains(rec.Body.String(), "block not found") {
-		t.Fatalf("body=%q, want block not found", rec.Body.String())
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want 503", rec.Code)
 	}
 }
 
