@@ -851,6 +851,8 @@ impl HttpResponse {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
@@ -862,7 +864,11 @@ mod tests {
         SyncEngine,
     };
 
-    use super::{new_devnet_rpc_state, render_prometheus_metrics, route_request, HttpRequest};
+    use super::{
+        decode_hex_payload, new_devnet_rpc_state, parse_hex32, parse_query_map,
+        render_prometheus_metrics, route_request, split_target, start_devnet_rpc_server,
+        status_text, HttpRequest,
+    };
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -889,12 +895,17 @@ mod tests {
                 .apply_block(&devnet_genesis_block_bytes(), None)
                 .expect("apply genesis");
         }
+        let rpc_block_store = BlockStore::open(block_store_path(&dir)).expect("reopen blockstore");
         let state = new_devnet_rpc_state(
             Arc::new(Mutex::new(engine)),
-            Some(block_store),
+            Some(rpc_block_store),
             Arc::new(PeerManager::new(default_peer_runtime_config("devnet", 8))),
         );
         (state, dir)
+    }
+
+    fn response_json(response: &super::HttpResponse) -> Value {
+        serde_json::from_slice(&response.body).expect("json")
     }
 
     #[test]
@@ -916,6 +927,69 @@ mod tests {
     }
 
     #[test]
+    fn get_tip_returns_genesis_tip_shape() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_tip".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 200);
+        let json = response_json(&response);
+        assert_eq!(json["has_tip"].as_bool(), Some(true));
+        assert_eq!(json["height"].as_u64(), Some(0));
+        assert_eq!(json["tip_hash"].as_str().map(|s| s.len()), Some(64));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tip_rejects_bad_method() {
+        let (state, dir) = build_state(false);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/get_tip".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("GET required")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tip_returns_unavailable_when_sync_engine_is_poisoned() {
+        let (state, dir) = build_state(false);
+        let sync_engine = Arc::clone(&state.sync_engine);
+        let _ = std::thread::spawn(move || {
+            let _guard = sync_engine.lock().expect("lock");
+            panic!("poison sync engine");
+        })
+        .join();
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_tip".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("sync engine unavailable")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
     fn get_block_requires_exactly_one_selector() {
         let (state, dir) = build_state(true);
         let response = route_request(
@@ -927,6 +1001,149 @@ mod tests {
             },
         );
         assert_eq!(response.status, 400);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_block_rejects_bad_method() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/get_block?height=0".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("GET required")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_block_by_height_returns_genesis() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_block?height=0".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 200);
+        let json = response_json(&response);
+        assert_eq!(json["height"].as_u64(), Some(0));
+        assert_eq!(json["canonical"].as_bool(), Some(true));
+        assert!(!json["hash"].as_str().unwrap_or_default().is_empty());
+        assert!(!json["block_hex"].as_str().unwrap_or_default().is_empty());
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_block_by_hash_returns_genesis() {
+        let (state, dir) = build_state(true);
+        let (_height, tip_hash) = state
+            .block_store
+            .as_ref()
+            .expect("blockstore")
+            .tip()
+            .expect("tip")
+            .expect("tip value");
+        let tip_hex = hex::encode(tip_hash);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: format!("/get_block?hash={tip_hex}"),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response_json(&response)["hash"].as_str(),
+            Some(tip_hex.as_str())
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_block_rejects_invalid_hash() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_block?hash=zz".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("invalid hash")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_block_rejects_invalid_height() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_block?height=nope".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("invalid height")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_block_returns_not_found_for_missing_height() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_block?height=9".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 404);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("block not found")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_block_returns_unavailable_without_blockstore() {
+        let (mut state, dir) = build_state(true);
+        state.block_store = None;
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_block?height=0".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("blockstore unavailable")
+        );
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
@@ -946,8 +1163,127 @@ mod tests {
     }
 
     #[test]
+    fn submit_tx_rejects_bad_method() {
+        let (state, dir) = build_state(false);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/submit_tx".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("POST required")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn submit_tx_rejects_invalid_json() {
+        let (state, dir) = build_state(false);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/submit_tx".to_string(),
+                body: b"{\"tx_hex\":".to_vec(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("invalid JSON body")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn submit_tx_rejects_invalid_tx() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/submit_tx".to_string(),
+                body: br#"{"tx_hex":"00"}"#.to_vec(),
+            },
+        );
+        assert_eq!(response.status, 422);
+        let body = response_json(&response);
+        assert_eq!(body["accepted"].as_bool(), Some(false));
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("transaction rejected"));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn submit_tx_reports_unavailable_when_tx_pool_is_poisoned() {
+        let (state, dir) = build_state(false);
+        let tx_pool = Arc::clone(&state.tx_pool);
+        let _ = std::thread::spawn(move || {
+            let _guard = tx_pool.lock().expect("lock");
+            panic!("poison tx pool");
+        })
+        .join();
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/submit_tx".to_string(),
+                body: br#"{"tx_hex":"00"}"#.to_vec(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("tx pool unavailable")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn metrics_reject_bad_method() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/metrics".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("GET required")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
     fn metrics_render_includes_v1_names() {
         let (state, dir) = build_state(true);
+        let _ = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_tip".to_string(),
+                body: Vec::new(),
+            },
+        );
+        let _ = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/submit_tx".to_string(),
+                body: br#"{"tx_hex":"00"}"#.to_vec(),
+            },
+        );
         let body = render_prometheus_metrics(&state);
         for name in [
             "rubin_node_tip_height",
@@ -960,6 +1296,118 @@ mod tests {
         ] {
             assert!(body.contains(name), "missing metric {name}");
         }
+        assert!(body.contains(r#"rubin_node_rpc_requests_total{route="/get_tip",status="200"} 1"#));
+        assert!(body.contains(r#"rubin_node_submit_tx_total{result="rejected"} 1"#));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn route_request_returns_unknown_route_404() {
+        let (state, dir) = build_state(false);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/nope".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 404);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("route not found")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn decode_hex_payload_accepts_prefix_and_rejects_empty_or_odd_length() {
+        assert_eq!(
+            decode_hex_payload("0x00ff").expect("decode"),
+            vec![0x00, 0xff]
+        );
+        assert_eq!(
+            decode_hex_payload(" ").unwrap_err(),
+            "tx_hex is required".to_string()
+        );
+        assert_eq!(
+            decode_hex_payload("abc").unwrap_err(),
+            "tx_hex must be even-length hex".to_string()
+        );
+    }
+
+    #[test]
+    fn decode_hex_payload_rejects_invalid_hex() {
+        assert_eq!(
+            decode_hex_payload("zz").unwrap_err(),
+            "tx_hex must be valid hex".to_string()
+        );
+    }
+
+    #[test]
+    fn parse_hex32_rejects_wrong_length() {
+        assert!(parse_hex32("00").is_err());
+    }
+
+    #[test]
+    fn split_target_and_query_helpers_work() {
+        let (path, query) = split_target("/get_block?height=7&hash=");
+        assert_eq!(path, "/get_block");
+        let params = parse_query_map(&query);
+        assert_eq!(params.get("height").map(String::as_str), Some("7"));
+        assert_eq!(params.get("hash").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn status_text_maps_known_values() {
+        assert_eq!(status_text(200), "OK");
+        assert_eq!(status_text(400), "Bad Request");
+        assert_eq!(status_text(404), "Not Found");
+        assert_eq!(status_text(409), "Conflict");
+        assert_eq!(status_text(422), "Unprocessable Entity");
+        assert_eq!(status_text(503), "Service Unavailable");
+        assert_eq!(status_text(999), "Unknown");
+    }
+
+    #[test]
+    fn start_server_serves_get_tip() {
+        let (state, dir) = build_state(false);
+        let mut server =
+            start_devnet_rpc_server("127.0.0.1:0", state.clone()).expect("start server");
+        let mut stream = TcpStream::connect(server.addr()).expect("connect");
+        stream
+            .write_all(b"GET /get_tip HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .expect("write request");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("shutdown write");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("read response");
+        assert!(response.contains("HTTP/1.1 200 OK"), "{response}");
+        assert!(response.contains("has_tip"), "{response}");
+        server.close();
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn metrics_render_handles_poisoned_locks() {
+        let (state, dir) = build_state(true);
+        let sync_engine = Arc::clone(&state.sync_engine);
+        let tx_pool = Arc::clone(&state.tx_pool);
+        let _ = std::thread::spawn(move || {
+            let _guard = sync_engine.lock().expect("lock");
+            panic!("poison sync engine");
+        })
+        .join();
+        let _ = std::thread::spawn(move || {
+            let _guard = tx_pool.lock().expect("lock");
+            panic!("poison tx pool");
+        })
+        .join();
+        let body = render_prometheus_metrics(&state);
+        assert!(body.contains("rubin_node_tip_height 0"));
+        assert!(body.contains("rubin_node_in_ibd 1"));
+        assert!(body.contains("rubin_node_mempool_txs 0"));
         fs::remove_dir_all(dir).expect("cleanup");
     }
 }
