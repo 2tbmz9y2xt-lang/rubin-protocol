@@ -4,7 +4,7 @@ use std::net::TcpStream;
 use std::sync::RwLock;
 use std::time::Duration;
 
-use rubin_consensus::constants::MAX_RELAY_MSG_BYTES;
+use rubin_consensus::{block_hash, constants::MAX_RELAY_MSG_BYTES, parse_block_bytes};
 use sha3::{Digest, Sha3_256};
 
 use crate::sync::SyncEngine;
@@ -365,6 +365,14 @@ impl PeerSession {
         block_bytes: &[u8],
         sync_engine: &mut SyncEngine,
     ) -> io::Result<()> {
+        let parsed = parse_block_bytes(block_bytes).map_err(io::Error::other)?;
+        let block_hash_bytes = block_hash(&parsed.header_bytes).map_err(io::Error::other)?;
+        if sync_engine
+            .has_block(block_hash_bytes)
+            .map_err(io::Error::other)?
+        {
+            return Ok(());
+        }
         sync_engine
             .apply_block(block_bytes, None)
             .map_err(io::Error::other)?;
@@ -1317,6 +1325,25 @@ mod tests {
                 io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
             )),
         }
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn handle_block_ignores_duplicate_frames() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut session = PeerSession::new(stream, default_peer_runtime_config("devnet", 8))
+                .expect("session");
+            let mut engine = test_sync_engine_with_genesis();
+            session
+                .handle_block(&devnet_genesis_block_bytes(), &mut engine)
+                .expect("duplicate block should be ignored");
+        });
+
+        let _client = TcpStream::connect(addr).expect("connect");
         server.join().expect("server join");
     }
 }
