@@ -97,6 +97,51 @@ impl SyncEngine {
         self.best_known_height
     }
 
+    pub fn tip(&self) -> Result<Option<(u64, [u8; 32])>, String> {
+        if let Some(block_store) = self.block_store.as_ref() {
+            return block_store.tip();
+        }
+        if !self.chain_state.has_tip {
+            return Ok(None);
+        }
+        Ok(Some((self.chain_state.height, self.chain_state.tip_hash)))
+    }
+
+    pub fn locator_hashes(&self, limit: usize) -> Result<Vec<[u8; 32]>, String> {
+        match self.block_store.as_ref() {
+            Some(block_store) => block_store.locator_hashes(limit),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub fn hashes_after_locators(
+        &self,
+        locator_hashes: &[[u8; 32]],
+        stop_hash: [u8; 32],
+        limit: u64,
+    ) -> Result<Vec<[u8; 32]>, String> {
+        match self.block_store.as_ref() {
+            Some(block_store) => {
+                block_store.hashes_after_locators(locator_hashes, stop_hash, limit)
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub fn get_block_by_hash(&self, block_hash_bytes: [u8; 32]) -> Result<Vec<u8>, String> {
+        let Some(block_store) = self.block_store.as_ref() else {
+            return Err("sync engine missing blockstore".to_string());
+        };
+        block_store.get_block_by_hash(block_hash_bytes)
+    }
+
+    pub fn has_block(&self, block_hash_bytes: [u8; 32]) -> Result<bool, String> {
+        let Some(block_store) = self.block_store.as_ref() else {
+            return Ok(false);
+        };
+        Ok(block_store.has_block(block_hash_bytes))
+    }
+
     pub fn is_in_ibd(&self, now_unix: u64) -> bool {
         if !self.chain_state.has_tip {
             return true;
