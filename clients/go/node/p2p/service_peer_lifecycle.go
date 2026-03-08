@@ -52,7 +52,9 @@ func (s *Service) handleConn(conn net.Conn, outboundAddr string) error {
 		current.setLastError(err.Error())
 		return err
 	}
-	s.tryRequestPeerAddrs(current)
+	if err := current.send(messageGetAddr, nil); err != nil {
+		current.setLastError(err.Error())
+	}
 	if err := current.run(s.ctx); err != nil && s.ctx.Err() == nil {
 		current.setLastError(err.Error())
 		return err
@@ -66,6 +68,11 @@ func (s *Service) registerPeer(p *peer) error {
 	}
 	s.peersMu.Lock()
 	s.peers[p.addr()] = p
+	if p.conn != nil {
+		if alias := normalizeNetAddr(p.conn.RemoteAddr().String()); alias != "" && alias != p.addr() {
+			s.peers[alias] = p
+		}
+	}
 	s.peersMu.Unlock()
 	s.resetReconnect(p.addr())
 	return nil
@@ -78,8 +85,11 @@ func (s *Service) unregisterPeer(p *peer) {
 	addr := p.addr()
 	remove := false
 	s.peersMu.Lock()
-	if current, ok := s.peers[addr]; ok && current == p {
-		delete(s.peers, addr)
+	for key, current := range s.peers {
+		if current != p {
+			continue
+		}
+		delete(s.peers, key)
 		remove = true
 	}
 	s.peersMu.Unlock()
@@ -116,19 +126,6 @@ func (s *Service) localVersion() (node.VersionPayloadV1, error) {
 		BestHeight:        bestHeight,
 		UserAgent:         s.cfg.UserAgent,
 	}, nil
-}
-
-func (s *Service) requestPeerAddrs(p *peer) error {
-	if p == nil {
-		return nil
-	}
-	return p.send(messageGetAddr, nil)
-}
-
-func (s *Service) tryRequestPeerAddrs(p *peer) {
-	if err := s.requestPeerAddrs(p); err != nil && p != nil {
-		p.setLastError(err.Error())
-	}
 }
 
 func (s *Service) isOutboundAddr(addr string) bool {

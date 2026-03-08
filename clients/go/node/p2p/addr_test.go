@@ -187,11 +187,8 @@ func TestDiscoverableAddrsFiltersSelfConnectedAndBanned(t *testing.T) {
 	}
 }
 
-func TestRequestPeerAddrsNilAndConnectDiscoveredSkipsConnected(t *testing.T) {
+func TestConnectDiscoveredSkipsConnected(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:19021", nil)
-	if err := h.service.requestPeerAddrs(nil); err != nil {
-		t.Fatalf("requestPeerAddrs(nil): %v", err)
-	}
 	addr := "127.0.0.1:19022"
 	h.service.peers[addr] = &peer{service: h.service, state: node.PeerState{Addr: addr}}
 	h.service.connectDiscoveredAddrs([]string{addr})
