@@ -15,6 +15,7 @@ const DEFAULT_BAN_THRESHOLD: i32 = 100;
 const WIRE_HEADER_SIZE: usize = 24;
 const WIRE_COMMAND_SIZE: usize = 12;
 const FUZZ_MAX_P2P_PAYLOAD_BYTES: u64 = 1 << 20;
+const VERSION_PAYLOAD_BYTES: u64 = 89;
 const MESSAGE_INV: &str = "inv";
 const MESSAGE_GETDATA: &str = "getdata";
 const MESSAGE_BLOCK: &str = "block";
@@ -25,6 +26,14 @@ const MESSAGE_ADDR: &str = "addr";
 pub const MSG_BLOCK: u8 = 0x01;
 pub const MSG_TX: u8 = 0x02;
 const INVENTORY_VECTOR_SIZE: usize = 33;
+const MAX_INVENTORY_VECTORS: usize = 4096;
+const MAX_INVENTORY_PAYLOAD_BYTES: u64 =
+    (MAX_INVENTORY_VECTORS as u64) * (INVENTORY_VECTOR_SIZE as u64);
+const ADDR_PAYLOAD_ENTRY_SIZE: usize = 18;
+const MAX_ADDR_PAYLOAD_ENTRIES: usize = 1000;
+const MAX_ADDR_COMPACT_SIZE_BYTES: u64 = 3;
+const MAX_ADDR_PAYLOAD_BYTES: u64 = MAX_ADDR_COMPACT_SIZE_BYTES
+    + (MAX_ADDR_PAYLOAD_ENTRIES as u64) * (ADDR_PAYLOAD_ENTRY_SIZE as u64);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WireMessage {
@@ -415,7 +424,12 @@ pub fn perform_version_handshake(
 
     let mut sent_verack = false;
     loop {
-        let msg = session.read_message()?;
+        let msg = read_message_from_with_payload_limit(
+            &mut session.stream,
+            network_magic(&session.cfg.network),
+            MAX_RELAY_MSG_BYTES,
+            pre_handshake_payload_cap,
+        )?;
         match msg.command.as_str() {
             "version" => {
                 let remote = unmarshal_version_payload_v1(&msg.payload)?;
@@ -514,9 +528,23 @@ fn read_message_from<R: Read>(
     expected_magic: [u8; 4],
     max_payload_bytes: u64,
 ) -> io::Result<WireMessage> {
+    read_message_from_with_payload_limit(
+        reader,
+        expected_magic,
+        max_payload_bytes,
+        runtime_payload_cap,
+    )
+}
+
+fn read_message_from_with_payload_limit<R: Read>(
+    reader: &mut R,
+    expected_magic: [u8; 4],
+    max_payload_bytes: u64,
+    payload_cap: fn(&str) -> u64,
+) -> io::Result<WireMessage> {
     let mut header = [0u8; WIRE_HEADER_SIZE];
     reader.read_exact(&mut header)?;
-    let envelope = parse_envelope_header(&header, expected_magic, max_payload_bytes)?;
+    let envelope = parse_envelope_header(&header, expected_magic, max_payload_bytes, payload_cap)?;
     let mut payload = vec![0u8; envelope.payload_len];
     if envelope.payload_len > 0 {
         reader.read_exact(&mut payload)?;
@@ -546,7 +574,22 @@ fn protocol_versions_compatible(local: u32, remote: u32) -> bool {
 }
 
 pub fn encode_inventory_vectors(items: &[InventoryVector]) -> io::Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(items.len() * INVENTORY_VECTOR_SIZE);
+    if items.len() > MAX_INVENTORY_VECTORS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "inventory count exceeds limit",
+        ));
+    }
+    let capacity = items
+        .len()
+        .checked_mul(INVENTORY_VECTOR_SIZE)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "inventory payload length overflow",
+            )
+        })?;
+    let mut out = Vec::with_capacity(capacity);
     for item in items {
         if item.kind != MSG_BLOCK && item.kind != MSG_TX {
             return Err(io::Error::new(
@@ -570,7 +613,14 @@ pub fn decode_inventory_vectors(payload: &[u8]) -> io::Result<Vec<InventoryVecto
             "inventory payload width mismatch",
         ));
     }
-    let mut out = Vec::with_capacity(payload.len() / INVENTORY_VECTOR_SIZE);
+    let count = payload.len() / INVENTORY_VECTOR_SIZE;
+    if count > MAX_INVENTORY_VECTORS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "inventory count exceeds limit",
+        ));
+    }
+    let mut out = Vec::with_capacity(count);
     for chunk in payload.chunks_exact(INVENTORY_VECTOR_SIZE) {
         let kind = chunk[0];
         if kind != MSG_BLOCK && kind != MSG_TX {
@@ -639,12 +689,26 @@ fn marshal_empty_addr_payload() -> Vec<u8> {
 
 fn unmarshal_addr_payload(payload: &[u8]) -> io::Result<Vec<String>> {
     let (count, consumed) = decode_compact_size(payload)?;
+    let count = usize::try_from(count)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "addr count overflow"))?;
+    if count > MAX_ADDR_PAYLOAD_ENTRIES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "addr count exceeds limit",
+        ));
+    }
+    let remaining = payload
+        .len()
+        .checked_sub(consumed)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "addr payload width mismatch"))?;
+    if count > remaining / ADDR_PAYLOAD_ENTRY_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "addr payload width mismatch",
+        ));
+    }
     let needed = consumed
-        .checked_add(
-            usize::try_from(count)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "addr count overflow"))?
-                .saturating_mul(18),
-        )
+        .checked_add(count * ADDR_PAYLOAD_ENTRY_SIZE)
         .ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "addr payload length overflow")
         })?;
@@ -654,7 +718,7 @@ fn unmarshal_addr_payload(payload: &[u8]) -> io::Result<Vec<String>> {
             "addr payload width mismatch",
         ));
     }
-    let mut out = Vec::with_capacity(count as usize);
+    let mut out = Vec::with_capacity(count);
     let mut offset = consumed;
     for _ in 0..count {
         let ip = std::net::Ipv6Addr::from(
@@ -716,7 +780,7 @@ fn decode_compact_size(payload: &[u8]) -> io::Result<(u64, usize)> {
 }
 
 fn marshal_version_payload_v1(v: VersionPayloadV1) -> Vec<u8> {
-    let mut payload = vec![0u8; 89];
+    let mut payload = vec![0u8; VERSION_PAYLOAD_BYTES as usize];
     payload[0..4].copy_from_slice(&v.protocol_version.to_le_bytes());
     payload[4] = if v.tx_relay { 1 } else { 0 };
     payload[5..13].copy_from_slice(&v.pruned_below_height.to_le_bytes());
@@ -728,10 +792,10 @@ fn marshal_version_payload_v1(v: VersionPayloadV1) -> Vec<u8> {
 }
 
 fn unmarshal_version_payload_v1(payload: &[u8]) -> io::Result<VersionPayloadV1> {
-    if payload.len() != 89 {
+    if payload.len() != VERSION_PAYLOAD_BYTES as usize {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            if payload.len() < 89 {
+            if payload.len() < VERSION_PAYLOAD_BYTES as usize {
                 "version payload too short"
             } else {
                 "trailing bytes in version payload"
@@ -807,7 +871,12 @@ fn unmarshal_wire_message(
         ));
     }
     let header = raw[..WIRE_HEADER_SIZE].try_into().expect("wire header");
-    let envelope = parse_envelope_header(&header, expected_magic, max_message_size)?;
+    let envelope = parse_envelope_header(
+        &header,
+        expected_magic,
+        max_message_size,
+        runtime_payload_cap,
+    )?;
     let total_len = WIRE_HEADER_SIZE + envelope.payload_len;
     if raw.len() < total_len {
         return Err(io::Error::new(
@@ -839,6 +908,7 @@ fn parse_envelope_header(
     header: &[u8; WIRE_HEADER_SIZE],
     expected_magic: [u8; 4],
     max_message_size: u64,
+    payload_cap: fn(&str) -> u64,
 ) -> io::Result<ParsedEnvelopeHeader> {
     if header[0..4] != expected_magic {
         return Err(io::Error::new(
@@ -852,6 +922,12 @@ fn parse_envelope_header(
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "message exceeds cap",
+        ));
+    }
+    if payload_len as u64 > payload_cap(&command) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "message exceeds command cap",
         ));
     }
     let mut checksum = [0u8; 4];
@@ -947,6 +1023,24 @@ fn normalize_peer_runtime_config(mut cfg: PeerRuntimeConfig) -> PeerRuntimeConfi
         cfg.ban_threshold = DEFAULT_BAN_THRESHOLD;
     }
     cfg
+}
+
+fn runtime_payload_cap(command: &str) -> u64 {
+    match command {
+        "version" => VERSION_PAYLOAD_BYTES,
+        "verack" | "ping" | "pong" | MESSAGE_GETADDR => 0,
+        MESSAGE_INV | MESSAGE_GETDATA => MAX_INVENTORY_PAYLOAD_BYTES,
+        MESSAGE_ADDR => MAX_ADDR_PAYLOAD_BYTES,
+        _ => MAX_RELAY_MSG_BYTES,
+    }
+}
+
+fn pre_handshake_payload_cap(command: &str) -> u64 {
+    match command {
+        "version" => VERSION_PAYLOAD_BYTES,
+        "verack" | "ping" | "pong" | MESSAGE_GETADDR | MESSAGE_ADDR => 0,
+        _ => 0,
+    }
 }
 
 fn network_magic(network: &str) -> [u8; 4] {
@@ -1188,6 +1282,69 @@ mod tests {
 
         client.join().expect("client join");
         server.join().expect("server join");
+    }
+
+    #[test]
+    fn p2p_read_message_rejects_inventory_command_cap_before_payload_read() {
+        let mut header = [0u8; WIRE_HEADER_SIZE];
+        header[0..4].copy_from_slice(&network_magic("devnet"));
+        header[4..16].copy_from_slice(&encode_wire_command(MESSAGE_INV).expect("command"));
+        let oversize = (MAX_INVENTORY_PAYLOAD_BYTES + 1) as u32;
+        header[16..20].copy_from_slice(&oversize.to_le_bytes());
+
+        let mut reader = std::io::Cursor::new(header);
+        let err = read_message_from(&mut reader, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "message exceeds command cap");
+    }
+
+    #[test]
+    fn p2p_read_message_rejects_addr_command_cap_before_payload_read() {
+        let mut header = [0u8; WIRE_HEADER_SIZE];
+        header[0..4].copy_from_slice(&network_magic("devnet"));
+        header[4..16].copy_from_slice(&encode_wire_command(MESSAGE_ADDR).expect("command"));
+        let oversize = (MAX_ADDR_PAYLOAD_BYTES + 1) as u32;
+        header[16..20].copy_from_slice(&oversize.to_le_bytes());
+
+        let mut reader = std::io::Cursor::new(header);
+        let err = read_message_from(&mut reader, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "message exceeds command cap");
+    }
+
+    #[test]
+    fn p2p_read_message_rejects_non_empty_ping_payload() {
+        let mut header = [0u8; WIRE_HEADER_SIZE];
+        header[0..4].copy_from_slice(&network_magic("devnet"));
+        header[4..16].copy_from_slice(&encode_wire_command("ping").expect("command"));
+        header[16..20].copy_from_slice(&1u32.to_le_bytes());
+
+        let mut reader = std::io::Cursor::new(header);
+        let err = read_message_from(&mut reader, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "message exceeds command cap");
+    }
+
+    #[test]
+    fn decode_inventory_vectors_rejects_count_over_limit() {
+        let count = MAX_INVENTORY_VECTORS + 1;
+        let mut payload = vec![0u8; count * INVENTORY_VECTOR_SIZE];
+        for chunk in payload.chunks_exact_mut(INVENTORY_VECTOR_SIZE) {
+            chunk[0] = MSG_BLOCK;
+        }
+        let err = decode_inventory_vectors(&payload).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "inventory count exceeds limit");
+    }
+
+    #[test]
+    fn unmarshal_addr_payload_rejects_count_over_limit() {
+        let err = unmarshal_addr_payload(&[0xfd, 0xe9, 0x03]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "addr count exceeds limit");
     }
 
     #[test]

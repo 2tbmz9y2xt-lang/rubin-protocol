@@ -71,6 +71,10 @@ func (p *peer) processRelayedBlock(blockBytes []byte) (*node.ChainStateConnectSu
 	p.service.chainMu.Unlock()
 	if err != nil {
 		if errors.Is(err, node.ErrParentNotFound) {
+			if err := consensus.PowCheck(pb.HeaderBytes, pb.Header.Target); err != nil {
+				p.bumpBan(100, err.Error())
+				return nil, err
+			}
 			p.service.retainOrResolveOrphan(p, blockHash, pb.Header.PrevBlockHash, blockBytes)
 			return nil, nil
 		}

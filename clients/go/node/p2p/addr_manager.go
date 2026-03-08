@@ -10,8 +10,9 @@ import (
 )
 
 const (
-	maxKnownAddrs    = 1000
-	maxAddrAdvertise = 25
+	maxKnownAddrs     = 1000
+	maxAddrAdvertise  = 25
+	maxAddrsPerSubnet = 10
 )
 
 type addrEntry struct {
@@ -48,7 +49,12 @@ func (m *addrManager) AddAddrs(addrs []string) {
 		if addr == "" {
 			continue
 		}
-		entry := m.addrs[addr]
+		entry, exists := m.addrs[addr]
+		if !exists {
+			if subnet := subnetKey(addr); subnet != "" && m.subnetCountLocked(subnet) >= maxAddrsPerSubnet {
+				continue
+			}
+		}
 		entry.addr = addr
 		entry.lastSeen = now
 		m.addrs[addr] = entry
@@ -164,4 +170,30 @@ func normalizeEndpointHost(host string, allowHostname bool) string {
 		return ""
 	}
 	return strings.ToLower(host)
+}
+
+func (m *addrManager) subnetCountLocked(subnet string) int {
+	count := 0
+	for addr := range m.addrs {
+		if subnetKey(addr) == subnet {
+			count++
+		}
+	}
+	return count
+}
+
+func subnetKey(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return ""
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil {
+		return ""
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return ""
+	}
+	return ip4.Mask(net.CIDRMask(24, 32)).String() + "/24"
 }

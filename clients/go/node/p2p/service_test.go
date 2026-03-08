@@ -462,6 +462,46 @@ func TestProcessRelayedBlockDoesNotMarkSeenWhenOrphanIsRejected(t *testing.T) {
 	}
 }
 
+func TestProcessRelayedBlockRejectsInvalidOrphanPoWBeforeRetention(t *testing.T) {
+	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
+
+	height2Hash, ok, err := source.blockStore.CanonicalHash(2)
+	if err != nil || !ok {
+		t.Fatalf("CanonicalHash(2): ok=%v err=%v", ok, err)
+	}
+	block2Bytes, err := source.blockStore.GetBlockByHash(height2Hash)
+	if err != nil {
+		t.Fatalf("GetBlockByHash(height2): %v", err)
+	}
+	invalid := append([]byte(nil), block2Bytes...)
+	for i := 76; i < 108; i++ {
+		invalid[i] = 0
+	}
+
+	peer := &peer{
+		service: sink.service,
+		state: node.PeerState{
+			Addr:          "127.0.0.1:39001",
+			RemoteVersion: testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 2),
+		},
+	}
+
+	summary, err := peer.processRelayedBlock(invalid)
+	if err == nil {
+		t.Fatalf("processRelayedBlock(invalid orphan pow) unexpectedly succeeded")
+	}
+	if summary != nil {
+		t.Fatalf("summary=%v, want nil", summary)
+	}
+	if sink.service.orphans.Len() != 0 {
+		t.Fatalf("orphans.Len()=%d, want 0", sink.service.orphans.Len())
+	}
+	if state := peer.snapshotState(); state.BanScore < 100 {
+		t.Fatalf("ban_score=%d, want >= 100", state.BanScore)
+	}
+}
+
 func TestAcceptedRelayedBlockBroadcastsResolvedOrphans(t *testing.T) {
 	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
 	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -548,6 +588,40 @@ func TestAcceptedRelayedBlockBroadcastsResolvedOrphans(t *testing.T) {
 	if secondItems[0].Hash != height2Hash {
 		t.Fatalf("second relayed hash=%x, want %x", secondItems[0].Hash, height2Hash)
 	}
+}
+
+func TestHandshakeSlotNilServiceAndChannel(t *testing.T) {
+	var nilSvc *Service
+	if !nilSvc.tryAcquireHandshakeSlot() {
+		t.Fatal("nil service should return true")
+	}
+	nilSvc.releaseHandshakeSlot()
+
+	svc := &Service{}
+	if !svc.tryAcquireHandshakeSlot() {
+		t.Fatal("nil channel should return true")
+	}
+	svc.releaseHandshakeSlot()
+}
+
+func TestHandshakeSlotHelpersBoundCapacity(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	limit := h.service.cfg.PeerRuntimeConfig.MaxPeers
+	for i := 0; i < limit; i++ {
+		if !h.service.tryAcquireHandshakeSlot() {
+			t.Fatalf("tryAcquireHandshakeSlot() failed at slot %d/%d", i+1, limit)
+		}
+	}
+	if h.service.tryAcquireHandshakeSlot() {
+		t.Fatalf("tryAcquireHandshakeSlot() succeeded past max peers")
+	}
+	for i := 0; i < limit; i++ {
+		h.service.releaseHandshakeSlot()
+	}
+	if !h.service.tryAcquireHandshakeSlot() {
+		t.Fatalf("expected released slot to be reusable")
+	}
+	h.service.releaseHandshakeSlot()
 }
 
 func TestRetainOrResolveOrphanImmediatelyResolvesWhenParentAlreadyExists(t *testing.T) {

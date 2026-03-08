@@ -85,8 +85,12 @@ func (s *Service) acceptLoop() {
 			}
 			continue
 		}
+		if !s.tryAcquireHandshakeSlot() {
+			_ = conn.Close()
+			continue
+		}
 		s.loopWG.Add(1)
-		go s.runConn(conn)
+		go s.runConn(conn, true)
 	}
 }
 
@@ -101,7 +105,35 @@ func (s *Service) dialPeer(addr string) {
 		s.recordDialFailure(addr)
 		return
 	}
+	if !s.tryAcquireHandshakeSlot() {
+		_ = conn.Close()
+		s.recordDialFailure(addr)
+		return
+	}
+	defer s.releaseHandshakeSlot()
 	if err := s.handleConn(conn, addr); err != nil && s.ctx != nil && s.ctx.Err() == nil {
 		s.recordDialFailure(addr)
+	}
+}
+
+func (s *Service) tryAcquireHandshakeSlot() bool {
+	if s == nil || s.handshakeSlots == nil {
+		return true
+	}
+	select {
+	case s.handshakeSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) releaseHandshakeSlot() {
+	if s == nil || s.handshakeSlots == nil {
+		return
+	}
+	select {
+	case <-s.handshakeSlots:
+	default:
 	}
 }

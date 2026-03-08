@@ -8,8 +8,11 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
-func (s *Service) runConn(conn net.Conn) {
+func (s *Service) runConn(conn net.Conn, ownsHandshakeSlot bool) {
 	defer s.loopWG.Done()
+	if ownsHandshakeSlot {
+		defer s.releaseHandshakeSlot()
+	}
 	_ = s.handleConn(conn, "")
 }
 

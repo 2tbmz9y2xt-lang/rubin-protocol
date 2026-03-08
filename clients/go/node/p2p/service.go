@@ -50,6 +50,7 @@ type Service struct {
 	reconnectState map[string]*reconnectEntry
 	outboundAddrs  []string
 	addrMgr        *addrManager
+	handshakeSlots chan struct{}
 
 	chainMu   sync.Mutex
 	blockSeen *boundedHashSet
@@ -119,6 +120,7 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		reconnectState: make(map[string]*reconnectEntry),
 		outboundAddrs:  outboundAddrs,
 		addrMgr:        addrMgr,
+		handshakeSlots: make(chan struct{}, cfg.PeerRuntimeConfig.MaxPeers),
 		blockSeen:      newBoundedHashSet(defaultBlockSeenCapacity),
 		txSeen:         newBoundedHashSet(defaultTxSeenCapacity),
 		orphans:        newOrphanPool(500),

@@ -26,7 +26,12 @@ func (p *peer) run(ctx context.Context) error {
 				return err
 			}
 		}
-		frame, err := readFrame(p.conn, networkMagic(p.service.cfg.PeerRuntimeConfig.Network), p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+		frame, err := readFrameWithPayloadLimit(
+			p.conn,
+			networkMagic(p.service.cfg.PeerRuntimeConfig.Network),
+			p.service.cfg.PeerRuntimeConfig.MaxMessageSize,
+			postHandshakePayloadCap(p.service.cfg.LocatorLimit, p.service.cfg.SyncConfig.HeaderBatchLimit),
+		)
 		if err != nil {
 			if shouldIgnoreReadError(err) {
 				continue

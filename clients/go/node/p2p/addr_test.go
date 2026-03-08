@@ -123,20 +123,22 @@ func TestAddrManagerEvictionAndLen(t *testing.T) {
 		currentTime = currentTime.Add(time.Second)
 		return currentTime
 	})
-	for port := 20000; port <= 21000; port++ {
-		manager.AddAddrs([]string{fmt.Sprintf("127.0.0.1:%d", port)})
+	for index := 0; index <= maxKnownAddrs; index++ {
+		thirdOctet := index / maxAddrsPerSubnet
+		fourthOctet := (index % maxAddrsPerSubnet) + 1
+		manager.AddAddrs([]string{fmt.Sprintf("10.0.%d.%d:18444", thirdOctet, fourthOctet)})
 	}
 	if got := manager.Len(); got != maxKnownAddrs {
 		t.Fatalf("Len()=%d, want %d", got, maxKnownAddrs)
 	}
 	addrs := manager.GetAddrs(maxKnownAddrs)
-	if slices.Contains(addrs, "127.0.0.1:20000") {
+	if slices.Contains(addrs, "10.0.0.1:18444") {
 		t.Fatalf("oldest address was not evicted")
 	}
-	if !slices.Contains(addrs, "127.0.0.1:21000") {
+	if !slices.Contains(addrs, "10.0.100.1:18444") {
 		t.Fatalf("newest address missing after eviction")
 	}
-	manager.MarkAttempted("127.0.0.1:21000")
+	manager.MarkAttempted("10.0.100.1:18444")
 }
 
 func TestAddrManagerNilAndHelperBranches(t *testing.T) {
@@ -163,6 +165,28 @@ func TestAddrManagerNilAndHelperBranches(t *testing.T) {
 	}
 	if got := normalizeDialTarget("Seed.Example.com:18444"); got != "seed.example.com:18444" {
 		t.Fatalf("normalizeDialTarget(hostname)=%q, want seed.example.com:18444", got)
+	}
+}
+
+func TestAddrManagerSubnetDiversityLimit(t *testing.T) {
+	manager := newAddrManager(nil)
+	for host := 1; host <= maxAddrsPerSubnet+2; host++ {
+		manager.AddAddrs([]string{fmt.Sprintf("10.1.2.%d:18444", host)})
+	}
+	manager.AddAddrs([]string{"10.1.3.1:18444"})
+
+	addrs := manager.GetAddrs(-1)
+	subnetCount := 0
+	for _, addr := range addrs {
+		if subnetKey(addr) == "10.1.2.0/24" {
+			subnetCount++
+		}
+	}
+	if subnetCount != maxAddrsPerSubnet {
+		t.Fatalf("10.1.2.0/24 count=%d, want %d", subnetCount, maxAddrsPerSubnet)
+	}
+	if !slices.Contains(addrs, "10.1.3.1:18444") {
+		t.Fatalf("expected other subnet address to be retained, got %v", addrs)
 	}
 }
 
@@ -249,5 +273,20 @@ func TestNewServiceSeedsAddrManagerFromBootstrapPeers(t *testing.T) {
 	})
 	if got := h.service.addrMgr.GetAddrs(8); !slices.Equal(got, []string{"127.0.0.1:19052"}) {
 		t.Fatalf("seeded bootstrap addrs=%v, want [127.0.0.1:19052]", got)
+	}
+}
+
+func TestSubnetKeyEdgeCases(t *testing.T) {
+	if got := subnetKey("not-a-hostport"); got != "" {
+		t.Fatalf("subnetKey(invalid)=%q, want empty", got)
+	}
+	if got := subnetKey("hostname.example.com:1234"); got != "" {
+		t.Fatalf("subnetKey(hostname)=%q, want empty", got)
+	}
+	if got := subnetKey("[::1]:1234"); got != "" {
+		t.Fatalf("subnetKey(ipv6)=%q, want empty", got)
+	}
+	if got := subnetKey("10.0.1.5:18444"); got != "10.0.1.0/24" {
+		t.Fatalf("subnetKey(valid)=%q, want 10.0.1.0/24", got)
 	}
 }
