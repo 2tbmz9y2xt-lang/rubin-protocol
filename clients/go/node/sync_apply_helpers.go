@@ -1,15 +1,22 @@
 package node
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
+type mempoolSnapshot struct {
+	entries []mempoolEntry
+}
+
 type syncRollbackState struct {
 	chainState      chainStateDisk
 	canonicalIndex  []string
+	mempool         mempoolSnapshot
 	tipTimestamp    uint64
 	bestKnownHeight uint64
 	lastReorgDepth  uint64
@@ -25,11 +32,16 @@ func (s *SyncEngine) captureRollbackState() (syncRollbackState, error) {
 	if err != nil {
 		return syncRollbackState{}, err
 	}
+	mempoolState, err := snapshotMempool(s.mempool)
+	if err != nil {
+		return syncRollbackState{}, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return syncRollbackState{
 		chainState:      snapshot,
 		canonicalIndex:  canonicalIndex,
+		mempool:         mempoolState,
 		tipTimestamp:    s.tipTimestamp,
 		bestKnownHeight: s.bestKnownHeight,
 		lastReorgDepth:  s.lastReorgDepth,
@@ -43,6 +55,9 @@ func (s *SyncEngine) rollbackApplyBlock(cause error, state syncRollbackState) er
 		if bsErr := s.blockStore.RestoreCanonicalIndex(state.canonicalIndex); bsErr != nil && restoreErr == nil {
 			restoreErr = bsErr
 		}
+	}
+	if mpErr := restoreMempoolSnapshot(s.mempool, state.mempool); mpErr != nil && restoreErr == nil {
+		restoreErr = mpErr
 	}
 	if restoreErr == nil && s.cfg.ChainStatePath != "" {
 		if saveErr := s.chainState.Save(s.cfg.ChainStatePath); saveErr != nil {
@@ -207,4 +222,57 @@ func parentTipTimestamp(store *BlockStore, tipHeight uint64, prevBlockHash [32]b
 		return 0, err
 	}
 	return parentHeader.Timestamp, nil
+}
+
+func snapshotMempool(m *Mempool) (mempoolSnapshot, error) {
+	if m == nil {
+		return mempoolSnapshot{}, nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	entries := make([]mempoolEntry, 0, len(m.txs))
+	for _, entry := range m.txs {
+		entries = append(entries, cloneMempoolEntry(entry))
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return bytes.Compare(entries[i].txid[:], entries[j].txid[:]) < 0
+	})
+	return mempoolSnapshot{entries: entries}, nil
+}
+
+func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.txs = make(map[[32]byte]*mempoolEntry, len(snapshot.entries))
+	m.spenders = make(map[consensus.Outpoint][32]byte)
+	for _, item := range snapshot.entries {
+		entry := cloneMempoolEntryPtr(item)
+		m.txs[entry.txid] = entry
+		for _, op := range entry.inputs {
+			m.spenders[op] = entry.txid
+		}
+	}
+	return nil
+}
+
+func cloneMempoolEntry(entry *mempoolEntry) mempoolEntry {
+	if entry == nil {
+		return mempoolEntry{}
+	}
+	return mempoolEntry{
+		raw:    append([]byte(nil), entry.raw...),
+		txid:   entry.txid,
+		inputs: append([]consensus.Outpoint(nil), entry.inputs...),
+		fee:    entry.fee,
+		weight: entry.weight,
+		size:   entry.size,
+	}
+}
+
+func cloneMempoolEntryPtr(entry mempoolEntry) *mempoolEntry {
+	copyEntry := cloneMempoolEntry(&entry)
+	return &copyEntry
 }

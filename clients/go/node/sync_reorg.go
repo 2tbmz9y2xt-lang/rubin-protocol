@@ -113,8 +113,11 @@ func (s *SyncEngine) applyHeavierBranch(
 	if err != nil {
 		return nil, err
 	}
-	disconnectedBlocks, reorgDepth, err := s.disconnectCanonicalToAncestor(commonAncestorHeight)
+	disconnectedBlocks, reorgDepth, err := s.prepareHeavierBranch(branch, commonAncestorHeight, prevTimestamps, rollbackState)
 	if err != nil {
+		return nil, err
+	}
+	if _, _, err := s.disconnectCanonicalToAncestor(commonAncestorHeight); err != nil {
 		return nil, s.rollbackApplyBlock(err, rollbackState)
 	}
 

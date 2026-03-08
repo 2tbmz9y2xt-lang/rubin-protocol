@@ -284,6 +284,76 @@ func TestApplyBlockWithReorgRollbackRestoresCanonicalIndexAndChainstateFile(t *t
 	}
 }
 
+func TestApplyBlockWithReorgRejectsInvalidHeavierBranchBeforeDisconnectingCanonicalTip(t *testing.T) {
+	engine, store, target := newReorgTestEngine(t)
+
+	subsidy1 := consensus.BlockSubsidy(1, 0)
+	blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, 2, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	summaryA1, err := engine.ApplyBlock(blockA1, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(A1): %v", err)
+	}
+	subsidy2 := consensus.BlockSubsidy(2, subsidy1)
+	blockA2 := buildSingleTxBlock(t, summaryA1.BlockHash, target, 3, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
+	summaryA2, err := engine.ApplyBlock(blockA2, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(A2): %v", err)
+	}
+
+	blockB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, 10, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	if _, err := engine.ApplyBlockWithReorg(blockB1, nil); err != nil {
+		t.Fatalf("ApplyBlockWithReorg(B1): %v", err)
+	}
+	blockB1Hash, err := consensus.BlockHash(blockHeaderBytes(t, blockB1))
+	if err != nil {
+		t.Fatalf("BlockHash(B1): %v", err)
+	}
+	blockB2 := buildSingleTxBlock(t, blockB1Hash, target, 11, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
+	if _, err := engine.ApplyBlockWithReorg(blockB2, nil); err != nil {
+		t.Fatalf("ApplyBlockWithReorg(B2): %v", err)
+	}
+	blockB2Hash, err := consensus.BlockHash(blockHeaderBytes(t, blockB2))
+	if err != nil {
+		t.Fatalf("BlockHash(B2): %v", err)
+	}
+
+	subsidy3 := consensus.BlockSubsidy(3, subsidy1+subsidy2)
+	validB3 := buildSingleTxBlock(t, blockB2Hash, target, 12, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 3, subsidy3))
+	invalidB3 := append([]byte(nil), validB3...)
+	invalidB3[len(invalidB3)-1] ^= 0x01
+
+	prevWrite := writeFileAtomicFn
+	t.Cleanup(func() { writeFileAtomicFn = prevWrite })
+	chainStateWrites := 0
+	indexWrites := 0
+	writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
+		switch path {
+		case ChainStatePath(filepath.Dir(store.rootPath)):
+			chainStateWrites++
+		case store.indexPath:
+			indexWrites++
+		}
+		return prevWrite(path, data, mode)
+	}
+
+	if _, err := engine.ApplyBlockWithReorg(invalidB3, nil); err == nil {
+		t.Fatalf("expected invalid heavier branch rejection")
+	}
+	if chainStateWrites != 0 || indexWrites != 0 {
+		t.Fatalf("invalid heavier branch rewrote state: chainstate=%d index=%d", chainStateWrites, indexWrites)
+	}
+	if engine.chainState.Height != summaryA2.BlockHeight || engine.chainState.TipHash != summaryA2.BlockHash {
+		t.Fatalf("canonical tip changed after invalid heavier branch")
+	}
+	tipHeight, tipHash, ok, err := store.Tip()
+	if err != nil {
+		t.Fatalf("store.Tip: %v", err)
+	}
+	if !ok || tipHeight != summaryA2.BlockHeight || tipHash != summaryA2.BlockHash {
+		t.Fatalf("store tip after invalid branch: ok=%v height=%d hash=%x", ok, tipHeight, tipHash)
+	}
+}
+
 func TestCollectBranchToCanonicalPropagatesNonNotExistErrors(t *testing.T) {
 	engine, store, target := newReorgTestEngine(t)
 
@@ -468,6 +538,126 @@ func TestApplyBlockWithReorgRequeuesDisconnectedTransactionsIntoMempool(t *testi
 	}
 	if engine.chainState.TipHash == summaryA101.BlockHash {
 		t.Fatalf("tip hash still points to old branch")
+	}
+}
+
+func TestApplyBlockWithReorgRollbackRestoresMempoolAfterPersistFailure(t *testing.T) {
+	engine, store, target := newReorgTestEngine(t)
+	mempool, err := NewMempool(engine.chainState, store, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	engine.SetMempool(mempool)
+
+	sourceKP, err := consensus.NewMLDSA87Keypair()
+	if err != nil {
+		t.Fatalf("NewMLDSA87Keypair(source): %v", err)
+	}
+	defer sourceKP.Close()
+	destKP, err := consensus.NewMLDSA87Keypair()
+	if err != nil {
+		t.Fatalf("NewMLDSA87Keypair(dest): %v", err)
+	}
+	defer destKP.Close()
+
+	sourceAddress := consensus.P2PKCovenantDataForPubkey(sourceKP.PubkeyBytes())
+	destAddress := consensus.P2PKCovenantDataForPubkey(destKP.PubkeyBytes())
+
+	prevHash := devnetGenesisBlockHash
+	alreadyGenerated := uint64(0)
+	var sourceOutpoint consensus.Outpoint
+	for height := uint64(1); height <= 100; height++ {
+		subsidy := consensus.BlockSubsidy(height, alreadyGenerated)
+		coinbase := reorgTestCoinbaseForAddress(t, height, subsidy, sourceAddress)
+		block := buildSingleTxBlock(t, prevHash, target, height+1, coinbase)
+		summary, err := engine.ApplyBlock(block, nil)
+		if err != nil {
+			t.Fatalf("ApplyBlock(height=%d): %v", height, err)
+		}
+		if height == 1 {
+			_, coinbaseTxid, _, _, err := consensus.ParseTx(coinbase)
+			if err != nil {
+				t.Fatalf("ParseTx(coinbase height1): %v", err)
+			}
+			sourceOutpoint = consensus.Outpoint{Txid: coinbaseTxid, Vout: 0}
+		}
+		prevHash = summary.BlockHash
+		alreadyGenerated += subsidy
+	}
+
+	spendTx := mustBuildSignedTransferTxForSyncTest(
+		t,
+		engine.chainState.Utxos,
+		[]consensus.Outpoint{sourceOutpoint},
+		700,
+		50,
+		1,
+		sourceKP,
+		sourceAddress,
+		destAddress,
+	)
+	_, _, spendWtxid, _, err := consensus.ParseTx(spendTx)
+	if err != nil {
+		t.Fatalf("ParseTx(spend): %v", err)
+	}
+	if err := mempool.AddTx(spendTx); err != nil {
+		t.Fatalf("mempool.AddTx(spend): %v", err)
+	}
+
+	subsidyA101 := consensus.BlockSubsidy(101, alreadyGenerated)
+	blockA101 := buildSingleTxBlock(t, prevHash, target, 202, reorgTestCoinbaseForAddress(t, 101, subsidyA101, sourceAddress))
+	summaryA101, err := engine.ApplyBlock(blockA101, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(A101): %v", err)
+	}
+	if got := mempool.Len(); got != 1 {
+		t.Fatalf("mempool len after A101=%d, want 1", got)
+	}
+
+	subsidyB101 := consensus.BlockSubsidy(101, alreadyGenerated)
+	blockB101 := buildMultiTxBlock(
+		t,
+		prevHash,
+		target,
+		203,
+		reorgTestCoinbaseForWtxids(t, 101, subsidyB101+50, destAddress, [][32]byte{{}, spendWtxid}),
+		spendTx,
+	)
+	if _, err := engine.ApplyBlockWithReorg(blockB101, nil); err != nil {
+		t.Fatalf("ApplyBlockWithReorg(B101): %v", err)
+	}
+	blockB101Hash, err := consensus.BlockHash(blockHeaderBytes(t, blockB101))
+	if err != nil {
+		t.Fatalf("BlockHash(B101): %v", err)
+	}
+
+	subsidyB102 := consensus.BlockSubsidy(102, alreadyGenerated+subsidyB101)
+	blockB102 := buildSingleTxBlock(t, blockB101Hash, target, 204, reorgTestCoinbaseForAddress(t, 102, subsidyB102, destAddress))
+
+	prevWrite := writeFileAtomicFn
+	t.Cleanup(func() { writeFileAtomicFn = prevWrite })
+	indexWrites := 0
+	writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
+		if path == store.indexPath {
+			indexWrites++
+			if indexWrites == 3 {
+				return os.ErrPermission
+			}
+		}
+		return prevWrite(path, data, mode)
+	}
+
+	if _, err := engine.ApplyBlockWithReorg(blockB102, nil); err == nil {
+		t.Fatalf("expected reorg persist failure")
+	}
+	if engine.chainState.Height != summaryA101.BlockHeight || engine.chainState.TipHash != summaryA101.BlockHash {
+		t.Fatalf("chainstate tip changed after rollback: height=%d hash=%x", engine.chainState.Height, engine.chainState.TipHash)
+	}
+	if got := mempool.Len(); got != 1 {
+		t.Fatalf("mempool len after rollback=%d, want 1", got)
+	}
+	if err := mempool.AddTx(spendTx); err == nil {
+		t.Fatalf("expected spend tx to remain in mempool after rollback")
 	}
 }
 
