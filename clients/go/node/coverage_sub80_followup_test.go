@@ -77,10 +77,10 @@ func TestCoverageResidual_SyncBranches(t *testing.T) {
 	if _, err := nilEngine.DisconnectTip(); err == nil {
 		t.Fatalf("expected nil DisconnectTip rejection")
 	}
-	if err := validateIncomingChainID(0, [32]byte{0x01}); err == nil {
+	if err := testValidateIncomingChainID(0, [32]byte{0x01}); err == nil {
 		t.Fatalf("expected genesis chain_id mismatch")
 	}
-	if got, err := blockStoreCanonicalCount(nil); err != nil || got != 0 {
+	if got, err := testBlockStoreCanonicalCount(nil); err != nil || got != 0 {
 		t.Fatalf("nil blockstore count=%d err=%v", got, err)
 	}
 

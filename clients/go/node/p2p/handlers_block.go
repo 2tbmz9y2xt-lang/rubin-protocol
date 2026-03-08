@@ -55,16 +55,13 @@ func (p *peer) handleBlock(blockBytes []byte) error {
 	}
 
 	p.service.chainMu.Lock()
-	summary, err := p.service.cfg.SyncEngine.ApplyBlock(blockBytes, nil)
+	summary, err := p.service.cfg.SyncEngine.ApplyBlockWithReorg(blockBytes, nil)
 	p.service.chainMu.Unlock()
 	if err != nil {
 		p.bumpBan(100, err.Error())
 		return err
 	}
-	p.service.cfg.SyncEngine.RecordBestKnownHeight(summary.BlockHeight)
-	if p.service.blockSeen.Add(blockHash) {
-		_ = p.service.broadcastInventory(p, []InventoryVector{{Type: MSG_BLOCK, Hash: blockHash}})
-	}
+	p.acceptedRelayedBlock(blockHash, summary.BlockHeight)
 	return p.service.requestBlocksIfBehind(p)
 }
 
@@ -78,4 +75,11 @@ func parseRelayedBlock(blockBytes []byte) (*consensus.ParsedBlock, [32]byte, err
 		return nil, [32]byte{}, err
 	}
 	return pb, blockHash, nil
+}
+
+func (p *peer) acceptedRelayedBlock(blockHash [32]byte, height uint64) {
+	p.service.cfg.SyncEngine.RecordBestKnownHeight(height)
+	if p.service.blockSeen.Add(blockHash) {
+		_ = p.service.broadcastInventory(p, []InventoryVector{{Type: MSG_BLOCK, Hash: blockHash}})
+	}
 }

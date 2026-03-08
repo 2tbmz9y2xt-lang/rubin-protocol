@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 
@@ -77,16 +78,20 @@ func OpenBlockStore(rootPath string) (*BlockStore, error) {
 }
 
 func (bs *BlockStore) PutBlock(height uint64, blockHash [32]byte, headerBytes []byte, blockBytes []byte) error {
+	if err := bs.StoreBlock(blockHash, headerBytes, blockBytes); err != nil {
+		return err
+	}
+	return bs.SetCanonicalTip(height, blockHash)
+}
+
+func (bs *BlockStore) StoreBlock(blockHash [32]byte, headerBytes []byte, blockBytes []byte) error {
 	if bs == nil {
 		return errors.New("nil blockstore")
 	}
 	if err := validateBlockHeaderHash(headerBytes, blockHash); err != nil {
 		return err
 	}
-	if err := bs.persistBlockBytes(blockHash, headerBytes, blockBytes); err != nil {
-		return err
-	}
-	return bs.SetCanonicalTip(height, blockHash)
+	return bs.persistBlockBytes(blockHash, headerBytes, blockBytes)
 }
 
 func (bs *BlockStore) SetCanonicalTip(height uint64, blockHash [32]byte) error {
@@ -97,10 +102,9 @@ func (bs *BlockStore) SetCanonicalTip(height uint64, blockHash [32]byte) error {
 	if err != nil {
 		return err
 	}
-	if !changed {
-		return saveBlockStoreIndex(bs.indexPath, bs.index)
+	if changed {
+		bs.index.Canonical = nextCanonical
 	}
-	bs.index.Canonical = nextCanonical
 	return saveBlockStoreIndex(bs.indexPath, bs.index)
 }
 
@@ -159,6 +163,32 @@ func (bs *BlockStore) Tip() (uint64, [32]byte, bool, error) {
 	return height, hash, true, nil
 }
 
+func (bs *BlockStore) CanonicalIndexSnapshot() ([]string, error) {
+	if bs == nil {
+		return nil, errors.New("nil blockstore")
+	}
+	for i, hashHex := range bs.index.Canonical {
+		if _, err := parseHex32(fmt.Sprintf("canonical[%d]", i), hashHex); err != nil {
+			return nil, err
+		}
+	}
+	return append([]string(nil), bs.index.Canonical...), nil
+}
+
+func (bs *BlockStore) RestoreCanonicalIndex(canonical []string) error {
+	if bs == nil {
+		return errors.New("nil blockstore")
+	}
+	nextCanonical := append([]string(nil), canonical...)
+	for i, hashHex := range nextCanonical {
+		if _, err := parseHex32(fmt.Sprintf("canonical[%d]", i), hashHex); err != nil {
+			return err
+		}
+	}
+	bs.index.Canonical = nextCanonical
+	return saveBlockStoreIndex(bs.indexPath, bs.index)
+}
+
 func (bs *BlockStore) GetBlockByHash(blockHash [32]byte) ([]byte, error) {
 	if bs == nil {
 		return nil, errors.New("nil blockstore")
@@ -171,6 +201,37 @@ func (bs *BlockStore) GetHeaderByHash(blockHash [32]byte) ([]byte, error) {
 		return nil, errors.New("nil blockstore")
 	}
 	return readFileFromDir(bs.headersDir, hex.EncodeToString(blockHash[:])+".bin")
+}
+
+func (bs *BlockStore) ChainWork(tipHash [32]byte) (*big.Int, error) {
+	if bs == nil {
+		return nil, errors.New("nil blockstore")
+	}
+	var zero [32]byte
+	if tipHash == zero {
+		return big.NewInt(0), nil
+	}
+
+	targets := make([][32]byte, 0, 16)
+	seen := make(map[[32]byte]struct{})
+	current := tipHash
+	for current != zero {
+		if _, exists := seen[current]; exists {
+			return nil, errors.New("blockstore parent cycle")
+		}
+		seen[current] = struct{}{}
+		headerBytes, err := bs.GetHeaderByHash(current)
+		if err != nil {
+			return nil, err
+		}
+		header, err := consensus.ParseBlockHeaderBytes(headerBytes)
+		if err != nil {
+			return nil, err
+		}
+		targets = append(targets, header.Target)
+		current = header.PrevBlockHash
+	}
+	return consensus.ChainWorkFromTargets(targets)
 }
 
 func (bs *BlockStore) PutUndo(blockHash [32]byte, undo *BlockUndo) error {

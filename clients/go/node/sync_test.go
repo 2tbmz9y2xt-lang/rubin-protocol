@@ -495,7 +495,7 @@ func TestSyncEngineApplyBlock_RollbackOnSaveFailure(t *testing.T) {
 }
 
 func TestRestoreChainState_NilDestination(t *testing.T) {
-	if err := restoreChainState(nil, chainStateDisk{}); err == nil {
+	if err := testRestoreChainState(nil, chainStateDisk{}); err == nil {
 		t.Fatalf("expected error")
 	}
 }
