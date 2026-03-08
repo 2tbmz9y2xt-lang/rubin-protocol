@@ -200,42 +200,6 @@ func TestRequestPeerAddrsNilAndConnectDiscoveredSkipsConnected(t *testing.T) {
 	}
 }
 
-func TestConnectDiscoveredAddrsUsesBudgetAndPendingDedupe(t *testing.T) {
-	h := newTestHarness(t, 1, "127.0.0.1:19025", nil)
-	h.service.cfg.PeerRuntimeConfig.MaxPeers = maxDiscoveredDialFanout
-	for i := 0; i < maxDiscoveredDialFanout-1; i++ {
-		addr := fmt.Sprintf("127.0.0.1:%d", 19100+i)
-		if !h.service.beginDial(addr) {
-			t.Fatalf("beginDial(%s) unexpectedly failed", addr)
-		}
-	}
-	addrA := "127.0.0.1:19201"
-	addrB := "127.0.0.1:19202"
-	addrC := "127.0.0.1:19203"
-	h.service.connectDiscoveredAddrs([]string{addrA, addrA, addrB, addrC})
-	if !h.service.isDialing(addrA) {
-		t.Fatalf("expected addrA to be scheduled")
-	}
-	if h.service.isDialing(addrB) || h.service.isDialing(addrC) {
-		t.Fatalf("expected per-message dial budget to cap discovered dials")
-	}
-}
-
-func TestReserveDiscoveredDialAppliesGlobalBudget(t *testing.T) {
-	h := newTestHarness(t, 1, "127.0.0.1:19027", nil)
-	h.service.cfg.PeerRuntimeConfig.MaxPeers = 2
-
-	if addr, ok := h.service.reserveDiscoveredDial("127.0.0.1:19211"); !ok || addr != "127.0.0.1:19211" {
-		t.Fatalf("first reserveDiscoveredDial=(%q,%v), want success", addr, ok)
-	}
-	if addr, ok := h.service.reserveDiscoveredDial("127.0.0.1:19212"); !ok || addr != "127.0.0.1:19212" {
-		t.Fatalf("second reserveDiscoveredDial=(%q,%v), want success", addr, ok)
-	}
-	if addr, ok := h.service.reserveDiscoveredDial("127.0.0.1:19213"); ok || addr != "" {
-		t.Fatalf("third reserveDiscoveredDial=(%q,%v), want budget rejection", addr, ok)
-	}
-}
-
 func TestAddrHandlerAndDiscoveryEdgeBranches(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:19031", nil)
 	p := newPeerRuntimeTestPeer(t)

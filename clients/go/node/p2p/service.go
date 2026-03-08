@@ -16,7 +16,6 @@ const (
 	defaultGetBlocksBatchLimit uint64 = 128
 	defaultLocatorLimit               = 32
 	defaultTxRelayFanout              = 8
-	maxDiscoveredDialFanout           = 8
 )
 
 type ServiceConfig struct {
@@ -51,8 +50,6 @@ type Service struct {
 	reconnectState map[string]*reconnectEntry
 	outboundAddrs  []string
 	addrMgr        *addrManager
-	dialingMu      sync.Mutex
-	dialing        map[string]struct{}
 
 	chainMu   sync.Mutex
 	blockSeen *boundedHashSet
@@ -121,7 +118,6 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		reconnectState: make(map[string]*reconnectEntry),
 		outboundAddrs:  outboundAddrs,
 		addrMgr:        addrMgr,
-		dialing:        make(map[string]struct{}),
 		blockSeen:      newBoundedHashSet(defaultBlockSeenCapacity),
 		txSeen:         newBoundedHashSet(defaultTxSeenCapacity),
 	}, nil

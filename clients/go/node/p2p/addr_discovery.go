@@ -25,16 +25,17 @@ func (s *Service) connectDiscoveredAddrs(addrs []string) {
 	if s == nil {
 		return
 	}
+	limit := s.cfg.PeerRuntimeConfig.MaxPeers
 	for _, addr := range normalizePeerAddrs(addrs) {
-		if !s.shouldDialDiscoveredAddr(addr) {
+		if s.isConnected(addr) {
 			continue
 		}
-		s.addrMgr.MarkAttempted(addr)
-		if !s.startDiscoveredDial(addr) {
-			if s.discoveredDialBudget() == 0 {
-				return
-			}
+		if s.connectedPeerCount() >= limit {
+			return
 		}
+		s.addrMgr.MarkAttempted(addr)
+		s.loopWG.Add(1)
+		go s.dialPeer(addr)
 	}
 }
 
@@ -49,63 +50,6 @@ func shouldAdvertiseAddr(addr string, self string, connected map[string]struct{}
 		return false
 	}
 	return true
-}
-
-func (s *Service) shouldDialDiscoveredAddr(addr string) bool {
-	if s == nil || addr == "" {
-		return false
-	}
-	return !s.isConnected(addr) && !s.isDialing(addr)
-}
-
-func (s *Service) discoveredDialBudget() int {
-	if s == nil {
-		return 0
-	}
-	available := s.cfg.PeerRuntimeConfig.MaxPeers - s.connectedPeerCount() - s.pendingDialCount()
-	if available <= 0 {
-		return 0
-	}
-	if available > maxDiscoveredDialFanout {
-		return maxDiscoveredDialFanout
-	}
-	return available
-}
-
-func (s *Service) startDiscoveredDial(addr string) bool {
-	addr, ok := s.reserveDiscoveredDial(addr)
-	if !ok {
-		return false
-	}
-	s.loopWG.Add(1)
-	go s.dialPeer(addr)
-	return true
-}
-
-func (s *Service) reserveDiscoveredDial(addr string) (string, bool) {
-	addr, ok := s.normalizedDialAddr(addr)
-	if !ok {
-		return "", false
-	}
-	s.peersMu.RLock()
-	_, connected := s.peers[addr]
-	connectedCount := len(s.peers)
-	s.peersMu.RUnlock()
-	if connected {
-		return "", false
-	}
-
-	s.dialingMu.Lock()
-	defer s.dialingMu.Unlock()
-	if _, exists := s.dialing[addr]; exists {
-		return "", false
-	}
-	available := s.cfg.PeerRuntimeConfig.MaxPeers - connectedCount - len(s.dialing)
-	if available <= 0 || len(s.dialing) >= maxDiscoveredDialFanout {
-		return "", false
-	}
-	s.dialing[addr] = struct{}{}
-	return addr, true
 }
 
 func (s *Service) connectedPeerCount() int {

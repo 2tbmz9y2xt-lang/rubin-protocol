@@ -165,7 +165,7 @@ func TestReconnectDuePeersSkipsConnectedAndNotDue(t *testing.T) {
 	}
 }
 
-func TestReconnectDuePeersUsesTrackedDialPath(t *testing.T) {
+func TestReconnectDuePeersDialsDuePeer(t *testing.T) {
 	restore := overrideReconnectTiming(50*time.Millisecond, 50*time.Millisecond, 200*time.Millisecond)
 	defer restore()
 
@@ -196,18 +196,7 @@ func TestReconnectDuePeersUsesTrackedDialPath(t *testing.T) {
 	currentTime = currentTime.Add(50 * time.Millisecond)
 
 	h.service.reconnectDuePeers()
-	waitFor(t, time.Second, func() bool {
-		return h.service.pendingDialCount() == 1
-	})
-	h.service.reconnectDuePeers()
-	if got := h.service.pendingDialCount(); got != 1 {
-		t.Fatalf("pendingDialCount=%d, want 1", got)
-	}
-
 	<-acceptedDone
-	waitFor(t, time.Second, func() bool {
-		return h.service.pendingDialCount() == 0
-	})
 	if got := accepted.Load(); got != 1 {
 		t.Fatalf("accepted=%d, want 1", got)
 	}

@@ -1,8 +1,6 @@
 package p2p
 
 import (
-	"bytes"
-	"crypto/sha3"
 	"net"
 	"sort"
 	"strconv"
@@ -26,20 +24,15 @@ type addrManager struct {
 	mu    sync.Mutex
 	addrs map[string]addrEntry
 	now   func() time.Time
-	salt  [32]byte
 }
 
 func newAddrManager(now func() time.Time) *addrManager {
 	if now == nil {
 		now = time.Now
 	}
-	var salt [32]byte
-	sum := sha3.Sum256([]byte(now().UTC().Format(time.RFC3339Nano)))
-	copy(salt[:], sum[:])
 	return &addrManager{
 		addrs: make(map[string]addrEntry),
 		now:   now,
-		salt:  salt,
 	}
 }
 
@@ -80,10 +73,8 @@ func (m *addrManager) GetAddrs(max int) []string {
 		entries = append(entries, entry)
 	}
 	sort.Slice(entries, func(i, j int) bool {
-		left := addrSelectionScore(m.salt, entries[i].addr)
-		right := addrSelectionScore(m.salt, entries[j].addr)
-		if cmp := bytes.Compare(left[:], right[:]); cmp != 0 {
-			return cmp < 0
+		if !entries[i].lastSeen.Equal(entries[j].lastSeen) {
+			return entries[i].lastSeen.After(entries[j].lastSeen)
 		}
 		return entries[i].addr < entries[j].addr
 	})
@@ -136,24 +127,15 @@ func (m *addrManager) evictLocked() {
 	}
 }
 
-func addrSelectionScore(salt [32]byte, addr string) [32]byte {
-	h := sha3.New256()
-	_, _ = h.Write(salt[:])
-	_, _ = h.Write([]byte(addr))
-	var out [32]byte
-	copy(out[:], h.Sum(nil))
-	return out
-}
-
 func normalizeNetAddr(raw string) string {
-	return normalizeEndpoint(raw, false)
+	return normalizeIPPort(raw, false)
 }
 
 func normalizeDialTarget(raw string) string {
-	return normalizeEndpoint(raw, true)
+	return normalizeIPPort(raw, true)
 }
 
-func normalizeEndpoint(raw string, allowHostname bool) string {
+func normalizeIPPort(raw string, allowHostname bool) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
@@ -167,14 +149,19 @@ func normalizeEndpoint(raw string, allowHostname bool) string {
 	if err != nil || port == 0 {
 		return ""
 	}
-	ip := net.ParseIP(host)
-	if ip != nil {
-		host = ip.String()
-	} else {
-		if !allowHostname || host == "" || strings.ContainsAny(host, " \t\r\n/") {
-			return ""
-		}
-		host = strings.ToLower(host)
+	host = normalizeEndpointHost(host, allowHostname)
+	if host == "" {
+		return ""
 	}
 	return net.JoinHostPort(host, strconv.FormatUint(port, 10))
+}
+
+func normalizeEndpointHost(host string, allowHostname bool) string {
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String()
+	}
+	if !allowHostname || host == "" || strings.ContainsAny(host, " \t\r\n/") {
+		return ""
+	}
+	return strings.ToLower(host)
 }
