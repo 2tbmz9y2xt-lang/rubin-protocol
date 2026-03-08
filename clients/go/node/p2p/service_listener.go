@@ -26,7 +26,9 @@ func (s *Service) Start(ctx context.Context) error {
 
 	s.loopWG.Add(1)
 	go s.acceptLoop()
-	for _, peerAddr := range s.cfg.BootstrapPeers {
+	s.loopWG.Add(1)
+	go s.reconnectLoop(s.ctx)
+	for _, peerAddr := range s.outboundAddrs {
 		peerAddr = strings.TrimSpace(peerAddr)
 		if peerAddr == "" {
 			continue
@@ -90,6 +92,9 @@ func (s *Service) acceptLoop() {
 func (s *Service) dialPeer(addr string) {
 	defer s.loopWG.Done()
 	defer s.finishDial(addr)
+	if s == nil {
+		return
+	}
 	ctx := s.ctx
 	if ctx == nil {
 		ctx = context.Background()
@@ -97,9 +102,12 @@ func (s *Service) dialPeer(addr string) {
 	dialer := &net.Dialer{Timeout: s.cfg.PeerRuntimeConfig.HandshakeTimeout}
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
+		s.recordDialFailure(addr)
 		return
 	}
-	s.handleConn(conn)
+	if err := s.handleConn(conn, addr); err != nil && s.ctx != nil && s.ctx.Err() == nil {
+		s.recordDialFailure(addr)
+	}
 }
 
 func (s *Service) startOutboundDial(addr string) bool {
