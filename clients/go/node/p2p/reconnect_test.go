@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -161,6 +162,54 @@ func TestReconnectDuePeersSkipsConnectedAndNotDue(t *testing.T) {
 	after := h.service.reconnectSnapshot("peer-b")
 	if after != before {
 		t.Fatalf("unexpected reconnect state mutation for not-due peer: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestReconnectDuePeersUsesTrackedDialPath(t *testing.T) {
+	restore := overrideReconnectTiming(50*time.Millisecond, 50*time.Millisecond, 200*time.Millisecond)
+	defer restore()
+
+	currentTime := time.Unix(1_777_000_275, 0)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	var accepted atomic.Int32
+	acceptedDone := make(chan struct{})
+	go func() {
+		defer close(acceptedDone)
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		accepted.Add(1)
+		defer conn.Close()
+		time.Sleep(150 * time.Millisecond)
+	}()
+
+	h := newTestHarness(t, 0, "127.0.0.1:0", []string{listener.Addr().String()})
+	h.service.cfg.Now = func() time.Time { return currentTime }
+	h.service.ctx = context.Background()
+	h.service.scheduleReconnect(listener.Addr().String())
+	currentTime = currentTime.Add(50 * time.Millisecond)
+
+	h.service.reconnectDuePeers()
+	waitFor(t, time.Second, func() bool {
+		return h.service.pendingDialCount() == 1
+	})
+	h.service.reconnectDuePeers()
+	if got := h.service.pendingDialCount(); got != 1 {
+		t.Fatalf("pendingDialCount=%d, want 1", got)
+	}
+
+	<-acceptedDone
+	waitFor(t, time.Second, func() bool {
+		return h.service.pendingDialCount() == 0
+	})
+	if got := accepted.Load(); got != 1 {
+		t.Fatalf("accepted=%d, want 1", got)
 	}
 }
 

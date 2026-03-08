@@ -138,11 +138,9 @@ func writeFrame(w io.Writer, magic [4]byte, frame message, maxMessageSize uint32
 }
 
 func encodeVersionPayload(v node.VersionPayloadV1) ([]byte, error) {
-	var buf bytes.Buffer
-	if err := encodeVersionPayloadTo(&buf, v); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	return encodePayload(func(w io.Writer) error {
+		return encodeVersionPayloadTo(w, v)
+	})
 }
 
 func encodeVersionPayloadTo(w io.Writer, v node.VersionPayloadV1) error {
@@ -328,8 +326,14 @@ func encodeGetBlocksPayload(req GetBlocksPayload) ([]byte, error) {
 	if len(req.LocatorHashes) > math.MaxUint16 {
 		return nil, fmt.Errorf("too many locator hashes: %d", len(req.LocatorHashes))
 	}
+	return encodePayload(func(w io.Writer) error {
+		return encodeGetBlocksPayloadTo(w, req)
+	})
+}
+
+func encodePayload(encode func(io.Writer) error) ([]byte, error) {
 	var buf bytes.Buffer
-	if err := encodeGetBlocksPayloadTo(&buf, req); err != nil {
+	if err := encode(&buf); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil

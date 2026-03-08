@@ -111,11 +111,8 @@ func (s *Service) dialPeer(addr string) {
 }
 
 func (s *Service) startOutboundDial(addr string) bool {
-	if s == nil {
-		return false
-	}
-	addr = normalizeDialTarget(addr)
-	if addr == "" || s.isConnected(addr) || !s.beginDial(addr) {
+	addr, ok := s.normalizedDialAddr(addr)
+	if !ok || s.isConnected(addr) || !s.beginDial(addr) {
 		return false
 	}
 	s.loopWG.Add(1)
@@ -124,28 +121,18 @@ func (s *Service) startOutboundDial(addr string) bool {
 }
 
 func (s *Service) beginDial(addr string) bool {
-	if s == nil {
-		return false
-	}
-	addr = normalizeDialTarget(addr)
-	if addr == "" {
-		return false
-	}
-	s.dialingMu.Lock()
-	defer s.dialingMu.Unlock()
-	if _, exists := s.dialing[addr]; exists {
-		return false
-	}
-	s.dialing[addr] = struct{}{}
-	return true
+	return s.withTrackedDialAddr(addr, func(addr string) bool {
+		if _, exists := s.dialing[addr]; exists {
+			return false
+		}
+		s.dialing[addr] = struct{}{}
+		return true
+	})
 }
 
 func (s *Service) finishDial(addr string) {
-	if s == nil {
-		return
-	}
-	addr = normalizeDialTarget(addr)
-	if addr == "" {
+	addr, ok := s.normalizedDialAddr(addr)
+	if !ok {
 		return
 	}
 	s.dialingMu.Lock()
@@ -154,17 +141,37 @@ func (s *Service) finishDial(addr string) {
 }
 
 func (s *Service) isDialing(addr string) bool {
+	return s.withTrackedDialAddr(addr, func(addr string) bool {
+		_, exists := s.dialing[addr]
+		return exists
+	})
+}
+
+func (s *Service) normalizedDialAddr(addr string) (string, bool) {
 	if s == nil {
-		return false
+		return "", false
 	}
 	addr = normalizeDialTarget(addr)
 	if addr == "" {
-		return false
+		return "", false
 	}
+	return addr, true
+}
+
+func (s *Service) withDialingState(addr string, fn func() bool) bool {
 	s.dialingMu.Lock()
 	defer s.dialingMu.Unlock()
-	_, exists := s.dialing[addr]
-	return exists
+	return fn()
+}
+
+func (s *Service) withTrackedDialAddr(addr string, fn func(string) bool) bool {
+	addr, ok := s.normalizedDialAddr(addr)
+	if !ok {
+		return false
+	}
+	return s.withDialingState(addr, func() bool {
+		return fn(addr)
+	})
 }
 
 func (s *Service) pendingDialCount() int {

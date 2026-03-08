@@ -44,9 +44,9 @@ func (s *Service) reconnectDuePeers() {
 		if !s.isReconnectDue(addr, now) {
 			continue
 		}
-		s.scheduleNextReconnectAttempt(addr, now)
-		s.loopWG.Add(1)
-		go s.dialPeer(addr)
+		if s.startOutboundDial(addr) {
+			s.scheduleNextReconnectAttempt(addr, now)
+		}
 	}
 }
 
@@ -113,20 +113,24 @@ func (s *Service) isReconnectDue(addr string, now time.Time) bool {
 }
 
 func (s *Service) reconnectSnapshot(addr string) reconnectEntry {
-	if s == nil {
-		return reconnectEntry{}
-	}
-	s.reconnectMu.Lock()
-	defer s.reconnectMu.Unlock()
-	addr = normalizeReconnectAddr(addr)
-	if addr == "" {
-		return reconnectEntry{}
-	}
-	entry := s.reconnectState[addr]
-	if entry == nil {
+	entry, ok := s.reconnectEntryFor(addr)
+	if !ok || entry == nil {
 		return reconnectEntry{}
 	}
 	return *entry
+}
+
+func (s *Service) reconnectEntryFor(addr string) (*reconnectEntry, bool) {
+	var entry *reconnectEntry
+	ok := s.withNormalizedReconnectAddr(addr, func(addr string) {
+		s.reconnectMu.Lock()
+		defer s.reconnectMu.Unlock()
+		entry = s.lookupReconnectEntry(addr)
+	})
+	if !ok {
+		return nil, false
+	}
+	return entry, entry != nil
 }
 
 func reconnectBackoff(failures int) time.Duration {
@@ -151,45 +155,61 @@ func reconnectBackoff(failures int) time.Duration {
 }
 
 func (s *Service) withReconnectEntry(addr string, fn func(*reconnectEntry)) bool {
-	if s == nil {
-		return false
-	}
-	addr = normalizeReconnectAddr(addr)
-	if addr == "" {
-		return false
-	}
-	s.reconnectMu.Lock()
-	defer s.reconnectMu.Unlock()
-	entry := s.reconnectState[addr]
-	if entry == nil {
-		entry = &reconnectEntry{}
-		s.reconnectState[addr] = entry
-	}
-	fn(entry)
-	return true
+	return s.withNormalizedReconnectAddr(addr, func(addr string) {
+		s.reconnectMu.Lock()
+		defer s.reconnectMu.Unlock()
+		entry := s.lookupReconnectEntry(addr)
+		if entry == nil {
+			entry = s.insertReconnectEntry(addr)
+		}
+		fn(entry)
+	})
 }
 
 func (s *Service) isConnected(addr string) bool {
-	if s == nil {
-		return false
-	}
-	addr = normalizeReconnectAddr(addr)
-	if addr == "" {
-		return false
-	}
-	s.peersMu.RLock()
-	defer s.peersMu.RUnlock()
-	_, ok := s.peers[addr]
-	return ok
+	connected := false
+	ok := s.withNormalizedReconnectAddr(addr, func(addr string) {
+		s.peersMu.RLock()
+		defer s.peersMu.RUnlock()
+		_, connected = s.peers[addr]
+	})
+	return ok && connected
 }
 
 func normalizeReconnectAddr(addr string) string {
-	addr = strings.TrimSpace(addr)
-	if addr == "" {
+	normalized, ok := normalizedReconnectAddr(addr)
+	if !ok {
 		return ""
 	}
-	if normalized := normalizeDialTarget(addr); normalized != "" {
-		return normalized
+	return normalized
+}
+
+func (s *Service) lookupReconnectEntry(addr string) *reconnectEntry {
+	return s.reconnectState[addr]
+}
+
+func (s *Service) insertReconnectEntry(addr string) *reconnectEntry {
+	entry := &reconnectEntry{}
+	s.reconnectState[addr] = entry
+	return entry
+}
+
+func (s *Service) withNormalizedReconnectAddr(addr string, fn func(string)) bool {
+	addr, ok := normalizedReconnectAddr(addr)
+	if !ok || s == nil {
+		return false
 	}
-	return addr
+	fn(addr)
+	return true
+}
+
+func normalizedReconnectAddr(addr string) (string, bool) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return "", false
+	}
+	if normalized := normalizeDialTarget(addr); normalized != "" {
+		return normalized, true
+	}
+	return addr, true
 }
