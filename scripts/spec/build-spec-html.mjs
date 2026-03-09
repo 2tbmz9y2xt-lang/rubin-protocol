@@ -9,6 +9,15 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { marked } from 'marked'
 
+function escapeHtml(value) {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('\"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
+
 const repoRoot = process.cwd()
 const srcDir = path.join(repoRoot, 'spec')
 const outDir = path.join(repoRoot, 'analysis', 'spec', 'html')
@@ -29,6 +38,12 @@ if (files.length === 0) {
 }
 
 fs.mkdirSync(outDir, { recursive: true })
+
+const renderer = new marked.Renderer()
+renderer.html = (token) => {
+  const rawHtml = typeof token === 'string' ? token : token.text
+  return escapeHtml(rawHtml)
+}
 
 function render(title, body) {
   return `<!DOCTYPE html>
@@ -58,7 +73,7 @@ const generated = []
 for (const file of files) {
   const src = path.join(srcDir, file)
   const md = fs.readFileSync(src, 'utf8')
-  const htmlBody = marked.parse(md)
+  const htmlBody = marked.parse(md, { renderer })
   const name = file.replace(/\.md$/, '')
   const dst = path.join(outDir, `${name}.html`)
   fs.writeFileSync(dst, render(name, htmlBody), 'utf8')
