@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use rubin_consensus::constants::POW_LIMIT;
-use rubin_consensus::{block_hash, parse_block_bytes};
+use rubin_consensus::{block_hash, parse_block_bytes, parse_block_header_bytes};
 
 use crate::blockstore::BlockStore;
 use crate::chainstate::{ChainState, ChainStateConnectSummary};
@@ -167,6 +167,12 @@ impl SyncEngine {
     ) -> Result<ChainStateConnectSummary, String> {
         let parsed = parse_block_bytes(block_bytes).map_err(|e| e.to_string())?;
         let block_hash_bytes = block_hash(&parsed.header_bytes).map_err(|e| e.to_string())?;
+        let derived_prev_timestamps = if prev_timestamps.is_none() {
+            self.prev_timestamps_for_next_block()?
+        } else {
+            None
+        };
+        let prev_timestamps = prev_timestamps.or(derived_prev_timestamps.as_deref());
 
         let snapshot = self.chain_state.clone();
         let old_tip_timestamp = self.tip_timestamp;
@@ -208,6 +214,33 @@ impl SyncEngine {
         }
 
         Ok(summary)
+    }
+
+    pub fn prev_timestamps_for_next_block(&self) -> Result<Option<Vec<u64>>, String> {
+        if !self.chain_state.has_tip {
+            return Ok(None);
+        }
+        if self.chain_state.height == u64::MAX {
+            return Err("height overflow".to_string());
+        }
+
+        let Some(block_store) = self.block_store.as_ref() else {
+            return Err("sync engine missing blockstore for timestamp context".to_string());
+        };
+
+        let next_height = self.chain_state.height + 1;
+        let window_len = next_height.min(11);
+        let mut out = Vec::with_capacity(window_len as usize);
+        for offset in 0..window_len {
+            let height = next_height - 1 - offset;
+            let Some(hash) = block_store.canonical_hash(height)? else {
+                return Err("missing canonical header for timestamp context".to_string());
+            };
+            let header_bytes = block_store.get_header_by_hash(hash)?;
+            let header = parse_block_header_bytes(&header_bytes).map_err(|e| e.to_string())?;
+            out.push(header.timestamp);
+        }
+        Ok(Some(out))
     }
 }
 

@@ -382,8 +382,11 @@ impl PeerSession {
         {
             return Ok(());
         }
+        let prev_timestamps = sync_engine
+            .prev_timestamps_for_next_block()
+            .map_err(io::Error::other)?;
         sync_engine
-            .apply_block(block_bytes, None)
+            .apply_block(block_bytes, prev_timestamps.as_deref())
             .map_err(io::Error::other)?;
         Ok(())
     }
@@ -1056,7 +1059,7 @@ fn network_magic(network: &str) -> [u8; 4] {
 mod tests {
     use std::fs;
     use std::io::Read;
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
@@ -1065,8 +1068,14 @@ mod tests {
     use super::*;
     use crate::blockstore::BlockStore;
     use crate::chainstate::ChainState;
+    use crate::coinbase::{build_coinbase_tx, default_mine_address};
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
-    use rubin_consensus::block_hash;
+    use rubin_consensus::constants::{MAX_FUTURE_DRIFT, POW_LIMIT};
+    use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
+    use rubin_consensus::{
+        block_hash, encode_compact_size, merkle_root_txids, parse_block_bytes, parse_tx,
+        BLOCK_HEADER_BYTES,
+    };
     use serde::Deserialize;
 
     static NEXT_TEST_ROOT_ID: AtomicU64 = AtomicU64::new(1);
@@ -1180,6 +1189,41 @@ mod tests {
             .apply_block(&devnet_genesis_block_bytes(), None)
             .expect("apply genesis");
         engine
+    }
+
+    fn build_block_bytes(
+        prev_hash: [u8; 32],
+        merkle_root: [u8; 32],
+        target: [u8; 32],
+        timestamp: u64,
+        txs: &[Vec<u8>],
+    ) -> Vec<u8> {
+        let mut header = Vec::with_capacity(BLOCK_HEADER_BYTES);
+        header.extend_from_slice(&1u32.to_le_bytes());
+        header.extend_from_slice(&prev_hash);
+        header.extend_from_slice(&merkle_root);
+        header.extend_from_slice(&timestamp.to_le_bytes());
+        header.extend_from_slice(&target);
+        header.extend_from_slice(&0u64.to_le_bytes());
+        assert_eq!(header.len(), BLOCK_HEADER_BYTES);
+
+        let mut block = header;
+        encode_compact_size(txs.len() as u64, &mut block);
+        for tx in txs {
+            block.extend_from_slice(tx);
+        }
+        block
+    }
+
+    fn height_one_coinbase_only_block(prev_hash: [u8; 32], timestamp: u64) -> Vec<u8> {
+        let witness_root = witness_merkle_root_wtxids(&[[0u8; 32]]).expect("witness root");
+        let witness_commitment = witness_commitment_hash(witness_root);
+        let coinbase =
+            build_coinbase_tx(1, 0, &default_mine_address(), witness_commitment).expect("coinbase");
+        let (_, coinbase_txid, _, consumed) = parse_tx(&coinbase).expect("parse coinbase");
+        assert_eq!(consumed, coinbase.len());
+        let merkle_root = merkle_root_txids(&[coinbase_txid]).expect("merkle root");
+        build_block_bytes(prev_hash, merkle_root, POW_LIMIT, timestamp, &[coinbase])
     }
 
     #[test]
@@ -1498,6 +1542,39 @@ mod tests {
             session
                 .handle_block(&devnet_genesis_block_bytes(), &mut engine)
                 .expect("duplicate block should be ignored");
+        });
+
+        let _client = TcpStream::connect(addr).expect("connect");
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn handle_block_rejects_future_timestamp_during_sync() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut session = PeerSession::new(stream, default_peer_runtime_config("devnet", 8))
+                .expect("session");
+            let mut engine = test_sync_engine_with_genesis();
+            let genesis = parse_block_bytes(&devnet_genesis_block_bytes()).expect("parse genesis");
+            let genesis_hash = block_hash(&genesis.header_bytes).expect("genesis hash");
+            let block = height_one_coinbase_only_block(
+                genesis_hash,
+                genesis
+                    .header
+                    .timestamp
+                    .saturating_add(MAX_FUTURE_DRIFT + 1),
+            );
+            let err = session
+                .handle_block(&block, &mut engine)
+                .expect_err("future timestamp must be rejected");
+            assert_eq!(err.kind(), io::ErrorKind::Other);
+            assert!(
+                err.to_string().contains("BLOCK_ERR_TIMESTAMP_FUTURE"),
+                "unexpected error: {err}"
+            );
         });
 
         let _client = TcpStream::connect(addr).expect("connect");
