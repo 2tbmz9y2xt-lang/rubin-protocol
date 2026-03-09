@@ -2,16 +2,15 @@ use num_bigint::BigUint;
 use num_traits::Zero;
 use rubin_consensus::merkle::witness_merkle_root_wtxids;
 use rubin_consensus::{
-    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles,
-    apply_non_coinbase_tx_basic_with_mtp, block_hash, compact_shortid,
-    connect_block_basic_in_memory_at_height, featurebit_state_at_height_from_window_counts,
+    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles, block_hash, compact_shortid,
+    connect_block_basic_in_memory_at_height_and_core_ext_deployments,
+    core_ext_verification_binding_from_name, featurebit_state_at_height_from_window_counts,
     flagday_active_at_height, fork_work_from_target, merkle_root_txids, parse_tx, pow_check,
     retarget_v1, retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_public,
     validate_block_basic_with_context_and_fees_at_height,
     validate_block_basic_with_context_at_height, validate_tx_covenants_genesis,
-    CoreExtActiveProfile, CoreExtProfiles, CoreExtVerificationBinding, ErrorCode,
-    FeatureBitDeployment, FeatureBitState, FlagDayDeployment, InMemoryChainState, Outpoint,
-    UtxoEntry,
+    CoreExtDeploymentProfile, CoreExtDeploymentProfiles, ErrorCode, FeatureBitDeployment,
+    FeatureBitState, FlagDayDeployment, InMemoryChainState, Outpoint, UtxoEntry,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -406,7 +405,7 @@ struct CoreExtProfileJson {
     #[serde(default)]
     ext_id: u16,
     #[serde(default)]
-    active: bool,
+    activation_height: u64,
     #[serde(default)]
     allowed_suite_ids: Vec<u8>,
     #[serde(default)]
@@ -721,34 +720,27 @@ fn value_as_string(v: &Value, def: &str) -> String {
         .unwrap_or_else(|| def.to_string())
 }
 
-fn core_ext_profiles_from_json(items: &[CoreExtProfileJson]) -> Result<CoreExtProfiles, String> {
-    let mut profiles = CoreExtProfiles::empty();
-    let mut active_ids = HashSet::new();
+fn core_ext_profiles_from_json(
+    items: &[CoreExtProfileJson],
+) -> Result<CoreExtDeploymentProfiles, String> {
+    let mut deployments = Vec::with_capacity(items.len());
+    let mut ext_ids = HashSet::new();
     for item in items {
-        if !item.active {
-            continue;
-        }
-        if !active_ids.insert(item.ext_id) {
+        if !ext_ids.insert(item.ext_id) {
             return Err(format!(
-                "duplicate active core_ext profile for ext_id={}",
+                "duplicate core_ext deployment for ext_id={}",
                 item.ext_id
             ));
         }
-        let binding_name = item.binding.trim();
-        let binding = match binding_name {
-            "" | "native_verify_sig" => CoreExtVerificationBinding::NativeVerifySig,
-            "verify_sig_ext_accept" => CoreExtVerificationBinding::VerifySigExtAccept,
-            "verify_sig_ext_reject" => CoreExtVerificationBinding::VerifySigExtReject,
-            "verify_sig_ext_error" => CoreExtVerificationBinding::VerifySigExtError,
-            _ => return Err(format!("unsupported core_ext binding: {}", item.binding)),
-        };
-        profiles.active.push(CoreExtActiveProfile {
+        let binding = core_ext_verification_binding_from_name(&item.binding)?;
+        deployments.push(CoreExtDeploymentProfile {
             ext_id: item.ext_id,
+            activation_height: item.activation_height,
             allowed_suite_ids: item.allowed_suite_ids.clone(),
             verification_binding: binding,
         });
     }
-    Ok(profiles)
+    Ok(CoreExtDeploymentProfiles { deployments })
 }
 
 fn op_featurebits_state(req: &Request) -> Response {
@@ -2060,7 +2052,20 @@ fn main() {
                 chain_id.copy_from_slice(&b);
             }
 
-            match connect_block_basic_in_memory_at_height(
+            let core_ext_deployments = match core_ext_profiles_from_json(&req.core_ext_profiles) {
+                Ok(v) => v,
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(e),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+
+            match connect_block_basic_in_memory_at_height_and_core_ext_deployments(
                 &block_bytes,
                 expected_prev,
                 expected_target,
@@ -2068,14 +2073,39 @@ fn main() {
                 prev_timestamps,
                 &mut state,
                 chain_id,
+                &core_ext_deployments,
             ) {
                 Ok(summary) => {
+                    let already_generated = match u64::try_from(summary.already_generated) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            let resp = Response {
+                                ok: false,
+                                err: Some("already_generated_overflow".to_string()),
+                                ..Default::default()
+                            };
+                            let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                            return;
+                        }
+                    };
+                    let already_generated_n1 = match u64::try_from(summary.already_generated_n1) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            let resp = Response {
+                                ok: false,
+                                err: Some("already_generated_overflow".to_string()),
+                                ..Default::default()
+                            };
+                            let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                            return;
+                        }
+                    };
                     let resp = Response {
                         ok: true,
                         sum_fees: Some(summary.sum_fees),
                         utxo_count: Some(summary.utxo_count),
-                        already_generated: Some(summary.already_generated as u64),
-                        already_generated_n1: Some(summary.already_generated_n1 as u64),
+                        already_generated: Some(already_generated),
+                        already_generated_n1: Some(already_generated_n1),
                         ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
@@ -2325,7 +2355,7 @@ fn main() {
                 }
                 chain_id.copy_from_slice(&b);
             }
-            let core_ext_profiles = match core_ext_profiles_from_json(&req.core_ext_profiles) {
+            let core_ext_deployments = match core_ext_profiles_from_json(&req.core_ext_profiles) {
                 Ok(v) => v,
                 Err(e) => {
                     let resp = Response {
@@ -2337,30 +2367,30 @@ fn main() {
                     return;
                 }
             };
-
-            let apply_result = if core_ext_profiles.active.is_empty() {
-                apply_non_coinbase_tx_basic_with_mtp(
-                    &tx,
-                    txid,
-                    &utxo_set,
-                    req.height,
-                    req.block_timestamp,
-                    block_mtp,
-                    chain_id,
-                )
-                .map(|summary| (utxo_set.clone(), summary))
-            } else {
-                apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
-                    &tx,
-                    txid,
-                    &utxo_set,
-                    req.height,
-                    req.block_timestamp,
-                    block_mtp,
-                    chain_id,
-                    &core_ext_profiles,
-                )
+            let core_ext_profiles = match core_ext_deployments.active_profiles_at_height(req.height)
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(err_code(e.code)),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
             };
+
+            let apply_result = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
+                &tx,
+                txid,
+                &utxo_set,
+                req.height,
+                req.block_timestamp,
+                block_mtp,
+                chain_id,
+                &core_ext_profiles,
+            );
 
             match apply_result {
                 Ok((_next_utxos, summary)) => {
@@ -3838,42 +3868,42 @@ mod tests {
     }
 
     #[test]
-    fn core_ext_profiles_duplicate_active_rejected() {
+    fn core_ext_profiles_duplicate_rejected() {
         let err = core_ext_profiles_from_json(&[
             CoreExtProfileJson {
                 ext_id: 7,
-                active: true,
+                activation_height: 0,
                 allowed_suite_ids: vec![3],
                 binding: "verify_sig_ext_accept".to_string(),
             },
             CoreExtProfileJson {
                 ext_id: 7,
-                active: true,
+                activation_height: 10,
                 allowed_suite_ids: vec![3],
                 binding: "verify_sig_ext_reject".to_string(),
             },
         ])
         .unwrap_err();
-        assert!(err.contains("duplicate active core_ext profile"));
+        assert!(err.contains("duplicate core_ext deployment"));
     }
 
     #[test]
-    fn core_ext_profiles_duplicate_inactive_ignored() {
-        let profiles = core_ext_profiles_from_json(&[
-            CoreExtProfileJson {
-                ext_id: 9,
-                active: false,
-                allowed_suite_ids: vec![3],
-                binding: "verify_sig_ext_accept".to_string(),
-            },
-            CoreExtProfileJson {
-                ext_id: 9,
-                active: false,
-                allowed_suite_ids: vec![3],
-                binding: "verify_sig_ext_reject".to_string(),
-            },
-        ])
+    fn core_ext_profiles_height_gate() {
+        let profiles = core_ext_profiles_from_json(&[CoreExtProfileJson {
+            ext_id: 9,
+            activation_height: 42,
+            allowed_suite_ids: vec![3],
+            binding: "verify_sig_ext_accept".to_string(),
+        }])
         .unwrap();
-        assert!(profiles.active.is_empty());
+        assert!(profiles
+            .active_profiles_at_height(41)
+            .unwrap()
+            .active
+            .is_empty());
+        assert_eq!(
+            profiles.active_profiles_at_height(42).unwrap().active.len(),
+            1
+        );
     }
 }

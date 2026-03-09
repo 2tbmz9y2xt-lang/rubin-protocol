@@ -178,3 +178,52 @@ func TestBoundedHashSet_CapacityOne(t *testing.T) {
 		t.Fatalf("expected Len=1 after eviction, got %d", s.Len())
 	}
 }
+
+func TestBoundedHashSet_RemoveExistingAndNonExistent(t *testing.T) {
+	s := newBoundedHashSet(10)
+	var h1, h2 [32]byte
+	h1[0] = 0x01
+	h2[0] = 0x02
+
+	s.Add(h1)
+
+	// Remove existing entry.
+	if !s.Remove(h1) {
+		t.Fatal("Remove existing hash must return true")
+	}
+	if s.Has(h1) {
+		t.Fatal("removed hash must not be present")
+	}
+	// Remove non-existent entry.
+	if s.Remove(h2) {
+		t.Fatal("Remove non-existent hash must return false")
+	}
+	if s.Len() != 0 {
+		t.Fatalf("Len()=%d, want 0", s.Len())
+	}
+}
+
+func TestBoundedHashSet_RemoveDoesNotAllowOverflow(t *testing.T) {
+	const cap = 3
+	s := newBoundedHashSet(cap)
+
+	var a, b, c, d, e [32]byte
+	a[0] = 0x01
+	b[0] = 0x02
+	c[0] = 0x03
+	d[0] = 0x04
+	e[0] = 0x05
+
+	if !s.Add(a) || !s.Add(b) || !s.Add(c) {
+		t.Fatal("initial adds should succeed")
+	}
+	if !s.Remove(a) {
+		t.Fatal("remove should succeed")
+	}
+	if !s.Add(d) || !s.Add(e) {
+		t.Fatal("adds after remove should succeed")
+	}
+	if s.Len() != cap {
+		t.Fatalf("Len should remain bounded at %d, got %d", cap, s.Len())
+	}
+}

@@ -4,8 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use rubin_consensus::{
-    block_hash, connect_block_basic_in_memory_at_height, encode_compact_size, parse_block_bytes,
-    ConnectBlockBasicSummary, InMemoryChainState, Outpoint, UtxoEntry,
+    block_hash, connect_block_basic_in_memory_at_height_and_core_ext_deployments,
+    encode_compact_size, parse_block_bytes, ConnectBlockBasicSummary, CoreExtDeploymentProfiles,
+    InMemoryChainState, Outpoint, UtxoEntry,
 };
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
@@ -89,6 +90,23 @@ impl ChainState {
         prev_timestamps: Option<&[u64]>,
         chain_id: [u8; 32],
     ) -> Result<ChainStateConnectSummary, String> {
+        self.connect_block_with_core_ext_deployments(
+            block_bytes,
+            expected_target,
+            prev_timestamps,
+            chain_id,
+            &CoreExtDeploymentProfiles::empty(),
+        )
+    }
+
+    pub fn connect_block_with_core_ext_deployments(
+        &mut self,
+        block_bytes: &[u8],
+        expected_target: Option<[u8; 32]>,
+        prev_timestamps: Option<&[u64]>,
+        chain_id: [u8; 32],
+        core_ext_deployments: &CoreExtDeploymentProfiles,
+    ) -> Result<ChainStateConnectSummary, String> {
         let (block_height, expected_prev_hash) = self.next_block_context()?;
         validate_incoming_chain_id(block_height, chain_id)?;
         let mut work_state = InMemoryChainState {
@@ -96,16 +114,18 @@ impl ChainState {
             already_generated: u128::from(self.already_generated),
         };
 
-        let connect_summary: ConnectBlockBasicSummary = connect_block_basic_in_memory_at_height(
-            block_bytes,
-            expected_prev_hash,
-            expected_target,
-            block_height,
-            prev_timestamps,
-            &mut work_state,
-            chain_id,
-        )
-        .map_err(|e| e.to_string())?;
+        let connect_summary: ConnectBlockBasicSummary =
+            connect_block_basic_in_memory_at_height_and_core_ext_deployments(
+                block_bytes,
+                expected_prev_hash,
+                expected_target,
+                block_height,
+                prev_timestamps,
+                &mut work_state,
+                chain_id,
+                core_ext_deployments,
+            )
+            .map_err(|e| e.to_string())?;
 
         let parsed = parse_block_bytes(block_bytes).map_err(|e| e.to_string())?;
         let tip_hash = block_hash(&parsed.header_bytes).map_err(|e| e.to_string())?;

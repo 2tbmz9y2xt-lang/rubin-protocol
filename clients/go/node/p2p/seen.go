@@ -51,7 +51,15 @@ func (s *boundedHashSet) Add(hash [32]byte) bool {
 	}
 	// Evict the oldest entry when the set is full.
 	if len(s.items) >= s.cap {
-		delete(s.items, s.ring[s.next])
+		for i := 0; i < s.cap; i++ {
+			idx := (s.next + i) % s.cap
+			if _, exists := s.items[s.ring[idx]]; !exists {
+				continue
+			}
+			delete(s.items, s.ring[idx])
+			s.next = idx
+			break
+		}
 	}
 	s.ring[s.next] = hash
 	s.items[hash] = struct{}{}
@@ -65,6 +73,17 @@ func (s *boundedHashSet) Has(hash [32]byte) bool {
 	defer s.mu.RUnlock()
 	_, exists := s.items[hash]
 	return exists
+}
+
+// Remove deletes hash from the set. Returns true if an entry was removed.
+func (s *boundedHashSet) Remove(hash [32]byte) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.items[hash]; !exists {
+		return false
+	}
+	delete(s.items, hash)
+	return true
 }
 
 // Len returns the current number of entries in the set.

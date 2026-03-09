@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
 )
 
@@ -15,6 +16,53 @@ type CoreExtProfile struct {
 
 type CoreExtProfileProvider interface {
 	LookupCoreExtProfile(extID uint16, height uint64) (CoreExtProfile, bool, error)
+}
+
+type CoreExtDeploymentProfile struct {
+	ExtID            uint16
+	ActivationHeight uint64
+	AllowedSuites    map[uint8]struct{}
+	VerifySigExtFn   CoreExtVerifySigExtFunc
+}
+
+type StaticCoreExtProfileProvider struct {
+	deployments map[uint16]CoreExtDeploymentProfile
+}
+
+func NewStaticCoreExtProfileProvider(deployments []CoreExtDeploymentProfile) (*StaticCoreExtProfileProvider, error) {
+	if len(deployments) == 0 {
+		return nil, nil
+	}
+	provider := &StaticCoreExtProfileProvider{
+		deployments: make(map[uint16]CoreExtDeploymentProfile, len(deployments)),
+	}
+	for _, item := range deployments {
+		if _, exists := provider.deployments[item.ExtID]; exists {
+			return nil, fmt.Errorf("duplicate core_ext deployment for ext_id=%d", item.ExtID)
+		}
+		provider.deployments[item.ExtID] = CoreExtDeploymentProfile{
+			ExtID:            item.ExtID,
+			ActivationHeight: item.ActivationHeight,
+			AllowedSuites:    cloneAllowedSuites(item.AllowedSuites),
+			VerifySigExtFn:   item.VerifySigExtFn,
+		}
+	}
+	return provider, nil
+}
+
+func (p *StaticCoreExtProfileProvider) LookupCoreExtProfile(extID uint16, height uint64) (CoreExtProfile, bool, error) {
+	if p == nil {
+		return CoreExtProfile{}, false, nil
+	}
+	deployment, ok := p.deployments[extID]
+	if !ok || height < deployment.ActivationHeight {
+		return CoreExtProfile{}, false, nil
+	}
+	return CoreExtProfile{
+		Active:         true,
+		AllowedSuites:  cloneAllowedSuites(deployment.AllowedSuites),
+		VerifySigExtFn: deployment.VerifySigExtFn,
+	}, true, nil
 }
 
 type CoreExtCovenantData struct {
@@ -68,4 +116,15 @@ func hasSuite(allowed map[uint8]struct{}, suiteID uint8) bool {
 	}
 	_, ok := allowed[suiteID]
 	return ok
+}
+
+func cloneAllowedSuites(allowed map[uint8]struct{}) map[uint8]struct{} {
+	if len(allowed) == 0 {
+		return nil
+	}
+	out := make(map[uint8]struct{}, len(allowed))
+	for suiteID := range allowed {
+		out[suiteID] = struct{}{}
+	}
+	return out
 }

@@ -43,7 +43,7 @@ func TestMinerPolicyFiltersCoreExtOutputCreation(t *testing.T) {
 	var prev [32]byte
 	prev[0] = 0x11
 	txBytes := mustMarshalTxForNodeTest(t, &consensus.Tx{
-		Version:   0,
+		Version:   1,
 		TxKind:    0x00,
 		TxNonce:   1,
 		Inputs:    []consensus.TxInput{{PrevTxid: prev, PrevVout: 0, Sequence: 0}},
@@ -87,7 +87,7 @@ func TestMinerPolicyFiltersCoreExtSpend(t *testing.T) {
 	p2pkCD[0] = consensus.SUITE_ID_ML_DSA_87
 
 	txBytes := mustMarshalTxForNodeTest(t, &consensus.Tx{
-		Version:   0,
+		Version:   1,
 		TxKind:    0x00,
 		TxNonce:   1,
 		Inputs:    []consensus.TxInput{{PrevTxid: prev, PrevVout: 0, Sequence: 0}},
@@ -151,5 +151,50 @@ func TestMinerPolicyFiltersCoreExtSpend(t *testing.T) {
 	}
 	if mb2.TxCount != 1 {
 		t.Fatalf("tx_count=%d, want 1 (coinbase only; CORE_EXT spend must be filtered)", mb2.TxCount)
+	}
+}
+
+func TestMinerPolicySkipsMalformedCoreExtOutput(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := ChainStatePath(dir)
+
+	chainState := NewChainState()
+	if err := chainState.Save(chainStatePath); err != nil {
+		t.Fatalf("save chainstate: %v", err)
+	}
+	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("open blockstore: %v", err)
+	}
+	syncEngine, err := NewSyncEngine(chainState, blockStore, DefaultSyncConfig(nil, [32]byte{}, chainStatePath))
+	if err != nil {
+		t.Fatalf("new sync engine: %v", err)
+	}
+
+	var prev [32]byte
+	prev[0] = 0x33
+	txBytes := mustMarshalTxForNodeTest(t, &consensus.Tx{
+		Version:  1,
+		TxKind:   0x00,
+		TxNonce:  1,
+		Inputs:   []consensus.TxInput{{PrevTxid: prev, PrevVout: 0, Sequence: 0}},
+		Outputs:  []consensus.TxOutput{{Value: 1, CovenantType: consensus.COV_TYPE_CORE_EXT, CovenantData: []byte{0x01}}},
+		Locktime: 0,
+	})
+
+	cfg := DefaultMinerConfig()
+	cfg.TimestampSource = func() uint64 { return 1_777_000_000 }
+	cfg.PolicyRejectCoreExtPreActivation = true
+	miner, err := NewMiner(chainState, blockStore, syncEngine, cfg)
+	if err != nil {
+		t.Fatalf("new miner: %v", err)
+	}
+
+	mb, err := miner.MineOne(context.Background(), [][]byte{txBytes})
+	if err != nil {
+		t.Fatalf("mine one: %v", err)
+	}
+	if mb.TxCount != 1 {
+		t.Fatalf("tx_count=%d, want 1 (coinbase only; malformed CORE_EXT tx must be skipped)", mb.TxCount)
 	}
 }

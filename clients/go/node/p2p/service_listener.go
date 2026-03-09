@@ -33,8 +33,7 @@ func (s *Service) Start(ctx context.Context) error {
 		if peerAddr == "" {
 			continue
 		}
-		s.loopWG.Add(1)
-		go s.dialPeer(peerAddr)
+		s.startDialPeer(peerAddr)
 	}
 	return nil
 }
@@ -96,6 +95,7 @@ func (s *Service) acceptLoop() {
 
 func (s *Service) dialPeer(addr string) {
 	defer s.loopWG.Done()
+	defer s.finishDialPeer(addr)
 	if s == nil {
 		return
 	}
@@ -114,6 +114,59 @@ func (s *Service) dialPeer(addr string) {
 	if err := s.handleConn(conn, addr); err != nil && s.ctx != nil && s.ctx.Err() == nil {
 		s.recordDialFailure(addr)
 	}
+}
+
+func (s *Service) startDialPeer(addr string) bool {
+	if !s.trackDialPeer(addr) {
+		return false
+	}
+	s.loopWG.Add(1)
+	go s.dialPeer(addr)
+	return true
+}
+
+func (s *Service) trackDialPeer(addr string) bool {
+	return s.trackDial(addr, 0)
+}
+
+func (s *Service) tryTrackDiscoveredDial(addr string, limit int) bool {
+	return s.trackDial(addr, limit)
+}
+
+// trackDial is the shared implementation for trackDialPeer and
+// tryTrackDiscoveredDial.  When limit > 0 the total of connected peers
+// plus in-flight dials is checked against limit before allowing the dial.
+func (s *Service) trackDial(addr string, limit int) bool {
+	if s == nil {
+		return false
+	}
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return false
+	}
+	s.dialMu.Lock()
+	defer s.dialMu.Unlock()
+	if _, exists := s.inFlightDial[addr]; exists {
+		return false
+	}
+	if limit > 0 && s.connectedPeerCount()+len(s.inFlightDial) >= limit {
+		return false
+	}
+	s.inFlightDial[addr] = struct{}{}
+	return true
+}
+
+func (s *Service) finishDialPeer(addr string) {
+	if s == nil {
+		return
+	}
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return
+	}
+	s.dialMu.Lock()
+	delete(s.inFlightDial, addr)
+	s.dialMu.Unlock()
 }
 
 func (s *Service) tryAcquireHandshakeSlot() bool {
