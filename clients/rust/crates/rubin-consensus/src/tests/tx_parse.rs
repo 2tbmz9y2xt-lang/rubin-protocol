@@ -1,6 +1,5 @@
 use super::*;
 
-
 #[test]
 fn parse_tx_rejects_unsupported_version() {
     let mut tx = minimal_tx_bytes();
