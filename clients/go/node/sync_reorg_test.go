@@ -180,12 +180,12 @@ func TestApplyBlockWithReorgRejectsInvalidNonHeavierSideBranch(t *testing.T) {
 	}
 
 	blockB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, 3, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
-	blockB1Hash, err := consensus.BlockHash(blockHeaderBytes(t, blockB1))
-	if err != nil {
-		t.Fatalf("BlockHash(B1): %v", err)
-	}
 	invalidB1 := append([]byte(nil), blockB1...)
-	invalidB1[len(invalidB1)-1] ^= 0x01
+	invalidB1[4+32] ^= 0x01 // flip a merkle-root byte while keeping the block parseable
+	invalidB1Hash, err := consensus.BlockHash(blockHeaderBytes(t, invalidB1))
+	if err != nil {
+		t.Fatalf("BlockHash(invalid B1): %v", err)
+	}
 	if _, err := engine.ApplyBlockWithReorg(invalidB1, nil); err == nil {
 		t.Fatalf("expected invalid competing branch rejection")
 	}
@@ -193,8 +193,8 @@ func TestApplyBlockWithReorgRejectsInvalidNonHeavierSideBranch(t *testing.T) {
 	if engine.chainState.Height != 1 || engine.chainState.TipHash != summaryA1.BlockHash {
 		t.Fatalf("canonical tip changed after invalid competing branch")
 	}
-	if _, err := store.GetBlockByHash(blockB1Hash); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("GetBlockByHash(B1) err=%v, want not-exist", err)
+	if _, err := store.GetBlockByHash(invalidB1Hash); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("GetBlockByHash(invalid B1) err=%v, want not-exist", err)
 	}
 }
 
