@@ -81,19 +81,46 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
+      - name: Cache Lean toolchain
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
+        with:
+          path: |
+            ~/.elan/bin
+            ~/.elan/env
+            ~/.elan/settings.toml
+            ~/.elan/tmp
+            ~/.elan/toolchains
+            ~/.elan/update-hashes
+          key: lean-toolchain-${{ runner.os }}-${{ hashFiles('rubin-formal/lean-toolchain') }}-v1
+          restore-keys: |
+            lean-toolchain-${{ runner.os }}-
+
       - name: Install elan (Lean toolchain manager)
         run: |
-          curl -sSfL https://github.com/leanprover/elan/releases/download/v4.1.2/elan-x86_64-unknown-linux-gnu.tar.gz -o /tmp/elan.tar.gz
-          echo "f81c2e48c1588d4612cd2c8851947898a45ac8d72748a07dff3a5694f1cf589b  /tmp/elan.tar.gz" | sha256sum -c -
-          tar -xzf /tmp/elan.tar.gz -C /tmp
-          /tmp/elan-init -y --no-modify-path
+          set -euo pipefail
+          if [ ! -x "$HOME/.elan/bin/elan" ]; then
+            curl --retry 5 --retry-delay 2 --retry-all-errors -sSfL https://github.com/leanprover/elan/releases/download/v4.1.2/elan-x86_64-unknown-linux-gnu.tar.gz -o /tmp/elan.tar.gz
+            echo "f81c2e48c1588d4612cd2c8851947898a45ac8d72748a07dff3a5694f1cf589b  /tmp/elan.tar.gz" | sha256sum -c -
+            tar -xzf /tmp/elan.tar.gz -C /tmp
+            /tmp/elan-init -y --no-modify-path
+          fi
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
       - name: Pin Lean toolchain (deterministic)
         run: |
+          set -euo pipefail
           TOOLCHAIN="$(cat rubin-formal/lean-toolchain)"
-          elan toolchain install "$TOOLCHAIN"
-          elan default "$TOOLCHAIN"
+          for attempt in 1 2 3 4; do
+            if elan toolchain install "$TOOLCHAIN"; then
+              elan default "$TOOLCHAIN"
+              exit 0
+            fi
+            if [ "$attempt" -eq 4 ]; then
+              echo "Lean toolchain install failed after $attempt attempts" >&2
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
 
       - name: Lean build (rubin-formal)
         run: |
@@ -296,19 +323,46 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
+      - name: Cache Lean toolchain
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
+        with:
+          path: |
+            ~/.elan/bin
+            ~/.elan/env
+            ~/.elan/settings.toml
+            ~/.elan/tmp
+            ~/.elan/toolchains
+            ~/.elan/update-hashes
+          key: lean-toolchain-${{ runner.os }}-${{ hashFiles('rubin-formal/lean-toolchain') }}-v1
+          restore-keys: |
+            lean-toolchain-${{ runner.os }}-
+
       - name: Install elan (Lean toolchain manager)
         run: |
-          curl -sSfL https://github.com/leanprover/elan/releases/download/v4.1.2/elan-x86_64-unknown-linux-gnu.tar.gz -o /tmp/elan.tar.gz
-          echo "f81c2e48c1588d4612cd2c8851947898a45ac8d72748a07dff3a5694f1cf589b  /tmp/elan.tar.gz" | sha256sum -c -
-          tar -xzf /tmp/elan.tar.gz -C /tmp
-          /tmp/elan-init -y --no-modify-path
+          set -euo pipefail
+          if [ ! -x "$HOME/.elan/bin/elan" ]; then
+            curl --retry 5 --retry-delay 2 --retry-all-errors -sSfL https://github.com/leanprover/elan/releases/download/v4.1.2/elan-x86_64-unknown-linux-gnu.tar.gz -o /tmp/elan.tar.gz
+            echo "f81c2e48c1588d4612cd2c8851947898a45ac8d72748a07dff3a5694f1cf589b  /tmp/elan.tar.gz" | sha256sum -c -
+            tar -xzf /tmp/elan.tar.gz -C /tmp
+            /tmp/elan-init -y --no-modify-path
+          fi
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
       - name: Pin Lean toolchain (deterministic)
         run: |
+          set -euo pipefail
           TOOLCHAIN="$(cat rubin-formal/lean-toolchain)"
-          elan toolchain install "$TOOLCHAIN"
-          elan default "$TOOLCHAIN"
+          for attempt in 1 2 3 4; do
+            if elan toolchain install "$TOOLCHAIN"; then
+              elan default "$TOOLCHAIN"
+              exit 0
+            fi
+            if [ "$attempt" -eq 4 ]; then
+              echo "Lean toolchain install failed after $attempt attempts" >&2
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
 
       - name: Cache OpenSSL 3.5 bundle
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
