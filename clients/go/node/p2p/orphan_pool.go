@@ -37,17 +37,17 @@ func newOrphanPool(limit int) *orphanPool {
 	}
 }
 
-func (o *orphanPool) Add(blockHash, parentHash [32]byte, blockBytes []byte) bool {
+func (o *orphanPool) Add(blockHash, parentHash [32]byte, blockBytes []byte) (bool, [][32]byte) {
 	if o == nil {
-		return false
+		return false, nil
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if _, exists := o.byHash[blockHash]; exists {
-		return false
+		return false, nil
 	}
 	if o.byteLimit > 0 && len(blockBytes) > o.byteLimit {
-		return false
+		return false, nil
 	}
 	entry := orphanEntry{
 		blockHash:  blockHash,
@@ -58,10 +58,13 @@ func (o *orphanPool) Add(blockHash, parentHash [32]byte, blockBytes []byte) bool
 	o.byHash[blockHash] = orphanMeta{parentHash: parentHash, size: len(entry.blockBytes)}
 	o.fifo = append(o.fifo, blockHash)
 	o.totalBytes += len(entry.blockBytes)
+	evicted := make([][32]byte, 0, 1)
 	for len(o.byHash) > o.limit || (o.byteLimit > 0 && o.totalBytes > o.byteLimit) {
-		o.evictOldest()
+		if dropped, ok := o.evictOldest(); ok {
+			evicted = append(evicted, dropped)
+		}
 	}
-	return true
+	return true, evicted
 }
 
 func (o *orphanPool) TakeChildren(parentHash [32]byte) []orphanEntry {
@@ -95,7 +98,7 @@ func (o *orphanPool) Len() int {
 	return len(o.byHash)
 }
 
-func (o *orphanPool) evictOldest() {
+func (o *orphanPool) evictOldest() ([32]byte, bool) {
 	for len(o.fifo) > 0 {
 		oldest := o.fifo[0]
 		o.fifo = o.fifo[1:]
@@ -118,8 +121,9 @@ func (o *orphanPool) evictOldest() {
 		} else {
 			o.pool[meta.parentHash] = children
 		}
-		return
+		return oldest, true
 	}
+	return [32]byte{}, false
 }
 
 func (o *orphanPool) pruneFIFO(removed map[[32]byte]struct{}) {
