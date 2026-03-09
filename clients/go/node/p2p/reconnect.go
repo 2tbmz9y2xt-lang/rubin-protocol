@@ -45,8 +45,7 @@ func (s *Service) reconnectDuePeers() {
 			continue
 		}
 		s.scheduleNextReconnectAttempt(addr, now)
-		s.loopWG.Add(1)
-		go s.dialPeer(addr)
+		s.startDialPeer(addr)
 	}
 }
 
