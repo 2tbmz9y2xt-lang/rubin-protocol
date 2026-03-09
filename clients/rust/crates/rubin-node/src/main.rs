@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use rubin_node::{
     block_store_path, chain_state_path, default_peer_runtime_config, default_sync_config,
-    load_chain_id_from_genesis_file, load_chain_state, new_devnet_rpc_state,
-    start_devnet_rpc_server, BlockStore, PeerManager, SyncEngine,
+    load_chain_state, load_genesis_config, new_devnet_rpc_state, start_devnet_rpc_server,
+    BlockStore, PeerManager, SyncEngine,
 };
 use serde::Serialize;
 
@@ -51,13 +51,14 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         }
     };
 
-    let chain_id = match load_chain_id_from_genesis_file(cfg.genesis_file.as_deref()) {
-        Ok(chain_id) => chain_id,
+    let genesis_cfg = match load_genesis_config(cfg.genesis_file.as_deref()) {
+        Ok(cfg) => cfg,
         Err(err) => {
             let _ = writeln!(stderr, "invalid genesis file: {err}");
             return 2;
         }
     };
+    let chain_id = genesis_cfg.chain_id;
 
     if let Err(err) = fs::create_dir_all(&cfg.data_dir) {
         let _ = writeln!(
@@ -99,6 +100,7 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
 
     let mut sync_cfg = default_sync_config(None, chain_id, Some(chain_state_file.clone()));
     sync_cfg.network = cfg.network.clone();
+    sync_cfg.core_ext_deployments = genesis_cfg.core_ext_deployments.clone();
     let mut sync_engine = match SyncEngine::new(chain_state, Some(block_store.clone()), sync_cfg) {
         Ok(engine) => engine,
         Err(err) => {

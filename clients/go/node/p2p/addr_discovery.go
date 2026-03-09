@@ -30,13 +30,22 @@ func (s *Service) connectDiscoveredAddrs(addrs []string) {
 		if s.isConnected(addr) {
 			continue
 		}
-		if s.connectedPeerCount() >= limit {
-			return
+		if !s.tryTrackDiscoveredDial(addr, limit) {
+			continue
 		}
 		s.addrMgr.MarkAttempted(addr)
 		s.loopWG.Add(1)
 		go s.dialPeer(addr)
 	}
+}
+
+func (s *Service) inFlightDialCount() int {
+	if s == nil {
+		return 0
+	}
+	s.dialMu.Lock()
+	defer s.dialMu.Unlock()
+	return len(s.inFlightDial)
 }
 
 func shouldAdvertiseAddr(addr string, self string, connected map[string]struct{}, banned map[string]struct{}) bool {
