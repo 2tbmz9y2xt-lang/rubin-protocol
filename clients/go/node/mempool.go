@@ -36,6 +36,8 @@ type Mempool struct {
 type MempoolConfig struct {
 	PolicyDaSurchargePerByte             uint64
 	PolicyRejectNonCoinbaseAnchorOutputs bool
+	PolicyRejectCoreExtPreActivation     bool
+	CoreExtProfiles                      consensus.CoreExtProfileProvider
 }
 
 type RelayTxMetadata struct {
@@ -52,6 +54,7 @@ func DefaultMempoolConfig() MempoolConfig {
 	return MempoolConfig{
 		PolicyDaSurchargePerByte:             minerDefaults.PolicyDaSurchargePerByte,
 		PolicyRejectNonCoinbaseAnchorOutputs: minerDefaults.PolicyRejectNonCoinbaseAnchorOutputs,
+		PolicyRejectCoreExtPreActivation:     minerDefaults.PolicyRejectCoreExtPreActivation,
 	}
 }
 
@@ -179,7 +182,7 @@ func (m *Mempool) checkTransactionLocked(txBytes []byte) (*consensus.CheckedTran
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := m.applyPolicyLocked(checked); err != nil {
+	if err := m.applyPolicyLocked(checked, nextHeight); err != nil {
 		return nil, nil, err
 	}
 	inputs := make([]consensus.Outpoint, 0, len(checked.Tx.Inputs))
@@ -189,7 +192,7 @@ func (m *Mempool) checkTransactionLocked(txBytes []byte) (*consensus.CheckedTran
 	return checked, inputs, nil
 }
 
-func (m *Mempool) applyPolicyLocked(checked *consensus.CheckedTransaction) error {
+func (m *Mempool) applyPolicyLocked(checked *consensus.CheckedTransaction, nextHeight uint64) error {
 	if checked == nil || checked.Tx == nil {
 		return errors.New("nil checked transaction")
 	}
@@ -208,6 +211,15 @@ func (m *Mempool) applyPolicyLocked(checked *consensus.CheckedTransaction) error
 	}
 	if reject {
 		return errors.New(reason)
+	}
+	if m.policy.PolicyRejectCoreExtPreActivation {
+		reject, reason, err := RejectCoreExtTxPreActivation(checked.Tx, m.chainState.Utxos, nextHeight, m.policy.CoreExtProfiles)
+		if err != nil {
+			return err
+		}
+		if reject {
+			return errors.New(reason)
+		}
 	}
 	return nil
 }

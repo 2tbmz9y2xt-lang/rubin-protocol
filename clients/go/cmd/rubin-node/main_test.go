@@ -347,6 +347,46 @@ func TestRunDryRunUsesDevnetGenesisChainIDByDefault(t *testing.T) {
 	}
 }
 
+func TestRunPassesGenesisCoreExtProfilesToMempool(t *testing.T) {
+	prev := newMempoolFn
+	var captured node.MempoolConfig
+	newMempoolFn = func(st *node.ChainState, store *node.BlockStore, chainID [32]byte, cfg node.MempoolConfig) (*node.Mempool, error) {
+		captured = cfg
+		return node.NewMempoolWithConfig(st, store, chainID, cfg)
+	}
+	t.Cleanup(func() { newMempoolFn = prev })
+
+	dir := t.TempDir()
+	genesisPath := filepath.Join(dir, "genesis.json")
+	if err := os.WriteFile(genesisPath, []byte(`{
+		"chain_id_hex":"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
+		"genesis_hash_hex":"0x8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff",
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[1],"binding":"verify_sig_ext_accept"}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run([]string{"--dry-run", "--datadir", dir, "--genesis-file", genesisPath}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr=%q)", code, errOut.String())
+	}
+	if !captured.PolicyRejectCoreExtPreActivation {
+		t.Fatalf("expected CORE_EXT mempool policy enabled by default")
+	}
+	if captured.CoreExtProfiles == nil {
+		t.Fatalf("expected mempool core_ext profiles")
+	}
+	profile, ok, err := captured.CoreExtProfiles.LookupCoreExtProfile(7, 12)
+	if err != nil {
+		t.Fatalf("LookupCoreExtProfile: %v", err)
+	}
+	if !ok || !profile.Active {
+		t.Fatalf("expected active core_ext profile at activation height")
+	}
+}
+
 func TestRunDryRunShowsTipWhenBlockstoreHasTip(t *testing.T) {
 	dir := t.TempDir()
 

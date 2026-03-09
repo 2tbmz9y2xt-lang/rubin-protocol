@@ -27,7 +27,7 @@ var newMinerFn = node.NewMiner
 
 var newSyncEngineFn = node.NewSyncEngine
 
-var newMempoolFn = node.NewMempool
+var newMempoolFn = node.NewMempoolWithConfig
 
 type multiStringFlag []string
 
@@ -122,7 +122,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "sync engine init failed: %v\n", err)
 		return 2
 	}
-	mempool, err := newMempoolFn(chainState, blockStore, chainIDFromGenesis)
+	mempoolCfg := node.DefaultMempoolConfig()
+	mempoolCfg.CoreExtProfiles = genesisCfg.CoreExtProfiles
+	mempool, err := newMempoolFn(chainState, blockStore, chainIDFromGenesis, mempoolCfg)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "mempool init failed: %v\n", err)
 		return 2
