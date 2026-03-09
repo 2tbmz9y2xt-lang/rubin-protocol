@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -13,6 +13,7 @@ use crate::{BlockStore, SyncEngine, TxPool, TxPoolAdmitErrorKind};
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+const MAX_CONCURRENT_RPC_CONNS: usize = 8;
 
 #[derive(Clone)]
 pub struct DevnetRPCState {
@@ -109,6 +110,7 @@ pub fn start_devnet_rpc_server(
         .to_string();
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::clone(&stop);
+    let state = Arc::new(state);
     let join = thread::spawn(move || {
         run_accept_loop(listener, state, stop_flag);
     });
@@ -165,11 +167,28 @@ impl RpcMetrics {
     }
 }
 
-fn run_accept_loop(listener: TcpListener, state: DevnetRPCState, stop: Arc<AtomicBool>) {
+fn run_accept_loop(listener: TcpListener, state: Arc<DevnetRPCState>, stop: Arc<AtomicBool>) {
+    let active = Arc::new(AtomicUsize::new(0));
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
-                let _ = handle_connection(stream, &state);
+                if active.load(Ordering::SeqCst) >= MAX_CONCURRENT_RPC_CONNS {
+                    drop(stream);
+                    thread::sleep(Duration::from_millis(25));
+                    continue;
+                }
+                let st = Arc::clone(&state);
+                let ctr = Arc::clone(&active);
+                ctr.fetch_add(1, Ordering::SeqCst);
+                if thread::Builder::new()
+                    .spawn(move || {
+                        let _ = handle_connection(stream, &st);
+                        ctr.fetch_sub(1, Ordering::SeqCst);
+                    })
+                    .is_err()
+                {
+                    active.fetch_sub(1, Ordering::SeqCst);
+                }
             }
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(25));
@@ -182,6 +201,9 @@ fn run_accept_loop(listener: TcpListener, state: DevnetRPCState, stop: Arc<Atomi
 }
 
 fn handle_connection(mut stream: TcpStream, state: &DevnetRPCState) -> Result<(), String> {
+    stream
+        .set_nonblocking(false)
+        .map_err(|err| format!("set_nonblocking: {err}"))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|err| format!("set_read_timeout: {err}"))?;
@@ -1875,6 +1897,115 @@ mod tests {
             !body.contains(r#"rubin_node_rpc_requests_total{route=""#),
             "{body}"
         );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn concurrent_connections_are_handled() {
+        let dir = unique_temp_dir("rubin-concurrent-rpc");
+        fs::create_dir_all(&dir).expect("mkdir");
+        let block_store = BlockStore::open(block_store_path(&dir)).expect("blockstore");
+        let mut engine = SyncEngine::new(
+            ChainState::new(),
+            Some(block_store.clone()),
+            default_sync_config(None, devnet_genesis_chain_id(), None),
+        )
+        .expect("sync");
+        engine
+            .apply_block(&devnet_genesis_block_bytes(), None)
+            .expect("apply genesis");
+        let rpc_block_store = BlockStore::open(block_store_path(&dir)).expect("reopen blockstore");
+        let state = new_devnet_rpc_state(
+            Arc::new(Mutex::new(engine)),
+            Some(rpc_block_store),
+            Arc::new(PeerManager::new(default_peer_runtime_config("devnet", 8))),
+        );
+        let server = start_devnet_rpc_server("127.0.0.1:0", state).expect("start");
+        let addr = server.addr().to_string();
+        let n = 4;
+        let handles: Vec<_> = (0..n)
+            .map(|_| {
+                let a = addr.clone();
+                std::thread::spawn(move || {
+                    let mut s = TcpStream::connect(&a).expect("connect");
+                    s.set_read_timeout(Some(Duration::from_secs(5)))
+                        .expect("timeout");
+                    s.write_all(b"GET /get_tip HTTP/1.0\r\n\r\n")
+                        .expect("write");
+                    let mut buf = Vec::new();
+                    let _ = s.read_to_end(&mut buf);
+                    let text = String::from_utf8_lossy(&buf);
+                    assert!(text.contains("200 OK"), "expected 200 OK, got: {text}");
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("join");
+        }
+        drop(server);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn excess_connections_are_dropped_at_capacity() {
+        let dir = unique_temp_dir("rubin-capacity-rpc");
+        fs::create_dir_all(&dir).expect("mkdir");
+        let block_store = BlockStore::open(block_store_path(&dir)).expect("blockstore");
+        let mut engine = SyncEngine::new(
+            ChainState::new(),
+            Some(block_store.clone()),
+            default_sync_config(None, devnet_genesis_chain_id(), None),
+        )
+        .expect("sync");
+        engine
+            .apply_block(&devnet_genesis_block_bytes(), None)
+            .expect("apply genesis");
+        let rpc_block_store = BlockStore::open(block_store_path(&dir)).expect("reopen blockstore");
+        let state = new_devnet_rpc_state(
+            Arc::new(Mutex::new(engine)),
+            Some(rpc_block_store),
+            Arc::new(PeerManager::new(default_peer_runtime_config("devnet", 8))),
+        );
+        let server = start_devnet_rpc_server("127.0.0.1:0", state).expect("start");
+        let addr = server.addr().to_string();
+        // Open MAX slow connections that hold slots via partial requests.
+        let holders: Vec<_> = (0..super::MAX_CONCURRENT_RPC_CONNS)
+            .map(|_| {
+                let a = addr.clone();
+                let (tx, rx) = std::sync::mpsc::channel::<()>();
+                let h = std::thread::spawn(move || {
+                    let mut s = TcpStream::connect(&a).expect("connect");
+                    s.set_write_timeout(Some(Duration::from_secs(5)))
+                        .expect("timeout");
+                    // Partial request — server blocks on read waiting for \r\n\r\n.
+                    s.write_all(b"GET /get_tip HTTP/1.0\r\n").expect("write");
+                    let _ = rx.recv();
+                });
+                (h, tx)
+            })
+            .collect();
+        // Wait for all connections to be accepted and handler threads started.
+        std::thread::sleep(Duration::from_millis(500));
+        // The (MAX+1)-th connection should be dropped.
+        let excess = TcpStream::connect(&addr);
+        if let Ok(mut s) = excess {
+            s.set_read_timeout(Some(Duration::from_millis(500)))
+                .expect("timeout");
+            s.write_all(b"GET /get_tip HTTP/1.0\r\n\r\n").ok();
+            let mut buf = Vec::new();
+            let _ = s.read_to_end(&mut buf);
+            // Dropped connection: empty response or connection reset.
+            assert!(
+                buf.is_empty() || !String::from_utf8_lossy(&buf).contains("200 OK"),
+                "excess connection should not get 200 OK"
+            );
+        }
+        // Release holders.
+        for (h, tx) in holders {
+            let _ = tx.send(());
+            let _ = h.join();
+        }
+        drop(server);
         fs::remove_dir_all(dir).expect("cleanup");
     }
 }

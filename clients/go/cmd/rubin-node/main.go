@@ -62,7 +62,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&cfg.BindAddr, "bind", defaults.BindAddr, "bind address host:port")
 	fs.StringVar(&cfg.RPCBindAddr, "rpc-bind", defaults.RPCBindAddr, "devnet HTTP RPC bind address host:port (disabled when empty)")
 	fs.StringVar(&cfg.LogLevel, "log-level", defaults.LogLevel, "log level: debug|info|warn|error")
-	genesisFile := fs.String("genesis-file", "", "path to genesis pack JSON with chain_id_hex and genesis hash")
+	genesisFile := fs.String("genesis-file", "", "path to genesis pack JSON with chain_id_hex, genesis hash, and optional core_ext_profiles")
 	fs.IntVar(&cfg.MaxPeers, "max-peers", defaults.MaxPeers, "max connected peers")
 	fs.StringVar(&cfg.MineAddress, "mine-address", "", "miner pubkey: 64-char hex key_id or 66-char hex suite_id||key_id")
 	mineBlocks := fs.Int("mine-blocks", 0, "mine N blocks locally after startup")
@@ -75,11 +75,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	cfg.LogLevel = strings.ToLower(strings.TrimSpace(cfg.LogLevel))
 	cfg.Peers = node.NormalizePeers(append([]string{*peerCSV}, peers...)...)
-	chainIDFromGenesis, genesisHashFromGenesis, err := parseGenesisConfig(*genesisFile)
+	genesisCfg, err := parseGenesisConfigFull(*genesisFile)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "invalid genesis file: %v\n", err)
 		return 2
 	}
+	chainIDFromGenesis := genesisCfg.ChainID
+	genesisHashFromGenesis := genesisCfg.GenesisHash
 	var zeroChainID [32]byte
 	if chainIDFromGenesis != zeroChainID {
 		cfg.ChainID = fmt.Sprintf("%x", chainIDFromGenesis[:])
@@ -110,6 +112,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	syncCfg := node.DefaultSyncConfig(nil, chainIDFromGenesis, chainStatePath)
 	syncCfg.Network = cfg.Network
+	syncCfg.CoreExtProfiles = genesisCfg.CoreExtProfiles
 	syncEngine, err := newSyncEngineFn(
 		chainState,
 		blockStore,
@@ -170,6 +173,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			}
 			minerCfg.MineAddress = addrBytes
 		}
+		minerCfg.CoreExtProfiles = genesisCfg.CoreExtProfiles
 		miner, err := newMinerFn(chainState, blockStore, syncEngine, minerCfg)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "miner init failed: %v\n", err)
@@ -343,35 +347,60 @@ func nowUnixU64() uint64 {
 }
 
 type genesisPack struct {
-	ChainIDHex            string `json:"chain_id_hex"`
-	GenesisHashHex        string `json:"genesis_hash_hex"`
-	GenesisBlockHashHex   string `json:"genesis_block_hash_hex"`
-	GenesisHeaderBytesHex string `json:"genesis_header_bytes_hex"`
+	ChainIDHex            string                  `json:"chain_id_hex"`
+	GenesisHashHex        string                  `json:"genesis_hash_hex"`
+	GenesisBlockHashHex   string                  `json:"genesis_block_hash_hex"`
+	GenesisHeaderBytesHex string                  `json:"genesis_header_bytes_hex"`
+	CoreExtProfiles       []genesisCoreExtProfile `json:"core_ext_profiles,omitempty"`
+}
+
+type genesisCoreExtProfile struct {
+	ExtID            uint16  `json:"ext_id"`
+	ActivationHeight uint64  `json:"activation_height"`
+	AllowedSuiteIDs  []uint8 `json:"allowed_suite_ids,omitempty"`
+	Binding          string  `json:"binding,omitempty"`
+}
+
+type parsedGenesisConfig struct {
+	ChainID         [32]byte
+	GenesisHash     [32]byte
+	CoreExtProfiles consensus.CoreExtProfileProvider
 }
 
 func parseGenesisConfig(path string) ([32]byte, [32]byte, error) {
-	chainID := node.DevnetGenesisChainID()
-	genesisHash := node.DevnetGenesisBlockHash()
+	cfg, err := parseGenesisConfigFull(path)
+	return cfg.ChainID, cfg.GenesisHash, err
+}
+
+func parseGenesisConfigFull(path string) (parsedGenesisConfig, error) {
+	cfg := parsedGenesisConfig{
+		ChainID:     node.DevnetGenesisChainID(),
+		GenesisHash: node.DevnetGenesisBlockHash(),
+	}
 	if strings.TrimSpace(path) == "" {
-		return chainID, genesisHash, nil
+		return cfg, nil
 	}
 	raw, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
-		return chainID, genesisHash, err
+		return cfg, err
 	}
 	var payload genesisPack
 	if err := json.Unmarshal(raw, &payload); err != nil {
-		return chainID, genesisHash, err
+		return cfg, err
 	}
-	chainID, err = parseHex32Field("chain_id", payload.ChainIDHex)
+	cfg.ChainID, err = parseHex32Field("chain_id", payload.ChainIDHex)
 	if err != nil {
-		return chainID, genesisHash, err
+		return cfg, err
 	}
-	genesisHash, err = parseGenesisHash(payload)
+	cfg.GenesisHash, err = parseGenesisHash(payload)
 	if err != nil {
-		return chainID, genesisHash, err
+		return cfg, err
 	}
-	return chainID, genesisHash, nil
+	cfg.CoreExtProfiles, err = buildGenesisCoreExtProfiles(payload.CoreExtProfiles)
+	if err != nil {
+		return cfg, err
+	}
+	return cfg, nil
 }
 
 func parseGenesisChainID(path string) ([32]byte, error) {
@@ -402,6 +431,51 @@ func parseGenesisHash(payload genesisPack) ([32]byte, error) {
 		return zero, fmt.Errorf("genesis_header_bytes must be %d bytes, got %d", consensus.BLOCK_HEADER_BYTES, len(headerBytes))
 	}
 	return consensus.BlockHash(headerBytes)
+}
+
+func buildGenesisCoreExtProfiles(items []genesisCoreExtProfile) (consensus.CoreExtProfileProvider, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	deployments := make([]consensus.CoreExtDeploymentProfile, 0, len(items))
+	for _, item := range items {
+		verifySigExtFn, err := parseCoreExtBinding(item.Binding)
+		if err != nil {
+			return nil, err
+		}
+		allowed := make(map[uint8]struct{}, len(item.AllowedSuiteIDs))
+		for _, suiteID := range item.AllowedSuiteIDs {
+			allowed[suiteID] = struct{}{}
+		}
+		deployments = append(deployments, consensus.CoreExtDeploymentProfile{
+			ExtID:            item.ExtID,
+			ActivationHeight: item.ActivationHeight,
+			AllowedSuites:    allowed,
+			VerifySigExtFn:   verifySigExtFn,
+		})
+	}
+	return consensus.NewStaticCoreExtProfileProvider(deployments)
+}
+
+func parseCoreExtBinding(binding string) (consensus.CoreExtVerifySigExtFunc, error) {
+	switch strings.TrimSpace(binding) {
+	case "", "native_verify_sig":
+		return nil, nil
+	case "verify_sig_ext_accept":
+		return func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) {
+			return true, nil
+		}, nil
+	case "verify_sig_ext_reject":
+		return func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) {
+			return false, nil
+		}, nil
+	case "verify_sig_ext_error":
+		return func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) {
+			return false, fmt.Errorf("verify_sig_ext unavailable")
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported core_ext binding: %s", binding)
+	}
 }
 
 func parseHex32Field(name, value string) ([32]byte, error) {

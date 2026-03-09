@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
 use rubin_consensus::constants::POW_LIMIT;
-use rubin_consensus::{block_hash, parse_block_bytes};
+use rubin_consensus::{
+    block_hash, parse_block_bytes, parse_block_header_bytes, CoreExtDeploymentProfiles,
+};
 
 use crate::blockstore::BlockStore;
 use crate::chainstate::{ChainState, ChainStateConnectSummary};
@@ -17,6 +19,7 @@ pub struct SyncConfig {
     pub chain_id: [u8; 32],
     pub chain_state_path: Option<PathBuf>,
     pub network: String,
+    pub core_ext_deployments: CoreExtDeploymentProfiles,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +50,7 @@ pub fn default_sync_config(
         chain_id,
         chain_state_path,
         network: "devnet".to_string(),
+        core_ext_deployments: CoreExtDeploymentProfiles::empty(),
     }
 }
 
@@ -167,16 +171,23 @@ impl SyncEngine {
     ) -> Result<ChainStateConnectSummary, String> {
         let parsed = parse_block_bytes(block_bytes).map_err(|e| e.to_string())?;
         let block_hash_bytes = block_hash(&parsed.header_bytes).map_err(|e| e.to_string())?;
+        let derived_prev_timestamps = if prev_timestamps.is_none() {
+            self.prev_timestamps_for_next_block()?
+        } else {
+            None
+        };
+        let prev_timestamps = prev_timestamps.or(derived_prev_timestamps.as_deref());
 
         let snapshot = self.chain_state.clone();
         let old_tip_timestamp = self.tip_timestamp;
         let old_best_known_height = self.best_known_height;
 
-        let summary = self.chain_state.connect_block(
+        let summary = self.chain_state.connect_block_with_core_ext_deployments(
             block_bytes,
             self.cfg.expected_target,
             prev_timestamps,
             self.cfg.chain_id,
+            &self.cfg.core_ext_deployments,
         )?;
 
         if let Some(block_store) = self.block_store.as_mut() {
@@ -209,6 +220,33 @@ impl SyncEngine {
 
         Ok(summary)
     }
+
+    pub fn prev_timestamps_for_next_block(&self) -> Result<Option<Vec<u64>>, String> {
+        if !self.chain_state.has_tip {
+            return Ok(None);
+        }
+        if self.chain_state.height == u64::MAX {
+            return Err("height overflow".to_string());
+        }
+
+        let Some(block_store) = self.block_store.as_ref() else {
+            return Err("sync engine missing blockstore for timestamp context".to_string());
+        };
+
+        let next_height = self.chain_state.height + 1;
+        let window_len = next_height.min(11);
+        let mut out = Vec::with_capacity(window_len as usize);
+        for offset in 0..window_len {
+            let height = next_height - 1 - offset;
+            let Some(hash) = block_store.canonical_hash(height)? else {
+                return Err("missing canonical header for timestamp context".to_string());
+            };
+            let header_bytes = block_store.get_header_by_hash(hash)?;
+            let header = parse_block_header_bytes(&header_bytes).map_err(|e| e.to_string())?;
+            out.push(header.timestamp);
+        }
+        Ok(Some(out))
+    }
 }
 
 fn validate_mainnet_genesis_guard(cfg: &SyncConfig) -> Result<(), String> {
@@ -232,15 +270,23 @@ fn validate_mainnet_genesis_guard(cfg: &SyncConfig) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use rubin_consensus::constants::{COV_TYPE_P2PK, POW_LIMIT};
-    use rubin_consensus::{Outpoint, UtxoEntry};
+    use rubin_consensus::constants::{COV_TYPE_EXT, COV_TYPE_P2PK, POW_LIMIT};
+    use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
+    use rubin_consensus::{
+        block_hash, encode_compact_size, merkle_root_txids, parse_block_bytes, parse_tx,
+        CoreExtDeploymentProfile, CoreExtDeploymentProfiles, CoreExtVerificationBinding, Outpoint,
+        UtxoEntry, BLOCK_HEADER_BYTES,
+    };
 
     use crate::blockstore::{block_store_path, BlockStore};
     use crate::chainstate::{chain_state_path, load_chain_state, ChainState};
+    use crate::coinbase::{build_coinbase_tx, default_mine_address};
+    use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use crate::io_utils::unique_temp_path;
     use crate::sync::{default_sync_config, SyncEngine};
 
     const VALID_BLOCK_HEX: &str = "01000000111111111111111111111111111111111111111111111111111111111111111102e66000bf8ce870908df4a8689554852ccef681ee0b5df32246162a53e36e290100000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff07000000000000000101000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff010000000000000000020020b716a4b7f4c0fab665298ab9b8199b601ab9fa7e0a27f0713383f34cf37071a8000000000000";
+    const CORE_EXT_NATIVE_BINDING_SPEND_TX_HEX: &str = "0100000000010000000000000001eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee000000000000000000015a0000000000000000002101111111111111111111111111111111111111111111111111111111111111111100000000010300010100";
 
     fn hex_to_bytes(hex: &str) -> Vec<u8> {
         let mut out = Vec::with_capacity(hex.len() / 2);
@@ -259,6 +305,30 @@ mod tests {
             idx += 2;
         }
         out
+    }
+
+    fn build_block_bytes(
+        prev_hash: [u8; 32],
+        merkle_root: [u8; 32],
+        target: [u8; 32],
+        timestamp: u64,
+        txs: &[Vec<u8>],
+    ) -> Vec<u8> {
+        let mut header = Vec::with_capacity(BLOCK_HEADER_BYTES);
+        header.extend_from_slice(&1u32.to_le_bytes());
+        header.extend_from_slice(&prev_hash);
+        header.extend_from_slice(&merkle_root);
+        header.extend_from_slice(&timestamp.to_le_bytes());
+        header.extend_from_slice(&target);
+        header.extend_from_slice(&0u64.to_le_bytes());
+        assert_eq!(header.len(), BLOCK_HEADER_BYTES);
+
+        let mut block = header;
+        encode_compact_size(txs.len() as u64, &mut block);
+        for tx in txs {
+            block.extend_from_slice(tx);
+        }
+        block
     }
 
     #[test]
@@ -383,5 +453,73 @@ mod tests {
         cfg.network = "mainnet".to_string();
         let engine = SyncEngine::new(st, None, cfg);
         assert!(engine.is_ok());
+    }
+
+    #[test]
+    fn sync_engine_rejects_post_activation_core_ext_spend_without_pre_active_bypass() {
+        let dir = unique_temp_path("rubin-node-sync-core-ext");
+        let chain_state_file = chain_state_path(&dir);
+        let block_store_root = block_store_path(&dir);
+        let store = BlockStore::open(block_store_root).expect("open blockstore");
+
+        let mut cfg = default_sync_config(
+            Some(POW_LIMIT),
+            devnet_genesis_chain_id(),
+            Some(chain_state_file),
+        );
+        cfg.core_ext_deployments = CoreExtDeploymentProfiles {
+            deployments: vec![CoreExtDeploymentProfile {
+                ext_id: 1,
+                activation_height: 1,
+                allowed_suite_ids: vec![3],
+                verification_binding: CoreExtVerificationBinding::NativeVerifySig,
+            }],
+        };
+        let mut engine = SyncEngine::new(ChainState::new(), Some(store), cfg).expect("new sync");
+        engine
+            .apply_block(&devnet_genesis_block_bytes(), None)
+            .expect("apply genesis");
+
+        engine.chain_state.utxos.insert(
+            Outpoint {
+                txid: [0xee; 32],
+                vout: 0,
+            },
+            UtxoEntry {
+                value: 100,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: vec![0x01, 0x00, 0x00],
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
+
+        let spend_tx = hex_to_bytes(CORE_EXT_NATIVE_BINDING_SPEND_TX_HEX);
+        let (_, spend_txid, spend_wtxid, consumed) = parse_tx(&spend_tx).expect("parse spend");
+        assert_eq!(consumed, spend_tx.len());
+        let witness_root =
+            witness_merkle_root_wtxids(&[[0u8; 32], spend_wtxid]).expect("witness root");
+        let witness_commitment = witness_commitment_hash(witness_root);
+        let coinbase =
+            build_coinbase_tx(1, 0, &default_mine_address(), witness_commitment).expect("coinbase");
+        let (_, coinbase_txid, _, coinbase_consumed) = parse_tx(&coinbase).expect("parse coinbase");
+        assert_eq!(coinbase_consumed, coinbase.len());
+        let merkle_root = merkle_root_txids(&[coinbase_txid, spend_txid]).expect("merkle root");
+        let genesis = devnet_genesis_block_bytes();
+        let genesis_hash = block_hash(&genesis[..BLOCK_HEADER_BYTES]).expect("genesis hash");
+        let parsed_genesis = parse_block_bytes(&genesis).expect("parse genesis");
+        let block = build_block_bytes(
+            genesis_hash,
+            merkle_root,
+            POW_LIMIT,
+            parsed_genesis.header.timestamp.saturating_add(1),
+            &[coinbase, spend_tx],
+        );
+
+        let err = engine.apply_block(&block, None).unwrap_err();
+        assert!(
+            err.contains("TX_ERR_SIG_ALG_INVALID"),
+            "unexpected error: {err}"
+        );
     }
 }

@@ -35,10 +35,13 @@ pub use compact_relay::compact_shortid;
 pub use compactsize::encode_compact_size;
 pub use compactsize::read_compact_size_bytes;
 pub use connect_block_inmem::{
-    connect_block_basic_in_memory_at_height, ConnectBlockBasicSummary, InMemoryChainState,
+    connect_block_basic_in_memory_at_height,
+    connect_block_basic_in_memory_at_height_and_core_ext_deployments, ConnectBlockBasicSummary,
+    InMemoryChainState,
 };
 pub use core_ext::{
-    parse_core_ext_covenant_data, validate_core_ext_spend, CoreExtActiveProfile, CoreExtProfiles,
+    core_ext_verification_binding_from_name, parse_core_ext_covenant_data, validate_core_ext_spend,
+    CoreExtActiveProfile, CoreExtDeploymentProfile, CoreExtDeploymentProfiles, CoreExtProfiles,
     CoreExtVerificationBinding,
 };
 pub use covenant_genesis::validate_tx_covenants_genesis;

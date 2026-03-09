@@ -24,6 +24,7 @@ type SyncConfig struct {
 	IBDLagSeconds    uint64
 	ChainID          [32]byte
 	Network          string
+	CoreExtProfiles  consensus.CoreExtProfileProvider
 }
 
 type HeaderRequest struct {
@@ -301,7 +302,13 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 	if err != nil {
 		return nil, err
 	}
-	summary, err := s.chainState.ConnectBlock(blockBytes, s.cfg.ExpectedTarget, prevTimestamps, s.cfg.ChainID)
+	summary, err := s.chainState.ConnectBlockWithCoreExtProfiles(
+		blockBytes,
+		s.cfg.ExpectedTarget,
+		prevTimestamps,
+		s.cfg.ChainID,
+		s.cfg.CoreExtProfiles,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -423,7 +430,13 @@ func (s *SyncEngine) prepareHeavierBranch(
 		return nil, 0, err
 	}
 	for _, item := range branch {
-		if _, err := previewState.ConnectBlock(item.blockBytes, s.cfg.ExpectedTarget, prevTimestamps, s.cfg.ChainID); err != nil {
+		if _, err := previewState.ConnectBlockWithCoreExtProfiles(
+			item.blockBytes,
+			s.cfg.ExpectedTarget,
+			prevTimestamps,
+			s.cfg.ChainID,
+			s.cfg.CoreExtProfiles,
+		); err != nil {
 			return nil, 0, err
 		}
 	}
