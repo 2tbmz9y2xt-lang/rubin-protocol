@@ -221,6 +221,18 @@ func TestConnectDiscoveredSkipsConnected(t *testing.T) {
 	}
 }
 
+func TestConnectDiscoveredAddrsRespectsMaxPeersWithInFlightDials(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:19024", nil)
+	h.service.cfg.PeerRuntimeConfig.MaxPeers = 1
+	h.service.inFlightDial["127.0.0.1:19025"] = struct{}{}
+
+	h.service.connectDiscoveredAddrs([]string{"127.0.0.1:19026", "127.0.0.1:19027"})
+
+	if got := h.service.inFlightDialCount(); got != 1 {
+		t.Fatalf("inFlightDialCount()=%d, want 1", got)
+	}
+}
+
 func TestAddrHandlerAndDiscoveryEdgeBranches(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:19031", nil)
 	p := newPeerRuntimeTestPeer(t)
