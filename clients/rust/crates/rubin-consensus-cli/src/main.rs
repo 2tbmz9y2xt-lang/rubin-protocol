@@ -2076,12 +2076,36 @@ fn main() {
                 &core_ext_deployments,
             ) {
                 Ok(summary) => {
+                    let already_generated = match u64::try_from(summary.already_generated) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            let resp = Response {
+                                ok: false,
+                                err: Some("already_generated_overflow".to_string()),
+                                ..Default::default()
+                            };
+                            let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                            return;
+                        }
+                    };
+                    let already_generated_n1 = match u64::try_from(summary.already_generated_n1) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            let resp = Response {
+                                ok: false,
+                                err: Some("already_generated_overflow".to_string()),
+                                ..Default::default()
+                            };
+                            let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                            return;
+                        }
+                    };
                     let resp = Response {
                         ok: true,
                         sum_fees: Some(summary.sum_fees),
                         utxo_count: Some(summary.utxo_count),
-                        already_generated: Some(summary.already_generated as u64),
-                        already_generated_n1: Some(summary.already_generated_n1 as u64),
+                        already_generated: Some(already_generated),
+                        already_generated_n1: Some(already_generated_n1),
                         ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
