@@ -254,7 +254,9 @@ func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, nextHeight ui
 		}
 		reject, nextDaIncluded, err := m.rejectCandidate(candidate.tx, nextHeight, policyDaIncluded)
 		if err != nil {
-			return nil, err
+			// Policy checks should never abort block construction.
+			// Treat policy evaluation errors as a rejected candidate and continue.
+			continue
 		}
 		if reject {
 			continue
