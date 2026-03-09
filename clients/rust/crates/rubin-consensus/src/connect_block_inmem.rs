@@ -5,9 +5,12 @@ use crate::block_basic::{
     validate_coinbase_apply_outputs, validate_coinbase_value_bound,
 };
 use crate::constants::{COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT};
+use crate::core_ext::CoreExtDeploymentProfiles;
 use crate::error::{ErrorCode, TxError};
 use crate::subsidy::block_subsidy;
-use crate::utxo_basic::{apply_non_coinbase_tx_basic_update_with_mtp, Outpoint, UtxoEntry};
+use crate::utxo_basic::{
+    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles, Outpoint, UtxoEntry,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InMemoryChainState {
@@ -37,6 +40,28 @@ pub fn connect_block_basic_in_memory_at_height(
     state: &mut InMemoryChainState,
     chain_id: [u8; 32],
 ) -> Result<ConnectBlockBasicSummary, TxError> {
+    connect_block_basic_in_memory_at_height_and_core_ext_deployments(
+        block_bytes,
+        expected_prev_hash,
+        expected_target,
+        block_height,
+        prev_timestamps,
+        state,
+        chain_id,
+        &CoreExtDeploymentProfiles::empty(),
+    )
+}
+
+pub fn connect_block_basic_in_memory_at_height_and_core_ext_deployments(
+    block_bytes: &[u8],
+    expected_prev_hash: Option<[u8; 32]>,
+    expected_target: Option<[u8; 32]>,
+    block_height: u64,
+    prev_timestamps: Option<&[u64]>,
+    state: &mut InMemoryChainState,
+    chain_id: [u8; 32],
+    core_ext_deployments: &CoreExtDeploymentProfiles,
+) -> Result<ConnectBlockBasicSummary, TxError> {
     // Stateless checks first.
     validate_block_basic_with_context_at_height(
         block_bytes,
@@ -56,12 +81,13 @@ pub fn connect_block_basic_in_memory_at_height(
 
     let already_generated = state.already_generated;
     let block_mtp = median_time_past(block_height, prev_timestamps)?.unwrap_or(pb.header.timestamp);
+    let core_ext_profiles = core_ext_deployments.active_profiles_at_height(block_height)?;
     let mut work_utxos = None;
 
     let mut sum_fees: u64 = 0;
     for i in 1..pb.txs.len() {
         let base_utxos = work_utxos.as_ref().unwrap_or(&state.utxos);
-        let (next_utxos, s) = apply_non_coinbase_tx_basic_update_with_mtp(
+        let (next_utxos, s) = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
             &pb.txs[i],
             pb.txids[i],
             base_utxos,
@@ -69,6 +95,7 @@ pub fn connect_block_basic_in_memory_at_height(
             pb.header.timestamp,
             block_mtp,
             chain_id,
+            &core_ext_profiles,
         )?;
         work_utxos = Some(next_utxos);
         sum_fees = sum_fees

@@ -17,10 +17,10 @@ func TestBuildCoreExtProfilesEmpty(t *testing.T) {
 func TestBuildCoreExtProfilesNativeBinding(t *testing.T) {
 	provider, err := buildCoreExtProfiles([]CoreExtProfileJSON{
 		{
-			ExtID:           7,
-			Active:          true,
-			AllowedSuiteIDs: []uint8{1, 3},
-			Binding:         "native_verify_sig",
+			ExtID:            7,
+			ActivationHeight: 5,
+			AllowedSuiteIDs:  []uint8{1, 3},
+			Binding:          "native_verify_sig",
 		},
 	})
 	if err != nil {
@@ -30,7 +30,13 @@ func TestBuildCoreExtProfilesNativeBinding(t *testing.T) {
 		t.Fatalf("expected non-nil provider")
 	}
 
-	profile, ok, err := provider.LookupCoreExtProfile(7, 0)
+	if _, ok, err := provider.LookupCoreExtProfile(7, 4); err != nil {
+		t.Fatalf("lookup failed: %v", err)
+	} else if ok {
+		t.Fatalf("profile must be inactive before activation height")
+	}
+
+	profile, ok, err := provider.LookupCoreExtProfile(7, 5)
 	if err != nil {
 		t.Fatalf("lookup failed: %v", err)
 	}
@@ -67,10 +73,10 @@ func TestBuildCoreExtProfilesVerifySigExtBindings(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			provider, err := buildCoreExtProfiles([]CoreExtProfileJSON{
 				{
-					ExtID:           uint16(100 + i),
-					Active:          true,
-					AllowedSuiteIDs: []uint8{3},
-					Binding:         tc.binding,
+					ExtID:            uint16(100 + i),
+					ActivationHeight: 0,
+					AllowedSuiteIDs:  []uint8{3},
+					Binding:          tc.binding,
 				},
 			})
 			if err != nil {
@@ -97,41 +103,46 @@ func TestBuildCoreExtProfilesVerifySigExtBindings(t *testing.T) {
 	}
 }
 
-func TestBuildCoreExtProfilesSkipsInactive(t *testing.T) {
+func TestBuildCoreExtProfilesHeightGate(t *testing.T) {
 	provider, err := buildCoreExtProfiles([]CoreExtProfileJSON{
 		{
-			ExtID:           77,
-			Active:          false,
-			AllowedSuiteIDs: []uint8{3},
-			Binding:         "verify_sig_ext_accept",
+			ExtID:            77,
+			ActivationHeight: 42,
+			AllowedSuiteIDs:  []uint8{3},
+			Binding:          "verify_sig_ext_accept",
 		},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if provider == nil {
-		t.Fatalf("expected provider map even when all profiles are inactive")
+		t.Fatalf("expected provider")
 	}
-	if _, ok, err := provider.LookupCoreExtProfile(77, 0); err != nil {
+	if _, ok, err := provider.LookupCoreExtProfile(77, 41); err != nil {
 		t.Fatalf("lookup failed: %v", err)
 	} else if ok {
-		t.Fatalf("inactive profile must not be present")
+		t.Fatalf("profile must be inactive before activation height")
+	}
+	if _, ok, err := provider.LookupCoreExtProfile(77, 42); err != nil {
+		t.Fatalf("lookup failed: %v", err)
+	} else if !ok {
+		t.Fatalf("profile must activate at activation height")
 	}
 }
 
-func TestBuildCoreExtProfilesDuplicateActiveRejected(t *testing.T) {
+func TestBuildCoreExtProfilesDuplicateRejected(t *testing.T) {
 	_, err := buildCoreExtProfiles([]CoreExtProfileJSON{
-		{ExtID: 9, Active: true, AllowedSuiteIDs: []uint8{3}, Binding: "verify_sig_ext_accept"},
-		{ExtID: 9, Active: true, AllowedSuiteIDs: []uint8{3}, Binding: "verify_sig_ext_reject"},
+		{ExtID: 9, ActivationHeight: 0, AllowedSuiteIDs: []uint8{3}, Binding: "verify_sig_ext_accept"},
+		{ExtID: 9, ActivationHeight: 10, AllowedSuiteIDs: []uint8{3}, Binding: "verify_sig_ext_reject"},
 	})
 	if err == nil {
-		t.Fatalf("expected duplicate active profile error")
+		t.Fatalf("expected duplicate deployment error")
 	}
 }
 
 func TestBuildCoreExtProfilesUnsupportedBindingRejected(t *testing.T) {
 	_, err := buildCoreExtProfiles([]CoreExtProfileJSON{
-		{ExtID: 10, Active: true, AllowedSuiteIDs: []uint8{3}, Binding: "unknown-binding"},
+		{ExtID: 10, ActivationHeight: 0, AllowedSuiteIDs: []uint8{3}, Binding: "unknown-binding"},
 	})
 	if err == nil {
 		t.Fatalf("expected unsupported binding error")

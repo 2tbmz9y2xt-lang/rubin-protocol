@@ -158,28 +158,18 @@ type UtxoJSON struct {
 }
 
 type CoreExtProfileJSON struct {
-	ExtID           uint16  `json:"ext_id"`
-	Active          bool    `json:"active"`
-	AllowedSuiteIDs []uint8 `json:"allowed_suite_ids,omitempty"`
-	Binding         string  `json:"binding,omitempty"`
-}
-
-type staticCoreExtProfiles map[uint16]consensus.CoreExtProfile
-
-func (m staticCoreExtProfiles) LookupCoreExtProfile(extID uint16, _ uint64) (consensus.CoreExtProfile, bool, error) {
-	p, ok := m[extID]
-	return p, ok, nil
+	ExtID            uint16  `json:"ext_id"`
+	ActivationHeight uint64  `json:"activation_height"`
+	AllowedSuiteIDs  []uint8 `json:"allowed_suite_ids,omitempty"`
+	Binding          string  `json:"binding,omitempty"`
 }
 
 func buildCoreExtProfiles(items []CoreExtProfileJSON) (consensus.CoreExtProfileProvider, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
-	profiles := make(staticCoreExtProfiles)
+	deployments := make([]consensus.CoreExtDeploymentProfile, 0, len(items))
 	for _, item := range items {
-		if !item.Active {
-			continue
-		}
 		binding := strings.TrimSpace(item.Binding)
 		verifySigExtFn := consensus.CoreExtVerifySigExtFunc(nil)
 		switch binding {
@@ -199,20 +189,18 @@ func buildCoreExtProfiles(items []CoreExtProfileJSON) (consensus.CoreExtProfileP
 		default:
 			return nil, fmt.Errorf("unsupported core_ext binding: %s", item.Binding)
 		}
-		if _, exists := profiles[item.ExtID]; exists {
-			return nil, fmt.Errorf("duplicate active core_ext profile for ext_id=%d", item.ExtID)
-		}
 		allowed := make(map[uint8]struct{}, len(item.AllowedSuiteIDs))
 		for _, suiteID := range item.AllowedSuiteIDs {
 			allowed[suiteID] = struct{}{}
 		}
-		profiles[item.ExtID] = consensus.CoreExtProfile{
-			Active:         true,
-			AllowedSuites:  allowed,
-			VerifySigExtFn: verifySigExtFn,
-		}
+		deployments = append(deployments, consensus.CoreExtDeploymentProfile{
+			ExtID:            item.ExtID,
+			ActivationHeight: item.ActivationHeight,
+			AllowedSuites:    allowed,
+			VerifySigExtFn:   verifySigExtFn,
+		})
 	}
-	return profiles, nil
+	return consensus.NewStaticCoreExtProfileProvider(deployments)
 }
 
 type ForkChoiceChain struct {
@@ -876,7 +864,13 @@ func runFromStdin() {
 			return
 		}
 
-		s, err := consensus.ConnectBlockBasicInMemoryAtHeight(
+		coreExtProfiles, err := buildCoreExtProfiles(coreExtProfilesReq)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+
+		s, err := consensus.ConnectBlockBasicInMemoryAtHeightAndCoreExtProfiles(
 			blockBytes,
 			expectedPrev,
 			expectedTarget,
@@ -884,6 +878,7 @@ func runFromStdin() {
 			req.PrevTimestamps,
 			&st,
 			chainID,
+			coreExtProfiles,
 		)
 		if err != nil {
 			writeConsensusErr(os.Stdout, err)
@@ -951,21 +946,16 @@ func runFromStdin() {
 			return
 		}
 
-		var s *consensus.UtxoApplySummary
-		if coreExtProfiles != nil {
-			_, s, err = consensus.ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
-				tx,
-				txid,
-				utxos,
-				req.Height,
-				req.BlockTimestamp,
-				blockMTP,
-				chainID,
-				coreExtProfiles,
-			)
-		} else {
-			s, err = consensus.ApplyNonCoinbaseTxBasicWithMTP(tx, txid, utxos, req.Height, req.BlockTimestamp, blockMTP, chainID)
-		}
+		_, s, err := consensus.ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
+			tx,
+			txid,
+			utxos,
+			req.Height,
+			req.BlockTimestamp,
+			blockMTP,
+			chainID,
+			coreExtProfiles,
+		)
 		if err != nil {
 			writeConsensusErr(os.Stdout, err)
 			return

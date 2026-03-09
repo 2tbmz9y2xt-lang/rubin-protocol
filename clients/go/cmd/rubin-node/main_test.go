@@ -172,6 +172,47 @@ func TestParseGenesisConfigRejectsMissingGenesisHash(t *testing.T) {
 	}
 }
 
+func TestParseGenesisConfigFullBuildsCoreExtProfiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	if err := os.WriteFile(path, []byte(`{
+		"chain_id_hex":"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
+		"genesis_hash_hex":"0x8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff",
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[1,3],"binding":"verify_sig_ext_accept"}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+
+	cfg, err := parseGenesisConfigFull(path)
+	if err != nil {
+		t.Fatalf("parseGenesisConfigFull: %v", err)
+	}
+	if cfg.CoreExtProfiles == nil {
+		t.Fatalf("expected core_ext provider")
+	}
+	if _, ok, err := cfg.CoreExtProfiles.LookupCoreExtProfile(7, 11); err != nil {
+		t.Fatalf("lookup pre-activation: %v", err)
+	} else if ok {
+		t.Fatalf("profile must be inactive before activation height")
+	}
+	profile, ok, err := cfg.CoreExtProfiles.LookupCoreExtProfile(7, 12)
+	if err != nil {
+		t.Fatalf("lookup active: %v", err)
+	}
+	if !ok || !profile.Active {
+		t.Fatalf("expected active profile at activation height")
+	}
+	if profile.VerifySigExtFn == nil {
+		t.Fatalf("expected verify_sig_ext binding")
+	}
+	if _, has := profile.AllowedSuites[1]; !has {
+		t.Fatalf("missing allowed suite 1")
+	}
+	if _, has := profile.AllowedSuites[3]; !has {
+		t.Fatalf("missing allowed suite 3")
+	}
+}
+
 func TestRunDryRunUsesDevnetGenesisChainIDByDefault(t *testing.T) {
 	prev := newSyncEngineFn
 	var gotCfg node.SyncConfig
