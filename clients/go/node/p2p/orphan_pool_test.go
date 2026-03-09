@@ -63,6 +63,44 @@ func TestOrphanEviction(t *testing.T) {
 	}
 }
 
+func TestOrphanPoolNilReceiverAdd(t *testing.T) {
+	var pool *orphanPool
+	added, evicted := pool.Add([32]byte{1}, [32]byte{2}, []byte{0x01})
+	if added {
+		t.Fatalf("nil receiver Add must return false")
+	}
+	if evicted != nil {
+		t.Fatalf("nil receiver Add must return nil evicted")
+	}
+	if pool.Len() != 0 {
+		t.Fatalf("nil receiver Len must return 0")
+	}
+}
+
+func TestOrphanPoolEvictedHashesReturned(t *testing.T) {
+	pool := newOrphanPool(2)
+	var parent [32]byte
+	parent[31] = 0xAA
+	var h1, h2, h3 [32]byte
+	h1[31] = 0x01
+	h2[31] = 0x02
+	h3[31] = 0x03
+
+	if added, evicted := pool.Add(h1, parent, []byte{1}); !added || len(evicted) != 0 {
+		t.Fatalf("first add: added=%v evicted=%d", added, len(evicted))
+	}
+	if added, evicted := pool.Add(h2, parent, []byte{2}); !added || len(evicted) != 0 {
+		t.Fatalf("second add: added=%v evicted=%d", added, len(evicted))
+	}
+	added, evicted := pool.Add(h3, parent, []byte{3})
+	if !added {
+		t.Fatalf("third add must succeed")
+	}
+	if len(evicted) != 1 || evicted[0] != h1 {
+		t.Fatalf("expected h1 evicted, got %v", evicted)
+	}
+}
+
 func TestOrphanPoolRejectsOversizedBlocksAndCapsBytes(t *testing.T) {
 	pool := newOrphanPool(500)
 	pool.byteLimit = 8
