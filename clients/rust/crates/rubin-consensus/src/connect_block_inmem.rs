@@ -5,9 +5,12 @@ use crate::block_basic::{
     validate_coinbase_apply_outputs, validate_coinbase_value_bound,
 };
 use crate::constants::{COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT};
+use crate::core_ext::CoreExtProfiles;
 use crate::error::{ErrorCode, TxError};
 use crate::subsidy::block_subsidy;
-use crate::utxo_basic::{apply_non_coinbase_tx_basic_update_with_mtp, Outpoint, UtxoEntry};
+use crate::utxo_basic::{
+    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles, Outpoint, UtxoEntry,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InMemoryChainState {
@@ -61,7 +64,12 @@ pub fn connect_block_basic_in_memory_at_height(
     let mut sum_fees: u64 = 0;
     for i in 1..pb.txs.len() {
         let base_utxos = work_utxos.as_ref().unwrap_or(&state.utxos);
-        let (next_utxos, s) = apply_non_coinbase_tx_basic_update_with_mtp(
+        // Use the profile-injection variant with empty profiles so that
+        // pre-activation CORE_EXT spends (anyone-can-spend sentinel
+        // witnesses) remain valid at consensus level.  The fail-closed
+        // guard in the default apply_non_coinbase_tx_basic_update_with_mtp
+        // is for node-level admission control, not for block connection.
+        let (next_utxos, s) = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
             &pb.txs[i],
             pb.txids[i],
             base_utxos,
@@ -69,6 +77,7 @@ pub fn connect_block_basic_in_memory_at_height(
             pb.header.timestamp,
             block_mtp,
             chain_id,
+            &CoreExtProfiles::empty(),
         )?;
         work_utxos = Some(next_utxos);
         sum_fees = sum_fees

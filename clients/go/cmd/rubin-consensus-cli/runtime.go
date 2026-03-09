@@ -951,21 +951,21 @@ func runFromStdin() {
 			return
 		}
 
+		// Always use the profile-injection variant so that pre-activation
+		// CORE_EXT spends (anyone-can-spend sentinel witnesses) are accepted
+		// when no profiles are provided.  The default ApplyNonCoinbaseTxBasicWithMTP
+		// is fail-closed (node-level admission), not suitable for conformance testing.
 		var s *consensus.UtxoApplySummary
-		if coreExtProfiles != nil {
-			_, s, err = consensus.ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
-				tx,
-				txid,
-				utxos,
-				req.Height,
-				req.BlockTimestamp,
-				blockMTP,
-				chainID,
-				coreExtProfiles,
-			)
-		} else {
-			s, err = consensus.ApplyNonCoinbaseTxBasicWithMTP(tx, txid, utxos, req.Height, req.BlockTimestamp, blockMTP, chainID)
-		}
+		_, s, err = consensus.ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
+			tx,
+			txid,
+			utxos,
+			req.Height,
+			req.BlockTimestamp,
+			blockMTP,
+			chainID,
+			coreExtProfiles,
+		)
 		if err != nil {
 			writeConsensusErr(os.Stdout, err)
 			return

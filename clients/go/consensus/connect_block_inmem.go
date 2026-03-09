@@ -77,7 +77,12 @@ func ConnectBlockBasicInMemoryAtHeight(
 		tx := pb.Txs[i]
 		txid := pb.Txids[i]
 
-		nextUtxos, s, err := ApplyNonCoinbaseTxBasicUpdateWithMTP(
+		// Use the profile-injection variant with nil profiles so that
+		// pre-activation CORE_EXT spends (anyone-can-spend sentinel
+		// witnesses) remain valid at consensus level.  The fail-closed
+		// guard in the default ApplyNonCoinbaseTxBasicUpdateWithMTP is
+		// for node-level admission control, not for block connection.
+		nextUtxos, s, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
 			tx,
 			txid,
 			workUtxos,
@@ -85,6 +90,7 @@ func ConnectBlockBasicInMemoryAtHeight(
 			pb.Header.Timestamp,
 			blockMTP,
 			chainID,
+			nil,
 		)
 		if err != nil {
 			return nil, err

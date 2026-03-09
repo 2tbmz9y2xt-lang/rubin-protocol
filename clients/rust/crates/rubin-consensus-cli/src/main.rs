@@ -2,8 +2,7 @@ use num_bigint::BigUint;
 use num_traits::Zero;
 use rubin_consensus::merkle::witness_merkle_root_wtxids;
 use rubin_consensus::{
-    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles,
-    apply_non_coinbase_tx_basic_with_mtp, block_hash, compact_shortid,
+    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles, block_hash, compact_shortid,
     connect_block_basic_in_memory_at_height, featurebit_state_at_height_from_window_counts,
     flagday_active_at_height, fork_work_from_target, merkle_root_txids, parse_tx, pow_check,
     retarget_v1, retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_public,
@@ -2338,29 +2337,20 @@ fn main() {
                 }
             };
 
-            let apply_result = if core_ext_profiles.active.is_empty() {
-                apply_non_coinbase_tx_basic_with_mtp(
-                    &tx,
-                    txid,
-                    &utxo_set,
-                    req.height,
-                    req.block_timestamp,
-                    block_mtp,
-                    chain_id,
-                )
-                .map(|summary| (utxo_set.clone(), summary))
-            } else {
-                apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
-                    &tx,
-                    txid,
-                    &utxo_set,
-                    req.height,
-                    req.block_timestamp,
-                    block_mtp,
-                    chain_id,
-                    &core_ext_profiles,
-                )
-            };
+            // Always use the profile-injection variant so that pre-activation
+            // CORE_EXT spends (anyone-can-spend sentinel witnesses) are accepted
+            // when no profiles are provided.  The default apply_non_coinbase_tx_basic_with_mtp
+            // is fail-closed (node-level admission), not suitable for conformance testing.
+            let apply_result = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
+                &tx,
+                txid,
+                &utxo_set,
+                req.height,
+                req.block_timestamp,
+                block_mtp,
+                chain_id,
+                &core_ext_profiles,
+            );
 
             match apply_result {
                 Ok((_next_utxos, summary)) => {

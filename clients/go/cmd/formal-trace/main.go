@@ -620,7 +620,10 @@ func run(fixturesDir, outPath string) error {
 						coreExtProfiles, e := buildCoreExtProfiles(v.CoreExtProfiles)
 						if e != nil {
 							runErr = e
-						} else if coreExtProfiles != nil {
+						} else {
+							// Always use the profile-injection variant so that
+							// pre-activation CORE_EXT spends are accepted when
+							// no profiles are provided (consensus-level behavior).
 							_, sum, runErr = consensus.ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
 								tx,
 								txid,
@@ -630,16 +633,6 @@ func run(fixturesDir, outPath string) error {
 								mtp,
 								chainID,
 								coreExtProfiles,
-							)
-						} else {
-							_, sum, runErr = consensus.ApplyNonCoinbaseTxBasicUpdateWithMTP(
-								tx,
-								txid,
-								utxos,
-								v.Height,
-								v.BlockTimestamp,
-								mtp,
-								chainID,
 							)
 						}
 					}
