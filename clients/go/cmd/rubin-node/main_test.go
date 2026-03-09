@@ -213,6 +213,115 @@ func TestParseGenesisConfigFullBuildsCoreExtProfiles(t *testing.T) {
 	}
 }
 
+func TestParseGenesisConfigFullReadFileError(t *testing.T) {
+	_, err := parseGenesisConfigFull(filepath.Join(t.TempDir(), "missing.json"))
+	if err == nil {
+		t.Fatalf("expected read error")
+	}
+}
+
+func TestParseGenesisConfigFullRejectsInvalidJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	if err := os.WriteFile(path, []byte(`{"chain_id_hex"`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+
+	if _, err := parseGenesisConfigFull(path); err == nil {
+		t.Fatalf("expected json error")
+	}
+}
+
+func TestParseGenesisConfigFullRejectsInvalidChainID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	genesisHashBytes := node.DevnetGenesisBlockHash()
+	genesisHash := hex.EncodeToString(genesisHashBytes[:])
+	if err := os.WriteFile(path, []byte(`{"chain_id_hex":"zz","genesis_hash_hex":"0x`+genesisHash+`"}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+
+	if _, err := parseGenesisConfigFull(path); err == nil {
+		t.Fatalf("expected chain_id parse error")
+	}
+}
+
+func TestParseGenesisConfigFullRejectsInvalidCoreExtBinding(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	chainIDBytes := node.DevnetGenesisChainID()
+	genesisHashBytes := node.DevnetGenesisBlockHash()
+	chainID := hex.EncodeToString(chainIDBytes[:])
+	genesisHash := hex.EncodeToString(genesisHashBytes[:])
+	if err := os.WriteFile(path, []byte(`{
+		"chain_id_hex":"0x`+chainID+`",
+		"genesis_hash_hex":"0x`+genesisHash+`",
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"binding":"unsupported"}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+
+	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "unsupported core_ext binding") {
+		t.Fatalf("expected unsupported binding error, got %v", err)
+	}
+}
+
+func TestParseGenesisHashRejectsInvalidHeaderBytes(t *testing.T) {
+	if _, err := parseGenesisHash(genesisPack{GenesisHeaderBytesHex: "zz"}); err == nil {
+		t.Fatalf("expected invalid hex error")
+	}
+	if _, err := parseGenesisHash(genesisPack{GenesisHeaderBytesHex: "00"}); err == nil {
+		t.Fatalf("expected invalid header length error")
+	}
+}
+
+func TestParseCoreExtBindingVariants(t *testing.T) {
+	tests := []struct {
+		name    string
+		binding string
+		wantNil bool
+		wantOK  bool
+		wantErr bool
+	}{
+		{name: "empty", binding: "", wantNil: true},
+		{name: "native", binding: "native_verify_sig", wantNil: true},
+		{name: "accept", binding: "verify_sig_ext_accept", wantOK: true},
+		{name: "reject", binding: "verify_sig_ext_reject"},
+		{name: "error", binding: "verify_sig_ext_error", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fn, err := parseCoreExtBinding(tt.binding)
+			if err != nil {
+				t.Fatalf("parseCoreExtBinding(%q): %v", tt.binding, err)
+			}
+			if tt.wantNil {
+				if fn != nil {
+					t.Fatalf("expected nil verifier for %q", tt.binding)
+				}
+				return
+			}
+			if fn == nil {
+				t.Fatalf("expected verifier for %q", tt.binding)
+			}
+			ok, callErr := fn(7, 1, nil, nil, [32]byte{}, nil)
+			if ok != tt.wantOK {
+				t.Fatalf("verify result=%v, want %v", ok, tt.wantOK)
+			}
+			if tt.wantErr {
+				if callErr == nil {
+					t.Fatalf("expected verifier error for %q", tt.binding)
+				}
+				return
+			}
+			if callErr != nil {
+				t.Fatalf("unexpected verifier error for %q: %v", tt.binding, callErr)
+			}
+		})
+	}
+}
+
 func TestRunDryRunUsesDevnetGenesisChainIDByDefault(t *testing.T) {
 	prev := newSyncEngineFn
 	var gotCfg node.SyncConfig

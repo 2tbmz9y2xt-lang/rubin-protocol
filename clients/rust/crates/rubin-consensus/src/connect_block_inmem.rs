@@ -52,6 +52,7 @@ pub fn connect_block_basic_in_memory_at_height(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn connect_block_basic_in_memory_at_height_and_core_ext_deployments(
     block_bytes: &[u8],
     expected_prev_hash: Option<[u8; 32]>,
