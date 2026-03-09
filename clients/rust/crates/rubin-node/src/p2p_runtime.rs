@@ -382,8 +382,11 @@ impl PeerSession {
         {
             return Ok(());
         }
+        let prev_timestamps = sync_engine
+            .prev_timestamps_for_next_block()
+            .map_err(io::Error::other)?;
         sync_engine
-            .apply_block(block_bytes, None)
+            .apply_block(block_bytes, prev_timestamps.as_deref())
             .map_err(io::Error::other)?;
         Ok(())
     }

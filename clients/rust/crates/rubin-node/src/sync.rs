@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use rubin_consensus::constants::POW_LIMIT;
-use rubin_consensus::{block_hash, parse_block_bytes};
+use rubin_consensus::{block_hash, parse_block_bytes, parse_block_header_bytes};
 
 use crate::blockstore::BlockStore;
 use crate::chainstate::{ChainState, ChainStateConnectSummary};
@@ -209,6 +209,37 @@ impl SyncEngine {
 
         Ok(summary)
     }
+
+    pub fn prev_timestamps_for_next_block(&self) -> Result<Option<Vec<u64>>, String> {
+        if !self.chain_state.has_tip {
+            return Ok(None);
+        }
+        let block_store = self
+            .block_store
+            .as_ref()
+            .ok_or_else(|| "sync engine missing blockstore for timestamp context".to_string())?;
+
+        let next_height = self.chain_state.height.saturating_add(1);
+        let window_len = usize::try_from(next_height.min(11)).unwrap_or(11);
+        let mut out = Vec::with_capacity(window_len);
+
+        for offset in 0..window_len {
+            let offset_u64 = u64::try_from(offset).map_err(|_| "offset overflow".to_string())?;
+            let height = self
+                .chain_state
+                .height
+                .checked_sub(offset_u64)
+                .ok_or_else(|| "height underflow".to_string())?;
+            let hash = block_store
+                .canonical_hash(height)?
+                .ok_or_else(|| format!("missing canonical hash at height {height}"))?;
+            let header_bytes = block_store.get_header_by_hash(hash)?;
+            let header = parse_block_header_bytes(&header_bytes).map_err(|e| e.to_string())?;
+            out.push(header.timestamp);
+        }
+
+        Ok(Some(out))
+    }
 }
 
 fn validate_mainnet_genesis_guard(cfg: &SyncConfig) -> Result<(), String> {
@@ -314,6 +345,30 @@ mod tests {
             .expect("tip")
             .expect("some tip");
         assert_eq!(tip.0, 0);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn prev_timestamps_for_next_block_reads_canonical_headers() {
+        let dir = unique_temp_path("rubin-node-sync-prev-timestamps");
+        let chain_state_file = chain_state_path(&dir);
+        let block_store_root = block_store_path(&dir);
+        let store = BlockStore::open(block_store_root).expect("open blockstore");
+
+        let st = ChainState::new();
+        let cfg = default_sync_config(Some(POW_LIMIT), [0u8; 32], Some(chain_state_file));
+        let mut engine = SyncEngine::new(st, Some(store), cfg).expect("new sync");
+
+        let block = hex_to_bytes(VALID_BLOCK_HEX);
+        let parsed = rubin_consensus::parse_block_bytes(&block).expect("parse block");
+        engine.apply_block(&block, None).expect("apply block");
+
+        let prev = engine
+            .prev_timestamps_for_next_block()
+            .expect("timestamp context")
+            .expect("non-genesis context");
+        assert_eq!(prev, vec![parsed.header.timestamp]);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
