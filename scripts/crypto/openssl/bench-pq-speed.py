@@ -18,6 +18,8 @@ ROW_RE = re.compile(
     r"(?P<verify_s>[0-9.]+)\s*$"
 )
 
+SUPPORTED_ALGORITHMS = ["ML-DSA-87", "SLH-DSA-SHAKE-256f"]
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run OpenSSL speed benchmark for PQ signature algorithms")
@@ -27,12 +29,19 @@ def main() -> int:
     )
     parser.add_argument("--seconds", type=int, default=5)
     parser.add_argument("--output-json", default="")
+    parser.add_argument(
+        "--algorithm",
+        action="append",
+        choices=SUPPORTED_ALGORITHMS,
+        help="Algorithm to benchmark. Repeat to include optional non-native candidates. Default: ML-DSA-87 only.",
+    )
     args = parser.parse_args()
 
     openssl_bin = Path(args.openssl_bin)
     if not openssl_bin.exists():
         raise SystemExit(f"openssl binary not found: {openssl_bin}")
 
+    algorithms = args.algorithm or ["ML-DSA-87"]
     cmd = [
         str(openssl_bin),
         "speed",
@@ -40,8 +49,7 @@ def main() -> int:
         "-signature-algorithms",
         "-seconds",
         str(args.seconds),
-        "ML-DSA-87",
-        "SLH-DSA-SHAKE-256f",
+        *algorithms,
     ]
     out = subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
 
@@ -55,25 +63,27 @@ def main() -> int:
             record[key] = float(match.group(key))
         rows.append(record)
 
-    if len(rows) != 2:
+    if len(rows) != len(algorithms):
         raise SystemExit(f"failed to parse speed output\n{out}")
 
     rows = sorted(rows, key=lambda row: row["algorithm"])
-    mldsa = next(row for row in rows if row["algorithm"] == "ML-DSA-87")
-    slh = next(row for row in rows if row["algorithm"] == "SLH-DSA-SHAKE-256f")
 
     result = {
         "openssl_bin": str(openssl_bin),
         "seconds": args.seconds,
         "raw_output": out,
         "benchmarks": rows,
-        "ratios": {
-            "verify_latency_slh_over_mldsa": slh["verify_sec"] / mldsa["verify_sec"],
-            "sign_latency_slh_over_mldsa": slh["sign_sec"] / mldsa["sign_sec"],
-            "verify_throughput_mldsa_over_slh": mldsa["verify_s"] / slh["verify_s"],
-            "sign_throughput_mldsa_over_slh": mldsa["sign_s"] / slh["sign_s"],
-        },
     }
+    if {"ML-DSA-87", "SLH-DSA-SHAKE-256f"}.issubset({row["algorithm"] for row in rows}):
+        mldsa = next(row for row in rows if row["algorithm"] == "ML-DSA-87")
+        slh = next(row for row in rows if row["algorithm"] == "SLH-DSA-SHAKE-256f")
+        result["ratios"] = {
+            "verify_latency_candidate_over_mldsa": slh["verify_sec"] / mldsa["verify_sec"],
+            "sign_latency_candidate_over_mldsa": slh["sign_sec"] / mldsa["sign_sec"],
+            "verify_throughput_mldsa_over_candidate": mldsa["verify_s"] / slh["verify_s"],
+            "sign_throughput_mldsa_over_candidate": mldsa["sign_s"] / slh["sign_s"],
+            "candidate_algorithm": "SLH-DSA-SHAKE-256f",
+        }
 
     if args.output_json:
         output_path = Path(args.output_json)

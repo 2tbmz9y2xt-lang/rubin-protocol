@@ -12,7 +12,7 @@ set -euo pipefail
 # - RUBIN_OPENSSL_FIPS_MODE:
 #     - off   (default): print summary only, exit 0
 #     - ready: attempt to load fips provider, but do not fail if unavailable
-#     - only : require fips provider + ML-DSA (SLH optional), otherwise exit non-zero
+#     - only : require fips provider + ML-DSA baseline capability, otherwise exit non-zero
 #
 # Expected usage:
 #   scripts/dev-env.sh -- scripts/crypto/openssl/fips-preflight.sh
@@ -59,8 +59,8 @@ echo "[fips-preflight] providers(with fips):"
 openssl list -providers -provider fips || true
 echo
 
-echo "[fips-preflight] signature algos in provider=fips (filtered):"
-openssl list -signature-algorithms -provider fips 2>/dev/null | grep -Eai 'ml-dsa|mldsa|slh-dsa|slh' || true
+echo "[fips-preflight] signature algos in provider=fips (ML-DSA baseline filter):"
+openssl list -signature-algorithms -provider fips 2>/dev/null | grep -Eai 'ml-dsa|mldsa' || true
 echo
 
 if [[ "${MODE}" == "only" ]]; then
