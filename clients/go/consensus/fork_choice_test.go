@@ -47,3 +47,23 @@ func TestChainWorkFromTargets_Sums(t *testing.T) {
 		t.Fatalf("sum mismatch")
 	}
 }
+
+func TestWorkFromTarget_AcceptsPowLimitBoundary(t *testing.T) {
+	w, err := WorkFromTarget(POW_LIMIT)
+	if err != nil {
+		t.Fatalf("WorkFromTarget(pow_limit): %v", err)
+	}
+	if got := w.Cmp(big.NewInt(1)); got != 0 {
+		t.Fatalf("work at pow_limit=%s, want 1", w.String())
+	}
+}
+
+func TestChainWorkFromTargets_PropagatesInvalidTarget(t *testing.T) {
+	_, err := ChainWorkFromTargets([][32]byte{filledHash(0xff), {}})
+	if err == nil {
+		t.Fatalf("expected invalid target error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
+	}
+}
