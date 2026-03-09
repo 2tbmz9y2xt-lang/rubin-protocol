@@ -105,10 +105,14 @@ func (p *peer) acceptedRelayedBlock(blockHash [32]byte, summary *node.ChainState
 }
 
 func (s *Service) retainOrResolveOrphan(skip *peer, blockHash, parentHash [32]byte, blockBytes []byte) {
-	if !s.orphans.Add(blockHash, parentHash, blockBytes) {
+	added, evicted := s.orphans.Add(blockHash, parentHash, blockBytes)
+	if !added {
 		return
 	}
 	s.blockSeen.Add(blockHash)
+	for _, dropped := range evicted {
+		s.blockSeen.Remove(dropped)
+	}
 	parentPresent, err := s.hasBlock(parentHash)
 	if err != nil || !parentPresent {
 		return

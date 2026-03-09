@@ -14,10 +14,10 @@ func TestOrphanPoolDefaultLimitAndDedup(t *testing.T) {
 	parent[31] = 0x55
 	var blockHash [32]byte
 	blockHash[31] = 0x77
-	if !pool.Add(blockHash, parent, []byte{0x01, 0x02}) {
+	if added, _ := pool.Add(blockHash, parent, []byte{0x01, 0x02}); !added {
 		t.Fatalf("expected first add to succeed")
 	}
-	if pool.Add(blockHash, parent, []byte{0x03}) {
+	if added, _ := pool.Add(blockHash, parent, []byte{0x03}); added {
 		t.Fatalf("expected duplicate add to be rejected")
 	}
 	children := pool.TakeChildren(parent)
@@ -45,7 +45,7 @@ func TestOrphanEviction(t *testing.T) {
 		var blockHash [32]byte
 		blockHash[30] = byte((i + 1) >> 8)
 		blockHash[31] = byte(i + 1)
-		if !pool.Add(blockHash, sharedParent, []byte{byte(i)}) {
+		if added, _ := pool.Add(blockHash, sharedParent, []byte{byte(i)}); !added {
 			t.Fatalf("Add(%d) unexpectedly rejected", i)
 		}
 	}
@@ -74,13 +74,13 @@ func TestOrphanPoolRejectsOversizedBlocksAndCapsBytes(t *testing.T) {
 	var second [32]byte
 	second[31] = 0x03
 
-	if pool.Add(first, parent, make([]byte, 9)) {
+	if added, _ := pool.Add(first, parent, make([]byte, 9)); added {
 		t.Fatalf("expected oversized orphan rejection")
 	}
-	if !pool.Add(first, parent, []byte{1, 2, 3, 4, 5}) {
+	if added, _ := pool.Add(first, parent, []byte{1, 2, 3, 4, 5}); !added {
 		t.Fatalf("expected first orphan add")
 	}
-	if !pool.Add(second, parent, []byte{6, 7, 8, 9, 10}) {
+	if added, _ := pool.Add(second, parent, []byte{6, 7, 8, 9, 10}); !added {
 		t.Fatalf("expected second orphan add")
 	}
 	if got := pool.Len(); got != 1 {
