@@ -505,6 +505,9 @@ func (s *SyncEngine) ApplyBlockWithReorg(blockBytes []byte, prevTimestamps []uin
 		return nil, err
 	}
 	if !switchToBranch {
+		if _, err := consensus.ValidateBlockBasicWithContextAtHeight(blockBytes, &pb.Header.PrevBlockHash, s.cfg.ExpectedTarget, candidateHeight, prevTimestamps); err != nil {
+			return nil, err
+		}
 		if err := s.blockStore.StoreBlock(blockHash, pb.HeaderBytes, blockBytes); err != nil {
 			return nil, err
 		}
