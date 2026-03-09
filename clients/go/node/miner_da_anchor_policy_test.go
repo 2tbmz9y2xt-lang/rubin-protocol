@@ -66,7 +66,7 @@ func TestMinerPolicyRejectsNonCoinbaseAnchorOutputs(t *testing.T) {
 	var anchor [32]byte
 	anchor[0] = 0x42
 	txBytes := mustMarshalTxForNodeTest(t, &consensus.Tx{
-		Version:   0,
+		Version:   1,
 		TxKind:    0x00,
 		TxNonce:   1,
 		Inputs:    []consensus.TxInput{{PrevTxid: prev, PrevVout: 0, Sequence: 0}},
