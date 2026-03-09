@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -500,6 +501,53 @@ func TestRestoreChainState_NilDestination(t *testing.T) {
 	}
 }
 
+func TestSyncEngineApplyBlockRejectsPostActivationCoreExtSpend(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := ChainStatePath(dir)
+	store, err := OpenBlockStore(BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("open blockstore: %v", err)
+	}
+	target := consensus.POW_LIMIT
+	profiles, err := consensus.NewStaticCoreExtProfileProvider([]consensus.CoreExtDeploymentProfile{{
+		ExtID:            1,
+		ActivationHeight: 1,
+		AllowedSuites:    map[uint8]struct{}{0x03: {}},
+	}})
+	if err != nil {
+		t.Fatalf("NewStaticCoreExtProfileProvider: %v", err)
+	}
+	cfg := DefaultSyncConfig(&target, devnetGenesisChainID, chainStatePath)
+	cfg.CoreExtProfiles = profiles
+	engine, err := NewSyncEngine(NewChainState(), store, cfg)
+	if err != nil {
+		t.Fatalf("new sync engine: %v", err)
+	}
+
+	if _, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil); err != nil {
+		t.Fatalf("apply genesis block: %v", err)
+	}
+
+	engine.chainState.Utxos[consensus.Outpoint{Txid: [32]byte{0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee}, Vout: 0}] = consensus.UtxoEntry{
+		Value:        100,
+		CovenantType: consensus.COV_TYPE_CORE_EXT,
+		CovenantData: coreExtCovenantData(1, nil),
+	}
+
+	spendTx := mustDecodeHexBytes(t, "0100000000010000000000000001eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee000000000000000000015a0000000000000000002101111111111111111111111111111111111111111111111111111111111111111100000000010300010100")
+	_, _, spendWTxID, _, err := consensus.ParseTx(spendTx)
+	if err != nil {
+		t.Fatalf("ParseTx(spend): %v", err)
+	}
+	subsidy := consensus.BlockSubsidy(1, 0)
+	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueForWtxids(t, 1, subsidy, [][32]byte{{}, spendWTxID})
+	block := buildMultiTxBlock(t, devnetGenesisBlockHash, target, 2, coinbase, spendTx)
+
+	if _, err := engine.ApplyBlock(block, nil); err == nil || !strings.Contains(err.Error(), string(consensus.TX_ERR_SIG_ALG_INVALID)) {
+		t.Fatalf("expected %s, got %v", consensus.TX_ERR_SIG_ALG_INVALID, err)
+	}
+}
+
 func mustBuildSignedTransferTxForSyncTest(
 	t *testing.T,
 	utxos map[consensus.Outpoint]consensus.UtxoEntry,
@@ -604,4 +652,13 @@ func coinbaseWithWitnessCommitmentAndP2PKValueForWtxids(t *testing.T, height uin
 		{value: value, covenantType: consensus.COV_TYPE_P2PK, covenantData: testP2PKCovenantData(0x11)},
 		{value: 0, covenantType: consensus.COV_TYPE_ANCHOR, covenantData: commitment[:]},
 	})
+}
+
+func mustDecodeHexBytes(t *testing.T, raw string) []byte {
+	t.Helper()
+	out, err := hex.DecodeString(raw)
+	if err != nil {
+		t.Fatalf("DecodeString: %v", err)
+	}
+	return out
 }

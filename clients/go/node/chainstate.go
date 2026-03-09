@@ -142,6 +142,16 @@ func (s *ChainState) ConnectBlock(
 	prevTimestamps []uint64,
 	chainID [32]byte,
 ) (*ChainStateConnectSummary, error) {
+	return s.ConnectBlockWithCoreExtProfiles(blockBytes, expectedTarget, prevTimestamps, chainID, nil)
+}
+
+func (s *ChainState) ConnectBlockWithCoreExtProfiles(
+	blockBytes []byte,
+	expectedTarget *[32]byte,
+	prevTimestamps []uint64,
+	chainID [32]byte,
+	coreExtProfiles consensus.CoreExtProfileProvider,
+) (*ChainStateConnectSummary, error) {
 	if s == nil {
 		return nil, errors.New("nil chainstate")
 	}
@@ -156,7 +166,7 @@ func (s *ChainState) ConnectBlock(
 		Utxos:            copyUtxoSet(s.Utxos),
 		AlreadyGenerated: new(big.Int).SetUint64(s.AlreadyGenerated),
 	}
-	summary, err := consensus.ConnectBlockBasicInMemoryAtHeight(
+	summary, err := consensus.ConnectBlockBasicInMemoryAtHeightAndCoreExtProfiles(
 		blockBytes,
 		expectedPrevHash,
 		expectedTarget,
@@ -164,6 +174,7 @@ func (s *ChainState) ConnectBlock(
 		prevTimestamps,
 		&workState,
 		chainID,
+		coreExtProfiles,
 	)
 	if err != nil {
 		return nil, err

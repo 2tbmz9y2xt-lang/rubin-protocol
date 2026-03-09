@@ -19,6 +19,98 @@ func coreExtCovenantData(extID uint16, payload []byte) []byte {
 	return out
 }
 
+func TestStaticCoreExtProfileProviderEmptyReturnsNil(t *testing.T) {
+	provider, err := NewStaticCoreExtProfileProvider(nil)
+	if err != nil {
+		t.Fatalf("NewStaticCoreExtProfileProvider(nil): %v", err)
+	}
+	if provider != nil {
+		t.Fatalf("expected nil provider for empty deployments")
+	}
+}
+
+func TestStaticCoreExtProfileProviderRejectsDuplicateExtID(t *testing.T) {
+	_, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{
+		{ExtID: 7, ActivationHeight: 1},
+		{ExtID: 7, ActivationHeight: 2},
+	})
+	if err == nil {
+		t.Fatalf("expected duplicate deployment error")
+	}
+}
+
+func TestStaticCoreExtProfileProviderLookupRespectsActivationHeight(t *testing.T) {
+	verifyFn := func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) {
+		return true, nil
+	}
+	allowed := map[uint8]struct{}{1: {}, 3: {}}
+	provider, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{
+		{
+			ExtID:            7,
+			ActivationHeight: 12,
+			AllowedSuites:    allowed,
+			VerifySigExtFn:   verifyFn,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewStaticCoreExtProfileProvider: %v", err)
+	}
+
+	if profile, ok, err := provider.LookupCoreExtProfile(7, 11); err != nil {
+		t.Fatalf("LookupCoreExtProfile pre-activation: %v", err)
+	} else if ok || profile.Active {
+		t.Fatalf("profile must be inactive before activation height")
+	}
+
+	profile, ok, err := provider.LookupCoreExtProfile(7, 12)
+	if err != nil {
+		t.Fatalf("LookupCoreExtProfile active: %v", err)
+	}
+	if !ok || !profile.Active {
+		t.Fatalf("expected active profile at activation height")
+	}
+	if profile.VerifySigExtFn == nil {
+		t.Fatalf("missing verify_sig_ext binding")
+	}
+	if _, has := profile.AllowedSuites[1]; !has {
+		t.Fatalf("missing allowed suite 1")
+	}
+	if _, has := profile.AllowedSuites[3]; !has {
+		t.Fatalf("missing allowed suite 3")
+	}
+
+	delete(profile.AllowedSuites, 1)
+	profile2, ok, err := provider.LookupCoreExtProfile(7, 12)
+	if err != nil {
+		t.Fatalf("LookupCoreExtProfile second active lookup: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected active profile on second lookup")
+	}
+	if _, has := profile2.AllowedSuites[1]; !has {
+		t.Fatalf("provider must clone allowed suites per lookup")
+	}
+}
+
+func TestStaticCoreExtProfileProviderNilReceiverAndUnknownExtID(t *testing.T) {
+	var provider *StaticCoreExtProfileProvider
+	if profile, ok, err := provider.LookupCoreExtProfile(7, 12); err != nil {
+		t.Fatalf("LookupCoreExtProfile nil receiver: %v", err)
+	} else if ok || profile.Active {
+		t.Fatalf("nil provider must behave as inactive")
+	}
+
+	provider, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{{ExtID: 7, ActivationHeight: 0}})
+	if err != nil {
+		t.Fatalf("NewStaticCoreExtProfileProvider: %v", err)
+	}
+	if profile, ok, err := provider.LookupCoreExtProfile(8, 12); err != nil {
+		t.Fatalf("LookupCoreExtProfile unknown ext id: %v", err)
+	} else if ok || profile.Active {
+		t.Fatalf("unknown ext id must behave as inactive")
+	}
+}
+
 func TestParseTx_UnknownSuiteAcceptedAndCharged(t *testing.T) {
 	var prev [32]byte
 	prev[0] = 0xaa
