@@ -110,6 +110,10 @@ jobs:
         run: |
           set -euo pipefail
           TOOLCHAIN="$(cat rubin-formal/lean-toolchain)"
+          if elan toolchain list | grep -Fq "$TOOLCHAIN"; then
+            elan default "$TOOLCHAIN"
+            exit 0
+          fi
           for attempt in 1 2 3 4; do
             if elan toolchain install "$TOOLCHAIN"; then
               elan default "$TOOLCHAIN"
@@ -352,6 +356,10 @@ jobs:
         run: |
           set -euo pipefail
           TOOLCHAIN="$(cat rubin-formal/lean-toolchain)"
+          if elan toolchain list | grep -Fq "$TOOLCHAIN"; then
+            elan default "$TOOLCHAIN"
+            exit 0
+          fi
           for attempt in 1 2 3 4; do
             if elan toolchain install "$TOOLCHAIN"; then
               elan default "$TOOLCHAIN"
