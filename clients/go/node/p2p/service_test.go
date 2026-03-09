@@ -378,7 +378,7 @@ func TestResolveOrphansDropsInvalidChildBytes(t *testing.T) {
 	parentHash[31] = 0x11
 	var childHash [32]byte
 	childHash[31] = 0x22
-	if !h.service.orphans.Add(childHash, parentHash, []byte{0x00}) {
+	if added, _ := h.service.orphans.Add(childHash, parentHash, []byte{0x00}); !added {
 		t.Fatalf("expected orphan add")
 	}
 
@@ -408,7 +408,7 @@ func TestResolveOrphansRequeuesStillMissingChild(t *testing.T) {
 
 	var wrongParent [32]byte
 	wrongParent[31] = 0x44
-	if !sink.service.orphans.Add(height2Hash, wrongParent, block2Bytes) {
+	if added, _ := sink.service.orphans.Add(height2Hash, wrongParent, block2Bytes); !added {
 		t.Fatalf("expected orphan add")
 	}
 
@@ -523,7 +523,7 @@ func TestAcceptedRelayedBlockBroadcastsResolvedOrphans(t *testing.T) {
 		t.Fatalf("GetBlockByHash(height2): %v", err)
 	}
 
-	if !sink.service.orphans.Add(height2Hash, height1Hash, block2Bytes) {
+	if added, _ := sink.service.orphans.Add(height2Hash, height1Hash, block2Bytes); !added {
 		t.Fatalf("expected orphan add")
 	}
 	sink.service.blockSeen.Add(height2Hash)
@@ -787,4 +787,48 @@ func waitFor(t *testing.T, timeout time.Duration, predicate func() bool) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatalf("condition not met within %s", timeout)
+}
+
+func TestRetainOrResolveOrphanClearsSeenForEvictedOrphan(t *testing.T) {
+	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
+
+	height1Hash, ok, err := source.blockStore.CanonicalHash(1)
+	if err != nil || !ok {
+		t.Fatalf("CanonicalHash(1): ok=%v err=%v", ok, err)
+	}
+	height2Hash, ok, err := source.blockStore.CanonicalHash(2)
+	if err != nil || !ok {
+		t.Fatalf("CanonicalHash(2): ok=%v err=%v", ok, err)
+	}
+	block1Bytes, err := source.blockStore.GetBlockByHash(height1Hash)
+	if err != nil {
+		t.Fatalf("GetBlockByHash(height1): %v", err)
+	}
+	block2Bytes, err := source.blockStore.GetBlockByHash(height2Hash)
+	if err != nil {
+		t.Fatalf("GetBlockByHash(height2): %v", err)
+	}
+
+	sink.service.orphans.limit = 1
+
+	peer := &peer{service: sink.service}
+	if _, err := peer.processRelayedBlock(block1Bytes); err != nil {
+		t.Fatalf("processRelayedBlock(block1): %v", err)
+	}
+	if !sink.service.blockSeen.Has(height1Hash) {
+		t.Fatalf("expected first orphan in blockSeen")
+	}
+	if _, err := peer.processRelayedBlock(block2Bytes); err != nil {
+		t.Fatalf("processRelayedBlock(block2): %v", err)
+	}
+	if sink.service.orphans.Len() != 1 {
+		t.Fatalf("orphans.Len()=%d, want 1", sink.service.orphans.Len())
+	}
+	if sink.service.blockSeen.Has(height1Hash) {
+		t.Fatalf("expected evicted orphan hash to be removed from blockSeen")
+	}
+	if !sink.service.blockSeen.Has(height2Hash) {
+		t.Fatalf("expected latest orphan hash to remain in blockSeen")
+	}
 }
