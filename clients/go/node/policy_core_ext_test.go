@@ -122,3 +122,26 @@ func TestRejectCoreExtTxPreActivation_RejectsSpendWhenProfileMissing(t *testing.
 		t.Fatalf("expected reject")
 	}
 }
+
+func TestRejectCoreExtTxPreActivation_AllowsSpendWhenProfileActive(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0x14
+	raw := txWithOneInputOneOutput(prev, 0, 1, consensus.COV_TYPE_P2PK, make([]byte, consensus.MAX_P2PK_COVENANT_DATA), []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_SENTINEL}})
+	tx := mustParseTx(t, raw)
+
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: prev, Vout: 0}: {
+			Value:        10,
+			CovenantType: consensus.COV_TYPE_CORE_EXT,
+			CovenantData: coreExtCovenantData(9, nil),
+		},
+	}
+	profiles := testCoreExtProfiles{activeByExtID: map[uint16]bool{9: true}}
+	reject, _, err := RejectCoreExtTxPreActivation(tx, utxos, 0, profiles)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if reject {
+		t.Fatalf("expected allow")
+	}
+}
