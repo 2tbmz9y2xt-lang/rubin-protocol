@@ -71,29 +71,12 @@ jobs:
           restore-keys: |
             rust-coverage-${{ runner.os }}-
 
-      - name: Install cargo-tarpaulin (prebuilt)
+      - name: Install cargo-tarpaulin
         env:
           TARPAULIN_VERSION: 0.35.2
         run: |
           set -euo pipefail
-          mkdir -p "$HOME/.cargo/bin"
-          tarpaulin_url="https://github.com/xd009642/tarpaulin/releases/download/${TARPAULIN_VERSION}/cargo-tarpaulin-x86_64-unknown-linux-musl.tar.gz"
-          tarpaulin_archive="$(mktemp)"
-          install_from_release=false
-          if curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused "$tarpaulin_url" -o "$tarpaulin_archive"; then
-            if file "$tarpaulin_archive" | grep -qi 'gzip compressed'; then
-              tar xzf "$tarpaulin_archive" -C "$HOME/.cargo/bin"
-              install_from_release=true
-            else
-              echo "prebuilt tarpaulin asset is not a gzip archive; falling back to cargo install"
-            fi
-          else
-            echo "failed to download prebuilt tarpaulin asset; falling back to cargo install"
-          fi
-          rm -f "$tarpaulin_archive"
-          if [ "$install_from_release" = false ]; then
-            cargo install cargo-tarpaulin --version "$TARPAULIN_VERSION" --locked
-          fi
+          cargo install cargo-tarpaulin --version "$TARPAULIN_VERSION" --locked
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           cargo tarpaulin --version
 
