@@ -113,7 +113,9 @@ def is_safe_git_rev(value: str) -> bool:
 
 
 def is_path_blocked(path: str) -> bool:
-    normalized = path.lstrip("./")
+    normalized = path
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
     if normalized in BLOCKED_EXACT_FILES:
         return True
     for prefix in BLOCKED_PATH_PREFIXES:
