@@ -67,6 +67,17 @@ func (s *boundedHashSet) Has(hash [32]byte) bool {
 	return exists
 }
 
+// Remove deletes hash from the set. Returns true if an entry was removed.
+func (s *boundedHashSet) Remove(hash [32]byte) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.items[hash]; !exists {
+		return false
+	}
+	delete(s.items, hash)
+	return true
+}
+
 // Len returns the current number of entries in the set.
 func (s *boundedHashSet) Len() int {
 	s.mu.RLock()

@@ -46,6 +46,9 @@ type Service struct {
 	peers   map[string]*peer
 	loopWG  sync.WaitGroup
 
+	dialMu       sync.Mutex
+	inFlightDial map[string]struct{}
+
 	reconnectMu    sync.Mutex
 	reconnectState map[string]*reconnectEntry
 	outboundAddrs  []string
@@ -117,6 +120,7 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	return &Service{
 		cfg:            cfg,
 		peers:          make(map[string]*peer),
+		inFlightDial:   make(map[string]struct{}),
 		reconnectState: make(map[string]*reconnectEntry),
 		outboundAddrs:  outboundAddrs,
 		addrMgr:        addrMgr,
