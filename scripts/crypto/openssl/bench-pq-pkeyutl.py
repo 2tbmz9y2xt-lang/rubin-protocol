@@ -11,10 +11,10 @@ import time
 from pathlib import Path
 
 
-ALGORITHMS = [
-    ("ML-DSA-87", 300),
-    ("SLH-DSA-SHAKE-256f", 40),
-]
+ALGORITHM_PROFILES = {
+    "ML-DSA-87": 300,
+    "SLH-DSA-SHAKE-256f": 40,
+}
 
 
 def run(cmd: list[str]) -> None:
@@ -134,6 +134,12 @@ def main() -> int:
         default=32,
         help="Message size in bytes",
     )
+    parser.add_argument(
+        "--algorithm",
+        action="append",
+        choices=sorted(ALGORITHM_PROFILES),
+        help="Algorithm to benchmark. Repeat to include optional non-native candidates. Default: ML-DSA-87 only.",
+    )
     args = parser.parse_args()
 
     openssl_bin = Path(args.openssl_bin)
@@ -151,7 +157,9 @@ def main() -> int:
             "message_bytes": args.msg_bytes,
             "benchmarks": [],
         }
-        for algorithm, iterations in ALGORITHMS:
+        algorithms = args.algorithm or ["ML-DSA-87"]
+        for algorithm in algorithms:
+            iterations = ALGORITHM_PROFILES[algorithm]
             bench = benchmark_algorithm(openssl_bin, algorithm, iterations, msg_path)
             results["benchmarks"].append(bench)
 

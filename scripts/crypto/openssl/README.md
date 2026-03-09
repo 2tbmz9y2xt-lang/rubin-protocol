@@ -80,7 +80,19 @@ Notes:
 
 ## Audit baseline (Apple Silicon, 16 cores)
 
-Reference command:
+Reference command (default / ML-DSA-first):
+
+```bash
+scripts/dev-env.sh -- "$HOME/.cache/rubin-openssl/bundle-<version>/bin/openssl" speed \
+  -elapsed -multi 16 -seconds 30 \
+  -signature-algorithms ML-DSA-87
+```
+
+Reference result (2026-02-23, local macOS host):
+
+- `ML-DSA-87 verify/s = 102012.8`
+
+Optional non-native candidate example:
 
 ```bash
 scripts/dev-env.sh -- "$HOME/.cache/rubin-openssl/bundle-<version>/bin/openssl" speed \
@@ -88,22 +100,29 @@ scripts/dev-env.sh -- "$HOME/.cache/rubin-openssl/bundle-<version>/bin/openssl" 
   -signature-algorithms ML-DSA-87 SLH-DSA-SHAKE-256f
 ```
 
-Reference result (2026-02-23, local macOS host):
-
-- `ML-DSA-87 verify/s = 102012.8`
-- `SLH-DSA-SHAKE-256f verify/s = 7360.8`
-- `verify latency ratio (SLH / ML-DSA) ≈ 13.86x`
+- `candidate example (SLH-DSA-SHAKE-256f) verify/s = 7360.8`
+- `verify latency ratio (candidate example / ML-DSA) ≈ 13.86x`
 
 Interpretation:
 
 - This is a local workstation baseline for audit comparability.
 - Absolute throughput depends on host class and scheduler; use this as a fixed local reference, not a server capacity claim.
 
-## Optional fallback benchmark (`pkeyutl` loop)
+## Optional benchmark (`pkeyutl` loop)
 
 ```bash
 cd <REPO_ROOT>
 scripts/dev-env.sh -- python3 scripts/crypto/openssl/bench-pq-pkeyutl.py \
+  --openssl-bin "$HOME/.cache/rubin-openssl/bundle-<version>/bin/openssl" \
+  --output-json <OUTPUT_JSON_PATH>
+```
+
+Optional non-native candidate example:
+
+```bash
+scripts/dev-env.sh -- python3 scripts/crypto/openssl/bench-pq-pkeyutl.py \
+  --algorithm ML-DSA-87 \
+  --algorithm SLH-DSA-SHAKE-256f \
   --openssl-bin "$HOME/.cache/rubin-openssl/bundle-<version>/bin/openssl" \
   --output-json <OUTPUT_JSON_PATH>
 ```
