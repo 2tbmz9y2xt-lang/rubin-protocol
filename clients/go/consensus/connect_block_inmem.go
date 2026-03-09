@@ -36,6 +36,28 @@ func ConnectBlockBasicInMemoryAtHeight(
 	state *InMemoryChainState,
 	chainID [32]byte,
 ) (*ConnectBlockBasicSummary, error) {
+	return ConnectBlockBasicInMemoryAtHeightAndCoreExtProfiles(
+		blockBytes,
+		expectedPrevHash,
+		expectedTarget,
+		blockHeight,
+		prevTimestamps,
+		state,
+		chainID,
+		nil,
+	)
+}
+
+func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfiles(
+	blockBytes []byte,
+	expectedPrevHash *[32]byte,
+	expectedTarget *[32]byte,
+	blockHeight uint64,
+	prevTimestamps []uint64,
+	state *InMemoryChainState,
+	chainID [32]byte,
+	coreExtProfiles CoreExtProfileProvider,
+) (*ConnectBlockBasicSummary, error) {
 	if state == nil {
 		return nil, txerr(BLOCK_ERR_PARSE, "nil chainstate")
 	}
@@ -77,7 +99,7 @@ func ConnectBlockBasicInMemoryAtHeight(
 		tx := pb.Txs[i]
 		txid := pb.Txids[i]
 
-		nextUtxos, s, err := ApplyNonCoinbaseTxBasicUpdateWithMTP(
+		nextUtxos, s, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
 			tx,
 			txid,
 			workUtxos,
@@ -85,6 +107,7 @@ func ConnectBlockBasicInMemoryAtHeight(
 			pb.Header.Timestamp,
 			blockMTP,
 			chainID,
+			coreExtProfiles,
 		)
 		if err != nil {
 			return nil, err

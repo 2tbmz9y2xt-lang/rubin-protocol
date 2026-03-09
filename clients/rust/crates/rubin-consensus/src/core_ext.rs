@@ -39,6 +39,19 @@ pub struct CoreExtProfiles {
     pub active: Vec<CoreExtActiveProfile>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoreExtDeploymentProfile {
+    pub ext_id: u16,
+    pub activation_height: u64,
+    pub allowed_suite_ids: Vec<u8>,
+    pub verification_binding: CoreExtVerificationBinding,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CoreExtDeploymentProfiles {
+    pub deployments: Vec<CoreExtDeploymentProfile>,
+}
+
 impl CoreExtProfiles {
     pub fn empty() -> Self {
         Self { active: Vec::new() }
@@ -59,6 +72,50 @@ impl CoreExtProfiles {
             found = Some(p);
         }
         Ok(found)
+    }
+}
+
+impl CoreExtDeploymentProfiles {
+    pub fn empty() -> Self {
+        Self {
+            deployments: Vec::new(),
+        }
+    }
+
+    pub fn active_profiles_at_height(&self, height: u64) -> Result<CoreExtProfiles, TxError> {
+        let mut active = Vec::new();
+        for deployment in &self.deployments {
+            if height < deployment.activation_height {
+                continue;
+            }
+            if active
+                .iter()
+                .any(|profile: &CoreExtActiveProfile| profile.ext_id == deployment.ext_id)
+            {
+                return Err(TxError::new(
+                    ErrorCode::TxErrCovenantTypeInvalid,
+                    "CORE_EXT multiple ACTIVE profiles for ext_id",
+                ));
+            }
+            active.push(CoreExtActiveProfile {
+                ext_id: deployment.ext_id,
+                allowed_suite_ids: deployment.allowed_suite_ids.clone(),
+                verification_binding: deployment.verification_binding.clone(),
+            });
+        }
+        Ok(CoreExtProfiles { active })
+    }
+}
+
+pub fn core_ext_verification_binding_from_name(
+    binding_name: &str,
+) -> Result<CoreExtVerificationBinding, String> {
+    match binding_name.trim() {
+        "" | "native_verify_sig" => Ok(CoreExtVerificationBinding::NativeVerifySig),
+        "verify_sig_ext_accept" => Ok(CoreExtVerificationBinding::VerifySigExtAccept),
+        "verify_sig_ext_reject" => Ok(CoreExtVerificationBinding::VerifySigExtReject),
+        "verify_sig_ext_error" => Ok(CoreExtVerificationBinding::VerifySigExtError),
+        _ => Err(format!("unsupported core_ext binding: {binding_name}")),
     }
 }
 
@@ -532,5 +589,47 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    }
+
+    #[test]
+    fn core_ext_deployments_activate_at_height() {
+        let deployments = CoreExtDeploymentProfiles {
+            deployments: vec![CoreExtDeploymentProfile {
+                ext_id: 7,
+                activation_height: 10,
+                allowed_suite_ids: vec![0x03],
+                verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+            }],
+        };
+
+        let before = deployments.active_profiles_at_height(9).unwrap();
+        assert!(before.active.is_empty());
+
+        let active = deployments.active_profiles_at_height(10).unwrap();
+        assert_eq!(active.active.len(), 1);
+        assert_eq!(active.active[0].ext_id, 7);
+    }
+
+    #[test]
+    fn core_ext_deployments_duplicate_active_rejected() {
+        let deployments = CoreExtDeploymentProfiles {
+            deployments: vec![
+                CoreExtDeploymentProfile {
+                    ext_id: 7,
+                    activation_height: 0,
+                    allowed_suite_ids: vec![0x03],
+                    verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+                },
+                CoreExtDeploymentProfile {
+                    ext_id: 7,
+                    activation_height: 0,
+                    allowed_suite_ids: vec![0x04],
+                    verification_binding: CoreExtVerificationBinding::VerifySigExtReject,
+                },
+            ],
+        };
+
+        let err = deployments.active_profiles_at_height(0).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
     }
 }
