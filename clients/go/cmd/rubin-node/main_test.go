@@ -172,6 +172,156 @@ func TestParseGenesisConfigRejectsMissingGenesisHash(t *testing.T) {
 	}
 }
 
+func TestParseGenesisConfigFullBuildsCoreExtProfiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	if err := os.WriteFile(path, []byte(`{
+		"chain_id_hex":"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
+		"genesis_hash_hex":"0x8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff",
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[1,3],"binding":"verify_sig_ext_accept"}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+
+	cfg, err := parseGenesisConfigFull(path)
+	if err != nil {
+		t.Fatalf("parseGenesisConfigFull: %v", err)
+	}
+	if cfg.CoreExtProfiles == nil {
+		t.Fatalf("expected core_ext provider")
+	}
+	if _, ok, err := cfg.CoreExtProfiles.LookupCoreExtProfile(7, 11); err != nil {
+		t.Fatalf("lookup pre-activation: %v", err)
+	} else if ok {
+		t.Fatalf("profile must be inactive before activation height")
+	}
+	profile, ok, err := cfg.CoreExtProfiles.LookupCoreExtProfile(7, 12)
+	if err != nil {
+		t.Fatalf("lookup active: %v", err)
+	}
+	if !ok || !profile.Active {
+		t.Fatalf("expected active profile at activation height")
+	}
+	if profile.VerifySigExtFn == nil {
+		t.Fatalf("expected verify_sig_ext binding")
+	}
+	if _, has := profile.AllowedSuites[1]; !has {
+		t.Fatalf("missing allowed suite 1")
+	}
+	if _, has := profile.AllowedSuites[3]; !has {
+		t.Fatalf("missing allowed suite 3")
+	}
+}
+
+func TestParseGenesisConfigFullReadFileError(t *testing.T) {
+	_, err := parseGenesisConfigFull(filepath.Join(t.TempDir(), "missing.json"))
+	if err == nil {
+		t.Fatalf("expected read error")
+	}
+}
+
+func TestParseGenesisConfigFullRejectsInvalidJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	if err := os.WriteFile(path, []byte(`{"chain_id_hex"`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+
+	if _, err := parseGenesisConfigFull(path); err == nil {
+		t.Fatalf("expected json error")
+	}
+}
+
+func TestParseGenesisConfigFullRejectsInvalidChainID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	genesisHashBytes := node.DevnetGenesisBlockHash()
+	genesisHash := hex.EncodeToString(genesisHashBytes[:])
+	if err := os.WriteFile(path, []byte(`{"chain_id_hex":"zz","genesis_hash_hex":"0x`+genesisHash+`"}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+
+	if _, err := parseGenesisConfigFull(path); err == nil {
+		t.Fatalf("expected chain_id parse error")
+	}
+}
+
+func TestParseGenesisConfigFullRejectsInvalidCoreExtBinding(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	chainIDBytes := node.DevnetGenesisChainID()
+	genesisHashBytes := node.DevnetGenesisBlockHash()
+	chainID := hex.EncodeToString(chainIDBytes[:])
+	genesisHash := hex.EncodeToString(genesisHashBytes[:])
+	if err := os.WriteFile(path, []byte(`{
+		"chain_id_hex":"0x`+chainID+`",
+		"genesis_hash_hex":"0x`+genesisHash+`",
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"binding":"unsupported"}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+
+	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "unsupported core_ext binding") {
+		t.Fatalf("expected unsupported binding error, got %v", err)
+	}
+}
+
+func TestParseGenesisHashRejectsInvalidHeaderBytes(t *testing.T) {
+	if _, err := parseGenesisHash(genesisPack{GenesisHeaderBytesHex: "zz"}); err == nil {
+		t.Fatalf("expected invalid hex error")
+	}
+	if _, err := parseGenesisHash(genesisPack{GenesisHeaderBytesHex: "00"}); err == nil {
+		t.Fatalf("expected invalid header length error")
+	}
+}
+
+func TestParseCoreExtBindingVariants(t *testing.T) {
+	tests := []struct {
+		name    string
+		binding string
+		wantNil bool
+		wantOK  bool
+		wantErr bool
+	}{
+		{name: "empty", binding: "", wantNil: true},
+		{name: "native", binding: "native_verify_sig", wantNil: true},
+		{name: "accept", binding: "verify_sig_ext_accept", wantOK: true},
+		{name: "reject", binding: "verify_sig_ext_reject"},
+		{name: "error", binding: "verify_sig_ext_error", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fn, err := parseCoreExtBinding(tt.binding)
+			if err != nil {
+				t.Fatalf("parseCoreExtBinding(%q): %v", tt.binding, err)
+			}
+			if tt.wantNil {
+				if fn != nil {
+					t.Fatalf("expected nil verifier for %q", tt.binding)
+				}
+				return
+			}
+			if fn == nil {
+				t.Fatalf("expected verifier for %q", tt.binding)
+			}
+			ok, callErr := fn(7, 1, nil, nil, [32]byte{}, nil)
+			if ok != tt.wantOK {
+				t.Fatalf("verify result=%v, want %v", ok, tt.wantOK)
+			}
+			if tt.wantErr {
+				if callErr == nil {
+					t.Fatalf("expected verifier error for %q", tt.binding)
+				}
+				return
+			}
+			if callErr != nil {
+				t.Fatalf("unexpected verifier error for %q: %v", tt.binding, callErr)
+			}
+		})
+	}
+}
+
 func TestRunDryRunUsesDevnetGenesisChainIDByDefault(t *testing.T) {
 	prev := newSyncEngineFn
 	var gotCfg node.SyncConfig
