@@ -1454,3 +1454,35 @@ fn sentinel_keyless_enforcement() {
         .expect_err("should reject sentinel with pubkey+sig");
     assert_eq!(err.code, ErrorCode::TxErrParse);
 }
+
+#[test]
+fn apply_non_coinbase_tx_basic_core_ext_default_apply_requires_profiles() {
+    let mut prev = [0u8; 32];
+    prev[0] = 0xf1;
+    let tx_bytes =
+        tx_with_one_input_one_output(prev, 0, 90, COV_TYPE_P2PK, &valid_p2pk_covenant_data());
+    let (mut tx, txid, _wtxid, _n) = parse_tx(&tx_bytes).expect("parse");
+    tx.witness = vec![crate::tx::WitnessItem {
+        suite_id: SUITE_ID_SENTINEL,
+        pubkey: vec![],
+        signature: vec![],
+    }];
+
+    let mut utxos: HashMap<Outpoint, UtxoEntry> = HashMap::new();
+    utxos.insert(
+        Outpoint {
+            txid: prev,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_EXT,
+            covenant_data: vec![0x01, 0x00, 0x00],
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    );
+
+    let err = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 100, 1000, ZERO_CHAIN_ID).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+}

@@ -56,7 +56,7 @@ func TestParseTx_UnknownSuiteAcceptedAndCharged(t *testing.T) {
 	}
 }
 
-func TestApplyNonCoinbaseTxBasic_CORE_EXT_PreActiveAnyoneCanSpend_KeylessSentinelOK(t *testing.T) {
+func TestApplyNonCoinbaseTxBasic_CORE_EXT_DefaultApplyRequiresProfiles(t *testing.T) {
 	var chainID [32]byte
 	var prev [32]byte
 	prev[0] = 0xa1
@@ -72,8 +72,36 @@ func TestApplyNonCoinbaseTxBasic_CORE_EXT_PreActiveAnyoneCanSpend_KeylessSentine
 			CovenantData: coreExtCovenantData(1, nil),
 		},
 	}
-	if _, _, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxos, 0, 0, chainID); err != nil {
-		t.Fatalf("ApplyNonCoinbaseTxBasicUpdate: %v", err)
+	_, _, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxos, 0, 0, chainID)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	}
+}
+
+func TestApplyNonCoinbaseTxBasic_CORE_EXT_PreActiveAnyoneCanSpend_KeylessSentinelOK(t *testing.T) {
+	var chainID [32]byte
+	var prev [32]byte
+	prev[0] = 0xb1
+
+	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
+	tx, txid := mustParseTxForUtxo(t, txBytes)
+	tx.Witness = []WitnessItem{{SuiteID: SUITE_ID_SENTINEL}}
+
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prev, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_CORE_EXT,
+			CovenantData: coreExtCovenantData(1, nil),
+		},
+	}
+	profiles := staticCoreExtProfiles{
+		1: {Active: false},
+	}
+	if _, _, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(tx, txid, utxos, 0, 0, 0, chainID, profiles); err != nil {
+		t.Fatalf("ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles: %v", err)
 	}
 }
 
@@ -93,8 +121,12 @@ func TestApplyNonCoinbaseTxBasic_CORE_EXT_PreActiveAnyoneCanSpend_NonKeylessSent
 			CovenantData: coreExtCovenantData(1, nil),
 		},
 	}
-	if _, _, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxos, 0, 0, chainID); err != nil {
-		t.Fatalf("ApplyNonCoinbaseTxBasicUpdate: %v", err)
+	_, _, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxos, 0, 0, chainID)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
 	}
 }
 

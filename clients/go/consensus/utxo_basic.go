@@ -65,7 +65,7 @@ func ApplyNonCoinbaseTxBasicUpdateWithMTP(
 	chainID [32]byte,
 ) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
 	_ = blockTimestamp
-	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, utxoSet, height, blockMTP, chainID, nil)
+	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, utxoSet, height, blockMTP, chainID, nil, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -91,7 +91,7 @@ func ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
 	coreExtProfiles CoreExtProfileProvider,
 ) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
 	_ = blockTimestamp
-	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, utxoSet, height, blockMTP, chainID, coreExtProfiles)
+	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, utxoSet, height, blockMTP, chainID, coreExtProfiles, false)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -109,6 +109,7 @@ func applyNonCoinbaseTxBasicWork(
 	blockMTP uint64,
 	chainID [32]byte,
 	coreExtProfiles CoreExtProfileProvider,
+	requireCoreExtProfiles bool,
 ) (map[Outpoint]UtxoEntry, uint64, error) {
 	if tx == nil {
 		return nil, 0, txerr(TX_ERR_PARSE, "nil tx")
@@ -267,6 +268,10 @@ func applyNonCoinbaseTxBasicWork(
 			active := false
 			allowedSuites := map[uint8]struct{}(nil)
 			verifySigExtFn := CoreExtVerifySigExtFunc(nil)
+
+			if requireCoreExtProfiles && coreExtProfiles == nil {
+				return nil, 0, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profiles required")
+			}
 
 			if coreExtProfiles != nil {
 				profile, ok, err := coreExtProfiles.LookupCoreExtProfile(cd.ExtID, height)

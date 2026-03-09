@@ -66,7 +66,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
     block_mtp: u64,
     chain_id: [u8; 32],
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
-    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
+    apply_non_coinbase_tx_basic_update_internal(
         tx,
         txid,
         utxo_set,
@@ -75,6 +75,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
         block_mtp,
         chain_id,
         &CoreExtProfiles::empty(),
+        true,
     )
 }
 
@@ -88,6 +89,31 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
     block_mtp: u64,
     chain_id: [u8; 32],
     core_ext_profiles_at_height: &CoreExtProfiles,
+) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
+    apply_non_coinbase_tx_basic_update_internal(
+        tx,
+        txid,
+        utxo_set,
+        height,
+        block_timestamp,
+        block_mtp,
+        chain_id,
+        core_ext_profiles_at_height,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_non_coinbase_tx_basic_update_internal(
+    tx: &Tx,
+    txid: [u8; 32],
+    utxo_set: &HashMap<Outpoint, UtxoEntry>,
+    height: u64,
+    block_timestamp: u64,
+    block_mtp: u64,
+    chain_id: [u8; 32],
+    core_ext_profiles_at_height: &CoreExtProfiles,
+    require_core_ext_profiles: bool,
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
     let _ = block_timestamp;
     if tx.inputs.is_empty() {
@@ -259,6 +285,12 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
                     return Err(TxError::new(
                         ErrorCode::TxErrParse,
                         "CORE_EXT witness_slots must be 1",
+                    ));
+                }
+                if require_core_ext_profiles && core_ext_profiles_at_height.active.is_empty() {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrCovenantTypeInvalid,
+                        "CORE_EXT profiles required",
                     ));
                 }
                 validate_core_ext_spend(
