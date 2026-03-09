@@ -126,23 +126,17 @@ func (s *Service) startDialPeer(addr string) bool {
 }
 
 func (s *Service) trackDialPeer(addr string) bool {
-	if s == nil {
-		return false
-	}
-	addr = strings.TrimSpace(addr)
-	if addr == "" {
-		return false
-	}
-	s.dialMu.Lock()
-	defer s.dialMu.Unlock()
-	if _, exists := s.inFlightDial[addr]; exists {
-		return false
-	}
-	s.inFlightDial[addr] = struct{}{}
-	return true
+	return s.trackDial(addr, 0)
 }
 
 func (s *Service) tryTrackDiscoveredDial(addr string, limit int) bool {
+	return s.trackDial(addr, limit)
+}
+
+// trackDial is the shared implementation for trackDialPeer and
+// tryTrackDiscoveredDial.  When limit > 0 the total of connected peers
+// plus in-flight dials is checked against limit before allowing the dial.
+func (s *Service) trackDial(addr string, limit int) bool {
 	if s == nil {
 		return false
 	}

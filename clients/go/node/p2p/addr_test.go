@@ -233,6 +233,76 @@ func TestConnectDiscoveredAddrsRespectsMaxPeersWithInFlightDials(t *testing.T) {
 	}
 }
 
+func TestTrackDialEdgeCases(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:19030", nil)
+
+	// nil receiver returns false.
+	var nilSvc *Service
+	if nilSvc.trackDialPeer("x") {
+		t.Fatal("nil trackDialPeer must return false")
+	}
+	if nilSvc.tryTrackDiscoveredDial("x", 10) {
+		t.Fatal("nil tryTrackDiscoveredDial must return false")
+	}
+
+	// Empty/whitespace addr returns false.
+	if h.service.trackDialPeer("") {
+		t.Fatal("empty addr must return false")
+	}
+	if h.service.trackDialPeer("   ") {
+		t.Fatal("whitespace addr must return false")
+	}
+	if h.service.tryTrackDiscoveredDial("", 10) {
+		t.Fatal("empty addr must return false")
+	}
+
+	// Successful track.
+	if !h.service.trackDialPeer("127.0.0.1:9999") {
+		t.Fatal("first trackDialPeer must succeed")
+	}
+	// Duplicate returns false.
+	if h.service.trackDialPeer("127.0.0.1:9999") {
+		t.Fatal("duplicate trackDialPeer must return false")
+	}
+
+	// tryTrackDiscoveredDial with existing addr returns false.
+	if h.service.tryTrackDiscoveredDial("127.0.0.1:9999", 10) {
+		t.Fatal("existing addr must return false")
+	}
+
+	// At-limit returns false.
+	h.service.cfg.PeerRuntimeConfig.MaxPeers = 1
+	if h.service.tryTrackDiscoveredDial("127.0.0.1:8888", 1) {
+		t.Fatal("at-limit must return false")
+	}
+}
+
+func TestFinishDialPeerEdgeCases(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:19035", nil)
+
+	// nil receiver does not panic.
+	var nilSvc *Service
+	nilSvc.finishDialPeer("x")
+
+	// Empty addr is no-op.
+	h.service.finishDialPeer("")
+	h.service.finishDialPeer("   ")
+
+	// Normal finish removes entry.
+	h.service.inFlightDial["127.0.0.1:7777"] = struct{}{}
+	h.service.finishDialPeer("127.0.0.1:7777")
+	if h.service.inFlightDialCount() != 0 {
+		t.Fatal("finishDialPeer must remove entry")
+	}
+}
+
+func TestInFlightDialCountNilReceiver(t *testing.T) {
+	var nilSvc *Service
+	if nilSvc.inFlightDialCount() != 0 {
+		t.Fatal("nil inFlightDialCount must return 0")
+	}
+}
+
 func TestAddrHandlerAndDiscoveryEdgeBranches(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:19031", nil)
 	p := newPeerRuntimeTestPeer(t)
