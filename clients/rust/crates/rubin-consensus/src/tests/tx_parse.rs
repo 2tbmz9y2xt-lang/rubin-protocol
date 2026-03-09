@@ -1,6 +1,15 @@
 use super::*;
 
 #[test]
+fn parse_tx_rejects_unsupported_version() {
+    let mut tx = minimal_tx_bytes();
+    tx[0..4].copy_from_slice(&(TX_WIRE_VERSION + 1).to_le_bytes());
+
+    let err = parse_tx(&tx).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+}
+
+#[test]
 fn parse_tx_minimal_txid_wtxid() {
     let tx_bytes = minimal_tx_bytes();
     let (_tx, txid, wtxid, n) = parse_tx(&tx_bytes).expect("parse");
