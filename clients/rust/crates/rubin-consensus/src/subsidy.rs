@@ -23,6 +23,44 @@ pub fn block_subsidy(height: u64, already_generated: u128) -> u64 {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_subsidy_height_zero_is_zero() {
+        assert_eq!(block_subsidy(0, 0), 0);
+        assert_eq!(block_subsidy(0, u128::MAX), 0);
+    }
+
+    #[test]
+    fn block_subsidy_height_one_matches_spec_formula() {
+        assert_eq!(block_subsidy(1, 0), 4_673_004_150);
+    }
+
+    #[test]
+    fn block_subsidy_returns_tail_at_and_above_cap() {
+        let mineable_cap = u128::from(MINEABLE_CAP);
+        assert_eq!(block_subsidy(1, mineable_cap), TAIL_EMISSION_PER_BLOCK);
+        assert_eq!(block_subsidy(1, mineable_cap + 1), TAIL_EMISSION_PER_BLOCK);
+    }
+
+    #[test]
+    fn block_subsidy_clamps_to_tail_when_base_reward_would_undercut() {
+        let remaining_below_tail = u128::from(TAIL_EMISSION_PER_BLOCK - 1) << EMISSION_SPEED_FACTOR;
+        let already_generated = u128::from(MINEABLE_CAP) - remaining_below_tail;
+        assert_eq!(block_subsidy(1, already_generated), TAIL_EMISSION_PER_BLOCK);
+    }
+
+    #[test]
+    fn block_subsidy_uses_base_reward_formula_when_above_tail() {
+        let already_generated = 123u128;
+        let expected =
+            ((u128::from(MINEABLE_CAP) - already_generated) >> EMISSION_SPEED_FACTOR) as u64;
+        assert_eq!(block_subsidy(1, already_generated), expected);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Kani bounded model checking proofs
 // ---------------------------------------------------------------------------

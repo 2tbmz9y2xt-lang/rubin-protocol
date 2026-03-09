@@ -111,7 +111,13 @@ jobs:
           set -euo pipefail
           TOOLCHAIN="$(cat rubin-formal/lean-toolchain)"
           for attempt in 1 2 3 4; do
-            if elan toolchain install "$TOOLCHAIN"; then
+            if install_output="$(elan toolchain install "$TOOLCHAIN" 2>&1)"; then
+              printf '%s\n' "$install_output"
+              elan default "$TOOLCHAIN"
+              exit 0
+            fi
+            printf '%s\n' "$install_output" >&2
+            if printf '%s\n' "$install_output" | grep -Fq "is already installed"; then
               elan default "$TOOLCHAIN"
               exit 0
             fi
@@ -353,7 +359,13 @@ jobs:
           set -euo pipefail
           TOOLCHAIN="$(cat rubin-formal/lean-toolchain)"
           for attempt in 1 2 3 4; do
-            if elan toolchain install "$TOOLCHAIN"; then
+            if install_output="$(elan toolchain install "$TOOLCHAIN" 2>&1)"; then
+              printf '%s\n' "$install_output"
+              elan default "$TOOLCHAIN"
+              exit 0
+            fi
+            printf '%s\n' "$install_output" >&2
+            if printf '%s\n' "$install_output" | grep -Fq "is already installed"; then
               elan default "$TOOLCHAIN"
               exit 0
             fi

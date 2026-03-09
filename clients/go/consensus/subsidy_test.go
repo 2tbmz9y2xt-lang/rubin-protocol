@@ -1,6 +1,9 @@
 package consensus
 
-import "testing"
+import (
+	"math/big"
+	"testing"
+)
 
 func TestBlockSubsidy_Height0IsZero(t *testing.T) {
 	if got := BlockSubsidy(0, 0); got != 0 {
@@ -41,5 +44,17 @@ func TestBlockSubsidy_BaseRewardFormula(t *testing.T) {
 	got := BlockSubsidy(1, alreadyGenerated)
 	if got != want {
 		t.Fatalf("got=%d, want %d", got, want)
+	}
+}
+
+func TestBlockSubsidyBig_NilAlreadyGeneratedMatchesZero(t *testing.T) {
+	if got := BlockSubsidyBig(1, nil); got != BlockSubsidy(1, 0) {
+		t.Fatalf("got=%d, want %d", got, BlockSubsidy(1, 0))
+	}
+}
+
+func TestBlockSubsidyBig_NegativeAlreadyGeneratedClampsToZero(t *testing.T) {
+	if got := BlockSubsidyBig(1, big.NewInt(-1)); got != BlockSubsidy(1, 0) {
+		t.Fatalf("got=%d, want %d", got, BlockSubsidy(1, 0))
 	}
 }
