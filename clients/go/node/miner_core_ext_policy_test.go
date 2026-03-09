@@ -43,7 +43,7 @@ func TestMinerPolicyFiltersCoreExtOutputCreation(t *testing.T) {
 	var prev [32]byte
 	prev[0] = 0x11
 	txBytes := mustMarshalTxForNodeTest(t, &consensus.Tx{
-		Version:   0,
+		Version:   1,
 		TxKind:    0x00,
 		TxNonce:   1,
 		Inputs:    []consensus.TxInput{{PrevTxid: prev, PrevVout: 0, Sequence: 0}},
@@ -87,7 +87,7 @@ func TestMinerPolicyFiltersCoreExtSpend(t *testing.T) {
 	p2pkCD[0] = consensus.SUITE_ID_ML_DSA_87
 
 	txBytes := mustMarshalTxForNodeTest(t, &consensus.Tx{
-		Version:   0,
+		Version:   1,
 		TxKind:    0x00,
 		TxNonce:   1,
 		Inputs:    []consensus.TxInput{{PrevTxid: prev, PrevVout: 0, Sequence: 0}},
@@ -174,7 +174,7 @@ func TestMinerPolicySkipsMalformedCoreExtOutput(t *testing.T) {
 	var prev [32]byte
 	prev[0] = 0x33
 	txBytes := mustMarshalTxForNodeTest(t, &consensus.Tx{
-		Version:  0,
+		Version:  1,
 		TxKind:   0x00,
 		TxNonce:  1,
 		Inputs:   []consensus.TxInput{{PrevTxid: prev, PrevVout: 0, Sequence: 0}},

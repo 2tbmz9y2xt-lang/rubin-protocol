@@ -46,6 +46,13 @@ func expectParseErrCode(t *testing.T, txBytes []byte, want ErrorCode) {
 	}
 }
 
+func TestParseTx_RejectsUnsupportedVersion(t *testing.T) {
+	txBytes := minimalTxBytes()
+	binary.LittleEndian.PutUint32(txBytes[:4], TX_WIRE_VERSION+1)
+
+	expectParseErrCode(t, txBytes, TX_ERR_PARSE)
+}
+
 func TestParseTx_Minimal_TxIDWTXID(t *testing.T) {
 	txBytes := minimalTxBytes()
 

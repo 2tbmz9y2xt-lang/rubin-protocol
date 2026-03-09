@@ -63,6 +63,9 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 	if err != nil {
 		return nil, zero, zero, 0, err
 	}
+	if version != TX_WIRE_VERSION {
+		return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "unsupported tx version")
+	}
 
 	txKind, err := readU8(b, &off)
 	if err != nil {
