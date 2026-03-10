@@ -77,21 +77,59 @@ jobs:
 
             Context:
             - Bitcoin-like UTXO chain with dual reference clients (Go + Rust) and Lean4 formal verification
-            - Cryptography: ML-DSA-65 (native signature scheme). SLH-DSA is NOT natively used, only referenced externally
-            - Covenant-typed covenant system (P2PK, HTLC, anchor, DA-commit)
+            - Cryptography: ML-DSA-87 (native signature scheme). SLH-DSA is NOT natively used, only referenced externally or via non-native/extensible paths
+            - Covenant-typed covenant system (P2PK, HTLC, anchor, DA-commit, CORE_EXT, vault, multisig)
             - Soft-fork deployment mechanism for protocol upgrades
             - Canonical chain: RUBIN_L1_CANONICAL.md -> fixtures -> Go client -> Rust parity client -> conformance tests
 
-            Review the diff for security issues (ordered by severity):
-            CRITICAL: double-spend, inflation, signature bypass, fork-choice errors, reorg safety
-            HIGH: nonce reuse, weak entropy, PQ parameter misuse, hash collision paths
-            MEDIUM: integer overflow/underflow, slice bounds, unchecked casts, panic paths in consensus
-            LOW: state transitions, disconnect/reconnect correctness, undo record integrity
-            INFO: behavioral divergence that could cause chain splits
-            PERF: unbounded allocations, CPU-intensive paths, disk exhaustion
-            STYLE: constant type confusion, vault bypass, timelock circumvention
+            Review the diff for security issues, ordered by severity:
 
-            Output JSON: {"model":"<name>","findings":[{"severity":"CRITICAL|HIGH|MEDIUM|LOW|INFO|PERF|STYLE","file":"<path>","line":<n>,"title":"<short>","details":"<explanation>","suggestion":"<fix>"}],"summary":"<overall>"}`;
+            CRITICAL:
+            - double-spend
+            - inflation
+            - signature bypass
+            - fork-choice errors
+            - reorg safety failures
+
+            HIGH:
+            - nonce reuse
+            - weak entropy
+            - PQ parameter misuse
+            - hash collision paths
+
+            MEDIUM:
+            - integer overflow or underflow
+            - slice bounds errors
+            - unchecked casts
+            - panic paths in consensus or validation
+
+            LOW:
+            - incorrect state transitions
+            - disconnect or reconnect correctness
+            - undo record integrity
+
+            INFO:
+            - behavioral divergence that could cause chain splits
+            - spec/code/fixture drift that changes accept or reject behavior
+
+            PERF:
+            - unbounded allocations
+            - CPU-intensive hot paths
+            - disk exhaustion paths
+
+            STYLE:
+            - constant type confusion
+            - vault bypass preconditions
+            - timelock circumvention via ambiguous logic
+
+            Rules:
+            - Review only what is visible in the provided diff bundle.
+            - Do not invent files, lines, or behavior not evidenced by the diff.
+            - If there are no findings, return an empty findings array and explain why in summary.
+            - Prefer the most relevant changed line in the diff for each finding.
+            - Output valid JSON only in this exact shape:
+
+            {"model":"<name>","findings":[{"severity":"CRITICAL|HIGH|MEDIUM|LOW|INFO|PERF|STYLE","file":"<path>","line":<n>,"title":"<short>","details":"<explanation>","suggestion":"<fix>"}],"summary":"<overall>"}`;
 
             const models = [
               '${{ matrix.model.id }}',
