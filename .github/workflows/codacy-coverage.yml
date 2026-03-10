@@ -12,6 +12,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
 
       - name: Cache OpenSSL 3.5 bundle
         uses: actions/cache@v5
@@ -84,6 +85,12 @@ jobs:
         run: |
           chmod +x scripts/run-codacy-coverage.sh
           ./scripts/run-codacy-coverage.sh
+
+      - name: Enforce local coverage gates
+        if: github.event_name == 'pull_request'
+        run: |
+          chmod +x scripts/preflight-codacy-coverage.sh
+          ./scripts/preflight-codacy-coverage.sh "origin/${{ github.base_ref }}"
 
       - name: Upload to Codacy
         env:
