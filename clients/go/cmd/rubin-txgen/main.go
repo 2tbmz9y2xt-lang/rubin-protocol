@@ -129,6 +129,11 @@ type submitTxHTTPPayload struct {
 }
 
 func submitTx(target string, txBytes []byte) error {
+	client := &http.Client{Timeout: 5 * time.Second}
+	return submitTxWithClient(target, txBytes, client)
+}
+
+func submitTxWithClient(target string, txBytes []byte, client *http.Client) error {
 	endpoint, err := normalizeSubmitTarget(target)
 	if err != nil {
 		return err
@@ -142,7 +147,6 @@ func submitTx(target string, txBytes []byte) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 5 * time.Second}
 	// #nosec G107,G704 -- devnet-only submit targets are validated to localhost/loopback in normalizeSubmitTarget.
 	resp, err := client.Do(req)
 	if err != nil {
@@ -150,11 +154,18 @@ func submitTx(target string, txBytes []byte) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusOK {
-		io.Copy(io.Discard, resp.Body)
+		if err := discardResponseBody(resp.Body); err != nil {
+			return err
+		}
 		return nil
 	}
 	rawBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 	return fmt.Errorf("status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(rawBody)))
+}
+
+func discardResponseBody(r io.Reader) error {
+	_, err := io.Copy(io.Discard, r)
+	return err
 }
 
 func normalizeSubmitTarget(raw string) (string, error) {
