@@ -134,6 +134,18 @@ impl TxPool {
         }
         Ok(txid)
     }
+
+    /// Remove transactions by txid (e.g. after block confirmation).
+    /// Cleans up the spender index for any removed entries.
+    pub fn evict_txids(&mut self, txids: &[[u8; 32]]) {
+        for txid in txids {
+            if let Some(entry) = self.txs.remove(txid) {
+                for input in &entry.inputs {
+                    self.spenders.remove(input);
+                }
+            }
+        }
+    }
 }
 
 impl Default for TxPool {

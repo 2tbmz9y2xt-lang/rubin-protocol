@@ -7,7 +7,13 @@ pub mod interop;
 mod io_utils;
 pub mod p2p_runtime;
 pub mod sync;
+pub mod sync_disconnect;
+pub mod sync_reorg;
 pub mod txpool;
+pub mod undo;
+
+#[cfg(test)]
+mod test_helpers;
 
 pub use blockstore::{block_store_path, BlockStore, BLOCK_STORE_DIR_NAME};
 pub use chainstate::{

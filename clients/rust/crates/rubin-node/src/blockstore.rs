@@ -1,10 +1,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
+use num_bigint::BigUint;
+use rubin_consensus::{
+    block_hash, fork_chainwork_from_targets, parse_block_header_bytes, BLOCK_HEADER_BYTES,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::io_utils::{parse_hex32, write_file_atomic};
+use crate::undo::{marshal_block_undo, unmarshal_block_undo, BlockUndo};
 
 pub const BLOCK_STORE_DIR_NAME: &str = "blockstore";
 const BLOCK_STORE_INDEX_VERSION: u32 = 1;
@@ -15,6 +19,7 @@ pub struct BlockStore {
     index_path: PathBuf,
     blocks_dir: PathBuf,
     headers_dir: PathBuf,
+    undo_dir: PathBuf,
     index: BlockStoreIndexDisk,
 }
 
@@ -34,11 +39,14 @@ impl BlockStore {
         let index_path = root_path.join("index.json");
         let blocks_dir = root_path.join("blocks");
         let headers_dir = root_path.join("headers");
+        let undo_dir = root_path.join("undo");
 
         fs::create_dir_all(&blocks_dir)
             .map_err(|e| format!("create blockstore blocks {}: {e}", blocks_dir.display()))?;
         fs::create_dir_all(&headers_dir)
             .map_err(|e| format!("create blockstore headers {}: {e}", headers_dir.display()))?;
+        fs::create_dir_all(&undo_dir)
+            .map_err(|e| format!("create blockstore undo {}: {e}", undo_dir.display()))?;
 
         let index = load_blockstore_index(&index_path)?;
         Ok(Self {
@@ -46,6 +54,7 @@ impl BlockStore {
             index_path,
             blocks_dir,
             headers_dir,
+            undo_dir,
             index,
         })
     }
@@ -223,6 +232,94 @@ impl BlockStore {
         }
         Ok(out)
     }
+
+    // ----- Side-chain block storage (without canonical update) -----
+
+    /// Store a block + header without updating the canonical index.
+    /// Used for side-chain blocks that are not (yet) canonical.
+    pub fn store_block(
+        &self,
+        block_hash_bytes: [u8; 32],
+        header_bytes: &[u8],
+        block_bytes: &[u8],
+    ) -> Result<(), String> {
+        if header_bytes.len() != BLOCK_HEADER_BYTES {
+            return Err(format!("invalid header length: {}", header_bytes.len()));
+        }
+        let computed_hash = block_hash(header_bytes).map_err(|e| e.to_string())?;
+        if computed_hash != block_hash_bytes {
+            return Err("header hash mismatch".to_string());
+        }
+        let hash_hex = hex::encode(block_hash_bytes);
+        write_file_if_absent(
+            &self.blocks_dir.join(format!("{hash_hex}.bin")),
+            block_bytes,
+        )?;
+        write_file_if_absent(
+            &self.headers_dir.join(format!("{hash_hex}.bin")),
+            header_bytes,
+        )
+    }
+
+    // ----- Chain work -----
+
+    /// Compute cumulative proof-of-work from genesis up to (and including)
+    /// the block identified by `tip_hash`, by walking parent pointers.
+    pub fn chain_work(&self, tip_hash: [u8; 32]) -> Result<BigUint, String> {
+        if tip_hash == [0u8; 32] {
+            return Ok(BigUint::ZERO);
+        }
+        let mut targets = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut current = tip_hash;
+        while current != [0u8; 32] {
+            if !seen.insert(current) {
+                return Err("blockstore parent cycle".into());
+            }
+            let header_bytes = self.get_header_by_hash(current)?;
+            let header = parse_block_header_bytes(&header_bytes).map_err(|e| e.to_string())?;
+            targets.push(header.target);
+            current = header.prev_block_hash;
+        }
+        fork_chainwork_from_targets(&targets).map_err(|e| e.to_string())
+    }
+
+    // ----- Undo storage -----
+
+    pub fn put_undo(&self, block_hash_bytes: [u8; 32], undo: &BlockUndo) -> Result<(), String> {
+        let raw = marshal_block_undo(undo)?;
+        let path = self
+            .undo_dir
+            .join(format!("{}.json", hex::encode(block_hash_bytes)));
+        write_file_atomic(&path, &raw)
+    }
+
+    pub fn get_undo(&self, block_hash_bytes: [u8; 32]) -> Result<BlockUndo, String> {
+        let path = self
+            .undo_dir
+            .join(format!("{}.json", hex::encode(block_hash_bytes)));
+        let raw = fs::read(&path).map_err(|e| format!("read undo {}: {e}", path.display()))?;
+        unmarshal_block_undo(&raw)
+    }
+
+    // ----- Canonical index helpers -----
+
+    pub fn canonical_len(&self) -> usize {
+        self.index.canonical.len()
+    }
+
+    /// Truncate canonical index to exactly `new_len` entries.
+    pub fn truncate_canonical(&mut self, new_len: usize) -> Result<(), String> {
+        if new_len > self.index.canonical.len() {
+            return Err(format!(
+                "truncate_canonical new_len {} > current {}",
+                new_len,
+                self.index.canonical.len()
+            ));
+        }
+        self.index.canonical.truncate(new_len);
+        save_blockstore_index(&self.index_path, &self.index)
+    }
 }
 
 pub fn block_store_path<P: AsRef<Path>>(data_dir: P) -> PathBuf {
@@ -311,6 +408,100 @@ mod tests {
         let tip = store2.tip().expect("tip").expect("some tip");
         assert_eq!(tip.0, 0);
         assert_eq!(tip.1, [0x11; 32]);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn blockstore_store_block_without_canonical() {
+        use crate::genesis::devnet_genesis_block_bytes;
+        use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
+
+        let dir = unique_temp_path("rubin-blockstore-store");
+        let root = block_store_path(&dir);
+        let store = BlockStore::open(&root).expect("open");
+
+        let genesis = devnet_genesis_block_bytes();
+        let header = &genesis[..BLOCK_HEADER_BYTES];
+        let hash = block_hash(header).expect("hash");
+
+        store
+            .store_block(hash, header, &genesis)
+            .expect("store_block");
+        assert!(store.has_block(hash));
+
+        // store_block does NOT update canonical index.
+        assert!(store.tip().expect("tip").is_none());
+
+        let retrieved = store.get_block_by_hash(hash).expect("get");
+        assert_eq!(retrieved, genesis);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn blockstore_chain_work_from_genesis() {
+        use crate::genesis::devnet_genesis_block_bytes;
+        use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
+
+        let dir = unique_temp_path("rubin-blockstore-cw");
+        let root = block_store_path(&dir);
+        let mut store = BlockStore::open(&root).expect("open");
+
+        let genesis = devnet_genesis_block_bytes();
+        let hash = block_hash(&genesis[..BLOCK_HEADER_BYTES]).expect("hash");
+        store
+            .put_block(0, hash, &genesis[..BLOCK_HEADER_BYTES], &genesis)
+            .expect("put");
+
+        let work = store.chain_work(hash).expect("chain_work");
+        assert!(work > num_bigint::BigUint::ZERO);
+
+        let zero_work = store.chain_work([0u8; 32]).expect("zero");
+        assert_eq!(zero_work, num_bigint::BigUint::ZERO);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn blockstore_undo_put_get_roundtrip() {
+        use crate::undo::{BlockUndo, TxUndo};
+
+        let dir = unique_temp_path("rubin-blockstore-undo");
+        let root = block_store_path(&dir);
+        let store = BlockStore::open(&root).expect("open");
+
+        let undo = BlockUndo {
+            block_height: 7,
+            previous_already_generated: 500,
+            txs: vec![TxUndo { spent: vec![] }],
+        };
+
+        let hash = [0xAB; 32];
+        store.put_undo(hash, &undo).expect("put_undo");
+        let loaded = store.get_undo(hash).expect("get_undo");
+        assert_eq!(loaded, undo);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn blockstore_truncate_and_canonical_len() {
+        let dir = unique_temp_path("rubin-blockstore-trunc");
+        let root = block_store_path(&dir);
+        let mut store = BlockStore::open(&root).expect("open");
+
+        store.set_canonical_tip(0, [0x11; 32]).expect("set 0");
+        store.set_canonical_tip(1, [0x22; 32]).expect("set 1");
+        assert_eq!(store.canonical_len(), 2);
+
+        store.truncate_canonical(1).expect("truncate");
+        assert_eq!(store.canonical_len(), 1);
+        let tip = store.tip().expect("tip").expect("some");
+        assert_eq!(tip.0, 0);
+
+        let err = store.truncate_canonical(5).unwrap_err();
+        assert!(err.contains("truncate_canonical"));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
