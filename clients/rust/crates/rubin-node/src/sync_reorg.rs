@@ -14,6 +14,8 @@ struct ReorgBranchBlock {
     hash: [u8; 32],
     block_bytes: Vec<u8>,
     target: [u8; 32],
+    /// Cached txids from block parse — avoids re-parsing during mempool eviction.
+    txids: Vec<[u8; 32]>,
 }
 
 impl SyncEngine {
@@ -176,7 +178,7 @@ impl SyncEngine {
         // valid against the new chain state will be re-admitted).
         if let Some(pool) = tx_pool {
             for item in &branch {
-                evict_confirmed_from_pool(pool, &item.block_bytes);
+                pool.evict_txids(&item.txids);
             }
             requeue_disconnected_transactions(pool, self, &disconnected_blocks);
         }
@@ -229,6 +231,7 @@ impl SyncEngine {
             hash: block_hash_bytes,
             block_bytes: block_bytes.to_vec(),
             target: parsed.header.target,
+            txids: parsed.txids.clone(),
         }];
 
         let mut parent_hash = parsed.header.prev_block_hash;
@@ -250,6 +253,7 @@ impl SyncEngine {
                 hash: parent_hash,
                 block_bytes: parent_bytes,
                 target: parent_parsed.header.target,
+                txids: parent_parsed.txids.clone(),
             });
 
             parent_hash = parent_parsed.header.prev_block_hash;

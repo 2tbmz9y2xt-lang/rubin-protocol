@@ -212,6 +212,7 @@ impl SyncEngine {
             &self.cfg.core_ext_deployments,
         )?;
 
+        let canonical_len_before = self.block_store.as_ref().map_or(0, |bs| bs.canonical_len());
         if let Some(block_store) = self.block_store.as_mut() {
             if let Err(err) = block_store.put_block(
                 summary.block_height,
@@ -226,10 +227,8 @@ impl SyncEngine {
             }
             // Persist the undo record alongside the block.
             if let Err(err) = block_store.put_undo(block_hash_bytes, &undo) {
-                // Rewind the canonical index that put_block just extended.
-                let rewind_err = block_store
-                    .truncate_canonical(block_store.canonical_len().saturating_sub(1))
-                    .err();
+                // Rewind canonical to the length captured before put_block.
+                let rewind_err = block_store.truncate_canonical(canonical_len_before).err();
                 self.chain_state = snapshot;
                 self.tip_timestamp = old_tip_timestamp;
                 self.best_known_height = old_best_known_height;
@@ -244,6 +243,10 @@ impl SyncEngine {
 
         if let Some(chain_state_path) = self.cfg.chain_state_path.as_ref() {
             if let Err(err) = self.chain_state.save(chain_state_path) {
+                // Rewind canonical index to the length captured before put_block.
+                if let Some(bs) = self.block_store.as_mut() {
+                    let _ = bs.truncate_canonical(canonical_len_before);
+                }
                 self.chain_state = snapshot;
                 self.tip_timestamp = old_tip_timestamp;
                 self.best_known_height = old_best_known_height;

@@ -45,6 +45,12 @@ impl SyncEngine {
 
         // Persist chain state BEFORE truncating canonical index so that a
         // save failure can be rolled back without losing canonical entries.
+        //
+        // Crash-consistency note: a crash between `save` and `truncate_canonical`
+        // leaves persisted chain_state at the parent while the canonical index
+        // still references the old tip.  On restart the mismatch guard at the top
+        // of this function will reject the stale canonical tip, requiring an
+        // index rebuild.  True atomicity would need a write-ahead log.
         if let Some(path) = self.cfg.chain_state_path.as_ref() {
             if let Err(err) = self.chain_state.save(path) {
                 self.rollback_apply_block(rollback);
