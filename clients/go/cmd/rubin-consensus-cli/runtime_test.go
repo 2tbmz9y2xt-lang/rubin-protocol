@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -533,6 +534,22 @@ func TestRubinConsensusCLI_RunFromStdin_CoversErrorPaths(t *testing.T) {
 		}
 	})
 
+	t.Run("compact_witness_roundtrip_invalid_lengths", func(t *testing.T) {
+		mustRunErr(t, Request{Op: "compact_witness_roundtrip", PubkeyLength: -1, SigLength: 1}, "invalid pubkey_length")
+		mustRunErr(
+			t,
+			Request{Op: "compact_witness_roundtrip", PubkeyLength: consensus.MAX_WITNESS_BYTES_PER_TX, SigLength: 1},
+			"invalid witness lengths",
+		)
+	})
+
+	t.Run("compact_witness_roundtrip_near_limit_valid", func(t *testing.T) {
+		resp := mustRunOk(t, Request{Op: "compact_witness_roundtrip", PubkeyLength: 99990, SigLength: 0})
+		if !resp.RoundtripOK || resp.WireBytes != 99997 {
+			t.Fatalf("unexpected resp: %+v", resp)
+		}
+	})
+
 	t.Run("compact_batch_verify_index_oob", func(t *testing.T) {
 		mustRunErr(t, Request{Op: "compact_batch_verify", BatchSize: 2, InvalidIndices: []int{2}}, "invalid index out of range")
 	})
@@ -542,6 +559,24 @@ func TestRubinConsensusCLI_RunFromStdin_CoversErrorPaths(t *testing.T) {
 			t,
 			Request{Op: "compact_state_machine", ChunkCount: 2, Events: []any{map[string]any{"type": "nope"}}},
 			"unknown state-machine event type",
+		)
+	})
+
+	t.Run("compact_state_machine_invalid_numeric_fields", func(t *testing.T) {
+		mustRunErr(
+			t,
+			Request{Op: "compact_state_machine", ChunkCount: 2, Events: []any{map[string]any{"type": "chunk", "index": 1.5}}},
+			"invalid index",
+		)
+		mustRunErr(
+			t,
+			Request{Op: "compact_state_machine", ChunkCount: 2, Events: []any{map[string]any{"type": "tick", "blocks": 1.5}}},
+			"invalid blocks",
+		)
+		mustRunErr(
+			t,
+			Request{Op: "compact_state_machine", ChunkCount: 2, Events: []any{map[string]any{"type": "tick", "blocks": math.Exp2(63)}}},
+			"invalid blocks",
 		)
 	})
 
@@ -560,6 +595,14 @@ func TestRubinConsensusCLI_RunFromStdin_CoversErrorPaths(t *testing.T) {
 		if len(r.InvalidOut) != 2 {
 			t.Fatalf("unexpected resp: %+v", r)
 		}
+	})
+
+	t.Run("compact_sendcmpct_modes_invalid_miss_rate_blocks", func(t *testing.T) {
+		mustRunErr(
+			t,
+			Request{Op: "compact_sendcmpct_modes", Phases: []map[string]any{{"warmup_done": true, "miss_rate_blocks": 1.5}}},
+			"invalid miss_rate_blocks",
+		)
 	})
 
 	t.Run("compact_peer_quality_unknown_event", func(t *testing.T) {
@@ -599,6 +642,14 @@ func TestRubinConsensusCLI_RunFromStdin_CoversErrorPaths(t *testing.T) {
 			t,
 			Request{Op: "compact_eviction_tiebreak", Entries: []map[string]any{{"da_id": "", "wire_bytes": 0}}},
 			"invalid da_id/wire_bytes",
+		)
+	})
+
+	t.Run("compact_eviction_tiebreak_invalid_numeric_entry", func(t *testing.T) {
+		mustRunErr(
+			t,
+			Request{Op: "compact_eviction_tiebreak", Entries: []map[string]any{{"da_id": "x", "fee": 1.5, "wire_bytes": 1, "received_time": 0}}},
+			"invalid fee",
 		)
 	})
 
@@ -778,6 +829,9 @@ func TestRubinConsensusCLI_RuntimeHelpers(t *testing.T) {
 
 		if toInt(float64(3), 9) != 3 || toInt(int64(4), 9) != 4 || toInt(uint64(5), 9) != 5 || toInt("x", 9) != 9 {
 			t.Fatalf("toInt mismatch")
+		}
+		if toInt(float64(3.5), 9) != 9 || toInt(uint64(platformMaxInt)+1, 9) != 9 {
+			t.Fatalf("toInt bounds mismatch")
 		}
 		if toString("ok", "bad") != "ok" || toString(123, "bad") != "bad" {
 			t.Fatalf("toString mismatch")
