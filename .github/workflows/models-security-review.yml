@@ -16,8 +16,8 @@ permissions:
 jobs:
   get-diff:
     runs-on: ubuntu-latest
-    outputs:
-      diff: ${{ steps.diff.outputs.diff }}
+outputs:
+      skip: ${{ steps.diff.outputs.skip }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -25,39 +25,48 @@ jobs:
       - name: Get PR diff
         id: diff
         run: |
-          DIFF=$(git diff origin/${{ github.base_ref }}...HEAD -- '*.go' '*.rs' '*.lean' | head -c 160000)
-          echo "diff<<DIFF_EOF" >> $GITHUB_OUTPUT
-          echo "$DIFF" >> $GITHUB_OUTPUT
-          echo "DIFF_EOF" >> $GITHUB_OUTPUT
+          git diff origin/${{ github.base_ref }}...HEAD -- '*.go' '*.rs' '*.lean' | head -c 160000 > /tmp/pr-diff.txt
+          if [ ! -s /tmp/pr-diff.txt ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "No diff found" > /tmp/pr-diff.txt
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr-diff
+          path: /tmp/pr-diff.txt
+          retention-days: 1
 
   stage1-primary-review:
     needs: get-diff
+    if: needs.get-diff.outputs.skip != 'true'
     runs-on: ubuntu-latest
-    outputs:
-      review: ${{ steps.review.outputs.comment }}
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pr-diff
       - name: "Stage 1: gpt-5 Primary Security Analysis"
         id: review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          BODY=$(jq -n \
-            --arg diff "${{ needs.get-diff.outputs.diff }}" \
-            '{
-              model: "openai/gpt-5",
-              messages: [
-                {
-                  role: "system",
-                  content: "You are a senior blockchain protocol security reviewer specializing in Go, Rust, and Lean4. This is the RUBIN protocol - a Bitcoin-like UTXO chain with post-quantum cryptography (ML-DSA, SLH-DSA), vault covenants, and formal verification. Perform a thorough primary security analysis focusing on: 1) Consensus-critical bugs (double-spend, inflation, signature bypass) 2) Cryptographic misuse (nonce reuse, weak entropy, PQ parameter errors) 3) Memory safety in Rust/Go (overflow, underflow, slice bounds) 4) Covenant/vault logic flaws 5) Denial-of-service vectors. Output a structured markdown report with severity (CRITICAL/HIGH/MEDIUM/LOW/INFO) for each finding. Be exhaustive - your analysis will be passed to other models for deeper inspection."
-                },
-                {
-                  role: "user",
-                  content: ("Review this pull request diff for security issues:\n\n" + $diff)
-                }
-              ],
-              temperature: 0.1,
-              max_tokens: 16384
-            }')
+          DIFF=$(cat pr-diff.txt)
+          BODY=$(jq -n --arg diff "$DIFF" '{
+            model: "openai/gpt-5",
+            messages: [
+              {
+                role: "system",
+                content: "You are a senior blockchain protocol security reviewer specializing in Go, Rust, and Lean4. This is the RUBIN protocol - a Bitcoin-like UTXO chain with post-quantum cryptography (ML-DSA, SLH-DSA), vault covenants, and formal verification. Perform a thorough primary security analysis focusing on: 1) Consensus-critical bugs (double-spend, inflation, signature bypass) 2) Cryptographic misuse (nonce reuse, weak entropy, PQ parameter errors) 3) Memory safety in Rust/Go (overflow, underflow, slice bounds) 4) Covenant/vault logic flaws 5) Denial-of-service vectors. Output a structured markdown report with severity (CRITICAL/HIGH/MEDIUM/LOW/INFO) for each finding. Be exhaustive - your analysis will be passed to other models for deeper inspection."
+              },
+              {
+                role: "user",
+                content: ("Review this pull request diff for security issues:\n\n" + $diff)
+              }
+            ],
+            temperature: 0.1,
+            max_tokens: 16384
+          }')
           RESPONSE=$(curl -sL \
             -X POST \
             -H "Accept: application/vnd.github+json" \
@@ -67,34 +76,40 @@ jobs:
             https://models.github.ai/inference/chat/completions \
             -d "$BODY")
           COMMENT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "Error: no response from model"')
-          echo "comment<<COMMENT_EOF" >> $GITHUB_OUTPUT
-          echo "$COMMENT" >> $GITHUB_OUTPUT
-          echo "COMMENT_EOF" >> $GITHUB_OUTPUT
+          echo "$COMMENT" > /tmp/stage1-review.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stage1-review
+          path: /tmp/stage1-review.txt
+          retention-days: 1
 
   stage2-reasoning-challenge:
     needs: [get-diff, stage1-primary-review]
     runs-on: ubuntu-latest
-    outputs:
-      review: ${{ steps.review.outputs.comment }}
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pr-diff
+      - uses: actions/download-artifact@v4
+        with:
+          name: stage1-review
       - name: "Stage 2: o4-mini Deep Reasoning Challenge"
         id: review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          BODY=$(jq -n \
-            --arg diff "${{ needs.get-diff.outputs.diff }}" \
-            --arg stage1 "${{ needs.stage1-primary-review.outputs.review }}" \
-            '{
-              model: "openai/o4-mini",
-              messages: [
-                {
-                  role: "user",
-                  content: ("You are a blockchain security auditor performing a SECOND-PASS review with deep reasoning. Another model (gpt-5) already performed a primary analysis. Your job is to:\n\n1) CHALLENGE the primary review - are there false positives? Missed issues?\n2) REASON STEP-BY-STEP about edge cases the primary reviewer may have missed\n3) VERIFY the severity ratings - are they accurate?\n4) IDENTIFY any logical flaws in the primary analysis itself\n5) ADD new findings that require deeper reasoning (state machine analysis, race conditions, mathematical proof gaps)\n\nContext: RUBIN protocol - Bitcoin-like UTXO chain with post-quantum crypto (ML-DSA, SLH-DSA), vault covenants, Lean4 formal verification.\n\n--- PRIMARY REVIEW (gpt-5) ---\n" + $stage1 + "\n\n--- ORIGINAL DIFF ---\n" + $diff + "\n\nProvide your second-pass analysis with severity ratings (CRITICAL/HIGH/MEDIUM/LOW/INFO). Clearly mark which findings are NEW vs corrections to the primary review.")
-                }
-              ],
-              max_tokens: 16384
-            }')
+          DIFF=$(cat pr-diff.txt)
+          STAGE1=$(cat stage1-review.txt)
+          BODY=$(jq -n --arg diff "$DIFF" --arg stage1 "$STAGE1" '{
+            model: "openai/o4-mini",
+            messages: [
+              {
+                role: "user",
+                content: ("You are a blockchain security auditor performing a SECOND-PASS review with deep reasoning. Another model (GPT-5) already performed a primary analysis. Your job is to:\n\n1) CHALLENGE the primary review - are there false positives? Missed issues?\n2) REASON STEP-BY-STEP about edge cases the primary reviewer may have missed\n3) VERIFY the severity ratings - are they accurate?\n4) IDENTIFY any logical flaws in the primary analysis itself\n5) ADD new findings that require deeper reasoning (state machine analysis, race conditions, mathematical proof gaps)\n\nContext: RUBIN protocol - Bitcoin-like UTXO chain with post-quantum crypto (ML-DSA, SLH-DSA), vault covenants, Lean4 formal verification.\n\n--- PRIMARY REVIEW (GPT-5) ---\n" + $stage1 + "\n\n--- ORIGINAL DIFF ---\n" + $diff + "\n\nProvide your second-pass analysis with severity ratings (CRITICAL/HIGH/MEDIUM/LOW/INFO). Clearly mark which findings are NEW vs corrections to the primary review.")
+              }
+            ],
+            max_tokens: 16384
+          }')
           RESPONSE=$(curl -sL \
             -X POST \
             -H "Accept: application/vnd.github+json" \
@@ -104,40 +119,49 @@ jobs:
             https://models.github.ai/inference/chat/completions \
             -d "$BODY")
           COMMENT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "Error: no response from model"')
-          echo "comment<<COMMENT_EOF" >> $GITHUB_OUTPUT
-          echo "$COMMENT" >> $GITHUB_OUTPUT
-          echo "COMMENT_EOF" >> $GITHUB_OUTPUT
+          echo "$COMMENT" > /tmp/stage2-review.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stage2-review
+          path: /tmp/stage2-review.txt
+          retention-days: 1
 
   stage3-synthesis:
     needs: [get-diff, stage1-primary-review, stage2-reasoning-challenge]
     runs-on: ubuntu-latest
-    outputs:
-      review: ${{ steps.review.outputs.comment }}
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pr-diff
+      - uses: actions/download-artifact@v4
+        with:
+          name: stage1-review
+      - uses: actions/download-artifact@v4
+        with:
+          name: stage2-review
       - name: "Stage 3: DeepSeek-V3 Consensus Synthesis"
         id: review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          BODY=$(jq -n \
-            --arg diff "${{ needs.get-diff.outputs.diff }}" \
-            --arg stage1 "${{ needs.stage1-primary-review.outputs.review }}" \
-            --arg stage2 "${{ needs.stage2-reasoning-challenge.outputs.review }}" \
-            '{
-              model: "deepseek/DeepSeek-V3-0324",
-              messages: [
-                {
-                  role: "system",
-                  content: "You are the FINAL ARBITER in a multi-model security review pipeline for the RUBIN blockchain protocol. Two models have already reviewed this code: gpt-5 (primary analysis) and o4-mini (reasoning challenge/second pass). Your job is to SYNTHESIZE their findings into a final actionable report."
-                },
-                {
-                  role: "user",
-                  content: ("Synthesize the following two reviews into a FINAL CONSENSUS REPORT.\n\nRules:\n1) Where both models AGREE - mark as CONFIRMED finding with combined severity\n2) Where models DISAGREE - analyze both arguments and make a final ruling\n3) Flag any FALSE POSITIVES identified by the second reviewer\n4) Produce a FINAL severity-sorted list of all confirmed issues\n5) End with a GO/NO-GO recommendation for merging\n\n--- STAGE 1: gpt-5 Primary Analysis ---\n" + $stage1 + "\n\n--- STAGE 2: o4-mini Reasoning Challenge ---\n" + $stage2 + "\n\n--- ORIGINAL DIFF ---\n" + $diff + "\n\nOutput format:\n## Final Consensus Report\n### CONFIRMED Issues (both models agree)\n### DISPUTED Issues (models disagree) + your ruling\n### FALSE POSITIVES (rejected findings)\n### ADDITIONAL Issues (found only by one model, confirmed by you)\n### Merge Recommendation: GO / CAUTION / NO-GO")
-                }
-              ],
-              temperature: 0.1,
-              max_tokens: 16384
-            }')
+          DIFF=$(cat pr-diff.txt)
+          STAGE1=$(cat stage1-review.txt)
+          STAGE2=$(cat stage2-review.txt)
+          BODY=$(jq -n --arg diff "$DIFF" --arg stage1 "$STAGE1" --arg stage2 "$STAGE2" '{
+            model: "deepseek/DeepSeek-V3-0324",
+            messages: [
+              {
+                role: "system",
+                content: "You are the FINAL ARBITER in a multi-model security review pipeline for the RUBIN blockchain protocol. Two models have already reviewed this code: GPT-5 (primary analysis) and o4-mini (reasoning challenge/second pass). Your job is to SYNTHESIZE their findings into a final actionable report."
+              },
+              {
+                role: "user",
+                content: ("Synthesize the following two reviews into a FINAL CONSENSUS REPORT.\n\nRules:\n1) Where both models AGREE - mark as CONFIRMED finding with combined severity\n2) Where models DISAGREE - analyze both arguments and make a final ruling\n3) Flag any FALSE POSITIVES identified by the second reviewer\n4) Produce a FINAL severity-sorted list of all confirmed issues\n5) End with a GO/NO-GO recommendation for merging\n\n--- STAGE 1: GPT-5 Primary Analysis ---\n" + $stage1 + "\n\n--- STAGE 2: o4-mini Reasoning Challenge ---\n" + $stage2 + "\n\n--- ORIGINAL DIFF ---\n" + $diff + "\n\nOutput format:\n## Final Consensus Report\n### CONFIRMED Issues (both models agree)\n### DISPUTED Issues (models disagree) + your ruling\n### FALSE POSITIVES (rejected findings)\n### ADDITIONAL Issues (found only by one model, confirmed by you)\n### Merge Recommendation: GO / CAUTION / NO-GO")
+              }
+            ],
+            temperature: 0.1,
+            max_tokens: 16384
+          }')
           RESPONSE=$(curl -sL \
             -X POST \
             -H "Accept: application/vnd.github+json" \
@@ -147,26 +171,39 @@ jobs:
             https://models.github.ai/inference/chat/completions \
             -d "$BODY")
           COMMENT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "Error: no response from model"')
-          echo "comment<<COMMENT_EOF" >> $GITHUB_OUTPUT
-          echo "$COMMENT" >> $GITHUB_OUTPUT
-          echo "COMMENT_EOF" >> $GITHUB_OUTPUT
+          echo "$COMMENT" > /tmp/stage3-review.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stage3-review
+          path: /tmp/stage3-review.txt
+          retention-days: 1
 
   post-orchestrated-review:
     needs: [stage1-primary-review, stage2-reasoning-challenge, stage3-synthesis]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: stage1-review
+      - uses: actions/download-artifact@v4
+        with:
+          name: stage2-review
+      - uses: actions/download-artifact@v4
+        with:
+          name: stage3-review
       - name: Post orchestrated review
         uses: actions/github-script@v7
         with:
           script: |
-            const stage1 = `${{ needs.stage1-primary-review.outputs.review }}`;
-            const stage2 = `${{ needs.stage2-reasoning-challenge.outputs.review }}`;
-            const stage3 = `${{ needs.stage3-synthesis.outputs.review }}`;
+            const fs = require('fs');
+            const stage1 = fs.readFileSync('stage1-review.txt', 'utf8');
+            const stage2 = fs.readFileSync('stage2-review.txt', 'utf8');
+            const stage3 = fs.readFileSync('stage3-review.txt', 'utf8');
             const body = [
               '## Orchestrated Multi-Model Security Review',
               '',
               '<details>',
-              '<summary>Stage 1: gpt-5 Primary Security Analysis</summary>',
+              '<summary>Stage 1: GPT-5 Primary Security Analysis</summary>',
               '',
               stage1,
               '',
@@ -184,11 +221,11 @@ jobs:
               stage3,
               '',
               '---',
-              '_Orchestrated 3-stage review: gpt-5 (analysis) -> o4-mini (challenge) -> DeepSeek-V3 (synthesis). Each stage builds on previous results._'
+              '_Orchestrated 3-stage review: GPT-5 (analysis) -> o4-mini (challenge) -> DeepSeek-V3 (synthesis). Each stage builds on previous results._'
             ].join('\n');
-                        const marker = '<!-- orchestrated-multi-model-review -->';
+            const marker = '<!-- orchestrated-multi-model-review -->';
             const fullBody = marker + '\n' + body;
-            const { data: comments } = await github.rest.issues.listComments({
+            const comments = await github.paginate(github.rest.issues.listComments, {
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
@@ -209,4 +246,3 @@ jobs:
                 body: fullBody
               });
             }
-            
