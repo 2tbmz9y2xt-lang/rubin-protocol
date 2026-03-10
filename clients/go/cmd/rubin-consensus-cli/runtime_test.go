@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -542,6 +543,13 @@ func TestRubinConsensusCLI_RunFromStdin_CoversErrorPaths(t *testing.T) {
 		)
 	})
 
+	t.Run("compact_witness_roundtrip_near_limit_valid", func(t *testing.T) {
+		resp := mustRunOk(t, Request{Op: "compact_witness_roundtrip", PubkeyLength: 99990, SigLength: 0})
+		if !resp.RoundtripOK || resp.WireBytes != 99997 {
+			t.Fatalf("unexpected resp: %+v", resp)
+		}
+	})
+
 	t.Run("compact_batch_verify_index_oob", func(t *testing.T) {
 		mustRunErr(t, Request{Op: "compact_batch_verify", BatchSize: 2, InvalidIndices: []int{2}}, "invalid index out of range")
 	})
@@ -563,6 +571,11 @@ func TestRubinConsensusCLI_RunFromStdin_CoversErrorPaths(t *testing.T) {
 		mustRunErr(
 			t,
 			Request{Op: "compact_state_machine", ChunkCount: 2, Events: []any{map[string]any{"type": "tick", "blocks": 1.5}}},
+			"invalid blocks",
+		)
+		mustRunErr(
+			t,
+			Request{Op: "compact_state_machine", ChunkCount: 2, Events: []any{map[string]any{"type": "tick", "blocks": math.Exp2(63)}}},
 			"invalid blocks",
 		)
 	})

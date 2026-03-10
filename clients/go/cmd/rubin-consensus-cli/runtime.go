@@ -502,6 +502,7 @@ func asSortedInts(values []int) []int {
 const (
 	platformMaxInt = int(^uint(0) >> 1)
 	platformMinInt = -platformMaxInt - 1
+	maxSafeJSONInt = 1 << 53
 )
 
 func asInt(v any) (int, bool) {
@@ -510,10 +511,14 @@ func asInt(v any) (int, bool) {
 		if math.IsNaN(value) || math.IsInf(value, 0) {
 			return 0, false
 		}
-		if value < float64(platformMinInt) || value > float64(platformMaxInt) || math.Trunc(value) != value {
+		if math.Trunc(value) != value || value < -maxSafeJSONInt || value > maxSafeJSONInt {
 			return 0, false
 		}
-		return int(value), true
+		narrowed := int64(value)
+		if float64(narrowed) != value || narrowed < int64(platformMinInt) || narrowed > int64(platformMaxInt) {
+			return 0, false
+		}
+		return int(narrowed), true
 	case int:
 		return value, true
 	case int64:
@@ -1062,18 +1067,20 @@ func runFromStdin() {
 			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
 			return
 		}
-		wireCap, ok := addPositiveInts(1, 9, pubLen, 9, sigLen)
+		pubLenCS := uint64(pubLen) // #nosec G115 -- nonNegativeBoundedInt caps pubLen before conversion
+		sigLenCS := uint64(sigLen) // #nosec G115 -- nonNegativeBoundedInt caps sigLen before conversion
+		pubLenEnc := consensus.EncodeCompactSize(pubLenCS)
+		sigLenEnc := consensus.EncodeCompactSize(sigLenCS)
+		wireCap, ok := addPositiveInts(1, len(pubLenEnc), pubLen, len(sigLenEnc), sigLen)
 		if !ok || wireCap > consensus.MAX_WITNESS_BYTES_PER_TX {
 			writeResp(os.Stdout, Response{Ok: false, Err: "invalid witness lengths"})
 			return
 		}
-		pubLenCS := uint64(pubLen) // #nosec G115 -- nonNegativeBoundedInt caps pubLen before conversion
-		sigLenCS := uint64(sigLen) // #nosec G115 -- nonNegativeBoundedInt caps sigLen before conversion
 		wire := make([]byte, 0, wireCap)
 		wire = append(wire, suiteID)
-		wire = append(wire, consensus.EncodeCompactSize(pubLenCS)...)
+		wire = append(wire, pubLenEnc...)
 		wire = append(wire, bytes.Repeat([]byte{0x11}, pubLen)...)
-		wire = append(wire, consensus.EncodeCompactSize(sigLenCS)...)
+		wire = append(wire, sigLenEnc...)
 		wire = append(wire, bytes.Repeat([]byte{0x22}, sigLen)...)
 		off := 0
 		if len(wire) < 1 {
