@@ -44,6 +44,11 @@ pub struct SyncEngine {
 pub(crate) struct SyncRollbackState {
     pub chain_state: ChainState,
     pub canonical_len: usize,
+    /// Suffix of canonical entries removed during disconnect (reorg path).
+    /// For rollback: truncate canonical to `canonical_len`, then re-append
+    /// this suffix.  `None` for light rollback (disconnect_tip).
+    /// O(reorg_depth) instead of O(chain_height).
+    pub canonical_removed_suffix: Option<Vec<String>>,
     pub tip_timestamp: u64,
     pub best_known_height: u64,
 }
@@ -264,24 +269,84 @@ impl SyncEngine {
 
     // ----- Rollback helpers (used by sync_disconnect / sync_reorg) -----
 
+    /// Light rollback state — no canonical suffix (used by disconnect_tip).
     pub(crate) fn capture_rollback_state(&self) -> SyncRollbackState {
         SyncRollbackState {
             chain_state: self.chain_state.clone(),
             canonical_len: self.block_store.as_ref().map_or(0, |bs| bs.canonical_len()),
+            canonical_removed_suffix: None,
             tip_timestamp: self.tip_timestamp,
             best_known_height: self.best_known_height,
         }
     }
 
-    pub(crate) fn rollback_apply_block(&mut self, rb: SyncRollbackState) {
+    /// Reorg rollback state — captures only the canonical suffix that
+    /// will be removed during disconnect (O(reorg_depth), not O(height)).
+    pub(crate) fn capture_reorg_rollback_state(
+        &self,
+        common_ancestor_height: u64,
+    ) -> SyncRollbackState {
+        let reorg_base = (common_ancestor_height as usize).saturating_add(1);
+        SyncRollbackState {
+            chain_state: self.chain_state.clone(),
+            canonical_len: reorg_base,
+            canonical_removed_suffix: self
+                .block_store
+                .as_ref()
+                .map(|bs| bs.canonical_suffix_from(reorg_base)),
+            tip_timestamp: self.tip_timestamp,
+            best_known_height: self.best_known_height,
+        }
+    }
+
+    /// Rollback in-memory and persisted state to the captured snapshot.
+    ///
+    /// Canonical index is rolled back FIRST (IO operation).  Only after
+    /// that succeeds are in-memory fields updated and chain_state saved.
+    /// This ordering prevents partial mutations on IO failure.
+    ///
+    /// Returns an error description if persistence failed — callers
+    /// should surface this as a repair hint.
+    pub(crate) fn rollback_apply_block(&mut self, rb: SyncRollbackState) -> Option<String> {
+        // Phase 1: canonical index rollback (IO) — fail-fast before
+        // mutating any in-memory state.
+        if let Some(bs) = self.block_store.as_mut() {
+            let res = if let Some(suffix) = rb.canonical_removed_suffix {
+                // Reorg path: truncate to base, re-append removed suffix.
+                bs.rollback_canonical(rb.canonical_len, suffix)
+            } else {
+                // Light rollback: truncate to saved length (disconnect_tip).
+                bs.truncate_canonical(rb.canonical_len)
+            };
+            if let Err(e) = res {
+                return Some(format!("canonical rollback failed: {e}"));
+            }
+        }
+
+        // Phase 2: update in-memory state and persist chain_state.
         self.chain_state = rb.chain_state;
         self.tip_timestamp = rb.tip_timestamp;
         self.best_known_height = rb.best_known_height;
-        if let Some(bs) = self.block_store.as_mut() {
-            let _ = bs.truncate_canonical(rb.canonical_len);
-        }
+
         if let Some(path) = self.cfg.chain_state_path.as_ref() {
-            let _ = self.chain_state.save(path);
+            if let Err(e) = self.chain_state.save(path) {
+                return Some(format!(
+                    "chain_state save on rollback failed \
+                     (canonical already rolled back, may require repair): {e}"
+                ));
+            }
+        }
+
+        None
+    }
+
+    /// Format an error message, optionally appending rollback failure details.
+    pub(crate) fn err_with_rollback(err: String, rb: Option<String>) -> String {
+        match rb {
+            Some(rb_err) => {
+                format!("{err}; rollback failed: {rb_err}; blockstore may require repair")
+            }
+            None => err,
         }
     }
 
