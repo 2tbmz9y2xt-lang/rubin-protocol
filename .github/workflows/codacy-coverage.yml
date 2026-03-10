@@ -85,6 +85,12 @@ jobs:
           chmod +x scripts/run-codacy-coverage.sh
           ./scripts/run-codacy-coverage.sh
 
+      - name: Enforce local coverage gates
+        if: github.event_name == 'pull_request'
+        run: |
+          chmod +x scripts/preflight-codacy-coverage.sh
+          ./scripts/preflight-codacy-coverage.sh "origin/${{ github.base_ref }}"
+
       - name: Upload to Codacy
         env:
           CODACY_API_TOKEN: ${{ secrets.CODACY_API_TOKEN }}
