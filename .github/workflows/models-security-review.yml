@@ -1,4 +1,4 @@
-name: "AI Security Review (GitHub Models)"
+name: "Multi-Model Security Review (GitHub Models)"
 
 on:
   pull_request:
@@ -14,13 +14,14 @@ permissions:
   models: read
 
 jobs:
-  ai-security-review:
+  get-diff:
     runs-on: ubuntu-latest
+    outputs:
+      diff: ${{ steps.diff.outputs.diff }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: Get PR diff
         id: diff
         run: |
@@ -29,19 +30,25 @@ jobs:
           echo "$DIFF" >> $GITHUB_OUTPUT
           echo "DIFF_EOF" >> $GITHUB_OUTPUT
 
-      - name: AI Security Review via GitHub Models
+  review-gpt41:
+    needs: get-diff
+    runs-on: ubuntu-latest
+    outputs:
+      comment: ${{ steps.review.outputs.comment }}
+    steps:
+      - name: GPT-4.1 Security Review
         id: review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           BODY=$(jq -n \
-            --arg diff "${{ steps.diff.outputs.diff }}" \
+            --arg diff "${{ needs.get-diff.outputs.diff }}" \
             '{
               model: "openai/gpt-4.1",
               messages: [
                 {
                   role: "system",
-                  content: "You are a senior blockchain protocol security reviewer specializing in Go, Rust, and Lean4. This is the RUBIN protocol — a Bitcoin-like UTXO chain with post-quantum cryptography (ML-DSA, SLH-DSA), vault covenants, and formal verification. Focus on: 1) Consensus-critical bugs (double-spend, inflation, signature bypass) 2) Cryptographic misuse (nonce reuse, weak entropy, PQ parameter errors) 3) Memory safety in Rust/Go (overflow, underflow, slice bounds) 4) Covenant/vault logic flaws 5) Denial-of-service vectors. Output a structured markdown report with severity (CRITICAL/HIGH/MEDIUM/LOW/INFO) for each finding. If no issues found, state that explicitly."
+                  content: "You are a senior blockchain protocol security reviewer specializing in Go, Rust, and Lean4. This is the RUBIN protocol - a Bitcoin-like UTXO chain with post-quantum cryptography (ML-DSA, SLH-DSA), vault covenants, and formal verification. Focus on: 1) Consensus-critical bugs (double-spend, inflation, signature bypass) 2) Cryptographic misuse (nonce reuse, weak entropy, PQ parameter errors) 3) Memory safety in Rust/Go (overflow, underflow, slice bounds) 4) Covenant/vault logic flaws 5) Denial-of-service vectors. Output a structured markdown report with severity (CRITICAL/HIGH/MEDIUM/LOW/INFO) for each finding."
                 },
                 {
                   role: "user",
@@ -51,7 +58,6 @@ jobs:
               temperature: 0.1,
               max_tokens: 4096
             }')
-
           RESPONSE=$(curl -sL \
             -X POST \
             -H "Accept: application/vnd.github+json" \
@@ -60,24 +66,118 @@ jobs:
             -H "Content-Type: application/json" \
             https://models.github.ai/inference/chat/completions \
             -d "$BODY")
-
           COMMENT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "Error: no response from model"')
-
           echo "comment<<COMMENT_EOF" >> $GITHUB_OUTPUT
           echo "$COMMENT" >> $GITHUB_OUTPUT
           echo "COMMENT_EOF" >> $GITHUB_OUTPUT
 
-      - name: Post review comment
+  review-o4-mini:
+    needs: get-diff
+    runs-on: ubuntu-latest
+    outputs:
+      comment: ${{ steps.review.outputs.comment }}
+    steps:
+      - name: o4-mini Reasoning Review
+        id: review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BODY=$(jq -n \
+            --arg diff "${{ needs.get-diff.outputs.diff }}" \
+            '{
+              model: "openai/o4-mini",
+              messages: [
+                {
+                  role: "user",
+                  content: ("You are a blockchain security auditor with deep reasoning capabilities. Analyze this RUBIN protocol PR diff step-by-step. RUBIN is a Bitcoin-like UTXO chain with post-quantum crypto (ML-DSA, SLH-DSA), vault covenants, and formal verification in Lean4. Think carefully about: 1) Logical correctness of state transitions 2) Edge cases in UTXO validation 3) Cryptographic protocol soundness 4) Formal verification gaps 5) Attack surface analysis. Provide severity ratings (CRITICAL/HIGH/MEDIUM/LOW/INFO).\n\nDiff:\n\n" + $diff)
+                }
+              ],
+              max_tokens: 4096
+            }')
+          RESPONSE=$(curl -sL \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            https://models.github.ai/inference/chat/completions \
+            -d "$BODY")
+          COMMENT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "Error: no response from model"')
+          echo "comment<<COMMENT_EOF" >> $GITHUB_OUTPUT
+          echo "$COMMENT" >> $GITHUB_OUTPUT
+          echo "COMMENT_EOF" >> $GITHUB_OUTPUT
+
+  review-deepseek:
+    needs: get-diff
+    runs-on: ubuntu-latest
+    outputs:
+      comment: ${{ steps.review.outputs.comment }}
+    steps:
+      - name: DeepSeek-V3 Review
+        id: review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BODY=$(jq -n \
+            --arg diff "${{ needs.get-diff.outputs.diff }}" \
+            '{
+              model: "deepseek/DeepSeek-V3-0324",
+              messages: [
+                {
+                  role: "system",
+                  content: "You are an independent code security reviewer providing a second opinion on blockchain protocol changes. This is the RUBIN protocol - a Bitcoin-like UTXO chain with post-quantum cryptography and formal verification. Focus on: 1) Issues other reviewers might miss 2) Subtle logic errors 3) Race conditions and concurrency bugs 4) Input validation gaps 5) Dependency and supply-chain risks. Output structured markdown with severity levels (CRITICAL/HIGH/MEDIUM/LOW/INFO)."
+                },
+                {
+                  role: "user",
+                  content: ("Provide an independent security review of this PR diff:\n\n" + $diff)
+                }
+              ],
+              temperature: 0.1,
+              max_tokens: 4096
+            }')
+          RESPONSE=$(curl -sL \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            https://models.github.ai/inference/chat/completions \
+            -d "$BODY")
+          COMMENT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "Error: no response from model"')
+          echo "comment<<COMMENT_EOF" >> $GITHUB_OUTPUT
+          echo "$COMMENT" >> $GITHUB_OUTPUT
+          echo "COMMENT_EOF" >> $GITHUB_OUTPUT
+
+  post-summary:
+    needs: [review-gpt41, review-o4-mini, review-deepseek]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post multi-model review
         uses: actions/github-script@v7
         with:
           script: |
-            const body = `## 🔒 AI Security Review (GitHub Models — GPT-4.1)
-
-            ${{ steps.review.outputs.comment }}
-
-            ---
-            _Automated review via GitHub Models. Not a substitute for human security audit._`;
-
+            const gpt41 = `${{ needs.review-gpt41.outputs.comment }}`;
+            const o4mini = `${{ needs.review-o4-mini.outputs.comment }}`;
+            const deepseek = `${{ needs.review-deepseek.outputs.comment }}`;
+            const body = [
+              '## Multi-Model Security Review (GitHub Models)',
+              '',
+              '### GPT-4.1 - Code Security Analysis',
+              gpt41,
+              '',
+              '---',
+              '',
+              '### o4-mini - Deep Reasoning Review',
+              o4mini,
+              '',
+              '---',
+              '',
+              '### DeepSeek-V3 - Independent Second Opinion',
+              deepseek,
+              '',
+              '---',
+              '_Multi-model automated review via GitHub Models. Each model provides an independent perspective. Not a substitute for human security audit._'
+            ].join('\n');
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
