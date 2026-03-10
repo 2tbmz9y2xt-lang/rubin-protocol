@@ -157,12 +157,10 @@ impl SyncEngine {
 
         // Disconnect canonical chain back to the common ancestor.
         if let Err(err) = self.disconnect_canonical_to_ancestor(common_ancestor_height) {
-            if let Some(rb_err) = self.rollback_apply_block(rollback) {
-                return Err(format!(
-                    "{err}; rollback failed: {rb_err}; blockstore may require repair"
-                ));
-            }
-            return Err(err);
+            return Err(Self::err_with_rollback(
+                err,
+                self.rollback_apply_block(rollback),
+            ));
         }
 
         // Connect the heavier branch.
@@ -171,12 +169,10 @@ impl SyncEngine {
             match self.apply_block(&item.block_bytes, prev_timestamps) {
                 Ok(summary) => last_summary = Some(summary),
                 Err(err) => {
-                    if let Some(rb_err) = self.rollback_apply_block(rollback) {
-                        return Err(format!(
-                            "{err}; rollback failed: {rb_err}; blockstore may require repair"
-                        ));
-                    }
-                    return Err(err);
+                    return Err(Self::err_with_rollback(
+                        err,
+                        self.rollback_apply_block(rollback),
+                    ));
                 }
             }
         }
@@ -535,6 +531,140 @@ mod tests {
             .apply_block_with_reorg(&bad_genesis, None, None)
             .unwrap_err();
         assert!(err.contains("parent block not found"), "got: {err}");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Test: disconnect failure during reorg triggers err_with_rollback path.
+    ///
+    /// Making chain_state_path read-only causes `disconnect_tip -> save` to
+    /// fail, while blockstore index save (separate path) still works.
+    /// The rollback's Phase 2 (chain_state.save) also fails → Some(err)
+    /// flows through `err_with_rollback`.
+    #[test]
+    fn apply_heavier_branch_disconnect_fail_rollback_cascade() {
+        let (mut engine, dir) = engine_with_store("rubin-reorg-disc-fail");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+
+        engine
+            .apply_block_with_reorg(&genesis, None, None)
+            .expect("genesis");
+
+        let block1 = coinbase_only_block(1, genesis_hash, gen_ts + 1);
+        engine
+            .apply_block_with_reorg(&block1, None, None)
+            .expect("block1");
+
+        // Build heavier branch: block1' → block2'.
+        let block1_alt = coinbase_only_block(1, genesis_hash, gen_ts + 2);
+        let block1_alt_hash =
+            rubin_consensus::block_hash(&block1_alt[..rubin_consensus::BLOCK_HEADER_BYTES])
+                .expect("hash1'");
+        engine
+            .block_store
+            .as_ref()
+            .unwrap()
+            .store_block(
+                block1_alt_hash,
+                &block1_alt[..rubin_consensus::BLOCK_HEADER_BYTES],
+                &block1_alt,
+            )
+            .expect("store block1'");
+
+        let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+        let block2_alt = coinbase_only_block_with_gen(2, subsidy1, block1_alt_hash, gen_ts + 3);
+
+        // Make data_dir read-only so write_file_atomic cannot create the
+        // temp file for chainstate.json.  Blockstore lives in a subdirectory
+        // whose permissions are unaffected, so undo reads still work.
+        let mut perms = std::fs::metadata(&dir).expect("dir meta").permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&dir, perms).expect("set dir ro");
+
+        let err = engine
+            .apply_block_with_reorg(&block2_alt, None, None)
+            .unwrap_err();
+
+        // Restore permissions for cleanup.
+        let mut perms = std::fs::metadata(&dir).expect("dir meta").permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&dir, perms).expect("restore dir rw");
+
+        // Error should mention rollback failure (chain_state save failed
+        // during both disconnect and rollback Phase 2).
+        assert!(
+            err.contains("rollback failed") || err.contains("Permission denied"),
+            "expected rollback cascade error, got: {err}"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Test: connect failure during reorg triggers err_with_rollback path.
+    ///
+    /// Making the undo directory read-only causes `apply_block -> put_undo`
+    /// to fail after disconnect has already succeeded.  Rollback succeeds
+    /// (index and chain_state paths are writable), so err_with_rollback
+    /// receives `None` — the original connect error is returned unchanged.
+    #[test]
+    fn apply_heavier_branch_connect_fail_undo_readonly() {
+        let (mut engine, dir) = engine_with_store("rubin-reorg-conn-fail");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+
+        engine
+            .apply_block_with_reorg(&genesis, None, None)
+            .expect("genesis");
+
+        let block1 = coinbase_only_block(1, genesis_hash, gen_ts + 1);
+        engine
+            .apply_block_with_reorg(&block1, None, None)
+            .expect("block1");
+
+        // Build heavier branch.
+        let block1_alt = coinbase_only_block(1, genesis_hash, gen_ts + 2);
+        let block1_alt_hash =
+            rubin_consensus::block_hash(&block1_alt[..rubin_consensus::BLOCK_HEADER_BYTES])
+                .expect("hash1'");
+        engine
+            .block_store
+            .as_ref()
+            .unwrap()
+            .store_block(
+                block1_alt_hash,
+                &block1_alt[..rubin_consensus::BLOCK_HEADER_BYTES],
+                &block1_alt,
+            )
+            .expect("store block1'");
+
+        let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+        let block2_alt = coinbase_only_block_with_gen(2, subsidy1, block1_alt_hash, gen_ts + 3);
+
+        // Make undo directory read-only so put_undo fails during connect.
+        let undo_dir = block_store_path(&dir).join("undo");
+        let mut perms = std::fs::metadata(&undo_dir)
+            .expect("undo meta")
+            .permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&undo_dir, perms).expect("set ro");
+
+        let err = engine
+            .apply_block_with_reorg(&block2_alt, None, None)
+            .unwrap_err();
+
+        // Restore permissions for cleanup.
+        let mut perms = std::fs::metadata(&undo_dir)
+            .expect("undo meta")
+            .permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&undo_dir, perms).expect("restore rw");
+
+        // Connect phase failed; error comes from put_undo or downstream.
+        assert!(
+            err.contains("undo") || err.contains("Permission denied"),
+            "expected undo write error, got: {err}"
+        );
+
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }

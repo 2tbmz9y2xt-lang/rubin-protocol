@@ -340,6 +340,16 @@ impl SyncEngine {
         None
     }
 
+    /// Format an error message, optionally appending rollback failure details.
+    pub(crate) fn err_with_rollback(err: String, rb: Option<String>) -> String {
+        match rb {
+            Some(rb_err) => {
+                format!("{err}; rollback failed: {rb_err}; blockstore may require repair")
+            }
+            None => err,
+        }
+    }
+
     pub fn prev_timestamps_for_next_block(&self) -> Result<Option<Vec<u64>>, String> {
         if !self.chain_state.has_tip {
             return Ok(None);
