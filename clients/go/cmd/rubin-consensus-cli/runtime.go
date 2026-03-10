@@ -499,19 +499,80 @@ func asSortedInts(values []int) []int {
 	return out
 }
 
-func toInt(v any, def int) int {
+const (
+	platformMaxInt = int(^uint(0) >> 1)
+	platformMinInt = -platformMaxInt - 1
+)
+
+func asInt(v any) (int, bool) {
 	switch value := v.(type) {
 	case float64:
-		return int(value)
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return 0, false
+		}
+		if value < float64(platformMinInt) || value > float64(platformMaxInt) || math.Trunc(value) != value {
+			return 0, false
+		}
+		return int(value), true
 	case int:
-		return value
+		return value, true
 	case int64:
-		return int(value)
+		if value < int64(platformMinInt) || value > int64(platformMaxInt) {
+			return 0, false
+		}
+		return int(value), true
 	case uint64:
-		return int(value)
+		if value > uint64(platformMaxInt) {
+			return 0, false
+		}
+		return int(value), true
 	default:
-		return def
+		return 0, false
 	}
+}
+
+func toInt(v any, def int) int {
+	if parsed, ok := asInt(v); ok {
+		return parsed
+	}
+	return def
+}
+
+func readIntField(payload map[string]any, field string, def int) (int, error) {
+	raw, ok := payload[field]
+	if !ok || raw == nil {
+		return def, nil
+	}
+	value, ok := asInt(raw)
+	if !ok {
+		return 0, fmt.Errorf("invalid %s", field)
+	}
+	return value, nil
+}
+
+func nonNegativeBoundedInt(name string, value, max int) error {
+	if value < 0 || value > max {
+		return fmt.Errorf("invalid %s", name)
+	}
+	return nil
+}
+
+func addPositiveInts(values ...int) (int, bool) {
+	total := 0
+	for _, value := range values {
+		if value < 0 || total > platformMaxInt-value {
+			return 0, false
+		}
+		total += value
+	}
+	return total, true
+}
+
+func compactSizeInt(value uint64) (int, bool) {
+	if value > uint64(platformMaxInt) {
+		return 0, false
+	}
+	return int(value), true
 }
 
 func toString(v any, def string) string {
@@ -993,11 +1054,26 @@ func runFromStdin() {
 		suiteID := uint8OrDefault(req.SuiteID, 0x01)
 		pubLen := req.PubkeyLength
 		sigLen := req.SigLength
-		wire := make([]byte, 0, 1+9+pubLen+9+sigLen)
+		if err := nonNegativeBoundedInt("pubkey_length", pubLen, consensus.MAX_WITNESS_BYTES_PER_TX); err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+		if err := nonNegativeBoundedInt("sig_length", sigLen, consensus.MAX_WITNESS_BYTES_PER_TX); err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+		wireCap, ok := addPositiveInts(1, 9, pubLen, 9, sigLen)
+		if !ok || wireCap > consensus.MAX_WITNESS_BYTES_PER_TX {
+			writeResp(os.Stdout, Response{Ok: false, Err: "invalid witness lengths"})
+			return
+		}
+		pubLenCS := uint64(pubLen) // #nosec G115 -- nonNegativeBoundedInt caps pubLen before conversion
+		sigLenCS := uint64(sigLen) // #nosec G115 -- nonNegativeBoundedInt caps sigLen before conversion
+		wire := make([]byte, 0, wireCap)
 		wire = append(wire, suiteID)
-		wire = append(wire, consensus.EncodeCompactSize(uint64(pubLen))...)
+		wire = append(wire, consensus.EncodeCompactSize(pubLenCS)...)
 		wire = append(wire, bytes.Repeat([]byte{0x11}, pubLen)...)
-		wire = append(wire, consensus.EncodeCompactSize(uint64(sigLen))...)
+		wire = append(wire, consensus.EncodeCompactSize(sigLenCS)...)
 		wire = append(wire, bytes.Repeat([]byte{0x22}, sigLen)...)
 		off := 0
 		if len(wire) < 1 {
@@ -1011,24 +1087,34 @@ func runFromStdin() {
 			writeResp(os.Stdout, Response{Ok: false, Err: "wire decode failed"})
 			return
 		}
-		off += n
-		if off+int(pub2) > len(wire) {
+		pubDecoded, ok := compactSizeInt(pub2)
+		if !ok {
 			writeResp(os.Stdout, Response{Ok: false, Err: "wire bounds"})
 			return
 		}
-		off += int(pub2)
+		off += n
+		if off+pubDecoded > len(wire) {
+			writeResp(os.Stdout, Response{Ok: false, Err: "wire bounds"})
+			return
+		}
+		off += pubDecoded
 		sig2, n, err := consensus.DecodeCompactSize(wire[off:])
 		if err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: "wire decode failed"})
 			return
 		}
-		off += n
-		if off+int(sig2) > len(wire) {
+		sigDecoded, ok := compactSizeInt(sig2)
+		if !ok {
 			writeResp(os.Stdout, Response{Ok: false, Err: "wire bounds"})
 			return
 		}
-		off += int(sig2)
-		roundtripOK := suite2 == suiteID && int(pub2) == pubLen && int(sig2) == sigLen && off == len(wire)
+		off += n
+		if off+sigDecoded > len(wire) {
+			writeResp(os.Stdout, Response{Ok: false, Err: "wire bounds"})
+			return
+		}
+		off += sigDecoded
+		roundtripOK := suite2 == suiteID && pubDecoded == pubLen && sigDecoded == sigLen && off == len(wire)
 		writeResp(os.Stdout, Response{
 			Ok:          true,
 			RoundtripOK: roundtripOK,
@@ -1125,7 +1211,11 @@ func runFromStdin() {
 			typ := toString(eventMap["type"], "")
 			switch typ {
 			case "chunk":
-				idx := toInt(eventMap["index"], -1)
+				idx, err := readIntField(eventMap, "index", -1)
+				if err != nil {
+					writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+					return
+				}
 				if idx >= 0 && idx < chunkCount && state != "EVICTED" {
 					chunks[idx] = struct{}{}
 				}
@@ -1150,7 +1240,12 @@ func runFromStdin() {
 				}
 			case "tick":
 				if state == "A" || state == "B" {
-					ttl -= toInt(eventMap["blocks"], 1)
+					blocks, err := readIntField(eventMap, "blocks", 1)
+					if err != nil {
+						writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+						return
+					}
+					ttl -= blocks
 					if ttl <= 0 {
 						state = "EVICTED"
 						evicted = true
@@ -1240,29 +1335,37 @@ func runFromStdin() {
 		return
 
 	case "compact_sendcmpct_modes":
-		computeMode := func(payload map[string]any) int {
+		computeMode := func(payload map[string]any) (int, error) {
 			inIBD := toBool(payload["in_ibd"], false)
 			warmupDone := toBool(payload["warmup_done"], false)
 			missRatePct, _ := payload["miss_rate_pct"].(float64)
-			missRateBlocks := toInt(payload["miss_rate_blocks"], 0)
+			missRateBlocks, err := readIntField(payload, "miss_rate_blocks", 0)
+			if err != nil {
+				return 0, err
+			}
 			if inIBD {
-				return 0
+				return 0, nil
 			}
 			if missRatePct > 10.0 && missRateBlocks >= 5 {
-				return 0
+				return 0, nil
 			}
 			if warmupDone && missRatePct <= 0.5 {
-				return 2
+				return 2, nil
 			}
 			if warmupDone {
-				return 1
+				return 1, nil
 			}
-			return 0
+			return 0, nil
 		}
 		if len(req.Phases) > 0 {
 			modes := make([]int, 0, len(req.Phases))
 			for _, phase := range req.Phases {
-				modes = append(modes, computeMode(phase))
+				mode, err := computeMode(phase)
+				if err != nil {
+					writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+					return
+				}
+				modes = append(modes, mode)
 			}
 			writeResp(os.Stdout, Response{Ok: true, InvalidOut: modes})
 			return
@@ -1273,7 +1376,12 @@ func runFromStdin() {
 			"miss_rate_pct":    req.MissRatePct,
 			"miss_rate_blocks": req.MissRateBlocks,
 		}
-		writeResp(os.Stdout, Response{Ok: true, Mode: computeMode(payload)})
+		mode, err := computeMode(payload)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+		writeResp(os.Stdout, Response{Ok: true, Mode: mode})
 		return
 
 	case "compact_peer_quality":
@@ -1410,9 +1518,21 @@ func runFromStdin() {
 		normalizedEntries := make([]normalized, 0, len(req.Entries))
 		for _, entry := range req.Entries {
 			daID := toString(entry["da_id"], "")
-			fee := toInt(entry["fee"], 0)
-			wireBytes := toInt(entry["wire_bytes"], 0)
-			receivedTime := toInt(entry["received_time"], 0)
+			fee, err := readIntField(entry, "fee", 0)
+			if err != nil {
+				writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+				return
+			}
+			wireBytes, err := readIntField(entry, "wire_bytes", 0)
+			if err != nil {
+				writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+				return
+			}
+			receivedTime, err := readIntField(entry, "received_time", 0)
+			if err != nil {
+				writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+				return
+			}
 			if daID == "" || wireBytes <= 0 {
 				writeResp(os.Stdout, Response{Ok: false, Err: "invalid da_id/wire_bytes"})
 				return
