@@ -109,6 +109,10 @@ impl SyncEngine {
         self.cfg.chain_id
     }
 
+    pub fn core_ext_deployments(&self) -> CoreExtDeploymentProfiles {
+        self.cfg.core_ext_deployments.clone()
+    }
+
     pub fn tip(&self) -> Result<Option<(u64, [u8; 32])>, String> {
         if let Some(block_store) = self.block_store.as_ref() {
             return block_store.tip();
