@@ -7,6 +7,7 @@ use rubin_consensus::{
 
 use crate::blockstore::BlockStore;
 use crate::chainstate::{ChainState, ChainStateConnectSummary};
+use crate::undo::build_block_undo;
 
 pub const DEFAULT_IBD_LAG_SECONDS: u64 = 24 * 60 * 60;
 const DEFAULT_HEADER_BATCH_LIMIT: u64 = 512;
@@ -31,11 +32,20 @@ pub struct HeaderRequest {
 
 #[derive(Debug)]
 pub struct SyncEngine {
-    chain_state: ChainState,
-    block_store: Option<BlockStore>,
-    cfg: SyncConfig,
-    tip_timestamp: u64,
-    best_known_height: u64,
+    pub(crate) chain_state: ChainState,
+    pub(crate) block_store: Option<BlockStore>,
+    pub(crate) cfg: SyncConfig,
+    pub(crate) tip_timestamp: u64,
+    pub(crate) best_known_height: u64,
+}
+
+/// Captured state for rollback on failure during reorg.
+#[derive(Clone, Debug)]
+pub(crate) struct SyncRollbackState {
+    pub chain_state: ChainState,
+    pub canonical_len: usize,
+    pub tip_timestamp: u64,
+    pub best_known_height: u64,
 }
 
 pub fn default_sync_config(
@@ -186,6 +196,14 @@ impl SyncEngine {
         let old_tip_timestamp = self.tip_timestamp;
         let old_best_known_height = self.best_known_height;
 
+        // Build undo record from the pre-mutation state.
+        let next_height = if self.chain_state.has_tip {
+            self.chain_state.height + 1
+        } else {
+            0
+        };
+        let undo = build_block_undo(&self.chain_state, block_bytes, next_height)?;
+
         let summary = self.chain_state.connect_block_with_core_ext_deployments(
             block_bytes,
             self.cfg.expected_target,
@@ -194,6 +212,7 @@ impl SyncEngine {
             &self.cfg.core_ext_deployments,
         )?;
 
+        let canonical_len_before = self.block_store.as_ref().map_or(0, |bs| bs.canonical_len());
         if let Some(block_store) = self.block_store.as_mut() {
             if let Err(err) = block_store.put_block(
                 summary.block_height,
@@ -206,10 +225,28 @@ impl SyncEngine {
                 self.best_known_height = old_best_known_height;
                 return Err(err);
             }
+            // Persist the undo record alongside the block.
+            if let Err(err) = block_store.put_undo(block_hash_bytes, &undo) {
+                // Rewind canonical to the length captured before put_block.
+                let rewind_err = block_store.truncate_canonical(canonical_len_before).err();
+                self.chain_state = snapshot;
+                self.tip_timestamp = old_tip_timestamp;
+                self.best_known_height = old_best_known_height;
+                if let Some(rewind_err) = rewind_err {
+                    return Err(format!(
+                        "{err}; failed to rewind canonical index after undo write failure: {rewind_err}; blockstore may require repair"
+                    ));
+                }
+                return Err(err);
+            }
         }
 
         if let Some(chain_state_path) = self.cfg.chain_state_path.as_ref() {
             if let Err(err) = self.chain_state.save(chain_state_path) {
+                // Rewind canonical index to the length captured before put_block.
+                if let Some(bs) = self.block_store.as_mut() {
+                    let _ = bs.truncate_canonical(canonical_len_before);
+                }
                 self.chain_state = snapshot;
                 self.tip_timestamp = old_tip_timestamp;
                 self.best_known_height = old_best_known_height;
@@ -223,6 +260,29 @@ impl SyncEngine {
         }
 
         Ok(summary)
+    }
+
+    // ----- Rollback helpers (used by sync_disconnect / sync_reorg) -----
+
+    pub(crate) fn capture_rollback_state(&self) -> SyncRollbackState {
+        SyncRollbackState {
+            chain_state: self.chain_state.clone(),
+            canonical_len: self.block_store.as_ref().map_or(0, |bs| bs.canonical_len()),
+            tip_timestamp: self.tip_timestamp,
+            best_known_height: self.best_known_height,
+        }
+    }
+
+    pub(crate) fn rollback_apply_block(&mut self, rb: SyncRollbackState) {
+        self.chain_state = rb.chain_state;
+        self.tip_timestamp = rb.tip_timestamp;
+        self.best_known_height = rb.best_known_height;
+        if let Some(bs) = self.block_store.as_mut() {
+            let _ = bs.truncate_canonical(rb.canonical_len);
+        }
+        if let Some(path) = self.cfg.chain_state_path.as_ref() {
+            let _ = self.chain_state.save(path);
+        }
     }
 
     pub fn prev_timestamps_for_next_block(&self) -> Result<Option<Vec<u64>>, String> {

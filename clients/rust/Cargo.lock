@@ -197,6 +197,7 @@ name = "rubin-node"
 version = "0.0.0"
 dependencies = [
  "hex",
+ "num-bigint",
  "rubin-consensus",
  "serde",
  "serde_json",
