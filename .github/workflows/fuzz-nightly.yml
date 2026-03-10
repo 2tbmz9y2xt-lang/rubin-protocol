@@ -56,7 +56,14 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # nightly
+        # NOTE: This MUST pin the `nightly` branch SHA, not `stable`.
+        # Dependabot treats all branches as one dependency—verify the SHA
+        # belongs to the nightly branch before merging Dependabot PRs.
+        # Current nightly branch: 0f1b44df7e9cbb178d781a242338dfa5e243ad7f
+        # Current stable branch:  631a55b12751854ce901bb631d5902ceb48146f7
+        uses: dtolnay/rust-toolchain@0f1b44df7e9cbb178d781a242338dfa5e243ad7f # nightly
+        with:
+          toolchain: nightly
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
