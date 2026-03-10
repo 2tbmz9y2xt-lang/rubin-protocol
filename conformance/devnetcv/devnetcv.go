@@ -236,7 +236,7 @@ func WriteFixtures(repoRoot string) error {
 		return err
 	}
 	fixturesDir := filepath.Join(repoRoot, "conformance", "fixtures")
-	if err := os.MkdirAll(fixturesDir, 0o755); err != nil {
+	if err := os.MkdirAll(fixturesDir, 0o750); err != nil {
 		return err
 	}
 	ordered := []struct {
@@ -255,7 +255,7 @@ func WriteFixtures(repoRoot string) error {
 			return err
 		}
 		path := filepath.Join(fixturesDir, item.gate+".json")
-		if err := os.WriteFile(path, raw, 0o644); err != nil {
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
 			return err
 		}
 	}
@@ -540,7 +540,7 @@ func snapshotChainState(st *node.ChainState) (ChainStateJSON, error) {
 	if err := st.Save(path); err != nil {
 		return ChainStateJSON{}, err
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) // #nosec G304 -- path comes from os.CreateTemp above.
 	if err != nil {
 		return ChainStateJSON{}, err
 	}

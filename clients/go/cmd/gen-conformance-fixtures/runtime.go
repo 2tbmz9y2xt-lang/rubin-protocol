@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -154,6 +155,8 @@ func mustSignInputDigest(id string, label string, signer digestSigner, tx *conse
 }
 
 func mustLoadFixture(path string) *fixtureFile {
+	path = mustCanonicalFixturePath(path)
+	// #nosec G304 -- path is validated to a repo-local JSON fixture under conformance/fixtures.
 	b, err := os.ReadFile(path)
 	if err != nil {
 		fatalf("read %s: %v", path, err)
@@ -163,6 +166,26 @@ func mustLoadFixture(path string) *fixtureFile {
 		fatalf("parse %s: %v", path, err)
 	}
 	return &f
+}
+
+func mustCanonicalFixturePath(path string) string {
+	repoRoot, err := repoRootFromGoModule()
+	if err != nil {
+		fatalf("repo root: %v", err)
+	}
+	clean := filepath.Clean(path)
+	fixturesRoot := filepath.Join(repoRoot, "conformance", "fixtures")
+	rel, err := filepath.Rel(fixturesRoot, clean)
+	if err != nil {
+		fatalf("fixture path %s: %v", path, err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		fatalf("fixture path %s escapes %s", path, fixturesRoot)
+	}
+	if filepath.Ext(clean) != ".json" {
+		fatalf("fixture path %s must be a .json file", path)
+	}
+	return clean
 }
 
 func mustWriteFixture(path string, f *fixtureFile) {

@@ -150,7 +150,9 @@ func submitTx(target string, txBytes []byte) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusOK {
-		io.Copy(io.Discard, resp.Body)
+		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+			return err
+		}
 		return nil
 	}
 	rawBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
