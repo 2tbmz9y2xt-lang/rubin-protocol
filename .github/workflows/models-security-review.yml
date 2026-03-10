@@ -1,0 +1,86 @@
+name: "AI Security Review (GitHub Models)"
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    paths:
+      - '**/*.go'
+      - '**/*.rs'
+      - '**/*.lean'
+
+permissions:
+  contents: read
+  pull-requests: write
+  models: read
+
+jobs:
+  ai-security-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff
+        id: diff
+        run: |
+          DIFF=$(git diff origin/${{ github.base_ref }}...HEAD -- '*.go' '*.rs' '*.lean' | head -c 80000)
+          echo "diff<<DIFF_EOF" >> $GITHUB_OUTPUT
+          echo "$DIFF" >> $GITHUB_OUTPUT
+          echo "DIFF_EOF" >> $GITHUB_OUTPUT
+
+      - name: AI Security Review via GitHub Models
+        id: review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BODY=$(jq -n \
+            --arg diff "${{ steps.diff.outputs.diff }}" \
+            '{
+              model: "openai/gpt-4.1",
+              messages: [
+                {
+                  role: "system",
+                  content: "You are a senior blockchain protocol security reviewer specializing in Go, Rust, and Lean4. This is the RUBIN protocol — a Bitcoin-like UTXO chain with post-quantum cryptography (ML-DSA, SLH-DSA), vault covenants, and formal verification. Focus on: 1) Consensus-critical bugs (double-spend, inflation, signature bypass) 2) Cryptographic misuse (nonce reuse, weak entropy, PQ parameter errors) 3) Memory safety in Rust/Go (overflow, underflow, slice bounds) 4) Covenant/vault logic flaws 5) Denial-of-service vectors. Output a structured markdown report with severity (CRITICAL/HIGH/MEDIUM/LOW/INFO) for each finding. If no issues found, state that explicitly."
+                },
+                {
+                  role: "user",
+                  content: ("Review this pull request diff for security issues:\n\n" + $diff)
+                }
+              ],
+              temperature: 0.1,
+              max_tokens: 4096
+            }')
+
+          RESPONSE=$(curl -sL \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            https://models.github.ai/inference/chat/completions \
+            -d "$BODY")
+
+          COMMENT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "Error: no response from model"')
+
+          echo "comment<<COMMENT_EOF" >> $GITHUB_OUTPUT
+          echo "$COMMENT" >> $GITHUB_OUTPUT
+          echo "COMMENT_EOF" >> $GITHUB_OUTPUT
+
+      - name: Post review comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = `## 🔒 AI Security Review (GitHub Models — GPT-4.1)
+
+            ${{ steps.review.outputs.comment }}
+
+            ---
+            _Automated review via GitHub Models. Not a substitute for human security audit._`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
