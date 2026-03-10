@@ -17,7 +17,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-git -C "$repo_root" fetch origin
+if [[ "$(git -C "$repo_root" rev-parse --is-shallow-repository)" == "true" ]]; then
+  git -C "$repo_root" fetch --prune --unshallow origin
+else
+  git -C "$repo_root" fetch origin
+fi
 merge_base="$(git -C "$repo_root" merge-base HEAD "$base_ref")"
 git -C "$repo_root" worktree add --detach "$base_worktree" "$merge_base" >/dev/null
 
