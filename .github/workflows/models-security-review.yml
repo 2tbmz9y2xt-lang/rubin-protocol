@@ -186,9 +186,27 @@ jobs:
               '---',
               '_Orchestrated 3-stage review: gpt-5 (analysis) -> o4-mini (challenge) -> DeepSeek-V3 (synthesis). Each stage builds on previous results._'
             ].join('\n');
-            await github.rest.issues.createComment({
+                        const marker = '<!-- orchestrated-multi-model-review -->';
+            const fullBody = marker + '\n' + body;
+            const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: body
             });
+            const existing = comments.find(c => c.body && c.body.includes('<!-- orchestrated-multi-model-review -->'));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: fullBody
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: fullBody
+              });
+            }
+            
