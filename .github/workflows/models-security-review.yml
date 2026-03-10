@@ -16,9 +16,9 @@ permissions:
 jobs:
   get-diff:
     runs-on: ubuntu-latest
-    outputs:
+      outputs:
       skip: "${{ steps.diff.outputs.skip }}"
-    steps:
+      steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
