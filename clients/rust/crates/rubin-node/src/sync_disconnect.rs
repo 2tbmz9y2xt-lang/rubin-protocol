@@ -43,17 +43,18 @@ impl SyncEngine {
 
         let summary = self.chain_state.disconnect_block(&block_bytes, &undo)?;
 
-        // Truncate canonical index (remove the tip entry).
-        if let Some(bs) = self.block_store.as_mut() {
-            if let Err(err) = bs.truncate_canonical(rollback.canonical_len.saturating_sub(1)) {
+        // Persist chain state BEFORE truncating canonical index so that a
+        // save failure can be rolled back without losing canonical entries.
+        if let Some(path) = self.cfg.chain_state_path.as_ref() {
+            if let Err(err) = self.chain_state.save(path) {
                 self.rollback_apply_block(rollback);
                 return Err(err);
             }
         }
 
-        // Persist chain state.
-        if let Some(path) = self.cfg.chain_state_path.as_ref() {
-            if let Err(err) = self.chain_state.save(path) {
+        // Truncate canonical index (remove the tip entry).
+        if let Some(bs) = self.block_store.as_mut() {
+            if let Err(err) = bs.truncate_canonical(rollback.canonical_len.saturating_sub(1)) {
                 self.rollback_apply_block(rollback);
                 return Err(err);
             }

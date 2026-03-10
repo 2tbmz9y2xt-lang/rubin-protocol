@@ -226,6 +226,9 @@ impl SyncEngine {
             }
             // Persist the undo record alongside the block.
             if let Err(err) = block_store.put_undo(block_hash_bytes, &undo) {
+                // Rewind the canonical index that put_block just extended.
+                let _ =
+                    block_store.truncate_canonical(block_store.canonical_len().saturating_sub(1));
                 self.chain_state = snapshot;
                 self.tip_timestamp = old_tip_timestamp;
                 self.best_known_height = old_best_known_height;

@@ -171,8 +171,13 @@ impl SyncEngine {
             }
         }
 
-        // Requeue non-coinbase transactions from disconnected blocks.
+        // Mempool maintenance: evict txs confirmed in the winning branch,
+        // then requeue txs from the disconnected blocks (those that are still
+        // valid against the new chain state will be re-admitted).
         if let Some(pool) = tx_pool {
+            for item in &branch {
+                evict_confirmed_from_pool(pool, &item.block_bytes);
+            }
             requeue_disconnected_transactions(pool, self, &disconnected_blocks);
         }
 
