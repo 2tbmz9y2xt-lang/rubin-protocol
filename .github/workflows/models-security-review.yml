@@ -16,7 +16,7 @@ permissions:
 jobs:
   get-diff:
     runs-on: ubuntu-latest
-outputs:
+    outputs:
       skip: ${{ steps.diff.outputs.skip }}
     steps:
       - uses: actions/checkout@v4
@@ -25,224 +25,308 @@ outputs:
       - name: Get PR diff
         id: diff
         run: |
-          git diff origin/${{ github.base_ref }}...HEAD -- '*.go' '*.rs' '*.lean' | head -c 160000 > /tmp/pr-diff.txt
-          if [ ! -s /tmp/pr-diff.txt ]; then
+          DIFF=$(gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }})
+          if [ -z "$DIFF" ]; then
             echo "skip=true" >> $GITHUB_OUTPUT
-            echo "No diff found" > /tmp/pr-diff.txt
           else
             echo "skip=false" >> $GITHUB_OUTPUT
+            echo "$DIFF" > pr-diff.txt
           fi
-      - uses: actions/upload-artifact@v4
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Upload diff artifact
+        if: steps.diff.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
         with:
           name: pr-diff
-          path: /tmp/pr-diff.txt
+          path: pr-diff.txt
           retention-days: 1
 
-  stage1-primary-review:
+  security-review:
     needs: get-diff
     if: needs.get-diff.outputs.skip != 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        model:
+          - id: openai/gpt-4.1
+            name: gpt-4.1
+            fallback: deepseek/DeepSeek-V3-0324
+          - id: deepseek/DeepSeek-V3-0324
+            name: deepseek-v3
+            fallback: meta/Llama-4-Maverick-17B-128E-Instruct-FP8
+          - id: meta/Llama-4-Maverick-17B-128E-Instruct-FP8
+            name: llama-4-maverick
+            fallback: openai/gpt-4.1-mini
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - name: Download diff artifact
+        uses: actions/download-artifact@v4
         with:
           name: pr-diff
-      - name: "Stage 1: gpt-5 Primary Security Analysis"
+      - name: Run security review with fallback
         id: review
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          DIFF=$(cat pr-diff.txt)
-          BODY=$(jq -n --arg diff "$DIFF" '{
-            model: "openai/gpt-5",
-            messages: [
-              {
-                role: "system",
-                content: "You are a senior blockchain protocol security reviewer specializing in Go, Rust, and Lean4. This is the RUBIN protocol - a Bitcoin-like UTXO chain with post-quantum cryptography (ML-DSA, SLH-DSA), vault covenants, and formal verification. Perform a thorough primary security analysis focusing on: 1) Consensus-critical bugs (double-spend, inflation, signature bypass) 2) Cryptographic misuse (nonce reuse, weak entropy, PQ parameter errors) 3) Memory safety in Rust/Go (overflow, underflow, slice bounds) 4) Covenant/vault logic flaws 5) Denial-of-service vectors. Output a structured markdown report with severity (CRITICAL/HIGH/MEDIUM/LOW/INFO) for each finding. Be exhaustive - your analysis will be passed to other models for deeper inspection."
-              },
-              {
-                role: "user",
-                content: ("Review this pull request diff for security issues:\n\n" + $diff)
-              }
-            ],
-            temperature: 0.1,
-            max_tokens: 16384
-          }')
-          RESPONSE=$(curl -sL \
-            -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            -H "Content-Type: application/json" \
-            https://models.github.ai/inference/chat/completions \
-            -d "$BODY")
-          COMMENT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "Error: no response from model"')
-          echo "$COMMENT" > /tmp/stage1-review.txt
-      - uses: actions/upload-artifact@v4
-        with:
-          name: stage1-review
-          path: /tmp/stage1-review.txt
-          retention-days: 1
-
-  stage2-reasoning-challenge:
-    needs: [get-diff, stage1-primary-review]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: pr-diff
-      - uses: actions/download-artifact@v4
-        with:
-          name: stage1-review
-      - name: "Stage 2: o4-mini Deep Reasoning Challenge"
-        id: review
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          DIFF=$(cat pr-diff.txt)
-          STAGE1=$(cat stage1-review.txt)
-          BODY=$(jq -n --arg diff "$DIFF" --arg stage1 "$STAGE1" '{
-            model: "openai/o4-mini",
-            messages: [
-              {
-                role: "user",
-                content: ("You are a blockchain security auditor performing a SECOND-PASS review with deep reasoning. Another model (GPT-5) already performed a primary analysis. Your job is to:\n\n1) CHALLENGE the primary review - are there false positives? Missed issues?\n2) REASON STEP-BY-STEP about edge cases the primary reviewer may have missed\n3) VERIFY the severity ratings - are they accurate?\n4) IDENTIFY any logical flaws in the primary analysis itself\n5) ADD new findings that require deeper reasoning (state machine analysis, race conditions, mathematical proof gaps)\n\nContext: RUBIN protocol - Bitcoin-like UTXO chain with post-quantum crypto (ML-DSA, SLH-DSA), vault covenants, Lean4 formal verification.\n\n--- PRIMARY REVIEW (GPT-5) ---\n" + $stage1 + "\n\n--- ORIGINAL DIFF ---\n" + $diff + "\n\nProvide your second-pass analysis with severity ratings (CRITICAL/HIGH/MEDIUM/LOW/INFO). Clearly mark which findings are NEW vs corrections to the primary review.")
-              }
-            ],
-            max_tokens: 16384
-          }')
-          RESPONSE=$(curl -sL \
-            -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            -H "Content-Type: application/json" \
-            https://models.github.ai/inference/chat/completions \
-            -d "$BODY")
-          COMMENT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "Error: no response from model"')
-          echo "$COMMENT" > /tmp/stage2-review.txt
-      - uses: actions/upload-artifact@v4
-        with:
-          name: stage2-review
-          path: /tmp/stage2-review.txt
-          retention-days: 1
-
-  stage3-synthesis:
-    needs: [get-diff, stage1-primary-review, stage2-reasoning-challenge]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: pr-diff
-      - uses: actions/download-artifact@v4
-        with:
-          name: stage1-review
-      - uses: actions/download-artifact@v4
-        with:
-          name: stage2-review
-      - name: "Stage 3: DeepSeek-V3 Consensus Synthesis"
-        id: review
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          DIFF=$(cat pr-diff.txt)
-          STAGE1=$(cat stage1-review.txt)
-          STAGE2=$(cat stage2-review.txt)
-          BODY=$(jq -n --arg diff "$DIFF" --arg stage1 "$STAGE1" --arg stage2 "$STAGE2" '{
-            model: "deepseek/DeepSeek-V3-0324",
-            messages: [
-              {
-                role: "system",
-                content: "You are the FINAL ARBITER in a multi-model security review pipeline for the RUBIN blockchain protocol. Two models have already reviewed this code: GPT-5 (primary analysis) and o4-mini (reasoning challenge/second pass). Your job is to SYNTHESIZE their findings into a final actionable report."
-              },
-              {
-                role: "user",
-                content: ("Synthesize the following two reviews into a FINAL CONSENSUS REPORT.\n\nRules:\n1) Where both models AGREE - mark as CONFIRMED finding with combined severity\n2) Where models DISAGREE - analyze both arguments and make a final ruling\n3) Flag any FALSE POSITIVES identified by the second reviewer\n4) Produce a FINAL severity-sorted list of all confirmed issues\n5) End with a GO/NO-GO recommendation for merging\n\n--- STAGE 1: GPT-5 Primary Analysis ---\n" + $stage1 + "\n\n--- STAGE 2: o4-mini Reasoning Challenge ---\n" + $stage2 + "\n\n--- ORIGINAL DIFF ---\n" + $diff + "\n\nOutput format:\n## Final Consensus Report\n### CONFIRMED Issues (both models agree)\n### DISPUTED Issues (models disagree) + your ruling\n### FALSE POSITIVES (rejected findings)\n### ADDITIONAL Issues (found only by one model, confirmed by you)\n### Merge Recommendation: GO / CAUTION / NO-GO")
-              }
-            ],
-            temperature: 0.1,
-            max_tokens: 16384
-          }')
-          RESPONSE=$(curl -sL \
-            -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            -H "Content-Type: application/json" \
-            https://models.github.ai/inference/chat/completions \
-            -d "$BODY")
-          COMMENT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "Error: no response from model"')
-          echo "$COMMENT" > /tmp/stage3-review.txt
-      - uses: actions/upload-artifact@v4
-        with:
-          name: stage3-review
-          path: /tmp/stage3-review.txt
-          retention-days: 1
-
-  post-orchestrated-review:
-    needs: [stage1-primary-review, stage2-reasoning-challenge, stage3-synthesis]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: stage1-review
-      - uses: actions/download-artifact@v4
-        with:
-          name: stage2-review
-      - uses: actions/download-artifact@v4
-        with:
-          name: stage3-review
-      - name: Post orchestrated review
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            const stage1 = fs.readFileSync('stage1-review.txt', 'utf8');
-            const stage2 = fs.readFileSync('stage2-review.txt', 'utf8');
-            const stage3 = fs.readFileSync('stage3-review.txt', 'utf8');
-            const body = [
-              '## Orchestrated Multi-Model Security Review',
-              '',
-              '<details>',
-              '<summary>Stage 1: GPT-5 Primary Security Analysis</summary>',
-              '',
-              stage1,
-              '',
-              '</details>',
-              '',
-              '<details>',
-              '<summary>Stage 2: o4-mini Reasoning Challenge</summary>',
-              '',
-              stage2,
-              '',
-              '</details>',
-              '',
-              '### Stage 3: Final Consensus (DeepSeek-V3)',
-              '',
-              stage3,
-              '',
-              '---',
-              '_Orchestrated 3-stage review: GPT-5 (analysis) -> o4-mini (challenge) -> DeepSeek-V3 (synthesis). Each stage builds on previous results._'
-            ].join('\n');
-            const marker = '<!-- orchestrated-multi-model-review -->';
-            const fullBody = marker + '\n' + body;
-            const comments = await github.paginate(github.rest.issues.listComments, {
+            const diff = fs.readFileSync('pr-diff.txt', 'utf8').slice(0, 12000);
+
+            const systemPrompt = `You are the main protocol security reviewer for the RUBIN protocol.
+
+            Context:
+            - Bitcoin-like UTXO chain with dual reference clients (Go + Rust) and Lean4 formal verification
+            - Cryptography: ML-DSA-87 (native signature scheme). SLH-DSA is NOT natively used, only referenced externally or via non-native/extensible paths
+            - Covenant-typed covenant system (P2PK, HTLC, anchor, DA-commit, CORE_EXT, vault, multisig)
+            - Soft-fork deployment mechanism for protocol upgrades
+            - Canonical chain: RUBIN_L1_CANONICAL.md -> fixtures -> Go client -> Rust parity client -> conformance tests
+
+            Review the diff for security issues, ordered by severity:
+
+            CRITICAL:
+            - double-spend
+            - inflation
+            - signature bypass
+            - fork-choice errors
+            - reorg safety failures
+
+            HIGH:
+            - nonce reuse
+            - weak entropy
+            - PQ parameter misuse
+            - hash collision paths
+
+            MEDIUM:
+            - integer overflow or underflow
+            - slice bounds errors
+            - unchecked casts
+            - panic paths in consensus or validation
+
+            LOW:
+            - incorrect state transitions
+            - disconnect or reconnect correctness
+            - undo record integrity
+
+            INFO:
+            - behavioral divergence that could cause chain splits
+            - spec/code/fixture drift that changes accept or reject behavior
+
+            PERF:
+            - unbounded allocations
+            - CPU-intensive hot paths
+            - disk exhaustion paths
+
+            STYLE:
+            - constant type confusion
+            - vault bypass preconditions
+            - timelock circumvention via ambiguous logic
+
+            Rules:
+            - Review only what is visible in the provided diff bundle.
+            - Do not invent files, lines, or behavior not evidenced by the diff.
+            - If there are no findings, return an empty findings array and explain why in summary.
+            - Prefer the most relevant changed line in the diff for each finding.
+            - Output valid JSON only in this exact shape:
+
+            {"model":"<name>","findings":[{"severity":"CRITICAL|HIGH|MEDIUM|LOW|INFO|PERF|STYLE","file":"<path>","line":<n>,"title":"<short>","details":"<explanation>","suggestion":"<fix>"}],"summary":"<overall>"}`;
+
+            const models = [
+              '${{ matrix.model.id }}',
+              '${{ matrix.model.fallback }}'
+            ];
+
+            let result = null;
+            let usedModel = null;
+
+            for (const modelId of models) {
+              try {
+                core.info(`Trying model: ${modelId}`);
+                const response = await fetch(
+                  'https://models.github.ai/inference/chat/completions',
+                  {
+                    method: 'POST',
+                    headers: {
+                      'Authorization': `Bearer ${process.env.GITHUB_TOKEN}`,
+                      'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                      model: modelId,
+                      messages: [
+                        { role: 'system', content: systemPrompt },
+                        { role: 'user', content: `Review this PR diff:\n\n${diff}` }
+                      ],
+                      temperature: 0.2
+                    })
+                  }
+                );
+                if (!response.ok) {
+                  core.warning(`Model ${modelId} returned ${response.status}: ${response.statusText}`);
+                  continue;
+                }
+                const data = await response.json();
+                result = data.choices[0].message.content;
+                usedModel = modelId;
+                break;
+              } catch (err) {
+                core.warning(`Model ${modelId} failed: ${err.message}`);
+              }
+            }
+
+            if (!result) {
+              core.setFailed('All models unavailable');
+              return;
+            }
+
+            core.info(`Used model: ${usedModel}`);
+            core.setOutput('review', result);
+            core.setOutput('used_model', usedModel);
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Post review comment
+        if: steps.review.outputs.review
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const review = ${{ toJSON(steps.review.outputs.review) }};
+            const model = '${{ steps.review.outputs.used_model }}';
+            const label = '${{ matrix.model.name }}';
+            await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
+              body: `### Security Review: ${label}\n_Model: ${model}_\n\n\`\`\`json\n${review}\n\`\`\``
             });
-            const existing = comments.find(c => c.body && c.body.includes('<!-- orchestrated-multi-model-review -->'));
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: existing.id,
-                body: fullBody
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: fullBody
-              });
+
+  resolve:
+    needs: security-review
+    if: always() && needs.security-review.result != 'cancelled'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect model reviews and resolve disputes
+        id: resolve
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+
+            const reviews = comments
+              .filter(c => c.body.startsWith('### Security Review:'))
+              .map(c => {
+                const jsonMatch = c.body.match(/```json\n([\s\S]*?)\n```/);
+                return jsonMatch ? jsonMatch[1] : null;
+              })
+              .filter(Boolean);
+
+            if (reviews.length === 0) {
+              core.setFailed('No model reviews found');
+              return;
             }
+
+            core.info(`Found ${reviews.length} model reviews`);
+
+            const allFindings = [];
+            for (const r of reviews) {
+              try {
+                const parsed = JSON.parse(r);
+                if (parsed.findings) {
+                  for (const f of parsed.findings) {
+                    f._model = parsed.model;
+                    allFindings.push(f);
+                  }
+                }
+              } catch (e) {
+                core.warning(`Failed to parse review JSON: ${e.message}`);
+              }
+            }
+
+            const severityOrder = ['CRITICAL','HIGH','MEDIUM','LOW','INFO','PERF','STYLE'];
+            allFindings.sort((a, b) => severityOrder.indexOf(a.severity) - severityOrder.indexOf(b.severity));
+
+            const grouped = {};
+            for (const f of allFindings) {
+              const key = `${f.file}::${f.title}`;
+              if (!grouped[key]) grouped[key] = [];
+              grouped[key].push(f);
+            }
+
+            const agreed = [];
+            const disputed = [];
+            const unique = [];
+
+            for (const [key, findings] of Object.entries(grouped)) {
+              if (findings.length >= 2) {
+                const sevs = new Set(findings.map(f => f.severity));
+                if (sevs.size === 1) {
+                  agreed.push({ ...findings[0], confirmedBy: findings.map(f => f._model) });
+                } else {
+                  disputed.push({ key, findings });
+                }
+              } else {
+                unique.push(findings[0]);
+              }
+            }
+
+            const hasCritical = agreed.some(f => f.severity === 'CRITICAL');
+            const hasDisputedCritical = disputed.some(d =>
+              d.findings.some(f => f.severity === 'CRITICAL' || f.severity === 'HIGH')
+            );
+
+            let verdict = 'APPROVE';
+            let reason = '';
+
+            if (hasCritical) {
+              verdict = 'BLOCK';
+              reason = `${agreed.filter(f => f.severity === 'CRITICAL').length} confirmed CRITICAL finding(s)`;
+            } else if (hasDisputedCritical) {
+              verdict = 'NEEDS_HUMAN_REVIEW';
+              reason = 'Disputed CRITICAL/HIGH findings between models';
+            }
+
+            let body = `### Security Review Resolution\n\n`;
+            body += `**Verdict: ${verdict}**`;
+            if (reason) body += ` - ${reason}`;
+            body += `\n\n`;
+            body += `| Metric | Count |\n|--------|-------|\n`;
+            body += `| Models responded | ${reviews.length} |\n`;
+            body += `| Agreed findings | ${agreed.length} |\n`;
+            body += `| Disputed findings | ${disputed.length} |\n`;
+            body += `| Unique (single model) | ${unique.length} |\n\n`;
+
+            if (agreed.length > 0) {
+              body += `#### Confirmed Findings\n`;
+              for (const f of agreed) {
+                body += `- **${f.severity}** \`${f.file}\`: ${f.title} _(confirmed by ${f.confirmedBy.join(', ')})_\n`;
+              }
+              body += `\n`;
+            }
+
+            if (disputed.length > 0) {
+              body += `#### Disputed Findings (need human review)\n`;
+              for (const d of disputed) {
+                body += `- \`${d.key}\`: `;
+                body += d.findings.map(f => `${f._model}=${f.severity}`).join(' vs ');
+                body += `\n`;
+              }
+              body += `\n`;
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
+
+            if (verdict === 'BLOCK') {
+              core.setFailed(`Merge blocked: ${reason}`);
+            } else {
+              core.info(`Resolution: ${verdict}`);
+            }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
