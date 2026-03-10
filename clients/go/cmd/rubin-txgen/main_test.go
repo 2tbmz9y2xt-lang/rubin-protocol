@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -284,6 +285,56 @@ func TestSubmitTxSucceedsOn200(t *testing.T) {
 	}
 	if !strings.Contains(gotBody, `"tx_hex":"0a0b"`) {
 		t.Fatalf("body=%q, want tx_hex payload", gotBody)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return fn(r)
+}
+
+type errReadCloser struct{}
+
+func (errReadCloser) Read([]byte) (int, error) { return 0, errors.New("body read failed") }
+func (errReadCloser) Close() error             { return nil }
+
+func TestSubmitTxReturnsErrorWhenResponseDrainFails(t *testing.T) {
+	client := &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			if r.URL.Path != "/submit_tx" {
+				t.Fatalf("path=%q, want /submit_tx", r.URL.Path)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       errReadCloser{},
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+
+	err := submitTxWithClient("http://127.0.0.1:19112", []byte{0x0a, 0x0b}, client)
+	if err == nil {
+		t.Fatal("expected body drain error")
+	}
+	if !strings.Contains(err.Error(), "body read failed") {
+		t.Fatalf("error=%q", err.Error())
+	}
+}
+
+func TestSubmitTxReturnsTransportError(t *testing.T) {
+	client := &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			return nil, errors.New("transport failed")
+		}),
+	}
+
+	err := submitTxWithClient("http://127.0.0.1:19112", []byte{0x0a, 0x0b}, client)
+	if err == nil {
+		t.Fatal("expected transport error")
+	}
+	if !strings.Contains(err.Error(), "transport failed") {
+		t.Fatalf("error=%q", err.Error())
 	}
 }
 
