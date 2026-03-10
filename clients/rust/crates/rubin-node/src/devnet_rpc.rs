@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::p2p_runtime::PeerManager;
-use crate::{BlockStore, SyncEngine, TxPool, TxPoolAdmitErrorKind};
+use crate::{BlockStore, SyncEngine, TxPool, TxPoolAdmitErrorKind, TxPoolConfig};
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
@@ -85,10 +85,17 @@ pub fn new_devnet_rpc_state(
     block_store: Option<BlockStore>,
     peer_manager: Arc<PeerManager>,
 ) -> DevnetRPCState {
+    let core_ext_deployments = sync_engine
+        .lock()
+        .map(|engine| engine.core_ext_deployments())
+        .unwrap_or_default();
     DevnetRPCState {
         sync_engine,
         block_store,
-        tx_pool: Arc::new(Mutex::new(TxPool::new())),
+        tx_pool: Arc::new(Mutex::new(TxPool::new_with_config(TxPoolConfig {
+            core_ext_deployments,
+            ..TxPoolConfig::default()
+        }))),
         peer_manager,
         metrics: Arc::new(RpcMetrics::default()),
         now_unix: current_unix,

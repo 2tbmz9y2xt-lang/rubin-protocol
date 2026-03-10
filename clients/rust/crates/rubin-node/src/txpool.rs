@@ -1,12 +1,21 @@
 use std::collections::HashMap;
 
 use rubin_consensus::{
-    apply_non_coinbase_tx_basic_with_mtp, parse_block_header_bytes, parse_tx, Outpoint,
+    apply_non_coinbase_tx_basic_with_mtp, parse_block_header_bytes, parse_core_ext_covenant_data,
+    parse_tx, tx_weight_and_stats_public, CoreExtDeploymentProfiles, Outpoint,
 };
 
 use crate::{BlockStore, ChainState};
 
 const MAX_TX_POOL_TRANSACTIONS: usize = 300;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxPoolConfig {
+    pub policy_da_surcharge_per_byte: u64,
+    pub policy_reject_non_coinbase_anchor_outputs: bool,
+    pub policy_reject_core_ext_pre_activation: bool,
+    pub core_ext_deployments: CoreExtDeploymentProfiles,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxPoolEntry {
@@ -16,6 +25,7 @@ pub struct TxPoolEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxPool {
+    cfg: TxPoolConfig,
     txs: HashMap<[u8; 32], TxPoolEntry>,
     spenders: HashMap<Outpoint, [u8; 32]>,
 }
@@ -43,7 +53,12 @@ impl std::error::Error for TxPoolAdmitError {}
 
 impl TxPool {
     pub fn new() -> Self {
+        Self::new_with_config(TxPoolConfig::default())
+    }
+
+    pub fn new_with_config(cfg: TxPoolConfig) -> Self {
         Self {
+            cfg,
             txs: HashMap::new(),
             spenders: HashMap::new(),
         }
@@ -105,6 +120,7 @@ impl TxPool {
             chain_id,
         )
         .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
+        apply_policy(&tx, &chain_state.utxos, next_height, &self.cfg).map_err(rejected)?;
 
         self.txs.insert(
             txid,
@@ -123,6 +139,17 @@ impl TxPool {
 impl Default for TxPool {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Default for TxPoolConfig {
+    fn default() -> Self {
+        Self {
+            policy_da_surcharge_per_byte: 0,
+            policy_reject_non_coinbase_anchor_outputs: true,
+            policy_reject_core_ext_pre_activation: true,
+            core_ext_deployments: CoreExtDeploymentProfiles::empty(),
+        }
     }
 }
 
@@ -208,6 +235,133 @@ fn unavailable(message: impl Into<String>) -> TxPoolAdmitError {
     }
 }
 
+fn apply_policy(
+    tx: &rubin_consensus::Tx,
+    utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
+    next_height: u64,
+    cfg: &TxPoolConfig,
+) -> Result<(), String> {
+    if cfg.policy_reject_non_coinbase_anchor_outputs {
+        reject_non_coinbase_anchor_outputs(tx)?;
+    }
+    reject_da_anchor_tx_policy(tx, utxos, cfg.policy_da_surcharge_per_byte)?;
+    if cfg.policy_reject_core_ext_pre_activation {
+        reject_core_ext_tx_pre_activation(tx, utxos, next_height, &cfg.core_ext_deployments)?;
+    }
+    Ok(())
+}
+
+fn reject_non_coinbase_anchor_outputs(tx: &rubin_consensus::Tx) -> Result<(), String> {
+    if tx
+        .outputs
+        .iter()
+        .any(|output| output.covenant_type == rubin_consensus::constants::COV_TYPE_ANCHOR)
+    {
+        return Err("non-coinbase CORE_ANCHOR is non-standard (policy)".to_string());
+    }
+    Ok(())
+}
+
+fn reject_da_anchor_tx_policy(
+    tx: &rubin_consensus::Tx,
+    utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
+    da_surcharge_per_byte: u64,
+) -> Result<(), String> {
+    let (_, da_bytes, _) = tx_weight_and_stats_public(tx).map_err(|err| err.to_string())?;
+    if da_bytes == 0 || da_surcharge_per_byte == 0 {
+        return Ok(());
+    }
+    let min_fee = da_bytes
+        .checked_mul(da_surcharge_per_byte)
+        .ok_or_else(|| "min fee overflow".to_string())?;
+    let fee = compute_fee_no_verify(tx, utxos)?;
+    if fee < min_fee {
+        return Err(format!(
+            "DA fee below policy minimum (fee={fee} min_fee={min_fee})"
+        ));
+    }
+    Ok(())
+}
+
+fn compute_fee_no_verify(
+    tx: &rubin_consensus::Tx,
+    utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
+) -> Result<u64, String> {
+    if tx.inputs.is_empty() {
+        return Err("missing inputs".to_string());
+    }
+    let mut sum_in = 0u64;
+    for input in &tx.inputs {
+        let outpoint = Outpoint {
+            txid: input.prev_txid,
+            vout: input.prev_vout,
+        };
+        let entry = utxos
+            .get(&outpoint)
+            .ok_or_else(|| "missing utxo".to_string())?;
+        sum_in = sum_in
+            .checked_add(entry.value)
+            .ok_or_else(|| "sum_in overflow".to_string())?;
+    }
+    let mut sum_out = 0u64;
+    for output in &tx.outputs {
+        sum_out = sum_out
+            .checked_add(output.value)
+            .ok_or_else(|| "sum_out overflow".to_string())?;
+    }
+    if sum_out > sum_in {
+        return Err("overspend".to_string());
+    }
+    Ok(sum_in - sum_out)
+}
+
+fn reject_core_ext_tx_pre_activation(
+    tx: &rubin_consensus::Tx,
+    utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
+    height: u64,
+    deployments: &CoreExtDeploymentProfiles,
+) -> Result<(), String> {
+    let active = deployments
+        .active_profiles_at_height(height)
+        .map_err(|err| err.to_string())?;
+    for output in &tx.outputs {
+        if output.covenant_type != rubin_consensus::constants::COV_TYPE_EXT {
+            continue;
+        }
+        let cov =
+            parse_core_ext_covenant_data(&output.covenant_data).map_err(|err| err.to_string())?;
+        if !active
+            .active
+            .iter()
+            .any(|profile| profile.ext_id == cov.ext_id)
+        {
+            return Err(format!("CORE_EXT output pre-ACTIVE ext_id={}", cov.ext_id));
+        }
+    }
+    for input in &tx.inputs {
+        let outpoint = Outpoint {
+            txid: input.prev_txid,
+            vout: input.prev_vout,
+        };
+        let Some(entry) = utxos.get(&outpoint) else {
+            continue;
+        };
+        if entry.covenant_type != rubin_consensus::constants::COV_TYPE_EXT {
+            continue;
+        }
+        let cov =
+            parse_core_ext_covenant_data(&entry.covenant_data).map_err(|err| err.to_string())?;
+        if !active
+            .active
+            .iter()
+            .any(|profile| profile.ext_id == cov.ext_id)
+        {
+            return Err(format!("CORE_EXT spend pre-ACTIVE ext_id={}", cov.ext_id));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -215,11 +369,18 @@ mod tests {
     use std::path::PathBuf;
 
     use rubin_consensus::block::BLOCK_HEADER_BYTES;
-    use rubin_consensus::{parse_tx, Outpoint, UtxoEntry};
+    use rubin_consensus::constants::{
+        COV_TYPE_ANCHOR, COV_TYPE_EXT, COV_TYPE_P2PK, SUITE_ID_SENTINEL, TX_WIRE_VERSION,
+    };
+    use rubin_consensus::{
+        marshal_tx, p2pk_covenant_data_for_pubkey, parse_tx, sign_transaction,
+        CoreExtDeploymentProfile, CoreExtDeploymentProfiles, CoreExtVerificationBinding,
+        DaChunkCore, Mldsa87Keypair, Outpoint, Tx, TxInput, TxOutput, UtxoEntry, WitnessItem,
+    };
 
     use super::{
         conflict, mtp_median, next_block_height, next_block_mtp, rejected, unavailable, TxPool,
-        TxPoolAdmitErrorKind, TxPoolEntry, MAX_TX_POOL_TRANSACTIONS,
+        TxPoolAdmitErrorKind, TxPoolConfig, TxPoolEntry, MAX_TX_POOL_TRANSACTIONS,
     };
     use crate::{
         block_store_path, default_sync_config, devnet_genesis_block_bytes, devnet_genesis_chain_id,
@@ -352,6 +513,108 @@ mod tests {
         state.height = vector.height.saturating_sub(1);
         state.utxos = fixture_utxos_to_map(&vector.utxos);
         state
+    }
+
+    fn empty_core_ext_covenant_data(ext_id: u16) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&ext_id.to_le_bytes());
+        out.push(0x00);
+        out
+    }
+
+    fn signed_p2pk_state_and_tx(
+        input_value: u64,
+        outputs: Vec<TxOutput>,
+        tx_kind: u8,
+        da_chunk_core: Option<DaChunkCore>,
+        da_payload: Vec<u8>,
+    ) -> (ChainState, Vec<u8>) {
+        let keypair = match Mldsa87Keypair::generate() {
+            Ok(value) => value,
+            Err(err) => panic!("OpenSSL signer unavailable for txpool policy test: {err}"),
+        };
+        let pubkey = keypair.pubkey_bytes();
+        let outpoint = Outpoint {
+            txid: [0x11; 32],
+            vout: 0,
+        };
+        let mut state = ChainState::new();
+        state.utxos.insert(
+            outpoint.clone(),
+            UtxoEntry {
+                value: input_value,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&pubkey),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
+
+        let mut tx = Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind,
+            tx_nonce: 7,
+            inputs: vec![TxInput {
+                prev_txid: outpoint.txid,
+                prev_vout: outpoint.vout,
+                script_sig: Vec::new(),
+                sequence: 0,
+            }],
+            outputs,
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core,
+            witness: Vec::new(),
+            da_payload,
+        };
+        sign_transaction(&mut tx, &state.utxos, [0u8; 32], &keypair).expect("sign tx");
+        let raw = marshal_tx(&tx).expect("marshal tx");
+        (state, raw)
+    }
+
+    fn core_ext_spend_state_and_tx(ext_id: u16) -> (ChainState, Vec<u8>) {
+        let input = Outpoint {
+            txid: [0x33; 32],
+            vout: 0,
+        };
+        let mut state = ChainState::new();
+        state.utxos.insert(
+            input.clone(),
+            UtxoEntry {
+                value: 10,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: empty_core_ext_covenant_data(ext_id),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
+        let tx = Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0x00,
+            tx_nonce: 9,
+            inputs: vec![TxInput {
+                prev_txid: input.txid,
+                prev_vout: input.vout,
+                script_sig: Vec::new(),
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: 9,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&vec![0x44; 2592]),
+            }],
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: vec![WitnessItem {
+                suite_id: SUITE_ID_SENTINEL,
+                pubkey: Vec::new(),
+                signature: Vec::new(),
+            }],
+            da_payload: Vec::new(),
+        };
+        let raw = marshal_tx(&tx).expect("marshal core_ext spend");
+        (state, raw)
     }
 
     #[test]
@@ -612,6 +875,113 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
         assert!(err.message.contains("transaction rejected"));
+    }
+
+    #[test]
+    fn admit_rejects_non_coinbase_anchor_outputs_by_policy() {
+        let (state, raw) = signed_p2pk_state_and_tx(
+            10,
+            vec![
+                TxOutput {
+                    value: 0,
+                    covenant_type: COV_TYPE_ANCHOR,
+                    covenant_data: vec![0x99],
+                },
+                TxOutput {
+                    value: 9,
+                    covenant_type: COV_TYPE_P2PK,
+                    covenant_data: p2pk_covenant_data_for_pubkey(&vec![0x22; 2592]),
+                },
+            ],
+            0x00,
+            None,
+            Vec::new(),
+        );
+        let err = TxPool::new()
+            .admit(&raw, &state, None, [0u8; 32])
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
+        assert!(err.message.contains("CORE_ANCHOR"));
+    }
+
+    #[test]
+    fn admit_rejects_da_tx_below_policy_surcharge_minimum() {
+        let (state, raw) = signed_p2pk_state_and_tx(
+            10,
+            vec![TxOutput {
+                value: 9,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&vec![0x23; 2592]),
+            }],
+            0x02,
+            Some(DaChunkCore {
+                da_id: [0x55; 32],
+                chunk_index: 0,
+                chunk_hash: [0x66; 32],
+            }),
+            vec![0x77; 64],
+        );
+        let mut pool = TxPool::new_with_config(TxPoolConfig::default());
+        pool.cfg.policy_da_surcharge_per_byte = 1;
+        let err = pool.admit(&raw, &state, None, [0u8; 32]).unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
+        assert!(err.message.contains("DA fee below policy minimum"));
+    }
+
+    #[test]
+    fn admit_rejects_core_ext_output_pre_activation_by_policy() {
+        let (state, raw) = signed_p2pk_state_and_tx(
+            10,
+            vec![TxOutput {
+                value: 9,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: empty_core_ext_covenant_data(7),
+            }],
+            0x00,
+            None,
+            Vec::new(),
+        );
+        let err = TxPool::new()
+            .admit(&raw, &state, None, [0u8; 32])
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
+        assert!(err.message.contains("CORE_EXT output pre-ACTIVE"));
+    }
+
+    #[test]
+    fn admit_allows_core_ext_output_when_profile_is_active() {
+        let (state, raw) = signed_p2pk_state_and_tx(
+            10,
+            vec![TxOutput {
+                value: 9,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: empty_core_ext_covenant_data(7),
+            }],
+            0x00,
+            None,
+            Vec::new(),
+        );
+        let mut pool = TxPool::new_with_config(TxPoolConfig::default());
+        pool.cfg.core_ext_deployments = CoreExtDeploymentProfiles {
+            deployments: vec![CoreExtDeploymentProfile {
+                ext_id: 7,
+                activation_height: 0,
+                allowed_suite_ids: vec![3],
+                verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+            }],
+        };
+        let txid = pool.admit(&raw, &state, None, [0u8; 32]).expect("admit");
+        assert!(pool.txs.contains_key(&txid));
+    }
+
+    #[test]
+    fn admit_rejects_core_ext_spend_pre_activation_by_policy() {
+        let (state, raw) = core_ext_spend_state_and_tx(9);
+        let err = TxPool::new()
+            .admit(&raw, &state, None, [0u8; 32])
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
+        assert!(err.message.contains("CORE_EXT spend pre-ACTIVE"));
     }
 
     #[test]

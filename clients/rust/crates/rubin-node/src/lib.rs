@@ -29,4 +29,4 @@ pub use p2p_runtime::{default_peer_runtime_config, PeerManager};
 pub use sync::{
     default_sync_config, HeaderRequest, SyncConfig, SyncEngine, DEFAULT_IBD_LAG_SECONDS,
 };
-pub use txpool::{TxPool, TxPoolAdmitError, TxPoolAdmitErrorKind};
+pub use txpool::{TxPool, TxPoolAdmitError, TxPoolAdmitErrorKind, TxPoolConfig};
