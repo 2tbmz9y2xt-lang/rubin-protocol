@@ -3,6 +3,7 @@ package node
 import (
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 
@@ -34,6 +35,7 @@ type SyncEngine struct {
 	blockStore      *BlockStore
 	mempool         *Mempool
 	cfg             SyncConfig
+	stderr          io.Writer
 	mu              sync.RWMutex
 	tipTimestamp    uint64
 	bestKnownHeight uint64
@@ -64,6 +66,7 @@ func NewSyncEngine(chainState *ChainState, blockStore *BlockStore, cfg SyncConfi
 		chainState: chainState,
 		blockStore: blockStore,
 		cfg:        cfg,
+		stderr:     io.Discard,
 	}
 	return engine, nil
 }
@@ -115,6 +118,20 @@ func (s *SyncEngine) SetMempool(mempool *Mempool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.mempool = mempool
+}
+
+// SetStderr sets the writer for non-fatal error diagnostics (e.g. mempool
+// post-acceptance failures). Defaults to io.Discard when not explicitly set.
+func (s *SyncEngine) SetStderr(w io.Writer) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if w == nil {
+		w = io.Discard
+	}
+	s.stderr = w
 }
 
 func (s *SyncEngine) HeaderSyncRequest() HeaderRequest {
@@ -310,8 +327,12 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 
 	s.recordAppliedBlock(summary.BlockHeight, pb.Header.Timestamp)
 	if s.mempool != nil {
-		_ = s.mempool.EvictConfirmed(blockBytes)
-		_ = s.mempool.RemoveConflicting(blockBytes)
+		if err := s.mempool.EvictConfirmed(blockBytes); err != nil {
+			_, _ = fmt.Fprintf(s.stderr, "mempool: evict-confirmed: %v\n", err)
+		}
+		if err := s.mempool.RemoveConflicting(blockBytes); err != nil {
+			_, _ = fmt.Fprintf(s.stderr, "mempool: remove-conflicting: %v\n", err)
+		}
 	}
 	return summary, nil
 }

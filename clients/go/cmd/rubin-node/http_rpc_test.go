@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -51,7 +52,7 @@ func mustRPCStateAtDir(t *testing.T, dir string, withGenesis bool) *devnetRPCSta
 		t.Fatalf("NewMempool: %v", err)
 	}
 	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8))
-	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil)
+	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil, io.Discard)
 	state.nowUnix = func() uint64 { return 0 }
 	return state
 }
@@ -105,7 +106,7 @@ func mustRPCStateWithSpendableUTXO(
 		t.Fatalf("NewMempool: %v", err)
 	}
 	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8))
-	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, announceTx)
+	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, announceTx, io.Discard)
 	state.nowUnix = func() uint64 { return 0 }
 	return state, outpoint, chainState.Utxos
 }
@@ -810,5 +811,53 @@ func TestStartDevnetRPCServerRejectsNilState(t *testing.T) {
 	}
 	if server != nil {
 		t.Fatalf("server=%#v, want nil", server)
+	}
+}
+
+func TestDevnetRPCSubmitTxLogsAnnounceTxError(t *testing.T) {
+	fromKey := mustRPCMLDSA87Keypair(t)
+	toKey := mustRPCMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+
+	var stderrBuf bytes.Buffer
+	state, input, utxos := mustRPCStateWithSpendableUTXO(t, fromAddress, func(tx []byte) error {
+		return errors.New("p2p broadcast unavailable")
+	})
+	state.stderr = &stderrBuf
+
+	txBytes, _ := mustRPCSignedTransferTx(t, utxos, input, fromKey, toAddress)
+	server := httptest.NewServer(newDevnetRPCHandler(state))
+	defer server.Close()
+
+	body, err := json.Marshal(submitTxRequest{TxHex: hex.EncodeToString(txBytes)})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	resp, err := http.Post(server.URL+"/submit_tx", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Transaction should still be accepted (announce failure is non-blocking).
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+	var got submitTxResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !got.Accepted {
+		t.Fatalf("accepted=false, want true")
+	}
+
+	// Verify the error was logged to stderr.
+	stderrOutput := stderrBuf.String()
+	if !strings.Contains(stderrOutput, "rpc: announce-tx:") {
+		t.Fatalf("expected announce-tx error on stderr, got: %q", stderrOutput)
+	}
+	if !strings.Contains(stderrOutput, "p2p broadcast unavailable") {
+		t.Fatalf("expected error message on stderr, got: %q", stderrOutput)
 	}
 }

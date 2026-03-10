@@ -25,6 +25,7 @@ type devnetRPCState struct {
 	mempool     *node.Mempool
 	peerManager *node.PeerManager
 	announceTx  func([]byte) error
+	stderr      io.Writer
 	nowUnix     func() uint64
 	metrics     *rpcMetrics
 }
@@ -71,13 +72,18 @@ func newDevnetRPCState(
 	mempool *node.Mempool,
 	peerManager *node.PeerManager,
 	announceTx func([]byte) error,
+	stderr io.Writer,
 ) *devnetRPCState {
+	if stderr == nil {
+		stderr = io.Discard
+	}
 	return &devnetRPCState{
 		syncEngine:  syncEngine,
 		blockStore:  blockStore,
 		mempool:     mempool,
 		peerManager: peerManager,
 		announceTx:  announceTx,
+		stderr:      stderr,
 		nowUnix:     nowUnixU64,
 		metrics:     newRPCMetrics(),
 	}
@@ -410,7 +416,9 @@ func handleSubmitTx(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if state.announceTx != nil {
-		_ = state.announceTx(raw)
+		if err := state.announceTx(raw); err != nil {
+			_, _ = fmt.Fprintf(state.stderr, "rpc: announce-tx: %v\n", err)
+		}
 	}
 	state.metrics.noteSubmit("accepted")
 	writeJSONResponse(state, route, w, http.StatusOK, submitTxResponse{
