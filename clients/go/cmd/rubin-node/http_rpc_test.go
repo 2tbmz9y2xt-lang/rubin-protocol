@@ -861,3 +861,10 @@ func TestDevnetRPCSubmitTxLogsAnnounceTxError(t *testing.T) {
 		t.Fatalf("expected error message on stderr, got: %q", stderrOutput)
 	}
 }
+
+func TestNewDevnetRPCStateNilStderrFallsBackToDiscard(t *testing.T) {
+	state := newDevnetRPCState(nil, nil, nil, nil, nil, nil)
+	if state.stderr != io.Discard {
+		t.Fatal("expected io.Discard for nil stderr")
+	}
+}
