@@ -17,7 +17,7 @@ jobs:
   get-diff:
     runs-on: ubuntu-latest
     outputs:
-      skip: ${{ steps.diff.outputs.skip }}
+      skip: "${{ steps.diff.outputs.skip }}"
     steps:
       - uses: actions/checkout@v4
         with:
