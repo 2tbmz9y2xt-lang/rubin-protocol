@@ -2,6 +2,7 @@ package node
 
 import (
 	"errors"
+	"fmt"
 	"math/big"
 	"os"
 
@@ -232,7 +233,9 @@ func (s *SyncEngine) requeueDisconnectedTransactions(disconnectedBlocks [][]byte
 			continue
 		}
 		for _, txBytes := range txs {
-			_ = s.mempool.AddTx(txBytes)
+			if err := s.mempool.AddTx(txBytes); err != nil {
+				_, _ = fmt.Fprintf(s.stderr, "mempool: requeue-tx: %v\n", err)
+			}
 		}
 	}
 }

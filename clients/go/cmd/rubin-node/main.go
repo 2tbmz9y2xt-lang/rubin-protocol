@@ -130,6 +130,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	syncEngine.SetMempool(mempool)
+	syncEngine.SetStderr(stderr)
 	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig(cfg.Network, cfg.MaxPeers))
 
 	tipHeight, tipHash, tipOK, err := blockStore.Tip()
@@ -217,7 +218,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	defer p2pService.Close()
-	rpcState := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, p2pService.AnnounceTx)
+	rpcState := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, p2pService.AnnounceTx, stderr)
 	rpcServer, err := startDevnetRPCServer(ctx, cfg.RPCBindAddr, rpcState, stdout, stderr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "rpc start failed: %v\n", err)
