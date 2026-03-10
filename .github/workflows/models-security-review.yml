@@ -179,6 +179,8 @@ jobs:
             }
 
             core.info(`Used model: ${usedModel}`);
+                          // Strip markdown code fences that models sometimes wrap around JSON
+              result = result.replace(/^\s*```(?:json)?\s*\n?/, '').replace(/\n?\s*```\s*$/, '').trim();
             core.setOutput('review', result);
             core.setOutput('used_model', usedModel);
         env:
