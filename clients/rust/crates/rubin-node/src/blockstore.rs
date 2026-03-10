@@ -308,7 +308,43 @@ impl BlockStore {
         self.index.canonical.len()
     }
 
+    /// Returns a clone of the canonical entries from `start` to the end.
+    /// Used to capture just the suffix that will be removed during a reorg
+    /// (O(reorg_depth) instead of O(chain_height)).
+    pub fn canonical_suffix_from(&self, start: usize) -> Vec<String> {
+        if start >= self.index.canonical.len() {
+            return vec![];
+        }
+        self.index.canonical[start..].to_vec()
+    }
+
+    /// Rollback canonical index after a partial reorg: truncate to
+    /// `base_len` (removing entries added during reconnect), then
+    /// re-append `suffix` (entries removed during disconnect).
+    ///
+    /// Atomic: on disk-write failure the index is reloaded from disk
+    /// so in-memory state stays consistent (no temp buffer needed).
+    pub fn rollback_canonical(
+        &mut self,
+        base_len: usize,
+        suffix: Vec<String>,
+    ) -> Result<(), String> {
+        let mut restored = Vec::with_capacity(base_len + suffix.len());
+        restored
+            .extend_from_slice(&self.index.canonical[..base_len.min(self.index.canonical.len())]);
+        restored.extend(suffix);
+        self.index.canonical = restored;
+        if let Err(e) = save_blockstore_index(&self.index_path, &self.index) {
+            self.reload_index_from_disk();
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// Truncate canonical index to exactly `new_len` entries.
+    ///
+    /// Atomic: on disk-write failure the index is reloaded from disk
+    /// (the atomic write guarantees the old version is still on disk).
     pub fn truncate_canonical(&mut self, new_len: usize) -> Result<(), String> {
         if new_len > self.index.canonical.len() {
             return Err(format!(
@@ -318,7 +354,24 @@ impl BlockStore {
             ));
         }
         self.index.canonical.truncate(new_len);
-        save_blockstore_index(&self.index_path, &self.index)
+        if let Err(e) = save_blockstore_index(&self.index_path, &self.index) {
+            self.reload_index_from_disk();
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Reload the blockstore index from disk to restore consistency
+    /// after a failed save.  Since `save_blockstore_index` uses
+    /// write-to-tmp + rename, the on-disk file is always a valid
+    /// previous version.
+    fn reload_index_from_disk(&mut self) {
+        if let Ok(disk) = load_blockstore_index(&self.index_path) {
+            self.index = disk;
+        }
+        // If reload also fails, in-memory state is stale but we
+        // already returned an error to the caller — the engine will
+        // be marked as needing repair.
     }
 }
 

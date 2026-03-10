@@ -149,7 +149,7 @@ impl SyncEngine {
         prev_timestamps: Option<&[u64]>,
         tx_pool: Option<&mut TxPool>,
     ) -> Result<ChainStateConnectSummary, String> {
-        let rollback = self.capture_rollback_state();
+        let rollback = self.capture_reorg_rollback_state(common_ancestor_height);
 
         // Dry-run: preview the disconnect + reconnect on a cloned state.
         let disconnected_blocks =
@@ -157,7 +157,11 @@ impl SyncEngine {
 
         // Disconnect canonical chain back to the common ancestor.
         if let Err(err) = self.disconnect_canonical_to_ancestor(common_ancestor_height) {
-            self.rollback_apply_block(rollback);
+            if let Some(rb_err) = self.rollback_apply_block(rollback) {
+                return Err(format!(
+                    "{err}; rollback failed: {rb_err}; blockstore may require repair"
+                ));
+            }
             return Err(err);
         }
 
@@ -167,7 +171,11 @@ impl SyncEngine {
             match self.apply_block(&item.block_bytes, prev_timestamps) {
                 Ok(summary) => last_summary = Some(summary),
                 Err(err) => {
-                    self.rollback_apply_block(rollback);
+                    if let Some(rb_err) = self.rollback_apply_block(rollback) {
+                        return Err(format!(
+                            "{err}; rollback failed: {rb_err}; blockstore may require repair"
+                        ));
+                    }
                     return Err(err);
                 }
             }
