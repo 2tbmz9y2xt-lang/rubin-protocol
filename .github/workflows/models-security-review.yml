@@ -34,8 +34,6 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ github.token }}
-    outputs:
-      diff-path: /tmp/pr_diff.txt
 
   security-review:
     needs: get-diff
@@ -152,18 +150,134 @@ jobs:
               body: `### Security Review: ${label}\n_Model: ${model}_\n\n\`\`\`json\n${review}\n\`\`\``
             });
 
-  aggregate:
+  resolve:
     needs: security-review
-    if: always()
+    if: always() && needs.security-review.result != 'cancelled'
     runs-on: ubuntu-latest
     steps:
-      - name: Check results
+      - name: Collect model reviews and resolve disputes
+        id: resolve
         uses: actions/github-script@v7
         with:
           script: |
-            const jobs = ${{ toJSON(needs.security-review) }};
-            if (jobs.result === 'failure') {
-              core.setFailed('One or more security reviews failed after fallback');
-            } else {
-              core.info('All security reviews completed');
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+
+            const reviews = comments
+              .filter(c => c.body.startsWith('### Security Review:'))
+              .map(c => {
+                const jsonMatch = c.body.match(/```json\n([\s\S]*?)\n```/);
+                return jsonMatch ? jsonMatch[1] : null;
+              })
+              .filter(Boolean);
+
+            if (reviews.length === 0) {
+              core.setFailed('No model reviews found');
+              return;
             }
+
+            core.info(`Found ${reviews.length} model reviews`);
+
+            const allFindings = [];
+            for (const r of reviews) {
+              try {
+                const parsed = JSON.parse(r);
+                if (parsed.findings) {
+                  for (const f of parsed.findings) {
+                    f._model = parsed.model;
+                    allFindings.push(f);
+                  }
+                }
+              } catch (e) {
+                core.warning(`Failed to parse review JSON: ${e.message}`);
+              }
+            }
+
+            const severityOrder = ['CRITICAL','HIGH','MEDIUM','LOW','INFO','PERF','STYLE'];
+            allFindings.sort((a, b) => severityOrder.indexOf(a.severity) - severityOrder.indexOf(b.severity));
+
+            const grouped = {};
+            for (const f of allFindings) {
+              const key = `${f.file}::${f.title}`;
+              if (!grouped[key]) grouped[key] = [];
+              grouped[key].push(f);
+            }
+
+            const agreed = [];
+            const disputed = [];
+            const unique = [];
+
+            for (const [key, findings] of Object.entries(grouped)) {
+              if (findings.length >= 2) {
+                const sevs = new Set(findings.map(f => f.severity));
+                if (sevs.size === 1) {
+                  agreed.push({ ...findings[0], confirmedBy: findings.map(f => f._model) });
+                } else {
+                  disputed.push({ key, findings });
+                }
+              } else {
+                unique.push(findings[0]);
+              }
+            }
+
+            const hasCritical = agreed.some(f => f.severity === 'CRITICAL');
+            const hasDisputedCritical = disputed.some(d =>
+              d.findings.some(f => f.severity === 'CRITICAL' || f.severity === 'HIGH')
+            );
+
+            let verdict = 'APPROVE';
+            let reason = '';
+
+            if (hasCritical) {
+              verdict = 'BLOCK';
+              reason = `${agreed.filter(f => f.severity === 'CRITICAL').length} confirmed CRITICAL finding(s)`;
+            } else if (hasDisputedCritical) {
+              verdict = 'NEEDS_HUMAN_REVIEW';
+              reason = 'Disputed CRITICAL/HIGH findings between models';
+            }
+
+            let body = `### Security Review Resolution\n\n`;
+            body += `**Verdict: ${verdict}**`;
+            if (reason) body += ` - ${reason}`;
+            body += `\n\n`;
+            body += `| Metric | Count |\n|--------|-------|\n`;
+            body += `| Models responded | ${reviews.length} |\n`;
+            body += `| Agreed findings | ${agreed.length} |\n`;
+            body += `| Disputed findings | ${disputed.length} |\n`;
+            body += `| Unique (single model) | ${unique.length} |\n\n`;
+
+            if (agreed.length > 0) {
+              body += `#### Confirmed Findings\n`;
+              for (const f of agreed) {
+                body += `- **${f.severity}** \`${f.file}\`: ${f.title} _(confirmed by ${f.confirmedBy.join(', ')})_\n`;
+              }
+              body += `\n`;
+            }
+
+            if (disputed.length > 0) {
+              body += `#### Disputed Findings (need human review)\n`;
+              for (const d of disputed) {
+                body += `- \`${d.key}\`: `;
+                body += d.findings.map(f => `${f._model}=${f.severity}`).join(' vs ');
+                body += `\n`;
+              }
+              body += `\n`;
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
+
+            if (verdict === 'BLOCK') {
+              core.setFailed(`Merge blocked: ${reason}`);
+            } else {
+              core.info(`Resolution: ${verdict}`);
+            }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
