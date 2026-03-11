@@ -84,6 +84,22 @@ func (bs *BlockStore) PutBlock(height uint64, blockHash [32]byte, headerBytes []
 	return bs.SetCanonicalTip(height, blockHash)
 }
 
+func (bs *BlockStore) CommitCanonicalBlock(height uint64, blockHash [32]byte, headerBytes []byte, blockBytes []byte, undo *BlockUndo) error {
+	if bs == nil {
+		return errors.New("nil blockstore")
+	}
+	if undo == nil {
+		return errors.New("nil block undo")
+	}
+	if err := bs.StoreBlock(blockHash, headerBytes, blockBytes); err != nil {
+		return err
+	}
+	if err := bs.PutUndo(blockHash, undo); err != nil {
+		return err
+	}
+	return bs.SetCanonicalTip(height, blockHash)
+}
+
 func (bs *BlockStore) StoreBlock(blockHash [32]byte, headerBytes []byte, blockBytes []byte) error {
 	if bs == nil {
 		return errors.New("nil blockstore")

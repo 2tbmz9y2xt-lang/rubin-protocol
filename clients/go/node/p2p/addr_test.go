@@ -3,6 +3,7 @@ package p2p
 import (
 	"context"
 	"fmt"
+	"net"
 	"slices"
 	"testing"
 	"time"
@@ -221,6 +222,43 @@ func TestConnectDiscoveredSkipsConnected(t *testing.T) {
 	}
 }
 
+func TestShouldDialDiscoveredAddrFiltersByNetwork(t *testing.T) {
+	cases := []struct {
+		name    string
+		addr    string
+		network string
+		want    bool
+	}{
+		{name: "mainnet rejects loopback", addr: "127.0.0.1:18444", network: "mainnet", want: false},
+		{name: "testnet rejects rfc1918", addr: "10.1.2.3:18444", network: "testnet", want: false},
+		{name: "mainnet rejects link local", addr: "169.254.1.2:18444", network: "mainnet", want: false},
+		{name: "mainnet rejects unspecified", addr: "0.0.0.0:18444", network: "mainnet", want: false},
+		{name: "mainnet rejects multicast", addr: "224.0.0.1:18444", network: "mainnet", want: false},
+		{name: "mainnet rejects shared space", addr: "100.64.1.2:18444", network: "mainnet", want: false},
+		{name: "mainnet rejects benchmark net", addr: "198.18.1.2:18444", network: "mainnet", want: false},
+		{name: "mainnet rejects doc net 192-0-2", addr: "192.0.2.1:18444", network: "mainnet", want: false},
+		{name: "mainnet rejects doc net 198-51-100", addr: "198.51.100.1:18444", network: "mainnet", want: false},
+		{name: "mainnet rejects doc net 203-0-113", addr: "203.0.113.1:18444", network: "mainnet", want: false},
+		{name: "testnet rejects ipv6 loopback", addr: "[::1]:18444", network: "testnet", want: false},
+		{name: "testnet rejects ipv6 multicast", addr: "[ff02::1]:18444", network: "testnet", want: false},
+		{name: "testnet rejects ipv6 documentation range", addr: "[2001:db8::1]:18444", network: "testnet", want: false},
+		{name: "mainnet rejects hostname", addr: "seed.example.com:18444", network: "mainnet", want: false},
+		{name: "mainnet allows public ipv4", addr: "8.8.8.8:18444", network: "mainnet", want: true},
+		{name: "testnet allows public ipv6", addr: "[2001:4860:4860::8888]:18444", network: "testnet", want: true},
+		{name: "devnet allows loopback", addr: "127.0.0.1:18444", network: "devnet", want: true},
+		{name: "empty network stays filtered", addr: "127.0.0.1:18444", network: "", want: false},
+		{name: "malformed addr rejected", addr: "bad", network: "mainnet", want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldDialDiscoveredAddr(tc.addr, tc.network); got != tc.want {
+				t.Fatalf("shouldDialDiscoveredAddr(%q, %q)=%v, want %v", tc.addr, tc.network, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestConnectDiscoveredAddrsRespectsMaxPeersWithInFlightDials(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:19024", nil)
 	h.service.cfg.PeerRuntimeConfig.MaxPeers = 1
@@ -330,6 +368,26 @@ func TestAddrHandlerAndDiscoveryEdgeBranches(t *testing.T) {
 	normalized := normalizePeerAddrs([]string{" 127.0.0.1:19032 ", "127.0.0.1:19032", "", "127.0.0.1:19033"})
 	if !slices.Equal(normalized, []string{"127.0.0.1:19032", "127.0.0.1:19033"}) {
 		t.Fatalf("normalizePeerAddrs=%v", normalized)
+	}
+}
+
+func TestShouldDialDiscoveredAddrAndIPHelpersCoverEdgeRejects(t *testing.T) {
+	if shouldDialDiscoveredAddr("", "mainnet") {
+		t.Fatal("empty discovered addr must be rejected")
+	}
+
+	h := newTestHarness(t, 0, "127.0.0.1:19061", nil)
+	h.service.cfg.PeerRuntimeConfig.Network = "mainnet"
+	h.service.connectDiscoveredAddrs([]string{"127.0.0.1:19062"})
+	if got := h.service.inFlightDialCount(); got != 0 {
+		t.Fatalf("filtered discovered addr started dial, got in-flight %d", got)
+	}
+
+	if isDialableDiscoveredIP(net.IP{1, 2, 3}) {
+		t.Fatal("short malformed IP slice must be rejected")
+	}
+	if isDialableDiscoveredIP(net.IPv4bcast) {
+		t.Fatal("ipv4 broadcast must be rejected as non-global-unicast")
 	}
 }
 

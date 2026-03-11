@@ -66,3 +66,80 @@ func TestSighashV1Digest_Smoke(t *testing.T) {
 		t.Fatalf("digest mismatch")
 	}
 }
+
+func TestSighashV1DigestWithCacheMatchesUncachedAcrossTypes(t *testing.T) {
+	var prev0 [32]byte
+	var prev1 [32]byte
+	prev0[0] = 0x11
+	prev1[0] = 0x22
+	var chainID [32]byte
+	chainID[0] = 0x44
+
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 9,
+		Inputs: []TxInput{
+			{PrevTxid: prev0, PrevVout: 0, Sequence: 1},
+			{PrevTxid: prev1, PrevVout: 1, Sequence: 2},
+		},
+		Outputs: []TxOutput{
+			{Value: 3, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
+			{Value: 4, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
+		},
+		Locktime: 5,
+	}
+	cache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		t.Fatalf("NewSighashV1PrehashCache: %v", err)
+	}
+
+	types := []uint8{
+		SIGHASH_ALL,
+		SIGHASH_NONE,
+		SIGHASH_SINGLE,
+		SIGHASH_ALL | SIGHASH_ANYONECANPAY,
+		SIGHASH_NONE | SIGHASH_ANYONECANPAY,
+		SIGHASH_SINGLE | SIGHASH_ANYONECANPAY,
+	}
+	for _, sighashType := range types {
+		for inputIndex, inputValue := range []uint64{11, 17} {
+			want, err := SighashV1DigestWithType(tx, uint32(inputIndex), inputValue, chainID, sighashType)
+			if err != nil {
+				t.Fatalf("SighashV1DigestWithType(type=%d,input=%d): %v", sighashType, inputIndex, err)
+			}
+			got, err := SighashV1DigestWithCache(cache, uint32(inputIndex), inputValue, chainID, sighashType)
+			if err != nil {
+				t.Fatalf("SighashV1DigestWithCache(type=%d,input=%d): %v", sighashType, inputIndex, err)
+			}
+			if got != want {
+				t.Fatalf("digest mismatch type=%d input=%d", sighashType, inputIndex)
+			}
+		}
+	}
+}
+
+func TestSighashV1DigestWithCacheRejectsNilCache(t *testing.T) {
+	if _, err := SighashV1DigestWithCache(nil, 0, 0, [32]byte{}, SIGHASH_ALL); err == nil {
+		t.Fatalf("expected nil cache error")
+	}
+}
+
+func TestNewSighashV1PrehashCacheRejectsUnsupportedTxKind(t *testing.T) {
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0xff,
+		TxNonce: 1,
+		Inputs:  []TxInput{{Sequence: 1}},
+	}
+	if _, err := NewSighashV1PrehashCache(tx); err == nil {
+		t.Fatalf("expected unsupported tx_kind error")
+	}
+}
+
+func TestSighashV1PrehashCacheSingleOutputHashNilCacheFallsBackToZeroHash(t *testing.T) {
+	var cache *SighashV1PrehashCache
+	if got := cache.singleOutputHash(0); got != sha3_256(nil) {
+		t.Fatalf("nil cache single output hash mismatch")
+	}
+}

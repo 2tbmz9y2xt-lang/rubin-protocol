@@ -204,7 +204,7 @@ func (s *SyncEngine) IsInIBD(nowUnix uint64) bool {
 }
 
 type syncRollbackState struct {
-	chainState      chainStateDisk
+	chainState      *ChainState
 	canonicalIndex  []string
 	mempool         mempoolSnapshot
 	tipTimestamp    uint64
@@ -214,10 +214,11 @@ type syncRollbackState struct {
 }
 
 func (s *SyncEngine) captureRollbackState() (syncRollbackState, error) {
-	snapshot, err := stateToDisk(s.chainState)
-	if err != nil {
-		return syncRollbackState{}, err
+	snapshot := cloneChainState(s.chainState)
+	if snapshot == nil {
+		return syncRollbackState{}, errors.New("nil chainstate")
 	}
+	var err error
 	var canonicalIndex []string
 	if s.blockStore != nil {
 		canonicalIndex, err = s.blockStore.CanonicalIndexSnapshot()
@@ -247,9 +248,9 @@ func (s *SyncEngine) rollbackApplyBlock(cause error, state syncRollbackState) er
 		if s.chainState == nil {
 			return errors.New("nil chainstate destination")
 		}
-		recovered, err := chainStateFromDisk(state.chainState)
-		if err != nil {
-			return err
+		recovered := cloneChainState(state.chainState)
+		if recovered == nil {
+			return errors.New("nil rollback chainstate")
 		}
 		*s.chainState = *recovered
 		return nil
@@ -307,10 +308,7 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 	if err != nil {
 		return nil, err
 	}
-	prevState, err := chainStateFromDisk(rollbackState.chainState)
-	if err != nil {
-		return nil, err
-	}
+	prevState := cloneChainState(rollbackState.chainState)
 	summary, err := s.chainState.ConnectBlockWithCoreExtProfiles(
 		blockBytes,
 		s.cfg.ExpectedTarget,
@@ -343,14 +341,11 @@ func (s *SyncEngine) persistAppliedBlock(summary *ChainStateConnectSummary, bloc
 		if err != nil {
 			return err
 		}
-		if err := s.blockStore.PutBlock(summary.BlockHeight, blockHash, pb.HeaderBytes, blockBytes); err != nil {
-			return err
-		}
-		if err := s.blockStore.PutUndo(blockHash, undo); err != nil {
+		if err := s.blockStore.CommitCanonicalBlock(summary.BlockHeight, blockHash, pb.HeaderBytes, blockBytes, undo); err != nil {
 			return err
 		}
 	}
-	if s.cfg.ChainStatePath != "" {
+	if s.cfg.ChainStatePath != "" && (s.blockStore == nil || shouldPersistChainStateSnapshot(s.chainState, summary)) {
 		if err := s.chainState.Save(s.cfg.ChainStatePath); err != nil {
 			return err
 		}

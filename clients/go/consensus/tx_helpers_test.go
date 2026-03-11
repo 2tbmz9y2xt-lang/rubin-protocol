@@ -4,6 +4,23 @@ import (
 	"testing"
 )
 
+type stubDigestSigner struct {
+	pub []byte
+	sig []byte
+	err error
+}
+
+func (s stubDigestSigner) PubkeyBytes() []byte {
+	return append([]byte(nil), s.pub...)
+}
+
+func (s stubDigestSigner) SignDigest32([32]byte) ([]byte, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return append([]byte(nil), s.sig...), nil
+}
+
 func TestP2PKCovenantDataForPubkey(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	pub := kp.PubkeyBytes()
@@ -215,5 +232,58 @@ func TestSignTransaction_KeyBindingMismatch(t *testing.T) {
 	err := SignTransaction(tx, utxoSet, chainID, kp) // signing with wrong key
 	if err == nil {
 		t.Fatal("expected error for key binding mismatch")
+	}
+}
+
+func TestSignTransaction_RejectsUnsupportedTxKindForPrehashCache(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	covData := P2PKCovenantDataForPubkey(kp.PubkeyBytes())
+	var prevTxid [32]byte
+	prevTxid[0] = 0xdd
+	op := Outpoint{Txid: prevTxid, Vout: 0}
+	utxoSet := map[Outpoint]UtxoEntry{
+		op: {Value: 50_000_000, CovenantType: COV_TYPE_P2PK, CovenantData: covData},
+	}
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0xff,
+		TxNonce: 1,
+		Inputs: []TxInput{{
+			PrevTxid: prevTxid,
+			PrevVout: 0,
+			Sequence: 0x7FFFFFFF,
+		}},
+	}
+	if err := SignTransaction(tx, utxoSet, [32]byte{}, kp); err == nil {
+		t.Fatal("expected unsupported tx_kind error")
+	}
+}
+
+func TestSignerBinding_RejectsNonCanonicalPubkeyLength(t *testing.T) {
+	if _, _, err := signerBinding(stubDigestSigner{pub: []byte{0x01}}); err == nil {
+		t.Fatal("expected non-canonical public key length error")
+	}
+}
+
+func TestSignWitnessItem_NilCacheUsesDirectSighash(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	pub := kp.PubkeyBytes()
+
+	got, err := signWitnessItem(tx, inputIndex, inputValue, chainID, nil, kp, pub)
+	if err != nil {
+		t.Fatalf("signWitnessItem(nil cache): %v", err)
+	}
+	if got.SuiteID != SUITE_ID_ML_DSA_87 {
+		t.Fatalf("suite = 0x%02x, want 0x%02x", got.SuiteID, SUITE_ID_ML_DSA_87)
+	}
+	if len(got.Pubkey) != len(pub) {
+		t.Fatalf("pubkey length = %d, want %d", len(got.Pubkey), len(pub))
+	}
+	if len(got.Signature) != ML_DSA_87_SIG_BYTES+1 {
+		t.Fatalf("signature length = %d, want %d", len(got.Signature), ML_DSA_87_SIG_BYTES+1)
+	}
+	if got.Signature[len(got.Signature)-1] != SIGHASH_ALL {
+		t.Fatalf("missing sighash type trailer")
 	}
 }

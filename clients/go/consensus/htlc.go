@@ -49,6 +49,21 @@ func ValidateHTLCSpend(
 	blockHeight uint64,
 	blockMTP uint64,
 ) error {
+	return ValidateHTLCSpendWithCache(entry, pathItem, sigItem, tx, inputIndex, inputValue, chainID, blockHeight, blockMTP, nil)
+}
+
+func ValidateHTLCSpendWithCache(
+	entry UtxoEntry,
+	pathItem WitnessItem,
+	sigItem WitnessItem,
+	tx *Tx,
+	inputIndex uint32,
+	inputValue uint64,
+	chainID [32]byte,
+	blockHeight uint64,
+	blockMTP uint64,
+	cache *SighashV1PrehashCache,
+) error {
 	c, err := ParseHTLCCovenantData(entry.CovenantData)
 	if err != nil {
 		return err
@@ -127,11 +142,7 @@ func ValidateHTLCSpend(
 		return txerr(TX_ERR_SIG_INVALID, "CORE_HTLC signature key binding mismatch")
 	}
 
-	cryptoSig, sighashType, err := extractCryptoSigAndSighash(sigItem)
-	if err != nil {
-		return err
-	}
-	digest, err := SighashV1DigestWithType(tx, inputIndex, inputValue, chainID, sighashType)
+	cryptoSig, digest, err := extractSigAndDigestWithCache(sigItem, tx, inputIndex, inputValue, chainID, cache)
 	if err != nil {
 		return err
 	}

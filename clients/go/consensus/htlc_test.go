@@ -641,3 +641,42 @@ func TestValidateHTLCSpend_ClaimOK(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestValidateHTLCSpendWithCache_ClaimOK(t *testing.T) {
+	claimKP := mustMLDSA87Keypair(t)
+	refundKP := mustMLDSA87Keypair(t)
+	claimPub := claimKP.PubkeyBytes()
+	refundPub := refundKP.PubkeyBytes()
+	claimKeyID := sha3_256(claimPub)
+	refundKeyID := sha3_256(refundPub)
+
+	preimage := []byte("rubin-htlc-claim-cache-ok")
+	entry := makeHTLCEntry(sha3_256(preimage), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
+	path := WitnessItem{
+		SuiteID:   SUITE_ID_SENTINEL,
+		Pubkey:    claimKeyID[:],
+		Signature: encodeHTLCClaimPayload(preimage),
+	}
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		t.Fatalf("NewSighashV1PrehashCache: %v", err)
+	}
+	digest, err := SighashV1DigestWithCache(cache, inputIndex, inputValue, chainID, SIGHASH_ALL)
+	if err != nil {
+		t.Fatalf("SighashV1DigestWithCache: %v", err)
+	}
+	claimSig, err := claimKP.SignDigest32(digest)
+	if err != nil {
+		t.Fatalf("SignDigest32: %v", err)
+	}
+	claimSig = append(claimSig, SIGHASH_ALL)
+	sig := WitnessItem{
+		SuiteID:   SUITE_ID_ML_DSA_87,
+		Pubkey:    claimPub,
+		Signature: claimSig,
+	}
+	if err := ValidateHTLCSpendWithCache(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache); err != nil {
+		t.Fatalf("ValidateHTLCSpendWithCache: %v", err)
+	}
+}

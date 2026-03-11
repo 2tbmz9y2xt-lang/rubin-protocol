@@ -85,6 +85,45 @@ func TestRunDryRunOK(t *testing.T) {
 	}
 }
 
+func TestRunDryRunReconcilesChainStateFromBlockStore(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := node.ChainStatePath(dir)
+	store, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("OpenBlockStore: %v", err)
+	}
+	target := consensus.POW_LIMIT
+	state := node.NewChainState()
+	engine, err := node.NewSyncEngine(state, store, node.DefaultSyncConfig(&target, node.DevnetGenesisChainID(), chainStatePath))
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	if _, err := engine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
+		t.Fatalf("ApplyBlock(genesis): %v", err)
+	}
+	if err := node.NewChainState().Save(chainStatePath); err != nil {
+		t.Fatalf("Save(stale chainstate): %v", err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run([]string{"--dry-run", "--datadir", dir}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("run dry-run code=%d stderr=%q", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "chainstate: has_tip=true height=0") {
+		t.Fatalf("stdout missing reconciled chainstate tip: %q", out.String())
+	}
+
+	loaded, err := node.LoadChainState(chainStatePath)
+	if err != nil {
+		t.Fatalf("LoadChainState: %v", err)
+	}
+	if !loaded.HasTip || loaded.Height != 0 || loaded.TipHash != node.DevnetGenesisBlockHash() {
+		t.Fatalf("unexpected reconciled chainstate: has_tip=%v height=%d tip=%x", loaded.HasTip, loaded.Height, loaded.TipHash)
+	}
+}
+
 func TestParseGenesisChainIDEmptyDefaultsToDevnet(t *testing.T) {
 	got, err := parseGenesisChainID("")
 	if err != nil {
@@ -394,13 +433,14 @@ func TestRunDryRunShowsTipWhenBlockstoreHasTip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}
-	header := make([]byte, 116) // consensus.BLOCK_HEADER_BYTES
-	hash, err := consensus.BlockHash(header)
+	chainState := node.NewChainState()
+	syncCfg := node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), node.ChainStatePath(dir))
+	engine, err := node.NewSyncEngine(chainState, blockStore, syncCfg)
 	if err != nil {
-		t.Fatalf("block hash: %v", err)
+		t.Fatalf("NewSyncEngine: %v", err)
 	}
-	if err := blockStore.PutBlock(0, hash, header, nil); err != nil {
-		t.Fatalf("put block: %v", err)
+	if _, err := engine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
+		t.Fatalf("ApplyBlock(genesis): %v", err)
 	}
 
 	var out bytes.Buffer
@@ -411,6 +451,66 @@ func TestRunDryRunShowsTipWhenBlockstoreHasTip(t *testing.T) {
 	}
 	if !bytes.Contains(out.Bytes(), []byte("blockstore: tip_height=")) {
 		t.Fatalf("expected tip output, got %q", out.String())
+	}
+}
+
+func TestRunDryRunFailsWhenChainstateReconcileFails(t *testing.T) {
+	dir := t.TempDir()
+	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("OpenBlockStore: %v", err)
+	}
+	parsed, err := consensus.ParseBlockBytes(node.DevnetGenesisBlockBytes())
+	if err != nil {
+		t.Fatalf("ParseBlockBytes(genesis): %v", err)
+	}
+	header := parsed.HeaderBytes
+	hash := node.DevnetGenesisBlockHash()
+	if err := blockStore.CommitCanonicalBlock(0, hash, header, []byte{0x00}, &node.BlockUndo{}); err != nil {
+		t.Fatalf("CommitCanonicalBlock: %v", err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run([]string{"--dry-run", "--datadir", dir}, &out, &errOut)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d (stderr=%q)", code, errOut.String())
+	}
+	if !bytes.Contains(errOut.Bytes(), []byte("chainstate reconcile failed")) {
+		t.Fatalf("expected reconcile failure in stderr, got %q", errOut.String())
+	}
+}
+
+func TestRunDryRunFailsWhenChainstateSaveFails(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := node.ChainStatePath(dir)
+	store, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("OpenBlockStore: %v", err)
+	}
+	target := consensus.POW_LIMIT
+	state := node.NewChainState()
+	engine, err := node.NewSyncEngine(state, store, node.DefaultSyncConfig(&target, node.DevnetGenesisChainID(), chainStatePath))
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	if _, err := engine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
+		t.Fatalf("ApplyBlock(genesis): %v", err)
+	}
+
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("Chmod(readonly datadir): %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run([]string{"--dry-run", "--datadir", dir}, &out, &errOut)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d (stderr=%q)", code, errOut.String())
+	}
+	if !bytes.Contains(errOut.Bytes(), []byte("chainstate save failed")) {
+		t.Fatalf("expected chainstate save failure in stderr, got %q", errOut.String())
 	}
 }
 
@@ -447,11 +547,15 @@ func TestRunMineBlocksExitOK(t *testing.T) {
 	}
 }
 
-func TestRunMineBlocksFailsOnHeightOverflow(t *testing.T) {
+func TestRunMineBlocksResetsDirtyChainStateWhenBlockstoreEmpty(t *testing.T) {
 	dir := t.TempDir()
 	chainState := node.NewChainState()
 	chainState.HasTip = true
-	chainState.Height = uint64(math.MaxUint32)
+	chainState.Height = math.MaxUint64
+	chainState.AlreadyGenerated = 123
+	var phantomTxid [32]byte
+	phantomTxid[0] = 0xaa
+	chainState.Utxos[consensus.Outpoint{Txid: phantomTxid, Vout: 1}] = consensus.UtxoEntry{Value: 7}
 	if err := chainState.Save(node.ChainStatePath(dir)); err != nil {
 		t.Fatalf("save chainstate: %v", err)
 	}
@@ -463,8 +567,11 @@ func TestRunMineBlocksFailsOnHeightOverflow(t *testing.T) {
 		&out,
 		&errOut,
 	)
-	if code != 2 {
-		t.Fatalf("expected exit code 2, got %d (stderr=%q)", code, errOut.String())
+	if code != 0 {
+		t.Fatalf("expected exit code 0 after fail-closed reset, got %d (stderr=%q)", code, errOut.String())
+	}
+	if !bytes.Contains(out.Bytes(), []byte("mined:")) {
+		t.Fatalf("expected mined output after dirty chainstate reset, got %q", out.String())
 	}
 }
 
@@ -522,6 +629,45 @@ func TestRunMainnetFailsWithoutExplicitTarget(t *testing.T) {
 	}
 	if !bytes.Contains(errOut.Bytes(), []byte("mainnet requires explicit expected_target")) {
 		t.Fatalf("unexpected stderr: %q", errOut.String())
+	}
+}
+
+func TestRunMainnetFailsBeforeReconcilingChainState(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := node.ChainStatePath(dir)
+	store, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("OpenBlockStore: %v", err)
+	}
+	target := consensus.POW_LIMIT
+	state := node.NewChainState()
+	engine, err := node.NewSyncEngine(state, store, node.DefaultSyncConfig(&target, node.DevnetGenesisChainID(), chainStatePath))
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	if _, err := engine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
+		t.Fatalf("ApplyBlock(genesis): %v", err)
+	}
+	if err := node.NewChainState().Save(chainStatePath); err != nil {
+		t.Fatalf("Save(stale chainstate): %v", err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run([]string{"--dry-run", "--datadir", dir, "--network", "mainnet"}, &out, &errOut)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d (stderr=%q)", code, errOut.String())
+	}
+	if !bytes.Contains(errOut.Bytes(), []byte("mainnet requires explicit expected_target")) {
+		t.Fatalf("unexpected stderr: %q", errOut.String())
+	}
+
+	loaded, err := node.LoadChainState(chainStatePath)
+	if err != nil {
+		t.Fatalf("LoadChainState: %v", err)
+	}
+	if loaded.HasTip || loaded.Height != 0 || loaded.TipHash != ([32]byte{}) || len(loaded.Utxos) != 0 {
+		t.Fatalf("mainnet guard should prevent reconcile mutation: has_tip=%v height=%d tip=%x utxos=%d", loaded.HasTip, loaded.Height, loaded.TipHash, len(loaded.Utxos))
 	}
 }
 
