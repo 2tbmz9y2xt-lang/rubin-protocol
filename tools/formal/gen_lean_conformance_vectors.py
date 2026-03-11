@@ -255,6 +255,8 @@ def load_cv_merkle(path: Path) -> list[MerkleVector]:
             continue
         if v.get("op") != "merkle_root":
             continue
+        if not v.get("expect_ok"):
+            continue  # skip negative vectors (handled by conformance runner)
         out.append(
             MerkleVector(
                 vid=str(v.get("id") or ""),
@@ -1825,6 +1827,8 @@ def load_cv_fork_choice(path: Path) -> list[ForkChoiceVector]:
         op = str(v.get("op") or "")
         if op not in ("fork_work", "fork_choice_select"):
             continue
+        if not v.get("expect_ok"):
+            continue  # skip negative vectors (handled by conformance runner)
         chains: list[ForkChain] = []
         for c in v.get("chains") or []:
             if not isinstance(c, dict):
