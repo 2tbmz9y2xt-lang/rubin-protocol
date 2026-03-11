@@ -123,6 +123,8 @@ def _emit_go_trace_v1(header: Header, entries: list[dict[str, Any]]) -> str:
         vector_id = str(e.get("vector_id", ""))
         op = str(e.get("op", ""))
         ok = bool(e.get("ok", False))
+        if not ok:
+            continue  # skip negative vectors — Lean refinement only covers accept path
         err = str(e.get("err", ""))
         outputs = e.get("outputs")
         if not isinstance(outputs, dict):

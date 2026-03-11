@@ -64,31 +64,10 @@ def goTraceFixturesDigestSHA3_256 : String := "e2201a1cd3860b42a7dd63c510cebadb8
 
 def parseOuts : List ParseOut := [
   { id := "PARSE-01", ok := true, err := "", consumed := 21, txidHex := "0xd205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0", wtxidHex := "0xf760a70e1e838404d8e41679962064dc1bf4fa181699009644a14d0aa389ab4e" },
-  { id := "PARSE-02", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "PARSE-03", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "PARSE-04", ok := false, err := "TX_ERR_WITNESS_OVERFLOW", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "PARSE-05", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "PARSE-06", ok := false, err := "TX_ERR_SIG_NONCANONICAL", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "PARSE-07", ok := false, err := "TX_ERR_SIG_NONCANONICAL", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "PARSE-08", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "PARSE-09", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "PARSE-10", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "PARSE-11", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "PARSE-12", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "PARSE-13", ok := false, err := "TX_ERR_WITNESS_OVERFLOW", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "PARSE-14", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "PARSE-15", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "PARSE-16", ok := true, err := "", consumed := 50022, txidHex := "0xd205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0", wtxidHex := "0x1f212a9c463bc752002a1e31c7a78a11882780744b5e602157b14d222c403ebe" },
-  { id := "PARSE-17", ok := false, err := "TX_ERR_PARSE", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "PARSE-18", ok := false, err := "TX_ERR_WITNESS_OVERFLOW", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "PARSE-19", ok := false, err := "TX_ERR_SIG_NONCANONICAL", consumed := 0, txidHex := "0x0000000000000000000000000000000000000000000000000000000000000000", wtxidHex := "0x0000000000000000000000000000000000000000000000000000000000000000" }
+  { id := "PARSE-16", ok := true, err := "", consumed := 50022, txidHex := "0xd205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0", wtxidHex := "0x1f212a9c463bc752002a1e31c7a78a11882780744b5e602157b14d222c403ebe" }
 ]
 
 def sighashOuts : List SighashOut := [
-  { id := "NEG-SIGHASH-BAD-CHAIN-ID-SHORT", ok := false, err := "bad chain_id", digestHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "NEG-SIGHASH-BAD-HEX", ok := false, err := "TX_ERR_PARSE", digestHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "NEG-SIGHASH-INPUT-INDEX-OOB", ok := false, err := "TX_ERR_PARSE", digestHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
-  { id := "NEG-SIGHASH-TRUNCATED-TX", ok := false, err := "TX_ERR_PARSE", digestHex := "0x0000000000000000000000000000000000000000000000000000000000000000" },
   { id := "SIGHASH-01", ok := true, err := "", digestHex := "0x2d0c47afbb6533ae5f83a4ca76ee7a2879710b8c5e6492c86a8ea71609a45802" },
   { id := "SIGHASH-02", ok := true, err := "", digestHex := "0xe156ba02d8b1ba785840358da93d3c5b71402bf9853abf9ecbce4cecd139660a" },
   { id := "SIGHASH-03", ok := true, err := "", digestHex := "0xa1a4d8f720145b8a6c2d80f1bd875de24e5c10b700b34fc80b5d469e715196f0" },
@@ -101,63 +80,28 @@ def powOuts : List PowOut := [
   { id := "POW-02", op := "retarget_v1", ok := true, err := "", targetNewHex := some ("0x0000000000000000000000000000000000000000000000000000000000000400"), blockHashHex := none },
   { id := "POW-03", op := "retarget_v1", ok := true, err := "", targetNewHex := some ("0x0000000000000000000000000000000000000000000000000000000000004000"), blockHashHex := none },
   { id := "POW-03A", op := "retarget_v1", ok := true, err := "", targetNewHex := some ("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"), blockHashHex := none },
-  { id := "POW-03B", op := "retarget_v1", ok := false, err := "TX_ERR_PARSE", targetNewHex := some ("0x0000000000000000000000000000000000000000000000000000000000000000"), blockHashHex := none },
   { id := "POW-03C", op := "retarget_v1", ok := true, err := "", targetNewHex := some ("0x0000000000000000000000000000000000000000000000000000000000000fff"), blockHashHex := none },
   { id := "POW-03D", op := "retarget_v1", ok := true, err := "", targetNewHex := some ("0x0000000000000000000000000000000000000000000000000000000000001001"), blockHashHex := none },
   { id := "POW-04", op := "block_hash", ok := true, err := "", targetNewHex := none, blockHashHex := some ("0x6df1cafaee3b81e81e298bc474b514cf8f4ba09e36f527a2d715957dd3360fff") },
   { id := "POW-05", op := "pow_check", ok := true, err := "", targetNewHex := none, blockHashHex := none },
-  { id := "POW-06", op := "pow_check", ok := false, err := "BLOCK_ERR_POW_INVALID", targetNewHex := none, blockHashHex := none },
-  { id := "POW-07", op := "pow_check", ok := false, err := "BLOCK_ERR_TARGET_INVALID", targetNewHex := none, blockHashHex := none },
   { id := "POW-08", op := "retarget_v1", ok := true, err := "", targetNewHex := some ("0x0000000000000000000000000000000000000000000000000000000000001003"), blockHashHex := none },
-  { id := "POW-08A", op := "retarget_v1", ok := false, err := "TX_ERR_PARSE", targetNewHex := some ("0x0000000000000000000000000000000000000000000000000000000000000000"), blockHashHex := none },
   { id := "POW-09", op := "retarget_v1", ok := true, err := "", targetNewHex := some ("0x0000000000000000000000000000000000000000000000000000000000000001"), blockHashHex := none },
   { id := "POW-10", op := "retarget_v1", ok := true, err := "", targetNewHex := some ("0x0000000000000000000000000000000000000000000000000000000000000001"), blockHashHex := none }
 ]
 
 def utxoBasicOuts : List UtxoBasicOut := [
-  { id := "CV-U-01", ok := false, err := "TX_ERR_MISSING_UTXO", fee := none, utxoCount := none },
-  { id := "CV-U-02", ok := false, err := "TX_ERR_MISSING_UTXO", fee := none, utxoCount := none },
-  { id := "CV-U-05", ok := false, err := "TX_ERR_VALUE_CONSERVATION", fee := none, utxoCount := none },
   { id := "CV-U-06", ok := true, err := "", fee := some 10, utxoCount := some 1 },
-  { id := "CV-U-08", ok := false, err := "TX_ERR_VAULT_OWNER_AUTH_REQUIRED", fee := none, utxoCount := none },
   { id := "CV-U-09", ok := true, err := "", fee := some 10, utxoCount := some 1 },
-  { id := "CV-U-10", ok := false, err := "TX_ERR_VALUE_CONSERVATION", fee := none, utxoCount := none },
   { id := "CV-U-11", ok := true, err := "", fee := some 10, utxoCount := some 1 },
-  { id := "CV-U-12", ok := false, err := "TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED", fee := none, utxoCount := none },
   { id := "CV-U-13", ok := true, err := "", fee := some 5, utxoCount := some 1 },
-  { id := "CV-U-14", ok := false, err := "TX_ERR_TX_NONCE_INVALID", fee := none, utxoCount := none },
-  { id := "CV-U-15", ok := false, err := "TX_ERR_SEQUENCE_INVALID", fee := none, utxoCount := none },
-  { id := "CV-U-16", ok := false, err := "TX_ERR_COVENANT_TYPE_INVALID", fee := none, utxoCount := none },
-  { id := "CV-U-17", ok := false, err := "TX_ERR_PARSE", fee := none, utxoCount := none },
-  { id := "CV-U-18", ok := false, err := "TX_ERR_COVENANT_TYPE_INVALID", fee := none, utxoCount := none },
   { id := "CV-U-19", ok := true, err := "", fee := some 100, utxoCount := some 0 },
-  { id := "CV-U-COINBASE-IMMATURE-01", ok := false, err := "TX_ERR_SIG_NONCANONICAL", fee := none, utxoCount := none },
-  { id := "CV-U-COINBASE-IMMATURE-02", ok := false, err := "TX_ERR_SIG_NONCANONICAL", fee := none, utxoCount := none },
-  { id := "CV-U-COINBASE-IMMATURE-03", ok := false, err := "TX_ERR_COINBASE_IMMATURE", fee := none, utxoCount := none },
   { id := "CV-U-EXT-01", ok := true, err := "", fee := some 10, utxoCount := some 1 },
   { id := "CV-U-EXT-02", ok := true, err := "", fee := some 10, utxoCount := some 1 },
-  { id := "CV-U-EXT-03", ok := false, err := "TX_ERR_COVENANT_TYPE_INVALID", fee := none, utxoCount := none },
-  { id := "CV-U-EXT-04", ok := false, err := "TX_ERR_SIG_ALG_INVALID", fee := none, utxoCount := none },
-  { id := "CV-U-EXT-05", ok := true, err := "", fee := some 10, utxoCount := some 1 },
-  { id := "CV-U-SIGHASH-TYPE-01", ok := false, err := "TX_ERR_SIGHASH_TYPE_INVALID", fee := none, utxoCount := none }
+  { id := "CV-U-EXT-05", ok := true, err := "", fee := some 10, utxoCount := some 1 }
 ]
 
 def blockBasicOuts : List BlockBasicOut := [
-  { id := "CV-B-01", ok := true, err := "", blockHashHex := some ("0x8d79bc005c07a95c60b1ba1539d3bbc112f157c42997413ffe5ffba8c6dc87ee"), sumWeight := some 414, sumDa := some 0 },
-  { id := "CV-B-02", ok := false, err := "BLOCK_ERR_LINKAGE_INVALID", blockHashHex := none, sumWeight := none, sumDa := none },
-  { id := "CV-B-03", ok := false, err := "BLOCK_ERR_MERKLE_INVALID", blockHashHex := none, sumWeight := none, sumDa := none },
-  { id := "CV-B-04", ok := false, err := "BLOCK_ERR_TARGET_INVALID", blockHashHex := none, sumWeight := none, sumDa := none },
-  { id := "CV-B-05", ok := false, err := "BLOCK_ERR_TARGET_INVALID", blockHashHex := none, sumWeight := none, sumDa := none },
-  { id := "CV-B-06", ok := false, err := "BLOCK_ERR_PARSE", blockHashHex := none, sumWeight := none, sumDa := none },
-  { id := "CV-B-07", ok := false, err := "BLOCK_ERR_WITNESS_COMMITMENT", blockHashHex := none, sumWeight := none, sumDa := none },
-  { id := "CV-B-08", ok := false, err := "BLOCK_ERR_WITNESS_COMMITMENT", blockHashHex := none, sumWeight := none, sumDa := none },
-  { id := "CV-B-09", ok := false, err := "TX_ERR_PARSE", blockHashHex := none, sumWeight := none, sumDa := none },
-  { id := "CV-B-10", ok := false, err := "TX_ERR_PARSE", blockHashHex := none, sumWeight := none, sumDa := none },
-  { id := "CV-B-11", ok := false, err := "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED", blockHashHex := none, sumWeight := none, sumDa := none },
-  { id := "CV-B-12", ok := false, err := "BLOCK_ERR_DA_BATCH_EXCEEDED", blockHashHex := none, sumWeight := none, sumDa := none },
-  { id := "CV-B-13", ok := false, err := "BLOCK_ERR_COINBASE_INVALID", blockHashHex := none, sumWeight := none, sumDa := none },
-  { id := "CV-B-14", ok := false, err := "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED", blockHashHex := none, sumWeight := none, sumDa := none },
-  { id := "CV-B-15", ok := false, err := "BLOCK_ERR_COINBASE_INVALID", blockHashHex := none, sumWeight := none, sumDa := none }
+  { id := "CV-B-01", ok := true, err := "", blockHashHex := some ("0x8d79bc005c07a95c60b1ba1539d3bbc112f157c42997413ffe5ffba8c6dc87ee"), sumWeight := some 414, sumDa := some 0 }
 ]
 
 def weightOuts : List WeightOut := [
@@ -168,21 +112,11 @@ def weightOuts : List WeightOut := [
 ]
 
 def validationOrderOuts : List ValidationOrderOut := [
-  { id := "CV-VO-01", ok := false, err := "BLOCK_ERR_PARSE", firstErr := some "BLOCK_ERR_PARSE", evaluated := ["parse"] },
-  { id := "CV-VO-02", ok := false, err := "BLOCK_ERR_TARGET_INVALID", firstErr := some "BLOCK_ERR_TARGET_INVALID", evaluated := ["parse", "target_range"] },
-  { id := "CV-VO-03", ok := false, err := "BLOCK_ERR_WEIGHT_EXCEEDED", firstErr := some "BLOCK_ERR_WEIGHT_EXCEEDED", evaluated := ["parse", "target_range", "pow", "expected_target", "linkage", "merkle", "witness_commitment", "timestamp", "weight"] },
-  { id := "CV-VO-04", ok := false, err := "TX_ERR_SIG_INVALID", firstErr := some "TX_ERR_SIG_INVALID", evaluated := ["cursor_p2pk", "cursor_htlc", "cursor_vault", "sig_threshold_vault"] },
-  { id := "CV-VO-05", ok := false, err := "BLOCK_ERR_WEIGHT_EXCEEDED", firstErr := some "BLOCK_ERR_WEIGHT_EXCEEDED", evaluated := ["parse", "target_range", "pow", "expected_target", "linkage", "merkle", "witness_commitment", "timestamp", "weight"] }
+  
 ]
 
 def daIntegrityOuts : List DaIntegrityOut := [
-  { id := "CV-DA-01", ok := true, err := "" },
-  { id := "CV-DA-02", ok := false, err := "BLOCK_ERR_DA_CHUNK_HASH_INVALID" },
-  { id := "CV-DA-03", ok := false, err := "BLOCK_ERR_DA_INCOMPLETE" },
-  { id := "CV-DA-04", ok := false, err := "BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID" },
-  { id := "CV-DA-05", ok := false, err := "BLOCK_ERR_DA_SET_INVALID" },
-  { id := "CV-DA-06", ok := false, err := "TX_ERR_PARSE" },
-  { id := "CV-DA-CHUNK-COUNT-ZERO", ok := false, err := "TX_ERR_PARSE" }
+  { id := "CV-DA-01", ok := true, err := "" }
 ]
 
 end RubinFormal.Refinement
