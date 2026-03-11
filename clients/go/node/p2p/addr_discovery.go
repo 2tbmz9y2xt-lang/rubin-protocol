@@ -74,11 +74,7 @@ func shouldDialDiscoveredAddr(addr string, network string) bool {
 }
 
 func normalizedDiscoveryNetwork(network string) string {
-	network = strings.ToLower(strings.TrimSpace(network))
-	if network == "" {
-		return "devnet"
-	}
-	return network
+	return strings.ToLower(strings.TrimSpace(network))
 }
 
 func isDialableDiscoveredIP(ip net.IP) bool {

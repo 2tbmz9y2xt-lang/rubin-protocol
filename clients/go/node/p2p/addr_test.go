@@ -245,7 +245,7 @@ func TestShouldDialDiscoveredAddrFiltersByNetwork(t *testing.T) {
 		{name: "mainnet allows public ipv4", addr: "8.8.8.8:18444", network: "mainnet", want: true},
 		{name: "testnet allows public ipv6", addr: "[2001:4860:4860::8888]:18444", network: "testnet", want: true},
 		{name: "devnet allows loopback", addr: "127.0.0.1:18444", network: "devnet", want: true},
-		{name: "empty network defaults to devnet", addr: "127.0.0.1:18444", network: "", want: true},
+		{name: "empty network stays filtered", addr: "127.0.0.1:18444", network: "", want: false},
 		{name: "malformed addr rejected", addr: "bad", network: "mainnet", want: false},
 	}
 
