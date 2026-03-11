@@ -5,6 +5,7 @@ pub mod devnet_rpc;
 pub mod genesis;
 pub mod interop;
 mod io_utils;
+pub mod miner;
 pub mod p2p_runtime;
 pub mod sync;
 pub mod sync_disconnect;
@@ -31,6 +32,7 @@ pub use genesis::{
     devnet_genesis_block_bytes, devnet_genesis_chain_id, load_chain_id_from_genesis_file,
     load_genesis_config, validate_incoming_chain_id, LoadedGenesisConfig,
 };
+pub use miner::{parse_mine_address_arg, MinedBlock, Miner, MinerConfig};
 pub use p2p_runtime::{default_peer_runtime_config, PeerManager};
 pub use sync::{
     default_sync_config, HeaderRequest, SyncConfig, SyncEngine, DEFAULT_IBD_LAG_SECONDS,
