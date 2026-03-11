@@ -112,6 +112,25 @@ func TestReadFrameWithPayloadLimitRejectsOversizeInvBeforePayloadRead(t *testing
 	}
 }
 
+func TestReadFrameWithPayloadLimitReadsTxPayloadExact(t *testing.T) {
+	payload := []byte{0x01, 0x02, 0x03, 0x04}
+	header, err := buildEnvelopeHeader(networkMagic("devnet"), messageTx, payload)
+	if err != nil {
+		t.Fatalf("buildEnvelopeHeader: %v", err)
+	}
+	reader := io.MultiReader(bytes.NewReader(header[:]), bytes.NewReader(payload))
+	got, err := readFrameWithPayloadLimit(reader, networkMagic("devnet"), 1024*1024, postHandshakePayloadCap(defaultLocatorLimit, 512))
+	if err != nil {
+		t.Fatalf("readFrameWithPayloadLimit: %v", err)
+	}
+	if got.Command != messageTx {
+		t.Fatalf("command=%q, want %q", got.Command, messageTx)
+	}
+	if !bytes.Equal(got.Payload, payload) {
+		t.Fatalf("payload mismatch")
+	}
+}
+
 func TestWriteFrameErrors(t *testing.T) {
 	t.Run("cap exceeded", func(t *testing.T) {
 		err := writeFrame(io.Discard, networkMagic("devnet"), message{Command: messageInv, Payload: []byte{1, 2}}, 1)

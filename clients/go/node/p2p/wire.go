@@ -85,13 +85,9 @@ func readFrameWithPayloadLimit(r io.Reader, expectedMagic [4]byte, maxMessageSiz
 	}
 	payload := []byte{}
 	if header.Size > 0 {
-		limited := io.LimitReader(r, int64(header.Size))
-		payload, err = io.ReadAll(limited)
-		if err != nil {
+		payload = make([]byte, int(header.Size))
+		if _, err := io.ReadFull(r, payload); err != nil {
 			return frame, err
-		}
-		if len(payload) != int(header.Size) {
-			return frame, io.ErrUnexpectedEOF
 		}
 	}
 	checksum := wireChecksum(payload)

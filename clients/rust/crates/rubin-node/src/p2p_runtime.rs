@@ -4,7 +4,11 @@ use std::net::TcpStream;
 use std::sync::RwLock;
 use std::time::Duration;
 
-use rubin_consensus::{block_hash, constants::MAX_RELAY_MSG_BYTES, parse_block_bytes};
+use rubin_consensus::{
+    block_hash,
+    constants::{MAX_BLOCK_BYTES, MAX_RELAY_MSG_BYTES},
+    parse_block_bytes,
+};
 use sha3::{Digest, Sha3_256};
 
 use crate::sync::SyncEngine;
@@ -1034,6 +1038,7 @@ fn runtime_payload_cap(command: &str) -> u64 {
         "verack" | "ping" | "pong" | MESSAGE_GETADDR => 0,
         MESSAGE_INV | MESSAGE_GETDATA => MAX_INVENTORY_PAYLOAD_BYTES,
         MESSAGE_ADDR => MAX_ADDR_PAYLOAD_BYTES,
+        MESSAGE_BLOCK | MESSAGE_TX => MAX_BLOCK_BYTES,
         _ => MAX_RELAY_MSG_BYTES,
     }
 }
@@ -1349,6 +1354,36 @@ mod tests {
         header[0..4].copy_from_slice(&network_magic("devnet"));
         header[4..16].copy_from_slice(&encode_wire_command(MESSAGE_ADDR).expect("command"));
         let oversize = (MAX_ADDR_PAYLOAD_BYTES + 1) as u32;
+        header[16..20].copy_from_slice(&oversize.to_le_bytes());
+
+        let mut reader = std::io::Cursor::new(header);
+        let err = read_message_from(&mut reader, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "message exceeds command cap");
+    }
+
+    #[test]
+    fn p2p_read_message_rejects_block_command_cap_before_payload_read() {
+        let mut header = [0u8; WIRE_HEADER_SIZE];
+        header[0..4].copy_from_slice(&network_magic("devnet"));
+        header[4..16].copy_from_slice(&encode_wire_command(MESSAGE_BLOCK).expect("command"));
+        let oversize = (MAX_BLOCK_BYTES + 1) as u32;
+        header[16..20].copy_from_slice(&oversize.to_le_bytes());
+
+        let mut reader = std::io::Cursor::new(header);
+        let err = read_message_from(&mut reader, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "message exceeds command cap");
+    }
+
+    #[test]
+    fn p2p_read_message_rejects_tx_command_cap_before_payload_read() {
+        let mut header = [0u8; WIRE_HEADER_SIZE];
+        header[0..4].copy_from_slice(&network_magic("devnet"));
+        header[4..16].copy_from_slice(&encode_wire_command(MESSAGE_TX).expect("command"));
+        let oversize = (MAX_BLOCK_BYTES + 1) as u32;
         header[16..20].copy_from_slice(&oversize.to_le_bytes());
 
         let mut reader = std::io::Cursor::new(header);
