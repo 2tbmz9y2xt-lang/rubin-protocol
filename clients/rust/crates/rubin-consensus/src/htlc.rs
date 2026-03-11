@@ -5,7 +5,7 @@ use crate::constants::{
 };
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
-use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_type};
+use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_cache, SighashV1PrehashCache};
 use crate::tx::{Tx, WitnessItem};
 use crate::utxo_basic::UtxoEntry;
 
@@ -78,6 +78,34 @@ pub fn validate_htlc_spend(
     chain_id: [u8; 32],
     block_height: u64,
     block_mtp: u64,
+) -> Result<(), TxError> {
+    let mut cache = SighashV1PrehashCache::new(tx)?;
+    validate_htlc_spend_with_cache(
+        entry,
+        path_item,
+        sig_item,
+        tx,
+        input_index,
+        input_value,
+        chain_id,
+        block_height,
+        block_mtp,
+        &mut cache,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_htlc_spend_with_cache(
+    entry: &UtxoEntry,
+    path_item: &WitnessItem,
+    sig_item: &WitnessItem,
+    _tx: &Tx,
+    input_index: u32,
+    input_value: u64,
+    chain_id: [u8; 32],
+    block_height: u64,
+    block_mtp: u64,
+    cache: &mut SighashV1PrehashCache<'_>,
 ) -> Result<(), TxError> {
     let cov = parse_htlc_covenant_data(&entry.covenant_data)?;
 
@@ -226,7 +254,7 @@ pub fn validate_htlc_spend(
         ));
     }
     let digest32 =
-        sighash_v1_digest_with_type(tx, input_index, input_value, chain_id, sighash_type)?;
+        sighash_v1_digest_with_cache(cache, input_index, input_value, chain_id, sighash_type)?;
 
     let ok = crate::verify_sig_openssl::verify_sig(
         sig_item.suite_id,

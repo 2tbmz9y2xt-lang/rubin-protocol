@@ -3,7 +3,7 @@ use crate::constants::{
     ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
 };
 use crate::error::{ErrorCode, TxError};
-use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_type};
+use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_cache, SighashV1PrehashCache};
 use crate::tx::Tx;
 use crate::tx::WitnessItem;
 use crate::utxo_basic::UtxoEntry;
@@ -179,6 +179,30 @@ pub fn validate_core_ext_spend(
     chain_id: [u8; 32],
     profiles_at_height: &CoreExtProfiles,
 ) -> Result<(), TxError> {
+    let mut cache = SighashV1PrehashCache::new(tx)?;
+    validate_core_ext_spend_with_cache(
+        entry,
+        w,
+        tx,
+        input_index,
+        input_value,
+        chain_id,
+        profiles_at_height,
+        &mut cache,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_core_ext_spend_with_cache(
+    entry: &UtxoEntry,
+    w: &WitnessItem,
+    _tx: &Tx,
+    input_index: u32,
+    input_value: u64,
+    chain_id: [u8; 32],
+    profiles_at_height: &CoreExtProfiles,
+    cache: &mut SighashV1PrehashCache<'_>,
+) -> Result<(), TxError> {
     let cov = parse_core_ext_covenant_data(&entry.covenant_data)?;
     let _ = cov.ext_payload;
 
@@ -223,7 +247,7 @@ pub fn validate_core_ext_spend(
             ));
         }
         let digest32 =
-            sighash_v1_digest_with_type(tx, input_index, input_value, chain_id, sighash_type)?;
+            sighash_v1_digest_with_cache(cache, input_index, input_value, chain_id, sighash_type)?;
         let ok = verify_sig(w.suite_id, &w.pubkey, crypto_sig, &digest32)?;
         if !ok {
             return Err(TxError::new(
@@ -247,7 +271,7 @@ pub fn validate_core_ext_spend(
         ));
     }
     let _digest32 =
-        sighash_v1_digest_with_type(tx, input_index, input_value, chain_id, sighash_type)?;
+        sighash_v1_digest_with_cache(cache, input_index, input_value, chain_id, sighash_type)?;
 
     match p.verification_binding {
         CoreExtVerificationBinding::NativeVerifySig => Err(TxError::new(

@@ -4,7 +4,7 @@ use crate::constants::{
 };
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
-use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_type};
+use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_cache, SighashV1PrehashCache};
 use crate::tx::{Tx, WitnessItem};
 use crate::utxo_basic::UtxoEntry;
 use crate::verify_sig_openssl::verify_sig;
@@ -47,6 +47,30 @@ pub fn validate_stealth_spend(
     chain_id: [u8; 32],
     block_height: u64,
 ) -> Result<(), TxError> {
+    let mut cache = SighashV1PrehashCache::new(tx)?;
+    validate_stealth_spend_with_cache(
+        entry,
+        w,
+        tx,
+        input_index,
+        input_value,
+        chain_id,
+        block_height,
+        &mut cache,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_stealth_spend_with_cache(
+    entry: &UtxoEntry,
+    w: &WitnessItem,
+    _tx: &Tx,
+    input_index: u32,
+    input_value: u64,
+    chain_id: [u8; 32],
+    block_height: u64,
+    cache: &mut SighashV1PrehashCache<'_>,
+) -> Result<(), TxError> {
     let cov = parse_stealth_covenant_data(&entry.covenant_data)?;
     let _ = cov.ciphertext;
 
@@ -86,7 +110,8 @@ pub fn validate_stealth_spend(
             "invalid sighash_type",
         ));
     }
-    let digest = sighash_v1_digest_with_type(tx, input_index, input_value, chain_id, sighash_type)?;
+    let digest =
+        sighash_v1_digest_with_cache(cache, input_index, input_value, chain_id, sighash_type)?;
     let ok = verify_sig(w.suite_id, &w.pubkey, crypto_sig, &digest)?;
     if !ok {
         return Err(TxError::new(
