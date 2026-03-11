@@ -46,6 +46,99 @@
       "target": "0x0000000000000000000000000000000000000000000000000000000000000001",
       "expect_ok": true,
       "expect_work": "0x10000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "id": "NEG-FC-ZERO-TARGET",
+      "op": "fork_work",
+      "target": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_PARSE"
+    },
+    {
+      "id": "NEG-FC-BAD-TARGET-HEX",
+      "op": "fork_work",
+      "target": "not-hex",
+      "expect_ok": false,
+      "expect_err": "bad target"
+    },
+    {
+      "id": "NEG-FC-EMPTY-CHAINS",
+      "op": "fork_choice_select",
+      "chains": [],
+      "expect_ok": false,
+      "expect_err": "bad chains"
+    },
+    {
+      "id": "NEG-FC-CHAIN-NO-TARGETS",
+      "op": "fork_choice_select",
+      "chains": [
+        {
+          "id": "A",
+          "targets": [],
+          "tip_hash": "0x00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "bad chain"
+    },
+    {
+      "id": "NEG-FC-CHAIN-ZERO-TARGET-IN-LIST",
+      "op": "fork_choice_select",
+      "chains": [
+        {
+          "id": "A",
+          "targets": [
+            "0x0000000000000000000000000000000000000000000000000000000000000000"
+          ],
+          "tip_hash": "0x00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_PARSE"
+    },
+    {
+      "id": "CV-FC-EQUAL-WORK-TIE-BREAK",
+      "op": "fork_choice_select",
+      "expect_ok": true,
+      "expect_winner": "A",
+      "chains": [
+        {
+          "id": "A",
+          "targets": [
+            "0x8000000000000000000000000000000000000000000000000000000000000000"
+          ],
+          "tip_hash": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        },
+        {
+          "id": "B",
+          "targets": [
+            "0x8000000000000000000000000000000000000000000000000000000000000000"
+          ],
+          "tip_hash": "0x0000000000000000000000000000000000000000000000000000000000000002"
+        }
+      ]
+    },
+    {
+      "id": "CV-FC-EQUAL-WORK-TIE-BREAK-REVERSED",
+      "op": "fork_choice_select",
+      "expect_ok": true,
+      "expect_winner": "B",
+      "chains": [
+        {
+          "id": "A",
+          "targets": [
+            "0x8000000000000000000000000000000000000000000000000000000000000000"
+          ],
+          "tip_hash": "0x0000000000000000000000000000000000000000000000000000000000000002"
+        },
+        {
+          "id": "B",
+          "targets": [
+            "0x8000000000000000000000000000000000000000000000000000000000000000"
+          ],
+          "tip_hash": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      ]
     }
   ]
 }

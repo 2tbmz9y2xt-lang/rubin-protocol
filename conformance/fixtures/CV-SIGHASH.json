@@ -50,6 +50,46 @@
       "input_value": 999,
       "expect_ok": true,
       "expect_digest": "daa23cc8b92c706958d428953b0c083017b97ebb53faa0c47c03f4b90a4a6c3f"
+    },
+    {
+      "id": "NEG-SIGHASH-BAD-HEX",
+      "op": "sighash_v1",
+      "tx_hex": "not-valid-hex",
+      "chain_id": "0000000000000000000000000000000000000000000000000000000000000001",
+      "input_index": 0,
+      "input_value": 5,
+      "expect_ok": false,
+      "expect_err": "bad hex"
+    },
+    {
+      "id": "NEG-SIGHASH-TRUNCATED-TX",
+      "op": "sighash_v1",
+      "tx_hex": "01000000",
+      "chain_id": "0000000000000000000000000000000000000000000000000000000000000001",
+      "input_index": 0,
+      "input_value": 5,
+      "expect_ok": false,
+      "expect_err": "TX_ERR_PARSE"
+    },
+    {
+      "id": "NEG-SIGHASH-BAD-CHAIN-ID-SHORT",
+      "op": "sighash_v1",
+      "tx_hex": "0100000000000000000000000001111111111111111111111111111111111111111111111111111111111111111102000000000300000000040000000000",
+      "chain_id": "0001",
+      "input_index": 0,
+      "input_value": 5,
+      "expect_ok": false,
+      "expect_err": "bad chain_id"
+    },
+    {
+      "id": "NEG-SIGHASH-INPUT-INDEX-OOB",
+      "op": "sighash_v1",
+      "tx_hex": "0100000000000000000000000001111111111111111111111111111111111111111111111111111111111111111102000000000300000000040000000000",
+      "chain_id": "0000000000000000000000000000000000000000000000000000000000000001",
+      "input_index": 99,
+      "input_value": 5,
+      "expect_ok": false,
+      "expect_err": "TX_ERR_PARSE"
     }
   ]
 }
