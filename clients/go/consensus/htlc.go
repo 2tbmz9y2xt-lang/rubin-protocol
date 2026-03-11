@@ -142,16 +142,7 @@ func ValidateHTLCSpendWithCache(
 		return txerr(TX_ERR_SIG_INVALID, "CORE_HTLC signature key binding mismatch")
 	}
 
-	cryptoSig, sighashType, err := extractCryptoSigAndSighash(sigItem)
-	if err != nil {
-		return err
-	}
-	var digest [32]byte
-	if cache != nil {
-		digest, err = SighashV1DigestWithCache(cache, inputIndex, inputValue, chainID, sighashType)
-	} else {
-		digest, err = SighashV1DigestWithType(tx, inputIndex, inputValue, chainID, sighashType)
-	}
+	cryptoSig, digest, err := extractSigAndDigestWithCache(sigItem, tx, inputIndex, inputValue, chainID, cache)
 	if err != nil {
 		return err
 	}
