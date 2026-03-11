@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_with_mtp, parse_block_header_bytes, parse_core_ext_covenant_data,
@@ -177,6 +177,26 @@ impl TxPool {
                 }
             }
         }
+    }
+
+    pub fn remove_conflicting_inputs(&mut self, txs: &[rubin_consensus::Tx]) {
+        let mut conflicting = HashSet::new();
+        for tx in txs {
+            for input in &tx.inputs {
+                let outpoint = Outpoint {
+                    txid: input.prev_txid,
+                    vout: input.prev_vout,
+                };
+                if let Some(txid) = self.spenders.get(&outpoint) {
+                    conflicting.insert(*txid);
+                }
+            }
+        }
+        if conflicting.is_empty() {
+            return;
+        }
+        let txids: Vec<[u8; 32]> = conflicting.into_iter().collect();
+        self.evict_txids(&txids);
     }
 }
 
@@ -453,7 +473,7 @@ mod tests {
     };
     use crate::{
         block_store_path, default_sync_config, devnet_genesis_block_bytes, devnet_genesis_chain_id,
-        BlockStore, ChainState, SyncEngine,
+        test_helpers::signed_conflicting_p2pk_state_and_txs, BlockStore, ChainState, SyncEngine,
     };
 
     #[derive(serde::Deserialize)]
@@ -950,6 +970,22 @@ mod tests {
 
         let selected = pool.select_transactions(1, 2);
         assert_eq!(selected, vec![vec![0x44, 0x44]]);
+    }
+
+    #[test]
+    fn remove_conflicting_inputs_evicts_conflicting_mempool_entries() {
+        let (state, admitted_raw, block_raw) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
+        let mut pool = TxPool::new();
+        let admitted_txid = pool
+            .admit(&admitted_raw, &state, None, devnet_genesis_chain_id())
+            .expect("admit");
+        let (block_tx, _txid, _wtxid, consumed) = parse_tx(&block_raw).expect("parse tx");
+        assert_eq!(consumed, block_raw.len());
+
+        pool.remove_conflicting_inputs(&[block_tx]);
+
+        assert!(!pool.txs.contains_key(&admitted_txid));
+        assert!(pool.is_empty());
     }
 
     #[test]
