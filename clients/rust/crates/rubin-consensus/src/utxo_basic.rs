@@ -4,13 +4,16 @@ use crate::constants::{
     COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_EXT, COV_TYPE_HTLC,
     COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_STEALTH, COV_TYPE_VAULT,
 };
-use crate::core_ext::{validate_core_ext_spend, CoreExtProfiles};
+use crate::core_ext::{validate_core_ext_spend_with_cache, CoreExtProfiles};
 use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
-use crate::htlc::{parse_htlc_covenant_data, validate_htlc_spend};
-use crate::spend_verify::{validate_p2pk_spend, validate_threshold_sig_spend};
-use crate::stealth::{parse_stealth_covenant_data, validate_stealth_spend};
+use crate::htlc::{parse_htlc_covenant_data, validate_htlc_spend_with_cache};
+use crate::sighash::SighashV1PrehashCache;
+use crate::spend_verify::{
+    validate_p2pk_spend_with_cache, validate_threshold_sig_spend_with_cache,
+};
+use crate::stealth::{parse_stealth_covenant_data, validate_stealth_spend_with_cache};
 use crate::tx::Tx;
 use crate::vault::{
     hash_in_sorted_32, output_descriptor_bytes, parse_multisig_covenant_data,
@@ -106,6 +109,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
     validate_tx_covenants_genesis(tx, height)?;
 
     let mut work = utxo_set.clone();
+    let mut sighash_cache = SighashV1PrehashCache::new(tx)?;
     let mut sum_in: u128 = 0;
     let mut sum_in_vault: u128 = 0;
     let mut vault_input_count: usize = 0;
@@ -198,7 +202,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
                         "CORE_P2PK witness_slots must be 1",
                     ));
                 }
-                validate_p2pk_spend(
+                validate_p2pk_spend_with_cache(
                     &entry,
                     &assigned[0],
                     tx,
@@ -206,11 +210,12 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
                     entry.value,
                     chain_id,
                     height,
+                    &mut sighash_cache,
                 )?;
             }
             COV_TYPE_MULTISIG => {
                 let m = parse_multisig_covenant_data(&entry.covenant_data)?;
-                validate_threshold_sig_spend(
+                validate_threshold_sig_spend_with_cache(
                     &m.keys,
                     m.threshold,
                     assigned,
@@ -220,6 +225,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
                     chain_id,
                     height,
                     "CORE_MULTISIG",
+                    &mut sighash_cache,
                 )?;
             }
             COV_TYPE_VAULT => {
@@ -242,7 +248,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
                         "CORE_HTLC witness_slots must be 2",
                     ));
                 }
-                validate_htlc_spend(
+                validate_htlc_spend_with_cache(
                     &entry,
                     &assigned[0],
                     &assigned[1],
@@ -252,6 +258,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
                     chain_id,
                     height,
                     block_mtp,
+                    &mut sighash_cache,
                 )?;
             }
             COV_TYPE_EXT => {
@@ -261,7 +268,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
                         "CORE_EXT witness_slots must be 1",
                     ));
                 }
-                validate_core_ext_spend(
+                validate_core_ext_spend_with_cache(
                     &entry,
                     &assigned[0],
                     tx,
@@ -269,6 +276,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
                     entry.value,
                     chain_id,
                     core_ext_profiles_at_height,
+                    &mut sighash_cache,
                 )?;
             }
             COV_TYPE_STEALTH => {
@@ -278,7 +286,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
                         "CORE_STEALTH witness_slots must be 1",
                     ));
                 }
-                validate_stealth_spend(
+                validate_stealth_spend_with_cache(
                     &entry,
                     &assigned[0],
                     tx,
@@ -286,6 +294,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
                     entry.value,
                     chain_id,
                     height,
+                    &mut sighash_cache,
                 )?;
             }
             _ => {}
@@ -397,7 +406,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
         }
 
         // Signature threshold check (CANONICAL §24.1 step 7).
-        validate_threshold_sig_spend(
+        validate_threshold_sig_spend_with_cache(
             &vault_sig_keys,
             vault_sig_threshold,
             &vault_sig_witness,
@@ -407,6 +416,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
             chain_id,
             height,
             "CORE_VAULT",
+            &mut sighash_cache,
         )?;
 
         // Whitelist enforcement: all outputs must be whitelisted.

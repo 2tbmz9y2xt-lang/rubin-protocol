@@ -7,7 +7,7 @@ use crate::constants::{
 };
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
-use crate::sighash::sighash_v1_digest_with_type;
+use crate::sighash::{sighash_v1_digest_with_cache, SighashV1PrehashCache};
 use crate::tx::{da_core_fields_bytes, Tx, WitnessItem};
 use crate::utxo_basic::{Outpoint, UtxoEntry};
 
@@ -88,6 +88,7 @@ pub fn sign_transaction(
     }
     let key_id = sha3_256(&pubkey);
 
+    let mut sighash_cache = SighashV1PrehashCache::new(tx)?;
     let mut witness = Vec::with_capacity(tx.inputs.len());
     for (idx, input) in tx.inputs.iter().enumerate() {
         let outpoint = Outpoint {
@@ -118,8 +119,13 @@ pub fn sign_transaction(
             ));
         }
 
-        let digest =
-            sighash_v1_digest_with_type(tx, idx as u32, entry.value, chain_id, SIGHASH_ALL)?;
+        let digest = sighash_v1_digest_with_cache(
+            &mut sighash_cache,
+            idx as u32,
+            entry.value,
+            chain_id,
+            SIGHASH_ALL,
+        )?;
         let mut signature = signer.sign_digest32(digest)?;
         if signature.len() as u64 != ML_DSA_87_SIG_BYTES {
             return Err(TxError::new(

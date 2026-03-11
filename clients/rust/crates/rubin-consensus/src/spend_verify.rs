@@ -3,7 +3,7 @@ use crate::constants::{
 };
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
-use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_type};
+use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_cache, SighashV1PrehashCache};
 use crate::tx::Tx;
 use crate::tx::WitnessItem;
 use crate::utxo_basic::UtxoEntry;
@@ -25,6 +25,7 @@ fn extract_crypto_sig_and_sighash(w: &WitnessItem) -> Result<(&[u8], u8), TxErro
     Ok((crypto_sig, sighash_type))
 }
 
+#[allow(dead_code)]
 pub(crate) fn validate_p2pk_spend(
     entry: &UtxoEntry,
     w: &WitnessItem,
@@ -33,6 +34,30 @@ pub(crate) fn validate_p2pk_spend(
     input_value: u64,
     chain_id: [u8; 32],
     block_height: u64,
+) -> Result<(), TxError> {
+    let mut cache = SighashV1PrehashCache::new(tx)?;
+    validate_p2pk_spend_with_cache(
+        entry,
+        w,
+        tx,
+        input_index,
+        input_value,
+        chain_id,
+        block_height,
+        &mut cache,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_p2pk_spend_with_cache(
+    entry: &UtxoEntry,
+    w: &WitnessItem,
+    _tx: &Tx,
+    input_index: u32,
+    input_value: u64,
+    chain_id: [u8; 32],
+    block_height: u64,
+    cache: &mut SighashV1PrehashCache<'_>,
 ) -> Result<(), TxError> {
     if w.suite_id != SUITE_ID_ML_DSA_87 {
         return Err(TxError::new(
@@ -66,7 +91,8 @@ pub(crate) fn validate_p2pk_spend(
         ));
     }
     let (crypto_sig, sighash_type) = extract_crypto_sig_and_sighash(w)?;
-    let digest = sighash_v1_digest_with_type(tx, input_index, input_value, chain_id, sighash_type)?;
+    let digest =
+        sighash_v1_digest_with_cache(cache, input_index, input_value, chain_id, sighash_type)?;
     let ok = verify_sig(w.suite_id, &w.pubkey, crypto_sig, &digest)?;
     if !ok {
         return Err(TxError::new(
@@ -77,6 +103,7 @@ pub(crate) fn validate_p2pk_spend(
     Ok(())
 }
 
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_threshold_sig_spend(
     keys: &[[u8; 32]],
@@ -88,6 +115,34 @@ pub(crate) fn validate_threshold_sig_spend(
     chain_id: [u8; 32],
     block_height: u64,
     context: &'static str,
+) -> Result<(), TxError> {
+    let mut cache = SighashV1PrehashCache::new(tx)?;
+    validate_threshold_sig_spend_with_cache(
+        keys,
+        threshold,
+        ws,
+        tx,
+        input_index,
+        input_value,
+        chain_id,
+        block_height,
+        context,
+        &mut cache,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_threshold_sig_spend_with_cache(
+    keys: &[[u8; 32]],
+    threshold: u8,
+    ws: &[WitnessItem],
+    _tx: &Tx,
+    input_index: u32,
+    input_value: u64,
+    chain_id: [u8; 32],
+    block_height: u64,
+    context: &'static str,
+    cache: &mut SighashV1PrehashCache<'_>,
 ) -> Result<(), TxError> {
     if ws.len() != keys.len() {
         return Err(TxError::new(
@@ -123,8 +178,8 @@ pub(crate) fn validate_threshold_sig_spend(
                     return Err(TxError::new(ErrorCode::TxErrSigInvalid, context));
                 }
                 let (crypto_sig, sighash_type) = extract_crypto_sig_and_sighash(w)?;
-                let digest = sighash_v1_digest_with_type(
-                    tx,
+                let digest = sighash_v1_digest_with_cache(
+                    cache,
                     input_index,
                     input_value,
                     chain_id,
