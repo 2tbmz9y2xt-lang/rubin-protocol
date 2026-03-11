@@ -8,10 +8,10 @@ use crate::tx::{da_core_fields_bytes, Tx};
 
 pub struct SighashV1PrehashCache<'a> {
     tx: &'a Tx,
-    hash_of_da_core_fields: [u8; 32],
-    hash_all_prevouts: [u8; 32],
-    hash_all_sequences: [u8; 32],
-    hash_all_outputs: [u8; 32],
+    hash_of_da_core_fields: Option<[u8; 32]>,
+    hash_all_prevouts: Option<[u8; 32]>,
+    hash_all_sequences: Option<[u8; 32]>,
+    hash_all_outputs: Option<[u8; 32]>,
     single_outputs: HashMap<u32, [u8; 32]>,
 }
 
@@ -46,32 +46,66 @@ pub fn sighash_v1_digest_with_type(
 
 impl<'a> SighashV1PrehashCache<'a> {
     pub fn new(tx: &'a Tx) -> Result<Self, TxError> {
-        let hash_of_da_core_fields = sha3_256(&da_core_fields_bytes(tx)?);
+        Ok(Self {
+            tx,
+            hash_of_da_core_fields: None,
+            hash_all_prevouts: None,
+            hash_all_sequences: None,
+            hash_all_outputs: None,
+            single_outputs: HashMap::new(),
+        })
+    }
 
-        let mut prevouts = Vec::with_capacity(tx.inputs.len() * (32 + 4));
-        let mut sequences = Vec::with_capacity(tx.inputs.len() * 4);
-        for tx_in in &tx.inputs {
+    fn hash_of_da_core_fields(&mut self) -> Result<[u8; 32], TxError> {
+        if let Some(hash) = self.hash_of_da_core_fields {
+            return Ok(hash);
+        }
+        let hash = sha3_256(&da_core_fields_bytes(self.tx)?);
+        self.hash_of_da_core_fields = Some(hash);
+        Ok(hash)
+    }
+
+    fn hash_all_prevouts(&mut self) -> [u8; 32] {
+        if let Some(hash) = self.hash_all_prevouts {
+            return hash;
+        }
+        let mut prevouts = Vec::with_capacity(self.tx.inputs.len() * (32 + 4));
+        for tx_in in &self.tx.inputs {
             prevouts.extend_from_slice(&tx_in.prev_txid);
             prevouts.extend_from_slice(&tx_in.prev_vout.to_le_bytes());
+        }
+        let hash = sha3_256(&prevouts);
+        self.hash_all_prevouts = Some(hash);
+        hash
+    }
+
+    fn hash_all_sequences(&mut self) -> [u8; 32] {
+        if let Some(hash) = self.hash_all_sequences {
+            return hash;
+        }
+        let mut sequences = Vec::with_capacity(self.tx.inputs.len() * 4);
+        for tx_in in &self.tx.inputs {
             sequences.extend_from_slice(&tx_in.sequence.to_le_bytes());
         }
+        let hash = sha3_256(&sequences);
+        self.hash_all_sequences = Some(hash);
+        hash
+    }
 
-        let mut outputs_bytes = Vec::with_capacity(tx.outputs.len() * 64);
-        for o in &tx.outputs {
+    fn hash_all_outputs(&mut self) -> [u8; 32] {
+        if let Some(hash) = self.hash_all_outputs {
+            return hash;
+        }
+        let mut outputs_bytes = Vec::with_capacity(self.tx.outputs.len() * 64);
+        for o in &self.tx.outputs {
             outputs_bytes.extend_from_slice(&o.value.to_le_bytes());
             outputs_bytes.extend_from_slice(&o.covenant_type.to_le_bytes());
             encode_compact_size(o.covenant_data.len() as u64, &mut outputs_bytes);
             outputs_bytes.extend_from_slice(&o.covenant_data);
         }
-
-        Ok(Self {
-            tx,
-            hash_of_da_core_fields,
-            hash_all_prevouts: sha3_256(&prevouts),
-            hash_all_sequences: sha3_256(&sequences),
-            hash_all_outputs: sha3_256(&outputs_bytes),
-            single_outputs: HashMap::new(),
-        })
+        let hash = sha3_256(&outputs_bytes);
+        self.hash_all_outputs = Some(hash);
+        hash
     }
 
     fn single_output_hash(&mut self, input_index: u32) -> [u8; 32] {
@@ -128,7 +162,7 @@ pub fn sighash_v1_digest_with_cache(
         prevouts.extend_from_slice(&i.prev_vout.to_le_bytes());
         sha3_256(&prevouts)
     } else {
-        cache.hash_all_prevouts
+        cache.hash_all_prevouts()
     };
 
     let hash_sequences = if anyone_can_pay {
@@ -136,11 +170,11 @@ pub fn sighash_v1_digest_with_cache(
         sequences.extend_from_slice(&i.sequence.to_le_bytes());
         sha3_256(&sequences)
     } else {
-        cache.hash_all_sequences
+        cache.hash_all_sequences()
     };
 
     let hash_outputs = match base_type {
-        SIGHASH_ALL => cache.hash_all_outputs,
+        SIGHASH_ALL => cache.hash_all_outputs(),
         SIGHASH_NONE => sha3_256(&[]),
         SIGHASH_SINGLE => cache.single_output_hash(input_index),
         _ => {
@@ -157,7 +191,7 @@ pub fn sighash_v1_digest_with_cache(
     preimage.extend_from_slice(&tx.version.to_le_bytes());
     preimage.push(tx.tx_kind);
     preimage.extend_from_slice(&tx.tx_nonce.to_le_bytes());
-    preimage.extend_from_slice(&cache.hash_of_da_core_fields);
+    preimage.extend_from_slice(&cache.hash_of_da_core_fields()?);
     preimage.extend_from_slice(&hash_prevouts);
     preimage.extend_from_slice(&hash_sequences);
     preimage.extend_from_slice(&input_index.to_le_bytes());
@@ -242,5 +276,24 @@ mod tests {
             .expect("second");
         assert_eq!(cache.single_outputs.len(), 1);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn sighash_cache_is_lazy_until_digest_is_requested() {
+        let tx = test_tx();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+
+        assert!(cache.hash_of_da_core_fields.is_none());
+        assert!(cache.hash_all_prevouts.is_none());
+        assert!(cache.hash_all_sequences.is_none());
+        assert!(cache.hash_all_outputs.is_none());
+
+        let _ = sighash_v1_digest_with_cache(&mut cache, 0, 10, [0x44; 32], SIGHASH_NONE)
+            .expect("digest");
+
+        assert!(cache.hash_of_da_core_fields.is_some());
+        assert!(cache.hash_all_prevouts.is_some());
+        assert!(cache.hash_all_sequences.is_some());
+        assert!(cache.hash_all_outputs.is_none());
     }
 }
