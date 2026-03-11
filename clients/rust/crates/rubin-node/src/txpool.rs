@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use rubin_consensus::{
@@ -21,6 +22,9 @@ pub struct TxPoolConfig {
 pub struct TxPoolEntry {
     pub raw: Vec<u8>,
     pub inputs: Vec<Outpoint>,
+    pub fee: u64,
+    pub weight: u64,
+    pub size: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +76,29 @@ impl TxPool {
         self.txs.is_empty()
     }
 
+    pub fn select_transactions(&self, max_count: usize, max_bytes: usize) -> Vec<Vec<u8>> {
+        if max_count == 0 || max_bytes == 0 {
+            return Vec::new();
+        }
+
+        let mut entries: Vec<&TxPoolEntry> = self.txs.values().collect();
+        entries.sort_by(compare_entries_for_mining);
+
+        let mut selected = Vec::with_capacity(entries.len().min(max_count));
+        let mut used_bytes = 0usize;
+        for entry in entries {
+            if selected.len() >= max_count {
+                break;
+            }
+            if entry.size > max_bytes.saturating_sub(used_bytes) {
+                continue;
+            }
+            selected.push(entry.raw.clone());
+            used_bytes += entry.size;
+        }
+        selected
+    }
+
     pub fn admit(
         &mut self,
         tx_bytes: &[u8],
@@ -110,7 +137,7 @@ impl TxPool {
 
         let next_height = next_block_height(chain_state)?;
         let block_mtp = next_block_mtp(block_store, next_height)?;
-        apply_non_coinbase_tx_basic_with_mtp(
+        let summary = apply_non_coinbase_tx_basic_with_mtp(
             &tx,
             txid,
             &chain_state.utxos,
@@ -121,12 +148,17 @@ impl TxPool {
         )
         .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
         apply_policy(&tx, &chain_state.utxos, next_height, &self.cfg).map_err(rejected)?;
+        let (weight, _, _) = tx_weight_and_stats_public(&tx)
+            .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
 
         self.txs.insert(
             txid,
             TxPoolEntry {
                 raw: tx_bytes.to_vec(),
                 inputs: inputs.clone(),
+                fee: summary.fee,
+                weight,
+                size: tx_bytes.len(),
             },
         );
         for input in inputs {
@@ -247,7 +279,7 @@ fn unavailable(message: impl Into<String>) -> TxPoolAdmitError {
     }
 }
 
-fn apply_policy(
+pub(crate) fn apply_policy(
     tx: &rubin_consensus::Tx,
     utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
     next_height: u64,
@@ -263,7 +295,7 @@ fn apply_policy(
     Ok(())
 }
 
-fn reject_non_coinbase_anchor_outputs(tx: &rubin_consensus::Tx) -> Result<(), String> {
+pub(crate) fn reject_non_coinbase_anchor_outputs(tx: &rubin_consensus::Tx) -> Result<(), String> {
     if tx
         .outputs
         .iter()
@@ -274,7 +306,7 @@ fn reject_non_coinbase_anchor_outputs(tx: &rubin_consensus::Tx) -> Result<(), St
     Ok(())
 }
 
-fn reject_da_anchor_tx_policy(
+pub(crate) fn reject_da_anchor_tx_policy(
     tx: &rubin_consensus::Tx,
     utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
     da_surcharge_per_byte: u64,
@@ -295,7 +327,7 @@ fn reject_da_anchor_tx_policy(
     Ok(())
 }
 
-fn compute_fee_no_verify(
+pub(crate) fn compute_fee_no_verify(
     tx: &rubin_consensus::Tx,
     utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
 ) -> Result<u64, String> {
@@ -327,7 +359,7 @@ fn compute_fee_no_verify(
     Ok(sum_in - sum_out)
 }
 
-fn reject_core_ext_tx_pre_activation(
+pub(crate) fn reject_core_ext_tx_pre_activation(
     tx: &rubin_consensus::Tx,
     utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
     height: u64,
@@ -374,8 +406,32 @@ fn reject_core_ext_tx_pre_activation(
     Ok(())
 }
 
+fn compare_entries_for_mining(a: &&TxPoolEntry, b: &&TxPoolEntry) -> Ordering {
+    match compare_fee_rate(a, b) {
+        Ordering::Greater => Ordering::Less,
+        Ordering::Less => Ordering::Greater,
+        Ordering::Equal => match b.fee.cmp(&a.fee) {
+            Ordering::Equal => match a.weight.cmp(&b.weight) {
+                Ordering::Equal => a.raw.cmp(&b.raw),
+                other => other,
+            },
+            other => other,
+        },
+    }
+}
+
+fn compare_fee_rate(a: &TxPoolEntry, b: &TxPoolEntry) -> Ordering {
+    if a.size == 0 || b.size == 0 {
+        return Ordering::Equal;
+    }
+    let left = u128::from(a.fee) * (b.size as u128);
+    let right = u128::from(b.fee) * (a.size as u128);
+    left.cmp(&right)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::cmp::Ordering;
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
@@ -391,8 +447,9 @@ mod tests {
     };
 
     use super::{
-        conflict, mtp_median, next_block_height, next_block_mtp, rejected, unavailable, TxPool,
-        TxPoolAdmitErrorKind, TxPoolConfig, TxPoolEntry, MAX_TX_POOL_TRANSACTIONS,
+        compare_entries_for_mining, compare_fee_rate, conflict, mtp_median, next_block_height,
+        next_block_mtp, rejected, unavailable, TxPool, TxPoolAdmitErrorKind, TxPoolConfig,
+        TxPoolEntry, MAX_TX_POOL_TRANSACTIONS,
     };
     use crate::{
         block_store_path, default_sync_config, devnet_genesis_block_bytes, devnet_genesis_chain_id,
@@ -753,6 +810,9 @@ mod tests {
             TxPoolEntry {
                 raw: raw.clone(),
                 inputs: Vec::new(),
+                fee: 0,
+                weight: 0,
+                size: raw.len(),
             },
         );
         let err = pool
@@ -791,6 +851,9 @@ mod tests {
                 TxPoolEntry {
                     raw: Vec::new(),
                     inputs: Vec::new(),
+                    fee: 0,
+                    weight: 0,
+                    size: 0,
                 },
             );
         }
@@ -821,6 +884,145 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Conflict);
         assert!(err.message.contains("double-spend conflict"));
+    }
+
+    #[test]
+    fn select_transactions_orders_by_fee_rate_then_fee() {
+        let mut pool = TxPool::new();
+        pool.txs.insert(
+            [0x11; 32],
+            TxPoolEntry {
+                raw: vec![0x11],
+                inputs: Vec::new(),
+                fee: 20,
+                weight: 100,
+                size: 20,
+            },
+        );
+        pool.txs.insert(
+            [0x22; 32],
+            TxPoolEntry {
+                raw: vec![0x22],
+                inputs: Vec::new(),
+                fee: 15,
+                weight: 90,
+                size: 10,
+            },
+        );
+        pool.txs.insert(
+            [0x33; 32],
+            TxPoolEntry {
+                raw: vec![0x33],
+                inputs: Vec::new(),
+                fee: 15,
+                weight: 80,
+                size: 10,
+            },
+        );
+
+        let selected = pool.select_transactions(3, 40);
+        assert_eq!(selected, vec![vec![0x33], vec![0x22], vec![0x11]]);
+    }
+
+    #[test]
+    fn select_transactions_respects_count_and_size_caps() {
+        let mut pool = TxPool::new();
+        pool.txs.insert(
+            [0x44; 32],
+            TxPoolEntry {
+                raw: vec![0x44, 0x44],
+                inputs: Vec::new(),
+                fee: 5,
+                weight: 10,
+                size: 2,
+            },
+        );
+        pool.txs.insert(
+            [0x55; 32],
+            TxPoolEntry {
+                raw: vec![0x55, 0x55, 0x55],
+                inputs: Vec::new(),
+                fee: 100,
+                weight: 10,
+                size: 3,
+            },
+        );
+
+        let selected = pool.select_transactions(1, 2);
+        assert_eq!(selected, vec![vec![0x44, 0x44]]);
+    }
+
+    #[test]
+    fn mining_sort_helpers_cover_zero_size_and_tiebreaks() {
+        let zero = TxPoolEntry {
+            raw: vec![0x00],
+            inputs: Vec::new(),
+            fee: 10,
+            weight: 10,
+            size: 0,
+        };
+        let normal = TxPoolEntry {
+            raw: vec![0x01],
+            inputs: Vec::new(),
+            fee: 20,
+            weight: 20,
+            size: 10,
+        };
+        assert_eq!(compare_fee_rate(&zero, &normal), Ordering::Equal);
+
+        let high_fee = TxPoolEntry {
+            raw: vec![0x03],
+            inputs: Vec::new(),
+            fee: 30,
+            weight: 10,
+            size: 10,
+        };
+        let low_fee = TxPoolEntry {
+            raw: vec![0x02],
+            inputs: Vec::new(),
+            fee: 20,
+            weight: 10,
+            size: 10,
+        };
+        assert_eq!(
+            compare_entries_for_mining(&&high_fee, &&low_fee),
+            Ordering::Less
+        );
+
+        let lighter = TxPoolEntry {
+            raw: vec![0x04],
+            inputs: Vec::new(),
+            fee: 20,
+            weight: 5,
+            size: 10,
+        };
+        let heavier = TxPoolEntry {
+            raw: vec![0x05],
+            inputs: Vec::new(),
+            fee: 20,
+            weight: 8,
+            size: 10,
+        };
+        assert_eq!(
+            compare_entries_for_mining(&&lighter, &&heavier),
+            Ordering::Less
+        );
+
+        let raw_a = TxPoolEntry {
+            raw: vec![0x01],
+            inputs: Vec::new(),
+            fee: 20,
+            weight: 10,
+            size: 10,
+        };
+        let raw_b = TxPoolEntry {
+            raw: vec![0x02],
+            inputs: Vec::new(),
+            fee: 20,
+            weight: 10,
+            size: 10,
+        };
+        assert_eq!(compare_entries_for_mining(&&raw_a, &&raw_b), Ordering::Less);
     }
 
     #[test]
