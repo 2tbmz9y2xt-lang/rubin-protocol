@@ -377,7 +377,12 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    use rubin_consensus::constants::{COV_TYPE_P2PK, MAX_BLOCK_WEIGHT, TX_WIRE_VERSION};
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
+    use rubin_consensus::{
+        marshal_tx, p2pk_covenant_data_for_pubkey, sign_transaction, Mldsa87Keypair, Outpoint,
+        TxInput, TxOutput, UtxoEntry,
+    };
 
     use crate::{
         block_store_path, chain_state_path, default_sync_config, devnet_genesis_chain_id,
@@ -415,8 +420,10 @@ mod tests {
     #[test]
     fn mine_one_from_empty_state_updates_tip() {
         let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner");
-        let mut cfg = MinerConfig::default();
-        cfg.timestamp_source = || 1_777_000_000;
+        let cfg = MinerConfig {
+            timestamp_source: || 1_777_000_000,
+            ..MinerConfig::default()
+        };
         let mut miner = Miner::new(&mut sync, None, cfg).expect("miner");
 
         let mined = miner.mine_one(&[]).expect("mine one");
@@ -431,8 +438,10 @@ mod tests {
     #[test]
     fn mine_n_produces_height_and_timestamp_progression() {
         let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-n");
-        let mut cfg = MinerConfig::default();
-        cfg.timestamp_source = || 1;
+        let cfg = MinerConfig {
+            timestamp_source: || 1,
+            ..MinerConfig::default()
+        };
         let pool = TxPool::new();
         let mut miner = Miner::new(&mut sync, Some(&pool), cfg).expect("miner");
 
@@ -551,7 +560,7 @@ mod tests {
         assert_eq!(&header[68..76], &7u64.to_le_bytes());
         assert_eq!(&header[76..108], &[0x33; 32]);
 
-        let block = assemble_block_bytes(&header, &coinbase0, &[second.clone()]);
+        let block = assemble_block_bytes(&header, &coinbase0, std::slice::from_ref(&second));
         let mut expected = header.clone();
         rubin_consensus::encode_compact_size(2, &mut expected);
         expected.extend_from_slice(&coinbase0);
@@ -585,6 +594,106 @@ mod tests {
             err.contains("non-canonical tx bytes in miner input"),
             "{err}"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn signed_p2pk_state_and_tx(input_value: u64, output_value: u64) -> (ChainState, Vec<u8>) {
+        let keypair = Mldsa87Keypair::generate().expect("OpenSSL signer unavailable");
+        let pubkey = keypair.pubkey_bytes();
+        let outpoint = Outpoint {
+            txid: [0x11; 32],
+            vout: 0,
+        };
+        let mut state = ChainState::new();
+        state.utxos.insert(
+            outpoint.clone(),
+            UtxoEntry {
+                value: input_value,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&pubkey),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
+
+        let mut tx = rubin_consensus::Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0x00,
+            tx_nonce: 7,
+            inputs: vec![TxInput {
+                prev_txid: outpoint.txid,
+                prev_vout: outpoint.vout,
+                script_sig: Vec::new(),
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: output_value,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&vec![0x22; 2592]),
+            }],
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: Vec::new(),
+        };
+        sign_transaction(&mut tx, &state.utxos, devnet_genesis_chain_id(), &keypair)
+            .expect("sign tx");
+        let raw = marshal_tx(&tx).expect("marshal tx");
+        (state, raw)
+    }
+
+    #[test]
+    fn mine_one_includes_valid_explicit_tx() {
+        let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-explicit-valid");
+        let (state, raw) = signed_p2pk_state_and_tx(20, 10);
+        sync.chain_state.utxos = state.utxos;
+        let cfg = MinerConfig {
+            timestamp_source: || 1_777_000_123,
+            ..MinerConfig::default()
+        };
+        let mut miner = Miner::new(&mut sync, None, cfg).expect("miner");
+
+        let mined = miner.mine_one(&[raw]).expect("mine one");
+        assert_eq!(mined.height, 0);
+        assert_eq!(mined.tx_count, 2);
+        assert!(miner.sync.chain_state.has_tip);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mine_one_rejects_height_overflow_before_assembly() {
+        let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-height-overflow");
+        sync.chain_state.has_tip = true;
+        sync.chain_state.height = u64::MAX;
+        let mut miner = Miner::new(&mut sync, None, MinerConfig::default()).expect("miner");
+        let err = miner.mine_one(&[]).unwrap_err();
+        assert!(err.contains("height overflow"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn select_candidate_transactions_covers_reject_skip_and_accept_paths() {
+        let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-selection");
+        let (state, raw) = signed_p2pk_state_and_tx(20, 10);
+        sync.chain_state.utxos = state.utxos;
+        let miner = Miner::new(&mut sync, None, MinerConfig::default()).expect("miner");
+
+        let rejected = miner
+            .select_candidate_transactions(vec![coinbase_bytes(0)], 0, MAX_BLOCK_WEIGHT)
+            .expect("reject branch");
+        assert!(rejected.is_empty());
+
+        let overweight = miner
+            .select_candidate_transactions(vec![raw.clone()], 0, 0)
+            .expect("weight skip");
+        assert!(overweight.is_empty());
+
+        let accepted = miner
+            .select_candidate_transactions(vec![raw], 0, MAX_BLOCK_WEIGHT)
+            .expect("accept branch");
+        assert_eq!(accepted.len(), 1);
+        assert!(accepted[0].weight > 0);
         let _ = fs::remove_dir_all(&dir);
     }
 }
