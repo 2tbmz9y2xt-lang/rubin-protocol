@@ -49,6 +49,21 @@ func ValidateHTLCSpend(
 	blockHeight uint64,
 	blockMTP uint64,
 ) error {
+	return ValidateHTLCSpendWithCache(entry, pathItem, sigItem, tx, inputIndex, inputValue, chainID, blockHeight, blockMTP, nil)
+}
+
+func ValidateHTLCSpendWithCache(
+	entry UtxoEntry,
+	pathItem WitnessItem,
+	sigItem WitnessItem,
+	tx *Tx,
+	inputIndex uint32,
+	inputValue uint64,
+	chainID [32]byte,
+	blockHeight uint64,
+	blockMTP uint64,
+	cache *SighashV1PrehashCache,
+) error {
 	c, err := ParseHTLCCovenantData(entry.CovenantData)
 	if err != nil {
 		return err
@@ -131,7 +146,12 @@ func ValidateHTLCSpend(
 	if err != nil {
 		return err
 	}
-	digest, err := SighashV1DigestWithType(tx, inputIndex, inputValue, chainID, sighashType)
+	var digest [32]byte
+	if cache != nil {
+		digest, err = SighashV1DigestWithCache(cache, inputIndex, inputValue, chainID, sighashType)
+	} else {
+		digest, err = SighashV1DigestWithType(tx, inputIndex, inputValue, chainID, sighashType)
+	}
 	if err != nil {
 		return err
 	}

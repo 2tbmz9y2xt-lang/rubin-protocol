@@ -24,6 +24,10 @@ func ParseStealthCovenantData(covData []byte) (*StealthCovenant, error) {
 }
 
 func validateCoreStealthSpend(entry UtxoEntry, w WitnessItem, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte, blockHeight uint64) error {
+	return validateCoreStealthSpendWithCache(entry, w, tx, inputIndex, inputValue, chainID, blockHeight, nil)
+}
+
+func validateCoreStealthSpendWithCache(entry UtxoEntry, w WitnessItem, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte, blockHeight uint64, cache *SighashV1PrehashCache) error {
 	c, err := ParseStealthCovenantData(entry.CovenantData)
 	if err != nil {
 		return err
@@ -36,5 +40,5 @@ func validateCoreStealthSpend(entry UtxoEntry, w WitnessItem, tx *Tx, inputIndex
 	if len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1 {
 		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
 	}
-	return verifyMLDSAKeyAndSig(w, c.OneTimeKeyID, tx, inputIndex, inputValue, chainID, "CORE_STEALTH")
+	return verifyMLDSAKeyAndSigWithCache(w, c.OneTimeKeyID, tx, inputIndex, inputValue, chainID, cache, "CORE_STEALTH")
 }

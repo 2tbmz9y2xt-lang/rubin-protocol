@@ -125,3 +125,45 @@ func TestValidateThresholdSigSpend_OkWithOneValidAndOneSentinel(t *testing.T) {
 		t.Fatalf("expected ok, got %v", err)
 	}
 }
+
+func TestExtractSigAndDigest_LegacyWrapper(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	sig := signDigestWithSighashType(t, kp, tx, inputIndex, inputValue, chainID, SIGHASH_ALL)
+	w := WitnessItem{
+		SuiteID:   SUITE_ID_ML_DSA_87,
+		Pubkey:    kp.PubkeyBytes(),
+		Signature: sig,
+	}
+
+	cryptoSig, digest, err := extractSigAndDigest(w, tx, inputIndex, inputValue, chainID)
+	if err != nil {
+		t.Fatalf("extractSigAndDigest: %v", err)
+	}
+	if len(cryptoSig) != len(sig)-1 {
+		t.Fatalf("crypto signature length = %d, want %d", len(cryptoSig), len(sig)-1)
+	}
+	wantDigest, err := SighashV1DigestWithType(tx, inputIndex, inputValue, chainID, SIGHASH_ALL)
+	if err != nil {
+		t.Fatalf("SighashV1DigestWithType: %v", err)
+	}
+	if digest != wantDigest {
+		t.Fatalf("digest mismatch")
+	}
+}
+
+func TestVerifyMLDSAKeyAndSig_LegacyWrapper(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	sig := signDigestWithSighashType(t, kp, tx, inputIndex, inputValue, chainID, SIGHASH_ALL)
+	pub := kp.PubkeyBytes()
+	w := WitnessItem{
+		SuiteID:   SUITE_ID_ML_DSA_87,
+		Pubkey:    pub,
+		Signature: sig,
+	}
+
+	if err := verifyMLDSAKeyAndSig(w, sha3_256(pub), tx, inputIndex, inputValue, chainID, "ctx"); err != nil {
+		t.Fatalf("verifyMLDSAKeyAndSig: %v", err)
+	}
+}

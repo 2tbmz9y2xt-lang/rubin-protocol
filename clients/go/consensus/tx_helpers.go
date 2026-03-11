@@ -89,6 +89,10 @@ func SignTransaction(tx *Tx, utxoSet map[Outpoint]UtxoEntry, chainID [32]byte, s
 	if err != nil {
 		return err
 	}
+	sighashCache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		return err
+	}
 
 	witness := make([]WitnessItem, 0, len(tx.Inputs))
 	for i, in := range tx.Inputs {
@@ -96,7 +100,7 @@ func SignTransaction(tx *Tx, utxoSet map[Outpoint]UtxoEntry, chainID [32]byte, s
 		if err != nil {
 			return err
 		}
-		witnessItem, err := signWitnessItem(tx, uint32(i), entry.Value, chainID, signer, pub)
+		witnessItem, err := signWitnessItem(tx, uint32(i), entry.Value, chainID, sighashCache, signer, pub)
 		if err != nil {
 			return err
 		}
@@ -138,10 +142,17 @@ func signWitnessItem(
 	inputIndex uint32,
 	inputValue uint64,
 	chainID [32]byte,
+	cache *SighashV1PrehashCache,
 	signer DigestSigner,
 	pub []byte,
 ) (WitnessItem, error) {
-	digest, err := SighashV1DigestWithType(tx, inputIndex, inputValue, chainID, SIGHASH_ALL)
+	var digest [32]byte
+	var err error
+	if cache != nil {
+		digest, err = SighashV1DigestWithCache(cache, inputIndex, inputValue, chainID, SIGHASH_ALL)
+	} else {
+		digest, err = SighashV1DigestWithType(tx, inputIndex, inputValue, chainID, SIGHASH_ALL)
+	}
 	if err != nil {
 		return WitnessItem{}, err
 	}

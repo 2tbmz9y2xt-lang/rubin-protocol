@@ -15,11 +15,20 @@ func extractCryptoSigAndSighash(w WitnessItem) ([]byte, uint8, error) {
 // the sighash digest from a witness item. This is the common preamble shared
 // by all signature verification paths (ML-DSA-87 core and CORE_EXT profiles).
 func extractSigAndDigest(w WitnessItem, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte) ([]byte, [32]byte, error) {
+	return extractSigAndDigestWithCache(w, tx, inputIndex, inputValue, chainID, nil)
+}
+
+func extractSigAndDigestWithCache(w WitnessItem, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte, cache *SighashV1PrehashCache) ([]byte, [32]byte, error) {
 	cryptoSig, sighashType, err := extractCryptoSigAndSighash(w)
 	if err != nil {
 		return nil, [32]byte{}, err
 	}
-	digest, err := SighashV1DigestWithType(tx, inputIndex, inputValue, chainID, sighashType)
+	var digest [32]byte
+	if cache != nil {
+		digest, err = SighashV1DigestWithCache(cache, inputIndex, inputValue, chainID, sighashType)
+	} else {
+		digest, err = SighashV1DigestWithType(tx, inputIndex, inputValue, chainID, sighashType)
+	}
 	if err != nil {
 		return nil, [32]byte{}, err
 	}
@@ -30,10 +39,14 @@ func extractSigAndDigest(w WitnessItem, tx *Tx, inputIndex uint32, inputValue ui
 // cryptographic signature. The caller must validate witness item lengths and
 // suite ID before calling this function.
 func verifyMLDSAKeyAndSig(w WitnessItem, expectedKeyID [32]byte, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte, context string) error {
+	return verifyMLDSAKeyAndSigWithCache(w, expectedKeyID, tx, inputIndex, inputValue, chainID, nil, context)
+}
+
+func verifyMLDSAKeyAndSigWithCache(w WitnessItem, expectedKeyID [32]byte, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte, cache *SighashV1PrehashCache, context string) error {
 	if sha3_256(w.Pubkey) != expectedKeyID {
 		return txerr(TX_ERR_SIG_INVALID, context+" key binding mismatch")
 	}
-	cryptoSig, digest, err := extractSigAndDigest(w, tx, inputIndex, inputValue, chainID)
+	cryptoSig, digest, err := extractSigAndDigestWithCache(w, tx, inputIndex, inputValue, chainID, cache)
 	if err != nil {
 		return err
 	}
@@ -48,6 +61,10 @@ func verifyMLDSAKeyAndSig(w WitnessItem, expectedKeyID [32]byte, tx *Tx, inputIn
 }
 
 func validateP2PKSpend(entry UtxoEntry, w WitnessItem, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte, blockHeight uint64) error {
+	return validateP2PKSpendWithCache(entry, w, tx, inputIndex, inputValue, chainID, blockHeight, nil)
+}
+
+func validateP2PKSpendWithCache(entry UtxoEntry, w WitnessItem, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte, blockHeight uint64, cache *SighashV1PrehashCache) error {
 	if w.SuiteID != SUITE_ID_ML_DSA_87 {
 		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_P2PK suite invalid")
 	}
@@ -60,7 +77,7 @@ func validateP2PKSpend(entry UtxoEntry, w WitnessItem, tx *Tx, inputIndex uint32
 	}
 	var keyID [32]byte
 	copy(keyID[:], entry.CovenantData[1:33])
-	return verifyMLDSAKeyAndSig(w, keyID, tx, inputIndex, inputValue, chainID, "CORE_P2PK")
+	return verifyMLDSAKeyAndSigWithCache(w, keyID, tx, inputIndex, inputValue, chainID, cache, "CORE_P2PK")
 }
 
 func validateThresholdSigSpend(
@@ -72,6 +89,21 @@ func validateThresholdSigSpend(
 	inputValue uint64,
 	chainID [32]byte,
 	blockHeight uint64,
+	context string,
+) error {
+	return validateThresholdSigSpendWithCache(keys, threshold, ws, tx, inputIndex, inputValue, chainID, blockHeight, nil, context)
+}
+
+func validateThresholdSigSpendWithCache(
+	keys [][32]byte,
+	threshold uint8,
+	ws []WitnessItem,
+	tx *Tx,
+	inputIndex uint32,
+	inputValue uint64,
+	chainID [32]byte,
+	blockHeight uint64,
+	cache *SighashV1PrehashCache,
 	context string,
 ) error {
 	if len(ws) != len(keys) {
@@ -91,7 +123,7 @@ func validateThresholdSigSpend(
 			if len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1 {
 				return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
 			}
-			if err := verifyMLDSAKeyAndSig(w, keys[i], tx, inputIndex, inputValue, chainID, context); err != nil {
+			if err := verifyMLDSAKeyAndSigWithCache(w, keys[i], tx, inputIndex, inputValue, chainID, cache, context); err != nil {
 				return err
 			}
 			valid++
