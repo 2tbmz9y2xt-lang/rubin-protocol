@@ -296,18 +296,19 @@ func applyNonCoinbaseTxBasicWork(
 			if w.SuiteID == SUITE_ID_SENTINEL {
 				return nil, 0, txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT sentinel forbidden under ACTIVE profile")
 			}
-			if w.SuiteID == SUITE_ID_ML_DSA_87 {
-				if len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1 {
-					return nil, 0, txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
-				}
-			}
-			cryptoSig, digest, err := extractSigAndDigestWithCache(w, tx, uint32(inputIndex), entry.Value, chainID, sighashCache)
-			if err != nil {
-				return nil, 0, err
+			extractCoreExtSigDigest := func() ([]byte, [32]byte, error) {
+				return extractSigAndDigestWithCache(w, tx, uint32(inputIndex), entry.Value, chainID, sighashCache)
 			}
 
 			switch w.SuiteID {
 			case SUITE_ID_ML_DSA_87:
+				if len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1 {
+					return nil, 0, txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
+				}
+				cryptoSig, digest, err := extractCoreExtSigDigest()
+				if err != nil {
+					return nil, 0, err
+				}
 				ok, err := verifySig(w.SuiteID, w.Pubkey, cryptoSig, digest)
 				if err != nil {
 					return nil, 0, err
@@ -318,6 +319,10 @@ func applyNonCoinbaseTxBasicWork(
 			default:
 				if verifySigExtFn == nil {
 					return nil, 0, txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext unsupported")
+				}
+				cryptoSig, digest, err := extractCoreExtSigDigest()
+				if err != nil {
+					return nil, 0, err
 				}
 				ok, err := verifySigExtFn(cd.ExtID, w.SuiteID, w.Pubkey, cryptoSig, digest, cd.ExtPayload)
 				if err != nil {
