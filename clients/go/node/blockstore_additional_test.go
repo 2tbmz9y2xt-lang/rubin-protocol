@@ -239,6 +239,68 @@ func TestBlockStorePutBlock_CallsSetCanonicalTip(t *testing.T) {
 	}
 }
 
+func TestCommitCanonicalBlock_DoesNotAdvanceTipWhenUndoWriteFails(t *testing.T) {
+	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	header := testHeaderBytes(13, 13)
+	hash := mustHeaderHash(t, header)
+	blockBytes := []byte("blk")
+
+	prevWrite := writeFileAtomicFn
+	t.Cleanup(func() { writeFileAtomicFn = prevWrite })
+	undoPath := filepath.Join(store.undoDir, hex.EncodeToString(hash[:])+".json")
+	writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
+		if path == undoPath {
+			return os.ErrPermission
+		}
+		return prevWrite(path, data, mode)
+	}
+
+	if err := store.CommitCanonicalBlock(0, hash, header, blockBytes, &BlockUndo{}); err == nil {
+		t.Fatalf("expected undo write failure")
+	}
+	if _, _, ok, err := store.Tip(); err != nil {
+		t.Fatalf("Tip: %v", err)
+	} else if ok {
+		t.Fatalf("canonical tip must stay empty after undo failure")
+	}
+	if _, err := os.Stat(undoPath); !os.IsNotExist(err) {
+		t.Fatalf("undo file must be absent after failed commit, err=%v", err)
+	}
+	gotBlock, err := store.GetBlockByHash(hash)
+	if err != nil {
+		t.Fatalf("GetBlockByHash: %v", err)
+	}
+	if !bytes.Equal(gotBlock, blockBytes) {
+		t.Fatalf("block bytes mismatch after failed commit")
+	}
+}
+
+func TestCommitCanonicalBlock_RejectsNilInputs(t *testing.T) {
+	header := testHeaderBytes(14, 14)
+	hash := mustHeaderHash(t, header)
+	blockBytes := []byte("blk")
+
+	var nilStore *BlockStore
+	if err := nilStore.CommitCanonicalBlock(0, hash, header, blockBytes, &BlockUndo{}); err == nil {
+		t.Fatalf("expected nil blockstore error")
+	}
+
+	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	if err := store.CommitCanonicalBlock(0, hash, header, blockBytes, nil); err == nil {
+		t.Fatalf("expected nil undo error")
+	}
+}
+
+func TestCommitCanonicalBlock_PropagatesStoreBlockFailure(t *testing.T) {
+	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	header := testHeaderBytes(15, 15)
+	hash := mustHeaderHash(t, header)
+	header[0] ^= 0xff
+	if err := store.CommitCanonicalBlock(0, hash, header, []byte("blk"), &BlockUndo{}); err == nil {
+		t.Fatalf("expected StoreBlock failure")
+	}
+}
+
 func TestBlockStoreStoreBlockAndChainWork(t *testing.T) {
 	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	if work, err := store.ChainWork([32]byte{}); err != nil {

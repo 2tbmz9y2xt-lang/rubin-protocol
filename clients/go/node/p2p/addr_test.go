@@ -3,6 +3,7 @@ package p2p
 import (
 	"context"
 	"fmt"
+	"net"
 	"slices"
 	"testing"
 	"time"
@@ -367,6 +368,26 @@ func TestAddrHandlerAndDiscoveryEdgeBranches(t *testing.T) {
 	normalized := normalizePeerAddrs([]string{" 127.0.0.1:19032 ", "127.0.0.1:19032", "", "127.0.0.1:19033"})
 	if !slices.Equal(normalized, []string{"127.0.0.1:19032", "127.0.0.1:19033"}) {
 		t.Fatalf("normalizePeerAddrs=%v", normalized)
+	}
+}
+
+func TestShouldDialDiscoveredAddrAndIPHelpersCoverEdgeRejects(t *testing.T) {
+	if shouldDialDiscoveredAddr("", "mainnet") {
+		t.Fatal("empty discovered addr must be rejected")
+	}
+
+	h := newTestHarness(t, 0, "127.0.0.1:19061", nil)
+	h.service.cfg.PeerRuntimeConfig.Network = "mainnet"
+	h.service.connectDiscoveredAddrs([]string{"127.0.0.1:19062"})
+	if got := h.service.inFlightDialCount(); got != 0 {
+		t.Fatalf("filtered discovered addr started dial, got in-flight %d", got)
+	}
+
+	if isDialableDiscoveredIP(net.IP{1, 2, 3}) {
+		t.Fatal("short malformed IP slice must be rejected")
+	}
+	if isDialableDiscoveredIP(net.IPv4bcast) {
+		t.Fatal("ipv4 broadcast must be rejected as non-global-unicast")
 	}
 }
 

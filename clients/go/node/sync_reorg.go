@@ -143,10 +143,11 @@ func (s *SyncEngine) prepareHeavierBranch(
 	prevTimestamps []uint64,
 	rollbackState syncRollbackState,
 ) ([][]byte, uint64, error) {
-	previewState, err := chainStateFromDisk(rollbackState.chainState)
-	if err != nil {
-		return nil, 0, err
+	previewState := cloneChainState(rollbackState.chainState)
+	if previewState == nil {
+		return nil, 0, errors.New("nil preview chainstate")
 	}
+	var err error
 	disconnectedBlocks, reorgDepth, err := s.previewDisconnectCanonicalToAncestor(previewState, commonAncestorHeight)
 	if err != nil {
 		return nil, 0, err
