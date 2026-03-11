@@ -124,3 +124,22 @@ func TestSighashV1DigestWithCacheRejectsNilCache(t *testing.T) {
 		t.Fatalf("expected nil cache error")
 	}
 }
+
+func TestNewSighashV1PrehashCacheRejectsUnsupportedTxKind(t *testing.T) {
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0xff,
+		TxNonce: 1,
+		Inputs:  []TxInput{{Sequence: 1}},
+	}
+	if _, err := NewSighashV1PrehashCache(tx); err == nil {
+		t.Fatalf("expected unsupported tx_kind error")
+	}
+}
+
+func TestSighashV1PrehashCacheSingleOutputHashNilCacheFallsBackToZeroHash(t *testing.T) {
+	var cache *SighashV1PrehashCache
+	if got := cache.singleOutputHash(0); got != sha3_256(nil) {
+		t.Fatalf("nil cache single output hash mismatch")
+	}
+}

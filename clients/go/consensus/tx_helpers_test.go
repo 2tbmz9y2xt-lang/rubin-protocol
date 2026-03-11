@@ -235,6 +235,30 @@ func TestSignTransaction_KeyBindingMismatch(t *testing.T) {
 	}
 }
 
+func TestSignTransaction_RejectsUnsupportedTxKindForPrehashCache(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	covData := P2PKCovenantDataForPubkey(kp.PubkeyBytes())
+	var prevTxid [32]byte
+	prevTxid[0] = 0xdd
+	op := Outpoint{Txid: prevTxid, Vout: 0}
+	utxoSet := map[Outpoint]UtxoEntry{
+		op: {Value: 50_000_000, CovenantType: COV_TYPE_P2PK, CovenantData: covData},
+	}
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0xff,
+		TxNonce: 1,
+		Inputs: []TxInput{{
+			PrevTxid: prevTxid,
+			PrevVout: 0,
+			Sequence: 0x7FFFFFFF,
+		}},
+	}
+	if err := SignTransaction(tx, utxoSet, [32]byte{}, kp); err == nil {
+		t.Fatal("expected unsupported tx_kind error")
+	}
+}
+
 func TestSignerBinding_RejectsNonCanonicalPubkeyLength(t *testing.T) {
 	if _, _, err := signerBinding(stubDigestSigner{pub: []byte{0x01}}); err == nil {
 		t.Fatal("expected non-canonical public key length error")

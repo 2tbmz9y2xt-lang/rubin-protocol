@@ -72,3 +72,25 @@ func TestCheckSpendCovenant_Errors(t *testing.T) {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
 	}
 }
+
+func TestApplyNonCoinbaseTxBasicWorkRejectsUnsupportedTxKindViaPrehashCache(t *testing.T) {
+	var prevTxid [32]byte
+	prevTxid[0] = 0x91
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0xff,
+		TxNonce: 1,
+		Inputs: []TxInput{{
+			PrevTxid: prevTxid,
+			PrevVout: 0,
+			Sequence: 0x7FFFFFFF,
+		}},
+	}
+	_, _, err := applyNonCoinbaseTxBasicWork(tx, [32]byte{}, map[Outpoint]UtxoEntry{}, 1, 0, [32]byte{}, nil)
+	if err == nil {
+		t.Fatal("expected unsupported tx_kind error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
+	}
+}
