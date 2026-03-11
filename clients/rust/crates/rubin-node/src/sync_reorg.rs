@@ -1,6 +1,6 @@
 use rubin_consensus::{
     block_hash, parse_block_bytes, parse_tx, read_compact_size_bytes,
-    validate_block_basic_with_context_at_height, BLOCK_HEADER_BYTES,
+    validate_block_basic_with_context_at_height, ParsedBlock, BLOCK_HEADER_BYTES,
 };
 
 use crate::chainstate::ChainStateConnectSummary;
@@ -36,6 +36,7 @@ impl SyncEngine {
         if let Some(summary) = self.apply_direct_if_possible(block_bytes, prev_timestamps)? {
             if let Some(pool) = tx_pool {
                 evict_confirmed_from_pool(pool, block_bytes);
+                remove_conflicting_from_pool(pool, &parsed);
             }
             return Ok(summary);
         }
@@ -318,6 +319,13 @@ fn evict_confirmed_from_pool(pool: &mut TxPool, block_bytes: &[u8]) {
     pool.evict_txids(&parsed.txids);
 }
 
+fn remove_conflicting_from_pool(pool: &mut TxPool, parsed: &ParsedBlock) {
+    if parsed.txs.len() <= 1 {
+        return;
+    }
+    pool.remove_conflicting_inputs(&parsed.txs[1..]);
+}
+
 /// Extract raw bytes for each non-coinbase transaction in a block.
 /// This avoids needing a marshal_tx function — we slice directly from
 /// the block bytes using parse_tx consumed lengths.
@@ -351,11 +359,12 @@ mod tests {
     use super::*;
     use crate::blockstore::{block_store_path, BlockStore};
     use crate::chainstate::{chain_state_path, ChainState};
+    use crate::devnet_genesis_chain_id;
     use crate::io_utils::unique_temp_path;
     use crate::sync::{default_sync_config, SyncEngine};
     use crate::test_helpers::{
-        coinbase_only_block, coinbase_only_block_with_gen, genesis_info,
-        height_one_coinbase_only_block,
+        block_with_txs, coinbase_only_block, coinbase_only_block_with_gen, genesis_info,
+        height_one_coinbase_only_block, signed_conflicting_p2pk_state_and_txs,
     };
 
     #[test]
@@ -409,6 +418,36 @@ mod tests {
             .expect("block 1");
         assert_eq!(summary.block_height, 1);
 
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn apply_block_with_reorg_tip_extension_removes_conflicting_pool_spends() {
+        let (mut engine, dir) = engine_with_store("rubin-reorg-tip-conflict");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+        engine
+            .apply_block_with_reorg(&genesis, None, None)
+            .expect("genesis");
+        engine.cfg.chain_id = devnet_genesis_chain_id();
+
+        let (state, admitted_raw, block_raw) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
+        engine.chain_state.utxos = state.utxos.clone();
+
+        let mut pool = TxPool::new();
+        pool.admit(
+            &admitted_raw,
+            &engine.chain_state,
+            engine.block_store.as_ref(),
+            engine.cfg.chain_id,
+        )
+        .expect("admit");
+
+        let block1 = block_with_txs(1, 0, genesis_hash, gen_ts + 1, &[block_raw]);
+        engine
+            .apply_block_with_reorg(&block1, None, Some(&mut pool))
+            .expect("block 1");
+
+        assert!(pool.is_empty());
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 

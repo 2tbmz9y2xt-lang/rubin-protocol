@@ -178,6 +178,11 @@ impl<'a> Miner<'a> {
         };
         let txids: Vec<[u8; 32]> = parsed.iter().map(|candidate| candidate.txid).collect();
         pool.evict_txids(&txids);
+        let block_txs: Vec<Tx> = parsed
+            .iter()
+            .map(|candidate| candidate.tx.clone())
+            .collect();
+        pool.remove_conflicting_inputs(&block_txs);
     }
 
     fn remaining_weight_budget(&self, next_height: u64) -> Result<u64, String> {
@@ -386,16 +391,13 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use rubin_consensus::constants::{COV_TYPE_P2PK, MAX_BLOCK_WEIGHT, TX_WIRE_VERSION};
+    use rubin_consensus::constants::MAX_BLOCK_WEIGHT;
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
-    use rubin_consensus::{
-        marshal_tx, p2pk_covenant_data_for_pubkey, sign_transaction, Mldsa87Keypair, Outpoint,
-        TxInput, TxOutput, UtxoEntry,
-    };
 
     use crate::{
         block_store_path, chain_state_path, default_sync_config, devnet_genesis_chain_id,
-        BlockStore, ChainState, SyncEngine, TxPool,
+        test_helpers::signed_conflicting_p2pk_state_and_txs, BlockStore, ChainState, SyncEngine,
+        TxPool,
     };
 
     use super::{
@@ -607,48 +609,8 @@ mod tests {
     }
 
     fn signed_p2pk_state_and_tx(input_value: u64, output_value: u64) -> (ChainState, Vec<u8>) {
-        let keypair = Mldsa87Keypair::generate().expect("OpenSSL signer unavailable");
-        let pubkey = keypair.pubkey_bytes();
-        let outpoint = Outpoint {
-            txid: [0x11; 32],
-            vout: 0,
-        };
-        let mut state = ChainState::new();
-        state.utxos.insert(
-            outpoint.clone(),
-            UtxoEntry {
-                value: input_value,
-                covenant_type: COV_TYPE_P2PK,
-                covenant_data: p2pk_covenant_data_for_pubkey(&pubkey),
-                creation_height: 0,
-                created_by_coinbase: false,
-            },
-        );
-
-        let mut tx = rubin_consensus::Tx {
-            version: TX_WIRE_VERSION,
-            tx_kind: 0x00,
-            tx_nonce: 7,
-            inputs: vec![TxInput {
-                prev_txid: outpoint.txid,
-                prev_vout: outpoint.vout,
-                script_sig: Vec::new(),
-                sequence: 0,
-            }],
-            outputs: vec![TxOutput {
-                value: output_value,
-                covenant_type: COV_TYPE_P2PK,
-                covenant_data: p2pk_covenant_data_for_pubkey(&vec![0x22; 2592]),
-            }],
-            locktime: 0,
-            da_commit_core: None,
-            da_chunk_core: None,
-            witness: Vec::new(),
-            da_payload: Vec::new(),
-        };
-        sign_transaction(&mut tx, &state.utxos, devnet_genesis_chain_id(), &keypair)
-            .expect("sign tx");
-        let raw = marshal_tx(&tx).expect("marshal tx");
+        let (state, raw, _conflict) =
+            signed_conflicting_p2pk_state_and_txs(input_value, output_value, output_value - 1);
         (state, raw)
     }
 
@@ -692,6 +654,36 @@ mod tests {
         assert_eq!(mined.len(), 2);
         assert_eq!(mined[0].tx_count, 2);
         assert_eq!(mined[1].tx_count, 1);
+        assert!(pool.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mine_one_evicts_conflicting_pool_transaction_for_explicit_candidate() {
+        let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-explicit-conflict");
+        let (state, explicit_raw, conflicting_raw) =
+            signed_conflicting_p2pk_state_and_txs(20, 10, 9);
+        sync.chain_state.utxos = state.utxos.clone();
+
+        let mut pool = TxPool::new();
+        pool.admit(
+            &conflicting_raw,
+            &sync.chain_state,
+            None,
+            devnet_genesis_chain_id(),
+        )
+        .expect("admit conflict");
+
+        {
+            let cfg = MinerConfig {
+                timestamp_source: || 1_777_000_555,
+                ..MinerConfig::default()
+            };
+            let mut miner = Miner::new(&mut sync, Some(&mut pool), cfg).expect("miner");
+            let mined = miner.mine_one(&[explicit_raw]).expect("mine explicit");
+            assert_eq!(mined.tx_count, 2);
+        }
+
         assert!(pool.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
