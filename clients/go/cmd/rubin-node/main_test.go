@@ -632,6 +632,45 @@ func TestRunMainnetFailsWithoutExplicitTarget(t *testing.T) {
 	}
 }
 
+func TestRunMainnetFailsBeforeReconcilingChainState(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := node.ChainStatePath(dir)
+	store, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("OpenBlockStore: %v", err)
+	}
+	target := consensus.POW_LIMIT
+	state := node.NewChainState()
+	engine, err := node.NewSyncEngine(state, store, node.DefaultSyncConfig(&target, node.DevnetGenesisChainID(), chainStatePath))
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	if _, err := engine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
+		t.Fatalf("ApplyBlock(genesis): %v", err)
+	}
+	if err := node.NewChainState().Save(chainStatePath); err != nil {
+		t.Fatalf("Save(stale chainstate): %v", err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run([]string{"--dry-run", "--datadir", dir, "--network", "mainnet"}, &out, &errOut)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d (stderr=%q)", code, errOut.String())
+	}
+	if !bytes.Contains(errOut.Bytes(), []byte("mainnet requires explicit expected_target")) {
+		t.Fatalf("unexpected stderr: %q", errOut.String())
+	}
+
+	loaded, err := node.LoadChainState(chainStatePath)
+	if err != nil {
+		t.Fatalf("LoadChainState: %v", err)
+	}
+	if loaded.HasTip || loaded.Height != 0 || loaded.TipHash != ([32]byte{}) || len(loaded.Utxos) != 0 {
+		t.Fatalf("mainnet guard should prevent reconcile mutation: has_tip=%v height=%d tip=%x utxos=%d", loaded.HasTip, loaded.Height, loaded.TipHash, len(loaded.Utxos))
+	}
+}
+
 func TestRunDryRunEmitsRPCBindAddrWhenPresent(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer

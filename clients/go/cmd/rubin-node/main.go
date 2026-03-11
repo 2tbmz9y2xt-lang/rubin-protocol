@@ -108,14 +108,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 	syncCfg := node.DefaultSyncConfig(nil, chainIDFromGenesis, chainStatePath)
 	syncCfg.Network = cfg.Network
 	syncCfg.CoreExtProfiles = genesisCfg.CoreExtProfiles
-	if _, err := node.ReconcileChainStateWithBlockStore(chainState, blockStore, syncCfg); err != nil {
-		_, _ = fmt.Fprintf(stderr, "chainstate reconcile failed: %v\n", err)
-		return 2
-	}
-	if err := chainState.Save(chainStatePath); err != nil {
-		_, _ = fmt.Fprintf(stderr, "chainstate save failed: %v\n", err)
-		return 2
-	}
 	syncEngine, err := newSyncEngineFn(
 		chainState,
 		blockStore,
@@ -123,6 +115,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "sync engine init failed: %v\n", err)
+		return 2
+	}
+	if _, err := node.ReconcileChainStateWithBlockStore(chainState, blockStore, syncCfg); err != nil {
+		_, _ = fmt.Fprintf(stderr, "chainstate reconcile failed: %v\n", err)
+		return 2
+	}
+	if err := chainState.Save(chainStatePath); err != nil {
+		_, _ = fmt.Fprintf(stderr, "chainstate save failed: %v\n", err)
 		return 2
 	}
 	mempoolCfg := node.DefaultMempoolConfig()
