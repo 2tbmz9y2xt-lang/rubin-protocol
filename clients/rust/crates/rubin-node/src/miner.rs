@@ -56,7 +56,7 @@ struct MinedCandidate {
 
 pub struct Miner<'a> {
     sync: &'a mut SyncEngine,
-    tx_pool: Option<&'a TxPool>,
+    tx_pool: Option<&'a mut TxPool>,
     cfg: MinerConfig,
 }
 
@@ -80,7 +80,7 @@ impl Default for MinerConfig {
 impl<'a> Miner<'a> {
     pub fn new(
         sync: &'a mut SyncEngine,
-        tx_pool: Option<&'a TxPool>,
+        tx_pool: Option<&'a mut TxPool>,
         mut cfg: MinerConfig,
     ) -> Result<Self, String> {
         cfg.mine_address = normalize_mine_address(&cfg.mine_address)?;
@@ -148,6 +148,7 @@ impl<'a> Miner<'a> {
         let summary = self
             .sync
             .apply_block(&block_bytes, prev_timestamps.as_deref())?;
+        self.evict_confirmed_from_pool(&parsed);
         Ok(MinedBlock {
             height: summary.block_height,
             hash: summary.block_hash,
@@ -165,10 +166,18 @@ impl<'a> Miner<'a> {
         if !txs.is_empty() {
             return txs.iter().take(max_selected).cloned().collect();
         }
-        match self.tx_pool {
+        match self.tx_pool.as_deref() {
             Some(pool) => pool.select_transactions(max_selected, MAX_BLOCK_WEIGHT as usize),
             None => Vec::new(),
         }
+    }
+
+    fn evict_confirmed_from_pool(&mut self, parsed: &[MinedCandidate]) {
+        let Some(pool) = self.tx_pool.as_deref_mut() else {
+            return;
+        };
+        let txids: Vec<[u8; 32]> = parsed.iter().map(|candidate| candidate.txid).collect();
+        pool.evict_txids(&txids);
     }
 
     fn remaining_weight_budget(&self, next_height: u64) -> Result<u64, String> {
@@ -442,8 +451,8 @@ mod tests {
             timestamp_source: || 1,
             ..MinerConfig::default()
         };
-        let pool = TxPool::new();
-        let mut miner = Miner::new(&mut sync, Some(&pool), cfg).expect("miner");
+        let mut pool = TxPool::new();
+        let mut miner = Miner::new(&mut sync, Some(&mut pool), cfg).expect("miner");
 
         let mined = miner.mine_n(3, &[]).expect("mine n");
         assert_eq!(mined.len(), 3);
@@ -485,12 +494,12 @@ mod tests {
     #[test]
     fn candidate_transactions_falls_back_to_pool_surface() {
         let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-pool");
-        let pool = TxPool::new();
+        let mut pool = TxPool::new();
         let cfg = MinerConfig {
             max_tx_per_block: 3,
             ..MinerConfig::default()
         };
-        let miner = Miner::new(&mut sync, Some(&pool), cfg).expect("miner");
+        let miner = Miner::new(&mut sync, Some(&mut pool), cfg).expect("miner");
         let selected = miner.candidate_transactions(&[]);
         assert!(selected.is_empty());
         let _ = fs::remove_dir_all(&dir);
@@ -658,6 +667,32 @@ mod tests {
         assert_eq!(mined.height, 0);
         assert_eq!(mined.tx_count, 2);
         assert!(miner.sync.chain_state.has_tip);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mine_n_evicts_confirmed_pool_transactions_between_blocks() {
+        let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-pool-evict");
+        let (state, raw) = signed_p2pk_state_and_tx(20, 10);
+        sync.chain_state.utxos = state.utxos;
+
+        let mut pool = TxPool::new();
+        pool.admit(&raw, &sync.chain_state, None, devnet_genesis_chain_id())
+            .expect("admit");
+
+        let mined = {
+            let cfg = MinerConfig {
+                timestamp_source: || 1_777_000_321,
+                ..MinerConfig::default()
+            };
+            let mut miner = Miner::new(&mut sync, Some(&mut pool), cfg).expect("miner");
+            miner.mine_n(2, &[]).expect("mine n")
+        };
+
+        assert_eq!(mined.len(), 2);
+        assert_eq!(mined[0].tx_count, 2);
+        assert_eq!(mined[1].tx_count, 1);
+        assert!(pool.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 
