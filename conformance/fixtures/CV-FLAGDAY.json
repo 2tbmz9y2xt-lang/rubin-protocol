@@ -98,6 +98,59 @@
       "expect_ok": true,
       "expect_activation_height": 2000,
       "expect_consensus_active": true
+    },
+    {
+      "id": "NEG-FD-BIT-OUT-OF-RANGE",
+      "op": "featurebits_state",
+      "name": "X",
+      "bit": 32,
+      "start_height": 0,
+      "timeout_height": 100000,
+      "activation_height": 2000,
+      "height": 2000,
+      "window_signal_counts": [],
+      "expect_ok": false,
+      "expect_err": "BLOCK_ERR_PARSE"
+    },
+    {
+      "id": "NEG-FD-EMPTY-NAME",
+      "op": "featurebits_state",
+      "name": "",
+      "bit": 0,
+      "start_height": 0,
+      "timeout_height": 100000,
+      "activation_height": 2000,
+      "height": 2000,
+      "window_signal_counts": [],
+      "expect_ok": false,
+      "expect_err": "featurebits: name required"
+    },
+    {
+      "id": "NEG-FD-TIMEOUT-BELOW-START",
+      "op": "featurebits_state",
+      "name": "X",
+      "bit": 0,
+      "start_height": 5000,
+      "timeout_height": 1000,
+      "activation_height": 2000,
+      "height": 2000,
+      "window_signal_counts": [],
+      "expect_ok": false,
+      "expect_err": "featurebits: timeout_height < start_height"
+    },
+    {
+      "id": "NEG-FD-PRE-ACTIVATION-ZERO-HEIGHT",
+      "op": "featurebits_state",
+      "name": "X",
+      "bit": 0,
+      "start_height": 0,
+      "timeout_height": 100000,
+      "activation_height": 1,
+      "height": 0,
+      "window_signal_counts": [],
+      "expect_ok": true,
+      "expect_activation_height": 1,
+      "expect_consensus_active": false
     }
   ]
 }

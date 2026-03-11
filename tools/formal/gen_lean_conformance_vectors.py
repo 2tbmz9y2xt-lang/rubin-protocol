@@ -255,6 +255,8 @@ def load_cv_merkle(path: Path) -> list[MerkleVector]:
             continue
         if v.get("op") != "merkle_root":
             continue
+        if not v.get("expect_ok"):
+            continue  # skip negative vectors (handled by conformance runner)
         out.append(
             MerkleVector(
                 vid=str(v.get("id") or ""),
@@ -417,7 +419,7 @@ def _load_sighash_gate(path: Path, gate: str) -> list[SighashVector]:
         if v.get("op") != "sighash_v1":
             continue
         if not v.get("expect_ok"):
-            raise ValueError(f"unexpected expect_ok=false in {gate}: {v.get('id')}")
+            continue  # skip negative vectors (handled by conformance runner)
         tx_hex = _materialize_tx_hex(v, vectors_by_id=raw_by_id)
         out.append(
             SighashVector(
@@ -1825,6 +1827,8 @@ def load_cv_fork_choice(path: Path) -> list[ForkChoiceVector]:
         op = str(v.get("op") or "")
         if op not in ("fork_work", "fork_choice_select"):
             continue
+        if not v.get("expect_ok"):
+            continue  # skip negative vectors (handled by conformance runner)
         chains: list[ForkChain] = []
         for c in v.get("chains") or []:
             if not isinstance(c, dict):
