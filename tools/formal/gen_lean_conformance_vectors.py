@@ -417,7 +417,7 @@ def _load_sighash_gate(path: Path, gate: str) -> list[SighashVector]:
         if v.get("op") != "sighash_v1":
             continue
         if not v.get("expect_ok"):
-            raise ValueError(f"unexpected expect_ok=false in {gate}: {v.get('id')}")
+            continue  # skip negative vectors (handled by conformance runner)
         tx_hex = _materialize_tx_hex(v, vectors_by_id=raw_by_id)
         out.append(
             SighashVector(
