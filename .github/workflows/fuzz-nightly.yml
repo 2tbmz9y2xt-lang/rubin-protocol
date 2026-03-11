@@ -61,7 +61,7 @@ jobs:
         # belongs to the nightly branch before merging Dependabot PRs.
         # Current nightly branch: 0f1b44df7e9cbb178d781a242338dfa5e243ad7f
         # Current stable branch:  631a55b12751854ce901bb631d5902ceb48146f7
-        uses: dtolnay/rust-toolchain@0f1b44df7e9cbb178d781a242338dfa5e243ad7f # nightly
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # nightly
         with:
           toolchain: nightly
 
