@@ -99,6 +99,47 @@
       ],
       "expect_ok": true,
       "expect_witness_merkle_root": "c7478fc0edf922e5a1f42c8c50da58fca91ad6520063b5c1dd394436baa11df6"
+    },
+    {
+      "id": "NEG-MERKLE-EMPTY-TXIDS",
+      "op": "merkle_root",
+      "txids": [],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_PARSE"
+    },
+    {
+      "id": "NEG-MERKLE-BAD-HEX-TXID",
+      "op": "merkle_root",
+      "txids": [
+        "zzzz"
+      ],
+      "expect_ok": false,
+      "expect_err": "bad txid"
+    },
+    {
+      "id": "NEG-MERKLE-SHORT-TXID",
+      "op": "merkle_root",
+      "txids": [
+        "d205b2f6296a4cc1e4ec65d1b80309ed"
+      ],
+      "expect_ok": false,
+      "expect_err": "bad txid"
+    },
+    {
+      "id": "NEG-WITNESS-EMPTY-WTXIDS",
+      "op": "witness_merkle_root",
+      "wtxids": [],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_PARSE"
+    },
+    {
+      "id": "NEG-WITNESS-BAD-HEX-WTXID",
+      "op": "witness_merkle_root",
+      "wtxids": [
+        "not-valid-hex"
+      ],
+      "expect_ok": false,
+      "expect_err": "bad wtxid"
     }
   ]
 }
