@@ -14,6 +14,7 @@ enum OpenSslFipsMode {
 }
 
 static OPENSSL_BOOTSTRAP_STATE: OnceLock<Result<(), TxError>> = OnceLock::new();
+static OPENSSL_CONSENSUS_INIT: OnceLock<Result<(), TxError>> = OnceLock::new();
 
 extern "C" {
     fn EVP_PKEY_CTX_new_from_name(
@@ -363,6 +364,36 @@ fn openssl_bootstrap(require_fips: bool) -> Result<(), TxError> {
     Ok(())
 }
 
+/// Deterministic OpenSSL initialization for the consensus verification path.
+///
+/// Does NOT read any `RUBIN_OPENSSL_*` environment variables, does NOT load the
+/// FIPS provider, and does NOT set `fips=yes` default properties. This ensures
+/// that consensus signature verification produces identical results across all
+/// nodes regardless of host environment configuration.
+///
+/// Non-consensus callers (key generation, signing, CLI tools) should continue
+/// to use [`ensure_openssl_bootstrap`] which honors operator-configured FIPS.
+fn openssl_consensus_bootstrap() -> Result<(), TxError> {
+    // Bare OPENSSL_init_crypto without propagating RUBIN_OPENSSL_CONF or
+    // RUBIN_OPENSSL_MODULES into the process environment. No FIPS provider.
+    unsafe {
+        openssl_sys::ERR_clear_error();
+        if OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CONFIG, core::ptr::null()) != 1 {
+            return Err(TxError::new(
+                ErrorCode::TxErrParse,
+                "openssl consensus init: OPENSSL_init_crypto failed",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_openssl_consensus_init() -> Result<(), TxError> {
+    OPENSSL_CONSENSUS_INIT
+        .get_or_init(openssl_consensus_bootstrap)
+        .clone()
+}
+
 pub fn verify_sig(
     suite_id: u8,
     pubkey: &[u8],
@@ -377,7 +408,7 @@ pub fn verify_sig(
     }
 
     let alg = suite_alg_name(suite_id)?;
-    ensure_openssl_bootstrap()?;
+    ensure_openssl_consensus_init()?;
 
     if pubkey.len() != ML_DSA_87_PUBKEY_BYTES as usize
         || signature.len() != ML_DSA_87_SIG_BYTES as usize
