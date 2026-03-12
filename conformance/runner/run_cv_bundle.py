@@ -390,6 +390,24 @@ def parse_hex_uint(value: Any) -> int:
 MAX_U256 = (1 << 256) - 1
 
 
+def parse_hex_u256_for_conformance(value: Any) -> tuple[Optional[int], Optional[str]]:
+    if not isinstance(value, str):
+        return None, "bad target"
+    text = value.strip().lower()
+    if text.startswith("0x"):
+        text = text[2:]
+    if text == "":
+        return 0, None
+    if len(text) % 2 == 1:
+        text = "0" + text
+    if len(text) > 64:
+        return None, "bad target"
+    try:
+        return int(text, 16), None
+    except ValueError:
+        return None, "bad target"
+
+
 def parse_hex_bytes(value: Any) -> bytes:
     if not isinstance(value, str):
         raise ValueError("expected hex string")
@@ -1378,12 +1396,10 @@ def validate_local_vector(gate: str, v: Dict[str, Any]) -> List[str]:
         return problems
 
     if op == "fork_work":
-        try:
-            target = parse_hex_uint(v.get("target"))
-        except ValueError:
-            target = None
+        target, err = parse_hex_u256_for_conformance(v.get("target"))
         ok = target is not None and 0 < target <= MAX_U256
-        err = None if ok else ("bad target" if target is None or target > MAX_U256 else "TX_ERR_PARSE")
+        if target is not None and target <= 0:
+            err = "TX_ERR_PARSE"
         work_hex = hex((1 << 256) // target) if ok else None
         if "expect_work" in v:
             expected_work = hex(parse_hex_uint(v["expect_work"])) if ok else None
@@ -1422,19 +1438,14 @@ def validate_local_vector(gate: str, v: Dict[str, Any]) -> List[str]:
                 return problems
             total_work = 0
             for t in targets:
-                try:
-                    target = parse_hex_uint(t)
-                except ValueError:
+                target, target_err = parse_hex_u256_for_conformance(t)
+                if target is None:
                     ok = False
-                    err = "bad target"
+                    err = target_err
                     break
                 if target <= 0:
                     ok = False
                     err = "TX_ERR_PARSE"
-                    break
-                if target > MAX_U256:
-                    ok = False
-                    err = "bad target"
                     break
                 total_work += (1 << 256) // target
             if not ok:
