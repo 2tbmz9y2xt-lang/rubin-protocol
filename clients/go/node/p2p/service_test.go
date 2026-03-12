@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"testing"
@@ -378,7 +379,7 @@ func TestResolveOrphansDropsInvalidChildBytes(t *testing.T) {
 	parentHash[31] = 0x11
 	var childHash [32]byte
 	childHash[31] = 0x22
-	if added, _ := h.service.orphans.Add(childHash, parentHash, []byte{0x00}); !added {
+	if added, _ := h.service.orphans.Add(childHash, parentHash, []byte{0x00}, ""); !added {
 		t.Fatalf("expected orphan add")
 	}
 
@@ -408,7 +409,7 @@ func TestResolveOrphansRequeuesStillMissingChild(t *testing.T) {
 
 	var wrongParent [32]byte
 	wrongParent[31] = 0x44
-	if added, _ := sink.service.orphans.Add(height2Hash, wrongParent, block2Bytes); !added {
+	if added, _ := sink.service.orphans.Add(height2Hash, wrongParent, block2Bytes, ""); !added {
 		t.Fatalf("expected orphan add")
 	}
 
@@ -426,7 +427,7 @@ func TestResolveOrphansRequeuesStillMissingChild(t *testing.T) {
 	}
 }
 
-func TestProcessRelayedBlockDoesNotMarkSeenWhenOrphanIsRejected(t *testing.T) {
+func TestProcessRelayedBlockMarksSeenWhenOrphanIsRejected(t *testing.T) {
 	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
 	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
 
@@ -457,8 +458,10 @@ func TestProcessRelayedBlockDoesNotMarkSeenWhenOrphanIsRejected(t *testing.T) {
 	if sink.service.orphans.Len() != 0 {
 		t.Fatalf("orphans.Len()=%d, want 0", sink.service.orphans.Len())
 	}
-	if sink.service.blockSeen.Has(height2Hash) {
-		t.Fatalf("blockSeen should stay clear when orphan retention fails")
+	// Rejected orphans are added to blockSeen as a negative cache to
+	// prevent unbounded re-download loops (getdata amplification).
+	if !sink.service.blockSeen.Has(height2Hash) {
+		t.Fatalf("blockSeen should be set for rejected orphans (negative cache)")
 	}
 }
 
@@ -523,7 +526,7 @@ func TestAcceptedRelayedBlockBroadcastsResolvedOrphans(t *testing.T) {
 		t.Fatalf("GetBlockByHash(height2): %v", err)
 	}
 
-	if added, _ := sink.service.orphans.Add(height2Hash, height1Hash, block2Bytes); !added {
+	if added, _ := sink.service.orphans.Add(height2Hash, height1Hash, block2Bytes, ""); !added {
 		t.Fatalf("expected orphan add")
 	}
 	sink.service.blockSeen.Add(height2Hash)
@@ -830,5 +833,52 @@ func TestRetainOrResolveOrphanClearsSeenForEvictedOrphan(t *testing.T) {
 	}
 	if !sink.service.blockSeen.Has(height2Hash) {
 		t.Fatalf("expected latest orphan hash to remain in blockSeen")
+	}
+}
+
+// TestFaultAttributionSplitConsensusVsIO verifies that any block that fails
+// ApplyBlockWithReorg results in a hard ban (100 points).  All errors from
+// this path are consensus violations (*TxError).
+func TestFaultAttributionSplitConsensusVsIO(t *testing.T) {
+	// Source has genesis+block1. Sink has genesis only.
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+
+	height1Hash, ok, err := source.blockStore.CanonicalHash(1)
+	if err != nil || !ok {
+		t.Fatalf("CanonicalHash(1): ok=%v err=%v", ok, err)
+	}
+	block1Bytes, err := source.blockStore.GetBlockByHash(height1Hash)
+	if err != nil {
+		t.Fatalf("GetBlockByHash(height1): %v", err)
+	}
+
+	// Corrupt the merkle root (bytes 36..68 in the header) so consensus
+	// validation fails.  Parent (genesis) exists in sink, so
+	// ApplyBlockWithReorg is reached and should return a TxError.
+	corrupted := append([]byte(nil), block1Bytes...)
+	for i := 36; i < 68; i++ {
+		corrupted[i] = 0xFF
+	}
+
+	peer := &peer{
+		service: sink.service,
+		state: node.PeerState{
+			Addr:          "127.0.0.1:41001",
+			RemoteVersion: testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 2),
+		},
+	}
+
+	_, applyErr := peer.processRelayedBlock(corrupted)
+	if applyErr == nil {
+		t.Fatalf("expected error for corrupted block")
+	}
+	// The error should be a consensus TxError (hard ban path).
+	var txErr *consensus.TxError
+	if !errors.As(applyErr, &txErr) {
+		t.Fatalf("expected TxError, got %T: %v", applyErr, applyErr)
+	}
+	if state := peer.snapshotState(); state.BanScore < 100 {
+		t.Fatalf("ban_score=%d, want >= 100 for consensus error", state.BanScore)
 	}
 }

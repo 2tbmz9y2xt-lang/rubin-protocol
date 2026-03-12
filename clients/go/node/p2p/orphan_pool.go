@@ -1,28 +1,40 @@
 package p2p
 
-import "sync"
+import (
+	"net"
+	"sync"
+)
 
 const defaultOrphanByteLimit = 64 << 20
+
+// defaultPerPeerOrphanLimit caps how many orphans a single peer may inject
+// before further submissions are silently dropped.  This prevents a single
+// attacker from monopolising the global pool.
+const defaultPerPeerOrphanLimit = 50
 
 type orphanEntry struct {
 	blockHash  [32]byte
 	parentHash [32]byte
 	blockBytes []byte
+	fromPeer   string // peer address that relayed this orphan
 }
 
 type orphanMeta struct {
 	parentHash [32]byte
 	size       int
+	fromPeer   string
 }
 
 type orphanPool struct {
-	mu         sync.Mutex
-	limit      int
-	byteLimit  int
-	totalBytes int
-	pool       map[[32]byte][]orphanEntry
-	byHash     map[[32]byte]orphanMeta
-	fifo       [][32]byte
+	mu            sync.Mutex
+	limit         int
+	perPeerLimit  int
+	byteLimit     int
+	totalBytes    int
+	pool          map[[32]byte][]orphanEntry
+	byHash        map[[32]byte]orphanMeta
+	fifo          [][32]byte
+	peerOrphanCnt map[string]int // per-peer orphan count
 }
 
 func newOrphanPool(limit int) *orphanPool {
@@ -30,14 +42,16 @@ func newOrphanPool(limit int) *orphanPool {
 		limit = 500
 	}
 	return &orphanPool{
-		limit:     limit,
-		byteLimit: defaultOrphanByteLimit,
-		pool:      make(map[[32]byte][]orphanEntry),
-		byHash:    make(map[[32]byte]orphanMeta),
+		limit:         limit,
+		perPeerLimit:  defaultPerPeerOrphanLimit,
+		byteLimit:     defaultOrphanByteLimit,
+		pool:          make(map[[32]byte][]orphanEntry),
+		byHash:        make(map[[32]byte]orphanMeta),
+		peerOrphanCnt: make(map[string]int),
 	}
 }
 
-func (o *orphanPool) Add(blockHash, parentHash [32]byte, blockBytes []byte) (bool, [][32]byte) {
+func (o *orphanPool) Add(blockHash, parentHash [32]byte, blockBytes []byte, fromPeer string) (bool, [][32]byte) {
 	if o == nil {
 		return false, nil
 	}
@@ -49,15 +63,25 @@ func (o *orphanPool) Add(blockHash, parentHash [32]byte, blockBytes []byte) (boo
 	if o.byteLimit > 0 && len(blockBytes) > o.byteLimit {
 		return false, nil
 	}
+	// Per-peer quota keyed by normalised IP (not ip:port) so that
+	// reconnecting with a new source port does not bypass the quota.
+	quotaKey := peerQuotaKey(fromPeer)
+	if o.perPeerLimit > 0 && quotaKey != "" && o.peerOrphanCnt[quotaKey] >= o.perPeerLimit {
+		return false, nil
+	}
 	entry := orphanEntry{
 		blockHash:  blockHash,
 		parentHash: parentHash,
 		blockBytes: append([]byte(nil), blockBytes...),
+		fromPeer:   quotaKey,
 	}
 	o.pool[parentHash] = append(o.pool[parentHash], entry)
-	o.byHash[blockHash] = orphanMeta{parentHash: parentHash, size: len(entry.blockBytes)}
+	o.byHash[blockHash] = orphanMeta{parentHash: parentHash, size: len(entry.blockBytes), fromPeer: quotaKey}
 	o.fifo = append(o.fifo, blockHash)
 	o.totalBytes += len(entry.blockBytes)
+	if quotaKey != "" {
+		o.peerOrphanCnt[quotaKey]++
+	}
 	evicted := make([][32]byte, 0, 1)
 	for len(o.byHash) > o.limit || (o.byteLimit > 0 && o.totalBytes > o.byteLimit) {
 		if dropped, ok := o.evictOldest(); ok {
@@ -79,6 +103,12 @@ func (o *orphanPool) TakeChildren(parentHash [32]byte) []orphanEntry {
 	for _, child := range children {
 		if meta, ok := o.byHash[child.blockHash]; ok {
 			o.totalBytes -= meta.size
+			if meta.fromPeer != "" {
+				o.peerOrphanCnt[meta.fromPeer]--
+				if o.peerOrphanCnt[meta.fromPeer] <= 0 {
+					delete(o.peerOrphanCnt, meta.fromPeer)
+				}
+			}
 			delete(o.byHash, child.blockHash)
 		}
 		removed[child.blockHash] = struct{}{}
@@ -108,6 +138,12 @@ func (o *orphanPool) evictOldest() ([32]byte, bool) {
 		}
 		delete(o.byHash, oldest)
 		o.totalBytes -= meta.size
+		if meta.fromPeer != "" {
+			o.peerOrphanCnt[meta.fromPeer]--
+			if o.peerOrphanCnt[meta.fromPeer] <= 0 {
+				delete(o.peerOrphanCnt, meta.fromPeer)
+			}
+		}
 		children := o.pool[meta.parentHash]
 		for index, child := range children {
 			if child.blockHash != oldest {
@@ -124,6 +160,20 @@ func (o *orphanPool) evictOldest() ([32]byte, bool) {
 		return oldest, true
 	}
 	return [32]byte{}, false
+}
+
+// peerQuotaKey normalises a peer address to its IP so that the orphan
+// per-peer quota cannot be trivially bypassed by reconnecting (which
+// changes the source port, hence the ip:port string).
+func peerQuotaKey(addr string) string {
+	if addr == "" {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr // already bare IP or unparseable
+	}
+	return host
 }
 
 func (o *orphanPool) pruneFIFO(removed map[[32]byte]struct{}) {

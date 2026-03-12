@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{self, Cursor, Read, Write};
 use std::net::TcpStream;
 use std::sync::RwLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rubin_consensus::{
     block_hash,
@@ -38,6 +38,8 @@ const MAX_ADDR_PAYLOAD_ENTRIES: usize = 1000;
 const MAX_ADDR_COMPACT_SIZE_BYTES: u64 = 3;
 const MAX_ADDR_PAYLOAD_BYTES: u64 = MAX_ADDR_COMPACT_SIZE_BYTES
     + (MAX_ADDR_PAYLOAD_ENTRIES as u64) * (ADDR_PAYLOAD_ENTRY_SIZE as u64);
+const MAX_HEADERS_BATCH: u64 = 2000;
+const MAX_HEADERS_PAYLOAD_BYTES: u64 = MAX_HEADERS_BATCH * (rubin_consensus::BLOCK_HEADER_BYTES as u64);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WireMessage {
@@ -415,6 +417,36 @@ impl PeerSession {
     }
 }
 
+/// A Read adapter that enforces an absolute wall-clock deadline across all
+/// `recv()` calls.  Before every `read()` (including the internal ones made
+/// by `read_exact()`), it recomputes the remaining time budget and sets
+/// `SO_RCVTIMEO` to `remaining`.  This prevents slowloris-style drip-feed
+/// attacks where an adversary sends one byte at a time to keep resetting a
+/// per-message timeout, while matching Go's single-deadline handshake model.
+struct DeadlineReader {
+    stream: TcpStream,
+    deadline: Instant,
+}
+
+impl Read for DeadlineReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let remaining = self
+            .deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or(Duration::ZERO);
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "handshake wall-clock deadline exceeded",
+            ));
+        }
+        self.stream
+            .set_read_timeout(Some(remaining))
+            .map_err(io::Error::other)?;
+        self.stream.read(buf)
+    }
+}
+
 pub fn perform_version_handshake(
     stream: TcpStream,
     cfg: PeerRuntimeConfig,
@@ -423,6 +455,19 @@ pub fn perform_version_handshake(
     expected_genesis_hash: [u8; 32],
 ) -> io::Result<PeerSession> {
     let mut session = PeerSession::new(stream, cfg).map_err(io::Error::other)?;
+
+    // Enforce an absolute wall-clock deadline for the entire handshake using
+    // DeadlineReader: a Read adapter that recomputes SO_RCVTIMEO before
+    // every recv() syscall inside read_exact().  This prevents slowloris
+    // drip-feed attacks where one byte per timeout-window keeps the
+    // connection alive indefinitely.  Each recv gets the full remaining
+    // budget (matching Go's single-deadline handshake model).
+    let handshake_deadline = Instant::now() + session.cfg.read_deadline;
+    let mut deadline_reader = DeadlineReader {
+        stream: session.stream.try_clone()?,
+        deadline: handshake_deadline,
+    };
+
     let version_payload = marshal_version_payload_v1(local);
     session.write_message(&WireMessage {
         command: "version".to_string(),
@@ -432,7 +477,7 @@ pub fn perform_version_handshake(
     let mut sent_verack = false;
     loop {
         let msg = read_message_from_with_payload_limit(
-            &mut session.stream,
+            &mut deadline_reader,
             network_magic(&session.cfg.network),
             MAX_RELAY_MSG_BYTES,
             pre_handshake_payload_cap,
@@ -1036,10 +1081,14 @@ fn runtime_payload_cap(command: &str) -> u64 {
     match command {
         "version" => VERSION_PAYLOAD_BYTES,
         "verack" | "ping" | "pong" | MESSAGE_GETADDR => 0,
-        MESSAGE_INV | MESSAGE_GETDATA => MAX_INVENTORY_PAYLOAD_BYTES,
+        MESSAGE_INV | MESSAGE_GETDATA | MESSAGE_GETBLOCKS => MAX_INVENTORY_PAYLOAD_BYTES,
         MESSAGE_ADDR => MAX_ADDR_PAYLOAD_BYTES,
         MESSAGE_BLOCK | MESSAGE_TX => MAX_BLOCK_BYTES,
-        _ => MAX_RELAY_MSG_BYTES,
+        "headers" => MAX_HEADERS_PAYLOAD_BYTES,
+        // Small cap for unknown commands: large enough to reach dispatch
+        // (where ban score is incremented), small enough to prevent
+        // attacker-controlled multi-MB allocation.
+        _ => 256,
     }
 }
 
@@ -1612,6 +1661,66 @@ mod tests {
             );
         });
 
+        let _client = TcpStream::connect(addr).expect("connect");
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn runtime_payload_cap_rejects_unknown_commands() {
+        // Known commands must have a non-zero cap.
+        assert!(runtime_payload_cap("version") > 0);
+        assert!(runtime_payload_cap(MESSAGE_BLOCK) > 0);
+        assert!(runtime_payload_cap(MESSAGE_TX) > 0);
+        assert!(runtime_payload_cap(MESSAGE_INV) > 0);
+        assert!(runtime_payload_cap(MESSAGE_GETBLOCKS) > 0);
+        assert!(runtime_payload_cap(MESSAGE_GETDATA) > 0);
+        assert!(runtime_payload_cap(MESSAGE_ADDR) > 0);
+
+        // headers gets an explicit cap matching MAX_HEADERS_PAYLOAD_BYTES.
+        assert_eq!(runtime_payload_cap("headers"), MAX_HEADERS_PAYLOAD_BYTES);
+        assert!(MAX_HEADERS_PAYLOAD_BYTES > 0);
+
+        // Unknown/garbage commands get a small cap (256 bytes) so they
+        // reach dispatch and accrue ban score, but cannot trigger large
+        // memory allocations.
+        assert_eq!(runtime_payload_cap("unknown"), 256);
+        assert_eq!(runtime_payload_cap("malicious_cmd"), 256);
+        assert_eq!(runtime_payload_cap(""), 256);
+    }
+
+    #[test]
+    fn handshake_times_out_on_silent_peer() {
+        // perform_version_handshake sets read_timeout before reading.
+        // A slowloris peer that never sends data must trigger a timeout
+        // error instead of hanging indefinitely.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut cfg = default_peer_runtime_config("devnet", 8);
+            cfg.read_deadline = Duration::from_millis(100);
+            let local = test_version_payload(0);
+            let chain_id = devnet_genesis_chain_id();
+            let genesis = devnet_genesis_block_bytes();
+            let genesis_hash = block_hash(&genesis[..BLOCK_HEADER_BYTES]).expect("genesis hash");
+            let result = perform_version_handshake(stream, cfg, local, chain_id, genesis_hash);
+            let err = match result {
+                Err(e) => e,
+                Ok(_) => panic!("handshake must time out on silent peer"),
+            };
+            // Timeout manifests as WouldBlock or TimedOut depending on OS.
+            assert!(
+                matches!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ),
+                "unexpected error kind: {:?}",
+                err.kind()
+            );
+        });
+
+        // Connect but never send anything — simulates a slowloris peer.
         let _client = TcpStream::connect(addr).expect("connect");
         server.join().expect("server join");
     }
