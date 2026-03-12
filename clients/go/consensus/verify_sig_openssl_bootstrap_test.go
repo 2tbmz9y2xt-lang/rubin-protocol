@@ -3,6 +3,7 @@
 package consensus
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -140,5 +141,31 @@ func TestEnsureOpenSSLBootstrap_InvalidFIPSModeRejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid RUBIN_OPENSSL_FIPS_MODE") {
 		t.Fatalf("expected invalid mode context, got: %v", err)
+	}
+}
+
+// TestEnsureOpenSSLConsensusInit_BootstrapError verifies that a bootstrap failure
+// in the consensus init path is properly wrapped and cached.
+func TestEnsureOpenSSLConsensusInit_BootstrapError(t *testing.T) {
+	resetOpenSSLBootstrapStateForTests()
+	t.Cleanup(resetOpenSSLBootstrapStateForTests)
+
+	injectedErr := fmt.Errorf("synthetic openssl failure")
+	opensslBootstrapFn = func(bool, string, string) error {
+		return injectedErr
+	}
+
+	err := ensureOpenSSLConsensusInit()
+	if err == nil {
+		t.Fatalf("expected error from consensus init with failing bootstrap")
+	}
+	if !strings.Contains(err.Error(), "openssl consensus init") {
+		t.Fatalf("expected wrapped error, got: %v", err)
+	}
+
+	// Second call must return same cached error.
+	err2 := ensureOpenSSLConsensusInit()
+	if err2 == nil || err2.Error() != err.Error() {
+		t.Fatalf("expected cached error on second call, got: %v", err2)
 	}
 }

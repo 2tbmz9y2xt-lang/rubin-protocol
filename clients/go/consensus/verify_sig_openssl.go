@@ -174,6 +174,7 @@ var (
 	opensslConsensusInitOnce  sync.Once
 	opensslConsensusInitErr   error
 	opensslVerifySigOneShotFn = opensslVerifySigOneShot
+	opensslBootstrapFn        = opensslBootstrap
 )
 
 func resetOpenSSLBootstrapStateForTests() {
@@ -181,6 +182,7 @@ func resetOpenSSLBootstrapStateForTests() {
 	opensslBootstrapErr = nil
 	opensslConsensusInitOnce = sync.Once{}
 	opensslConsensusInitErr = nil
+	opensslBootstrapFn = opensslBootstrap
 }
 
 // ensureOpenSSLConsensusInit performs bare OpenSSL initialization for the consensus
@@ -195,7 +197,7 @@ func resetOpenSSLBootstrapStateForTests() {
 // use ensureOpenSSLBootstrap() which honors operator-configured FIPS settings.
 func ensureOpenSSLConsensusInit() error {
 	opensslConsensusInitOnce.Do(func() {
-		if err := opensslBootstrap(false, "", ""); err != nil {
+		if err := opensslBootstrapFn(false, "", ""); err != nil {
 			opensslConsensusInitErr = txerr(TX_ERR_PARSE, fmt.Sprintf("openssl consensus init: %v", err))
 		}
 	})
@@ -224,7 +226,7 @@ func ensureOpenSSLBootstrap() error {
 	rubinModules := strings.TrimSpace(os.Getenv("RUBIN_OPENSSL_MODULES"))
 
 	opensslBootstrapOnce.Do(func() {
-		if err := opensslBootstrap(requireFIPS, rubinConf, rubinModules); err != nil {
+		if err := opensslBootstrapFn(requireFIPS, rubinConf, rubinModules); err != nil {
 			opensslBootstrapErr = txerr(TX_ERR_PARSE, fmt.Sprintf("openssl bootstrap: %v", err))
 		}
 	})
