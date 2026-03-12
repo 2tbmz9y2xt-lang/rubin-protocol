@@ -171,12 +171,37 @@ import (
 var (
 	opensslBootstrapOnce      sync.Once
 	opensslBootstrapErr       error
+	opensslConsensusInitOnce  sync.Once
+	opensslConsensusInitErr   error
 	opensslVerifySigOneShotFn = opensslVerifySigOneShot
+	opensslBootstrapFn        = opensslBootstrap
 )
 
 func resetOpenSSLBootstrapStateForTests() {
 	opensslBootstrapOnce = sync.Once{}
 	opensslBootstrapErr = nil
+	opensslConsensusInitOnce = sync.Once{}
+	opensslConsensusInitErr = nil
+	opensslBootstrapFn = opensslBootstrap
+}
+
+// ensureOpenSSLConsensusInit performs bare OpenSSL initialization for the consensus
+// verification path. It does NOT read any RUBIN_OPENSSL_* environment variables,
+// does NOT load the FIPS provider, and does NOT set fips=yes default properties.
+//
+// This ensures that consensus signature verification is deterministic across all
+// nodes regardless of host environment configuration. Two nodes with different
+// RUBIN_OPENSSL_FIPS_MODE settings will produce identical verification results.
+//
+// Non-consensus callers (key generation, signing, CLI tools) should continue to
+// use ensureOpenSSLBootstrap() which honors operator-configured FIPS settings.
+func ensureOpenSSLConsensusInit() error {
+	opensslConsensusInitOnce.Do(func() {
+		if err := opensslBootstrapFn(false, "", ""); err != nil {
+			opensslConsensusInitErr = txerr(TX_ERR_PARSE, fmt.Sprintf("openssl consensus init: %v", err))
+		}
+	})
+	return opensslConsensusInitErr
 }
 
 // ensureOpenSSLBootstrap reads RUBIN_OPENSSL_* process environment once and caches the
@@ -201,7 +226,7 @@ func ensureOpenSSLBootstrap() error {
 	rubinModules := strings.TrimSpace(os.Getenv("RUBIN_OPENSSL_MODULES"))
 
 	opensslBootstrapOnce.Do(func() {
-		if err := opensslBootstrap(requireFIPS, rubinConf, rubinModules); err != nil {
+		if err := opensslBootstrapFn(requireFIPS, rubinConf, rubinModules); err != nil {
 			opensslBootstrapErr = txerr(TX_ERR_PARSE, fmt.Sprintf("openssl bootstrap: %v", err))
 		}
 	})
@@ -300,7 +325,7 @@ func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte
 
 	switch suiteID {
 	case SUITE_ID_ML_DSA_87:
-		if err := ensureOpenSSLBootstrap(); err != nil {
+		if err := ensureOpenSSLConsensusInit(); err != nil {
 			return false, err
 		}
 		if len(pubkey) != ML_DSA_87_PUBKEY_BYTES || len(signature) != ML_DSA_87_SIG_BYTES {
