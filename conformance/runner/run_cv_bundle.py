@@ -397,7 +397,7 @@ def parse_hex_u256_for_conformance(value: Any) -> tuple[Optional[int], Optional[
     if text.startswith("0x"):
         text = text[2:]
     if text == "":
-        return 0, None
+        return None, "bad target"
     if len(text) % 2 == 1:
         text = "0" + text
     if len(text) > 64:
