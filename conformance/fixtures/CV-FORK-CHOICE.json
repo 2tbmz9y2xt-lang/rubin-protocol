@@ -139,6 +139,116 @@
           "tip_hash": "0x0000000000000000000000000000000000000000000000000000000000000001"
         }
       ]
+    },
+    {
+      "id": "NEG-FC-TARGET-OVERFLOW",
+      "op": "fork_work",
+      "target": "0x10000000000000000000000000000000000000000000000000000000000000000",
+      "expect_ok": false,
+      "expect_err": "bad target"
+    },
+    {
+      "id": "CV-FC-HEAVIER-WINS-DISTINCT-TIPS",
+      "op": "fork_choice_select",
+      "expect_ok": true,
+      "expect_winner": "B",
+      "chains": [
+        {
+          "id": "A",
+          "targets": [
+            "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          ],
+          "tip_hash": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        },
+        {
+          "id": "B",
+          "targets": [
+            "0x8000000000000000000000000000000000000000000000000000000000000000"
+          ],
+          "tip_hash": "0x0000000000000000000000000000000000000000000000000000000000000002"
+        }
+      ]
+    },
+    {
+      "id": "CV-FC-THREE-CHAIN-HEAVIEST",
+      "op": "fork_choice_select",
+      "expect_ok": true,
+      "expect_winner": "heavy",
+      "chains": [
+        {
+          "id": "light",
+          "targets": [
+            "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          ],
+          "tip_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "id": "heavy",
+          "targets": [
+            "0x0100000000000000000000000000000000000000000000000000000000000000",
+            "0x0100000000000000000000000000000000000000000000000000000000000000"
+          ],
+          "tip_hash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        {
+          "id": "mid",
+          "targets": [
+            "0x8000000000000000000000000000000000000000000000000000000000000000"
+          ],
+          "tip_hash": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      ]
+    },
+    {
+      "id": "CV-FC-SHORT-HEAVY-BEATS-LONG-LIGHT",
+      "op": "fork_choice_select",
+      "expect_ok": true,
+      "expect_winner": "heavy",
+      "chains": [
+        {
+          "id": "light",
+          "targets": [
+            "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          ],
+          "tip_hash": "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        {
+          "id": "heavy",
+          "targets": [
+            "0x1000000000000000000000000000000000000000000000000000000000000000"
+          ],
+          "tip_hash": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      ]
+    },
+    {
+      "id": "NEG-FC-ALL-INVALID-TARGETS",
+      "op": "fork_choice_select",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_PARSE",
+      "chains": [
+        {
+          "id": "A",
+          "targets": [
+            "0x0000000000000000000000000000000000000000000000000000000000000000"
+          ],
+          "tip_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "id": "B",
+          "targets": [
+            "0x0000000000000000000000000000000000000000000000000000000000000000"
+          ],
+          "tip_hash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ]
     }
   ]
 }

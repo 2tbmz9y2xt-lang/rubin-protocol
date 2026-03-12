@@ -387,6 +387,27 @@ def parse_hex_uint(value: Any) -> int:
     return int(text, 16)
 
 
+MAX_U256 = (1 << 256) - 1
+
+
+def parse_hex_u256_for_conformance(value: Any) -> tuple[Optional[int], Optional[str]]:
+    if not isinstance(value, str):
+        return None, "bad target"
+    text = value.strip().lower()
+    if text.startswith("0x"):
+        text = text[2:]
+    if text == "":
+        return None, "bad target"
+    if len(text) % 2 == 1:
+        text = "0" + text
+    if len(text) > 64:
+        return None, "bad target"
+    try:
+        return int(text, 16), None
+    except ValueError:
+        return None, "bad target"
+
+
 def parse_hex_bytes(value: Any) -> bytes:
     if not isinstance(value, str):
         raise ValueError("expected hex string")
@@ -1375,17 +1396,18 @@ def validate_local_vector(gate: str, v: Dict[str, Any]) -> List[str]:
         return problems
 
     if op == "fork_work":
-        target = parse_hex_uint(v.get("target"))
-        if target <= 0:
-            problems.append(f"{prefix}: target must be > 0")
-            return problems
-        work = (1 << 256) // target
-        work_hex = hex(work)
+        target, err = parse_hex_u256_for_conformance(v.get("target"))
+        ok = target is not None and 0 < target <= MAX_U256
+        if target is not None and target <= 0:
+            err = "TX_ERR_PARSE"
+        work_hex = hex((1 << 256) // target) if ok else None
         if "expect_work" in v:
-            expected_work = hex(parse_hex_uint(v["expect_work"]))
+            expected_work = hex(parse_hex_uint(v["expect_work"])) if ok else None
             check_expect(problems, prefix, work_hex, expected_work, "work")
         if "expect_ok" in v:
-            check_expect(problems, prefix, True, bool(v["expect_ok"]), "ok")
+            check_expect(problems, prefix, ok, bool(v["expect_ok"]), "ok")
+        if "expect_err" in v:
+            check_expect(problems, prefix, err, v["expect_err"], "err")
         return problems
 
     if op == "fork_choice_select":
@@ -1397,23 +1419,37 @@ def validate_local_vector(gate: str, v: Dict[str, Any]) -> List[str]:
         best_id = None
         best_work = -1
         best_tip = None
+        ok = True
+        err = None
         for chain in chains:
             if not isinstance(chain, dict):
                 problems.append(f"{prefix}: chain entry must be object")
                 return problems
             cid = str(chain.get("id"))
-            tip_hash = parse_hex_bytes(chain.get("tip_hash", ""))
+            try:
+                tip_hash = parse_hex_bytes(chain.get("tip_hash", ""))
+            except ValueError:
+                ok = False
+                err = "bad tip_hash"
+                break
             targets = chain.get("targets", [])
             if not isinstance(targets, list) or len(targets) == 0:
                 problems.append(f"{prefix}: chain {cid} targets must be non-empty array")
                 return problems
             total_work = 0
             for t in targets:
-                target = parse_hex_uint(t)
+                target, target_err = parse_hex_u256_for_conformance(t)
+                if target is None:
+                    ok = False
+                    err = target_err
+                    break
                 if target <= 0:
-                    problems.append(f"{prefix}: chain {cid} has non-positive target")
-                    return problems
+                    ok = False
+                    err = "TX_ERR_PARSE"
+                    break
                 total_work += (1 << 256) // target
+            if not ok:
+                break
 
             if (total_work > best_work) or (
                 total_work == best_work and (best_tip is None or tip_hash < best_tip)
@@ -1422,13 +1458,15 @@ def validate_local_vector(gate: str, v: Dict[str, Any]) -> List[str]:
                 best_tip = tip_hash
                 best_id = cid
 
-        if "expect_winner" in v:
+        if "expect_winner" in v and ok:
             check_expect(problems, prefix, best_id, str(v["expect_winner"]), "winner")
-        if "expect_chainwork" in v:
+        if "expect_chainwork" in v and ok:
             expected_work = parse_hex_uint(v["expect_chainwork"])
             check_expect(problems, prefix, best_work, expected_work, "chainwork")
         if "expect_ok" in v:
-            check_expect(problems, prefix, True, bool(v["expect_ok"]), "ok")
+            check_expect(problems, prefix, ok, bool(v["expect_ok"]), "ok")
+        if "expect_err" in v:
+            check_expect(problems, prefix, err, v["expect_err"], "err")
         return problems
 
     if op == "determinism_order":
