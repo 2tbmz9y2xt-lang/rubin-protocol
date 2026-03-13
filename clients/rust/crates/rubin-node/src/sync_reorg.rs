@@ -7,6 +7,8 @@ use crate::chainstate::ChainStateConnectSummary;
 use crate::sync::SyncEngine;
 use crate::txpool::TxPool;
 
+pub(crate) const PARENT_BLOCK_NOT_FOUND_ERR: &str = "parent block not found";
+
 /// A block on a candidate side-chain branch, collected while walking
 /// parent pointers back to a common ancestor on the canonical chain.
 struct ReorgBranchBlock {
@@ -96,7 +98,7 @@ impl SyncEngine {
         if !self.chain_state.has_tip {
             // Genesis: prev_block_hash must be zero.
             if parsed.header.prev_block_hash != [0u8; 32] {
-                return Err("parent block not found".into());
+                return Err(PARENT_BLOCK_NOT_FOUND_ERR.into());
             }
             let summary = self.apply_block(block_bytes, prev_timestamps)?;
             return Ok(Some(summary));
@@ -251,7 +253,7 @@ impl SyncEngine {
             // Load the parent block from the side-chain store.
             let parent_bytes = block_store
                 .get_block_by_hash(parent_hash)
-                .map_err(|_| "parent block not found".to_string())?;
+                .map_err(|_| PARENT_BLOCK_NOT_FOUND_ERR.to_string())?;
             let parent_parsed = parse_block_bytes(&parent_bytes).map_err(|e| e.to_string())?;
 
             branch.push(ReorgBranchBlock {
@@ -569,7 +571,7 @@ mod tests {
         let err = engine
             .apply_block_with_reorg(&bad_genesis, None, None)
             .unwrap_err();
-        assert!(err.contains("parent block not found"), "got: {err}");
+        assert!(err.contains(PARENT_BLOCK_NOT_FOUND_ERR), "got: {err}");
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 

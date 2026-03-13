@@ -266,6 +266,12 @@ func TestPeerQuotaKeyEdgeCases(t *testing.T) {
 	if got := peerQuotaKey("[::1]:9000"); got != "::1" {
 		t.Fatalf("peerQuotaKey(\"[::1]:9000\") = %q, want \"::1\"", got)
 	}
+	if got := peerQuotaKey("[fe80::1%en0]:9000"); got != "fe80::1" {
+		t.Fatalf("peerQuotaKey(\"[fe80::1%%en0]:9000\") = %q, want \"fe80::1\"", got)
+	}
+	if got := peerQuotaKey("fe80::1%en1"); got != "fe80::1" {
+		t.Fatalf("peerQuotaKey(\"fe80::1%%en1\") = %q, want \"fe80::1\"", got)
+	}
 	if got := peerQuotaKey("bare-hostname"); got != "bare-hostname" {
 		t.Fatalf("peerQuotaKey(\"bare-hostname\") = %q, want \"bare-hostname\"", got)
 	}

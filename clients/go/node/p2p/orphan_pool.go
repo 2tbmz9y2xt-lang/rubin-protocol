@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"net"
+	"net/netip"
 	"sync"
 )
 
@@ -171,7 +172,10 @@ func peerQuotaKey(addr string) string {
 	}
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		return addr // already bare IP or unparseable
+		host = addr // already bare IP or unparseable
+	}
+	if ip, err := netip.ParseAddr(host); err == nil {
+		return ip.WithZone("").String()
 	}
 	return host
 }
