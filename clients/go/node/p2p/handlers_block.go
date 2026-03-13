@@ -170,4 +170,3 @@ func (s *Service) resolveOrphans(skip *peer, blockHash [32]byte) {
 		s.resolveOrphans(skip, childHash)
 	}
 }
-
