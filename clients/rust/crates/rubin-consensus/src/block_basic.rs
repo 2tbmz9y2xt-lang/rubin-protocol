@@ -41,7 +41,7 @@ pub struct BlockBasicSummary {
     pub block_hash: [u8; 32],
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct DaCommitSet {
     tx: Tx,
     chunk_count: u16,
@@ -261,8 +261,41 @@ fn validate_da_set_integrity(txs: &[Tx]) -> Result<(), TxError> {
         }
     }
 
-    let commit_ids = sorted_da_ids(&commits);
-    let chunk_ids = sorted_da_ids(&chunks);
+    validate_da_set_maps(&commits, &chunks)
+}
+
+fn da_commit_for_id<'a>(
+    commits: &'a HashMap<[u8; 32], DaCommitSet>,
+    da_id: &[u8; 32],
+) -> Result<&'a DaCommitSet, TxError> {
+    commits.get(da_id).ok_or_else(|| {
+        TxError::new(
+            ErrorCode::BlockErrDaSetInvalid,
+            "missing DA commit for da_id",
+        )
+    })
+}
+
+fn da_chunk_set_for_id<'a>(
+    chunks: &'a HashMap<[u8; 32], HashMap<u16, Tx>>,
+    da_id: &[u8; 32],
+) -> Result<&'a HashMap<u16, Tx>, TxError> {
+    chunks
+        .get(da_id)
+        .ok_or_else(|| TxError::new(ErrorCode::BlockErrDaIncomplete, "DA commit without chunks"))
+}
+
+fn da_chunk_tx_for_index(set: &HashMap<u16, Tx>, index: u16) -> Result<&Tx, TxError> {
+    set.get(&index)
+        .ok_or_else(|| TxError::new(ErrorCode::BlockErrDaIncomplete, "missing DA chunk index"))
+}
+
+fn validate_da_set_maps(
+    commits: &HashMap<[u8; 32], DaCommitSet>,
+    chunks: &HashMap<[u8; 32], HashMap<u16, Tx>>,
+) -> Result<(), TxError> {
+    let commit_ids = sorted_da_ids(commits);
+    let chunk_ids = sorted_da_ids(chunks);
 
     for da_id in &chunk_ids {
         if !commits.contains_key(da_id) {
@@ -274,18 +307,14 @@ fn validate_da_set_integrity(txs: &[Tx]) -> Result<(), TxError> {
     }
 
     for da_id in &commit_ids {
-        let commit = commits
-            .get(da_id)
-            .expect("commit id list must reference existing commit");
+        let commit = da_commit_for_id(commits, da_id)?;
         if commit.chunk_count == 0 || u64::from(commit.chunk_count) > MAX_DA_CHUNK_COUNT {
             return Err(TxError::new(
                 ErrorCode::TxErrParse,
                 "chunk_count out of range for tx_kind=0x01",
             ));
         }
-        let set = chunks.get(da_id).ok_or_else(|| {
-            TxError::new(ErrorCode::BlockErrDaIncomplete, "DA commit without chunks")
-        })?;
+        let set = da_chunk_set_for_id(chunks, da_id)?;
         if set.len() != commit.chunk_count as usize {
             return Err(TxError::new(
                 ErrorCode::BlockErrDaIncomplete,
@@ -293,9 +322,7 @@ fn validate_da_set_integrity(txs: &[Tx]) -> Result<(), TxError> {
             ));
         }
         for i in 0..commit.chunk_count {
-            let _ = set.get(&i).ok_or_else(|| {
-                TxError::new(ErrorCode::BlockErrDaIncomplete, "missing DA chunk index")
-            })?;
+            let _ = da_chunk_tx_for_index(set, i)?;
         }
     }
 
@@ -307,17 +334,11 @@ fn validate_da_set_integrity(txs: &[Tx]) -> Result<(), TxError> {
     }
 
     for da_id in &commit_ids {
-        let commit = commits
-            .get(da_id)
-            .expect("commit id list must reference existing commit");
-        let set = chunks
-            .get(da_id)
-            .expect("completeness checks guarantee chunk set presence");
+        let commit = da_commit_for_id(commits, da_id)?;
+        let set = da_chunk_set_for_id(chunks, da_id)?;
         let mut concat = Vec::<u8>::new();
         for i in 0..commit.chunk_count {
-            let tx = set
-                .get(&i)
-                .expect("completeness checks guarantee chunk index presence");
+            let tx = da_chunk_tx_for_index(set, i)?;
             concat.extend_from_slice(&tx.da_payload);
         }
         let payload_commitment = sha3_256(&concat);
@@ -473,6 +494,94 @@ fn compact_size_len(n: u64) -> u64 {
         0xfd..=0xffff => 3,
         0x1_0000..=0xffff_ffff => 5,
         _ => 9,
+    }
+}
+
+#[cfg(test)]
+mod internal_tests {
+    use super::{
+        da_chunk_set_for_id, da_chunk_tx_for_index, da_commit_for_id, validate_da_set_maps,
+        DaCommitSet,
+    };
+    use crate::constants::COV_TYPE_DA_COMMIT;
+    use crate::error::ErrorCode;
+    use crate::tx::{Tx, TxOutput};
+    use std::collections::HashMap;
+
+    fn dummy_da_commit_tx(payload_commitment: [u8; 32]) -> Tx {
+        Tx {
+            version: 1,
+            tx_kind: 0x01,
+            tx_nonce: 0,
+            inputs: Vec::new(),
+            outputs: vec![TxOutput {
+                value: 0,
+                covenant_type: COV_TYPE_DA_COMMIT,
+                covenant_data: payload_commitment.to_vec(),
+            }],
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: Vec::new(),
+        }
+    }
+
+    fn dummy_da_chunk_tx(payload: &[u8]) -> Tx {
+        Tx {
+            version: 1,
+            tx_kind: 0x02,
+            tx_nonce: 0,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: payload.to_vec(),
+        }
+    }
+
+    #[test]
+    fn da_commit_for_id_missing_returns_block_err_da_set_invalid() {
+        let commits: HashMap<[u8; 32], DaCommitSet> = HashMap::new();
+        let err = da_commit_for_id(&commits, &[0x11; 32]).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BlockErrDaSetInvalid);
+    }
+
+    #[test]
+    fn da_chunk_set_for_id_missing_returns_block_err_da_incomplete() {
+        let chunks: HashMap<[u8; 32], HashMap<u16, Tx>> = HashMap::new();
+        let err = da_chunk_set_for_id(&chunks, &[0x22; 32]).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BlockErrDaIncomplete);
+    }
+
+    #[test]
+    fn da_chunk_tx_for_index_missing_returns_block_err_da_incomplete() {
+        let set: HashMap<u16, Tx> = HashMap::new();
+        let err = da_chunk_tx_for_index(&set, 0).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BlockErrDaIncomplete);
+    }
+
+    #[test]
+    fn validate_da_set_maps_rejects_missing_chunk_index_without_panic() {
+        let da_id = [0x33; 32];
+        let mut commits = HashMap::new();
+        commits.insert(
+            da_id,
+            DaCommitSet {
+                tx: dummy_da_commit_tx([0x44; 32]),
+                chunk_count: 2,
+            },
+        );
+
+        let mut set = HashMap::new();
+        set.insert(0, dummy_da_chunk_tx(b"chunk-0"));
+        let mut chunks = HashMap::new();
+        chunks.insert(da_id, set);
+
+        let err = validate_da_set_maps(&commits, &chunks).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BlockErrDaIncomplete);
     }
 }
 
