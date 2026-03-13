@@ -688,7 +688,13 @@ func TestBlockStoreCanonicalAndTruncateErrorBranches(t *testing.T) {
 	hash := [32]byte{0x21}
 	store.index.Canonical = []string{hex.EncodeToString(hash[:]), "zz"}
 	store.canonicalHeightByHash = map[[32]byte]uint64{hash: 0}
-	if err := store.TruncateCanonical(1); err == nil {
-		t.Fatalf("expected malformed canonical truncate error")
+	if err := store.TruncateCanonical(1); err != nil {
+		t.Fatalf("TruncateCanonical malformed suffix: %v", err)
+	}
+	if len(store.index.Canonical) != 1 {
+		t.Fatalf("canonical len=%d, want 1", len(store.index.Canonical))
+	}
+	if _, ok := store.canonicalHeightByHash[hash]; !ok {
+		t.Fatalf("expected retained prefix to stay indexed")
 	}
 }

@@ -1,15 +1,14 @@
 package node
 
 import (
-	"encoding/hex"
 	"errors"
+	"fmt"
 )
 
 func (bs *BlockStore) FindCanonicalHeight(blockHash [32]byte) (uint64, bool, error) {
 	if bs == nil {
 		return 0, false, errors.New("nil blockstore")
 	}
-	blockHashHex := hex.EncodeToString(blockHash[:])
 
 	for {
 		var (
@@ -20,15 +19,27 @@ func (bs *BlockStore) FindCanonicalHeight(blockHash [32]byte) (uint64, bool, err
 
 		bs.stateMu.RLock()
 		if cachedHeight, ok := bs.canonicalHeightByHash[blockHash]; ok {
-			if cachedHeight < uint64(len(bs.index.Canonical)) && bs.index.Canonical[cachedHeight] == blockHashHex {
-				bs.stateMu.RUnlock()
-				return cachedHeight, true, nil
+			if cachedHeight < uint64(len(bs.index.Canonical)) {
+				hash, err := parseHex32(fmt.Sprintf("canonical[%d]", cachedHeight), bs.index.Canonical[cachedHeight])
+				if err != nil {
+					bs.stateMu.RUnlock()
+					return 0, false, err
+				}
+				if hash == blockHash {
+					bs.stateMu.RUnlock()
+					return cachedHeight, true, nil
+				}
 			}
 			staleCache = true
 		}
 		for idx := len(bs.index.Canonical); idx > 0; idx-- {
 			currentHeight := uint64(idx - 1)
-			if bs.index.Canonical[currentHeight] == blockHashHex {
+			hash, err := parseHex32(fmt.Sprintf("canonical[%d]", currentHeight), bs.index.Canonical[currentHeight])
+			if err != nil {
+				bs.stateMu.RUnlock()
+				return 0, false, err
+			}
+			if hash == blockHash {
 				found = true
 				height = currentHeight
 				break
@@ -46,10 +57,17 @@ func (bs *BlockStore) FindCanonicalHeight(blockHash [32]byte) (uint64, bool, err
 		}
 
 		bs.stateMu.Lock()
-		if height < uint64(len(bs.index.Canonical)) && bs.index.Canonical[height] == blockHashHex {
-			bs.canonicalHeightByHash[blockHash] = height
-			bs.stateMu.Unlock()
-			return height, true, nil
+		if height < uint64(len(bs.index.Canonical)) {
+			hash, err := parseHex32(fmt.Sprintf("canonical[%d]", height), bs.index.Canonical[height])
+			if err != nil {
+				bs.stateMu.Unlock()
+				return 0, false, err
+			}
+			if hash == blockHash {
+				bs.canonicalHeightByHash[blockHash] = height
+				bs.stateMu.Unlock()
+				return height, true, nil
+			}
 		}
 		if staleCache {
 			delete(bs.canonicalHeightByHash, blockHash)

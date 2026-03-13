@@ -353,14 +353,12 @@ func (bs *BlockStore) dropCanonicalStateFromLocked(start uint64) error {
 	if bs == nil || start >= uint64(len(bs.index.Canonical)) {
 		return nil
 	}
-	for i := start; i < uint64(len(bs.index.Canonical)); i++ {
-		hash, err := parseHex32(fmt.Sprintf("canonical[%d]", i), bs.index.Canonical[i])
-		if err != nil {
-			return err
-		}
-		delete(bs.canonicalHeightByHash, hash)
-		delete(bs.chainWorkByHash, hash)
+	nextIndex, err := buildCanonicalHeightIndex(bs.index.Canonical[:start])
+	if err != nil {
+		return err
 	}
+	bs.canonicalHeightByHash = nextIndex
+	bs.chainWorkByHash = make(map[[32]byte]*big.Int)
 	return nil
 }
 
