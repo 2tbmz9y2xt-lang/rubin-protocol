@@ -57,6 +57,7 @@ def sanitize_go_or_c(text: str) -> str:
 
 
 def sanitize_rust(text: str) -> str:
+    text = strip_c_block_comments(text)
     text = strip_line_comments(text, "//")
     text = strip_double_quoted_strings(text)
     return text
@@ -69,7 +70,7 @@ def contains_call(body: str, name: str) -> bool:
 def check_go_verify(path: Path, text: str) -> list[str]:
     errors: list[str] = []
     sanitized_text = sanitize_go_or_c(text)
-    c_text = strip_double_quoted_strings(strip_line_comments(text, "//"))
+    c_text = sanitize_go_or_c(text)
     body = extract_function_body(sanitized_text, "func verifySig(")
     if body is None:
         return [f"{path}: missing func verifySig("]
@@ -172,11 +173,79 @@ def main() -> int:
         description="Fail on consensus OpenSSL patterns that allow env/config drift."
     )
     parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Run synthetic parser-bypass self-tests instead of checking repository files.",
+    )
+    parser.add_argument(
         "files",
-        nargs="+",
+        nargs="*",
         help="Repository-relative files to inspect.",
     )
     args = parser.parse_args()
+
+    if args.self_test:
+        bad_go = """package consensus
+        // func verifySig() { ensureOpenSSLConsensusInit() }
+        /*
+        static int rubin_openssl_consensus_init(char* err_buf, size_t err_buf_len) {
+            return 1;
+        }
+        */
+        func verifySig() error {
+            return ensureOpenSSLBootstrap()
+        }
+        static int rubin_openssl_consensus_init(char* err_buf, size_t err_buf_len) {
+            rubin_set_env_if_empty("OPENSSL_CONF", "bad", err_buf, err_buf_len);
+            if (OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CONFIG, NULL) != 1) {
+                return -1;
+            }
+            return 1;
+        }
+        func ensureOpenSSLConsensusInit() error {
+            return opensslBootstrapFn(false, "", "")
+        }
+        """
+        bad_go_errors = check_go_verify(Path("synthetic.go"), bad_go)
+        assert any("must use ensureOpenSSLConsensusInit" in err for err in bad_go_errors)
+        assert any("must not call ensureOpenSSLBootstrap" in err for err in bad_go_errors)
+        assert any("must not use OPENSSL_INIT_LOAD_CONFIG" in err for err in bad_go_errors)
+        assert any("must not delegate to opensslBootstrap" in err for err in bad_go_errors)
+        assert any("must not read or mutate OPENSSL_CONF/OPENSSL_MODULES" in err for err in bad_go_errors)
+
+        bad_rust = """/*
+        fn openssl_consensus_bootstrap() -> Result<(), TxError> {
+            Ok(())
+        }
+        */
+        pub fn verify_sig(
+            suite_id: u8,
+            pubkey: &[u8],
+            signature: &[u8],
+            digest32: &[u8; 32],
+        ) -> Result<bool, TxError> {
+            ensure_openssl_bootstrap()?;
+            Ok(true)
+        }
+
+        fn openssl_consensus_bootstrap() -> Result<(), TxError> {
+            if OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CONFIG, core::ptr::null()) != 1 {
+                return Err(TxError::new(ErrorCode::TxErrParse, "fail"));
+            }
+            set_env_if_empty("OPENSSL_CONF", Some("bad".to_string()));
+            Ok(())
+        }
+        """
+        bad_rust_errors = check_rust_verify(Path("synthetic.rs"), bad_rust)
+        assert any("must use ensure_openssl_consensus_init" in err for err in bad_rust_errors)
+        assert any("must not call ensure_openssl_bootstrap" in err for err in bad_rust_errors)
+        assert any("must not use OPENSSL_INIT_LOAD_CONFIG" in err for err in bad_rust_errors)
+        assert any("must not read or propagate operator-configured OpenSSL env" in err for err in bad_rust_errors)
+        print("OK: consensus OpenSSL isolation self-test passed.")
+        return 0
+
+    if not args.files:
+        parser.error("files are required unless --self-test is set")
 
     repo_root = Path(".").resolve()
     errors: list[str] = []

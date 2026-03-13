@@ -140,6 +140,8 @@ def main() -> int:
             prefixes=("scripts/crypto/openssl",),
             suffixes=(),
             exact=(
+                ".github/workflows/ci.yml",
+                "tools/check_consensus_openssl_isolation.py",
                 "scripts/dev-env.sh",
                 "clients/go/consensus/verify_sig_openssl.go",
                 "clients/go/consensus/verify_sig_openssl_bootstrap_test.go",
@@ -166,6 +168,14 @@ def main() -> int:
             add_check(
                 "consensus_openssl_source_policy",
                 ["python3", "tools/check_consensus_openssl_isolation.py", *consensus_openssl_sources],
+            )
+        if any(
+            path in {".github/workflows/ci.yml", "tools/check_consensus_openssl_isolation.py"}
+            for path in changed
+        ):
+            add_check(
+                "consensus_openssl_tooling_self_test",
+                ["python3", "tools/check_consensus_openssl_isolation.py", "--self-test"],
             )
         add_check(
             "go_verify_sig_smoke",
