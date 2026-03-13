@@ -31,6 +31,33 @@ jobs:
         run: |
           python3 tools/check_openssl_cve_response.py --code-root .
 
+      - name: Consensus OpenSSL isolation policy
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base_ref="origin/${{ github.base_ref }}"
+          else
+            base_ref="${{ github.event.before }}"
+          fi
+          verify_changed="$(git diff --name-only "${base_ref}"..HEAD -- \
+            clients/go/consensus/verify_sig_openssl.go \
+            clients/rust/crates/rubin-consensus/src/verify_sig_openssl.rs || true)"
+          tooling_changed="$(git diff --name-only "${base_ref}"..HEAD -- \
+            .github/workflows/ci.yml \
+            tools/check_consensus_openssl_isolation.py || true)"
+          if [[ -n "${verify_changed}" ]]; then
+            python3 tools/check_consensus_openssl_isolation.py \
+              clients/go/consensus/verify_sig_openssl.go \
+              clients/rust/crates/rubin-consensus/src/verify_sig_openssl.rs
+          fi
+          if [[ -n "${tooling_changed}" ]]; then
+            python3 tools/check_consensus_openssl_isolation.py --self-test
+          fi
+          if [[ -n "${verify_changed}" || -n "${tooling_changed}" ]]; then
+            exit 0
+          fi
+          echo "SKIP: consensus OpenSSL verify files and policy tooling unchanged"
+
   security_ai:
     needs: policy
     runs-on: ubuntu-latest
