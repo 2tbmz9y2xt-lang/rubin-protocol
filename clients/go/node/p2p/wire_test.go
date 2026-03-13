@@ -11,6 +11,14 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
+type errReader struct {
+	err error
+}
+
+func (r errReader) Read(_ []byte) (int, error) {
+	return 0, r.err
+}
+
 func TestReadWriteFrameRoundtrip(t *testing.T) {
 	msg := message{Command: messageInv, Payload: []byte{0x01, 0x02, 0x03}}
 	magic := networkMagic("devnet")
@@ -128,6 +136,67 @@ func TestReadFrameWithPayloadLimitReadsTxPayloadExact(t *testing.T) {
 	}
 	if !bytes.Equal(got.Payload, payload) {
 		t.Fatalf("payload mismatch")
+	}
+}
+
+func TestReadPayloadWithChecksumChunkedRoundtrip(t *testing.T) {
+	payload := bytes.Repeat([]byte{0xab}, streamReadChunkBytes+17)
+	checksum := wireChecksum(payload)
+	got, err := readPayloadWithChecksum(bytes.NewReader(payload), uint32(len(payload)), checksum)
+	if err != nil {
+		t.Fatalf("readPayloadWithChecksum: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("payload mismatch")
+	}
+}
+
+func TestReadPayloadWithChecksumRejectsBadChecksumAfterChunkedRead(t *testing.T) {
+	payload := bytes.Repeat([]byte{0xcd}, streamReadChunkBytes+9)
+	checksum := wireChecksum(payload)
+	checksum[0] ^= 0xff
+	_, err := readPayloadWithChecksum(bytes.NewReader(payload), uint32(len(payload)), checksum)
+	if err == nil || err.Error() != "invalid envelope checksum" {
+		t.Fatalf("expected invalid envelope checksum, got %v", err)
+	}
+}
+
+func TestReadPayloadWithChecksumNormalizesShortReadToUnexpectedEOF(t *testing.T) {
+	payload := bytes.Repeat([]byte{0xef}, streamReadChunkBytes+5)
+	checksum := wireChecksum(payload)
+	short := payload[:len(payload)-3]
+	_, err := readPayloadWithChecksum(bytes.NewReader(short), uint32(len(payload)), checksum)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("expected unexpected EOF, got %v", err)
+	}
+}
+
+func TestReadPayloadWithChecksumRejectsZeroLengthBadChecksum(t *testing.T) {
+	checksum := wireChecksum(nil)
+	checksum[0] ^= 0xff
+	_, err := readPayloadWithChecksum(bytes.NewReader(nil), 0, checksum)
+	if err == nil || err.Error() != "invalid envelope checksum" {
+		t.Fatalf("expected invalid envelope checksum, got %v", err)
+	}
+}
+
+func TestReadPayloadWithChecksumZeroLengthReturnsEmptySlice(t *testing.T) {
+	got, err := readPayloadWithChecksum(bytes.NewReader(nil), 0, wireChecksum(nil))
+	if err != nil {
+		t.Fatalf("readPayloadWithChecksum: %v", err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Fatalf("expected empty non-nil slice, got %#v", got)
+	}
+}
+
+func TestReadPayloadWithChecksumPropagatesNonEOFReadError(t *testing.T) {
+	payload := bytes.Repeat([]byte{0x11}, streamReadChunkBytes)
+	checksum := wireChecksum(payload)
+	boom := errors.New("boom")
+	_, err := readPayloadWithChecksum(errReader{err: boom}, uint32(len(payload)), checksum)
+	if !errors.Is(err, boom) {
+		t.Fatalf("expected boom, got %v", err)
 	}
 }
 

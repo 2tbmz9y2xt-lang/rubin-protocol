@@ -43,6 +43,7 @@ const (
 	maxAddrPayloadEntries   = maxKnownAddrs
 	maxInventoryVectors     = 4096
 	maxCompactSizeBytes     = 9
+	streamReadChunkBytes    = 32 * 1024
 )
 
 type message struct {
@@ -83,24 +84,55 @@ func readFrameWithPayloadLimit(r io.Reader, expectedMagic [4]byte, maxMessageSiz
 			return frame, errors.New("message exceeds command cap")
 		}
 	}
-	payload := []byte{}
-	if header.Size > 0 {
-		limited := io.LimitReader(r, int64(header.Size))
-		payload, err = io.ReadAll(limited)
-		if err != nil {
-			return frame, err
-		}
-		if len(payload) != int(header.Size) {
-			return frame, io.ErrUnexpectedEOF
-		}
-	}
-	checksum := wireChecksum(payload)
-	if !bytes.Equal(header.Checksum[:], checksum[:]) {
-		return frame, errors.New("invalid envelope checksum")
+	payload, err := readPayloadWithChecksum(r, header.Size, header.Checksum)
+	if err != nil {
+		return frame, err
 	}
 	frame.Command = header.Command
 	frame.Payload = payload
 	return frame, nil
+}
+
+func readPayloadWithChecksum(r io.Reader, size uint32, wantChecksum [4]byte) ([]byte, error) {
+	if size == 0 {
+		if wantChecksum != wireChecksum(nil) {
+			return nil, errors.New("invalid envelope checksum")
+		}
+		return make([]byte, 0), nil
+	}
+
+	hasher := sha3.New256()
+	initialCap := int(size)
+	if initialCap > streamReadChunkBytes {
+		initialCap = streamReadChunkBytes
+	}
+	payload := make([]byte, 0, initialCap)
+	remaining := int(size)
+	for remaining > 0 {
+		chunkLen := remaining
+		if chunkLen > streamReadChunkBytes {
+			chunkLen = streamReadChunkBytes
+		}
+		chunk := make([]byte, chunkLen)
+		if _, err := io.ReadFull(r, chunk); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return nil, io.ErrUnexpectedEOF
+			}
+			return nil, err
+		}
+		if _, err := hasher.Write(chunk); err != nil {
+			return nil, err
+		}
+		payload = append(payload, chunk...)
+		remaining -= chunkLen
+	}
+
+	sum := hasher.Sum(nil)
+	if !bytes.Equal(wantChecksum[:], sum[:4]) {
+		return nil, errors.New("invalid envelope checksum")
+	}
+
+	return payload, nil
 }
 
 func readFrameHeader(r io.Reader, expectedMagic [4]byte, maxMessageSize uint32) (frameHeader, error) {
