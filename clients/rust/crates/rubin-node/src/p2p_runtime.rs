@@ -1679,7 +1679,7 @@ mod tests {
 
         // headers gets an explicit cap matching MAX_HEADERS_PAYLOAD_BYTES.
         assert_eq!(runtime_payload_cap("headers"), MAX_HEADERS_PAYLOAD_BYTES);
-        assert!(MAX_HEADERS_PAYLOAD_BYTES > 0);
+        const { assert!(MAX_HEADERS_PAYLOAD_BYTES > 0) };
 
         // Unknown/garbage commands get a small cap (256 bytes) so they
         // reach dispatch and accrue ban score, but cannot trigger large
