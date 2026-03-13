@@ -24,7 +24,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          model: claude-opus-4-5
+          model: claude-opus-4-6
           prompt: |
             You are a senior security and protocol engineer reviewing changes to the RUBIN blockchain protocol.
             Context:
