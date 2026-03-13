@@ -6,6 +6,25 @@ func (bs *BlockStore) FindCanonicalHeight(blockHash [32]byte) (uint64, bool, err
 	if bs == nil {
 		return 0, false, errors.New("nil blockstore")
 	}
+	if height, ok := bs.canonicalHeightByHash[blockHash]; ok {
+		hash, exists, err := bs.CanonicalHash(height)
+		if err != nil {
+			return 0, false, err
+		}
+		if exists && hash == blockHash {
+			return height, true, nil
+		}
+		bs.rebuildCanonicalHeightIndex()
+		if height, ok := bs.canonicalHeightByHash[blockHash]; ok {
+			hash, exists, err := bs.CanonicalHash(height)
+			if err != nil {
+				return 0, false, err
+			}
+			if exists && hash == blockHash {
+				return height, true, nil
+			}
+		}
+	}
 	tipHeight, _, ok, err := bs.Tip()
 	if err != nil || !ok {
 		return 0, false, err
@@ -17,6 +36,9 @@ func (bs *BlockStore) FindCanonicalHeight(blockHash [32]byte) (uint64, bool, err
 			return 0, false, err
 		}
 		if exists && hash == blockHash {
+			if bs.canonicalHeightByHash != nil {
+				bs.canonicalHeightByHash[blockHash] = currentHeight
+			}
 			return currentHeight, true, nil
 		}
 	}

@@ -30,6 +30,9 @@ type BlockStore struct {
 	headersDir string
 	undoDir    string
 	index      blockStoreIndexDisk
+
+	canonicalHeightByHash map[[32]byte]uint64
+	chainWorkByHash       map[[32]byte]*big.Int
 }
 
 // Block/header/undo blobs are append-only. The canonical chain view is the index file,
@@ -73,6 +76,9 @@ func OpenBlockStore(rootPath string) (*BlockStore, error) {
 		headersDir: headersDir,
 		undoDir:    undoDir,
 		index:      index,
+
+		canonicalHeightByHash: buildCanonicalHeightIndex(index.Canonical),
+		chainWorkByHash:       make(map[[32]byte]*big.Int),
 	}
 	return bs, nil
 }
@@ -120,6 +126,7 @@ func (bs *BlockStore) SetCanonicalTip(height uint64, blockHash [32]byte) error {
 	}
 	if changed {
 		bs.index.Canonical = nextCanonical
+		bs.rebuildCanonicalHeightIndex()
 	}
 	return saveBlockStoreIndex(bs.indexPath, bs.index)
 }
@@ -145,6 +152,7 @@ func (bs *BlockStore) TruncateCanonical(count uint64) error {
 		return fmt.Errorf("truncate count out of range: %d", count)
 	}
 	bs.index.Canonical = append([]string(nil), bs.index.Canonical[:count]...)
+	bs.rebuildCanonicalHeightIndex()
 	return saveBlockStoreIndex(bs.indexPath, bs.index)
 }
 
@@ -202,6 +210,7 @@ func (bs *BlockStore) RestoreCanonicalIndex(canonical []string) error {
 		}
 	}
 	bs.index.Canonical = nextCanonical
+	bs.rebuildCanonicalHeightIndex()
 	return saveBlockStoreIndex(bs.indexPath, bs.index)
 }
 
@@ -227,11 +236,27 @@ func (bs *BlockStore) ChainWork(tipHash [32]byte) (*big.Int, error) {
 	if tipHash == zero {
 		return big.NewInt(0), nil
 	}
+	if cached, ok := bs.chainWorkByHash[tipHash]; ok {
+		return cloneBigInt(cached), nil
+	}
 
+	hashes := make([][32]byte, 0, 16)
 	targets := make([][32]byte, 0, 16)
 	seen := make(map[[32]byte]struct{})
 	current := tipHash
 	for current != zero {
+		if cached, ok := bs.chainWorkByHash[current]; ok {
+			total := cloneBigInt(cached)
+			for i := len(targets) - 1; i >= 0; i-- {
+				work, err := consensus.WorkFromTarget(targets[i])
+				if err != nil {
+					return nil, err
+				}
+				total.Add(total, work)
+				bs.chainWorkByHash[hashes[i]] = cloneBigInt(total)
+			}
+			return cloneBigInt(bs.chainWorkByHash[tipHash]), nil
+		}
 		if _, exists := seen[current]; exists {
 			return nil, errors.New("blockstore parent cycle")
 		}
@@ -244,10 +269,50 @@ func (bs *BlockStore) ChainWork(tipHash [32]byte) (*big.Int, error) {
 		if err != nil {
 			return nil, err
 		}
+		hashes = append(hashes, current)
 		targets = append(targets, header.Target)
 		current = header.PrevBlockHash
 	}
-	return consensus.ChainWorkFromTargets(targets)
+	total, err := consensus.ChainWorkFromTargets(targets)
+	if err != nil {
+		return nil, err
+	}
+	running := big.NewInt(0)
+	for i := len(targets) - 1; i >= 0; i-- {
+		work, err := consensus.WorkFromTarget(targets[i])
+		if err != nil {
+			return nil, err
+		}
+		running.Add(running, work)
+		bs.chainWorkByHash[hashes[i]] = cloneBigInt(running)
+	}
+	return total, nil
+}
+
+func buildCanonicalHeightIndex(canonical []string) map[[32]byte]uint64 {
+	out := make(map[[32]byte]uint64, len(canonical))
+	for i, hashHex := range canonical {
+		hash, err := parseHex32(fmt.Sprintf("canonical[%d]", i), hashHex)
+		if err != nil {
+			continue
+		}
+		out[hash] = uint64(i)
+	}
+	return out
+}
+
+func (bs *BlockStore) rebuildCanonicalHeightIndex() {
+	if bs == nil {
+		return
+	}
+	bs.canonicalHeightByHash = buildCanonicalHeightIndex(bs.index.Canonical)
+}
+
+func cloneBigInt(x *big.Int) *big.Int {
+	if x == nil {
+		return nil
+	}
+	return new(big.Int).Set(x)
 }
 
 func (bs *BlockStore) PutUndo(blockHash [32]byte, undo *BlockUndo) error {

@@ -338,6 +338,51 @@ func TestBlockStoreStoreBlockAndChainWork(t *testing.T) {
 	}
 }
 
+func TestBlockStoreChainWorkCachesAndHelperCoverage(t *testing.T) {
+	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+
+	header0 := testHeaderBytes(9, 1)
+	for i := 4; i < 36; i++ {
+		header0[i] = 0
+	}
+	hash0 := mustHeaderHash(t, header0)
+	if err := store.StoreBlock(hash0, header0, []byte("blk0")); err != nil {
+		t.Fatalf("StoreBlock(root): %v", err)
+	}
+
+	header1 := append([]byte(nil), testHeaderBytes(10, 2)...)
+	copy(header1[4:36], hash0[:])
+	hash1 := mustHeaderHash(t, header1)
+	if err := store.StoreBlock(hash1, header1, []byte("blk1")); err != nil {
+		t.Fatalf("StoreBlock(child): %v", err)
+	}
+
+	work1, err := store.ChainWork(hash1)
+	if err != nil {
+		t.Fatalf("ChainWork(initial): %v", err)
+	}
+	work1.Add(work1, big.NewInt(1))
+
+	cachedAgain, err := store.ChainWork(hash1)
+	if err != nil {
+		t.Fatalf("ChainWork(cached): %v", err)
+	}
+	if cachedAgain.Cmp(work1) >= 0 {
+		t.Fatalf("cached ChainWork should return an independent clone")
+	}
+
+	index := buildCanonicalHeightIndex([]string{"zz", hex.EncodeToString(hash1[:])})
+	if got, ok := index[hash1]; !ok || got != 1 {
+		t.Fatalf("buildCanonicalHeightIndex(hash1)=(%v,%d), want true,1", ok, got)
+	}
+
+	var nilStore *BlockStore
+	nilStore.rebuildCanonicalHeightIndex()
+	if cloneBigInt(nil) != nil {
+		t.Fatalf("cloneBigInt(nil) should be nil")
+	}
+}
+
 func TestBlockStoreCanonicalIndexHelpersAndUndoErrors(t *testing.T) {
 	var nilStore *BlockStore
 	if _, err := nilStore.CanonicalIndexSnapshot(); err == nil {
