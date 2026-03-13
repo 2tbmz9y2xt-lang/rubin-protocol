@@ -374,17 +374,16 @@ fn openssl_bootstrap(require_fips: bool) -> Result<(), TxError> {
 /// Non-consensus callers (key generation, signing, CLI tools) should continue
 /// to use [`ensure_openssl_bootstrap`] which honors operator-configured FIPS.
 fn openssl_consensus_bootstrap() -> Result<(), TxError> {
-    // Bare OPENSSL_init_crypto without propagating RUBIN_OPENSSL_CONF or
-    // RUBIN_OPENSSL_MODULES into the process environment. No FIPS provider.
     unsafe {
         openssl_sys::ERR_clear_error();
-        if OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CONFIG, core::ptr::null()) != 1 {
+        if OPENSSL_init_crypto(0, core::ptr::null()) != 1 {
             return Err(TxError::new(
                 ErrorCode::TxErrParse,
                 "openssl consensus init: OPENSSL_init_crypto failed",
             ));
         }
     }
+    openssl_check_sigalg(c"ML-DSA-87", c"")?;
     Ok(())
 }
 
@@ -507,6 +506,12 @@ mod tests {
         OpenSslFipsMode,
     };
     use crate::error::ErrorCode;
+    use std::sync::{Mutex, OnceLock};
+
+    fn openssl_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn map_digest_verify_rc_accepts_valid_signature() {
@@ -585,5 +590,59 @@ mod tests {
         )
         .expect("verify signature");
         assert!(ok);
+    }
+
+    #[test]
+    fn openssl_consensus_bootstrap_ignores_inherited_openssl_env() {
+        let _guard = openssl_env_lock().lock().expect("env lock");
+        let saved_conf = std::env::var_os("OPENSSL_CONF");
+        let saved_modules = std::env::var_os("OPENSSL_MODULES");
+        std::env::remove_var("OPENSSL_CONF");
+        std::env::remove_var("OPENSSL_MODULES");
+
+        let keypair = match Mldsa87Keypair::generate() {
+            Ok(value) => value,
+            Err(err) => {
+                if let Some(value) = saved_conf {
+                    std::env::set_var("OPENSSL_CONF", value);
+                } else {
+                    std::env::remove_var("OPENSSL_CONF");
+                }
+                if let Some(value) = saved_modules {
+                    std::env::set_var("OPENSSL_MODULES", value);
+                } else {
+                    std::env::remove_var("OPENSSL_MODULES");
+                }
+                assert_eq!(err.code, ErrorCode::TxErrParse);
+                return;
+            }
+        };
+        let pubkey = keypair.pubkey_bytes();
+        let digest = [0x6a; 32];
+        let signature = keypair.sign_digest32(digest).expect("sign digest");
+
+        std::env::set_var("OPENSSL_CONF", "/tmp/rubin-consensus-invalid-openssl.cnf");
+        std::env::set_var(
+            "OPENSSL_MODULES",
+            "/tmp/rubin-consensus-invalid-ossl-modules",
+        );
+
+        super::openssl_consensus_bootstrap()
+            .expect("consensus bootstrap must ignore inherited OPENSSL_* env");
+        let ok =
+            super::openssl_verify_sig_digest_oneshot(c"ML-DSA-87", &pubkey, &signature, &digest)
+                .expect("verify signature under poisoned OPENSSL_* env");
+        assert!(ok);
+
+        if let Some(value) = saved_conf {
+            std::env::set_var("OPENSSL_CONF", value);
+        } else {
+            std::env::remove_var("OPENSSL_CONF");
+        }
+        if let Some(value) = saved_modules {
+            std::env::set_var("OPENSSL_MODULES", value);
+        } else {
+            std::env::remove_var("OPENSSL_MODULES");
+        }
     }
 }

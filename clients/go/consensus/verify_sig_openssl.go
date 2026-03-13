@@ -102,6 +102,21 @@ static int rubin_openssl_bootstrap(
 	return 1;
 }
 
+static int rubin_openssl_consensus_init(char* err_buf, size_t err_buf_len) {
+	ERR_clear_error();
+
+	if (OPENSSL_init_crypto(0, NULL) != 1) {
+		rubin_err(err_buf, err_buf_len, "OPENSSL_init_crypto failed");
+		return -1;
+	}
+
+	if (!rubin_check_sigalg("ML-DSA-87", NULL, err_buf, err_buf_len)) {
+		return -1;
+	}
+
+	return 1;
+}
+
 // Returns:
 //  1  -> signature valid
 //  0  -> signature invalid
@@ -175,6 +190,7 @@ var (
 	opensslConsensusInitErr   error
 	opensslVerifySigOneShotFn = opensslVerifySigOneShot
 	opensslBootstrapFn        = opensslBootstrap
+	opensslConsensusInitFn    = opensslConsensusInit
 )
 
 func resetOpenSSLBootstrapStateForTests() {
@@ -183,6 +199,7 @@ func resetOpenSSLBootstrapStateForTests() {
 	opensslConsensusInitOnce = sync.Once{}
 	opensslConsensusInitErr = nil
 	opensslBootstrapFn = opensslBootstrap
+	opensslConsensusInitFn = opensslConsensusInit
 }
 
 // ensureOpenSSLConsensusInit performs bare OpenSSL initialization for the consensus
@@ -197,7 +214,7 @@ func resetOpenSSLBootstrapStateForTests() {
 // use ensureOpenSSLBootstrap() which honors operator-configured FIPS settings.
 func ensureOpenSSLConsensusInit() error {
 	opensslConsensusInitOnce.Do(func() {
-		if err := opensslBootstrapFn(false, "", ""); err != nil {
+		if err := opensslConsensusInitFn(); err != nil {
 			opensslConsensusInitErr = txerr(TX_ERR_PARSE, fmt.Sprintf("openssl consensus init: %v", err))
 		}
 	})
@@ -267,6 +284,25 @@ func opensslBootstrap(requireFIPS bool, rubinConf string, rubinModules string) e
 	}
 	if n == 0 {
 		return fmt.Errorf("unknown bootstrap failure")
+	}
+	return fmt.Errorf("%s", string(errBuf[:n]))
+}
+
+func opensslConsensusInit() error {
+	errBuf := make([]byte, 512)
+	rc := C.rubin_openssl_consensus_init(
+		(*C.char)(unsafe.Pointer(&errBuf[0])),
+		C.size_t(len(errBuf)),
+	)
+	if int(rc) == 1 {
+		return nil
+	}
+	n := 0
+	for n < len(errBuf) && errBuf[n] != 0 {
+		n++
+	}
+	if n == 0 {
+		return fmt.Errorf("unknown consensus init failure")
 	}
 	return fmt.Errorf("%s", string(errBuf[:n]))
 }
