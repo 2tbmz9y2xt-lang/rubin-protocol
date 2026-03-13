@@ -12,10 +12,14 @@ use rubin_consensus::{
 use sha3::{Digest, Sha3_256};
 
 use crate::sync::SyncEngine;
+use crate::sync_reorg::PARENT_BLOCK_NOT_FOUND_ERR;
 
 const DEFAULT_READ_DEADLINE: Duration = Duration::from_secs(15);
 const DEFAULT_WRITE_DEADLINE: Duration = Duration::from_secs(15);
+const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_BAN_THRESHOLD: i32 = 100;
+const DEFAULT_ORPHAN_LIMIT: usize = 500;
+const DEFAULT_ORPHAN_BYTE_LIMIT: usize = 64 << 20;
 const WIRE_HEADER_SIZE: usize = 24;
 const WIRE_COMMAND_SIZE: usize = 12;
 const FUZZ_MAX_P2P_PAYLOAD_BYTES: u64 = 1 << 20;
@@ -91,10 +95,34 @@ pub struct PeerState {
     pub verack_received: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OrphanBlockEntry {
+    block_hash: [u8; 32],
+    parent_hash: [u8; 32],
+    block_bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OrphanBlockMeta {
+    parent_hash: [u8; 32],
+    size: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OrphanBlockPool {
+    limit: usize,
+    byte_limit: usize,
+    total_bytes: usize,
+    pool: HashMap<[u8; 32], Vec<OrphanBlockEntry>>,
+    by_hash: HashMap<[u8; 32], OrphanBlockMeta>,
+    fifo: Vec<[u8; 32]>,
+}
+
 pub struct PeerSession {
     stream: TcpStream,
     cfg: PeerRuntimeConfig,
     peer: PeerState,
+    orphans: OrphanBlockPool,
 }
 
 pub struct PeerManager {
@@ -162,6 +190,7 @@ impl PeerSession {
                 addr,
                 ..PeerState::default()
             },
+            orphans: OrphanBlockPool::new(DEFAULT_ORPHAN_LIMIT, DEFAULT_ORPHAN_BYTE_LIMIT),
         })
     }
 
@@ -234,13 +263,8 @@ impl PeerSession {
                     // accepted runtime commands (stub)
                 }
                 other => {
-                    self.bump_ban(1, &format!("unknown command: {other}"));
-                    if self.peer.ban_score >= self.cfg.ban_threshold {
-                        return Err(io::Error::new(
-                            io::ErrorKind::PermissionDenied,
-                            "peer banned",
-                        ));
-                    }
+                    self.peer.last_error = format!("unknown command: {other}");
+                    return Err(unknown_command_err(other));
                 }
             }
         }
@@ -300,13 +324,8 @@ impl PeerSession {
                     let _ = unmarshal_addr_payload(&msg.payload)?;
                 }
                 other => {
-                    self.bump_ban(1, &format!("unknown command: {other}"));
-                    if self.peer.ban_score >= self.cfg.ban_threshold {
-                        return Err(io::Error::new(
-                            io::ErrorKind::PermissionDenied,
-                            "peer banned",
-                        ));
-                    }
+                    self.peer.last_error = format!("unknown command: {other}");
+                    return Err(unknown_command_err(other));
                 }
             }
         }
@@ -389,12 +408,73 @@ impl PeerSession {
         {
             return Ok(());
         }
-        let prev_timestamps = sync_engine
-            .prev_timestamps_for_next_block()
-            .map_err(io::Error::other)?;
-        sync_engine
-            .apply_block(block_bytes, prev_timestamps.as_deref())
-            .map_err(io::Error::other)?;
+        if parsed.header.prev_block_hash != [0u8; 32]
+            && !sync_engine
+                .has_block(parsed.header.prev_block_hash)
+                .map_err(io::Error::other)?
+        {
+            self.retain_or_resolve_orphan(
+                block_hash_bytes,
+                parsed.header.prev_block_hash,
+                block_bytes,
+                sync_engine,
+            )?;
+            return Ok(());
+        }
+        match sync_engine.apply_block_with_reorg(block_bytes, None, None) {
+            Ok(summary) => {
+                sync_engine.record_best_known_height(summary.block_height);
+                self.resolve_orphans(block_hash_bytes, sync_engine)?;
+            }
+            Err(err) if is_parent_not_found_err(&err) => {
+                return Err(io::Error::other(format!(
+                    "unexpected missing-parent after precheck: {err}"
+                )));
+            }
+            Err(err) => return Err(io::Error::other(err)),
+        }
+        Ok(())
+    }
+
+    fn retain_or_resolve_orphan(
+        &mut self,
+        block_hash: [u8; 32],
+        parent_hash: [u8; 32],
+        block_bytes: &[u8],
+        sync_engine: &mut SyncEngine,
+    ) -> io::Result<()> {
+        self.orphans.add(block_hash, parent_hash, block_bytes);
+        if sync_engine
+            .has_block(parent_hash)
+            .map_err(io::Error::other)?
+        {
+            self.resolve_orphans(parent_hash, sync_engine)?;
+        }
+        Ok(())
+    }
+
+    fn resolve_orphans(
+        &mut self,
+        parent_hash: [u8; 32],
+        sync_engine: &mut SyncEngine,
+    ) -> io::Result<()> {
+        let mut ready = self.orphans.take_children(parent_hash);
+        while let Some(child) = ready.pop() {
+            match sync_engine.apply_block_with_reorg(&child.block_bytes, None, None) {
+                Ok(summary) => {
+                    sync_engine.record_best_known_height(summary.block_height);
+                    ready.extend(self.orphans.take_children(child.block_hash));
+                }
+                Err(err) if is_parent_not_found_err(&err) => {
+                    self.orphans
+                        .add(child.block_hash, child.parent_hash, &child.block_bytes);
+                }
+                Err(err) => {
+                    self.peer.last_error = err.clone();
+                    return Err(io::Error::other(err));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -463,7 +543,8 @@ pub fn perform_version_handshake(
     // drip-feed attacks where one byte per timeout-window keeps the
     // connection alive indefinitely.  Each recv gets the full remaining
     // budget (matching Go's single-deadline handshake model).
-    let handshake_deadline = Instant::now() + session.cfg.read_deadline;
+    let handshake_budget = handshake_timeout_budget(session.cfg.read_deadline);
+    let handshake_deadline = Instant::now() + handshake_budget;
     let mut deadline_reader = DeadlineReader {
         stream: session.stream.try_clone()?,
         deadline: handshake_deadline,
@@ -1086,10 +1167,7 @@ fn runtime_payload_cap(command: &str) -> u64 {
         MESSAGE_ADDR => MAX_ADDR_PAYLOAD_BYTES,
         MESSAGE_BLOCK | MESSAGE_TX => MAX_BLOCK_BYTES,
         "headers" => MAX_HEADERS_PAYLOAD_BYTES,
-        // Small cap for unknown commands: large enough to reach dispatch
-        // (where ban score is incremented), small enough to prevent
-        // attacker-controlled multi-MB allocation.
-        _ => 256,
+        _ => 0,
     }
 }
 
@@ -1099,6 +1177,110 @@ fn pre_handshake_payload_cap(command: &str) -> u64 {
         "verack" | "ping" | "pong" | MESSAGE_GETADDR | MESSAGE_ADDR => 0,
         _ => 0,
     }
+}
+
+impl OrphanBlockPool {
+    fn new(limit: usize, byte_limit: usize) -> Self {
+        Self {
+            limit,
+            byte_limit,
+            total_bytes: 0,
+            pool: HashMap::new(),
+            by_hash: HashMap::new(),
+            fifo: Vec::new(),
+        }
+    }
+
+    fn add(&mut self, block_hash: [u8; 32], parent_hash: [u8; 32], block_bytes: &[u8]) {
+        if self.by_hash.contains_key(&block_hash) {
+            return;
+        }
+        if self.byte_limit > 0 && block_bytes.len() > self.byte_limit {
+            return;
+        }
+        let entry = OrphanBlockEntry {
+            block_hash,
+            parent_hash,
+            block_bytes: block_bytes.to_vec(),
+        };
+        self.pool.entry(parent_hash).or_default().push(entry);
+        self.by_hash.insert(
+            block_hash,
+            OrphanBlockMeta {
+                parent_hash,
+                size: block_bytes.len(),
+            },
+        );
+        self.total_bytes += block_bytes.len();
+        self.fifo.push(block_hash);
+        while self.by_hash.len() > self.limit
+            || (self.byte_limit > 0 && self.total_bytes > self.byte_limit)
+        {
+            if !self.evict_oldest() {
+                break;
+            }
+        }
+    }
+
+    fn take_children(&mut self, parent_hash: [u8; 32]) -> Vec<OrphanBlockEntry> {
+        let children = self.pool.remove(&parent_hash).unwrap_or_default();
+        if children.is_empty() {
+            return children;
+        }
+        let removed: HashMap<[u8; 32], ()> = children
+            .iter()
+            .map(|child| (child.block_hash, ()))
+            .collect();
+        for child in &children {
+            if let Some(meta) = self.by_hash.remove(&child.block_hash) {
+                self.total_bytes = self.total_bytes.saturating_sub(meta.size);
+            }
+        }
+        self.fifo.retain(|hash| !removed.contains_key(hash));
+        children
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.by_hash.len()
+    }
+
+    fn evict_oldest(&mut self) -> bool {
+        while let Some(oldest) = self.fifo.first().copied() {
+            self.fifo.remove(0);
+            let Some(meta) = self.by_hash.remove(&oldest) else {
+                continue;
+            };
+            self.total_bytes = self.total_bytes.saturating_sub(meta.size);
+            let mut remove_parent = false;
+            if let Some(children) = self.pool.get_mut(&meta.parent_hash) {
+                if let Some(index) = children.iter().position(|child| child.block_hash == oldest) {
+                    children.remove(index);
+                }
+                remove_parent = children.is_empty();
+            }
+            if remove_parent {
+                self.pool.remove(&meta.parent_hash);
+            }
+            return true;
+        }
+        false
+    }
+}
+
+fn is_parent_not_found_err(err: &str) -> bool {
+    err == PARENT_BLOCK_NOT_FOUND_ERR
+}
+
+fn unknown_command_err(command: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("unknown message type: {command}"),
+    )
+}
+
+fn handshake_timeout_budget(read_deadline: Duration) -> Duration {
+    read_deadline.min(DEFAULT_HANDSHAKE_TIMEOUT)
 }
 
 fn network_magic(network: &str) -> [u8; 4] {
@@ -1125,6 +1307,7 @@ mod tests {
     use crate::chainstate::ChainState;
     use crate::coinbase::{build_coinbase_tx, default_mine_address};
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
+    use crate::test_helpers::coinbase_only_block_with_gen;
     use rubin_consensus::constants::{MAX_FUTURE_DRIFT, POW_LIMIT};
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
     use rubin_consensus::{
@@ -1226,6 +1409,7 @@ mod tests {
     fn test_sync_engine_with_genesis() -> SyncEngine {
         let unique = NEXT_TEST_ROOT_ID.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!("rubin-node-p2p-runtime-{unique}"));
+        let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("create temp dir");
         let blockstore_dir = root.join("blockstore");
         let chainstate_path = root.join("chainstate.json");
@@ -1667,6 +1851,117 @@ mod tests {
     }
 
     #[test]
+    fn handle_block_retains_orphan_until_parent_arrives() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut session = PeerSession::new(stream, default_peer_runtime_config("devnet", 8))
+                .expect("session");
+            let mut engine = test_sync_engine_with_genesis();
+            let genesis = parse_block_bytes(&devnet_genesis_block_bytes()).expect("parse genesis");
+            let genesis_hash = block_hash(&genesis.header_bytes).expect("genesis hash");
+            let block1 = height_one_coinbase_only_block(genesis_hash, genesis.header.timestamp + 1);
+            let block1_hash = block_hash(&block1[..BLOCK_HEADER_BYTES]).expect("block1 hash");
+            let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+            let block2 = coinbase_only_block_with_gen(
+                2,
+                subsidy1,
+                block1_hash,
+                genesis.header.timestamp + 2,
+            );
+            let block2_hash = block_hash(&block2[..BLOCK_HEADER_BYTES]).expect("block2 hash");
+
+            session
+                .handle_block(&block2, &mut engine)
+                .expect("orphan block should be retained");
+            assert_eq!(engine.chain_state.height, 0, "orphan must not advance tip");
+            assert_eq!(
+                engine.chain_state.tip_hash, genesis_hash,
+                "tip must remain genesis"
+            );
+            assert!(
+                !engine
+                    .has_block(block2_hash)
+                    .expect("orphan must not persist before parent"),
+                "orphan should remain memory-only until its parent connects"
+            );
+
+            session
+                .handle_block(&block1, &mut engine)
+                .expect("parent block should connect and resolve orphan");
+
+            assert_eq!(session.orphans.len(), 0, "orphan pool should drain");
+            assert!(engine.has_block(block1_hash).expect("block1 applied"));
+            assert!(engine.has_block(block2_hash).expect("block2 resolved"));
+            assert_eq!(engine.chain_state.height, 2);
+        });
+
+        let _client = TcpStream::connect(addr).expect("connect");
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn handle_block_surfaces_invalid_orphan_after_parent_arrives() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut session = PeerSession::new(stream, default_peer_runtime_config("devnet", 8))
+                .expect("session");
+            let mut engine = test_sync_engine_with_genesis();
+            let genesis = parse_block_bytes(&devnet_genesis_block_bytes()).expect("parse genesis");
+            let genesis_hash = block_hash(&genesis.header_bytes).expect("genesis hash");
+            let block1 = height_one_coinbase_only_block(genesis_hash, genesis.header.timestamp + 1);
+            let block1_hash = block_hash(&block1[..BLOCK_HEADER_BYTES]).expect("block1 hash");
+            let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+            let mut block2 = coinbase_only_block_with_gen(
+                2,
+                subsidy1,
+                block1_hash,
+                genesis.header.timestamp + 2,
+            );
+            block2[36] ^= 0xff; // corrupt merkle root while keeping the block parseable
+            let block2_hash = block_hash(&block2[..BLOCK_HEADER_BYTES]).expect("block2 hash");
+
+            session
+                .handle_block(&block2, &mut engine)
+                .expect("orphan should be retained until parent arrives");
+            assert!(
+                !engine
+                    .has_block(block2_hash)
+                    .expect("invalid orphan must not persist before parent"),
+                "invalid orphan should remain memory-only until parent arrives"
+            );
+            let err = session
+                .handle_block(&block1, &mut engine)
+                .expect_err("invalid orphan should surface after parent arrives");
+
+            assert_eq!(session.orphans.len(), 0, "invalid orphan should be dropped");
+            assert_eq!(
+                engine.chain_state.height, 1,
+                "parent block must remain connected"
+            );
+            assert_eq!(
+                session.state().ban_score,
+                0,
+                "invalid orphan should not ban the peer"
+            );
+            let err_text = err.to_string();
+            assert!(
+                err_text.contains("BLOCK_ERR_MERKLE_INVALID")
+                    || err_text.contains("merkle_root mismatch"),
+                "got: {err_text}"
+            );
+        });
+
+        let _client = TcpStream::connect(addr).expect("connect");
+        server.join().expect("server join");
+    }
+
+    #[test]
     fn runtime_payload_cap_rejects_unknown_commands() {
         // Known commands must have a non-zero cap.
         assert!(runtime_payload_cap("version") > 0);
@@ -1681,12 +1976,22 @@ mod tests {
         assert_eq!(runtime_payload_cap("headers"), MAX_HEADERS_PAYLOAD_BYTES);
         const { assert!(MAX_HEADERS_PAYLOAD_BYTES > 0) };
 
-        // Unknown/garbage commands get a small cap (256 bytes) so they
-        // reach dispatch and accrue ban score, but cannot trigger large
-        // memory allocations.
-        assert_eq!(runtime_payload_cap("unknown"), 256);
-        assert_eq!(runtime_payload_cap("malicious_cmd"), 256);
-        assert_eq!(runtime_payload_cap(""), 256);
+        // Unknown/garbage commands are rejected at the envelope stage.
+        assert_eq!(runtime_payload_cap("unknown"), 0);
+        assert_eq!(runtime_payload_cap("malicious_cmd"), 0);
+        assert_eq!(runtime_payload_cap(""), 0);
+    }
+
+    #[test]
+    fn handshake_timeout_budget_matches_go_default() {
+        assert_eq!(
+            handshake_timeout_budget(DEFAULT_READ_DEADLINE),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            handshake_timeout_budget(Duration::from_millis(100)),
+            Duration::from_millis(100)
+        );
     }
 
     #[test]
@@ -1724,5 +2029,41 @@ mod tests {
         // Connect but never send anything — simulates a slowloris peer.
         let _client = TcpStream::connect(addr).expect("connect");
         server.join().expect("server join");
+    }
+
+    #[test]
+    fn run_message_loop_disconnects_unknown_command_without_ban() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut session = PeerSession::new(stream, default_peer_runtime_config("devnet", 8))
+                .expect("session");
+            let err = session
+                .run_message_loop()
+                .expect_err("unknown command must disconnect");
+            let state = session.state();
+            (err.kind(), err.to_string(), state)
+        });
+
+        let mut client = TcpStream::connect(addr).expect("connect");
+        let msg = WireMessage {
+            command: "weird".to_string(),
+            payload: Vec::new(),
+        };
+        let header = build_envelope_header(network_magic("devnet"), &msg.command, &msg.payload)
+            .expect("header");
+        client.write_all(&header).expect("write header");
+        client.flush().expect("flush");
+
+        let (kind, err, state) = server.join().expect("server join");
+        assert_eq!(kind, io::ErrorKind::InvalidData);
+        assert!(err.contains("unknown message type: weird"), "got: {err}");
+        assert_eq!(
+            state.ban_score, 0,
+            "unknown command should disconnect, not ban"
+        );
+        assert_eq!(state.last_error, "unknown command: weird");
     }
 }
