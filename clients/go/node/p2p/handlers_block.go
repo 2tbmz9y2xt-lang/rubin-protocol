@@ -78,6 +78,10 @@ func (p *peer) processRelayedBlock(blockBytes []byte) (*node.ChainStateConnectSu
 			p.service.retainOrResolveOrphan(p, blockHash, pb.Header.PrevBlockHash, blockBytes)
 			return nil, nil
 		}
+		// Hard-ban: currently all errors from ApplyBlockWithReorg are
+		// consensus violations (*TxError).  If storage/I/O errors start
+		// propagating from this path in the future, split them out to
+		// avoid banning honest peers during local degradation.
 		p.bumpBan(100, err.Error())
 		return nil, err
 	}
@@ -105,8 +109,25 @@ func (p *peer) acceptedRelayedBlock(blockHash [32]byte, summary *node.ChainState
 }
 
 func (s *Service) retainOrResolveOrphan(skip *peer, blockHash, parentHash [32]byte, blockBytes []byte) {
-	added, evicted := s.orphans.Add(blockHash, parentHash, blockBytes)
+	peerAddr := ""
+	if skip != nil {
+		peerAddr = skip.addr()
+	}
+	s.retainOrResolveOrphanFrom(peerAddr, blockHash, parentHash, blockBytes)
+}
+
+// retainOrResolveOrphanFrom is like retainOrResolveOrphan but takes an explicit
+// peer address.  resolveOrphans uses this to preserve the original submitter's
+// identity so that per-peer quota accounting remains accurate across requeue
+// cycles.
+func (s *Service) retainOrResolveOrphanFrom(fromPeer string, blockHash, parentHash [32]byte, blockBytes []byte) {
+	added, evicted := s.orphans.Add(blockHash, parentHash, blockBytes, fromPeer)
 	if !added {
+		// Rejected orphans (quota/limit) are NOT added to blockSeen.
+		// blockSeen is consulted by needsInventory(): poisoning it
+		// would suppress valid block announcements from other peers.
+		// The cost of re-downloading a rejected orphan is bounded by
+		// per-peer ban scoring and the orphan pool's own dedup.
 		return
 	}
 	s.blockSeen.Add(blockHash)
@@ -117,7 +138,7 @@ func (s *Service) retainOrResolveOrphan(skip *peer, blockHash, parentHash [32]by
 	if err != nil || !parentPresent {
 		return
 	}
-	s.resolveOrphans(skip, parentHash)
+	s.resolveOrphans(nil, parentHash)
 }
 
 func (s *Service) resolveOrphans(skip *peer, blockHash [32]byte) {
@@ -132,8 +153,15 @@ func (s *Service) resolveOrphans(skip *peer, blockHash [32]byte) {
 		s.chainMu.Unlock()
 		if applyErr != nil {
 			if errors.Is(applyErr, node.ErrParentNotFound) {
-				s.retainOrResolveOrphan(skip, childHash, pb.Header.PrevBlockHash, child.blockBytes)
+				// Clear blockSeen before requeue so
+				// retainOrResolveOrphanFrom can re-add it.
+				s.blockSeen.Remove(childHash)
+				// Preserve original peer attribution so the per-peer orphan
+				// quota cannot be bypassed through requeue cycles.
+				s.retainOrResolveOrphanFrom(child.fromPeer, childHash, pb.Header.PrevBlockHash, child.blockBytes)
 			}
+			// Non-requeue failures: leave in blockSeen to prevent
+			// re-advertisement of known-invalid blocks.
 			continue
 		}
 		s.cfg.SyncEngine.RecordBestKnownHeight(summary.BlockHeight)
