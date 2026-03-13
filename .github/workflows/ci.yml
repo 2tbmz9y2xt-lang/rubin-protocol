@@ -31,6 +31,96 @@ jobs:
         run: |
           python3 tools/check_openssl_cve_response.py --code-root .
 
+      - name: Consensus OpenSSL isolation policy
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base_ref="origin/${{ github.base_ref }}"
+          else
+            base_ref="${{ github.event.before }}"
+          fi
+          verify_changed="$(git diff --name-only "${base_ref}"..HEAD -- \
+            clients/go/consensus/verify_sig_openssl.go \
+            clients/rust/crates/rubin-consensus/src/verify_sig_openssl.rs || true)"
+          tooling_changed="$(git diff --name-only "${base_ref}"..HEAD -- \
+            .github/workflows/ci.yml \
+            tools/check_consensus_openssl_isolation.py || true)"
+          if [[ -n "${verify_changed}" ]]; then
+            python3 tools/check_consensus_openssl_isolation.py \
+              clients/go/consensus/verify_sig_openssl.go \
+              clients/rust/crates/rubin-consensus/src/verify_sig_openssl.rs
+            exit 0
+          fi
+          if [[ -z "${tooling_changed}" ]]; then
+            echo "SKIP: consensus OpenSSL verify files and policy tooling unchanged"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import importlib.util
+          from pathlib import Path
+          
+          tool_path = Path("tools/check_consensus_openssl_isolation.py")
+          spec = importlib.util.spec_from_file_location("openssl_isolation_check", tool_path)
+          mod = importlib.util.module_from_spec(spec)
+          assert spec.loader is not None
+          spec.loader.exec_module(mod)
+          
+          bad_go = """package consensus
+          // func verifySig() { ensureOpenSSLConsensusInit() }
+          /*
+          static int rubin_openssl_consensus_init(char* err_buf, size_t err_buf_len) {
+              return 1;
+          }
+          */
+          func verifySig() error {
+              return ensureOpenSSLBootstrap()
+          }
+          static int rubin_openssl_consensus_init(char* err_buf, size_t err_buf_len) {
+              rubin_set_env_if_empty("OPENSSL_CONF", "bad", err_buf, err_buf_len);
+              if (OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CONFIG, NULL) != 1) {
+                  return -1;
+              }
+              return 1;
+          }
+          func ensureOpenSSLConsensusInit() error {
+              return opensslBootstrapFn(false, "", "")
+          }
+          """
+          bad_go_errors = mod.check_go_verify(Path("synthetic.go"), bad_go)
+          assert any("must use ensureOpenSSLConsensusInit" in err for err in bad_go_errors)
+          assert any("must not call ensureOpenSSLBootstrap" in err for err in bad_go_errors)
+          assert any("must not use OPENSSL_INIT_LOAD_CONFIG" in err for err in bad_go_errors)
+          assert any("must not delegate to opensslBootstrap" in err for err in bad_go_errors)
+          assert any("must not read or mutate OPENSSL_CONF/OPENSSL_MODULES" in err for err in bad_go_errors)
+          
+          bad_rust = """// pub fn verify_sig() { ensure_openssl_consensus_init()?; }
+          pub fn verify_sig(
+              suite_id: u8,
+              pubkey: &[u8],
+              signature: &[u8],
+              digest32: &[u8; 32],
+          ) -> Result<bool, TxError> {
+              ensure_openssl_bootstrap()?;
+              Ok(true)
+          }
+          
+          fn openssl_consensus_bootstrap() -> Result<(), TxError> {
+              if OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CONFIG, core::ptr::null()) != 1 {
+                  return Err(TxError::new(ErrorCode::TxErrParse, "fail"));
+              }
+              set_env_if_empty("OPENSSL_CONF", Some("bad".to_string()));
+              Ok(())
+          }
+          """
+          bad_rust_errors = mod.check_rust_verify(Path("synthetic.rs"), bad_rust)
+          assert any("must use ensure_openssl_consensus_init" in err for err in bad_rust_errors)
+          assert any("must not call ensure_openssl_bootstrap" in err for err in bad_rust_errors)
+          assert any("must not use OPENSSL_INIT_LOAD_CONFIG" in err for err in bad_rust_errors)
+          assert any("must not read or propagate operator-configured OpenSSL env" in err for err in bad_rust_errors)
+          
+          print("OK: consensus OpenSSL isolation tooling self-test passed.")
+          PY
+
   security_ai:
     needs: policy
     runs-on: ubuntu-latest

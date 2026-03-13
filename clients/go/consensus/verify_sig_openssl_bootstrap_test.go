@@ -127,6 +127,30 @@ func TestVerifySig_IgnoresInvalidFIPSMode(t *testing.T) {
 	}
 }
 
+func TestVerifySig_IgnoresInheritedOpenSSLConfig(t *testing.T) {
+	resetOpenSSLBootstrapStateForTests()
+	t.Cleanup(resetOpenSSLBootstrapStateForTests)
+
+	kp := mustMLDSA87Keypair(t)
+	var digest [32]byte
+	digest[0] = 0x6a
+	signature, err := kp.SignDigest32(digest)
+	if err != nil {
+		t.Fatalf("SignDigest32: %v", err)
+	}
+
+	t.Setenv("OPENSSL_CONF", "/tmp/rubin-consensus-invalid-openssl.cnf")
+	t.Setenv("OPENSSL_MODULES", "/tmp/rubin-consensus-invalid-ossl-modules")
+
+	ok, verifyErr := verifySig(SUITE_ID_ML_DSA_87, kp.PubkeyBytes(), signature, digest)
+	if verifyErr != nil {
+		t.Fatalf("consensus verifySig must ignore inherited OPENSSL_* env, got: %v", verifyErr)
+	}
+	if !ok {
+		t.Fatalf("expected verifySig=true under poisoned inherited OPENSSL_* env")
+	}
+}
+
 // TestEnsureOpenSSLBootstrap_InvalidFIPSModeRejected confirms that the
 // non-consensus bootstrap path still rejects invalid FIPS modes.
 func TestEnsureOpenSSLBootstrap_InvalidFIPSModeRejected(t *testing.T) {
@@ -151,7 +175,7 @@ func TestEnsureOpenSSLConsensusInit_BootstrapError(t *testing.T) {
 	t.Cleanup(resetOpenSSLBootstrapStateForTests)
 
 	injectedErr := fmt.Errorf("synthetic openssl failure")
-	opensslBootstrapFn = func(bool, string, string) error {
+	opensslConsensusInitFn = func() error {
 		return injectedErr
 	}
 
@@ -167,5 +191,20 @@ func TestEnsureOpenSSLConsensusInit_BootstrapError(t *testing.T) {
 	err2 := ensureOpenSSLConsensusInit()
 	if err2 == nil || err2.Error() != err.Error() {
 		t.Fatalf("expected cached error on second call, got: %v", err2)
+	}
+}
+
+func TestParseOpenSSLErrorBuffer_Fallback(t *testing.T) {
+	err := parseOpenSSLErrorBuffer(make([]byte, 8), "fallback text")
+	if err == nil || err.Error() != "fallback text" {
+		t.Fatalf("expected fallback error, got: %v", err)
+	}
+}
+
+func TestParseOpenSSLErrorBuffer_Message(t *testing.T) {
+	buf := append([]byte("consensus failed"), 0)
+	err := parseOpenSSLErrorBuffer(buf, "fallback text")
+	if err == nil || err.Error() != "consensus failed" {
+		t.Fatalf("expected parsed buffer error, got: %v", err)
 	}
 }
