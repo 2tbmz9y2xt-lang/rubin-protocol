@@ -45,6 +45,7 @@ const MAX_ADDR_PAYLOAD_BYTES: u64 = MAX_ADDR_COMPACT_SIZE_BYTES
 const MAX_HEADERS_BATCH: u64 = 2000;
 const MAX_HEADERS_PAYLOAD_BYTES: u64 =
     MAX_HEADERS_BATCH * (rubin_consensus::BLOCK_HEADER_BYTES as u64);
+const STREAM_READ_CHUNK_BYTES: usize = 32 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WireMessage {
@@ -679,22 +680,46 @@ fn read_message_from_with_payload_limit<R: Read>(
     let mut header = [0u8; WIRE_HEADER_SIZE];
     reader.read_exact(&mut header)?;
     let envelope = parse_envelope_header(&header, expected_magic, max_payload_bytes, payload_cap)?;
-    let mut payload = vec![0u8; envelope.payload_len];
-    if envelope.payload_len > 0 {
-        reader.read_exact(&mut payload)?;
+    let payload = read_payload_with_checksum(reader, envelope.payload_len, envelope.checksum)?;
+
+    Ok(WireMessage {
+        command: envelope.command,
+        payload,
+    })
+}
+
+fn read_payload_with_checksum<R: Read>(
+    reader: &mut R,
+    payload_len: usize,
+    want_checksum: [u8; 4],
+) -> io::Result<Vec<u8>> {
+    if payload_len == 0 {
+        if want_checksum != wire_checksum(&[]) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid envelope checksum",
+            ));
+        }
+        return Ok(Vec::new());
     }
-    let checksum = wire_checksum(&payload);
-    if envelope.checksum != checksum {
+
+    let mut hasher = Sha3_256::new();
+    let mut payload = vec![0u8; payload_len];
+    for chunk in payload.chunks_mut(STREAM_READ_CHUNK_BYTES) {
+        reader.read_exact(chunk)?;
+        hasher.update(&*chunk);
+    }
+
+    let digest = hasher.finalize();
+    let checksum = [digest[0], digest[1], digest[2], digest[3]];
+    if want_checksum != checksum {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid envelope checksum",
         ));
     }
 
-    Ok(WireMessage {
-        command: envelope.command,
-        payload,
-    })
+    Ok(payload)
 }
 
 fn protocol_versions_compatible(local: u32, remote: u32) -> bool {
@@ -1639,6 +1664,28 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert_eq!(err.to_string(), "message exceeds command cap");
+    }
+
+    #[test]
+    fn p2p_read_payload_with_checksum_chunked_roundtrip() {
+        let payload = vec![0xabu8; STREAM_READ_CHUNK_BYTES + 17];
+        let checksum = wire_checksum(&payload);
+        let mut reader = std::io::Cursor::new(payload.clone());
+        let got =
+            read_payload_with_checksum(&mut reader, payload.len(), checksum).expect("payload");
+        assert_eq!(got, payload);
+    }
+
+    #[test]
+    fn p2p_read_payload_with_checksum_rejects_bad_checksum_after_chunked_read() {
+        let payload = vec![0xcdu8; STREAM_READ_CHUNK_BYTES + 9];
+        let mut checksum = wire_checksum(&payload);
+        checksum[0] ^= 0xff;
+        let mut reader = std::io::Cursor::new(payload);
+        let err = read_payload_with_checksum(&mut reader, STREAM_READ_CHUNK_BYTES + 9, checksum)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "invalid envelope checksum");
     }
 
     #[test]
