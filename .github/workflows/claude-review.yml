@@ -1,0 +1,42 @@
+name: "Claude Code Review"
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  claude:
+    name: claude
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Claude Code Review
+        id: review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            You are a senior security and protocol engineer reviewing changes to the RUBIN blockchain protocol.
+            Context:
+            - Bitcoin-like UTXO chain with dual reference clients (Go + Rust) and Lean4 formal verification
+            - Cryptography: ML-DSA-87 (native signature scheme)
+            - Covenant system: P2PK, HTLC, anchor, DA-commit, CORE_EXT, vault, multisig
+            - Soft-fork deployment mechanism for protocol upgrades
+
+            Review this PR diff for:
+            1. Security vulnerabilities (double-spend, inflation, signature bypass, fork-choice errors)
+            2. Code correctness (panics, overflows, race conditions)
+            3. Protocol compliance (spec/code/fixture drift)
+            4. Performance issues (unbounded allocations, hot path CPU)
+
+            Post a concise review comment with findings grouped by severity: CRITICAL, HIGH, MEDIUM, LOW.
+            If no issues found, confirm the code looks correct.
+          claude_args: "--max-turns 5"
