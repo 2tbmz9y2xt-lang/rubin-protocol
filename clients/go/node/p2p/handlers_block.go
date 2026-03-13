@@ -122,15 +122,15 @@ func (s *Service) retainOrResolveOrphan(skip *peer, blockHash, parentHash [32]by
 // cycles.
 func (s *Service) retainOrResolveOrphanFrom(fromPeer string, blockHash, parentHash [32]byte, blockBytes []byte) {
 	added, evicted := s.orphans.Add(blockHash, parentHash, blockBytes, fromPeer)
-	// Always mark as seen: on success this prevents duplicate getdata;
-	// on quota/limit rejection this acts as a negative cache so the
-	// peer cannot trigger unbounded re-download loops.  The 10k LRU
-	// seen cache will eventually rotate the entry, letting honest
-	// peers re-announce the block.
-	s.blockSeen.Add(blockHash)
 	if !added {
+		// Rejected orphans (quota/limit) are NOT added to blockSeen.
+		// blockSeen is consulted by needsInventory(): poisoning it
+		// would suppress valid block announcements from other peers.
+		// The cost of re-downloading a rejected orphan is bounded by
+		// per-peer ban scoring and the orphan pool's own dedup.
 		return
 	}
+	s.blockSeen.Add(blockHash)
 	for _, dropped := range evicted {
 		s.blockSeen.Remove(dropped)
 	}

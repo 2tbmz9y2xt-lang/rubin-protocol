@@ -427,7 +427,7 @@ func TestResolveOrphansRequeuesStillMissingChild(t *testing.T) {
 	}
 }
 
-func TestProcessRelayedBlockMarksSeenWhenOrphanIsRejected(t *testing.T) {
+func TestProcessRelayedBlockDoesNotMarkSeenWhenOrphanIsRejected(t *testing.T) {
 	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
 	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
 
@@ -458,10 +458,11 @@ func TestProcessRelayedBlockMarksSeenWhenOrphanIsRejected(t *testing.T) {
 	if sink.service.orphans.Len() != 0 {
 		t.Fatalf("orphans.Len()=%d, want 0", sink.service.orphans.Len())
 	}
-	// Rejected orphans are added to blockSeen as a negative cache to
-	// prevent unbounded re-download loops (getdata amplification).
-	if !sink.service.blockSeen.Has(height2Hash) {
-		t.Fatalf("blockSeen should be set for rejected orphans (negative cache)")
+	// Rejected orphans must NOT be added to blockSeen: blockSeen is
+	// consulted by needsInventory(), so poisoning it would suppress
+	// valid block announcements from other peers.
+	if sink.service.blockSeen.Has(height2Hash) {
+		t.Fatalf("blockSeen must not be set for rejected orphans")
 	}
 }
 
