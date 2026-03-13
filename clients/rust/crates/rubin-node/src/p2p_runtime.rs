@@ -39,7 +39,8 @@ const MAX_ADDR_COMPACT_SIZE_BYTES: u64 = 3;
 const MAX_ADDR_PAYLOAD_BYTES: u64 = MAX_ADDR_COMPACT_SIZE_BYTES
     + (MAX_ADDR_PAYLOAD_ENTRIES as u64) * (ADDR_PAYLOAD_ENTRY_SIZE as u64);
 const MAX_HEADERS_BATCH: u64 = 2000;
-const MAX_HEADERS_PAYLOAD_BYTES: u64 = MAX_HEADERS_BATCH * (rubin_consensus::BLOCK_HEADER_BYTES as u64);
+const MAX_HEADERS_PAYLOAD_BYTES: u64 =
+    MAX_HEADERS_BATCH * (rubin_consensus::BLOCK_HEADER_BYTES as u64);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WireMessage {
