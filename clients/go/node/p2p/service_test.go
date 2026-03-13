@@ -837,9 +837,9 @@ func TestRetainOrResolveOrphanClearsSeenForEvictedOrphan(t *testing.T) {
 	}
 }
 
-// TestFaultAttributionSplitConsensusVsIO verifies that any block that fails
-// ApplyBlockWithReorg results in a hard ban (100 points).  All errors from
-// this path are consensus violations (*TxError).
+// TestFaultAttributionSplitConsensusVsIO verifies that consensus-invalid blocks
+// still result in a hard ban (100 points) after ApplyBlockWithReorg fault
+// attribution is split between peer-invalid and local/runtime failures.
 func TestFaultAttributionSplitConsensusVsIO(t *testing.T) {
 	// Source has genesis+block1. Sink has genesis only.
 	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
@@ -881,5 +881,55 @@ func TestFaultAttributionSplitConsensusVsIO(t *testing.T) {
 	}
 	if state := peer.snapshotState(); state.BanScore < 100 {
 		t.Fatalf("ban_score=%d, want >= 100 for consensus error", state.BanScore)
+	}
+}
+
+func TestFaultAttributionSplitLocalApplyErrorDoesNotHardBan(t *testing.T) {
+	// Source has genesis+block1. Sink has genesis only, but we replace the
+	// sync engine with an uninitialized zero-value to force a local/runtime
+	// ApplyBlockWithReorg failure after parent discovery succeeds.
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+
+	height1Hash, ok, err := source.blockStore.CanonicalHash(1)
+	if err != nil || !ok {
+		t.Fatalf("CanonicalHash(1): ok=%v err=%v", ok, err)
+	}
+	block1Bytes, err := source.blockStore.GetBlockByHash(height1Hash)
+	if err != nil {
+		t.Fatalf("GetBlockByHash(height1): %v", err)
+	}
+
+	sink.service.cfg.SyncEngine = &node.SyncEngine{}
+
+	peer := &peer{
+		service: sink.service,
+		state: node.PeerState{
+			Addr:          "127.0.0.1:41002",
+			RemoteVersion: testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 2),
+		},
+	}
+
+	_, applyErr := peer.processRelayedBlock(block1Bytes)
+	if applyErr == nil {
+		t.Fatalf("expected local/runtime error")
+	}
+	if state := peer.snapshotState(); state.BanScore != 0 {
+		t.Fatalf("ban_score=%d, want 0 for local/runtime error", state.BanScore)
+	}
+	if state := peer.snapshotState(); state.LastError == "" {
+		t.Fatalf("expected local/runtime error to be recorded in LastError")
+	}
+}
+
+func TestIsConsensusApplyBlockError(t *testing.T) {
+	if isConsensusApplyBlockError(nil) {
+		t.Fatalf("nil error must not be treated as consensus error")
+	}
+	if isConsensusApplyBlockError(errors.New("local runtime failure")) {
+		t.Fatalf("plain runtime error must not be treated as consensus error")
+	}
+	if !isConsensusApplyBlockError(&consensus.TxError{Code: consensus.TX_ERR_PARSE, Msg: "bad block"}) {
+		t.Fatalf("consensus TxError must be treated as consensus error")
 	}
 }

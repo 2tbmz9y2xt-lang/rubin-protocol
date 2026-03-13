@@ -78,15 +78,23 @@ func (p *peer) processRelayedBlock(blockBytes []byte) (*node.ChainStateConnectSu
 			p.service.retainOrResolveOrphan(p, blockHash, pb.Header.PrevBlockHash, blockBytes)
 			return nil, nil
 		}
-		// Hard-ban: currently all errors from ApplyBlockWithReorg are
-		// consensus violations (*TxError).  If storage/I/O errors start
-		// propagating from this path in the future, split them out to
-		// avoid banning honest peers during local degradation.
-		p.bumpBan(100, err.Error())
+		if isConsensusApplyBlockError(err) {
+			p.bumpBan(100, err.Error())
+		} else {
+			p.setLastError(err.Error())
+		}
 		return nil, err
 	}
 	p.acceptedRelayedBlock(blockHash, summary)
 	return summary, nil
+}
+
+func isConsensusApplyBlockError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var txErr *consensus.TxError
+	return errors.As(err, &txErr)
 }
 
 func parseRelayedBlock(blockBytes []byte) (*consensus.ParsedBlock, [32]byte, error) {
