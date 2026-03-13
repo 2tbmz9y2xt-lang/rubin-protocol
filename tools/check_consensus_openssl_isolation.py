@@ -56,6 +56,27 @@ def sanitize_go_or_c(text: str) -> str:
     return text
 
 
+def extract_go_cgo_preamble(text: str) -> str | None:
+    import_c = 'import "C"'
+    import_idx = text.find(import_c)
+    if import_idx < 0:
+        return None
+
+    comment_end = text.rfind("*/", 0, import_idx)
+    if comment_end < 0:
+        return None
+    comment_start = text.rfind("/*", 0, comment_end)
+    if comment_start < 0:
+        return None
+    return text[comment_start + 2 : comment_end]
+
+
+def sanitize_c_preamble(text: str) -> str:
+    text = strip_c_block_comments(text)
+    text = strip_line_comments(text, "//")
+    return text
+
+
 def sanitize_rust(text: str) -> str:
     text = strip_c_block_comments(text)
     text = strip_line_comments(text, "//")
@@ -70,7 +91,6 @@ def contains_call(body: str, name: str) -> bool:
 def check_go_verify(path: Path, text: str) -> list[str]:
     errors: list[str] = []
     sanitized_text = sanitize_go_or_c(text)
-    c_text = sanitize_go_or_c(text)
     body = extract_function_body(sanitized_text, "func verifySig(")
     if body is None:
         return [f"{path}: missing func verifySig("]
@@ -106,6 +126,12 @@ def check_go_verify(path: Path, text: str) -> list[str]:
                 f"{path}: opensslConsensusInit must not call rubin_openssl_bootstrap()"
             )
 
+    cgo_preamble = extract_go_cgo_preamble(text)
+    if cgo_preamble is None:
+        errors.append(f"{path}: missing cgo preamble before import \"C\"")
+        return errors
+
+    c_text = sanitize_c_preamble(cgo_preamble)
     c_consensus_body = extract_function_body(c_text, "static int rubin_openssl_consensus_init")
     if c_consensus_body is None:
         errors.append(f"{path}: missing static int rubin_openssl_consensus_init")
@@ -186,21 +212,20 @@ def main() -> int:
 
     if args.self_test:
         bad_go = """package consensus
-        // func verifySig() { ensureOpenSSLConsensusInit() }
         /*
-        static int rubin_openssl_consensus_init(char* err_buf, size_t err_buf_len) {
-            return 1;
-        }
-        */
-        func verifySig() error {
-            return ensureOpenSSLBootstrap()
-        }
         static int rubin_openssl_consensus_init(char* err_buf, size_t err_buf_len) {
             rubin_set_env_if_empty("OPENSSL_CONF", "bad", err_buf, err_buf_len);
             if (OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CONFIG, NULL) != 1) {
                 return -1;
             }
             return 1;
+        }
+        */
+        import "C"
+
+        // func verifySig() { ensureOpenSSLConsensusInit() }
+        func verifySig() error {
+            return ensureOpenSSLBootstrap()
         }
         func ensureOpenSSLConsensusInit() error {
             return opensslBootstrapFn(false, "", "")
