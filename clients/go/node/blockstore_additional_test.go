@@ -101,6 +101,13 @@ func TestBlockStoreSetCanonicalTip_SameHashIdempotent(t *testing.T) {
 	}
 }
 
+func TestBlockStoreSetCanonicalTip_NilBlockStore(t *testing.T) {
+	var nilStore *BlockStore
+	if err := nilStore.SetCanonicalTip(0, [32]byte{}); err == nil {
+		t.Fatalf("expected nil blockstore error")
+	}
+}
+
 func TestBlockStoreRewindToHeight_Errors(t *testing.T) {
 	var nilBS *BlockStore
 	if err := nilBS.RewindToHeight(0); err == nil {
@@ -371,9 +378,8 @@ func TestBlockStoreChainWorkCachesAndHelperCoverage(t *testing.T) {
 		t.Fatalf("cached ChainWork should return an independent clone")
 	}
 
-	index := buildCanonicalHeightIndex([]string{"zz", hex.EncodeToString(hash1[:])})
-	if got, ok := index[hash1]; !ok || got != 1 {
-		t.Fatalf("buildCanonicalHeightIndex(hash1)=(%v,%d), want true,1", ok, got)
+	if _, err := buildCanonicalHeightIndex([]string{"zz", hex.EncodeToString(hash1[:])}); err == nil {
+		t.Fatalf("expected invalid canonical index error")
 	}
 
 	var nilStore *BlockStore
@@ -421,6 +427,106 @@ func TestBlockStoreCanonicalIndexHelpersAndUndoErrors(t *testing.T) {
 	}
 	if _, err := store.GetUndo([32]byte{0xff}); err == nil {
 		t.Fatalf("expected malformed undo error")
+	}
+}
+
+func TestBlockStoreChainWorkCachesCanonicalOnly(t *testing.T) {
+	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+
+	header0 := testHeaderBytes(0x31, 1)
+	for i := 4; i < 36; i++ {
+		header0[i] = 0
+	}
+	hash0 := mustHeaderHash(t, header0)
+	if err := store.PutBlock(0, hash0, header0, []byte("b0")); err != nil {
+		t.Fatalf("PutBlock(root): %v", err)
+	}
+
+	header1a := append([]byte(nil), testHeaderBytes(0x32, 2)...)
+	copy(header1a[4:36], hash0[:])
+	hash1a := mustHeaderHash(t, header1a)
+	if err := store.PutBlock(1, hash1a, header1a, []byte("b1a")); err != nil {
+		t.Fatalf("PutBlock(branch a): %v", err)
+	}
+
+	header1b := append([]byte(nil), testHeaderBytes(0x33, 3)...)
+	copy(header1b[4:36], hash0[:])
+	hash1b := mustHeaderHash(t, header1b)
+	if err := store.PutBlock(1, hash1b, header1b, []byte("b1b")); err != nil {
+		t.Fatalf("PutBlock(branch b): %v", err)
+	}
+
+	if _, err := store.ChainWork(hash1a); err != nil {
+		t.Fatalf("ChainWork(non-canonical branch): %v", err)
+	}
+	if _, err := store.ChainWork(hash1b); err != nil {
+		t.Fatalf("ChainWork(canonical branch): %v", err)
+	}
+
+	store.stateMu.RLock()
+	_, rootCached := store.chainWorkByHash[hash0]
+	_, branchACached := store.chainWorkByHash[hash1a]
+	_, branchBCached := store.chainWorkByHash[hash1b]
+	store.stateMu.RUnlock()
+
+	if !rootCached {
+		t.Fatalf("expected canonical root to be cached")
+	}
+	if branchACached {
+		t.Fatalf("non-canonical branch work must not stay cached")
+	}
+	if !branchBCached {
+		t.Fatalf("expected canonical tip to be cached")
+	}
+}
+
+func TestBlockStoreChainWorkRejectsInvalidTargetWithCachedAncestor(t *testing.T) {
+	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+
+	header0 := testHeaderBytes(0x41, 1)
+	for i := 4; i < 36; i++ {
+		header0[i] = 0
+	}
+	hash0 := mustHeaderHash(t, header0)
+	if err := store.PutBlock(0, hash0, header0, []byte("root")); err != nil {
+		t.Fatalf("PutBlock(root): %v", err)
+	}
+	if _, err := store.ChainWork(hash0); err != nil {
+		t.Fatalf("ChainWork(root): %v", err)
+	}
+
+	header1 := append([]byte(nil), testHeaderBytes(0x42, 2)...)
+	copy(header1[4:36], hash0[:])
+	for i := 76; i < 108; i++ {
+		header1[i] = 0
+	}
+	hash1 := mustHeaderHash(t, header1)
+	if err := store.StoreBlock(hash1, header1, []byte("bad-child")); err != nil {
+		t.Fatalf("StoreBlock(child): %v", err)
+	}
+
+	if _, err := store.ChainWork(hash1); err == nil {
+		t.Fatalf("expected invalid target error")
+	}
+}
+
+func TestBlockStoreChainWorkRejectsInvalidTargetWithoutCachedAncestor(t *testing.T) {
+	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+
+	header := testHeaderBytes(0x43, 3)
+	for i := 4; i < 36; i++ {
+		header[i] = 0
+	}
+	for i := 76; i < 108; i++ {
+		header[i] = 0
+	}
+	hash := mustHeaderHash(t, header)
+	if err := store.StoreBlock(hash, header, []byte("bad-root")); err != nil {
+		t.Fatalf("StoreBlock(root): %v", err)
+	}
+
+	if _, err := store.ChainWork(hash); err == nil {
+		t.Fatalf("expected invalid target error")
 	}
 }
 
@@ -475,5 +581,114 @@ func TestBlockStoreStoreBlockAndChainWorkErrors(t *testing.T) {
 	}
 	if _, err := cycleStore.ChainWork(cycleHash); err == nil {
 		t.Fatalf("expected cycle error")
+	}
+}
+
+func TestUpdatedCanonicalHashes_CoversAllBranches(t *testing.T) {
+	hash0 := [32]byte{0x01}
+	hash1 := [32]byte{0x02}
+	hash2 := [32]byte{0x03}
+	h0 := hex.EncodeToString(hash0[:])
+	h1 := hex.EncodeToString(hash1[:])
+	h2 := hex.EncodeToString(hash2[:])
+
+	if _, _, err := updatedCanonicalHashes([]string{}, 1, hash0); err == nil {
+		t.Fatalf("expected height-gap error")
+	}
+
+	got, changed, err := updatedCanonicalHashes([]string{}, 0, hash0)
+	if err != nil || !changed || len(got) != 1 || got[0] != h0 {
+		t.Fatalf("append branch mismatch: got=%v changed=%v err=%v", got, changed, err)
+	}
+
+	got, changed, err = updatedCanonicalHashes([]string{h0, h1}, 1, hash1)
+	if err != nil || changed || len(got) != 2 || got[1] != h1 {
+		t.Fatalf("no-op branch mismatch: got=%v changed=%v err=%v", got, changed, err)
+	}
+
+	got, changed, err = updatedCanonicalHashes([]string{h0, h1}, 1, hash2)
+	if err != nil || !changed || len(got) != 2 || got[0] != h0 || got[1] != h2 {
+		t.Fatalf("replace branch mismatch: got=%v changed=%v err=%v", got, changed, err)
+	}
+}
+
+func TestBlockStoreCanonicalStateHelpers(t *testing.T) {
+	hash0 := [32]byte{0x11}
+	hash1 := [32]byte{0x12}
+	work := big.NewInt(123)
+
+	var nilStore *BlockStore
+	if got, ok := nilStore.cachedChainWork(hash0); ok || got != nil {
+		t.Fatalf("nil cachedChainWork = (%v,%v), want (nil,false)", got, ok)
+	}
+	nilStore.storeChainWorkIfCanonical(hash0, work)
+	nilStore.rebuildCanonicalHeightIndex()
+	if err := nilStore.dropCanonicalStateFromLocked(0); err != nil {
+		t.Fatalf("nil dropCanonicalStateFromLocked: %v", err)
+	}
+
+	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store.index.Canonical = []string{hex.EncodeToString(hash0[:]), hex.EncodeToString(hash1[:])}
+	store.canonicalHeightByHash = map[[32]byte]uint64{hash0: 0, hash1: 1}
+	store.chainWorkByHash = map[[32]byte]*big.Int{hash0: big.NewInt(10), hash1: big.NewInt(20)}
+
+	store.storeChainWorkIfCanonical(hash0, work)
+	if got, ok := store.cachedChainWork(hash0); !ok || got.Cmp(work) != 0 {
+		t.Fatalf("cachedChainWork mismatch: got=%v ok=%v", got, ok)
+	}
+	if got, ok := store.cachedChainWork(hash1); !ok || got.Cmp(big.NewInt(20)) != 0 {
+		t.Fatalf("unexpected cachedChainWork for hash1: got=%v ok=%v", got, ok)
+	}
+	store.storeChainWorkIfCanonical([32]byte{0xff}, big.NewInt(77))
+	if _, ok := store.chainWorkByHash[[32]byte{0xff}]; ok {
+		t.Fatalf("non-canonical work should not be stored")
+	}
+	store.storeChainWorkIfCanonical(hash0, nil)
+
+	if err := store.dropCanonicalStateFromLocked(1); err != nil {
+		t.Fatalf("dropCanonicalStateFromLocked: %v", err)
+	}
+	if _, ok := store.canonicalHeightByHash[hash1]; ok {
+		t.Fatalf("expected hash1 to be dropped from canonical index")
+	}
+	if _, ok := store.chainWorkByHash[hash1]; ok {
+		t.Fatalf("expected hash1 work cache to be dropped")
+	}
+
+	store.index.Canonical = []string{"zz"}
+	store.rebuildCanonicalHeightIndex()
+	if len(store.canonicalHeightByHash) != 1 {
+		t.Fatalf("malformed rebuild should preserve old index")
+	}
+
+	store.index.Canonical = []string{hex.EncodeToString(hash0[:])}
+	store.rebuildCanonicalHeightIndex()
+	if len(store.canonicalHeightByHash) != 1 || store.canonicalHeightByHash[hash0] != 0 {
+		t.Fatalf("rebuildCanonicalHeightIndex mismatch: %v", store.canonicalHeightByHash)
+	}
+	if len(store.chainWorkByHash) != 0 {
+		t.Fatalf("rebuildCanonicalHeightIndex should reset chainWork cache")
+	}
+}
+
+func TestBlockStoreCanonicalAndTruncateErrorBranches(t *testing.T) {
+	var nilStore *BlockStore
+	if _, _, err := nilStore.CanonicalHash(0); err == nil {
+		t.Fatalf("expected nil CanonicalHash error")
+	}
+	if err := nilStore.TruncateCanonical(0); err == nil {
+		t.Fatalf("expected nil TruncateCanonical error")
+	}
+
+	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	if err := store.TruncateCanonical(1); err == nil {
+		t.Fatalf("expected truncate out-of-range error")
+	}
+
+	hash := [32]byte{0x21}
+	store.index.Canonical = []string{hex.EncodeToString(hash[:]), "zz"}
+	store.canonicalHeightByHash = map[[32]byte]uint64{hash: 0}
+	if err := store.TruncateCanonical(1); err == nil {
+		t.Fatalf("expected malformed canonical truncate error")
 	}
 }

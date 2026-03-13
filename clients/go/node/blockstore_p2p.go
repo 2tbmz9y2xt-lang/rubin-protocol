@@ -1,44 +1,44 @@
 package node
 
-import "errors"
+import (
+	"encoding/hex"
+	"errors"
+)
 
 func (bs *BlockStore) FindCanonicalHeight(blockHash [32]byte) (uint64, bool, error) {
 	if bs == nil {
 		return 0, false, errors.New("nil blockstore")
 	}
+	blockHashHex := hex.EncodeToString(blockHash[:])
+	bs.stateMu.RLock()
 	if height, ok := bs.canonicalHeightByHash[blockHash]; ok {
-		hash, exists, err := bs.CanonicalHash(height)
-		if err != nil {
-			return 0, false, err
-		}
-		if exists && hash == blockHash {
+		if height < uint64(len(bs.index.Canonical)) && bs.index.Canonical[height] == blockHashHex {
+			bs.stateMu.RUnlock()
 			return height, true, nil
 		}
-		bs.rebuildCanonicalHeightIndex()
-		if height, ok := bs.canonicalHeightByHash[blockHash]; ok {
-			hash, exists, err := bs.CanonicalHash(height)
-			if err != nil {
-				return 0, false, err
-			}
-			if exists && hash == blockHash {
-				return height, true, nil
-			}
-		}
+		bs.stateMu.RUnlock()
+		bs.stateMu.Lock()
+		delete(bs.canonicalHeightByHash, blockHash)
+		bs.stateMu.Unlock()
+	} else {
+		bs.stateMu.RUnlock()
 	}
-	tipHeight, _, ok, err := bs.Tip()
-	if err != nil || !ok {
-		return 0, false, err
+
+	bs.stateMu.RLock()
+	canonical := append([]string(nil), bs.index.Canonical...)
+	bs.stateMu.RUnlock()
+	if len(canonical) == 0 {
+		return 0, false, nil
 	}
-	for height := tipHeight + 1; height > 0; height-- {
-		currentHeight := height - 1
-		hash, exists, err := bs.CanonicalHash(currentHeight)
-		if err != nil {
-			return 0, false, err
-		}
-		if exists && hash == blockHash {
-			if bs.canonicalHeightByHash != nil {
+
+	for height := len(canonical); height > 0; height-- {
+		currentHeight := uint64(height - 1)
+		if canonical[currentHeight] == blockHashHex {
+			bs.stateMu.Lock()
+			if bs.canonicalHeightByHash != nil && currentHeight < uint64(len(bs.index.Canonical)) && bs.index.Canonical[currentHeight] == blockHashHex {
 				bs.canonicalHeightByHash[blockHash] = currentHeight
 			}
+			bs.stateMu.Unlock()
 			return currentHeight, true, nil
 		}
 	}

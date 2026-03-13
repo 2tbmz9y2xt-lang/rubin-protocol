@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -24,6 +25,8 @@ const (
 )
 
 type BlockStore struct {
+	stateMu sync.RWMutex
+
 	rootPath   string
 	indexPath  string
 	blocksDir  string
@@ -68,6 +71,10 @@ func OpenBlockStore(rootPath string) (*BlockStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	canonicalHeightByHash, err := buildCanonicalHeightIndex(index.Canonical)
+	if err != nil {
+		return nil, err
+	}
 
 	bs := &BlockStore{
 		rootPath:   rootPath,
@@ -77,7 +84,7 @@ func OpenBlockStore(rootPath string) (*BlockStore, error) {
 		undoDir:    undoDir,
 		index:      index,
 
-		canonicalHeightByHash: buildCanonicalHeightIndex(index.Canonical),
+		canonicalHeightByHash: canonicalHeightByHash,
 		chainWorkByHash:       make(map[[32]byte]*big.Int),
 	}
 	return bs, nil
@@ -120,13 +127,27 @@ func (bs *BlockStore) SetCanonicalTip(height uint64, blockHash [32]byte) error {
 	if bs == nil {
 		return errors.New("nil blockstore")
 	}
-	nextCanonical, changed, err := updatedCanonicalHashes(bs.index.Canonical, height, blockHash)
-	if err != nil {
-		return err
-	}
-	if changed {
+	bs.stateMu.Lock()
+	defer bs.stateMu.Unlock()
+
+	hashHex := hex.EncodeToString(blockHash[:])
+	currentLen := uint64(len(bs.index.Canonical))
+	switch {
+	case height > currentLen:
+		return fmt.Errorf("height gap: got %d, expected <= %d", height, currentLen)
+	case height == currentLen:
+		bs.index.Canonical = append(bs.index.Canonical, hashHex)
+		bs.canonicalHeightByHash[blockHash] = height
+	case bs.index.Canonical[height] == hashHex:
+		// No-op.
+	default:
+		if err := bs.dropCanonicalStateFromLocked(height); err != nil {
+			return err
+		}
+		nextCanonical := append([]string(nil), bs.index.Canonical[:height]...)
+		nextCanonical = append(nextCanonical, hashHex)
 		bs.index.Canonical = nextCanonical
-		bs.rebuildCanonicalHeightIndex()
+		bs.canonicalHeightByHash[blockHash] = height
 	}
 	return saveBlockStoreIndex(bs.indexPath, bs.index)
 }
@@ -148,11 +169,15 @@ func (bs *BlockStore) TruncateCanonical(count uint64) error {
 	if bs == nil {
 		return errors.New("nil blockstore")
 	}
+	bs.stateMu.Lock()
+	defer bs.stateMu.Unlock()
 	if count > uint64(len(bs.index.Canonical)) {
 		return fmt.Errorf("truncate count out of range: %d", count)
 	}
+	if err := bs.dropCanonicalStateFromLocked(count); err != nil {
+		return err
+	}
 	bs.index.Canonical = append([]string(nil), bs.index.Canonical[:count]...)
-	bs.rebuildCanonicalHeightIndex()
 	return saveBlockStoreIndex(bs.indexPath, bs.index)
 }
 
@@ -161,6 +186,8 @@ func (bs *BlockStore) CanonicalHash(height uint64) ([32]byte, bool, error) {
 	if bs == nil {
 		return out, false, errors.New("nil blockstore")
 	}
+	bs.stateMu.RLock()
+	defer bs.stateMu.RUnlock()
 	if height >= uint64(len(bs.index.Canonical)) {
 		return out, false, nil
 	}
@@ -176,6 +203,8 @@ func (bs *BlockStore) Tip() (uint64, [32]byte, bool, error) {
 	if bs == nil {
 		return 0, out, false, errors.New("nil blockstore")
 	}
+	bs.stateMu.RLock()
+	defer bs.stateMu.RUnlock()
 	height, ok := canonicalTipHeight(bs.index.Canonical)
 	if !ok {
 		return 0, out, false, nil
@@ -191,6 +220,8 @@ func (bs *BlockStore) CanonicalIndexSnapshot() ([]string, error) {
 	if bs == nil {
 		return nil, errors.New("nil blockstore")
 	}
+	bs.stateMu.RLock()
+	defer bs.stateMu.RUnlock()
 	for i, hashHex := range bs.index.Canonical {
 		if _, err := parseHex32(fmt.Sprintf("canonical[%d]", i), hashHex); err != nil {
 			return nil, err
@@ -204,13 +235,15 @@ func (bs *BlockStore) RestoreCanonicalIndex(canonical []string) error {
 		return errors.New("nil blockstore")
 	}
 	nextCanonical := append([]string(nil), canonical...)
-	for i, hashHex := range nextCanonical {
-		if _, err := parseHex32(fmt.Sprintf("canonical[%d]", i), hashHex); err != nil {
-			return err
-		}
+	nextIndex, err := buildCanonicalHeightIndex(nextCanonical)
+	if err != nil {
+		return err
 	}
+	bs.stateMu.Lock()
+	defer bs.stateMu.Unlock()
 	bs.index.Canonical = nextCanonical
-	bs.rebuildCanonicalHeightIndex()
+	bs.canonicalHeightByHash = nextIndex
+	bs.chainWorkByHash = make(map[[32]byte]*big.Int)
 	return saveBlockStoreIndex(bs.indexPath, bs.index)
 }
 
@@ -236,8 +269,8 @@ func (bs *BlockStore) ChainWork(tipHash [32]byte) (*big.Int, error) {
 	if tipHash == zero {
 		return big.NewInt(0), nil
 	}
-	if cached, ok := bs.chainWorkByHash[tipHash]; ok {
-		return cloneBigInt(cached), nil
+	if cached, ok := bs.cachedChainWork(tipHash); ok {
+		return cached, nil
 	}
 
 	hashes := make([][32]byte, 0, 16)
@@ -245,7 +278,7 @@ func (bs *BlockStore) ChainWork(tipHash [32]byte) (*big.Int, error) {
 	seen := make(map[[32]byte]struct{})
 	current := tipHash
 	for current != zero {
-		if cached, ok := bs.chainWorkByHash[current]; ok {
+		if cached, ok := bs.cachedChainWork(current); ok {
 			total := cloneBigInt(cached)
 			for i := len(targets) - 1; i >= 0; i-- {
 				work, err := consensus.WorkFromTarget(targets[i])
@@ -253,9 +286,12 @@ func (bs *BlockStore) ChainWork(tipHash [32]byte) (*big.Int, error) {
 					return nil, err
 				}
 				total.Add(total, work)
-				bs.chainWorkByHash[hashes[i]] = cloneBigInt(total)
+				bs.storeChainWorkIfCanonical(hashes[i], total)
 			}
-			return cloneBigInt(bs.chainWorkByHash[tipHash]), nil
+			if cachedTip, ok := bs.cachedChainWork(tipHash); ok {
+				return cachedTip, nil
+			}
+			return cloneBigInt(total), nil
 		}
 		if _, exists := seen[current]; exists {
 			return nil, errors.New("blockstore parent cycle")
@@ -284,28 +320,73 @@ func (bs *BlockStore) ChainWork(tipHash [32]byte) (*big.Int, error) {
 			return nil, err
 		}
 		running.Add(running, work)
-		bs.chainWorkByHash[hashes[i]] = cloneBigInt(running)
+		bs.storeChainWorkIfCanonical(hashes[i], running)
 	}
 	return total, nil
 }
 
-func buildCanonicalHeightIndex(canonical []string) map[[32]byte]uint64 {
+func buildCanonicalHeightIndex(canonical []string) (map[[32]byte]uint64, error) {
 	out := make(map[[32]byte]uint64, len(canonical))
 	for i, hashHex := range canonical {
 		hash, err := parseHex32(fmt.Sprintf("canonical[%d]", i), hashHex)
 		if err != nil {
-			continue
+			return nil, err
 		}
 		out[hash] = uint64(i)
 	}
-	return out
+	return out, nil
 }
 
 func (bs *BlockStore) rebuildCanonicalHeightIndex() {
 	if bs == nil {
 		return
 	}
-	bs.canonicalHeightByHash = buildCanonicalHeightIndex(bs.index.Canonical)
+	nextIndex, err := buildCanonicalHeightIndex(bs.index.Canonical)
+	if err != nil {
+		return
+	}
+	bs.canonicalHeightByHash = nextIndex
+	bs.chainWorkByHash = make(map[[32]byte]*big.Int)
+}
+
+func (bs *BlockStore) dropCanonicalStateFromLocked(start uint64) error {
+	if bs == nil || start >= uint64(len(bs.index.Canonical)) {
+		return nil
+	}
+	for i := start; i < uint64(len(bs.index.Canonical)); i++ {
+		hash, err := parseHex32(fmt.Sprintf("canonical[%d]", i), bs.index.Canonical[i])
+		if err != nil {
+			return err
+		}
+		delete(bs.canonicalHeightByHash, hash)
+		delete(bs.chainWorkByHash, hash)
+	}
+	return nil
+}
+
+func (bs *BlockStore) cachedChainWork(blockHash [32]byte) (*big.Int, bool) {
+	if bs == nil {
+		return nil, false
+	}
+	bs.stateMu.RLock()
+	defer bs.stateMu.RUnlock()
+	cached, ok := bs.chainWorkByHash[blockHash]
+	if !ok {
+		return nil, false
+	}
+	return cloneBigInt(cached), true
+}
+
+func (bs *BlockStore) storeChainWorkIfCanonical(blockHash [32]byte, work *big.Int) {
+	if bs == nil || work == nil {
+		return
+	}
+	bs.stateMu.Lock()
+	defer bs.stateMu.Unlock()
+	if _, ok := bs.canonicalHeightByHash[blockHash]; !ok {
+		return
+	}
+	bs.chainWorkByHash[blockHash] = cloneBigInt(work)
 }
 
 func cloneBigInt(x *big.Int) *big.Int {
