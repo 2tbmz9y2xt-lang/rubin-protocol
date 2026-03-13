@@ -193,3 +193,18 @@ func TestEnsureOpenSSLConsensusInit_BootstrapError(t *testing.T) {
 		t.Fatalf("expected cached error on second call, got: %v", err2)
 	}
 }
+
+func TestParseOpenSSLErrorBuffer_Fallback(t *testing.T) {
+	err := parseOpenSSLErrorBuffer(make([]byte, 8), "fallback text")
+	if err == nil || err.Error() != "fallback text" {
+		t.Fatalf("expected fallback error, got: %v", err)
+	}
+}
+
+func TestParseOpenSSLErrorBuffer_Message(t *testing.T) {
+	buf := append([]byte("consensus failed"), 0)
+	err := parseOpenSSLErrorBuffer(buf, "fallback text")
+	if err == nil || err.Error() != "consensus failed" {
+		t.Fatalf("expected parsed buffer error, got: %v", err)
+	}
+}

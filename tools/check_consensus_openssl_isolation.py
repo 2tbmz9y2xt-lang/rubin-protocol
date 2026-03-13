@@ -113,6 +113,10 @@ def check_go_verify(path: Path, text: str) -> list[str]:
             errors.append(
                 f"{path}: rubin_openssl_consensus_init must not use OPENSSL_INIT_LOAD_CONFIG"
             )
+        if "OPENSSL_init_crypto(OPENSSL_INIT_NO_LOAD_CONFIG" not in c_consensus_body:
+            errors.append(
+                f"{path}: rubin_openssl_consensus_init must explicitly use OPENSSL_INIT_NO_LOAD_CONFIG to block inherited OPENSSL config"
+            )
         if (
             contains_call(c_consensus_body, "rubin_set_env_if_empty")
             or contains_call(c_consensus_body, "setenv")
@@ -151,6 +155,10 @@ def check_rust_verify(path: Path, text: str) -> list[str]:
         if "OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CONFIG" in consensus_body:
             errors.append(
                 f"{path}: openssl_consensus_bootstrap must not use OPENSSL_INIT_LOAD_CONFIG because inherited OPENSSL_CONF/OPENSSL_MODULES can affect consensus"
+            )
+        if "OPENSSL_init_crypto(OPENSSL_INIT_NO_LOAD_CONFIG" not in consensus_body:
+            errors.append(
+                f"{path}: openssl_consensus_bootstrap must explicitly use OPENSSL_INIT_NO_LOAD_CONFIG to block inherited OPENSSL config"
             )
         if "set_env_if_empty" in consensus_body or "RUBIN_OPENSSL_" in consensus_body:
             errors.append(

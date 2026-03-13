@@ -105,7 +105,7 @@ static int rubin_openssl_bootstrap(
 static int rubin_openssl_consensus_init(char* err_buf, size_t err_buf_len) {
 	ERR_clear_error();
 
-	if (OPENSSL_init_crypto(0, NULL) != 1) {
+	if (OPENSSL_init_crypto(OPENSSL_INIT_NO_LOAD_CONFIG, NULL) != 1) {
 		rubin_err(err_buf, err_buf_len, "OPENSSL_init_crypto failed");
 		return -1;
 	}
@@ -278,14 +278,7 @@ func opensslBootstrap(requireFIPS bool, rubinConf string, rubinModules string) e
 	if int(rc) == 1 {
 		return nil
 	}
-	n := 0
-	for n < len(errBuf) && errBuf[n] != 0 {
-		n++
-	}
-	if n == 0 {
-		return fmt.Errorf("unknown bootstrap failure")
-	}
-	return fmt.Errorf("%s", string(errBuf[:n]))
+	return parseOpenSSLErrorBuffer(errBuf, "unknown bootstrap failure")
 }
 
 func opensslConsensusInit() error {
@@ -297,12 +290,16 @@ func opensslConsensusInit() error {
 	if int(rc) == 1 {
 		return nil
 	}
+	return parseOpenSSLErrorBuffer(errBuf, "unknown consensus init failure")
+}
+
+func parseOpenSSLErrorBuffer(errBuf []byte, fallback string) error {
 	n := 0
 	for n < len(errBuf) && errBuf[n] != 0 {
 		n++
 	}
 	if n == 0 {
-		return fmt.Errorf("unknown consensus init failure")
+		return fmt.Errorf("%s", fallback)
 	}
 	return fmt.Errorf("%s", string(errBuf[:n]))
 }
