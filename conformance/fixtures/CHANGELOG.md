@@ -9,6 +9,21 @@ Policy:
 
 ---
 
+## 2026-03-14 — HTLC same-key parse coverage lock-in
+
+Причина:
+- закрыть validated external-audit test gap для уже существующего правила `CORE_HTLC`:
+  `ClaimKeyID == RefundKeyID` должно отклоняться как `TX_ERR_PARSE`;
+- зафиксировать этот reject отдельным executable CV, чтобы future refactor не снял проверку незаметно.
+
+Инструменты:
+- ручное обновление `CV-HTLC.json`,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-HTLC`,
+- синхронизация матрицы: `tools/gen_conformance_matrix.py`.
+
+Изменённые fixtures:
+- `CV-HTLC.json` (добавлен `CV-HTLC-18`).
+
 ## 2026-03-07 — Parse ordering lock-in for witness vs `da_payload_len`
 
 Причина:

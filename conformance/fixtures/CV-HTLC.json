@@ -294,6 +294,27 @@
         }
       ],
       "note": "Valid HTLC refund spend: height lock met and refund signature verifies."
+    },
+    {
+      "block_timestamp": 2000,
+      "expect_err": "TX_ERR_PARSE",
+      "expect_ok": false,
+      "height": 1000000,
+      "id": "CV-HTLC-18",
+      "note": "Reject CORE_HTLC covenant data when claim_key_id == refund_key_id.",
+      "op": "utxo_apply_basic",
+      "tx_hex": "0100000000010000000000000001a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9000000000000000000015a0000000000000000002101000000000000000000000000000000000000000000000000000000000000000000000000020020b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a716fd0301000101aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa024011111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111010100",
+      "utxos": [
+        {
+          "covenant_data": "54e89e15c3eef53f39d5e758fd47dfc84f15f042cd83edc0c93723e93b7d0a83000a00000000000000b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a716b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a716",
+          "covenant_type": 256,
+          "created_by_coinbase": false,
+          "creation_height": 0,
+          "txid": "a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9",
+          "value": 100,
+          "vout": 0
+        }
+      ]
     }
   ]
 }
