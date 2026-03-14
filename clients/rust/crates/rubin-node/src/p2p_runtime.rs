@@ -704,10 +704,16 @@ fn read_payload_with_checksum<R: Read>(
     }
 
     let mut hasher = Sha3_256::new();
-    let mut payload = vec![0u8; payload_len];
-    for chunk in payload.chunks_mut(STREAM_READ_CHUNK_BYTES) {
+    let mut payload = Vec::with_capacity(payload_len.min(STREAM_READ_CHUNK_BYTES));
+    let mut chunk = [0u8; STREAM_READ_CHUNK_BYTES];
+    let mut remaining = payload_len;
+    while remaining > 0 {
+        let chunk_len = remaining.min(STREAM_READ_CHUNK_BYTES);
+        let chunk = &mut chunk[..chunk_len];
         reader.read_exact(chunk)?;
         hasher.update(&*chunk);
+        payload.extend_from_slice(chunk);
+        remaining -= chunk_len;
     }
 
     let digest = hasher.finalize();

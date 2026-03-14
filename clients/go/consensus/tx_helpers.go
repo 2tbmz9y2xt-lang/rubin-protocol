@@ -49,14 +49,15 @@ func CheckTransaction(
 	if err != nil {
 		return nil, err
 	}
-	_, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTP(
+	workUtxos := cloneUtxoSet(utxoSet)
+	_, fee, err := applyNonCoinbaseTxBasicWork(
 		tx,
 		txid,
-		utxoSet,
+		workUtxos,
 		height,
 		blockMTP,
-		blockMTP,
 		chainID,
+		nil,
 	)
 	if err != nil {
 		return nil, err
@@ -67,7 +68,7 @@ func CheckTransaction(
 		Bytes:          append([]byte(nil), txBytes...),
 		TxID:           txid,
 		WTxID:          wtxid,
-		Fee:            summary.Fee,
+		Fee:            fee,
 		Weight:         weight,
 		DaBytes:        daBytes,
 		SerializedSize: len(txBytes),
