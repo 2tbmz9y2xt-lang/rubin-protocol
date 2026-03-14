@@ -33,6 +33,7 @@ type Mempool struct {
 	txs        map[[32]byte]*mempoolEntry
 	spenders   map[consensus.Outpoint][32]byte
 	worstHeap  mempoolWorstHeap
+	heapItems  map[[32]byte]*mempoolHeapItem
 	heapSeqs   map[[32]byte]uint64
 	nextHeapID uint64
 }
@@ -43,6 +44,7 @@ type mempoolHeapItem struct {
 	weight uint64
 	size   int
 	heapID uint64
+	index  int
 }
 
 type mempoolWorstHeap []*mempoolHeapItem
@@ -55,16 +57,21 @@ func (h mempoolWorstHeap) Less(i, j int) bool {
 
 func (h mempoolWorstHeap) Swap(i, j int) {
 	h[i], h[j] = h[j], h[i]
+	h[i].index = i
+	h[j].index = j
 }
 
 func (h *mempoolWorstHeap) Push(x any) {
-	*h = append(*h, x.(*mempoolHeapItem))
+	item := x.(*mempoolHeapItem)
+	item.index = len(*h)
+	*h = append(*h, item)
 }
 
 func (h *mempoolWorstHeap) Pop() any {
 	old := *h
 	n := len(old)
 	item := old[n-1]
+	item.index = -1
 	*h = old[:n-1]
 	return item
 }
@@ -107,6 +114,7 @@ func NewMempoolWithConfig(chainState *ChainState, blockStore *BlockStore, chainI
 		txs:        make(map[[32]byte]*mempoolEntry),
 		spenders:   make(map[consensus.Outpoint][32]byte),
 		worstHeap:  make(mempoolWorstHeap, 0, maxMempoolTransactions),
+		heapItems:  make(map[[32]byte]*mempoolHeapItem),
 		heapSeqs:   make(map[[32]byte]uint64),
 	}, nil
 }
@@ -299,7 +307,11 @@ func (m *Mempool) removeTxLocked(txid [32]byte) {
 	if !ok {
 		return
 	}
+	if item, ok := m.heapItems[txid]; ok && item != nil && item.index >= 0 && item.index < len(m.worstHeap) && m.worstHeap[item.index] == item {
+		heap.Remove(&m.worstHeap, item.index)
+	}
 	delete(m.txs, txid)
+	delete(m.heapItems, txid)
 	delete(m.heapSeqs, txid)
 	for _, op := range entry.inputs {
 		delete(m.spenders, op)
@@ -320,10 +332,11 @@ func (m *Mempool) validateAdmissionLocked(entry *mempoolEntry) error {
 		}
 	}
 	if len(m.txs) >= m.maxTxs {
-		worstTxid, worstEntry, ok := m.popWorstLocked()
+		worstTxid, worstEntry, ok := m.peekWorstLocked()
 		if !ok || compareEntryPriority(entry, worstEntry) <= 0 {
 			return fmt.Errorf("mempool full")
 		}
+		m.popWorstLocked()
 		m.removePoppedWorstLocked(worstTxid, worstEntry)
 	}
 	return nil
@@ -348,13 +361,15 @@ func (m *Mempool) addEntryLocked(entry *mempoolEntry) {
 	for _, op := range entry.inputs {
 		m.spenders[op] = entry.txid
 	}
-	heap.Push(&m.worstHeap, &mempoolHeapItem{
+	item := &mempoolHeapItem{
 		txid:   entry.txid,
 		fee:    entry.fee,
 		weight: entry.weight,
 		size:   entry.size,
 		heapID: heapID,
-	})
+	}
+	heap.Push(&m.worstHeap, item)
+	m.heapItems[entry.txid] = item
 }
 
 func (m *Mempool) snapshotEntries() []*mempoolEntry {
@@ -418,23 +433,25 @@ func outpointFromInput(in consensus.TxInput) consensus.Outpoint {
 }
 
 func (m *Mempool) seedWorstHeapLocked() {
-	if len(m.heapSeqs) >= len(m.txs) {
+	if len(m.heapItems) >= len(m.txs) {
 		return
 	}
 	for txid, entry := range m.txs {
-		if _, ok := m.heapSeqs[txid]; ok {
+		if _, ok := m.heapItems[txid]; ok {
 			continue
 		}
 		m.nextHeapID++
 		heapID := m.nextHeapID
 		m.heapSeqs[txid] = heapID
-		heap.Push(&m.worstHeap, &mempoolHeapItem{
+		item := &mempoolHeapItem{
 			txid:   txid,
 			fee:    entry.fee,
 			weight: entry.weight,
 			size:   entry.size,
 			heapID: heapID,
-		})
+		}
+		heap.Push(&m.worstHeap, item)
+		m.heapItems[txid] = item
 	}
 }
 
@@ -442,14 +459,11 @@ func (m *Mempool) peekWorstLocked() ([32]byte, *mempoolEntry, bool) {
 	m.seedWorstHeapLocked()
 	for len(m.worstHeap) > 0 {
 		item := m.worstHeap[0]
-		heapID, ok := m.heapSeqs[item.txid]
-		if !ok || heapID != item.heapID {
-			heap.Pop(&m.worstHeap)
-			continue
-		}
 		entry := m.txs[item.txid]
 		if entry == nil {
 			heap.Pop(&m.worstHeap)
+			delete(m.heapItems, item.txid)
+			delete(m.heapSeqs, item.txid)
 			continue
 		}
 		return item.txid, entry, true
@@ -463,11 +477,13 @@ func (m *Mempool) popWorstLocked() ([32]byte, *mempoolEntry, bool) {
 		return [32]byte{}, nil, false
 	}
 	heap.Pop(&m.worstHeap)
+	delete(m.heapItems, txid)
 	return txid, entry, true
 }
 
 func (m *Mempool) removePoppedWorstLocked(txid [32]byte, entry *mempoolEntry) {
 	delete(m.txs, txid)
+	delete(m.heapItems, txid)
 	delete(m.heapSeqs, txid)
 	if entry == nil {
 		return

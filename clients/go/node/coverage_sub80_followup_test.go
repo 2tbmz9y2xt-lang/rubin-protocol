@@ -64,6 +64,12 @@ func TestCoverageResidual_MempoolBranches(t *testing.T) {
 	if err := mp.validateAdmissionLocked(nil); err == nil {
 		t.Fatalf("expected nil mempool entry rejection")
 	}
+	if err := mp.EvictConfirmed([]byte{0x00}); err == nil {
+		t.Fatalf("expected invalid block bytes rejection")
+	}
+	if err := mp.RemoveConflicting([]byte{0x00}); err == nil {
+		t.Fatalf("expected invalid block bytes rejection")
+	}
 }
 
 func TestCoverageResidual_RemoveConflictingParsesBlockBytes(t *testing.T) {
@@ -113,6 +119,51 @@ func TestCoverageResidual_CompareEntryPriorityTieBreakers(t *testing.T) {
 		&mempoolEntry{txid: [32]byte{0x02}, fee: 10, weight: 4, size: 2},
 	); got <= 0 {
 		t.Fatalf("expected lower txid to win deterministic tie-break, got %d", got)
+	}
+}
+
+func TestCoverageResidual_MempoolHeapRepairBranches(t *testing.T) {
+	st := NewChainState()
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+
+	mp.mu.Lock()
+	defer mp.mu.Unlock()
+
+	liveTxid := [32]byte{0x10}
+	mp.txs[liveTxid] = &mempoolEntry{
+		raw:    []byte{0x01},
+		txid:   liveTxid,
+		inputs: nil,
+		fee:    2,
+		weight: 1,
+		size:   1,
+	}
+
+	gotTxid, entry, ok := mp.peekWorstLocked()
+	if !ok || entry == nil || gotTxid != liveTxid {
+		t.Fatalf("peekWorstLocked seeded heap = (%x, %v, %v)", gotTxid, entry, ok)
+	}
+
+	staleTxid := [32]byte{0x01}
+	stale := &mempoolHeapItem{txid: staleTxid, fee: 1, weight: 1, size: 1, heapID: 99, index: 0}
+	liveItem := mp.heapItems[liveTxid]
+	liveItem.index = 1
+	mp.worstHeap = mempoolWorstHeap{stale, liveItem}
+	mp.heapItems[staleTxid] = stale
+	mp.heapSeqs[staleTxid] = stale.heapID
+
+	gotTxid, entry, ok = mp.peekWorstLocked()
+	if !ok || entry == nil || gotTxid != liveTxid {
+		t.Fatalf("peekWorstLocked after stale cleanup = (%x, %v, %v)", gotTxid, entry, ok)
+	}
+	if _, ok := mp.heapItems[staleTxid]; ok {
+		t.Fatalf("expected stale heap item cleanup")
+	}
+	if _, ok := mp.heapSeqs[staleTxid]; ok {
+		t.Fatalf("expected stale heap seq cleanup")
 	}
 }
 
