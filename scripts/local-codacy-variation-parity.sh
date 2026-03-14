@@ -90,22 +90,11 @@ codacy_pr_coverage_status_json() {
   local repo pr_number
   repo="$1"
   pr_number="$2"
-  python3 - "$repo" "$pr_number" <<'PY'
-import json
-import sys
-import urllib.request
-
-repo = sys.argv[1]
-pr_number = sys.argv[2]
-owner, name = repo.split("/", 1)
-url = (
-    "https://app.codacy.com/api/v3/analysis/organizations/gh/"
-    f"{owner}/repositories/{name}/pull-requests/{pr_number}/coverage/status"
-)
-with urllib.request.urlopen(url, timeout=20) as response:
-    data = json.load(response)
-print(json.dumps(data))
-PY
+  local owner name url
+  owner="${repo%%/*}"
+  name="${repo#*/}"
+  url="https://app.codacy.com/api/v3/analysis/organizations/gh/${owner}/repositories/${name}/pull-requests/${pr_number}/coverage/status"
+  curl -fsSL "$url"
 }
 
 download_main_commit_artifacts() {
