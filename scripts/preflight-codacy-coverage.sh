@@ -9,6 +9,7 @@ base_worktree="$tmp_dir/base"
 artifact_dir="$tmp_dir/base-artifacts"
 head_go="${HEAD_GO_COVERAGE:-$tmp_dir/head-go.coverage.out}"
 head_rust="${HEAD_RUST_LCOV:-$tmp_dir/head-rust.lcov.info}"
+head_coverage_sha="${HEAD_COVERAGE_SHA:-}"
 base_go="$tmp_dir/base-go.coverage.out"
 base_rust="$tmp_dir/base-rust.lcov.info"
 
@@ -75,11 +76,15 @@ else
   git -C "$repo_root" fetch origin
 fi
 merge_base="$(git -C "$repo_root" merge-base HEAD "$base_ref")"
+current_head="$(git -C "$repo_root" rev-parse HEAD)"
 
-if [[ -s "$head_go" && -s "$head_rust" ]]; then
+if [[ -n "$head_coverage_sha" && "$head_coverage_sha" == "$current_head" && -s "$head_go" && -s "$head_rust" ]]; then
   echo "Reusing existing head coverage artifacts from current workspace"
 else
-  echo "Generating head coverage against $(git -C "$repo_root" rev-parse --short HEAD)"
+  if [[ -n "$head_coverage_sha" && "$head_coverage_sha" != "$current_head" ]]; then
+    echo "Ignoring stale head coverage artifacts: expected $current_head, got $head_coverage_sha"
+  fi
+  echo "Generating head coverage against $(git -C "$repo_root" rev-parse --short "$current_head")"
   GO_COVER_OUT="$head_go" \
   RUST_LCOV_OUT="$head_rust" \
   "$repo_root/scripts/dev-env.sh" -- \
