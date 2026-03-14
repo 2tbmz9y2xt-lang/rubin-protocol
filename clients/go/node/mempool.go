@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"container/heap"
 	"errors"
 	"fmt"
 	"math/bits"
@@ -31,6 +32,41 @@ type Mempool struct {
 	maxTxs     int
 	txs        map[[32]byte]*mempoolEntry
 	spenders   map[consensus.Outpoint][32]byte
+	worstHeap  mempoolWorstHeap
+	heapSeqs   map[[32]byte]uint64
+	nextHeapID uint64
+}
+
+type mempoolHeapItem struct {
+	txid   [32]byte
+	fee    uint64
+	weight uint64
+	size   int
+	heapID uint64
+}
+
+type mempoolWorstHeap []*mempoolHeapItem
+
+func (h mempoolWorstHeap) Len() int { return len(h) }
+
+func (h mempoolWorstHeap) Less(i, j int) bool {
+	return compareHeapItemPriority(h[i], h[j]) < 0
+}
+
+func (h mempoolWorstHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+}
+
+func (h *mempoolWorstHeap) Push(x any) {
+	*h = append(*h, x.(*mempoolHeapItem))
+}
+
+func (h *mempoolWorstHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
 }
 
 type MempoolConfig struct {
@@ -70,6 +106,8 @@ func NewMempoolWithConfig(chainState *ChainState, blockStore *BlockStore, chainI
 		maxTxs:     maxMempoolTransactions,
 		txs:        make(map[[32]byte]*mempoolEntry),
 		spenders:   make(map[consensus.Outpoint][32]byte),
+		worstHeap:  make(mempoolWorstHeap, 0, maxMempoolTransactions),
+		heapSeqs:   make(map[[32]byte]uint64),
 	}, nil
 }
 
@@ -262,6 +300,7 @@ func (m *Mempool) removeTxLocked(txid [32]byte) {
 		return
 	}
 	delete(m.txs, txid)
+	delete(m.heapSeqs, txid)
 	for _, op := range entry.inputs {
 		delete(m.spenders, op)
 	}
@@ -281,11 +320,11 @@ func (m *Mempool) validateAdmissionLocked(entry *mempoolEntry) error {
 		}
 	}
 	if len(m.txs) >= m.maxTxs {
-		worstTxid, worstEntry, ok := m.findWorstLocked()
+		worstTxid, worstEntry, ok := m.popWorstLocked()
 		if !ok || compareEntryPriority(entry, worstEntry) <= 0 {
 			return fmt.Errorf("mempool full")
 		}
-		m.removeTxLocked(worstTxid)
+		m.removePoppedWorstLocked(worstTxid, worstEntry)
 	}
 	return nil
 }
@@ -302,10 +341,20 @@ func newMempoolEntry(checked *consensus.CheckedTransaction, inputs []consensus.O
 }
 
 func (m *Mempool) addEntryLocked(entry *mempoolEntry) {
+	m.nextHeapID++
+	heapID := m.nextHeapID
 	m.txs[entry.txid] = entry
+	m.heapSeqs[entry.txid] = heapID
 	for _, op := range entry.inputs {
 		m.spenders[op] = entry.txid
 	}
+	heap.Push(&m.worstHeap, &mempoolHeapItem{
+		txid:   entry.txid,
+		fee:    entry.fee,
+		weight: entry.weight,
+		size:   entry.size,
+		heapID: heapID,
+	})
 }
 
 func (m *Mempool) snapshotEntries() []*mempoolEntry {
@@ -368,40 +417,98 @@ func outpointFromInput(in consensus.TxInput) consensus.Outpoint {
 	return consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
 }
 
-func (m *Mempool) findWorstLocked() ([32]byte, *mempoolEntry, bool) {
-	var worstTxid [32]byte
-	var worstEntry *mempoolEntry
-	first := true
-	for txid, entry := range m.txs {
-		if first || compareEntryPriority(entry, worstEntry) < 0 {
-			worstTxid = txid
-			worstEntry = entry
-			first = false
-		}
+func (m *Mempool) seedWorstHeapLocked() {
+	if len(m.heapSeqs) >= len(m.txs) {
+		return
 	}
-	return worstTxid, worstEntry, !first
+	for txid, entry := range m.txs {
+		if _, ok := m.heapSeqs[txid]; ok {
+			continue
+		}
+		m.nextHeapID++
+		heapID := m.nextHeapID
+		m.heapSeqs[txid] = heapID
+		heap.Push(&m.worstHeap, &mempoolHeapItem{
+			txid:   txid,
+			fee:    entry.fee,
+			weight: entry.weight,
+			size:   entry.size,
+			heapID: heapID,
+		})
+	}
+}
+
+func (m *Mempool) peekWorstLocked() ([32]byte, *mempoolEntry, bool) {
+	m.seedWorstHeapLocked()
+	for len(m.worstHeap) > 0 {
+		item := m.worstHeap[0]
+		heapID, ok := m.heapSeqs[item.txid]
+		if !ok || heapID != item.heapID {
+			heap.Pop(&m.worstHeap)
+			continue
+		}
+		entry := m.txs[item.txid]
+		if entry == nil {
+			heap.Pop(&m.worstHeap)
+			continue
+		}
+		return item.txid, entry, true
+	}
+	return [32]byte{}, nil, false
+}
+
+func (m *Mempool) popWorstLocked() ([32]byte, *mempoolEntry, bool) {
+	txid, entry, ok := m.peekWorstLocked()
+	if !ok {
+		return [32]byte{}, nil, false
+	}
+	heap.Pop(&m.worstHeap)
+	return txid, entry, true
+}
+
+func (m *Mempool) removePoppedWorstLocked(txid [32]byte, entry *mempoolEntry) {
+	delete(m.txs, txid)
+	delete(m.heapSeqs, txid)
+	if entry == nil {
+		return
+	}
+	for _, op := range entry.inputs {
+		delete(m.spenders, op)
+	}
 }
 
 func compareEntryPriority(a *mempoolEntry, b *mempoolEntry) int {
-	if cmp := compareFeeRate(a, b); cmp != 0 {
-		return cmp
-	}
 	if a == nil || b == nil {
 		return 0
 	}
-	if a.fee != b.fee {
-		if a.fee > b.fee {
+	return comparePriorityValues(a.fee, a.size, a.weight, a.txid, b.fee, b.size, b.weight, b.txid)
+}
+
+func compareHeapItemPriority(a *mempoolHeapItem, b *mempoolHeapItem) int {
+	if a == nil || b == nil {
+		return 0
+	}
+	return comparePriorityValues(a.fee, a.size, a.weight, a.txid, b.fee, b.size, b.weight, b.txid)
+}
+
+func comparePriorityValues(feeA uint64, sizeA int, weightA uint64, txidA [32]byte, feeB uint64, sizeB int, weightB uint64, txidB [32]byte) int {
+	cmp := compareFeeRateValues(feeA, sizeA, feeB, sizeB)
+	if cmp != 0 {
+		return cmp
+	}
+	if feeA != feeB {
+		if feeA > feeB {
 			return 1
 		}
 		return -1
 	}
-	if a.weight != b.weight {
-		if a.weight < b.weight {
+	if weightA != weightB {
+		if weightA < weightB {
 			return 1
 		}
 		return -1
 	}
-	switch cmp := bytes.Compare(a.txid[:], b.txid[:]); {
+	switch cmp := bytes.Compare(txidA[:], txidB[:]); {
 	case cmp < 0:
 		return 1
 	case cmp > 0:
@@ -412,11 +519,18 @@ func compareEntryPriority(a *mempoolEntry, b *mempoolEntry) int {
 }
 
 func compareFeeRate(a *mempoolEntry, b *mempoolEntry) int {
-	if a == nil || b == nil || a.size <= 0 || b.size <= 0 {
+	if a == nil || b == nil {
 		return 0
 	}
-	ahi, alo := bits.Mul64(a.fee, uint64(b.size))
-	bhi, blo := bits.Mul64(b.fee, uint64(a.size))
+	return compareFeeRateValues(a.fee, a.size, b.fee, b.size)
+}
+
+func compareFeeRateValues(feeA uint64, sizeA int, feeB uint64, sizeB int) int {
+	if sizeA <= 0 || sizeB <= 0 {
+		return 0
+	}
+	ahi, alo := bits.Mul64(feeA, uint64(sizeB))
+	bhi, blo := bits.Mul64(feeB, uint64(sizeA))
 	if ahi != bhi {
 		if ahi > bhi {
 			return 1

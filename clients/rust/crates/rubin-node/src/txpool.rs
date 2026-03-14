@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_with_mtp, parse_block_header_bytes, parse_core_ext_covenant_data,
@@ -27,11 +27,44 @@ pub struct TxPoolEntry {
     pub size: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct TxPool {
     cfg: TxPoolConfig,
     txs: HashMap<[u8; 32], TxPoolEntry>,
     spenders: HashMap<Outpoint, [u8; 32]>,
+    worst_heap: BinaryHeap<WorstEntryKey>,
+    heap_seqs: HashMap<[u8; 32], u64>,
+    next_heap_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorstEntryKey {
+    txid: [u8; 32],
+    fee: u64,
+    weight: u64,
+    size: usize,
+    heap_id: u64,
+}
+
+impl Ord for WorstEntryKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        compare_priority_values(
+            other.fee,
+            other.size,
+            other.weight,
+            &other.txid,
+            self.fee,
+            self.size,
+            self.weight,
+            &self.txid,
+        )
+    }
+}
+
+impl PartialOrd for WorstEntryKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +98,9 @@ impl TxPool {
             cfg,
             txs: HashMap::new(),
             spenders: HashMap::new(),
+            worst_heap: BinaryHeap::new(),
+            heap_seqs: HashMap::new(),
+            next_heap_id: 0,
         }
     }
 
@@ -114,9 +150,6 @@ impl TxPool {
         if self.txs.contains_key(&txid) {
             return Err(conflict("tx already in mempool"));
         }
-        if self.txs.len() >= MAX_TX_POOL_TRANSACTIONS {
-            return Err(unavailable("tx pool full"));
-        }
 
         let inputs: Vec<Outpoint> = tx
             .inputs
@@ -151,19 +184,28 @@ impl TxPool {
         let (weight, _, _) = tx_weight_and_stats_public(&tx)
             .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
 
-        self.txs.insert(
-            txid,
-            TxPoolEntry {
-                raw: tx_bytes.to_vec(),
-                inputs: inputs.clone(),
-                fee: summary.fee,
-                weight,
-                size: tx_bytes.len(),
-            },
-        );
-        for input in inputs {
-            self.spenders.insert(input, txid);
+        let entry = TxPoolEntry {
+            raw: tx_bytes.to_vec(),
+            inputs: inputs.clone(),
+            fee: summary.fee,
+            weight,
+            size: tx_bytes.len(),
+        };
+
+        if self.txs.len() >= MAX_TX_POOL_TRANSACTIONS {
+            let Some(worst_txid) = self.current_worst_txid() else {
+                return Err(unavailable("tx pool full"));
+            };
+            let Some(worst_entry) = self.txs.get(&worst_txid) else {
+                return Err(unavailable("tx pool full"));
+            };
+            if compare_admit_priority(txid, &entry, worst_txid, worst_entry) != Ordering::Greater {
+                return Err(unavailable("tx pool full"));
+            }
+            self.remove_entry(&worst_txid);
         }
+
+        self.insert_entry(txid, entry);
         Ok(txid)
     }
 
@@ -171,11 +213,7 @@ impl TxPool {
     /// Cleans up the spender index for any removed entries.
     pub fn evict_txids(&mut self, txids: &[[u8; 32]]) {
         for txid in txids {
-            if let Some(entry) = self.txs.remove(txid) {
-                for input in &entry.inputs {
-                    self.spenders.remove(input);
-                }
-            }
+            self.remove_entry(txid);
         }
     }
 
@@ -197,6 +235,69 @@ impl TxPool {
         }
         let txids: Vec<[u8; 32]> = conflicting.into_iter().collect();
         self.evict_txids(&txids);
+    }
+
+    fn insert_entry(&mut self, txid: [u8; 32], entry: TxPoolEntry) {
+        self.next_heap_id = self.next_heap_id.saturating_add(1);
+        let heap_id = self.next_heap_id;
+        for input in &entry.inputs {
+            self.spenders.insert(input.clone(), txid);
+        }
+        self.heap_seqs.insert(txid, heap_id);
+        self.worst_heap.push(WorstEntryKey {
+            txid,
+            fee: entry.fee,
+            weight: entry.weight,
+            size: entry.size,
+            heap_id,
+        });
+        self.txs.insert(txid, entry);
+    }
+
+    fn remove_entry(&mut self, txid: &[u8; 32]) {
+        if let Some(entry) = self.txs.remove(txid) {
+            self.heap_seqs.remove(txid);
+            for input in &entry.inputs {
+                self.spenders.remove(input);
+            }
+        }
+    }
+
+    fn seed_worst_heap(&mut self) {
+        if self.heap_seqs.len() >= self.txs.len() {
+            return;
+        }
+        let missing: Vec<([u8; 32], u64, u64, usize)> = self
+            .txs
+            .iter()
+            .filter(|(txid, _)| !self.heap_seqs.contains_key(*txid))
+            .map(|(txid, entry)| (*txid, entry.fee, entry.weight, entry.size))
+            .collect();
+        for (txid, fee, weight, size) in missing {
+            self.next_heap_id = self.next_heap_id.saturating_add(1);
+            let heap_id = self.next_heap_id;
+            self.heap_seqs.insert(txid, heap_id);
+            self.worst_heap.push(WorstEntryKey {
+                txid,
+                fee,
+                weight,
+                size,
+                heap_id,
+            });
+        }
+    }
+
+    fn current_worst_txid(&mut self) -> Option<[u8; 32]> {
+        self.seed_worst_heap();
+        loop {
+            let head = self.worst_heap.peek()?;
+            match self.heap_seqs.get(&head.txid) {
+                Some(heap_id) if *heap_id == head.heap_id => return Some(head.txid),
+                _ => {
+                    self.worst_heap.pop();
+                }
+            }
+        }
     }
 }
 
@@ -440,12 +541,49 @@ fn compare_entries_for_mining(a: &&TxPoolEntry, b: &&TxPoolEntry) -> Ordering {
     }
 }
 
+fn compare_admit_priority(
+    txid_a: [u8; 32],
+    a: &TxPoolEntry,
+    txid_b: [u8; 32],
+    b: &TxPoolEntry,
+) -> Ordering {
+    compare_priority_values(
+        a.fee, a.size, a.weight, &txid_a, b.fee, b.size, b.weight, &txid_b,
+    )
+}
+
+fn compare_priority_values(
+    fee_a: u64,
+    size_a: usize,
+    weight_a: u64,
+    tie_a: &[u8],
+    fee_b: u64,
+    size_b: usize,
+    weight_b: u64,
+    tie_b: &[u8],
+) -> Ordering {
+    match compare_fee_rate_values(fee_a, size_a, fee_b, size_b) {
+        Ordering::Equal => match fee_a.cmp(&fee_b) {
+            Ordering::Equal => match weight_b.cmp(&weight_a) {
+                Ordering::Equal => tie_b.cmp(tie_a),
+                other => other,
+            },
+            other => other,
+        },
+        other => other,
+    }
+}
+
 fn compare_fee_rate(a: &TxPoolEntry, b: &TxPoolEntry) -> Ordering {
-    if a.size == 0 || b.size == 0 {
+    compare_fee_rate_values(a.fee, a.size, b.fee, b.size)
+}
+
+fn compare_fee_rate_values(fee_a: u64, size_a: usize, fee_b: u64, size_b: usize) -> Ordering {
+    if size_a == 0 || size_b == 0 {
         return Ordering::Equal;
     }
-    let left = u128::from(a.fee) * (b.size as u128);
-    let right = u128::from(b.fee) * (a.size as u128);
+    let left = u128::from(fee_a) * (size_b as u128);
+    let right = u128::from(fee_b) * (size_a as u128);
     left.cmp(&right)
 }
 
@@ -467,9 +605,9 @@ mod tests {
     };
 
     use super::{
-        compare_entries_for_mining, compare_fee_rate, conflict, mtp_median, next_block_height,
-        next_block_mtp, rejected, unavailable, TxPool, TxPoolAdmitErrorKind, TxPoolConfig,
-        TxPoolEntry, MAX_TX_POOL_TRANSACTIONS,
+        compare_admit_priority, compare_entries_for_mining, compare_fee_rate, conflict, mtp_median,
+        next_block_height, next_block_mtp, rejected, unavailable, TxPool, TxPoolAdmitErrorKind,
+        TxPoolConfig, TxPoolEntry, MAX_TX_POOL_TRANSACTIONS,
     };
     use crate::{
         block_store_path, default_sync_config, devnet_genesis_block_bytes, devnet_genesis_chain_id,
@@ -855,7 +993,17 @@ mod tests {
 
     #[test]
     fn admit_rejects_pool_full() {
-        let raw = genesis_coinbase_bytes();
+        let (state, raw) = signed_p2pk_state_and_tx(
+            10,
+            vec![TxOutput {
+                value: 10,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&vec![0x55; 2592]),
+            }],
+            0x00,
+            None,
+            Vec::new(),
+        );
         let (_tx, txid, _wtxid, consumed) = parse_tx(&raw).expect("parse tx");
         assert_eq!(consumed, raw.len());
 
@@ -869,19 +1017,72 @@ mod tests {
             pool.txs.insert(
                 key,
                 TxPoolEntry {
-                    raw: Vec::new(),
+                    raw: vec![0xff],
                     inputs: Vec::new(),
-                    fee: 0,
-                    weight: 0,
-                    size: 0,
+                    fee: 1,
+                    weight: 1,
+                    size: 1,
                 },
             );
         }
-        let err = pool
-            .admit(&raw, &ChainState::new(), None, devnet_genesis_chain_id())
-            .unwrap_err();
+        let err = pool.admit(&raw, &state, None, [0u8; 32]).unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
         assert!(err.message.contains("tx pool full"));
+    }
+
+    #[test]
+    fn admit_evicts_lowest_priority_when_pool_full() {
+        let (state, raw) = signed_p2pk_state_and_tx(
+            10,
+            vec![TxOutput {
+                value: 8,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&vec![0x66; 2592]),
+            }],
+            0x00,
+            None,
+            Vec::new(),
+        );
+        let (_tx, txid, _wtxid, consumed) = parse_tx(&raw).expect("parse tx");
+        assert_eq!(consumed, raw.len());
+
+        let mut pool = TxPool::new();
+        let worst = [0x11; 32];
+        pool.txs.insert(
+            worst,
+            TxPoolEntry {
+                raw: vec![0x01],
+                inputs: Vec::new(),
+                fee: 0,
+                weight: 100,
+                size: 1,
+            },
+        );
+        for idx in 1..MAX_TX_POOL_TRANSACTIONS {
+            let mut key = [0u8; 32];
+            key[..8].copy_from_slice(&(idx as u64 + 1).to_le_bytes());
+            if key == txid || key == worst {
+                key[8] = 1;
+            }
+            pool.txs.insert(
+                key,
+                TxPoolEntry {
+                    raw: vec![0xff],
+                    inputs: Vec::new(),
+                    fee: 1,
+                    weight: 1,
+                    size: 1,
+                },
+            );
+        }
+
+        let admitted = pool
+            .admit(&raw, &state, None, [0u8; 32])
+            .expect("admit should evict");
+        assert_eq!(admitted, txid);
+        assert_eq!(pool.txs.len(), MAX_TX_POOL_TRANSACTIONS);
+        assert!(pool.txs.contains_key(&txid));
+        assert!(!pool.txs.contains_key(&worst));
     }
 
     #[test]
@@ -1020,6 +1221,10 @@ mod tests {
             weight: 10,
             size: 10,
         };
+        assert_eq!(
+            compare_admit_priority([0x03; 32], &high_fee, [0x02; 32], &low_fee),
+            Ordering::Greater
+        );
         assert_eq!(
             compare_entries_for_mining(&&high_fee, &&low_fee),
             Ordering::Less
