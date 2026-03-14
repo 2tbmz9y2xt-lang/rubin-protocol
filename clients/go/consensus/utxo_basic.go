@@ -64,15 +64,16 @@ func ApplyNonCoinbaseTxBasicUpdateWithMTP(
 	blockMTP uint64,
 	chainID [32]byte,
 ) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
-	_ = blockTimestamp
-	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, utxoSet, height, blockMTP, chainID, nil)
-	if err != nil {
-		return nil, nil, err
-	}
-	return work, &UtxoApplySummary{
-		Fee:       fee,
-		UtxoCount: uint64(len(work)),
-	}, nil
+	return ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
+		tx,
+		txid,
+		utxoSet,
+		height,
+		blockTimestamp,
+		blockMTP,
+		chainID,
+		nil,
+	)
 }
 
 // ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles is a helper for deterministic tooling
@@ -91,7 +92,8 @@ func ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
 	coreExtProfiles CoreExtProfileProvider,
 ) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
 	_ = blockTimestamp
-	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, utxoSet, height, blockMTP, chainID, coreExtProfiles)
+	work := cloneUtxoSet(utxoSet)
+	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, work, height, blockMTP, chainID, coreExtProfiles)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -127,11 +129,7 @@ func applyNonCoinbaseTxBasicWork(
 	if err != nil {
 		return nil, 0, err
 	}
-
-	work := make(map[Outpoint]UtxoEntry, len(utxoSet))
-	for k, v := range utxoSet {
-		work[k] = v
-	}
+	work := utxoSet
 
 	var sumIn u128
 	var sumInVault u128
@@ -501,6 +499,24 @@ func applyNonCoinbaseTxBasicWork(
 	}
 
 	return work, fee, nil
+}
+
+func cloneUtxoSet(src map[Outpoint]UtxoEntry) map[Outpoint]UtxoEntry {
+	out := make(map[Outpoint]UtxoEntry, len(src))
+	for k, v := range src {
+		out[k] = cloneUtxoEntry(v)
+	}
+	return out
+}
+
+func cloneUtxoEntry(entry UtxoEntry) UtxoEntry {
+	return UtxoEntry{
+		Value:             entry.Value,
+		CovenantType:      entry.CovenantType,
+		CovenantData:      append([]byte(nil), entry.CovenantData...),
+		CreationHeight:    entry.CreationHeight,
+		CreatedByCoinbase: entry.CreatedByCoinbase,
+	}
 }
 
 func checkSpendCovenant(
