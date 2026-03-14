@@ -169,7 +169,48 @@ def diff_coverage(
     return coverable, covered, uncovered_refs
 
 
+def diff_coverage_by_file(
+    head: dict[Path, dict[int, bool]], changed: dict[Path, set[int]]
+) -> dict[Path, tuple[int, int, list[int]]]:
+    per_file: dict[Path, tuple[int, int, list[int]]] = {}
+    for file_path, changed_lines_set in changed.items():
+        file_lines = head.get(file_path)
+        if not file_lines:
+            continue
+        coverable = 0
+        covered = 0
+        uncovered: list[int] = []
+        for line_no in sorted(changed_lines_set):
+            line_covered = file_lines.get(line_no)
+            if line_covered is None:
+                continue
+            coverable += 1
+            if line_covered:
+                covered += 1
+            else:
+                uncovered.append(line_no)
+        if coverable:
+            per_file[file_path] = (coverable, covered, uncovered)
+    return per_file
+
+
+def compress_ranges(lines: list[int]) -> list[str]:
+    if not lines:
+        return []
+    ranges: list[str] = []
+    start = prev = lines[0]
+    for line_no in lines[1:]:
+        if line_no == prev + 1:
+            prev = line_no
+            continue
+        ranges.append(f"{start}-{prev}" if start != prev else str(start))
+        start = prev = line_no
+    ranges.append(f"{start}-{prev}" if start != prev else str(start))
+    return ranges
+
+
 def print_summary(
+    repo_root: Path,
     base_ref: str,
     base_coverable: int,
     base_covered: int,
@@ -178,6 +219,9 @@ def print_summary(
     diff_coverable: int,
     diff_covered: int,
     uncovered_refs: list[str],
+    per_file: dict[Path, tuple[int, int, list[int]]],
+    min_variation: float,
+    min_diff_coverage: float,
 ) -> None:
     base_pct = coverage_percent(base_coverable, base_covered)
     head_pct = coverage_percent(head_coverable, head_covered)
@@ -189,6 +233,21 @@ def print_summary(
     print(f"  head HEAD:      {head_pct:.2f}% ({head_covered}/{head_coverable})")
     print(f"  variation:      {variation:+.2f}%")
     print(f"  diff coverage:  {diff_pct:.2f}% ({diff_covered}/{diff_coverable})")
+    print(f"  gates:          variation >= {min_variation:+.2f}%, diff >= {min_diff_coverage:.2f}%")
+    if per_file:
+        print("  changed files:")
+        for file_path, (coverable, covered, uncovered) in sorted(
+            per_file.items(),
+            key=lambda item: (len(item[1][2]), str(item[0])),
+            reverse=True,
+        ):
+            rel = file_path.resolve().relative_to(repo_root)
+            pct = coverage_percent(coverable, covered)
+            if uncovered:
+                ranges = ", ".join(compress_ranges(uncovered[:12]))
+                print(f"    - {rel}: {pct:.2f}% ({covered}/{coverable}), uncovered {ranges}")
+            else:
+                print(f"    - {rel}: {pct:.2f}% ({covered}/{coverable})")
     if uncovered_refs:
         print("  uncovered changed lines:")
         for ref in uncovered_refs[:20]:
@@ -213,8 +272,10 @@ def main() -> int:
 
     changed = changed_lines(repo_root, args.base_ref)
     diff_coverable, diff_covered, uncovered_refs = diff_coverage(head_coverage, changed)
+    per_file = diff_coverage_by_file(head_coverage, changed)
 
     print_summary(
+        repo_root,
         args.base_ref,
         base_coverable,
         base_covered,
@@ -223,6 +284,9 @@ def main() -> int:
         diff_coverable,
         diff_covered,
         uncovered_refs,
+        per_file,
+        args.min_variation,
+        args.min_diff_coverage,
     )
 
     base_pct = coverage_percent(base_coverable, base_covered)
