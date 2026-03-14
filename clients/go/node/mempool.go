@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"container/heap"
 	"errors"
 	"fmt"
 	"math/bits"
@@ -31,6 +32,55 @@ type Mempool struct {
 	maxTxs     int
 	txs        map[[32]byte]*mempoolEntry
 	spenders   map[consensus.Outpoint][32]byte
+	worstHeap  mempoolWorstHeap
+	heapItems  map[[32]byte]*mempoolHeapItem
+	heapSeqs   map[[32]byte]uint64
+	nextHeapID uint64
+}
+
+type mempoolHeapItem struct {
+	txid   [32]byte
+	fee    uint64
+	weight uint64
+	size   int
+	heapID uint64
+	index  int
+}
+
+type mempoolPriority struct {
+	fee    uint64
+	size   int
+	weight uint64
+	txid   [32]byte
+}
+
+type mempoolWorstHeap []*mempoolHeapItem
+
+func (h mempoolWorstHeap) Len() int { return len(h) }
+
+func (h mempoolWorstHeap) Less(i, j int) bool {
+	return compareHeapItemPriority(h[i], h[j]) < 0
+}
+
+func (h mempoolWorstHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].index = i
+	h[j].index = j
+}
+
+func (h *mempoolWorstHeap) Push(x any) {
+	item := x.(*mempoolHeapItem)
+	item.index = len(*h)
+	*h = append(*h, item)
+}
+
+func (h *mempoolWorstHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	item.index = -1
+	*h = old[:n-1]
+	return item
 }
 
 type MempoolConfig struct {
@@ -70,6 +120,9 @@ func NewMempoolWithConfig(chainState *ChainState, blockStore *BlockStore, chainI
 		maxTxs:     maxMempoolTransactions,
 		txs:        make(map[[32]byte]*mempoolEntry),
 		spenders:   make(map[consensus.Outpoint][32]byte),
+		worstHeap:  make(mempoolWorstHeap, 0, maxMempoolTransactions),
+		heapItems:  make(map[[32]byte]*mempoolHeapItem),
+		heapSeqs:   make(map[[32]byte]uint64),
 	}, nil
 }
 
@@ -95,11 +148,11 @@ func (m *Mempool) AddTx(txBytes []byte) error {
 		return err
 	}
 
-	if err := m.validateAdmissionLocked(checked.TxID, inputs); err != nil {
+	entry := newMempoolEntry(checked, inputs)
+	if err := m.validateAdmissionLocked(entry); err != nil {
 		return err
 	}
 
-	entry := newMempoolEntry(checked, inputs)
 	m.addEntryLocked(entry)
 	return nil
 }
@@ -132,23 +185,22 @@ func (m *Mempool) SelectTransactions(maxCount int, maxBytes int) [][]byte {
 }
 
 func (m *Mempool) EvictConfirmed(blockBytes []byte) error {
-	if m == nil {
-		return errors.New("nil mempool")
-	}
-	block, err := consensus.ParseBlockBytes(blockBytes)
-	if err != nil {
-		return err
-	}
+	return m.withParsedBlock(blockBytes, m.EvictConfirmedParsed)
+}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, txid := range block.Txids {
-		m.removeTxLocked(txid)
-	}
-	return nil
+func (m *Mempool) EvictConfirmedParsed(block *consensus.ParsedBlock) error {
+	return m.withLockedParsedBlock(block, func(block *consensus.ParsedBlock) {
+		for _, txid := range block.Txids {
+			m.removeTxLocked(txid)
+		}
+	})
 }
 
 func (m *Mempool) RemoveConflicting(blockBytes []byte) error {
+	return m.withParsedBlock(blockBytes, m.RemoveConflictingParsed)
+}
+
+func (m *Mempool) withParsedBlock(blockBytes []byte, fn func(*consensus.ParsedBlock) error) error {
 	if m == nil {
 		return errors.New("nil mempool")
 	}
@@ -156,13 +208,27 @@ func (m *Mempool) RemoveConflicting(blockBytes []byte) error {
 	if err != nil {
 		return err
 	}
+	return fn(block)
+}
 
+func (m *Mempool) RemoveConflictingParsed(block *consensus.ParsedBlock) error {
+	return m.withLockedParsedBlock(block, func(block *consensus.ParsedBlock) {
+		for txid := range m.collectConflictsLocked(block) {
+			m.removeTxLocked(txid)
+		}
+	})
+}
+
+func (m *Mempool) withLockedParsedBlock(block *consensus.ParsedBlock, fn func(*consensus.ParsedBlock)) error {
+	if m == nil {
+		return errors.New("nil mempool")
+	}
+	if block == nil {
+		return errors.New("nil parsed block")
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	for txid := range m.collectConflictsLocked(block) {
-		m.removeTxLocked(txid)
-	}
+	fn(block)
 	return nil
 }
 
@@ -178,7 +244,7 @@ func (m *Mempool) checkTransactionLocked(txBytes []byte) (*consensus.CheckedTran
 	if err != nil {
 		return nil, nil, err
 	}
-	checked, err := consensus.CheckTransaction(txBytes, copyUtxoSet(m.chainState.Utxos), nextHeight, blockMTP, m.chainID)
+	checked, err := consensus.CheckTransaction(txBytes, m.chainState.Utxos, nextHeight, blockMTP, m.chainID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -243,23 +309,32 @@ func (m *Mempool) removeTxLocked(txid [32]byte) {
 	if !ok {
 		return
 	}
-	delete(m.txs, txid)
-	for _, op := range entry.inputs {
-		delete(m.spenders, op)
+	if item, ok := m.heapItems[txid]; ok && item != nil && item.index >= 0 && item.index < len(m.worstHeap) && m.worstHeap[item.index] == item {
+		heap.Remove(&m.worstHeap, item.index)
 	}
+	m.deleteEntryLocked(txid, entry)
 }
 
-func (m *Mempool) validateAdmissionLocked(txid [32]byte, inputs []consensus.Outpoint) error {
+func (m *Mempool) validateAdmissionLocked(entry *mempoolEntry) error {
+	if entry == nil {
+		return errors.New("nil mempool entry")
+	}
+	txid := entry.txid
 	if _, exists := m.txs[txid]; exists {
 		return fmt.Errorf("tx already in mempool")
 	}
-	if len(m.txs) >= m.maxTxs {
-		return fmt.Errorf("mempool full")
-	}
-	for _, op := range inputs {
+	for _, op := range entry.inputs {
 		if existing, ok := m.spenders[op]; ok {
 			return fmt.Errorf("mempool double-spend conflict with %x", existing)
 		}
+	}
+	if len(m.txs) >= m.maxTxs {
+		worstTxid, worstEntry, ok := m.peekWorstLocked()
+		if !ok || compareEntryPriority(entry, worstEntry) <= 0 {
+			return fmt.Errorf("mempool full")
+		}
+		m.popWorstLocked()
+		m.removePoppedWorstLocked(worstTxid, worstEntry)
 	}
 	return nil
 }
@@ -276,10 +351,16 @@ func newMempoolEntry(checked *consensus.CheckedTransaction, inputs []consensus.O
 }
 
 func (m *Mempool) addEntryLocked(entry *mempoolEntry) {
+	m.nextHeapID++
+	heapID := m.nextHeapID
 	m.txs[entry.txid] = entry
+	m.heapSeqs[entry.txid] = heapID
 	for _, op := range entry.inputs {
 		m.spenders[op] = entry.txid
 	}
+	item := newHeapItem(entry.txid, entry, heapID)
+	heap.Push(&m.worstHeap, item)
+	m.heapItems[entry.txid] = item
 }
 
 func (m *Mempool) snapshotEntries() []*mempoolEntry {
@@ -342,12 +423,147 @@ func outpointFromInput(in consensus.TxInput) consensus.Outpoint {
 	return consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
 }
 
-func compareFeeRate(a *mempoolEntry, b *mempoolEntry) int {
-	if a == nil || b == nil || a.size <= 0 || b.size <= 0 {
+func newHeapItem(txid [32]byte, entry *mempoolEntry, heapID uint64) *mempoolHeapItem {
+	return &mempoolHeapItem{
+		txid:   txid,
+		fee:    entry.fee,
+		weight: entry.weight,
+		size:   entry.size,
+		heapID: heapID,
+	}
+}
+
+func (m *Mempool) seedWorstHeapLocked() {
+	if len(m.heapItems) >= len(m.txs) {
+		return
+	}
+	for txid, entry := range m.txs {
+		if _, ok := m.heapItems[txid]; ok {
+			continue
+		}
+		m.nextHeapID++
+		heapID := m.nextHeapID
+		m.heapSeqs[txid] = heapID
+		item := newHeapItem(txid, entry, heapID)
+		heap.Push(&m.worstHeap, item)
+		m.heapItems[txid] = item
+	}
+}
+
+func (m *Mempool) peekWorstLocked() ([32]byte, *mempoolEntry, bool) {
+	m.seedWorstHeapLocked()
+	for len(m.worstHeap) > 0 {
+		item := m.worstHeap[0]
+		entry := m.txs[item.txid]
+		if entry == nil {
+			heap.Pop(&m.worstHeap)
+			delete(m.heapItems, item.txid)
+			delete(m.heapSeqs, item.txid)
+			continue
+		}
+		return item.txid, entry, true
+	}
+	return [32]byte{}, nil, false
+}
+
+func (m *Mempool) popWorstLocked() ([32]byte, *mempoolEntry, bool) {
+	txid, entry, ok := m.peekWorstLocked()
+	if !ok {
+		return [32]byte{}, nil, false
+	}
+	heap.Pop(&m.worstHeap)
+	delete(m.heapItems, txid)
+	return txid, entry, true
+}
+
+func (m *Mempool) removePoppedWorstLocked(txid [32]byte, entry *mempoolEntry) {
+	m.deleteEntryLocked(txid, entry)
+}
+
+func (m *Mempool) deleteEntryLocked(txid [32]byte, entry *mempoolEntry) {
+	delete(m.txs, txid)
+	delete(m.heapItems, txid)
+	delete(m.heapSeqs, txid)
+	if entry == nil {
+		return
+	}
+	for _, op := range entry.inputs {
+		delete(m.spenders, op)
+	}
+}
+
+func compareEntryPriority(a *mempoolEntry, b *mempoolEntry) int {
+	if a == nil || b == nil {
 		return 0
 	}
-	ahi, alo := bits.Mul64(a.fee, uint64(b.size))
-	bhi, blo := bits.Mul64(b.fee, uint64(a.size))
+	return comparePriorityValues(priorityFromEntry(a), priorityFromEntry(b))
+}
+
+func compareHeapItemPriority(a *mempoolHeapItem, b *mempoolHeapItem) int {
+	if a == nil || b == nil {
+		return 0
+	}
+	return comparePriorityValues(priorityFromHeapItem(a), priorityFromHeapItem(b))
+}
+
+func priorityFromEntry(entry *mempoolEntry) mempoolPriority {
+	return mempoolPriority{
+		fee:    entry.fee,
+		size:   entry.size,
+		weight: entry.weight,
+		txid:   entry.txid,
+	}
+}
+
+func priorityFromHeapItem(item *mempoolHeapItem) mempoolPriority {
+	return mempoolPriority{
+		fee:    item.fee,
+		size:   item.size,
+		weight: item.weight,
+		txid:   item.txid,
+	}
+}
+
+func comparePriorityValues(a mempoolPriority, b mempoolPriority) int {
+	cmp := compareFeeRateValues(a.fee, a.size, b.fee, b.size)
+	if cmp != 0 {
+		return cmp
+	}
+	if a.fee != b.fee {
+		if a.fee > b.fee {
+			return 1
+		}
+		return -1
+	}
+	if a.weight != b.weight {
+		if a.weight < b.weight {
+			return 1
+		}
+		return -1
+	}
+	switch cmp := bytes.Compare(a.txid[:], b.txid[:]); {
+	case cmp < 0:
+		return 1
+	case cmp > 0:
+		return -1
+	default:
+		return 0
+	}
+}
+
+func compareFeeRate(a *mempoolEntry, b *mempoolEntry) int {
+	if a == nil || b == nil {
+		return 0
+	}
+	return compareFeeRateValues(a.fee, a.size, b.fee, b.size)
+}
+
+func compareFeeRateValues(feeA uint64, sizeA int, feeB uint64, sizeB int) int {
+	if sizeA <= 0 || sizeB <= 0 {
+		return 0
+	}
+	ahi, alo := bits.Mul64(feeA, uint64(sizeB))
+	bhi, blo := bits.Mul64(feeB, uint64(sizeA))
 	if ahi != bhi {
 		if ahi > bhi {
 			return 1

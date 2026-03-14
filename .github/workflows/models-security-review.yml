@@ -11,6 +11,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  models: read
 
 jobs:
   get-diff:
@@ -160,6 +161,7 @@ jobs:
               issue_number: context.issue.number,
               body: `### Security Review: deepseek-v3\n_Model: deepseek/DeepSeek-V3-0324_\n\n\`\`\`json\n${review}\n\`\`\``
             });
+
       - name: Block on critical findings
         if: steps.review.outputs.review
         uses: actions/github-script@v8

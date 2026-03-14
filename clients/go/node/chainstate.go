@@ -163,7 +163,7 @@ func (s *ChainState) ConnectBlockWithCoreExtProfiles(
 		s.Utxos = make(map[consensus.Outpoint]consensus.UtxoEntry)
 	}
 	workState := consensus.InMemoryChainState{
-		Utxos:            copyUtxoSet(s.Utxos),
+		Utxos:            s.Utxos,
 		AlreadyGenerated: new(big.Int).SetUint64(s.AlreadyGenerated),
 	}
 	summary, err := consensus.ConnectBlockBasicInMemoryAtHeightAndCoreExtProfiles(
