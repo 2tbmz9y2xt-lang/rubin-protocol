@@ -2,6 +2,9 @@ package node
 
 import (
 	"context"
+	"encoding/hex"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -83,6 +86,89 @@ func TestFindCanonicalHeight_NilBlockStore(t *testing.T) {
 	_, _, err := bs.FindCanonicalHeight([32]byte{})
 	if err == nil {
 		t.Fatal("expected error for nil blockstore")
+	}
+}
+
+func TestFindCanonicalHeight_ReorgRebuildsCache(t *testing.T) {
+	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	hash0, _ := mustPutBlock(t, store, 0, 0x10, 1, []byte("b0"))
+	hash1a, _ := mustPutBlock(t, store, 1, 0x11, 2, []byte("b1a"))
+	hash1b, _ := mustPutBlock(t, store, 1, 0x12, 3, []byte("b1b"))
+
+	height, found, err := store.FindCanonicalHeight(hash1a)
+	if err != nil {
+		t.Fatalf("FindCanonicalHeight(first branch): %v", err)
+	}
+	if found {
+		t.Fatalf("old branch should not remain canonical, got height=%d", height)
+	}
+
+	height, found, err = store.FindCanonicalHeight(hash1b)
+	if err != nil {
+		t.Fatalf("FindCanonicalHeight(reorg tip): %v", err)
+	}
+	if !found || height != 1 {
+		t.Fatalf("reorg tip=(found=%v,height=%d), want true,1", found, height)
+	}
+
+	height, found, err = store.FindCanonicalHeight(hash0)
+	if err != nil {
+		t.Fatalf("FindCanonicalHeight(genesis): %v", err)
+	}
+	if !found || height != 0 {
+		t.Fatalf("genesis=(found=%v,height=%d), want true,0", found, height)
+	}
+}
+
+func TestFindCanonicalHeight_UsesCachedHeightAndRepairsStaleIndex(t *testing.T) {
+	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	_, _ = mustPutBlock(t, store, 0, 0x20, 1, []byte("b0"))
+	hash1, _ := mustPutBlock(t, store, 1, 0x21, 2, []byte("b1"))
+
+	height, found, err := store.FindCanonicalHeight(hash1)
+	if err != nil {
+		t.Fatalf("FindCanonicalHeight(initial): %v", err)
+	}
+	if !found || height != 1 {
+		t.Fatalf("initial=(found=%v,height=%d), want true,1", found, height)
+	}
+
+	store.canonicalHeightByHash[hash1] = 0
+
+	height, found, err = store.FindCanonicalHeight(hash1)
+	if err != nil {
+		t.Fatalf("FindCanonicalHeight(stale cache): %v", err)
+	}
+	if !found || height != 1 {
+		t.Fatalf("stale cache=(found=%v,height=%d), want true,1", found, height)
+	}
+
+	height, found, err = store.FindCanonicalHeight(hash1)
+	if err != nil {
+		t.Fatalf("FindCanonicalHeight(cached hit): %v", err)
+	}
+	if !found || height != 1 {
+		t.Fatalf("cached hit=(found=%v,height=%d), want true,1", found, height)
+	}
+}
+
+func TestFindCanonicalHeight_PreservesCanonicalHashParsingSemantics(t *testing.T) {
+	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	hash0, _ := mustPutBlock(t, store, 0, 0x30, 1, []byte("b0"))
+
+	store.index.Canonical[0] = strings.ToUpper(hex.EncodeToString(hash0[:]))
+	height, found, err := store.FindCanonicalHeight(hash0)
+	if err != nil {
+		t.Fatalf("FindCanonicalHeight(mixed-case): %v", err)
+	}
+	if !found || height != 0 {
+		t.Fatalf("mixed-case=(found=%v,height=%d), want true,0", found, height)
+	}
+
+	store.index.Canonical[0] = "zz"
+	store.canonicalHeightByHash[hash0] = 0
+	if _, _, err := store.FindCanonicalHeight(hash0); err == nil {
+		t.Fatalf("expected malformed canonical entry error")
 	}
 }
 
