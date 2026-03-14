@@ -78,9 +78,11 @@ jobs:
               '- Do not invent files, lines, or behavior not evidenced by the diff.',
               '- If no findings, return empty findings array and explain why in summary.',
               '- Output ONLY valid JSON, no markdown fences, no commentary before/after.',
+              '- Do NOT use trailing commas in arrays or objects.',
               '- Output: {"model":"","findings":[{"severity":"...","file":"","line":0,"title":"","details":"","suggestion":""}],"summary":""}',
             ].join('\n');
             const modelId = 'deepseek/DeepSeek-V3-0324';
+            let rawContent = '';
             let result = null;
             try {
               core.info(`Trying model: ${modelId}`);
@@ -108,33 +110,43 @@ jobs:
                 return;
               }
               const data = await response.json();
-              result = data.choices[0].message.content;
+              rawContent = data.choices[0].message.content;
+              result = rawContent;
             } catch (err) {
               core.setFailed(`Security review fail-closed: model ${modelId} error: ${err.message}`);
               return;
             }
-            // Strip markdown fences and surrounding text to extract JSON
-            result = result.replace(/^[\s\S]*?(?=\{)/, '').replace(/\}[\s\S]*$/, '}').trim();
-            // Validate JSON before passing downstream
+
+            // Helper: sanitize common JSON issues from LLMs
+            function sanitizeJson(str) {
+              // Strip markdown fences
+              str = str.replace(/^[\s\S]*?(?=\{)/, '').replace(/\}[\s\S]*$/, '}').trim();
+              // Remove trailing commas before } or ]
+              str = str.replace(/,\s*([\]\}])/g, '$1');
+              // Remove single-line comments
+              str = str.replace(/\/\/[^\n]*/g, '');
+              return str;
+            }
+
+            result = sanitizeJson(result);
+
             try {
               JSON.parse(result);
             } catch (e) {
-              core.warning(`Model returned malformed JSON, attempting recovery: ${e.message}`);
-              // Try to extract first valid JSON object
+              core.warning(`Model returned malformed JSON, attempting regex recovery: ${e.message}`);
               const match = result.match(/\{[\s\S]*\}/);
               if (match) {
-                result = match[0];
+                result = sanitizeJson(match[0]);
                 try {
                   JSON.parse(result);
                 } catch (e2) {
-                  core.setFailed(`Security review fail-closed: unrecoverable JSON from model: ${e2.message}`);
-                  // Save raw output as artifact for debugging
-                  require('fs').writeFileSync('raw-review-output.txt', data?.choices?.[0]?.message?.content || 'no content');
+                  fs.writeFileSync('raw-review-output.txt', rawContent);
+                  core.setFailed(`Security review fail-closed: unrecoverable JSON: ${e2.message}`);
                   return;
                 }
               } else {
+                fs.writeFileSync('raw-review-output.txt', rawContent);
                 core.setFailed(`Security review fail-closed: no JSON object found in model response`);
-                require('fs').writeFileSync('raw-review-output.txt', data?.choices?.[0]?.message?.content || 'no content');
                 return;
               }
             }
@@ -161,7 +173,6 @@ jobs:
               issue_number: context.issue.number,
               body: `### Security Review: deepseek-v3\n_Model: deepseek/DeepSeek-V3-0324_\n\n\`\`\`json\n${review}\n\`\`\``
             });
-
       - name: Block on critical findings
         if: steps.review.outputs.review
         uses: actions/github-script@v8
@@ -169,22 +180,33 @@ jobs:
           script: |
             const raw = ${{ toJSON(steps.review.outputs.review) }};
             if (!raw) return;
+
+            function sanitizeJson(str) {
+              str = str.replace(/,\s*([\]\}])/g, '$1');
+              str = str.replace(/\/\/[^\n]*/g, '');
+              return str.trim();
+            }
+
             let parsed;
             try {
               parsed = JSON.parse(raw);
             } catch (e) {
-              // Attempt to extract JSON object from noisy output
-              const match = raw.match(/\{[\s\S]*\}/);
-              if (match) {
-                try {
-                  parsed = JSON.parse(match[0]);
-                } catch (e2) {
-                  core.setFailed(`Security review fail-closed: unparseable review JSON after recovery: ${e2.message}`);
+              const cleaned = sanitizeJson(raw);
+              try {
+                parsed = JSON.parse(cleaned);
+              } catch (e2) {
+                const match = cleaned.match(/\{[\s\S]*\}/);
+                if (match) {
+                  try {
+                    parsed = JSON.parse(match[0]);
+                  } catch (e3) {
+                    core.setFailed(`Security review fail-closed: unparseable review JSON: ${e3.message}`);
+                    return;
+                  }
+                } else {
+                  core.setFailed(`Security review fail-closed: unparseable review JSON: ${e.message}`);
                   return;
                 }
-              } else {
-                core.setFailed(`Security review fail-closed: unparseable review JSON: ${e.message}`);
-                return;
               }
             }
             const critical = (parsed.findings || []).filter(f => f.severity === 'CRITICAL');
