@@ -72,24 +72,20 @@ func TestValidateBlockBasic_AnchorBytesPrecedeNonceReplay(t *testing.T) {
 	}
 }
 
-func TestValidateBlockBasic_WeightPrecedesNonceReplay(t *testing.T) {
+func TestValidateBlockBasic_WeightPrecedesCoinbaseStructure(t *testing.T) {
 	overweightTx := txWithNonceAndOutputs(1, repeatedAnchorOutputs(1024, 17_000))
-	duplicateNonceTx := txWithNonceAndOutputs(1, []testOutput{
-		{value: 1, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()},
-	})
-	coinbase := coinbaseWithWitnessCommitmentAtHeight(t, 1, overweightTx, duplicateNonceTx)
+	coinbase := coinbaseWithWitnessCommitmentAtHeight(t, 0, overweightTx)
 
 	cbid := testTxID(t, coinbase)
-	tx1id := testTxID(t, overweightTx)
-	tx2id := testTxID(t, duplicateNonceTx)
-	root, err := MerkleRootTxids([][32]byte{cbid, tx1id, tx2id})
+	txid := testTxID(t, overweightTx)
+	root, err := MerkleRootTxids([][32]byte{cbid, txid})
 	if err != nil {
 		t.Fatalf("MerkleRootTxids: %v", err)
 	}
 
 	prev := hashWithPrefix(0xa2)
 	target := filledHash(0xff)
-	block := buildBlockBytes(t, prev, root, target, 42, [][]byte{coinbase, overweightTx, duplicateNonceTx})
+	block := buildBlockBytes(t, prev, root, target, 42, [][]byte{coinbase, overweightTx})
 
 	_, err = ValidateBlockBasicAtHeight(block, &prev, &target, 1)
 	if err == nil {
