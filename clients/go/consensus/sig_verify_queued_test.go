@@ -656,7 +656,7 @@ func TestValidateHTLCSpendQ_RefundKeyIDMismatch(t *testing.T) {
 	path := WitnessItem{
 		SuiteID:   SUITE_ID_SENTINEL,
 		Pubkey:    wrongRefundKey[:], // doesn't match refund_key_id
-		Signature: []byte{0x01},     // refund path
+		Signature: []byte{0x01},      // refund path
 	}
 	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
 

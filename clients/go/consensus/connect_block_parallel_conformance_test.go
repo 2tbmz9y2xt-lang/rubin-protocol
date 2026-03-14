@@ -478,11 +478,11 @@ func TestConnectBlockParallelSigVerify_CoinbaseVaultForbidden(t *testing.T) {
 
 	// Build a minimal valid vault covenant: owner_lock_id[32] || threshold=1 || key_count=1 || key[32] || whitelist_count=0
 	vaultCov := make([]byte, 0, 68)
-	vaultCov = append(vaultCov, keyID[:]...)  // owner_lock_id
-	vaultCov = append(vaultCov, 1)            // threshold
-	vaultCov = append(vaultCov, 1)            // key_count
-	vaultCov = append(vaultCov, keyID[:]...)  // key
-	vaultCov = AppendU16le(vaultCov, 0)       // whitelist_count
+	vaultCov = append(vaultCov, keyID[:]...) // owner_lock_id
+	vaultCov = append(vaultCov, 1)           // threshold
+	vaultCov = append(vaultCov, 1)           // key_count
+	vaultCov = append(vaultCov, keyID[:]...) // key
+	vaultCov = AppendU16le(vaultCov, 0)      // whitelist_count
 
 	// Coinbase with VAULT output + anchor for witness commitment.
 	wtxids := [][32]byte{{}} // single coinbase → wtxid[0] = zero

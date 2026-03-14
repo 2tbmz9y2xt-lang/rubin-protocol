@@ -1226,7 +1226,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreExtBranches(t *testing.T) {
 		// Wrong pubkey length for ML-DSA-87.
 		tx.Witness = []WitnessItem{{
 			SuiteID:   SUITE_ID_ML_DSA_87,
-			Pubkey:    make([]byte, 10),               // too short
+			Pubkey:    make([]byte, 10), // too short
 			Signature: make([]byte, ML_DSA_87_SIG_BYTES+1),
 		}}
 
