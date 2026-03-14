@@ -18,7 +18,7 @@ jobs:
     outputs:
       skip: "${{ steps.diff.outputs.skip }}"
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           fetch-depth: 0
       - name: Get PR diff
@@ -46,7 +46,7 @@ jobs:
     if: needs.get-diff.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
       - name: Download diff artifact
         uses: actions/download-artifact@v8
         with:
@@ -76,7 +76,8 @@ jobs:
               '- Review only what is visible in the provided diff bundle.',
               '- Do not invent files, lines, or behavior not evidenced by the diff.',
               '- If no findings, return empty findings array and explain why in summary.',
-              '- Output valid JSON: {"model":"","findings":[{"severity":"...","file":"","line":0,"title":"","details":"","suggestion":""}],"summary":""}',
+              '- Output ONLY valid JSON, no markdown fences, no commentary before/after.',
+              '- Output: {"model":"","findings":[{"severity":"...","file":"","line":0,"title":"","details":"","suggestion":""}],"summary":""}',
             ].join('\n');
             const modelId = 'deepseek/DeepSeek-V3-0324';
             let result = null;
@@ -111,10 +112,41 @@ jobs:
               core.setFailed(`Security review fail-closed: model ${modelId} error: ${err.message}`);
               return;
             }
-            result = result.replace(/^\s*```(?:json)?\s*\n?/, '').replace(/\n?\s*```\s*$/, '').trim();
+            // Strip markdown fences and surrounding text to extract JSON
+            result = result.replace(/^[\s\S]*?(?=\{)/, '').replace(/\}[\s\S]*$/, '}').trim();
+            // Validate JSON before passing downstream
+            try {
+              JSON.parse(result);
+            } catch (e) {
+              core.warning(`Model returned malformed JSON, attempting recovery: ${e.message}`);
+              // Try to extract first valid JSON object
+              const match = result.match(/\{[\s\S]*\}/);
+              if (match) {
+                result = match[0];
+                try {
+                  JSON.parse(result);
+                } catch (e2) {
+                  core.setFailed(`Security review fail-closed: unrecoverable JSON from model: ${e2.message}`);
+                  // Save raw output as artifact for debugging
+                  require('fs').writeFileSync('raw-review-output.txt', data?.choices?.[0]?.message?.content || 'no content');
+                  return;
+                }
+              } else {
+                core.setFailed(`Security review fail-closed: no JSON object found in model response`);
+                require('fs').writeFileSync('raw-review-output.txt', data?.choices?.[0]?.message?.content || 'no content');
+                return;
+              }
+            }
             core.setOutput('review', result);
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload raw review output
+        if: always() && hashFiles('raw-review-output.txt') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: raw-review-output
+          path: raw-review-output.txt
+          retention-days: 3
       - name: Post review comment
         if: steps.review.outputs.review
         uses: actions/github-script@v8
@@ -133,14 +165,25 @@ jobs:
         uses: actions/github-script@v8
         with:
           script: |
-            const review = ${{ toJSON(steps.review.outputs.review) }};
-            if (!review) return;
+            const raw = ${{ toJSON(steps.review.outputs.review) }};
+            if (!raw) return;
             let parsed;
             try {
-              parsed = JSON.parse(review);
+              parsed = JSON.parse(raw);
             } catch (e) {
-              core.setFailed(`Security review fail-closed: unparseable review JSON: ${e.message}`);
-              return;
+              // Attempt to extract JSON object from noisy output
+              const match = raw.match(/\{[\s\S]*\}/);
+              if (match) {
+                try {
+                  parsed = JSON.parse(match[0]);
+                } catch (e2) {
+                  core.setFailed(`Security review fail-closed: unparseable review JSON after recovery: ${e2.message}`);
+                  return;
+                }
+              } else {
+                core.setFailed(`Security review fail-closed: unparseable review JSON: ${e.message}`);
+                return;
+              }
             }
             const critical = (parsed.findings || []).filter(f => f.severity === 'CRITICAL');
             if (critical.length > 0) {
