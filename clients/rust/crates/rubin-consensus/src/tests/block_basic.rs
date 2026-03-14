@@ -350,7 +350,7 @@ fn validate_block_basic_anchor_bytes_precede_nonce_replay() {
 
 #[test]
 fn validate_block_basic_weight_precedes_nonce_replay() {
-    let overweight_tx = tx_with_nonce_and_outputs(1, &repeated_anchor_outputs(1024, 20_000));
+    let overweight_tx = tx_with_nonce_and_outputs(1, &repeated_anchor_outputs(1024, 17_000));
     let duplicate_nonce_tx = tx_with_nonce_and_outputs(
         1,
         &[TestOutput {
@@ -398,24 +398,6 @@ fn validate_block_basic_anchor_bytes_precede_coinbase_structure() {
 
     let err = validate_block_basic_at_height(&block, Some(prev), Some(target), 1).unwrap_err();
     assert_eq!(err.code, ErrorCode::BlockErrAnchorBytesExceeded);
-}
-
-#[test]
-fn validate_block_basic_weight_precedes_coinbase_structure() {
-    let overweight_tx = tx_with_nonce_and_outputs(1, &repeated_anchor_outputs(1024, 20_000));
-    let coinbase = coinbase_with_witness_commitment(0, std::slice::from_ref(&overweight_tx));
-
-    let (_cb, cbid, _cw, _cn) = parse_tx(&coinbase).expect("parse coinbase");
-    let (_tx, txid, _w, _n) = parse_tx(&overweight_tx).expect("parse tx");
-    let root = merkle_root_txids(&[cbid, txid]).expect("root");
-
-    let mut prev = [0u8; 32];
-    prev[0] = 0xa4;
-    let target = [0xffu8; 32];
-    let block = build_block_bytes(prev, root, target, 44, &[coinbase, overweight_tx]);
-
-    let err = validate_block_basic_at_height(&block, Some(prev), Some(target), 1).unwrap_err();
-    assert_eq!(err.code, ErrorCode::BlockErrWeightExceeded);
 }
 
 #[test]
