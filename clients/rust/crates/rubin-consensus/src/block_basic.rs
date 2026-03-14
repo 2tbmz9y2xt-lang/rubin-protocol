@@ -16,7 +16,7 @@ mod coinbase;
 mod header;
 mod txs;
 
-use self::coinbase::{validate_coinbase_structure, validate_coinbase_witness_commitment};
+use self::coinbase::validate_coinbase_witness_commitment;
 use self::header::{validate_header_commitments, validate_timestamp_rules};
 use self::txs::{accumulate_block_resource_stats, validate_block_tx_semantics, BlockTxStats};
 
@@ -146,7 +146,6 @@ pub fn validate_block_basic_with_context_at_height(
     validate_coinbase_witness_commitment(&pb)?;
     validate_timestamp_rules(pb.header.timestamp, block_height, prev_timestamps)?;
 
-    validate_coinbase_structure(&pb, block_height)?;
     let stats = accumulate_block_resource_stats(&pb)?;
     validate_block_resource_limits(stats)?;
 

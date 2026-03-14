@@ -72,24 +72,20 @@ func TestValidateBlockBasic_AnchorBytesPrecedeNonceReplay(t *testing.T) {
 	}
 }
 
-func TestValidateBlockBasic_WeightPrecedesNonceReplay(t *testing.T) {
-	overweightTx := txWithNonceAndOutputs(1, repeatedAnchorOutputs(1024, 20_000))
-	duplicateNonceTx := txWithNonceAndOutputs(1, []testOutput{
-		{value: 1, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()},
-	})
-	coinbase := coinbaseWithWitnessCommitmentAtHeight(t, 1, overweightTx, duplicateNonceTx)
+func TestValidateBlockBasic_WeightPrecedesCoinbaseStructure(t *testing.T) {
+	overweightTx := txWithNonceAndOutputs(1, repeatedAnchorOutputs(1024, 17_000))
+	coinbase := coinbaseWithWitnessCommitmentAtHeight(t, 0, overweightTx)
 
 	cbid := testTxID(t, coinbase)
-	tx1id := testTxID(t, overweightTx)
-	tx2id := testTxID(t, duplicateNonceTx)
-	root, err := MerkleRootTxids([][32]byte{cbid, tx1id, tx2id})
+	txid := testTxID(t, overweightTx)
+	root, err := MerkleRootTxids([][32]byte{cbid, txid})
 	if err != nil {
 		t.Fatalf("MerkleRootTxids: %v", err)
 	}
 
 	prev := hashWithPrefix(0xa2)
 	target := filledHash(0xff)
-	block := buildBlockBytes(t, prev, root, target, 42, [][]byte{coinbase, overweightTx, duplicateNonceTx})
+	block := buildBlockBytes(t, prev, root, target, 42, [][]byte{coinbase, overweightTx})
 
 	_, err = ValidateBlockBasicAtHeight(block, &prev, &target, 1)
 	if err == nil {
@@ -97,5 +93,29 @@ func TestValidateBlockBasic_WeightPrecedesNonceReplay(t *testing.T) {
 	}
 	if got := mustTxErrCode(t, err); got != BLOCK_ERR_WEIGHT_EXCEEDED {
 		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_WEIGHT_EXCEEDED)
+	}
+}
+
+func TestValidateBlockBasic_AnchorBytesPrecedeCoinbaseStructure(t *testing.T) {
+	oversizedAnchorTx := txWithNonceAndOutputs(1, repeatedAnchorOutputs(3, 50_000))
+	coinbase := coinbaseWithWitnessCommitmentAtHeight(t, 0, oversizedAnchorTx)
+
+	cbid := testTxID(t, coinbase)
+	txid := testTxID(t, oversizedAnchorTx)
+	root, err := MerkleRootTxids([][32]byte{cbid, txid})
+	if err != nil {
+		t.Fatalf("MerkleRootTxids: %v", err)
+	}
+
+	prev := hashWithPrefix(0xa3)
+	target := filledHash(0xff)
+	block := buildBlockBytes(t, prev, root, target, 43, [][]byte{coinbase, oversizedAnchorTx})
+
+	_, err = ValidateBlockBasicAtHeight(block, &prev, &target, 1)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != BLOCK_ERR_ANCHOR_BYTES_EXCEEDED {
+		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_ANCHOR_BYTES_EXCEEDED)
 	}
 }

@@ -60,7 +60,8 @@ func TestValidateBlockTxSemantics_NonceReplay(t *testing.T) {
 			PrevVout: ^uint32(0),
 			Sequence: ^uint32(0),
 		}},
-		Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+		Outputs:  []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+		Locktime: 1,
 	}
 
 	nonCB := func(nonce uint64) *Tx {
@@ -95,7 +96,8 @@ func TestValidateBlockTxSemantics_CovenantError(t *testing.T) {
 			PrevVout: ^uint32(0),
 			Sequence: ^uint32(0),
 		}},
-		Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+		Outputs:  []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+		Locktime: 1,
 	}
 
 	// P2PK with Value=0 is invalid: "CORE_P2PK value must be > 0"

@@ -24,6 +24,9 @@ func accumulateBlockResourceStats(pb *ParsedBlock) (*blockTxStats, error) {
 }
 
 func validateBlockTxSemantics(pb *ParsedBlock, blockHeight uint64) error {
+	if err := validateCoinbaseStructure(pb, blockHeight); err != nil {
+		return err
+	}
 	seenNonces := make(map[uint64]struct{}, len(pb.Txs))
 	for i, tx := range pb.Txs {
 		if i > 0 && isCoinbaseTx(tx) {
