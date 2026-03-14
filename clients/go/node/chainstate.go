@@ -189,12 +189,92 @@ func (s *ChainState) ConnectBlockWithCoreExtProfiles(
 		return nil, err
 	}
 
-	s.HasTip = true
-	s.Height = blockHeight
-	s.TipHash = blockHash
+	// Fail-atomic: check overflow BEFORE any state mutation so that an error
+	// does not leave ChainState partially updated.
 	if !workState.AlreadyGenerated.IsUint64() {
 		return nil, errors.New("already_generated overflow")
 	}
+
+	s.HasTip = true
+	s.Height = blockHeight
+	s.TipHash = blockHash
+	s.AlreadyGenerated = workState.AlreadyGenerated.Uint64()
+	s.Utxos = workState.Utxos
+
+	return &ChainStateConnectSummary{
+		BlockHeight:        blockHeight,
+		BlockHash:          blockHash,
+		SumFees:            summary.SumFees,
+		AlreadyGenerated:   summary.AlreadyGenerated,
+		AlreadyGeneratedN1: summary.AlreadyGeneratedN1,
+		UtxoCount:          summary.UtxoCount,
+	}, nil
+}
+
+// ConnectBlockParallelSigs connects a block using parallel signature
+// verification. This is an IBD optimization: pre-checks are sequential,
+// ML-DSA-87 signature verifications are batched and executed across a
+// goroutine pool. See consensus.ConnectBlockParallelSigVerify for details.
+//
+// workers controls the goroutine pool size. If <= 0, defaults to GOMAXPROCS.
+func (s *ChainState) ConnectBlockParallelSigs(
+	blockBytes []byte,
+	expectedTarget *[32]byte,
+	prevTimestamps []uint64,
+	chainID [32]byte,
+	coreExtProfiles consensus.CoreExtProfileProvider,
+	workers int,
+) (*ChainStateConnectSummary, error) {
+	if s == nil {
+		return nil, errors.New("nil chainstate")
+	}
+	blockHeight, expectedPrevHash, err := nextBlockContext(s)
+	if err != nil {
+		return nil, err
+	}
+	if s.Utxos == nil {
+		s.Utxos = make(map[consensus.Outpoint]consensus.UtxoEntry)
+	}
+	// Clone UTXO set for fail-atomicity (same pattern as ConnectBlockWithCoreExtProfiles
+	// at line 166). A future optimization may use a delta/undo journal, but correctness
+	// requires matching the sequential path's isolation semantics exactly.
+	workState := consensus.InMemoryChainState{
+		Utxos:            copyUtxoSet(s.Utxos),
+		AlreadyGenerated: new(big.Int).SetUint64(s.AlreadyGenerated),
+	}
+	summary, err := consensus.ConnectBlockParallelSigVerifyWithCoreExtProfiles(
+		blockBytes,
+		expectedPrevHash,
+		expectedTarget,
+		blockHeight,
+		prevTimestamps,
+		&workState,
+		chainID,
+		coreExtProfiles,
+		workers,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	pb, err := consensus.ParseBlockBytes(blockBytes)
+	if err != nil {
+		return nil, err
+	}
+	blockHash, err := consensus.BlockHash(pb.HeaderBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	// Fail-atomic: check overflow BEFORE any state mutation so that an error
+	// does not leave ChainState partially updated.
+	if !workState.AlreadyGenerated.IsUint64() {
+		return nil, errors.New("already_generated overflow")
+	}
+
+	s.HasTip = true
+	s.Height = blockHeight
+	s.TipHash = blockHash
 	s.AlreadyGenerated = workState.AlreadyGenerated.Uint64()
 	s.Utxos = workState.Utxos
 

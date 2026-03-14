@@ -388,3 +388,84 @@ func mustHash32Hex(t *testing.T, s string) [32]byte {
 	copy(out[:], b)
 	return out
 }
+
+// TestChainStateConnectBlockParallelSigs exercises the ConnectBlockParallelSigs
+// method on ChainState, ensuring it produces identical results to ConnectBlock
+// for the genesis block and a coinbase-only follow-up block.
+func TestChainStateConnectBlockParallelSigs(t *testing.T) {
+	target := consensus.POW_LIMIT
+
+	// Sequential path: connect genesis + one block.
+	seqSt := NewChainState()
+	seqGenesis, err := seqSt.ConnectBlock(devnetGenesisBlockBytes, &target, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("seq connect genesis: %v", err)
+	}
+
+	subsidy1 := consensus.BlockSubsidy(1, 0)
+	block1Coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1)
+	block1 := buildSingleTxBlock(t, seqSt.TipHash, target, 2, block1Coinbase)
+	seqBlock1, err := seqSt.ConnectBlock(block1, &target, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("seq connect block 1: %v", err)
+	}
+
+	// Parallel path: connect genesis + same block.
+	parSt := NewChainState()
+	parGenesis, err := parSt.ConnectBlockParallelSigs(devnetGenesisBlockBytes, &target, nil, devnetGenesisChainID, nil, 4)
+	if err != nil {
+		t.Fatalf("par connect genesis: %v", err)
+	}
+	if seqGenesis.BlockHeight != parGenesis.BlockHeight {
+		t.Fatalf("genesis height mismatch: seq=%d par=%d", seqGenesis.BlockHeight, parGenesis.BlockHeight)
+	}
+
+	parBlock1, err := parSt.ConnectBlockParallelSigs(block1, &target, nil, devnetGenesisChainID, nil, 4)
+	if err != nil {
+		t.Fatalf("par connect block 1: %v", err)
+	}
+
+	// Compare results.
+	if seqBlock1.SumFees != parBlock1.SumFees {
+		t.Fatalf("SumFees mismatch: seq=%d par=%d", seqBlock1.SumFees, parBlock1.SumFees)
+	}
+	if seqBlock1.AlreadyGenerated != parBlock1.AlreadyGenerated {
+		t.Fatalf("AlreadyGenerated mismatch: seq=%d par=%d", seqBlock1.AlreadyGenerated, parBlock1.AlreadyGenerated)
+	}
+	if seqBlock1.AlreadyGeneratedN1 != parBlock1.AlreadyGeneratedN1 {
+		t.Fatalf("AlreadyGeneratedN1 mismatch: seq=%d par=%d", seqBlock1.AlreadyGeneratedN1, parBlock1.AlreadyGeneratedN1)
+	}
+	if seqBlock1.UtxoCount != parBlock1.UtxoCount {
+		t.Fatalf("UtxoCount mismatch: seq=%d par=%d", seqBlock1.UtxoCount, parBlock1.UtxoCount)
+	}
+
+	// State must match.
+	if seqSt.Height != parSt.Height {
+		t.Fatalf("height mismatch: seq=%d par=%d", seqSt.Height, parSt.Height)
+	}
+	if seqSt.AlreadyGenerated != parSt.AlreadyGenerated {
+		t.Fatalf("already_generated mismatch: seq=%d par=%d", seqSt.AlreadyGenerated, parSt.AlreadyGenerated)
+	}
+	if len(seqSt.Utxos) != len(parSt.Utxos) {
+		t.Fatalf("utxo count mismatch: seq=%d par=%d", len(seqSt.Utxos), len(parSt.Utxos))
+	}
+}
+
+// TestChainStateConnectBlockParallelSigs_NilState checks that nil receiver is rejected.
+func TestChainStateConnectBlockParallelSigs_NilState(t *testing.T) {
+	var st *ChainState
+	_, err := st.ConnectBlockParallelSigs(nil, nil, nil, [32]byte{}, nil, 0)
+	if err == nil {
+		t.Fatal("expected error for nil chainstate")
+	}
+}
+
+// TestChainStateConnectBlockParallelSigs_InvalidBlock checks error propagation.
+func TestChainStateConnectBlockParallelSigs_InvalidBlock(t *testing.T) {
+	target := consensus.POW_LIMIT
+	st := NewChainState()
+	_, err := st.ConnectBlockParallelSigs([]byte{0x00}, &target, nil, [32]byte{}, nil, 1)
+	if err == nil {
+		t.Fatal("expected error for invalid block")
+	}
+}

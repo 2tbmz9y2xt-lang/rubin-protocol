@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -661,4 +662,92 @@ func mustDecodeHexBytes(t *testing.T, raw string) []byte {
 		t.Fatalf("DecodeString: %v", err)
 	}
 	return out
+}
+
+// TestSyncEngine_isInIBDUnchecked exercises the internal isInIBDUnchecked()
+// method used to choose between sequential and parallel signature verification
+// during block connection.
+func TestSyncEngine_isInIBDUnchecked(t *testing.T) {
+	t.Run("nil_engine", func(t *testing.T) {
+		var nilEngine *SyncEngine
+		if !nilEngine.isInIBDUnchecked() {
+			t.Fatal("expected IBD for nil engine")
+		}
+	})
+
+	t.Run("nil_chainstate", func(t *testing.T) {
+		engine := &SyncEngine{}
+		if !engine.isInIBDUnchecked() {
+			t.Fatal("expected IBD when chainState is nil")
+		}
+	})
+
+	t.Run("no_tip", func(t *testing.T) {
+		st := NewChainState()
+		engine, err := NewSyncEngine(st, nil, DefaultSyncConfig(nil, [32]byte{}, ""))
+		if err != nil {
+			t.Fatalf("NewSyncEngine: %v", err)
+		}
+		if !engine.isInIBDUnchecked() {
+			t.Fatal("expected IBD when no tip")
+		}
+	})
+
+	t.Run("zero_timestamp", func(t *testing.T) {
+		st := NewChainState()
+		st.HasTip = true
+		engine, err := NewSyncEngine(st, nil, DefaultSyncConfig(nil, [32]byte{}, ""))
+		if err != nil {
+			t.Fatalf("NewSyncEngine: %v", err)
+		}
+		engine.tipTimestamp = 0
+		if !engine.isInIBDUnchecked() {
+			t.Fatal("expected IBD when tipTimestamp == 0")
+		}
+	})
+
+	t.Run("tip_in_future", func(t *testing.T) {
+		st := NewChainState()
+		st.HasTip = true
+		engine, err := NewSyncEngine(st, nil, DefaultSyncConfig(nil, [32]byte{}, ""))
+		if err != nil {
+			t.Fatalf("NewSyncEngine: %v", err)
+		}
+		// Set tip timestamp far in the future.
+		engine.tipTimestamp = ^uint64(0)
+		engine.cfg.IBDLagSeconds = 100
+		if !engine.isInIBDUnchecked() {
+			t.Fatal("expected IBD when tip timestamp is in future")
+		}
+	})
+
+	t.Run("recent_tip_not_ibd", func(t *testing.T) {
+		st := NewChainState()
+		st.HasTip = true
+		engine, err := NewSyncEngine(st, nil, DefaultSyncConfig(nil, [32]byte{}, ""))
+		if err != nil {
+			t.Fatalf("NewSyncEngine: %v", err)
+		}
+		// Tip is very recent (1 second ago).
+		engine.tipTimestamp = uint64(time.Now().Unix()) - 1
+		engine.cfg.IBDLagSeconds = 86400
+		if engine.isInIBDUnchecked() {
+			t.Fatal("did not expect IBD when tip is recent")
+		}
+	})
+
+	t.Run("old_tip_is_ibd", func(t *testing.T) {
+		st := NewChainState()
+		st.HasTip = true
+		engine, err := NewSyncEngine(st, nil, DefaultSyncConfig(nil, [32]byte{}, ""))
+		if err != nil {
+			t.Fatalf("NewSyncEngine: %v", err)
+		}
+		// Tip is very old.
+		engine.tipTimestamp = 1000
+		engine.cfg.IBDLagSeconds = 100
+		if !engine.isInIBDUnchecked() {
+			t.Fatal("expected IBD when tip is very old")
+		}
+	})
 }
