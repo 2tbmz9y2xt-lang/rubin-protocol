@@ -1083,7 +1083,7 @@ func TestValidateHTLCSpendQ_ClaimPreimageLengthMismatch(t *testing.T) {
 
 	// Encode preLen=20 but only append 10 bytes of actual preimage data.
 	payload := make([]byte, 0, 13)
-	payload = append(payload, 0x00)               // claim path
+	payload = append(payload, 0x00)                // claim path
 	payload = AppendU16le(payload, 20)             // preLen=20
 	payload = append(payload, make([]byte, 10)...) // only 10 bytes (mismatch)
 
