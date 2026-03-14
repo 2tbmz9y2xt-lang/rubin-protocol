@@ -1009,6 +1009,135 @@ func TestValidateThresholdSigSpendQ_SentinelWithData(t *testing.T) {
 	}
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// HTLC claim preimage length bounds tests (lines 172-177 of sig_verify_queued.go)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestValidateHTLCSpendQ_ClaimPreimageTooShort(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	claimKeyID := sha3_256(kp.PubkeyBytes())
+
+	// Preimage with 5 bytes (< MIN_HTLC_PREIMAGE_BYTES=16).
+	shortPreimage := []byte("short")
+	entry := makeHTLCEntry(sha3_256(shortPreimage), LOCK_MODE_HEIGHT, 1, claimKeyID, htlcRefundKeyID())
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+
+	path := WitnessItem{
+		SuiteID:   SUITE_ID_SENTINEL,
+		Pubkey:    claimKeyID[:],
+		Signature: encodeHTLCClaimPayload(shortPreimage),
+	}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
+
+	q := NewSigCheckQueue(1)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	if err == nil {
+		t.Fatal("expected preimage too short error")
+	}
+	if !isTxErrCode(err, TX_ERR_PARSE) {
+		t.Fatalf("expected TX_ERR_PARSE, got: %v", err)
+	}
+}
+
+func TestValidateHTLCSpendQ_ClaimPreimageTooLong(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	claimKeyID := sha3_256(kp.PubkeyBytes())
+
+	// Preimage with 257 bytes (> MAX_HTLC_PREIMAGE_BYTES=256).
+	longPreimage := make([]byte, MAX_HTLC_PREIMAGE_BYTES+1)
+	for i := range longPreimage {
+		longPreimage[i] = byte(i)
+	}
+	entry := makeHTLCEntry(sha3_256(longPreimage), LOCK_MODE_HEIGHT, 1, claimKeyID, htlcRefundKeyID())
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+
+	path := WitnessItem{
+		SuiteID:   SUITE_ID_SENTINEL,
+		Pubkey:    claimKeyID[:],
+		Signature: encodeHTLCClaimPayload(longPreimage),
+	}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
+
+	q := NewSigCheckQueue(1)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	if err == nil {
+		t.Fatal("expected preimage too long error")
+	}
+	if !isTxErrCode(err, TX_ERR_PARSE) {
+		t.Fatalf("expected TX_ERR_PARSE, got: %v", err)
+	}
+}
+
+func TestValidateHTLCSpendQ_ClaimPreimageLengthMismatch(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	claimKeyID := sha3_256(kp.PubkeyBytes())
+
+	entry := makeHTLCEntry([32]byte{0x01}, LOCK_MODE_HEIGHT, 1, claimKeyID, htlcRefundKeyID())
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+
+	// Encode preLen=20 but only append 10 bytes of actual preimage data.
+	payload := make([]byte, 0, 13)
+	payload = append(payload, 0x00)               // claim path
+	payload = AppendU16le(payload, 20)             // preLen=20
+	payload = append(payload, make([]byte, 10)...) // only 10 bytes (mismatch)
+
+	path := WitnessItem{
+		SuiteID:   SUITE_ID_SENTINEL,
+		Pubkey:    claimKeyID[:],
+		Signature: payload,
+	}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
+
+	q := NewSigCheckQueue(1)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	if err == nil {
+		t.Fatal("expected claim payload length mismatch error")
+	}
+	if !isTxErrCode(err, TX_ERR_PARSE) {
+		t.Fatalf("expected TX_ERR_PARSE, got: %v", err)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Nil-queue verifySig error paths (P2PK + HTLC)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestVerifyMLDSAKeyAndSigQ_NilQueue_BadSuiteErr(t *testing.T) {
+	// Call verifyMLDSAKeyAndSigQ with nil queue and a bad suite so that
+	// verifySig returns err (not ok=false). Covers lines 44-46.
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+	digest, _ := SighashV1DigestWithCache(cache, inputIndex, inputValue, chainID, SIGHASH_ALL)
+
+	_ = digest // avoid unused
+
+	// verifyMLDSAKeyAndSigQ calls extractSigAndDigestWithCache then verifySig.
+	// We feed bad suite through validateP2PKSpendQ with nil queue.
+	// But validateP2PKSpendQ checks suite before reaching verifySig at line 29.
+	// Instead, test via validateThresholdSigSpendQ with nil queue and a bad suite
+	// that passes the ML-DSA-87 length check but has corrupt pubkey → verifySig err.
+	// Actually, verifySig with SUITE_ID_ML_DSA_87 and corrupt pubkey returns (false, nil),
+	// not err. To get err, need unknown suite — but that's caught earlier.
+	// The nil-queue verifySig err path (lines 44-46) requires a suite that passes
+	// earlier checks but fails in verifySig. This is UNREACHABLE_FROM_PUBLIC_SURFACE
+	// because all invalid suites are caught before reaching verifySig.
+	// Skip: unreachable via public API.
+	t.Skip("verifySig err with nil queue is unreachable: all invalid suites caught earlier")
+}
+
+func TestValidateHTLCSpendQ_NilQueue_BadSuiteErr(t *testing.T) {
+	// Same reasoning: lines 231-233 (nil-queue verifySig err in HTLC path).
+	// verifySig only returns err for unknown suites, but suite check is at line 213.
+	// UNREACHABLE_FROM_PUBLIC_SURFACE.
+	t.Skip("HTLC nil-queue verifySig err is unreachable: suite checked at line 213")
+}
+
 func TestValidateThresholdSigSpendQ_NonCanonicalLengths(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	keyID := sha3_256(kp.PubkeyBytes())
