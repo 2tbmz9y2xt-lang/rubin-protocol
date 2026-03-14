@@ -148,6 +148,12 @@ func TestCheckTransaction_ValidTx(t *testing.T) {
 	if checked.SerializedSize != len(txBytes) {
 		t.Fatalf("serialized size mismatch: %d vs %d", checked.SerializedSize, len(txBytes))
 	}
+	if _, ok := utxoSet[op]; !ok {
+		t.Fatalf("CheckTransaction mutated caller utxo set")
+	}
+	if len(utxoSet) != 1 {
+		t.Fatalf("utxo set size changed: %d", len(utxoSet))
+	}
 }
 
 func TestSignTransaction_NilTx(t *testing.T) {

@@ -123,6 +123,12 @@ func TestApplyNonCoinbaseTxBasicUpdate_P2PKOK(t *testing.T) {
 	if out.Value != 90 || out.CovenantType != COV_TYPE_P2PK || len(out.CovenantData) != MAX_P2PK_COVENANT_DATA {
 		t.Fatalf("unexpected output UTXO fields")
 	}
+	if _, ok := utxos[Outpoint{Txid: prev, Vout: 0}]; !ok {
+		t.Fatalf("input utxo mutated in original map")
+	}
+	if _, ok := utxos[Outpoint{Txid: txid, Vout: 0}]; ok {
+		t.Fatalf("output utxo leaked into original map")
+	}
 }
 
 func TestApplyNonCoinbaseTxBasicUpdate_RejectsImmatureCoinbaseSpend(t *testing.T) {

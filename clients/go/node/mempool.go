@@ -178,7 +178,7 @@ func (m *Mempool) checkTransactionLocked(txBytes []byte) (*consensus.CheckedTran
 	if err != nil {
 		return nil, nil, err
 	}
-	checked, err := consensus.CheckTransaction(txBytes, copyUtxoSet(m.chainState.Utxos), nextHeight, blockMTP, m.chainID)
+	checked, err := consensus.CheckTransaction(txBytes, m.chainState.Utxos, nextHeight, blockMTP, m.chainID)
 	if err != nil {
 		return nil, nil, err
 	}
