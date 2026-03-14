@@ -45,9 +45,6 @@ exact = [r for r in runs if r.get("conclusion") == "success" and r.get("headSha"
 if exact:
     print(exact[0]["databaseId"])
     raise SystemExit
-success = [r for r in runs if r.get("conclusion") == "success"]
-if success:
-    print(success[0]["databaseId"])
 PY
 )"
   if [[ -z "$run_id" ]]; then
