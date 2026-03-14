@@ -55,10 +55,12 @@ func (q *SigCheckQueue) Push(suiteID uint8, pubkey, sig []byte, digest [32]byte,
 	if errOnFail == nil {
 		errOnFail = txerr(TX_ERR_SIG_INVALID, "signature verification failed (fail-closed default)")
 	}
+	// Defensive copy: verification is deferred until Flush (and then concurrent),
+	// so we must own the data to prevent TOCTOU if callers reuse buffers.
 	q.tasks = append(q.tasks, sigCheckTask{
 		suiteID:   suiteID,
-		pubkey:    pubkey,
-		sig:       sig,
+		pubkey:    append([]byte(nil), pubkey...),
+		sig:       append([]byte(nil), sig...),
 		digest:    digest,
 		errOnFail: errOnFail,
 	})
