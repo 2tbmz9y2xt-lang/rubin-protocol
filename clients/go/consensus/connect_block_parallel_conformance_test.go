@@ -322,3 +322,116 @@ func TestConnectBlockParallelSigVerify_GuardPaths(t *testing.T) {
 		}
 	})
 }
+
+// buildTestBlock builds a structurally valid block containing one P2PK spend transaction.
+// Returns blockBytes, prevHash, target, and the utxoSet that makes the spend valid.
+// The non-coinbase tx spends 100 from a UTXO and outputs 90 (fee = 10).
+func buildTestBlock(t *testing.T, coinbaseP2PKValue uint64) (blockBytes []byte, prev [32]byte, target [32]byte, utxos map[Outpoint]UtxoEntry) {
+	t.Helper()
+	height := uint64(1)
+	prev = hashWithPrefix(0x99)
+	target = filledHash(0xff)
+
+	kp := mustMLDSA87Keypair(t)
+	covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+
+	prevOut := Outpoint{Txid: prev, Vout: 0}
+	spendTx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prev, PrevVout: 0, Sequence: 0}},
+		Outputs: []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: covData}},
+	}
+	spendTx.Witness = []WitnessItem{signP2PKInputWitness(t, spendTx, 0, 100, [32]byte{}, kp)}
+	spendBytes := txBytesFromTx(t, spendTx)
+	_, spendTxid, _, _, err := ParseTx(spendBytes)
+	if err != nil {
+		t.Fatalf("ParseTx(spend): %v", err)
+	}
+
+	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, coinbaseP2PKValue, spendBytes)
+	cbTxid := testTxID(t, coinbase)
+
+	root, err := MerkleRootTxids([][32]byte{cbTxid, spendTxid})
+	if err != nil {
+		t.Fatalf("MerkleRootTxids: %v", err)
+	}
+	blockBytes = buildBlockBytes(t, prev, root, target, 1, [][]byte{coinbase, spendBytes})
+
+	utxos = map[Outpoint]UtxoEntry{
+		prevOut: {
+			Value:        100,
+			CovenantType: COV_TYPE_P2PK,
+			CovenantData: append([]byte(nil), covData...),
+		},
+	}
+	return
+}
+
+// TestConnectBlockParallelSigVerify_TxValidationError_MissingUTXO covers lines 118-119:
+// a valid block with a non-coinbase tx referencing a UTXO not in the state.
+func TestConnectBlockParallelSigVerify_TxValidationError_MissingUTXO(t *testing.T) {
+	height := uint64(1)
+	block, prev, target, _ := buildTestBlock(t, 100)
+
+	// Empty UTXO set → non-coinbase tx fails at input lookup.
+	state := &InMemoryChainState{
+		Utxos:            make(map[Outpoint]UtxoEntry),
+		AlreadyGenerated: new(big.Int),
+	}
+	_, err := ConnectBlockParallelSigVerifyWithCoreExtProfiles(
+		block, &prev, &target, height, []uint64{0}, state, [32]byte{}, nil, 4,
+	)
+	if err == nil {
+		t.Fatal("expected error for missing UTXO")
+	}
+}
+
+// TestConnectBlockParallelSigVerify_CoinbaseValueBound covers lines 136-137:
+// a block where coinbase value exceeds subsidy + fees.
+func TestConnectBlockParallelSigVerify_CoinbaseValueBound(t *testing.T) {
+	height := uint64(1)
+
+	// Set AlreadyGenerated = MINEABLE_CAP → subsidy = TAIL_EMISSION_PER_BLOCK.
+	// Fee from the tx = 100 - 90 = 10. Bound = TAIL + 10.
+	// Build coinbase with value = TAIL + 11 → exceeds bound.
+	coinbaseVal := uint64(TAIL_EMISSION_PER_BLOCK) + 11
+	block, prev, target, utxos := buildTestBlock(t, coinbaseVal)
+
+	state := &InMemoryChainState{
+		Utxos:            utxos,
+		AlreadyGenerated: new(big.Int).SetUint64(MINEABLE_CAP),
+	}
+	_, err := ConnectBlockParallelSigVerifyWithCoreExtProfiles(
+		block, &prev, &target, height, []uint64{0}, state, [32]byte{}, nil, 4,
+	)
+	if err == nil {
+		t.Fatal("expected coinbase value bound error")
+	}
+}
+
+// TestConnectBlockParallelSigVerify_AlreadyGeneratedOverflow covers lines 167-168:
+// already_generated > MaxUint64 causes bigIntToUint64 to fail.
+func TestConnectBlockParallelSigVerify_AlreadyGeneratedOverflow(t *testing.T) {
+	height := uint64(1)
+
+	// With huge AlreadyGenerated, subsidy = TAIL_EMISSION_PER_BLOCK.
+	// Fee = 10. Coinbase value must be <= TAIL + 10 to pass value bound check.
+	coinbaseVal := uint64(TAIL_EMISSION_PER_BLOCK) + 10
+	block, prev, target, utxos := buildTestBlock(t, coinbaseVal)
+
+	// AlreadyGenerated = 2^64 → overflows uint64 conversion at line 167.
+	hugeAG := new(big.Int).SetBit(new(big.Int), 64, 1)
+
+	state := &InMemoryChainState{
+		Utxos:            utxos,
+		AlreadyGenerated: hugeAG,
+	}
+	_, err := ConnectBlockParallelSigVerifyWithCoreExtProfiles(
+		block, &prev, &target, height, []uint64{0}, state, [32]byte{}, nil, 4,
+	)
+	if err == nil {
+		t.Fatal("expected already_generated overflow error")
+	}
+}

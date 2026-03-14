@@ -1347,6 +1347,75 @@ func TestApplyWrapper(t *testing.T) {
 	})
 }
 
+// TestApplyNonCoinbaseTxBasicWorkQ_CovenantGenesisError exercises the
+// ValidateTxCovenantsGenesis error path (connect_block_parallel.go lines 241-242).
+func TestApplyNonCoinbaseTxBasicWorkQ_CovenantGenesisError(t *testing.T) {
+	// P2PK output with value=0 fails covenant genesis validation.
+	kp := mustMLDSA87Keypair(t)
+	covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+	prevTxid := hashWithPrefix(0xCC)
+	utxoSet := map[Outpoint]UtxoEntry{
+		{Txid: prevTxid, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_P2PK,
+			CovenantData: append([]byte(nil), covData...),
+		},
+	}
+
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0}},
+		Outputs: []TxOutput{{Value: 0, CovenantType: COV_TYPE_P2PK, CovenantData: covData}}, // value=0 is invalid for P2PK
+	}
+	tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, kp)}
+
+	q := NewSigCheckQueue(1)
+	_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxoSet, 1, 0, [32]byte{}, nil, q)
+	if err == nil {
+		t.Fatal("expected covenant genesis error for P2PK value=0")
+	}
+	if !isTxErrCode(err, TX_ERR_COVENANT_TYPE_INVALID) {
+		t.Fatalf("expected TX_ERR_COVENANT_TYPE_INVALID, got: %v", err)
+	}
+}
+
+// TestApplyNonCoinbaseTxBasicWorkQ_SighashPrehashError exercises the
+// NewSighashV1PrehashCache error path (connect_block_parallel.go line 245).
+func TestApplyNonCoinbaseTxBasicWorkQ_SighashPrehashError(t *testing.T) {
+	// TxKind=0x01 without DaCommitCore fails sighash prehash cache creation.
+	kp := mustMLDSA87Keypair(t)
+	covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+	prevTxid := hashWithPrefix(0xDD)
+	utxoSet := map[Outpoint]UtxoEntry{
+		{Txid: prevTxid, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_P2PK,
+			CovenantData: append([]byte(nil), covData...),
+		},
+	}
+
+	tx := &Tx{
+		Version:      1,
+		TxKind:       0x01, // DA commit
+		TxNonce:      1,
+		DaCommitCore: nil, // missing → sighash fails
+		Inputs:       []TxInput{{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0}},
+		Outputs:      []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: covData}},
+	}
+	tx.Witness = []WitnessItem{{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: kp.PubkeyBytes(), Signature: make([]byte, ML_DSA_87_SIG_BYTES)}}
+
+	q := NewSigCheckQueue(1)
+	_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxoSet, 1, 0, [32]byte{}, nil, q)
+	if err == nil {
+		t.Fatal("expected sighash prehash error for tx_kind=0x01 without da_commit_core")
+	}
+	if !isTxErrCode(err, TX_ERR_PARSE) {
+		t.Fatalf("expected TX_ERR_PARSE, got: %v", err)
+	}
+}
+
 // sortKeys32 sorts two 32-byte arrays lexicographically and returns them in order.
 func sortKeys32(a, b [32]byte) ([32]byte, [32]byte) {
 	if bytes.Compare(a[:], b[:]) > 0 {
