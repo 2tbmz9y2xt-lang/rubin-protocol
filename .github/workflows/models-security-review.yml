@@ -52,12 +52,15 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: pr-diff
+      - name: Install jsonrepair
+        run: npm install jsonrepair
       - name: Run security review
         id: review
         uses: actions/github-script@v8
         with:
           script: |
             const fs = require('fs');
+            const { jsonrepair } = require('./node_modules/jsonrepair');
             const diff = fs.readFileSync('pr-diff.txt', 'utf8').slice(0, 12000);
             const systemPrompt = [
               'You are the main protocol security reviewer for the RUBIN protocol. Context:',
@@ -77,9 +80,8 @@ jobs:
               '- Review only what is visible in the provided diff bundle.',
               '- Do not invent files, lines, or behavior not evidenced by the diff.',
               '- If no findings, return empty findings array and explain why in summary.',
-              '- Output ONLY valid JSON, no markdown fences, no commentary before/after.',
-              '- Do NOT use trailing commas in arrays or objects.',
-              '- Output: {"model":"","findings":[{"severity":"...","file":"","line":0,"title":"","details":"","suggestion":""}],"summary":""}',
+              '- Output ONLY valid JSON. No markdown, no commentary, no trailing commas.',
+              '- Schema: {"model":"string","findings":[{"severity":"string","file":"string","line":0,"title":"string","details":"string","suggestion":"string"}],"summary":"string"}',
             ].join('\n');
             const modelId = 'deepseek/DeepSeek-V3-0324';
             let rawContent = '';
@@ -100,7 +102,8 @@ jobs:
                       { role: 'system', content: systemPrompt },
                       { role: 'user', content: `Review this PR diff:\n\n${diff}` }
                     ],
-                    temperature: 0.2
+                    temperature: 0.2,
+                    response_format: { type: 'json_object' }
                   })
                 }
               );
@@ -117,36 +120,20 @@ jobs:
               return;
             }
 
-            // Helper: sanitize common JSON issues from LLMs
-            function sanitizeJson(str) {
-              // Strip markdown fences
-              str = str.replace(/^[\s\S]*?(?=\{)/, '').replace(/\}[\s\S]*$/, '}').trim();
-              // Remove trailing commas before } or ]
-              str = str.replace(/,\s*([\]\}])/g, '$1');
-              // Remove single-line comments
-              str = str.replace(/\/\/[^\n]*/g, '');
-              return str;
-            }
+            // Strip markdown fences if present
+            result = result.replace(/^[\s\S]*?(?=\{)/, '').replace(/\}[\s\S]*$/, '}').trim();
 
-            result = sanitizeJson(result);
-
+            // Try parse, fallback to jsonrepair
             try {
               JSON.parse(result);
             } catch (e) {
-              core.warning(`Model returned malformed JSON, attempting regex recovery: ${e.message}`);
-              const match = result.match(/\{[\s\S]*\}/);
-              if (match) {
-                result = sanitizeJson(match[0]);
-                try {
-                  JSON.parse(result);
-                } catch (e2) {
-                  fs.writeFileSync('raw-review-output.txt', rawContent);
-                  core.setFailed(`Security review fail-closed: unrecoverable JSON: ${e2.message}`);
-                  return;
-                }
-              } else {
+              core.warning(`Model returned malformed JSON: ${e.message}. Attempting jsonrepair...`);
+              try {
+                result = jsonrepair(result);
+                JSON.parse(result); // validate repair worked
+              } catch (e2) {
                 fs.writeFileSync('raw-review-output.txt', rawContent);
-                core.setFailed(`Security review fail-closed: no JSON object found in model response`);
+                core.setFailed(`Security review fail-closed: jsonrepair also failed: ${e2.message}`);
                 return;
               }
             }
@@ -180,34 +167,12 @@ jobs:
           script: |
             const raw = ${{ toJSON(steps.review.outputs.review) }};
             if (!raw) return;
-
-            function sanitizeJson(str) {
-              str = str.replace(/,\s*([\]\}])/g, '$1');
-              str = str.replace(/\/\/[^\n]*/g, '');
-              return str.trim();
-            }
-
             let parsed;
             try {
               parsed = JSON.parse(raw);
             } catch (e) {
-              const cleaned = sanitizeJson(raw);
-              try {
-                parsed = JSON.parse(cleaned);
-              } catch (e2) {
-                const match = cleaned.match(/\{[\s\S]*\}/);
-                if (match) {
-                  try {
-                    parsed = JSON.parse(match[0]);
-                  } catch (e3) {
-                    core.setFailed(`Security review fail-closed: unparseable review JSON: ${e3.message}`);
-                    return;
-                  }
-                } else {
-                  core.setFailed(`Security review fail-closed: unparseable review JSON: ${e.message}`);
-                  return;
-                }
-              }
+              core.setFailed(`Security review fail-closed: unparseable review JSON: ${e.message}`);
+              return;
             }
             const critical = (parsed.findings || []).filter(f => f.severity === 'CRITICAL');
             if (critical.length > 0) {
