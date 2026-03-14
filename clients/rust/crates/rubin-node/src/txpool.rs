@@ -309,8 +309,10 @@ impl TxPool {
     }
 
     fn seed_worst_heap(&mut self) {
+        let max_stale_tail = self.txs.len().saturating_add(1);
         if self.heap_seqs.len() == self.txs.len()
             && (self.txs.is_empty() || !self.worst_heap.is_empty())
+            && self.worst_heap.len() <= max_stale_tail
         {
             return;
         }
