@@ -73,7 +73,7 @@ func TestCheckSpendCovenant_Errors(t *testing.T) {
 	}
 }
 
-func TestApplyNonCoinbaseTxBasicInPlaceRejectsUnsupportedTxKindViaPrehashCache(t *testing.T) {
+func TestApplyNonCoinbaseTxBasicWorkRejectsUnsupportedTxKindViaPrehashCache(t *testing.T) {
 	var prevTxid [32]byte
 	prevTxid[0] = 0x91
 	tx := &Tx{
@@ -86,10 +86,7 @@ func TestApplyNonCoinbaseTxBasicInPlaceRejectsUnsupportedTxKindViaPrehashCache(t
 			Sequence: 0x7FFFFFFF,
 		}},
 	}
-	err := func() error {
-		_, err := applyNonCoinbaseTxBasicInPlace(tx, [32]byte{}, map[Outpoint]UtxoEntry{}, 1, 0, [32]byte{}, nil)
-		return err
-	}()
+	_, _, err := applyNonCoinbaseTxBasicWork(tx, [32]byte{}, map[Outpoint]UtxoEntry{}, 1, 0, [32]byte{}, nil)
 	if err == nil {
 		t.Fatal("expected unsupported tx_kind error")
 	}

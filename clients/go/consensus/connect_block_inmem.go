@@ -99,12 +99,11 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfiles(
 		tx := pb.Txs[i]
 		txid := pb.Txids[i]
 
-		s, err := applyNonCoinbaseTxBasicUpdateInPlaceWithMTPAndCoreExtProfiles(
+		nextUtxos, fee, err := applyNonCoinbaseTxBasicWork(
 			tx,
 			txid,
 			workUtxos,
 			blockHeight,
-			pb.Header.Timestamp,
 			blockMTP,
 			chainID,
 			coreExtProfiles,
@@ -112,7 +111,8 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfiles(
 		if err != nil {
 			return nil, err
 		}
-		sumFees, err = addU64(sumFees, s.Fee)
+		workUtxos = nextUtxos
+		sumFees, err = addU64(sumFees, fee)
 		if err != nil {
 			return nil, txerr(BLOCK_ERR_PARSE, "sum_fees overflow")
 		}
