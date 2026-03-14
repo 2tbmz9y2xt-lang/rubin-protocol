@@ -86,12 +86,11 @@ func ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
 	txid [32]byte,
 	utxoSet map[Outpoint]UtxoEntry,
 	height uint64,
-	blockTimestamp uint64,
+	_ uint64,
 	blockMTP uint64,
 	chainID [32]byte,
 	coreExtProfiles CoreExtProfileProvider,
 ) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
-	_ = blockTimestamp
 	work := cloneUtxoSet(utxoSet)
 	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, work, height, blockMTP, chainID, coreExtProfiles)
 	if err != nil {

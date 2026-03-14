@@ -193,15 +193,6 @@ var (
 	opensslConsensusInitFn    = opensslConsensusInit
 )
 
-func resetOpenSSLBootstrapStateForTests() {
-	opensslBootstrapOnce = sync.Once{}
-	opensslBootstrapErr = nil
-	opensslConsensusInitOnce = sync.Once{}
-	opensslConsensusInitErr = nil
-	opensslBootstrapFn = opensslBootstrap
-	opensslConsensusInitFn = opensslConsensusInit
-}
-
 // ensureOpenSSLConsensusInit performs bare OpenSSL initialization for the consensus
 // verification path. It does NOT read any RUBIN_OPENSSL_* environment variables,
 // does NOT load the FIPS provider, and does NOT set fips=yes default properties.

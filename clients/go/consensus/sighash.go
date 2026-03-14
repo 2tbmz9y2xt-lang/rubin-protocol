@@ -71,7 +71,7 @@ func SighashV1DigestWithCache(cache *SighashV1PrehashCache, inputIndex uint32, i
 		return zero, txerr(TX_ERR_PARSE, "sighash: nil cache")
 	}
 	tx := cache.tx
-	if int(inputIndex) < 0 || int(inputIndex) >= len(tx.Inputs) {
+	if int(inputIndex) >= len(tx.Inputs) {
 		return zero, txerr(TX_ERR_PARSE, "sighash: input_index out of bounds")
 	}
 	if !IsValidSighashType(sighashType) {
