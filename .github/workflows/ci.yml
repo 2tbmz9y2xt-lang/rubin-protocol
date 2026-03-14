@@ -85,7 +85,15 @@ jobs:
           GOTOOLCHAIN=auto go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
+      - name: Cache cargo-audit binary
+        id: cache-cargo-audit-sec
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-v0.21.2
+
       - name: Install cargo-audit
+        if: steps.cache-cargo-audit-sec.outputs.cache-hit != 'true'
         run: cargo install cargo-audit --locked
 
       - name: Security precheck gate
@@ -154,6 +162,14 @@ jobs:
             fi
             sleep $((attempt * 10))
           done
+
+      - name: Cache Lean .lake build artifacts
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
+        with:
+          path: rubin-formal/.lake
+          key: lake-formal-${{ runner.os }}-${{ hashFiles('rubin-formal/lean-toolchain', 'rubin-formal/lakefile.lean', 'rubin-formal/lake-manifest.json') }}
+          restore-keys: |
+            lake-formal-${{ runner.os }}-
 
       - name: Lean build (rubin-formal)
         run: |
@@ -234,6 +250,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           components: rustfmt, clippy
+
+      - name: Cache Rust cargo registry & build
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            clients/rust/target
+          key: rust-${{ runner.os }}-${{ hashFiles('clients/rust/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+
       - uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6
         with:
           node-version-file: '.node-version'
@@ -332,7 +361,15 @@ jobs:
           cd clients/rust
           cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Cache cargo-audit binary
+        id: cache-cargo-audit-test
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-v0.21.2
+
       - name: Install cargo-audit
+        if: steps.cache-cargo-audit-test.outputs.cache-hit != 'true'
         run: cargo install cargo-audit --locked
 
       - name: Cargo audit
@@ -474,6 +511,14 @@ jobs:
       - name: Check Lean conformance vector staleness
         run: |
           python3 tools/check_lean_conformance_staleness.py
+
+      - name: Cache Lean .lake build artifacts (refinement)
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
+        with:
+          path: rubin-formal/.lake
+          key: lake-refinement-${{ runner.os }}-${{ hashFiles('rubin-formal/lean-toolchain', 'rubin-formal/lakefile.lean', 'rubin-formal/lake-manifest.json') }}
+          restore-keys: |
+            lake-refinement-${{ runner.os }}-
 
       - name: Lean build (rubin-formal)
         run: |

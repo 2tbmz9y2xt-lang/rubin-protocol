@@ -15,16 +15,18 @@ jobs:
     name: claude
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
 
       - name: Run Claude Code Review
         id: review
         uses: anthropics/claude-code-action@v1
+        env:
+          ANTHROPIC_MODEL: claude-sonnet-4-6
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          model: claude-opus-4-6
+          claude_args: "--max-turns 15"
           prompt: |
             You are a senior security and protocol engineer reviewing changes to the RUBIN blockchain protocol.
             Context:
@@ -41,4 +43,4 @@ jobs:
 
             Post a concise review comment with findings grouped by severity: CRITICAL, HIGH, MEDIUM, LOW.
             If no issues found, confirm the code looks correct.
-        github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
