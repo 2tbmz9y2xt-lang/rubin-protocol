@@ -309,7 +309,9 @@ impl TxPool {
     }
 
     fn seed_worst_heap(&mut self) {
-        if self.heap_seqs.len() == self.txs.len() && self.worst_heap.len() <= self.txs.len() {
+        if self.heap_seqs.len() == self.txs.len()
+            && (self.txs.is_empty() || !self.worst_heap.is_empty())
+        {
             return;
         }
         self.rebuild_worst_heap();
@@ -1358,6 +1360,44 @@ mod tests {
         assert_eq!(pool.txs.len(), 1);
         assert_eq!(pool.heap_seqs.len(), 1);
         assert_eq!(pool.worst_heap.len(), 1);
+    }
+
+    #[test]
+    fn current_worst_txid_skips_stale_heap_tail_without_rebuild() {
+        let mut pool = TxPool::new();
+        for idx in 0..2u8 {
+            let txid = [idx + 1; 32];
+            pool.insert_entry(
+                txid,
+                TxPoolEntry {
+                    raw: vec![idx],
+                    inputs: Vec::new(),
+                    fee: idx as u64 + 10,
+                    weight: idx as u64 + 10,
+                    size: 1,
+                },
+            );
+        }
+
+        pool.remove_entry(&[1; 32]);
+        pool.insert_entry(
+            [3; 32],
+            TxPoolEntry {
+                raw: vec![3],
+                inputs: Vec::new(),
+                fee: 30,
+                weight: 30,
+                size: 1,
+            },
+        );
+
+        assert_eq!(pool.txs.len(), 2);
+        assert_eq!(pool.heap_seqs.len(), 2);
+        assert_eq!(pool.worst_heap.len(), 3);
+
+        let next_heap_id = pool.next_heap_id;
+        assert!(pool.current_worst_txid().is_some());
+        assert_eq!(pool.next_heap_id, next_heap_id);
     }
 
     #[test]

@@ -383,6 +383,52 @@ func TestMempoolFullRejectPreservesFutureEvictionCandidate(t *testing.T) {
 	}
 }
 
+func TestRestoreMempoolSnapshotClearsStaleWorstHeapState(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 100})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	mp.maxTxs = 1
+
+	txLow := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+	txBetter := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 90, 3, 2, fromKey, fromAddress, toAddress)
+	if err := mp.AddTx(txLow); err != nil {
+		t.Fatalf("AddTx(low): %v", err)
+	}
+
+	snapshot, err := snapshotMempool(mp)
+	if err != nil {
+		t.Fatalf("snapshotMempool: %v", err)
+	}
+
+	staleTxid := [32]byte{0xee}
+	staleItem := &mempoolHeapItem{txid: staleTxid, heapID: 99, index: 0}
+	mp.worstHeap = mempoolWorstHeap{staleItem}
+	mp.heapItems = map[[32]byte]*mempoolHeapItem{staleTxid: staleItem}
+	mp.heapSeqs = map[[32]byte]uint64{staleTxid: 99}
+
+	if err := restoreMempoolSnapshot(mp, snapshot); err != nil {
+		t.Fatalf("restoreMempoolSnapshot: %v", err)
+	}
+	if len(mp.worstHeap) != 0 || len(mp.heapItems) != 0 || len(mp.heapSeqs) != 0 {
+		t.Fatalf("restore must clear heap state: heap=%d items=%d seqs=%d", len(mp.worstHeap), len(mp.heapItems), len(mp.heapSeqs))
+	}
+	if err := mp.AddTx(txBetter); err != nil {
+		t.Fatalf("AddTx(better) after restore should evict low priority entry: %v", err)
+	}
+
+	selected := mp.SelectTransactions(2, 1<<20)
+	if len(selected) != 1 || txIDHex(t, selected[0]) != txIDHex(t, txBetter) {
+		t.Fatalf("selected=%v, want [%s]", []string{txIDHex(t, selected[0])}, txIDHex(t, txBetter))
+	}
+}
+
 func TestMempoolEviction(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
