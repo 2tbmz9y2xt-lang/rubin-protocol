@@ -37,6 +37,7 @@ pub(super) fn validate_block_tx_semantics(
     pb: &ParsedBlock,
     block_height: u64,
 ) -> Result<(), TxError> {
+    coinbase::validate_coinbase_structure(pb, block_height)?;
     let mut seen_nonces: HashMap<u64, ()> = HashMap::with_capacity(pb.txs.len());
     for (i, tx) in pb.txs.iter().enumerate() {
         if i > 0 {

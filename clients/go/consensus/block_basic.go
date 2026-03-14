@@ -148,9 +148,6 @@ func validateParsedBlockBasicWithContextAtHeight(
 	if err := validateTimestampRules(pb.Header.Timestamp, blockHeight, prevTimestamps); err != nil {
 		return nil, err
 	}
-	if err := validateCoinbaseStructure(pb, blockHeight); err != nil {
-		return nil, err
-	}
 	stats, err := accumulateBlockResourceStats(pb)
 	if err != nil {
 		return nil, err
