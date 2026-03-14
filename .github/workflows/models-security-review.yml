@@ -11,6 +11,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+    models: read
 
 jobs:
   get-diff:
