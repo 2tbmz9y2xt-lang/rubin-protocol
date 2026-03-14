@@ -3,6 +3,7 @@ package consensus
 import (
 	"runtime"
 	"sync"
+	"sync/atomic"
 )
 
 // SigCheckQueue collects deferred signature verification tasks during
@@ -116,6 +117,7 @@ func (q *SigCheckQueue) Flush() error {
 
 	results := make([]error, n)
 	var wg sync.WaitGroup
+	var anyFailed atomic.Bool // early-abort: skip remaining sigs after first failure
 
 	taskCh := make(chan int, n)
 	for i := 0; i < n; i++ {
@@ -128,12 +130,17 @@ func (q *SigCheckQueue) Flush() error {
 		go func() {
 			defer wg.Done()
 			for idx := range taskCh {
+				if anyFailed.Load() {
+					continue // drain channel without expensive crypto work
+				}
 				t := q.tasks[idx]
 				ok, err := verifySig(t.suiteID, t.pubkey, t.sig, t.digest)
 				if err != nil {
 					results[idx] = err
+					anyFailed.Store(true)
 				} else if !ok {
 					results[idx] = t.errOnFail
+					anyFailed.Store(true)
 				}
 				// results[idx] remains nil if valid
 			}
@@ -198,6 +205,8 @@ func VerifySignaturesBatch(
 	}
 
 	var wg sync.WaitGroup
+	var batchFailed atomic.Bool // early-abort for adversarial input
+
 	taskCh := make(chan int, len(tasks))
 	for i := range tasks {
 		taskCh <- i
@@ -209,12 +218,17 @@ func VerifySignaturesBatch(
 		go func() {
 			defer wg.Done()
 			for idx := range taskCh {
+				if batchFailed.Load() {
+					continue // drain channel without expensive crypto work
+				}
 				t := tasks[idx]
 				ok, err := verifySig(t.SuiteID, t.Pubkey, t.Sig, t.Digest)
 				if err != nil {
 					results[idx] = err
+					batchFailed.Store(true)
 				} else if !ok {
 					results[idx] = txerr(TX_ERR_SIG_INVALID, "batch: signature invalid")
+					batchFailed.Store(true)
 				}
 			}
 		}()
