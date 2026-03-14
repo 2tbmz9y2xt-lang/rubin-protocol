@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -186,6 +187,33 @@ func (s *SyncEngine) ReorgCount() uint64 {
 	return s.reorgCount
 }
 
+// isInIBDUnchecked returns true if the engine appears to be in IBD based on
+// the recorded tip timestamp and the configured IBD lag threshold. Unlike
+// IsInIBD, it does not require a nowUnix argument — it uses time.Now().
+//
+// This is an internal helper for the block connection path where we need to
+// choose between sequential and parallel signature verification.
+func (s *SyncEngine) isInIBDUnchecked() bool {
+	if s == nil || s.chainState == nil {
+		return true
+	}
+	if !s.chainState.HasTip {
+		return true
+	}
+	s.mu.RLock()
+	tipTimestamp := s.tipTimestamp
+	ibdLag := s.cfg.IBDLagSeconds
+	s.mu.RUnlock()
+	if tipTimestamp == 0 {
+		return true
+	}
+	nowUnix := uint64(time.Now().Unix())
+	if nowUnix < tipTimestamp {
+		return true
+	}
+	return nowUnix-tipTimestamp > ibdLag
+}
+
 func (s *SyncEngine) IsInIBD(nowUnix uint64) bool {
 	if s == nil || s.chainState == nil {
 		return true
@@ -309,13 +337,30 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 		return nil, err
 	}
 	prevState := cloneChainState(rollbackState.chainState)
-	summary, err := s.chainState.ConnectBlockWithCoreExtProfiles(
-		blockBytes,
-		s.cfg.ExpectedTarget,
-		prevTimestamps,
-		s.cfg.ChainID,
-		s.cfg.CoreExtProfiles,
-	)
+
+	// During IBD, use parallel signature verification for faster block
+	// processing. The parallel path defers ML-DSA-87 crypto to a goroutine
+	// pool while running all other pre-checks sequentially. Error ordering
+	// may differ from the sequential path, which is acceptable during IBD.
+	var summary *ChainStateConnectSummary
+	if s.isInIBDUnchecked() {
+		summary, err = s.chainState.ConnectBlockParallelSigs(
+			blockBytes,
+			s.cfg.ExpectedTarget,
+			prevTimestamps,
+			s.cfg.ChainID,
+			s.cfg.CoreExtProfiles,
+			0, // workers: 0 = GOMAXPROCS
+		)
+	} else {
+		summary, err = s.chainState.ConnectBlockWithCoreExtProfiles(
+			blockBytes,
+			s.cfg.ExpectedTarget,
+			prevTimestamps,
+			s.cfg.ChainID,
+			s.cfg.CoreExtProfiles,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
