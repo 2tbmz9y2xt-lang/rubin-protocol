@@ -252,6 +252,107 @@ func TestVerifySignaturesBatch_Empty(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Fail-closed guards
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestSigCheckQueue_NilErrOnFail_FailsClosed(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+
+	var digest [32]byte
+	digest[0] = 0x42
+	sig, err := kp.SignDigest32(digest)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	// Corrupt the digest so verification fails.
+	badDigest := digest
+	badDigest[0] ^= 0xFF
+
+	q := NewSigCheckQueue(1)
+	// Push with nil errOnFail — must NOT silently accept.
+	q.Push(SUITE_ID_ML_DSA_87, kp.PubkeyBytes(), sig, badDigest, nil)
+	err = q.Flush()
+	if err == nil {
+		t.Fatalf("expected fail-closed error from nil errOnFail, got nil")
+	}
+	if !isTxErrCode(err, TX_ERR_SIG_INVALID) {
+		t.Fatalf("expected TX_ERR_SIG_INVALID from fail-closed default, got: %v", err)
+	}
+}
+
+func TestSigCheckQueue_ZeroValueFlush_FailsClosed(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+
+	// Create a zero-value queue (NOT via NewSigCheckQueue) — workers=0.
+	var q SigCheckQueue
+
+	for i := 0; i < 4; i++ {
+		var d [32]byte
+		d[0] = byte(i)
+		sig, err := kp.SignDigest32(d)
+		if err != nil {
+			t.Fatalf("sign %d: %v", i, err)
+		}
+		q.Push(SUITE_ID_ML_DSA_87, kp.PubkeyBytes(), sig, d, txerr(TX_ERR_SIG_INVALID, "zero-value"))
+	}
+	// Flush must normalize workers and verify — not skip.
+	if err := q.Flush(); err != nil {
+		t.Fatalf("zero-value queue Flush should pass for valid sigs: %v", err)
+	}
+
+	// Now with invalid sigs: must detect.
+	for i := 0; i < 4; i++ {
+		var d [32]byte
+		d[0] = byte(i)
+		sig, err := kp.SignDigest32(d)
+		if err != nil {
+			t.Fatalf("sign %d: %v", i, err)
+		}
+		d[0] ^= 0xFF // corrupt
+		q.Push(SUITE_ID_ML_DSA_87, kp.PubkeyBytes(), sig, d, txerr(TX_ERR_SIG_INVALID, "zero-value-invalid"))
+	}
+	err := q.Flush()
+	if err == nil {
+		t.Fatalf("zero-value queue must detect invalid sigs, got nil")
+	}
+}
+
+func TestSigCheckQueue_AssertFlushed_Panics(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+
+	q := NewSigCheckQueue(1)
+	var d [32]byte
+	sig, _ := kp.SignDigest32(d)
+	q.Push(SUITE_ID_ML_DSA_87, kp.PubkeyBytes(), sig, d, txerr(TX_ERR_SIG_INVALID, "test"))
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatalf("expected panic from AssertFlushed on unflushed queue")
+		}
+	}()
+	q.AssertFlushed() // should panic
+}
+
+func TestSigCheckQueue_AssertFlushed_NilOK(t *testing.T) {
+	var q *SigCheckQueue
+	q.AssertFlushed() // nil queue — should not panic
+}
+
+func TestSigCheckQueue_AssertFlushed_AfterFlush(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+
+	q := NewSigCheckQueue(1)
+	var d [32]byte
+	sig, _ := kp.SignDigest32(d)
+	q.Push(SUITE_ID_ML_DSA_87, kp.PubkeyBytes(), sig, d, txerr(TX_ERR_SIG_INVALID, "test"))
+	if err := q.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	q.AssertFlushed() // should NOT panic after successful flush
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Parallel stress test
 // ─────────────────────────────────────────────────────────────────────────────
 

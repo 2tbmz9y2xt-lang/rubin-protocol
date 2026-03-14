@@ -48,7 +48,12 @@ func NewSigCheckQueue(workers int) *SigCheckQueue {
 
 // Push adds a signature verification task to the queue.
 // The errOnFail is the error returned if this particular verification fails.
+// If errOnFail is nil, a default TX_ERR_SIG_INVALID error is substituted to
+// ensure fail-closed behavior — an invalid signature can never silently succeed.
 func (q *SigCheckQueue) Push(suiteID uint8, pubkey, sig []byte, digest [32]byte, errOnFail error) {
+	if errOnFail == nil {
+		errOnFail = txerr(TX_ERR_SIG_INVALID, "signature verification failed (fail-closed default)")
+	}
 	q.tasks = append(q.tasks, sigCheckTask{
 		suiteID:   suiteID,
 		pubkey:    pubkey,
@@ -96,7 +101,15 @@ func (q *SigCheckQueue) Flush() error {
 	}
 
 	// Multiple tasks: fan out across workers.
+	// Normalize workers defensively — a zero-value SigCheckQueue (not created
+	// via NewSigCheckQueue) must not silently skip verification.
 	workers := q.workers
+	if workers <= 0 {
+		workers = runtime.GOMAXPROCS(0)
+		if workers < 1 {
+			workers = 1
+		}
+	}
 	if workers > n {
 		workers = n
 	}
@@ -136,6 +149,21 @@ func (q *SigCheckQueue) Flush() error {
 		}
 	}
 	return nil
+}
+
+// AssertFlushed panics if the queue has unflushed tasks. This is a defensive
+// postcondition that callers MUST invoke after completing block validation to
+// guarantee that no deferred signature checks were silently skipped.
+//
+// This addresses the fail-open risk inherent in deferred verification: if a
+// caller returns success without flushing, this assertion catches the bug.
+func (q *SigCheckQueue) AssertFlushed() {
+	if q == nil {
+		return
+	}
+	if len(q.tasks) > 0 {
+		panic("consensus: SigCheckQueue has unflushed tasks — signature bypass risk")
+	}
 }
 
 // VerifySignaturesBatch verifies multiple (suiteID, pubkey, sig, digest) tuples

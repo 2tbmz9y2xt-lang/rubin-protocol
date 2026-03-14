@@ -189,12 +189,15 @@ func (s *ChainState) ConnectBlockWithCoreExtProfiles(
 		return nil, err
 	}
 
-	s.HasTip = true
-	s.Height = blockHeight
-	s.TipHash = blockHash
+	// Fail-atomic: check overflow BEFORE any state mutation so that an error
+	// does not leave ChainState partially updated.
 	if !workState.AlreadyGenerated.IsUint64() {
 		return nil, errors.New("already_generated overflow")
 	}
+
+	s.HasTip = true
+	s.Height = blockHeight
+	s.TipHash = blockHash
 	s.AlreadyGenerated = workState.AlreadyGenerated.Uint64()
 	s.Utxos = workState.Utxos
 
@@ -260,12 +263,15 @@ func (s *ChainState) ConnectBlockParallelSigs(
 		return nil, err
 	}
 
-	s.HasTip = true
-	s.Height = blockHeight
-	s.TipHash = blockHash
+	// Fail-atomic: check overflow BEFORE any state mutation so that an error
+	// does not leave ChainState partially updated.
 	if !workState.AlreadyGenerated.IsUint64() {
 		return nil, errors.New("already_generated overflow")
 	}
+
+	s.HasTip = true
+	s.Height = blockHeight
+	s.TipHash = blockHash
 	s.AlreadyGenerated = workState.AlreadyGenerated.Uint64()
 	s.Utxos = workState.Utxos
 
