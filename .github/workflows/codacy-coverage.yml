@@ -72,19 +72,39 @@ jobs:
           restore-keys: |
             rust-coverage-${{ runner.os }}-
 
+      - name: Cache cargo-tarpaulin
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
+        with:
+          path: ~/.cargo/bin/cargo-tarpaulin
+          key: cargo-tarpaulin-${{ runner.os }}-0.35.2
+
       - name: Install cargo-tarpaulin
         env:
           TARPAULIN_VERSION: 0.35.2
         run: |
           set -euo pipefail
-          cargo install cargo-tarpaulin --version "$TARPAULIN_VERSION" --locked
+          export PATH="$HOME/.cargo/bin:$PATH"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          installed_version="$(cargo tarpaulin --version 2>/dev/null | awk '{print $2}' || true)"
+          if [[ "$installed_version" != "$TARPAULIN_VERSION" ]]; then
+            cargo install cargo-tarpaulin --version "$TARPAULIN_VERSION" --locked
+          fi
           cargo tarpaulin --version
 
       - name: Generate coverage artifacts
         run: |
           chmod +x scripts/run-codacy-coverage.sh
           ./scripts/run-codacy-coverage.sh
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+        with:
+          name: codacy-coverage-${{ github.sha }}
+          path: |
+            clients/go/coverage.out
+            clients/rust/lcov.info
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Enforce local coverage gates
         if: github.event_name == 'pull_request'
