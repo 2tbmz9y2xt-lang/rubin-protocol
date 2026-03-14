@@ -91,7 +91,7 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfiles(
 	} else if ok {
 		blockMTP = median
 	}
-	workUtxos := state.Utxos
+	workUtxos := cloneUtxoSet(state.Utxos)
 
 	// Compute fees and update UTXO set by applying all non-coinbase transactions.
 	var sumFees uint64
@@ -99,7 +99,7 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfiles(
 		tx := pb.Txs[i]
 		txid := pb.Txids[i]
 
-		nextUtxos, s, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
+		s, err := applyNonCoinbaseTxBasicUpdateInPlaceWithMTPAndCoreExtProfiles(
 			tx,
 			txid,
 			workUtxos,
@@ -112,7 +112,6 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfiles(
 		if err != nil {
 			return nil, err
 		}
-		workUtxos = nextUtxos
 		sumFees, err = addU64(sumFees, s.Fee)
 		if err != nil {
 			return nil, txerr(BLOCK_ERR_PARSE, "sum_fees overflow")

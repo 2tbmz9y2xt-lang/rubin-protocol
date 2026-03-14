@@ -49,14 +49,16 @@ func CheckTransaction(
 	if err != nil {
 		return nil, err
 	}
-	_, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTP(
+	workUtxos := cloneUtxoSet(utxoSet)
+	summary, err := applyNonCoinbaseTxBasicUpdateInPlaceWithMTPAndCoreExtProfiles(
 		tx,
 		txid,
-		utxoSet,
+		workUtxos,
 		height,
 		blockMTP,
 		blockMTP,
 		chainID,
+		nil,
 	)
 	if err != nil {
 		return nil, err
