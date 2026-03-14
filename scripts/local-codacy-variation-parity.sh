@@ -33,13 +33,40 @@ fetch_origin() {
 }
 
 detect_repo() {
-  gh repo view --json nameWithOwner --jq '.nameWithOwner'
+  if command -v gh >/dev/null 2>&1; then
+    gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null && return 0
+  fi
+
+  local remote_url
+  remote_url="$(git -C "$repo_root" remote get-url origin 2>/dev/null || true)"
+  if [[ -z "$remote_url" ]]; then
+    return 1
+  fi
+
+  python3 - "$remote_url" <<'PY'
+import re
+import sys
+
+remote = sys.argv[1].strip()
+patterns = [
+    r'github\.com[:/](?P<owner>[^/]+)/(?P<repo>[^/.]+?)(?:\.git)?$',
+]
+for pattern in patterns:
+    match = re.search(pattern, remote)
+    if match:
+        print(f"{match.group('owner')}/{match.group('repo')}")
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
 }
 
 github_pr_head_sha() {
   local repo pr_number
   repo="$1"
   pr_number="$2"
+  if ! command -v gh >/dev/null 2>&1; then
+    return 1
+  fi
   gh pr view "$pr_number" --repo "$repo" --json headRefOid --jq '.headRefOid'
 }
 
@@ -60,6 +87,9 @@ PY
   fi
 
   local repo branch
+  if ! command -v gh >/dev/null 2>&1; then
+    return 1
+  fi
   repo="$(detect_repo 2>/dev/null || true)"
   branch="$(git -C "$repo_root" branch --show-current)"
   if [[ -z "$repo" || -z "$branch" ]]; then
@@ -67,23 +97,6 @@ PY
   fi
 
   gh pr view "$branch" --repo "$repo" --json number --jq '.number' 2>/dev/null
-}
-
-codacy_common_ancestor_for_pr() {
-  local status_json
-  status_json="$(codacy_pr_coverage_status_json "$1" "$2")"
-  python3 - "$status_json" <<'PY'
-import json
-import sys
-
-data = json.loads(sys.argv[1])
-ancestor = data["data"]["commonAncestorCommit"]
-sha = ancestor.get("commitSha")
-processed_reports = [r for r in ancestor.get("reports", []) if r.get("status") == "Processed"]
-if not sha or not processed_reports:
-    raise SystemExit(1)
-print(sha)
-PY
 }
 
 codacy_pr_coverage_status_json() {
@@ -97,30 +110,76 @@ codacy_pr_coverage_status_json() {
   curl -fsSL "$url"
 }
 
-download_main_commit_artifacts() {
-  local repo target_sha tmp_json run_id found_go found_rust
+extract_codacy_common_ancestor() {
+  local status_json
+  status_json="$1"
+  if [[ -z "$status_json" ]]; then
+    return 0
+  fi
+
+  python3 - "$status_json" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+ancestor = data["data"]["commonAncestorCommit"]
+sha = ancestor.get("commitSha")
+processed_reports = [r for r in ancestor.get("reports", []) if r.get("status") == "Processed"]
+if sha and processed_reports:
+    print(sha)
+PY
+}
+
+find_successful_main_run_id() {
+  local repo target_sha owner name page tmp_json run_id page_size
   repo="$1"
   target_sha="$2"
-  tmp_json="$tmp_dir/codacy-main-runs.json"
+  owner="${repo%%/*}"
+  name="${repo#*/}"
+  page_size=100
 
-  gh run list \
-    --repo "$repo" \
-    --workflow codacy-coverage.yml \
-    --branch main \
-    --event push \
-    --json databaseId,headSha,conclusion \
-    --limit 30 >"$tmp_json"
+  for page in $(seq 1 20); do
+    tmp_json="$tmp_dir/codacy-main-runs-page-${page}.json"
+    gh api "/repos/${owner}/${name}/actions/workflows/codacy-coverage.yml/runs?branch=main&event=push&status=completed&per_page=${page_size}&page=${page}" >"$tmp_json"
 
-  run_id="$(python3 - "$tmp_json" "$target_sha" <<'PY'
-import json, sys
-runs = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+    run_id="$(python3 - "$tmp_json" "$target_sha" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
 target_sha = sys.argv[2]
-for run in runs:
-    if run.get("conclusion") == "success" and run.get("headSha") == target_sha:
-        print(run["databaseId"])
+for run in payload.get("workflow_runs", []):
+    if run.get("conclusion") == "success" and run.get("head_sha") == target_sha:
+        print(run["id"])
         break
 PY
 )"
+    if [[ -n "$run_id" ]]; then
+      printf '%s\n' "$run_id"
+      return 0
+    fi
+
+    if [[ "$(python3 - "$tmp_json" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+print(len(payload.get("workflow_runs", [])))
+PY
+)" -lt "$page_size" ]]; then
+      break
+    fi
+  done
+
+  return 1
+}
+
+download_main_commit_artifacts() {
+  local repo target_sha run_id found_go found_rust
+  repo="$1"
+  target_sha="$2"
+
+  run_id="$(find_successful_main_run_id "$repo" "$target_sha" || true)"
   if [[ -z "$run_id" ]]; then
     echo "FAIL: no successful main codacy-coverage artifact found for baseline $target_sha" >&2
     return 1
@@ -142,30 +201,21 @@ PY
 }
 
 fetch_origin
-require_gh
-
-repo="$(detect_repo)"
 merge_base="$(git -C "$repo_root" merge-base HEAD "$base_ref")"
 current_head="$(git -C "$repo_root" rev-parse HEAD)"
 target_baseline_sha="$merge_base"
 pr_number="$(detect_pr_number || true)"
+repo=""
 codacy_status_json=""
 
 if [[ -n "$pr_number" ]]; then
+  repo="$(detect_repo)"
+  if [[ -z "$repo" ]]; then
+    echo "FAIL: could not determine GitHub repository for PR parity check" >&2
+    exit 1
+  fi
   codacy_status_json="$(codacy_pr_coverage_status_json "$repo" "$pr_number" || true)"
-  codacy_ancestor="$(python3 - "$codacy_status_json" <<'PY'
-import json, sys
-if not sys.argv[1]:
-    raise SystemExit(1)
-data = json.loads(sys.argv[1])
-ancestor = data["data"]["commonAncestorCommit"]
-sha = ancestor.get("commitSha")
-processed_reports = [r for r in ancestor.get("reports", []) if r.get("status") == "Processed"]
-if not sha or not processed_reports:
-    raise SystemExit(1)
-print(sha)
-PY
-  )"
+  codacy_ancestor="$(extract_codacy_common_ancestor "$codacy_status_json")"
   if [[ -n "$codacy_ancestor" ]]; then
     target_baseline_sha="$codacy_ancestor"
     echo "Codacy PR #$pr_number common ancestor baseline: $target_baseline_sha" >&2
@@ -185,6 +235,12 @@ if [[ "${GITHUB_ACTIONS:-}" != "true" ]]; then
   fi
 
   remote_pr_head="$(github_pr_head_sha "$repo" "$pr_number" || true)"
+  if [[ -z "$codacy_status_json" ]]; then
+    echo "  codacy ancestor: unavailable"
+    echo "  github PR head:  ${remote_pr_head:-missing}"
+    echo "PASS: Codacy metadata unavailable; local merge-base fallback remains $merge_base"
+    exit 0
+  fi
   python3 - "$codacy_status_json" "$merge_base" "$remote_pr_head" <<'PY'
 import json
 import sys
@@ -217,6 +273,13 @@ if ancestor_sha != local_merge_base:
 print("PASS: Codacy baseline matches local merge-base")
 PY
   exit 0
+fi
+
+require_gh
+repo="${repo:-$(detect_repo)}"
+if [[ -z "$repo" ]]; then
+  echo "FAIL: could not determine GitHub repository for CI parity check" >&2
+  exit 1
 fi
 
 if [[ -n "$head_coverage_sha" && "$head_coverage_sha" == "$current_head" && -s "$head_go" && -s "$head_rust" ]]; then
