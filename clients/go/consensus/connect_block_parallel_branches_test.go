@@ -1416,6 +1416,73 @@ func TestApplyNonCoinbaseTxBasicWorkQ_SighashPrehashError(t *testing.T) {
 	}
 }
 
+// TestApplyNonCoinbaseTxBasicWorkQ_CheckSpendCovenantError exercises line 305-306:
+// UTXO with corrupt vault covenant data triggers checkSpendCovenant error.
+func TestApplyNonCoinbaseTxBasicWorkQ_CheckSpendCovenantError(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+	prevTxid := hashWithPrefix(0xEE)
+
+	// UTXO with COV_TYPE_VAULT but truncated covenant data → ParseVaultCovenantDataForSpend fails.
+	utxoSet := map[Outpoint]UtxoEntry{
+		{Txid: prevTxid, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_VAULT,
+			CovenantData: []byte{0xFF}, // too short for vault
+		},
+	}
+
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0}},
+		Outputs: []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: covData}},
+	}
+	tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, kp)}
+
+	q := NewSigCheckQueue(1)
+	_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxoSet, 1, 0, [32]byte{}, nil, q)
+	if err == nil {
+		t.Fatal("expected checkSpendCovenant error for corrupt vault data")
+	}
+}
+
+// TestApplyNonCoinbaseTxBasicWorkQ_P2PKSpendQError exercises line 326:
+// P2PK input with an invalid suite ID triggers validateP2PKSpendQ error.
+func TestApplyNonCoinbaseTxBasicWorkQ_P2PKSpendQError(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+	prevTxid := hashWithPrefix(0xFF)
+
+	utxoSet := map[Outpoint]UtxoEntry{
+		{Txid: prevTxid, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_P2PK,
+			CovenantData: append([]byte(nil), covData...),
+		},
+	}
+
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0}},
+		Outputs: []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: covData}},
+	}
+	// Witness with invalid suite ID (0xFF instead of ML_DSA_87).
+	tx.Witness = []WitnessItem{{SuiteID: 0xFF, Pubkey: kp.PubkeyBytes(), Signature: make([]byte, ML_DSA_87_SIG_BYTES)}}
+
+	q := NewSigCheckQueue(1)
+	_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxoSet, 1, 0, [32]byte{}, nil, q)
+	if err == nil {
+		t.Fatal("expected P2PK spend error for invalid suite ID")
+	}
+	if !isTxErrCode(err, TX_ERR_SIG_ALG_INVALID) {
+		t.Fatalf("expected TX_ERR_SIG_ALG_INVALID, got: %v", err)
+	}
+}
+
 // sortKeys32 sorts two 32-byte arrays lexicographically and returns them in order.
 func sortKeys32(a, b [32]byte) ([32]byte, [32]byte) {
 	if bytes.Compare(a[:], b[:]) > 0 {

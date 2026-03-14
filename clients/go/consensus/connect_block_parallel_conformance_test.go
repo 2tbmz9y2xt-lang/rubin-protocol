@@ -435,3 +435,82 @@ func TestConnectBlockParallelSigVerify_AlreadyGeneratedOverflow(t *testing.T) {
 		t.Fatal("expected already_generated overflow error")
 	}
 }
+
+// TestConnectBlockParallelSigVerify_AlreadyGeneratedN1Overflow covers lines 171-172:
+// already_generated fits uint64 but already_generated + subsidy overflows.
+func TestConnectBlockParallelSigVerify_AlreadyGeneratedN1Overflow(t *testing.T) {
+	height := uint64(1)
+
+	// AlreadyGenerated = MaxUint64 - 1000 → fits uint64, passes line 167.
+	// Subsidy = TAIL_EMISSION_PER_BLOCK = 19_025_875 (since AG >= MINEABLE_CAP).
+	// N1 = (MaxUint64-1000) + 19_025_875 overflows uint64 → line 171-172.
+	// Coinbase value must be <= TAIL + 10 to pass value bound check.
+	coinbaseVal := uint64(TAIL_EMISSION_PER_BLOCK) + 10
+	block, prev, target, utxos := buildTestBlock(t, coinbaseVal)
+
+	ag := new(big.Int).SetUint64(^uint64(0) - 1000)
+
+	state := &InMemoryChainState{
+		Utxos:            utxos,
+		AlreadyGenerated: ag,
+	}
+	_, err := ConnectBlockParallelSigVerifyWithCoreExtProfiles(
+		block, &prev, &target, height, []uint64{0}, state, [32]byte{}, nil, 4,
+	)
+	if err == nil {
+		t.Fatal("expected already_generated_n1 overflow error")
+	}
+}
+
+// TestConnectBlockParallelSigVerify_CoinbaseVaultForbidden covers lines 139-140:
+// a block with a valid VAULT output in the coinbase.
+func TestConnectBlockParallelSigVerify_CoinbaseVaultForbidden(t *testing.T) {
+	height := uint64(1)
+	prev := hashWithPrefix(0xBB)
+	target := filledHash(0xff)
+
+	// Build a coinbase-only block where the coinbase contains a VAULT output.
+	// VAULT in coinbase passes basic validation (ValidateTxCovenantsGenesis checks
+	// the vault structure, not its placement in coinbase) but fails at
+	// validateCoinbaseApplyOutputs.
+	kp := mustMLDSA87Keypair(t)
+	keyID := sha3_256(kp.PubkeyBytes())
+
+	// Build a minimal valid vault covenant: owner_lock_id[32] || threshold=1 || key_count=1 || key[32] || whitelist_count=0
+	vaultCov := make([]byte, 0, 68)
+	vaultCov = append(vaultCov, keyID[:]...)  // owner_lock_id
+	vaultCov = append(vaultCov, 1)            // threshold
+	vaultCov = append(vaultCov, 1)            // key_count
+	vaultCov = append(vaultCov, keyID[:]...)  // key
+	vaultCov = AppendU16le(vaultCov, 0)       // whitelist_count
+
+	// Coinbase with VAULT output + anchor for witness commitment.
+	wtxids := [][32]byte{{}} // single coinbase → wtxid[0] = zero
+	wroot, err := WitnessMerkleRootWtxids(wtxids)
+	if err != nil {
+		t.Fatalf("WitnessMerkleRootWtxids: %v", err)
+	}
+	commit := WitnessCommitmentHash(wroot)
+	coinbase := coinbaseTxWithOutputs(uint32(height), []testOutput{
+		{value: 100, covenantType: COV_TYPE_VAULT, covenantData: vaultCov},
+		{value: 0, covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]},
+	})
+	cbTxid := testTxID(t, coinbase)
+
+	root, err := MerkleRootTxids([][32]byte{cbTxid})
+	if err != nil {
+		t.Fatalf("MerkleRootTxids: %v", err)
+	}
+	block := buildBlockBytes(t, prev, root, target, 1, [][]byte{coinbase})
+
+	state := &InMemoryChainState{
+		Utxos:            make(map[Outpoint]UtxoEntry),
+		AlreadyGenerated: new(big.Int),
+	}
+	_, err = ConnectBlockParallelSigVerifyWithCoreExtProfiles(
+		block, &prev, &target, height, []uint64{0}, state, [32]byte{}, nil, 4,
+	)
+	if err == nil {
+		t.Fatal("expected coinbase vault forbidden error")
+	}
+}
