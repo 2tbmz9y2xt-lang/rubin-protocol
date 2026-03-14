@@ -91,7 +91,7 @@ else
   "$repo_root/scripts/run-codacy-coverage.sh" "$repo_root"
 fi
 
-if download_base_coverage_from_artifacts "$merge_base"; then
+if [[ "${GITHUB_ACTIONS:-}" == "true" ]] && download_base_coverage_from_artifacts "$merge_base"; then
   echo "Baseline coverage restored from GitHub artifacts for $(git -C "$repo_root" rev-parse --short "$merge_base")"
 else
   git -C "$repo_root" worktree add --detach "$base_worktree" "$merge_base" >/dev/null
