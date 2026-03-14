@@ -47,6 +47,13 @@ type mempoolHeapItem struct {
 	index  int
 }
 
+type mempoolPriority struct {
+	fee    uint64
+	size   int
+	weight uint64
+	txid   [32]byte
+}
+
 type mempoolWorstHeap []*mempoolHeapItem
 
 func (h mempoolWorstHeap) Len() int { return len(h) }
@@ -182,18 +189,11 @@ func (m *Mempool) EvictConfirmed(blockBytes []byte) error {
 }
 
 func (m *Mempool) EvictConfirmedParsed(block *consensus.ParsedBlock) error {
-	if m == nil {
-		return errors.New("nil mempool")
-	}
-	if block == nil {
-		return errors.New("nil parsed block")
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, txid := range block.Txids {
-		m.removeTxLocked(txid)
-	}
-	return nil
+	return m.withLockedParsedBlock(block, func(block *consensus.ParsedBlock) {
+		for _, txid := range block.Txids {
+			m.removeTxLocked(txid)
+		}
+	})
 }
 
 func (m *Mempool) RemoveConflicting(blockBytes []byte) error {
@@ -212,6 +212,14 @@ func (m *Mempool) withParsedBlock(blockBytes []byte, fn func(*consensus.ParsedBl
 }
 
 func (m *Mempool) RemoveConflictingParsed(block *consensus.ParsedBlock) error {
+	return m.withLockedParsedBlock(block, func(block *consensus.ParsedBlock) {
+		for txid := range m.collectConflictsLocked(block) {
+			m.removeTxLocked(txid)
+		}
+	})
+}
+
+func (m *Mempool) withLockedParsedBlock(block *consensus.ParsedBlock, fn func(*consensus.ParsedBlock)) error {
 	if m == nil {
 		return errors.New("nil mempool")
 	}
@@ -220,10 +228,7 @@ func (m *Mempool) RemoveConflictingParsed(block *consensus.ParsedBlock) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	for txid := range m.collectConflictsLocked(block) {
-		m.removeTxLocked(txid)
-	}
+	fn(block)
 	return nil
 }
 
@@ -491,34 +496,52 @@ func compareEntryPriority(a *mempoolEntry, b *mempoolEntry) int {
 	if a == nil || b == nil {
 		return 0
 	}
-	return comparePriorityValues(a.fee, a.size, a.weight, a.txid, b.fee, b.size, b.weight, b.txid)
+	return comparePriorityValues(priorityFromEntry(a), priorityFromEntry(b))
 }
 
 func compareHeapItemPriority(a *mempoolHeapItem, b *mempoolHeapItem) int {
 	if a == nil || b == nil {
 		return 0
 	}
-	return comparePriorityValues(a.fee, a.size, a.weight, a.txid, b.fee, b.size, b.weight, b.txid)
+	return comparePriorityValues(priorityFromHeapItem(a), priorityFromHeapItem(b))
 }
 
-func comparePriorityValues(feeA uint64, sizeA int, weightA uint64, txidA [32]byte, feeB uint64, sizeB int, weightB uint64, txidB [32]byte) int {
-	cmp := compareFeeRateValues(feeA, sizeA, feeB, sizeB)
+func priorityFromEntry(entry *mempoolEntry) mempoolPriority {
+	return mempoolPriority{
+		fee:    entry.fee,
+		size:   entry.size,
+		weight: entry.weight,
+		txid:   entry.txid,
+	}
+}
+
+func priorityFromHeapItem(item *mempoolHeapItem) mempoolPriority {
+	return mempoolPriority{
+		fee:    item.fee,
+		size:   item.size,
+		weight: item.weight,
+		txid:   item.txid,
+	}
+}
+
+func comparePriorityValues(a mempoolPriority, b mempoolPriority) int {
+	cmp := compareFeeRateValues(a.fee, a.size, b.fee, b.size)
 	if cmp != 0 {
 		return cmp
 	}
-	if feeA != feeB {
-		if feeA > feeB {
+	if a.fee != b.fee {
+		if a.fee > b.fee {
 			return 1
 		}
 		return -1
 	}
-	if weightA != weightB {
-		if weightA < weightB {
+	if a.weight != b.weight {
+		if a.weight < b.weight {
 			return 1
 		}
 		return -1
 	}
-	switch cmp := bytes.Compare(txidA[:], txidB[:]); {
+	switch cmp := bytes.Compare(a.txid[:], b.txid[:]); {
 	case cmp < 0:
 		return 1
 	case cmp > 0:
