@@ -46,17 +46,28 @@ struct WorstEntryKey {
     heap_id: u64,
 }
 
+struct AdmitPriority<'a> {
+    fee: u64,
+    size: usize,
+    weight: u64,
+    tie: &'a [u8],
+}
+
 impl Ord for WorstEntryKey {
     fn cmp(&self, other: &Self) -> Ordering {
         compare_priority_values(
-            other.fee,
-            other.size,
-            other.weight,
-            &other.txid,
-            self.fee,
-            self.size,
-            self.weight,
-            &self.txid,
+            AdmitPriority {
+                fee: other.fee,
+                size: other.size,
+                weight: other.weight,
+                tie: &other.txid,
+            },
+            AdmitPriority {
+                fee: self.fee,
+                size: self.size,
+                weight: self.weight,
+                tie: &self.txid,
+            },
         )
     }
 }
@@ -591,24 +602,26 @@ fn compare_admit_priority(
     b: &TxPoolEntry,
 ) -> Ordering {
     compare_priority_values(
-        a.fee, a.size, a.weight, &txid_a, b.fee, b.size, b.weight, &txid_b,
+        AdmitPriority {
+            fee: a.fee,
+            size: a.size,
+            weight: a.weight,
+            tie: &txid_a,
+        },
+        AdmitPriority {
+            fee: b.fee,
+            size: b.size,
+            weight: b.weight,
+            tie: &txid_b,
+        },
     )
 }
 
-fn compare_priority_values(
-    fee_a: u64,
-    size_a: usize,
-    weight_a: u64,
-    tie_a: &[u8],
-    fee_b: u64,
-    size_b: usize,
-    weight_b: u64,
-    tie_b: &[u8],
-) -> Ordering {
-    match compare_fee_rate_values(fee_a, size_a, fee_b, size_b) {
-        Ordering::Equal => match fee_a.cmp(&fee_b) {
-            Ordering::Equal => match weight_b.cmp(&weight_a) {
-                Ordering::Equal => tie_b.cmp(tie_a),
+fn compare_priority_values(a: AdmitPriority<'_>, b: AdmitPriority<'_>) -> Ordering {
+    match compare_fee_rate_values(a.fee, a.size, b.fee, b.size) {
+        Ordering::Equal => match a.fee.cmp(&b.fee) {
+            Ordering::Equal => match b.weight.cmp(&a.weight) {
+                Ordering::Equal => b.tie.cmp(a.tie),
                 other => other,
             },
             other => other,
