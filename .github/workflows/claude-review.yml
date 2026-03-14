@@ -22,11 +22,11 @@ jobs:
       - name: Run Claude Code Review
         id: review
         uses: anthropics/claude-code-action@v1
+        env:
+          ANTHROPIC_MODEL: claude-sonnet-4-6
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          model: claude-sonnet-4-6
-          max_turns: "15"
-          direct_prompt: true
+          claude_args: "--max-turns 15"
           prompt: |
             You are a senior security and protocol engineer reviewing changes to the RUBIN blockchain protocol.
             Context:
@@ -43,4 +43,4 @@ jobs:
 
             Post a concise review comment with findings grouped by severity: CRITICAL, HIGH, MEDIUM, LOW.
             If no issues found, confirm the code looks correct.
-        github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
