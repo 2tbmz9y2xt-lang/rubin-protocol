@@ -78,8 +78,13 @@ func (q *SigCheckQueue) Len() int {
 //
 // After Flush, the queue is empty and can be reused.
 //
-// Determinism guarantee: errors are returned in submission order, not completion
-// order. If tasks 0, 3, and 7 all fail, only task 0's error is returned.
+// Error ordering: the first recorded error by submission order is returned.
+// The early-abort flag means some higher-index tasks may be skipped, so the
+// returned error may not be the absolute lowest failing index if a lower-index
+// task was skipped due to concurrency. This is acceptable because:
+//   - The queue is only used during IBD, where error ordering is not consensus-critical
+//   - Both paths (sequential and parallel) agree on accept/reject outcomes
+//   - The block IS invalid regardless of which signature error is surfaced
 func (q *SigCheckQueue) Flush() error {
 	if q == nil || len(q.tasks) == 0 {
 		return nil
@@ -205,7 +210,6 @@ func VerifySignaturesBatch(
 	}
 
 	var wg sync.WaitGroup
-	var batchFailed atomic.Bool // early-abort for adversarial input
 
 	taskCh := make(chan int, len(tasks))
 	for i := range tasks {
@@ -218,17 +222,12 @@ func VerifySignaturesBatch(
 		go func() {
 			defer wg.Done()
 			for idx := range taskCh {
-				if batchFailed.Load() {
-					continue // drain channel without expensive crypto work
-				}
 				t := tasks[idx]
 				ok, err := verifySig(t.SuiteID, t.Pubkey, t.Sig, t.Digest)
 				if err != nil {
 					results[idx] = err
-					batchFailed.Store(true)
 				} else if !ok {
 					results[idx] = txerr(TX_ERR_SIG_INVALID, "batch: signature invalid")
-					batchFailed.Store(true)
 				}
 			}
 		}()

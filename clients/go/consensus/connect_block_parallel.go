@@ -245,6 +245,10 @@ func applyNonCoinbaseTxBasicWorkQ(
 		return nil, 0, err
 	}
 
+	// Clone UTXO set so per-tx mutations (spend/create) don't alias the caller's map.
+	// This matches the sequential path (applyNonCoinbaseTxBasicWork). A future
+	// optimization may use an overlay/undo journal instead, but correctness requires
+	// matching the canonical sequential behavior exactly.
 	work := make(map[Outpoint]UtxoEntry, len(utxoSet))
 	for k, v := range utxoSet {
 		work[k] = v
@@ -290,7 +294,8 @@ func applyNonCoinbaseTxBasicWorkQ(
 			return nil, 0, txerr(TX_ERR_MISSING_UTXO, "attempt to spend non-spendable covenant")
 		}
 
-		if entry.CreatedByCoinbase && height < entry.CreationHeight+COINBASE_MATURITY {
+		// Overflow-safe maturity check: avoid entry.CreationHeight+COINBASE_MATURITY wrapping.
+		if entry.CreatedByCoinbase && (height < entry.CreationHeight || height-entry.CreationHeight < COINBASE_MATURITY) {
 			return nil, 0, txerr(TX_ERR_COINBASE_IMMATURE, "coinbase immature")
 		}
 
