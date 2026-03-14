@@ -102,15 +102,13 @@ jobs:
               );
               if (!response.ok) {
                 const body = await response.text();
-                core.warning(`Model ${modelId} returned ${response.status}: ${body.slice(0, 200)}`);
-                core.setOutput('review', '');
+                core.setFailed(`Security review fail-closed: model ${modelId} returned ${response.status}: ${body.slice(0, 200)}`);
                 return;
               }
               const data = await response.json();
               result = data.choices[0].message.content;
             } catch (err) {
-              core.warning(`Model ${modelId} failed: ${err.message}`);
-              core.setOutput('review', '');
+              core.setFailed(`Security review fail-closed: model ${modelId} error: ${err.message}`);
               return;
             }
             result = result.replace(/^\s*```(?:json)?\s*\n?/, '').replace(/\n?\s*```\s*$/, '').trim();
@@ -141,7 +139,7 @@ jobs:
             try {
               parsed = JSON.parse(review);
             } catch (e) {
-              core.warning(`Failed to parse review JSON: ${e.message}`);
+              core.setFailed(`Security review fail-closed: unparseable review JSON: ${e.message}`);
               return;
             }
             const critical = (parsed.findings || []).filter(f => f.severity === 'CRITICAL');
