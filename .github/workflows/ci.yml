@@ -74,7 +74,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
-      - name: Install Semgrep
+      - name: Cache Cargo         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5         with:           path: |             ~/.cargo/registry             ~/.cargo/git             clients/rust/target           key: cargo-${{ runner.os }}-${{ hashFiles('clients/rust/Cargo.lock') }}           restore-keys: |             cargo-${{ runner.os }}-       - name: Install Semgrep
         run: |
           python3 -m pip install --upgrade pip
           python3 -m pip install semgrep==1.136.0
@@ -317,7 +317,7 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
           "$(go env GOPATH)/bin/govulncheck" ./...
 
-      - name: Rust fmt
+      - name: Cache Cargo         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5         with:           path: |             ~/.cargo/registry             ~/.cargo/git             clients/rust/target           key: cargo-${{ runner.os }}-${{ hashFiles('clients/rust/Cargo.lock') }}           restore-keys: |             cargo-${{ runner.os }}-       - name: Rust fmt
         run: |
           cd clients/rust
           cargo fmt -- --check
