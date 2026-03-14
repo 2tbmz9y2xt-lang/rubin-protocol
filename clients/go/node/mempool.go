@@ -178,14 +178,7 @@ func (m *Mempool) SelectTransactions(maxCount int, maxBytes int) [][]byte {
 }
 
 func (m *Mempool) EvictConfirmed(blockBytes []byte) error {
-	if m == nil {
-		return errors.New("nil mempool")
-	}
-	block, err := consensus.ParseBlockBytes(blockBytes)
-	if err != nil {
-		return err
-	}
-	return m.EvictConfirmedParsed(block)
+	return m.withParsedBlock(blockBytes, m.EvictConfirmedParsed)
 }
 
 func (m *Mempool) EvictConfirmedParsed(block *consensus.ParsedBlock) error {
@@ -204,6 +197,10 @@ func (m *Mempool) EvictConfirmedParsed(block *consensus.ParsedBlock) error {
 }
 
 func (m *Mempool) RemoveConflicting(blockBytes []byte) error {
+	return m.withParsedBlock(blockBytes, m.RemoveConflictingParsed)
+}
+
+func (m *Mempool) withParsedBlock(blockBytes []byte, fn func(*consensus.ParsedBlock) error) error {
 	if m == nil {
 		return errors.New("nil mempool")
 	}
@@ -211,7 +208,7 @@ func (m *Mempool) RemoveConflicting(blockBytes []byte) error {
 	if err != nil {
 		return err
 	}
-	return m.RemoveConflictingParsed(block)
+	return fn(block)
 }
 
 func (m *Mempool) RemoveConflictingParsed(block *consensus.ParsedBlock) error {
@@ -310,12 +307,7 @@ func (m *Mempool) removeTxLocked(txid [32]byte) {
 	if item, ok := m.heapItems[txid]; ok && item != nil && item.index >= 0 && item.index < len(m.worstHeap) && m.worstHeap[item.index] == item {
 		heap.Remove(&m.worstHeap, item.index)
 	}
-	delete(m.txs, txid)
-	delete(m.heapItems, txid)
-	delete(m.heapSeqs, txid)
-	for _, op := range entry.inputs {
-		delete(m.spenders, op)
-	}
+	m.deleteEntryLocked(txid, entry)
 }
 
 func (m *Mempool) validateAdmissionLocked(entry *mempoolEntry) error {
@@ -361,13 +353,7 @@ func (m *Mempool) addEntryLocked(entry *mempoolEntry) {
 	for _, op := range entry.inputs {
 		m.spenders[op] = entry.txid
 	}
-	item := &mempoolHeapItem{
-		txid:   entry.txid,
-		fee:    entry.fee,
-		weight: entry.weight,
-		size:   entry.size,
-		heapID: heapID,
-	}
+	item := newHeapItem(entry.txid, entry, heapID)
 	heap.Push(&m.worstHeap, item)
 	m.heapItems[entry.txid] = item
 }
@@ -432,6 +418,16 @@ func outpointFromInput(in consensus.TxInput) consensus.Outpoint {
 	return consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
 }
 
+func newHeapItem(txid [32]byte, entry *mempoolEntry, heapID uint64) *mempoolHeapItem {
+	return &mempoolHeapItem{
+		txid:   txid,
+		fee:    entry.fee,
+		weight: entry.weight,
+		size:   entry.size,
+		heapID: heapID,
+	}
+}
+
 func (m *Mempool) seedWorstHeapLocked() {
 	if len(m.heapItems) >= len(m.txs) {
 		return
@@ -443,13 +439,7 @@ func (m *Mempool) seedWorstHeapLocked() {
 		m.nextHeapID++
 		heapID := m.nextHeapID
 		m.heapSeqs[txid] = heapID
-		item := &mempoolHeapItem{
-			txid:   txid,
-			fee:    entry.fee,
-			weight: entry.weight,
-			size:   entry.size,
-			heapID: heapID,
-		}
+		item := newHeapItem(txid, entry, heapID)
 		heap.Push(&m.worstHeap, item)
 		m.heapItems[txid] = item
 	}
@@ -482,6 +472,10 @@ func (m *Mempool) popWorstLocked() ([32]byte, *mempoolEntry, bool) {
 }
 
 func (m *Mempool) removePoppedWorstLocked(txid [32]byte, entry *mempoolEntry) {
+	m.deleteEntryLocked(txid, entry)
+}
+
+func (m *Mempool) deleteEntryLocked(txid [32]byte, entry *mempoolEntry) {
 	delete(m.txs, txid)
 	delete(m.heapItems, txid)
 	delete(m.heapSeqs, txid)
