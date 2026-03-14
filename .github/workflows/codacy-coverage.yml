@@ -109,6 +109,7 @@ jobs:
       - name: Enforce local coverage gates
         if: github.event_name == 'pull_request'
         env:
+          GH_TOKEN: ${{ github.token }}
           HEAD_GO_COVERAGE: ${{ github.workspace }}/clients/go/coverage.out
           HEAD_RUST_LCOV: ${{ github.workspace }}/clients/rust/lcov.info
           HEAD_COVERAGE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}

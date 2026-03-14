@@ -17,6 +17,11 @@ HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(?P<start>\d+)(?:,(?P<count>\d+))? @@
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Predict Codacy coverage gates locally.")
+    parser.add_argument(
+        "--summary-title",
+        default="Codacy coverage preflight",
+        help="Header shown before the coverage summary.",
+    )
     parser.add_argument("--repo-root", required=True, type=Path)
     parser.add_argument("--base-ref", required=True)
     parser.add_argument("--base-go", required=True, type=Path)
@@ -210,6 +215,7 @@ def compress_ranges(lines: list[int]) -> list[str]:
 
 
 def print_summary(
+    summary_title: str,
     repo_root: Path,
     base_ref: str,
     base_coverable: int,
@@ -228,7 +234,7 @@ def print_summary(
     variation = head_pct - base_pct
     diff_pct = coverage_percent(diff_coverable, diff_covered)
 
-    print("Codacy coverage preflight")
+    print(summary_title)
     print(f"  base {base_ref[:12]}: {base_pct:.2f}% ({base_covered}/{base_coverable})")
     print(f"  head HEAD:      {head_pct:.2f}% ({head_covered}/{head_coverable})")
     print(f"  variation:      {variation:+.2f}%")
@@ -275,6 +281,7 @@ def main() -> int:
     per_file = diff_coverage_by_file(head_coverage, changed)
 
     print_summary(
+        args.summary_title,
         repo_root,
         args.base_ref,
         base_coverable,
