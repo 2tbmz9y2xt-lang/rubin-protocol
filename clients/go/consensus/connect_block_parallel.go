@@ -90,7 +90,14 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfiles(
 	} else if ok {
 		blockMTP = median
 	}
-	workUtxos := state.Utxos
+	// Clone UTXO set upfront to prevent aliasing state.Utxos. Without this,
+	// coinbase-only blocks (no non-coinbase txs) would insert coinbase outputs
+	// directly into state.Utxos before all fallible checks complete, leaving
+	// the caller's state partially mutated on error paths.
+	workUtxos := make(map[Outpoint]UtxoEntry, len(state.Utxos))
+	for k, v := range state.Utxos {
+		workUtxos[k] = v
+	}
 
 	// Create a single sig check queue for the entire block.
 	// All signature verifications across all transactions are collected here
