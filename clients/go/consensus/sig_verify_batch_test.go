@@ -542,6 +542,65 @@ func TestVerifyMLDSAKeyAndSigQ_KeyBindingMismatch(t *testing.T) {
 	}
 }
 
+func TestVerifyMLDSAKeyAndSigQ_NilQueue_InvalidSig(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	sig := signDigestWithSighashType(t, kp, tx, inputIndex, inputValue, chainID, SIGHASH_ALL)
+	tx.Witness = []WitnessItem{{
+		SuiteID:   SUITE_ID_ML_DSA_87,
+		Pubkey:    kp.PubkeyBytes(),
+		Signature: sig,
+	}}
+
+	cache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		t.Fatalf("sighash cache: %v", err)
+	}
+
+	// Corrupt pubkey so key binding still matches but sig verification fails.
+	kp2 := mustMLDSA87Keypair(t)
+	expectedKeyID := sha3_256(kp2.PubkeyBytes())
+	// Use kp2's pubkey (valid key binding) with kp's signature (mismatched).
+	w := WitnessItem{
+		SuiteID:   SUITE_ID_ML_DSA_87,
+		Pubkey:    kp2.PubkeyBytes(),
+		Signature: sig,
+	}
+
+	// sigQueue=nil → verifies inline → should return invalid sig error.
+	err = verifyMLDSAKeyAndSigQ(w, expectedKeyID, tx, inputIndex, inputValue, chainID, cache, nil, "TEST")
+	if err == nil {
+		t.Fatalf("expected error for mismatched sig, got nil")
+	}
+	if !isTxErrCode(err, TX_ERR_SIG_INVALID) {
+		t.Fatalf("expected TX_ERR_SIG_INVALID, got: %v", err)
+	}
+}
+
+func TestVerifyMLDSAKeyAndSigQ_NilQueue_BadSuite(t *testing.T) {
+	// Bad suite → verifySig returns err (not ok=false). sigQueue=nil path.
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	fakePubkey := make([]byte, 32)
+	fakePubkey[0] = 0xAA
+	expectedKeyID := sha3_256(fakePubkey)
+	w := WitnessItem{
+		SuiteID:   0xFE, // bad suite
+		Pubkey:    fakePubkey,
+		Signature: make([]byte, 2), // [sighash_type_byte, one_sig_byte]
+	}
+
+	cache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		t.Fatalf("sighash cache: %v", err)
+	}
+
+	err = verifyMLDSAKeyAndSigQ(w, expectedKeyID, tx, inputIndex, inputValue, chainID, cache, nil, "TEST")
+	if err == nil {
+		t.Fatalf("expected error for bad suite ID, got nil")
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Benchmark: Parallel queue vs sequential verify
 // ─────────────────────────────────────────────────────────────────────────────
