@@ -356,6 +356,90 @@ func TestSigCheckQueue_AssertFlushed_AfterFlush(t *testing.T) {
 	}
 }
 
+func TestSigCheckQueue_Len_Nil(t *testing.T) {
+	var q *SigCheckQueue
+	if q.Len() != 0 {
+		t.Fatalf("nil queue Len should be 0, got %d", q.Len())
+	}
+}
+
+func TestSigCheckQueue_Single_BadSuiteError(t *testing.T) {
+	// Push a single task with an unknown suite ID. verifySig returns an error
+	// (not ok=false), which exercises the Flush single-task err!=nil path (line 94).
+	q := NewSigCheckQueue(1)
+	q.Push(0xFE, []byte("fake-pubkey"), []byte("fake-sig"), [32]byte{}, txerr(TX_ERR_SIG_INVALID, "test"))
+	err := q.Flush()
+	if err == nil {
+		t.Fatalf("expected error for bad suite ID in single-task Flush")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VerifySignaturesBatch: single-task fast path and default-workers coverage
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestVerifySignaturesBatch_SingleValid_DefaultWorkers(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	var d [32]byte
+	d[0] = 0xAA
+	sig, err := kp.SignDigest32(d)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	// workers=0 → defaults to GOMAXPROCS, then clamped to len(tasks)=1.
+	// Exercises: lines 181-183 (default workers), 184-186 (clamp), 190-191 (single fast path), 197 (return).
+	results := VerifySignaturesBatch([]SigVerifyRequest{{
+		SuiteID: SUITE_ID_ML_DSA_87,
+		Pubkey:  kp.PubkeyBytes(),
+		Sig:     sig,
+		Digest:  d,
+	}}, 0)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0] != nil {
+		t.Fatalf("expected nil error for valid sig, got: %v", results[0])
+	}
+}
+
+func TestVerifySignaturesBatch_SingleInvalid(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	var d [32]byte
+	d[0] = 0xBB
+	sig, err := kp.SignDigest32(d)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	d[0] ^= 0xFF // corrupt digest → verifySig returns ok=false
+	// Exercises: lines 194-196 (!ok branch in single-task path).
+	results := VerifySignaturesBatch([]SigVerifyRequest{{
+		SuiteID: SUITE_ID_ML_DSA_87,
+		Pubkey:  kp.PubkeyBytes(),
+		Sig:     sig,
+		Digest:  d,
+	}}, 1)
+	if results[0] == nil {
+		t.Fatalf("expected error for invalid sig")
+	}
+	if !isTxErrCode(results[0], TX_ERR_SIG_INVALID) {
+		t.Fatalf("expected TX_ERR_SIG_INVALID, got: %v", results[0])
+	}
+}
+
+func TestVerifySignaturesBatch_SingleBadSuiteError(t *testing.T) {
+	// Bad suite ID → verifySig returns err (not ok=false).
+	// Exercises: lines 192-193 (err != nil branch in single-task path).
+	results := VerifySignaturesBatch([]SigVerifyRequest{{
+		SuiteID: 0xFE,
+		Pubkey:  []byte("fake"),
+		Sig:     []byte("fake"),
+		Digest:  [32]byte{},
+	}}, 1)
+	if results[0] == nil {
+		t.Fatalf("expected error for bad suite ID")
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Parallel stress test
 // ─────────────────────────────────────────────────────────────────────────────
