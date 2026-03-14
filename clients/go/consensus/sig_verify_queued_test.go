@@ -870,6 +870,119 @@ func TestValidateHTLCSpendQ_RefundPayloadLengthMismatch(t *testing.T) {
 	}
 }
 
+func TestValidateHTLCSpendQ_NilQueue_ClaimInvalidSig(t *testing.T) {
+	claimKP := mustMLDSA87Keypair(t)
+	claimKP2 := mustMLDSA87Keypair(t) // different keypair for wrong sig
+	refundKP := mustMLDSA87Keypair(t)
+	claimPub2 := claimKP2.PubkeyBytes()
+	claimKeyID2 := sha3_256(claimPub2)
+	refundKeyID := sha3_256(refundKP.PubkeyBytes())
+
+	preimage := []byte("rubin-htlc-nil-q-claim")
+	entry := makeHTLCEntry(sha3_256(preimage), LOCK_MODE_HEIGHT, 1, claimKeyID2, refundKeyID)
+
+	path := WitnessItem{
+		SuiteID:   SUITE_ID_SENTINEL,
+		Pubkey:    claimKeyID2[:],
+		Signature: encodeHTLCClaimPayload(preimage),
+	}
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		t.Fatalf("cache: %v", err)
+	}
+	digest, err := SighashV1DigestWithCache(cache, inputIndex, inputValue, chainID, SIGHASH_ALL)
+	if err != nil {
+		t.Fatalf("digest: %v", err)
+	}
+	// Sign with wrong key (claimKP, not claimKP2) → valid sig structure, wrong key.
+	claimSig, err := claimKP.SignDigest32(digest)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	claimSig = append(claimSig, SIGHASH_ALL)
+	sig := WitnessItem{
+		SuiteID:   SUITE_ID_ML_DSA_87,
+		Pubkey:    claimPub2, // matches claimKeyID2, but signed by claimKP
+		Signature: claimSig,
+	}
+
+	// nil queue → inline verify → sig mismatch → TX_ERR_SIG_INVALID
+	err = validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, nil)
+	if err == nil {
+		t.Fatalf("expected error for mismatched HTLC sig, got nil")
+	}
+	if !isTxErrCode(err, TX_ERR_SIG_INVALID) {
+		t.Fatalf("expected TX_ERR_SIG_INVALID, got: %v", err)
+	}
+}
+
+func TestValidateHTLCSpendQ_NilQueue_RefundOK(t *testing.T) {
+	claimKP := mustMLDSA87Keypair(t)
+	refundKP := mustMLDSA87Keypair(t)
+	claimKeyID := sha3_256(claimKP.PubkeyBytes())
+	refundPub := refundKP.PubkeyBytes()
+	refundKeyID := sha3_256(refundPub)
+
+	preimage := []byte("rubin-htlc-nil-q-refund")
+	entry := makeHTLCEntry(sha3_256(preimage), LOCK_MODE_HEIGHT, 10, claimKeyID, refundKeyID)
+
+	path := WitnessItem{
+		SuiteID:   SUITE_ID_SENTINEL,
+		Pubkey:    refundKeyID[:],
+		Signature: []byte{0x01},
+	}
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		t.Fatalf("cache: %v", err)
+	}
+	digest, err := SighashV1DigestWithCache(cache, inputIndex, inputValue, chainID, SIGHASH_ALL)
+	if err != nil {
+		t.Fatalf("digest: %v", err)
+	}
+	refundSig, err := refundKP.SignDigest32(digest)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	refundSig = append(refundSig, SIGHASH_ALL)
+	sig := WitnessItem{
+		SuiteID:   SUITE_ID_ML_DSA_87,
+		Pubkey:    refundPub,
+		Signature: refundSig,
+	}
+
+	// nil queue → inline verify → should pass
+	err = validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 10, 0, cache, nil)
+	if err != nil {
+		t.Fatalf("inline HTLC refund: %v", err)
+	}
+}
+
+func TestValidateThresholdSigSpendQ_NilQueue_ValidSig(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	keyID := sha3_256(kp.PubkeyBytes())
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+	digest, _ := SighashV1DigestWithCache(cache, inputIndex, inputValue, chainID, SIGHASH_ALL)
+	sig, _ := kp.SignDigest32(digest)
+	sig = append(sig, SIGHASH_ALL)
+
+	keys := [][32]byte{keyID}
+	ws := []WitnessItem{
+		{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: kp.PubkeyBytes(), Signature: sig},
+	}
+
+	// nil queue → inline verify
+	err := validateThresholdSigSpendQ(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, cache, nil, "TEST")
+	if err != nil {
+		t.Fatalf("nil queue threshold verify: %v", err)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // validateThresholdSigSpendQ additional error-path tests
 // ─────────────────────────────────────────────────────────────────────────────
