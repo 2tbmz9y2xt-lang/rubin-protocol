@@ -278,4 +278,47 @@ func TestConnectBlockParallelSigVerify_GuardPaths(t *testing.T) {
 			t.Fatal("expected error for negative AlreadyGenerated")
 		}
 	})
+
+	t.Run("nil_Utxos_normalized", func(t *testing.T) {
+		state := &InMemoryChainState{
+			Utxos:            nil, // should be normalized to empty map
+			AlreadyGenerated: new(big.Int),
+		}
+		_, err := ConnectBlockParallelSigVerifyWithCoreExtProfiles(
+			[]byte{0x00}, nil, nil, 0, nil, state, [32]byte{}, nil, 0,
+		)
+		// Will fail at block validation but nil Utxos normalization is covered.
+		if err == nil {
+			t.Fatal("expected error for invalid block bytes")
+		}
+		if state.Utxos == nil {
+			t.Fatal("expected Utxos to be normalized to non-nil")
+		}
+	})
+
+	t.Run("nil_Utxos_and_nil_AlreadyGenerated", func(t *testing.T) {
+		state := &InMemoryChainState{
+			Utxos:            nil,
+			AlreadyGenerated: nil,
+		}
+		_, err := ConnectBlockParallelSigVerifyWithCoreExtProfiles(
+			[]byte{0x00}, nil, nil, 0, nil, state, [32]byte{}, nil, 0,
+		)
+		if err == nil {
+			t.Fatal("expected error for invalid block bytes")
+		}
+	})
+
+	t.Run("wrapper_convenience_function", func(t *testing.T) {
+		state := &InMemoryChainState{
+			Utxos:            make(map[Outpoint]UtxoEntry),
+			AlreadyGenerated: new(big.Int),
+		}
+		_, err := ConnectBlockParallelSigVerify(
+			[]byte{0x00}, nil, nil, 0, nil, state, [32]byte{}, 0,
+		)
+		if err == nil {
+			t.Fatal("expected error for invalid block bytes")
+		}
+	})
 }

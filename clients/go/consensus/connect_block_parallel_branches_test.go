@@ -1295,6 +1295,58 @@ func TestApplyNonCoinbaseTxBasicWorkQ_AnchorOutputSkip(t *testing.T) {
 	}
 }
 
+// TestApplyWrapper exercises the wrapper function
+// applyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesQ through both success
+// and error paths.
+func TestApplyWrapper(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		kp := mustMLDSA87Keypair(t)
+		covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+		prevTxid := hashWithPrefix(0x70)
+		txid := hashWithPrefix(0x71)
+
+		tx := &Tx{
+			Version: 1,
+			TxKind:  0x00,
+			TxNonce: 1,
+			Inputs:  []TxInput{{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0}},
+			Outputs: []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: covData}},
+		}
+		tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, kp)}
+
+		utxos := map[Outpoint]UtxoEntry{
+			{Txid: prevTxid, Vout: 0}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: covData},
+		}
+
+		q := NewSigCheckQueue(1)
+		nextUtxos, summary, err := applyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesQ(
+			tx, txid, utxos, 1, 12345, 0, [32]byte{}, nil, q,
+		)
+		if err != nil {
+			t.Fatalf("wrapper success: %v", err)
+		}
+		if err := q.Flush(); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		if summary.Fee != 10 {
+			t.Errorf("expected fee=10, got %d", summary.Fee)
+		}
+		if len(nextUtxos) != 1 {
+			t.Errorf("expected 1 UTXO, got %d", len(nextUtxos))
+		}
+	})
+
+	t.Run("error_propagated", func(t *testing.T) {
+		q := NewSigCheckQueue(1)
+		_, _, err := applyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesQ(
+			nil, [32]byte{}, nil, 0, 0, 0, [32]byte{}, nil, q,
+		)
+		if err == nil {
+			t.Fatal("expected error from nil tx")
+		}
+	})
+}
+
 // sortKeys32 sorts two 32-byte arrays lexicographically and returns them in order.
 func sortKeys32(a, b [32]byte) ([32]byte, [32]byte) {
 	if bytes.Compare(a[:], b[:]) > 0 {
