@@ -14,7 +14,8 @@ Policy:
 Причина:
 - закрыть validated external-audit test gap для уже существующего правила `CORE_HTLC`:
   `ClaimKeyID == RefundKeyID` должно отклоняться как `TX_ERR_PARSE`;
-- зафиксировать этот reject отдельным executable CV, чтобы future refactor не снял проверку незаметно.
+- зафиксировать этот reject отдельным executable CV на otherwise-valid refund spend,
+  чтобы future refactor не снял проверку незаметно и не маскировал её другим parse-failure path.
 
 Инструменты:
 - ручное обновление `CV-HTLC.json`,
