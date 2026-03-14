@@ -408,3 +408,512 @@ func TestValidateCoreStealthSpendQ_BadCovenantData(t *testing.T) {
 		t.Fatal("expected covenant parse error")
 	}
 }
+
+func TestValidateCoreStealthSpendQ_NonCanonicalLengths(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	keyID := sha3_256(kp.PubkeyBytes())
+
+	entry := UtxoEntry{
+		Value:        100,
+		CovenantType: COV_TYPE_CORE_STEALTH,
+		CovenantData: makeStealthCovenantData(keyID),
+	}
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+
+	w := WitnessItem{
+		SuiteID:   SUITE_ID_ML_DSA_87,
+		Pubkey:    make([]byte, 10), // wrong length
+		Signature: make([]byte, ML_DSA_87_SIG_BYTES+1),
+	}
+
+	q := NewSigCheckQueue(1)
+	err := validateCoreStealthSpendQ(entry, w, tx, inputIndex, inputValue, chainID, 0, cache, q)
+	if err == nil {
+		t.Fatal("expected non-canonical error")
+	}
+	if !isTxErrCode(err, TX_ERR_SIG_NONCANONICAL) {
+		t.Fatalf("expected TX_ERR_SIG_NONCANONICAL, got: %v", err)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// validateP2PKSpendQ error-path tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestValidateP2PKSpendQ_SuiteInvalid(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	entry := UtxoEntry{
+		Value:        100,
+		CovenantType: COV_TYPE_P2PK,
+		CovenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes()),
+	}
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+
+	w := WitnessItem{
+		SuiteID:   0xFF, // not ML-DSA-87
+		Pubkey:    kp.PubkeyBytes(),
+		Signature: make([]byte, ML_DSA_87_SIG_BYTES+1),
+	}
+
+	q := NewSigCheckQueue(1)
+	err := validateP2PKSpendQ(entry, w, tx, inputIndex, inputValue, chainID, 0, cache, q)
+	if err == nil {
+		t.Fatal("expected suite invalid error")
+	}
+	if !isTxErrCode(err, TX_ERR_SIG_ALG_INVALID) {
+		t.Fatalf("expected TX_ERR_SIG_ALG_INVALID, got: %v", err)
+	}
+}
+
+func TestValidateP2PKSpendQ_NonCanonicalLengths(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	entry := UtxoEntry{
+		Value:        100,
+		CovenantType: COV_TYPE_P2PK,
+		CovenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes()),
+	}
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+
+	w := WitnessItem{
+		SuiteID:   SUITE_ID_ML_DSA_87,
+		Pubkey:    make([]byte, 10), // wrong length
+		Signature: make([]byte, ML_DSA_87_SIG_BYTES+1),
+	}
+
+	q := NewSigCheckQueue(1)
+	err := validateP2PKSpendQ(entry, w, tx, inputIndex, inputValue, chainID, 0, cache, q)
+	if err == nil {
+		t.Fatal("expected non-canonical error")
+	}
+	if !isTxErrCode(err, TX_ERR_SIG_NONCANONICAL) {
+		t.Fatalf("expected TX_ERR_SIG_NONCANONICAL, got: %v", err)
+	}
+}
+
+func TestValidateP2PKSpendQ_CovenantDataInvalid(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	// Use ML-DSA-87 suite but wrong covenant_data (e.g. 0xFF suite byte).
+	badCovData := make([]byte, MAX_P2PK_COVENANT_DATA)
+	badCovData[0] = 0xFF // mismatched suite_id
+	keyID := sha3_256(kp.PubkeyBytes())
+	copy(badCovData[1:33], keyID[:])
+
+	entry := UtxoEntry{
+		Value:        100,
+		CovenantType: COV_TYPE_P2PK,
+		CovenantData: badCovData,
+	}
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+
+	w := WitnessItem{
+		SuiteID:   SUITE_ID_ML_DSA_87,
+		Pubkey:    kp.PubkeyBytes(),
+		Signature: make([]byte, ML_DSA_87_SIG_BYTES+1),
+	}
+
+	q := NewSigCheckQueue(1)
+	err := validateP2PKSpendQ(entry, w, tx, inputIndex, inputValue, chainID, 0, cache, q)
+	if err == nil {
+		t.Fatal("expected covenant_data invalid error")
+	}
+	if !isTxErrCode(err, TX_ERR_COVENANT_TYPE_INVALID) {
+		t.Fatalf("expected TX_ERR_COVENANT_TYPE_INVALID, got: %v", err)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// validateHTLCSpendQ additional error-path tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// htlcRefundKeyID returns a distinct refund key_id for HTLC tests that only need
+// a valid entry (claim/refund must differ per ParseHTLCCovenantData).
+func htlcRefundKeyID() [32]byte {
+	var k [32]byte
+	k[0] = 0xFE
+	k[1] = 0xDC
+	return k
+}
+
+func TestValidateHTLCSpendQ_SelectorSuiteInvalid(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	claimKeyID := sha3_256(kp.PubkeyBytes())
+
+	entry := makeHTLCEntry(sha3_256([]byte("test-preimage-1234")), LOCK_MODE_HEIGHT, 1, claimKeyID, htlcRefundKeyID())
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+
+	path := WitnessItem{
+		SuiteID:   SUITE_ID_ML_DSA_87, // wrong — should be SENTINEL
+		Pubkey:    claimKeyID[:],
+		Signature: encodeHTLCClaimPayload([]byte("test-preimage-1234")),
+	}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
+
+	q := NewSigCheckQueue(1)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	if err == nil {
+		t.Fatal("expected selector suite error")
+	}
+}
+
+func TestValidateHTLCSpendQ_SelectorKeyIDLengthInvalid(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	claimKeyID := sha3_256(kp.PubkeyBytes())
+
+	entry := makeHTLCEntry(sha3_256([]byte("test-preimage-1234")), LOCK_MODE_HEIGHT, 1, claimKeyID, htlcRefundKeyID())
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+
+	path := WitnessItem{
+		SuiteID:   SUITE_ID_SENTINEL,
+		Pubkey:    []byte{0x01, 0x02}, // wrong — must be 32 bytes
+		Signature: encodeHTLCClaimPayload([]byte("test-preimage-1234")),
+	}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
+
+	q := NewSigCheckQueue(1)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	if err == nil {
+		t.Fatal("expected key_id length error")
+	}
+}
+
+func TestValidateHTLCSpendQ_ClaimKeyIDMismatch(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	refundKP := mustMLDSA87Keypair(t)
+	claimKeyID := sha3_256(kp.PubkeyBytes())
+	refundKeyID := sha3_256(refundKP.PubkeyBytes())
+	var wrongKeyID [32]byte
+	wrongKeyID[0] = 0xFF
+
+	entry := makeHTLCEntry(sha3_256([]byte("test-preimage-1234")), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+
+	path := WitnessItem{
+		SuiteID:   SUITE_ID_SENTINEL,
+		Pubkey:    wrongKeyID[:], // doesn't match claim_key_id
+		Signature: encodeHTLCClaimPayload([]byte("test-preimage-1234")),
+	}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
+
+	q := NewSigCheckQueue(1)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	if err == nil {
+		t.Fatal("expected claim key_id mismatch error")
+	}
+	if !isTxErrCode(err, TX_ERR_SIG_INVALID) {
+		t.Fatalf("expected TX_ERR_SIG_INVALID, got: %v", err)
+	}
+}
+
+func TestValidateHTLCSpendQ_UnknownPath(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	claimKeyID := sha3_256(kp.PubkeyBytes())
+
+	entry := makeHTLCEntry(sha3_256([]byte("test-preimage-1234")), LOCK_MODE_HEIGHT, 1, claimKeyID, htlcRefundKeyID())
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+
+	path := WitnessItem{
+		SuiteID:   SUITE_ID_SENTINEL,
+		Pubkey:    claimKeyID[:],
+		Signature: []byte{0x42}, // unknown path ID
+	}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
+
+	q := NewSigCheckQueue(1)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	if err == nil {
+		t.Fatal("expected unknown path error")
+	}
+}
+
+func TestValidateHTLCSpendQ_RefundKeyIDMismatch(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	claimKeyID := sha3_256(kp.PubkeyBytes())
+	var refundKeyID, wrongRefundKey [32]byte
+	refundKeyID[0] = 0xAA
+	wrongRefundKey[0] = 0xBB
+
+	entry := makeHTLCEntry(sha3_256([]byte("test-preimage-1234")), LOCK_MODE_HEIGHT, 10, claimKeyID, refundKeyID)
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+
+	path := WitnessItem{
+		SuiteID:   SUITE_ID_SENTINEL,
+		Pubkey:    wrongRefundKey[:], // doesn't match refund_key_id
+		Signature: []byte{0x01},     // refund path
+	}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
+
+	q := NewSigCheckQueue(1)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 10, 0, cache, q)
+	if err == nil {
+		t.Fatal("expected refund key_id mismatch error")
+	}
+	if !isTxErrCode(err, TX_ERR_SIG_INVALID) {
+		t.Fatalf("expected TX_ERR_SIG_INVALID, got: %v", err)
+	}
+}
+
+func TestValidateHTLCSpendQ_TimestampLockNotMet(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	refundKP := mustMLDSA87Keypair(t)
+	claimKeyID := sha3_256(kp.PubkeyBytes())
+	refundKeyID := sha3_256(refundKP.PubkeyBytes())
+
+	entry := makeHTLCEntry(sha3_256([]byte("test-preimage-1234")), LOCK_MODE_TIMESTAMP, 100, claimKeyID, refundKeyID)
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+
+	path := WitnessItem{
+		SuiteID:   SUITE_ID_SENTINEL,
+		Pubkey:    refundKeyID[:],
+		Signature: []byte{0x01}, // refund path
+	}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: refundKP.PubkeyBytes(), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
+
+	q := NewSigCheckQueue(1)
+	// blockHeight=200 (enough for height), blockMTP=50 (< lock_value=100)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 200, 50, cache, q)
+	if err == nil {
+		t.Fatal("expected timestamp lock not met error")
+	}
+	if !isTxErrCode(err, TX_ERR_TIMELOCK_NOT_MET) {
+		t.Fatalf("expected TX_ERR_TIMELOCK_NOT_MET, got: %v", err)
+	}
+}
+
+func TestValidateHTLCSpendQ_SigSuiteInvalid(t *testing.T) {
+	claimKP := mustMLDSA87Keypair(t)
+	refundKP := mustMLDSA87Keypair(t)
+	claimKeyID := sha3_256(claimKP.PubkeyBytes())
+	refundKeyID := sha3_256(refundKP.PubkeyBytes())
+
+	preimage := []byte("test-preimage-sig-s")
+	entry := makeHTLCEntry(sha3_256(preimage), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+
+	path := WitnessItem{
+		SuiteID:   SUITE_ID_SENTINEL,
+		Pubkey:    claimKeyID[:],
+		Signature: encodeHTLCClaimPayload(preimage),
+	}
+	sig := WitnessItem{
+		SuiteID:   0xFF, // invalid suite
+		Pubkey:    claimKP.PubkeyBytes(),
+		Signature: make([]byte, ML_DSA_87_SIG_BYTES+1),
+	}
+
+	q := NewSigCheckQueue(1)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	if err == nil {
+		t.Fatal("expected sig suite invalid error")
+	}
+	if !isTxErrCode(err, TX_ERR_SIG_ALG_INVALID) {
+		t.Fatalf("expected TX_ERR_SIG_ALG_INVALID, got: %v", err)
+	}
+}
+
+func TestValidateHTLCSpendQ_SigKeyBindingMismatch(t *testing.T) {
+	claimKP := mustMLDSA87Keypair(t)
+	wrongKP := mustMLDSA87Keypair(t)
+	refundKP := mustMLDSA87Keypair(t)
+	claimKeyID := sha3_256(claimKP.PubkeyBytes())
+	refundKeyID := sha3_256(refundKP.PubkeyBytes())
+
+	preimage := []byte("test-preimage-bind1")
+	entry := makeHTLCEntry(sha3_256(preimage), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+
+	path := WitnessItem{
+		SuiteID:   SUITE_ID_SENTINEL,
+		Pubkey:    claimKeyID[:],
+		Signature: encodeHTLCClaimPayload(preimage),
+	}
+	sig := WitnessItem{
+		SuiteID:   SUITE_ID_ML_DSA_87,
+		Pubkey:    wrongKP.PubkeyBytes(), // sha3_256(wrongKP) != claimKeyID
+		Signature: make([]byte, ML_DSA_87_SIG_BYTES+1),
+	}
+
+	q := NewSigCheckQueue(1)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	if err == nil {
+		t.Fatal("expected key binding mismatch error")
+	}
+	if !isTxErrCode(err, TX_ERR_SIG_INVALID) {
+		t.Fatalf("expected TX_ERR_SIG_INVALID, got: %v", err)
+	}
+}
+
+func TestValidateHTLCSpendQ_SigNonCanonicalLengths(t *testing.T) {
+	claimKP := mustMLDSA87Keypair(t)
+	refundKP := mustMLDSA87Keypair(t)
+	claimKeyID := sha3_256(claimKP.PubkeyBytes())
+	refundKeyID := sha3_256(refundKP.PubkeyBytes())
+
+	preimage := []byte("test-preimage-noncl")
+	entry := makeHTLCEntry(sha3_256(preimage), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+
+	path := WitnessItem{
+		SuiteID:   SUITE_ID_SENTINEL,
+		Pubkey:    claimKeyID[:],
+		Signature: encodeHTLCClaimPayload(preimage),
+	}
+	sig := WitnessItem{
+		SuiteID:   SUITE_ID_ML_DSA_87,
+		Pubkey:    make([]byte, 10), // wrong length
+		Signature: make([]byte, ML_DSA_87_SIG_BYTES+1),
+	}
+
+	q := NewSigCheckQueue(1)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	if err == nil {
+		t.Fatal("expected non-canonical lengths error")
+	}
+	if !isTxErrCode(err, TX_ERR_SIG_NONCANONICAL) {
+		t.Fatalf("expected TX_ERR_SIG_NONCANONICAL, got: %v", err)
+	}
+}
+
+func TestValidateHTLCSpendQ_ClaimPayloadTooShort(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	claimKeyID := sha3_256(kp.PubkeyBytes())
+
+	entry := makeHTLCEntry(sha3_256([]byte("test-preimage-1234")), LOCK_MODE_HEIGHT, 1, claimKeyID, htlcRefundKeyID())
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+
+	path := WitnessItem{
+		SuiteID:   SUITE_ID_SENTINEL,
+		Pubkey:    claimKeyID[:],
+		Signature: []byte{0x00, 0x10}, // claim path, but payload too short (missing preimage_len)
+	}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
+
+	q := NewSigCheckQueue(1)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	if err == nil {
+		t.Fatal("expected payload too short error")
+	}
+}
+
+func TestValidateHTLCSpendQ_SelectorPayloadEmpty(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	claimKeyID := sha3_256(kp.PubkeyBytes())
+
+	entry := makeHTLCEntry(sha3_256([]byte("test-preimage-1234")), LOCK_MODE_HEIGHT, 1, claimKeyID, htlcRefundKeyID())
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+
+	path := WitnessItem{
+		SuiteID:   SUITE_ID_SENTINEL,
+		Pubkey:    claimKeyID[:],
+		Signature: nil, // empty payload
+	}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
+
+	q := NewSigCheckQueue(1)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	if err == nil {
+		t.Fatal("expected payload too short error")
+	}
+}
+
+func TestValidateHTLCSpendQ_RefundPayloadLengthMismatch(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	refundKP := mustMLDSA87Keypair(t)
+	claimKeyID := sha3_256(kp.PubkeyBytes())
+	refundKeyID := sha3_256(refundKP.PubkeyBytes())
+
+	entry := makeHTLCEntry(sha3_256([]byte("test-preimage-1234")), LOCK_MODE_HEIGHT, 10, claimKeyID, refundKeyID)
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+
+	path := WitnessItem{
+		SuiteID:   SUITE_ID_SENTINEL,
+		Pubkey:    refundKeyID[:],
+		Signature: []byte{0x01, 0xFF}, // refund path but extra byte
+	}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: refundKP.PubkeyBytes(), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
+
+	q := NewSigCheckQueue(1)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 10, 0, cache, q)
+	if err == nil {
+		t.Fatal("expected refund payload length error")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// validateThresholdSigSpendQ additional error-path tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestValidateThresholdSigSpendQ_SentinelWithData(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	keyID := sha3_256(kp.PubkeyBytes())
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+
+	keys := [][32]byte{keyID}
+	ws := []WitnessItem{
+		{SuiteID: SUITE_ID_SENTINEL, Pubkey: []byte{0x01}, Signature: nil}, // non-empty pubkey
+	}
+
+	q := NewSigCheckQueue(1)
+	err := validateThresholdSigSpendQ(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST")
+	if err == nil {
+		t.Fatal("expected SENTINEL with data error")
+	}
+	if !isTxErrCode(err, TX_ERR_PARSE) {
+		t.Fatalf("expected TX_ERR_PARSE, got: %v", err)
+	}
+}
+
+func TestValidateThresholdSigSpendQ_NonCanonicalLengths(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	keyID := sha3_256(kp.PubkeyBytes())
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+
+	keys := [][32]byte{keyID}
+	ws := []WitnessItem{
+		{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, 10), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}, // wrong pubkey length
+	}
+
+	q := NewSigCheckQueue(1)
+	err := validateThresholdSigSpendQ(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST")
+	if err == nil {
+		t.Fatal("expected non-canonical lengths error")
+	}
+	if !isTxErrCode(err, TX_ERR_SIG_NONCANONICAL) {
+		t.Fatalf("expected TX_ERR_SIG_NONCANONICAL, got: %v", err)
+	}
+}
