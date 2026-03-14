@@ -440,6 +440,55 @@ func TestVerifySignaturesBatch_SingleBadSuiteError(t *testing.T) {
 	}
 }
 
+func TestSigCheckQueue_Multi_BadSuiteError(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	// 1 worker: deterministic sequential processing inside goroutine.
+	// Task 0 triggers verifySig error (bad suite) → anyFailed=true.
+	// Task 1 hits anyFailed.Load() → continue (drain path).
+	q := NewSigCheckQueue(1)
+
+	q.Push(0xFE, []byte("fake-pubkey"), []byte("fake-sig"), [32]byte{},
+		txerr(TX_ERR_SIG_INVALID, "bad-suite"))
+
+	var d [32]byte
+	d[0] = 0x42
+	sig, err := kp.SignDigest32(d)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	q.Push(SUITE_ID_ML_DSA_87, kp.PubkeyBytes(), sig, d,
+		txerr(TX_ERR_SIG_INVALID, "valid-sig"))
+
+	err = q.Flush()
+	if err == nil {
+		t.Fatalf("expected error from bad suite ID in multi-task Flush, got nil")
+	}
+}
+
+func TestVerifySignaturesBatch_Multi_BadSuiteError(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	var d [32]byte
+	d[0] = 0xCC
+	sig, err := kp.SignDigest32(d)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	// Task 0 has bad suite → verifySig returns err (not ok=false).
+	// Exercises the multi-goroutine err!=nil branch (line 233-235).
+	tasks := []SigVerifyRequest{
+		{SuiteID: 0xFE, Pubkey: []byte("fake"), Sig: []byte("fake"), Digest: [32]byte{}},
+		{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: kp.PubkeyBytes(), Sig: sig, Digest: d},
+	}
+	results := VerifySignaturesBatch(tasks, 1)
+	if results[0] == nil {
+		t.Fatalf("expected error for bad suite ID in multi-task batch")
+	}
+	// Task 1 should be valid.
+	if results[1] != nil {
+		t.Fatalf("expected valid sig for task 1, got: %v", results[1])
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Parallel stress test
 // ─────────────────────────────────────────────────────────────────────────────
