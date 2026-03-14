@@ -108,6 +108,10 @@ jobs:
 
       - name: Enforce local coverage gates
         if: github.event_name == 'pull_request'
+        env:
+          HEAD_GO_COVERAGE: ${{ github.workspace }}/clients/go/coverage.out
+          HEAD_RUST_LCOV: ${{ github.workspace }}/clients/rust/lcov.info
+          HEAD_COVERAGE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           chmod +x scripts/preflight-codacy-coverage.sh
           ./scripts/preflight-codacy-coverage.sh "origin/${{ github.base_ref }}"
