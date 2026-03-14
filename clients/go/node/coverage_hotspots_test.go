@@ -101,11 +101,11 @@ func TestCoverage_MempoolHelpers(t *testing.T) {
 		existingTxID = txid
 		break
 	}
-	if err := mp.validateAdmissionLocked(existingTxID, nil); err == nil {
+	if err := mp.validateAdmissionLocked(&mempoolEntry{txid: existingTxID, size: 1}); err == nil {
 		t.Fatalf("expected duplicate tx rejection")
 	}
 	mp.maxTxs = len(mp.txs)
-	if err := mp.validateAdmissionLocked([32]byte{0xaa}, nil); err == nil {
+	if err := mp.validateAdmissionLocked(&mempoolEntry{txid: [32]byte{0xaa}, fee: 0, weight: 1, size: 1}); err == nil {
 		t.Fatalf("expected mempool full")
 	}
 	if got := pickEntries(mp.snapshotEntries(), 1, 1<<20); len(got) != 1 {

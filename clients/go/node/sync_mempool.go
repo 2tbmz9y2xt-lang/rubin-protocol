@@ -35,6 +35,9 @@ func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
 	defer m.mu.Unlock()
 	m.txs = make(map[[32]byte]*mempoolEntry, len(snapshot.entries))
 	m.spenders = make(map[consensus.Outpoint][32]byte)
+	m.worstHeap = make(mempoolWorstHeap, 0, len(snapshot.entries))
+	m.heapItems = make(map[[32]byte]*mempoolHeapItem, len(snapshot.entries))
+	m.heapSeqs = make(map[[32]byte]uint64, len(snapshot.entries))
 	for _, item := range snapshot.entries {
 		entry := cloneMempoolEntry(&item)
 		m.txs[entry.txid] = &entry
