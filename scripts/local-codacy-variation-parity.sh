@@ -36,6 +36,13 @@ detect_repo() {
   gh repo view --json nameWithOwner --jq '.nameWithOwner'
 }
 
+github_pr_head_sha() {
+  local repo pr_number
+  repo="$1"
+  pr_number="$2"
+  gh pr view "$pr_number" --repo "$repo" --json headRefOid --jq '.headRefOid'
+}
+
 detect_pr_number() {
   if [[ -n "${CODACY_PR_NUMBER:-}" ]]; then
     printf '%s\n' "$CODACY_PR_NUMBER"
@@ -63,6 +70,23 @@ PY
 }
 
 codacy_common_ancestor_for_pr() {
+  local status_json
+  status_json="$(codacy_pr_coverage_status_json "$1" "$2")"
+  python3 - "$status_json" <<'PY'
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+ancestor = data["data"]["commonAncestorCommit"]
+sha = ancestor.get("commitSha")
+processed_reports = [r for r in ancestor.get("reports", []) if r.get("status") == "Processed"]
+if not sha or not processed_reports:
+    raise SystemExit(1)
+print(sha)
+PY
+}
+
+codacy_pr_coverage_status_json() {
   local repo pr_number
   repo="$1"
   pr_number="$2"
@@ -80,13 +104,7 @@ url = (
 )
 with urllib.request.urlopen(url, timeout=20) as response:
     data = json.load(response)
-
-ancestor = data["data"]["commonAncestorCommit"]
-sha = ancestor.get("commitSha")
-processed_reports = [r for r in ancestor.get("reports", []) if r.get("status") == "Processed"]
-if not sha or not processed_reports:
-    raise SystemExit(1)
-print(sha)
+print(json.dumps(data))
 PY
 }
 
@@ -142,15 +160,74 @@ merge_base="$(git -C "$repo_root" merge-base HEAD "$base_ref")"
 current_head="$(git -C "$repo_root" rev-parse HEAD)"
 target_baseline_sha="$merge_base"
 pr_number="$(detect_pr_number || true)"
+codacy_status_json=""
 
 if [[ -n "$pr_number" ]]; then
-  codacy_ancestor="$(codacy_common_ancestor_for_pr "$repo" "$pr_number" || true)"
+  codacy_status_json="$(codacy_pr_coverage_status_json "$repo" "$pr_number" || true)"
+  codacy_ancestor="$(python3 - "$codacy_status_json" <<'PY'
+import json, sys
+if not sys.argv[1]:
+    raise SystemExit(1)
+data = json.loads(sys.argv[1])
+ancestor = data["data"]["commonAncestorCommit"]
+sha = ancestor.get("commitSha")
+processed_reports = [r for r in ancestor.get("reports", []) if r.get("status") == "Processed"]
+if not sha or not processed_reports:
+    raise SystemExit(1)
+print(sha)
+PY
+  )"
   if [[ -n "$codacy_ancestor" ]]; then
     target_baseline_sha="$codacy_ancestor"
     echo "Codacy PR #$pr_number common ancestor baseline: $target_baseline_sha" >&2
   else
     echo "Codacy PR #$pr_number baseline unavailable; falling back to local merge-base $merge_base" >&2
   fi
+fi
+
+if [[ "${GITHUB_ACTIONS:-}" != "true" ]]; then
+  echo "Codacy variation parity"
+  echo "  mode:           local metadata parity"
+  echo "  local merge-base: $merge_base"
+  if [[ -z "$pr_number" ]]; then
+    echo "  open PR:        none"
+    echo "PASS: no open PR; external Codacy parity will be checked in CI once a PR exists"
+    exit 0
+  fi
+
+  remote_pr_head="$(github_pr_head_sha "$repo" "$pr_number" || true)"
+  python3 - "$codacy_status_json" "$merge_base" "$remote_pr_head" <<'PY'
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+local_merge_base = sys.argv[2]
+remote_pr_head = sys.argv[3]
+ancestor = data["data"]["commonAncestorCommit"]
+head = data["data"]["headCommit"]
+ancestor_sha = ancestor.get("commitSha")
+head_sha = head.get("commitSha")
+ancestor_reports = ancestor.get("reports", [])
+head_reports = head.get("reports", [])
+
+print(f"  codacy ancestor: {ancestor_sha or 'missing'}")
+print(f"  github PR head:  {remote_pr_head or 'missing'}")
+print(f"  codacy PR head:  {head_sha or 'missing'}")
+print(f"  ancestor reports processed: {sum(1 for r in ancestor_reports if r.get('status') == 'Processed')}")
+print(f"  head reports processed:     {sum(1 for r in head_reports if r.get('status') == 'Processed')}")
+
+if not ancestor_sha:
+    print("FAIL: Codacy did not return a common ancestor baseline", file=sys.stderr)
+    raise SystemExit(1)
+if ancestor_sha != local_merge_base:
+    print(
+        f"FAIL: local merge-base {local_merge_base} differs from Codacy common ancestor {ancestor_sha}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+print("PASS: Codacy baseline matches local merge-base")
+PY
+  exit 0
 fi
 
 if [[ -n "$head_coverage_sha" && "$head_coverage_sha" == "$current_head" && -s "$head_go" && -s "$head_rust" ]]; then
