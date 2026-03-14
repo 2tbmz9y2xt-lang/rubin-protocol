@@ -95,11 +95,11 @@ func (m *Mempool) AddTx(txBytes []byte) error {
 		return err
 	}
 
-	if err := m.validateAdmissionLocked(checked.TxID, inputs); err != nil {
+	entry := newMempoolEntry(checked, inputs)
+	if err := m.validateAdmissionLocked(entry); err != nil {
 		return err
 	}
 
-	entry := newMempoolEntry(checked, inputs)
 	m.addEntryLocked(entry)
 	return nil
 }
@@ -139,7 +139,16 @@ func (m *Mempool) EvictConfirmed(blockBytes []byte) error {
 	if err != nil {
 		return err
 	}
+	return m.EvictConfirmedParsed(block)
+}
 
+func (m *Mempool) EvictConfirmedParsed(block *consensus.ParsedBlock) error {
+	if m == nil {
+		return errors.New("nil mempool")
+	}
+	if block == nil {
+		return errors.New("nil parsed block")
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, txid := range block.Txids {
@@ -156,7 +165,16 @@ func (m *Mempool) RemoveConflicting(blockBytes []byte) error {
 	if err != nil {
 		return err
 	}
+	return m.RemoveConflictingParsed(block)
+}
 
+func (m *Mempool) RemoveConflictingParsed(block *consensus.ParsedBlock) error {
+	if m == nil {
+		return errors.New("nil mempool")
+	}
+	if block == nil {
+		return errors.New("nil parsed block")
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -249,17 +267,25 @@ func (m *Mempool) removeTxLocked(txid [32]byte) {
 	}
 }
 
-func (m *Mempool) validateAdmissionLocked(txid [32]byte, inputs []consensus.Outpoint) error {
+func (m *Mempool) validateAdmissionLocked(entry *mempoolEntry) error {
+	if entry == nil {
+		return errors.New("nil mempool entry")
+	}
+	txid := entry.txid
 	if _, exists := m.txs[txid]; exists {
 		return fmt.Errorf("tx already in mempool")
 	}
-	if len(m.txs) >= m.maxTxs {
-		return fmt.Errorf("mempool full")
-	}
-	for _, op := range inputs {
+	for _, op := range entry.inputs {
 		if existing, ok := m.spenders[op]; ok {
 			return fmt.Errorf("mempool double-spend conflict with %x", existing)
 		}
+	}
+	if len(m.txs) >= m.maxTxs {
+		worstTxid, worstEntry, ok := m.findWorstLocked()
+		if !ok || compareEntryPriority(entry, worstEntry) <= 0 {
+			return fmt.Errorf("mempool full")
+		}
+		m.removeTxLocked(worstTxid)
 	}
 	return nil
 }
@@ -340,6 +366,49 @@ func (m *Mempool) collectConflictsLocked(block *consensus.ParsedBlock) map[[32]b
 
 func outpointFromInput(in consensus.TxInput) consensus.Outpoint {
 	return consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
+}
+
+func (m *Mempool) findWorstLocked() ([32]byte, *mempoolEntry, bool) {
+	var worstTxid [32]byte
+	var worstEntry *mempoolEntry
+	first := true
+	for txid, entry := range m.txs {
+		if first || compareEntryPriority(entry, worstEntry) < 0 {
+			worstTxid = txid
+			worstEntry = entry
+			first = false
+		}
+	}
+	return worstTxid, worstEntry, !first
+}
+
+func compareEntryPriority(a *mempoolEntry, b *mempoolEntry) int {
+	if cmp := compareFeeRate(a, b); cmp != 0 {
+		return cmp
+	}
+	if a == nil || b == nil {
+		return 0
+	}
+	if a.fee != b.fee {
+		if a.fee > b.fee {
+			return 1
+		}
+		return -1
+	}
+	if a.weight != b.weight {
+		if a.weight < b.weight {
+			return 1
+		}
+		return -1
+	}
+	switch cmp := bytes.Compare(a.txid[:], b.txid[:]); {
+	case cmp < 0:
+		return 1
+	case cmp > 0:
+		return -1
+	default:
+		return 0
+	}
 }
 
 func compareFeeRate(a *mempoolEntry, b *mempoolEntry) int {

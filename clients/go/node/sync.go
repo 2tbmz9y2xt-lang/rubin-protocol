@@ -325,10 +325,10 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 
 	s.recordAppliedBlock(summary.BlockHeight, pb.Header.Timestamp)
 	if s.mempool != nil {
-		if err := s.mempool.EvictConfirmed(blockBytes); err != nil {
+		if err := s.mempool.EvictConfirmedParsed(pb); err != nil {
 			_, _ = fmt.Fprintf(s.stderr, "mempool: evict-confirmed: %v\n", err)
 		}
-		if err := s.mempool.RemoveConflicting(blockBytes); err != nil {
+		if err := s.mempool.RemoveConflictingParsed(pb); err != nil {
 			_, _ = fmt.Fprintf(s.stderr, "mempool: remove-conflicting: %v\n", err)
 		}
 	}

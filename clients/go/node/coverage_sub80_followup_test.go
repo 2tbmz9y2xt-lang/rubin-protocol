@@ -23,6 +23,12 @@ func TestCoverageResidual_MempoolBranches(t *testing.T) {
 	if err := (*Mempool)(nil).RemoveConflicting([]byte{0x00}); err == nil {
 		t.Fatalf("expected nil mempool conflict rejection")
 	}
+	if err := (*Mempool)(nil).EvictConfirmedParsed(&consensus.ParsedBlock{}); err == nil {
+		t.Fatalf("expected nil mempool parsed eviction rejection")
+	}
+	if err := (*Mempool)(nil).RemoveConflictingParsed(&consensus.ParsedBlock{}); err == nil {
+		t.Fatalf("expected nil mempool parsed conflict rejection")
+	}
 	if got := compareFeeRate(nil, &mempoolEntry{fee: 1, size: 1}); got != 0 {
 		t.Fatalf("compareFeeRate(nil)= %d", got)
 	}
@@ -37,6 +43,9 @@ func TestCoverageResidual_MempoolBranches(t *testing.T) {
 	if entries[0].txid[0] != 0x01 {
 		t.Fatalf("expected deterministic txid tie-break")
 	}
+	if got := compareEntryPriority(nil, &mempoolEntry{txid: [32]byte{0x01}, fee: 1, size: 1}); got != 0 {
+		t.Fatalf("compareEntryPriority(nil)= %d", got)
+	}
 
 	st := NewChainState()
 	mp, err := NewMempool(st, nil, devnetGenesisChainID)
@@ -45,6 +54,65 @@ func TestCoverageResidual_MempoolBranches(t *testing.T) {
 	}
 	if mtp, err := mp.nextBlockMTP(0); err != nil || mtp != 0 {
 		t.Fatalf("nextBlockMTP(0)=%d,%v", mtp, err)
+	}
+	if err := mp.EvictConfirmedParsed(nil); err == nil {
+		t.Fatalf("expected nil parsed block eviction rejection")
+	}
+	if err := mp.RemoveConflictingParsed(nil); err == nil {
+		t.Fatalf("expected nil parsed block conflict rejection")
+	}
+	if err := mp.validateAdmissionLocked(nil); err == nil {
+		t.Fatalf("expected nil mempool entry rejection")
+	}
+}
+
+func TestCoverageResidual_RemoveConflictingParsesBlockBytes(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	txPool := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+	txBlock := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 89, 2, 2, fromKey, fromAddress, toAddress)
+	if err := mp.AddTx(txPool); err != nil {
+		t.Fatalf("AddTx(txPool): %v", err)
+	}
+
+	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, consensus.BlockSubsidy(1, 0))
+	block := buildMultiTxBlock(t, [32]byte{}, consensus.POW_LIMIT, 1, coinbase, txBlock)
+	if err := mp.RemoveConflicting(block); err != nil {
+		t.Fatalf("RemoveConflicting: %v", err)
+	}
+	if got := mp.Len(); got != 0 {
+		t.Fatalf("mempool len=%d, want 0", got)
+	}
+}
+
+func TestCoverageResidual_CompareEntryPriorityTieBreakers(t *testing.T) {
+	if got := compareEntryPriority(
+		&mempoolEntry{txid: [32]byte{0x01}, fee: 10, size: 2},
+		&mempoolEntry{txid: [32]byte{0x02}, fee: 5, size: 1},
+	); got <= 0 {
+		t.Fatalf("expected higher absolute fee to win when fee rates tie, got %d", got)
+	}
+
+	if got := compareEntryPriority(
+		&mempoolEntry{txid: [32]byte{0x01}, fee: 10, weight: 4, size: 2},
+		&mempoolEntry{txid: [32]byte{0x02}, fee: 10, weight: 5, size: 2},
+	); got <= 0 {
+		t.Fatalf("expected lower weight to win when fee and fee rate tie, got %d", got)
+	}
+
+	if got := compareEntryPriority(
+		&mempoolEntry{txid: [32]byte{0x01}, fee: 10, weight: 4, size: 2},
+		&mempoolEntry{txid: [32]byte{0x02}, fee: 10, weight: 4, size: 2},
+	); got <= 0 {
+		t.Fatalf("expected lower txid to win deterministic tie-break, got %d", got)
 	}
 }
 
