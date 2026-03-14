@@ -64,7 +64,16 @@ func ApplyNonCoinbaseTxBasicUpdateWithMTP(
 	blockMTP uint64,
 	chainID [32]byte,
 ) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
-	return applyNonCoinbaseTxBasicUpdateCloneWithProfiles(tx, txid, utxoSet, height, blockTimestamp, blockMTP, chainID, nil)
+	return ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
+		tx,
+		txid,
+		utxoSet,
+		height,
+		blockTimestamp,
+		blockMTP,
+		chainID,
+		nil,
+	)
 }
 
 // ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles is a helper for deterministic tooling
@@ -73,19 +82,6 @@ func ApplyNonCoinbaseTxBasicUpdateWithMTP(
 // Consensus validity depends on the resolved profile(ext_id, height). Nodes MUST ensure they use
 // the canonical chain-config source for this mapping.
 func ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
-	tx *Tx,
-	txid [32]byte,
-	utxoSet map[Outpoint]UtxoEntry,
-	height uint64,
-	blockTimestamp uint64,
-	blockMTP uint64,
-	chainID [32]byte,
-	coreExtProfiles CoreExtProfileProvider,
-) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
-	return applyNonCoinbaseTxBasicUpdateCloneWithProfiles(tx, txid, utxoSet, height, blockTimestamp, blockMTP, chainID, coreExtProfiles)
-}
-
-func applyNonCoinbaseTxBasicUpdateCloneWithProfiles(
 	tx *Tx,
 	txid [32]byte,
 	utxoSet map[Outpoint]UtxoEntry,
