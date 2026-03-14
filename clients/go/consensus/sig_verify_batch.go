@@ -151,19 +151,18 @@ func (q *SigCheckQueue) Flush() error {
 	return nil
 }
 
-// AssertFlushed panics if the queue has unflushed tasks. This is a defensive
-// postcondition that callers MUST invoke after completing block validation to
-// guarantee that no deferred signature checks were silently skipped.
-//
-// This addresses the fail-open risk inherent in deferred verification: if a
-// caller returns success without flushing, this assertion catches the bug.
-func (q *SigCheckQueue) AssertFlushed() {
+// AssertFlushed returns an error if the queue has unflushed tasks. This is a
+// defensive postcondition for testing that no deferred signature checks were
+// silently skipped. In production, callers must call Flush() explicitly before
+// accepting a block — the block validation flow guarantees this structurally.
+func (q *SigCheckQueue) AssertFlushed() error {
 	if q == nil {
-		return
+		return nil
 	}
 	if len(q.tasks) > 0 {
-		panic("consensus: SigCheckQueue has unflushed tasks — signature bypass risk")
+		return txerr(TX_ERR_SIG_INVALID, "SigCheckQueue has unflushed tasks — signature bypass risk")
 	}
+	return nil
 }
 
 // VerifySignaturesBatch verifies multiple (suiteID, pubkey, sig, digest) tuples

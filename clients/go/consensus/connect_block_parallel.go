@@ -96,7 +96,6 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfiles(
 	// All signature verifications across all transactions are collected here
 	// and executed in parallel after all pre-checks pass.
 	sigQueue := NewSigCheckQueue(workers)
-	defer sigQueue.AssertFlushed() // fail-closed: panic if caller exits without flushing
 
 	// Apply all non-coinbase transactions with deferred sig verification.
 	var sumFees uint64

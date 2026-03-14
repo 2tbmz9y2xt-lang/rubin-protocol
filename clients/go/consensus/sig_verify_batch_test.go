@@ -317,7 +317,7 @@ func TestSigCheckQueue_ZeroValueFlush_FailsClosed(t *testing.T) {
 	}
 }
 
-func TestSigCheckQueue_AssertFlushed_Panics(t *testing.T) {
+func TestSigCheckQueue_AssertFlushed_Unflushed(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 
 	q := NewSigCheckQueue(1)
@@ -325,18 +325,20 @@ func TestSigCheckQueue_AssertFlushed_Panics(t *testing.T) {
 	sig, _ := kp.SignDigest32(d)
 	q.Push(SUITE_ID_ML_DSA_87, kp.PubkeyBytes(), sig, d, txerr(TX_ERR_SIG_INVALID, "test"))
 
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatalf("expected panic from AssertFlushed on unflushed queue")
-		}
-	}()
-	q.AssertFlushed() // should panic
+	err := q.AssertFlushed()
+	if err == nil {
+		t.Fatalf("expected error from AssertFlushed on unflushed queue")
+	}
+	if !isTxErrCode(err, TX_ERR_SIG_INVALID) {
+		t.Fatalf("expected TX_ERR_SIG_INVALID, got: %v", err)
+	}
 }
 
 func TestSigCheckQueue_AssertFlushed_NilOK(t *testing.T) {
 	var q *SigCheckQueue
-	q.AssertFlushed() // nil queue — should not panic
+	if err := q.AssertFlushed(); err != nil {
+		t.Fatalf("nil queue AssertFlushed: %v", err)
+	}
 }
 
 func TestSigCheckQueue_AssertFlushed_AfterFlush(t *testing.T) {
@@ -349,7 +351,9 @@ func TestSigCheckQueue_AssertFlushed_AfterFlush(t *testing.T) {
 	if err := q.Flush(); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
-	q.AssertFlushed() // should NOT panic after successful flush
+	if err := q.AssertFlushed(); err != nil {
+		t.Fatalf("AssertFlushed after successful Flush: %v", err)
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
