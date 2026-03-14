@@ -183,6 +183,10 @@ func (q *SigCheckQueue) AssertFlushed() error {
 // in parallel using a goroutine pool. Returns an error slice aligned with the
 // input; nil entries indicate valid signatures.
 //
+// Contract: callers MUST NOT mutate task Pubkey/Sig slices until this function
+// returns. Unlike SigCheckQueue.Push, this function reads slices directly from
+// the caller-provided tasks for zero-copy efficiency.
+//
 // This is a lower-level utility. Prefer SigCheckQueue for integration with
 // the block validation pipeline.
 func VerifySignaturesBatch(

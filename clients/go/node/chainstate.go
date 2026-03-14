@@ -235,6 +235,9 @@ func (s *ChainState) ConnectBlockParallelSigs(
 	if s.Utxos == nil {
 		s.Utxos = make(map[consensus.Outpoint]consensus.UtxoEntry)
 	}
+	// Clone UTXO set for fail-atomicity (same pattern as ConnectBlockWithCoreExtProfiles
+	// at line 166). A future optimization may use a delta/undo journal, but correctness
+	// requires matching the sequential path's isolation semantics exactly.
 	workState := consensus.InMemoryChainState{
 		Utxos:            copyUtxoSet(s.Utxos),
 		AlreadyGenerated: new(big.Int).SetUint64(s.AlreadyGenerated),
