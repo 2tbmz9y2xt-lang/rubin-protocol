@@ -13,10 +13,10 @@ jobs:
   fips-only-smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Cache OpenSSL 3.5 bundle
-        uses: actions/cache@v5
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
         with:
           path: |
             ~/.cache/rubin-openssl/bundle-3.5.5
@@ -145,7 +145,7 @@ jobs:
 
       - name: Upload FIPS-only nightly artifacts
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fips-only-nightly
           path: artifacts/fips-nightly
