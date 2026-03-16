@@ -32,3 +32,29 @@ The currently implemented guardrail is **miner template filtering**:
 
 If `CORE_EXT` outputs are created pre-activation, they may be spent by anyone under consensus rules (no signature),
 which is indistinguishable from user error after the fact. Policy guardrails must block creation, not only spend.
+
+---
+
+## Cross-References (updated 2026-03-15)
+
+The normative CORE_EXT profile framework is defined in:
+
+- **rubin-spec-private:** `spec/RUBIN_CORE_EXT_EXTENSION_FRAMEWORK.md`
+  (approved per COUNCIL_CORE_EXT_FRAMEWORK_20260315)
+- **rubin-core-ext-lab:** `RUBIN_CORE_EXT_EXTENSION_FRAMEWORK.md`
+  (mirrored; lab design space)
+
+Relevant CANONICAL sections:
+- `RUBIN_L1_CANONICAL.md §23.2.2` — CORE_EXT Covenant-Type Activation Preconditions
+- `RUBIN_L1_CANONICAL.md §12.5` — `verify_sig_ext` Binding (Normative)
+- `RUBIN_L1_CANONICAL.md §14` — Covenant Type Registry (CORE_EXT wire format)
+
+**CORE_EXT scope boundary:** CORE_EXT is for business logic and institutional
+compliance profiles only. It MUST NOT be used as a native cryptographic suite
+replacement mechanism (COUNCIL_NATIVE_ROTATION_ARCH_20260315). Native suite
+lifecycle is governed by `RUBIN_NATIVE_CRYPTO_ROTATION_SPEC_v1.md`.
+
+**Implementation prerequisites before activating any profile:**
+1. Deployment descriptor wire format alignment with CANONICAL §23.2
+2. `EXT_BASE_COST` numeric value supported by devnet measurement
+3. `conformance/fixtures/CV-EXT.json` produced and passing on both Go and Rust clients
