@@ -36,7 +36,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
       - name: Upload diff artifact
         if: steps.diff.outputs.skip != 'true'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pr-diff
           path: pr-diff.txt
@@ -49,14 +49,14 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
       - name: Download diff artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: pr-diff
       - name: Install jsonrepair
         run: npm install jsonrepair
       - name: Run security review
         id: review
-        uses: actions/github-script@v8
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7
         with:
           script: |
             const fs = require('fs');
@@ -142,14 +142,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Upload raw review output
         if: always() && hashFiles('raw-review-output.txt') != ''
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: raw-review-output
           path: raw-review-output.txt
           retention-days: 3
       - name: Post review comment
         if: steps.review.outputs.review
-        uses: actions/github-script@v8
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7
         with:
           script: |
             const review = ${{ toJSON(steps.review.outputs.review) }};
@@ -162,7 +162,7 @@ jobs:
             });
       - name: Block on critical findings
         if: steps.review.outputs.review
-        uses: actions/github-script@v8
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7
         with:
           script: |
             const raw = ${{ toJSON(steps.review.outputs.review) }};

@@ -25,7 +25,7 @@ jobs:
 
       - name: Run Claude Code Review
         id: review
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@b8af2aac9666eb9921246e2d2b46a8e8fcfabc88 # v1
         env:
           ANTHROPIC_MODEL: claude-sonnet-4-6
         with:
