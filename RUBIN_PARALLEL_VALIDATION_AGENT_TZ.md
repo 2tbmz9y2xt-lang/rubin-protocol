@@ -83,7 +83,7 @@ If any check fails: task is `BLOCKED`, not `DONE`.
 
 Coverage requirement for new parallel-validation code:
 
-- floor: `>=80%`
+- floor: `>=85%`
 - target: `>=95%`
 
 ## 7. Fixture Contract
