@@ -35,6 +35,13 @@ Quick references:
 - Architecture & change path map: `./ARCHITECTURE_MAP.md`
 - Conformance harness overview: `./conformance/README.md`
 - Combined-load benchmark SLO/evidence lane: `./scripts/benchmarks/COMBINED_LOAD_SLO.md`
+- Parallel validation implementation plan: `./RUBIN_PARALLEL_VALIDATION_IMPLEMENTATION_PLAN.md`
+- Parallel validation agent TZ: `./RUBIN_PARALLEL_VALIDATION_AGENT_TZ.md`
+- Parallel validation operator runbook: `./RUBIN_PARALLEL_VALIDATION_OPERATOR_RUNBOOK.md`
+- Parallel validation shadow mode: `./RUBIN_PARALLEL_VALIDATION_SHADOW_MODE.md`
+- Parallel validation fixtures spec: `./RUBIN_PARALLEL_VALIDATION_FIXTURES.md`
+- Parallel validation benchmark plan: `./RUBIN_PARALLEL_VALIDATION_BENCHMARK_PLAN.md`
+- Parallel validation security notes: `./RUBIN_PARALLEL_VALIDATION_SECURITY_NOTES.md`
 
 ## Quick Start (Local)
 
