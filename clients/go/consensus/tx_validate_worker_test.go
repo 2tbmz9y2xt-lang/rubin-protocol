@@ -430,6 +430,26 @@ func TestFirstTxError_PicksSmallestTxIndexEvenIfOutOfOrder(t *testing.T) {
 	}
 }
 
+func TestFirstTxError_FallsBackWhenTxIndexMissingOrZero(t *testing.T) {
+	errA := txerr(TX_ERR_PARSE, "missing index A")
+	errB := txerr(TX_ERR_PARSE, "missing index B")
+
+	// Both errors have TxIndex=0 (missing). Reducer must deterministically keep
+	// the first such error encountered.
+	results := []WorkerResult[TxValidationResult]{
+		{Value: TxValidationResult{TxIndex: 0, Err: errA}, Err: errA},
+		{Value: TxValidationResult{TxIndex: 0, Err: errB}, Err: errB},
+	}
+
+	got := FirstTxError(results)
+	if got == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if got != errA {
+		t.Fatalf("expected first missing-index error, got %v", got)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // validateInputSpendQ branch coverage
 // ─────────────────────────────────────────────────────────────────────────────
