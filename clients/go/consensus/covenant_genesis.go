@@ -1,8 +1,15 @@
 package consensus
 
-func ValidateTxCovenantsGenesis(tx *Tx, blockHeight uint64) error {
+// ValidateTxCovenantsGenesis checks that every output's covenant is well-formed
+// at creation time. The rotation parameter controls which signature suites are
+// valid for native covenant creation at the given block height. Pass nil for
+// the default pre-rotation behaviour ({ML-DSA-87} only).
+func ValidateTxCovenantsGenesis(tx *Tx, blockHeight uint64, rotation RotationProvider) error {
 	if tx == nil {
 		return txerr(TX_ERR_PARSE, "nil tx")
+	}
+	if rotation == nil {
+		rotation = DefaultRotationProvider{}
 	}
 
 	for _, out := range tx.Outputs {
@@ -15,10 +22,9 @@ func ValidateTxCovenantsGenesis(tx *Tx, blockHeight uint64) error {
 				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "invalid CORE_P2PK covenant_data length")
 			}
 			suiteID := out.CovenantData[0]
-			if suiteID != SUITE_ID_ML_DSA_87 {
-				return txerr(TX_ERR_COVENANT_TYPE_INVALID, "invalid CORE_P2PK suite_id")
+			if !rotation.NativeCreateSuites(blockHeight).Contains(suiteID) {
+				return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_P2PK suite not in native create set")
 			}
-			_ = blockHeight
 
 		case COV_TYPE_ANCHOR:
 			if out.Value != 0 {

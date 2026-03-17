@@ -20,6 +20,7 @@ mod stealth;
 pub mod subsidy;
 pub mod tx;
 mod tx_helpers;
+pub mod suite_registry;
 mod utxo_basic;
 mod vault;
 mod verify_sig_openssl;
@@ -47,6 +48,10 @@ pub use core_ext::{
 };
 pub use covenant_genesis::validate_tx_covenants_genesis;
 pub use error::{ErrorCode, TxError};
+pub use suite_registry::{
+    CryptoRotationDescriptor, DefaultRotationProvider, DescriptorRotationProvider,
+    NativeSuiteSet, RotationProvider, SuiteParams, SuiteRegistry,
+};
 pub use featurebits::{
     featurebit_state_at_height_from_window_counts, FeatureBitDeployment, FeatureBitEval,
     FeatureBitState,

@@ -245,7 +245,7 @@ func applyNonCoinbaseTxBasicWorkQ(
 		return nil, 0, txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
 	}
 
-	if err := ValidateTxCovenantsGenesis(tx, height); err != nil {
+	if err := ValidateTxCovenantsGenesis(tx, height, nil); err != nil {
 		return nil, 0, err
 	}
 	sighashCache, err := NewSighashV1PrehashCache(tx)
@@ -335,7 +335,7 @@ func applyNonCoinbaseTxBasicWorkQ(
 			if slots != 1 {
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_P2PK witness_slots must be 1")
 			}
-			if err := validateP2PKSpendQ(entry, assigned[0], tx, uint32(inputIndex), entry.Value, chainID, height, sighashCache, sigQueue); err != nil {
+			if err := validateP2PKSpendQ(entry, assigned[0], tx, uint32(inputIndex), entry.Value, chainID, height, sighashCache, sigQueue, nil, nil); err != nil {
 				return nil, 0, err
 			}
 		case COV_TYPE_MULTISIG:
@@ -355,6 +355,7 @@ func applyNonCoinbaseTxBasicWorkQ(
 				sighashCache,
 				sigQueue,
 				"CORE_MULTISIG",
+				nil, nil,
 			); err != nil {
 				return nil, 0, err
 			}
@@ -387,6 +388,7 @@ func applyNonCoinbaseTxBasicWorkQ(
 				blockMTP,
 				sighashCache,
 				sigQueue,
+				nil, nil,
 			); err != nil {
 				return nil, 0, err
 			}
@@ -472,7 +474,7 @@ func applyNonCoinbaseTxBasicWorkQ(
 			if slots != CORE_STEALTH_WITNESS_SLOTS {
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_STEALTH witness_slots must be 1")
 			}
-			if err := validateCoreStealthSpendQ(entry, assigned[0], tx, uint32(inputIndex), entry.Value, chainID, height, sighashCache, sigQueue); err != nil {
+			if err := validateCoreStealthSpendQ(entry, assigned[0], tx, uint32(inputIndex), entry.Value, chainID, height, sighashCache, sigQueue, nil, nil); err != nil {
 				return nil, 0, err
 			}
 		default:
@@ -602,6 +604,7 @@ func applyNonCoinbaseTxBasicWorkQ(
 			sighashCache,
 			sigQueue,
 			"CORE_VAULT",
+			nil, nil,
 		); err != nil {
 			return nil, 0, err
 		}

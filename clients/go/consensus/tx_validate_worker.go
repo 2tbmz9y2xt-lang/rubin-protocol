@@ -78,7 +78,7 @@ func ValidateTxLocal(
 		if err := validateInputSpendQ(
 			entry, assigned, tx, uint32(inputIndex), entry.Value,
 			chainID, blockHeight, blockMTP, tvc.SighashCache,
-			coreExtProfiles, sigQueue,
+			coreExtProfiles, sigQueue, nil, nil,
 		); err != nil {
 			result.Err = err
 			return result
@@ -114,13 +114,15 @@ func validateInputSpendQ(
 	sighashCache *SighashV1PrehashCache,
 	coreExtProfiles CoreExtProfileProvider,
 	sigQueue *SigCheckQueue,
+	rotation RotationProvider,
+	registry *SuiteRegistry,
 ) error {
 	switch entry.CovenantType {
 	case COV_TYPE_P2PK:
 		if len(assigned) != 1 {
 			return txerr(TX_ERR_PARSE, "CORE_P2PK witness_slots must be 1")
 		}
-		return validateP2PKSpendQ(entry, assigned[0], tx, inputIndex, inputValue, chainID, blockHeight, sighashCache, sigQueue)
+		return validateP2PKSpendQ(entry, assigned[0], tx, inputIndex, inputValue, chainID, blockHeight, sighashCache, sigQueue, rotation, registry)
 
 	case COV_TYPE_MULTISIG:
 		m, err := ParseMultisigCovenantData(entry.CovenantData)
@@ -130,6 +132,7 @@ func validateInputSpendQ(
 		return validateThresholdSigSpendQ(
 			m.Keys, m.Threshold, assigned, tx, inputIndex, inputValue,
 			chainID, blockHeight, sighashCache, sigQueue, "CORE_MULTISIG",
+			rotation, registry,
 		)
 
 	case COV_TYPE_VAULT:
@@ -143,6 +146,7 @@ func validateInputSpendQ(
 		return validateThresholdSigSpendQ(
 			v.Keys, v.Threshold, assigned, tx, inputIndex, inputValue,
 			chainID, blockHeight, sighashCache, sigQueue, "CORE_VAULT",
+			rotation, registry,
 		)
 
 	case COV_TYPE_HTLC:
@@ -152,6 +156,7 @@ func validateInputSpendQ(
 		return validateHTLCSpendQ(
 			entry, assigned[0], assigned[1], tx, inputIndex, inputValue,
 			chainID, blockHeight, blockMTP, sighashCache, sigQueue,
+			rotation, registry,
 		)
 
 	case COV_TYPE_CORE_EXT:
@@ -167,7 +172,7 @@ func validateInputSpendQ(
 		if len(assigned) != CORE_STEALTH_WITNESS_SLOTS {
 			return txerr(TX_ERR_PARSE, "CORE_STEALTH witness_slots must be 1")
 		}
-		return validateCoreStealthSpendQ(entry, assigned[0], tx, inputIndex, inputValue, chainID, blockHeight, sighashCache, sigQueue)
+		return validateCoreStealthSpendQ(entry, assigned[0], tx, inputIndex, inputValue, chainID, blockHeight, sighashCache, sigQueue, rotation, registry)
 
 	default:
 		// Other covenant types have no spend-time checks in the genesis set.

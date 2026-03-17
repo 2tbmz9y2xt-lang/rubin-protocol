@@ -47,7 +47,7 @@ func TestValidateHTLCSpendQ_ClaimOK(t *testing.T) {
 
 	// Test with queue: should defer sig and return nil.
 	q := NewSigCheckQueue(1)
-	err = validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	err = validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q, nil, nil)
 	if err != nil {
 		t.Fatalf("queued HTLC claim: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestValidateHTLCSpendQ_ClaimOK(t *testing.T) {
 	}
 
 	// Test with nil queue: should verify inline.
-	err = validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, nil)
+	err = validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("inline HTLC claim: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestValidateHTLCSpendQ_RefundOK(t *testing.T) {
 
 	// blockHeight=10 meets lock_value=10
 	q := NewSigCheckQueue(1)
-	err = validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 10, 0, cache, q)
+	err = validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 10, 0, cache, q, nil, nil)
 	if err != nil {
 		t.Fatalf("queued HTLC refund: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestValidateHTLCSpendQ_TimelockNotMet(t *testing.T) {
 
 	// blockHeight=50 < lock_value=100
 	q := NewSigCheckQueue(1)
-	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 50, 0, cache, q)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 50, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected timelock error")
 	}
@@ -176,7 +176,7 @@ func TestValidateHTLCSpendQ_PreImageMismatch(t *testing.T) {
 	cache, _ := NewSighashV1PrehashCache(tx)
 
 	q := NewSigCheckQueue(1)
-	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected preimage mismatch error")
 	}
@@ -218,7 +218,7 @@ func TestValidateThresholdSigSpendQ_OneOfTwo(t *testing.T) {
 	}
 
 	q := NewSigCheckQueue(1)
-	err = validateThresholdSigSpendQ(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST-MULTISIG")
+	err = validateThresholdSigSpendQ(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST-MULTISIG", nil, nil)
 	if err != nil {
 		t.Fatalf("threshold 1-of-2 queued: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestValidateThresholdSigSpendQ_ThresholdNotMet(t *testing.T) {
 	}
 
 	q := NewSigCheckQueue(1)
-	err := validateThresholdSigSpendQ(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST-MULTISIG")
+	err := validateThresholdSigSpendQ(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST-MULTISIG", nil, nil)
 	if err == nil {
 		t.Fatal("expected threshold not met error")
 	}
@@ -269,7 +269,7 @@ func TestValidateThresholdSigSpendQ_SlotMismatch(t *testing.T) {
 	}
 
 	q := NewSigCheckQueue(1)
-	err := validateThresholdSigSpendQ(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST")
+	err := validateThresholdSigSpendQ(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST", nil, nil)
 	if err == nil {
 		t.Fatal("expected slot mismatch error")
 	}
@@ -291,7 +291,7 @@ func TestValidateThresholdSigSpendQ_InvalidSuiteID(t *testing.T) {
 	}
 
 	q := NewSigCheckQueue(1)
-	err := validateThresholdSigSpendQ(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST")
+	err := validateThresholdSigSpendQ(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST", nil, nil)
 	if err == nil {
 		t.Fatal("expected suite invalid error")
 	}
@@ -345,7 +345,7 @@ func TestValidateCoreStealthSpendQ_OK(t *testing.T) {
 	}
 
 	q := NewSigCheckQueue(1)
-	err = validateCoreStealthSpendQ(entry, w, tx, inputIndex, inputValue, chainID, 0, cache, q)
+	err = validateCoreStealthSpendQ(entry, w, tx, inputIndex, inputValue, chainID, 0, cache, q, nil, nil)
 	if err != nil {
 		t.Fatalf("queued stealth: %v", err)
 	}
@@ -377,7 +377,7 @@ func TestValidateCoreStealthSpendQ_InvalidSuite(t *testing.T) {
 	}
 
 	q := NewSigCheckQueue(1)
-	err := validateCoreStealthSpendQ(entry, w, tx, inputIndex, inputValue, chainID, 0, cache, q)
+	err := validateCoreStealthSpendQ(entry, w, tx, inputIndex, inputValue, chainID, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected suite invalid error")
 	}
@@ -403,7 +403,7 @@ func TestValidateCoreStealthSpendQ_BadCovenantData(t *testing.T) {
 	}
 
 	q := NewSigCheckQueue(1)
-	err := validateCoreStealthSpendQ(entry, w, tx, inputIndex, inputValue, chainID, 0, cache, q)
+	err := validateCoreStealthSpendQ(entry, w, tx, inputIndex, inputValue, chainID, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected covenant parse error")
 	}
@@ -429,7 +429,7 @@ func TestValidateCoreStealthSpendQ_NonCanonicalLengths(t *testing.T) {
 	}
 
 	q := NewSigCheckQueue(1)
-	err := validateCoreStealthSpendQ(entry, w, tx, inputIndex, inputValue, chainID, 0, cache, q)
+	err := validateCoreStealthSpendQ(entry, w, tx, inputIndex, inputValue, chainID, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected non-canonical error")
 	}
@@ -460,7 +460,7 @@ func TestValidateP2PKSpendQ_SuiteInvalid(t *testing.T) {
 	}
 
 	q := NewSigCheckQueue(1)
-	err := validateP2PKSpendQ(entry, w, tx, inputIndex, inputValue, chainID, 0, cache, q)
+	err := validateP2PKSpendQ(entry, w, tx, inputIndex, inputValue, chainID, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected suite invalid error")
 	}
@@ -487,7 +487,7 @@ func TestValidateP2PKSpendQ_NonCanonicalLengths(t *testing.T) {
 	}
 
 	q := NewSigCheckQueue(1)
-	err := validateP2PKSpendQ(entry, w, tx, inputIndex, inputValue, chainID, 0, cache, q)
+	err := validateP2PKSpendQ(entry, w, tx, inputIndex, inputValue, chainID, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected non-canonical error")
 	}
@@ -520,7 +520,7 @@ func TestValidateP2PKSpendQ_CovenantDataInvalid(t *testing.T) {
 	}
 
 	q := NewSigCheckQueue(1)
-	err := validateP2PKSpendQ(entry, w, tx, inputIndex, inputValue, chainID, 0, cache, q)
+	err := validateP2PKSpendQ(entry, w, tx, inputIndex, inputValue, chainID, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected covenant_data invalid error")
 	}
@@ -559,7 +559,7 @@ func TestValidateHTLCSpendQ_SelectorSuiteInvalid(t *testing.T) {
 	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
 
 	q := NewSigCheckQueue(1)
-	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected selector suite error")
 	}
@@ -582,7 +582,7 @@ func TestValidateHTLCSpendQ_SelectorKeyIDLengthInvalid(t *testing.T) {
 	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
 
 	q := NewSigCheckQueue(1)
-	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected key_id length error")
 	}
@@ -609,7 +609,7 @@ func TestValidateHTLCSpendQ_ClaimKeyIDMismatch(t *testing.T) {
 	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
 
 	q := NewSigCheckQueue(1)
-	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected claim key_id mismatch error")
 	}
@@ -635,7 +635,7 @@ func TestValidateHTLCSpendQ_UnknownPath(t *testing.T) {
 	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
 
 	q := NewSigCheckQueue(1)
-	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected unknown path error")
 	}
@@ -661,7 +661,7 @@ func TestValidateHTLCSpendQ_RefundKeyIDMismatch(t *testing.T) {
 	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
 
 	q := NewSigCheckQueue(1)
-	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 10, 0, cache, q)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 10, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected refund key_id mismatch error")
 	}
@@ -690,7 +690,7 @@ func TestValidateHTLCSpendQ_TimestampLockNotMet(t *testing.T) {
 
 	q := NewSigCheckQueue(1)
 	// blockHeight=200 (enough for height), blockMTP=50 (< lock_value=100)
-	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 200, 50, cache, q)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 200, 50, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected timestamp lock not met error")
 	}
@@ -723,7 +723,7 @@ func TestValidateHTLCSpendQ_SigSuiteInvalid(t *testing.T) {
 	}
 
 	q := NewSigCheckQueue(1)
-	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected sig suite invalid error")
 	}
@@ -757,7 +757,7 @@ func TestValidateHTLCSpendQ_SigKeyBindingMismatch(t *testing.T) {
 	}
 
 	q := NewSigCheckQueue(1)
-	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected key binding mismatch error")
 	}
@@ -790,7 +790,7 @@ func TestValidateHTLCSpendQ_SigNonCanonicalLengths(t *testing.T) {
 	}
 
 	q := NewSigCheckQueue(1)
-	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected non-canonical lengths error")
 	}
@@ -816,7 +816,7 @@ func TestValidateHTLCSpendQ_ClaimPayloadTooShort(t *testing.T) {
 	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
 
 	q := NewSigCheckQueue(1)
-	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected payload too short error")
 	}
@@ -839,7 +839,7 @@ func TestValidateHTLCSpendQ_SelectorPayloadEmpty(t *testing.T) {
 	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
 
 	q := NewSigCheckQueue(1)
-	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected payload too short error")
 	}
@@ -864,7 +864,7 @@ func TestValidateHTLCSpendQ_RefundPayloadLengthMismatch(t *testing.T) {
 	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: refundKP.PubkeyBytes(), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
 
 	q := NewSigCheckQueue(1)
-	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 10, 0, cache, q)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 10, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected refund payload length error")
 	}
@@ -909,7 +909,7 @@ func TestValidateHTLCSpendQ_NilQueue_ClaimInvalidSig(t *testing.T) {
 	}
 
 	// nil queue → inline verify → sig mismatch → TX_ERR_SIG_INVALID
-	err = validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, nil)
+	err = validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for mismatched HTLC sig, got nil")
 	}
@@ -955,7 +955,7 @@ func TestValidateHTLCSpendQ_NilQueue_RefundOK(t *testing.T) {
 	}
 
 	// nil queue → inline verify → should pass
-	err = validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 10, 0, cache, nil)
+	err = validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 10, 0, cache, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("inline HTLC refund: %v", err)
 	}
@@ -977,7 +977,7 @@ func TestValidateThresholdSigSpendQ_NilQueue_ValidSig(t *testing.T) {
 	}
 
 	// nil queue → inline verify
-	err := validateThresholdSigSpendQ(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, cache, nil, "TEST")
+	err := validateThresholdSigSpendQ(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, cache, nil, "TEST", nil, nil)
 	if err != nil {
 		t.Fatalf("nil queue threshold verify: %v", err)
 	}
@@ -1000,7 +1000,7 @@ func TestValidateThresholdSigSpendQ_SentinelWithData(t *testing.T) {
 	}
 
 	q := NewSigCheckQueue(1)
-	err := validateThresholdSigSpendQ(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST")
+	err := validateThresholdSigSpendQ(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST", nil, nil)
 	if err == nil {
 		t.Fatal("expected SENTINEL with data error")
 	}
@@ -1032,7 +1032,7 @@ func TestValidateHTLCSpendQ_ClaimPreimageTooShort(t *testing.T) {
 	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
 
 	q := NewSigCheckQueue(1)
-	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected preimage too short error")
 	}
@@ -1063,7 +1063,7 @@ func TestValidateHTLCSpendQ_ClaimPreimageTooLong(t *testing.T) {
 	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
 
 	q := NewSigCheckQueue(1)
-	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected preimage too long error")
 	}
@@ -1095,7 +1095,7 @@ func TestValidateHTLCSpendQ_ClaimPreimageLengthMismatch(t *testing.T) {
 	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
 
 	q := NewSigCheckQueue(1)
-	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q)
+	err := validateHTLCSpendQ(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected claim payload length mismatch error")
 	}
@@ -1151,7 +1151,7 @@ func TestValidateThresholdSigSpendQ_NonCanonicalLengths(t *testing.T) {
 	}
 
 	q := NewSigCheckQueue(1)
-	err := validateThresholdSigSpendQ(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST")
+	err := validateThresholdSigSpendQ(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST", nil, nil)
 	if err == nil {
 		t.Fatal("expected non-canonical lengths error")
 	}

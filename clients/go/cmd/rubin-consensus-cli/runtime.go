@@ -970,7 +970,7 @@ func runFromStdin() {
 			writeConsensusErr(os.Stdout, err)
 			return
 		}
-		if err := consensus.ValidateTxCovenantsGenesis(tx, req.Height); err != nil {
+		if err := consensus.ValidateTxCovenantsGenesis(tx, req.Height, nil); err != nil {
 			writeConsensusErr(os.Stdout, err)
 			return
 		}
