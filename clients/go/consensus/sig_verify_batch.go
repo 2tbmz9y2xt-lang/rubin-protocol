@@ -25,6 +25,7 @@ import (
 type SigCheckQueue struct {
 	tasks   []sigCheckTask
 	workers int
+	cache   *SigCache // optional; positive-only sig cache (Q-PV-07)
 }
 
 type sigCheckTask struct {
@@ -45,6 +46,14 @@ func NewSigCheckQueue(workers int) *SigCheckQueue {
 		workers = 1
 	}
 	return &SigCheckQueue{workers: workers}
+}
+
+// WithCache attaches a positive-only signature cache to the queue.
+// Cached tuples are skipped during Flush (cache hit = valid).
+// Returns the queue for chaining.
+func (q *SigCheckQueue) WithCache(c *SigCache) *SigCheckQueue {
+	q.cache = c
+	return q
 }
 
 // Push adds a signature verification task to the queue.
@@ -98,12 +107,18 @@ func (q *SigCheckQueue) Flush() error {
 	// Single task: verify inline to avoid goroutine overhead.
 	if n == 1 {
 		t := q.tasks[0]
+		if q.cache != nil && q.cache.Lookup(t.suiteID, t.pubkey, t.sig, t.digest) {
+			return nil // cache hit — previously verified valid
+		}
 		ok, err := verifySig(t.suiteID, t.pubkey, t.sig, t.digest)
 		if err != nil {
 			return err
 		}
 		if !ok {
 			return t.errOnFail
+		}
+		if q.cache != nil {
+			q.cache.Insert(t.suiteID, t.pubkey, t.sig, t.digest)
 		}
 		return nil
 	}
@@ -141,6 +156,10 @@ func (q *SigCheckQueue) Flush() error {
 					continue // drain channel without expensive crypto work
 				}
 				t := q.tasks[idx]
+				// Cache lookup: skip expensive crypto if previously verified valid.
+				if q.cache != nil && q.cache.Lookup(t.suiteID, t.pubkey, t.sig, t.digest) {
+					continue // cache hit — valid
+				}
 				ok, err := verifySig(t.suiteID, t.pubkey, t.sig, t.digest)
 				if err != nil {
 					results[idx] = err
@@ -148,6 +167,8 @@ func (q *SigCheckQueue) Flush() error {
 				} else if !ok {
 					results[idx] = t.errOnFail
 					anyFailed.Store(true)
+				} else if q.cache != nil {
+					q.cache.Insert(t.suiteID, t.pubkey, t.sig, t.digest)
 				}
 				// results[idx] remains nil if valid
 			}
