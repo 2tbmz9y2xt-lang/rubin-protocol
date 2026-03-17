@@ -294,5 +294,35 @@ func RunTxValidationWorkers(
 // FirstTxError returns the first error by transaction index from validation
 // results, or nil if all transactions are valid.
 func FirstTxError(results []WorkerResult[TxValidationResult]) error {
-	return FirstError(results)
+	var (
+		haveErr    bool
+		minTxIndex int
+		minErr     error
+	)
+	for _, r := range results {
+		if r.Err == nil {
+			continue
+		}
+		// Prefer the canonical tx index if available.
+		txIndex := r.Value.TxIndex
+		if txIndex <= 0 {
+			// Defensive fallback: if we somehow lost the tx index, preserve
+			// deterministic behavior by keeping the first such error seen.
+			if !haveErr {
+				haveErr = true
+				minTxIndex = txIndex
+				minErr = r.Err
+			}
+			continue
+		}
+		if !haveErr || minTxIndex <= 0 || txIndex < minTxIndex {
+			haveErr = true
+			minTxIndex = txIndex
+			minErr = r.Err
+		}
+	}
+	if !haveErr {
+		return nil
+	}
+	return minErr
 }

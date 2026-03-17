@@ -238,6 +238,37 @@ func TestCollectDAPayloadCommitTasks_NilCommitCore(t *testing.T) {
 	}
 }
 
+func TestCollectDAPayloadCommitTasks_NilChunkCoreIsSkipped(t *testing.T) {
+	daID := [32]byte{0xDD}
+	commitment := sha3_256([]byte("payload"))
+
+	// Include a tx_kind=0x02 chunk tx with nil DaChunkCore: must be skipped,
+	// and must not panic even when commits exist.
+	txs := []*Tx{
+		{TxKind: 0x01, DaCommitCore: &DaCommitCore{
+			DaID: daID, ChunkCount: 1,
+		}, Outputs: []TxOutput{{
+			CovenantType: COV_TYPE_DA_COMMIT,
+			CovenantData: commitment[:],
+		}}},
+		{TxKind: 0x02, DaChunkCore: nil, DaPayload: []byte("ignored")},
+	}
+
+	tasks := CollectDAPayloadCommitTasks(txs)
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(tasks))
+	}
+	if tasks[0].DaID != daID {
+		t.Fatalf("unexpected DaID")
+	}
+	if tasks[0].ChunkCount != 1 {
+		t.Fatalf("expected ChunkCount=1, got %d", tasks[0].ChunkCount)
+	}
+	if tasks[0].ExpectedCommit != commitment {
+		t.Fatalf("commitment mismatch")
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // End-to-end: collect + verify
 // ─────────────────────────────────────────────────────────────────────────────
