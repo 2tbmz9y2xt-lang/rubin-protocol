@@ -307,6 +307,81 @@ func TestConnectBlockParallelSigVerify_CoinbaseOnly(t *testing.T) {
 	if summary.SumFees != 0 {
 		t.Fatalf("expected 0 fees, got %d", summary.SumFees)
 	}
+	if summary.PostStateDigest != UtxoSetHash(state.Utxos) {
+		t.Fatal("post-state digest must match UTXO set")
+	}
+}
+
+func TestPostStateDigest_SequentialParallelParity(t *testing.T) {
+	height := uint64(1)
+	prev := hashWithPrefix(0xAB)
+	target := filledHash(0xff)
+
+	// Shared initial state: one P2PK UTXO.
+	kp := mustMLDSA87Keypair(t)
+	prevTxid := hashWithPrefix(0x10)
+	covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+	op := Outpoint{Txid: prevTxid, Vout: 0}
+	startUtxos := map[Outpoint]UtxoEntry{
+		op: {
+			Value:        1000,
+			CovenantType: COV_TYPE_P2PK,
+			CovenantData: append([]byte(nil), covData...),
+		},
+	}
+
+	makeState := func() *InMemoryChainState {
+		utxos := make(map[Outpoint]UtxoEntry, len(startUtxos))
+		for k, v := range startUtxos {
+			utxos[k] = v
+		}
+		return &InMemoryChainState{
+			Utxos:            utxos,
+			AlreadyGenerated: new(big.Int),
+		}
+	}
+
+	// Spend tx (fee=10).
+	spend := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0}},
+		Outputs: []TxOutput{{Value: 990, CovenantType: COV_TYPE_P2PK, CovenantData: covData}},
+	}
+	spend.Witness = []WitnessItem{signP2PKInputWitness(t, spend, 0, 1000, [32]byte{}, kp)}
+	spendBytes := txBytesFromTx(t, spend)
+	_, spendTxid, _, _, err := ParseTx(spendBytes)
+	if err != nil {
+		t.Fatalf("ParseTx: %v", err)
+	}
+
+	// Coinbase value includes subsidy + fees.
+	seqState := makeState()
+	subsidy := BlockSubsidyBig(height, seqState.AlreadyGenerated)
+	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, subsidy+10, spendBytes)
+	cbTxid := testTxID(t, coinbase)
+
+	root, err := MerkleRootTxids([][32]byte{cbTxid, spendTxid})
+	if err != nil {
+		t.Fatalf("MerkleRootTxids: %v", err)
+	}
+	block := buildBlockBytes(t, prev, root, target, 1, [][]byte{coinbase, spendBytes})
+
+	seqSummary, err := ConnectBlockBasicInMemoryAtHeight(block, &prev, &target, height, []uint64{0}, seqState, [32]byte{})
+	if err != nil {
+		t.Fatalf("sequential connect: %v", err)
+	}
+
+	parState := makeState()
+	parSummary, err := ConnectBlockParallelSigVerify(block, &prev, &target, height, []uint64{0}, parState, [32]byte{}, 2)
+	if err != nil {
+		t.Fatalf("parallel connect: %v", err)
+	}
+
+	if seqSummary.PostStateDigest != parSummary.PostStateDigest {
+		t.Fatalf("post-state digest mismatch: seq=%x par=%x", seqSummary.PostStateDigest, parSummary.PostStateDigest)
+	}
 }
 
 // TestApplyNonCoinbaseTxBasicWorkQ_MatchesSequential verifies that the queued
