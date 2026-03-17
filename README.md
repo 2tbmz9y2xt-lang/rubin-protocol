@@ -42,6 +42,8 @@ Quick references:
 - Parallel validation fixtures spec: `./RUBIN_PARALLEL_VALIDATION_FIXTURES.md`
 - Parallel validation benchmark plan: `./RUBIN_PARALLEL_VALIDATION_BENCHMARK_PLAN.md`
 - Parallel validation security notes: `./RUBIN_PARALLEL_VALIDATION_SECURITY_NOTES.md`
+- Parallel validation PR review template: `./RUBIN_PARALLEL_VALIDATION_PR_REVIEW_TEMPLATE.md`
+- Parallel validation security review template: `./RUBIN_PARALLEL_VALIDATION_SECURITY_REVIEW_TEMPLATE.md`
 
 ## Quick Start (Local)
 
