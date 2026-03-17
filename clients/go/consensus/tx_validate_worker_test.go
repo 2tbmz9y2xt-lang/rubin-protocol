@@ -411,6 +411,25 @@ func TestFirstTxError_Nil(t *testing.T) {
 	}
 }
 
+func TestFirstTxError_PicksSmallestTxIndexEvenIfOutOfOrder(t *testing.T) {
+	err3 := txerr(TX_ERR_PARSE, "tx3")
+	err1 := txerr(TX_ERR_MISSING_UTXO, "tx1")
+
+	results := []WorkerResult[TxValidationResult]{
+		{Value: TxValidationResult{TxIndex: 3, Err: err3}, Err: err3},
+		{Value: TxValidationResult{TxIndex: 2, Valid: true}, Err: nil},
+		{Value: TxValidationResult{TxIndex: 1, Err: err1}, Err: err1},
+	}
+
+	got := FirstTxError(results)
+	if got == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if got != err1 {
+		t.Fatalf("expected smallest-index error (tx1), got %v", got)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // validateInputSpendQ branch coverage
 // ─────────────────────────────────────────────────────────────────────────────
