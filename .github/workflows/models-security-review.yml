@@ -56,7 +56,7 @@ jobs:
         run: npm install jsonrepair
       - name: Run security review
         id: review
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v7
         with:
           script: |
             const fs = require('fs');
@@ -149,7 +149,7 @@ jobs:
           retention-days: 3
       - name: Post review comment
         if: steps.review.outputs.review
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v7
         with:
           script: |
             const review = ${{ toJSON(steps.review.outputs.review) }};
@@ -162,7 +162,7 @@ jobs:
             });
       - name: Block on critical findings
         if: steps.review.outputs.review
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v7
         with:
           script: |
             const raw = ${{ toJSON(steps.review.outputs.review) }};
