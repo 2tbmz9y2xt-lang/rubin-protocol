@@ -200,7 +200,11 @@ pub fn validate_rotation_set(
             if a.create_height < b.spend_height && b.create_height < a.spend_height {
                 return Err(format!(
                     "rotation: overlapping rotations {:?} [{},{}) and {:?} [{},{})",
-                    a.name, a.create_height, a.spend_height, b.name, b.create_height,
+                    a.name,
+                    a.create_height,
+                    a.spend_height,
+                    b.name,
+                    b.create_height,
                     b.spend_height,
                 ));
             }
