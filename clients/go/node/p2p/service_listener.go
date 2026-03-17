@@ -14,14 +14,19 @@ func (s *Service) Start(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if s.listener != nil {
+	s.peersMu.RLock()
+	started := s.listener != nil
+	s.peersMu.RUnlock()
+	if started {
 		return errors.New("service already started")
 	}
 	listener, err := net.Listen("tcp", s.cfg.BindAddr)
 	if err != nil {
 		return err
 	}
+	s.peersMu.Lock()
 	s.listener = listener
+	s.peersMu.Unlock()
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
 	s.loopWG.Add(1)
@@ -65,8 +70,11 @@ func (s *Service) Addr() string {
 	if s == nil {
 		return ""
 	}
-	if s.listener != nil {
-		return s.listener.Addr().String()
+	s.peersMu.RLock()
+	ln := s.listener
+	s.peersMu.RUnlock()
+	if ln != nil {
+		return ln.Addr().String()
 	}
 	return s.cfg.BindAddr
 }

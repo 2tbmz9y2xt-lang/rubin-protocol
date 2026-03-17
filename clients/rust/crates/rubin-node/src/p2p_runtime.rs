@@ -824,7 +824,11 @@ pub fn decode_getblocks_payload(payload: &[u8]) -> io::Result<GetBlocksPayload> 
             "getblocks payload too short",
         ));
     }
-    let count = u16::from_be_bytes(payload[0..2].try_into().expect("count")) as usize;
+    let count = u16::from_be_bytes(
+        payload[0..2]
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid getblocks count"))?,
+    ) as usize;
     let want = 2 + count * 32 + 32;
     if payload.len() != want {
         return Err(io::Error::new(
@@ -887,10 +891,15 @@ fn unmarshal_addr_payload(payload: &[u8]) -> io::Result<Vec<String>> {
     let mut offset = consumed;
     for _ in 0..count {
         let ip = std::net::Ipv6Addr::from(
-            <[u8; 16]>::try_from(&payload[offset..offset + 16]).expect("ip"),
+            <[u8; 16]>::try_from(&payload[offset..offset + 16])
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid ip address"))?,
         );
         offset += 16;
-        let port = u16::from_be_bytes(payload[offset..offset + 2].try_into().expect("port"));
+        let port = u16::from_be_bytes(
+            payload[offset..offset + 2]
+                .try_into()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid port"))?,
+        );
         offset += 2;
         out.push(std::net::SocketAddr::new(ip.into(), port).to_string());
     }

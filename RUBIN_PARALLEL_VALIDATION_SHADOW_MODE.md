@@ -25,7 +25,7 @@ For each validated block compare:
 Shadow mode MUST guarantee:
 
 - no change to externally observed node verdict;
-- bounded diagnostic logging;
+- bounded diagnostic logging (≤1 MB per block, rate-limited to ≤100 log lines/s);
 - deterministic mismatch reproduction input bundle.
 
 ## Required Instrumentation
@@ -39,6 +39,6 @@ Shadow mode MUST guarantee:
 
 A rollout phase exits shadow only when:
 
-- mismatch count is zero for required soak window;
+- mismatch count is zero for at least 72 hours (soak window);
 - no unresolved deterministic replay discrepancy remains open;
-- promotion checklist (`Q-PV-20`) is satisfied.
+- promotion checklist (see `RUBIN_PARALLEL_VALIDATION_OPERATOR_RUNBOOK.md` §Promotion Criteria) is satisfied.

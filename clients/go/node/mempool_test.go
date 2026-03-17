@@ -424,8 +424,11 @@ func TestRestoreMempoolSnapshotClearsStaleWorstHeapState(t *testing.T) {
 	}
 
 	selected := mp.SelectTransactions(2, 1<<20)
-	if len(selected) != 1 || txIDHex(t, selected[0]) != txIDHex(t, txBetter) {
-		t.Fatalf("selected=%v, want [%s]", []string{txIDHex(t, selected[0])}, txIDHex(t, txBetter))
+	if len(selected) != 1 {
+		t.Fatalf("selected count=%d, want 1", len(selected))
+	}
+	if txIDHex(t, selected[0]) != txIDHex(t, txBetter) {
+		t.Fatalf("selected=%s, want %s", txIDHex(t, selected[0]), txIDHex(t, txBetter))
 	}
 }
 

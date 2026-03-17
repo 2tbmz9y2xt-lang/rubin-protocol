@@ -97,7 +97,7 @@ jobs:
 
       - name: Install cargo-audit
         if: steps.cache-cargo-audit-sec.outputs.cache-hit != 'true'
-        run: cargo install cargo-audit --locked
+        run: cargo install cargo-audit@0.21.2 --locked
 
       - name: Security precheck gate
         run: scripts/security/precheck.sh --ci
@@ -373,7 +373,7 @@ jobs:
 
       - name: Install cargo-audit
         if: steps.cache-cargo-audit-test.outputs.cache-hit != 'true'
-        run: cargo install cargo-audit --locked
+        run: cargo install cargo-audit@0.21.2 --locked
 
       - name: Cargo audit
         run: |
