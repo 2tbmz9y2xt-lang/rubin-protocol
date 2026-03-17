@@ -105,6 +105,18 @@ func NewNativeSuiteSet(ids ...uint8) *NativeSuiteSet {
 	return &NativeSuiteSet{suites: m}
 }
 
+// Clone returns a deep copy of the suite set so callers cannot mutate shared state.
+func (s *NativeSuiteSet) Clone() *NativeSuiteSet {
+	if s == nil {
+		return nil
+	}
+	m := make(map[uint8]struct{}, len(s.suites))
+	for id := range s.suites {
+		m[id] = struct{}{}
+	}
+	return &NativeSuiteSet{suites: m}
+}
+
 // RotationProvider determines which signature suites are valid for native
 // covenant creation and spending at a given block height. This is the
 // injection point for rotation deployment descriptors.
@@ -130,10 +142,10 @@ var defaultNativeSuiteSet = NewNativeSuiteSet(SUITE_ID_ML_DSA_87)
 
 // NativeCreateSuites implements RotationProvider.
 func (DefaultRotationProvider) NativeCreateSuites(_ uint64) *NativeSuiteSet {
-	return defaultNativeSuiteSet
+	return defaultNativeSuiteSet.Clone()
 }
 
 // NativeSpendSuites implements RotationProvider.
 func (DefaultRotationProvider) NativeSpendSuites(_ uint64) *NativeSuiteSet {
-	return defaultNativeSuiteSet
+	return defaultNativeSuiteSet.Clone()
 }
