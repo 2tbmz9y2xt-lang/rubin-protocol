@@ -43,6 +43,13 @@ func verifyMLDSAKeyAndSig(w WitnessItem, expectedKeyID [32]byte, tx *Tx, inputIn
 }
 
 func verifyMLDSAKeyAndSigWithCache(w WitnessItem, expectedKeyID [32]byte, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte, cache *SighashV1PrehashCache, context string) error {
+	return verifyKeyAndSigWithRegistryCache(w, expectedKeyID, tx, inputIndex, inputValue, chainID, cache, nil, context)
+}
+
+// verifyKeyAndSigWithRegistryCache verifies a witness item's key binding and
+// cryptographic signature using registry-aware algorithm dispatch. When registry
+// is nil, falls back to the hardcoded ML-DSA-87 verification path.
+func verifyKeyAndSigWithRegistryCache(w WitnessItem, expectedKeyID [32]byte, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte, cache *SighashV1PrehashCache, registry *SuiteRegistry, context string) error {
 	if sha3_256(w.Pubkey) != expectedKeyID {
 		return txerr(TX_ERR_SIG_INVALID, context+" key binding mismatch")
 	}
@@ -50,7 +57,7 @@ func verifyMLDSAKeyAndSigWithCache(w WitnessItem, expectedKeyID [32]byte, tx *Tx
 	if err != nil {
 		return err
 	}
-	ok, err := verifySig(w.SuiteID, w.Pubkey, cryptoSig, digest)
+	ok, err := verifySigWithRegistry(w.SuiteID, w.Pubkey, cryptoSig, digest, registry)
 	if err != nil {
 		return err
 	}
@@ -65,19 +72,42 @@ func validateP2PKSpend(entry UtxoEntry, w WitnessItem, tx *Tx, inputIndex uint32
 }
 
 func validateP2PKSpendWithCache(entry UtxoEntry, w WitnessItem, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte, blockHeight uint64, cache *SighashV1PrehashCache) error {
-	if w.SuiteID != SUITE_ID_ML_DSA_87 {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_P2PK suite invalid")
+	return validateP2PKSpendAtHeight(entry, w, tx, inputIndex, inputValue, chainID, blockHeight, cache, DefaultRotationProvider{}, DefaultSuiteRegistry())
+}
+
+// validateP2PKSpendAtHeight validates a P2PK spend using the suite registry
+// and rotation provider for suite validation, length checks, and signature
+// dispatch. When rotation or registry is nil, defaults are used (ML-DSA-87
+// genesis set).
+func validateP2PKSpendAtHeight(entry UtxoEntry, w WitnessItem, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte, blockHeight uint64, cache *SighashV1PrehashCache, rotation RotationProvider, registry *SuiteRegistry) error {
+	if rotation == nil {
+		rotation = DefaultRotationProvider{}
 	}
-	_ = blockHeight
-	if len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1 {
-		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
+	if registry == nil {
+		registry = DefaultSuiteRegistry()
 	}
+
+	nativeSpend := rotation.NativeSpendSuites(blockHeight)
+	if !nativeSpend.Contains(w.SuiteID) {
+		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_P2PK suite not in native spend set")
+	}
+
+	params, ok := registry.Lookup(w.SuiteID)
+	if !ok {
+		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_P2PK suite not registered")
+	}
+
+	if len(w.Pubkey) != params.PubkeyLen || len(w.Signature) != params.SigLen+1 {
+		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical witness item lengths")
+	}
+
 	if len(entry.CovenantData) != MAX_P2PK_COVENANT_DATA || entry.CovenantData[0] != w.SuiteID {
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_P2PK covenant_data invalid")
 	}
+
 	var keyID [32]byte
 	copy(keyID[:], entry.CovenantData[1:33])
-	return verifyMLDSAKeyAndSigWithCache(w, keyID, tx, inputIndex, inputValue, chainID, cache, "CORE_P2PK")
+	return verifyKeyAndSigWithRegistryCache(w, keyID, tx, inputIndex, inputValue, chainID, cache, registry, "CORE_P2PK")
 }
 
 func validateThresholdSigSpend(
@@ -106,33 +136,68 @@ func validateThresholdSigSpendWithCache(
 	cache *SighashV1PrehashCache,
 	context string,
 ) error {
+	return validateThresholdSigSpendAtHeight(keys, threshold, ws, tx, inputIndex, inputValue, chainID, blockHeight, cache, DefaultRotationProvider{}, DefaultSuiteRegistry(), context)
+}
+
+// validateThresholdSigSpendAtHeight validates a threshold-sig spend using the
+// suite registry and rotation provider. When rotation or registry is nil,
+// defaults are used (ML-DSA-87 genesis set).
+func validateThresholdSigSpendAtHeight(
+	keys [][32]byte,
+	threshold uint8,
+	ws []WitnessItem,
+	tx *Tx,
+	inputIndex uint32,
+	inputValue uint64,
+	chainID [32]byte,
+	blockHeight uint64,
+	cache *SighashV1PrehashCache,
+	rotation RotationProvider,
+	registry *SuiteRegistry,
+	context string,
+) error {
+	if rotation == nil {
+		rotation = DefaultRotationProvider{}
+	}
+	if registry == nil {
+		registry = DefaultSuiteRegistry()
+	}
+
 	if len(ws) != len(keys) {
 		return txerr(TX_ERR_PARSE, "witness slot assignment mismatch")
 	}
+
+	nativeSpend := rotation.NativeSpendSuites(blockHeight)
 	valid := 0
+
 	for i := range keys {
 		w := ws[i]
-		switch w.SuiteID {
-		case SUITE_ID_SENTINEL:
+		if w.SuiteID == SUITE_ID_SENTINEL {
 			if len(w.Pubkey) != 0 || len(w.Signature) != 0 {
 				return txerr(TX_ERR_PARSE, "SENTINEL witness must be keyless")
 			}
 			continue
-		case SUITE_ID_ML_DSA_87:
-			_ = blockHeight
-			if len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1 {
-				return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
-			}
-			if err := verifyMLDSAKeyAndSigWithCache(w, keys[i], tx, inputIndex, inputValue, chainID, cache, context); err != nil {
-				return err
-			}
-			valid++
-		default:
-			// Unknown suites are accepted at parse stage (CANONICAL §12.2 / CV-SIG-05);
-			// non-CORE_EXT spend paths must reject them deterministically here.
-			return txerr(TX_ERR_SIG_ALG_INVALID, context+" suite invalid")
 		}
+
+		if !nativeSpend.Contains(w.SuiteID) {
+			return txerr(TX_ERR_SIG_ALG_INVALID, context+" suite not in native spend set")
+		}
+
+		params, ok := registry.Lookup(w.SuiteID)
+		if !ok {
+			return txerr(TX_ERR_SIG_ALG_INVALID, context+" suite not registered")
+		}
+
+		if len(w.Pubkey) != params.PubkeyLen || len(w.Signature) != params.SigLen+1 {
+			return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical witness item lengths")
+		}
+
+		if err := verifyKeyAndSigWithRegistryCache(w, keys[i], tx, inputIndex, inputValue, chainID, cache, registry, context); err != nil {
+			return err
+		}
+		valid++
 	}
+
 	if valid < int(threshold) {
 		return txerr(TX_ERR_SIG_INVALID, context+" threshold not met")
 	}
