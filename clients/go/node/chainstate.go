@@ -71,6 +71,7 @@ type ChainStateConnectSummary struct {
 	AlreadyGenerated   uint64
 	AlreadyGeneratedN1 uint64
 	UtxoCount          uint64
+	PostStateDigest    [32]byte
 }
 
 type chainStateDisk struct {
@@ -208,6 +209,7 @@ func (s *ChainState) ConnectBlockWithCoreExtProfiles(
 		AlreadyGenerated:   summary.AlreadyGenerated,
 		AlreadyGeneratedN1: summary.AlreadyGeneratedN1,
 		UtxoCount:          summary.UtxoCount,
+		PostStateDigest:    summary.PostStateDigest,
 	}, nil
 }
 
@@ -285,6 +287,7 @@ func (s *ChainState) ConnectBlockParallelSigs(
 		AlreadyGenerated:   summary.AlreadyGenerated,
 		AlreadyGeneratedN1: summary.AlreadyGeneratedN1,
 		UtxoCount:          summary.UtxoCount,
+		PostStateDigest:    summary.PostStateDigest,
 	}, nil
 }
 

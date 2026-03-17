@@ -68,6 +68,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	mineBlocks := fs.Int("mine-blocks", 0, "mine N blocks locally after startup")
 	mineExit := fs.Bool("mine-exit", false, "exit immediately after local mining")
 	featurebitsDeploymentsPath := fs.String("featurebits-deployments", "", "path to JSON file with featurebit deployments (telemetry-only)")
+	pvMode := fs.String("pv-mode", "off", "parallel validation mode: off|shadow|on (truth path is sequential)")
+	pvShadowMax := fs.Uint64("pv-shadow-max", 3, "max pv shadow mismatch samples to record/print (bounded)")
 	dryRun := fs.Bool("dry-run", false, "print effective config and exit")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -108,6 +110,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	syncCfg := node.DefaultSyncConfig(nil, chainIDFromGenesis, chainStatePath)
 	syncCfg.Network = cfg.Network
 	syncCfg.CoreExtProfiles = genesisCfg.CoreExtProfiles
+	syncCfg.ParallelValidationMode = *pvMode
+	syncCfg.PVShadowMaxSamples = *pvShadowMax
 	syncEngine, err := newSyncEngineFn(
 		chainState,
 		blockStore,

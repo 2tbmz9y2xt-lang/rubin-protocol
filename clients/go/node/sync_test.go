@@ -22,6 +22,9 @@ func TestDefaultSyncConfigAndEngineInit_Defaults(t *testing.T) {
 	if cfg.IBDLagSeconds != defaultIBDLagSeconds {
 		t.Fatalf("ibd_lag_seconds=%d, want %d", cfg.IBDLagSeconds, defaultIBDLagSeconds)
 	}
+	if cfg.ParallelValidationMode != "off" {
+		t.Fatalf("parallel_validation_mode=%q, want off", cfg.ParallelValidationMode)
+	}
 
 	cfg.HeaderBatchLimit = 0
 	cfg.IBDLagSeconds = 0
@@ -34,6 +37,25 @@ func TestDefaultSyncConfigAndEngineInit_Defaults(t *testing.T) {
 	}
 	if engine.cfg.IBDLagSeconds != defaultIBDLagSeconds {
 		t.Fatalf("ibd_lag_seconds=%d, want %d", engine.cfg.IBDLagSeconds, defaultIBDLagSeconds)
+	}
+}
+
+func TestNewSyncEngine_ParallelValidationModeParse(t *testing.T) {
+	st := NewChainState()
+	cfg := DefaultSyncConfig(nil, [32]byte{}, "")
+	cfg.ParallelValidationMode = "shadow"
+	if _, err := NewSyncEngine(st, nil, cfg); err != nil {
+		t.Fatalf("expected shadow mode ok: %v", err)
+	}
+
+	cfg.ParallelValidationMode = "on"
+	if _, err := NewSyncEngine(st, nil, cfg); err != nil {
+		t.Fatalf("expected on mode ok: %v", err)
+	}
+
+	cfg.ParallelValidationMode = "nope"
+	if _, err := NewSyncEngine(st, nil, cfg); err == nil {
+		t.Fatal("expected error for invalid mode")
 	}
 }
 
