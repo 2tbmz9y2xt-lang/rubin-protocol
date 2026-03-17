@@ -1,0 +1,7 @@
+# CodeRabbit configuration
+# Automatic PR reviews are disabled — use local CLI only:
+#   coderabbit review --plain
+#   coderabbit review --prompt-only
+reviews:
+  auto_review:
+    enabled: false
