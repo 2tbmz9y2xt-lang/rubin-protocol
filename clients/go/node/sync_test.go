@@ -1,6 +1,8 @@
 package node
 
 import (
+	"bytes"
+	"crypto/sha3"
 	"encoding/hex"
 	"os"
 	"path/filepath"
@@ -56,6 +58,88 @@ func TestNewSyncEngine_ParallelValidationModeParse(t *testing.T) {
 	cfg.ParallelValidationMode = "nope"
 	if _, err := NewSyncEngine(st, nil, cfg); err == nil {
 		t.Fatal("expected error for invalid mode")
+	}
+}
+
+func TestPVShadowMismatch_SequentialTruthPreserved(t *testing.T) {
+	target := consensus.POW_LIMIT
+	cfg := DefaultSyncConfig(&target, devnetGenesisChainID, "")
+	cfg.ParallelValidationMode = "shadow"
+	cfg.PVShadowMaxSamples = 2
+
+	signer := mustNodeMLDSA87Keypair(t)
+	keyID := sha3.Sum256(signer.PubkeyBytes())
+	fromAddr, err := ParseMineAddress(hex.EncodeToString(keyID[:]))
+	if err != nil {
+		t.Fatalf("ParseMineAddress: %v", err)
+	}
+	st, ops := testSpendableChainState(fromAddr, []uint64{100})
+
+	engine, err := NewSyncEngine(st, nil, cfg)
+	if err != nil {
+		t.Fatalf("new sync engine: %v", err)
+	}
+	var stderr bytes.Buffer
+	engine.SetStderr(&stderr)
+	inOp := ops[0]
+
+	// tx1: valid structure, but corrupt the signature so sequential path returns TX_ERR_SIG_INVALID.
+	changeAddress := append([]byte(nil), fromAddr...)
+	toAddress := append([]byte(nil), fromAddr...)
+	tx1 := mustBuildSignedTransferTxForSyncTest(t, engine.chainState.Utxos, []consensus.Outpoint{inOp}, 1, 0, 1, signer, changeAddress, toAddress)
+	parsed1, _, wtxid1, _, err := consensus.ParseTx(tx1)
+	if err != nil {
+		t.Fatalf("ParseTx(tx1): %v", err)
+	}
+	// Flip one byte in the first witness signature (P2PK => witness[0]).
+	if len(parsed1.Witness) == 0 || len(parsed1.Witness[0].Signature) == 0 {
+		t.Fatal("expected witness signature in tx1")
+	}
+	parsed1.Witness[0].Signature[0] ^= 0xFF
+	tx1, err = consensus.MarshalTx(parsed1)
+	if err != nil {
+		t.Fatalf("MarshalTx(tx1): %v", err)
+	}
+	// Recompute wtxid after corruption (coinbase witness commitment must match).
+	_, _, wtxid1, _, err = consensus.ParseTx(tx1)
+	if err != nil {
+		t.Fatalf("ParseTx(tx1 after corrupt): %v", err)
+	}
+
+	// tx2: missing UTXO, so parallel pre-check may return TX_ERR_MISSING_UTXO before flushing sigs.
+	tx2obj := &consensus.Tx{
+		Version:  1,
+		TxKind:   0x00,
+		TxNonce:  2,
+		Inputs:   []consensus.TxInput{{PrevTxid: [32]byte{0x99}, PrevVout: 0, Sequence: 0}},
+		Outputs:  []consensus.TxOutput{{Value: 1, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: changeAddress}},
+		Locktime: 0,
+	}
+	tx2, err := consensus.MarshalTx(tx2obj)
+	if err != nil {
+		t.Fatalf("MarshalTx(tx2): %v", err)
+	}
+	_, _, wtxid2, _, err := consensus.ParseTx(tx2)
+	if err != nil {
+		t.Fatalf("ParseTx(tx2): %v", err)
+	}
+
+	height := st.Height + 1
+	subsidy := consensus.BlockSubsidy(height, st.AlreadyGenerated)
+	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueForWtxids(t, height, subsidy, [][32]byte{{}, wtxid1, wtxid2})
+	block := buildMultiTxBlock(t, st.TipHash, target, 2, coinbase, tx1, tx2)
+
+	_, err = engine.ApplyBlock(block, nil)
+	if err == nil || !strings.Contains(err.Error(), string(consensus.TX_ERR_SIG_INVALID)) {
+		t.Fatalf("expected sequential truth error %s, got %v", consensus.TX_ERR_SIG_INVALID, err)
+	}
+
+	mismatches, samples := engine.PVShadowStats()
+	if mismatches == 0 || len(samples) == 0 {
+		t.Fatalf("expected pv shadow mismatch recorded, got mismatches=%d samples=%v", mismatches, samples)
+	}
+	if !strings.Contains(stderr.String(), "pv_shadow: mismatch") {
+		t.Fatalf("expected pv_shadow diagnostic on stderr, got: %q", stderr.String())
 	}
 }
 
