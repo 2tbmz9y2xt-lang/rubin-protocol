@@ -60,7 +60,7 @@
       ],
       "expect_fee": 10,
       "expect_utxo_count": 1,
-      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID"
+      "expect_err": "TX_ERR_SIG_ALG_INVALID"
     },
     {
       "id": "CV-SIG-02b",
@@ -82,7 +82,7 @@
       ],
       "expect_fee": 10,
       "expect_utxo_count": 1,
-      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID"
+      "expect_err": "TX_ERR_SIG_ALG_INVALID"
     },
     {
       "id": "CV-SIG-02c",
@@ -101,7 +101,7 @@
           "vout": 0
         }
       ],
-      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
       "tx_hex_from": "CV-SIG-02b",
       "tx_hex_mutations": [
         {

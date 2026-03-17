@@ -30,7 +30,7 @@ pub fn validate_tx_covenants_genesis(tx: &Tx, _block_height: u64) -> Result<(), 
                 let suite_id = out.covenant_data[0];
                 if suite_id != SUITE_ID_ML_DSA_87 {
                     return Err(TxError::new(
-                        ErrorCode::TxErrCovenantTypeInvalid,
+                        ErrorCode::TxErrSigAlgInvalid,
                         "invalid CORE_P2PK suite_id",
                     ));
                 }

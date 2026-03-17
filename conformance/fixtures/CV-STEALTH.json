@@ -163,7 +163,7 @@
       "id": "CV-ST-U-06",
       "op": "utxo_apply_basic",
       "expect_ok": false,
-      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
       "height": 1000000,
       "block_timestamp": 1000,
       "utxos": [
