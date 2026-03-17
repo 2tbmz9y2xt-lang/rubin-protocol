@@ -158,10 +158,12 @@ def main() -> int:
 
     pr_number = pr_number_from_event()
     if pr_number is None:
-        # On push-to-main we still enforce via required docs checks elsewhere.
-        print("PV_DOC_COMPLIANCE: FAIL (PV/CORE_EXT touched but PR context missing)")
-        print("Reason: this gate requires a PR body with required template sections.")
-        return 1
+        # This script is executed in both PR and push workflows.
+        # Enforce strictly for PRs (where the PR body exists). For pushes (including main),
+        # fail-closed enforcement via PR body isn't possible, so we skip to avoid mainline CI
+        # going red post-merge for already-reviewed changes.
+        print("PV_DOC_COMPLIANCE: SKIP (non-PR event; PR body not available)")
+        return 0
 
     if not args.repo:
         print("PV_DOC_COMPLIANCE: FAIL (missing GITHUB_REPOSITORY)")
