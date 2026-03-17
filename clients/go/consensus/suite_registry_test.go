@@ -102,7 +102,7 @@ func TestNativeSuiteSet_SuiteIDs_Sorted(t *testing.T) {
 		t.Fatalf("len = %d, want 3", len(ids))
 	}
 	if ids[0] != SUITE_ID_ML_DSA_87 || ids[1] != 0x02 || ids[2] != 0x03 {
-		t.Errorf("SuiteIDs = %v, want [1 2 3]", ids)
+		t.Errorf("SuiteIDs = %v, want [%d %d %d]", ids, SUITE_ID_ML_DSA_87, 0x02, 0x03)
 	}
 }
 
@@ -136,6 +136,29 @@ func TestNativeSuiteSet_Dedup(t *testing.T) {
 	s := NewNativeSuiteSet(SUITE_ID_ML_DSA_87, SUITE_ID_ML_DSA_87, SUITE_ID_ML_DSA_87)
 	if s.Len() != 1 {
 		t.Errorf("Len = %d, want 1 (dedup)", s.Len())
+	}
+}
+
+func TestNativeSuiteSet_Clone(t *testing.T) {
+	orig := NewNativeSuiteSet(SUITE_ID_ML_DSA_87, 0x02)
+	cloned := orig.Clone()
+	if cloned.Len() != orig.Len() {
+		t.Fatalf("Clone Len = %d, want %d", cloned.Len(), orig.Len())
+	}
+	if !cloned.Contains(SUITE_ID_ML_DSA_87) || !cloned.Contains(0x02) {
+		t.Error("Clone should contain same IDs")
+	}
+	// Mutating clone must not affect original.
+	cloned.suites[0xFF] = struct{}{}
+	if orig.Contains(0xFF) {
+		t.Error("mutating clone must not affect original")
+	}
+}
+
+func TestNativeSuiteSet_Clone_Nil(t *testing.T) {
+	var s *NativeSuiteSet
+	if s.Clone() != nil {
+		t.Error("Clone of nil should return nil")
 	}
 }
 
