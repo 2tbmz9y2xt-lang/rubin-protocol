@@ -1,7 +1,9 @@
 package consensus
 
 import (
+	"math"
 	"testing"
+	"unsafe"
 )
 
 // helper: build a minimal tx with given witness items.
@@ -187,5 +189,162 @@ func TestTxWeightAtHeight_WrongLengths_UsesFloor(t *testing.T) {
 	legacy, _, _, _ := TxWeightAndStats(tx)
 	if weight != legacy {
 		t.Errorf("wrong-lengths weight %d != legacy %d (both should use unknown floor)", weight, legacy)
+	}
+}
+
+// fakeByteSlice creates a []byte slice header with the given length but
+// minimal backing memory. Only len() is safe — accessing elements beyond
+// index 0 is undefined. Used to trigger addU64 overflow paths in weight
+// calculation without allocating gigabytes of memory.
+func fakeByteSlice(n int) []byte {
+	var dummy byte
+	return unsafe.Slice(&dummy, n)
+}
+
+func TestTxWeightWithRegistry_ScriptSigOverflow(t *testing.T) {
+	// Two inputs with ScriptSig length MaxInt each. After accumulating the
+	// first input's scriptSig (~2^63), the second addU64(baseSize, len(scriptSig))
+	// overflows uint64.
+	big := fakeByteSlice(math.MaxInt)
+	tx := &Tx{
+		Version: TX_WIRE_VERSION,
+		Inputs: []TxInput{
+			{ScriptSig: big},
+			{ScriptSig: big},
+		},
+		Outputs: []TxOutput{{Value: 1000, CovenantType: COV_TYPE_P2PK}},
+	}
+
+	reg := DefaultSuiteRegistry()
+	rp := DefaultRotationProvider{}
+
+	_, _, _, err := txWeightAndStatsWithRegistry(tx, 100, rp, reg)
+	if err == nil {
+		t.Fatal("expected overflow error from huge ScriptSig")
+	}
+}
+
+func TestTxWeightWithRegistry_CovenantDataOverflow(t *testing.T) {
+	// Two outputs with CovenantData length MaxInt each → overflow in output loop.
+	big := fakeByteSlice(math.MaxInt)
+	tx := &Tx{
+		Version: TX_WIRE_VERSION,
+		Inputs:  []TxInput{{PrevVout: 0}},
+		Outputs: []TxOutput{
+			{Value: 1000, CovenantType: COV_TYPE_P2PK, CovenantData: big},
+			{Value: 2000, CovenantType: COV_TYPE_P2PK, CovenantData: big},
+		},
+	}
+
+	reg := DefaultSuiteRegistry()
+	rp := DefaultRotationProvider{}
+
+	_, _, _, err := txWeightAndStatsWithRegistry(tx, 100, rp, reg)
+	if err == nil {
+		t.Fatal("expected overflow error from huge CovenantData")
+	}
+}
+
+func TestTxWeightWithRegistry_WitnessOverflow(t *testing.T) {
+	// Two witness items with huge pubkey → overflow in witness loop.
+	big := fakeByteSlice(math.MaxInt)
+	tx := &Tx{
+		Version: TX_WIRE_VERSION,
+		Inputs:  []TxInput{{PrevVout: 0}},
+		Outputs: []TxOutput{{Value: 1000, CovenantType: COV_TYPE_P2PK}},
+		Witness: []WitnessItem{
+			{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: big, Signature: []byte{0x01}},
+			{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: big, Signature: []byte{0x01}},
+		},
+	}
+
+	reg := DefaultSuiteRegistry()
+	rp := DefaultRotationProvider{}
+
+	_, _, _, err := txWeightAndStatsWithRegistry(tx, 100, rp, reg)
+	if err == nil {
+		t.Fatal("expected overflow error from huge witness pubkey")
+	}
+}
+
+func TestTxWeightWithRegistry_AnchorBytesOverflow(t *testing.T) {
+	// Two anchor outputs with huge CovenantData → overflow in anchorBytes accumulation.
+	big := fakeByteSlice(math.MaxInt)
+	tx := &Tx{
+		Version: TX_WIRE_VERSION,
+		Inputs:  []TxInput{{PrevVout: 0}},
+		Outputs: []TxOutput{
+			{Value: 1000, CovenantType: COV_TYPE_ANCHOR, CovenantData: big},
+			{Value: 2000, CovenantType: COV_TYPE_ANCHOR, CovenantData: big},
+		},
+	}
+
+	reg := DefaultSuiteRegistry()
+	rp := DefaultRotationProvider{}
+
+	_, _, _, err := txWeightAndStatsWithRegistry(tx, 100, rp, reg)
+	if err == nil {
+		t.Fatal("expected overflow error from anchor bytes")
+	}
+}
+
+func TestTxWeightWithRegistry_BaseWeightMulOverflow(t *testing.T) {
+	// Single input with ScriptSig big enough that mulU64(4, baseSize) overflows.
+	// After one MaxInt ScriptSig: baseSize ≈ 2^63. mulU64(4, 2^63) = 2^65 > MaxUint64.
+	big := fakeByteSlice(math.MaxInt)
+	tx := &Tx{
+		Version: TX_WIRE_VERSION,
+		Inputs:  []TxInput{{ScriptSig: big}},
+		Outputs: []TxOutput{{Value: 1000, CovenantType: COV_TYPE_P2PK}},
+	}
+
+	reg := DefaultSuiteRegistry()
+	rp := DefaultRotationProvider{}
+
+	_, _, _, err := txWeightAndStatsWithRegistry(tx, 100, rp, reg)
+	if err == nil {
+		t.Fatal("expected overflow error from mulU64(WITNESS_DISCOUNT_DIVISOR, baseSize)")
+	}
+}
+
+func TestTxWeightWithRegistry_SignatureOverflow(t *testing.T) {
+	// Two witness items with huge Signature → overflow in witness loop.
+	big := fakeByteSlice(math.MaxInt)
+	tx := &Tx{
+		Version: TX_WIRE_VERSION,
+		Inputs:  []TxInput{{PrevVout: 0}},
+		Outputs: []TxOutput{{Value: 1000, CovenantType: COV_TYPE_P2PK}},
+		Witness: []WitnessItem{
+			{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: []byte{0x01}, Signature: big},
+			{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: []byte{0x01}, Signature: big},
+		},
+	}
+
+	reg := DefaultSuiteRegistry()
+	rp := DefaultRotationProvider{}
+
+	_, _, _, err := txWeightAndStatsWithRegistry(tx, 100, rp, reg)
+	if err == nil {
+		t.Fatal("expected overflow error from huge witness signature")
+	}
+}
+
+func TestTxWeightWithRegistry_DaPayloadOverflow(t *testing.T) {
+	// DaPayload big enough to overflow daSize computation.
+	big := fakeByteSlice(math.MaxInt)
+	tx := &Tx{
+		Version:   TX_WIRE_VERSION,
+		TxKind:    0x01,
+		Inputs:    []TxInput{{PrevVout: 0}},
+		Outputs:   []TxOutput{{Value: 1000, CovenantType: COV_TYPE_P2PK}},
+		DaPayload: big,
+	}
+
+	reg := DefaultSuiteRegistry()
+	rp := DefaultRotationProvider{}
+
+	_, _, _, err := txWeightAndStatsWithRegistry(tx, 100, rp, reg)
+	if err == nil {
+		t.Fatal("expected overflow error from huge DaPayload")
 	}
 }
