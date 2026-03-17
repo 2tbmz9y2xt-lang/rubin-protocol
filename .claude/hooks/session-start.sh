@@ -6,9 +6,6 @@ if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
   exit 0
 fi
 
-# Read stdin (hook input JSON)
-input=$(cat)
-source_type=$(echo "$input" | jq -r '.source // "unknown"')
 
 cat >&2 <<'BOOT'
 === NEON MEMORY BOOT CHECK REQUIRED ===
