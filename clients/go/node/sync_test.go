@@ -143,6 +143,74 @@ func TestPVShadowMismatch_SequentialTruthPreserved(t *testing.T) {
 	}
 }
 
+func TestPVShadowStats_NilEngine(t *testing.T) {
+	var nilEngine *SyncEngine
+	m, s := nilEngine.PVShadowStats()
+	if m != 0 || s != nil {
+		t.Fatalf("expected zero stats for nil engine, got mismatches=%d samples=%v", m, s)
+	}
+}
+
+func TestPVShadowMismatch_IsBounded(t *testing.T) {
+	st := NewChainState()
+	cfg := DefaultSyncConfig(nil, [32]byte{}, "")
+	cfg.ParallelValidationMode = "shadow"
+	cfg.PVShadowMaxSamples = 1
+	engine, err := NewSyncEngine(st, nil, cfg)
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+
+	engine.recordPVShadowMismatch("a")
+	engine.recordPVShadowMismatch("b")
+	m, samples := engine.PVShadowStats()
+	if m != 2 {
+		t.Fatalf("mismatches=%d, want 2", m)
+	}
+	if len(samples) != 1 || samples[0] != "a" {
+		t.Fatalf("samples=%v, want [a]", samples)
+	}
+}
+
+func TestPVShadow_NoMismatchOnValidBlock(t *testing.T) {
+	target := consensus.POW_LIMIT
+	cfg := DefaultSyncConfig(&target, devnetGenesisChainID, "")
+	cfg.ParallelValidationMode = "shadow"
+	cfg.PVShadowMaxSamples = 3
+
+	signer := mustNodeMLDSA87Keypair(t)
+	keyID := sha3.Sum256(signer.PubkeyBytes())
+	fromAddr, err := ParseMineAddress(hex.EncodeToString(keyID[:]))
+	if err != nil {
+		t.Fatalf("ParseMineAddress: %v", err)
+	}
+	st, ops := testSpendableChainState(fromAddr, []uint64{100})
+	engine, err := NewSyncEngine(st, nil, cfg)
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	var stderr bytes.Buffer
+	engine.SetStderr(&stderr)
+
+	height := st.Height + 1
+	tx1 := mustBuildSignedTransferTxForSyncTest(t, st.Utxos, []consensus.Outpoint{ops[0]}, 1, 0, 1, signer, fromAddr, fromAddr)
+	_, _, wtxid1, _, err := consensus.ParseTx(tx1)
+	if err != nil {
+		t.Fatalf("ParseTx(tx1): %v", err)
+	}
+	subsidy := consensus.BlockSubsidy(height, st.AlreadyGenerated)
+	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueForWtxids(t, height, subsidy, [][32]byte{{}, wtxid1})
+	block := buildMultiTxBlock(t, st.TipHash, target, 2, coinbase, tx1)
+
+	if _, err := engine.ApplyBlock(block, nil); err != nil {
+		t.Fatalf("ApplyBlock(valid): %v", err)
+	}
+	m, samples := engine.PVShadowStats()
+	if m != 0 || len(samples) != 0 {
+		t.Fatalf("expected no mismatches on valid block, got mismatches=%d samples=%v stderr=%q", m, samples, stderr.String())
+	}
+}
+
 func TestNewSyncEngine_NilChainState(t *testing.T) {
 	_, err := NewSyncEngine(nil, nil, SyncConfig{})
 	if err == nil {
