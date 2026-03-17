@@ -73,6 +73,7 @@ type SyncEngine struct {
 	pvShadowMax        uint64
 	pvShadowMismatches uint64
 	pvShadowSamples    []string
+	pvTelemetry        *PVTelemetry
 }
 
 func DefaultSyncConfig(expectedTarget *[32]byte, chainID [32]byte, chainStatePath string) SyncConfig {
@@ -107,6 +108,7 @@ func NewSyncEngine(chainState *ChainState, blockStore *BlockStore, cfg SyncConfi
 		stderr:      io.Discard,
 		pvMode:      mode,
 		pvShadowMax: cfg.PVShadowMaxSamples,
+		pvTelemetry: NewPVTelemetry(cfg.ParallelValidationMode),
 	}
 	if engine.pvShadowMax == 0 {
 		engine.pvShadowMax = defaultPVShadowMaxSamples
@@ -136,6 +138,14 @@ func (s *SyncEngine) recordPVShadowMismatch(line string) {
 		return
 	}
 	s.pvShadowSamples = append(s.pvShadowSamples, line)
+}
+
+// PVTelemetry returns the PV telemetry instance for metrics export.
+func (s *SyncEngine) PVTelemetry() *PVTelemetry {
+	if s == nil {
+		return nil
+	}
+	return s.pvTelemetry
 }
 
 func (s *SyncEngine) PVShadowStats() (mismatches uint64, samples []string) {
@@ -406,6 +416,7 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 	var summary *ChainStateConnectSummary
 	// Q-PV-12 shadow rollout: sequential truth path. Parallel validation runs on a
 	// cloned state and is used for bounded diagnostics only (never changes verdict).
+	pvActive := (s.pvMode == pvModeShadow || s.pvMode == pvModeOn) && s.isInIBDUnchecked()
 	summary, err = s.chainState.ConnectBlockWithCoreExtProfiles(
 		blockBytes,
 		s.cfg.ExpectedTarget,
@@ -414,7 +425,9 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 		s.cfg.CoreExtProfiles,
 	)
 	if err != nil {
-		if (s.pvMode == pvModeShadow || s.pvMode == pvModeOn) && s.isInIBDUnchecked() {
+		if pvActive {
+			s.pvTelemetry.RecordBlockValidated()
+			validateStart := time.Now()
 			shadowState := cloneChainState(prevState)
 			_, parErr := shadowState.ConnectBlockParallelSigs(
 				blockBytes,
@@ -424,15 +437,21 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 				s.cfg.CoreExtProfiles,
 				0,
 			)
+			s.pvTelemetry.RecordValidateLatency(time.Since(validateStart))
 			seqCode, parCode := txErrCode(err), txErrCode(parErr)
 			if seqCode != parCode {
 				s.recordPVShadowMismatch(fmt.Sprintf("pv_shadow mismatch(height=%d): seq_err=%s par_err=%s", blockHeight, seqCode, parCode))
 				_, _ = fmt.Fprintf(s.stderr, "pv_shadow: mismatch height=%d seq_err=%s par_err=%s\n", blockHeight, seqCode, parCode)
+				s.pvTelemetry.RecordMismatchError()
 			}
+		} else {
+			s.pvTelemetry.RecordBlockSkipped()
 		}
 		return nil, err
 	}
-	if (s.pvMode == pvModeShadow || s.pvMode == pvModeOn) && s.isInIBDUnchecked() {
+	if pvActive {
+		s.pvTelemetry.RecordBlockValidated()
+		validateStart := time.Now()
 		shadowState := cloneChainState(prevState)
 		parSummary, parErr := shadowState.ConnectBlockParallelSigs(
 			blockBytes,
@@ -442,13 +461,18 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 			s.cfg.CoreExtProfiles,
 			0,
 		)
+		s.pvTelemetry.RecordValidateLatency(time.Since(validateStart))
 		if parErr != nil {
 			s.recordPVShadowMismatch(fmt.Sprintf("pv_shadow mismatch(height=%d): seq_ok par_err=%s", blockHeight, txErrCode(parErr)))
 			_, _ = fmt.Fprintf(s.stderr, "pv_shadow: mismatch height=%d seq_ok par_err=%s\n", blockHeight, txErrCode(parErr))
+			s.pvTelemetry.RecordMismatchVerdict()
 		} else if parSummary.PostStateDigest != summary.PostStateDigest {
 			s.recordPVShadowMismatch(fmt.Sprintf("pv_shadow mismatch(height=%d): post_state_digest", blockHeight))
 			_, _ = fmt.Fprintf(s.stderr, "pv_shadow: mismatch height=%d post_state_digest\n", blockHeight)
+			s.pvTelemetry.RecordMismatchState()
 		}
+	} else {
+		s.pvTelemetry.RecordBlockSkipped()
 	}
 	if err := s.persistAppliedBlock(summary, blockHash, pb, blockBytes, prevState); err != nil {
 		return nil, s.rollbackApplyBlock(err, rollbackState)

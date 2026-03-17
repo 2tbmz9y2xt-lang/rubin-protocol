@@ -538,6 +538,15 @@ func renderPrometheusMetrics(state *devnetRPCState) string {
 			),
 		)
 	}
+	// Q-PV-13: parallel validation telemetry.
+	if state != nil && state.syncEngine != nil {
+		pvt := state.syncEngine.PVTelemetry()
+		if pvt != nil {
+			pvLines := pvt.Snapshot().PrometheusLines()
+			lines = append(lines, pvLines...)
+		}
+	}
+
 	return strings.Join(lines, "\n") + "\n"
 }
 
