@@ -88,7 +88,9 @@ def detect_range_from_github_event() -> tuple[str, str, bool] | None:
 
 def changed_files(base: str, head: str, pr_mode: bool) -> list[str]:
     range_expr = f"{base}...{head}" if pr_mode else f"{base}..{head}"
-    out = run_git(["diff", "--name-only", "--diff-filter=ACMR", range_expr])
+    # Include additions/modifications/renames AND deletions; removing a PV/CORE_EXT
+    # sensitive file must still go through the same documentation gate.
+    out = run_git(["diff", "--name-only", "--diff-filter=ACMRD", range_expr])
     files = [line.strip() for line in out.splitlines() if line.strip()]
     return sorted(set(files))
 
