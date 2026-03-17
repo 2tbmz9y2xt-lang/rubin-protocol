@@ -38,6 +38,17 @@ const (
 	pvModeOn
 )
 
+func (m parallelValidationMode) String() string {
+	switch m {
+	case pvModeShadow:
+		return "shadow"
+	case pvModeOn:
+		return "on"
+	default:
+		return "off"
+	}
+}
+
 func parseParallelValidationMode(s string) (parallelValidationMode, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "", "off":
@@ -108,7 +119,7 @@ func NewSyncEngine(chainState *ChainState, blockStore *BlockStore, cfg SyncConfi
 		stderr:      io.Discard,
 		pvMode:      mode,
 		pvShadowMax: cfg.PVShadowMaxSamples,
-		pvTelemetry: NewPVTelemetry(cfg.ParallelValidationMode),
+		pvTelemetry: NewPVTelemetry(mode.String()),
 	}
 	if engine.pvShadowMax == 0 {
 		engine.pvShadowMax = defaultPVShadowMaxSamples
@@ -474,9 +485,11 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 	} else {
 		s.pvTelemetry.RecordBlockSkipped()
 	}
+	commitStart := time.Now()
 	if err := s.persistAppliedBlock(summary, blockHash, pb, blockBytes, prevState); err != nil {
 		return nil, s.rollbackApplyBlock(err, rollbackState)
 	}
+	s.pvTelemetry.RecordCommitLatency(time.Since(commitStart))
 
 	s.recordAppliedBlock(summary.BlockHeight, pb.Header.Timestamp)
 	if s.mempool != nil {
