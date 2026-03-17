@@ -23,9 +23,10 @@ import (
 //	    return err // first error by submission order
 //	}
 type SigCheckQueue struct {
-	tasks   []sigCheckTask
-	workers int
-	cache   *SigCache // optional; positive-only sig cache (Q-PV-07)
+	tasks    []sigCheckTask
+	workers  int
+	cache    *SigCache      // optional; positive-only sig cache (Q-PV-07)
+	registry *SuiteRegistry // optional; when set, Flush uses verifySigWithRegistry for rotation-aware dispatch
 }
 
 type sigCheckTask struct {
@@ -53,6 +54,15 @@ func NewSigCheckQueue(workers int) *SigCheckQueue {
 // Returns the queue for chaining.
 func (q *SigCheckQueue) WithCache(c *SigCache) *SigCheckQueue {
 	q.cache = c
+	return q
+}
+
+// WithRegistry attaches a suite registry for rotation-aware verification during Flush.
+// When set, Flush uses verifySigWithRegistry instead of verifySig so queued tasks
+// from native spend suites (e.g. post-rotation) verify correctly.
+// Returns the queue for chaining.
+func (q *SigCheckQueue) WithRegistry(registry *SuiteRegistry) *SigCheckQueue {
+	q.registry = registry
 	return q
 }
 
@@ -110,7 +120,13 @@ func (q *SigCheckQueue) Flush() error {
 		if q.cache != nil && q.cache.Lookup(t.suiteID, t.pubkey, t.sig, t.digest) {
 			return nil // cache hit — previously verified valid
 		}
-		ok, err := verifySig(t.suiteID, t.pubkey, t.sig, t.digest)
+		var ok bool
+		var err error
+		if q.registry != nil {
+			ok, err = verifySigWithRegistry(t.suiteID, t.pubkey, t.sig, t.digest, q.registry)
+		} else {
+			ok, err = verifySig(t.suiteID, t.pubkey, t.sig, t.digest)
+		}
 		if err != nil {
 			return err
 		}
@@ -160,7 +176,13 @@ func (q *SigCheckQueue) Flush() error {
 				if q.cache != nil && q.cache.Lookup(t.suiteID, t.pubkey, t.sig, t.digest) {
 					continue // cache hit — valid
 				}
-				ok, err := verifySig(t.suiteID, t.pubkey, t.sig, t.digest)
+				var ok bool
+				var err error
+				if q.registry != nil {
+					ok, err = verifySigWithRegistry(t.suiteID, t.pubkey, t.sig, t.digest, q.registry)
+				} else {
+					ok, err = verifySig(t.suiteID, t.pubkey, t.sig, t.digest)
+				}
 				if err != nil {
 					results[idx] = err
 					anyFailed.Store(true)

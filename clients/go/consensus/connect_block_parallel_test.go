@@ -425,7 +425,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_MatchesSequential(t *testing.T) {
 	// Queued (parallel).
 	parUtxos := map[Outpoint]UtxoEntry{op: utxo}
 	q := NewSigCheckQueue(2)
-	parWork, parFee, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, parUtxos, 1, 0, [32]byte{}, nil, q)
+	parWork, parFee, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, parUtxos, 1, 0, [32]byte{}, nil, q, nil, nil)
 	if err != nil {
 		t.Fatalf("Queued pre-flush: %v", err)
 	}
@@ -459,7 +459,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_MissingUTXO(t *testing.T) {
 		Witness: []WitnessItem{{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: kp.PubkeyBytes(), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}},
 	}
 	q := NewSigCheckQueue(1)
-	_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, make(map[Outpoint]UtxoEntry), 1, 0, [32]byte{}, nil, q)
+	_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, make(map[Outpoint]UtxoEntry), 1, 0, [32]byte{}, nil, q, nil, nil)
 	if err == nil {
 		t.Fatalf("expected UTXO error")
 	}

@@ -17,8 +17,9 @@ import "encoding/binary"
 
 // verifyMLDSAKeyAndSigQ is the queue-aware variant of verifyMLDSAKeyAndSigWithCache.
 // When sigQueue is non-nil, it performs all fast pre-checks (key binding, sighash
-// computation) inline and defers the expensive ML-DSA-87 crypto verification to
-// the queue. When sigQueue is nil, it behaves identically to the original.
+// computation) inline and defers the expensive crypto verification to the queue
+// (Flush uses registry when set for rotation-aware dispatch). When sigQueue is nil,
+// it verifies inline using verifySigWithRegistry if registry is non-nil, else verifySig.
 func verifyMLDSAKeyAndSigQ(
 	w WitnessItem,
 	expectedKeyID [32]byte,
@@ -28,6 +29,7 @@ func verifyMLDSAKeyAndSigQ(
 	chainID [32]byte,
 	cache *SighashV1PrehashCache,
 	sigQueue *SigCheckQueue,
+	registry *SuiteRegistry,
 	context string,
 ) error {
 	if sha3_256(w.Pubkey) != expectedKeyID {
@@ -41,7 +43,12 @@ func verifyMLDSAKeyAndSigQ(
 		sigQueue.Push(w.SuiteID, w.Pubkey, cryptoSig, digest, txerr(TX_ERR_SIG_INVALID, context+" signature invalid"))
 		return nil
 	}
-	ok, err := verifySig(w.SuiteID, w.Pubkey, cryptoSig, digest)
+	var ok bool
+	if registry != nil {
+		ok, err = verifySigWithRegistry(w.SuiteID, w.Pubkey, cryptoSig, digest, registry)
+	} else {
+		ok, err = verifySig(w.SuiteID, w.Pubkey, cryptoSig, digest)
+	}
 	if err != nil {
 		return err
 	}
@@ -91,7 +98,7 @@ func validateP2PKSpendQ(
 	}
 	var keyID [32]byte
 	copy(keyID[:], entry.CovenantData[1:33])
-	return verifyMLDSAKeyAndSigQ(w, keyID, tx, inputIndex, inputValue, chainID, cache, sigQueue, "CORE_P2PK")
+	return verifyMLDSAKeyAndSigQ(w, keyID, tx, inputIndex, inputValue, chainID, cache, sigQueue, registry, "CORE_P2PK")
 }
 
 // validateThresholdSigSpendQ is the queue-aware variant of validateThresholdSigSpendWithCache.
@@ -151,7 +158,7 @@ func validateThresholdSigSpendQ(
 			return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical witness item lengths")
 		}
 
-		if err := verifyMLDSAKeyAndSigQ(w, keys[i], tx, inputIndex, inputValue, chainID, cache, sigQueue, context); err != nil {
+		if err := verifyMLDSAKeyAndSigQ(w, keys[i], tx, inputIndex, inputValue, chainID, cache, sigQueue, registry, context); err != nil {
 			return err
 		}
 		valid++
@@ -277,7 +284,13 @@ func validateHTLCSpendQ(
 		sigQueue.Push(sigItem.SuiteID, sigItem.Pubkey, cryptoSig, digest, txerr(TX_ERR_SIG_INVALID, "CORE_HTLC signature invalid"))
 		return nil
 	}
-	sigOk, verifyErr := verifySig(sigItem.SuiteID, sigItem.Pubkey, cryptoSig, digest)
+	var sigOk bool
+	var verifyErr error
+	if registry != nil {
+		sigOk, verifyErr = verifySigWithRegistry(sigItem.SuiteID, sigItem.Pubkey, cryptoSig, digest, registry)
+	} else {
+		sigOk, verifyErr = verifySig(sigItem.SuiteID, sigItem.Pubkey, cryptoSig, digest)
+	}
 	if verifyErr != nil {
 		return verifyErr
 	}
@@ -327,5 +340,5 @@ func validateCoreStealthSpendQ(
 	if len(w.Pubkey) != params.PubkeyLen || len(w.Signature) != params.SigLen+1 {
 		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical witness item lengths")
 	}
-	return verifyMLDSAKeyAndSigQ(w, c.OneTimeKeyID, tx, inputIndex, inputValue, chainID, cache, sigQueue, "CORE_STEALTH")
+	return verifyMLDSAKeyAndSigQ(w, c.OneTimeKeyID, tx, inputIndex, inputValue, chainID, cache, sigQueue, registry, "CORE_STEALTH")
 }

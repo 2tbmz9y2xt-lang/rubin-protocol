@@ -55,9 +55,10 @@ func ValidateTxLocal(
 		return result
 	}
 
-	// Create per-worker sig queue. Workers=1 since this runs inside a
-	// pool worker already — no need for nested parallelism.
-	sigQueue := NewSigCheckQueue(1)
+	// Create per-worker sig queue (rotation-aware so Flush uses verifySigWithRegistry).
+	reg := DefaultSuiteRegistry()
+	rot := DefaultRotationProvider{}
+	sigQueue := NewSigCheckQueue(1).WithRegistry(reg)
 	if sigCache != nil {
 		sigQueue.WithCache(sigCache)
 	}
@@ -78,7 +79,7 @@ func ValidateTxLocal(
 		if err := validateInputSpendQ(
 			entry, assigned, tx, uint32(inputIndex), entry.Value,
 			chainID, blockHeight, blockMTP, tvc.SighashCache,
-			coreExtProfiles, sigQueue, nil, nil,
+			coreExtProfiles, sigQueue, rot, reg,
 		); err != nil {
 			result.Err = err
 			return result

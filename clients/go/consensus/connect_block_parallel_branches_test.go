@@ -49,7 +49,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_MultisigBranch(t *testing.T) {
 	}
 
 	q := NewSigCheckQueue(1)
-	nextUtxos, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xBB), utxoSet, 1, 0, [32]byte{}, nil, q)
+	nextUtxos, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xBB), utxoSet, 1, 0, [32]byte{}, nil, q, nil, nil)
 	if err != nil {
 		t.Fatalf("multisig branch: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_HTLCClaimBranch(t *testing.T) {
 	tx.Witness = []WitnessItem{pathItem, sigItem}
 
 	q := NewSigCheckQueue(1)
-	nextUtxos, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xDD), utxoSet, 1, 0, [32]byte{}, nil, q)
+	nextUtxos, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xDD), utxoSet, 1, 0, [32]byte{}, nil, q, nil, nil)
 	if err != nil {
 		t.Fatalf("HTLC claim branch: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_StealthBranch(t *testing.T) {
 	tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 500, [32]byte{}, kp)}
 
 	q := NewSigCheckQueue(1)
-	nextUtxos, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xFF), utxoSet, 1, 0, [32]byte{}, nil, q)
+	nextUtxos, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xFF), utxoSet, 1, 0, [32]byte{}, nil, q, nil, nil)
 	if err != nil {
 		t.Fatalf("stealth branch: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_StealthBranch(t *testing.T) {
 func TestApplyNonCoinbaseTxBasicWorkQ_ErrorPaths(t *testing.T) {
 	t.Run("nil_tx", func(t *testing.T) {
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(nil, [32]byte{}, nil, 0, 0, [32]byte{}, nil, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(nil, [32]byte{}, nil, 0, 0, [32]byte{}, nil, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected error for nil tx")
 		}
@@ -165,7 +165,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_ErrorPaths(t *testing.T) {
 	t.Run("no_inputs", func(t *testing.T) {
 		tx := &Tx{Version: 1, TxNonce: 1}
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, nil, 0, 0, [32]byte{}, nil, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, nil, 0, 0, [32]byte{}, nil, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected error for no inputs")
 		}
@@ -178,7 +178,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_ErrorPaths(t *testing.T) {
 			Inputs:  []TxInput{{PrevTxid: hashWithPrefix(1), PrevVout: 0}},
 		}
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, nil, 0, 0, [32]byte{}, nil, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, nil, 0, 0, [32]byte{}, nil, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected error for zero nonce")
 		}
@@ -201,7 +201,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_ErrorPaths(t *testing.T) {
 
 		q := NewSigCheckQueue(1)
 		utxos := make(map[Outpoint]UtxoEntry) // empty
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected missing UTXO error")
 		}
@@ -233,7 +233,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_ErrorPaths(t *testing.T) {
 			{Txid: prevTxid, Vout: 0}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: covData},
 		}
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected duplicate input error")
 		}
@@ -263,7 +263,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_ErrorPaths(t *testing.T) {
 		}
 		q := NewSigCheckQueue(1)
 		// height=50, but coinbase at height=0 needs COINBASE_MATURITY blocks
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 50, 0, [32]byte{}, nil, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 50, 0, [32]byte{}, nil, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected coinbase immature error")
 		}
@@ -293,7 +293,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_ErrorPaths(t *testing.T) {
 			},
 		}
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected unspendable anchor error")
 		}
@@ -319,7 +319,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_ErrorPaths(t *testing.T) {
 			{Txid: prevTxid, Vout: 0}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: covData},
 		}
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected sequence invalid error")
 		}
@@ -348,7 +348,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_ErrorPaths(t *testing.T) {
 			{Txid: prevTxid, Vout: 0}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: covData},
 		}
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected witness count mismatch error")
 		}
@@ -371,7 +371,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_ErrorPaths(t *testing.T) {
 			{Txid: prevTxid, Vout: 0}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: covData},
 		}
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected value conservation error")
 		}
@@ -394,7 +394,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_ErrorPaths(t *testing.T) {
 
 		utxos := make(map[Outpoint]UtxoEntry)
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected coinbase prevout encoding error")
 		}
@@ -421,7 +421,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_ErrorPaths(t *testing.T) {
 			},
 		}
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected DA_COMMIT unspendable error")
 		}
@@ -447,7 +447,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_ErrorPaths(t *testing.T) {
 			{Txid: prevTxid, Vout: 0}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: covData},
 		}
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected script_sig error")
 		}
@@ -470,7 +470,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_ErrorPaths(t *testing.T) {
 			{Txid: prevTxid, Vout: 0}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: covData},
 		}
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected witness underflow error")
 		}
@@ -510,7 +510,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_ErrorPaths(t *testing.T) {
 			{Txid: prevVault2, Vout: 0}: {Value: 100, CovenantType: COV_TYPE_VAULT, CovenantData: vaultCovData},
 		}
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, nil, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected multiple vault inputs error")
 		}
@@ -565,7 +565,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_VaultSpendOK(t *testing.T) {
 	}
 
 	q := NewSigCheckQueue(1)
-	nextUtxos, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxos, 200, 0, [32]byte{}, nil, q)
+	nextUtxos, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxos, 200, 0, [32]byte{}, nil, q, nil, nil)
 	if err != nil {
 		t.Fatalf("vault spend: %v", err)
 	}
@@ -615,7 +615,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_VaultCreationOK(t *testing.T) {
 	}
 
 	q := NewSigCheckQueue(1)
-	nextUtxos, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxos, 200, 0, [32]byte{}, nil, q)
+	nextUtxos, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxos, 200, 0, [32]byte{}, nil, q, nil, nil)
 	if err != nil {
 		t.Fatalf("vault creation: %v", err)
 	}
@@ -680,7 +680,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_VaultErrorPaths(t *testing.T) {
 			{Txid: prevOwner, Vout: 0}: {Value: 10, CovenantType: COV_TYPE_P2PK, CovenantData: ownerCovData},
 		}
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 200, 0, [32]byte{}, nil, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 200, 0, [32]byte{}, nil, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected vault output in spend error")
 		}
@@ -724,7 +724,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_VaultErrorPaths(t *testing.T) {
 			{Txid: prevSponsor, Vout: 0}: {Value: 5, CovenantType: COV_TYPE_P2PK, CovenantData: sponsorCovData},
 		}
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 200, 0, [32]byte{}, nil, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 200, 0, [32]byte{}, nil, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected fee sponsor forbidden error")
 		}
@@ -764,7 +764,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_VaultErrorPaths(t *testing.T) {
 			{Txid: prevOwner, Vout: 0}: {Value: 10, CovenantType: COV_TYPE_P2PK, CovenantData: ownerCovData},
 		}
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 200, 0, [32]byte{}, nil, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 200, 0, [32]byte{}, nil, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected whitelist error")
 		}
@@ -806,7 +806,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_VaultErrorPaths(t *testing.T) {
 			{Txid: prevInput, Vout: 0}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: inputCovData},
 		}
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 200, 0, [32]byte{}, nil, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 200, 0, [32]byte{}, nil, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected vault owner auth error")
 		}
@@ -847,7 +847,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_VaultErrorPaths(t *testing.T) {
 			{Txid: prevOwner, Vout: 0}: {Value: 10, CovenantType: COV_TYPE_P2PK, CovenantData: ownerCovData},
 		}
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 200, 0, [32]byte{}, nil, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 200, 0, [32]byte{}, nil, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected disallowed destination type error")
 		}
@@ -904,7 +904,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreExtBranches(t *testing.T) {
 		}
 		// nil coreExtProfiles → inactive profile.
 		q := NewSigCheckQueue(1)
-		_, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xA1), utxos, 1, 0, [32]byte{}, nil, q)
+		_, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xA1), utxos, 1, 0, [32]byte{}, nil, q, nil, nil)
 		if err != nil {
 			t.Fatalf("inactive CORE_EXT: %v", err)
 		}
@@ -948,7 +948,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreExtBranches(t *testing.T) {
 		}
 
 		q := NewSigCheckQueue(1)
-		_, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xB1), utxos, 1, 0, [32]byte{}, profiles, q)
+		_, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xB1), utxos, 1, 0, [32]byte{}, profiles, q, nil, nil)
 		if err != nil {
 			t.Fatalf("active CORE_EXT ML-DSA-87: %v", err)
 		}
@@ -998,7 +998,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreExtBranches(t *testing.T) {
 		}
 
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, profiles, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, profiles, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected suite disallowed error")
 		}
@@ -1036,7 +1036,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreExtBranches(t *testing.T) {
 		}
 
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, profiles, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, profiles, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected sentinel forbidden error")
 		}
@@ -1080,7 +1080,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreExtBranches(t *testing.T) {
 		}
 
 		q := NewSigCheckQueue(1)
-		_, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xD1), utxos, 1, 0, [32]byte{}, profiles, q)
+		_, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xD1), utxos, 1, 0, [32]byte{}, profiles, q, nil, nil)
 		if err != nil {
 			t.Fatalf("ext verifier OK: %v", err)
 		}
@@ -1125,7 +1125,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreExtBranches(t *testing.T) {
 		}
 
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, profiles, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, profiles, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected ext verifier rejection error")
 		}
@@ -1166,7 +1166,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreExtBranches(t *testing.T) {
 		}
 
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, profiles, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, profiles, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected nil ext verifier error")
 		}
@@ -1200,7 +1200,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreExtBranches(t *testing.T) {
 		}
 
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, profiles, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, profiles, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected profile lookup error")
 		}
@@ -1243,7 +1243,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreExtBranches(t *testing.T) {
 		}
 
 		q := NewSigCheckQueue(1)
-		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, profiles, q)
+		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, profiles, q, nil, nil)
 		if err == nil {
 			t.Fatal("expected non-canonical lengths error")
 		}
@@ -1278,7 +1278,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_AnchorOutputSkip(t *testing.T) {
 	}
 
 	q := NewSigCheckQueue(1)
-	nextUtxos, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxos, 1, 0, [32]byte{}, nil, q)
+	nextUtxos, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxos, 1, 0, [32]byte{}, nil, q, nil, nil)
 	if err != nil {
 		t.Fatalf("anchor output skip: %v", err)
 	}
@@ -1320,7 +1320,7 @@ func TestApplyWrapper(t *testing.T) {
 
 		q := NewSigCheckQueue(1)
 		nextUtxos, summary, err := applyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesQ(
-			tx, txid, utxos, 1, 12345, 0, [32]byte{}, nil, q,
+			tx, txid, utxos, 1, 12345, 0, [32]byte{}, nil, q, nil, nil,
 		)
 		if err != nil {
 			t.Fatalf("wrapper success: %v", err)
@@ -1339,7 +1339,7 @@ func TestApplyWrapper(t *testing.T) {
 	t.Run("error_propagated", func(t *testing.T) {
 		q := NewSigCheckQueue(1)
 		_, _, err := applyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesQ(
-			nil, [32]byte{}, nil, 0, 0, 0, [32]byte{}, nil, q,
+			nil, [32]byte{}, nil, 0, 0, 0, [32]byte{}, nil, q, nil, nil,
 		)
 		if err == nil {
 			t.Fatal("expected error from nil tx")
@@ -1372,7 +1372,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CovenantGenesisError(t *testing.T) {
 	tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, kp)}
 
 	q := NewSigCheckQueue(1)
-	_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxoSet, 1, 0, [32]byte{}, nil, q)
+	_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxoSet, 1, 0, [32]byte{}, nil, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected covenant genesis error for P2PK value=0")
 	}
@@ -1407,7 +1407,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_SighashPrehashError(t *testing.T) {
 	tx.Witness = []WitnessItem{{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: kp.PubkeyBytes(), Signature: make([]byte, ML_DSA_87_SIG_BYTES)}}
 
 	q := NewSigCheckQueue(1)
-	_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxoSet, 1, 0, [32]byte{}, nil, q)
+	_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxoSet, 1, 0, [32]byte{}, nil, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected sighash prehash error for tx_kind=0x01 without da_commit_core")
 	}
@@ -1442,7 +1442,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CheckSpendCovenantError(t *testing.T) {
 	tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, kp)}
 
 	q := NewSigCheckQueue(1)
-	_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxoSet, 1, 0, [32]byte{}, nil, q)
+	_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxoSet, 1, 0, [32]byte{}, nil, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected checkSpendCovenant error for corrupt vault data")
 	}
@@ -1474,7 +1474,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_P2PKSpendQError(t *testing.T) {
 	tx.Witness = []WitnessItem{{SuiteID: 0xFF, Pubkey: kp.PubkeyBytes(), Signature: make([]byte, ML_DSA_87_SIG_BYTES)}}
 
 	q := NewSigCheckQueue(1)
-	_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxoSet, 1, 0, [32]byte{}, nil, q)
+	_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxoSet, 1, 0, [32]byte{}, nil, q, nil, nil)
 	if err == nil {
 		t.Fatal("expected P2PK spend error for invalid suite ID")
 	}

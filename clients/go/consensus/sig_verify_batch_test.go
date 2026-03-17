@@ -542,7 +542,7 @@ func TestVerifyMLDSAKeyAndSigQ_NilQueue_MatchesOriginal(t *testing.T) {
 
 	// Queue=nil should verify inline, matching the original function.
 	err = verifyMLDSAKeyAndSigQ(
-		tx.Witness[0], expectedKeyID, tx, inputIndex, inputValue, chainID, cache, nil, "TEST",
+		tx.Witness[0], expectedKeyID, tx, inputIndex, inputValue, chainID, cache, nil, nil, "TEST",
 	)
 	if err != nil {
 		t.Fatalf("nil queue verify: %v", err)
@@ -551,7 +551,7 @@ func TestVerifyMLDSAKeyAndSigQ_NilQueue_MatchesOriginal(t *testing.T) {
 	// Queue=non-nil should defer (not fail).
 	q := NewSigCheckQueue(1)
 	err = verifyMLDSAKeyAndSigQ(
-		tx.Witness[0], expectedKeyID, tx, inputIndex, inputValue, chainID, cache, q, "TEST",
+		tx.Witness[0], expectedKeyID, tx, inputIndex, inputValue, chainID, cache, q, nil, "TEST",
 	)
 	if err != nil {
 		t.Fatalf("queued verify (pre-flush): %v", err)
@@ -577,7 +577,7 @@ func TestVerifyMLDSAKeyAndSigQ_KeyBindingMismatch(t *testing.T) {
 	// Wrong key ID → should fail immediately, even with queue.
 	q := NewSigCheckQueue(1)
 	err := verifyMLDSAKeyAndSigQ(
-		tx.Witness[0], [32]byte{0xFF}, tx, 0, 1, [32]byte{}, nil, q, "TEST",
+		tx.Witness[0], [32]byte{0xFF}, tx, 0, 1, [32]byte{}, nil, q, nil, "TEST",
 	)
 	if err == nil {
 		t.Fatalf("expected key binding error")
@@ -618,7 +618,7 @@ func TestVerifyMLDSAKeyAndSigQ_NilQueue_InvalidSig(t *testing.T) {
 	}
 
 	// sigQueue=nil → verifies inline → should return invalid sig error.
-	err = verifyMLDSAKeyAndSigQ(w, expectedKeyID, tx, inputIndex, inputValue, chainID, cache, nil, "TEST")
+	err = verifyMLDSAKeyAndSigQ(w, expectedKeyID, tx, inputIndex, inputValue, chainID, cache, nil, nil, "TEST")
 	if err == nil {
 		t.Fatalf("expected error for mismatched sig, got nil")
 	}
@@ -644,7 +644,7 @@ func TestVerifyMLDSAKeyAndSigQ_NilQueue_BadSuite(t *testing.T) {
 		t.Fatalf("sighash cache: %v", err)
 	}
 
-	err = verifyMLDSAKeyAndSigQ(w, expectedKeyID, tx, inputIndex, inputValue, chainID, cache, nil, "TEST")
+	err = verifyMLDSAKeyAndSigQ(w, expectedKeyID, tx, inputIndex, inputValue, chainID, cache, nil, nil, "TEST")
 	if err == nil {
 		t.Fatalf("expected error for bad suite ID, got nil")
 	}

@@ -35,6 +35,13 @@ impl SuiteRegistry {
         Self { suites }
     }
 
+    /// Builds a registry from a map of suite ID to parameters. Use this for
+    /// custom rotation deployments or tests that need additional suites beyond
+    /// the default (e.g. `CryptoRotationDescriptor::validate` with old→new transition).
+    pub fn with_suites(suites: BTreeMap<u8, SuiteParams>) -> Self {
+        Self { suites }
+    }
+
     /// Looks up parameters for a suite ID.
     pub fn lookup(&self, suite_id: u8) -> Option<&SuiteParams> {
         self.suites.get(&suite_id)
@@ -248,6 +255,26 @@ mod tests {
         let p = reg.lookup(SUITE_ID_ML_DSA_87).unwrap();
         assert_eq!(p.pubkey_len, ML_DSA_87_PUBKEY_BYTES);
         assert_eq!(p.sig_len, ML_DSA_87_SIG_BYTES);
+    }
+
+    #[test]
+    fn test_suite_registry_with_suites() {
+        let mut suites = BTreeMap::new();
+        suites.insert(
+            0x01,
+            SuiteParams {
+                suite_id: 0x01,
+                pubkey_len: 100,
+                sig_len: 200,
+                verify_cost: 1,
+            },
+        );
+        let reg = SuiteRegistry::with_suites(suites);
+        assert!(reg.is_registered(0x01));
+        assert!(!reg.is_registered(0x02));
+        let p = reg.lookup(0x01).unwrap();
+        assert_eq!(p.pubkey_len, 100);
+        assert_eq!(p.sig_len, 200);
     }
 
     #[test]
