@@ -18,6 +18,13 @@ type ConnectBlockBasicSummary struct {
 	AlreadyGeneratedN1 uint64
 	UtxoCount          uint64
 	PostStateDigest    [32]byte
+
+	// SigTaskCount is the number of signature verification tasks dispatched
+	// to the worker pool during parallel validation. Zero for sequential path.
+	SigTaskCount uint64
+	// WorkerPanics is the number of panics recovered in worker goroutines
+	// during parallel validation. Zero for sequential path.
+	WorkerPanics uint64
 }
 
 // ConnectBlockBasicInMemoryAtHeight connects a block against an in-memory UTXO snapshot and an

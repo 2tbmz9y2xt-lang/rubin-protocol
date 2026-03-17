@@ -6,7 +6,6 @@ if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
   exit 0
 fi
 
-
 cat >&2 <<'BOOT'
 === NEON MEMORY BOOT CHECK REQUIRED ===
 

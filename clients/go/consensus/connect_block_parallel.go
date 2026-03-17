@@ -133,12 +133,16 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfiles(
 		}
 	}
 
+	// Record task count before flushing (Flush clears the queue).
+	sigTaskCount := uint64(sigQueue.Len())
+
 	// Flush the signature queue: verify all collected signatures in parallel.
 	// Returns the first error by submission order (deterministic within the
 	// deferred-sig model).
 	if err := sigQueue.Flush(); err != nil {
 		return nil, err
 	}
+	workerPanics := sigQueue.Panics()
 
 	// Enforce coinbase bound using locally computed fees.
 	if err := validateCoinbaseValueBound(pb, blockHeight, alreadyGenerated, sumFees); err != nil {
@@ -191,6 +195,8 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfiles(
 		AlreadyGeneratedN1: alreadyGeneratedN1U64,
 		UtxoCount:          uint64(len(state.Utxos)),
 		PostStateDigest:    UtxoSetHash(state.Utxos),
+		SigTaskCount:       sigTaskCount,
+		WorkerPanics:       workerPanics,
 	}, nil
 }
 

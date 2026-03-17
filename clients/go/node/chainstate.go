@@ -72,6 +72,8 @@ type ChainStateConnectSummary struct {
 	AlreadyGeneratedN1 uint64
 	UtxoCount          uint64
 	PostStateDigest    [32]byte
+	SigTaskCount       uint64 // parallel path only; 0 for sequential
+	WorkerPanics       uint64 // parallel path only; 0 for sequential
 }
 
 type chainStateDisk struct {
@@ -288,6 +290,8 @@ func (s *ChainState) ConnectBlockParallelSigs(
 		AlreadyGeneratedN1: summary.AlreadyGeneratedN1,
 		UtxoCount:          summary.UtxoCount,
 		PostStateDigest:    summary.PostStateDigest,
+		SigTaskCount:       summary.SigTaskCount,
+		WorkerPanics:       summary.WorkerPanics,
 	}, nil
 }
 
