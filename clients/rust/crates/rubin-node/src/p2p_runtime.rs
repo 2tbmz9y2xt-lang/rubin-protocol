@@ -772,7 +772,7 @@ pub fn decode_inventory_vectors(payload: &[u8]) -> io::Result<Vec<InventoryVecto
     if payload.is_empty() {
         return Ok(Vec::new());
     }
-    if payload.len() % INVENTORY_VECTOR_SIZE != 0 {
+    if !payload.len().is_multiple_of(INVENTORY_VECTOR_SIZE) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "inventory payload width mismatch",
