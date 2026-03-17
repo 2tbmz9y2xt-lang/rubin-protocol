@@ -154,7 +154,9 @@ func TestBroadcastInventoryTxUsesFanoutLimit(t *testing.T) {
 		current := &peer{conn: conn, service: h.service, state: nodePeerState("peer-" + string(rune('0'+i)))}
 		peers = append(peers, current)
 		recorders = append(recorders, conn)
+		h.service.peersMu.Lock()
 		h.service.peers[current.addr()] = current
+		h.service.peersMu.Unlock()
 	}
 
 	var txid [32]byte
@@ -192,8 +194,10 @@ func TestBroadcastInventoryMixedKeepsBlocksGlobal(t *testing.T) {
 	defer remote2.Close()
 	peer2 := &peer{conn: local2, service: h.service, state: nodePeerState("peer-b")}
 
+	h.service.peersMu.Lock()
 	h.service.peers[peer1.addr()] = peer1
 	h.service.peers[peer2.addr()] = peer2
+	h.service.peersMu.Unlock()
 
 	done1 := make(chan int, 1)
 	done2 := make(chan int, 1)

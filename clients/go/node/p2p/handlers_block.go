@@ -150,31 +150,38 @@ func (s *Service) retainOrResolveOrphanFrom(fromPeer string, blockHash, parentHa
 }
 
 func (s *Service) resolveOrphans(skip *peer, blockHash [32]byte) {
-	children := s.orphans.TakeChildren(blockHash)
-	for _, child := range children {
-		pb, childHash, err := parseRelayedBlock(child.blockBytes)
-		if err != nil {
-			continue
-		}
-		s.chainMu.Lock()
-		summary, applyErr := s.cfg.SyncEngine.ApplyBlockWithReorg(child.blockBytes, nil)
-		s.chainMu.Unlock()
-		if applyErr != nil {
-			if errors.Is(applyErr, node.ErrParentNotFound) {
-				// Clear blockSeen before requeue so
-				// retainOrResolveOrphanFrom can re-add it.
-				s.blockSeen.Remove(childHash)
-				// Preserve original peer attribution so the per-peer orphan
-				// quota cannot be bypassed through requeue cycles.
-				s.retainOrResolveOrphanFrom(child.fromPeer, childHash, pb.Header.PrevBlockHash, child.blockBytes)
+	// Iterative queue-based approach to avoid stack overflow on deep
+	// orphan chains (mirrors Bitcoin Core's ProcessOrphanTx pattern).
+	queue := [][32]byte{blockHash}
+	for len(queue) > 0 {
+		parentHash := queue[0]
+		queue = queue[1:]
+		children := s.orphans.TakeChildren(parentHash)
+		for _, child := range children {
+			pb, childHash, err := parseRelayedBlock(child.blockBytes)
+			if err != nil {
+				continue
 			}
-			// Non-requeue failures: leave in blockSeen to prevent
-			// re-advertisement of known-invalid blocks.
-			continue
+			s.chainMu.Lock()
+			summary, applyErr := s.cfg.SyncEngine.ApplyBlockWithReorg(child.blockBytes, nil)
+			s.chainMu.Unlock()
+			if applyErr != nil {
+				if errors.Is(applyErr, node.ErrParentNotFound) {
+					// Clear blockSeen before requeue so
+					// retainOrResolveOrphanFrom can re-add it.
+					s.blockSeen.Remove(childHash)
+					// Preserve original peer attribution so the per-peer orphan
+					// quota cannot be bypassed through requeue cycles.
+					s.retainOrResolveOrphanFrom(child.fromPeer, childHash, pb.Header.PrevBlockHash, child.blockBytes)
+				}
+				// Non-requeue failures: leave in blockSeen to prevent
+				// re-advertisement of known-invalid blocks.
+				continue
+			}
+			s.cfg.SyncEngine.RecordBestKnownHeight(summary.BlockHeight)
+			s.blockSeen.Add(childHash)
+			_ = s.broadcastInventory(skip, []InventoryVector{{Type: MSG_BLOCK, Hash: childHash}})
+			queue = append(queue, childHash)
 		}
-		s.cfg.SyncEngine.RecordBestKnownHeight(summary.BlockHeight)
-		s.blockSeen.Add(childHash)
-		_ = s.broadcastInventory(skip, []InventoryVector{{Type: MSG_BLOCK, Hash: childHash}})
-		s.resolveOrphans(skip, childHash)
 	}
 }

@@ -101,8 +101,10 @@ func (m *addrManager) MarkAttempted(addr string) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	entry := m.addrs[addr]
-	entry.addr = addr
+	entry, exists := m.addrs[addr]
+	if !exists {
+		return
+	}
 	entry.attempts++
 	m.addrs[addr] = entry
 }

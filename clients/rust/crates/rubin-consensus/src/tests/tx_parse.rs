@@ -206,7 +206,7 @@ fn parse_tx_witness_overflow_precedes_suite_canonicalization() {
     tx.truncate(core_end());
 
     tx.push(0x01); // witness_count=1
-    tx.push(0x03); // unknown suite_id (would be TxErrSigAlgInvalid if reached)
+    tx.push(0x03); // unknown suite_id (accepted by parser; overflow check fires first here)
     tx.push(0x00); // pubkey_length=0
     crate::compactsize::encode_compact_size(100_001, &mut tx); // sig_length
     tx.extend_from_slice(&vec![0u8; 100_001]);

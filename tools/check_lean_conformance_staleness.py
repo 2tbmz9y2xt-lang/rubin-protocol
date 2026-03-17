@@ -53,12 +53,14 @@ def main() -> int:
 
     after_paths = generated_vector_files(conformance_dir)
     tracked_paths = before_paths | after_paths
-    stale = sorted(
-        path.relative_to(repo_root).as_posix()
-        for path in tracked_paths
-        if before.get(path) != (path.read_text(encoding="utf-8") if path.exists() else None)
-    )
-    restore(tracked_paths, before)
+    try:
+        stale = sorted(
+            path.relative_to(repo_root).as_posix()
+            for path in tracked_paths
+            if before.get(path) != (path.read_text(encoding="utf-8") if path.exists() else None)
+        )
+    finally:
+        restore(tracked_paths, before)
 
     if proc.returncode != 0:
         if proc.stdout:

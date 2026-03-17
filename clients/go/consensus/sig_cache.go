@@ -121,7 +121,7 @@ func (c *SigCache) Reset() {
 	}
 	c.mu.Lock()
 	c.entries = make(map[[32]byte]struct{}, c.capacity)
-	c.mu.Unlock()
 	c.hits.Store(0)
 	c.misses.Store(0)
+	c.mu.Unlock()
 }
