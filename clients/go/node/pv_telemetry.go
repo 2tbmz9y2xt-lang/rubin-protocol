@@ -204,10 +204,10 @@ type PVTelemetrySnapshot struct {
 	WorkerTasksTotal uint64
 	WorkerPanics     uint64
 
-	ValidateCount     int64
-	ValidateAvgNs     int64
-	CommitCount       int64
-	CommitAvgNs       int64
+	ValidateCount int64
+	ValidateAvgNs int64
+	CommitCount   int64
+	CommitAvgNs   int64
 }
 
 // Snapshot returns a point-in-time copy of all telemetry counters.
