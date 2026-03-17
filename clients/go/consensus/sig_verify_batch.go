@@ -27,6 +27,7 @@ type SigCheckQueue struct {
 	workers  int
 	cache    *SigCache      // optional; positive-only sig cache (Q-PV-07)
 	registry *SuiteRegistry // optional; when set, Flush uses verifySigWithRegistry for rotation-aware dispatch
+	panics   atomic.Uint64
 }
 
 type sigCheckTask struct {
@@ -91,6 +92,14 @@ func (q *SigCheckQueue) Len() int {
 		return 0
 	}
 	return len(q.tasks)
+}
+
+// Panics returns the number of panics recovered during the last Flush.
+func (q *SigCheckQueue) Panics() uint64 {
+	if q == nil {
+		return 0
+	}
+	return q.panics.Load()
 }
 
 // Flush verifies all queued signatures in parallel and returns the first error
@@ -167,6 +176,12 @@ func (q *SigCheckQueue) Flush() error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					q.panics.Add(1)
+					anyFailed.Store(true)
+				}
+			}()
 			for idx := range taskCh {
 				if anyFailed.Load() {
 					continue // drain channel without expensive crypto work

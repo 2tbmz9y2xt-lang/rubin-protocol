@@ -473,6 +473,12 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 			0,
 		)
 		s.pvTelemetry.RecordValidateLatency(time.Since(validateStart))
+		if parSummary != nil {
+			s.pvTelemetry.RecordWorkerTasks(parSummary.SigTaskCount)
+			for i := uint64(0); i < parSummary.WorkerPanics; i++ {
+				s.pvTelemetry.RecordWorkerPanic()
+			}
+		}
 		if parErr != nil {
 			s.recordPVShadowMismatch(fmt.Sprintf("pv_shadow mismatch(height=%d): seq_ok par_err=%s", blockHeight, txErrCode(parErr)))
 			_, _ = fmt.Fprintf(s.stderr, "pv_shadow: mismatch height=%d seq_ok par_err=%s\n", blockHeight, txErrCode(parErr))
