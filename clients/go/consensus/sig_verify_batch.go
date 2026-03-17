@@ -176,13 +176,16 @@ func (q *SigCheckQueue) Flush() error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			var currentIdx int
 			defer func() {
 				if r := recover(); r != nil {
 					q.panics.Add(1)
+					results[currentIdx] = txerr(TX_ERR_SIG_INVALID, "signature worker panic (fail-closed)")
 					anyFailed.Store(true)
 				}
 			}()
 			for idx := range taskCh {
+				currentIdx = idx
 				if anyFailed.Load() {
 					continue // drain channel without expensive crypto work
 				}

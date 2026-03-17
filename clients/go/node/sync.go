@@ -453,7 +453,12 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 			if seqCode != parCode {
 				s.recordPVShadowMismatch(fmt.Sprintf("pv_shadow mismatch(height=%d): seq_err=%s par_err=%s", blockHeight, seqCode, parCode))
 				_, _ = fmt.Fprintf(s.stderr, "pv_shadow: mismatch height=%d seq_err=%s par_err=%s\n", blockHeight, seqCode, parCode)
-				s.pvTelemetry.RecordMismatchError()
+				if parErr == nil {
+					// seq reject vs par accept = verdict divergence
+					s.pvTelemetry.RecordMismatchVerdict()
+				} else {
+					s.pvTelemetry.RecordMismatchError()
+				}
 			}
 		} else {
 			s.pvTelemetry.RecordBlockSkipped()
