@@ -273,7 +273,7 @@
     },
     {
       "block_timestamp": 1000,
-      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
       "expect_ok": false,
       "height": 1000000,
       "id": "CV-U-16",
@@ -313,7 +313,7 @@
     },
     {
       "block_timestamp": 1000,
-      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
       "expect_ok": false,
       "height": 100,
       "id": "CV-U-18",

@@ -460,7 +460,7 @@ func TestValidateInputSpendQ_DefaultCovType(t *testing.T) {
 		CovenantType: 0xFFFF, // unknown type
 		CovenantData: []byte{0x00},
 	}
-	err := validateInputSpendQ(entry, nil, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil)
+	err := validateInputSpendQ(entry, nil, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("expected nil for unknown covenant type, got: %v", err)
 	}
@@ -721,7 +721,7 @@ func TestValidateInputSpendQ_P2PKWrongSlots(t *testing.T) {
 		CovenantType: COV_TYPE_P2PK,
 		CovenantData: p2pkCovenantDataForPubkey(make([]byte, ML_DSA_87_PUBKEY_BYTES)),
 	}
-	err := validateInputSpendQ(entry, []WitnessItem{{}, {}}, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil)
+	err := validateInputSpendQ(entry, []WitnessItem{{}, {}}, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for wrong slot count")
 	}
@@ -736,7 +736,7 @@ func TestValidateInputSpendQ_HTLCWrongSlots(t *testing.T) {
 		CovenantData: covData,
 	}
 	// Only 1 witness item instead of 2.
-	err := validateInputSpendQ(entry, []WitnessItem{{}}, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil)
+	err := validateInputSpendQ(entry, []WitnessItem{{}}, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for HTLC wrong slot count")
 	}
@@ -747,7 +747,7 @@ func TestValidateInputSpendQ_CoreExtWrongSlots(t *testing.T) {
 		CovenantType: COV_TYPE_CORE_EXT,
 		CovenantData: makeCoreExtCovenantData(0x01),
 	}
-	err := validateInputSpendQ(entry, []WitnessItem{{}, {}}, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil)
+	err := validateInputSpendQ(entry, []WitnessItem{{}, {}}, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for CORE_EXT wrong slot count")
 	}
@@ -759,7 +759,7 @@ func TestValidateInputSpendQ_StealthWrongSlots(t *testing.T) {
 		CovenantType: COV_TYPE_CORE_STEALTH,
 		CovenantData: covData,
 	}
-	err := validateInputSpendQ(entry, []WitnessItem{{}, {}}, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil)
+	err := validateInputSpendQ(entry, []WitnessItem{{}, {}}, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for CORE_STEALTH wrong slot count")
 	}

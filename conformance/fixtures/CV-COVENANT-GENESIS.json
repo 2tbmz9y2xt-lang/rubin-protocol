@@ -18,7 +18,7 @@
       "id": "CV-COV-03",
       "op": "covenant_genesis_check",
       "expect_ok": false,
-      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
       "tx_hex": "0100000000000000000000000000010100000000000000000021020000000000000000000000000000000000000000000000000000000000000000000000000000"
     },
     {

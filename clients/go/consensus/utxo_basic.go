@@ -121,7 +121,7 @@ func applyNonCoinbaseTxBasicWork(
 		return nil, 0, txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
 	}
 
-	if err := ValidateTxCovenantsGenesis(tx, height); err != nil {
+	if err := ValidateTxCovenantsGenesis(tx, height, nil); err != nil {
 		return nil, 0, err
 	}
 	sighashCache, err := NewSighashV1PrehashCache(tx)

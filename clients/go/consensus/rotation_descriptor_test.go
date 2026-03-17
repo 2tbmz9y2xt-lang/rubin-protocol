@@ -1,0 +1,224 @@
+package consensus
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestCryptoRotationDescriptor_Validate(t *testing.T) {
+	// Build a registry with two suites for testing.
+	reg := &SuiteRegistry{
+		suites: map[uint8]SuiteParams{
+			0x01: {SuiteID: 0x01, PubkeyLen: 2592, SigLen: 4627},
+			0x02: {SuiteID: 0x02, PubkeyLen: 1024, SigLen: 512},
+		},
+	}
+
+	valid := CryptoRotationDescriptor{
+		Name:         "test-rotation",
+		OldSuiteID:   0x01,
+		NewSuiteID:   0x02,
+		CreateHeight: 100,
+		SpendHeight:  200,
+	}
+	if err := valid.Validate(reg); err != nil {
+		t.Fatalf("expected valid: %v", err)
+	}
+
+	// With sunset.
+	withSunset := valid
+	withSunset.SunsetHeight = 300
+	if err := withSunset.Validate(reg); err != nil {
+		t.Fatalf("expected valid with sunset: %v", err)
+	}
+
+	cases := []struct {
+		name    string
+		mod     func(*CryptoRotationDescriptor)
+		wantErr string
+	}{
+		{
+			name:    "empty_name",
+			mod:     func(d *CryptoRotationDescriptor) { d.Name = "" },
+			wantErr: "name required",
+		},
+		{
+			name:    "old_equals_new",
+			mod:     func(d *CryptoRotationDescriptor) { d.NewSuiteID = d.OldSuiteID },
+			wantErr: "must differ",
+		},
+		{
+			name:    "old_not_registered",
+			mod:     func(d *CryptoRotationDescriptor) { d.OldSuiteID = 0xFF },
+			wantErr: "old suite 0xff not registered",
+		},
+		{
+			name:    "new_not_registered",
+			mod:     func(d *CryptoRotationDescriptor) { d.NewSuiteID = 0xFE },
+			wantErr: "new suite 0xfe not registered",
+		},
+		{
+			name:    "create_gte_spend",
+			mod:     func(d *CryptoRotationDescriptor) { d.CreateHeight = d.SpendHeight },
+			wantErr: "create_height",
+		},
+		{
+			name:    "create_gt_spend",
+			mod:     func(d *CryptoRotationDescriptor) { d.CreateHeight = d.SpendHeight + 1 },
+			wantErr: "create_height",
+		},
+		{
+			name: "sunset_lte_spend",
+			mod: func(d *CryptoRotationDescriptor) {
+				d.SunsetHeight = d.SpendHeight
+			},
+			wantErr: "sunset_height",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := valid
+			tc.mod(&d)
+			err := d.Validate(reg)
+			if err == nil {
+				t.Fatalf("expected error containing %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateRotationSet_Overlap(t *testing.T) {
+	reg := &SuiteRegistry{
+		suites: map[uint8]SuiteParams{
+			0x01: {SuiteID: 0x01, PubkeyLen: 2592, SigLen: 4627},
+			0x02: {SuiteID: 0x02, PubkeyLen: 1024, SigLen: 512},
+		},
+	}
+
+	// Non-overlapping: first completes before second starts.
+	noOverlap := []CryptoRotationDescriptor{
+		{Name: "rot-1", OldSuiteID: 0x01, NewSuiteID: 0x02, CreateHeight: 100, SpendHeight: 200},
+		{Name: "rot-2", OldSuiteID: 0x01, NewSuiteID: 0x02, CreateHeight: 200, SpendHeight: 300},
+	}
+	if err := ValidateRotationSet(noOverlap, reg); err != nil {
+		t.Fatalf("expected non-overlapping to pass: %v", err)
+	}
+
+	// Overlapping: second starts before first finishes.
+	overlap := []CryptoRotationDescriptor{
+		{Name: "rot-A", OldSuiteID: 0x01, NewSuiteID: 0x02, CreateHeight: 100, SpendHeight: 250},
+		{Name: "rot-B", OldSuiteID: 0x01, NewSuiteID: 0x02, CreateHeight: 200, SpendHeight: 350},
+	}
+	err := ValidateRotationSet(overlap, reg)
+	if err == nil {
+		t.Fatalf("expected overlap error")
+	}
+	if !strings.Contains(err.Error(), "overlapping") {
+		t.Fatalf("error %q does not contain 'overlapping'", err.Error())
+	}
+}
+
+func TestDescriptorRotationProvider_CreateSuites(t *testing.T) {
+	d := CryptoRotationDescriptor{
+		Name:         "test",
+		OldSuiteID:   0x01,
+		NewSuiteID:   0x02,
+		CreateHeight: 100,
+		SpendHeight:  200,
+		SunsetHeight: 300,
+	}
+	p := DescriptorRotationProvider{Descriptor: d}
+
+	// Before H1: only old.
+	s := p.NativeCreateSuites(50)
+	if !s.Contains(0x01) || s.Contains(0x02) {
+		t.Fatalf("before H1: expected only old suite")
+	}
+
+	// At H1: both.
+	s = p.NativeCreateSuites(100)
+	if !s.Contains(0x01) || !s.Contains(0x02) {
+		t.Fatalf("at H1: expected both suites")
+	}
+
+	// Between H2 and H4: both.
+	s = p.NativeCreateSuites(250)
+	if !s.Contains(0x01) || !s.Contains(0x02) {
+		t.Fatalf("between H2 and H4: expected both suites")
+	}
+
+	// At H4: only new.
+	s = p.NativeCreateSuites(300)
+	if s.Contains(0x01) || !s.Contains(0x02) {
+		t.Fatalf("at H4: expected only new suite")
+	}
+}
+
+func TestDescriptorRotationProvider_SpendSuites(t *testing.T) {
+	d := CryptoRotationDescriptor{
+		Name:         "test",
+		OldSuiteID:   0x01,
+		NewSuiteID:   0x02,
+		CreateHeight: 100,
+		SpendHeight:  200,
+	}
+	p := DescriptorRotationProvider{Descriptor: d}
+
+	// Before H2: only old.
+	s := p.NativeSpendSuites(150)
+	if !s.Contains(0x01) || s.Contains(0x02) {
+		t.Fatalf("before H2: expected only old suite for spend")
+	}
+
+	// At H2: both.
+	s = p.NativeSpendSuites(200)
+	if !s.Contains(0x01) || !s.Contains(0x02) {
+		t.Fatalf("at H2: expected both suites for spend")
+	}
+
+	// After H2: both.
+	s = p.NativeSpendSuites(999)
+	if !s.Contains(0x01) || !s.Contains(0x02) {
+		t.Fatalf("after H2: expected both suites for spend")
+	}
+}
+
+func TestDescriptorRotationProvider_NoSunset(t *testing.T) {
+	d := CryptoRotationDescriptor{
+		Name:         "no-sunset",
+		OldSuiteID:   0x01,
+		NewSuiteID:   0x02,
+		CreateHeight: 100,
+		SpendHeight:  200,
+		SunsetHeight: 0, // no sunset
+	}
+	p := DescriptorRotationProvider{Descriptor: d}
+
+	// At a very high height, both suites remain valid for creation.
+	s := p.NativeCreateSuites(999999)
+	if !s.Contains(0x01) || !s.Contains(0x02) {
+		t.Fatalf("no sunset: expected both suites at high height")
+	}
+}
+
+func TestCryptoRotationDescriptor_NilRegistry(t *testing.T) {
+	// With nil registry, should fall back to DefaultSuiteRegistry (ML-DSA-87 only).
+	d := CryptoRotationDescriptor{
+		Name:         "test",
+		OldSuiteID:   SUITE_ID_ML_DSA_87,
+		NewSuiteID:   0x42,
+		CreateHeight: 100,
+		SpendHeight:  200,
+	}
+	err := d.Validate(nil)
+	if err == nil {
+		t.Fatalf("expected error: 0x42 not in default registry")
+	}
+	if !strings.Contains(err.Error(), "new suite 0x42 not registered") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

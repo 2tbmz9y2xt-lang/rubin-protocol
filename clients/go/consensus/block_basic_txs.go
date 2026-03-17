@@ -41,7 +41,7 @@ func validateBlockTxSemantics(pb *ParsedBlock, blockHeight uint64) error {
 			}
 			seenNonces[tx.TxNonce] = struct{}{}
 		}
-		if err := ValidateTxCovenantsGenesis(tx, blockHeight); err != nil {
+		if err := ValidateTxCovenantsGenesis(tx, blockHeight, nil); err != nil {
 			return err
 		}
 	}

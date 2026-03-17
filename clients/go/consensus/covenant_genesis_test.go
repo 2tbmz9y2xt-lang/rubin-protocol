@@ -62,12 +62,12 @@ func TestValidateTxCovenantsGenesis_P2PK_BadSuite(t *testing.T) {
 			{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: data},
 		},
 	}
-	err := ValidateTxCovenantsGenesis(tx, 0)
+	err := ValidateTxCovenantsGenesis(tx, 0, nil)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
 	}
 }
 
@@ -155,7 +155,7 @@ func TestValidateTxCovenantsGenesis_Table(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tx := &Tx{Outputs: []TxOutput{tc.output}}
-			err := ValidateTxCovenantsGenesis(tx, 0)
+			err := ValidateTxCovenantsGenesis(tx, 0, nil)
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
@@ -173,7 +173,7 @@ func TestValidateTxCovenantsGenesis_Table(t *testing.T) {
 }
 
 func TestValidateTxCovenantsGenesis_NilTx(t *testing.T) {
-	err := ValidateTxCovenantsGenesis(nil, 0)
+	err := ValidateTxCovenantsGenesis(nil, 0, nil)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -211,7 +211,7 @@ func TestValidateTxCovenantsGenesis_MoreBranches(t *testing.T) {
 		{
 			name:    "p2pk_suite_invalid",
 			tx:      &Tx{Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: invalidP2PKSuite}}},
-			wantErr: TX_ERR_COVENANT_TYPE_INVALID,
+			wantErr: TX_ERR_SIG_ALG_INVALID,
 		},
 		{
 			name:    "anchor_len_zero",
@@ -252,7 +252,7 @@ func TestValidateTxCovenantsGenesis_MoreBranches(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateTxCovenantsGenesis(tc.tx, 0)
+			err := ValidateTxCovenantsGenesis(tc.tx, 0, nil)
 			if err == nil {
 				t.Fatalf("expected error")
 			}
@@ -270,7 +270,7 @@ func TestValidateTxCovenantsGenesis_DACommitRules(t *testing.T) {
 	// tx_kind must be 0x01
 	{
 		tx := &Tx{TxKind: 0x00, Outputs: []TxOutput{valid}}
-		err := ValidateTxCovenantsGenesis(tx, 0)
+		err := ValidateTxCovenantsGenesis(tx, 0, nil)
 		if err == nil {
 			t.Fatalf("expected error")
 		}
@@ -284,7 +284,7 @@ func TestValidateTxCovenantsGenesis_DACommitRules(t *testing.T) {
 		out := valid
 		out.Value = 1
 		tx := &Tx{TxKind: 0x01, Outputs: []TxOutput{out}}
-		err := ValidateTxCovenantsGenesis(tx, 0)
+		err := ValidateTxCovenantsGenesis(tx, 0, nil)
 		if err == nil {
 			t.Fatalf("expected error")
 		}
@@ -298,7 +298,7 @@ func TestValidateTxCovenantsGenesis_DACommitRules(t *testing.T) {
 		out := valid
 		out.CovenantData = make([]byte, 31)
 		tx := &Tx{TxKind: 0x01, Outputs: []TxOutput{out}}
-		err := ValidateTxCovenantsGenesis(tx, 0)
+		err := ValidateTxCovenantsGenesis(tx, 0, nil)
 		if err == nil {
 			t.Fatalf("expected error")
 		}
@@ -310,8 +310,47 @@ func TestValidateTxCovenantsGenesis_DACommitRules(t *testing.T) {
 	// ok
 	{
 		tx := &Tx{TxKind: 0x01, Outputs: []TxOutput{valid}}
-		if err := ValidateTxCovenantsGenesis(tx, 0); err != nil {
+		if err := ValidateTxCovenantsGenesis(tx, 0, nil); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
+	}
+}
+
+// testRotationProvider is a RotationProvider that allows only the specified
+// suite ID for creation. Used to test that ValidateTxCovenantsGenesis
+// respects the rotation provider rather than hardcoding ML-DSA-87.
+type testRotationProvider struct {
+	createSuiteID uint8
+}
+
+func (p testRotationProvider) NativeCreateSuites(height uint64) *NativeSuiteSet {
+	return NewNativeSuiteSet(p.createSuiteID)
+}
+func (p testRotationProvider) NativeSpendSuites(height uint64) *NativeSuiteSet {
+	return NewNativeSuiteSet(p.createSuiteID)
+}
+
+func TestValidateTxCovenantsGenesis_RotationAware(t *testing.T) {
+	// A rotation provider that accepts only suite 0x42, NOT ML-DSA-87 (0x01).
+	rot := testRotationProvider{createSuiteID: 0x42}
+
+	// P2PK with ML-DSA-87 should be REJECTED under this rotation.
+	mlDSA := make([]byte, MAX_P2PK_COVENANT_DATA)
+	mlDSA[0] = SUITE_ID_ML_DSA_87
+	tx := &Tx{Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: mlDSA}}}
+	err := ValidateTxCovenantsGenesis(tx, 0, rot)
+	if err == nil {
+		t.Fatalf("expected ML-DSA-87 to be rejected by custom rotation")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
+	}
+
+	// P2PK with suite 0x42 should be ACCEPTED under this rotation.
+	custom := make([]byte, MAX_P2PK_COVENANT_DATA)
+	custom[0] = 0x42
+	tx2 := &Tx{Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: custom}}}
+	if err := ValidateTxCovenantsGenesis(tx2, 0, rot); err != nil {
+		t.Fatalf("expected suite 0x42 to be accepted: %v", err)
 	}
 }

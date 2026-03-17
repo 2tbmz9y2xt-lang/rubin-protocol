@@ -28,17 +28,37 @@ func validateCoreStealthSpend(entry UtxoEntry, w WitnessItem, tx *Tx, inputIndex
 }
 
 func validateCoreStealthSpendWithCache(entry UtxoEntry, w WitnessItem, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte, blockHeight uint64, cache *SighashV1PrehashCache) error {
+	return validateCoreStealthSpendAtHeight(entry, w, tx, inputIndex, inputValue, chainID, blockHeight, cache, nil, nil)
+}
+
+// validateCoreStealthSpendAtHeight validates a stealth spend using the suite
+// registry and rotation provider. When rotation or registry is nil, defaults
+// are used (ML-DSA-87 genesis set).
+func validateCoreStealthSpendAtHeight(entry UtxoEntry, w WitnessItem, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte, blockHeight uint64, cache *SighashV1PrehashCache, rotation RotationProvider, registry *SuiteRegistry) error {
+	if rotation == nil {
+		rotation = DefaultRotationProvider{}
+	}
+	if registry == nil {
+		registry = DefaultSuiteRegistry()
+	}
+
 	c, err := ParseStealthCovenantData(entry.CovenantData)
 	if err != nil {
 		return err
 	}
 
-	if w.SuiteID != SUITE_ID_ML_DSA_87 {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_STEALTH suite invalid")
+	nativeSpend := rotation.NativeSpendSuites(blockHeight)
+	if !nativeSpend.Contains(w.SuiteID) {
+		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_STEALTH suite not in native spend set")
 	}
-	_ = blockHeight
-	if len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1 {
-		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
+
+	params, ok := registry.Lookup(w.SuiteID)
+	if !ok {
+		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_STEALTH suite not registered")
 	}
-	return verifyMLDSAKeyAndSigWithCache(w, c.OneTimeKeyID, tx, inputIndex, inputValue, chainID, cache, "CORE_STEALTH")
+
+	if len(w.Pubkey) != params.PubkeyLen || len(w.Signature) != params.SigLen+1 {
+		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical witness item lengths")
+	}
+	return verifyKeyAndSigWithRegistryCache(w, c.OneTimeKeyID, tx, inputIndex, inputValue, chainID, cache, registry, "CORE_STEALTH")
 }

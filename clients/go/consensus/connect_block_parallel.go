@@ -99,10 +99,10 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfiles(
 		workUtxos[k] = v
 	}
 
-	// Create a single sig check queue for the entire block.
-	// All signature verifications across all transactions are collected here
-	// and executed in parallel after all pre-checks pass.
-	sigQueue := NewSigCheckQueue(workers)
+	// Create a single sig check queue for the entire block (rotation-aware so Flush uses verifySigWithRegistry).
+	reg := DefaultSuiteRegistry()
+	rot := DefaultRotationProvider{}
+	sigQueue := NewSigCheckQueue(workers).WithRegistry(reg)
 
 	// Apply all non-coinbase transactions with deferred sig verification.
 	var sumFees uint64
@@ -120,6 +120,8 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfiles(
 			chainID,
 			coreExtProfiles,
 			sigQueue,
+			rot,
+			reg,
 		)
 		if err != nil {
 			return nil, err
@@ -206,9 +208,11 @@ func applyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesQ(
 	chainID [32]byte,
 	coreExtProfiles CoreExtProfileProvider,
 	sigQueue *SigCheckQueue,
+	rotation RotationProvider,
+	registry *SuiteRegistry,
 ) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
 	_ = blockTimestamp
-	work, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxoSet, height, blockMTP, chainID, coreExtProfiles, sigQueue)
+	work, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxoSet, height, blockMTP, chainID, coreExtProfiles, sigQueue, rotation, registry)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -234,6 +238,8 @@ func applyNonCoinbaseTxBasicWorkQ(
 	chainID [32]byte,
 	coreExtProfiles CoreExtProfileProvider,
 	sigQueue *SigCheckQueue,
+	rotation RotationProvider,
+	registry *SuiteRegistry,
 ) (map[Outpoint]UtxoEntry, uint64, error) {
 	if tx == nil {
 		return nil, 0, txerr(TX_ERR_PARSE, "nil tx")
@@ -245,7 +251,7 @@ func applyNonCoinbaseTxBasicWorkQ(
 		return nil, 0, txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
 	}
 
-	if err := ValidateTxCovenantsGenesis(tx, height); err != nil {
+	if err := ValidateTxCovenantsGenesis(tx, height, nil); err != nil {
 		return nil, 0, err
 	}
 	sighashCache, err := NewSighashV1PrehashCache(tx)
@@ -335,7 +341,7 @@ func applyNonCoinbaseTxBasicWorkQ(
 			if slots != 1 {
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_P2PK witness_slots must be 1")
 			}
-			if err := validateP2PKSpendQ(entry, assigned[0], tx, uint32(inputIndex), entry.Value, chainID, height, sighashCache, sigQueue); err != nil {
+			if err := validateP2PKSpendQ(entry, assigned[0], tx, uint32(inputIndex), entry.Value, chainID, height, sighashCache, sigQueue, rotation, registry); err != nil {
 				return nil, 0, err
 			}
 		case COV_TYPE_MULTISIG:
@@ -355,6 +361,7 @@ func applyNonCoinbaseTxBasicWorkQ(
 				sighashCache,
 				sigQueue,
 				"CORE_MULTISIG",
+				rotation, registry,
 			); err != nil {
 				return nil, 0, err
 			}
@@ -387,6 +394,7 @@ func applyNonCoinbaseTxBasicWorkQ(
 				blockMTP,
 				sighashCache,
 				sigQueue,
+				rotation, registry,
 			); err != nil {
 				return nil, 0, err
 			}
@@ -472,7 +480,7 @@ func applyNonCoinbaseTxBasicWorkQ(
 			if slots != CORE_STEALTH_WITNESS_SLOTS {
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_STEALTH witness_slots must be 1")
 			}
-			if err := validateCoreStealthSpendQ(entry, assigned[0], tx, uint32(inputIndex), entry.Value, chainID, height, sighashCache, sigQueue); err != nil {
+			if err := validateCoreStealthSpendQ(entry, assigned[0], tx, uint32(inputIndex), entry.Value, chainID, height, sighashCache, sigQueue, rotation, registry); err != nil {
 				return nil, 0, err
 			}
 		default:
@@ -602,6 +610,7 @@ func applyNonCoinbaseTxBasicWorkQ(
 			sighashCache,
 			sigQueue,
 			"CORE_VAULT",
+			rotation, registry,
 		); err != nil {
 			return nil, 0, err
 		}

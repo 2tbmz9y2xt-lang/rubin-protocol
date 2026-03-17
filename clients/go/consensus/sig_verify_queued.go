@@ -17,8 +17,9 @@ import "encoding/binary"
 
 // verifyMLDSAKeyAndSigQ is the queue-aware variant of verifyMLDSAKeyAndSigWithCache.
 // When sigQueue is non-nil, it performs all fast pre-checks (key binding, sighash
-// computation) inline and defers the expensive ML-DSA-87 crypto verification to
-// the queue. When sigQueue is nil, it behaves identically to the original.
+// computation) inline and defers the expensive crypto verification to the queue
+// (Flush uses registry when set for rotation-aware dispatch). When sigQueue is nil,
+// it verifies inline using verifySigWithRegistry if registry is non-nil, else verifySig.
 func verifyMLDSAKeyAndSigQ(
 	w WitnessItem,
 	expectedKeyID [32]byte,
@@ -28,6 +29,7 @@ func verifyMLDSAKeyAndSigQ(
 	chainID [32]byte,
 	cache *SighashV1PrehashCache,
 	sigQueue *SigCheckQueue,
+	registry *SuiteRegistry,
 	context string,
 ) error {
 	if sha3_256(w.Pubkey) != expectedKeyID {
@@ -41,7 +43,12 @@ func verifyMLDSAKeyAndSigQ(
 		sigQueue.Push(w.SuiteID, w.Pubkey, cryptoSig, digest, txerr(TX_ERR_SIG_INVALID, context+" signature invalid"))
 		return nil
 	}
-	ok, err := verifySig(w.SuiteID, w.Pubkey, cryptoSig, digest)
+	var ok bool
+	if registry != nil {
+		ok, err = verifySigWithRegistry(w.SuiteID, w.Pubkey, cryptoSig, digest, registry)
+	} else {
+		ok, err = verifySig(w.SuiteID, w.Pubkey, cryptoSig, digest)
+	}
 	if err != nil {
 		return err
 	}
@@ -52,6 +59,7 @@ func verifyMLDSAKeyAndSigQ(
 }
 
 // validateP2PKSpendQ is the queue-aware variant of validateP2PKSpendWithCache.
+// When rotation or registry is nil, defaults are used (ML-DSA-87 genesis set).
 func validateP2PKSpendQ(
 	entry UtxoEntry,
 	w WitnessItem,
@@ -62,27 +70,43 @@ func validateP2PKSpendQ(
 	blockHeight uint64,
 	cache *SighashV1PrehashCache,
 	sigQueue *SigCheckQueue,
+	rotation RotationProvider,
+	registry *SuiteRegistry,
 ) error {
-	if w.SuiteID != SUITE_ID_ML_DSA_87 {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_P2PK suite invalid")
+	if rotation == nil {
+		rotation = DefaultRotationProvider{}
 	}
-	_ = blockHeight
-	if len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1 {
-		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
+	if registry == nil {
+		registry = DefaultSuiteRegistry()
+	}
+
+	nativeSpend := rotation.NativeSpendSuites(blockHeight)
+	if !nativeSpend.Contains(w.SuiteID) {
+		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_P2PK suite not in native spend set")
+	}
+
+	params, ok := registry.Lookup(w.SuiteID)
+	if !ok {
+		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_P2PK suite not registered")
+	}
+
+	if len(w.Pubkey) != params.PubkeyLen || len(w.Signature) != params.SigLen+1 {
+		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical witness item lengths")
 	}
 	if len(entry.CovenantData) != MAX_P2PK_COVENANT_DATA || entry.CovenantData[0] != w.SuiteID {
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_P2PK covenant_data invalid")
 	}
 	var keyID [32]byte
 	copy(keyID[:], entry.CovenantData[1:33])
-	return verifyMLDSAKeyAndSigQ(w, keyID, tx, inputIndex, inputValue, chainID, cache, sigQueue, "CORE_P2PK")
+	return verifyMLDSAKeyAndSigQ(w, keyID, tx, inputIndex, inputValue, chainID, cache, sigQueue, registry, "CORE_P2PK")
 }
 
 // validateThresholdSigSpendQ is the queue-aware variant of validateThresholdSigSpendWithCache.
 //
-// When sigQueue is non-nil, ML-DSA-87 signatures are counted optimistically (valid++)
+// When sigQueue is non-nil, signatures are counted optimistically (valid++)
 // and the actual crypto verification is deferred to the queue. If the queue flush
 // reveals an invalid signature, the block-level error will be returned.
+// When rotation or registry is nil, defaults are used (ML-DSA-87 genesis set).
 func validateThresholdSigSpendQ(
 	keys [][32]byte,
 	threshold uint8,
@@ -95,31 +119,49 @@ func validateThresholdSigSpendQ(
 	cache *SighashV1PrehashCache,
 	sigQueue *SigCheckQueue,
 	context string,
+	rotation RotationProvider,
+	registry *SuiteRegistry,
 ) error {
+	if rotation == nil {
+		rotation = DefaultRotationProvider{}
+	}
+	if registry == nil {
+		registry = DefaultSuiteRegistry()
+	}
+
 	if len(ws) != len(keys) {
 		return txerr(TX_ERR_PARSE, "witness slot assignment mismatch")
 	}
+
+	nativeSpend := rotation.NativeSpendSuites(blockHeight)
 	valid := 0
+
 	for i := range keys {
 		w := ws[i]
-		switch w.SuiteID {
-		case SUITE_ID_SENTINEL:
+		if w.SuiteID == SUITE_ID_SENTINEL {
 			if len(w.Pubkey) != 0 || len(w.Signature) != 0 {
 				return txerr(TX_ERR_PARSE, "SENTINEL witness must be keyless")
 			}
 			continue
-		case SUITE_ID_ML_DSA_87:
-			_ = blockHeight
-			if len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1 {
-				return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
-			}
-			if err := verifyMLDSAKeyAndSigQ(w, keys[i], tx, inputIndex, inputValue, chainID, cache, sigQueue, context); err != nil {
-				return err
-			}
-			valid++
-		default:
-			return txerr(TX_ERR_SIG_ALG_INVALID, context+" suite invalid")
 		}
+
+		if !nativeSpend.Contains(w.SuiteID) {
+			return txerr(TX_ERR_SIG_ALG_INVALID, context+" suite not in native spend set")
+		}
+
+		params, ok := registry.Lookup(w.SuiteID)
+		if !ok {
+			return txerr(TX_ERR_SIG_ALG_INVALID, context+" suite not registered")
+		}
+
+		if len(w.Pubkey) != params.PubkeyLen || len(w.Signature) != params.SigLen+1 {
+			return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical witness item lengths")
+		}
+
+		if err := verifyMLDSAKeyAndSigQ(w, keys[i], tx, inputIndex, inputValue, chainID, cache, sigQueue, registry, context); err != nil {
+			return err
+		}
+		valid++
 	}
 	if valid < int(threshold) {
 		return txerr(TX_ERR_SIG_INVALID, context+" threshold not met")
@@ -128,6 +170,7 @@ func validateThresholdSigSpendQ(
 }
 
 // validateHTLCSpendQ is the queue-aware variant of ValidateHTLCSpendWithCache.
+// When rotation or registry is nil, defaults are used (ML-DSA-87 genesis set).
 func validateHTLCSpendQ(
 	entry UtxoEntry,
 	pathItem WitnessItem,
@@ -140,6 +183,8 @@ func validateHTLCSpendQ(
 	blockMTP uint64,
 	cache *SighashV1PrehashCache,
 	sigQueue *SigCheckQueue,
+	rotation RotationProvider,
+	registry *SuiteRegistry,
 ) error {
 	c, err := ParseHTLCCovenantData(entry.CovenantData)
 	if err != nil {
@@ -206,13 +251,25 @@ func validateHTLCSpendQ(
 		return txerr(TX_ERR_PARSE, "CORE_HTLC unknown spend path")
 	}
 
-	switch sigItem.SuiteID {
-	case SUITE_ID_ML_DSA_87:
-		if len(sigItem.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(sigItem.Signature) != ML_DSA_87_SIG_BYTES+1 {
-			return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
-		}
-	default:
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_HTLC sig_item suite invalid")
+	if rotation == nil {
+		rotation = DefaultRotationProvider{}
+	}
+	if registry == nil {
+		registry = DefaultSuiteRegistry()
+	}
+
+	nativeSpend := rotation.NativeSpendSuites(blockHeight)
+	if !nativeSpend.Contains(sigItem.SuiteID) {
+		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_HTLC suite not in native spend set")
+	}
+
+	params, ok := registry.Lookup(sigItem.SuiteID)
+	if !ok {
+		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_HTLC suite not registered")
+	}
+
+	if len(sigItem.Pubkey) != params.PubkeyLen || len(sigItem.Signature) != params.SigLen+1 {
+		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical witness item lengths")
 	}
 
 	if sha3_256(sigItem.Pubkey) != expectedKeyID {
@@ -227,17 +284,24 @@ func validateHTLCSpendQ(
 		sigQueue.Push(sigItem.SuiteID, sigItem.Pubkey, cryptoSig, digest, txerr(TX_ERR_SIG_INVALID, "CORE_HTLC signature invalid"))
 		return nil
 	}
-	ok, err := verifySig(sigItem.SuiteID, sigItem.Pubkey, cryptoSig, digest)
-	if err != nil {
-		return err
+	var sigOk bool
+	var verifyErr error
+	if registry != nil {
+		sigOk, verifyErr = verifySigWithRegistry(sigItem.SuiteID, sigItem.Pubkey, cryptoSig, digest, registry)
+	} else {
+		sigOk, verifyErr = verifySig(sigItem.SuiteID, sigItem.Pubkey, cryptoSig, digest)
 	}
-	if !ok {
+	if verifyErr != nil {
+		return verifyErr
+	}
+	if !sigOk {
 		return txerr(TX_ERR_SIG_INVALID, "CORE_HTLC signature invalid")
 	}
 	return nil
 }
 
 // validateCoreStealthSpendQ is the queue-aware variant of validateCoreStealthSpendWithCache.
+// When rotation or registry is nil, defaults are used (ML-DSA-87 genesis set).
 func validateCoreStealthSpendQ(
 	entry UtxoEntry,
 	w WitnessItem,
@@ -248,18 +312,33 @@ func validateCoreStealthSpendQ(
 	blockHeight uint64,
 	cache *SighashV1PrehashCache,
 	sigQueue *SigCheckQueue,
+	rotation RotationProvider,
+	registry *SuiteRegistry,
 ) error {
+	if rotation == nil {
+		rotation = DefaultRotationProvider{}
+	}
+	if registry == nil {
+		registry = DefaultSuiteRegistry()
+	}
+
 	c, err := ParseStealthCovenantData(entry.CovenantData)
 	if err != nil {
 		return err
 	}
 
-	if w.SuiteID != SUITE_ID_ML_DSA_87 {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_STEALTH suite invalid")
+	nativeSpend := rotation.NativeSpendSuites(blockHeight)
+	if !nativeSpend.Contains(w.SuiteID) {
+		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_STEALTH suite not in native spend set")
 	}
-	_ = blockHeight
-	if len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1 {
-		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
+
+	params, ok := registry.Lookup(w.SuiteID)
+	if !ok {
+		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_STEALTH suite not registered")
 	}
-	return verifyMLDSAKeyAndSigQ(w, c.OneTimeKeyID, tx, inputIndex, inputValue, chainID, cache, sigQueue, "CORE_STEALTH")
+
+	if len(w.Pubkey) != params.PubkeyLen || len(w.Signature) != params.SigLen+1 {
+		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical witness item lengths")
+	}
+	return verifyMLDSAKeyAndSigQ(w, c.OneTimeKeyID, tx, inputIndex, inputValue, chainID, cache, sigQueue, registry, "CORE_STEALTH")
 }

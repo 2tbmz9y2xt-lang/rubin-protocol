@@ -25,7 +25,7 @@ fn validate_tx_covenants_genesis_p2pk_non_native_suite_rejected() {
     }];
 
     let err = validate_tx_covenants_genesis(&tx, 0).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
 }
 
 #[test]
