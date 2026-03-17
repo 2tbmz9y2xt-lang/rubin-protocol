@@ -14,6 +14,9 @@ jobs:
       - name: Sensitive files/content gate
         run: python3 tools/check_sensitive_files.py
 
+      - name: PV/CORE_EXT PR template compliance (policy)
+        run: python3 tools/check_pv_doc_compliance.py
+
       - name: Mainnet genesis anti-devnet guard (policy)
         run: |
           python3 tools/check_mainnet_genesis_guard.py \
