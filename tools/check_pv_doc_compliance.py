@@ -88,10 +88,27 @@ def detect_range_from_github_event() -> tuple[str, str, bool] | None:
 
 def changed_files(base: str, head: str, pr_mode: bool) -> list[str]:
     range_expr = f"{base}...{head}" if pr_mode else f"{base}..{head}"
-    # Include additions/modifications/renames AND deletions; removing a PV/CORE_EXT
-    # sensitive file must still go through the same documentation gate.
-    out = run_git(["diff", "--name-only", "--diff-filter=ACMRD", range_expr])
-    files = [line.strip() for line in out.splitlines() if line.strip()]
+    # Include additions/modifications/renames AND deletions; include both old and new
+    # paths for renames so a rename from a sensitive path still triggers the gate.
+    out = run_git(
+        ["diff", "--name-status", "--diff-filter=ACMRD", "-z", range_expr]
+    )
+    parts = [p for p in out.split("\0") if p.strip()]
+    files: list[str] = []
+    i = 0
+    while i < len(parts):
+        status = parts[i]
+        i += 1
+        if i >= len(parts):
+            break
+        # Rename: status NUL old NUL new NUL → two paths
+        if len(status) >= 1 and status[0] == "R" and i + 1 < len(parts):
+            files.append(parts[i].strip())
+            files.append(parts[i + 1].strip())
+            i += 2
+        else:
+            files.append(parts[i].strip())
+            i += 1
     return sorted(set(files))
 
 
@@ -176,27 +193,28 @@ def main() -> int:
             missing.append(pat)
 
     boundary_errors: list[str] = []
-    # Require explicit affirmative boundary lines to avoid YES/NO placeholders.
+    # Require explicit affirmative boundary lines; allow template bullets (- ) and
+    # backticks around SECTION_HASHES.json so filling the template exactly passes.
     consensus_line_re = re.compile(
-        r"(?im)^\s*Consensus rules unchanged:\s*(YES|NO)\s*$"
+        r"(?im)^\s*(-\s*)?Consensus rules unchanged:\s*(YES|NO)\s*$"
     )
     sh_line_re = re.compile(
-        r"(?im)^\s*SECTION_HASHES\.json unchanged:\s*(YES|NO)\s*$"
+        r"(?im)^\s*(-\s*)?`?SECTION_HASHES\.json`?\s+unchanged:\s*(YES|NO)\s*$"
     )
 
     m_cons = consensus_line_re.search(body)
     m_sh = sh_line_re.search(body)
-
+    # Group 2 is the YES/NO value (group 1 is optional bullet)
     if not m_cons:
         boundary_errors.append("missing line: 'Consensus rules unchanged: YES'")
-    elif m_cons.group(1) != "YES":
+    elif m_cons.group(2) != "YES":
         boundary_errors.append(
             "Consensus boundary must be explicitly affirmed: 'Consensus rules unchanged: YES'"
         )
 
     if not m_sh:
         boundary_errors.append("missing line: 'SECTION_HASHES.json unchanged: YES'")
-    elif m_sh.group(1) != "YES":
+    elif m_sh.group(2) != "YES":
         boundary_errors.append(
             "SECTION_HASHES.json boundary must be explicitly affirmed: 'SECTION_HASHES.json unchanged: YES'"
         )
