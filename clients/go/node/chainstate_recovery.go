@@ -116,7 +116,7 @@ func ReconcileChainStateWithBlockStore(state *ChainState, store *BlockStore, cfg
 			}
 			if hasHeight && canonicalHash == state.TipHash {
 				if state.Height == tipHeight {
-					return false, nil
+					return changed, nil
 				}
 				replayFrom = state.Height + 1
 			} else {

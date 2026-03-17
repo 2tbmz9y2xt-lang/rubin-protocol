@@ -15,7 +15,7 @@ Parallel validation exposes three modes:
 3. devnet `shadow`
 4. testnet `shadow`
 5. opt-in testnet `on`
-6. mainnet default remains `off` until evidence threshold is met
+6. mainnet default remains `off` until: ≥30 days zero-mismatch soak on testnet, all conformance vectors green, formal bridge proof complete
 
 ## 3. Observability Signals
 
@@ -49,6 +49,7 @@ Immediate fallback path:
 
 Promotion to broader rollout is allowed only when:
 
-- zero unresolved shadow mismatches in required soak window;
-- parity fixtures are green;
-- formal and benchmark evidence for current phase is complete.
+- zero unresolved shadow mismatches for ≥72 hours (soak window);
+- all parity conformance fixtures pass (`run_cv_bundle` exit 0);
+- formal Lean bridge proofs type-check (`lake build` exit 0);
+- parallel validation benchmark shows ≤5% latency regression vs sequential.

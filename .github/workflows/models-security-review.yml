@@ -49,11 +49,11 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
       - name: Download diff artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v4
         with:
           name: pr-diff
       - name: Install jsonrepair
-        run: npm install jsonrepair
+        run: npm install jsonrepair@3.12.0
       - name: Run security review
         id: review
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v7
@@ -113,6 +113,10 @@ jobs:
                 return;
               }
               const data = await response.json();
+              if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+                core.setFailed(`Security review fail-closed: model ${modelId} returned unexpected structure: ${JSON.stringify(data).slice(0, 200)}`);
+                return;
+              }
               rawContent = data.choices[0].message.content;
               result = rawContent;
             } catch (err) {
@@ -120,8 +124,8 @@ jobs:
               return;
             }
 
-            // Strip markdown fences if present
-            result = result.replace(/^[\s\S]*?(?=\{)/, '').replace(/\}[\s\S]*$/, '}').trim();
+            // Strip markdown fences if present: find first '{' and last '}'
+            result = result.replace(/^[\s\S]*?(?=\{)/, '').replace(/\}(?![\s\S]*\})[\s\S]*$/, '}').trim();
 
             // Try parse, fallback to jsonrepair
             try {
@@ -174,7 +178,7 @@ jobs:
               core.setFailed(`Security review fail-closed: unparseable review JSON: ${e.message}`);
               return;
             }
-            const critical = (parsed.findings || []).filter(f => f.severity === 'CRITICAL');
+            const critical = (parsed.findings || []).filter(f => (f.severity || '').toUpperCase() === 'CRITICAL');
             if (critical.length > 0) {
               core.setFailed(`Merge blocked: ${critical.length} CRITICAL finding(s)`);
             } else {

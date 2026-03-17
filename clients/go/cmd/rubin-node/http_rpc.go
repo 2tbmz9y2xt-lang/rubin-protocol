@@ -545,7 +545,9 @@ func writeJSONResponse(state *devnetRPCState, route string, w http.ResponseWrite
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
-		http.Error(w, `{"accepted":false,"error":"encode failed"}`, http.StatusInternalServerError)
+		// Headers already sent — cannot change status code. Log the error
+		// for observability; the client receives a truncated body.
+		_, _ = fmt.Fprintf(w, `{"accepted":false,"error":"encode failed"}`)
 		status = http.StatusInternalServerError
 	}
 	if state != nil && state.metrics != nil {
