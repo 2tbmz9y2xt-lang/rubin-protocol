@@ -41,12 +41,10 @@ CORE_EXT_TOUCH_NEEDLES = (
 
 
 REQ_MARKERS = [
-    # Hard minimum anchors, deliberately short to reduce false negatives.
+    # Structural anchors.
     r"(?im)^\s*Refs:\s*Q-[A-Z0-9-]+\s*$",
     r"(?im)^\s*##\s*Summary\s*$",
     r"(?im)^\s*##\s*Scope\s*$",
-    r"(?im)consensus\s+.*unchanged|no\s+consensus\s+changes",
-    r"(?im)section_hashes\.json",
 ]
 
 
@@ -175,14 +173,48 @@ def main() -> int:
         if not re.search(pat, body):
             missing.append(pat)
 
-    if missing:
+    boundary_errors: list[str] = []
+    # Require explicit affirmative boundary lines to avoid YES/NO placeholders.
+    consensus_line_re = re.compile(
+        r"(?im)^\s*Consensus rules unchanged:\s*(YES|NO)\s*$"
+    )
+    sh_line_re = re.compile(
+        r"(?im)^\s*SECTION_HASHES\.json unchanged:\s*(YES|NO)\s*$"
+    )
+
+    m_cons = consensus_line_re.search(body)
+    m_sh = sh_line_re.search(body)
+
+    if not m_cons:
+        boundary_errors.append("missing line: 'Consensus rules unchanged: YES'")
+    elif m_cons.group(1) != "YES":
+        boundary_errors.append(
+            "Consensus boundary must be explicitly affirmed: 'Consensus rules unchanged: YES'"
+        )
+
+    if not m_sh:
+        boundary_errors.append("missing line: 'SECTION_HASHES.json unchanged: YES'")
+    elif m_sh.group(1) != "YES":
+        boundary_errors.append(
+            "SECTION_HASHES.json boundary must be explicitly affirmed: 'SECTION_HASHES.json unchanged: YES'"
+        )
+
+    if missing or boundary_errors:
         print("PV_DOC_COMPLIANCE: FAIL")
         print("PR touches PV/CORE_EXT sensitive paths but is missing required PR-body markers.")
-        print("Missing markers (regex):")
-        for m in missing:
-            print(f"- {m}")
+        if missing:
+            print("Missing structural markers (regex):")
+            for m in missing:
+                print(f"- {m}")
+        if boundary_errors:
+            print("Boundary issues:")
+            for msg in boundary_errors:
+                print(f"- {msg}")
         print()
-        print("Fix: use the PV PR template and include required evidence + Refs: Q-... line.")
+        print(
+            "Fix: use the PV PR template and include Refs: Q-..., required sections,"
+            " and boundary lines with explicit 'YES' values."
+        )
         return 1
 
     print("PV_DOC_COMPLIANCE: PASS")
