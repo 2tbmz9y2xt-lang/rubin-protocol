@@ -360,3 +360,34 @@ func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte
 		return false, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: unsupported suite_id")
 	}
 }
+
+// verifySigWithRegistry dispatches signature verification using the suite
+// registry for algorithm lookup instead of hardcoded suite_id → algorithm
+// mapping. Falls back to legacy verifySig when registry is nil.
+//
+// This enables transparent support for new signature suites added to the
+// registry without code changes to the verification dispatch path.
+func verifySigWithRegistry(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte, registry *SuiteRegistry) (bool, error) {
+	if registry == nil {
+		return verifySig(suiteID, pubkey, signature, digest32)
+	}
+
+	params, ok := registry.Lookup(suiteID)
+	if !ok {
+		return false, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: unsupported suite_id")
+	}
+
+	if err := ensureOpenSSLConsensusInit(); err != nil {
+		return false, err
+	}
+
+	if len(pubkey) != params.PubkeyLen || len(signature) != params.SigLen {
+		return false, nil
+	}
+
+	verifyOk, err := opensslVerifySigOneShotFn(params.OpenSSLAlg, pubkey, signature, digest32[:])
+	if err != nil {
+		return false, txerr(TX_ERR_SIG_INVALID, "verify_sig: EVP_DigestVerify internal error")
+	}
+	return verifyOk, nil
+}

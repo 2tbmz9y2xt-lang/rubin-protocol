@@ -333,7 +333,14 @@ func sortedDAIDs[T any](m map[[32]byte]T) [][32]byte {
 	return ids
 }
 
-func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
+// txWeightComponents computes the common weight components shared by both
+// legacy and registry-aware weight calculations: baseSize, witnessSize,
+// anchorBytes, daBytes. It also iterates witness items and calls sigCostFn
+// for each non-sentinel witness to accumulate sig verification cost.
+//
+// sigCostFn receives a WitnessItem and returns (cost uint64, err error).
+// For sentinel items (SuiteID == SUITE_ID_SENTINEL) the callback is skipped.
+func txWeightComponents(tx *Tx, sigCostFn func(WitnessItem) (uint64, error)) (uint64, uint64, uint64, error) {
 	if tx == nil {
 		return 0, 0, 0, txerr(TX_ERR_PARSE, "nil tx")
 	}
@@ -403,8 +410,7 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 	}
 
 	witnessSize := compactSizeLen(uint64(len(tx.Witness)))
-	var mlCount uint64
-	var unknownSuiteCount uint64
+	var sigCost uint64
 	for _, w := range tx.Witness {
 		witnessSize, err = addU64(witnessSize, 1)
 		if err != nil {
@@ -426,14 +432,16 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 		if err != nil {
 			return 0, 0, 0, err
 		}
-		switch w.SuiteID {
-		case SUITE_ID_ML_DSA_87:
-			if len(w.Pubkey) == ML_DSA_87_PUBKEY_BYTES && len(w.Signature) == ML_DSA_87_SIG_BYTES+1 {
-				mlCount++
-			}
-		case SUITE_ID_SENTINEL:
-		default:
-			unknownSuiteCount++
+		if w.SuiteID == SUITE_ID_SENTINEL {
+			continue
+		}
+		cost, costErr := sigCostFn(w)
+		if costErr != nil {
+			return 0, 0, 0, costErr
+		}
+		sigCost, err = addU64(sigCost, cost)
+		if err != nil {
+			return 0, 0, 0, err
 		}
 	}
 
@@ -445,20 +453,6 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 	daBytes := uint64(0)
 	if tx.TxKind != 0x00 {
 		daBytes = daLen
-	}
-
-	mlCost, err := mulU64(mlCount, VERIFY_COST_ML_DSA_87)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-	sigCost := mlCost
-	unknownCost, err := mulU64(unknownSuiteCount, VERIFY_COST_UNKNOWN_SUITE)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-	sigCost, err = addU64(sigCost, unknownCost)
-	if err != nil {
-		return 0, 0, 0, err
 	}
 
 	baseWeight, err := mulU64(WITNESS_DISCOUNT_DIVISOR, baseSize)
@@ -479,6 +473,21 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 	}
 
 	return weight, daBytes, anchorBytes, nil
+}
+
+// txWeightAndStats computes legacy weight with hardcoded per-suite costs.
+func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
+	return txWeightComponents(tx, func(w WitnessItem) (uint64, error) {
+		switch w.SuiteID {
+		case SUITE_ID_ML_DSA_87:
+			if len(w.Pubkey) == ML_DSA_87_PUBKEY_BYTES && len(w.Signature) == ML_DSA_87_SIG_BYTES+1 {
+				return VERIFY_COST_ML_DSA_87, nil
+			}
+			return 0, nil
+		default:
+			return VERIFY_COST_UNKNOWN_SUITE, nil
+		}
+	})
 }
 
 func compactSizeLen(n uint64) uint64 {
@@ -515,4 +524,43 @@ func mulU64(a uint64, b uint64) (uint64, error) {
 // It is a pure function of a parsed Tx and does not consult chainstate.
 func TxWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 	return txWeightAndStats(tx)
+}
+
+// TxWeightAndStatsAtHeight computes weight using per-suite verify costs from
+// the registry and height-aware native spend suites from the rotation provider.
+// This is the consensus-path entry point; the legacy TxWeightAndStats uses
+// hardcoded costs as a conservative upper bound.
+func TxWeightAndStatsAtHeight(tx *Tx, height uint64, rotation RotationProvider, registry *SuiteRegistry) (uint64, uint64, uint64, error) {
+	return txWeightAndStatsWithRegistry(tx, height, rotation, registry)
+}
+
+// txWeightAndStatsWithRegistry is the suite-aware weight calculation.
+// It delegates to txWeightComponents with a registry-aware sig cost function.
+func txWeightAndStatsWithRegistry(tx *Tx, height uint64, rotation RotationProvider, registry *SuiteRegistry) (uint64, uint64, uint64, error) {
+	if tx == nil {
+		return 0, 0, 0, txerr(TX_ERR_PARSE, "nil tx")
+	}
+	if rotation == nil || registry == nil {
+		return txWeightAndStats(tx)
+	}
+
+	nativeSpend := rotation.NativeSpendSuites(height)
+
+	return txWeightComponents(tx, func(w WitnessItem) (uint64, error) {
+		if nativeSpend.Contains(w.SuiteID) {
+			if params, ok := registry.Lookup(w.SuiteID); ok {
+				// Native registered suite: use registry cost if lengths match,
+				// else zero (matches legacy — malformed native witness items
+				// are not counted as unknown suites).
+				if len(w.Pubkey) == params.PubkeyLen && len(w.Signature) == params.SigLen+1 {
+					return params.VerifyCost, nil
+				}
+				return 0, nil
+			}
+			// In native spend set but not registered — treat as unknown.
+			return VERIFY_COST_UNKNOWN_SUITE, nil
+		}
+		// Not in native spend set — unknown suite floor.
+		return VERIFY_COST_UNKNOWN_SUITE, nil
+	})
 }
