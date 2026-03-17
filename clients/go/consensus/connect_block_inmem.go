@@ -17,6 +17,7 @@ type ConnectBlockBasicSummary struct {
 	AlreadyGenerated   uint64
 	AlreadyGeneratedN1 uint64
 	UtxoCount          uint64
+	PostStateDigest    [32]byte
 }
 
 // ConnectBlockBasicInMemoryAtHeight connects a block against an in-memory UTXO snapshot and an
@@ -168,6 +169,7 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfiles(
 		AlreadyGenerated:   alreadyGeneratedU64,
 		AlreadyGeneratedN1: alreadyGeneratedN1U64,
 		UtxoCount:          uint64(len(state.Utxos)),
+		PostStateDigest:    UtxoSetHash(state.Utxos),
 	}, nil
 }
 
