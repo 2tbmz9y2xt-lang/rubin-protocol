@@ -13,6 +13,8 @@ import (
 
 const defaultIBDLagSeconds = 24 * 60 * 60
 
+const defaultPVShadowMaxSamples = 3
+
 var ErrParentNotFound = errors.New("parent block not found")
 
 type SyncConfig struct {
@@ -23,6 +25,30 @@ type SyncConfig struct {
 	ChainID          [32]byte
 	Network          string
 	CoreExtProfiles  consensus.CoreExtProfileProvider
+
+	ParallelValidationMode string // off|shadow|on
+	PVShadowMaxSamples     uint64 // bounded mismatch diagnostics; 0 => default
+}
+
+type parallelValidationMode uint8
+
+const (
+	pvModeOff parallelValidationMode = iota
+	pvModeShadow
+	pvModeOn
+)
+
+func parseParallelValidationMode(s string) (parallelValidationMode, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "off":
+		return pvModeOff, nil
+	case "shadow":
+		return pvModeShadow, nil
+	case "on":
+		return pvModeOn, nil
+	default:
+		return pvModeOff, fmt.Errorf("invalid parallel_validation_mode: %q (want off|shadow|on)", s)
+	}
 }
 
 type HeaderRequest struct {
@@ -42,16 +68,23 @@ type SyncEngine struct {
 	bestKnownHeight uint64
 	lastReorgDepth  uint64
 	reorgCount      uint64
+
+	pvMode             parallelValidationMode
+	pvShadowMax        uint64
+	pvShadowMismatches uint64
+	pvShadowSamples    []string
 }
 
 func DefaultSyncConfig(expectedTarget *[32]byte, chainID [32]byte, chainStatePath string) SyncConfig {
 	return SyncConfig{
-		HeaderBatchLimit: 512,
-		IBDLagSeconds:    defaultIBDLagSeconds,
-		ExpectedTarget:   expectedTarget,
-		ChainID:          chainID,
-		ChainStatePath:   chainStatePath,
-		Network:          "devnet",
+		HeaderBatchLimit:       512,
+		IBDLagSeconds:          defaultIBDLagSeconds,
+		ExpectedTarget:         expectedTarget,
+		ChainID:                chainID,
+		ChainStatePath:         chainStatePath,
+		Network:                "devnet",
+		ParallelValidationMode: "off",
+		PVShadowMaxSamples:     defaultPVShadowMaxSamples,
 	}
 }
 
@@ -63,11 +96,20 @@ func NewSyncEngine(chainState *ChainState, blockStore *BlockStore, cfg SyncConfi
 	if err := validateMainnetGenesisGuard(cfg); err != nil {
 		return nil, err
 	}
+	mode, err := parseParallelValidationMode(cfg.ParallelValidationMode)
+	if err != nil {
+		return nil, err
+	}
 	engine := &SyncEngine{
-		chainState: chainState,
-		blockStore: blockStore,
-		cfg:        cfg,
-		stderr:     io.Discard,
+		chainState:  chainState,
+		blockStore:  blockStore,
+		cfg:         cfg,
+		stderr:      io.Discard,
+		pvMode:      mode,
+		pvShadowMax: cfg.PVShadowMaxSamples,
+	}
+	if engine.pvShadowMax == 0 {
+		engine.pvShadowMax = defaultPVShadowMaxSamples
 	}
 	return engine, nil
 }
@@ -80,7 +122,30 @@ func normalizeSyncConfig(cfg SyncConfig) SyncConfig {
 		cfg.IBDLagSeconds = defaultIBDLagSeconds
 	}
 	cfg.Network = normalizedNetworkName(cfg.Network)
+	if strings.TrimSpace(cfg.ParallelValidationMode) == "" {
+		cfg.ParallelValidationMode = "off"
+	}
 	return cfg
+}
+
+func (s *SyncEngine) recordPVShadowMismatch(line string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pvShadowMismatches++
+	if s.pvShadowMax == 0 || uint64(len(s.pvShadowSamples)) >= s.pvShadowMax {
+		return
+	}
+	s.pvShadowSamples = append(s.pvShadowSamples, line)
+}
+
+func (s *SyncEngine) PVShadowStats() (mismatches uint64, samples []string) {
+	if s == nil {
+		return 0, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := append([]string(nil), s.pvShadowSamples...)
+	return s.pvShadowMismatches, out
 }
 
 func normalizedNetworkName(network string) string {
@@ -338,31 +403,52 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 	}
 	prevState := cloneChainState(rollbackState.chainState)
 
-	// During IBD, use parallel signature verification for faster block
-	// processing. The parallel path defers ML-DSA-87 crypto to a goroutine
-	// pool while running all other pre-checks sequentially. Error ordering
-	// may differ from the sequential path, which is acceptable during IBD.
 	var summary *ChainStateConnectSummary
-	if s.isInIBDUnchecked() {
-		summary, err = s.chainState.ConnectBlockParallelSigs(
-			blockBytes,
-			s.cfg.ExpectedTarget,
-			prevTimestamps,
-			s.cfg.ChainID,
-			s.cfg.CoreExtProfiles,
-			0, // workers: 0 = GOMAXPROCS
-		)
-	} else {
-		summary, err = s.chainState.ConnectBlockWithCoreExtProfiles(
-			blockBytes,
-			s.cfg.ExpectedTarget,
-			prevTimestamps,
-			s.cfg.ChainID,
-			s.cfg.CoreExtProfiles,
-		)
-	}
+	// Q-PV-12 shadow rollout: sequential truth path. Parallel validation runs on a
+	// cloned state and is used for bounded diagnostics only (never changes verdict).
+	summary, err = s.chainState.ConnectBlockWithCoreExtProfiles(
+		blockBytes,
+		s.cfg.ExpectedTarget,
+		prevTimestamps,
+		s.cfg.ChainID,
+		s.cfg.CoreExtProfiles,
+	)
 	if err != nil {
+		if (s.pvMode == pvModeShadow || s.pvMode == pvModeOn) && s.isInIBDUnchecked() {
+			shadowState := cloneChainState(prevState)
+			_, parErr := shadowState.ConnectBlockParallelSigs(
+				blockBytes,
+				s.cfg.ExpectedTarget,
+				prevTimestamps,
+				s.cfg.ChainID,
+				s.cfg.CoreExtProfiles,
+				0,
+			)
+			seqCode, parCode := txErrCode(err), txErrCode(parErr)
+			if seqCode != parCode {
+				s.recordPVShadowMismatch(fmt.Sprintf("pv_shadow mismatch(height=%d): seq_err=%s par_err=%s", blockHeight, seqCode, parCode))
+				_, _ = fmt.Fprintf(s.stderr, "pv_shadow: mismatch height=%d seq_err=%s par_err=%s\n", blockHeight, seqCode, parCode)
+			}
+		}
 		return nil, err
+	}
+	if (s.pvMode == pvModeShadow || s.pvMode == pvModeOn) && s.isInIBDUnchecked() {
+		shadowState := cloneChainState(prevState)
+		parSummary, parErr := shadowState.ConnectBlockParallelSigs(
+			blockBytes,
+			s.cfg.ExpectedTarget,
+			prevTimestamps,
+			s.cfg.ChainID,
+			s.cfg.CoreExtProfiles,
+			0,
+		)
+		if parErr != nil {
+			s.recordPVShadowMismatch(fmt.Sprintf("pv_shadow mismatch(height=%d): seq_ok par_err=%s", blockHeight, txErrCode(parErr)))
+			_, _ = fmt.Fprintf(s.stderr, "pv_shadow: mismatch height=%d seq_ok par_err=%s\n", blockHeight, txErrCode(parErr))
+		} else if parSummary.PostStateDigest != summary.PostStateDigest {
+			s.recordPVShadowMismatch(fmt.Sprintf("pv_shadow mismatch(height=%d): post_state_digest", blockHeight))
+			_, _ = fmt.Fprintf(s.stderr, "pv_shadow: mismatch height=%d post_state_digest\n", blockHeight)
+		}
 	}
 	if err := s.persistAppliedBlock(summary, blockHash, pb, blockBytes, prevState); err != nil {
 		return nil, s.rollbackApplyBlock(err, rollbackState)
@@ -378,6 +464,16 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 		}
 	}
 	return summary, nil
+}
+
+func txErrCode(err error) string {
+	if err == nil {
+		return "OK"
+	}
+	if te, ok := err.(*consensus.TxError); ok {
+		return string(te.Code)
+	}
+	return "ERR"
 }
 
 func (s *SyncEngine) persistAppliedBlock(summary *ChainStateConnectSummary, blockHash [32]byte, pb *consensus.ParsedBlock, blockBytes []byte, prevState *ChainState) error {
