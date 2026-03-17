@@ -516,3 +516,171 @@ func mulU64(a uint64, b uint64) (uint64, error) {
 func TxWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 	return txWeightAndStats(tx)
 }
+
+// TxWeightAndStatsAtHeight computes weight using per-suite verify costs from
+// the registry and height-aware native spend suites from the rotation provider.
+// This is the consensus-path entry point; the legacy TxWeightAndStats uses
+// hardcoded costs as a conservative upper bound.
+func TxWeightAndStatsAtHeight(tx *Tx, height uint64, rotation RotationProvider, registry *SuiteRegistry) (uint64, uint64, uint64, error) {
+	return txWeightAndStatsWithRegistry(tx, height, rotation, registry)
+}
+
+// txWeightAndStatsWithRegistry is the suite-aware weight calculation.
+// For each witness item, it looks up the suite in the registry to get the
+// per-signature verify cost. Unknown suites use VERIFY_COST_UNKNOWN_SUITE.
+//
+// The function computes the same baseSize, witnessSize, daSize as
+// txWeightAndStats; only the sigCost accounting changes.
+func txWeightAndStatsWithRegistry(tx *Tx, height uint64, rotation RotationProvider, registry *SuiteRegistry) (uint64, uint64, uint64, error) {
+	if tx == nil {
+		return 0, 0, 0, txerr(TX_ERR_PARSE, "nil tx")
+	}
+	if rotation == nil || registry == nil {
+		// Fallback to legacy if either provider is nil.
+		return txWeightAndStats(tx)
+	}
+
+	nativeSpend := rotation.NativeSpendSuites(height)
+
+	var err error
+	var baseSize uint64
+	baseSize = 4 + 1 + 8
+	baseSize, err = addU64(baseSize, compactSizeLen(uint64(len(tx.Inputs))))
+	if err != nil {
+		return 0, 0, 0, txerr(TX_ERR_PARSE, "tx base size overflow")
+	}
+	for _, in := range tx.Inputs {
+		baseSize, err = addU64(baseSize, 32+4)
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		baseSize, err = addU64(baseSize, compactSizeLen(uint64(len(in.ScriptSig))))
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		baseSize, err = addU64(baseSize, uint64(len(in.ScriptSig)))
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		baseSize, err = addU64(baseSize, 4)
+		if err != nil {
+			return 0, 0, 0, err
+		}
+	}
+	baseSize, err = addU64(baseSize, compactSizeLen(uint64(len(tx.Outputs))))
+	if err != nil {
+		return 0, 0, 0, txerr(TX_ERR_PARSE, "tx base size overflow")
+	}
+	var anchorBytes uint64
+	for _, out := range tx.Outputs {
+		baseSize, err = addU64(baseSize, 8+2)
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		covLen := uint64(len(out.CovenantData))
+		baseSize, err = addU64(baseSize, compactSizeLen(covLen))
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		baseSize, err = addU64(baseSize, covLen)
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		if out.CovenantType == COV_TYPE_ANCHOR || out.CovenantType == COV_TYPE_DA_COMMIT {
+			anchorBytes, err = addU64(anchorBytes, covLen)
+			if err != nil {
+				return 0, 0, 0, err
+			}
+		}
+	}
+	baseSize, err = addU64(baseSize, 4)
+	if err != nil {
+		return 0, 0, 0, txerr(TX_ERR_PARSE, "tx base size overflow")
+	}
+	daCoreBytes, err := daCoreFieldsBytes(tx)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	baseSize, err = addU64(baseSize, uint64(len(daCoreBytes)))
+	if err != nil {
+		return 0, 0, 0, err
+	}
+
+	witnessSize := compactSizeLen(uint64(len(tx.Witness)))
+	var sigCost uint64
+	for _, w := range tx.Witness {
+		witnessSize, err = addU64(witnessSize, 1)
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		witnessSize, err = addU64(witnessSize, compactSizeLen(uint64(len(w.Pubkey))))
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		witnessSize, err = addU64(witnessSize, uint64(len(w.Pubkey)))
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		witnessSize, err = addU64(witnessSize, compactSizeLen(uint64(len(w.Signature))))
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		witnessSize, err = addU64(witnessSize, uint64(len(w.Signature)))
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		if w.SuiteID == SUITE_ID_SENTINEL {
+			continue
+		}
+		var cost uint64
+		if nativeSpend.Contains(w.SuiteID) {
+			if params, ok := registry.Lookup(w.SuiteID); ok {
+				// Native registered suite: use registry cost if lengths match,
+				// else zero (matches legacy behaviour — malformed native witness
+				// items are not counted as unknown suites).
+				if len(w.Pubkey) == params.PubkeyLen && len(w.Signature) == params.SigLen+1 {
+					cost = params.VerifyCost
+				}
+			} else {
+				// In native spend set but not registered — treat as unknown.
+				cost = VERIFY_COST_UNKNOWN_SUITE
+			}
+		} else {
+			// Not in native spend set — unknown suite floor.
+			cost = VERIFY_COST_UNKNOWN_SUITE
+		}
+		sigCost, err = addU64(sigCost, cost)
+		if err != nil {
+			return 0, 0, 0, err
+		}
+	}
+
+	daLen := uint64(len(tx.DaPayload))
+	daSize, err := addU64(compactSizeLen(daLen), daLen)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	daBytes := uint64(0)
+	if tx.TxKind != 0x00 {
+		daBytes = daLen
+	}
+
+	baseWeight, err := mulU64(WITNESS_DISCOUNT_DIVISOR, baseSize)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	weight, err := addU64(baseWeight, witnessSize)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	weight, err = addU64(weight, daSize)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	weight, err = addU64(weight, sigCost)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+
+	return weight, anchorBytes, daBytes, nil
+}
