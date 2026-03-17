@@ -138,7 +138,7 @@ Mandatory per-stack gates:
 
 Coverage policy for new parallel-validation code:
 
-- hard floor: `>= 80%`
+- hard floor: `>= 85%`
 - target: `>= 95%`
 - if branch is unreachable from public/runtime surface, annotate explicitly with rationale.
 
