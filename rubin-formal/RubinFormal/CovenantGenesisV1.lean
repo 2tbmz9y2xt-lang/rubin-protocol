@@ -182,7 +182,7 @@ def validateOutGenesis (out : TxOut) (txKind : Nat) (_blockHeight : Nat) : Excep
     if out.covenantData.size != MAX_P2PK_COVENANT_DATA then throw "TX_ERR_COVENANT_TYPE_INVALID"
     let suiteId := (out.covenantData.get! 0).toNat
     if suiteId != SUITE_ID_ML_DSA_87 then
-      throw "TX_ERR_COVENANT_TYPE_INVALID"
+      throw "TX_ERR_SIG_ALG_INVALID"
   else if out.covenantType == COV_TYPE_ANCHOR then
     if out.value != 0 then throw "TX_ERR_COVENANT_TYPE_INVALID"
     let l := out.covenantData.size

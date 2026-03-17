@@ -37,13 +37,16 @@ def parseU16le (b0 b1 : UInt8) : Nat :=
   Wire.u16le? b0 b1
 
 def validateP2PKSpendPreSig (entry : UtxoEntry) (w : WitnessItem) (_blockHeight : Nat) : Except String Unit := do
+  if entry.covenantData.size != CovenantGenesisV1.MAX_P2PK_COVENANT_DATA then
+    throw "TX_ERR_COVENANT_TYPE_INVALID"
+  let entrySuite := (entry.covenantData.get! 0).toNat
+  if entrySuite != SUITE_ID_ML_DSA_87 then
+    throw "TX_ERR_SIG_ALG_INVALID"
   let suite := w.suiteId
   if suite != SUITE_ID_ML_DSA_87 then
     throw "TX_ERR_SIG_ALG_INVALID"
-  if entry.covenantData.size != CovenantGenesisV1.MAX_P2PK_COVENANT_DATA then
-    throw "TX_ERR_COVENANT_TYPE_INVALID"
-  if (entry.covenantData.get! 0).toNat != suite then
-    throw "TX_ERR_COVENANT_TYPE_INVALID"
+  if entrySuite != suite then
+    throw "TX_ERR_SIG_ALG_INVALID"
   let keyId := entry.covenantData.extract 1 33
   if SHA3.sha3_256 w.pubkey != keyId then
     throw "TX_ERR_SIG_INVALID"
