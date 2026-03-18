@@ -90,10 +90,10 @@ func ValidateRotationSet(descriptors []CryptoRotationDescriptor, registry *Suite
 //
 // Spec §6 phases (RUBIN_NATIVE_CRYPTO_ROTATION_SPEC_v1.md):
 //
-//   Phase 0 (h < H1):           create={old}       spend={old}
-//   Phase 1 (H1 ≤ h < H2):     create={old,new}   spend={old,new}
-//   Phase 2 (H2 ≤ h < H4|∞):   create={new}       spend={old,new}
-//   Phase 4 (H4 ≤ h):          create={new}        spend={new}
+//	Phase 0 (h < H1):           create={old}       spend={old}
+//	Phase 1 (H1 ≤ h < H2):     create={old,new}   spend={old,new}
+//	Phase 2 (H2 ≤ h < H4|∞):   create={new}       spend={old,new}
+//	Phase 4 (H4 ≤ h):          create={new}        spend={new}
 type DescriptorRotationProvider struct {
 	Descriptor CryptoRotationDescriptor
 }
