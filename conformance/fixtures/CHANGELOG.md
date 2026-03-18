@@ -9,6 +9,21 @@ Policy:
 
 ---
 
+## 2026-03-18 — Rotation weight conformance vectors (Q-CONF-ROTATION-06)
+
+Причина:
+- зафиксировать suite-aware tx weight accounting под crypto rotation:
+  - известная suite (зарегистрирована) использует `verify_cost` из инжектированного `suite_registry`;
+  - неизвестная suite использует floor `VERIFY_COST_UNKNOWN_SUITE`.
+
+Инструменты:
+- добавление нового gate `CV-NATIVE-ROTATION-WEIGHT`,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-NATIVE-ROTATION-WEIGHT`,
+- синхронизация матрицы: `tools/gen_conformance_matrix.py`.
+
+Изменённые fixtures:
+- `CV-NATIVE-ROTATION-WEIGHT.json` (new)
+
 ## 2026-03-18 — Rotation create-suite conformance vectors (Q-CONF-ROTATION-01)
 
 Причина:
