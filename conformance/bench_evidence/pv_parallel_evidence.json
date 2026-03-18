@@ -1,0 +1,15 @@
+{
+  "schema": "pv_bench_evidence_v1",
+  "timestamp_utc": "2026-03-18T01:23:50Z",
+  "env": {
+    "go_version": "go1.25.7 darwin/arm64",
+    "gomaxprocs": "",
+    "os": "Darwin",
+    "arch": "arm64"
+  },
+  "gates": {
+    "one_worker_regression_pct_max": 5,
+    "multi_worker_gain_expected": true
+  },
+  "instructions": "Run: cd clients/go && go test ./consensus -bench=BenchmarkConnectBlockParallelSigVerify -benchmem -run=^$ -count=1. Compare 1Worker ns/op to baseline; 8Workers/16Workers should be lower (gain)."
+}

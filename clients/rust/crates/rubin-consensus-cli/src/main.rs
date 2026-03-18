@@ -2106,6 +2106,7 @@ fn main() {
                         utxo_count: Some(summary.utxo_count),
                         already_generated: Some(already_generated),
                         already_generated_n1: Some(already_generated_n1),
+                        digest: Some(hex::encode(summary.post_state_digest)),
                         ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);

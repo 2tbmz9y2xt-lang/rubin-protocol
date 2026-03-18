@@ -956,6 +956,7 @@ func runFromStdin() {
 			UtxoCount:          s.UtxoCount,
 			AlreadyGenerated:   s.AlreadyGenerated,
 			AlreadyGeneratedN1: s.AlreadyGeneratedN1,
+			DigestHex:          hex.EncodeToString(s.PostStateDigest[:]),
 		})
 		return
 
