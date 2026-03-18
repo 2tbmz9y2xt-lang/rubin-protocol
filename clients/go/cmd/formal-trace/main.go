@@ -237,13 +237,29 @@ type daIntegrityVector struct {
 }
 
 var writeJSONFn = writeJSON
+var gitCommitMetaFn = mustGitCommitMeta
+var goVersionFn = mustGoVersion
 
-func mustGitCommit() string {
-	out, err := exec.Command("git", "rev-parse", "HEAD").Output()
+const unknownGeneratedAtUTC = "1970-01-01T00:00:00Z"
+
+func normalizeCommittedAtUTC(raw string) string {
+	committedAt, err := time.Parse(time.RFC3339, raw)
 	if err != nil {
-		return "UNKNOWN"
+		return unknownGeneratedAtUTC
 	}
-	return strings.TrimSpace(string(out))
+	return committedAt.UTC().Format(time.RFC3339)
+}
+
+func mustGitCommitMeta() (commit string, committedAtUTC string) {
+	out, err := exec.Command("git", "show", "-s", "--format=%H%n%cI", "HEAD").Output()
+	if err != nil {
+		return "UNKNOWN", unknownGeneratedAtUTC
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != 2 || lines[0] == "" || lines[1] == "" {
+		return "UNKNOWN", unknownGeneratedAtUTC
+	}
+	return lines[0], normalizeCommittedAtUTC(lines[1])
 }
 
 func mustGoVersion() string {
@@ -413,12 +429,15 @@ func run(fixturesDir, outPath string) error {
 	}
 	var traceBuf bytes.Buffer
 
+	repoCommit, generatedAtUTC := gitCommitMetaFn()
 	hdr := traceHeader{
-		Type:                  "header",
-		SchemaVersion:         1,
-		GeneratedAtUTC:        time.Now().UTC().Format(time.RFC3339Nano),
-		RepoCommit:            mustGitCommit(),
-		GoVersion:             mustGoVersion(),
+		Type:          "header",
+		SchemaVersion: 1,
+		// Use HEAD commit metadata instead of wall clock time so repeat
+		// regeneration on the same commit stays byte-stable.
+		GeneratedAtUTC:        generatedAtUTC,
+		RepoCommit:            repoCommit,
+		GoVersion:             goVersionFn(),
 		FixturesDigestSHA3256: fixturesDigest,
 	}
 	if err := writeJSONFn(&traceBuf, hdr); err != nil {
