@@ -122,8 +122,7 @@ pub(crate) fn validate_stealth_spend_at_height(
         )
     })?;
 
-    if w.pubkey.len() as u64 != params.pubkey_len
-        || w.signature.len() as u64 != params.sig_len + 1
+    if w.pubkey.len() as u64 != params.pubkey_len || w.signature.len() as u64 != params.sig_len + 1
     {
         return Err(TxError::new(
             ErrorCode::TxErrSigNoncanonical,

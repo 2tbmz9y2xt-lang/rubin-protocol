@@ -107,8 +107,7 @@ pub(crate) fn validate_p2pk_spend_at_height(
         )
     })?;
 
-    if w.pubkey.len() as u64 != params.pubkey_len
-        || w.signature.len() as u64 != params.sig_len + 1
+    if w.pubkey.len() as u64 != params.pubkey_len || w.signature.len() as u64 != params.sig_len + 1
     {
         return Err(TxError::new(
             ErrorCode::TxErrSigNoncanonical,
@@ -250,9 +249,9 @@ pub(crate) fn validate_threshold_sig_spend_at_height(
             return Err(TxError::new(ErrorCode::TxErrSigAlgInvalid, context));
         }
 
-        let params = reg.lookup(w.suite_id).ok_or_else(|| {
-            TxError::new(ErrorCode::TxErrSigAlgInvalid, context)
-        })?;
+        let params = reg
+            .lookup(w.suite_id)
+            .ok_or_else(|| TxError::new(ErrorCode::TxErrSigAlgInvalid, context))?;
 
         if w.pubkey.len() as u64 != params.pubkey_len
             || w.signature.len() as u64 != params.sig_len + 1
@@ -267,13 +266,8 @@ pub(crate) fn validate_threshold_sig_spend_at_height(
             return Err(TxError::new(ErrorCode::TxErrSigInvalid, context));
         }
         let (crypto_sig, sighash_type) = extract_crypto_sig_and_sighash(w)?;
-        let digest = sighash_v1_digest_with_cache(
-            cache,
-            input_index,
-            input_value,
-            chain_id,
-            sighash_type,
-        )?;
+        let digest =
+            sighash_v1_digest_with_cache(cache, input_index, input_value, chain_id, sighash_type)?;
         let ok = verify_sig_with_registry(w.suite_id, &w.pubkey, crypto_sig, &digest, Some(reg))?;
         if !ok {
             return Err(TxError::new(ErrorCode::TxErrSigInvalid, context));
