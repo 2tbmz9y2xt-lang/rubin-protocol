@@ -1,6 +1,14 @@
-# RUBIN Formal (Lean4) — bootstrap
+# RUBIN Formal (Lean4) — mirror/bootstrap (in-repo)
 
 Этот каталог содержит in-repo formal proof-pack baseline для RUBIN.
+**Источник истины (authoritative formal baseline)** — standalone репозиторий `rubin-formal`:
+`https://github.com/2tbmz9y2xt-lang/rubin-formal`.
+
+Этот in-repo каталог используется как:
+
+- зеркальный bootstrap для CI в `rubin-protocol`,
+- воспроизводимый “пин” для replay/refinement поверх conformance fixtures,
+- удобная точка входа для разработчиков, но **не** как canonical formal SOT.
 
 ## Что есть сейчас
 
