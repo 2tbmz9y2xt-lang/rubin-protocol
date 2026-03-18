@@ -74,6 +74,14 @@ pub const SIGHASH_ANYONECANPAY: u8 = 0x80;
 pub const VERIFY_COST_ML_DSA_87: u64 = 8;
 pub const VERIFY_COST_UNKNOWN_SUITE: u64 = 64;
 
+/// EXT_BASE_COST is a policy/activation prerequisite constant for CORE_EXT tracks.
+/// It is defined as a stable numeric baseline derived from devnet-style measurement
+/// and exposed on the consensus parameter surface for cross-client parity.
+///
+/// NOTE: This constant does not change consensus validity by itself; it is not wired
+/// into weight or fee rules unless explicitly specified by a separate consensus change.
+pub const EXT_BASE_COST: u64 = 64;
+
 pub const SIGNAL_WINDOW: u64 = 2016;
 pub const SIGNAL_THRESHOLD: u32 = 1815;
 
