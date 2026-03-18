@@ -1,0 +1,107 @@
+{
+  "gate": "CV-NATIVE-ROTATION-DESCRIPTOR",
+  "description": "Rotation conformance vectors for descriptor validation and invalid-condition normalization. All invalid cases must map to a uniform `descriptor-not-activated` error string.",
+  "vectors": [
+    {
+      "id": "NATIVE-ROT-DESC-01",
+      "op": "rotation_descriptor_check",
+      "rotation_descriptor": {
+        "name": "bad-old-eq-new",
+        "old_suite_id": 1,
+        "new_suite_id": 1,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": false,
+      "expect_err": "descriptor-not-activated"
+    },
+    {
+      "id": "NATIVE-ROT-DESC-02",
+      "op": "rotation_descriptor_check",
+      "rotation_descriptor": {
+        "name": "bad-unregistered-old",
+        "old_suite_id": 3,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": false,
+      "expect_err": "descriptor-not-activated"
+    },
+    {
+      "id": "NATIVE-ROT-DESC-03",
+      "op": "rotation_descriptor_check",
+      "rotation_descriptor": {
+        "name": "bad-h1-ge-h2",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 200,
+        "spend_height": 200,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": false,
+      "expect_err": "descriptor-not-activated"
+    },
+    {
+      "id": "NATIVE-ROT-DESC-04",
+      "op": "rotation_descriptor_check",
+      "rotation_descriptor": {
+        "name": "bad-h4-le-h2",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 200
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": false,
+      "expect_err": "descriptor-not-activated"
+    },
+    {
+      "id": "NATIVE-ROT-DESC-05",
+      "op": "rotation_descriptor_check",
+      "rotation_descriptors": [
+        {
+          "name": "rot-a",
+          "old_suite_id": 1,
+          "new_suite_id": 2,
+          "create_height": 100,
+          "spend_height": 200,
+          "sunset_height": 0
+        },
+        {
+          "name": "rot-b",
+          "old_suite_id": 1,
+          "new_suite_id": 2,
+          "create_height": 150,
+          "spend_height": 250,
+          "sunset_height": 0
+        }
+      ],
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": false,
+      "expect_err": "descriptor-not-activated"
+    }
+  ]
+}
+
