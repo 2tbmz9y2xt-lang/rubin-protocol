@@ -37,13 +37,25 @@
       "covenant_data_hex": "00100101",
       "ext_id": 4096,
       "expect_ok": false,
-      "expect_err": "TX_ERR_SIG_ALG_INVALID"
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
+      "height": 100,
+      "suite_id": 5,
+      "core_ext_profiles": [
+        {
+          "ext_id": 4096,
+          "activation_height": 50,
+          "allowed_suite_ids": [
+            3
+          ],
+          "binding": "native_verify_sig"
+        }
+      ]
     },
     {
       "id": "CV-EXT-05",
       "family": "ERR",
       "op": "ext_error_priority",
-      "description": "Malformed covenant_data (length mismatch) — parse error before sig",
+      "description": "Malformed covenant_data (length mismatch) \u2014 parse error before sig",
       "covenant_data_hex": "0010050102",
       "ext_id": 4096,
       "expect_ok": false,
@@ -53,11 +65,29 @@
       "id": "CV-EXT-06",
       "family": "DUP",
       "op": "ext_duplicate_profile",
-      "description": "Duplicate ACTIVE profile for same ext_id — provider rejects",
+      "description": "Duplicate ACTIVE profile for same ext_id \u2014 provider rejects",
       "covenant_data_hex": "070000",
       "ext_id": 7,
       "expect_ok": false,
-      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID"
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "core_ext_profiles": [
+        {
+          "ext_id": 7,
+          "activation_height": 10,
+          "allowed_suite_ids": [
+            1
+          ],
+          "binding": "native_verify_sig"
+        },
+        {
+          "ext_id": 7,
+          "activation_height": 20,
+          "allowed_suite_ids": [
+            3
+          ],
+          "binding": "native_verify_sig"
+        }
+      ]
     }
   ]
 }
