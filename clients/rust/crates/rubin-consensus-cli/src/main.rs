@@ -4,7 +4,8 @@ use rubin_consensus::merkle::witness_merkle_root_wtxids;
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles, block_hash, compact_shortid,
     connect_block_basic_in_memory_at_height_and_core_ext_deployments,
-    core_ext_verification_binding_from_name, featurebit_state_at_height_from_window_counts,
+    core_ext_verification_binding_from_name, parse_core_ext_covenant_data,
+    featurebit_state_at_height_from_window_counts,
     flagday_active_at_height, fork_work_from_target, merkle_root_txids, parse_tx, pow_check,
     retarget_v1, retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_public,
     validate_block_basic_with_context_and_fees_at_height,
@@ -651,6 +652,9 @@ struct Response {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     prioritize: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ext_id: Option<u16>,
 }
 
 fn err_code(code: ErrorCode) -> String {
@@ -3754,6 +3758,82 @@ fn main() {
                 ok: true,
                 ..Default::default()
             };
+            let _ = serde_json::to_writer(std::io::stdout(), &resp);
+        }
+        "ext_envelope_parse" => {
+            let cov_bytes = match hex::decode(&req.covenant_data_hex) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = Response { ok: false, err: Some("bad covenant_data hex".to_string()), ..Default::default() };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            match parse_core_ext_covenant_data(&cov_bytes) {
+                Ok(parsed) => {
+                    let resp = Response { ok: true, ext_id: Some(parsed.ext_id), ..Default::default() };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+                Err(e) => {
+                    let resp = Response { ok: false, err: Some(err_code(e.code)), ..Default::default() };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+            }
+        }
+        "ext_activation_check" | "ext_pre_activation_spend" | "ext_enforcement_check" | "ext_error_priority" => {
+            let cov_bytes = match hex::decode(&req.covenant_data_hex) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = Response { ok: false, err: Some("bad covenant_data hex".to_string()), ..Default::default() };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            let parsed = match parse_core_ext_covenant_data(&cov_bytes) {
+                Ok(p) => p,
+                Err(e) => {
+                    let resp = Response { ok: false, err: Some(err_code(e.code)), ..Default::default() };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            let profiles = match core_ext_profiles_from_json(&req.core_ext_profiles) {
+                Ok(p) => p,
+                Err(e) => {
+                    let resp = Response { ok: false, err: Some(e), ..Default::default() };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            let snap = match profiles.active_profiles_at_height(req.height) {
+                Ok(s) => s,
+                Err(e) => {
+                    let resp = Response { ok: false, err: Some(err_code(e.code)), ..Default::default() };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            if let Some(profile) = snap.active.iter().find(|p| p.ext_id == parsed.ext_id) {
+                let suite_id = req.suite_id.unwrap_or(0);
+                if suite_id != 0 && !profile.allowed_suite_ids.contains(&suite_id) {
+                    let resp = Response { ok: false, err: Some("TX_ERR_SIG_ALG_INVALID".to_string()), ..Default::default() };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            }
+            let resp = Response { ok: true, ext_id: Some(parsed.ext_id), ..Default::default() };
+            let _ = serde_json::to_writer(std::io::stdout(), &resp);
+        }
+        "ext_duplicate_profile" => {
+            let mut seen = std::collections::HashSet::new();
+            for p in &req.core_ext_profiles {
+                if !seen.insert(p.ext_id) {
+                    let resp = Response { ok: false, err: Some("TX_ERR_COVENANT_TYPE_INVALID".to_string()), ..Default::default() };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            }
+            let resp = Response { ok: true, ..Default::default() };
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
         _ => {

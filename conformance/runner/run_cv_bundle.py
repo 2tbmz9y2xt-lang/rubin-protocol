@@ -1622,6 +1622,21 @@ def validate_vector(
         if tx_hex == "":
             return [f"{gate}/{v.get('id','?')}: missing tx_hex"]
         req["tx_hex"] = tx_hex
+    elif op in (
+        "ext_envelope_parse",
+        "ext_activation_check",
+        "ext_pre_activation_spend",
+        "ext_enforcement_check",
+        "ext_error_priority",
+        "ext_duplicate_profile",
+    ):
+        req["covenant_data"] = v.get("covenant_data_hex", "")
+        if "height" in v:
+            req["height"] = int(v["height"])
+        if "suite_id" in v:
+            req["suite_id"] = int(v["suite_id"])
+        if "core_ext_profiles" in v:
+            req["core_ext_profiles"] = v["core_ext_profiles"]
     elif op == "utxo_apply_basic":
         if tx_hex == "":
             return [f"{gate}/{v.get('id','?')}: missing tx_hex"]
@@ -1828,6 +1843,21 @@ def validate_vector(
     elif op == "covenant_genesis_check":
         # ok/err parity is already checked above.
         pass
+    elif op in (
+        "ext_envelope_parse",
+        "ext_activation_check",
+        "ext_pre_activation_spend",
+        "ext_enforcement_check",
+        "ext_error_priority",
+        "ext_duplicate_profile",
+    ):
+        req["covenant_data"] = v.get("covenant_data_hex", "")
+        if "height" in v:
+            req["height"] = int(v["height"])
+        if "suite_id" in v:
+            req["suite_id"] = int(v["suite_id"])
+        if "core_ext_profiles" in v:
+            req["core_ext_profiles"] = v["core_ext_profiles"]
     elif op == "utxo_apply_basic":
         for k in ["fee", "utxo_count"]:
             gv = as_int(go_resp.get(k))

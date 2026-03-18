@@ -292,6 +292,7 @@ type Response struct {
 	VerifyCalled       bool     `json:"verify_called,omitempty"`
 	CommitBearing      bool     `json:"commit_bearing,omitempty"`
 	Prioritize         bool     `json:"prioritize,omitempty"`
+	ExtID              uint16   `json:"ext_id,omitempty"`
 }
 
 func writeResp(w io.Writer, resp Response) {
@@ -1963,6 +1964,70 @@ func runFromStdin() {
 				writeResp(os.Stdout, Response{Ok: false, Err: check.Code})
 				return
 			}
+		}
+		writeResp(os.Stdout, Response{Ok: true})
+		return
+
+	case "ext_envelope_parse":
+		covDataBytes, err := hex.DecodeString(req.CovenantDataHex)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad covenant_data hex"})
+			return
+		}
+		parsed, err := consensus.ParseCoreExtCovenantData(covDataBytes)
+		if err != nil {
+			writeConsensusErr(os.Stdout, err)
+			return
+		}
+		writeResp(os.Stdout, Response{Ok: true, ExtID: parsed.ExtID})
+		return
+
+	case "ext_activation_check", "ext_pre_activation_spend", "ext_enforcement_check", "ext_error_priority":
+		covDataBytes, err := hex.DecodeString(req.CovenantDataHex)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad covenant_data hex"})
+			return
+		}
+		parsed, err := consensus.ParseCoreExtCovenantData(covDataBytes)
+		if err != nil {
+			writeConsensusErr(os.Stdout, err)
+			return
+		}
+		profiles, err := buildCoreExtProfiles(coreExtProfilesReq)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+		if profiles == nil {
+			writeResp(os.Stdout, Response{Ok: true, ExtID: parsed.ExtID})
+			return
+		}
+		profile, found, err := profiles.LookupCoreExtProfile(parsed.ExtID, req.Height)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: string(consensus.TX_ERR_COVENANT_TYPE_INVALID)})
+			return
+		}
+		if !found || !profile.Active {
+			writeResp(os.Stdout, Response{Ok: true, ExtID: parsed.ExtID})
+			return
+		}
+		suiteID := uint8OrDefault(req.SuiteID, 0)
+		if suiteID != 0 && !consensus.HasSuiteExported(profile.AllowedSuites, suiteID) {
+			writeResp(os.Stdout, Response{Ok: false, Err: string(consensus.TX_ERR_SIG_ALG_INVALID)})
+			return
+		}
+		writeResp(os.Stdout, Response{Ok: true, ExtID: parsed.ExtID})
+		return
+
+	case "ext_duplicate_profile":
+		profiles := coreExtProfilesReq
+		seen := make(map[uint16]struct{})
+		for _, p := range profiles {
+			if _, dup := seen[p.ExtID]; dup {
+				writeResp(os.Stdout, Response{Ok: false, Err: string(consensus.TX_ERR_COVENANT_TYPE_INVALID)})
+				return
+			}
+			seen[p.ExtID] = struct{}{}
 		}
 		writeResp(os.Stdout, Response{Ok: true})
 		return

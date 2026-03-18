@@ -1,0 +1,63 @@
+{
+  "gate": "CV-EXT",
+  "vectors": [
+    {
+      "id": "CV-EXT-01",
+      "family": "ENV",
+      "op": "ext_envelope_parse",
+      "description": "Valid CORE_EXT envelope: ext_id=0x1000, empty payload",
+      "covenant_data_hex": "001000",
+      "ext_id": 4096,
+      "expect_ok": true
+    },
+    {
+      "id": "CV-EXT-02",
+      "family": "ENV",
+      "op": "ext_envelope_parse",
+      "description": "Malformed CORE_EXT envelope: too short (1 byte)",
+      "covenant_data_hex": "01",
+      "ext_id": 0,
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID"
+    },
+    {
+      "id": "CV-EXT-03",
+      "family": "ACT",
+      "op": "ext_activation_check",
+      "description": "CORE_EXT spend pre-activation: no profile, permissive path",
+      "covenant_data_hex": "001000",
+      "ext_id": 4096,
+      "expect_ok": true
+    },
+    {
+      "id": "CV-EXT-04",
+      "family": "ENF",
+      "op": "ext_enforcement_check",
+      "description": "CORE_EXT spend with disallowed suite under ACTIVE profile",
+      "covenant_data_hex": "00100101",
+      "ext_id": 4096,
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID"
+    },
+    {
+      "id": "CV-EXT-05",
+      "family": "ERR",
+      "op": "ext_error_priority",
+      "description": "Malformed covenant_data (length mismatch) — parse error before sig",
+      "covenant_data_hex": "0010050102",
+      "ext_id": 4096,
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID"
+    },
+    {
+      "id": "CV-EXT-06",
+      "family": "DUP",
+      "op": "ext_duplicate_profile",
+      "description": "Duplicate ACTIVE profile for same ext_id — provider rejects",
+      "covenant_data_hex": "070000",
+      "ext_id": 7,
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID"
+    }
+  ]
+}
