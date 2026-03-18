@@ -26,6 +26,7 @@ EXPECTED_GATES = frozenset(
         "CV-DEVNET-MATURITY",
         "CV-DEVNET-SIGHASH-CHAINID",
         "CV-DEVNET-SUBSIDY",
+        "CV-EXT",
         "CV-FEATUREBITS",
         "CV-FLAGDAY",
         "CV-FORK-CHOICE",

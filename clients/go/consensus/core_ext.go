@@ -118,6 +118,11 @@ func hasSuite(allowed map[uint8]struct{}, suiteID uint8) bool {
 	return ok
 }
 
+// HasSuiteExported is the exported wrapper for hasSuite, used by CLI runtime.
+func HasSuiteExported(allowed map[uint8]struct{}, suiteID uint8) bool {
+	return hasSuite(allowed, suiteID)
+}
+
 func cloneAllowedSuites(allowed map[uint8]struct{}) map[uint8]struct{} {
 	if len(allowed) == 0 {
 		return nil
