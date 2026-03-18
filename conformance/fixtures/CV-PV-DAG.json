@@ -1,0 +1,22 @@
+{
+  "gate": "CV-PV-DAG",
+  "vectors": [
+    {
+      "id": "CV-PV-DAG-01",
+      "op": "connect_block_basic",
+      "block_hex": "0100000000000000000000000000000000000000000000000000000000000000000000006f732e615e2f43337a53e9884adba7da32257d5bb5701adc7ed0bd406f2df91340e49e6900000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00000000000000000101000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff0200407a10f35a0000000021018448b91b88d1a6fbb65e872b72c381b2a9f3ce286a232f56309667f639dd72790000000000000000020020b716a4b7f4c0fab665298ab9b8199b601ab9fa7e0a27f0713383f34cf37071a8000000000000",
+      "chain_id": "88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
+      "height": 0,
+      "already_generated": 0,
+      "utxos": [],
+      "prev_timestamps": [],
+      "expected_target": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "expect_ok": true,
+      "expect_sum_fees": 0,
+      "expect_utxo_count": 1,
+      "expect_already_generated": 0,
+      "expect_already_generated_n1": 0,
+      "expect_digest": "8b172fb3a5e70b56de9ae78ce750c04eccbc4dd8b3be55751252e5a1b4f2e752"
+    }
+  ]
+}

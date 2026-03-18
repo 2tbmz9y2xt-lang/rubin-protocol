@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 
+use sha3::{Digest, Sha3_256};
+
 use crate::block_basic::{
     median_time_past, parse_block_bytes, validate_block_basic_with_context_at_height,
     validate_coinbase_apply_outputs, validate_coinbase_value_bound,
 };
+use crate::compactsize::encode_compact_size;
 use crate::constants::{COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT};
 use crate::core_ext::CoreExtDeploymentProfiles;
 use crate::error::{ErrorCode, TxError};
@@ -11,6 +14,8 @@ use crate::subsidy::block_subsidy;
 use crate::utxo_basic::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles, Outpoint, UtxoEntry,
 };
+
+const UTXO_SET_HASH_DST: &[u8] = b"RUBINv1-utxo-set-hash/";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InMemoryChainState {
@@ -25,6 +30,8 @@ pub struct ConnectBlockBasicSummary {
     pub already_generated: u128,
     pub already_generated_n1: u128,
     pub utxo_count: u64,
+    /// Post-state UTXO set digest (SHA3-256) for parity checks.
+    pub post_state_digest: [u8; 32],
 }
 
 /// ConnectBlockBasicInMemoryAtHeight connects a block against an in-memory chainstate and enforces
@@ -143,10 +150,42 @@ pub fn connect_block_basic_in_memory_at_height_and_core_ext_deployments(
         state.already_generated = already_generated_n1;
     }
 
+    let post_state_digest = utxo_set_hash(&state.utxos);
+
     Ok(ConnectBlockBasicSummary {
         sum_fees,
         already_generated,
         already_generated_n1,
         utxo_count: state.utxos.len() as u64,
+        post_state_digest,
     })
+}
+
+/// utxo_set_hash computes a deterministic SHA3-256 digest over the UTXO set.
+/// Must match Go consensus.UtxoSetHash and rubin-node chainstate for parity.
+fn utxo_set_hash(utxos: &HashMap<Outpoint, UtxoEntry>) -> [u8; 32] {
+    let mut items: Vec<([u8; 36], &UtxoEntry)> = Vec::with_capacity(utxos.len());
+    for (outpoint, entry) in utxos {
+        let mut key = [0u8; 36];
+        key[..32].copy_from_slice(&outpoint.txid);
+        key[32..].copy_from_slice(&outpoint.vout.to_le_bytes());
+        items.push((key, entry));
+    }
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut buf = Vec::with_capacity(UTXO_SET_HASH_DST.len() + 8 + items.len() * 64);
+    buf.extend_from_slice(UTXO_SET_HASH_DST);
+    buf.extend_from_slice(&(items.len() as u64).to_le_bytes());
+
+    for (key, entry) in items {
+        buf.extend_from_slice(&key);
+        buf.extend_from_slice(&entry.value.to_le_bytes());
+        buf.extend_from_slice(&entry.covenant_type.to_le_bytes());
+        encode_compact_size(entry.covenant_data.len() as u64, &mut buf);
+        buf.extend_from_slice(&entry.covenant_data);
+        buf.extend_from_slice(&entry.creation_height.to_le_bytes());
+        buf.push(u8::from(entry.created_by_coinbase));
+    }
+
+    Sha3_256::digest(&buf).into()
 }

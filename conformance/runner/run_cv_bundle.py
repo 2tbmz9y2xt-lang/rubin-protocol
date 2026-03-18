@@ -1811,6 +1811,10 @@ def validate_vector(
             if gv != rv:
                 problems.append(f"{gate}/{vid}: {k} mismatch go={gv} rust={rv}")
 
+        if go_resp.get("digest") != rust_resp.get("digest"):
+            problems.append(
+                f"{gate}/{vid}: digest mismatch go={go_resp.get('digest')} rust={rust_resp.get('digest')}"
+            )
         if "expect_sum_fees" in v and as_int(go_resp.get("sum_fees")) != int(v["expect_sum_fees"]):
             problems.append(f"{gate}/{vid}: expect_sum_fees mismatch")
         if "expect_utxo_count" in v and as_int(go_resp.get("utxo_count")) != int(v["expect_utxo_count"]):
@@ -1819,6 +1823,8 @@ def validate_vector(
             problems.append(f"{gate}/{vid}: expect_already_generated mismatch")
         if "expect_already_generated_n1" in v and as_int(go_resp.get("already_generated_n1")) != int(v["expect_already_generated_n1"]):
             problems.append(f"{gate}/{vid}: expect_already_generated_n1 mismatch")
+        if "expect_digest" in v and go_resp.get("digest") != v["expect_digest"]:
+            problems.append(f"{gate}/{vid}: expect_digest mismatch")
     elif op == "covenant_genesis_check":
         # ok/err parity is already checked above.
         pass

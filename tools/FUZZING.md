@@ -16,6 +16,7 @@ Targets live in `clients/go/consensus/*_test.go` (Go 1.18+):
 - Retarget arithmetic determinism (stage-2): `FuzzRetargetV1Arithmetic`
 - DA parser paths (stage-2): `FuzzParseTxDAKinds`
 - UTXO apply paths (stage-2): `FuzzApplyNonCoinbaseTxBasic`
+- Parallel validation determinism (Q-PV-17): `FuzzConnectBlockParallelDeterminism` — seq vs parallel same verdict/digest; seed preserved for replay.
 
 Examples:
 
@@ -28,7 +29,13 @@ scripts/dev-env.sh -- bash -lc 'cd clients/go/consensus && go test -run=^$ -fuzz
 scripts/dev-env.sh -- bash -lc 'cd clients/go/consensus && go test -run=^$ -fuzz=FuzzRetargetV1Arithmetic -fuzztime=45s'
 scripts/dev-env.sh -- bash -lc 'cd clients/go/consensus && go test -run=^$ -fuzz=FuzzParseTxDAKinds -fuzztime=45s'
 scripts/dev-env.sh -- bash -lc 'cd clients/go/consensus && go test -run=^$ -fuzz=FuzzApplyNonCoinbaseTxBasic -fuzztime=45s'
+scripts/dev-env.sh -- bash -lc 'cd clients/go/consensus && go test -run=^$ -fuzz=FuzzConnectBlockParallelDeterminism -fuzztime=30s'
 ```
+
+**Deterministic replay (Q-PV-17):** On failure the fuzz engine writes a seed to `testdata/fuzz/`. Re-run with that seed to reproduce:
+`go test -run='FuzzConnectBlockParallelDeterminism/<seed>' -v ./consensus`
+
+**Race detector (Q-PV-17):** `go test -race -run TestConnectBlockParallelSigVerify_Race ./consensus`
 
 ## Rust (cargo-fuzz / libFuzzer)
 
