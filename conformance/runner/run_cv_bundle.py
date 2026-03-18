@@ -1569,6 +1569,16 @@ def validate_vector(
         if tx_hex == "":
             return [f"{gate}/{v.get('id','?')}: missing tx_hex"]
         req["tx_hex"] = tx_hex
+    elif op in ("rotation_create_suite_check", "rotation_native_create_suites"):
+        if "height" not in v:
+            return [f"{gate}/{v.get('id','?')}: missing height"]
+        req["height"] = int(v["height"])
+        if "suite_id" in v:
+            req["suite_id"] = int(v["suite_id"])
+        if "rotation_descriptor" not in v:
+            return [f"{gate}/{v.get('id','?')}: missing rotation_descriptor"]
+        req["rotation_descriptor"] = v["rotation_descriptor"]
+        req["suite_registry"] = v.get("suite_registry", [])
     elif op == "block_hash":
         req["header_hex"] = v["header_hex"]
     elif op == "pow_check":
@@ -1773,6 +1783,15 @@ def validate_vector(
             )
         if "expect_digest" in v and go_resp.get("digest") != v["expect_digest"]:
             problems.append(f"{gate}/{vid}: expect_digest mismatch")
+    elif op == "rotation_native_create_suites":
+        if go_resp.get("suite_ids") != rust_resp.get("suite_ids"):
+            problems.append(
+                f"{gate}/{vid}: suite_ids mismatch go={go_resp.get('suite_ids')} rust={rust_resp.get('suite_ids')}"
+            )
+        if "expect_suite_ids" in v and go_resp.get("suite_ids") != v["expect_suite_ids"]:
+            problems.append(
+                f"{gate}/{vid}: expect_suite_ids={v['expect_suite_ids']} got_suite_ids={go_resp.get('suite_ids')}"
+            )
     elif op == "block_hash":
         if go_resp.get("block_hash") != rust_resp.get("block_hash"):
             problems.append(

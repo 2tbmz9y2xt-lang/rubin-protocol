@@ -19,6 +19,19 @@ type SuiteRegistry struct {
 	suites map[uint8]SuiteParams
 }
 
+// NewSuiteRegistryFromParams builds a registry from an explicit list of suites.
+// This is intended for conformance tooling and tests that need suites beyond
+// the default pre-rotation registry.
+//
+// NOTE: The returned registry is independent from any caller slices/maps.
+func NewSuiteRegistryFromParams(params []SuiteParams) *SuiteRegistry {
+	suites := make(map[uint8]SuiteParams, len(params))
+	for _, p := range params {
+		suites[p.SuiteID] = p
+	}
+	return &SuiteRegistry{suites: suites}
+}
+
 // DefaultSuiteRegistry returns the registry containing all currently defined
 // native signature suites. Pre-rotation, this is ML-DSA-87 only.
 func DefaultSuiteRegistry() *SuiteRegistry {
