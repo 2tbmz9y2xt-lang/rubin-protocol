@@ -425,6 +425,47 @@ pub fn verify_sig(
     openssl_verify_sig_digest_oneshot(alg, pubkey, signature, digest32)
 }
 
+/// Registry-aware signature verification. When registry is Some, looks up
+/// the suite's OpenSSL algorithm name and expected lengths from the registry.
+/// When registry is None, falls back to the hardcoded verify_sig path.
+/// Parity with Go `verifySigWithRegistry`.
+pub fn verify_sig_with_registry(
+    suite_id: u8,
+    pubkey: &[u8],
+    signature: &[u8],
+    digest32: &[u8; 32],
+    registry: Option<&crate::suite_registry::SuiteRegistry>,
+) -> Result<bool, TxError> {
+    let Some(reg) = registry else {
+        return verify_sig(suite_id, pubkey, signature, digest32);
+    };
+    let Some(params) = reg.lookup(suite_id) else {
+        return Err(TxError::new(
+            ErrorCode::TxErrSigAlgInvalid,
+            "verify_sig_with_registry: suite not registered",
+        ));
+    };
+
+    ensure_openssl_consensus_init()?;
+
+    if pubkey.len() as u64 != params.pubkey_len || signature.len() as u64 != params.sig_len {
+        return Ok(false);
+    }
+
+    // Convert the static str to CStr for OpenSSL.
+    let alg = match params.openssl_alg {
+        "ML-DSA-87" => c"ML-DSA-87",
+        _ => {
+            return Err(TxError::new(
+                ErrorCode::TxErrSigAlgInvalid,
+                "verify_sig_with_registry: unknown OpenSSL alg",
+            ))
+        }
+    };
+
+    openssl_verify_sig_digest_oneshot(alg, pubkey, signature, digest32)
+}
+
 fn map_digest_verify_rc(rc: core::ffi::c_int) -> Result<bool, TxError> {
     if rc == 1 {
         Ok(true)

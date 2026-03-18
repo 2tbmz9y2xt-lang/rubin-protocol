@@ -60,7 +60,7 @@ pub(super) fn validate_block_tx_semantics(
                 ));
             }
         }
-        validate_tx_covenants_genesis(tx, block_height)?;
+        validate_tx_covenants_genesis(tx, block_height, None)?;
     }
     Ok(())
 }

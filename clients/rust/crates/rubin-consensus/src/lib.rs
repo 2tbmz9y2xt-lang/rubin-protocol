@@ -27,9 +27,9 @@ mod verify_sig_openssl;
 mod wire_read;
 
 pub use block::{block_hash, parse_block_header_bytes, BlockHeader, BLOCK_HEADER_BYTES};
-pub use block_basic::tx_weight_and_stats_public;
 pub use block_basic::{
-    parse_block_bytes, validate_block_basic, validate_block_basic_at_height,
+    parse_block_bytes, tx_weight_and_stats_at_height, tx_weight_and_stats_public,
+    validate_block_basic, validate_block_basic_at_height,
     validate_block_basic_with_context_and_fees_at_height,
     validate_block_basic_with_context_at_height, BlockBasicSummary, ParsedBlock,
 };
@@ -79,7 +79,7 @@ pub use vault::{
     output_descriptor_bytes, parse_multisig_covenant_data, parse_vault_covenant_data,
     witness_slots, MultisigCovenant, VaultCovenant,
 };
-pub use verify_sig_openssl::{verify_sig, Mldsa87Keypair};
+pub use verify_sig_openssl::{verify_sig, verify_sig_with_registry, Mldsa87Keypair};
 
 #[cfg(test)]
 mod compact_relay_tests;
