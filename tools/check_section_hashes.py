@@ -90,13 +90,42 @@ def main() -> int:
 
     headings = data.get("section_headings", {})
     expected = data.get("sections", {})
-    section_sources = data.get("section_sources", {})
+    allowed_source_files = data.get("allowed_source_files")
+    if allowed_source_files is None:
+        allowed_source_files = [default_src_rel]
+    if (
+        not isinstance(allowed_source_files, list)
+        or not allowed_source_files
+        or any(not isinstance(src, str) or not src.strip() for src in allowed_source_files)
+    ):
+        print("ERROR: invalid allowed_source_files in SECTION_HASHES.json", file=sys.stderr)
+        return 2
+    allowed_source_set = set(allowed_source_files)
+    if default_src_rel not in allowed_source_set:
+        print("ERROR: source_file must be present in allowed_source_files", file=sys.stderr)
+        return 2
+
+    raw_section_sources = data.get("section_sources")
+    if raw_section_sources is None:
+        section_sources = {}
+    else:
+        section_sources = raw_section_sources
     if not isinstance(headings, dict) or not isinstance(expected, dict):
         print("ERROR: invalid SECTION_HASHES.json structure", file=sys.stderr)
         return 2
-    if section_sources and not isinstance(section_sources, dict):
+    if not isinstance(section_sources, dict):
         print("ERROR: invalid section_sources in SECTION_HASHES.json", file=sys.stderr)
         return 2
+    for key, src_rel in section_sources.items():
+        if not isinstance(src_rel, str) or not src_rel.strip():
+            print(f"ERROR: invalid section_sources value for {key}", file=sys.stderr)
+            return 2
+        if src_rel not in allowed_source_set:
+            print(
+                f"ERROR: source_file not allowlisted for {key}: {src_rel}",
+                file=sys.stderr,
+            )
+            return 2
 
     source_cache: dict[str, str] = {
         default_src_rel: default_src_path.read_text(encoding="utf-8", errors="strict")

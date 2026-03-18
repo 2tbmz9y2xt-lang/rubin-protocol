@@ -98,7 +98,39 @@ if (!defaultSourceFile) {
   console.error("FAIL [meta] source_file missing in SECTION_HASHES.json");
   process.exit(1);
 }
-const sectionSources = expectedDoc.section_sources || {};
+const allowedSourceFiles = expectedDoc.allowed_source_files;
+if (
+  allowedSourceFiles !== undefined &&
+  (!Array.isArray(allowedSourceFiles) ||
+    allowedSourceFiles.some((value) => typeof value !== "string" || value.length === 0))
+) {
+  console.error("FAIL [meta] invalid allowed_source_files in SECTION_HASHES.json");
+  process.exit(1);
+}
+const allowedSourceSet = new Set(allowedSourceFiles || [defaultSourceFile]);
+if (!allowedSourceSet.has(defaultSourceFile)) {
+  console.error("FAIL [meta] source_file must be present in allowed_source_files");
+  process.exit(1);
+}
+const rawSectionSources = expectedDoc.section_sources;
+if (
+  rawSectionSources !== undefined &&
+  (rawSectionSources === null || Array.isArray(rawSectionSources) || typeof rawSectionSources !== "object")
+) {
+  console.error("FAIL [meta] invalid section_sources in SECTION_HASHES.json");
+  process.exit(1);
+}
+const sectionSources = rawSectionSources || {};
+for (const [key, srcRel] of Object.entries(sectionSources)) {
+  if (typeof srcRel !== "string" || srcRel.length === 0) {
+    console.error(`FAIL [meta] invalid section_sources value for ${key}`);
+    process.exit(1);
+  }
+  if (!allowedSourceSet.has(srcRel)) {
+    console.error(`FAIL [meta] section source for ${key} is not allowlisted: ${srcRel}`);
+    process.exit(1);
+  }
+}
 const sourceCache = new Map();
 
 function loadSource(srcRel) {

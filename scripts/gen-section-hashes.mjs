@@ -11,6 +11,7 @@ const sectionSources = {
   replay_domain_checks: "spec/RUBIN_CONSENSUS_STATE_MACHINE.md",
   utxo_state_model: "spec/RUBIN_CONSENSUS_STATE_MACHINE.md",
 };
+const allowedSourceFiles = [defaultSourceFile, ...new Set(Object.values(sectionSources))];
 
 const sectionHeadings = {
   transaction_wire: "## 5. Transaction Wire",
@@ -72,6 +73,7 @@ const doc = {
   source_file: defaultSourceFile,
   canonicalization:
     "LF normalization; extract markdown from exact section heading to next heading of same/higher level; trim; append trailing LF",
+  allowed_source_files: allowedSourceFiles,
   section_sources: sectionSources,
   section_headings: sectionHeadings,
   sections: hashes,
