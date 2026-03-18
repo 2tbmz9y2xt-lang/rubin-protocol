@@ -170,13 +170,15 @@
       "status": "proved",
       "theorems": [
         "RubinFormal.Refinement.ParallelEquivalence.cursor_determinism",
+        "RubinFormal.Refinement.ParallelEquivalence.cursor_pure",
         "RubinFormal.Refinement.ParallelEquivalence.reducer_equivalence",
         "RubinFormal.Refinement.ParallelEquivalence.accept_reject_equivalence",
         "RubinFormal.Refinement.ParallelEquivalence.commit_equivalence_accept",
         "RubinFormal.Refinement.ParallelEquivalence.commit_equivalence_reject",
         "RubinFormal.Refinement.ParallelEquivalence.worker_purity",
-        "RubinFormal.Refinement.ParallelEquivalence.sig_tasks_independent",
-        "RubinFormal.Refinement.ParallelEquivalence.precompute_resolves_dependencies"
+        "RubinFormal.Refinement.ParallelEquivalence.worker_deterministic",
+        "RubinFormal.Refinement.ParallelEquivalence.reducer_permutation_invariant",
+        "RubinFormal.Refinement.ParallelEquivalence.precompute_enables_reorder"
       ],
       "file": "rubin-formal/RubinFormal/Refinement/ParallelEquivalence.lean"
     }
