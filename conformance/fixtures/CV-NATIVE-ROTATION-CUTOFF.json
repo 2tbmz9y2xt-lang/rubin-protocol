@@ -62,9 +62,8 @@
           "openssl_alg": "ML-DSA-87"
         }
       ],
-      "expect_ok": false,
-      "expect_err": "TX_ERR_SIG_ALG_INVALID",
-      "note": "Create with old suite at H2: MUST reject (old removed from create set at H2)"
+      "expect_ok": true,
+      "note": "Create with old suite at H2: still allowed (old removed from create only at H4/sunset, not at H2/spend)"
     },
     {
       "id": "NATIVE-ROT-CUTOFF-03",
