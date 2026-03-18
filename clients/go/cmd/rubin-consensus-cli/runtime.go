@@ -837,7 +837,28 @@ func runFromStdin() {
 			writeConsensusErr(os.Stdout, err)
 			return
 		}
-		w, da, anchor, err := consensus.TxWeightAndStats(tx)
+		var w uint64
+		var da uint64
+		var anchor uint64
+		if req.RotationDescriptor != nil && len(req.SuiteRegistry) > 0 {
+			reg := buildSuiteRegistry(req.SuiteRegistry)
+			desc := consensus.CryptoRotationDescriptor{
+				Name:         req.RotationDescriptor.Name,
+				OldSuiteID:   req.RotationDescriptor.OldSuiteID,
+				NewSuiteID:   req.RotationDescriptor.NewSuiteID,
+				CreateHeight: req.RotationDescriptor.CreateHeight,
+				SpendHeight:  req.RotationDescriptor.SpendHeight,
+				SunsetHeight: req.RotationDescriptor.SunsetHeight,
+			}
+			if err := desc.Validate(reg); err != nil {
+				writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
+				return
+			}
+			rp := consensus.DescriptorRotationProvider{Descriptor: desc}
+			w, da, anchor, err = consensus.TxWeightAndStatsAtHeight(tx, req.Height, rp, reg)
+		} else {
+			w, da, anchor, err = consensus.TxWeightAndStats(tx)
+		}
 		if err != nil {
 			writeConsensusErr(os.Stdout, err)
 			return

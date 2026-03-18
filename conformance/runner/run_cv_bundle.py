@@ -1569,6 +1569,12 @@ def validate_vector(
         if tx_hex == "":
             return [f"{gate}/{v.get('id','?')}: missing tx_hex"]
         req["tx_hex"] = tx_hex
+        if "height" in v:
+            req["height"] = int(v["height"])
+        if "rotation_descriptor" in v:
+            req["rotation_descriptor"] = v["rotation_descriptor"]
+        if "suite_registry" in v:
+            req["suite_registry"] = v.get("suite_registry", [])
     elif op in ("rotation_create_suite_check", "rotation_native_create_suites"):
         if "height" not in v:
             return [f"{gate}/{v.get('id','?')}: missing height"]

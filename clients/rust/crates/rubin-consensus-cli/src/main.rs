@@ -8,7 +8,7 @@ use rubin_consensus::{
     core_ext_verification_binding_from_name, featurebit_state_at_height_from_window_counts,
     flagday_active_at_height, fork_work_from_target, merkle_root_txids,
     parse_core_ext_covenant_data, parse_tx, pow_check, retarget_v1, retarget_v1_clamped,
-    sighash_v1_digest, tx_weight_and_stats_public,
+    sighash_v1_digest, tx_weight_and_stats_at_height, tx_weight_and_stats_public,
     validate_block_basic_with_context_and_fees_at_height,
     validate_block_basic_with_context_at_height, validate_tx_covenants_genesis,
     CoreExtDeploymentProfile, CoreExtDeploymentProfiles, CryptoRotationDescriptor,
@@ -1338,7 +1338,49 @@ fn main() {
                     return;
                 }
             };
-            match tx_weight_and_stats_public(&tx) {
+            let use_registry = req.rotation_descriptor.is_some() && !req.suite_registry.is_empty();
+            let r = if use_registry {
+                let rd = req.rotation_descriptor.as_ref().expect("checked");
+                let mut suites = std::collections::BTreeMap::new();
+                for s in &req.suite_registry {
+                    // Conformance tooling may inject arbitrary names; keep stable mapping
+                    // by accepting ML-DSA-87 only for now.
+                    let alg: &'static str = "ML-DSA-87";
+                    suites.insert(
+                        s.suite_id,
+                        SuiteParams {
+                            suite_id: s.suite_id,
+                            pubkey_len: s.pubkey_len,
+                            sig_len: s.sig_len,
+                            verify_cost: s.verify_cost,
+                            openssl_alg: alg,
+                        },
+                    );
+                }
+                let registry = SuiteRegistry::with_suites(suites);
+                let desc = CryptoRotationDescriptor {
+                    name: rd.name.clone(),
+                    old_suite_id: rd.old_suite_id,
+                    new_suite_id: rd.new_suite_id,
+                    create_height: rd.create_height,
+                    spend_height: rd.spend_height,
+                    sunset_height: rd.sunset_height,
+                };
+                if desc.validate(&registry).is_err() {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("descriptor-not-activated".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+                let rp = DescriptorRotationProvider { descriptor: desc };
+                tx_weight_and_stats_at_height(&tx, req.height, Some(&rp), Some(&registry))
+            } else {
+                tx_weight_and_stats_public(&tx)
+            };
+            match r {
                 Ok((w, da, anchor)) => {
                     let resp = Response {
                         ok: true,
