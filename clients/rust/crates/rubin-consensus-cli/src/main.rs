@@ -1338,6 +1338,15 @@ fn main() {
                     return;
                 }
             };
+            if req.rotation_descriptor.is_some() && req.suite_registry.is_empty() {
+                let resp = Response {
+                    ok: false,
+                    err: Some("bad suite_registry".to_string()),
+                    ..Default::default()
+                };
+                let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                return;
+            }
             let use_registry = req.rotation_descriptor.is_some() && !req.suite_registry.is_empty();
             let r = if use_registry {
                 let rd = req.rotation_descriptor.as_ref().expect("checked");

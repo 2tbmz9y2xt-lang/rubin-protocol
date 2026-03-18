@@ -840,6 +840,10 @@ func runFromStdin() {
 		var w uint64
 		var da uint64
 		var anchor uint64
+		if req.RotationDescriptor != nil && len(req.SuiteRegistry) == 0 {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad suite_registry"})
+			return
+		}
 		if req.RotationDescriptor != nil && len(req.SuiteRegistry) > 0 {
 			reg := buildSuiteRegistry(req.SuiteRegistry)
 			desc := consensus.CryptoRotationDescriptor{
