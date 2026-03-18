@@ -20,6 +20,11 @@ def normalize_lf(s: str) -> str:
     return s.replace("\r\n", "\n").replace("\r", "\n")
 
 
+def sha3_256_hex_lf_normalized_bytes(b: bytes) -> str:
+    b = b.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return hashlib.sha3_256(b).hexdigest()
+
+
 def heading_level(heading: str) -> int:
     m = re.match(r"^(#+)\s", heading)
     if not m:
@@ -119,6 +124,35 @@ def main() -> int:
 
     if failures:
         return 1
+
+    # Governance merge gate (AM-02): if pinned section hashes change, formal disposition must be updated.
+    # Spec CI checks out rubin-protocol tooling; use its in-repo rubin-formal mirror coverage registry.
+    formal_cov = repo_root / "rubin-protocol" / "rubin-formal" / "proof_coverage.json"
+    if formal_cov.exists():
+        try:
+            formal_data = json.loads(formal_cov.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"ERROR: cannot parse formal proof_coverage.json: {e}", file=sys.stderr)
+            return 2
+        formal_exp = formal_data.get("spec_section_hashes_sha3_256")
+        if not isinstance(formal_exp, str) or not formal_exp.strip():
+            print(
+                "FAIL: formal disposition missing spec_section_hashes_sha3_256 "
+                f"in {formal_cov.as_posix()}",
+                file=sys.stderr,
+            )
+            return 1
+        spec_got = sha3_256_hex_lf_normalized_bytes(hashes_path.read_bytes())
+        if formal_exp != spec_got:
+            print("FAIL: formal disposition out of date for spec/SECTION_HASHES.json", file=sys.stderr)
+            print(f"  expected(formal): {formal_exp}", file=sys.stderr)
+            print(f"  got(spec):        {spec_got}", file=sys.stderr)
+            print(
+                "  fix: update rubin-formal proof_coverage.json field spec_section_hashes_sha3_256 "
+                "to match current spec/SECTION_HASHES.json",
+                file=sys.stderr,
+            )
+            return 1
 
     print("OK: SECTION_HASHES.json matches canonical sections.")
     return 0
