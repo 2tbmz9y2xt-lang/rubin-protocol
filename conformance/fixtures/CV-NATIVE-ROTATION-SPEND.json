@@ -17,8 +17,20 @@
         "sunset_height": 0
       },
       "suite_registry": [
-        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
-        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+        {
+          "suite_id": 1,
+          "pubkey_len": 2592,
+          "sig_len": 4627,
+          "verify_cost": 8,
+          "openssl_alg": "ML-DSA-87"
+        },
+        {
+          "suite_id": 2,
+          "pubkey_len": 1024,
+          "sig_len": 512,
+          "verify_cost": 9,
+          "openssl_alg": "ML-DSA-87"
+        }
       ],
       "expect_ok": true
     },
@@ -37,11 +49,24 @@
         "sunset_height": 0
       },
       "suite_registry": [
-        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
-        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+        {
+          "suite_id": 1,
+          "pubkey_len": 2592,
+          "sig_len": 4627,
+          "verify_cost": 8,
+          "openssl_alg": "ML-DSA-87"
+        },
+        {
+          "suite_id": 2,
+          "pubkey_len": 1024,
+          "sig_len": 512,
+          "verify_cost": 9,
+          "openssl_alg": "ML-DSA-87"
+        }
       ],
-      "expect_ok": false,
-      "expect_err": "TX_ERR_SIG_ALG_INVALID"
+      "expect_ok": true,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
+      "note": "Spend with new suite at H2-1: allowed (new suite enters spend set at H1, not H2, per spec \u00a76 Phase 1)"
     },
     {
       "id": "NATIVE-ROT-SPEND-P2PK-03",
@@ -58,12 +83,23 @@
         "sunset_height": 0
       },
       "suite_registry": [
-        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
-        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+        {
+          "suite_id": 1,
+          "pubkey_len": 2592,
+          "sig_len": 4627,
+          "verify_cost": 8,
+          "openssl_alg": "ML-DSA-87"
+        },
+        {
+          "suite_id": 2,
+          "pubkey_len": 1024,
+          "sig_len": 512,
+          "verify_cost": 9,
+          "openssl_alg": "ML-DSA-87"
+        }
       ],
       "expect_ok": true
     },
-
     {
       "id": "NATIVE-ROT-SPEND-MULTISIG-01",
       "op": "rotation_spend_suite_check",
@@ -79,8 +115,20 @@
         "sunset_height": 0
       },
       "suite_registry": [
-        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
-        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+        {
+          "suite_id": 1,
+          "pubkey_len": 2592,
+          "sig_len": 4627,
+          "verify_cost": 8,
+          "openssl_alg": "ML-DSA-87"
+        },
+        {
+          "suite_id": 2,
+          "pubkey_len": 1024,
+          "sig_len": 512,
+          "verify_cost": 9,
+          "openssl_alg": "ML-DSA-87"
+        }
       ],
       "expect_ok": true
     },
@@ -99,11 +147,24 @@
         "sunset_height": 0
       },
       "suite_registry": [
-        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
-        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+        {
+          "suite_id": 1,
+          "pubkey_len": 2592,
+          "sig_len": 4627,
+          "verify_cost": 8,
+          "openssl_alg": "ML-DSA-87"
+        },
+        {
+          "suite_id": 2,
+          "pubkey_len": 1024,
+          "sig_len": 512,
+          "verify_cost": 9,
+          "openssl_alg": "ML-DSA-87"
+        }
       ],
-      "expect_ok": false,
-      "expect_err": "TX_ERR_SIG_ALG_INVALID"
+      "expect_ok": true,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
+      "note": "Spend with new suite at H2-1: allowed (new suite enters spend set at H1, not H2, per spec \u00a76 Phase 1)"
     },
     {
       "id": "NATIVE-ROT-SPEND-MULTISIG-03",
@@ -120,12 +181,23 @@
         "sunset_height": 0
       },
       "suite_registry": [
-        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
-        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+        {
+          "suite_id": 1,
+          "pubkey_len": 2592,
+          "sig_len": 4627,
+          "verify_cost": 8,
+          "openssl_alg": "ML-DSA-87"
+        },
+        {
+          "suite_id": 2,
+          "pubkey_len": 1024,
+          "sig_len": 512,
+          "verify_cost": 9,
+          "openssl_alg": "ML-DSA-87"
+        }
       ],
       "expect_ok": true
     },
-
     {
       "id": "NATIVE-ROT-SPEND-VAULT-01",
       "op": "rotation_spend_suite_check",
@@ -141,8 +213,20 @@
         "sunset_height": 0
       },
       "suite_registry": [
-        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
-        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+        {
+          "suite_id": 1,
+          "pubkey_len": 2592,
+          "sig_len": 4627,
+          "verify_cost": 8,
+          "openssl_alg": "ML-DSA-87"
+        },
+        {
+          "suite_id": 2,
+          "pubkey_len": 1024,
+          "sig_len": 512,
+          "verify_cost": 9,
+          "openssl_alg": "ML-DSA-87"
+        }
       ],
       "expect_ok": true
     },
@@ -161,11 +245,24 @@
         "sunset_height": 0
       },
       "suite_registry": [
-        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
-        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+        {
+          "suite_id": 1,
+          "pubkey_len": 2592,
+          "sig_len": 4627,
+          "verify_cost": 8,
+          "openssl_alg": "ML-DSA-87"
+        },
+        {
+          "suite_id": 2,
+          "pubkey_len": 1024,
+          "sig_len": 512,
+          "verify_cost": 9,
+          "openssl_alg": "ML-DSA-87"
+        }
       ],
-      "expect_ok": false,
-      "expect_err": "TX_ERR_SIG_ALG_INVALID"
+      "expect_ok": true,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
+      "note": "Spend with new suite at H2-1: allowed (new suite enters spend set at H1, not H2, per spec \u00a76 Phase 1)"
     },
     {
       "id": "NATIVE-ROT-SPEND-VAULT-03",
@@ -182,12 +279,23 @@
         "sunset_height": 0
       },
       "suite_registry": [
-        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
-        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+        {
+          "suite_id": 1,
+          "pubkey_len": 2592,
+          "sig_len": 4627,
+          "verify_cost": 8,
+          "openssl_alg": "ML-DSA-87"
+        },
+        {
+          "suite_id": 2,
+          "pubkey_len": 1024,
+          "sig_len": 512,
+          "verify_cost": 9,
+          "openssl_alg": "ML-DSA-87"
+        }
       ],
       "expect_ok": true
     },
-
     {
       "id": "NATIVE-ROT-SPEND-STEALTH-01",
       "op": "rotation_spend_suite_check",
@@ -203,8 +311,20 @@
         "sunset_height": 0
       },
       "suite_registry": [
-        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
-        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+        {
+          "suite_id": 1,
+          "pubkey_len": 2592,
+          "sig_len": 4627,
+          "verify_cost": 8,
+          "openssl_alg": "ML-DSA-87"
+        },
+        {
+          "suite_id": 2,
+          "pubkey_len": 1024,
+          "sig_len": 512,
+          "verify_cost": 9,
+          "openssl_alg": "ML-DSA-87"
+        }
       ],
       "expect_ok": true
     },
@@ -223,11 +343,24 @@
         "sunset_height": 0
       },
       "suite_registry": [
-        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
-        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+        {
+          "suite_id": 1,
+          "pubkey_len": 2592,
+          "sig_len": 4627,
+          "verify_cost": 8,
+          "openssl_alg": "ML-DSA-87"
+        },
+        {
+          "suite_id": 2,
+          "pubkey_len": 1024,
+          "sig_len": 512,
+          "verify_cost": 9,
+          "openssl_alg": "ML-DSA-87"
+        }
       ],
-      "expect_ok": false,
-      "expect_err": "TX_ERR_SIG_ALG_INVALID"
+      "expect_ok": true,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
+      "note": "Spend with new suite at H2-1: allowed (new suite enters spend set at H1, not H2, per spec \u00a76 Phase 1)"
     },
     {
       "id": "NATIVE-ROT-SPEND-STEALTH-03",
@@ -244,11 +377,22 @@
         "sunset_height": 0
       },
       "suite_registry": [
-        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
-        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+        {
+          "suite_id": 1,
+          "pubkey_len": 2592,
+          "sig_len": 4627,
+          "verify_cost": 8,
+          "openssl_alg": "ML-DSA-87"
+        },
+        {
+          "suite_id": 2,
+          "pubkey_len": 1024,
+          "sig_len": 512,
+          "verify_cost": 9,
+          "openssl_alg": "ML-DSA-87"
+        }
       ],
       "expect_ok": true
     }
   ]
 }
-

@@ -64,8 +64,8 @@
         }
       ],
       "covenant_type": 0,
-      "expect_ok": true,
-      "note": "Spend with old suite at H4: still allowed (sunset affects CREATE only, not SPEND)"
+      "expect_ok": false,
+      "note": "Spend with old suite at H4: MUST reject (old removed from spend set at H4 per spec \u00a76 Phase 4)"
     },
     {
       "id": "NATIVE-ROT-SUNSET-03",
@@ -96,8 +96,8 @@
           "openssl_alg": "ML-DSA-87"
         }
       ],
-      "expect_ok": true,
-      "note": "Create with old suite at H4-1: allowed (old still in create set)"
+      "expect_ok": false,
+      "note": "Create with old suite at H4-1: MUST reject (old already removed from create set at H2 per spec \u00a76 Phase 2)"
     },
     {
       "id": "NATIVE-ROT-SUNSET-04",
@@ -161,8 +161,8 @@
           "openssl_alg": "ML-DSA-87"
         }
       ],
-      "expect_ok": true,
-      "note": "H4=0 (undefined): old suite creates valid indefinitely"
+      "expect_ok": false,
+      "note": "Create with old suite far after H4: MUST reject (old removed from create set at H2)"
     }
   ]
 }

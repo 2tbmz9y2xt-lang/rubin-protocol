@@ -88,33 +88,44 @@ func ValidateRotationSet(descriptors []CryptoRotationDescriptor, registry *Suite
 // DescriptorRotationProvider implements RotationProvider using a validated
 // CryptoRotationDescriptor. It assumes Validate() has already been called.
 //
-// Logic:
-//   - Before H1: only OldSuiteID
-//   - [H1, H4) or [H1, ∞) if H4=0: OldSuiteID + NewSuiteID for creation
-//   - [H4, ∞): only NewSuiteID for creation
-//   - Before H2: only OldSuiteID for spending
-//   - [H2, ∞): OldSuiteID + NewSuiteID for spending
+// Spec §6 phases (RUBIN_NATIVE_CRYPTO_ROTATION_SPEC_v1.md):
+//
+//   Phase 0 (h < H1):           create={old}       spend={old}
+//   Phase 1 (H1 ≤ h < H2):     create={old,new}   spend={old,new}
+//   Phase 2 (H2 ≤ h < H4|∞):   create={new}       spend={old,new}
+//   Phase 4 (H4 ≤ h):          create={new}        spend={new}
 type DescriptorRotationProvider struct {
 	Descriptor CryptoRotationDescriptor
 }
 
 // NativeCreateSuites implements RotationProvider.
+//
+//	Phase 0 (h < H1):       {old}
+//	Phase 1 (H1 ≤ h < H2): {old, new}
+//	Phase 2+ (h ≥ H2):     {new}
 func (p DescriptorRotationProvider) NativeCreateSuites(height uint64) *NativeSuiteSet {
 	d := p.Descriptor
-	if height < d.CreateHeight {
+	if height < d.CreateHeight { // H1
 		return NewNativeSuiteSet(d.OldSuiteID)
 	}
-	if d.SunsetHeight != 0 && height >= d.SunsetHeight {
-		return NewNativeSuiteSet(d.NewSuiteID)
+	if height < d.SpendHeight { // H2
+		return NewNativeSuiteSet(d.OldSuiteID, d.NewSuiteID)
 	}
-	return NewNativeSuiteSet(d.OldSuiteID, d.NewSuiteID)
+	return NewNativeSuiteSet(d.NewSuiteID)
 }
 
 // NativeSpendSuites implements RotationProvider.
+//
+//	Phase 0 (h < H1):                  {old}
+//	Phase 1-3 (H1 ≤ h, no H4 or h<H4): {old, new}
+//	Phase 4 (H4 ≤ h):                  {new}
 func (p DescriptorRotationProvider) NativeSpendSuites(height uint64) *NativeSuiteSet {
 	d := p.Descriptor
-	if height < d.SpendHeight {
+	if height < d.CreateHeight { // H1
 		return NewNativeSuiteSet(d.OldSuiteID)
+	}
+	if d.SunsetHeight != 0 && height >= d.SunsetHeight { // H4
+		return NewNativeSuiteSet(d.NewSuiteID)
 	}
 	return NewNativeSuiteSet(d.OldSuiteID, d.NewSuiteID)
 }
