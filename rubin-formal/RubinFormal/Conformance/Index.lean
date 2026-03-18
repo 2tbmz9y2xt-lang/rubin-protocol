@@ -66,3 +66,5 @@ import RubinFormal.Conformance.CVNativeRotationCreateVectors
 import RubinFormal.Conformance.CVNativeRotationCreateReplay
 import RubinFormal.Conformance.CVNativeRotationSpendVectors
 import RubinFormal.Conformance.CVNativeRotationSpendReplay
+import RubinFormal.Conformance.CVNativeRotationDescriptorVectors
+import RubinFormal.Conformance.CVNativeRotationDescriptorReplay
