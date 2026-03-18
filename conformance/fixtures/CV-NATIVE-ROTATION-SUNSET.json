@@ -30,7 +30,7 @@
           "openssl_alg": "ML-DSA-87"
         }
       ],
-      "covenant_type": "CORE_P2PK",
+      "covenant_type": 0,
       "expect_ok": true,
       "note": "Spend with old suite at H4-1: allowed (old still in spend set)"
     },
@@ -63,7 +63,7 @@
           "openssl_alg": "ML-DSA-87"
         }
       ],
-      "covenant_type": "CORE_P2PK",
+      "covenant_type": 0,
       "expect_ok": false,
       "expect_err": "TX_ERR_SIG_ALG_INVALID",
       "note": "Spend with old suite at H4: MUST reject (old removed from spend set at H4)"
@@ -97,7 +97,7 @@
           "openssl_alg": "ML-DSA-87"
         }
       ],
-      "covenant_type": "CORE_P2PK",
+      "covenant_type": 0,
       "expect_ok": true,
       "note": "Spend with new suite at H4: allowed"
     },
@@ -130,7 +130,7 @@
           "openssl_alg": "ML-DSA-87"
         }
       ],
-      "covenant_type": "CORE_P2PK",
+      "covenant_type": 0,
       "expect_ok": true,
       "note": "H4=0 (undefined): old suite spends valid indefinitely"
     }

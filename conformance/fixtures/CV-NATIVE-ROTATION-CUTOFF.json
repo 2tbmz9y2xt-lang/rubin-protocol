@@ -192,7 +192,7 @@
           "openssl_alg": "ML-DSA-87"
         }
       ],
-      "covenant_type": "CORE_P2PK",
+      "covenant_type": 0,
       "expect_ok": true,
       "note": "Spend with old suite at H2: still allowed (old removed from spend at H4, not H2)"
     }
