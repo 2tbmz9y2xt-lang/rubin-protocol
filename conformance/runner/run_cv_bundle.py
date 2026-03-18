@@ -1595,6 +1595,12 @@ def validate_vector(
         req["covenant_type"] = int(v["covenant_type"])
         req["rotation_descriptor"] = v["rotation_descriptor"]
         req["suite_registry"] = v.get("suite_registry", [])
+    elif op == "rotation_descriptor_check":
+        if "rotation_descriptor" in v:
+            req["rotation_descriptor"] = v["rotation_descriptor"]
+        if "rotation_descriptors" in v:
+            req["rotation_descriptors"] = v["rotation_descriptors"]
+        req["suite_registry"] = v.get("suite_registry", [])
     elif op == "block_hash":
         req["header_hex"] = v["header_hex"]
     elif op == "pow_check":

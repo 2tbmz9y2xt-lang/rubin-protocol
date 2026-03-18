@@ -1,6 +1,7 @@
 use num_bigint::BigUint;
 use num_traits::Zero;
 use rubin_consensus::merkle::witness_merkle_root_wtxids;
+use rubin_consensus::suite_registry::validate_rotation_set;
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles, block_hash, compact_shortid,
     connect_block_basic_in_memory_at_height_and_core_ext_deployments,
@@ -168,6 +169,9 @@ struct Request {
 
     #[serde(default)]
     suite_registry: Vec<SuiteParamsJson>,
+
+    #[serde(default)]
+    rotation_descriptors: Vec<RotationDescriptorJson>,
 
     #[serde(default)]
     key_binding_ok: Option<bool>,
@@ -1527,6 +1531,85 @@ fn main() {
                 let resp = Response {
                     ok: false,
                     err: Some("TX_ERR_SIG_ALG_INVALID".to_string()),
+                    ..Default::default()
+                };
+                let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                return;
+            }
+            let resp = Response {
+                ok: true,
+                ..Default::default()
+            };
+            let _ = serde_json::to_writer(std::io::stdout(), &resp);
+        }
+        "rotation_descriptor_check" => {
+            let mut suites = std::collections::BTreeMap::new();
+            for s in &req.suite_registry {
+                suites.insert(
+                    s.suite_id,
+                    SuiteParams {
+                        suite_id: s.suite_id,
+                        pubkey_len: s.pubkey_len,
+                        sig_len: s.sig_len,
+                        verify_cost: s.verify_cost,
+                        openssl_alg: "ML-DSA-87",
+                    },
+                );
+            }
+            let registry = SuiteRegistry::with_suites(suites);
+            if !req.rotation_descriptors.is_empty() {
+                let ds: Vec<CryptoRotationDescriptor> = req
+                    .rotation_descriptors
+                    .iter()
+                    .map(|rd| CryptoRotationDescriptor {
+                        name: rd.name.clone(),
+                        old_suite_id: rd.old_suite_id,
+                        new_suite_id: rd.new_suite_id,
+                        create_height: rd.create_height,
+                        spend_height: rd.spend_height,
+                        sunset_height: rd.sunset_height,
+                    })
+                    .collect();
+                if validate_rotation_set(&ds, &registry).is_err() {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("descriptor-not-activated".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+                let resp = Response {
+                    ok: true,
+                    ..Default::default()
+                };
+                let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                return;
+            }
+            let rd = match &req.rotation_descriptor {
+                Some(v) => v,
+                None => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad rotation_descriptor".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            let desc = CryptoRotationDescriptor {
+                name: rd.name.clone(),
+                old_suite_id: rd.old_suite_id,
+                new_suite_id: rd.new_suite_id,
+                create_height: rd.create_height,
+                spend_height: rd.spend_height,
+                sunset_height: rd.sunset_height,
+            };
+            if desc.validate(&registry).is_err() {
+                let resp = Response {
+                    ok: false,
+                    err: Some("descriptor-not-activated".to_string()),
                     ..Default::default()
                 };
                 let _ = serde_json::to_writer(std::io::stdout(), &resp);

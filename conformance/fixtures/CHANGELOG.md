@@ -37,6 +37,20 @@ Policy:
 Изменённые fixtures:
 - `CV-NATIVE-ROTATION-SPEND.json` (new)
 
+## 2026-03-18 — Rotation descriptor conformance vectors (Q-CONF-ROTATION-05)
+
+Причина:
+- зафиксировать invariant-проверки `CryptoRotationDescriptor.Validate()` и `ValidateRotationSet()` (перекрытия),
+  а также нормализацию любых invalid conditions в единый err string `descriptor-not-activated`.
+
+Инструменты:
+- добавление нового gate `CV-NATIVE-ROTATION-DESCRIPTOR`,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-NATIVE-ROTATION-DESCRIPTOR`,
+- синхронизация матрицы: `tools/gen_conformance_matrix.py`.
+
+Изменённые fixtures:
+- `CV-NATIVE-ROTATION-DESCRIPTOR.json` (new)
+
 ## 2026-03-14 — HTLC same-key parse coverage lock-in
 
 Причина:
