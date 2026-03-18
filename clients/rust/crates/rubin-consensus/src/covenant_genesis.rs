@@ -2,16 +2,27 @@ use crate::constants::{
     COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_EXT, COV_TYPE_HTLC, COV_TYPE_MULTISIG,
     COV_TYPE_P2PK, COV_TYPE_RESERVED_FUTURE, COV_TYPE_STEALTH, COV_TYPE_VAULT,
     MAX_ANCHOR_PAYLOAD_SIZE, MAX_COVENANT_DATA_PER_OUTPUT, MAX_P2PK_COVENANT_DATA,
-    SUITE_ID_ML_DSA_87,
 };
 use crate::core_ext::parse_core_ext_covenant_data;
 use crate::error::{ErrorCode, TxError};
 use crate::htlc::parse_htlc_covenant_data;
 use crate::stealth::parse_stealth_covenant_data;
+use crate::suite_registry::{DefaultRotationProvider, RotationProvider};
 use crate::tx::Tx;
 use crate::vault::{parse_multisig_covenant_data, parse_vault_covenant_data};
 
-pub fn validate_tx_covenants_genesis(tx: &Tx, _block_height: u64) -> Result<(), TxError> {
+/// Validates covenant structure at creation time. The `rotation` parameter
+/// controls which signature suites are valid for native covenant creation
+/// at the given block height. Pass `None` for the default pre-rotation
+/// behaviour ({ML-DSA-87} only).
+pub fn validate_tx_covenants_genesis(
+    tx: &Tx,
+    block_height: u64,
+    rotation: Option<&dyn RotationProvider>,
+) -> Result<(), TxError> {
+    let default_rp = DefaultRotationProvider;
+    let rp: &dyn RotationProvider = rotation.unwrap_or(&default_rp);
+
     for out in &tx.outputs {
         match out.covenant_type {
             COV_TYPE_P2PK => {
@@ -28,10 +39,10 @@ pub fn validate_tx_covenants_genesis(tx: &Tx, _block_height: u64) -> Result<(), 
                     ));
                 }
                 let suite_id = out.covenant_data[0];
-                if suite_id != SUITE_ID_ML_DSA_87 {
+                if !rp.native_create_suites(block_height).contains(suite_id) {
                     return Err(TxError::new(
                         ErrorCode::TxErrSigAlgInvalid,
-                        "invalid CORE_P2PK suite_id",
+                        "CORE_P2PK suite not in native create set",
                     ));
                 }
             }

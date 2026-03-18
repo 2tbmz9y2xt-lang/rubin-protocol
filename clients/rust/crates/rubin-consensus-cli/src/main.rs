@@ -2165,7 +2165,7 @@ fn main() {
                 }
             };
 
-            match validate_tx_covenants_genesis(&tx, req.height) {
+            match validate_tx_covenants_genesis(&tx, req.height, None) {
                 Ok(()) => {
                     let resp = Response {
                         ok: true,

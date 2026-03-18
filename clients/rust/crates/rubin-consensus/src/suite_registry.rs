@@ -10,6 +10,8 @@ pub struct SuiteParams {
     pub pubkey_len: u64,
     pub sig_len: u64,
     pub verify_cost: u64,
+    /// OpenSSL algorithm name for verify_sig dispatch (e.g. "ML-DSA-87").
+    pub openssl_alg: &'static str,
 }
 
 /// Maps suite IDs to their consensus parameters. Single source of truth for
@@ -30,6 +32,7 @@ impl SuiteRegistry {
                 pubkey_len: ML_DSA_87_PUBKEY_BYTES,
                 sig_len: ML_DSA_87_SIG_BYTES,
                 verify_cost: VERIFY_COST_ML_DSA_87,
+                openssl_alg: "ML-DSA-87",
             },
         );
         Self { suites }
@@ -233,6 +236,7 @@ mod tests {
                 pubkey_len: 2592,
                 sig_len: 4627,
                 verify_cost: 8,
+                openssl_alg: "ML-DSA-87",
             },
         );
         suites.insert(
@@ -242,6 +246,7 @@ mod tests {
                 pubkey_len: 1024,
                 sig_len: 512,
                 verify_cost: 4,
+                openssl_alg: "ML-DSA-87",
             },
         );
         SuiteRegistry { suites }
@@ -267,6 +272,7 @@ mod tests {
                 pubkey_len: 100,
                 sig_len: 200,
                 verify_cost: 1,
+                openssl_alg: "ML-DSA-87",
             },
         );
         let reg = SuiteRegistry::with_suites(suites);

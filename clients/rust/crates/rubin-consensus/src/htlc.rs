@@ -1,11 +1,11 @@
 use crate::constants::{
     LOCK_MODE_HEIGHT, LOCK_MODE_TIMESTAMP, MAX_HTLC_COVENANT_DATA, MAX_HTLC_PREIMAGE_BYTES,
-    MIN_HTLC_PREIMAGE_BYTES, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87,
-    SUITE_ID_SENTINEL,
+    MIN_HTLC_PREIMAGE_BYTES, SUITE_ID_SENTINEL,
 };
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
 use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_cache, SighashV1PrehashCache};
+use crate::suite_registry::{DefaultRotationProvider, RotationProvider, SuiteRegistry};
 use crate::tx::{Tx, WitnessItem};
 use crate::utxo_basic::UtxoEntry;
 
@@ -215,23 +215,34 @@ pub(crate) fn validate_htlc_spend_with_cache(
         }
     };
 
-    match sig_item.suite_id {
-        SUITE_ID_ML_DSA_87 => {
-            if sig_item.pubkey.len() as u64 != ML_DSA_87_PUBKEY_BYTES
-                || sig_item.signature.len() as u64 != ML_DSA_87_SIG_BYTES + 1
-            {
-                return Err(TxError::new(
-                    ErrorCode::TxErrSigNoncanonical,
-                    "non-canonical ML-DSA witness item lengths",
-                ));
-            }
-        }
-        _ => {
-            return Err(TxError::new(
-                ErrorCode::TxErrSigAlgInvalid,
-                "CORE_HTLC sig_item suite invalid",
-            ));
-        }
+    // Rotation-aware suite validation.
+    let default_rp = DefaultRotationProvider;
+    let default_reg = SuiteRegistry::default_registry();
+    let rp: &dyn RotationProvider = &default_rp;
+    let reg = &default_reg;
+
+    let native_spend = rp.native_spend_suites(block_height);
+    if !native_spend.contains(sig_item.suite_id) {
+        return Err(TxError::new(
+            ErrorCode::TxErrSigAlgInvalid,
+            "CORE_HTLC suite not in native spend set",
+        ));
+    }
+
+    let params = reg.lookup(sig_item.suite_id).ok_or_else(|| {
+        TxError::new(
+            ErrorCode::TxErrSigAlgInvalid,
+            "CORE_HTLC suite not registered",
+        )
+    })?;
+
+    if sig_item.pubkey.len() as u64 != params.pubkey_len
+        || sig_item.signature.len() as u64 != params.sig_len + 1
+    {
+        return Err(TxError::new(
+            ErrorCode::TxErrSigNoncanonical,
+            "non-canonical witness item lengths",
+        ));
     }
 
     if sha3_256(&sig_item.pubkey) != expected_key_id {
@@ -256,11 +267,12 @@ pub(crate) fn validate_htlc_spend_with_cache(
     let digest32 =
         sighash_v1_digest_with_cache(cache, input_index, input_value, chain_id, sighash_type)?;
 
-    let ok = crate::verify_sig_openssl::verify_sig(
+    let ok = crate::verify_sig_openssl::verify_sig_with_registry(
         sig_item.suite_id,
         &sig_item.pubkey,
         crypto_sig,
         &digest32,
+        Some(reg),
     )?;
     if !ok {
         return Err(TxError::new(

@@ -376,7 +376,12 @@ fn sorted_da_ids<T>(m: &HashMap<[u8; 32], T>) -> Vec<[u8; 32]> {
     ids
 }
 
-fn tx_weight_and_stats(tx: &Tx) -> Result<(u64, u64, u64), TxError> {
+/// Shared weight-computation skeleton. `sig_cost_fn` receives each witness item
+/// and returns its verification cost (same pattern as Go `txWeightComponents`).
+fn tx_weight_components<F>(tx: &Tx, sig_cost_fn: F) -> Result<(u64, u64, u64), TxError>
+where
+    F: Fn(&crate::tx::WitnessItem) -> Result<u64, TxError>,
+{
     let mut base_size: u64 = 4 + 1 + 8;
     base_size = base_size
         .checked_add(compact_size_len(tx.inputs.len() as u64))
@@ -426,8 +431,7 @@ fn tx_weight_and_stats(tx: &Tx) -> Result<(u64, u64, u64), TxError> {
         .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
 
     let mut witness_size: u64 = compact_size_len(tx.witness.len() as u64);
-    let mut ml_count: u64 = 0;
-    let mut unknown_suite_count: u64 = 0;
+    let mut sig_cost: u64 = 0;
     for w in &tx.witness {
         witness_size = witness_size
             .checked_add(1)
@@ -445,21 +449,10 @@ fn tx_weight_and_stats(tx: &Tx) -> Result<(u64, u64, u64), TxError> {
             .checked_add(w.signature.len() as u64)
             .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
 
-        match w.suite_id {
-            SUITE_ID_SENTINEL => {}
-            SUITE_ID_ML_DSA_87 => {
-                if w.pubkey.len() as u64 == ML_DSA_87_PUBKEY_BYTES
-                    && w.signature.len() as u64 == ML_DSA_87_SIG_BYTES + 1
-                {
-                    ml_count += 1;
-                }
-            }
-            _ => {
-                unknown_suite_count = unknown_suite_count
-                    .checked_add(1)
-                    .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
-            }
-        }
+        let cost = sig_cost_fn(w)?;
+        sig_cost = sig_cost
+            .checked_add(cost)
+            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
     }
 
     let da_len = tx.da_payload.len() as u64;
@@ -467,11 +460,6 @@ fn tx_weight_and_stats(tx: &Tx) -> Result<(u64, u64, u64), TxError> {
         .checked_add(da_len)
         .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
     let da_bytes = if tx.tx_kind != 0x00 { da_len } else { 0 };
-
-    let sig_cost = ml_count
-        .checked_mul(VERIFY_COST_ML_DSA_87)
-        .and_then(|v| v.checked_add(unknown_suite_count.checked_mul(VERIFY_COST_UNKNOWN_SUITE)?))
-        .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
 
     let weight = WITNESS_DISCOUNT_DIVISOR
         .checked_mul(base_size)
@@ -483,8 +471,60 @@ fn tx_weight_and_stats(tx: &Tx) -> Result<(u64, u64, u64), TxError> {
     Ok((weight, da_bytes, anchor_bytes))
 }
 
+/// Legacy weight with hardcoded per-suite costs.
+fn tx_weight_and_stats(tx: &Tx) -> Result<(u64, u64, u64), TxError> {
+    tx_weight_components(tx, |w| match w.suite_id {
+        SUITE_ID_SENTINEL => Ok(0),
+        SUITE_ID_ML_DSA_87 => {
+            if w.pubkey.len() as u64 == ML_DSA_87_PUBKEY_BYTES
+                && w.signature.len() as u64 == ML_DSA_87_SIG_BYTES + 1
+            {
+                Ok(VERIFY_COST_ML_DSA_87)
+            } else {
+                Ok(0)
+            }
+        }
+        _ => Ok(VERIFY_COST_UNKNOWN_SUITE),
+    })
+}
+
 pub fn tx_weight_and_stats_public(tx: &Tx) -> Result<(u64, u64, u64), TxError> {
     tx_weight_and_stats(tx)
+}
+
+/// Suite-aware weight calculation using registry verify costs and
+/// rotation-aware native spend suites. Parity with Go
+/// `TxWeightAndStatsAtHeight`. When rotation or registry is None,
+/// falls back to the legacy hardcoded calculation.
+pub fn tx_weight_and_stats_at_height(
+    tx: &crate::tx::Tx,
+    height: u64,
+    rotation: Option<&dyn crate::suite_registry::RotationProvider>,
+    registry: Option<&crate::suite_registry::SuiteRegistry>,
+) -> Result<(u64, u64, u64), TxError> {
+    let (rotation, registry) = match (rotation, registry) {
+        (Some(r), Some(reg)) => (r, reg),
+        _ => return tx_weight_and_stats(tx),
+    };
+
+    let native_spend = rotation.native_spend_suites(height);
+
+    tx_weight_components(tx, |w| {
+        if native_spend.contains(w.suite_id) {
+            if let Some(params) = registry.lookup(w.suite_id) {
+                if w.pubkey.len() as u64 == params.pubkey_len
+                    && w.signature.len() as u64 == params.sig_len + 1
+                {
+                    return Ok(params.verify_cost);
+                }
+                return Ok(0);
+            }
+            // In native spend set but not registered — unknown.
+            return Ok(VERIFY_COST_UNKNOWN_SUITE);
+        }
+        // Not in native spend set — unknown suite floor.
+        Ok(VERIFY_COST_UNKNOWN_SUITE)
+    })
 }
 
 fn compact_size_len(n: u64) -> u64 {

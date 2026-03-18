@@ -106,7 +106,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
         ));
     }
 
-    validate_tx_covenants_genesis(tx, height)?;
+    validate_tx_covenants_genesis(tx, height, None)?;
 
     let mut work = utxo_set.clone();
     let mut sighash_cache = SighashV1PrehashCache::new(tx)?;
