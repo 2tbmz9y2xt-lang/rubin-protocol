@@ -5,14 +5,14 @@ namespace RubinFormal.Conformance
 
 def VERIFY_COST_UNKNOWN_SUITE : Nat := 64
 
-def nativeSpendSuites (oldSuiteId newSuiteId spendHeight height : Nat) : List Nat :=
+def nativeSpendSuitesWeight (oldSuiteId newSuiteId spendHeight height : Nat) : List Nat :=
   if height < spendHeight then
     [oldSuiteId]
   else
     [oldSuiteId, newSuiteId]
 
 def sigCostFor (v : CVNativeRotationWeightVector) : Nat :=
-  let nativeSpend := nativeSpendSuites v.oldSuiteId v.newSuiteId v.spendHeight v.height
+  let nativeSpend := nativeSpendSuitesWeight v.oldSuiteId v.newSuiteId v.spendHeight v.height
   if nativeSpend.contains v.suiteId then
     if v.suiteRegistered then v.verifyCost else VERIFY_COST_UNKNOWN_SUITE
   else
