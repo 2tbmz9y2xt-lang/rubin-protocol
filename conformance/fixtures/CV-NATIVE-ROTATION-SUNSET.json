@@ -1,0 +1,138 @@
+{
+  "gate": "CV-NATIVE-ROTATION-SUNSET",
+  "vectors": [
+    {
+      "id": "NATIVE-ROT-SUNSET-01",
+      "op": "rotation_spend_suite_check",
+      "height": 399,
+      "suite_id": 1,
+      "rotation_descriptor": {
+        "name": "test-rot",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 400
+      },
+      "suite_registry": [
+        {
+          "suite_id": 1,
+          "pubkey_len": 2592,
+          "sig_len": 4627,
+          "verify_cost": 8,
+          "openssl_alg": "ML-DSA-87"
+        },
+        {
+          "suite_id": 2,
+          "pubkey_len": 1024,
+          "sig_len": 512,
+          "verify_cost": 9,
+          "openssl_alg": "ML-DSA-87"
+        }
+      ],
+      "covenant_type": "CORE_P2PK",
+      "expect_ok": true,
+      "note": "Spend with old suite at H4-1: allowed (old still in spend set)"
+    },
+    {
+      "id": "NATIVE-ROT-SUNSET-02",
+      "op": "rotation_spend_suite_check",
+      "height": 400,
+      "suite_id": 1,
+      "rotation_descriptor": {
+        "name": "test-rot",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 400
+      },
+      "suite_registry": [
+        {
+          "suite_id": 1,
+          "pubkey_len": 2592,
+          "sig_len": 4627,
+          "verify_cost": 8,
+          "openssl_alg": "ML-DSA-87"
+        },
+        {
+          "suite_id": 2,
+          "pubkey_len": 1024,
+          "sig_len": 512,
+          "verify_cost": 9,
+          "openssl_alg": "ML-DSA-87"
+        }
+      ],
+      "covenant_type": "CORE_P2PK",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
+      "note": "Spend with old suite at H4: MUST reject (old removed from spend set at H4)"
+    },
+    {
+      "id": "NATIVE-ROT-SUNSET-03",
+      "op": "rotation_spend_suite_check",
+      "height": 400,
+      "suite_id": 2,
+      "rotation_descriptor": {
+        "name": "test-rot",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 400
+      },
+      "suite_registry": [
+        {
+          "suite_id": 1,
+          "pubkey_len": 2592,
+          "sig_len": 4627,
+          "verify_cost": 8,
+          "openssl_alg": "ML-DSA-87"
+        },
+        {
+          "suite_id": 2,
+          "pubkey_len": 1024,
+          "sig_len": 512,
+          "verify_cost": 9,
+          "openssl_alg": "ML-DSA-87"
+        }
+      ],
+      "covenant_type": "CORE_P2PK",
+      "expect_ok": true,
+      "note": "Spend with new suite at H4: allowed"
+    },
+    {
+      "id": "NATIVE-ROT-SUNSET-04",
+      "op": "rotation_spend_suite_check",
+      "height": 999999,
+      "suite_id": 1,
+      "rotation_descriptor": {
+        "name": "test-rot",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        {
+          "suite_id": 1,
+          "pubkey_len": 2592,
+          "sig_len": 4627,
+          "verify_cost": 8,
+          "openssl_alg": "ML-DSA-87"
+        },
+        {
+          "suite_id": 2,
+          "pubkey_len": 1024,
+          "sig_len": 512,
+          "verify_cost": 9,
+          "openssl_alg": "ML-DSA-87"
+        }
+      ],
+      "covenant_type": "CORE_P2PK",
+      "expect_ok": true,
+      "note": "H4=0 (undefined): old suite spends valid indefinitely"
+    }
+  ]
+}

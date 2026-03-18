@@ -27,6 +27,8 @@ EXPECTED_GATES = frozenset(
         "CV-DEVNET-SIGHASH-CHAINID",
         "CV-DEVNET-SUBSIDY",
         "CV-EXT",
+        "CV-NATIVE-ROTATION-CUTOFF",
+        "CV-NATIVE-ROTATION-SUNSET",
         "CV-FEATUREBITS",
         "CV-FLAGDAY",
         "CV-FORK-CHOICE",
