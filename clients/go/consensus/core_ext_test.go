@@ -310,3 +310,16 @@ func TestApplyNonCoinbaseTxBasic_CORE_EXT_VerifySigExtErrorMapsToAlgInvalid(t *t
 		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
 	}
 }
+
+func TestHasSuiteExported(t *testing.T) {
+	allowed := map[uint8]struct{}{1: {}, 3: {}}
+	if !HasSuiteExported(allowed, 1) {
+		t.Fatal("expected suite 1 to be allowed")
+	}
+	if HasSuiteExported(allowed, 2) {
+		t.Fatal("expected suite 2 to not be allowed")
+	}
+	if HasSuiteExported(nil, 1) {
+		t.Fatal("expected nil map to return false")
+	}
+}
