@@ -8,15 +8,15 @@
   "lean_toolchain_file": "rubin-formal/lean-toolchain",
   "refinement_bridge_file": "rubin-formal/refinement_bridge.json",
   "coverage": [
-        {
-            "section_key": "consensus_constants",
-            "section_heading": "## 4. Consensus Constants (Wire-Level)",
-            "status": "stated",
-            "theorems": [
-                "RubinFormal.Conformance.cv_weight_vectors_pass"
-            ],
-            "file": "rubin-formal/RubinFormal/PinnedSections.lean"
-        },
+    {
+      "section_key": "consensus_constants",
+      "section_heading": "## 4. Consensus Constants (Wire-Level)",
+      "status": "stated",
+      "theorems": [
+        "RubinFormal.Conformance.cv_weight_vectors_pass"
+      ],
+      "file": "rubin-formal/RubinFormal/PinnedSections.lean"
+    },
     {
       "section_key": "transaction_wire",
       "section_heading": "## 5. Transaction Wire",
@@ -118,15 +118,15 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean"
     },
-        {
-            "section_key": "coinbase_and_subsidy",
-            "section_heading": "## 19. Coinbase and Subsidy (Normative)",
-            "status": "stated",
-            "theorems": [
-                "RubinFormal.Conformance.cv_subsidy_vectors_pass"
-            ],
-            "file": "rubin-formal/RubinFormal/PinnedSections.lean"
-        },
+    {
+      "section_key": "coinbase_and_subsidy",
+      "section_heading": "## 19. Coinbase and Subsidy (Normative)",
+      "status": "stated",
+      "theorems": [
+        "RubinFormal.Conformance.cv_subsidy_vectors_pass"
+      ],
+      "file": "rubin-formal/RubinFormal/PinnedSections.lean"
+    },
     {
       "section_key": "value_conservation",
       "section_heading": "## 20. Value Conservation (Normative)",
@@ -146,30 +146,48 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean"
     },
-        {
-            "section_key": "block_timestamp_rules",
-            "section_heading": "## 22. Block Timestamp Rules (Normative)",
-            "status": "stated",
-            "theorems": [
-                "RubinFormal.Conformance.cv_timestamp_vectors_pass"
-            ],
-            "file": "rubin-formal/RubinFormal/PinnedSections.lean"
-        },
-        {
-            "section_key": "block_validation_order",
-            "section_heading": "## 25. Block Validation Order (Normative)",
-            "status": "stated",
-            "theorems": [
-                "RubinFormal.Conformance.cv_validation_order_vectors_pass"
-            ],
-            "file": "rubin-formal/RubinFormal/PinnedSections.lean"
-        }
+    {
+      "section_key": "block_timestamp_rules",
+      "section_heading": "## 22. Block Timestamp Rules (Normative)",
+      "status": "stated",
+      "theorems": [
+        "RubinFormal.Conformance.cv_timestamp_vectors_pass"
+      ],
+      "file": "rubin-formal/RubinFormal/PinnedSections.lean"
+    },
+    {
+      "section_key": "block_validation_order",
+      "section_heading": "## 25. Block Validation Order (Normative)",
+      "status": "stated",
+      "theorems": [
+        "RubinFormal.Conformance.cv_validation_order_vectors_pass"
+      ],
+      "file": "rubin-formal/RubinFormal/PinnedSections.lean"
+    },
+    {
+      "section_key": "parallel_validation_equivalence",
+      "section_heading": "## Parallel Validation \u2014 Sequential Equivalence (Q-PV-19)",
+      "status": "proved",
+      "theorems": [
+        "RubinFormal.Refinement.ParallelEquivalence.cursor_determinism",
+        "RubinFormal.Refinement.ParallelEquivalence.cursor_pure",
+        "RubinFormal.Refinement.ParallelEquivalence.reducer_equivalence",
+        "RubinFormal.Refinement.ParallelEquivalence.accept_reject_equivalence",
+        "RubinFormal.Refinement.ParallelEquivalence.commit_equivalence_accept",
+        "RubinFormal.Refinement.ParallelEquivalence.commit_equivalence_reject",
+        "RubinFormal.Refinement.ParallelEquivalence.worker_purity",
+        "RubinFormal.Refinement.ParallelEquivalence.worker_deterministic",
+        "RubinFormal.Refinement.ParallelEquivalence.reducer_permutation_invariant",
+        "RubinFormal.Refinement.ParallelEquivalence.precompute_enables_reorder"
+      ],
+      "file": "rubin-formal/RubinFormal/Refinement/ParallelEquivalence.lean"
+    }
   ],
   "proof_level": "refinement",
   "claims": {
     "allowed": [
       "Lean executable semantics replay all conformance fixtures (CV-*.json) with byte-level input coverage; this is not a universal proof of CANONICAL semantics",
-      "Go(reference) → Lean refinement is checked for critical ops over the full conformance fixture set (trace schema v1)",
+      "Go(reference) \u2192 Lean refinement is checked for critical ops over the full conformance fixture set (trace schema v1)",
       "formal claims are bounded by explicit forbidden claims below"
     ],
     "forbidden": [

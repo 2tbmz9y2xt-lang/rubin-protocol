@@ -33,6 +33,7 @@ REQUIRED_SECTION_KEYS = {
     "da_set_integrity",
     "block_timestamp_rules",
     "block_validation_order",
+    "parallel_validation_equivalence",
 }
 
 

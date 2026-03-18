@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "status": "baseline",
-  "notes": "Bridge map for model theorem -> executable conformance op evidence. This is baseline trace-compatibility metadata, not full mechanized refinement.",
+  "status": "pv-refined",
+  "notes": "Bridge map for executable trace ops. PV structural proofs are in proof_coverage.json (not trace-replay based).",
   "critical_ops": [
     {
       "op": "parse_tx",
