@@ -49,7 +49,13 @@ Immediate fallback path:
 
 Promotion to broader rollout is allowed only when:
 
-- zero unresolved shadow mismatches for ≥72 hours (soak window);
+- zero unresolved shadow mismatches for the stage-specific soak window;
 - all parity conformance fixtures pass (`run_cv_bundle` exit 0);
 - formal Lean bridge proofs type-check (`lake build` exit 0);
 - parallel validation benchmark shows ≤5% latency regression vs sequential.
+
+For detailed stage definitions, soak windows, evidence thresholds, and
+rollback rules, see `RUBIN_PARALLEL_VALIDATION_PROMOTION_GATES.md`.
+
+CI enforcement: `scripts/pv-soak-ci-gate.sh` runs on every PR touching
+parallel validation code. Evidence schema: `conformance/schemas/pv-soak-report-v1.json`.

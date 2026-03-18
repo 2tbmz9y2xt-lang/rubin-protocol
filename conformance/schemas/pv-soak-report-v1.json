@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PV Soak Report v1",
+  "description": "Evidence report for parallel validation soak testing at each promotion stage.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "stage",
+    "blocks_validated",
+    "mismatch_count",
+    "verdict",
+    "go_commit",
+    "timestamp_utc"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "stage": {
+      "type": "string",
+      "enum": ["local", "ci", "devnet", "testnet-shadow", "opt-in"]
+    },
+    "start_height": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "end_height": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "blocks_validated": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "duration_hours": {
+      "type": "number",
+      "minimum": 0
+    },
+    "mismatches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["height", "tx_index", "field", "sequential_value", "parallel_value"],
+        "properties": {
+          "height": { "type": "integer" },
+          "tx_index": { "type": "integer" },
+          "field": {
+            "type": "string",
+            "enum": ["verdict", "first_err", "post_state_digest", "witness_digest"]
+          },
+          "sequential_value": { "type": "string" },
+          "parallel_value": { "type": "string" }
+        }
+      }
+    },
+    "mismatch_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["PASS", "FAIL"]
+    },
+    "go_commit": { "type": "string" },
+    "rust_commit": { "type": "string" },
+    "timestamp_utc": { "type": "string", "format": "date-time" }
+  }
+}
