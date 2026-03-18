@@ -9,6 +9,20 @@ Policy:
 
 ---
 
+## 2026-03-18 — Rotation create-suite conformance vectors (Q-CONF-ROTATION-01)
+
+Причина:
+- зафиксировать executable conformance для rotation create-side membership (NATIVE_CREATE_SUITES(height))
+  на boundary `H2-1` и `H2`, как governance-требование трека rotation.
+
+Инструменты:
+- точечное добавление нового gate `CV-NATIVE-ROTATION-CREATE`,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-NATIVE-ROTATION-CREATE`,
+- синхронизация матрицы: `tools/gen_conformance_matrix.py`.
+
+Изменённые fixtures:
+- `CV-NATIVE-ROTATION-CREATE.json` (new)
+
 ## 2026-03-14 — HTLC same-key parse coverage lock-in
 
 Причина:

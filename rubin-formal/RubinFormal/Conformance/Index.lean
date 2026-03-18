@@ -62,3 +62,5 @@ import RubinFormal.Conformance.CVDevnetMaturityVectors
 import RubinFormal.Conformance.CVDevnetMaturityReplay
 import RubinFormal.Conformance.CVDevnetSighashChainidVectors
 import RubinFormal.Conformance.CVDevnetSighashChainidReplay
+import RubinFormal.Conformance.CVNativeRotationCreateVectors
+import RubinFormal.Conformance.CVNativeRotationCreateReplay

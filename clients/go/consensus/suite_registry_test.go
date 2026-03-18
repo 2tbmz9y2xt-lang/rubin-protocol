@@ -71,6 +71,33 @@ func TestSuiteRegistry_NilSafe(t *testing.T) {
 	}
 }
 
+func TestNewSuiteRegistryFromParams_BuildsIndependentRegistry(t *testing.T) {
+	params := []SuiteParams{
+		{SuiteID: 0x01, PubkeyLen: 10, SigLen: 20, VerifyCost: 8, OpenSSLAlg: "ML-DSA-87"},
+		{SuiteID: 0x02, PubkeyLen: 11, SigLen: 21, VerifyCost: 9, OpenSSLAlg: "ML-DSA-87"},
+	}
+	reg := NewSuiteRegistryFromParams(params)
+	if reg == nil {
+		t.Fatal("reg is nil")
+	}
+	if !reg.IsRegistered(0x01) || !reg.IsRegistered(0x02) {
+		t.Fatalf("expected both suites to be registered")
+	}
+	p, ok := reg.Lookup(0x02)
+	if !ok {
+		t.Fatalf("expected Lookup(0x02) to succeed")
+	}
+	if p.VerifyCost != 9 {
+		t.Fatalf("VerifyCost=%d, want 9", p.VerifyCost)
+	}
+
+	params[1].VerifyCost = 123
+	p2, _ := reg.Lookup(0x02)
+	if p2.VerifyCost != 9 {
+		t.Fatalf("registry should not observe caller mutation: VerifyCost=%d, want 9", p2.VerifyCost)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // NativeSuiteSet tests
 // ---------------------------------------------------------------------------

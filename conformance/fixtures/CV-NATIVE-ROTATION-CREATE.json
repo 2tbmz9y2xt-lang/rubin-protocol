@@ -1,0 +1,88 @@
+{
+  "gate": "CV-NATIVE-ROTATION-CREATE",
+  "description": "Rotation conformance vectors for native create-suite membership (CORE_P2PK output creation). Uses a deployment descriptor to derive NATIVE_CREATE_SUITES(height) and checks allow/deny outcomes.",
+  "vectors": [
+    {
+      "id": "NATIVE-ROT-CREATE-01",
+      "op": "rotation_create_suite_check",
+      "height": 199,
+      "suite_id": 1,
+      "rotation_descriptor": {
+        "name": "test-rot",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": true,
+      "note": "suite_id=old is in create set at H2-1"
+    },
+    {
+      "id": "NATIVE-ROT-CREATE-02",
+      "op": "rotation_create_suite_check",
+      "height": 199,
+      "suite_id": 66,
+      "rotation_descriptor": {
+        "name": "test-rot",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
+      "note": "suite_id=0x42 is NOT in create set at H2-1"
+    },
+    {
+      "id": "NATIVE-ROT-CREATE-03",
+      "op": "rotation_create_suite_check",
+      "height": 200,
+      "suite_id": 2,
+      "rotation_descriptor": {
+        "name": "test-rot",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": true,
+      "note": "suite_id=new is in create set at H2"
+    },
+    {
+      "id": "NATIVE-ROT-CREATE-04",
+      "op": "rotation_create_suite_check",
+      "height": 200,
+      "suite_id": 67,
+      "rotation_descriptor": {
+        "name": "test-rot",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
+      "note": "suite_id=0x43 is NOT in create set at H2"
+    }
+  ]
+}

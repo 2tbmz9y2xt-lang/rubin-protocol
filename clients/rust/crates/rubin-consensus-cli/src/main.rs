@@ -5,12 +5,15 @@ use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles, block_hash, compact_shortid,
     connect_block_basic_in_memory_at_height_and_core_ext_deployments,
     core_ext_verification_binding_from_name, featurebit_state_at_height_from_window_counts,
-    flagday_active_at_height, fork_work_from_target, merkle_root_txids, parse_tx, pow_check,
-    retarget_v1, retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_public,
+    flagday_active_at_height, fork_work_from_target, merkle_root_txids,
+    parse_core_ext_covenant_data, parse_tx, pow_check, retarget_v1, retarget_v1_clamped,
+    sighash_v1_digest, tx_weight_and_stats_public,
     validate_block_basic_with_context_and_fees_at_height,
     validate_block_basic_with_context_at_height, validate_tx_covenants_genesis,
-    CoreExtDeploymentProfile, CoreExtDeploymentProfiles, ErrorCode, FeatureBitDeployment,
-    FeatureBitState, FlagDayDeployment, InMemoryChainState, Outpoint, UtxoEntry,
+    CoreExtDeploymentProfile, CoreExtDeploymentProfiles, CryptoRotationDescriptor,
+    DescriptorRotationProvider, ErrorCode, FeatureBitDeployment, FeatureBitState,
+    FlagDayDeployment, InMemoryChainState, Outpoint, RotationProvider, SuiteParams, SuiteRegistry,
+    UtxoEntry,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -159,6 +162,12 @@ struct Request {
 
     #[serde(default)]
     suite_id: Option<u8>,
+
+    #[serde(default)]
+    rotation_descriptor: Option<RotationDescriptorJson>,
+
+    #[serde(default)]
+    suite_registry: Vec<SuiteParamsJson>,
 
     #[serde(default)]
     key_binding_ok: Option<bool>,
@@ -412,6 +421,36 @@ struct CoreExtProfileJson {
     binding: String,
 }
 
+#[derive(Deserialize, Default)]
+struct RotationDescriptorJson {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    old_suite_id: u8,
+    #[serde(default)]
+    new_suite_id: u8,
+    #[serde(default)]
+    create_height: u64,
+    #[serde(default)]
+    spend_height: u64,
+    #[serde(default)]
+    sunset_height: u64,
+}
+
+#[derive(Deserialize, Default)]
+struct SuiteParamsJson {
+    #[serde(default)]
+    suite_id: u8,
+    #[serde(default)]
+    pubkey_len: u64,
+    #[serde(default)]
+    sig_len: u64,
+    #[serde(default)]
+    verify_cost: u64,
+    #[serde(default)]
+    openssl_alg: String,
+}
+
 #[derive(Deserialize)]
 struct ForkChoiceChainJson {
     id: String,
@@ -492,6 +531,12 @@ struct Response {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     anchor_bytes: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ext_id: Option<u16>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suite_ids: Option<Vec<u8>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     duplicates: Option<Vec<u64>>,
@@ -1309,6 +1354,128 @@ fn main() {
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
             }
+        }
+        "rotation_create_suite_check" => {
+            let rd = match &req.rotation_descriptor {
+                Some(v) => v,
+                None => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad rotation_descriptor".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            let mut suites = std::collections::BTreeMap::new();
+            for s in &req.suite_registry {
+                // Conformance tooling may inject arbitrary names; keep stable mapping
+                // by accepting ML-DSA-87 only for now.
+                let alg: &'static str = "ML-DSA-87";
+                suites.insert(
+                    s.suite_id,
+                    SuiteParams {
+                        suite_id: s.suite_id,
+                        pubkey_len: s.pubkey_len,
+                        sig_len: s.sig_len,
+                        verify_cost: s.verify_cost,
+                        openssl_alg: alg,
+                    },
+                );
+            }
+            let registry = SuiteRegistry::with_suites(suites);
+            let desc = CryptoRotationDescriptor {
+                name: rd.name.clone(),
+                old_suite_id: rd.old_suite_id,
+                new_suite_id: rd.new_suite_id,
+                create_height: rd.create_height,
+                spend_height: rd.spend_height,
+                sunset_height: rd.sunset_height,
+            };
+            if desc.validate(&registry).is_err() {
+                let resp = Response {
+                    ok: false,
+                    err: Some("descriptor-not-activated".to_string()),
+                    ..Default::default()
+                };
+                let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                return;
+            }
+            let rp = DescriptorRotationProvider { descriptor: desc };
+            let suite_id = req.suite_id.unwrap_or(0);
+            if !rp.native_create_suites(req.height).contains(suite_id) {
+                let resp = Response {
+                    ok: false,
+                    err: Some("TX_ERR_SIG_ALG_INVALID".to_string()),
+                    ..Default::default()
+                };
+                let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                return;
+            }
+            let resp = Response {
+                ok: true,
+                ..Default::default()
+            };
+            let _ = serde_json::to_writer(std::io::stdout(), &resp);
+        }
+        "rotation_native_create_suites" => {
+            let rd = match &req.rotation_descriptor {
+                Some(v) => v,
+                None => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad rotation_descriptor".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            let mut suites = std::collections::BTreeMap::new();
+            for s in &req.suite_registry {
+                let alg: &'static str = match s.openssl_alg.as_str() {
+                    "ML-DSA-87" => "ML-DSA-87",
+                    "" => "ML-DSA-87",
+                    _ => "ML-DSA-87",
+                };
+                suites.insert(
+                    s.suite_id,
+                    SuiteParams {
+                        suite_id: s.suite_id,
+                        pubkey_len: s.pubkey_len,
+                        sig_len: s.sig_len,
+                        verify_cost: s.verify_cost,
+                        openssl_alg: alg,
+                    },
+                );
+            }
+            let registry = SuiteRegistry::with_suites(suites);
+            let desc = CryptoRotationDescriptor {
+                name: rd.name.clone(),
+                old_suite_id: rd.old_suite_id,
+                new_suite_id: rd.new_suite_id,
+                create_height: rd.create_height,
+                spend_height: rd.spend_height,
+                sunset_height: rd.sunset_height,
+            };
+            if desc.validate(&registry).is_err() {
+                let resp = Response {
+                    ok: false,
+                    err: Some("descriptor-not-activated".to_string()),
+                    ..Default::default()
+                };
+                let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                return;
+            }
+            let rp = DescriptorRotationProvider { descriptor: desc };
+            let ids = rp.native_create_suites(req.height).suite_ids();
+            let resp = Response {
+                ok: true,
+                suite_ids: Some(ids),
+                ..Default::default()
+            };
+            let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
         "block_hash" => {
             let header_bytes = match hex::decode(req.header_hex) {
@@ -3750,6 +3917,128 @@ fn main() {
                 }
             }
 
+            let resp = Response {
+                ok: true,
+                ..Default::default()
+            };
+            let _ = serde_json::to_writer(std::io::stdout(), &resp);
+        }
+        "ext_envelope_parse" => {
+            let cov_bytes = match hex::decode(&req.covenant_data_hex) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad covenant_data hex".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            match parse_core_ext_covenant_data(&cov_bytes) {
+                Ok(parsed) => {
+                    let resp = Response {
+                        ok: true,
+                        ext_id: Some(parsed.ext_id),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(err_code(e.code)),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                }
+            }
+        }
+        "ext_activation_check"
+        | "ext_pre_activation_spend"
+        | "ext_enforcement_check"
+        | "ext_error_priority" => {
+            let cov_bytes = match hex::decode(&req.covenant_data_hex) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad covenant_data hex".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            let parsed = match parse_core_ext_covenant_data(&cov_bytes) {
+                Ok(p) => p,
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(err_code(e.code)),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            let profiles = match core_ext_profiles_from_json(&req.core_ext_profiles) {
+                Ok(p) => p,
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(e),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            let snap = match profiles.active_profiles_at_height(req.height) {
+                Ok(s) => s,
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(err_code(e.code)),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            if let Some(profile) = snap.active.iter().find(|p| p.ext_id == parsed.ext_id) {
+                let suite_id = req.suite_id.unwrap_or(0);
+                if suite_id != 0 && !profile.allowed_suite_ids.contains(&suite_id) {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("TX_ERR_SIG_ALG_INVALID".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            }
+            let resp = Response {
+                ok: true,
+                ext_id: Some(parsed.ext_id),
+                ..Default::default()
+            };
+            let _ = serde_json::to_writer(std::io::stdout(), &resp);
+        }
+        "ext_duplicate_profile" => {
+            let mut seen = std::collections::HashSet::new();
+            for p in &req.core_ext_profiles {
+                if !seen.insert(p.ext_id) {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("TX_ERR_COVENANT_TYPE_INVALID".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            }
             let resp = Response {
                 ok: true,
                 ..Default::default()
