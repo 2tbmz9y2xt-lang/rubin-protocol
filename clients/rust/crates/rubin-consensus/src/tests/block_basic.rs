@@ -785,6 +785,148 @@ fn tx_weight_at_height_unknown_suite_uses_floor() {
     assert_eq!(w_reg, w_legacy);
 }
 
+// ── Rotation-aware spend tests (RUST-05 parity) ──
+
+#[test]
+fn p2pk_spend_rejects_non_native_suite_via_rotation() {
+    use crate::spend_verify::validate_p2pk_spend_at_height;
+    use crate::suite_registry::{NativeSuiteSet, RotationProvider, SuiteRegistry};
+
+    // RotationProvider that rejects ML-DSA-87 for spend.
+    struct EmptySpend;
+    impl RotationProvider for EmptySpend {
+        fn native_create_suites(&self, _h: u64) -> NativeSuiteSet {
+            NativeSuiteSet::new(&[SUITE_ID_ML_DSA_87])
+        }
+        fn native_spend_suites(&self, _h: u64) -> NativeSuiteSet {
+            NativeSuiteSet::new(&[]) // reject all
+        }
+    }
+
+    let entry = crate::utxo_basic::UtxoEntry {
+        value: 1,
+        covenant_type: COV_TYPE_P2PK,
+        covenant_data: vec![0u8; MAX_P2PK_COVENANT_DATA as usize],
+        creation_height: 0,
+        created_by_coinbase: false,
+    };
+    let tx_bytes = minimal_tx_bytes();
+    let (tx, _, _, _) = parse_tx(&tx_bytes).expect("parse");
+    let w = crate::tx::WitnessItem {
+        suite_id: SUITE_ID_ML_DSA_87,
+        pubkey: vec![0x01],
+        signature: vec![0x01],
+    };
+    let mut cache = crate::sighash::SighashV1PrehashCache::new(&tx).expect("cache");
+    let rp = EmptySpend;
+    let reg = SuiteRegistry::default_registry();
+    let err = validate_p2pk_spend_at_height(
+        &entry,
+        &w,
+        &tx,
+        0,
+        1,
+        [0u8; 32],
+        0,
+        &mut cache,
+        Some(&rp),
+        Some(&reg),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+}
+
+#[test]
+fn threshold_spend_rejects_non_native_suite_via_rotation() {
+    use crate::spend_verify::validate_threshold_sig_spend_at_height;
+    use crate::suite_registry::{NativeSuiteSet, RotationProvider, SuiteRegistry};
+
+    struct EmptySpend;
+    impl RotationProvider for EmptySpend {
+        fn native_create_suites(&self, _h: u64) -> NativeSuiteSet {
+            NativeSuiteSet::new(&[])
+        }
+        fn native_spend_suites(&self, _h: u64) -> NativeSuiteSet {
+            NativeSuiteSet::new(&[])
+        }
+    }
+
+    let keys = [sha3_256(&[0x01])];
+    let ws = [crate::tx::WitnessItem {
+        suite_id: SUITE_ID_ML_DSA_87,
+        pubkey: vec![0x01],
+        signature: vec![0x01],
+    }];
+    let tx_bytes = minimal_tx_bytes();
+    let (tx, _, _, _) = parse_tx(&tx_bytes).expect("parse");
+    let mut cache = crate::sighash::SighashV1PrehashCache::new(&tx).expect("cache");
+    let rp = EmptySpend;
+    let reg = SuiteRegistry::default_registry();
+    let err = validate_threshold_sig_spend_at_height(
+        &keys,
+        1,
+        &ws,
+        &tx,
+        0,
+        1,
+        [0u8; 32],
+        0,
+        "CORE_MULTISIG",
+        &mut cache,
+        Some(&rp),
+        Some(&reg),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+}
+
+#[test]
+fn stealth_spend_rejects_non_native_suite_via_rotation() {
+    use crate::suite_registry::{NativeSuiteSet, RotationProvider, SuiteRegistry};
+
+    struct EmptySpend;
+    impl RotationProvider for EmptySpend {
+        fn native_create_suites(&self, _h: u64) -> NativeSuiteSet {
+            NativeSuiteSet::new(&[])
+        }
+        fn native_spend_suites(&self, _h: u64) -> NativeSuiteSet {
+            NativeSuiteSet::new(&[])
+        }
+    }
+
+    let entry = crate::utxo_basic::UtxoEntry {
+        value: 100,
+        covenant_type: COV_TYPE_STEALTH,
+        covenant_data: vec![0u8; MAX_STEALTH_COVENANT_DATA as usize],
+        creation_height: 0,
+        created_by_coinbase: false,
+    };
+    let w = crate::tx::WitnessItem {
+        suite_id: SUITE_ID_ML_DSA_87,
+        pubkey: vec![],
+        signature: vec![],
+    };
+    let tx_bytes = minimal_tx_bytes();
+    let (tx, _, _, _) = parse_tx(&tx_bytes).expect("parse");
+    let mut cache = crate::sighash::SighashV1PrehashCache::new(&tx).expect("cache");
+    let rp = EmptySpend;
+    let reg = SuiteRegistry::default_registry();
+    let err = crate::stealth::validate_stealth_spend_at_height(
+        &entry,
+        &w,
+        &tx,
+        0,
+        100,
+        [0u8; 32],
+        0,
+        &mut cache,
+        Some(&rp),
+        Some(&reg),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+}
+
 #[test]
 fn covenant_genesis_rotation_aware_rejects_non_native_suite() {
     use crate::suite_registry::{NativeSuiteSet, RotationProvider};
