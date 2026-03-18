@@ -46,7 +46,7 @@ def parse_fixture_gates(fixtures_dir: Path) -> dict[str, set[str]]:
 
 def theorem_exists(repo_root: Path, theorem_name: str) -> bool:
     short_name = theorem_name.split(".")[-1]
-    for p in (repo_root / "rubin-formal" / "RubinFormal").glob("*.lean"):
+    for p in (repo_root / "rubin-formal" / "RubinFormal").rglob("*.lean"):
         txt = p.read_text(encoding="utf-8")
         if f"theorem {short_name}" in txt:
             return True
