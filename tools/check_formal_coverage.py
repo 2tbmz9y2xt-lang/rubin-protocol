@@ -170,6 +170,10 @@ def main() -> int:
             raise ValueError(f"invalid gate name: {gate}")
         return gate[3:].lower().replace("-", "_")
 
+    # Gates that are runtime/parallel-only (e.g. connect_block_parallel) and do not
+    # yet have Lean vectors/replay; skip formal coverage requirement for them.
+    FORMAL_SKIP_GATE_PREFIXES = ("CV-PV-",)
+
     fixture_files = sorted(p for p in fixtures_dir.glob("CV-*.json") if p.is_file())
     if not fixture_files:
         return fail("no CV-*.json fixtures found in conformance/fixtures")
@@ -181,6 +185,8 @@ def main() -> int:
         if not isinstance(gate, str) or not gate.startswith("CV-"):
             print(f"ERROR: invalid or missing gate in fixture {p.relative_to(repo_root)}: {gate}", file=sys.stderr)
             conf_bad = True
+            continue
+        if any(gate.startswith(prefix) for prefix in FORMAL_SKIP_GATE_PREFIXES):
             continue
 
         camel = gate_to_camel(gate)

@@ -173,8 +173,7 @@ fn utxo_set_hash(utxos: &HashMap<Outpoint, UtxoEntry>) -> [u8; 32] {
     }
     items.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let mut buf =
-        Vec::with_capacity(UTXO_SET_HASH_DST.len() + 8 + items.len() * 64);
+    let mut buf = Vec::with_capacity(UTXO_SET_HASH_DST.len() + 8 + items.len() * 64);
     buf.extend_from_slice(UTXO_SET_HASH_DST);
     buf.extend_from_slice(&(items.len() as u64).to_le_bytes());
 
