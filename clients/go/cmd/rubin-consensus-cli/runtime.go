@@ -893,6 +893,33 @@ func runFromStdin() {
 		writeResp(os.Stdout, Response{Ok: true, SuiteIDs: rp.NativeCreateSuites(req.Height).SuiteIDs()})
 		return
 
+	case "rotation_spend_suite_check":
+		if req.RotationDescriptor == nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad rotation_descriptor"})
+			return
+		}
+		reg := buildSuiteRegistry(req.SuiteRegistry)
+		desc := consensus.CryptoRotationDescriptor{
+			Name:         req.RotationDescriptor.Name,
+			OldSuiteID:   req.RotationDescriptor.OldSuiteID,
+			NewSuiteID:   req.RotationDescriptor.NewSuiteID,
+			CreateHeight: req.RotationDescriptor.CreateHeight,
+			SpendHeight:  req.RotationDescriptor.SpendHeight,
+			SunsetHeight: req.RotationDescriptor.SunsetHeight,
+		}
+		if err := desc.Validate(reg); err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
+			return
+		}
+		rp := consensus.DescriptorRotationProvider{Descriptor: desc}
+		suiteID := uint8OrDefault(req.SuiteID, 0)
+		if !rp.NativeSpendSuites(req.Height).Contains(suiteID) {
+			writeResp(os.Stdout, Response{Ok: false, Err: string(consensus.TX_ERR_SIG_ALG_INVALID)})
+			return
+		}
+		writeResp(os.Stdout, Response{Ok: true})
+		return
+
 	case "block_hash":
 		headerBytes, err := hex.DecodeString(req.HeaderHex)
 		if err != nil {

@@ -23,6 +23,20 @@ Policy:
 Изменённые fixtures:
 - `CV-NATIVE-ROTATION-CREATE.json` (new)
 
+## 2026-03-18 — Rotation spend-suite conformance vectors (Q-CONF-ROTATION-02)
+
+Причина:
+- зафиксировать executable conformance для rotation spend-side membership (NATIVE_SPEND_SUITES(height))
+  по 4 covenant types (CORE_P2PK/CORE_MULTISIG/CORE_VAULT/CORE_STEALTH) на boundary `H2-1` и `H2`.
+
+Инструменты:
+- точечное добавление нового gate `CV-NATIVE-ROTATION-SPEND`,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-NATIVE-ROTATION-SPEND`,
+- синхронизация матрицы: `tools/gen_conformance_matrix.py`.
+
+Изменённые fixtures:
+- `CV-NATIVE-ROTATION-SPEND.json` (new)
+
 ## 2026-03-14 — HTLC same-key parse coverage lock-in
 
 Причина:

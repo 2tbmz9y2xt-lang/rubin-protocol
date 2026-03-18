@@ -1579,6 +1579,22 @@ def validate_vector(
             return [f"{gate}/{v.get('id','?')}: missing rotation_descriptor"]
         req["rotation_descriptor"] = v["rotation_descriptor"]
         req["suite_registry"] = v.get("suite_registry", [])
+        if op == "rotation_create_suite_check" and "suite_id" not in v:
+            return [f"{gate}/{v.get('id','?')}: missing suite_id"]
+    elif op == "rotation_spend_suite_check":
+        if "height" not in v:
+            return [f"{gate}/{v.get('id','?')}: missing height"]
+        if "suite_id" not in v:
+            return [f"{gate}/{v.get('id','?')}: missing suite_id"]
+        if "covenant_type" not in v:
+            return [f"{gate}/{v.get('id','?')}: missing covenant_type"]
+        if "rotation_descriptor" not in v:
+            return [f"{gate}/{v.get('id','?')}: missing rotation_descriptor"]
+        req["height"] = int(v["height"])
+        req["suite_id"] = int(v["suite_id"])
+        req["covenant_type"] = int(v["covenant_type"])
+        req["rotation_descriptor"] = v["rotation_descriptor"]
+        req["suite_registry"] = v.get("suite_registry", [])
     elif op == "block_hash":
         req["header_hex"] = v["header_hex"]
     elif op == "pow_check":

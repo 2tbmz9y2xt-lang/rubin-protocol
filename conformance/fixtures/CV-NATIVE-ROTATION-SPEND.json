@@ -1,0 +1,254 @@
+{
+  "gate": "CV-NATIVE-ROTATION-SPEND",
+  "description": "Rotation conformance vectors for native spend-suite membership across covenant types. Checks allow/deny outcomes based on NATIVE_SPEND_SUITES(height) around the H2 boundary.",
+  "vectors": [
+    {
+      "id": "NATIVE-ROT-SPEND-P2PK-01",
+      "op": "rotation_spend_suite_check",
+      "covenant_type": 1,
+      "height": 199,
+      "suite_id": 1,
+      "rotation_descriptor": {
+        "name": "test-rot",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": true
+    },
+    {
+      "id": "NATIVE-ROT-SPEND-P2PK-02",
+      "op": "rotation_spend_suite_check",
+      "covenant_type": 1,
+      "height": 199,
+      "suite_id": 2,
+      "rotation_descriptor": {
+        "name": "test-rot",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID"
+    },
+    {
+      "id": "NATIVE-ROT-SPEND-P2PK-03",
+      "op": "rotation_spend_suite_check",
+      "covenant_type": 1,
+      "height": 200,
+      "suite_id": 2,
+      "rotation_descriptor": {
+        "name": "test-rot",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": true
+    },
+
+    {
+      "id": "NATIVE-ROT-SPEND-MULTISIG-01",
+      "op": "rotation_spend_suite_check",
+      "covenant_type": 3,
+      "height": 199,
+      "suite_id": 1,
+      "rotation_descriptor": {
+        "name": "test-rot",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": true
+    },
+    {
+      "id": "NATIVE-ROT-SPEND-MULTISIG-02",
+      "op": "rotation_spend_suite_check",
+      "covenant_type": 3,
+      "height": 199,
+      "suite_id": 2,
+      "rotation_descriptor": {
+        "name": "test-rot",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID"
+    },
+    {
+      "id": "NATIVE-ROT-SPEND-MULTISIG-03",
+      "op": "rotation_spend_suite_check",
+      "covenant_type": 3,
+      "height": 200,
+      "suite_id": 2,
+      "rotation_descriptor": {
+        "name": "test-rot",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": true
+    },
+
+    {
+      "id": "NATIVE-ROT-SPEND-VAULT-01",
+      "op": "rotation_spend_suite_check",
+      "covenant_type": 5,
+      "height": 199,
+      "suite_id": 1,
+      "rotation_descriptor": {
+        "name": "test-rot",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": true
+    },
+    {
+      "id": "NATIVE-ROT-SPEND-VAULT-02",
+      "op": "rotation_spend_suite_check",
+      "covenant_type": 5,
+      "height": 199,
+      "suite_id": 2,
+      "rotation_descriptor": {
+        "name": "test-rot",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID"
+    },
+    {
+      "id": "NATIVE-ROT-SPEND-VAULT-03",
+      "op": "rotation_spend_suite_check",
+      "covenant_type": 5,
+      "height": 200,
+      "suite_id": 2,
+      "rotation_descriptor": {
+        "name": "test-rot",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": true
+    },
+
+    {
+      "id": "NATIVE-ROT-SPEND-STEALTH-01",
+      "op": "rotation_spend_suite_check",
+      "covenant_type": 4097,
+      "height": 199,
+      "suite_id": 1,
+      "rotation_descriptor": {
+        "name": "test-rot",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": true
+    },
+    {
+      "id": "NATIVE-ROT-SPEND-STEALTH-02",
+      "op": "rotation_spend_suite_check",
+      "covenant_type": 4097,
+      "height": 199,
+      "suite_id": 2,
+      "rotation_descriptor": {
+        "name": "test-rot",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID"
+    },
+    {
+      "id": "NATIVE-ROT-SPEND-STEALTH-03",
+      "op": "rotation_spend_suite_check",
+      "covenant_type": 4097,
+      "height": 200,
+      "suite_id": 2,
+      "rotation_descriptor": {
+        "name": "test-rot",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": true
+    }
+  ]
+}
+
