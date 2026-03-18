@@ -145,13 +145,19 @@ func TestDescriptorRotationProvider_CreateSuites(t *testing.T) {
 		t.Fatalf("at H1: expected both suites")
 	}
 
-	// Between H2 and H4: both.
-	s = p.NativeCreateSuites(250)
+	// Between H1 and H2: both.
+	s = p.NativeCreateSuites(150)
 	if !s.Contains(0x01) || !s.Contains(0x02) {
-		t.Fatalf("between H2 and H4: expected both suites")
+		t.Fatalf("between H1 and H2: expected both suites")
 	}
 
-	// At H4: only new.
+	// At H2: only new (create cutoff per spec §6 Phase 2).
+	s = p.NativeCreateSuites(200)
+	if s.Contains(0x01) || !s.Contains(0x02) {
+		t.Fatalf("at H2: expected only new suite (create cutoff)")
+	}
+
+	// At H4: still only new.
 	s = p.NativeCreateSuites(300)
 	if s.Contains(0x01) || !s.Contains(0x02) {
 		t.Fatalf("at H4: expected only new suite")
@@ -165,25 +171,38 @@ func TestDescriptorRotationProvider_SpendSuites(t *testing.T) {
 		NewSuiteID:   0x02,
 		CreateHeight: 100,
 		SpendHeight:  200,
+		SunsetHeight: 400,
 	}
 	p := DescriptorRotationProvider{Descriptor: d}
 
-	// Before H2: only old.
-	s := p.NativeSpendSuites(150)
+	// Before H1: only old.
+	s := p.NativeSpendSuites(50)
 	if !s.Contains(0x01) || s.Contains(0x02) {
-		t.Fatalf("before H2: expected only old suite for spend")
+		t.Fatalf("before H1: expected only old suite for spend")
 	}
 
-	// At H2: both.
-	s = p.NativeSpendSuites(200)
+	// At H1: both (new suite enters spend set at activation).
+	s = p.NativeSpendSuites(100)
 	if !s.Contains(0x01) || !s.Contains(0x02) {
-		t.Fatalf("at H2: expected both suites for spend")
+		t.Fatalf("at H1: expected both suites for spend")
 	}
 
-	// After H2: both.
+	// Between H1 and H4: both.
+	s = p.NativeSpendSuites(250)
+	if !s.Contains(0x01) || !s.Contains(0x02) {
+		t.Fatalf("between H1 and H4: expected both suites for spend")
+	}
+
+	// At H4: only new (sunset per spec §6 Phase 4).
+	s = p.NativeSpendSuites(400)
+	if s.Contains(0x01) || !s.Contains(0x02) {
+		t.Fatalf("at H4: expected only new suite for spend (sunset)")
+	}
+
+	// After H4: only new.
 	s = p.NativeSpendSuites(999)
-	if !s.Contains(0x01) || !s.Contains(0x02) {
-		t.Fatalf("after H2: expected both suites for spend")
+	if s.Contains(0x01) || !s.Contains(0x02) {
+		t.Fatalf("after H4: expected only new suite for spend")
 	}
 }
 
@@ -198,10 +217,16 @@ func TestDescriptorRotationProvider_NoSunset(t *testing.T) {
 	}
 	p := DescriptorRotationProvider{Descriptor: d}
 
-	// At a very high height, both suites remain valid for creation.
+	// At a very high height without sunset, create returns only new (H2 create cutoff still applies).
 	s := p.NativeCreateSuites(999999)
+	if s.Contains(0x01) || !s.Contains(0x02) {
+		t.Fatalf("no sunset, high height: expected only new suite for create (H2 cutoff)")
+	}
+
+	// But spend returns both (no H4 sunset means old never removed from spend).
+	s = p.NativeSpendSuites(999999)
 	if !s.Contains(0x01) || !s.Contains(0x02) {
-		t.Fatalf("no sunset: expected both suites at high height")
+		t.Fatalf("no sunset: expected both suites for spend at high height")
 	}
 }
 

@@ -173,22 +173,32 @@ pub struct DescriptorRotationProvider {
 }
 
 impl RotationProvider for DescriptorRotationProvider {
+    /// Phase 0 (h < H1): {old}; Phase 1 (H1 ≤ h < H2): {old,new}; Phase 2+ (h ≥ H2): {new}
     fn native_create_suites(&self, height: u64) -> NativeSuiteSet {
         let d = &self.descriptor;
         if height < d.create_height {
+            // Phase 0: before H1
             NativeSuiteSet::new(&[d.old_suite_id])
-        } else if d.sunset_height != 0 && height >= d.sunset_height {
-            NativeSuiteSet::new(&[d.new_suite_id])
-        } else {
+        } else if height < d.spend_height {
+            // Phase 1: [H1, H2)
             NativeSuiteSet::new(&[d.old_suite_id, d.new_suite_id])
+        } else {
+            // Phase 2+: H2 onwards — create cutoff
+            NativeSuiteSet::new(&[d.new_suite_id])
         }
     }
 
+    /// Phase 0 (h < H1): {old}; Phase 1-3 (H1 ≤ h, h<H4|∞): {old,new}; Phase 4 (H4 ≤ h): {new}
     fn native_spend_suites(&self, height: u64) -> NativeSuiteSet {
         let d = &self.descriptor;
-        if height < d.spend_height {
+        if height < d.create_height {
+            // Phase 0: before H1
             NativeSuiteSet::new(&[d.old_suite_id])
+        } else if d.sunset_height != 0 && height >= d.sunset_height {
+            // Phase 4: H4 sunset
+            NativeSuiteSet::new(&[d.new_suite_id])
         } else {
+            // Phase 1-3: [H1, H4) or [H1, ∞)
             NativeSuiteSet::new(&[d.old_suite_id, d.new_suite_id])
         }
     }
@@ -412,7 +422,12 @@ mod tests {
         assert!(s.contains(0x01));
         assert!(s.contains(0x02));
 
-        // At H4: only new.
+        // At H2: only new (create cutoff per spec §6 Phase 2).
+        let s = p.native_create_suites(200);
+        assert!(!s.contains(0x01));
+        assert!(s.contains(0x02));
+
+        // At H4: still only new.
         let s = p.native_create_suites(300);
         assert!(!s.contains(0x01));
         assert!(s.contains(0x02));
@@ -426,18 +441,28 @@ mod tests {
             new_suite_id: 0x02,
             create_height: 100,
             spend_height: 200,
-            sunset_height: 0,
+            sunset_height: 400,
         };
         let p = DescriptorRotationProvider { descriptor: d };
 
-        // Before H2: only old.
-        let s = p.native_spend_suites(150);
+        // Before H1: only old.
+        let s = p.native_spend_suites(50);
         assert!(s.contains(0x01));
         assert!(!s.contains(0x02));
 
-        // At H2: both.
-        let s = p.native_spend_suites(200);
+        // At H1: both (new enters spend at activation).
+        let s = p.native_spend_suites(100);
         assert!(s.contains(0x01));
+        assert!(s.contains(0x02));
+
+        // Between H1 and H4: both.
+        let s = p.native_spend_suites(300);
+        assert!(s.contains(0x01));
+        assert!(s.contains(0x02));
+
+        // At H4: only new (sunset per spec §6 Phase 4).
+        let s = p.native_spend_suites(400);
+        assert!(!s.contains(0x01));
         assert!(s.contains(0x02));
     }
 }

@@ -25,6 +25,7 @@ jobs:
 
       - name: Run Claude Code Review
         id: review
+        continue-on-error: true
         uses: anthropics/claude-code-action@1b422b3517b51140e4484faab676c5e68b914866 # v1
         env:
           ANTHROPIC_MODEL: claude-sonnet-4-6
@@ -145,3 +146,15 @@ jobs:
                - BLOCK ON SPEC DRIFT (explain)
             5. If no issues found, confirm the code looks correct and state SAFE TO MERGE.
           github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Record advisory Claude failure
+        if: ${{ always() && steps.review.outcome != 'success' }}
+        run: |
+          {
+            echo "### Advisory Claude review unavailable"
+            echo
+            echo "- The Claude review step failed and did not publish a review."
+            echo "- This workflow is advisory and must not block merge on provider-side quota or transient upstream failures."
+            echo "- Required merge gates remain the other CI, formal, conformance, and controller review checks."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning::Claude review failed; treating this workflow as advisory."

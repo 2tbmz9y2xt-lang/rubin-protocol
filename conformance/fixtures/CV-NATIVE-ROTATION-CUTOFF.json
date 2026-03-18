@@ -62,8 +62,8 @@
           "openssl_alg": "ML-DSA-87"
         }
       ],
-      "expect_ok": true,
-      "note": "Create with old suite at H2: still allowed (old removed from create only at H4/sunset, not at H2/spend)"
+      "expect_ok": false,
+      "note": "Create with old suite at H2: MUST reject (old removed from create set at H2 per spec \u00a76 Phase 2)"
     },
     {
       "id": "NATIVE-ROT-CUTOFF-03",
