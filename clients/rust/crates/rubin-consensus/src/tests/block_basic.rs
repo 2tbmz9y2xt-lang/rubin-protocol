@@ -731,7 +731,8 @@ fn tx_weight_at_height_none_fallback_equals_legacy() {
     let (w_legacy, da_legacy, anchor_legacy) =
         crate::block_basic::tx_weight_and_stats_public(&tx).expect("legacy weight");
     let (w_reg, da_reg, anchor_reg) =
-        crate::block_basic::tx_weight_and_stats_at_height(&tx, 0, None, None).expect("at_height weight");
+        crate::block_basic::tx_weight_and_stats_at_height(&tx, 0, None, None)
+            .expect("at_height weight");
     assert_eq!(w_legacy, w_reg);
     assert_eq!(da_legacy, da_reg);
     assert_eq!(anchor_legacy, anchor_reg);
@@ -749,8 +750,7 @@ fn tx_weight_at_height_with_registry_known_suite() {
         crate::block_basic::tx_weight_and_stats_at_height(&tx, 0, Some(&rp), Some(&reg))
             .expect("at_height weight with registry");
     // Empty witness → sig_cost = 0 → should match legacy.
-    let (w_legacy, _, _) =
-        crate::block_basic::tx_weight_and_stats_public(&tx).expect("legacy");
+    let (w_legacy, _, _) = crate::block_basic::tx_weight_and_stats_public(&tx).expect("legacy");
     assert_eq!(w, w_legacy);
 }
 
@@ -780,8 +780,7 @@ fn tx_weight_at_height_unknown_suite_uses_floor() {
     let (w_reg, _, _) =
         crate::block_basic::tx_weight_and_stats_at_height(&tx, 0, Some(&rp), Some(&reg))
             .expect("at_height");
-    let (w_legacy, _, _) =
-        crate::block_basic::tx_weight_and_stats_public(&tx).expect("legacy");
+    let (w_legacy, _, _) = crate::block_basic::tx_weight_and_stats_public(&tx).expect("legacy");
     // Both should use VERIFY_COST_UNKNOWN_SUITE for suite 0xFE.
     assert_eq!(w_reg, w_legacy);
 }
