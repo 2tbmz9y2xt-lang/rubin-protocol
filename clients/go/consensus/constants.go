@@ -72,6 +72,14 @@ const (
 	VERIFY_COST_ML_DSA_87     = 8
 	VERIFY_COST_UNKNOWN_SUITE = 64 // conservative floor for non-native suites (CANONICAL §9)
 
+	// EXT_BASE_COST is a policy/activation prerequisite constant for CORE_EXT tracks.
+	// It is defined as a stable numeric baseline derived from devnet-style measurement
+	// and exposed on the consensus parameter surface for cross-client parity.
+	//
+	// NOTE: This constant does not change consensus validity by itself; it is not wired
+	// into weight or fee rules unless explicitly specified by a separate consensus change.
+	EXT_BASE_COST = uint64(64)
+
 	CORE_EXT_WITNESS_SLOTS     = 1
 	CORE_STEALTH_WITNESS_SLOTS = 1
 
