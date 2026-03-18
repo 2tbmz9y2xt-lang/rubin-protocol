@@ -4,7 +4,7 @@
   "claim_level": "refined",
   "spec_source_file": "spec/RUBIN_L1_CANONICAL.md",
   "spec_section_hashes_file": "spec/SECTION_HASHES.json",
-  "spec_section_hashes_sha3_256": "524435b419d9bd5853d4a7f73d71961bf061a2b778f13303e429bc1de55ad35a",
+  "spec_section_hashes_sha3_256": "a63ae948ca8f710ff98d2203f8dff3319c4e90784e51404a7a3948677d81e1e1",
   "lean_toolchain_file": "rubin-formal/lean-toolchain",
   "refinement_bridge_file": "rubin-formal/refinement_bridge.json",
   "coverage": [
@@ -102,7 +102,7 @@
     },
     {
       "section_key": "replay_domain_checks",
-      "section_heading": "## 17. Replay-Domain Checks (Normative)",
+      "section_heading": "## 1. Replay-Domain Checks (Normative)",
       "status": "proved",
       "theorems": [
         "RubinFormal.Conformance.cv_replay_vectors_pass"
@@ -111,7 +111,7 @@
     },
     {
       "section_key": "utxo_state_model",
-      "section_heading": "## 18. UTXO State Model (Normative)",
+      "section_heading": "## 2. UTXO State Model (Normative)",
       "status": "proved",
       "theorems": [
         "RubinFormal.Conformance.cv_utxo_basic_vectors_pass"

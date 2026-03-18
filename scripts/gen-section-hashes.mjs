@@ -5,9 +5,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const specPath = path.join(root, "spec", "RUBIN_L1_CANONICAL.md");
 const outPath = path.join(root, "spec", "SECTION_HASHES.json");
-const spec = fs.readFileSync(specPath, "utf8").replace(/\r\n/g, "\n");
+const defaultSourceFile = "spec/RUBIN_L1_CANONICAL.md";
+const sectionSources = {
+  replay_domain_checks: "spec/RUBIN_CONSENSUS_STATE_MACHINE.md",
+  utxo_state_model: "spec/RUBIN_CONSENSUS_STATE_MACHINE.md",
+};
+const allowedSourceFiles = [defaultSourceFile, ...new Set(Object.values(sectionSources))];
 
 const sectionHeadings = {
   transaction_wire: "## 5. Transaction Wire",
@@ -19,8 +23,8 @@ const sectionHeadings = {
   covenant_registry: "## 14. Covenant Type Registry (Normative)",
   difficulty_update: "## 15. Difficulty Update (Normative)",
   transaction_structural_rules: "## 16. Transaction Structural Rules (Normative)",
-  replay_domain_checks: "## 17. Replay-Domain Checks (Normative)",
-  utxo_state_model: "## 18. UTXO State Model (Normative)",
+  replay_domain_checks: "## 1. Replay-Domain Checks (Normative)",
+  utxo_state_model: "## 2. UTXO State Model (Normative)",
   value_conservation: "## 20. Value Conservation (Normative)",
   da_set_integrity: "## 21. DA Set Integrity (Normative)",
 };
@@ -47,10 +51,16 @@ function extractSection(md, heading) {
 }
 
 const hashes = {};
+const sources = new Map();
 for (const [key, heading] of Object.entries(sectionHeadings)) {
-  const section = extractSection(spec, heading);
+  const srcRel = sectionSources[key] || defaultSourceFile;
+  if (!sources.has(srcRel)) {
+    const srcPath = path.join(root, srcRel);
+    sources.set(srcRel, fs.readFileSync(srcPath, "utf8").replace(/\r\n/g, "\n"));
+  }
+  const section = extractSection(sources.get(srcRel), heading);
   if (!section) {
-    console.error(`Section not found: ${heading}`);
+    console.error(`Section not found: ${heading} (${srcRel})`);
     process.exit(1);
   }
   hashes[key] = crypto.createHash("sha3-256").update(section).digest("hex");
@@ -58,11 +68,13 @@ for (const [key, heading] of Object.entries(sectionHeadings)) {
 }
 
 const doc = {
-  schema_version: 1,
+  schema_version: 2,
   hash_algorithm: "sha3-256",
-  source_file: "spec/RUBIN_L1_CANONICAL.md",
+  source_file: defaultSourceFile,
   canonicalization:
     "LF normalization; extract markdown from exact section heading to next heading of same/higher level; trim; append trailing LF",
+  allowed_source_files: allowedSourceFiles,
+  section_sources: sectionSources,
   section_headings: sectionHeadings,
   sections: hashes,
 };

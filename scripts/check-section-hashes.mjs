@@ -60,10 +60,8 @@ if (!resolved.specPath || !resolved.hashesPath) {
   process.exit(2);
 }
 
-const specPath = resolved.specPath;
 const hashesPath = resolved.hashesPath;
-
-const spec = fs.readFileSync(specPath, "utf8").replace(/\r\n/g, "\n");
+const specRepoRoot = path.resolve(resolved.specRoot, "..");
 const expectedDoc = JSON.parse(fs.readFileSync(hashesPath, "utf8"));
 
 let expected = expectedDoc;
@@ -95,6 +93,57 @@ const fallbackSectionHeadings = {
   da_set_integrity: "## 21. DA Set Integrity (Normative)",
 };
 const sectionHeadings = expectedDoc.section_headings || fallbackSectionHeadings;
+const defaultSourceFile = expectedDoc.source_file;
+if (!defaultSourceFile) {
+  console.error("FAIL [meta] source_file missing in SECTION_HASHES.json");
+  process.exit(1);
+}
+const allowedSourceFiles = expectedDoc.allowed_source_files;
+if (
+  allowedSourceFiles !== undefined &&
+  (!Array.isArray(allowedSourceFiles) ||
+    allowedSourceFiles.some((value) => typeof value !== "string" || value.length === 0))
+) {
+  console.error("FAIL [meta] invalid allowed_source_files in SECTION_HASHES.json");
+  process.exit(1);
+}
+const allowedSourceSet = new Set(allowedSourceFiles || [defaultSourceFile]);
+if (!allowedSourceSet.has(defaultSourceFile)) {
+  console.error("FAIL [meta] source_file must be present in allowed_source_files");
+  process.exit(1);
+}
+const rawSectionSources = expectedDoc.section_sources;
+if (
+  rawSectionSources !== undefined &&
+  (rawSectionSources === null || Array.isArray(rawSectionSources) || typeof rawSectionSources !== "object")
+) {
+  console.error("FAIL [meta] invalid section_sources in SECTION_HASHES.json");
+  process.exit(1);
+}
+const sectionSources = rawSectionSources || {};
+for (const [key, srcRel] of Object.entries(sectionSources)) {
+  if (typeof srcRel !== "string" || srcRel.length === 0) {
+    console.error(`FAIL [meta] invalid section_sources value for ${key}`);
+    process.exit(1);
+  }
+  if (!allowedSourceSet.has(srcRel)) {
+    console.error(`FAIL [meta] section source for ${key} is not allowlisted: ${srcRel}`);
+    process.exit(1);
+  }
+}
+const sourceCache = new Map();
+
+function loadSource(srcRel) {
+  if (!sourceCache.has(srcRel)) {
+    const srcPath = path.resolve(specRepoRoot, srcRel);
+    if (!fs.existsSync(srcPath)) {
+      console.error(`FAIL [spec-root] missing source file: ${srcRel}`);
+      process.exit(1);
+    }
+    sourceCache.set(srcRel, fs.readFileSync(srcPath, "utf8").replace(/\r\n/g, "\n"));
+  }
+  return sourceCache.get(srcRel);
+}
 
 function extractSection(md, heading) {
   const lines = md.split("\n");
@@ -119,9 +168,10 @@ function extractSection(md, heading) {
 
 let failed = 0;
 for (const [key, heading] of Object.entries(sectionHeadings)) {
-  const section = extractSection(spec, heading);
+  const srcRel = sectionSources[key] || defaultSourceFile;
+  const section = extractSection(loadSource(srcRel), heading);
   if (!section) {
-    console.error(`FAIL [${key}] missing section: ${heading}`);
+    console.error(`FAIL [${key}] missing section: ${heading} (${srcRel})`);
     failed += 1;
     continue;
   }
