@@ -70,3 +70,5 @@ import RubinFormal.Conformance.CVNativeRotationSpendVectors
 import RubinFormal.Conformance.CVNativeRotationSpendReplay
 import RubinFormal.Conformance.CVNativeRotationDescriptorVectors
 import RubinFormal.Conformance.CVNativeRotationDescriptorReplay
+import RubinFormal.Conformance.CVNativeRotationWeightVectors
+import RubinFormal.Conformance.CVNativeRotationWeightReplay

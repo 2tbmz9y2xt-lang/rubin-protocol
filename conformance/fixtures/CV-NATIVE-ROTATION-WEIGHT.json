@@ -1,0 +1,75 @@
+{
+  "gate": "CV-NATIVE-ROTATION-WEIGHT",
+  "vectors": [
+    {
+      "id": "NATIVE-ROT-WEIGHT-01",
+      "op": "tx_weight_and_stats",
+      "height": 100,
+      "rotation_descriptor": {
+        "name": "rot-weight",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 50,
+        "spend_height": 100,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        {
+          "suite_id": 1,
+          "pubkey_len": 2592,
+          "sig_len": 4627,
+          "verify_cost": 8,
+          "openssl_alg": "ML-DSA-87"
+        },
+        {
+          "suite_id": 2,
+          "pubkey_len": 64,
+          "sig_len": 0,
+          "verify_cost": 9,
+          "openssl_alg": "ML-DSA-87"
+        }
+      ],
+      "tx_hex": "010000000002000000000000000111111111111111111111111111111111111111111111111111111111111111110000000000000000000000000000010240cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc01dd00",
+      "expect_ok": true,
+      "expect_weight": 319,
+      "expect_da_bytes": 0,
+      "expect_anchor_bytes": 0,
+      "note": "Same tx as CV-WEIGHT/WEIGHT-03 (suite_id=0x40). With injected rotation+registry, cost comes from registry (verify_cost=9) instead of unknown floor (64)."
+    },
+    {
+      "id": "NATIVE-ROT-WEIGHT-02",
+      "op": "tx_weight_and_stats",
+      "height": 100,
+      "rotation_descriptor": {
+        "name": "rot-weight",
+        "old_suite_id": 1,
+        "new_suite_id": 3,
+        "create_height": 50,
+        "spend_height": 100,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        {
+          "suite_id": 1,
+          "pubkey_len": 2592,
+          "sig_len": 4627,
+          "verify_cost": 8,
+          "openssl_alg": "ML-DSA-87"
+        },
+        {
+          "suite_id": 3,
+          "pubkey_len": 64,
+          "sig_len": 0,
+          "verify_cost": 9,
+          "openssl_alg": "ML-DSA-87"
+        }
+      ],
+      "tx_hex": "010000000002000000000000000111111111111111111111111111111111111111111111111111111111111111110000000000000000000000000000010240cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc01dd00",
+      "expect_ok": true,
+      "expect_weight": 374,
+      "expect_da_bytes": 0,
+      "expect_anchor_bytes": 0,
+      "note": "Unknown suite (0x40) not in native spend set at height=100; suite-aware path uses VERIFY_COST_UNKNOWN_SUITE floor (64)."
+    }
+  ]
+}
