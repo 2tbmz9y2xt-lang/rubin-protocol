@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha3"
 	"encoding/json"
 	"errors"
@@ -281,6 +282,55 @@ func TestRunReturnsNoEntriesWritten(t *testing.T) {
 	outPath := filepath.Join(t.TempDir(), "trace.jsonl")
 	if err := run(fixturesDir, outPath); err == nil {
 		t.Fatalf("expected error")
+	}
+}
+
+func TestNormalizeCommittedAtUTC(t *testing.T) {
+	if got := normalizeCommittedAtUTC("2026-03-18T19:23:18+01:00"); got != "2026-03-18T18:23:18Z" {
+		t.Fatalf("normalized timestamp=%q", got)
+	}
+	if got := normalizeCommittedAtUTC("not-a-timestamp"); got != unknownGeneratedAtUTC {
+		t.Fatalf("fallback timestamp=%q", got)
+	}
+}
+
+func TestRunIsDeterministicForSameHead(t *testing.T) {
+	prevGitCommitMetaFn := gitCommitMetaFn
+	prevGoVersionFn := goVersionFn
+	gitCommitMetaFn = func() (string, string) {
+		return "8999206a02ab317748a7ced8e129a1d52215656e", "2026-03-18T18:23:18Z"
+	}
+	goVersionFn = func() string { return "go version go1.25.0 darwin/arm64" }
+	t.Cleanup(func() {
+		gitCommitMetaFn = prevGitCommitMetaFn
+		goVersionFn = prevGoVersionFn
+	})
+
+	fixturesDir := t.TempDir()
+	fixture := `{"gate":"CV-PARSE","vectors":[{"id":"P1","op":"parse","tx_hex":"00","expect_ok":false}]}`
+	if err := os.WriteFile(filepath.Join(fixturesDir, "CV-PARSE.json"), []byte(fixture), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	out1 := filepath.Join(t.TempDir(), "trace-1.jsonl")
+	out2 := filepath.Join(t.TempDir(), "trace-2.jsonl")
+	if err := run(fixturesDir, out1); err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	if err := run(fixturesDir, out2); err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+
+	b1, err := os.ReadFile(out1)
+	if err != nil {
+		t.Fatalf("read out1: %v", err)
+	}
+	b2, err := os.ReadFile(out2)
+	if err != nil {
+		t.Fatalf("read out2: %v", err)
+	}
+	if !bytes.Equal(b1, b2) {
+		t.Fatalf("trace output is not deterministic for same HEAD")
 	}
 }
 
