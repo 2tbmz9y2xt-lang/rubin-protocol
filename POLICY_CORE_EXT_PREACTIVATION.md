@@ -56,5 +56,10 @@ lifecycle is governed by `RUBIN_NATIVE_CRYPTO_ROTATION_SPEC_v1.md`.
 
 **Implementation prerequisites before activating any profile:**
 1. Deployment descriptor wire format alignment with CANONICAL §23.2
-2. `EXT_BASE_COST` numeric value supported by devnet measurement
+2. `EXT_BASE_COST` numeric value supported by devnet-style measurement
 3. `conformance/fixtures/CV-EXT.json` produced and passing on both Go and Rust clients
+
+Current baseline:
+
+- `EXT_BASE_COST = 64` (see `clients/go/consensus/constants.go` and
+  `clients/rust/crates/rubin-consensus/src/constants.rs`; evidence captured under `Q-IMPL-CORE-EXT-COST-01`).
