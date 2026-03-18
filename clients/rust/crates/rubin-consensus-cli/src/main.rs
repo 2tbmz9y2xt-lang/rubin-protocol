@@ -1370,19 +1370,9 @@ fn main() {
             };
             let mut suites = std::collections::BTreeMap::new();
             for s in &req.suite_registry {
-                let alg: &'static str = match s.openssl_alg.as_str() {
-                    "ML-DSA-87" => "ML-DSA-87",
-                    "" => "ML-DSA-87",
-                    other => {
-                        // conformance tooling can inject arbitrary names; keep stable mapping
-                        // by accepting ML-DSA-87 only for now.
-                        if other == "ML_DSA_87" {
-                            "ML-DSA-87"
-                        } else {
-                            "ML-DSA-87"
-                        }
-                    }
-                };
+                // Conformance tooling may inject arbitrary names; keep stable mapping
+                // by accepting ML-DSA-87 only for now.
+                let alg: &'static str = "ML-DSA-87";
                 suites.insert(
                     s.suite_id,
                     SuiteParams {
