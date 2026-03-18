@@ -721,3 +721,94 @@ fn verify_sig_parallel_mldsa_deterministic() {
         handle.join().expect("parallel verify worker panicked");
     }
 }
+
+// ── Rotation-aware weight tests (RUST-02 parity with Go TxWeightAndStatsAtHeight) ──
+
+#[test]
+fn tx_weight_at_height_none_fallback_equals_legacy() {
+    let tx_bytes = minimal_tx_bytes();
+    let (tx, _, _, _) = parse_tx(&tx_bytes).expect("parse");
+    let (w_legacy, da_legacy, anchor_legacy) =
+        crate::block_basic::tx_weight_and_stats_public(&tx).expect("legacy weight");
+    let (w_reg, da_reg, anchor_reg) =
+        crate::block_basic::tx_weight_and_stats_at_height(&tx, 0, None, None).expect("at_height weight");
+    assert_eq!(w_legacy, w_reg);
+    assert_eq!(da_legacy, da_reg);
+    assert_eq!(anchor_legacy, anchor_reg);
+}
+
+#[test]
+fn tx_weight_at_height_with_registry_known_suite() {
+    use crate::suite_registry::{DefaultRotationProvider, SuiteRegistry};
+
+    let tx_bytes = minimal_tx_bytes();
+    let (tx, _, _, _) = parse_tx(&tx_bytes).expect("parse");
+    let rp = DefaultRotationProvider;
+    let reg = SuiteRegistry::default_registry();
+    let (w, _da, _anchor) =
+        crate::block_basic::tx_weight_and_stats_at_height(&tx, 0, Some(&rp), Some(&reg))
+            .expect("at_height weight with registry");
+    // Empty witness → sig_cost = 0 → should match legacy.
+    let (w_legacy, _, _) =
+        crate::block_basic::tx_weight_and_stats_public(&tx).expect("legacy");
+    assert_eq!(w, w_legacy);
+}
+
+#[test]
+fn tx_weight_at_height_unknown_suite_uses_floor() {
+    use crate::suite_registry::{DefaultRotationProvider, SuiteRegistry};
+
+    // Build a tx with one unknown-suite witness item.
+    let mut tx_bytes = Vec::new();
+    tx_bytes.extend_from_slice(&1u32.to_le_bytes()); // version
+    tx_bytes.push(0x00); // tx_kind
+    tx_bytes.extend_from_slice(&0u64.to_le_bytes()); // tx_nonce
+    crate::compactsize::encode_compact_size(0, &mut tx_bytes); // inputs
+    crate::compactsize::encode_compact_size(0, &mut tx_bytes); // outputs
+    tx_bytes.extend_from_slice(&0u32.to_le_bytes()); // locktime
+    crate::compactsize::encode_compact_size(1, &mut tx_bytes); // 1 witness item
+    tx_bytes.push(0xFE); // unknown suite_id
+    crate::compactsize::encode_compact_size(1, &mut tx_bytes); // pubkey len
+    tx_bytes.push(0x01); // pubkey
+    crate::compactsize::encode_compact_size(1, &mut tx_bytes); // sig len
+    tx_bytes.push(0x02); // sig
+    crate::compactsize::encode_compact_size(0, &mut tx_bytes); // da_payload
+
+    let (tx, _, _, _) = parse_tx(&tx_bytes).expect("parse");
+    let rp = DefaultRotationProvider;
+    let reg = SuiteRegistry::default_registry();
+    let (w_reg, _, _) =
+        crate::block_basic::tx_weight_and_stats_at_height(&tx, 0, Some(&rp), Some(&reg))
+            .expect("at_height");
+    let (w_legacy, _, _) =
+        crate::block_basic::tx_weight_and_stats_public(&tx).expect("legacy");
+    // Both should use VERIFY_COST_UNKNOWN_SUITE for suite 0xFE.
+    assert_eq!(w_reg, w_legacy);
+}
+
+#[test]
+fn covenant_genesis_rotation_aware_rejects_non_native_suite() {
+    use crate::suite_registry::{NativeSuiteSet, RotationProvider};
+
+    struct RejectAll;
+    impl RotationProvider for RejectAll {
+        fn native_create_suites(&self, _h: u64) -> NativeSuiteSet {
+            NativeSuiteSet::new(&[]) // empty = reject everything
+        }
+        fn native_spend_suites(&self, _h: u64) -> NativeSuiteSet {
+            NativeSuiteSet::new(&[])
+        }
+    }
+
+    let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
+    let mut cov = vec![0u8; MAX_P2PK_COVENANT_DATA as usize];
+    cov[0] = SUITE_ID_ML_DSA_87;
+    tx.outputs = vec![crate::tx::TxOutput {
+        value: 1,
+        covenant_type: COV_TYPE_P2PK,
+        covenant_data: cov,
+    }];
+    let rp = RejectAll;
+    let err = validate_tx_covenants_genesis(&tx, 0, Some(&rp)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+}
