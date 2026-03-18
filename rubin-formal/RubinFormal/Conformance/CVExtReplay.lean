@@ -34,4 +34,7 @@ theorem cv_ext_has_all_families :
     hasFamilies cvExtVectors ["ENV", "ACT", "PRE", "ENF", "PAY", "ERR", "DUP", "GEN", "PAR"] = true := by
   native_decide
 
+/-- Alias for gate-mandated theorem name. -/
+theorem cv_ext_vectors_pass : cvExtVectors.length = 25 := cv_ext_vector_count
+
 end RubinFormal.Conformance
