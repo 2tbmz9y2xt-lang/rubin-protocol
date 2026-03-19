@@ -307,6 +307,56 @@ func TestValidateCoreExtWitnessAtHeightMixedProfileNativeSuiteUsesNativePath(t *
 	}
 }
 
+func TestValidateCoreExtWitnessAtHeightNativeSuiteMissingRegistryFailsClosed(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0xae
+	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
+	tx, _ := mustParseTxForUtxo(t, txBytes)
+	cache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		t.Fatalf("NewSighashV1PrehashCache: %v", err)
+	}
+	called := false
+	profile := CoreExtProfile{
+		Active:            true,
+		AllowedSuites:     map[uint8]struct{}{0x02: {}, 0x03: {}},
+		VerifySigExtFn:    func(uint16, uint8, []byte, []byte, [32]byte, []byte) (bool, error) { called = true; return true, nil },
+		BindingDescriptor: []byte{0xa1},
+		ExtPayloadSchema:  []byte{0xb2},
+	}
+	w := WitnessItem{
+		SuiteID:   0x02,
+		Pubkey:    []byte{0x01, 0x02, 0x03, 0x04},
+		Signature: []byte{0x05, 0x06, 0x07, 0x01},
+	}
+	err = validateCoreExtWitnessAtHeight(
+		&CoreExtCovenantData{ExtID: 7, ExtPayload: []byte{0x99}},
+		profile,
+		w,
+		tx,
+		0,
+		100,
+		[32]byte{0: 0x43},
+		0,
+		cache,
+		nativeRotationProvider{},
+		NewSuiteRegistryFromParams(nil),
+		nil,
+	)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
+	}
+	if err.Error() != "TX_ERR_SIG_ALG_INVALID: CORE_EXT registered native suite missing from registry" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if called {
+		t.Fatalf("native suite path must fail closed before verify_sig_ext")
+	}
+}
+
 func TestParseTx_UnknownSuiteAcceptedAndCharged(t *testing.T) {
 	var prev [32]byte
 	prev[0] = 0xaa

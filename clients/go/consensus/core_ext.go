@@ -265,18 +265,6 @@ func normalizeCoreExtSuiteContext(rotation RotationProvider, registry *SuiteRegi
 	return rotation, registry
 }
 
-func coreExtNativeSuiteParams(suiteID uint8, blockHeight uint64, rotation RotationProvider, registry *SuiteRegistry) (SuiteParams, bool) {
-	rotation, registry = normalizeCoreExtSuiteContext(rotation, registry)
-	if !rotation.NativeSpendSuites(blockHeight).Contains(suiteID) {
-		return SuiteParams{}, false
-	}
-	params, ok := registry.Lookup(suiteID)
-	if !ok {
-		return SuiteParams{}, false
-	}
-	return params, true
-}
-
 func validateCoreExtNativeWitness(w WitnessItem, params SuiteParams) error {
 	if len(w.Pubkey) != params.PubkeyLen || len(w.Signature) != params.SigLen+1 {
 		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical CORE_EXT native witness item lengths")
@@ -313,7 +301,11 @@ func validateCoreExtWitnessAtHeight(
 	// Per CANONICAL §12.5 / §23.2.2, any suite that is currently native at this
 	// height stays on native verify_sig even under mixed CORE_EXT profiles; the
 	// verify_sig_ext binding governs only permitted non-native suites.
-	if params, native := coreExtNativeSuiteParams(w.SuiteID, blockHeight, rotation, registry); native {
+	if rotation.NativeSpendSuites(blockHeight).Contains(w.SuiteID) {
+		params, found := registry.Lookup(w.SuiteID)
+		if !found {
+			return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT registered native suite missing from registry")
+		}
 		if err := validateCoreExtNativeWitness(w, params); err != nil {
 			return err
 		}
