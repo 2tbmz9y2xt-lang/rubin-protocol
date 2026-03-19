@@ -79,7 +79,7 @@ const invariants = [
   { id: "CURSOR_MODEL", re: /WitnessItems are consumed by inputs using a cursor model/, desc: "cursor model section present" },
   { id: "CURSOR_WITNESS_SLOTS", re: /witness_slots\(e\)/, desc: "witness_slots(e) rule present" },
   { id: "OUTPUT_DESCRIPTOR_SECTION", re: /### 18\.3 OutputDescriptorBytes \(Normative\)/, desc: "OutputDescriptorBytes section present" },
-  { id: "OUTPUT_VALUE_EXCLUDED", re: /`output\.value` is intentionally excluded/, desc: "OutputDescriptor excludes value" },
+  { id: "OUTPUT_DESCRIPTOR_REF", re: /Authoritative text is centralized in `spec\/RUBIN_CONSENSUS_STATE_MACHINE\.md` §2\.3\./, desc: "OutputDescriptor authoritative reference present" },
   { id: "DA_COMMIT_ERR", re: /BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID/, desc: "DA payload commit error code present" },
   { id: "VALIDATION_ORDER_SECTION", re: /## 25\. Block Validation Order \(Normative\)/, desc: "validation order section present" },
 ];
