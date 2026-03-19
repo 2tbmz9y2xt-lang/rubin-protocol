@@ -27,6 +27,8 @@ type CoreExtProfileProvider interface {
 	LookupCoreExtProfile(extID uint16, height uint64) (CoreExtProfile, bool, error)
 }
 
+type emptyCoreExtProfileProvider struct{}
+
 type CoreExtDeploymentProfile struct {
 	ExtID             uint16
 	ActivationHeight  uint64
@@ -40,9 +42,15 @@ type StaticCoreExtProfileProvider struct {
 	deployments map[uint16]CoreExtDeploymentProfile
 }
 
+func EmptyCoreExtProfileProvider() CoreExtProfileProvider {
+	return emptyCoreExtProfileProvider{}
+}
+
 func NewStaticCoreExtProfileProvider(deployments []CoreExtDeploymentProfile) (*StaticCoreExtProfileProvider, error) {
 	if len(deployments) == 0 {
-		return nil, nil
+		return &StaticCoreExtProfileProvider{
+			deployments: make(map[uint16]CoreExtDeploymentProfile),
+		}, nil
 	}
 	provider := &StaticCoreExtProfileProvider{
 		deployments: make(map[uint16]CoreExtDeploymentProfile, len(deployments)),
@@ -64,6 +72,10 @@ func NewStaticCoreExtProfileProvider(deployments []CoreExtDeploymentProfile) (*S
 		}
 	}
 	return provider, nil
+}
+
+func (emptyCoreExtProfileProvider) LookupCoreExtProfile(uint16, uint64) (CoreExtProfile, bool, error) {
+	return CoreExtProfile{}, false, nil
 }
 
 func (p *StaticCoreExtProfileProvider) LookupCoreExtProfile(extID uint16, height uint64) (CoreExtProfile, bool, error) {
@@ -358,17 +370,19 @@ func validateCoreExtSpendWithCache(
 		return err
 	}
 
+	if coreExtProfiles == nil {
+		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile provider missing")
+	}
+
 	profile := CoreExtProfile{}
 	active := false
-	if coreExtProfiles != nil {
-		resolved, ok, err := coreExtProfiles.LookupCoreExtProfile(cd.ExtID, blockHeight)
-		if err != nil {
-			return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile lookup failure")
-		}
-		if ok && resolved.Active {
-			active = true
-			profile = resolved
-		}
+	resolved, ok, err := coreExtProfiles.LookupCoreExtProfile(cd.ExtID, blockHeight)
+	if err != nil {
+		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile lookup failure")
+	}
+	if ok && resolved.Active {
+		active = true
+		profile = resolved
 	}
 	if !active {
 		return nil

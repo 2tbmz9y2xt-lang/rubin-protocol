@@ -48,6 +48,9 @@ func ValidateTxLocal(
 		TxIndex: tvc.TxIndex,
 		Fee:     tvc.Fee,
 	}
+	if coreExtProfiles == nil {
+		coreExtProfiles = EmptyCoreExtProfileProvider()
+	}
 
 	tx := tvc.Tx
 	if tx == nil {
@@ -205,18 +208,19 @@ func validateCoreExtSpendQ(
 		return err
 	}
 
+	if coreExtProfiles == nil {
+		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile provider missing")
+	}
+
 	profile := CoreExtProfile{}
 	active := false
-
-	if coreExtProfiles != nil {
-		resolved, ok, err := coreExtProfiles.LookupCoreExtProfile(cd.ExtID, blockHeight)
-		if err != nil {
-			return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile lookup failure")
-		}
-		if ok && resolved.Active {
-			active = true
-			profile = resolved
-		}
+	resolved, ok, err := coreExtProfiles.LookupCoreExtProfile(cd.ExtID, blockHeight)
+	if err != nil {
+		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile lookup failure")
+	}
+	if ok && resolved.Active {
+		active = true
+		profile = resolved
 	}
 
 	if !active {

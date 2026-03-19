@@ -39,7 +39,7 @@ func ConnectBlockParallelSigVerify(
 		prevTimestamps,
 		state,
 		chainID,
-		nil,
+		EmptyCoreExtProfileProvider(),
 		workers,
 	)
 }
@@ -57,6 +57,9 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfiles(
 	coreExtProfiles CoreExtProfileProvider,
 	workers int,
 ) (*ConnectBlockBasicSummary, error) {
+	if coreExtProfiles == nil {
+		coreExtProfiles = EmptyCoreExtProfileProvider()
+	}
 	if state == nil {
 		return nil, txerr(BLOCK_ERR_PARSE, "nil chainstate")
 	}
@@ -247,6 +250,9 @@ func applyNonCoinbaseTxBasicWorkQ(
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 ) (map[Outpoint]UtxoEntry, uint64, error) {
+	if coreExtProfiles == nil {
+		coreExtProfiles = EmptyCoreExtProfileProvider()
+	}
 	if tx == nil {
 		return nil, 0, txerr(TX_ERR_PARSE, "nil tx")
 	}

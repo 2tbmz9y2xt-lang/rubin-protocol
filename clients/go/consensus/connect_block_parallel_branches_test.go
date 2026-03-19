@@ -902,9 +902,9 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreExtBranches(t *testing.T) {
 		utxos := map[Outpoint]UtxoEntry{
 			{Txid: prevTxid, Vout: 0}: {Value: 100, CovenantType: COV_TYPE_CORE_EXT, CovenantData: coreExtCovData},
 		}
-		// nil coreExtProfiles → inactive profile.
+		// Explicit empty provider models the pre-ACTIVE no-deployment case.
 		q := NewSigCheckQueue(1)
-		_, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xA1), utxos, 1, 0, [32]byte{}, nil, q, nil, nil)
+		_, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xA1), utxos, 1, 0, [32]byte{}, EmptyCoreExtProfileProvider(), q, nil, nil)
 		if err != nil {
 			t.Fatalf("inactive CORE_EXT: %v", err)
 		}

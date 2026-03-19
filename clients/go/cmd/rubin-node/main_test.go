@@ -434,8 +434,13 @@ func TestBuildGenesisCoreExtProfilesEmptySetAnchorEnforced(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildGenesisCoreExtProfiles(empty anchor): %v", err)
 	}
-	if provider != nil {
-		t.Fatalf("expected nil provider for empty anchored profile set")
+	if provider == nil {
+		t.Fatalf("expected explicit empty provider for empty anchored profile set")
+	}
+	if _, ok, err := provider.LookupCoreExtProfile(7, 0); err != nil {
+		t.Fatalf("LookupCoreExtProfile: %v", err)
+	} else if ok {
+		t.Fatalf("expected no active profile from empty anchored provider")
 	}
 	anchor[0] ^= 0xff
 	if _, err := buildGenesisCoreExtProfiles(nil, chainID, hex.EncodeToString(anchor[:])); err == nil {

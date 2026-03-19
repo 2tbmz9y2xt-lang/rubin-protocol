@@ -506,7 +506,7 @@ func buildGenesisCoreExtProfiles(items []genesisCoreExtProfile, chainID [32]byte
 		}
 	}
 	if len(items) == 0 {
-		return nil, nil
+		return consensus.NewStaticCoreExtProfileProvider(nil)
 	}
 	return consensus.NewStaticCoreExtProfileProvider(deployments)
 }

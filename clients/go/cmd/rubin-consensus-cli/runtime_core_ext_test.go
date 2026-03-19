@@ -13,8 +13,13 @@ func TestBuildCoreExtProfilesEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if provider != nil {
-		t.Fatalf("expected nil provider for empty profiles")
+	if provider == nil {
+		t.Fatalf("expected explicit empty provider for empty profiles")
+	}
+	if _, ok, err := provider.LookupCoreExtProfile(7, 0); err != nil {
+		t.Fatalf("LookupCoreExtProfile: %v", err)
+	} else if ok {
+		t.Fatalf("expected no active profile from empty provider")
 	}
 }
 
@@ -177,8 +182,13 @@ func TestBuildCoreExtProfilesEmptySetAnchorEnforced(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildCoreExtProfiles(empty anchor): %v", err)
 	}
-	if provider != nil {
-		t.Fatalf("expected nil provider for empty anchored profile set")
+	if provider == nil {
+		t.Fatalf("expected explicit empty provider for empty anchored profile set")
+	}
+	if _, ok, err := provider.LookupCoreExtProfile(7, 0); err != nil {
+		t.Fatalf("LookupCoreExtProfile: %v", err)
+	} else if ok {
+		t.Fatalf("expected no active profile from empty anchored provider")
 	}
 	anchor[0] ^= 0xff
 	if _, err := buildCoreExtProfiles(nil, hex.EncodeToString(chainID[:]), hex.EncodeToString(anchor[:])); err == nil {

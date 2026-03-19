@@ -467,15 +467,27 @@ func TestValidateInputSpendQ_DefaultCovType(t *testing.T) {
 }
 
 func TestValidateCoreExtSpendQ_InactiveProfile(t *testing.T) {
-	// When no CoreExtProfileProvider is set, CORE_EXT should pass (inactive).
+	// An explicit empty provider models pre-ACTIVE semantics without relying on nil.
+	entry := UtxoEntry{
+		CovenantType: COV_TYPE_CORE_EXT,
+		CovenantData: makeCoreExtCovenantData(0x01),
+	}
+	w := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87}
+	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, EmptyCoreExtProfileProvider(), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("expected nil for inactive CORE_EXT, got: %v", err)
+	}
+}
+
+func TestValidateCoreExtSpendQ_MissingProviderRejected(t *testing.T) {
 	entry := UtxoEntry{
 		CovenantType: COV_TYPE_CORE_EXT,
 		CovenantData: makeCoreExtCovenantData(0x01),
 	}
 	w := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87}
 	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, nil, nil, nil, nil)
-	if err != nil {
-		t.Fatalf("expected nil for inactive CORE_EXT, got: %v", err)
+	if err == nil || err.Error() != "TX_ERR_COVENANT_TYPE_INVALID: CORE_EXT profile provider missing" {
+		t.Fatalf("expected missing provider error, got %v", err)
 	}
 }
 

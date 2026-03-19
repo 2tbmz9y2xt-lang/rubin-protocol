@@ -29,13 +29,18 @@ func coreExtCovenantData(extID uint16, payload []byte) []byte {
 	return out
 }
 
-func TestStaticCoreExtProfileProviderEmptyReturnsNil(t *testing.T) {
+func TestStaticCoreExtProfileProviderEmptyReturnsInactiveProvider(t *testing.T) {
 	provider, err := NewStaticCoreExtProfileProvider(nil)
 	if err != nil {
 		t.Fatalf("NewStaticCoreExtProfileProvider(nil): %v", err)
 	}
-	if provider != nil {
-		t.Fatalf("expected nil provider for empty deployments")
+	if provider == nil {
+		t.Fatalf("expected non-nil provider for empty deployments")
+	}
+	if _, ok, err := provider.LookupCoreExtProfile(7, 0); err != nil {
+		t.Fatalf("LookupCoreExtProfile: %v", err)
+	} else if ok {
+		t.Fatalf("expected no active profile from empty provider")
 	}
 }
 

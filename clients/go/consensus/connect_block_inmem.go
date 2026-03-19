@@ -52,7 +52,7 @@ func ConnectBlockBasicInMemoryAtHeight(
 		prevTimestamps,
 		state,
 		chainID,
-		nil,
+		EmptyCoreExtProfileProvider(),
 	)
 }
 
@@ -66,6 +66,9 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfiles(
 	chainID [32]byte,
 	coreExtProfiles CoreExtProfileProvider,
 ) (*ConnectBlockBasicSummary, error) {
+	if coreExtProfiles == nil {
+		coreExtProfiles = EmptyCoreExtProfileProvider()
+	}
 	return ConnectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
 		blockBytes,
 		expectedPrevHash,
@@ -92,6 +95,9 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 ) (*ConnectBlockBasicSummary, error) {
+	if coreExtProfiles == nil {
+		coreExtProfiles = EmptyCoreExtProfileProvider()
+	}
 	if state == nil {
 		return nil, txerr(BLOCK_ERR_PARSE, "nil chainstate")
 	}

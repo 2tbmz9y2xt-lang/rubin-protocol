@@ -277,7 +277,7 @@ func buildCoreExtProfiles(items []CoreExtProfileJSON, chainIDHex string, expecte
 		}
 	}
 	if len(deployments) == 0 {
-		return nil, nil
+		return consensus.NewStaticCoreExtProfileProvider(nil)
 	}
 	return consensus.NewStaticCoreExtProfileProvider(deployments)
 }

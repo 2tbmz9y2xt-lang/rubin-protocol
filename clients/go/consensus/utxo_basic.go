@@ -91,6 +91,9 @@ func ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
 	chainID [32]byte,
 	coreExtProfiles CoreExtProfileProvider,
 ) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
+	if coreExtProfiles == nil {
+		coreExtProfiles = EmptyCoreExtProfileProvider()
+	}
 	return ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
 		tx,
 		txid,
@@ -120,6 +123,9 @@ func ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 ) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
+	if coreExtProfiles == nil {
+		coreExtProfiles = EmptyCoreExtProfileProvider()
+	}
 	work := cloneUtxoSet(utxoSet)
 	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, work, height, blockMTP, chainID, coreExtProfiles, rotation, registry)
 	if err != nil {
@@ -142,6 +148,9 @@ func applyNonCoinbaseTxBasicWork(
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 ) (map[Outpoint]UtxoEntry, uint64, error) {
+	if coreExtProfiles == nil {
+		coreExtProfiles = EmptyCoreExtProfileProvider()
+	}
 	if tx == nil {
 		return nil, 0, txerr(TX_ERR_PARSE, "nil tx")
 	}
