@@ -465,9 +465,6 @@ func decodeOptionalHexBytesField(name, value string) ([]byte, error) {
 }
 
 func buildGenesisCoreExtProfiles(items []genesisCoreExtProfile, chainID [32]byte, expectedSetAnchorHex string) (consensus.CoreExtProfileProvider, error) {
-	if len(items) == 0 {
-		return nil, nil
-	}
 	deployments := make([]consensus.CoreExtDeploymentProfile, 0, len(items))
 	for _, item := range items {
 		verifySigExtFn, err := parseCoreExtBinding(item.Binding)
@@ -507,6 +504,9 @@ func buildGenesisCoreExtProfiles(items []genesisCoreExtProfile, chainID [32]byte
 		if actualAnchor != expectedAnchor {
 			return nil, fmt.Errorf("core_ext profile set anchor mismatch")
 		}
+	}
+	if len(items) == 0 {
+		return nil, nil
 	}
 	return consensus.NewStaticCoreExtProfileProvider(deployments)
 }

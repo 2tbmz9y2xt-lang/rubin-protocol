@@ -688,6 +688,7 @@ func TestSyncEngineApplyBlockRejectsPostActivationCoreExtSpend(t *testing.T) {
 		ExtID:            1,
 		ActivationHeight: 1,
 		AllowedSuites:    map[uint8]struct{}{0x03: {}},
+		ExtPayloadSchema: []byte{0xb2},
 	}})
 	if err != nil {
 		t.Fatalf("NewStaticCoreExtProfileProvider: %v", err)

@@ -436,6 +436,9 @@ fn validate_core_ext_spend_with_cache_impl(
         ));
     }
 
+    // Per CANONICAL §12.5 / §23.2.2, any suite that is currently native at this
+    // height stays on native verify_sig even under mixed CORE_EXT profiles; the
+    // verify_sig_ext binding governs only permitted non-native suites.
     if rotation
         .native_spend_suites(block_height)
         .contains(w.suite_id)

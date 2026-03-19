@@ -259,9 +259,6 @@ func buildCoreExtProfiles(items []CoreExtProfileJSON, chainIDHex string, expecte
 	if err != nil {
 		return nil, err
 	}
-	if len(deployments) == 0 {
-		return nil, nil
-	}
 	if strings.TrimSpace(expectedSetAnchorHex) != "" {
 		chainID, err := parseOptionalChainIDHex(chainIDHex)
 		if err != nil {
@@ -278,6 +275,9 @@ func buildCoreExtProfiles(items []CoreExtProfileJSON, chainIDHex string, expecte
 		if actualAnchor != expectedAnchor {
 			return nil, fmt.Errorf("core_ext profile set anchor mismatch")
 		}
+	}
+	if len(deployments) == 0 {
+		return nil, nil
 	}
 	return consensus.NewStaticCoreExtProfileProvider(deployments)
 }

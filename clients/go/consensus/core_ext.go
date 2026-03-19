@@ -298,6 +298,9 @@ func validateCoreExtWitnessAtHeight(
 		return extractSigAndDigestWithCache(w, tx, inputIndex, inputValue, chainID, sighashCache)
 	}
 
+	// Per CANONICAL §12.5 / §23.2.2, any suite that is currently native at this
+	// height stays on native verify_sig even under mixed CORE_EXT profiles; the
+	// verify_sig_ext binding governs only permitted non-native suites.
 	if params, native := coreExtNativeSuiteParams(w.SuiteID, blockHeight, rotation, registry); native {
 		if err := validateCoreExtNativeWitness(w, params); err != nil {
 			return err

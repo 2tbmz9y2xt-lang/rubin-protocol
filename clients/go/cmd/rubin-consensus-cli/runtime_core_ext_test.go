@@ -21,10 +21,11 @@ func TestBuildCoreExtProfilesEmpty(t *testing.T) {
 func TestBuildCoreExtProfilesNativeBinding(t *testing.T) {
 	provider, err := buildCoreExtProfiles([]CoreExtProfileJSON{
 		{
-			ExtID:            7,
-			ActivationHeight: 5,
-			AllowedSuiteIDs:  []uint8{1, 3},
-			Binding:          "native_verify_sig",
+			ExtID:               7,
+			ActivationHeight:    5,
+			AllowedSuiteIDs:     []uint8{1, 3},
+			Binding:             "native_verify_sig",
+			ExtPayloadSchemaHex: "b2",
 		},
 	}, "", "")
 	if err != nil {
@@ -77,10 +78,12 @@ func TestBuildCoreExtProfilesVerifySigExtBindings(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			provider, err := buildCoreExtProfiles([]CoreExtProfileJSON{
 				{
-					ExtID:            uint16(100 + i),
-					ActivationHeight: 0,
-					AllowedSuiteIDs:  []uint8{3},
-					Binding:          tc.binding,
+					ExtID:                uint16(100 + i),
+					ActivationHeight:     0,
+					AllowedSuiteIDs:      []uint8{3},
+					Binding:              tc.binding,
+					BindingDescriptorHex: "a1",
+					ExtPayloadSchemaHex:  "b2",
 				},
 			}, "", "")
 			if err != nil {
@@ -110,10 +113,12 @@ func TestBuildCoreExtProfilesVerifySigExtBindings(t *testing.T) {
 func TestBuildCoreExtProfilesHeightGate(t *testing.T) {
 	provider, err := buildCoreExtProfiles([]CoreExtProfileJSON{
 		{
-			ExtID:            77,
-			ActivationHeight: 42,
-			AllowedSuiteIDs:  []uint8{3},
-			Binding:          "verify_sig_ext_accept",
+			ExtID:                77,
+			ActivationHeight:     42,
+			AllowedSuiteIDs:      []uint8{3},
+			Binding:              "verify_sig_ext_accept",
+			BindingDescriptorHex: "a1",
+			ExtPayloadSchemaHex:  "b2",
 		},
 	}, "", "")
 	if err != nil {
@@ -136,8 +141,8 @@ func TestBuildCoreExtProfilesHeightGate(t *testing.T) {
 
 func TestBuildCoreExtProfilesDuplicateRejected(t *testing.T) {
 	_, err := buildCoreExtProfiles([]CoreExtProfileJSON{
-		{ExtID: 9, ActivationHeight: 0, AllowedSuiteIDs: []uint8{3}, Binding: "verify_sig_ext_accept"},
-		{ExtID: 9, ActivationHeight: 10, AllowedSuiteIDs: []uint8{3}, Binding: "verify_sig_ext_reject"},
+		{ExtID: 9, ActivationHeight: 0, AllowedSuiteIDs: []uint8{3}, Binding: "verify_sig_ext_accept", BindingDescriptorHex: "a1", ExtPayloadSchemaHex: "b2"},
+		{ExtID: 9, ActivationHeight: 10, AllowedSuiteIDs: []uint8{3}, Binding: "verify_sig_ext_reject", BindingDescriptorHex: "a1", ExtPayloadSchemaHex: "b2"},
 	}, "", "")
 	if err == nil {
 		t.Fatalf("expected duplicate deployment error")
@@ -159,6 +164,25 @@ func TestBuildCoreExtProfilesRejectsEmptyAllowedSuites(t *testing.T) {
 	}, "", "")
 	if err == nil {
 		t.Fatalf("expected empty allowed suites error")
+	}
+}
+
+func TestBuildCoreExtProfilesEmptySetAnchorEnforced(t *testing.T) {
+	chainID := [32]byte{0: 0x42}
+	anchor, err := consensus.CoreExtProfileSetAnchorV1(chainID, nil)
+	if err != nil {
+		t.Fatalf("CoreExtProfileSetAnchorV1(empty): %v", err)
+	}
+	provider, err := buildCoreExtProfiles(nil, hex.EncodeToString(chainID[:]), hex.EncodeToString(anchor[:]))
+	if err != nil {
+		t.Fatalf("buildCoreExtProfiles(empty anchor): %v", err)
+	}
+	if provider != nil {
+		t.Fatalf("expected nil provider for empty anchored profile set")
+	}
+	anchor[0] ^= 0xff
+	if _, err := buildCoreExtProfiles(nil, hex.EncodeToString(chainID[:]), hex.EncodeToString(anchor[:])); err == nil {
+		t.Fatalf("expected empty profile set anchor mismatch")
 	}
 }
 

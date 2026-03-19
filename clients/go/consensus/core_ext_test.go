@@ -12,6 +12,16 @@ func (m staticCoreExtProfiles) LookupCoreExtProfile(extID uint16, _ uint64) (Cor
 	return p, ok, nil
 }
 
+type nativeRotationProvider struct{}
+
+func (nativeRotationProvider) NativeCreateSuites(uint64) *NativeSuiteSet {
+	return NewNativeSuiteSet(0x02)
+}
+
+func (nativeRotationProvider) NativeSpendSuites(uint64) *NativeSuiteSet {
+	return NewNativeSuiteSet(0x02)
+}
+
 func coreExtCovenantData(extID uint16, payload []byte) []byte {
 	out := AppendU16le(nil, extID)
 	out = AppendCompactSize(out, uint64(len(payload)))
@@ -31,8 +41,8 @@ func TestStaticCoreExtProfileProviderEmptyReturnsNil(t *testing.T) {
 
 func TestStaticCoreExtProfileProviderRejectsDuplicateExtID(t *testing.T) {
 	_, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{
-		{ExtID: 7, ActivationHeight: 1},
-		{ExtID: 7, ActivationHeight: 2},
+		{ExtID: 7, ActivationHeight: 1, AllowedSuites: map[uint8]struct{}{3: {}}, ExtPayloadSchema: []byte{0xb2}},
+		{ExtID: 7, ActivationHeight: 2, AllowedSuites: map[uint8]struct{}{3: {}}, ExtPayloadSchema: []byte{0xb2}},
 	})
 	if err == nil {
 		t.Fatalf("expected duplicate deployment error")
@@ -133,6 +143,7 @@ func TestStaticCoreExtProfileProviderNilReceiverAndUnknownExtID(t *testing.T) {
 		ExtID:            7,
 		ActivationHeight: 0,
 		AllowedSuites:    map[uint8]struct{}{1: {}},
+		ExtPayloadSchema: []byte{0xb2},
 	}})
 	if err != nil {
 		t.Fatalf("NewStaticCoreExtProfileProvider: %v", err)
@@ -235,6 +246,60 @@ func TestCoreExtProfileBytesV1RejectsInvalidProfiles(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
+}
+
+func TestValidateCoreExtWitnessAtHeightMixedProfileNativeSuiteUsesNativePath(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0xad
+	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
+	tx, _ := mustParseTxForUtxo(t, txBytes)
+	cache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		t.Fatalf("NewSighashV1PrehashCache: %v", err)
+	}
+	called := false
+	profile := CoreExtProfile{
+		Active:            true,
+		AllowedSuites:     map[uint8]struct{}{0x02: {}, 0x03: {}},
+		VerifySigExtFn:    func(uint16, uint8, []byte, []byte, [32]byte, []byte) (bool, error) { called = true; return false, nil },
+		BindingDescriptor: []byte{0xa1},
+		ExtPayloadSchema:  []byte{0xb2},
+	}
+	w := WitnessItem{
+		SuiteID:   0x02,
+		Pubkey:    []byte{0x01, 0x02, 0x03, 0x04},
+		Signature: []byte{0x05, 0x06, 0x07, 0x01},
+	}
+	registry := NewSuiteRegistryFromParams([]SuiteParams{{
+		SuiteID:    0x02,
+		PubkeyLen:  len(w.Pubkey),
+		SigLen:     len(w.Signature) - 1,
+		VerifyCost: 1,
+		OpenSSLAlg: "ML-DSA-87",
+	}})
+	queue := NewSigCheckQueue(0).WithRegistry(registry)
+	if err := validateCoreExtWitnessAtHeight(
+		&CoreExtCovenantData{ExtID: 7, ExtPayload: []byte{0x99}},
+		profile,
+		w,
+		tx,
+		0,
+		100,
+		[32]byte{0: 0x42},
+		0,
+		cache,
+		nativeRotationProvider{},
+		registry,
+		queue,
+	); err != nil {
+		t.Fatalf("validateCoreExtWitnessAtHeight: %v", err)
+	}
+	if called {
+		t.Fatalf("native suite path must not invoke verify_sig_ext")
+	}
+	if got := queue.Len(); got != 1 {
+		t.Fatalf("sigQueue len=%d, want 1", got)
+	}
 }
 
 func TestParseTx_UnknownSuiteAcceptedAndCharged(t *testing.T) {
@@ -367,6 +432,7 @@ func TestApplyNonCoinbaseTxBasic_CORE_EXT_RotatedNativeSuiteUsesRegistryPath(t *
 		ExtID:            7,
 		ActivationHeight: 0,
 		AllowedSuites:    map[uint8]struct{}{0x02: {}},
+		ExtPayloadSchema: []byte{0xb2},
 	}})
 	if err != nil {
 		t.Fatalf("NewStaticCoreExtProfileProvider: %v", err)

@@ -217,7 +217,7 @@ func TestParseGenesisConfigFullBuildsCoreExtProfiles(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{
 		"chain_id_hex":"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
 		"genesis_hash_hex":"0x8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff",
-		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[1,3],"binding":"verify_sig_ext_accept"}]
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[1,3],"binding":"verify_sig_ext_accept","binding_descriptor_hex":"a1","ext_payload_schema_hex":"b2"}]
 	}`), 0o600); err != nil {
 		t.Fatalf("write genesis file: %v", err)
 	}
@@ -424,6 +424,25 @@ func TestParseGenesisConfigFullRejectsInvalidCoreExtProfileSetAnchorHex(t *testi
 	}
 }
 
+func TestBuildGenesisCoreExtProfilesEmptySetAnchorEnforced(t *testing.T) {
+	chainID := [32]byte{0: 0x42}
+	anchor, err := consensus.CoreExtProfileSetAnchorV1(chainID, nil)
+	if err != nil {
+		t.Fatalf("CoreExtProfileSetAnchorV1(empty): %v", err)
+	}
+	provider, err := buildGenesisCoreExtProfiles(nil, chainID, hex.EncodeToString(anchor[:]))
+	if err != nil {
+		t.Fatalf("buildGenesisCoreExtProfiles(empty anchor): %v", err)
+	}
+	if provider != nil {
+		t.Fatalf("expected nil provider for empty anchored profile set")
+	}
+	anchor[0] ^= 0xff
+	if _, err := buildGenesisCoreExtProfiles(nil, chainID, hex.EncodeToString(anchor[:])); err == nil {
+		t.Fatalf("expected empty profile set anchor mismatch")
+	}
+}
+
 func TestParseGenesisConfigFullRejectsInvalidCoreExtAnchorProfiles(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "genesis.json")
@@ -539,7 +558,7 @@ func TestRunPassesGenesisCoreExtProfilesToMempool(t *testing.T) {
 	if err := os.WriteFile(genesisPath, []byte(`{
 		"chain_id_hex":"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
 		"genesis_hash_hex":"0x8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff",
-		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[1],"binding":"verify_sig_ext_accept"}]
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[1],"binding":"verify_sig_ext_accept","binding_descriptor_hex":"a1","ext_payload_schema_hex":"b2"}]
 	}`), 0o600); err != nil {
 		t.Fatalf("write genesis file: %v", err)
 	}

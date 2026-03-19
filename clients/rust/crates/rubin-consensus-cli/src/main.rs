@@ -839,6 +839,9 @@ fn parse_optional_chain_id_hex(chain_id: &str) -> Result<[u8; 32], String> {
         .strip_prefix("0x")
         .or_else(|| trimmed.strip_prefix("0X"))
         .unwrap_or(trimmed);
+    if trimmed.len() != 64 {
+        return Err("bad chain_id".to_string());
+    }
     let bytes = hex::decode(trimmed).map_err(|_| "bad chain_id".to_string())?;
     if bytes.len() != 32 {
         return Err("bad chain_id".to_string());
@@ -4609,6 +4612,25 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("anchor mismatch"));
+    }
+
+    #[test]
+    fn core_ext_profiles_empty_set_anchor_enforced() {
+        let chain_id = [0x42; 32];
+        let mut expected = core_ext_profile_set_anchor_v1(chain_id, &[]).expect("anchor");
+        let profiles =
+            core_ext_profiles_from_json(&[], chain_id, &hex::encode(expected)).expect("profiles");
+        assert!(profiles.deployments.is_empty());
+
+        expected[0] ^= 0xff;
+        let err = core_ext_profiles_from_json(&[], chain_id, &hex::encode(expected)).unwrap_err();
+        assert!(err.contains("anchor mismatch"));
+    }
+
+    #[test]
+    fn core_ext_profiles_reject_invalid_set_anchor_length() {
+        let err = core_ext_profiles_from_json(&[], [0u8; 32], "aa").unwrap_err();
+        assert_eq!(err, "bad core_ext_profile_set_anchor_hex");
     }
 
     #[test]
