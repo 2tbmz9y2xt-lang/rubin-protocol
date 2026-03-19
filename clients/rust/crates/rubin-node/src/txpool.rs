@@ -1636,6 +1636,8 @@ mod tests {
                 activation_height: 0,
                 allowed_suite_ids: vec![3],
                 verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+                binding_descriptor: b"accept".to_vec(),
+                ext_payload_schema: b"schema".to_vec(),
             }],
         };
         let txid = pool.admit(&raw, &state, None, [0u8; 32]).expect("admit");

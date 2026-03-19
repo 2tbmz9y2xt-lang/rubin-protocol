@@ -86,7 +86,7 @@ func TestApplyNonCoinbaseTxBasicWorkRejectsUnsupportedTxKindViaPrehashCache(t *t
 			Sequence: 0x7FFFFFFF,
 		}},
 	}
-	_, _, err := applyNonCoinbaseTxBasicWork(tx, [32]byte{}, map[Outpoint]UtxoEntry{}, 1, 0, [32]byte{}, nil)
+	_, _, err := applyNonCoinbaseTxBasicWork(tx, [32]byte{}, map[Outpoint]UtxoEntry{}, 1, 0, [32]byte{}, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected unsupported tx_kind error")
 	}

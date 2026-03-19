@@ -1,11 +1,14 @@
 package main
 
 import (
+	"encoding/hex"
 	"testing"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 func TestBuildCoreExtProfilesEmpty(t *testing.T) {
-	provider, err := buildCoreExtProfiles(nil)
+	provider, err := buildCoreExtProfiles(nil, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -22,7 +25,7 @@ func TestBuildCoreExtProfilesNativeBinding(t *testing.T) {
 			AllowedSuiteIDs:  []uint8{1, 3},
 			Binding:          "native_verify_sig",
 		},
-	})
+	}, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -78,7 +81,7 @@ func TestBuildCoreExtProfilesVerifySigExtBindings(t *testing.T) {
 					AllowedSuiteIDs:  []uint8{3},
 					Binding:          tc.binding,
 				},
-			})
+			}, "", "")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -111,7 +114,7 @@ func TestBuildCoreExtProfilesHeightGate(t *testing.T) {
 			AllowedSuiteIDs:  []uint8{3},
 			Binding:          "verify_sig_ext_accept",
 		},
-	})
+	}, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -134,7 +137,7 @@ func TestBuildCoreExtProfilesDuplicateRejected(t *testing.T) {
 	_, err := buildCoreExtProfiles([]CoreExtProfileJSON{
 		{ExtID: 9, ActivationHeight: 0, AllowedSuiteIDs: []uint8{3}, Binding: "verify_sig_ext_accept"},
 		{ExtID: 9, ActivationHeight: 10, AllowedSuiteIDs: []uint8{3}, Binding: "verify_sig_ext_reject"},
-	})
+	}, "", "")
 	if err == nil {
 		t.Fatalf("expected duplicate deployment error")
 	}
@@ -143,8 +146,41 @@ func TestBuildCoreExtProfilesDuplicateRejected(t *testing.T) {
 func TestBuildCoreExtProfilesUnsupportedBindingRejected(t *testing.T) {
 	_, err := buildCoreExtProfiles([]CoreExtProfileJSON{
 		{ExtID: 10, ActivationHeight: 0, AllowedSuiteIDs: []uint8{3}, Binding: "unknown-binding"},
-	})
+	}, "", "")
 	if err == nil {
 		t.Fatalf("expected unsupported binding error")
+	}
+}
+
+func TestBuildCoreExtProfilesRejectsEmptyAllowedSuites(t *testing.T) {
+	_, err := buildCoreExtProfiles([]CoreExtProfileJSON{
+		{ExtID: 10, ActivationHeight: 0, AllowedSuiteIDs: nil, Binding: "native_verify_sig"},
+	}, "", "")
+	if err == nil {
+		t.Fatalf("expected empty allowed suites error")
+	}
+}
+
+func TestBuildCoreExtProfilesRejectsSetAnchorMismatch(t *testing.T) {
+	items := []CoreExtProfileJSON{{
+		ExtID:                7,
+		ActivationHeight:     12,
+		AllowedSuiteIDs:      []uint8{3},
+		Binding:              "verify_sig_ext_accept",
+		BindingDescriptorHex: "a1",
+		ExtPayloadSchemaHex:  "b2",
+	}}
+	deployments, err := buildCoreExtDeployments(items)
+	if err != nil {
+		t.Fatalf("buildCoreExtDeployments: %v", err)
+	}
+	chainID := [32]byte{0: 0x42}
+	anchor, err := consensus.CoreExtProfileSetAnchorV1(chainID, deployments)
+	if err != nil {
+		t.Fatalf("CoreExtProfileSetAnchorV1: %v", err)
+	}
+	anchor[0] ^= 0xff
+	if _, err := buildCoreExtProfiles(items, hex.EncodeToString(chainID[:]), hex.EncodeToString(anchor[:])); err == nil {
+		t.Fatalf("expected set anchor mismatch error")
 	}
 }

@@ -408,79 +408,21 @@ func applyNonCoinbaseTxBasicWorkQ(
 			if slots != CORE_EXT_WITNESS_SLOTS {
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
 			}
-			cd, err := ParseCoreExtCovenantData(entry.CovenantData)
-			if err != nil {
+			if err := validateCoreExtSpendQ(
+				entry,
+				assigned[0],
+				tx,
+				uint32(inputIndex),
+				entry.Value,
+				chainID,
+				height,
+				sighashCache,
+				coreExtProfiles,
+				sigQueue,
+				rotation,
+				registry,
+			); err != nil {
 				return nil, 0, err
-			}
-			w := assigned[0]
-
-			active := false
-			allowedSuites := map[uint8]struct{}(nil)
-			verifySigExtFn := CoreExtVerifySigExtFunc(nil)
-
-			if coreExtProfiles != nil {
-				profile, ok, err := coreExtProfiles.LookupCoreExtProfile(cd.ExtID, height)
-				if err != nil {
-					return nil, 0, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile lookup failure")
-				}
-				if ok && profile.Active {
-					active = true
-					allowedSuites = profile.AllowedSuites
-					verifySigExtFn = profile.VerifySigExtFn
-				}
-			}
-
-			if !active {
-				break
-			}
-
-			if !hasSuite(allowedSuites, w.SuiteID) {
-				return nil, 0, txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT suite disallowed under ACTIVE profile")
-			}
-			if w.SuiteID == SUITE_ID_SENTINEL {
-				return nil, 0, txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT sentinel forbidden under ACTIVE profile")
-			}
-			extractCoreExtSigDigest := func() ([]byte, [32]byte, error) {
-				return extractSigAndDigestWithCache(w, tx, uint32(inputIndex), entry.Value, chainID, sighashCache)
-			}
-
-			switch w.SuiteID {
-			case SUITE_ID_ML_DSA_87:
-				if len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1 {
-					return nil, 0, txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
-				}
-				cryptoSig, digest, err := extractCoreExtSigDigest()
-				if err != nil {
-					return nil, 0, err
-				}
-				if sigQueue != nil {
-					sigQueue.Push(w.SuiteID, w.Pubkey, cryptoSig, digest, txerr(TX_ERR_SIG_INVALID, "CORE_EXT signature invalid"))
-				} else {
-					ok, err := verifySig(w.SuiteID, w.Pubkey, cryptoSig, digest)
-					if err != nil {
-						return nil, 0, err
-					}
-					if !ok {
-						return nil, 0, txerr(TX_ERR_SIG_INVALID, "CORE_EXT signature invalid")
-					}
-				}
-			default:
-				// CORE_EXT external verifiers are NOT deferred to the queue
-				// because they may not be thread-safe.
-				if verifySigExtFn == nil {
-					return nil, 0, txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext unsupported")
-				}
-				cryptoSig, digest, err := extractCoreExtSigDigest()
-				if err != nil {
-					return nil, 0, err
-				}
-				ok, err := verifySigExtFn(cd.ExtID, w.SuiteID, w.Pubkey, cryptoSig, digest, cd.ExtPayload)
-				if err != nil {
-					return nil, 0, txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext error")
-				}
-				if !ok {
-					return nil, 0, txerr(TX_ERR_SIG_INVALID, "CORE_EXT signature invalid")
-				}
 			}
 		case COV_TYPE_CORE_STEALTH:
 			if slots != CORE_STEALTH_WITNESS_SLOTS {

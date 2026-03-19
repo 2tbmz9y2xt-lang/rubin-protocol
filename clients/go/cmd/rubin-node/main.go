@@ -357,18 +357,21 @@ func nowUnixU64() uint64 {
 }
 
 type genesisPack struct {
-	ChainIDHex            string                  `json:"chain_id_hex"`
-	GenesisHashHex        string                  `json:"genesis_hash_hex"`
-	GenesisBlockHashHex   string                  `json:"genesis_block_hash_hex"`
-	GenesisHeaderBytesHex string                  `json:"genesis_header_bytes_hex"`
-	CoreExtProfiles       []genesisCoreExtProfile `json:"core_ext_profiles,omitempty"`
+	ChainIDHex                 string                  `json:"chain_id_hex"`
+	GenesisHashHex             string                  `json:"genesis_hash_hex"`
+	GenesisBlockHashHex        string                  `json:"genesis_block_hash_hex"`
+	GenesisHeaderBytesHex      string                  `json:"genesis_header_bytes_hex"`
+	CoreExtProfiles            []genesisCoreExtProfile `json:"core_ext_profiles,omitempty"`
+	CoreExtProfileSetAnchorHex string                  `json:"core_ext_profile_set_anchor_hex,omitempty"`
 }
 
 type genesisCoreExtProfile struct {
-	ExtID            uint16  `json:"ext_id"`
-	ActivationHeight uint64  `json:"activation_height"`
-	AllowedSuiteIDs  []uint8 `json:"allowed_suite_ids,omitempty"`
-	Binding          string  `json:"binding,omitempty"`
+	ExtID                uint16  `json:"ext_id"`
+	ActivationHeight     uint64  `json:"activation_height"`
+	AllowedSuiteIDs      []uint8 `json:"allowed_suite_ids,omitempty"`
+	Binding              string  `json:"binding,omitempty"`
+	BindingDescriptorHex string  `json:"binding_descriptor_hex,omitempty"`
+	ExtPayloadSchemaHex  string  `json:"ext_payload_schema_hex,omitempty"`
 }
 
 type parsedGenesisConfig struct {
@@ -406,7 +409,7 @@ func parseGenesisConfigFull(path string) (parsedGenesisConfig, error) {
 	if err != nil {
 		return cfg, err
 	}
-	cfg.CoreExtProfiles, err = buildGenesisCoreExtProfiles(payload.CoreExtProfiles)
+	cfg.CoreExtProfiles, err = buildGenesisCoreExtProfiles(payload.CoreExtProfiles, cfg.ChainID, payload.CoreExtProfileSetAnchorHex)
 	if err != nil {
 		return cfg, err
 	}
@@ -443,7 +446,19 @@ func parseGenesisHash(payload genesisPack) ([32]byte, error) {
 	return consensus.BlockHash(headerBytes)
 }
 
-func buildGenesisCoreExtProfiles(items []genesisCoreExtProfile) (consensus.CoreExtProfileProvider, error) {
+func decodeOptionalHexBytesField(name, value string) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	raw, err := hex.DecodeString(trimHexPrefix(value))
+	if err != nil {
+		return nil, fmt.Errorf("bad %s", name)
+	}
+	return raw, nil
+}
+
+func buildGenesisCoreExtProfiles(items []genesisCoreExtProfile, chainID [32]byte, expectedSetAnchorHex string) (consensus.CoreExtProfileProvider, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
@@ -453,16 +468,39 @@ func buildGenesisCoreExtProfiles(items []genesisCoreExtProfile) (consensus.CoreE
 		if err != nil {
 			return nil, err
 		}
+		bindingDescriptor, err := decodeOptionalHexBytesField("binding_descriptor_hex", item.BindingDescriptorHex)
+		if err != nil {
+			return nil, err
+		}
+		extPayloadSchema, err := decodeOptionalHexBytesField("ext_payload_schema_hex", item.ExtPayloadSchemaHex)
+		if err != nil {
+			return nil, err
+		}
 		allowed := make(map[uint8]struct{}, len(item.AllowedSuiteIDs))
 		for _, suiteID := range item.AllowedSuiteIDs {
 			allowed[suiteID] = struct{}{}
 		}
 		deployments = append(deployments, consensus.CoreExtDeploymentProfile{
-			ExtID:            item.ExtID,
-			ActivationHeight: item.ActivationHeight,
-			AllowedSuites:    allowed,
-			VerifySigExtFn:   verifySigExtFn,
+			ExtID:             item.ExtID,
+			ActivationHeight:  item.ActivationHeight,
+			AllowedSuites:     allowed,
+			VerifySigExtFn:    verifySigExtFn,
+			BindingDescriptor: bindingDescriptor,
+			ExtPayloadSchema:  extPayloadSchema,
 		})
+	}
+	if strings.TrimSpace(expectedSetAnchorHex) != "" {
+		expectedAnchor, err := parseHex32Field("core_ext_profile_set_anchor", expectedSetAnchorHex)
+		if err != nil {
+			return nil, err
+		}
+		actualAnchor, err := consensus.CoreExtProfileSetAnchorV1(chainID, deployments)
+		if err != nil {
+			return nil, err
+		}
+		if actualAnchor != expectedAnchor {
+			return nil, fmt.Errorf("core_ext profile set anchor mismatch")
+		}
 	}
 	return consensus.NewStaticCoreExtProfileProvider(deployments)
 }

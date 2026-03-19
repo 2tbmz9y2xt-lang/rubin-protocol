@@ -167,6 +167,7 @@ func validateInputSpendQ(
 		return validateCoreExtSpendQ(
 			entry, assigned[0], tx, inputIndex, inputValue,
 			chainID, blockHeight, sighashCache, coreExtProfiles, sigQueue,
+			rotation, registry,
 		)
 
 	case COV_TYPE_CORE_STEALTH:
@@ -196,83 +197,45 @@ func validateCoreExtSpendQ(
 	sighashCache *SighashV1PrehashCache,
 	coreExtProfiles CoreExtProfileProvider,
 	sigQueue *SigCheckQueue,
+	rotation RotationProvider,
+	registry *SuiteRegistry,
 ) error {
 	cd, err := ParseCoreExtCovenantData(entry.CovenantData)
 	if err != nil {
 		return err
 	}
 
+	profile := CoreExtProfile{}
 	active := false
-	allowedSuites := map[uint8]struct{}(nil)
-	verifySigExtFn := CoreExtVerifySigExtFunc(nil)
 
 	if coreExtProfiles != nil {
-		profile, ok, err := coreExtProfiles.LookupCoreExtProfile(cd.ExtID, blockHeight)
+		resolved, ok, err := coreExtProfiles.LookupCoreExtProfile(cd.ExtID, blockHeight)
 		if err != nil {
 			return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile lookup failure")
 		}
-		if ok && profile.Active {
+		if ok && resolved.Active {
 			active = true
-			allowedSuites = profile.AllowedSuites
-			verifySigExtFn = profile.VerifySigExtFn
+			profile = resolved
 		}
 	}
 
 	if !active {
 		return nil
 	}
-
-	if !hasSuite(allowedSuites, w.SuiteID) {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT suite disallowed under ACTIVE profile")
-	}
-	if w.SuiteID == SUITE_ID_SENTINEL {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT sentinel forbidden under ACTIVE profile")
-	}
-
-	extractSigDigest := func() ([]byte, [32]byte, error) {
-		return extractSigAndDigestWithCache(w, tx, inputIndex, inputValue, chainID, sighashCache)
-	}
-
-	switch w.SuiteID {
-	case SUITE_ID_ML_DSA_87:
-		if len(w.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(w.Signature) != ML_DSA_87_SIG_BYTES+1 {
-			return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
-		}
-		cryptoSig, digest, err := extractSigDigest()
-		if err != nil {
-			return err
-		}
-		if sigQueue != nil {
-			sigQueue.Push(w.SuiteID, w.Pubkey, cryptoSig, digest, txerr(TX_ERR_SIG_INVALID, "CORE_EXT signature invalid"))
-		} else {
-			ok, err := verifySig(w.SuiteID, w.Pubkey, cryptoSig, digest)
-			if err != nil {
-				return err
-			}
-			if !ok {
-				return txerr(TX_ERR_SIG_INVALID, "CORE_EXT signature invalid")
-			}
-		}
-	default:
-		// External verifiers are NOT deferred to the queue — they may not
-		// be thread-safe.
-		if verifySigExtFn == nil {
-			return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext unsupported")
-		}
-		cryptoSig, digest, err := extractSigDigest()
-		if err != nil {
-			return err
-		}
-		ok, err := verifySigExtFn(cd.ExtID, w.SuiteID, w.Pubkey, cryptoSig, digest, cd.ExtPayload)
-		if err != nil {
-			return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext error")
-		}
-		if !ok {
-			return txerr(TX_ERR_SIG_INVALID, "CORE_EXT signature invalid")
-		}
-	}
-
-	return nil
+	return validateCoreExtWitnessAtHeight(
+		cd,
+		profile,
+		w,
+		tx,
+		inputIndex,
+		inputValue,
+		chainID,
+		blockHeight,
+		sighashCache,
+		rotation,
+		registry,
+		sigQueue,
+	)
 }
 
 // RunTxValidationWorkers validates multiple transactions in parallel using

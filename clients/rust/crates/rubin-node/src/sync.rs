@@ -602,6 +602,8 @@ mod tests {
                 activation_height: 1,
                 allowed_suite_ids: vec![3],
                 verification_binding: CoreExtVerificationBinding::NativeVerifySig,
+                binding_descriptor: Vec::new(),
+                ext_payload_schema: Vec::new(),
             }],
         };
         let mut engine = SyncEngine::new(ChainState::new(), Some(store), cfg).expect("new sync");

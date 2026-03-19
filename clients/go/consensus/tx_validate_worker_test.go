@@ -473,7 +473,7 @@ func TestValidateCoreExtSpendQ_InactiveProfile(t *testing.T) {
 		CovenantData: makeCoreExtCovenantData(0x01),
 	}
 	w := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87}
-	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, nil, nil)
+	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("expected nil for inactive CORE_EXT, got: %v", err)
 	}
@@ -778,7 +778,7 @@ func TestValidateCoreExtSpendQ_SentinelForbidden(t *testing.T) {
 		found: true,
 	}
 	w := WitnessItem{SuiteID: SUITE_ID_SENTINEL}
-	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, profiles, nil)
+	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, profiles, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for sentinel under active profile")
 	}
@@ -797,7 +797,7 @@ func TestValidateCoreExtSpendQ_DisallowedSuite(t *testing.T) {
 		found: true,
 	}
 	w := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87}
-	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, profiles, nil)
+	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, profiles, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for disallowed suite")
 	}
@@ -841,7 +841,7 @@ func TestValidateCoreExtSpendQ_ExternalVerifier(t *testing.T) {
 		Pubkey:    make([]byte, 10),
 		Signature: append(make([]byte, 100), SIGHASH_ALL),
 	}
-	err := validateCoreExtSpendQ(entry, w, tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil)
+	err := validateCoreExtSpendQ(entry, w, tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("external verifier: %v", err)
 	}
@@ -878,7 +878,7 @@ func TestValidateCoreExtSpendQ_ExternalVerifierRejects(t *testing.T) {
 		Pubkey:    make([]byte, 10),
 		Signature: append(make([]byte, 100), SIGHASH_ALL),
 	}
-	err := validateCoreExtSpendQ(entry, w, tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil)
+	err := validateCoreExtSpendQ(entry, w, tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for rejected external verifier")
 	}
@@ -912,7 +912,7 @@ func TestValidateCoreExtSpendQ_ExternalVerifierError(t *testing.T) {
 		Pubkey:    make([]byte, 10),
 		Signature: append(make([]byte, 100), SIGHASH_ALL),
 	}
-	err := validateCoreExtSpendQ(entry, w, tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil)
+	err := validateCoreExtSpendQ(entry, w, tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for ext verifier error")
 	}
@@ -935,7 +935,7 @@ func TestValidateCoreExtSpendQ_MLDSA87_NonCanonical(t *testing.T) {
 		Pubkey:    make([]byte, 10), // wrong size
 		Signature: make([]byte, 10), // wrong size
 	}
-	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, profiles, nil)
+	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, profiles, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for non-canonical ML-DSA lengths")
 	}
@@ -967,7 +967,7 @@ func TestValidateCoreExtSpendQ_NilQueue_MLDSA(t *testing.T) {
 	sighashCache, _ := NewSighashV1PrehashCache(tx)
 
 	// sigQueue=nil → inline verifySig
-	err := validateCoreExtSpendQ(entry, tx.Witness[0], tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil)
+	err := validateCoreExtSpendQ(entry, tx.Witness[0], tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("nil queue MLDSA: %v", err)
 	}
@@ -982,7 +982,7 @@ func TestValidateCoreExtSpendQ_ProfileLookupError(t *testing.T) {
 		err: txerr(TX_ERR_COVENANT_TYPE_INVALID, "lookup fail"),
 	}
 	w := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87}
-	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, profiles, nil)
+	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, profiles, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for profile lookup failure")
 	}
@@ -1017,7 +1017,7 @@ func TestValidateCoreExtSpendQ_ExternalVerifierNil(t *testing.T) {
 		Pubkey:    make([]byte, 10),
 		Signature: append(make([]byte, 100), SIGHASH_ALL),
 	}
-	err := validateCoreExtSpendQ(entry, w, tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil)
+	err := validateCoreExtSpendQ(entry, w, tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for nil external verifier")
 	}

@@ -285,6 +285,22 @@ func TestParseGenesisConfigFullRejectsInvalidChainID(t *testing.T) {
 	}
 }
 
+func TestParseGenesisConfigFullRejectsEmptyCoreExtAllowedSuites(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	if err := os.WriteFile(path, []byte(`{
+		"chain_id_hex":"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
+		"genesis_hash_hex":"0x8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff",
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[],"binding":"native_verify_sig"}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+
+	if _, err := parseGenesisConfigFull(path); err == nil {
+		t.Fatalf("expected empty allowed suites error")
+	}
+}
+
 func TestParseGenesisConfigFullRejectsInvalidCoreExtBinding(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "genesis.json")
@@ -302,6 +318,39 @@ func TestParseGenesisConfigFullRejectsInvalidCoreExtBinding(t *testing.T) {
 
 	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "unsupported core_ext binding") {
 		t.Fatalf("expected unsupported binding error, got %v", err)
+	}
+}
+
+func TestParseGenesisConfigFullRejectsCoreExtProfileSetAnchorMismatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	chainIDBytes := node.DevnetGenesisChainID()
+	genesisHashBytes := node.DevnetGenesisBlockHash()
+	deployments := []consensus.CoreExtDeploymentProfile{{
+		ExtID:             7,
+		ActivationHeight:  12,
+		AllowedSuites:     map[uint8]struct{}{3: {}},
+		VerifySigExtFn:    func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) { return true, nil },
+		BindingDescriptor: []byte{0xa1},
+		ExtPayloadSchema:  []byte{0xb2},
+	}}
+	anchor, err := consensus.CoreExtProfileSetAnchorV1(chainIDBytes, deployments)
+	if err != nil {
+		t.Fatalf("CoreExtProfileSetAnchorV1: %v", err)
+	}
+	anchor[0] ^= 0xff
+	chainID := hex.EncodeToString(chainIDBytes[:])
+	genesisHash := hex.EncodeToString(genesisHashBytes[:])
+	if err := os.WriteFile(path, []byte(`{
+		"chain_id_hex":"0x`+chainID+`",
+		"genesis_hash_hex":"0x`+genesisHash+`",
+		"core_ext_profile_set_anchor_hex":"0x`+hex.EncodeToString(anchor[:])+`",
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[3],"binding":"verify_sig_ext_accept","binding_descriptor_hex":"a1","ext_payload_schema_hex":"b2"}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "core_ext profile set anchor mismatch") {
+		t.Fatalf("expected set anchor mismatch error, got %v", err)
 	}
 }
 

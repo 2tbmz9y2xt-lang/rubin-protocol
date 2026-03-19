@@ -147,7 +147,8 @@ type Request struct {
 
 type requestEnvelope struct {
 	Request
-	CoreExtProfiles []CoreExtProfileJSON `json:"core_ext_profiles,omitempty"`
+	CoreExtProfiles            []CoreExtProfileJSON `json:"core_ext_profiles,omitempty"`
+	CoreExtProfileSetAnchorHex string               `json:"core_ext_profile_set_anchor_hex,omitempty"`
 }
 
 type UtxoJSON struct {
@@ -161,10 +162,12 @@ type UtxoJSON struct {
 }
 
 type CoreExtProfileJSON struct {
-	ExtID            uint16  `json:"ext_id"`
-	ActivationHeight uint64  `json:"activation_height"`
-	AllowedSuiteIDs  []uint8 `json:"allowed_suite_ids,omitempty"`
-	Binding          string  `json:"binding,omitempty"`
+	ExtID                uint16  `json:"ext_id"`
+	ActivationHeight     uint64  `json:"activation_height"`
+	AllowedSuiteIDs      []uint8 `json:"allowed_suite_ids,omitempty"`
+	Binding              string  `json:"binding,omitempty"`
+	BindingDescriptorHex string  `json:"binding_descriptor_hex,omitempty"`
+	ExtPayloadSchemaHex  string  `json:"ext_payload_schema_hex,omitempty"`
 }
 
 type RotationDescriptorJSON struct {
@@ -184,7 +187,19 @@ type SuiteParamsJSON struct {
 	OpenSSLAlg string `json:"openssl_alg"`
 }
 
-func buildCoreExtProfiles(items []CoreExtProfileJSON) (consensus.CoreExtProfileProvider, error) {
+func parseOptionalHexBytes(name, value string) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	raw, err := hex.DecodeString(strings.TrimPrefix(strings.TrimPrefix(value, "0x"), "0X"))
+	if err != nil {
+		return nil, fmt.Errorf("bad %s", name)
+	}
+	return raw, nil
+}
+
+func buildCoreExtDeployments(items []CoreExtProfileJSON) ([]consensus.CoreExtDeploymentProfile, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
@@ -209,16 +224,54 @@ func buildCoreExtProfiles(items []CoreExtProfileJSON) (consensus.CoreExtProfileP
 		default:
 			return nil, fmt.Errorf("unsupported core_ext binding: %s", item.Binding)
 		}
+		bindingDescriptor, err := parseOptionalHexBytes("binding_descriptor_hex", item.BindingDescriptorHex)
+		if err != nil {
+			return nil, err
+		}
+		extPayloadSchema, err := parseOptionalHexBytes("ext_payload_schema_hex", item.ExtPayloadSchemaHex)
+		if err != nil {
+			return nil, err
+		}
 		allowed := make(map[uint8]struct{}, len(item.AllowedSuiteIDs))
 		for _, suiteID := range item.AllowedSuiteIDs {
 			allowed[suiteID] = struct{}{}
 		}
 		deployments = append(deployments, consensus.CoreExtDeploymentProfile{
-			ExtID:            item.ExtID,
-			ActivationHeight: item.ActivationHeight,
-			AllowedSuites:    allowed,
-			VerifySigExtFn:   verifySigExtFn,
+			ExtID:             item.ExtID,
+			ActivationHeight:  item.ActivationHeight,
+			AllowedSuites:     allowed,
+			VerifySigExtFn:    verifySigExtFn,
+			BindingDescriptor: bindingDescriptor,
+			ExtPayloadSchema:  extPayloadSchema,
 		})
+	}
+	return deployments, nil
+}
+
+func buildCoreExtProfiles(items []CoreExtProfileJSON, chainIDHex string, expectedSetAnchorHex string) (consensus.CoreExtProfileProvider, error) {
+	deployments, err := buildCoreExtDeployments(items)
+	if err != nil {
+		return nil, err
+	}
+	if len(deployments) == 0 {
+		return nil, nil
+	}
+	if strings.TrimSpace(expectedSetAnchorHex) != "" {
+		chainID, err := parseOptionalChainIDHex(chainIDHex)
+		if err != nil {
+			return nil, err
+		}
+		expectedAnchor, err := parseExactHex32(expectedSetAnchorHex)
+		if err != nil {
+			return nil, fmt.Errorf("bad core_ext_profile_set_anchor_hex")
+		}
+		actualAnchor, err := consensus.CoreExtProfileSetAnchorV1(chainID, deployments)
+		if err != nil {
+			return nil, err
+		}
+		if actualAnchor != expectedAnchor {
+			return nil, fmt.Errorf("core_ext profile set anchor mismatch")
+		}
 	}
 	return consensus.NewStaticCoreExtProfileProvider(deployments)
 }
@@ -244,6 +297,28 @@ func buildSuiteRegistry(items []SuiteParamsJSON) *consensus.SuiteRegistry {
 		})
 	}
 	return consensus.NewSuiteRegistryFromParams(params)
+}
+
+func buildCoreExtSuiteContext(req Request) (consensus.RotationProvider, *consensus.SuiteRegistry, error) {
+	reg := buildSuiteRegistry(req.SuiteRegistry)
+	if req.RotationDescriptor == nil {
+		return nil, reg, nil
+	}
+	if reg == nil {
+		return nil, nil, fmt.Errorf("bad suite_registry")
+	}
+	desc := consensus.CryptoRotationDescriptor{
+		Name:         req.RotationDescriptor.Name,
+		OldSuiteID:   req.RotationDescriptor.OldSuiteID,
+		NewSuiteID:   req.RotationDescriptor.NewSuiteID,
+		CreateHeight: req.RotationDescriptor.CreateHeight,
+		SpendHeight:  req.RotationDescriptor.SpendHeight,
+		SunsetHeight: req.RotationDescriptor.SunsetHeight,
+	}
+	if err := desc.Validate(reg); err != nil {
+		return nil, nil, fmt.Errorf("descriptor-not-activated")
+	}
+	return consensus.DescriptorRotationProvider{Descriptor: desc}, reg, nil
 }
 
 type Check struct {
@@ -1110,13 +1185,18 @@ func runFromStdin() {
 			return
 		}
 
-		coreExtProfiles, err := buildCoreExtProfiles(coreExtProfilesReq)
+		coreExtProfiles, err := buildCoreExtProfiles(coreExtProfilesReq, req.ChainIDHex, envelope.CoreExtProfileSetAnchorHex)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+		rotation, registry, err := buildCoreExtSuiteContext(req)
 		if err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
 			return
 		}
 
-		s, err := consensus.ConnectBlockBasicInMemoryAtHeightAndCoreExtProfiles(
+		s, err := consensus.ConnectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
 			blockBytes,
 			expectedPrev,
 			expectedTarget,
@@ -1125,6 +1205,8 @@ func runFromStdin() {
 			&st,
 			chainID,
 			coreExtProfiles,
+			rotation,
+			registry,
 		)
 		if err != nil {
 			writeConsensusErr(os.Stdout, err)
@@ -1187,13 +1269,18 @@ func runFromStdin() {
 			return
 		}
 
-		coreExtProfiles, err := buildCoreExtProfiles(coreExtProfilesReq)
+		coreExtProfiles, err := buildCoreExtProfiles(coreExtProfilesReq, req.ChainIDHex, envelope.CoreExtProfileSetAnchorHex)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
+		rotation, registry, err := buildCoreExtSuiteContext(req)
 		if err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
 			return
 		}
 
-		_, s, err := consensus.ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
+		_, s, err := consensus.ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
 			tx,
 			txid,
 			utxos,
@@ -1202,6 +1289,8 @@ func runFromStdin() {
 			blockMTP,
 			chainID,
 			coreExtProfiles,
+			rotation,
+			registry,
 		)
 		if err != nil {
 			writeConsensusErr(os.Stdout, err)
@@ -2172,7 +2261,7 @@ func runFromStdin() {
 			writeConsensusErr(os.Stdout, err)
 			return
 		}
-		profiles, err := buildCoreExtProfiles(coreExtProfilesReq)
+		profiles, err := buildCoreExtProfiles(coreExtProfilesReq, req.ChainIDHex, envelope.CoreExtProfileSetAnchorHex)
 		if err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
 			return

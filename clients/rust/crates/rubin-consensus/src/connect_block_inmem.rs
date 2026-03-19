@@ -11,8 +11,10 @@ use crate::constants::{COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT};
 use crate::core_ext::CoreExtDeploymentProfiles;
 use crate::error::{ErrorCode, TxError};
 use crate::subsidy::block_subsidy;
+use crate::suite_registry::{RotationProvider, SuiteRegistry};
 use crate::utxo_basic::{
-    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles, Outpoint, UtxoEntry,
+    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context, Outpoint,
+    UtxoEntry,
 };
 
 const UTXO_SET_HASH_DST: &[u8] = b"RUBINv1-utxo-set-hash/";
@@ -70,6 +72,33 @@ pub fn connect_block_basic_in_memory_at_height_and_core_ext_deployments(
     chain_id: [u8; 32],
     core_ext_deployments: &CoreExtDeploymentProfiles,
 ) -> Result<ConnectBlockBasicSummary, TxError> {
+    connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context(
+        block_bytes,
+        expected_prev_hash,
+        expected_target,
+        block_height,
+        prev_timestamps,
+        state,
+        chain_id,
+        core_ext_deployments,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context(
+    block_bytes: &[u8],
+    expected_prev_hash: Option<[u8; 32]>,
+    expected_target: Option<[u8; 32]>,
+    block_height: u64,
+    prev_timestamps: Option<&[u64]>,
+    state: &mut InMemoryChainState,
+    chain_id: [u8; 32],
+    core_ext_deployments: &CoreExtDeploymentProfiles,
+    rotation: Option<&dyn RotationProvider>,
+    registry: Option<&SuiteRegistry>,
+) -> Result<ConnectBlockBasicSummary, TxError> {
     // Stateless checks first.
     validate_block_basic_with_context_at_height(
         block_bytes,
@@ -95,16 +124,19 @@ pub fn connect_block_basic_in_memory_at_height_and_core_ext_deployments(
     let mut sum_fees: u64 = 0;
     for i in 1..pb.txs.len() {
         let base_utxos = work_utxos.as_ref().unwrap_or(&state.utxos);
-        let (next_utxos, s) = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
-            &pb.txs[i],
-            pb.txids[i],
-            base_utxos,
-            block_height,
-            pb.header.timestamp,
-            block_mtp,
-            chain_id,
-            &core_ext_profiles,
-        )?;
+        let (next_utxos, s) =
+            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+                &pb.txs[i],
+                pb.txids[i],
+                base_utxos,
+                block_height,
+                pb.header.timestamp,
+                block_mtp,
+                chain_id,
+                &core_ext_profiles,
+                rotation,
+                registry,
+            )?;
         work_utxos = Some(next_utxos);
         sum_fees = sum_fees
             .checked_add(s.fee)

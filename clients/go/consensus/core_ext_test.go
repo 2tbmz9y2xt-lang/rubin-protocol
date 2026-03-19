@@ -39,6 +39,15 @@ func TestStaticCoreExtProfileProviderRejectsDuplicateExtID(t *testing.T) {
 	}
 }
 
+func TestStaticCoreExtProfileProviderRejectsEmptyAllowedSuites(t *testing.T) {
+	_, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{
+		{ExtID: 7, ActivationHeight: 1, AllowedSuites: nil},
+	})
+	if err == nil {
+		t.Fatalf("expected empty allowed suites error")
+	}
+}
+
 func TestStaticCoreExtProfileProviderLookupRespectsActivationHeight(t *testing.T) {
 	verifyFn := func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) {
 		return true, nil
@@ -100,7 +109,11 @@ func TestStaticCoreExtProfileProviderNilReceiverAndUnknownExtID(t *testing.T) {
 		t.Fatalf("nil provider must behave as inactive")
 	}
 
-	provider, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{{ExtID: 7, ActivationHeight: 0}})
+	provider, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{{
+		ExtID:            7,
+		ActivationHeight: 0,
+		AllowedSuites:    map[uint8]struct{}{1: {}},
+	}})
 	if err != nil {
 		t.Fatalf("NewStaticCoreExtProfileProvider: %v", err)
 	}
@@ -108,6 +121,32 @@ func TestStaticCoreExtProfileProviderNilReceiverAndUnknownExtID(t *testing.T) {
 		t.Fatalf("LookupCoreExtProfile unknown ext id: %v", err)
 	} else if ok || profile.Active {
 		t.Fatalf("unknown ext id must behave as inactive")
+	}
+}
+
+func TestCoreExtProfileSetAnchorChangesWithPayloadSchema(t *testing.T) {
+	chainID := [32]byte{0: 0x42}
+	base := CoreExtDeploymentProfile{
+		ExtID:             7,
+		ActivationHeight:  1,
+		AllowedSuites:     map[uint8]struct{}{3: {}},
+		VerifySigExtFn:    func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) { return true, nil },
+		BindingDescriptor: []byte{0xa1},
+		ExtPayloadSchema:  []byte{0xb2},
+	}
+	changed := base
+	changed.ExtPayloadSchema = []byte{0xb3}
+
+	baseAnchor, err := CoreExtProfileSetAnchorV1(chainID, []CoreExtDeploymentProfile{base})
+	if err != nil {
+		t.Fatalf("CoreExtProfileSetAnchorV1(base): %v", err)
+	}
+	changedAnchor, err := CoreExtProfileSetAnchorV1(chainID, []CoreExtDeploymentProfile{changed})
+	if err != nil {
+		t.Fatalf("CoreExtProfileSetAnchorV1(changed): %v", err)
+	}
+	if baseAnchor == changedAnchor {
+		t.Fatalf("expected profile set anchor to change when ext_payload_schema changes")
 	}
 }
 
@@ -212,6 +251,64 @@ func TestApplyNonCoinbaseTxBasic_CORE_EXT_DeterministicCovenantDataParseFirst(t 
 	}
 	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	}
+}
+
+func TestApplyNonCoinbaseTxBasic_CORE_EXT_RotatedNativeSuiteUsesRegistryPath(t *testing.T) {
+	var chainID [32]byte
+	var prev [32]byte
+	prev[0] = 0xa4
+
+	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
+	tx, txid := mustParseTxForUtxo(t, txBytes)
+	sig := make([]byte, ML_DSA_87_SIG_BYTES+1)
+	sig[ML_DSA_87_SIG_BYTES] = 0x01
+	tx.Witness = []WitnessItem{{
+		SuiteID:   0x02,
+		Pubkey:    make([]byte, ML_DSA_87_PUBKEY_BYTES),
+		Signature: sig,
+	}}
+
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prev, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_CORE_EXT,
+			CovenantData: coreExtCovenantData(7, nil),
+		},
+	}
+	profiles, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{{
+		ExtID:            7,
+		ActivationHeight: 0,
+		AllowedSuites:    map[uint8]struct{}{0x02: {}},
+	}})
+	if err != nil {
+		t.Fatalf("NewStaticCoreExtProfileProvider: %v", err)
+	}
+	registry := NewSuiteRegistryFromParams([]SuiteParams{{
+		SuiteID:    0x02,
+		PubkeyLen:  ML_DSA_87_PUBKEY_BYTES,
+		SigLen:     ML_DSA_87_SIG_BYTES,
+		VerifyCost: VERIFY_COST_ML_DSA_87,
+		OpenSSLAlg: "ML-DSA-87",
+	}})
+	err = nil
+	_, _, err = ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
+		tx,
+		txid,
+		utxos,
+		0,
+		0,
+		0,
+		chainID,
+		profiles,
+		&mockRotationProvider{h2: 0},
+		registry,
+	)
+	if err == nil {
+		t.Fatalf("expected invalid signature error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_INVALID)
 	}
 }
 
