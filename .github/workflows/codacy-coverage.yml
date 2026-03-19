@@ -15,7 +15,7 @@ jobs:
           fetch-depth: 0
 
       - name: Cache OpenSSL 3.5 bundle
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
         with:
           path: |
             ~/.cache/rubin-openssl/bundle-3.5.5
@@ -62,7 +62,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
       - name: Cache Rust deps (coverage)
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
         with:
           path: |
             ~/.cargo/registry
@@ -73,7 +73,7 @@ jobs:
             rust-coverage-${{ runner.os }}-
 
       - name: Cache cargo-tarpaulin
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
         with:
           path: ~/.cargo/bin/cargo-tarpaulin
           key: cargo-tarpaulin-${{ runner.os }}-0.35.2
