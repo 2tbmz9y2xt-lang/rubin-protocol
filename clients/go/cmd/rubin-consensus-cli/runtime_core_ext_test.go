@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/hex"
+	"strings"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -182,5 +183,19 @@ func TestBuildCoreExtProfilesRejectsSetAnchorMismatch(t *testing.T) {
 	anchor[0] ^= 0xff
 	if _, err := buildCoreExtProfiles(items, hex.EncodeToString(chainID[:]), hex.EncodeToString(anchor[:])); err == nil {
 		t.Fatalf("expected set anchor mismatch error")
+	}
+}
+
+func TestBuildCoreExtProfilesRejectsOversizedHexFields(t *testing.T) {
+	_, err := buildCoreExtProfiles([]CoreExtProfileJSON{{
+		ExtID:                7,
+		ActivationHeight:     12,
+		AllowedSuiteIDs:      []uint8{3},
+		Binding:              "verify_sig_ext_accept",
+		BindingDescriptorHex: strings.Repeat("aa", maxCoreExtHexFieldBytes+1),
+		ExtPayloadSchemaHex:  "b2",
+	}}, "", "")
+	if err == nil {
+		t.Fatalf("expected oversized binding descriptor rejection")
 	}
 }

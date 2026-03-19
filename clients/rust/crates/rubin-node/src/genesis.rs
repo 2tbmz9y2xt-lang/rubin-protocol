@@ -143,6 +143,7 @@ fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
 }
 
 fn decode_optional_hex_bytes(name: &str, value: &str) -> Result<Vec<u8>, String> {
+    const MAX_CORE_EXT_HEX_FIELD_BYTES: usize = 4096;
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Ok(Vec::new());
@@ -151,6 +152,9 @@ fn decode_optional_hex_bytes(name: &str, value: &str) -> Result<Vec<u8>, String>
         .strip_prefix("0x")
         .or_else(|| trimmed.strip_prefix("0X"))
         .unwrap_or(trimmed);
+    if trimmed.len() > MAX_CORE_EXT_HEX_FIELD_BYTES * 2 {
+        return Err(format!("bad {name}"));
+    }
     hex::decode(trimmed).map_err(|e| format!("{name}: {e}"))
 }
 
@@ -333,6 +337,32 @@ mod tests {
 
         let err = load_genesis_config(Some(&path)).unwrap_err();
         assert!(err.contains("anchor mismatch"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_oversized_core_ext_hex_fields() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-core-ext-oversized-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{{\"ext_id\":7,\"activation_height\":12,\"allowed_suite_ids\":[3],\"binding\":\"verify_sig_ext_accept\",\"binding_descriptor_hex\":\"{}\",\"ext_payload_schema_hex\":\"b2\"}}]}}",
+                "aa".repeat(4097)
+            ),
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path)).unwrap_err();
+        assert!(err.contains("bad binding_descriptor_hex"));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }

@@ -201,6 +201,7 @@ func CoreExtProfileBytesV1(profile CoreExtDeploymentProfile) ([]byte, error) {
 
 	out := append([]byte(nil), []byte("RUBIN-CORE-EXT-PROFILE-v1")...)
 	out = AppendU16le(out, profile.ExtID)
+	out = AppendU64le(out, profile.ActivationHeight)
 	out = AppendCompactSize(out, uint64(len(allowed)))
 	out = append(out, allowed...)
 	out = append(out, bindingKind)

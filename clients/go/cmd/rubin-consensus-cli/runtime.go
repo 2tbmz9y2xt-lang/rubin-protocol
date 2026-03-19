@@ -187,12 +187,18 @@ type SuiteParamsJSON struct {
 	OpenSSLAlg string `json:"openssl_alg"`
 }
 
+const maxCoreExtHexFieldBytes = 4096
+
 func parseOptionalHexBytes(name, value string) ([]byte, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return nil, nil
 	}
-	raw, err := hex.DecodeString(strings.TrimPrefix(strings.TrimPrefix(value, "0x"), "0X"))
+	trimmed := strings.TrimPrefix(strings.TrimPrefix(value, "0x"), "0X")
+	if (name == "binding_descriptor_hex" || name == "ext_payload_schema_hex") && len(trimmed) > maxCoreExtHexFieldBytes*2 {
+		return nil, fmt.Errorf("bad %s", name)
+	}
+	raw, err := hex.DecodeString(trimmed)
 	if err != nil {
 		return nil, fmt.Errorf("bad %s", name)
 	}

@@ -8,9 +8,15 @@ use crate::tx::Tx;
 use crate::tx::WitnessItem;
 use crate::utxo_basic::UtxoEntry;
 use crate::verify_sig_openssl::verify_sig_with_registry;
+use std::sync::OnceLock;
 
 pub const CORE_EXT_BINDING_KIND_NATIVE_ONLY: u8 = 0x01;
 pub const CORE_EXT_BINDING_KIND_VERIFY_SIG_EXT: u8 = 0x02;
+
+fn default_suite_registry() -> &'static SuiteRegistry {
+    static DEFAULT_SUITE_REGISTRY: OnceLock<SuiteRegistry> = OnceLock::new();
+    DEFAULT_SUITE_REGISTRY.get_or_init(SuiteRegistry::default_registry)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreExtCovenant<'a> {
@@ -182,6 +188,7 @@ pub fn core_ext_profile_bytes_v1(profile: &CoreExtDeploymentProfile) -> Result<V
 
     let mut out = b"RUBIN-CORE-EXT-PROFILE-v1".to_vec();
     out.extend_from_slice(&profile.ext_id.to_le_bytes());
+    out.extend_from_slice(&profile.activation_height.to_le_bytes());
     encode_compact_size(allowed_suite_ids.len() as u64, &mut out);
     out.extend_from_slice(&allowed_suite_ids);
     out.push(binding_kind);
@@ -376,8 +383,10 @@ pub(crate) fn validate_core_ext_spend_with_cache_and_suite_context(
 ) -> Result<(), TxError> {
     let default_rotation = DefaultRotationProvider;
     let rotation = rotation.unwrap_or(&default_rotation);
-    let default_registry = SuiteRegistry::default_registry();
-    let registry = registry.unwrap_or(&default_registry);
+    let registry = match registry {
+        Some(registry) => registry,
+        None => default_suite_registry(),
+    };
 
     validate_core_ext_spend_with_cache_impl(
         entry,
@@ -906,6 +915,25 @@ mod tests {
         let base_anchor =
             core_ext_profile_set_anchor_v1(chain_id, &[base.clone()]).expect("base anchor");
         base.ext_payload_schema = b"schema-b".to_vec();
+        let changed_anchor =
+            core_ext_profile_set_anchor_v1(chain_id, &[base]).expect("changed anchor");
+        assert_ne!(base_anchor, changed_anchor);
+    }
+
+    #[test]
+    fn core_ext_profile_set_anchor_changes_with_activation_height() {
+        let chain_id = [0x42; 32];
+        let mut base = CoreExtDeploymentProfile {
+            ext_id: 7,
+            activation_height: 1,
+            allowed_suite_ids: vec![3],
+            verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+            binding_descriptor: b"accept".to_vec(),
+            ext_payload_schema: b"schema-a".to_vec(),
+        };
+        let base_anchor =
+            core_ext_profile_set_anchor_v1(chain_id, &[base.clone()]).expect("base anchor");
+        base.activation_height = 2;
         let changed_anchor =
             core_ext_profile_set_anchor_v1(chain_id, &[base]).expect("changed anchor");
         assert_ne!(base_anchor, changed_anchor);

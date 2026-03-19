@@ -778,6 +778,7 @@ fn value_as_string(v: &Value, def: &str) -> String {
 }
 
 fn decode_optional_hex_bytes(name: &str, value: &str) -> Result<Vec<u8>, String> {
+    const MAX_CORE_EXT_HEX_FIELD_BYTES: usize = 4096;
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Ok(Vec::new());
@@ -786,7 +787,47 @@ fn decode_optional_hex_bytes(name: &str, value: &str) -> Result<Vec<u8>, String>
         .strip_prefix("0x")
         .or_else(|| trimmed.strip_prefix("0X"))
         .unwrap_or(trimmed);
+    if trimmed.len() > MAX_CORE_EXT_HEX_FIELD_BYTES * 2 {
+        return Err(format!("bad {name}"));
+    }
     hex::decode(trimmed).map_err(|_| format!("bad {name}"))
+}
+
+fn normalize_suite_openssl_alg(value: &str) -> Result<&'static str, String> {
+    match value.trim() {
+        "" | "ML-DSA-87" => Ok("ML-DSA-87"),
+        _ => Err("bad suite_registry".to_string()),
+    }
+}
+
+fn build_suite_registry_from_json(
+    items: &[SuiteParamsJson],
+) -> Result<Option<SuiteRegistry>, String> {
+    if items.is_empty() {
+        return Ok(None);
+    }
+
+    let mut suites = std::collections::BTreeMap::new();
+    for s in items {
+        let alg = normalize_suite_openssl_alg(&s.openssl_alg)?;
+        if suites
+            .insert(
+                s.suite_id,
+                SuiteParams {
+                    suite_id: s.suite_id,
+                    pubkey_len: s.pubkey_len,
+                    sig_len: s.sig_len,
+                    verify_cost: s.verify_cost,
+                    openssl_alg: alg,
+                },
+            )
+            .is_some()
+        {
+            return Err("bad suite_registry".to_string());
+        }
+    }
+
+    Ok(Some(SuiteRegistry::with_suites(suites)))
 }
 
 fn parse_optional_chain_id_hex(chain_id: &str) -> Result<[u8; 32], String> {
@@ -851,28 +892,7 @@ fn core_ext_profiles_from_json(
 fn build_core_ext_suite_context(
     req: &Request,
 ) -> Result<(Option<DescriptorRotationProvider>, Option<SuiteRegistry>), String> {
-    let registry = if req.suite_registry.is_empty() {
-        None
-    } else {
-        let mut suites = std::collections::BTreeMap::new();
-        for s in &req.suite_registry {
-            let alg = match s.openssl_alg.as_str() {
-                "" | "ML-DSA-87" => "ML-DSA-87",
-                _ => "ML-DSA-87",
-            };
-            suites.insert(
-                s.suite_id,
-                SuiteParams {
-                    suite_id: s.suite_id,
-                    pubkey_len: s.pubkey_len,
-                    sig_len: s.sig_len,
-                    verify_cost: s.verify_cost,
-                    openssl_alg: alg,
-                },
-            );
-        }
-        Some(SuiteRegistry::with_suites(suites))
-    };
+    let registry = build_suite_registry_from_json(&req.suite_registry)?;
 
     let rotation = match &req.rotation_descriptor {
         Some(rd) => {
@@ -1455,23 +1475,18 @@ fn main() {
             let use_registry = req.rotation_descriptor.is_some() && !req.suite_registry.is_empty();
             let r = if use_registry {
                 let rd = req.rotation_descriptor.as_ref().expect("checked");
-                let mut suites = std::collections::BTreeMap::new();
-                for s in &req.suite_registry {
-                    // Conformance tooling may inject arbitrary names; keep stable mapping
-                    // by accepting ML-DSA-87 only for now.
-                    let alg: &'static str = "ML-DSA-87";
-                    suites.insert(
-                        s.suite_id,
-                        SuiteParams {
-                            suite_id: s.suite_id,
-                            pubkey_len: s.pubkey_len,
-                            sig_len: s.sig_len,
-                            verify_cost: s.verify_cost,
-                            openssl_alg: alg,
-                        },
-                    );
-                }
-                let registry = SuiteRegistry::with_suites(suites);
+                let registry = match build_suite_registry_from_json(&req.suite_registry) {
+                    Ok(Some(registry)) => registry,
+                    _ => {
+                        let resp = Response {
+                            ok: false,
+                            err: Some("bad suite_registry".to_string()),
+                            ..Default::default()
+                        };
+                        let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                        return;
+                    }
+                };
                 let desc = CryptoRotationDescriptor {
                     name: rd.name.clone(),
                     old_suite_id: rd.old_suite_id,
@@ -1528,23 +1543,18 @@ fn main() {
                     return;
                 }
             };
-            let mut suites = std::collections::BTreeMap::new();
-            for s in &req.suite_registry {
-                // Conformance tooling may inject arbitrary names; keep stable mapping
-                // by accepting ML-DSA-87 only for now.
-                let alg: &'static str = "ML-DSA-87";
-                suites.insert(
-                    s.suite_id,
-                    SuiteParams {
-                        suite_id: s.suite_id,
-                        pubkey_len: s.pubkey_len,
-                        sig_len: s.sig_len,
-                        verify_cost: s.verify_cost,
-                        openssl_alg: alg,
-                    },
-                );
-            }
-            let registry = SuiteRegistry::with_suites(suites);
+            let registry = match build_suite_registry_from_json(&req.suite_registry) {
+                Ok(Some(registry)) => registry,
+                _ => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad suite_registry".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
             let desc = CryptoRotationDescriptor {
                 name: rd.name.clone(),
                 old_suite_id: rd.old_suite_id,
@@ -1592,25 +1602,18 @@ fn main() {
                     return;
                 }
             };
-            let mut suites = std::collections::BTreeMap::new();
-            for s in &req.suite_registry {
-                let alg: &'static str = match s.openssl_alg.as_str() {
-                    "ML-DSA-87" => "ML-DSA-87",
-                    "" => "ML-DSA-87",
-                    _ => "ML-DSA-87",
-                };
-                suites.insert(
-                    s.suite_id,
-                    SuiteParams {
-                        suite_id: s.suite_id,
-                        pubkey_len: s.pubkey_len,
-                        sig_len: s.sig_len,
-                        verify_cost: s.verify_cost,
-                        openssl_alg: alg,
-                    },
-                );
-            }
-            let registry = SuiteRegistry::with_suites(suites);
+            let registry = match build_suite_registry_from_json(&req.suite_registry) {
+                Ok(Some(registry)) => registry,
+                _ => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad suite_registry".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
             let desc = CryptoRotationDescriptor {
                 name: rd.name.clone(),
                 old_suite_id: rd.old_suite_id,
@@ -1650,20 +1653,18 @@ fn main() {
                     return;
                 }
             };
-            let mut suites = std::collections::BTreeMap::new();
-            for s in &req.suite_registry {
-                suites.insert(
-                    s.suite_id,
-                    SuiteParams {
-                        suite_id: s.suite_id,
-                        pubkey_len: s.pubkey_len,
-                        sig_len: s.sig_len,
-                        verify_cost: s.verify_cost,
-                        openssl_alg: "ML-DSA-87",
-                    },
-                );
-            }
-            let registry = SuiteRegistry::with_suites(suites);
+            let registry = match build_suite_registry_from_json(&req.suite_registry) {
+                Ok(Some(registry)) => registry,
+                _ => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad suite_registry".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
             let desc = CryptoRotationDescriptor {
                 name: rd.name.clone(),
                 old_suite_id: rd.old_suite_id,
@@ -1699,20 +1700,18 @@ fn main() {
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
         "rotation_descriptor_check" => {
-            let mut suites = std::collections::BTreeMap::new();
-            for s in &req.suite_registry {
-                suites.insert(
-                    s.suite_id,
-                    SuiteParams {
-                        suite_id: s.suite_id,
-                        pubkey_len: s.pubkey_len,
-                        sig_len: s.sig_len,
-                        verify_cost: s.verify_cost,
-                        openssl_alg: "ML-DSA-87",
-                    },
-                );
-            }
-            let registry = SuiteRegistry::with_suites(suites);
+            let registry = match build_suite_registry_from_json(&req.suite_registry) {
+                Ok(Some(registry)) => registry,
+                _ => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad suite_registry".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
             if !req.rotation_descriptors.is_empty() {
                 let ds: Vec<CryptoRotationDescriptor> = req
                     .rotation_descriptors
@@ -4610,5 +4609,58 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("anchor mismatch"));
+    }
+
+    #[test]
+    fn suite_registry_rejects_unknown_openssl_alg() {
+        let err = build_suite_registry_from_json(&[SuiteParamsJson {
+            suite_id: 3,
+            pubkey_len: 2592,
+            sig_len: 4627,
+            verify_cost: 990000,
+            openssl_alg: "SLH-DSA".to_string(),
+        }])
+        .unwrap_err();
+        assert_eq!(err, "bad suite_registry");
+    }
+
+    #[test]
+    fn suite_registry_rejects_duplicate_suite_ids() {
+        let err = build_suite_registry_from_json(&[
+            SuiteParamsJson {
+                suite_id: 3,
+                pubkey_len: 2592,
+                sig_len: 4627,
+                verify_cost: 990000,
+                openssl_alg: "ML-DSA-87".to_string(),
+            },
+            SuiteParamsJson {
+                suite_id: 3,
+                pubkey_len: 2592,
+                sig_len: 4627,
+                verify_cost: 990000,
+                openssl_alg: "ML-DSA-87".to_string(),
+            },
+        ])
+        .unwrap_err();
+        assert_eq!(err, "bad suite_registry");
+    }
+
+    #[test]
+    fn core_ext_profiles_reject_oversized_hex_fields() {
+        let err = core_ext_profiles_from_json(
+            &[CoreExtProfileJson {
+                ext_id: 9,
+                activation_height: 42,
+                allowed_suite_ids: vec![3],
+                binding: "verify_sig_ext_accept".to_string(),
+                binding_descriptor_hex: "aa".repeat(4097),
+                ext_payload_schema_hex: "b2".to_string(),
+            }],
+            [0u8; 32],
+            "",
+        )
+        .unwrap_err();
+        assert_eq!(err, "bad binding_descriptor_hex");
     }
 }

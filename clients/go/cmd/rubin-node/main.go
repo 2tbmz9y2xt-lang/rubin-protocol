@@ -446,12 +446,18 @@ func parseGenesisHash(payload genesisPack) ([32]byte, error) {
 	return consensus.BlockHash(headerBytes)
 }
 
+const maxCoreExtHexFieldBytes = 4096
+
 func decodeOptionalHexBytesField(name, value string) ([]byte, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return nil, nil
 	}
-	raw, err := hex.DecodeString(trimHexPrefix(value))
+	trimmed := trimHexPrefix(value)
+	if (name == "binding_descriptor_hex" || name == "ext_payload_schema_hex") && len(trimmed) > maxCoreExtHexFieldBytes*2 {
+		return nil, fmt.Errorf("bad %s", name)
+	}
+	raw, err := hex.DecodeString(trimmed)
 	if err != nil {
 		return nil, fmt.Errorf("bad %s", name)
 	}

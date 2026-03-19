@@ -150,6 +150,32 @@ func TestCoreExtProfileSetAnchorChangesWithPayloadSchema(t *testing.T) {
 	}
 }
 
+func TestCoreExtProfileSetAnchorChangesWithActivationHeight(t *testing.T) {
+	chainID := [32]byte{0: 0x42}
+	base := CoreExtDeploymentProfile{
+		ExtID:             7,
+		ActivationHeight:  1,
+		AllowedSuites:     map[uint8]struct{}{3: {}},
+		VerifySigExtFn:    func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) { return true, nil },
+		BindingDescriptor: []byte{0xa1},
+		ExtPayloadSchema:  []byte{0xb2},
+	}
+	changed := base
+	changed.ActivationHeight = 2
+
+	baseAnchor, err := CoreExtProfileSetAnchorV1(chainID, []CoreExtDeploymentProfile{base})
+	if err != nil {
+		t.Fatalf("CoreExtProfileSetAnchorV1(base): %v", err)
+	}
+	changedAnchor, err := CoreExtProfileSetAnchorV1(chainID, []CoreExtDeploymentProfile{changed})
+	if err != nil {
+		t.Fatalf("CoreExtProfileSetAnchorV1(changed): %v", err)
+	}
+	if baseAnchor == changedAnchor {
+		t.Fatalf("expected profile set anchor to change when activation_height changes")
+	}
+}
+
 func TestParseTx_UnknownSuiteAcceptedAndCharged(t *testing.T) {
 	var prev [32]byte
 	prev[0] = 0xaa
