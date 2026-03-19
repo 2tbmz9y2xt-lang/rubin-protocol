@@ -373,6 +373,77 @@ func TestParseGenesisConfigFullRejectsOversizedCoreExtHexFields(t *testing.T) {
 	}
 }
 
+func TestParseGenesisConfigFullRejectsInvalidCoreExtHexFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	chainIDBytes := node.DevnetGenesisChainID()
+	genesisHashBytes := node.DevnetGenesisBlockHash()
+	chainID := hex.EncodeToString(chainIDBytes[:])
+	genesisHash := hex.EncodeToString(genesisHashBytes[:])
+
+	if err := os.WriteFile(path, []byte(`{
+		"chain_id_hex":"0x`+chainID+`",
+		"genesis_hash_hex":"0x`+genesisHash+`",
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[3],"binding":"verify_sig_ext_accept","binding_descriptor_hex":"zz","ext_payload_schema_hex":"b2"}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "bad binding_descriptor_hex") {
+		t.Fatalf("expected invalid descriptor rejection, got %v", err)
+	}
+
+	if err := os.WriteFile(path, []byte(`{
+		"chain_id_hex":"0x`+chainID+`",
+		"genesis_hash_hex":"0x`+genesisHash+`",
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[3],"binding":"verify_sig_ext_accept","binding_descriptor_hex":"a1","ext_payload_schema_hex":"zz"}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "bad ext_payload_schema_hex") {
+		t.Fatalf("expected invalid payload schema rejection, got %v", err)
+	}
+}
+
+func TestParseGenesisConfigFullRejectsInvalidCoreExtProfileSetAnchorHex(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	chainIDBytes := node.DevnetGenesisChainID()
+	genesisHashBytes := node.DevnetGenesisBlockHash()
+	chainID := hex.EncodeToString(chainIDBytes[:])
+	genesisHash := hex.EncodeToString(genesisHashBytes[:])
+	if err := os.WriteFile(path, []byte(`{
+		"chain_id_hex":"0x`+chainID+`",
+		"genesis_hash_hex":"0x`+genesisHash+`",
+		"core_ext_profile_set_anchor_hex":"zz",
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[3],"binding":"verify_sig_ext_accept","binding_descriptor_hex":"a1","ext_payload_schema_hex":"b2"}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+	if _, err := parseGenesisConfigFull(path); err == nil {
+		t.Fatalf("expected invalid set anchor rejection")
+	}
+}
+
+func TestParseGenesisConfigFullRejectsInvalidCoreExtAnchorProfiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	chainIDBytes := node.DevnetGenesisChainID()
+	genesisHashBytes := node.DevnetGenesisBlockHash()
+	chainID := hex.EncodeToString(chainIDBytes[:])
+	genesisHash := hex.EncodeToString(genesisHashBytes[:])
+	if err := os.WriteFile(path, []byte(`{
+		"chain_id_hex":"0x`+chainID+`",
+		"genesis_hash_hex":"0x`+genesisHash+`",
+		"core_ext_profile_set_anchor_hex":"0x`+strings.Repeat("00", 32)+`",
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[],"binding":"native_verify_sig","ext_payload_schema_hex":"b2"}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "must have non-empty allowed suites") {
+		t.Fatalf("expected invalid profile rejection during anchor check, got %v", err)
+	}
+}
+
 func TestParseGenesisHashRejectsInvalidHeaderBytes(t *testing.T) {
 	if _, err := parseGenesisHash(genesisPack{GenesisHeaderBytesHex: "zz"}); err == nil {
 		t.Fatalf("expected invalid hex error")

@@ -59,6 +59,12 @@ func TestStaticCoreExtProfileProviderLookupRespectsActivationHeight(t *testing.T
 			ActivationHeight: 12,
 			AllowedSuites:    allowed,
 			VerifySigExtFn:   verifyFn,
+			BindingDescriptor: []byte{
+				0xa1,
+			},
+			ExtPayloadSchema: []byte{
+				0xb2,
+			},
 		},
 	})
 	if err != nil {
@@ -87,8 +93,16 @@ func TestStaticCoreExtProfileProviderLookupRespectsActivationHeight(t *testing.T
 	if _, has := profile.AllowedSuites[3]; !has {
 		t.Fatalf("missing allowed suite 3")
 	}
+	if len(profile.BindingDescriptor) != 1 || profile.BindingDescriptor[0] != 0xa1 {
+		t.Fatalf("missing binding descriptor")
+	}
+	if len(profile.ExtPayloadSchema) != 1 || profile.ExtPayloadSchema[0] != 0xb2 {
+		t.Fatalf("missing ext payload schema")
+	}
 
 	delete(profile.AllowedSuites, 1)
+	profile.BindingDescriptor[0] = 0xff
+	profile.ExtPayloadSchema[0] = 0xee
 	profile2, ok, err := provider.LookupCoreExtProfile(7, 12)
 	if err != nil {
 		t.Fatalf("LookupCoreExtProfile second active lookup: %v", err)
@@ -98,6 +112,12 @@ func TestStaticCoreExtProfileProviderLookupRespectsActivationHeight(t *testing.T
 	}
 	if _, has := profile2.AllowedSuites[1]; !has {
 		t.Fatalf("provider must clone allowed suites per lookup")
+	}
+	if len(profile2.BindingDescriptor) != 1 || profile2.BindingDescriptor[0] != 0xa1 {
+		t.Fatalf("provider must clone binding descriptor per lookup")
+	}
+	if len(profile2.ExtPayloadSchema) != 1 || profile2.ExtPayloadSchema[0] != 0xb2 {
+		t.Fatalf("provider must clone ext payload schema per lookup")
 	}
 }
 
@@ -174,6 +194,47 @@ func TestCoreExtProfileSetAnchorChangesWithActivationHeight(t *testing.T) {
 	if baseAnchor == changedAnchor {
 		t.Fatalf("expected profile set anchor to change when activation_height changes")
 	}
+}
+
+func TestCoreExtProfileBytesV1RejectsInvalidProfiles(t *testing.T) {
+	t.Run("empty allowed suites", func(t *testing.T) {
+		_, err := CoreExtProfileBytesV1(CoreExtDeploymentProfile{
+			ExtID:            7,
+			ActivationHeight: 1,
+			ExtPayloadSchema: []byte{0xb2},
+		})
+		if err == nil || err.Error() != "core_ext profile ext_id=7 must have non-empty allowed suites" {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("native binding rejects descriptor", func(t *testing.T) {
+		_, err := CoreExtProfileBytesV1(CoreExtDeploymentProfile{
+			ExtID:             7,
+			ActivationHeight:  1,
+			AllowedSuites:     map[uint8]struct{}{3: {}},
+			BindingDescriptor: []byte{0xa1},
+			ExtPayloadSchema:  []byte{0xb2},
+		})
+		if err == nil || err.Error() != "core_ext profile ext_id=7 native-only profile must not carry binding_descriptor" {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("verify_sig_ext binding requires descriptor", func(t *testing.T) {
+		_, err := CoreExtProfileBytesV1(CoreExtDeploymentProfile{
+			ExtID:            7,
+			ActivationHeight: 1,
+			AllowedSuites:    map[uint8]struct{}{3: {}},
+			VerifySigExtFn: func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) {
+				return true, nil
+			},
+			ExtPayloadSchema: []byte{0xb2},
+		})
+		if err == nil || err.Error() != "core_ext profile ext_id=7 verify_sig_ext profile must carry binding_descriptor" {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
 }
 
 func TestParseTx_UnknownSuiteAcceptedAndCharged(t *testing.T) {

@@ -875,6 +875,23 @@ mod tests {
     }
 
     #[test]
+    fn core_ext_deployments_empty_allowed_suite_ids_rejected_at_activation_lookup() {
+        let deployments = CoreExtDeploymentProfiles {
+            deployments: vec![CoreExtDeploymentProfile {
+                ext_id: 7,
+                activation_height: 10,
+                allowed_suite_ids: Vec::new(),
+                verification_binding: CoreExtVerificationBinding::NativeVerifySig,
+                binding_descriptor: Vec::new(),
+                ext_payload_schema: b"schema".to_vec(),
+            }],
+        };
+
+        let err = deployments.active_profiles_at_height(10).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    }
+
+    #[test]
     fn core_ext_deployments_duplicate_active_rejected() {
         let deployments = CoreExtDeploymentProfiles {
             deployments: vec![
@@ -937,6 +954,57 @@ mod tests {
         let changed_anchor =
             core_ext_profile_set_anchor_v1(chain_id, &[base]).expect("changed anchor");
         assert_ne!(base_anchor, changed_anchor);
+    }
+
+    #[test]
+    fn core_ext_profile_bytes_v1_native_binding_succeeds_without_descriptor() {
+        let profile = CoreExtDeploymentProfile {
+            ext_id: 7,
+            activation_height: 1,
+            allowed_suite_ids: vec![3],
+            verification_binding: CoreExtVerificationBinding::NativeVerifySig,
+            binding_descriptor: Vec::new(),
+            ext_payload_schema: b"schema-a".to_vec(),
+        };
+
+        let bytes = core_ext_profile_bytes_v1(&profile).expect("native profile bytes");
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn core_ext_profile_bytes_v1_rejects_invalid_profiles() {
+        let err = core_ext_profile_bytes_v1(&CoreExtDeploymentProfile {
+            ext_id: 7,
+            activation_height: 1,
+            allowed_suite_ids: Vec::new(),
+            verification_binding: CoreExtVerificationBinding::NativeVerifySig,
+            binding_descriptor: Vec::new(),
+            ext_payload_schema: b"schema-a".to_vec(),
+        })
+        .unwrap_err();
+        assert!(err.contains("must have non-empty allowed_suite_ids"));
+
+        let err = core_ext_profile_bytes_v1(&CoreExtDeploymentProfile {
+            ext_id: 7,
+            activation_height: 1,
+            allowed_suite_ids: vec![3],
+            verification_binding: CoreExtVerificationBinding::NativeVerifySig,
+            binding_descriptor: vec![0xa1],
+            ext_payload_schema: b"schema-a".to_vec(),
+        })
+        .unwrap_err();
+        assert!(err.contains("native-only profile must not carry binding_descriptor"));
+
+        let err = core_ext_profile_bytes_v1(&CoreExtDeploymentProfile {
+            ext_id: 7,
+            activation_height: 1,
+            allowed_suite_ids: vec![3],
+            verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+            binding_descriptor: Vec::new(),
+            ext_payload_schema: b"schema-a".to_vec(),
+        })
+        .unwrap_err();
+        assert!(err.contains("verify_sig_ext profile must carry binding_descriptor"));
     }
 
     #[test]
