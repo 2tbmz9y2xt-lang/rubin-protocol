@@ -38,7 +38,7 @@ func TestBuildCoreExtProfilesNativeBinding(t *testing.T) {
 			ExtID:               7,
 			ActivationHeight:    5,
 			AllowedSuiteIDs:     []uint8{1, 3},
-			Binding:             "native_verify_sig",
+			Binding:             " native_verify_sig \n",
 			ExtPayloadSchemaHex: "b2",
 		},
 	}, "", "")
@@ -89,8 +89,8 @@ func TestBuildCoreExtProfilesVerifySigExtBindings(t *testing.T) {
 		skipCall          bool
 	}{
 		{
-			name:              "openssl-digest32",
-			binding:           consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
+			name:              "openssl-digest32-whitespace",
+			binding:           "  " + consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 + "\n",
 			bindingDescriptor: hex.EncodeToString(opensslDescriptor),
 			extPayloadSchema:  "b2",
 			skipCall:          true,

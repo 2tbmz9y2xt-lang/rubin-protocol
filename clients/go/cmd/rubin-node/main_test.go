@@ -351,6 +351,38 @@ func TestParseGenesisConfigFullRejectsInvalidCoreExtBindingBeforeHexDecode(t *te
 	}
 }
 
+func TestParseGenesisConfigFullAcceptsWhitespaceWrappedCoreExtBinding(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	chainIDBytes := node.DevnetGenesisChainID()
+	genesisHashBytes := node.DevnetGenesisBlockHash()
+	chainID := hex.EncodeToString(chainIDBytes[:])
+	genesisHash := hex.EncodeToString(genesisHashBytes[:])
+	descriptorHex := mustCoreExtOpenSSLDigest32DescriptorHex(t)
+	if err := os.WriteFile(path, []byte(`{
+		"chain_id_hex":"0x`+chainID+`",
+		"genesis_hash_hex":"0x`+genesisHash+`",
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[3],"binding":"  `+consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1+`\n","binding_descriptor_hex":"`+descriptorHex+`","ext_payload_schema_hex":"b2"}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+
+	cfg, err := parseGenesisConfigFull(path)
+	if err != nil {
+		t.Fatalf("parseGenesisConfigFull: %v", err)
+	}
+	profile, ok, err := cfg.CoreExtProfiles.LookupCoreExtProfile(7, 12)
+	if err != nil {
+		t.Fatalf("LookupCoreExtProfile: %v", err)
+	}
+	if !ok || !profile.Active {
+		t.Fatalf("expected active profile at activation height")
+	}
+	if profile.VerifySigExtFn == nil {
+		t.Fatalf("expected verify_sig_ext binding")
+	}
+}
+
 func TestParseGenesisConfigFullRejectsCoreExtProfileSetAnchorMismatch(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "genesis.json")

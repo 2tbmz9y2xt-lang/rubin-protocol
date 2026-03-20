@@ -248,6 +248,7 @@ pub fn core_ext_verification_binding_from_name_and_descriptor(
     binding_name: &str,
     binding_descriptor: &[u8],
 ) -> Result<CoreExtVerificationBinding, String> {
+    let binding_name = binding_name.trim();
     match binding_name {
         "" | "native_verify_sig" => Ok(CoreExtVerificationBinding::NativeVerifySig),
         CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1 => {
@@ -1332,11 +1333,26 @@ mod tests {
             native,
             CoreExtVerificationBinding::NativeVerifySig
         ));
-        let native_named =
-            core_ext_verification_binding_from_name("native_verify_sig").expect("native named");
+        let native_named = core_ext_verification_binding_from_name(" native_verify_sig \n")
+            .expect("native named");
         assert!(matches!(
             native_named,
             CoreExtVerificationBinding::NativeVerifySig
+        ));
+        let descriptor = core_ext_openssl_digest32_binding_descriptor_bytes(
+            "ML-DSA-87",
+            ML_DSA_87_PUBKEY_BYTES,
+            ML_DSA_87_SIG_BYTES,
+        )
+        .expect("descriptor");
+        let openssl = core_ext_verification_binding_from_name_and_descriptor(
+            &format!("  {CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1}\n"),
+            &descriptor,
+        )
+        .expect("openssl binding");
+        assert!(matches!(
+            openssl,
+            CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(_)
         ));
         let err =
             core_ext_verification_binding_from_name("unsupported").expect_err("unsupported bind");

@@ -852,6 +852,7 @@ fn parse_optional_chain_id_hex(chain_id: &str) -> Result<[u8; 32], String> {
 }
 
 fn core_ext_runtime_binding_supported(binding: &str) -> bool {
+    let binding = binding.trim();
     matches!(
         binding,
         "" | "native_verify_sig"
@@ -867,20 +868,21 @@ fn core_ext_profiles_from_json(
     let mut deployments = Vec::with_capacity(items.len());
     let mut ext_ids = HashSet::new();
     for item in items {
+        let binding_name = item.binding.trim();
         if !ext_ids.insert(item.ext_id) {
             return Err(format!(
                 "duplicate core_ext deployment for ext_id={}",
                 item.ext_id
             ));
         }
-        if !core_ext_runtime_binding_supported(&item.binding) {
+        if !core_ext_runtime_binding_supported(binding_name) {
             return Err(format!("unsupported core_ext binding: {}", item.binding));
         }
         let binding_descriptor =
             decode_optional_hex_bytes("binding_descriptor_hex", &item.binding_descriptor_hex)?;
         let ext_payload_schema =
             decode_optional_hex_bytes("ext_payload_schema_hex", &item.ext_payload_schema_hex)?;
-        if item.binding == rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+        if binding_name == rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
             && ext_payload_schema.is_empty()
         {
             return Err(format!(
@@ -889,7 +891,7 @@ fn core_ext_profiles_from_json(
             ));
         }
         let binding = core_ext_verification_binding_from_name_and_descriptor(
-            &item.binding,
+            binding_name,
             &binding_descriptor,
         )?;
         deployments.push(CoreExtDeploymentProfile {
@@ -4639,8 +4641,10 @@ mod tests {
                 ext_id: 9,
                 activation_height: 42,
                 allowed_suite_ids: vec![3],
-                binding: rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
-                    .to_string(),
+                binding: format!(
+                    "  {}\n",
+                    rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+                ),
                 binding_descriptor_hex: hex::encode(binding_descriptor),
                 ext_payload_schema_hex: "b2".to_string(),
             }],

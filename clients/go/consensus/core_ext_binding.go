@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"math"
+	"strings"
 )
 
 const CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 = "verify_sig_ext_openssl_digest32_v1"
@@ -17,6 +18,7 @@ type CoreExtOpenSSLDigest32BindingDescriptor struct {
 }
 
 func ParseCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte) (CoreExtVerifySigExtFunc, error) {
+	binding = strings.TrimSpace(binding)
 	switch binding {
 	case "", "native_verify_sig":
 		return nil, nil

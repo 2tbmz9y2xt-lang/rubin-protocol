@@ -159,6 +159,7 @@ fn decode_optional_hex_bytes(name: &str, value: &str) -> Result<Vec<u8>, String>
 }
 
 fn genesis_core_ext_binding_supported(binding: &str) -> bool {
+    let binding = binding.trim();
     matches!(
         binding,
         "" | "native_verify_sig"
@@ -174,20 +175,21 @@ fn core_ext_deployments_from_json(
     let mut seen = std::collections::HashSet::new();
     let mut deployments = Vec::with_capacity(items.len());
     for item in items {
+        let binding_name = item.binding.trim();
         if !seen.insert(item.ext_id) {
             return Err(format!(
                 "duplicate core_ext deployment for ext_id={}",
                 item.ext_id
             ));
         }
-        if !genesis_core_ext_binding_supported(&item.binding) {
+        if !genesis_core_ext_binding_supported(binding_name) {
             return Err(format!("unsupported core_ext binding: {}", item.binding));
         }
         let binding_descriptor =
             decode_optional_hex_bytes("binding_descriptor_hex", &item.binding_descriptor_hex)?;
         let ext_payload_schema =
             decode_optional_hex_bytes("ext_payload_schema_hex", &item.ext_payload_schema_hex)?;
-        if item.binding == rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+        if binding_name == rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
             && ext_payload_schema.is_empty()
         {
             return Err(format!(
@@ -196,7 +198,7 @@ fn core_ext_deployments_from_json(
             ));
         }
         let verification_binding = core_ext_verification_binding_from_name_and_descriptor(
-            &item.binding,
+            binding_name,
             &binding_descriptor,
         )?;
         deployments.push(CoreExtDeploymentProfile {
@@ -503,6 +505,43 @@ mod tests {
 
         let err = load_genesis_config(Some(&path)).unwrap_err();
         assert!(err.contains("unsupported core_ext binding"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_accepts_whitespace_wrapped_binding() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-core-ext-whitespace-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        let binding_descriptor = rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
+            "ML-DSA-87",
+            rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+        )
+        .expect("descriptor");
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{{\"ext_id\":7,\"activation_height\":12,\"allowed_suite_ids\":[3],\"binding\":\"  {}\\n\",\"binding_descriptor_hex\":\"{}\",\"ext_payload_schema_hex\":\"b2\"}}]}}",
+                rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
+                hex::encode(binding_descriptor),
+            ),
+        )
+        .expect("write");
+
+        let cfg = load_genesis_config(Some(&path)).expect("load genesis");
+        let profiles = cfg
+            .core_ext_deployments
+            .active_profiles_at_height(12)
+            .expect("active profiles");
+        assert_eq!(profiles.active.len(), 1);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
