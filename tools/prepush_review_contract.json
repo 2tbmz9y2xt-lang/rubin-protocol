@@ -7,7 +7,7 @@
     "fast_patch": {
       "combine_review_units_when_at_most": 6,
       "model": "gpt-5.4-mini",
-      "model_reasoning_effort": "high",
+      "model_reasoning_effort": "medium",
       "stall_seconds": 60
     },
     "heavy_artillery": {
