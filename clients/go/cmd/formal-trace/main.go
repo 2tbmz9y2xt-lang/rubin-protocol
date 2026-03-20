@@ -21,6 +21,8 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
+const maxTraceCoreExtHexFieldBytes = 4096
+
 type traceHeader struct {
 	Type                  string `json:"type"`
 	GeneratedAtUTC        string `json:"generated_at_utc"`
@@ -143,8 +145,9 @@ func buildCoreExtProfiles(items []coreExtProfileJSON) (consensus.CoreExtProfileP
 	}
 	deployments := make([]consensus.CoreExtDeploymentProfile, 0, len(items))
 	for _, item := range items {
-		if !traceCoreExtBindingIsSupported(item.Binding) {
-			return nil, fmt.Errorf("unsupported core_ext binding: %s", item.Binding)
+		binding := strings.TrimSpace(item.Binding)
+		if !traceCoreExtBindingIsSupported(binding) {
+			return nil, fmt.Errorf("unsupported core_ext binding: %s", binding)
 		}
 		bindingDescriptor, err := decodeOptionalTraceHexBytes("binding_descriptor_hex", item.BindingDescriptorHex)
 		if err != nil {
@@ -154,10 +157,10 @@ func buildCoreExtProfiles(items []coreExtProfileJSON) (consensus.CoreExtProfileP
 		if err != nil {
 			return nil, err
 		}
-		if item.Binding == consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 && len(extPayloadSchema) == 0 {
+		if binding == consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 && len(extPayloadSchema) == 0 {
 			return nil, fmt.Errorf("core_ext binding %s requires ext_payload_schema_hex", consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
 		}
-		verifySigExtFn, err := consensus.ParseCoreExtVerifySigExtBinding(item.Binding, bindingDescriptor)
+		verifySigExtFn, err := consensus.ParseCoreExtVerifySigExtBinding(binding, bindingDescriptor)
 		if err != nil {
 			return nil, err
 		}
@@ -182,7 +185,11 @@ func decodeOptionalTraceHexBytes(name, value string) ([]byte, error) {
 	if value == "" {
 		return nil, nil
 	}
-	raw, err := hex.DecodeString(strings.TrimPrefix(strings.TrimPrefix(value, "0x"), "0X"))
+	trimmed := strings.TrimPrefix(strings.TrimPrefix(value, "0x"), "0X")
+	if (name == "binding_descriptor_hex" || name == "ext_payload_schema_hex") && len(trimmed) > maxTraceCoreExtHexFieldBytes*2 {
+		return nil, fmt.Errorf("bad %s", name)
+	}
+	raw, err := hex.DecodeString(trimmed)
 	if err != nil {
 		return nil, fmt.Errorf("bad %s", name)
 	}

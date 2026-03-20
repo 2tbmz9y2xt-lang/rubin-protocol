@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -265,6 +266,22 @@ func setCoreExtOpenSSLDigest32Binding(v map[string]any) {
 	v["core_ext_profiles"] = profiles
 }
 
+func parseJSONUint32(name string, value any) (uint32, error) {
+	n, ok := value.(float64)
+	if !ok || math.IsNaN(n) || math.IsInf(n, 0) || n < 0 || n > math.MaxUint32 || math.Trunc(n) != n {
+		return 0, fmt.Errorf("%s: want uint32-compatible JSON number", name)
+	}
+	return uint32(n), nil
+}
+
+func mustJSONUint32(name string, value any) uint32 {
+	out, err := parseJSONUint32(name, value)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	return out
+}
+
 func multisigCovenantData1of1(pub []byte) []byte {
 	kid := keyIDForPub(pub)
 	out := make([]byte, 0, 34)
@@ -308,7 +325,7 @@ func updateSingleInputSignedVector(
 	utxos[0]["covenant_data"] = hex.EncodeToString(inCov)
 
 	prevTxid := mustHex32(utxos[0]["txid"].(string))
-	prevVout := uint32(utxos[0]["vout"].(float64))
+	prevVout := mustJSONUint32(id+".utxos[0].vout", utxos[0]["vout"])
 
 	tx := &consensus.Tx{
 		Version:  1,
@@ -372,7 +389,7 @@ func updateP2PKBurnToFeeVector(f *fixtureFile, id string, chainID [32]byte, sign
 	utxos[0]["covenant_data"] = hex.EncodeToString(cov)
 
 	prevTxid := mustHex32(utxos[0]["txid"].(string))
-	prevVout := uint32(utxos[0]["vout"].(float64))
+	prevVout := mustJSONUint32(id+".utxos[0].vout", utxos[0]["vout"])
 
 	tx := &consensus.Tx{
 		Version:  1,
@@ -408,7 +425,7 @@ func updateCoreExtRealBindingVector(
 	}
 
 	prevTxid := mustHex32(utxos[0]["txid"].(string))
-	prevVout := uint32(utxos[0]["vout"].(float64))
+	prevVout := mustJSONUint32(id+".utxos[0].vout", utxos[0]["vout"])
 	pub := signer.PubkeyBytes()
 	outCov := p2pkCovenantData(pub)
 
@@ -423,7 +440,7 @@ func updateCoreExtRealBindingVector(
 
 	sig := mustSignInputDigest(id, "input0", signer, tx, 0, inValue, chainID)
 	tx.Witness = []consensus.WitnessItem{{
-		SuiteID:   0x03,
+		SuiteID:   consensus.SUITE_ID_ML_DSA_87,
 		Pubkey:    pub,
 		Signature: sig,
 	}}
@@ -477,8 +494,8 @@ func updateVaultSpendVectorsUTXO(
 
 		prev0 := mustHex32(utxos[0]["txid"].(string))
 		prev1 := mustHex32(utxos[1]["txid"].(string))
-		vout0 := uint32(utxos[0]["vout"].(float64))
-		vout1 := uint32(utxos[1]["vout"].(float64))
+		vout0 := mustJSONUint32(id+".utxos[0].vout", utxos[0]["vout"])
+		vout1 := mustJSONUint32(id+".utxos[1].vout", utxos[1]["vout"])
 
 		tx := &consensus.Tx{
 			Version: 1,
@@ -548,7 +565,7 @@ func updateVaultCreateVectors(
 		utxos[0]["value"] = float64(inValue)
 
 		prev := mustHex32(utxos[0]["txid"].(string))
-		vout := uint32(utxos[0]["vout"].(float64))
+		vout := mustJSONUint32(id+".utxos[0].vout", utxos[0]["vout"])
 		tx := &consensus.Tx{
 			Version:  1,
 			TxKind:   0x00,
@@ -576,7 +593,7 @@ func updateVaultCreateVectors(
 		utxos[0]["value"] = float64(inValue)
 
 		prev := mustHex32(utxos[0]["txid"].(string))
-		vout := uint32(utxos[0]["vout"].(float64))
+		vout := mustJSONUint32(id+".utxos[0].vout", utxos[0]["vout"])
 		tx := &consensus.Tx{
 			Version:  1,
 			TxKind:   0x00,
@@ -636,9 +653,9 @@ func updateVaultSpendVectorsVaultFixture(
 		prev0 := mustHex32(utxos[0]["txid"].(string))
 		prev1 := mustHex32(utxos[1]["txid"].(string))
 		prev2 := mustHex32(utxos[2]["txid"].(string))
-		vout0 := uint32(utxos[0]["vout"].(float64))
-		vout1 := uint32(utxos[1]["vout"].(float64))
-		vout2 := uint32(utxos[2]["vout"].(float64))
+		vout0 := mustJSONUint32(id+".utxos[0].vout", utxos[0]["vout"])
+		vout1 := mustJSONUint32(id+".utxos[1].vout", utxos[1]["vout"])
+		vout2 := mustJSONUint32(id+".utxos[2].vout", utxos[2]["vout"])
 
 		tx := &consensus.Tx{
 			Version: 1,
@@ -683,8 +700,8 @@ func updateVaultSpendVectorsVaultFixture(
 
 		prev0 := mustHex32(utxos[0]["txid"].(string))
 		prev1 := mustHex32(utxos[1]["txid"].(string))
-		vout0 := uint32(utxos[0]["vout"].(float64))
-		vout1 := uint32(utxos[1]["vout"].(float64))
+		vout0 := mustJSONUint32(id+".utxos[0].vout", utxos[0]["vout"])
+		vout1 := mustJSONUint32(id+".utxos[1].vout", utxos[1]["vout"])
 
 		nonWL := p2pkCovenantData(dest2KP.PubkeyBytes())
 		tx := &consensus.Tx{
@@ -754,7 +771,7 @@ func updateHTLCVector(
 	utxos[0]["value"] = float64(100)
 
 	prev := mustHex32(utxos[0]["txid"].(string))
-	vout := uint32(utxos[0]["vout"].(float64))
+	vout := mustJSONUint32(id+".utxos[0].vout", utxos[0]["vout"])
 
 	outCov := p2pkCovenantData(destKP.PubkeyBytes())
 	tx := &consensus.Tx{
@@ -814,7 +831,7 @@ func updateSubsidyBlocks(
 	spendUTXO[0]["covenant_data"] = hex.EncodeToString(spendInCov)
 
 	prevSpend := mustHex32(spendUTXO[0]["txid"].(string))
-	prevSpendVout := uint32(spendUTXO[0]["vout"].(float64))
+	prevSpendVout := mustJSONUint32("CV-SUB-01.spend_utxo[0].vout", spendUTXO[0]["vout"])
 
 	// Build the non-coinbase tx: 100 -> 90 (fee=10).
 	outCov := p2pkCovenantData(coinbaseDestKP.PubkeyBytes())
