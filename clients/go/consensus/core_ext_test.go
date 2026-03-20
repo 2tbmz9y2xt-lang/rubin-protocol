@@ -367,7 +367,7 @@ func TestValidateCoreExtWitnessAtHeightNativeSuiteMissingRegistryFailsClosed(t *
 	}
 }
 
-func TestValidateCoreExtWitnessAtHeightSunsetNativeSuiteFailsClosed(t *testing.T) {
+func TestValidateCoreExtWitnessAtHeightRegisteredNativeSuiteOutsideSpendSetRejected(t *testing.T) {
 	var prev [32]byte
 	prev[0] = 0xaf
 	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
@@ -415,11 +415,11 @@ func TestValidateCoreExtWitnessAtHeightSunsetNativeSuiteFailsClosed(t *testing.T
 	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
 	}
-	if err.Error() != "TX_ERR_SIG_ALG_INVALID: CORE_EXT sunset native suite forbidden" {
+	if err.Error() != "TX_ERR_SIG_ALG_INVALID: CORE_EXT registered native suite not spend-permitted at this height" {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if called {
-		t.Fatalf("sunset native suite must fail closed before verify_sig_ext")
+		t.Fatalf("registered native suite outside spend set must reject before verify_sig_ext")
 	}
 }
 

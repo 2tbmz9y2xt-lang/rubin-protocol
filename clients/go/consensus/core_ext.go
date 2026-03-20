@@ -301,13 +301,13 @@ func validateCoreExtWitnessAtHeight(
 	nativeSpendSuites := rotation.NativeSpendSuites(blockHeight)
 	params, nativeRegistered := registry.Lookup(w.SuiteID)
 
-	// Per CANONICAL §12.5 / §23.2.2, registered native suites keep native
-	// lifecycle semantics under CORE_EXT: they remain on native verify_sig while
-	// currently spend-permitted and must fail closed after sunset instead of
-	// reviving through verify_sig_ext.
+	// Per CANONICAL §12.5 / §23.2.2, registry-known native suites stay on the
+	// native path only while currently spend-permitted at this height; suites
+	// outside the current native spend set reject here and never fall through to
+	// verify_sig_ext.
 	if nativeRegistered {
 		if !nativeSpendSuites.Contains(w.SuiteID) {
-			return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT sunset native suite forbidden")
+			return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT registered native suite not spend-permitted at this height")
 		}
 		if err := validateCoreExtNativeWitness(w, params); err != nil {
 			return err
