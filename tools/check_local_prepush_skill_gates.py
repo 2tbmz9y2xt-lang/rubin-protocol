@@ -74,16 +74,29 @@ def load_profile_contract(profile_name: str, path: Path = CONTRACT_PATH) -> Revi
             f"review contract at {path} has unsupported model_reasoning_effort={reasoning!r} for profile {profile_name!r}"
         )
 
+    def read_int_field(field: str, default: int) -> int:
+        raw = profile_data.get(field)
+        return default if raw is None else int(raw)
+
     try:
-        stall_seconds = int(profile_data.get("stall_seconds") or default_profile.stall_seconds)
-        combine_threshold = int(
-            profile_data.get("combine_review_units_when_at_most") or default_profile.combine_review_units_when_at_most
+        stall_seconds = read_int_field("stall_seconds", default_profile.stall_seconds)
+        combine_threshold = read_int_field(
+            "combine_review_units_when_at_most",
+            default_profile.combine_review_units_when_at_most,
         )
     except (TypeError, ValueError) as exc:
         raise ValueError(f"review contract at {path} has non-numeric thresholds for profile {profile_name!r}") from exc
+    if stall_seconds < 30:
+        raise ValueError(f"review contract at {path} profile {profile_name!r} has stall_seconds={stall_seconds}, expected >= 30")
+    if combine_threshold < 1:
+        raise ValueError(
+            f"review contract at {path} profile {profile_name!r} has combine_review_units_when_at_most={combine_threshold}, expected >= 1"
+        )
 
     def read_lens_list(field: str) -> tuple[str, ...]:
-        raw = profile_data.get(field) or ()
+        raw = profile_data.get(field)
+        if raw is None:
+            raw = []
         if not isinstance(raw, list):
             raise ValueError(f"review contract at {path} field {field!r} for profile {profile_name!r} must be a list")
         values: list[str] = []

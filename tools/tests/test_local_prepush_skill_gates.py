@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 
@@ -127,6 +128,58 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "is missing"):
             m.load_profile_contract("fast_patch", path=missing)
+
+    def test_empty_conditional_lenses_are_allowed(self):
+        with tempfile.TemporaryDirectory() as td:
+            contract_path = Path(td) / "contract.json"
+            contract_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 3,
+                        "default_profile": "fast_patch",
+                        "profiles": {
+                            "fast_patch": {
+                                "model": "gpt-5.4-mini",
+                                "model_reasoning_effort": "medium",
+                                "stall_seconds": 60,
+                                "combine_review_units_when_at_most": 6,
+                                "required_lenses": ["code-review", "diff-scan"],
+                                "conditional_lenses": [],
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            profile = m.load_profile_contract("fast_patch", path=contract_path)
+
+        self.assertEqual(profile.conditional_lenses, ())
+
+    def test_zero_combine_threshold_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            contract_path = Path(td) / "contract.json"
+            contract_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 3,
+                        "default_profile": "fast_patch",
+                        "profiles": {
+                            "fast_patch": {
+                                "model": "gpt-5.4-mini",
+                                "model_reasoning_effort": "medium",
+                                "stall_seconds": 60,
+                                "combine_review_units_when_at_most": 0,
+                                "required_lenses": ["code-review", "diff-scan"],
+                                "conditional_lenses": [],
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "expected >= 1"):
+                m.load_profile_contract("fast_patch", path=contract_path)
 
 
 if __name__ == "__main__":
