@@ -67,6 +67,19 @@ class PrepushReceiptTests(unittest.TestCase):
             self.assertFalse(checked["fresh"])
             self.assertEqual(checked["reason"], "base-ref-mismatch")
 
+    def test_check_handles_non_numeric_schema_version_as_malformed(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            self.init_repo(repo_root)
+            payload = m.write_receipt(repo_root, base_ref="origin/main", source="test")
+            receipt_path = Path(payload["receipt_path"])
+            data = json.loads(receipt_path.read_text(encoding="utf-8"))
+            data["schema_version"] = "broken"
+            receipt_path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            checked = m.check_receipt(repo_root, base_ref="origin/main")
+            self.assertFalse(checked["fresh"])
+            self.assertEqual(checked["reason"], "schema-malformed")
+
     def test_write_outputs_json_serializable_payload(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)

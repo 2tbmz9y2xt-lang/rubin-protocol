@@ -92,7 +92,12 @@ def check_receipt(repo_root: Path, *, base_ref: str) -> dict[str, object]:
         result["reason"] = "malformed:non-object"
         return result
     result["receipt"] = payload
-    if int(payload.get("schema_version") or 0) != 1:
+    try:
+        schema_version = int(payload.get("schema_version") or 0)
+    except (TypeError, ValueError):
+        result["reason"] = "schema-malformed"
+        return result
+    if schema_version != 1:
         result["reason"] = "schema-mismatch"
         return result
     if str(payload.get("base_ref") or "") != base_ref:
