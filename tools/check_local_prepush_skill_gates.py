@@ -8,6 +8,9 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+MAX_RENDERED_CHANGED_PATHS = 25
+MAX_RENDERED_PATH_CHARS = 160
+
 
 @dataclass(frozen=True)
 class ScanLens:
@@ -20,7 +23,9 @@ class ScanLens:
 def read_changed_files(path: Path) -> set[str]:
     if not path.exists():
         return set()
-    return {line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
+    raw = path.read_text(encoding="utf-8")
+    parts = raw.split("\0") if "\0" in raw else raw.splitlines()
+    return {part for part in parts if part}
 
 
 def is_under(path: str, prefix: str) -> bool:
@@ -47,6 +52,11 @@ def run_check(name: str, cmd: list[str], repo_root: Path) -> int:
     else:
         print(f"[local-prepush-gate] {name}: PASS")
     return proc.returncode
+
+
+def sanitize_path_for_prompt(path: str) -> str:
+    truncated = path if len(path) <= MAX_RENDERED_PATH_CHARS else path[: MAX_RENDERED_PATH_CHARS - 3] + "..."
+    return shlex.quote(truncated).replace("\n", r"\n").replace("\r", r"\r").replace("\t", r"\t")
 
 
 def build_plan(changed: set[str]) -> tuple[list[tuple[str, list[str]]], list[str], list[ScanLens]]:
@@ -327,7 +337,12 @@ def render_fullscan(changed: set[str], checks: list[tuple[str, list[str]]], lens
 
     if changed:
         lines.extend(["", "Changed files in scope:"])
-        lines.extend(f"- {path}" for path in sorted(changed))
+        sorted_paths = sorted(changed)
+        rendered = sorted_paths[:MAX_RENDERED_CHANGED_PATHS]
+        lines.extend(f"- {sanitize_path_for_prompt(path)}" for path in rendered)
+        remaining = len(sorted_paths) - len(rendered)
+        if remaining > 0:
+            lines.append(f"- +{remaining} more files omitted from the supplement; rely on the diff bundle for the complete path set.")
 
     if checks:
         lines.extend(["", "Deterministic local gates already executed before model review:"])

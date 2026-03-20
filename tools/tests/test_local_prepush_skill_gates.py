@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -53,6 +54,25 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
         self.assertIn("STANDBY review lenses", rendered)
         self.assertIn("cargo-audit-scan", rendered)
         self.assertIn("No Rust dependency manifest or lockfile changed", rendered)
+
+    def test_read_changed_files_supports_nul_delimited_payload_and_render_sanitizes_paths(self):
+        with tempfile.TemporaryDirectory() as td:
+            changed_path = Path(td) / "changed.txt"
+            changed_path.write_text("safe.py\0evil\nname.py\0", encoding="utf-8")
+            changed = m.read_changed_files(changed_path)
+
+        self.assertIn("safe.py", changed)
+        self.assertIn("evil\nname.py", changed)
+
+        rendered = m.render_fullscan(changed, [], [])
+        self.assertIn("evil\\nname.py", rendered)
+        self.assertNotIn("evil\nname.py", rendered)
+
+    def test_render_fullscan_caps_changed_file_listing(self):
+        changed = {f"path-{idx}.py" for idx in range(m.MAX_RENDERED_CHANGED_PATHS + 3)}
+        rendered = m.render_fullscan(changed, [], [])
+
+        self.assertIn("+3 more files omitted from the supplement", rendered)
 
 
 if __name__ == "__main__":
