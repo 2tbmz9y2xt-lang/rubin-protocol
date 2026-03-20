@@ -410,19 +410,20 @@ fn validate_core_ext_spend_with_cache_impl(
         ));
     }
 
-    // Per CANONICAL §12.5 / §23.2.2, any suite that is currently native at this
-    // height stays on native verify_sig even under mixed CORE_EXT profiles; the
-    // verify_sig_ext binding governs only permitted non-native suites.
-    if rotation
-        .native_spend_suites(block_height)
-        .contains(w.suite_id)
-    {
-        let Some(params) = registry.lookup(w.suite_id) else {
+    let native_spend_suites = rotation.native_spend_suites(block_height);
+    let native_params = registry.lookup(w.suite_id);
+
+    // Per CANONICAL §12.5 / §23.2.2, registered native suites keep native
+    // lifecycle semantics under CORE_EXT: they stay on native verify_sig while
+    // currently spend-permitted and must fail closed after sunset rather than
+    // reviving through verify_sig_ext.
+    if let Some(params) = native_params {
+        if !native_spend_suites.contains(w.suite_id) {
             return Err(TxError::new(
                 ErrorCode::TxErrSigAlgInvalid,
-                "CORE_EXT registered native suite missing from registry",
+                "CORE_EXT sunset native suite forbidden",
             ));
-        };
+        }
         if w.pubkey.len() as u64 != params.pubkey_len
             || w.signature.len() as u64 != params.sig_len + 1
         {
@@ -454,6 +455,12 @@ fn validate_core_ext_spend_with_cache_impl(
             ));
         }
         return Ok(());
+    }
+    if native_spend_suites.contains(w.suite_id) {
+        return Err(TxError::new(
+            ErrorCode::TxErrSigAlgInvalid,
+            "CORE_EXT registered native suite missing from registry",
+        ));
     }
 
     let Some((&sighash_type, _crypto_sig)) = w.signature.split_last() else {
@@ -1044,5 +1051,66 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    }
+
+    #[test]
+    fn core_ext_sunset_native_suite_fails_closed_before_ext_binding() {
+        use crate::suite_registry::{NativeSuiteSet, RotationProvider, SuiteParams, SuiteRegistry};
+        use std::collections::BTreeMap;
+
+        struct SunsetSpend;
+        impl RotationProvider for SunsetSpend {
+            fn native_create_suites(&self, _height: u64) -> NativeSuiteSet {
+                NativeSuiteSet::new(&[SUITE_ID_ML_DSA_87, 0x02])
+            }
+
+            fn native_spend_suites(&self, _height: u64) -> NativeSuiteSet {
+                NativeSuiteSet::new(&[SUITE_ID_ML_DSA_87])
+            }
+        }
+
+        let entry = dummy_entry(7);
+        let profiles = CoreExtProfiles {
+            active: vec![CoreExtActiveProfile {
+                ext_id: 7,
+                allowed_suite_ids: vec![0x02],
+                verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+                binding_descriptor: b"accept".to_vec(),
+                ext_payload_schema: b"schema".to_vec(),
+            }],
+        };
+        let w = WitnessItem {
+            suite_id: 0x02,
+            pubkey: vec![0u8; ML_DSA_87_PUBKEY_BYTES as usize],
+            signature: vec![0u8; (ML_DSA_87_SIG_BYTES as usize) + 1],
+        };
+        let (tx, input_index, input_value, chain_id) = dummy_tx();
+        let mut suites = BTreeMap::new();
+        suites.insert(
+            0x02,
+            SuiteParams {
+                suite_id: 0x02,
+                pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+                sig_len: ML_DSA_87_SIG_BYTES,
+                verify_cost: VERIFY_COST_ML_DSA_87,
+                openssl_alg: "ML-DSA-87",
+            },
+        );
+        let reg = SuiteRegistry::with_suites(suites);
+        let err = validate_core_ext_spend_at_height(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            &profiles,
+            Some(&SunsetSpend),
+            Some(&reg),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+        assert_eq!(err.msg, "CORE_EXT sunset native suite forbidden");
     }
 }
