@@ -1333,8 +1333,8 @@ mod tests {
             native,
             CoreExtVerificationBinding::NativeVerifySig
         ));
-        let native_named = core_ext_verification_binding_from_name(" native_verify_sig \n")
-            .expect("native named");
+        let native_named =
+            core_ext_verification_binding_from_name(" native_verify_sig \n").expect("native named");
         assert!(matches!(
             native_named,
             CoreExtVerificationBinding::NativeVerifySig

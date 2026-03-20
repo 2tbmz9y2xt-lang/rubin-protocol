@@ -520,12 +520,13 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("mkdir");
         let path = dir.join("genesis.json");
-        let binding_descriptor = rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
-            "ML-DSA-87",
-            rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
-            rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
-        )
-        .expect("descriptor");
+        let binding_descriptor =
+            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
+                "ML-DSA-87",
+                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            )
+            .expect("descriptor");
         std::fs::write(
             &path,
             format!(
