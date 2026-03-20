@@ -132,6 +132,7 @@ Policy:
   - добавлены `CV-U-EXT-04` и `CV-U-EXT-05` для ACTIVE `CORE_EXT` profile:
     - non-native suite + `native_verify_sig` → `TX_ERR_SIG_ALG_INVALID`;
     - non-native suite + `verify_sig_ext_openssl_digest32_v1` → successful spend.
+  - companion metadata для `CV-U-EXT-05` и `CV-EXT-ENF-04` теперь фиксирует реальный descriptor/schema путь (`binding_descriptor_hex` + `ext_payload_schema_hex=b2`).
 
 Инструменты:
 - точечные правки fixtures (`tx_hex_from`/`tx_hex_mutations`, `core_ext_profiles`),
