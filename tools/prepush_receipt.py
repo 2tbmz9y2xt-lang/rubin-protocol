@@ -114,7 +114,12 @@ def check_receipt(repo_root: Path, *, base_ref: str) -> dict[str, object]:
         result["reason"] = "head-mismatch"
         result["current_head"] = head
         return result
-    merge_base = current_merge_base(repo_root, base_ref)
+    try:
+        merge_base = current_merge_base(repo_root, base_ref)
+    except RuntimeError as exc:
+        result["reason"] = "merge-base-unavailable"
+        result["merge_base_error"] = str(exc)
+        return result
     if str(payload.get("merge_base") or "") != merge_base:
         result["reason"] = "merge-base-mismatch"
         result["current_merge_base"] = merge_base

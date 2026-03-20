@@ -93,6 +93,17 @@ class PrepushReceiptTests(unittest.TestCase):
             self.assertFalse(checked["fresh"])
             self.assertEqual(checked["reason"], "receipt-dirty-worktree")
 
+    def test_check_handles_missing_base_ref_as_stale(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            self.init_repo(repo_root)
+            m.write_receipt(repo_root, base_ref="origin/main", source="test")
+            subprocess.run(["git", "update-ref", "-d", "refs/remotes/origin/main"], cwd=repo_root, check=True)
+            checked = m.check_receipt(repo_root, base_ref="origin/main")
+            self.assertFalse(checked["fresh"])
+            self.assertEqual(checked["reason"], "merge-base-unavailable")
+            self.assertIn("git merge-base", checked["merge_base_error"])
+
     def test_write_outputs_json_serializable_payload(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
