@@ -103,6 +103,9 @@ def check_receipt(repo_root: Path, *, base_ref: str) -> dict[str, object]:
     if str(payload.get("base_ref") or "") != base_ref:
         result["reason"] = "base-ref-mismatch"
         return result
+    if payload.get("tracked_worktree_clean") is not True:
+        result["reason"] = "receipt-dirty-worktree"
+        return result
     if not tracked_worktree_clean(repo_root):
         result["reason"] = "dirty-worktree"
         return result
