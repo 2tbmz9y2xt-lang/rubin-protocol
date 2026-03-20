@@ -342,32 +342,6 @@ pub fn validate_core_ext_spend_at_height(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn validate_core_ext_spend_with_cache(
-    entry: &UtxoEntry,
-    w: &WitnessItem,
-    tx: &Tx,
-    input_index: u32,
-    input_value: u64,
-    chain_id: [u8; 32],
-    profiles_at_height: &CoreExtProfiles,
-    cache: &mut SighashV1PrehashCache<'_>,
-) -> Result<(), TxError> {
-    validate_core_ext_spend_with_cache_and_suite_context(
-        entry,
-        w,
-        tx,
-        input_index,
-        input_value,
-        chain_id,
-        0,
-        profiles_at_height,
-        None,
-        None,
-        cache,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_core_ext_spend_with_cache_and_suite_context(
     entry: &UtxoEntry,
     w: &WitnessItem,
