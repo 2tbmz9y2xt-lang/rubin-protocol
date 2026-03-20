@@ -298,13 +298,16 @@ func validateCoreExtWitnessAtHeight(
 		return extractSigAndDigestWithCache(w, tx, inputIndex, inputValue, chainID, sighashCache)
 	}
 
-	// Per CANONICAL §12.5 / §23.2.2, any suite that is currently native at this
-	// height stays on native verify_sig even under mixed CORE_EXT profiles; the
-	// verify_sig_ext binding governs only permitted non-native suites.
-	if rotation.NativeSpendSuites(blockHeight).Contains(w.SuiteID) {
-		params, found := registry.Lookup(w.SuiteID)
-		if !found {
-			return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT registered native suite missing from registry")
+	nativeSpendSuites := rotation.NativeSpendSuites(blockHeight)
+	params, nativeRegistered := registry.Lookup(w.SuiteID)
+
+	// Per CANONICAL §12.5 / §23.2.2, registry-known native suites stay on the
+	// native path only while currently spend-permitted at this height; suites
+	// outside the current native spend set reject here and never fall through to
+	// verify_sig_ext.
+	if nativeRegistered {
+		if !nativeSpendSuites.Contains(w.SuiteID) {
+			return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT registered native suite not spend-permitted at this height")
 		}
 		if err := validateCoreExtNativeWitness(w, params); err != nil {
 			return err
@@ -325,6 +328,9 @@ func validateCoreExtWitnessAtHeight(
 			return txerr(TX_ERR_SIG_INVALID, "CORE_EXT signature invalid")
 		}
 		return nil
+	}
+	if nativeSpendSuites.Contains(w.SuiteID) {
+		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT registered native suite missing from registry")
 	}
 
 	if profile.VerifySigExtFn == nil {
