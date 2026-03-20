@@ -33,6 +33,13 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
         self.assertIn("go_verify_sig_smoke", check_names)
         self.assertIn("rust_verify_sig_smoke", check_names)
         self.assertTrue(any("OpenSSL isolation" in focus for focus in focuses))
+        self.assertEqual(profile.model, "gpt-5.4")
+        self.assertEqual(profile.model_reasoning_effort, "xhigh")
+        self.assertEqual(profile.combine_review_units_when_at_most, 4)
+        self.assertEqual(
+            profile.required_lenses,
+            ("code-review", "diff-scan", "combined-security-scan", "semgrep-scan", "rubin-coverage"),
+        )
         self.assertIn("code-review", active_lenses)
         self.assertIn("diff-scan", active_lenses)
         self.assertIn("combined-security-scan", active_lenses)
@@ -51,9 +58,11 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
 
         rendered = m.render_fullscan(changed, checks, lenses, profile)
         self.assertIn("Selected review profile: fast_patch", rendered)
-        self.assertIn("ACTIVE review lenses", rendered)
+        self.assertIn("PROFILE-REQUIRED review lenses", rendered)
+        self.assertIn("PROFILE-CONDITIONAL active review lenses", rendered)
         self.assertIn("code-review", rendered)
         self.assertIn("diff-scan", rendered)
+        self.assertIn("Model route: gpt-5.4-mini (medium), combine-if-paths<=6", rendered)
         self.assertIn("STANDBY review lenses", rendered)
         self.assertIn("cargo-audit-scan", rendered)
         self.assertIn("No Rust dependency manifest or lockfile changed", rendered)
@@ -84,6 +93,12 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
         self.assertEqual(checks, [])
         self.assertEqual(focuses, [])
         self.assertEqual(profile.name, "runtime_code")
+        self.assertEqual(profile.model, "gpt-5.4")
+        self.assertEqual(profile.model_reasoning_effort, "high")
+        self.assertEqual(
+            profile.required_lenses,
+            ("code-review", "diff-scan", "combined-security-scan", "semgrep-scan"),
+        )
         self.assertTrue(any(lens.name == "combined-security-scan" and lens.active for lens in lenses))
 
     def test_build_plan_selects_fast_patch_profile_for_tooling_only(self):
@@ -91,6 +106,9 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
         checks, focuses, lenses, profile = m.build_plan(changed)
 
         self.assertEqual(profile.name, "fast_patch")
+        self.assertEqual(profile.model, "gpt-5.4-mini")
+        self.assertEqual(profile.model_reasoning_effort, "medium")
+        self.assertEqual(profile.required_lenses, ("code-review", "diff-scan"))
         self.assertTrue(any(lens.name == "internal-tools" and lens.active for lens in lenses))
 
 
