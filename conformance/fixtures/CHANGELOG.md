@@ -125,6 +125,7 @@ Policy:
 
 Причина:
 - закрыть хвосты после удаления `suite_id=0x02` из native consensus:
+  - обновлены fixture-файлы `CV-UTXO-BASIC.json` и `CV-EXT.json` для реального `CORE_EXT` binding path;
   - `CV-VAULT-UNKNOWN-SUITE-01` теперь фиксирует reject как non-native suite (`TX_ERR_SIG_ALG_INVALID`),
     а не parse-stage noncanonical;
   - `CV-U-EXT-02` больше не дублирует sentinel-кейс и проверяет pre-active non-native witness;
