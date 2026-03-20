@@ -394,7 +394,7 @@ fn openssl_consensus_bootstrap() -> Result<(), TxError> {
     Ok(())
 }
 
-fn ensure_openssl_consensus_init() -> Result<(), TxError> {
+pub(crate) fn ensure_openssl_consensus_init() -> Result<(), TxError> {
     OPENSSL_CONSENSUS_INIT
         .get_or_init(openssl_consensus_bootstrap)
         .clone()
@@ -479,7 +479,7 @@ fn map_digest_verify_rc(rc: core::ffi::c_int) -> Result<bool, TxError> {
     }
 }
 
-fn openssl_verify_sig_digest_oneshot(
+pub(crate) fn openssl_verify_sig_digest_oneshot(
     alg: &'static CStr,
     pubkey: &[u8],
     signature: &[u8],

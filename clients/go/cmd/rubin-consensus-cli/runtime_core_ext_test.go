@@ -8,6 +8,15 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
+func mustRuntimeOpenSSLDigest32Descriptor(t *testing.T) []byte {
+	t.Helper()
+	descriptor, err := consensus.CoreExtOpenSSLDigest32BindingDescriptorBytes("ML-DSA-87", consensus.ML_DSA_87_PUBKEY_BYTES, consensus.ML_DSA_87_SIG_BYTES)
+	if err != nil {
+		t.Fatalf("CoreExtOpenSSLDigest32BindingDescriptorBytes: %v", err)
+	}
+	return descriptor
+}
+
 func TestBuildCoreExtProfilesEmpty(t *testing.T) {
 	provider, err := buildCoreExtProfiles(nil, "", "")
 	if err != nil {
@@ -29,7 +38,7 @@ func TestBuildCoreExtProfilesNativeBinding(t *testing.T) {
 			ExtID:               7,
 			ActivationHeight:    5,
 			AllowedSuiteIDs:     []uint8{1, 3},
-			Binding:             "native_verify_sig",
+			Binding:             " native_verify_sig \n",
 			ExtPayloadSchemaHex: "b2",
 		},
 	}, "", "")
@@ -68,15 +77,24 @@ func TestBuildCoreExtProfilesNativeBinding(t *testing.T) {
 }
 
 func TestBuildCoreExtProfilesVerifySigExtBindings(t *testing.T) {
+	opensslDescriptor, err := consensus.CoreExtOpenSSLDigest32BindingDescriptorBytes("ML-DSA-87", consensus.ML_DSA_87_PUBKEY_BYTES, consensus.ML_DSA_87_SIG_BYTES)
+	if err != nil {
+		t.Fatalf("CoreExtOpenSSLDigest32BindingDescriptorBytes: %v", err)
+	}
 	tests := []struct {
-		name    string
-		binding string
-		ok      bool
-		wantErr bool
+		name              string
+		binding           string
+		bindingDescriptor string
+		extPayloadSchema  string
+		skipCall          bool
 	}{
-		{name: "accept", binding: "verify_sig_ext_accept", ok: true, wantErr: false},
-		{name: "reject", binding: "verify_sig_ext_reject", ok: false, wantErr: false},
-		{name: "error", binding: "verify_sig_ext_error", ok: false, wantErr: true},
+		{
+			name:              "openssl-digest32-whitespace",
+			binding:           "  " + consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 + "\n",
+			bindingDescriptor: hex.EncodeToString(opensslDescriptor),
+			extPayloadSchema:  "b2",
+			skipCall:          true,
+		},
 	}
 
 	for i, tc := range tests {
@@ -87,8 +105,8 @@ func TestBuildCoreExtProfilesVerifySigExtBindings(t *testing.T) {
 					ActivationHeight:     0,
 					AllowedSuiteIDs:      []uint8{3},
 					Binding:              tc.binding,
-					BindingDescriptorHex: "a1",
-					ExtPayloadSchemaHex:  "b2",
+					BindingDescriptorHex: tc.bindingDescriptor,
+					ExtPayloadSchemaHex:  tc.extPayloadSchema,
 				},
 			}, "", "")
 			if err != nil {
@@ -104,14 +122,32 @@ func TestBuildCoreExtProfilesVerifySigExtBindings(t *testing.T) {
 			if profile.VerifySigExtFn == nil {
 				t.Fatalf("expected VerifySigExtFn for binding=%s", tc.binding)
 			}
-			gotOK, gotErr := profile.VerifySigExtFn(0, 3, nil, nil, [32]byte{}, nil)
-			if gotOK != tc.ok {
-				t.Fatalf("unexpected ok for %s: got=%v want=%v", tc.binding, gotOK, tc.ok)
+			if tc.skipCall {
+				return
 			}
-			if (gotErr != nil) != tc.wantErr {
-				t.Fatalf("unexpected error state for %s: gotErr=%v wantErr=%v", tc.binding, gotErr, tc.wantErr)
+			if gotOK, gotErr := profile.VerifySigExtFn(0, 3, nil, nil, [32]byte{}, nil); gotOK || gotErr != nil {
+				t.Fatalf("unexpected verifier result for %s: ok=%v err=%v", tc.binding, gotOK, gotErr)
 			}
 		})
+	}
+}
+
+func TestBuildCoreExtProfilesRejectsOpenSSLBindingWithoutPayloadSchema(t *testing.T) {
+	descriptor, err := consensus.CoreExtOpenSSLDigest32BindingDescriptorBytes("ML-DSA-87", consensus.ML_DSA_87_PUBKEY_BYTES, consensus.ML_DSA_87_SIG_BYTES)
+	if err != nil {
+		t.Fatalf("CoreExtOpenSSLDigest32BindingDescriptorBytes: %v", err)
+	}
+	_, err = buildCoreExtProfiles([]CoreExtProfileJSON{
+		{
+			ExtID:                77,
+			ActivationHeight:     0,
+			AllowedSuiteIDs:      []uint8{3},
+			Binding:              consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
+			BindingDescriptorHex: hex.EncodeToString(descriptor),
+		},
+	}, "", "")
+	if err == nil {
+		t.Fatalf("expected missing ext_payload_schema rejection")
 	}
 }
 
@@ -121,8 +157,8 @@ func TestBuildCoreExtProfilesHeightGate(t *testing.T) {
 			ExtID:                77,
 			ActivationHeight:     42,
 			AllowedSuiteIDs:      []uint8{3},
-			Binding:              "verify_sig_ext_accept",
-			BindingDescriptorHex: "a1",
+			Binding:              consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
+			BindingDescriptorHex: hex.EncodeToString(mustRuntimeOpenSSLDigest32Descriptor(t)),
 			ExtPayloadSchemaHex:  "b2",
 		},
 	}, "", "")
@@ -145,9 +181,10 @@ func TestBuildCoreExtProfilesHeightGate(t *testing.T) {
 }
 
 func TestBuildCoreExtProfilesDuplicateRejected(t *testing.T) {
+	descriptorHex := hex.EncodeToString(mustRuntimeOpenSSLDigest32Descriptor(t))
 	_, err := buildCoreExtProfiles([]CoreExtProfileJSON{
-		{ExtID: 9, ActivationHeight: 0, AllowedSuiteIDs: []uint8{3}, Binding: "verify_sig_ext_accept", BindingDescriptorHex: "a1", ExtPayloadSchemaHex: "b2"},
-		{ExtID: 9, ActivationHeight: 10, AllowedSuiteIDs: []uint8{3}, Binding: "verify_sig_ext_reject", BindingDescriptorHex: "a1", ExtPayloadSchemaHex: "b2"},
+		{ExtID: 9, ActivationHeight: 0, AllowedSuiteIDs: []uint8{3}, Binding: consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1, BindingDescriptorHex: descriptorHex, ExtPayloadSchemaHex: "b2"},
+		{ExtID: 9, ActivationHeight: 10, AllowedSuiteIDs: []uint8{3}, Binding: consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1, BindingDescriptorHex: descriptorHex, ExtPayloadSchemaHex: "b2"},
 	}, "", "")
 	if err == nil {
 		t.Fatalf("expected duplicate deployment error")
@@ -197,12 +234,13 @@ func TestBuildCoreExtProfilesEmptySetAnchorEnforced(t *testing.T) {
 }
 
 func TestBuildCoreExtProfilesRejectsSetAnchorMismatch(t *testing.T) {
+	descriptorHex := hex.EncodeToString(mustRuntimeOpenSSLDigest32Descriptor(t))
 	items := []CoreExtProfileJSON{{
 		ExtID:                7,
 		ActivationHeight:     12,
 		AllowedSuiteIDs:      []uint8{3},
-		Binding:              "verify_sig_ext_accept",
-		BindingDescriptorHex: "a1",
+		Binding:              consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
+		BindingDescriptorHex: descriptorHex,
 		ExtPayloadSchemaHex:  "b2",
 	}}
 	deployments, err := buildCoreExtDeployments(items)
@@ -225,11 +263,25 @@ func TestBuildCoreExtProfilesRejectsOversizedHexFields(t *testing.T) {
 		ExtID:                7,
 		ActivationHeight:     12,
 		AllowedSuiteIDs:      []uint8{3},
-		Binding:              "verify_sig_ext_accept",
+		Binding:              consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
 		BindingDescriptorHex: strings.Repeat("aa", maxCoreExtHexFieldBytes+1),
 		ExtPayloadSchemaHex:  "b2",
 	}}, "", "")
 	if err == nil {
 		t.Fatalf("expected oversized binding descriptor rejection")
+	}
+}
+
+func TestBuildCoreExtProfilesRejectsUnsupportedBindingBeforeHexDecode(t *testing.T) {
+	_, err := buildCoreExtProfiles([]CoreExtProfileJSON{{
+		ExtID:                7,
+		ActivationHeight:     12,
+		AllowedSuiteIDs:      []uint8{3},
+		Binding:              "unknown-binding",
+		BindingDescriptorHex: "zz",
+		ExtPayloadSchemaHex:  "zz",
+	}}, "", "")
+	if err == nil || !strings.Contains(err.Error(), "unsupported core_ext binding") {
+		t.Fatalf("expected unsupported binding error, got %v", err)
 	}
 }

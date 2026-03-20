@@ -1,5 +1,5 @@
 use crate::compactsize::{encode_compact_size, read_compact_size_bytes};
-use crate::constants::SUITE_ID_SENTINEL;
+use crate::constants::{ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_SENTINEL};
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
 use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_cache, SighashV1PrehashCache};
@@ -7,11 +7,16 @@ use crate::suite_registry::{DefaultRotationProvider, RotationProvider, SuiteRegi
 use crate::tx::Tx;
 use crate::tx::WitnessItem;
 use crate::utxo_basic::UtxoEntry;
-use crate::verify_sig_openssl::verify_sig_with_registry;
+use crate::verify_sig_openssl::{openssl_verify_sig_digest_oneshot, verify_sig_with_registry};
+use core::ffi::CStr;
 use std::sync::OnceLock;
 
 pub const CORE_EXT_BINDING_KIND_NATIVE_ONLY: u8 = 0x01;
 pub const CORE_EXT_BINDING_KIND_VERIFY_SIG_EXT: u8 = 0x02;
+pub const CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1: &str =
+    "verify_sig_ext_openssl_digest32_v1";
+const CORE_EXT_OPENSSL_DIGEST32_BINDING_DESCRIPTOR_PREFIX: &[u8] =
+    b"RUBIN-CORE-EXT-VERIFY-SIG-OPENSSL-DIGEST32-v1";
 
 fn default_suite_registry() -> &'static SuiteRegistry {
     static DEFAULT_SUITE_REGISTRY: OnceLock<SuiteRegistry> = OnceLock::new();
@@ -34,6 +39,15 @@ pub enum CoreExtVerificationBinding {
     VerifySigExtReject,
     /// Deterministic test binding: `verify_sig_ext` errors.
     VerifySigExtError,
+    /// Activation-ready binding: verify digest32 with an OpenSSL-backed verifier.
+    VerifySigExtOpenSslDigest32V1(CoreExtOpenSslDigest32BindingDescriptor),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoreExtOpenSslDigest32BindingDescriptor {
+    pub openssl_alg: String,
+    pub pubkey_len: u64,
+    pub sig_len: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -227,13 +241,132 @@ pub fn core_ext_profile_set_anchor_v1(
 pub fn core_ext_verification_binding_from_name(
     binding_name: &str,
 ) -> Result<CoreExtVerificationBinding, String> {
-    match binding_name.trim() {
+    core_ext_verification_binding_from_name_and_descriptor(binding_name, &[])
+}
+
+pub fn core_ext_verification_binding_from_name_and_descriptor(
+    binding_name: &str,
+    binding_descriptor: &[u8],
+) -> Result<CoreExtVerificationBinding, String> {
+    let binding_name = binding_name.trim();
+    match binding_name {
         "" | "native_verify_sig" => Ok(CoreExtVerificationBinding::NativeVerifySig),
-        "verify_sig_ext_accept" => Ok(CoreExtVerificationBinding::VerifySigExtAccept),
-        "verify_sig_ext_reject" => Ok(CoreExtVerificationBinding::VerifySigExtReject),
-        "verify_sig_ext_error" => Ok(CoreExtVerificationBinding::VerifySigExtError),
+        CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1 => {
+            Ok(CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(
+                parse_core_ext_openssl_digest32_binding_descriptor(binding_descriptor)?,
+            ))
+        }
         _ => Err(format!("unsupported core_ext binding: {binding_name}")),
     }
+}
+
+fn core_ext_supported_openssl_alg(openssl_alg: &str) -> Option<(u64, u64)> {
+    match openssl_alg {
+        "ML-DSA-87" => Some((ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)),
+        _ => None,
+    }
+}
+
+fn validate_core_ext_openssl_binding_descriptor(
+    openssl_alg: &str,
+    pubkey_len: u64,
+    sig_len: u64,
+) -> Result<(), String> {
+    let Some((expected_pubkey_len, expected_sig_len)) = core_ext_supported_openssl_alg(openssl_alg)
+    else {
+        return Err(format!("unsupported core_ext OpenSSL alg: {openssl_alg}"));
+    };
+    if pubkey_len != expected_pubkey_len {
+        return Err(format!(
+            "core_ext OpenSSL binding pubkey length mismatch for {}: got {} want {}",
+            openssl_alg, pubkey_len, expected_pubkey_len
+        ));
+    }
+    if sig_len != expected_sig_len {
+        return Err(format!(
+            "core_ext OpenSSL binding sig length mismatch for {}: got {} want {}",
+            openssl_alg, sig_len, expected_sig_len
+        ));
+    }
+    Ok(())
+}
+
+pub fn core_ext_openssl_digest32_binding_descriptor_bytes(
+    openssl_alg: &str,
+    pubkey_len: u64,
+    sig_len: u64,
+) -> Result<Vec<u8>, String> {
+    validate_core_ext_openssl_binding_descriptor(openssl_alg, pubkey_len, sig_len)?;
+    let mut out = CORE_EXT_OPENSSL_DIGEST32_BINDING_DESCRIPTOR_PREFIX.to_vec();
+    encode_compact_size(openssl_alg.len() as u64, &mut out);
+    out.extend_from_slice(openssl_alg.as_bytes());
+    encode_compact_size(pubkey_len, &mut out);
+    encode_compact_size(sig_len, &mut out);
+    Ok(out)
+}
+
+pub fn parse_core_ext_openssl_digest32_binding_descriptor(
+    raw: &[u8],
+) -> Result<CoreExtOpenSslDigest32BindingDescriptor, String> {
+    if !raw.starts_with(CORE_EXT_OPENSSL_DIGEST32_BINDING_DESCRIPTOR_PREFIX) {
+        return Err("bad core_ext binding_descriptor".to_string());
+    }
+    let mut off = CORE_EXT_OPENSSL_DIGEST32_BINDING_DESCRIPTOR_PREFIX.len();
+    let (alg_len, alg_len_bytes) = read_compact_size_bytes(&raw[off..])
+        .map_err(|_| "bad core_ext binding_descriptor".to_string())?;
+    off += alg_len_bytes;
+    let alg_len_usize =
+        usize::try_from(alg_len).map_err(|_| "bad core_ext binding_descriptor".to_string())?;
+    let end = off
+        .checked_add(alg_len_usize)
+        .ok_or_else(|| "bad core_ext binding_descriptor".to_string())?;
+    if end > raw.len() {
+        return Err("bad core_ext binding_descriptor".to_string());
+    }
+    let openssl_alg = std::str::from_utf8(&raw[off..end])
+        .map_err(|_| "bad core_ext binding_descriptor".to_string())?
+        .to_string();
+    off = end;
+    let (pubkey_len, pubkey_len_bytes) = read_compact_size_bytes(&raw[off..])
+        .map_err(|_| "bad core_ext binding_descriptor".to_string())?;
+    off += pubkey_len_bytes;
+    let (sig_len, sig_len_bytes) = read_compact_size_bytes(&raw[off..])
+        .map_err(|_| "bad core_ext binding_descriptor".to_string())?;
+    off += sig_len_bytes;
+    if off != raw.len() {
+        return Err("bad core_ext binding_descriptor".to_string());
+    }
+    validate_core_ext_openssl_binding_descriptor(&openssl_alg, pubkey_len, sig_len)?;
+    Ok(CoreExtOpenSslDigest32BindingDescriptor {
+        openssl_alg,
+        pubkey_len,
+        sig_len,
+    })
+}
+
+fn core_ext_openssl_alg_cstr(openssl_alg: &str) -> Result<&'static CStr, TxError> {
+    match openssl_alg {
+        "ML-DSA-87" => Ok(c"ML-DSA-87"),
+        _ => Err(TxError::new(
+            ErrorCode::TxErrSigAlgInvalid,
+            "CORE_EXT verify_sig_ext unsupported OpenSSL alg",
+        )),
+    }
+}
+
+fn verify_core_ext_openssl_digest32_binding(
+    descriptor: &CoreExtOpenSslDigest32BindingDescriptor,
+    pubkey: &[u8],
+    signature: &[u8],
+    digest32: &[u8; 32],
+) -> Result<bool, TxError> {
+    if pubkey.len() as u64 != descriptor.pubkey_len || signature.len() as u64 != descriptor.sig_len
+    {
+        return Ok(false);
+    }
+    crate::verify_sig_openssl::ensure_openssl_consensus_init()?;
+    let alg = core_ext_openssl_alg_cstr(&descriptor.openssl_alg)?;
+    openssl_verify_sig_digest_oneshot(alg, pubkey, signature, digest32)
 }
 
 pub fn parse_core_ext_covenant_data(cov_data: &[u8]) -> Result<CoreExtCovenant<'_>, TxError> {
@@ -463,7 +596,7 @@ fn validate_core_ext_spend_with_cache_impl(
         ));
     }
 
-    let Some((&sighash_type, _crypto_sig)) = w.signature.split_last() else {
+    let Some((&sighash_type, crypto_sig)) = w.signature.split_last() else {
         return Err(TxError::new(
             ErrorCode::TxErrParse,
             "missing sighash_type byte",
@@ -475,7 +608,7 @@ fn validate_core_ext_spend_with_cache_impl(
             "invalid sighash_type",
         ));
     }
-    let _digest32 =
+    let digest32 =
         sighash_v1_digest_with_cache(cache, input_index, input_value, chain_id, sighash_type)?;
 
     match p.verification_binding {
@@ -492,6 +625,21 @@ fn validate_core_ext_spend_with_cache_impl(
             ErrorCode::TxErrSigAlgInvalid,
             "CORE_EXT verify_sig_ext error",
         )),
+        CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(ref descriptor) => {
+            match verify_core_ext_openssl_digest32_binding(
+                descriptor, &w.pubkey, crypto_sig, &digest32,
+            ) {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(TxError::new(
+                    ErrorCode::TxErrSigInvalid,
+                    "CORE_EXT signature invalid",
+                )),
+                Err(_) => Err(TxError::new(
+                    ErrorCode::TxErrSigAlgInvalid,
+                    "CORE_EXT verify_sig_ext error",
+                )),
+            }
+        }
     }
 }
 
@@ -771,6 +919,67 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    }
+
+    #[test]
+    fn core_ext_openssl_digest32_binding_descriptor_round_trip() {
+        let raw = core_ext_openssl_digest32_binding_descriptor_bytes(
+            "ML-DSA-87",
+            ML_DSA_87_PUBKEY_BYTES,
+            ML_DSA_87_SIG_BYTES,
+        )
+        .expect("descriptor");
+        let desc = parse_core_ext_openssl_digest32_binding_descriptor(&raw).expect("parse");
+        assert_eq!(desc.openssl_alg, "ML-DSA-87");
+        assert_eq!(desc.pubkey_len, ML_DSA_87_PUBKEY_BYTES);
+        assert_eq!(desc.sig_len, ML_DSA_87_SIG_BYTES);
+    }
+
+    #[test]
+    fn core_ext_active_verify_sig_ext_openssl_digest32_allows_non_native_suite() {
+        let kp = crate::verify_sig_openssl::Mldsa87Keypair::generate().expect("keypair");
+        let binding_descriptor = core_ext_openssl_digest32_binding_descriptor_bytes(
+            "ML-DSA-87",
+            ML_DSA_87_PUBKEY_BYTES,
+            ML_DSA_87_SIG_BYTES,
+        )
+        .expect("descriptor");
+        let descriptor =
+            parse_core_ext_openssl_digest32_binding_descriptor(&binding_descriptor).expect("parse");
+        let entry = dummy_entry(7);
+        let profiles = CoreExtProfiles {
+            active: vec![CoreExtActiveProfile {
+                ext_id: 7,
+                allowed_suite_ids: vec![0x09],
+                verification_binding: CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(
+                    descriptor,
+                ),
+                binding_descriptor,
+                ext_payload_schema: b"schema".to_vec(),
+            }],
+        };
+        let (tx, input_index, input_value, chain_id) = dummy_tx();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let digest =
+            sighash_v1_digest_with_cache(&mut cache, input_index, input_value, chain_id, 0x01)
+                .expect("digest");
+        let mut signature = kp.sign_digest32(digest).expect("sign");
+        signature.push(0x01);
+        let w = WitnessItem {
+            suite_id: 0x09,
+            pubkey: kp.pubkey_bytes(),
+            signature,
+        };
+        validate_core_ext_spend(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            &profiles,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1115,5 +1324,95 @@ mod tests {
             err.msg,
             "CORE_EXT registered native suite not spend-permitted at this height"
         );
+    }
+
+    #[test]
+    fn core_ext_verification_binding_name_helper_covers_native_and_unsupported() {
+        let native = core_ext_verification_binding_from_name("").expect("native empty");
+        assert!(matches!(
+            native,
+            CoreExtVerificationBinding::NativeVerifySig
+        ));
+        let native_named =
+            core_ext_verification_binding_from_name(" native_verify_sig \n").expect("native named");
+        assert!(matches!(
+            native_named,
+            CoreExtVerificationBinding::NativeVerifySig
+        ));
+        let descriptor = core_ext_openssl_digest32_binding_descriptor_bytes(
+            "ML-DSA-87",
+            ML_DSA_87_PUBKEY_BYTES,
+            ML_DSA_87_SIG_BYTES,
+        )
+        .expect("descriptor");
+        let openssl = core_ext_verification_binding_from_name_and_descriptor(
+            &format!("  {CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1}\n"),
+            &descriptor,
+        )
+        .expect("openssl binding");
+        assert!(matches!(
+            openssl,
+            CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(_)
+        ));
+        let err =
+            core_ext_verification_binding_from_name("unsupported").expect_err("unsupported bind");
+        assert!(err.contains("unsupported core_ext binding"));
+    }
+
+    #[test]
+    fn core_ext_binding_descriptor_validation_errors() {
+        let err = core_ext_openssl_digest32_binding_descriptor_bytes(
+            "bad",
+            ML_DSA_87_PUBKEY_BYTES,
+            ML_DSA_87_SIG_BYTES,
+        )
+        .expect_err("unsupported alg");
+        assert!(err.contains("unsupported core_ext OpenSSL alg"));
+
+        let err = core_ext_openssl_digest32_binding_descriptor_bytes(
+            "ML-DSA-87",
+            ML_DSA_87_PUBKEY_BYTES - 1,
+            ML_DSA_87_SIG_BYTES,
+        )
+        .expect_err("pubkey mismatch");
+        assert!(err.contains("pubkey length mismatch"));
+
+        let err = core_ext_openssl_digest32_binding_descriptor_bytes(
+            "ML-DSA-87",
+            ML_DSA_87_PUBKEY_BYTES,
+            ML_DSA_87_SIG_BYTES - 1,
+        )
+        .expect_err("sig mismatch");
+        assert!(err.contains("sig length mismatch"));
+    }
+
+    #[test]
+    fn parse_core_ext_binding_descriptor_rejects_malformed_inputs() {
+        let err = parse_core_ext_openssl_digest32_binding_descriptor(b"bad")
+            .expect_err("bad prefix must fail");
+        assert_eq!(err, "bad core_ext binding_descriptor");
+
+        let truncated = CORE_EXT_OPENSSL_DIGEST32_BINDING_DESCRIPTOR_PREFIX.to_vec();
+        let err = parse_core_ext_openssl_digest32_binding_descriptor(&truncated)
+            .expect_err("missing alg len must fail");
+        assert_eq!(err, "bad core_ext binding_descriptor");
+
+        let mut bad_alg = CORE_EXT_OPENSSL_DIGEST32_BINDING_DESCRIPTOR_PREFIX.to_vec();
+        encode_compact_size(5, &mut bad_alg);
+        bad_alg.extend_from_slice(b"x");
+        let err = parse_core_ext_openssl_digest32_binding_descriptor(&bad_alg)
+            .expect_err("truncated alg must fail");
+        assert_eq!(err, "bad core_ext binding_descriptor");
+
+        let mut trailing = core_ext_openssl_digest32_binding_descriptor_bytes(
+            "ML-DSA-87",
+            ML_DSA_87_PUBKEY_BYTES,
+            ML_DSA_87_SIG_BYTES,
+        )
+        .expect("descriptor");
+        trailing.push(0);
+        let err = parse_core_ext_openssl_digest32_binding_descriptor(&trailing)
+            .expect_err("trailing bytes must fail");
+        assert_eq!(err, "bad core_ext binding_descriptor");
     }
 }

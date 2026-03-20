@@ -682,6 +682,172 @@ func TestApplyNonCoinbaseTxBasic_CORE_EXT_VerifySigExtErrorMapsToAlgInvalid(t *t
 	}
 }
 
+func TestCoreExtOpenSSLDigest32BindingDescriptorRoundTrip(t *testing.T) {
+	raw, err := CoreExtOpenSSLDigest32BindingDescriptorBytes("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+	if err != nil {
+		t.Fatalf("CoreExtOpenSSLDigest32BindingDescriptorBytes: %v", err)
+	}
+	desc, err := ParseCoreExtOpenSSLDigest32BindingDescriptor(raw)
+	if err != nil {
+		t.Fatalf("ParseCoreExtOpenSSLDigest32BindingDescriptor: %v", err)
+	}
+	if desc.OpenSSLAlg != "ML-DSA-87" {
+		t.Fatalf("alg=%q, want ML-DSA-87", desc.OpenSSLAlg)
+	}
+	if desc.PubkeyLen != ML_DSA_87_PUBKEY_BYTES {
+		t.Fatalf("pubkey_len=%d, want %d", desc.PubkeyLen, ML_DSA_87_PUBKEY_BYTES)
+	}
+	if desc.SigLen != ML_DSA_87_SIG_BYTES {
+		t.Fatalf("sig_len=%d, want %d", desc.SigLen, ML_DSA_87_SIG_BYTES)
+	}
+}
+
+func TestApplyNonCoinbaseTxBasic_CORE_EXT_OpenSSLDigest32BindingVerifiesNonNativeSuite(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+
+	var chainID [32]byte
+	chainID[0] = 0x33
+	var prev [32]byte
+	prev[0] = 0xa6
+
+	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
+	tx, txid := mustParseTxForUtxo(t, txBytes)
+	witness := signP2PKInputWitness(t, tx, 0, 100, chainID, kp)
+	witness.SuiteID = 0x09
+	tx.Witness = []WitnessItem{witness}
+
+	descriptor, err := CoreExtOpenSSLDigest32BindingDescriptorBytes("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+	if err != nil {
+		t.Fatalf("CoreExtOpenSSLDigest32BindingDescriptorBytes: %v", err)
+	}
+	verifyFn, err := ParseCoreExtVerifySigExtBinding(CoreExtBindingNameVerifySigExtOpenSSLDigest32V1, descriptor)
+	if err != nil {
+		t.Fatalf("ParseCoreExtVerifySigExtBinding: %v", err)
+	}
+
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prev, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_CORE_EXT,
+			CovenantData: coreExtCovenantData(7, []byte{0x01}),
+		},
+	}
+
+	profiles := staticCoreExtProfiles{
+		7: {
+			Active: true,
+			AllowedSuites: map[uint8]struct{}{
+				0x09: {},
+			},
+			VerifySigExtFn:    verifyFn,
+			BindingDescriptor: descriptor,
+			ExtPayloadSchema:  []byte{0xb2},
+		},
+	}
+
+	if _, _, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(tx, txid, utxos, 0, 0, 0, chainID, profiles); err != nil {
+		t.Fatalf("ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles: %v", err)
+	}
+}
+
+func TestVerifyCoreExtOpenSSLDigest32_LengthMismatchSkipsConsensusInit(t *testing.T) {
+	resetOpenSSLBootstrapStateForTests()
+	t.Cleanup(resetOpenSSLBootstrapStateForTests)
+	opensslConsensusInitFn = func() error {
+		return errors.New("boom")
+	}
+	desc := CoreExtOpenSSLDigest32BindingDescriptor{
+		OpenSSLAlg: "ML-DSA-87",
+		PubkeyLen:  ML_DSA_87_PUBKEY_BYTES,
+		SigLen:     ML_DSA_87_SIG_BYTES,
+	}
+	var digest32 [32]byte
+	ok, err := verifyCoreExtOpenSSLDigest32(desc, []byte{0x01}, []byte{0x02}, digest32)
+	if err != nil {
+		t.Fatalf("verifyCoreExtOpenSSLDigest32: %v", err)
+	}
+	if ok {
+		t.Fatalf("length mismatch should reject before OpenSSL init")
+	}
+}
+
+func TestParseCoreExtVerifySigExtBinding_NativeAndUnsupported(t *testing.T) {
+	verifyFn, err := ParseCoreExtVerifySigExtBinding("", nil)
+	if err != nil {
+		t.Fatalf("native empty binding: %v", err)
+	}
+	if verifyFn != nil {
+		t.Fatalf("native empty binding must not create verify function")
+	}
+	verifyFn, err = ParseCoreExtVerifySigExtBinding("native_verify_sig", nil)
+	if err != nil {
+		t.Fatalf("native binding: %v", err)
+	}
+	if verifyFn != nil {
+		t.Fatalf("native binding must not create verify function")
+	}
+	if _, err := ParseCoreExtVerifySigExtBinding("unsupported", nil); err == nil {
+		t.Fatalf("unsupported binding must fail")
+	}
+}
+
+func TestCoreExtOpenSSLDigest32BindingDescriptorErrors(t *testing.T) {
+	if _, err := CoreExtOpenSSLDigest32BindingDescriptorBytes("bad", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES); err == nil {
+		t.Fatalf("unsupported alg must fail")
+	}
+	if _, err := CoreExtOpenSSLDigest32BindingDescriptorBytes("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES-1, ML_DSA_87_SIG_BYTES); err == nil {
+		t.Fatalf("pubkey len mismatch must fail")
+	}
+	if _, err := CoreExtOpenSSLDigest32BindingDescriptorBytes("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES-1); err == nil {
+		t.Fatalf("sig len mismatch must fail")
+	}
+}
+
+func TestParseCoreExtOpenSSLDigest32BindingDescriptorRejectsMalformed(t *testing.T) {
+	cases := map[string][]byte{
+		"bad-prefix":      []byte("bad"),
+		"missing-alg-len": append([]byte(nil), coreExtOpenSSLDigest32BindingDescriptorPrefix...),
+		"alg-len-overflow": append(
+			append([]byte(nil), coreExtOpenSSLDigest32BindingDescriptorPrefix...),
+			0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		),
+		"truncated-alg": append(
+			AppendCompactSize(append([]byte(nil), coreExtOpenSSLDigest32BindingDescriptorPrefix...), 5),
+			'M',
+		),
+		"missing-pubkey-len": append(
+			AppendCompactSize(append([]byte(nil), coreExtOpenSSLDigest32BindingDescriptorPrefix...), 8),
+			[]byte("ML-DSA-87")...,
+		),
+	}
+	for name, raw := range cases {
+		if _, err := ParseCoreExtOpenSSLDigest32BindingDescriptor(raw); err == nil {
+			t.Fatalf("%s: expected malformed descriptor error", name)
+		}
+	}
+
+	raw, err := CoreExtOpenSSLDigest32BindingDescriptorBytes("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+	if err != nil {
+		t.Fatalf("descriptor bytes: %v", err)
+	}
+	if _, err := ParseCoreExtOpenSSLDigest32BindingDescriptor(raw[:len(raw)-1]); err == nil {
+		t.Fatalf("truncated descriptor must fail")
+	}
+	withExtra := append(append([]byte(nil), raw...), 0x00)
+	if _, err := ParseCoreExtOpenSSLDigest32BindingDescriptor(withExtra); err == nil {
+		t.Fatalf("trailing bytes must fail")
+	}
+
+	unsupportedAlg := append([]byte(nil), coreExtOpenSSLDigest32BindingDescriptorPrefix...)
+	unsupportedAlg = AppendCompactSize(unsupportedAlg, 3)
+	unsupportedAlg = append(unsupportedAlg, []byte("bad")...)
+	unsupportedAlg = AppendCompactSize(unsupportedAlg, uint64(ML_DSA_87_PUBKEY_BYTES))
+	unsupportedAlg = AppendCompactSize(unsupportedAlg, uint64(ML_DSA_87_SIG_BYTES))
+	if _, err := ParseCoreExtOpenSSLDigest32BindingDescriptor(unsupportedAlg); err == nil {
+		t.Fatalf("unsupported parsed alg must fail validation")
+	}
+}
+
 func TestHasSuiteExported(t *testing.T) {
 	allowed := map[uint8]struct{}{1: {}, 3: {}}
 	if !HasSuiteExported(allowed, 1) {

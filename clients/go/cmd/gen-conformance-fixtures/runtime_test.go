@@ -3,10 +3,27 @@ package main
 import (
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestMustJSONUint32RejectsNonIntegralAndOverflow(t *testing.T) {
+	if _, err := parseJSONUint32("bad", math.MaxUint32+1); err == nil {
+		t.Fatalf("parseJSONUint32 should reject overflow")
+	}
+	if _, err := parseJSONUint32("bad", 1.5); err == nil {
+		t.Fatalf("parseJSONUint32 should reject non-integral values")
+	}
+	got, err := parseJSONUint32("ok", 7.0)
+	if err != nil {
+		t.Fatalf("parseJSONUint32(valid): %v", err)
+	}
+	if got != 7 {
+		t.Fatalf("got %d, want 7", got)
+	}
+}
 
 func TestGenConformanceFixturesGenerator_WritesToTempRepo(t *testing.T) {
 	tmp := t.TempDir()
@@ -82,6 +99,33 @@ func TestGenConformanceFixturesGenerator_WritesToTempRepo(t *testing.T) {
 		newVector("CV-U-12", 2, nil),
 		newVector("CV-U-13", 2, nil),
 		newVector("CV-U-19", 1, nil), // burn-to-fee (output_count=0)
+		newVector("CV-U-EXT-05", 1, map[string]any{
+			"core_ext_profiles": []any{
+				map[string]any{
+					"ext_id":                 float64(1),
+					"activation_height":      float64(0),
+					"allowed_suite_ids":      []any{float64(3)},
+					"binding":                "",
+					"binding_descriptor_hex": "",
+					"ext_payload_schema_hex": "",
+				},
+			},
+		}),
+	})
+
+	writeFixture("CV-EXT.json", []map[string]any{
+		newVector("CV-EXT-ENF-04", 1, map[string]any{
+			"core_ext_profiles": []any{
+				map[string]any{
+					"ext_id":                 float64(4096),
+					"activation_height":      float64(50),
+					"allowed_suite_ids":      []any{float64(1), float64(3)},
+					"binding":                "",
+					"binding_descriptor_hex": "",
+					"ext_payload_schema_hex": "",
+				},
+			},
+		}),
 	})
 
 	writeFixture("CV-VAULT.json", []map[string]any{
