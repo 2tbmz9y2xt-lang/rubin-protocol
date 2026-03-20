@@ -187,8 +187,7 @@ fn core_ext_deployments_from_json(
             decode_optional_hex_bytes("binding_descriptor_hex", &item.binding_descriptor_hex)?;
         let ext_payload_schema =
             decode_optional_hex_bytes("ext_payload_schema_hex", &item.ext_payload_schema_hex)?;
-        if item.binding
-            == rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+        if item.binding == rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
             && ext_payload_schema.is_empty()
         {
             return Err(format!(
@@ -422,11 +421,10 @@ mod tests {
                 rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
             )
             .expect("descriptor");
-        let descriptor =
-            rubin_consensus::parse_core_ext_openssl_digest32_binding_descriptor(
-                &binding_descriptor,
-            )
-            .expect("parse");
+        let descriptor = rubin_consensus::parse_core_ext_openssl_digest32_binding_descriptor(
+            &binding_descriptor,
+        )
+        .expect("parse");
         let mut anchor = core_ext_profile_set_anchor_v1(
             devnet_genesis_chain_id(),
             &[CoreExtDeploymentProfile {

@@ -359,11 +359,11 @@ fn verify_core_ext_openssl_digest32_binding(
     signature: &[u8],
     digest32: &[u8; 32],
 ) -> Result<bool, TxError> {
-    crate::verify_sig_openssl::ensure_openssl_consensus_init()?;
     if pubkey.len() as u64 != descriptor.pubkey_len || signature.len() as u64 != descriptor.sig_len
     {
         return Ok(false);
     }
+    crate::verify_sig_openssl::ensure_openssl_consensus_init()?;
     let alg = core_ext_openssl_alg_cstr(&descriptor.openssl_alg)?;
     openssl_verify_sig_digest_oneshot(alg, pubkey, signature, digest32)
 }

@@ -750,6 +750,27 @@ func TestApplyNonCoinbaseTxBasic_CORE_EXT_OpenSSLDigest32BindingVerifiesNonNativ
 	}
 }
 
+func TestVerifyCoreExtOpenSSLDigest32_LengthMismatchSkipsConsensusInit(t *testing.T) {
+	resetOpenSSLBootstrapStateForTests()
+	t.Cleanup(resetOpenSSLBootstrapStateForTests)
+	opensslConsensusInitFn = func() error {
+		return errors.New("boom")
+	}
+	desc := CoreExtOpenSSLDigest32BindingDescriptor{
+		OpenSSLAlg: "ML-DSA-87",
+		PubkeyLen:  ML_DSA_87_PUBKEY_BYTES,
+		SigLen:     ML_DSA_87_SIG_BYTES,
+	}
+	var digest32 [32]byte
+	ok, err := verifyCoreExtOpenSSLDigest32(desc, []byte{0x01}, []byte{0x02}, digest32)
+	if err != nil {
+		t.Fatalf("verifyCoreExtOpenSSLDigest32: %v", err)
+	}
+	if ok {
+		t.Fatalf("length mismatch should reject before OpenSSL init")
+	}
+}
+
 func TestHasSuiteExported(t *testing.T) {
 	allowed := map[uint8]struct{}{1: {}, 3: {}}
 	if !HasSuiteExported(allowed, 1) {

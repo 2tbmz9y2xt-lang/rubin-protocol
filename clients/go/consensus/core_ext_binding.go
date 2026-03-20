@@ -102,11 +102,11 @@ func validateCoreExtOpenSSLBindingDescriptor(opensslAlg string, pubkeyLen int, s
 }
 
 func verifyCoreExtOpenSSLDigest32(desc CoreExtOpenSSLDigest32BindingDescriptor, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
-	if err := ensureOpenSSLConsensusInit(); err != nil {
-		return false, err
-	}
 	if len(pubkey) != desc.PubkeyLen || len(signature) != desc.SigLen {
 		return false, nil
+	}
+	if err := ensureOpenSSLConsensusInit(); err != nil {
+		return false, err
 	}
 	ok, err := opensslVerifySigOneShotFn(desc.OpenSSLAlg, pubkey, signature, digest32[:])
 	if err != nil {
