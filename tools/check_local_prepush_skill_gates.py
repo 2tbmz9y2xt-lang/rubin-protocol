@@ -2,16 +2,37 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shlex
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+
+MAX_RENDERED_CHANGED_PATHS = 25
+MAX_RENDERED_PATH_CHARS = 160
+
+
+@dataclass(frozen=True)
+class ScanLens:
+    name: str
+    active: bool
+    why: str
+    guidance: str
+
+
+@dataclass(frozen=True)
+class ReviewProfile:
+    name: str
+    why: str
 
 
 def read_changed_files(path: Path) -> set[str]:
     if not path.exists():
         return set()
-    return {line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
+    raw = path.read_text(encoding="utf-8")
+    parts = raw.split("\0") if "\0" in raw else raw.splitlines()
+    return {part for part in parts if part}
 
 
 def is_under(path: str, prefix: str) -> bool:
@@ -40,20 +61,16 @@ def run_check(name: str, cmd: list[str], repo_root: Path) -> int:
     return proc.returncode
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--repo-root", required=True)
-    ap.add_argument("--changed-files", required=True)
-    ap.add_argument("--focus-output", required=True)
-    args = ap.parse_args()
+def sanitize_path_for_prompt(path: str) -> str:
+    truncated = path if len(path) <= MAX_RENDERED_PATH_CHARS else path[: MAX_RENDERED_PATH_CHARS - 3] + "..."
+    return shlex.quote(truncated).replace("\n", r"\n").replace("\r", r"\r").replace("\t", r"\t")
 
-    repo_root = Path(args.repo_root).resolve()
-    changed = read_changed_files(Path(args.changed_files))
-    focus_output = Path(args.focus_output)
 
+def build_plan(changed: set[str]) -> tuple[list[tuple[str, list[str]]], list[str], list[ScanLens], ReviewProfile]:
     checks: list[tuple[str, list[str]]] = []
     seen_check_names: set[str] = set()
     focuses: list[str] = []
+    lenses: list[ScanLens] = []
 
     def add_check(name: str, cmd: list[str]) -> None:
         if name in seen_check_names:
@@ -64,6 +81,16 @@ def main() -> int:
     def add_focus(text: str) -> None:
         if text not in focuses:
             focuses.append(text)
+
+    def add_lens(name: str, *, active: bool, active_why: str, guidance: str, inactive_why: str) -> None:
+        lenses.append(
+            ScanLens(
+                name=name,
+                active=active,
+                why=active_why if active else inactive_why,
+                guidance=guidance,
+            )
+        )
 
     fixture_json_changed = any(
         matches_any(
@@ -217,7 +244,207 @@ def main() -> int:
             ["scripts/dev-env.sh", "--", "bash", "-lc", "cd clients/rust && cargo test -p rubin-consensus"],
         )
 
+    consensus_core_related = any(
+        matches_any(
+            path,
+            prefixes=(
+                "clients/go/consensus",
+                "clients/rust/crates/rubin-consensus",
+                "clients/go/cmd/rubin-consensus-cli",
+                "clients/rust/crates/rubin-consensus-cli",
+                "conformance",
+                "tools/formal",
+            ),
+            suffixes=(".lean",),
+            exact=(
+                "tools/check_formal_refinement_bridge.py",
+                "tools/check_lean_conformance_staleness.py",
+                "rubin-formal/refinement_bridge.json",
+            ),
+        )
+        for path in changed
+    )
+    crypto_related = any(
+        any(token in path for token in ("verify_sig", "openssl", "mldsa", "sighash", "suite_registry", "rotation_descriptor"))
+        for path in changed
+    )
+    core_ext_related = any("core_ext" in path for path in changed)
+
+    runtime_source_related = any(
+        (path.endswith(".go") and not path.endswith("_test.go"))
+        or (path.endswith(".rs") and not path.endswith("_test.rs"))
+        for path in changed
+    )
+    has_scan_surface = any(
+        path.endswith((".go", ".rs", ".py", ".sh", ".yml", ".yaml", ".json", ".toml", ".md"))
+        for path in changed
+    )
+    go_related = any(path.endswith(".go") for path in changed)
+    python_related = any(path.endswith(".py") for path in changed)
+    rust_dependency_related = any(Path(path).name in {"Cargo.toml", "Cargo.lock"} for path in changed)
+    internal_tooling_related = any(
+        path.startswith(("tools/", "scripts/", ".github/workflows/", ".git/hooks-disabled/"))
+        for path in changed
+    )
+    coverage_related = any(
+        matches_any(
+            path,
+            prefixes=("clients/go", "clients/rust", "conformance", "tools/formal"),
+            suffixes=(".go", ".rs", ".lean"),
+            exact=("conformance/runner/run_cv_bundle.py",),
+        )
+        for path in changed
+    )
+
+    add_lens(
+        "code-review",
+        active=True,
+        active_why="Always-on baseline pass for correctness, regressions, changed-line security impact, and reviewable behavioral drift.",
+        guidance="Do a primary correctness/regression/security review of the diff before considering any specialized lens complete.",
+        inactive_why="Never inactive.",
+    )
+    add_lens(
+        "diff-scan",
+        active=True,
+        active_why="Always-on diff-focused pass over the exact changed bundle.",
+        guidance="Treat the diff bundle as the trusted attack surface; look for newly introduced changed-line issues and do not promote unchanged code to findings unless the diff makes it newly reachable.",
+        inactive_why="Never inactive.",
+    )
+    add_lens(
+        "combined-security-scan",
+        active=has_scan_surface or internal_tooling_related,
+        active_why="Code/config/tooling files changed, so the review should synthesize multiple security and reliability passes into one conclusion.",
+        guidance="Synthesize crypto misuse, parse/serialization, auth/config, filesystem/process, resource-exhaustion, and supply-chain angles before returning findings=[].",
+        inactive_why="No code/config/tooling scan surface changed in this push.",
+    )
+    add_lens(
+        "semgrep-scan",
+        active=has_scan_surface or internal_tooling_related,
+        active_why="Code/config/tooling files changed, so pattern-style security checks are relevant.",
+        guidance="Emulate semgrep-style pattern review over changed files: dangerous command execution, path handling, weak validation, auth bypass, unsafe deserialization, and config drift.",
+        inactive_why="No code/config/tooling files changed that justify semgrep-style pattern review.",
+    )
+    add_lens(
+        "gosec-scan",
+        active=go_related,
+        active_why="Go source changed in this push.",
+        guidance="Apply gosec-style scrutiny for command execution, weak randomness, temp/file permission handling, unsafe conversions, nil/error handling, and network/security defaults in Go paths.",
+        inactive_why="No Go source changed in this push.",
+    )
+    add_lens(
+        "cargo-audit-scan",
+        active=rust_dependency_related,
+        active_why="Rust dependency manifests or lockfiles changed, so supply-chain/advisory drift is in scope.",
+        guidance="Review dependency changes as a cargo-audit lens: advisories, vulnerable crate upgrades/downgrades, and new dependency surface introduced by the diff.",
+        inactive_why="No Rust dependency manifest or lockfile changed in this push.",
+    )
+    add_lens(
+        "security-best-practices",
+        active=go_related or python_related,
+        active_why="Go or Python source changed, so secure-defaults guidance is relevant.",
+        guidance="Check secure defaults, input validation, error handling, timeouts, resource limits, and denial-of-service hardening for the changed Go/Python paths.",
+        inactive_why="No Go or Python source changed in this push.",
+    )
+    add_lens(
+        "rubin-coverage",
+        active=coverage_related,
+        active_why="Consensus/runtime/conformance paths changed, so test reachability and coverage regressions are part of push risk.",
+        guidance="Look for missing tests, dead branches behind non-public surfaces, and changes that expand runtime risk without matching executable coverage evidence.",
+        inactive_why="No consensus/runtime/conformance path changed that requires a coverage lens.",
+    )
+    add_lens(
+        "internal-tools",
+        active=internal_tooling_related,
+        active_why="Tooling, hooks, scripts, or workflow files changed in this push.",
+        guidance="Review operational safety, fail-closed behavior, idempotence, path handling, and local-vs-canonical truth boundaries for changed tooling.",
+        inactive_why="No tooling/workflow files changed in this push.",
+    )
+
+    if any((consensus_core_related, formal_bridge_related, openssl_related, conformance_hygiene_related, conformance_runtime_related, crypto_related, core_ext_related, rust_perf_related)):
+        profile = ReviewProfile(
+            name="heavy_artillery",
+            why="Consensus/core/formal/crypto/CORE_EXT surface changed, so pre-push must use the heaviest review profile.",
+        )
+    elif runtime_source_related:
+        profile = ReviewProfile(
+            name="runtime_code",
+            why="Protocol runtime code changed outside the strict consensus-heavy bucket, so use the full GPT-5.4 runtime review profile.",
+        )
+    else:
+        profile = ReviewProfile(
+            name="fast_patch",
+            why="Only tooling/tests/docs/patch-level surface changed, so the fast GPT-5.4-mini review profile is sufficient.",
+        )
+
+    return checks, focuses, lenses, profile
+
+
+def render_fullscan(changed: set[str], checks: list[tuple[str, list[str]]], lenses: list[ScanLens], profile: ReviewProfile) -> str:
+    active = [lens for lens in lenses if lens.active]
+    standby = [lens for lens in lenses if not lens.active]
+    lines: list[str] = [
+        "Skill-backed full-scan supplement:",
+        "- These entries are scripted review lenses. They are not claims that external tools or Codex skills were auto-executed unless a deterministic local gate below already ran.",
+        "- Apply every ACTIVE lens before returning findings=[].",
+        "- Keep findings grounded in the diff bundle and changed-line evidence contract.",
+        f"- Selected review profile: {profile.name}.",
+        f"- Profile rationale: {profile.why}",
+    ]
+
+    if changed:
+        lines.extend(["", "Changed files in scope:"])
+        sorted_paths = sorted(changed)
+        rendered = sorted_paths[:MAX_RENDERED_CHANGED_PATHS]
+        lines.extend(f"- {sanitize_path_for_prompt(path)}" for path in rendered)
+        remaining = len(sorted_paths) - len(rendered)
+        if remaining > 0:
+            lines.append(f"- +{remaining} more files omitted from the supplement; rely on the diff bundle for the complete path set.")
+
+    if checks:
+        lines.extend(["", "Deterministic local gates already executed before model review:"])
+        lines.extend(f"- {name}" for name, _ in checks)
+
+    lines.extend(["", "ACTIVE review lenses:"])
+    if active:
+        for lens in active:
+            lines.append(f"- {lens.name}: {lens.why}")
+            lines.append(f"  Pass: {lens.guidance}")
+    else:
+        lines.append("- None. Use the baseline review rules only.")
+
+    if standby:
+        lines.extend(["", "STANDBY review lenses (inactive for this push):"])
+        for lens in standby:
+            lines.append(f"- {lens.name}: {lens.why}")
+            lines.append(f"  If activated later: {lens.guidance}")
+
+    return "\n".join(lines) + "\n"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--repo-root", required=True)
+    ap.add_argument("--changed-files", required=True)
+    ap.add_argument("--focus-output", required=True)
+    ap.add_argument("--fullscan-output", required=True)
+    ap.add_argument("--profile-output")
+    args = ap.parse_args()
+
+    repo_root = Path(args.repo_root).resolve()
+    changed = read_changed_files(Path(args.changed_files))
+    focus_output = Path(args.focus_output)
+    fullscan_output = Path(args.fullscan_output)
+    profile_output = Path(args.profile_output).resolve() if args.profile_output else None
+
+    checks, focuses, lenses, profile = build_plan(changed)
+
     focus_output.write_text("\n".join(focuses) + ("\n" if focuses else ""), encoding="utf-8")
+    fullscan_output.write_text(render_fullscan(changed, checks, lenses, profile), encoding="utf-8")
+    if profile_output is not None:
+        profile_output.write_text(
+            json.dumps({"profile": profile.name, "why": profile.why}, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
     if not checks:
         print("[local-prepush-gate] no extra local gates triggered")
