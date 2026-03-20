@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "note": "rubin-protocol local pre-push review contract",
+  "model": "gpt-5.3-codex",
+  "model_reasoning_effort": "xhigh",
+  "stall_seconds": 75,
+  "fullscan_mode": "skill-backed"
+}
