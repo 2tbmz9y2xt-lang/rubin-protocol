@@ -205,12 +205,26 @@ func parseOptionalHexBytes(name, value string) ([]byte, error) {
 	return raw, nil
 }
 
+func runtimeCoreExtBindingIsSupported(binding string) error {
+	switch binding {
+	case "", "native_verify_sig":
+	case consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1:
+		return nil
+	default:
+		return fmt.Errorf("unsupported core_ext binding: %s", binding)
+	}
+	return nil
+}
+
 func buildCoreExtDeployments(items []CoreExtProfileJSON) ([]consensus.CoreExtDeploymentProfile, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
 	deployments := make([]consensus.CoreExtDeploymentProfile, 0, len(items))
 	for _, item := range items {
+		if err := runtimeCoreExtBindingIsSupported(item.Binding); err != nil {
+			return nil, err
+		}
 		bindingDescriptor, err := parseOptionalHexBytes("binding_descriptor_hex", item.BindingDescriptorHex)
 		if err != nil {
 			return nil, err
@@ -240,7 +254,7 @@ func buildCoreExtDeployments(items []CoreExtProfileJSON) ([]consensus.CoreExtDep
 }
 
 func parseRuntimeCoreExtBinding(binding string, bindingDescriptor []byte, extPayloadSchema []byte) (consensus.CoreExtVerifySigExtFunc, error) {
-	if strings.TrimSpace(binding) == consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 && len(extPayloadSchema) == 0 {
+	if binding == consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 && len(extPayloadSchema) == 0 {
 		return nil, fmt.Errorf("core_ext binding %s requires ext_payload_schema_hex", consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
 	}
 	return consensus.ParseCoreExtVerifySigExtBinding(binding, bindingDescriptor)

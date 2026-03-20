@@ -248,11 +248,8 @@ pub fn core_ext_verification_binding_from_name_and_descriptor(
     binding_name: &str,
     binding_descriptor: &[u8],
 ) -> Result<CoreExtVerificationBinding, String> {
-    match binding_name.trim() {
+    match binding_name {
         "" | "native_verify_sig" => Ok(CoreExtVerificationBinding::NativeVerifySig),
-        "verify_sig_ext_accept" => Ok(CoreExtVerificationBinding::VerifySigExtAccept),
-        "verify_sig_ext_reject" => Ok(CoreExtVerificationBinding::VerifySigExtReject),
-        "verify_sig_ext_error" => Ok(CoreExtVerificationBinding::VerifySigExtError),
         CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1 => {
             Ok(CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(
                 parse_core_ext_openssl_digest32_binding_descriptor(binding_descriptor)?,
@@ -319,13 +316,16 @@ pub fn parse_core_ext_openssl_digest32_binding_descriptor(
     off += alg_len_bytes;
     let alg_len_usize =
         usize::try_from(alg_len).map_err(|_| "bad core_ext binding_descriptor".to_string())?;
-    if off + alg_len_usize > raw.len() {
+    let end = off
+        .checked_add(alg_len_usize)
+        .ok_or_else(|| "bad core_ext binding_descriptor".to_string())?;
+    if end > raw.len() {
         return Err("bad core_ext binding_descriptor".to_string());
     }
-    let openssl_alg = std::str::from_utf8(&raw[off..off + alg_len_usize])
+    let openssl_alg = std::str::from_utf8(&raw[off..end])
         .map_err(|_| "bad core_ext binding_descriptor".to_string())?
         .to_string();
-    off += alg_len_usize;
+    off = end;
     let (pubkey_len, pubkey_len_bytes) = read_compact_size_bytes(&raw[off..])
         .map_err(|_| "bad core_ext binding_descriptor".to_string())?;
     off += pubkey_len_bytes;

@@ -2,453 +2,455 @@
   "gate": "CV-EXT",
   "vectors": [
     {
-      "id": "CV-EXT-ENV-01",
-      "family": "ENV",
-      "op": "ext_envelope_parse",
+      "covenant_data_hex": "001000",
       "description": "Valid envelope: ext_id=0x1000, empty payload",
-      "covenant_data_hex": "001000",
-      "expect_ok": true
+      "expect_ok": true,
+      "family": "ENV",
+      "id": "CV-EXT-ENV-01",
+      "op": "ext_envelope_parse"
     },
     {
-      "id": "CV-EXT-ENV-02",
-      "family": "ENV",
-      "op": "ext_envelope_parse",
-      "description": "Malformed: too short (1 byte)",
       "covenant_data_hex": "01",
+      "description": "Malformed: too short (1 byte)",
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
       "expect_ok": false,
-      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID"
+      "family": "ENV",
+      "id": "CV-EXT-ENV-02",
+      "op": "ext_envelope_parse"
     },
     {
-      "id": "CV-EXT-ENV-03",
-      "family": "ENV",
-      "op": "ext_envelope_parse",
-      "description": "Valid envelope: ext_id=0x1000, 3-byte payload",
       "covenant_data_hex": "001003010203",
-      "expect_ok": true
-    },
-    {
-      "id": "CV-EXT-ENV-04",
+      "description": "Valid envelope: ext_id=0x1000, 3-byte payload",
+      "expect_ok": true,
       "family": "ENV",
-      "op": "ext_envelope_parse",
+      "id": "CV-EXT-ENV-03",
+      "op": "ext_envelope_parse"
+    },
+    {
+      "covenant_data_hex": "0010050102",
       "description": "Malformed: payload length mismatch (declares 5, has 2)",
-      "covenant_data_hex": "0010050102",
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
       "expect_ok": false,
-      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID"
+      "family": "ENV",
+      "id": "CV-EXT-ENV-04",
+      "op": "ext_envelope_parse"
     },
     {
-      "id": "CV-EXT-ACT-01",
-      "family": "ACT",
-      "op": "ext_activation_check",
-      "description": "Pre-activation (height 49 < activation 50): permissive",
+      "core_ext_profiles": [
+        {
+          "activation_height": 50,
+          "allowed_suite_ids": [
+            1,
+            3
+          ],
+          "binding": "native_verify_sig",
+          "ext_id": 4096
+        }
+      ],
       "covenant_data_hex": "001000",
+      "description": "Pre-activation (height 49 \u003c activation 50): permissive",
+      "expect_ok": true,
+      "family": "ACT",
       "height": 49,
+      "id": "CV-EXT-ACT-01",
+      "op": "ext_activation_check"
+    },
+    {
       "core_ext_profiles": [
         {
-          "ext_id": 4096,
           "activation_height": 50,
           "allowed_suite_ids": [
             1,
             3
           ],
-          "binding": "native_verify_sig"
+          "binding": "native_verify_sig",
+          "ext_id": 4096
         }
       ],
-      "expect_ok": true
-    },
-    {
-      "id": "CV-EXT-ACT-02",
-      "family": "ACT",
-      "op": "ext_activation_check",
+      "covenant_data_hex": "00100101",
       "description": "At activation (height 50 = activation 50): ACTIVE enforced, suite 1 allowed",
-      "covenant_data_hex": "00100101",
-      "height": 50,
-      "suite_id": 1,
-      "core_ext_profiles": [
-        {
-          "ext_id": 4096,
-          "activation_height": 50,
-          "allowed_suite_ids": [
-            1,
-            3
-          ],
-          "binding": "native_verify_sig"
-        }
-      ],
-      "expect_ok": true
-    },
-    {
-      "id": "CV-EXT-ACT-03",
+      "expect_ok": true,
       "family": "ACT",
+      "height": 50,
+      "id": "CV-EXT-ACT-02",
       "op": "ext_activation_check",
-      "description": "Undeclared profile (ext_id=0x2000, no deployment): permissive",
+      "suite_id": 1
+    },
+    {
+      "core_ext_profiles": [
+        {
+          "activation_height": 50,
+          "allowed_suite_ids": [
+            1,
+            3
+          ],
+          "binding": "native_verify_sig",
+          "ext_id": 4096
+        }
+      ],
       "covenant_data_hex": "002000",
+      "description": "Undeclared profile (ext_id=0x2000, no deployment): permissive",
+      "expect_ok": true,
+      "family": "ACT",
       "height": 100,
+      "id": "CV-EXT-ACT-03",
+      "op": "ext_activation_check"
+    },
+    {
       "core_ext_profiles": [
         {
-          "ext_id": 4096,
           "activation_height": 50,
           "allowed_suite_ids": [
             1,
             3
           ],
-          "binding": "native_verify_sig"
+          "binding": "native_verify_sig",
+          "ext_id": 4096
         }
       ],
-      "expect_ok": true
-    },
-    {
-      "id": "CV-EXT-PRE-01",
-      "family": "PRE",
-      "op": "ext_pre_activation_spend",
+      "covenant_data_hex": "001000",
       "description": "Keyless sentinel (suite_id=0) pre-activation: permissive accept",
-      "covenant_data_hex": "001000",
+      "expect_ok": true,
+      "family": "PRE",
       "height": 10,
-      "suite_id": 0,
+      "id": "CV-EXT-PRE-01",
+      "op": "ext_pre_activation_spend",
+      "suite_id": 0
+    },
+    {
       "core_ext_profiles": [
         {
-          "ext_id": 4096,
           "activation_height": 50,
           "allowed_suite_ids": [
             1,
             3
           ],
-          "binding": "native_verify_sig"
+          "binding": "native_verify_sig",
+          "ext_id": 4096
         }
       ],
-      "expect_ok": true
-    },
-    {
-      "id": "CV-EXT-PRE-02",
-      "family": "PRE",
-      "op": "ext_pre_activation_spend",
+      "covenant_data_hex": "00100101",
       "description": "Non-keyless (suite_id=1) pre-activation: permissive accept",
-      "covenant_data_hex": "00100101",
-      "height": 10,
-      "suite_id": 1,
-      "core_ext_profiles": [
-        {
-          "ext_id": 4096,
-          "activation_height": 50,
-          "allowed_suite_ids": [
-            1,
-            3
-          ],
-          "binding": "native_verify_sig"
-        }
-      ],
-      "expect_ok": true
-    },
-    {
-      "id": "CV-EXT-PRE-03",
+      "expect_ok": true,
       "family": "PRE",
+      "height": 10,
+      "id": "CV-EXT-PRE-02",
       "op": "ext_pre_activation_spend",
+      "suite_id": 1
+    },
+    {
+      "covenant_data_hex": "001000",
       "description": "No profiles at all: permissive accept",
-      "covenant_data_hex": "001000",
+      "expect_ok": true,
+      "family": "PRE",
       "height": 100,
-      "expect_ok": true
+      "id": "CV-EXT-PRE-03",
+      "op": "ext_pre_activation_spend"
     },
     {
-      "id": "CV-EXT-ENF-01",
-      "family": "ENF",
-      "op": "ext_enforcement_check",
+      "core_ext_profiles": [
+        {
+          "activation_height": 50,
+          "allowed_suite_ids": [
+            1,
+            3
+          ],
+          "binding": "native_verify_sig",
+          "ext_id": 4096
+        }
+      ],
+      "covenant_data_hex": "00100101",
       "description": "Allowed suite (suite_id=3): accept",
-      "covenant_data_hex": "00100101",
+      "expect_ok": true,
+      "family": "ENF",
       "height": 100,
-      "suite_id": 3,
+      "id": "CV-EXT-ENF-01",
+      "op": "ext_enforcement_check",
+      "suite_id": 3
+    },
+    {
       "core_ext_profiles": [
         {
-          "ext_id": 4096,
           "activation_height": 50,
           "allowed_suite_ids": [
             1,
             3
           ],
-          "binding": "native_verify_sig"
+          "binding": "native_verify_sig",
+          "ext_id": 4096
         }
       ],
-      "expect_ok": true
-    },
-    {
-      "id": "CV-EXT-ENF-02",
-      "family": "ENF",
-      "op": "ext_enforcement_check",
+      "covenant_data_hex": "00100101",
       "description": "Disallowed suite (suite_id=5): reject",
-      "covenant_data_hex": "00100101",
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
+      "expect_ok": false,
+      "family": "ENF",
       "height": 100,
-      "suite_id": 5,
+      "id": "CV-EXT-ENF-02",
+      "op": "ext_enforcement_check",
+      "suite_id": 5
+    },
+    {
       "core_ext_profiles": [
         {
-          "ext_id": 4096,
           "activation_height": 50,
           "allowed_suite_ids": [
             1,
             3
           ],
-          "binding": "native_verify_sig"
+          "binding": "native_verify_sig",
+          "ext_id": 4096
         }
       ],
-      "expect_ok": false,
-      "expect_err": "TX_ERR_SIG_ALG_INVALID"
-    },
-    {
-      "id": "CV-EXT-ENF-03",
-      "family": "ENF",
-      "op": "ext_enforcement_check",
+      "covenant_data_hex": "001000",
       "description": "Suite_id=0 (keyless) under ACTIVE: allowed (sentinel path)",
-      "covenant_data_hex": "001000",
-      "height": 100,
-      "suite_id": 0,
-      "core_ext_profiles": [
-        {
-          "ext_id": 4096,
-          "activation_height": 50,
-          "allowed_suite_ids": [
-            1,
-            3
-          ],
-          "binding": "native_verify_sig"
-        }
-      ],
-      "expect_ok": true
-    },
-    {
-      "id": "CV-EXT-ENF-04",
+      "expect_ok": true,
       "family": "ENF",
+      "height": 100,
+      "id": "CV-EXT-ENF-03",
       "op": "ext_enforcement_check",
-      "description": "verify_sig_ext_accept binding: allowed suite, accept",
-      "covenant_data_hex": "00100101",
-      "height": 100,
-      "suite_id": 1,
+      "suite_id": 0
+    },
+    {
       "core_ext_profiles": [
         {
-          "ext_id": 4096,
           "activation_height": 50,
           "allowed_suite_ids": [
             1,
             3
           ],
-          "binding": "verify_sig_ext_accept"
+          "binding": "verify_sig_ext_openssl_digest32_v1",
+          "binding_descriptor_hex": "525542494e2d434f52452d4558542d5645524946592d5349472d4f50454e53534c2d44494745535433322d7631094d4c2d4453412d3837fd200afd1312",
+          "ext_id": 4096,
+          "ext_payload_schema_hex": "b2"
         }
       ],
-      "expect_ok": true
+      "covenant_data_hex": "00100101",
+      "description": "verify_sig_ext_openssl_digest32_v1 binding: allowed suite, real ML-DSA-87 verifier",
+      "expect_ok": true,
+      "family": "ENF",
+      "height": 100,
+      "id": "CV-EXT-ENF-04",
+      "op": "ext_enforcement_check",
+      "suite_id": 1
     },
     {
-      "id": "CV-EXT-PAY-01",
-      "family": "PAY",
-      "op": "ext_envelope_parse",
-      "description": "Valid payload: 32-byte data blob",
       "covenant_data_hex": "001020000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-      "expect_ok": true
-    },
-    {
-      "id": "CV-EXT-PAY-02",
+      "description": "Valid payload: 32-byte data blob",
+      "expect_ok": true,
       "family": "PAY",
-      "op": "ext_envelope_parse",
-      "description": "Empty payload is valid (extension-defined semantics)",
+      "id": "CV-EXT-PAY-01",
+      "op": "ext_envelope_parse"
+    },
+    {
       "covenant_data_hex": "001000",
-      "expect_ok": true
+      "description": "Empty payload is valid (extension-defined semantics)",
+      "expect_ok": true,
+      "family": "PAY",
+      "id": "CV-EXT-PAY-02",
+      "op": "ext_envelope_parse"
     },
     {
-      "id": "CV-EXT-ERR-01",
-      "family": "ERR",
-      "op": "ext_error_priority",
-      "description": "Parse error before suite check: malformed envelope",
+      "core_ext_profiles": [
+        {
+          "activation_height": 50,
+          "allowed_suite_ids": [
+            1,
+            3
+          ],
+          "binding": "native_verify_sig",
+          "ext_id": 4096
+        }
+      ],
       "covenant_data_hex": "0010050102",
+      "description": "Parse error before suite check: malformed envelope",
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "expect_ok": false,
+      "family": "ERR",
       "height": 100,
-      "suite_id": 5,
+      "id": "CV-EXT-ERR-01",
+      "op": "ext_error_priority",
+      "suite_id": 5
+    },
+    {
       "core_ext_profiles": [
         {
-          "ext_id": 4096,
           "activation_height": 50,
           "allowed_suite_ids": [
             1,
             3
           ],
-          "binding": "native_verify_sig"
+          "binding": "native_verify_sig",
+          "ext_id": 4096
         }
       ],
-      "expect_ok": false,
-      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID"
-    },
-    {
-      "id": "CV-EXT-ERR-02",
-      "family": "ERR",
-      "op": "ext_error_priority",
-      "description": "Too-short envelope (1 byte): parse error",
       "covenant_data_hex": "ff",
-      "height": 100,
-      "core_ext_profiles": [
-        {
-          "ext_id": 4096,
-          "activation_height": 50,
-          "allowed_suite_ids": [
-            1,
-            3
-          ],
-          "binding": "native_verify_sig"
-        }
-      ],
+      "description": "Too-short envelope (1 byte): parse error",
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
       "expect_ok": false,
-      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID"
-    },
-    {
-      "id": "CV-EXT-ERR-03",
       "family": "ERR",
-      "op": "ext_error_priority",
-      "description": "Valid envelope but disallowed suite: suite error (not parse)",
-      "covenant_data_hex": "00100101",
       "height": 100,
-      "suite_id": 99,
+      "id": "CV-EXT-ERR-02",
+      "op": "ext_error_priority"
+    },
+    {
       "core_ext_profiles": [
         {
-          "ext_id": 4096,
           "activation_height": 50,
           "allowed_suite_ids": [
             1,
             3
           ],
-          "binding": "native_verify_sig"
+          "binding": "native_verify_sig",
+          "ext_id": 4096
         }
       ],
+      "covenant_data_hex": "00100101",
+      "description": "Valid envelope but disallowed suite: suite error (not parse)",
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
       "expect_ok": false,
-      "expect_err": "TX_ERR_SIG_ALG_INVALID"
+      "family": "ERR",
+      "height": 100,
+      "id": "CV-EXT-ERR-03",
+      "op": "ext_error_priority",
+      "suite_id": 99
     },
     {
-      "id": "CV-EXT-DUP-01",
-      "family": "DUP",
-      "op": "ext_duplicate_profile",
-      "description": "Two profiles with same ext_id=7: reject",
-      "covenant_data_hex": "070000",
       "core_ext_profiles": [
         {
-          "ext_id": 7,
           "activation_height": 10,
           "allowed_suite_ids": [
             1
           ],
-          "binding": "native_verify_sig"
+          "binding": "native_verify_sig",
+          "ext_id": 7
         },
         {
-          "ext_id": 7,
           "activation_height": 20,
           "allowed_suite_ids": [
             3
           ],
-          "binding": "native_verify_sig"
+          "binding": "native_verify_sig",
+          "ext_id": 7
         }
       ],
+      "covenant_data_hex": "070000",
+      "description": "Two profiles with same ext_id=7: reject",
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
       "expect_ok": false,
-      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID"
+      "family": "DUP",
+      "id": "CV-EXT-DUP-01",
+      "op": "ext_duplicate_profile"
     },
     {
-      "id": "CV-EXT-DUP-02",
-      "family": "DUP",
-      "op": "ext_duplicate_profile",
-      "description": "Two profiles with different ext_ids: accept",
-      "covenant_data_hex": "070000",
       "core_ext_profiles": [
         {
-          "ext_id": 7,
           "activation_height": 10,
           "allowed_suite_ids": [
             1
           ],
-          "binding": "native_verify_sig"
+          "binding": "native_verify_sig",
+          "ext_id": 7
         },
         {
-          "ext_id": 8,
           "activation_height": 10,
           "allowed_suite_ids": [
             3
           ],
-          "binding": "native_verify_sig"
+          "binding": "native_verify_sig",
+          "ext_id": 8
         }
       ],
-      "expect_ok": true
+      "covenant_data_hex": "070000",
+      "description": "Two profiles with different ext_ids: accept",
+      "expect_ok": true,
+      "family": "DUP",
+      "id": "CV-EXT-DUP-02",
+      "op": "ext_duplicate_profile"
     },
     {
-      "id": "CV-EXT-GEN-01",
-      "family": "GEN",
-      "op": "ext_activation_check",
-      "description": "Genesis-active profile (activation_height=0): active at height 0",
-      "covenant_data_hex": "00100101",
-      "height": 0,
-      "suite_id": 1,
       "core_ext_profiles": [
         {
-          "ext_id": 4096,
           "activation_height": 0,
           "allowed_suite_ids": [
             1
           ],
-          "binding": "native_verify_sig"
+          "binding": "native_verify_sig",
+          "ext_id": 4096
         }
       ],
-      "expect_ok": true
+      "covenant_data_hex": "00100101",
+      "description": "Genesis-active profile (activation_height=0): active at height 0",
+      "expect_ok": true,
+      "family": "GEN",
+      "height": 0,
+      "id": "CV-EXT-GEN-01",
+      "op": "ext_activation_check",
+      "suite_id": 1
     },
     {
-      "id": "CV-EXT-GEN-02",
-      "family": "GEN",
-      "op": "ext_enforcement_check",
-      "description": "Genesis-active: disallowed suite at genesis height: reject",
-      "covenant_data_hex": "00100101",
-      "height": 0,
-      "suite_id": 5,
       "core_ext_profiles": [
         {
-          "ext_id": 4096,
           "activation_height": 0,
           "allowed_suite_ids": [
             1,
             3
           ],
-          "binding": "native_verify_sig"
+          "binding": "native_verify_sig",
+          "ext_id": 4096
         }
       ],
-      "expect_ok": false,
-      "expect_err": "TX_ERR_SIG_ALG_INVALID"
-    },
-    {
-      "id": "CV-EXT-PAR-01",
-      "family": "PAR",
-      "op": "ext_activation_check",
-      "description": "Parity: pre-activation permissive must match Go/Rust",
-      "covenant_data_hex": "001000",
-      "height": 10,
-      "core_ext_profiles": [
-        {
-          "ext_id": 4096,
-          "activation_height": 50,
-          "allowed_suite_ids": [
-            1,
-            3
-          ],
-          "binding": "native_verify_sig"
-        }
-      ],
-      "expect_ok": true
-    },
-    {
-      "id": "CV-EXT-PAR-02",
-      "family": "PAR",
-      "op": "ext_enforcement_check",
-      "description": "Parity: ACTIVE enforcement reject must match Go/Rust",
       "covenant_data_hex": "00100101",
-      "height": 100,
-      "suite_id": 99,
+      "description": "Genesis-active: disallowed suite at genesis height: reject",
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
+      "expect_ok": false,
+      "family": "GEN",
+      "height": 0,
+      "id": "CV-EXT-GEN-02",
+      "op": "ext_enforcement_check",
+      "suite_id": 5
+    },
+    {
       "core_ext_profiles": [
         {
-          "ext_id": 4096,
           "activation_height": 50,
           "allowed_suite_ids": [
             1,
             3
           ],
-          "binding": "native_verify_sig"
+          "binding": "native_verify_sig",
+          "ext_id": 4096
         }
       ],
+      "covenant_data_hex": "001000",
+      "description": "Parity: pre-activation permissive must match Go/Rust",
+      "expect_ok": true,
+      "family": "PAR",
+      "height": 10,
+      "id": "CV-EXT-PAR-01",
+      "op": "ext_activation_check"
+    },
+    {
+      "core_ext_profiles": [
+        {
+          "activation_height": 50,
+          "allowed_suite_ids": [
+            1,
+            3
+          ],
+          "binding": "native_verify_sig",
+          "ext_id": 4096
+        }
+      ],
+      "covenant_data_hex": "00100101",
+      "description": "Parity: ACTIVE enforcement reject must match Go/Rust",
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
       "expect_ok": false,
-      "expect_err": "TX_ERR_SIG_ALG_INVALID"
+      "family": "PAR",
+      "height": 100,
+      "id": "CV-EXT-PAR-02",
+      "op": "ext_enforcement_check",
+      "suite_id": 99
     }
   ]
 }

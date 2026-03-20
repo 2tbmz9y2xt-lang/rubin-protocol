@@ -851,6 +851,14 @@ fn parse_optional_chain_id_hex(chain_id: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
+fn core_ext_runtime_binding_supported(binding: &str) -> bool {
+    matches!(
+        binding,
+        "" | "native_verify_sig"
+            | rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+    )
+}
+
 fn core_ext_profiles_from_json(
     items: &[CoreExtProfileJson],
     chain_id: [u8; 32],
@@ -865,11 +873,14 @@ fn core_ext_profiles_from_json(
                 item.ext_id
             ));
         }
+        if !core_ext_runtime_binding_supported(&item.binding) {
+            return Err(format!("unsupported core_ext binding: {}", item.binding));
+        }
         let binding_descriptor =
             decode_optional_hex_bytes("binding_descriptor_hex", &item.binding_descriptor_hex)?;
         let ext_payload_schema =
             decode_optional_hex_bytes("ext_payload_schema_hex", &item.ext_payload_schema_hex)?;
-        if item.binding.trim()
+        if item.binding
             == rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
             && ext_payload_schema.is_empty()
         {
@@ -4527,20 +4538,33 @@ mod tests {
 
     #[test]
     fn core_ext_profiles_duplicate_rejected() {
+        let binding_descriptor =
+            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
+                "ML-DSA-87",
+                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            )
+            .expect("descriptor");
         let err = core_ext_profiles_from_json(
             &[
                 CoreExtProfileJson {
                     ext_id: 7,
                     activation_height: 0,
                     allowed_suite_ids: vec![3],
-                    binding: "verify_sig_ext_accept".to_string(),
+                    binding: rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+                        .to_string(),
+                    binding_descriptor_hex: hex::encode(&binding_descriptor),
+                    ext_payload_schema_hex: "b2".to_string(),
                     ..Default::default()
                 },
                 CoreExtProfileJson {
                     ext_id: 7,
                     activation_height: 10,
                     allowed_suite_ids: vec![3],
-                    binding: "verify_sig_ext_reject".to_string(),
+                    binding: rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+                        .to_string(),
+                    binding_descriptor_hex: hex::encode(binding_descriptor),
+                    ext_payload_schema_hex: "b2".to_string(),
                     ..Default::default()
                 },
             ],
@@ -4553,12 +4577,22 @@ mod tests {
 
     #[test]
     fn core_ext_profiles_height_gate() {
+        let binding_descriptor =
+            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
+                "ML-DSA-87",
+                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            )
+            .expect("descriptor");
         let profiles = core_ext_profiles_from_json(
             &[CoreExtProfileJson {
                 ext_id: 9,
                 activation_height: 42,
                 allowed_suite_ids: vec![3],
-                binding: "verify_sig_ext_accept".to_string(),
+                binding: rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+                    .to_string(),
+                binding_descriptor_hex: hex::encode(binding_descriptor),
+                ext_payload_schema_hex: "b2".to_string(),
                 ..Default::default()
             }],
             [0u8; 32],
@@ -4648,6 +4682,18 @@ mod tests {
     #[test]
     fn core_ext_profiles_anchor_mismatch_rejected() {
         let chain_id = [0x42; 32];
+        let binding_descriptor =
+            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
+                "ML-DSA-87",
+                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            )
+            .expect("descriptor");
+        let descriptor =
+            rubin_consensus::parse_core_ext_openssl_digest32_binding_descriptor(
+                &binding_descriptor,
+            )
+            .expect("parse");
         let mut expected = core_ext_profile_set_anchor_v1(
             chain_id,
             &[CoreExtDeploymentProfile {
@@ -4655,8 +4701,10 @@ mod tests {
                 activation_height: 42,
                 allowed_suite_ids: vec![3],
                 verification_binding:
-                    rubin_consensus::CoreExtVerificationBinding::VerifySigExtAccept,
-                binding_descriptor: vec![0xa1],
+                    rubin_consensus::CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(
+                        descriptor,
+                    ),
+                binding_descriptor: binding_descriptor.clone(),
                 ext_payload_schema: vec![0xb2],
             }],
         )
@@ -4667,8 +4715,9 @@ mod tests {
                 ext_id: 9,
                 activation_height: 42,
                 allowed_suite_ids: vec![3],
-                binding: "verify_sig_ext_accept".to_string(),
-                binding_descriptor_hex: "a1".to_string(),
+                binding: rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+                    .to_string(),
+                binding_descriptor_hex: hex::encode(binding_descriptor),
                 ext_payload_schema_hex: "b2".to_string(),
             }],
             chain_id,
@@ -4739,7 +4788,8 @@ mod tests {
                 ext_id: 9,
                 activation_height: 42,
                 allowed_suite_ids: vec![3],
-                binding: "verify_sig_ext_accept".to_string(),
+                binding: rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+                    .to_string(),
                 binding_descriptor_hex: "aa".repeat(4097),
                 ext_payload_schema_hex: "b2".to_string(),
             }],
@@ -4748,5 +4798,23 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, "bad binding_descriptor_hex");
+    }
+
+    #[test]
+    fn core_ext_profiles_reject_unsupported_binding_before_hex_decode() {
+        let err = core_ext_profiles_from_json(
+            &[CoreExtProfileJson {
+                ext_id: 9,
+                activation_height: 42,
+                allowed_suite_ids: vec![3],
+                binding: "unknown-binding".to_string(),
+                binding_descriptor_hex: "zz".to_string(),
+                ext_payload_schema_hex: "zz".to_string(),
+            }],
+            [0u8; 32],
+            "",
+        )
+        .unwrap_err();
+        assert!(err.contains("unsupported core_ext binding"));
     }
 }

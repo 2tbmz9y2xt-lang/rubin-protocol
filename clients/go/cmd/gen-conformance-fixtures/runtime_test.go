@@ -82,6 +82,33 @@ func TestGenConformanceFixturesGenerator_WritesToTempRepo(t *testing.T) {
 		newVector("CV-U-12", 2, nil),
 		newVector("CV-U-13", 2, nil),
 		newVector("CV-U-19", 1, nil), // burn-to-fee (output_count=0)
+		newVector("CV-U-EXT-05", 1, map[string]any{
+			"core_ext_profiles": []any{
+				map[string]any{
+					"ext_id":             float64(1),
+					"activation_height":  float64(0),
+					"allowed_suite_ids":  []any{float64(3)},
+					"binding":            "",
+					"binding_descriptor_hex": "",
+					"ext_payload_schema_hex": "",
+				},
+			},
+		}),
+	})
+
+	writeFixture("CV-EXT.json", []map[string]any{
+		newVector("CV-EXT-ENF-04", 1, map[string]any{
+			"core_ext_profiles": []any{
+				map[string]any{
+					"ext_id":             float64(4096),
+					"activation_height":  float64(50),
+					"allowed_suite_ids":  []any{float64(1), float64(3)},
+					"binding":            "",
+					"binding_descriptor_hex": "",
+					"ext_payload_schema_hex": "",
+				},
+			},
+		}),
 	})
 
 	writeFixture("CV-VAULT.json", []map[string]any{

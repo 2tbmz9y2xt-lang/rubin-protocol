@@ -158,6 +158,14 @@ fn decode_optional_hex_bytes(name: &str, value: &str) -> Result<Vec<u8>, String>
     hex::decode(trimmed).map_err(|e| format!("{name}: {e}"))
 }
 
+fn genesis_core_ext_binding_supported(binding: &str) -> bool {
+    matches!(
+        binding,
+        "" | "native_verify_sig"
+            | rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+    )
+}
+
 fn core_ext_deployments_from_json(
     chain_id: [u8; 32],
     expected_set_anchor_hex: &str,
@@ -172,11 +180,14 @@ fn core_ext_deployments_from_json(
                 item.ext_id
             ));
         }
+        if !genesis_core_ext_binding_supported(&item.binding) {
+            return Err(format!("unsupported core_ext binding: {}", item.binding));
+        }
         let binding_descriptor =
             decode_optional_hex_bytes("binding_descriptor_hex", &item.binding_descriptor_hex)?;
         let ext_payload_schema =
             decode_optional_hex_bytes("ext_payload_schema_hex", &item.ext_payload_schema_hex)?;
-        if item.binding.trim()
+        if item.binding
             == rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
             && ext_payload_schema.is_empty()
         {
@@ -273,9 +284,20 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("mkdir");
         let path = dir.join("genesis.json");
+        let binding_descriptor =
+            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
+                "ML-DSA-87",
+                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            )
+            .expect("descriptor");
         std::fs::write(
             &path,
-            "{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{\"ext_id\":7,\"activation_height\":12,\"allowed_suite_ids\":[3],\"binding\":\"verify_sig_ext_accept\"}]}",
+            format!(
+                "{{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{{\"ext_id\":7,\"activation_height\":12,\"allowed_suite_ids\":[3],\"binding\":\"{}\",\"binding_descriptor_hex\":\"{}\",\"ext_payload_schema_hex\":\"b2\"}}]}}",
+                rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
+                hex::encode(binding_descriptor),
+            ),
         )
         .expect("write");
 
@@ -393,14 +415,28 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("mkdir");
         let path = dir.join("genesis.json");
+        let binding_descriptor =
+            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
+                "ML-DSA-87",
+                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            )
+            .expect("descriptor");
+        let descriptor =
+            rubin_consensus::parse_core_ext_openssl_digest32_binding_descriptor(
+                &binding_descriptor,
+            )
+            .expect("parse");
         let mut anchor = core_ext_profile_set_anchor_v1(
             devnet_genesis_chain_id(),
             &[CoreExtDeploymentProfile {
                 ext_id: 7,
                 activation_height: 12,
                 allowed_suite_ids: vec![3],
-                verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
-                binding_descriptor: vec![0xa1],
+                verification_binding: CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(
+                    descriptor,
+                ),
+                binding_descriptor: binding_descriptor.clone(),
                 ext_payload_schema: vec![0xb2],
             }],
         )
@@ -409,8 +445,10 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "{{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profile_set_anchor_hex\":\"0x{}\",\"core_ext_profiles\":[{{\"ext_id\":7,\"activation_height\":12,\"allowed_suite_ids\":[3],\"binding\":\"verify_sig_ext_accept\",\"binding_descriptor_hex\":\"a1\",\"ext_payload_schema_hex\":\"b2\"}}]}}",
-                hex::encode(anchor)
+                "{{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profile_set_anchor_hex\":\"0x{}\",\"core_ext_profiles\":[{{\"ext_id\":7,\"activation_height\":12,\"allowed_suite_ids\":[3],\"binding\":\"{}\",\"binding_descriptor_hex\":\"{}\",\"ext_payload_schema_hex\":\"b2\"}}]}}",
+                hex::encode(anchor),
+                rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
+                hex::encode(binding_descriptor),
             ),
         )
         .expect("write");
@@ -435,7 +473,8 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "{{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{{\"ext_id\":7,\"activation_height\":12,\"allowed_suite_ids\":[3],\"binding\":\"verify_sig_ext_accept\",\"binding_descriptor_hex\":\"{}\",\"ext_payload_schema_hex\":\"b2\"}}]}}",
+                "{{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{{\"ext_id\":7,\"activation_height\":12,\"allowed_suite_ids\":[3],\"binding\":\"{}\",\"binding_descriptor_hex\":\"{}\",\"ext_payload_schema_hex\":\"b2\"}}]}}",
+                rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
                 "aa".repeat(4097)
             ),
         )
@@ -443,6 +482,29 @@ mod tests {
 
         let err = load_genesis_config(Some(&path)).unwrap_err();
         assert!(err.contains("bad binding_descriptor_hex"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_unsupported_binding_before_hex_decode() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-core-ext-unsupported-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            "{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{\"ext_id\":7,\"activation_height\":12,\"allowed_suite_ids\":[3],\"binding\":\"unknown-binding\",\"binding_descriptor_hex\":\"zz\",\"ext_payload_schema_hex\":\"zz\"}]}",
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path)).unwrap_err();
+        assert!(err.contains("unsupported core_ext binding"));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }

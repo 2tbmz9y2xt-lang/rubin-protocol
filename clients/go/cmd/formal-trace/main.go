@@ -128,12 +128,24 @@ type coreExtProfileJSON struct {
 	ExtPayloadSchemaHex  string  `json:"ext_payload_schema_hex,omitempty"`
 }
 
+func traceCoreExtBindingIsSupported(binding string) bool {
+	switch binding {
+	case "", "native_verify_sig", consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1:
+		return true
+	default:
+		return false
+	}
+}
+
 func buildCoreExtProfiles(items []coreExtProfileJSON) (consensus.CoreExtProfileProvider, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
 	deployments := make([]consensus.CoreExtDeploymentProfile, 0, len(items))
 	for _, item := range items {
+		if !traceCoreExtBindingIsSupported(item.Binding) {
+			return nil, fmt.Errorf("unsupported core_ext binding: %s", item.Binding)
+		}
 		bindingDescriptor, err := decodeOptionalTraceHexBytes("binding_descriptor_hex", item.BindingDescriptorHex)
 		if err != nil {
 			return nil, err
@@ -142,7 +154,7 @@ func buildCoreExtProfiles(items []coreExtProfileJSON) (consensus.CoreExtProfileP
 		if err != nil {
 			return nil, err
 		}
-		if strings.TrimSpace(item.Binding) == consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 && len(extPayloadSchema) == 0 {
+		if item.Binding == consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 && len(extPayloadSchema) == 0 {
 			return nil, fmt.Errorf("core_ext binding %s requires ext_payload_schema_hex", consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
 		}
 		verifySigExtFn, err := consensus.ParseCoreExtVerifySigExtBinding(item.Binding, bindingDescriptor)

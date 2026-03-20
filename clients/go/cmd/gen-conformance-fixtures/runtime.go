@@ -77,7 +77,16 @@ func runGeneratorCLI() {
 		)
 
 		updateP2PKBurnToFeeVector(f, "CV-U-19", zeroChainID, ownerKP, 100) // burn-to-fee, output_count=0
+		updateCoreExtRealBindingVector(f, "CV-U-EXT-05", zeroChainID, ownerKP, 100, 90)
 
+		mustWriteFixture(path, f)
+	}
+
+	// CV-EXT metadata update for strict real binding ingestion.
+	{
+		path := filepath.Join(repoRoot, "conformance/fixtures/CV-EXT.json")
+		f := mustLoadFixture(path)
+		updateCoreExtEnforcementVector(f, "CV-EXT-ENF-04")
 		mustWriteFixture(path, f)
 	}
 
@@ -233,6 +242,29 @@ func p2pkCovenantData(pub []byte) []byte {
 	return p2pkCovenantDataWithSuite(consensus.SUITE_ID_ML_DSA_87, pub)
 }
 
+func mustCoreExtOpenSSLDigest32BindingDescriptorHex() string {
+	raw, err := consensus.CoreExtOpenSSLDigest32BindingDescriptorBytes(
+		"ML-DSA-87",
+		consensus.ML_DSA_87_PUBKEY_BYTES,
+		consensus.ML_DSA_87_SIG_BYTES,
+	)
+	if err != nil {
+		fatalf("core_ext binding descriptor: %v", err)
+	}
+	return hex.EncodeToString(raw)
+}
+
+func setCoreExtOpenSSLDigest32Binding(v map[string]any) {
+	profiles := anyToSliceMap(v["core_ext_profiles"])
+	if len(profiles) != 1 {
+		fatalf("%s: want 1 core_ext profile", v["id"])
+	}
+	profiles[0]["binding"] = consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1
+	profiles[0]["binding_descriptor_hex"] = mustCoreExtOpenSSLDigest32BindingDescriptorHex()
+	profiles[0]["ext_payload_schema_hex"] = "b2"
+	v["core_ext_profiles"] = profiles
+}
+
 func multisigCovenantData1of1(pub []byte) []byte {
 	kid := keyIDForPub(pub)
 	out := make([]byte, 0, 34)
@@ -357,6 +389,53 @@ func updateP2PKBurnToFeeVector(f *fixtureFile, id string, chainID [32]byte, sign
 	b := mustTxBytes(tx)
 	v["tx_hex"] = hex.EncodeToString(b)
 	v["utxos"] = utxos
+}
+
+func updateCoreExtRealBindingVector(
+	f *fixtureFile,
+	id string,
+	chainID [32]byte,
+	signer *consensus.MLDSA87Keypair,
+	inValue uint64,
+	outValue uint64,
+) {
+	v := findVector(f, id)
+	setCoreExtOpenSSLDigest32Binding(v)
+
+	utxos := anyToSliceMap(v["utxos"])
+	if len(utxos) != 1 {
+		fatalf("%s: want 1 utxo, got %d", id, len(utxos))
+	}
+
+	prevTxid := mustHex32(utxos[0]["txid"].(string))
+	prevVout := uint32(utxos[0]["vout"].(float64))
+	pub := signer.PubkeyBytes()
+	outCov := p2pkCovenantData(pub)
+
+	tx := &consensus.Tx{
+		Version:  1,
+		TxKind:   0x00,
+		TxNonce:  1,
+		Inputs:   []consensus.TxInput{{PrevTxid: prevTxid, PrevVout: prevVout, ScriptSig: nil, Sequence: 0}},
+		Outputs:  []consensus.TxOutput{{Value: outValue, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: outCov}},
+		Locktime: 0,
+	}
+
+	sig := mustSignInputDigest(id, "input0", signer, tx, 0, inValue, chainID)
+	tx.Witness = []consensus.WitnessItem{{
+		SuiteID:   0x03,
+		Pubkey:    pub,
+		Signature: sig,
+	}}
+
+	v["tx_hex"] = hex.EncodeToString(mustTxBytes(tx))
+	v["utxos"] = utxos
+}
+
+func updateCoreExtEnforcementVector(f *fixtureFile, id string) {
+	v := findVector(f, id)
+	v["description"] = "verify_sig_ext_openssl_digest32_v1 binding: allowed suite, real ML-DSA-87 verifier"
+	setCoreExtOpenSSLDigest32Binding(v)
 }
 
 func updateVaultSpendVectorsUTXO(
