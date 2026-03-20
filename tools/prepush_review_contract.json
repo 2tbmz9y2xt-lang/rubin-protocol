@@ -1,25 +1,60 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "note": "rubin-protocol local pre-push review contract",
   "default_profile": "fast_patch",
   "fullscan_mode": "skill-backed",
   "profiles": {
     "fast_patch": {
       "combine_review_units_when_at_most": 6,
+      "conditional_lenses": [
+        "combined-security-scan",
+        "semgrep-scan",
+        "internal-tools"
+      ],
       "model": "gpt-5.4-mini",
       "model_reasoning_effort": "medium",
+      "required_lenses": [
+        "code-review",
+        "diff-scan"
+      ],
       "stall_seconds": 60
     },
     "heavy_artillery": {
       "combine_review_units_when_at_most": 4,
+      "conditional_lenses": [
+        "gosec-scan",
+        "cargo-audit-scan",
+        "security-best-practices",
+        "internal-tools"
+      ],
       "model": "gpt-5.4",
       "model_reasoning_effort": "xhigh",
+      "required_lenses": [
+        "code-review",
+        "diff-scan",
+        "combined-security-scan",
+        "semgrep-scan",
+        "rubin-coverage"
+      ],
       "stall_seconds": 90
     },
     "runtime_code": {
       "combine_review_units_when_at_most": 4,
+      "conditional_lenses": [
+        "gosec-scan",
+        "cargo-audit-scan",
+        "security-best-practices",
+        "rubin-coverage",
+        "internal-tools"
+      ],
       "model": "gpt-5.4",
       "model_reasoning_effort": "high",
+      "required_lenses": [
+        "code-review",
+        "diff-scan",
+        "combined-security-scan",
+        "semgrep-scan"
+      ],
       "stall_seconds": 75
     }
   }

@@ -11,6 +11,8 @@ from pathlib import Path
 
 MAX_RENDERED_CHANGED_PATHS = 25
 MAX_RENDERED_PATH_CHARS = 160
+CONTRACT_PATH = Path(__file__).resolve().with_name("prepush_review_contract.json")
+ALLOWED_REASONING = {"low", "medium", "high", "xhigh"}
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,111 @@ class ScanLens:
 class ReviewProfile:
     name: str
     why: str
+    model: str = ""
+    model_reasoning_effort: str = ""
+    stall_seconds: int = 0
+    combine_review_units_when_at_most: int = 0
+    required_lenses: tuple[str, ...] = ()
+    conditional_lenses: tuple[str, ...] = ()
+
+
+def load_profile_contract(profile_name: str, path: Path = CONTRACT_PATH) -> ReviewProfile:
+    default_profile = ReviewProfile(
+        name=profile_name,
+        why="Default local review contract.",
+        model="gpt-5.4",
+        model_reasoning_effort="high",
+        stall_seconds=75,
+        combine_review_units_when_at_most=4,
+        required_lenses=("code-review", "diff-scan"),
+        conditional_lenses=(),
+    )
+    if not path.exists():
+        raise ValueError(f"review contract at {path} is missing")
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"review contract at {path} must decode to an object")
+
+    try:
+        schema_version = int(data.get("schema_version") or 1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"review contract at {path} has non-numeric schema_version") from exc
+    if schema_version < 2:
+        raise ValueError(f"review contract at {path} must use schema_version >= 2")
+
+    profiles = data.get("profiles")
+    if not isinstance(profiles, dict) or not profiles:
+        raise ValueError(f"review contract at {path} must define non-empty profiles")
+    profile_data = profiles.get(profile_name)
+    if not isinstance(profile_data, dict):
+        raise ValueError(f"review contract at {path} has no profile named {profile_name!r}")
+
+    model = str(profile_data.get("model") or default_profile.model).strip()
+    reasoning = str(profile_data.get("model_reasoning_effort") or default_profile.model_reasoning_effort).strip().lower()
+    if reasoning not in ALLOWED_REASONING:
+        raise ValueError(
+            f"review contract at {path} has unsupported model_reasoning_effort={reasoning!r} for profile {profile_name!r}"
+        )
+
+    def read_int_field(field: str, default: int) -> int:
+        raw = profile_data.get(field)
+        return default if raw is None else int(raw)
+
+    try:
+        stall_seconds = read_int_field("stall_seconds", default_profile.stall_seconds)
+        combine_threshold = read_int_field(
+            "combine_review_units_when_at_most",
+            default_profile.combine_review_units_when_at_most,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"review contract at {path} has non-numeric thresholds for profile {profile_name!r}") from exc
+    if stall_seconds < 30:
+        raise ValueError(f"review contract at {path} profile {profile_name!r} has stall_seconds={stall_seconds}, expected >= 30")
+    if combine_threshold < 1:
+        raise ValueError(
+            f"review contract at {path} profile {profile_name!r} has combine_review_units_when_at_most={combine_threshold}, expected >= 1"
+        )
+
+    def read_lens_list(field: str) -> tuple[str, ...]:
+        raw = profile_data.get(field)
+        if raw is None:
+            raw = []
+        if not isinstance(raw, list):
+            raise ValueError(f"review contract at {path} field {field!r} for profile {profile_name!r} must be a list")
+        values: list[str] = []
+        for item in raw:
+            value = str(item).strip()
+            if not value:
+                raise ValueError(f"review contract at {path} field {field!r} for profile {profile_name!r} contains empty lens")
+            if value not in values:
+                values.append(value)
+        return tuple(values)
+
+    required_lenses = read_lens_list("required_lenses")
+    conditional_lenses = read_lens_list("conditional_lenses")
+    if not required_lenses:
+        raise ValueError(f"review contract at {path} profile {profile_name!r} must define non-empty required_lenses")
+
+    return ReviewProfile(
+        name=profile_name,
+        why=default_profile.why,
+        model=model,
+        model_reasoning_effort=reasoning,
+        stall_seconds=stall_seconds,
+        combine_review_units_when_at_most=combine_threshold,
+        required_lenses=required_lenses,
+        conditional_lenses=conditional_lenses,
+    )
+
+
+def ensure_known_profile_lenses(profile: ReviewProfile, lenses: list[ScanLens]) -> None:
+    known_lenses = {lens.name for lens in lenses}
+    unknown = [name for name in (*profile.required_lenses, *profile.conditional_lenses) if name not in known_lenses]
+    if unknown:
+        raise ValueError(
+            f"profile {profile.name!r} references unknown review lenses: {', '.join(sorted(set(unknown)))}"
+        )
 
 
 def read_changed_files(path: Path) -> set[str]:
@@ -375,12 +482,29 @@ def build_plan(changed: set[str]) -> tuple[list[tuple[str, list[str]]], list[str
             name="fast_patch",
             why="Only tooling/tests/docs/patch-level surface changed, so the fast GPT-5.4-mini review profile is sufficient.",
         )
-
+    contract_profile = load_profile_contract(profile.name)
+    profile = ReviewProfile(
+        name=profile.name,
+        why=profile.why,
+        model=contract_profile.model,
+        model_reasoning_effort=contract_profile.model_reasoning_effort,
+        stall_seconds=contract_profile.stall_seconds,
+        combine_review_units_when_at_most=contract_profile.combine_review_units_when_at_most,
+        required_lenses=contract_profile.required_lenses,
+        conditional_lenses=contract_profile.conditional_lenses,
+    )
+    ensure_known_profile_lenses(profile, lenses)
     return checks, focuses, lenses, profile
 
 
 def render_fullscan(changed: set[str], checks: list[tuple[str, list[str]]], lenses: list[ScanLens], profile: ReviewProfile) -> str:
-    active = [lens for lens in lenses if lens.active]
+    by_name = {lens.name: lens for lens in lenses}
+    profile_required = [by_name[name] for name in profile.required_lenses if name in by_name]
+    profile_conditional_active = [
+        by_name[name] for name in profile.conditional_lenses if name in by_name and by_name[name].active
+    ]
+    active_names = {lens.name for lens in profile_required if lens.active} | {lens.name for lens in profile_conditional_active}
+    active = [lens for lens in lenses if lens.active and lens.name not in active_names]
     standby = [lens for lens in lenses if not lens.active]
     lines: list[str] = [
         "Skill-backed full-scan supplement:",
@@ -389,6 +513,7 @@ def render_fullscan(changed: set[str], checks: list[tuple[str, list[str]]], lens
         "- Keep findings grounded in the diff bundle and changed-line evidence contract.",
         f"- Selected review profile: {profile.name}.",
         f"- Profile rationale: {profile.why}",
+        f"- Model route: {profile.model} ({profile.model_reasoning_effort}), combine-if-paths<={profile.combine_review_units_when_at_most}.",
     ]
 
     if changed:
@@ -404,7 +529,20 @@ def render_fullscan(changed: set[str], checks: list[tuple[str, list[str]]], lens
         lines.extend(["", "Deterministic local gates already executed before model review:"])
         lines.extend(f"- {name}" for name, _ in checks)
 
-    lines.extend(["", "ACTIVE review lenses:"])
+    lines.extend(["", "PROFILE-REQUIRED review lenses (apply in this order):"])
+    for lens in profile_required:
+        lines.append(f"- {lens.name}: {lens.why}")
+        lines.append(f"  Pass: {lens.guidance}")
+
+    lines.extend(["", "PROFILE-CONDITIONAL active review lenses:"])
+    if profile_conditional_active:
+        for lens in profile_conditional_active:
+            lines.append(f"- {lens.name}: {lens.why}")
+            lines.append(f"  Pass: {lens.guidance}")
+    else:
+        lines.append("- None triggered for this push.")
+
+    lines.extend(["", "ADDITIONAL ACTIVE review lenses:"])
     if active:
         for lens in active:
             lines.append(f"- {lens.name}: {lens.why}")
@@ -436,13 +574,31 @@ def main() -> int:
     fullscan_output = Path(args.fullscan_output)
     profile_output = Path(args.profile_output).resolve() if args.profile_output else None
 
-    checks, focuses, lenses, profile = build_plan(changed)
+    try:
+        checks, focuses, lenses, profile = build_plan(changed)
+    except ValueError as exc:
+        print(f"[local-prepush-gate] contract: FAIL ({exc})", file=sys.stderr)
+        return 2
 
     focus_output.write_text("\n".join(focuses) + ("\n" if focuses else ""), encoding="utf-8")
     fullscan_output.write_text(render_fullscan(changed, checks, lenses, profile), encoding="utf-8")
     if profile_output is not None:
         profile_output.write_text(
-            json.dumps({"profile": profile.name, "why": profile.why}, indent=2, sort_keys=True) + "\n",
+            json.dumps(
+                {
+                    "combine_review_units_when_at_most": profile.combine_review_units_when_at_most,
+                    "conditional_lenses": list(profile.conditional_lenses),
+                    "model": profile.model,
+                    "model_reasoning_effort": profile.model_reasoning_effort,
+                    "profile": profile.name,
+                    "required_lenses": list(profile.required_lenses),
+                    "stall_seconds": profile.stall_seconds,
+                    "why": profile.why,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
             encoding="utf-8",
         )
 
