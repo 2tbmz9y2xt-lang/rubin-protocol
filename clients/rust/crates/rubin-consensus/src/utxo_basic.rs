@@ -4,7 +4,7 @@ use crate::constants::{
     COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_EXT, COV_TYPE_HTLC,
     COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_STEALTH, COV_TYPE_VAULT,
 };
-use crate::core_ext::{validate_core_ext_spend_with_cache, CoreExtProfiles};
+use crate::core_ext::{validate_core_ext_spend_with_cache_and_suite_context, CoreExtProfiles};
 use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
@@ -14,6 +14,7 @@ use crate::spend_verify::{
     validate_p2pk_spend_with_cache, validate_threshold_sig_spend_with_cache,
 };
 use crate::stealth::{parse_stealth_covenant_data, validate_stealth_spend_with_cache};
+use crate::suite_registry::{RotationProvider, SuiteRegistry};
 use crate::tx::Tx;
 use crate::vault::{
     hash_in_sorted_32, output_descriptor_bytes, parse_multisig_covenant_data,
@@ -91,6 +92,33 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
     block_mtp: u64,
     chain_id: [u8; 32],
     core_ext_profiles_at_height: &CoreExtProfiles,
+) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
+    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+        tx,
+        txid,
+        utxo_set,
+        height,
+        block_timestamp,
+        block_mtp,
+        chain_id,
+        core_ext_profiles_at_height,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+    tx: &Tx,
+    txid: [u8; 32],
+    utxo_set: &HashMap<Outpoint, UtxoEntry>,
+    height: u64,
+    block_timestamp: u64,
+    block_mtp: u64,
+    chain_id: [u8; 32],
+    core_ext_profiles_at_height: &CoreExtProfiles,
+    rotation: Option<&dyn RotationProvider>,
+    registry: Option<&SuiteRegistry>,
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
     let _ = block_timestamp;
     if tx.inputs.is_empty() {
@@ -268,14 +296,17 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
                         "CORE_EXT witness_slots must be 1",
                     ));
                 }
-                validate_core_ext_spend_with_cache(
+                validate_core_ext_spend_with_cache_and_suite_context(
                     &entry,
                     &assigned[0],
                     tx,
                     input_index as u32,
                     entry.value,
                     chain_id,
+                    height,
                     core_ext_profiles_at_height,
+                    rotation,
+                    registry,
                     &mut sighash_cache,
                 )?;
             }

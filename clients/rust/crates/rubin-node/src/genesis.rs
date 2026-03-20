@@ -3,7 +3,8 @@ use std::path::Path;
 
 use rubin_consensus::encode_compact_size;
 use rubin_consensus::{
-    core_ext_verification_binding_from_name, CoreExtDeploymentProfile, CoreExtDeploymentProfiles,
+    core_ext_profile_set_anchor_v1, core_ext_verification_binding_from_name,
+    CoreExtDeploymentProfile, CoreExtDeploymentProfiles,
 };
 use serde::Deserialize;
 
@@ -18,6 +19,8 @@ const GENESIS_MAGIC_SEPARATOR: &[u8] = b"RUBIN-GENESIS-v1";
 struct GenesisPack {
     chain_id_hex: String,
     #[serde(default)]
+    core_ext_profile_set_anchor_hex: String,
+    #[serde(default)]
     core_ext_profiles: Vec<GenesisCoreExtProfile>,
 }
 
@@ -29,6 +32,10 @@ struct GenesisCoreExtProfile {
     allowed_suite_ids: Vec<u8>,
     #[serde(default)]
     binding: String,
+    #[serde(default)]
+    binding_descriptor_hex: String,
+    #[serde(default)]
+    ext_payload_schema_hex: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,9 +78,14 @@ pub fn load_genesis_config(path: Option<&Path>) -> Result<LoadedGenesisConfig, S
     } else if let Some(rest) = trimmed.strip_prefix("0X") {
         trimmed = rest;
     }
+    let chain_id = parse_hex32("chain_id", trimmed)?;
     Ok(LoadedGenesisConfig {
-        chain_id: parse_hex32("chain_id", trimmed)?,
-        core_ext_deployments: core_ext_deployments_from_json(&payload.core_ext_profiles)?,
+        chain_id,
+        core_ext_deployments: core_ext_deployments_from_json(
+            chain_id,
+            &payload.core_ext_profile_set_anchor_hex,
+            &payload.core_ext_profiles,
+        )?,
     })
 }
 
@@ -117,6 +129,10 @@ fn decode_hex_exact(name: &str, value: &str, expected_len: usize) -> Vec<u8> {
 }
 
 fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
+    let value = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
     let bytes = hex::decode(value).map_err(|e| format!("{name}: {e}"))?;
     if bytes.len() != 32 {
         return Err(format!("{name}: expected 32 bytes, got {}", bytes.len()));
@@ -126,7 +142,25 @@ fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
+fn decode_optional_hex_bytes(name: &str, value: &str) -> Result<Vec<u8>, String> {
+    const MAX_CORE_EXT_HEX_FIELD_BYTES: usize = 4096;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let trimmed = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    if trimmed.len() > MAX_CORE_EXT_HEX_FIELD_BYTES * 2 {
+        return Err(format!("bad {name}"));
+    }
+    hex::decode(trimmed).map_err(|e| format!("{name}: {e}"))
+}
+
 fn core_ext_deployments_from_json(
+    chain_id: [u8; 32],
+    expected_set_anchor_hex: &str,
     items: &[GenesisCoreExtProfile],
 ) -> Result<CoreExtDeploymentProfiles, String> {
     let mut seen = std::collections::HashSet::new();
@@ -139,18 +173,37 @@ fn core_ext_deployments_from_json(
             ));
         }
         let verification_binding = core_ext_verification_binding_from_name(&item.binding)?;
+        let binding_descriptor =
+            decode_optional_hex_bytes("binding_descriptor_hex", &item.binding_descriptor_hex)?;
+        let ext_payload_schema =
+            decode_optional_hex_bytes("ext_payload_schema_hex", &item.ext_payload_schema_hex)?;
         deployments.push(CoreExtDeploymentProfile {
             ext_id: item.ext_id,
             activation_height: item.activation_height,
             allowed_suite_ids: item.allowed_suite_ids.clone(),
             verification_binding,
+            binding_descriptor,
+            ext_payload_schema,
         });
     }
-    Ok(CoreExtDeploymentProfiles { deployments })
+    let profiles = CoreExtDeploymentProfiles { deployments };
+    profiles.validate()?;
+    if !expected_set_anchor_hex.trim().is_empty() {
+        let expected = parse_hex32("core_ext_profile_set_anchor_hex", expected_set_anchor_hex)?;
+        let actual = core_ext_profile_set_anchor_v1(chain_id, &profiles.deployments)?;
+        if actual != expected {
+            return Err("core_ext profile set anchor mismatch".to_string());
+        }
+    }
+    Ok(profiles)
 }
 
 #[cfg(test)]
 mod tests {
+    use rubin_consensus::{
+        core_ext_profile_set_anchor_v1, CoreExtDeploymentProfile, CoreExtVerificationBinding,
+    };
+
     use super::{
         derive_devnet_genesis_chain_id, devnet_genesis_block_bytes, devnet_genesis_chain_id,
         load_chain_id_from_genesis_file, load_genesis_config, validate_incoming_chain_id,
@@ -222,6 +275,94 @@ mod tests {
             cfg.core_ext_deployments.deployments[0].activation_height,
             12
         );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_empty_core_ext_allowed_suite_ids() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-core-ext-empty-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            "{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{\"ext_id\":7,\"activation_height\":12,\"allowed_suite_ids\":[],\"binding\":\"native_verify_sig\"}]}",
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path)).unwrap_err();
+        assert!(err.contains("non-empty allowed_suite_ids"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_core_ext_profile_set_anchor_mismatch() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-core-ext-anchor-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        let mut anchor = core_ext_profile_set_anchor_v1(
+            devnet_genesis_chain_id(),
+            &[CoreExtDeploymentProfile {
+                ext_id: 7,
+                activation_height: 12,
+                allowed_suite_ids: vec![3],
+                verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+                binding_descriptor: vec![0xa1],
+                ext_payload_schema: vec![0xb2],
+            }],
+        )
+        .expect("anchor");
+        anchor[0] ^= 0xff;
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profile_set_anchor_hex\":\"0x{}\",\"core_ext_profiles\":[{{\"ext_id\":7,\"activation_height\":12,\"allowed_suite_ids\":[3],\"binding\":\"verify_sig_ext_accept\",\"binding_descriptor_hex\":\"a1\",\"ext_payload_schema_hex\":\"b2\"}}]}}",
+                hex::encode(anchor)
+            ),
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path)).unwrap_err();
+        assert!(err.contains("anchor mismatch"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_oversized_core_ext_hex_fields() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-core-ext-oversized-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{{\"ext_id\":7,\"activation_height\":12,\"allowed_suite_ids\":[3],\"binding\":\"verify_sig_ext_accept\",\"binding_descriptor_hex\":\"{}\",\"ext_payload_schema_hex\":\"b2\"}}]}}",
+                "aa".repeat(4097)
+            ),
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path)).unwrap_err();
+        assert!(err.contains("bad binding_descriptor_hex"));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }

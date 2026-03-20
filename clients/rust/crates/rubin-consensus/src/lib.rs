@@ -38,12 +38,14 @@ pub use compactsize::encode_compact_size;
 pub use compactsize::read_compact_size_bytes;
 pub use connect_block_inmem::{
     connect_block_basic_in_memory_at_height,
-    connect_block_basic_in_memory_at_height_and_core_ext_deployments, ConnectBlockBasicSummary,
-    InMemoryChainState,
+    connect_block_basic_in_memory_at_height_and_core_ext_deployments,
+    connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context,
+    ConnectBlockBasicSummary, InMemoryChainState,
 };
 pub use core_ext::{
-    core_ext_verification_binding_from_name, parse_core_ext_covenant_data, validate_core_ext_spend,
-    CoreExtActiveProfile, CoreExtDeploymentProfile, CoreExtDeploymentProfiles, CoreExtProfiles,
+    core_ext_profile_set_anchor_v1, core_ext_verification_binding_from_name,
+    parse_core_ext_covenant_data, validate_core_ext_spend, CoreExtActiveProfile,
+    CoreExtDeploymentProfile, CoreExtDeploymentProfiles, CoreExtProfiles,
     CoreExtVerificationBinding,
 };
 pub use covenant_genesis::validate_tx_covenants_genesis;
@@ -73,6 +75,7 @@ pub use utxo_basic::{
     apply_non_coinbase_tx_basic, apply_non_coinbase_tx_basic_update,
     apply_non_coinbase_tx_basic_update_with_mtp,
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles,
+    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
     apply_non_coinbase_tx_basic_with_mtp, Outpoint, UtxoApplySummary, UtxoEntry,
 };
 pub use vault::{

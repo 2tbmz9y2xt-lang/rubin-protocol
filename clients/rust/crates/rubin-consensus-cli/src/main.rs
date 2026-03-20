@@ -3,13 +3,14 @@ use num_traits::Zero;
 use rubin_consensus::merkle::witness_merkle_root_wtxids;
 use rubin_consensus::suite_registry::validate_rotation_set;
 use rubin_consensus::{
-    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles, block_hash, compact_shortid,
-    connect_block_basic_in_memory_at_height_and_core_ext_deployments,
-    core_ext_verification_binding_from_name, featurebit_state_at_height_from_window_counts,
-    flagday_active_at_height, fork_work_from_target, merkle_root_txids,
-    parse_core_ext_covenant_data, parse_tx, pow_check, retarget_v1, retarget_v1_clamped,
-    sighash_v1_digest, tx_weight_and_stats_at_height, tx_weight_and_stats_public,
-    validate_block_basic_with_context_and_fees_at_height,
+    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
+    block_hash, compact_shortid,
+    connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context,
+    core_ext_profile_set_anchor_v1, core_ext_verification_binding_from_name,
+    featurebit_state_at_height_from_window_counts, flagday_active_at_height, fork_work_from_target,
+    merkle_root_txids, parse_core_ext_covenant_data, parse_tx, pow_check, retarget_v1,
+    retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_at_height,
+    tx_weight_and_stats_public, validate_block_basic_with_context_and_fees_at_height,
     validate_block_basic_with_context_at_height, validate_tx_covenants_genesis,
     CoreExtDeploymentProfile, CoreExtDeploymentProfiles, CryptoRotationDescriptor,
     DescriptorRotationProvider, ErrorCode, FeatureBitDeployment, FeatureBitState,
@@ -94,6 +95,9 @@ struct Request {
 
     #[serde(default)]
     core_ext_profiles: Vec<CoreExtProfileJson>,
+
+    #[serde(default)]
+    core_ext_profile_set_anchor_hex: String,
 
     #[serde(default)]
     height: u64,
@@ -423,6 +427,10 @@ struct CoreExtProfileJson {
     allowed_suite_ids: Vec<u8>,
     #[serde(default)]
     binding: String,
+    #[serde(default)]
+    binding_descriptor_hex: String,
+    #[serde(default)]
+    ext_payload_schema_hex: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -769,8 +777,84 @@ fn value_as_string(v: &Value, def: &str) -> String {
         .unwrap_or_else(|| def.to_string())
 }
 
+fn decode_optional_hex_bytes(name: &str, value: &str) -> Result<Vec<u8>, String> {
+    const MAX_CORE_EXT_HEX_FIELD_BYTES: usize = 4096;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let trimmed = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    if trimmed.len() > MAX_CORE_EXT_HEX_FIELD_BYTES * 2 {
+        return Err(format!("bad {name}"));
+    }
+    hex::decode(trimmed).map_err(|_| format!("bad {name}"))
+}
+
+fn normalize_suite_openssl_alg(value: &str) -> Result<&'static str, String> {
+    match value.trim() {
+        "" | "ML-DSA-87" => Ok("ML-DSA-87"),
+        _ => Err("bad suite_registry".to_string()),
+    }
+}
+
+fn build_suite_registry_from_json(
+    items: &[SuiteParamsJson],
+) -> Result<Option<SuiteRegistry>, String> {
+    if items.is_empty() {
+        return Ok(None);
+    }
+
+    let mut suites = std::collections::BTreeMap::new();
+    for s in items {
+        let alg = normalize_suite_openssl_alg(&s.openssl_alg)?;
+        if suites
+            .insert(
+                s.suite_id,
+                SuiteParams {
+                    suite_id: s.suite_id,
+                    pubkey_len: s.pubkey_len,
+                    sig_len: s.sig_len,
+                    verify_cost: s.verify_cost,
+                    openssl_alg: alg,
+                },
+            )
+            .is_some()
+        {
+            return Err("bad suite_registry".to_string());
+        }
+    }
+
+    Ok(Some(SuiteRegistry::with_suites(suites)))
+}
+
+fn parse_optional_chain_id_hex(chain_id: &str) -> Result<[u8; 32], String> {
+    let trimmed = chain_id.trim();
+    if trimmed.is_empty() {
+        return Ok([0u8; 32]);
+    }
+    let trimmed = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    if trimmed.len() != 64 {
+        return Err("bad chain_id".to_string());
+    }
+    let bytes = hex::decode(trimmed).map_err(|_| "bad chain_id".to_string())?;
+    if bytes.len() != 32 {
+        return Err("bad chain_id".to_string());
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
 fn core_ext_profiles_from_json(
     items: &[CoreExtProfileJson],
+    chain_id: [u8; 32],
+    expected_set_anchor_hex: &str,
 ) -> Result<CoreExtDeploymentProfiles, String> {
     let mut deployments = Vec::with_capacity(items.len());
     let mut ext_ids = HashSet::new();
@@ -782,14 +866,58 @@ fn core_ext_profiles_from_json(
             ));
         }
         let binding = core_ext_verification_binding_from_name(&item.binding)?;
+        let binding_descriptor =
+            decode_optional_hex_bytes("binding_descriptor_hex", &item.binding_descriptor_hex)?;
+        let ext_payload_schema =
+            decode_optional_hex_bytes("ext_payload_schema_hex", &item.ext_payload_schema_hex)?;
         deployments.push(CoreExtDeploymentProfile {
             ext_id: item.ext_id,
             activation_height: item.activation_height,
             allowed_suite_ids: item.allowed_suite_ids.clone(),
             verification_binding: binding,
+            binding_descriptor,
+            ext_payload_schema,
         });
     }
-    Ok(CoreExtDeploymentProfiles { deployments })
+    let profiles = CoreExtDeploymentProfiles { deployments };
+    profiles.validate()?;
+    if !expected_set_anchor_hex.trim().is_empty() {
+        let expected = parse_optional_chain_id_hex(expected_set_anchor_hex)
+            .map_err(|_| "bad core_ext_profile_set_anchor_hex".to_string())?;
+        let actual = core_ext_profile_set_anchor_v1(chain_id, &profiles.deployments)?;
+        if actual != expected {
+            return Err("core_ext profile set anchor mismatch".to_string());
+        }
+    }
+    Ok(profiles)
+}
+
+fn build_core_ext_suite_context(
+    req: &Request,
+) -> Result<(Option<DescriptorRotationProvider>, Option<SuiteRegistry>), String> {
+    let registry = build_suite_registry_from_json(&req.suite_registry)?;
+
+    let rotation = match &req.rotation_descriptor {
+        Some(rd) => {
+            let registry_ref = registry
+                .as_ref()
+                .ok_or_else(|| "bad suite_registry".to_string())?;
+            let desc = CryptoRotationDescriptor {
+                name: rd.name.clone(),
+                old_suite_id: rd.old_suite_id,
+                new_suite_id: rd.new_suite_id,
+                create_height: rd.create_height,
+                spend_height: rd.spend_height,
+                sunset_height: rd.sunset_height,
+            };
+            desc.validate(registry_ref)
+                .map_err(|_| "descriptor-not-activated".to_string())?;
+            Some(DescriptorRotationProvider { descriptor: desc })
+        }
+        None => None,
+    };
+
+    Ok((rotation, registry))
 }
 
 fn op_featurebits_state(req: &Request) -> Response {
@@ -873,7 +1001,7 @@ fn main() {
 
     match req.op.as_str() {
         "parse_tx" => {
-            let tx_bytes = match hex::decode(req.tx_hex) {
+            let tx_bytes = match hex::decode(&req.tx_hex) {
                 Ok(v) => v,
                 Err(_) => {
                     let resp = Response {
@@ -1191,7 +1319,7 @@ fn main() {
             }
         }
         "sighash_v1" => {
-            let tx_bytes = match hex::decode(req.tx_hex) {
+            let tx_bytes = match hex::decode(&req.tx_hex) {
                 Ok(v) => v,
                 Err(_) => {
                     let resp = Response {
@@ -1234,7 +1362,7 @@ fn main() {
                 }
             };
 
-            let chain_id_bytes = match hex::decode(req.chain_id) {
+            let chain_id_bytes = match hex::decode(&req.chain_id) {
                 Ok(v) => v,
                 Err(_) => {
                     let resp = Response {
@@ -1314,7 +1442,7 @@ fn main() {
             }
         }
         "tx_weight_and_stats" => {
-            let tx_bytes = match hex::decode(req.tx_hex) {
+            let tx_bytes = match hex::decode(&req.tx_hex) {
                 Ok(v) => v,
                 Err(_) => {
                     let resp = Response {
@@ -1350,23 +1478,18 @@ fn main() {
             let use_registry = req.rotation_descriptor.is_some() && !req.suite_registry.is_empty();
             let r = if use_registry {
                 let rd = req.rotation_descriptor.as_ref().expect("checked");
-                let mut suites = std::collections::BTreeMap::new();
-                for s in &req.suite_registry {
-                    // Conformance tooling may inject arbitrary names; keep stable mapping
-                    // by accepting ML-DSA-87 only for now.
-                    let alg: &'static str = "ML-DSA-87";
-                    suites.insert(
-                        s.suite_id,
-                        SuiteParams {
-                            suite_id: s.suite_id,
-                            pubkey_len: s.pubkey_len,
-                            sig_len: s.sig_len,
-                            verify_cost: s.verify_cost,
-                            openssl_alg: alg,
-                        },
-                    );
-                }
-                let registry = SuiteRegistry::with_suites(suites);
+                let registry = match build_suite_registry_from_json(&req.suite_registry) {
+                    Ok(Some(registry)) => registry,
+                    _ => {
+                        let resp = Response {
+                            ok: false,
+                            err: Some("bad suite_registry".to_string()),
+                            ..Default::default()
+                        };
+                        let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                        return;
+                    }
+                };
                 let desc = CryptoRotationDescriptor {
                     name: rd.name.clone(),
                     old_suite_id: rd.old_suite_id,
@@ -1423,23 +1546,18 @@ fn main() {
                     return;
                 }
             };
-            let mut suites = std::collections::BTreeMap::new();
-            for s in &req.suite_registry {
-                // Conformance tooling may inject arbitrary names; keep stable mapping
-                // by accepting ML-DSA-87 only for now.
-                let alg: &'static str = "ML-DSA-87";
-                suites.insert(
-                    s.suite_id,
-                    SuiteParams {
-                        suite_id: s.suite_id,
-                        pubkey_len: s.pubkey_len,
-                        sig_len: s.sig_len,
-                        verify_cost: s.verify_cost,
-                        openssl_alg: alg,
-                    },
-                );
-            }
-            let registry = SuiteRegistry::with_suites(suites);
+            let registry = match build_suite_registry_from_json(&req.suite_registry) {
+                Ok(Some(registry)) => registry,
+                _ => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad suite_registry".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
             let desc = CryptoRotationDescriptor {
                 name: rd.name.clone(),
                 old_suite_id: rd.old_suite_id,
@@ -1487,25 +1605,18 @@ fn main() {
                     return;
                 }
             };
-            let mut suites = std::collections::BTreeMap::new();
-            for s in &req.suite_registry {
-                let alg: &'static str = match s.openssl_alg.as_str() {
-                    "ML-DSA-87" => "ML-DSA-87",
-                    "" => "ML-DSA-87",
-                    _ => "ML-DSA-87",
-                };
-                suites.insert(
-                    s.suite_id,
-                    SuiteParams {
-                        suite_id: s.suite_id,
-                        pubkey_len: s.pubkey_len,
-                        sig_len: s.sig_len,
-                        verify_cost: s.verify_cost,
-                        openssl_alg: alg,
-                    },
-                );
-            }
-            let registry = SuiteRegistry::with_suites(suites);
+            let registry = match build_suite_registry_from_json(&req.suite_registry) {
+                Ok(Some(registry)) => registry,
+                _ => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad suite_registry".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
             let desc = CryptoRotationDescriptor {
                 name: rd.name.clone(),
                 old_suite_id: rd.old_suite_id,
@@ -1545,20 +1656,18 @@ fn main() {
                     return;
                 }
             };
-            let mut suites = std::collections::BTreeMap::new();
-            for s in &req.suite_registry {
-                suites.insert(
-                    s.suite_id,
-                    SuiteParams {
-                        suite_id: s.suite_id,
-                        pubkey_len: s.pubkey_len,
-                        sig_len: s.sig_len,
-                        verify_cost: s.verify_cost,
-                        openssl_alg: "ML-DSA-87",
-                    },
-                );
-            }
-            let registry = SuiteRegistry::with_suites(suites);
+            let registry = match build_suite_registry_from_json(&req.suite_registry) {
+                Ok(Some(registry)) => registry,
+                _ => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad suite_registry".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
             let desc = CryptoRotationDescriptor {
                 name: rd.name.clone(),
                 old_suite_id: rd.old_suite_id,
@@ -1594,20 +1703,18 @@ fn main() {
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
         "rotation_descriptor_check" => {
-            let mut suites = std::collections::BTreeMap::new();
-            for s in &req.suite_registry {
-                suites.insert(
-                    s.suite_id,
-                    SuiteParams {
-                        suite_id: s.suite_id,
-                        pubkey_len: s.pubkey_len,
-                        sig_len: s.sig_len,
-                        verify_cost: s.verify_cost,
-                        openssl_alg: "ML-DSA-87",
-                    },
-                );
-            }
-            let registry = SuiteRegistry::with_suites(suites);
+            let registry = match build_suite_registry_from_json(&req.suite_registry) {
+                Ok(Some(registry)) => registry,
+                _ => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("bad suite_registry".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
             if !req.rotation_descriptors.is_empty() {
                 let ds: Vec<CryptoRotationDescriptor> = req
                     .rotation_descriptors
@@ -1673,7 +1780,7 @@ fn main() {
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
         "block_hash" => {
-            let header_bytes = match hex::decode(req.header_hex) {
+            let header_bytes = match hex::decode(&req.header_hex) {
                 Ok(v) => v,
                 Err(_) => {
                     let resp = Response {
@@ -1732,7 +1839,7 @@ fn main() {
             }
         }
         "pow_check" => {
-            let header_bytes = match hex::decode(req.header_hex) {
+            let header_bytes = match hex::decode(&req.header_hex) {
                 Ok(v) => v,
                 Err(_) => {
                     let resp = Response {
@@ -1753,7 +1860,7 @@ fn main() {
                     return;
                 }
             };
-            let target_bytes = match hex::decode(req.target_hex) {
+            let target_bytes = match hex::decode(&req.target_hex) {
                 Ok(v) => v,
                 Err(_) => {
                     let resp = Response {
@@ -1833,7 +1940,7 @@ fn main() {
             }
         }
         "retarget_v1" => {
-            let old_bytes = match hex::decode(req.target_old) {
+            let old_bytes = match hex::decode(&req.target_old) {
                 Ok(v) => v,
                 Err(_) => {
                     let resp = Response {
@@ -1918,7 +2025,7 @@ fn main() {
             }
         }
         "block_basic_check" => {
-            let block_bytes = match hex::decode(req.block_hex) {
+            let block_bytes = match hex::decode(&req.block_hex) {
                 Ok(v) => v,
                 Err(_) => {
                     let resp = Response {
@@ -1943,7 +2050,7 @@ fn main() {
             let expected_prev = if req.expected_prev_hash.is_empty() {
                 None
             } else {
-                let b = match hex::decode(req.expected_prev_hash) {
+                let b = match hex::decode(&req.expected_prev_hash) {
                     Ok(v) => v,
                     Err(_) => {
                         let resp = Response {
@@ -1990,7 +2097,7 @@ fn main() {
             let expected_target = if req.expected_target.is_empty() {
                 None
             } else {
-                let b = match hex::decode(req.expected_target) {
+                let b = match hex::decode(&req.expected_target) {
                     Ok(v) => v,
                     Err(_) => {
                         let resp = Response {
@@ -2084,7 +2191,7 @@ fn main() {
             }
         }
         "block_basic_check_with_fees" => {
-            let block_bytes = match hex::decode(req.block_hex) {
+            let block_bytes = match hex::decode(&req.block_hex) {
                 Ok(v) => v,
                 Err(_) => {
                     let resp = Response {
@@ -2109,7 +2216,7 @@ fn main() {
             let expected_prev = if req.expected_prev_hash.is_empty() {
                 None
             } else {
-                let b = match hex::decode(req.expected_prev_hash) {
+                let b = match hex::decode(&req.expected_prev_hash) {
                     Ok(v) => v,
                     Err(_) => {
                         let resp = Response {
@@ -2156,7 +2263,7 @@ fn main() {
             let expected_target = if req.expected_target.is_empty() {
                 None
             } else {
-                let b = match hex::decode(req.expected_target) {
+                let b = match hex::decode(&req.expected_target) {
                     Ok(v) => v,
                     Err(_) => {
                         let resp = Response {
@@ -2252,7 +2359,7 @@ fn main() {
             }
         }
         "connect_block_basic" => {
-            let block_bytes = match hex::decode(req.block_hex) {
+            let block_bytes = match hex::decode(&req.block_hex) {
                 Ok(v) => v,
                 Err(_) => {
                     let resp = Response {
@@ -2268,7 +2375,7 @@ fn main() {
             let expected_prev = if req.expected_prev_hash.is_empty() {
                 None
             } else {
-                let b = match hex::decode(req.expected_prev_hash) {
+                let b = match hex::decode(&req.expected_prev_hash) {
                     Ok(v) => v,
                     Err(_) => {
                         let resp = Response {
@@ -2297,7 +2404,7 @@ fn main() {
             let expected_target = if req.expected_target.is_empty() {
                 None
             } else {
-                let b = match hex::decode(req.expected_target) {
+                let b = match hex::decode(&req.expected_target) {
                     Ok(v) => v,
                     Err(_) => {
                         let resp = Response {
@@ -2414,7 +2521,11 @@ fn main() {
                 chain_id.copy_from_slice(&b);
             }
 
-            let core_ext_deployments = match core_ext_profiles_from_json(&req.core_ext_profiles) {
+            let core_ext_deployments = match core_ext_profiles_from_json(
+                &req.core_ext_profiles,
+                chain_id,
+                &req.core_ext_profile_set_anchor_hex,
+            ) {
                 Ok(v) => v,
                 Err(e) => {
                     let resp = Response {
@@ -2427,7 +2538,20 @@ fn main() {
                 }
             };
 
-            match connect_block_basic_in_memory_at_height_and_core_ext_deployments(
+            let (rotation, registry) = match build_core_ext_suite_context(&req) {
+                Ok(v) => v,
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(e),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+
+            match connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context(
                 &block_bytes,
                 expected_prev,
                 expected_target,
@@ -2436,6 +2560,8 @@ fn main() {
                 &mut state,
                 chain_id,
                 &core_ext_deployments,
+                rotation.as_ref().map(|rp| rp as &dyn RotationProvider),
+                registry.as_ref(),
             ) {
                 Ok(summary) => {
                     let already_generated = match u64::try_from(summary.already_generated) {
@@ -2484,7 +2610,7 @@ fn main() {
             }
         }
         "covenant_genesis_check" => {
-            let tx_bytes = match hex::decode(req.tx_hex) {
+            let tx_bytes = match hex::decode(&req.tx_hex) {
                 Ok(v) => v,
                 Err(_) => {
                     let resp = Response {
@@ -2566,7 +2692,7 @@ fn main() {
             }
         }
         "utxo_apply_basic" => {
-            let tx_bytes = match hex::decode(req.tx_hex) {
+            let tx_bytes = match hex::decode(&req.tx_hex) {
                 Ok(v) => v,
                 Err(_) => {
                     let resp = Response {
@@ -2718,7 +2844,23 @@ fn main() {
                 }
                 chain_id.copy_from_slice(&b);
             }
-            let core_ext_deployments = match core_ext_profiles_from_json(&req.core_ext_profiles) {
+            let core_ext_deployments = match core_ext_profiles_from_json(
+                &req.core_ext_profiles,
+                chain_id,
+                &req.core_ext_profile_set_anchor_hex,
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(e),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            let (rotation, registry) = match build_core_ext_suite_context(&req) {
                 Ok(v) => v,
                 Err(e) => {
                     let resp = Response {
@@ -2744,16 +2886,19 @@ fn main() {
                 }
             };
 
-            let apply_result = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
-                &tx,
-                txid,
-                &utxo_set,
-                req.height,
-                req.block_timestamp,
-                block_mtp,
-                chain_id,
-                &core_ext_profiles,
-            );
+            let apply_result =
+                apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+                    &tx,
+                    txid,
+                    &utxo_set,
+                    req.height,
+                    req.block_timestamp,
+                    block_mtp,
+                    chain_id,
+                    &core_ext_profiles,
+                    rotation.as_ref().map(|rp| rp as &dyn RotationProvider),
+                    registry.as_ref(),
+                );
 
             match apply_result {
                 Ok((_next_utxos, summary)) => {
@@ -2793,7 +2938,7 @@ fn main() {
             }
         }
         "compact_shortid" => {
-            let wtxid_bytes = match hex::decode(req.wtxid) {
+            let wtxid_bytes = match hex::decode(&req.wtxid) {
                 Ok(v) => v,
                 Err(_) => {
                     let resp = Response {
@@ -3766,7 +3911,7 @@ fn main() {
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
         "output_descriptor_bytes" => {
-            let cov_data = match hex::decode(req.covenant_data_hex) {
+            let cov_data = match hex::decode(&req.covenant_data_hex) {
                 Ok(v) => v,
                 Err(_) => {
                     let resp = Response {
@@ -3805,7 +3950,7 @@ fn main() {
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
         "output_descriptor_hash" => {
-            let cov_data = match hex::decode(req.covenant_data_hex) {
+            let cov_data = match hex::decode(&req.covenant_data_hex) {
                 Ok(v) => v,
                 Err(_) => {
                     let resp = Response {
@@ -4178,7 +4323,23 @@ fn main() {
                     return;
                 }
             };
-            let profiles = match core_ext_profiles_from_json(&req.core_ext_profiles) {
+            let chain_id = match parse_optional_chain_id_hex(&req.chain_id) {
+                Ok(v) => v,
+                Err(e) => {
+                    let resp = Response {
+                        ok: false,
+                        err: Some(e),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
+            };
+            let profiles = match core_ext_profiles_from_json(
+                &req.core_ext_profiles,
+                chain_id,
+                &req.core_ext_profile_set_anchor_hex,
+            ) {
                 Ok(p) => p,
                 Err(e) => {
                     let resp = Response {
@@ -4354,32 +4515,43 @@ mod tests {
 
     #[test]
     fn core_ext_profiles_duplicate_rejected() {
-        let err = core_ext_profiles_from_json(&[
-            CoreExtProfileJson {
-                ext_id: 7,
-                activation_height: 0,
-                allowed_suite_ids: vec![3],
-                binding: "verify_sig_ext_accept".to_string(),
-            },
-            CoreExtProfileJson {
-                ext_id: 7,
-                activation_height: 10,
-                allowed_suite_ids: vec![3],
-                binding: "verify_sig_ext_reject".to_string(),
-            },
-        ])
+        let err = core_ext_profiles_from_json(
+            &[
+                CoreExtProfileJson {
+                    ext_id: 7,
+                    activation_height: 0,
+                    allowed_suite_ids: vec![3],
+                    binding: "verify_sig_ext_accept".to_string(),
+                    ..Default::default()
+                },
+                CoreExtProfileJson {
+                    ext_id: 7,
+                    activation_height: 10,
+                    allowed_suite_ids: vec![3],
+                    binding: "verify_sig_ext_reject".to_string(),
+                    ..Default::default()
+                },
+            ],
+            [0u8; 32],
+            "",
+        )
         .unwrap_err();
         assert!(err.contains("duplicate core_ext deployment"));
     }
 
     #[test]
     fn core_ext_profiles_height_gate() {
-        let profiles = core_ext_profiles_from_json(&[CoreExtProfileJson {
-            ext_id: 9,
-            activation_height: 42,
-            allowed_suite_ids: vec![3],
-            binding: "verify_sig_ext_accept".to_string(),
-        }])
+        let profiles = core_ext_profiles_from_json(
+            &[CoreExtProfileJson {
+                ext_id: 9,
+                activation_height: 42,
+                allowed_suite_ids: vec![3],
+                binding: "verify_sig_ext_accept".to_string(),
+                ..Default::default()
+            }],
+            [0u8; 32],
+            "",
+        )
         .unwrap();
         assert!(profiles
             .active_profiles_at_height(41)
@@ -4390,5 +4562,127 @@ mod tests {
             profiles.active_profiles_at_height(42).unwrap().active.len(),
             1
         );
+    }
+
+    #[test]
+    fn core_ext_profiles_empty_allowed_suites_rejected() {
+        let err = core_ext_profiles_from_json(
+            &[CoreExtProfileJson {
+                ext_id: 9,
+                activation_height: 42,
+                allowed_suite_ids: vec![],
+                binding: "native_verify_sig".to_string(),
+                ..Default::default()
+            }],
+            [0u8; 32],
+            "",
+        )
+        .unwrap_err();
+        assert!(err.contains("non-empty allowed_suite_ids"));
+    }
+
+    #[test]
+    fn core_ext_profiles_anchor_mismatch_rejected() {
+        let chain_id = [0x42; 32];
+        let mut expected = core_ext_profile_set_anchor_v1(
+            chain_id,
+            &[CoreExtDeploymentProfile {
+                ext_id: 9,
+                activation_height: 42,
+                allowed_suite_ids: vec![3],
+                verification_binding:
+                    rubin_consensus::CoreExtVerificationBinding::VerifySigExtAccept,
+                binding_descriptor: vec![0xa1],
+                ext_payload_schema: vec![0xb2],
+            }],
+        )
+        .expect("anchor");
+        expected[0] ^= 0xff;
+        let err = core_ext_profiles_from_json(
+            &[CoreExtProfileJson {
+                ext_id: 9,
+                activation_height: 42,
+                allowed_suite_ids: vec![3],
+                binding: "verify_sig_ext_accept".to_string(),
+                binding_descriptor_hex: "a1".to_string(),
+                ext_payload_schema_hex: "b2".to_string(),
+            }],
+            chain_id,
+            &hex::encode(expected),
+        )
+        .unwrap_err();
+        assert!(err.contains("anchor mismatch"));
+    }
+
+    #[test]
+    fn core_ext_profiles_empty_set_anchor_enforced() {
+        let chain_id = [0x42; 32];
+        let mut expected = core_ext_profile_set_anchor_v1(chain_id, &[]).expect("anchor");
+        let profiles =
+            core_ext_profiles_from_json(&[], chain_id, &hex::encode(expected)).expect("profiles");
+        assert!(profiles.deployments.is_empty());
+
+        expected[0] ^= 0xff;
+        let err = core_ext_profiles_from_json(&[], chain_id, &hex::encode(expected)).unwrap_err();
+        assert!(err.contains("anchor mismatch"));
+    }
+
+    #[test]
+    fn core_ext_profiles_reject_invalid_set_anchor_length() {
+        let err = core_ext_profiles_from_json(&[], [0u8; 32], "aa").unwrap_err();
+        assert_eq!(err, "bad core_ext_profile_set_anchor_hex");
+    }
+
+    #[test]
+    fn suite_registry_rejects_unknown_openssl_alg() {
+        let err = build_suite_registry_from_json(&[SuiteParamsJson {
+            suite_id: 3,
+            pubkey_len: 2592,
+            sig_len: 4627,
+            verify_cost: 990000,
+            openssl_alg: "SLH-DSA".to_string(),
+        }])
+        .unwrap_err();
+        assert_eq!(err, "bad suite_registry");
+    }
+
+    #[test]
+    fn suite_registry_rejects_duplicate_suite_ids() {
+        let err = build_suite_registry_from_json(&[
+            SuiteParamsJson {
+                suite_id: 3,
+                pubkey_len: 2592,
+                sig_len: 4627,
+                verify_cost: 990000,
+                openssl_alg: "ML-DSA-87".to_string(),
+            },
+            SuiteParamsJson {
+                suite_id: 3,
+                pubkey_len: 2592,
+                sig_len: 4627,
+                verify_cost: 990000,
+                openssl_alg: "ML-DSA-87".to_string(),
+            },
+        ])
+        .unwrap_err();
+        assert_eq!(err, "bad suite_registry");
+    }
+
+    #[test]
+    fn core_ext_profiles_reject_oversized_hex_fields() {
+        let err = core_ext_profiles_from_json(
+            &[CoreExtProfileJson {
+                ext_id: 9,
+                activation_height: 42,
+                allowed_suite_ids: vec![3],
+                binding: "verify_sig_ext_accept".to_string(),
+                binding_descriptor_hex: "aa".repeat(4097),
+                ext_payload_schema_hex: "b2".to_string(),
+            }],
+            [0u8; 32],
+            "",
+        )
+        .unwrap_err();
+        assert_eq!(err, "bad binding_descriptor_hex");
     }
 }

@@ -1,28 +1,38 @@
 package main
 
 import (
+	"encoding/hex"
+	"strings"
 	"testing"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 func TestBuildCoreExtProfilesEmpty(t *testing.T) {
-	provider, err := buildCoreExtProfiles(nil)
+	provider, err := buildCoreExtProfiles(nil, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if provider != nil {
-		t.Fatalf("expected nil provider for empty profiles")
+	if provider == nil {
+		t.Fatalf("expected explicit empty provider for empty profiles")
+	}
+	if _, ok, err := provider.LookupCoreExtProfile(7, 0); err != nil {
+		t.Fatalf("LookupCoreExtProfile: %v", err)
+	} else if ok {
+		t.Fatalf("expected no active profile from empty provider")
 	}
 }
 
 func TestBuildCoreExtProfilesNativeBinding(t *testing.T) {
 	provider, err := buildCoreExtProfiles([]CoreExtProfileJSON{
 		{
-			ExtID:            7,
-			ActivationHeight: 5,
-			AllowedSuiteIDs:  []uint8{1, 3},
-			Binding:          "native_verify_sig",
+			ExtID:               7,
+			ActivationHeight:    5,
+			AllowedSuiteIDs:     []uint8{1, 3},
+			Binding:             "native_verify_sig",
+			ExtPayloadSchemaHex: "b2",
 		},
-	})
+	}, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -73,12 +83,14 @@ func TestBuildCoreExtProfilesVerifySigExtBindings(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			provider, err := buildCoreExtProfiles([]CoreExtProfileJSON{
 				{
-					ExtID:            uint16(100 + i),
-					ActivationHeight: 0,
-					AllowedSuiteIDs:  []uint8{3},
-					Binding:          tc.binding,
+					ExtID:                uint16(100 + i),
+					ActivationHeight:     0,
+					AllowedSuiteIDs:      []uint8{3},
+					Binding:              tc.binding,
+					BindingDescriptorHex: "a1",
+					ExtPayloadSchemaHex:  "b2",
 				},
-			})
+			}, "", "")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -106,12 +118,14 @@ func TestBuildCoreExtProfilesVerifySigExtBindings(t *testing.T) {
 func TestBuildCoreExtProfilesHeightGate(t *testing.T) {
 	provider, err := buildCoreExtProfiles([]CoreExtProfileJSON{
 		{
-			ExtID:            77,
-			ActivationHeight: 42,
-			AllowedSuiteIDs:  []uint8{3},
-			Binding:          "verify_sig_ext_accept",
+			ExtID:                77,
+			ActivationHeight:     42,
+			AllowedSuiteIDs:      []uint8{3},
+			Binding:              "verify_sig_ext_accept",
+			BindingDescriptorHex: "a1",
+			ExtPayloadSchemaHex:  "b2",
 		},
-	})
+	}, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -132,9 +146,9 @@ func TestBuildCoreExtProfilesHeightGate(t *testing.T) {
 
 func TestBuildCoreExtProfilesDuplicateRejected(t *testing.T) {
 	_, err := buildCoreExtProfiles([]CoreExtProfileJSON{
-		{ExtID: 9, ActivationHeight: 0, AllowedSuiteIDs: []uint8{3}, Binding: "verify_sig_ext_accept"},
-		{ExtID: 9, ActivationHeight: 10, AllowedSuiteIDs: []uint8{3}, Binding: "verify_sig_ext_reject"},
-	})
+		{ExtID: 9, ActivationHeight: 0, AllowedSuiteIDs: []uint8{3}, Binding: "verify_sig_ext_accept", BindingDescriptorHex: "a1", ExtPayloadSchemaHex: "b2"},
+		{ExtID: 9, ActivationHeight: 10, AllowedSuiteIDs: []uint8{3}, Binding: "verify_sig_ext_reject", BindingDescriptorHex: "a1", ExtPayloadSchemaHex: "b2"},
+	}, "", "")
 	if err == nil {
 		t.Fatalf("expected duplicate deployment error")
 	}
@@ -143,8 +157,79 @@ func TestBuildCoreExtProfilesDuplicateRejected(t *testing.T) {
 func TestBuildCoreExtProfilesUnsupportedBindingRejected(t *testing.T) {
 	_, err := buildCoreExtProfiles([]CoreExtProfileJSON{
 		{ExtID: 10, ActivationHeight: 0, AllowedSuiteIDs: []uint8{3}, Binding: "unknown-binding"},
-	})
+	}, "", "")
 	if err == nil {
 		t.Fatalf("expected unsupported binding error")
+	}
+}
+
+func TestBuildCoreExtProfilesRejectsEmptyAllowedSuites(t *testing.T) {
+	_, err := buildCoreExtProfiles([]CoreExtProfileJSON{
+		{ExtID: 10, ActivationHeight: 0, AllowedSuiteIDs: nil, Binding: "native_verify_sig"},
+	}, "", "")
+	if err == nil {
+		t.Fatalf("expected empty allowed suites error")
+	}
+}
+
+func TestBuildCoreExtProfilesEmptySetAnchorEnforced(t *testing.T) {
+	chainID := [32]byte{0: 0x42}
+	anchor, err := consensus.CoreExtProfileSetAnchorV1(chainID, nil)
+	if err != nil {
+		t.Fatalf("CoreExtProfileSetAnchorV1(empty): %v", err)
+	}
+	provider, err := buildCoreExtProfiles(nil, hex.EncodeToString(chainID[:]), hex.EncodeToString(anchor[:]))
+	if err != nil {
+		t.Fatalf("buildCoreExtProfiles(empty anchor): %v", err)
+	}
+	if provider == nil {
+		t.Fatalf("expected explicit empty provider for empty anchored profile set")
+	}
+	if _, ok, err := provider.LookupCoreExtProfile(7, 0); err != nil {
+		t.Fatalf("LookupCoreExtProfile: %v", err)
+	} else if ok {
+		t.Fatalf("expected no active profile from empty anchored provider")
+	}
+	anchor[0] ^= 0xff
+	if _, err := buildCoreExtProfiles(nil, hex.EncodeToString(chainID[:]), hex.EncodeToString(anchor[:])); err == nil {
+		t.Fatalf("expected empty profile set anchor mismatch")
+	}
+}
+
+func TestBuildCoreExtProfilesRejectsSetAnchorMismatch(t *testing.T) {
+	items := []CoreExtProfileJSON{{
+		ExtID:                7,
+		ActivationHeight:     12,
+		AllowedSuiteIDs:      []uint8{3},
+		Binding:              "verify_sig_ext_accept",
+		BindingDescriptorHex: "a1",
+		ExtPayloadSchemaHex:  "b2",
+	}}
+	deployments, err := buildCoreExtDeployments(items)
+	if err != nil {
+		t.Fatalf("buildCoreExtDeployments: %v", err)
+	}
+	chainID := [32]byte{0: 0x42}
+	anchor, err := consensus.CoreExtProfileSetAnchorV1(chainID, deployments)
+	if err != nil {
+		t.Fatalf("CoreExtProfileSetAnchorV1: %v", err)
+	}
+	anchor[0] ^= 0xff
+	if _, err := buildCoreExtProfiles(items, hex.EncodeToString(chainID[:]), hex.EncodeToString(anchor[:])); err == nil {
+		t.Fatalf("expected set anchor mismatch error")
+	}
+}
+
+func TestBuildCoreExtProfilesRejectsOversizedHexFields(t *testing.T) {
+	_, err := buildCoreExtProfiles([]CoreExtProfileJSON{{
+		ExtID:                7,
+		ActivationHeight:     12,
+		AllowedSuiteIDs:      []uint8{3},
+		Binding:              "verify_sig_ext_accept",
+		BindingDescriptorHex: strings.Repeat("aa", maxCoreExtHexFieldBytes+1),
+		ExtPayloadSchemaHex:  "b2",
+	}}, "", "")
+	if err == nil {
+		t.Fatalf("expected oversized binding descriptor rejection")
 	}
 }

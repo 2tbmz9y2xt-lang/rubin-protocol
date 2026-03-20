@@ -12,6 +12,16 @@ func (m staticCoreExtProfiles) LookupCoreExtProfile(extID uint16, _ uint64) (Cor
 	return p, ok, nil
 }
 
+type nativeRotationProvider struct{}
+
+func (nativeRotationProvider) NativeCreateSuites(uint64) *NativeSuiteSet {
+	return NewNativeSuiteSet(0x02)
+}
+
+func (nativeRotationProvider) NativeSpendSuites(uint64) *NativeSuiteSet {
+	return NewNativeSuiteSet(0x02)
+}
+
 func coreExtCovenantData(extID uint16, payload []byte) []byte {
 	out := AppendU16le(nil, extID)
 	out = AppendCompactSize(out, uint64(len(payload)))
@@ -19,23 +29,37 @@ func coreExtCovenantData(extID uint16, payload []byte) []byte {
 	return out
 }
 
-func TestStaticCoreExtProfileProviderEmptyReturnsNil(t *testing.T) {
+func TestStaticCoreExtProfileProviderEmptyReturnsInactiveProvider(t *testing.T) {
 	provider, err := NewStaticCoreExtProfileProvider(nil)
 	if err != nil {
 		t.Fatalf("NewStaticCoreExtProfileProvider(nil): %v", err)
 	}
-	if provider != nil {
-		t.Fatalf("expected nil provider for empty deployments")
+	if provider == nil {
+		t.Fatalf("expected non-nil provider for empty deployments")
+	}
+	if _, ok, err := provider.LookupCoreExtProfile(7, 0); err != nil {
+		t.Fatalf("LookupCoreExtProfile: %v", err)
+	} else if ok {
+		t.Fatalf("expected no active profile from empty provider")
 	}
 }
 
 func TestStaticCoreExtProfileProviderRejectsDuplicateExtID(t *testing.T) {
 	_, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{
-		{ExtID: 7, ActivationHeight: 1},
-		{ExtID: 7, ActivationHeight: 2},
+		{ExtID: 7, ActivationHeight: 1, AllowedSuites: map[uint8]struct{}{3: {}}, ExtPayloadSchema: []byte{0xb2}},
+		{ExtID: 7, ActivationHeight: 2, AllowedSuites: map[uint8]struct{}{3: {}}, ExtPayloadSchema: []byte{0xb2}},
 	})
 	if err == nil {
 		t.Fatalf("expected duplicate deployment error")
+	}
+}
+
+func TestStaticCoreExtProfileProviderRejectsEmptyAllowedSuites(t *testing.T) {
+	_, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{
+		{ExtID: 7, ActivationHeight: 1, AllowedSuites: nil},
+	})
+	if err == nil {
+		t.Fatalf("expected empty allowed suites error")
 	}
 }
 
@@ -50,6 +74,12 @@ func TestStaticCoreExtProfileProviderLookupRespectsActivationHeight(t *testing.T
 			ActivationHeight: 12,
 			AllowedSuites:    allowed,
 			VerifySigExtFn:   verifyFn,
+			BindingDescriptor: []byte{
+				0xa1,
+			},
+			ExtPayloadSchema: []byte{
+				0xb2,
+			},
 		},
 	})
 	if err != nil {
@@ -78,8 +108,16 @@ func TestStaticCoreExtProfileProviderLookupRespectsActivationHeight(t *testing.T
 	if _, has := profile.AllowedSuites[3]; !has {
 		t.Fatalf("missing allowed suite 3")
 	}
+	if len(profile.BindingDescriptor) != 1 || profile.BindingDescriptor[0] != 0xa1 {
+		t.Fatalf("missing binding descriptor")
+	}
+	if len(profile.ExtPayloadSchema) != 1 || profile.ExtPayloadSchema[0] != 0xb2 {
+		t.Fatalf("missing ext payload schema")
+	}
 
 	delete(profile.AllowedSuites, 1)
+	profile.BindingDescriptor[0] = 0xff
+	profile.ExtPayloadSchema[0] = 0xee
 	profile2, ok, err := provider.LookupCoreExtProfile(7, 12)
 	if err != nil {
 		t.Fatalf("LookupCoreExtProfile second active lookup: %v", err)
@@ -89,6 +127,12 @@ func TestStaticCoreExtProfileProviderLookupRespectsActivationHeight(t *testing.T
 	}
 	if _, has := profile2.AllowedSuites[1]; !has {
 		t.Fatalf("provider must clone allowed suites per lookup")
+	}
+	if len(profile2.BindingDescriptor) != 1 || profile2.BindingDescriptor[0] != 0xa1 {
+		t.Fatalf("provider must clone binding descriptor per lookup")
+	}
+	if len(profile2.ExtPayloadSchema) != 1 || profile2.ExtPayloadSchema[0] != 0xb2 {
+		t.Fatalf("provider must clone ext payload schema per lookup")
 	}
 }
 
@@ -100,7 +144,12 @@ func TestStaticCoreExtProfileProviderNilReceiverAndUnknownExtID(t *testing.T) {
 		t.Fatalf("nil provider must behave as inactive")
 	}
 
-	provider, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{{ExtID: 7, ActivationHeight: 0}})
+	provider, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{{
+		ExtID:            7,
+		ActivationHeight: 0,
+		AllowedSuites:    map[uint8]struct{}{1: {}},
+		ExtPayloadSchema: []byte{0xb2},
+	}})
 	if err != nil {
 		t.Fatalf("NewStaticCoreExtProfileProvider: %v", err)
 	}
@@ -108,6 +157,203 @@ func TestStaticCoreExtProfileProviderNilReceiverAndUnknownExtID(t *testing.T) {
 		t.Fatalf("LookupCoreExtProfile unknown ext id: %v", err)
 	} else if ok || profile.Active {
 		t.Fatalf("unknown ext id must behave as inactive")
+	}
+}
+
+func TestCoreExtProfileSetAnchorChangesWithPayloadSchema(t *testing.T) {
+	chainID := [32]byte{0: 0x42}
+	base := CoreExtDeploymentProfile{
+		ExtID:             7,
+		ActivationHeight:  1,
+		AllowedSuites:     map[uint8]struct{}{3: {}},
+		VerifySigExtFn:    func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) { return true, nil },
+		BindingDescriptor: []byte{0xa1},
+		ExtPayloadSchema:  []byte{0xb2},
+	}
+	changed := base
+	changed.ExtPayloadSchema = []byte{0xb3}
+
+	baseAnchor, err := CoreExtProfileSetAnchorV1(chainID, []CoreExtDeploymentProfile{base})
+	if err != nil {
+		t.Fatalf("CoreExtProfileSetAnchorV1(base): %v", err)
+	}
+	changedAnchor, err := CoreExtProfileSetAnchorV1(chainID, []CoreExtDeploymentProfile{changed})
+	if err != nil {
+		t.Fatalf("CoreExtProfileSetAnchorV1(changed): %v", err)
+	}
+	if baseAnchor == changedAnchor {
+		t.Fatalf("expected profile set anchor to change when ext_payload_schema changes")
+	}
+}
+
+func TestCoreExtProfileSetAnchorChangesWithActivationHeight(t *testing.T) {
+	chainID := [32]byte{0: 0x42}
+	base := CoreExtDeploymentProfile{
+		ExtID:             7,
+		ActivationHeight:  1,
+		AllowedSuites:     map[uint8]struct{}{3: {}},
+		VerifySigExtFn:    func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) { return true, nil },
+		BindingDescriptor: []byte{0xa1},
+		ExtPayloadSchema:  []byte{0xb2},
+	}
+	changed := base
+	changed.ActivationHeight = 2
+
+	baseAnchor, err := CoreExtProfileSetAnchorV1(chainID, []CoreExtDeploymentProfile{base})
+	if err != nil {
+		t.Fatalf("CoreExtProfileSetAnchorV1(base): %v", err)
+	}
+	changedAnchor, err := CoreExtProfileSetAnchorV1(chainID, []CoreExtDeploymentProfile{changed})
+	if err != nil {
+		t.Fatalf("CoreExtProfileSetAnchorV1(changed): %v", err)
+	}
+	if baseAnchor == changedAnchor {
+		t.Fatalf("expected profile set anchor to change when activation_height changes")
+	}
+}
+
+func TestCoreExtProfileBytesV1RejectsInvalidProfiles(t *testing.T) {
+	t.Run("empty allowed suites", func(t *testing.T) {
+		_, err := CoreExtProfileBytesV1(CoreExtDeploymentProfile{
+			ExtID:            7,
+			ActivationHeight: 1,
+			ExtPayloadSchema: []byte{0xb2},
+		})
+		if err == nil || err.Error() != "core_ext profile ext_id=7 must have non-empty allowed suites" {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("native binding rejects descriptor", func(t *testing.T) {
+		_, err := CoreExtProfileBytesV1(CoreExtDeploymentProfile{
+			ExtID:             7,
+			ActivationHeight:  1,
+			AllowedSuites:     map[uint8]struct{}{3: {}},
+			BindingDescriptor: []byte{0xa1},
+			ExtPayloadSchema:  []byte{0xb2},
+		})
+		if err == nil || err.Error() != "core_ext profile ext_id=7 native-only profile must not carry binding_descriptor" {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("verify_sig_ext binding requires descriptor", func(t *testing.T) {
+		_, err := CoreExtProfileBytesV1(CoreExtDeploymentProfile{
+			ExtID:            7,
+			ActivationHeight: 1,
+			AllowedSuites:    map[uint8]struct{}{3: {}},
+			VerifySigExtFn: func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) {
+				return true, nil
+			},
+			ExtPayloadSchema: []byte{0xb2},
+		})
+		if err == nil || err.Error() != "core_ext profile ext_id=7 verify_sig_ext profile must carry binding_descriptor" {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
+
+func TestValidateCoreExtWitnessAtHeightMixedProfileNativeSuiteUsesNativePath(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0xad
+	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
+	tx, _ := mustParseTxForUtxo(t, txBytes)
+	cache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		t.Fatalf("NewSighashV1PrehashCache: %v", err)
+	}
+	called := false
+	profile := CoreExtProfile{
+		Active:            true,
+		AllowedSuites:     map[uint8]struct{}{0x02: {}, 0x03: {}},
+		VerifySigExtFn:    func(uint16, uint8, []byte, []byte, [32]byte, []byte) (bool, error) { called = true; return false, nil },
+		BindingDescriptor: []byte{0xa1},
+		ExtPayloadSchema:  []byte{0xb2},
+	}
+	w := WitnessItem{
+		SuiteID:   0x02,
+		Pubkey:    []byte{0x01, 0x02, 0x03, 0x04},
+		Signature: []byte{0x05, 0x06, 0x07, 0x01},
+	}
+	registry := NewSuiteRegistryFromParams([]SuiteParams{{
+		SuiteID:    0x02,
+		PubkeyLen:  len(w.Pubkey),
+		SigLen:     len(w.Signature) - 1,
+		VerifyCost: 1,
+		OpenSSLAlg: "ML-DSA-87",
+	}})
+	queue := NewSigCheckQueue(0).WithRegistry(registry)
+	if err := validateCoreExtWitnessAtHeight(
+		&CoreExtCovenantData{ExtID: 7, ExtPayload: []byte{0x99}},
+		profile,
+		w,
+		tx,
+		0,
+		100,
+		[32]byte{0: 0x42},
+		0,
+		cache,
+		nativeRotationProvider{},
+		registry,
+		queue,
+	); err != nil {
+		t.Fatalf("validateCoreExtWitnessAtHeight: %v", err)
+	}
+	if called {
+		t.Fatalf("native suite path must not invoke verify_sig_ext")
+	}
+	if got := queue.Len(); got != 1 {
+		t.Fatalf("sigQueue len=%d, want 1", got)
+	}
+}
+
+func TestValidateCoreExtWitnessAtHeightNativeSuiteMissingRegistryFailsClosed(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0xae
+	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
+	tx, _ := mustParseTxForUtxo(t, txBytes)
+	cache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		t.Fatalf("NewSighashV1PrehashCache: %v", err)
+	}
+	called := false
+	profile := CoreExtProfile{
+		Active:            true,
+		AllowedSuites:     map[uint8]struct{}{0x02: {}, 0x03: {}},
+		VerifySigExtFn:    func(uint16, uint8, []byte, []byte, [32]byte, []byte) (bool, error) { called = true; return true, nil },
+		BindingDescriptor: []byte{0xa1},
+		ExtPayloadSchema:  []byte{0xb2},
+	}
+	w := WitnessItem{
+		SuiteID:   0x02,
+		Pubkey:    []byte{0x01, 0x02, 0x03, 0x04},
+		Signature: []byte{0x05, 0x06, 0x07, 0x01},
+	}
+	err = validateCoreExtWitnessAtHeight(
+		&CoreExtCovenantData{ExtID: 7, ExtPayload: []byte{0x99}},
+		profile,
+		w,
+		tx,
+		0,
+		100,
+		[32]byte{0: 0x43},
+		0,
+		cache,
+		nativeRotationProvider{},
+		NewSuiteRegistryFromParams(nil),
+		nil,
+	)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
+	}
+	if err.Error() != "TX_ERR_SIG_ALG_INVALID: CORE_EXT registered native suite missing from registry" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if called {
+		t.Fatalf("native suite path must fail closed before verify_sig_ext")
 	}
 }
 
@@ -212,6 +458,65 @@ func TestApplyNonCoinbaseTxBasic_CORE_EXT_DeterministicCovenantDataParseFirst(t 
 	}
 	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	}
+}
+
+func TestApplyNonCoinbaseTxBasic_CORE_EXT_RotatedNativeSuiteUsesRegistryPath(t *testing.T) {
+	var chainID [32]byte
+	var prev [32]byte
+	prev[0] = 0xa4
+
+	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
+	tx, txid := mustParseTxForUtxo(t, txBytes)
+	sig := make([]byte, ML_DSA_87_SIG_BYTES+1)
+	sig[ML_DSA_87_SIG_BYTES] = 0x01
+	tx.Witness = []WitnessItem{{
+		SuiteID:   0x02,
+		Pubkey:    make([]byte, ML_DSA_87_PUBKEY_BYTES),
+		Signature: sig,
+	}}
+
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prev, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_CORE_EXT,
+			CovenantData: coreExtCovenantData(7, nil),
+		},
+	}
+	profiles, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{{
+		ExtID:            7,
+		ActivationHeight: 0,
+		AllowedSuites:    map[uint8]struct{}{0x02: {}},
+		ExtPayloadSchema: []byte{0xb2},
+	}})
+	if err != nil {
+		t.Fatalf("NewStaticCoreExtProfileProvider: %v", err)
+	}
+	registry := NewSuiteRegistryFromParams([]SuiteParams{{
+		SuiteID:    0x02,
+		PubkeyLen:  ML_DSA_87_PUBKEY_BYTES,
+		SigLen:     ML_DSA_87_SIG_BYTES,
+		VerifyCost: VERIFY_COST_ML_DSA_87,
+		OpenSSLAlg: "ML-DSA-87",
+	}})
+	err = nil
+	_, _, err = ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
+		tx,
+		txid,
+		utxos,
+		0,
+		0,
+		0,
+		chainID,
+		profiles,
+		&mockRotationProvider{h2: 0},
+		registry,
+	)
+	if err == nil {
+		t.Fatalf("expected invalid signature error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_INVALID)
 	}
 }
 
