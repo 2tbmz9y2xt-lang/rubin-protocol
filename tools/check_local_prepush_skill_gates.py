@@ -47,7 +47,7 @@ def load_profile_contract(profile_name: str, path: Path = CONTRACT_PATH) -> Revi
         conditional_lenses=(),
     )
     if not path.exists():
-        return default_profile
+        raise ValueError(f"review contract at {path} is missing")
 
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -110,6 +110,15 @@ def load_profile_contract(profile_name: str, path: Path = CONTRACT_PATH) -> Revi
         required_lenses=required_lenses,
         conditional_lenses=conditional_lenses,
     )
+
+
+def ensure_known_profile_lenses(profile: ReviewProfile, lenses: list[ScanLens]) -> None:
+    known_lenses = {lens.name for lens in lenses}
+    unknown = [name for name in (*profile.required_lenses, *profile.conditional_lenses) if name not in known_lenses]
+    if unknown:
+        raise ValueError(
+            f"profile {profile.name!r} references unknown review lenses: {', '.join(sorted(set(unknown)))}"
+        )
 
 
 def read_changed_files(path: Path) -> set[str]:
@@ -471,6 +480,7 @@ def build_plan(changed: set[str]) -> tuple[list[tuple[str, list[str]]], list[str
         required_lenses=contract_profile.required_lenses,
         conditional_lenses=contract_profile.conditional_lenses,
     )
+    ensure_known_profile_lenses(profile, lenses)
     return checks, focuses, lenses, profile
 
 

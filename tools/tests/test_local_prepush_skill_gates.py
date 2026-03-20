@@ -111,6 +111,23 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
         self.assertEqual(profile.required_lenses, ("code-review", "diff-scan"))
         self.assertTrue(any(lens.name == "internal-tools" and lens.active for lens in lenses))
 
+    def test_unknown_profile_lens_fails_closed(self):
+        profile = m.ReviewProfile(
+            name="fast_patch",
+            why="test",
+            required_lenses=("code-review", "missing-lens"),
+        )
+        lenses = [m.ScanLens(name="code-review", active=True, why="test", guidance="test")]
+
+        with self.assertRaisesRegex(ValueError, "unknown review lenses"):
+            m.ensure_known_profile_lenses(profile, lenses)
+
+    def test_missing_contract_fails_closed(self):
+        missing = Path(tempfile.mkdtemp()) / "missing-contract.json"
+
+        with self.assertRaisesRegex(ValueError, "is missing"):
+            m.load_profile_contract("fast_patch", path=missing)
+
 
 if __name__ == "__main__":
     unittest.main()
