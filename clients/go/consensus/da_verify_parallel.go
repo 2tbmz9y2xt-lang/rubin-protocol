@@ -98,8 +98,15 @@ func CollectDAChunkHashTasks(txs []*Tx) []DAChunkHashTask {
 // commitment verification tasks. Each task groups all chunks for a single
 // DA ID. Tasks are returned in deterministic order (sorted by DA ID).
 //
-// Precondition: structural validation (duplicate checks, chunk count) has
-// already been performed by the sequential validateDASetIntegrity phase.
+// Precondition: the caller has already enforced DA-set structural integrity
+// for every collected DA ID:
+//  1. no duplicate chunk index exists for the DA ID,
+//  2. len(chunks) == chunkCount for the DA commit,
+//  3. every chunk index in [0, chunkCount-1] is present.
+//
+// Snapshot import, fast-sync, or any other caller that bypasses the
+// sequential validateDASetIntegrity phase MUST re-enforce this contiguity
+// contract independently before calling this helper.
 func CollectDAPayloadCommitTasks(txs []*Tx) []DAPayloadCommitTask {
 	commits := make(map[[32]byte]*Tx)
 	chunks := make(map[[32]byte]map[uint16]*Tx)

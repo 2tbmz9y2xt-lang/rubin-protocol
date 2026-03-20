@@ -133,6 +133,60 @@ func TestTxWeightAndStats_NonCanonicalWitnessLengths_NoSigCost(t *testing.T) {
 	}
 }
 
+func TestTxWeightAndStats_MalformedNativeWitness_ZeroSigCostIntentional(t *testing.T) {
+	malformedPub := make([]byte, ML_DSA_87_PUBKEY_BYTES-1)
+	malformedSig := make([]byte, ML_DSA_87_SIG_BYTES+1)
+
+	buildTx := func(suiteID uint8) *Tx {
+		return &Tx{
+			Version: 1,
+			TxKind:  0x00,
+			TxNonce: 9,
+			Inputs: []TxInput{
+				{Sequence: 0},
+			},
+			Outputs: []TxOutput{
+				{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
+			},
+			Locktime: 0,
+			Witness: []WitnessItem{
+				{SuiteID: suiteID, Pubkey: malformedPub, Signature: malformedSig},
+			},
+		}
+	}
+
+	malformedTx := buildTx(SUITE_ID_ML_DSA_87)
+	sentinelTx := buildTx(SUITE_ID_SENTINEL)
+
+	legacyWeight, _, _, err := TxWeightAndStats(malformedTx)
+	if err != nil {
+		t.Fatalf("TxWeightAndStats(malformed): %v", err)
+	}
+	sentinelWeight, _, _, err := TxWeightAndStats(sentinelTx)
+	if err != nil {
+		t.Fatalf("TxWeightAndStats(sentinel): %v", err)
+	}
+	if legacyWeight == 0 {
+		t.Fatalf("legacyWeight=0, want > 0 from witness bytes")
+	}
+	if legacyWeight != sentinelWeight {
+		t.Fatalf("legacyWeight=%d, want sentinelWeight=%d", legacyWeight, sentinelWeight)
+	}
+
+	registryWeight, _, _, err := TxWeightAndStatsAtHeight(
+		malformedTx,
+		0,
+		DefaultRotationProvider{},
+		DefaultSuiteRegistry(),
+	)
+	if err != nil {
+		t.Fatalf("TxWeightAndStatsAtHeight(malformed): %v", err)
+	}
+	if registryWeight != sentinelWeight {
+		t.Fatalf("registryWeight=%d, want sentinelWeight=%d", registryWeight, sentinelWeight)
+	}
+}
+
 func TestTxWeightAndStats_TxKind00_DAIgnoredForDaBytes(t *testing.T) {
 	tx := &Tx{
 		Version:  1,

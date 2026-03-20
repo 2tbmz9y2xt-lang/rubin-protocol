@@ -149,6 +149,39 @@ func TestConnectBlockBasicInMemoryAtHeight_NilState(t *testing.T) {
 	}
 }
 
+func TestParseAndValidateBlockBasicWithContextAtHeight_ReturnsParsedBlock(t *testing.T) {
+	height := uint64(0)
+	prev := hashWithPrefix(0x41)
+	target := filledHash(0xff)
+
+	coinbase := coinbaseWithWitnessCommitmentAtHeight(t, height)
+	cbTxid := testTxID(t, coinbase)
+	root, err := MerkleRootTxids([][32]byte{cbTxid})
+	if err != nil {
+		t.Fatalf("MerkleRootTxids: %v", err)
+	}
+	block := buildBlockBytes(t, prev, root, target, 5, [][]byte{coinbase})
+
+	pb, summary, err := parseAndValidateBlockBasicWithContextAtHeight(block, &prev, &target, height, nil)
+	if err != nil {
+		t.Fatalf("parseAndValidateBlockBasicWithContextAtHeight: %v", err)
+	}
+	if pb == nil || len(pb.Txs) != 1 || len(pb.Txids) != 1 {
+		t.Fatalf("unexpected parsed block shape: %#v", pb)
+	}
+	if pb.Txids[0] != cbTxid {
+		t.Fatalf("parsed txid mismatch")
+	}
+
+	want, err := ValidateBlockBasicWithContextAtHeight(block, &prev, &target, height, nil)
+	if err != nil {
+		t.Fatalf("ValidateBlockBasicWithContextAtHeight: %v", err)
+	}
+	if *summary != *want {
+		t.Fatalf("summary mismatch: got %#v want %#v", *summary, *want)
+	}
+}
+
 func TestConnectBlockBasicInMemoryAtHeight_Height0_DoesNotAdvanceAlreadyGenerated(t *testing.T) {
 	height := uint64(0)
 	prev := hashWithPrefix(0x12)

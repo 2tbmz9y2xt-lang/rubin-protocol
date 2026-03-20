@@ -121,11 +121,32 @@ func ValidateBlockBasicWithContextAtHeight(
 	blockHeight uint64,
 	prevTimestamps []uint64,
 ) (*BlockBasicSummary, error) {
+	_, summary, err := parseAndValidateBlockBasicWithContextAtHeight(
+		blockBytes,
+		expectedPrevHash,
+		expectedTarget,
+		blockHeight,
+		prevTimestamps,
+	)
+	return summary, err
+}
+
+func parseAndValidateBlockBasicWithContextAtHeight(
+	blockBytes []byte,
+	expectedPrevHash *[32]byte,
+	expectedTarget *[32]byte,
+	blockHeight uint64,
+	prevTimestamps []uint64,
+) (*ParsedBlock, *BlockBasicSummary, error) {
 	pb, err := ParseBlockBytes(blockBytes)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return validateParsedBlockBasicWithContextAtHeight(pb, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps)
+	summary, err := validateParsedBlockBasicWithContextAtHeight(pb, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps)
+	if err != nil {
+		return nil, nil, err
+	}
+	return pb, summary, nil
 }
 
 func validateParsedBlockBasicWithContextAtHeight(
@@ -191,11 +212,13 @@ func ValidateBlockBasicWithContextAndFeesAtHeight(
 	alreadyGenerated uint64,
 	sumFees uint64,
 ) (*BlockBasicSummary, error) {
-	pb, err := ParseBlockBytes(blockBytes)
-	if err != nil {
-		return nil, err
-	}
-	s, err := validateParsedBlockBasicWithContextAtHeight(pb, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps)
+	pb, s, err := parseAndValidateBlockBasicWithContextAtHeight(
+		blockBytes,
+		expectedPrevHash,
+		expectedTarget,
+		blockHeight,
+		prevTimestamps,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -257,6 +280,10 @@ func validateDASetIntegrity(txs []*Tx) error {
 		}
 	}
 
+	if len(commits) > MAX_DA_BATCHES_PER_BLOCK {
+		return txerr(BLOCK_ERR_DA_BATCH_EXCEEDED, "too many DA commits in block")
+	}
+
 	commitIDs := sortedDAIDs(commits)
 	chunkIDs := sortedDAIDs(chunks)
 
@@ -287,10 +314,6 @@ func validateDASetIntegrity(txs []*Tx) error {
 		}
 	}
 
-	if len(commits) > MAX_DA_BATCHES_PER_BLOCK {
-		return txerr(BLOCK_ERR_DA_BATCH_EXCEEDED, "too many DA commits in block")
-	}
-
 	for _, daID := range commitIDs {
 		commit := commits[daID]
 		set := chunks[daID]
@@ -307,9 +330,10 @@ func validateDASetIntegrity(txs []*Tx) error {
 				continue
 			}
 			daCommitOutputs++
-			if len(out.CovenantData) == 32 {
-				copy(gotCommitment[:], out.CovenantData)
+			if len(out.CovenantData) != 32 {
+				return txerr(BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID, "DA commitment output has invalid length")
 			}
+			copy(gotCommitment[:], out.CovenantData)
 		}
 		if daCommitOutputs != 1 {
 			return txerr(BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID, "DA commitment output missing or duplicated")
@@ -483,6 +507,9 @@ func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 			if len(w.Pubkey) == ML_DSA_87_PUBKEY_BYTES && len(w.Signature) == ML_DSA_87_SIG_BYTES+1 {
 				return VERIFY_COST_ML_DSA_87, nil
 			}
+			// Malformed native witness: zero sig_cost because witness bytes still
+			// contribute via wit_size and validation rejects on cheap length checks
+			// without invoking expensive crypto verification.
 			return 0, nil
 		default:
 			return VERIFY_COST_UNKNOWN_SUITE, nil
@@ -551,7 +578,8 @@ func txWeightAndStatsWithRegistry(tx *Tx, height uint64, rotation RotationProvid
 			if params, ok := registry.Lookup(w.SuiteID); ok {
 				// Native registered suite: use registry cost if lengths match,
 				// else zero (matches legacy — malformed native witness items
-				// are not counted as unknown suites).
+				// still pay through wit_size and fail on cheap length checks,
+				// so they are not charged as unknown suites).
 				if len(w.Pubkey) == params.PubkeyLen && len(w.Signature) == params.SigLen+1 {
 					return params.VerifyCost, nil
 				}
