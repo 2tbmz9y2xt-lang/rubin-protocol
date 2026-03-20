@@ -1,8 +1,26 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "note": "rubin-protocol local pre-push review contract",
-  "model": "gpt-5.3-codex",
-  "model_reasoning_effort": "xhigh",
-  "stall_seconds": 75,
-  "fullscan_mode": "skill-backed"
+  "default_profile": "fast_patch",
+  "fullscan_mode": "skill-backed",
+  "profiles": {
+    "fast_patch": {
+      "combine_review_units_when_at_most": 6,
+      "model": "gpt-5.4-mini",
+      "model_reasoning_effort": "high",
+      "stall_seconds": 60
+    },
+    "heavy_artillery": {
+      "combine_review_units_when_at_most": 4,
+      "model": "gpt-5.4",
+      "model_reasoning_effort": "xhigh",
+      "stall_seconds": 90
+    },
+    "runtime_code": {
+      "combine_review_units_when_at_most": 4,
+      "model": "gpt-5.4",
+      "model_reasoning_effort": "high",
+      "stall_seconds": 75
+    }
+  }
 }

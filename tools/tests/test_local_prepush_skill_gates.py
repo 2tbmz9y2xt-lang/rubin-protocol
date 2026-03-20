@@ -21,10 +21,11 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
             "tools/check_consensus_openssl_isolation.py",
         }
 
-        checks, focuses, lenses = m.build_plan(changed)
+        checks, focuses, lenses, profile = m.build_plan(changed)
         check_names = {name for name, _cmd in checks}
         active_lenses = {lens.name for lens in lenses if lens.active}
 
+        self.assertEqual(profile.name, "heavy_artillery")
         self.assertIn("conformance_fixtures_policy", check_names)
         self.assertIn("conformance_matrix", check_names)
         self.assertIn("formal_refinement_bridge", check_names)
@@ -43,11 +44,13 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
 
     def test_render_fullscan_reports_active_and_standby_lenses(self):
         changed = {"docs/README.md"}
-        checks, focuses, lenses = m.build_plan(changed)
+        checks, focuses, lenses, profile = m.build_plan(changed)
         self.assertEqual(checks, [])
         self.assertEqual(focuses, [])
+        self.assertEqual(profile.name, "fast_patch")
 
-        rendered = m.render_fullscan(changed, checks, lenses)
+        rendered = m.render_fullscan(changed, checks, lenses, profile)
+        self.assertIn("Selected review profile: fast_patch", rendered)
         self.assertIn("ACTIVE review lenses", rendered)
         self.assertIn("code-review", rendered)
         self.assertIn("diff-scan", rendered)
@@ -64,15 +67,31 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
         self.assertIn("safe.py", changed)
         self.assertIn("evil\nname.py", changed)
 
-        rendered = m.render_fullscan(changed, [], [])
+        rendered = m.render_fullscan(changed, [], [], m.ReviewProfile(name="fast_patch", why="test"))
         self.assertIn("evil\\nname.py", rendered)
         self.assertNotIn("evil\nname.py", rendered)
 
     def test_render_fullscan_caps_changed_file_listing(self):
         changed = {f"path-{idx}.py" for idx in range(m.MAX_RENDERED_CHANGED_PATHS + 3)}
-        rendered = m.render_fullscan(changed, [], [])
+        rendered = m.render_fullscan(changed, [], [], m.ReviewProfile(name="fast_patch", why="test"))
 
         self.assertIn("+3 more files omitted from the supplement", rendered)
+
+    def test_build_plan_selects_runtime_code_profile_for_non_consensus_rust(self):
+        changed = {"clients/rust/crates/rubin-node/src/txpool.rs"}
+        checks, focuses, lenses, profile = m.build_plan(changed)
+
+        self.assertEqual(checks, [])
+        self.assertEqual(focuses, [])
+        self.assertEqual(profile.name, "runtime_code")
+        self.assertTrue(any(lens.name == "combined-security-scan" and lens.active for lens in lenses))
+
+    def test_build_plan_selects_fast_patch_profile_for_tooling_only(self):
+        changed = {"tools/check_local_prepush_skill_gates.py", "tools/tests/test_local_prepush_skill_gates.py"}
+        checks, focuses, lenses, profile = m.build_plan(changed)
+
+        self.assertEqual(profile.name, "fast_patch")
+        self.assertTrue(any(lens.name == "internal-tools" and lens.active for lens in lenses))
 
 
 if __name__ == "__main__":
