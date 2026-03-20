@@ -1324,4 +1324,79 @@ mod tests {
             "CORE_EXT registered native suite not spend-permitted at this height"
         );
     }
+
+    #[test]
+    fn core_ext_verification_binding_name_helper_covers_native_and_unsupported() {
+        let native = core_ext_verification_binding_from_name("").expect("native empty");
+        assert!(matches!(
+            native,
+            CoreExtVerificationBinding::NativeVerifySig
+        ));
+        let native_named =
+            core_ext_verification_binding_from_name("native_verify_sig").expect("native named");
+        assert!(matches!(
+            native_named,
+            CoreExtVerificationBinding::NativeVerifySig
+        ));
+        let err =
+            core_ext_verification_binding_from_name("unsupported").expect_err("unsupported bind");
+        assert!(err.contains("unsupported core_ext binding"));
+    }
+
+    #[test]
+    fn core_ext_binding_descriptor_validation_errors() {
+        let err = core_ext_openssl_digest32_binding_descriptor_bytes(
+            "bad",
+            ML_DSA_87_PUBKEY_BYTES,
+            ML_DSA_87_SIG_BYTES,
+        )
+        .expect_err("unsupported alg");
+        assert!(err.contains("unsupported core_ext OpenSSL alg"));
+
+        let err = core_ext_openssl_digest32_binding_descriptor_bytes(
+            "ML-DSA-87",
+            ML_DSA_87_PUBKEY_BYTES - 1,
+            ML_DSA_87_SIG_BYTES,
+        )
+        .expect_err("pubkey mismatch");
+        assert!(err.contains("pubkey length mismatch"));
+
+        let err = core_ext_openssl_digest32_binding_descriptor_bytes(
+            "ML-DSA-87",
+            ML_DSA_87_PUBKEY_BYTES,
+            ML_DSA_87_SIG_BYTES - 1,
+        )
+        .expect_err("sig mismatch");
+        assert!(err.contains("sig length mismatch"));
+    }
+
+    #[test]
+    fn parse_core_ext_binding_descriptor_rejects_malformed_inputs() {
+        let err = parse_core_ext_openssl_digest32_binding_descriptor(b"bad")
+            .expect_err("bad prefix must fail");
+        assert_eq!(err, "bad core_ext binding_descriptor");
+
+        let truncated = CORE_EXT_OPENSSL_DIGEST32_BINDING_DESCRIPTOR_PREFIX.to_vec();
+        let err = parse_core_ext_openssl_digest32_binding_descriptor(&truncated)
+            .expect_err("missing alg len must fail");
+        assert_eq!(err, "bad core_ext binding_descriptor");
+
+        let mut bad_alg = CORE_EXT_OPENSSL_DIGEST32_BINDING_DESCRIPTOR_PREFIX.to_vec();
+        encode_compact_size(5, &mut bad_alg);
+        bad_alg.extend_from_slice(b"x");
+        let err = parse_core_ext_openssl_digest32_binding_descriptor(&bad_alg)
+            .expect_err("truncated alg must fail");
+        assert_eq!(err, "bad core_ext binding_descriptor");
+
+        let mut trailing = core_ext_openssl_digest32_binding_descriptor_bytes(
+            "ML-DSA-87",
+            ML_DSA_87_PUBKEY_BYTES,
+            ML_DSA_87_SIG_BYTES,
+        )
+        .expect("descriptor");
+        trailing.push(0);
+        let err = parse_core_ext_openssl_digest32_binding_descriptor(&trailing)
+            .expect_err("trailing bytes must fail");
+        assert_eq!(err, "bad core_ext binding_descriptor");
+    }
 }

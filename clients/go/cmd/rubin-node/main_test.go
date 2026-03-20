@@ -483,6 +483,20 @@ func TestBuildGenesisCoreExtProfilesEmptySetAnchorEnforced(t *testing.T) {
 	}
 }
 
+func TestBuildGenesisCoreExtProfilesRejectsMissingPayloadSchema(t *testing.T) {
+	chainID := node.DevnetGenesisChainID()
+	items := []genesisCoreExtProfile{{
+		ExtID:                7,
+		ActivationHeight:     12,
+		AllowedSuiteIDs:      []uint8{3},
+		Binding:              consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
+		BindingDescriptorHex: mustCoreExtOpenSSLDigest32DescriptorHex(t),
+	}}
+	if _, err := buildGenesisCoreExtProfiles(items, chainID, ""); err == nil || !strings.Contains(err.Error(), "requires ext_payload_schema_hex") {
+		t.Fatalf("expected missing payload schema error, got %v", err)
+	}
+}
+
 func TestParseGenesisConfigFullRejectsInvalidCoreExtAnchorProfiles(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "genesis.json")
