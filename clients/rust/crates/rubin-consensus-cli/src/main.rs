@@ -4555,7 +4555,6 @@ mod tests {
                             .to_string(),
                     binding_descriptor_hex: hex::encode(&binding_descriptor),
                     ext_payload_schema_hex: "b2".to_string(),
-                    ..Default::default()
                 },
                 CoreExtProfileJson {
                     ext_id: 7,
@@ -4566,7 +4565,6 @@ mod tests {
                             .to_string(),
                     binding_descriptor_hex: hex::encode(binding_descriptor),
                     ext_payload_schema_hex: "b2".to_string(),
-                    ..Default::default()
                 },
             ],
             [0u8; 32],
@@ -4594,7 +4592,6 @@ mod tests {
                     .to_string(),
                 binding_descriptor_hex: hex::encode(binding_descriptor),
                 ext_payload_schema_hex: "b2".to_string(),
-                ..Default::default()
             }],
             [0u8; 32],
             "",
