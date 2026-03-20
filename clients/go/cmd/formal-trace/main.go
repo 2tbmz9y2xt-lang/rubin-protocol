@@ -120,10 +120,12 @@ type utxoJSON struct {
 }
 
 type coreExtProfileJSON struct {
-	ExtID            uint16  `json:"ext_id"`
-	ActivationHeight uint64  `json:"activation_height"`
-	AllowedSuiteIDs  []uint8 `json:"allowed_suite_ids,omitempty"`
-	Binding          string  `json:"binding,omitempty"`
+	ExtID                uint16  `json:"ext_id"`
+	ActivationHeight     uint64  `json:"activation_height"`
+	AllowedSuiteIDs      []uint8 `json:"allowed_suite_ids,omitempty"`
+	Binding              string  `json:"binding,omitempty"`
+	BindingDescriptorHex string  `json:"binding_descriptor_hex,omitempty"`
+	ExtPayloadSchemaHex  string  `json:"ext_payload_schema_hex,omitempty"`
 }
 
 func buildCoreExtProfiles(items []coreExtProfileJSON) (consensus.CoreExtProfileProvider, error) {
@@ -132,37 +134,47 @@ func buildCoreExtProfiles(items []coreExtProfileJSON) (consensus.CoreExtProfileP
 	}
 	deployments := make([]consensus.CoreExtDeploymentProfile, 0, len(items))
 	for _, item := range items {
-		binding := strings.TrimSpace(item.Binding)
-		verifySigExtFn := consensus.CoreExtVerifySigExtFunc(nil)
-		switch binding {
-		case "", "native_verify_sig":
-		case "verify_sig_ext_accept":
-			verifySigExtFn = func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) {
-				return true, nil
-			}
-		case "verify_sig_ext_reject":
-			verifySigExtFn = func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) {
-				return false, nil
-			}
-		case "verify_sig_ext_error":
-			verifySigExtFn = func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) {
-				return false, fmt.Errorf("verify_sig_ext unavailable")
-			}
-		default:
-			return nil, fmt.Errorf("unsupported core_ext binding: %s", item.Binding)
+		bindingDescriptor, err := decodeOptionalTraceHexBytes("binding_descriptor_hex", item.BindingDescriptorHex)
+		if err != nil {
+			return nil, err
+		}
+		extPayloadSchema, err := decodeOptionalTraceHexBytes("ext_payload_schema_hex", item.ExtPayloadSchemaHex)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(item.Binding) == consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 && len(extPayloadSchema) == 0 {
+			return nil, fmt.Errorf("core_ext binding %s requires ext_payload_schema_hex", consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
+		}
+		verifySigExtFn, err := consensus.ParseCoreExtVerifySigExtBinding(item.Binding, bindingDescriptor)
+		if err != nil {
+			return nil, err
 		}
 		allowed := make(map[uint8]struct{}, len(item.AllowedSuiteIDs))
 		for _, suiteID := range item.AllowedSuiteIDs {
 			allowed[suiteID] = struct{}{}
 		}
 		deployments = append(deployments, consensus.CoreExtDeploymentProfile{
-			ExtID:            item.ExtID,
-			ActivationHeight: item.ActivationHeight,
-			AllowedSuites:    allowed,
-			VerifySigExtFn:   verifySigExtFn,
+			ExtID:             item.ExtID,
+			ActivationHeight:  item.ActivationHeight,
+			AllowedSuites:     allowed,
+			VerifySigExtFn:    verifySigExtFn,
+			BindingDescriptor: bindingDescriptor,
+			ExtPayloadSchema:  extPayloadSchema,
 		})
 	}
 	return consensus.NewStaticCoreExtProfileProvider(deployments)
+}
+
+func decodeOptionalTraceHexBytes(name, value string) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	raw, err := hex.DecodeString(strings.TrimPrefix(strings.TrimPrefix(value, "0x"), "0X"))
+	if err != nil {
+		return nil, fmt.Errorf("bad %s", name)
+	}
+	return raw, nil
 }
 
 type blockBasicFixture struct {

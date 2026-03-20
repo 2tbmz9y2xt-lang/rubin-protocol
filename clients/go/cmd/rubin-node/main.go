@@ -467,15 +467,15 @@ func decodeOptionalHexBytesField(name, value string) ([]byte, error) {
 func buildGenesisCoreExtProfiles(items []genesisCoreExtProfile, chainID [32]byte, expectedSetAnchorHex string) (consensus.CoreExtProfileProvider, error) {
 	deployments := make([]consensus.CoreExtDeploymentProfile, 0, len(items))
 	for _, item := range items {
-		verifySigExtFn, err := parseCoreExtBinding(item.Binding)
-		if err != nil {
-			return nil, err
-		}
 		bindingDescriptor, err := decodeOptionalHexBytesField("binding_descriptor_hex", item.BindingDescriptorHex)
 		if err != nil {
 			return nil, err
 		}
 		extPayloadSchema, err := decodeOptionalHexBytesField("ext_payload_schema_hex", item.ExtPayloadSchemaHex)
+		if err != nil {
+			return nil, err
+		}
+		verifySigExtFn, err := parseCoreExtBinding(item.Binding, bindingDescriptor, extPayloadSchema)
 		if err != nil {
 			return nil, err
 		}
@@ -511,25 +511,11 @@ func buildGenesisCoreExtProfiles(items []genesisCoreExtProfile, chainID [32]byte
 	return consensus.NewStaticCoreExtProfileProvider(deployments)
 }
 
-func parseCoreExtBinding(binding string) (consensus.CoreExtVerifySigExtFunc, error) {
-	switch strings.TrimSpace(binding) {
-	case "", "native_verify_sig":
-		return nil, nil
-	case "verify_sig_ext_accept":
-		return func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) {
-			return true, nil
-		}, nil
-	case "verify_sig_ext_reject":
-		return func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) {
-			return false, nil
-		}, nil
-	case "verify_sig_ext_error":
-		return func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) {
-			return false, fmt.Errorf("verify_sig_ext unavailable")
-		}, nil
-	default:
-		return nil, fmt.Errorf("unsupported core_ext binding: %s", binding)
+func parseCoreExtBinding(binding string, bindingDescriptor []byte, extPayloadSchema []byte) (consensus.CoreExtVerifySigExtFunc, error) {
+	if strings.TrimSpace(binding) == consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 && len(extPayloadSchema) == 0 {
+		return nil, fmt.Errorf("core_ext binding %s requires ext_payload_schema_hex", consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
 	}
+	return consensus.ParseCoreExtVerifySigExtBinding(binding, bindingDescriptor)
 }
 
 func parseHex32Field(name, value string) ([32]byte, error) {

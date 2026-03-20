@@ -68,15 +68,29 @@ func TestBuildCoreExtProfilesNativeBinding(t *testing.T) {
 }
 
 func TestBuildCoreExtProfilesVerifySigExtBindings(t *testing.T) {
+	opensslDescriptor, err := consensus.CoreExtOpenSSLDigest32BindingDescriptorBytes("ML-DSA-87", consensus.ML_DSA_87_PUBKEY_BYTES, consensus.ML_DSA_87_SIG_BYTES)
+	if err != nil {
+		t.Fatalf("CoreExtOpenSSLDigest32BindingDescriptorBytes: %v", err)
+	}
 	tests := []struct {
-		name    string
-		binding string
-		ok      bool
-		wantErr bool
+		name              string
+		binding           string
+		bindingDescriptor string
+		extPayloadSchema  string
+		ok                bool
+		wantErr           bool
+		skipCall          bool
 	}{
 		{name: "accept", binding: "verify_sig_ext_accept", ok: true, wantErr: false},
 		{name: "reject", binding: "verify_sig_ext_reject", ok: false, wantErr: false},
 		{name: "error", binding: "verify_sig_ext_error", ok: false, wantErr: true},
+		{
+			name:              "openssl-digest32",
+			binding:           consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
+			bindingDescriptor: hex.EncodeToString(opensslDescriptor),
+			extPayloadSchema:  "b2",
+			skipCall:          true,
+		},
 	}
 
 	for i, tc := range tests {
@@ -87,8 +101,8 @@ func TestBuildCoreExtProfilesVerifySigExtBindings(t *testing.T) {
 					ActivationHeight:     0,
 					AllowedSuiteIDs:      []uint8{3},
 					Binding:              tc.binding,
-					BindingDescriptorHex: "a1",
-					ExtPayloadSchemaHex:  "b2",
+					BindingDescriptorHex: tc.bindingDescriptor,
+					ExtPayloadSchemaHex:  tc.extPayloadSchema,
 				},
 			}, "", "")
 			if err != nil {
@@ -104,6 +118,9 @@ func TestBuildCoreExtProfilesVerifySigExtBindings(t *testing.T) {
 			if profile.VerifySigExtFn == nil {
 				t.Fatalf("expected VerifySigExtFn for binding=%s", tc.binding)
 			}
+			if tc.skipCall {
+				return
+			}
 			gotOK, gotErr := profile.VerifySigExtFn(0, 3, nil, nil, [32]byte{}, nil)
 			if gotOK != tc.ok {
 				t.Fatalf("unexpected ok for %s: got=%v want=%v", tc.binding, gotOK, tc.ok)
@@ -112,6 +129,25 @@ func TestBuildCoreExtProfilesVerifySigExtBindings(t *testing.T) {
 				t.Fatalf("unexpected error state for %s: gotErr=%v wantErr=%v", tc.binding, gotErr, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestBuildCoreExtProfilesRejectsOpenSSLBindingWithoutPayloadSchema(t *testing.T) {
+	descriptor, err := consensus.CoreExtOpenSSLDigest32BindingDescriptorBytes("ML-DSA-87", consensus.ML_DSA_87_PUBKEY_BYTES, consensus.ML_DSA_87_SIG_BYTES)
+	if err != nil {
+		t.Fatalf("CoreExtOpenSSLDigest32BindingDescriptorBytes: %v", err)
+	}
+	_, err = buildCoreExtProfiles([]CoreExtProfileJSON{
+		{
+			ExtID:                77,
+			ActivationHeight:     0,
+			AllowedSuiteIDs:      []uint8{3},
+			Binding:              consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
+			BindingDescriptorHex: hex.EncodeToString(descriptor),
+		},
+	}, "", "")
+	if err == nil {
+		t.Fatalf("expected missing ext_payload_schema rejection")
 	}
 }
 

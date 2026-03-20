@@ -478,23 +478,37 @@ func TestParseGenesisHashRejectsInvalidHeaderBytes(t *testing.T) {
 }
 
 func TestParseCoreExtBindingVariants(t *testing.T) {
+	opensslDescriptor, err := consensus.CoreExtOpenSSLDigest32BindingDescriptorBytes("ML-DSA-87", consensus.ML_DSA_87_PUBKEY_BYTES, consensus.ML_DSA_87_SIG_BYTES)
+	if err != nil {
+		t.Fatalf("CoreExtOpenSSLDigest32BindingDescriptorBytes: %v", err)
+	}
 	tests := []struct {
-		name    string
-		binding string
-		wantNil bool
-		wantOK  bool
-		wantErr bool
+		name              string
+		binding           string
+		bindingDescriptor []byte
+		extPayloadSchema  []byte
+		wantNil           bool
+		wantOK            bool
+		wantErr           bool
+		skipCall          bool
 	}{
 		{name: "empty", binding: "", wantNil: true},
 		{name: "native", binding: "native_verify_sig", wantNil: true},
 		{name: "accept", binding: "verify_sig_ext_accept", wantOK: true},
 		{name: "reject", binding: "verify_sig_ext_reject"},
 		{name: "error", binding: "verify_sig_ext_error", wantErr: true},
+		{
+			name:              "openssl-digest32",
+			binding:           consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
+			bindingDescriptor: opensslDescriptor,
+			extPayloadSchema:  []byte{0xb2},
+			skipCall:          true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fn, err := parseCoreExtBinding(tt.binding)
+			fn, err := parseCoreExtBinding(tt.binding, tt.bindingDescriptor, tt.extPayloadSchema)
 			if err != nil {
 				t.Fatalf("parseCoreExtBinding(%q): %v", tt.binding, err)
 			}
@@ -506,6 +520,9 @@ func TestParseCoreExtBindingVariants(t *testing.T) {
 			}
 			if fn == nil {
 				t.Fatalf("expected verifier for %q", tt.binding)
+			}
+			if tt.skipCall {
+				return
 			}
 			ok, callErr := fn(7, 1, nil, nil, [32]byte{}, nil)
 			if ok != tt.wantOK {
@@ -521,6 +538,16 @@ func TestParseCoreExtBindingVariants(t *testing.T) {
 				t.Fatalf("unexpected verifier error for %q: %v", tt.binding, callErr)
 			}
 		})
+	}
+}
+
+func TestParseCoreExtBindingRejectsOpenSSLBindingWithoutPayloadSchema(t *testing.T) {
+	descriptor, err := consensus.CoreExtOpenSSLDigest32BindingDescriptorBytes("ML-DSA-87", consensus.ML_DSA_87_PUBKEY_BYTES, consensus.ML_DSA_87_SIG_BYTES)
+	if err != nil {
+		t.Fatalf("CoreExtOpenSSLDigest32BindingDescriptorBytes: %v", err)
+	}
+	if _, err := parseCoreExtBinding(consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1, descriptor, nil); err == nil {
+		t.Fatalf("expected missing ext_payload_schema rejection")
 	}
 }
 
