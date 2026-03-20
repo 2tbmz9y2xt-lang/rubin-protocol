@@ -112,11 +112,13 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
 	}
 
 	// Stateless checks first (wire, merkle root, PoW/target, covenant creation, etc).
-	if _, err := ValidateBlockBasicWithContextAtHeight(blockBytes, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps); err != nil {
-		return nil, err
-	}
-
-	pb, err := ParseBlockBytes(blockBytes)
+	pb, _, err := parseAndValidateBlockBasicWithContextAtHeight(
+		blockBytes,
+		expectedPrevHash,
+		expectedTarget,
+		blockHeight,
+		prevTimestamps,
+	)
 	if err != nil {
 		return nil, err
 	}

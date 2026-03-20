@@ -269,6 +269,41 @@ func daCommitTxBytesDuplicateOutputs(txNonce uint64, daID [32]byte, chunkCount u
 	return b
 }
 
+func daCommitTxBytesWithOutputLen(txNonce uint64, daID [32]byte, chunkCount uint16, payloadCommitment []byte) []byte {
+	b := make([]byte, 0, 320)
+	b = AppendU32le(b, 1)
+	b = append(b, 0x01)
+	b = AppendU64le(b, txNonce)
+	b = AppendCompactSize(b, 1)
+	prevTxid := filled32(byte(txNonce))
+	b = append(b, prevTxid[:]...)
+	b = AppendU32le(b, 0)
+	b = AppendCompactSize(b, 0)
+	b = AppendU32le(b, 0)
+	b = AppendCompactSize(b, 1)
+	b = AppendU64le(b, 0)
+	b = AppendU16le(b, COV_TYPE_DA_COMMIT)
+	b = AppendCompactSize(b, uint64(len(payloadCommitment)))
+	b = append(b, payloadCommitment...)
+	b = AppendU32le(b, 0)
+	b = append(b, daID[:]...)
+	b = AppendU16le(b, chunkCount)
+	retlDomain := filled32(0x10)
+	b = append(b, retlDomain[:]...)
+	b = AppendU64le(b, 1)
+	txDataRoot := filled32(0x11)
+	b = append(b, txDataRoot[:]...)
+	stateRoot := filled32(0x12)
+	b = append(b, stateRoot[:]...)
+	withdrawalsRoot := filled32(0x13)
+	b = append(b, withdrawalsRoot[:]...)
+	b = append(b, 0x00)
+	b = AppendCompactSize(b, 0)
+	b = AppendCompactSize(b, 0)
+	b = AppendCompactSize(b, 0)
+	return b
+}
+
 func TestValidateBlockBasic_DA_DuplicateCommit(t *testing.T) {
 	daID := filled32(0xc1)
 	commitment := filled32(0xc2)
@@ -429,6 +464,50 @@ func TestValidateBlockBasic_DA_CommitOutputMissingOrDuplicated(t *testing.T) {
 			t.Fatalf("code=%s, want %s", got, BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID)
 		}
 	})
+
+	t.Run("invalid_length", func(t *testing.T) {
+		daID := filled32(0xcc)
+		payload := []byte("abc")
+		badCommitment := bytes.Repeat([]byte{0x44}, 31)
+
+		commit := daCommitTxBytesWithOutputLen(1, daID, 1, badCommitment)
+		chunk := daChunkTxBytes(2, daID, 0, sha3_256(payload), payload)
+		block, prev, target := buildDABlockBytes(t, commit, chunk)
+
+		_, err := ValidateBlockBasic(block, &prev, &target)
+		if err == nil {
+			t.Fatalf("expected error")
+		}
+		if got := mustTxErrCode(t, err); got != BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID {
+			t.Fatalf("code=%s, want %s", got, BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID)
+		}
+	})
+}
+
+func TestValidateBlockBasic_DA_BatchExceededPreemptsPayloadChecks(t *testing.T) {
+	txs := make([][]byte, 0, (MAX_DA_BATCHES_PER_BLOCK+1)*2)
+	for i := 0; i < MAX_DA_BATCHES_PER_BLOCK+1; i++ {
+		daID := filled32(byte(i))
+		payload := []byte{byte(i)}
+		chunk := daChunkTxBytes(uint64(10_000+i), daID, 0, sha3_256(payload), payload)
+		if i == 0 {
+			commit := daCommitTxBytesWithOutputLen(uint64(i+1), daID, 1, bytes.Repeat([]byte{0x77}, 31))
+			txs = append(txs, commit, chunk)
+			continue
+		}
+		commitment := sha3_256(payload)
+		commit := daCommitTxBytes(uint64(i+1), daID, 1, commitment)
+		txs = append(txs, commit, chunk)
+	}
+
+	block, prev, target := buildDABlockBytes(t, txs...)
+	_, err := ValidateBlockBasic(block, &prev, &target)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != BLOCK_ERR_DA_BATCH_EXCEEDED {
+		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_DA_BATCH_EXCEEDED)
+	}
 }
 
 func TestValidateBlockBasic_DA_CapsBeforeIntegrityChecks(t *testing.T) {
