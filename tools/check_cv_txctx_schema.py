@@ -43,6 +43,9 @@ def validate_structural_invariants(fixture_path: Path) -> list[str]:
     with open(fixture_path) as f:
         data = json.load(f)
 
+    if not isinstance(data, dict):
+        return ["top-level JSON must be an object"]
+
     vectors = data.get("vectors")
     if not isinstance(vectors, list):
         errors.append("vectors must be an array")
