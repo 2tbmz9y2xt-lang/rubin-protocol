@@ -87,6 +87,7 @@ type MempoolConfig struct {
 	PolicyDaSurchargePerByte             uint64
 	PolicyRejectNonCoinbaseAnchorOutputs bool
 	PolicyRejectCoreExtPreActivation     bool
+	PolicyMaxExtPayloadBytes             int
 	CoreExtProfiles                      consensus.CoreExtProfileProvider
 }
 
@@ -280,6 +281,15 @@ func (m *Mempool) applyPolicyLocked(checked *consensus.CheckedTransaction, nextH
 	}
 	if m.policy.PolicyRejectCoreExtPreActivation {
 		reject, reason, err := RejectCoreExtTxPreActivation(checked.Tx, m.chainState.Utxos, nextHeight, m.policy.CoreExtProfiles)
+		if err != nil {
+			return err
+		}
+		if reject {
+			return errors.New(reason)
+		}
+	}
+	if m.policy.PolicyMaxExtPayloadBytes > 0 {
+		reject, reason, err := RejectCoreExtTxOversizedPayload(checked.Tx, m.policy.PolicyMaxExtPayloadBytes)
 		if err != nil {
 			return err
 		}

@@ -123,6 +123,113 @@ func TestRejectCoreExtTxPreActivation_RejectsSpendWhenProfileMissing(t *testing.
 	}
 }
 
+func TestRejectCoreExtTxOversizedPayload_NilTx(t *testing.T) {
+	reject, _, err := RejectCoreExtTxOversizedPayload(nil, 48)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if reject {
+		t.Fatalf("nil tx must not reject")
+	}
+}
+
+func TestRejectCoreExtTxOversizedPayload_ZeroLimit(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0x30
+	payload := make([]byte, 100)
+	raw := txWithOneInputOneOutput(prev, 0, 1, consensus.COV_TYPE_CORE_EXT, coreExtCovenantData(5, payload), nil)
+	tx := mustParseTx(t, raw)
+
+	reject, _, err := RejectCoreExtTxOversizedPayload(tx, 0)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if reject {
+		t.Fatalf("zero limit must not reject (policy disabled)")
+	}
+}
+
+func TestRejectCoreExtTxOversizedPayload_AllowsUnderLimit(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0x31
+	payload := make([]byte, 32)
+	raw := txWithOneInputOneOutput(prev, 0, 1, consensus.COV_TYPE_CORE_EXT, coreExtCovenantData(5, payload), nil)
+	tx := mustParseTx(t, raw)
+
+	reject, _, err := RejectCoreExtTxOversizedPayload(tx, 48)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if reject {
+		t.Fatalf("payload within limit must not reject")
+	}
+}
+
+func TestRejectCoreExtTxOversizedPayload_AllowsAtLimit(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0x32
+	payload := make([]byte, 48)
+	raw := txWithOneInputOneOutput(prev, 0, 1, consensus.COV_TYPE_CORE_EXT, coreExtCovenantData(5, payload), nil)
+	tx := mustParseTx(t, raw)
+
+	reject, _, err := RejectCoreExtTxOversizedPayload(tx, 48)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if reject {
+		t.Fatalf("payload at exact limit must not reject")
+	}
+}
+
+func TestRejectCoreExtTxOversizedPayload_RejectsOverLimit(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0x33
+	payload := make([]byte, 49)
+	raw := txWithOneInputOneOutput(prev, 0, 1, consensus.COV_TYPE_CORE_EXT, coreExtCovenantData(5, payload), nil)
+	tx := mustParseTx(t, raw)
+
+	reject, reason, err := RejectCoreExtTxOversizedPayload(tx, 48)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !reject {
+		t.Fatalf("payload over limit must reject")
+	}
+	if reason == "" {
+		t.Fatalf("reason must not be empty")
+	}
+}
+
+func TestRejectCoreExtTxOversizedPayload_IgnoresNonCoreExt(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0x34
+	raw := txWithOneInputOneOutput(prev, 0, 1, consensus.COV_TYPE_P2PK, make([]byte, consensus.MAX_P2PK_COVENANT_DATA), []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_SENTINEL}})
+	tx := mustParseTx(t, raw)
+
+	reject, _, err := RejectCoreExtTxOversizedPayload(tx, 1)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if reject {
+		t.Fatalf("non-CORE_EXT output must not trigger payload check")
+	}
+}
+
+func TestRejectCoreExtTxOversizedPayload_EmptyPayloadAllowed(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0x35
+	raw := txWithOneInputOneOutput(prev, 0, 1, consensus.COV_TYPE_CORE_EXT, coreExtCovenantData(5, nil), nil)
+	tx := mustParseTx(t, raw)
+
+	reject, _, err := RejectCoreExtTxOversizedPayload(tx, 1)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if reject {
+		t.Fatalf("empty payload must not reject")
+	}
+}
+
 func TestRejectCoreExtTxPreActivation_AllowsSpendWhenProfileActive(t *testing.T) {
 	var prev [32]byte
 	prev[0] = 0x14
