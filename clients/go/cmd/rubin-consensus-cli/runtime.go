@@ -219,6 +219,17 @@ func (flag *BoolishFlag) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+func (flag BoolishFlag) MarshalJSON() ([]byte, error) {
+	switch flag {
+	case 0:
+		return []byte("false"), nil
+	case 1:
+		return []byte("true"), nil
+	default:
+		return nil, fmt.Errorf("bad tx_context_enabled")
+	}
+}
+
 type RotationDescriptorJSON struct {
 	Name         string `json:"name"`
 	OldSuiteID   uint8  `json:"old_suite_id"`

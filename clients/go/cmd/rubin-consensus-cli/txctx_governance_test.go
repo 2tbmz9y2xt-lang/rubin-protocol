@@ -203,6 +203,28 @@ func TestCoreExtProfileJSONRejectsNonBooleanTxContextEnabledJSON(t *testing.T) {
 	}
 }
 
+func TestCoreExtProfileJSONMarshalsCanonicalBooleanTxContextEnabledJSON(t *testing.T) {
+	payload, err := json.Marshal(CoreExtProfileJSON{
+		ExtID:              9,
+		ActivationHeight:   42,
+		TxContextEnabled:   1,
+		AllowedSuiteIDs:    []uint8{3},
+		MaxExtPayloadBytes: 48,
+		Binding:            "native_verify_sig",
+	})
+	if err != nil {
+		t.Fatalf("marshal profile: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	value, ok := decoded["tx_context_enabled"].(bool)
+	if !ok || !value {
+		t.Fatalf("expected canonical boolean tx_context_enabled, got %#v", decoded["tx_context_enabled"])
+	}
+}
+
 func TestRunTxctxGovernanceVectorAcceptsValidRequest(t *testing.T) {
 	profile := testTxctxGovernanceProfile()
 	artifact := []byte("txctx-governance-artifact")
