@@ -6,7 +6,7 @@ use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_cache, Sighas
 use crate::suite_registry::{DefaultRotationProvider, RotationProvider, SuiteRegistry};
 use crate::tx::Tx;
 use crate::tx::WitnessItem;
-use crate::txcontext::{TxContextBase, TxContextContinuing};
+use crate::txcontext::{TxContextBase, TxContextBundle, TxContextContinuing};
 use crate::utxo_basic::UtxoEntry;
 use crate::verify_sig_openssl::{openssl_verify_sig_digest_oneshot, verify_sig_with_registry};
 use core::ffi::CStr;
@@ -471,6 +471,7 @@ pub fn validate_core_ext_spend(
         profiles_at_height,
         None,
         None,
+        None,
         &mut cache,
     )
 }
@@ -500,6 +501,7 @@ pub fn validate_core_ext_spend_at_height(
         profiles_at_height,
         rotation,
         registry,
+        None,
         &mut cache,
     )
 }
@@ -516,6 +518,7 @@ pub(crate) fn validate_core_ext_spend_with_cache_and_suite_context(
     profiles_at_height: &CoreExtProfiles,
     rotation: Option<&dyn RotationProvider>,
     registry: Option<&SuiteRegistry>,
+    tx_context: Option<&TxContextBundle>,
     cache: &mut SighashV1PrehashCache<'_>,
 ) -> Result<(), TxError> {
     let default_rotation = DefaultRotationProvider;
@@ -535,6 +538,7 @@ pub(crate) fn validate_core_ext_spend_with_cache_and_suite_context(
         profiles_at_height,
         rotation,
         registry,
+        tx_context,
         cache,
     )
 }
@@ -550,6 +554,7 @@ fn validate_core_ext_spend_with_cache_impl(
     profiles_at_height: &CoreExtProfiles,
     rotation: &dyn RotationProvider,
     registry: &SuiteRegistry,
+    tx_context: Option<&TxContextBundle>,
     cache: &mut SighashV1PrehashCache<'_>,
 ) -> Result<(), TxError> {
     let cov = parse_core_ext_covenant_data(&entry.covenant_data)?;
@@ -641,6 +646,52 @@ fn validate_core_ext_spend_with_cache_impl(
     let digest32 =
         sighash_v1_digest_with_cache(cache, input_index, input_value, chain_id, sighash_type)?;
 
+    if p.tx_context_enabled {
+        let verify_tx_context_fn = p.verify_sig_ext_tx_context_fn.ok_or_else(|| {
+            TxError::new(
+                ErrorCode::TxErrSigAlgInvalid,
+                "CORE_EXT verify_sig_ext unsupported",
+            )
+        })?;
+        let tx_context = tx_context.ok_or_else(|| {
+            TxError::new(
+                ErrorCode::TxErrSigInvalid,
+                "CORE_EXT txcontext bundle missing",
+            )
+        })?;
+        let ctx_continuing = tx_context.get_continuing(cov.ext_id).ok_or_else(|| {
+            TxError::new(
+                ErrorCode::TxErrSigInvalid,
+                "CORE_EXT txcontext continuing bundle missing",
+            )
+        })?;
+        let ok = verify_tx_context_fn(
+            cov.ext_id,
+            w.suite_id,
+            &w.pubkey,
+            crypto_sig,
+            &digest32,
+            cov.ext_payload,
+            tx_context.base.as_ref(),
+            ctx_continuing.as_ref(),
+            input_value,
+        )
+        .map_err(|_| {
+            TxError::new(
+                ErrorCode::TxErrSigAlgInvalid,
+                "CORE_EXT verify_sig_ext error",
+            )
+        })?;
+        return if ok {
+            Ok(())
+        } else {
+            Err(TxError::new(
+                ErrorCode::TxErrSigInvalid,
+                "CORE_EXT signature invalid",
+            ))
+        };
+    }
+
     match p.verification_binding {
         CoreExtVerificationBinding::NativeVerifySig => Err(TxError::new(
             ErrorCode::TxErrSigAlgInvalid,
@@ -682,6 +733,7 @@ mod tests {
         VERIFY_COST_ML_DSA_87,
     };
     use crate::tx::{Tx, TxInput, TxOutput};
+    use crate::txcontext::{build_tx_context, build_tx_context_output_ext_id_cache};
 
     fn core_ext_covdata(ext_id: u16, payload: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
@@ -959,6 +1011,333 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn txcontext_accept_verifier(
+        _ext_id: u16,
+        _suite_id: u8,
+        _pubkey: &[u8],
+        _signature: &[u8],
+        _digest32: &[u8; 32],
+        _ext_payload: &[u8],
+        _ctx_base: &TxContextBase,
+        _ctx_continuing: &TxContextContinuing,
+        _self_input_value: u64,
+    ) -> Result<bool, TxError> {
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn txcontext_reject_verifier(
+        _ext_id: u16,
+        _suite_id: u8,
+        _pubkey: &[u8],
+        _signature: &[u8],
+        _digest32: &[u8; 32],
+        _ext_payload: &[u8],
+        _ctx_base: &TxContextBase,
+        _ctx_continuing: &TxContextContinuing,
+        _self_input_value: u64,
+    ) -> Result<bool, TxError> {
+        Ok(false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn txcontext_error_verifier(
+        _ext_id: u16,
+        _suite_id: u8,
+        _pubkey: &[u8],
+        _signature: &[u8],
+        _digest32: &[u8; 32],
+        _ext_payload: &[u8],
+        _ctx_base: &TxContextBase,
+        _ctx_continuing: &TxContextContinuing,
+        _self_input_value: u64,
+    ) -> Result<bool, TxError> {
+        Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "test txcontext verifier error",
+        ))
+    }
+
+    fn build_test_txcontext_bundle(
+        ext_id: u16,
+        height: u64,
+    ) -> (Tx, TxContextBundle, u32, u64, [u8; 32]) {
+        let mut prev = [0u8; 32];
+        prev[0] = 0x44;
+        let mut chain_id = [0u8; 32];
+        chain_id[0] = 0x55;
+        let tx = Tx {
+            version: 1,
+            tx_kind: 0x00,
+            tx_nonce: 1,
+            inputs: vec![TxInput {
+                prev_txid: prev,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: 90,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: core_ext_covdata(ext_id, &[]),
+            }],
+            locktime: 0,
+            witness: vec![WitnessItem {
+                suite_id: 0x42,
+                pubkey: vec![0x01, 0x02, 0x03],
+                signature: vec![0x04, 0x01],
+            }],
+            da_commit_core: None,
+            da_chunk_core: None,
+            da_payload: vec![],
+        };
+        let resolved_inputs = vec![UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_EXT,
+            covenant_data: core_ext_covdata(ext_id, &[0x99]),
+            creation_height: 0,
+            created_by_coinbase: false,
+        }];
+        let profiles = CoreExtProfiles {
+            active: vec![CoreExtActiveProfile {
+                ext_id,
+                tx_context_enabled: true,
+                allowed_suite_ids: vec![0x42],
+                verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+                verify_sig_ext_tx_context_fn: Some(txcontext_accept_verifier),
+                binding_descriptor: b"accept".to_vec(),
+                ext_payload_schema: b"schema".to_vec(),
+            }],
+        };
+        let cache = build_tx_context_output_ext_id_cache(&tx).expect("txcontext cache");
+        let bundle = build_tx_context(&tx, &resolved_inputs, Some(&cache), height, &profiles)
+            .expect("txcontext build")
+            .expect("txcontext bundle");
+        (tx, bundle, 0, 100, chain_id)
+    }
+
+    #[test]
+    fn core_ext_active_txcontext_missing_bundle_fails_closed() {
+        let entry = UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_EXT,
+            covenant_data: core_ext_covdata(7, &[0x99]),
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let profiles = CoreExtProfiles {
+            active: vec![CoreExtActiveProfile {
+                ext_id: 7,
+                tx_context_enabled: true,
+                allowed_suite_ids: vec![0x42],
+                verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+                verify_sig_ext_tx_context_fn: Some(txcontext_accept_verifier),
+                binding_descriptor: b"accept".to_vec(),
+                ext_payload_schema: b"schema".to_vec(),
+            }],
+        };
+        let w = WitnessItem {
+            suite_id: 0x42,
+            pubkey: vec![0x01, 0x02, 0x03],
+            signature: vec![0x04, 0x01],
+        };
+        let (tx, input_index, input_value, chain_id) = dummy_tx();
+        let err = validate_core_ext_spend(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            &profiles,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+        assert_eq!(err.msg, "CORE_EXT txcontext bundle missing");
+    }
+
+    #[test]
+    fn core_ext_active_txcontext_missing_runtime_verifier_rejected_sig_alg_invalid() {
+        let entry = UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_EXT,
+            covenant_data: core_ext_covdata(7, &[0x99]),
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let profiles = CoreExtProfiles {
+            active: vec![CoreExtActiveProfile {
+                ext_id: 7,
+                tx_context_enabled: true,
+                allowed_suite_ids: vec![0x42],
+                verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+                verify_sig_ext_tx_context_fn: None,
+                binding_descriptor: b"accept".to_vec(),
+                ext_payload_schema: b"schema".to_vec(),
+            }],
+        };
+        let w = WitnessItem {
+            suite_id: 0x42,
+            pubkey: vec![0x01, 0x02, 0x03],
+            signature: vec![0x04, 0x01],
+        };
+        let (tx, input_index, input_value, chain_id) = dummy_tx();
+        let err = validate_core_ext_spend(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            &profiles,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+        assert_eq!(err.msg, "CORE_EXT verify_sig_ext unsupported");
+    }
+
+    #[test]
+    fn core_ext_active_txcontext_missing_continuing_bundle_fails_closed() {
+        let entry = UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_EXT,
+            covenant_data: core_ext_covdata(7, &[0x99]),
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let profiles = CoreExtProfiles {
+            active: vec![CoreExtActiveProfile {
+                ext_id: 7,
+                tx_context_enabled: true,
+                allowed_suite_ids: vec![0x42],
+                verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+                verify_sig_ext_tx_context_fn: Some(txcontext_accept_verifier),
+                binding_descriptor: b"accept".to_vec(),
+                ext_payload_schema: b"schema".to_vec(),
+            }],
+        };
+        let w = WitnessItem {
+            suite_id: 0x42,
+            pubkey: vec![0x01, 0x02, 0x03],
+            signature: vec![0x04, 0x01],
+        };
+        let (tx, tx_context, input_index, input_value, chain_id) =
+            build_test_txcontext_bundle(9, 55);
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let err = validate_core_ext_spend_with_cache_and_suite_context(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            55,
+            &profiles,
+            None,
+            None,
+            Some(&tx_context),
+            &mut cache,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+        assert_eq!(err.msg, "CORE_EXT txcontext continuing bundle missing");
+    }
+
+    #[test]
+    fn core_ext_active_txcontext_reject_maps_to_sig_invalid() {
+        let entry = UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_EXT,
+            covenant_data: core_ext_covdata(7, &[0x99]),
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let profiles = CoreExtProfiles {
+            active: vec![CoreExtActiveProfile {
+                ext_id: 7,
+                tx_context_enabled: true,
+                allowed_suite_ids: vec![0x42],
+                verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+                verify_sig_ext_tx_context_fn: Some(txcontext_reject_verifier),
+                binding_descriptor: b"accept".to_vec(),
+                ext_payload_schema: b"schema".to_vec(),
+            }],
+        };
+        let w = WitnessItem {
+            suite_id: 0x42,
+            pubkey: vec![0x01, 0x02, 0x03],
+            signature: vec![0x04, 0x01],
+        };
+        let (tx, tx_context, input_index, input_value, chain_id) =
+            build_test_txcontext_bundle(7, 55);
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let err = validate_core_ext_spend_with_cache_and_suite_context(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            55,
+            &profiles,
+            None,
+            None,
+            Some(&tx_context),
+            &mut cache,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+        assert_eq!(err.msg, "CORE_EXT signature invalid");
+    }
+
+    #[test]
+    fn core_ext_active_txcontext_error_maps_to_sig_alg_invalid() {
+        let entry = UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_EXT,
+            covenant_data: core_ext_covdata(7, &[0x99]),
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let profiles = CoreExtProfiles {
+            active: vec![CoreExtActiveProfile {
+                ext_id: 7,
+                tx_context_enabled: true,
+                allowed_suite_ids: vec![0x42],
+                verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+                verify_sig_ext_tx_context_fn: Some(txcontext_error_verifier),
+                binding_descriptor: b"accept".to_vec(),
+                ext_payload_schema: b"schema".to_vec(),
+            }],
+        };
+        let w = WitnessItem {
+            suite_id: 0x42,
+            pubkey: vec![0x01, 0x02, 0x03],
+            signature: vec![0x04, 0x01],
+        };
+        let (tx, tx_context, input_index, input_value, chain_id) =
+            build_test_txcontext_bundle(7, 55);
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let err = validate_core_ext_spend_with_cache_and_suite_context(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            55,
+            &profiles,
+            None,
+            None,
+            Some(&tx_context),
+            &mut cache,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+        assert_eq!(err.msg, "CORE_EXT verify_sig_ext error");
     }
 
     #[test]

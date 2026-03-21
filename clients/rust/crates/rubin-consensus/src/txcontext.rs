@@ -131,7 +131,7 @@ pub fn build_tx_context_output_ext_id_cache(
     Ok(cache)
 }
 
-fn collect_txcontext_ext_ids(
+pub(crate) fn collect_txcontext_ext_ids(
     resolved_inputs: &[UtxoEntry],
     profiles_at_height: &CoreExtProfiles,
 ) -> Result<Vec<u16>, TxError> {
