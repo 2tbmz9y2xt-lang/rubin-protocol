@@ -280,6 +280,20 @@ func txctxDefaultP2PKCovenantData() []byte {
 	return out
 }
 
+func txctxDefaultCovenantData(covType uint16) ([]byte, error) {
+	switch covType {
+	case consensus.COV_TYPE_P2PK:
+		return txctxDefaultP2PKCovenantData(), nil
+	case consensus.COV_TYPE_ANCHOR:
+		return make([]byte, 32), nil
+	default:
+		return nil, fmt.Errorf(
+			"unsupported harness covenant_type=%d without raw_covenant_data_hex",
+			covType,
+		)
+	}
+}
+
 func txctxCanonicalOutputValue(covType uint16, value uint64) uint64 {
 	switch covType {
 	case consensus.COV_TYPE_ANCHOR, consensus.COV_TYPE_DA_COMMIT:
@@ -463,6 +477,24 @@ func txctxDuplicatePrevout(tc *TxctxCaseJSON) bool {
 	return false
 }
 
+func txctxHasActiveInputExtID(tc *TxctxCaseJSON, extID uint16) bool {
+	profilesByExt := txctxProfileByExtID(tc)
+	profile, ok := profilesByExt[extID]
+	if !ok || tc.Height < profile.ActivationHeight || profile.TxContextEnabled != 1 {
+		return false
+	}
+	for _, input := range tc.Inputs {
+		covType, err := txctxParseCovenantType(input.CovenantType)
+		if err != nil || covType != consensus.COV_TYPE_CORE_EXT {
+			continue
+		}
+		if input.ExtID == extID {
+			return true
+		}
+	}
+	return false
+}
+
 func txctxFirstOverflowExtID(outputs []TxctxOutputJSON) uint16 {
 	counts := make(map[uint16]int)
 	for _, output := range outputs {
@@ -518,7 +550,10 @@ func txctxBuildHarnessArtifacts(
 			return nil, txid, chainID, nil, nil, nil, err
 		}
 		if covType != consensus.COV_TYPE_CORE_EXT {
-			covData = txctxDefaultP2PKCovenantData()
+			covData, err = txctxDefaultCovenantData(covType)
+			if err != nil {
+				return nil, txid, chainID, nil, nil, nil, err
+			}
 		}
 		tx.Inputs = append(tx.Inputs, consensus.TxInput{
 			PrevTxid: prevTxid,
@@ -556,18 +591,16 @@ func txctxBuildHarnessArtifacts(
 				return nil, txid, chainID, nil, nil, nil, err
 			}
 		} else {
-			switch covType {
-			case consensus.COV_TYPE_CORE_EXT:
+			if covType == consensus.COV_TYPE_CORE_EXT {
 				covData, err = txctxCoreExtCovData(output.ExtID, output.ExtPayloadHex, output.RawExtPayloadHex)
 				if err != nil {
 					return nil, txid, chainID, nil, nil, nil, err
 				}
-			case consensus.COV_TYPE_P2PK:
-				covData = txctxDefaultP2PKCovenantData()
-			case consensus.COV_TYPE_ANCHOR:
-				covData = make([]byte, 32)
-			default:
-				covData = txctxDefaultP2PKCovenantData()
+			} else {
+				covData, err = txctxDefaultCovenantData(covType)
+				if err != nil {
+					return nil, txid, chainID, nil, nil, nil, err
+				}
 			}
 		}
 		tx.Outputs = append(tx.Outputs, consensus.TxOutput{
@@ -719,7 +752,8 @@ func runTxctxSpendVector(req Request) Response {
 			return Response{Ok: false, Err: txctxErrCode(err), Diagnostics: diag.responseMap()}
 		}
 		diag.attachBundle(bundle)
-		if tc.ForceMissingCtxContinuingExt != 0 {
+		if txctxHasActiveInputExtID(tc, tc.ForceMissingCtxContinuingExt) {
+			diag.failingExtID = tc.ForceMissingCtxContinuingExt
 			return Response{Ok: false, Err: string(consensus.TX_ERR_SIG_INVALID), Diagnostics: diag.responseMap()}
 		}
 	}

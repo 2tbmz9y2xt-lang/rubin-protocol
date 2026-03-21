@@ -55,3 +55,46 @@ func TestTxctxProfileErrorRejectsNonMinimalRawCompactSize(t *testing.T) {
 		t.Fatalf("got %q want %q", got, consensus.TX_ERR_COVENANT_TYPE_INVALID)
 	}
 }
+
+func TestTxctxBuildHarnessArtifactsRejectsUnsupportedNonCoreExtOutputWithoutRawData(t *testing.T) {
+	tc := &TxctxCaseJSON{
+		Height: 200,
+		Outputs: []TxctxOutputJSON{{
+			CovenantType: "CORE_VAULT",
+			Value:        1,
+		}},
+	}
+
+	_, _, _, _, _, _, err := txctxBuildHarnessArtifacts(tc, &txctxDiagnosticsRecorder{})
+	if err == nil || !strings.Contains(err.Error(), "unsupported harness covenant_type=") {
+		t.Fatalf("expected unsupported covenant error, got %v", err)
+	}
+}
+
+func TestRunTxctxSpendVectorScopesMissingContinuingToRequestedExtID(t *testing.T) {
+	profile := testTxctxProfile(0x0FFE)
+	tc := &TxctxCaseJSON{
+		Height:   200,
+		Profiles: []TxctxProfileJSON{profile},
+		Inputs: []TxctxInputJSON{{
+			CovenantType:   "CORE_EXT",
+			ExtID:          0x0FFE,
+			UtxoValue:      5,
+			SelfInputValue: 5,
+			SuiteID:        0x10,
+			SighashType:    consensus.SIGHASH_ALL,
+			PubkeyLength:   2592,
+		}},
+		Outputs: []TxctxOutputJSON{{
+			CovenantType: "CORE_EXT",
+			ExtID:        0x0FFE,
+			Value:        5,
+		}},
+		ForceMissingCtxContinuingExt: 0x0FFF,
+	}
+
+	resp := runTxctxSpendVector(Request{TxctxCase: tc})
+	if !resp.Ok {
+		t.Fatalf("expected scoped missing-continuing injection to be ignored, got ok=%v err=%q", resp.Ok, resp.Err)
+	}
+}

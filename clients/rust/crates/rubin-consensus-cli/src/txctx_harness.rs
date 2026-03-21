@@ -1,6 +1,6 @@
 use super::Response;
 use rubin_consensus::constants::{
-    COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_EXT, COV_TYPE_P2PK, SIGHASH_ALL,
+    COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_EXT, COV_TYPE_P2PK, COV_TYPE_VAULT, SIGHASH_ALL,
     SIGHASH_ANYONECANPAY, SIGHASH_NONE, SIGHASH_SINGLE, SUITE_ID_ML_DSA_87,
 };
 use rubin_consensus::core_ext::{
@@ -341,11 +341,22 @@ fn txctx_default_p2pk_covdata() -> Vec<u8> {
     out
 }
 
+fn txctx_default_covenant_data(cov_type: u16) -> Result<Vec<u8>, String> {
+    match cov_type {
+        COV_TYPE_P2PK => Ok(txctx_default_p2pk_covdata()),
+        COV_TYPE_ANCHOR => Ok(vec![0u8; 32]),
+        _ => Err(format!(
+            "unsupported harness covenant_type={cov_type} without raw_covenant_data_hex"
+        )),
+    }
+}
+
 fn txctx_parse_covenant_type(name: &str) -> Result<u16, String> {
     match name.trim().to_uppercase().as_str() {
         "" | "CORE_P2PK" => Ok(COV_TYPE_P2PK),
         "CORE_EXT" | "CORE_EXT_INACTIVE" => Ok(COV_TYPE_EXT),
         "CORE_ANCHOR" => Ok(COV_TYPE_ANCHOR),
+        "CORE_VAULT" => Ok(COV_TYPE_VAULT),
         "CORE_DA_COMMIT" => Ok(COV_TYPE_DA_COMMIT),
         _ => Err(format!("unknown covenant_type={name}")),
     }
@@ -377,6 +388,26 @@ fn txctx_allowed_suites(profile: &TxctxProfile) -> Vec<u8> {
         return vec![profile.suite_id];
     }
     vec![0x10]
+}
+
+fn txctx_has_active_input_ext_id(tc: &TxctxCase, ext_id: u16) -> bool {
+    let profiles_by_ext: HashMap<u16, &TxctxProfile> = tc
+        .profiles
+        .iter()
+        .map(|profile| (profile.ext_id, profile))
+        .collect();
+    let Some(profile) = profiles_by_ext.get(&ext_id) else {
+        return false;
+    };
+    if tc.height < profile.activation_height || profile.tx_context_enabled != 1 {
+        return false;
+    }
+    tc.inputs.iter().any(|input| {
+        input.ext_id == ext_id
+            && txctx_parse_covenant_type(&input.covenant_type)
+                .map(|cov_type| cov_type == COV_TYPE_EXT)
+                .unwrap_or(false)
+    })
 }
 
 fn txctx_duplicate_prevout(tc: &TxctxCase) -> bool {
@@ -541,6 +572,53 @@ mod tests {
             Some("TX_ERR_COVENANT_TYPE_INVALID")
         );
     }
+
+    #[test]
+    fn txctx_build_artifacts_rejects_unsupported_non_core_ext_output_without_raw_data() {
+        let tc = TxctxCase {
+            height: 200,
+            outputs: vec![TxctxOutput {
+                covenant_type: "CORE_VAULT".to_string(),
+                value: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let err = txctx_build_artifacts(&tc).unwrap_err();
+        assert!(
+            err.contains("unsupported harness covenant_type="),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn txctx_missing_continuing_injection_is_ext_scoped() {
+        let tc = TxctxCase {
+            height: 200,
+            profiles: vec![test_profile(0x0ffe)],
+            inputs: vec![TxctxInput {
+                covenant_type: "CORE_EXT".to_string(),
+                ext_id: 0x0ffe,
+                utxo_value: 5,
+                self_input_value: 5,
+                suite_id: 0x10,
+                sighash_type: SIGHASH_ALL,
+                pubkey_length: 2592,
+                ..Default::default()
+            }],
+            outputs: vec![TxctxOutput {
+                covenant_type: "CORE_EXT".to_string(),
+                ext_id: 0x0ffe,
+                value: 5,
+                ..Default::default()
+            }],
+            force_missing_ctx_continuing_ext_id: 0x0fff,
+            ..Default::default()
+        };
+
+        let resp = run_txctx_spend_vector(Some(tc));
+        assert!(resp.ok, "unexpected error: {:?}", resp.err);
+    }
 }
 
 fn txctx_first_overflow_ext_id(outputs: &[TxctxOutput]) -> u16 {
@@ -625,7 +703,7 @@ fn txctx_build_artifacts(
         let covenant_data = if cov_type == COV_TYPE_EXT {
             txctx_core_ext_covdata(ext_id, &input.ext_payload_hex, &input.raw_ext_payload_hex)?
         } else {
-            txctx_default_p2pk_covdata()
+            txctx_default_covenant_data(cov_type)?
         };
         tx.inputs.push(TxInput {
             prev_txid,
@@ -669,9 +747,7 @@ fn txctx_build_artifacts(
                     &output.ext_payload_hex,
                     &output.raw_ext_payload_hex,
                 )?,
-                COV_TYPE_P2PK => txctx_default_p2pk_covdata(),
-                COV_TYPE_ANCHOR => vec![0u8; 32],
-                _ => txctx_default_p2pk_covdata(),
+                _ => txctx_default_covenant_data(cov_type)?,
             }
         };
         tx.outputs.push(TxOutput {
@@ -798,7 +874,11 @@ pub fn run_txctx_spend_vector(txctx_case: Option<TxctxCase>) -> Response {
                 return txctx_err_response(err.code.as_str());
             }
         }
-        if tc.force_missing_ctx_continuing_ext_id != 0 {
+        if txctx_has_active_input_ext_id(&tc, tc.force_missing_ctx_continuing_ext_id) {
+            {
+                let mut recorder = recorder_cell().lock().expect("recorder lock");
+                recorder.failing_ext_id = tc.force_missing_ctx_continuing_ext_id;
+            }
             return txctx_err_response("TX_ERR_SIG_INVALID");
         }
     }
