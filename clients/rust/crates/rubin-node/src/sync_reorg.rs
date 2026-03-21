@@ -207,13 +207,16 @@ impl SyncEngine {
             .preview_disconnect_canonical_to_ancestor(&mut preview_state, common_ancestor_height)?;
 
         // Connect each branch block on the preview state.
+        let (rotation, registry) = self.suite_context();
         for item in branch {
-            preview_state.connect_block_with_core_ext_deployments(
+            preview_state.connect_block_with_core_ext_deployments_and_suite_context(
                 &item.block_bytes,
                 self.cfg.expected_target,
                 prev_timestamps,
                 self.cfg.chain_id,
                 &self.cfg.core_ext_deployments,
+                rotation,
+                registry,
             )?;
         }
 
@@ -356,14 +359,26 @@ fn non_coinbase_tx_bytes(block_bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
 
 #[cfg(test)]
 mod tests {
-    use rubin_consensus::constants::POW_LIMIT;
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use rubin_consensus::constants::{
+        ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, POW_LIMIT, SUITE_ID_ML_DSA_87,
+        VERIFY_COST_ML_DSA_87,
+    };
+    use rubin_consensus::{
+        marshal_tx, p2pk_covenant_data_for_pubkey, parse_tx, sign_transaction, Mldsa87Keypair,
+        NativeSuiteSet, Outpoint, RotationProvider, SuiteParams, SuiteRegistry, Tx, TxInput,
+        TxOutput, UtxoEntry,
+    };
 
     use super::*;
     use crate::blockstore::{block_store_path, BlockStore};
     use crate::chainstate::{chain_state_path, ChainState};
     use crate::devnet_genesis_chain_id;
     use crate::io_utils::unique_temp_path;
-    use crate::sync::{default_sync_config, SyncEngine};
+    use crate::sync::{default_sync_config, SuiteContext, SyncEngine};
     use crate::test_helpers::{
         block_with_txs, coinbase_only_block, coinbase_only_block_with_gen, genesis_info,
         height_one_coinbase_only_block, signed_conflicting_p2pk_state_and_txs,
@@ -388,6 +403,99 @@ mod tests {
         let cfg = default_sync_config(Some(POW_LIMIT), [0u8; 32], Some(chain_state_path(&dir)));
         let engine = SyncEngine::new(ChainState::new(), Some(store), cfg).expect("new sync");
         (engine, dir)
+    }
+
+    struct CountingRotationProvider {
+        suite_id: u8,
+        spend_calls: AtomicUsize,
+    }
+
+    impl RotationProvider for CountingRotationProvider {
+        fn native_create_suites(&self, _height: u64) -> NativeSuiteSet {
+            NativeSuiteSet::new(&[SUITE_ID_ML_DSA_87, self.suite_id])
+        }
+
+        fn native_spend_suites(&self, _height: u64) -> NativeSuiteSet {
+            self.spend_calls.fetch_add(1, Ordering::SeqCst);
+            NativeSuiteSet::new(&[self.suite_id])
+        }
+    }
+
+    fn suite_context(extra_suite_id: u8) -> (Arc<CountingRotationProvider>, SuiteContext) {
+        let rotation = Arc::new(CountingRotationProvider {
+            suite_id: extra_suite_id,
+            spend_calls: AtomicUsize::new(0),
+        });
+        let mut suites = BTreeMap::new();
+        suites.insert(
+            SUITE_ID_ML_DSA_87,
+            SuiteParams {
+                suite_id: SUITE_ID_ML_DSA_87,
+                pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+                sig_len: ML_DSA_87_SIG_BYTES,
+                verify_cost: VERIFY_COST_ML_DSA_87,
+                openssl_alg: "ML-DSA-87",
+            },
+        );
+        suites.insert(
+            extra_suite_id,
+            SuiteParams {
+                suite_id: extra_suite_id,
+                pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+                sig_len: ML_DSA_87_SIG_BYTES,
+                verify_cost: VERIFY_COST_ML_DSA_87,
+                openssl_alg: "ML-DSA-87",
+            },
+        );
+        let ctx = SuiteContext {
+            rotation: rotation.clone(),
+            registry: Arc::new(SuiteRegistry::with_suites(suites)),
+        };
+        (rotation, ctx)
+    }
+
+    fn rewrite_native_suite(mut raw: Vec<u8>, suite_id: u8) -> Vec<u8> {
+        let (mut tx, _, _, consumed) = parse_tx(&raw).expect("parse tx");
+        assert_eq!(consumed, raw.len(), "parse tx consumed full buffer");
+        assert_eq!(tx.witness.len(), 1, "single witness expected");
+        tx.witness[0].suite_id = suite_id;
+        raw = marshal_tx(&tx).expect("marshal tx");
+        raw
+    }
+
+    fn build_rotated_p2pk_tx(
+        state: &ChainState,
+        outpoint: Outpoint,
+        keypair: &Mldsa87Keypair,
+        tx_nonce: u64,
+        output_value: u64,
+        dest_fill: u8,
+        suite_id: u8,
+    ) -> Vec<u8> {
+        let mut tx = Tx {
+            version: rubin_consensus::constants::TX_WIRE_VERSION,
+            tx_kind: 0x00,
+            tx_nonce,
+            inputs: vec![TxInput {
+                prev_txid: outpoint.txid,
+                prev_vout: outpoint.vout,
+                script_sig: Vec::new(),
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: output_value,
+                covenant_type: rubin_consensus::constants::COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&vec![dest_fill; 2592]),
+            }],
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: Vec::new(),
+        };
+        sign_transaction(&mut tx, &state.utxos, devnet_genesis_chain_id(), keypair)
+            .expect("sign tx");
+        rewrite_native_suite(marshal_tx(&tx).expect("marshal tx"), suite_id)
     }
 
     #[test]
@@ -559,6 +667,117 @@ mod tests {
 
         assert_eq!(engine.chain_state.height, 2);
         assert_eq!(summary.block_height, 2);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn native_suites_cache_invalidated_on_reorg() {
+        let (mut engine, dir) = engine_with_store("rubin-reorg-native-suite");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+        engine
+            .apply_block_with_reorg(&genesis, None, None)
+            .expect("genesis");
+        engine.cfg.chain_id = devnet_genesis_chain_id();
+
+        const ROTATED_SUITE_ID: u8 = 0x42;
+        let signer_a = Mldsa87Keypair::generate().expect("OpenSSL signer unavailable");
+        let signer_b = Mldsa87Keypair::generate().expect("OpenSSL signer unavailable");
+        let outpoint_a = Outpoint {
+            txid: [0x11; 32],
+            vout: 0,
+        };
+        let outpoint_b = Outpoint {
+            txid: [0x22; 32],
+            vout: 0,
+        };
+        let mut state = ChainState::new();
+        state.utxos.insert(
+            outpoint_a.clone(),
+            UtxoEntry {
+                value: 20,
+                covenant_type: rubin_consensus::constants::COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&signer_a.pubkey_bytes()),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
+        state.utxos.insert(
+            outpoint_b.clone(),
+            UtxoEntry {
+                value: 20,
+                covenant_type: rubin_consensus::constants::COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&signer_b.pubkey_bytes()),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
+
+        let admitted_raw = build_rotated_p2pk_tx(
+            &state,
+            outpoint_a.clone(),
+            &signer_a,
+            7,
+            10,
+            0x31,
+            ROTATED_SUITE_ID,
+        );
+        let block_raw = build_rotated_p2pk_tx(
+            &state,
+            outpoint_b.clone(),
+            &signer_b,
+            8,
+            9,
+            0x41,
+            ROTATED_SUITE_ID,
+        );
+        for entry in state.utxos.values_mut() {
+            entry.covenant_data[0] = ROTATED_SUITE_ID;
+        }
+
+        let (rotation, suite_ctx) = suite_context(ROTATED_SUITE_ID);
+        engine.cfg.suite_context = Some(suite_ctx.clone());
+        engine.chain_state.utxos = state.utxos.clone();
+
+        let mut pool = TxPool::new_with_config(crate::txpool::TxPoolConfig {
+            suite_context: Some(suite_ctx),
+            ..crate::txpool::TxPoolConfig::default()
+        });
+
+        let (_, _, admitted_wtxid, admitted_len) = parse_tx(&admitted_raw).expect("parse admitted");
+        assert_eq!(admitted_len, admitted_raw.len());
+
+        let block1 = block_with_txs(1, 0, genesis_hash, gen_ts + 1, &[admitted_raw.clone()]);
+        let summary_a1 = engine
+            .apply_block_with_reorg(&block1, None, Some(&mut pool))
+            .expect("A1 canonical");
+
+        let block1_alt = block_with_txs(1, 0, genesis_hash, gen_ts + 2, &[block_raw]);
+        engine
+            .apply_block_with_reorg(&block1_alt, None, Some(&mut pool))
+            .expect("B1 side chain stored");
+
+        let block1_alt_hash =
+            rubin_consensus::block_hash(&block1_alt[..rubin_consensus::BLOCK_HEADER_BYTES])
+                .expect("hash B1");
+        let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+        let block2_alt = coinbase_only_block_with_gen(2, subsidy1, block1_alt_hash, gen_ts + 3);
+
+        engine
+            .apply_block_with_reorg(&block2_alt, None, Some(&mut pool))
+            .expect("reorg to heavier branch");
+
+        assert_eq!(pool.len(), 1, "disconnected tx requeued into mempool");
+        assert!(
+            rotation.spend_calls.load(Ordering::SeqCst) >= 3,
+            "expected native spend suites to be recomputed for canonical apply, preview replay, and mempool requeue"
+        );
+        assert_ne!(engine.chain_state.tip_hash, summary_a1.block_hash);
+        let selected = pool.select_transactions(10, usize::MAX);
+        assert_eq!(selected.len(), 1);
+        let (_, _, selected_wtxid, selected_len) = parse_tx(&selected[0]).expect("parse selected");
+        assert_eq!(selected_len, selected[0].len());
+        assert_eq!(selected_wtxid, admitted_wtxid);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }

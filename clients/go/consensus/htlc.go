@@ -64,6 +64,30 @@ func ValidateHTLCSpendWithCache(
 	blockMTP uint64,
 	cache *SighashV1PrehashCache,
 ) error {
+	return ValidateHTLCSpendAtHeight(entry, pathItem, sigItem, tx, inputIndex, inputValue, chainID, blockHeight, blockMTP, cache, nil, nil)
+}
+
+func ValidateHTLCSpendAtHeight(
+	entry UtxoEntry,
+	pathItem WitnessItem,
+	sigItem WitnessItem,
+	tx *Tx,
+	inputIndex uint32,
+	inputValue uint64,
+	chainID [32]byte,
+	blockHeight uint64,
+	blockMTP uint64,
+	cache *SighashV1PrehashCache,
+	rotation RotationProvider,
+	registry *SuiteRegistry,
+) error {
+	if rotation == nil {
+		rotation = DefaultRotationProvider{}
+	}
+	if registry == nil {
+		registry = DefaultSuiteRegistry()
+	}
+
 	c, err := ParseHTLCCovenantData(entry.CovenantData)
 	if err != nil {
 		return err
@@ -129,13 +153,18 @@ func ValidateHTLCSpendWithCache(
 		return txerr(TX_ERR_PARSE, "CORE_HTLC unknown spend path")
 	}
 
-	switch sigItem.SuiteID {
-	case SUITE_ID_ML_DSA_87:
-		if len(sigItem.Pubkey) != ML_DSA_87_PUBKEY_BYTES || len(sigItem.Signature) != ML_DSA_87_SIG_BYTES+1 {
-			return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
-		}
-	default:
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_HTLC sig_item suite invalid")
+	nativeSpend := rotation.NativeSpendSuites(blockHeight)
+	if !nativeSpend.Contains(sigItem.SuiteID) {
+		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_HTLC suite not in native spend set")
+	}
+
+	params, ok := registry.Lookup(sigItem.SuiteID)
+	if !ok {
+		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_HTLC suite not registered")
+	}
+
+	if len(sigItem.Pubkey) != params.PubkeyLen || len(sigItem.Signature) != params.SigLen+1 {
+		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical witness item lengths")
 	}
 
 	if sha3_256(sigItem.Pubkey) != expectedKeyID {
@@ -146,7 +175,7 @@ func ValidateHTLCSpendWithCache(
 	if err != nil {
 		return err
 	}
-	ok, err := verifySig(sigItem.SuiteID, sigItem.Pubkey, cryptoSig, digest)
+	ok, err = verifySigWithRegistry(sigItem.SuiteID, sigItem.Pubkey, cryptoSig, digest, registry)
 	if err != nil {
 		return err
 	}

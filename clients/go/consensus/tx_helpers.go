@@ -37,6 +37,28 @@ func CheckTransaction(
 	blockMTP uint64,
 	chainID [32]byte,
 ) (*CheckedTransaction, error) {
+	return CheckTransactionWithCoreExtProfilesAndSuiteContext(
+		txBytes,
+		utxoSet,
+		height,
+		blockMTP,
+		chainID,
+		nil,
+		nil,
+		nil,
+	)
+}
+
+func CheckTransactionWithCoreExtProfilesAndSuiteContext(
+	txBytes []byte,
+	utxoSet map[Outpoint]UtxoEntry,
+	height uint64,
+	blockMTP uint64,
+	chainID [32]byte,
+	coreExtProfiles CoreExtProfileProvider,
+	rotation RotationProvider,
+	registry *SuiteRegistry,
+) (*CheckedTransaction, error) {
 	tx, txid, wtxid, consumed, err := ParseTx(txBytes)
 	if err != nil {
 		return nil, err
@@ -57,9 +79,9 @@ func CheckTransaction(
 		height,
 		blockMTP,
 		chainID,
-		nil,
-		nil,
-		nil,
+		coreExtProfiles,
+		rotation,
+		registry,
 	)
 	if err != nil {
 		return nil, err

@@ -148,12 +148,14 @@ func ReconcileChainStateWithBlockStore(state *ChainState, store *BlockStore, cfg
 		if err != nil {
 			return false, err
 		}
-		if _, err := state.ConnectBlockWithCoreExtProfiles(
+		if _, err := state.ConnectBlockWithCoreExtProfilesAndSuiteContext(
 			blockBytes,
 			cfg.ExpectedTarget,
 			prevTimestamps,
 			cfg.ChainID,
 			cfg.CoreExtProfiles,
+			cfg.RotationProvider,
+			cfg.SuiteRegistry,
 		); err != nil {
 			return false, err
 		}

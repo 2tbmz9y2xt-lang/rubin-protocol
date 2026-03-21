@@ -1,9 +1,11 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use rubin_consensus::constants::POW_LIMIT;
 use rubin_consensus::{
     block_hash, parse_block_bytes, parse_block_header_bytes, CoreExtDeploymentProfiles,
 };
+use rubin_consensus::{RotationProvider, SuiteRegistry};
 
 use crate::blockstore::BlockStore;
 use crate::chainstate::{ChainState, ChainStateConnectSummary};
@@ -12,7 +14,7 @@ use crate::undo::build_block_undo;
 pub const DEFAULT_IBD_LAG_SECONDS: u64 = 24 * 60 * 60;
 const DEFAULT_HEADER_BATCH_LIMIT: u64 = 512;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct SyncConfig {
     pub header_batch_limit: u64,
     pub ibd_lag_seconds: u64,
@@ -21,6 +23,22 @@ pub struct SyncConfig {
     pub chain_state_path: Option<PathBuf>,
     pub network: String,
     pub core_ext_deployments: CoreExtDeploymentProfiles,
+    pub suite_context: Option<SuiteContext>,
+}
+
+#[derive(Clone)]
+pub struct SuiteContext {
+    pub rotation: Arc<dyn RotationProvider + Send + Sync>,
+    pub registry: Arc<SuiteRegistry>,
+}
+
+impl std::fmt::Debug for SuiteContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SuiteContext")
+            .field("rotation", &"<dyn RotationProvider>")
+            .field("registry", &self.registry)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,10 +84,18 @@ pub fn default_sync_config(
         chain_state_path,
         network: "devnet".to_string(),
         core_ext_deployments: CoreExtDeploymentProfiles::empty(),
+        suite_context: None,
     }
 }
 
 impl SyncEngine {
+    pub(crate) fn suite_context(&self) -> (Option<&dyn RotationProvider>, Option<&SuiteRegistry>) {
+        match self.cfg.suite_context.as_ref() {
+            Some(ctx) => (Some(ctx.rotation.as_ref()), Some(ctx.registry.as_ref())),
+            None => (None, None),
+        }
+    }
+
     pub fn new(
         chain_state: ChainState,
         block_store: Option<BlockStore>,
@@ -209,13 +235,23 @@ impl SyncEngine {
         };
         let undo = build_block_undo(&self.chain_state, block_bytes, next_height)?;
 
-        let summary = self.chain_state.connect_block_with_core_ext_deployments(
-            block_bytes,
-            self.cfg.expected_target,
-            prev_timestamps,
-            self.cfg.chain_id,
-            &self.cfg.core_ext_deployments,
-        )?;
+        let suite_context = self.cfg.suite_context.clone();
+        let (rotation, registry): (Option<&dyn RotationProvider>, Option<&SuiteRegistry>) =
+            match suite_context.as_ref() {
+                Some(ctx) => (Some(ctx.rotation.as_ref()), Some(ctx.registry.as_ref())),
+                None => (None, None),
+            };
+        let summary = self
+            .chain_state
+            .connect_block_with_core_ext_deployments_and_suite_context(
+                block_bytes,
+                self.cfg.expected_target,
+                prev_timestamps,
+                self.cfg.chain_id,
+                &self.cfg.core_ext_deployments,
+                rotation,
+                registry,
+            )?;
 
         let canonical_len_before = self.block_store.as_ref().map_or(0, |bs| bs.canonical_len());
         if let Some(block_store) = self.block_store.as_mut() {

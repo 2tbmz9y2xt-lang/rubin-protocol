@@ -25,6 +25,8 @@ type SyncConfig struct {
 	ChainID          [32]byte
 	Network          string
 	CoreExtProfiles  consensus.CoreExtProfileProvider
+	RotationProvider consensus.RotationProvider
+	SuiteRegistry    *consensus.SuiteRegistry
 
 	ParallelValidationMode string // off|shadow|on
 	PVShadowMaxSamples     uint64 // bounded mismatch diagnostics; 0 => default
@@ -204,6 +206,19 @@ func (s *SyncEngine) SetMempool(mempool *Mempool) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if mempool != nil {
+		mempool.mu.Lock()
+		if mempool.policy.CoreExtProfiles == nil {
+			mempool.policy.CoreExtProfiles = s.cfg.CoreExtProfiles
+		}
+		if mempool.policy.RotationProvider == nil {
+			mempool.policy.RotationProvider = s.cfg.RotationProvider
+		}
+		if mempool.policy.SuiteRegistry == nil {
+			mempool.policy.SuiteRegistry = s.cfg.SuiteRegistry
+		}
+		mempool.mu.Unlock()
+	}
 	s.mempool = mempool
 }
 
@@ -428,12 +443,14 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 	// Q-PV-12 shadow rollout: sequential truth path. Parallel validation runs on a
 	// cloned state and is used for bounded diagnostics only (never changes verdict).
 	pvActive := (s.pvMode == pvModeShadow || s.pvMode == pvModeOn) && s.isInIBDUnchecked()
-	summary, err = s.chainState.ConnectBlockWithCoreExtProfiles(
+	summary, err = s.chainState.ConnectBlockWithCoreExtProfilesAndSuiteContext(
 		blockBytes,
 		s.cfg.ExpectedTarget,
 		prevTimestamps,
 		s.cfg.ChainID,
 		s.cfg.CoreExtProfiles,
+		s.cfg.RotationProvider,
+		s.cfg.SuiteRegistry,
 	)
 	if err != nil {
 		if pvActive {

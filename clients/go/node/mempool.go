@@ -89,6 +89,8 @@ type MempoolConfig struct {
 	PolicyRejectCoreExtPreActivation     bool
 	PolicyMaxExtPayloadBytes             int
 	CoreExtProfiles                      consensus.CoreExtProfileProvider
+	RotationProvider                     consensus.RotationProvider
+	SuiteRegistry                        *consensus.SuiteRegistry
 }
 
 type RelayTxMetadata struct {
@@ -245,7 +247,16 @@ func (m *Mempool) checkTransactionLocked(txBytes []byte) (*consensus.CheckedTran
 	if err != nil {
 		return nil, nil, err
 	}
-	checked, err := consensus.CheckTransaction(txBytes, m.chainState.Utxos, nextHeight, blockMTP, m.chainID)
+	checked, err := consensus.CheckTransactionWithCoreExtProfilesAndSuiteContext(
+		txBytes,
+		m.chainState.Utxos,
+		nextHeight,
+		blockMTP,
+		m.chainID,
+		m.policy.CoreExtProfiles,
+		m.policy.RotationProvider,
+		m.policy.SuiteRegistry,
+	)
 	if err != nil {
 		return nil, nil, err
 	}
