@@ -40,7 +40,7 @@ pub struct TxctxCase {
     #[serde(default)]
     force_missing_ctx_continuing_ext_id: u16,
     #[serde(default)]
-    verifier_access_index: usize,
+    verifier_access_index: i64,
     #[serde(default, rename = "warn_governance_failure")]
     _warn_governance_failure: bool,
 }
@@ -154,7 +154,7 @@ fn recorder_cell() -> &'static Mutex<Recorder> {
 fn txctx_reset_recorder(tc: &TxctxCase) {
     let mut recorder = recorder_cell().lock().expect("recorder lock");
     *recorder = Recorder::default();
-    recorder.access_index = tc.verifier_access_index;
+    recorder.access_index = tc.verifier_access_index.max(0) as usize;
     for profile in &tc.profiles {
         recorder
             .profile_modes
@@ -957,5 +957,17 @@ mod tests {
             ..Default::default()
         };
         assert!(txctx_duplicate_prevout(&tc));
+    }
+
+    #[test]
+    fn txctx_case_deserializes_negative_verifier_access_index() {
+        let tc: TxctxCase = serde_json::from_value(json!({
+            "verifier_access_index": -1
+        }))
+        .expect("negative index should deserialize");
+        assert_eq!(tc.verifier_access_index, -1);
+        txctx_reset_recorder(&tc);
+        let recorder = recorder_cell().lock().expect("recorder lock");
+        assert_eq!(recorder.access_index, 0);
     }
 }

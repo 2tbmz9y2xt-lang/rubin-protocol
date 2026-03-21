@@ -15,7 +15,11 @@ class RunCvBundleOpNormalizationTests(unittest.TestCase):
 
     def test_non_txctx_whitespace_op_is_missing(self):
         op = normalized_vector_op("CV-OTHER", {"id": "X", "op": "   "})
-        self.assertIsNone(op)
+        self.assertEqual(op, "   ")
+
+    def test_noncanonical_whitespace_is_not_silently_normalized(self):
+        op = normalized_vector_op("CV-TXCTX", {"id": "CV-TXCTX-01", "op": " txctx_spend_vector "})
+        self.assertEqual(op, " txctx_spend_vector ")
 
 
 if __name__ == "__main__":

@@ -63,6 +63,19 @@ class TxctxCaseTests(unittest.TestCase):
         self.assertEqual(case["outputs"][0]["covenant_type"], "CORE_EXT")
         self.assertEqual(case["outputs"][0]["value"], 1)
 
+    def test_prevout_short_hex_left_pads_before_width_fixing(self):
+        vector = {
+            "id": "v",
+            "profile": "p",
+            "height": 200,
+            "inputs": [
+                {"prevout": "1:0"},
+                {"prevout": "01:0"},
+            ],
+        }
+        case = build_txctx_case(vector, FIXTURE)
+        self.assertEqual(case["inputs"][0]["prevout_txid_hex"], case["inputs"][1]["prevout_txid_hex"])
+
 
 if __name__ == "__main__":
     unittest.main()

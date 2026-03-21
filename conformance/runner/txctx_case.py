@@ -171,7 +171,7 @@ def _parse_prevout(value: str, index: int) -> Tuple[str, int]:
         return _default_prevout(index)
     prefix, vout_str = value.split(":", 1)
     txid = _normalize_hex(prefix)
-    txid = (txid + ("0" * 64))[:64]
+    txid = txid.rjust(64, "0")[-64:]
     return txid, _intish(vout_str)
 
 

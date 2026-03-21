@@ -45,13 +45,14 @@ TXCTX_GOVERNANCE_SKIP_IDS = {"CV-TXCTX-60", "CV-TXCTX-GOV-01"}
 
 def normalized_vector_op(gate: str, vector: Dict[str, Any]) -> Optional[str]:
     op = vector.get("op")
-    if isinstance(op, str):
-        op = op.strip()
-    if gate == "CV-TXCTX" and not op:
+    stripped = op.strip() if isinstance(op, str) else op
+    if gate == "CV-TXCTX" and (op is None or stripped == ""):
         vid = str(vector.get("id", "?"))
         if vid in TXCTX_GOVERNANCE_SKIP_IDS:
             return None
         return "txctx_spend_vector"
+    if isinstance(op, str) and op != stripped:
+        return op
     if not op:
         return None
     return str(op)
