@@ -1,0 +1,2007 @@
+{
+  "gate": "CV-TXCTX",
+  "spec": "SPEC-TXCTX-01 v2.0",
+  "version": "1.0.0",
+  "profiles": {
+    "test_amm_profile": {
+      "ext_id": 4095,
+      "ext_id_hex": "0fff",
+      "suite_id": 16,
+      "suite_id_hex": "10",
+      "txcontext_enabled": 1,
+      "allowed_sighash_set": 1,
+      "max_ext_payload_bytes": 48,
+      "binding_kind": 2,
+      "suite_count": 1,
+      "activation_height": 100,
+      "verifier_logic": "requires ContinuingOutputCount>=1; checks new_reserve_x*new_reserve_y >= old_reserve_x*old_reserve_y; old reserves from e.ext_payload[0..16], new from ContinuingOutputs[0].ExtPayload[0..16]",
+      "baseline": {
+        "old_reserve_x": 100,
+        "old_reserve_y": 200,
+        "old_product": 20000
+      },
+      "abi": "9-param"
+    },
+    "test_passthrough_profile": {
+      "ext_id": 4094,
+      "ext_id_hex": "0ffe",
+      "suite_id": 16,
+      "suite_id_hex": "10",
+      "txcontext_enabled": 1,
+      "allowed_sighash_set": 1,
+      "max_ext_payload_bytes": 48,
+      "binding_kind": 2,
+      "suite_count": 1,
+      "activation_height": 100,
+      "verifier_logic": "always returns true",
+      "abi": "9-param"
+    },
+    "test_disabled_profile": {
+      "ext_id": 4093,
+      "ext_id_hex": "0ffd",
+      "suite_id": 16,
+      "suite_id_hex": "10",
+      "txcontext_enabled": 0,
+      "allowed_sighash_set": 0,
+      "max_ext_payload_bytes": 0,
+      "binding_kind": 2,
+      "suite_count": 1,
+      "activation_height": 100,
+      "verifier_logic": "always returns true regardless of sig content (test context only); 6-parameter ABI — no TxContext params (no ctx_base, ctx_continuing, self_input_value). [M2 FIX: was \"always returns true for valid ML-DSA-87 sig\" — that description implied sig validation which this test fixture does NOT perform. Harness MUST dispatch using 6-param ABI based on txcontext_enabled=0x00, not on verifier_logic text.]",
+      "abi": "6-param"
+    },
+    "test_acp_profile": {
+      "ext_id": 4092,
+      "ext_id_hex": "0ffc",
+      "suite_id": 16,
+      "suite_id_hex": "10",
+      "txcontext_enabled": 1,
+      "allowed_sighash_set": 129,
+      "max_ext_payload_bytes": 48,
+      "binding_kind": 2,
+      "suite_count": 1,
+      "activation_height": 100,
+      "verifier_logic": "always returns true",
+      "abi": "9-param"
+    }
+  },
+  "vectors": [
+    {
+      "id": "CV-TXCTX-01",
+      "description": "K=2 continuing outputs, AMM invariant satisfied",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "note": "old_reserve_x=100 (u64le), old_reserve_y=200 (u64le) AMM verifier reads new reserves ONLY from ContinuingOutputs[0].ExtPayload[0:16]. ContinuingOutputs[1] (if present) is NOT read by the AMM invariant check — it is present as a second output (e.g., LP token) but ignored by this verifier. Implementations MUST NOT aggregate or sum reserves across multiple ContinuingOutputs.",
+      "continuing_outputs": [
+        {
+          "value": 950,
+          "ext_payload_hex": "6b00000000000000cf00000000000000",
+          "note": "new_reserve_x=107, new_reserve_y=207; 107*207=22149 >= 20000"
+        },
+        {
+          "value": 50,
+          "ext_payload_hex": "3200000000000000c800000000000000",
+          "note": "LP token output, ext_id=0x0FFF same profile"
+        }
+      ],
+      "expect_ok": true
+    },
+    {
+      "id": "CV-TXCTX-02",
+      "description": "0 continuing outputs; test_amm_profile requires Count>=1",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_INVALID",
+      "note": "verifier returns false: ContinuingOutputCount=0 < required 1"
+    },
+    {
+      "id": "CV-TXCTX-03",
+      "description": "0 continuing outputs; test_passthrough_profile always accepts",
+      "profile": "test_passthrough_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "00",
+      "continuing_outputs": [],
+      "expect_ok": true
+    },
+    {
+      "id": "CV-TXCTX-04",
+      "description": "5 continuing outputs same ext_id; 3rd output triggers >K=2 reject at construction per §5.2 B-1 fix",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [
+        {
+          "value": 900,
+          "ext_payload_hex": "6b00000000000000cf00000000000000",
+          "note": "index 0: first continuing output — NEVER REACHES verifier; tx rejected at step 3c construction"
+        },
+        {
+          "value": 50,
+          "ext_payload_hex": "3200000000000000c800000000000000",
+          "note": "index 1: second continuing output — NEVER REACHES verifier; tx rejected at step 3c construction"
+        },
+        {
+          "value": 10,
+          "ext_payload_hex": "0100000000000000",
+          "note": "index 2: TRIGGERS TX_ERR_COVENANT_TYPE_INVALID at step 3c (3rd qualifying output, ContinuingOutputCount==K=2)"
+        },
+        {
+          "value": 10,
+          "ext_payload_hex": "0200000000000000",
+          "note": "index 3: never evaluated; tx already rejected at index 2"
+        },
+        {
+          "value": 10,
+          "ext_payload_hex": "0300000000000000",
+          "note": "index 4: never evaluated; tx already rejected at index 2"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "note": "Under B-1 fix: when ContinuingOutputCount==K and another qualifying output is found, immediate TX_ERR_COVENANT_TYPE_INVALID. Silent truncation (v1 behaviour) is prohibited."
+    },
+    {
+      "id": "CV-TXCTX-05",
+      "description": "All outputs have ext_id=0x0FFE; excluded from ContinuingOutputs for 0x0FFF; AMM requires Count>=1",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [
+        {
+          "value": 900,
+          "ext_id": "0x0FFE",
+          "ext_payload_hex": "0100000000000000"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_INVALID",
+      "continuing_ext_id_override": "0x0FFE"
+    },
+    {
+      "id": "CV-TXCTX-06",
+      "description": "Only non-CORE_EXT outputs (CORE_P2PK); excluded from ContinuingOutputs; AMM requires Count>=1",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "output_covenant_types": [
+        "CORE_P2PK"
+      ],
+      "continuing_outputs": [],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_INVALID"
+    },
+    {
+      "id": "CV-TXCTX-07",
+      "description": "sighash_type=0x02 (SIGHASH_NONE); allowed_sighash_set=0x01 disallows it; sub-step 7.1",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 2,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [
+        {
+          "value": 950,
+          "ext_payload_hex": "6b00000000000000cf00000000000000"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID"
+    },
+    {
+      "id": "CV-TXCTX-08",
+      "description": "TxContextBase totals consistent; self_input_value matches UTXO value; AMM satisfied",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "utxo_value": 1000,
+      "total_in": 1000,
+      "total_out": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [
+        {
+          "value": 950,
+          "ext_payload_hex": "6b00000000000000cf00000000000000"
+        }
+      ],
+      "expect_ok": true
+    },
+    {
+      "id": "CV-TXCTX-09",
+      "description": "ValidateOutputAtCreation (step 2) rejects transaction; TxContext not built",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "inject_step2_error": "TX_ERR_COVENANT_TYPE_INVALID",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "note": "TxContext construction never reached"
+    },
+    {
+      "id": "CV-TXCTX-10",
+      "description": "Two CORE_EXT inputs same ext_id=0x0FFF; identical TxContextBase and TxContextContinuing; different self_input_value; both AMM satisfied",
+      "multi_input": true,
+      "inputs": [
+        {
+          "profile": "test_amm_profile",
+          "height": 200,
+          "sighash_type": 1,
+          "self_input_value": 600,
+          "utxo_value": 600,
+          "ext_payload_hex": "6400000000000000c800000000000000"
+        },
+        {
+          "profile": "test_amm_profile",
+          "height": 200,
+          "sighash_type": 1,
+          "self_input_value": 400,
+          "utxo_value": 400,
+          "ext_payload_hex": "6400000000000000c800000000000000"
+        }
+      ],
+      "continuing_outputs": [
+        {
+          "value": 950,
+          "ext_payload_hex": "6b00000000000000cf00000000000000"
+        }
+      ],
+      "assertion": "ctx_base pointer identical for both invocations; ctx_continuing pointer identical for both invocations; input[0] MUST receive self_input_value=600 (NOT shared ctx value); input[1] MUST receive self_input_value=400 (NOT shared ctx value). Harness MUST verify each invocation receives its own distinct self_input_value from the per-input witness, not a cached or shared value.",
+      "expect_ok": true,
+      "note": "Two CORE_EXT inputs under same ext_id (test_amm_profile). Each receives a separate TxContextContinuing with its own self_input_value (600 and 400). Both inputs share the SAME TxContextBase (identical tx-level data). Harness assertion (CV-10 audit): implementations SHOULD use the same TxContextBase object for both verifier calls — Go: same pointer address (*TxContextBase); Rust: Arc::ptr_eq should return true for the two ctx_base references. Without this assertion, two independent TxContextBase objects with identical values would pass the vector but violate the shared-lock-free-base semantics."
+    },
+    {
+      "id": "CV-TXCTX-11a",
+      "description": "Two inputs different ext_ids (0x0FFF and 0x0FFE); shared TxContextBase; separate TxContextContinuing; both pass",
+      "multi_input": true,
+      "inputs": [
+        {
+          "profile": "test_amm_profile",
+          "ext_id": "0x0FFF",
+          "sighash_type": 1,
+          "self_input_value": 600,
+          "ext_payload_hex": "6400000000000000c800000000000000"
+        },
+        {
+          "profile": "test_passthrough_profile",
+          "ext_id": "0x0FFE",
+          "sighash_type": 1,
+          "self_input_value": 400,
+          "ext_payload_hex": "00"
+        }
+      ],
+      "continuing_outputs_0x0FFF": [
+        {
+          "value": 950,
+          "ext_payload_hex": "6b00000000000000cf00000000000000"
+        }
+      ],
+      "continuing_outputs_0x0FFE": [],
+      "assertion": "ctx_base.TotalIn/TotalOut/Height identical for both inputs; ctx_continuing differs per ext_id",
+      "expect_ok": true
+    },
+    {
+      "id": "CV-TXCTX-11b",
+      "description": "Two inputs different ext_ids; first input (0x0FFF) AMM invariant violated",
+      "multi_input": true,
+      "inputs": [
+        {
+          "profile": "test_amm_profile",
+          "ext_id": "0x0FFF",
+          "sighash_type": 1,
+          "self_input_value": 600,
+          "ext_payload_hex": "6400000000000000c800000000000000"
+        },
+        {
+          "profile": "test_passthrough_profile",
+          "ext_id": "0x0FFE",
+          "sighash_type": 1,
+          "self_input_value": 400,
+          "ext_payload_hex": "00"
+        }
+      ],
+      "continuing_outputs_0x0FFF": [
+        {
+          "value": 100,
+          "ext_payload_hex": "0100000000000000c800000000000000",
+          "note": "new_reserve_x=1, new_reserve_y=200; 1*200=200 < 20000 — VIOLATION"
+        }
+      ],
+      "continuing_outputs_0x0FFE": [],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_INVALID",
+      "note": "First input (index 0) fails; error from lowest-index failing input"
+    },
+    {
+      "id": "CV-TXCTX-12",
+      "description": "Pre-activation profile (height < activation_height); anyone-can-spend",
+      "profile": "test_amm_profile",
+      "height": 50,
+      "note": "activation_height=100; height=50 < 100 => pre-activation permissive",
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "00",
+      "continuing_outputs": [],
+      "expect_ok": true
+    },
+    {
+      "id": "CV-TXCTX-13",
+      "description": "AMM invariant violated; new_x * new_y = 100 < old_product = 20000",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [
+        {
+          "value": 900,
+          "ext_payload_hex": "0100000000000000c800000000000000",
+          "note": "new_reserve_x=1, new_reserve_y=200; 1*200=200 < 20000"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_INVALID"
+    },
+    {
+      "id": "CV-TXCTX-14",
+      "description": "len(ext_payload)=52 > max_ext_payload_bytes=48; sub-step 7.2 rejects",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "note": "52 bytes ext_payload; max is 48",
+      "continuing_outputs": [],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID"
+    },
+    {
+      "id": "CV-TXCTX-15",
+      "description": "Dual-failure per-input: sighash=0x02 AND len=52>48; sub-step 7.1 fires first",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 2,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "note": "Both 7.1 and 7.2 would fail; 7.1 (sighash check) runs first",
+      "continuing_outputs": [],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID"
+    },
+    {
+      "id": "CV-TXCTX-16",
+      "description": "Step 3 → TX_ERR_MISSING_UTXO; TxContext not constructed",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "inject_step3_error": "TX_ERR_MISSING_UTXO",
+      "note": "Referenced UTXO does not exist; step 3c never reached",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_MISSING_UTXO"
+    },
+    {
+      "id": "CV-TXCTX-17",
+      "description": "Variant A crypto equivalence: suite_id=0x10 with valid ML-DSA-87 sig; result equals native verify_sig for same byte inputs",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "sig_type": "valid_ml_dsa_87",
+      "assertion": "verify_sig_ext result with suite_id=0x10 MUST equal verify_sig result for same pubkey, sig, digest32",
+      "continuing_outputs": [
+        {
+          "value": 950,
+          "ext_payload_hex": "6b00000000000000cf00000000000000"
+        }
+      ],
+      "expect_ok": true,
+      "note": " CRYPTO PARITY SCOPE: This vector uses a mock/stub verifier for the ML-DSA-87 signature check. Full cryptographic parity between Go and Rust (identical rejection/acceptance of real ML-DSA-87 key/signature pairs) MUST be verified in a separate crypto test suite with known-good test vectors from the ML-DSA-87 reference implementation. CV-TXCTX-17 does NOT substitute for that requirement. TRACKING: Q-CRYPTO-TXCTX-01 (ML-DSA-87 Go/Rust parity test suite) MUST be completed before any activation (devnet or mainnet)."
+    },
+    {
+      "id": "CV-TXCTX-18",
+      "description": "Variant A parse-stage: malformed pubkey length=100 (expected 2592); non-native suite skips parse-level length check",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "pubkey_length_override": 100,
+      "note": "For non-native suite_id=0x10, §5.4 does NOT check canonical lengths at parse stage; malformed pubkey reaches verifier → TX_ERR_SIG_INVALID (not TX_ERR_SIG_NONCANONICAL) [BLOCKER-1 R17: AMM reserves ARE valid (new_product=22149 > old_product=20000) — rejection is on sig (malformed pubkey), not AMM invariant. This is an intentional test of sub-step 7.3 ordering: verifier returns false on sig check BEFORE/INSTEAD-OF AMM result. §1.2 audit-command MUST filter TX_ERR_SIG_INVALID as verifier-level rejection, not AMM failure.]",
+      "continuing_outputs": [
+        {
+          "value": 950,
+          "ext_payload_hex": "6b00000000000000cf00000000000000"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_INVALID",
+      "test_purpose": "order_7_3_sig_before_amm_logic"
+    },
+    {
+      "id": "CV-TXCTX-19",
+      "description": "txcontext_enabled=0x02 (invalid value, not 0x00 or 0x01); §8C invariant violation",
+      "profile_override": {
+        "ext_id": "0x0FFB",
+        "txcontext_enabled": 2,
+        "allowed_sighash_set": 1,
+        "max_ext_payload_bytes": 48,
+        "binding_kind": 2,
+        "suite_count": 1,
+        "activation_height": 100
+      },
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "00",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID"
+    },
+    {
+      "id": "CV-TXCTX-20",
+      "description": "txcontext_enabled=0x01; allowed_suite_ids contains 0x01 which is in NATIVE_SPEND_SUITES; §8A invariant 3 violation",
+      "profile_override": {
+        "ext_id": "0x0FFA",
+        "suite_id": 1,
+        "txcontext_enabled": 1,
+        "allowed_suite_ids": [
+          1
+        ],
+        "allowed_sighash_set": 1,
+        "max_ext_payload_bytes": 48,
+        "binding_kind": 2,
+        "suite_count": 1,
+        "activation_height": 100,
+        "abi": "9-param"
+      },
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "00",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID"
+    },
+    {
+      "id": "CV-TXCTX-21",
+      "description": "txcontext_enabled=0x01; allowed_sighash_set=0x09 (bit 3 set, reserved); §8A invariant 5 violation",
+      "profile_override": {
+        "ext_id": "0x0FF9",
+        "suite_id": 16,
+        "txcontext_enabled": 1,
+        "allowed_sighash_set": 9,
+        "max_ext_payload_bytes": 48,
+        "binding_kind": 2,
+        "suite_count": 1,
+        "activation_height": 100,
+        "abi": "9-param"
+      },
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "00",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID"
+    },
+    {
+      "id": "CV-TXCTX-22",
+      "description": "Dual-failure tx-wide: AMM invariant violated (verifier=false) AND sumout > sumin; sub-step 7.3 fires before 7.4",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "total_in": 1000,
+      "total_out": 2000,
+      "note": "sumout > sumin would trigger TX_ERR_VALUE_CONSERVATION at 7.4; but verifier fails at 7.3 first",
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [
+        {
+          "value": 1950,
+          "ext_payload_hex": "0100000000000000c800000000000000",
+          "note": "new_reserve_x=1; invariant violated"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_INVALID",
+      "not_expect_err": "TX_ERR_VALUE_CONSERVATION"
+    },
+    {
+      "id": "CV-TXCTX-23",
+      "description": "ACTIVE test_disabled_profile (txcontext_enabled=0x00); 6-parameter ABI; valid sig; expect pass",
+      "profile": "test_disabled_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "00",
+      "note": "No TxContext construction; existing §18.2 ACTIVE CORE_EXT path; suite authorization enforced via 6-param verify_sig_ext",
+      "expect_ok": true,
+      "harness_assertion": {
+        "verifier_called_with_6_params": true,
+        "description": "MED-R3-2: Harness MUST verify that verifier was called with 6-parameter ABI (no ctx_base, no ctx_continuing, no self_input_value). Go: mock verifier MUST record parameter count on each call; assert call_args_count == 6. Rust: mock verifier MUST assert ctx_base is not passed. Without this assertion, harness passes even if verifier is incorrectly invoked with 9 params because testDisabledProfile always returns true regardless of params."
+      }
+    },
+    {
+      "id": "CV-TXCTX-24",
+      "description": "txcontext_enabled=0x01; max_ext_payload_bytes=0; §8A invariant 6 violation",
+      "profile_override": {
+        "ext_id": "0x0FF8",
+        "suite_id": 16,
+        "txcontext_enabled": 1,
+        "allowed_sighash_set": 1,
+        "max_ext_payload_bytes": 0,
+        "binding_kind": 2,
+        "suite_count": 1,
+        "activation_height": 100,
+        "abi": "9-param"
+      },
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "00",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID"
+    },
+    {
+      "id": "CV-TXCTX-25",
+      "description": "3 continuing outputs for ext_id=0x0FFF (>K=2); rejected at TxContextContinuing construction per §5.2",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [
+        {
+          "value": 900,
+          "ext_payload_hex": "6b00000000000000cf00000000000000",
+          "note": "index 0"
+        },
+        {
+          "value": 50,
+          "ext_payload_hex": "3200000000000000c800000000000000",
+          "note": "index 1"
+        },
+        {
+          "value": 50,
+          "ext_payload_hex": "0100000000000000c800000000000000",
+          "note": "index 2: triggers >K rejection"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "note": "Silent truncation exploit closed — third qualifying output triggers immediate rejection"
+    },
+    {
+      "id": "CV-TXCTX-26",
+      "description": "sighash_type=0x81 (SIGHASH_ALL+ANYONECANPAY); test_acp_profile allows both base=0x01 and ACP=0x80",
+      "profile": "test_acp_profile",
+      "height": 200,
+      "sighash_type": 129,
+      "self_input_value": 500,
+      "ext_payload_hex": "00",
+      "continuing_outputs": [],
+      "expect_ok": true,
+      "note": "allowed_sighash_set=0x81: bit0 (SIGHASH_ALL) + bit7 (ANYONECANPAY); sighash=0x81 passes"
+    },
+    {
+      "id": "CV-TXCTX-27",
+      "description": "sighash_type=0x81 (SIGHASH_ALL+ANYONECANPAY); test_amm_profile allows only 0x01 (no ACP)",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 129,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [
+        {
+          "value": 950,
+          "ext_payload_hex": "6b00000000000000cf00000000000000"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
+      "note": "allowed_sighash_set=0x01: bit7 not set → ANYONECANPAY not allowed → TX_ERR_SIG_ALG_INVALID"
+    },
+    {
+      "id": "CV-TXCTX-28",
+      "description": "Combined §8A invariant violation (allowed_sighash_set=0x09, reserved bit) AND sighash_type=0x02 on same input; sub-step 7.0 fires before 7.1",
+      "profile_override": {
+        "ext_id": "0x0FF7",
+        "suite_id": 16,
+        "txcontext_enabled": 1,
+        "allowed_sighash_set": 9,
+        "max_ext_payload_bytes": 48,
+        "binding_kind": 2,
+        "suite_count": 1,
+        "activation_height": 100,
+        "abi": "9-param"
+      },
+      "height": 200,
+      "sighash_type": 2,
+      "self_input_value": 1000,
+      "ext_payload_hex": "00",
+      "continuing_outputs": [],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "not_expect_err": "TX_ERR_SIG_ALG_INVALID",
+      "note": "7.0 (profile invariant) fires before 7.1 (sighash); confirms full 7.0→7.1 priority chain"
+    },
+    {
+      "id": "CV-TXCTX-29",
+      "description": "CORE_EXT (test_amm_profile) + CORE_VAULT inputs in same transaction; TxContext sub-steps apply only to CORE_EXT; §20 applied once tx-wide; both pass",
+      "multi_input": true,
+      "inputs": [
+        {
+          "covenant_type": "CORE_EXT",
+          "profile": "test_amm_profile",
+          "height": 200,
+          "sighash_type": 1,
+          "self_input_value": 600,
+          "ext_payload_hex": "6400000000000000c800000000000000"
+        },
+        {
+          "covenant_type": "CORE_VAULT",
+          "height": 200,
+          "sighash_type": 1,
+          "self_input_value": 400,
+          "note": "CORE_VAULT governed by §24.1, not TxContext sub-steps"
+        }
+      ],
+      "continuing_outputs_0x0FFF": [
+        {
+          "value": 950,
+          "ext_payload_hex": "6b00000000000000cf00000000000000"
+        }
+      ],
+      "total_in": 1000,
+      "total_out": 1000,
+      "assertion": "TxContext sub-steps 7.0-7.3 applied to CORE_EXT input only; §20 applied once for full tx",
+      "expect_ok": true
+    },
+    {
+      "id": "CV-TXCTX-30",
+      "description": "u128 high-value: two inputs each with value near u64::MAX; TotalIn near 2×u64::MAX; no overflow; AMM satisfied",
+      "multi_input": true,
+      "inputs": [
+        {
+          "profile": "test_amm_profile",
+          "height": 200,
+          "sighash_type": 1,
+          "self_input_value": 18446744073709551615,
+          "utxo_value": 18446744073709551615,
+          "ext_payload_hex": "6400000000000000c800000000000000"
+        },
+        {
+          "profile": "test_passthrough_profile",
+          "height": 200,
+          "sighash_type": 1,
+          "self_input_value": 18446744073709551615,
+          "utxo_value": 18446744073709551615,
+          "ext_payload_hex": "00"
+        }
+      ],
+      "continuing_outputs_0x0FFF": [
+        {
+          "value": 950,
+          "ext_payload_hex": "6b00000000000000cf00000000000000"
+        }
+      ],
+      "continuing_outputs_0x0FFE": [],
+      "assertion": "TotalIn = 2*(u64::MAX) fits in u128 (2^65-2 << 2^128); Go [2]uint64 and Rust u128 MUST agree",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_PARSE",
+      "total_in_go_limbs": {
+        "lo": "0xfffffffffffffffe",
+        "hi": "0x0000000000000001",
+        "note": "Go [2]uint64{lo, hi} representation; index 0=lo, index 1=hi (little-endian limb order). Harness MUST assert TxContextBase.TotalIn == [2]uint64{0xfffffffffffffffe, 0x0000000000000001} on Go client."
+      },
+      "total_out": 950,
+      "note": " total_out=950 added (CV-30 audit fix): harness MUST accumulate ALL output values including non-continuing outputs. TxContextBase.TotalIn still MUST equal 2^65-2 across Go/Rust, but the full transaction later rejects in current canonical protocol because fee = TotalIn-TotalOut does not fit the downstream u64 fee path and maps to TX_ERR_PARSE. This vector therefore remains a live TxContext u128-parity check while matching current origin/main behavior.",
+      "total_in_u128_display": "0x1fffffffffffffffe"
+    },
+    {
+      "id": "CV-TXCTX-31",
+      "description": "SIGHASH_SINGLE + inputindex=1 >= outputcount=1; hashOutputs=SHA3-256(empty); TxContextContinuing correctly populated; passthrough verifier accepts; documents §7.6 attack surface",
+      "profile_override": {
+        "ext_id": "0x0FF6",
+        "suite_id": 16,
+        "txcontext_enabled": 1,
+        "allowed_sighash_set": 4,
+        "max_ext_payload_bytes": 48,
+        "binding_kind": 2,
+        "suite_count": 1,
+        "activation_height": 100,
+        "verifier_logic": "always returns true",
+        "abi": "9-param"
+      },
+      "height": 200,
+      "sighash_type": 3,
+      "input_index": 1,
+      "output_count": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "00",
+      "continuing_outputs": [],
+      "expect_ok": true,
+      "note": "Per §7.6: when inputindex >= outputcount, CANONICAL §12.3 sets hashOutputs=SHA3-256(empty). Signature does not commit to any real outputs. TxContextContinuing is still correctly constructed. Passthrough verifier returns true → accepted. This vector documents that §7.6 risk is REAL — AMM profiles MUST NOT allow SIGHASH_SINGLE."
+    },
+    {
+      "id": "CV-TXCTX-32",
+      "description": "ContinuingOutputs[1].ExtPayload length=52 > max_ext_payload_bytes=48; sub-step 7.2b rejects on second continuing output",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [
+        {
+          "value": 900,
+          "ext_payload_hex": "6b00000000000000cf00000000000000",
+          "note": "index 0: 16 bytes, within cap=48"
+        },
+        {
+          "value": 50,
+          "ext_payload_hex": "6b00000000000000cf00000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+          "note": "index 1: 52 bytes > cap=48; triggers sub-step 7.2b reject"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "note": "CV-14 tests input ext_payload cap. This vector specifically tests sub-step 7.2b: the second continuing output (index=1) has oversized ExtPayload. First continuing output passes. Confirms 7.2b iterates all ContinuingOutputs, not just index=0."
+    },
+    {
+      "id": "CV-TXCTX-33",
+      "description": "sighash=0x82 (SIGHASH_NONE+ACP); test_acp_profile allows ACP but not SIGHASH_NONE base; validates bitfield independence",
+      "profile": "test_acp_profile",
+      "height": 200,
+      "sighash_type": 130,
+      "self_input_value": 500,
+      "ext_payload_hex": "00",
+      "continuing_outputs": [],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
+      "note": "allowed_sighash_set=0x81: bit0=SIGHASH_ALL, bit7=ACP. base_type=0x02 (SIGHASH_NONE) → bit1=0 → not allowed. ACP is permitted but base is not → TX_ERR_SIG_ALG_INVALID. Validates bitfield logic: ACP permission alone does not bypass base type check."
+    },
+    {
+      "id": "CV-TXCTX-34",
+      "description": "txcontext_enabled=0x01; binding_kind=0x01 (not 0x02); §8A invariant 2 violation",
+      "profile_override": {
+        "ext_id": "0x0FF4",
+        "suite_id": 16,
+        "txcontext_enabled": 1,
+        "binding_kind": 1,
+        "allowed_sighash_set": 1,
+        "max_ext_payload_bytes": 48,
+        "suite_count": 1,
+        "activation_height": 100,
+        "abi": "9-param"
+      },
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "00",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "note": "binding_kind=0x01 violates §8A invariant 2 (binding_kind MUST be 0x02 for txcontext_enabled=0x01 profiles)"
+    },
+    {
+      "id": "CV-TXCTX-35",
+      "description": "txcontext_enabled=0x00; allowed_sighash_set=0x01 (non-zero); §8B invariant violation",
+      "profile_override": {
+        "ext_id": "0x0FF5",
+        "suite_id": 16,
+        "txcontext_enabled": 0,
+        "allowed_sighash_set": 1,
+        "max_ext_payload_bytes": 0,
+        "binding_kind": 2,
+        "suite_count": 1,
+        "activation_height": 100
+      },
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "00",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "note": "txcontext_enabled=0x00 with allowed_sighash_set=0x01 (non-zero) violates §8B invariant 1 (MUST be 0x00)"
+    },
+    {
+      "id": "CV-TXCTX-36",
+      "description": "max_ext_payload_bytes=65535 (0xFFFF, u16 max); ext_payload length=16 within cap; AMM invariant satisfied",
+      "profile_override": {
+        "ext_id": "0x0FF3",
+        "suite_id": 16,
+        "txcontext_enabled": 1,
+        "allowed_sighash_set": 1,
+        "max_ext_payload_bytes": 65535,
+        "binding_kind": 2,
+        "suite_count": 1,
+        "activation_height": 100,
+        "verifier_logic": "always returns true",
+        "abi": "9-param"
+      },
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [
+        {
+          "value": 950,
+          "ext_payload_hex": "6b00000000000000cf00000000000000"
+        }
+      ],
+      "expect_ok": true,
+      "note": "Boundary value test: max_ext_payload_bytes=0xFFFF (65535). Verifies u16le parsing at max value. ext_payload len=16 << 65535 → within cap → passthrough verifier accepts."
+    },
+    {
+      "id": "CV-TXCTX-37",
+      "description": "sighash_type=0x04; base_type=0x04 ∉ {0x01,0x02,0x03}; sub-step 7.1 rejects with TX_ERR_SIGHASH_TYPE_INVALID",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 4,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIGHASH_TYPE_INVALID",
+      "note": "base_type = 0x04 & 0x7F = 0x04; not in {0x01, 0x02, 0x03}; TX_ERR_SIGHASH_TYPE_INVALID per §7.1 first branch. Distinct from TX_ERR_SIG_ALG_INVALID (valid base type, disallowed by profile policy)."
+    },
+    {
+      "id": "CV-TXCTX-38",
+      "description": "sighash_type=0x80 (bare ANYONECANPAY, no base type); base_type=0x00 ∉ {0x01,0x02,0x03}; sub-step 7.1 rejects",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 128,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIGHASH_TYPE_INVALID",
+      "note": "base_type = 0x80 & 0x7F = 0x00; not in {0x01, 0x02, 0x03}; TX_ERR_SIGHASH_TYPE_INVALID. ACP modifier alone without a valid base type is invalid regardless of allowed_sighash_set."
+    },
+    {
+      "id": "CV-TXCTX-39",
+      "description": "txcontext_enabled=0x01; suite_count=2 (not 1); §8A invariant 4 violation (Step 1: suite_count MUST be 1)",
+      "profile_override": {
+        "ext_id": "0x0FF2",
+        "suite_id": 16,
+        "txcontext_enabled": 1,
+        "allowed_sighash_set": 1,
+        "max_ext_payload_bytes": 48,
+        "binding_kind": 2,
+        "suite_count": 2,
+        "activation_height": 100,
+        "abi": "9-param"
+      },
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "00",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "note": "suite_count=2 violates §8A invariant 4 (MUST be 1 in Step 1). Provides regression baseline: when Step 2 relaxes suite_count==1, this vector must be updated or removed. Confirms Step 1 enforcement. STEP 2 MIGRATION: this vector enforces suite_count==1 (Step 1 invariant). When Step 2 activates, §8A invariant 4 is relaxed to allow suite_count>1. This vector MUST be updated or removed before Step 2 conformance gate. Field deprecated_in_step=2 marks it for review. Q-STEP2-TXCTX-01: formal migration tracker. All Step-2-affected vectors: CV-TXCTX-39. Review all before Step 2 conformance gate. See step2_migration field for full details.",
+      "deprecated_in_step": 2,
+      "step2_migration": {
+        "tracking": "Q-STEP2-TXCTX-01",
+        "also_affected": [
+          "CV-TXCTX-39"
+        ],
+        "action": "Review and update all vectors in also_affected before Step 2 conformance gate activation. CV-39 MUST be updated (suite_count==1 invariant relaxed) or removed.",
+        "ci_gate": "A CI job MUST exist (Q-STEP2-TXCTX-01) that detects vectors with deprecated_in_step=2 and fails the build if Step 2 is activated without removing or updating them. Without this gate, stale vectors produce false positives in conformance runs after Step 2 activation."
+      }
+    },
+    {
+      "id": "CV-TXCTX-40",
+      "description": "txcontext_enabled=0x01; allowed_sighash_set=0x80 (ACP modifier only, no base type bits set); §8A invariant 7 violation",
+      "profile_override": {
+        "ext_id": "0x0FF1",
+        "suite_id": 16,
+        "txcontext_enabled": 1,
+        "allowed_sighash_set": 128,
+        "max_ext_payload_bytes": 48,
+        "binding_kind": 2,
+        "suite_count": 1,
+        "activation_height": 100,
+        "abi": "9-param"
+      },
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "00",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "note": "allowed_sighash_set=0x80: bit7 (ACP) set but bits 0-2 (base types) all zero. Violates §8A invariant 7: 'allowed_sighash_set has at least one bit among bits 0-2'. Distinguished from §8A-5 (bits 3-6): 0x80 & 0x78 = 0x00 (passes inv.5) but 0x80 & 0x07 = 0x00 (fails inv.7). Profiles with ACP-only sighash set cannot be activated."
+    },
+    {
+      "id": "CV-TXCTX-41",
+      "description": "txcontext_enabled=0x00; allowed_sighash_set=0x00 (passes §8B inv.2); max_ext_payload_bytes=1 (non-zero); §8B invariant 3 violation",
+      "profile_override": {
+        "ext_id": "0x0FF0",
+        "suite_id": 16,
+        "txcontext_enabled": 0,
+        "allowed_sighash_set": 0,
+        "max_ext_payload_bytes": 1,
+        "binding_kind": 2,
+        "suite_count": 1,
+        "activation_height": 100
+      },
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "00",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "note": "txcontext_enabled=0x00 with allowed_sighash_set=0x00 (§8B inv.2 passes) but max_ext_payload_bytes=1 (non-zero) violates §8B invariant 3. Completes §8B coverage: CV-35 covers inv.2, this vector covers inv.3 independently."
+    },
+    {
+      "id": "CV-TXCTX-42",
+      "description": "sighash_type=0x03 (SIGHASH_SINGLE) on test_acp_profile; allowed_sighash_set=0x81 (ALL=bit0 + ACP=bit7); SIGHASH_SINGLE (bit2) not permitted → TX_ERR_SIG_ALG_INVALID",
+      "profile": "test_acp_profile",
+      "height": 200,
+      "sighash_type": 3,
+      "self_input_value": 500,
+      "ext_payload_hex": "00",
+      "continuing_outputs": [],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
+      "note": "test_acp_profile: allowed_sighash_set=0x81 (bit0=ALL + bit7=ACP). sighash_type=0x03: base_type=0x03 & 0x7F=0x03; baseTypeBit=2; (0x81 >> 2) & 0x01 = 0x00 → base type not allowed. TX_ERR_SIG_ALG_INVALID. Completes sighash-on-ACP-profile coverage: CV-26 (0x81 passes), CV-33 (0x82 fails base), this vector (0x03 fails base)."
+    },
+    {
+      "id": "CV-TXCTX-43",
+      "description": "Cross-ext_id >K rollback: tx with two ext_ids. Per ascending u16 order: ext_id_B (0x0FFE=4094) is processed FIRST (lower value). ext_id_B has K+1=3 continuing outputs → fails on 3rd output → rollback ALL. ext_id_A (0x0FFF=4095) is never constructed because rollback happens before it. Verifies §5.2 atomic discard: ALL TxContextContinuing entries discarded on >K reject.",
+      "multi_input": true,
+      "inputs": [
+        {
+          "ext_id": "0x0FFF",
+          "profile": "test_amm_profile",
+          "description": "ext_id_A: 2 continuing outputs — exactly at K limit, passes"
+        },
+        {
+          "ext_id": "0x0FFE",
+          "profile": "test_passthrough_profile",
+          "description": "ext_id_B: 3 continuing outputs — K+1, triggers step 3c reject"
+        }
+      ],
+      "continuing_outputs_0x0FFF": [
+        {
+          "value": 1000,
+          "ext_payload_hex": "00"
+        },
+        {
+          "value": 1000,
+          "ext_payload_hex": "00"
+        }
+      ],
+      "continuing_outputs_0x0FFE": [
+        {
+          "value": 500,
+          "ext_payload_hex": "00"
+        },
+        {
+          "value": 500,
+          "ext_payload_hex": "00"
+        },
+        {
+          "value": 500,
+          "ext_payload_hex": "00"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "note": "Per ascending u16 order: 0x0FFE=4094 < 0x0FFF=4095, so ext_id_B (0x0FFE) is processed FIRST. ext_id_B reaches K+1=3 continuing outputs → TX_ERR_COVENANT_TYPE_INVALID. Rollback discards all partially-constructed entries. ext_id_A (0x0FFF) is NEVER started — not because it passed, but because processing stopped at ext_id_B. Harness MUST verify: (a) error is TX_ERR_COVENANT_TYPE_INVALID, (b) no TxContextContinuing exists for either ext_id_A or ext_id_B after rejection.",
+      "expected_failing_ext_id": 4094,
+      "expected_failing_ext_id_hex": "0ffe",
+      "post_state_assertion": "After TX_ERR_COVENANT_TYPE_INVALID: BuildTxContext MUST return nil/None — both ext_id 0x0FFF and 0x0FFE TxContextContinuing entries MUST be atomically discarded. len(bundle.continuing) == 0 OR bundle == nil. [W-1 R8 fix: added post_state_assertion to cross-extid rollback vector]"
+    },
+    {
+      "id": "CV-TXCTX-44",
+      "description": "§7.6 governance-only protection: AMM profile with allowed_sighash_set=0x04 (SIGHASH_SINGLE); inputindex=0 >= outputcount=0; hashOutputs=SHA3-256(empty); AMM verifier accepts (passthrough); demonstrates that consensus gate does NOT protect against §7.6 attack when profile governance permits SIGHASH_SINGLE — protection is governance-level only.",
+      "profile_override": {
+        "ext_id": "0x0FEF",
+        "suite_id": 16,
+        "txcontext_enabled": 1,
+        "allowed_sighash_set": 4,
+        "max_ext_payload_bytes": 48,
+        "binding_kind": 2,
+        "suite_count": 1,
+        "activation_height": 100,
+        "abi": "9-param"
+      },
+      "height": 200,
+      "sighash_type": 3,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [],
+      "input_index": 0,
+      "output_count": 0,
+      "expect_ok": true,
+      "note": "§7.6 governance-only protection demonstration. Profile explicitly permits SIGHASH_SINGLE (allowed_sighash_set=0x04, bit2=1). inputindex=0 >= outputcount=0 → hashOutputs=SHA3-256(empty). Signature does not commit to any outputs. TxContextContinuing is empty (no continuing outputs). Passthrough verifier accepts. CONSENSUS GATE DOES NOT REJECT — consensus only checks that sighash_type is permitted by profile policy (0x03 & 0x7F = 0x03, bit2 set, 0x04>>2&1=1 ✓). This vector exists to document that §7.6 attack surface is a GOVERNANCE concern: AMM/stablecoin profiles MUST NOT set allowed_sighash_set bits 1-2. See §7.6 normative requirement. §8A invariant analysis: allowed_sighash_set=0x04 (0b00000100). Inv.5 (bits 3-6 == 0): 0x04 & 0x78 = 0x00 → PASS. Inv.7 (bits 0-2 != 0): 0x04 & 0x07 = 0x04 != 0 → PASS. Therefore §8A is NOT violated; profile passes invariant checks. expect_ok=true is correct."
+    },
+    {
+      "id": "CV-TXCTX-45",
+      "description": "Malformed CompactSize in CORE_EXT output covenant_data: ext_id=2 bytes present but CompactSize length prefix truncated (only 1 byte of a 3-byte CompactSize form); step 2 cache construction MUST reject with TX_ERR_COVENANT_TYPE_INVALID.",
+      "output_override": {
+        "covenant_type": "CORE_EXT",
+        "covenant_data_hex": "FF0FFD",
+        "note": "ext_id=0x0FFF (2 bytes: FF 0F), then 0xFD = CompactSize 3-byte form marker but payload truncated (missing 2 more bytes). Malformed CompactSize."
+      },
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "note": "Malformed CompactSize in CORE_EXT output covenant_data. covenant_data = [0xFF, 0x0F, 0xFD]: ext_id=0x0FFF (bytes 0-1), byte 2 = 0xFD = CompactSize 3-byte form marker, but bytes 3-4 are missing. Step 2 (outputExtIDCache construction) MUST detect truncated CompactSize and reject with TX_ERR_COVENANT_TYPE_INVALID before reaching step 3c. Tests TZ-04-01 error handling contract."
+    },
+    {
+      "id": "CV-TXCTX-46",
+      "description": "ctx_continuing lookup failure: TxContext-enabled input (txcontext_enabled=0x01) but no TxContextContinuing exists in bundle for input's ext_id (simulated via harness injection). MUST return TX_ERR_SIG_INVALID per SPEC-TXCTX-01 §3.1 defensive contract.",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "inject_missing_ctx_continuing": true,
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_INVALID",
+      "note": "Harness MUST inject a missing TxContextContinuing for the input's ext_id (simulate by not building TxContext for this ext_id). Implementation MUST return TX_ERR_SIG_INVALID without panic. Tests SPEC §3.1 defensive contract: 'If no TxContextContinuing exists for the input's ext_id when txcontext_enabled=0x01, MUST return TX_ERR_SIG_INVALID.'"
+    },
+    {
+      "id": "CV-TXCTX-47",
+      "description": "sighash_type=0x00 (bare zero byte): base_type = 0x00 & 0x7F = 0x00; not in {0x01, 0x02, 0x03}; TX_ERR_SIGHASH_TYPE_INVALID per §7.1 first branch.",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 0,
+      "self_input_value": 500,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIGHASH_TYPE_INVALID",
+      "note": "sighash_type=0x00: base_type = 0x00 & 0x7F = 0x00; base_type < 0x01 → TX_ERR_SIGHASH_TYPE_INVALID. Completes sighash_type invalid-base coverage alongside CV-37 (0x04) and CV-38 (0x80)."
+    },
+    {
+      "id": "CV-TXCTX-48",
+      "description": "Priority: sub-step 7.2 (input payload cap) wins over 7.3 (verifier false): ext_payload oversized AND AMM verifier would reject; expects TX_ERR_COVENANT_TYPE_INVALID (7.2), not TX_ERR_SIG_INVALID (7.3).",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "6400000000000000c80000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "continuing_outputs": [
+        {
+          "value": 500,
+          "ext_payload_hex": "0000000000000000c800000000000000"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "note": "ext_payload length = 16+40 = 56 bytes > max_ext_payload_bytes=48. AMM invariant would also fail (new_x*new_y < old_x*old_y). Sub-step 7.2 (payload cap) fires BEFORE 7.3 (verifier). Expects TX_ERR_COVENANT_TYPE_INVALID, NOT TX_ERR_SIG_INVALID. Tests priority 7.2 > 7.3 in error chain."
+    },
+    {
+      "id": "CV-TXCTX-49",
+      "description": "Sub-step 7.2b: ContinuingOutputs[0].ExtPayload=52 > max_ext_payload_bytes=48; rejects on FIRST continuing output (index=0). CV-32 tests index=1; this tests index=0.",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [
+        {
+          "value": 500,
+          "ext_payload_hex": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "note": "ContinuingOutputs[0].ExtPayload = 52 bytes > max_ext_payload_bytes=48. Sub-step 7.2b rejects on first continuing output (index=0). Completes 7.2b coverage: CV-32 tests index=1, this vector tests index=0."
+    },
+    {
+      "id": "CV-TXCTX-50",
+      "description": "AMM verifier with reserves near u64::MAX: old_x = old_y ≈ u64::MAX/2; new_x*new_y overflow test via uint128Mul. Tests that uint128Mul correctly handles near-max reserve values.",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "fefffffffffffffffeffffffffffffff",
+      "continuing_outputs": [
+        {
+          "value": 500,
+          "ext_payload_hex": "ffffffffffffff7fffffffffffffff7f"
+        }
+      ],
+      "expect_ok": false,
+      "note": "old_x = 0xFFFFFFFFFFFFFFFE (u64::MAX-1, bytes le: FE FF FF FF FF FF FF FF), old_y = 0xFFFFFFFFFFFFFFFE. new_x = 0x7FFFFFFFFFFFFFFF (i64::MAX, bytes le: FF FF FF FF FF FF FF 7F), new_y = 0x7FFFFFFFFFFFFFFF. uint128Mul: old_x*old_y = (2^64-2)^2 = 2^128 - 4*2^64 + 4 — fits in u128. new_x*new_y = (2^63-1)^2 = 2^126 - 2^64 + 1. new_x*new_y < old_x*old_y → AMM invariant violated → TX_ERR_SIG_INVALID. Primary purpose: verify uint128Mul does NOT panic on near-u64::MAX inputs. Both Go (bits.Mul64) and Rust (native u128) MUST produce identical results. Hex fixtures are deterministic: ext_payload_hex encodes old reserves le64, continuing_outputs ext_payload_hex encodes new reserves le64.",
+      "expect_err": "TX_ERR_SIG_INVALID"
+    },
+    {
+      "id": "CV-TXCTX-51",
+      "description": "ext_id iteration order: two ext_ids both with >K outputs. ext_id_A=0x0FEE (u16=4078, lower) and ext_id_B=0x0FEF (u16=4079, higher). Ascending order: 0x0FEE processed first. Error attributed to 0x0FEE.",
+      "multi_input": true,
+      "inputs": [
+        {
+          "ext_id": "0x0FEF",
+          "profile": "test_passthrough_profile",
+          "description": "ext_id_B = 0x0FEF — higher value, would also overflow at K+1"
+        },
+        {
+          "ext_id": "0x0FEE",
+          "profile": "test_passthrough_profile",
+          "description": "ext_id_A = 0x0FEE — lower value, processed FIRST in ascending order"
+        }
+      ],
+      "continuing_outputs_0x0FEE": [
+        {
+          "value": 500,
+          "ext_payload_hex": "00"
+        },
+        {
+          "value": 500,
+          "ext_payload_hex": "00"
+        },
+        {
+          "value": 500,
+          "ext_payload_hex": "00"
+        }
+      ],
+      "continuing_outputs_0x0FEF": [
+        {
+          "value": 500,
+          "ext_payload_hex": "00"
+        },
+        {
+          "value": 500,
+          "ext_payload_hex": "00"
+        },
+        {
+          "value": 500,
+          "ext_payload_hex": "00"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "note": "Both ext_id 0x0FEE (u16=4078) and ext_id 0x0FEF (u16=4079) have K+1=3 continuing outputs (both would overflow). Per ascending u16 numeric order: 0x0FEE=4078 < 0x0FEF=4079, so 0x0FEE is processed first. Error is attributed to 0x0FEE reaching K+1. Both Go and Rust MUST process ext_ids in ascending numeric order and return TX_ERR_COVENANT_TYPE_INVALID attributed to ext_id 0x0FEE. Tests normative ascending u16 sort requirement (SPEC §5.2, TZ §4.1). ROLLBACK ASSERTION (HIGH-H): This vector tests error attribution to the first (lower) ext_id. It does NOT explicitly test that the TxContextContinuing entry for the second ext_id (0x0FEF) — which was NOT yet processed when error occurred — is atomically discarded. TZ §4.1 requires: \"any partially-built TxContextContinuing entries for other ext_ids MUST be discarded.\" Unit test requirement: TestBuildTxContext_DualOverflow_RollbackBothExtIds — after the error, verify that both ext_ids have no TxContextContinuing in the result map (map MUST be nil or empty, not partially populated). INFO-R3-2 FIX: Added expected_failing_ext_id=0x0FEE (4078). CV-51 has 2 inputs (not 3), so verifier §8 threshold must be >= 2. Ascending order: 0x0FEE (4078) < 0x0FEF (4079) → error attributed to 0x0FEE. Harness MUST assert actual error attribution matches this field.",
+      "post_state_assertion": "After TX_ERR_COVENANT_TYPE_INVALID: the TxContextContinuing map for ALL ext_ids MUST be nil or empty. Specifically: both ext_id=0x0FEE (the one that triggered rejection) AND ext_id=0x0FEF (which never started processing due to atomic discard) MUST have no TxContextContinuing entry. Harness should verify: buildTxContext result map length == 0 after rejection. Unit test: TestBuildTxContext_DualOverflow_RollbackBothExtIds (in PR checklist).",
+      "expected_failing_ext_id": 4078,
+      "expected_failing_ext_id_hex": "0fee"
+    },
+    {
+      "id": "CV-TXCTX-52",
+      "description": "AMM verifier bounds check: ext_payload < 16 bytes (insufficient for reserves); verifier MUST return false without panic → TX_ERR_SIG_INVALID.",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "00",
+      "continuing_outputs": [
+        {
+          "value": 500,
+          "ext_payload_hex": "6400000000000000c800000000000000"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_INVALID",
+      "note": "AMM profile; ext_payload = [0x00] (1 byte), which is < 16 bytes required for old_x/old_y reserves. TestAMMVerifier MUST check len(extPayload) >= 16 and return false without panic. Sub-step 7.2 passes (1 <= 48). Tests ПРОБЛЕМА-3 bounds check requirement."
+    },
+    {
+      "id": "CV-TXCTX-53",
+      "description": "§8B happy path: disabled profile (txcontext_enabled=0x00) with fully compliant invariants: allowed_sighash_set=0x00, max_ext_payload_bytes=0x0000. All §8B invariants pass. expect_ok=true (6-param verifier, passthrough).",
+      "profile": "test_disabled_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "expect_ok": true,
+      "note": "§8B positive/happy-path vector. test_disabled_profile: txcontext_enabled=0x00, allowed_sighash_set=0x00, max_ext_payload_bytes=0x0000. §8B inv.1: txcontext_enabled==0x00 ✓. inv.2: allowed_sighash_set==0x00 ✓. inv.3: max_ext_payload_bytes==0x0000 ✓. All §8B invariants satisfied. Complements CV-35 (inv.2 violation), CV-41 (inv.3 violation). Tests that a fully compliant disabled profile is accepted.",
+      "harness_assertion": {
+        "verifier_called_with_6_params": true,
+        "description": "MED-R3-2: Same as CV-23 — harness MUST verify 6-param ABI dispatch for test_disabled_profile (txcontext_enabled=0x00). CV-53 is the §8B happy path; this assertion confirms the ABI routing is correct."
+      }
+    },
+    {
+      "id": "CV-TXCTX-50b",
+      "description": "AMM verifier near-u64MAX positive path: old and new reserves both near u64::MAX but new_x*new_y >= old_x*old_y. Tests uint128GTE correctness on overflow-range values, not just no-panic.",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "ffffffffffffff3fffffffffffffff3f",
+      "continuing_outputs": [
+        {
+          "value": 500,
+          "ext_payload_hex": "ffffffffffffff7fffffffffffffff7f"
+        }
+      ],
+      "expect_ok": true,
+      "note": "old_x = 0x3FFFFFFFFFFFFFFF (u64::MAX/4 ≈ 4.6e18, bytes le: FF FF FF FF FF FF FF 3F), old_y = 0x3FFFFFFFFFFFFFFF. new_x = 0x7FFFFFFFFFFFFFFF (u64::MAX/2 ≈ 9.2e18, bytes le: FF FF FF FF FF FF FF 7F), new_y = 0x7FFFFFFFFFFFFFFF. old_x * old_y = (2^62-1)^2 ≈ 2^124. new_x * new_y = (2^63-1)^2 ≈ 2^126. new_x*new_y > old_x*old_y → AMM invariant satisfied → expect_ok=true. Primary purpose: verify uint128GTE correctness when both operands are in overflow range. If uint128GTE incorrectly swaps Lo/Hi, this test fails even though CV-50 passes. Complements CV-50 (negative path). Both clients MUST agree: expect_ok=true."
+    },
+    {
+      "id": "CV-TXCTX-54",
+      "description": "Empty ExtPayload parity: ContinuingOutput with CompactSize=0 (empty payload). Go MUST produce []byte{} (not nil); Rust MUST produce Vec::new() (not None). Passthrough verifier, expect_ok=true.",
+      "profile": "test_passthrough_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "00",
+      "continuing_outputs": [
+        {
+          "value": 500,
+          "ext_payload_hex": ""
+        }
+      ],
+      "expect_ok": true,
+      "note": "ContinuingOutput has CompactSize=0 → ExtPayload after stripping = empty byte sequence. Amendment C requires: ExtPayload MUST be zero-length byte slice — NOT nil/None. Go harness MUST assert: ContinuingOutputs[0].ExtPayload != nil && len(...) == 0. Rust harness MUST assert: continuing_outputs[0].ext_payload == Vec::new() (not None). Tests parity: bytes.Equal(nil, []byte{}) == false in Go, so if implementation uses nil instead of []byte{}, bytes.Equal comparisons will diverge. Passthrough verifier used to isolate ExtPayload representation check. UNIT TEST REQUIREMENT (TZ §4.5): In addition to this conformance vector, a unit test MUST exist: after BuildTxContext with CompactSize=0 output, assert that ContinuingOutputs[0].ExtPayload is not nil (Go) / is Vec::new() not None (Rust). len(nil)==0 and len([]byte{})==0 are identical in Go, so unit test MUST use reflect.DeepEqual or explicit nil check, not len() comparison."
+    },
+    {
+      "id": "CV-TXCTX-55",
+      "description": "AMM profile + SIGHASH_SINGLE (allowed_sighash_set=0x04) + real AMM verifier + no continuing outputs → TX_ERR_SIG_INVALID. AMM verifier fails Count<1 check. Tests §7.6 attack surface with non-passthrough verifier.",
+      "profile_override": {
+        "ext_id": "0x0FED",
+        "suite_id": 16,
+        "txcontext_enabled": 1,
+        "allowed_sighash_set": 4,
+        "max_ext_payload_bytes": 48,
+        "binding_kind": 2,
+        "suite_count": 1,
+        "activation_height": 100,
+        "verifier": "test_amm_verifier",
+        "abi": "9-param"
+      },
+      "height": 200,
+      "sighash_type": 3,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [],
+      "input_index": 0,
+      "output_count": 0,
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_INVALID",
+      "note": "AMM profile with allowed_sighash_set=0x04 (SIGHASH_SINGLE permitted by policy). inputindex=0 >= outputcount=0 → hashOutputs=SHA3-256(empty). No continuing outputs in transaction → ContinuingOutputCount=0. AMM verifier checks Count >= 1 → returns false → TX_ERR_SIG_INVALID. Complements CV-44 which uses passthrough verifier (expect_ok=true). This vector uses a real AMM verifier: the attack surface documented in §7.6 is mitigated because AMM verifier requires continuing outputs for reserve check — but the underlying sighash vulnerability remains if a profile uses SIGHASH_SINGLE with a verifier that does NOT require continuing outputs. §8A invariant analysis: 0x04 & 0x07 = 0x04 ≠ 0 → inv.7 PASS; 0x04 & 0x78 = 0x00 → inv.5 PASS. Profile accepted at 7.0/7.1; fails at 7.3."
+    },
+    {
+      "id": "CV-TXCTX-56",
+      "description": "Structural scan scope (N-5): ACTIVE input ext_id=0x0FFF captures output ext_id=0x0FFF regardless of output creation height. Output with rogue ext_payload (pre-activation semantics). Passthrough verifier, expect_ok=true — documents that consensus accepts output without checking its creation height.",
+      "profile": "test_passthrough_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [
+        {
+          "value": 500,
+          "ext_payload_hex": "deadbeefdeadbeefdeadbeefdeadbeef",
+          "note": "output created pre-activation (height < activation_height) with rogue payload; structurally matched by ext_id only"
+        }
+      ],
+      "expect_ok": true,
+      "note": "Documents N-5 output scan scope: outputs are matched structurally by ext_id only. The output's ext_payload is arbitrary (pre-activation rogue data). Passthrough verifier accepts. Implication: real AMM verifiers MUST validate ext_payload length and format defensively, since ContinuingOutputs may contain outputs created by anyone with any ext_payload. K-limit (K=2) is the consensus-level guard against flooding. Per-verifier validation is the application-level guard against rogue payloads. This vector demonstrates the attack surface documented in §5.2 N-5 fixup."
+    },
+    {
+      "id": "CV-TXCTX-57",
+      "description": "allowed_suite_ids uniqueness: profile with duplicate suite_id [0x10, 0x10] is malformed → TX_ERR_COVENANT_TYPE_INVALID. Prevents anchor hash divergence between Go (deduplicates) and Rust (does not).",
+      "profile_override": {
+        "ext_id": "0x0FEC",
+        "suite_id": 16,
+        "txcontext_enabled": 1,
+        "allowed_sighash_set": 1,
+        "max_ext_payload_bytes": 48,
+        "binding_kind": 2,
+        "suite_count": 2,
+        "allowed_suite_ids": [
+          16,
+          16
+        ],
+        "activation_height": 100,
+        "abi": "9-param"
+      },
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "note": "Profile with allowed_suite_ids = [0x10, 0x10] (duplicate). §8A invariant 3 (uniqueness requirement): MUST NOT contain duplicate values. Both Go and Rust MUST reject this at profile validation (CheckProfileInvariants). Without this check, Go may deduplicate before anchor computation while Rust does not → anchor hash divergence → chain split. This vector ensures both clients agree: duplicate suite_ids are malformed."
+    },
+    {
+      "id": "CV-TXCTX-58",
+      "description": "AMM verifier: ContinuingOutputs[1] has smaller reserves than ContinuingOutputs[0]. Verifier MUST read only ContinuingOutputs[0] for new reserves, ignore [1]. If verifier aggregates or picks minimum, AMM invariant fails incorrectly.",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [
+        {
+          "value": 500,
+          "ext_payload_hex": "6b00000000000000cf00000000000000"
+        },
+        {
+          "value": 200,
+          "ext_payload_hex": "01000000000000000100000000000000"
+        }
+      ],
+      "expect_ok": true,
+      "note": "old_x=100, old_y=200 (from e.ext_payload). ContinuingOutputs[0]: new_x=107, new_y=207 → 107*207=22149 >= 100*200=20000 → AMM passes. ContinuingOutputs[1]: new_x=1, new_y=1 → 1*1=1 << 20000. AMM verifier MUST read new reserves ONLY from ContinuingOutputs[0].ExtPayload[0:16]. If verifier incorrectly reads ContinuingOutputs[1] or aggregates both, it would return false (AMM invariant violated). expect_ok=true verifies verifier correctly ignores [1]. Complements CV-01 note; adds regression baseline for [1] misread bug."
+    },
+    {
+      "id": "CV-TXCTX-59",
+      "description": "CheckValueConservationTxWide hasVaultInputs=false: TotalOut > TotalIn → TX_ERR_VALUE_CONSERVATION. Tests that value conservation check correctly rejects deficit when no COREVAULT inputs are present.",
+      "profile": "test_passthrough_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 100,
+      "output_values": [
+        200
+      ],
+      "has_vault_inputs": false,
+      "vault_input_sum": 0,
+      "expect_ok": false,
+      "expect_err": "TX_ERR_VALUE_CONSERVATION",
+      "note": "self_input_value=100 (TotalIn=100), output_values=[200] (TotalOut=200). TotalOut > TotalIn → value conservation violated. has_vault_inputs=false, vault_input_sum=0. CheckValueConservationTxWide MUST return TX_ERR_VALUE_CONSERVATION. Complements CV-29 (has_vault_inputs=true case). Critical: if has_vault_inputs=true with vault_input_sum=0 (caller bug), the conservation check might incorrectly pass — this vector isolates the false case to ensure the base path is correctly enforced."
+    },
+    {
+      "id": "CV-TXCTX-60",
+      "description": "Governance authorization duplicate check: profile with allowed_suite_ids=[0x10, 0x10] MUST be rejected at governance authorization time (anchor computation). Tests that governance does NOT compute anchor for malformed profile, preventing anchor divergence between Go (may deduplicate) and Rust (may not). Anchor pipeline scope.",
+      "note": "This vector is in the CV-ANCHOR pipeline scope (governance authorization time). Profile with allowed_suite_ids=[0x10, 0x10] is malformed per §8A invariant 3. The MUST reject happens at governance authorization (before anchor computation), NOT at spend time (CV-57 covers spend-time). If governance does NOT check: Go deduplicates → anchor with [0x10]; Rust does not deduplicate → anchor with [0x10, 0x10]. Divergent anchors → chain split. Both CV-57 (spend-time gate) and CV-60 (governance gate) must be enforced. Harness: attempt to authorize profile with duplicate suite_ids → MUST fail at governance layer.",
+      "governance_scope": true,
+      "profile_attempt": {
+        "ext_id": "0x0FEB",
+        "allowed_suite_ids": [
+          16,
+          16
+        ],
+        "suite_count": 2
+      },
+      "expect_governance_reject": true
+    },
+    {
+      "id": "CV-TXCTX-61",
+      "description": "AMM verifier non-baseline reserves: old_x=500, old_y=1000 (product=500000, NOT baseline 20000). Tests that verifier reads reserves from ext_payload dynamically, not from a hardcoded constant.",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 2000,
+      "ext_payload_hex": "f401000000000000e803000000000000",
+      "continuing_outputs": [
+        {
+          "value": 1000,
+          "ext_payload_hex": "fa01000000000000f003000000000000"
+        }
+      ],
+      "expect_ok": true,
+      "note": "old_x = 0x01F4 = 500 (le64: F4 01 00 00 00 00 00 00), old_y = 0x03E8 = 1000 (le64: E8 03 00 00 00 00 00 00). old_product = 500 * 1000 = 500000. new_x = 0x01FA = 506 (le64: FA 01 00 00 00 00 00 00), new_y = 0x03F0 = 1008 (le64: F0 03 00 00 00 00 00 00). new_product = 506 * 1008 = 510048 >= 500000 → AMM invariant satisfied. Primary purpose: detect if AMM verifier uses hardcoded baseline old_product=20000 instead of reading from ext_payload. If it does, it would compute 510048 >= 20000 → true (accidentally passes). But a proper test like CV-13 with new < old and non-baseline is needed. This vector alone confirms the positive path reads ext_payload correctly."
+    },
+    {
+      "id": "CV-TXCTX-62",
+      "description": "AMM verifier non-baseline negative: old_x=500, old_y=1000. new_x=499, new_y=999 → newProduct=498501 < oldProduct=500000 → TX_ERR_SIG_INVALID. Detects hardcoded old_product=20000 bug: 498501 > 20000 so buggy impl returns true (incorrect). Correct impl returns false.",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 2000,
+      "ext_payload_hex": "f401000000000000e803000000000000",
+      "continuing_outputs": [
+        {
+          "value": 1000,
+          "ext_payload_hex": "f301000000000000e703000000000000"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_INVALID",
+      "note": "old_x = 0x01F4 = 500 (le64: F4 01 00 00 00 00 00 00), old_y = 0x03E8 = 1000 (le64: E8 03 00 00 00 00 00 00). old_product = 500 * 1000 = 500000. new_x = 0x01F3 = 499 (le64: F3 01 00 00 00 00 00 00), new_y = 0x03E7 = 999 (le64: E7 03 00 00 00 00 00 00). new_product = 499 * 999 = 498501 < 500000 → AMM invariant violated → TX_ERR_SIG_INVALID. HARDCODED CONSTANT DETECTION: if verifier uses hardcoded old_product=20000 instead of reading from ext_payload, it computes 498501 > 20000 → returns true (WRONG). This vector FAILS on buggy impl (false positive) and PASSES on correct impl. Pairs with CV-61 (positive non-baseline path) to fully detect the bug."
+    },
+    {
+      "id": "CV-TXCTX-63",
+      "description": "CheckValueConservationTxWide: hasVaultInputs=false but vaultInputSum=500 (caller bug: forgot to set flag). TotalOut > TotalIn. MUST still fail with TX_ERR_VALUE_CONSERVATION — vaultInputSum MUST be ignored when hasVaultInputs=false.",
+      "profile": "test_passthrough_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 100,
+      "output_values": [
+        200
+      ],
+      "has_vault_inputs": false,
+      "vault_input_sum": 500,
+      "expect_ok": false,
+      "expect_err": "TX_ERR_VALUE_CONSERVATION",
+      "note": "self_input_value=100 (TotalIn=100), output_values=[200] (TotalOut=200). has_vault_inputs=false, vault_input_sum=500 (caller bug: passed non-zero vaultInputSum but forgot to set has_vault_inputs=true). CheckValueConservationTxWide MUST ignore vault_input_sum when has_vault_inputs=false. TotalOut=200 > TotalIn=100 → TX_ERR_VALUE_CONSERVATION regardless of vault_input_sum. Detects implementation bug where vault_input_sum is used unconditionally, which would allow (100 + 500 = 600 >= 200) → incorrectly accept value creation. Pairs with CV-59 (same scenario, vault_input_sum=0) and CV-29 (has_vault_inputs=true)."
+    },
+    {
+      "id": "CV-TXCTX-50c",
+      "description": "uint128GTE swap-discriminating vector: old_product={hi=0, lo=0xFFFFFFFFFFFFFFFF}, new_product={hi=1, lo=0}. Correct impl (hi first): hi=1 > hi=0 → GTE=true → AMM passes. Swap impl (lo first): lo=0 < lo=0xFFFF... → GTE=false → AMM fails (WRONG). Detects hi/lo inversion that CV-50b may miss.",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 5000,
+      "ext_payload_hex": "ffffffff000000000100000001000000",
+      "continuing_outputs": [
+        {
+          "value": 1000,
+          "ext_payload_hex": "00000000010000000000000001000000"
+        }
+      ],
+      "expect_ok": true,
+      "note": "old_x = 0xFFFFFFFF (4294967295), old_y = 0x100000001 (4294967297). old_product = (2^32-1)*(2^32+1) = 2^64-1 = {hi=0, lo=0xFFFFFFFFFFFFFFFF}. new_x = 0x100000000 (2^32 = 4294967296), new_y = 0x100000000 (2^32). new_product = 2^64 = {hi=1, lo=0}. SWAP DETECTION: correct uint128GTE compares hi first: new.hi=1 > old.hi=0 → TRUE (AMM passes). A swap-buggy impl compares lo first: new.lo=0 < old.lo=0xFFFF... → FALSE (AMM fails, wrong). expect_ok=true: a correct impl MUST accept this transaction. If both CV-50c and CV-50b pass, the uint128GTE implementation is correct for all cases. If CV-50c fails (expect_ok=false), the hi/lo comparison order is inverted. ARITHMETIC FIX (СРЕД-1 audit): old_x=0xFFFFFFFF (le64: ffffffff00000000), old_y=0x100000001 (le64: 0100000001000000). product = 0xFFFFFFFF * 0x100000001 = (2^32-1)*(2^32+1) = 2^64-1 = 0xFFFFFFFFFFFFFFFF. Encoding: lo=0xFFFFFFFFFFFFFFFF, hi=0 → [2]uint64{lo=0xFFFFFFFFFFFFFFFF, hi=0}. Previous hex (ffffffffffffff000100000001000000) encoded old_x=0x00FFFFFFFFFFFFFF (7 bytes != 4 bytes). Fixed hex (ffffffff000000000100000001000000) correctly encodes 0xFFFFFFFF in first 4 bytes."
+    },
+    {
+      "id": "CV-TXCTX-64",
+      "description": "AMM verifier: ContinuingOutputs[0].ExtPayload = 15 bytes (insufficient for new reserves), but input ext_payload is 16 bytes (correct). Verifier MUST check len(newPayload) >= 16 and return false → TX_ERR_SIG_INVALID.",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [
+        {
+          "value": 500,
+          "ext_payload_hex": "6b00000000000000cf000000000000"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_INVALID",
+      "note": "Input ext_payload = 16 bytes (old_x=100, old_y=200) — correctly sized. ContinuingOutputs[0].ExtPayload = 15 bytes (new_y truncated by 1 byte). AMM verifier MUST check `len(newPayload) >= 16` before accessing [0:8] and [8:16]. If bounds check is missing → panic/out-of-range access. If bounds check is present → returns false → TX_ERR_SIG_INVALID. CV-52 tests input ext_payload < 16; this vector tests ContinuingOutputs[0].ExtPayload < 16 with a correct input payload. Both bounds checks must exist independently."
+    },
+    {
+      "id": "CV-TXCTX-65",
+      "description": "CompactSize 0xFE (5-byte form) malformed edge case: ext_payload uses 0xFE marker with truncated 4-byte value. Step 2 MUST reject as TX_ERR_COVENANT_TYPE_INVALID. Complements CV-45 (0xFD 3-byte truncated). Tests 5-byte and 9-byte CompactSize form handling.",
+      "profile": "test_passthrough_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "raw_ext_payload": "0xFE 01 02 03",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "note": "ext_payload starts with CompactSize marker 0xFE (5-byte form: marker + 4-byte LE u32). Only 3 bytes of value follow (01 02 03) — truncated, fewer than required 4 bytes. Step 2 CompactSize parsing MUST detect this as malformed and reject the transaction. CV-45 tests 0xFD (3-byte form) truncation; this vector tests 0xFE (5-byte form). 0xFF (9-byte form) is analogous — implementors MUST handle all 4 CompactSize forms: 1-byte (< 0xFD), 3-byte (0xFD), 5-byte (0xFE), 9-byte (0xFF). Missing any form creates a parsing divergence between Go and Rust."
+    },
+    {
+      "id": "CV-TXCTX-66",
+      "description": "CompactSize 0xFF (9-byte form) is non-minimal for ext_payload_len=8 and MUST be rejected under canonical CompactSize minimality. Complements CV-45 (0xFD truncated) and CV-65 (0xFE truncated).",
+      "profile": "test_passthrough_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "raw_compact_size_form": "0xFF",
+      "raw_ext_payload": "0xFF 08 00 00 00 00 00 00 00 41 42 43 44 45 46 47 48",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "note": "ext_payload uses CompactSize 0xFF marker (9-byte form): 0xFF + 8-byte LE u64 length = 08 00 00 00 00 00 00 00 (value=8) + 8-byte payload ABCDEFGH. Under current canonical minimality rules this encoding is NON-MINIMAL because value=8 must use the 1-byte CompactSize form. CORE_EXT covenant-data parsing therefore rejects it as malformed covenant_data and maps to TX_ERR_COVENANT_TYPE_INVALID. HARNESS NOTE: raw_compact_size_form/raw_ext_payload still matter — the harness must feed the raw non-minimal bytes into the real parser, not silently normalize them away."
+    },
+    {
+      "id": "CV-TXCTX-67",
+      "description": "CompactSize 0xFF (9-byte form) truncated: only 0xFF marker + 5 bytes (instead of required 8 bytes for length value). Step 2 MUST reject as TX_ERR_COVENANT_TYPE_INVALID.",
+      "profile": "test_passthrough_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "raw_ext_payload": "0xFF 01 02 03 04 05",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "note": "ext_payload starts with 0xFF marker (9-byte form) but only 5 bytes of the 8-byte length follow (01 02 03 04 05 — truncated). Step 2 CompactSize parsing MUST detect this as malformed and reject. CV-45 tests 0xFD truncation, CV-65 tests 0xFE truncation, this tests 0xFF truncation. Together CV-45/CV-65/CV-66/CV-67 provide full CompactSize form coverage: valid 0xFD (CV-05), truncated 0xFD (CV-45), valid 0xFF (CV-66), truncated 0xFF (CV-67). Note: 0xFE truncated covered by CV-65."
+    },
+    {
+      "id": "CV-TXCTX-68",
+      "description": "Governance failure scenario: profile with activation_height=99, transition_height=100, spend height=99. Profile is ACTIVE (99 >= 99) but v2 anchor regime not yet in effect (99 < transition_height=100). Tests consensus behavior under malformed governance state where activation_height < transition_height. Harness MUST log governance_failure_marker warning.",
+      "profile": "test_passthrough_profile",
+      "height": 99,
+      "activation_height": 99,
+      "transition_height": 100,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "expect_ok": true,
+      "note": "GOVERNANCE SCOPE CLARIFICATION (HIGH-C audit): This vector tests consensus-level behavior for a profile with activationHeight=99 < transitionHeight=100. Consensus ACCEPTS this transaction (expect_ok=true, passthrough verifier) because consensus does not enforce activationHeight >= transitionHeight — that is a governance-level invariant. Q-GOV-TXCTX-ACTIVATION-01 requires governance tooling to REJECT authorization of such a profile. This vector does NOT document a \"normal\" scenario — it documents what happens when governance fails to enforce the invariant (malformed governance state). Complementary governance-level test: governance harness MUST reject profile authorization with activationHeight < transitionHeight (CV-60 scope). Both are required: CV-68 proves consensus is not the enforcement layer; governance harness proves the invariant is enforced at the right layer. activationHeight=99, transitionHeight=100, spend at height=99. Profile is ACTIVE (height >= activationHeight). v2 anchor has NOT yet transitioned (height < transitionHeight). Tests the boundary: profile is ACTIVE before the v2 anchor regime begins. Both clients MUST agree: the profile is recognized as ACTIVE and step 3c fires. This is the most critical boundary for chain split risk — if one client uses activationHeight > transitionHeight invariant enforcement and the other does not, they will disagree on whether the profile is active at height=99. Q-GOV-TXCTX-ACTIVATION-01: governance MUST prevent activationHeight < transitionHeight; this vector documents the edge case behavior when that invariant is violated (activation_height < transition_height).",
+      "intent": "document_governance_failure_scenario",
+      "warnlevel": "governance_critical",
+      "governance_failure_marker": true,
+      "harness_warning": "HARNESS MUST LOG WARNING when executing this vector: \"CV-68 PASSED — this documents consensus behavior under malformed governance state. governance_failure_marker=true. Ensure Q-GOV-TXCTX-ACTIVATION-01 CI gate is active.\""
+    },
+    {
+      "id": "CV-TXCTX-69",
+      "description": "TotalIn accumulation: self_input_value = 0 (zero-value UTXO). Tests that TotalIn = 0 is handled correctly — value conservation with TotalOut = 0 should pass; verifier receives self_input_value=0.",
+      "profile": "test_passthrough_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 0,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [],
+      "expect_ok": true,
+      "note": "self_input_value = 0 (zero-value UTXO). TotalIn accumulation must handle 0 correctly — u128(0) addition is identity. Verifier receives self_input_value=0; passthrough accepts. Current canonical output-creation rules require CORE_EXT value > 0, so this vector keeps TotalOut=0 by using no continuing outputs rather than an explicit zero-value CORE_EXT output. The edge case under test remains the same: zero-value input, zero total_out, and no accidental underflow or skipped conservation logic."
+    },
+    {
+      "id": "CV-TXCTX-70",
+      "description": "Duplicate input outpoint: two CORE_EXT inputs with the same prevout (txid:vout). Parse-level duplicate-outpoint check MUST reject as TX_ERR_PARSE before TxContext construction (canonical §13). TxContext MUST NOT be constructed for a transaction with duplicate input outpoints.",
+      "profile": "test_passthrough_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "inputs": [
+        {
+          "prevout": "aabb:0",
+          "ext_id": "0x0FFE"
+        },
+        {
+          "prevout": "aabb:0",
+          "ext_id": "0x0FFE"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_PARSE",
+      "note": "Two CORE_EXT inputs with the same prevout (aabb:0 appears twice). This tests that the parse-level duplicate-outpoint check detects the duplication BEFORE BuildTxContext is invoked. TxContext MUST NOT be constructed for duplicate prevouts. Error MUST be TX_ERR_PARSE (canonical §13 error code table). Both Go and Rust MUST agree on rejection at parse level.",
+      "post_state_assertion": "MUST verify that BuildTxContext was NOT called before duplicate-outpoint detection. If using mock: assert BuildTxContext call count == 0 when duplicate prevout detected. This confirms that parse-level duplicate check fires BEFORE TxContext construction."
+    },
+    {
+      "id": "CV-TXCTX-71",
+      "description": "Genesis height edge: spend at Height=0. TxContextBase.Height=0 MUST be passed correctly to verifier. NATIVE_SPEND_SUITES(0) returns baseline suite. activationHeight > 0 for all non-genesis profiles, so no v2 profiles are active at Height=0. Passthrough profile (no activationHeight restriction) MUST still pass.",
+      "profile": "test_passthrough_profile",
+      "height": 0,
+      "activation_height": 0,
+      "sighash_type": 1,
+      "self_input_value": 1000,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "expect_ok": true,
+      "note": "Height=0 (genesis block). TxContextBase.Height MUST be 0, not some default/sentinel. Tests that height=0 does not trigger any special-case bugs in: (1) NATIVE_SPEND_SUITES(0) lookup — MUST return baseline ML-DSA-87, (2) activationHeight comparison — passthrough has activationHeight=0, MUST be ACTIVE, (3) transitionHeight — at height=0 no v2 anchor transition has occurred, (4) TxContextBase.Height field — MUST not be overwritten with a non-zero sentinel. Coverage gap G-5: verifier receiving wrong height=0 vs height=1 edge."
+    },
+    {
+      "id": "CV-TXCTX-72",
+      "description": "Go/Rust bounds divergence: ContinuingOutputCount=1 but verifier reads ContinuingOutputs[1]. In Go: returns zero-value TxOutputView{Value:0, ExtPayload:nil}. In Rust: get_output_checked(1) returns Err(SigInvalid). Both MUST return false/TX_ERR_SIG_INVALID — consensus MUST agree.",
+      "profile": "test_passthrough_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "continuing_output_count": 1,
+      "verifier_accesses_index": 1,
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_INVALID",
+      "note": "CRIT-2 coverage vector: verifier that reads ContinuingOutputs[1] when ContinuingOutputCount=1. In Go: ContinuingOutputs is [2]TxOutputView — index [1] returns zero-value TxOutputView. A Go verifier that does NOT check ContinuingOutputCount before reading [1] gets {Value:0, ExtPayload:nil} and may incorrectly return true (silent wrong answer). In Rust: get_output_checked(1) returns Err(ConsensusError::SigInvalid) — verifier gets false. BOTH clients MUST return false/TX_ERR_SIG_INVALID. This detects the silent wrong-answer divergence between Go zero-value and Rust None. Go implementations MUST explicitly check ContinuingOutputCount before accessing any index. This is distinct from a panic — in Go it silently succeeds with wrong data.",
+      "harness_assertion": {
+        "description": "CRIT-2 Go/Rust divergence guard: mock verifier MUST record actual return value, not just error presence. Go: direct index [1] returns zero-value TxOutputView (silent wrong-answer). Rust: get_output_checked(1) returns Err(SigInvalid). Both MUST produce expect_err=TX_ERR_SIG_INVALID.",
+        "go": "assert callResult.ErrCode == TX_ERR_SIG_INVALID; assert !callResult.Ok",
+        "rust": "assert_eq!(result.unwrap_err(), ConsensusError::SigInvalid)"
+      }
+    },
+    {
+      "id": "CV-TXCTX-73",
+      "description": "vaultInputSum=u64MAX with hasVaultInputs=false: MUST reject (value conservation fails). Tests that implementations ignore vaultInputSum when flag is false — not use it additively.",
+      "profile": "test_passthrough_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 1,
+      "has_vault_inputs": false,
+      "vault_input_sum": 18446744073709551615,
+      "total_in": 1,
+      "total_out": 2,
+      "expect_ok": false,
+      "expect_err": "TX_ERR_VALUE_CONSERVATION",
+      "note": "CRIT-3 coverage vector: hasVaultInputs=false, vaultInputSum=u64MAX (18446744073709551615), TotalIn=1, TotalOut=2. A broken implementation that uses vaultInputSum additively: TotalIn+vaultInputSum overflow → computes 1 + u64MAX as u128 = 18446744073709551616, then TotalOut=2 ≤ that huge number → INCORRECTLY ACCEPTS the transaction, creating money from thin air. A correct implementation ignores vaultInputSum when hasVaultInputs=false: TotalOut=2 > TotalIn=1 → TX_ERR_VALUE_CONSERVATION. This is the extreme edge case for CRIT-3. CV-63 uses vaultInputSum=500 — this uses u64MAX to ensure the additive bug is detectable even with overflow-tolerant arithmetic. Both Go and Rust MUST reject."
+    },
+    {
+      "id": "CV-TXCTX-74",
+      "description": "sighash_type=0xC0 (ACP 0x80 | reserved base 0x40): 0xC0 & 0x7F = 0x40, which is not in {0x01, 0x02, 0x03} → TX_ERR_SIGHASH_TYPE_INVALID. Tests 3-byte-ACP + reserved base rejection.",
+      "profile": "test_passthrough_profile",
+      "height": 200,
+      "sighash_type": 192,
+      "self_input_value": 500,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIGHASH_TYPE_INVALID",
+      "note": "sighash_type=0xC0 (decimal 192). CheckSighashPolicy: baseType = 0xC0 & 0x7F = 0x40 (decimal 64). 0x40 ∉ {0x01, 0x02, 0x03} → TX_ERR_SIGHASH_TYPE_INVALID (via baseType < 0x01 or baseType > 0x03 check). This exercises the ACP bit (0x80) combined with a reserved base type (0x40). Coverage gap MED-7: CV-38 tests 0x80 (bare ACP, 0x80&0x7F=0x00), but 0xC0 tests ACP+reserved which takes a different code path through the base type check."
+    },
+    {
+      "id": "CV-TXCTX-75",
+      "description": "sighash_type=0x83 (ACP 0x80 | SIGHASH_SINGLE 0x03): profile with allowed_sighash_set=0x01 (SIGHASH_ALL only) MUST reject as TX_ERR_SIG_ALG_INVALID (ACP bit not in allowed set).",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 131,
+      "self_input_value": 500,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
+      "note": "sighash_type=0x83 (decimal 131). CheckSighashPolicy: baseType = 0x83 & 0x7F = 0x03 (SIGHASH_SINGLE). test_amm_profile has allowed_sighash_set=0x01 (only SIGHASH_ALL). ACP bit: 0x83 & 0x80 = 0x80 (ACP set). allowed_sighash_set & 0x80 = 0 → ACP not allowed. → TX_ERR_SIG_ALG_INVALID. Coverage gap MED-7: this tests ACP+SIGHASH_SINGLE against a profile that only allows SIGHASH_ALL. The base type (0x03) is valid, but ACP is not in the allowed set — error is SIG_ALG_INVALID not SIGHASH_TYPE_INVALID."
+    },
+    {
+      "id": "CV-TXCTX-76",
+      "description": "Zero-value UTXO value conservation FAIL: self_input_value=0, TotalIn=0, continuing_output value=1, TotalOut=1 > TotalIn=0 → TX_ERR_VALUE_CONSERVATION. Tests that zero-value TotalIn is enforced correctly.",
+      "profile": "test_passthrough_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 0,
+      "continuing_outputs": [
+        {
+          "value": 1,
+          "ext_payload_hex": "6400000000000000c800000000000000"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_VALUE_CONSERVATION",
+      "note": "Coverage gap for CV-69 (which only tests TotalOut=0 = TotalIn=0 passing case). self_input_value=0 → TotalIn=0. Continuing output value=1 → TotalOut=1. 1 > 0 → TX_ERR_VALUE_CONSERVATION. Tests that zero-value edge case correctly enforces the conservation check — not accidentally treating TotalIn=0 as 'no check required' or skipping u128 accumulation."
+    },
+    {
+      "id": "CV-TXCTX-77",
+      "description": "AMM profile at Height=0: activationHeight=100 > Height=0 → profile is pre-activation → anyone-can-spend → ACCEPTED. [R7 fix: was stale description mentioning TX_ERR_SIG_ALG_INVALID / TX_ERR_COVENANT_TYPE_INVALID — HIGH-4 FIX corrected expect_ok=true but description was not updated. Pre-activation means no verifier is called.]",
+      "profile": "test_amm_profile",
+      "height": 0,
+      "activation_height": 100,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "expect_ok": true,
+      "note": "HIGH-4 FIX: Pre-activation behavior per SPEC §12 Path 1: profile is NOT ACTIVE (Height=0 < activationHeight=100) → anyone-can-spend applies. expect_ok=true (CORRECTED from false). The original CV-77 incorrectly had expect_ok=false with TX_ERR_COVENANT_TYPE_INVALID — this contradicts SPEC §12 Path 1 and is inconsistent with CV-12 (height=50 < activation=100, expect_ok=true) and CV-79 (height=99 = activation-1, expect_ok=true). All three vectors test pre-activation state. All three MUST have expect_ok=true. The AMM profile verifier is NOT called in pre-activation state — the transaction is accepted via anyone-can-spend regardless of verifier logic. Original note: Coverage gap CV-71b: AMM profile (test_amm_profile, activationHeight=100) at Height=0. Profile is NOT yet ACTIVE (Height=0 < activationHeight=100). Pre-activation behavior: CORE_EXT input under inacti"
+    },
+    {
+      "id": "CV-TXCTX-81",
+      "description": "INFO-A happy path: profile with allowed_sighash_set=0x82 (SIGHASH_NONE 0x02 | ACP 0x80). sighash_type=0x82 (SIGHASH_NONE+ACP). MUST pass §8A invariants and be accepted — tests that a profile explicitly allowing ACP+SIGHASH_NONE combination correctly accepts such a transaction.",
+      "profile": "",
+      "profile_override": {
+        "ext_id_hex": "0fea",
+        "ext_id": 4074,
+        "suite_id_hex": "10",
+        "suite_id": 16,
+        "txcontext_enabled": 1,
+        "allowed_sighash_set": 130,
+        "allowed_sighash_set_hex": "82",
+        "max_ext_payload_bytes": 48,
+        "binding_kind": 2,
+        "suite_count": 1,
+        "activation_height": 100,
+        "verifier_logic": "passthrough; always returns true",
+        "abi": "9-param"
+      },
+      "height": 200,
+      "sighash_type": 130,
+      "sighash_type_hex": "82",
+      "self_input_value": 500,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "expect_ok": true,
+      "note": "INFO-A coverage: profile with allowed_sighash_set=0x82 (bit 1 = SIGHASH_NONE, bit 7 = ACP). sighash_type=0x82: baseType = 0x82 & 0x7F = 0x02 (SIGHASH_NONE). ACP bit = 0x82 & 0x80 = 0x80. Checks: (1) baseType=0x02 is in allowed set (bit 1 of 0x82 is set) → pass. (2) ACP bit present AND bit 7 of 0x82 is set → pass. Expected result: accept. This is the happy-path complement to CV-33 (which rejects 0x82 on test_acp_profile with allowed_sighash_set=0x81 where ACP+NONE is not permitted).",
+      "post_state_assertion": "INFO-A happy path: ACP+NONE sighash profile MUST be ACCEPTED. Harness MUST verify: (1) verifier was called with 9-param ABI, (2) sighash_type=0x82 (SIGHASH_NONE|ACP) is accepted by profile with allowed_sighash_set=0x82, (3) no TX_ERR_* error is returned. This is the positive baseline for ACP-enabled profiles with SIGHASH_NONE. [M1 R15 fix: replaced copy-pasted CV-70 double-spend assertion with correct CV-81 happy-path assertion]"
+    },
+    {
+      "id": "CV-TXCTX-78",
+      "description": "activationHeight exact boundary: height == activationHeight == 100. Profile MUST be ACTIVE (height >= activationHeight). Verifier applies. Passthrough → expect_ok: true. Tests >= not > comparison.",
+      "profile": "test_passthrough_profile",
+      "height": 100,
+      "activation_height": 100,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "expect_ok": true,
+      "note": "ВЫСОК-F exact boundary: height=100, activationHeight=100. Profile is ACTIVE when height >= activationHeight. A bug using strict > instead of >= would treat height=100 as pre-activation → anyone-can-spend → would pass trivially, masking the >= boundary error. With passthrough verifier (always returns true), this vector passes IFF the implementation correctly identifies the profile as ACTIVE at height=activationHeight. Both CV-78 (height=activationHeight, expect_ok=true) and CV-12 (height<activationHeight, expect_ok=true via anyone-can-spend) test opposite sides of the activation boundary. They are both true but for different reasons — CV-78 because profile is ACTIVE and verifier accepts, CV-12 because profile is pre-active and anyone-can-spend accepts."
+    },
+    {
+      "id": "CV-TXCTX-79",
+      "description": "activationHeight exact boundary: height == activationHeight - 1 == 99. Profile is pre-activation (height < activationHeight). AMM verifier would fail but anyone-can-spend applies → expect_ok: true. Complementary to CV-78.",
+      "profile": "test_amm_profile",
+      "height": 99,
+      "activation_height": 100,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [
+        {
+          "value": 500,
+          "ext_payload_hex": "64000000000000000100000000000000"
+        }
+      ],
+      "expect_ok": true,
+      "note": "ВЫСОК-F pre-activation boundary: height=99 (= activationHeight - 1), activationHeight=100. Profile is pre-activation (99 < 100). Pre-activation behavior: anyone-can-spend applies. AMM invariant is NOT checked — the verifier is not called in pre-activation state. Transaction is accepted regardless of ext_payload content. This vector uses test_amm_profile to confirm that the pre-activation path bypasses verifier logic. Note: CV-68 uses activationHeight=transitionHeight-1 which is a malformed governance state; CV-79 uses standard pre-activation (activationHeight=100 is well-formed governance state). Together CV-78+CV-79 close the exact-boundary gap."
+    },
+    {
+      "id": "CV-TXCTX-82",
+      "description": "СРЕД-4: AMM profile with activationHeight=0 at height=0. Profile MUST be ACTIVE (0 >= 0). Tests >= 0 edge case — implementation using > 0 would incorrectly treat genesis height as pre-activation.",
+      "profile": "test_amm_profile",
+      "height": 0,
+      "activation_height": 0,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [
+        {
+          "value": 500,
+          "ext_payload_hex": "6400000000000000c800000000000000"
+        }
+      ],
+      "expect_ok": true,
+      "note": "СРЕД-4 coverage: AMM profile with activationHeight=0, spend at height=0. Profile MUST be ACTIVE: 0 >= 0. AMM invariant: new reserves == old reserves → new_x*new_y >= old_x*old_y (100*200 >= 100*200) → true. A bug using strict > instead of >= for activation check would treat height=0 as pre-activation even with activationHeight=0 — anyone-can-spend would apply and test would pass incorrectly. To distinguish: this vector uses AMM verifier which ONLY passes if invariant holds. Pre-activation path would also accept (anyone-can-spend) but for wrong reason. The ext_payload = old reserves = 100,200 and continuing output = same → invariant satisfied.",
+      "profile_override": {
+        "activation_height": 0,
+        "note": "HIGH-1 R17 fix: activation_height=0 needed to match description. profile test_amm_profile has activation_height=100. This vector tests genesis activation (height=0 >= activation_height=0) so override is required."
+      }
+    },
+    {
+      "id": "CV-TXCTX-80",
+      "description": "СРЕД-6: AMM profile, ContinuingOutputs[0].ext_payload = 9 bytes 'ROGUEDATA'. AMM verifier: len(ext_payload) = 9 < 16 → return false → TX_ERR_SIG_INVALID. Closes N-5 rogue payload negative coverage for AMM verifier.",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [
+        {
+          "value": 500,
+          "ext_payload_hex": "524f47554544415441"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_INVALID",
+      "note": "СРЕД-6 N-5 rogue payload: ContinuingOutputs[0].ext_payload_hex = '524f47554544415441' (9 bytes = ASCII 'ROGUEDATA'). AMM verifier: if len(ext_payload) < 16 { return false }. 9 < 16 → verifier returns false → TX_ERR_SIG_INVALID. CV-52 tests rogue ext_payload on the SPENDING input (Step 2 parse failure). CV-64 tests ContinuingOutputs[0].ExtPayload = 15 bytes (just below 16-byte threshold). CV-80 tests an arbitrary rogue payload well below threshold. Together they cover: (a) input parse rejection, (b) near-threshold output rejection, (c) arbitrary rogue content rejection. N-5 coverage is now complete."
+    },
+    {
+      "id": "CV-TXCTX-83",
+      "description": "INFO-R2-1: activationHeight=0 (via override), height=1. Profile MUST be ACTIVE (1 >= 0). Passthrough verifier → expect_ok: true. Closes coverage matrix for activationHeight=0 family.",
+      "profile": "test_passthrough_profile",
+      "height": 1,
+      "activation_height": 0,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "expect_ok": true,
+      "note": "INFO-R2-1 coverage: activationHeight=0, height=1. Profile is ACTIVE (1 >= 0). Together with CV-82 (height=0, activationHeight=0, ACTIVE) and CV-77 (height=0, activationHeight=100, pre-active), this completes the activationHeight=0 test matrix:   CV-77: height < activationHeight (pre-active, anyone-can-spend)   CV-82: height == activationHeight == 0 (ACTIVE at genesis)   CV-83: height > activationHeight == 0 (ACTIVE after genesis) Without CV-83, an implementation using height > activationHeight (strict >) instead of height >= activationHeight would pass CV-82 accidentally (0 > 0 = false → pre-active → anyone-can-spend → passthrough accepts) but CV-83 would catch it: 1 > 0 = true → both buggy and correct implementation would accept → no discrimination. Actually the real discriminator is CV-82 not CV-83 for the >= vs > bug. CV-83 confirms correct ACTIVE behavior persists above activationHeight=0.",
+      "profile_override": {
+        "activation_height": 0,
+        "note": "R18 fix: description says activationHeight=0 but profile has 100. Override needed for vector to test what description claims."
+      }
+    },
+    {
+      "id": "CV-TXCTX-83b",
+      "description": "INFO-R2-1 cascade: AMM profile, activationHeight=0, height=1. ACTIVE (1>=0). AMM verifier MUST be called (not bypassed via pre-activation anyone-can-spend path). AMM invariant held → expect_ok=true.",
+      "profile": "test_amm_profile",
+      "height": 1,
+      "activation_height": 0,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [
+        {
+          "value": 500,
+          "ext_payload_hex": "6400000000000000c800000000000000"
+        }
+      ],
+      "expect_ok": true,
+      "note": "CASCADE from CV-83 (activationHeight=0, height=1, passthrough). This vector uses AMM profile to PROVE the verifier is actually called at height=1. Pre-activation path (anyone-can-spend) bypasses the verifier — so if the implementation has a > vs >= bug, it would also accept this via anyone-can-spend (wrong reason). Only the AMM invariant check distinguishes: (1) ACTIVE path: verifier called, AMM invariant checked, old_x=100 new_x=100 → pass (2) Pre-active path: verifier NOT called, anyone-can-spend, pass for wrong reason To distinguish, use a FAILING AMM invariant: add CV-83c (below threshold) → ACTIVE path: fail; pre-active path: pass. That triple (83, 83b, 83c) fully distinguishes correct activation boundary from a > vs >= bug. HIGH-R3-6 FIX: Added profile_override with activation_height=0 to remove ambiguity. Without profile_override, harness may use test_amm_profile (activation_height=100) — then height=1 < 100 → pre-activation → anyone-can-spend → expect_ok=true by wrong reason. With profile_override activation_height=0: height=1 >= 0 → ACTIVE → AMM verifier applies.",
+      "profile_override": {
+        "ext_id_hex": "0fff",
+        "ext_id": 4095,
+        "suite_id_hex": "10",
+        "suite_id": 16,
+        "txcontext_enabled": 1,
+        "allowed_sighash_set": 1,
+        "max_ext_payload_bytes": 48,
+        "binding_kind": 2,
+        "suite_count": 1,
+        "activation_height": 0,
+        "verifier_logic": "AMM: new_x*new_y >= old_x*old_y; overrides test_amm_profile activation_height to 0",
+        "abi": "9-param"
+      }
+    },
+    {
+      "id": "CV-TXCTX-83c",
+      "description": "INFO-R2-1 cascade: AMM profile, activationHeight=0, height=1. ACTIVE. AMM invariant VIOLATED → expect_ok=false (TX_ERR_SIG_INVALID). Distinguishes ACTIVE+fail from pre-active+pass.",
+      "profile": "test_amm_profile",
+      "height": 1,
+      "activation_height": 0,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "continuing_outputs": [
+        {
+          "value": 500,
+          "ext_payload_hex": "6400000000000000c700000000000000"
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_INVALID",
+      "note": "CASCADE from CV-83b. AMM profile at activationHeight=0, height=1 — profile is ACTIVE. old reserves: x=100, y=200 (from self ext_payload). new reserves: x=100, y=199 (from continuing output ext_payload: last byte 0xc7 = 199). new_x*new_y = 100*199 = 19900 < old_x*old_y = 100*200 = 20000 → AMM invariant VIOLATED. Expected: TX_ERR_SIG_INVALID. This vector is decisive: pre-activation path would return true (anyone-can-spend). Active path returns false (AMM verifier rejects). If a > vs >= bug treats height=1 as pre-activation, this vector passes incorrectly and the implementation is non-conforming. CV-83, 83b, 83c together form a complete boundary discriminator for activationHeight=0. HIGH-R3-6 FIX: Added profile_override with activation_height=0. CV-83c is the DISCRIMINATING vector: height=1, activation_height=0 → ACTIVE. AMM invariant violated → expect_ok=false. Pre-activation (wrong impl): height=1 < activation_height=100 → anyone-can-spend → expect_ok=true. If CV-83c passes, it proves verifier IS called (not bypassed by pre-activation path).",
+      "profile_override": {
+        "ext_id_hex": "0fff",
+        "ext_id": 4095,
+        "suite_id_hex": "10",
+        "suite_id": 16,
+        "txcontext_enabled": 1,
+        "allowed_sighash_set": 1,
+        "max_ext_payload_bytes": 48,
+        "binding_kind": 2,
+        "suite_count": 1,
+        "activation_height": 0,
+        "verifier_logic": "AMM: new_x*new_y >= old_x*old_y; overrides test_amm_profile activation_height to 0",
+        "abi": "9-param"
+      }
+    },
+    {
+      "id": "CV-TXCTX-84",
+      "description": "H4 FIX: 3-extid ascending-order discriminating vector. ALL three ext_ids have K+1 continuing outputs. Ascending order MUST attribute error to lowest ext_id (0x0FFC=4092). Non-deterministic iteration gives 0x0FFD or 0x0FFE — harness MUST verify attribution, not just expect_err.",
+      "profile": "test_amm_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 500,
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "inputs": [
+        {
+          "ext_id_hex": "0ffc",
+          "ext_id": "0x0FFC",
+          "continuing_output_count": 3
+        },
+        {
+          "ext_id_hex": "0ffd",
+          "ext_id": "0x0FFD",
+          "continuing_output_count": 3
+        },
+        {
+          "ext_id_hex": "0ffe",
+          "ext_id": "0x0FFE",
+          "continuing_output_count": 3
+        }
+      ],
+      "expect_ok": false,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "expected_failing_ext_id_hex": "0ffc",
+      "expected_failing_ext_id": 4092,
+      "post_state_assertion": "Harness MUST verify error is attributed to ext_id=0x0FFC (4092 = lowest in ascending u16 order). ext_ids 0x0FFD and 0x0FFE MUST have empty TxContextContinuing maps after rejection. This is the DISCRIMINATING assertion: if implementation uses non-deterministic map iteration, it may attribute error to 0x0FFD (4093) or 0x0FFE (4094) — harness MUST fail on wrong attribution. CV-43 uses 2 ext_ids; this uses 3 to ensure ascending-order is the ONLY correct result (not coincidentally correct due to hash-seed alignment).",
+      "note": "H4 FIX: CV-43 (2 ext_ids) cannot fully discriminate ascending-order vs hash-map accident. With 2 ext_ids, there is a 50% chance any hash-map iteration gives ascending order accidentally. With 3 ext_ids all overflowing: P(correct by chance) = 1/6 (1 of 6 possible iteration orders). The harness MUST check expected_failing_ext_id field against the actual error attribution. Profiles: 0x0FFC uses test_acp_profile_4092 override, 0x0FFD uses test_disabled_profile_4093 override, 0x0FFE uses test_passthrough_profile_4094 override. All have K=2, all inputs provide 3 continuing outputs. Ascending order: 4092 < 4093 < 4094 → first ext_id processed = 4092 = 0x0FFC. A-3 R10 fix: Added explicit continuing_outputs_0x0FFC/0x0FFD/0x0FFE (3 entries each, K+1=3 per ext_id) consistent with CV-43/CV-51 structure. Without explicit outputs, harness implementations may diverge on output construction.",
+      "continuing_outputs_0x0FFC": [
+        {
+          "ext_id_hex": "0ffc",
+          "ext_id": 4092,
+          "value": 0,
+          "ext_payload_hex": "00000000000000000000000000000000",
+          "note": "Continuing output 1/3 (index 0) for ext_id 0x0FFC — within K=2 limit, does not trigger error"
+        },
+        {
+          "ext_id_hex": "0ffc",
+          "ext_id": 4092,
+          "value": 0,
+          "ext_payload_hex": "00000000000000000000000000000000",
+          "note": "Continuing output 2/3 (index 1) for ext_id 0x0FFC — within K=2 limit, does not trigger error"
+        },
+        {
+          "ext_id_hex": "0ffc",
+          "ext_id": 4092,
+          "value": 0,
+          "ext_payload_hex": "00000000000000000000000000000000",
+          "note": "Continuing output 3/3 (index 2) for ext_id 0x0FFC — K+1 = 3rd output TRIGGERS TX_ERR_COVENANT_TYPE_INVALID [F-05 fix: only this output is the trigger, not 1/3 or 2/3]"
+        }
+      ],
+      "continuing_outputs_0x0FFD": [
+        {
+          "ext_id_hex": "0ffd",
+          "ext_id": 4093,
+          "value": 0,
+          "ext_payload_hex": "00000000000000000000000000000000",
+          "note": "Continuing output 1/3 (index 0) for ext_id 0x0FFD — within K=2 limit, does not trigger error"
+        },
+        {
+          "ext_id_hex": "0ffd",
+          "ext_id": 4093,
+          "value": 0,
+          "ext_payload_hex": "00000000000000000000000000000000",
+          "note": "Continuing output 2/3 (index 1) for ext_id 0x0FFD — within K=2 limit, does not trigger error"
+        },
+        {
+          "ext_id_hex": "0ffd",
+          "ext_id": 4093,
+          "value": 0,
+          "ext_payload_hex": "00000000000000000000000000000000",
+          "note": "Continuing output 3/3 (index 2) for ext_id 0x0FFD — K+1 = 3rd output TRIGGERS TX_ERR_COVENANT_TYPE_INVALID [F-05 fix: only this output is the trigger, not 1/3 or 2/3]"
+        }
+      ],
+      "continuing_outputs_0x0FFE": [
+        {
+          "ext_id_hex": "0ffe",
+          "ext_id": 4094,
+          "value": 0,
+          "ext_payload_hex": "00000000000000000000000000000000",
+          "note": "Continuing output 1/3 (index 0) for ext_id 0x0FFE — within K=2 limit, does not trigger error"
+        },
+        {
+          "ext_id_hex": "0ffe",
+          "ext_id": 4094,
+          "value": 0,
+          "ext_payload_hex": "00000000000000000000000000000000",
+          "note": "Continuing output 2/3 (index 1) for ext_id 0x0FFE — within K=2 limit, does not trigger error"
+        },
+        {
+          "ext_id_hex": "0ffe",
+          "ext_id": 4094,
+          "value": 0,
+          "ext_payload_hex": "00000000000000000000000000000000",
+          "note": "Continuing output 3/3 (index 2) for ext_id 0x0FFE — K+1 = 3rd output TRIGGERS TX_ERR_COVENANT_TYPE_INVALID [F-05 fix: only this output is the trigger, not 1/3 or 2/3]"
+        }
+      ]
+    },
+    {
+      "id": "CV-TXCTX-GOV-01",
+      "description": "M6: Governance harness test — profile with activationHeight < transitionHeight. Governance tooling MUST reject this profile authorization. This is not a spend-time vector — it tests the governance submission pipeline.",
+      "governance_scope": true,
+      "profile_under_test": {
+        "activation_height": 99,
+        "transition_height": 100,
+        "violation": "activationHeight (99) < transitionHeight (100)"
+      },
+      "expected_governance_result": "REJECTED",
+      "expect_governance_error": "ACTIVATION_HEIGHT_BELOW_TRANSITION_HEIGHT",
+      "note": "M6: Q-GOV-TXCTX-ACTIVATION-01 requires governance tooling to block profiles where activationHeight < transitionHeight. Consensus does NOT enforce this (activationHeight is excluded from anchor by design) — see CV-68 which documents what happens at consensus level. THIS vector tests the governance SUBMISSION PIPELINE, not consensus. Governance tooling MUST reject this profile before it reaches on-chain authorization. Without this test: governance tooling gap is documentation-only. Harness: governance_harness.SubmitProfile(profile) MUST return error with code ACTIVATION_HEIGHT_BELOW_TRANSITION_HEIGHT. This vector requires governance harness implementation (separate from spend-time harness). DEADLINE: governance harness MUST be implemented before first v2 profile authorization on devnet. DEADLINE (MED-R3-1): This governance harness test MUST pass before any v2 profile authorization on devnet — identical deadline to CV-60. Both CV-60 and CV-TXCTX-GOV-01 are governance-scope tests that gate the same event: first v2 profile authorization on any network.",
+      "deadline": "before any v2 profile authorization on devnet (same as CV-60)"
+    },
+    {
+      "id": "CV-TXCTX-91",
+      "description": "INFO edge case: has_vault_inputs=false, vault_input_sum=u64MAX, TotalIn=10, TotalOut=10. Correct: ignore vault_input_sum → TotalOut==TotalIn → accept. Broken: TotalIn += vault_input_sum → (10 + u64MAX) wraps to 9 → TotalOut=10 > TotalIn=9 → wrong reject.",
+      "profile": "test_passthrough_profile",
+      "height": 200,
+      "sighash_type": 1,
+      "self_input_value": 10,
+      "has_vault_inputs": false,
+      "vault_input_sum": 18446744073709551615,
+      "vault_input_sum_hex": "ffffffffffffffff",
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "expect_ok": true,
+      "note": "INFO edge case (from Round 3 INFO section): vault_input_sum=u64MAX with has_vault_inputs=false. SPEC §5.1 normative: 'Implementations MUST ignore vault_input_sum when has_vault_inputs=false.' Correct implementation: TotalIn=10, TotalOut=10, ignore vault_input_sum → accept. Broken implementation: TotalIn = 10 + u64MAX = 9 (uint overflow wrap) → TotalOut=10 > TotalIn=9 → TX_ERR_VALUE_CONSERVATION (wrong). This distinguishes correct ignore-semantics from broken additive semantics even when the wrapped result is plausible. Companion to CV-63 (vault_input_sum=500, has_vault_inputs=false, TotalOut > TotalIn → reject) and CV-73 (vault_input_sum=u64MAX, has_vault_inputs=false, TotalOut > TotalIn → reject). CV-91 is the only vector where has_vault_inputs=false AND TotalOut==TotalIn → should accept. BLOCKER R13 fix: Added explicit total_in=10 and total_out=10 fields. Without total_out=10, a broken implementation (adds vault_input_sum additively: TotalIn=10+u64MAX wraps to 9) would also pass because TotalOut=0 <= broken_TotalIn=9. With total_out=10: correct impl passes (10<=10), broken impl FAILS (10 > 9) — the vector now discriminates.",
+      "total_in": 10,
+      "total_out": 10
+    },
+    {
+      "id": "CV-TXCTX-92",
+      "description": "Vault floor reject: transaction with CORE_EXT input (value=200) and CORE_VAULT inputs (vault_input_sum=800). total_in=1000 (200+800). Rule 4 passes (sum_out=700 <= sum_in=1000), but rule 5 rejects (sum_out=700 < vault_input_sum=800). Tests canonical §20 rule 5 vault floor constraint directly.",
+      "profile": "test_passthrough_profile",
+      "height": 200,
+      "activation_height": 100,
+      "transition_height": 150,
+      "sighash_type": 1,
+      "self_input_value": 200,
+      "has_vault_inputs": true,
+      "vault_input_sum": 800,
+      "total_in": 1000,
+      "total_out": 700,
+      "expect_ok": false,
+      "expect_err": "TX_ERR_VALUE_CONSERVATION",
+      "ext_payload_hex": "6400000000000000c800000000000000",
+      "note": "Transaction has CORE_EXT input value=200 and CORE_VAULT inputs totaling 800, so total_in=200+800=1000. Rule 4: sum_out(700) <= sum_in(1000) → PASS. Rule 5: has_vault_inputs=true and sum_out(700) < vault_input_sum(800) → REJECT TX_ERR_VALUE_CONSERVATION. An implementation that checks only rule 4 would incorrectly accept this transaction. Both Go and Rust MUST reject.",
+      "output_values": [
+        700
+      ]
+    }
+  ],
+  "vector_count": 92,
+  "test_ext_id_allocation": {
+    "note": "Test ext_id space 0x0FF0..0x0FFF (16 values) is fully allocated. Standard profiles: 0x0FFC=test_acp, 0x0FFD=test_disabled, 0x0FFE=test_passthrough, 0x0FFF=test_amm. Profile overrides CV-19..CV-41 use 0x0FF0..0x0FFB. New vectors needing profile_override MUST use ext_ids <= 0x0FEF."
+  },
+  "$schema_note": "CV-TXCTX.json does not currently have a formal JSON Schema (draft-07 or later). Harness implementations MUST NOT silently ignore unknown fields — unknown fields MUST be logged as warnings to catch typos in field names (e.g., \"expectOk\" vs \"expect_ok\"). Formal schema definition is tracked as Q-CONF-TXCTX-SCHEMA-01. Known non-standard fields: deprecated_in_step (CV-39), governance_scope (CV-60), step2_migration (CV-39), has_vault_inputs (CV-59/63), vault_input_sum (CV-59/63). Non-standard fields currently in use: `raw_compact_size_form` (CV-66, CV-67), `raw_ext_payload` (CV-65..67) with hex-space notation, `governance_scope` (CV-60), `deprecated_in_step` (CV-39), `step2_migration` (CV-39), `harness_only` (none currently). Harness MUST fail on unrecognized vector fields with a warning — not silently ignore.",
+  "harness_requirements": [
+    {
+      "id": "CV-HARNESS-HEIGHT-ASSERT",
+      "description": "Non-vector harness requirement: after BuildTxContext, harness MUST assert ctx_base.Height == vector.height. This catches 'wrong height' bug (chain_tip vs block_under_validation) at conformance gate, not only during reorg testing.",
+      "harness_only": true,
+      "note": "This is NOT a spend-time conformance vector — it is a harness implementation requirement. After calling BuildTxContext for any CV vector with a specified height, the test harness MUST assert: assert_eq!(ctx_base.height, vector.height). Without this assertion, a node that passes chain_tip_height instead of block_under_validation_height will pass all 68 conformance vectors (they use static height=200 which equals chain tip in harness) but fail in production during reorg. This assertion MUST be added to both Go and Rust conformance harness implementations."
+    },
+    {
+      "id": "CV-HARNESS-COMPACTSIZE-0xFF-ENCODING",
+      "description": "For CV-66 and CV-67: harness MUST construct wire encoding using 0xFF CompactSize form. A harness that ignores raw_compact_size_form field will use normal encoding and test will pass without exercising the 0xFF code path.",
+      "applies_to": [
+        "CV-TXCTX-66",
+        "CV-TXCTX-67"
+      ],
+      "note": "ВЫСОК-E: CV-66 uses raw_compact_size_form='0xFF' and CV-67 uses raw_ext_payload with 0xFF prefix. Harness MUST NOT treat raw_compact_size_form as an unknown field and silently skip it. Required behavior: harness builds a CORE_EXT output whose ext_payload field is wire-encoded with CompactSize 0xFF marker: [0xFF][8-byte LE u64 length][payload bytes]. If harness ignores raw_compact_size_form: test uses normal-form encoding, CV-66 passes because passthrough verifier accepts anything — but 0xFF parsing is never tested. Verification: harness MUST assert that the raw bytes fed to stripping logic start with 0xFF.",
+      "enforcement": "СРД-3 enforcement: Harness MUST treat raw_compact_size_form as a KNOWN field — not an unknown field that triggers only a warning. Unknown-field handling (log + warn) is insufficient for this field: if silently ignored, CV-66 will pass because the passthrough verifier accepts anything, but the 0xFF CompactSize code path is never exercised. Required assertion: after constructing the CORE_EXT output, harness MUST assert the wire bytes[0] == 0xFF before feeding to stripping logic. This assertion MUST be implemented, not just documented.",
+      "harness_only": true
+    },
+    {
+      "id": "CV-HARNESS-V2COUNT-NONNEGATIVE",
+      "description": "MED-R2-3: Implementations MUST assert v2_count >= 0 before computing n_total. A negative v2_count (governance tooling underflow when removing a non-existent profile) produces ntotal < v1_count, causing wrong CompactSize in anchor and chain split.",
+      "note": "This is a governance-state invariant, not a spend-time vector. Node implementations MUST include: assert(v2_count >= 0) before ntotal = v1_count + v2_count. If v2_count < 0: MUST panic (governance state corruption), not silently compute wrong ntotal. Governance tooling MUST use set-based or non-negative counter for profile tracking — decrementing a counter below zero is a tooling bug, not a consensus error. Lean theorem ntotalEmptyV2Equivalence proves x+0=x but does NOT prove v2_count >= 0 — that invariant must be enforced separately at governance state management layer.",
+      "harness_only": true
+    },
+    {
+      "id": "CV-HARNESS-AMENDMENT-E-SCHEMA",
+      "description": "INFO-R2-3: Amendment E dependency checklist MUST have machine-verifiable format. Free-text checklists cannot be automatically validated by governance tooling.",
+      "note": "Amendment E §5 requires production profiles to include a dependency checklist before authorization. The checklist MUST be structured (YAML), not free-text, to enable automated validation. Required fields per SPEC-TXCTX-01-AMENDMENTS.md Amendment E YAML schema: { txcontext_inputs_used: { self_input_value: bool, ctx_base_height: bool, ctx_base_total_in: bool, ctx_continuing_outputs: bool }, sighash_types_required: [list], max_ext_payload_bytes: int, verifier_side_effects: \"none\", reviewer: \"github_username\" }. Governance tooling (Q-OPS-TXCTX-01) MUST validate all required fields. [HIGH R13 fix: removed native_suites and txcontext_base which did not exist in the normative YAML schema — replaced with actual schema fields ctx_base_height, ctx_base_total_in, ctx_continuing_outputs]",
+      "harness_only": true
+    }
+  ],
+  "total_entries": 92,
+  "spend_time_vector_count": 90,
+  "governance_scope_vector_count": 2
+}

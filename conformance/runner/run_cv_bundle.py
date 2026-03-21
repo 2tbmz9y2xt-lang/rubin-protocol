@@ -8,7 +8,13 @@ import os
 import pathlib
 import subprocess
 import sys
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+
+RUNNER_DIR = pathlib.Path(__file__).resolve().parent
+if str(RUNNER_DIR) not in sys.path:
+    sys.path.insert(0, str(RUNNER_DIR))
+
+from txctx_case import build_txctx_case, validate_txctx_responses
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -33,6 +39,23 @@ LOCAL_OPS = {
     for op in os.getenv("RUBIN_CONFORMANCE_LOCAL_OPS", "").split(",")
     if op.strip()
 }
+
+TXCTX_GOVERNANCE_SKIP_IDS = {"CV-TXCTX-60", "CV-TXCTX-GOV-01"}
+
+
+def normalized_vector_op(gate: str, vector: Dict[str, Any]) -> Optional[str]:
+    op = vector.get("op")
+    stripped = op.strip() if isinstance(op, str) else op
+    if gate == "CV-TXCTX" and (op is None or stripped == ""):
+        vid = str(vector.get("id", "?"))
+        if vid in TXCTX_GOVERNANCE_SKIP_IDS:
+            return None
+        return "txctx_spend_vector"
+    if isinstance(op, str) and op != stripped:
+        return op
+    if not op:
+        return None
+    return str(op)
 
 
 def run(cmd: List[str], cwd: pathlib.Path) -> None:
@@ -1525,13 +1548,17 @@ def validate_vector(
     go_cli: pathlib.Path,
     rust_cli: pathlib.Path,
     vectors_by_id: Dict[str, Dict[str, Any]],
-) -> List[str]:
-    op = v.get("op")
+) -> Tuple[List[str], bool]:
+    vid = v.get("id", "?")
+    op = normalized_vector_op(gate, v)
+    if gate == "CV-TXCTX" and op is None:
+        if str(vid) in TXCTX_GOVERNANCE_SKIP_IDS:
+            return [], True
     if not op:
-        return [f"{gate}/{v.get('id','?')}: missing op"]
+        return [f"{gate}/{vid}: missing op"], False
 
     if op in LOCAL_OPS:
-        return validate_local_vector(gate, v)
+        return validate_local_vector(gate, v), False
 
     try:
         tx_hex = materialize_tx_hex(v, vectors_by_id=vectors_by_id)
@@ -1759,8 +1786,45 @@ def validate_vector(
         req["whitelist"] = [str(x) for x in v.get("whitelist", [])]
         if "validation_order" in v and isinstance(v["validation_order"], list):
             req["validation_order"] = [str(x) for x in v["validation_order"]]
+    elif op == "txctx_spend_vector":
+        fixture = {
+            "profiles": vectors_by_id.get("__fixture_profiles__", {}),
+        }
+        req = {
+            "op": op,
+            "txctx_case": build_txctx_case(v, fixture),
+        }
     else:
-        return [f"{gate}/{v.get('id','?')}: unknown op {op}"]
+        return [f"{gate}/{vid}: unknown op {op}"], False
+
+    if op == "txctx_spend_vector":
+        go_resp = call_tool(go_cli, req)
+        rust_resp = call_tool(rust_cli, req)
+
+        problems: List[str] = []
+        if bool(go_resp.get("ok")) != bool(rust_resp.get("ok")):
+            problems.append(f"{gate}/{vid}: go ok={go_resp.get('ok')} rust ok={rust_resp.get('ok')}")
+            return problems, False
+
+        expected_ok = bool(v.get("expect_ok", True))
+        if expected_ok != bool(go_resp.get("ok")):
+            problems.append(f"{gate}/{vid}: expect_ok={expected_ok} got_ok={go_resp.get('ok')}")
+            return problems, False
+
+        if not go_resp.get("ok"):
+            ge = go_resp.get("err")
+            re = rust_resp.get("err")
+            if ge != re:
+                problems.append(f"{gate}/{vid}: err mismatch go={ge} rust={re}")
+            if "expect_err" in v and ge != v["expect_err"]:
+                problems.append(f"{gate}/{vid}: expect_err={v['expect_err']} got_err={ge}")
+            if v.get("not_expect_err") and ge == v["not_expect_err"]:
+                problems.append(f"{gate}/{vid}: not_expect_err violated")
+            problems.extend(validate_txctx_responses(gate, v, go_resp, rust_resp))
+            return problems, False
+
+        problems.extend(validate_txctx_responses(gate, v, go_resp, rust_resp))
+        return problems, False
 
     go_resp = call_tool(go_cli, req)
     rust_resp = call_tool(rust_cli, req)
@@ -2262,7 +2326,15 @@ def validate_vector(
         # ok/err parity is already checked above.
         pass
 
-    return problems
+    return problems, False
+
+
+def normalize_validation_result(
+    result: Union[List[str], Tuple[List[str], bool]]
+) -> Tuple[List[str], bool]:
+    if isinstance(result, tuple):
+        return result
+    return result, False
 
 
 def main() -> int:
@@ -2285,6 +2357,7 @@ def main() -> int:
     go_cli, rust_cli = build_tools()
 
     total = 0
+    skipped = 0
     problems: List[str] = []
     for f in fixtures:
         gate = f["gate"]
@@ -2292,7 +2365,13 @@ def main() -> int:
         for v in vectors:
             total += 1
             vectors_by_id = {str(x.get("id", "")): x for x in vectors if isinstance(x, dict)}
-            problems.extend(validate_vector(gate, v, go_cli, rust_cli, vectors_by_id))
+            vectors_by_id["__fixture_profiles__"] = f.get("profiles", {})
+            vector_problems, was_skipped = normalize_validation_result(
+                validate_vector(gate, v, go_cli, rust_cli, vectors_by_id)
+            )
+            problems.extend(vector_problems)
+            if was_skipped:
+                skipped += 1
 
     if problems:
         for p in problems:
@@ -2300,7 +2379,10 @@ def main() -> int:
         print(f"FAILED: {len(problems)} problems across {total} vectors")
         return 1
 
-    print(f"PASS: {total} vectors")
+    if skipped:
+        print(f"PASS: {total - skipped} vectors (skipped {skipped} governance vectors)")
+    else:
+        print(f"PASS: {total} vectors")
     return 0
 
 

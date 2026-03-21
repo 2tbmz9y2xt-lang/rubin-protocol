@@ -56,6 +56,7 @@ EXPECTED_GATES = frozenset(
         "CV-STEALTH",
         "CV-SUBSIDY",
         "CV-TIMESTAMP",
+        "CV-TXCTX",
         "CV-UTXO-BASIC",
         "CV-VALIDATION-ORDER",
         "CV-VAULT",
@@ -112,11 +113,22 @@ def validate_fixture_schema(data: Any, path: Path) -> tuple[str, list[dict[str, 
         if not isinstance(vector, dict):
             raise RuntimeError(f"fixture vector[{idx}] must be object: {path}")
         op = vector.get("op")
+        if gate == "CV-TXCTX" and (op is None or (isinstance(op, str) and not op.strip())):
+            continue
         if not isinstance(op, str) or not op.strip():
             vid = vector.get("id", f"#{idx}")
             raise RuntimeError(f"fixture vector missing required op: {path} ({vid})")
 
     return gate.strip(), vectors
+
+
+def normalized_vector_op(gate: str, vector: dict[str, Any]) -> str:
+    op = vector.get("op")
+    if isinstance(op, str) and op.strip():
+        return op.strip()
+    if gate == "CV-TXCTX":
+        return "txctx_spend_vector"
+    raise RuntimeError(f"fixture vector missing required op: {gate} ({vector.get('id', '?')})")
 
 
 def load_gate_rows(local_ops: set[str]) -> list[GateRow]:
@@ -128,7 +140,7 @@ def load_gate_rows(local_ops: set[str]) -> list[GateRow]:
         if gate in seen_gates:
             raise RuntimeError(f"duplicate fixture gate: {gate}: {p}")
         seen_gates.add(gate)
-        ops = tuple(sorted({v["op"].strip() for v in vectors}))
+        ops = tuple(sorted({normalized_vector_op(gate, v) for v in vectors}))
 
         local = tuple(sorted([o for o in ops if o in local_ops]))
         executable = tuple(sorted([o for o in ops if o not in local_ops]))

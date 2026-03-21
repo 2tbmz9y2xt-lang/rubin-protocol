@@ -1,3 +1,5 @@
+mod txctx_harness;
+
 use num_bigint::BigUint;
 use num_traits::Zero;
 use rubin_consensus::merkle::witness_merkle_root_wtxids;
@@ -22,10 +24,14 @@ use serde_json::Value;
 use sha3::{Digest, Sha3_256};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use txctx_harness::{run_txctx_spend_vector, TxctxCase};
 
 #[derive(Deserialize, Default)]
 struct Request {
     op: String,
+
+    #[serde(default)]
+    txctx_case: Option<TxctxCase>,
 
     #[serde(default)]
     tx_hex: String,
@@ -485,6 +491,9 @@ struct CheckJson {
 #[derive(Serialize, Default)]
 struct Response {
     ok: bool,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostics: Option<Value>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     err: Option<String>,
@@ -1034,6 +1043,10 @@ fn main() {
     };
 
     match req.op.as_str() {
+        "txctx_spend_vector" => {
+            let resp = run_txctx_spend_vector(req.txctx_case);
+            let _ = serde_json::to_writer(std::io::stdout(), &resp);
+        }
         "parse_tx" => {
             let tx_bytes = match hex::decode(&req.tx_hex) {
                 Ok(v) => v,

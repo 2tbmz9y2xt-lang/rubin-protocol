@@ -9,6 +9,22 @@ Policy:
 
 ---
 
+## 2026-03-21 — TXCTX spend-time conformance harness intake (Q-CONF-TXCTX-HARNESS-01)
+
+Причина:
+- ввести executable TXCTX conformance gate для Step 1 через реальный Go/Rust harness;
+- отделить spend-time vectors от governance-scope vectors без ручного разбора;
+- зафиксировать текущую canonical реализацию там, где bundle-векторы расходились с live `origin/main`
+  по non-minimal CompactSize, zero-value `CORE_EXT` outputs и текущему `u128 -> u64` fee narrowing path.
+
+Инструменты:
+- `python3 conformance/runner/run_cv_bundle.py --only-gates CV-TXCTX`
+- `python3 tools/gen_conformance_matrix.py`
+- Go/Rust CLI harness unit tests
+
+Изменённые fixtures:
+- `CV-TXCTX.json` (new)
+
 ## 2026-03-18 — Rotation weight conformance vectors (Q-CONF-ROTATION-06)
 
 Причина:
