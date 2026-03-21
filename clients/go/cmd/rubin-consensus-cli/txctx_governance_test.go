@@ -143,7 +143,7 @@ func TestRunTxctxGovernanceVectorRejectsExtraChecklist(t *testing.T) {
 func TestRunTxctxGovernanceVectorRejectsNonCanonicalChecklistExtID(t *testing.T) {
 	profile := testTxctxGovernanceProfile()
 	checklist := testTxctxGovernanceChecklist(profile.ExtID, 48)
-	checklist.ProfileExtID = "010"
+	checklist.ProfileExtID = "0x1"
 	resp := runTxctxGovernanceVector(
 		Request{
 			TransitionHeight:     uint64Ptr(100),
@@ -153,6 +153,24 @@ func TestRunTxctxGovernanceVectorRejectsNonCanonicalChecklistExtID(t *testing.T)
 	)
 	if resp.Ok {
 		t.Fatalf("expected non-canonical ext id rejection")
+	}
+	if resp.Err != txctxGovernanceErrInvalidChecklist {
+		t.Fatalf("unexpected err: %q", resp.Err)
+	}
+}
+
+func TestRunTxctxGovernanceVectorRejectsNegativePayloadLimit(t *testing.T) {
+	profile := testTxctxGovernanceProfile()
+	profile.MaxExtPayloadBytes = -1
+	resp := runTxctxGovernanceVector(
+		Request{
+			TransitionHeight:     uint64Ptr(100),
+			DependencyChecklists: []TxctxDependencyChecklistJSON{testTxctxGovernanceChecklist(profile.ExtID, -1)},
+		},
+		[]CoreExtProfileJSON{profile},
+	)
+	if resp.Ok {
+		t.Fatalf("expected negative payload limit rejection")
 	}
 	if resp.Err != txctxGovernanceErrInvalidChecklist {
 		t.Fatalf("unexpected err: %q", resp.Err)

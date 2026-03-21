@@ -146,6 +146,9 @@ fn validate_dependency_checklist(
     {
         return Err(TXCTX_GOVERNANCE_ERR_INVALID_CHECKLIST);
     }
+    if checklist.max_ext_payload_bytes < 0 || profile.max_ext_payload_bytes < 0 {
+        return Err(TXCTX_GOVERNANCE_ERR_INVALID_CHECKLIST);
+    }
     if checklist.max_ext_payload_bytes != profile.max_ext_payload_bytes {
         return Err(TXCTX_GOVERNANCE_ERR_INVALID_CHECKLIST);
     }
@@ -165,11 +168,11 @@ fn normalize_governance_hex(raw: &str) -> String {
 
 fn parse_checklist_ext_id(raw: &str) -> Option<u16> {
     let raw = raw.trim();
-    if raw.is_empty() {
+    if raw.len() != 6 {
         return None;
     }
-    let hex = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X"))?;
-    if hex.is_empty() {
+    let hex = raw.strip_prefix("0x")?;
+    if !hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
         return None;
     }
     u16::from_str_radix(hex, 16).ok()
@@ -352,11 +355,29 @@ mod tests {
     #[test]
     fn rejects_noncanonical_checklist_ext_id() {
         let mut checklist = test_checklist(0x0feb, 48);
-        checklist.profile_ext_id = "010".to_string();
+        checklist.profile_ext_id = "0x1".to_string();
         let req = Request {
             transition_height: Some(100),
             core_ext_profiles: vec![test_profile()],
             dependency_checklists: vec![checklist],
+            ..Default::default()
+        };
+        let resp = run_txctx_governance_vector(&req);
+        assert!(!resp.ok);
+        assert_eq!(
+            resp.err.as_deref(),
+            Some(TXCTX_GOVERNANCE_ERR_INVALID_CHECKLIST)
+        );
+    }
+
+    #[test]
+    fn rejects_negative_payload_limit() {
+        let mut profile = test_profile();
+        profile.max_ext_payload_bytes = -1;
+        let req = Request {
+            transition_height: Some(100),
+            core_ext_profiles: vec![profile],
+            dependency_checklists: vec![test_checklist(0x0feb, -1)],
             ..Default::default()
         };
         let resp = run_txctx_governance_vector(&req);

@@ -6,7 +6,7 @@ use rubin_consensus::{
     core_ext_profile_set_anchor_v1, core_ext_verification_binding_from_name_and_descriptor,
     CoreExtDeploymentProfile, CoreExtDeploymentProfiles,
 };
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 
 const GENESIS_HEADER_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000006f732e615e2f43337a53e9884adba7da32257d5bb5701adc7ed0bd406f2df91340e49e6900000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000";
 const GENESIS_TX_HEX: &str = "01000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff0200407a10f35a0000000021018448b91b88d1a6fbb65e872b72c381b2a9f3ce286a232f56309667f639dd72790000000000000000020020b716a4b7f4c0fab665298ab9b8199b601ab9fa7e0a27f0713383f34cf37071a8000000000000";
@@ -28,7 +28,7 @@ struct GenesisPack {
 struct GenesisCoreExtProfile {
     ext_id: u16,
     activation_height: u64,
-    #[serde(default, deserialize_with = "deserialize_boolish")]
+    #[serde(default)]
     tx_context_enabled: bool,
     #[serde(default)]
     allowed_suite_ids: Vec<u8>,
@@ -38,27 +38,6 @@ struct GenesisCoreExtProfile {
     binding_descriptor_hex: String,
     #[serde(default)]
     ext_payload_schema_hex: String,
-}
-
-fn deserialize_boolish<'de, D>(deserializer: D) -> Result<bool, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Boolish {
-        Bool(bool),
-        Int(u8),
-    }
-
-    match Boolish::deserialize(deserializer)? {
-        Boolish::Bool(value) => Ok(value),
-        Boolish::Int(0) => Ok(false),
-        Boolish::Int(1) => Ok(true),
-        Boolish::Int(_) => Err(serde::de::Error::custom(
-            "tx_context_enabled must be bool or 0/1",
-        )),
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -439,12 +418,12 @@ mod tests {
         let path = dir.join("genesis.json");
         std::fs::write(
             &path,
-            "{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{\"ext_id\":7,\"activation_height\":12,\"tx_context_enabled\":2,\"allowed_suite_ids\":[3],\"binding\":\"native_verify_sig\"}]}",
+            "{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{\"ext_id\":7,\"activation_height\":12,\"tx_context_enabled\":1,\"allowed_suite_ids\":[3],\"binding\":\"native_verify_sig\"}]}",
         )
         .expect("write");
 
         let err = load_genesis_config(Some(&path)).unwrap_err();
-        assert!(err.contains("tx_context_enabled must be bool or 0/1"));
+        assert!(err.contains("expected a boolean"));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }

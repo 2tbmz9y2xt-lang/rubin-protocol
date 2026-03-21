@@ -143,6 +143,9 @@ func validateDependencyChecklist(
 	if !strings.EqualFold(strings.TrimSpace(checklist.VerifierSideEffects), "none") {
 		return fmt.Errorf(txctxGovernanceErrInvalidChecklist)
 	}
+	if checklist.MaxExtPayloadBytes < 0 || profile.MaxExtPayloadBytes < 0 {
+		return fmt.Errorf(txctxGovernanceErrInvalidChecklist)
+	}
 	if checklist.MaxExtPayloadBytes != profile.MaxExtPayloadBytes {
 		return fmt.Errorf(txctxGovernanceErrInvalidChecklist)
 	}
@@ -172,18 +175,14 @@ func equalBytes(a []byte, b []byte) bool {
 
 func parseChecklistExtID(raw string) (uint16, bool) {
 	raw = strings.TrimSpace(raw)
-	if raw == "" {
+	if len(raw) != 6 || !strings.HasPrefix(raw, "0x") {
 		return 0, false
 	}
-	hexRaw, ok := strings.CutPrefix(raw, "0x")
-	if !ok {
-		hexRaw, ok = strings.CutPrefix(raw, "0X")
-		if !ok {
+	hexRaw := raw[2:]
+	for _, ch := range hexRaw {
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
 			return 0, false
 		}
-	}
-	if hexRaw == "" {
-		return 0, false
 	}
 	value, err := strconv.ParseUint(hexRaw, 16, 16)
 	if err != nil {
