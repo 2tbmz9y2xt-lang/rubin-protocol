@@ -153,12 +153,14 @@ func (s *SyncEngine) prepareHeavierBranch(
 		return nil, 0, err
 	}
 	for _, item := range branch {
-		if _, err := previewState.ConnectBlockWithCoreExtProfiles(
+		if _, err := previewState.ConnectBlockWithCoreExtProfilesAndSuiteContext(
 			item.blockBytes,
 			s.cfg.ExpectedTarget,
 			prevTimestamps,
 			s.cfg.ChainID,
 			s.cfg.CoreExtProfiles,
+			s.cfg.RotationProvider,
+			s.cfg.SuiteRegistry,
 		); err != nil {
 			return nil, 0, err
 		}

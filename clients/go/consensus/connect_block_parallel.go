@@ -57,6 +57,34 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfiles(
 	coreExtProfiles CoreExtProfileProvider,
 	workers int,
 ) (*ConnectBlockBasicSummary, error) {
+	return ConnectBlockParallelSigVerifyWithCoreExtProfilesAndSuiteContext(
+		blockBytes,
+		expectedPrevHash,
+		expectedTarget,
+		blockHeight,
+		prevTimestamps,
+		state,
+		chainID,
+		coreExtProfiles,
+		nil,
+		nil,
+		workers,
+	)
+}
+
+func ConnectBlockParallelSigVerifyWithCoreExtProfilesAndSuiteContext(
+	blockBytes []byte,
+	expectedPrevHash *[32]byte,
+	expectedTarget *[32]byte,
+	blockHeight uint64,
+	prevTimestamps []uint64,
+	state *InMemoryChainState,
+	chainID [32]byte,
+	coreExtProfiles CoreExtProfileProvider,
+	rotation RotationProvider,
+	registry *SuiteRegistry,
+	workers int,
+) (*ConnectBlockBasicSummary, error) {
 	if coreExtProfiles == nil {
 		coreExtProfiles = EmptyCoreExtProfileProvider()
 	}
@@ -103,8 +131,7 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfiles(
 	}
 
 	// Create a single sig check queue for the entire block (rotation-aware so Flush uses verifySigWithRegistry).
-	reg := DefaultSuiteRegistry()
-	rot := DefaultRotationProvider{}
+	rot, reg := normalizeCoreExtSuiteContext(rotation, registry)
 	sigQueue := NewSigCheckQueue(workers).WithRegistry(reg)
 
 	// Apply all non-coinbase transactions with deferred sig verification.

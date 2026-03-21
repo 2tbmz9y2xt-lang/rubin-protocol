@@ -161,7 +161,7 @@ func applyNonCoinbaseTxBasicWork(
 		return nil, 0, txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
 	}
 
-	if err := ValidateTxCovenantsGenesis(tx, height, nil); err != nil {
+	if err := ValidateTxCovenantsGenesis(tx, height, rotation); err != nil {
 		return nil, 0, err
 	}
 	sighashCache, err := NewSighashV1PrehashCache(tx)
@@ -273,7 +273,7 @@ func applyNonCoinbaseTxBasicWork(
 			if len(assigned) != 1 {
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_P2PK witness_slots must be 1")
 			}
-			if err := validateP2PKSpendWithCache(entry, assigned[0], tx, uint32(inputIndex), entry.Value, chainID, height, sighashCache); err != nil {
+			if err := validateP2PKSpendAtHeight(entry, assigned[0], tx, uint32(inputIndex), entry.Value, chainID, height, sighashCache, rotation, registry); err != nil {
 				return nil, 0, err
 			}
 		case COV_TYPE_MULTISIG:
@@ -281,7 +281,7 @@ func applyNonCoinbaseTxBasicWork(
 			if err != nil {
 				return nil, 0, err
 			}
-			if err := validateThresholdSigSpendWithCache(
+			if err := validateThresholdSigSpendAtHeight(
 				m.Keys,
 				m.Threshold,
 				assigned,
@@ -291,6 +291,8 @@ func applyNonCoinbaseTxBasicWork(
 				chainID,
 				height,
 				sighashCache,
+				rotation,
+				registry,
 				"CORE_MULTISIG",
 			); err != nil {
 				return nil, 0, err
@@ -314,7 +316,7 @@ func applyNonCoinbaseTxBasicWork(
 			if len(assigned) != 2 {
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_HTLC witness_slots must be 2")
 			}
-			if err := ValidateHTLCSpendWithCache(
+			if err := ValidateHTLCSpendAtHeight(
 				entry,
 				assigned[0],
 				assigned[1],
@@ -325,6 +327,8 @@ func applyNonCoinbaseTxBasicWork(
 				height,
 				blockMTP,
 				sighashCache,
+				rotation,
+				registry,
 			); err != nil {
 				return nil, 0, err
 			}
@@ -352,7 +356,7 @@ func applyNonCoinbaseTxBasicWork(
 			if len(assigned) != CORE_STEALTH_WITNESS_SLOTS {
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_STEALTH witness_slots must be 1")
 			}
-			if err := validateCoreStealthSpendWithCache(entry, assigned[0], tx, uint32(inputIndex), entry.Value, chainID, height, sighashCache); err != nil {
+			if err := validateCoreStealthSpendAtHeight(entry, assigned[0], tx, uint32(inputIndex), entry.Value, chainID, height, sighashCache, rotation, registry); err != nil {
 				return nil, 0, err
 			}
 		default:
@@ -468,7 +472,7 @@ func applyNonCoinbaseTxBasicWork(
 		}
 
 		// Signature threshold check (CANONICAL §24.1 step 7).
-		if err := validateThresholdSigSpendWithCache(
+		if err := validateThresholdSigSpendAtHeight(
 			vaultSigKeys,
 			vaultSigThreshold,
 			vaultSigWitness,
@@ -478,6 +482,8 @@ func applyNonCoinbaseTxBasicWork(
 			chainID,
 			height,
 			sighashCache,
+			rotation,
+			registry,
 			"CORE_VAULT",
 		); err != nil {
 			return nil, 0, err

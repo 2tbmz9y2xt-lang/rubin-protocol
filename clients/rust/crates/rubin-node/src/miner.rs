@@ -241,6 +241,7 @@ impl<'a> Miner<'a> {
             policy_reject_core_ext_pre_activation: self.cfg.policy_reject_core_ext_pre_activation,
             policy_max_ext_payload_bytes: 0,
             core_ext_deployments: self.cfg.core_ext_deployments.clone(),
+            suite_context: self.sync.cfg.suite_context.clone(),
         };
         if apply_policy(tx, &self.sync.chain_state.utxos, next_height, &policy_cfg).is_err() {
             return Ok((true, policy_da_included));

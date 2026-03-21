@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -541,6 +542,159 @@ func TestApplyBlockWithReorgRequeuesDisconnectedTransactionsIntoMempool(t *testi
 	}
 }
 
+type countingRotationProvider struct {
+	suiteID    uint8
+	spendCalls int
+}
+
+func (p *countingRotationProvider) NativeCreateSuites(uint64) *consensus.NativeSuiteSet {
+	return consensus.NewNativeSuiteSet(consensus.SUITE_ID_ML_DSA_87, p.suiteID)
+}
+
+func (p *countingRotationProvider) NativeSpendSuites(uint64) *consensus.NativeSuiteSet {
+	p.spendCalls++
+	return consensus.NewNativeSuiteSet(consensus.SUITE_ID_ML_DSA_87, p.suiteID)
+}
+
+func TestNativeSuitesCacheInvalidatedOnReorg(t *testing.T) {
+	engine, store, target := newReorgTestEngine(t)
+	sourceKPA := mustReorgMLDSA87Keypair(t)
+	destKPA := mustReorgMLDSA87Keypair(t)
+	sourceKPB := mustReorgMLDSA87Keypair(t)
+	destKPB := mustReorgMLDSA87Keypair(t)
+
+	sourceAddressA := consensus.P2PKCovenantDataForPubkey(sourceKPA.PubkeyBytes())
+	destAddressA := consensus.P2PKCovenantDataForPubkey(destKPA.PubkeyBytes())
+	sourceAddressB := consensus.P2PKCovenantDataForPubkey(sourceKPB.PubkeyBytes())
+	destAddressB := consensus.P2PKCovenantDataForPubkey(destKPB.PubkeyBytes())
+	sourceOutpointA := consensus.Outpoint{Txid: [32]byte{0x11}, Vout: 0}
+	sourceOutpointB := consensus.Outpoint{Txid: [32]byte{0x22}, Vout: 0}
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		sourceOutpointA: {
+			Value:             750,
+			CovenantType:      consensus.COV_TYPE_P2PK,
+			CovenantData:      append([]byte(nil), sourceAddressA...),
+			CreationHeight:    0,
+			CreatedByCoinbase: false,
+		},
+		sourceOutpointB: {
+			Value:             730,
+			CovenantType:      consensus.COV_TYPE_P2PK,
+			CovenantData:      append([]byte(nil), sourceAddressB...),
+			CreationHeight:    0,
+			CreatedByCoinbase: false,
+		},
+	}
+
+	blockASpend := mustBuildSignedTransferTxForSyncTest(
+		t,
+		utxos,
+		[]consensus.Outpoint{sourceOutpointA},
+		680,
+		50,
+		1,
+		sourceKPA,
+		sourceAddressA,
+		destAddressA,
+	)
+	blockBSpend := mustBuildSignedTransferTxForSyncTest(
+		t,
+		utxos,
+		[]consensus.Outpoint{sourceOutpointB},
+		665,
+		50,
+		2,
+		sourceKPB,
+		sourceAddressB,
+		destAddressB,
+	)
+
+	const rotatedSuiteID = 0x42
+	blockASpend = rewriteSyncTestWitnessSuiteID(t, blockASpend, rotatedSuiteID)
+	blockBSpend = rewriteSyncTestWitnessSuiteID(t, blockBSpend, rotatedSuiteID)
+	for _, op := range []consensus.Outpoint{sourceOutpointA, sourceOutpointB} {
+		rotatedEntry := utxos[op]
+		rotatedEntry.CovenantData = append([]byte(nil), rotatedEntry.CovenantData...)
+		rotatedEntry.CovenantData[0] = rotatedSuiteID
+		utxos[op] = rotatedEntry
+	}
+
+	rotation := &countingRotationProvider{suiteID: rotatedSuiteID}
+	registry := reorgTestSuiteRegistry(rotatedSuiteID)
+	engine.cfg.RotationProvider = rotation
+	engine.cfg.SuiteRegistry = registry
+	engine.chainState.Utxos = utxos
+
+	mempool, err := NewMempoolWithConfig(engine.chainState, store, devnetGenesisChainID, MempoolConfig{
+		RotationProvider: rotation,
+		SuiteRegistry:    registry,
+	})
+	if err != nil {
+		t.Fatalf("NewMempoolWithConfig: %v", err)
+	}
+	engine.SetMempool(mempool)
+
+	_, _, blockASpendWtxid, _, err := consensus.ParseTx(blockASpend)
+	if err != nil {
+		t.Fatalf("ParseTx(blockASpend): %v", err)
+	}
+	subsidy1 := consensus.BlockSubsidy(1, 0)
+	blockA1 := buildMultiTxBlock(
+		t,
+		devnetGenesisBlockHash,
+		target,
+		2,
+		reorgTestCoinbaseForWtxids(t, 1, subsidy1+50, sourceAddressA, [][32]byte{{}, blockASpendWtxid}),
+		blockASpend,
+	)
+	summaryA1, err := engine.ApplyBlock(blockA1, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(A1): %v", err)
+	}
+
+	_, _, blockBSpendWtxid, _, err := consensus.ParseTx(blockBSpend)
+	if err != nil {
+		t.Fatalf("ParseTx(blockBSpend): %v", err)
+	}
+	blockB1 := buildMultiTxBlock(
+		t,
+		devnetGenesisBlockHash,
+		target,
+		3,
+		reorgTestCoinbaseForWtxids(t, 1, subsidy1+50, destAddressB, [][32]byte{{}, blockBSpendWtxid}),
+		blockBSpend,
+	)
+	if _, err := engine.ApplyBlockWithReorg(blockB1, nil); err != nil {
+		t.Fatalf("ApplyBlockWithReorg(B1): %v", err)
+	}
+	blockB1Hash, err := consensus.BlockHash(blockHeaderBytes(t, blockB1))
+	if err != nil {
+		t.Fatalf("BlockHash(B1): %v", err)
+	}
+
+	subsidy2 := consensus.BlockSubsidy(2, subsidy1)
+	blockB2 := buildSingleTxBlock(
+		t,
+		blockB1Hash,
+		target,
+		4,
+		reorgTestCoinbaseForAddress(t, 2, subsidy2, destAddressB),
+	)
+	if _, err := engine.ApplyBlockWithReorg(blockB2, nil); err != nil {
+		t.Fatalf("ApplyBlockWithReorg(B2): %v", err)
+	}
+
+	if got := mempool.Len(); got != 1 {
+		t.Fatalf("mempool len after reorg=%d, want 1", got)
+	}
+	if rotation.spendCalls < 3 {
+		t.Fatalf("NativeSpendSuites calls=%d, want >= 3 (canonical apply, preview replay, mempool requeue)", rotation.spendCalls)
+	}
+	if engine.chainState.TipHash == summaryA1.BlockHash {
+		t.Fatalf("tip hash still points to old branch")
+	}
+}
+
 func TestApplyBlockWithReorgRollbackRestoresMempoolAfterPersistFailure(t *testing.T) {
 	engine, store, target := newReorgTestEngine(t)
 	mempool, err := NewMempool(engine.chainState, store, devnetGenesisChainID)
@@ -891,6 +1045,58 @@ func TestSyncApplyHelperAdditionalBranches(t *testing.T) {
 func reorgTestCoinbaseForAddress(t *testing.T, height uint64, value uint64, address []byte) []byte {
 	t.Helper()
 	return reorgTestCoinbaseForWtxids(t, height, value, address, [][32]byte{{}})
+}
+
+func mustReorgMLDSA87Keypair(t *testing.T) *consensus.MLDSA87Keypair {
+	t.Helper()
+	kp, err := consensus.NewMLDSA87Keypair()
+	if err != nil {
+		if strings.Contains(err.Error(), "unsupported") {
+			t.Skipf("ML-DSA backend unavailable in this OpenSSL build: %v", err)
+		}
+		t.Fatalf("NewMLDSA87Keypair: %v", err)
+	}
+	t.Cleanup(func() { kp.Close() })
+	return kp
+}
+
+func rewriteSyncTestWitnessSuiteID(t *testing.T, txBytes []byte, suiteID uint8) []byte {
+	t.Helper()
+	tx, _, _, consumed, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("ParseTx(rewrite suite): %v", err)
+	}
+	if consumed != len(txBytes) {
+		t.Fatalf("ParseTx(rewrite suite) consumed=%d, want %d", consumed, len(txBytes))
+	}
+	if len(tx.Witness) != 1 {
+		t.Fatalf("rewrite suite expects single witness, got %d", len(tx.Witness))
+	}
+	tx.Witness[0].SuiteID = suiteID
+	rewritten, err := consensus.MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx(rewrite suite): %v", err)
+	}
+	return rewritten
+}
+
+func reorgTestSuiteRegistry(extraSuiteID uint8) *consensus.SuiteRegistry {
+	return consensus.NewSuiteRegistryFromParams([]consensus.SuiteParams{
+		{
+			SuiteID:    consensus.SUITE_ID_ML_DSA_87,
+			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+			OpenSSLAlg: "ML-DSA-87",
+		},
+		{
+			SuiteID:    extraSuiteID,
+			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+			OpenSSLAlg: "ML-DSA-87",
+		},
+	})
 }
 
 func reorgTestCoinbaseForWtxids(t *testing.T, height uint64, value uint64, address []byte, wtxids [][32]byte) []byte {
