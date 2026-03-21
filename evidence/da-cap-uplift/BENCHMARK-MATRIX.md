@@ -145,6 +145,8 @@ Defined in detail by Q-DEVNET-DA-CAP-ADVERSARIAL-01 (issue #822). This matrix de
 | BM-CAMP-BURST-32 | Bursty demand (10 full → 10 empty → repeat) | 32 MB | 200 blocks | Constrained |
 | BM-CAMP-BURST-48 | Bursty demand (10 full → 10 empty → repeat) | 48 MB-equiv | 200 blocks | Constrained |
 
+**Required measurements per run:** Same measurement set as BM-SAT (§3.1). Additionally, campaign runs must capture the centralization pressure dimensions from §6.
+
 ### 3.4 BM-PARITY: Go/Rust Parity Under Stress
 
 **Purpose:** Ensure stressed DA does not cause Go/Rust divergence.
@@ -169,8 +171,8 @@ Defined in detail by Q-DEVNET-DA-CAP-PARITY-01 (issue #823). This matrix defines
 
 | Metric | Threshold | Rationale |
 |--------|-----------|-----------|
-| Block propagation p95 | ≤ 2000 ms | Must propagate within one block interval margin (target 10s) |
-| Block propagation p99 | ≤ 5000 ms | Hard upper bound — beyond this, orphaning risk becomes systemic |
+| Block propagation p95 | ≤ 30000 ms | Must propagate within 25% of block interval (TARGET_BLOCK_INTERVAL = 120s) |
+| Block propagation p99 | ≤ 60000 ms | Hard upper bound — beyond half the block interval, orphaning risk becomes systemic |
 | Orphan rate | ≤ 1.0% | At sustained load over 100+ blocks |
 | Orphan rate (adversarial) | ≤ 5.0% | Under active adversarial conditions |
 
