@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ops::Range;
 
 use crate::constants::{
     COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_EXT, COV_TYPE_HTLC,
@@ -148,7 +149,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_sui
     let mut vault_owner_lock_id: [u8; 32] = [0u8; 32];
     let mut vault_sig_keys: Vec<[u8; 32]> = Vec::new();
     let mut vault_sig_threshold: u8 = 0;
-    let mut vault_sig_witness: Vec<crate::tx::WitnessItem> = Vec::new();
+    let mut vault_sig_witness_range: Option<Range<usize>> = None;
     let mut vault_sig_input_index: u32 = 0;
     let mut vault_sig_input_value: u64 = 0;
     let mut have_vault_sig: bool = false;
@@ -157,8 +158,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_sui
     let mut input_cov_types: Vec<u16> = Vec::with_capacity(tx.inputs.len());
     let mut seen_inputs: HashMap<Outpoint, ()> = HashMap::with_capacity(tx.inputs.len());
     let mut resolved_inputs: Vec<UtxoEntry> = Vec::with_capacity(tx.inputs.len());
-    let mut resolved_witness: Vec<Vec<crate::tx::WitnessItem>> =
-        Vec::with_capacity(tx.inputs.len());
+    let mut resolved_witness_ranges: Vec<Range<usize>> = Vec::with_capacity(tx.inputs.len());
     let mut resolved_outpoints: Vec<Outpoint> = Vec::with_capacity(tx.inputs.len());
     let zero_txid: [u8; 32] = [0u8; 32];
 
@@ -227,9 +227,9 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_sui
         if witness_cursor + slots > tx.witness.len() {
             return Err(TxError::new(ErrorCode::TxErrParse, "witness underflow"));
         }
-        let assigned = &tx.witness[witness_cursor..witness_cursor + slots];
+        let assigned_range = witness_cursor..witness_cursor + slots;
         resolved_inputs.push(entry);
-        resolved_witness.push(assigned.to_vec());
+        resolved_witness_ranges.push(assigned_range);
         resolved_outpoints.push(op);
         witness_cursor += slots;
     }
@@ -255,12 +255,13 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_sui
         )?
     };
 
-    for (input_index, ((entry, assigned), op)) in resolved_inputs
+    for (input_index, ((entry, assigned_range), op)) in resolved_inputs
         .iter()
-        .zip(resolved_witness.iter())
+        .zip(resolved_witness_ranges.iter())
         .zip(resolved_outpoints.iter())
         .enumerate()
     {
+        let assigned = &tx.witness[assigned_range.clone()];
         match entry.covenant_type {
             COV_TYPE_P2PK => {
                 if assigned.len() != 1 {
@@ -301,7 +302,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_sui
                 // after owner-authorization and no-fee-sponsorship checks.
                 vault_sig_keys = v.keys.clone();
                 vault_sig_threshold = v.threshold;
-                vault_sig_witness = assigned.to_vec();
+                vault_sig_witness_range = Some(assigned_range.clone());
                 vault_sig_input_index = input_index as u32;
                 vault_sig_input_value = entry.value;
                 vault_owner_lock_id = v.owner_lock_id;
@@ -470,10 +471,14 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_sui
         }
 
         // Signature threshold check (CANONICAL §24.1 step 7).
+        let vault_sig_witness = match vault_sig_witness_range.as_ref() {
+            Some(range) => &tx.witness[range.clone()],
+            None => unreachable!("vault witness range must exist when have_vault_sig is true"),
+        };
         validate_threshold_sig_spend_with_cache(
             &vault_sig_keys,
             vault_sig_threshold,
-            &vault_sig_witness,
+            vault_sig_witness,
             tx,
             vault_sig_input_index,
             vault_sig_input_value,
