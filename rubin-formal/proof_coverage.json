@@ -4,7 +4,7 @@
   "claim_level": "refined",
   "spec_source_file": "spec/RUBIN_L1_CANONICAL.md",
   "spec_section_hashes_file": "spec/SECTION_HASHES.json",
-  "spec_section_hashes_sha3_256": "f442b73983a7e6e2769c3f6d6c2f4a302720be5b505be4f48bac47a38093d594",
+  "spec_section_hashes_sha3_256": "e6f6daf93926eb0fb4a1e7db68dff7803f0796cb8af70f03e9238398fcd3c602",
   "lean_toolchain_file": "rubin-formal/lean-toolchain",
   "refinement_bridge_file": "rubin-formal/refinement_bridge.json",
   "coverage": [
@@ -58,20 +58,30 @@
     {
       "section_key": "sighash_v1",
       "section_heading": "## 12. Sighash v1 (Normative)",
-      "status": "proved",
+      "status": "stated",
       "theorems": [
         "RubinFormal.Conformance.cv_sighash_vectors_pass"
       ],
-      "file": "rubin-formal/RubinFormal/PinnedSections.lean"
+      "file": "rubin-formal/RubinFormal/PinnedSections.lean",
+      "notes": "Protocol mirror summary: TXCTX broadens the pinned sighash surface through the TxContext-aware verify_sig_ext path and allowed_sighash_set policy. The section remains intentionally stated.",
+      "limitations": [
+        "This in-repo summary does not claim universal proof for the TXCTX-expanded sighash surface.",
+        "See standalone rubin-formal/proof_coverage.json for the authoritative detailed limitations."
+      ]
     },
     {
       "section_key": "consensus_error_codes",
       "section_heading": "## 13. Consensus Error Codes (Normative)",
-      "status": "proved",
+      "status": "stated",
       "theorems": [
         "RubinFormal.Conformance.cv_validation_order_vectors_pass"
       ],
-      "file": "rubin-formal/RubinFormal/PinnedSections.lean"
+      "file": "rubin-formal/RubinFormal/PinnedSections.lean",
+      "notes": "Protocol mirror summary: pre-existing validation-order evidence remains, but TXCTX adds new Section 13.1 source mappings and reject paths not yet fully covered by a dedicated formal theorem.",
+      "limitations": [
+        "This in-repo summary does not claim formal closure for the new TXCTX-specific Section 13.1 mappings.",
+        "See standalone rubin-formal/proof_coverage.json for the authoritative claim boundary."
+      ]
     },
     {
       "section_key": "covenant_registry",
@@ -112,11 +122,16 @@
     {
       "section_key": "utxo_state_model",
       "section_heading": "## 2. UTXO State Model (Normative)",
-      "status": "proved",
+      "status": "stated",
       "theorems": [
         "RubinFormal.Conformance.cv_utxo_basic_vectors_pass"
       ],
-      "file": "rubin-formal/RubinFormal/PinnedSections.lean"
+      "file": "rubin-formal/RubinFormal/PinnedSections.lean",
+      "notes": "Protocol mirror summary: legacy UTXO/value/vault replay coverage remains intact, but the pinned section now also includes TXCTX step 3c semantics that are not yet formally closed.",
+      "limitations": [
+        "This in-repo summary does not claim formal closure for SpendTx step 3c TxContext construction.",
+        "The authoritative detailed limitations live in standalone rubin-formal/proof_coverage.json."
+      ]
     },
     {
       "section_key": "coinbase_and_subsidy",
