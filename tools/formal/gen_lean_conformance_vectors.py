@@ -543,6 +543,71 @@ def render_cv_weight_lean(vectors: list[WeightVector]) -> str:
     )
     return _render_lean_namespace("CV-WEIGHT", module_body)
 
+
+@dataclass(frozen=True)
+class TxctxVector:
+    vid: str
+    expect_ok: bool
+    expect_err: str | None
+    governance_scope: bool
+
+
+def load_cv_txctx(path: Path) -> list[TxctxVector]:
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    if doc.get("gate") != "CV-TXCTX":
+        raise ValueError(f"expected gate=CV-TXCTX, got {doc.get('gate')!r}")
+    vectors = doc.get("vectors")
+    if not isinstance(vectors, list):
+        raise ValueError("vectors must be a list")
+    out: list[TxctxVector] = []
+    for v in vectors:
+        if not isinstance(v, dict):
+            continue
+        vid = str(v.get("id") or "")
+        if not vid:
+            continue
+        expect_ok = bool(v.get("expect_ok"))
+        expect_err = str(v.get("expect_err")) if not expect_ok and v.get("expect_err") is not None else None
+        out.append(
+            TxctxVector(
+                vid=vid,
+                expect_ok=expect_ok,
+                expect_err=expect_err,
+                governance_scope=bool(v.get("governance_scope", False)),
+            )
+        )
+    if not out:
+        raise ValueError("no txctx vectors found")
+    return out
+
+
+def render_cv_txctx_lean(vectors: list[TxctxVector]) -> str:
+    rows: list[str] = []
+    for v in vectors:
+        rows.append(
+            "  { "
+            + f'id := "{v.vid}", '
+            + f"expectOk := {'true' if v.expect_ok else 'false'}, "
+            + f"expectErr := {_lean_opt_str(v.expect_err)}, "
+            + f"governanceScope := {'true' if v.governance_scope else 'false'}"
+            + " }"
+        )
+
+    body = ",\n".join(rows)
+    module_body = (
+        "structure CVTxctxVector where\n"
+        "  id : String\n"
+        "  expectOk : Bool\n"
+        "  expectErr : Option String\n"
+        "  governanceScope : Bool\n"
+        "\n"
+        "def cvTxctxVectors : List CVTxctxVector := [\n"
+        + body
+        + "\n]\n"
+        "\n"
+    )
+    return _render_lean_namespace("CV-TXCTX", module_body)
+
 @dataclass(frozen=True)
 class PowWindowPattern:
     window_size: int
@@ -2499,6 +2564,12 @@ def main() -> int:
     wv = load_cv_weight(in_weight)
     out_weight.write_text(_inject_perf_options(render_cv_weight_lean(wv)), encoding="utf-8")
     print(f"WROTE: {out_weight}")
+
+    in_txctx = repo_root / "conformance" / "fixtures" / "CV-TXCTX.json"
+    out_txctx = repo_root / "rubin-formal" / "RubinFormal" / "Conformance" / "CVTxctxVectors.lean"
+    tv = load_cv_txctx(in_txctx)
+    out_txctx.write_text(_inject_perf_options(render_cv_txctx_lean(tv)), encoding="utf-8")
+    print(f"WROTE: {out_txctx}")
 
     in_utxo_basic = repo_root / "conformance" / "fixtures" / "CV-UTXO-BASIC.json"
     out_utxo_basic = repo_root / "rubin-formal" / "RubinFormal" / "Conformance" / "CVUtxoBasicVectors.lean"
