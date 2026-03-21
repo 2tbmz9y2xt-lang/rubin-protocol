@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from txctx_case import build_txctx_case
+from txctx_case import build_txctx_case, build_txctx_governance_request
 
 
 FIXTURE = {
@@ -75,6 +75,31 @@ class TxctxCaseTests(unittest.TestCase):
         }
         case = build_txctx_case(vector, FIXTURE)
         self.assertEqual(case["inputs"][0]["prevout_txid_hex"], case["inputs"][1]["prevout_txid_hex"])
+
+    def test_governance_request_uses_duplicate_suite_ids_from_profile_attempt(self):
+        vector = {
+            "id": "CV-TXCTX-60",
+            "profile_attempt": {
+                "ext_id": 0x0FEB,
+                "allowed_suite_ids": [16, 16],
+            },
+        }
+        request = build_txctx_governance_request(vector, FIXTURE)
+        self.assertEqual(request["op"], "txctx_governance_vector")
+        self.assertEqual(request["core_ext_profiles"][0]["allowed_suite_ids"], [16, 16])
+        self.assertEqual(request["dependency_checklists"][0]["profile_ext_id"], "0x0feb")
+
+    def test_governance_request_carries_transition_height_guard(self):
+        vector = {
+            "id": "CV-TXCTX-GOV-01",
+            "profile_under_test": {
+                "activation_height": 99,
+                "transition_height": 100,
+            },
+        }
+        request = build_txctx_governance_request(vector, FIXTURE)
+        self.assertEqual(request["transition_height"], 100)
+        self.assertEqual(request["core_ext_profiles"][0]["activation_height"], 99)
 
 
 if __name__ == "__main__":

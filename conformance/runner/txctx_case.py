@@ -408,6 +408,85 @@ def build_txctx_case(vector: Dict[str, Any], fixture: Dict[str, Any]) -> Dict[st
     }
 
 
+def build_txctx_governance_request(vector: Dict[str, Any], fixture: Dict[str, Any]) -> Dict[str, Any]:
+    fixture_profiles = fixture.get("profiles", {})
+    base_profile = dict(fixture_profiles.get(str(vector.get("profile", "test_passthrough_profile")), {}))
+    profile_attempt = dict(vector.get("profile_attempt") or {})
+    profile_under_test = dict(vector.get("profile_under_test") or {})
+
+    ext_id = _intish(
+        profile_attempt.get(
+            "ext_id",
+            profile_under_test.get("ext_id", base_profile.get("ext_id", 0x0FEB)),
+        )
+    )
+    activation_height = _intish(
+        profile_under_test.get(
+            "activation_height",
+            profile_attempt.get("activation_height", base_profile.get("activation_height", 0)),
+        )
+    )
+    allowed_suite_ids = profile_attempt.get("allowed_suite_ids")
+    if allowed_suite_ids is None:
+        suite_id = _intish(base_profile.get("suite_id", 0x10))
+        allowed_suite_ids = [suite_id] if suite_id else []
+
+    max_ext_payload_bytes = _intish(
+        profile_attempt.get(
+            "max_ext_payload_bytes",
+            profile_under_test.get(
+                "max_ext_payload_bytes",
+                base_profile.get("max_ext_payload_bytes", 0),
+            ),
+        )
+    )
+    profile = {
+        "ext_id": ext_id,
+        "activation_height": activation_height,
+        "tx_context_enabled": _intish(
+            profile_under_test.get(
+                "txcontext_enabled",
+                profile_attempt.get(
+                    "txcontext_enabled",
+                    base_profile.get("txcontext_enabled", 1),
+                ),
+            )
+        ),
+        "allowed_suite_ids": [_intish(v) for v in allowed_suite_ids],
+        "allowed_sighash_set": _intish(base_profile.get("allowed_sighash_set", 1)),
+        "max_ext_payload_bytes": max_ext_payload_bytes,
+    }
+    request = {
+        "op": "txctx_governance_vector",
+        "core_ext_profiles": [profile],
+        "dependency_checklists": [
+            {
+                "profile_ext_id": f"0x{ext_id:04x}",
+                "spec_document": "SPEC-TXCTX-01.md",
+                "txcontext_inputs_used": {
+                    "self_input_value": True,
+                    "ctx_base_height": True,
+                    "ctx_base_total_in": True,
+                    "ctx_continuing_outputs": True,
+                },
+                "sighash_types_required": ["SIGHASH_ALL"],
+                "max_ext_payload_bytes": max_ext_payload_bytes,
+                "verifier_side_effects": "none",
+                "reviewer": "txctx-governance-harness",
+            }
+        ],
+        "mempool_txctx_confirmed": bool(vector.get("mempool_txctx_confirmed", True)),
+    }
+    transition_height = profile_under_test.get("transition_height", vector.get("transition_height"))
+    if transition_height is not None:
+        request["transition_height"] = _intish(transition_height)
+    if "artifact_hex" in vector:
+        request["artifact_hex"] = _normalize_hex(vector.get("artifact_hex"))
+    if "expected_artifact_hash_hex" in vector:
+        request["expected_artifact_hash_hex"] = _normalize_hex(vector.get("expected_artifact_hash_hex"))
+    return request
+
+
 def validate_txctx_responses(
     gate: str,
     vector: Dict[str, Any],
@@ -470,4 +549,29 @@ def validate_txctx_responses(
         if go_diag["base_height"] != 0:
             problems.append(f"{gate}/{vid}: expected TxContextBase.Height=0")
 
+    return problems
+
+
+def validate_txctx_governance_responses(
+    gate: str,
+    vector: Dict[str, Any],
+    go_resp: Dict[str, Any],
+    rust_resp: Dict[str, Any],
+) -> List[str]:
+    problems: List[str] = []
+    vid = str(vector.get("id", "?"))
+    if go_resp.get("diagnostics") != rust_resp.get("diagnostics"):
+        problems.append(
+            f"{gate}/{vid}: diagnostics mismatch go={go_resp.get('diagnostics')} rust={rust_resp.get('diagnostics')}"
+        )
+    expect_reject = bool(vector.get("expect_governance_reject", False))
+    if str(vector.get("expected_governance_result", "")).upper() == "REJECTED":
+        expect_reject = True
+    expected_ok = not expect_reject
+    if expected_ok != bool(go_resp.get("ok")):
+        problems.append(f"{gate}/{vid}: governance expect_ok={expected_ok} got_ok={go_resp.get('ok')}")
+    if vector.get("expect_governance_error") and go_resp.get("err") != vector["expect_governance_error"]:
+        problems.append(
+            f"{gate}/{vid}: expect_governance_error={vector['expect_governance_error']} got_err={go_resp.get('err')}"
+        )
     return problems

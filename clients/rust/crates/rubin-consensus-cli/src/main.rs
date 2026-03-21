@@ -1,3 +1,4 @@
+mod txctx_governance;
 mod txctx_harness;
 
 use num_bigint::BigUint;
@@ -19,11 +20,12 @@ use rubin_consensus::{
     FlagDayDeployment, InMemoryChainState, Outpoint, RotationProvider, SuiteParams, SuiteRegistry,
     UtxoEntry,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha3::{Digest, Sha3_256};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use txctx_governance::run_txctx_governance_vector;
 use txctx_harness::{run_txctx_spend_vector, TxctxCase};
 
 #[derive(Deserialize, Default)]
@@ -122,6 +124,9 @@ struct Request {
 
     #[serde(default)]
     activation_height: Option<u64>,
+
+    #[serde(default)]
+    transition_height: Option<u64>,
 
     #[serde(default)]
     window_signal_counts: Vec<u32>,
@@ -410,6 +415,18 @@ struct Request {
 
     #[serde(default)]
     orphan_pool_fill_pct: f64,
+
+    #[serde(default)]
+    artifact_hex: String,
+
+    #[serde(default)]
+    expected_artifact_hash_hex: String,
+
+    #[serde(default)]
+    dependency_checklists: Vec<TxctxDependencyChecklistJson>,
+
+    #[serde(default)]
+    mempool_txctx_confirmed: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -429,16 +446,67 @@ struct CoreExtProfileJson {
     ext_id: u16,
     #[serde(default)]
     activation_height: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_boolish")]
     tx_context_enabled: bool,
     #[serde(default)]
     allowed_suite_ids: Vec<u8>,
+    #[serde(default)]
+    allowed_sighash_set: u8,
+    #[serde(default)]
+    max_ext_payload_bytes: i64,
     #[serde(default)]
     binding: String,
     #[serde(default)]
     binding_descriptor_hex: String,
     #[serde(default)]
     ext_payload_schema_hex: String,
+}
+
+fn deserialize_boolish<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Boolish {
+        Bool(bool),
+        Int(u8),
+    }
+
+    match Boolish::deserialize(deserializer)? {
+        Boolish::Bool(value) => Ok(value),
+        Boolish::Int(value) => Ok(value != 0),
+    }
+}
+
+#[derive(Clone, Deserialize, Default)]
+struct TxctxDependencyInputsJson {
+    #[serde(default)]
+    self_input_value: bool,
+    #[serde(default)]
+    ctx_base_height: bool,
+    #[serde(default)]
+    ctx_base_total_in: bool,
+    #[serde(default)]
+    ctx_continuing_outputs: bool,
+}
+
+#[derive(Clone, Deserialize, Default)]
+struct TxctxDependencyChecklistJson {
+    #[serde(default)]
+    profile_ext_id: String,
+    #[serde(default)]
+    spec_document: String,
+    #[serde(default)]
+    txcontext_inputs_used: TxctxDependencyInputsJson,
+    #[serde(default)]
+    sighash_types_required: Vec<String>,
+    #[serde(default)]
+    max_ext_payload_bytes: i64,
+    #[serde(default)]
+    verifier_side_effects: String,
+    #[serde(default)]
+    reviewer: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -1045,6 +1113,10 @@ fn main() {
     match req.op.as_str() {
         "txctx_spend_vector" => {
             let resp = run_txctx_spend_vector(req.txctx_case);
+            let _ = serde_json::to_writer(std::io::stdout(), &resp);
+        }
+        "txctx_governance_vector" => {
+            let resp = run_txctx_governance_vector(&req);
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
         "parse_tx" => {
@@ -4576,6 +4648,8 @@ mod tests {
                     activation_height: 0,
                     tx_context_enabled: false,
                     allowed_suite_ids: vec![3],
+                    allowed_sighash_set: 0,
+                    max_ext_payload_bytes: 0,
                     binding:
                         rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
                             .to_string(),
@@ -4587,6 +4661,8 @@ mod tests {
                     activation_height: 10,
                     tx_context_enabled: false,
                     allowed_suite_ids: vec![3],
+                    allowed_sighash_set: 0,
+                    max_ext_payload_bytes: 0,
                     binding:
                         rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
                             .to_string(),
@@ -4616,6 +4692,8 @@ mod tests {
                 activation_height: 42,
                 tx_context_enabled: false,
                 allowed_suite_ids: vec![3],
+                allowed_sighash_set: 0,
+                max_ext_payload_bytes: 0,
                 binding: rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
                     .to_string(),
                 binding_descriptor_hex: hex::encode(binding_descriptor),
@@ -4668,6 +4746,8 @@ mod tests {
                 activation_height: 42,
                 tx_context_enabled: false,
                 allowed_suite_ids: vec![3],
+                allowed_sighash_set: 0,
+                max_ext_payload_bytes: 0,
                 binding: format!(
                     "  {}\n",
                     rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
@@ -4696,6 +4776,8 @@ mod tests {
                 ext_id: 9,
                 activation_height: 42,
                 allowed_suite_ids: vec![3],
+                allowed_sighash_set: 0,
+                max_ext_payload_bytes: 0,
                 binding: rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
                     .to_string(),
                 binding_descriptor_hex: hex::encode(binding_descriptor),
@@ -4746,6 +4828,8 @@ mod tests {
                 activation_height: 42,
                 tx_context_enabled: false,
                 allowed_suite_ids: vec![3],
+                allowed_sighash_set: 0,
+                max_ext_payload_bytes: 0,
                 binding: rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
                     .to_string(),
                 binding_descriptor_hex: hex::encode(binding_descriptor),
@@ -4820,6 +4904,8 @@ mod tests {
                 activation_height: 42,
                 tx_context_enabled: false,
                 allowed_suite_ids: vec![3],
+                allowed_sighash_set: 0,
+                max_ext_payload_bytes: 0,
                 binding: rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
                     .to_string(),
                 binding_descriptor_hex: "aa".repeat(4097),
@@ -4840,6 +4926,8 @@ mod tests {
                 activation_height: 42,
                 tx_context_enabled: false,
                 allowed_suite_ids: vec![3],
+                allowed_sighash_set: 0,
+                max_ext_payload_bytes: 0,
                 binding: "unknown-binding".to_string(),
                 binding_descriptor_hex: "zz".to_string(),
                 ext_payload_schema_hex: "zz".to_string(),

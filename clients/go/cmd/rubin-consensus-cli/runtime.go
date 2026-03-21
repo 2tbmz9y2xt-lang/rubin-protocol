@@ -18,132 +18,137 @@ import (
 )
 
 type Request struct {
-	TxctxCase            *TxctxCaseJSON           `json:"txctx_case,omitempty"`
-	IncomingHasCommit    *bool                    `json:"incoming_has_commit,omitempty"`
-	CommitArrives        *bool                    `json:"commit_arrives,omitempty"`
-	StructuralOK         *bool                    `json:"structural_ok,omitempty"`
-	ContainsBlockCommit  *bool                    `json:"contains_block_with_commit,omitempty"`
-	ContainsKnownChunk   *bool                    `json:"contains_chunk_for_known_commit,omitempty"`
-	SuiteID              *uint8                   `json:"suite_id,omitempty"`
-	ContainsCommit       *bool                    `json:"contains_commit,omitempty"`
-	MaxFutureDrift       *uint64                  `json:"max_future_drift,omitempty"`
-	KeyBindingOK         *bool                    `json:"key_binding_ok,omitempty"`
-	GracePeriodActive    *bool                    `json:"grace_period_active,omitempty"`
-	WarmupDone           *bool                    `json:"warmup_done,omitempty"`
-	PreimageOK           *bool                    `json:"preimage_ok,omitempty"`
-	VerifyOK             *bool                    `json:"verify_ok,omitempty"`
-	BlockMTP             *uint64                  `json:"block_mtp,omitempty"`
-	HasOwnerAuth         *bool                    `json:"has_owner_auth,omitempty"`
-	SigThresholdOK       *bool                    `json:"sig_threshold_ok,omitempty"`
-	InIBD                *bool                    `json:"in_ibd,omitempty"`
-	SentinelVerifyCalled *bool                    `json:"sentinel_verify_called,omitempty"`
-	LocktimeOK           *bool                    `json:"locktime_ok,omitempty"`
-	Telemetry            map[string]any           `json:"telemetry,omitempty"`
-	GetblocktxnOK        *bool                    `json:"getblocktxn_ok,omitempty"`
-	InitialCommitSeen    *bool                    `json:"initial_commit_seen,omitempty"`
-	ChainIDHex           string                   `json:"chain_id,omitempty"`
-	DaID                 string                   `json:"da_id,omitempty"`
-	TxHex                string                   `json:"tx_hex,omitempty"`
-	TargetOldHex         string                   `json:"target_old,omitempty"`
-	Target               string                   `json:"target,omitempty"`
-	ExpectedTarget       string                   `json:"expected_target,omitempty"`
-	Op                   string                   `json:"op"`
-	OwnerLockID          string                   `json:"owner_lock_id,omitempty"`
-	TargetHex            string                   `json:"target_hex,omitempty"`
-	ExpectedPrev         string                   `json:"expected_prev_hash,omitempty"`
-	HeaderHex            string                   `json:"header_hex,omitempty"`
-	CovenantDataHex      string                   `json:"covenant_data_hex,omitempty"`
-	WtxidHex             string                   `json:"wtxid,omitempty"`
-	Path                 string                   `json:"path,omitempty"`
-	BlockHex             string                   `json:"block_hex,omitempty"`
-	ValidationOrder      []string                 `json:"validation_order,omitempty"`
-	InvalidIndices       []int                    `json:"invalid_indices,omitempty"`
-	Keys                 []any                    `json:"keys,omitempty"`
-	Txids                []string                 `json:"txids,omitempty"`
-	Wtxids               []string                 `json:"wtxids,omitempty"`
-	Nonces               []uint64                 `json:"nonces,omitempty"`
-	Chains               []ForkChoiceChain        `json:"chains,omitempty"`
-	ChunkFees            []int                    `json:"chunk_fees,omitempty"`
-	NonVaultLockIDs      []string                 `json:"non_vault_lock_ids,omitempty"`
-	Commits              []map[string]any         `json:"commits,omitempty"`
-	Entries              []map[string]any         `json:"entries,omitempty"`
-	PeerStreamsBPS       []int                    `json:"peer_streams_bps,omitempty"`
-	Phases               []map[string]any         `json:"phases,omitempty"`
-	Checks               []Check                  `json:"checks,omitempty"`
-	Events               []any                    `json:"events,omitempty"`
-	WindowTimestamps     []uint64                 `json:"window_timestamps,omitempty"`
-	PrevTimestamps       []uint64                 `json:"prev_timestamps,omitempty"`
-	InitialChunks        []int                    `json:"initial_chunks,omitempty"`
-	Utxos                []UtxoJSON               `json:"utxos,omitempty"`
-	Whitelist            []string                 `json:"whitelist,omitempty"`
-	BlocktxnIndices      []int                    `json:"blocktxn_indices,omitempty"`
-	MissingIndices       []int                    `json:"missing_indices,omitempty"`
-	MempoolIndices       []int                    `json:"mempool_indices,omitempty"`
-	PrefilledIndices     []int                    `json:"prefilled_indices,omitempty"`
-	GlobalLimit          int                      `json:"global_limit,omitempty"`
-	InputValue           uint64                   `json:"input_value,omitempty"`
-	SigLength            int                      `json:"sig_length,omitempty"`
-	TxCount              int                      `json:"tx_count,omitempty"`
-	PubkeyLength         int                      `json:"pubkey_length,omitempty"`
-	AlreadyGenerated     uint64                   `json:"already_generated,omitempty"`
-	SumFees              uint64                   `json:"sum_fees,omitempty"`
-	ChunkCount           int                      `json:"chunk_count,omitempty"`
-	TTLBlocks            int                      `json:"ttl_blocks,omitempty"`
-	SentinelSigLen       int                      `json:"sentinel_sig_len,omitempty"`
-	SentinelPubkeyLen    int                      `json:"sentinel_pubkey_len,omitempty"`
-	OrphanPoolFillPct    float64                  `json:"orphan_pool_fill_pct,omitempty"`
-	Height               uint64                   `json:"height,omitempty"`
-	PerPeerLimit         int                      `json:"per_peer_limit,omitempty"`
-	PerDaIDLimit         int                      `json:"per_da_id_limit,omitempty"`
-	KeyCount             int                      `json:"key_count,omitempty"`
-	CurrentPeerBytes     int                      `json:"current_peer_bytes,omitempty"`
-	CurrentDaIDBytes     int                      `json:"current_da_id_bytes,omitempty"`
-	CurrentGlobalBytes   int                      `json:"current_global_bytes,omitempty"`
-	IncomingChunkBytes   int                      `json:"incoming_chunk_bytes,omitempty"`
-	TimestampLast        uint64                   `json:"timestamp_last,omitempty"`
-	StormTriggerPct      float64                  `json:"storm_trigger_pct,omitempty"`
-	RecoverySuccessRate  float64                  `json:"recovery_success_rate,omitempty"`
-	ObservationMinutes   int                      `json:"observation_minutes,omitempty"`
-	MaxDAChunkCount      int                      `json:"max_da_chunk_count,omitempty"`
-	Slots                int                      `json:"slots,omitempty"`
-	TimestampFirst       uint64                   `json:"timestamp_first,omitempty"`
-	BatchSize            int                      `json:"batch_size,omitempty"`
-	MissRatePct          float64                  `json:"miss_rate_pct,omitempty"`
-	MissRateBlocks       int                      `json:"miss_rate_blocks,omitempty"`
-	StartScore           int                      `json:"start_score,omitempty"`
-	Timestamp            uint64                   `json:"timestamp,omitempty"`
-	ElapsedBlocks        int                      `json:"elapsed_blocks,omitempty"`
-	PerPeerBPS           int                      `json:"per_peer_bps,omitempty"`
-	GlobalBPS            int                      `json:"global_bps,omitempty"`
-	SumInVault           uint64                   `json:"sum_in_vault,omitempty"`
-	PeerStreamBPS        int                      `json:"peer_stream_bps,omitempty"`
-	ActiveSets           int                      `json:"active_sets,omitempty"`
-	CompletedSets        int                      `json:"completed_sets,omitempty"`
-	TotalSets            int                      `json:"total_sets,omitempty"`
-	Nonce2               uint64                   `json:"nonce2,omitempty"`
-	GracePeriodBlocks    int                      `json:"grace_period_blocks,omitempty"`
-	SumOut               uint64                   `json:"sum_out,omitempty"`
-	Nonce1               uint64                   `json:"nonce1,omitempty"`
-	BlockTimestamp       uint64                   `json:"block_timestamp,omitempty"`
-	CommitFee            int                      `json:"commit_fee,omitempty"`
-	VaultInputCount      int                      `json:"vault_input_count,omitempty"`
-	CurrentPinnedBytes   int                      `json:"current_pinned_payload_bytes,omitempty"`
-	IncomingPayload      int                      `json:"incoming_payload_bytes,omitempty"`
-	IncomingOverhead     int                      `json:"incoming_commit_overhead_bytes,omitempty"`
-	CapBytes             int                      `json:"cap_bytes,omitempty"`
-	MTP                  uint64                   `json:"mtp,omitempty"`
-	InputIndex           uint32                   `json:"input_index,omitempty"`
-	CovenantType         uint16                   `json:"covenant_type,omitempty"`
-	SentinelSuiteID      uint8                    `json:"sentinel_suite_id,omitempty"`
-	Name                 string                   `json:"name,omitempty"`
-	Bit                  uint8                    `json:"bit,omitempty"`
-	StartHeight          uint64                   `json:"start_height,omitempty"`
-	TimeoutHeight        uint64                   `json:"timeout_height,omitempty"`
-	ActivationHeight     *uint64                  `json:"activation_height,omitempty"`
-	WindowSignalCounts   []uint32                 `json:"window_signal_counts,omitempty"`
-	RotationDescriptor   *RotationDescriptorJSON  `json:"rotation_descriptor,omitempty"`
-	RotationDescriptors  []RotationDescriptorJSON `json:"rotation_descriptors,omitempty"`
-	SuiteRegistry        []SuiteParamsJSON        `json:"suite_registry,omitempty"`
+	TxctxCase             *TxctxCaseJSON                 `json:"txctx_case,omitempty"`
+	IncomingHasCommit     *bool                          `json:"incoming_has_commit,omitempty"`
+	CommitArrives         *bool                          `json:"commit_arrives,omitempty"`
+	StructuralOK          *bool                          `json:"structural_ok,omitempty"`
+	ContainsBlockCommit   *bool                          `json:"contains_block_with_commit,omitempty"`
+	ContainsKnownChunk    *bool                          `json:"contains_chunk_for_known_commit,omitempty"`
+	SuiteID               *uint8                         `json:"suite_id,omitempty"`
+	ContainsCommit        *bool                          `json:"contains_commit,omitempty"`
+	MaxFutureDrift        *uint64                        `json:"max_future_drift,omitempty"`
+	KeyBindingOK          *bool                          `json:"key_binding_ok,omitempty"`
+	GracePeriodActive     *bool                          `json:"grace_period_active,omitempty"`
+	WarmupDone            *bool                          `json:"warmup_done,omitempty"`
+	PreimageOK            *bool                          `json:"preimage_ok,omitempty"`
+	VerifyOK              *bool                          `json:"verify_ok,omitempty"`
+	BlockMTP              *uint64                        `json:"block_mtp,omitempty"`
+	HasOwnerAuth          *bool                          `json:"has_owner_auth,omitempty"`
+	SigThresholdOK        *bool                          `json:"sig_threshold_ok,omitempty"`
+	InIBD                 *bool                          `json:"in_ibd,omitempty"`
+	SentinelVerifyCalled  *bool                          `json:"sentinel_verify_called,omitempty"`
+	LocktimeOK            *bool                          `json:"locktime_ok,omitempty"`
+	Telemetry             map[string]any                 `json:"telemetry,omitempty"`
+	GetblocktxnOK         *bool                          `json:"getblocktxn_ok,omitempty"`
+	InitialCommitSeen     *bool                          `json:"initial_commit_seen,omitempty"`
+	ChainIDHex            string                         `json:"chain_id,omitempty"`
+	DaID                  string                         `json:"da_id,omitempty"`
+	TxHex                 string                         `json:"tx_hex,omitempty"`
+	TargetOldHex          string                         `json:"target_old,omitempty"`
+	Target                string                         `json:"target,omitempty"`
+	ExpectedTarget        string                         `json:"expected_target,omitempty"`
+	Op                    string                         `json:"op"`
+	OwnerLockID           string                         `json:"owner_lock_id,omitempty"`
+	TargetHex             string                         `json:"target_hex,omitempty"`
+	ExpectedPrev          string                         `json:"expected_prev_hash,omitempty"`
+	HeaderHex             string                         `json:"header_hex,omitempty"`
+	CovenantDataHex       string                         `json:"covenant_data_hex,omitempty"`
+	WtxidHex              string                         `json:"wtxid,omitempty"`
+	Path                  string                         `json:"path,omitempty"`
+	BlockHex              string                         `json:"block_hex,omitempty"`
+	ValidationOrder       []string                       `json:"validation_order,omitempty"`
+	InvalidIndices        []int                          `json:"invalid_indices,omitempty"`
+	Keys                  []any                          `json:"keys,omitempty"`
+	Txids                 []string                       `json:"txids,omitempty"`
+	Wtxids                []string                       `json:"wtxids,omitempty"`
+	Nonces                []uint64                       `json:"nonces,omitempty"`
+	Chains                []ForkChoiceChain              `json:"chains,omitempty"`
+	ChunkFees             []int                          `json:"chunk_fees,omitempty"`
+	NonVaultLockIDs       []string                       `json:"non_vault_lock_ids,omitempty"`
+	Commits               []map[string]any               `json:"commits,omitempty"`
+	Entries               []map[string]any               `json:"entries,omitempty"`
+	PeerStreamsBPS        []int                          `json:"peer_streams_bps,omitempty"`
+	Phases                []map[string]any               `json:"phases,omitempty"`
+	Checks                []Check                        `json:"checks,omitempty"`
+	Events                []any                          `json:"events,omitempty"`
+	WindowTimestamps      []uint64                       `json:"window_timestamps,omitempty"`
+	PrevTimestamps        []uint64                       `json:"prev_timestamps,omitempty"`
+	InitialChunks         []int                          `json:"initial_chunks,omitempty"`
+	Utxos                 []UtxoJSON                     `json:"utxos,omitempty"`
+	Whitelist             []string                       `json:"whitelist,omitempty"`
+	BlocktxnIndices       []int                          `json:"blocktxn_indices,omitempty"`
+	MissingIndices        []int                          `json:"missing_indices,omitempty"`
+	MempoolIndices        []int                          `json:"mempool_indices,omitempty"`
+	PrefilledIndices      []int                          `json:"prefilled_indices,omitempty"`
+	GlobalLimit           int                            `json:"global_limit,omitempty"`
+	InputValue            uint64                         `json:"input_value,omitempty"`
+	SigLength             int                            `json:"sig_length,omitempty"`
+	TxCount               int                            `json:"tx_count,omitempty"`
+	PubkeyLength          int                            `json:"pubkey_length,omitempty"`
+	AlreadyGenerated      uint64                         `json:"already_generated,omitempty"`
+	SumFees               uint64                         `json:"sum_fees,omitempty"`
+	ChunkCount            int                            `json:"chunk_count,omitempty"`
+	TTLBlocks             int                            `json:"ttl_blocks,omitempty"`
+	SentinelSigLen        int                            `json:"sentinel_sig_len,omitempty"`
+	SentinelPubkeyLen     int                            `json:"sentinel_pubkey_len,omitempty"`
+	OrphanPoolFillPct     float64                        `json:"orphan_pool_fill_pct,omitempty"`
+	Height                uint64                         `json:"height,omitempty"`
+	PerPeerLimit          int                            `json:"per_peer_limit,omitempty"`
+	PerDaIDLimit          int                            `json:"per_da_id_limit,omitempty"`
+	KeyCount              int                            `json:"key_count,omitempty"`
+	CurrentPeerBytes      int                            `json:"current_peer_bytes,omitempty"`
+	CurrentDaIDBytes      int                            `json:"current_da_id_bytes,omitempty"`
+	CurrentGlobalBytes    int                            `json:"current_global_bytes,omitempty"`
+	IncomingChunkBytes    int                            `json:"incoming_chunk_bytes,omitempty"`
+	TimestampLast         uint64                         `json:"timestamp_last,omitempty"`
+	StormTriggerPct       float64                        `json:"storm_trigger_pct,omitempty"`
+	RecoverySuccessRate   float64                        `json:"recovery_success_rate,omitempty"`
+	ObservationMinutes    int                            `json:"observation_minutes,omitempty"`
+	MaxDAChunkCount       int                            `json:"max_da_chunk_count,omitempty"`
+	Slots                 int                            `json:"slots,omitempty"`
+	TimestampFirst        uint64                         `json:"timestamp_first,omitempty"`
+	BatchSize             int                            `json:"batch_size,omitempty"`
+	MissRatePct           float64                        `json:"miss_rate_pct,omitempty"`
+	MissRateBlocks        int                            `json:"miss_rate_blocks,omitempty"`
+	StartScore            int                            `json:"start_score,omitempty"`
+	Timestamp             uint64                         `json:"timestamp,omitempty"`
+	ElapsedBlocks         int                            `json:"elapsed_blocks,omitempty"`
+	PerPeerBPS            int                            `json:"per_peer_bps,omitempty"`
+	GlobalBPS             int                            `json:"global_bps,omitempty"`
+	SumInVault            uint64                         `json:"sum_in_vault,omitempty"`
+	PeerStreamBPS         int                            `json:"peer_stream_bps,omitempty"`
+	ActiveSets            int                            `json:"active_sets,omitempty"`
+	CompletedSets         int                            `json:"completed_sets,omitempty"`
+	TotalSets             int                            `json:"total_sets,omitempty"`
+	Nonce2                uint64                         `json:"nonce2,omitempty"`
+	GracePeriodBlocks     int                            `json:"grace_period_blocks,omitempty"`
+	SumOut                uint64                         `json:"sum_out,omitempty"`
+	Nonce1                uint64                         `json:"nonce1,omitempty"`
+	BlockTimestamp        uint64                         `json:"block_timestamp,omitempty"`
+	CommitFee             int                            `json:"commit_fee,omitempty"`
+	VaultInputCount       int                            `json:"vault_input_count,omitempty"`
+	CurrentPinnedBytes    int                            `json:"current_pinned_payload_bytes,omitempty"`
+	IncomingPayload       int                            `json:"incoming_payload_bytes,omitempty"`
+	IncomingOverhead      int                            `json:"incoming_commit_overhead_bytes,omitempty"`
+	CapBytes              int                            `json:"cap_bytes,omitempty"`
+	MTP                   uint64                         `json:"mtp,omitempty"`
+	InputIndex            uint32                         `json:"input_index,omitempty"`
+	CovenantType          uint16                         `json:"covenant_type,omitempty"`
+	SentinelSuiteID       uint8                          `json:"sentinel_suite_id,omitempty"`
+	Name                  string                         `json:"name,omitempty"`
+	Bit                   uint8                          `json:"bit,omitempty"`
+	StartHeight           uint64                         `json:"start_height,omitempty"`
+	TimeoutHeight         uint64                         `json:"timeout_height,omitempty"`
+	ActivationHeight      *uint64                        `json:"activation_height,omitempty"`
+	TransitionHeight      *uint64                        `json:"transition_height,omitempty"`
+	WindowSignalCounts    []uint32                       `json:"window_signal_counts,omitempty"`
+	RotationDescriptor    *RotationDescriptorJSON        `json:"rotation_descriptor,omitempty"`
+	RotationDescriptors   []RotationDescriptorJSON       `json:"rotation_descriptors,omitempty"`
+	SuiteRegistry         []SuiteParamsJSON              `json:"suite_registry,omitempty"`
+	ArtifactHex           string                         `json:"artifact_hex,omitempty"`
+	ExpectedArtifactHash  string                         `json:"expected_artifact_hash_hex,omitempty"`
+	DependencyChecklists  []TxctxDependencyChecklistJSON `json:"dependency_checklists,omitempty"`
+	MempoolTxctxConfirmed *bool                          `json:"mempool_txctx_confirmed,omitempty"`
 }
 
 type requestEnvelope struct {
@@ -165,10 +170,30 @@ type UtxoJSON struct {
 type CoreExtProfileJSON struct {
 	ExtID                uint16  `json:"ext_id"`
 	ActivationHeight     uint64  `json:"activation_height"`
+	TxContextEnabled     int     `json:"tx_context_enabled,omitempty"`
 	AllowedSuiteIDs      []uint8 `json:"allowed_suite_ids,omitempty"`
+	AllowedSighashSet    uint8   `json:"allowed_sighash_set,omitempty"`
+	MaxExtPayloadBytes   int     `json:"max_ext_payload_bytes,omitempty"`
 	Binding              string  `json:"binding,omitempty"`
 	BindingDescriptorHex string  `json:"binding_descriptor_hex,omitempty"`
 	ExtPayloadSchemaHex  string  `json:"ext_payload_schema_hex,omitempty"`
+}
+
+type TxctxDependencyInputsJSON struct {
+	SelfInputValue       bool `json:"self_input_value"`
+	CtxBaseHeight        bool `json:"ctx_base_height"`
+	CtxBaseTotalIn       bool `json:"ctx_base_total_in"`
+	CtxContinuingOutputs bool `json:"ctx_continuing_outputs"`
+}
+
+type TxctxDependencyChecklistJSON struct {
+	ProfileExtID         string                    `json:"profile_ext_id,omitempty"`
+	SpecDocument         string                    `json:"spec_document,omitempty"`
+	TxContextInputsUsed  TxctxDependencyInputsJSON `json:"txcontext_inputs_used,omitempty"`
+	SighashTypesRequired []string                  `json:"sighash_types_required,omitempty"`
+	MaxExtPayloadBytes   int                       `json:"max_ext_payload_bytes,omitempty"`
+	VerifierSideEffects  string                    `json:"verifier_side_effects,omitempty"`
+	Reviewer             string                    `json:"reviewer,omitempty"`
 }
 
 type RotationDescriptorJSON struct {
@@ -736,6 +761,11 @@ func runFromStdin() {
 	switch req.Op {
 	case "txctx_spend_vector":
 		resp := runTxctxSpendVector(req)
+		writeResp(os.Stdout, resp)
+		return
+
+	case "txctx_governance_vector":
+		resp := runTxctxGovernanceVector(req, coreExtProfilesReq)
 		writeResp(os.Stdout, resp)
 		return
 
