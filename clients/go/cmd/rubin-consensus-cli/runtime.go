@@ -18,6 +18,7 @@ import (
 )
 
 type Request struct {
+	TxctxCase            *TxctxCaseJSON           `json:"txctx_case,omitempty"`
 	IncomingHasCommit    *bool                    `json:"incoming_has_commit,omitempty"`
 	CommitArrives        *bool                    `json:"commit_arrives,omitempty"`
 	StructuralOK         *bool                    `json:"structural_ok,omitempty"`
@@ -342,84 +343,85 @@ type Check struct {
 }
 
 type Response struct {
-	WorkHex            string   `json:"work,omitempty"`
-	Err                string   `json:"err,omitempty"`
-	TxidHex            string   `json:"txid,omitempty"`
-	WtxidHex           string   `json:"wtxid,omitempty"`
-	MerkleHex          string   `json:"merkle_root,omitempty"`
-	WitnessMerkleHex   string   `json:"witness_merkle_root,omitempty"`
-	DigestHex          string   `json:"digest,omitempty"`
-	BlockHash          string   `json:"block_hash,omitempty"`
-	TargetNew          string   `json:"target_new,omitempty"`
-	ShortID            string   `json:"short_id,omitempty"`
-	DescriptorHex      string   `json:"descriptor_hex,omitempty"`
-	State              string   `json:"state,omitempty"`
-	BoundaryHeight     *uint64  `json:"boundary_height,omitempty"`
-	PrevWindowSignal   *uint32  `json:"prev_window_signal_count,omitempty"`
-	SignalWindow       uint64   `json:"signal_window,omitempty"`
-	SignalThreshold    uint32   `json:"signal_threshold,omitempty"`
-	EstimatedActivate  *uint64  `json:"estimated_activation_height,omitempty"`
-	ActivationHeight   *uint64  `json:"activation_height,omitempty"`
-	ConsensusActive    *bool    `json:"consensus_active,omitempty"`
-	RetainedPeer       string   `json:"retained_peer,omitempty"`
-	FirstErr           string   `json:"first_err,omitempty"`
-	Chainwork          string   `json:"chainwork,omitempty"`
-	Winner             string   `json:"winner,omitempty"`
-	MissingOut         []int    `json:"missing_indices,omitempty"`
-	PenalizedPeers     []string `json:"penalized_peers,omitempty"`
-	MissingFields      []string `json:"missing_fields,omitempty"`
-	CheckblockResults  []bool   `json:"checkblock_results,omitempty"`
-	EvictOrder         []string `json:"evict_order,omitempty"`
-	RetainedChunks     []int    `json:"retained_chunks,omitempty"`
-	PrefetchTargets    []int    `json:"prefetch_targets,omitempty"`
-	Duplicates         []uint64 `json:"duplicates,omitempty"`
-	SortedKeys         []string `json:"sorted_keys,omitempty"`
-	InvalidOut         []int    `json:"invalid_indices,omitempty"`
-	Evaluated          []string `json:"evaluated,omitempty"`
-	DiscardedChunks    []int    `json:"discarded_chunks,omitempty"`
-	DuplicatesDropped  int      `json:"duplicates_dropped,omitempty"`
-	UtxoCount          uint64   `json:"utxo_count,omitempty"`
-	CountedBytes       int      `json:"counted_bytes,omitempty"`
-	Weight             uint64   `json:"weight"`
-	WireBytes          int      `json:"wire_bytes,omitempty"`
-	Fee                uint64   `json:"fee,omitempty"`
-	IgnoredOverhead    int      `json:"ignored_overhead_bytes,omitempty"`
-	SumFees            uint64   `json:"sum_fees,omitempty"`
-	Mode               int      `json:"mode,omitempty"`
-	TotalFee           int      `json:"total_fee,omitempty"`
-	Consumed           int      `json:"consumed,omitempty"`
-	AlreadyGenerated   uint64   `json:"already_generated,omitempty"`
-	AlreadyGeneratedN1 uint64   `json:"already_generated_n1,omitempty"`
-	TTL                int      `json:"ttl,omitempty"`
-	TTLResetCount      int      `json:"ttl_reset_count,omitempty"`
-	AnchorBytes        uint64   `json:"anchor_bytes"`
-	DaBytes            uint64   `json:"da_bytes"`
-	FillPct            float64  `json:"fill_pct,omitempty"`
-	Rate               float64  `json:"rate,omitempty"`
-	Score              int      `json:"score,omitempty"`
-	BatchOK            bool     `json:"batch_ok,omitempty"`
-	Rollback           bool     `json:"rollback,omitempty"`
-	PeerExceeded       bool     `json:"peer_exceeded,omitempty"`
-	GlobalExceeded     bool     `json:"global_exceeded,omitempty"`
-	QualityPenalty     bool     `json:"quality_penalty,omitempty"`
-	Disconnect         bool     `json:"disconnect,omitempty"`
-	StormMode          bool     `json:"storm_mode,omitempty"`
-	Admit              bool     `json:"admit,omitempty"`
-	Pinned             bool     `json:"pinned,omitempty"`
-	Evicted            bool     `json:"evicted,omitempty"`
-	Reconstructed      bool     `json:"reconstructed,omitempty"`
-	Fallback           bool     `json:"fallback,omitempty"`
-	Ok                 bool     `json:"ok"`
-	RoundtripOK        bool     `json:"roundtrip_ok,omitempty"`
-	PenalizePeer       bool     `json:"penalize_peer,omitempty"`
-	Replaced           bool     `json:"replaced,omitempty"`
-	RequestFullBlock   bool     `json:"request_full_block,omitempty"`
-	RequestGetblocktxn bool     `json:"request_getblocktxn,omitempty"`
-	VerifyCalled       bool     `json:"verify_called,omitempty"`
-	CommitBearing      bool     `json:"commit_bearing,omitempty"`
-	Prioritize         bool     `json:"prioritize,omitempty"`
-	ExtID              uint16   `json:"ext_id,omitempty"`
-	SuiteIDs           []uint8  `json:"suite_ids,omitempty"`
+	Diagnostics        map[string]any `json:"diagnostics,omitempty"`
+	WorkHex            string         `json:"work,omitempty"`
+	Err                string         `json:"err,omitempty"`
+	TxidHex            string         `json:"txid,omitempty"`
+	WtxidHex           string         `json:"wtxid,omitempty"`
+	MerkleHex          string         `json:"merkle_root,omitempty"`
+	WitnessMerkleHex   string         `json:"witness_merkle_root,omitempty"`
+	DigestHex          string         `json:"digest,omitempty"`
+	BlockHash          string         `json:"block_hash,omitempty"`
+	TargetNew          string         `json:"target_new,omitempty"`
+	ShortID            string         `json:"short_id,omitempty"`
+	DescriptorHex      string         `json:"descriptor_hex,omitempty"`
+	State              string         `json:"state,omitempty"`
+	BoundaryHeight     *uint64        `json:"boundary_height,omitempty"`
+	PrevWindowSignal   *uint32        `json:"prev_window_signal_count,omitempty"`
+	SignalWindow       uint64         `json:"signal_window,omitempty"`
+	SignalThreshold    uint32         `json:"signal_threshold,omitempty"`
+	EstimatedActivate  *uint64        `json:"estimated_activation_height,omitempty"`
+	ActivationHeight   *uint64        `json:"activation_height,omitempty"`
+	ConsensusActive    *bool          `json:"consensus_active,omitempty"`
+	RetainedPeer       string         `json:"retained_peer,omitempty"`
+	FirstErr           string         `json:"first_err,omitempty"`
+	Chainwork          string         `json:"chainwork,omitempty"`
+	Winner             string         `json:"winner,omitempty"`
+	MissingOut         []int          `json:"missing_indices,omitempty"`
+	PenalizedPeers     []string       `json:"penalized_peers,omitempty"`
+	MissingFields      []string       `json:"missing_fields,omitempty"`
+	CheckblockResults  []bool         `json:"checkblock_results,omitempty"`
+	EvictOrder         []string       `json:"evict_order,omitempty"`
+	RetainedChunks     []int          `json:"retained_chunks,omitempty"`
+	PrefetchTargets    []int          `json:"prefetch_targets,omitempty"`
+	Duplicates         []uint64       `json:"duplicates,omitempty"`
+	SortedKeys         []string       `json:"sorted_keys,omitempty"`
+	InvalidOut         []int          `json:"invalid_indices,omitempty"`
+	Evaluated          []string       `json:"evaluated,omitempty"`
+	DiscardedChunks    []int          `json:"discarded_chunks,omitempty"`
+	DuplicatesDropped  int            `json:"duplicates_dropped,omitempty"`
+	UtxoCount          uint64         `json:"utxo_count,omitempty"`
+	CountedBytes       int            `json:"counted_bytes,omitempty"`
+	Weight             uint64         `json:"weight"`
+	WireBytes          int            `json:"wire_bytes,omitempty"`
+	Fee                uint64         `json:"fee,omitempty"`
+	IgnoredOverhead    int            `json:"ignored_overhead_bytes,omitempty"`
+	SumFees            uint64         `json:"sum_fees,omitempty"`
+	Mode               int            `json:"mode,omitempty"`
+	TotalFee           int            `json:"total_fee,omitempty"`
+	Consumed           int            `json:"consumed,omitempty"`
+	AlreadyGenerated   uint64         `json:"already_generated,omitempty"`
+	AlreadyGeneratedN1 uint64         `json:"already_generated_n1,omitempty"`
+	TTL                int            `json:"ttl,omitempty"`
+	TTLResetCount      int            `json:"ttl_reset_count,omitempty"`
+	AnchorBytes        uint64         `json:"anchor_bytes"`
+	DaBytes            uint64         `json:"da_bytes"`
+	FillPct            float64        `json:"fill_pct,omitempty"`
+	Rate               float64        `json:"rate,omitempty"`
+	Score              int            `json:"score,omitempty"`
+	BatchOK            bool           `json:"batch_ok,omitempty"`
+	Rollback           bool           `json:"rollback,omitempty"`
+	PeerExceeded       bool           `json:"peer_exceeded,omitempty"`
+	GlobalExceeded     bool           `json:"global_exceeded,omitempty"`
+	QualityPenalty     bool           `json:"quality_penalty,omitempty"`
+	Disconnect         bool           `json:"disconnect,omitempty"`
+	StormMode          bool           `json:"storm_mode,omitempty"`
+	Admit              bool           `json:"admit,omitempty"`
+	Pinned             bool           `json:"pinned,omitempty"`
+	Evicted            bool           `json:"evicted,omitempty"`
+	Reconstructed      bool           `json:"reconstructed,omitempty"`
+	Fallback           bool           `json:"fallback,omitempty"`
+	Ok                 bool           `json:"ok"`
+	RoundtripOK        bool           `json:"roundtrip_ok,omitempty"`
+	PenalizePeer       bool           `json:"penalize_peer,omitempty"`
+	Replaced           bool           `json:"replaced,omitempty"`
+	RequestFullBlock   bool           `json:"request_full_block,omitempty"`
+	RequestGetblocktxn bool           `json:"request_getblocktxn,omitempty"`
+	VerifyCalled       bool           `json:"verify_called,omitempty"`
+	CommitBearing      bool           `json:"commit_bearing,omitempty"`
+	Prioritize         bool           `json:"prioritize,omitempty"`
+	ExtID              uint16         `json:"ext_id,omitempty"`
+	SuiteIDs           []uint8        `json:"suite_ids,omitempty"`
 }
 
 func writeResp(w io.Writer, resp Response) {
@@ -732,6 +734,11 @@ func runFromStdin() {
 	coreExtProfilesReq := envelope.CoreExtProfiles
 
 	switch req.Op {
+	case "txctx_spend_vector":
+		resp := runTxctxSpendVector(req)
+		writeResp(os.Stdout, resp)
+		return
+
 	case "parse_tx":
 		txBytes, err := hex.DecodeString(req.TxHex)
 		if err != nil {
