@@ -119,6 +119,7 @@ impl ChainState {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn connect_block_with_core_ext_deployments_and_suite_context(
         &mut self,
         block_bytes: &[u8],

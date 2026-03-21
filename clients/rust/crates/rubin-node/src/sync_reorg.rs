@@ -747,7 +747,13 @@ mod tests {
         let (_, _, admitted_wtxid, admitted_len) = parse_tx(&admitted_raw).expect("parse admitted");
         assert_eq!(admitted_len, admitted_raw.len());
 
-        let block1 = block_with_txs(1, 0, genesis_hash, gen_ts + 1, &[admitted_raw.clone()]);
+        let block1 = block_with_txs(
+            1,
+            0,
+            genesis_hash,
+            gen_ts + 1,
+            std::slice::from_ref(&admitted_raw),
+        );
         let summary_a1 = engine
             .apply_block_with_reorg(&block1, None, Some(&mut pool))
             .expect("A1 canonical");
