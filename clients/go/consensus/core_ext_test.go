@@ -1274,6 +1274,65 @@ func TestApplyNonCoinbaseTxBasic_CORE_EXT_OpenSSLDigest32BindingVerifiesNonNativ
 	}
 }
 
+func TestApplyNonCoinbaseTxBasic_CORE_EXT_TxContextEnabledOpenSSLDigest32BindingVerifiesMLDSA87Parity(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+
+	var chainID [32]byte
+	chainID[0] = 0x74
+	var prev [32]byte
+	prev[0] = 0xa7
+
+	txBytes := txWithOneInputOneOutputWithWitness(prev, 0, 90, COV_TYPE_CORE_EXT, coreExtCovenantData(7, nil), nil)
+	tx, txid := mustParseTxForUtxo(t, txBytes)
+	tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, chainID, kp)}
+
+	descriptor, err := CoreExtOpenSSLDigest32BindingDescriptorBytes("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+	if err != nil {
+		t.Fatalf("CoreExtOpenSSLDigest32BindingDescriptorBytes: %v", err)
+	}
+	verifyFn, err := ParseCoreExtVerifySigExtBinding(CoreExtBindingNameVerifySigExtOpenSSLDigest32V1, descriptor)
+	if err != nil {
+		t.Fatalf("ParseCoreExtVerifySigExtBinding: %v", err)
+	}
+
+	profiles, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{{
+		ExtID:             7,
+		ActivationHeight:  0,
+		TxContextEnabled:  true,
+		AllowedSuites:     map[uint8]struct{}{SUITE_ID_ML_DSA_87: {}},
+		VerifySigExtFn:    verifyFn,
+		BindingDescriptor: descriptor,
+		ExtPayloadSchema:  []byte{0xb2},
+	}})
+	if err != nil {
+		t.Fatalf("NewStaticCoreExtProfileProvider: %v", err)
+	}
+
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prev, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_CORE_EXT,
+			CovenantData: coreExtCovenantData(7, []byte{0x99}),
+		},
+	}
+
+	if _, _, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(tx, txid, utxos, 55, 0, 0, chainID, profiles); err != nil {
+		t.Fatalf("ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(valid sig): %v", err)
+	}
+
+	bad := tx.Witness[0]
+	bad.Signature = append([]byte(nil), bad.Signature...)
+	bad.Signature[0] ^= 0x01
+	tx.Witness = []WitnessItem{bad}
+	_, _, err = ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(tx, txid, utxos, 55, 0, 0, chainID, profiles)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_INVALID)
+	}
+}
+
 func TestVerifyCoreExtOpenSSLDigest32_LengthMismatchSkipsConsensusInit(t *testing.T) {
 	resetOpenSSLBootstrapStateForTests()
 	t.Cleanup(resetOpenSSLBootstrapStateForTests)
