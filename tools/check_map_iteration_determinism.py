@@ -53,15 +53,16 @@ GO_MAP_DECL_RE = re.compile(
     r"^\s*(\w+)\s*:?=\s*(?:make\()?map\[", re.MULTILINE
 )
 # Also catch map-typed function/method parameters by scanning func signatures.
-# We extract the parameter list from func lines and find `name map[` within it.
-GO_FUNC_LINE_RE = re.compile(
-    r"^func\s+(?:\([^)]*\)\s+)?\w+(?:\[.*?\])?\s*\((.+)", re.MULTILINE
+# We extract the full parameter list (possibly multiline) and find `name map[`.
+GO_FUNC_START_RE = re.compile(
+    r"^func\s+(?:\([^)]*\)\s+)?\w+(?:\[.*?\])?\s*\(", re.MULTILINE
 )
 GO_MAP_PARAM_IN_SIG_RE = re.compile(
     r"(\w+)\s+map\["
 )
+# Match `range <var>` but NOT `range <var>[key]` (map lookup returns slice)
 GO_RANGE_RE = re.compile(
-    r"for\s+\w+(?:\s*,\s*\w+)?\s*:?=\s*range\s+(\w+)"
+    r"for\s+\w+(?:\s*,\s*\w+)?\s*:?=\s*range\s+(\w+)(?!\s*\[)"
 )
 
 # --- Rust consensus crate ---
@@ -101,9 +102,19 @@ def check_go(violations: list[str]) -> None:
             map_vars = set()
             for m in GO_MAP_DECL_RE.finditer(text):
                 map_vars.add(m.group(1))
-            # Scan function signatures only for map-typed params
-            for m in GO_FUNC_LINE_RE.finditer(text):
-                sig = m.group(1)
+            # Scan function signatures (including multiline) for map-typed params
+            for m in GO_FUNC_START_RE.finditer(text):
+                # Collect everything from '(' to matching ')' — handles multiline
+                start = m.end()
+                depth = 1
+                pos = start
+                while pos < len(text) and depth > 0:
+                    if text[pos] == "(":
+                        depth += 1
+                    elif text[pos] == ")":
+                        depth -= 1
+                    pos += 1
+                sig = text[start:pos - 1]
                 for pm in GO_MAP_PARAM_IN_SIG_RE.finditer(sig):
                     map_vars.add(pm.group(1))
             if not map_vars:
