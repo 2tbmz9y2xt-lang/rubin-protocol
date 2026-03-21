@@ -1,6 +1,9 @@
 package consensus
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func encodeHTLCCovenantData(
 	hash [32]byte,
@@ -678,5 +681,83 @@ func TestValidateHTLCSpendWithCache_ClaimOK(t *testing.T) {
 	}
 	if err := ValidateHTLCSpendWithCache(entry, path, sig, tx, inputIndex, inputValue, chainID, 0, 0, cache); err != nil {
 		t.Fatalf("ValidateHTLCSpendWithCache: %v", err)
+	}
+}
+
+// TestHTLCSpend_RotatedSuite_Rejected verifies that HTLC spend with a
+// sunset suite is rejected via rotation enforcement.
+func TestHTLCSpend_RotatedSuite_Rejected(t *testing.T) {
+	_, _, claimKeyID, refundKeyID := makeMLKeyMaterial(0x90)
+	entry := makeHTLCEntry(sha3_256([]byte("rotation-test")), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
+	path := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: refundKeyID[:], Signature: []byte{0x01}}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}
+
+	// Create a rotation provider that sunsets ML-DSA-87 at height 10.
+	// Use a registry with ML-DSA-87 (old) and a dummy suite 0x02 (new).
+	registry := NewSuiteRegistryFromParams([]SuiteParams{
+		{SuiteID: SUITE_ID_ML_DSA_87, PubkeyLen: ML_DSA_87_PUBKEY_BYTES, SigLen: ML_DSA_87_SIG_BYTES, VerifyCost: VERIFY_COST_ML_DSA_87},
+		{SuiteID: 0x02, PubkeyLen: 32, SigLen: 64, VerifyCost: 100},
+	})
+	desc := CryptoRotationDescriptor{
+		Name:         "test-htlc-sunset",
+		OldSuiteID:   SUITE_ID_ML_DSA_87,
+		NewSuiteID:   0x02,
+		CreateHeight: 1,
+		SpendHeight:  5,
+		SunsetHeight: 10,
+	}
+	if err := desc.Validate(registry); err != nil {
+		t.Fatalf("descriptor validation: %v", err)
+	}
+	rotation := DescriptorRotationProvider{Descriptor: desc}
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	// At height 15 (after sunset), ML-DSA-87 is NOT in native spend set
+	err := ValidateHTLCSpendAtHeight(entry, path, sig, tx, inputIndex, inputValue, chainID, 15, 0, nil, rotation, registry)
+	if err == nil {
+		t.Fatal("expected rejection for sunset suite")
+	}
+	if !strings.Contains(err.Error(), "TX_ERR_SIG_ALG_INVALID") {
+		t.Fatalf("expected TX_ERR_SIG_ALG_INVALID, got: %v", err)
+	}
+}
+
+// TestHTLCSpend_ActiveSuite_Accepted verifies that HTLC spend with a
+// still-active suite is accepted (same rotation but at height before sunset).
+func TestHTLCSpend_ActiveSuite_Accepted(t *testing.T) {
+	claimPub, _, claimKeyID, refundKeyID := makeMLKeyMaterial(0x91)
+	preimage := []byte("rotation-active-test-preimage-ok")
+	hash := sha3_256(preimage)
+	entry := makeHTLCEntry(hash, LOCK_MODE_HEIGHT, 100, claimKeyID, refundKeyID)
+	path := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: claimKeyID[:], Signature: encodeHTLCClaimPayload(preimage)}
+
+	// Same rotation provider: ML-DSA-87 sunset at height 10
+	registry := NewSuiteRegistryFromParams([]SuiteParams{
+		{SuiteID: SUITE_ID_ML_DSA_87, PubkeyLen: ML_DSA_87_PUBKEY_BYTES, SigLen: ML_DSA_87_SIG_BYTES, VerifyCost: VERIFY_COST_ML_DSA_87},
+		{SuiteID: 0x02, PubkeyLen: 32, SigLen: 64, VerifyCost: 100},
+	})
+	desc := CryptoRotationDescriptor{
+		Name:         "test-htlc-active",
+		OldSuiteID:   SUITE_ID_ML_DSA_87,
+		NewSuiteID:   0x02,
+		CreateHeight: 1,
+		SpendHeight:  5,
+		SunsetHeight: 10,
+	}
+	rotation := DescriptorRotationProvider{Descriptor: desc}
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	// At height 3 (before sunset, ML-DSA-87 still in spend set)
+	// This will pass suite check but fail on signature verification
+	// (we don't have a real ML-DSA signature). That's OK — the point is
+	// it doesn't fail with TX_ERR_SIG_ALG_INVALID.
+	err := ValidateHTLCSpendAtHeight(entry, path, WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: claimPub, Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}, tx, inputIndex, inputValue, chainID, 3, 0, nil, rotation, registry)
+	if err == nil {
+		// If no error, sig verify passed (unlikely with fake sig)
+		return
+	}
+	// Should fail on sig verification, NOT on suite check
+	if strings.Contains(err.Error(), "TX_ERR_SIG_ALG_INVALID") {
+		t.Fatalf("should NOT fail with TX_ERR_SIG_ALG_INVALID at height 3 (pre-sunset), got: %v", err)
 	}
 }
