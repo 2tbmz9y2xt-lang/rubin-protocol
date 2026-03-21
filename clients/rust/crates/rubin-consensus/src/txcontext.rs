@@ -7,6 +7,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 pub const TXCONTEXT_MAX_CONTINUING_OUTPUTS: usize = 2;
+const TXCONTEXT_TOO_MANY_CONTINUING_OUTPUTS: &str =
+    "too many continuing outputs for txcontext ext_id";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Uint128 {
@@ -204,10 +206,7 @@ pub fn build_tx_context(
                 if bundle.continuing_output_count as usize >= TXCONTEXT_MAX_CONTINUING_OUTPUTS {
                     return Err(TxError::new(
                         ErrorCode::TxErrCovenantTypeInvalid,
-                        Box::leak(
-                            format!("too many continuing outputs for ext_id={ext_id}")
-                                .into_boxed_str(),
-                        ),
+                        TXCONTEXT_TOO_MANY_CONTINUING_OUTPUTS,
                     ));
                 }
                 let index = bundle.continuing_output_count as usize;
@@ -615,6 +614,8 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
-        assert!(err.to_string().contains("ext_id=7"));
+        assert!(err
+            .to_string()
+            .contains(TXCONTEXT_TOO_MANY_CONTINUING_OUTPUTS));
     }
 }
