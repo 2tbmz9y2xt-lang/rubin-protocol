@@ -13,6 +13,7 @@ MAX_RENDERED_CHANGED_PATHS = 25
 MAX_RENDERED_PATH_CHARS = 160
 CONTRACT_PATH = Path(__file__).resolve().with_name("prepush_review_contract.json")
 ALLOWED_REASONING = {"low", "medium", "high", "xhigh"}
+ALLOWED_CHECK_TYPES = {"auto", "consensus_critical", "formal_lean", "code_noncritical", "diff_only"}
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,7 @@ class ScanLens:
 @dataclass(frozen=True)
 class ReviewProfile:
     name: str
+    check_type: str
     why: str
     model: str = ""
     model_reasoning_effort: str = ""
@@ -38,11 +40,12 @@ class ReviewProfile:
 def load_profile_contract(profile_name: str, path: Path = CONTRACT_PATH) -> ReviewProfile:
     default_profile = ReviewProfile(
         name=profile_name,
+        check_type=profile_name,
         why="Default local review contract.",
-        model="gpt-5.4",
-        model_reasoning_effort="high",
+        model="gpt-5.4-mini",
+        model_reasoning_effort="xhigh",
         stall_seconds=75,
-        combine_review_units_when_at_most=4,
+        combine_review_units_when_at_most=6,
         required_lenses=("code-review", "diff-scan"),
         conditional_lenses=(),
     )
@@ -57,8 +60,8 @@ def load_profile_contract(profile_name: str, path: Path = CONTRACT_PATH) -> Revi
         schema_version = int(data.get("schema_version") or 1)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"review contract at {path} has non-numeric schema_version") from exc
-    if schema_version < 2:
-        raise ValueError(f"review contract at {path} must use schema_version >= 2")
+    if schema_version < 3:
+        raise ValueError(f"review contract at {path} must use schema_version >= 3")
 
     profiles = data.get("profiles")
     if not isinstance(profiles, dict) or not profiles:
@@ -115,6 +118,7 @@ def load_profile_contract(profile_name: str, path: Path = CONTRACT_PATH) -> Revi
 
     return ReviewProfile(
         name=profile_name,
+        check_type=profile_name,
         why=default_profile.why,
         model=model,
         model_reasoning_effort=reasoning,
@@ -173,7 +177,15 @@ def sanitize_path_for_prompt(path: str) -> str:
     return shlex.quote(truncated).replace("\n", r"\n").replace("\r", r"\r").replace("\t", r"\t")
 
 
-def build_plan(changed: set[str]) -> tuple[list[tuple[str, list[str]]], list[str], list[ScanLens], ReviewProfile]:
+def build_plan(
+    changed: set[str],
+    *,
+    check_type_override: str = "auto",
+) -> tuple[list[tuple[str, list[str]]], list[str], list[ScanLens], ReviewProfile]:
+    if check_type_override not in ALLOWED_CHECK_TYPES:
+        allowed = ", ".join(sorted(ALLOWED_CHECK_TYPES))
+        raise ValueError(f"unsupported check_type {check_type_override!r}; expected one of: {allowed}")
+
     checks: list[tuple[str, list[str]]] = []
     seen_check_names: set[str] = set()
     focuses: list[str] = []
@@ -466,24 +478,44 @@ def build_plan(changed: set[str]) -> tuple[list[tuple[str, list[str]]], list[str
         inactive_why="No tooling/workflow files changed in this push.",
     )
 
-    if any((consensus_core_related, formal_bridge_related, openssl_related, conformance_hygiene_related, conformance_runtime_related, crypto_related, core_ext_related, rust_perf_related)):
-        profile = ReviewProfile(
-            name="heavy_artillery",
-            why="Consensus/core/formal/crypto/CORE_EXT surface changed, so pre-push must use the heaviest review profile.",
-        )
+    detected_check_type = "diff_only"
+    if check_type_override != "auto":
+        detected_check_type = check_type_override
+    elif any((consensus_core_related, openssl_related, conformance_hygiene_related, conformance_runtime_related, crypto_related, core_ext_related, rust_perf_related)):
+        detected_check_type = "consensus_critical"
+    elif formal_bridge_related or any(path.endswith(".lean") for path in changed):
+        detected_check_type = "formal_lean"
     elif runtime_source_related:
+        detected_check_type = "code_noncritical"
+
+    if detected_check_type == "consensus_critical":
         profile = ReviewProfile(
-            name="runtime_code",
-            why="Protocol runtime code changed outside the strict consensus-heavy bucket, so use the full GPT-5.4 runtime review profile.",
+            name="consensus_critical",
+            check_type=detected_check_type,
+            why="Consensus/core/crypto/CORE_EXT/conformance-sensitive surface changed; run the strictest fail-closed review pack.",
+        )
+    elif detected_check_type == "formal_lean":
+        profile = ReviewProfile(
+            name="formal_lean",
+            check_type=detected_check_type,
+            why="Formal Lean/proof bridge surface changed; enforce formal-heavy fail-closed review pack.",
+        )
+    elif detected_check_type == "code_noncritical":
+        profile = ReviewProfile(
+            name="code_noncritical",
+            check_type=detected_check_type,
+            why="Runtime/application code changed outside consensus-critical buckets; use non-critical code profile.",
         )
     else:
         profile = ReviewProfile(
-            name="fast_patch",
-            why="Only tooling/tests/docs/patch-level surface changed, so the fast GPT-5.4-mini review profile is sufficient.",
+            name="diff_only",
+            check_type=detected_check_type,
+            why="Only patch/tooling/docs diff surface changed; use strict diff-only profile.",
         )
     contract_profile = load_profile_contract(profile.name)
     profile = ReviewProfile(
         name=profile.name,
+        check_type=profile.check_type,
         why=profile.why,
         model=contract_profile.model,
         model_reasoning_effort=contract_profile.model_reasoning_effort,
@@ -496,8 +528,26 @@ def build_plan(changed: set[str]) -> tuple[list[tuple[str, list[str]]], list[str
     return checks, focuses, lenses, profile
 
 
+def active_lens_names(lenses: list[ScanLens], profile: ReviewProfile) -> list[str]:
+    by_name = {lens.name: lens for lens in lenses}
+    names: list[str] = []
+    for name in profile.required_lenses:
+        lens = by_name.get(name)
+        if lens is not None and lens.active and name not in names:
+            names.append(name)
+    for name in profile.conditional_lenses:
+        lens = by_name.get(name)
+        if lens is not None and lens.active and name not in names:
+            names.append(name)
+    for lens in lenses:
+        if lens.active and lens.name not in names:
+            names.append(lens.name)
+    return names
+
+
 def render_fullscan(changed: set[str], checks: list[tuple[str, list[str]]], lenses: list[ScanLens], profile: ReviewProfile) -> str:
     by_name = {lens.name: lens for lens in lenses}
+    active_lenses = active_lens_names(lenses, profile)
     profile_required = [by_name[name] for name in profile.required_lenses if name in by_name]
     profile_conditional_active = [
         by_name[name] for name in profile.conditional_lenses if name in by_name and by_name[name].active
@@ -511,8 +561,10 @@ def render_fullscan(changed: set[str], checks: list[tuple[str, list[str]]], lens
         "- Apply every ACTIVE lens before returning findings=[].",
         "- Keep findings grounded in the diff bundle and changed-line evidence contract.",
         f"- Selected review profile: {profile.name}.",
+        f"- Check type: {profile.check_type}.",
         f"- Profile rationale: {profile.why}",
         f"- Model route: {profile.model} ({profile.model_reasoning_effort}), combine-if-paths<={profile.combine_review_units_when_at_most}.",
+        f"- ACTIVE_LENSES: {','.join(active_lenses) if active_lenses else 'none'}",
     ]
 
     if changed:
@@ -565,6 +617,7 @@ def main() -> int:
     ap.add_argument("--focus-output", required=True)
     ap.add_argument("--fullscan-output", required=True)
     ap.add_argument("--profile-output")
+    ap.add_argument("--check-type", default="auto")
     args = ap.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
@@ -574,7 +627,7 @@ def main() -> int:
     profile_output = Path(args.profile_output).resolve() if args.profile_output else None
 
     try:
-        checks, focuses, lenses, profile = build_plan(changed)
+        checks, focuses, lenses, profile = build_plan(changed, check_type_override=args.check_type)
     except ValueError as exc:
         print(f"[local-prepush-gate] contract: FAIL ({exc})", file=sys.stderr)
         return 2
@@ -587,6 +640,8 @@ def main() -> int:
                 {
                     "combine_review_units_when_at_most": profile.combine_review_units_when_at_most,
                     "conditional_lenses": list(profile.conditional_lenses),
+                    "check_type": profile.check_type,
+                    "active_lenses": active_lens_names(lenses, profile),
                     "model": profile.model,
                     "model_reasoning_effort": profile.model_reasoning_effort,
                     "profile": profile.name,
