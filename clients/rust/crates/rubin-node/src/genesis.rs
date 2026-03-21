@@ -406,6 +406,29 @@ mod tests {
     }
 
     #[test]
+    fn load_genesis_config_rejects_non_boolean_tx_context_enabled() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-core-ext-invalid-txcontext-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            "{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{\"ext_id\":7,\"activation_height\":12,\"tx_context_enabled\":1,\"allowed_suite_ids\":[3],\"binding\":\"native_verify_sig\"}]}",
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path)).unwrap_err();
+        assert!(err.contains("expected a boolean"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
     fn load_genesis_config_rejects_openssl_digest32_binding_without_payload_schema() {
         let dir = std::env::temp_dir().join(format!(
             "rubin-node-genesis-core-ext-openssl-missing-schema-{}",

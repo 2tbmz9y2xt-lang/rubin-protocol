@@ -1,9 +1,9 @@
 import unittest
 
 if __package__:
-    from .run_cv_bundle import TXCTX_GOVERNANCE_SKIP_IDS, normalized_vector_op
+    from .run_cv_bundle import TXCTX_GOVERNANCE_VECTOR_IDS, normalized_vector_op, validate_vector
 else:
-    from run_cv_bundle import TXCTX_GOVERNANCE_SKIP_IDS, normalized_vector_op
+    from run_cv_bundle import TXCTX_GOVERNANCE_VECTOR_IDS, normalized_vector_op, validate_vector
 
 
 class RunCvBundleOpNormalizationTests(unittest.TestCase):
@@ -11,10 +11,10 @@ class RunCvBundleOpNormalizationTests(unittest.TestCase):
         op = normalized_vector_op("CV-TXCTX", {"id": "CV-TXCTX-01", "op": "   "})
         self.assertEqual(op, "txctx_spend_vector")
 
-    def test_txctx_governance_skip_keeps_none(self):
-        vector_id = next(iter(TXCTX_GOVERNANCE_SKIP_IDS))
+    def test_txctx_governance_vectors_route_to_governance_harness(self):
+        vector_id = next(iter(TXCTX_GOVERNANCE_VECTOR_IDS))
         op = normalized_vector_op("CV-TXCTX", {"id": vector_id, "op": "   "})
-        self.assertIsNone(op)
+        self.assertEqual(op, "txctx_governance_vector")
 
     def test_non_txctx_whitespace_op_is_missing(self):
         op = normalized_vector_op("CV-OTHER", {"id": "X", "op": "   "})
@@ -23,6 +23,11 @@ class RunCvBundleOpNormalizationTests(unittest.TestCase):
     def test_noncanonical_whitespace_is_not_silently_normalized(self):
         op = normalized_vector_op("CV-TXCTX", {"id": "CV-TXCTX-01", "op": " txctx_spend_vector "})
         self.assertEqual(op, " txctx_spend_vector ")
+
+    def test_txctx_invalid_nonstring_op_returns_validation_error_instead_of_crashing(self):
+        problems, skipped = validate_vector("CV-TXCTX", {"id": "CV-TXCTX-01", "op": 0}, None, None, {})
+        self.assertEqual(problems, ["CV-TXCTX/CV-TXCTX-01: missing op"])
+        self.assertFalse(skipped)
 
 
 if __name__ == "__main__":
