@@ -107,6 +107,7 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     let mut sync_cfg = default_sync_config(None, chain_id, Some(chain_state_file.clone()));
     sync_cfg.network = cfg.network.clone();
     sync_cfg.core_ext_deployments = genesis_cfg.core_ext_deployments.clone();
+    sync_cfg.suite_context = genesis_cfg.suite_context.clone();
     let mut sync_engine = match SyncEngine::new(chain_state, Some(block_store.clone()), sync_cfg) {
         Ok(engine) => engine,
         Err(err) => {
