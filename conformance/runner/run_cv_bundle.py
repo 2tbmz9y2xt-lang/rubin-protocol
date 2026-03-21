@@ -10,6 +10,10 @@ import subprocess
 import sys
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+RUNNER_DIR = pathlib.Path(__file__).resolve().parent
+if str(RUNNER_DIR) not in sys.path:
+    sys.path.insert(0, str(RUNNER_DIR))
+
 from txctx_case import build_txctx_case, validate_txctx_responses
 
 
