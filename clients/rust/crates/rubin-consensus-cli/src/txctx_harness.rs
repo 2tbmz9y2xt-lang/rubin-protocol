@@ -146,15 +146,22 @@ type TxctxArtifacts = (
     CoreExtProfiles,
 );
 
+const TXCTX_MAX_VERIFIER_ACCESS_INDEX: i64 = i32::MAX as i64;
+
 fn recorder_cell() -> &'static Mutex<Recorder> {
     static CELL: OnceLock<Mutex<Recorder>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(Recorder::default()))
 }
 
+fn txctx_normalize_access_index(raw: i64) -> usize {
+    let clamped = raw.clamp(0, TXCTX_MAX_VERIFIER_ACCESS_INDEX);
+    usize::try_from(clamped).expect("clamped access index should fit usize")
+}
+
 fn txctx_reset_recorder(tc: &TxctxCase) {
     let mut recorder = recorder_cell().lock().expect("recorder lock");
     *recorder = Recorder::default();
-    recorder.access_index = tc.verifier_access_index.max(0) as usize;
+    recorder.access_index = txctx_normalize_access_index(tc.verifier_access_index);
     for profile in &tc.profiles {
         recorder
             .profile_modes
@@ -826,6 +833,14 @@ pub fn run_txctx_spend_vector(txctx_case: Option<TxctxCase>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn txctx_test_guard() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("txctx test lock")
+    }
 
     fn test_profile(ext_id: u16) -> TxctxProfile {
         TxctxProfile {
@@ -844,6 +859,7 @@ mod tests {
 
     #[test]
     fn txctx_profile_error_rejects_oversized_continuing_output() {
+        let _guard = txctx_test_guard();
         let tc = TxctxCase {
             height: 200,
             profiles: vec![test_profile(0x0fff)],
@@ -869,6 +885,7 @@ mod tests {
 
     #[test]
     fn txctx_profile_error_rejects_non_minimal_raw_compact_size() {
+        let _guard = txctx_test_guard();
         let tc = TxctxCase {
             height: 200,
             profiles: vec![test_profile(0x0ffe)],
@@ -888,6 +905,7 @@ mod tests {
 
     #[test]
     fn txctx_build_artifacts_rejects_unsupported_non_core_ext_output_without_raw_data() {
+        let _guard = txctx_test_guard();
         let tc = TxctxCase {
             height: 200,
             outputs: vec![TxctxOutput {
@@ -906,6 +924,7 @@ mod tests {
 
     #[test]
     fn txctx_missing_continuing_injection_is_ext_scoped() {
+        let _guard = txctx_test_guard();
         let tc = TxctxCase {
             height: 200,
             profiles: vec![test_profile(0x0ffe)],
@@ -935,12 +954,14 @@ mod tests {
 
     #[test]
     fn txctx_parse_txid_accepts_odd_length_hex() {
+        let _guard = txctx_test_guard();
         let parsed = txctx_parse_txid("1").expect("odd-length hex should normalize");
         assert_eq!(parsed[31], 0x01);
     }
 
     #[test]
     fn txctx_duplicate_prevout_canonicalizes_equivalent_hex() {
+        let _guard = txctx_test_guard();
         let tc = TxctxCase {
             inputs: vec![
                 TxctxInput {
@@ -961,6 +982,7 @@ mod tests {
 
     #[test]
     fn txctx_case_deserializes_negative_verifier_access_index() {
+        let _guard = txctx_test_guard();
         let tc: TxctxCase = serde_json::from_value(json!({
             "verifier_access_index": -1
         }))
@@ -969,5 +991,20 @@ mod tests {
         txctx_reset_recorder(&tc);
         let recorder = recorder_cell().lock().expect("recorder lock");
         assert_eq!(recorder.access_index, 0);
+    }
+
+    #[test]
+    fn txctx_case_clamps_oversized_verifier_access_index() {
+        let _guard = txctx_test_guard();
+        let tc: TxctxCase = serde_json::from_value(json!({
+            "verifier_access_index": i64::MAX
+        }))
+        .expect("oversized positive index within i64 should deserialize");
+        txctx_reset_recorder(&tc);
+        let recorder = recorder_cell().lock().expect("recorder lock");
+        assert_eq!(
+            recorder.access_index,
+            TXCTX_MAX_VERIFIER_ACCESS_INDEX as usize
+        );
     }
 }
