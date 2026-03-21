@@ -475,7 +475,11 @@ where
 
     match Boolish::deserialize(deserializer)? {
         Boolish::Bool(value) => Ok(value),
-        Boolish::Int(value) => Ok(value != 0),
+        Boolish::Int(0) => Ok(false),
+        Boolish::Int(1) => Ok(true),
+        Boolish::Int(_) => Err(serde::de::Error::custom(
+            "tx_context_enabled must be bool or 0/1",
+        )),
     }
 }
 
@@ -4955,5 +4959,16 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("requires runtime verifier wiring"));
+    }
+
+    #[test]
+    fn core_ext_profile_json_rejects_non_boolean_tx_context_enabled() {
+        let err = match serde_json::from_str::<CoreExtProfileJson>(
+            r#"{"ext_id":9,"activation_height":42,"tx_context_enabled":2,"allowed_suite_ids":[3]}"#,
+        ) {
+            Ok(_) => panic!("expected tx_context_enabled=2 to be rejected"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("tx_context_enabled must be bool or 0/1"));
     }
 }

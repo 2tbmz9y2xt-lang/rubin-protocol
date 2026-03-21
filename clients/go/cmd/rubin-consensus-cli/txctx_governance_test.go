@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"testing"
 )
 
@@ -116,6 +117,71 @@ func TestRunTxctxGovernanceVectorRejectsLargePayloadWithoutMempoolGate(t *testin
 	}
 	if resp.Err != txctxGovernanceErrMempoolGateRequired {
 		t.Fatalf("unexpected err: %q", resp.Err)
+	}
+}
+
+func TestRunTxctxGovernanceVectorRejectsExtraChecklist(t *testing.T) {
+	profile := testTxctxGovernanceProfile()
+	resp := runTxctxGovernanceVector(
+		Request{
+			TransitionHeight: uint64Ptr(100),
+			DependencyChecklists: []TxctxDependencyChecklistJSON{
+				testTxctxGovernanceChecklist(profile.ExtID, 48),
+				testTxctxGovernanceChecklist(0x0fed, 48),
+			},
+		},
+		[]CoreExtProfileJSON{profile},
+	)
+	if resp.Ok {
+		t.Fatalf("expected extra checklist rejection")
+	}
+	if resp.Err != txctxGovernanceErrInvalidChecklist {
+		t.Fatalf("unexpected err: %q", resp.Err)
+	}
+}
+
+func TestRunTxctxGovernanceVectorRejectsNonCanonicalChecklistExtID(t *testing.T) {
+	profile := testTxctxGovernanceProfile()
+	checklist := testTxctxGovernanceChecklist(profile.ExtID, 48)
+	checklist.ProfileExtID = "010"
+	resp := runTxctxGovernanceVector(
+		Request{
+			TransitionHeight:     uint64Ptr(100),
+			DependencyChecklists: []TxctxDependencyChecklistJSON{checklist},
+		},
+		[]CoreExtProfileJSON{profile},
+	)
+	if resp.Ok {
+		t.Fatalf("expected non-canonical ext id rejection")
+	}
+	if resp.Err != txctxGovernanceErrInvalidChecklist {
+		t.Fatalf("unexpected err: %q", resp.Err)
+	}
+}
+
+func TestRunTxctxGovernanceVectorRejectsNonBooleanTxContextEnabled(t *testing.T) {
+	profile := testTxctxGovernanceProfile()
+	profile.TxContextEnabled = 2
+	resp := runTxctxGovernanceVector(
+		Request{
+			TransitionHeight:     uint64Ptr(100),
+			DependencyChecklists: []TxctxDependencyChecklistJSON{testTxctxGovernanceChecklist(profile.ExtID, 48)},
+		},
+		[]CoreExtProfileJSON{profile},
+	)
+	if resp.Ok {
+		t.Fatalf("expected invalid tx_context_enabled rejection")
+	}
+	if resp.Err != txctxGovernanceErrInvalidChecklist {
+		t.Fatalf("unexpected err: %q", resp.Err)
+	}
+}
+
+func TestCoreExtProfileJSONRejectsNonBooleanTxContextEnabledJSON(t *testing.T) {
+	var profile CoreExtProfileJSON
+	err := json.Unmarshal([]byte(`{"tx_context_enabled":2}`), &profile)
+	if err == nil {
+		t.Fatalf("expected tx_context_enabled unmarshal failure")
 	}
 }
 

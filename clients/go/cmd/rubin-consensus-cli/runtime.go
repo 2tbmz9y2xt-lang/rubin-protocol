@@ -170,7 +170,7 @@ type UtxoJSON struct {
 type CoreExtProfileJSON struct {
 	ExtID                uint16  `json:"ext_id"`
 	ActivationHeight     uint64  `json:"activation_height"`
-	TxContextEnabled     int     `json:"tx_context_enabled,omitempty"`
+	TxContextEnabled     BoolishFlag `json:"tx_context_enabled,omitempty"`
 	AllowedSuiteIDs      []uint8 `json:"allowed_suite_ids,omitempty"`
 	AllowedSighashSet    uint8   `json:"allowed_sighash_set,omitempty"`
 	MaxExtPayloadBytes   int     `json:"max_ext_payload_bytes,omitempty"`
@@ -194,6 +194,29 @@ type TxctxDependencyChecklistJSON struct {
 	MaxExtPayloadBytes   int                       `json:"max_ext_payload_bytes,omitempty"`
 	VerifierSideEffects  string                    `json:"verifier_side_effects,omitempty"`
 	Reviewer             string                    `json:"reviewer,omitempty"`
+}
+
+type BoolishFlag int
+
+func (flag *BoolishFlag) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	switch string(trimmed) {
+	case "true":
+		*flag = 1
+		return nil
+	case "false":
+		*flag = 0
+		return nil
+	}
+	var value int
+	if err := json.Unmarshal(trimmed, &value); err != nil {
+		return fmt.Errorf("bad tx_context_enabled")
+	}
+	if value != 0 && value != 1 {
+		return fmt.Errorf("bad tx_context_enabled")
+	}
+	*flag = BoolishFlag(value)
+	return nil
 }
 
 type RotationDescriptorJSON struct {

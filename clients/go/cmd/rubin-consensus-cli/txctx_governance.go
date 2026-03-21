@@ -77,6 +77,7 @@ func validateTxctxGovernanceProfiles(
 	mempoolConfirmed *bool,
 ) error {
 	seenExtIDs := make(map[uint16]struct{}, len(profiles))
+	requiredChecklistExtIDs := make(map[uint16]struct{}, len(profiles))
 	checklistsByExtID := make(map[uint16]TxctxDependencyChecklistJSON, len(checklists))
 	for _, checklist := range checklists {
 		extID, ok := parseChecklistExtID(checklist.ProfileExtID)
@@ -99,9 +100,13 @@ func validateTxctxGovernanceProfiles(
 		if hasDuplicateSuiteID(profile.AllowedSuiteIDs) {
 			return fmt.Errorf(txctxGovernanceErrDuplicateAllowedSuiteID)
 		}
+		if profile.TxContextEnabled != 0 && profile.TxContextEnabled != 1 {
+			return fmt.Errorf(txctxGovernanceErrInvalidChecklist)
+		}
 		if profile.TxContextEnabled == 0 {
 			continue
 		}
+		requiredChecklistExtIDs[profile.ExtID] = struct{}{}
 		if transitionHeight != nil && profile.ActivationHeight < *transitionHeight {
 			return fmt.Errorf(txctxGovernanceErrActivationBelowTransition)
 		}
@@ -111,6 +116,14 @@ func validateTxctxGovernanceProfiles(
 		}
 		if err := validateDependencyChecklist(checklist, profile, mempoolConfirmed); err != nil {
 			return err
+		}
+	}
+	if len(checklistsByExtID) != len(requiredChecklistExtIDs) {
+		return fmt.Errorf(txctxGovernanceErrInvalidChecklist)
+	}
+	for extID := range checklistsByExtID {
+		if _, ok := requiredChecklistExtIDs[extID]; !ok {
+			return fmt.Errorf(txctxGovernanceErrInvalidChecklist)
 		}
 	}
 	return nil
@@ -162,7 +175,17 @@ func parseChecklistExtID(raw string) (uint16, bool) {
 	if raw == "" {
 		return 0, false
 	}
-	value, err := strconv.ParseUint(raw, 0, 16)
+	hexRaw, ok := strings.CutPrefix(raw, "0x")
+	if !ok {
+		hexRaw, ok = strings.CutPrefix(raw, "0X")
+		if !ok {
+			return 0, false
+		}
+	}
+	if hexRaw == "" {
+		return 0, false
+	}
+	value, err := strconv.ParseUint(hexRaw, 16, 16)
 	if err != nil {
 		return 0, false
 	}

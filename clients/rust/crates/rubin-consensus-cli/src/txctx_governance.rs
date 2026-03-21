@@ -83,6 +83,7 @@ fn validate_txctx_governance_profiles(
     mempool_confirmed: Option<bool>,
 ) -> Result<(), &'static str> {
     let mut seen_ext_ids = std::collections::HashSet::with_capacity(profiles.len());
+    let mut required_checklist_ext_ids = std::collections::HashSet::with_capacity(profiles.len());
     let mut checklists_by_ext_id = HashMap::with_capacity(checklists.len());
     for checklist in checklists {
         let ext_id = parse_checklist_ext_id(&checklist.profile_ext_id)
@@ -104,6 +105,7 @@ fn validate_txctx_governance_profiles(
         if !profile.tx_context_enabled {
             continue;
         }
+        required_checklist_ext_ids.insert(profile.ext_id);
         if let Some(transition_height) = transition_height {
             if profile.activation_height < transition_height {
                 return Err(TXCTX_GOVERNANCE_ERR_ACTIVATION_BELOW_TRANSITION);
@@ -113,6 +115,14 @@ fn validate_txctx_governance_profiles(
             .get(&profile.ext_id)
             .ok_or(TXCTX_GOVERNANCE_ERR_MISSING_CHECKLIST)?;
         validate_dependency_checklist(checklist, profile, mempool_confirmed)?;
+    }
+    if checklists_by_ext_id.len() != required_checklist_ext_ids.len() {
+        return Err(TXCTX_GOVERNANCE_ERR_INVALID_CHECKLIST);
+    }
+    for ext_id in checklists_by_ext_id.keys() {
+        if !required_checklist_ext_ids.contains(ext_id) {
+            return Err(TXCTX_GOVERNANCE_ERR_INVALID_CHECKLIST);
+        }
     }
     Ok(())
 }
@@ -158,10 +168,11 @@ fn parse_checklist_ext_id(raw: &str) -> Option<u16> {
     if raw.is_empty() {
         return None;
     }
-    if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
-        return u16::from_str_radix(hex, 16).ok();
+    let hex = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X"))?;
+    if hex.is_empty() {
+        return None;
     }
-    raw.parse::<u16>().ok()
+    u16::from_str_radix(hex, 16).ok()
 }
 
 fn has_duplicate_suite_id(ids: &[u8]) -> bool {
@@ -320,5 +331,39 @@ mod tests {
         assert!(resp.ok, "{:?}", resp.err);
         let diagnostics = resp.diagnostics.expect("diagnostics");
         assert_eq!(diagnostics["derived_transition_height"], json!(100));
+    }
+
+    #[test]
+    fn rejects_extra_checklist() {
+        let req = Request {
+            transition_height: Some(100),
+            core_ext_profiles: vec![test_profile()],
+            dependency_checklists: vec![test_checklist(0x0feb, 48), test_checklist(0x0fed, 48)],
+            ..Default::default()
+        };
+        let resp = run_txctx_governance_vector(&req);
+        assert!(!resp.ok);
+        assert_eq!(
+            resp.err.as_deref(),
+            Some(TXCTX_GOVERNANCE_ERR_INVALID_CHECKLIST)
+        );
+    }
+
+    #[test]
+    fn rejects_noncanonical_checklist_ext_id() {
+        let mut checklist = test_checklist(0x0feb, 48);
+        checklist.profile_ext_id = "010".to_string();
+        let req = Request {
+            transition_height: Some(100),
+            core_ext_profiles: vec![test_profile()],
+            dependency_checklists: vec![checklist],
+            ..Default::default()
+        };
+        let resp = run_txctx_governance_vector(&req);
+        assert!(!resp.ok);
+        assert_eq!(
+            resp.err.as_deref(),
+            Some(TXCTX_GOVERNANCE_ERR_INVALID_CHECKLIST)
+        );
     }
 }

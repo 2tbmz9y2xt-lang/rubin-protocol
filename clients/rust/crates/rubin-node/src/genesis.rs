@@ -53,7 +53,11 @@ where
 
     match Boolish::deserialize(deserializer)? {
         Boolish::Bool(value) => Ok(value),
-        Boolish::Int(value) => Ok(value != 0),
+        Boolish::Int(0) => Ok(false),
+        Boolish::Int(1) => Ok(true),
+        Boolish::Int(_) => Err(serde::de::Error::custom(
+            "tx_context_enabled must be bool or 0/1",
+        )),
     }
 }
 
@@ -418,6 +422,29 @@ mod tests {
 
         let err = load_genesis_config(Some(&path)).unwrap_err();
         assert!(err.contains("requires runtime verifier wiring"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_non_boolean_tx_context_enabled() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-core-ext-invalid-txcontext-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            "{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{\"ext_id\":7,\"activation_height\":12,\"tx_context_enabled\":2,\"allowed_suite_ids\":[3],\"binding\":\"native_verify_sig\"}]}",
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path)).unwrap_err();
+        assert!(err.contains("tx_context_enabled must be bool or 0/1"));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
