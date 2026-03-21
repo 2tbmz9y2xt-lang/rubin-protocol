@@ -50,8 +50,7 @@ pub use core_ext::{
     parse_core_ext_openssl_digest32_binding_descriptor, validate_core_ext_spend,
     CoreExtActiveProfile, CoreExtDeploymentProfile, CoreExtDeploymentProfiles,
     CoreExtOpenSslDigest32BindingDescriptor, CoreExtProfiles, CoreExtVerificationBinding,
-    GovernanceReplayToken,
-    CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
+    GovernanceReplayToken, CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
 };
 pub use covenant_genesis::validate_tx_covenants_genesis;
 pub use error::{ErrorCode, TxError};

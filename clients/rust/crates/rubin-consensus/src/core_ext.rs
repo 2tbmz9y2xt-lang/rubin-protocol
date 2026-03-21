@@ -1685,7 +1685,7 @@ mod tests {
                 verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: b"accept".to_vec(),
                 ext_payload_schema: b"schema".to_vec(),
-            governance_nonce: 0,
+                governance_nonce: 0,
             }],
         };
 
@@ -1710,7 +1710,7 @@ mod tests {
                 verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: Vec::new(),
                 ext_payload_schema: b"schema".to_vec(),
-            governance_nonce: 0,
+                governance_nonce: 0,
             }],
         };
 
@@ -1731,7 +1731,7 @@ mod tests {
                     verify_sig_ext_tx_context_fn: None,
                     binding_descriptor: b"accept".to_vec(),
                     ext_payload_schema: b"schema-a".to_vec(),
-            governance_nonce: 0,
+                    governance_nonce: 0,
                 },
                 CoreExtDeploymentProfile {
                     ext_id: 7,
@@ -1742,7 +1742,7 @@ mod tests {
                     verify_sig_ext_tx_context_fn: None,
                     binding_descriptor: b"reject".to_vec(),
                     ext_payload_schema: b"schema-b".to_vec(),
-            governance_nonce: 0,
+                    governance_nonce: 0,
                 },
             ],
         };

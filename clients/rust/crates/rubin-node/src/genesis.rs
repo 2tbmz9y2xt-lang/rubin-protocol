@@ -498,7 +498,7 @@ mod tests {
                 verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: binding_descriptor.clone(),
                 ext_payload_schema: vec![0xb2],
-            governance_nonce: 0,
+                governance_nonce: 0,
             }],
         )
         .expect("anchor");
