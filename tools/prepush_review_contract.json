@@ -17,7 +17,7 @@
         "code-review",
         "diff-scan"
       ],
-      "stall_seconds": 60
+      "stall_seconds": 90
     },
     "heavy_artillery": {
       "combine_review_units_when_at_most": 4,
@@ -36,7 +36,7 @@
         "semgrep-scan",
         "rubin-coverage"
       ],
-      "stall_seconds": 90
+      "stall_seconds": 150
     },
     "runtime_code": {
       "combine_review_units_when_at_most": 4,
@@ -47,7 +47,7 @@
         "rubin-coverage",
         "internal-tools"
       ],
-      "model": "gpt-5.4",
+      "model": "gpt-5.4-mini",
       "model_reasoning_effort": "high",
       "required_lenses": [
         "code-review",
@@ -55,7 +55,7 @@
         "combined-security-scan",
         "semgrep-scan"
       ],
-      "stall_seconds": 75
+      "stall_seconds": 120
     }
   }
 }
