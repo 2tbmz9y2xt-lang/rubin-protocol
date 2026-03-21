@@ -60,8 +60,12 @@ GO_MAP_DECL_RE = re.compile(
 GO_FUNC_START_RE = re.compile(
     r"^func\s+(?:\([^)]*\)\s+)?\w+(?:\[.*?\])?\s*\(", re.MULTILINE
 )
+# Match `name map[` AND grouped params `a, b map[` (captures all names)
 GO_MAP_PARAM_IN_SIG_RE = re.compile(
     r"(\w+)\s+map\["
+)
+GO_GROUPED_MAP_PARAM_RE = re.compile(
+    r"((?:\w+\s*,\s*)*\w+)\s+map\["
 )
 # Match `range <var>` — including `range <var>[key]` since indexed maps
 # can hold maps (e.g. map[K]map[K2]V), making iteration nondeterministic.
@@ -120,8 +124,12 @@ def check_go(violations: list[str]) -> None:
                         depth -= 1
                     pos += 1
                 sig = text[start:pos - 1]
-                for pm in GO_MAP_PARAM_IN_SIG_RE.finditer(sig):
-                    map_vars.add(pm.group(1))
+                # Handle grouped params: `a, b map[K]V` → both a and b
+                for gm in GO_GROUPED_MAP_PARAM_RE.finditer(sig):
+                    names = [n.strip() for n in gm.group(1).split(",")]
+                    for name in names:
+                        if name and name not in ("func", "return", "var", "type", "map", "range"):
+                            map_vars.add(name)
             if not map_vars:
                 continue
             # Find range over map vars
@@ -167,21 +175,29 @@ def check_rust(violations: list[str]) -> None:
             hashmap_vars: set[str] = set()
             for line in text.splitlines():
                 # Field or param: `name: HashMap<...>`, `name: &HashMap<...>`,
-                # `name: &mut HashMap<...>`, `name: std::collections::HashMap<...>`
+                # `name: &mut HashMap<...>`, `name: &'a HashMap<...>`,
+                # `name: std::collections::HashMap<...>`
                 fm = re.search(
-                    r"(\w+)\s*:\s*(?:&\s*(?:mut\s+)?)?(?:std::collections::)?HashMap\s*<",
+                    r"(\w+)\s*:\s*(?:&\s*(?:'[\w]+\s+)?(?:mut\s+)?)?(?:std::collections::)?HashMap\s*<",
                     line,
                 )
                 if fm:
                     hashmap_vars.add(fm.group(1))
                 # Let binding: `let mut name = HashMap::...` or `let name: HashMap`
-                # Also: `let name = &some_hashmap` (indirect ref)
                 lm = re.search(
-                    r"let\s+(?:mut\s+)?(\w+)\s*(?::\s*(?:&\s*(?:mut\s+)?)?(?:std::collections::)?HashMap|=\s*(?:&\s*(?:mut\s+)?)?HashMap)",
+                    r"let\s+(?:mut\s+)?(\w+)\s*(?::\s*(?:&\s*(?:'[\w]+\s+)?(?:mut\s+)?)?(?:std::collections::)?HashMap|=\s*(?:&\s*(?:mut\s+)?)?HashMap)",
                     line,
                 )
                 if lm:
                     hashmap_vars.add(lm.group(1))
+                # Also: `let m = &some_hashmap` — borrow alias of a known HashMap var
+                if hashmap_vars:
+                    am = re.search(
+                        r"let\s+(?:mut\s+)?(\w+)\s*=\s*&\s*(?:mut\s+)?(\w+)",
+                        line,
+                    )
+                    if am and am.group(2) in hashmap_vars:
+                        hashmap_vars.add(am.group(1))
             if not hashmap_vars:
                 continue
 
