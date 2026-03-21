@@ -149,10 +149,7 @@ impl GovernanceReplayToken {
                 self.issued_at_height, current_height
             ));
         }
-        let expiry = self
-            .issued_at_height
-            .checked_add(self.validity_window)
-            .unwrap_or(u64::MAX);
+        let expiry = self.issued_at_height.saturating_add(self.validity_window);
         if current_height >= expiry {
             return Err(format!(
                 "governance replay token expired: expiry={} current={}",
