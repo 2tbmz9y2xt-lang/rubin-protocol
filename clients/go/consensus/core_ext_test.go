@@ -332,6 +332,7 @@ func TestValidateCoreExtWitnessAtHeightMixedProfileNativeSuiteUsesNativePath(t *
 		cache,
 		nativeRotationProvider{},
 		registry,
+		nil,
 		queue,
 	); err != nil {
 		t.Fatalf("validateCoreExtWitnessAtHeight: %v", err)
@@ -378,6 +379,7 @@ func TestValidateCoreExtWitnessAtHeightNativeSuiteMissingRegistryFailsClosed(t *
 		cache,
 		nativeRotationProvider{},
 		NewSuiteRegistryFromParams(nil),
+		nil,
 		nil,
 	)
 	if err == nil {
@@ -435,6 +437,7 @@ func TestValidateCoreExtWitnessAtHeightRegisteredNativeSuiteOutsideSpendSetRejec
 			OpenSSLAlg: "ML-DSA-87",
 		}}),
 		nil,
+		nil,
 	)
 	if err == nil {
 		t.Fatalf("expected error")
@@ -447,6 +450,371 @@ func TestValidateCoreExtWitnessAtHeightRegisteredNativeSuiteOutsideSpendSetRejec
 	}
 	if called {
 		t.Fatalf("registered native suite outside spend set must reject before verify_sig_ext")
+	}
+}
+
+func TestValidateCoreExtWitnessAtHeight_TxContextEnabledDispatchesNineParam(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0xb0
+
+	txBytes := txWithOneInputOneOutputWithWitness(prev, 0, 90, COV_TYPE_CORE_EXT, coreExtCovenantData(7, nil), []WitnessItem{{
+		SuiteID:   0x42,
+		Pubkey:    []byte{0x01, 0x02, 0x03},
+		Signature: []byte{0x04, 0x01},
+	}})
+	tx, _ := mustParseTxForUtxo(t, txBytes)
+	sighashCache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		t.Fatalf("NewSighashV1PrehashCache: %v", err)
+	}
+
+	resolved := []UtxoEntry{{
+		Value:        100,
+		CovenantType: COV_TYPE_CORE_EXT,
+		CovenantData: coreExtCovenantData(7, []byte{0xaa}),
+	}}
+	txContext, err := BuildTxContext(tx, resolved, mustBuildTxContextOutputExtIDCache(t, tx), 55, staticCoreExtProfiles{
+		7: {Active: true, TxContextEnabled: true},
+	})
+	if err != nil {
+		t.Fatalf("BuildTxContext: %v", err)
+	}
+
+	called := false
+	profile := CoreExtProfile{
+		Active:           true,
+		TxContextEnabled: true,
+		AllowedSuites:    map[uint8]struct{}{0x42: {}},
+		VerifySigExtTxContextFn: func(
+			extID uint16,
+			suiteID uint8,
+			pubkey []byte,
+			signature []byte,
+			digest32 [32]byte,
+			extPayload []byte,
+			ctxBase *TxContextBase,
+			ctxContinuing *TxContextContinuing,
+			selfInputValue uint64,
+		) (bool, error) {
+			called = true
+			if extID != 7 || suiteID != 0x42 {
+				t.Fatalf("extID/suiteID=%d/%d", extID, suiteID)
+			}
+			if string(extPayload) != string([]byte{0xaa}) {
+				t.Fatalf("extPayload=%x", extPayload)
+			}
+			if ctxBase == nil || ctxBase.TotalIn != (Uint128{Lo: 100, Hi: 0}) || ctxBase.TotalOut != (Uint128{Lo: 90, Hi: 0}) || ctxBase.Height != 55 {
+				t.Fatalf("ctxBase=%+v", ctxBase)
+			}
+			if ctxContinuing == nil || ctxContinuing.ContinuingOutputCount != 1 || ctxContinuing.ContinuingOutputs[0].Value != 90 {
+				t.Fatalf("ctxContinuing=%+v", ctxContinuing)
+			}
+			if ctxContinuing.ContinuingOutputs[0].ExtPayload == nil || len(ctxContinuing.ContinuingOutputs[0].ExtPayload) != 0 {
+				t.Fatalf("continuing payload must be non-nil empty slice, got %#v", ctxContinuing.ContinuingOutputs[0].ExtPayload)
+			}
+			if selfInputValue != 100 {
+				t.Fatalf("selfInputValue=%d", selfInputValue)
+			}
+			_ = pubkey
+			_ = signature
+			_ = digest32
+			return true, nil
+		},
+		BindingDescriptor: []byte{0xa1},
+		ExtPayloadSchema:  []byte{0xb2},
+	}
+
+	if err := validateCoreExtWitnessAtHeight(
+		&CoreExtCovenantData{ExtID: 7, ExtPayload: []byte{0xaa}},
+		profile,
+		tx.Witness[0],
+		tx,
+		0,
+		100,
+		[32]byte{0: 0x55},
+		55,
+		sighashCache,
+		nativeRotationProvider{},
+		nil,
+		txContext,
+		nil,
+	); err != nil {
+		t.Fatalf("validateCoreExtWitnessAtHeight: %v", err)
+	}
+	if !called {
+		t.Fatalf("expected 9-parameter verifier to run")
+	}
+}
+
+func TestValidateCoreExtWitnessAtHeight_TxContextEnabledNilBundleFailsClosed(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0xb1
+
+	txBytes := txWithOneInputOneOutputWithWitness(prev, 0, 90, COV_TYPE_CORE_EXT, coreExtCovenantData(7, nil), []WitnessItem{{
+		SuiteID:   0x42,
+		Pubkey:    []byte{0x01, 0x02, 0x03},
+		Signature: []byte{0x04, 0x01},
+	}})
+	tx, _ := mustParseTxForUtxo(t, txBytes)
+	sighashCache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		t.Fatalf("NewSighashV1PrehashCache: %v", err)
+	}
+
+	called := false
+	profile := CoreExtProfile{
+		Active:           true,
+		TxContextEnabled: true,
+		AllowedSuites:    map[uint8]struct{}{0x42: {}},
+		VerifySigExtTxContextFn: func(uint16, uint8, []byte, []byte, [32]byte, []byte, *TxContextBase, *TxContextContinuing, uint64) (bool, error) {
+			called = true
+			return true, nil
+		},
+		BindingDescriptor: []byte{0xa1},
+		ExtPayloadSchema:  []byte{0xb2},
+	}
+
+	err = validateCoreExtWitnessAtHeight(
+		&CoreExtCovenantData{ExtID: 7, ExtPayload: []byte{0xaa}},
+		profile,
+		tx.Witness[0],
+		tx,
+		0,
+		100,
+		[32]byte{0: 0x56},
+		55,
+		sighashCache,
+		nativeRotationProvider{},
+		nil,
+		nil,
+		nil,
+	)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_INVALID {
+		t.Fatalf("code=%s want %s", got, TX_ERR_SIG_INVALID)
+	}
+	if err.Error() != "TX_ERR_SIG_INVALID: CORE_EXT txcontext bundle missing" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if called {
+		t.Fatalf("verifier must not run when txcontext bundle is missing")
+	}
+}
+
+func TestApplyNonCoinbaseTxBasicUpdate_CORE_EXT_TxContextStep3cAndDispatch(t *testing.T) {
+	var chainID [32]byte
+	chainID[0] = 0x61
+	var prev [32]byte
+	prev[0] = 0xb2
+
+	txBytes := txWithOneInputOneOutputWithWitness(prev, 0, 90, COV_TYPE_CORE_EXT, coreExtCovenantData(7, nil), []WitnessItem{{
+		SuiteID:   0x42,
+		Pubkey:    []byte{0x01, 0x02, 0x03},
+		Signature: []byte{0x04, 0x01},
+	}})
+	tx, txid := mustParseTxForUtxo(t, txBytes)
+
+	called := false
+	profiles, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{{
+		ExtID:            7,
+		ActivationHeight: 0,
+		TxContextEnabled: true,
+		AllowedSuites:    map[uint8]struct{}{0x42: {}},
+		VerifySigExtTxContextFn: func(
+			extID uint16,
+			suiteID uint8,
+			_ []byte,
+			_ []byte,
+			_ [32]byte,
+			extPayload []byte,
+			ctxBase *TxContextBase,
+			ctxContinuing *TxContextContinuing,
+			selfInputValue uint64,
+		) (bool, error) {
+			called = true
+			if extID != 7 || suiteID != 0x42 {
+				t.Fatalf("extID/suiteID=%d/%d", extID, suiteID)
+			}
+			if string(extPayload) != string([]byte{0x99}) {
+				t.Fatalf("extPayload=%x", extPayload)
+			}
+			if ctxBase == nil || ctxBase.TotalIn != (Uint128{Lo: 100, Hi: 0}) || ctxBase.TotalOut != (Uint128{Lo: 90, Hi: 0}) || ctxBase.Height != 1 {
+				t.Fatalf("ctxBase=%+v", ctxBase)
+			}
+			if ctxContinuing == nil || ctxContinuing.ContinuingOutputCount != 1 || ctxContinuing.ContinuingOutputs[0].Value != 90 {
+				t.Fatalf("ctxContinuing=%+v", ctxContinuing)
+			}
+			if ctxContinuing.ContinuingOutputs[0].ExtPayload == nil || len(ctxContinuing.ContinuingOutputs[0].ExtPayload) != 0 {
+				t.Fatalf("continuing payload must be non-nil empty slice, got %#v", ctxContinuing.ContinuingOutputs[0].ExtPayload)
+			}
+			if selfInputValue != 100 {
+				t.Fatalf("selfInputValue=%d", selfInputValue)
+			}
+			return true, nil
+		},
+		BindingDescriptor: []byte{0xa1},
+		ExtPayloadSchema:  []byte{0xb2},
+	}})
+	if err != nil {
+		t.Fatalf("NewStaticCoreExtProfileProvider: %v", err)
+	}
+
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prev, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_CORE_EXT,
+			CovenantData: coreExtCovenantData(7, []byte{0x99}),
+		},
+	}
+	if _, _, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
+		tx,
+		txid,
+		utxos,
+		1,
+		0,
+		0,
+		chainID,
+		profiles,
+		nativeRotationProvider{},
+		nil,
+	); err != nil {
+		t.Fatalf("ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext: %v", err)
+	}
+	if !called {
+		t.Fatalf("expected txcontext-enabled verifier to run")
+	}
+}
+
+func TestApplyNonCoinbaseTxBasicUpdate_CORE_EXT_TxContextMalformedOutputFailsBeforeVerifier(t *testing.T) {
+	var chainID [32]byte
+	chainID[0] = 0x62
+	var prev [32]byte
+	prev[0] = 0xb3
+
+	txBytes := txWithOneInputOneOutputWithWitness(prev, 0, 90, COV_TYPE_CORE_EXT, []byte{0x01}, []WitnessItem{{
+		SuiteID:   0x42,
+		Pubkey:    []byte{0x01, 0x02, 0x03},
+		Signature: []byte{0x04, 0x01},
+	}})
+	tx, txid := mustParseTxForUtxo(t, txBytes)
+
+	called := false
+	profiles, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{{
+		ExtID:            7,
+		ActivationHeight: 0,
+		TxContextEnabled: true,
+		AllowedSuites:    map[uint8]struct{}{0x42: {}},
+		VerifySigExtTxContextFn: func(uint16, uint8, []byte, []byte, [32]byte, []byte, *TxContextBase, *TxContextContinuing, uint64) (bool, error) {
+			called = true
+			return true, nil
+		},
+		BindingDescriptor: []byte{0xa1},
+		ExtPayloadSchema:  []byte{0xb2},
+	}})
+	if err != nil {
+		t.Fatalf("NewStaticCoreExtProfileProvider: %v", err)
+	}
+
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prev, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_CORE_EXT,
+			CovenantData: coreExtCovenantData(7, []byte{0x99}),
+		},
+	}
+	_, _, err = ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
+		tx,
+		txid,
+		utxos,
+		1,
+		0,
+		0,
+		chainID,
+		profiles,
+		nativeRotationProvider{},
+		nil,
+	)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("code=%s want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	}
+	if called {
+		t.Fatalf("verifier must not run when step-2 cache construction fails")
+	}
+}
+
+func TestApplyNonCoinbaseTxBasicUpdate_CORE_EXT_TxContextTooManyContinuingOutputsFailsBeforeVerifier(t *testing.T) {
+	var chainID [32]byte
+	chainID[0] = 0x63
+	var prev [32]byte
+	prev[0] = 0xb4
+
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prev, PrevVout: 0, Sequence: 0}},
+		Outputs: []TxOutput{
+			{Value: 30, CovenantType: COV_TYPE_CORE_EXT, CovenantData: coreExtCovenantData(7, nil)},
+			{Value: 30, CovenantType: COV_TYPE_CORE_EXT, CovenantData: coreExtCovenantData(7, []byte{0x01})},
+			{Value: 30, CovenantType: COV_TYPE_CORE_EXT, CovenantData: coreExtCovenantData(7, []byte{0x02})},
+		},
+		Witness: []WitnessItem{{
+			SuiteID:   0x42,
+			Pubkey:    []byte{0x01, 0x02, 0x03},
+			Signature: []byte{0x04, 0x01},
+		}},
+	}
+	txid := hashWithPrefix(0xb5)
+
+	called := false
+	profiles, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{{
+		ExtID:            7,
+		ActivationHeight: 0,
+		TxContextEnabled: true,
+		AllowedSuites:    map[uint8]struct{}{0x42: {}},
+		VerifySigExtTxContextFn: func(uint16, uint8, []byte, []byte, [32]byte, []byte, *TxContextBase, *TxContextContinuing, uint64) (bool, error) {
+			called = true
+			return true, nil
+		},
+		BindingDescriptor: []byte{0xa1},
+		ExtPayloadSchema:  []byte{0xb2},
+	}})
+	if err != nil {
+		t.Fatalf("NewStaticCoreExtProfileProvider: %v", err)
+	}
+
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prev, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_CORE_EXT,
+			CovenantData: coreExtCovenantData(7, []byte{0x99}),
+		},
+	}
+	_, _, err = ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
+		tx,
+		txid,
+		utxos,
+		1,
+		0,
+		0,
+		chainID,
+		profiles,
+		nativeRotationProvider{},
+		nil,
+	)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("code=%s want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	}
+	if called {
+		t.Fatalf("verifier must not run when txcontext build rejects excessive continuing outputs")
 	}
 }
 

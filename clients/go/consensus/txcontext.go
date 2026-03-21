@@ -28,6 +28,15 @@ type TxOutputView struct {
 	ExtPayload []byte
 }
 
+// ExtIDCacheEntry is one step-2 CORE_EXT output cache record for txcontext.
+// Entries are keyed by ext_id and preserve vout order within each bucket.
+type ExtIDCacheEntry struct {
+	ExtID      uint16
+	VoutIndex  uint32
+	ExtPayload []byte
+	Value      uint64
+}
+
 // TxContextContinuing is the immutable ext_id-local continuing output bundle.
 // Only indices [0, ContinuingOutputCount) are valid.
 type TxContextContinuing struct {
@@ -66,6 +75,73 @@ func uint128FromInternal(v u128) Uint128 {
 	}
 }
 
+func cloneTxContextPayload(src []byte) []byte {
+	out := make([]byte, len(src))
+	copy(out, src)
+	return out
+}
+
+// BuildTxContextOutputExtIDCache builds the step-2 structural CORE_EXT output
+// cache used by BuildTxContext. Buckets preserve transaction vout order.
+func BuildTxContextOutputExtIDCache(tx *Tx) (map[uint16][]ExtIDCacheEntry, error) {
+	if tx == nil {
+		return nil, txerr(TX_ERR_PARSE, "nil tx")
+	}
+	cache := make(map[uint16][]ExtIDCacheEntry)
+	for voutIndex, out := range tx.Outputs {
+		if out.CovenantType != COV_TYPE_CORE_EXT {
+			continue
+		}
+		cd, err := ParseCoreExtCovenantData(out.CovenantData)
+		if err != nil {
+			return nil, err
+		}
+		cache[cd.ExtID] = append(cache[cd.ExtID], ExtIDCacheEntry{
+			ExtID:      cd.ExtID,
+			VoutIndex:  uint32(voutIndex),
+			ExtPayload: cloneTxContextPayload(cd.ExtPayload),
+			Value:      out.Value,
+		})
+	}
+	return cache, nil
+}
+
+func collectTxContextExtIDs(
+	resolvedInputs []UtxoEntry,
+	blockHeight uint64,
+	coreExtProfiles CoreExtProfileProvider,
+) ([]uint16, error) {
+	if coreExtProfiles == nil {
+		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile provider missing")
+	}
+
+	wanted := make(map[uint16]struct{})
+	for _, entry := range resolvedInputs {
+		if entry.CovenantType != COV_TYPE_CORE_EXT {
+			continue
+		}
+		cd, err := ParseCoreExtCovenantData(entry.CovenantData)
+		if err != nil {
+			return nil, err
+		}
+		profile, ok, err := coreExtProfiles.LookupCoreExtProfile(cd.ExtID, blockHeight)
+		if err != nil {
+			return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile lookup failure")
+		}
+		if !ok || !profile.Active || !profile.TxContextEnabled {
+			continue
+		}
+		wanted[cd.ExtID] = struct{}{}
+	}
+
+	extIDs := make([]uint16, 0, len(wanted))
+	for extID := range wanted {
+		extIDs = append(extIDs, extID)
+	}
+	sort.Slice(extIDs, func(i, j int) bool { return extIDs[i] < extIDs[j] })
+	return extIDs, nil
+}
+
 func sumTxContextInputValues(resolvedInputs []UtxoEntry, initial u128) (u128, error) {
 	total := initial
 	for _, entry := range resolvedInputs {
@@ -96,6 +172,7 @@ func sumTxContextOutputValues(outputs []TxOutput, initial u128) (u128, error) {
 func BuildTxContext(
 	tx *Tx,
 	resolvedInputs []UtxoEntry,
+	outputExtIDCache map[uint16][]ExtIDCacheEntry,
 	blockHeight uint64,
 	coreExtProfiles CoreExtProfileProvider,
 ) (*TxContextBundle, error) {
@@ -105,8 +182,15 @@ func BuildTxContext(
 	if len(tx.Inputs) != len(resolvedInputs) {
 		return nil, txerr(TX_ERR_PARSE, "txcontext resolved input count mismatch")
 	}
-	if coreExtProfiles == nil {
-		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile provider missing")
+	extIDs, err := collectTxContextExtIDs(resolvedInputs, blockHeight, coreExtProfiles)
+	if err != nil {
+		return nil, err
+	}
+	if len(extIDs) == 0 {
+		return nil, nil
+	}
+	if outputExtIDCache == nil {
+		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "txcontext output cache missing")
 	}
 
 	totalIn, err := sumTxContextInputValues(resolvedInputs, u128{})
@@ -117,34 +201,6 @@ func BuildTxContext(
 	if err != nil {
 		return nil, err
 	}
-
-	wanted := make(map[uint16]struct{})
-	for _, entry := range resolvedInputs {
-		if entry.CovenantType != COV_TYPE_CORE_EXT {
-			continue
-		}
-		cd, err := ParseCoreExtCovenantData(entry.CovenantData)
-		if err != nil {
-			return nil, err
-		}
-		profile, ok, err := coreExtProfiles.LookupCoreExtProfile(cd.ExtID, blockHeight)
-		if err != nil {
-			return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile lookup failure")
-		}
-		if !ok || !profile.Active || !profile.TxContextEnabled {
-			continue
-		}
-		wanted[cd.ExtID] = struct{}{}
-	}
-	if len(wanted) == 0 {
-		return nil, nil
-	}
-
-	extIDs := make([]uint16, 0, len(wanted))
-	for extID := range wanted {
-		extIDs = append(extIDs, extID)
-	}
-	sort.Slice(extIDs, func(i, j int) bool { return extIDs[i] < extIDs[j] })
 
 	bundle := &TxContextBundle{
 		Base: &TxContextBase{
@@ -157,30 +213,19 @@ func BuildTxContext(
 	}
 
 	for _, extID := range extIDs {
-		bundle.ContinuingByExt[extID] = &TxContextContinuing{}
-	}
-
-	for _, out := range tx.Outputs {
-		if out.CovenantType != COV_TYPE_CORE_EXT {
-			continue
+		continuing := &TxContextContinuing{}
+		for _, entry := range outputExtIDCache[extID] {
+			if int(continuing.ContinuingOutputCount) >= TXCONTEXT_MAX_CONTINUING_OUTPUTS {
+				return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, fmt.Sprintf("too many continuing outputs for ext_id=%d", extID))
+			}
+			idx := int(continuing.ContinuingOutputCount)
+			continuing.ContinuingOutputs[idx] = TxOutputView{
+				Value:      entry.Value,
+				ExtPayload: cloneTxContextPayload(entry.ExtPayload),
+			}
+			continuing.ContinuingOutputCount++
 		}
-		cd, err := ParseCoreExtCovenantData(out.CovenantData)
-		if err != nil {
-			return nil, err
-		}
-		continuing, ok := bundle.ContinuingByExt[cd.ExtID]
-		if !ok {
-			continue
-		}
-		if int(continuing.ContinuingOutputCount) >= TXCONTEXT_MAX_CONTINUING_OUTPUTS {
-			return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, fmt.Sprintf("too many continuing outputs for ext_id=%d", cd.ExtID))
-		}
-		idx := int(continuing.ContinuingOutputCount)
-		continuing.ContinuingOutputs[idx] = TxOutputView{
-			Value:      out.Value,
-			ExtPayload: cloneBytes(cd.ExtPayload),
-		}
-		continuing.ContinuingOutputCount++
+		bundle.ContinuingByExt[extID] = continuing
 	}
 
 	return bundle, nil
