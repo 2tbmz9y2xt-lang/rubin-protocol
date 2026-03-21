@@ -1,0 +1,142 @@
+{
+  "gate": "CV-DA-STRESS",
+  "vectors": [
+    {
+      "id": "CV-DA-STRESS-01",
+      "op": "compact_prefetch_caps",
+      "expect_ok": true,
+      "peer_streams_bps": [
+        3900000,
+        3900000,
+        3900000,
+        3900000,
+        3900000,
+        3900000,
+        3900000,
+        3900000
+      ],
+      "per_peer_bps": 4000000,
+      "global_bps": 32000000,
+      "expect_peer_exceeded": false,
+      "expect_global_exceeded": false,
+      "expect_quality_penalty": false,
+      "expect_disconnect": false
+    },
+    {
+      "id": "CV-DA-STRESS-02",
+      "op": "compact_prefetch_caps",
+      "expect_ok": true,
+      "peer_streams_bps": [
+        6100000,
+        6000000,
+        6000000,
+        6000000,
+        6000000,
+        6000000,
+        6000000,
+        6000000
+      ],
+      "per_peer_bps": 6000000,
+      "global_bps": 48000000,
+      "expect_peer_exceeded": true,
+      "expect_global_exceeded": true,
+      "expect_quality_penalty": true,
+      "expect_disconnect": false
+    },
+    {
+      "id": "CV-DA-STRESS-03",
+      "op": "compact_orphan_limits",
+      "expect_ok": true,
+      "per_peer_limit": 4194304,
+      "per_da_id_limit": 8388608,
+      "global_limit": 67108864,
+      "current_peer_bytes": 3145728,
+      "current_da_id_bytes": 7340032,
+      "current_global_bytes": 66846720,
+      "incoming_chunk_bytes": 524288,
+      "expect_admit": false
+    },
+    {
+      "id": "CV-DA-STRESS-04",
+      "op": "compact_orphan_limits",
+      "expect_ok": true,
+      "per_peer_limit": 6291456,
+      "per_da_id_limit": 12582912,
+      "global_limit": 100663296,
+      "current_peer_bytes": 5242880,
+      "current_da_id_bytes": 11534336,
+      "current_global_bytes": 99614720,
+      "incoming_chunk_bytes": 524288,
+      "expect_admit": true
+    },
+    {
+      "id": "CV-DA-STRESS-05",
+      "op": "compact_orphan_storm",
+      "expect_ok": true,
+      "global_limit": 67108864,
+      "current_global_bytes": 65011712,
+      "incoming_chunk_bytes": 524288,
+      "incoming_has_commit": false,
+      "recovery_success_rate": 98.0,
+      "observation_minutes": 8,
+      "expect_fill_pct": 96.875,
+      "expect_storm_mode": true,
+      "expect_admit": false,
+      "expect_rollback": false
+    },
+    {
+      "id": "CV-DA-STRESS-06",
+      "op": "compact_orphan_storm",
+      "expect_ok": true,
+      "global_limit": 100663296,
+      "current_global_bytes": 97517568,
+      "incoming_chunk_bytes": 524288,
+      "incoming_has_commit": true,
+      "recovery_success_rate": 93.0,
+      "observation_minutes": 12,
+      "expect_fill_pct": 96.875,
+      "expect_storm_mode": true,
+      "expect_admit": true,
+      "expect_rollback": true
+    },
+    {
+      "id": "CV-DA-STRESS-07",
+      "op": "compact_pinned_accounting",
+      "expect_ok": true,
+      "cap_bytes": 96000000,
+      "current_pinned_payload_bytes": 60000000,
+      "incoming_payload_bytes": 32000000,
+      "incoming_commit_overhead_bytes": 2048,
+      "expect_counted_bytes": 92000000,
+      "expect_ignored_overhead_bytes": 2048,
+      "expect_admit": true
+    },
+    {
+      "id": "CV-DA-STRESS-08",
+      "op": "compact_pinned_accounting",
+      "expect_ok": true,
+      "cap_bytes": 144000000,
+      "current_pinned_payload_bytes": 90000000,
+      "incoming_payload_bytes": 48000000,
+      "incoming_commit_overhead_bytes": 4096,
+      "expect_counted_bytes": 138000000,
+      "expect_ignored_overhead_bytes": 4096,
+      "expect_admit": true
+    },
+    {
+      "id": "CV-DA-STRESS-09",
+      "op": "compact_chunk_count_cap",
+      "expect_ok": true,
+      "max_da_chunk_count": 91,
+      "chunk_count": 91
+    },
+    {
+      "id": "CV-DA-STRESS-10",
+      "op": "compact_chunk_count_cap",
+      "expect_ok": false,
+      "max_da_chunk_count": 91,
+      "chunk_count": 92,
+      "expect_err": "TX_ERR_PARSE"
+    }
+  ]
+}
