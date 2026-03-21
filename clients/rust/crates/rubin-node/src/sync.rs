@@ -435,20 +435,21 @@ fn validate_mainnet_genesis_guard(cfg: &SyncConfig) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use rubin_consensus::constants::{COV_TYPE_EXT, COV_TYPE_P2PK, POW_LIMIT};
+    use rubin_consensus::constants::{COV_TYPE_EXT, COV_TYPE_P2PK, POW_LIMIT, SUITE_ID_ML_DSA_87};
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
     use rubin_consensus::{
         block_hash, encode_compact_size, merkle_root_txids, parse_block_bytes, parse_tx,
         CoreExtDeploymentProfile, CoreExtDeploymentProfiles, CoreExtVerificationBinding, Outpoint,
         UtxoEntry, BLOCK_HEADER_BYTES,
     };
+    use rubin_consensus::{DefaultRotationProvider, SuiteRegistry};
 
     use crate::blockstore::{block_store_path, BlockStore};
     use crate::chainstate::{chain_state_path, load_chain_state, ChainState};
     use crate::coinbase::{build_coinbase_tx, default_mine_address};
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use crate::io_utils::unique_temp_path;
-    use crate::sync::{default_sync_config, SyncEngine};
+    use crate::sync::{default_sync_config, SuiteContext, SyncEngine};
 
     const VALID_BLOCK_HEX: &str = "01000000111111111111111111111111111111111111111111111111111111111111111102e66000bf8ce870908df4a8689554852ccef681ee0b5df32246162a53e36e290100000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff07000000000000000101000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff010000000000000000020020b716a4b7f4c0fab665298ab9b8199b601ab9fa7e0a27f0713383f34cf37071a8000000000000";
     const CORE_EXT_NATIVE_BINDING_SPEND_TX_HEX: &str = "0100000000010000000000000001eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee000000000000000000015a0000000000000000002101111111111111111111111111111111111111111111111111111111111111111100000000010300010100";
@@ -618,6 +619,46 @@ mod tests {
         cfg.network = "mainnet".to_string();
         let engine = SyncEngine::new(st, None, cfg);
         assert!(engine.is_ok());
+    }
+
+    #[test]
+    fn suite_context_none_returns_none_pair() {
+        let cfg = default_sync_config(Some(POW_LIMIT), devnet_genesis_chain_id(), None);
+        let engine = SyncEngine::new(ChainState::new(), None, cfg).expect("new sync");
+        let (rot, reg) = engine.suite_context();
+        // When suite_context is None, both should be None
+        // (consensus functions internally fallback to DefaultRotationProvider)
+        assert!(rot.is_none());
+        assert!(reg.is_none());
+    }
+
+    #[test]
+    fn suite_context_with_stored_context_returns_some() {
+        use std::sync::Arc;
+        let mut cfg = default_sync_config(Some(POW_LIMIT), devnet_genesis_chain_id(), None);
+        cfg.suite_context = Some(SuiteContext {
+            rotation: Arc::new(DefaultRotationProvider),
+            registry: Arc::new(SuiteRegistry::default_registry().clone()),
+        });
+        let engine = SyncEngine::new(ChainState::new(), None, cfg).expect("new sync");
+        let (rot, reg) = engine.suite_context();
+        assert!(rot.is_some());
+        assert!(reg.is_some());
+        // DefaultRotationProvider should include ML-DSA-87 at any height
+        let spend_set = rot.unwrap().native_spend_suites(0);
+        assert!(spend_set.contains(SUITE_ID_ML_DSA_87));
+    }
+
+    #[test]
+    fn sync_engine_default_rotation_connects_genesis() {
+        // Regression: SyncEngine without explicit suite_context connects genesis normally
+        let cfg = default_sync_config(Some(POW_LIMIT), devnet_genesis_chain_id(), None);
+        let mut engine = SyncEngine::new(ChainState::new(), None, cfg).expect("new sync");
+        engine
+            .apply_block(&devnet_genesis_block_bytes(), None)
+            .expect("default rotation must accept genesis");
+        assert!(engine.chain_state.has_tip);
+        assert_eq!(engine.chain_state.height, 0);
     }
 
     #[test]
