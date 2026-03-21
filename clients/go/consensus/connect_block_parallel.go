@@ -611,7 +611,7 @@ func applyNonCoinbaseTxBasicWorkQ(
 		TotalOut: uint128FromInternal(sumOut),
 		Height:   height,
 	}
-	if txContext != nil && txContext.Base != nil {
+	if txContext != nil {
 		if errTx := requireTxContextBaseMatchesTotals(txContext.Base, valueBase.TotalIn, valueBase.TotalOut, height); errTx != nil {
 			return nil, 0, errTx
 		}

@@ -433,7 +433,7 @@ func TestCheckValueConservationTxWide_RejectsOutputsExceedInputs(t *testing.T) {
 	}
 }
 
-func TestCheckValueConservationTxWide_IgnoresVaultFloorWithoutVaultInputs(t *testing.T) {
+func TestCheckValueConservationTxWide_IgnoresVaultFloorWithoutExactOneVaultInput(t *testing.T) {
 	err := CheckValueConservationTxWide(
 		&TxContextBase{
 			TotalIn:  Uint128{Lo: 10},
@@ -491,6 +491,9 @@ func TestRequireTxContextBaseMatchesTotals(t *testing.T) {
 		TotalIn:  Uint128{Lo: 10, Hi: 2},
 		TotalOut: Uint128{Lo: 9, Hi: 1},
 		Height:   55,
+	}
+	if err := requireTxContextBaseMatchesTotals(nil, Uint128{Lo: 10, Hi: 2}, Uint128{Lo: 9, Hi: 1}, 55); err == nil || err.Code != TX_ERR_PARSE {
+		t.Fatalf("expected TX_ERR_PARSE on nil base, got %v", err)
 	}
 	if err := requireTxContextBaseMatchesTotals(base, Uint128{Lo: 10, Hi: 2}, Uint128{Lo: 9, Hi: 1}, 55); err != nil {
 		t.Fatalf("expected exact totals match, got %v", err)

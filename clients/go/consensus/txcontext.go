@@ -84,11 +84,11 @@ func uint128ToInternal(v Uint128) u128 {
 
 // CheckValueConservationTxWide applies the canonical tx-wide value
 // conservation rules against the immutable txcontext totals. The vault floor
-// input is ignored unless the transaction actually spends at least one
-// CORE_VAULT input.
+// input is ignored unless the transaction spends exactly one CORE_VAULT input,
+// matching the executable validator paths.
 func CheckValueConservationTxWide(
 	base *TxContextBase,
-	hasVaultInputs bool,
+	hasExactOneVaultInput bool,
 	vaultInputSum Uint128,
 ) *TxError {
 	if base == nil {
@@ -101,7 +101,7 @@ func CheckValueConservationTxWide(
 		return &TxError{Code: TX_ERR_VALUE_CONSERVATION, Msg: "sum_out exceeds sum_in"}
 	}
 
-	if hasVaultInputs {
+	if hasExactOneVaultInput {
 		vaultFloor := uint128ToInternal(vaultInputSum)
 		if cmpU128(totalOut, vaultFloor) < 0 {
 			return &TxError{Code: TX_ERR_VALUE_CONSERVATION, Msg: "CORE_VAULT value must not fund miner fee"}
