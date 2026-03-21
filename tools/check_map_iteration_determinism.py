@@ -35,18 +35,12 @@ GO_ALLOWLIST = {
     "connect_block_parallel.go:applyNonCoinbaseTxBasicWorkQ",
     # build overlay map→map, order-neutral
     "connect_block_parallel_precompute.go:PrecomputeTxContexts",
-    # range over slice param []CoreExtDeploymentProfile, not a map
-    "core_ext.go:NewStaticCoreExtProfileProvider",
     # clone set map[uint8]struct{}, order-neutral
     "core_ext.go:cloneAllowedSuites",
     # collect keys → sort.Slice before return
     "core_ext.go:sortedAllowedSuites",
-    # range over slice param, anchors sorted before hash
-    "core_ext.go:CoreExtProfileSetAnchorV1",
     # collect items → sort by key → deterministic hash
     "state_digest.go:UtxoSetHash",
-    # outer range is over sorted slice, inner is slice too
-    "txcontext.go:BuildTxContext",
     # deep-copy map→map, order-neutral
     "utxo_basic.go:cloneUtxoSet",
     # shallow-copy map→map, order-neutral
@@ -58,11 +52,13 @@ GO_ALLOWLIST = {
 GO_MAP_DECL_RE = re.compile(
     r"^\s*(\w+)\s*:?=\s*(?:make\()?map\[", re.MULTILINE
 )
-# Also catch map-typed function/method parameters:
-#   func foo(m map[string]int)
-#   func (r *T) bar(things map[uint16]Entry, ...)
-GO_MAP_PARAM_RE = re.compile(
-    r"(\w+)\s+map\[", re.MULTILINE
+# Also catch map-typed function/method parameters by scanning func signatures.
+# We extract the parameter list from func lines and find `name map[` within it.
+GO_FUNC_LINE_RE = re.compile(
+    r"^func\s+(?:\([^)]*\)\s+)?\w+(?:\[.*?\])?\s*\((.+)", re.MULTILINE
+)
+GO_MAP_PARAM_IN_SIG_RE = re.compile(
+    r"(\w+)\s+map\["
 )
 GO_RANGE_RE = re.compile(
     r"for\s+\w+(?:\s*,\s*\w+)?\s*:?=\s*range\s+(\w+)"
@@ -105,12 +101,11 @@ def check_go(violations: list[str]) -> None:
             map_vars = set()
             for m in GO_MAP_DECL_RE.finditer(text):
                 map_vars.add(m.group(1))
-            # Also scan function signatures for map-typed params
-            for m in GO_MAP_PARAM_RE.finditer(text):
-                param_name = m.group(1)
-                # Exclude false positives: keywords, type names, etc.
-                if param_name not in ("func", "return", "var", "type", "map", "range"):
-                    map_vars.add(param_name)
+            # Scan function signatures only for map-typed params
+            for m in GO_FUNC_LINE_RE.finditer(text):
+                sig = m.group(1)
+                for pm in GO_MAP_PARAM_IN_SIG_RE.finditer(sig):
+                    map_vars.add(pm.group(1))
             if not map_vars:
                 continue
             # Find range over map vars
