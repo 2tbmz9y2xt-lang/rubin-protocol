@@ -203,6 +203,9 @@ func coreExtBindingKind(profile CoreExtDeploymentProfile) (byte, error) {
 }
 
 func CoreExtProfileBytesV1(profile CoreExtDeploymentProfile) ([]byte, error) {
+	if profile.TxContextEnabled {
+		return nil, fmt.Errorf("core_ext profile ext_id=%d txcontext-enabled profile requires v2 anchor pipeline", profile.ExtID)
+	}
 	allowed := sortedAllowedSuites(profile.AllowedSuites)
 	if len(allowed) == 0 {
 		return nil, fmt.Errorf("core_ext profile ext_id=%d must have non-empty allowed suites", profile.ExtID)
