@@ -952,4 +952,68 @@ mod tests {
         assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
         assert!(take_txctx_record().is_none());
     }
+
+    #[test]
+    fn apply_non_coinbase_tx_basic_update_core_ext_txcontext_output_validation_precedes_witness_count_mismatch(
+    ) {
+        let _guard = test_lock().lock().expect("test lock");
+        reset_txctx_record();
+
+        let mut chain_id = [0u8; 32];
+        chain_id[0] = 0x64;
+        let mut prev_txid = [0u8; 32];
+        prev_txid[0] = 0xb5;
+        let mut txid = [0u8; 32];
+        txid[0] = 0xb8;
+
+        let tx = Tx {
+            version: 1,
+            tx_kind: 0x00,
+            tx_nonce: 1,
+            inputs: vec![TxInput {
+                prev_txid,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: 90,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: vec![0x01],
+            }],
+            locktime: 0,
+            witness: vec![
+                WitnessItem {
+                    suite_id: 0x42,
+                    pubkey: vec![0x01, 0x02, 0x03],
+                    signature: vec![0x04, 0x01],
+                },
+                WitnessItem {
+                    suite_id: 0x42,
+                    pubkey: vec![0x09],
+                    signature: vec![0x08, 0x01],
+                },
+            ],
+            da_payload: vec![],
+            da_commit_core: None,
+            da_chunk_core: None,
+        };
+
+        let err =
+            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+                &tx,
+                txid,
+                &txcontext_input_utxos(prev_txid),
+                1,
+                0,
+                0,
+                chain_id,
+                &txcontext_profiles(),
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+        assert!(take_txctx_record().is_none());
+    }
 }
