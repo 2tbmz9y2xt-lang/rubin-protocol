@@ -421,16 +421,19 @@ fn txctx_has_active_input_ext_id(tc: &TxctxCase, ext_id: u16) -> bool {
 fn txctx_duplicate_prevout(tc: &TxctxCase) -> bool {
     let mut seen = BTreeSet::new();
     for input in &tc.inputs {
-        let key = format!(
-            "{}:{}",
-            txctx_normalize_hex(&input.prevout_txid_hex),
-            input.prevout_vout
-        );
+        let key = txctx_canonical_prevout_key(&input.prevout_txid_hex, input.prevout_vout);
         if !seen.insert(key) {
             return true;
         }
     }
     false
+}
+
+fn txctx_canonical_prevout_key(txid_hex: &str, vout: u32) -> String {
+    let key_txid = txctx_parse_txid(txid_hex)
+        .map(hex::encode)
+        .unwrap_or_else(|_| txctx_normalize_hex(txid_hex));
+    format!("{key_txid}:{vout}")
 }
 
 fn txctx_profile_error(tc: &TxctxCase) -> Option<&'static str> {
@@ -538,9 +541,12 @@ fn txctx_has_continuing_overflow(outputs: &[TxctxOutput]) -> bool {
 }
 
 fn txctx_parse_txid(hex_value: &str) -> Result<[u8; 32], String> {
-    let raw = txctx_normalize_hex(hex_value);
+    let mut raw = txctx_normalize_hex(hex_value);
     if raw.is_empty() {
         return Ok([0u8; 32]);
+    }
+    if raw.len() % 2 == 1 {
+        raw.insert(0, '0');
     }
     let mut bytes = txctx_decode_hex(&raw)?;
     if bytes.len() > 32 {
@@ -925,5 +931,31 @@ mod tests {
 
         let resp = run_txctx_spend_vector(Some(tc));
         assert!(resp.ok, "unexpected error: {:?}", resp.err);
+    }
+
+    #[test]
+    fn txctx_parse_txid_accepts_odd_length_hex() {
+        let parsed = txctx_parse_txid("1").expect("odd-length hex should normalize");
+        assert_eq!(parsed[31], 0x01);
+    }
+
+    #[test]
+    fn txctx_duplicate_prevout_canonicalizes_equivalent_hex() {
+        let tc = TxctxCase {
+            inputs: vec![
+                TxctxInput {
+                    prevout_txid_hex: "1".to_string(),
+                    prevout_vout: 0,
+                    ..Default::default()
+                },
+                TxctxInput {
+                    prevout_txid_hex: "01".to_string(),
+                    prevout_vout: 0,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(txctx_duplicate_prevout(&tc));
     }
 }

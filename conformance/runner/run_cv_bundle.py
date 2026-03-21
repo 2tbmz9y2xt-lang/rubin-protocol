@@ -43,6 +43,20 @@ LOCAL_OPS = {
 TXCTX_GOVERNANCE_SKIP_IDS = {"CV-TXCTX-60", "CV-TXCTX-GOV-01"}
 
 
+def normalized_vector_op(gate: str, vector: Dict[str, Any]) -> Optional[str]:
+    op = vector.get("op")
+    if isinstance(op, str):
+        op = op.strip()
+    if gate == "CV-TXCTX" and not op:
+        vid = str(vector.get("id", "?"))
+        if vid in TXCTX_GOVERNANCE_SKIP_IDS:
+            return None
+        return "txctx_spend_vector"
+    if not op:
+        return None
+    return str(op)
+
+
 def run(cmd: List[str], cwd: pathlib.Path) -> None:
     p = subprocess.run(cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if p.returncode != 0:
@@ -1534,12 +1548,11 @@ def validate_vector(
     rust_cli: pathlib.Path,
     vectors_by_id: Dict[str, Dict[str, Any]],
 ) -> Tuple[List[str], bool]:
-    op = v.get("op")
     vid = v.get("id", "?")
-    if gate == "CV-TXCTX" and not op:
+    op = normalized_vector_op(gate, v)
+    if gate == "CV-TXCTX" and op is None:
         if str(vid) in TXCTX_GOVERNANCE_SKIP_IDS:
             return [], True
-        op = "txctx_spend_vector"
     if not op:
         return [f"{gate}/{vid}: missing op"], False
 

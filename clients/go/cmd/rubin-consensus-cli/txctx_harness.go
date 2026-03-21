@@ -468,13 +468,21 @@ func txctxProfileError(tc *TxctxCaseJSON) string {
 func txctxDuplicatePrevout(tc *TxctxCaseJSON) bool {
 	seen := make(map[string]struct{}, len(tc.Inputs))
 	for _, input := range tc.Inputs {
-		key := fmt.Sprintf("%s:%d", txctxNormalizeHex(input.PrevoutTxidHex), input.PrevoutVout)
+		key := txctxCanonicalPrevoutKey(input.PrevoutTxidHex, input.PrevoutVout)
 		if _, ok := seen[key]; ok {
 			return true
 		}
 		seen[key] = struct{}{}
 	}
 	return false
+}
+
+func txctxCanonicalPrevoutKey(txidHex string, vout uint32) string {
+	txid, err := txctxParseTxid(txidHex)
+	if err != nil {
+		return fmt.Sprintf("%s:%d", txctxNormalizeHex(txidHex), vout)
+	}
+	return fmt.Sprintf("%x:%d", txid, vout)
 }
 
 func txctxHasActiveInputExtID(tc *TxctxCaseJSON, extID uint16) bool {

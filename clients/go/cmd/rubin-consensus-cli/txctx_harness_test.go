@@ -98,3 +98,15 @@ func TestRunTxctxSpendVectorScopesMissingContinuingToRequestedExtID(t *testing.T
 		t.Fatalf("expected scoped missing-continuing injection to be ignored, got ok=%v err=%q", resp.Ok, resp.Err)
 	}
 }
+
+func TestTxctxDuplicatePrevoutCanonicalizesEquivalentPrevoutHex(t *testing.T) {
+	tc := &TxctxCaseJSON{
+		Inputs: []TxctxInputJSON{
+			{PrevoutTxidHex: "1", PrevoutVout: 0},
+			{PrevoutTxidHex: "01", PrevoutVout: 0},
+		},
+	}
+	if !txctxDuplicatePrevout(tc) {
+		t.Fatal("expected equivalent prevout encodings to be treated as duplicates")
+	}
+}
