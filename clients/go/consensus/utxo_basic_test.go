@@ -157,6 +157,39 @@ func TestApplyNonCoinbaseTxBasicUpdate_RejectsImmatureCoinbaseSpend(t *testing.T
 	}
 }
 
+func TestApplyNonCoinbaseTxBasicUpdate_RejectsImmatureCoinbaseSpend_OverflowSafe(t *testing.T) {
+	// Regression: creation_height near MaxUint64 must not wrap around and
+	// falsely pass the maturity check. The overflow-safe form uses
+	// subtraction instead of addition.
+	var prev [32]byte
+	prev[0] = 0xc2
+
+	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
+	tx, txid := mustParseTxForUtxo(t, txBytes)
+
+	const nearMax uint64 = ^uint64(0) - 10 // MaxUint64 - 10
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prev, Vout: 0}: {
+			Value:             100,
+			CovenantType:      COV_TYPE_P2PK,
+			CovenantData:      validP2PKCovenantData(),
+			CreationHeight:    nearMax,
+			CreatedByCoinbase: true,
+		},
+	}
+
+	// height = nearMax + 5: maturity gap is only 5, well below COINBASE_MATURITY.
+	// With the old overflow-prone check (height < creation+MATURITY), the
+	// addition would wrap and the check would incorrectly pass.
+	_, _, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxos, nearMax+5, 0, [32]byte{})
+	if err == nil {
+		t.Fatalf("expected TX_ERR_COINBASE_IMMATURE for overflow-edge case")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_COINBASE_IMMATURE {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_COINBASE_IMMATURE)
+	}
+}
+
 func TestApplyNonCoinbaseTxBasic_InputValidationErrors(t *testing.T) {
 	cases := []struct {
 		utxosFn   func(prev [32]byte) map[Outpoint]UtxoEntry
