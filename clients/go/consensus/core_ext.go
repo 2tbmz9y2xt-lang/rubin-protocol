@@ -17,6 +17,7 @@ const (
 
 type CoreExtProfile struct {
 	Active            bool
+	TxContextEnabled  bool
 	AllowedSuites     map[uint8]struct{}
 	VerifySigExtFn    CoreExtVerifySigExtFunc
 	BindingDescriptor []byte
@@ -32,6 +33,7 @@ type emptyCoreExtProfileProvider struct{}
 type CoreExtDeploymentProfile struct {
 	ExtID             uint16
 	ActivationHeight  uint64
+	TxContextEnabled  bool
 	AllowedSuites     map[uint8]struct{}
 	VerifySigExtFn    CoreExtVerifySigExtFunc
 	BindingDescriptor []byte
@@ -65,6 +67,7 @@ func NewStaticCoreExtProfileProvider(deployments []CoreExtDeploymentProfile) (*S
 		provider.deployments[item.ExtID] = CoreExtDeploymentProfile{
 			ExtID:             item.ExtID,
 			ActivationHeight:  item.ActivationHeight,
+			TxContextEnabled:  item.TxContextEnabled,
 			AllowedSuites:     cloneAllowedSuites(item.AllowedSuites),
 			VerifySigExtFn:    item.VerifySigExtFn,
 			BindingDescriptor: cloneBytes(item.BindingDescriptor),
@@ -88,6 +91,7 @@ func (p *StaticCoreExtProfileProvider) LookupCoreExtProfile(extID uint16, height
 	}
 	return CoreExtProfile{
 		Active:            true,
+		TxContextEnabled:  deployment.TxContextEnabled,
 		AllowedSuites:     cloneAllowedSuites(deployment.AllowedSuites),
 		VerifySigExtFn:    deployment.VerifySigExtFn,
 		BindingDescriptor: cloneBytes(deployment.BindingDescriptor),
