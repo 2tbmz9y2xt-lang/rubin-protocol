@@ -1454,3 +1454,38 @@ fn sentinel_keyless_enforcement() {
         .expect_err("should reject sentinel with pubkey+sig");
     assert_eq!(err.code, ErrorCode::TxErrParse);
 }
+
+#[test]
+fn apply_non_coinbase_tx_basic_coinbase_maturity_overflow_safe() {
+    // Regression: creation_height near u64::MAX must not wrap around and
+    // falsely pass the maturity check. The overflow-safe form uses
+    // subtraction instead of addition.
+    let mut prev = [0u8; 32];
+    prev[0] = 0xc2;
+    let tx_bytes =
+        tx_with_one_input_one_output(prev, 0, 90, COV_TYPE_P2PK, &valid_p2pk_covenant_data());
+    let (tx, txid, _wtxid, _n) = parse_tx(&tx_bytes).expect("parse");
+
+    let near_max: u64 = u64::MAX - 10;
+    let mut utxos: HashMap<Outpoint, UtxoEntry> = HashMap::new();
+    utxos.insert(
+        Outpoint {
+            txid: prev,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: valid_p2pk_covenant_data(),
+            creation_height: near_max,
+            created_by_coinbase: true,
+        },
+    );
+
+    // height = near_max + 5: maturity gap is only 5, well below COINBASE_MATURITY.
+    // With the old overflow-prone check (height < creation+MATURITY), the
+    // addition would wrap and the check would incorrectly pass.
+    let err = apply_non_coinbase_tx_basic(&tx, txid, &utxos, near_max + 5, 1000, ZERO_CHAIN_ID)
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrCoinbaseImmature);
+}

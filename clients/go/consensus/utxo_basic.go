@@ -213,7 +213,8 @@ func applyNonCoinbaseTxBasicWork(
 			return nil, 0, txerr(TX_ERR_MISSING_UTXO, "attempt to spend non-spendable covenant")
 		}
 
-		if entry.CreatedByCoinbase && height < entry.CreationHeight+COINBASE_MATURITY {
+		// Overflow-safe maturity check: avoid entry.CreationHeight+COINBASE_MATURITY wrapping.
+		if entry.CreatedByCoinbase && (height < entry.CreationHeight || height-entry.CreationHeight < COINBASE_MATURITY) {
 			return nil, 0, txerr(TX_ERR_COINBASE_IMMATURE, "coinbase immature")
 		}
 
