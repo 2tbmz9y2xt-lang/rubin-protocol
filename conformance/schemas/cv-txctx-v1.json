@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rubin-protocol.dev/schemas/cv-txctx-v1.json",
+  "title": "CV-TXCTX Conformance Vector Bundle",
+  "description": "Schema for SPEC-TXCTX-01 conformance vectors. Validates structure of profiles and vectors in CV-TXCTX.json.",
+  "type": "object",
+  "required": ["gate", "spec", "version", "profiles", "vectors", "vector_count"],
+  "properties": {
+    "gate": {
+      "type": "string",
+      "const": "CV-TXCTX"
+    },
+    "spec": {
+      "type": "string",
+      "pattern": "^SPEC-TXCTX-01"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "profiles": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/$defs/profile"
+      }
+    },
+    "vectors": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/vector"
+      }
+    },
+    "vector_count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "total_entries": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "spend_time_vector_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "governance_scope_vector_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "test_ext_id_allocation": {
+      "type": "object"
+    },
+    "harness_requirements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "description"],
+        "properties": {
+          "id": { "type": "string" },
+          "description": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "$schema_note": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "profile": {
+      "type": "object",
+      "required": [
+        "ext_id",
+        "suite_id",
+        "txcontext_enabled",
+        "max_ext_payload_bytes",
+        "activation_height"
+      ],
+      "properties": {
+        "ext_id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "ext_id_hex": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4}$"
+        },
+        "suite_id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "suite_id_hex": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{2}$"
+        },
+        "txcontext_enabled": {
+          "type": "integer",
+          "enum": [0, 1]
+        },
+        "allowed_sighash_set": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "max_ext_payload_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "binding_kind": {
+          "type": "integer"
+        },
+        "suite_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "activation_height": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "verifier_logic": {
+          "type": "string"
+        },
+        "abi": {
+          "type": "string",
+          "enum": ["6-param", "9-param"]
+        },
+        "baseline": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "vector": {
+      "type": "object",
+      "required": ["id", "description"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^CV-TXCTX-[A-Za-z0-9-]+$"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expect_ok": {
+          "type": "boolean"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sighash_type": {
+          "type": "integer"
+        },
+        "self_input_value": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ext_payload_hex": {
+          "type": "string",
+          "pattern": "^[0-9a-f]*$"
+        },
+        "continuing_outputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/continuing_output"
+          }
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "continuing_output": {
+      "type": "object",
+      "required": ["value"],
+      "properties": {
+        "value": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ext_id": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0, "maximum": 65535 },
+            { "type": "string", "pattern": "^0x[0-9a-fA-F]+$" }
+          ]
+        },
+        "ext_payload_hex": {
+          "type": "string",
+          "pattern": "^[0-9a-f]*$"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
