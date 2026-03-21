@@ -612,12 +612,14 @@ func applyNonCoinbaseTxBasicWorkQ(
 		Height:   height,
 	}
 	if txContext != nil && txContext.Base != nil {
-		valueBase = txContext.Base
+		if errTx := requireTxContextBaseMatchesTotals(txContext.Base, valueBase.TotalIn, valueBase.TotalOut, height); errTx != nil {
+			return nil, 0, errTx
+		}
 	}
-	if errTx := CheckValueConservationTxWide(valueBase, vaultInputCount > 0, uint128FromInternal(sumInVault)); errTx != nil {
+	if errTx := CheckValueConservationTxWide(valueBase, vaultInputCount == 1, uint128FromInternal(sumInVault)); errTx != nil {
 		return nil, 0, errTx
 	}
-	feeU128, err := subU128(uint128ToInternal(valueBase.TotalIn), uint128ToInternal(valueBase.TotalOut))
+	feeU128, err := subU128(sumIn, sumOut)
 	if err != nil {
 		return nil, 0, err
 	}

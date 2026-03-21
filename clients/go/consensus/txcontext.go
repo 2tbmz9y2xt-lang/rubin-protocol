@@ -111,6 +111,21 @@ func CheckValueConservationTxWide(
 	return nil
 }
 
+func requireTxContextBaseMatchesTotals(
+	base *TxContextBase,
+	totalIn Uint128,
+	totalOut Uint128,
+	height uint64,
+) *TxError {
+	if base == nil {
+		return &TxError{Code: TX_ERR_PARSE, Msg: "txcontext base missing"}
+	}
+	if base.TotalIn != totalIn || base.TotalOut != totalOut || base.Height != height {
+		return &TxError{Code: TX_ERR_PARSE, Msg: "txcontext base totals mismatch"}
+	}
+	return nil
+}
+
 func cloneTxContextPayload(src []byte) []byte {
 	out := make([]byte, len(src))
 	copy(out, src)

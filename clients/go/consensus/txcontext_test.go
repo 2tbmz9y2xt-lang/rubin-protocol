@@ -486,6 +486,23 @@ func TestCheckValueConservationTxWide_HighValueTieBreak(t *testing.T) {
 	}
 }
 
+func TestRequireTxContextBaseMatchesTotals(t *testing.T) {
+	base := &TxContextBase{
+		TotalIn:  Uint128{Lo: 10, Hi: 2},
+		TotalOut: Uint128{Lo: 9, Hi: 1},
+		Height:   55,
+	}
+	if err := requireTxContextBaseMatchesTotals(base, Uint128{Lo: 10, Hi: 2}, Uint128{Lo: 9, Hi: 1}, 55); err != nil {
+		t.Fatalf("expected exact totals match, got %v", err)
+	}
+	if err := requireTxContextBaseMatchesTotals(base, Uint128{Lo: 11, Hi: 2}, Uint128{Lo: 9, Hi: 1}, 55); err == nil || err.Code != TX_ERR_PARSE {
+		t.Fatalf("expected TX_ERR_PARSE on total_in mismatch, got %v", err)
+	}
+	if err := requireTxContextBaseMatchesTotals(base, Uint128{Lo: 10, Hi: 2}, Uint128{Lo: 9, Hi: 1}, 56); err == nil || err.Code != TX_ERR_PARSE {
+		t.Fatalf("expected TX_ERR_PARSE on height mismatch, got %v", err)
+	}
+}
+
 type staticMapCoreExtProfileProvider struct {
 	profiles map[uint16]CoreExtProfile
 }
