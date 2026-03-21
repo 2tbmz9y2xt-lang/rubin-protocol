@@ -170,7 +170,7 @@ type UtxoJSON struct {
 type CoreExtProfileJSON struct {
 	ExtID                uint16  `json:"ext_id"`
 	ActivationHeight     uint64  `json:"activation_height"`
-	TxContextEnabled     BoolishFlag `json:"tx_context_enabled,omitempty"`
+	TxContextEnabled     BoolishFlag `json:"tx_context_enabled"`
 	AllowedSuiteIDs      []uint8 `json:"allowed_suite_ids,omitempty"`
 	AllowedSighashSet    uint8   `json:"allowed_sighash_set,omitempty"`
 	MaxExtPayloadBytes   int     `json:"max_ext_payload_bytes,omitempty"`
