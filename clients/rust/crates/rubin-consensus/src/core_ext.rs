@@ -1406,13 +1406,7 @@ mod tests {
         };
         let (mut tx, tx_context, input_index, input_value, chain_id) =
             build_test_txcontext_bundle(7, 55);
-        let keypair = match crate::verify_sig_openssl::Mldsa87Keypair::generate() {
-            Ok(value) => value,
-            Err(err) => {
-                assert_eq!(err.code, ErrorCode::TxErrParse);
-                return;
-            }
-        };
+        let keypair = crate::verify_sig_openssl::Mldsa87Keypair::generate().expect("keypair");
         let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
         let digest =
             sighash_v1_digest_with_cache(&mut cache, input_index, input_value, chain_id, 0x01)
