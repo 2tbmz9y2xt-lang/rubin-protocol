@@ -3,7 +3,7 @@ use crate::core_ext::{parse_core_ext_covenant_data, CoreExtProfiles};
 use crate::error::{ErrorCode, TxError};
 use crate::tx::{Tx, TxOutput};
 use crate::utxo_basic::UtxoEntry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 pub const TXCONTEXT_MAX_CONTINUING_OUTPUTS: usize = 2;
@@ -39,14 +39,14 @@ pub struct TxContextBase {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TxOutputView {
     pub value: u64,
-    pub ext_payload: Vec<u8>,
+    pub ext_payload: Arc<[u8]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtIdCacheEntry {
     pub ext_id: u16,
     pub vout_index: u32,
-    pub ext_payload: Vec<u8>,
+    pub ext_payload: Arc<[u8]>,
     pub value: u64,
 }
 
@@ -133,7 +133,7 @@ pub fn build_tx_context_output_ext_id_cache(
             .push(ExtIdCacheEntry {
                 ext_id: covenant.ext_id,
                 vout_index: vout_index as u32,
-                ext_payload: covenant.ext_payload.to_vec(),
+                ext_payload: Arc::from(covenant.ext_payload),
                 value: output.value,
             });
     }
@@ -144,7 +144,7 @@ fn collect_txcontext_ext_ids(
     resolved_inputs: &[UtxoEntry],
     profiles_at_height: &CoreExtProfiles,
 ) -> Result<Vec<u16>, TxError> {
-    let mut ext_ids = Vec::new();
+    let mut ext_ids = BTreeSet::new();
     for entry in resolved_inputs {
         if entry.covenant_type != COV_TYPE_EXT {
             continue;
@@ -156,14 +156,9 @@ fn collect_txcontext_ext_ids(
         if !profile.tx_context_enabled {
             continue;
         }
-        if ext_ids.last().copied() == Some(covenant.ext_id) || ext_ids.contains(&covenant.ext_id) {
-            continue;
-        }
-        ext_ids.push(covenant.ext_id);
+        ext_ids.insert(covenant.ext_id);
     }
-    ext_ids.sort_unstable();
-    ext_ids.dedup();
-    Ok(ext_ids)
+    Ok(ext_ids.into_iter().collect())
 }
 
 pub fn build_tx_context(
@@ -212,7 +207,7 @@ pub fn build_tx_context(
                 let index = bundle.continuing_output_count as usize;
                 bundle.continuing_outputs[index] = Some(TxOutputView {
                     value: entry.value,
-                    ext_payload: entry.ext_payload.clone(),
+                    ext_payload: Arc::clone(&entry.ext_payload),
                 });
                 bundle.continuing_output_count += 1;
             }
@@ -469,8 +464,8 @@ mod tests {
         assert_eq!(ext5.continuing_output_count, 2);
         assert_eq!(ext5.get_output_checked(0).unwrap().value, 13);
         assert_eq!(
-            ext5.get_output_checked(0).unwrap().ext_payload,
-            vec![0x05, 0x01]
+            ext5.get_output_checked(0).unwrap().ext_payload.as_ref(),
+            &[0x05, 0x01]
         );
         assert_eq!(ext5.get_output_checked(1).unwrap().value, 15);
 
