@@ -43,9 +43,16 @@ def validate_structural_invariants(fixture_path: Path) -> list[str]:
     with open(fixture_path) as f:
         data = json.load(f)
 
-    vectors = data.get("vectors", [])
+    vectors = data.get("vectors")
+    if not isinstance(vectors, list):
+        errors.append("vectors must be an array")
+        return errors
+
     ids_seen: set[str] = set()
     for i, vec in enumerate(vectors):
+        if not isinstance(vec, dict):
+            errors.append(f"vectors[{i}]: expected object, got {type(vec).__name__}")
+            continue
         vid = vec.get("id")
         if isinstance(vid, str):
             if vid in ids_seen:
