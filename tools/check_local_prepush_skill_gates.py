@@ -253,12 +253,11 @@ def build_plan(changed: set[str]) -> tuple[list[tuple[str, list[str]]], list[str
         add_check("formal_refinement_bridge", ["python3", "tools/check_formal_refinement_bridge.py"])
 
     conformance_runtime_related = any(
-        matches_any(
-            path,
-            prefixes=("conformance/cmd", "conformance/devnetcv"),
-            suffixes=(".go",),
-            exact=("conformance/replay_test.go", "conformance/runner/run_cv_bundle.py"),
+        (
+            (is_under(path, "conformance/cmd") or is_under(path, "conformance/devnetcv"))
+            and path.endswith(".go")
         )
+        or path in {"conformance/replay_test.go", "conformance/runner/run_cv_bundle.py"}
         for path in changed
     )
     if conformance_runtime_related:
