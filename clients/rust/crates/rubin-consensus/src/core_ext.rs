@@ -6,6 +6,7 @@ use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_cache, Sighas
 use crate::suite_registry::{DefaultRotationProvider, RotationProvider, SuiteRegistry};
 use crate::tx::Tx;
 use crate::tx::WitnessItem;
+use crate::txcontext::{TxContextBase, TxContextContinuing};
 use crate::utxo_basic::UtxoEntry;
 use crate::verify_sig_openssl::{openssl_verify_sig_digest_oneshot, verify_sig_with_registry};
 use core::ffi::CStr;
@@ -17,6 +18,18 @@ pub const CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1: &str =
     "verify_sig_ext_openssl_digest32_v1";
 const CORE_EXT_OPENSSL_DIGEST32_BINDING_DESCRIPTOR_PREFIX: &[u8] =
     b"RUBIN-CORE-EXT-VERIFY-SIG-OPENSSL-DIGEST32-v1";
+
+pub type CoreExtVerifySigExtTxContextFn = fn(
+    ext_id: u16,
+    suite_id: u8,
+    pubkey: &[u8],
+    signature: &[u8],
+    digest32: &[u8; 32],
+    ext_payload: &[u8],
+    ctx_base: &TxContextBase,
+    ctx_continuing: &TxContextContinuing,
+    self_input_value: u64,
+) -> Result<bool, TxError>;
 
 fn default_suite_registry() -> &'static SuiteRegistry {
     static DEFAULT_SUITE_REGISTRY: OnceLock<SuiteRegistry> = OnceLock::new();
@@ -50,11 +63,14 @@ pub struct CoreExtOpenSslDigest32BindingDescriptor {
     pub sig_len: u64,
 }
 
+#[allow(unpredictable_function_pointer_comparisons)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreExtActiveProfile {
     pub ext_id: u16,
+    pub tx_context_enabled: bool,
     pub allowed_suite_ids: Vec<u8>,
     pub verification_binding: CoreExtVerificationBinding,
+    pub verify_sig_ext_tx_context_fn: Option<CoreExtVerifySigExtTxContextFn>,
     pub binding_descriptor: Vec<u8>,
     pub ext_payload_schema: Vec<u8>,
 }
@@ -64,12 +80,15 @@ pub struct CoreExtProfiles {
     pub active: Vec<CoreExtActiveProfile>,
 }
 
+#[allow(unpredictable_function_pointer_comparisons)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreExtDeploymentProfile {
     pub ext_id: u16,
     pub activation_height: u64,
+    pub tx_context_enabled: bool,
     pub allowed_suite_ids: Vec<u8>,
     pub verification_binding: CoreExtVerificationBinding,
+    pub verify_sig_ext_tx_context_fn: Option<CoreExtVerifySigExtTxContextFn>,
     pub binding_descriptor: Vec<u8>,
     pub ext_payload_schema: Vec<u8>,
 }
@@ -84,7 +103,10 @@ impl CoreExtProfiles {
         Self { active: Vec::new() }
     }
 
-    fn lookup_active_profile(&self, ext_id: u16) -> Result<Option<&CoreExtActiveProfile>, TxError> {
+    pub(crate) fn lookup_active_profile(
+        &self,
+        ext_id: u16,
+    ) -> Result<Option<&CoreExtActiveProfile>, TxError> {
         let mut found: Option<&CoreExtActiveProfile> = None;
         for p in &self.active {
             if p.ext_id != ext_id {
@@ -144,8 +166,10 @@ impl CoreExtDeploymentProfiles {
             }
             active.push(CoreExtActiveProfile {
                 ext_id: deployment.ext_id,
+                tx_context_enabled: deployment.tx_context_enabled,
                 allowed_suite_ids: deployment.allowed_suite_ids.clone(),
                 verification_binding: deployment.verification_binding.clone(),
+                verify_sig_ext_tx_context_fn: deployment.verify_sig_ext_tx_context_fn,
                 binding_descriptor: deployment.binding_descriptor.clone(),
                 ext_payload_schema: deployment.ext_payload_schema.clone(),
             });
@@ -185,6 +209,12 @@ fn core_ext_binding_kind(profile: &CoreExtDeploymentProfile) -> Result<u8, Strin
 }
 
 pub fn core_ext_profile_bytes_v1(profile: &CoreExtDeploymentProfile) -> Result<Vec<u8>, String> {
+    if profile.tx_context_enabled {
+        return Err(format!(
+            "core_ext profile ext_id={} txcontext-enabled profile requires v2 anchor pipeline",
+            profile.ext_id
+        ));
+    }
     let allowed_suite_ids = normalized_allowed_suite_ids(&profile.allowed_suite_ids);
     if allowed_suite_ids.is_empty() {
         return Err(format!(
@@ -773,8 +803,10 @@ mod tests {
         let profiles = CoreExtProfiles {
             active: vec![CoreExtActiveProfile {
                 ext_id: 7,
+                tx_context_enabled: false,
                 allowed_suite_ids: vec![SUITE_ID_ML_DSA_87],
                 verification_binding: CoreExtVerificationBinding::NativeVerifySig,
+                verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: Vec::new(),
                 ext_payload_schema: Vec::new(),
             }],
@@ -804,8 +836,10 @@ mod tests {
         let profiles = CoreExtProfiles {
             active: vec![CoreExtActiveProfile {
                 ext_id: 7,
+                tx_context_enabled: false,
                 allowed_suite_ids: vec![0x03],
                 verification_binding: CoreExtVerificationBinding::NativeVerifySig,
+                verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: Vec::new(),
                 ext_payload_schema: Vec::new(),
             }],
@@ -835,8 +869,10 @@ mod tests {
         let profiles = CoreExtProfiles {
             active: vec![CoreExtActiveProfile {
                 ext_id: 7,
+                tx_context_enabled: false,
                 allowed_suite_ids: vec![0x03],
                 verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+                verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: b"accept".to_vec(),
                 ext_payload_schema: b"schema".to_vec(),
             }],
@@ -865,8 +901,10 @@ mod tests {
         let profiles = CoreExtProfiles {
             active: vec![CoreExtActiveProfile {
                 ext_id: 7,
+                tx_context_enabled: false,
                 allowed_suite_ids: vec![0x03],
                 verification_binding: CoreExtVerificationBinding::VerifySigExtReject,
+                verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: b"reject".to_vec(),
                 ext_payload_schema: b"schema".to_vec(),
             }],
@@ -896,8 +934,10 @@ mod tests {
         let profiles = CoreExtProfiles {
             active: vec![CoreExtActiveProfile {
                 ext_id: 7,
+                tx_context_enabled: false,
                 allowed_suite_ids: vec![0x03],
                 verification_binding: CoreExtVerificationBinding::VerifySigExtError,
+                verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: b"error".to_vec(),
                 ext_payload_schema: b"schema".to_vec(),
             }],
@@ -950,10 +990,12 @@ mod tests {
         let profiles = CoreExtProfiles {
             active: vec![CoreExtActiveProfile {
                 ext_id: 7,
+                tx_context_enabled: false,
                 allowed_suite_ids: vec![0x09],
                 verification_binding: CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(
                     descriptor,
                 ),
+                verify_sig_ext_tx_context_fn: None,
                 binding_descriptor,
                 ext_payload_schema: b"schema".to_vec(),
             }],
@@ -988,8 +1030,10 @@ mod tests {
         let profiles = CoreExtProfiles {
             active: vec![CoreExtActiveProfile {
                 ext_id: 7,
+                tx_context_enabled: false,
                 allowed_suite_ids: vec![0x03],
                 verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+                verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: b"accept".to_vec(),
                 ext_payload_schema: b"schema".to_vec(),
             }],
@@ -1019,8 +1063,10 @@ mod tests {
         let profiles = CoreExtProfiles {
             active: vec![CoreExtActiveProfile {
                 ext_id: 7,
+                tx_context_enabled: false,
                 allowed_suite_ids: vec![SUITE_ID_ML_DSA_87],
                 verification_binding: CoreExtVerificationBinding::NativeVerifySig,
+                verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: Vec::new(),
                 ext_payload_schema: Vec::new(),
             }],
@@ -1052,8 +1098,10 @@ mod tests {
             deployments: vec![CoreExtDeploymentProfile {
                 ext_id: 7,
                 activation_height: 10,
+                tx_context_enabled: true,
                 allowed_suite_ids: vec![0x03],
                 verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+                verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: b"accept".to_vec(),
                 ext_payload_schema: b"schema".to_vec(),
             }],
@@ -1065,6 +1113,7 @@ mod tests {
         let active = deployments.active_profiles_at_height(10).unwrap();
         assert_eq!(active.active.len(), 1);
         assert_eq!(active.active[0].ext_id, 7);
+        assert!(active.active[0].tx_context_enabled);
     }
 
     #[test]
@@ -1073,8 +1122,10 @@ mod tests {
             deployments: vec![CoreExtDeploymentProfile {
                 ext_id: 7,
                 activation_height: 10,
+                tx_context_enabled: false,
                 allowed_suite_ids: Vec::new(),
                 verification_binding: CoreExtVerificationBinding::NativeVerifySig,
+                verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: Vec::new(),
                 ext_payload_schema: b"schema".to_vec(),
             }],
@@ -1091,16 +1142,20 @@ mod tests {
                 CoreExtDeploymentProfile {
                     ext_id: 7,
                     activation_height: 0,
+                    tx_context_enabled: false,
                     allowed_suite_ids: vec![0x03],
                     verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+                    verify_sig_ext_tx_context_fn: None,
                     binding_descriptor: b"accept".to_vec(),
                     ext_payload_schema: b"schema-a".to_vec(),
                 },
                 CoreExtDeploymentProfile {
                     ext_id: 7,
                     activation_height: 0,
+                    tx_context_enabled: false,
                     allowed_suite_ids: vec![0x04],
                     verification_binding: CoreExtVerificationBinding::VerifySigExtReject,
+                    verify_sig_ext_tx_context_fn: None,
                     binding_descriptor: b"reject".to_vec(),
                     ext_payload_schema: b"schema-b".to_vec(),
                 },
@@ -1117,8 +1172,10 @@ mod tests {
         let mut base = CoreExtDeploymentProfile {
             ext_id: 7,
             activation_height: 1,
+            tx_context_enabled: false,
             allowed_suite_ids: vec![3],
             verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+            verify_sig_ext_tx_context_fn: None,
             binding_descriptor: b"accept".to_vec(),
             ext_payload_schema: b"schema-a".to_vec(),
         };
@@ -1136,8 +1193,10 @@ mod tests {
         let mut base = CoreExtDeploymentProfile {
             ext_id: 7,
             activation_height: 1,
+            tx_context_enabled: false,
             allowed_suite_ids: vec![3],
             verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+            verify_sig_ext_tx_context_fn: None,
             binding_descriptor: b"accept".to_vec(),
             ext_payload_schema: b"schema-a".to_vec(),
         };
@@ -1154,8 +1213,10 @@ mod tests {
         let profile = CoreExtDeploymentProfile {
             ext_id: 7,
             activation_height: 1,
+            tx_context_enabled: false,
             allowed_suite_ids: vec![3],
             verification_binding: CoreExtVerificationBinding::NativeVerifySig,
+            verify_sig_ext_tx_context_fn: None,
             binding_descriptor: Vec::new(),
             ext_payload_schema: b"schema-a".to_vec(),
         };
@@ -1169,8 +1230,10 @@ mod tests {
         let err = core_ext_profile_bytes_v1(&CoreExtDeploymentProfile {
             ext_id: 7,
             activation_height: 1,
+            tx_context_enabled: false,
             allowed_suite_ids: Vec::new(),
             verification_binding: CoreExtVerificationBinding::NativeVerifySig,
+            verify_sig_ext_tx_context_fn: None,
             binding_descriptor: Vec::new(),
             ext_payload_schema: b"schema-a".to_vec(),
         })
@@ -1180,8 +1243,10 @@ mod tests {
         let err = core_ext_profile_bytes_v1(&CoreExtDeploymentProfile {
             ext_id: 7,
             activation_height: 1,
+            tx_context_enabled: false,
             allowed_suite_ids: vec![3],
             verification_binding: CoreExtVerificationBinding::NativeVerifySig,
+            verify_sig_ext_tx_context_fn: None,
             binding_descriptor: vec![0xa1],
             ext_payload_schema: b"schema-a".to_vec(),
         })
@@ -1191,13 +1256,28 @@ mod tests {
         let err = core_ext_profile_bytes_v1(&CoreExtDeploymentProfile {
             ext_id: 7,
             activation_height: 1,
+            tx_context_enabled: false,
             allowed_suite_ids: vec![3],
             verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+            verify_sig_ext_tx_context_fn: None,
             binding_descriptor: Vec::new(),
             ext_payload_schema: b"schema-a".to_vec(),
         })
         .unwrap_err();
         assert!(err.contains("verify_sig_ext profile must carry binding_descriptor"));
+
+        let err = core_ext_profile_bytes_v1(&CoreExtDeploymentProfile {
+            ext_id: 7,
+            activation_height: 1,
+            tx_context_enabled: true,
+            allowed_suite_ids: vec![3],
+            verification_binding: CoreExtVerificationBinding::NativeVerifySig,
+            verify_sig_ext_tx_context_fn: None,
+            binding_descriptor: Vec::new(),
+            ext_payload_schema: b"schema-a".to_vec(),
+        })
+        .unwrap_err();
+        assert!(err.contains("txcontext-enabled profile requires v2 anchor pipeline"));
     }
 
     #[test]
@@ -1220,8 +1300,10 @@ mod tests {
         let profiles = CoreExtProfiles {
             active: vec![CoreExtActiveProfile {
                 ext_id: 7,
+                tx_context_enabled: false,
                 allowed_suite_ids: vec![0x02],
                 verification_binding: CoreExtVerificationBinding::NativeVerifySig,
+                verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: Vec::new(),
                 ext_payload_schema: Vec::new(),
             }],
@@ -1282,8 +1364,10 @@ mod tests {
         let profiles = CoreExtProfiles {
             active: vec![CoreExtActiveProfile {
                 ext_id: 7,
+                tx_context_enabled: false,
                 allowed_suite_ids: vec![0x02],
                 verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+                verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: b"accept".to_vec(),
                 ext_payload_schema: b"schema".to_vec(),
             }],

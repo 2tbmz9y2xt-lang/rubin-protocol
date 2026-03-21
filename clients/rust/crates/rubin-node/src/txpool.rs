@@ -1634,8 +1634,10 @@ mod tests {
             deployments: vec![CoreExtDeploymentProfile {
                 ext_id: 7,
                 activation_height: 0,
+                tx_context_enabled: false,
                 allowed_suite_ids: vec![3],
                 verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+                verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: b"accept".to_vec(),
                 ext_payload_schema: b"schema".to_vec(),
             }],

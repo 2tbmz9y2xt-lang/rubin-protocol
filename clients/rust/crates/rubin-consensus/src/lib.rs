@@ -21,6 +21,7 @@ pub mod subsidy;
 pub mod suite_registry;
 pub mod tx;
 mod tx_helpers;
+pub mod txcontext;
 mod utxo_basic;
 mod vault;
 mod verify_sig_openssl;
@@ -74,6 +75,10 @@ pub use suite_registry::{
 };
 pub use tx::{parse_tx, DaChunkCore, DaCommitCore, Tx, TxInput, TxOutput, WitnessItem};
 pub use tx_helpers::{marshal_tx, p2pk_covenant_data_for_pubkey, sign_transaction, DigestSigner};
+pub use txcontext::{
+    build_tx_context, build_tx_context_output_ext_id_cache, ExtIdCacheEntry, TxContextBase,
+    TxContextBundle, TxContextContinuing, TxOutputView, Uint128, TXCONTEXT_MAX_CONTINUING_OUTPUTS,
+};
 pub use utxo_basic::{
     apply_non_coinbase_tx_basic, apply_non_coinbase_tx_basic_update,
     apply_non_coinbase_tx_basic_update_with_mtp,
