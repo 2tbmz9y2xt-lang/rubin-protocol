@@ -8,7 +8,7 @@ import os
 import pathlib
 import subprocess
 import sys
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 RUNNER_DIR = pathlib.Path(__file__).resolve().parent
 if str(RUNNER_DIR) not in sys.path:
@@ -2315,6 +2315,14 @@ def validate_vector(
     return problems, False
 
 
+def normalize_validation_result(
+    result: Union[List[str], Tuple[List[str], bool]]
+) -> Tuple[List[str], bool]:
+    if isinstance(result, tuple):
+        return result
+    return result, False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only-gates", nargs="*", default=None)
@@ -2344,7 +2352,9 @@ def main() -> int:
             total += 1
             vectors_by_id = {str(x.get("id", "")): x for x in vectors if isinstance(x, dict)}
             vectors_by_id["__fixture_profiles__"] = f.get("profiles", {})
-            vector_problems, was_skipped = validate_vector(gate, v, go_cli, rust_cli, vectors_by_id)
+            vector_problems, was_skipped = normalize_validation_result(
+                validate_vector(gate, v, go_cli, rust_cli, vectors_by_id)
+            )
             problems.extend(vector_problems)
             if was_skipped:
                 skipped += 1
