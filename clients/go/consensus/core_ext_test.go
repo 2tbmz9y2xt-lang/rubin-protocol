@@ -222,6 +222,20 @@ func TestCoreExtProfileSetAnchorChangesWithActivationHeight(t *testing.T) {
 	}
 }
 
+func TestCoreExtProfileSetAnchorV1RejectsTxContextEnabledProfiles(t *testing.T) {
+	chainID := [32]byte{0: 0x42}
+	_, err := CoreExtProfileSetAnchorV1(chainID, []CoreExtDeploymentProfile{{
+		ExtID:            7,
+		ActivationHeight: 1,
+		TxContextEnabled: true,
+		AllowedSuites:    map[uint8]struct{}{3: {}},
+		ExtPayloadSchema: []byte{0xb2},
+	}})
+	if err == nil || err.Error() != "core_ext profile ext_id=7 txcontext-enabled profile requires v2 anchor pipeline" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestCoreExtProfileBytesV1RejectsInvalidProfiles(t *testing.T) {
 	t.Run("empty allowed suites", func(t *testing.T) {
 		_, err := CoreExtProfileBytesV1(CoreExtDeploymentProfile{
@@ -258,6 +272,19 @@ func TestCoreExtProfileBytesV1RejectsInvalidProfiles(t *testing.T) {
 			ExtPayloadSchema: []byte{0xb2},
 		})
 		if err == nil || err.Error() != "core_ext profile ext_id=7 verify_sig_ext profile must carry binding_descriptor" {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("txcontext enabled requires v2 pipeline", func(t *testing.T) {
+		_, err := CoreExtProfileBytesV1(CoreExtDeploymentProfile{
+			ExtID:            7,
+			ActivationHeight: 1,
+			TxContextEnabled: true,
+			AllowedSuites:    map[uint8]struct{}{3: {}},
+			ExtPayloadSchema: []byte{0xb2},
+		})
+		if err == nil || err.Error() != "core_ext profile ext_id=7 txcontext-enabled profile requires v2 anchor pipeline" {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
