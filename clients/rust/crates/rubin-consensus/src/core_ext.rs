@@ -333,6 +333,10 @@ pub fn core_ext_profile_bytes_v1(profile: &CoreExtDeploymentProfile) -> Result<V
     out.extend_from_slice(&profile.binding_descriptor);
     encode_compact_size(profile.ext_payload_schema.len() as u64, &mut out);
     out.extend_from_slice(&profile.ext_payload_schema);
+    // NOTE: governance_nonce is intentionally NOT included in v1 profile bytes.
+    // Adding it here would break Go/Rust parity (Go CoreExtProfileBytesV1 does
+    // not include it yet). Must be added to BOTH clients simultaneously in a
+    // coordinated profile-bytes-v2 PR.
     Ok(out)
 }
 

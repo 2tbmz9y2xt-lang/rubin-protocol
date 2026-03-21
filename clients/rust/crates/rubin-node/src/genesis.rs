@@ -38,6 +38,8 @@ struct GenesisCoreExtProfile {
     binding_descriptor_hex: String,
     #[serde(default)]
     ext_payload_schema_hex: String,
+    #[serde(default)]
+    governance_nonce: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -218,7 +220,7 @@ fn core_ext_deployments_from_json(
             verify_sig_ext_tx_context_fn: None,
             binding_descriptor,
             ext_payload_schema,
-            governance_nonce: 0,
+            governance_nonce: item.governance_nonce,
         });
     }
     let profiles = CoreExtDeploymentProfiles { deployments };
