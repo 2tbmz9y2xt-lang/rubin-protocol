@@ -97,7 +97,8 @@ The hardware Rubin would be comfortable recommending if DA-heavy operation becom
 | Compact relay reconstruction success rate | % | successful compact reconstructions / total relay attempts |
 | Relay fallback rate | % | full-block fallback / total relay attempts |
 | Orphan rate | % | orphaned blocks / total blocks |
-| Prefetch completion time (p50/p95) | ms | time from first chunk request to full DA set |
+| Prefetch completion time (p50/p95/p99) | ms | time from first chunk request to full DA set |
+| Prefetch stall rate | % | blocks where prefetch did not complete before validation |
 | Peak RSS | MB | max resident set during DA validation window |
 | Sustained RSS (p95 over run) | MB | 95th percentile RSS during steady state |
 | CPU wall-clock on DA validation | ms/block | time spent in DA validation path per block |
@@ -150,12 +151,15 @@ Defined in detail by Q-DEVNET-DA-CAP-ADVERSARIAL-01 (issue #822). This matrix de
 
 Defined in detail by Q-DEVNET-DA-CAP-PARITY-01 (issue #823). This matrix defines the parity contract.
 
-| Run ID | Scenario | Parity Check |
-|--------|----------|--------------|
-| BM-PAR-SAT | Saturated load (32 + 48) | accept/reject identical |
-| BM-PAR-ADV | Adversarial (all BM-ADV runs) | accept/reject identical |
-| BM-PAR-ERR | Error ordering under stress | deterministic where contracted |
-| BM-PAR-FALLBACK | Fallback path comparison | no materially different fallback |
+| Run ID | Scenario | Hardware | Parity Check |
+|--------|----------|----------|--------------|
+| BM-PAR-SAT-BV | Saturated load (32 + 48) | Baseline | accept/reject identical |
+| BM-PAR-SAT-CT | Saturated load (32 + 48) | Constrained | accept/reject identical |
+| BM-PAR-ADV-BV | Adversarial (all BM-ADV runs) | Baseline | accept/reject identical |
+| BM-PAR-ADV-CT | Adversarial (all BM-ADV runs) | Constrained | accept/reject identical |
+| BM-PAR-ERR-BV | Error ordering under stress | Baseline | deterministic where contracted |
+| BM-PAR-FALLBACK-BV | Fallback path comparison | Baseline | no materially different fallback |
+| BM-PAR-FALLBACK-CT | Fallback path comparison | Constrained | no materially different fallback |
 
 ---
 
