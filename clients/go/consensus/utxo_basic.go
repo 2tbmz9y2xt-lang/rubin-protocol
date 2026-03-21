@@ -495,13 +495,18 @@ func applyNonCoinbaseTxBasicWork(
 		}
 	}
 
-	if cmpU128(sumOut, sumIn) > 0 {
-		return nil, 0, txerr(TX_ERR_VALUE_CONSERVATION, "sum_out exceeds sum_in")
+	valueBase := &TxContextBase{
+		TotalIn:  uint128FromInternal(sumIn),
+		TotalOut: uint128FromInternal(sumOut),
+		Height:   height,
 	}
-	if vaultInputCount == 1 && cmpU128(sumOut, sumInVault) < 0 {
-		return nil, 0, txerr(TX_ERR_VALUE_CONSERVATION, "CORE_VAULT value must not fund miner fee")
+	if txContext != nil && txContext.Base != nil {
+		valueBase = txContext.Base
 	}
-	feeU128, err := subU128(sumIn, sumOut)
+	if errTx := CheckValueConservationTxWide(valueBase, vaultInputCount > 0, uint128FromInternal(sumInVault)); errTx != nil {
+		return nil, 0, errTx
+	}
+	feeU128, err := subU128(uint128ToInternal(valueBase.TotalIn), uint128ToInternal(valueBase.TotalOut))
 	if err != nil {
 		return nil, 0, err
 	}

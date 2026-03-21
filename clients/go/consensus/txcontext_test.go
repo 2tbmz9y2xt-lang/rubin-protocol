@@ -409,6 +409,83 @@ func TestStaticCoreExtProfileProvider_PropagatesTxContextEnabled(t *testing.T) {
 	}
 }
 
+func TestCheckValueConservationTxWide_NilBaseFailsClosed(t *testing.T) {
+	err := CheckValueConservationTxWide(nil, false, Uint128{})
+	if err == nil || err.Code != TX_ERR_PARSE {
+		t.Fatalf("expected TX_ERR_PARSE, got %v", err)
+	}
+}
+
+func TestCheckValueConservationTxWide_RejectsOutputsExceedInputs(t *testing.T) {
+	err := CheckValueConservationTxWide(
+		&TxContextBase{
+			TotalIn:  Uint128{Lo: 10},
+			TotalOut: Uint128{Lo: 11},
+		},
+		false,
+		Uint128{Lo: 500},
+	)
+	if err == nil || err.Code != TX_ERR_VALUE_CONSERVATION {
+		t.Fatalf("expected TX_ERR_VALUE_CONSERVATION, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "sum_out exceeds sum_in") {
+		t.Fatalf("unexpected error detail: %v", err)
+	}
+}
+
+func TestCheckValueConservationTxWide_IgnoresVaultFloorWithoutVaultInputs(t *testing.T) {
+	err := CheckValueConservationTxWide(
+		&TxContextBase{
+			TotalIn:  Uint128{Lo: 10},
+			TotalOut: Uint128{Lo: 9},
+		},
+		false,
+		Uint128{Lo: 500},
+	)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+}
+
+func TestCheckValueConservationTxWide_RejectsVaultFeeSponsorship(t *testing.T) {
+	err := CheckValueConservationTxWide(
+		&TxContextBase{
+			TotalIn:  Uint128{Lo: 600},
+			TotalOut: Uint128{Lo: 499},
+		},
+		true,
+		Uint128{Lo: 500},
+	)
+	if err == nil || err.Code != TX_ERR_VALUE_CONSERVATION {
+		t.Fatalf("expected TX_ERR_VALUE_CONSERVATION, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "CORE_VAULT value must not fund miner fee") {
+		t.Fatalf("unexpected error detail: %v", err)
+	}
+}
+
+func TestCheckValueConservationTxWide_HighValueTieBreak(t *testing.T) {
+	base := &TxContextBase{
+		TotalIn:  Uint128{Lo: 1, Hi: 2},
+		TotalOut: Uint128{Lo: 0, Hi: 2},
+	}
+	if err := CheckValueConservationTxWide(base, false, Uint128{}); err != nil {
+		t.Fatalf("expected hi-equal lo-tiebreak to pass, got %v", err)
+	}
+
+	err := CheckValueConservationTxWide(
+		&TxContextBase{
+			TotalIn:  Uint128{Lo: 1, Hi: 2},
+			TotalOut: Uint128{Lo: 2, Hi: 2},
+		},
+		false,
+		Uint128{},
+	)
+	if err == nil || err.Code != TX_ERR_VALUE_CONSERVATION {
+		t.Fatalf("expected high-value overflow path to fail conservation, got %v", err)
+	}
+}
+
 type staticMapCoreExtProfileProvider struct {
 	profiles map[uint16]CoreExtProfile
 }
