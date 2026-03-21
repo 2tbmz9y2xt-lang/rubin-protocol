@@ -642,6 +642,7 @@ mod tests {
                 verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: Vec::new(),
                 ext_payload_schema: Vec::new(),
+                governance_nonce: 0,
             }],
         };
         let mut engine = SyncEngine::new(ChainState::new(), Some(store), cfg).expect("new sync");

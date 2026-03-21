@@ -463,6 +463,8 @@ struct CoreExtProfileJson {
     binding_descriptor_hex: String,
     #[serde(default)]
     ext_payload_schema_hex: String,
+    #[serde(default)]
+    governance_nonce: u64,
 }
 
 fn deserialize_boolish<'de, D>(deserializer: D) -> Result<bool, D::Error>
@@ -995,6 +997,7 @@ fn core_ext_profiles_from_json(
             verify_sig_ext_tx_context_fn: None,
             binding_descriptor,
             ext_payload_schema,
+            governance_nonce: item.governance_nonce,
         });
     }
     let profiles = CoreExtDeploymentProfiles { deployments };
@@ -4662,6 +4665,7 @@ mod tests {
                             .to_string(),
                     binding_descriptor_hex: hex::encode(&binding_descriptor),
                     ext_payload_schema_hex: "b2".to_string(),
+                    governance_nonce: 0,
                 },
                 CoreExtProfileJson {
                     ext_id: 7,
@@ -4675,6 +4679,7 @@ mod tests {
                             .to_string(),
                     binding_descriptor_hex: hex::encode(binding_descriptor),
                     ext_payload_schema_hex: "b2".to_string(),
+                    governance_nonce: 0,
                 },
             ],
             [0u8; 32],
@@ -4705,6 +4710,7 @@ mod tests {
                     .to_string(),
                 binding_descriptor_hex: hex::encode(binding_descriptor),
                 ext_payload_schema_hex: "b2".to_string(),
+                governance_nonce: 0,
             }],
             [0u8; 32],
             "",
@@ -4761,6 +4767,7 @@ mod tests {
                 ),
                 binding_descriptor_hex: hex::encode(binding_descriptor),
                 ext_payload_schema_hex: "b2".to_string(),
+                governance_nonce: 0,
             }],
             [0u8; 32],
             "",
@@ -4825,6 +4832,7 @@ mod tests {
                 verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: binding_descriptor.clone(),
                 ext_payload_schema: vec![0xb2],
+                governance_nonce: 0,
             }],
         )
         .expect("anchor");
@@ -4841,6 +4849,7 @@ mod tests {
                     .to_string(),
                 binding_descriptor_hex: hex::encode(binding_descriptor),
                 ext_payload_schema_hex: "b2".to_string(),
+                governance_nonce: 0,
             }],
             chain_id,
             &hex::encode(expected),
@@ -4917,6 +4926,7 @@ mod tests {
                     .to_string(),
                 binding_descriptor_hex: "aa".repeat(4097),
                 ext_payload_schema_hex: "b2".to_string(),
+                governance_nonce: 0,
             }],
             [0u8; 32],
             "",
@@ -4938,6 +4948,7 @@ mod tests {
                 binding: "unknown-binding".to_string(),
                 binding_descriptor_hex: "zz".to_string(),
                 ext_payload_schema_hex: "zz".to_string(),
+                governance_nonce: 0,
             }],
             [0u8; 32],
             "",

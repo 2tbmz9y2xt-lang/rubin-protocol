@@ -1698,6 +1698,7 @@ mod tests {
                 verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: b"accept".to_vec(),
                 ext_payload_schema: b"schema".to_vec(),
+                governance_nonce: 0,
             }],
         };
         let txid = pool.admit(&raw, &state, None, [0u8; 32]).expect("admit");

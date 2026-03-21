@@ -91,6 +91,99 @@ pub struct CoreExtDeploymentProfile {
     pub verify_sig_ext_tx_context_fn: Option<CoreExtVerifySigExtTxContextFn>,
     pub binding_descriptor: Vec<u8>,
     pub ext_payload_schema: Vec<u8>,
+    /// Governance nonce for replay protection. Incremented on each
+    /// governance action (activate/deactivate/parameter change).
+    /// Tokens issued with a previous nonce are rejected.
+    pub governance_nonce: u64,
+}
+
+/// GovernanceReplayToken binds a profile authorization to a specific
+/// height window, preventing replay of governance actions across
+/// activation/deactivation cycles.
+///
+/// A token is valid only when `current_height` falls within
+/// `[issued_at_height, issued_at_height + validity_window)` AND
+/// `nonce` matches the deployment's governance nonce.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernanceReplayToken {
+    pub ext_id: u16,
+    pub nonce: u64,
+    pub issued_at_height: u64,
+    pub validity_window: u64,
+}
+
+impl GovernanceReplayToken {
+    /// Create a new replay token for the given profile deployment.
+    pub fn issue(ext_id: u16, nonce: u64, current_height: u64, validity_window: u64) -> Self {
+        Self {
+            ext_id,
+            nonce,
+            issued_at_height: current_height,
+            validity_window,
+        }
+    }
+
+    /// Check whether this token is valid for the given ext_id at the given height and nonce.
+    /// Returns Ok(()) if valid, Err with reason if not.
+    pub fn validate(
+        &self,
+        expected_ext_id: u16,
+        current_height: u64,
+        expected_nonce: u64,
+    ) -> Result<(), String> {
+        if self.ext_id != expected_ext_id {
+            return Err(format!(
+                "governance replay token ext_id mismatch: token={} expected={}",
+                self.ext_id, expected_ext_id
+            ));
+        }
+        if self.nonce != expected_nonce {
+            return Err(format!(
+                "governance replay token nonce mismatch: token={} expected={}",
+                self.nonce, expected_nonce
+            ));
+        }
+        if current_height < self.issued_at_height {
+            return Err(format!(
+                "governance replay token not yet valid: issued_at={} current={}",
+                self.issued_at_height, current_height
+            ));
+        }
+        let expiry = self.issued_at_height.saturating_add(self.validity_window);
+        if current_height >= expiry {
+            return Err(format!(
+                "governance replay token expired: expiry={} current={}",
+                expiry, current_height
+            ));
+        }
+        Ok(())
+    }
+
+    /// Serialize the token to a deterministic byte representation.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(26);
+        out.extend_from_slice(&self.ext_id.to_le_bytes());
+        out.extend_from_slice(&self.nonce.to_le_bytes());
+        out.extend_from_slice(&self.issued_at_height.to_le_bytes());
+        out.extend_from_slice(&self.validity_window.to_le_bytes());
+        out
+    }
+
+    /// Deserialize a token from its byte representation.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
+        if data.len() != 26 {
+            return Err(format!(
+                "governance replay token: expected 26 bytes, got {}",
+                data.len()
+            ));
+        }
+        Ok(Self {
+            ext_id: u16::from_le_bytes([data[0], data[1]]),
+            nonce: u64::from_le_bytes(data[2..10].try_into().unwrap()),
+            issued_at_height: u64::from_le_bytes(data[10..18].try_into().unwrap()),
+            validity_window: u64::from_le_bytes(data[18..26].try_into().unwrap()),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -209,6 +302,12 @@ fn core_ext_binding_kind(profile: &CoreExtDeploymentProfile) -> Result<u8, Strin
 }
 
 pub fn core_ext_profile_bytes_v1(profile: &CoreExtDeploymentProfile) -> Result<Vec<u8>, String> {
+    if profile.governance_nonce != 0 {
+        return Err(format!(
+            "core_ext profile ext_id={} governance_nonce={} requires v2 profile bytes (Go+Rust coordinated)",
+            profile.ext_id, profile.governance_nonce
+        ));
+    }
     if profile.tx_context_enabled {
         return Err(format!(
             "core_ext profile ext_id={} txcontext-enabled profile requires v2 anchor pipeline",
@@ -240,6 +339,10 @@ pub fn core_ext_profile_bytes_v1(profile: &CoreExtDeploymentProfile) -> Result<V
     out.extend_from_slice(&profile.binding_descriptor);
     encode_compact_size(profile.ext_payload_schema.len() as u64, &mut out);
     out.extend_from_slice(&profile.ext_payload_schema);
+    // NOTE: governance_nonce is intentionally NOT included in v1 profile bytes.
+    // Adding it here would break Go/Rust parity (Go CoreExtProfileBytesV1 does
+    // not include it yet). Must be added to BOTH clients simultaneously in a
+    // coordinated profile-bytes-v2 PR.
     Ok(out)
 }
 
@@ -1589,6 +1692,7 @@ mod tests {
                 verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: b"accept".to_vec(),
                 ext_payload_schema: b"schema".to_vec(),
+                governance_nonce: 0,
             }],
         };
 
@@ -1613,6 +1717,7 @@ mod tests {
                 verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: Vec::new(),
                 ext_payload_schema: b"schema".to_vec(),
+                governance_nonce: 0,
             }],
         };
 
@@ -1633,6 +1738,7 @@ mod tests {
                     verify_sig_ext_tx_context_fn: None,
                     binding_descriptor: b"accept".to_vec(),
                     ext_payload_schema: b"schema-a".to_vec(),
+                    governance_nonce: 0,
                 },
                 CoreExtDeploymentProfile {
                     ext_id: 7,
@@ -1643,6 +1749,7 @@ mod tests {
                     verify_sig_ext_tx_context_fn: None,
                     binding_descriptor: b"reject".to_vec(),
                     ext_payload_schema: b"schema-b".to_vec(),
+                    governance_nonce: 0,
                 },
             ],
         };
@@ -1663,6 +1770,7 @@ mod tests {
             verify_sig_ext_tx_context_fn: None,
             binding_descriptor: b"accept".to_vec(),
             ext_payload_schema: b"schema-a".to_vec(),
+            governance_nonce: 0,
         };
         let base_anchor =
             core_ext_profile_set_anchor_v1(chain_id, &[base.clone()]).expect("base anchor");
@@ -1684,6 +1792,7 @@ mod tests {
             verify_sig_ext_tx_context_fn: None,
             binding_descriptor: b"accept".to_vec(),
             ext_payload_schema: b"schema-a".to_vec(),
+            governance_nonce: 0,
         };
         let base_anchor =
             core_ext_profile_set_anchor_v1(chain_id, &[base.clone()]).expect("base anchor");
@@ -1704,6 +1813,7 @@ mod tests {
             verify_sig_ext_tx_context_fn: None,
             binding_descriptor: Vec::new(),
             ext_payload_schema: b"schema-a".to_vec(),
+            governance_nonce: 0,
         };
 
         let bytes = core_ext_profile_bytes_v1(&profile).expect("native profile bytes");
@@ -1721,6 +1831,7 @@ mod tests {
             verify_sig_ext_tx_context_fn: None,
             binding_descriptor: Vec::new(),
             ext_payload_schema: b"schema-a".to_vec(),
+            governance_nonce: 0,
         })
         .unwrap_err();
         assert!(err.contains("must have non-empty allowed_suite_ids"));
@@ -1734,6 +1845,7 @@ mod tests {
             verify_sig_ext_tx_context_fn: None,
             binding_descriptor: vec![0xa1],
             ext_payload_schema: b"schema-a".to_vec(),
+            governance_nonce: 0,
         })
         .unwrap_err();
         assert!(err.contains("native-only profile must not carry binding_descriptor"));
@@ -1747,6 +1859,7 @@ mod tests {
             verify_sig_ext_tx_context_fn: None,
             binding_descriptor: Vec::new(),
             ext_payload_schema: b"schema-a".to_vec(),
+            governance_nonce: 0,
         })
         .unwrap_err();
         assert!(err.contains("verify_sig_ext profile must carry binding_descriptor"));
@@ -1760,6 +1873,7 @@ mod tests {
             verify_sig_ext_tx_context_fn: None,
             binding_descriptor: Vec::new(),
             ext_payload_schema: b"schema-a".to_vec(),
+            governance_nonce: 0,
         })
         .unwrap_err();
         assert!(err.contains("txcontext-enabled profile requires v2 anchor pipeline"));
@@ -1983,5 +2097,74 @@ mod tests {
         let err = parse_core_ext_openssl_digest32_binding_descriptor(&trailing)
             .expect_err("trailing bytes must fail");
         assert_eq!(err, "bad core_ext binding_descriptor");
+    }
+
+    // --- GovernanceReplayToken tests ---
+
+    #[test]
+    fn governance_replay_token_issue_and_validate() {
+        let token = GovernanceReplayToken::issue(7, 1, 100, 50);
+        assert!(token.validate(7, 100, 1).is_ok());
+        assert!(token.validate(7, 149, 1).is_ok());
+    }
+
+    #[test]
+    fn governance_replay_token_rejects_wrong_nonce() {
+        let token = GovernanceReplayToken::issue(7, 1, 100, 50);
+        let err = token.validate(7, 120, 2).unwrap_err();
+        assert!(err.contains("nonce mismatch"));
+    }
+
+    #[test]
+    fn governance_replay_token_rejects_wrong_ext_id() {
+        let token = GovernanceReplayToken::issue(7, 1, 100, 50);
+        let err = token.validate(9, 120, 1).unwrap_err();
+        assert!(err.contains("ext_id mismatch"));
+    }
+
+    #[test]
+    fn governance_replay_token_rejects_before_issued() {
+        let token = GovernanceReplayToken::issue(7, 1, 100, 50);
+        let err = token.validate(7, 99, 1).unwrap_err();
+        assert!(err.contains("not yet valid"));
+    }
+
+    #[test]
+    fn governance_replay_token_rejects_expired() {
+        let token = GovernanceReplayToken::issue(7, 1, 100, 50);
+        let err = token.validate(7, 150, 1).unwrap_err();
+        assert!(err.contains("expired"));
+    }
+
+    #[test]
+    fn governance_replay_token_boundary_at_expiry() {
+        let token = GovernanceReplayToken::issue(7, 1, 100, 1);
+        // height=100 is valid (issued_at)
+        assert!(token.validate(7, 100, 1).is_ok());
+        // height=101 is expired (100 + 1 = 101)
+        let err = token.validate(7, 101, 1).unwrap_err();
+        assert!(err.contains("expired"));
+    }
+
+    #[test]
+    fn governance_replay_token_roundtrip_bytes() {
+        let token = GovernanceReplayToken::issue(42, 7, 1000, 500);
+        let bytes = token.to_bytes();
+        assert_eq!(bytes.len(), 26);
+        let recovered = GovernanceReplayToken::from_bytes(&bytes).unwrap();
+        assert_eq!(token, recovered);
+    }
+
+    #[test]
+    fn governance_replay_token_from_bytes_rejects_wrong_len() {
+        let err = GovernanceReplayToken::from_bytes(&[0u8; 10]).unwrap_err();
+        assert!(err.contains("expected 26 bytes"));
+    }
+
+    #[test]
+    fn governance_replay_token_overflow_safe() {
+        // validity_window = u64::MAX should not panic
+        let token = GovernanceReplayToken::issue(1, 1, u64::MAX - 10, u64::MAX);
+        assert!(token.validate(1, u64::MAX - 5, 1).is_ok());
     }
 }
