@@ -75,6 +75,57 @@ func uint128FromInternal(v u128) Uint128 {
 	}
 }
 
+func uint128ToInternal(v Uint128) u128 {
+	return u128{
+		lo: v.Lo,
+		hi: v.Hi,
+	}
+}
+
+// CheckValueConservationTxWide applies the canonical tx-wide value
+// conservation rules against the immutable txcontext totals. The vault floor
+// input is ignored unless the transaction spends exactly one CORE_VAULT input,
+// matching the executable validator paths.
+func CheckValueConservationTxWide(
+	base *TxContextBase,
+	hasExactOneVaultInput bool,
+	vaultInputSum Uint128,
+) *TxError {
+	if base == nil {
+		return &TxError{Code: TX_ERR_PARSE, Msg: "txcontext base missing"}
+	}
+
+	totalIn := uint128ToInternal(base.TotalIn)
+	totalOut := uint128ToInternal(base.TotalOut)
+	if cmpU128(totalOut, totalIn) > 0 {
+		return &TxError{Code: TX_ERR_VALUE_CONSERVATION, Msg: "sum_out exceeds sum_in"}
+	}
+
+	if hasExactOneVaultInput {
+		vaultFloor := uint128ToInternal(vaultInputSum)
+		if cmpU128(totalOut, vaultFloor) < 0 {
+			return &TxError{Code: TX_ERR_VALUE_CONSERVATION, Msg: "CORE_VAULT value must not fund miner fee"}
+		}
+	}
+
+	return nil
+}
+
+func requireTxContextBaseMatchesTotals(
+	base *TxContextBase,
+	totalIn Uint128,
+	totalOut Uint128,
+	height uint64,
+) *TxError {
+	if base == nil {
+		return &TxError{Code: TX_ERR_PARSE, Msg: "txcontext base missing"}
+	}
+	if base.TotalIn != totalIn || base.TotalOut != totalOut || base.Height != height {
+		return &TxError{Code: TX_ERR_PARSE, Msg: "txcontext base totals mismatch"}
+	}
+	return nil
+}
+
 func cloneTxContextPayload(src []byte) []byte {
 	out := make([]byte, len(src))
 	copy(out, src)
