@@ -94,7 +94,7 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
         self.assertEqual(checks, [])
         self.assertEqual(focuses, [])
         self.assertEqual(profile.name, "runtime_code")
-        self.assertEqual(profile.model, "gpt-5.4")
+        self.assertEqual(profile.model, "gpt-5.4-mini")
         self.assertEqual(profile.model_reasoning_effort, "high")
         self.assertEqual(
             profile.required_lenses,

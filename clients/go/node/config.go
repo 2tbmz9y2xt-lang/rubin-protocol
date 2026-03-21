@@ -8,18 +8,55 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 type Config struct {
-	Network     string   `json:"network"`
-	DataDir     string   `json:"data_dir"`
-	BindAddr    string   `json:"bind_addr"`
-	RPCBindAddr string   `json:"rpc_bind_addr,omitempty"`
-	LogLevel    string   `json:"log_level"`
-	Peers       []string `json:"peers"`
-	MaxPeers    int      `json:"max_peers"`
-	ChainID     string   `json:"chain_id_hex,omitempty"`
-	MineAddress string   `json:"mine_address"`
+	Network            string              `json:"network"`
+	DataDir            string              `json:"data_dir"`
+	BindAddr           string              `json:"bind_addr"`
+	RPCBindAddr        string              `json:"rpc_bind_addr,omitempty"`
+	LogLevel           string              `json:"log_level"`
+	Peers              []string            `json:"peers"`
+	MaxPeers           int                 `json:"max_peers"`
+	ChainID            string              `json:"chain_id_hex,omitempty"`
+	MineAddress        string              `json:"mine_address"`
+	RotationDescriptor *RotationConfigJSON `json:"rotation_descriptor,omitempty"`
+}
+
+// RotationConfigJSON is the JSON-serializable rotation descriptor for node config.
+// When present, the node constructs a DescriptorRotationProvider from it.
+// When absent (nil), DefaultRotationProvider is used (ML-DSA-87 at all heights).
+type RotationConfigJSON struct {
+	Name         string `json:"name"`
+	OldSuiteID   uint8  `json:"old_suite_id"`
+	NewSuiteID   uint8  `json:"new_suite_id"`
+	CreateHeight uint64 `json:"create_height"`
+	SpendHeight  uint64 `json:"spend_height"`
+	SunsetHeight uint64 `json:"sunset_height,omitempty"`
+}
+
+// BuildRotationProvider constructs a RotationProvider from the config.
+// Returns nil (=> default) if no rotation descriptor is configured.
+func (cfg Config) BuildRotationProvider() (consensus.RotationProvider, *consensus.SuiteRegistry, error) {
+	if cfg.RotationDescriptor == nil {
+		return nil, nil, nil
+	}
+	rd := cfg.RotationDescriptor
+	registry := consensus.DefaultSuiteRegistry()
+	desc := consensus.CryptoRotationDescriptor{
+		Name:         rd.Name,
+		OldSuiteID:   rd.OldSuiteID,
+		NewSuiteID:   rd.NewSuiteID,
+		CreateHeight: rd.CreateHeight,
+		SpendHeight:  rd.SpendHeight,
+		SunsetHeight: rd.SunsetHeight,
+	}
+	if err := desc.Validate(registry); err != nil {
+		return nil, nil, fmt.Errorf("rotation_descriptor: %w", err)
+	}
+	return consensus.DescriptorRotationProvider{Descriptor: desc}, registry, nil
 }
 
 var allowedLogLevels = map[string]struct{}{
@@ -105,6 +142,11 @@ func ValidateConfig(cfg Config) error {
 		}
 		if len(raw) != 32 && len(raw) != 33 {
 			return fmt.Errorf("mine_address must be 32 (key_id) or 33 (suite_id||key_id) bytes, got %d", len(raw))
+		}
+	}
+	if cfg.RotationDescriptor != nil {
+		if _, _, err := cfg.BuildRotationProvider(); err != nil {
+			return err
 		}
 	}
 	return nil

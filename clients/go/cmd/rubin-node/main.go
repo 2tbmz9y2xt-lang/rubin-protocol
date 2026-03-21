@@ -102,6 +102,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "chainstate load failed: %v\n", err)
 		return 2
 	}
+	// Wire rotation descriptor from config into ChainState.
+	rotation, registry, err := cfg.BuildRotationProvider()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "rotation config failed: %v\n", err)
+		return 2
+	}
+	chainState.Rotation = rotation
+	chainState.Registry = registry
 	blockStore, err := node.OpenBlockStore(node.BlockStorePath(cfg.DataDir))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "blockstore open failed: %v\n", err)
