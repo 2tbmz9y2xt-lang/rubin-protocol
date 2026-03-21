@@ -85,15 +85,21 @@ pub fn new_devnet_rpc_state(
     block_store: Option<BlockStore>,
     peer_manager: Arc<PeerManager>,
 ) -> DevnetRPCState {
-    let core_ext_deployments = sync_engine
+    let (core_ext_deployments, suite_context) = sync_engine
         .lock()
-        .map(|engine| engine.core_ext_deployments())
-        .unwrap_or_default();
+        .map(|engine| {
+            (
+                engine.core_ext_deployments(),
+                engine.cfg.suite_context.clone(),
+            )
+        })
+        .unwrap_or_else(|_| (Default::default(), None));
     DevnetRPCState {
         sync_engine,
         block_store,
         tx_pool: Arc::new(Mutex::new(TxPool::new_with_config(TxPoolConfig {
             core_ext_deployments,
+            suite_context,
             ..TxPoolConfig::default()
         }))),
         peer_manager,

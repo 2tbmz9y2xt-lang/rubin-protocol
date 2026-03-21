@@ -457,12 +457,14 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 			s.pvTelemetry.RecordBlockValidated()
 			validateStart := time.Now()
 			shadowState := cloneChainState(prevState)
-			_, parErr := shadowState.ConnectBlockParallelSigs(
+			_, parErr := shadowState.ConnectBlockParallelSigsWithSuiteContext(
 				blockBytes,
 				s.cfg.ExpectedTarget,
 				prevTimestamps,
 				s.cfg.ChainID,
 				s.cfg.CoreExtProfiles,
+				s.cfg.RotationProvider,
+				s.cfg.SuiteRegistry,
 				0,
 			)
 			s.pvTelemetry.RecordValidateLatency(time.Since(validateStart))
@@ -486,12 +488,14 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 		s.pvTelemetry.RecordBlockValidated()
 		validateStart := time.Now()
 		shadowState := cloneChainState(prevState)
-		parSummary, parErr := shadowState.ConnectBlockParallelSigs(
+		parSummary, parErr := shadowState.ConnectBlockParallelSigsWithSuiteContext(
 			blockBytes,
 			s.cfg.ExpectedTarget,
 			prevTimestamps,
 			s.cfg.ChainID,
 			s.cfg.CoreExtProfiles,
+			s.cfg.RotationProvider,
+			s.cfg.SuiteRegistry,
 			0,
 		)
 		s.pvTelemetry.RecordValidateLatency(time.Since(validateStart))
