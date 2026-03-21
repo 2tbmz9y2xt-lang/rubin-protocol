@@ -15,6 +15,7 @@ pub struct TxPoolConfig {
     pub policy_da_surcharge_per_byte: u64,
     pub policy_reject_non_coinbase_anchor_outputs: bool,
     pub policy_reject_core_ext_pre_activation: bool,
+    pub policy_max_ext_payload_bytes: usize,
     pub core_ext_deployments: CoreExtDeploymentProfiles,
 }
 
@@ -371,6 +372,7 @@ impl Default for TxPoolConfig {
             policy_da_surcharge_per_byte: 0,
             policy_reject_non_coinbase_anchor_outputs: true,
             policy_reject_core_ext_pre_activation: true,
+            policy_max_ext_payload_bytes: 0,
             core_ext_deployments: CoreExtDeploymentProfiles::empty(),
         }
     }
@@ -470,6 +472,38 @@ pub(crate) fn apply_policy(
     reject_da_anchor_tx_policy(tx, utxos, cfg.policy_da_surcharge_per_byte)?;
     if cfg.policy_reject_core_ext_pre_activation {
         reject_core_ext_tx_pre_activation(tx, utxos, next_height, &cfg.core_ext_deployments)?;
+    }
+    if cfg.policy_max_ext_payload_bytes > 0 {
+        reject_core_ext_tx_oversized_payload(tx, cfg.policy_max_ext_payload_bytes)?;
+    }
+    Ok(())
+}
+
+/// SHOULD-level mempool policy: reject transactions with CORE_EXT outputs whose
+/// ext_payload exceeds the configured maximum. This is relay policy, not consensus.
+pub(crate) fn reject_core_ext_tx_oversized_payload(
+    tx: &rubin_consensus::Tx,
+    max_bytes: usize,
+) -> Result<(), String> {
+    if max_bytes == 0 {
+        return Ok(());
+    }
+    for (i, output) in tx.outputs.iter().enumerate() {
+        if output.covenant_type != rubin_consensus::constants::COV_TYPE_EXT {
+            continue;
+        }
+        let cov = match parse_core_ext_covenant_data(&output.covenant_data) {
+            Ok(c) => c,
+            Err(_) => continue, // Parse failure handled by consensus validation
+        };
+        if cov.ext_payload.len() > max_bytes {
+            return Err(format!(
+                "CORE_EXT output {} ext_payload {} bytes exceeds policy limit {}",
+                i,
+                cov.ext_payload.len(),
+                max_bytes,
+            ));
+        }
     }
     Ok(())
 }
@@ -685,8 +719,9 @@ mod tests {
 
     use super::{
         compare_admit_priority, compare_entries_for_mining, compare_fee_rate, conflict, mtp_median,
-        next_block_height, next_block_mtp, rejected, unavailable, TxPool, TxPoolAdmitErrorKind,
-        TxPoolConfig, TxPoolEntry, MAX_TX_POOL_TRANSACTIONS,
+        next_block_height, next_block_mtp, reject_core_ext_tx_oversized_payload, rejected,
+        unavailable, TxPool, TxPoolAdmitErrorKind, TxPoolConfig, TxPoolEntry,
+        MAX_TX_POOL_TRANSACTIONS,
     };
     use crate::{
         block_store_path, default_sync_config, devnet_genesis_block_bytes, devnet_genesis_chain_id,
@@ -822,9 +857,14 @@ mod tests {
     }
 
     fn empty_core_ext_covenant_data(ext_id: u16) -> Vec<u8> {
+        core_ext_covenant_data_with_payload(ext_id, &[])
+    }
+
+    fn core_ext_covenant_data_with_payload(ext_id: u16, payload: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&ext_id.to_le_bytes());
-        out.push(0x00);
+        rubin_consensus::encode_compact_size(payload.len() as u64, &mut out);
+        out.extend_from_slice(payload);
         out
     }
 
@@ -1669,5 +1709,133 @@ mod tests {
         let unavailable_err = unavailable("unavailable");
         assert_eq!(unavailable_err.kind, TxPoolAdmitErrorKind::Unavailable);
         assert_eq!(unavailable_err.to_string(), "unavailable");
+    }
+
+    #[test]
+    fn reject_oversized_payload_allows_under_limit() {
+        let tx = Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0,
+            tx_nonce: 1,
+            inputs: vec![],
+            outputs: vec![TxOutput {
+                value: 1,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: core_ext_covenant_data_with_payload(5, &[0u8; 32]),
+            }],
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: vec![],
+            da_payload: vec![],
+        };
+        assert!(reject_core_ext_tx_oversized_payload(&tx, 48).is_ok());
+    }
+
+    #[test]
+    fn reject_oversized_payload_allows_at_limit() {
+        let tx = Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0,
+            tx_nonce: 1,
+            inputs: vec![],
+            outputs: vec![TxOutput {
+                value: 1,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: core_ext_covenant_data_with_payload(5, &[0u8; 48]),
+            }],
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: vec![],
+            da_payload: vec![],
+        };
+        assert!(reject_core_ext_tx_oversized_payload(&tx, 48).is_ok());
+    }
+
+    #[test]
+    fn reject_oversized_payload_rejects_over_limit() {
+        let tx = Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0,
+            tx_nonce: 1,
+            inputs: vec![],
+            outputs: vec![TxOutput {
+                value: 1,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: core_ext_covenant_data_with_payload(5, &[0u8; 49]),
+            }],
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: vec![],
+            da_payload: vec![],
+        };
+        let err = reject_core_ext_tx_oversized_payload(&tx, 48);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("exceeds policy limit"));
+    }
+
+    #[test]
+    fn reject_oversized_payload_ignores_non_core_ext() {
+        let tx = Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0,
+            tx_nonce: 1,
+            inputs: vec![],
+            outputs: vec![TxOutput {
+                value: 1,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: vec![0u8; 100],
+            }],
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: vec![],
+            da_payload: vec![],
+        };
+        assert!(reject_core_ext_tx_oversized_payload(&tx, 1).is_ok());
+    }
+
+    #[test]
+    fn reject_oversized_payload_zero_limit_disables() {
+        let tx = Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0,
+            tx_nonce: 1,
+            inputs: vec![],
+            outputs: vec![TxOutput {
+                value: 1,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: core_ext_covenant_data_with_payload(5, &[0u8; 100]),
+            }],
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: vec![],
+            da_payload: vec![],
+        };
+        assert!(reject_core_ext_tx_oversized_payload(&tx, 0).is_ok());
+    }
+
+    #[test]
+    fn reject_oversized_payload_empty_payload_allowed() {
+        let tx = Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0,
+            tx_nonce: 1,
+            inputs: vec![],
+            outputs: vec![TxOutput {
+                value: 1,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: core_ext_covenant_data_with_payload(5, &[]),
+            }],
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: vec![],
+            da_payload: vec![],
+        };
+        assert!(reject_core_ext_tx_oversized_payload(&tx, 1).is_ok());
     }
 }

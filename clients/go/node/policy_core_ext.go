@@ -40,6 +40,39 @@ func rejectCoreExtCovenantDataPreActivation(
 	return false, "", nil
 }
 
+// RejectCoreExtTxOversizedPayload implements SHOULD-level mempool policy that rejects
+// transactions containing CORE_EXT outputs whose ext_payload exceeds maxBytes.
+// This is a relay/mempool policy (not consensus), preventing oversized payloads
+// from consuming mempool space before the SHOULD→MUST promotion threshold is reached.
+func RejectCoreExtTxOversizedPayload(
+	tx *consensus.Tx,
+	maxBytes int,
+) (reject bool, reason string, err error) {
+	if tx == nil {
+		return false, "", nil
+	}
+	if maxBytes <= 0 {
+		return false, "", nil
+	}
+	for i, out := range tx.Outputs {
+		if out.CovenantType != consensus.COV_TYPE_CORE_EXT {
+			continue
+		}
+		cd, err := consensus.ParseCoreExtCovenantData(out.CovenantData)
+		if err != nil {
+			// Parse failure is handled by consensus validation; skip here.
+			continue
+		}
+		if len(cd.ExtPayload) > maxBytes {
+			return true, fmt.Sprintf(
+				"CORE_EXT output %d ext_payload %d bytes exceeds policy limit %d",
+				i, len(cd.ExtPayload), maxBytes,
+			), nil
+		}
+	}
+	return false, "", nil
+}
+
 // RejectCoreExtTxPreActivation implements non-consensus policy guardrails for CORE_EXT.
 //
 // It returns reject=true if tx creates or spends a CORE_EXT output whose profile(ext_id, height)
