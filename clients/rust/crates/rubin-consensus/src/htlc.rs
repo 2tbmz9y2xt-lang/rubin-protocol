@@ -484,7 +484,8 @@ mod tests {
         let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
         let (rotation, registry) = sunset_rotation();
 
-        // At height 3 (before sunset=10), ML-DSA-87 IS in spend set
+        // At height 7 (post-spend=5, pre-sunset=10), ML-DSA-87 IS in spend set.
+        // This exercises the H2..H4 window where spend rules diverge from create rules.
         let err = validate_htlc_spend_at_height(
             &entry,
             &path_item,
@@ -493,7 +494,7 @@ mod tests {
             0,
             1000,
             [0u8; 32],
-            3,
+            7,
             0,
             &mut cache,
             Some(&rotation),
@@ -507,7 +508,7 @@ mod tests {
                 assert_ne!(
                     e.code,
                     ErrorCode::TxErrSigAlgInvalid,
-                    "should NOT fail on suite check at height 3: {e}"
+                    "should NOT fail on suite check at height 7 (post-spend, pre-sunset): {e}"
                 );
             }
         }
