@@ -451,6 +451,9 @@ struct CoreExtProfileJson {
     #[serde(default)]
     allowed_suite_ids: Vec<u8>,
     #[serde(default)]
+    // Governance vectors deserialize the full profile shape even though this bitset
+    // is consumed by the spend-time harness lane, not by governance checks.
+    #[allow(dead_code)]
     allowed_sighash_set: u8,
     #[serde(default)]
     max_ext_payload_bytes: i64,

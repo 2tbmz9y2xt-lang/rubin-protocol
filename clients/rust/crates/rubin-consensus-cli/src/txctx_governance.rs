@@ -1,5 +1,5 @@
 use super::{
-    CoreExtProfileJson, Request, Response, TxctxDependencyChecklistJson, TxctxDependencyInputsJson,
+    CoreExtProfileJson, Request, Response, TxctxDependencyChecklistJson,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -244,6 +244,7 @@ fn txctx_enabled_profile_count(profiles: &[CoreExtProfileJson]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TxctxDependencyInputsJson;
 
     fn test_profile() -> CoreExtProfileJson {
         CoreExtProfileJson {
