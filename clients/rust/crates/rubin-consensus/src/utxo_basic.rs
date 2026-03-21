@@ -204,7 +204,11 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_sui
             ));
         }
 
-        if entry.created_by_coinbase && height < entry.creation_height + COINBASE_MATURITY {
+        // Overflow-safe maturity check: avoid entry.creation_height + COINBASE_MATURITY wrapping.
+        if entry.created_by_coinbase
+            && (height < entry.creation_height
+                || height - entry.creation_height < COINBASE_MATURITY)
+        {
             return Err(TxError::new(
                 ErrorCode::TxErrCoinbaseImmature,
                 "coinbase immature",
