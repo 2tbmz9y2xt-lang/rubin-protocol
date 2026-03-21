@@ -469,3 +469,85 @@ func TestChainStateConnectBlockParallelSigs_InvalidBlock(t *testing.T) {
 		t.Fatal("expected error for invalid block")
 	}
 }
+
+// TestChainState_RotationOrNil_ReturnsNilWhenNotSet verifies that nil Rotation
+// is passed through as nil (consensus internally fallbacks to DefaultRotationProvider).
+func TestChainState_RotationOrNil_ReturnsNilWhenNotSet(t *testing.T) {
+	st := NewChainState()
+	rot := st.rotationOrNil()
+	if rot != nil {
+		t.Fatal("rotationOrNil must return nil when Rotation not set")
+	}
+}
+
+// TestChainState_RotationOrDefault_UsesStored verifies that a non-nil
+// Rotation field is used instead of the default.
+func TestChainState_RotationOrDefault_UsesStored(t *testing.T) {
+	st := NewChainState()
+	// Create a rotation provider that sunsets ML-DSA-87 at height 10
+	registry := consensus.NewSuiteRegistryFromParams([]consensus.SuiteParams{
+		{SuiteID: consensus.SUITE_ID_ML_DSA_87, PubkeyLen: consensus.ML_DSA_87_PUBKEY_BYTES, SigLen: consensus.ML_DSA_87_SIG_BYTES, VerifyCost: consensus.VERIFY_COST_ML_DSA_87},
+		{SuiteID: 0x02, PubkeyLen: 32, SigLen: 64, VerifyCost: 100},
+	})
+	desc := consensus.CryptoRotationDescriptor{
+		Name:         "test-sunset",
+		OldSuiteID:   consensus.SUITE_ID_ML_DSA_87,
+		NewSuiteID:   0x02,
+		CreateHeight: 1,
+		SpendHeight:  5,
+		SunsetHeight: 10,
+	}
+	if err := desc.Validate(registry); err != nil {
+		t.Fatalf("descriptor validation: %v", err)
+	}
+	st.Rotation = consensus.DescriptorRotationProvider{Descriptor: desc}
+
+	rot := st.rotationOrNil()
+	// At height 15 (after sunset), ML-DSA-87 should NOT be in spend set
+	suites := rot.NativeSpendSuites(15)
+	if suites.Contains(consensus.SUITE_ID_ML_DSA_87) {
+		t.Fatal("ML-DSA-87 should be sunset at height 15")
+	}
+}
+
+// TestChainState_RegistryOrNil_ReturnsNilWhenNotSet verifies nil Registry
+// is passed through as nil (consensus internally fallbacks to DefaultSuiteRegistry).
+func TestChainState_RegistryOrNil_ReturnsNilWhenNotSet(t *testing.T) {
+	st := NewChainState()
+	reg := st.registryOrNil()
+	if reg != nil {
+		t.Fatal("registryOrNil must return nil when Registry not set")
+	}
+}
+
+// TestChainState_RegistryOrDefault_UsesStored verifies that a non-nil
+// Registry field is used instead of the default.
+func TestChainState_RegistryOrDefault_UsesStored(t *testing.T) {
+	st := NewChainState()
+	customRegistry := consensus.NewSuiteRegistryFromParams([]consensus.SuiteParams{
+		{SuiteID: 0x42, PubkeyLen: 32, SigLen: 64, VerifyCost: 100},
+	})
+	st.Registry = customRegistry
+	reg := st.registryOrNil()
+	if _, ok := reg.Lookup(0x42); !ok {
+		t.Fatal("stored registry must be used")
+	}
+	if _, ok := reg.Lookup(consensus.SUITE_ID_ML_DSA_87); ok {
+		t.Fatal("default ML-DSA-87 must NOT be in custom registry")
+	}
+}
+
+// TestChainState_ConnectBlock_DefaultRotation_StillWorks is a regression test
+// confirming that ChainState without explicit rotation connects blocks normally.
+func TestChainState_ConnectBlock_DefaultRotation_StillWorks(t *testing.T) {
+	target := consensus.POW_LIMIT
+	st := NewChainState()
+	// No Rotation or Registry set — defaults should be used
+	_, err := st.ConnectBlock(devnetGenesisBlockBytes, &target, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("connect genesis with default rotation: %v", err)
+	}
+	if !st.HasTip || st.Height != 0 {
+		t.Fatalf("unexpected state after genesis: has_tip=%v height=%d", st.HasTip, st.Height)
+	}
+}

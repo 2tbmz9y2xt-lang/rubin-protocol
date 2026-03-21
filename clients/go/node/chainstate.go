@@ -62,6 +62,8 @@ type ChainState struct {
 	AlreadyGenerated uint64
 	TipHash          [32]byte
 	HasTip           bool
+	Rotation         consensus.RotationProvider
+	Registry         *consensus.SuiteRegistry
 }
 
 type ChainStateConnectSummary struct {
@@ -99,6 +101,26 @@ func NewChainState() *ChainState {
 	return &ChainState{
 		Utxos: make(map[consensus.Outpoint]consensus.UtxoEntry),
 	}
+}
+
+// rotationOrNil returns s.Rotation if set, otherwise nil.
+// When nil, consensus functions internally fallback to DefaultRotationProvider,
+// matching the Rust defaulting contract where SyncEngine passes None.
+func (s *ChainState) rotationOrNil() consensus.RotationProvider {
+	if s != nil {
+		return s.Rotation
+	}
+	return nil
+}
+
+// registryOrNil returns s.Registry if set, otherwise nil.
+// When nil, consensus functions internally fallback to DefaultSuiteRegistry,
+// matching the Rust defaulting contract.
+func (s *ChainState) registryOrNil() *consensus.SuiteRegistry {
+	if s != nil {
+		return s.Registry
+	}
+	return nil
 }
 
 func ChainStatePath(dataDir string) string {
@@ -161,8 +183,8 @@ func (s *ChainState) ConnectBlockWithCoreExtProfiles(
 		prevTimestamps,
 		chainID,
 		coreExtProfiles,
-		nil,
-		nil,
+		s.rotationOrNil(),
+		s.registryOrNil(),
 	)
 }
 
@@ -257,8 +279,8 @@ func (s *ChainState) ConnectBlockParallelSigs(
 		prevTimestamps,
 		chainID,
 		coreExtProfiles,
-		nil,
-		nil,
+		s.rotationOrNil(),
+		s.registryOrNil(),
 		workers,
 	)
 }
