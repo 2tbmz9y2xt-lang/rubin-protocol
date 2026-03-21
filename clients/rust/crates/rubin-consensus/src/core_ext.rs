@@ -123,9 +123,20 @@ impl GovernanceReplayToken {
         }
     }
 
-    /// Check whether this token is valid at the given height and nonce.
+    /// Check whether this token is valid for the given ext_id at the given height and nonce.
     /// Returns Ok(()) if valid, Err with reason if not.
-    pub fn validate(&self, current_height: u64, expected_nonce: u64) -> Result<(), String> {
+    pub fn validate(
+        &self,
+        expected_ext_id: u16,
+        current_height: u64,
+        expected_nonce: u64,
+    ) -> Result<(), String> {
+        if self.ext_id != expected_ext_id {
+            return Err(format!(
+                "governance replay token ext_id mismatch: token={} expected={}",
+                self.ext_id, expected_ext_id
+            ));
+        }
         if self.nonce != expected_nonce {
             return Err(format!(
                 "governance replay token nonce mismatch: token={} expected={}",
@@ -2086,28 +2097,35 @@ mod tests {
     #[test]
     fn governance_replay_token_issue_and_validate() {
         let token = GovernanceReplayToken::issue(7, 1, 100, 50);
-        assert!(token.validate(100, 1).is_ok());
-        assert!(token.validate(149, 1).is_ok());
+        assert!(token.validate(7, 100, 1).is_ok());
+        assert!(token.validate(7, 149, 1).is_ok());
     }
 
     #[test]
     fn governance_replay_token_rejects_wrong_nonce() {
         let token = GovernanceReplayToken::issue(7, 1, 100, 50);
-        let err = token.validate(120, 2).unwrap_err();
+        let err = token.validate(7, 120, 2).unwrap_err();
         assert!(err.contains("nonce mismatch"));
+    }
+
+    #[test]
+    fn governance_replay_token_rejects_wrong_ext_id() {
+        let token = GovernanceReplayToken::issue(7, 1, 100, 50);
+        let err = token.validate(9, 120, 1).unwrap_err();
+        assert!(err.contains("ext_id mismatch"));
     }
 
     #[test]
     fn governance_replay_token_rejects_before_issued() {
         let token = GovernanceReplayToken::issue(7, 1, 100, 50);
-        let err = token.validate(99, 1).unwrap_err();
+        let err = token.validate(7, 99, 1).unwrap_err();
         assert!(err.contains("not yet valid"));
     }
 
     #[test]
     fn governance_replay_token_rejects_expired() {
         let token = GovernanceReplayToken::issue(7, 1, 100, 50);
-        let err = token.validate(150, 1).unwrap_err();
+        let err = token.validate(7, 150, 1).unwrap_err();
         assert!(err.contains("expired"));
     }
 
@@ -2115,9 +2133,9 @@ mod tests {
     fn governance_replay_token_boundary_at_expiry() {
         let token = GovernanceReplayToken::issue(7, 1, 100, 1);
         // height=100 is valid (issued_at)
-        assert!(token.validate(100, 1).is_ok());
+        assert!(token.validate(7, 100, 1).is_ok());
         // height=101 is expired (100 + 1 = 101)
-        let err = token.validate(101, 1).unwrap_err();
+        let err = token.validate(7, 101, 1).unwrap_err();
         assert!(err.contains("expired"));
     }
 
@@ -2140,6 +2158,6 @@ mod tests {
     fn governance_replay_token_overflow_safe() {
         // validity_window = u64::MAX should not panic
         let token = GovernanceReplayToken::issue(1, 1, u64::MAX - 10, u64::MAX);
-        assert!(token.validate(u64::MAX - 5, 1).is_ok());
+        assert!(token.validate(1, u64::MAX - 5, 1).is_ok());
     }
 }
