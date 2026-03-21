@@ -1349,6 +1349,211 @@ def render_cv_da_integrity_lean(vectors: list[DaIntegrityVector]) -> str:
 
 
 @dataclass(frozen=True)
+class DaStressVector:
+    vid: str
+    op: str
+    expect_ok: bool
+    expect_err: str | None
+    peer_streams_bps: list[int] | None
+    per_peer_bps: int | None
+    global_bps: int | None
+    expect_peer_exceeded: bool | None
+    expect_global_exceeded: bool | None
+    expect_quality_penalty: bool | None
+    expect_disconnect: bool | None
+    per_peer_limit: int | None
+    per_da_id_limit: int | None
+    global_limit: int | None
+    current_peer_bytes: int | None
+    current_da_id_bytes: int | None
+    current_global_bytes: int | None
+    incoming_chunk_bytes: int | None
+    expect_admit: bool | None
+    incoming_has_commit: bool | None
+    recovery_success_rate: int | None
+    observation_minutes: int | None
+    expect_fill_pct: int | None
+    expect_storm_mode: bool | None
+    expect_rollback: bool | None
+    cap_bytes: int | None
+    current_pinned_payload_bytes: int | None
+    incoming_payload_bytes: int | None
+    incoming_commit_overhead_bytes: int | None
+    expect_counted_bytes: int | None
+    expect_ignored_overhead_bytes: int | None
+    max_da_chunk_count: int | None
+    chunk_count: int | None
+
+
+def load_cv_da_stress(path: Path) -> list[DaStressVector]:
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    if doc.get("gate") != "CV-DA-STRESS":
+        raise ValueError(f"expected gate=CV-DA-STRESS, got {doc.get('gate')!r}")
+    vectors = doc.get("vectors")
+    if not isinstance(vectors, list):
+        raise ValueError("vectors must be a list")
+    out: list[DaStressVector] = []
+    for v in vectors:
+        if not isinstance(v, dict):
+            continue
+        vid = str(v.get("id") or "")
+        op = str(v.get("op") or "")
+        if not vid or not op:
+            continue
+        expect_ok = bool(v.get("expect_ok"))
+        peer_streams_raw = v.get("peer_streams_bps")
+        peer_streams: list[int] | None = None
+        if isinstance(peer_streams_raw, list):
+            peer_streams = [int(x) for x in peer_streams_raw]
+        recovery_success = v.get("recovery_success_rate")
+        expect_fill_pct = v.get("expect_fill_pct")
+        out.append(
+            DaStressVector(
+                vid=vid,
+                op=op,
+                expect_ok=expect_ok,
+                expect_err=(str(v.get("expect_err")) if not expect_ok and v.get("expect_err") is not None else None),
+                peer_streams_bps=peer_streams,
+                per_peer_bps=(int(v["per_peer_bps"]) if "per_peer_bps" in v else None),
+                global_bps=(int(v["global_bps"]) if "global_bps" in v else None),
+                expect_peer_exceeded=(bool(v["expect_peer_exceeded"]) if "expect_peer_exceeded" in v else None),
+                expect_global_exceeded=(bool(v["expect_global_exceeded"]) if "expect_global_exceeded" in v else None),
+                expect_quality_penalty=(bool(v["expect_quality_penalty"]) if "expect_quality_penalty" in v else None),
+                expect_disconnect=(bool(v["expect_disconnect"]) if "expect_disconnect" in v else None),
+                per_peer_limit=(int(v["per_peer_limit"]) if "per_peer_limit" in v else None),
+                per_da_id_limit=(int(v["per_da_id_limit"]) if "per_da_id_limit" in v else None),
+                global_limit=(int(v["global_limit"]) if "global_limit" in v else None),
+                current_peer_bytes=(int(v["current_peer_bytes"]) if "current_peer_bytes" in v else None),
+                current_da_id_bytes=(int(v["current_da_id_bytes"]) if "current_da_id_bytes" in v else None),
+                current_global_bytes=(int(v["current_global_bytes"]) if "current_global_bytes" in v else None),
+                incoming_chunk_bytes=(int(v["incoming_chunk_bytes"]) if "incoming_chunk_bytes" in v else None),
+                expect_admit=(bool(v["expect_admit"]) if "expect_admit" in v else None),
+                incoming_has_commit=(bool(v["incoming_has_commit"]) if "incoming_has_commit" in v else None),
+                recovery_success_rate=(int(round(float(recovery_success))) if recovery_success is not None else None),
+                observation_minutes=(int(v["observation_minutes"]) if "observation_minutes" in v else None),
+                expect_fill_pct=(int(round(float(expect_fill_pct))) if expect_fill_pct is not None else None),
+                expect_storm_mode=(bool(v["expect_storm_mode"]) if "expect_storm_mode" in v else None),
+                expect_rollback=(bool(v["expect_rollback"]) if "expect_rollback" in v else None),
+                cap_bytes=(int(v["cap_bytes"]) if "cap_bytes" in v else None),
+                current_pinned_payload_bytes=(int(v["current_pinned_payload_bytes"]) if "current_pinned_payload_bytes" in v else None),
+                incoming_payload_bytes=(int(v["incoming_payload_bytes"]) if "incoming_payload_bytes" in v else None),
+                incoming_commit_overhead_bytes=(int(v["incoming_commit_overhead_bytes"]) if "incoming_commit_overhead_bytes" in v else None),
+                expect_counted_bytes=(int(v["expect_counted_bytes"]) if "expect_counted_bytes" in v else None),
+                expect_ignored_overhead_bytes=(int(v["expect_ignored_overhead_bytes"]) if "expect_ignored_overhead_bytes" in v else None),
+                max_da_chunk_count=(int(v["max_da_chunk_count"]) if "max_da_chunk_count" in v else None),
+                chunk_count=(int(v["chunk_count"]) if "chunk_count" in v else None),
+            )
+        )
+    if not out:
+        raise ValueError("no DA stress vectors found")
+    return out
+
+
+def _lean_opt_nat(value: int | None) -> str:
+    if value is None:
+        return "none"
+    return f"some {value}"
+
+
+def _lean_opt_bool(value: bool | None) -> str:
+    if value is None:
+        return "none"
+    return "some true" if value else "some false"
+
+
+def _lean_opt_nat_list(values: list[int] | None) -> str:
+    if values is None:
+        return "none"
+    return "some [" + ", ".join(str(v) for v in values) + "]"
+
+
+def render_cv_da_stress_lean(vectors: list[DaStressVector]) -> str:
+    rows: list[str] = []
+    for v in vectors:
+        rows.append(
+            "  { "
+            + f'id := "{v.vid}", '
+            + f'op := "{v.op}", '
+            + f"expectOk := {'true' if v.expect_ok else 'false'}, "
+            + f"expectErr := {_lean_opt_str(v.expect_err)}, "
+            + f"peerStreamsBps := {_lean_opt_nat_list(v.peer_streams_bps)}, "
+            + f"perPeerBps := {_lean_opt_nat(v.per_peer_bps)}, "
+            + f"globalBps := {_lean_opt_nat(v.global_bps)}, "
+            + f"expectPeerExceeded := {_lean_opt_bool(v.expect_peer_exceeded)}, "
+            + f"expectGlobalExceeded := {_lean_opt_bool(v.expect_global_exceeded)}, "
+            + f"expectQualityPenalty := {_lean_opt_bool(v.expect_quality_penalty)}, "
+            + f"expectDisconnect := {_lean_opt_bool(v.expect_disconnect)}, "
+            + f"perPeerLimit := {_lean_opt_nat(v.per_peer_limit)}, "
+            + f"perDaIdLimit := {_lean_opt_nat(v.per_da_id_limit)}, "
+            + f"globalLimit := {_lean_opt_nat(v.global_limit)}, "
+            + f"currentPeerBytes := {_lean_opt_nat(v.current_peer_bytes)}, "
+            + f"currentDaIdBytes := {_lean_opt_nat(v.current_da_id_bytes)}, "
+            + f"currentGlobalBytes := {_lean_opt_nat(v.current_global_bytes)}, "
+            + f"incomingChunkBytes := {_lean_opt_nat(v.incoming_chunk_bytes)}, "
+            + f"expectAdmit := {_lean_opt_bool(v.expect_admit)}, "
+            + f"incomingHasCommit := {_lean_opt_bool(v.incoming_has_commit)}, "
+            + f"recoverySuccessRate := {_lean_opt_nat(v.recovery_success_rate)}, "
+            + f"observationMinutes := {_lean_opt_nat(v.observation_minutes)}, "
+            + f"expectFillPct := {_lean_opt_nat(v.expect_fill_pct)}, "
+            + f"expectStormMode := {_lean_opt_bool(v.expect_storm_mode)}, "
+            + f"expectRollback := {_lean_opt_bool(v.expect_rollback)}, "
+            + f"capBytes := {_lean_opt_nat(v.cap_bytes)}, "
+            + f"currentPinnedPayloadBytes := {_lean_opt_nat(v.current_pinned_payload_bytes)}, "
+            + f"incomingPayloadBytes := {_lean_opt_nat(v.incoming_payload_bytes)}, "
+            + f"incomingCommitOverheadBytes := {_lean_opt_nat(v.incoming_commit_overhead_bytes)}, "
+            + f"expectCountedBytes := {_lean_opt_nat(v.expect_counted_bytes)}, "
+            + f"expectIgnoredOverheadBytes := {_lean_opt_nat(v.expect_ignored_overhead_bytes)}, "
+            + f"maxDaChunkCount := {_lean_opt_nat(v.max_da_chunk_count)}, "
+            + f"chunkCount := {_lean_opt_nat(v.chunk_count)}"
+            + " }"
+        )
+
+    body = ",\n".join(rows)
+    module_body = (
+        "structure CVDaStressVector where\n"
+        "  id : String\n"
+        "  op : String\n"
+        "  expectOk : Bool\n"
+        "  expectErr : Option String := none\n"
+        "  peerStreamsBps : Option (List Nat) := none\n"
+        "  perPeerBps : Option Nat := none\n"
+        "  globalBps : Option Nat := none\n"
+        "  expectPeerExceeded : Option Bool := none\n"
+        "  expectGlobalExceeded : Option Bool := none\n"
+        "  expectQualityPenalty : Option Bool := none\n"
+        "  expectDisconnect : Option Bool := none\n"
+        "  perPeerLimit : Option Nat := none\n"
+        "  perDaIdLimit : Option Nat := none\n"
+        "  globalLimit : Option Nat := none\n"
+        "  currentPeerBytes : Option Nat := none\n"
+        "  currentDaIdBytes : Option Nat := none\n"
+        "  currentGlobalBytes : Option Nat := none\n"
+        "  incomingChunkBytes : Option Nat := none\n"
+        "  expectAdmit : Option Bool := none\n"
+        "  incomingHasCommit : Option Bool := none\n"
+        "  recoverySuccessRate : Option Nat := none\n"
+        "  observationMinutes : Option Nat := none\n"
+        "  expectFillPct : Option Nat := none\n"
+        "  expectStormMode : Option Bool := none\n"
+        "  expectRollback : Option Bool := none\n"
+        "  capBytes : Option Nat := none\n"
+        "  currentPinnedPayloadBytes : Option Nat := none\n"
+        "  incomingPayloadBytes : Option Nat := none\n"
+        "  incomingCommitOverheadBytes : Option Nat := none\n"
+        "  expectCountedBytes : Option Nat := none\n"
+        "  expectIgnoredOverheadBytes : Option Nat := none\n"
+        "  maxDaChunkCount : Option Nat := none\n"
+        "  chunkCount : Option Nat := none\n"
+        "\n"
+        "def cvDaStressVectors : List CVDaStressVector := [\n"
+        + body
+        + "\n]\n"
+        "\n"
+    )
+    return _render_lean_namespace("CV-DA-STRESS", module_body)
+
+
+@dataclass(frozen=True)
 class CovenantGenesisVector:
     vid: str
     tx_hex: str
@@ -2594,6 +2799,12 @@ def main() -> int:
     div = load_cv_da_integrity(in_da_integrity)
     out_da_integrity.write_text(_inject_perf_options(render_cv_da_integrity_lean(div)), encoding="utf-8")
     print(f"WROTE: {out_da_integrity}")
+
+    in_da_stress = repo_root / "conformance" / "fixtures" / "CV-DA-STRESS.json"
+    out_da_stress = repo_root / "rubin-formal" / "RubinFormal" / "Conformance" / "CVDaStressVectors.lean"
+    dsv = load_cv_da_stress(in_da_stress)
+    out_da_stress.write_text(_inject_perf_options(render_cv_da_stress_lean(dsv)), encoding="utf-8")
+    print(f"WROTE: {out_da_stress}")
 
     in_cov_gen = repo_root / "conformance" / "fixtures" / "CV-COVENANT-GENESIS.json"
     out_cov_gen = repo_root / "rubin-formal" / "RubinFormal" / "Conformance" / "CVCovenantGenesisVectors.lean"
