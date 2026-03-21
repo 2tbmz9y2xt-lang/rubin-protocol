@@ -107,6 +107,37 @@ pub(crate) fn validate_htlc_spend_with_cache(
     block_mtp: u64,
     cache: &mut SighashV1PrehashCache<'_>,
 ) -> Result<(), TxError> {
+    validate_htlc_spend_at_height(
+        entry,
+        path_item,
+        sig_item,
+        _tx,
+        input_index,
+        input_value,
+        chain_id,
+        block_height,
+        block_mtp,
+        cache,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_htlc_spend_at_height(
+    entry: &UtxoEntry,
+    path_item: &WitnessItem,
+    sig_item: &WitnessItem,
+    _tx: &Tx,
+    input_index: u32,
+    input_value: u64,
+    chain_id: [u8; 32],
+    block_height: u64,
+    block_mtp: u64,
+    cache: &mut SighashV1PrehashCache<'_>,
+    rotation: Option<&dyn RotationProvider>,
+    registry: Option<&SuiteRegistry>,
+) -> Result<(), TxError> {
     let cov = parse_htlc_covenant_data(&entry.covenant_data)?;
 
     if path_item.suite_id != SUITE_ID_SENTINEL {
@@ -215,11 +246,10 @@ pub(crate) fn validate_htlc_spend_with_cache(
         }
     };
 
-    // Rotation-aware suite validation.
     let default_rp = DefaultRotationProvider;
     let default_reg = SuiteRegistry::default_registry();
-    let rp: &dyn RotationProvider = &default_rp;
-    let reg = &default_reg;
+    let rp: &dyn RotationProvider = rotation.unwrap_or(&default_rp);
+    let reg = registry.unwrap_or(&default_reg);
 
     let native_spend = rp.native_spend_suites(block_height);
     if !native_spend.contains(sig_item.suite_id) {

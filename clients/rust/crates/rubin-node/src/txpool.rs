@@ -2,21 +2,24 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use rubin_consensus::{
-    apply_non_coinbase_tx_basic_with_mtp, parse_block_header_bytes, parse_core_ext_covenant_data,
-    parse_tx, tx_weight_and_stats_public, CoreExtDeploymentProfiles, Outpoint, Tx, UtxoEntry,
+    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
+    parse_block_header_bytes, parse_core_ext_covenant_data, parse_tx, tx_weight_and_stats_public,
+    CoreExtDeploymentProfiles, Outpoint, RotationProvider, SuiteRegistry, Tx, UtxoEntry,
 };
 
+use crate::sync::SuiteContext;
 use crate::{BlockStore, ChainState};
 
 const MAX_TX_POOL_TRANSACTIONS: usize = 300;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct TxPoolConfig {
     pub policy_da_surcharge_per_byte: u64,
     pub policy_reject_non_coinbase_anchor_outputs: bool,
     pub policy_reject_core_ext_pre_activation: bool,
     pub policy_max_ext_payload_bytes: usize,
     pub core_ext_deployments: CoreExtDeploymentProfiles,
+    pub suite_context: Option<SuiteContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,16 +213,30 @@ impl TxPool {
 
         let next_height = next_block_height(chain_state)?;
         let block_mtp = next_block_mtp(block_store, next_height)?;
-        let summary = apply_non_coinbase_tx_basic_with_mtp(
-            &tx,
-            txid,
-            &chain_state.utxos,
-            next_height,
-            block_mtp,
-            block_mtp,
-            chain_id,
-        )
-        .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
+        let active_profiles = self
+            .cfg
+            .core_ext_deployments
+            .active_profiles_at_height(next_height)
+            .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
+        let (rotation, registry): (Option<&dyn RotationProvider>, Option<&SuiteRegistry>) =
+            match self.cfg.suite_context.as_ref() {
+                Some(ctx) => (Some(ctx.rotation.as_ref()), Some(ctx.registry.as_ref())),
+                None => (None, None),
+            };
+        let (_, summary) =
+            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+                &tx,
+                txid,
+                &chain_state.utxos,
+                next_height,
+                block_mtp,
+                block_mtp,
+                chain_id,
+                &active_profiles,
+                rotation,
+                registry,
+            )
+            .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
         apply_policy(&tx, &chain_state.utxos, next_height, &self.cfg).map_err(rejected)?;
 
         let entry = TxPoolEntry {
@@ -374,6 +391,7 @@ impl Default for TxPoolConfig {
             policy_reject_core_ext_pre_activation: true,
             policy_max_ext_payload_bytes: 0,
             core_ext_deployments: CoreExtDeploymentProfiles::empty(),
+            suite_context: None,
         }
     }
 }

@@ -155,6 +155,26 @@ func (s *ChainState) ConnectBlockWithCoreExtProfiles(
 	chainID [32]byte,
 	coreExtProfiles consensus.CoreExtProfileProvider,
 ) (*ChainStateConnectSummary, error) {
+	return s.ConnectBlockWithCoreExtProfilesAndSuiteContext(
+		blockBytes,
+		expectedTarget,
+		prevTimestamps,
+		chainID,
+		coreExtProfiles,
+		nil,
+		nil,
+	)
+}
+
+func (s *ChainState) ConnectBlockWithCoreExtProfilesAndSuiteContext(
+	blockBytes []byte,
+	expectedTarget *[32]byte,
+	prevTimestamps []uint64,
+	chainID [32]byte,
+	coreExtProfiles consensus.CoreExtProfileProvider,
+	rotation consensus.RotationProvider,
+	registry *consensus.SuiteRegistry,
+) (*ChainStateConnectSummary, error) {
 	if s == nil {
 		return nil, errors.New("nil chainstate")
 	}
@@ -169,7 +189,7 @@ func (s *ChainState) ConnectBlockWithCoreExtProfiles(
 		Utxos:            s.Utxos,
 		AlreadyGenerated: new(big.Int).SetUint64(s.AlreadyGenerated),
 	}
-	summary, err := consensus.ConnectBlockBasicInMemoryAtHeightAndCoreExtProfiles(
+	summary, err := consensus.ConnectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
 		blockBytes,
 		expectedPrevHash,
 		expectedTarget,
@@ -178,6 +198,8 @@ func (s *ChainState) ConnectBlockWithCoreExtProfiles(
 		&workState,
 		chainID,
 		coreExtProfiles,
+		rotation,
+		registry,
 	)
 	if err != nil {
 		return nil, err
@@ -229,6 +251,28 @@ func (s *ChainState) ConnectBlockParallelSigs(
 	coreExtProfiles consensus.CoreExtProfileProvider,
 	workers int,
 ) (*ChainStateConnectSummary, error) {
+	return s.ConnectBlockParallelSigsWithSuiteContext(
+		blockBytes,
+		expectedTarget,
+		prevTimestamps,
+		chainID,
+		coreExtProfiles,
+		nil,
+		nil,
+		workers,
+	)
+}
+
+func (s *ChainState) ConnectBlockParallelSigsWithSuiteContext(
+	blockBytes []byte,
+	expectedTarget *[32]byte,
+	prevTimestamps []uint64,
+	chainID [32]byte,
+	coreExtProfiles consensus.CoreExtProfileProvider,
+	rotation consensus.RotationProvider,
+	registry *consensus.SuiteRegistry,
+	workers int,
+) (*ChainStateConnectSummary, error) {
 	if s == nil {
 		return nil, errors.New("nil chainstate")
 	}
@@ -246,7 +290,7 @@ func (s *ChainState) ConnectBlockParallelSigs(
 		Utxos:            copyUtxoSet(s.Utxos),
 		AlreadyGenerated: new(big.Int).SetUint64(s.AlreadyGenerated),
 	}
-	summary, err := consensus.ConnectBlockParallelSigVerifyWithCoreExtProfiles(
+	summary, err := consensus.ConnectBlockParallelSigVerifyWithCoreExtProfilesAndSuiteContext(
 		blockBytes,
 		expectedPrevHash,
 		expectedTarget,
@@ -255,6 +299,8 @@ func (s *ChainState) ConnectBlockParallelSigs(
 		&workState,
 		chainID,
 		coreExtProfiles,
+		rotation,
+		registry,
 		workers,
 	)
 	if err != nil {
