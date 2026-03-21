@@ -29,12 +29,40 @@ GO_ALLOWLIST = {
     # txcontext.go collects into map then sorts — the range is safe
     # because the sorted slice is what gets used downstream.
     "txcontext.go:collectTxContextExtIDs",
+    # collect keys → sort.Slice before use
+    "block_basic.go:sortedDAIDs",
+    # clone map→map, order-neutral
+    "connect_block_parallel.go:applyNonCoinbaseTxBasicWorkQ",
+    # build overlay map→map, order-neutral
+    "connect_block_parallel_precompute.go:PrecomputeTxContexts",
+    # range over slice param []CoreExtDeploymentProfile, not a map
+    "core_ext.go:NewStaticCoreExtProfileProvider",
+    # clone set map[uint8]struct{}, order-neutral
+    "core_ext.go:cloneAllowedSuites",
+    # collect keys → sort.Slice before return
+    "core_ext.go:sortedAllowedSuites",
+    # range over slice param, anchors sorted before hash
+    "core_ext.go:CoreExtProfileSetAnchorV1",
+    # collect items → sort by key → deterministic hash
+    "state_digest.go:UtxoSetHash",
+    # outer range is over sorted slice, inner is slice too
+    "txcontext.go:BuildTxContext",
+    # deep-copy map→map, order-neutral
+    "utxo_basic.go:cloneUtxoSet",
+    # shallow-copy map→map, order-neutral
+    "utxo_snapshot.go:NewUtxoSnapshot",
 }
 
 # Pattern: `for <var> := range <identifier>` where identifier is NOT a slice/array
 # Heuristic: we flag `range <name>` where <name> was declared as map[...].
 GO_MAP_DECL_RE = re.compile(
     r"^\s*(\w+)\s*:?=\s*(?:make\()?map\[", re.MULTILINE
+)
+# Also catch map-typed function/method parameters:
+#   func foo(m map[string]int)
+#   func (r *T) bar(things map[uint16]Entry, ...)
+GO_MAP_PARAM_RE = re.compile(
+    r"(\w+)\s+map\[", re.MULTILINE
 )
 GO_RANGE_RE = re.compile(
     r"for\s+\w+(?:\s*,\s*\w+)?\s*:?=\s*range\s+(\w+)"
@@ -50,6 +78,8 @@ RUST_ALLOWLIST = {
     # TxContextBundle.continuing is HashMap but only accessed via .get() —
     # sorted_ext_ids() provides the deterministic view.
     "txcontext.rs:sorted_ext_ids",
+    # collect keys → sort_unstable before use
+    "block_basic.rs:sorted_da_ids",
 }
 
 RUST_HASHMAP_ITER_RE = re.compile(
@@ -71,10 +101,16 @@ def check_go(violations: list[str]) -> None:
             if gofile.name.endswith("_test.go"):
                 continue
             text = gofile.read_text(encoding="utf-8")
-            # Find all map declarations
+            # Find all map declarations and map-typed parameters
             map_vars = set()
             for m in GO_MAP_DECL_RE.finditer(text):
                 map_vars.add(m.group(1))
+            # Also scan function signatures for map-typed params
+            for m in GO_MAP_PARAM_RE.finditer(text):
+                param_name = m.group(1)
+                # Exclude false positives: keywords, type names, etc.
+                if param_name not in ("func", "return", "var", "type", "map", "range"):
+                    map_vars.add(param_name)
             if not map_vars:
                 continue
             # Find range over map vars
@@ -96,7 +132,7 @@ def check_go(violations: list[str]) -> None:
 
 def _go_enclosing_func(text: str, target_line: int) -> str | None:
     """Find the Go function name enclosing a given line number."""
-    func_re = re.compile(r"^func\s+(?:\([^)]*\)\s+)?(\w+)\s*\(")
+    func_re = re.compile(r"^func\s+(?:\([^)]*\)\s+)?(\w+)\s*(?:\[.*?\])?\s*\(")
     current_func = None
     for line_no, line in enumerate(text.splitlines(), 1):
         m = func_re.match(line)
@@ -116,16 +152,22 @@ def check_rust(violations: list[str]) -> None:
             if "/tests/" in str(rsfile) or rsfile.name.endswith("_test.rs"):
                 continue
             text = rsfile.read_text(encoding="utf-8")
-            # Find HashMap declarations (field or let binding)
+            # Find HashMap declarations (field, let binding, or fn parameter)
             hashmap_vars: set[str] = set()
             for line in text.splitlines():
-                # Field: `name: HashMap<...>`
-                fm = re.search(r"(\w+)\s*:\s*HashMap\s*<", line)
+                # Field or param: `name: HashMap<...>`, `name: &HashMap<...>`,
+                # `name: &mut HashMap<...>`, `name: std::collections::HashMap<...>`
+                fm = re.search(
+                    r"(\w+)\s*:\s*(?:&\s*(?:mut\s+)?)?(?:std::collections::)?HashMap\s*<",
+                    line,
+                )
                 if fm:
                     hashmap_vars.add(fm.group(1))
                 # Let binding: `let mut name = HashMap::...` or `let name: HashMap`
+                # Also: `let name = &some_hashmap` (indirect ref)
                 lm = re.search(
-                    r"let\s+(?:mut\s+)?(\w+)\s*(?::\s*HashMap|=\s*HashMap)", line
+                    r"let\s+(?:mut\s+)?(\w+)\s*(?::\s*(?:&\s*(?:mut\s+)?)?(?:std::collections::)?HashMap|=\s*(?:&\s*(?:mut\s+)?)?HashMap)",
+                    line,
                 )
                 if lm:
                     hashmap_vars.add(lm.group(1))
