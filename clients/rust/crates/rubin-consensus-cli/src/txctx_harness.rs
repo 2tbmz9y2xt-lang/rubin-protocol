@@ -19,8 +19,8 @@ use std::sync::{Mutex, OnceLock};
 
 #[derive(Clone, Deserialize, Default)]
 pub struct TxctxCase {
-    #[serde(default)]
-    vector_id: String,
+    #[serde(default, rename = "vector_id")]
+    _vector_id: String,
     #[serde(default)]
     height: u64,
     #[serde(default)]
@@ -41,14 +41,14 @@ pub struct TxctxCase {
     force_missing_ctx_continuing_ext_id: u16,
     #[serde(default)]
     verifier_access_index: usize,
-    #[serde(default)]
-    warn_governance_failure: bool,
+    #[serde(default, rename = "warn_governance_failure")]
+    _warn_governance_failure: bool,
 }
 
 #[derive(Clone, Deserialize, Default)]
 pub struct TxctxProfile {
-    #[serde(default)]
-    name: String,
+    #[serde(default, rename = "name")]
+    _name: String,
     #[serde(default)]
     ext_id: u16,
     #[serde(default)]
@@ -136,6 +136,15 @@ struct Recorder {
     profile_modes: HashMap<u16, String>,
     access_index: usize,
 }
+
+type TxctxArtifacts = (
+    Tx,
+    [u8; 32],
+    [u8; 32],
+    HashMap<Outpoint, UtxoEntry>,
+    Vec<UtxoEntry>,
+    CoreExtProfiles,
+);
 
 fn recorder_cell() -> &'static Mutex<Recorder> {
     static CELL: OnceLock<Mutex<Recorder>> = OnceLock::new();
@@ -226,15 +235,14 @@ fn txctx_record_call(
             Some(recorder.continuing_shared_across_calls.unwrap_or(true) && prev == continuing_ptr)
         }
     };
-    if let Some(output) = ctx_continuing.valid_outputs().first() {
-        if let Some(output) = output {
-            if output.ext_payload.is_empty() {
-                recorder.empty_payload_non_nil = true;
-            }
+    if let Some(Some(output)) = ctx_continuing.valid_outputs().first() {
+        if output.ext_payload.is_empty() {
+            recorder.empty_payload_non_nil = true;
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn txctx_verifier_dispatch(
     ext_id: u16,
     suite_id: u8,
@@ -444,9 +452,7 @@ fn txctx_profile_error(tc: &TxctxCase) -> Option<&'static str> {
                 || profile.max_ext_payload_bytes <= 0
                 || profile.suite_count as usize != allowed.len()
                 || allowed.iter().copied().collect::<BTreeSet<_>>().len() != allowed.len()
-                || allowed
-                    .iter()
-                    .any(|suite_id| *suite_id == SUITE_ID_ML_DSA_87)
+                || allowed.contains(&SUITE_ID_ML_DSA_87)
                 || profile.allowed_sighash_set & 0x78 != 0
                 || profile.allowed_sighash_set & 0x07 == 0
             {
@@ -510,117 +516,6 @@ fn txctx_profile_error(tc: &TxctxCase) -> Option<&'static str> {
     None
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_profile(ext_id: u16) -> TxctxProfile {
-        TxctxProfile {
-            ext_id,
-            activation_height: 100,
-            tx_context_enabled: 1,
-            allowed_suite_ids: vec![16],
-            allowed_sighash_set: 1,
-            max_ext_payload_bytes: 48,
-            binding_kind: 0x02,
-            suite_count: 1,
-            suite_id: 16,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn txctx_profile_error_rejects_oversized_continuing_output() {
-        let tc = TxctxCase {
-            height: 200,
-            profiles: vec![test_profile(0x0fff)],
-            inputs: vec![TxctxInput {
-                ext_id: 0x0fff,
-                sighash_type: 1,
-                ..Default::default()
-            }],
-            outputs: vec![TxctxOutput {
-                covenant_type: "CORE_EXT".to_string(),
-                ext_id: 0x0fff,
-                value: 1,
-                ext_payload_hex: "00".repeat(52),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        assert_eq!(
-            txctx_profile_error(&tc),
-            Some("TX_ERR_COVENANT_TYPE_INVALID")
-        );
-    }
-
-    #[test]
-    fn txctx_profile_error_rejects_non_minimal_raw_compact_size() {
-        let tc = TxctxCase {
-            height: 200,
-            profiles: vec![test_profile(0x0ffe)],
-            inputs: vec![TxctxInput {
-                ext_id: 0x0ffe,
-                sighash_type: 1,
-                raw_ext_payload_hex: "ff08000000000000004142434445464748".to_string(),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        assert_eq!(
-            txctx_profile_error(&tc),
-            Some("TX_ERR_COVENANT_TYPE_INVALID")
-        );
-    }
-
-    #[test]
-    fn txctx_build_artifacts_rejects_unsupported_non_core_ext_output_without_raw_data() {
-        let tc = TxctxCase {
-            height: 200,
-            outputs: vec![TxctxOutput {
-                covenant_type: "CORE_VAULT".to_string(),
-                value: 1,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let err = txctx_build_artifacts(&tc).unwrap_err();
-        assert!(
-            err.contains("unsupported harness covenant_type="),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn txctx_missing_continuing_injection_is_ext_scoped() {
-        let tc = TxctxCase {
-            height: 200,
-            profiles: vec![test_profile(0x0ffe)],
-            inputs: vec![TxctxInput {
-                covenant_type: "CORE_EXT".to_string(),
-                ext_id: 0x0ffe,
-                utxo_value: 5,
-                self_input_value: 5,
-                suite_id: 0x10,
-                sighash_type: SIGHASH_ALL,
-                pubkey_length: 2592,
-                ..Default::default()
-            }],
-            outputs: vec![TxctxOutput {
-                covenant_type: "CORE_EXT".to_string(),
-                ext_id: 0x0ffe,
-                value: 5,
-                ..Default::default()
-            }],
-            force_missing_ctx_continuing_ext_id: 0x0fff,
-            ..Default::default()
-        };
-
-        let resp = run_txctx_spend_vector(Some(tc));
-        assert!(resp.ok, "unexpected error: {:?}", resp.err);
-    }
-}
-
 fn txctx_first_overflow_ext_id(outputs: &[TxctxOutput]) -> u16 {
     let mut counts = BTreeMap::new();
     for output in outputs {
@@ -656,19 +551,7 @@ fn txctx_parse_txid(hex_value: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
-fn txctx_build_artifacts(
-    tc: &TxctxCase,
-) -> Result<
-    (
-        Tx,
-        [u8; 32],
-        [u8; 32],
-        HashMap<Outpoint, UtxoEntry>,
-        Vec<UtxoEntry>,
-        CoreExtProfiles,
-    ),
-    String,
-> {
+fn txctx_build_artifacts(tc: &TxctxCase) -> Result<TxctxArtifacts, String> {
     let mut tx = Tx {
         version: 1,
         tx_kind: 0,
@@ -931,5 +814,116 @@ pub fn run_txctx_spend_vector(txctx_case: Option<TxctxCase>) -> Response {
             txctx_ok_response()
         }
         Err(err) => txctx_err_response(err.code.as_str()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_profile(ext_id: u16) -> TxctxProfile {
+        TxctxProfile {
+            ext_id,
+            activation_height: 100,
+            tx_context_enabled: 1,
+            allowed_suite_ids: vec![16],
+            allowed_sighash_set: 1,
+            max_ext_payload_bytes: 48,
+            binding_kind: 0x02,
+            suite_count: 1,
+            suite_id: 16,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn txctx_profile_error_rejects_oversized_continuing_output() {
+        let tc = TxctxCase {
+            height: 200,
+            profiles: vec![test_profile(0x0fff)],
+            inputs: vec![TxctxInput {
+                ext_id: 0x0fff,
+                sighash_type: 1,
+                ..Default::default()
+            }],
+            outputs: vec![TxctxOutput {
+                covenant_type: "CORE_EXT".to_string(),
+                ext_id: 0x0fff,
+                value: 1,
+                ext_payload_hex: "00".repeat(52),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            txctx_profile_error(&tc),
+            Some("TX_ERR_COVENANT_TYPE_INVALID")
+        );
+    }
+
+    #[test]
+    fn txctx_profile_error_rejects_non_minimal_raw_compact_size() {
+        let tc = TxctxCase {
+            height: 200,
+            profiles: vec![test_profile(0x0ffe)],
+            inputs: vec![TxctxInput {
+                ext_id: 0x0ffe,
+                sighash_type: 1,
+                raw_ext_payload_hex: "ff08000000000000004142434445464748".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            txctx_profile_error(&tc),
+            Some("TX_ERR_COVENANT_TYPE_INVALID")
+        );
+    }
+
+    #[test]
+    fn txctx_build_artifacts_rejects_unsupported_non_core_ext_output_without_raw_data() {
+        let tc = TxctxCase {
+            height: 200,
+            outputs: vec![TxctxOutput {
+                covenant_type: "CORE_VAULT".to_string(),
+                value: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let err = txctx_build_artifacts(&tc).unwrap_err();
+        assert!(
+            err.contains("unsupported harness covenant_type="),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn txctx_missing_continuing_injection_is_ext_scoped() {
+        let tc = TxctxCase {
+            height: 200,
+            profiles: vec![test_profile(0x0ffe)],
+            inputs: vec![TxctxInput {
+                covenant_type: "CORE_EXT".to_string(),
+                ext_id: 0x0ffe,
+                utxo_value: 5,
+                self_input_value: 5,
+                suite_id: 0x10,
+                sighash_type: SIGHASH_ALL,
+                pubkey_length: 2592,
+                ..Default::default()
+            }],
+            outputs: vec![TxctxOutput {
+                covenant_type: "CORE_EXT".to_string(),
+                ext_id: 0x0ffe,
+                value: 5,
+                ..Default::default()
+            }],
+            force_missing_ctx_continuing_ext_id: 0x0fff,
+            ..Default::default()
+        };
+
+        let resp = run_txctx_spend_vector(Some(tc));
+        assert!(resp.ok, "unexpected error: {:?}", resp.err);
     }
 }
