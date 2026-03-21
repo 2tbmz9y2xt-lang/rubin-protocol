@@ -1061,6 +1061,26 @@ mod tests {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn txcontext_openssl_digest32_verifier(
+        _ext_id: u16,
+        _suite_id: u8,
+        pubkey: &[u8],
+        signature: &[u8],
+        digest32: &[u8; 32],
+        _ext_payload: &[u8],
+        _ctx_base: &TxContextBase,
+        _ctx_continuing: &TxContextContinuing,
+        _self_input_value: u64,
+    ) -> Result<bool, TxError> {
+        let descriptor = CoreExtOpenSslDigest32BindingDescriptor {
+            openssl_alg: "ML-DSA-87".to_string(),
+            pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+            sig_len: ML_DSA_87_SIG_BYTES,
+        };
+        verify_core_ext_openssl_digest32_binding(&descriptor, pubkey, signature, digest32)
+    }
+
     fn build_test_txcontext_bundle(
         ext_id: u16,
         height: u64,
@@ -1352,6 +1372,98 @@ mod tests {
         assert_eq!(desc.openssl_alg, "ML-DSA-87");
         assert_eq!(desc.pubkey_len, ML_DSA_87_PUBKEY_BYTES);
         assert_eq!(desc.sig_len, ML_DSA_87_SIG_BYTES);
+    }
+
+    #[test]
+    fn core_ext_active_txcontext_openssl_digest32_binding_verifies_mldsa87_parity() {
+        let entry = UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_EXT,
+            covenant_data: core_ext_covdata(7, &[0x99]),
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let binding_descriptor = core_ext_openssl_digest32_binding_descriptor_bytes(
+            "ML-DSA-87",
+            ML_DSA_87_PUBKEY_BYTES,
+            ML_DSA_87_SIG_BYTES,
+        )
+        .expect("descriptor");
+        let descriptor =
+            parse_core_ext_openssl_digest32_binding_descriptor(&binding_descriptor).expect("parse");
+        let profiles = CoreExtProfiles {
+            active: vec![CoreExtActiveProfile {
+                ext_id: 7,
+                tx_context_enabled: true,
+                allowed_suite_ids: vec![SUITE_ID_ML_DSA_87],
+                verification_binding: CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(
+                    descriptor,
+                ),
+                verify_sig_ext_tx_context_fn: Some(txcontext_openssl_digest32_verifier),
+                binding_descriptor,
+                ext_payload_schema: b"schema".to_vec(),
+            }],
+        };
+        let (mut tx, tx_context, input_index, input_value, chain_id) =
+            build_test_txcontext_bundle(7, 55);
+        let keypair = match crate::verify_sig_openssl::Mldsa87Keypair::generate() {
+            Ok(value) => value,
+            Err(err) => {
+                assert_eq!(err.code, ErrorCode::TxErrParse);
+                return;
+            }
+        };
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let digest =
+            sighash_v1_digest_with_cache(&mut cache, input_index, input_value, chain_id, 0x01)
+                .expect("digest");
+        let mut signature = keypair.sign_digest32(digest).expect("sign");
+        signature.push(0x01);
+        let witness = WitnessItem {
+            suite_id: SUITE_ID_ML_DSA_87,
+            pubkey: keypair.pubkey_bytes(),
+            signature,
+        };
+        tx.witness[0] = witness.clone();
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        validate_core_ext_spend_with_cache_and_suite_context(
+            &entry,
+            &witness,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            55,
+            &profiles,
+            None,
+            None,
+            Some(&tx_context),
+            &mut cache,
+        )
+        .unwrap();
+
+        let mut bad = witness.clone();
+        bad.signature[0] ^= 0x01;
+        tx.witness[0] = bad.clone();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let err = validate_core_ext_spend_with_cache_and_suite_context(
+            &entry,
+            &bad,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            55,
+            &profiles,
+            None,
+            None,
+            Some(&tx_context),
+            &mut cache,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+        assert_eq!(err.msg, "CORE_EXT signature invalid");
     }
 
     #[test]
