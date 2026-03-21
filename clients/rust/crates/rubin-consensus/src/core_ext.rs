@@ -94,6 +94,10 @@ pub struct CoreExtDeploymentProfile {
     /// Governance nonce for replay protection. Incremented on each
     /// governance action (activate/deactivate/parameter change).
     /// Tokens issued with a previous nonce are rejected.
+    ///
+    /// `0` remains the only safe v1 default: `core_ext_profile_bytes_v1()`
+    /// fail-closes on any non-zero nonce until the coordinated Go+Rust
+    /// profile-bytes-v2 path exists.
     pub governance_nonce: u64,
 }
 
@@ -111,6 +115,8 @@ pub struct GovernanceReplayToken {
     pub issued_at_height: u64,
     pub validity_window: u64,
 }
+
+const GOVERNANCE_REPLAY_TOKEN_BYTES: usize = 26;
 
 impl GovernanceReplayToken {
     /// Create a new replay token for the given profile deployment.
@@ -149,7 +155,7 @@ impl GovernanceReplayToken {
                 self.issued_at_height, current_height
             ));
         }
-        let expiry = self.issued_at_height.saturating_add(self.validity_window);
+        let expiry = self.expiry_height();
         if current_height >= expiry {
             return Err(format!(
                 "governance replay token expired: expiry={} current={}",
@@ -157,6 +163,12 @@ impl GovernanceReplayToken {
             ));
         }
         Ok(())
+    }
+
+    fn expiry_height(&self) -> u64 {
+        // Tokens intentionally saturate to u64::MAX rather than wrapping so an
+        // oversized validity window cannot become valid again after overflow.
+        self.issued_at_height.saturating_add(self.validity_window)
     }
 
     /// Serialize the token to a deterministic byte representation.
@@ -171,19 +183,33 @@ impl GovernanceReplayToken {
 
     /// Deserialize a token from its byte representation.
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
-        if data.len() != 26 {
+        if data.len() != GOVERNANCE_REPLAY_TOKEN_BYTES {
             return Err(format!(
                 "governance replay token: expected 26 bytes, got {}",
                 data.len()
             ));
         }
+        let ext_id = u16::from_le_bytes([data[0], data[1]]);
+        let nonce = read_replay_token_u64(data, 2)?;
+        let issued_at_height = read_replay_token_u64(data, 10)?;
+        let validity_window = read_replay_token_u64(data, 18)?;
         Ok(Self {
-            ext_id: u16::from_le_bytes([data[0], data[1]]),
-            nonce: u64::from_le_bytes(data[2..10].try_into().unwrap()),
-            issued_at_height: u64::from_le_bytes(data[10..18].try_into().unwrap()),
-            validity_window: u64::from_le_bytes(data[18..26].try_into().unwrap()),
+            ext_id,
+            nonce,
+            issued_at_height,
+            validity_window,
         })
     }
+}
+
+fn read_replay_token_u64(data: &[u8], offset: usize) -> Result<u64, String> {
+    let end = offset + 8;
+    let bytes = data
+        .get(offset..end)
+        .ok_or_else(|| format!("governance replay token: truncated field at offset {offset}"))?;
+    let mut raw = [0u8; 8];
+    raw.copy_from_slice(bytes);
+    Ok(u64::from_le_bytes(raw))
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -2163,8 +2189,31 @@ mod tests {
 
     #[test]
     fn governance_replay_token_overflow_safe() {
-        // validity_window = u64::MAX should not panic
+        // validity_window = u64::MAX should not panic and should saturate.
         let token = GovernanceReplayToken::issue(1, 1, u64::MAX - 10, u64::MAX);
         assert!(token.validate(1, u64::MAX - 5, 1).is_ok());
+        let err = token.validate(1, u64::MAX, 1).unwrap_err();
+        assert!(err.contains("expired: expiry=18446744073709551615"));
+    }
+
+    #[test]
+    fn governance_replay_token_expiry_saturates_instead_of_wrapping() {
+        let token = GovernanceReplayToken::issue(9, 2, u64::MAX - 1, 50);
+        assert!(token.validate(9, u64::MAX - 1, 2).is_ok());
+        let err = token.validate(9, u64::MAX, 2).unwrap_err();
+        assert!(err.contains("expired"));
+    }
+
+    #[test]
+    fn governance_replay_token_from_bytes_accepts_exact_26_byte_payload() {
+        let token = GovernanceReplayToken::issue(5, 8, 13, 21);
+        let recovered = GovernanceReplayToken::from_bytes(&token.to_bytes()).unwrap();
+        assert_eq!(recovered, token);
+    }
+
+    #[test]
+    fn governance_replay_token_nonce_zero_is_allowed_for_v1_fail_closed_paths() {
+        let token = GovernanceReplayToken::issue(7, 0, 100, 25);
+        assert!(token.validate(7, 110, 0).is_ok());
     }
 }
