@@ -205,6 +205,90 @@ func TestMempoolPolicyAllowsCoreExtWhenProfileActive(t *testing.T) {
 	}
 }
 
+func TestMempoolPolicyRejectsOversizedCoreExtPayload(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		PolicyMaxExtPayloadBytes: 32,
+		CoreExtProfiles:          testCoreExtProfiles{activeByExtID: map[uint16]bool{7: true}},
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+
+	// Build tx with oversized payload (49 bytes > 32 limit)
+	entry := st.Utxos[outpoints[0]]
+	tx := &consensus.Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs: []consensus.TxInput{{
+			PrevTxid: outpoints[0].Txid,
+			PrevVout: outpoints[0].Vout,
+			Sequence: 0,
+		}},
+		Outputs: []consensus.TxOutput{
+			{Value: 90, CovenantType: consensus.COV_TYPE_CORE_EXT, CovenantData: coreExtCovenantDataForNodeTest(7, make([]byte, 49))},
+			{Value: entry.Value - 91, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), fromAddress...)},
+		},
+		Locktime: 0,
+	}
+	if err := consensus.SignTransaction(tx, st.Utxos, devnetGenesisChainID, fromKey); err != nil {
+		t.Fatalf("SignTransaction: %v", err)
+	}
+	txBytes, err := consensus.MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx: %v", err)
+	}
+	if err := mp.AddTx(txBytes); err == nil || !strings.Contains(err.Error(), "exceeds policy limit") {
+		t.Fatalf("expected oversized payload rejection, got %v", err)
+	}
+}
+
+func TestMempoolPolicyAllowsCoreExtPayloadUnderLimit(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		PolicyMaxExtPayloadBytes: 48,
+		CoreExtProfiles:          testCoreExtProfiles{activeByExtID: map[uint16]bool{7: true}},
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+
+	// Build tx with payload under limit (32 bytes <= 48 limit)
+	entry := st.Utxos[outpoints[0]]
+	tx := &consensus.Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs: []consensus.TxInput{{
+			PrevTxid: outpoints[0].Txid,
+			PrevVout: outpoints[0].Vout,
+			Sequence: 0,
+		}},
+		Outputs: []consensus.TxOutput{
+			{Value: 90, CovenantType: consensus.COV_TYPE_CORE_EXT, CovenantData: coreExtCovenantDataForNodeTest(7, make([]byte, 32))},
+			{Value: entry.Value - 91, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), fromAddress...)},
+		},
+		Locktime: 0,
+	}
+	if err := consensus.SignTransaction(tx, st.Utxos, devnetGenesisChainID, fromKey); err != nil {
+		t.Fatalf("SignTransaction: %v", err)
+	}
+	txBytes, err := consensus.MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx: %v", err)
+	}
+	if err := mp.AddTx(txBytes); err != nil {
+		t.Fatalf("expected admission, got %v", err)
+	}
+}
+
 func TestMempoolPolicyRejectsNilCheckedTransaction(t *testing.T) {
 	mp := &Mempool{}
 	if err := mp.applyPolicyLocked(nil, 0); err == nil || !strings.Contains(err.Error(), "nil checked transaction") {
