@@ -302,6 +302,12 @@ fn core_ext_binding_kind(profile: &CoreExtDeploymentProfile) -> Result<u8, Strin
 }
 
 pub fn core_ext_profile_bytes_v1(profile: &CoreExtDeploymentProfile) -> Result<Vec<u8>, String> {
+    if profile.governance_nonce != 0 {
+        return Err(format!(
+            "core_ext profile ext_id={} governance_nonce={} requires v2 profile bytes (Go+Rust coordinated)",
+            profile.ext_id, profile.governance_nonce
+        ));
+    }
     if profile.tx_context_enabled {
         return Err(format!(
             "core_ext profile ext_id={} txcontext-enabled profile requires v2 anchor pipeline",
