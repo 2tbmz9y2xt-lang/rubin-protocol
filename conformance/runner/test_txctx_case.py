@@ -105,6 +105,16 @@ class TxctxCaseTests(unittest.TestCase):
         self.assertTrue(request["artifact_hex"])
         self.assertTrue(request["expected_artifact_hash_hex"])
 
+    def test_governance_request_with_invalid_artifact_hex_keeps_runner_alive(self):
+        vector = {
+            "id": "CV-TXCTX-GOV-01",
+            "artifact_hex": "zz",
+        }
+        request = build_txctx_governance_request(vector, FIXTURE)
+        self.assertEqual(request["artifact_hex"], "zz")
+        self.assertEqual(len(request["expected_artifact_hash_hex"]), 64)
+        int(request["expected_artifact_hash_hex"], 16)
+
 
 if __name__ == "__main__":
     unittest.main()

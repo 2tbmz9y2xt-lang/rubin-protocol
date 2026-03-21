@@ -485,8 +485,15 @@ def build_txctx_governance_request(vector: Dict[str, Any], fixture: Dict[str, An
         )
     )
     request["artifact_hex"] = artifact_hex
+    default_expected_hash = ""
+    try:
+        default_expected_hash = hashlib.sha256(bytes.fromhex(artifact_hex)).hexdigest()
+    except ValueError:
+        # Keep malformed artifact vectors on the governance-validation path
+        # instead of crashing the harness while trying to synthesize a hash.
+        default_expected_hash = hashlib.sha256(artifact_hex.encode("utf-8")).hexdigest()
     request["expected_artifact_hash_hex"] = _normalize_hex(
-        vector.get("expected_artifact_hash_hex", hashlib.sha256(bytes.fromhex(artifact_hex)).hexdigest())
+        vector.get("expected_artifact_hash_hex", default_expected_hash)
     )
     transition_height = profile_under_test.get("transition_height", vector.get("transition_height"))
     if transition_height is not None:

@@ -1557,7 +1557,7 @@ def validate_vector(
     vid = v.get("id", "?")
     op = normalized_vector_op(gate, v)
     if gate == "CV-TXCTX" and op is None:
-        if str(vid) in TXCTX_GOVERNANCE_SKIP_IDS:
+        if str(vid) in TXCTX_GOVERNANCE_VECTOR_IDS:
             return [], True
     if not op:
         return [f"{gate}/{vid}: missing op"], False
