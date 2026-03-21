@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"encoding/binary"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -48,6 +49,61 @@ func TestBuildTxContext_NoTxContextEnabledInputsReturnsNil(t *testing.T) {
 	}
 }
 
+func TestTxContextBundle_EmptyHelpers(t *testing.T) {
+	var bundle *TxContextBundle
+	if got, ok := bundle.Continuing(7); ok || got != nil {
+		t.Fatalf("nil bundle Continuing=%v ok=%v", got, ok)
+	}
+	if got := bundle.OrderedExtIDs(); got != nil {
+		t.Fatalf("nil bundle OrderedExtIDs=%v", got)
+	}
+
+	empty := &TxContextBundle{}
+	if got, ok := empty.Continuing(7); ok || got != nil {
+		t.Fatalf("empty bundle Continuing=%v ok=%v", got, ok)
+	}
+	if got := empty.OrderedExtIDs(); got != nil {
+		t.Fatalf("empty bundle OrderedExtIDs=%v", got)
+	}
+}
+
+func TestSumTxContextValues_Overflow(t *testing.T) {
+	if _, err := sumTxContextInputValues(
+		[]UtxoEntry{{Value: 1}},
+		u128{hi: ^uint64(0), lo: ^uint64(0)},
+	); err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
+		t.Fatalf("expected TX_ERR_PARSE input overflow, got %v", err)
+	}
+
+	if _, err := sumTxContextOutputValues(
+		[]TxOutput{{Value: 1}},
+		u128{hi: ^uint64(0), lo: ^uint64(0)},
+	); err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
+		t.Fatalf("expected TX_ERR_PARSE output overflow, got %v", err)
+	}
+}
+
+func TestBuildTxContext_InputValidationErrors(t *testing.T) {
+	profiles := &testCoreExtProfileProvider{
+		profile: CoreExtProfile{Active: true, TxContextEnabled: true},
+		found:   true,
+	}
+
+	if _, err := BuildTxContext(nil, nil, 1, profiles); err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
+		t.Fatalf("expected TX_ERR_PARSE for nil tx, got %v", err)
+	}
+
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevVout: 0}},
+	}
+	if _, err := BuildTxContext(tx, nil, 1, profiles); err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
+		t.Fatalf("expected TX_ERR_PARSE for input mismatch, got %v", err)
+	}
+}
+
 func TestBuildTxContext_NilProfileProviderFailsClosed(t *testing.T) {
 	tx := &Tx{
 		Version: 1,
@@ -73,6 +129,45 @@ func TestBuildTxContext_NilProfileProviderFailsClosed(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "profile provider missing") {
 		t.Fatalf("expected provider-missing detail, got %v", err)
+	}
+}
+
+func TestBuildTxContext_RejectsMalformedInputCovenantData(t *testing.T) {
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevVout: 0}},
+	}
+	resolved := []UtxoEntry{{Value: 100, CovenantType: COV_TYPE_CORE_EXT, CovenantData: []byte{0x01}}}
+	profiles := &testCoreExtProfileProvider{
+		profile: CoreExtProfile{Active: true, TxContextEnabled: true},
+		found:   true,
+	}
+
+	_, err := BuildTxContext(tx, resolved, 1, profiles)
+	if err == nil || mustTxErrCode(t, err) != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("expected malformed input covenant error, got %v", err)
+	}
+}
+
+func TestBuildTxContext_RejectsProfileLookupFailure(t *testing.T) {
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevVout: 0}},
+	}
+	resolved := []UtxoEntry{
+		{Value: 100, CovenantType: COV_TYPE_CORE_EXT, CovenantData: makeCoreExtCovenantDataWithPayload(9, []byte{0x01})},
+	}
+
+	_, err := BuildTxContext(tx, resolved, 1, errCoreExtProfileProvider{})
+	if err == nil || mustTxErrCode(t, err) != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("expected profile lookup failure, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "profile lookup failure") {
+		t.Fatalf("expected profile lookup detail, got %v", err)
 	}
 }
 
@@ -197,6 +292,29 @@ func TestBuildTxContext_RejectsThirdContinuingOutputForLowestExtID(t *testing.T)
 	}
 }
 
+func TestBuildTxContext_RejectsMalformedOutputCovenantData(t *testing.T) {
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevVout: 0}},
+		Outputs: []TxOutput{{Value: 10, CovenantType: COV_TYPE_CORE_EXT, CovenantData: []byte{0x01}}},
+	}
+	resolved := []UtxoEntry{
+		{Value: 100, CovenantType: COV_TYPE_CORE_EXT, CovenantData: makeCoreExtCovenantDataWithPayload(9, []byte{0xaa})},
+	}
+	profiles := &staticMapCoreExtProfileProvider{
+		profiles: map[uint16]CoreExtProfile{
+			9: {Active: true, TxContextEnabled: true},
+		},
+	}
+
+	_, err := BuildTxContext(tx, resolved, 1, profiles)
+	if err == nil || mustTxErrCode(t, err) != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("expected malformed output covenant error, got %v", err)
+	}
+}
+
 func TestStaticCoreExtProfileProvider_PropagatesTxContextEnabled(t *testing.T) {
 	provider, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{{
 		ExtID:            7,
@@ -227,4 +345,10 @@ type staticMapCoreExtProfileProvider struct {
 func (p *staticMapCoreExtProfileProvider) LookupCoreExtProfile(extID uint16, _ uint64) (CoreExtProfile, bool, error) {
 	profile, ok := p.profiles[extID]
 	return profile, ok, nil
+}
+
+type errCoreExtProfileProvider struct{}
+
+func (errCoreExtProfileProvider) LookupCoreExtProfile(uint16, uint64) (CoreExtProfile, bool, error) {
+	return CoreExtProfile{}, false, errors.New("lookup failed")
 }

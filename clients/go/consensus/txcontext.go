@@ -66,6 +66,30 @@ func uint128FromInternal(v u128) Uint128 {
 	}
 }
 
+func sumTxContextInputValues(resolvedInputs []UtxoEntry, initial u128) (u128, error) {
+	total := initial
+	for _, entry := range resolvedInputs {
+		var err error
+		total, err = addU64ToU128(total, entry.Value)
+		if err != nil {
+			return u128{}, err
+		}
+	}
+	return total, nil
+}
+
+func sumTxContextOutputValues(outputs []TxOutput, initial u128) (u128, error) {
+	total := initial
+	for _, out := range outputs {
+		var err error
+		total, err = addU64ToU128(total, out.Value)
+		if err != nil {
+			return u128{}, err
+		}
+	}
+	return total, nil
+}
+
 // BuildTxContext constructs the immutable txcontext bundle for a transaction.
 // It returns nil when the transaction has no CORE_EXT input whose ACTIVE profile
 // enables txcontext at the supplied height.
@@ -85,26 +109,17 @@ func BuildTxContext(
 		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile provider missing")
 	}
 
-	var totalIn u128
-	for _, entry := range resolvedInputs {
-		var err error
-		totalIn, err = addU64ToU128(totalIn, entry.Value)
-		if err != nil {
-			return nil, err
-		}
+	totalIn, err := sumTxContextInputValues(resolvedInputs, u128{})
+	if err != nil {
+		return nil, err
 	}
-
-	var totalOut u128
-	for _, out := range tx.Outputs {
-		var err error
-		totalOut, err = addU64ToU128(totalOut, out.Value)
-		if err != nil {
-			return nil, err
-		}
+	totalOut, err := sumTxContextOutputValues(tx.Outputs, u128{})
+	if err != nil {
+		return nil, err
 	}
 
 	wanted := make(map[uint16]struct{})
-	for i, entry := range resolvedInputs {
+	for _, entry := range resolvedInputs {
 		if entry.CovenantType != COV_TYPE_CORE_EXT {
 			continue
 		}
@@ -118,9 +133,6 @@ func BuildTxContext(
 		}
 		if !ok || !profile.Active || !profile.TxContextEnabled {
 			continue
-		}
-		if i >= len(tx.Inputs) {
-			return nil, txerr(TX_ERR_PARSE, "txcontext input index mismatch")
 		}
 		wanted[cd.ExtID] = struct{}{}
 	}
