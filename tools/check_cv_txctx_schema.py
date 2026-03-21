@@ -18,11 +18,14 @@ DEFAULT_SCHEMA = REPO_ROOT / "conformance" / "schemas" / "cv-txctx-v1.json"
 
 def validate(fixture_path: Path, schema_path: Path) -> list[str]:
     """Return list of error messages. Empty = valid."""
+    # Always run structural invariants (duplicate IDs, vector_count consistency)
+    structural_errors = validate_structural_invariants(fixture_path)
+
     try:
         import jsonschema  # type: ignore[import-untyped]
     except ImportError:
         # Fallback: structural checks without jsonschema library
-        return validate_structural(fixture_path, schema_path)
+        return structural_errors + validate_structural(fixture_path, schema_path)
 
     with open(schema_path) as f:
         schema = json.load(f)
@@ -30,8 +33,32 @@ def validate(fixture_path: Path, schema_path: Path) -> list[str]:
         data = json.load(f)
 
     validator = jsonschema.Draft202012Validator(schema)
-    errors = sorted(validator.iter_errors(data), key=lambda e: list(e.path))
-    return [f"{'.'.join(str(p) for p in e.absolute_path)}: {e.message}" for e in errors]
+    schema_errors = sorted(validator.iter_errors(data), key=lambda e: list(e.path))
+    return [f"{'.'.join(str(p) for p in e.absolute_path)}: {e.message}" for e in schema_errors] + structural_errors
+
+
+def validate_structural_invariants(fixture_path: Path) -> list[str]:
+    """Invariants that JSON Schema cannot express: duplicate IDs, count consistency."""
+    errors: list[str] = []
+    with open(fixture_path) as f:
+        data = json.load(f)
+
+    vectors = data.get("vectors", [])
+    ids_seen: set[str] = set()
+    for i, vec in enumerate(vectors):
+        vid = vec.get("id")
+        if isinstance(vid, str):
+            if vid in ids_seen:
+                errors.append(f"vectors[{i}]: duplicate id '{vid}'")
+            ids_seen.add(vid)
+
+    vc = data.get("vector_count")
+    if isinstance(vc, int) and vc != len(vectors):
+        errors.append(
+            f"vector_count={vc} does not match actual vector count={len(vectors)}"
+        )
+
+    return errors
 
 
 def validate_structural(fixture_path: Path, schema_path: Path) -> list[str]:
