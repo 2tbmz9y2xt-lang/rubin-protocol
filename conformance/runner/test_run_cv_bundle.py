@@ -1,8 +1,8 @@
 import unittest
 
-try:
+if __package__:
     from .run_cv_bundle import TXCTX_GOVERNANCE_SKIP_IDS, normalized_vector_op
-except ImportError:
+else:
     from run_cv_bundle import TXCTX_GOVERNANCE_SKIP_IDS, normalized_vector_op
 
 
