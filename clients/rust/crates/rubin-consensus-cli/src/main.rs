@@ -995,6 +995,7 @@ fn core_ext_profiles_from_json(
             verify_sig_ext_tx_context_fn: None,
             binding_descriptor,
             ext_payload_schema,
+            governance_nonce: 0,
         });
     }
     let profiles = CoreExtDeploymentProfiles { deployments };
@@ -4825,6 +4826,7 @@ mod tests {
                 verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: binding_descriptor.clone(),
                 ext_payload_schema: vec![0xb2],
+            governance_nonce: 0,
             }],
         )
         .expect("anchor");
