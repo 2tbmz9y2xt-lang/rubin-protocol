@@ -322,7 +322,7 @@ mod tests {
         VERIFY_COST_ML_DSA_87,
     };
     use crate::suite_registry::{
-        CryptoRotationDescriptor, DescriptorRotationProvider, NativeSuiteSet, SuiteParams,
+        CryptoRotationDescriptor, DescriptorRotationProvider, SuiteParams,
     };
     use crate::tx::{Tx, TxInput, TxOutput};
 
