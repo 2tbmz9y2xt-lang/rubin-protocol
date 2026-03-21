@@ -25,6 +25,23 @@ Policy:
 Изменённые fixtures:
 - `CV-TXCTX.json` (new)
 
+## 2026-03-21 — DA-cap stress parity gate (Q-DEVNET-DA-CAP-PARITY-01)
+
+Причина:
+- зафиксировать executable Go/Rust parity under DA stress для evidence lane `#820` без изменения consensus constants;
+- добавить отдельный gate, который сравнивает baseline `32 MB`-shaped pressure и `48 MB`-equivalent pressure
+  на существующих compact/orphan/prefetch/pinned-accounting operations;
+- не смешивать будущий DA-cap evidence lane с общим `CV-COMPACT`, чтобы итоговый parity пакет был читаемым и
+  напрямую ссылался на issue `#823`.
+
+Инструменты:
+- ручное добавление нового gate `CV-DA-STRESS`,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-DA-STRESS`,
+- синхронизация матрицы: `tools/gen_conformance_matrix.py`.
+
+Изменённые fixtures:
+- `CV-DA-STRESS.json` (new)
+
 ## 2026-03-18 — Rotation weight conformance vectors (Q-CONF-ROTATION-06)
 
 Причина:
