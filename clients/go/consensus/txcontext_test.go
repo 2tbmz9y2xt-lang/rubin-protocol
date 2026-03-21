@@ -48,6 +48,34 @@ func TestBuildTxContext_NoTxContextEnabledInputsReturnsNil(t *testing.T) {
 	}
 }
 
+func TestBuildTxContext_NilProfileProviderFailsClosed(t *testing.T) {
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs: []TxInput{
+			{PrevVout: 0},
+		},
+		Outputs: []TxOutput{
+			{Value: 90, CovenantType: COV_TYPE_CORE_EXT, CovenantData: makeCoreExtCovenantDataWithPayload(9, []byte{0xaa})},
+		},
+	}
+	resolved := []UtxoEntry{
+		{Value: 100, CovenantType: COV_TYPE_CORE_EXT, CovenantData: makeCoreExtCovenantDataWithPayload(9, []byte{0x01})},
+	}
+
+	_, err := BuildTxContext(tx, resolved, 101, nil)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("code=%s want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	}
+	if !strings.Contains(err.Error(), "profile provider missing") {
+		t.Fatalf("expected provider-missing detail, got %v", err)
+	}
+}
+
 func TestBuildTxContext_BuildsBaseAndContinuingOutputsDeterministically(t *testing.T) {
 	tx := &Tx{
 		Version: 1,
@@ -94,6 +122,9 @@ func TestBuildTxContext_BuildsBaseAndContinuingOutputsDeterministically(t *testi
 	}
 	if bundle.Base.Height != 222 {
 		t.Fatalf("Height=%d want 222", bundle.Base.Height)
+	}
+	if got, want := bundle.OrderedExtIDs(), []uint16{5, 7}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("OrderedExtIDs=%v want %v", got, want)
 	}
 
 	cont5, ok := bundle.Continuing(5)

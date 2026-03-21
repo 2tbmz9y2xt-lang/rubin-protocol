@@ -37,8 +37,9 @@ type TxContextContinuing struct {
 
 // TxContextBundle is the full txcontext package for one transaction.
 type TxContextBundle struct {
-	Base            *TxContextBase
-	ContinuingByExt map[uint16]*TxContextContinuing
+	Base             *TxContextBase
+	ContinuingByExt  map[uint16]*TxContextContinuing
+	continuingExtIDs []uint16
 }
 
 func (b *TxContextBundle) Continuing(extID uint16) (*TxContextContinuing, bool) {
@@ -47,6 +48,15 @@ func (b *TxContextBundle) Continuing(extID uint16) (*TxContextContinuing, bool) 
 	}
 	v, ok := b.ContinuingByExt[extID]
 	return v, ok
+}
+
+// OrderedExtIDs returns the deterministic ext_id traversal order for
+// ContinuingByExt.
+func (b *TxContextBundle) OrderedExtIDs() []uint16 {
+	if b == nil || len(b.continuingExtIDs) == 0 {
+		return nil
+	}
+	return append([]uint16(nil), b.continuingExtIDs...)
 }
 
 func uint128FromInternal(v u128) Uint128 {
@@ -72,7 +82,7 @@ func BuildTxContext(
 		return nil, txerr(TX_ERR_PARSE, "txcontext resolved input count mismatch")
 	}
 	if coreExtProfiles == nil {
-		coreExtProfiles = EmptyCoreExtProfileProvider()
+		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile provider missing")
 	}
 
 	var totalIn u128
@@ -130,33 +140,35 @@ func BuildTxContext(
 			TotalOut: uint128FromInternal(totalOut),
 			Height:   blockHeight,
 		},
-		ContinuingByExt: make(map[uint16]*TxContextContinuing, len(extIDs)),
+		ContinuingByExt:  make(map[uint16]*TxContextContinuing, len(extIDs)),
+		continuingExtIDs: append([]uint16(nil), extIDs...),
 	}
 
 	for _, extID := range extIDs {
-		continuing := &TxContextContinuing{}
-		for _, out := range tx.Outputs {
-			if out.CovenantType != COV_TYPE_CORE_EXT {
-				continue
-			}
-			cd, err := ParseCoreExtCovenantData(out.CovenantData)
-			if err != nil {
-				return nil, err
-			}
-			if cd.ExtID != extID {
-				continue
-			}
-			if int(continuing.ContinuingOutputCount) >= TXCONTEXT_MAX_CONTINUING_OUTPUTS {
-				return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, fmt.Sprintf("too many continuing outputs for ext_id=%d", extID))
-			}
-			idx := int(continuing.ContinuingOutputCount)
-			continuing.ContinuingOutputs[idx] = TxOutputView{
-				Value:      out.Value,
-				ExtPayload: cloneBytes(cd.ExtPayload),
-			}
-			continuing.ContinuingOutputCount++
+		bundle.ContinuingByExt[extID] = &TxContextContinuing{}
+	}
+
+	for _, out := range tx.Outputs {
+		if out.CovenantType != COV_TYPE_CORE_EXT {
+			continue
 		}
-		bundle.ContinuingByExt[extID] = continuing
+		cd, err := ParseCoreExtCovenantData(out.CovenantData)
+		if err != nil {
+			return nil, err
+		}
+		continuing, ok := bundle.ContinuingByExt[cd.ExtID]
+		if !ok {
+			continue
+		}
+		if int(continuing.ContinuingOutputCount) >= TXCONTEXT_MAX_CONTINUING_OUTPUTS {
+			return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, fmt.Sprintf("too many continuing outputs for ext_id=%d", cd.ExtID))
+		}
+		idx := int(continuing.ContinuingOutputCount)
+		continuing.ContinuingOutputs[idx] = TxOutputView{
+			Value:      out.Value,
+			ExtPayload: cloneBytes(cd.ExtPayload),
+		}
+		continuing.ContinuingOutputCount++
 	}
 
 	return bundle, nil
