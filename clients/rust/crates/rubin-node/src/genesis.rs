@@ -4,7 +4,8 @@ use std::path::Path;
 use rubin_consensus::encode_compact_size;
 use rubin_consensus::{
     core_ext_profile_set_anchor_v1, core_ext_verification_binding_from_name_and_descriptor,
-    CoreExtDeploymentProfile, CoreExtDeploymentProfiles,
+    CoreExtDeploymentProfile, CoreExtDeploymentProfiles, CryptoRotationDescriptor,
+    DescriptorRotationProvider, SuiteRegistry,
 };
 use serde::Deserialize;
 
@@ -22,6 +23,22 @@ struct GenesisPack {
     core_ext_profile_set_anchor_hex: String,
     #[serde(default)]
     core_ext_profiles: Vec<GenesisCoreExtProfile>,
+    #[serde(default)]
+    rotation_descriptor: Option<GenesisRotationDescriptor>,
+}
+
+/// JSON-serializable rotation descriptor for genesis/config.
+/// When present, constructs a DescriptorRotationProvider.
+/// When absent, DefaultRotationProvider is used (ML-DSA-87 at all heights).
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+struct GenesisRotationDescriptor {
+    name: String,
+    old_suite_id: u8,
+    new_suite_id: u8,
+    create_height: u64,
+    spend_height: u64,
+    #[serde(default)]
+    sunset_height: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -42,10 +59,13 @@ struct GenesisCoreExtProfile {
     governance_nonce: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct LoadedGenesisConfig {
     pub chain_id: [u8; 32],
     pub core_ext_deployments: CoreExtDeploymentProfiles,
+    /// Optional SuiteContext from rotation_descriptor in config.
+    /// None means use DefaultRotationProvider (ML-DSA-87 at all heights).
+    pub suite_context: Option<crate::sync::SuiteContext>,
 }
 
 pub fn devnet_genesis_block_bytes() -> Vec<u8> {
@@ -67,6 +87,7 @@ pub fn load_genesis_config(path: Option<&Path>) -> Result<LoadedGenesisConfig, S
         return Ok(LoadedGenesisConfig {
             chain_id: devnet_genesis_chain_id(),
             core_ext_deployments: CoreExtDeploymentProfiles::empty(),
+            suite_context: None,
         });
     };
     let raw = fs::read_to_string(path)
@@ -90,7 +111,31 @@ pub fn load_genesis_config(path: Option<&Path>) -> Result<LoadedGenesisConfig, S
             &payload.core_ext_profile_set_anchor_hex,
             &payload.core_ext_profiles,
         )?,
+        suite_context: build_suite_context_from_descriptor(&payload.rotation_descriptor)?,
     })
+}
+
+fn build_suite_context_from_descriptor(
+    desc: &Option<GenesisRotationDescriptor>,
+) -> Result<Option<crate::sync::SuiteContext>, String> {
+    let Some(rd) = desc else {
+        return Ok(None);
+    };
+    use std::sync::Arc;
+    let registry = Arc::new(SuiteRegistry::default_registry().clone());
+    let descriptor = CryptoRotationDescriptor {
+        name: rd.name.clone(),
+        old_suite_id: rd.old_suite_id,
+        new_suite_id: rd.new_suite_id,
+        create_height: rd.create_height,
+        spend_height: rd.spend_height,
+        sunset_height: rd.sunset_height,
+    };
+    descriptor
+        .validate(&registry)
+        .map_err(|e| format!("rotation_descriptor: {e}"))?;
+    let rotation = Arc::new(DescriptorRotationProvider { descriptor });
+    Ok(Some(crate::sync::SuiteContext { rotation, registry }))
 }
 
 pub fn load_chain_id_from_genesis_file(path: Option<&Path>) -> Result<[u8; 32], String> {
