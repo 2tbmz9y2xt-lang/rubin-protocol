@@ -1,29 +1,41 @@
-# Proof Coverage (bootstrap)
+# Proof Coverage (bootstrap summary)
 
 Источник: `spec/SECTION_HASHES.json`  
-Машинный реестр: `rubin-formal/proof_coverage.json`
+Authoritative machine-readable source: standalone `rubin-formal/proof_coverage.json`  
+In-repo summary: `rubin-protocol/rubin-formal/proof_coverage.json`
 
-Текущее состояние: pinned секции заведены со статусом `stated` в рамках `proof_level=byte-model`,
-а conformance-фикстуры `conformance/fixtures/CV-*.json` полностью покрыты Lean replay-слоем.
+Текущее состояние: authoritative standalone source-of-truth фиксирует `proof_level=refinement`,
+`claim_level=refined`, полный registry по 17 pinned section keys и явные `notes` / `limitations`
+для thin или partial entries. Файл в `rubin-protocol` — это summary subset для local CI/tooling;
+он не должен расходиться по top-level claim boundary и hash baseline, но может не содержать полный registry.
 
 ## Термины (важно)
 
-- `proof_level=byte-model` означает: в репо есть исполняемый (native_decide) Lean replay-слой,
-  который проверяет byte-level свойства на наборе conformance-векторов (CV-*.json).
+- `proof_level=refinement` означает: в репо есть исполняемый Lean replay-слой и trace-based
+  Go(reference) → Lean refinement checks для критических ops на conformance-наборе.
 - `claim_level` фиксирует допустимый публичный уровень заявлений:
   - `toy` (только model-baseline),
   - `byte` (byte-accurate слой),
   - `refined` (refinement to executable path).
 - `status=proved/stated/deferred` относится к конкретной pinned-секции **в рамках указанного `proof_level`**.
 
-Внешний аудит / freeze-ready коммуникации **НЕ ДОЛЖНЫ** трактовать `proof_level=byte-model`
-как “formal verification of CANONICAL”.
+Внешний аудит / freeze-ready коммуникации **НЕ ДОЛЖНЫ** трактовать `proof_level=refinement`
+как “formal verification of CANONICAL for all inputs/sections”.
+
+Связка с hash-pinning:
+
+- `spec/SECTION_HASHES.json` сейчас содержит 17 pinned section keys.
+- summary `proof_coverage.json` обязан совпадать с authoritative standalone файлом по
+  `proof_level`, `claim_level`, `spec_section_hashes_sha3_256` и по смысловой границе claims
+  для тех секций, которые он перечисляет.
+- Если standalone registry ослабляет секционный claim до `stated`, summary не имеет права
+  оставлять для той же секции более сильный статус.
 
 ## Путь к freeze-ready
 
-1. Углубить доказательства до байтовой эквивалентности формул из CANONICAL.
-2. Для consensus-critical safety-инвариантов добавить refinement-слой (model → executable path).
-3. Держать матрицу покрытия в синхроне с hash-pinning CANONICAL.
+1. Держать summary в синхроне с standalone `rubin-formal` реестром и с hash-pinning CANONICAL.
+2. Расширить protocol tooling так, чтобы summary всё меньше отличался от authoritative registry.
+3. Для consensus-critical safety-инвариантов добавлять более сильный beyond-fixtures proof surface.
 
 ## Risk scoring / gates
 
