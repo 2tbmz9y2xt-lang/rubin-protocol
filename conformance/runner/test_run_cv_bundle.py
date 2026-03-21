@@ -1,6 +1,9 @@
 import unittest
 
-from run_cv_bundle import TXCTX_GOVERNANCE_SKIP_IDS, normalized_vector_op
+try:
+    from .run_cv_bundle import TXCTX_GOVERNANCE_SKIP_IDS, normalized_vector_op
+except ImportError:
+    from run_cv_bundle import TXCTX_GOVERNANCE_SKIP_IDS, normalized_vector_op
 
 
 class RunCvBundleOpNormalizationTests(unittest.TestCase):
