@@ -424,6 +424,8 @@ struct CoreExtProfileJson {
     #[serde(default)]
     activation_height: u64,
     #[serde(default)]
+    tx_context_enabled: bool,
+    #[serde(default)]
     allowed_suite_ids: Vec<u8>,
     #[serde(default)]
     binding: String,
@@ -897,8 +899,10 @@ fn core_ext_profiles_from_json(
         deployments.push(CoreExtDeploymentProfile {
             ext_id: item.ext_id,
             activation_height: item.activation_height,
+            tx_context_enabled: item.tx_context_enabled,
             allowed_suite_ids: item.allowed_suite_ids.clone(),
             verification_binding: binding,
+            verify_sig_ext_tx_context_fn: None,
             binding_descriptor,
             ext_payload_schema,
         });
@@ -4551,6 +4555,7 @@ mod tests {
                 CoreExtProfileJson {
                     ext_id: 7,
                     activation_height: 0,
+                    tx_context_enabled: false,
                     allowed_suite_ids: vec![3],
                     binding:
                         rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
@@ -4561,6 +4566,7 @@ mod tests {
                 CoreExtProfileJson {
                     ext_id: 7,
                     activation_height: 10,
+                    tx_context_enabled: false,
                     allowed_suite_ids: vec![3],
                     binding:
                         rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
@@ -4589,6 +4595,7 @@ mod tests {
             &[CoreExtProfileJson {
                 ext_id: 9,
                 activation_height: 42,
+                tx_context_enabled: false,
                 allowed_suite_ids: vec![3],
                 binding: rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
                     .to_string(),
@@ -4640,6 +4647,7 @@ mod tests {
             &[CoreExtProfileJson {
                 ext_id: 9,
                 activation_height: 42,
+                tx_context_enabled: false,
                 allowed_suite_ids: vec![3],
                 binding: format!(
                     "  {}\n",
@@ -4700,11 +4708,13 @@ mod tests {
             &[CoreExtDeploymentProfile {
                 ext_id: 9,
                 activation_height: 42,
+                tx_context_enabled: false,
                 allowed_suite_ids: vec![3],
                 verification_binding:
                     rubin_consensus::CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(
                         descriptor,
                     ),
+                verify_sig_ext_tx_context_fn: None,
                 binding_descriptor: binding_descriptor.clone(),
                 ext_payload_schema: vec![0xb2],
             }],
@@ -4715,6 +4725,7 @@ mod tests {
             &[CoreExtProfileJson {
                 ext_id: 9,
                 activation_height: 42,
+                tx_context_enabled: false,
                 allowed_suite_ids: vec![3],
                 binding: rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
                     .to_string(),
@@ -4788,6 +4799,7 @@ mod tests {
             &[CoreExtProfileJson {
                 ext_id: 9,
                 activation_height: 42,
+                tx_context_enabled: false,
                 allowed_suite_ids: vec![3],
                 binding: rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
                     .to_string(),
@@ -4807,6 +4819,7 @@ mod tests {
             &[CoreExtProfileJson {
                 ext_id: 9,
                 activation_height: 42,
+                tx_context_enabled: false,
                 allowed_suite_ids: vec![3],
                 binding: "unknown-binding".to_string(),
                 binding_descriptor_hex: "zz".to_string(),
