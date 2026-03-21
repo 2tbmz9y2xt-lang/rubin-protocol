@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from txctx_case import build_txctx_case
+from txctx_case import build_txctx_case, build_txctx_governance_request
 
 
 FIXTURE = {
@@ -75,6 +75,45 @@ class TxctxCaseTests(unittest.TestCase):
         }
         case = build_txctx_case(vector, FIXTURE)
         self.assertEqual(case["inputs"][0]["prevout_txid_hex"], case["inputs"][1]["prevout_txid_hex"])
+
+    def test_governance_request_uses_duplicate_suite_ids_from_profile_attempt(self):
+        vector = {
+            "id": "CV-TXCTX-60",
+            "profile_attempt": {
+                "ext_id": 0x0FEB,
+                "allowed_suite_ids": [16, 16],
+            },
+        }
+        request = build_txctx_governance_request(vector, FIXTURE)
+        self.assertEqual(request["op"], "txctx_governance_vector")
+        self.assertEqual(request["core_ext_profiles"][0]["allowed_suite_ids"], [16, 16])
+        self.assertEqual(request["dependency_checklists"][0]["profile_ext_id"], "0x0feb")
+        self.assertTrue(request["artifact_hex"])
+        self.assertTrue(request["expected_artifact_hash_hex"])
+
+    def test_governance_request_carries_transition_height_guard(self):
+        vector = {
+            "id": "CV-TXCTX-GOV-01",
+            "profile_under_test": {
+                "activation_height": 99,
+                "transition_height": 100,
+            },
+        }
+        request = build_txctx_governance_request(vector, FIXTURE)
+        self.assertEqual(request["transition_height"], 100)
+        self.assertEqual(request["core_ext_profiles"][0]["activation_height"], 99)
+        self.assertTrue(request["artifact_hex"])
+        self.assertTrue(request["expected_artifact_hash_hex"])
+
+    def test_governance_request_with_invalid_artifact_hex_keeps_runner_alive(self):
+        vector = {
+            "id": "CV-TXCTX-GOV-01",
+            "artifact_hex": "zz",
+        }
+        request = build_txctx_governance_request(vector, FIXTURE)
+        self.assertEqual(request["artifact_hex"], "zz")
+        self.assertEqual(len(request["expected_artifact_hash_hex"]), 64)
+        int(request["expected_artifact_hash_hex"], 16)
 
 
 if __name__ == "__main__":
