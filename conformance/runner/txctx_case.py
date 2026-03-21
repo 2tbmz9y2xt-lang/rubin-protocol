@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -477,13 +478,19 @@ def build_txctx_governance_request(vector: Dict[str, Any], fixture: Dict[str, An
         ],
         "mempool_txctx_confirmed": bool(vector.get("mempool_txctx_confirmed", True)),
     }
+    artifact_hex = _normalize_hex(
+        vector.get(
+            "artifact_hex",
+            fixture.get("governance_artifact_hex", "74786374782d676f7665726e616e63652d6172746966616374"),
+        )
+    )
+    request["artifact_hex"] = artifact_hex
+    request["expected_artifact_hash_hex"] = _normalize_hex(
+        vector.get("expected_artifact_hash_hex", hashlib.sha256(bytes.fromhex(artifact_hex)).hexdigest())
+    )
     transition_height = profile_under_test.get("transition_height", vector.get("transition_height"))
     if transition_height is not None:
         request["transition_height"] = _intish(transition_height)
-    if "artifact_hex" in vector:
-        request["artifact_hex"] = _normalize_hex(vector.get("artifact_hex"))
-    if "expected_artifact_hash_hex" in vector:
-        request["expected_artifact_hash_hex"] = _normalize_hex(vector.get("expected_artifact_hash_hex"))
     return request
 
 

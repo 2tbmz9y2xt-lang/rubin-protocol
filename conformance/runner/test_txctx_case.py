@@ -88,6 +88,8 @@ class TxctxCaseTests(unittest.TestCase):
         self.assertEqual(request["op"], "txctx_governance_vector")
         self.assertEqual(request["core_ext_profiles"][0]["allowed_suite_ids"], [16, 16])
         self.assertEqual(request["dependency_checklists"][0]["profile_ext_id"], "0x0feb")
+        self.assertTrue(request["artifact_hex"])
+        self.assertTrue(request["expected_artifact_hash_hex"])
 
     def test_governance_request_carries_transition_height_guard(self):
         vector = {
@@ -100,6 +102,8 @@ class TxctxCaseTests(unittest.TestCase):
         request = build_txctx_governance_request(vector, FIXTURE)
         self.assertEqual(request["transition_height"], 100)
         self.assertEqual(request["core_ext_profiles"][0]["activation_height"], 99)
+        self.assertTrue(request["artifact_hex"])
+        self.assertTrue(request["expected_artifact_hash_hex"])
 
 
 if __name__ == "__main__":

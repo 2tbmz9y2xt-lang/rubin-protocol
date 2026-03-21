@@ -9,8 +9,14 @@ import (
 
 func testTxctxGovernanceChecklist(extID uint16, maxExtPayloadBytes int) TxctxDependencyChecklistJSON {
 	return TxctxDependencyChecklistJSON{
-		ProfileExtID:         "0x" + hex.EncodeToString([]byte{byte(extID >> 8), byte(extID)}),
-		SpecDocument:         "SPEC-TXCTX-01.md",
+		ProfileExtID: "0x" + hex.EncodeToString([]byte{byte(extID >> 8), byte(extID)}),
+		SpecDocument: "SPEC-TXCTX-01.md",
+		TxContextInputsUsed: TxctxDependencyInputsJSON{
+			SelfInputValue:       true,
+			CtxBaseHeight:        true,
+			CtxBaseTotalIn:       true,
+			CtxContinuingOutputs: true,
+		},
 		SighashTypesRequired: []string{"SIGHASH_ALL"},
 		MaxExtPayloadBytes:   maxExtPayloadBytes,
 		VerifierSideEffects:  "none",
@@ -29,14 +35,24 @@ func testTxctxGovernanceProfile() CoreExtProfileJSON {
 	}
 }
 
+func testTxctxGovernanceRequest(
+	checklists []TxctxDependencyChecklistJSON,
+) Request {
+	artifact := []byte("txctx-governance-artifact")
+	hash := sha256.Sum256(artifact)
+	return Request{
+		ArtifactHex:          hex.EncodeToString(artifact),
+		ExpectedArtifactHash: hex.EncodeToString(hash[:]),
+		TransitionHeight:     uint64Ptr(100),
+		DependencyChecklists: checklists,
+	}
+}
+
 func TestRunTxctxGovernanceVectorRejectsDuplicateAllowedSuiteIDs(t *testing.T) {
 	profile := testTxctxGovernanceProfile()
 	profile.AllowedSuiteIDs = []uint8{0x10, 0x10}
 	resp := runTxctxGovernanceVector(
-		Request{
-			TransitionHeight:     uint64Ptr(100),
-			DependencyChecklists: []TxctxDependencyChecklistJSON{testTxctxGovernanceChecklist(profile.ExtID, 48)},
-		},
+		testTxctxGovernanceRequest([]TxctxDependencyChecklistJSON{testTxctxGovernanceChecklist(profile.ExtID, 48)}),
 		[]CoreExtProfileJSON{profile},
 	)
 	if resp.Ok {
@@ -51,10 +67,7 @@ func TestRunTxctxGovernanceVectorRejectsActivationBelowTransition(t *testing.T) 
 	profile := testTxctxGovernanceProfile()
 	profile.ActivationHeight = 99
 	resp := runTxctxGovernanceVector(
-		Request{
-			TransitionHeight:     uint64Ptr(100),
-			DependencyChecklists: []TxctxDependencyChecklistJSON{testTxctxGovernanceChecklist(profile.ExtID, 48)},
-		},
+		testTxctxGovernanceRequest([]TxctxDependencyChecklistJSON{testTxctxGovernanceChecklist(profile.ExtID, 48)}),
 		[]CoreExtProfileJSON{profile},
 	)
 	if resp.Ok {
@@ -89,9 +102,7 @@ func TestRunTxctxGovernanceVectorRejectsArtifactHashMismatch(t *testing.T) {
 
 func TestRunTxctxGovernanceVectorRejectsMissingChecklist(t *testing.T) {
 	resp := runTxctxGovernanceVector(
-		Request{
-			TransitionHeight: uint64Ptr(100),
-		},
+		testTxctxGovernanceRequest(nil),
 		[]CoreExtProfileJSON{testTxctxGovernanceProfile()},
 	)
 	if resp.Ok {
@@ -102,14 +113,27 @@ func TestRunTxctxGovernanceVectorRejectsMissingChecklist(t *testing.T) {
 	}
 }
 
+func TestRunTxctxGovernanceVectorRejectsMissingArtifactHash(t *testing.T) {
+	resp := runTxctxGovernanceVector(
+		Request{
+			TransitionHeight:     uint64Ptr(100),
+			DependencyChecklists: []TxctxDependencyChecklistJSON{testTxctxGovernanceChecklist(0x0feb, 48)},
+		},
+		[]CoreExtProfileJSON{testTxctxGovernanceProfile()},
+	)
+	if resp.Ok {
+		t.Fatalf("expected missing artifact hash rejection")
+	}
+	if resp.Err != "bad expected_artifact_hash_hex" {
+		t.Fatalf("unexpected err: %q", resp.Err)
+	}
+}
+
 func TestRunTxctxGovernanceVectorRejectsLargePayloadWithoutMempoolGate(t *testing.T) {
 	profile := testTxctxGovernanceProfile()
 	profile.MaxExtPayloadBytes = 300
 	resp := runTxctxGovernanceVector(
-		Request{
-			TransitionHeight:     uint64Ptr(100),
-			DependencyChecklists: []TxctxDependencyChecklistJSON{testTxctxGovernanceChecklist(profile.ExtID, 300)},
-		},
+		testTxctxGovernanceRequest([]TxctxDependencyChecklistJSON{testTxctxGovernanceChecklist(profile.ExtID, 300)}),
 		[]CoreExtProfileJSON{profile},
 	)
 	if resp.Ok {
@@ -123,13 +147,10 @@ func TestRunTxctxGovernanceVectorRejectsLargePayloadWithoutMempoolGate(t *testin
 func TestRunTxctxGovernanceVectorRejectsExtraChecklist(t *testing.T) {
 	profile := testTxctxGovernanceProfile()
 	resp := runTxctxGovernanceVector(
-		Request{
-			TransitionHeight: uint64Ptr(100),
-			DependencyChecklists: []TxctxDependencyChecklistJSON{
-				testTxctxGovernanceChecklist(profile.ExtID, 48),
-				testTxctxGovernanceChecklist(0x0fed, 48),
-			},
-		},
+		testTxctxGovernanceRequest([]TxctxDependencyChecklistJSON{
+			testTxctxGovernanceChecklist(profile.ExtID, 48),
+			testTxctxGovernanceChecklist(0x0fed, 48),
+		}),
 		[]CoreExtProfileJSON{profile},
 	)
 	if resp.Ok {
@@ -145,10 +166,7 @@ func TestRunTxctxGovernanceVectorRejectsNonCanonicalChecklistExtID(t *testing.T)
 	checklist := testTxctxGovernanceChecklist(profile.ExtID, 48)
 	checklist.ProfileExtID = "0x1"
 	resp := runTxctxGovernanceVector(
-		Request{
-			TransitionHeight:     uint64Ptr(100),
-			DependencyChecklists: []TxctxDependencyChecklistJSON{checklist},
-		},
+		testTxctxGovernanceRequest([]TxctxDependencyChecklistJSON{checklist}),
 		[]CoreExtProfileJSON{profile},
 	)
 	if resp.Ok {
@@ -163,10 +181,7 @@ func TestRunTxctxGovernanceVectorRejectsNegativePayloadLimit(t *testing.T) {
 	profile := testTxctxGovernanceProfile()
 	profile.MaxExtPayloadBytes = -1
 	resp := runTxctxGovernanceVector(
-		Request{
-			TransitionHeight:     uint64Ptr(100),
-			DependencyChecklists: []TxctxDependencyChecklistJSON{testTxctxGovernanceChecklist(profile.ExtID, -1)},
-		},
+		testTxctxGovernanceRequest([]TxctxDependencyChecklistJSON{testTxctxGovernanceChecklist(profile.ExtID, -1)}),
 		[]CoreExtProfileJSON{profile},
 	)
 	if resp.Ok {
@@ -177,14 +192,79 @@ func TestRunTxctxGovernanceVectorRejectsNegativePayloadLimit(t *testing.T) {
 	}
 }
 
+func TestRunTxctxGovernanceVectorRejectsStepTwoSuiteSet(t *testing.T) {
+	profile := testTxctxGovernanceProfile()
+	profile.AllowedSuiteIDs = []uint8{0x10, 0x11}
+	artifact := []byte("txctx-governance-artifact")
+	hash := sha256.Sum256(artifact)
+	resp := runTxctxGovernanceVector(
+		Request{
+			ArtifactHex:          hex.EncodeToString(artifact),
+			ExpectedArtifactHash: hex.EncodeToString(hash[:]),
+			TransitionHeight:     uint64Ptr(100),
+			DependencyChecklists: []TxctxDependencyChecklistJSON{testTxctxGovernanceChecklist(profile.ExtID, 48)},
+		},
+		[]CoreExtProfileJSON{profile},
+	)
+	if resp.Ok {
+		t.Fatalf("expected step-two suite set rejection")
+	}
+	if resp.Err != txctxGovernanceErrInvalidChecklist {
+		t.Fatalf("unexpected err: %q", resp.Err)
+	}
+}
+
+func TestRunTxctxGovernanceVectorRejectsChecklistWithoutDeclaredDependencies(t *testing.T) {
+	profile := testTxctxGovernanceProfile()
+	checklist := testTxctxGovernanceChecklist(profile.ExtID, 48)
+	checklist.TxContextInputsUsed = TxctxDependencyInputsJSON{}
+	artifact := []byte("txctx-governance-artifact")
+	hash := sha256.Sum256(artifact)
+	resp := runTxctxGovernanceVector(
+		Request{
+			ArtifactHex:          hex.EncodeToString(artifact),
+			ExpectedArtifactHash: hex.EncodeToString(hash[:]),
+			TransitionHeight:     uint64Ptr(100),
+			DependencyChecklists: []TxctxDependencyChecklistJSON{checklist},
+		},
+		[]CoreExtProfileJSON{profile},
+	)
+	if resp.Ok {
+		t.Fatalf("expected dependency checklist rejection")
+	}
+	if resp.Err != txctxGovernanceErrInvalidChecklist {
+		t.Fatalf("unexpected err: %q", resp.Err)
+	}
+}
+
+func TestRunTxctxGovernanceVectorRejectsUnknownSighashType(t *testing.T) {
+	profile := testTxctxGovernanceProfile()
+	checklist := testTxctxGovernanceChecklist(profile.ExtID, 48)
+	checklist.SighashTypesRequired = []string{"SIGHASH_FOO"}
+	artifact := []byte("txctx-governance-artifact")
+	hash := sha256.Sum256(artifact)
+	resp := runTxctxGovernanceVector(
+		Request{
+			ArtifactHex:          hex.EncodeToString(artifact),
+			ExpectedArtifactHash: hex.EncodeToString(hash[:]),
+			TransitionHeight:     uint64Ptr(100),
+			DependencyChecklists: []TxctxDependencyChecklistJSON{checklist},
+		},
+		[]CoreExtProfileJSON{profile},
+	)
+	if resp.Ok {
+		t.Fatalf("expected invalid sighash rejection")
+	}
+	if resp.Err != txctxGovernanceErrInvalidChecklist {
+		t.Fatalf("unexpected err: %q", resp.Err)
+	}
+}
+
 func TestRunTxctxGovernanceVectorRejectsNonBooleanTxContextEnabled(t *testing.T) {
 	profile := testTxctxGovernanceProfile()
 	profile.TxContextEnabled = 2
 	resp := runTxctxGovernanceVector(
-		Request{
-			TransitionHeight:     uint64Ptr(100),
-			DependencyChecklists: []TxctxDependencyChecklistJSON{testTxctxGovernanceChecklist(profile.ExtID, 48)},
-		},
+		testTxctxGovernanceRequest([]TxctxDependencyChecklistJSON{testTxctxGovernanceChecklist(profile.ExtID, 48)}),
 		[]CoreExtProfileJSON{profile},
 	)
 	if resp.Ok {

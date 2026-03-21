@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -32,6 +33,9 @@ func runTxctxGovernanceVector(req Request, profiles []CoreExtProfileJSON) Respon
 	if req.TransitionHeight != nil {
 		diag["transition_height"] = *req.TransitionHeight
 	}
+	if txctxEnabledProfileCount(profiles) > 0 && strings.TrimSpace(req.ExpectedArtifactHash) == "" {
+		return Response{Ok: false, Err: "bad expected_artifact_hash_hex", Diagnostics: diag}
+	}
 	if err := validateArtifactHash(req.ArtifactHex, req.ExpectedArtifactHash); err != nil {
 		return Response{Ok: false, Err: err.Error(), Diagnostics: diag}
 	}
@@ -47,9 +51,6 @@ func runTxctxGovernanceVector(req Request, profiles []CoreExtProfileJSON) Respon
 }
 
 func validateArtifactHash(artifactHex string, expectedHashHex string) error {
-	if strings.TrimSpace(expectedHashHex) == "" {
-		return nil
-	}
 	artifactHex = normalizeGovernanceHex(artifactHex)
 	if artifactHex == "" {
 		return fmt.Errorf("bad artifact_hex")
@@ -100,6 +101,9 @@ func validateTxctxGovernanceProfiles(
 		if hasDuplicateSuiteID(profile.AllowedSuiteIDs) {
 			return fmt.Errorf(txctxGovernanceErrDuplicateAllowedSuiteID)
 		}
+		if len(profile.AllowedSuiteIDs) != 1 {
+			return fmt.Errorf(txctxGovernanceErrInvalidChecklist)
+		}
 		if profile.TxContextEnabled != 0 && profile.TxContextEnabled != 1 {
 			return fmt.Errorf(txctxGovernanceErrInvalidChecklist)
 		}
@@ -138,6 +142,12 @@ func validateDependencyChecklist(
 		len(checklist.SighashTypesRequired) == 0 ||
 		strings.TrimSpace(checklist.VerifierSideEffects) == "" ||
 		strings.TrimSpace(checklist.Reviewer) == "" {
+		return fmt.Errorf(txctxGovernanceErrInvalidChecklist)
+	}
+	if !hasDeclaredTxctxDependency(checklist.TxContextInputsUsed) {
+		return fmt.Errorf(txctxGovernanceErrInvalidChecklist)
+	}
+	if !hasValidSighashTypes(checklist.SighashTypesRequired) {
 		return fmt.Errorf(txctxGovernanceErrInvalidChecklist)
 	}
 	if !strings.EqualFold(strings.TrimSpace(checklist.VerifierSideEffects), "none") {
@@ -200,6 +210,29 @@ func hasDuplicateSuiteID(ids []uint8) bool {
 		seen[suiteID] = struct{}{}
 	}
 	return false
+}
+
+func hasDeclaredTxctxDependency(inputs TxctxDependencyInputsJSON) bool {
+	return inputs.SelfInputValue ||
+		inputs.CtxBaseHeight ||
+		inputs.CtxBaseTotalIn ||
+		inputs.CtxContinuingOutputs
+}
+
+func hasValidSighashTypes(values []string) bool {
+	allowed := []string{"SIGHASH_ALL", "SIGHASH_SINGLE", "SIGHASH_NONE", "ACP"}
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		normalized := strings.ToUpper(strings.TrimSpace(value))
+		if normalized == "" || !slices.Contains(allowed, normalized) {
+			return false
+		}
+		if _, exists := seen[normalized]; exists {
+			return false
+		}
+		seen[normalized] = struct{}{}
+	}
+	return true
 }
 
 func deriveTxctxTransitionHeight(profiles []CoreExtProfileJSON) (uint64, bool) {

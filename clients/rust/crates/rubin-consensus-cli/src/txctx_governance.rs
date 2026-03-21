@@ -1,7 +1,9 @@
-use super::{CoreExtProfileJson, Request, Response, TxctxDependencyChecklistJson};
+use super::{
+    CoreExtProfileJson, Request, Response, TxctxDependencyChecklistJson, TxctxDependencyInputsJson,
+};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const TXCTX_GOVERNANCE_ERR_ACTIVATION_BELOW_TRANSITION: &str =
     "ACTIVATION_HEIGHT_BELOW_TRANSITION_HEIGHT";
@@ -27,6 +29,11 @@ pub fn run_txctx_governance_vector(req: &Request) -> Response {
         diagnostics["transition_height"] = json!(transition_height);
     }
 
+    if txctx_enabled_profile_count(&req.core_ext_profiles) > 0
+        && req.expected_artifact_hash_hex.trim().is_empty()
+    {
+        return err_response("bad expected_artifact_hash_hex", diagnostics);
+    }
     if let Err(err) = validate_artifact_hash(&req.artifact_hex, &req.expected_artifact_hash_hex) {
         return err_response(err, diagnostics);
     }
@@ -55,9 +62,6 @@ fn err_response(err: &str, diagnostics: Value) -> Response {
 }
 
 fn validate_artifact_hash(artifact_hex: &str, expected_hash_hex: &str) -> Result<(), &'static str> {
-    if expected_hash_hex.trim().is_empty() {
-        return Ok(());
-    }
     let artifact_hex = normalize_governance_hex(artifact_hex);
     if artifact_hex.is_empty() {
         return Err("bad artifact_hex");
@@ -102,6 +106,9 @@ fn validate_txctx_governance_profiles(
         if has_duplicate_suite_id(&profile.allowed_suite_ids) {
             return Err(TXCTX_GOVERNANCE_ERR_DUPLICATE_ALLOWED_SUITE_ID);
         }
+        if profile.allowed_suite_ids.len() != 1 {
+            return Err(TXCTX_GOVERNANCE_ERR_INVALID_CHECKLIST);
+        }
         if !profile.tx_context_enabled {
             continue;
         }
@@ -139,6 +146,12 @@ fn validate_dependency_checklist(
     {
         return Err(TXCTX_GOVERNANCE_ERR_INVALID_CHECKLIST);
     }
+    if !has_declared_txctx_dependency(&checklist.txcontext_inputs_used) {
+        return Err(TXCTX_GOVERNANCE_ERR_INVALID_CHECKLIST);
+    }
+    if !has_valid_sighash_types(&checklist.sighash_types_required) {
+        return Err(TXCTX_GOVERNANCE_ERR_INVALID_CHECKLIST);
+    }
     if !checklist
         .verifier_side_effects
         .trim()
@@ -172,20 +185,45 @@ fn parse_checklist_ext_id(raw: &str) -> Option<u16> {
         return None;
     }
     let hex = raw.strip_prefix("0x")?;
-    if !hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+    if !hex
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         return None;
     }
     u16::from_str_radix(hex, 16).ok()
 }
 
 fn has_duplicate_suite_id(ids: &[u8]) -> bool {
-    let mut seen = std::collections::HashSet::with_capacity(ids.len());
+    let mut seen = HashSet::with_capacity(ids.len());
     for suite_id in ids {
         if !seen.insert(*suite_id) {
             return true;
         }
     }
     false
+}
+
+fn has_declared_txctx_dependency(inputs: &super::TxctxDependencyInputsJson) -> bool {
+    inputs.self_input_value
+        || inputs.ctx_base_height
+        || inputs.ctx_base_total_in
+        || inputs.ctx_continuing_outputs
+}
+
+fn has_valid_sighash_types(values: &[String]) -> bool {
+    let allowed = ["SIGHASH_ALL", "SIGHASH_SINGLE", "SIGHASH_NONE", "ACP"];
+    let mut seen = HashSet::with_capacity(values.len());
+    for value in values {
+        let normalized = value.trim().to_ascii_uppercase();
+        if normalized.is_empty() || !allowed.contains(&normalized.as_str()) {
+            return false;
+        }
+        if !seen.insert(normalized) {
+            return false;
+        }
+    }
+    true
 }
 
 fn derive_txctx_transition_height(profiles: &[CoreExtProfileJson]) -> Option<u64> {
@@ -219,11 +257,27 @@ mod tests {
         }
     }
 
+    fn test_request(checklists: Vec<TxctxDependencyChecklistJson>) -> Request {
+        let artifact = b"txctx-governance-artifact";
+        Request {
+            artifact_hex: hex::encode(artifact),
+            expected_artifact_hash_hex: hex::encode(Sha256::digest(artifact)),
+            transition_height: Some(100),
+            dependency_checklists: checklists,
+            ..Default::default()
+        }
+    }
+
     fn test_checklist(ext_id: u16, max_ext_payload_bytes: i64) -> TxctxDependencyChecklistJson {
         TxctxDependencyChecklistJson {
             profile_ext_id: format!("0x{ext_id:04x}"),
             spec_document: "SPEC-TXCTX-01.md".to_string(),
-            txcontext_inputs_used: Default::default(),
+            txcontext_inputs_used: TxctxDependencyInputsJson {
+                self_input_value: true,
+                ctx_base_height: true,
+                ctx_base_total_in: true,
+                ctx_continuing_outputs: true,
+            },
             sighash_types_required: vec!["SIGHASH_ALL".to_string()],
             max_ext_payload_bytes,
             verifier_side_effects: "none".to_string(),
@@ -235,12 +289,8 @@ mod tests {
     fn rejects_duplicate_allowed_suite_ids() {
         let mut profile = test_profile();
         profile.allowed_suite_ids = vec![0x10, 0x10];
-        let req = Request {
-            transition_height: Some(100),
-            core_ext_profiles: vec![profile],
-            dependency_checklists: vec![test_checklist(0x0feb, 48)],
-            ..Default::default()
-        };
+        let mut req = test_request(vec![test_checklist(0x0feb, 48)]);
+        req.core_ext_profiles = vec![profile];
         let resp = run_txctx_governance_vector(&req);
         assert!(!resp.ok);
         assert_eq!(
@@ -253,12 +303,8 @@ mod tests {
     fn rejects_activation_below_transition() {
         let mut profile = test_profile();
         profile.activation_height = 99;
-        let req = Request {
-            transition_height: Some(100),
-            core_ext_profiles: vec![profile],
-            dependency_checklists: vec![test_checklist(0x0feb, 48)],
-            ..Default::default()
-        };
+        let mut req = test_request(vec![test_checklist(0x0feb, 48)]);
+        req.core_ext_profiles = vec![profile];
         let resp = run_txctx_governance_vector(&req);
         assert!(!resp.ok);
         assert_eq!(
@@ -287,11 +333,8 @@ mod tests {
 
     #[test]
     fn rejects_missing_checklist() {
-        let req = Request {
-            transition_height: Some(100),
-            core_ext_profiles: vec![test_profile()],
-            ..Default::default()
-        };
+        let mut req = test_request(vec![]);
+        req.core_ext_profiles = vec![test_profile()];
         let resp = run_txctx_governance_vector(&req);
         assert!(!resp.ok);
         assert_eq!(
@@ -301,15 +344,24 @@ mod tests {
     }
 
     #[test]
+    fn rejects_missing_artifact_hash() {
+        let req = Request {
+            transition_height: Some(100),
+            core_ext_profiles: vec![test_profile()],
+            dependency_checklists: vec![test_checklist(0x0feb, 48)],
+            ..Default::default()
+        };
+        let resp = run_txctx_governance_vector(&req);
+        assert!(!resp.ok);
+        assert_eq!(resp.err.as_deref(), Some("bad expected_artifact_hash_hex"));
+    }
+
+    #[test]
     fn rejects_large_payload_without_mempool_gate() {
         let mut profile = test_profile();
         profile.max_ext_payload_bytes = 300;
-        let req = Request {
-            transition_height: Some(100),
-            core_ext_profiles: vec![profile],
-            dependency_checklists: vec![test_checklist(0x0feb, 300)],
-            ..Default::default()
-        };
+        let mut req = test_request(vec![test_checklist(0x0feb, 300)]);
+        req.core_ext_profiles = vec![profile];
         let resp = run_txctx_governance_vector(&req);
         assert!(!resp.ok);
         assert_eq!(
@@ -338,12 +390,8 @@ mod tests {
 
     #[test]
     fn rejects_extra_checklist() {
-        let req = Request {
-            transition_height: Some(100),
-            core_ext_profiles: vec![test_profile()],
-            dependency_checklists: vec![test_checklist(0x0feb, 48), test_checklist(0x0fed, 48)],
-            ..Default::default()
-        };
+        let mut req = test_request(vec![test_checklist(0x0feb, 48), test_checklist(0x0fed, 48)]);
+        req.core_ext_profiles = vec![test_profile()];
         let resp = run_txctx_governance_vector(&req);
         assert!(!resp.ok);
         assert_eq!(
@@ -356,12 +404,8 @@ mod tests {
     fn rejects_noncanonical_checklist_ext_id() {
         let mut checklist = test_checklist(0x0feb, 48);
         checklist.profile_ext_id = "0x1".to_string();
-        let req = Request {
-            transition_height: Some(100),
-            core_ext_profiles: vec![test_profile()],
-            dependency_checklists: vec![checklist],
-            ..Default::default()
-        };
+        let mut req = test_request(vec![checklist]);
+        req.core_ext_profiles = vec![test_profile()];
         let resp = run_txctx_governance_vector(&req);
         assert!(!resp.ok);
         assert_eq!(
@@ -374,12 +418,50 @@ mod tests {
     fn rejects_negative_payload_limit() {
         let mut profile = test_profile();
         profile.max_ext_payload_bytes = -1;
-        let req = Request {
-            transition_height: Some(100),
-            core_ext_profiles: vec![profile],
-            dependency_checklists: vec![test_checklist(0x0feb, -1)],
-            ..Default::default()
-        };
+        let mut req = test_request(vec![test_checklist(0x0feb, -1)]);
+        req.core_ext_profiles = vec![profile];
+        let resp = run_txctx_governance_vector(&req);
+        assert!(!resp.ok);
+        assert_eq!(
+            resp.err.as_deref(),
+            Some(TXCTX_GOVERNANCE_ERR_INVALID_CHECKLIST)
+        );
+    }
+
+    #[test]
+    fn rejects_step_two_suite_set() {
+        let mut profile = test_profile();
+        profile.allowed_suite_ids = vec![0x10, 0x11];
+        let mut req = test_request(vec![test_checklist(0x0feb, 48)]);
+        req.core_ext_profiles = vec![profile];
+        let resp = run_txctx_governance_vector(&req);
+        assert!(!resp.ok);
+        assert_eq!(
+            resp.err.as_deref(),
+            Some(TXCTX_GOVERNANCE_ERR_INVALID_CHECKLIST)
+        );
+    }
+
+    #[test]
+    fn rejects_checklist_without_declared_dependencies() {
+        let mut checklist = test_checklist(0x0feb, 48);
+        checklist.txcontext_inputs_used = TxctxDependencyInputsJson::default();
+        let mut req = test_request(vec![checklist]);
+        req.core_ext_profiles = vec![test_profile()];
+        let resp = run_txctx_governance_vector(&req);
+        assert!(!resp.ok);
+        assert_eq!(
+            resp.err.as_deref(),
+            Some(TXCTX_GOVERNANCE_ERR_INVALID_CHECKLIST)
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_sighash_type() {
+        let mut checklist = test_checklist(0x0feb, 48);
+        checklist.sighash_types_required = vec!["SIGHASH_FOO".to_string()];
+        let mut req = test_request(vec![checklist]);
+        req.core_ext_profiles = vec![test_profile()];
         let resp = run_txctx_governance_vector(&req);
         assert!(!resp.ok);
         assert_eq!(
