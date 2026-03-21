@@ -34,7 +34,7 @@ jobs:
 
       - name: CV-TXCTX schema validation (policy)
         run: |
-          pip install --quiet jsonschema 2>/dev/null || true
+          pip install --quiet jsonschema
           python3 tools/check_cv_txctx_schema.py
 
       - name: OpenSSL CVE response policy
