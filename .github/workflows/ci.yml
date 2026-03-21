@@ -32,6 +32,11 @@ jobs:
             --code-root . \
             --skip-doc-policy
 
+      - name: CV-TXCTX schema validation (policy)
+        run: |
+          pip install --quiet jsonschema
+          python3 tools/check_cv_txctx_schema.py
+
       - name: OpenSSL CVE response policy
         run: |
           python3 tools/check_openssl_cve_response.py --code-root .
