@@ -45,6 +45,9 @@ GO_ALLOWLIST = {
     "utxo_basic.go:cloneUtxoSet",
     # shallow-copy map→map, order-neutral
     "utxo_snapshot.go:NewUtxoSnapshot",
+    # range outputExtIDCache[extID] — value type is []ExtIDCacheEntry (slice),
+    # not a map. Outer loop is over sorted extIDs slice.
+    "txcontext.go:BuildTxContext",
 }
 
 # Pattern: `for <var> := range <identifier>` where identifier is NOT a slice/array
@@ -60,9 +63,11 @@ GO_FUNC_START_RE = re.compile(
 GO_MAP_PARAM_IN_SIG_RE = re.compile(
     r"(\w+)\s+map\["
 )
-# Match `range <var>` but NOT `range <var>[key]` (map lookup returns slice)
+# Match `range <var>` — including `range <var>[key]` since indexed maps
+# can hold maps (e.g. map[K]map[K2]V), making iteration nondeterministic.
+# False positives where value type is slice must go in the allowlist.
 GO_RANGE_RE = re.compile(
-    r"for\s+\w+(?:\s*,\s*\w+)?\s*:?=\s*range\s+(\w+)(?!\s*\[)"
+    r"for\s+\w+(?:\s*,\s*\w+)?\s*:?=\s*range\s+(\w+)"
 )
 
 # --- Rust consensus crate ---
