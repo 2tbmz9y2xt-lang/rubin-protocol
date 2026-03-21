@@ -194,6 +194,9 @@ jobs:
       - name: Formal risk gate (Phase-0/devnet)
         run: python3 tools/check_formal_risk_gate.py --profile phase0
 
+      - name: Map iteration determinism lint (Go/Rust)
+        run: python3 tools/check_map_iteration_determinism.py
+
   test:
     needs: policy
     runs-on: ubuntu-latest
