@@ -50,19 +50,10 @@ pub struct ExtIdCacheEntry {
     pub value: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TxContextContinuing {
     pub continuing_output_count: u8,
     pub continuing_outputs: [Option<TxOutputView>; TXCONTEXT_MAX_CONTINUING_OUTPUTS],
-}
-
-impl Default for TxContextContinuing {
-    fn default() -> Self {
-        Self {
-            continuing_output_count: 0,
-            continuing_outputs: [None, None],
-        }
-    }
 }
 
 impl TxContextContinuing {
