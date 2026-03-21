@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import dataclass
+from decimal import Decimal
+from math import gcd
 from pathlib import Path
 from typing import Any
 
@@ -1370,9 +1372,13 @@ class DaStressVector:
     incoming_chunk_bytes: int | None
     expect_admit: bool | None
     incoming_has_commit: bool | None
-    recovery_success_rate: int | None
+    storm_trigger_pct_numer: int | None
+    storm_trigger_pct_denom: int | None
+    recovery_success_rate_numer: int | None
+    recovery_success_rate_denom: int | None
     observation_minutes: int | None
-    expect_fill_pct: int | None
+    expect_fill_pct_numer: int | None
+    expect_fill_pct_denom: int | None
     expect_storm_mode: bool | None
     expect_rollback: bool | None
     cap_bytes: int | None
@@ -1383,6 +1389,23 @@ class DaStressVector:
     expect_ignored_overhead_bytes: int | None
     max_da_chunk_count: int | None
     chunk_count: int | None
+
+
+def _decimal_to_ratio(value: Any) -> tuple[int, int] | None:
+    if value is None:
+        return None
+    dec = Decimal(str(value))
+    sign, digits, exponent = dec.as_tuple()
+    numer = int("".join(str(d) for d in digits) or "0")
+    if sign:
+        numer = -numer
+    if exponent >= 0:
+        numer *= 10 ** exponent
+        denom = 1
+    else:
+        denom = 10 ** (-exponent)
+    divisor = gcd(abs(numer), denom)
+    return numer // divisor, denom // divisor
 
 
 def load_cv_da_stress(path: Path) -> list[DaStressVector]:
@@ -1405,8 +1428,9 @@ def load_cv_da_stress(path: Path) -> list[DaStressVector]:
         peer_streams: list[int] | None = None
         if isinstance(peer_streams_raw, list):
             peer_streams = [int(x) for x in peer_streams_raw]
-        recovery_success = v.get("recovery_success_rate")
-        expect_fill_pct = v.get("expect_fill_pct")
+        storm_trigger_pct = _decimal_to_ratio(v.get("storm_trigger_pct", 90.0) if op == "compact_orphan_storm" else None)
+        recovery_success = _decimal_to_ratio(v.get("recovery_success_rate"))
+        expect_fill_pct = _decimal_to_ratio(v.get("expect_fill_pct"))
         out.append(
             DaStressVector(
                 vid=vid,
@@ -1429,9 +1453,13 @@ def load_cv_da_stress(path: Path) -> list[DaStressVector]:
                 incoming_chunk_bytes=(int(v["incoming_chunk_bytes"]) if "incoming_chunk_bytes" in v else None),
                 expect_admit=(bool(v["expect_admit"]) if "expect_admit" in v else None),
                 incoming_has_commit=(bool(v["incoming_has_commit"]) if "incoming_has_commit" in v else None),
-                recovery_success_rate=(int(round(float(recovery_success))) if recovery_success is not None else None),
+                storm_trigger_pct_numer=(storm_trigger_pct[0] if storm_trigger_pct is not None else None),
+                storm_trigger_pct_denom=(storm_trigger_pct[1] if storm_trigger_pct is not None else None),
+                recovery_success_rate_numer=(recovery_success[0] if recovery_success is not None else None),
+                recovery_success_rate_denom=(recovery_success[1] if recovery_success is not None else None),
                 observation_minutes=(int(v["observation_minutes"]) if "observation_minutes" in v else None),
-                expect_fill_pct=(int(round(float(expect_fill_pct))) if expect_fill_pct is not None else None),
+                expect_fill_pct_numer=(expect_fill_pct[0] if expect_fill_pct is not None else None),
+                expect_fill_pct_denom=(expect_fill_pct[1] if expect_fill_pct is not None else None),
                 expect_storm_mode=(bool(v["expect_storm_mode"]) if "expect_storm_mode" in v else None),
                 expect_rollback=(bool(v["expect_rollback"]) if "expect_rollback" in v else None),
                 cap_bytes=(int(v["cap_bytes"]) if "cap_bytes" in v else None),
@@ -1492,9 +1520,13 @@ def render_cv_da_stress_lean(vectors: list[DaStressVector]) -> str:
             + f"incomingChunkBytes := {_lean_opt_nat(v.incoming_chunk_bytes)}, "
             + f"expectAdmit := {_lean_opt_bool(v.expect_admit)}, "
             + f"incomingHasCommit := {_lean_opt_bool(v.incoming_has_commit)}, "
-            + f"recoverySuccessRate := {_lean_opt_nat(v.recovery_success_rate)}, "
+            + f"stormTriggerPctNumer := {_lean_opt_nat(v.storm_trigger_pct_numer)}, "
+            + f"stormTriggerPctDenom := {_lean_opt_nat(v.storm_trigger_pct_denom)}, "
+            + f"recoverySuccessRateNumer := {_lean_opt_nat(v.recovery_success_rate_numer)}, "
+            + f"recoverySuccessRateDenom := {_lean_opt_nat(v.recovery_success_rate_denom)}, "
             + f"observationMinutes := {_lean_opt_nat(v.observation_minutes)}, "
-            + f"expectFillPct := {_lean_opt_nat(v.expect_fill_pct)}, "
+            + f"expectFillPctNumer := {_lean_opt_nat(v.expect_fill_pct_numer)}, "
+            + f"expectFillPctDenom := {_lean_opt_nat(v.expect_fill_pct_denom)}, "
             + f"expectStormMode := {_lean_opt_bool(v.expect_storm_mode)}, "
             + f"expectRollback := {_lean_opt_bool(v.expect_rollback)}, "
             + f"capBytes := {_lean_opt_nat(v.cap_bytes)}, "
@@ -1531,9 +1563,13 @@ def render_cv_da_stress_lean(vectors: list[DaStressVector]) -> str:
         "  incomingChunkBytes : Option Nat := none\n"
         "  expectAdmit : Option Bool := none\n"
         "  incomingHasCommit : Option Bool := none\n"
-        "  recoverySuccessRate : Option Nat := none\n"
+        "  stormTriggerPctNumer : Option Nat := none\n"
+        "  stormTriggerPctDenom : Option Nat := none\n"
+        "  recoverySuccessRateNumer : Option Nat := none\n"
+        "  recoverySuccessRateDenom : Option Nat := none\n"
         "  observationMinutes : Option Nat := none\n"
-        "  expectFillPct : Option Nat := none\n"
+        "  expectFillPctNumer : Option Nat := none\n"
+        "  expectFillPctDenom : Option Nat := none\n"
         "  expectStormMode : Option Bool := none\n"
         "  expectRollback : Option Bool := none\n"
         "  capBytes : Option Nat := none\n"

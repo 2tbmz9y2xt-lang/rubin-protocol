@@ -11,6 +11,15 @@ private def boolOptEq (lhs rhs : Option Bool) : Bool :=
 private def listNatOptEq (lhs rhs : Option (List Nat)) : Bool :=
   lhs == rhs
 
+private def ratioEq (lhsNum lhsDen rhsNum rhsDen : Nat) : Bool :=
+  lhsNum * rhsDen == rhsNum * lhsDen
+
+private def ratioGt (lhsNum lhsDen rhsNum rhsDen : Nat) : Bool :=
+  lhsNum * rhsDen > rhsNum * lhsDen
+
+private def ratioLt (lhsNum lhsDen rhsNum rhsDen : Nat) : Bool :=
+  lhsNum * rhsDen < rhsNum * lhsDen
+
 private def evalDaStress (v : CVDaStressVector) : Bool :=
   if v.op == "compact_prefetch_caps" then
     match v.peerStreamsBps, v.perPeerBps, v.globalBps,
@@ -42,21 +51,27 @@ private def evalDaStress (v : CVDaStressVector) : Bool :=
     | _, _, _, _, _, _, _, _ => false
   else if v.op == "compact_orphan_storm" then
     match v.globalLimit, v.currentGlobalBytes, v.incomingChunkBytes, v.incomingHasCommit,
-          v.recoverySuccessRate, v.observationMinutes, v.expectFillPct,
+          v.stormTriggerPctNumer, v.stormTriggerPctDenom,
+          v.recoverySuccessRateNumer, v.recoverySuccessRateDenom,
+          v.observationMinutes, v.expectFillPctNumer, v.expectFillPctDenom,
           v.expectStormMode, v.expectAdmit, v.expectRollback with
     | some globalLimit, some currentGlobalBytes, some incomingChunkBytes, some incomingHasCommit,
-      some recoverySuccessRate, some observationMinutes, some expectFillPct,
+      some stormTriggerPctNumer, some stormTriggerPctDenom,
+      some recoverySuccessRateNumer, some recoverySuccessRateDenom,
+      some observationMinutes, some expectFillPctNumer, some expectFillPctDenom,
       some expectStormMode, some expectAdmit, some expectRollback =>
-        let fillPct := ((currentGlobalBytes * 100) + (globalLimit / 2)) / globalLimit
-        let stormMode := fillPct >= 90
+        let fillPctNumer := currentGlobalBytes * 100
+        let fillPctDenom := globalLimit
+        let stormMode := ratioGt fillPctNumer fillPctDenom stormTriggerPctNumer stormTriggerPctDenom
         let admit := currentGlobalBytes + incomingChunkBytes <= globalLimit
           && ((!stormMode) || incomingHasCommit)
-        let rollback := stormMode && incomingHasCommit && recoverySuccessRate < 95 && observationMinutes >= 10
-        fillPct == expectFillPct
+        let rollback := ratioLt recoverySuccessRateNumer recoverySuccessRateDenom 95 1
+          && observationMinutes >= 10
+        ratioEq fillPctNumer fillPctDenom expectFillPctNumer expectFillPctDenom
           && stormMode == expectStormMode
           && admit == expectAdmit
           && rollback == expectRollback
-    | _, _, _, _, _, _, _, _, _, _ => false
+    | _, _, _, _, _, _, _, _, _, _, _, _, _, _ => false
   else if v.op == "compact_pinned_accounting" then
     match v.capBytes, v.currentPinnedPayloadBytes, v.incomingPayloadBytes,
           v.incomingCommitOverheadBytes, v.expectCountedBytes,
