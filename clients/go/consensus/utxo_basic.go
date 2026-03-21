@@ -185,8 +185,11 @@ func applyNonCoinbaseTxBasicWork(
 	var inputLockIDs [][32]byte
 	var inputCovTypes []uint16
 	seenInputs := make(map[Outpoint]struct{}, len(tx.Inputs))
+	resolvedInputs := make([]UtxoEntry, 0, len(tx.Inputs))
+	resolvedWitness := make([][]WitnessItem, 0, len(tx.Inputs))
+	resolvedOutpoints := make([]Outpoint, 0, len(tx.Inputs))
 	var zeroTxid [32]byte
-	for inputIndex, in := range tx.Inputs {
+	for _, in := range tx.Inputs {
 		if len(in.ScriptSig) != 0 {
 			return nil, 0, txerr(TX_ERR_PARSE, "script_sig must be empty under genesis covenant set")
 		}
@@ -236,10 +239,37 @@ func applyNonCoinbaseTxBasicWork(
 			return nil, 0, txerr(TX_ERR_PARSE, "witness underflow")
 		}
 		assigned := tx.Witness[witnessCursor : witnessCursor+slots]
+		resolvedInputs = append(resolvedInputs, entry)
+		resolvedWitness = append(resolvedWitness, append([]WitnessItem(nil), assigned...))
+		resolvedOutpoints = append(resolvedOutpoints, op)
+		witnessCursor += slots
+	}
+	if witnessCursor != len(tx.Witness) {
+		return nil, 0, txerr(TX_ERR_PARSE, "witness_count mismatch")
+	}
+
+	txContextExtIDs, err := collectTxContextExtIDs(resolvedInputs, height, coreExtProfiles)
+	if err != nil {
+		return nil, 0, err
+	}
+	var txContext *TxContextBundle
+	if len(txContextExtIDs) != 0 {
+		outputExtIDCache, err := BuildTxContextOutputExtIDCache(tx)
+		if err != nil {
+			return nil, 0, err
+		}
+		txContext, err = BuildTxContext(tx, resolvedInputs, outputExtIDCache, height, coreExtProfiles)
+		if err != nil {
+			return nil, 0, err
+		}
+	}
+
+	for inputIndex, entry := range resolvedInputs {
+		assigned := resolvedWitness[inputIndex]
 
 		switch entry.CovenantType {
 		case COV_TYPE_P2PK:
-			if slots != 1 {
+			if len(assigned) != 1 {
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_P2PK witness_slots must be 1")
 			}
 			if err := validateP2PKSpendWithCache(entry, assigned[0], tx, uint32(inputIndex), entry.Value, chainID, height, sighashCache); err != nil {
@@ -280,7 +310,7 @@ func applyNonCoinbaseTxBasicWork(
 			vaultOwnerLockID = v.OwnerLockID
 			haveVaultSig = true
 		case COV_TYPE_HTLC:
-			if slots != 2 {
+			if len(assigned) != 2 {
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_HTLC witness_slots must be 2")
 			}
 			if err := ValidateHTLCSpendWithCache(
@@ -298,7 +328,7 @@ func applyNonCoinbaseTxBasicWork(
 				return nil, 0, err
 			}
 		case COV_TYPE_CORE_EXT:
-			if slots != CORE_EXT_WITNESS_SLOTS {
+			if len(assigned) != CORE_EXT_WITNESS_SLOTS {
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
 			}
 			if err := validateCoreExtSpendWithCache(
@@ -313,11 +343,12 @@ func applyNonCoinbaseTxBasicWork(
 				coreExtProfiles,
 				rotation,
 				registry,
+				txContext,
 			); err != nil {
 				return nil, 0, err
 			}
 		case COV_TYPE_CORE_STEALTH:
-			if slots != CORE_STEALTH_WITNESS_SLOTS {
+			if len(assigned) != CORE_STEALTH_WITNESS_SLOTS {
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_STEALTH witness_slots must be 1")
 			}
 			if err := validateCoreStealthSpendWithCache(entry, assigned[0], tx, uint32(inputIndex), entry.Value, chainID, height, sighashCache); err != nil {
@@ -326,8 +357,6 @@ func applyNonCoinbaseTxBasicWork(
 		default:
 			// Other covenants have no additional spend-time checks in the genesis set.
 		}
-
-		witnessCursor += slots
 
 		inputLockID := sha3_256(OutputDescriptorBytes(entry.CovenantType, entry.CovenantData))
 		inputLockIDs = append(inputLockIDs, inputLockID)
@@ -344,10 +373,7 @@ func applyNonCoinbaseTxBasicWork(
 			}
 		}
 
-		delete(work, op)
-	}
-	if witnessCursor != len(tx.Witness) {
-		return nil, 0, txerr(TX_ERR_PARSE, "witness_count mismatch")
+		delete(work, resolvedOutpoints[inputIndex])
 	}
 
 	var sumOut u128

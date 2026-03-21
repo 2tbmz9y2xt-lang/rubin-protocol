@@ -460,7 +460,7 @@ func TestValidateInputSpendQ_DefaultCovType(t *testing.T) {
 		CovenantType: 0xFFFF, // unknown type
 		CovenantData: []byte{0x00},
 	}
-	err := validateInputSpendQ(entry, nil, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil, nil, nil)
+	err := validateInputSpendQ(entry, nil, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("expected nil for unknown covenant type, got: %v", err)
 	}
@@ -473,7 +473,7 @@ func TestValidateCoreExtSpendQ_InactiveProfile(t *testing.T) {
 		CovenantData: makeCoreExtCovenantData(0x01),
 	}
 	w := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87}
-	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, EmptyCoreExtProfileProvider(), nil, nil, nil)
+	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, EmptyCoreExtProfileProvider(), nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("expected nil for inactive CORE_EXT, got: %v", err)
 	}
@@ -485,7 +485,7 @@ func TestValidateCoreExtSpendQ_MissingProviderRejected(t *testing.T) {
 		CovenantData: makeCoreExtCovenantData(0x01),
 	}
 	w := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87}
-	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, nil, nil, nil, nil)
+	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, nil, nil, nil, nil, nil)
 	if err == nil || err.Error() != "TX_ERR_COVENANT_TYPE_INVALID: CORE_EXT profile provider missing" {
 		t.Fatalf("expected missing provider error, got %v", err)
 	}
@@ -728,12 +728,224 @@ func TestValidateTxLocal_CoreExt_ActiveProfile(t *testing.T) {
 	}
 }
 
+func TestValidateTxLocal_CoreExtTxContextEnabledDispatchesNineParam(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0xb0
+
+	txBytes := txWithOneInputOneOutputWithWitness(prev, 0, 90, COV_TYPE_CORE_EXT, coreExtCovenantData(7, nil), []WitnessItem{{
+		SuiteID:   0x42,
+		Pubkey:    []byte{0x01, 0x02, 0x03},
+		Signature: []byte{0x04, 0x01},
+	}})
+	tx, _ := mustParseTxForUtxo(t, txBytes)
+	sighashCache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		t.Fatalf("sighash cache: %v", err)
+	}
+
+	called := false
+	profiles, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{{
+		ExtID:            7,
+		ActivationHeight: 0,
+		TxContextEnabled: true,
+		AllowedSuites:    map[uint8]struct{}{0x42: {}},
+		VerifySigExtTxContextFn: func(
+			extID uint16,
+			suiteID uint8,
+			pubkey []byte,
+			signature []byte,
+			digest32 [32]byte,
+			extPayload []byte,
+			ctxBase *TxContextBase,
+			ctxContinuing *TxContextContinuing,
+			selfInputValue uint64,
+		) (bool, error) {
+			called = true
+			if extID != 7 || suiteID != 0x42 {
+				t.Fatalf("extID/suiteID=%d/%d", extID, suiteID)
+			}
+			if string(extPayload) != string([]byte{0x99}) {
+				t.Fatalf("extPayload=%x", extPayload)
+			}
+			if ctxBase == nil || ctxBase.TotalIn != (Uint128{Lo: 100, Hi: 0}) || ctxBase.TotalOut != (Uint128{Lo: 90, Hi: 0}) || ctxBase.Height != 1 {
+				t.Fatalf("ctxBase=%+v", ctxBase)
+			}
+			if ctxContinuing == nil || ctxContinuing.ContinuingOutputCount != 1 || ctxContinuing.ContinuingOutputs[0].Value != 90 {
+				t.Fatalf("ctxContinuing=%+v", ctxContinuing)
+			}
+			if ctxContinuing.ContinuingOutputs[0].ExtPayload == nil || len(ctxContinuing.ContinuingOutputs[0].ExtPayload) != 0 {
+				t.Fatalf("continuing payload must be non-nil empty slice, got %#v", ctxContinuing.ContinuingOutputs[0].ExtPayload)
+			}
+			if selfInputValue != 100 {
+				t.Fatalf("selfInputValue=%d", selfInputValue)
+			}
+			_ = pubkey
+			_ = signature
+			_ = digest32
+			return true, nil
+		},
+		BindingDescriptor: []byte{0xa1},
+		ExtPayloadSchema:  []byte{0xb2},
+	}})
+	if err != nil {
+		t.Fatalf("NewStaticCoreExtProfileProvider: %v", err)
+	}
+
+	tvc := TxValidationContext{
+		TxIndex: 1,
+		Tx:      tx,
+		ResolvedInputs: []UtxoEntry{{
+			Value:        100,
+			CovenantType: COV_TYPE_CORE_EXT,
+			CovenantData: coreExtCovenantData(7, []byte{0x99}),
+		}},
+		WitnessStart: 0,
+		WitnessEnd:   1,
+		SighashCache: sighashCache,
+		Fee:          10,
+	}
+
+	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, profiles, nil)
+	if !result.Valid {
+		t.Fatalf("txcontext-enabled CORE_EXT valid: %v", result.Err)
+	}
+	if !called {
+		t.Fatalf("expected txcontext-enabled verifier to run")
+	}
+}
+
+func TestValidateTxLocal_CoreExtTxContextMalformedOutputFailsBeforeVerifier(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0xb3
+
+	txBytes := txWithOneInputOneOutputWithWitness(prev, 0, 90, COV_TYPE_CORE_EXT, []byte{0x01}, []WitnessItem{{
+		SuiteID:   0x42,
+		Pubkey:    []byte{0x01, 0x02, 0x03},
+		Signature: []byte{0x04, 0x01},
+	}})
+	tx, _ := mustParseTxForUtxo(t, txBytes)
+	sighashCache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		t.Fatalf("sighash cache: %v", err)
+	}
+
+	called := false
+	profiles, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{{
+		ExtID:            7,
+		ActivationHeight: 0,
+		TxContextEnabled: true,
+		AllowedSuites:    map[uint8]struct{}{0x42: {}},
+		VerifySigExtTxContextFn: func(uint16, uint8, []byte, []byte, [32]byte, []byte, *TxContextBase, *TxContextContinuing, uint64) (bool, error) {
+			called = true
+			return true, nil
+		},
+		BindingDescriptor: []byte{0xa1},
+		ExtPayloadSchema:  []byte{0xb2},
+	}})
+	if err != nil {
+		t.Fatalf("NewStaticCoreExtProfileProvider: %v", err)
+	}
+
+	tvc := TxValidationContext{
+		TxIndex: 1,
+		Tx:      tx,
+		ResolvedInputs: []UtxoEntry{{
+			Value:        100,
+			CovenantType: COV_TYPE_CORE_EXT,
+			CovenantData: coreExtCovenantData(7, []byte{0x99}),
+		}},
+		WitnessStart: 0,
+		WitnessEnd:   1,
+		SighashCache: sighashCache,
+		Fee:          10,
+	}
+
+	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, profiles, nil)
+	if result.Err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, result.Err); got != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("code=%s want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	}
+	if called {
+		t.Fatalf("verifier must not run when txcontext output cache build fails")
+	}
+}
+
+func TestValidateTxLocal_CoreExtTxContextTooManyContinuingOutputsFailsBeforeVerifier(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0xb4
+
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prev, PrevVout: 0, Sequence: 0}},
+		Outputs: []TxOutput{
+			{Value: 30, CovenantType: COV_TYPE_CORE_EXT, CovenantData: coreExtCovenantData(7, nil)},
+			{Value: 30, CovenantType: COV_TYPE_CORE_EXT, CovenantData: coreExtCovenantData(7, []byte{0x01})},
+			{Value: 30, CovenantType: COV_TYPE_CORE_EXT, CovenantData: coreExtCovenantData(7, []byte{0x02})},
+		},
+		Witness: []WitnessItem{{
+			SuiteID:   0x42,
+			Pubkey:    []byte{0x01, 0x02, 0x03},
+			Signature: []byte{0x04, 0x01},
+		}},
+	}
+	sighashCache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		t.Fatalf("sighash cache: %v", err)
+	}
+
+	called := false
+	profiles, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{{
+		ExtID:            7,
+		ActivationHeight: 0,
+		TxContextEnabled: true,
+		AllowedSuites:    map[uint8]struct{}{0x42: {}},
+		VerifySigExtTxContextFn: func(uint16, uint8, []byte, []byte, [32]byte, []byte, *TxContextBase, *TxContextContinuing, uint64) (bool, error) {
+			called = true
+			return true, nil
+		},
+		BindingDescriptor: []byte{0xa1},
+		ExtPayloadSchema:  []byte{0xb2},
+	}})
+	if err != nil {
+		t.Fatalf("NewStaticCoreExtProfileProvider: %v", err)
+	}
+
+	tvc := TxValidationContext{
+		TxIndex: 1,
+		Tx:      tx,
+		ResolvedInputs: []UtxoEntry{{
+			Value:        100,
+			CovenantType: COV_TYPE_CORE_EXT,
+			CovenantData: coreExtCovenantData(7, []byte{0x99}),
+		}},
+		WitnessStart: 0,
+		WitnessEnd:   1,
+		SighashCache: sighashCache,
+		Fee:          10,
+	}
+
+	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, profiles, nil)
+	if result.Err == nil {
+		t.Fatalf("expected error")
+	}
+	if got := mustTxErrCode(t, result.Err); got != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("code=%s want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	}
+	if called {
+		t.Fatalf("verifier must not run when txcontext build rejects excessive continuing outputs")
+	}
+}
+
 func TestValidateInputSpendQ_P2PKWrongSlots(t *testing.T) {
 	entry := UtxoEntry{
 		CovenantType: COV_TYPE_P2PK,
 		CovenantData: p2pkCovenantDataForPubkey(make([]byte, ML_DSA_87_PUBKEY_BYTES)),
 	}
-	err := validateInputSpendQ(entry, []WitnessItem{{}, {}}, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil, nil, nil)
+	err := validateInputSpendQ(entry, []WitnessItem{{}, {}}, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for wrong slot count")
 	}
@@ -748,7 +960,7 @@ func TestValidateInputSpendQ_HTLCWrongSlots(t *testing.T) {
 		CovenantData: covData,
 	}
 	// Only 1 witness item instead of 2.
-	err := validateInputSpendQ(entry, []WitnessItem{{}}, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil, nil, nil)
+	err := validateInputSpendQ(entry, []WitnessItem{{}}, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for HTLC wrong slot count")
 	}
@@ -759,7 +971,7 @@ func TestValidateInputSpendQ_CoreExtWrongSlots(t *testing.T) {
 		CovenantType: COV_TYPE_CORE_EXT,
 		CovenantData: makeCoreExtCovenantData(0x01),
 	}
-	err := validateInputSpendQ(entry, []WitnessItem{{}, {}}, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil, nil, nil)
+	err := validateInputSpendQ(entry, []WitnessItem{{}, {}}, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for CORE_EXT wrong slot count")
 	}
@@ -771,7 +983,7 @@ func TestValidateInputSpendQ_StealthWrongSlots(t *testing.T) {
 		CovenantType: COV_TYPE_CORE_STEALTH,
 		CovenantData: covData,
 	}
-	err := validateInputSpendQ(entry, []WitnessItem{{}, {}}, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil, nil, nil)
+	err := validateInputSpendQ(entry, []WitnessItem{{}, {}}, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for CORE_STEALTH wrong slot count")
 	}
@@ -790,7 +1002,7 @@ func TestValidateCoreExtSpendQ_SentinelForbidden(t *testing.T) {
 		found: true,
 	}
 	w := WitnessItem{SuiteID: SUITE_ID_SENTINEL}
-	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, profiles, nil, nil, nil)
+	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, profiles, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for sentinel under active profile")
 	}
@@ -809,7 +1021,7 @@ func TestValidateCoreExtSpendQ_DisallowedSuite(t *testing.T) {
 		found: true,
 	}
 	w := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87}
-	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, profiles, nil, nil, nil)
+	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, profiles, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for disallowed suite")
 	}
@@ -853,7 +1065,7 @@ func TestValidateCoreExtSpendQ_ExternalVerifier(t *testing.T) {
 		Pubkey:    make([]byte, 10),
 		Signature: append(make([]byte, 100), SIGHASH_ALL),
 	}
-	err := validateCoreExtSpendQ(entry, w, tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil, nil, nil)
+	err := validateCoreExtSpendQ(entry, w, tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("external verifier: %v", err)
 	}
@@ -890,7 +1102,7 @@ func TestValidateCoreExtSpendQ_ExternalVerifierRejects(t *testing.T) {
 		Pubkey:    make([]byte, 10),
 		Signature: append(make([]byte, 100), SIGHASH_ALL),
 	}
-	err := validateCoreExtSpendQ(entry, w, tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil, nil, nil)
+	err := validateCoreExtSpendQ(entry, w, tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for rejected external verifier")
 	}
@@ -924,7 +1136,7 @@ func TestValidateCoreExtSpendQ_ExternalVerifierError(t *testing.T) {
 		Pubkey:    make([]byte, 10),
 		Signature: append(make([]byte, 100), SIGHASH_ALL),
 	}
-	err := validateCoreExtSpendQ(entry, w, tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil, nil, nil)
+	err := validateCoreExtSpendQ(entry, w, tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for ext verifier error")
 	}
@@ -947,7 +1159,7 @@ func TestValidateCoreExtSpendQ_MLDSA87_NonCanonical(t *testing.T) {
 		Pubkey:    make([]byte, 10), // wrong size
 		Signature: make([]byte, 10), // wrong size
 	}
-	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, profiles, nil, nil, nil)
+	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, profiles, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for non-canonical ML-DSA lengths")
 	}
@@ -979,7 +1191,7 @@ func TestValidateCoreExtSpendQ_NilQueue_MLDSA(t *testing.T) {
 	sighashCache, _ := NewSighashV1PrehashCache(tx)
 
 	// sigQueue=nil → inline verifySig
-	err := validateCoreExtSpendQ(entry, tx.Witness[0], tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil, nil, nil)
+	err := validateCoreExtSpendQ(entry, tx.Witness[0], tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("nil queue MLDSA: %v", err)
 	}
@@ -994,7 +1206,7 @@ func TestValidateCoreExtSpendQ_ProfileLookupError(t *testing.T) {
 		err: txerr(TX_ERR_COVENANT_TYPE_INVALID, "lookup fail"),
 	}
 	w := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87}
-	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, profiles, nil, nil, nil)
+	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, profiles, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for profile lookup failure")
 	}
@@ -1029,7 +1241,7 @@ func TestValidateCoreExtSpendQ_ExternalVerifierNil(t *testing.T) {
 		Pubkey:    make([]byte, 10),
 		Signature: append(make([]byte, 100), SIGHASH_ALL),
 	}
-	err := validateCoreExtSpendQ(entry, w, tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil, nil, nil)
+	err := validateCoreExtSpendQ(entry, w, tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("expected error for nil external verifier")
 	}

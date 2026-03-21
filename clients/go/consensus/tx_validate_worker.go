@@ -66,6 +66,25 @@ func ValidateTxLocal(
 		sigQueue.WithCache(sigCache)
 	}
 
+	var txContext *TxContextBundle
+	txContextExtIDs, err := collectTxContextExtIDs(tvc.ResolvedInputs, blockHeight, coreExtProfiles)
+	if err != nil {
+		result.Err = err
+		return result
+	}
+	if len(txContextExtIDs) != 0 {
+		outputExtIDCache, err := BuildTxContextOutputExtIDCache(tx)
+		if err != nil {
+			result.Err = err
+			return result
+		}
+		txContext, err = BuildTxContext(tx, tvc.ResolvedInputs, outputExtIDCache, blockHeight, coreExtProfiles)
+		if err != nil {
+			result.Err = err
+			return result
+		}
+	}
+
 	witnessCursor := tvc.WitnessStart
 	for inputIndex, entry := range tvc.ResolvedInputs {
 		slots, err := WitnessSlots(entry.CovenantType, entry.CovenantData)
@@ -82,7 +101,7 @@ func ValidateTxLocal(
 		if err := validateInputSpendQ(
 			entry, assigned, tx, uint32(inputIndex), entry.Value,
 			chainID, blockHeight, blockMTP, tvc.SighashCache,
-			coreExtProfiles, sigQueue, rot, reg,
+			coreExtProfiles, sigQueue, rot, reg, txContext,
 		); err != nil {
 			result.Err = err
 			return result
@@ -120,6 +139,7 @@ func validateInputSpendQ(
 	sigQueue *SigCheckQueue,
 	rotation RotationProvider,
 	registry *SuiteRegistry,
+	txContext *TxContextBundle,
 ) error {
 	switch entry.CovenantType {
 	case COV_TYPE_P2PK:
@@ -170,7 +190,7 @@ func validateInputSpendQ(
 		return validateCoreExtSpendQ(
 			entry, assigned[0], tx, inputIndex, inputValue,
 			chainID, blockHeight, sighashCache, coreExtProfiles, sigQueue,
-			rotation, registry,
+			rotation, registry, txContext,
 		)
 
 	case COV_TYPE_CORE_STEALTH:
@@ -202,6 +222,7 @@ func validateCoreExtSpendQ(
 	sigQueue *SigCheckQueue,
 	rotation RotationProvider,
 	registry *SuiteRegistry,
+	txContext *TxContextBundle,
 ) error {
 	cd, err := ParseCoreExtCovenantData(entry.CovenantData)
 	if err != nil {
@@ -238,6 +259,7 @@ func validateCoreExtSpendQ(
 		sighashCache,
 		rotation,
 		registry,
+		txContext,
 		sigQueue,
 	)
 }

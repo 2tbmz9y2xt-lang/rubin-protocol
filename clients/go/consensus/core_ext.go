@@ -9,6 +9,17 @@ import (
 )
 
 type CoreExtVerifySigExtFunc func(extID uint16, suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte, extPayload []byte) (bool, error)
+type CoreExtVerifySigExtTxContextFunc func(
+	extID uint16,
+	suiteID uint8,
+	pubkey []byte,
+	signature []byte,
+	digest32 [32]byte,
+	extPayload []byte,
+	ctxBase *TxContextBase,
+	ctxContinuing *TxContextContinuing,
+	selfInputValue uint64,
+) (bool, error)
 
 const (
 	CoreExtBindingKindNativeOnly   byte = 0x01
@@ -16,12 +27,13 @@ const (
 )
 
 type CoreExtProfile struct {
-	Active            bool
-	TxContextEnabled  bool
-	AllowedSuites     map[uint8]struct{}
-	VerifySigExtFn    CoreExtVerifySigExtFunc
-	BindingDescriptor []byte
-	ExtPayloadSchema  []byte
+	Active                  bool
+	TxContextEnabled        bool
+	AllowedSuites           map[uint8]struct{}
+	VerifySigExtFn          CoreExtVerifySigExtFunc
+	VerifySigExtTxContextFn CoreExtVerifySigExtTxContextFunc
+	BindingDescriptor       []byte
+	ExtPayloadSchema        []byte
 }
 
 type CoreExtProfileProvider interface {
@@ -31,13 +43,14 @@ type CoreExtProfileProvider interface {
 type emptyCoreExtProfileProvider struct{}
 
 type CoreExtDeploymentProfile struct {
-	ExtID             uint16
-	ActivationHeight  uint64
-	TxContextEnabled  bool
-	AllowedSuites     map[uint8]struct{}
-	VerifySigExtFn    CoreExtVerifySigExtFunc
-	BindingDescriptor []byte
-	ExtPayloadSchema  []byte
+	ExtID                   uint16
+	ActivationHeight        uint64
+	TxContextEnabled        bool
+	AllowedSuites           map[uint8]struct{}
+	VerifySigExtFn          CoreExtVerifySigExtFunc
+	VerifySigExtTxContextFn CoreExtVerifySigExtTxContextFunc
+	BindingDescriptor       []byte
+	ExtPayloadSchema        []byte
 }
 
 type StaticCoreExtProfileProvider struct {
@@ -65,13 +78,14 @@ func NewStaticCoreExtProfileProvider(deployments []CoreExtDeploymentProfile) (*S
 			return nil, fmt.Errorf("core_ext deployment for ext_id=%d must have non-empty allowed suites", item.ExtID)
 		}
 		provider.deployments[item.ExtID] = CoreExtDeploymentProfile{
-			ExtID:             item.ExtID,
-			ActivationHeight:  item.ActivationHeight,
-			TxContextEnabled:  item.TxContextEnabled,
-			AllowedSuites:     cloneAllowedSuites(item.AllowedSuites),
-			VerifySigExtFn:    item.VerifySigExtFn,
-			BindingDescriptor: cloneBytes(item.BindingDescriptor),
-			ExtPayloadSchema:  cloneBytes(item.ExtPayloadSchema),
+			ExtID:                   item.ExtID,
+			ActivationHeight:        item.ActivationHeight,
+			TxContextEnabled:        item.TxContextEnabled,
+			AllowedSuites:           cloneAllowedSuites(item.AllowedSuites),
+			VerifySigExtFn:          item.VerifySigExtFn,
+			VerifySigExtTxContextFn: item.VerifySigExtTxContextFn,
+			BindingDescriptor:       cloneBytes(item.BindingDescriptor),
+			ExtPayloadSchema:        cloneBytes(item.ExtPayloadSchema),
 		}
 	}
 	return provider, nil
@@ -90,12 +104,13 @@ func (p *StaticCoreExtProfileProvider) LookupCoreExtProfile(extID uint16, height
 		return CoreExtProfile{}, false, nil
 	}
 	return CoreExtProfile{
-		Active:            true,
-		TxContextEnabled:  deployment.TxContextEnabled,
-		AllowedSuites:     cloneAllowedSuites(deployment.AllowedSuites),
-		VerifySigExtFn:    deployment.VerifySigExtFn,
-		BindingDescriptor: cloneBytes(deployment.BindingDescriptor),
-		ExtPayloadSchema:  cloneBytes(deployment.ExtPayloadSchema),
+		Active:                  true,
+		TxContextEnabled:        deployment.TxContextEnabled,
+		AllowedSuites:           cloneAllowedSuites(deployment.AllowedSuites),
+		VerifySigExtFn:          deployment.VerifySigExtFn,
+		VerifySigExtTxContextFn: deployment.VerifySigExtTxContextFn,
+		BindingDescriptor:       cloneBytes(deployment.BindingDescriptor),
+		ExtPayloadSchema:        cloneBytes(deployment.ExtPayloadSchema),
 	}, true, nil
 }
 
@@ -177,6 +192,36 @@ func cloneAllowedSuites(allowed map[uint8]struct{}) map[uint8]struct{} {
 	return out
 }
 
+func wrapCoreExtVerifySigExtWithTxContext(fn CoreExtVerifySigExtFunc) CoreExtVerifySigExtTxContextFunc {
+	if fn == nil {
+		return nil
+	}
+	return func(
+		extID uint16,
+		suiteID uint8,
+		pubkey []byte,
+		signature []byte,
+		digest32 [32]byte,
+		extPayload []byte,
+		_ *TxContextBase,
+		_ *TxContextContinuing,
+		_ uint64,
+	) (bool, error) {
+		return fn(extID, suiteID, pubkey, signature, digest32, extPayload)
+	}
+}
+
+func hasCoreExtVerifySigExtBinding(profile CoreExtDeploymentProfile) bool {
+	return profile.VerifySigExtFn != nil || profile.VerifySigExtTxContextFn != nil
+}
+
+func coreExtVerifySigExtTxContextFn(profile CoreExtProfile) CoreExtVerifySigExtTxContextFunc {
+	if profile.VerifySigExtTxContextFn != nil {
+		return profile.VerifySigExtTxContextFn
+	}
+	return wrapCoreExtVerifySigExtWithTxContext(profile.VerifySigExtFn)
+}
+
 func sortedAllowedSuites(allowed map[uint8]struct{}) []uint8 {
 	if len(allowed) == 0 {
 		return nil
@@ -190,7 +235,7 @@ func sortedAllowedSuites(allowed map[uint8]struct{}) []uint8 {
 }
 
 func coreExtBindingKind(profile CoreExtDeploymentProfile) (byte, error) {
-	if profile.VerifySigExtFn == nil {
+	if !hasCoreExtVerifySigExtBinding(profile) {
 		if len(profile.BindingDescriptor) != 0 {
 			return 0, fmt.Errorf("core_ext profile ext_id=%d native-only profile must not carry binding_descriptor", profile.ExtID)
 		}
@@ -291,6 +336,7 @@ func validateCoreExtWitnessAtHeight(
 	sighashCache *SighashV1PrehashCache,
 	rotation RotationProvider,
 	registry *SuiteRegistry,
+	txContext *TxContextBundle,
 	sigQueue *SigCheckQueue,
 ) error {
 	rotation, registry = normalizeCoreExtSuiteContext(rotation, registry)
@@ -340,12 +386,43 @@ func validateCoreExtWitnessAtHeight(
 		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT registered native suite missing from registry")
 	}
 
-	if profile.VerifySigExtFn == nil {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext unsupported")
-	}
 	cryptoSig, digest, err := extractSigDigest()
 	if err != nil {
 		return err
+	}
+	if profile.TxContextEnabled {
+		verifyTxContextFn := coreExtVerifySigExtTxContextFn(profile)
+		if verifyTxContextFn == nil {
+			return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext unsupported")
+		}
+		if txContext == nil || txContext.Base == nil {
+			return txerr(TX_ERR_SIG_INVALID, "CORE_EXT txcontext bundle missing")
+		}
+		ctxContinuing, ok := txContext.Continuing(cd.ExtID)
+		if !ok || ctxContinuing == nil {
+			return txerr(TX_ERR_SIG_INVALID, "CORE_EXT txcontext continuing bundle missing")
+		}
+		ok, err := verifyTxContextFn(
+			cd.ExtID,
+			w.SuiteID,
+			w.Pubkey,
+			cryptoSig,
+			digest,
+			cd.ExtPayload,
+			txContext.Base,
+			ctxContinuing,
+			inputValue,
+		)
+		if err != nil {
+			return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext error")
+		}
+		if !ok {
+			return txerr(TX_ERR_SIG_INVALID, "CORE_EXT signature invalid")
+		}
+		return nil
+	}
+	if profile.VerifySigExtFn == nil {
+		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext unsupported")
 	}
 	ok, err := profile.VerifySigExtFn(cd.ExtID, w.SuiteID, w.Pubkey, cryptoSig, digest, cd.ExtPayload)
 	if err != nil {
@@ -369,6 +446,7 @@ func validateCoreExtSpendWithCache(
 	coreExtProfiles CoreExtProfileProvider,
 	rotation RotationProvider,
 	registry *SuiteRegistry,
+	txContext *TxContextBundle,
 ) error {
 	cd, err := ParseCoreExtCovenantData(entry.CovenantData)
 	if err != nil {
@@ -405,6 +483,7 @@ func validateCoreExtSpendWithCache(
 		sighashCache,
 		rotation,
 		registry,
+		txContext,
 		nil,
 	)
 }

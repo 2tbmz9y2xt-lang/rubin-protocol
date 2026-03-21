@@ -964,6 +964,191 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreExtBranches(t *testing.T) {
 		}
 	})
 
+	t.Run("txcontext_enabled_dispatches_nine_param", func(t *testing.T) {
+		prevTxid := hashWithPrefix(0xB2)
+		txBytes := txWithOneInputOneOutputWithWitness(prevTxid, 0, 90, COV_TYPE_CORE_EXT, coreExtCovenantData(7, nil), []WitnessItem{{
+			SuiteID:   0x42,
+			Pubkey:    []byte{0x01, 0x02, 0x03},
+			Signature: []byte{0x04, 0x01},
+		}})
+		tx, txid := mustParseTxForUtxo(t, txBytes)
+
+		called := false
+		profiles, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{{
+			ExtID:            7,
+			ActivationHeight: 0,
+			TxContextEnabled: true,
+			AllowedSuites:    map[uint8]struct{}{0x42: {}},
+			VerifySigExtTxContextFn: func(
+				extID uint16,
+				suiteID uint8,
+				pubkey []byte,
+				signature []byte,
+				digest32 [32]byte,
+				extPayload []byte,
+				ctxBase *TxContextBase,
+				ctxContinuing *TxContextContinuing,
+				selfInputValue uint64,
+			) (bool, error) {
+				called = true
+				if extID != 7 || suiteID != 0x42 {
+					t.Fatalf("extID/suiteID=%d/%d", extID, suiteID)
+				}
+				if string(extPayload) != string([]byte{0x99}) {
+					t.Fatalf("extPayload=%x", extPayload)
+				}
+				if ctxBase == nil || ctxBase.TotalIn != (Uint128{Lo: 100, Hi: 0}) || ctxBase.TotalOut != (Uint128{Lo: 90, Hi: 0}) || ctxBase.Height != 1 {
+					t.Fatalf("ctxBase=%+v", ctxBase)
+				}
+				if ctxContinuing == nil || ctxContinuing.ContinuingOutputCount != 1 || ctxContinuing.ContinuingOutputs[0].Value != 90 {
+					t.Fatalf("ctxContinuing=%+v", ctxContinuing)
+				}
+				if ctxContinuing.ContinuingOutputs[0].ExtPayload == nil || len(ctxContinuing.ContinuingOutputs[0].ExtPayload) != 0 {
+					t.Fatalf("continuing payload must be non-nil empty slice, got %#v", ctxContinuing.ContinuingOutputs[0].ExtPayload)
+				}
+				if selfInputValue != 100 {
+					t.Fatalf("selfInputValue=%d", selfInputValue)
+				}
+				_ = pubkey
+				_ = signature
+				_ = digest32
+				return true, nil
+			},
+			BindingDescriptor: []byte{0xa1},
+			ExtPayloadSchema:  []byte{0xb2},
+		}})
+		if err != nil {
+			t.Fatalf("NewStaticCoreExtProfileProvider: %v", err)
+		}
+
+		utxos := map[Outpoint]UtxoEntry{
+			{Txid: prevTxid, Vout: 0}: {
+				Value:        100,
+				CovenantType: COV_TYPE_CORE_EXT,
+				CovenantData: coreExtCovenantData(7, []byte{0x99}),
+			},
+		}
+
+		q := NewSigCheckQueue(1)
+		_, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxos, 1, 0, [32]byte{}, profiles, q, nil, nil)
+		if err != nil {
+			t.Fatalf("txcontext-enabled CORE_EXT: %v", err)
+		}
+		if err := q.Flush(); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		if !called {
+			t.Fatalf("expected txcontext-enabled verifier to run")
+		}
+		if fee != 10 {
+			t.Errorf("expected fee=10, got %d", fee)
+		}
+	})
+
+	t.Run("txcontext_malformed_output_fails_before_verifier", func(t *testing.T) {
+		prevTxid := hashWithPrefix(0xB3)
+		txBytes := txWithOneInputOneOutputWithWitness(prevTxid, 0, 90, COV_TYPE_CORE_EXT, []byte{0x01}, []WitnessItem{{
+			SuiteID:   0x42,
+			Pubkey:    []byte{0x01, 0x02, 0x03},
+			Signature: []byte{0x04, 0x01},
+		}})
+		tx, _ := mustParseTxForUtxo(t, txBytes)
+
+		called := false
+		profiles, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{{
+			ExtID:            7,
+			ActivationHeight: 0,
+			TxContextEnabled: true,
+			AllowedSuites:    map[uint8]struct{}{0x42: {}},
+			VerifySigExtTxContextFn: func(uint16, uint8, []byte, []byte, [32]byte, []byte, *TxContextBase, *TxContextContinuing, uint64) (bool, error) {
+				called = true
+				return true, nil
+			},
+			BindingDescriptor: []byte{0xa1},
+			ExtPayloadSchema:  []byte{0xb2},
+		}})
+		if err != nil {
+			t.Fatalf("NewStaticCoreExtProfileProvider: %v", err)
+		}
+
+		utxos := map[Outpoint]UtxoEntry{
+			{Txid: prevTxid, Vout: 0}: {
+				Value:        100,
+				CovenantType: COV_TYPE_CORE_EXT,
+				CovenantData: coreExtCovenantData(7, []byte{0x99}),
+			},
+		}
+
+		q := NewSigCheckQueue(1)
+		_, _, err = applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, profiles, q, nil, nil)
+		if err == nil {
+			t.Fatal("expected malformed output error")
+		}
+		if !isTxErrCode(err, TX_ERR_COVENANT_TYPE_INVALID) {
+			t.Fatalf("expected TX_ERR_COVENANT_TYPE_INVALID, got: %v", err)
+		}
+		if called {
+			t.Fatalf("verifier must not run when txcontext output cache build fails")
+		}
+	})
+
+	t.Run("txcontext_too_many_continuing_outputs_fails_before_verifier", func(t *testing.T) {
+		prevTxid := hashWithPrefix(0xB4)
+		tx := &Tx{
+			Version: 1,
+			TxKind:  0x00,
+			TxNonce: 1,
+			Inputs:  []TxInput{{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0}},
+			Outputs: []TxOutput{
+				{Value: 30, CovenantType: COV_TYPE_CORE_EXT, CovenantData: coreExtCovenantData(7, nil)},
+				{Value: 30, CovenantType: COV_TYPE_CORE_EXT, CovenantData: coreExtCovenantData(7, []byte{0x01})},
+				{Value: 30, CovenantType: COV_TYPE_CORE_EXT, CovenantData: coreExtCovenantData(7, []byte{0x02})},
+			},
+			Witness: []WitnessItem{{
+				SuiteID:   0x42,
+				Pubkey:    []byte{0x01, 0x02, 0x03},
+				Signature: []byte{0x04, 0x01},
+			}},
+		}
+
+		called := false
+		profiles, err := NewStaticCoreExtProfileProvider([]CoreExtDeploymentProfile{{
+			ExtID:            7,
+			ActivationHeight: 0,
+			TxContextEnabled: true,
+			AllowedSuites:    map[uint8]struct{}{0x42: {}},
+			VerifySigExtTxContextFn: func(uint16, uint8, []byte, []byte, [32]byte, []byte, *TxContextBase, *TxContextContinuing, uint64) (bool, error) {
+				called = true
+				return true, nil
+			},
+			BindingDescriptor: []byte{0xa1},
+			ExtPayloadSchema:  []byte{0xb2},
+		}})
+		if err != nil {
+			t.Fatalf("NewStaticCoreExtProfileProvider: %v", err)
+		}
+
+		utxos := map[Outpoint]UtxoEntry{
+			{Txid: prevTxid, Vout: 0}: {
+				Value:        100,
+				CovenantType: COV_TYPE_CORE_EXT,
+				CovenantData: coreExtCovenantData(7, []byte{0x99}),
+			},
+		}
+
+		q := NewSigCheckQueue(1)
+		_, _, err = applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, profiles, q, nil, nil)
+		if err == nil {
+			t.Fatal("expected excessive continuing outputs error")
+		}
+		if !isTxErrCode(err, TX_ERR_COVENANT_TYPE_INVALID) {
+			t.Fatalf("expected TX_ERR_COVENANT_TYPE_INVALID, got: %v", err)
+		}
+		if called {
+			t.Fatalf("verifier must not run when txcontext build rejects excessive continuing outputs")
+		}
+	})
+
 	t.Run("active_profile_suite_disallowed", func(t *testing.T) {
 		kp := mustMLDSA87Keypair(t)
 		outCovData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())

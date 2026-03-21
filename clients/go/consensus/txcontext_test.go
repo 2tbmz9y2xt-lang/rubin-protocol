@@ -17,6 +17,22 @@ func makeCoreExtCovenantDataWithPayload(extID uint16, payload []byte) []byte {
 	return out
 }
 
+func mustBuildTxContextOutputExtIDCache(t *testing.T, tx *Tx) map[uint16][]ExtIDCacheEntry {
+	t.Helper()
+	cache, err := BuildTxContextOutputExtIDCache(tx)
+	if err != nil {
+		t.Fatalf("BuildTxContextOutputExtIDCache: %v", err)
+	}
+	return cache
+}
+
+func TestBuildTxContextOutputExtIDCache_NilTxFailsClosed(t *testing.T) {
+	_, err := BuildTxContextOutputExtIDCache(nil)
+	if err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
+		t.Fatalf("expected TX_ERR_PARSE for nil tx, got %v", err)
+	}
+}
+
 func TestBuildTxContext_NoTxContextEnabledInputsReturnsNil(t *testing.T) {
 	tx := &Tx{
 		Version: 1,
@@ -40,7 +56,7 @@ func TestBuildTxContext_NoTxContextEnabledInputsReturnsNil(t *testing.T) {
 		found: true,
 	}
 
-	bundle, err := BuildTxContext(tx, resolved, 101, profiles)
+	bundle, err := BuildTxContext(tx, resolved, mustBuildTxContextOutputExtIDCache(t, tx), 101, profiles)
 	if err != nil {
 		t.Fatalf("BuildTxContext: %v", err)
 	}
@@ -89,7 +105,7 @@ func TestBuildTxContext_InputValidationErrors(t *testing.T) {
 		found:   true,
 	}
 
-	if _, err := BuildTxContext(nil, nil, 1, profiles); err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
+	if _, err := BuildTxContext(nil, nil, nil, 1, profiles); err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
 		t.Fatalf("expected TX_ERR_PARSE for nil tx, got %v", err)
 	}
 
@@ -99,7 +115,7 @@ func TestBuildTxContext_InputValidationErrors(t *testing.T) {
 		TxNonce: 1,
 		Inputs:  []TxInput{{PrevVout: 0}},
 	}
-	if _, err := BuildTxContext(tx, nil, 1, profiles); err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
+	if _, err := BuildTxContext(tx, nil, mustBuildTxContextOutputExtIDCache(t, tx), 1, profiles); err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
 		t.Fatalf("expected TX_ERR_PARSE for input mismatch, got %v", err)
 	}
 }
@@ -120,7 +136,7 @@ func TestBuildTxContext_NilProfileProviderFailsClosed(t *testing.T) {
 		{Value: 100, CovenantType: COV_TYPE_CORE_EXT, CovenantData: makeCoreExtCovenantDataWithPayload(9, []byte{0x01})},
 	}
 
-	_, err := BuildTxContext(tx, resolved, 101, nil)
+	_, err := BuildTxContext(tx, resolved, mustBuildTxContextOutputExtIDCache(t, tx), 101, nil)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -129,6 +145,31 @@ func TestBuildTxContext_NilProfileProviderFailsClosed(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "profile provider missing") {
 		t.Fatalf("expected provider-missing detail, got %v", err)
+	}
+}
+
+func TestBuildTxContext_MissingOutputCacheFailsWhenTxContextEnabled(t *testing.T) {
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevVout: 0}},
+		Outputs: []TxOutput{
+			{Value: 33, CovenantType: COV_TYPE_CORE_EXT, CovenantData: makeCoreExtCovenantDataWithPayload(7, nil)},
+		},
+	}
+	resolved := []UtxoEntry{
+		{Value: 50, CovenantType: COV_TYPE_CORE_EXT, CovenantData: makeCoreExtCovenantDataWithPayload(7, []byte{0xaa})},
+	}
+	profiles := &staticMapCoreExtProfileProvider{
+		profiles: map[uint16]CoreExtProfile{
+			7: {Active: true, TxContextEnabled: true},
+		},
+	}
+
+	_, err := BuildTxContext(tx, resolved, nil, 222, profiles)
+	if err == nil || mustTxErrCode(t, err) != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("expected missing output cache error, got %v", err)
 	}
 }
 
@@ -145,7 +186,7 @@ func TestBuildTxContext_RejectsMalformedInputCovenantData(t *testing.T) {
 		found:   true,
 	}
 
-	_, err := BuildTxContext(tx, resolved, 1, profiles)
+	_, err := BuildTxContext(tx, resolved, mustBuildTxContextOutputExtIDCache(t, tx), 1, profiles)
 	if err == nil || mustTxErrCode(t, err) != TX_ERR_COVENANT_TYPE_INVALID {
 		t.Fatalf("expected malformed input covenant error, got %v", err)
 	}
@@ -162,7 +203,7 @@ func TestBuildTxContext_RejectsProfileLookupFailure(t *testing.T) {
 		{Value: 100, CovenantType: COV_TYPE_CORE_EXT, CovenantData: makeCoreExtCovenantDataWithPayload(9, []byte{0x01})},
 	}
 
-	_, err := BuildTxContext(tx, resolved, 1, errCoreExtProfileProvider{})
+	_, err := BuildTxContext(tx, resolved, mustBuildTxContextOutputExtIDCache(t, tx), 1, errCoreExtProfileProvider{})
 	if err == nil || mustTxErrCode(t, err) != TX_ERR_COVENANT_TYPE_INVALID {
 		t.Fatalf("expected profile lookup failure, got %v", err)
 	}
@@ -202,7 +243,7 @@ func TestBuildTxContext_BuildsBaseAndContinuingOutputsDeterministically(t *testi
 		},
 	}
 
-	bundle, err := BuildTxContext(tx, resolved, 222, profiles)
+	bundle, err := BuildTxContext(tx, resolved, mustBuildTxContextOutputExtIDCache(t, tx), 222, profiles)
 	if err != nil {
 		t.Fatalf("BuildTxContext: %v", err)
 	}
@@ -251,6 +292,44 @@ func TestBuildTxContext_BuildsBaseAndContinuingOutputsDeterministically(t *testi
 	}
 }
 
+func TestBuildTxContext_EmptyExtPayloadPreservesNonNilSlice(t *testing.T) {
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevVout: 0}},
+		Outputs: []TxOutput{
+			{Value: 33, CovenantType: COV_TYPE_CORE_EXT, CovenantData: makeCoreExtCovenantDataWithPayload(7, nil)},
+		},
+	}
+	resolved := []UtxoEntry{
+		{Value: 50, CovenantType: COV_TYPE_CORE_EXT, CovenantData: makeCoreExtCovenantDataWithPayload(7, []byte{0xaa})},
+	}
+	profiles := &staticMapCoreExtProfileProvider{
+		profiles: map[uint16]CoreExtProfile{
+			7: {Active: true, TxContextEnabled: true},
+		},
+	}
+
+	bundle, err := BuildTxContext(tx, resolved, mustBuildTxContextOutputExtIDCache(t, tx), 222, profiles)
+	if err != nil {
+		t.Fatalf("BuildTxContext: %v", err)
+	}
+	cont7, ok := bundle.Continuing(7)
+	if !ok {
+		t.Fatalf("missing ext_id=7 bundle")
+	}
+	if cont7.ContinuingOutputCount != 1 {
+		t.Fatalf("count=%d want 1", cont7.ContinuingOutputCount)
+	}
+	if cont7.ContinuingOutputs[0].ExtPayload == nil {
+		t.Fatalf("ExtPayload must be []byte{} not nil")
+	}
+	if got := len(cont7.ContinuingOutputs[0].ExtPayload); got != 0 {
+		t.Fatalf("payload len=%d want 0", got)
+	}
+}
+
 func TestBuildTxContext_RejectsThirdContinuingOutputForLowestExtID(t *testing.T) {
 	tx := &Tx{
 		Version: 1,
@@ -280,7 +359,7 @@ func TestBuildTxContext_RejectsThirdContinuingOutputForLowestExtID(t *testing.T)
 		},
 	}
 
-	_, err := BuildTxContext(tx, resolved, 99, profiles)
+	_, err := BuildTxContext(tx, resolved, mustBuildTxContextOutputExtIDCache(t, tx), 99, profiles)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -300,18 +379,10 @@ func TestBuildTxContext_RejectsMalformedOutputCovenantData(t *testing.T) {
 		Inputs:  []TxInput{{PrevVout: 0}},
 		Outputs: []TxOutput{{Value: 10, CovenantType: COV_TYPE_CORE_EXT, CovenantData: []byte{0x01}}},
 	}
-	resolved := []UtxoEntry{
-		{Value: 100, CovenantType: COV_TYPE_CORE_EXT, CovenantData: makeCoreExtCovenantDataWithPayload(9, []byte{0xaa})},
-	}
-	profiles := &staticMapCoreExtProfileProvider{
-		profiles: map[uint16]CoreExtProfile{
-			9: {Active: true, TxContextEnabled: true},
-		},
-	}
 
-	_, err := BuildTxContext(tx, resolved, 1, profiles)
+	_, err := BuildTxContextOutputExtIDCache(tx)
 	if err == nil || mustTxErrCode(t, err) != TX_ERR_COVENANT_TYPE_INVALID {
-		t.Fatalf("expected malformed output covenant error, got %v", err)
+		t.Fatalf("expected malformed output cache error, got %v", err)
 	}
 }
 
