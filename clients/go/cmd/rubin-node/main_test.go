@@ -691,6 +691,44 @@ func TestRunPassesGenesisCoreExtProfilesToMempool(t *testing.T) {
 	}
 }
 
+func TestApplySuiteContextToSyncConfig(t *testing.T) {
+	syncCfg := node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), "")
+	registry := consensus.DefaultSuiteRegistry()
+	rotation := consensus.DescriptorRotationProvider{
+		Descriptor: consensus.CryptoRotationDescriptor{
+			Name:         "rotation-test",
+			OldSuiteID:   consensus.SUITE_ID_ML_DSA_87,
+			NewSuiteID:   0x02,
+			CreateHeight: 100,
+			SpendHeight:  120,
+		},
+	}
+
+	applySuiteContextToSyncConfig(&syncCfg, rotation, registry)
+
+	if syncCfg.RotationProvider == nil {
+		t.Fatalf("expected sync config rotation provider to be propagated")
+	}
+	if syncCfg.SuiteRegistry == nil {
+		t.Fatalf("expected sync config suite registry to be propagated")
+	}
+}
+
+func TestApplySuiteContextToSyncConfig_NilConfig(t *testing.T) {
+	registry := consensus.DefaultSuiteRegistry()
+	rotation := consensus.DescriptorRotationProvider{
+		Descriptor: consensus.CryptoRotationDescriptor{
+			Name:         "rotation-test",
+			OldSuiteID:   consensus.SUITE_ID_ML_DSA_87,
+			NewSuiteID:   0x02,
+			CreateHeight: 100,
+			SpendHeight:  120,
+		},
+	}
+
+	applySuiteContextToSyncConfig(nil, rotation, registry)
+}
+
 func TestRunDryRunShowsTipWhenBlockstoreHasTip(t *testing.T) {
 	dir := t.TempDir()
 
