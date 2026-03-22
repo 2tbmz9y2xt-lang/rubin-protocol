@@ -770,6 +770,33 @@ fn tx_weight_at_height_with_registry_known_suite() {
 }
 
 #[test]
+fn tx_weight_at_height_sentinel_has_no_cost() {
+    use crate::suite_registry::{DefaultRotationProvider, SuiteRegistry};
+
+    let mut tx_bytes = Vec::new();
+    tx_bytes.extend_from_slice(&1u32.to_le_bytes()); // version
+    tx_bytes.push(0x00); // tx_kind
+    tx_bytes.extend_from_slice(&0u64.to_le_bytes()); // tx_nonce
+    crate::compactsize::encode_compact_size(0, &mut tx_bytes); // inputs
+    crate::compactsize::encode_compact_size(0, &mut tx_bytes); // outputs
+    tx_bytes.extend_from_slice(&0u32.to_le_bytes()); // locktime
+    crate::compactsize::encode_compact_size(1, &mut tx_bytes); // 1 witness item
+    tx_bytes.push(SUITE_ID_SENTINEL);
+    crate::compactsize::encode_compact_size(0, &mut tx_bytes); // pubkey len
+    crate::compactsize::encode_compact_size(0, &mut tx_bytes); // sig len
+    crate::compactsize::encode_compact_size(0, &mut tx_bytes); // da_payload
+
+    let (tx, _, _, _) = parse_tx(&tx_bytes).expect("parse");
+    let rp = DefaultRotationProvider;
+    let reg = SuiteRegistry::default_registry();
+    let (w_reg, _, _) =
+        crate::block_basic::tx_weight_and_stats_at_height(&tx, 0, Some(&rp), Some(&reg))
+            .expect("at_height");
+    let (w_legacy, _, _) = crate::block_basic::tx_weight_and_stats_public(&tx).expect("legacy");
+    assert_eq!(w_reg, w_legacy);
+}
+
+#[test]
 fn tx_weight_at_height_unknown_suite_uses_floor() {
     use crate::suite_registry::{DefaultRotationProvider, SuiteRegistry};
 
