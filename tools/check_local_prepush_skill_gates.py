@@ -478,13 +478,18 @@ def build_plan(
         inactive_why="No tooling/workflow files changed in this push.",
     )
 
+    lean_related = any(path.endswith(".lean") for path in changed)
+    formal_profile_related = formal_bridge_related or lean_related
+    consensus_priority_related = any((openssl_related, conformance_runtime_related, crypto_related, core_ext_related, rust_perf_related))
+
     detected_check_type = "diff_only"
     if check_type_override != "auto":
         detected_check_type = check_type_override
+    elif formal_profile_related and not consensus_priority_related:
+        # Pure formal/proof/bridge changes should prefer the formal profile.
+        detected_check_type = "formal_lean"
     elif any((consensus_core_related, openssl_related, conformance_hygiene_related, conformance_runtime_related, crypto_related, core_ext_related, rust_perf_related)):
         detected_check_type = "consensus_critical"
-    elif formal_bridge_related or any(path.endswith(".lean") for path in changed):
-        detected_check_type = "formal_lean"
     elif runtime_source_related:
         detected_check_type = "code_noncritical"
 
