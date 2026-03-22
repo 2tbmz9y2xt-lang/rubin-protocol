@@ -629,6 +629,21 @@ fn verify_sig_rejects_wrong_mldsa_lengths_before_openssl() {
 }
 
 #[test]
+fn verify_sig_with_registry_rejects_wrong_mldsa_lengths_before_openssl() {
+    let digest = [0u8; 32];
+    let registry = crate::suite_registry::SuiteRegistry::default_registry();
+    let ok = crate::verify_sig_openssl::verify_sig_with_registry(
+        SUITE_ID_ML_DSA_87,
+        &vec![0u8; (ML_DSA_87_PUBKEY_BYTES as usize) - 1],
+        &vec![0u8; ML_DSA_87_SIG_BYTES as usize],
+        &digest,
+        Some(&registry),
+    )
+    .expect("verify_sig_with_registry should not return transport error for length mismatch");
+    assert!(!ok);
+}
+
+#[test]
 fn verify_sig_unsupported_suite_rejected_sig_alg_invalid() {
     let digest = [0u8; 32];
     let err = crate::verify_sig_openssl::verify_sig(0x02, &[0x01], &[0x02], &digest).unwrap_err();
