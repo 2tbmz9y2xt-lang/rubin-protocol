@@ -84,15 +84,15 @@ def parse_active_lenses(raw: str) -> list[str]:
     return values
 
 
-def read_optional_text(path: Path) -> str:
+def read_required_text(path: Path, label: str) -> str:
     if not path.exists():
-        return ""
+        raise FileNotFoundError(f"{label} file is missing: {path}")
     return path.read_text(encoding="utf-8")
 
 
 def read_focus_lines(path: Path) -> list[str]:
     if not path.exists():
-        return []
+        raise FileNotFoundError(f"focus file is missing: {path}")
     lines = []
     for line in path.read_text(encoding="utf-8").splitlines():
         value = line.strip()
@@ -157,9 +157,9 @@ def main() -> int:
     prompt = compose_prompt(
         check_type=args.check_type.strip(),
         active_lenses=parse_active_lenses(args.active_lenses),
-        fullscan_text=read_optional_text(Path(args.fullscan_path)),
+        fullscan_text=read_required_text(Path(args.fullscan_path), "fullscan"),
         focus_lines=read_focus_lines(Path(args.focus_path)),
-        bundle_text=Path(args.bundle_path).read_text(encoding="utf-8"),
+        bundle_text=read_required_text(Path(args.bundle_path), "bundle"),
     )
     Path(args.output).write_text(prompt, encoding="utf-8")
     return 0

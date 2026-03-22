@@ -362,6 +362,12 @@ def build_plan(
             ["scripts/dev-env.sh", "--", "bash", "-lc", "cd clients/rust && cargo test -p rubin-consensus"],
         )
 
+    formal_bridge_exact_paths = {
+        "tools/check_formal_refinement_bridge.py",
+        "tools/check_lean_conformance_staleness.py",
+        "rubin-formal/refinement_bridge.json",
+    }
+
     consensus_core_related = any(
         matches_any(
             path,
@@ -374,16 +380,13 @@ def build_plan(
                 "tools/formal",
             ),
             suffixes=(".lean",),
-            exact=(
-                "tools/check_formal_refinement_bridge.py",
-                "tools/check_lean_conformance_staleness.py",
-                "rubin-formal/refinement_bridge.json",
-            ),
+            exact=tuple(formal_bridge_exact_paths),
         )
         for path in changed
     )
     consensus_nonformal_core_related = any(
         not path.endswith(".lean")
+        and path not in formal_bridge_exact_paths
         and matches_any(
             path,
             prefixes=(
@@ -395,11 +398,7 @@ def build_plan(
                 "tools/formal",
             ),
             suffixes=(),
-            exact=(
-                "tools/check_formal_refinement_bridge.py",
-                "tools/check_lean_conformance_staleness.py",
-                "rubin-formal/refinement_bridge.json",
-            ),
+            exact=(),
         )
         for path in changed
     )

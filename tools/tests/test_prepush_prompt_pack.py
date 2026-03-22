@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -65,6 +66,18 @@ class PrepushPromptPackTests(unittest.TestCase):
                 focus_lines=[],
                 bundle_text=" \n",
             )
+
+    def test_read_required_text_fails_closed_when_file_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            missing = Path(td) / "missing.txt"
+            with self.assertRaisesRegex(FileNotFoundError, "fullscan file is missing"):
+                m.read_required_text(missing, "fullscan")
+
+    def test_read_focus_lines_fails_closed_when_file_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            missing = Path(td) / "focus.txt"
+            with self.assertRaisesRegex(FileNotFoundError, "focus file is missing"):
+                m.read_focus_lines(missing)
 
 
 if __name__ == "__main__":
