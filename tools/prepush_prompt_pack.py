@@ -147,7 +147,7 @@ def compose_prompt(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build Prompt Pack v1 for local pre-push model review.")
     parser.add_argument("--check-type", required=True)
-    parser.add_argument("--active-lenses", default="")
+    parser.add_argument("--active-lenses", required=True)
     parser.add_argument("--fullscan-path", required=True)
     parser.add_argument("--focus-path", required=True)
     parser.add_argument("--bundle-path", required=True)
