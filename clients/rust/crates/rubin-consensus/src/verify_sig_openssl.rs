@@ -414,13 +414,14 @@ pub fn verify_sig(
     }
 
     let alg = suite_alg_name(suite_id)?;
-    ensure_openssl_consensus_init()?;
 
     if pubkey.len() != ML_DSA_87_PUBKEY_BYTES as usize
         || signature.len() != ML_DSA_87_SIG_BYTES as usize
     {
         return Ok(false);
     }
+
+    ensure_openssl_consensus_init()?;
 
     openssl_verify_sig_digest_oneshot(alg, pubkey, signature, digest32)
 }
@@ -446,11 +447,11 @@ pub fn verify_sig_with_registry(
         ));
     };
 
-    ensure_openssl_consensus_init()?;
-
     if pubkey.len() as u64 != params.pubkey_len || signature.len() as u64 != params.sig_len {
         return Ok(false);
     }
+
+    ensure_openssl_consensus_init()?;
 
     // Convert the static str to CStr for OpenSSL.
     let alg = match params.openssl_alg {
