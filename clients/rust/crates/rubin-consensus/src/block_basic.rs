@@ -510,6 +510,9 @@ pub fn tx_weight_and_stats_at_height(
     let native_spend = rotation.native_spend_suites(height);
 
     tx_weight_components(tx, |w| {
+        if w.suite_id == SUITE_ID_SENTINEL {
+            return Ok(0);
+        }
         if native_spend.contains(w.suite_id) {
             if let Some(params) = registry.lookup(w.suite_id) {
                 if w.pubkey.len() as u64 == params.pubkey_len
