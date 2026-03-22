@@ -1401,6 +1401,7 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
     use std::thread;
     use std::time::Duration;
 
@@ -1417,6 +1418,8 @@ mod tests {
         BLOCK_HEADER_BYTES,
     };
     use serde::Deserialize;
+
+    static ORPHAN_POOL_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     static NEXT_TEST_ROOT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -2087,6 +2090,7 @@ mod tests {
 
     #[test]
     fn orphan_pool_replaces_local_oldest_when_global_limit_reached() {
+        let _guard = ORPHAN_POOL_TEST_LOCK.lock().expect("lock orphan tests");
         GLOBAL_ORPHAN_TOTAL_BYTES.store(0, Ordering::SeqCst);
         GLOBAL_ORPHAN_BYTE_LIMIT_OVERRIDE.store(1024, Ordering::SeqCst);
 
@@ -2115,6 +2119,7 @@ mod tests {
 
     #[test]
     fn orphan_pool_enforces_global_byte_limit_across_sessions() {
+        let _guard = ORPHAN_POOL_TEST_LOCK.lock().expect("lock orphan tests");
         GLOBAL_ORPHAN_TOTAL_BYTES.store(0, Ordering::SeqCst);
         GLOBAL_ORPHAN_BYTE_LIMIT_OVERRIDE.store(1024, Ordering::SeqCst);
 
