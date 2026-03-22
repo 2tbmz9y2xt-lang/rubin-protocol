@@ -137,7 +137,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Validate fail-closed summary contract for pre-push model output.")
     parser.add_argument("--result-json", required=True)
     parser.add_argument("--expected-check-type", required=True)
-    parser.add_argument("--active-lenses", default="")
+    parser.add_argument("--active-lenses", required=True)
     args = parser.parse_args()
 
     result = json.loads(Path(args.result_json).read_text(encoding="utf-8"))

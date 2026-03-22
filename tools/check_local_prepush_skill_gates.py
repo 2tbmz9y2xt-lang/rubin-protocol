@@ -382,6 +382,27 @@ def build_plan(
         )
         for path in changed
     )
+    consensus_nonformal_core_related = any(
+        not path.endswith(".lean")
+        and matches_any(
+            path,
+            prefixes=(
+                "clients/go/consensus",
+                "clients/rust/crates/rubin-consensus",
+                "clients/go/cmd/rubin-consensus-cli",
+                "clients/rust/crates/rubin-consensus-cli",
+                "conformance",
+                "tools/formal",
+            ),
+            suffixes=(),
+            exact=(
+                "tools/check_formal_refinement_bridge.py",
+                "tools/check_lean_conformance_staleness.py",
+                "rubin-formal/refinement_bridge.json",
+            ),
+        )
+        for path in changed
+    )
     crypto_related = any(
         any(token in path for token in ("verify_sig", "openssl", "mldsa", "sighash", "suite_registry", "rotation_descriptor"))
         for path in changed
@@ -480,7 +501,16 @@ def build_plan(
 
     lean_related = any(path.endswith(".lean") for path in changed)
     formal_profile_related = formal_bridge_related or lean_related
-    consensus_priority_related = any((openssl_related, conformance_runtime_related, crypto_related, core_ext_related, rust_perf_related))
+    consensus_priority_related = any(
+        (
+            consensus_nonformal_core_related,
+            openssl_related,
+            conformance_runtime_related,
+            crypto_related,
+            core_ext_related,
+            rust_perf_related,
+        )
+    )
 
     detected_check_type = "diff_only"
     if check_type_override != "auto":

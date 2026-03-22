@@ -159,6 +159,19 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
         self.assertEqual(profile.name, "consensus_critical")
         self.assertEqual(profile.check_type, "consensus_critical")
 
+    def test_build_plan_auto_keeps_consensus_critical_for_mixed_lean_and_consensus_core(self):
+        changed = {
+            "rubin-formal/RubinFormal/Conformance/CVUtxoBasicVectors.lean",
+            "clients/go/consensus/tx_parse.go",
+        }
+        checks, focuses, _lenses, profile = m.build_plan(changed)
+
+        self.assertIn("lean_conformance_staleness", {name for name, _cmd in checks})
+        self.assertIn("formal_refinement_bridge", {name for name, _cmd in checks})
+        self.assertTrue(any("Formal bridge sync" in focus for focus in focuses))
+        self.assertEqual(profile.name, "consensus_critical")
+        self.assertEqual(profile.check_type, "consensus_critical")
+
     def test_build_plan_rejects_unsupported_check_type(self):
         with self.assertRaisesRegex(ValueError, "unsupported check_type"):
             m.build_plan({"README.md"}, check_type_override="not-a-check")
