@@ -351,6 +351,34 @@ func TestPrecomputeTxContexts_WitnessUnderflow(t *testing.T) {
 	}
 }
 
+func TestPrecomputeTxContexts_WitnessCountMismatch(t *testing.T) {
+	covData := validP2PKCovenantData()
+	prevTxid := sha3_256([]byte("witness-overflow"))
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prevTxid, Vout: 0}: {Value: 500, CovenantType: COV_TYPE_P2PK, CovenantData: covData},
+	}
+
+	// P2PK needs 1 witness slot, but we provide an extra witness item.
+	tx := &Tx{
+		Version: 1, TxKind: 0x00, TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0}},
+		Outputs: []TxOutput{{Value: 400, CovenantType: COV_TYPE_P2PK, CovenantData: covData}},
+		Witness: []WitnessItem{
+			{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)},
+			{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)},
+		},
+	}
+
+	pb := makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx})
+	_, err := PrecomputeTxContexts(pb, utxos, 100)
+	if err == nil {
+		t.Fatal("expected witness_count mismatch error")
+	}
+	if !isTxErrCode(err, TX_ERR_PARSE) {
+		t.Fatalf("expected TX_ERR_PARSE, got: %v", err)
+	}
+}
+
 func TestPrecomputeTxContexts_OutputsExceedInputs(t *testing.T) {
 	covData := validP2PKCovenantData()
 	prevTxid := sha3_256([]byte("value-overflow"))

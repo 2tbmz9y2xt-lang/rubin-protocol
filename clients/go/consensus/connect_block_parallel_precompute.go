@@ -148,6 +148,9 @@ func PrecomputeTxContexts(
 			return nil, txerr(TX_ERR_PARSE, "witness underflow")
 		}
 		witnessCursor = witnessEnd
+		if witnessCursor != len(tx.Witness) {
+			return nil, txerr(TX_ERR_PARSE, "witness_count mismatch")
+		}
 
 		// Compute fee (sumIn - sumOut), matching sequential path value conservation.
 		var sumOut u128
