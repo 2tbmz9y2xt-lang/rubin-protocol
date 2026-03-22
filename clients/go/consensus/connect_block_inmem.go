@@ -169,7 +169,7 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfiles(
 		AlreadyGenerated:   alreadyGeneratedU64,
 		AlreadyGeneratedN1: alreadyGeneratedN1U64,
 		UtxoCount:          uint64(len(state.Utxos)),
-		PostStateDigest:    UtxoSetHash(state.Utxos),
+		PostStateDigest:    maybeUtxoSetHash(state.Utxos),
 	}, nil
 }
 

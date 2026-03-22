@@ -9,6 +9,19 @@ import (
 
 var utxoSetHashDST = []byte("RUBINv1-utxo-set-hash/")
 
+// enablePostStateDigest gates expensive full-UTXO post-state hashing.
+//
+// The digest is only used for diagnostics/parity tooling and is disabled by
+// default in production block-connection paths to avoid per-block O(N) work.
+var enablePostStateDigest = false
+
+func maybeUtxoSetHash(utxos map[Outpoint]UtxoEntry) [32]byte {
+	if !enablePostStateDigest {
+		return [32]byte{}
+	}
+	return UtxoSetHash(utxos)
+}
+
 // UtxoSetHash computes a deterministic SHA3-256 digest over the full UTXO set.
 //
 // This is intended for parity checks (sequential vs parallel pipelines) and MUST

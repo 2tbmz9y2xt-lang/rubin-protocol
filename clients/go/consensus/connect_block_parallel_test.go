@@ -281,6 +281,8 @@ func TestConnectBlockParallelSigVerify_InvalidSigRejects(t *testing.T) {
 // TestConnectBlockParallelSigVerify_CoinbaseOnly exercises a block with only
 // a coinbase transaction (no sigs to verify, queue should be empty).
 func TestConnectBlockParallelSigVerify_CoinbaseOnly(t *testing.T) {
+	enablePostStateDigest = true
+	t.Cleanup(func() { enablePostStateDigest = false })
 	height := uint64(1)
 	prev := hashWithPrefix(0xAA)
 	target := filledHash(0xff)
@@ -312,7 +314,35 @@ func TestConnectBlockParallelSigVerify_CoinbaseOnly(t *testing.T) {
 	}
 }
 
+func TestPostStateDigest_DisabledByDefault(t *testing.T) {
+	enablePostStateDigest = false
+
+	height := uint64(1)
+	prev := hashWithPrefix(0xAC)
+	target := filledHash(0xff)
+	state := &InMemoryChainState{Utxos: make(map[Outpoint]UtxoEntry), AlreadyGenerated: new(big.Int)}
+
+	subsidy := BlockSubsidyBig(height, state.AlreadyGenerated)
+	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, subsidy)
+	cbTxid := testTxID(t, coinbase)
+	root, err := MerkleRootTxids([][32]byte{cbTxid})
+	if err != nil {
+		t.Fatalf("MerkleRootTxids: %v", err)
+	}
+	block := buildBlockBytes(t, prev, root, target, 1, [][]byte{coinbase})
+
+	summary, err := ConnectBlockBasicInMemoryAtHeight(block, &prev, &target, height, []uint64{0}, state, [32]byte{})
+	if err != nil {
+		t.Fatalf("sequential connect: %v", err)
+	}
+	if summary.PostStateDigest != ([32]byte{}) {
+		t.Fatalf("expected zero digest when disabled, got %x", summary.PostStateDigest)
+	}
+}
+
 func TestPostStateDigest_SequentialParallelParity(t *testing.T) {
+	enablePostStateDigest = true
+	t.Cleanup(func() { enablePostStateDigest = false })
 	height := uint64(1)
 	prev := hashWithPrefix(0xAB)
 	target := filledHash(0xff)
