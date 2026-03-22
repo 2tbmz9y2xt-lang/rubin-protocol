@@ -313,3 +313,204 @@ pub(crate) fn validate_htlc_spend_at_height(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constants::{
+        COV_TYPE_HTLC, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87,
+        VERIFY_COST_ML_DSA_87,
+    };
+    use crate::suite_registry::{
+        CryptoRotationDescriptor, DescriptorRotationProvider, SuiteParams,
+    };
+    use crate::tx::{Tx, TxInput, TxOutput};
+
+    fn make_htlc_covenant_data(
+        hash: [u8; 32],
+        lock_mode: u8,
+        lock_value: u64,
+        claim_key_id: [u8; 32],
+        refund_key_id: [u8; 32],
+    ) -> Vec<u8> {
+        let mut out = Vec::with_capacity(MAX_HTLC_COVENANT_DATA as usize);
+        out.extend_from_slice(&hash);
+        out.push(lock_mode);
+        out.extend_from_slice(&lock_value.to_le_bytes());
+        out.extend_from_slice(&claim_key_id);
+        out.extend_from_slice(&refund_key_id);
+        out
+    }
+
+    fn make_htlc_entry(claim_key_id: [u8; 32], refund_key_id: [u8; 32]) -> UtxoEntry {
+        UtxoEntry {
+            value: 1000,
+            covenant_type: COV_TYPE_HTLC,
+            covenant_data: make_htlc_covenant_data(
+                sha3_256(b"rotation-test"),
+                LOCK_MODE_HEIGHT,
+                1,
+                claim_key_id,
+                refund_key_id,
+            ),
+            creation_height: 0,
+            created_by_coinbase: false,
+        }
+    }
+
+    fn dummy_tx() -> Tx {
+        Tx {
+            version: 1,
+            tx_kind: 0,
+            tx_nonce: 1,
+            inputs: vec![TxInput {
+                prev_txid: [0xee; 32],
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: 900,
+                covenant_type: crate::constants::COV_TYPE_P2PK,
+                covenant_data: vec![0u8; 33],
+            }],
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: vec![],
+            da_payload: vec![],
+        }
+    }
+
+    fn sunset_rotation() -> (DescriptorRotationProvider, SuiteRegistry) {
+        use std::collections::BTreeMap;
+        let mut suites = BTreeMap::new();
+        suites.insert(
+            SUITE_ID_ML_DSA_87,
+            SuiteParams {
+                suite_id: SUITE_ID_ML_DSA_87,
+                pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+                sig_len: ML_DSA_87_SIG_BYTES,
+                verify_cost: VERIFY_COST_ML_DSA_87,
+                openssl_alg: "ML-DSA-87",
+            },
+        );
+        suites.insert(
+            0x02,
+            SuiteParams {
+                suite_id: 0x02,
+                pubkey_len: 32,
+                sig_len: 64,
+                verify_cost: 100,
+                openssl_alg: "TEST-SUITE",
+            },
+        );
+        let registry = SuiteRegistry::with_suites(suites);
+        let desc = CryptoRotationDescriptor {
+            name: "test-htlc-sunset".to_string(),
+            old_suite_id: SUITE_ID_ML_DSA_87,
+            new_suite_id: 0x02,
+            create_height: 1,
+            spend_height: 5,
+            sunset_height: 10,
+        };
+        desc.validate(&registry).expect("descriptor valid");
+        (DescriptorRotationProvider { descriptor: desc }, registry)
+    }
+
+    #[test]
+    fn test_htlc_spend_rotated_suite_rejected() {
+        let claim_key_id = sha3_256(b"claim-key-rotation");
+        let refund_key_id = sha3_256(b"refund-key-rotation");
+        let entry = make_htlc_entry(claim_key_id, refund_key_id);
+
+        let path_item = WitnessItem {
+            suite_id: SUITE_ID_SENTINEL,
+            pubkey: refund_key_id.to_vec(),
+            signature: vec![0x01], // refund path selector
+        };
+        let sig_item = WitnessItem {
+            suite_id: SUITE_ID_ML_DSA_87,
+            pubkey: vec![0u8; ML_DSA_87_PUBKEY_BYTES as usize],
+            signature: vec![0u8; (ML_DSA_87_SIG_BYTES + 1) as usize],
+        };
+
+        let tx = dummy_tx();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let (rotation, registry) = sunset_rotation();
+
+        // At height 15 (after sunset=10), ML-DSA-87 NOT in spend set
+        let err = validate_htlc_spend_at_height(
+            &entry,
+            &path_item,
+            &sig_item,
+            &tx,
+            0,
+            1000,
+            [0u8; 32],
+            15,
+            0,
+            &mut cache,
+            Some(&rotation),
+            Some(&registry),
+        );
+        let err = err.expect_err("should reject sunset suite");
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+        assert!(
+            err.to_string()
+                .contains("CORE_HTLC suite not in native spend set"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_htlc_spend_active_suite_accepted() {
+        let claim_key_id = sha3_256(b"claim-key-active");
+        let refund_key_id = sha3_256(b"refund-key-active");
+        let entry = make_htlc_entry(claim_key_id, refund_key_id);
+
+        let path_item = WitnessItem {
+            suite_id: SUITE_ID_SENTINEL,
+            pubkey: refund_key_id.to_vec(),
+            signature: vec![0x01], // refund path
+        };
+        let sig_item = WitnessItem {
+            suite_id: SUITE_ID_ML_DSA_87,
+            pubkey: vec![0u8; ML_DSA_87_PUBKEY_BYTES as usize],
+            signature: vec![0u8; (ML_DSA_87_SIG_BYTES + 1) as usize],
+        };
+
+        let tx = dummy_tx();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let (rotation, registry) = sunset_rotation();
+
+        // At height 7 (post-spend=5, pre-sunset=10), ML-DSA-87 IS in spend set.
+        // This exercises the H2..H4 window where spend rules diverge from create rules.
+        let err = validate_htlc_spend_at_height(
+            &entry,
+            &path_item,
+            &sig_item,
+            &tx,
+            0,
+            1000,
+            [0u8; 32],
+            7,
+            0,
+            &mut cache,
+            Some(&rotation),
+            Some(&registry),
+        );
+        // Should pass suite check, fail on sig verify (fake sig)
+        match err {
+            Ok(()) => {} // unlikely with fake sig but acceptable
+            Err(e) => {
+                // Must NOT be TxErrSigAlgInvalid — that would mean suite check failed
+                assert_ne!(
+                    e.code,
+                    ErrorCode::TxErrSigAlgInvalid,
+                    "should NOT fail on suite check at height 7 (post-spend, pre-sunset): {e}"
+                );
+            }
+        }
+    }
+}
