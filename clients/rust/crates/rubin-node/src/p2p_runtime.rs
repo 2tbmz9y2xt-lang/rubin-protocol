@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::{self, Cursor, Read, Write};
 use std::net::TcpStream;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
@@ -20,6 +21,7 @@ const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_BAN_THRESHOLD: i32 = 100;
 const DEFAULT_ORPHAN_LIMIT: usize = 500;
 const DEFAULT_ORPHAN_BYTE_LIMIT: usize = 64 << 20;
+const DEFAULT_GLOBAL_ORPHAN_BYTE_LIMIT: usize = 256 << 20;
 const WIRE_HEADER_SIZE: usize = 24;
 const WIRE_COMMAND_SIZE: usize = 12;
 const FUZZ_MAX_P2P_PAYLOAD_BYTES: u64 = 1 << 20;
@@ -46,6 +48,10 @@ const MAX_HEADERS_BATCH: u64 = 2000;
 const MAX_HEADERS_PAYLOAD_BYTES: u64 =
     MAX_HEADERS_BATCH * (rubin_consensus::BLOCK_HEADER_BYTES as u64);
 const STREAM_READ_CHUNK_BYTES: usize = 32 * 1024;
+
+static GLOBAL_ORPHAN_TOTAL_BYTES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static GLOBAL_ORPHAN_BYTE_LIMIT_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WireMessage {
@@ -109,7 +115,7 @@ struct OrphanBlockMeta {
     size: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 struct OrphanBlockPool {
     limit: usize,
     byte_limit: usize,
@@ -444,7 +450,12 @@ impl PeerSession {
         block_bytes: &[u8],
         sync_engine: &mut SyncEngine,
     ) -> io::Result<()> {
-        self.orphans.add(block_hash, parent_hash, block_bytes);
+        self.orphans.add(
+            block_hash,
+            parent_hash,
+            block_bytes,
+            global_orphan_byte_limit(),
+        );
         if sync_engine
             .has_block(parent_hash)
             .map_err(io::Error::other)?
@@ -467,8 +478,12 @@ impl PeerSession {
                     ready.extend(self.orphans.take_children(child.block_hash));
                 }
                 Err(err) if is_parent_not_found_err(&err) => {
-                    self.orphans
-                        .add(child.block_hash, child.parent_hash, &child.block_bytes);
+                    self.orphans.add(
+                        child.block_hash,
+                        child.parent_hash,
+                        &child.block_bytes,
+                        global_orphan_byte_limit(),
+                    );
                 }
                 Err(err) => {
                     self.peer.last_error = err.clone();
@@ -1219,6 +1234,17 @@ fn pre_handshake_payload_cap(command: &str) -> u64 {
     }
 }
 
+fn global_orphan_byte_limit() -> usize {
+    #[cfg(test)]
+    {
+        let override_limit = GLOBAL_ORPHAN_BYTE_LIMIT_OVERRIDE.load(Ordering::Relaxed);
+        if override_limit > 0 {
+            return override_limit;
+        }
+    }
+    DEFAULT_GLOBAL_ORPHAN_BYTE_LIMIT
+}
+
 impl OrphanBlockPool {
     fn new(limit: usize, byte_limit: usize) -> Self {
         Self {
@@ -1231,12 +1257,40 @@ impl OrphanBlockPool {
         }
     }
 
-    fn add(&mut self, block_hash: [u8; 32], parent_hash: [u8; 32], block_bytes: &[u8]) {
+    fn add(
+        &mut self,
+        block_hash: [u8; 32],
+        parent_hash: [u8; 32],
+        block_bytes: &[u8],
+        global_byte_limit: usize,
+    ) {
         if self.by_hash.contains_key(&block_hash) {
             return;
         }
         if self.byte_limit > 0 && block_bytes.len() > self.byte_limit {
             return;
+        }
+        let block_size = block_bytes.len();
+        loop {
+            let current = GLOBAL_ORPHAN_TOTAL_BYTES.load(Ordering::Acquire);
+            let Some(next) = current.checked_add(block_size) else {
+                return;
+            };
+            if global_byte_limit > 0 && next > global_byte_limit {
+                if !self.evict_oldest() {
+                    return;
+                }
+                continue;
+            }
+            match GLOBAL_ORPHAN_TOTAL_BYTES.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(_) => continue,
+            }
         }
         let entry = OrphanBlockEntry {
             block_hash,
@@ -1274,6 +1328,7 @@ impl OrphanBlockPool {
         for child in &children {
             if let Some(meta) = self.by_hash.remove(&child.block_hash) {
                 self.total_bytes = self.total_bytes.saturating_sub(meta.size);
+                GLOBAL_ORPHAN_TOTAL_BYTES.fetch_sub(meta.size, Ordering::AcqRel);
             }
         }
         self.fifo.retain(|hash| !removed.contains_key(hash));
@@ -1292,6 +1347,7 @@ impl OrphanBlockPool {
                 continue;
             };
             self.total_bytes = self.total_bytes.saturating_sub(meta.size);
+            GLOBAL_ORPHAN_TOTAL_BYTES.fetch_sub(meta.size, Ordering::AcqRel);
             let mut remove_parent = false;
             if let Some(children) = self.pool.get_mut(&meta.parent_hash) {
                 if let Some(index) = children.iter().position(|child| child.block_hash == oldest) {
@@ -1305,6 +1361,12 @@ impl OrphanBlockPool {
             return true;
         }
         false
+    }
+}
+
+impl Drop for OrphanBlockPool {
+    fn drop(&mut self) {
+        GLOBAL_ORPHAN_TOTAL_BYTES.fetch_sub(self.total_bytes, Ordering::AcqRel);
     }
 }
 
@@ -2021,6 +2083,60 @@ mod tests {
 
         let _client = TcpStream::connect(addr).expect("connect");
         server.join().expect("server join");
+    }
+
+    #[test]
+    fn orphan_pool_replaces_local_oldest_when_global_limit_reached() {
+        GLOBAL_ORPHAN_TOTAL_BYTES.store(0, Ordering::SeqCst);
+        GLOBAL_ORPHAN_BYTE_LIMIT_OVERRIDE.store(1024, Ordering::SeqCst);
+
+        let mut pool = OrphanBlockPool::new(16, usize::MAX);
+        let first = vec![7u8; 800];
+        let second = vec![9u8; 800];
+
+        pool.add([1u8; 32], [2u8; 32], &first, global_orphan_byte_limit());
+        pool.add([3u8; 32], [4u8; 32], &second, global_orphan_byte_limit());
+
+        assert_eq!(pool.len(), 1, "global cap should still permit local churn");
+        assert!(
+            pool.by_hash.contains_key(&[3u8; 32]),
+            "new orphan should be retained"
+        );
+        assert!(
+            !pool.by_hash.contains_key(&[1u8; 32]),
+            "old orphan should be evicted to make room"
+        );
+        assert_eq!(GLOBAL_ORPHAN_TOTAL_BYTES.load(Ordering::SeqCst), 800);
+
+        drop(pool);
+        GLOBAL_ORPHAN_BYTE_LIMIT_OVERRIDE.store(0, Ordering::SeqCst);
+        assert_eq!(GLOBAL_ORPHAN_TOTAL_BYTES.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn orphan_pool_enforces_global_byte_limit_across_sessions() {
+        GLOBAL_ORPHAN_TOTAL_BYTES.store(0, Ordering::SeqCst);
+        GLOBAL_ORPHAN_BYTE_LIMIT_OVERRIDE.store(1024, Ordering::SeqCst);
+
+        let mut pool_a = OrphanBlockPool::new(16, usize::MAX);
+        let mut pool_b = OrphanBlockPool::new(16, usize::MAX);
+        let block = vec![7u8; 800];
+
+        pool_a.add([1u8; 32], [2u8; 32], &block, global_orphan_byte_limit());
+        pool_b.add([3u8; 32], [4u8; 32], &block, global_orphan_byte_limit());
+
+        assert_eq!(pool_a.len(), 1, "first session should retain orphan");
+        assert_eq!(
+            pool_b.len(),
+            0,
+            "second session should be capped by global limit"
+        );
+        assert_eq!(GLOBAL_ORPHAN_TOTAL_BYTES.load(Ordering::SeqCst), 800);
+
+        drop(pool_a);
+        drop(pool_b);
+        GLOBAL_ORPHAN_BYTE_LIMIT_OVERRIDE.store(0, Ordering::SeqCst);
+        assert_eq!(GLOBAL_ORPHAN_TOTAL_BYTES.load(Ordering::SeqCst), 0);
     }
 
     #[test]
