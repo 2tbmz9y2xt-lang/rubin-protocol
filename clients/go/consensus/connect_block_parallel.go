@@ -164,7 +164,7 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfilesAndSuiteContext(
 	}
 
 	// Record task count before flushing (Flush clears the queue).
-	sigTaskCount := uint64(sigQueue.Len())
+	sigTaskCount := uint64(sigQueue.Len()) // #nosec G115 -- Len() is non-negative and used only for bookkeeping.
 
 	// Flush the signature queue: verify all collected signatures in parallel.
 	// Returns the first error by submission order (deterministic within the

@@ -239,17 +239,20 @@ func txctxDecodeHex(raw string) ([]byte, error) {
 }
 
 func txctxAppendCompactSize(dst []byte, value int) []byte {
+	if value < 0 {
+		panic("txctx compact size: negative value")
+	}
 	switch {
 	case value < 0xFD:
-		return append(dst, byte(value))
+		return append(dst, byte(value)) // #nosec G115 -- branch guard limits value to a single byte.
 	case value <= 0xFFFF:
-		return append(dst, 0xFD, byte(value), byte(value>>8))
+		return append(dst, 0xFD, byte(value), byte(value>>8)) // #nosec G115 -- branch guard limits value to uint16 width.
 	case value <= 0xFFFF_FFFF:
-		return append(dst, 0xFE, byte(value), byte(value>>8), byte(value>>16), byte(value>>24))
+		return append(dst, 0xFE, byte(value), byte(value>>8), byte(value>>16), byte(value>>24)) // #nosec G115 -- branch guard limits value to uint32 width.
 	default:
 		out := append(dst, 0xFF)
 		for i := 0; i < 8; i++ {
-			out = append(out, byte(uint64(value)>>(8*i)))
+			out = append(out, byte(uint64(value)>>(8*i))) // #nosec G115 -- negative values are rejected above; remaining path encodes uint64.
 		}
 		return out
 	}

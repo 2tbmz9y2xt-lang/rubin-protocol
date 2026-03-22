@@ -45,10 +45,10 @@ func sigCacheKey(suiteID uint8, pubkey, sig []byte, digest [32]byte) [32]byte {
 	buf := make([]byte, 0, 1+4+len(pubkey)+4+len(sig)+32)
 	buf = append(buf, suiteID)
 	var lenBuf [4]byte
-	binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(pubkey)))
+	binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(pubkey))) // #nosec G115 -- suite-specific pubkey sizes are bounded well below uint32.
 	buf = append(buf, lenBuf[:]...)
 	buf = append(buf, pubkey...)
-	binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(sig)))
+	binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(sig))) // #nosec G115 -- suite-specific signature sizes are bounded well below uint32.
 	buf = append(buf, lenBuf[:]...)
 	buf = append(buf, sig...)
 	buf = append(buf, digest[:]...)

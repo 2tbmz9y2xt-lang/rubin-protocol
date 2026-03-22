@@ -42,8 +42,8 @@ func CoreExtOpenSSLDigest32BindingDescriptorBytes(opensslAlg string, pubkeyLen i
 	out := append([]byte(nil), coreExtOpenSSLDigest32BindingDescriptorPrefix...)
 	out = AppendCompactSize(out, uint64(len(opensslAlg)))
 	out = append(out, opensslAlg...)
-	out = AppendCompactSize(out, uint64(pubkeyLen))
-	out = AppendCompactSize(out, uint64(sigLen))
+	out = AppendCompactSize(out, uint64(pubkeyLen)) // #nosec G115 -- validateCoreExtOpenSSLBindingDescriptor enforces exact ML-DSA-87 sizes.
+	out = AppendCompactSize(out, uint64(sigLen))    // #nosec G115 -- validateCoreExtOpenSSLBindingDescriptor enforces exact ML-DSA-87 sizes.
 	return out, nil
 }
 
