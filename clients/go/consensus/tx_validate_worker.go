@@ -110,6 +110,11 @@ func ValidateTxLocal(
 		witnessCursor += slots
 	}
 
+	if witnessCursor != len(tx.Witness) {
+		result.Err = txerr(TX_ERR_PARSE, "witness_count mismatch")
+		return result
+	}
+
 	result.SigCount = sigQueue.Len()
 
 	// Flush deferred signature verifications.

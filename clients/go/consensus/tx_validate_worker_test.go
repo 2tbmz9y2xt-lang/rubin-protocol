@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -149,6 +150,53 @@ func TestValidateTxLocal_WitnessUnderflow(t *testing.T) {
 	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil, nil)
 	if result.Valid {
 		t.Fatalf("expected invalid for witness underflow")
+	}
+}
+
+func TestValidateTxLocal_WitnessCountMismatch(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+
+	var prevTxid [32]byte
+	prevTxid[0] = 0x42
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0}},
+		Outputs: []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: covData}},
+	}
+
+	validWitness := signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, kp)
+	tx.Witness = []WitnessItem{validWitness, validWitness}
+
+	sighashCache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		t.Fatalf("NewSighashV1PrehashCache: %v", err)
+	}
+
+	tvc := TxValidationContext{
+		TxIndex: 1,
+		Tx:      tx,
+		ResolvedInputs: []UtxoEntry{{
+			Value:        100,
+			CovenantType: COV_TYPE_P2PK,
+			CovenantData: covData,
+		}},
+		WitnessStart: 0,
+		WitnessEnd:   1,
+		SighashCache: sighashCache,
+	}
+
+	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil, nil)
+	if result.Valid {
+		t.Fatalf("expected invalid for witness count mismatch")
+	}
+	if !isTxErrCode(result.Err, TX_ERR_PARSE) {
+		t.Fatalf("expected TX_ERR_PARSE, got: %v", result.Err)
+	}
+	if !strings.Contains(result.Err.Error(), "witness_count mismatch") {
+		t.Fatalf("expected witness_count mismatch detail, got: %v", result.Err)
 	}
 }
 
