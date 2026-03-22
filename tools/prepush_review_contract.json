@@ -1,25 +1,10 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "note": "rubin-protocol local pre-push review contract",
-  "default_profile": "fast_patch",
+  "default_profile": "diff_only",
   "fullscan_mode": "skill-backed",
   "profiles": {
-    "fast_patch": {
-      "combine_review_units_when_at_most": 6,
-      "conditional_lenses": [
-        "combined-security-scan",
-        "semgrep-scan",
-        "internal-tools"
-      ],
-      "model": "gpt-5.4-mini",
-      "model_reasoning_effort": "medium",
-      "required_lenses": [
-        "code-review",
-        "diff-scan"
-      ],
-      "stall_seconds": 90
-    },
-    "heavy_artillery": {
+    "consensus_critical": {
       "combine_review_units_when_at_most": 4,
       "conditional_lenses": [
         "gosec-scan",
@@ -38,8 +23,24 @@
       ],
       "stall_seconds": 150
     },
-    "runtime_code": {
+    "formal_lean": {
       "combine_review_units_when_at_most": 4,
+      "conditional_lenses": [
+        "combined-security-scan",
+        "semgrep-scan",
+        "internal-tools"
+      ],
+      "model": "gpt-5.4",
+      "model_reasoning_effort": "xhigh",
+      "required_lenses": [
+        "code-review",
+        "diff-scan",
+        "rubin-coverage"
+      ],
+      "stall_seconds": 150
+    },
+    "code_noncritical": {
+      "combine_review_units_when_at_most": 6,
       "conditional_lenses": [
         "gosec-scan",
         "cargo-audit-scan",
@@ -48,12 +49,25 @@
         "internal-tools"
       ],
       "model": "gpt-5.4-mini",
-      "model_reasoning_effort": "high",
+      "model_reasoning_effort": "xhigh",
       "required_lenses": [
         "code-review",
         "diff-scan",
         "combined-security-scan",
         "semgrep-scan"
+      ],
+      "stall_seconds": 120
+    },
+    "diff_only": {
+      "combine_review_units_when_at_most": 12,
+      "conditional_lenses": [
+        "internal-tools"
+      ],
+      "model": "gpt-5.4-mini",
+      "model_reasoning_effort": "xhigh",
+      "required_lenses": [
+        "code-review",
+        "diff-scan"
       ],
       "stall_seconds": 120
     }
