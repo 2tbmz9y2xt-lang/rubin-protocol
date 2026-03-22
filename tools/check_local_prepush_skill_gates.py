@@ -45,7 +45,7 @@ def load_profile_contract(profile_name: str, path: Path = CONTRACT_PATH) -> Revi
         model="gpt-5.4-mini",
         model_reasoning_effort="xhigh",
         stall_seconds=75,
-        combine_review_units_when_at_most=6,
+        combine_review_units_when_at_most=12,
         required_lenses=("code-review", "diff-scan"),
         conditional_lenses=(),
     )

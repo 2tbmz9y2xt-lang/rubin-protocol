@@ -64,7 +64,7 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
         self.assertIn("PROFILE-CONDITIONAL active review lenses", rendered)
         self.assertIn("code-review", rendered)
         self.assertIn("diff-scan", rendered)
-        self.assertIn("Model route: gpt-5.4-mini (xhigh), combine-if-paths<=6", rendered)
+        self.assertIn("Model route: gpt-5.4-mini (xhigh), combine-if-paths<=12", rendered)
         self.assertIn("STANDBY review lenses", rendered)
         self.assertIn("cargo-audit-scan", rendered)
         self.assertIn("No Rust dependency manifest or lockfile changed", rendered)

@@ -21,7 +21,7 @@
         "semgrep-scan",
         "rubin-coverage"
       ],
-      "stall_seconds": 90
+      "stall_seconds": 150
     },
     "formal_lean": {
       "combine_review_units_when_at_most": 4,
@@ -37,7 +37,7 @@
         "diff-scan",
         "rubin-coverage"
       ],
-      "stall_seconds": 90
+      "stall_seconds": 150
     },
     "code_noncritical": {
       "combine_review_units_when_at_most": 6,
@@ -56,10 +56,10 @@
         "combined-security-scan",
         "semgrep-scan"
       ],
-      "stall_seconds": 75
+      "stall_seconds": 120
     },
     "diff_only": {
-      "combine_review_units_when_at_most": 6,
+      "combine_review_units_when_at_most": 12,
       "conditional_lenses": [
         "internal-tools"
       ],
@@ -69,7 +69,7 @@
         "code-review",
         "diff-scan"
       ],
-      "stall_seconds": 75
+      "stall_seconds": 120
     }
   }
 }
