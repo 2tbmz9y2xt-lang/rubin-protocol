@@ -29,6 +29,14 @@ var newSyncEngineFn = node.NewSyncEngine
 
 var newMempoolFn = node.NewMempoolWithConfig
 
+func applySuiteContextToSyncConfig(cfg *node.SyncConfig, rotation consensus.RotationProvider, registry *consensus.SuiteRegistry) {
+	if cfg == nil {
+		return
+	}
+	cfg.RotationProvider = rotation
+	cfg.SuiteRegistry = registry
+}
+
 type multiStringFlag []string
 
 func (m *multiStringFlag) String() string {
@@ -118,6 +126,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	syncCfg := node.DefaultSyncConfig(nil, chainIDFromGenesis, chainStatePath)
 	syncCfg.Network = cfg.Network
 	syncCfg.CoreExtProfiles = genesisCfg.CoreExtProfiles
+	applySuiteContextToSyncConfig(&syncCfg, rotation, registry)
 	syncCfg.ParallelValidationMode = *pvMode
 	syncCfg.PVShadowMaxSamples = *pvShadowMax
 	syncEngine, err := newSyncEngineFn(
