@@ -33,7 +33,7 @@ func (bs *BlockStore) FindCanonicalHeight(blockHash [32]byte) (uint64, bool, err
 			staleCache = true
 		}
 		for idx := len(bs.index.Canonical); idx > 0; idx-- {
-			currentHeight := uint64(idx - 1)
+			currentHeight := uint64(idx - 1) // #nosec G115 -- idx > 0 in this loop, so idx-1 is non-negative.
 			hash, err := parseHex32(fmt.Sprintf("canonical[%d]", currentHeight), bs.index.Canonical[currentHeight])
 			if err != nil {
 				bs.stateMu.RUnlock()

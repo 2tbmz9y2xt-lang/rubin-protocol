@@ -504,7 +504,7 @@ func canonicalTipHeight(canonical []string) (uint64, bool) {
 	if len(canonical) == 0 {
 		return 0, false
 	}
-	return uint64(len(canonical) - 1), true
+	return uint64(len(canonical) - 1), true // #nosec G115 -- len(canonical) > 0 is checked above.
 }
 
 func writeFileIfAbsent(path string, content []byte) error {

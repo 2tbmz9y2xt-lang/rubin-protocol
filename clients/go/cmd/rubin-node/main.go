@@ -163,7 +163,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if tipOK {
 		_, _ = fmt.Fprintf(stdout, "chainstate: has_tip=%v height=%d utxos=%d already_generated=%d tip=%x\n", chainState.HasTip, chainState.Height, len(chainState.Utxos), chainState.AlreadyGenerated, chainState.TipHash)
-		_, _ = fmt.Fprintf(stdout, "blockstore: tip_height=%d tip_hash=%x\n", tipHeight, tipHash)
+		_, _ = fmt.Fprintf(stdout, "blockstore: tip_height=%d tip_hash=%x\n", tipHeight, tipHash) // #nosec G705 -- plain-text CLI diagnostics to stdout, not HTML/template output.
 	} else {
 		_, _ = fmt.Fprintf(stdout, "chainstate: has_tip=%v height=%d utxos=%d already_generated=%d\n", chainState.HasTip, chainState.Height, len(chainState.Utxos), chainState.AlreadyGenerated)
 		_, _ = fmt.Fprintln(stdout, "blockstore: empty")
@@ -307,7 +307,7 @@ func printFeatureBitsTelemetry(w io.Writer, bs headerStore, height uint64, deplo
 			active := height >= *dj.ActivationHeight
 			consensusActive = fmt.Sprintf(" consensus_active=%t activation_height=%d", active, *dj.ActivationHeight)
 		}
-		_, _ = fmt.Fprintf(
+		_, _ = fmt.Fprintf( // #nosec G705 -- plain-text featurebits telemetry to CLI output, not HTML/template output.
 			w,
 			"featurebits: name=%s bit=%d height=%d boundary=%d state=%s prev_window_signal_count=%d%s\n",
 			d.Name,

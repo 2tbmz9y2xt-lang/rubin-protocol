@@ -72,7 +72,7 @@ func Shard(op Outpoint, numShards int) int {
 	// txid distributions (SHA3-256 hashes).
 	h := uint32(op.Txid[0])<<24 | uint32(op.Txid[1])<<16 |
 		uint32(op.Txid[2])<<8 | uint32(op.Txid[3])
-	return int(h % uint32(numShards))
+	return int(h % uint32(numShards)) // #nosec G115 -- numShards <= 1 is rejected above; shard index remains bounded by numShards.
 }
 
 // ResolveInputs looks up all input outpoints for a transaction and returns

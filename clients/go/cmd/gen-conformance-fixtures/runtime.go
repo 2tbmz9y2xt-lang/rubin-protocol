@@ -791,8 +791,11 @@ func updateHTLCVector(
 	//  - crypto signature (ML-DSA): pubkey + signature
 	var selSig []byte
 	selSig = append(selSig, 0x00) // pathID=claim
+	if len(preimage) > math.MaxUint16 {
+		fatalf("%s: preimage too large", id)
+	}
 	var preLen [2]byte
-	binary.LittleEndian.PutUint16(preLen[:], uint16(len(preimage)))
+	binary.LittleEndian.PutUint16(preLen[:], uint16(len(preimage))) // #nosec G115 -- preimage length is checked against math.MaxUint16 above.
 	selSig = append(selSig, preLen[:]...)
 	selSig = append(selSig, preimage...)
 
@@ -817,10 +820,10 @@ func updateSubsidyBlocks(
 	sub1 := findVector(f, "CV-SUB-01")
 	sub2 := findVector(f, "CV-SUB-02")
 
-	blockHeight := uint64(1)
+	blockHeight := uint32(1)
 	alreadyGenerated := uint64(0)
 	sumFees := uint64(10)
-	subsidy := consensus.BlockSubsidy(blockHeight, alreadyGenerated)
+	subsidy := consensus.BlockSubsidy(uint64(blockHeight), alreadyGenerated)
 
 	spendPub := spendKP.PubkeyBytes()
 	spendInCov := p2pkCovenantData(spendPub)
@@ -865,7 +868,7 @@ func updateSubsidyBlocks(
 				{Value: coinbaseValue, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: cbDestCov},
 				{Value: 0, CovenantType: consensus.COV_TYPE_ANCHOR, CovenantData: bytes.Repeat([]byte{0x00}, 32)}, // placeholder
 			},
-			Locktime:  uint32(blockHeight),
+			Locktime:  blockHeight,
 			Witness:   nil,
 			DaPayload: nil,
 		}
@@ -919,7 +922,7 @@ func updateSubsidyBlocks(
 		block = append(block, coinbaseBytes...)
 		block = append(block, nonCoinbaseBytes...)
 
-		if _, err := consensus.ValidateBlockBasicWithContextAtHeight(block, nil, nil, blockHeight, nil); err != nil {
+		if _, err := consensus.ValidateBlockBasicWithContextAtHeight(block, nil, nil, uint64(blockHeight), nil); err != nil {
 			fatalf("subsidy: generated block fails basic validation: %v", err)
 		}
 

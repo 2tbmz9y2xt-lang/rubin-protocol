@@ -308,7 +308,11 @@ func (s *SyncEngine) isInIBDUnchecked() bool {
 	if tipTimestamp == 0 {
 		return true
 	}
-	nowUnix := uint64(time.Now().Unix())
+	nowUnixSigned := time.Now().Unix()
+	if nowUnixSigned < 0 {
+		return true
+	}
+	nowUnix := uint64(nowUnixSigned) // #nosec G115 -- guarded against negative Unix timestamps above.
 	if nowUnix < tipTimestamp {
 		return true
 	}

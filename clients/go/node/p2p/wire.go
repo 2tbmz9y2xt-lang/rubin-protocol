@@ -260,7 +260,7 @@ func buildEnvelopeHeader(magic [4]byte, command string, payload []byte) ([wireHe
 	if len(payload) > math.MaxUint32 {
 		return header, errors.New("payload length overflow")
 	}
-	binary.LittleEndian.PutUint32(header[16:20], uint32(len(payload)))
+	binary.LittleEndian.PutUint32(header[16:20], uint32(len(payload))) // #nosec G115 -- len(payload) is checked against math.MaxUint32 above.
 	checksum := wireChecksum(payload)
 	copy(header[20:24], checksum[:])
 	return header, nil
@@ -382,7 +382,7 @@ func encodePayload(encode func(io.Writer) error) ([]byte, error) {
 }
 
 func encodeGetBlocksPayloadTo(w io.Writer, req GetBlocksPayload) error {
-	if err := binary.Write(w, binary.BigEndian, uint16(len(req.LocatorHashes))); err != nil {
+	if err := binary.Write(w, binary.BigEndian, uint16(len(req.LocatorHashes))); err != nil { // #nosec G115 -- len(req.LocatorHashes) is checked against math.MaxUint16 in encodeGetBlocksPayload.
 		return err
 	}
 	for _, locator := range req.LocatorHashes {
@@ -458,11 +458,11 @@ func decodeAddrPayload(payload []byte) ([]string, error) {
 	if remaining < 0 || count > uint64(remaining/addrPayloadEntrySize) {
 		return nil, errors.New("addr payload width mismatch")
 	}
-	needed := consumed + int(count)*addrPayloadEntrySize
+	needed := consumed + int(count)*addrPayloadEntrySize // #nosec G115 -- count is bounded by remaining/addrPayloadEntrySize above.
 	if len(payload) != needed {
 		return nil, errors.New("addr payload width mismatch")
 	}
-	out := make([]string, 0, int(count))
+	out := make([]string, 0, int(count)) // #nosec G115 -- count is bounded by remaining/addrPayloadEntrySize above.
 	offset := consumed
 	for i := uint64(0); i < count; i++ {
 		addr, nextOffset, err := decodeAddrPayloadEntry(payload, offset)
