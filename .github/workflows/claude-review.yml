@@ -32,6 +32,7 @@ jobs:
           claude_args: |
             --model claude-opus-4-6
             --max-turns 64
+          display_report: true
           prompt: |
             You are the first-pass consensus/code reviewer for RUBIN.
 
