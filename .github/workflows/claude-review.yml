@@ -27,11 +27,12 @@ jobs:
         id: review
         continue-on-error: true
         uses: anthropics/claude-code-action@6062f3709600659be5e47fcddf2cf76993c235c2 # v1
-        env:
-          ANTHROPIC_MODEL: claude-sonnet-4-6
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: "--max-turns 18"
+          claude_args: |
+            --model claude-opus-4-6
+            --max-turns 18
+            --debug
           prompt: |
             You are the first-pass consensus/code reviewer for RUBIN.
 
