@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::io;
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -36,6 +36,7 @@ pub struct RunningNodeP2PService {
 struct SharedServiceState {
     stop: Arc<AtomicBool>,
     runtime_cfg: PeerRuntimeConfig,
+    active_sessions: Arc<AtomicUsize>,
     peer_manager: Arc<PeerManager>,
     sync_engine: Arc<Mutex<SyncEngine>>,
     bootstrap_peers: Arc<Vec<String>>,
@@ -58,6 +59,7 @@ pub fn start_node_p2p_service(cfg: NodeP2PServiceConfig) -> Result<RunningNodeP2
     let shared = SharedServiceState {
         stop: Arc::clone(&stop),
         runtime_cfg: cfg.runtime_cfg,
+        active_sessions: Arc::new(AtomicUsize::new(0)),
         peer_manager: cfg.peer_manager,
         sync_engine: cfg.sync_engine,
         bootstrap_peers: Arc::new(cfg.bootstrap_peers),
@@ -107,15 +109,23 @@ fn run_accept_loop(listener: TcpListener, shared: SharedServiceState) {
     while !shared.stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
+                let Some(session_slot) = try_acquire_session_slot(&shared) else {
+                    drop(stream);
+                    continue;
+                };
                 let handler_shared = shared.clone();
                 thread::spawn(move || {
+                    let _session_slot = session_slot;
                     let _ = handle_peer(stream, None, handler_shared);
                 });
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(ACCEPT_LOOP_SLEEP);
             }
-            Err(_) => break,
+            Err(_) => {
+                // Socket pressure must not permanently kill the public listener.
+                thread::sleep(ACCEPT_LOOP_SLEEP);
+            }
         }
     }
 }
@@ -146,6 +156,13 @@ fn start_outbound_peer(addr: String, shared: SharedServiceState) {
     guard.insert(addr.clone());
     drop(guard);
     thread::spawn(move || {
+        let Some(session_slot) = try_acquire_session_slot(&shared) else {
+            let Ok(mut guard) = shared.in_flight_dials.lock() else {
+                return;
+            };
+            guard.remove(&addr);
+            return;
+        };
         let result = TcpStream::connect(&addr)
             .map_err(|err| format!("connect {addr}: {err}"))
             .and_then(|stream| handle_peer(stream, Some(addr.clone()), shared.clone()));
@@ -155,11 +172,30 @@ fn start_outbound_peer(addr: String, shared: SharedServiceState) {
         guard.remove(&addr);
         drop(guard);
         let _ = result;
+        let _session_slot = session_slot;
     });
 }
 
 fn is_connected(peer_manager: &PeerManager, addr: &str) -> bool {
     peer_manager.snapshot().iter().any(|peer| peer.addr == addr)
+}
+
+fn try_acquire_session_slot(shared: &SharedServiceState) -> Option<SessionSlotGuard> {
+    loop {
+        let current = shared.active_sessions.load(Ordering::SeqCst);
+        if current >= shared.runtime_cfg.max_peers {
+            return None;
+        }
+        if shared
+            .active_sessions
+            .compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return Some(SessionSlotGuard {
+                active_sessions: Arc::clone(&shared.active_sessions),
+            });
+        }
+    }
 }
 
 fn handle_peer(
@@ -260,6 +296,16 @@ struct PeerGuard {
 impl Drop for PeerGuard {
     fn drop(&mut self) {
         self.peer_manager.remove_peer(&self.addr);
+    }
+}
+
+struct SessionSlotGuard {
+    active_sessions: Arc<AtomicUsize>,
+}
+
+impl Drop for SessionSlotGuard {
+    fn drop(&mut self) {
+        self.active_sessions.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -393,6 +439,55 @@ mod tests {
 
         service.close();
         server.join().expect("server join");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn service_rejects_inbound_peer_above_session_cap() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-service-session-cap");
+        let mut runtime_cfg = default_peer_runtime_config("devnet", 1);
+        runtime_cfg.read_deadline = Duration::from_millis(250);
+        runtime_cfg.write_deadline = Duration::from_millis(250);
+        let peer_manager = Arc::new(PeerManager::new(runtime_cfg.clone()));
+        let mut service = start_node_p2p_service(NodeP2PServiceConfig {
+            bind_addr: "127.0.0.1:0".to_string(),
+            bootstrap_peers: Vec::new(),
+            runtime_cfg: runtime_cfg.clone(),
+            peer_manager: Arc::clone(&peer_manager),
+            sync_engine,
+            chain_id: devnet_genesis_chain_id(),
+            genesis_hash: test_genesis_hash(),
+        })
+        .expect("start service");
+
+        let first_stream = TcpStream::connect(service.addr()).expect("connect first peer");
+        first_stream.set_nodelay(true).expect("first set_nodelay");
+        let local = local_version(0).expect("local version");
+        thread::sleep(Duration::from_millis(50));
+
+        let second_stream = TcpStream::connect(service.addr()).expect("connect second peer");
+        let err = match perform_version_handshake(
+            second_stream,
+            runtime_cfg,
+            local.clone(),
+            local.chain_id,
+            local.genesis_hash,
+        ) {
+            Ok(_) => panic!("second handshake should be rejected once max_peers is reached"),
+            Err(err) => err,
+        };
+        let err_text = err.to_string();
+        assert!(
+            err_text.contains("failed to fill whole buffer")
+                || err_text.contains("Connection reset by peer")
+                || err_text.contains("Broken pipe")
+                || err_text.contains("Connection refused"),
+            "unexpected second handshake error: {err_text}"
+        );
+        assert!(peer_manager.snapshot().len() <= 1, "session cap must hold");
+
+        drop(first_stream);
+        service.close();
         fs::remove_dir_all(dir).expect("cleanup");
     }
 }

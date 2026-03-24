@@ -421,7 +421,7 @@ impl PeerSession {
 
     fn is_behind(&self, sync_engine: &SyncEngine) -> io::Result<bool> {
         let Some((height, _)) = sync_engine.tip().map_err(io::Error::other)? else {
-            return Ok(self.peer.remote_version.best_height > 0);
+            return Ok(true);
         };
         Ok(height < self.peer.remote_version.best_height)
     }
@@ -1940,6 +1940,37 @@ mod tests {
             session
                 .request_more_blocks_if_behind(&engine)
                 .expect("follow-up getblocks");
+        });
+
+        let mut client = TcpStream::connect(addr).expect("connect");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set_read_timeout");
+        let msg = read_message_from(&mut client, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
+            .expect("read getblocks");
+        assert_eq!(msg.command, MESSAGE_GETBLOCKS);
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn request_blocks_if_behind_bootstraps_when_local_tip_missing() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut session = PeerSession::new(stream, default_peer_runtime_config("devnet", 8))
+                .expect("session");
+            session.peer.remote_version.best_height = 0;
+            let engine = SyncEngine::new(
+                ChainState::new(),
+                None,
+                crate::sync::default_sync_config(Some(POW_LIMIT), devnet_genesis_chain_id(), None),
+            )
+            .expect("new sync engine");
+            session
+                .request_blocks_if_behind(&engine)
+                .expect("initial bootstrap getblocks");
         });
 
         let mut client = TcpStream::connect(addr).expect("connect");
