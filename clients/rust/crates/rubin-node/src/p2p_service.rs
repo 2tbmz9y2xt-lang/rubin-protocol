@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::io;
-use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -41,6 +41,7 @@ struct SharedServiceState {
     stop: Arc<AtomicBool>,
     runtime_cfg: PeerRuntimeConfig,
     active_sessions: Arc<AtomicUsize>,
+    worker_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
     peer_manager: Arc<PeerManager>,
     sync_engine: Arc<Mutex<SyncEngine>>,
     bootstrap_peers: Arc<Vec<String>>,
@@ -64,6 +65,7 @@ pub fn start_node_p2p_service(cfg: NodeP2PServiceConfig) -> Result<RunningNodeP2
         stop: Arc::clone(&stop),
         runtime_cfg: cfg.runtime_cfg,
         active_sessions: Arc::new(AtomicUsize::new(0)),
+        worker_handles: Arc::new(Mutex::new(Vec::new())),
         peer_manager: cfg.peer_manager,
         sync_engine: cfg.sync_engine,
         bootstrap_peers: Arc::new(cfg.bootstrap_peers),
@@ -101,6 +103,7 @@ impl RunningNodeP2PService {
         if let Some(join) = self.reconnect_join.take() {
             let _ = join.join();
         }
+        join_all_service_workers(&self.shared);
         wait_for_service_shutdown(&self.shared);
     }
 }
@@ -113,6 +116,7 @@ impl Drop for RunningNodeP2PService {
 
 fn run_accept_loop(listener: TcpListener, shared: SharedServiceState) {
     while !shared.stop.load(Ordering::SeqCst) {
+        reap_finished_service_workers(&shared);
         match listener.accept() {
             Ok((stream, _)) => {
                 let Some(session_slot) = try_acquire_session_slot(&shared) else {
@@ -120,7 +124,7 @@ fn run_accept_loop(listener: TcpListener, shared: SharedServiceState) {
                     continue;
                 };
                 let handler_shared = shared.clone();
-                thread::spawn(move || {
+                spawn_service_worker(&shared, move || {
                     let _session_slot = session_slot;
                     let _ = handle_peer(stream, None, handler_shared);
                 });
@@ -138,6 +142,7 @@ fn run_accept_loop(listener: TcpListener, shared: SharedServiceState) {
 fn run_reconnect_loop(shared: SharedServiceState) {
     let mut waited = Duration::ZERO;
     while !shared.stop.load(Ordering::SeqCst) {
+        reap_finished_service_workers(&shared);
         if waited >= RECONNECT_INTERVAL {
             reconnect_missing_bootstrap_peers(&shared);
             waited = Duration::ZERO;
@@ -154,17 +159,18 @@ fn start_outbound_peer(addr: String, shared: SharedServiceState) {
     }
     guard.insert(addr.clone());
     drop(guard);
-    thread::spawn(move || {
-        let connect_timeout = outbound_connect_timeout(&shared.runtime_cfg);
+    let worker_shared = shared.clone();
+    spawn_service_worker(&shared, move || {
+        let connect_timeout = outbound_connect_timeout(&worker_shared.runtime_cfg);
         let result = connect_with_timeout(&addr, connect_timeout).and_then(|stream| {
-            let Some(session_slot) = try_acquire_session_slot(&shared) else {
+            let Some(session_slot) = try_acquire_session_slot(&worker_shared) else {
                 return Err(format!("session cap reached before handshake: {addr}"));
             };
-            let result = handle_peer(stream, Some(addr.clone()), shared.clone());
+            let result = handle_peer(stream, Some(addr.clone()), worker_shared.clone());
             drop(session_slot);
             result
         });
-        let mut guard = lock_in_flight_dials(&shared);
+        let mut guard = lock_in_flight_dials(&worker_shared);
         guard.remove(&addr);
         drop(guard);
         let _ = result;
@@ -200,6 +206,55 @@ fn lock_in_flight_dials<'a>(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn lock_worker_handles<'a>(
+    shared: &'a SharedServiceState,
+) -> std::sync::MutexGuard<'a, Vec<JoinHandle<()>>> {
+    shared
+        .worker_handles
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn spawn_service_worker(shared: &SharedServiceState, worker: impl FnOnce() + Send + 'static) {
+    let handle = thread::spawn(worker);
+    let mut handles = lock_worker_handles(shared);
+    handles.push(handle);
+}
+
+fn reap_finished_service_workers(shared: &SharedServiceState) {
+    let finished = {
+        let mut handles = lock_worker_handles(shared);
+        let mut finished = Vec::new();
+        let mut idx = 0;
+        while idx < handles.len() {
+            if handles[idx].is_finished() {
+                finished.push(handles.swap_remove(idx));
+            } else {
+                idx += 1;
+            }
+        }
+        finished
+    };
+    for handle in finished {
+        let _ = handle.join();
+    }
+}
+
+fn join_all_service_workers(shared: &SharedServiceState) {
+    loop {
+        let handles = {
+            let mut handles = lock_worker_handles(shared);
+            if handles.is_empty() {
+                return;
+            }
+            std::mem::take(&mut *handles)
+        };
+        for handle in handles {
+            let _ = handle.join();
+        }
+    }
+}
+
 fn try_acquire_session_slot(shared: &SharedServiceState) -> Option<SessionSlotGuard> {
     loop {
         let current = shared.active_sessions.load(Ordering::SeqCst);
@@ -229,21 +284,11 @@ fn outbound_connect_timeout(cfg: &PeerRuntimeConfig) -> Duration {
 }
 
 fn connect_with_timeout(addr: &str, timeout: Duration) -> Result<TcpStream, String> {
-    let addrs: Vec<_> = addr
-        .to_socket_addrs()
-        .map_err(|err| format!("resolve {addr}: {err}"))?
-        .collect();
-    let mut last_err = None;
-    for socket_addr in addrs {
-        match TcpStream::connect_timeout(&socket_addr, timeout) {
-            Ok(stream) => return Ok(stream),
-            Err(err) => last_err = Some(err),
-        }
-    }
-    let err = last_err
-        .map(|err| err.to_string())
-        .unwrap_or_else(|| "unknown connect error".to_string());
-    Err(format!("connect {addr}: {err}"))
+    let socket_addr: SocketAddr = addr
+        .parse()
+        .map_err(|err| format!("bootstrap peer must be literal socket address ({addr}): {err}"))?;
+    TcpStream::connect_timeout(&socket_addr, timeout)
+        .map_err(|err| format!("connect {addr}: {err}"))
 }
 
 fn wait_for_service_shutdown(shared: &SharedServiceState) {
@@ -400,9 +445,10 @@ mod tests {
     use rubin_consensus::{block_hash, constants::POW_LIMIT, BLOCK_HEADER_BYTES};
 
     use super::{
-        accept_error_backoff, connect_with_timeout, lock_in_flight_dials, outbound_connect_timeout,
-        reconnect_missing_bootstrap_peers, should_skip_outbound_dial, start_node_p2p_service,
-        wait_for_service_shutdown, NodeP2PServiceConfig, SharedServiceState,
+        accept_error_backoff, connect_with_timeout, join_all_service_workers, lock_in_flight_dials,
+        outbound_connect_timeout, reconnect_missing_bootstrap_peers, should_skip_outbound_dial,
+        start_node_p2p_service, wait_for_service_shutdown, NodeP2PServiceConfig,
+        SharedServiceState,
     };
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use crate::interop::local_version;
@@ -443,6 +489,7 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             runtime_cfg: runtime_cfg.clone(),
             active_sessions: Arc::new(AtomicUsize::new(0)),
+            worker_handles: Arc::new(Mutex::new(Vec::new())),
             peer_manager: Arc::new(PeerManager::new(runtime_cfg)),
             sync_engine,
             bootstrap_peers: Arc::new(bootstrap_peers),
@@ -647,10 +694,10 @@ mod tests {
     }
 
     #[test]
-    fn connect_with_timeout_reports_resolve_errors() {
+    fn connect_with_timeout_rejects_non_literal_bootstrap_addr() {
         let err = connect_with_timeout("bad host:19111", Duration::from_millis(25)).unwrap_err();
         assert!(
-            err.starts_with("resolve bad host:19111:"),
+            err.starts_with("bootstrap peer must be literal socket address (bad host:19111):"),
             "unexpected error: {err}"
         );
     }
@@ -752,6 +799,37 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_millis(50),
             "drained state should not block shutdown"
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn join_all_service_workers_waits_for_registered_workers() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-worker-join");
+        let shared = test_shared_state(
+            default_peer_runtime_config("devnet", 8),
+            vec![],
+            sync_engine,
+        );
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_worker = Arc::clone(&finished);
+        {
+            let mut handles = super::lock_worker_handles(&shared);
+            handles.push(thread::spawn(move || {
+                thread::sleep(Duration::from_millis(50));
+                finished_worker.store(true, Ordering::SeqCst);
+            }));
+        }
+
+        join_all_service_workers(&shared);
+
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "worker must finish before shutdown returns"
+        );
+        assert!(
+            super::lock_worker_handles(&shared).is_empty(),
+            "worker registry must drain"
         );
         fs::remove_dir_all(dir).expect("cleanup");
     }
