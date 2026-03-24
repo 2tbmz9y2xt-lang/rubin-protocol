@@ -6,10 +6,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
 use rubin_node::{
     block_store_path, chain_state_path, default_peer_runtime_config, default_sync_config,
-    load_chain_state, load_genesis_config, new_devnet_rpc_state, parse_mine_address_arg,
-    start_devnet_rpc_server, BlockStore, Miner, MinerConfig, PeerManager, SyncEngine,
+    devnet_genesis_block_bytes, load_chain_state, load_genesis_config, new_devnet_rpc_state,
+    parse_mine_address_arg, start_devnet_rpc_server, start_node_p2p_service, BlockStore, Miner,
+    MinerConfig, NodeP2PServiceConfig, PeerManager, SyncEngine,
 };
 use serde::Serialize;
 
@@ -18,6 +20,9 @@ struct CliConfig {
     network: String,
     data_dir: PathBuf,
     genesis_file: Option<PathBuf>,
+    bind_addr: String,
+    peers: Vec<String>,
+    max_peers: usize,
     rpc_bind_addr: String,
     mine_address: Option<String>,
     mine_blocks: usize,
@@ -31,6 +36,9 @@ struct EffectiveConfig {
     data_dir: String,
     chain_id_hex: String,
     genesis_file: Option<String>,
+    bind_addr: String,
+    peers: Vec<String>,
+    max_peers: usize,
     rpc_bind_addr: Option<String>,
     mine_address: Option<String>,
     mine_blocks: usize,
@@ -56,6 +64,10 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
             return 2;
         }
     };
+    if let Err(err) = validate_config(&cfg) {
+        let _ = writeln!(stderr, "{err}");
+        return 2;
+    }
 
     let genesis_cfg = match load_genesis_config(cfg.genesis_file.as_deref()) {
         Ok(cfg) => cfg,
@@ -127,6 +139,9 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
             .genesis_file
             .as_ref()
             .map(|path| path.display().to_string()),
+        bind_addr: cfg.bind_addr.clone(),
+        peers: cfg.peers.clone(),
+        max_peers: cfg.max_peers,
         rpc_bind_addr: if cfg.rpc_bind_addr.trim().is_empty() {
             None
         } else {
@@ -190,28 +205,55 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
             return 0;
         }
     }
-    if cfg.rpc_bind_addr.trim().is_empty() {
-        let _ = writeln!(stdout, "rubin-node skeleton ready");
-        return 0;
-    }
-
-    let state = new_devnet_rpc_state(
-        Arc::new(Mutex::new(sync_engine)),
-        Some(block_store),
-        Arc::new(PeerManager::new(default_peer_runtime_config(
-            &cfg.network,
-            8,
-        ))),
-    );
-    let server = match start_devnet_rpc_server(&cfg.rpc_bind_addr, state) {
-        Ok(server) => server,
+    let genesis_bytes = devnet_genesis_block_bytes();
+    let genesis_hash = match block_hash(&genesis_bytes[..BLOCK_HEADER_BYTES]) {
+        Ok(hash) => hash,
         Err(err) => {
-            let _ = writeln!(stderr, "rpc start failed: {err}");
+            let _ = writeln!(stderr, "genesis hash compute failed: {err}");
             return 2;
         }
     };
-    let _ = writeln!(stdout, "rpc: listening={}", server.addr());
-    let _ = writeln!(stdout, "rubin-node skeleton ready");
+    let sync_engine = Arc::new(Mutex::new(sync_engine));
+    let peer_runtime_cfg = default_peer_runtime_config(&cfg.network, cfg.max_peers);
+    let peer_manager = Arc::new(PeerManager::new(peer_runtime_cfg.clone()));
+    let mut p2p_service = match start_node_p2p_service(NodeP2PServiceConfig {
+        bind_addr: cfg.bind_addr.clone(),
+        bootstrap_peers: cfg.peers.clone(),
+        runtime_cfg: peer_runtime_cfg,
+        peer_manager: Arc::clone(&peer_manager),
+        sync_engine: Arc::clone(&sync_engine),
+        chain_id,
+        genesis_hash,
+    }) {
+        Ok(service) => service,
+        Err(err) => {
+            let _ = writeln!(stderr, "p2p start failed: {err}");
+            return 2;
+        }
+    };
+    let _ = writeln!(stdout, "p2p: listening={}", p2p_service.addr());
+
+    let state = new_devnet_rpc_state(
+        Arc::clone(&sync_engine),
+        Some(block_store),
+        Arc::clone(&peer_manager),
+    );
+    let server = if cfg.rpc_bind_addr.trim().is_empty() {
+        None
+    } else {
+        match start_devnet_rpc_server(&cfg.rpc_bind_addr, state) {
+            Ok(server) => Some(server),
+            Err(err) => {
+                let _ = writeln!(stderr, "rpc start failed: {err}");
+                p2p_service.close();
+                return 2;
+            }
+        }
+    };
+    if let Some(server) = server.as_ref() {
+        let _ = writeln!(stdout, "rpc: listening={}", server.addr());
+    }
+    let _ = writeln!(stdout, "rubin-node skeleton running");
     let _ = stdout.flush();
 
     loop {
@@ -224,12 +266,16 @@ fn parse_args(args: &[String]) -> Result<CliConfig, String> {
         network: "devnet".to_string(),
         data_dir: default_data_dir(),
         genesis_file: None,
+        bind_addr: "0.0.0.0:19111".to_string(),
+        peers: Vec::new(),
+        max_peers: 64,
         rpc_bind_addr: String::new(),
         mine_address: None,
         mine_blocks: 0,
         mine_exit: false,
         dry_run: false,
     };
+    let mut peer_tokens = Vec::new();
 
     let mut idx = 0usize;
     while idx < args.len() {
@@ -254,6 +300,36 @@ fn parse_args(args: &[String]) -> Result<CliConfig, String> {
                     .get(idx)
                     .ok_or_else(|| "missing value for --genesis-file".to_string())?;
                 cfg.genesis_file = Some(PathBuf::from(value));
+            }
+            "--bind" => {
+                idx += 1;
+                let value = args
+                    .get(idx)
+                    .ok_or_else(|| "missing value for --bind".to_string())?;
+                cfg.bind_addr = value.clone();
+            }
+            "--peers" => {
+                idx += 1;
+                let value = args
+                    .get(idx)
+                    .ok_or_else(|| "missing value for --peers".to_string())?;
+                peer_tokens.push(value.clone());
+            }
+            "--peer" => {
+                idx += 1;
+                let value = args
+                    .get(idx)
+                    .ok_or_else(|| "missing value for --peer".to_string())?;
+                peer_tokens.push(value.clone());
+            }
+            "--max-peers" => {
+                idx += 1;
+                let value = args
+                    .get(idx)
+                    .ok_or_else(|| "missing value for --max-peers".to_string())?;
+                cfg.max_peers = value
+                    .parse::<usize>()
+                    .map_err(|_| "invalid value for --max-peers".to_string())?;
             }
             "--rpc-bind" => {
                 idx += 1;
@@ -290,6 +366,7 @@ fn parse_args(args: &[String]) -> Result<CliConfig, String> {
         }
         idx += 1;
     }
+    cfg.peers = normalize_peers(&peer_tokens);
 
     Ok(cfg)
 }
@@ -304,8 +381,74 @@ fn default_data_dir() -> PathBuf {
 fn usage(stdout: &mut dyn Write) {
     let _ = writeln!(
         stdout,
-        "usage: rubin-node [--network <name>] [--datadir <path>] [--genesis-file <path>] [--rpc-bind <host:port>] [--mine-address <hex>] [--mine-blocks <n>] [--mine-exit] [--dry-run]"
+        "usage: rubin-node [--network <name>] [--datadir <path>] [--genesis-file <path>] [--bind <host:port>] [--peer <host:port>]... [--peers <csv>] [--max-peers <n>] [--rpc-bind <host:port>] [--mine-address <hex>] [--mine-blocks <n>] [--mine-exit] [--dry-run]"
     );
+}
+
+fn normalize_peers(raw: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for token in raw {
+        for peer in token.split(',') {
+            let peer = peer.trim();
+            if peer.is_empty() || out.iter().any(|current| current == peer) {
+                continue;
+            }
+            out.push(peer.to_string());
+        }
+    }
+    out
+}
+
+fn validate_config(cfg: &CliConfig) -> Result<(), String> {
+    if cfg.network.trim().is_empty() {
+        return Err("network is required".to_string());
+    }
+    if cfg.data_dir.as_os_str().is_empty() {
+        return Err("data_dir is required".to_string());
+    }
+    validate_addr("bind_addr", &cfg.bind_addr)?;
+    if !cfg.rpc_bind_addr.trim().is_empty() {
+        validate_addr("rpc_bind_addr", &cfg.rpc_bind_addr)?;
+    }
+    for peer in &cfg.peers {
+        validate_peer_addr(peer)?;
+    }
+    if cfg.max_peers == 0 {
+        return Err("max_peers must be > 0".to_string());
+    }
+    if cfg.max_peers > 4096 {
+        return Err("max_peers must be <= 4096".to_string());
+    }
+    Ok(())
+}
+
+fn validate_addr(label: &str, addr: &str) -> Result<(), String> {
+    let addr = addr.trim();
+    if addr.is_empty() {
+        return Err(format!("{label} is required"));
+    }
+    let Some((host, port)) = addr.rsplit_once(':') else {
+        return Err(format!("invalid {label}: missing port"));
+    };
+    if host.trim().is_empty() || port.trim().is_empty() {
+        return Err(format!("invalid {label}: missing host or port"));
+    }
+    if host.contains(' ') {
+        return Err(format!("invalid {label}: invalid host"));
+    }
+    Ok(())
+}
+
+fn validate_peer_addr(addr: &str) -> Result<(), String> {
+    validate_addr("peer", addr)?;
+    let (host, _) = addr
+        .trim()
+        .rsplit_once(':')
+        .ok_or_else(|| "invalid peer: missing port".to_string())?;
+    if host.trim().is_empty() {
+        return Err("invalid peer: missing host".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -396,6 +539,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_args_accepts_bind_peer_and_max_peers() {
+        let cfg = parse_args(&[
+            "--bind".to_string(),
+            "127.0.0.1:19111".to_string(),
+            "--peer".to_string(),
+            "127.0.0.1:19112".to_string(),
+            "--peers".to_string(),
+            "127.0.0.1:19113,127.0.0.1:19112".to_string(),
+            "--max-peers".to_string(),
+            "32".to_string(),
+        ])
+        .expect("parse");
+        assert_eq!(cfg.bind_addr, "127.0.0.1:19111");
+        assert_eq!(
+            cfg.peers,
+            vec!["127.0.0.1:19112".to_string(), "127.0.0.1:19113".to_string(),]
+        );
+        assert_eq!(cfg.max_peers, 32);
+    }
+
+    #[test]
     fn parse_args_accepts_mining_flags() {
         let mine_address = "11".repeat(32);
         let cfg = parse_args(&[
@@ -428,6 +592,33 @@ mod tests {
         assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
         let json: Value = serde_json::from_slice(&stdout).expect("json");
         assert_eq!(json["rpc_bind_addr"].as_str(), Some("127.0.0.1:19112"));
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn dry_run_emits_p2p_runtime_fields() {
+        let dir = unique_temp_dir("rubin-node-bin-p2p-runtime");
+        let args = vec![
+            "--dry-run".to_string(),
+            "--datadir".to_string(),
+            dir.display().to_string(),
+            "--bind".to_string(),
+            "127.0.0.1:19111".to_string(),
+            "--peer".to_string(),
+            "127.0.0.1:19112".to_string(),
+            "--max-peers".to_string(),
+            "16".to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run(&args, &mut stdout, &mut stderr);
+        assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
+        let json: Value = serde_json::from_slice(&stdout).expect("json");
+        assert_eq!(json["bind_addr"].as_str(), Some("127.0.0.1:19111"));
+        assert_eq!(json["max_peers"].as_u64(), Some(16));
+        assert_eq!(json["peers"][0].as_str(), Some("127.0.0.1:19112"));
 
         fs::remove_dir_all(&dir).expect("cleanup");
     }

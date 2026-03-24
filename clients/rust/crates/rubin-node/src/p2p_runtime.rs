@@ -349,6 +349,69 @@ impl PeerSession {
         })
     }
 
+    pub fn request_blocks_if_behind(&mut self, sync_engine: &SyncEngine) -> io::Result<()> {
+        if self.is_behind(sync_engine)? {
+            self.request_blocks(sync_engine)?;
+        }
+        Ok(())
+    }
+
+    pub fn handle_live_message(
+        &mut self,
+        msg: WireMessage,
+        sync_engine: &mut SyncEngine,
+    ) -> io::Result<()> {
+        match msg.command.as_str() {
+            MESSAGE_INV => {
+                let requests = self.handle_inv(&msg.payload, sync_engine)?;
+                if !requests.is_empty() {
+                    let payload = encode_inventory_vectors(&requests)?;
+                    self.write_message(&WireMessage {
+                        command: MESSAGE_GETDATA.to_string(),
+                        payload,
+                    })?;
+                }
+            }
+            MESSAGE_GETDATA => {
+                self.respond_to_getdata(&msg.payload, sync_engine)?;
+            }
+            MESSAGE_GETBLOCKS => {
+                let items = self.handle_getblocks(&msg.payload, sync_engine)?;
+                if !items.is_empty() {
+                    self.write_message(&WireMessage {
+                        command: MESSAGE_INV.to_string(),
+                        payload: encode_inventory_vectors(&items)?,
+                    })?;
+                }
+            }
+            MESSAGE_BLOCK => {
+                self.handle_block(&msg.payload, sync_engine)?;
+                self.request_more_blocks_if_behind(sync_engine)?;
+            }
+            MESSAGE_TX | "headers" | "pong" => {}
+            "ping" => {
+                self.write_message(&WireMessage {
+                    command: "pong".to_string(),
+                    payload: Vec::new(),
+                })?;
+            }
+            MESSAGE_GETADDR => {
+                self.write_message(&WireMessage {
+                    command: MESSAGE_ADDR.to_string(),
+                    payload: marshal_empty_addr_payload(),
+                })?;
+            }
+            MESSAGE_ADDR => {
+                let _ = unmarshal_addr_payload(&msg.payload)?;
+            }
+            other => {
+                self.peer.last_error = format!("unknown command: {other}");
+                return Err(unknown_command_err(other));
+            }
+        }
+        Ok(())
+    }
+
     fn request_more_blocks_if_behind(&mut self, sync_engine: &SyncEngine) -> io::Result<()> {
         if self.is_behind(sync_engine)? {
             self.request_blocks(sync_engine)?;
