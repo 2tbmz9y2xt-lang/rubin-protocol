@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::io::{self, Write};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -446,13 +447,9 @@ fn validate_addr(label: &str, addr: &str) -> Result<(), String> {
 
 fn validate_peer_addr(addr: &str) -> Result<(), String> {
     validate_addr("peer", addr)?;
-    let (host, _) = addr
-        .trim()
-        .rsplit_once(':')
-        .ok_or_else(|| "invalid peer: missing port".to_string())?;
-    if host.trim().is_empty() {
-        return Err("invalid peer: missing host".to_string());
-    }
+    addr.trim()
+        .parse::<SocketAddr>()
+        .map_err(|err| format!("invalid peer: expected literal socket address ({err})"))?;
     Ok(())
 }
 
@@ -463,7 +460,7 @@ mod tests {
 
     use serde_json::Value;
 
-    use super::{parse_args, run, runtime_genesis_hash};
+    use super::{parse_args, run, runtime_genesis_hash, validate_config};
     use rubin_node::load_genesis_config;
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
@@ -581,6 +578,20 @@ mod tests {
             vec!["127.0.0.1:19112".to_string(), "127.0.0.1:19113".to_string(),]
         );
         assert_eq!(cfg.max_peers, 32);
+    }
+
+    #[test]
+    fn validate_config_rejects_non_literal_peer_addr() {
+        let cfg = parse_args(&[
+            "--peer".to_string(),
+            "bootstrap.example.org:19111".to_string(),
+        ])
+        .expect("parse args");
+        let err = validate_config(&cfg).unwrap_err();
+        assert!(
+            err.starts_with("invalid peer: expected literal socket address"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

@@ -154,7 +154,7 @@ fn run_reconnect_loop(shared: SharedServiceState) {
 
 fn start_outbound_peer(addr: String, shared: SharedServiceState) {
     let mut guard = lock_in_flight_dials(&shared);
-    if should_skip_outbound_dial(&guard, &addr, shared.runtime_cfg.max_peers) {
+    if should_skip_outbound_dial(&shared, &guard, &addr) {
         return;
     }
     guard.insert(addr.clone());
@@ -193,8 +193,16 @@ fn accept_error_backoff() -> Duration {
     ACCEPT_LOOP_SLEEP
 }
 
-fn should_skip_outbound_dial(in_flight: &HashSet<String>, addr: &str, max_peers: usize) -> bool {
-    in_flight.contains(addr) || in_flight.len() >= max_peers
+fn should_skip_outbound_dial(
+    shared: &SharedServiceState,
+    in_flight: &HashSet<String>,
+    addr: &str,
+) -> bool {
+    let occupied = shared
+        .active_sessions
+        .load(Ordering::SeqCst)
+        .saturating_add(in_flight.len());
+    in_flight.contains(addr) || occupied >= shared.runtime_cfg.max_peers
 }
 
 fn lock_in_flight_dials<'a>(
@@ -629,51 +637,24 @@ mod tests {
     }
 
     #[test]
-    fn service_rejects_inbound_peer_above_session_cap() {
+    fn session_slot_rejects_when_service_is_at_peer_cap() {
         let (sync_engine, dir) = test_engine("rubin-node-p2p-service-session-cap");
         let mut runtime_cfg = default_peer_runtime_config("devnet", 1);
         runtime_cfg.read_deadline = Duration::from_millis(250);
         runtime_cfg.write_deadline = Duration::from_millis(250);
-        let peer_manager = Arc::new(PeerManager::new(runtime_cfg.clone()));
-        let mut service = start_node_p2p_service(NodeP2PServiceConfig {
-            bind_addr: "127.0.0.1:0".to_string(),
-            bootstrap_peers: Vec::new(),
-            runtime_cfg: runtime_cfg.clone(),
-            peer_manager: Arc::clone(&peer_manager),
-            sync_engine,
-            chain_id: devnet_genesis_chain_id(),
-            genesis_hash: test_genesis_hash(),
-        })
-        .expect("start service");
+        let shared = test_shared_state(runtime_cfg, Vec::new(), sync_engine);
 
-        let first_stream = TcpStream::connect(service.addr()).expect("connect first peer");
-        first_stream.set_nodelay(true).expect("first set_nodelay");
-        let local = local_version(0).expect("local version");
-        thread::sleep(Duration::from_millis(50));
-
-        let second_stream = TcpStream::connect(service.addr()).expect("connect second peer");
-        let err = match perform_version_handshake(
-            second_stream,
-            runtime_cfg,
-            local.clone(),
-            local.chain_id,
-            local.genesis_hash,
-        ) {
-            Ok(_) => panic!("second handshake should be rejected once max_peers is reached"),
-            Err(err) => err,
-        };
-        let err_text = err.to_string();
+        let first = super::try_acquire_session_slot(&shared).expect("first session slot");
         assert!(
-            err_text.contains("failed to fill whole buffer")
-                || err_text.contains("Connection reset by peer")
-                || err_text.contains("Broken pipe")
-                || err_text.contains("Connection refused"),
-            "unexpected second handshake error: {err_text}"
+            super::try_acquire_session_slot(&shared).is_none(),
+            "session cap must reject the second slot while the first is active"
         );
-        assert!(peer_manager.snapshot().len() <= 1, "session cap must hold");
 
-        drop(first_stream);
-        service.close();
+        drop(first);
+        assert!(
+            super::try_acquire_session_slot(&shared).is_some(),
+            "slot must become available again after the active session drops"
+        );
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
@@ -704,11 +685,32 @@ mod tests {
 
     #[test]
     fn should_skip_outbound_dial_covers_duplicate_and_budget_caps() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-dial-capacity");
+        let shared = test_shared_state(
+            default_peer_runtime_config("devnet", 2),
+            vec![],
+            sync_engine,
+        );
         let mut in_flight = HashSet::new();
         in_flight.insert("127.0.0.1:19111".to_string());
-        assert!(should_skip_outbound_dial(&in_flight, "127.0.0.1:19111", 8));
-        assert!(should_skip_outbound_dial(&in_flight, "127.0.0.1:19112", 1));
-        assert!(!should_skip_outbound_dial(&in_flight, "127.0.0.1:19112", 8));
+        assert!(should_skip_outbound_dial(
+            &shared,
+            &in_flight,
+            "127.0.0.1:19111"
+        ));
+        shared.active_sessions.store(1, Ordering::SeqCst);
+        assert!(should_skip_outbound_dial(
+            &shared,
+            &in_flight,
+            "127.0.0.1:19112"
+        ));
+        shared.active_sessions.store(0, Ordering::SeqCst);
+        assert!(!should_skip_outbound_dial(
+            &shared,
+            &in_flight,
+            "127.0.0.1:19112"
+        ));
+        fs::remove_dir_all(dir).expect("cleanup");
     }
 
     #[test]
@@ -758,34 +760,28 @@ mod tests {
     }
 
     #[test]
-    fn outbound_dial_drops_inflight_marker_when_session_cap_is_already_full() {
+    fn outbound_dial_skips_connect_when_session_cap_is_already_full() {
         let (sync_engine, dir) = test_engine("rubin-node-p2p-outbound-cap");
         let mut runtime_cfg = default_peer_runtime_config("devnet", 1);
         runtime_cfg.read_deadline = Duration::from_millis(250);
         runtime_cfg.write_deadline = Duration::from_millis(250);
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
-        let addr = listener.local_addr().expect("addr").to_string();
+        let addr = "127.0.0.1:19199".to_string();
         let shared = test_shared_state(runtime_cfg, vec![], sync_engine);
         shared.active_sessions.store(1, Ordering::SeqCst);
-        let accepted = Arc::new(AtomicBool::new(false));
-        let accepted_server = Arc::clone(&accepted);
-        let server = thread::spawn(move || {
-            let (_stream, _) = listener.accept().expect("accept dial");
-            accepted_server.store(true, Ordering::SeqCst);
-        });
 
         super::start_outbound_peer(addr, shared.clone());
 
-        wait_until(Instant::now() + Duration::from_secs(2), || {
-            accepted.load(Ordering::SeqCst) && lock_in_flight_dials(&shared).is_empty()
-        });
+        thread::sleep(Duration::from_millis(200));
+        assert!(
+            lock_in_flight_dials(&shared).is_empty(),
+            "skipped dial must not leave an in-flight marker behind"
+        );
         assert!(
             shared.peer_manager.snapshot().is_empty(),
-            "failed handshake must not register peer"
+            "skipped dial must not register peer"
         );
 
         shared.stop.store(true, Ordering::SeqCst);
-        server.join().expect("server join");
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
