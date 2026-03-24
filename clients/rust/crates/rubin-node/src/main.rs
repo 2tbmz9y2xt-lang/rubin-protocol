@@ -6,11 +6,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
 use rubin_node::{
     block_store_path, chain_state_path, default_peer_runtime_config, default_sync_config,
-    devnet_genesis_block_bytes, load_chain_state, load_genesis_config, new_devnet_rpc_state,
-    parse_mine_address_arg, start_devnet_rpc_server, start_node_p2p_service, BlockStore, Miner,
+    load_chain_state, load_genesis_config, new_devnet_rpc_state, parse_mine_address_arg,
+    start_devnet_rpc_server, start_node_p2p_service, BlockStore, LoadedGenesisConfig, Miner,
     MinerConfig, NodeP2PServiceConfig, PeerManager, SyncEngine,
 };
 use serde::Serialize;
@@ -205,11 +204,10 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
             return 0;
         }
     }
-    let genesis_bytes = devnet_genesis_block_bytes();
-    let genesis_hash = match block_hash(&genesis_bytes[..BLOCK_HEADER_BYTES]) {
+    let genesis_hash = match runtime_genesis_hash(&genesis_cfg) {
         Ok(hash) => hash,
         Err(err) => {
-            let _ = writeln!(stderr, "genesis hash compute failed: {err}");
+            let _ = writeln!(stderr, "{err}");
             return 2;
         }
     };
@@ -259,6 +257,13 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     loop {
         thread::sleep(Duration::from_secs(60));
     }
+}
+
+fn runtime_genesis_hash(genesis_cfg: &LoadedGenesisConfig) -> Result<[u8; 32], String> {
+    genesis_cfg.genesis_hash.ok_or_else(|| {
+        "runtime p2p requires genesis_hash_hex in the genesis file when chain_id is not devnet"
+            .to_string()
+    })
 }
 
 fn parse_args(args: &[String]) -> Result<CliConfig, String> {
@@ -458,7 +463,8 @@ mod tests {
 
     use serde_json::Value;
 
-    use super::{parse_args, run};
+    use super::{parse_args, run, runtime_genesis_hash};
+    use rubin_node::load_genesis_config;
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -522,6 +528,24 @@ mod tests {
             json["chain_id_hex"].as_str(),
             Some("1111111111111111111111111111111111111111111111111111111111111111")
         );
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn runtime_requires_explicit_genesis_hash_for_custom_chain_id() {
+        let dir = unique_temp_dir("rubin-node-bin-runtime-genesis-hash");
+        fs::create_dir_all(&dir).expect("mkdir");
+        let genesis_file = dir.join("genesis.json");
+        fs::write(
+            &genesis_file,
+            "{\"chain_id_hex\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}",
+        )
+        .expect("write genesis");
+
+        let genesis_cfg = load_genesis_config(Some(&genesis_file)).expect("load");
+        let err = runtime_genesis_hash(&genesis_cfg).unwrap_err();
+        assert!(err.contains("genesis_hash_hex"), "unexpected error: {err}");
 
         fs::remove_dir_all(&dir).expect("cleanup");
     }

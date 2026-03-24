@@ -3,9 +3,10 @@ use std::path::Path;
 
 use rubin_consensus::encode_compact_size;
 use rubin_consensus::{
-    core_ext_profile_set_anchor_v1, core_ext_verification_binding_from_name_and_descriptor,
-    CoreExtDeploymentProfile, CoreExtDeploymentProfiles, CryptoRotationDescriptor,
-    DescriptorRotationProvider, SuiteRegistry,
+    block_hash, core_ext_profile_set_anchor_v1,
+    core_ext_verification_binding_from_name_and_descriptor, CoreExtDeploymentProfile,
+    CoreExtDeploymentProfiles, CryptoRotationDescriptor, DescriptorRotationProvider, SuiteRegistry,
+    BLOCK_HEADER_BYTES,
 };
 use serde::Deserialize;
 
@@ -19,6 +20,8 @@ const GENESIS_MAGIC_SEPARATOR: &[u8] = b"RUBIN-GENESIS-v1";
 #[derive(Deserialize)]
 struct GenesisPack {
     chain_id_hex: String,
+    #[serde(default)]
+    genesis_hash_hex: String,
     #[serde(default)]
     core_ext_profile_set_anchor_hex: String,
     #[serde(default)]
@@ -62,6 +65,7 @@ struct GenesisCoreExtProfile {
 #[derive(Clone, Debug)]
 pub struct LoadedGenesisConfig {
     pub chain_id: [u8; 32],
+    pub genesis_hash: Option<[u8; 32]>,
     pub core_ext_deployments: CoreExtDeploymentProfiles,
     /// Optional SuiteContext from rotation_descriptor in config.
     /// None means use DefaultRotationProvider (ML-DSA-87 at all heights).
@@ -82,10 +86,16 @@ pub fn devnet_genesis_chain_id() -> [u8; 32] {
     decode_hex32("devnet_genesis_chain_id", GENESIS_CHAIN_ID_HEX)
 }
 
+pub fn devnet_genesis_hash() -> [u8; 32] {
+    let bytes = devnet_genesis_block_bytes();
+    block_hash(&bytes[..BLOCK_HEADER_BYTES]).expect("devnet genesis hash")
+}
+
 pub fn load_genesis_config(path: Option<&Path>) -> Result<LoadedGenesisConfig, String> {
     let Some(path) = path else {
         return Ok(LoadedGenesisConfig {
             chain_id: devnet_genesis_chain_id(),
+            genesis_hash: Some(devnet_genesis_hash()),
             core_ext_deployments: CoreExtDeploymentProfiles::empty(),
             suite_context: None,
         });
@@ -104,8 +114,21 @@ pub fn load_genesis_config(path: Option<&Path>) -> Result<LoadedGenesisConfig, S
         trimmed = rest;
     }
     let chain_id = parse_hex32("chain_id", trimmed)?;
+    let genesis_hash = if payload.genesis_hash_hex.trim().is_empty() {
+        if chain_id == devnet_genesis_chain_id() {
+            Some(devnet_genesis_hash())
+        } else {
+            None
+        }
+    } else {
+        Some(parse_hex32(
+            "genesis_hash",
+            payload.genesis_hash_hex.trim(),
+        )?)
+    };
     Ok(LoadedGenesisConfig {
         chain_id,
+        genesis_hash,
         core_ext_deployments: core_ext_deployments_from_json(
             chain_id,
             &payload.core_ext_profile_set_anchor_hex,
@@ -288,7 +311,8 @@ mod tests {
 
     use super::{
         derive_devnet_genesis_chain_id, devnet_genesis_block_bytes, devnet_genesis_chain_id,
-        load_chain_id_from_genesis_file, load_genesis_config, validate_incoming_chain_id,
+        devnet_genesis_hash, load_chain_id_from_genesis_file, load_genesis_config,
+        validate_incoming_chain_id,
     };
 
     #[test]
@@ -362,6 +386,7 @@ mod tests {
 
         let cfg = load_genesis_config(Some(&path)).expect("load");
         assert_eq!(cfg.chain_id, devnet_genesis_chain_id());
+        assert_eq!(cfg.genesis_hash, Some(devnet_genesis_hash()));
         assert_eq!(cfg.core_ext_deployments.deployments.len(), 1);
         assert_eq!(cfg.core_ext_deployments.deployments[0].ext_id, 7);
         assert_eq!(
@@ -425,6 +450,7 @@ mod tests {
         .expect("write");
 
         let cfg = load_genesis_config(Some(&path)).expect("load");
+        assert_eq!(cfg.genesis_hash, Some(devnet_genesis_hash()));
         assert_eq!(cfg.core_ext_deployments.deployments.len(), 1);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -646,6 +672,7 @@ mod tests {
         .expect("write");
 
         let cfg = load_genesis_config(Some(&path)).expect("load genesis");
+        assert_eq!(cfg.genesis_hash, Some(devnet_genesis_hash()));
         let profiles = cfg
             .core_ext_deployments
             .active_profiles_at_height(12)
@@ -664,5 +691,56 @@ mod tests {
     fn validate_incoming_chain_id_rejects_wrong_non_zero_genesis_chain_id() {
         let err = validate_incoming_chain_id(0, [0x11; 32]).unwrap_err();
         assert_eq!(err, "genesis chain_id mismatch");
+    }
+
+    #[test]
+    fn load_genesis_config_reads_explicit_genesis_hash() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-explicit-hash-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            "{\
+              \"chain_id_hex\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\
+              \"genesis_hash_hex\":\"0x2222222222222222222222222222222222222222222222222222222222222222\"\
+            }",
+        )
+        .expect("write");
+
+        let cfg = load_genesis_config(Some(&path)).expect("load");
+        assert_eq!(cfg.chain_id, [0x11; 32]);
+        assert_eq!(cfg.genesis_hash, Some([0x22; 32]));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_leaves_custom_runtime_hash_unset_without_explicit_value() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-missing-hash-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            "{\"chain_id_hex\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}",
+        )
+        .expect("write");
+
+        let cfg = load_genesis_config(Some(&path)).expect("load");
+        assert_eq!(cfg.chain_id, [0x11; 32]);
+        assert_eq!(cfg.genesis_hash, None);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }

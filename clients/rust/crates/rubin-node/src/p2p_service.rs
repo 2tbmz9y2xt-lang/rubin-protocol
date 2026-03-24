@@ -4,7 +4,7 @@ use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::p2p_runtime::VersionPayloadV1;
 use crate::p2p_runtime::{perform_version_handshake, PeerManager, PeerRuntimeConfig};
@@ -15,6 +15,7 @@ const RECONNECT_LOOP_SLEEP: Duration = Duration::from_millis(250);
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 const MIN_OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const SERVICE_CLOSE_WAIT_SLEEP: Duration = Duration::from_millis(25);
 
 #[derive(Clone)]
 pub struct NodeP2PServiceConfig {
@@ -30,6 +31,7 @@ pub struct NodeP2PServiceConfig {
 pub struct RunningNodeP2PService {
     addr: String,
     stop: Arc<AtomicBool>,
+    shared: SharedServiceState,
     accept_join: Option<JoinHandle<()>>,
     reconnect_join: Option<JoinHandle<()>>,
 }
@@ -79,6 +81,7 @@ pub fn start_node_p2p_service(cfg: NodeP2PServiceConfig) -> Result<RunningNodeP2
     Ok(RunningNodeP2PService {
         addr,
         stop,
+        shared,
         accept_join: Some(accept_join),
         reconnect_join: Some(reconnect_join),
     })
@@ -98,6 +101,7 @@ impl RunningNodeP2PService {
         if let Some(join) = self.reconnect_join.take() {
             let _ = join.join();
         }
+        wait_for_service_shutdown(&self.shared);
     }
 }
 
@@ -125,8 +129,7 @@ fn run_accept_loop(listener: TcpListener, shared: SharedServiceState) {
                 thread::sleep(ACCEPT_LOOP_SLEEP);
             }
             Err(_) => {
-                // Socket pressure must not permanently kill the public listener.
-                thread::sleep(ACCEPT_LOOP_SLEEP);
+                thread::sleep(accept_error_backoff());
             }
         }
     }
@@ -136,11 +139,7 @@ fn run_reconnect_loop(shared: SharedServiceState) {
     let mut waited = Duration::ZERO;
     while !shared.stop.load(Ordering::SeqCst) {
         if waited >= RECONNECT_INTERVAL {
-            for addr in shared.bootstrap_peers.iter() {
-                if !is_connected(&shared.peer_manager, addr) {
-                    start_outbound_peer(addr.clone(), shared.clone());
-                }
-            }
+            reconnect_missing_bootstrap_peers(&shared);
             waited = Duration::ZERO;
         }
         thread::sleep(RECONNECT_LOOP_SLEEP);
@@ -149,10 +148,8 @@ fn run_reconnect_loop(shared: SharedServiceState) {
 }
 
 fn start_outbound_peer(addr: String, shared: SharedServiceState) {
-    let Ok(mut guard) = shared.in_flight_dials.lock() else {
-        return;
-    };
-    if guard.contains(&addr) || guard.len() >= shared.runtime_cfg.max_peers {
+    let mut guard = lock_in_flight_dials(&shared);
+    if should_skip_outbound_dial(&guard, &addr, shared.runtime_cfg.max_peers) {
         return;
     }
     guard.insert(addr.clone());
@@ -167,9 +164,7 @@ fn start_outbound_peer(addr: String, shared: SharedServiceState) {
             drop(session_slot);
             result
         });
-        let Ok(mut guard) = shared.in_flight_dials.lock() else {
-            return;
-        };
+        let mut guard = lock_in_flight_dials(&shared);
         guard.remove(&addr);
         drop(guard);
         let _ = result;
@@ -178,6 +173,31 @@ fn start_outbound_peer(addr: String, shared: SharedServiceState) {
 
 fn is_connected(peer_manager: &PeerManager, addr: &str) -> bool {
     peer_manager.snapshot().iter().any(|peer| peer.addr == addr)
+}
+
+fn reconnect_missing_bootstrap_peers(shared: &SharedServiceState) {
+    for addr in shared.bootstrap_peers.iter() {
+        if !is_connected(&shared.peer_manager, addr) {
+            start_outbound_peer(addr.clone(), shared.clone());
+        }
+    }
+}
+
+fn accept_error_backoff() -> Duration {
+    ACCEPT_LOOP_SLEEP
+}
+
+fn should_skip_outbound_dial(in_flight: &HashSet<String>, addr: &str, max_peers: usize) -> bool {
+    in_flight.contains(addr) || in_flight.len() >= max_peers
+}
+
+fn lock_in_flight_dials<'a>(
+    shared: &'a SharedServiceState,
+) -> std::sync::MutexGuard<'a, HashSet<String>> {
+    shared
+        .in_flight_dials
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn try_acquire_session_slot(shared: &SharedServiceState) -> Option<SessionSlotGuard> {
@@ -213,9 +233,6 @@ fn connect_with_timeout(addr: &str, timeout: Duration) -> Result<TcpStream, Stri
         .to_socket_addrs()
         .map_err(|err| format!("resolve {addr}: {err}"))?
         .collect();
-    if addrs.is_empty() {
-        return Err(format!("resolve {addr}: no addresses"));
-    }
     let mut last_err = None;
     for socket_addr in addrs {
         match TcpStream::connect_timeout(&socket_addr, timeout) {
@@ -227,6 +244,23 @@ fn connect_with_timeout(addr: &str, timeout: Duration) -> Result<TcpStream, Stri
         .map(|err| err.to_string())
         .unwrap_or_else(|| "unknown connect error".to_string());
     Err(format!("connect {addr}: {err}"))
+}
+
+fn wait_for_service_shutdown(shared: &SharedServiceState) {
+    let wait_budget = shared
+        .runtime_cfg
+        .read_deadline
+        .max(outbound_connect_timeout(&shared.runtime_cfg))
+        + RECONNECT_LOOP_SLEEP;
+    let deadline = Instant::now() + wait_budget;
+    while Instant::now() < deadline {
+        let dials_drained = lock_in_flight_dials(shared).is_empty();
+        let sessions_drained = shared.active_sessions.load(Ordering::SeqCst) == 0;
+        if dials_drained && sessions_drained {
+            return;
+        }
+        thread::sleep(SERVICE_CLOSE_WAIT_SLEEP);
+    }
 }
 
 fn handle_peer(
@@ -355,19 +389,26 @@ impl Drop for SessionSlotGuard {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::fs;
     use std::net::{TcpListener, TcpStream};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
 
     use rubin_consensus::{block_hash, constants::POW_LIMIT, BLOCK_HEADER_BYTES};
 
-    use super::{start_node_p2p_service, NodeP2PServiceConfig};
+    use super::{
+        accept_error_backoff, connect_with_timeout, lock_in_flight_dials, outbound_connect_timeout,
+        reconnect_missing_bootstrap_peers, should_skip_outbound_dial, start_node_p2p_service,
+        wait_for_service_shutdown, NodeP2PServiceConfig, SharedServiceState,
+    };
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use crate::interop::local_version;
-    use crate::p2p_runtime::{default_peer_runtime_config, perform_version_handshake, PeerManager};
+    use crate::p2p_runtime::{
+        default_peer_runtime_config, perform_version_handshake, PeerManager, PeerRuntimeConfig,
+    };
     use crate::{block_store_path, default_sync_config, BlockStore, ChainState, SyncEngine};
 
     fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
@@ -391,6 +432,24 @@ mod tests {
     fn test_genesis_hash() -> [u8; 32] {
         let genesis = devnet_genesis_block_bytes();
         block_hash(&genesis[..BLOCK_HEADER_BYTES]).expect("genesis hash")
+    }
+
+    fn test_shared_state(
+        runtime_cfg: PeerRuntimeConfig,
+        bootstrap_peers: Vec<String>,
+        sync_engine: Arc<Mutex<SyncEngine>>,
+    ) -> SharedServiceState {
+        SharedServiceState {
+            stop: Arc::new(AtomicBool::new(false)),
+            runtime_cfg: runtime_cfg.clone(),
+            active_sessions: Arc::new(AtomicUsize::new(0)),
+            peer_manager: Arc::new(PeerManager::new(runtime_cfg)),
+            sync_engine,
+            bootstrap_peers: Arc::new(bootstrap_peers),
+            in_flight_dials: Arc::new(Mutex::new(HashSet::new())),
+            chain_id: devnet_genesis_chain_id(),
+            genesis_hash: test_genesis_hash(),
+        }
     }
 
     fn wait_until(deadline: Instant, check: impl Fn() -> bool) {
@@ -568,6 +627,132 @@ mod tests {
 
         drop(first_stream);
         service.close();
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn accept_error_backoff_retries_listener_errors() {
+        assert_eq!(accept_error_backoff(), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn outbound_connect_timeout_clamps_runtime_window() {
+        let mut cfg = default_peer_runtime_config("devnet", 8);
+        cfg.read_deadline = Duration::from_millis(10);
+        assert_eq!(outbound_connect_timeout(&cfg), Duration::from_millis(250));
+        cfg.read_deadline = Duration::from_secs(30);
+        assert_eq!(outbound_connect_timeout(&cfg), Duration::from_secs(5));
+        cfg.read_deadline = Duration::from_secs(2);
+        assert_eq!(outbound_connect_timeout(&cfg), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn connect_with_timeout_reports_resolve_errors() {
+        let err = connect_with_timeout("bad host:19111", Duration::from_millis(25)).unwrap_err();
+        assert!(
+            err.starts_with("resolve bad host:19111:"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn should_skip_outbound_dial_covers_duplicate_and_budget_caps() {
+        let mut in_flight = HashSet::new();
+        in_flight.insert("127.0.0.1:19111".to_string());
+        assert!(should_skip_outbound_dial(&in_flight, "127.0.0.1:19111", 8));
+        assert!(should_skip_outbound_dial(&in_flight, "127.0.0.1:19112", 1));
+        assert!(!should_skip_outbound_dial(&in_flight, "127.0.0.1:19112", 8));
+    }
+
+    #[test]
+    fn reconnect_missing_bootstrap_peers_only_redials_missing_entries() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-reconnect-helper");
+        let mut runtime_cfg = default_peer_runtime_config("devnet", 8);
+        runtime_cfg.read_deadline = Duration::from_secs(1);
+        runtime_cfg.write_deadline = Duration::from_secs(1);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind bootstrap");
+        let bootstrap_addr = listener.local_addr().expect("addr").to_string();
+        let shared = test_shared_state(
+            runtime_cfg.clone(),
+            vec![bootstrap_addr.clone()],
+            sync_engine,
+        );
+        let handshake_seen = Arc::new(AtomicBool::new(false));
+        let handshake_seen_server = Arc::clone(&handshake_seen);
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept bootstrap");
+            let local = local_version(0).expect("local version");
+            let _session = perform_version_handshake(
+                stream,
+                runtime_cfg,
+                local,
+                local.chain_id,
+                local.genesis_hash,
+            )
+            .expect("handshake");
+            handshake_seen_server.store(true, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(100));
+        });
+
+        reconnect_missing_bootstrap_peers(&shared);
+
+        wait_until(Instant::now() + Duration::from_secs(2), || {
+            handshake_seen.load(Ordering::SeqCst)
+                && shared
+                    .peer_manager
+                    .snapshot()
+                    .iter()
+                    .any(|peer| peer.addr == bootstrap_addr)
+        });
+
+        shared.stop.store(true, Ordering::SeqCst);
+        server.join().expect("server join");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn outbound_dial_drops_inflight_marker_when_session_cap_is_already_full() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-outbound-cap");
+        let mut runtime_cfg = default_peer_runtime_config("devnet", 1);
+        runtime_cfg.read_deadline = Duration::from_millis(250);
+        runtime_cfg.write_deadline = Duration::from_millis(250);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let shared = test_shared_state(runtime_cfg, vec![], sync_engine);
+        shared.active_sessions.store(1, Ordering::SeqCst);
+        let accepted = Arc::new(AtomicBool::new(false));
+        let accepted_server = Arc::clone(&accepted);
+        let server = thread::spawn(move || {
+            let (_stream, _) = listener.accept().expect("accept dial");
+            accepted_server.store(true, Ordering::SeqCst);
+        });
+
+        super::start_outbound_peer(addr, shared.clone());
+
+        wait_until(Instant::now() + Duration::from_secs(2), || {
+            accepted.load(Ordering::SeqCst) && lock_in_flight_dials(&shared).is_empty()
+        });
+        assert!(
+            shared.peer_manager.snapshot().is_empty(),
+            "failed handshake must not register peer"
+        );
+
+        shared.stop.store(true, Ordering::SeqCst);
+        server.join().expect("server join");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn wait_for_service_shutdown_returns_when_state_is_already_drained() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-shutdown-drained");
+        let runtime_cfg = default_peer_runtime_config("devnet", 8);
+        let shared = test_shared_state(runtime_cfg, vec![], sync_engine);
+        let started = Instant::now();
+        wait_for_service_shutdown(&shared);
+        assert!(
+            started.elapsed() < Duration::from_millis(50),
+            "drained state should not block shutdown"
+        );
         fs::remove_dir_all(dir).expect("cleanup");
     }
 }
