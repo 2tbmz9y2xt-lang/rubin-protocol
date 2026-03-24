@@ -339,21 +339,80 @@ impl PeerSession {
     }
 
     pub fn request_blocks(&mut self, sync_engine: &SyncEngine) -> io::Result<()> {
-        let payload = encode_getblocks_payload(GetBlocksPayload {
-            locator_hashes: sync_engine.locator_hashes(32).map_err(io::Error::other)?,
-            stop_hash: [0u8; 32],
-        })?;
-        self.write_message(&WireMessage {
-            command: MESSAGE_GETBLOCKS.to_string(),
-            payload,
-        })
+        self.write_message(&self.build_getblocks_message(sync_engine)?)
     }
 
     pub fn request_blocks_if_behind(&mut self, sync_engine: &SyncEngine) -> io::Result<()> {
-        if self.is_behind(sync_engine)? {
-            self.request_blocks(sync_engine)?;
+        if let Some(msg) = self.prepare_block_request_if_behind(sync_engine)? {
+            self.write_message(&msg)?;
         }
         Ok(())
+    }
+
+    pub fn prepare_block_request_if_behind(
+        &self,
+        sync_engine: &SyncEngine,
+    ) -> io::Result<Option<WireMessage>> {
+        if self.is_behind(sync_engine)? {
+            return Ok(Some(self.build_getblocks_message(sync_engine)?));
+        }
+        Ok(None)
+    }
+
+    pub fn collect_live_responses(
+        &mut self,
+        msg: WireMessage,
+        sync_engine: &mut SyncEngine,
+    ) -> io::Result<Vec<WireMessage>> {
+        match msg.command.as_str() {
+            MESSAGE_INV => {
+                let requests = self.handle_inv(&msg.payload, sync_engine)?;
+                if requests.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    Ok(vec![WireMessage {
+                        command: MESSAGE_GETDATA.to_string(),
+                        payload: encode_inventory_vectors(&requests)?,
+                    }])
+                }
+            }
+            MESSAGE_GETDATA => self.collect_getdata_responses(&msg.payload, sync_engine),
+            MESSAGE_GETBLOCKS => {
+                let items = self.handle_getblocks(&msg.payload, sync_engine)?;
+                if items.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    Ok(vec![WireMessage {
+                        command: MESSAGE_INV.to_string(),
+                        payload: encode_inventory_vectors(&items)?,
+                    }])
+                }
+            }
+            MESSAGE_BLOCK => {
+                self.handle_block(&msg.payload, sync_engine)?;
+                Ok(self
+                    .prepare_block_request_if_behind(sync_engine)?
+                    .into_iter()
+                    .collect())
+            }
+            MESSAGE_TX | "headers" | "pong" => Ok(Vec::new()),
+            "ping" => Ok(vec![WireMessage {
+                command: "pong".to_string(),
+                payload: Vec::new(),
+            }]),
+            MESSAGE_GETADDR => Ok(vec![WireMessage {
+                command: MESSAGE_ADDR.to_string(),
+                payload: marshal_empty_addr_payload(),
+            }]),
+            MESSAGE_ADDR => {
+                let _ = unmarshal_addr_payload(&msg.payload)?;
+                Ok(Vec::new())
+            }
+            other => {
+                self.peer.last_error = format!("unknown command: {other}");
+                Err(unknown_command_err(other))
+            }
+        }
     }
 
     pub fn handle_live_message(
@@ -361,53 +420,8 @@ impl PeerSession {
         msg: WireMessage,
         sync_engine: &mut SyncEngine,
     ) -> io::Result<()> {
-        match msg.command.as_str() {
-            MESSAGE_INV => {
-                let requests = self.handle_inv(&msg.payload, sync_engine)?;
-                if !requests.is_empty() {
-                    let payload = encode_inventory_vectors(&requests)?;
-                    self.write_message(&WireMessage {
-                        command: MESSAGE_GETDATA.to_string(),
-                        payload,
-                    })?;
-                }
-            }
-            MESSAGE_GETDATA => {
-                self.respond_to_getdata(&msg.payload, sync_engine)?;
-            }
-            MESSAGE_GETBLOCKS => {
-                let items = self.handle_getblocks(&msg.payload, sync_engine)?;
-                if !items.is_empty() {
-                    self.write_message(&WireMessage {
-                        command: MESSAGE_INV.to_string(),
-                        payload: encode_inventory_vectors(&items)?,
-                    })?;
-                }
-            }
-            MESSAGE_BLOCK => {
-                self.handle_block(&msg.payload, sync_engine)?;
-                self.request_more_blocks_if_behind(sync_engine)?;
-            }
-            MESSAGE_TX | "headers" | "pong" => {}
-            "ping" => {
-                self.write_message(&WireMessage {
-                    command: "pong".to_string(),
-                    payload: Vec::new(),
-                })?;
-            }
-            MESSAGE_GETADDR => {
-                self.write_message(&WireMessage {
-                    command: MESSAGE_ADDR.to_string(),
-                    payload: marshal_empty_addr_payload(),
-                })?;
-            }
-            MESSAGE_ADDR => {
-                let _ = unmarshal_addr_payload(&msg.payload)?;
-            }
-            other => {
-                self.peer.last_error = format!("unknown command: {other}");
-                return Err(unknown_command_err(other));
-            }
+        for response in self.collect_live_responses(msg, sync_engine)? {
+            self.write_message(&response)?;
         }
         Ok(())
     }
@@ -558,6 +572,18 @@ impl PeerSession {
     }
 
     fn respond_to_getdata(&mut self, payload: &[u8], sync_engine: &SyncEngine) -> io::Result<()> {
+        for response in self.collect_getdata_responses(payload, sync_engine)? {
+            self.write_message(&response)?;
+        }
+        Ok(())
+    }
+
+    fn collect_getdata_responses(
+        &mut self,
+        payload: &[u8],
+        sync_engine: &SyncEngine,
+    ) -> io::Result<Vec<WireMessage>> {
+        let mut responses = Vec::new();
         for item in decode_inventory_vectors(payload)? {
             if item.kind != MSG_BLOCK {
                 continue;
@@ -568,12 +594,23 @@ impl PeerSession {
             let block = sync_engine
                 .get_block_by_hash(item.hash)
                 .map_err(io::Error::other)?;
-            self.write_message(&WireMessage {
+            responses.push(WireMessage {
                 command: MESSAGE_BLOCK.to_string(),
                 payload: block,
-            })?;
+            });
         }
-        Ok(())
+        Ok(responses)
+    }
+
+    fn build_getblocks_message(&self, sync_engine: &SyncEngine) -> io::Result<WireMessage> {
+        let payload = encode_getblocks_payload(GetBlocksPayload {
+            locator_hashes: sync_engine.locator_hashes(32).map_err(io::Error::other)?,
+            stop_hash: [0u8; 32],
+        })?;
+        Ok(WireMessage {
+            command: MESSAGE_GETBLOCKS.to_string(),
+            payload,
+        })
     }
 }
 

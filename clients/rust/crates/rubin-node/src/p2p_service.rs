@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::io;
-use std::net::{TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -13,6 +13,8 @@ use crate::SyncEngine;
 const ACCEPT_LOOP_SLEEP: Duration = Duration::from_millis(100);
 const RECONNECT_LOOP_SLEEP: Duration = Duration::from_millis(250);
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
+const MIN_OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
+const MAX_OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct NodeP2PServiceConfig {
@@ -150,29 +152,27 @@ fn start_outbound_peer(addr: String, shared: SharedServiceState) {
     let Ok(mut guard) = shared.in_flight_dials.lock() else {
         return;
     };
-    if guard.contains(&addr) {
+    if guard.contains(&addr) || guard.len() >= shared.runtime_cfg.max_peers {
         return;
     }
     guard.insert(addr.clone());
     drop(guard);
     thread::spawn(move || {
-        let Some(session_slot) = try_acquire_session_slot(&shared) else {
-            let Ok(mut guard) = shared.in_flight_dials.lock() else {
-                return;
+        let connect_timeout = outbound_connect_timeout(&shared.runtime_cfg);
+        let result = connect_with_timeout(&addr, connect_timeout).and_then(|stream| {
+            let Some(session_slot) = try_acquire_session_slot(&shared) else {
+                return Err(format!("session cap reached before handshake: {addr}"));
             };
-            guard.remove(&addr);
-            return;
-        };
-        let result = TcpStream::connect(&addr)
-            .map_err(|err| format!("connect {addr}: {err}"))
-            .and_then(|stream| handle_peer(stream, Some(addr.clone()), shared.clone()));
+            let result = handle_peer(stream, Some(addr.clone()), shared.clone());
+            drop(session_slot);
+            result
+        });
         let Ok(mut guard) = shared.in_flight_dials.lock() else {
             return;
         };
         guard.remove(&addr);
         drop(guard);
         let _ = result;
-        let _session_slot = session_slot;
     });
 }
 
@@ -196,6 +196,37 @@ fn try_acquire_session_slot(shared: &SharedServiceState) -> Option<SessionSlotGu
             });
         }
     }
+}
+
+fn outbound_connect_timeout(cfg: &PeerRuntimeConfig) -> Duration {
+    if cfg.read_deadline < MIN_OUTBOUND_CONNECT_TIMEOUT {
+        MIN_OUTBOUND_CONNECT_TIMEOUT
+    } else if cfg.read_deadline > MAX_OUTBOUND_CONNECT_TIMEOUT {
+        MAX_OUTBOUND_CONNECT_TIMEOUT
+    } else {
+        cfg.read_deadline
+    }
+}
+
+fn connect_with_timeout(addr: &str, timeout: Duration) -> Result<TcpStream, String> {
+    let addrs: Vec<_> = addr
+        .to_socket_addrs()
+        .map_err(|err| format!("resolve {addr}: {err}"))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(format!("resolve {addr}: no addresses"));
+    }
+    let mut last_err = None;
+    for socket_addr in addrs {
+        match TcpStream::connect_timeout(&socket_addr, timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(err) => last_err = Some(err),
+        }
+    }
+    let err = last_err
+        .map(|err| err.to_string())
+        .unwrap_or_else(|| "unknown connect error".to_string());
+    Err(format!("connect {addr}: {err}"))
 }
 
 fn handle_peer(
@@ -243,9 +274,15 @@ fn handle_peer(
             .lock()
             .map_err(|_| "sync engine unavailable".to_string())?;
         engine.record_best_known_height(session.state().remote_version.best_height);
-        session
-            .request_blocks_if_behind(&engine)
+        let initial_request = session
+            .prepare_block_request_if_behind(&engine)
             .map_err(|err| format!("initial sync request: {err}"))?;
+        drop(engine);
+        if let Some(msg) = initial_request {
+            session
+                .write_message(&msg)
+                .map_err(|err| format!("initial sync request: {err}"))?;
+        }
     }
 
     while !shared.stop.load(Ordering::SeqCst) {
@@ -261,13 +298,20 @@ fn handle_peer(
             }
             Err(err) => return Err(format!("read message: {err}")),
         };
-        let mut engine = shared
-            .sync_engine
-            .lock()
-            .map_err(|_| "sync engine unavailable".to_string())?;
-        session
-            .handle_live_message(msg, &mut engine)
-            .map_err(|err| format!("handle live message: {err}"))?;
+        let outbound_messages = {
+            let mut engine = shared
+                .sync_engine
+                .lock()
+                .map_err(|_| "sync engine unavailable".to_string())?;
+            session
+                .collect_live_responses(msg, &mut engine)
+                .map_err(|err| format!("handle live message: {err}"))?
+        };
+        for outbound in outbound_messages {
+            session
+                .write_message(&outbound)
+                .map_err(|err| format!("handle live message: {err}"))?;
+        }
     }
     Ok(())
 }
@@ -439,6 +483,42 @@ mod tests {
 
         service.close();
         server.join().expect("server join");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn outbound_connect_attempt_does_not_consume_session_slot_before_connect() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-service-outbound-slot");
+        let mut runtime_cfg = default_peer_runtime_config("devnet", 1);
+        runtime_cfg.read_deadline = Duration::from_millis(250);
+        runtime_cfg.write_deadline = Duration::from_millis(250);
+        let peer_manager = Arc::new(PeerManager::new(runtime_cfg.clone()));
+        let mut service = start_node_p2p_service(NodeP2PServiceConfig {
+            bind_addr: "127.0.0.1:0".to_string(),
+            bootstrap_peers: vec!["192.0.2.1:6553".to_string()],
+            runtime_cfg: runtime_cfg.clone(),
+            peer_manager,
+            sync_engine,
+            chain_id: devnet_genesis_chain_id(),
+            genesis_hash: test_genesis_hash(),
+        })
+        .expect("start service");
+
+        thread::sleep(Duration::from_millis(75));
+
+        let stream = TcpStream::connect(service.addr()).expect("connect inbound");
+        let local = local_version(0).expect("local version");
+        let session = perform_version_handshake(
+            stream,
+            runtime_cfg,
+            local,
+            local.chain_id,
+            local.genesis_hash,
+        )
+        .expect("inbound handshake must not be blocked by pending bootstrap dial");
+        drop(session);
+
+        service.close();
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
