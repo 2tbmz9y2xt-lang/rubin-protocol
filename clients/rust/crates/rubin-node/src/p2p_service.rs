@@ -762,7 +762,11 @@ fn handle_peer(
     Ok(())
 }
 
-fn flush_peer_outbox<F>(shared: &SharedServiceState, peer_addr: &str, mut write_frame: F) -> Result<(), String>
+fn flush_peer_outbox<F>(
+    shared: &SharedServiceState,
+    peer_addr: &str,
+    mut write_frame: F,
+) -> Result<(), String>
 where
     F: FnMut(&[u8]) -> io::Result<()>,
 {
