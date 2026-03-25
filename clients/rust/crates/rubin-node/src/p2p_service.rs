@@ -64,7 +64,10 @@ struct SharedServiceState {
     chain_id: [u8; 32],
     genesis_hash: [u8; 32],
     relay_state: Arc<TxRelayState>,
-    peer_writers: Arc<Mutex<HashMap<String, Arc<Mutex<TcpStream>>>>>,
+    /// Outbound relay message queues per peer. Relay broadcasts enqueue
+    /// serialized frames here; each peer's message loop drains its queue
+    /// between reads, ensuring writes are serialized on the same TcpStream.
+    peer_outboxes: Arc<Mutex<HashMap<String, Vec<Vec<u8>>>>>,
     local_addr: String,
 }
 
@@ -131,6 +134,7 @@ pub fn start_node_p2p_service(cfg: NodeP2PServiceConfig) -> Result<RunningNodeP2
         .map_err(|err| format!("local_addr: {err}"))?
         .to_string();
     let stop = Arc::new(AtomicBool::new(false));
+    let relay_state = Arc::new(TxRelayState::new_with_network(&cfg.runtime_cfg.network));
     let shared = SharedServiceState {
         stop: Arc::clone(&stop),
         runtime_cfg: cfg.runtime_cfg,
@@ -143,8 +147,8 @@ pub fn start_node_p2p_service(cfg: NodeP2PServiceConfig) -> Result<RunningNodeP2
         in_flight_dials: Arc::new(Mutex::new(HashSet::new())),
         chain_id: cfg.chain_id,
         genesis_hash: cfg.genesis_hash,
-        relay_state: Arc::new(TxRelayState::new()),
-        peer_writers: Arc::new(Mutex::new(HashMap::new())),
+        relay_state,
+        peer_outboxes: Arc::new(Mutex::new(HashMap::new())),
         local_addr: addr.clone(),
     };
     let accept_shared = shared.clone();
@@ -173,9 +177,9 @@ impl RunningNodeP2PService {
         Arc::clone(&self.shared.relay_state)
     }
 
-    /// Peer writers for tx broadcast.
-    pub fn peer_writers(&self) -> Arc<Mutex<HashMap<String, Arc<Mutex<TcpStream>>>>> {
-        Arc::clone(&self.shared.peer_writers)
+    /// Peer outboxes for tx broadcast.
+    pub fn peer_outboxes(&self) -> Arc<Mutex<HashMap<String, Vec<Vec<u8>>>>> {
+        Arc::clone(&self.shared.peer_outboxes)
     }
 
     pub fn close(&mut self) {
@@ -676,21 +680,13 @@ fn handle_peer(
         addr: peer_addr.clone(),
     };
 
-    // Register a cloned TcpStream for tx relay broadcast (matches Go's writeMu pattern).
-    let peer_writer_registered = if let Ok(cloned) = session.try_clone_stream() {
-        if let Ok(mut writers) = shared.peer_writers.lock() {
-            writers.insert(peer_addr.clone(), Arc::new(Mutex::new(cloned)));
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-    let _writer_guard = PeerWriterGuard {
-        peer_writers: Arc::clone(&shared.peer_writers),
+    // Register outbox for this peer so relay broadcasts can enqueue frames.
+    if let Ok(mut outboxes) = shared.peer_outboxes.lock() {
+        outboxes.insert(peer_addr.clone(), Vec::new());
+    }
+    let _outbox_guard = PeerOutboxGuard {
+        peer_outboxes: Arc::clone(&shared.peer_outboxes),
         addr: peer_addr.clone(),
-        registered: peer_writer_registered,
     };
 
     // Build relay context for message loop.
@@ -698,7 +694,7 @@ fn handle_peer(
         relay_state: &shared.relay_state,
         peer_manager: &shared.peer_manager,
         local_addr: &shared.local_addr,
-        peer_writers: &shared.peer_writers,
+        peer_writers: &shared.peer_outboxes,
     };
 
     {
@@ -727,6 +723,16 @@ fn handle_peer(
                     io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
                 ) =>
             {
+                // Drain relay outbox on read timeout so broadcasts don't pile up.
+                if let Ok(mut outboxes) = shared.peer_outboxes.lock() {
+                    if let Some(queue) = outboxes.get_mut(&peer_addr) {
+                        for frame in queue.drain(..) {
+                            if session.write_raw(&frame).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
                 continue;
             }
             Err(err) => return Err(format!("read message: {err}")),
@@ -757,6 +763,18 @@ fn handle_peer(
             session
                 .write_message(&outbound)
                 .map_err(|err| format!("handle live message: {err}"))?;
+        }
+        // Drain any relay frames queued by broadcast_inventory.
+        // Writes happen on the peer's own thread, serialized with
+        // normal message writes — no interleaving possible.
+        if let Ok(mut outboxes) = shared.peer_outboxes.lock() {
+            if let Some(queue) = outboxes.get_mut(&peer_addr) {
+                for frame in queue.drain(..) {
+                    session
+                        .write_raw(&frame)
+                        .map_err(|err| format!("relay drain: {err}"))?;
+                }
+            }
         }
     }
     Ok(())
@@ -789,18 +807,15 @@ impl Drop for PeerGuard {
     }
 }
 
-struct PeerWriterGuard {
-    peer_writers: Arc<Mutex<HashMap<String, Arc<Mutex<TcpStream>>>>>,
+struct PeerOutboxGuard {
+    peer_outboxes: Arc<Mutex<HashMap<String, Vec<Vec<u8>>>>>,
     addr: String,
-    registered: bool,
 }
 
-impl Drop for PeerWriterGuard {
+impl Drop for PeerOutboxGuard {
     fn drop(&mut self) {
-        if self.registered {
-            if let Ok(mut writers) = self.peer_writers.lock() {
-                writers.remove(&self.addr);
-            }
+        if let Ok(mut outboxes) = self.peer_outboxes.lock() {
+            outboxes.remove(&self.addr);
         }
     }
 }
@@ -883,7 +898,7 @@ mod tests {
             chain_id: devnet_genesis_chain_id(),
             genesis_hash: test_genesis_hash(),
             relay_state: Arc::new(TxRelayState::new()),
-            peer_writers: Arc::new(Mutex::new(HashMap::new())),
+            peer_outboxes: Arc::new(Mutex::new(HashMap::new())),
             local_addr: "127.0.0.1:0".to_string(),
         }
     }
