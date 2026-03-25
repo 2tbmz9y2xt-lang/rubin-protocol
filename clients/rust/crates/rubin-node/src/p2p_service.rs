@@ -1435,6 +1435,21 @@ mod tests {
     }
 
     #[test]
+    fn connect_with_timeout_hostname_uses_dns_resolver_path() {
+        // "localhost:1" resolves via DNS (not IP literal fast path),
+        // covering the resolver thread spawn + channel recv + addr iteration.
+        // Port 1 is refused immediately, so this is fast.
+        let result = super::connect_with_timeout("localhost:1", Duration::from_millis(500));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // Should be a connect error, not DNS error (localhost resolves).
+        assert!(
+            err.contains("connect"),
+            "localhost should resolve but connect to port 1 should fail: {err}"
+        );
+    }
+
+    #[test]
     fn reconnect_loop_fires_after_interval() {
         let (sync_engine, dir) = test_engine("rubin-node-p2p-reconnect-loop");
         let runtime_cfg = default_peer_runtime_config("devnet", 8);

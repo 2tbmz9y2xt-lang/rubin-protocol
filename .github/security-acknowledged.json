@@ -45,6 +45,13 @@
       "date": "2026-03-25"
     },
     {
+      "title_pattern": "global orphan",
+      "file_pattern": "p2p_runtime.rs",
+      "reason": "MITIGATED: orphan pool operations protected by mutex, no concurrent access to byte counter. Covers: 'race condition in global orphan', 'non-atomic update of global orphan'.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-25"
+    },
+    {
       "title_pattern": "Genesis Hash",
       "file_pattern": "",
       "reason": "MITIGATED: non-devnet requires explicit --genesis-file + handshake validates genesis_hash (Go parity)",
