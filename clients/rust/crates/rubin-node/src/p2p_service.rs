@@ -716,6 +716,7 @@ fn handle_peer(
     }
 
     while !shared.stop.load(Ordering::SeqCst) {
+        flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
         let msg = match session.read_message() {
             Ok(msg) => msg,
             Err(err)
@@ -724,19 +725,7 @@ fn handle_peer(
                     io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
                 ) =>
             {
-                // Drain relay outbox into local buffer, then release the lock
-                // before performing socket writes (avoids blocking other peers).
-                let pending: Vec<Vec<u8>> = shared
-                    .peer_outboxes
-                    .lock()
-                    .ok()
-                    .and_then(|mut ob| ob.get_mut(&peer_addr).map(PeerOutbox::take_frames))
-                    .unwrap_or_default();
-                for frame in pending {
-                    session
-                        .write_raw(&frame)
-                        .map_err(|err| format!("relay drain: {err}"))?;
-                }
+                flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
                 continue;
             }
             Err(err) => return Err(format!("read message: {err}")),
@@ -768,19 +757,25 @@ fn handle_peer(
                 .write_message(&outbound)
                 .map_err(|err| format!("handle live message: {err}"))?;
         }
-        // Drain relay outbox into local buffer, then release the lock
-        // before performing socket writes (avoids blocking other peers).
-        let pending: Vec<Vec<u8>> = shared
-            .peer_outboxes
-            .lock()
-            .ok()
-            .and_then(|mut ob| ob.get_mut(&peer_addr).map(PeerOutbox::take_frames))
-            .unwrap_or_default();
-        for frame in pending {
-            session
-                .write_raw(&frame)
-                .map_err(|err| format!("relay drain: {err}"))?;
-        }
+        flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
+    }
+    Ok(())
+}
+
+fn flush_peer_outbox<F>(shared: &SharedServiceState, peer_addr: &str, mut write_frame: F) -> Result<(), String>
+where
+    F: FnMut(&[u8]) -> io::Result<()>,
+{
+    // Drain relay outbox into a local buffer, then release the lock before
+    // performing socket writes so other peers can still enqueue broadcasts.
+    let pending: Vec<Vec<u8>> = shared
+        .peer_outboxes
+        .lock()
+        .ok()
+        .and_then(|mut ob| ob.get_mut(peer_addr).map(PeerOutbox::take_frames))
+        .unwrap_or_default();
+    for frame in pending {
+        write_frame(&frame).map_err(|err| format!("relay drain: {err}"))?;
     }
     Ok(())
 }
@@ -848,7 +843,7 @@ mod tests {
     use rubin_consensus::{block_hash, constants::POW_LIMIT, BLOCK_HEADER_BYTES};
 
     use super::{
-        connect_with_timeout, join_all_service_workers, lock_in_flight_dials,
+        connect_with_timeout, flush_peer_outbox, join_all_service_workers, lock_in_flight_dials,
         outbound_connect_timeout, reconnect_missing_bootstrap_peers, should_skip_outbound_dial,
         start_node_p2p_service, wait_for_service_shutdown, NodeP2PServiceConfig,
         SharedServiceState,
@@ -858,6 +853,7 @@ mod tests {
     use crate::p2p_runtime::{
         default_peer_runtime_config, perform_version_handshake, PeerManager, PeerRuntimeConfig,
     };
+    use crate::tx_relay::PeerOutbox;
     use crate::tx_relay::TxRelayState;
     use crate::{block_store_path, default_sync_config, BlockStore, ChainState, SyncEngine};
     use std::collections::HashMap;
@@ -916,6 +912,34 @@ mod tests {
             thread::sleep(Duration::from_millis(25));
         }
         panic!("condition not reached before deadline");
+    }
+
+    #[test]
+    fn flush_peer_outbox_drains_without_holding_lock_during_writes() {
+        let (sync_engine, _dir) = test_engine("rubin-node-p2p-service-outbox-flush");
+        let shared = test_shared_state(
+            default_peer_runtime_config("devnet", 8),
+            Vec::new(),
+            sync_engine,
+        );
+        {
+            let mut outboxes = shared.peer_outboxes.lock().unwrap();
+            outboxes.insert("peer:8333".to_string(), PeerOutbox::default());
+            outboxes
+                .get_mut("peer:8333")
+                .unwrap()
+                .push_frame(vec![0xAA, 0xBB, 0xCC]);
+        }
+
+        let mut drained = Vec::new();
+        flush_peer_outbox(&shared, "peer:8333", |frame| {
+            drained.push(frame.to_vec());
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(drained, vec![vec![0xAA, 0xBB, 0xCC]]);
+        assert!(shared.peer_outboxes.lock().unwrap()["peer:8333"].is_empty());
     }
 
     #[test]
