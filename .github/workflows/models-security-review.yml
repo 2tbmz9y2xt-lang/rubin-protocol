@@ -162,7 +162,7 @@ jobs:
               const header = `FILE: ${file}\n`;
               // Reserve space: header + separator (except first entry) + at least 200 chars of content
               const frameSize = header.length + (entries.length > 0 ? SEPARATOR.length : 0);
-              if (usedBytes + frameSize + 200 > TOTAL_FILE_BUDGET) break; // no room for meaningful content
+              if (usedBytes + frameSize + 200 > TOTAL_FILE_BUDGET) continue; // skip this file, try shorter ones
               const remainingBudget = TOTAL_FILE_BUDGET - usedBytes - frameSize;
               const contentBudget = Math.min(PER_FILE_CAP, remainingBudget);
               const entry = header + content.slice(0, contentBudget);
