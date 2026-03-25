@@ -36,7 +36,9 @@ const MESSAGE_ADDR: &str = "addr";
 pub const MSG_BLOCK: u8 = 0x01;
 pub const MSG_TX: u8 = 0x02;
 const INVENTORY_VECTOR_SIZE: usize = 33;
+const MAX_PROTOCOL_VERSION: u32 = 1024;
 const MAX_INVENTORY_VECTORS: usize = 4096;
+const MAX_GETDATA_RESPONSE_BLOCKS: usize = 16;
 const MAX_INVENTORY_PAYLOAD_BYTES: u64 =
     (MAX_INVENTORY_VECTORS as u64) * (INVENTORY_VECTOR_SIZE as u64);
 const ADDR_PAYLOAD_ENTRY_SIZE: usize = 18;
@@ -598,6 +600,9 @@ impl PeerSession {
                 command: MESSAGE_BLOCK.to_string(),
                 payload: block,
             });
+            if responses.len() >= MAX_GETDATA_RESPONSE_BLOCKS {
+                break;
+            }
         }
         Ok(responses)
     }
@@ -732,6 +737,15 @@ fn validate_remote_version(
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid protocol_version",
+        ));
+    }
+    if remote.protocol_version > MAX_PROTOCOL_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "protocol_version {} exceeds max {}",
+                remote.protocol_version, MAX_PROTOCOL_VERSION
+            ),
         ));
     }
     if !protocol_versions_compatible(local_protocol_version, remote.protocol_version) {

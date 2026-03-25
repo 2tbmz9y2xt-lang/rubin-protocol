@@ -1,7 +1,6 @@
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -433,24 +432,13 @@ fn validate_addr(label: &str, addr: &str) -> Result<(), String> {
     if addr.is_empty() {
         return Err(format!("{label} is required"));
     }
-    let Some((host, port)) = addr.rsplit_once(':') else {
-        return Err(format!("invalid {label}: missing port"));
-    };
-    if host.trim().is_empty() || port.trim().is_empty() {
-        return Err(format!("invalid {label}: missing host or port"));
-    }
-    if host.contains(' ') {
-        return Err(format!("invalid {label}: invalid host"));
-    }
+    addr.parse::<std::net::SocketAddr>()
+        .map_err(|err| format!("invalid {label}: {err}"))?;
     Ok(())
 }
 
 fn validate_peer_addr(addr: &str) -> Result<(), String> {
-    validate_addr("peer", addr)?;
-    addr.trim()
-        .parse::<SocketAddr>()
-        .map_err(|err| format!("invalid peer: expected literal socket address ({err})"))?;
-    Ok(())
+    validate_addr("peer", addr)
 }
 
 #[cfg(test)]
@@ -589,7 +577,7 @@ mod tests {
         .expect("parse args");
         let err = validate_config(&cfg).unwrap_err();
         assert!(
-            err.starts_with("invalid peer: expected literal socket address"),
+            err.contains("invalid peer"),
             "unexpected error: {err}"
         );
     }

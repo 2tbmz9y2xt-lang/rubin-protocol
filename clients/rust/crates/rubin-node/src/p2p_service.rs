@@ -215,6 +215,9 @@ fn should_skip_outbound_dial(
     in_flight.contains(addr) || occupied >= shared.runtime_cfg.max_peers
 }
 
+/// Lock in_flight_dials. Insert happens in the caller thread (start_outbound_peer),
+/// remove happens in the worker thread (after connect succeeds or fails).
+/// Separate lock scopes are intentional — they span different threads.
 fn lock_in_flight_dials<'a>(
     shared: &'a SharedServiceState,
 ) -> std::sync::MutexGuard<'a, HashSet<String>> {
@@ -234,6 +237,8 @@ fn lock_worker_handles<'a>(
 }
 
 fn spawn_service_worker(shared: &SharedServiceState, worker: impl FnOnce() + Send + 'static) {
+    // Reap finished workers before spawning to prevent unbounded accumulation.
+    reap_finished_service_workers(shared);
     let handle = thread::spawn(worker);
     let mut handles = lock_worker_handles(shared);
     handles.push(handle);
