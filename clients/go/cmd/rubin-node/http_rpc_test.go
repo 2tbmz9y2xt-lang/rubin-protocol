@@ -726,23 +726,44 @@ func TestTipFromBlockStoreRejectsNilStore(t *testing.T) {
 func TestClassifySubmitErrVariants(t *testing.T) {
 	tests := []struct {
 		name       string
-		errText    string
+		err        error
 		wantStatus int
 		wantResult string
 	}{
-		{name: "conflict already present", errText: "already in mempool", wantStatus: http.StatusConflict, wantResult: "conflict"},
-		{name: "conflict double spend", errText: "double-spend conflict", wantStatus: http.StatusConflict, wantResult: "conflict"},
-		{name: "unavailable mempool full", errText: "mempool full", wantStatus: http.StatusServiceUnavailable, wantResult: "unavailable"},
-		{name: "unavailable blockstore", errText: "blockstore unavailable", wantStatus: http.StatusServiceUnavailable, wantResult: "unavailable"},
-		{name: "rejected default", errText: "transaction rejected", wantStatus: http.StatusUnprocessableEntity, wantResult: "rejected"},
+		{name: "conflict already present", err: &node.TxAdmitError{Kind: node.TxAdmitConflict, Message: "already in mempool"}, wantStatus: http.StatusConflict, wantResult: "conflict"},
+		{name: "conflict double spend", err: &node.TxAdmitError{Kind: node.TxAdmitConflict, Message: "double-spend conflict"}, wantStatus: http.StatusConflict, wantResult: "conflict"},
+		{name: "unavailable mempool full", err: &node.TxAdmitError{Kind: node.TxAdmitUnavailable, Message: "mempool full"}, wantStatus: http.StatusServiceUnavailable, wantResult: "unavailable"},
+		{name: "unavailable blockstore", err: &node.TxAdmitError{Kind: node.TxAdmitUnavailable, Message: "blockstore unavailable"}, wantStatus: http.StatusServiceUnavailable, wantResult: "unavailable"},
+		{name: "rejected consensus", err: &node.TxAdmitError{Kind: node.TxAdmitRejected, Message: "transaction rejected"}, wantStatus: http.StatusUnprocessableEntity, wantResult: "rejected"},
+		{name: "fallback unknown error", err: errors.New("something unexpected"), wantStatus: http.StatusUnprocessableEntity, wantResult: "rejected"},
+		{name: "nil error", err: nil, wantStatus: http.StatusOK, wantResult: "accepted"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			status, result := classifySubmitErr(errors.New(tc.errText))
+			status, result := classifySubmitErr(tc.err)
 			if status != tc.wantStatus || result != tc.wantResult {
 				t.Fatalf("got (%d, %q), want (%d, %q)", status, result, tc.wantStatus, tc.wantResult)
 			}
 		})
+	}
+}
+
+func TestTxAdmitErrorKindHTTPMapping(t *testing.T) {
+	// Parity table: must match Rust TxPoolAdmitErrorKind → HTTP status in devnet_rpc.rs.
+	parity := []struct {
+		kind       node.TxAdmitErrorKind
+		wantStatus int
+	}{
+		{node.TxAdmitConflict, http.StatusConflict},              // 409
+		{node.TxAdmitRejected, http.StatusUnprocessableEntity},   // 422
+		{node.TxAdmitUnavailable, http.StatusServiceUnavailable}, // 503
+	}
+	for _, p := range parity {
+		err := &node.TxAdmitError{Kind: p.kind, Message: "test"}
+		status, _ := classifySubmitErr(err)
+		if status != p.wantStatus {
+			t.Errorf("kind %q: got status %d, want %d", p.kind, status, p.wantStatus)
+		}
 	}
 }
 

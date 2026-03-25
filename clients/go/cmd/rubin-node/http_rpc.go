@@ -601,15 +601,19 @@ func classifySubmitErr(err error) (int, string) {
 	if err == nil {
 		return http.StatusOK, "accepted"
 	}
-	msg := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(msg, "already in mempool"), strings.Contains(msg, "double-spend conflict"):
-		return http.StatusConflict, "conflict"
-	case strings.Contains(msg, "mempool full"), strings.Contains(msg, "nil mempool"), strings.Contains(msg, "blockstore"), strings.Contains(msg, "chainstate"):
-		return http.StatusServiceUnavailable, "unavailable"
-	default:
-		return http.StatusUnprocessableEntity, "rejected"
+	var txErr *node.TxAdmitError
+	if errors.As(err, &txErr) {
+		switch txErr.Kind {
+		case node.TxAdmitConflict:
+			return http.StatusConflict, "conflict"
+		case node.TxAdmitUnavailable:
+			return http.StatusServiceUnavailable, "unavailable"
+		default:
+			return http.StatusUnprocessableEntity, "rejected"
+		}
 	}
+	// Defensive fallback for non-TxAdmitError (should not happen in normal flow).
+	return http.StatusUnprocessableEntity, "rejected"
 }
 
 func ensureJSONBodyEOF(dec *json.Decoder) error {

@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -896,4 +897,92 @@ func txIDHex(t *testing.T, txBytes []byte) string {
 		t.Fatalf("ParseTx: %v", err)
 	}
 	return fmt.Sprintf("%x", txid[:])
+}
+
+func TestTxAdmitErrorKinds(t *testing.T) {
+	assertKind := func(t *testing.T, err error, wantKind TxAdmitErrorKind) {
+		t.Helper()
+		var txErr *TxAdmitError
+		if !errors.As(err, &txErr) {
+			t.Fatalf("expected *TxAdmitError, got %T: %v", err, err)
+		}
+		if txErr.Kind != wantKind {
+			t.Fatalf("kind=%q, want %q (msg=%q)", txErr.Kind, wantKind, txErr.Message)
+		}
+	}
+
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+
+	t.Run("nil mempool", func(t *testing.T) {
+		var mp *Mempool
+		err := mp.AddTx([]byte{0x00})
+		assertKind(t, err, TxAdmitUnavailable)
+	})
+
+	t.Run("duplicate tx conflict", func(t *testing.T) {
+		st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+		mp, err := NewMempool(st, nil, devnetGenesisChainID)
+		if err != nil {
+			t.Fatalf("new mempool: %v", err)
+		}
+		tx := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+		if err := mp.AddTx(tx); err != nil {
+			t.Fatalf("first AddTx: %v", err)
+		}
+		err = mp.AddTx(tx)
+		assertKind(t, err, TxAdmitConflict)
+	})
+
+	t.Run("double spend conflict", func(t *testing.T) {
+		st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+		mp, err := NewMempool(st, nil, devnetGenesisChainID)
+		if err != nil {
+			t.Fatalf("new mempool: %v", err)
+		}
+		tx1 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+		tx2 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 89, 2, 2, fromKey, fromAddress, toAddress)
+		if err := mp.AddTx(tx1); err != nil {
+			t.Fatalf("first AddTx: %v", err)
+		}
+		err = mp.AddTx(tx2)
+		assertKind(t, err, TxAdmitConflict)
+	})
+
+	t.Run("mempool full unavailable", func(t *testing.T) {
+		st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 100})
+		mp, err := NewMempool(st, nil, devnetGenesisChainID)
+		if err != nil {
+			t.Fatalf("new mempool: %v", err)
+		}
+		mp.maxTxs = 1
+		tx1 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 5, 1, fromKey, fromAddress, toAddress)
+		tx2 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 90, 1, 2, fromKey, fromAddress, toAddress)
+		if err := mp.AddTx(tx1); err != nil {
+			t.Fatalf("first AddTx: %v", err)
+		}
+		// tx2 has lower fee-rate than tx1 so cannot evict → pool full
+		err = mp.AddTx(tx2)
+		assertKind(t, err, TxAdmitUnavailable)
+	})
+
+	t.Run("invalid tx rejected", func(t *testing.T) {
+		st, _ := testSpendableChainState(fromAddress, []uint64{100})
+		mp, err := NewMempool(st, nil, devnetGenesisChainID)
+		if err != nil {
+			t.Fatalf("new mempool: %v", err)
+		}
+		// Garbage bytes that fail consensus.CheckTransaction → rejected.
+		err = mp.AddTx([]byte{0xDE, 0xAD})
+		assertKind(t, err, TxAdmitRejected)
+	})
+}
+
+func TestTxAdmitErrorMessage(t *testing.T) {
+	err := &TxAdmitError{Kind: TxAdmitConflict, Message: "tx already in mempool"}
+	if err.Error() != "tx already in mempool" {
+		t.Fatalf("Error()=%q, want %q", err.Error(), "tx already in mempool")
+	}
 }
