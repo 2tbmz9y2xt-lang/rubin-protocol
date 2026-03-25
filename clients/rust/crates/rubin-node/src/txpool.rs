@@ -163,6 +163,17 @@ impl TxPool {
         block_store: Option<&BlockStore>,
         chain_id: [u8; 32],
     ) -> Result<[u8; 32], TxPoolAdmitError> {
+        self.admit_with_metadata(tx_bytes, chain_state, block_store, chain_id)
+            .map(|(txid, _)| txid)
+    }
+
+    pub fn admit_with_metadata(
+        &mut self,
+        tx_bytes: &[u8],
+        chain_state: &ChainState,
+        block_store: Option<&BlockStore>,
+        chain_id: [u8; 32],
+    ) -> Result<([u8; 32], RelayTxMetadata), TxPoolAdmitError> {
         let (tx, txid, _wtxid, consumed) =
             parse_tx(tx_bytes).map_err(|err| rejected(format!("transaction rejected: {err}")))?;
         if consumed != tx_bytes.len() {
@@ -274,7 +285,23 @@ impl TxPool {
         }
 
         self.insert_entry(txid, entry);
-        Ok(txid)
+        Ok((
+            txid,
+            RelayTxMetadata {
+                fee: summary.fee,
+                size: tx_bytes.len(),
+            },
+        ))
+    }
+
+    pub fn relay_metadata_for_bytes(
+        &self,
+        tx_bytes: &[u8],
+        chain_state: &ChainState,
+        block_store: Option<&BlockStore>,
+        chain_id: [u8; 32],
+    ) -> Result<RelayTxMetadata, TxPoolAdmitError> {
+        relay_metadata(tx_bytes, chain_state, block_store, chain_id, &self.cfg)
     }
 
     /// Remove transactions by txid (e.g. after block confirmation).

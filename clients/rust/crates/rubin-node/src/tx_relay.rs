@@ -233,6 +233,7 @@ fn broadcast_inv_to_addrs(
 /// broadcast INV to peers. Matches Go `AnnounceTx`.
 pub fn announce_tx(
     tx_bytes: &[u8],
+    meta: crate::txpool::RelayTxMetadata,
     relay_state: &TxRelayState,
     peer_manager: &PeerManager,
     local_addr: &str,
@@ -240,12 +241,11 @@ pub fn announce_tx(
 ) -> Result<(), String> {
     let txid = canonical_txid(tx_bytes)?;
 
-    // Store in relay pool (fee=0, size=raw length — metadata not available
-    // from RPC path without re-parsing; matches Go where mempool.RelayMetadata
-    // extracts fee/size, but for RPC-submitted txs fee is already validated).
+    // RPC path already passed mempool admission, so preserve the validated
+    // relay metadata for relay-pool priority instead of degrading to zero fee.
     if !relay_state
         .relay_pool
-        .put(txid, tx_bytes, 0, tx_bytes.len())
+        .put(txid, tx_bytes, meta.fee, meta.size)
     {
         return Ok(());
     }
@@ -274,7 +274,8 @@ pub fn announce_tx(
 /// (Go's seen-before-pool pattern).
 ///
 /// If relay metadata validation fails, the tx remains marked as seen so peers
-/// do not churn INV/GETDATA retries for the same invalid payload.
+/// do not churn INV/GETDATA retries for the same invalid payload, but the peer
+/// session itself is not failed.
 ///
 /// Rejects oversized payloads (> MAX_RELAY_MSG_BYTES) before any processing.
 pub fn handle_received_tx(
@@ -307,14 +308,16 @@ pub fn handle_received_tx(
         suite_context: sync_engine.cfg.suite_context.clone(),
         ..crate::txpool::TxPoolConfig::default()
     };
-    let meta = crate::txpool::relay_metadata(
+    let meta = match crate::txpool::relay_metadata(
         tx_bytes,
         &sync_engine.chain_state,
         sync_engine.block_store.as_ref(),
         sync_engine.cfg.chain_id,
         &relay_cfg,
-    )
-    .map_err(io::Error::other)?;
+    ) {
+        Ok(meta) => meta,
+        Err(_) => return Ok(()),
+    };
 
     // Store in relay pool with extracted metadata.
     if !relay_state
@@ -444,6 +447,21 @@ mod tests {
         let mut cfg = default_sync_config(None, fixture_chain_id(vector.chain_id.as_deref()), None);
         cfg.core_ext_deployments = rubin_consensus::CoreExtDeploymentProfiles::empty();
         SyncEngine::new(chain_state_from_positive_fixture(vector), None, cfg).expect("sync engine")
+    }
+
+    fn positive_fixture_tx_and_meta() -> (Vec<u8>, crate::txpool::RelayTxMetadata) {
+        let vector = positive_fixture_vector();
+        let tx_bytes = hex::decode(&vector.tx_hex).expect("tx hex");
+        let state = chain_state_from_positive_fixture(&vector);
+        let meta = crate::txpool::relay_metadata(
+            &tx_bytes,
+            &state,
+            None,
+            fixture_chain_id(vector.chain_id.as_deref()),
+            &crate::txpool::TxPoolConfig::default(),
+        )
+        .expect("positive fixture relay metadata");
+        (tx_bytes, meta)
     }
 
     fn make_txid(b: u8) -> [u8; 32] {
@@ -848,7 +866,7 @@ mod tests {
 
     #[test]
     fn announce_tx_with_real_tx_stores_and_broadcasts() {
-        let tx_bytes = real_tx_bytes();
+        let (tx_bytes, meta) = positive_fixture_tx_and_meta();
         let relay = TxRelayState::new();
         let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
             "devnet", 64,
@@ -863,7 +881,7 @@ mod tests {
             .unwrap()
             .insert("peer-x:8333".to_string(), PeerOutbox::default());
 
-        let result = announce_tx(&tx_bytes, &relay, &pm, "local:8333", &outboxes);
+        let result = announce_tx(&tx_bytes, meta, &relay, &pm, "local:8333", &outboxes);
         assert!(result.is_ok(), "announce_tx failed: {:?}", result.err());
 
         // Tx should be in relay pool + seen set.
@@ -881,6 +899,10 @@ mod tests {
     fn announce_tx_skips_already_seen() {
         let tx_bytes = real_tx_bytes();
         let txid = canonical_txid(&tx_bytes).unwrap();
+        let meta = crate::txpool::RelayTxMetadata {
+            fee: 0,
+            size: tx_bytes.len(),
+        };
         let relay = TxRelayState::new();
         let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
             "devnet", 64,
@@ -899,7 +921,7 @@ mod tests {
         relay.tx_seen.add(txid);
         relay.relay_pool.put(txid, &tx_bytes, 0, tx_bytes.len());
 
-        let result = announce_tx(&tx_bytes, &relay, &pm, "local:8333", &outboxes);
+        let result = announce_tx(&tx_bytes, meta, &relay, &pm, "local:8333", &outboxes);
         assert!(result.is_ok());
 
         // No broadcast should occur (already seen).
@@ -910,6 +932,10 @@ mod tests {
     #[test]
     fn announce_tx_relay_pool_rejection_skips_seen_and_broadcast() {
         let tx_bytes = real_tx_bytes();
+        let meta = crate::txpool::RelayTxMetadata {
+            fee: 0,
+            size: tx_bytes.len(),
+        };
         let relay = TxRelayState {
             tx_seen: BoundedHashSet::new(crate::tx_seen::DEFAULT_TX_SEEN_CAPACITY),
             relay_pool: RelayTxPool::new_with_limit(1),
@@ -931,7 +957,7 @@ mod tests {
 
         assert!(relay.relay_pool.put([0xEE; 32], &[0xAA], 1, 1));
 
-        let result = announce_tx(&tx_bytes, &relay, &pm, "local:8333", &outboxes);
+        let result = announce_tx(&tx_bytes, meta, &relay, &pm, "local:8333", &outboxes);
         assert!(result.is_ok());
 
         let txid = canonical_txid(&tx_bytes).unwrap();
@@ -939,6 +965,41 @@ mod tests {
         assert!(!relay.relay_pool.has(&txid));
         let boxes = outboxes.lock().unwrap();
         assert!(boxes["peer-z:8333"].is_empty());
+    }
+
+    #[test]
+    fn announce_tx_uses_real_metadata_for_relay_pool_priority() {
+        let (tx_bytes, meta) = positive_fixture_tx_and_meta();
+        let incoming_txid = canonical_txid(&tx_bytes).unwrap();
+        let existing_txid = [0xEE; 32];
+        let relay = TxRelayState {
+            tx_seen: BoundedHashSet::new(crate::tx_seen::DEFAULT_TX_SEEN_CAPACITY),
+            relay_pool: RelayTxPool::new_with_limit(1),
+            tx_relay_fanout: DEFAULT_TX_RELAY_FANOUT,
+            network: "devnet".to_string(),
+        };
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "peer-rpc:8333".to_string(),
+            ..Default::default()
+        });
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("peer-rpc:8333".to_string(), PeerOutbox::default());
+
+        assert!(relay.relay_pool.put(existing_txid, &[0xAA], 1, 100_000));
+
+        let result = announce_tx(&tx_bytes, meta, &relay, &pm, "local:8333", &outboxes);
+        assert!(result.is_ok(), "announce_tx failed: {:?}", result.err());
+        assert!(relay.tx_seen.has(&incoming_txid));
+        assert!(relay.relay_pool.has(&incoming_txid));
+        assert!(!relay.relay_pool.has(&existing_txid));
+        let boxes = outboxes.lock().unwrap();
+        assert_eq!(boxes["peer-rpc:8333"].len(), 1);
     }
 
     #[test]
@@ -1019,7 +1080,7 @@ mod tests {
             "local:8333",
             &outboxes,
         );
-        assert!(result.is_err());
+        assert!(result.is_ok());
         assert!(relay.tx_seen.has(&txid));
         assert!(!relay.relay_pool.has(&txid));
         let boxes = outboxes.lock().unwrap();
