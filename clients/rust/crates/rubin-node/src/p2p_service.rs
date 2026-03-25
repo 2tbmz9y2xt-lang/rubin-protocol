@@ -719,17 +719,9 @@ fn handle_peer(
         // Flush relay outbox BEFORE blocking on read_message so that queued
         // INV frames are sent without waiting for inbound socket activity.
         // Matches Go where broadcastInventory writes directly to the socket.
-        {
-            let pending: Vec<Vec<u8>> = shared
-                .peer_outboxes
-                .lock()
-                .ok()
-                .and_then(|mut ob| ob.get_mut(&peer_addr).map(std::mem::take))
-                .unwrap_or_default();
-            for frame in pending {
-                if session.write_raw(&frame).is_err() {
-                    break;
-                }
+        for frame in take_pending_outbox_frames(&shared.peer_outboxes, &peer_addr) {
+            if session.write_raw(&frame).is_err() {
+                break;
             }
         }
         let msg = match session.read_message() {
@@ -740,15 +732,8 @@ fn handle_peer(
                     io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
                 ) =>
             {
-                // Drain relay outbox into local buffer, then release the lock
-                // before performing socket writes (avoids blocking other peers).
-                let pending: Vec<Vec<u8>> = shared
-                    .peer_outboxes
-                    .lock()
-                    .ok()
-                    .and_then(|mut ob| ob.get_mut(&peer_addr).map(std::mem::take))
-                    .unwrap_or_default();
-                for frame in pending {
+                // Drain relay outbox (timeout/idle path).
+                for frame in take_pending_outbox_frames(&shared.peer_outboxes, &peer_addr) {
                     if session.write_raw(&frame).is_err() {
                         break;
                     }
@@ -784,21 +769,29 @@ fn handle_peer(
                 .write_message(&outbound)
                 .map_err(|err| format!("handle live message: {err}"))?;
         }
-        // Drain relay outbox into local buffer, then release the lock
-        // before performing socket writes (avoids blocking other peers).
-        let pending: Vec<Vec<u8>> = shared
-            .peer_outboxes
-            .lock()
-            .ok()
-            .and_then(|mut ob| ob.get_mut(&peer_addr).map(std::mem::take))
-            .unwrap_or_default();
-        for frame in pending {
+        // Drain relay outbox (post-message path).
+        for frame in take_pending_outbox_frames(&shared.peer_outboxes, &peer_addr) {
             session
                 .write_raw(&frame)
                 .map_err(|err| format!("relay drain: {err}"))?;
         }
     }
     Ok(())
+}
+
+/// Drain all queued relay frames for `peer_addr` from the shared outbox.
+///
+/// Returns the frames that were pending. The caller is responsible for
+/// writing them to the peer's socket.
+fn take_pending_outbox_frames(
+    outboxes: &Mutex<HashMap<String, Vec<Vec<u8>>>>,
+    peer_addr: &str,
+) -> Vec<Vec<u8>> {
+    outboxes
+        .lock()
+        .ok()
+        .and_then(|mut ob| ob.get_mut(peer_addr).map(std::mem::take))
+        .unwrap_or_default()
 }
 
 fn service_local_version(
@@ -860,6 +853,41 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
+
+    use super::take_pending_outbox_frames;
+
+    #[test]
+    fn take_pending_outbox_frames_drains_and_clears() {
+        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("peer:8333".to_string(), vec![vec![1, 2], vec![3, 4]]);
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("other:8333".to_string(), vec![vec![5]]);
+
+        let frames = take_pending_outbox_frames(&outboxes, "peer:8333");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0], vec![1, 2]);
+        assert_eq!(frames[1], vec![3, 4]);
+
+        // Queue is now empty for that peer.
+        let again = take_pending_outbox_frames(&outboxes, "peer:8333");
+        assert!(again.is_empty());
+
+        // Other peer unaffected.
+        let other = take_pending_outbox_frames(&outboxes, "other:8333");
+        assert_eq!(other.len(), 1);
+    }
+
+    #[test]
+    fn take_pending_outbox_frames_missing_peer_returns_empty() {
+        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let frames = take_pending_outbox_frames(&outboxes, "nobody:8333");
+        assert!(frames.is_empty());
+    }
 
     use rubin_consensus::{block_hash, constants::POW_LIMIT, BLOCK_HEADER_BYTES};
 
