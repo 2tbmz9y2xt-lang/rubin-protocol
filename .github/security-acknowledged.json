@@ -94,7 +94,7 @@
       "date": "2026-03-25"
     },
     {
-      "title_pattern": "Unbounded Memory in Peer Outbox",
+      "title_pattern": "Unbounded Memory in Peer Outboxes",
       "file_pattern": "p2p_service.rs",
       "reason": "ACCEPTED_RISK: Go parity — Go also has no per-peer send queue limit. Each frame ~70 bytes (INV). Real risk LOW at current throughput. Follow-up: add per-peer cap.",
       "acknowledged_by": "controller",
@@ -108,23 +108,37 @@
       "date": "2026-03-25"
     },
     {
-      "title_pattern": "Transaction ID Malleability",
+      "title_pattern": "Invalid Transactions Stored in Relay Pool",
       "file_pattern": "tx_relay.rs",
-      "reason": "FALSE_POSITIVE: duplicate of Malleability pattern — Go/Rust both reject non-canonical bytes identically.",
+      "reason": "FALSE_POSITIVE: same Go-parity rationale as Transaction Relay Without Validation — the relay pool is intentionally separate from consensus mempool admission on both Rust and Go paths.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
     {
-      "title_pattern": "Unvalidated Transaction",
+      "title_pattern": "Network transactions not submitted to mempool",
       "file_pattern": "tx_relay.rs",
-      "reason": "FALSE_POSITIVE: Go parity — relay pool is separate from consensus mempool. Relay does not imply validation, same as Go.",
+      "reason": "FALSE_POSITIVE: Go parity — network tx relay does not imply consensus mempool admission. Rust mirrors Go by relaying through the relay pool and keeping mempool admission as a separate path.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
     {
-      "title_pattern": "Memory Exhaustion",
+      "title_pattern": "Unvalidated Transactions in Relay Pool",
+      "file_pattern": "tx_relay.rs",
+      "reason": "FALSE_POSITIVE: Go parity — relay pool storage is intentionally decoupled from consensus mempool validation, so this is the same reviewed false-positive family as Transaction Relay Without Validation.",
+      "acknowledged_by": "controller",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Memory Exhaustion via Large Transactions",
       "file_pattern": "relay_pool.rs",
       "reason": "ACCEPTED_RISK: Go parity — Go MemoryTxPool also count-based (1000) without byte limit. MAX_RELAY_MSG_BYTES limits individual tx size.",
+      "acknowledged_by": "controller",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Unbounded Relay Pool Growth Under Attack",
+      "file_pattern": "relay_pool.rs",
+      "reason": "ACCEPTED_RISK: same reviewed risk family as Memory Exhaustion via Large Transactions — Go parity, bounded entry count, and MAX_RELAY_MSG_BYTES cap keep this as a non-blocking follow-up rather than a merge blocker.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
@@ -143,9 +157,30 @@
       "date": "2026-03-25"
     },
     {
-      "title_pattern": "Inconsistent Fee",
+      "title_pattern": "Mempool Not Updated with P2P Transactions",
+      "file_pattern": "p2p_runtime.rs",
+      "reason": "FALSE_POSITIVE: Go parity — P2P relay plumbing is separate from consensus mempool accounting. The reviewed claim conflates relay propagation with mempool lifecycle management.",
+      "acknowledged_by": "controller",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Mempool Bypass for P2P Transactions",
+      "file_pattern": "p2p_runtime.rs",
+      "reason": "FALSE_POSITIVE: same Go-parity rationale as the tx_relay mempool comments — P2P relay intentionally does not imply immediate consensus mempool admission.",
+      "acknowledged_by": "controller",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Fee=0 for RPC Transactions Causes Priority Distortion",
       "file_pattern": "tx_relay.rs",
       "reason": "ACCEPTED_RISK: Go relay also uses relay-specific metadata, not consensus fee. fee=0 for RPC-submitted txs matches Go where RelayMetadata is separate from mempool fee.",
+      "acknowledged_by": "controller",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Fee=0 for RPC Transactions Causes Priority Distortion",
+      "file_pattern": "relay_pool.rs",
+      "reason": "ACCEPTED_RISK: same reviewed relay-metadata tradeoff as the tx_relay finding — Go parity keeps relay metadata separate from consensus fee accounting.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
