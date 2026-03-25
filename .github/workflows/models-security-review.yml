@@ -110,10 +110,7 @@ jobs:
                           .replace(/[^\x20-\x7E]/g, '')
                           .slice(0, 200);
                         if (sev && title) {
-                          titles.push(`[${sev}] ${title}`);
-                          // Add file+severity composite key for fuzzy dedup
-                          // (R1 rephrases same finding with different titles)
-                          if (file) titles.push(`[${sev}:${file}]`);
+                          titles.push(`[${sev}] ${title}` + (file ? ` (in ${file})` : ''));
                         }
                       }
                     } catch {}
@@ -197,10 +194,10 @@ jobs:
               '- NEVER say "looks good" or "no issues found" if you have not verified every line.',
               '- If the diff is too large to fully verify, say so explicitly and flag unreviewed sections.',
               '- DEDUPLICATION (MANDATORY): Check the PREVIOUSLY REPORTED section below the diff.',
-              '  If a finding matches ANY of: (a) exact title, (b) same [SEVERITY:file] key,',
-              '  or (c) describes the same underlying issue with different wording — SKIP IT.',
-              '  Only report genuinely NEW issues. Re-reporting creates noise and wastes review cycles.',
-              '  When in doubt whether an issue was already reported, SKIP it.',
+              '  If a finding describes the same underlying issue as one already reported — even with',
+              '  different wording or title — SKIP IT. Two findings about the same root cause in the',
+              '  same file are duplicates regardless of how they are phrased.',
+              '  Only report genuinely NEW issues not covered by previous reviews.',
               '- ANTI-HALLUCINATION: If the diff is truncated or you cannot see a file/function mentioned elsewhere',
               '  in the diff — do NOT claim it is missing. Add it to unreviewed_sections and set verdict to WARN.',
               '- NEVER report "function not defined" or "file missing" unless you have verified the COMPLETE diff.',
