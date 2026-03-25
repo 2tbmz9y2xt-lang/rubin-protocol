@@ -148,15 +148,19 @@ jobs:
               } catch { return null; }
             };
 
+            // Dynamic per-file limit: divide budget across all files so none are silently dropped.
+            const TOTAL_FILE_BUDGET = 100000;
+            const fileCount = changedFiles.length || 1;
+            const perFileBudget = Math.min(30000, Math.floor(TOTAL_FILE_BUDGET / fileCount));
             const changedFilePayload = changedFiles
               .map(file => {
                 const content = readChangedFile(file);
                 if (!content) return null;
-                return `FILE: ${file}\n${content.slice(0, 30000)}`;
+                return `FILE: ${file}\n${content.slice(0, perFileBudget)}`;
               })
               .filter(Boolean)
               .join('\n\n---\n\n')
-              .slice(0, 100000);
+              .slice(0, TOTAL_FILE_BUDGET);
 
             const systemPrompt = [
               'You are a HOSTILE protocol security auditor for the RUBIN blockchain protocol.',
