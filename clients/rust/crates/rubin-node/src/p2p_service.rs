@@ -163,6 +163,14 @@ fn start_outbound_peer(addr: String, shared: SharedServiceState) {
     spawn_service_worker(&shared, move || {
         let connect_timeout = outbound_connect_timeout(&worker_shared.runtime_cfg);
         let result = connect_with_timeout(&addr, connect_timeout).and_then(|stream| {
+            // Clear in-flight marker once TCP connect succeeds — active_sessions
+            // takes over slot accounting from here.  Leaving the marker until
+            // handle_peer returns would double-count this peer in
+            // should_skip_outbound_dial (active_sessions + in_flight.len()).
+            {
+                let mut guard = lock_in_flight_dials(&worker_shared);
+                guard.remove(&addr);
+            }
             let Some(session_slot) = try_acquire_session_slot(&worker_shared) else {
                 return Err(format!("session cap reached before handshake: {addr}"));
             };
@@ -170,9 +178,11 @@ fn start_outbound_peer(addr: String, shared: SharedServiceState) {
             drop(session_slot);
             result
         });
-        let mut guard = lock_in_flight_dials(&worker_shared);
-        guard.remove(&addr);
-        drop(guard);
+        // If connect failed, in_flight marker is still set — clean up.
+        {
+            let mut guard = lock_in_flight_dials(&worker_shared);
+            guard.remove(&addr);
+        }
         let _ = result;
     });
 }
