@@ -46,6 +46,7 @@ struct SharedServiceState {
     peer_manager: Arc<PeerManager>,
     sync_engine: Arc<Mutex<SyncEngine>>,
     bootstrap_peers: Arc<Vec<String>>,
+    bootstrap_rotate_idx: Arc<AtomicUsize>,
     in_flight_dials: Arc<Mutex<HashSet<String>>>,
     chain_id: [u8; 32],
     genesis_hash: [u8; 32],
@@ -70,6 +71,7 @@ pub fn start_node_p2p_service(cfg: NodeP2PServiceConfig) -> Result<RunningNodeP2
         peer_manager: cfg.peer_manager,
         sync_engine: cfg.sync_engine,
         bootstrap_peers: Arc::new(cfg.bootstrap_peers),
+        bootstrap_rotate_idx: Arc::new(AtomicUsize::new(0)),
         in_flight_dials: Arc::new(Mutex::new(HashSet::new())),
         chain_id: cfg.chain_id,
         genesis_hash: cfg.genesis_hash,
@@ -193,7 +195,19 @@ fn is_connected(peer_manager: &PeerManager, addr: &str) -> bool {
 }
 
 fn reconnect_missing_bootstrap_peers(shared: &SharedServiceState) {
-    for addr in shared.bootstrap_peers.iter() {
+    let n = shared.bootstrap_peers.len();
+    if n == 0 {
+        return;
+    }
+    // Rotate starting index each call so later peers get a fair chance
+    // when slots are limited.  Without rotation, a dead peer at index 0
+    // would permanently starve reachable peers at higher indices.
+    let start = shared
+        .bootstrap_rotate_idx
+        .fetch_add(1, Ordering::Relaxed)
+        % n;
+    for i in 0..n {
+        let addr = &shared.bootstrap_peers[(start + i) % n];
         if !is_connected(&shared.peer_manager, addr) {
             start_outbound_peer(addr.clone(), shared.clone());
         }
@@ -518,6 +532,7 @@ mod tests {
             peer_manager: Arc::new(PeerManager::new(runtime_cfg)),
             sync_engine,
             bootstrap_peers: Arc::new(bootstrap_peers),
+            bootstrap_rotate_idx: Arc::new(AtomicUsize::new(0)),
             in_flight_dials: Arc::new(Mutex::new(HashSet::new())),
             chain_id: devnet_genesis_chain_id(),
             genesis_hash: test_genesis_hash(),
