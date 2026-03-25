@@ -202,10 +202,7 @@ fn reconnect_missing_bootstrap_peers(shared: &SharedServiceState) {
     // Rotate starting index each call so later peers get a fair chance
     // when slots are limited.  Without rotation, a dead peer at index 0
     // would permanently starve reachable peers at higher indices.
-    let start = shared
-        .bootstrap_rotate_idx
-        .fetch_add(1, Ordering::Relaxed)
-        % n;
+    let start = shared.bootstrap_rotate_idx.fetch_add(1, Ordering::Relaxed) % n;
     for i in 0..n {
         let addr = &shared.bootstrap_peers[(start + i) % n];
         if !is_connected(&shared.peer_manager, addr) {
