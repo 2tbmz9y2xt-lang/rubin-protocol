@@ -152,11 +152,11 @@ jobs:
               .map(file => {
                 const content = readChangedFile(file);
                 if (!content) return null;
-                return `FILE: ${file}\n${content.slice(0, 8000)}`;
+                return `FILE: ${file}\n${content.slice(0, 30000)}`;
               })
               .filter(Boolean)
               .join('\n\n---\n\n')
-              .slice(0, 64000);
+              .slice(0, 100000);
 
             const systemPrompt = [
               'You are a HOSTILE protocol security auditor for the RUBIN blockchain protocol.',
