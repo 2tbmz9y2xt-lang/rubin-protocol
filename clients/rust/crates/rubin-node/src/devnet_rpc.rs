@@ -1577,6 +1577,68 @@ mod tests {
     }
 
     #[test]
+    fn submit_tx_calls_announce_callback_on_success() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let vector = positive_fixture_vector();
+        assert!(vector.expect_ok);
+        let raw = hex::decode(&vector.tx_hex).expect("decode tx hex");
+        let called = Arc::new(AtomicBool::new(false));
+        let called_clone = Arc::clone(&called);
+
+        let mut state = build_state_with_chain_state(
+            chain_state_from_positive_fixture(&vector),
+            fixture_chain_id(vector.chain_id.as_deref()),
+        );
+        state.announce_tx = Some(Arc::new(move |_tx_bytes: &[u8]| {
+            called_clone.store(true, Ordering::SeqCst);
+            Ok(())
+        }));
+
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/submit_tx".to_string(),
+                body: format!(r#"{{"tx_hex":"{}"}}"#, hex::encode(&raw)).into_bytes(),
+            },
+        );
+        assert_eq!(response.status, 200);
+        assert!(
+            called.load(Ordering::SeqCst),
+            "announce_tx should be called"
+        );
+    }
+
+    #[test]
+    fn submit_tx_logs_announce_error_without_failing_rpc() {
+        let vector = positive_fixture_vector();
+        assert!(vector.expect_ok);
+        let raw = hex::decode(&vector.tx_hex).expect("decode tx hex");
+
+        let mut state = build_state_with_chain_state(
+            chain_state_from_positive_fixture(&vector),
+            fixture_chain_id(vector.chain_id.as_deref()),
+        );
+        state.announce_tx = Some(Arc::new(
+            |_tx_bytes: &[u8]| Err("relay failure".to_string()),
+        ));
+
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/submit_tx".to_string(),
+                body: format!(r#"{{"tx_hex":"{}"}}"#, hex::encode(&raw)).into_bytes(),
+            },
+        );
+        // RPC should still succeed — announce failure is fire-and-forget.
+        assert_eq!(response.status, 200);
+        let body = response_json(&response);
+        assert_eq!(body["accepted"].as_bool(), Some(true));
+    }
+
+    #[test]
     fn get_block_returns_unavailable_when_block_bytes_are_missing() {
         let (state, dir) = build_state(true);
         let (_height, tip_hash) = state

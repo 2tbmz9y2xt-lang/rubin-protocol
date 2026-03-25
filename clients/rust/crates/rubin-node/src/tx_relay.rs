@@ -404,6 +404,252 @@ mod tests {
     }
 
     #[test]
+    fn broadcast_inventory_enqueues_tx_frames_to_registered_peers() {
+        let relay = TxRelayState::new();
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        // Register two peers in peer_manager.
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "peer-a:8333".to_string(),
+            ..Default::default()
+        });
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "peer-b:8333".to_string(),
+            ..Default::default()
+        });
+        // Create outboxes for both peers.
+        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("peer-a:8333".to_string(), Vec::new());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("peer-b:8333".to_string(), Vec::new());
+
+        // Broadcast TX inventory — should enqueue frames.
+        let result = broadcast_inventory(
+            &relay,
+            None,
+            &[InventoryVector {
+                kind: MSG_TX,
+                hash: make_txid(0x42),
+            }],
+            &pm,
+            "local:8333",
+            &outboxes,
+        );
+        assert!(result.is_ok());
+
+        // At least one outbox should have a frame.
+        let boxes = outboxes.lock().unwrap();
+        let total_frames: usize = boxes.values().map(|q| q.len()).sum();
+        assert!(total_frames > 0, "expected at least one enqueued frame");
+        // Each frame should start with RBDV magic.
+        for queue in boxes.values() {
+            for frame in queue {
+                assert_eq!(&frame[0..4], b"RBDV", "frame should use Rubin devnet magic");
+            }
+        }
+    }
+
+    #[test]
+    fn broadcast_inventory_block_items_go_to_all_peers() {
+        let relay = TxRelayState::new();
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "peer-a:8333".to_string(),
+            ..Default::default()
+        });
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "peer-b:8333".to_string(),
+            ..Default::default()
+        });
+        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("peer-a:8333".to_string(), Vec::new());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("peer-b:8333".to_string(), Vec::new());
+
+        // Broadcast BLOCK inventory — should go to ALL peers.
+        let result = broadcast_inventory(
+            &relay,
+            None,
+            &[InventoryVector {
+                kind: MSG_BLOCK,
+                hash: make_txid(0xBB),
+            }],
+            &pm,
+            "local:8333",
+            &outboxes,
+        );
+        assert!(result.is_ok());
+
+        let boxes = outboxes.lock().unwrap();
+        // Both peers should have exactly 1 frame.
+        assert_eq!(boxes["peer-a:8333"].len(), 1);
+        assert_eq!(boxes["peer-b:8333"].len(), 1);
+    }
+
+    #[test]
+    fn broadcast_inventory_skip_addr_excludes_sender() {
+        let relay = TxRelayState::new();
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "sender:8333".to_string(),
+            ..Default::default()
+        });
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "other:8333".to_string(),
+            ..Default::default()
+        });
+        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("sender:8333".to_string(), Vec::new());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("other:8333".to_string(), Vec::new());
+
+        let result = broadcast_inventory(
+            &relay,
+            Some("sender:8333"),
+            &[InventoryVector {
+                kind: MSG_TX,
+                hash: make_txid(0x01),
+            }],
+            &pm,
+            "local:8333",
+            &outboxes,
+        );
+        assert!(result.is_ok());
+
+        let boxes = outboxes.lock().unwrap();
+        // Sender should be skipped.
+        assert_eq!(boxes["sender:8333"].len(), 0);
+        // Other peer should get the frame.
+        assert_eq!(boxes["other:8333"].len(), 1);
+    }
+
+    #[test]
+    fn broadcast_inventory_mixed_block_and_tx() {
+        let relay = TxRelayState::new();
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        for i in 0..3 {
+            let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+                addr: format!("peer-{i}:8333"),
+                ..Default::default()
+            });
+        }
+        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        for i in 0..3 {
+            outboxes
+                .lock()
+                .unwrap()
+                .insert(format!("peer-{i}:8333"), Vec::new());
+        }
+
+        let result = broadcast_inventory(
+            &relay,
+            None,
+            &[
+                InventoryVector {
+                    kind: MSG_BLOCK,
+                    hash: make_txid(0xBB),
+                },
+                InventoryVector {
+                    kind: MSG_TX,
+                    hash: make_txid(0xCC),
+                },
+            ],
+            &pm,
+            "local:8333",
+            &outboxes,
+        );
+        assert!(result.is_ok());
+
+        // All peers should have block frame; tx frame may go to subset via fanout.
+        let boxes = outboxes.lock().unwrap();
+        for i in 0..3 {
+            assert!(
+                !boxes[&format!("peer-{i}:8333")].is_empty(),
+                "peer-{i} should have at least block frame"
+            );
+        }
+    }
+
+    #[test]
+    fn broadcast_inventory_empty_items_noop() {
+        let relay = TxRelayState::new();
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "peer:8333".to_string(),
+            ..Default::default()
+        });
+        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("peer:8333".to_string(), Vec::new());
+
+        let result = broadcast_inventory(&relay, None, &[], &pm, "local:8333", &outboxes);
+        assert!(result.is_ok());
+        assert!(outboxes.lock().unwrap()["peer:8333"].is_empty());
+    }
+
+    #[test]
+    fn handle_received_tx_seen_before_pool() {
+        let relay = TxRelayState::new();
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+
+        // Pre-mark txid as seen — handle_received_tx should return Ok without storing.
+        let txid = make_txid(0x99);
+        relay.tx_seen.add(txid);
+
+        // We can't call handle_received_tx with invalid bytes (it needs parseable tx),
+        // but we verify the seen-before-pool semantics via the components.
+        assert!(relay.tx_seen.has(&txid));
+        assert!(!relay.relay_pool.has(&txid));
+
+        // Second add returns false — no relay.
+        assert!(!relay.tx_seen.add(txid));
+    }
+
+    #[test]
+    fn default_relay_state() {
+        let rs = TxRelayState::default();
+        assert_eq!(rs.tx_relay_fanout, DEFAULT_TX_RELAY_FANOUT);
+        assert_eq!(rs.network, "devnet");
+        assert!(rs.relay_pool.is_empty());
+        assert!(rs.tx_seen.is_empty());
+    }
+
+    #[test]
+    fn relay_state_with_network() {
+        let rs = TxRelayState::new_with_network("mainnet");
+        assert_eq!(rs.network, "mainnet");
+    }
+
+    #[test]
     fn tx_relay_score_matches_go_reference() {
         // Cross-validate with Go: sha3_256(key || salt || addr)
         // key = [0x00; 32], salt = "", addr = "test"
