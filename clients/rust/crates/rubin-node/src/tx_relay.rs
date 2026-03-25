@@ -616,10 +616,10 @@ mod tests {
     #[test]
     fn handle_received_tx_seen_before_pool() {
         let relay = TxRelayState::new();
-        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+        let _pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
             "devnet", 64,
         ));
-        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let _outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
 
         // Pre-mark txid as seen — handle_received_tx should return Ok without storing.
         let txid = make_txid(0x99);
