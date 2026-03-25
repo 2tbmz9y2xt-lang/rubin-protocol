@@ -80,16 +80,16 @@
       "date": "2026-03-25"
     },
     {
-      "title_pattern": "Malleability",
+      "title_pattern": "Transaction ID Malleability Due to Non-Canonical Parsing",
       "file_pattern": "tx_relay.rs",
-      "reason": "FALSE_POSITIVE: Go canonicalTxID (handlers_tx.go:41) uses identical consumed!=len check. Zero divergence — both reject trailing bytes.",
+      "reason": "FALSE_POSITIVE: matches the exact DeepSeek title. Go canonicalTxID (handlers_tx.go:41) uses identical consumed!=len check. Zero divergence — both reject trailing bytes.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
     {
-      "title_pattern": "Non-Canonical Parsing",
+      "title_pattern": "Consensus Divergence Risk in Transaction ID Calculation",
       "file_pattern": "tx_relay.rs",
-      "reason": "FALSE_POSITIVE: same as Malleability — Rust canonical_txid mirrors Go canonicalTxID exactly (consumed != len → error).",
+      "reason": "FALSE_POSITIVE: matches the exact earlier DeepSeek title for the same parser concern. Rust canonical_txid mirrors Go canonicalTxID exactly (consumed != len → error).",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
