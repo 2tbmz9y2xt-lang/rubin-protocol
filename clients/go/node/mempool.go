@@ -98,6 +98,37 @@ type RelayTxMetadata struct {
 	Size int
 }
 
+// TxAdmitErrorKind classifies mempool admission failures for deterministic
+// HTTP status mapping. Mirrors Rust TxPoolAdmitErrorKind.
+type TxAdmitErrorKind string
+
+const (
+	TxAdmitConflict    TxAdmitErrorKind = "conflict"
+	TxAdmitRejected    TxAdmitErrorKind = "rejected"
+	TxAdmitUnavailable TxAdmitErrorKind = "unavailable"
+)
+
+// TxAdmitError is a typed mempool admission error carrying a classification
+// kind and a human-readable message.
+type TxAdmitError struct {
+	Kind    TxAdmitErrorKind
+	Message string
+}
+
+func (e *TxAdmitError) Error() string { return e.Message }
+
+func txAdmitConflict(msg string) *TxAdmitError {
+	return &TxAdmitError{Kind: TxAdmitConflict, Message: msg}
+}
+
+func txAdmitRejected(msg string) *TxAdmitError {
+	return &TxAdmitError{Kind: TxAdmitRejected, Message: msg}
+}
+
+func txAdmitUnavailable(msg string) *TxAdmitError {
+	return &TxAdmitError{Kind: TxAdmitUnavailable, Message: msg}
+}
+
 func NewMempool(chainState *ChainState, blockStore *BlockStore, chainID [32]byte) (*Mempool, error) {
 	return NewMempoolWithConfig(chainState, blockStore, chainID, DefaultMempoolConfig())
 }
@@ -140,7 +171,7 @@ func (m *Mempool) Len() int {
 
 func (m *Mempool) AddTx(txBytes []byte) error {
 	if m == nil {
-		return errors.New("nil mempool")
+		return txAdmitUnavailable("nil mempool")
 	}
 
 	m.mu.Lock()
@@ -162,7 +193,7 @@ func (m *Mempool) AddTx(txBytes []byte) error {
 
 func (m *Mempool) RelayMetadata(txBytes []byte) (RelayTxMetadata, error) {
 	if m == nil {
-		return RelayTxMetadata{}, errors.New("nil mempool")
+		return RelayTxMetadata{}, txAdmitUnavailable("nil mempool")
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -240,12 +271,12 @@ func (m *Mempool) withLockedParsedBlock(block *consensus.ParsedBlock, fn func(*c
 func (m *Mempool) checkTransactionLocked(txBytes []byte) (*consensus.CheckedTransaction, []consensus.Outpoint, error) {
 	nextHeight, _, err := nextBlockContext(m.chainState)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, txAdmitUnavailable(err.Error())
 	}
 
 	blockMTP, err := m.nextBlockMTP(nextHeight)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, txAdmitUnavailable(err.Error())
 	}
 	checked, err := consensus.CheckTransactionWithCoreExtProfilesAndSuiteContext(
 		txBytes,
@@ -258,10 +289,10 @@ func (m *Mempool) checkTransactionLocked(txBytes []byte) (*consensus.CheckedTran
 		m.policy.SuiteRegistry,
 	)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, txAdmitRejected(err.Error())
 	}
 	if err := m.applyPolicyLocked(checked, nextHeight); err != nil {
-		return nil, nil, err
+		return nil, nil, txAdmitRejected(err.Error())
 	}
 	inputs := make([]consensus.Outpoint, 0, len(checked.Tx.Inputs))
 	for _, in := range checked.Tx.Inputs {
@@ -338,21 +369,21 @@ func (m *Mempool) removeTxLocked(txid [32]byte) {
 
 func (m *Mempool) validateAdmissionLocked(entry *mempoolEntry) error {
 	if entry == nil {
-		return errors.New("nil mempool entry")
+		return txAdmitRejected("nil mempool entry")
 	}
 	txid := entry.txid
 	if _, exists := m.txs[txid]; exists {
-		return fmt.Errorf("tx already in mempool")
+		return txAdmitConflict("tx already in mempool")
 	}
 	for _, op := range entry.inputs {
 		if existing, ok := m.spenders[op]; ok {
-			return fmt.Errorf("mempool double-spend conflict with %x", existing)
+			return txAdmitConflict(fmt.Sprintf("mempool double-spend conflict with %x", existing))
 		}
 	}
 	if len(m.txs) >= m.maxTxs {
 		worstTxid, worstEntry, ok := m.peekWorstLocked()
 		if !ok || compareEntryPriority(entry, worstEntry) <= 0 {
-			return fmt.Errorf("mempool full")
+			return txAdmitUnavailable("mempool full")
 		}
 		m.popWorstLocked()
 		m.removePoppedWorstLocked(worstTxid, worstEntry)
