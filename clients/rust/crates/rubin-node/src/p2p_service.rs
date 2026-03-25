@@ -694,6 +694,7 @@ fn handle_peer(
         relay_state: &shared.relay_state,
         peer_manager: &shared.peer_manager,
         local_addr: &shared.local_addr,
+        peer_registered_addr: &peer_addr,
         peer_writers: &shared.peer_outboxes,
     };
 
@@ -723,14 +724,17 @@ fn handle_peer(
                     io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
                 ) =>
             {
-                // Drain relay outbox on read timeout so broadcasts don't pile up.
-                if let Ok(mut outboxes) = shared.peer_outboxes.lock() {
-                    if let Some(queue) = outboxes.get_mut(&peer_addr) {
-                        for frame in queue.drain(..) {
-                            if session.write_raw(&frame).is_err() {
-                                break;
-                            }
-                        }
+                // Drain relay outbox into local buffer, then release the lock
+                // before performing socket writes (avoids blocking other peers).
+                let pending: Vec<Vec<u8>> = shared
+                    .peer_outboxes
+                    .lock()
+                    .ok()
+                    .and_then(|mut ob| ob.get_mut(&peer_addr).map(std::mem::take))
+                    .unwrap_or_default();
+                for frame in pending {
+                    if session.write_raw(&frame).is_err() {
+                        break;
                     }
                 }
                 continue;
@@ -764,17 +768,18 @@ fn handle_peer(
                 .write_message(&outbound)
                 .map_err(|err| format!("handle live message: {err}"))?;
         }
-        // Drain any relay frames queued by broadcast_inventory.
-        // Writes happen on the peer's own thread, serialized with
-        // normal message writes — no interleaving possible.
-        if let Ok(mut outboxes) = shared.peer_outboxes.lock() {
-            if let Some(queue) = outboxes.get_mut(&peer_addr) {
-                for frame in queue.drain(..) {
-                    session
-                        .write_raw(&frame)
-                        .map_err(|err| format!("relay drain: {err}"))?;
-                }
-            }
+        // Drain relay outbox into local buffer, then release the lock
+        // before performing socket writes (avoids blocking other peers).
+        let pending: Vec<Vec<u8>> = shared
+            .peer_outboxes
+            .lock()
+            .ok()
+            .and_then(|mut ob| ob.get_mut(&peer_addr).map(std::mem::take))
+            .unwrap_or_default();
+        for frame in pending {
+            session
+                .write_raw(&frame)
+                .map_err(|err| format!("relay drain: {err}"))?;
         }
     }
     Ok(())
