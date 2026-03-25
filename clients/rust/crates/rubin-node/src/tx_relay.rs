@@ -68,7 +68,11 @@ pub fn select_tx_relay_peers(
             a.1.cmp(&b.1)
         }
     });
-    scored.into_iter().take(limit).map(|(_, addr)| addr).collect()
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, addr)| addr)
+        .collect()
 }
 
 /// Compute relay score for a peer. Matches Go `txRelayScore`:
@@ -175,7 +179,9 @@ pub fn announce_tx(
     // Store in relay pool (fee=0, size=raw length — metadata not available
     // from RPC path without re-parsing; matches Go where mempool.RelayMetadata
     // extracts fee/size, but for RPC-submitted txs fee is already validated).
-    relay_state.relay_pool.put(txid, tx_bytes, 0, tx_bytes.len());
+    relay_state
+        .relay_pool
+        .put(txid, tx_bytes, 0, tx_bytes.len());
 
     if !relay_state.tx_seen.add(txid) {
         return Ok(()); // Already seen — don't broadcast.
@@ -214,7 +220,10 @@ pub fn handle_received_tx(
     }
 
     // Store in relay pool.
-    if !relay_state.relay_pool.put(txid, tx_bytes, 0, tx_bytes.len()) {
+    if !relay_state
+        .relay_pool
+        .put(txid, tx_bytes, 0, tx_bytes.len())
+    {
         return Ok(()); // Pool rejected (full, low priority) — don't relay.
     }
 
@@ -294,10 +303,7 @@ mod tests {
     #[test]
     fn inventory_relay_key_single_item_returns_hash() {
         let hash = [0xBB; 32];
-        let items = vec![InventoryVector {
-            kind: MSG_TX,
-            hash,
-        }];
+        let items = vec![InventoryVector { kind: MSG_TX, hash }];
         assert_eq!(inventory_relay_key(&items), hash);
     }
 
@@ -327,9 +333,7 @@ mod tests {
     fn select_tx_relay_peers_deterministic_ordering() {
         let key = [0xCC; 32];
         let salt = "local:8333";
-        let addrs: Vec<String> = (0..10)
-            .map(|i| format!("peer-{i}:8333"))
-            .collect();
+        let addrs: Vec<String> = (0..10).map(|i| format!("peer-{i}:8333")).collect();
 
         let selected = select_tx_relay_peers(key, salt, &addrs, 3);
         assert_eq!(selected.len(), 3);
@@ -365,9 +369,10 @@ mod tests {
     #[test]
     fn announce_tx_marks_seen_and_stores() {
         let relay = TxRelayState::new();
-        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config("devnet", 64));
-        let writers: Mutex<HashMap<String, Arc<Mutex<TcpStream>>>> =
-            Mutex::new(HashMap::new());
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let writers: Mutex<HashMap<String, Arc<Mutex<TcpStream>>>> = Mutex::new(HashMap::new());
 
         // We need a real parseable tx for canonical_txid. Use a minimal
         // test by directly testing the seen/pool components.
@@ -396,9 +401,10 @@ mod tests {
     #[test]
     fn broadcast_inventory_skips_sender() {
         let relay = TxRelayState::new();
-        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config("devnet", 64));
-        let writers: Mutex<HashMap<String, Arc<Mutex<TcpStream>>>> =
-            Mutex::new(HashMap::new());
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let writers: Mutex<HashMap<String, Arc<Mutex<TcpStream>>>> = Mutex::new(HashMap::new());
 
         // With no peers registered, broadcast should succeed silently.
         let result = broadcast_inventory(
