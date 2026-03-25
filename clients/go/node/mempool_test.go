@@ -517,6 +517,47 @@ func TestRestoreMempoolSnapshotClearsStaleWorstHeapState(t *testing.T) {
 	}
 }
 
+func TestMempoolAddTxHeightOverflow(t *testing.T) {
+	st := &ChainState{HasTip: true, Height: ^uint64(0)} // MaxUint64
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	err = mp.AddTx([]byte{0x01})
+	if err == nil {
+		t.Fatal("expected error for height overflow")
+	}
+	var txErr *TxAdmitError
+	if !errors.As(err, &txErr) {
+		t.Fatalf("expected TxAdmitError, got %T: %v", err, err)
+	}
+	if txErr.Kind != TxAdmitUnavailable {
+		t.Fatalf("expected TxAdmitUnavailable, got %v", txErr.Kind)
+	}
+}
+
+func TestMempoolAddTxBlockMTPError(t *testing.T) {
+	// Empty blockStore + non-zero height → prevTimestampsFromStore fails.
+	dir := t.TempDir()
+	store := mustOpenBlockStore(t, BlockStorePath(dir))
+	st := &ChainState{HasTip: true, Height: 50}
+	mp, err := NewMempool(st, store, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	err = mp.AddTx([]byte{0x01})
+	if err == nil {
+		t.Fatal("expected error for missing block timestamps")
+	}
+	var txErr *TxAdmitError
+	if !errors.As(err, &txErr) {
+		t.Fatalf("expected TxAdmitError, got %T: %v", err, err)
+	}
+	if txErr.Kind != TxAdmitUnavailable {
+		t.Fatalf("expected TxAdmitUnavailable, got %v", txErr.Kind)
+	}
+}
+
 func TestMempoolEviction(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
