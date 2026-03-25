@@ -13,6 +13,11 @@ use crate::tx_seen::BoundedHashSet;
 /// Default TX relay fanout (matches Go `defaultTxRelayFanout`).
 pub const DEFAULT_TX_RELAY_FANOUT: usize = 8;
 
+/// Maximum frames per peer outbox before new relay messages are dropped.
+/// At ~70 bytes/frame (INV with 1 tx), 1024 frames ≈ 70 KiB — safe even for
+/// slow peers while preventing unbounded growth.
+const MAX_OUTBOX_FRAMES_PER_PEER: usize = 1024;
+
 /// Shared relay state passed through the P2P service.
 pub struct TxRelayState {
     pub tx_seen: BoundedHashSet,
@@ -165,7 +170,10 @@ fn broadcast_inv_to_addrs(
     };
     for addr in addrs {
         if let Some(queue) = outboxes.get_mut(addr) {
-            queue.push(frame.clone());
+            if queue.len() < MAX_OUTBOX_FRAMES_PER_PEER {
+                queue.push(frame.clone());
+            }
+            // else: drop silently — peer is slow, will catch up on next drain.
         }
     }
     Ok(())
@@ -210,8 +218,11 @@ pub fn announce_tx(
 
 /// Handle a transaction received from a peer.
 ///
-/// Marks txid as seen BEFORE relay pool admission (matches Go's
-/// seen-before-pool pattern to suppress inv/getdata churn even if pool rejects).
+/// Validates structure via consensus parsing, extracts relay metadata
+/// (fee=0 fallback, size=raw length — matches Go `relayTxMetadata`),
+/// then marks seen BEFORE pool admission (Go's seen-before-pool pattern).
+///
+/// Rejects oversized payloads (> MAX_RELAY_MSG_BYTES) before any processing.
 pub fn handle_received_tx(
     tx_bytes: &[u8],
     relay_state: &TxRelayState,
@@ -220,17 +231,31 @@ pub fn handle_received_tx(
     local_addr: &str,
     peer_writers: &Mutex<HashMap<String, Vec<Vec<u8>>>>,
 ) -> io::Result<()> {
+    // Reject oversized tx payloads early (defense-in-depth).
+    if tx_bytes.len() > rubin_consensus::constants::MAX_RELAY_MSG_BYTES as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "tx payload exceeds MAX_RELAY_MSG_BYTES",
+        ));
+    }
+
+    // Structural validation via consensus parser (matches Go's canonicalTxID + relayTxMetadata).
     let txid = canonical_txid(tx_bytes).map_err(io::Error::other)?;
+
+    // Relay metadata: fee=0 (fallback), size=raw length.
+    // Matches Go's `relayTxMetadata` default when TxMetadataFunc is nil.
+    let relay_fee: u64 = 0;
+    let relay_size = tx_bytes.len();
 
     // Mark seen BEFORE pool admission (matches Go).
     if !relay_state.tx_seen.add(txid) {
         return Ok(()); // Already seen — don't relay.
     }
 
-    // Store in relay pool.
+    // Store in relay pool with extracted metadata.
     if !relay_state
         .relay_pool
-        .put(txid, tx_bytes, 0, tx_bytes.len())
+        .put(txid, tx_bytes, relay_fee, relay_size)
     {
         return Ok(()); // Pool rejected (full, low priority) — don't relay.
     }
