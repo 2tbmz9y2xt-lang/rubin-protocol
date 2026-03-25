@@ -62,7 +62,7 @@ jobs:
           script: |
             const fs = require('fs');
             const { jsonrepair } = require('./node_modules/jsonrepair');
-            const diff = fs.readFileSync('pr-diff.txt', 'utf8').slice(0, 12000);
+            const diff = fs.readFileSync('pr-diff.txt', 'utf8').slice(0, 64000);
 
             const systemPrompt = [
               'You are a HOSTILE protocol security auditor for the RUBIN blockchain protocol.',
@@ -99,6 +99,8 @@ jobs:
               '- If cryptographic code changed: verify parameter sizes, check for timing side-channels.',
               '- NEVER say "looks good" or "no issues found" if you have not verified every line.',
               '- If the diff is too large to fully verify, say so explicitly and flag unreviewed sections.',
+              '- If a function/module is CALLED in the diff but its DEFINITION is not visible, classify it as UNREVIEWED, NOT as CRITICAL. The definition may be beyond the context window or in a pre-existing file.',
+              '- NEVER flag "function not defined in diff" as CRITICAL — functions can exist in files not touched by the PR.',
               '',
               'OUTPUT FORMAT — strict JSON only, no markdown, no commentary:',
               '{',
