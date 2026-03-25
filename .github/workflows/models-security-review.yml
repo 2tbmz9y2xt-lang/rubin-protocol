@@ -68,18 +68,30 @@ jobs:
             const { jsonrepair } = require('./node_modules/jsonrepair');
             const diff = fs.readFileSync('pr-diff.txt', 'utf8').slice(0, 128000);
 
-            // Fetch previous security review findings to avoid re-reporting
+            // Fetch previous security review findings to avoid re-reporting.
+            // P1 fix: only trust comments from the bot account (github-actions[bot])
+            // that actually runs this workflow — reject arbitrary contributor comments.
+            // P2 fix: paginate through ALL comments to reliably find the latest reviews.
+            const TRUSTED_AUTHORS = new Set(['github-actions[bot]']);
             let previousFindings = '';
             try {
-              const comments = await github.rest.issues.listComments({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                per_page: 20,
-              });
-              const reviewComments = comments.data
-                .filter(c => c.body && c.body.includes('Security Review:') && c.body.includes('deepseek'))
-                .slice(-3);  // last 3 reviews
+              const allComments = [];
+              for await (const response of github.paginate.iterator(
+                github.rest.issues.listComments, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  per_page: 100,
+                }
+              )) {
+                allComments.push(...response.data);
+              }
+              const reviewComments = allComments
+                .filter(c => c.body
+                  && TRUSTED_AUTHORS.has(c.user?.login ?? '')
+                  && c.body.includes('Security Review:')
+                  && c.body.includes('deepseek'))
+                .slice(-3);  // last 3 trusted reviews
               if (reviewComments.length > 0) {
                 const titles = [];
                 for (const c of reviewComments) {
