@@ -195,9 +195,12 @@ pub fn announce_tx(
     // Store in relay pool (fee=0, size=raw length — metadata not available
     // from RPC path without re-parsing; matches Go where mempool.RelayMetadata
     // extracts fee/size, but for RPC-submitted txs fee is already validated).
-    relay_state
+    if !relay_state
         .relay_pool
-        .put(txid, tx_bytes, 0, tx_bytes.len());
+        .put(txid, tx_bytes, 0, tx_bytes.len())
+    {
+        return Ok(()); // Pool full / low-priority eviction failed — don't advertise.
+    }
 
     if !relay_state.tx_seen.add(txid) {
         return Ok(()); // Already seen — don't broadcast.
