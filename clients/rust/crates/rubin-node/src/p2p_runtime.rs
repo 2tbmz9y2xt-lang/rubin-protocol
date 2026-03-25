@@ -448,6 +448,7 @@ impl PeerSession {
                 if let Some(ctx) = relay_ctx {
                     crate::tx_relay::handle_received_tx(
                         &msg.payload,
+                        sync_engine,
                         ctx.relay_state,
                         ctx.peer_manager,
                         ctx.peer_registered_addr,

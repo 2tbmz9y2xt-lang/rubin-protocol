@@ -269,13 +269,17 @@ pub fn announce_tx(
 
 /// Handle a transaction received from a peer.
 ///
-/// Validates structure via consensus parsing, extracts relay metadata
-/// (fee=0 fallback, size=raw length — matches Go `relayTxMetadata`),
-/// then marks seen BEFORE pool admission (Go's seen-before-pool pattern).
+/// Validates structure via consensus parsing, derives relay metadata using the
+/// current chainstate/policy context, then marks seen BEFORE pool admission
+/// (Go's seen-before-pool pattern).
+///
+/// If relay metadata validation fails, the tx remains marked as seen so peers
+/// do not churn INV/GETDATA retries for the same invalid payload.
 ///
 /// Rejects oversized payloads (> MAX_RELAY_MSG_BYTES) before any processing.
 pub fn handle_received_tx(
     tx_bytes: &[u8],
+    sync_engine: &crate::sync::SyncEngine,
     relay_state: &TxRelayState,
     peer_manager: &PeerManager,
     skip_addr: &str,
@@ -293,20 +297,29 @@ pub fn handle_received_tx(
     // Structural validation via consensus parser (matches Go's canonicalTxID + relayTxMetadata).
     let txid = canonical_txid(tx_bytes).map_err(io::Error::other)?;
 
-    // Relay metadata: fee=0 (fallback), size=raw length.
-    // Matches Go's `relayTxMetadata` default when TxMetadataFunc is nil.
-    let relay_fee: u64 = 0;
-    let relay_size = tx_bytes.len();
-
     // Mark seen BEFORE pool admission (matches Go).
     if !relay_state.tx_seen.add(txid) {
         return Ok(()); // Already seen — don't relay.
     }
 
+    let relay_cfg = crate::txpool::TxPoolConfig {
+        core_ext_deployments: sync_engine.cfg.core_ext_deployments.clone(),
+        suite_context: sync_engine.cfg.suite_context.clone(),
+        ..crate::txpool::TxPoolConfig::default()
+    };
+    let meta = crate::txpool::relay_metadata(
+        tx_bytes,
+        &sync_engine.chain_state,
+        sync_engine.block_store.as_ref(),
+        sync_engine.cfg.chain_id,
+        &relay_cfg,
+    )
+    .map_err(io::Error::other)?;
+
     // Store in relay pool with extracted metadata.
     if !relay_state
         .relay_pool
-        .put(txid, tx_bytes, relay_fee, relay_size)
+        .put(txid, tx_bytes, meta.fee, meta.size)
     {
         return Ok(()); // Pool rejected (full, low priority) — don't relay.
     }
@@ -339,6 +352,99 @@ fn canonical_txid(tx_bytes: &[u8]) -> Result<[u8; 32], String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{default_sync_config, ChainState, SyncEngine};
+
+    #[derive(serde::Deserialize)]
+    struct FixtureFile<T> {
+        vectors: Vec<T>,
+    }
+
+    #[derive(Clone, serde::Deserialize)]
+    struct FixtureUtxo {
+        txid: String,
+        vout: u32,
+        value: u64,
+        covenant_type: u16,
+        covenant_data: String,
+        creation_height: u64,
+        created_by_coinbase: bool,
+    }
+
+    #[derive(Clone, serde::Deserialize)]
+    struct PositiveTxVector {
+        id: String,
+        tx_hex: String,
+        #[serde(default)]
+        chain_id: Option<String>,
+        height: u64,
+        expect_ok: bool,
+        utxos: Vec<FixtureUtxo>,
+    }
+
+    fn parse_hex32_test(name: &str, value: &str) -> [u8; 32] {
+        let raw = hex::decode(value).unwrap_or_else(|err| panic!("{name} hex: {err}"));
+        assert_eq!(raw.len(), 32, "{name} must be 32 bytes");
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&raw);
+        out
+    }
+
+    fn fixture_utxos_to_map(
+        items: &[FixtureUtxo],
+    ) -> HashMap<rubin_consensus::Outpoint, rubin_consensus::UtxoEntry> {
+        let mut out = HashMap::with_capacity(items.len());
+        for item in items {
+            out.insert(
+                rubin_consensus::Outpoint {
+                    txid: parse_hex32_test("fixture utxo txid", &item.txid),
+                    vout: item.vout,
+                },
+                rubin_consensus::UtxoEntry {
+                    value: item.value,
+                    covenant_type: item.covenant_type,
+                    covenant_data: hex::decode(&item.covenant_data)
+                        .expect("fixture covenant_data hex"),
+                    creation_height: item.creation_height,
+                    created_by_coinbase: item.created_by_coinbase,
+                },
+            );
+        }
+        out
+    }
+
+    fn positive_fixture_vector() -> PositiveTxVector {
+        const UTXO_BASIC_FIXTURE_JSON: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../../conformance/fixtures/CV-UTXO-BASIC.json"
+        ));
+        let fixture: FixtureFile<PositiveTxVector> =
+            serde_json::from_str(UTXO_BASIC_FIXTURE_JSON).expect("parse positive fixture");
+        fixture
+            .vectors
+            .into_iter()
+            .find(|vector| vector.id == "CV-U-06")
+            .expect("positive fixture vector")
+    }
+
+    fn fixture_chain_id(chain_id: Option<&str>) -> [u8; 32] {
+        chain_id
+            .map(|value| parse_hex32_test("chain_id", value))
+            .unwrap_or([0u8; 32])
+    }
+
+    fn chain_state_from_positive_fixture(vector: &PositiveTxVector) -> ChainState {
+        let mut state = ChainState::new();
+        state.has_tip = vector.height > 0;
+        state.height = vector.height.saturating_sub(1);
+        state.utxos = fixture_utxos_to_map(&vector.utxos);
+        state
+    }
+
+    fn sync_engine_from_positive_fixture(vector: &PositiveTxVector) -> SyncEngine {
+        let mut cfg = default_sync_config(None, fixture_chain_id(vector.chain_id.as_deref()), None);
+        cfg.core_ext_deployments = rubin_consensus::CoreExtDeploymentProfiles::empty();
+        SyncEngine::new(chain_state_from_positive_fixture(vector), None, cfg).expect("sync engine")
+    }
 
     fn make_txid(b: u8) -> [u8; 32] {
         [b; 32]
@@ -836,8 +942,11 @@ mod tests {
     }
 
     #[test]
-    fn handle_received_tx_with_real_tx_stores_and_relays() {
-        let tx_bytes = real_tx_bytes();
+    fn handle_received_tx_with_valid_fixture_stores_and_relays() {
+        let vector = positive_fixture_vector();
+        assert!(vector.expect_ok, "{} should be positive fixture", vector.id);
+        let tx_bytes = hex::decode(&vector.tx_hex).expect("tx hex");
+        let sync_engine = sync_engine_from_positive_fixture(&vector);
         let relay = TxRelayState::new();
         let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
             "devnet", 64,
@@ -858,6 +967,7 @@ mod tests {
 
         let result = handle_received_tx(
             &tx_bytes,
+            &sync_engine,
             &relay,
             &pm,
             "sender:8333",
@@ -877,6 +987,47 @@ mod tests {
     }
 
     #[test]
+    fn handle_received_tx_metadata_failure_marks_seen_but_does_not_relay() {
+        let tx_bytes = real_tx_bytes();
+        let sync_engine = SyncEngine::new(
+            ChainState::new(),
+            None,
+            default_sync_config(None, [0u8; 32], None),
+        )
+        .expect("sync engine");
+        let relay = TxRelayState::new();
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("sender:8333".to_string(), PeerOutbox::default());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("other:8333".to_string(), PeerOutbox::default());
+
+        let txid = canonical_txid(&tx_bytes).unwrap();
+        let result = handle_received_tx(
+            &tx_bytes,
+            &sync_engine,
+            &relay,
+            &pm,
+            "sender:8333",
+            "local:8333",
+            &outboxes,
+        );
+        assert!(result.is_err());
+        assert!(relay.tx_seen.has(&txid));
+        assert!(!relay.relay_pool.has(&txid));
+        let boxes = outboxes.lock().unwrap();
+        assert!(boxes["sender:8333"].is_empty());
+        assert!(boxes["other:8333"].is_empty());
+    }
+
+    #[test]
     fn handle_received_tx_duplicate_is_noop() {
         let tx_bytes = real_tx_bytes();
         let txid = canonical_txid(&tx_bytes).unwrap();
@@ -890,6 +1041,12 @@ mod tests {
 
         let result = handle_received_tx(
             &tx_bytes,
+            &SyncEngine::new(
+                ChainState::new(),
+                None,
+                default_sync_config(None, [0u8; 32], None),
+            )
+            .expect("sync engine"),
             &relay,
             &pm,
             "sender:8333",
