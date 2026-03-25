@@ -384,6 +384,29 @@ func TestAnnounceTxMetadataError(t *testing.T) {
 	}
 }
 
+func TestAnnounceTxPoolFullSkipsBroadcast(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	// Replace pool with capacity=1 so second insert fails.
+	h.service.cfg.TxPool = NewMemoryTxPoolWithLimit(1)
+	// Pre-fill the pool with a high-fee tx so that the low-fee announce is rejected.
+	occupant := distinctTxBytes(t, 900)
+	occupantID, _ := canonicalTxID(occupant)
+	h.service.cfg.TxPool.Put(occupantID, occupant, 9999, len(occupant))
+
+	// Announce a tx with default fee=0 (relayTxMetadata fallback) — pool should reject.
+	txBytes := distinctTxBytes(t, 901)
+	txid, _ := canonicalTxID(txBytes)
+	if err := h.service.AnnounceTx(txBytes); err != nil {
+		t.Fatalf("AnnounceTx should return nil even on pool-full: %v", err)
+	}
+	if h.service.cfg.TxPool.Has(txid) {
+		t.Fatal("pool-rejected tx should not be stored")
+	}
+	if h.service.txSeen.Has(txid) {
+		t.Fatal("pool-rejected tx should not be marked seen")
+	}
+}
+
 // --- MemoryTxPool unit tests ---
 
 func TestMemoryTxPoolSizeLimit(t *testing.T) {
