@@ -121,7 +121,9 @@ pub struct PeerRelayContext<'a> {
     pub relay_state: &'a crate::tx_relay::TxRelayState,
     pub peer_manager: &'a PeerManager,
     pub local_addr: &'a str,
-    pub peer_writers: &'a std::sync::Mutex<HashMap<String, std::sync::Arc<std::sync::Mutex<std::net::TcpStream>>>>,
+    pub peer_writers: &'a std::sync::Mutex<
+        HashMap<String, std::sync::Arc<std::sync::Mutex<std::net::TcpStream>>>,
+    >,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -404,7 +406,8 @@ impl PeerSession {
         }
         match msg.command.as_str() {
             MESSAGE_INV => {
-                let requests = self.handle_inv(&msg.payload, sync_engine, relay_ctx.map(|c| c.relay_state))?;
+                let requests =
+                    self.handle_inv(&msg.payload, sync_engine, relay_ctx.map(|c| c.relay_state))?;
                 if requests.is_empty() {
                     Ok(Vec::new())
                 } else {
@@ -414,7 +417,11 @@ impl PeerSession {
                     }])
                 }
             }
-            MESSAGE_GETDATA => self.collect_getdata_responses(&msg.payload, sync_engine, relay_ctx.map(|c| c.relay_state)),
+            MESSAGE_GETDATA => self.collect_getdata_responses(
+                &msg.payload,
+                sync_engine,
+                relay_ctx.map(|c| c.relay_state),
+            ),
             MESSAGE_GETBLOCKS => {
                 let items = self.handle_getblocks(&msg.payload, sync_engine)?;
                 if items.is_empty() {
@@ -537,9 +544,7 @@ impl PeerSession {
                 }
                 MSG_TX => {
                     if let Some(rs) = relay_state {
-                        if !rs.tx_seen.has(&vector.hash)
-                            && !rs.relay_pool.has(&vector.hash)
-                        {
+                        if !rs.tx_seen.has(&vector.hash) && !rs.relay_pool.has(&vector.hash) {
                             requests.push(vector);
                         }
                     }

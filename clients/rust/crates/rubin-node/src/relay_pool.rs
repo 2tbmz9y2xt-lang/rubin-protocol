@@ -229,7 +229,7 @@ mod tests {
         let incoming = [2u8; 32];
 
         assert!(pool.put(existing, &[0x01], 100, 100)); // fee_rate = 1.0
-        // Incoming has lower fee-rate — should be rejected.
+                                                        // Incoming has lower fee-rate — should be rejected.
         assert!(!pool.put(incoming, &[0x02], 10, 100)); // fee_rate = 0.1
         assert!(pool.has(&existing));
         assert!(!pool.has(&incoming));
