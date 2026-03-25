@@ -48,6 +48,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          fetch-depth: 0
       - name: Download diff artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v4
         with:
@@ -61,8 +63,43 @@ jobs:
         with:
           script: |
             const fs = require('fs');
+            const path = require('path');
+            const { execSync } = require('child_process');
             const { jsonrepair } = require('./node_modules/jsonrepair');
-            const diff = fs.readFileSync('pr-diff.txt', 'utf8').slice(0, 12000);
+            const diff = fs.readFileSync('pr-diff.txt', 'utf8').slice(0, 128000);
+
+            // Read full changed files for context (same pattern as rubin-formal)
+            const repoRoot = process.cwd();
+            const repoRootReal = fs.realpathSync(repoRoot);
+            const baseSha = '${{ github.event.pull_request.base.sha }}';
+            const headSha = '${{ github.event.pull_request.head.sha }}';
+            const changedFiles = execSync(
+              `git diff --diff-filter=ACMR --name-only ${baseSha} ${headSha} -- '*.go' '*.rs' '*.lean'`,
+              { maxBuffer: 20 * 1024 * 1024 }
+            ).toString().split('\n').map(s => s.trim()).filter(Boolean);
+
+            const readChangedFile = (file) => {
+              const fullPath = path.resolve(repoRoot, file);
+              const rel = path.relative(repoRoot, fullPath);
+              if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+              try {
+                const st = fs.lstatSync(fullPath);
+                if (st.isSymbolicLink() || !st.isFile()) return null;
+                const realPath = fs.realpathSync(fullPath);
+                if (!(realPath === repoRootReal || realPath.startsWith(`${repoRootReal}${path.sep}`))) return null;
+                return fs.readFileSync(realPath, 'utf8');
+              } catch { return null; }
+            };
+
+            const changedFilePayload = changedFiles
+              .map(file => {
+                const content = readChangedFile(file);
+                if (!content) return null;
+                return `FILE: ${file}\n${content.slice(0, 8000)}`;
+              })
+              .filter(Boolean)
+              .join('\n\n---\n\n')
+              .slice(0, 64000);
 
             const systemPrompt = [
               'You are a HOSTILE protocol security auditor for the RUBIN blockchain protocol.',
@@ -99,6 +136,12 @@ jobs:
               '- If cryptographic code changed: verify parameter sizes, check for timing side-channels.',
               '- NEVER say "looks good" or "no issues found" if you have not verified every line.',
               '- If the diff is too large to fully verify, say so explicitly and flag unreviewed sections.',
+              '- ANTI-HALLUCINATION: If the diff is truncated or you cannot see a file/function mentioned elsewhere',
+              '  in the diff — do NOT claim it is missing. Add it to unreviewed_sections and set verdict to WARN.',
+              '- NEVER report "function not defined" or "file missing" unless you have verified the COMPLETE diff.',
+              '  If diff is truncated, assume unseen code exists and flag as unreviewed, not missing.',
+              '- You will receive BOTH the diff AND the full content of changed files. Use the full file content',
+              '  to verify function definitions, imports, and call sites before claiming anything is missing.',
               '',
               'OUTPUT FORMAT — strict JSON only, no markdown, no commentary:',
               '{',
@@ -141,7 +184,7 @@ jobs:
                     model: modelId,
                     messages: [
                       { role: 'system', content: systemPrompt },
-                      { role: 'user', content: `Review this PR diff for security vulnerabilities. Be hostile — assume every change is a potential exploit vector:\n\n${diff}` }
+                      { role: 'user', content: `Review this PR diff for security vulnerabilities. Be hostile — assume every change is a potential exploit vector.\n\nDIFF:\n${diff}${changedFilePayload ? `\n\n---\nFULL CHANGED FILES (use to verify definitions before claiming anything missing):\n${changedFilePayload}` : ''}` }
                     ],
                     temperature: 0.6,
                     top_p: 0.95
