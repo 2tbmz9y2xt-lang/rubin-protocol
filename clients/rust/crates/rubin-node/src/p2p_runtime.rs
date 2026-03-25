@@ -366,6 +366,16 @@ impl PeerSession {
         msg: WireMessage,
         sync_engine: &mut SyncEngine,
     ) -> io::Result<Vec<WireMessage>> {
+        if msg.payload.len() > MAX_RELAY_MSG_BYTES as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "message payload too large: {} > {}",
+                    msg.payload.len(),
+                    MAX_RELAY_MSG_BYTES
+                ),
+            ));
+        }
         match msg.command.as_str() {
             MESSAGE_INV => {
                 let requests = self.handle_inv(&msg.payload, sync_engine)?;

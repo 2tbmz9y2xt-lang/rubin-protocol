@@ -16,6 +16,7 @@ const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 const MIN_OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const SERVICE_CLOSE_WAIT_SLEEP: Duration = Duration::from_millis(25);
+const MAX_SHUTDOWN_WAIT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct NodeP2PServiceConfig {
@@ -315,11 +316,12 @@ fn connect_with_timeout(addr: &str, timeout: Duration) -> Result<TcpStream, Stri
 }
 
 fn wait_for_service_shutdown(shared: &SharedServiceState) {
-    let wait_budget = shared
+    let wait_budget = (shared
         .runtime_cfg
         .read_deadline
         .max(outbound_connect_timeout(&shared.runtime_cfg))
-        + RECONNECT_LOOP_SLEEP;
+        + RECONNECT_LOOP_SLEEP)
+        .min(MAX_SHUTDOWN_WAIT);
     let deadline = Instant::now() + wait_budget;
     while Instant::now() < deadline {
         let dials_drained = lock_in_flight_dials(shared).is_empty();

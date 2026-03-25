@@ -415,6 +415,9 @@ fn validate_config(cfg: &CliConfig) -> Result<(), String> {
     if !cfg.rpc_bind_addr.trim().is_empty() {
         validate_addr("rpc_bind_addr", &cfg.rpc_bind_addr)?;
     }
+    if cfg.peers.len() > 1000 {
+        return Err(format!("too many peers: {} (max 1000)", cfg.peers.len()));
+    }
     for peer in &cfg.peers {
         validate_peer_addr(peer)?;
     }
