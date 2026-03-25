@@ -8,9 +8,12 @@ mod io_utils;
 pub mod miner;
 pub mod p2p_runtime;
 pub mod p2p_service;
+pub mod relay_pool;
 pub mod sync;
 pub mod sync_disconnect;
 pub mod sync_reorg;
+pub mod tx_relay;
+pub mod tx_seen;
 pub mod txpool;
 pub mod undo;
 

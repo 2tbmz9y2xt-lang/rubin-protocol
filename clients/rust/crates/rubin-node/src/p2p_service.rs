@@ -6,8 +6,12 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::p2p_runtime::VersionPayloadV1;
-use crate::p2p_runtime::{perform_version_handshake, PeerManager, PeerRuntimeConfig};
+use std::collections::HashMap;
+
+use crate::p2p_runtime::{
+    perform_version_handshake, PeerManager, PeerRelayContext, PeerRuntimeConfig, VersionPayloadV1,
+};
+use crate::tx_relay::TxRelayState;
 use crate::SyncEngine;
 
 const ACCEPT_LOOP_SLEEP: Duration = Duration::from_millis(100);
@@ -59,6 +63,9 @@ struct SharedServiceState {
     in_flight_dials: Arc<Mutex<HashSet<String>>>,
     chain_id: [u8; 32],
     genesis_hash: [u8; 32],
+    relay_state: Arc<TxRelayState>,
+    peer_writers: Arc<Mutex<HashMap<String, Arc<Mutex<TcpStream>>>>>,
+    local_addr: String,
 }
 
 /// Validate peer address at config time using `ToSocketAddrs`.
@@ -136,6 +143,9 @@ pub fn start_node_p2p_service(cfg: NodeP2PServiceConfig) -> Result<RunningNodeP2
         in_flight_dials: Arc::new(Mutex::new(HashSet::new())),
         chain_id: cfg.chain_id,
         genesis_hash: cfg.genesis_hash,
+        relay_state: Arc::new(TxRelayState::new()),
+        peer_writers: Arc::new(Mutex::new(HashMap::new())),
+        local_addr: addr.clone(),
     };
     let accept_shared = shared.clone();
     let accept_join = thread::spawn(move || run_accept_loop(listener, accept_shared));
@@ -156,6 +166,16 @@ pub fn start_node_p2p_service(cfg: NodeP2PServiceConfig) -> Result<RunningNodeP2
 impl RunningNodeP2PService {
     pub fn addr(&self) -> &str {
         &self.addr
+    }
+
+    /// Relay state for tx dedup + relay pool.
+    pub fn relay_state(&self) -> Arc<TxRelayState> {
+        Arc::clone(&self.shared.relay_state)
+    }
+
+    /// Peer writers for tx broadcast.
+    pub fn peer_writers(&self) -> Arc<Mutex<HashMap<String, Arc<Mutex<TcpStream>>>>> {
+        Arc::clone(&self.shared.peer_writers)
     }
 
     pub fn close(&mut self) {
@@ -653,7 +673,32 @@ fn handle_peer(
         .map_err(|err| format!("peer register: {err}"))?;
     let _peer_guard = PeerGuard {
         peer_manager: Arc::clone(&shared.peer_manager),
-        addr: peer_addr,
+        addr: peer_addr.clone(),
+    };
+
+    // Register a cloned TcpStream for tx relay broadcast (matches Go's writeMu pattern).
+    let peer_writer_registered = if let Ok(cloned) = session.try_clone_stream() {
+        if let Ok(mut writers) = shared.peer_writers.lock() {
+            writers.insert(peer_addr.clone(), Arc::new(Mutex::new(cloned)));
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    let _writer_guard = PeerWriterGuard {
+        peer_writers: Arc::clone(&shared.peer_writers),
+        addr: peer_addr.clone(),
+        registered: peer_writer_registered,
+    };
+
+    // Build relay context for message loop.
+    let relay_ctx = PeerRelayContext {
+        relay_state: &shared.relay_state,
+        peer_manager: &shared.peer_manager,
+        local_addr: &shared.local_addr,
+        peer_writers: &shared.peer_writers,
     };
 
     {
@@ -703,7 +748,7 @@ fn handle_peer(
                 .lock()
                 .map_err(|_| "sync engine unavailable".to_string())?;
             let responses = session
-                .collect_live_responses(msg, &mut engine)
+                .collect_live_responses(msg, &mut engine, Some(&relay_ctx))
                 .map_err(|err| format!("handle live message: {err}"))?;
             drop(engine);
             responses
@@ -744,6 +789,22 @@ impl Drop for PeerGuard {
     }
 }
 
+struct PeerWriterGuard {
+    peer_writers: Arc<Mutex<HashMap<String, Arc<Mutex<TcpStream>>>>>,
+    addr: String,
+    registered: bool,
+}
+
+impl Drop for PeerWriterGuard {
+    fn drop(&mut self) {
+        if self.registered {
+            if let Ok(mut writers) = self.peer_writers.lock() {
+                writers.remove(&self.addr);
+            }
+        }
+    }
+}
+
 struct SessionSlotGuard {
     active_sessions: Arc<AtomicUsize>,
 }
@@ -777,7 +838,9 @@ mod tests {
     use crate::p2p_runtime::{
         default_peer_runtime_config, perform_version_handshake, PeerManager, PeerRuntimeConfig,
     };
+    use crate::tx_relay::TxRelayState;
     use crate::{block_store_path, default_sync_config, BlockStore, ChainState, SyncEngine};
+    use std::collections::HashMap;
 
     fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -819,6 +882,9 @@ mod tests {
             in_flight_dials: Arc::new(Mutex::new(HashSet::new())),
             chain_id: devnet_genesis_chain_id(),
             genesis_hash: test_genesis_hash(),
+            relay_state: Arc::new(TxRelayState::new()),
+            peer_writers: Arc::new(Mutex::new(HashMap::new())),
+            local_addr: "127.0.0.1:0".to_string(),
         }
     }
 
