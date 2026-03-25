@@ -268,6 +268,13 @@ mod tests {
         [b; 32]
     }
 
+    /// Load a real parseable tx from the CV-CANONICAL-INVARIANT fixture.
+    fn real_tx_bytes() -> Vec<u8> {
+        // Positive fixture: version=1, 1 input, 1 output, parseable by consensus.
+        const TX_HEX: &str = "0100000001030000000000000001111111111111111111111111111111111111111111111111111111111111111100000000000000000001000000000000000003012077777777777777777777777777777777777777777777777777777777777777770000000001010101010101010101010101010101010101010101010101010101010101010100020202020202020202020202020202020202020202020202020202020202020201000000000000000303030303030303030303030303030303030303030303030303030303030303040404040404040404040404040404040404040404040404040404040404040405050505050505050505050505050505050505050505050505050505050505050101ee000199";
+        hex::decode(TX_HEX).expect("decode fixture tx hex")
+    }
+
     #[test]
     fn tx_relay_score_deterministic() {
         let key = [0xAA; 32];
@@ -632,6 +639,155 @@ mod tests {
 
         // Second add returns false — no relay.
         assert!(!relay.tx_seen.add(txid));
+    }
+
+    #[test]
+    fn canonical_txid_parses_valid_tx() {
+        let tx_bytes = real_tx_bytes();
+        let txid = canonical_txid(&tx_bytes);
+        assert!(txid.is_ok(), "should parse valid tx: {:?}", txid.err());
+        assert_ne!(txid.unwrap(), [0u8; 32]);
+    }
+
+    #[test]
+    fn canonical_txid_rejects_truncated() {
+        let result = canonical_txid(&[0x01, 0x00]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn canonical_txid_rejects_trailing_bytes() {
+        let mut tx = real_tx_bytes();
+        tx.push(0xFF); // extra trailing byte
+        let result = canonical_txid(&tx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("non-canonical"));
+    }
+
+    #[test]
+    fn announce_tx_with_real_tx_stores_and_broadcasts() {
+        let tx_bytes = real_tx_bytes();
+        let relay = TxRelayState::new();
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "peer-x:8333".to_string(),
+            ..Default::default()
+        });
+        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("peer-x:8333".to_string(), Vec::new());
+
+        let result = announce_tx(&tx_bytes, &relay, &pm, "local:8333", &outboxes);
+        assert!(result.is_ok(), "announce_tx failed: {:?}", result.err());
+
+        // Tx should be in relay pool + seen set.
+        let txid = canonical_txid(&tx_bytes).unwrap();
+        assert!(relay.relay_pool.has(&txid));
+        assert!(relay.tx_seen.has(&txid));
+
+        // Peer should have received an INV frame.
+        let boxes = outboxes.lock().unwrap();
+        assert_eq!(boxes["peer-x:8333"].len(), 1);
+        assert_eq!(&boxes["peer-x:8333"][0][0..4], b"RBDV");
+    }
+
+    #[test]
+    fn announce_tx_skips_already_seen() {
+        let tx_bytes = real_tx_bytes();
+        let txid = canonical_txid(&tx_bytes).unwrap();
+        let relay = TxRelayState::new();
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "peer-y:8333".to_string(),
+            ..Default::default()
+        });
+        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("peer-y:8333".to_string(), Vec::new());
+
+        // Pre-mark as seen + pre-store in pool.
+        relay.tx_seen.add(txid);
+        relay.relay_pool.put(txid, &tx_bytes, 0, tx_bytes.len());
+
+        let result = announce_tx(&tx_bytes, &relay, &pm, "local:8333", &outboxes);
+        assert!(result.is_ok());
+
+        // No broadcast should occur (already seen).
+        let boxes = outboxes.lock().unwrap();
+        assert!(boxes["peer-y:8333"].is_empty());
+    }
+
+    #[test]
+    fn handle_received_tx_with_real_tx_stores_and_relays() {
+        let tx_bytes = real_tx_bytes();
+        let relay = TxRelayState::new();
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "other:8333".to_string(),
+            ..Default::default()
+        });
+        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("sender:8333".to_string(), Vec::new());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("other:8333".to_string(), Vec::new());
+
+        let result = handle_received_tx(
+            &tx_bytes,
+            &relay,
+            &pm,
+            "sender:8333",
+            "local:8333",
+            &outboxes,
+        );
+        assert!(result.is_ok());
+
+        let txid = canonical_txid(&tx_bytes).unwrap();
+        assert!(relay.tx_seen.has(&txid));
+        assert!(relay.relay_pool.has(&txid));
+
+        // Other peer gets INV, sender does not (skipped).
+        let boxes = outboxes.lock().unwrap();
+        assert!(boxes["sender:8333"].is_empty());
+        assert_eq!(boxes["other:8333"].len(), 1);
+    }
+
+    #[test]
+    fn handle_received_tx_duplicate_is_noop() {
+        let tx_bytes = real_tx_bytes();
+        let txid = canonical_txid(&tx_bytes).unwrap();
+        let relay = TxRelayState::new();
+        relay.tx_seen.add(txid);
+
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+
+        let result = handle_received_tx(
+            &tx_bytes,
+            &relay,
+            &pm,
+            "sender:8333",
+            "local:8333",
+            &outboxes,
+        );
+        assert!(result.is_ok());
+        assert!(!relay.relay_pool.has(&txid)); // Not stored — was already seen.
     }
 
     #[test]
