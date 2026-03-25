@@ -143,14 +143,14 @@
       "date": "2026-03-25"
     },
     {
-      "title_pattern": "Poisoned Lock",
+      "title_pattern": "Poisoned Lock in Broadcast",
       "file_pattern": "tx_relay.rs",
       "reason": "ACCEPTED_RISK: poison = thread panic = node already degraded. Returning error is correct — no recovery possible from panicked thread.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
     {
-      "title_pattern": "Unbounded GETDATA",
+      "title_pattern": "Unbounded GETDATA Response Memory",
       "file_pattern": "p2p_runtime.rs",
       "reason": "MITIGATED: MAX_GETDATA_RESPONSE_BYTES (128MB) + MAX_GETDATA_RESPONSE_BLOCKS (16) cap. Pre-existing design, not new in this PR.",
       "acknowledged_by": "controller",
@@ -185,14 +185,14 @@
       "date": "2026-03-25"
     },
     {
-      "title_pattern": "Inefficient",
+      "title_pattern": "Inefficient Worst-Tx Selection",
       "file_pattern": "relay_pool.rs",
       "reason": "ACCEPTED_RISK: O(n) worst-tx selection in relay_pool matches Go implementation and is bounded by the 1000-entry relay pool cap. Not a blocker.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
     {
-      "title_pattern": "Inefficient",
+      "title_pattern": "Inefficient Eviction in BoundedHashSet",
       "file_pattern": "tx_seen.rs",
       "reason": "ACCEPTED_RISK: tx_seen eviction strategy matches Go implementation; worst-case scan is bounded by the fixed seen-set capacity and is not a merge blocker.",
       "acknowledged_by": "controller",
