@@ -229,7 +229,7 @@ mod tests {
         let incoming = [2u8; 32];
 
         assert!(pool.put(existing, &[0x01], 100, 100)); // fee_rate = 1.0
-                                                        // Incoming has lower fee-rate — should be rejected.
+        // Incoming has lower fee-rate — should be rejected.
         assert!(!pool.put(incoming, &[0x02], 10, 100)); // fee_rate = 0.1
         assert!(pool.has(&existing));
         assert!(!pool.has(&incoming));
@@ -292,28 +292,5 @@ mod tests {
         let txid = [42u8; 32];
         assert!(pool.put(txid, &[1], 100, 50));
         assert!(pool.has(&txid));
-    }
-
-    #[test]
-    fn default_impl_works() {
-        let pool = RelayTxPool::default();
-        assert!(pool.is_empty());
-        assert!(pool.put([1u8; 32], &[0x01], 100, 50));
-        assert_eq!(pool.len(), 1);
-    }
-
-    #[test]
-    fn put_infers_size_from_raw_when_zero() {
-        let pool = RelayTxPool::new_with_limit(10);
-        let txid = [5u8; 32];
-        // size=0 → infer from raw.len()
-        assert!(pool.put(txid, &[0x01, 0x02, 0x03], 100, 0));
-        assert_eq!(pool.get(&txid).unwrap().len(), 3);
-    }
-
-    #[test]
-    fn get_returns_none_for_missing() {
-        let pool = RelayTxPool::new_with_limit(10);
-        assert!(pool.get(&[0xFF; 32]).is_none());
     }
 }

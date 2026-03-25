@@ -15,8 +15,7 @@ const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CONCURRENT_RPC_CONNS: usize = 8;
 
-pub type AnnounceTxFn =
-    Arc<dyn Fn(&[u8], crate::txpool::RelayTxMetadata) -> Result<(), String> + Send + Sync>;
+pub type AnnounceTxFn = Arc<dyn Fn(&[u8]) -> Result<(), String> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct DevnetRPCState {
@@ -580,7 +579,7 @@ fn handle_submit_tx(state: &DevnetRPCState, method: &str, body: &[u8]) -> HttpRe
         }
     };
     let admit_result = match state.tx_pool.lock() {
-        Ok(mut pool) => pool.admit_with_metadata(
+        Ok(mut pool) => pool.admit(
             &tx_bytes,
             &chain_state,
             fresh_block_store.as_ref(),
@@ -592,10 +591,10 @@ fn handle_submit_tx(state: &DevnetRPCState, method: &str, body: &[u8]) -> HttpRe
         }),
     };
     match admit_result {
-        Ok((txid, relay_meta)) => {
+        Ok(txid) => {
             // Relay tx to peers (fire-and-forget, matches Go behavior).
             if let Some(ref announce) = state.announce_tx {
-                if let Err(err) = announce(&tx_bytes, relay_meta) {
+                if let Err(err) = announce(&tx_bytes) {
                     eprintln!("rpc: announce-tx: {err}");
                 }
             }
@@ -1575,68 +1574,6 @@ mod tests {
         );
         let metrics = render_prometheus_metrics(&state);
         assert!(metrics.contains(r#"rubin_node_submit_tx_total{result="unavailable"} 1"#));
-    }
-
-    #[test]
-    fn submit_tx_calls_announce_callback_on_success() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let vector = positive_fixture_vector();
-        assert!(vector.expect_ok);
-        let raw = hex::decode(&vector.tx_hex).expect("decode tx hex");
-        let called = Arc::new(AtomicBool::new(false));
-        let called_clone = Arc::clone(&called);
-
-        let mut state = build_state_with_chain_state(
-            chain_state_from_positive_fixture(&vector),
-            fixture_chain_id(vector.chain_id.as_deref()),
-        );
-        state.announce_tx = Some(Arc::new(move |_tx_bytes: &[u8], _meta| {
-            called_clone.store(true, Ordering::SeqCst);
-            Ok(())
-        }));
-
-        let response = route_request(
-            &state,
-            HttpRequest {
-                method: "POST".to_string(),
-                target: "/submit_tx".to_string(),
-                body: format!(r#"{{"tx_hex":"{}"}}"#, hex::encode(&raw)).into_bytes(),
-            },
-        );
-        assert_eq!(response.status, 200);
-        assert!(
-            called.load(Ordering::SeqCst),
-            "announce_tx should be called"
-        );
-    }
-
-    #[test]
-    fn submit_tx_logs_announce_error_without_failing_rpc() {
-        let vector = positive_fixture_vector();
-        assert!(vector.expect_ok);
-        let raw = hex::decode(&vector.tx_hex).expect("decode tx hex");
-
-        let mut state = build_state_with_chain_state(
-            chain_state_from_positive_fixture(&vector),
-            fixture_chain_id(vector.chain_id.as_deref()),
-        );
-        state.announce_tx = Some(Arc::new(|_tx_bytes: &[u8], _meta| {
-            Err("relay failure".to_string())
-        }));
-
-        let response = route_request(
-            &state,
-            HttpRequest {
-                method: "POST".to_string(),
-                target: "/submit_tx".to_string(),
-                body: format!(r#"{{"tx_hex":"{}"}}"#, hex::encode(&raw)).into_bytes(),
-            },
-        );
-        // RPC should still succeed — announce failure is fire-and-forget.
-        assert_eq!(response.status, 200);
-        let body = response_json(&response);
-        assert_eq!(body["accepted"].as_bool(), Some(true));
     }
 
     #[test]

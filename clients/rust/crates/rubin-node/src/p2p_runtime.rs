@@ -121,12 +121,7 @@ pub struct PeerRelayContext<'a> {
     pub relay_state: &'a crate::tx_relay::TxRelayState,
     pub peer_manager: &'a PeerManager,
     pub local_addr: &'a str,
-    /// Canonical peer address registered in PeerManager (may differ from
-    /// socket peer_addr for outbound connections using hostname dial targets).
-    pub peer_registered_addr: &'a str,
-    /// Outbound relay queues: serialized wire frames enqueued by broadcast,
-    /// drained by the peer thread to avoid concurrent TcpStream writes.
-    pub peer_writers: &'a std::sync::Mutex<HashMap<String, crate::tx_relay::PeerOutbox>>,
+    pub peer_writers: &'a std::sync::Mutex<HashMap<String, std::sync::Arc<std::sync::Mutex<std::net::TcpStream>>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -212,10 +207,9 @@ impl PeerManager {
 }
 
 impl PeerSession {
-    /// Write raw pre-serialized bytes to the peer's TcpStream.
-    /// Used for draining relay outbox frames.
-    pub fn write_raw(&mut self, data: &[u8]) -> io::Result<()> {
-        self.stream.write_all(data)
+    /// Clone the underlying TcpStream for use as a peer writer in tx relay.
+    pub fn try_clone_stream(&self) -> io::Result<TcpStream> {
+        self.stream.try_clone()
     }
 
     fn new(stream: TcpStream, cfg: PeerRuntimeConfig) -> Result<Self, String> {
@@ -410,8 +404,7 @@ impl PeerSession {
         }
         match msg.command.as_str() {
             MESSAGE_INV => {
-                let requests =
-                    self.handle_inv(&msg.payload, sync_engine, relay_ctx.map(|c| c.relay_state))?;
+                let requests = self.handle_inv(&msg.payload, sync_engine, relay_ctx.map(|c| c.relay_state))?;
                 if requests.is_empty() {
                     Ok(Vec::new())
                 } else {
@@ -421,11 +414,7 @@ impl PeerSession {
                     }])
                 }
             }
-            MESSAGE_GETDATA => self.collect_getdata_responses(
-                &msg.payload,
-                sync_engine,
-                relay_ctx.map(|c| c.relay_state),
-            ),
+            MESSAGE_GETDATA => self.collect_getdata_responses(&msg.payload, sync_engine, relay_ctx.map(|c| c.relay_state)),
             MESSAGE_GETBLOCKS => {
                 let items = self.handle_getblocks(&msg.payload, sync_engine)?;
                 if items.is_empty() {
@@ -448,10 +437,9 @@ impl PeerSession {
                 if let Some(ctx) = relay_ctx {
                     crate::tx_relay::handle_received_tx(
                         &msg.payload,
-                        sync_engine,
                         ctx.relay_state,
                         ctx.peer_manager,
-                        ctx.peer_registered_addr,
+                        &self.peer.addr,
                         ctx.local_addr,
                         ctx.peer_writers,
                     )?;
@@ -549,7 +537,9 @@ impl PeerSession {
                 }
                 MSG_TX => {
                     if let Some(rs) = relay_state {
-                        if !rs.tx_seen.has(&vector.hash) && !rs.relay_pool.has(&vector.hash) {
+                        if !rs.tx_seen.has(&vector.hash)
+                            && !rs.relay_pool.has(&vector.hash)
+                        {
                             requests.push(vector);
                         }
                     }
@@ -672,14 +662,13 @@ impl PeerSession {
     ) -> io::Result<Vec<WireMessage>> {
         let mut responses = Vec::new();
         let mut total_bytes: usize = 0;
-        let mut block_count: usize = 0;
         for item in decode_inventory_vectors(payload)? {
             match item.kind {
                 MSG_BLOCK => {
                     if !sync_engine.has_block(item.hash).map_err(io::Error::other)? {
                         continue;
                     }
-                    if block_count >= MAX_GETDATA_RESPONSE_BLOCKS {
+                    if responses.len() >= MAX_GETDATA_RESPONSE_BLOCKS {
                         break;
                     }
                     let block = sync_engine
@@ -689,7 +678,6 @@ impl PeerSession {
                         break;
                     }
                     total_bytes = total_bytes.saturating_add(block.len());
-                    block_count += 1;
                     responses.push(WireMessage {
                         command: MESSAGE_BLOCK.to_string(),
                         payload: block,
@@ -698,12 +686,6 @@ impl PeerSession {
                 MSG_TX => {
                     if let Some(rs) = relay_state {
                         if let Some(tx_bytes) = rs.relay_pool.get(&item.hash) {
-                            if total_bytes.saturating_add(tx_bytes.len())
-                                > MAX_GETDATA_RESPONSE_BYTES
-                            {
-                                break;
-                            }
-                            total_bytes = total_bytes.saturating_add(tx_bytes.len());
                             responses.push(WireMessage {
                                 command: MESSAGE_TX.to_string(),
                                 payload: tx_bytes,
@@ -1235,7 +1217,7 @@ fn unmarshal_version_payload_v1(payload: &[u8]) -> io::Result<VersionPayloadV1> 
     })
 }
 
-pub fn build_envelope_header(
+fn build_envelope_header(
     magic: [u8; 4],
     command: &str,
     payload: &[u8],
@@ -1620,7 +1602,7 @@ fn handshake_timeout_budget(read_deadline: Duration) -> Duration {
     read_deadline.min(DEFAULT_HANDSHAKE_TIMEOUT)
 }
 
-pub fn network_magic(network: &str) -> [u8; 4] {
+fn network_magic(network: &str) -> [u8; 4] {
     match network {
         "mainnet" => *b"RBMN",
         "testnet" => *b"RBTN",
