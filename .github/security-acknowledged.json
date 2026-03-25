@@ -78,6 +78,90 @@
       "reason": "MITIGATED: OUTBOUND_SLOT_RESERVE=2 prevents inbound from starving outbound dials",
       "acknowledged_by": "architect",
       "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Malleability",
+      "file_pattern": "tx_relay.rs",
+      "reason": "FALSE_POSITIVE: Go canonicalTxID (handlers_tx.go:41) uses identical consumed!=len check. Zero divergence — both reject trailing bytes.",
+      "acknowledged_by": "controller",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Non-Canonical Parsing",
+      "file_pattern": "tx_relay.rs",
+      "reason": "FALSE_POSITIVE: same as Malleability — Rust canonical_txid mirrors Go canonicalTxID exactly (consumed != len → error).",
+      "acknowledged_by": "controller",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Unbounded Memory in Peer Outbox",
+      "file_pattern": "p2p_service.rs",
+      "reason": "ACCEPTED_RISK: Go parity — Go also has no per-peer send queue limit. Each frame ~70 bytes (INV). Real risk LOW at current throughput. Follow-up: add per-peer cap.",
+      "acknowledged_by": "controller",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Transaction Relay Without Validation",
+      "file_pattern": "tx_relay.rs",
+      "reason": "FALSE_POSITIVE: Go handleTx (handlers_tx.go:9-34) also does NOT submit to consensus mempool — only relay pool + re-announce. Mempool admission is a separate RPC path.",
+      "acknowledged_by": "controller",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Transaction ID Malleability",
+      "file_pattern": "tx_relay.rs",
+      "reason": "FALSE_POSITIVE: duplicate of Malleability pattern — Go/Rust both reject non-canonical bytes identically.",
+      "acknowledged_by": "controller",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Unvalidated Transaction",
+      "file_pattern": "tx_relay.rs",
+      "reason": "FALSE_POSITIVE: Go parity — relay pool is separate from consensus mempool. Relay does not imply validation, same as Go.",
+      "acknowledged_by": "controller",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Memory Exhaustion",
+      "file_pattern": "relay_pool.rs",
+      "reason": "ACCEPTED_RISK: Go parity — Go MemoryTxPool also count-based (1000) without byte limit. MAX_RELAY_MSG_BYTES limits individual tx size.",
+      "acknowledged_by": "controller",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Poisoned Lock",
+      "file_pattern": "tx_relay.rs",
+      "reason": "ACCEPTED_RISK: poison = thread panic = node already degraded. Returning error is correct — no recovery possible from panicked thread.",
+      "acknowledged_by": "controller",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Unbounded GETDATA",
+      "file_pattern": "p2p_runtime.rs",
+      "reason": "MITIGATED: MAX_GETDATA_RESPONSE_BYTES (128MB) + MAX_GETDATA_RESPONSE_BLOCKS (16) cap. Pre-existing design, not new in this PR.",
+      "acknowledged_by": "controller",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Inconsistent Fee",
+      "file_pattern": "tx_relay.rs",
+      "reason": "ACCEPTED_RISK: Go relay also uses relay-specific metadata, not consensus fee. fee=0 for RPC-submitted txs matches Go where RelayMetadata is separate from mempool fee.",
+      "acknowledged_by": "controller",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Inefficient",
+      "file_pattern": "",
+      "reason": "ACCEPTED_RISK: O(n) eviction in relay pool and tx_seen matches Go implementation. N<=1000 (pool) and amortized O(1) (seen). Not a blocker.",
+      "acknowledged_by": "controller",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Redundant Tx Parsing",
+      "file_pattern": "tx_relay.rs",
+      "reason": "ACCEPTED_RISK: single parse per tx relay path. Optimizing to reuse parsed tx is premature — relay is not hot path.",
+      "acknowledged_by": "controller",
+      "date": "2026-03-25"
     }
   ]
 }
