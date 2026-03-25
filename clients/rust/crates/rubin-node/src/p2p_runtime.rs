@@ -697,6 +697,12 @@ impl PeerSession {
                 MSG_TX => {
                     if let Some(rs) = relay_state {
                         if let Some(tx_bytes) = rs.relay_pool.get(&item.hash) {
+                            if total_bytes.saturating_add(tx_bytes.len())
+                                > MAX_GETDATA_RESPONSE_BYTES
+                            {
+                                break;
+                            }
+                            total_bytes = total_bytes.saturating_add(tx_bytes.len());
                             responses.push(WireMessage {
                                 command: MESSAGE_TX.to_string(),
                                 payload: tx_bytes,
