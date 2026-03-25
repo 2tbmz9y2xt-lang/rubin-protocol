@@ -239,8 +239,14 @@ impl PeerSession {
     }
 
     pub fn read_message(&mut self) -> io::Result<WireMessage> {
+        self.read_message_with_timeout(self.cfg.read_deadline)
+    }
+
+    /// Read a message with a custom timeout (used for sub-timeout polling in
+    /// the live message loop so relay outbox frames are drained promptly).
+    pub fn read_message_with_timeout(&mut self, timeout: Duration) -> io::Result<WireMessage> {
         self.stream
-            .set_read_timeout(Some(self.cfg.read_deadline))
+            .set_read_timeout(Some(timeout))
             .map_err(io::Error::other)?;
         read_message_from(
             &mut self.stream,

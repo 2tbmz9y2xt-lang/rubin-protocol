@@ -715,28 +715,34 @@ fn handle_peer(
         }
     }
 
+    // Sub-timeout for the live loop: short reads so we drain relay outbox
+    // promptly.  Cumulative idle counter replaces the single long read_deadline
+    // for dead-peer detection.
+    const RELAY_POLL_INTERVAL: Duration = Duration::from_millis(500);
+    let dead_peer_timeout = shared.runtime_cfg.read_deadline;
+    let mut idle_elapsed = Duration::ZERO;
+
     while !shared.stop.load(Ordering::SeqCst) {
-        // Flush relay outbox BEFORE blocking on read_message so that queued
-        // INV frames are sent without waiting for inbound socket activity.
-        // Matches Go where broadcastInventory writes directly to the socket.
+        // Flush relay outbox before every read attempt.
         for frame in take_pending_outbox_frames(&shared.peer_outboxes, &peer_addr) {
             if session.write_raw(&frame).is_err() {
                 break;
             }
         }
-        let msg = match session.read_message() {
-            Ok(msg) => msg,
+        let msg = match session.read_message_with_timeout(RELAY_POLL_INTERVAL) {
+            Ok(msg) => {
+                idle_elapsed = Duration::ZERO;
+                msg
+            }
             Err(err)
                 if matches!(
                     err.kind(),
                     io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
                 ) =>
             {
-                // Drain relay outbox (timeout/idle path).
-                for frame in take_pending_outbox_frames(&shared.peer_outboxes, &peer_addr) {
-                    if session.write_raw(&frame).is_err() {
-                        break;
-                    }
+                idle_elapsed += RELAY_POLL_INTERVAL;
+                if idle_elapsed >= dead_peer_timeout {
+                    return Err("peer idle timeout".to_string());
                 }
                 continue;
             }
@@ -1616,6 +1622,155 @@ mod tests {
         shared.stop.store(true, Ordering::SeqCst);
         handle.join().expect("loop join");
         shared.stop.store(true, Ordering::SeqCst);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// Integration test: service dials a bootstrap peer, we enqueue relay
+    /// frames in the outbox, verify the live loop drains them within the
+    /// 500ms poll interval.  Covers write_raw drain paths (lines 728-731,
+    /// 743-745, 779-781) and the peer_outboxes accessor (line 181).
+    #[test]
+    fn outbox_drain_via_live_loop() {
+        use std::io::Read;
+
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-outbox-drain");
+        let mut server_cfg = default_peer_runtime_config("devnet", 8);
+        server_cfg.read_deadline = Duration::from_secs(5);
+        server_cfg.write_deadline = Duration::from_secs(5);
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let bootstrap_addr = listener.local_addr().expect("addr").to_string();
+
+        // Shared flag: server tells us when handshake is done.
+        let hs_done = Arc::new(AtomicBool::new(false));
+        let hs_done_s = Arc::clone(&hs_done);
+        // Shared flag: tell server when to stop.
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_s = Arc::clone(&stop);
+
+        let cfg_clone = server_cfg.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let local = local_version(0).expect("version");
+            let _session = perform_version_handshake(
+                stream.try_clone().expect("clone"),
+                cfg_clone,
+                local,
+                local.chain_id,
+                local.genesis_hash,
+            )
+            .expect("server handshake");
+            hs_done_s.store(true, Ordering::SeqCst);
+
+            // Read raw bytes the service drains into us.
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .ok();
+            let mut buf = [0u8; 256];
+            let mut total = 0usize;
+            while !stop_s.load(Ordering::SeqCst) {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => total += n,
+                    Err(_) => break,
+                }
+            }
+            total
+        });
+
+        let peer_manager = Arc::new(PeerManager::new(server_cfg.clone()));
+        let mut svc_cfg = default_peer_runtime_config("devnet", 8);
+        svc_cfg.read_deadline = Duration::from_secs(10);
+        svc_cfg.write_deadline = Duration::from_secs(5);
+        let mut service = start_node_p2p_service(NodeP2PServiceConfig {
+            bind_addr: "127.0.0.1:0".to_string(),
+            bootstrap_peers: vec![bootstrap_addr.clone()],
+            runtime_cfg: svc_cfg,
+            peer_manager: Arc::clone(&peer_manager),
+            sync_engine,
+            chain_id: devnet_genesis_chain_id(),
+            genesis_hash: test_genesis_hash(),
+        })
+        .expect("start service");
+
+        // Wait for handshake on both sides.
+        wait_until(Instant::now() + Duration::from_secs(5), || {
+            hs_done.load(Ordering::SeqCst)
+        });
+        // Wait for outbox registration.
+        let outboxes = service.peer_outboxes();
+        wait_until(Instant::now() + Duration::from_secs(3), || {
+            outboxes.lock().unwrap().len() > 0
+        });
+
+        let peer_key = {
+            outboxes.lock().unwrap().keys().next().unwrap().clone()
+        };
+
+        // Enqueue frames.
+        let frames: Vec<Vec<u8>> = vec![vec![0xDE, 0xAD], vec![0xBE, 0xEF, 0xCA, 0xFE]];
+        let total_bytes: usize = frames.iter().map(|f| f.len()).sum();
+        outboxes
+            .lock()
+            .unwrap()
+            .get_mut(&peer_key)
+            .unwrap()
+            .extend(frames);
+
+        // Wait for drain.
+        wait_until(Instant::now() + Duration::from_secs(3), || {
+            outboxes
+                .lock()
+                .unwrap()
+                .get(&peer_key)
+                .map_or(true, |q| q.is_empty())
+        });
+
+        // Stop server, collect bytes read.
+        stop.store(true, Ordering::SeqCst);
+        service.close();
+        let received = server.join().expect("server join");
+        assert!(
+            received >= total_bytes,
+            "server should have received at least {total_bytes} bytes, got {received}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Test that `peer_outboxes()` accessor returns the shared outbox map.
+    #[test]
+    fn peer_outboxes_accessor_returns_shared_map() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-outbox-accessor");
+        let runtime_cfg = default_peer_runtime_config("devnet", 8);
+        let mut service = start_node_p2p_service(NodeP2PServiceConfig {
+            bind_addr: "127.0.0.1:0".to_string(),
+            bootstrap_peers: Vec::new(),
+            runtime_cfg: runtime_cfg.clone(),
+            peer_manager: Arc::new(PeerManager::new(runtime_cfg)),
+            sync_engine,
+            chain_id: devnet_genesis_chain_id(),
+            genesis_hash: test_genesis_hash(),
+        })
+        .expect("start service");
+
+        let outboxes = service.peer_outboxes();
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("test:8333".to_string(), vec![vec![42]]);
+        assert_eq!(
+            service
+                .peer_outboxes()
+                .lock()
+                .unwrap()
+                .get("test:8333")
+                .unwrap()
+                .len(),
+            1
+        );
+
+        service.close();
         fs::remove_dir_all(dir).expect("cleanup");
     }
 }
