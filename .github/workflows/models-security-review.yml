@@ -100,7 +100,13 @@ jobs:
                     try {
                       const parsed = JSON.parse(jsonMatch[1]);
                       for (const f of (parsed.findings || [])) {
-                        titles.push(`[${f.severity}] ${f.title}`);
+                        // Sanitize: strip newlines, limit length, allow only printable ASCII
+                        const sev = String(f.severity || '').replace(/[^A-Z]/g, '').slice(0, 10);
+                        const title = String(f.title || '')
+                          .replace(/[\r\n]+/g, ' ')
+                          .replace(/[^\x20-\x7E]/g, '')
+                          .slice(0, 120);
+                        if (sev && title) titles.push(`[${sev}] ${title}`);
                       }
                     } catch {}
                   }
