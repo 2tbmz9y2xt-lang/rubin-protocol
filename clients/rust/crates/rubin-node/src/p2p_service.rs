@@ -1698,7 +1698,7 @@ mod tests {
         // Wait for outbox registration.
         let outboxes = service.peer_outboxes();
         wait_until(Instant::now() + Duration::from_secs(3), || {
-            outboxes.lock().unwrap().len() > 0
+            !outboxes.lock().unwrap().is_empty()
         });
 
         let peer_key = { outboxes.lock().unwrap().keys().next().unwrap().clone() };
@@ -1719,7 +1719,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .get(&peer_key)
-                .map_or(true, |q| q.is_empty())
+                .is_none_or(|q| q.is_empty())
         });
 
         // Stop server, collect bytes read.
