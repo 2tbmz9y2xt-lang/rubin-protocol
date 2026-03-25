@@ -195,9 +195,12 @@ pub fn announce_tx(
     // Store in relay pool (fee=0, size=raw length — metadata not available
     // from RPC path without re-parsing; matches Go where mempool.RelayMetadata
     // extracts fee/size, but for RPC-submitted txs fee is already validated).
-    relay_state
+    if !relay_state
         .relay_pool
-        .put(txid, tx_bytes, 0, tx_bytes.len());
+        .put(txid, tx_bytes, 0, tx_bytes.len())
+    {
+        return Ok(());
+    }
 
     if !relay_state.tx_seen.add(txid) {
         return Ok(()); // Already seen — don't broadcast.
@@ -748,6 +751,40 @@ mod tests {
         // No broadcast should occur (already seen).
         let boxes = outboxes.lock().unwrap();
         assert!(boxes["peer-y:8333"].is_empty());
+    }
+
+    #[test]
+    fn announce_tx_relay_pool_rejection_skips_seen_and_broadcast() {
+        let tx_bytes = real_tx_bytes();
+        let relay = TxRelayState {
+            tx_seen: BoundedHashSet::new(crate::tx_seen::DEFAULT_TX_SEEN_CAPACITY),
+            relay_pool: RelayTxPool::new_with_limit(1),
+            tx_relay_fanout: DEFAULT_TX_RELAY_FANOUT,
+            network: "devnet".to_string(),
+        };
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "peer-z:8333".to_string(),
+            ..Default::default()
+        });
+        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("peer-z:8333".to_string(), Vec::new());
+
+        assert!(relay.relay_pool.put([0xEE; 32], &[0xAA], 1, 1));
+
+        let result = announce_tx(&tx_bytes, &relay, &pm, "local:8333", &outboxes);
+        assert!(result.is_ok());
+
+        let txid = canonical_txid(&tx_bytes).unwrap();
+        assert!(!relay.tx_seen.has(&txid));
+        assert!(!relay.relay_pool.has(&txid));
+        let boxes = outboxes.lock().unwrap();
+        assert!(boxes["peer-z:8333"].is_empty());
     }
 
     #[test]
