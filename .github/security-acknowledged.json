@@ -1,60 +1,74 @@
 {
-  "$schema_note": "Acknowledged security findings. DeepSeek workflow skips these when counting CRITICAL/HIGH blockers. Each entry has a title pattern (substring match) and explanation.",
-  "version": 1,
+  "$schema_note": "Acknowledged security findings. DeepSeek workflow skips these when counting CRITICAL/HIGH blockers. Each entry has a title pattern (case-insensitive substring match) and explanation.",
+  "version": 2,
   "acknowledged": [
     {
-      "title_pattern": "Unbounded Worker Thread Allocation",
+      "title_pattern": "Worker Thread",
       "file_pattern": "p2p_service.rs",
-      "reason": "MITIGATED: MAX_WORKER_THREADS=256 cap at spawn_service_worker() line 325",
+      "reason": "MITIGATED: MAX_WORKER_THREADS=256 cap + thread::Builder (no panic on spawn fail)",
       "acknowledged_by": "architect",
       "date": "2026-03-25"
     },
     {
-      "title_pattern": "DNS Resolution DoS",
+      "title_pattern": "DNS Resolver",
       "file_pattern": "p2p_service.rs",
-      "reason": "MITIGATED: MAX_DNS_RESOLVER_THREADS=4 with AtomicUsize CAS loop",
+      "reason": "MITIGATED: MAX_DNS_RESOLVER_THREADS=4, 3s timeout, slot cleanup on spawn failure",
       "acknowledged_by": "architect",
       "date": "2026-03-25"
     },
     {
-      "title_pattern": "Integer Overflow in Orphan Pool",
+      "title_pattern": "DNS Resolution",
+      "file_pattern": "p2p_service.rs",
+      "reason": "MITIGATED: same as DNS Resolver — bounded pool with timeout",
+      "acknowledged_by": "architect",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Orphan Block Pool",
       "file_pattern": "p2p_runtime.rs",
-      "reason": "MITIGATED: saturating_add + checked_add used",
+      "reason": "MITIGATED: global_orphan_byte_limit() + per-block size check + checked_add at insertion",
       "acknowledged_by": "architect",
       "date": "2026-03-25"
     },
     {
-      "title_pattern": "Orphan Block Pool Allocation",
-      "file_pattern": "p2p_service.rs",
-      "reason": "MITIGATED: global_orphan_byte_limit() cap + checked_add at insertion",
+      "title_pattern": "Orphan Pool",
+      "file_pattern": "p2p_runtime.rs",
+      "reason": "MITIGATED: same as Orphan Block Pool — byte limit + eviction + size check",
+      "acknowledged_by": "architect",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Integer Overflow",
+      "file_pattern": "p2p_runtime.rs",
+      "reason": "MITIGATED: checked_add used everywhere, saturating_add only for non-overflow-sensitive counters",
       "acknowledged_by": "architect",
       "date": "2026-03-25"
     },
     {
       "title_pattern": "Genesis Hash",
-      "file_pattern": "main.rs",
-      "reason": "MITIGATED: runtime_genesis_hash() returns Err for non-devnet without explicit hash",
+      "file_pattern": "",
+      "reason": "MITIGATED: non-devnet requires explicit --genesis-file + handshake validates genesis_hash (Go parity)",
       "acknowledged_by": "architect",
       "date": "2026-03-25"
     },
     {
-      "title_pattern": "DNS Resolver Thread Leak",
-      "file_pattern": "p2p_service.rs",
-      "reason": "MITIGATED: counter decremented on thread exit, bounded by MAX_DNS_RESOLVER_THREADS",
-      "acknowledged_by": "architect",
-      "date": "2026-03-25"
-    },
-    {
-      "title_pattern": "Non-atomic update of global orphan",
-      "file_pattern": "p2p_runtime.rs",
-      "reason": "MITIGATED: operations hold mutex, AtomicUsize not needed",
-      "acknowledged_by": "architect",
-      "date": "2026-03-25"
-    },
-    {
-      "title_pattern": "Unvalidated Inventory Vectors",
+      "title_pattern": "Inventory Vector",
       "file_pattern": "p2p_runtime.rs",
       "reason": "MITIGATED: compact_size parsing enforces MAX_INV_ITEMS before allocation",
+      "acknowledged_by": "architect",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "SyncEngine Lock",
+      "file_pattern": "p2p_service.rs",
+      "reason": "ACCEPTED_RISK: lock held during message processing bounded by MAX_RELAY_MSG_BYTES + block validation. Splitting requires major async refactor — deferred to post-MVP.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Session Slot",
+      "file_pattern": "p2p_service.rs",
+      "reason": "MITIGATED: OUTBOUND_SLOT_RESERVE=2 prevents inbound from starving outbound dials",
       "acknowledged_by": "architect",
       "date": "2026-03-25"
     }

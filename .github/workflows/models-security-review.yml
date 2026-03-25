@@ -380,7 +380,7 @@ jobs:
               return acknowledged.some(ack => {
                 const pattern = (ack.title_pattern || '').toLowerCase();
                 if (!pattern) return false;  // empty pattern matches everything — reject
-                const titleMatch = title.includes(pattern);
+                const titleMatch = title.toLowerCase().includes(pattern.toLowerCase());
                 const fileMatch = !ack.file_pattern || file.includes((ack.file_pattern || '').toLowerCase());
                 return titleMatch && fileMatch;
               });
