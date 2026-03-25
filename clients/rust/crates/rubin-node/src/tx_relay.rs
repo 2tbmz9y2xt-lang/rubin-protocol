@@ -17,6 +17,55 @@ pub const DEFAULT_TX_RELAY_FANOUT: usize = 8;
 /// At ~70 bytes/frame (INV with 1 tx), 1024 frames ≈ 70 KiB — safe even for
 /// slow peers while preventing unbounded growth.
 const MAX_OUTBOX_FRAMES_PER_PEER: usize = 1024;
+/// Hard per-peer byte budget for queued relay frames.
+///
+/// Inventory frames are normally tiny, but a byte cap ensures future relay
+/// changes cannot turn the frame-count cap into a multi-megabyte queue.
+const MAX_OUTBOX_BYTES_PER_PEER: usize = 1 << 20;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PeerOutbox {
+    frames: Vec<Vec<u8>>,
+    total_bytes: usize,
+}
+
+impl PeerOutbox {
+    pub fn push_frame(&mut self, frame: Vec<u8>) -> bool {
+        if self.frames.len() >= MAX_OUTBOX_FRAMES_PER_PEER {
+            return false;
+        }
+        let Some(next_total) = self.total_bytes.checked_add(frame.len()) else {
+            return false;
+        };
+        if next_total > MAX_OUTBOX_BYTES_PER_PEER {
+            return false;
+        }
+        self.total_bytes = next_total;
+        self.frames.push(frame);
+        true
+    }
+
+    pub fn take_frames(&mut self) -> Vec<Vec<u8>> {
+        self.total_bytes = 0;
+        std::mem::take(&mut self.frames)
+    }
+
+    pub fn len(&self) -> usize {
+        self.frames.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+
+    pub fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
+    pub fn frames(&self) -> &[Vec<u8>] {
+        &self.frames
+    }
+}
 
 /// Shared relay state passed through the P2P service.
 pub struct TxRelayState {
@@ -117,7 +166,7 @@ pub fn broadcast_inventory(
     items: &[InventoryVector],
     peer_manager: &PeerManager,
     local_addr: &str,
-    peer_writers: &Mutex<HashMap<String, Vec<Vec<u8>>>>,
+    peer_writers: &Mutex<HashMap<String, PeerOutbox>>,
 ) -> Result<(), String> {
     let peers = peer_manager.snapshot();
     let mut addrs: Vec<String> = peers
@@ -153,7 +202,7 @@ fn broadcast_inv_to_addrs(
     items: &[InventoryVector],
     addrs: &[String],
     network: &str,
-    peer_writers: &Mutex<HashMap<String, Vec<Vec<u8>>>>,
+    peer_writers: &Mutex<HashMap<String, PeerOutbox>>,
 ) -> Result<(), String> {
     let payload = encode_inventory_vectors(items).map_err(|e| e.to_string())?;
     let magic = crate::p2p_runtime::network_magic(network);
@@ -170,10 +219,9 @@ fn broadcast_inv_to_addrs(
     };
     for addr in addrs {
         if let Some(queue) = outboxes.get_mut(addr) {
-            if queue.len() < MAX_OUTBOX_FRAMES_PER_PEER {
-                queue.push(frame.clone());
-            }
-            // else: drop silently — peer is slow, will catch up on next drain.
+            let _ = queue.push_frame(frame.clone());
+            // else: drop silently — peer is slow or over byte budget and will
+            // catch up on the next drain.
         }
     }
     Ok(())
@@ -188,7 +236,7 @@ pub fn announce_tx(
     relay_state: &TxRelayState,
     peer_manager: &PeerManager,
     local_addr: &str,
-    peer_writers: &Mutex<HashMap<String, Vec<Vec<u8>>>>,
+    peer_writers: &Mutex<HashMap<String, PeerOutbox>>,
 ) -> Result<(), String> {
     let txid = canonical_txid(tx_bytes)?;
 
@@ -232,7 +280,7 @@ pub fn handle_received_tx(
     peer_manager: &PeerManager,
     skip_addr: &str,
     local_addr: &str,
-    peer_writers: &Mutex<HashMap<String, Vec<Vec<u8>>>>,
+    peer_writers: &Mutex<HashMap<String, PeerOutbox>>,
 ) -> io::Result<()> {
     // Reject oversized tx payloads early (defense-in-depth).
     if tx_bytes.len() > rubin_consensus::constants::MAX_RELAY_MSG_BYTES as usize {
@@ -389,7 +437,7 @@ mod tests {
         let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
             "devnet", 64,
         ));
-        let writers: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let writers: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
 
         // We need a real parseable tx for canonical_txid. Use a minimal
         // test by directly testing the seen/pool components.
@@ -421,7 +469,7 @@ mod tests {
         let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
             "devnet", 64,
         ));
-        let writers: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let writers: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
 
         // With no peers registered, broadcast should succeed silently.
         let result = broadcast_inventory(
@@ -454,15 +502,15 @@ mod tests {
             ..Default::default()
         });
         // Create outboxes for both peers.
-        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
         outboxes
             .lock()
             .unwrap()
-            .insert("peer-a:8333".to_string(), Vec::new());
+            .insert("peer-a:8333".to_string(), PeerOutbox::default());
         outboxes
             .lock()
             .unwrap()
-            .insert("peer-b:8333".to_string(), Vec::new());
+            .insert("peer-b:8333".to_string(), PeerOutbox::default());
 
         // Broadcast TX inventory — should enqueue frames.
         let result = broadcast_inventory(
@@ -484,7 +532,7 @@ mod tests {
         assert!(total_frames > 0, "expected at least one enqueued frame");
         // Each frame should start with RBDV magic.
         for queue in boxes.values() {
-            for frame in queue {
+            for frame in queue.frames() {
                 assert_eq!(&frame[0..4], b"RBDV", "frame should use Rubin devnet magic");
             }
         }
@@ -504,15 +552,15 @@ mod tests {
             addr: "peer-b:8333".to_string(),
             ..Default::default()
         });
-        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
         outboxes
             .lock()
             .unwrap()
-            .insert("peer-a:8333".to_string(), Vec::new());
+            .insert("peer-a:8333".to_string(), PeerOutbox::default());
         outboxes
             .lock()
             .unwrap()
-            .insert("peer-b:8333".to_string(), Vec::new());
+            .insert("peer-b:8333".to_string(), PeerOutbox::default());
 
         // Broadcast BLOCK inventory — should go to ALL peers.
         let result = broadcast_inventory(
@@ -548,15 +596,15 @@ mod tests {
             addr: "other:8333".to_string(),
             ..Default::default()
         });
-        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
         outboxes
             .lock()
             .unwrap()
-            .insert("sender:8333".to_string(), Vec::new());
+            .insert("sender:8333".to_string(), PeerOutbox::default());
         outboxes
             .lock()
             .unwrap()
-            .insert("other:8333".to_string(), Vec::new());
+            .insert("other:8333".to_string(), PeerOutbox::default());
 
         let result = broadcast_inventory(
             &relay,
@@ -590,12 +638,12 @@ mod tests {
                 ..Default::default()
             });
         }
-        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
         for i in 0..3 {
             outboxes
                 .lock()
                 .unwrap()
-                .insert(format!("peer-{i}:8333"), Vec::new());
+                .insert(format!("peer-{i}:8333"), PeerOutbox::default());
         }
 
         let result = broadcast_inventory(
@@ -637,11 +685,11 @@ mod tests {
             addr: "peer:8333".to_string(),
             ..Default::default()
         });
-        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
         outboxes
             .lock()
             .unwrap()
-            .insert("peer:8333".to_string(), Vec::new());
+            .insert("peer:8333".to_string(), PeerOutbox::default());
 
         let result = broadcast_inventory(&relay, None, &[], &pm, "local:8333", &outboxes);
         assert!(result.is_ok());
@@ -654,7 +702,7 @@ mod tests {
         let _pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
             "devnet", 64,
         ));
-        let _outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let _outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
 
         // Pre-mark txid as seen — handle_received_tx should return Ok without storing.
         let txid = make_txid(0x99);
@@ -703,11 +751,11 @@ mod tests {
             addr: "peer-x:8333".to_string(),
             ..Default::default()
         });
-        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
         outboxes
             .lock()
             .unwrap()
-            .insert("peer-x:8333".to_string(), Vec::new());
+            .insert("peer-x:8333".to_string(), PeerOutbox::default());
 
         let result = announce_tx(&tx_bytes, &relay, &pm, "local:8333", &outboxes);
         assert!(result.is_ok(), "announce_tx failed: {:?}", result.err());
@@ -720,7 +768,7 @@ mod tests {
         // Peer should have received an INV frame.
         let boxes = outboxes.lock().unwrap();
         assert_eq!(boxes["peer-x:8333"].len(), 1);
-        assert_eq!(&boxes["peer-x:8333"][0][0..4], b"RBDV");
+        assert_eq!(&boxes["peer-x:8333"].frames()[0][0..4], b"RBDV");
     }
 
     #[test]
@@ -735,11 +783,11 @@ mod tests {
             addr: "peer-y:8333".to_string(),
             ..Default::default()
         });
-        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
         outboxes
             .lock()
             .unwrap()
-            .insert("peer-y:8333".to_string(), Vec::new());
+            .insert("peer-y:8333".to_string(), PeerOutbox::default());
 
         // Pre-mark as seen + pre-store in pool.
         relay.tx_seen.add(txid);
@@ -769,11 +817,11 @@ mod tests {
             addr: "peer-z:8333".to_string(),
             ..Default::default()
         });
-        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
         outboxes
             .lock()
             .unwrap()
-            .insert("peer-z:8333".to_string(), Vec::new());
+            .insert("peer-z:8333".to_string(), PeerOutbox::default());
 
         assert!(relay.relay_pool.put([0xEE; 32], &[0xAA], 1, 1));
 
@@ -798,15 +846,15 @@ mod tests {
             addr: "other:8333".to_string(),
             ..Default::default()
         });
-        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
         outboxes
             .lock()
             .unwrap()
-            .insert("sender:8333".to_string(), Vec::new());
+            .insert("sender:8333".to_string(), PeerOutbox::default());
         outboxes
             .lock()
             .unwrap()
-            .insert("other:8333".to_string(), Vec::new());
+            .insert("other:8333".to_string(), PeerOutbox::default());
 
         let result = handle_received_tx(
             &tx_bytes,
@@ -838,7 +886,7 @@ mod tests {
         let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
             "devnet", 64,
         ));
-        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
 
         let result = handle_received_tx(
             &tx_bytes,
@@ -865,6 +913,24 @@ mod tests {
     fn relay_state_with_network() {
         let rs = TxRelayState::new_with_network("mainnet");
         assert_eq!(rs.network, "mainnet");
+    }
+
+    #[test]
+    fn peer_outbox_enforces_byte_budget_and_resets_on_drain() {
+        let mut outbox = PeerOutbox::default();
+        assert!(outbox.push_frame(vec![0xAA; MAX_OUTBOX_BYTES_PER_PEER - 16]));
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox.total_bytes(), MAX_OUTBOX_BYTES_PER_PEER - 16);
+
+        assert!(!outbox.push_frame(vec![0xBB; 17]));
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox.total_bytes(), MAX_OUTBOX_BYTES_PER_PEER - 16);
+
+        let drained = outbox.take_frames();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(outbox.len(), 0);
+        assert_eq!(outbox.total_bytes(), 0);
+        assert!(outbox.is_empty());
     }
 
     #[test]

@@ -126,7 +126,7 @@ pub struct PeerRelayContext<'a> {
     pub peer_registered_addr: &'a str,
     /// Outbound relay queues: serialized wire frames enqueued by broadcast,
     /// drained by the peer thread to avoid concurrent TcpStream writes.
-    pub peer_writers: &'a std::sync::Mutex<HashMap<String, Vec<Vec<u8>>>>,
+    pub peer_writers: &'a std::sync::Mutex<HashMap<String, crate::tx_relay::PeerOutbox>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

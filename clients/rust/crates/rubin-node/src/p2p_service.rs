@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use crate::p2p_runtime::{
     perform_version_handshake, PeerManager, PeerRelayContext, PeerRuntimeConfig, VersionPayloadV1,
 };
-use crate::tx_relay::TxRelayState;
+use crate::tx_relay::{PeerOutbox, TxRelayState};
 use crate::SyncEngine;
 
 const ACCEPT_LOOP_SLEEP: Duration = Duration::from_millis(100);
@@ -67,7 +67,7 @@ struct SharedServiceState {
     /// Outbound relay message queues per peer. Relay broadcasts enqueue
     /// serialized frames here; each peer's message loop drains its queue
     /// between reads, ensuring writes are serialized on the same TcpStream.
-    peer_outboxes: Arc<Mutex<HashMap<String, Vec<Vec<u8>>>>>,
+    peer_outboxes: Arc<Mutex<HashMap<String, PeerOutbox>>>,
     local_addr: String,
 }
 
@@ -178,7 +178,7 @@ impl RunningNodeP2PService {
     }
 
     /// Peer outboxes for tx broadcast.
-    pub fn peer_outboxes(&self) -> Arc<Mutex<HashMap<String, Vec<Vec<u8>>>>> {
+    pub fn peer_outboxes(&self) -> Arc<Mutex<HashMap<String, PeerOutbox>>> {
         Arc::clone(&self.shared.peer_outboxes)
     }
 
@@ -682,7 +682,7 @@ fn handle_peer(
 
     // Register outbox for this peer so relay broadcasts can enqueue frames.
     if let Ok(mut outboxes) = shared.peer_outboxes.lock() {
-        outboxes.insert(peer_addr.clone(), Vec::new());
+        outboxes.insert(peer_addr.clone(), PeerOutbox::default());
     }
     let _outbox_guard = PeerOutboxGuard {
         peer_outboxes: Arc::clone(&shared.peer_outboxes),
@@ -730,7 +730,7 @@ fn handle_peer(
                     .peer_outboxes
                     .lock()
                     .ok()
-                    .and_then(|mut ob| ob.get_mut(&peer_addr).map(std::mem::take))
+                    .and_then(|mut ob| ob.get_mut(&peer_addr).map(PeerOutbox::take_frames))
                     .unwrap_or_default();
                 for frame in pending {
                     session
@@ -774,7 +774,7 @@ fn handle_peer(
             .peer_outboxes
             .lock()
             .ok()
-            .and_then(|mut ob| ob.get_mut(&peer_addr).map(std::mem::take))
+            .and_then(|mut ob| ob.get_mut(&peer_addr).map(PeerOutbox::take_frames))
             .unwrap_or_default();
         for frame in pending {
             session
@@ -813,7 +813,7 @@ impl Drop for PeerGuard {
 }
 
 struct PeerOutboxGuard {
-    peer_outboxes: Arc<Mutex<HashMap<String, Vec<Vec<u8>>>>>,
+    peer_outboxes: Arc<Mutex<HashMap<String, PeerOutbox>>>,
     addr: String,
 }
 
