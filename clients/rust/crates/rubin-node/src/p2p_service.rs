@@ -716,6 +716,22 @@ fn handle_peer(
     }
 
     while !shared.stop.load(Ordering::SeqCst) {
+        // Flush relay outbox BEFORE blocking on read_message so that queued
+        // INV frames are sent without waiting for inbound socket activity.
+        // Matches Go where broadcastInventory writes directly to the socket.
+        {
+            let pending: Vec<Vec<u8>> = shared
+                .peer_outboxes
+                .lock()
+                .ok()
+                .and_then(|mut ob| ob.get_mut(&peer_addr).map(std::mem::take))
+                .unwrap_or_default();
+            for frame in pending {
+                if session.write_raw(&frame).is_err() {
+                    break;
+                }
+            }
+        }
         let msg = match session.read_message() {
             Ok(msg) => msg,
             Err(err)
