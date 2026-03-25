@@ -1,7 +1,6 @@
 use std::collections::HashMap;
-use std::io::{self, Write};
-use std::net::TcpStream;
-use std::sync::{Arc, Mutex};
+use std::io;
+use std::sync::Mutex;
 
 use sha3::{Digest, Sha3_256};
 
@@ -11,8 +10,6 @@ use crate::p2p_runtime::{
 use crate::relay_pool::RelayTxPool;
 use crate::tx_seen::BoundedHashSet;
 
-const MESSAGE_INV: &str = "inv";
-
 /// Default TX relay fanout (matches Go `defaultTxRelayFanout`).
 pub const DEFAULT_TX_RELAY_FANOUT: usize = 8;
 
@@ -21,6 +18,7 @@ pub struct TxRelayState {
     pub tx_seen: BoundedHashSet,
     pub relay_pool: RelayTxPool,
     pub tx_relay_fanout: usize,
+    pub network: String,
 }
 
 impl Default for TxRelayState {
@@ -31,10 +29,15 @@ impl Default for TxRelayState {
 
 impl TxRelayState {
     pub fn new() -> Self {
+        Self::new_with_network("devnet")
+    }
+
+    pub fn new_with_network(network: &str) -> Self {
         Self {
             tx_seen: BoundedHashSet::new(crate::tx_seen::DEFAULT_TX_SEEN_CAPACITY),
             relay_pool: RelayTxPool::new(),
             tx_relay_fanout: DEFAULT_TX_RELAY_FANOUT,
+            network: network.to_string(),
         }
     }
 }
@@ -109,7 +112,7 @@ pub fn broadcast_inventory(
     items: &[InventoryVector],
     peer_manager: &PeerManager,
     local_addr: &str,
-    peer_writers: &Mutex<HashMap<String, Arc<Mutex<TcpStream>>>>,
+    peer_writers: &Mutex<HashMap<String, Vec<Vec<u8>>>>,
 ) -> Result<(), String> {
     let peers = peer_manager.snapshot();
     let mut addrs: Vec<String> = peers
@@ -126,7 +129,7 @@ pub fn broadcast_inventory(
 
     if !block_items.is_empty() {
         let block_vecs: Vec<InventoryVector> = block_items.into_iter().cloned().collect();
-        broadcast_inv_to_addrs(&block_vecs, &addrs, peer_writers)?;
+        broadcast_inv_to_addrs(&block_vecs, &addrs, &relay_state.network, peer_writers)?;
     }
 
     if tx_items.is_empty() {
@@ -137,27 +140,32 @@ pub fn broadcast_inventory(
     let relay_key = inventory_relay_key(&tx_vecs);
     let relay_salt = skip_addr.unwrap_or(local_addr);
     addrs = select_tx_relay_peers(relay_key, relay_salt, &addrs, relay_state.tx_relay_fanout);
-    broadcast_inv_to_addrs(&tx_vecs, &addrs, peer_writers)
+    broadcast_inv_to_addrs(&tx_vecs, &addrs, &relay_state.network, peer_writers)
 }
 
 /// Send INV message to a set of peer addresses.
 fn broadcast_inv_to_addrs(
     items: &[InventoryVector],
     addrs: &[String],
-    peer_writers: &Mutex<HashMap<String, Arc<Mutex<TcpStream>>>>,
+    network: &str,
+    peer_writers: &Mutex<HashMap<String, Vec<Vec<u8>>>>,
 ) -> Result<(), String> {
     let payload = encode_inventory_vectors(items).map_err(|e| e.to_string())?;
-    let frame = encode_wire_frame(MESSAGE_INV, &payload);
-    let Ok(writers) = peer_writers.lock() else {
-        return Err("peer_writers lock poisoned".to_string());
+    let magic = crate::p2p_runtime::network_magic(network);
+    let header = crate::p2p_runtime::build_envelope_header(magic, "inv", &payload)
+        .map_err(|e| e.to_string())?;
+    // Build a single frame: header + payload.
+    let mut frame = Vec::with_capacity(header.len() + payload.len());
+    frame.extend_from_slice(&header);
+    frame.extend_from_slice(&payload);
+    // Enqueue the frame into each peer's outbox. The peer's own thread
+    // will drain the queue, ensuring writes are serialized on the TcpStream.
+    let Ok(mut outboxes) = peer_writers.lock() else {
+        return Err("peer_outboxes lock poisoned".to_string());
     };
     for addr in addrs {
-        if let Some(stream) = writers.get(addr) {
-            if let Ok(mut s) = stream.lock() {
-                if let Err(e) = s.write_all(&frame) {
-                    eprintln!("relay: send INV to {addr}: {e}");
-                }
-            }
+        if let Some(queue) = outboxes.get_mut(addr) {
+            queue.push(frame.clone());
         }
     }
     Ok(())
@@ -172,7 +180,7 @@ pub fn announce_tx(
     relay_state: &TxRelayState,
     peer_manager: &PeerManager,
     local_addr: &str,
-    peer_writers: &Mutex<HashMap<String, Arc<Mutex<TcpStream>>>>,
+    peer_writers: &Mutex<HashMap<String, Vec<Vec<u8>>>>,
 ) -> Result<(), String> {
     let txid = canonical_txid(tx_bytes)?;
 
@@ -210,7 +218,7 @@ pub fn handle_received_tx(
     peer_manager: &PeerManager,
     skip_addr: &str,
     local_addr: &str,
-    peer_writers: &Mutex<HashMap<String, Arc<Mutex<TcpStream>>>>,
+    peer_writers: &Mutex<HashMap<String, Vec<Vec<u8>>>>,
 ) -> io::Result<()> {
     let txid = canonical_txid(tx_bytes).map_err(io::Error::other)?;
 
@@ -250,32 +258,6 @@ fn canonical_txid(tx_bytes: &[u8]) -> Result<[u8; 32], String> {
         return Err("non-canonical tx bytes".to_string());
     }
     Ok(txid)
-}
-
-/// Encode a wire-protocol frame (network_magic + command + payload_size + checksum + payload).
-///
-/// Uses devnet magic `[0xFA, 0xBF, 0xB5, 0xDA]` matching both Go and Rust.
-fn encode_wire_frame(command: &str, payload: &[u8]) -> Vec<u8> {
-    let magic = [0xFA, 0xBF, 0xB5, 0xDA]; // devnet
-    let mut cmd_bytes = [0u8; 12];
-    let cmd_src = command.as_bytes();
-    let copy_len = cmd_src.len().min(12);
-    cmd_bytes[..copy_len].copy_from_slice(&cmd_src[..copy_len]);
-
-    let payload_size = (payload.len() as u32).to_le_bytes();
-
-    let mut hasher = Sha3_256::new();
-    hasher.update(payload);
-    let digest = hasher.finalize();
-    let checksum = &digest[..4];
-
-    let mut frame = Vec::with_capacity(24 + payload.len());
-    frame.extend_from_slice(&magic);
-    frame.extend_from_slice(&cmd_bytes);
-    frame.extend_from_slice(&payload_size);
-    frame.extend_from_slice(checksum);
-    frame.extend_from_slice(payload);
-    frame
 }
 
 #[cfg(test)]
@@ -372,7 +354,7 @@ mod tests {
         let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
             "devnet", 64,
         ));
-        let writers: Mutex<HashMap<String, Arc<Mutex<TcpStream>>>> = Mutex::new(HashMap::new());
+        let writers: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
 
         // We need a real parseable tx for canonical_txid. Use a minimal
         // test by directly testing the seen/pool components.
@@ -404,7 +386,7 @@ mod tests {
         let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
             "devnet", 64,
         ));
-        let writers: Mutex<HashMap<String, Arc<Mutex<TcpStream>>>> = Mutex::new(HashMap::new());
+        let writers: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
 
         // With no peers registered, broadcast should succeed silently.
         let result = broadcast_inventory(
@@ -419,19 +401,6 @@ mod tests {
             &writers,
         );
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn encode_wire_frame_structure() {
-        let frame = encode_wire_frame("inv", &[0x01, 0x02]);
-        // 4 magic + 12 command + 4 size + 4 checksum + 2 payload = 26.
-        assert_eq!(frame.len(), 26);
-        assert_eq!(&frame[0..4], &[0xFA, 0xBF, 0xB5, 0xDA]);
-        assert_eq!(&frame[4..7], b"inv");
-        // Payload size = 2 (little-endian).
-        assert_eq!(&frame[16..20], &[2, 0, 0, 0]);
-        // Payload at the end.
-        assert_eq!(&frame[24..26], &[0x01, 0x02]);
     }
 
     #[test]

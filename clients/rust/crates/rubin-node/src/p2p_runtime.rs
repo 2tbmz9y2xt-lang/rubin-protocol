@@ -121,9 +121,9 @@ pub struct PeerRelayContext<'a> {
     pub relay_state: &'a crate::tx_relay::TxRelayState,
     pub peer_manager: &'a PeerManager,
     pub local_addr: &'a str,
-    pub peer_writers: &'a std::sync::Mutex<
-        HashMap<String, std::sync::Arc<std::sync::Mutex<std::net::TcpStream>>>,
-    >,
+    /// Outbound relay queues: serialized wire frames enqueued by broadcast,
+    /// drained by the peer thread to avoid concurrent TcpStream writes.
+    pub peer_writers: &'a std::sync::Mutex<HashMap<String, Vec<Vec<u8>>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -209,9 +209,10 @@ impl PeerManager {
 }
 
 impl PeerSession {
-    /// Clone the underlying TcpStream for use as a peer writer in tx relay.
-    pub fn try_clone_stream(&self) -> io::Result<TcpStream> {
-        self.stream.try_clone()
+    /// Write raw pre-serialized bytes to the peer's TcpStream.
+    /// Used for draining relay outbox frames.
+    pub fn write_raw(&mut self, data: &[u8]) -> io::Result<()> {
+        self.stream.write_all(data)
     }
 
     fn new(stream: TcpStream, cfg: PeerRuntimeConfig) -> Result<Self, String> {
@@ -667,13 +668,14 @@ impl PeerSession {
     ) -> io::Result<Vec<WireMessage>> {
         let mut responses = Vec::new();
         let mut total_bytes: usize = 0;
+        let mut block_count: usize = 0;
         for item in decode_inventory_vectors(payload)? {
             match item.kind {
                 MSG_BLOCK => {
                     if !sync_engine.has_block(item.hash).map_err(io::Error::other)? {
                         continue;
                     }
-                    if responses.len() >= MAX_GETDATA_RESPONSE_BLOCKS {
+                    if block_count >= MAX_GETDATA_RESPONSE_BLOCKS {
                         break;
                     }
                     let block = sync_engine
@@ -683,6 +685,7 @@ impl PeerSession {
                         break;
                     }
                     total_bytes = total_bytes.saturating_add(block.len());
+                    block_count += 1;
                     responses.push(WireMessage {
                         command: MESSAGE_BLOCK.to_string(),
                         payload: block,
@@ -1222,7 +1225,7 @@ fn unmarshal_version_payload_v1(payload: &[u8]) -> io::Result<VersionPayloadV1> 
     })
 }
 
-fn build_envelope_header(
+pub fn build_envelope_header(
     magic: [u8; 4],
     command: &str,
     payload: &[u8],
@@ -1607,7 +1610,7 @@ fn handshake_timeout_budget(read_deadline: Duration) -> Duration {
     read_deadline.min(DEFAULT_HANDSHAKE_TIMEOUT)
 }
 
-fn network_magic(network: &str) -> [u8; 4] {
+pub fn network_magic(network: &str) -> [u8; 4] {
     match network {
         "mainnet" => *b"RBMN",
         "testnet" => *b"RBTN",
