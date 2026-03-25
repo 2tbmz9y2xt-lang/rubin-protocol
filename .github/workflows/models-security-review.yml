@@ -149,9 +149,12 @@ jobs:
             };
 
             // Dynamic per-file limit: divide budget across all files so none are silently dropped.
+            // Account for per-entry overhead: "FILE: <path>\n" (~60 bytes) + separator "\n\n---\n\n" (7 bytes).
             const TOTAL_FILE_BUDGET = 100000;
             const fileCount = changedFiles.length || 1;
-            const perFileBudget = Math.min(30000, Math.floor(TOTAL_FILE_BUDGET / fileCount));
+            const PER_FILE_OVERHEAD = 70; // "FILE: " + avg path + newline + separator
+            const usableBudget = TOTAL_FILE_BUDGET - (fileCount * PER_FILE_OVERHEAD);
+            const perFileBudget = Math.min(30000, Math.max(1000, Math.floor(usableBudget / fileCount)));
             const changedFilePayload = changedFiles
               .map(file => {
                 const content = readChangedFile(file);
