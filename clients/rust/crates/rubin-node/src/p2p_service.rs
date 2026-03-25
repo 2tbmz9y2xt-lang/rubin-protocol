@@ -85,6 +85,10 @@ fn validate_peer_addr(addr: &str) -> Result<(), String> {
         if !rest.starts_with(':') || rest.len() < 2 {
             return Err(format!("missing port after bracketed IPv6: {addr}"));
         }
+        let port_str = &rest[1..];
+        port_str
+            .parse::<u16>()
+            .map_err(|_| format!("invalid port in bracketed IPv6 address: {addr}"))?;
     }
     // Format-only check: verify host:port structure without DNS resolution.
     // DNS is deferred to connect_with_timeout at runtime, so transient resolver
@@ -1341,6 +1345,18 @@ mod tests {
     fn validate_peer_addr_rejects_no_colon() {
         let err = super::validate_peer_addr("example.com").unwrap_err();
         assert!(err.contains("missing port separator"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn validate_peer_addr_rejects_bracketed_ipv6_invalid_port() {
+        let err = super::validate_peer_addr("[::1]:99999").unwrap_err();
+        assert!(err.contains("invalid port"), "out-of-range port: {err}");
+
+        let err = super::validate_peer_addr("[::1]:abc").unwrap_err();
+        assert!(err.contains("invalid port"), "non-numeric port: {err}");
+
+        let err = super::validate_peer_addr("[::1]:80:90").unwrap_err();
+        assert!(err.contains("invalid port"), "double port: {err}");
     }
 
     #[test]
