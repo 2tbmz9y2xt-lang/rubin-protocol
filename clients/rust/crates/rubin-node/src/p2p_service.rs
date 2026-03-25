@@ -733,9 +733,9 @@ fn handle_peer(
                     .and_then(|mut ob| ob.get_mut(&peer_addr).map(std::mem::take))
                     .unwrap_or_default();
                 for frame in pending {
-                    if session.write_raw(&frame).is_err() {
-                        break;
-                    }
+                    session
+                        .write_raw(&frame)
+                        .map_err(|err| format!("relay drain: {err}"))?;
                 }
                 continue;
             }
