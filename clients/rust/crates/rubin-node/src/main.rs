@@ -579,10 +579,7 @@ mod tests {
         ])
         .expect("parse args");
         let err = validate_config(&cfg).unwrap_err();
-        assert!(
-            err.contains("invalid peer"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("invalid peer"), "unexpected error: {err}");
     }
 
     #[test]
