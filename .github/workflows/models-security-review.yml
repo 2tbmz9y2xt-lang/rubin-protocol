@@ -154,7 +154,7 @@ jobs:
             const fileCount = changedFiles.length || 1;
             const PER_FILE_OVERHEAD = 70; // "FILE: " + avg path + newline + separator
             const usableBudget = TOTAL_FILE_BUDGET - (fileCount * PER_FILE_OVERHEAD);
-            const perFileBudget = Math.min(30000, Math.max(1000, Math.floor(usableBudget / fileCount)));
+            const perFileBudget = Math.min(30000, Math.floor(Math.max(0, usableBudget) / fileCount));
             const changedFilePayload = changedFiles
               .map(file => {
                 const content = readChangedFile(file);
