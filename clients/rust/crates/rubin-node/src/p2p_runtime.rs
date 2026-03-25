@@ -121,6 +121,9 @@ pub struct PeerRelayContext<'a> {
     pub relay_state: &'a crate::tx_relay::TxRelayState,
     pub peer_manager: &'a PeerManager,
     pub local_addr: &'a str,
+    /// Canonical peer address registered in PeerManager (may differ from
+    /// socket peer_addr for outbound connections using hostname dial targets).
+    pub peer_registered_addr: &'a str,
     /// Outbound relay queues: serialized wire frames enqueued by broadcast,
     /// drained by the peer thread to avoid concurrent TcpStream writes.
     pub peer_writers: &'a std::sync::Mutex<HashMap<String, Vec<Vec<u8>>>>,
@@ -447,7 +450,7 @@ impl PeerSession {
                         &msg.payload,
                         ctx.relay_state,
                         ctx.peer_manager,
-                        &self.peer.addr,
+                        ctx.peer_registered_addr,
                         ctx.local_addr,
                         ctx.peer_writers,
                     )?;
