@@ -1,0 +1,62 @@
+{
+  "$schema_note": "Acknowledged security findings. DeepSeek workflow skips these when counting CRITICAL/HIGH blockers. Each entry has a title pattern (substring match) and explanation.",
+  "version": 1,
+  "acknowledged": [
+    {
+      "title_pattern": "Unbounded Worker Thread Allocation",
+      "file_pattern": "p2p_service.rs",
+      "reason": "MITIGATED: MAX_WORKER_THREADS=256 cap at spawn_service_worker() line 325",
+      "acknowledged_by": "architect",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "DNS Resolution DoS",
+      "file_pattern": "p2p_service.rs",
+      "reason": "MITIGATED: MAX_DNS_RESOLVER_THREADS=4 with AtomicUsize CAS loop",
+      "acknowledged_by": "architect",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Integer Overflow in Orphan Pool",
+      "file_pattern": "p2p_runtime.rs",
+      "reason": "MITIGATED: saturating_add + checked_add used",
+      "acknowledged_by": "architect",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Orphan Block Pool Allocation",
+      "file_pattern": "p2p_service.rs",
+      "reason": "MITIGATED: global_orphan_byte_limit() cap + checked_add at insertion",
+      "acknowledged_by": "architect",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Genesis Hash",
+      "file_pattern": "main.rs",
+      "reason": "MITIGATED: runtime_genesis_hash() returns Err for non-devnet without explicit hash",
+      "acknowledged_by": "architect",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "DNS Resolver Thread Leak",
+      "file_pattern": "p2p_service.rs",
+      "reason": "MITIGATED: counter decremented on thread exit, bounded by MAX_DNS_RESOLVER_THREADS",
+      "acknowledged_by": "architect",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Non-atomic update of global orphan",
+      "file_pattern": "p2p_runtime.rs",
+      "reason": "MITIGATED: operations hold mutex, AtomicUsize not needed",
+      "acknowledged_by": "architect",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Unvalidated Inventory Vectors",
+      "file_pattern": "p2p_runtime.rs",
+      "reason": "MITIGATED: compact_size parsing enforces MAX_INV_ITEMS before allocation",
+      "acknowledged_by": "architect",
+      "date": "2026-03-25"
+    }
+  ]
+}
