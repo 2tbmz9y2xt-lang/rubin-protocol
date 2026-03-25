@@ -13,6 +13,10 @@ use rubin_consensus::{
 use sha3::{Digest, Sha3_256};
 
 use crate::sync::SyncEngine;
+
+/// Maximum reasonable best_height delta before clamping peer claims.
+/// Prevents malicious peers from forcing unnecessary sync with absurdly high values.
+const MAX_BEST_HEIGHT_DELTA: u64 = 100_000;
 use crate::sync_reorg::PARENT_BLOCK_NOT_FOUND_ERR;
 
 const DEFAULT_READ_DEADLINE: Duration = Duration::from_secs(15);
@@ -36,7 +40,16 @@ const MESSAGE_ADDR: &str = "addr";
 pub const MSG_BLOCK: u8 = 0x01;
 pub const MSG_TX: u8 = 0x02;
 const INVENTORY_VECTOR_SIZE: usize = 33;
+const MAX_PROTOCOL_VERSION: u32 = 1024;
 const MAX_INVENTORY_VECTORS: usize = 4096;
+const MAX_GETDATA_RESPONSE_BLOCKS: usize = 16;
+/// 128 MiB byte budget for buffered GETDATA block responses.
+const MAX_GETDATA_RESPONSE_BYTES: usize = 128 * 1024 * 1024;
+// Compile-time: ensure usize can hold our byte limits (rejects 32-bit targets).
+const _: () = assert!(
+    core::mem::size_of::<usize>() >= 8,
+    "rubin-node requires 64-bit target"
+);
 const MAX_INVENTORY_PAYLOAD_BYTES: u64 =
     (MAX_INVENTORY_VECTORS as u64) * (INVENTORY_VECTOR_SIZE as u64);
 const ADDR_PAYLOAD_ENTRY_SIZE: usize = 18;
@@ -122,7 +135,7 @@ struct OrphanBlockPool {
     total_bytes: usize,
     pool: HashMap<[u8; 32], Vec<OrphanBlockEntry>>,
     by_hash: HashMap<[u8; 32], OrphanBlockMeta>,
-    fifo: Vec<[u8; 32]>,
+    fifo: std::collections::VecDeque<[u8; 32]>,
 }
 
 pub struct PeerSession {
@@ -339,14 +352,101 @@ impl PeerSession {
     }
 
     pub fn request_blocks(&mut self, sync_engine: &SyncEngine) -> io::Result<()> {
-        let payload = encode_getblocks_payload(GetBlocksPayload {
-            locator_hashes: sync_engine.locator_hashes(32).map_err(io::Error::other)?,
-            stop_hash: [0u8; 32],
-        })?;
-        self.write_message(&WireMessage {
-            command: MESSAGE_GETBLOCKS.to_string(),
-            payload,
-        })
+        self.write_message(&self.build_getblocks_message(sync_engine)?)
+    }
+
+    pub fn request_blocks_if_behind(&mut self, sync_engine: &SyncEngine) -> io::Result<()> {
+        if let Some(msg) = self.prepare_block_request_if_behind(sync_engine)? {
+            self.write_message(&msg)?;
+        }
+        Ok(())
+    }
+
+    pub fn prepare_block_request_if_behind(
+        &self,
+        sync_engine: &SyncEngine,
+    ) -> io::Result<Option<WireMessage>> {
+        if self.is_behind(sync_engine)? {
+            return Ok(Some(self.build_getblocks_message(sync_engine)?));
+        }
+        Ok(None)
+    }
+
+    pub fn collect_live_responses(
+        &mut self,
+        msg: WireMessage,
+        sync_engine: &mut SyncEngine,
+    ) -> io::Result<Vec<WireMessage>> {
+        if msg.payload.len() > MAX_RELAY_MSG_BYTES as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "message payload too large: {} > {}",
+                    msg.payload.len(),
+                    MAX_RELAY_MSG_BYTES
+                ),
+            ));
+        }
+        match msg.command.as_str() {
+            MESSAGE_INV => {
+                let requests = self.handle_inv(&msg.payload, sync_engine)?;
+                if requests.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    Ok(vec![WireMessage {
+                        command: MESSAGE_GETDATA.to_string(),
+                        payload: encode_inventory_vectors(&requests)?,
+                    }])
+                }
+            }
+            MESSAGE_GETDATA => self.collect_getdata_responses(&msg.payload, sync_engine),
+            MESSAGE_GETBLOCKS => {
+                let items = self.handle_getblocks(&msg.payload, sync_engine)?;
+                if items.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    Ok(vec![WireMessage {
+                        command: MESSAGE_INV.to_string(),
+                        payload: encode_inventory_vectors(&items)?,
+                    }])
+                }
+            }
+            MESSAGE_BLOCK => {
+                self.handle_block(&msg.payload, sync_engine)?;
+                Ok(self
+                    .prepare_block_request_if_behind(sync_engine)?
+                    .into_iter()
+                    .collect())
+            }
+            MESSAGE_TX | "headers" | "pong" => Ok(Vec::new()),
+            "ping" => Ok(vec![WireMessage {
+                command: "pong".to_string(),
+                payload: Vec::new(),
+            }]),
+            MESSAGE_GETADDR => Ok(vec![WireMessage {
+                command: MESSAGE_ADDR.to_string(),
+                payload: marshal_empty_addr_payload(),
+            }]),
+            MESSAGE_ADDR => {
+                let _ = unmarshal_addr_payload(&msg.payload)?;
+                Ok(Vec::new())
+            }
+            other => {
+                self.peer.last_error = format!("unknown command: {other}");
+                Err(unknown_command_err(other))
+            }
+        }
+    }
+
+    pub fn handle_live_message(
+        &mut self,
+        msg: WireMessage,
+        sync_engine: &mut SyncEngine,
+    ) -> io::Result<()> {
+        for response in self.collect_live_responses(msg, sync_engine)? {
+            self.write_message(&response)?;
+        }
+        Ok(())
     }
 
     fn request_more_blocks_if_behind(&mut self, sync_engine: &SyncEngine) -> io::Result<()> {
@@ -358,9 +458,16 @@ impl PeerSession {
 
     fn is_behind(&self, sync_engine: &SyncEngine) -> io::Result<bool> {
         let Some((height, _)) = sync_engine.tip().map_err(io::Error::other)? else {
-            return Ok(self.peer.remote_version.best_height > 0);
+            return Ok(true);
         };
-        Ok(height < self.peer.remote_version.best_height)
+        // Clamp remote best_height claim: a malicious peer reporting an absurdly
+        // high value could force unnecessary sync requests.
+        let clamped_remote = self
+            .peer
+            .remote_version
+            .best_height
+            .min(height.saturating_add(MAX_BEST_HEIGHT_DELTA));
+        Ok(height < clamped_remote)
     }
 
     pub fn handle_getblocks(
@@ -495,6 +602,19 @@ impl PeerSession {
     }
 
     fn respond_to_getdata(&mut self, payload: &[u8], sync_engine: &SyncEngine) -> io::Result<()> {
+        for response in self.collect_getdata_responses(payload, sync_engine)? {
+            self.write_message(&response)?;
+        }
+        Ok(())
+    }
+
+    fn collect_getdata_responses(
+        &mut self,
+        payload: &[u8],
+        sync_engine: &SyncEngine,
+    ) -> io::Result<Vec<WireMessage>> {
+        let mut responses = Vec::new();
+        let mut total_bytes: usize = 0;
         for item in decode_inventory_vectors(payload)? {
             if item.kind != MSG_BLOCK {
                 continue;
@@ -502,15 +622,37 @@ impl PeerSession {
             if !sync_engine.has_block(item.hash).map_err(io::Error::other)? {
                 continue;
             }
+            // Enforce block count limit before fetch.
+            if responses.len() >= MAX_GETDATA_RESPONSE_BLOCKS {
+                break;
+            }
             let block = sync_engine
                 .get_block_by_hash(item.hash)
                 .map_err(io::Error::other)?;
-            self.write_message(&WireMessage {
+            // Enforce byte budget AFTER fetch but BEFORE buffering.
+            // This is a hard cap — the block is dropped if it would
+            // exceed the 128 MiB limit, preventing even one-block overrun.
+            if total_bytes.saturating_add(block.len()) > MAX_GETDATA_RESPONSE_BYTES {
+                break;
+            }
+            total_bytes = total_bytes.saturating_add(block.len());
+            responses.push(WireMessage {
                 command: MESSAGE_BLOCK.to_string(),
                 payload: block,
-            })?;
+            });
         }
-        Ok(())
+        Ok(responses)
+    }
+
+    fn build_getblocks_message(&self, sync_engine: &SyncEngine) -> io::Result<WireMessage> {
+        let payload = encode_getblocks_payload(GetBlocksPayload {
+            locator_hashes: sync_engine.locator_hashes(32).map_err(io::Error::other)?,
+            stop_hash: [0u8; 32],
+        })?;
+        Ok(WireMessage {
+            command: MESSAGE_GETBLOCKS.to_string(),
+            payload,
+        })
     }
 }
 
@@ -632,6 +774,15 @@ fn validate_remote_version(
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid protocol_version",
+        ));
+    }
+    if remote.protocol_version > MAX_PROTOCOL_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "protocol_version {} exceeds max {}",
+                remote.protocol_version, MAX_PROTOCOL_VERSION
+            ),
         ));
     }
     if !protocol_versions_compatible(local_protocol_version, remote.protocol_version) {
@@ -1253,7 +1404,7 @@ impl OrphanBlockPool {
             total_bytes: 0,
             pool: HashMap::new(),
             by_hash: HashMap::new(),
-            fifo: Vec::new(),
+            fifo: std::collections::VecDeque::new(),
         }
     }
 
@@ -1305,14 +1456,26 @@ impl OrphanBlockPool {
                 size: block_bytes.len(),
             },
         );
-        self.total_bytes += block_bytes.len();
-        self.fifo.push(block_hash);
-        while self.by_hash.len() > self.limit
+        self.total_bytes = self.total_bytes.saturating_add(block_bytes.len());
+        self.fifo.push_back(block_hash);
+        // Evict until under limits, but remove at least MIN_EVICT_BATCH entries
+        // when over capacity to reduce thrashing under sustained pressure.
+        let min_evict = if self.by_hash.len() > self.limit
+            || (self.byte_limit > 0 && self.total_bytes > self.byte_limit)
+        {
+            (self.by_hash.len() / 10).max(1)
+        } else {
+            0
+        };
+        let mut evicted = 0;
+        while evicted < min_evict
+            || self.by_hash.len() > self.limit
             || (self.byte_limit > 0 && self.total_bytes > self.byte_limit)
         {
             if !self.evict_oldest() {
                 break;
             }
+            evicted += 1;
         }
     }
 
@@ -1341,8 +1504,7 @@ impl OrphanBlockPool {
     }
 
     fn evict_oldest(&mut self) -> bool {
-        while let Some(oldest) = self.fifo.first().copied() {
-            self.fifo.remove(0);
+        while let Some(oldest) = self.fifo.pop_front() {
             let Some(meta) = self.by_hash.remove(&oldest) else {
                 continue;
             };
@@ -1877,6 +2039,37 @@ mod tests {
             session
                 .request_more_blocks_if_behind(&engine)
                 .expect("follow-up getblocks");
+        });
+
+        let mut client = TcpStream::connect(addr).expect("connect");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set_read_timeout");
+        let msg = read_message_from(&mut client, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
+            .expect("read getblocks");
+        assert_eq!(msg.command, MESSAGE_GETBLOCKS);
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn request_blocks_if_behind_bootstraps_when_local_tip_missing() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut session = PeerSession::new(stream, default_peer_runtime_config("devnet", 8))
+                .expect("session");
+            session.peer.remote_version.best_height = 0;
+            let engine = SyncEngine::new(
+                ChainState::new(),
+                None,
+                crate::sync::default_sync_config(Some(POW_LIMIT), devnet_genesis_chain_id(), None),
+            )
+            .expect("new sync engine");
+            session
+                .request_blocks_if_behind(&engine)
+                .expect("initial bootstrap getblocks");
         });
 
         let mut client = TcpStream::connect(addr).expect("connect");
