@@ -106,7 +106,12 @@ jobs:
                           .replace(/[\r\n]+/g, ' ')
                           .replace(/[^\x20-\x7E]/g, '')
                           .slice(0, 120);
-                        if (sev && title) titles.push(`[${sev}] ${title}`);
+                        const file = String(f.file || '')
+                          .replace(/[^\x20-\x7E]/g, '')
+                          .slice(0, 200);
+                        if (sev && title) {
+                          titles.push(`[${sev}] ${title}` + (file ? ` (in ${file})` : ''));
+                        }
                       }
                     } catch {}
                   }
@@ -188,9 +193,11 @@ jobs:
               '- If cryptographic code changed: verify parameter sizes, check for timing side-channels.',
               '- NEVER say "looks good" or "no issues found" if you have not verified every line.',
               '- If the diff is too large to fully verify, say so explicitly and flag unreviewed sections.',
-              '- DEDUPLICATION: If a finding title appears in the PREVIOUSLY REPORTED section, do NOT include it',
-              '  in your findings array. Only report NEW issues not already tracked. Re-reporting fixed issues wastes',
-              '  reviewer time and creates noise.',
+              '- DEDUPLICATION (MANDATORY): Check the PREVIOUSLY REPORTED section below the diff.',
+              '  If a finding describes the same underlying issue as one already reported — even with',
+              '  different wording or title — SKIP IT. Two findings about the same root cause in the',
+              '  same file are duplicates regardless of how they are phrased.',
+              '  Only report genuinely NEW issues not covered by previous reviews.',
               '- ANTI-HALLUCINATION: If the diff is truncated or you cannot see a file/function mentioned elsewhere',
               '  in the diff — do NOT claim it is missing. Add it to unreviewed_sections and set verdict to WARN.',
               '- NEVER report "function not defined" or "file missing" unless you have verified the COMPLETE diff.',
