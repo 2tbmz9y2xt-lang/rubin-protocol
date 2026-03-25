@@ -336,11 +336,12 @@ jobs:
               body: `### ${emoji} Security Review: ${verdict}\n_Model: deepseek/DeepSeek-R1-0528_\n\n\`\`\`json\n${review}\n\`\`\``
             });
 
-      - name: Block on critical/high findings
+      - name: Block on critical/high findings (with acknowledged-list filter)
         if: steps.review.outputs.review
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v7
         with:
           script: |
+            const fs = require('fs');
             const raw = ${{ toJSON(steps.review.outputs.review) }};
             if (!raw) return;
             let parsed;
@@ -350,14 +351,63 @@ jobs:
               core.setFailed(`Security review fail-closed: unparseable review JSON: ${e.message}`);
               return;
             }
-            const dominated = (parsed.findings || []).filter(f => {
+
+            // Load acknowledged findings list from BASE ref (not PR workspace).
+            // Security: prevents contributors from adding broad patterns in the
+            // same PR to bypass the CRITICAL/HIGH merge gate.
+            const { execSync } = require('child_process');
+            const baseSha = '${{ github.event.pull_request.base.sha }}';
+            let acknowledged = [];
+            try {
+              const ackRaw = execSync(
+                `git show ${baseSha}:.github/security-acknowledged.json`,
+                { encoding: 'utf8', timeout: 5000 }
+              );
+              const ackData = JSON.parse(ackRaw);
+              acknowledged = ackData.acknowledged || [];
+              core.info(`Loaded ${acknowledged.length} acknowledged pattern(s) from base ref ${baseSha.slice(0, 8)}`);
+            } catch (e) {
+              // File doesn't exist on base branch yet, or parse error — no filter
+              core.info(`No acknowledged list on base ref — all findings are novel`);
+            }
+
+            // Check if a finding matches any acknowledged pattern.
+            // Fail-closed: entries with empty/missing title_pattern are skipped
+            // to prevent a malformed entry from suppressing all findings.
+            function isAcknowledged(finding) {
+              const title = (finding.title || '').toLowerCase();
+              const file = (finding.file || '').toLowerCase();
+              return acknowledged.some(ack => {
+                const pattern = (ack.title_pattern || '').toLowerCase();
+                if (!pattern) return false;  // empty pattern matches everything — reject
+                const titleMatch = title.includes(pattern);
+                const fileMatch = !ack.file_pattern || file.includes((ack.file_pattern || '').toLowerCase());
+                return titleMatch && fileMatch;
+              });
+            }
+
+            const allCritHigh = (parsed.findings || []).filter(f => {
               const sev = (f.severity || '').toUpperCase();
               return sev === 'CRITICAL' || sev === 'HIGH';
             });
-            if (dominated.length > 0) {
-              core.setFailed(`Merge blocked: ${dominated.length} CRITICAL/HIGH finding(s)`);
+
+            const novel = allCritHigh.filter(f => !isAcknowledged(f));
+            const suppressed = allCritHigh.filter(f => isAcknowledged(f));
+
+            if (suppressed.length > 0) {
+              core.info(`Suppressed ${suppressed.length} acknowledged CRITICAL/HIGH finding(s):`);
+              for (const f of suppressed) {
+                core.info(`  [ACK] ${f.severity}: ${f.title} (${f.file})`);
+              }
+            }
+
+            if (novel.length > 0) {
+              core.setFailed(`Merge blocked: ${novel.length} NEW CRITICAL/HIGH finding(s) (${suppressed.length} acknowledged, skipped)`);
+              for (const f of novel) {
+                core.error(`  [NEW] ${f.severity}: ${f.title} (${f.file})`);
+              }
             } else {
-              core.info('No CRITICAL/HIGH findings - review passed');
+              core.info(`No new CRITICAL/HIGH findings — review passed (${suppressed.length} acknowledged finding(s) suppressed)`);
             }
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
