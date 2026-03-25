@@ -148,15 +148,28 @@ jobs:
               } catch { return null; }
             };
 
-            const changedFilePayload = changedFiles
-              .map(file => {
-                const content = readChangedFile(file);
-                if (!content) return null;
-                return `FILE: ${file}\n${content.slice(0, 8000)}`;
-              })
-              .filter(Boolean)
-              .join('\n\n---\n\n')
-              .slice(0, 64000);
+            // Streaming budget: add files one-by-one until TOTAL_FILE_BUDGET is reached.
+            // Each entry's real overhead (header + separator) is computed from actual path length,
+            // preventing silent truncation of tail files by the final .slice() guard.
+            const TOTAL_FILE_BUDGET = 100000;
+            const SEPARATOR = '\n\n---\n\n';
+            const PER_FILE_CAP = 30000; // max chars per individual file
+            const entries = [];
+            let usedBytes = 0;
+            for (const file of changedFiles) {
+              const content = readChangedFile(file);
+              if (!content) continue;
+              const header = `FILE: ${file}\n`;
+              // Reserve space: header + separator (except first entry) + at least 200 chars of content
+              const frameSize = header.length + (entries.length > 0 ? SEPARATOR.length : 0);
+              if (usedBytes + frameSize + 200 > TOTAL_FILE_BUDGET) continue; // skip this file, try shorter ones
+              const remainingBudget = TOTAL_FILE_BUDGET - usedBytes - frameSize;
+              const contentBudget = Math.min(PER_FILE_CAP, remainingBudget);
+              const entry = header + content.slice(0, contentBudget);
+              entries.push(entry);
+              usedBytes += entry.length + (entries.length > 1 ? SEPARATOR.length : 0);
+            }
+            const changedFilePayload = entries.join(SEPARATOR);
 
             const systemPrompt = [
               'You are a HOSTILE protocol security auditor for the RUBIN blockchain protocol.',
