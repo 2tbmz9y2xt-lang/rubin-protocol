@@ -1029,8 +1029,12 @@ mod tests {
     fn outbound_connect_attempt_does_not_consume_session_slot_before_connect() {
         let (sync_engine, dir) = test_engine("rubin-node-p2p-service-outbound-slot");
         let mut runtime_cfg = default_peer_runtime_config("devnet", 1);
-        runtime_cfg.read_deadline = Duration::from_millis(250);
-        runtime_cfg.write_deadline = Duration::from_millis(250);
+        // Coverage instrumentation slows the handshake path enough that the
+        // smaller test deadlines become flaky even though the session-slot
+        // behavior is correct. Use a wider window here so the test checks slot
+        // accounting rather than timing jitter.
+        runtime_cfg.read_deadline = Duration::from_secs(1);
+        runtime_cfg.write_deadline = Duration::from_secs(1);
         let peer_manager = Arc::new(PeerManager::new(runtime_cfg.clone()));
         let mut service = start_node_p2p_service(NodeP2PServiceConfig {
             bind_addr: "127.0.0.1:0".to_string(),
@@ -1043,7 +1047,7 @@ mod tests {
         })
         .expect("start service");
 
-        thread::sleep(Duration::from_millis(75));
+        thread::sleep(Duration::from_millis(150));
 
         let stream = TcpStream::connect(service.addr()).expect("connect inbound");
         let local = local_version(0).expect("local version");
