@@ -126,7 +126,7 @@ pub struct PeerRelayContext<'a> {
     pub peer_registered_addr: &'a str,
     /// Outbound relay queues: serialized wire frames enqueued by broadcast,
     /// drained by the peer thread to avoid concurrent TcpStream writes.
-    pub peer_writers: &'a std::sync::Mutex<HashMap<String, Vec<Vec<u8>>>>,
+    pub peer_writers: &'a std::sync::Mutex<HashMap<String, crate::tx_relay::PeerOutbox>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -239,14 +239,8 @@ impl PeerSession {
     }
 
     pub fn read_message(&mut self) -> io::Result<WireMessage> {
-        self.read_message_with_timeout(self.cfg.read_deadline)
-    }
-
-    /// Read a message with a custom timeout (used for sub-timeout polling in
-    /// the live message loop so relay outbox frames are drained promptly).
-    pub fn read_message_with_timeout(&mut self, timeout: Duration) -> io::Result<WireMessage> {
         self.stream
-            .set_read_timeout(Some(timeout))
+            .set_read_timeout(Some(self.cfg.read_deadline))
             .map_err(io::Error::other)?;
         read_message_from(
             &mut self.stream,
@@ -454,6 +448,7 @@ impl PeerSession {
                 if let Some(ctx) = relay_ctx {
                     crate::tx_relay::handle_received_tx(
                         &msg.payload,
+                        sync_engine,
                         ctx.relay_state,
                         ctx.peer_manager,
                         ctx.peer_registered_addr,

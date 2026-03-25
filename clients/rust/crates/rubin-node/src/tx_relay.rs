@@ -17,6 +17,55 @@ pub const DEFAULT_TX_RELAY_FANOUT: usize = 8;
 /// At ~70 bytes/frame (INV with 1 tx), 1024 frames ≈ 70 KiB — safe even for
 /// slow peers while preventing unbounded growth.
 const MAX_OUTBOX_FRAMES_PER_PEER: usize = 1024;
+/// Hard per-peer byte budget for queued relay frames.
+///
+/// Inventory frames are normally tiny, but a byte cap ensures future relay
+/// changes cannot turn the frame-count cap into a multi-megabyte queue.
+const MAX_OUTBOX_BYTES_PER_PEER: usize = 1 << 20;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PeerOutbox {
+    frames: Vec<Vec<u8>>,
+    total_bytes: usize,
+}
+
+impl PeerOutbox {
+    pub fn push_frame(&mut self, frame: Vec<u8>) -> bool {
+        if self.frames.len() >= MAX_OUTBOX_FRAMES_PER_PEER {
+            return false;
+        }
+        let Some(next_total) = self.total_bytes.checked_add(frame.len()) else {
+            return false;
+        };
+        if next_total > MAX_OUTBOX_BYTES_PER_PEER {
+            return false;
+        }
+        self.total_bytes = next_total;
+        self.frames.push(frame);
+        true
+    }
+
+    pub fn take_frames(&mut self) -> Vec<Vec<u8>> {
+        self.total_bytes = 0;
+        std::mem::take(&mut self.frames)
+    }
+
+    pub fn len(&self) -> usize {
+        self.frames.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+
+    pub fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
+    pub fn frames(&self) -> &[Vec<u8>] {
+        &self.frames
+    }
+}
 
 /// Shared relay state passed through the P2P service.
 pub struct TxRelayState {
@@ -117,7 +166,7 @@ pub fn broadcast_inventory(
     items: &[InventoryVector],
     peer_manager: &PeerManager,
     local_addr: &str,
-    peer_writers: &Mutex<HashMap<String, Vec<Vec<u8>>>>,
+    peer_writers: &Mutex<HashMap<String, PeerOutbox>>,
 ) -> Result<(), String> {
     let peers = peer_manager.snapshot();
     let mut addrs: Vec<String> = peers
@@ -153,7 +202,7 @@ fn broadcast_inv_to_addrs(
     items: &[InventoryVector],
     addrs: &[String],
     network: &str,
-    peer_writers: &Mutex<HashMap<String, Vec<Vec<u8>>>>,
+    peer_writers: &Mutex<HashMap<String, PeerOutbox>>,
 ) -> Result<(), String> {
     let payload = encode_inventory_vectors(items).map_err(|e| e.to_string())?;
     let magic = crate::p2p_runtime::network_magic(network);
@@ -170,10 +219,9 @@ fn broadcast_inv_to_addrs(
     };
     for addr in addrs {
         if let Some(queue) = outboxes.get_mut(addr) {
-            if queue.len() < MAX_OUTBOX_FRAMES_PER_PEER {
-                queue.push(frame.clone());
-            }
-            // else: drop silently — peer is slow, will catch up on next drain.
+            let _ = queue.push_frame(frame.clone());
+            // else: drop silently — peer is slow or over byte budget and will
+            // catch up on the next drain.
         }
     }
     Ok(())
@@ -185,21 +233,21 @@ fn broadcast_inv_to_addrs(
 /// broadcast INV to peers. Matches Go `AnnounceTx`.
 pub fn announce_tx(
     tx_bytes: &[u8],
+    meta: crate::txpool::RelayTxMetadata,
     relay_state: &TxRelayState,
     peer_manager: &PeerManager,
     local_addr: &str,
-    peer_writers: &Mutex<HashMap<String, Vec<Vec<u8>>>>,
+    peer_writers: &Mutex<HashMap<String, PeerOutbox>>,
 ) -> Result<(), String> {
     let txid = canonical_txid(tx_bytes)?;
 
-    // Store in relay pool (fee=0, size=raw length — metadata not available
-    // from RPC path without re-parsing; matches Go where mempool.RelayMetadata
-    // extracts fee/size, but for RPC-submitted txs fee is already validated).
+    // RPC path already passed mempool admission, so preserve the validated
+    // relay metadata for relay-pool priority instead of degrading to zero fee.
     if !relay_state
         .relay_pool
-        .put(txid, tx_bytes, 0, tx_bytes.len())
+        .put(txid, tx_bytes, meta.fee, meta.size)
     {
-        return Ok(()); // Pool full / low-priority eviction failed — don't advertise.
+        return Ok(());
     }
 
     if !relay_state.tx_seen.add(txid) {
@@ -221,18 +269,23 @@ pub fn announce_tx(
 
 /// Handle a transaction received from a peer.
 ///
-/// Validates structure via consensus parsing, extracts relay metadata
-/// (fee=0 fallback, size=raw length — matches Go `relayTxMetadata`),
-/// then marks seen BEFORE pool admission (Go's seen-before-pool pattern).
+/// Validates structure via consensus parsing, derives relay metadata using the
+/// current chainstate/policy context, then marks seen BEFORE pool admission
+/// (Go's seen-before-pool pattern).
+///
+/// If relay metadata validation fails, the tx remains marked as seen so peers
+/// do not churn INV/GETDATA retries for the same invalid payload, but the peer
+/// session itself is not failed.
 ///
 /// Rejects oversized payloads (> MAX_RELAY_MSG_BYTES) before any processing.
 pub fn handle_received_tx(
     tx_bytes: &[u8],
+    sync_engine: &crate::sync::SyncEngine,
     relay_state: &TxRelayState,
     peer_manager: &PeerManager,
     skip_addr: &str,
     local_addr: &str,
-    peer_writers: &Mutex<HashMap<String, Vec<Vec<u8>>>>,
+    peer_writers: &Mutex<HashMap<String, PeerOutbox>>,
 ) -> io::Result<()> {
     // Reject oversized tx payloads early (defense-in-depth).
     if tx_bytes.len() > rubin_consensus::constants::MAX_RELAY_MSG_BYTES as usize {
@@ -245,20 +298,31 @@ pub fn handle_received_tx(
     // Structural validation via consensus parser (matches Go's canonicalTxID + relayTxMetadata).
     let txid = canonical_txid(tx_bytes).map_err(io::Error::other)?;
 
-    // Relay metadata: fee=0 (fallback), size=raw length.
-    // Matches Go's `relayTxMetadata` default when TxMetadataFunc is nil.
-    let relay_fee: u64 = 0;
-    let relay_size = tx_bytes.len();
-
     // Mark seen BEFORE pool admission (matches Go).
     if !relay_state.tx_seen.add(txid) {
         return Ok(()); // Already seen — don't relay.
     }
 
+    let relay_cfg = crate::txpool::TxPoolConfig {
+        core_ext_deployments: sync_engine.cfg.core_ext_deployments.clone(),
+        suite_context: sync_engine.cfg.suite_context.clone(),
+        ..crate::txpool::TxPoolConfig::default()
+    };
+    let meta = match crate::txpool::relay_metadata(
+        tx_bytes,
+        &sync_engine.chain_state,
+        sync_engine.block_store.as_ref(),
+        sync_engine.cfg.chain_id,
+        &relay_cfg,
+    ) {
+        Ok(meta) => meta,
+        Err(_) => return Ok(()),
+    };
+
     // Store in relay pool with extracted metadata.
     if !relay_state
         .relay_pool
-        .put(txid, tx_bytes, relay_fee, relay_size)
+        .put(txid, tx_bytes, meta.fee, meta.size)
     {
         return Ok(()); // Pool rejected (full, low priority) — don't relay.
     }
@@ -291,6 +355,114 @@ fn canonical_txid(tx_bytes: &[u8]) -> Result<[u8; 32], String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{default_sync_config, ChainState, SyncEngine};
+
+    #[derive(serde::Deserialize)]
+    struct FixtureFile<T> {
+        vectors: Vec<T>,
+    }
+
+    #[derive(Clone, serde::Deserialize)]
+    struct FixtureUtxo {
+        txid: String,
+        vout: u32,
+        value: u64,
+        covenant_type: u16,
+        covenant_data: String,
+        creation_height: u64,
+        created_by_coinbase: bool,
+    }
+
+    #[derive(Clone, serde::Deserialize)]
+    struct PositiveTxVector {
+        id: String,
+        tx_hex: String,
+        #[serde(default)]
+        chain_id: Option<String>,
+        height: u64,
+        expect_ok: bool,
+        utxos: Vec<FixtureUtxo>,
+    }
+
+    fn parse_hex32_test(name: &str, value: &str) -> [u8; 32] {
+        let raw = hex::decode(value).unwrap_or_else(|err| panic!("{name} hex: {err}"));
+        assert_eq!(raw.len(), 32, "{name} must be 32 bytes");
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&raw);
+        out
+    }
+
+    fn fixture_utxos_to_map(
+        items: &[FixtureUtxo],
+    ) -> HashMap<rubin_consensus::Outpoint, rubin_consensus::UtxoEntry> {
+        let mut out = HashMap::with_capacity(items.len());
+        for item in items {
+            out.insert(
+                rubin_consensus::Outpoint {
+                    txid: parse_hex32_test("fixture utxo txid", &item.txid),
+                    vout: item.vout,
+                },
+                rubin_consensus::UtxoEntry {
+                    value: item.value,
+                    covenant_type: item.covenant_type,
+                    covenant_data: hex::decode(&item.covenant_data)
+                        .expect("fixture covenant_data hex"),
+                    creation_height: item.creation_height,
+                    created_by_coinbase: item.created_by_coinbase,
+                },
+            );
+        }
+        out
+    }
+
+    fn positive_fixture_vector() -> PositiveTxVector {
+        const UTXO_BASIC_FIXTURE_JSON: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../../conformance/fixtures/CV-UTXO-BASIC.json"
+        ));
+        let fixture: FixtureFile<PositiveTxVector> =
+            serde_json::from_str(UTXO_BASIC_FIXTURE_JSON).expect("parse positive fixture");
+        fixture
+            .vectors
+            .into_iter()
+            .find(|vector| vector.id == "CV-U-06")
+            .expect("positive fixture vector")
+    }
+
+    fn fixture_chain_id(chain_id: Option<&str>) -> [u8; 32] {
+        chain_id
+            .map(|value| parse_hex32_test("chain_id", value))
+            .unwrap_or([0u8; 32])
+    }
+
+    fn chain_state_from_positive_fixture(vector: &PositiveTxVector) -> ChainState {
+        let mut state = ChainState::new();
+        state.has_tip = vector.height > 0;
+        state.height = vector.height.saturating_sub(1);
+        state.utxos = fixture_utxos_to_map(&vector.utxos);
+        state
+    }
+
+    fn sync_engine_from_positive_fixture(vector: &PositiveTxVector) -> SyncEngine {
+        let mut cfg = default_sync_config(None, fixture_chain_id(vector.chain_id.as_deref()), None);
+        cfg.core_ext_deployments = rubin_consensus::CoreExtDeploymentProfiles::empty();
+        SyncEngine::new(chain_state_from_positive_fixture(vector), None, cfg).expect("sync engine")
+    }
+
+    fn positive_fixture_tx_and_meta() -> (Vec<u8>, crate::txpool::RelayTxMetadata) {
+        let vector = positive_fixture_vector();
+        let tx_bytes = hex::decode(&vector.tx_hex).expect("tx hex");
+        let state = chain_state_from_positive_fixture(&vector);
+        let meta = crate::txpool::relay_metadata(
+            &tx_bytes,
+            &state,
+            None,
+            fixture_chain_id(vector.chain_id.as_deref()),
+            &crate::txpool::TxPoolConfig::default(),
+        )
+        .expect("positive fixture relay metadata");
+        (tx_bytes, meta)
+    }
 
     fn make_txid(b: u8) -> [u8; 32] {
         [b; 32]
@@ -389,7 +561,7 @@ mod tests {
         let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
             "devnet", 64,
         ));
-        let writers: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let writers: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
 
         // We need a real parseable tx for canonical_txid. Use a minimal
         // test by directly testing the seen/pool components.
@@ -421,7 +593,7 @@ mod tests {
         let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
             "devnet", 64,
         ));
-        let writers: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let writers: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
 
         // With no peers registered, broadcast should succeed silently.
         let result = broadcast_inventory(
@@ -454,15 +626,15 @@ mod tests {
             ..Default::default()
         });
         // Create outboxes for both peers.
-        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
         outboxes
             .lock()
             .unwrap()
-            .insert("peer-a:8333".to_string(), Vec::new());
+            .insert("peer-a:8333".to_string(), PeerOutbox::default());
         outboxes
             .lock()
             .unwrap()
-            .insert("peer-b:8333".to_string(), Vec::new());
+            .insert("peer-b:8333".to_string(), PeerOutbox::default());
 
         // Broadcast TX inventory — should enqueue frames.
         let result = broadcast_inventory(
@@ -484,7 +656,7 @@ mod tests {
         assert!(total_frames > 0, "expected at least one enqueued frame");
         // Each frame should start with RBDV magic.
         for queue in boxes.values() {
-            for frame in queue {
+            for frame in queue.frames() {
                 assert_eq!(&frame[0..4], b"RBDV", "frame should use Rubin devnet magic");
             }
         }
@@ -504,15 +676,15 @@ mod tests {
             addr: "peer-b:8333".to_string(),
             ..Default::default()
         });
-        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
         outboxes
             .lock()
             .unwrap()
-            .insert("peer-a:8333".to_string(), Vec::new());
+            .insert("peer-a:8333".to_string(), PeerOutbox::default());
         outboxes
             .lock()
             .unwrap()
-            .insert("peer-b:8333".to_string(), Vec::new());
+            .insert("peer-b:8333".to_string(), PeerOutbox::default());
 
         // Broadcast BLOCK inventory — should go to ALL peers.
         let result = broadcast_inventory(
@@ -548,15 +720,15 @@ mod tests {
             addr: "other:8333".to_string(),
             ..Default::default()
         });
-        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
         outboxes
             .lock()
             .unwrap()
-            .insert("sender:8333".to_string(), Vec::new());
+            .insert("sender:8333".to_string(), PeerOutbox::default());
         outboxes
             .lock()
             .unwrap()
-            .insert("other:8333".to_string(), Vec::new());
+            .insert("other:8333".to_string(), PeerOutbox::default());
 
         let result = broadcast_inventory(
             &relay,
@@ -590,12 +762,12 @@ mod tests {
                 ..Default::default()
             });
         }
-        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
         for i in 0..3 {
             outboxes
                 .lock()
                 .unwrap()
-                .insert(format!("peer-{i}:8333"), Vec::new());
+                .insert(format!("peer-{i}:8333"), PeerOutbox::default());
         }
 
         let result = broadcast_inventory(
@@ -637,11 +809,11 @@ mod tests {
             addr: "peer:8333".to_string(),
             ..Default::default()
         });
-        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
         outboxes
             .lock()
             .unwrap()
-            .insert("peer:8333".to_string(), Vec::new());
+            .insert("peer:8333".to_string(), PeerOutbox::default());
 
         let result = broadcast_inventory(&relay, None, &[], &pm, "local:8333", &outboxes);
         assert!(result.is_ok());
@@ -654,7 +826,7 @@ mod tests {
         let _pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
             "devnet", 64,
         ));
-        let _outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let _outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
 
         // Pre-mark txid as seen — handle_received_tx should return Ok without storing.
         let txid = make_txid(0x99);
@@ -694,7 +866,7 @@ mod tests {
 
     #[test]
     fn announce_tx_with_real_tx_stores_and_broadcasts() {
-        let tx_bytes = real_tx_bytes();
+        let (tx_bytes, meta) = positive_fixture_tx_and_meta();
         let relay = TxRelayState::new();
         let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
             "devnet", 64,
@@ -703,13 +875,13 @@ mod tests {
             addr: "peer-x:8333".to_string(),
             ..Default::default()
         });
-        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
         outboxes
             .lock()
             .unwrap()
-            .insert("peer-x:8333".to_string(), Vec::new());
+            .insert("peer-x:8333".to_string(), PeerOutbox::default());
 
-        let result = announce_tx(&tx_bytes, &relay, &pm, "local:8333", &outboxes);
+        let result = announce_tx(&tx_bytes, meta, &relay, &pm, "local:8333", &outboxes);
         assert!(result.is_ok(), "announce_tx failed: {:?}", result.err());
 
         // Tx should be in relay pool + seen set.
@@ -720,13 +892,17 @@ mod tests {
         // Peer should have received an INV frame.
         let boxes = outboxes.lock().unwrap();
         assert_eq!(boxes["peer-x:8333"].len(), 1);
-        assert_eq!(&boxes["peer-x:8333"][0][0..4], b"RBDV");
+        assert_eq!(&boxes["peer-x:8333"].frames()[0][0..4], b"RBDV");
     }
 
     #[test]
     fn announce_tx_skips_already_seen() {
         let tx_bytes = real_tx_bytes();
         let txid = canonical_txid(&tx_bytes).unwrap();
+        let meta = crate::txpool::RelayTxMetadata {
+            fee: 0,
+            size: tx_bytes.len(),
+        };
         let relay = TxRelayState::new();
         let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
             "devnet", 64,
@@ -735,17 +911,17 @@ mod tests {
             addr: "peer-y:8333".to_string(),
             ..Default::default()
         });
-        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
         outboxes
             .lock()
             .unwrap()
-            .insert("peer-y:8333".to_string(), Vec::new());
+            .insert("peer-y:8333".to_string(), PeerOutbox::default());
 
         // Pre-mark as seen + pre-store in pool.
         relay.tx_seen.add(txid);
         relay.relay_pool.put(txid, &tx_bytes, 0, tx_bytes.len());
 
-        let result = announce_tx(&tx_bytes, &relay, &pm, "local:8333", &outboxes);
+        let result = announce_tx(&tx_bytes, meta, &relay, &pm, "local:8333", &outboxes);
         assert!(result.is_ok());
 
         // No broadcast should occur (already seen).
@@ -754,8 +930,84 @@ mod tests {
     }
 
     #[test]
-    fn handle_received_tx_with_real_tx_stores_and_relays() {
+    fn announce_tx_relay_pool_rejection_skips_seen_and_broadcast() {
         let tx_bytes = real_tx_bytes();
+        let meta = crate::txpool::RelayTxMetadata {
+            fee: 0,
+            size: tx_bytes.len(),
+        };
+        let relay = TxRelayState {
+            tx_seen: BoundedHashSet::new(crate::tx_seen::DEFAULT_TX_SEEN_CAPACITY),
+            relay_pool: RelayTxPool::new_with_limit(1),
+            tx_relay_fanout: DEFAULT_TX_RELAY_FANOUT,
+            network: "devnet".to_string(),
+        };
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "peer-z:8333".to_string(),
+            ..Default::default()
+        });
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("peer-z:8333".to_string(), PeerOutbox::default());
+
+        assert!(relay.relay_pool.put([0xEE; 32], &[0xAA], 1, 1));
+
+        let result = announce_tx(&tx_bytes, meta, &relay, &pm, "local:8333", &outboxes);
+        assert!(result.is_ok());
+
+        let txid = canonical_txid(&tx_bytes).unwrap();
+        assert!(!relay.tx_seen.has(&txid));
+        assert!(!relay.relay_pool.has(&txid));
+        let boxes = outboxes.lock().unwrap();
+        assert!(boxes["peer-z:8333"].is_empty());
+    }
+
+    #[test]
+    fn announce_tx_uses_real_metadata_for_relay_pool_priority() {
+        let (tx_bytes, meta) = positive_fixture_tx_and_meta();
+        let incoming_txid = canonical_txid(&tx_bytes).unwrap();
+        let existing_txid = [0xEE; 32];
+        let relay = TxRelayState {
+            tx_seen: BoundedHashSet::new(crate::tx_seen::DEFAULT_TX_SEEN_CAPACITY),
+            relay_pool: RelayTxPool::new_with_limit(1),
+            tx_relay_fanout: DEFAULT_TX_RELAY_FANOUT,
+            network: "devnet".to_string(),
+        };
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "peer-rpc:8333".to_string(),
+            ..Default::default()
+        });
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("peer-rpc:8333".to_string(), PeerOutbox::default());
+
+        assert!(relay.relay_pool.put(existing_txid, &[0xAA], 1, 100_000));
+
+        let result = announce_tx(&tx_bytes, meta, &relay, &pm, "local:8333", &outboxes);
+        assert!(result.is_ok(), "announce_tx failed: {:?}", result.err());
+        assert!(relay.tx_seen.has(&incoming_txid));
+        assert!(relay.relay_pool.has(&incoming_txid));
+        assert!(!relay.relay_pool.has(&existing_txid));
+        let boxes = outboxes.lock().unwrap();
+        assert_eq!(boxes["peer-rpc:8333"].len(), 1);
+    }
+
+    #[test]
+    fn handle_received_tx_with_valid_fixture_stores_and_relays() {
+        let vector = positive_fixture_vector();
+        assert!(vector.expect_ok, "{} should be positive fixture", vector.id);
+        let tx_bytes = hex::decode(&vector.tx_hex).expect("tx hex");
+        let sync_engine = sync_engine_from_positive_fixture(&vector);
         let relay = TxRelayState::new();
         let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
             "devnet", 64,
@@ -764,18 +1016,19 @@ mod tests {
             addr: "other:8333".to_string(),
             ..Default::default()
         });
-        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
         outboxes
             .lock()
             .unwrap()
-            .insert("sender:8333".to_string(), Vec::new());
+            .insert("sender:8333".to_string(), PeerOutbox::default());
         outboxes
             .lock()
             .unwrap()
-            .insert("other:8333".to_string(), Vec::new());
+            .insert("other:8333".to_string(), PeerOutbox::default());
 
         let result = handle_received_tx(
             &tx_bytes,
+            &sync_engine,
             &relay,
             &pm,
             "sender:8333",
@@ -795,6 +1048,47 @@ mod tests {
     }
 
     #[test]
+    fn handle_received_tx_metadata_failure_marks_seen_but_does_not_relay() {
+        let tx_bytes = real_tx_bytes();
+        let sync_engine = SyncEngine::new(
+            ChainState::new(),
+            None,
+            default_sync_config(None, [0u8; 32], None),
+        )
+        .expect("sync engine");
+        let relay = TxRelayState::new();
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("sender:8333".to_string(), PeerOutbox::default());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("other:8333".to_string(), PeerOutbox::default());
+
+        let txid = canonical_txid(&tx_bytes).unwrap();
+        let result = handle_received_tx(
+            &tx_bytes,
+            &sync_engine,
+            &relay,
+            &pm,
+            "sender:8333",
+            "local:8333",
+            &outboxes,
+        );
+        assert!(result.is_ok());
+        assert!(relay.tx_seen.has(&txid));
+        assert!(!relay.relay_pool.has(&txid));
+        let boxes = outboxes.lock().unwrap();
+        assert!(boxes["sender:8333"].is_empty());
+        assert!(boxes["other:8333"].is_empty());
+    }
+
+    #[test]
     fn handle_received_tx_duplicate_is_noop() {
         let tx_bytes = real_tx_bytes();
         let txid = canonical_txid(&tx_bytes).unwrap();
@@ -804,10 +1098,16 @@ mod tests {
         let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
             "devnet", 64,
         ));
-        let outboxes: Mutex<HashMap<String, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
 
         let result = handle_received_tx(
             &tx_bytes,
+            &SyncEngine::new(
+                ChainState::new(),
+                None,
+                default_sync_config(None, [0u8; 32], None),
+            )
+            .expect("sync engine"),
             &relay,
             &pm,
             "sender:8333",
@@ -831,6 +1131,24 @@ mod tests {
     fn relay_state_with_network() {
         let rs = TxRelayState::new_with_network("mainnet");
         assert_eq!(rs.network, "mainnet");
+    }
+
+    #[test]
+    fn peer_outbox_enforces_byte_budget_and_resets_on_drain() {
+        let mut outbox = PeerOutbox::default();
+        assert!(outbox.push_frame(vec![0xAA; MAX_OUTBOX_BYTES_PER_PEER - 16]));
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox.total_bytes(), MAX_OUTBOX_BYTES_PER_PEER - 16);
+
+        assert!(!outbox.push_frame(vec![0xBB; 17]));
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox.total_bytes(), MAX_OUTBOX_BYTES_PER_PEER - 16);
+
+        let drained = outbox.take_frames();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(outbox.len(), 0);
+        assert_eq!(outbox.total_bytes(), 0);
+        assert!(outbox.is_empty());
     }
 
     #[test]

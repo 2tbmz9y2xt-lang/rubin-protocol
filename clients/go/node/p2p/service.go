@@ -164,9 +164,7 @@ func (s *Service) AnnounceTx(txBytes []byte) error {
 	if err != nil {
 		return err
 	}
-	if !s.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size) {
-		return nil // Pool full / low-priority eviction failed — don't advertise.
-	}
+	s.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size)
 	if !s.txSeen.Add(txid) {
 		return nil
 	}

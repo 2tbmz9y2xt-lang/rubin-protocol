@@ -15,7 +15,8 @@ const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CONCURRENT_RPC_CONNS: usize = 8;
 
-pub type AnnounceTxFn = Arc<dyn Fn(&[u8]) -> Result<(), String> + Send + Sync>;
+pub type AnnounceTxFn =
+    Arc<dyn Fn(&[u8], crate::txpool::RelayTxMetadata) -> Result<(), String> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct DevnetRPCState {
@@ -579,7 +580,7 @@ fn handle_submit_tx(state: &DevnetRPCState, method: &str, body: &[u8]) -> HttpRe
         }
     };
     let admit_result = match state.tx_pool.lock() {
-        Ok(mut pool) => pool.admit(
+        Ok(mut pool) => pool.admit_with_metadata(
             &tx_bytes,
             &chain_state,
             fresh_block_store.as_ref(),
@@ -591,10 +592,10 @@ fn handle_submit_tx(state: &DevnetRPCState, method: &str, body: &[u8]) -> HttpRe
         }),
     };
     match admit_result {
-        Ok(txid) => {
+        Ok((txid, relay_meta)) => {
             // Relay tx to peers (fire-and-forget, matches Go behavior).
             if let Some(ref announce) = state.announce_tx {
-                if let Err(err) = announce(&tx_bytes) {
+                if let Err(err) = announce(&tx_bytes, relay_meta) {
                     eprintln!("rpc: announce-tx: {err}");
                 }
             }
@@ -1590,7 +1591,7 @@ mod tests {
             chain_state_from_positive_fixture(&vector),
             fixture_chain_id(vector.chain_id.as_deref()),
         );
-        state.announce_tx = Some(Arc::new(move |_tx_bytes: &[u8]| {
+        state.announce_tx = Some(Arc::new(move |_tx_bytes: &[u8], _meta| {
             called_clone.store(true, Ordering::SeqCst);
             Ok(())
         }));
@@ -1620,9 +1621,9 @@ mod tests {
             chain_state_from_positive_fixture(&vector),
             fixture_chain_id(vector.chain_id.as_deref()),
         );
-        state.announce_tx = Some(Arc::new(
-            |_tx_bytes: &[u8]| Err("relay failure".to_string()),
-        ));
+        state.announce_tx = Some(Arc::new(|_tx_bytes: &[u8], _meta| {
+            Err("relay failure".to_string())
+        }));
 
         let response = route_request(
             &state,

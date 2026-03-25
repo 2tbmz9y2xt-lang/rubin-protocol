@@ -247,8 +247,8 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         let pm = Arc::clone(&peer_manager);
         let pw = p2p_service.peer_outboxes();
         let local = p2p_service.addr().to_string();
-        Some(Arc::new(move |tx_bytes: &[u8]| {
-            rubin_node::tx_relay::announce_tx(tx_bytes, &relay_state, &pm, &local, &pw)
+        Some(Arc::new(move |tx_bytes: &[u8], meta| {
+            rubin_node::tx_relay::announce_tx(tx_bytes, meta, &relay_state, &pm, &local, &pw)
         }))
     };
     let state = new_devnet_rpc_state(
