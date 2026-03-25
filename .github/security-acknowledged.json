@@ -151,8 +151,15 @@
     },
     {
       "title_pattern": "Inefficient",
-      "file_pattern": "",
-      "reason": "ACCEPTED_RISK: O(n) eviction in relay pool and tx_seen matches Go implementation. N<=1000 (pool) and amortized O(1) (seen). Not a blocker.",
+      "file_pattern": "relay_pool.rs",
+      "reason": "ACCEPTED_RISK: O(n) worst-tx selection in relay_pool matches Go implementation and is bounded by the 1000-entry relay pool cap. Not a blocker.",
+      "acknowledged_by": "controller",
+      "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Inefficient",
+      "file_pattern": "tx_seen.rs",
+      "reason": "ACCEPTED_RISK: tx_seen eviction strategy matches Go implementation; worst-case scan is bounded by the fixed seen-set capacity and is not a merge blocker.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
