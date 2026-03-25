@@ -352,17 +352,23 @@ jobs:
               return;
             }
 
-            // Load acknowledged findings list
+            // Load acknowledged findings list from BASE ref (not PR workspace).
+            // Security: prevents contributors from adding broad patterns in the
+            // same PR to bypass the CRITICAL/HIGH merge gate.
+            const { execSync } = require('child_process');
+            const baseSha = '${{ github.event.pull_request.base.sha }}';
             let acknowledged = [];
             try {
-              const ackPath = '.github/security-acknowledged.json';
-              if (fs.existsSync(ackPath)) {
-                const ackData = JSON.parse(fs.readFileSync(ackPath, 'utf8'));
-                acknowledged = ackData.acknowledged || [];
-                core.info(`Loaded ${acknowledged.length} acknowledged finding pattern(s)`);
-              }
+              const ackRaw = execSync(
+                `git show ${baseSha}:.github/security-acknowledged.json`,
+                { encoding: 'utf8', timeout: 5000 }
+              );
+              const ackData = JSON.parse(ackRaw);
+              acknowledged = ackData.acknowledged || [];
+              core.info(`Loaded ${acknowledged.length} acknowledged pattern(s) from base ref ${baseSha.slice(0, 8)}`);
             } catch (e) {
-              core.warning(`Failed to load acknowledged list: ${e.message} — proceeding without filter`);
+              // File doesn't exist on base branch yet, or parse error — no filter
+              core.info(`No acknowledged list on base ref — all findings are novel`);
             }
 
             // Check if a finding matches any acknowledged pattern
