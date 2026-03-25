@@ -1663,9 +1663,7 @@ mod tests {
             hs_done_s.store(true, Ordering::SeqCst);
 
             // Read raw bytes the service drains into us.
-            stream
-                .set_read_timeout(Some(Duration::from_secs(3)))
-                .ok();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
             let mut buf = [0u8; 256];
             let mut total = 0usize;
             while !stop_s.load(Ordering::SeqCst) {
@@ -1703,9 +1701,7 @@ mod tests {
             outboxes.lock().unwrap().len() > 0
         });
 
-        let peer_key = {
-            outboxes.lock().unwrap().keys().next().unwrap().clone()
-        };
+        let peer_key = { outboxes.lock().unwrap().keys().next().unwrap().clone() };
 
         // Enqueue frames.
         let frames: Vec<Vec<u8>> = vec![vec![0xDE, 0xAD], vec![0xBE, 0xEF, 0xCA, 0xFE]];
