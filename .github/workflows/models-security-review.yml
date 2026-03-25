@@ -371,12 +371,16 @@ jobs:
               core.info(`No acknowledged list on base ref — all findings are novel`);
             }
 
-            // Check if a finding matches any acknowledged pattern
+            // Check if a finding matches any acknowledged pattern.
+            // Fail-closed: entries with empty/missing title_pattern are skipped
+            // to prevent a malformed entry from suppressing all findings.
             function isAcknowledged(finding) {
               const title = (finding.title || '').toLowerCase();
               const file = (finding.file || '').toLowerCase();
               return acknowledged.some(ack => {
-                const titleMatch = title.includes((ack.title_pattern || '').toLowerCase());
+                const pattern = (ack.title_pattern || '').toLowerCase();
+                if (!pattern) return false;  // empty pattern matches everything — reject
+                const titleMatch = title.includes(pattern);
                 const fileMatch = !ack.file_pattern || file.includes((ack.file_pattern || '').toLowerCase());
                 return titleMatch && fileMatch;
               });
