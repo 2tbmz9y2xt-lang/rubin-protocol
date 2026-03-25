@@ -68,6 +68,58 @@ jobs:
             const { jsonrepair } = require('./node_modules/jsonrepair');
             const diff = fs.readFileSync('pr-diff.txt', 'utf8').slice(0, 128000);
 
+            // Fetch previous security review findings to avoid re-reporting.
+            // P1 fix: only trust comments from the bot account (github-actions[bot])
+            // that actually runs this workflow — reject arbitrary contributor comments.
+            // P2 fix: paginate through ALL comments to reliably find the latest reviews.
+            const TRUSTED_AUTHORS = new Set(['github-actions[bot]']);
+            let previousFindings = '';
+            try {
+              const allComments = [];
+              for await (const response of github.paginate.iterator(
+                github.rest.issues.listComments, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  per_page: 100,
+                }
+              )) {
+                allComments.push(...response.data);
+              }
+              const reviewComments = allComments
+                .filter(c => c.body
+                  && TRUSTED_AUTHORS.has(c.user?.login ?? '')
+                  && c.body.includes('Security Review:')
+                  && c.body.includes('deepseek'))
+                .slice(-3);  // last 3 trusted reviews
+              if (reviewComments.length > 0) {
+                const titles = [];
+                for (const c of reviewComments) {
+                  const jsonMatch = c.body.match(/```json\n([\s\S]*?)```/);
+                  if (jsonMatch) {
+                    try {
+                      const parsed = JSON.parse(jsonMatch[1]);
+                      for (const f of (parsed.findings || [])) {
+                        // Sanitize: strip newlines, limit length, allow only printable ASCII
+                        const sev = String(f.severity || '').replace(/[^A-Z]/g, '').slice(0, 10);
+                        const title = String(f.title || '')
+                          .replace(/[\r\n]+/g, ' ')
+                          .replace(/[^\x20-\x7E]/g, '')
+                          .slice(0, 120);
+                        if (sev && title) titles.push(`[${sev}] ${title}`);
+                      }
+                    } catch {}
+                  }
+                }
+                if (titles.length > 0) {
+                  previousFindings = '\n\nPREVIOUSLY REPORTED (do NOT re-report these — they are already tracked):\n' +
+                    [...new Set(titles)].join('\n');
+                }
+              }
+            } catch (err) {
+              core.warning(`Could not fetch previous reviews: ${err.message}`);
+            }
+
             // Read full changed files for context (same pattern as rubin-formal)
             const repoRoot = process.cwd();
             const repoRootReal = fs.realpathSync(repoRoot);
@@ -136,6 +188,9 @@ jobs:
               '- If cryptographic code changed: verify parameter sizes, check for timing side-channels.',
               '- NEVER say "looks good" or "no issues found" if you have not verified every line.',
               '- If the diff is too large to fully verify, say so explicitly and flag unreviewed sections.',
+              '- DEDUPLICATION: If a finding title appears in the PREVIOUSLY REPORTED section, do NOT include it',
+              '  in your findings array. Only report NEW issues not already tracked. Re-reporting fixed issues wastes',
+              '  reviewer time and creates noise.',
               '- ANTI-HALLUCINATION: If the diff is truncated or you cannot see a file/function mentioned elsewhere',
               '  in the diff — do NOT claim it is missing. Add it to unreviewed_sections and set verdict to WARN.',
               '- NEVER report "function not defined" or "file missing" unless you have verified the COMPLETE diff.',
@@ -184,7 +239,7 @@ jobs:
                     model: modelId,
                     messages: [
                       { role: 'system', content: systemPrompt },
-                      { role: 'user', content: `Review this PR diff for security vulnerabilities. Be hostile — assume every change is a potential exploit vector.\n\nDIFF:\n${diff}${changedFilePayload ? `\n\n---\nFULL CHANGED FILES (use to verify definitions before claiming anything missing):\n${changedFilePayload}` : ''}` }
+                      { role: 'user', content: `Review this PR diff for security vulnerabilities. Be hostile — assume every change is a potential exploit vector.\n\nDIFF:\n${diff}${changedFilePayload ? `\n\n---\nFULL CHANGED FILES (use to verify definitions before claiming anything missing):\n${changedFilePayload}` : ''}${previousFindings}` }
                     ],
                     temperature: 0.6,
                     top_p: 0.95
