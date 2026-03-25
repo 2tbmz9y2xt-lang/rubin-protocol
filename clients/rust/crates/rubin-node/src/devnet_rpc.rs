@@ -15,6 +15,9 @@ const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CONCURRENT_RPC_CONNS: usize = 8;
 
+pub type AnnounceTxFn =
+    Arc<dyn Fn(&[u8], crate::txpool::RelayTxMetadata) -> Result<(), String> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct DevnetRPCState {
     sync_engine: Arc<Mutex<SyncEngine>>,
@@ -23,6 +26,7 @@ pub struct DevnetRPCState {
     peer_manager: Arc<PeerManager>,
     metrics: Arc<RpcMetrics>,
     now_unix: fn() -> u64,
+    announce_tx: Option<AnnounceTxFn>,
 }
 
 pub struct RunningDevnetRPCServer {
@@ -84,6 +88,7 @@ pub fn new_devnet_rpc_state(
     sync_engine: Arc<Mutex<SyncEngine>>,
     block_store: Option<BlockStore>,
     peer_manager: Arc<PeerManager>,
+    announce_tx: Option<AnnounceTxFn>,
 ) -> DevnetRPCState {
     let (core_ext_deployments, suite_context) = sync_engine
         .lock()
@@ -105,6 +110,7 @@ pub fn new_devnet_rpc_state(
         peer_manager,
         metrics: Arc::new(RpcMetrics::default()),
         now_unix: current_unix,
+        announce_tx,
     }
 }
 
@@ -574,7 +580,7 @@ fn handle_submit_tx(state: &DevnetRPCState, method: &str, body: &[u8]) -> HttpRe
         }
     };
     let admit_result = match state.tx_pool.lock() {
-        Ok(mut pool) => pool.admit(
+        Ok(mut pool) => pool.admit_with_metadata(
             &tx_bytes,
             &chain_state,
             fresh_block_store.as_ref(),
@@ -586,7 +592,13 @@ fn handle_submit_tx(state: &DevnetRPCState, method: &str, body: &[u8]) -> HttpRe
         }),
     };
     match admit_result {
-        Ok(txid) => {
+        Ok((txid, relay_meta)) => {
+            // Relay tx to peers (fire-and-forget, matches Go behavior).
+            if let Some(ref announce) = state.announce_tx {
+                if let Err(err) = announce(&tx_bytes, relay_meta) {
+                    eprintln!("rpc: announce-tx: {err}");
+                }
+            }
             state.metrics.note_submit("accepted");
             json_response(
                 state,
@@ -964,6 +976,7 @@ mod tests {
             Arc::new(Mutex::new(engine)),
             Some(rpc_block_store),
             Arc::new(PeerManager::new(default_peer_runtime_config("devnet", 8))),
+            None,
         );
         (state, dir)
     }
@@ -1089,6 +1102,7 @@ mod tests {
             peer_manager: Arc::new(PeerManager::new(default_peer_runtime_config("devnet", 8))),
             metrics: Arc::new(super::RpcMetrics::default()),
             now_unix: super::current_unix,
+            announce_tx: None,
         }
     }
 
@@ -1564,6 +1578,68 @@ mod tests {
     }
 
     #[test]
+    fn submit_tx_calls_announce_callback_on_success() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let vector = positive_fixture_vector();
+        assert!(vector.expect_ok);
+        let raw = hex::decode(&vector.tx_hex).expect("decode tx hex");
+        let called = Arc::new(AtomicBool::new(false));
+        let called_clone = Arc::clone(&called);
+
+        let mut state = build_state_with_chain_state(
+            chain_state_from_positive_fixture(&vector),
+            fixture_chain_id(vector.chain_id.as_deref()),
+        );
+        state.announce_tx = Some(Arc::new(move |_tx_bytes: &[u8], _meta| {
+            called_clone.store(true, Ordering::SeqCst);
+            Ok(())
+        }));
+
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/submit_tx".to_string(),
+                body: format!(r#"{{"tx_hex":"{}"}}"#, hex::encode(&raw)).into_bytes(),
+            },
+        );
+        assert_eq!(response.status, 200);
+        assert!(
+            called.load(Ordering::SeqCst),
+            "announce_tx should be called"
+        );
+    }
+
+    #[test]
+    fn submit_tx_logs_announce_error_without_failing_rpc() {
+        let vector = positive_fixture_vector();
+        assert!(vector.expect_ok);
+        let raw = hex::decode(&vector.tx_hex).expect("decode tx hex");
+
+        let mut state = build_state_with_chain_state(
+            chain_state_from_positive_fixture(&vector),
+            fixture_chain_id(vector.chain_id.as_deref()),
+        );
+        state.announce_tx = Some(Arc::new(|_tx_bytes: &[u8], _meta| {
+            Err("relay failure".to_string())
+        }));
+
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/submit_tx".to_string(),
+                body: format!(r#"{{"tx_hex":"{}"}}"#, hex::encode(&raw)).into_bytes(),
+            },
+        );
+        // RPC should still succeed — announce failure is fire-and-forget.
+        assert_eq!(response.status, 200);
+        let body = response_json(&response);
+        assert_eq!(body["accepted"].as_bool(), Some(true));
+    }
+
+    #[test]
     fn get_block_returns_unavailable_when_block_bytes_are_missing() {
         let (state, dir) = build_state(true);
         let (_height, tip_hash) = state
@@ -1698,6 +1774,7 @@ mod tests {
             peer_manager: Arc::new(PeerManager::new(default_peer_runtime_config("devnet", 8))),
             metrics: Arc::new(super::RpcMetrics::default()),
             now_unix: || 0,
+            announce_tx: None,
         };
 
         let body = render_prometheus_metrics(&state);
@@ -1932,6 +2009,7 @@ mod tests {
             Arc::new(Mutex::new(engine)),
             Some(rpc_block_store),
             Arc::new(PeerManager::new(default_peer_runtime_config("devnet", 8))),
+            None,
         );
         let server = start_devnet_rpc_server("127.0.0.1:0", state).expect("start");
         let addr = server.addr().to_string();
@@ -1978,6 +2056,7 @@ mod tests {
             Arc::new(Mutex::new(engine)),
             Some(rpc_block_store),
             Arc::new(PeerManager::new(default_peer_runtime_config("devnet", 8))),
+            None,
         );
         let server = start_devnet_rpc_server("127.0.0.1:0", state).expect("start");
         let addr = server.addr().to_string();

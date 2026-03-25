@@ -115,6 +115,20 @@ pub struct PeerState {
     pub verack_received: bool,
 }
 
+/// Context for TX relay operations, passed through the message loop.
+/// Optional — tests and block-only peers can omit it.
+pub struct PeerRelayContext<'a> {
+    pub relay_state: &'a crate::tx_relay::TxRelayState,
+    pub peer_manager: &'a PeerManager,
+    pub local_addr: &'a str,
+    /// Canonical peer address registered in PeerManager (may differ from
+    /// socket peer_addr for outbound connections using hostname dial targets).
+    pub peer_registered_addr: &'a str,
+    /// Outbound relay queues: serialized wire frames enqueued by broadcast,
+    /// drained by the peer thread to avoid concurrent TcpStream writes.
+    pub peer_writers: &'a std::sync::Mutex<HashMap<String, crate::tx_relay::PeerOutbox>>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OrphanBlockEntry {
     block_hash: [u8; 32],
@@ -198,6 +212,12 @@ impl PeerManager {
 }
 
 impl PeerSession {
+    /// Write raw pre-serialized bytes to the peer's TcpStream.
+    /// Used for draining relay outbox frames.
+    pub fn write_raw(&mut self, data: &[u8]) -> io::Result<()> {
+        self.stream.write_all(data)
+    }
+
     fn new(stream: TcpStream, cfg: PeerRuntimeConfig) -> Result<Self, String> {
         let addr = stream
             .peer_addr()
@@ -301,7 +321,7 @@ impl PeerSession {
             let msg = self.read_message()?;
             match msg.command.as_str() {
                 MESSAGE_INV => {
-                    let requests = self.handle_inv(&msg.payload, sync_engine)?;
+                    let requests = self.handle_inv(&msg.payload, sync_engine, None)?;
                     if !requests.is_empty() {
                         let payload = encode_inventory_vectors(&requests)?;
                         self.write_message(&WireMessage {
@@ -311,7 +331,7 @@ impl PeerSession {
                     }
                 }
                 MESSAGE_GETDATA => {
-                    self.respond_to_getdata(&msg.payload, sync_engine)?;
+                    self.respond_to_getdata(&msg.payload, sync_engine, None)?;
                 }
                 MESSAGE_GETBLOCKS => {
                     let items = self.handle_getblocks(&msg.payload, sync_engine)?;
@@ -376,6 +396,7 @@ impl PeerSession {
         &mut self,
         msg: WireMessage,
         sync_engine: &mut SyncEngine,
+        relay_ctx: Option<&PeerRelayContext<'_>>,
     ) -> io::Result<Vec<WireMessage>> {
         if msg.payload.len() > MAX_RELAY_MSG_BYTES as usize {
             return Err(io::Error::new(
@@ -389,7 +410,8 @@ impl PeerSession {
         }
         match msg.command.as_str() {
             MESSAGE_INV => {
-                let requests = self.handle_inv(&msg.payload, sync_engine)?;
+                let requests =
+                    self.handle_inv(&msg.payload, sync_engine, relay_ctx.map(|c| c.relay_state))?;
                 if requests.is_empty() {
                     Ok(Vec::new())
                 } else {
@@ -399,7 +421,11 @@ impl PeerSession {
                     }])
                 }
             }
-            MESSAGE_GETDATA => self.collect_getdata_responses(&msg.payload, sync_engine),
+            MESSAGE_GETDATA => self.collect_getdata_responses(
+                &msg.payload,
+                sync_engine,
+                relay_ctx.map(|c| c.relay_state),
+            ),
             MESSAGE_GETBLOCKS => {
                 let items = self.handle_getblocks(&msg.payload, sync_engine)?;
                 if items.is_empty() {
@@ -418,7 +444,21 @@ impl PeerSession {
                     .into_iter()
                     .collect())
             }
-            MESSAGE_TX | "headers" | "pong" => Ok(Vec::new()),
+            MESSAGE_TX => {
+                if let Some(ctx) = relay_ctx {
+                    crate::tx_relay::handle_received_tx(
+                        &msg.payload,
+                        sync_engine,
+                        ctx.relay_state,
+                        ctx.peer_manager,
+                        ctx.peer_registered_addr,
+                        ctx.local_addr,
+                        ctx.peer_writers,
+                    )?;
+                }
+                Ok(Vec::new())
+            }
+            "headers" | "pong" => Ok(Vec::new()),
             "ping" => Ok(vec![WireMessage {
                 command: "pong".to_string(),
                 payload: Vec::new(),
@@ -442,8 +482,9 @@ impl PeerSession {
         &mut self,
         msg: WireMessage,
         sync_engine: &mut SyncEngine,
+        relay_ctx: Option<&PeerRelayContext<'_>>,
     ) -> io::Result<()> {
-        for response in self.collect_live_responses(msg, sync_engine)? {
+        for response in self.collect_live_responses(msg, sync_engine, relay_ctx)? {
             self.write_message(&response)?;
         }
         Ok(())
@@ -492,18 +533,28 @@ impl PeerSession {
         &mut self,
         payload: &[u8],
         sync_engine: &SyncEngine,
+        relay_state: Option<&crate::tx_relay::TxRelayState>,
     ) -> io::Result<Vec<InventoryVector>> {
         let vectors = decode_inventory_vectors(payload)?;
         let mut requests = Vec::new();
         for vector in vectors {
-            if vector.kind != MSG_BLOCK {
-                continue;
-            }
-            if !sync_engine
-                .has_block(vector.hash)
-                .map_err(io::Error::other)?
-            {
-                requests.push(vector);
+            match vector.kind {
+                MSG_BLOCK => {
+                    if !sync_engine
+                        .has_block(vector.hash)
+                        .map_err(io::Error::other)?
+                    {
+                        requests.push(vector);
+                    }
+                }
+                MSG_TX => {
+                    if let Some(rs) = relay_state {
+                        if !rs.tx_seen.has(&vector.hash) && !rs.relay_pool.has(&vector.hash) {
+                            requests.push(vector);
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         Ok(requests)
@@ -601,8 +652,13 @@ impl PeerSession {
         Ok(())
     }
 
-    fn respond_to_getdata(&mut self, payload: &[u8], sync_engine: &SyncEngine) -> io::Result<()> {
-        for response in self.collect_getdata_responses(payload, sync_engine)? {
+    fn respond_to_getdata(
+        &mut self,
+        payload: &[u8],
+        sync_engine: &SyncEngine,
+        relay_state: Option<&crate::tx_relay::TxRelayState>,
+    ) -> io::Result<()> {
+        for response in self.collect_getdata_responses(payload, sync_engine, relay_state)? {
             self.write_message(&response)?;
         }
         Ok(())
@@ -612,34 +668,51 @@ impl PeerSession {
         &mut self,
         payload: &[u8],
         sync_engine: &SyncEngine,
+        relay_state: Option<&crate::tx_relay::TxRelayState>,
     ) -> io::Result<Vec<WireMessage>> {
         let mut responses = Vec::new();
         let mut total_bytes: usize = 0;
+        let mut block_count: usize = 0;
         for item in decode_inventory_vectors(payload)? {
-            if item.kind != MSG_BLOCK {
-                continue;
+            match item.kind {
+                MSG_BLOCK => {
+                    if !sync_engine.has_block(item.hash).map_err(io::Error::other)? {
+                        continue;
+                    }
+                    if block_count >= MAX_GETDATA_RESPONSE_BLOCKS {
+                        break;
+                    }
+                    let block = sync_engine
+                        .get_block_by_hash(item.hash)
+                        .map_err(io::Error::other)?;
+                    if total_bytes.saturating_add(block.len()) > MAX_GETDATA_RESPONSE_BYTES {
+                        break;
+                    }
+                    total_bytes = total_bytes.saturating_add(block.len());
+                    block_count += 1;
+                    responses.push(WireMessage {
+                        command: MESSAGE_BLOCK.to_string(),
+                        payload: block,
+                    });
+                }
+                MSG_TX => {
+                    if let Some(rs) = relay_state {
+                        if let Some(tx_bytes) = rs.relay_pool.get(&item.hash) {
+                            if total_bytes.saturating_add(tx_bytes.len())
+                                > MAX_GETDATA_RESPONSE_BYTES
+                            {
+                                break;
+                            }
+                            total_bytes = total_bytes.saturating_add(tx_bytes.len());
+                            responses.push(WireMessage {
+                                command: MESSAGE_TX.to_string(),
+                                payload: tx_bytes,
+                            });
+                        }
+                    }
+                }
+                _ => {}
             }
-            if !sync_engine.has_block(item.hash).map_err(io::Error::other)? {
-                continue;
-            }
-            // Enforce block count limit before fetch.
-            if responses.len() >= MAX_GETDATA_RESPONSE_BLOCKS {
-                break;
-            }
-            let block = sync_engine
-                .get_block_by_hash(item.hash)
-                .map_err(io::Error::other)?;
-            // Enforce byte budget AFTER fetch but BEFORE buffering.
-            // This is a hard cap — the block is dropped if it would
-            // exceed the 128 MiB limit, preventing even one-block overrun.
-            if total_bytes.saturating_add(block.len()) > MAX_GETDATA_RESPONSE_BYTES {
-                break;
-            }
-            total_bytes = total_bytes.saturating_add(block.len());
-            responses.push(WireMessage {
-                command: MESSAGE_BLOCK.to_string(),
-                payload: block,
-            });
         }
         Ok(responses)
     }
@@ -1162,7 +1235,7 @@ fn unmarshal_version_payload_v1(payload: &[u8]) -> io::Result<VersionPayloadV1> 
     })
 }
 
-fn build_envelope_header(
+pub fn build_envelope_header(
     magic: [u8; 4],
     command: &str,
     payload: &[u8],
@@ -1547,7 +1620,7 @@ fn handshake_timeout_budget(read_deadline: Duration) -> Duration {
     read_deadline.min(DEFAULT_HANDSHAKE_TIMEOUT)
 }
 
-fn network_magic(network: &str) -> [u8; 4] {
+pub fn network_magic(network: &str) -> [u8; 4] {
     match network {
         "mainnet" => *b"RBMN",
         "testnet" => *b"RBTN",
@@ -2098,7 +2171,7 @@ mod tests {
             }])
             .expect("inventory payload");
             session
-                .respond_to_getdata(&payload, &engine)
+                .respond_to_getdata(&payload, &engine, None)
                 .expect("missing block should be ignored");
         });
 

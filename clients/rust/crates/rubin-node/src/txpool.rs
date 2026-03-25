@@ -95,6 +95,12 @@ pub struct TxPoolAdmitError {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelayTxMetadata {
+    pub fee: u64,
+    pub size: usize,
+}
+
 impl std::fmt::Display for TxPoolAdmitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message)
@@ -157,6 +163,17 @@ impl TxPool {
         block_store: Option<&BlockStore>,
         chain_id: [u8; 32],
     ) -> Result<[u8; 32], TxPoolAdmitError> {
+        self.admit_with_metadata(tx_bytes, chain_state, block_store, chain_id)
+            .map(|(txid, _)| txid)
+    }
+
+    pub fn admit_with_metadata(
+        &mut self,
+        tx_bytes: &[u8],
+        chain_state: &ChainState,
+        block_store: Option<&BlockStore>,
+        chain_id: [u8; 32],
+    ) -> Result<([u8; 32], RelayTxMetadata), TxPoolAdmitError> {
         let (tx, txid, _wtxid, consumed) =
             parse_tx(tx_bytes).map_err(|err| rejected(format!("transaction rejected: {err}")))?;
         if consumed != tx_bytes.len() {
@@ -268,7 +285,23 @@ impl TxPool {
         }
 
         self.insert_entry(txid, entry);
-        Ok(txid)
+        Ok((
+            txid,
+            RelayTxMetadata {
+                fee: summary.fee,
+                size: tx_bytes.len(),
+            },
+        ))
+    }
+
+    pub fn relay_metadata_for_bytes(
+        &self,
+        tx_bytes: &[u8],
+        chain_state: &ChainState,
+        block_store: Option<&BlockStore>,
+        chain_id: [u8; 32],
+    ) -> Result<RelayTxMetadata, TxPoolAdmitError> {
+        relay_metadata(tx_bytes, chain_state, block_store, chain_id, &self.cfg)
     }
 
     /// Remove transactions by txid (e.g. after block confirmation).
@@ -375,6 +408,52 @@ impl TxPool {
         }
         self.worst_heap = rebuilt;
     }
+}
+
+pub(crate) fn relay_metadata(
+    tx_bytes: &[u8],
+    chain_state: &ChainState,
+    block_store: Option<&BlockStore>,
+    chain_id: [u8; 32],
+    cfg: &TxPoolConfig,
+) -> Result<RelayTxMetadata, TxPoolAdmitError> {
+    let (tx, txid, _wtxid, consumed) =
+        parse_tx(tx_bytes).map_err(|err| rejected(format!("transaction rejected: {err}")))?;
+    if consumed != tx_bytes.len() {
+        return Err(rejected("transaction rejected: non-canonical tx bytes"));
+    }
+
+    let next_height = next_block_height(chain_state)?;
+    let block_mtp = next_block_mtp(block_store, next_height)?;
+    let active_profiles = cfg
+        .core_ext_deployments
+        .active_profiles_at_height(next_height)
+        .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
+    let (rotation, registry): (Option<&dyn RotationProvider>, Option<&SuiteRegistry>) =
+        match cfg.suite_context.as_ref() {
+            Some(ctx) => (Some(ctx.rotation.as_ref()), Some(ctx.registry.as_ref())),
+            None => (None, None),
+        };
+    let (_, summary) =
+        apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+            &tx,
+            txid,
+            &chain_state.utxos,
+            next_height,
+            block_mtp,
+            block_mtp,
+            chain_id,
+            &active_profiles,
+            rotation,
+            registry,
+        )
+        .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
+    apply_policy(&tx, &chain_state.utxos, next_height, cfg).map_err(rejected)?;
+
+    Ok(RelayTxMetadata {
+        fee: summary.fee,
+        size: tx_bytes.len(),
+    })
 }
 
 impl Default for TxPool {
@@ -738,7 +817,7 @@ mod tests {
     use super::{
         compare_admit_priority, compare_entries_for_mining, compare_fee_rate, conflict, mtp_median,
         next_block_height, next_block_mtp, reject_core_ext_tx_oversized_payload, rejected,
-        unavailable, TxPool, TxPoolAdmitErrorKind, TxPoolConfig, TxPoolEntry,
+        relay_metadata, unavailable, TxPool, TxPoolAdmitErrorKind, TxPoolConfig, TxPoolEntry,
         MAX_TX_POOL_TRANSACTIONS,
     };
     use crate::{
@@ -1036,6 +1115,25 @@ mod tests {
     }
 
     #[test]
+    fn relay_metadata_accepts_valid_conformance_tx() {
+        let vector = positive_fixture_vector();
+        let raw = hex::decode(&vector.tx_hex).expect("tx hex");
+        let state = chain_state_from_positive_fixture(&vector);
+
+        let meta = relay_metadata(
+            &raw,
+            &state,
+            None,
+            fixture_chain_id(vector.chain_id.as_deref()),
+            &TxPoolConfig::default(),
+        )
+        .expect("relay metadata");
+
+        assert_eq!(meta.size, raw.len());
+        assert!(meta.fee > 0, "relay metadata should derive non-zero fee");
+    }
+
+    #[test]
     fn new_pool_starts_empty() {
         let pool = TxPool::new();
         assert!(pool.is_empty());
@@ -1126,6 +1224,27 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
         assert!(err.message.contains("non-canonical tx bytes"));
+    }
+
+    #[test]
+    fn relay_metadata_rejects_pre_activation_core_ext_outputs() {
+        let (state, raw) = signed_p2pk_state_and_tx(
+            10,
+            vec![TxOutput {
+                value: 9,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: empty_core_ext_covenant_data(7),
+            }],
+            0x00,
+            None,
+            Vec::new(),
+        );
+
+        let err =
+            relay_metadata(&raw, &state, None, [0u8; 32], &TxPoolConfig::default()).unwrap_err();
+
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
+        assert!(err.message.contains("CORE_EXT output pre-ACTIVE"));
     }
 
     #[test]
