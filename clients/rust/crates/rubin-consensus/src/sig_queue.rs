@@ -476,7 +476,9 @@ mod tests {
                 .expect("enqueue invalid zero-value");
         }
         assert!(queue.flush().is_err(), "invalid zero-value flush must fail");
-        queue.assert_flushed().expect("assert flushed after failure");
+        queue
+            .assert_flushed()
+            .expect("assert flushed after failure");
     }
 
     #[test]
@@ -514,7 +516,9 @@ mod tests {
             )
             .expect("enqueue bad suite");
         assert!(queue.flush().is_err(), "bad suite id must fail");
-        queue.assert_flushed().expect("assert flushed after bad suite");
+        queue
+            .assert_flushed()
+            .expect("assert flushed after bad suite");
     }
 
     #[test]
