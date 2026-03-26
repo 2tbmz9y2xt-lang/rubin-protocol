@@ -400,10 +400,10 @@ jobs:
         run: |
           python3 conformance/runner/run_cv_bundle.py
 
-      - name: PV soak parity gate
+      - name: Node runtime total parity gate
         run: |
-          ./scripts/pv-soak-ci-gate.sh --report /tmp/pv-soak-report.json
-          cat /tmp/pv-soak-report.json
+          ./scripts/node-runtime-total-parity-gate.sh
+          cat /tmp/node-runtime-total-parity-report.json
 
   formal_refinement:
     needs: policy
