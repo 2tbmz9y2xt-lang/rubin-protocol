@@ -93,6 +93,7 @@ pub use utxo_basic::{
     apply_non_coinbase_tx_basic_update_with_mtp,
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles,
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
+    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks,
     apply_non_coinbase_tx_basic_with_mtp, Outpoint, UtxoApplySummary, UtxoEntry,
 };
 pub use utxo_snapshot::{utxo_snapshot_shard, UtxoSnapshot};

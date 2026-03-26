@@ -50,23 +50,25 @@ impl Default for SigCheckQueue {
     }
 }
 
+#[cfg(test)]
 impl Drop for SigCheckQueue {
     fn drop(&mut self) {
         if self.tasks.is_empty() || std::thread::panicking() {
             return;
         }
-        if let Err(err) = self.flush() {
-            panic!("SigCheckQueue drop flush failed: {err}");
-        }
+        panic!("SigCheckQueue dropped with unflushed tasks");
     }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
 impl SigCheckQueue {
     pub(crate) fn new(workers: usize) -> Self {
-        let mut queue = Self::default();
-        queue.workers = workers.max(1);
-        queue
+        Self {
+            tasks: Vec::new(),
+            queued_bytes: 0,
+            registry: None,
+            workers: workers.max(1),
+        }
     }
 
     pub(crate) fn with_registry(mut self, registry: &SuiteRegistry) -> Self {
@@ -542,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn sig_check_queue_drop_flushes_valid_tasks() {
+    fn sig_check_queue_assert_flushed_accepts_after_explicit_flush() {
         let keypair = Mldsa87Keypair::generate().expect("keypair");
         let digest = [0x77; 32];
         let sig = keypair.sign_digest32(digest).expect("sign");
@@ -556,10 +558,12 @@ mod tests {
                 TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
             )
             .expect("enqueue");
+        queue.flush().expect("flush");
+        queue.assert_flushed().expect("assert flushed");
     }
 
     #[test]
-    #[should_panic(expected = "SigCheckQueue drop flush failed")]
+    #[should_panic(expected = "SigCheckQueue dropped with unflushed tasks")]
     fn sig_check_queue_drop_panics_on_invalid_pending_task() {
         let mut queue = SigCheckQueue::new(1);
         queue
