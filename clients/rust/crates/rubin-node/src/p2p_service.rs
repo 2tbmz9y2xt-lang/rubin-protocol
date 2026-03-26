@@ -718,10 +718,12 @@ fn handle_peer(
 
     while !shared.stop.load(Ordering::SeqCst) {
         flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
-        let msg = match session
-            .read_message_with_timeout(live_loop_read_timeout(session.read_deadline()))
-        {
-            Ok(msg) => msg,
+        match session.poll_read_ready(LIVE_LOOP_IDLE_DRAIN_POLL_INTERVAL) {
+            Ok(true) => {}
+            Ok(false) => {
+                flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
+                continue;
+            }
             Err(err)
                 if matches!(
                     err.kind(),
@@ -731,8 +733,11 @@ fn handle_peer(
                 flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
                 continue;
             }
-            Err(err) => return Err(format!("read message: {err}")),
-        };
+            Err(err) => return Err(format!("poll live message readiness: {err}")),
+        }
+        let msg = session
+            .read_message()
+            .map_err(|err| format!("read message: {err}"))?;
         let outbound_messages = {
             // Validate payload size before acquiring engine lock.
             if msg.payload.len() > rubin_consensus::constants::MAX_RELAY_MSG_BYTES as usize {
@@ -763,10 +768,6 @@ fn handle_peer(
         flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
     }
     Ok(())
-}
-
-fn live_loop_read_timeout(read_deadline: Duration) -> Duration {
-    read_deadline.min(LIVE_LOOP_IDLE_DRAIN_POLL_INTERVAL)
 }
 
 fn flush_peer_outbox<F>(
@@ -862,9 +863,9 @@ mod tests {
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use crate::interop::local_version;
     use crate::p2p_runtime::{
-        build_envelope_header, default_peer_runtime_config, encode_inventory_vectors,
-        network_magic, perform_version_handshake, InventoryVector, PeerManager, PeerRuntimeConfig,
-        WireMessage, MSG_TX,
+        build_envelope_header, decode_inventory_vectors, default_peer_runtime_config,
+        encode_inventory_vectors, network_magic, perform_version_handshake, InventoryVector,
+        PeerManager, PeerRuntimeConfig, WireMessage, MSG_TX,
     };
     use crate::tx_relay::PeerOutbox;
     use crate::tx_relay::TxRelayState;
@@ -1142,6 +1143,82 @@ mod tests {
             assert_eq!(
                 msg.command, "getblocks",
                 "unexpected pre-pong message while validating live-loop immediate reads"
+            );
+        }
+
+        shared.stop.store(true, Ordering::SeqCst);
+        drop(session);
+        handler.join().expect("handler join");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn service_preserves_full_deadline_for_fragmented_live_frames() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-fragmented-live-read");
+        let mut runtime_cfg = default_peer_runtime_config("devnet", 8);
+        runtime_cfg.read_deadline = Duration::from_secs(2);
+        runtime_cfg.write_deadline = Duration::from_secs(1);
+        let shared = test_shared_state(runtime_cfg.clone(), Vec::new(), sync_engine);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let handler_shared = shared.clone();
+        let handler = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept peer");
+            let _ = super::handle_peer(stream, None, handler_shared);
+        });
+
+        let mut client_cfg = runtime_cfg.clone();
+        client_cfg.read_deadline = Duration::from_secs(2);
+        let stream = TcpStream::connect(addr).expect("connect service");
+        let local = local_version(0).expect("local version");
+        let mut session = perform_version_handshake(
+            stream,
+            client_cfg,
+            local,
+            local.chain_id,
+            local.genesis_hash,
+        )
+        .expect("handshake");
+
+        let payload = encode_inventory_vectors(&[InventoryVector {
+            kind: MSG_TX,
+            hash: [0xCD; 32],
+        }])
+        .expect("inv payload");
+        let frame = test_wire_frame(&runtime_cfg, "inv", &payload);
+        let header_len = frame.len() - payload.len();
+        session
+            .write_raw(&frame[..header_len])
+            .expect("write fragmented header");
+        thread::sleep(Duration::from_millis(650));
+        session
+            .write_raw(&frame[header_len..])
+            .expect("write fragmented payload");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let msg = session
+                .read_message()
+                .expect("read fragmented live response");
+            if msg.command == "getdata" {
+                let requested = decode_inventory_vectors(&msg.payload).expect("decode getdata");
+                assert_eq!(
+                    requested,
+                    vec![InventoryVector {
+                        kind: MSG_TX,
+                        hash: [0xCD; 32],
+                    }],
+                    "service must finish consuming the fragmented frame before responding"
+                );
+                break;
+            }
+            assert_eq!(
+                msg.command, "getblocks",
+                "unexpected pre-getdata message while validating fragmented live reads"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "fragmented live frame must complete without disconnecting the peer"
             );
         }
 

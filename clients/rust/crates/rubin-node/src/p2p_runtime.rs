@@ -246,6 +246,29 @@ impl PeerSession {
         self.cfg.read_deadline
     }
 
+    pub fn poll_read_ready(&self, timeout: Duration) -> io::Result<bool> {
+        self.stream
+            .set_read_timeout(Some(timeout))
+            .map_err(io::Error::other)?;
+        let mut probe = [0u8; 1];
+        match self.stream.peek(&mut probe) {
+            Ok(0) => Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "peer closed connection",
+            )),
+            Ok(_) => Ok(true),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     pub fn read_message_with_timeout(&mut self, timeout: Duration) -> io::Result<WireMessage> {
         self.stream
             .set_read_timeout(Some(timeout))
