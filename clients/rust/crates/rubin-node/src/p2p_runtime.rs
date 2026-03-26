@@ -637,7 +637,7 @@ impl PeerSession {
         match sync_engine.apply_block_with_reorg(block_bytes, None, tx_pool.as_deref_mut()) {
             Ok(summary) => {
                 sync_engine.record_best_known_height(summary.block_height);
-                self.resolve_orphans(block_hash_bytes, sync_engine, tx_pool.as_deref_mut())?;
+                self.resolve_orphans(block_hash_bytes, sync_engine, tx_pool)?;
             }
             Err(err) if is_parent_not_found_err(&err) => {
                 return Err(io::Error::other(format!(
