@@ -841,12 +841,15 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
     use rubin_consensus::constants::{COV_TYPE_EXT, COV_TYPE_P2PK, POW_LIMIT, SUITE_ID_ML_DSA_87};
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
     use rubin_consensus::{
         block_hash, encode_compact_size, merkle_root_txids, parse_block_bytes, parse_tx,
-        CoreExtDeploymentProfile, CoreExtDeploymentProfiles, CoreExtVerificationBinding, Outpoint,
-        UtxoEntry, BLOCK_HEADER_BYTES,
+        CoreExtDeploymentProfile, CoreExtDeploymentProfiles, CoreExtVerificationBinding,
+        NativeSuiteSet, Outpoint, RotationProvider, UtxoEntry, BLOCK_HEADER_BYTES,
     };
     use rubin_consensus::{DefaultRotationProvider, SuiteRegistry};
 
@@ -862,6 +865,21 @@ mod tests {
 
     const VALID_BLOCK_HEX: &str = "01000000111111111111111111111111111111111111111111111111111111111111111102e66000bf8ce870908df4a8689554852ccef681ee0b5df32246162a53e36e290100000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff07000000000000000101000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff010000000000000000020020b716a4b7f4c0fab665298ab9b8199b601ab9fa7e0a27f0713383f34cf37071a8000000000000";
     const CORE_EXT_NATIVE_BINDING_SPEND_TX_HEX: &str = "0100000000010000000000000001eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee000000000000000000015a0000000000000000002101111111111111111111111111111111111111111111111111111111111111111100000000010300010100";
+
+    struct CountingRotationProvider {
+        spend_calls: AtomicUsize,
+    }
+
+    impl RotationProvider for CountingRotationProvider {
+        fn native_create_suites(&self, _height: u64) -> NativeSuiteSet {
+            NativeSuiteSet::new(&[SUITE_ID_ML_DSA_87])
+        }
+
+        fn native_spend_suites(&self, _height: u64) -> NativeSuiteSet {
+            self.spend_calls.fetch_add(1, Ordering::SeqCst);
+            NativeSuiteSet::new(&[SUITE_ID_ML_DSA_87])
+        }
+    }
 
     fn hex_to_bytes(hex: &str) -> Vec<u8> {
         let mut out = Vec::with_capacity(hex.len() / 2);
@@ -1200,5 +1218,94 @@ mod tests {
             err.contains("TX_ERR_SIG_ALG_INVALID"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn sync_engine_shadow_mode_reuses_shared_suite_context_sequentially() {
+        let dir = unique_temp_path("rubin-node-sync-pv-shared-suite-context");
+        let chain_state_file = chain_state_path(&dir);
+        let block_store_root = block_store_path(&dir);
+        let store = BlockStore::open(block_store_root).expect("open blockstore");
+
+        let rotation = Arc::new(CountingRotationProvider {
+            spend_calls: AtomicUsize::new(0),
+        });
+
+        let mut cfg = default_sync_config(
+            Some(POW_LIMIT),
+            devnet_genesis_chain_id(),
+            Some(chain_state_file),
+        );
+        cfg.parallel_validation_mode = "shadow".to_string();
+        cfg.suite_context = Some(SuiteContext {
+            rotation: rotation.clone(),
+            registry: Arc::new(SuiteRegistry::default_registry().clone()),
+        });
+        cfg.core_ext_deployments = CoreExtDeploymentProfiles {
+            deployments: vec![CoreExtDeploymentProfile {
+                ext_id: 1,
+                activation_height: 1,
+                tx_context_enabled: false,
+                allowed_suite_ids: vec![3],
+                verification_binding: CoreExtVerificationBinding::NativeVerifySig,
+                verify_sig_ext_tx_context_fn: None,
+                binding_descriptor: Vec::new(),
+                ext_payload_schema: Vec::new(),
+                governance_nonce: 0,
+            }],
+        };
+
+        let mut engine = SyncEngine::new(ChainState::new(), Some(store), cfg).expect("new sync");
+        engine
+            .apply_block(&devnet_genesis_block_bytes(), None)
+            .expect("apply genesis");
+
+        engine.chain_state.utxos.insert(
+            Outpoint {
+                txid: [0xee; 32],
+                vout: 0,
+            },
+            UtxoEntry {
+                value: 100,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: vec![0x01, 0x00, 0x00],
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
+
+        let spend_tx = hex_to_bytes(CORE_EXT_NATIVE_BINDING_SPEND_TX_HEX);
+        let (_, spend_txid, spend_wtxid, consumed) = parse_tx(&spend_tx).expect("parse spend");
+        assert_eq!(consumed, spend_tx.len());
+        let witness_root =
+            witness_merkle_root_wtxids(&[[0u8; 32], spend_wtxid]).expect("witness root");
+        let witness_commitment = witness_commitment_hash(witness_root);
+        let coinbase =
+            build_coinbase_tx(1, 0, &default_mine_address(), witness_commitment).expect("coinbase");
+        let (_, coinbase_txid, _, coinbase_consumed) = parse_tx(&coinbase).expect("parse coinbase");
+        assert_eq!(coinbase_consumed, coinbase.len());
+        let merkle_root = merkle_root_txids(&[coinbase_txid, spend_txid]).expect("merkle root");
+        let genesis = devnet_genesis_block_bytes();
+        let genesis_hash = block_hash(&genesis[..BLOCK_HEADER_BYTES]).expect("genesis hash");
+        let parsed_genesis = parse_block_bytes(&genesis).expect("parse genesis");
+        let block = build_block_bytes(
+            genesis_hash,
+            merkle_root,
+            POW_LIMIT,
+            parsed_genesis.header.timestamp.saturating_add(1),
+            &[coinbase, spend_tx],
+        );
+
+        let err = engine.apply_block(&block, None).unwrap_err();
+        assert!(
+            err.contains("TX_ERR_SIG_ALG_INVALID"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            rotation.spend_calls.load(Ordering::SeqCst) >= 2,
+            "shared suite context should be exercised by both primary and shadow validation paths"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }
