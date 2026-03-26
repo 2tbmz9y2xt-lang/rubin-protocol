@@ -26,6 +26,7 @@ pub mod txcontext;
 mod utxo_basic;
 pub mod utxo_snapshot;
 mod vault;
+pub mod precompute;
 mod verify_sig_openssl;
 mod wire_read;
 
@@ -79,6 +80,7 @@ pub use tx::{parse_tx, DaChunkCore, DaCommitCore, Tx, TxInput, TxOutput, Witness
 pub use tx_dep_graph::{
     build_tx_dep_graph, TxDepEdge, TxDepEdgeKind, TxDepGraph, TxValidationContext,
 };
+pub use precompute::{precompute_tx_contexts, PrecomputedTxContext};
 pub use tx_helpers::{marshal_tx, p2pk_covenant_data_for_pubkey, sign_transaction, DigestSigner};
 pub use txcontext::{
     build_tx_context, build_tx_context_output_ext_id_cache, ExtIdCacheEntry, TxContextBase,
