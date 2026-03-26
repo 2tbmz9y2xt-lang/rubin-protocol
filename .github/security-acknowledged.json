@@ -218,6 +218,27 @@
       "reason": "ACCEPTED_RISK: Go parity — ordered reduction requires one result slot per submitted task just like Go make([]WorkerResult, n). The caller already materializes the task batch; concrete task-count bounds belong at future block-level integration sites, not this infrastructure primitive.",
       "acknowledged_by": "architect",
       "date": "2026-03-26"
+    },
+    {
+      "title_pattern": "worker pool error reporting loses transaction index",
+      "file_pattern": "tx_validate_worker.rs",
+      "reason": "FALSE_POSITIVE: run_worker_pool returns results in submission order (deterministic). PTCs are in tx_index order from precompute. first_tx_error iterates in this order, so first-by-iteration ≡ first-by-tx_index. tx_index=0 impossible (coinbase excluded).",
+      "acknowledged_by": "architect",
+      "date": "2026-03-27"
+    },
+    {
+      "title_pattern": "sig_count",
+      "file_pattern": "tx_validate_worker.rs",
+      "reason": "FALSE_POSITIVE: ptc.resolved_inputs never contains zero-witness covenant types (anchor/da_commit excluded by precompute). All covenant types reaching the loop have witness_slots >= 1. sig_count tracks validated inputs (Go parity), not individual sig verifications.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-27"
+    },
+    {
+      "title_pattern": "integer overflow in witness",
+      "file_pattern": "tx_validate_worker.rs",
+      "reason": "FALSE_POSITIVE: witness_cursor <= witness_end <= tx.witness.len() bounded by block weight limit. slots from witness_slots() max 255 (u8). On 64-bit (RUBIN requirement) overflow impossible. Block size limits prevent >4B witness items even on 32-bit.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-27"
     }
   ]
 }

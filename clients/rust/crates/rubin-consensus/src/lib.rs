@@ -24,6 +24,7 @@ pub mod suite_registry;
 pub mod tx;
 pub mod tx_dep_graph;
 mod tx_helpers;
+pub mod tx_validate_worker;
 pub mod txcontext;
 mod utxo_basic;
 pub mod utxo_snapshot;
@@ -84,6 +85,9 @@ pub use tx_dep_graph::{
     build_tx_dep_graph, TxDepEdge, TxDepEdgeKind, TxDepGraph, TxValidationContext,
 };
 pub use tx_helpers::{marshal_tx, p2pk_covenant_data_for_pubkey, sign_transaction, DigestSigner};
+pub use tx_validate_worker::{
+    first_tx_error, run_tx_validation_workers, validate_tx_local, TxValidationResult,
+};
 pub use txcontext::{
     build_tx_context, build_tx_context_output_ext_id_cache, ExtIdCacheEntry, TxContextBase,
     TxContextBundle, TxContextContinuing, TxOutputView, Uint128, TXCONTEXT_MAX_CONTINUING_OUTPUTS,
