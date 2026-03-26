@@ -1320,8 +1320,12 @@ mod tests {
     fn service_accepts_inbound_peer_handshake() {
         let (sync_engine, dir) = test_engine("rubin-node-p2p-service-inbound");
         let mut runtime_cfg = default_peer_runtime_config("devnet", 8);
-        runtime_cfg.read_deadline = Duration::from_secs(1);
-        runtime_cfg.write_deadline = Duration::from_secs(1);
+        // Coverage instrumentation slows the handshake path enough that tight
+        // 1s deadlines can fail before the service has done any meaningful
+        // work. Widen the test window so the assertion stays about handshake
+        // correctness rather than tarpaulin timing jitter.
+        runtime_cfg.read_deadline = Duration::from_secs(2);
+        runtime_cfg.write_deadline = Duration::from_secs(2);
         let mut service = start_node_p2p_service(NodeP2PServiceConfig {
             bind_addr: "127.0.0.1:0".to_string(),
             bootstrap_peers: Vec::new(),
@@ -1407,8 +1411,8 @@ mod tests {
         // smaller test deadlines become flaky even though the session-slot
         // behavior is correct. Use a wider window here so the test checks slot
         // accounting rather than timing jitter.
-        runtime_cfg.read_deadline = Duration::from_secs(1);
-        runtime_cfg.write_deadline = Duration::from_secs(1);
+        runtime_cfg.read_deadline = Duration::from_secs(2);
+        runtime_cfg.write_deadline = Duration::from_secs(2);
         let peer_manager = Arc::new(PeerManager::new(runtime_cfg.clone()));
         let mut service = start_node_p2p_service(NodeP2PServiceConfig {
             bind_addr: "127.0.0.1:0".to_string(),
