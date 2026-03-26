@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 
+const MAX_SIGCHECK_QUEUE_WORKERS: usize = 128;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SigCheckTask {
     suite_id: u8,
@@ -29,6 +31,7 @@ pub struct SigCheckQueue {
     workers: usize,
     registry: Option<SuiteRegistry>,
     panics: Arc<AtomicU64>,
+    poisoned_after_panic: bool,
 }
 
 impl SigCheckQueue {
@@ -38,6 +41,7 @@ impl SigCheckQueue {
             workers,
             registry: None,
             panics: Arc::new(AtomicU64::new(0)),
+            poisoned_after_panic: false,
         }
     }
 
@@ -82,6 +86,12 @@ impl SigCheckQueue {
     }
 
     pub fn flush(&mut self) -> Result<(), TxError> {
+        if self.poisoned_after_panic {
+            return Err(TxError::new(
+                ErrorCode::TxErrSigInvalid,
+                "SigCheckQueue poisoned after worker panic",
+            ));
+        }
         if self.tasks.is_empty() {
             return Ok(());
         }
@@ -158,6 +168,9 @@ impl SigCheckQueue {
             }
         }
         if let Some((_, err)) = first_error {
+            if self.panics() > 0 {
+                self.poisoned_after_panic = true;
+            }
             return Err(err);
         }
         Ok(())
@@ -168,6 +181,12 @@ impl SigCheckQueue {
     }
 
     fn ensure_registry(&mut self, registry: &SuiteRegistry) -> Result<(), TxError> {
+        if self.poisoned_after_panic {
+            return Err(TxError::new(
+                ErrorCode::TxErrSigInvalid,
+                "SigCheckQueue poisoned after worker panic",
+            ));
+        }
         match &self.registry {
             Some(current) if current != registry => Err(TxError::new(
                 ErrorCode::TxErrSigAlgInvalid,
@@ -192,6 +211,8 @@ pub(crate) fn queue_or_verify_signature(
     err_on_fail: TxError,
 ) -> Result<(), TxError> {
     if let Some(queue) = sig_queue.as_mut() {
+        // Deferred mode changes only when signature errors are surfaced, not
+        // the final accept/reject outcome. Structural checks still run inline.
         queue.ensure_registry(registry)?;
         queue.push(suite_id, pubkey, crypto_sig, digest, err_on_fail);
         return Ok(());
@@ -229,7 +250,10 @@ fn normalized_worker_count(max_workers: usize, task_count: usize) -> usize {
             .unwrap_or(1)
             .max(1);
     }
-    workers.min(task_count).max(1)
+    workers
+        .min(MAX_SIGCHECK_QUEUE_WORKERS)
+        .min(task_count)
+        .max(1)
 }
 
 fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -565,6 +589,36 @@ mod tests {
 
         assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
         assert_eq!(queue.len(), 0);
+    }
+
+    #[test]
+    fn sig_check_queue_rejects_reuse_after_panic_poison() {
+        let registry = SuiteRegistry::default_registry();
+        let mut queue = SigCheckQueue::new(1);
+        queue.poisoned_after_panic = true;
+
+        let mut maybe_queue = Some(&mut queue);
+        let err = queue_or_verify_signature(
+            SUITE_ID_ML_DSA_87,
+            b"pk",
+            b"sig",
+            [0u8; 32],
+            &registry,
+            &mut maybe_queue,
+            TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
+        )
+        .expect_err("poisoned queue must reject reuse");
+
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    }
+
+    #[test]
+    fn normalized_worker_count_caps_large_worker_values() {
+        assert_eq!(
+            normalized_worker_count(usize::MAX, 1_000),
+            MAX_SIGCHECK_QUEUE_WORKERS
+        );
+        assert_eq!(normalized_worker_count(usize::MAX, 8), 8);
     }
 
     #[test]
