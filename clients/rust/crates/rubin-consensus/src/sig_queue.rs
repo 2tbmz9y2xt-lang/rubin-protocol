@@ -1,9 +1,10 @@
-use crate::constants::MAX_WITNESS_ITEMS;
+use crate::constants::{MAX_BLOCK_WEIGHT, WITNESS_DISCOUNT_DIVISOR};
 use crate::error::{ErrorCode, TxError};
 use crate::suite_registry::SuiteRegistry;
 use crate::verify_sig_openssl::{verify_sig, verify_sig_with_registry};
 
-const MAX_SIGCHECK_QUEUE_TASKS: usize = MAX_WITNESS_ITEMS as usize;
+const MAX_SIGCHECK_QUEUE_BYTES: usize =
+    (MAX_BLOCK_WEIGHT as usize) * (WITNESS_DISCOUNT_DIVISOR as usize);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SigCheckTask {
@@ -25,11 +26,13 @@ struct SigCheckTask {
 ///
 /// When no caller wires this queue into block validation, the sequential path
 /// still verifies inline. Callers that do use the queue must flush it before
-/// accepting a block; `assert_flushed` is the defensive postcondition for that.
+/// accepting a block; dropping a non-empty queue panics fail-closed so queued
+/// signatures cannot be silently skipped.
 #[must_use = "SigCheckQueue must be flushed before block acceptance"]
 #[derive(Debug, Default)]
 pub struct SigCheckQueue {
     tasks: Vec<SigCheckTask>,
+    queued_bytes: usize,
     registry: Option<SuiteRegistry>,
 }
 
@@ -51,12 +54,7 @@ impl SigCheckQueue {
         digest: [u8; 32],
         err_on_fail: TxError,
     ) -> Result<(), TxError> {
-        if self.tasks.len() >= MAX_SIGCHECK_QUEUE_TASKS {
-            return Err(TxError::new(
-                ErrorCode::TxErrWitnessOverflow,
-                "SigCheckQueue task count exceeded",
-            ));
-        }
+        self.queued_bytes = next_queued_bytes(self.queued_bytes, pubkey.len() + sig.len())?;
         self.tasks.push(SigCheckTask {
             suite_id,
             pubkey: pubkey.to_vec(),
@@ -76,7 +74,7 @@ impl SigCheckQueue {
     }
 
     pub fn assert_flushed(&self) -> Result<(), TxError> {
-        if self.tasks.is_empty() {
+        if self.tasks.is_empty() && self.queued_bytes == 0 {
             return Ok(());
         }
         Err(TxError::new(
@@ -90,15 +88,11 @@ impl SigCheckQueue {
             return Ok(());
         }
 
-        let tasks = std::mem::take(&mut self.tasks);
-        for task in tasks {
+        self.queued_bytes = 0;
+        for task in self.tasks.drain(..) {
             verify_queued_task(task, self.registry.as_ref())?;
         }
         Ok(())
-    }
-
-    pub fn panics(&self) -> u64 {
-        0
     }
 
     fn ensure_registry(&mut self, registry: &SuiteRegistry) -> Result<(), TxError> {
@@ -155,6 +149,30 @@ fn verify_queued_task(task: SigCheckTask, registry: Option<&SuiteRegistry>) -> R
         return Err(task.err_on_fail);
     }
     Ok(())
+}
+
+fn next_queued_bytes(current: usize, task_bytes: usize) -> Result<usize, TxError> {
+    let next = current.checked_add(task_bytes).ok_or_else(|| {
+        TxError::new(
+            ErrorCode::TxErrWitnessOverflow,
+            "SigCheckQueue queued-byte accounting overflow",
+        )
+    })?;
+    if next > MAX_SIGCHECK_QUEUE_BYTES {
+        return Err(TxError::new(
+            ErrorCode::TxErrWitnessOverflow,
+            "SigCheckQueue queued-byte budget exceeded",
+        ));
+    }
+    Ok(next)
+}
+
+impl Drop for SigCheckQueue {
+    fn drop(&mut self) {
+        if !std::thread::panicking() && (!self.tasks.is_empty() || self.queued_bytes != 0) {
+            panic!("SigCheckQueue dropped with unflushed tasks");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -416,6 +434,7 @@ mod tests {
             .assert_flushed()
             .expect_err("must detect unflushed queue");
         assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+        queue.flush().expect("cleanup flush");
     }
 
     #[test]
@@ -505,34 +524,21 @@ mod tests {
     }
 
     #[test]
-    fn sig_check_queue_rejects_capacity_overflow() {
-        let keypair = Mldsa87Keypair::generate().expect("keypair");
-        let digest = [0x77; 32];
-        let sig = keypair.sign_digest32(digest).expect("sign");
+    fn sig_check_queue_rejects_byte_budget_overflow() {
         let mut queue = SigCheckQueue::default();
-
-        for _ in 0..MAX_SIGCHECK_QUEUE_TASKS {
-            queue
-                .push(
-                    SUITE_ID_ML_DSA_87,
-                    &keypair.pubkey_bytes(),
-                    &sig,
-                    digest,
-                    TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
-                )
-                .expect("fill queue to bound");
-        }
+        queue.queued_bytes = MAX_SIGCHECK_QUEUE_BYTES;
 
         let err = queue
             .push(
                 SUITE_ID_ML_DSA_87,
-                &keypair.pubkey_bytes(),
-                &sig,
-                digest,
+                b"p",
+                b"s",
+                [0u8; 32],
                 TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
             )
-            .expect_err("overflow must fail closed");
+            .expect_err("byte budget overflow must fail closed");
         assert_eq!(err.code, ErrorCode::TxErrWitnessOverflow);
+        queue.queued_bytes = 0;
     }
 
     #[test]
