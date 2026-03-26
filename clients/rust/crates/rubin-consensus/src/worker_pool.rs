@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
+const FIXED_WORKER_PANIC_MESSAGE: &str = "worker panic";
+
 /// Cooperative cancellation flag for worker-pool tasks.
 #[derive(Clone, Debug, Default)]
 pub struct WorkerCancellationToken {
@@ -48,6 +50,37 @@ where
 
 impl<E> std::error::Error for WorkerPoolError<E> where E: std::error::Error + 'static {}
 
+/// Pool-wide execution failures detected before or outside task execution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkerPoolRunError {
+    InvalidMaxTasks,
+    TooManyTasks { task_count: usize, max_tasks: usize },
+    QueuePoisoned,
+    ResultCollectionIncomplete { expected: usize, received: usize },
+}
+
+impl fmt::Display for WorkerPoolRunError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidMaxTasks => write!(f, "worker pool max_tasks must be positive"),
+            Self::TooManyTasks {
+                task_count,
+                max_tasks,
+            } => write!(
+                f,
+                "worker pool task count {task_count} exceeds configured limit {max_tasks}"
+            ),
+            Self::QueuePoisoned => write!(f, "worker queue poisoned"),
+            Self::ResultCollectionIncomplete { expected, received } => write!(
+                f,
+                "worker result collection incomplete: expected {expected}, received {received}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for WorkerPoolRunError {}
+
 /// Ordered outcome for one submitted task.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkerResult<R, E> {
@@ -72,21 +105,30 @@ impl<R, E> WorkerResult<R, E> {
 }
 
 /// Single-use bounded deterministic worker pool for read-only consensus jobs.
+///
+/// The pool does not infer safe task counts on its own. Callers must provide
+/// a consensus-derived `max_tasks` limit so adversarial inputs cannot inflate
+/// ordered result buffers beyond the intended block-scoped surface.
 pub struct WorkerPool<F> {
     pub max_workers: usize,
+    pub max_tasks: usize,
     pub func: F,
 }
 
 impl<F> WorkerPool<F> {
-    pub fn new(max_workers: usize, func: F) -> Self {
-        Self { max_workers, func }
+    pub fn new(max_workers: usize, max_tasks: usize, func: F) -> Self {
+        Self {
+            max_workers,
+            max_tasks,
+            func,
+        }
     }
 
     pub fn run<T, R, E>(
         &self,
         token: &WorkerCancellationToken,
         tasks: Vec<T>,
-    ) -> Vec<WorkerResult<R, E>>
+    ) -> Result<Vec<WorkerResult<R, E>>, WorkerPoolRunError>
     where
         T: Send,
         R: Send,
@@ -95,22 +137,33 @@ impl<F> WorkerPool<F> {
     {
         let task_count = tasks.len();
         if task_count == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
+        }
+        if self.max_tasks == 0 {
+            return Err(WorkerPoolRunError::InvalidMaxTasks);
+        }
+        if task_count > self.max_tasks {
+            return Err(WorkerPoolRunError::TooManyTasks {
+                task_count,
+                max_tasks: self.max_tasks,
+            });
         }
 
         let worker_count = normalized_worker_count(self.max_workers, task_count);
         if task_count == 1 {
             let task = tasks.into_iter().next().expect("single task exists");
-            return vec![exec_task(&self.func, token, task)];
+            return Ok(vec![exec_task(&self.func, token, task)]);
         }
 
         let queue = Arc::new(Mutex::new(
             tasks.into_iter().enumerate().collect::<VecDeque<_>>(),
         ));
         let (tx, rx) = mpsc::channel::<(usize, WorkerResult<R, E>)>();
+        let hard_failure = Arc::new(Mutex::new(None::<WorkerPoolRunError>));
         let mut results = std::iter::repeat_with(|| None)
             .take(task_count)
             .collect::<Vec<Option<WorkerResult<R, E>>>>();
+        let mut received = 0usize;
 
         thread::scope(|scope| {
             for _ in 0..worker_count {
@@ -118,9 +171,13 @@ impl<F> WorkerPool<F> {
                 let tx = tx.clone();
                 let token = token.clone();
                 let func = &self.func;
+                let hard_failure = Arc::clone(&hard_failure);
                 scope.spawn(move || loop {
                     let next = {
-                        let mut guard = queue.lock().expect("worker queue poisoned");
+                        let Ok(mut guard) = queue.lock() else {
+                            record_run_error(&hard_failure, WorkerPoolRunError::QueuePoisoned);
+                            break;
+                        };
                         guard.pop_front()
                     };
                     let Some((idx, task)) = next else {
@@ -135,29 +192,46 @@ impl<F> WorkerPool<F> {
             drop(tx);
             for (idx, result) in rx {
                 results[idx] = Some(result);
+                received += 1;
             }
         });
 
+        if let Some(err) = take_run_error(&hard_failure) {
+            return Err(err);
+        }
+        if received != task_count {
+            return Err(WorkerPoolRunError::ResultCollectionIncomplete {
+                expected: task_count,
+                received,
+            });
+        }
+
         results
             .into_iter()
-            .map(|item| item.expect("worker result missing"))
-            .collect()
+            .map(|item| {
+                item.ok_or(WorkerPoolRunError::ResultCollectionIncomplete {
+                    expected: task_count,
+                    received,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
     }
 }
 
 pub fn run_worker_pool<T, R, E, F>(
     token: &WorkerCancellationToken,
     max_workers: usize,
+    max_tasks: usize,
     tasks: Vec<T>,
     func: F,
-) -> Vec<WorkerResult<R, E>>
+) -> Result<Vec<WorkerResult<R, E>>, WorkerPoolRunError>
 where
     T: Send,
     R: Send,
     E: Send,
     F: Fn(&WorkerCancellationToken, T) -> Result<R, E> + Sync,
 {
-    WorkerPool::new(max_workers, func).run(token, tasks)
+    WorkerPool::new(max_workers, max_tasks, func).run(token, tasks)
 }
 
 pub fn first_error<R, E>(results: &[WorkerResult<R, E>]) -> Option<&WorkerPoolError<E>> {
@@ -205,22 +279,29 @@ where
     }
 }
 
-fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
-    match payload.downcast::<String>() {
-        Ok(msg) => *msg,
-        Err(payload) => match payload.downcast::<&'static str>() {
-            Ok(msg) => (*msg).to_string(),
-            Err(_) => "non-string panic payload".to_string(),
-        },
+fn panic_payload_to_string(_: Box<dyn std::any::Any + Send>) -> String {
+    FIXED_WORKER_PANIC_MESSAGE.to_string()
+}
+
+fn record_run_error(target: &Mutex<Option<WorkerPoolRunError>>, err: WorkerPoolRunError) {
+    if let Ok(mut guard) = target.lock() {
+        if guard.is_none() {
+            *guard = Some(err);
+        }
     }
+}
+
+fn take_run_error(source: &Mutex<Option<WorkerPoolRunError>>) -> Option<WorkerPoolRunError> {
+    source.lock().ok().and_then(|mut guard| guard.take())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         collect_values, first_error, run_worker_pool, WorkerCancellationToken, WorkerPool,
-        WorkerPoolError,
+        WorkerPoolError, WorkerPoolRunError, FIXED_WORKER_PANIC_MESSAGE,
     };
+    use std::panic;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -243,16 +324,16 @@ mod tests {
     #[test]
     fn worker_pool_empty() {
         let token = WorkerCancellationToken::new();
-        let pool = WorkerPool::new(4, int_identity);
-        let results: Vec<_> = pool.run::<_, _, String>(&token, Vec::new());
+        let pool = WorkerPool::new(4, 8, int_identity);
+        let results: Vec<_> = pool.run::<_, _, String>(&token, Vec::new()).unwrap();
         assert!(results.is_empty());
     }
 
     #[test]
     fn worker_pool_single_task() {
         let token = WorkerCancellationToken::new();
-        let pool = WorkerPool::new(4, int_double);
-        let results = pool.run(&token, vec![21usize]);
+        let pool = WorkerPool::new(4, 8, int_double);
+        let results = pool.run(&token, vec![21usize]).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].value, Some(42));
         assert_eq!(results[0].error, None);
@@ -261,9 +342,9 @@ mod tests {
     #[test]
     fn worker_pool_multiple_tasks_preserve_order() {
         let token = WorkerCancellationToken::new();
-        let pool = WorkerPool::new(2, int_double);
+        let pool = WorkerPool::new(2, 8, int_double);
         let tasks = vec![1usize, 2, 3, 4, 5];
-        let results = pool.run(&token, tasks.clone());
+        let results = pool.run(&token, tasks.clone()).unwrap();
         assert_eq!(results.len(), tasks.len());
         for (idx, result) in results.iter().enumerate() {
             assert_eq!(result.error, None, "task {idx} unexpectedly failed");
@@ -274,9 +355,9 @@ mod tests {
     #[test]
     fn worker_pool_task_errors_preserve_index_order() {
         let token = WorkerCancellationToken::new();
-        let pool = WorkerPool::new(4, fail_odd);
+        let pool = WorkerPool::new(4, 8, fail_odd);
         let tasks = vec![2usize, 3, 4, 5, 6];
-        let results = pool.run(&token, tasks);
+        let results = pool.run(&token, tasks).unwrap();
 
         assert_eq!(results[0].value, Some(2));
         assert_eq!(results[0].error, None);
@@ -297,9 +378,9 @@ mod tests {
     #[test]
     fn worker_pool_zero_workers_defaults_to_parallelism() {
         let token = WorkerCancellationToken::new();
-        let pool = WorkerPool::new(0, int_identity);
+        let pool = WorkerPool::new(0, 16, int_identity);
         let tasks = (0usize..10).collect::<Vec<_>>();
-        let results = pool.run(&token, tasks);
+        let results = pool.run(&token, tasks).unwrap();
         for (idx, result) in results.iter().enumerate() {
             assert_eq!(result.error, None);
             assert_eq!(result.value, Some(idx));
@@ -311,7 +392,7 @@ mod tests {
         let token = WorkerCancellationToken::new();
         let current = Arc::new(AtomicUsize::new(0));
         let max_seen = Arc::new(AtomicUsize::new(0));
-        let pool = WorkerPool::new(100, {
+        let pool = WorkerPool::new(100, 8, {
             let current = Arc::clone(&current);
             let max_seen = Arc::clone(&max_seen);
             move |_: &WorkerCancellationToken, value: usize| -> Result<usize, String> {
@@ -323,25 +404,27 @@ mod tests {
             }
         });
 
-        let _ = pool.run(&token, vec![1usize, 2, 3]);
+        let _ = pool.run(&token, vec![1usize, 2, 3]).unwrap();
         assert!(max_seen.load(Ordering::SeqCst) <= 3);
     }
 
     #[test]
     fn worker_pool_panic_recovery_keeps_other_tasks_running() {
         let token = WorkerCancellationToken::new();
-        let pool = WorkerPool::new(2, |_: &WorkerCancellationToken, value: usize| {
+        let pool = WorkerPool::new(2, 8, |_: &WorkerCancellationToken, value: usize| {
             if value == 3 {
                 panic!("task 3 panicked");
             }
             Ok::<usize, String>(value * 10)
         });
         let tasks = vec![1usize, 2, 3, 4, 5];
-        let results = pool.run(&token, tasks.clone());
+        let results = pool.run(&token, tasks.clone()).unwrap();
 
         assert_eq!(
             results[2].error,
-            Some(WorkerPoolError::Panic("task 3 panicked".to_string()))
+            Some(WorkerPoolError::Panic(
+                FIXED_WORKER_PANIC_MESSAGE.to_string()
+            ))
         );
         for (idx, result) in results.iter().enumerate() {
             if idx == 2 {
@@ -355,7 +438,7 @@ mod tests {
     #[test]
     fn worker_pool_context_cancellation_marks_unstarted_tasks() {
         let token = WorkerCancellationToken::new();
-        let pool = WorkerPool::new(1, {
+        let pool = WorkerPool::new(1, 8, {
             let token = token.clone();
             move |task_token: &WorkerCancellationToken, value: usize| -> Result<usize, String> {
                 if value == 2 {
@@ -369,7 +452,7 @@ mod tests {
             }
         });
 
-        let results = pool.run(&token, vec![1usize, 2, 3, 4, 5]);
+        let results = pool.run(&token, vec![1usize, 2, 3, 4, 5]).unwrap();
         assert_eq!(results[0].value, Some(10));
         assert_eq!(results[0].error, None);
         assert_eq!(results[1].value, Some(2));
@@ -384,8 +467,8 @@ mod tests {
     fn worker_pool_already_cancelled_token_short_circuits_all_tasks() {
         let token = WorkerCancellationToken::new();
         token.cancel();
-        let pool = WorkerPool::new(4, int_identity);
-        let results = pool.run(&token, vec![1usize, 2, 3]);
+        let pool = WorkerPool::new(4, 8, int_identity);
+        let results = pool.run(&token, vec![1usize, 2, 3]).unwrap();
         for result in results {
             assert_eq!(result.value, None);
             assert_eq!(result.error, Some(WorkerPoolError::Cancelled));
@@ -395,7 +478,7 @@ mod tests {
     #[test]
     fn worker_pool_run_func_helper() {
         let token = WorkerCancellationToken::new();
-        let results = run_worker_pool(&token, 2, vec![10usize, 20, 30], int_double);
+        let results = run_worker_pool(&token, 2, 8, vec![10usize, 20, 30], int_double).unwrap();
         let values = collect_values(results).expect("all tasks should succeed");
         assert_eq!(values, vec![20usize, 40, 60]);
     }
@@ -446,14 +529,14 @@ mod tests {
     fn worker_pool_result_order_is_deterministic_across_runs() {
         for _ in 0..10 {
             let token = WorkerCancellationToken::new();
-            let pool = WorkerPool::new(4, |_: &WorkerCancellationToken, value: usize| {
+            let pool = WorkerPool::new(4, 32, |_: &WorkerCancellationToken, value: usize| {
                 if value.is_multiple_of(3) {
                     std::thread::sleep(Duration::from_millis(1));
                 }
                 Ok::<usize, String>(value * value)
             });
             let tasks = (0usize..20).collect::<Vec<_>>();
-            let results = pool.run(&token, tasks.clone());
+            let results = pool.run(&token, tasks.clone()).unwrap();
             for (idx, result) in results.iter().enumerate() {
                 assert_eq!(result.error, None);
                 assert_eq!(result.value, Some(tasks[idx] * tasks[idx]));
@@ -467,7 +550,7 @@ mod tests {
         let token = WorkerCancellationToken::new();
         let current = Arc::new(AtomicUsize::new(0));
         let max_seen = Arc::new(AtomicUsize::new(0));
-        let pool = WorkerPool::new(MAX_WORKERS, {
+        let pool = WorkerPool::new(MAX_WORKERS, 32, {
             let current = Arc::clone(&current);
             let max_seen = Arc::clone(&max_seen);
             move |_: &WorkerCancellationToken, value: usize| -> Result<usize, String> {
@@ -480,7 +563,7 @@ mod tests {
         });
 
         let tasks = (0usize..20).collect::<Vec<_>>();
-        let _ = pool.run(&token, tasks);
+        let _ = pool.run(&token, tasks).unwrap();
         assert!(max_seen.load(Ordering::SeqCst) <= MAX_WORKERS);
     }
 
@@ -488,12 +571,53 @@ mod tests {
     fn worker_pool_large_batch() {
         let token = WorkerCancellationToken::new();
         let tasks = (0usize..1000).collect::<Vec<_>>();
-        let pool = WorkerPool::new(8, int_double);
-        let results = pool.run(&token, tasks.clone());
+        let pool = WorkerPool::new(8, 1000, int_double);
+        let results = pool.run(&token, tasks.clone()).unwrap();
         assert_eq!(results.len(), tasks.len());
         for (idx, result) in results.iter().enumerate() {
             assert_eq!(result.error, None);
             assert_eq!(result.value, Some(tasks[idx] * 2));
         }
+    }
+
+    #[test]
+    fn worker_pool_rejects_zero_max_tasks() {
+        let token = WorkerCancellationToken::new();
+        let pool = WorkerPool::new(4, 0, int_identity);
+        assert_eq!(
+            pool.run(&token, vec![1usize, 2, 3]),
+            Err(WorkerPoolRunError::InvalidMaxTasks)
+        );
+    }
+
+    #[test]
+    fn worker_pool_rejects_task_count_over_limit() {
+        let token = WorkerCancellationToken::new();
+        let pool = WorkerPool::new(4, 2, int_identity);
+        assert_eq!(
+            pool.run(&token, vec![1usize, 2, 3]),
+            Err(WorkerPoolRunError::TooManyTasks {
+                task_count: 3,
+                max_tasks: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn worker_pool_non_string_panic_uses_fixed_message() {
+        let token = WorkerCancellationToken::new();
+        let pool = WorkerPool::new(1, 1, |_: &WorkerCancellationToken, _value: usize| {
+            panic::panic_any(7usize);
+            #[allow(unreachable_code)]
+            Ok::<usize, String>(0)
+        });
+
+        let results = pool.run(&token, vec![1usize]).unwrap();
+        assert_eq!(
+            results[0].error,
+            Some(WorkerPoolError::Panic(
+                FIXED_WORKER_PANIC_MESSAGE.to_string()
+            ))
+        );
     }
 }

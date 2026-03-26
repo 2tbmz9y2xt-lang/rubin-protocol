@@ -338,11 +338,15 @@ func TestPV14_DeterministicReplay_MultiTxBlock_Parity(t *testing.T) {
 func TestPV14_WorkerPool_EmptyTasks(t *testing.T) {
 	pool := &WorkerPool[int, int]{
 		MaxWorkers: 4,
+		MaxTasks:   8,
 		Func: func(ctx context.Context, task int) (int, error) {
 			return task * 2, nil
 		},
 	}
-	results := pool.Run(context.Background(), nil)
+	results, err := pool.Run(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected run error: %v", err)
+	}
 	if len(results) != 0 {
 		t.Fatalf("expected nil results, got %v", results)
 	}
@@ -351,6 +355,7 @@ func TestPV14_WorkerPool_EmptyTasks(t *testing.T) {
 func TestPV14_WorkerPool_PanicRecovery(t *testing.T) {
 	pool := &WorkerPool[int, int]{
 		MaxWorkers: 2,
+		MaxTasks:   8,
 		Func: func(ctx context.Context, task int) (int, error) {
 			if task == 1 {
 				panic("deliberate panic")
@@ -358,7 +363,10 @@ func TestPV14_WorkerPool_PanicRecovery(t *testing.T) {
 			return task * 2, nil
 		},
 	}
-	results := pool.Run(context.Background(), []int{0, 1, 2})
+	results, err := pool.Run(context.Background(), []int{0, 1, 2})
+	if err != nil {
+		t.Fatalf("unexpected run error: %v", err)
+	}
 	if len(results) != 3 {
 		t.Fatalf("expected 3 results, got %d", len(results))
 	}

@@ -282,13 +282,17 @@ func RunTxValidationWorkers(
 	coreExtProfiles CoreExtProfileProvider,
 	sigCache *SigCache,
 ) []WorkerResult[TxValidationResult] {
-	return RunFunc(ctx, maxWorkers, txcs, func(ctx context.Context, tvc TxValidationContext) (TxValidationResult, error) {
+	results, err := RunFunc(ctx, maxWorkers, len(txcs), txcs, func(ctx context.Context, tvc TxValidationContext) (TxValidationResult, error) {
 		r := ValidateTxLocal(tvc, chainID, blockHeight, blockMTP, coreExtProfiles, sigCache)
 		if r.Err != nil {
 			return r, r.Err
 		}
 		return r, nil
 	})
+	if err != nil {
+		return []WorkerResult[TxValidationResult]{{Err: err}}
+	}
+	return results
 }
 
 // FirstTxError returns the first error by transaction index from validation

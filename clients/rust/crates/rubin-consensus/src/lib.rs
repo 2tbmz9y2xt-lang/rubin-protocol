@@ -100,7 +100,7 @@ pub use vault::{
 pub use verify_sig_openssl::{verify_sig, verify_sig_with_registry, Mldsa87Keypair};
 pub use worker_pool::{
     collect_values, first_error, run_worker_pool, WorkerCancellationToken, WorkerPool,
-    WorkerPoolError, WorkerResult,
+    WorkerPoolError, WorkerPoolRunError, WorkerResult,
 };
 
 #[cfg(test)]

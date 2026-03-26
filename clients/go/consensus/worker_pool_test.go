@@ -27,19 +27,33 @@ func intFailOdd(_ context.Context, v int) (int, error) {
 	return v, nil
 }
 
+func mustRunPool[T any, R any](
+	t *testing.T,
+	pool *WorkerPool[T, R],
+	ctx context.Context,
+	tasks []T,
+) []WorkerResult[R] {
+	t.Helper()
+	results, err := pool.Run(ctx, tasks)
+	if err != nil {
+		t.Fatalf("unexpected run error: %v", err)
+	}
+	return results
+}
+
 // --------------- basic tests ---------------
 
 func TestWorkerPool_Empty(t *testing.T) {
-	pool := &WorkerPool[int, int]{MaxWorkers: 4, Func: intIdentity}
-	results := pool.Run(context.Background(), nil)
+	pool := &WorkerPool[int, int]{MaxWorkers: 4, MaxTasks: 8, Func: intIdentity}
+	results := mustRunPool(t, pool, context.Background(), nil)
 	if len(results) != 0 {
 		t.Fatalf("expected 0 results, got %d", len(results))
 	}
 }
 
 func TestWorkerPool_SingleTask(t *testing.T) {
-	pool := &WorkerPool[int, int]{MaxWorkers: 4, Func: intDouble}
-	results := pool.Run(context.Background(), []int{21})
+	pool := &WorkerPool[int, int]{MaxWorkers: 4, MaxTasks: 8, Func: intDouble}
+	results := mustRunPool(t, pool, context.Background(), []int{21})
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}
@@ -52,9 +66,9 @@ func TestWorkerPool_SingleTask(t *testing.T) {
 }
 
 func TestWorkerPool_MultipleTasksOrdered(t *testing.T) {
-	pool := &WorkerPool[int, int]{MaxWorkers: 2, Func: intDouble}
+	pool := &WorkerPool[int, int]{MaxWorkers: 2, MaxTasks: 8, Func: intDouble}
 	tasks := []int{1, 2, 3, 4, 5}
-	results := pool.Run(context.Background(), tasks)
+	results := mustRunPool(t, pool, context.Background(), tasks)
 	if len(results) != 5 {
 		t.Fatalf("expected 5 results, got %d", len(results))
 	}
@@ -69,9 +83,9 @@ func TestWorkerPool_MultipleTasksOrdered(t *testing.T) {
 }
 
 func TestWorkerPool_ErrorPreservesOrder(t *testing.T) {
-	pool := &WorkerPool[int, int]{MaxWorkers: 4, Func: intFailOdd}
+	pool := &WorkerPool[int, int]{MaxWorkers: 4, MaxTasks: 8, Func: intFailOdd}
 	tasks := []int{2, 3, 4, 5, 6}
-	results := pool.Run(context.Background(), tasks)
+	results := mustRunPool(t, pool, context.Background(), tasks)
 
 	// Task 0 (2): ok, Task 1 (3): error, Task 2 (4): ok, Task 3 (5): error, Task 4 (6): ok
 	if results[0].Err != nil || results[0].Value != 2 {
@@ -93,12 +107,12 @@ func TestWorkerPool_ErrorPreservesOrder(t *testing.T) {
 
 func TestWorkerPool_DefaultWorkers(t *testing.T) {
 	// MaxWorkers=0 → should default to GOMAXPROCS.
-	pool := &WorkerPool[int, int]{MaxWorkers: 0, Func: intIdentity}
+	pool := &WorkerPool[int, int]{MaxWorkers: 0, MaxTasks: 16, Func: intIdentity}
 	tasks := make([]int, 10)
 	for i := range tasks {
 		tasks[i] = i
 	}
-	results := pool.Run(context.Background(), tasks)
+	results := mustRunPool(t, pool, context.Background(), tasks)
 	for i, r := range results {
 		if r.Err != nil {
 			t.Fatalf("task %d: %v", i, r.Err)
@@ -116,6 +130,7 @@ func TestWorkerPool_WorkersCappedAtTaskCount(t *testing.T) {
 
 	pool := &WorkerPool[int, int]{
 		MaxWorkers: 100,
+		MaxTasks:   8,
 		Func: func(_ context.Context, v int) (int, error) {
 			c := current.Add(1)
 			for {
@@ -130,7 +145,7 @@ func TestWorkerPool_WorkersCappedAtTaskCount(t *testing.T) {
 		},
 	}
 	tasks := []int{1, 2, 3}
-	pool.Run(context.Background(), tasks)
+	_ = mustRunPool(t, pool, context.Background(), tasks)
 
 	mc := maxConcurrent.Load()
 	if mc > 3 {
@@ -143,6 +158,7 @@ func TestWorkerPool_WorkersCappedAtTaskCount(t *testing.T) {
 func TestWorkerPool_PanicRecovery(t *testing.T) {
 	pool := &WorkerPool[int, int]{
 		MaxWorkers: 2,
+		MaxTasks:   8,
 		Func: func(_ context.Context, v int) (int, error) {
 			if v == 3 {
 				panic("task 3 panicked")
@@ -151,13 +167,13 @@ func TestWorkerPool_PanicRecovery(t *testing.T) {
 		},
 	}
 	tasks := []int{1, 2, 3, 4, 5}
-	results := pool.Run(context.Background(), tasks)
+	results := mustRunPool(t, pool, context.Background(), tasks)
 
 	// Task 2 (value=3) should have panic error.
 	if results[2].Err == nil {
 		t.Fatal("expected panic error for task[2]")
 	}
-	if results[2].Err.Error() != "worker panic: task 3 panicked" {
+	if results[2].Err.Error() != fixedWorkerPanicMessage {
 		t.Fatalf("unexpected panic error: %v", results[2].Err)
 	}
 	// Other tasks should succeed.
@@ -179,6 +195,7 @@ func TestWorkerPool_PanicDoesNotLeakGoroutines(t *testing.T) {
 
 	pool := &WorkerPool[int, int]{
 		MaxWorkers: 4,
+		MaxTasks:   16,
 		Func: func(_ context.Context, v int) (int, error) {
 			if v%2 == 0 {
 				panic(fmt.Sprintf("panic at %d", v))
@@ -187,7 +204,7 @@ func TestWorkerPool_PanicDoesNotLeakGoroutines(t *testing.T) {
 		},
 	}
 	tasks := []int{1, 2, 3, 4, 5, 6, 7, 8}
-	pool.Run(context.Background(), tasks)
+	_ = mustRunPool(t, pool, context.Background(), tasks)
 
 	// Give goroutines time to clean up.
 	time.Sleep(50 * time.Millisecond)
@@ -207,6 +224,7 @@ func TestWorkerPool_ContextCancellation(t *testing.T) {
 	var started atomic.Int32
 	pool := &WorkerPool[int, int]{
 		MaxWorkers: 1, // single worker for deterministic ordering
+		MaxTasks:   8,
 		Func: func(ctx context.Context, v int) (int, error) {
 			started.Add(1)
 			if v == 2 {
@@ -222,7 +240,7 @@ func TestWorkerPool_ContextCancellation(t *testing.T) {
 	}
 
 	tasks := []int{1, 2, 3, 4, 5}
-	results := pool.Run(ctx, tasks)
+	results := mustRunPool(t, pool, ctx, tasks)
 
 	// Task 0 (value=1): should succeed.
 	if results[0].Err != nil {
@@ -247,9 +265,9 @@ func TestWorkerPool_AlreadyCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled
 
-	pool := &WorkerPool[int, int]{MaxWorkers: 4, Func: intIdentity}
+	pool := &WorkerPool[int, int]{MaxWorkers: 4, MaxTasks: 8, Func: intIdentity}
 	tasks := []int{1, 2, 3}
-	results := pool.Run(ctx, tasks)
+	results := mustRunPool(t, pool, ctx, tasks)
 
 	for i, r := range results {
 		if r.Err == nil {
@@ -264,7 +282,10 @@ func TestWorkerPool_AlreadyCancelledContext(t *testing.T) {
 // --------------- convenience functions ---------------
 
 func TestRunFunc(t *testing.T) {
-	results := RunFunc(context.Background(), 2, []int{10, 20, 30}, intDouble)
+	results, err := RunFunc(context.Background(), 2, 8, []int{10, 20, 30}, intDouble)
+	if err != nil {
+		t.Fatalf("unexpected run error: %v", err)
+	}
 	if len(results) != 3 {
 		t.Fatalf("expected 3 results, got %d", len(results))
 	}
@@ -331,6 +352,7 @@ func TestWorkerPool_DeterministicResultOrder(t *testing.T) {
 	for iter := 0; iter < 10; iter++ {
 		pool := &WorkerPool[int, int]{
 			MaxWorkers: 4,
+			MaxTasks:   32,
 			Func: func(_ context.Context, v int) (int, error) {
 				// Vary delay to expose ordering bugs.
 				if v%3 == 0 {
@@ -343,7 +365,7 @@ func TestWorkerPool_DeterministicResultOrder(t *testing.T) {
 		for i := range tasks {
 			tasks[i] = i
 		}
-		results := pool.Run(context.Background(), tasks)
+		results := mustRunPool(t, pool, context.Background(), tasks)
 		for i, r := range results {
 			if r.Err != nil {
 				t.Fatalf("iter %d task %d: %v", iter, i, r.Err)
@@ -364,6 +386,7 @@ func TestWorkerPool_BoundedConcurrency(t *testing.T) {
 
 	pool := &WorkerPool[int, int]{
 		MaxWorkers: maxW,
+		MaxTasks:   32,
 		Func: func(_ context.Context, v int) (int, error) {
 			c := current.Add(1)
 			for {
@@ -381,7 +404,7 @@ func TestWorkerPool_BoundedConcurrency(t *testing.T) {
 	for i := range tasks {
 		tasks[i] = i
 	}
-	pool.Run(context.Background(), tasks)
+	_ = mustRunPool(t, pool, context.Background(), tasks)
 
 	if maxSeen.Load() > maxW {
 		t.Fatalf("max concurrent %d exceeds MaxWorkers %d", maxSeen.Load(), maxW)
@@ -392,12 +415,12 @@ func TestWorkerPool_BoundedConcurrency(t *testing.T) {
 
 func TestWorkerPool_LargeBatch(t *testing.T) {
 	const n = 1000
-	pool := &WorkerPool[int, int]{MaxWorkers: 8, Func: intDouble}
+	pool := &WorkerPool[int, int]{MaxWorkers: 8, MaxTasks: n, Func: intDouble}
 	tasks := make([]int, n)
 	for i := range tasks {
 		tasks[i] = i
 	}
-	results := pool.Run(context.Background(), tasks)
+	results := mustRunPool(t, pool, context.Background(), tasks)
 	if len(results) != n {
 		t.Fatalf("expected %d results, got %d", n, len(results))
 	}
@@ -414,12 +437,48 @@ func TestWorkerPool_LargeBatch(t *testing.T) {
 // --------------- negative workers ---------------
 
 func TestWorkerPool_NegativeWorkers(t *testing.T) {
-	pool := &WorkerPool[int, int]{MaxWorkers: -5, Func: intIdentity}
-	results := pool.Run(context.Background(), []int{42})
+	pool := &WorkerPool[int, int]{MaxWorkers: -5, MaxTasks: 1, Func: intIdentity}
+	results := mustRunPool(t, pool, context.Background(), []int{42})
 	if results[0].Err != nil {
 		t.Fatalf("unexpected error: %v", results[0].Err)
 	}
 	if results[0].Value != 42 {
 		t.Fatalf("expected 42, got %d", results[0].Value)
+	}
+}
+
+func TestWorkerPool_InvalidMaxTasks(t *testing.T) {
+	pool := &WorkerPool[int, int]{MaxWorkers: 4, MaxTasks: 0, Func: intIdentity}
+	if _, err := pool.Run(context.Background(), []int{1, 2, 3}); !errors.Is(err, ErrWorkerPoolInvalidMaxTasks) {
+		t.Fatalf("expected ErrWorkerPoolInvalidMaxTasks, got %v", err)
+	}
+}
+
+func TestWorkerPool_TaskCountLimit(t *testing.T) {
+	pool := &WorkerPool[int, int]{MaxWorkers: 4, MaxTasks: 2, Func: intIdentity}
+	_, err := pool.Run(context.Background(), []int{1, 2, 3})
+	var runErr *WorkerPoolRunError
+	if !errors.As(err, &runErr) {
+		t.Fatalf("expected WorkerPoolRunError, got %v", err)
+	}
+	if runErr.TaskCount != 3 || runErr.MaxTasks != 2 {
+		t.Fatalf("unexpected run error payload: %+v", runErr)
+	}
+}
+
+func TestWorkerPool_NonStringPanicUsesFixedMessage(t *testing.T) {
+	pool := &WorkerPool[int, int]{
+		MaxWorkers: 1,
+		MaxTasks:   1,
+		Func: func(_ context.Context, _ int) (int, error) {
+			panic(7)
+		},
+	}
+	results := mustRunPool(t, pool, context.Background(), []int{1})
+	if results[0].Err == nil {
+		t.Fatal("expected panic error")
+	}
+	if results[0].Err.Error() != fixedWorkerPanicMessage {
+		t.Fatalf("expected fixed panic message, got %v", results[0].Err)
 	}
 }
