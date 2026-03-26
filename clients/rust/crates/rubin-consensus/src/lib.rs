@@ -23,6 +23,7 @@ pub mod tx;
 mod tx_helpers;
 pub mod txcontext;
 mod utxo_basic;
+pub mod utxo_snapshot;
 mod vault;
 mod verify_sig_openssl;
 mod wire_read;
@@ -86,6 +87,7 @@ pub use utxo_basic::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
     apply_non_coinbase_tx_basic_with_mtp, Outpoint, UtxoApplySummary, UtxoEntry,
 };
+pub use utxo_snapshot::{utxo_snapshot_shard, UtxoSnapshot};
 pub use vault::{
     output_descriptor_bytes, parse_multisig_covenant_data, parse_vault_covenant_data,
     witness_slots, MultisigCovenant, VaultCovenant,
