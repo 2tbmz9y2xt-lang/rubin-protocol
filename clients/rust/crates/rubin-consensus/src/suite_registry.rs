@@ -16,7 +16,7 @@ pub struct SuiteParams {
 
 /// Maps suite IDs to their consensus parameters. Single source of truth for
 /// per-suite constants, replacing scattered hardcoded ML_DSA_87_* constants.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuiteRegistry {
     suites: BTreeMap<u8, SuiteParams>,
 }

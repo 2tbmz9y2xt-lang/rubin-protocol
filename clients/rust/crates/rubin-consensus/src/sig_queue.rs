@@ -166,6 +166,20 @@ impl SigCheckQueue {
     pub fn panics(&self) -> u64 {
         self.panics.load(Ordering::SeqCst)
     }
+
+    fn ensure_registry(&mut self, registry: &SuiteRegistry) -> Result<(), TxError> {
+        match &self.registry {
+            Some(current) if current != registry => Err(TxError::new(
+                ErrorCode::TxErrSigAlgInvalid,
+                "SigCheckQueue registry mismatch",
+            )),
+            Some(_) => Ok(()),
+            None => {
+                self.registry = Some(registry.clone());
+                Ok(())
+            }
+        }
+    }
 }
 
 pub(crate) fn queue_or_verify_signature(
@@ -178,6 +192,7 @@ pub(crate) fn queue_or_verify_signature(
     err_on_fail: TxError,
 ) -> Result<(), TxError> {
     if let Some(queue) = sig_queue.as_mut() {
+        queue.ensure_registry(registry)?;
         queue.push(suite_id, pubkey, crypto_sig, digest, err_on_fail);
         return Ok(());
     }
@@ -227,8 +242,9 @@ mod tests {
     use crate::compactsize::encode_compact_size;
     use crate::constants::{
         COV_TYPE_EXT, COV_TYPE_HTLC, COV_TYPE_P2PK, COV_TYPE_STEALTH, LOCK_MODE_HEIGHT,
-        MAX_HTLC_COVENANT_DATA, MAX_STEALTH_COVENANT_DATA, ML_KEM_1024_CT_BYTES, SIGHASH_ALL,
-        SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
+        MAX_HTLC_COVENANT_DATA, MAX_STEALTH_COVENANT_DATA, ML_DSA_87_PUBKEY_BYTES,
+        ML_DSA_87_SIG_BYTES, ML_KEM_1024_CT_BYTES, SIGHASH_ALL, SUITE_ID_ML_DSA_87,
+        SUITE_ID_SENTINEL, VERIFY_COST_ML_DSA_87,
     };
     use crate::core_ext::{
         parse_core_ext_covenant_data, validate_core_ext_spend_with_cache_and_suite_context_q,
@@ -240,11 +256,13 @@ mod tests {
     use crate::spend_verify::{validate_p2pk_spend_q, validate_threshold_sig_spend_q};
     use crate::stealth::parse_stealth_covenant_data;
     use crate::stealth::validate_stealth_spend_q;
+    use crate::suite_registry::SuiteParams;
     use crate::tx::{Tx, TxInput, TxOutput, WitnessItem};
     use crate::tx_helpers::p2pk_covenant_data_for_pubkey;
     use crate::utxo_basic::UtxoEntry;
     use crate::verify_sig_openssl::Mldsa87Keypair;
     use crate::{sighash_v1_digest_with_cache, SighashV1PrehashCache};
+    use std::collections::BTreeMap;
 
     fn test_tx_context() -> (Tx, u32, u64, [u8; 32]) {
         let mut prev = [0u8; 32];
@@ -476,6 +494,77 @@ mod tests {
             TxError::new(ErrorCode::TxErrSigInvalid, "test"),
         );
         assert!(queue.flush().is_err(), "bad suite id must fail");
+    }
+
+    #[test]
+    fn queue_or_verify_signature_auto_wires_registry() {
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let digest = [0x55; 32];
+        let sig = keypair.sign_digest32(digest).expect("sign");
+        let registry = SuiteRegistry::default_registry();
+        let mut queue = SigCheckQueue::new(1);
+        let mut maybe_queue = Some(&mut queue);
+
+        queue_or_verify_signature(
+            SUITE_ID_ML_DSA_87,
+            &keypair.pubkey_bytes(),
+            &sig,
+            digest,
+            &registry,
+            &mut maybe_queue,
+            TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
+        )
+        .expect("enqueue with registry");
+
+        assert_eq!(queue.registry.as_ref(), Some(&registry));
+        queue.flush().expect("flush");
+    }
+
+    #[test]
+    fn queue_or_verify_signature_rejects_registry_mismatch() {
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let digest = [0x66; 32];
+        let sig = keypair.sign_digest32(digest).expect("sign");
+
+        let current_registry = SuiteRegistry::default_registry();
+        let mut suites = BTreeMap::new();
+        suites.insert(
+            SUITE_ID_ML_DSA_87,
+            SuiteParams {
+                suite_id: SUITE_ID_ML_DSA_87,
+                pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+                sig_len: ML_DSA_87_SIG_BYTES,
+                verify_cost: VERIFY_COST_ML_DSA_87,
+                openssl_alg: "ML-DSA-87",
+            },
+        );
+        suites.insert(
+            0x44,
+            SuiteParams {
+                suite_id: 0x44,
+                pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+                sig_len: ML_DSA_87_SIG_BYTES,
+                verify_cost: VERIFY_COST_ML_DSA_87,
+                openssl_alg: "ML-DSA-87",
+            },
+        );
+        let mismatched_registry = SuiteRegistry::with_suites(suites);
+
+        let mut queue = SigCheckQueue::new(1).with_registry(&current_registry);
+        let mut maybe_queue = Some(&mut queue);
+        let err = queue_or_verify_signature(
+            SUITE_ID_ML_DSA_87,
+            &keypair.pubkey_bytes(),
+            &sig,
+            digest,
+            &mismatched_registry,
+            &mut maybe_queue,
+            TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
+        )
+        .expect_err("mismatched registry must fail");
+
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+        assert_eq!(queue.len(), 0);
     }
 
     #[test]
