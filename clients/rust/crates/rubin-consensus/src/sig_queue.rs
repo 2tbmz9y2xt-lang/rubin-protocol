@@ -1,13 +1,9 @@
+use crate::constants::MAX_WITNESS_ITEMS;
 use crate::error::{ErrorCode, TxError};
 use crate::suite_registry::SuiteRegistry;
 use crate::verify_sig_openssl::{verify_sig, verify_sig_with_registry};
-use std::collections::VecDeque;
-use std::panic::{self, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::thread;
 
-const MAX_SIGCHECK_QUEUE_WORKERS: usize = 128;
+const MAX_SIGCHECK_QUEUE_TASKS: usize = MAX_WITNESS_ITEMS as usize;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SigCheckTask {
@@ -20,29 +16,26 @@ struct SigCheckTask {
 
 /// SigCheckQueue collects deferred signature verification tasks during
 /// sequential transaction validation. When flushed, it verifies all collected
-/// signatures in parallel and returns the first error by submission order.
+/// signatures and returns the first error by submission order.
+///
+/// This slice intentionally keeps Flush deterministic and sequential. The
+/// bounded parallel executor belongs to the follow-up SIG-BATCH task; mixing it
+/// in here created Rust-only panic/error behavior that diverged from the queue
+/// primitive's acceptance gate.
 ///
 /// When no caller wires this queue into block validation, the sequential path
 /// still verifies inline. Callers that do use the queue must flush it before
 /// accepting a block; `assert_flushed` is the defensive postcondition for that.
+#[must_use = "SigCheckQueue must be flushed before block acceptance"]
 #[derive(Debug, Default)]
 pub struct SigCheckQueue {
     tasks: Vec<SigCheckTask>,
-    workers: usize,
     registry: Option<SuiteRegistry>,
-    panics: Arc<AtomicU64>,
-    poisoned_after_panic: bool,
 }
 
 impl SigCheckQueue {
-    pub fn new(workers: usize) -> Self {
-        Self {
-            tasks: Vec::new(),
-            workers,
-            registry: None,
-            panics: Arc::new(AtomicU64::new(0)),
-            poisoned_after_panic: false,
-        }
+    pub fn new(_workers: usize) -> Self {
+        Self::default()
     }
 
     pub fn with_registry(mut self, registry: &SuiteRegistry) -> Self {
@@ -57,7 +50,13 @@ impl SigCheckQueue {
         sig: &[u8],
         digest: [u8; 32],
         err_on_fail: TxError,
-    ) {
+    ) -> Result<(), TxError> {
+        if self.tasks.len() >= MAX_SIGCHECK_QUEUE_TASKS {
+            return Err(TxError::new(
+                ErrorCode::TxErrWitnessOverflow,
+                "SigCheckQueue task count exceeded",
+            ));
+        }
         self.tasks.push(SigCheckTask {
             suite_id,
             pubkey: pubkey.to_vec(),
@@ -65,6 +64,7 @@ impl SigCheckQueue {
             digest,
             err_on_fail,
         });
+        Ok(())
     }
 
     pub fn len(&self) -> usize {
@@ -81,112 +81,27 @@ impl SigCheckQueue {
         }
         Err(TxError::new(
             ErrorCode::TxErrSigInvalid,
-            "SigCheckQueue has unflushed tasks",
+            "SigCheckQueue has unflushed tasks — signature bypass risk",
         ))
     }
 
     pub fn flush(&mut self) -> Result<(), TxError> {
-        if self.poisoned_after_panic {
-            return Err(TxError::new(
-                ErrorCode::TxErrSigInvalid,
-                "SigCheckQueue poisoned after worker panic",
-            ));
-        }
         if self.tasks.is_empty() {
             return Ok(());
         }
 
         let tasks = std::mem::take(&mut self.tasks);
-        if tasks.len() == 1 {
-            return verify_queued_task(
-                tasks.into_iter().next().expect("single task"),
-                self.registry.as_ref(),
-            );
-        }
-
-        let workers = normalized_worker_count(self.workers, tasks.len());
-        let registry = self.registry.clone();
-        let panics = Arc::clone(&self.panics);
-        let any_failed = Arc::new(AtomicBool::new(false));
-        let queue = Mutex::new(tasks.into_iter().enumerate().collect::<VecDeque<_>>());
-        let results = (0..workers.max(1))
-            .map(|_| Vec::<(usize, TxError)>::new())
-            .collect::<Vec<_>>();
-        let results = Arc::new(Mutex::new(results));
-
-        thread::scope(|scope| {
-            for worker_id in 0..workers {
-                let any_failed = Arc::clone(&any_failed);
-                let panics = Arc::clone(&panics);
-                let registry = registry.clone();
-                let results = Arc::clone(&results);
-                let queue = &queue;
-                scope.spawn(move || {
-                    let mut current_idx = None;
-                    let worker_run = || loop {
-                        let next = {
-                            let mut guard = lock_recover(queue);
-                            guard.pop_front()
-                        };
-                        let Some((idx, task)) = next else {
-                            break;
-                        };
-                        current_idx = Some(idx);
-                        if any_failed.load(Ordering::SeqCst) {
-                            continue;
-                        }
-                        if let Err(err) = verify_queued_task(task, registry.as_ref()) {
-                            any_failed.store(true, Ordering::SeqCst);
-                            lock_recover(&results)[worker_id].push((idx, err));
-                        }
-                    };
-
-                    if panic::catch_unwind(AssertUnwindSafe(worker_run)).is_err() {
-                        if let Some(idx) = current_idx {
-                            panics.fetch_add(1, Ordering::SeqCst);
-                            any_failed.store(true, Ordering::SeqCst);
-                            lock_recover(&results)[worker_id].push((
-                                idx,
-                                TxError::new(
-                                    ErrorCode::TxErrSigInvalid,
-                                    "signature worker panic (fail-closed)",
-                                ),
-                            ));
-                        }
-                    }
-                });
-            }
-        });
-
-        let mut first_error: Option<(usize, TxError)> = None;
-        for worker_results in lock_recover(&results).iter() {
-            for (idx, err) in worker_results {
-                match &first_error {
-                    Some((best_idx, _)) if idx >= best_idx => {}
-                    _ => first_error = Some((*idx, err.clone())),
-                }
-            }
-        }
-        if let Some((_, err)) = first_error {
-            if self.panics() > 0 {
-                self.poisoned_after_panic = true;
-            }
-            return Err(err);
+        for task in tasks {
+            verify_queued_task(task, self.registry.as_ref())?;
         }
         Ok(())
     }
 
     pub fn panics(&self) -> u64 {
-        self.panics.load(Ordering::SeqCst)
+        0
     }
 
     fn ensure_registry(&mut self, registry: &SuiteRegistry) -> Result<(), TxError> {
-        if self.poisoned_after_panic {
-            return Err(TxError::new(
-                ErrorCode::TxErrSigInvalid,
-                "SigCheckQueue poisoned after worker panic",
-            ));
-        }
         match &self.registry {
             Some(current) if current != registry => Err(TxError::new(
                 ErrorCode::TxErrSigAlgInvalid,
@@ -214,7 +129,7 @@ pub(crate) fn queue_or_verify_signature(
         // Deferred mode changes only when signature errors are surfaced, not
         // the final accept/reject outcome. Structural checks still run inline.
         queue.ensure_registry(registry)?;
-        queue.push(suite_id, pubkey, crypto_sig, digest, err_on_fail);
+        queue.push(suite_id, pubkey, crypto_sig, digest, err_on_fail)?;
         return Ok(());
     }
 
@@ -240,24 +155,6 @@ fn verify_queued_task(task: SigCheckTask, registry: Option<&SuiteRegistry>) -> R
         return Err(task.err_on_fail);
     }
     Ok(())
-}
-
-fn normalized_worker_count(max_workers: usize, task_count: usize) -> usize {
-    let mut workers = max_workers;
-    if workers == 0 {
-        workers = thread::available_parallelism()
-            .map(|v| v.get())
-            .unwrap_or(1)
-            .max(1);
-    }
-    workers
-        .min(MAX_SIGCHECK_QUEUE_WORKERS)
-        .min(task_count)
-        .max(1)
-}
-
-fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -400,20 +297,24 @@ mod tests {
         let bad_sig_b = keypair_c.sign_digest32(digest_b).expect("bad sig b");
 
         let mut queue = SigCheckQueue::new(2);
-        queue.push(
-            SUITE_ID_ML_DSA_87,
-            &keypair_a.pubkey_bytes(),
-            &bad_sig_a,
-            digest_a,
-            TxError::new(ErrorCode::TxErrSigInvalid, "first failure"),
-        );
-        queue.push(
-            SUITE_ID_ML_DSA_87,
-            &keypair_b.pubkey_bytes(),
-            &bad_sig_b,
-            digest_b,
-            TxError::new(ErrorCode::TxErrSigInvalid, "second failure"),
-        );
+        queue
+            .push(
+                SUITE_ID_ML_DSA_87,
+                &keypair_a.pubkey_bytes(),
+                &bad_sig_a,
+                digest_a,
+                TxError::new(ErrorCode::TxErrSigInvalid, "first failure"),
+            )
+            .expect("enqueue first");
+        queue
+            .push(
+                SUITE_ID_ML_DSA_87,
+                &keypair_b.pubkey_bytes(),
+                &bad_sig_b,
+                digest_b,
+                TxError::new(ErrorCode::TxErrSigInvalid, "second failure"),
+            )
+            .expect("enqueue second");
 
         let err = queue.flush().expect_err("flush must fail");
         assert_eq!(
@@ -430,23 +331,27 @@ mod tests {
         let sig = keypair.sign_digest32(digest).expect("sign");
 
         let mut queue = SigCheckQueue::new(1);
-        queue.push(
-            SUITE_ID_ML_DSA_87,
-            &keypair.pubkey_bytes(),
-            &sig,
-            digest,
-            TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
-        );
+        queue
+            .push(
+                SUITE_ID_ML_DSA_87,
+                &keypair.pubkey_bytes(),
+                &sig,
+                digest,
+                TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
+            )
+            .expect("enqueue batch one");
         queue.flush().expect("first flush");
         queue.assert_flushed().expect("queue empty");
 
-        queue.push(
-            SUITE_ID_ML_DSA_87,
-            &keypair.pubkey_bytes(),
-            &sig,
-            digest,
-            TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
-        );
+        queue
+            .push(
+                SUITE_ID_ML_DSA_87,
+                &keypair.pubkey_bytes(),
+                &sig,
+                digest,
+                TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
+            )
+            .expect("enqueue batch two");
         queue.flush().expect("second flush");
         queue.assert_flushed().expect("queue empty again");
     }
@@ -460,13 +365,15 @@ mod tests {
             let mut digest = [0u8; 32];
             digest[0] = i;
             let sig = keypair.sign_digest32(digest).expect("sign");
-            queue.push(
-                SUITE_ID_ML_DSA_87,
-                &keypair.pubkey_bytes(),
-                &sig,
-                digest,
-                TxError::new(ErrorCode::TxErrSigInvalid, "zero-value"),
-            );
+            queue
+                .push(
+                    SUITE_ID_ML_DSA_87,
+                    &keypair.pubkey_bytes(),
+                    &sig,
+                    digest,
+                    TxError::new(ErrorCode::TxErrSigInvalid, "zero-value"),
+                )
+                .expect("enqueue valid zero-value");
         }
         queue.flush().expect("valid zero-value flush");
 
@@ -475,13 +382,15 @@ mod tests {
             digest[0] = i;
             let sig = keypair.sign_digest32(digest).expect("sign");
             digest[0] ^= 0xff;
-            queue.push(
-                SUITE_ID_ML_DSA_87,
-                &keypair.pubkey_bytes(),
-                &sig,
-                digest,
-                TxError::new(ErrorCode::TxErrSigInvalid, "zero-value-invalid"),
-            );
+            queue
+                .push(
+                    SUITE_ID_ML_DSA_87,
+                    &keypair.pubkey_bytes(),
+                    &sig,
+                    digest,
+                    TxError::new(ErrorCode::TxErrSigInvalid, "zero-value-invalid"),
+                )
+                .expect("enqueue invalid zero-value");
         }
         assert!(queue.flush().is_err(), "invalid zero-value flush must fail");
     }
@@ -493,13 +402,15 @@ mod tests {
         let sig = keypair.sign_digest32(digest).expect("sign");
 
         let mut queue = SigCheckQueue::new(1);
-        queue.push(
-            SUITE_ID_ML_DSA_87,
-            &keypair.pubkey_bytes(),
-            &sig,
-            digest,
-            TxError::new(ErrorCode::TxErrSigInvalid, "test"),
-        );
+        queue
+            .push(
+                SUITE_ID_ML_DSA_87,
+                &keypair.pubkey_bytes(),
+                &sig,
+                digest,
+                TxError::new(ErrorCode::TxErrSigInvalid, "test"),
+            )
+            .expect("enqueue");
 
         let err = queue
             .assert_flushed()
@@ -510,13 +421,15 @@ mod tests {
     #[test]
     fn sig_check_queue_single_bad_suite_error() {
         let mut queue = SigCheckQueue::new(1);
-        queue.push(
-            0xfe,
-            b"fake-pubkey",
-            b"fake-sig",
-            [0u8; 32],
-            TxError::new(ErrorCode::TxErrSigInvalid, "test"),
-        );
+        queue
+            .push(
+                0xfe,
+                b"fake-pubkey",
+                b"fake-sig",
+                [0u8; 32],
+                TxError::new(ErrorCode::TxErrSigInvalid, "test"),
+            )
+            .expect("enqueue bad suite");
         assert!(queue.flush().is_err(), "bad suite id must fail");
     }
 
@@ -592,33 +505,34 @@ mod tests {
     }
 
     #[test]
-    fn sig_check_queue_rejects_reuse_after_panic_poison() {
-        let registry = SuiteRegistry::default_registry();
-        let mut queue = SigCheckQueue::new(1);
-        queue.poisoned_after_panic = true;
+    fn sig_check_queue_rejects_capacity_overflow() {
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let digest = [0x77; 32];
+        let sig = keypair.sign_digest32(digest).expect("sign");
+        let mut queue = SigCheckQueue::default();
 
-        let mut maybe_queue = Some(&mut queue);
-        let err = queue_or_verify_signature(
-            SUITE_ID_ML_DSA_87,
-            b"pk",
-            b"sig",
-            [0u8; 32],
-            &registry,
-            &mut maybe_queue,
-            TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
-        )
-        .expect_err("poisoned queue must reject reuse");
+        for _ in 0..MAX_SIGCHECK_QUEUE_TASKS {
+            queue
+                .push(
+                    SUITE_ID_ML_DSA_87,
+                    &keypair.pubkey_bytes(),
+                    &sig,
+                    digest,
+                    TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
+                )
+                .expect("fill queue to bound");
+        }
 
-        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
-    }
-
-    #[test]
-    fn normalized_worker_count_caps_large_worker_values() {
-        assert_eq!(
-            normalized_worker_count(usize::MAX, 1_000),
-            MAX_SIGCHECK_QUEUE_WORKERS
-        );
-        assert_eq!(normalized_worker_count(usize::MAX, 8), 8);
+        let err = queue
+            .push(
+                SUITE_ID_ML_DSA_87,
+                &keypair.pubkey_bytes(),
+                &sig,
+                digest,
+                TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
+            )
+            .expect_err("overflow must fail closed");
+        assert_eq!(err.code, ErrorCode::TxErrWitnessOverflow);
     }
 
     #[test]
