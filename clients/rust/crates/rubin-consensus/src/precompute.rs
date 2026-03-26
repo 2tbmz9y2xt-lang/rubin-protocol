@@ -35,6 +35,14 @@ pub struct PrecomputedTxContext {
     pub fee: u64,
 }
 
+/// Overflow-safe witness slot accumulator. Returns the new total or an error
+/// if the addition would overflow `usize`.
+pub(crate) fn add_witness_slots(total: usize, slots: usize) -> Result<usize, TxError> {
+    total
+        .checked_add(slots)
+        .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "witness slot count overflow"))
+}
+
 /// Build an immutable [`PrecomputedTxContext`] slice for all non-coinbase
 /// transactions in a parsed block.
 ///
@@ -147,9 +155,7 @@ pub fn precompute_tx_contexts(
             if slots == 0 {
                 return Err(TxError::new(ErrorCode::TxErrParse, "invalid witness slots"));
             }
-            total_witness_slots = total_witness_slots.checked_add(slots).ok_or_else(|| {
-                TxError::new(ErrorCode::TxErrParse, "witness slot count overflow")
-            })?;
+            total_witness_slots = add_witness_slots(total_witness_slots, slots)?;
 
             sum_in = sum_in.checked_add(u128::from(entry.value)).ok_or_else(|| {
                 TxError::new(ErrorCode::TxErrValueConservation, "input sum overflow")

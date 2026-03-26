@@ -650,3 +650,38 @@ func TestPrecomputeTxContexts_MatureCoinbaseSpendAccepted(t *testing.T) {
 		t.Fatalf("expected 1 context, got %d", len(results))
 	}
 }
+
+func TestAddWitnessSlots_Overflow(t *testing.T) {
+	// Normal addition succeeds.
+	total, err := addWitnessSlots(10, 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if total != 15 {
+		t.Fatalf("expected 15, got %d", total)
+	}
+
+	// Boundary: maxInt + 0 succeeds.
+	total, err = addWitnessSlots(maxInt, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if total != maxInt {
+		t.Fatalf("expected maxInt, got %d", total)
+	}
+
+	// Overflow: maxInt + 1 fails.
+	_, err = addWitnessSlots(maxInt, 1)
+	if err == nil {
+		t.Fatal("expected overflow error")
+	}
+	if !strings.Contains(err.Error(), "witness slot count overflow") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Overflow: large values.
+	_, err = addWitnessSlots(maxInt-10, 20)
+	if err == nil {
+		t.Fatal("expected overflow error")
+	}
+}

@@ -838,3 +838,30 @@ fn precompute_mature_coinbase_spend_accepted() {
     // Block height 150: maturity gap = 150 - 50 = 100 == COINBASE_MATURITY. Should pass.
     precompute_tx_contexts(&pb, &utxos, 150).unwrap();
 }
+
+#[test]
+fn add_witness_slots_overflow() {
+    use crate::precompute::add_witness_slots;
+
+    // Normal addition succeeds.
+    assert_eq!(add_witness_slots(10, 5).unwrap(), 15);
+
+    // Boundary: usize::MAX total + 0 succeeds.
+    assert_eq!(add_witness_slots(usize::MAX, 0).unwrap(), usize::MAX);
+
+    // Overflow: usize::MAX + 1 fails.
+    let err = add_witness_slots(usize::MAX, 1).unwrap_err();
+    assert!(
+        err.msg.contains("witness slot count overflow"),
+        "unexpected: {}",
+        err.msg
+    );
+
+    // Overflow: large values.
+    let err = add_witness_slots(usize::MAX - 10, 20).unwrap_err();
+    assert!(
+        err.msg.contains("witness slot count overflow"),
+        "unexpected: {}",
+        err.msg
+    );
+}

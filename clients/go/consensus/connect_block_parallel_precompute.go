@@ -4,6 +4,15 @@ import "math"
 
 const maxInt = int(math.MaxInt)
 
+// addWitnessSlots returns total + slots, or an error if the addition
+// would overflow int.
+func addWitnessSlots(total, slots int) (int, error) {
+	if slots > maxInt-total {
+		return 0, txerr(TX_ERR_PARSE, "witness slot count overflow")
+	}
+	return total + slots, nil
+}
+
 // TxValidationContext holds the immutable, precomputed context for a single
 // non-coinbase transaction within a block. It is computed once against the
 // block-start UTXO snapshot and passed to read-only validation workers.
@@ -144,10 +153,11 @@ func PrecomputeTxContexts(
 			if slots <= 0 {
 				return nil, txerr(TX_ERR_PARSE, "invalid witness slots")
 			}
-			if slots > maxInt-totalWitnessSlots {
-				return nil, txerr(TX_ERR_PARSE, "witness slot count overflow")
+			newTotal, err3 := addWitnessSlots(totalWitnessSlots, slots)
+			if err3 != nil {
+				return nil, err3
 			}
-			totalWitnessSlots += slots
+			totalWitnessSlots = newTotal
 
 			resolvedInputs[j] = entry
 			inputOutpoints[j] = op
