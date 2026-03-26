@@ -473,6 +473,12 @@ func TestWorkerPoolRunErrorString(t *testing.T) {
 	}
 }
 
+func TestWorkerPoolInvalidMaxTasksString(t *testing.T) {
+	if ErrWorkerPoolInvalidMaxTasks.Error() != "worker pool max_tasks must be positive" {
+		t.Fatalf("unexpected invalid-max-tasks string: %q", ErrWorkerPoolInvalidMaxTasks)
+	}
+}
+
 func TestWorkerPool_NonStringPanicUsesFixedMessage(t *testing.T) {
 	pool := &WorkerPool[int, int]{
 		MaxWorkers: 1,

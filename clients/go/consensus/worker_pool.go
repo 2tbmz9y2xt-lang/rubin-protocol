@@ -8,7 +8,7 @@ import (
 	"sync"
 )
 
-var ErrWorkerPoolInvalidMaxTasks = errors.New("worker pool max tasks must be positive")
+var ErrWorkerPoolInvalidMaxTasks = errors.New("worker pool max_tasks must be positive")
 
 const fixedWorkerPanicMessage = "worker panic"
 
