@@ -261,9 +261,12 @@ func TestValidateTxLocal_WithSigCache(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestRunTxValidationWorkers_Empty(t *testing.T) {
-	results := RunTxValidationWorkers(
+	results, err := RunTxValidationWorkers(
 		context.Background(), 4, nil, [32]byte{}, 1, 0, nil, nil,
 	)
+	if err != nil {
+		t.Fatalf("RunTxValidationWorkers: %v", err)
+	}
 	if len(results) != 0 {
 		t.Fatalf("expected 0 results, got %d", len(results))
 	}
@@ -303,9 +306,12 @@ func TestRunTxValidationWorkers_SingleValid(t *testing.T) {
 		Fee:          10,
 	}}
 
-	results := RunTxValidationWorkers(
+	results, err := RunTxValidationWorkers(
 		context.Background(), 2, txcs, [32]byte{}, 1, 0, nil, nil,
 	)
+	if err != nil {
+		t.Fatalf("RunTxValidationWorkers: %v", err)
+	}
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}
@@ -364,9 +370,12 @@ func TestRunTxValidationWorkers_MultipleWithOneInvalid(t *testing.T) {
 		makeTvc(3, true),
 	}
 
-	results := RunTxValidationWorkers(
+	results, err := RunTxValidationWorkers(
 		context.Background(), 2, txcs, [32]byte{}, 1, 0, nil, nil,
 	)
+	if err != nil {
+		t.Fatalf("RunTxValidationWorkers: %v", err)
+	}
 	if len(results) != 3 {
 		t.Fatalf("expected 3 results, got %d", len(results))
 	}
@@ -430,7 +439,10 @@ func TestRunTxValidationWorkers_CancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled
 
-	results := RunTxValidationWorkers(ctx, 2, txcs, [32]byte{}, 1, 0, nil, nil)
+	results, err := RunTxValidationWorkers(ctx, 2, txcs, [32]byte{}, 1, 0, nil, nil)
+	if err != nil {
+		t.Fatalf("RunTxValidationWorkers: %v", err)
+	}
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}

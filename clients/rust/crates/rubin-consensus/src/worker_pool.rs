@@ -620,4 +620,48 @@ mod tests {
             ))
         );
     }
+
+    #[test]
+    fn worker_pool_error_display_variants() {
+        assert_eq!(
+            WorkerPoolError::<String>::Cancelled.to_string(),
+            "worker cancelled"
+        );
+        assert_eq!(
+            WorkerPoolError::<String>::Panic(FIXED_WORKER_PANIC_MESSAGE.to_string()).to_string(),
+            "worker panic: worker panic"
+        );
+        assert_eq!(
+            WorkerPoolError::<String>::Task("task failed".to_string()).to_string(),
+            "task failed"
+        );
+    }
+
+    #[test]
+    fn worker_pool_run_error_display_variants() {
+        assert_eq!(
+            WorkerPoolRunError::InvalidMaxTasks.to_string(),
+            "worker pool max_tasks must be positive"
+        );
+        assert_eq!(
+            WorkerPoolRunError::TooManyTasks {
+                task_count: 7,
+                max_tasks: 3,
+            }
+            .to_string(),
+            "worker pool task count 7 exceeds configured limit 3"
+        );
+        assert_eq!(
+            WorkerPoolRunError::QueuePoisoned.to_string(),
+            "worker queue poisoned"
+        );
+        assert_eq!(
+            WorkerPoolRunError::ResultCollectionIncomplete {
+                expected: 5,
+                received: 4,
+            }
+            .to_string(),
+            "worker result collection incomplete: expected 5, received 4"
+        );
+    }
 }
