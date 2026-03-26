@@ -41,8 +41,8 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Cancelled => write!(f, "worker cancelled"),
-            Self::Panic(msg) => write!(f, "worker panic: {msg}"),
+            Self::Cancelled => write!(f, "context canceled"),
+            Self::Panic(msg) => write!(f, "{msg}"),
             Self::Task(err) => err.fmt(f),
         }
     }
@@ -625,11 +625,11 @@ mod tests {
     fn worker_pool_error_display_variants() {
         assert_eq!(
             WorkerPoolError::<String>::Cancelled.to_string(),
-            "worker cancelled"
+            "context canceled"
         );
         assert_eq!(
             WorkerPoolError::<String>::Panic(FIXED_WORKER_PANIC_MESSAGE.to_string()).to_string(),
-            "worker panic: worker panic"
+            "worker panic"
         );
         assert_eq!(
             WorkerPoolError::<String>::Task("task failed".to_string()).to_string(),
