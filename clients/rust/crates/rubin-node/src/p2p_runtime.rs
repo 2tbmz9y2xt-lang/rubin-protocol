@@ -157,6 +157,7 @@ pub struct PeerSession {
     cfg: PeerRuntimeConfig,
     peer: PeerState,
     orphans: OrphanBlockPool,
+    prefetched_read_byte: Option<u8>,
 }
 
 pub struct PeerManager {
@@ -231,6 +232,7 @@ impl PeerSession {
                 ..PeerState::default()
             },
             orphans: OrphanBlockPool::new(DEFAULT_ORPHAN_LIMIT, DEFAULT_ORPHAN_BYTE_LIMIT),
+            prefetched_read_byte: None,
         })
     }
 
@@ -239,11 +241,52 @@ impl PeerSession {
     }
 
     pub fn read_message(&mut self) -> io::Result<WireMessage> {
+        self.read_message_with_timeout(self.cfg.read_deadline)
+    }
+
+    pub fn read_deadline(&self) -> Duration {
+        self.cfg.read_deadline
+    }
+
+    pub fn poll_read_ready(&mut self, timeout: Duration) -> io::Result<bool> {
+        if self.prefetched_read_byte.is_some() {
+            return Ok(true);
+        }
         self.stream
-            .set_read_timeout(Some(self.cfg.read_deadline))
+            .set_read_timeout(Some(timeout))
             .map_err(io::Error::other)?;
+        let mut probe = [0u8; 1];
+        match self.stream.read(&mut probe) {
+            Ok(0) => Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "peer closed connection",
+            )),
+            Ok(_) => {
+                self.prefetched_read_byte = Some(probe[0]);
+                Ok(true)
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    pub fn read_message_with_timeout(&mut self, timeout: Duration) -> io::Result<WireMessage> {
+        self.stream
+            .set_read_timeout(Some(timeout))
+            .map_err(io::Error::other)?;
+        let mut reader = PrefetchedReader {
+            stream: &mut self.stream,
+            prefetched_read_byte: self.prefetched_read_byte.take(),
+        };
         read_message_from(
-            &mut self.stream,
+            &mut reader,
             network_magic(&self.cfg.network),
             MAX_RELAY_MSG_BYTES,
         )
@@ -755,6 +798,29 @@ impl Read for DeadlineReader {
         self.stream
             .set_read_timeout(Some(remaining))
             .map_err(io::Error::other)?;
+        self.stream.read(buf)
+    }
+}
+
+struct PrefetchedReader<'a> {
+    stream: &'a mut TcpStream,
+    prefetched_read_byte: Option<u8>,
+}
+
+impl Read for PrefetchedReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(first_byte) = self.prefetched_read_byte.take() {
+            if buf.is_empty() {
+                self.prefetched_read_byte = Some(first_byte);
+                return Ok(0);
+            }
+            buf[0] = first_byte;
+            if buf.len() == 1 {
+                return Ok(1);
+            }
+            let read = self.stream.read(&mut buf[1..])?;
+            return Ok(read + 1);
+        }
         self.stream.read(buf)
     }
 }
@@ -2477,6 +2543,52 @@ mod tests {
 
         // Connect but never send anything — simulates a slowloris peer.
         let _client = TcpStream::connect(addr).expect("connect");
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn peer_session_zero_read_deadline_normalizes_to_default() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut cfg = default_peer_runtime_config("devnet", 8);
+            cfg.read_deadline = Duration::from_secs(0);
+            let session = PeerSession::new(stream, cfg).expect("session");
+            assert_eq!(session.read_deadline(), DEFAULT_READ_DEADLINE);
+        });
+
+        let _client = TcpStream::connect(addr).expect("connect");
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn poll_read_ready_prefetches_without_consuming_frame() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let header =
+                build_envelope_header(network_magic("devnet"), "ping", &[]).expect("ping header");
+            stream.write_all(&header).expect("write ping");
+            stream.flush().expect("flush ping");
+        });
+
+        let stream = TcpStream::connect(addr).expect("connect");
+        let mut session =
+            PeerSession::new(stream, default_peer_runtime_config("devnet", 8)).expect("session");
+        assert!(session
+            .poll_read_ready(Duration::from_secs(1))
+            .expect("first poll"));
+        assert!(session
+            .poll_read_ready(Duration::from_secs(1))
+            .expect("second poll reuses prefetched byte"));
+        let msg = session.read_message().expect("read prefetched ping");
+        assert_eq!(msg.command, "ping");
+        assert!(msg.payload.is_empty());
+
         server.join().expect("server join");
     }
 

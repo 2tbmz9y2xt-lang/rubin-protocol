@@ -21,6 +21,7 @@ const MIN_OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const SERVICE_CLOSE_WAIT_SLEEP: Duration = Duration::from_millis(25);
 const MAX_SHUTDOWN_WAIT: Duration = Duration::from_secs(30);
+const LIVE_LOOP_IDLE_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// Hard ceiling on live worker threads to prevent resource exhaustion.
 /// Set to 3× max_peers to allow transient overlap during handshake/teardown.
 const WORKER_THREAD_MULTIPLIER: usize = 3;
@@ -717,8 +718,12 @@ fn handle_peer(
 
     while !shared.stop.load(Ordering::SeqCst) {
         flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
-        let msg = match session.read_message() {
-            Ok(msg) => msg,
+        match session.poll_read_ready(live_loop_poll_timeout(session.read_deadline())) {
+            Ok(true) => {}
+            Ok(false) => {
+                flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
+                continue;
+            }
             Err(err)
                 if matches!(
                     err.kind(),
@@ -728,8 +733,11 @@ fn handle_peer(
                 flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
                 continue;
             }
-            Err(err) => return Err(format!("read message: {err}")),
-        };
+            Err(err) => return Err(format!("poll live message readiness: {err}")),
+        }
+        let msg = session
+            .read_message()
+            .map_err(|err| format!("read message: {err}"))?;
         let outbound_messages = {
             // Validate payload size before acquiring engine lock.
             if msg.payload.len() > rubin_consensus::constants::MAX_RELAY_MSG_BYTES as usize {
@@ -760,6 +768,10 @@ fn handle_peer(
         flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
     }
     Ok(())
+}
+
+fn live_loop_poll_timeout(read_deadline: Duration) -> Duration {
+    read_deadline.min(LIVE_LOOP_IDLE_DRAIN_POLL_INTERVAL)
 }
 
 fn flush_peer_outbox<F>(
@@ -855,7 +867,9 @@ mod tests {
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use crate::interop::local_version;
     use crate::p2p_runtime::{
-        default_peer_runtime_config, perform_version_handshake, PeerManager, PeerRuntimeConfig,
+        build_envelope_header, decode_inventory_vectors, default_peer_runtime_config,
+        encode_inventory_vectors, network_magic, perform_version_handshake, InventoryVector,
+        PeerManager, PeerRuntimeConfig, WireMessage, MSG_TX,
     };
     use crate::tx_relay::PeerOutbox;
     use crate::tx_relay::TxRelayState;
@@ -946,12 +960,372 @@ mod tests {
         assert!(shared.peer_outboxes.lock().unwrap()["peer:8333"].is_empty());
     }
 
+    fn test_wire_frame(runtime_cfg: &PeerRuntimeConfig, command: &str, payload: &[u8]) -> Vec<u8> {
+        let header = build_envelope_header(network_magic(&runtime_cfg.network), command, payload)
+            .expect("wire header");
+        let mut raw = Vec::with_capacity(header.len() + payload.len());
+        raw.extend_from_slice(&header);
+        raw.extend_from_slice(payload);
+        raw
+    }
+
+    #[test]
+    fn service_flushes_idle_peer_outbox_within_poll_interval() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-idle-drain");
+        let mut runtime_cfg = default_peer_runtime_config("devnet", 8);
+        runtime_cfg.read_deadline = Duration::from_secs(2);
+        runtime_cfg.write_deadline = Duration::from_secs(1);
+        let shared = test_shared_state(runtime_cfg.clone(), Vec::new(), sync_engine);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let handler_shared = shared.clone();
+        let handler = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept peer");
+            let _ = super::handle_peer(stream, None, handler_shared);
+        });
+
+        let mut client_cfg = runtime_cfg.clone();
+        client_cfg.read_deadline = Duration::from_millis(1200);
+        let stream = TcpStream::connect(addr).expect("connect service");
+        let local = local_version(0).expect("local version");
+        let mut session = perform_version_handshake(
+            stream,
+            client_cfg,
+            local,
+            local.chain_id,
+            local.genesis_hash,
+        )
+        .expect("handshake");
+
+        let peer_addr = {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            wait_until(deadline, || {
+                !shared.peer_outboxes.lock().unwrap().is_empty()
+            });
+            let addr = {
+                let outboxes = shared.peer_outboxes.lock().unwrap();
+                outboxes
+                    .keys()
+                    .next()
+                    .expect("registered peer outbox")
+                    .clone()
+            };
+            addr
+        };
+
+        thread::sleep(Duration::from_millis(100));
+        let payload = encode_inventory_vectors(&[InventoryVector {
+            kind: MSG_TX,
+            hash: [0xAB; 32],
+        }])
+        .expect("inv payload");
+        let frame = test_wire_frame(&runtime_cfg, "inv", &payload);
+        {
+            let mut outboxes = shared.peer_outboxes.lock().unwrap();
+            outboxes
+                .get_mut(&peer_addr)
+                .expect("registered peer outbox")
+                .push_frame(frame);
+        }
+
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(1200);
+        let msg = loop {
+            let msg = session.read_message().expect("prompt relay frame");
+            if msg.command == "inv" {
+                break msg;
+            }
+            assert_eq!(
+                msg.command, "getblocks",
+                "unexpected pre-relay message before queued frame flush"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "queued frame did not arrive within the poll window"
+            );
+        };
+        assert_eq!(msg.payload, payload);
+        assert!(
+            started.elapsed() < Duration::from_millis(1200),
+            "queued frame must flush before the full read_deadline elapses"
+        );
+
+        shared.stop.store(true, Ordering::SeqCst);
+        drop(session);
+        handler.join().expect("handler join");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn quiet_peer_survives_repeated_live_loop_sub_timeouts() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-quiet-peer");
+        let mut runtime_cfg = default_peer_runtime_config("devnet", 8);
+        runtime_cfg.read_deadline = Duration::from_secs(1);
+        runtime_cfg.write_deadline = Duration::from_secs(1);
+        let shared = test_shared_state(runtime_cfg.clone(), Vec::new(), sync_engine);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let handler_shared = shared.clone();
+        let handler = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept peer");
+            let _ = super::handle_peer(stream, None, handler_shared);
+        });
+
+        let stream = TcpStream::connect(addr).expect("connect service");
+        let local = local_version(0).expect("local version");
+        let session = perform_version_handshake(
+            stream,
+            runtime_cfg,
+            local,
+            local.chain_id,
+            local.genesis_hash,
+        )
+        .expect("handshake");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        wait_until(deadline, || {
+            !shared.peer_outboxes.lock().unwrap().is_empty()
+        });
+        thread::sleep(Duration::from_millis(1400));
+        assert_eq!(
+            shared.peer_outboxes.lock().unwrap().len(),
+            1,
+            "quiet healthy peer must remain connected across repeated sub-timeouts"
+        );
+
+        shared.stop.store(true, Ordering::SeqCst);
+        drop(session);
+        handler.join().expect("handler join");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn service_handles_live_message_without_waiting_for_timeout() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-live-read");
+        let mut runtime_cfg = default_peer_runtime_config("devnet", 8);
+        runtime_cfg.read_deadline = Duration::from_secs(2);
+        runtime_cfg.write_deadline = Duration::from_secs(1);
+        let shared = test_shared_state(runtime_cfg.clone(), Vec::new(), sync_engine);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let handler_shared = shared.clone();
+        let handler = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept peer");
+            let _ = super::handle_peer(stream, None, handler_shared);
+        });
+
+        let mut client_cfg = runtime_cfg.clone();
+        client_cfg.read_deadline = Duration::from_millis(1200);
+        let stream = TcpStream::connect(addr).expect("connect service");
+        let local = local_version(0).expect("local version");
+        let mut session = perform_version_handshake(
+            stream,
+            client_cfg,
+            local,
+            local.chain_id,
+            local.genesis_hash,
+        )
+        .expect("handshake");
+
+        session
+            .write_message(&WireMessage {
+                command: "ping".to_string(),
+                payload: Vec::new(),
+            })
+            .expect("send live ping");
+
+        let deadline = Instant::now() + Duration::from_millis(1200);
+        loop {
+            let msg = session.read_message().expect("read live response");
+            if msg.command == "pong" {
+                assert!(
+                    Instant::now() < deadline,
+                    "live loop must process immediate inbound messages without waiting for the full read timeout"
+                );
+                break;
+            }
+            assert_eq!(
+                msg.command, "getblocks",
+                "unexpected pre-pong message while validating live-loop immediate reads"
+            );
+        }
+
+        shared.stop.store(true, Ordering::SeqCst);
+        drop(session);
+        handler.join().expect("handler join");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn service_preserves_full_deadline_for_fragmented_live_frames() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-fragmented-live-read");
+        let mut runtime_cfg = default_peer_runtime_config("devnet", 8);
+        runtime_cfg.read_deadline = Duration::from_secs(2);
+        runtime_cfg.write_deadline = Duration::from_secs(1);
+        let shared = test_shared_state(runtime_cfg.clone(), Vec::new(), sync_engine);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let handler_shared = shared.clone();
+        let handler = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept peer");
+            let _ = super::handle_peer(stream, None, handler_shared);
+        });
+
+        let mut client_cfg = runtime_cfg.clone();
+        client_cfg.read_deadline = Duration::from_secs(2);
+        let stream = TcpStream::connect(addr).expect("connect service");
+        let local = local_version(0).expect("local version");
+        let mut session = perform_version_handshake(
+            stream,
+            client_cfg,
+            local,
+            local.chain_id,
+            local.genesis_hash,
+        )
+        .expect("handshake");
+
+        let payload = encode_inventory_vectors(&[InventoryVector {
+            kind: MSG_TX,
+            hash: [0xCD; 32],
+        }])
+        .expect("inv payload");
+        let frame = test_wire_frame(&runtime_cfg, "inv", &payload);
+        let header_len = frame.len() - payload.len();
+        session
+            .write_raw(&frame[..header_len])
+            .expect("write fragmented header");
+        thread::sleep(Duration::from_millis(650));
+        session
+            .write_raw(&frame[header_len..])
+            .expect("write fragmented payload");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let msg = session
+                .read_message()
+                .expect("read fragmented live response");
+            if msg.command == "getdata" {
+                let requested = decode_inventory_vectors(&msg.payload).expect("decode getdata");
+                assert_eq!(
+                    requested,
+                    vec![InventoryVector {
+                        kind: MSG_TX,
+                        hash: [0xCD; 32],
+                    }],
+                    "service must finish consuming the fragmented frame before responding"
+                );
+                break;
+            }
+            assert_eq!(
+                msg.command, "getblocks",
+                "unexpected pre-getdata message while validating fragmented live reads"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "fragmented live frame must complete without disconnecting the peer"
+            );
+        }
+
+        shared.stop.store(true, Ordering::SeqCst);
+        drop(session);
+        handler.join().expect("handler join");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn service_respects_short_live_read_deadlines_for_idle_drain() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-short-live-poll");
+        let mut runtime_cfg = default_peer_runtime_config("devnet", 8);
+        runtime_cfg.read_deadline = Duration::from_millis(120);
+        runtime_cfg.write_deadline = Duration::from_secs(1);
+        let shared = test_shared_state(runtime_cfg.clone(), Vec::new(), sync_engine);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let handler_shared = shared.clone();
+        let handler = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept peer");
+            let _ = super::handle_peer(stream, None, handler_shared);
+        });
+
+        let mut client_cfg = runtime_cfg.clone();
+        client_cfg.read_deadline = Duration::from_millis(600);
+        let stream = TcpStream::connect(addr).expect("connect service");
+        let local = local_version(0).expect("local version");
+        let mut session = perform_version_handshake(
+            stream,
+            client_cfg,
+            local,
+            local.chain_id,
+            local.genesis_hash,
+        )
+        .expect("handshake");
+
+        let peer_addr = {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            wait_until(deadline, || {
+                !shared.peer_outboxes.lock().unwrap().is_empty()
+            });
+            let outboxes = shared.peer_outboxes.lock().unwrap();
+            outboxes
+                .keys()
+                .next()
+                .expect("registered peer outbox")
+                .clone()
+        };
+
+        thread::sleep(Duration::from_millis(50));
+        let payload = encode_inventory_vectors(&[InventoryVector {
+            kind: MSG_TX,
+            hash: [0xEF; 32],
+        }])
+        .expect("inv payload");
+        let frame = test_wire_frame(&runtime_cfg, "inv", &payload);
+        {
+            let mut outboxes = shared.peer_outboxes.lock().unwrap();
+            outboxes
+                .get_mut(&peer_addr)
+                .expect("registered peer outbox")
+                .push_frame(frame);
+        }
+
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(300);
+        loop {
+            let msg = session.read_message().expect("short-poll relay frame");
+            if msg.command == "inv" {
+                assert!(
+                    started.elapsed() < Duration::from_millis(300),
+                    "queued frame must honor the shorter configured live-loop deadline"
+                );
+                assert_eq!(msg.payload, payload);
+                break;
+            }
+            assert_eq!(
+                msg.command, "getblocks",
+                "unexpected pre-relay message before queued frame flush"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "short live-loop poll must flush queued frames promptly"
+            );
+        }
+
+        shared.stop.store(true, Ordering::SeqCst);
+        drop(session);
+        handler.join().expect("handler join");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
     #[test]
     fn service_accepts_inbound_peer_handshake() {
         let (sync_engine, dir) = test_engine("rubin-node-p2p-service-inbound");
         let mut runtime_cfg = default_peer_runtime_config("devnet", 8);
-        runtime_cfg.read_deadline = Duration::from_secs(1);
-        runtime_cfg.write_deadline = Duration::from_secs(1);
+        // Coverage instrumentation slows the handshake path enough that tight
+        // 1s deadlines can fail before the service has done any meaningful
+        // work. Widen the test window so the assertion stays about handshake
+        // correctness rather than tarpaulin timing jitter.
+        runtime_cfg.read_deadline = Duration::from_secs(2);
+        runtime_cfg.write_deadline = Duration::from_secs(2);
         let mut service = start_node_p2p_service(NodeP2PServiceConfig {
             bind_addr: "127.0.0.1:0".to_string(),
             bootstrap_peers: Vec::new(),
@@ -1037,8 +1411,8 @@ mod tests {
         // smaller test deadlines become flaky even though the session-slot
         // behavior is correct. Use a wider window here so the test checks slot
         // accounting rather than timing jitter.
-        runtime_cfg.read_deadline = Duration::from_secs(1);
-        runtime_cfg.write_deadline = Duration::from_secs(1);
+        runtime_cfg.read_deadline = Duration::from_secs(2);
+        runtime_cfg.write_deadline = Duration::from_secs(2);
         let peer_manager = Arc::new(PeerManager::new(runtime_cfg.clone()));
         let mut service = start_node_p2p_service(NodeP2PServiceConfig {
             bind_addr: "127.0.0.1:0".to_string(),
