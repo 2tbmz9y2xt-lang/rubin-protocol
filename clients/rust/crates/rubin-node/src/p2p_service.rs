@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use crate::p2p_runtime::{
     perform_version_handshake, PeerManager, PeerRelayContext, PeerRuntimeConfig, VersionPayloadV1,
 };
+use crate::sync_reorg::TxPoolCleanupPlan;
 use crate::tx_relay::{PeerOutbox, TxRelayState};
 use crate::{SyncEngine, TxPool};
 
@@ -758,28 +759,25 @@ fn handle_peer(
                     .sync_engine
                     .lock()
                     .map_err(|_| "sync engine unavailable".to_string())?;
-                let outcome = session
-                    .collect_live_responses(msg, &mut engine, Some(&relay_ctx))
-                    .map_err(|err| format!("handle live message: {err}"))?;
-                (outcome.responses, outcome.tx_pool_cleanup)
+                match session.collect_live_responses(msg, &mut engine, Some(&relay_ctx)) {
+                    Ok(outcome) => (
+                        outcome.responses,
+                        outcome
+                            .tx_pool_cleanup
+                            .merge(session.take_pending_tx_pool_cleanup()),
+                    ),
+                    Err(err) => {
+                        let pending_cleanup = session.take_pending_tx_pool_cleanup();
+                        drop(engine);
+                        if !pending_cleanup.is_empty() {
+                            apply_tx_pool_cleanup(&shared, pending_cleanup)?;
+                        }
+                        return Err(format!("handle live message: {err}"));
+                    }
+                }
             };
             if !tx_pool_cleanup.is_empty() {
-                let (chain_state, block_store, chain_id) = {
-                    let engine = shared
-                        .sync_engine
-                        .lock()
-                        .map_err(|_| "sync engine unavailable".to_string())?;
-                    (
-                        engine.chain_state_snapshot(),
-                        engine.block_store_snapshot(),
-                        engine.chain_id(),
-                    )
-                };
-                let mut tx_pool = shared
-                    .tx_pool
-                    .lock()
-                    .map_err(|_| "tx pool unavailable".to_string())?;
-                tx_pool_cleanup.apply(&mut tx_pool, &chain_state, block_store.as_ref(), chain_id);
+                apply_tx_pool_cleanup(&shared, tx_pool_cleanup)?;
             }
             responses
         };
@@ -816,6 +814,29 @@ where
     for frame in pending {
         write_frame(&frame).map_err(|err| format!("relay drain: {err}"))?;
     }
+    Ok(())
+}
+
+fn apply_tx_pool_cleanup(
+    shared: &SharedServiceState,
+    tx_pool_cleanup: TxPoolCleanupPlan,
+) -> Result<(), String> {
+    let (chain_state, block_store, chain_id) = {
+        let engine = shared
+            .sync_engine
+            .lock()
+            .map_err(|_| "sync engine unavailable".to_string())?;
+        (
+            engine.chain_state_snapshot(),
+            engine.block_store_snapshot(),
+            engine.chain_id(),
+        )
+    };
+    let mut tx_pool = shared
+        .tx_pool
+        .lock()
+        .map_err(|_| "tx pool unavailable".to_string())?;
+    tx_pool_cleanup.apply(&mut tx_pool, &chain_state, block_store.as_ref(), chain_id);
     Ok(())
 }
 

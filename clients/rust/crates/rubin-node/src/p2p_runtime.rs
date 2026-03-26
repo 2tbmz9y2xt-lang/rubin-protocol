@@ -162,6 +162,7 @@ pub struct PeerSession {
     cfg: PeerRuntimeConfig,
     peer: PeerState,
     orphans: OrphanBlockPool,
+    pending_tx_pool_cleanup: TxPoolCleanupPlan,
     prefetched_read_byte: Option<u8>,
 }
 
@@ -237,12 +238,25 @@ impl PeerSession {
                 ..PeerState::default()
             },
             orphans: OrphanBlockPool::new(DEFAULT_ORPHAN_LIMIT, DEFAULT_ORPHAN_BYTE_LIMIT),
+            pending_tx_pool_cleanup: TxPoolCleanupPlan::default(),
             prefetched_read_byte: None,
         })
     }
 
     pub fn state(&self) -> PeerState {
         self.peer.clone()
+    }
+
+    pub fn take_pending_tx_pool_cleanup(&mut self) -> TxPoolCleanupPlan {
+        std::mem::take(&mut self.pending_tx_pool_cleanup)
+    }
+
+    fn stash_pending_tx_pool_cleanup(&mut self, cleanup: TxPoolCleanupPlan) {
+        if cleanup.is_empty() {
+            return;
+        }
+        let pending = self.take_pending_tx_pool_cleanup();
+        self.pending_tx_pool_cleanup = pending.merge(cleanup);
     }
 
     pub fn read_message(&mut self) -> io::Result<WireMessage> {
@@ -660,20 +674,24 @@ impl PeerSession {
                 .has_block(parsed.header.prev_block_hash)
                 .map_err(io::Error::other)?
         {
-            self.retain_or_resolve_orphan(
+            return self.retain_or_resolve_orphan(
                 block_hash_bytes,
                 parsed.header.prev_block_hash,
                 block_bytes,
                 sync_engine,
-            )?;
-            return Ok(TxPoolCleanupPlan::default());
+            );
         }
         match sync_engine.apply_block_with_reorg(block_bytes, None) {
             Ok(outcome) => {
                 sync_engine.record_best_known_height(outcome.summary.block_height);
-                Ok(outcome
-                    .tx_pool_cleanup
-                    .merge(self.resolve_orphans(block_hash_bytes, sync_engine)?))
+                let mut tx_pool_cleanup = outcome.tx_pool_cleanup;
+                if let Err(err) =
+                    self.resolve_orphans(block_hash_bytes, sync_engine, &mut tx_pool_cleanup)
+                {
+                    self.stash_pending_tx_pool_cleanup(tx_pool_cleanup);
+                    return Err(err);
+                }
+                Ok(tx_pool_cleanup)
             }
             Err(err) if is_parent_not_found_err(&err) => Err(io::Error::other(format!(
                 "unexpected missing-parent after precheck: {err}"
@@ -688,7 +706,7 @@ impl PeerSession {
         parent_hash: [u8; 32],
         block_bytes: &[u8],
         sync_engine: &mut SyncEngine,
-    ) -> io::Result<()> {
+    ) -> io::Result<TxPoolCleanupPlan> {
         self.orphans.add(
             block_hash,
             parent_hash,
@@ -699,23 +717,29 @@ impl PeerSession {
             .has_block(parent_hash)
             .map_err(io::Error::other)?
         {
-            let _ = self.resolve_orphans(parent_hash, sync_engine)?;
+            let mut tx_pool_cleanup = TxPoolCleanupPlan::default();
+            if let Err(err) = self.resolve_orphans(parent_hash, sync_engine, &mut tx_pool_cleanup) {
+                self.stash_pending_tx_pool_cleanup(tx_pool_cleanup);
+                return Err(err);
+            }
+            return Ok(tx_pool_cleanup);
         }
-        Ok(())
+        Ok(TxPoolCleanupPlan::default())
     }
 
     fn resolve_orphans(
         &mut self,
         parent_hash: [u8; 32],
         sync_engine: &mut SyncEngine,
-    ) -> io::Result<TxPoolCleanupPlan> {
+        tx_pool_cleanup: &mut TxPoolCleanupPlan,
+    ) -> io::Result<()> {
         let mut ready = self.orphans.take_children(parent_hash);
-        let mut cleanup = TxPoolCleanupPlan::default();
         while let Some(child) = ready.pop() {
             match sync_engine.apply_block_with_reorg(&child.block_bytes, None) {
                 Ok(outcome) => {
                     sync_engine.record_best_known_height(outcome.summary.block_height);
-                    cleanup = cleanup.merge(outcome.tx_pool_cleanup);
+                    *tx_pool_cleanup =
+                        std::mem::take(tx_pool_cleanup).merge(outcome.tx_pool_cleanup);
                     ready.extend(self.orphans.take_children(child.block_hash));
                 }
                 Err(err) if is_parent_not_found_err(&err) => {
@@ -732,7 +756,7 @@ impl PeerSession {
                 }
             }
         }
-        Ok(cleanup)
+        Ok(())
     }
 
     fn respond_to_getdata(
@@ -2547,11 +2571,20 @@ mod tests {
             let err = session
                 .handle_block(&block1, &mut engine)
                 .expect_err("invalid orphan should surface after parent arrives");
+            let pending_cleanup = session.take_pending_tx_pool_cleanup();
 
             assert_eq!(session.orphans.len(), 0, "invalid orphan should be dropped");
             assert_eq!(
                 engine.chain_state.height, 1,
                 "parent block must remain connected"
+            );
+            assert!(
+                !pending_cleanup.is_empty(),
+                "accepted parent block cleanup must survive the later orphan error"
+            );
+            assert!(
+                session.take_pending_tx_pool_cleanup().is_empty(),
+                "pending cleanup should drain once observed"
             );
             assert_eq!(
                 session.state().ban_score,
