@@ -1,11 +1,16 @@
-use crate::constants::{MAX_BLOCK_WEIGHT, WITNESS_DISCOUNT_DIVISOR};
+use crate::constants::MAX_BLOCK_WEIGHT;
 use crate::error::{ErrorCode, TxError};
 use crate::suite_registry::SuiteRegistry;
 use crate::verify_sig_openssl::{verify_sig, verify_sig_with_registry};
 
-const MAX_SIGCHECK_QUEUE_BYTES: usize =
-    (MAX_BLOCK_WEIGHT as usize) * (WITNESS_DISCOUNT_DIVISOR as usize);
+// Deferred sigcheck payload comes from witness bytes. Even in a maximally
+// witness-heavy valid block, raw queued pubkey+signature bytes cannot exceed
+// the block weight budget because witness data is charged 1:1 in weight.
+const MAX_SIGCHECK_QUEUE_BYTES: usize = MAX_BLOCK_WEIGHT as usize;
 const SIGCHECK_TASK_FIXED_OVERHEAD_BYTES: usize = 1 + 32 + 1;
+// The task cap is a secondary guardrail: derive it from the smallest
+// architecture-stable in-memory task footprint so pathological tiny tasks
+// cannot evade the byte budget through per-task overhead.
 const MAX_SIGCHECK_QUEUE_TASKS: usize =
     MAX_SIGCHECK_QUEUE_BYTES / SIGCHECK_TASK_FIXED_OVERHEAD_BYTES;
 
@@ -682,6 +687,11 @@ mod tests {
         let err = ensure_task_budget(MAX_SIGCHECK_QUEUE_TASKS)
             .expect_err("task budget boundary must fail closed");
         assert_eq!(err.code, ErrorCode::TxErrWitnessOverflow);
+    }
+
+    #[test]
+    fn sig_check_queue_byte_budget_is_bounded_by_block_weight() {
+        assert_eq!(MAX_SIGCHECK_QUEUE_BYTES, MAX_BLOCK_WEIGHT as usize);
     }
 
     #[test]
