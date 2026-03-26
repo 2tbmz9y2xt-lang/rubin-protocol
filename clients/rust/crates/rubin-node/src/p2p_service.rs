@@ -718,7 +718,7 @@ fn handle_peer(
 
     while !shared.stop.load(Ordering::SeqCst) {
         flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
-        match session.poll_read_ready(LIVE_LOOP_IDLE_DRAIN_POLL_INTERVAL) {
+        match session.poll_read_ready(live_loop_poll_timeout(session.read_deadline())) {
             Ok(true) => {}
             Ok(false) => {
                 flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
@@ -768,6 +768,10 @@ fn handle_peer(
         flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
     }
     Ok(())
+}
+
+fn live_loop_poll_timeout(read_deadline: Duration) -> Duration {
+    read_deadline.min(LIVE_LOOP_IDLE_DRAIN_POLL_INTERVAL)
 }
 
 fn flush_peer_outbox<F>(
@@ -1219,6 +1223,90 @@ mod tests {
             assert!(
                 Instant::now() < deadline,
                 "fragmented live frame must complete without disconnecting the peer"
+            );
+        }
+
+        shared.stop.store(true, Ordering::SeqCst);
+        drop(session);
+        handler.join().expect("handler join");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn service_respects_short_live_read_deadlines_for_idle_drain() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-short-live-poll");
+        let mut runtime_cfg = default_peer_runtime_config("devnet", 8);
+        runtime_cfg.read_deadline = Duration::from_millis(120);
+        runtime_cfg.write_deadline = Duration::from_secs(1);
+        let shared = test_shared_state(runtime_cfg.clone(), Vec::new(), sync_engine);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let handler_shared = shared.clone();
+        let handler = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept peer");
+            let _ = super::handle_peer(stream, None, handler_shared);
+        });
+
+        let mut client_cfg = runtime_cfg.clone();
+        client_cfg.read_deadline = Duration::from_millis(600);
+        let stream = TcpStream::connect(addr).expect("connect service");
+        let local = local_version(0).expect("local version");
+        let mut session = perform_version_handshake(
+            stream,
+            client_cfg,
+            local,
+            local.chain_id,
+            local.genesis_hash,
+        )
+        .expect("handshake");
+
+        let peer_addr = {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            wait_until(deadline, || {
+                !shared.peer_outboxes.lock().unwrap().is_empty()
+            });
+            let outboxes = shared.peer_outboxes.lock().unwrap();
+            outboxes
+                .keys()
+                .next()
+                .expect("registered peer outbox")
+                .clone()
+        };
+
+        thread::sleep(Duration::from_millis(50));
+        let payload = encode_inventory_vectors(&[InventoryVector {
+            kind: MSG_TX,
+            hash: [0xEF; 32],
+        }])
+        .expect("inv payload");
+        let frame = test_wire_frame(&runtime_cfg, "inv", &payload);
+        {
+            let mut outboxes = shared.peer_outboxes.lock().unwrap();
+            outboxes
+                .get_mut(&peer_addr)
+                .expect("registered peer outbox")
+                .push_frame(frame);
+        }
+
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(300);
+        loop {
+            let msg = session.read_message().expect("short-poll relay frame");
+            if msg.command == "inv" {
+                assert!(
+                    started.elapsed() < Duration::from_millis(300),
+                    "queued frame must honor the shorter configured live-loop deadline"
+                );
+                assert_eq!(msg.payload, payload);
+                break;
+            }
+            assert_eq!(
+                msg.command, "getblocks",
+                "unexpected pre-relay message before queued frame flush"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "short live-loop poll must flush queued frames promptly"
             );
         }
 
