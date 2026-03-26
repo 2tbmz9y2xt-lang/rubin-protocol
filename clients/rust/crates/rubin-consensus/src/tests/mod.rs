@@ -617,4 +617,5 @@ mod block_basic;
 mod covenant_genesis;
 mod precompute;
 mod tx_parse;
+mod tx_validate_worker;
 mod utxo_apply;
