@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use crate::block_basic::ParsedBlock;
 use crate::block::{BlockHeader, BLOCK_HEADER_BYTES};
+use crate::block_basic::ParsedBlock;
 use crate::constants::*;
 use crate::hash::sha3_256;
 use crate::precompute::precompute_tx_contexts;
@@ -25,9 +25,7 @@ fn make_parsed_block(coinbase: Tx, txs: Vec<Tx>) -> ParsedBlock {
     all_txs.push(coinbase);
     all_txs.extend(txs);
 
-    let txids: Vec<[u8; 32]> = (0..all_txs.len())
-        .map(|i| sha3_256(&[i as u8]))
-        .collect();
+    let txids: Vec<[u8; 32]> = (0..all_txs.len()).map(|i| sha3_256(&[i as u8])).collect();
     let wtxids = txids.clone();
 
     ParsedBlock {
@@ -87,8 +85,12 @@ fn precompute_coinbase_only_block() {
 fn precompute_nil_block() {
     let pb = ParsedBlock {
         header: BlockHeader {
-            version: 1, prev_block_hash: [0u8; 32], merkle_root: [0u8; 32],
-            timestamp: 0, target: [0u8; 32], nonce: 0,
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [0u8; 32],
+            timestamp: 0,
+            target: [0u8; 32],
+            nonce: 0,
         },
         header_bytes: [0u8; BLOCK_HEADER_BYTES],
         tx_count: 0,
@@ -104,7 +106,10 @@ fn precompute_nil_block() {
 fn precompute_single_p2pk() {
     let cov_data = valid_p2pk_covenant_data();
     let prev_txid = sha3_256(b"prev-tx-for-precompute");
-    let op = Outpoint { txid: prev_txid, vout: 0 };
+    let op = Outpoint {
+        txid: prev_txid,
+        vout: 0,
+    };
     let utxos = HashMap::from([(
         op.clone(),
         UtxoEntry {
@@ -117,10 +122,23 @@ fn precompute_single_p2pk() {
     )]);
 
     let tx = Tx {
-        version: 1, tx_kind: 0x00, tx_nonce: 1,
-        inputs: vec![TxInput { prev_txid, prev_vout: 0, script_sig: Vec::new(), sequence: 0 }],
-        outputs: vec![TxOutput { value: 900, covenant_type: COV_TYPE_P2PK, covenant_data: cov_data }],
-        locktime: 0, da_commit_core: None, da_chunk_core: None,
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 900,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data,
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
         witness: vec![dummy_witness()],
         da_payload: Vec::new(),
     };
@@ -146,29 +164,73 @@ fn precompute_witness_cursor_parity() {
     let prev1 = sha3_256(b"utxo-1");
 
     let utxos = HashMap::from([
-        (Outpoint { txid: prev0, vout: 0 }, UtxoEntry {
-            value: 500, covenant_type: COV_TYPE_P2PK, covenant_data: cov_data.clone(),
-            creation_height: 0, created_by_coinbase: false,
-        }),
-        (Outpoint { txid: prev1, vout: 0 }, UtxoEntry {
-            value: 500, covenant_type: COV_TYPE_P2PK, covenant_data: cov_data.clone(),
-            creation_height: 0, created_by_coinbase: false,
-        }),
+        (
+            Outpoint {
+                txid: prev0,
+                vout: 0,
+            },
+            UtxoEntry {
+                value: 500,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: cov_data.clone(),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        ),
+        (
+            Outpoint {
+                txid: prev1,
+                vout: 0,
+            },
+            UtxoEntry {
+                value: 500,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: cov_data.clone(),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        ),
     ]);
 
     let tx0 = Tx {
-        version: 1, tx_kind: 0x00, tx_nonce: 1,
-        inputs: vec![TxInput { prev_txid: prev0, prev_vout: 0, script_sig: Vec::new(), sequence: 0 }],
-        outputs: vec![TxOutput { value: 400, covenant_type: COV_TYPE_P2PK, covenant_data: cov_data.clone() }],
-        locktime: 0, da_commit_core: None, da_chunk_core: None,
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![TxInput {
+            prev_txid: prev0,
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 400,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data.clone(),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
         witness: vec![dummy_witness()],
         da_payload: Vec::new(),
     };
     let tx1 = Tx {
-        version: 1, tx_kind: 0x00, tx_nonce: 2,
-        inputs: vec![TxInput { prev_txid: prev1, prev_vout: 0, script_sig: Vec::new(), sequence: 0 }],
-        outputs: vec![TxOutput { value: 400, covenant_type: COV_TYPE_P2PK, covenant_data: cov_data }],
-        locktime: 0, da_commit_core: None, da_chunk_core: None,
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 2,
+        inputs: vec![TxInput {
+            prev_txid: prev1,
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 400,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data,
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
         witness: vec![dummy_witness()],
         da_payload: Vec::new(),
     };
@@ -192,18 +254,37 @@ fn precompute_same_block_parent_child() {
     let prev_txid = sha3_256(b"genesis-utxo");
 
     let utxos = HashMap::from([(
-        Outpoint { txid: prev_txid, vout: 0 },
+        Outpoint {
+            txid: prev_txid,
+            vout: 0,
+        },
         UtxoEntry {
-            value: 1000, covenant_type: COV_TYPE_P2PK, covenant_data: cov_data.clone(),
-            creation_height: 0, created_by_coinbase: false,
+            value: 1000,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data.clone(),
+            creation_height: 0,
+            created_by_coinbase: false,
         },
     )]);
 
     let tx0 = Tx {
-        version: 1, tx_kind: 0x00, tx_nonce: 1,
-        inputs: vec![TxInput { prev_txid, prev_vout: 0, script_sig: Vec::new(), sequence: 0 }],
-        outputs: vec![TxOutput { value: 900, covenant_type: COV_TYPE_P2PK, covenant_data: cov_data.clone() }],
-        locktime: 0, da_commit_core: None, da_chunk_core: None,
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 900,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data.clone(),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
         witness: vec![dummy_witness()],
         da_payload: Vec::new(),
     };
@@ -211,10 +292,23 @@ fn precompute_same_block_parent_child() {
     // tx1 spends tx0's output. tx0 is at block index 1 → txid = sha3(byte(1))
     let tx0_txid = sha3_256(&[1u8]);
     let tx1 = Tx {
-        version: 1, tx_kind: 0x00, tx_nonce: 2,
-        inputs: vec![TxInput { prev_txid: tx0_txid, prev_vout: 0, script_sig: Vec::new(), sequence: 0 }],
-        outputs: vec![TxOutput { value: 800, covenant_type: COV_TYPE_P2PK, covenant_data: cov_data }],
-        locktime: 0, da_commit_core: None, da_chunk_core: None,
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 2,
+        inputs: vec![TxInput {
+            prev_txid: tx0_txid,
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 800,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data,
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
         witness: vec![dummy_witness()],
         da_payload: Vec::new(),
     };
@@ -234,10 +328,23 @@ fn precompute_same_block_parent_child() {
 fn precompute_missing_utxo() {
     let prev_txid = sha3_256(b"nonexistent");
     let tx = Tx {
-        version: 1, tx_kind: 0x00, tx_nonce: 1,
-        inputs: vec![TxInput { prev_txid, prev_vout: 0, script_sig: Vec::new(), sequence: 0 }],
-        outputs: vec![TxOutput { value: 100, covenant_type: COV_TYPE_P2PK, covenant_data: valid_p2pk_covenant_data() }],
-        locktime: 0, da_commit_core: None, da_chunk_core: None,
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 100,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: valid_p2pk_covenant_data(),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
         witness: vec![dummy_witness()],
         da_payload: Vec::new(),
     };
@@ -251,19 +358,45 @@ fn precompute_duplicate_input() {
     let cov_data = valid_p2pk_covenant_data();
     let prev_txid = sha3_256(b"dup-input");
     let utxos = HashMap::from([(
-        Outpoint { txid: prev_txid, vout: 0 },
-        UtxoEntry { value: 1000, covenant_type: COV_TYPE_P2PK, covenant_data: cov_data.clone(),
-            creation_height: 0, created_by_coinbase: false },
+        Outpoint {
+            txid: prev_txid,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 1000,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data.clone(),
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
     )]);
 
     let tx = Tx {
-        version: 1, tx_kind: 0x00, tx_nonce: 1,
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
         inputs: vec![
-            TxInput { prev_txid, prev_vout: 0, script_sig: Vec::new(), sequence: 0 },
-            TxInput { prev_txid, prev_vout: 0, script_sig: Vec::new(), sequence: 0 },
+            TxInput {
+                prev_txid,
+                prev_vout: 0,
+                script_sig: Vec::new(),
+                sequence: 0,
+            },
+            TxInput {
+                prev_txid,
+                prev_vout: 0,
+                script_sig: Vec::new(),
+                sequence: 0,
+            },
         ],
-        outputs: vec![TxOutput { value: 100, covenant_type: COV_TYPE_P2PK, covenant_data: cov_data }],
-        locktime: 0, da_commit_core: None, da_chunk_core: None,
+        outputs: vec![TxOutput {
+            value: 100,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data,
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
         witness: vec![dummy_witness(), dummy_witness()],
         da_payload: Vec::new(),
     };
@@ -277,16 +410,37 @@ fn precompute_witness_underflow() {
     let cov_data = valid_p2pk_covenant_data();
     let prev_txid = sha3_256(b"witness-underflow");
     let utxos = HashMap::from([(
-        Outpoint { txid: prev_txid, vout: 0 },
-        UtxoEntry { value: 500, covenant_type: COV_TYPE_P2PK, covenant_data: cov_data.clone(),
-            creation_height: 0, created_by_coinbase: false },
+        Outpoint {
+            txid: prev_txid,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 500,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data.clone(),
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
     )]);
 
     let tx = Tx {
-        version: 1, tx_kind: 0x00, tx_nonce: 1,
-        inputs: vec![TxInput { prev_txid, prev_vout: 0, script_sig: Vec::new(), sequence: 0 }],
-        outputs: vec![TxOutput { value: 400, covenant_type: COV_TYPE_P2PK, covenant_data: cov_data }],
-        locktime: 0, da_commit_core: None, da_chunk_core: None,
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 400,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data,
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
         witness: vec![], // empty!
         da_payload: Vec::new(),
     };
@@ -300,16 +454,37 @@ fn precompute_witness_count_mismatch() {
     let cov_data = valid_p2pk_covenant_data();
     let prev_txid = sha3_256(b"witness-overflow");
     let utxos = HashMap::from([(
-        Outpoint { txid: prev_txid, vout: 0 },
-        UtxoEntry { value: 500, covenant_type: COV_TYPE_P2PK, covenant_data: cov_data.clone(),
-            creation_height: 0, created_by_coinbase: false },
+        Outpoint {
+            txid: prev_txid,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 500,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data.clone(),
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
     )]);
 
     let tx = Tx {
-        version: 1, tx_kind: 0x00, tx_nonce: 1,
-        inputs: vec![TxInput { prev_txid, prev_vout: 0, script_sig: Vec::new(), sequence: 0 }],
-        outputs: vec![TxOutput { value: 400, covenant_type: COV_TYPE_P2PK, covenant_data: cov_data }],
-        locktime: 0, da_commit_core: None, da_chunk_core: None,
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 400,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data,
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
         witness: vec![dummy_witness(), dummy_witness()], // extra
         da_payload: Vec::new(),
     };
@@ -323,16 +498,37 @@ fn precompute_outputs_exceed_inputs() {
     let cov_data = valid_p2pk_covenant_data();
     let prev_txid = sha3_256(b"value-overflow");
     let utxos = HashMap::from([(
-        Outpoint { txid: prev_txid, vout: 0 },
-        UtxoEntry { value: 100, covenant_type: COV_TYPE_P2PK, covenant_data: cov_data.clone(),
-            creation_height: 0, created_by_coinbase: false },
+        Outpoint {
+            txid: prev_txid,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data.clone(),
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
     )]);
 
     let tx = Tx {
-        version: 1, tx_kind: 0x00, tx_nonce: 1,
-        inputs: vec![TxInput { prev_txid, prev_vout: 0, script_sig: Vec::new(), sequence: 0 }],
-        outputs: vec![TxOutput { value: 200, covenant_type: COV_TYPE_P2PK, covenant_data: cov_data }],
-        locktime: 0, da_commit_core: None, da_chunk_core: None,
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 200,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data,
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
         witness: vec![dummy_witness()],
         da_payload: Vec::new(),
     };
@@ -345,16 +541,37 @@ fn precompute_outputs_exceed_inputs() {
 fn precompute_non_spendable_covenant() {
     let prev_txid = sha3_256(b"anchor-spend");
     let utxos = HashMap::from([(
-        Outpoint { txid: prev_txid, vout: 0 },
-        UtxoEntry { value: 100, covenant_type: COV_TYPE_ANCHOR, covenant_data: Vec::new(),
-            creation_height: 0, created_by_coinbase: false },
+        Outpoint {
+            txid: prev_txid,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_ANCHOR,
+            covenant_data: Vec::new(),
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
     )]);
 
     let tx = Tx {
-        version: 1, tx_kind: 0x00, tx_nonce: 1,
-        inputs: vec![TxInput { prev_txid, prev_vout: 0, script_sig: Vec::new(), sequence: 0 }],
-        outputs: vec![TxOutput { value: 50, covenant_type: COV_TYPE_P2PK, covenant_data: valid_p2pk_covenant_data() }],
-        locktime: 0, da_commit_core: None, da_chunk_core: None,
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 50,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: valid_p2pk_covenant_data(),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
         witness: vec![dummy_witness()],
         da_payload: Vec::new(),
     };
@@ -366,10 +583,23 @@ fn precompute_non_spendable_covenant() {
 #[test]
 fn precompute_coinbase_prevout_forbidden() {
     let tx = Tx {
-        version: 1, tx_kind: 0x00, tx_nonce: 1,
-        inputs: vec![TxInput { prev_txid: [0u8; 32], prev_vout: 0xffff_ffff, script_sig: Vec::new(), sequence: 0 }],
-        outputs: vec![TxOutput { value: 50, covenant_type: COV_TYPE_P2PK, covenant_data: valid_p2pk_covenant_data() }],
-        locktime: 0, da_commit_core: None, da_chunk_core: None,
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![TxInput {
+            prev_txid: [0u8; 32],
+            prev_vout: 0xffff_ffff,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 50,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: valid_p2pk_covenant_data(),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
         witness: vec![dummy_witness()],
         da_payload: Vec::new(),
     };
@@ -381,10 +611,18 @@ fn precompute_coinbase_prevout_forbidden() {
 #[test]
 fn precompute_no_inputs() {
     let tx = Tx {
-        version: 1, tx_kind: 0x00, tx_nonce: 1,
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
         inputs: vec![],
-        outputs: vec![TxOutput { value: 50, covenant_type: COV_TYPE_P2PK, covenant_data: valid_p2pk_covenant_data() }],
-        locktime: 0, da_commit_core: None, da_chunk_core: None,
+        outputs: vec![TxOutput {
+            value: 50,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: valid_p2pk_covenant_data(),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
         witness: vec![],
         da_payload: Vec::new(),
     };
@@ -397,18 +635,39 @@ fn precompute_no_inputs() {
 fn precompute_snapshot_not_mutated() {
     let cov_data = valid_p2pk_covenant_data();
     let prev_txid = sha3_256(b"snapshot-immutable");
-    let op = Outpoint { txid: prev_txid, vout: 0 };
+    let op = Outpoint {
+        txid: prev_txid,
+        vout: 0,
+    };
     let utxos = HashMap::from([(
         op.clone(),
-        UtxoEntry { value: 1000, covenant_type: COV_TYPE_P2PK, covenant_data: cov_data.clone(),
-            creation_height: 0, created_by_coinbase: false },
+        UtxoEntry {
+            value: 1000,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data.clone(),
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
     )]);
 
     let tx = Tx {
-        version: 1, tx_kind: 0x00, tx_nonce: 1,
-        inputs: vec![TxInput { prev_txid, prev_vout: 0, script_sig: Vec::new(), sequence: 0 }],
-        outputs: vec![TxOutput { value: 900, covenant_type: COV_TYPE_P2PK, covenant_data: cov_data }],
-        locktime: 0, da_commit_core: None, da_chunk_core: None,
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 900,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data,
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
         witness: vec![dummy_witness()],
         da_payload: Vec::new(),
     };

@@ -65,8 +65,7 @@ pub fn precompute_tx_contexts(
 
     // Working UTXO overlay: starts from immutable snapshot, tracks same-block
     // produced outputs. The original snapshot is never modified.
-    let mut overlay: HashMap<Outpoint, UtxoEntry> =
-        HashMap::with_capacity(utxo_snapshot.len());
+    let mut overlay: HashMap<Outpoint, UtxoEntry> = HashMap::with_capacity(utxo_snapshot.len());
     for (k, v) in utxo_snapshot {
         overlay.insert(k.clone(), v.clone());
     }
@@ -113,13 +112,12 @@ pub fn precompute_tx_contexts(
                 ));
             }
 
-            let entry = overlay.get(&op).cloned().ok_or_else(|| {
-                TxError::new(ErrorCode::TxErrMissingUtxo, "utxo not found")
-            })?;
+            let entry = overlay
+                .get(&op)
+                .cloned()
+                .ok_or_else(|| TxError::new(ErrorCode::TxErrMissingUtxo, "utxo not found"))?;
 
-            if entry.covenant_type == COV_TYPE_ANCHOR
-                || entry.covenant_type == COV_TYPE_DA_COMMIT
-            {
+            if entry.covenant_type == COV_TYPE_ANCHOR || entry.covenant_type == COV_TYPE_DA_COMMIT {
                 return Err(TxError::new(
                     ErrorCode::TxErrMissingUtxo,
                     "attempt to spend non-spendable covenant",
@@ -128,18 +126,13 @@ pub fn precompute_tx_contexts(
 
             let slots = witness_slots(entry.covenant_type, &entry.covenant_data)?;
             if slots == 0 {
-                return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "invalid witness slots",
-                ));
+                return Err(TxError::new(ErrorCode::TxErrParse, "invalid witness slots"));
             }
             total_witness_slots += slots;
 
-            sum_in = sum_in
-                .checked_add(u128::from(entry.value))
-                .ok_or_else(|| {
-                    TxError::new(ErrorCode::TxErrValueConservation, "input sum overflow")
-                })?;
+            sum_in = sum_in.checked_add(u128::from(entry.value)).ok_or_else(|| {
+                TxError::new(ErrorCode::TxErrValueConservation, "input sum overflow")
+            })?;
 
             resolved_inputs.push(entry);
             input_outpoints.push(op);
@@ -150,10 +143,7 @@ pub fn precompute_tx_contexts(
         let witness_start: usize = 0;
         let witness_end = total_witness_slots;
         if witness_end > tx.witness.len() {
-            return Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "witness underflow",
-            ));
+            return Err(TxError::new(ErrorCode::TxErrParse, "witness underflow"));
         }
         if witness_end != tx.witness.len() {
             return Err(TxError::new(
@@ -202,8 +192,7 @@ pub fn precompute_tx_contexts(
             overlay.remove(op);
         }
         for (j, output) in tx.outputs.iter().enumerate() {
-            if output.covenant_type == COV_TYPE_ANCHOR
-                || output.covenant_type == COV_TYPE_DA_COMMIT
+            if output.covenant_type == COV_TYPE_ANCHOR || output.covenant_type == COV_TYPE_DA_COMMIT
             {
                 continue;
             }
