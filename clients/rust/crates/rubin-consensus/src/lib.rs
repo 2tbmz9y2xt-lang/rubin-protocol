@@ -20,6 +20,7 @@ mod stealth;
 pub mod subsidy;
 pub mod suite_registry;
 pub mod tx;
+pub mod tx_dep_graph;
 mod tx_helpers;
 pub mod txcontext;
 mod utxo_basic;
@@ -75,6 +76,9 @@ pub use suite_registry::{
     RotationProvider, SuiteParams, SuiteRegistry,
 };
 pub use tx::{parse_tx, DaChunkCore, DaCommitCore, Tx, TxInput, TxOutput, WitnessItem};
+pub use tx_dep_graph::{
+    build_tx_dep_graph, TxDepEdge, TxDepEdgeKind, TxDepGraph, TxValidationContext,
+};
 pub use tx_helpers::{marshal_tx, p2pk_covenant_data_for_pubkey, sign_transaction, DigestSigner};
 pub use txcontext::{
     build_tx_context, build_tx_context_output_ext_id_cache, ExtIdCacheEntry, TxContextBase,
