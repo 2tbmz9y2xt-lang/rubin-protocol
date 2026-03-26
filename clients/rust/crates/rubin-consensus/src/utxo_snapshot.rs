@@ -5,19 +5,10 @@ use crate::tx::Tx;
 use crate::utxo_basic::{Outpoint, UtxoEntry};
 
 /// Immutable block-start view of the UTXO set for read-only input resolution.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UtxoSnapshot {
     utxos: HashMap<Outpoint, UtxoEntry>,
     count: usize,
-}
-
-impl Default for UtxoSnapshot {
-    fn default() -> Self {
-        Self {
-            utxos: HashMap::new(),
-            count: 0,
-        }
-    }
 }
 
 impl UtxoSnapshot {
