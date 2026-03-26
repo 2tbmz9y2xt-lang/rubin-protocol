@@ -52,8 +52,11 @@ impl Default for SigCheckQueue {
 
 impl Drop for SigCheckQueue {
     fn drop(&mut self) {
-        if !self.tasks.is_empty() && !std::thread::panicking() {
-            panic!("SigCheckQueue dropped with unflushed tasks");
+        if self.tasks.is_empty() || std::thread::panicking() {
+            return;
+        }
+        if let Err(err) = self.flush() {
+            panic!("SigCheckQueue drop flush failed: {err}");
         }
     }
 }
@@ -539,8 +542,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "SigCheckQueue dropped with unflushed tasks")]
-    fn sig_check_queue_drop_panics_when_tasks_remain() {
+    fn sig_check_queue_drop_flushes_valid_tasks() {
         let keypair = Mldsa87Keypair::generate().expect("keypair");
         let digest = [0x77; 32];
         let sig = keypair.sign_digest32(digest).expect("sign");
@@ -551,6 +553,21 @@ mod tests {
                 &keypair.pubkey_bytes(),
                 &sig,
                 digest,
+                TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
+            )
+            .expect("enqueue");
+    }
+
+    #[test]
+    #[should_panic(expected = "SigCheckQueue drop flush failed")]
+    fn sig_check_queue_drop_panics_on_invalid_pending_task() {
+        let mut queue = SigCheckQueue::new(1);
+        queue
+            .push(
+                0xfe,
+                b"fake-pubkey",
+                b"fake-sig",
+                [0u8; 32],
                 TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
             )
             .expect("enqueue");
