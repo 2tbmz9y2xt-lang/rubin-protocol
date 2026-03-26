@@ -2,11 +2,11 @@ use crate::constants::{MAX_BLOCK_WEIGHT, WITNESS_DISCOUNT_DIVISOR};
 use crate::error::{ErrorCode, TxError};
 use crate::suite_registry::SuiteRegistry;
 use crate::verify_sig_openssl::{verify_sig, verify_sig_with_registry};
-use std::mem::size_of;
 
 const MAX_SIGCHECK_QUEUE_BYTES: usize =
     (MAX_BLOCK_WEIGHT as usize) * (WITNESS_DISCOUNT_DIVISOR as usize);
 const MAX_SIGCHECK_QUEUE_TASKS: usize = MAX_BLOCK_WEIGHT as usize;
+const SIGCHECK_TASK_FIXED_OVERHEAD_BYTES: usize = 1 + 32 + 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SigCheckTask {
@@ -220,7 +220,7 @@ fn next_queued_bytes(current: usize, task_bytes: usize) -> Result<usize, TxError
 }
 
 fn sigcheck_task_bytes(pubkey_len: usize, sig_len: usize) -> Result<usize, TxError> {
-    size_of::<SigCheckTask>()
+    SIGCHECK_TASK_FIXED_OVERHEAD_BYTES
         .checked_add(pubkey_len)
         .and_then(|next| next.checked_add(sig_len))
         .ok_or_else(|| {
@@ -642,6 +642,12 @@ mod tests {
             )
             .expect_err("byte budget overflow must fail closed");
         assert_eq!(err.code, ErrorCode::TxErrWitnessOverflow);
+    }
+
+    #[test]
+    fn sigcheck_task_bytes_is_architecture_independent() {
+        let bytes = sigcheck_task_bytes(10, 20).expect("accounting");
+        assert_eq!(bytes, SIGCHECK_TASK_FIXED_OVERHEAD_BYTES + 30);
     }
 
     #[test]
