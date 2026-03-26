@@ -1,14 +1,14 @@
 use crate::constants::{MAX_P2PK_COVENANT_DATA, SUITE_ID_SENTINEL};
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
+use crate::sig_queue::{queue_or_verify_signature, SigCheckQueue};
 use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_cache, SighashV1PrehashCache};
 use crate::suite_registry::{DefaultRotationProvider, RotationProvider, SuiteRegistry};
 use crate::tx::Tx;
 use crate::tx::WitnessItem;
 use crate::utxo_basic::UtxoEntry;
-use crate::verify_sig_openssl::verify_sig_with_registry;
 
-fn extract_crypto_sig_and_sighash(w: &WitnessItem) -> Result<(&[u8], u8), TxError> {
+pub(crate) fn extract_crypto_sig_and_sighash(w: &WitnessItem) -> Result<(&[u8], u8), TxError> {
     let Some((&sighash_type, crypto_sig)) = w.signature.split_last() else {
         return Err(TxError::new(
             ErrorCode::TxErrParse,
@@ -87,6 +87,33 @@ pub(crate) fn validate_p2pk_spend_at_height(
     rotation: Option<&dyn RotationProvider>,
     registry: Option<&SuiteRegistry>,
 ) -> Result<(), TxError> {
+    validate_p2pk_spend_q(
+        entry,
+        w,
+        input_index,
+        input_value,
+        chain_id,
+        block_height,
+        cache,
+        None,
+        rotation,
+        registry,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_p2pk_spend_q(
+    entry: &UtxoEntry,
+    w: &WitnessItem,
+    input_index: u32,
+    input_value: u64,
+    chain_id: [u8; 32],
+    block_height: u64,
+    cache: &mut SighashV1PrehashCache<'_>,
+    sig_queue: Option<&mut SigCheckQueue>,
+    rotation: Option<&dyn RotationProvider>,
+    registry: Option<&SuiteRegistry>,
+) -> Result<(), TxError> {
     let default_rp = DefaultRotationProvider;
     let default_reg = SuiteRegistry::default_registry();
     let rp: &dyn RotationProvider = rotation.unwrap_or(&default_rp);
@@ -124,23 +151,19 @@ pub(crate) fn validate_p2pk_spend_at_height(
     }
     let mut key_id = [0u8; 32];
     key_id.copy_from_slice(&entry.covenant_data[1..33]);
-    if sha3_256(&w.pubkey) != key_id {
-        return Err(TxError::new(
-            ErrorCode::TxErrSigInvalid,
-            "CORE_P2PK key binding mismatch",
-        ));
-    }
-    let (crypto_sig, sighash_type) = extract_crypto_sig_and_sighash(w)?;
-    let digest =
-        sighash_v1_digest_with_cache(cache, input_index, input_value, chain_id, sighash_type)?;
-    let ok = verify_sig_with_registry(w.suite_id, &w.pubkey, crypto_sig, &digest, Some(reg))?;
-    if !ok {
-        return Err(TxError::new(
-            ErrorCode::TxErrSigInvalid,
-            "CORE_P2PK signature invalid",
-        ));
-    }
-    Ok(())
+    let mut sig_queue = sig_queue;
+    verify_mldsa_key_and_sig_q(
+        w,
+        key_id,
+        input_index,
+        input_value,
+        chain_id,
+        cache,
+        reg,
+        &mut sig_queue,
+        TxError::new(ErrorCode::TxErrSigInvalid, "CORE_P2PK key binding mismatch"),
+        TxError::new(ErrorCode::TxErrSigInvalid, "CORE_P2PK signature invalid"),
+    )
 }
 
 #[allow(dead_code)]
@@ -218,10 +241,42 @@ pub(crate) fn validate_threshold_sig_spend_at_height(
     rotation: Option<&dyn RotationProvider>,
     registry: Option<&SuiteRegistry>,
 ) -> Result<(), TxError> {
+    validate_threshold_sig_spend_q(
+        keys,
+        threshold,
+        ws,
+        input_index,
+        input_value,
+        chain_id,
+        block_height,
+        context,
+        cache,
+        None,
+        rotation,
+        registry,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_threshold_sig_spend_q(
+    keys: &[[u8; 32]],
+    threshold: u8,
+    ws: &[WitnessItem],
+    input_index: u32,
+    input_value: u64,
+    chain_id: [u8; 32],
+    block_height: u64,
+    context: &'static str,
+    cache: &mut SighashV1PrehashCache<'_>,
+    sig_queue: Option<&mut SigCheckQueue>,
+    rotation: Option<&dyn RotationProvider>,
+    registry: Option<&SuiteRegistry>,
+) -> Result<(), TxError> {
     let default_rp = DefaultRotationProvider;
     let default_reg = SuiteRegistry::default_registry();
     let rp: &dyn RotationProvider = rotation.unwrap_or(&default_rp);
     let reg = registry.unwrap_or(&default_reg);
+    let mut sig_queue = sig_queue;
 
     if ws.len() != keys.len() {
         return Err(TxError::new(
@@ -262,22 +317,54 @@ pub(crate) fn validate_threshold_sig_spend_at_height(
             ));
         }
 
-        if sha3_256(&w.pubkey) != keys[i] {
-            return Err(TxError::new(ErrorCode::TxErrSigInvalid, context));
-        }
-        let (crypto_sig, sighash_type) = extract_crypto_sig_and_sighash(w)?;
-        let digest =
-            sighash_v1_digest_with_cache(cache, input_index, input_value, chain_id, sighash_type)?;
-        let ok = verify_sig_with_registry(w.suite_id, &w.pubkey, crypto_sig, &digest, Some(reg))?;
-        if !ok {
-            return Err(TxError::new(ErrorCode::TxErrSigInvalid, context));
-        }
+        verify_mldsa_key_and_sig_q(
+            w,
+            keys[i],
+            input_index,
+            input_value,
+            chain_id,
+            cache,
+            reg,
+            &mut sig_queue,
+            TxError::new(ErrorCode::TxErrSigInvalid, context),
+            TxError::new(ErrorCode::TxErrSigInvalid, context),
+        )?;
         valid = valid.saturating_add(1);
     }
     if valid < threshold {
         return Err(TxError::new(ErrorCode::TxErrSigInvalid, context));
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn verify_mldsa_key_and_sig_q(
+    w: &WitnessItem,
+    expected_key_id: [u8; 32],
+    input_index: u32,
+    input_value: u64,
+    chain_id: [u8; 32],
+    cache: &mut SighashV1PrehashCache<'_>,
+    registry: &SuiteRegistry,
+    sig_queue: &mut Option<&mut SigCheckQueue>,
+    key_binding_error: TxError,
+    invalid_sig_error: TxError,
+) -> Result<(), TxError> {
+    if sha3_256(&w.pubkey) != expected_key_id {
+        return Err(key_binding_error);
+    }
+    let (crypto_sig, sighash_type) = extract_crypto_sig_and_sighash(w)?;
+    let digest =
+        sighash_v1_digest_with_cache(cache, input_index, input_value, chain_id, sighash_type)?;
+    queue_or_verify_signature(
+        w.suite_id,
+        &w.pubkey,
+        crypto_sig,
+        digest,
+        registry,
+        sig_queue,
+        invalid_sig_error,
+    )
 }
 
 #[cfg(test)]
