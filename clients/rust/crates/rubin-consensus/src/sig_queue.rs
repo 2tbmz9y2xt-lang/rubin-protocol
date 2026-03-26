@@ -21,27 +21,22 @@ struct SigCheckTask {
 ///
 /// This slice intentionally keeps Flush deterministic and sequential. The
 /// bounded parallel executor belongs to the follow-up SIG-BATCH task; mixing it
-/// in here created Rust-only panic/error behavior that diverged from the queue
-/// primitive's acceptance gate.
-///
-/// When no caller wires this queue into block validation, the sequential path
-/// still verifies inline. Callers that do use the queue must flush it before
-/// accepting a block; dropping a non-empty queue panics fail-closed so queued
-/// signatures cannot be silently skipped.
-#[must_use = "SigCheckQueue must be flushed before block acceptance"]
+/// in here created Rust-only panic/error behavior that diverged from this
+/// queue primitive's acceptance gate.
 #[derive(Debug, Default)]
-pub struct SigCheckQueue {
+pub(crate) struct SigCheckQueue {
     tasks: Vec<SigCheckTask>,
     queued_bytes: usize,
     registry: Option<SuiteRegistry>,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl SigCheckQueue {
-    pub fn new(_workers: usize) -> Self {
+    pub(crate) fn new(_workers: usize) -> Self {
         Self::default()
     }
 
-    pub fn with_registry(mut self, registry: &SuiteRegistry) -> Self {
+    pub(crate) fn with_registry(mut self, registry: &SuiteRegistry) -> Self {
         self.registry = Some(registry.clone());
         self
     }
@@ -65,31 +60,22 @@ impl SigCheckQueue {
         Ok(())
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.tasks.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.tasks.is_empty()
     }
 
-    pub fn assert_flushed(&self) -> Result<(), TxError> {
-        if self.tasks.is_empty() && self.queued_bytes == 0 {
-            return Ok(());
-        }
-        Err(TxError::new(
-            ErrorCode::TxErrSigInvalid,
-            "SigCheckQueue has unflushed tasks — signature bypass risk",
-        ))
-    }
-
-    pub fn flush(&mut self) -> Result<(), TxError> {
+    pub(crate) fn flush(&mut self) -> Result<(), TxError> {
         if self.tasks.is_empty() {
             return Ok(());
         }
 
+        let tasks = std::mem::take(&mut self.tasks);
         self.queued_bytes = 0;
-        for task in self.tasks.drain(..) {
+        for task in tasks {
             verify_queued_task(task, self.registry.as_ref())?;
         }
         Ok(())
@@ -134,6 +120,7 @@ pub(crate) fn queue_or_verify_signature(
     Ok(())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn verify_queued_task(task: SigCheckTask, registry: Option<&SuiteRegistry>) -> Result<(), TxError> {
     let ok = match registry {
         Some(registry) => verify_sig_with_registry(
@@ -165,14 +152,6 @@ fn next_queued_bytes(current: usize, task_bytes: usize) -> Result<usize, TxError
         ));
     }
     Ok(next)
-}
-
-impl Drop for SigCheckQueue {
-    fn drop(&mut self) {
-        if !std::thread::panicking() && (!self.tasks.is_empty() || self.queued_bytes != 0) {
-            panic!("SigCheckQueue dropped with unflushed tasks");
-        }
-    }
 }
 
 #[cfg(test)]
@@ -359,7 +338,7 @@ mod tests {
             )
             .expect("enqueue batch one");
         queue.flush().expect("first flush");
-        queue.assert_flushed().expect("queue empty");
+        assert!(queue.is_empty(), "queue empty after first flush");
 
         queue
             .push(
@@ -371,7 +350,7 @@ mod tests {
             )
             .expect("enqueue batch two");
         queue.flush().expect("second flush");
-        queue.assert_flushed().expect("queue empty again");
+        assert!(queue.is_empty(), "queue empty after second flush");
     }
 
     #[test]
@@ -414,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn sig_check_queue_assert_flushed_unflushed() {
+    fn sig_check_queue_len_tracks_unflushed_tasks() {
         let keypair = Mldsa87Keypair::generate().expect("keypair");
         let digest = [0x44; 32];
         let sig = keypair.sign_digest32(digest).expect("sign");
@@ -430,10 +409,8 @@ mod tests {
             )
             .expect("enqueue");
 
-        let err = queue
-            .assert_flushed()
-            .expect_err("must detect unflushed queue");
-        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+        assert_eq!(queue.len(), 1);
+        assert!(!queue.is_empty());
         queue.flush().expect("cleanup flush");
     }
 
@@ -525,8 +502,10 @@ mod tests {
 
     #[test]
     fn sig_check_queue_rejects_byte_budget_overflow() {
-        let mut queue = SigCheckQueue::default();
-        queue.queued_bytes = MAX_SIGCHECK_QUEUE_BYTES;
+        let mut queue = SigCheckQueue {
+            queued_bytes: MAX_SIGCHECK_QUEUE_BYTES,
+            ..SigCheckQueue::default()
+        };
 
         let err = queue
             .push(
@@ -538,7 +517,6 @@ mod tests {
             )
             .expect_err("byte budget overflow must fail closed");
         assert_eq!(err.code, ErrorCode::TxErrWitnessOverflow);
-        queue.queued_bytes = 0;
     }
 
     #[test]
@@ -573,7 +551,7 @@ mod tests {
         .expect("queued p2pk");
         assert_eq!(queue.len(), 1);
         queue.flush().expect("flush");
-        queue.assert_flushed().expect("empty");
+        assert!(queue.is_empty(), "queue empty after flush");
     }
 
     #[test]
