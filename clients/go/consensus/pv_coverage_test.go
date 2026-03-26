@@ -90,11 +90,14 @@ func TestPV14_RunTxValidationWorkers_ValidP2PK(t *testing.T) {
 		Fee:          10,
 	}
 
-	results := RunTxValidationWorkers(
+	results, err := RunTxValidationWorkers(
 		context.Background(), 2,
 		[]TxValidationContext{tvc},
 		[32]byte{}, 1, 0, nil, nil,
 	)
+	if err != nil {
+		t.Fatalf("RunTxValidationWorkers: %v", err)
+	}
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}
@@ -143,7 +146,10 @@ func TestPV14_RunTxValidationWorkers_WithSigCache(t *testing.T) {
 	cache := NewSigCache(100)
 
 	// First run: no cache hits.
-	results1 := RunTxValidationWorkers(context.Background(), 1, []TxValidationContext{tvc}, [32]byte{}, 1, 0, nil, cache)
+	results1, err := RunTxValidationWorkers(context.Background(), 1, []TxValidationContext{tvc}, [32]byte{}, 1, 0, nil, cache)
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
 	if results1[0].Err != nil {
 		t.Fatalf("first run: %v", results1[0].Err)
 	}
@@ -152,7 +158,10 @@ func TestPV14_RunTxValidationWorkers_WithSigCache(t *testing.T) {
 	}
 
 	// Second run: should get cache hit.
-	results2 := RunTxValidationWorkers(context.Background(), 1, []TxValidationContext{tvc}, [32]byte{}, 1, 0, nil, cache)
+	results2, err := RunTxValidationWorkers(context.Background(), 1, []TxValidationContext{tvc}, [32]byte{}, 1, 0, nil, cache)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
 	if results2[0].Err != nil {
 		t.Fatalf("second run: %v", results2[0].Err)
 	}
@@ -181,7 +190,10 @@ func TestPV14_RunTxValidationWorkers_CancelledContext(t *testing.T) {
 		WitnessStart:   0, WitnessEnd: 1, SighashCache: sighashCache, Fee: 10,
 	}
 
-	results := RunTxValidationWorkers(ctx, 1, []TxValidationContext{tvc}, [32]byte{}, 1, 0, nil, nil)
+	results, err := RunTxValidationWorkers(ctx, 1, []TxValidationContext{tvc}, [32]byte{}, 1, 0, nil, nil)
+	if err != nil {
+		t.Fatalf("RunTxValidationWorkers: %v", err)
+	}
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}
@@ -338,11 +350,15 @@ func TestPV14_DeterministicReplay_MultiTxBlock_Parity(t *testing.T) {
 func TestPV14_WorkerPool_EmptyTasks(t *testing.T) {
 	pool := &WorkerPool[int, int]{
 		MaxWorkers: 4,
+		MaxTasks:   8,
 		Func: func(ctx context.Context, task int) (int, error) {
 			return task * 2, nil
 		},
 	}
-	results := pool.Run(context.Background(), nil)
+	results, err := pool.Run(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected run error: %v", err)
+	}
 	if len(results) != 0 {
 		t.Fatalf("expected nil results, got %v", results)
 	}
@@ -351,6 +367,7 @@ func TestPV14_WorkerPool_EmptyTasks(t *testing.T) {
 func TestPV14_WorkerPool_PanicRecovery(t *testing.T) {
 	pool := &WorkerPool[int, int]{
 		MaxWorkers: 2,
+		MaxTasks:   8,
 		Func: func(ctx context.Context, task int) (int, error) {
 			if task == 1 {
 				panic("deliberate panic")
@@ -358,7 +375,10 @@ func TestPV14_WorkerPool_PanicRecovery(t *testing.T) {
 			return task * 2, nil
 		},
 	}
-	results := pool.Run(context.Background(), []int{0, 1, 2})
+	results, err := pool.Run(context.Background(), []int{0, 1, 2})
+	if err != nil {
+		t.Fatalf("unexpected run error: %v", err)
+	}
 	if len(results) != 3 {
 		t.Fatalf("expected 3 results, got %d", len(results))
 	}

@@ -2,14 +2,32 @@ package consensus
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
 )
 
+var ErrWorkerPoolInvalidMaxTasks = errors.New("worker pool max_tasks must be positive")
+
+const fixedWorkerPanicMessage = "worker panic"
+
+type WorkerPoolRunError struct {
+	TaskCount int
+	MaxTasks  int
+}
+
+func (e *WorkerPoolRunError) Error() string {
+	return fmt.Sprintf("worker pool task count %d exceeds configured limit %d", e.TaskCount, e.MaxTasks)
+}
+
 // WorkerPool executes a batch of typed tasks in parallel using a bounded
 // goroutine pool. Results are returned in submission order regardless of
 // scheduling, ensuring deterministic output for consensus-critical pipelines.
+//
+// Callers must also provide a canonical MaxTasks bound derived from the block-
+// level surface they are parallelizing. The worker pool itself must not accept
+// unbounded task counts from adversarial inputs.
 //
 // The pool is single-use: call Run once. For repeated batches, create a new
 // pool each time.
@@ -25,6 +43,10 @@ type WorkerPool[T any, R any] struct {
 	// MaxWorkers is the maximum number of concurrent goroutines.
 	// If <= 0, defaults to GOMAXPROCS.
 	MaxWorkers int
+
+	// MaxTasks is the maximum number of submitted tasks accepted by this run.
+	// Callers must derive this from canonical block-level limits.
+	MaxTasks int
 
 	// Func is the work function applied to each task. It receives a context
 	// (for cancellation) and the task value, and returns a result or error.
@@ -46,10 +68,16 @@ type WorkerResult[R any] struct {
 //
 // If a task panics, the panic is recovered and converted to an error result.
 // Other tasks are unaffected.
-func (p *WorkerPool[T, R]) Run(ctx context.Context, tasks []T) []WorkerResult[R] {
+func (p *WorkerPool[T, R]) Run(ctx context.Context, tasks []T) ([]WorkerResult[R], error) {
 	n := len(tasks)
 	if n == 0 {
-		return nil
+		return nil, nil
+	}
+	if p.MaxTasks <= 0 {
+		return nil, ErrWorkerPoolInvalidMaxTasks
+	}
+	if n > p.MaxTasks {
+		return nil, &WorkerPoolRunError{TaskCount: n, MaxTasks: p.MaxTasks}
 	}
 
 	workers := p.MaxWorkers
@@ -68,7 +96,7 @@ func (p *WorkerPool[T, R]) Run(ctx context.Context, tasks []T) []WorkerResult[R]
 	// Single task: run inline to avoid goroutine overhead.
 	if n == 1 {
 		results[0] = p.execTask(ctx, tasks[0])
-		return results
+		return results, nil
 	}
 
 	// Fan out via buffered channel of indices.
@@ -90,7 +118,7 @@ func (p *WorkerPool[T, R]) Run(ctx context.Context, tasks []T) []WorkerResult[R]
 	}
 
 	wg.Wait()
-	return results
+	return results, nil
 }
 
 // execTask runs a single task with panic recovery and context check.
@@ -103,7 +131,7 @@ func (p *WorkerPool[T, R]) execTask(ctx context.Context, task T) (result WorkerR
 
 	defer func() {
 		if r := recover(); r != nil {
-			result.Err = fmt.Errorf("worker panic: %v", r)
+			result.Err = errors.New(fixedWorkerPanicMessage)
 		}
 	}()
 
@@ -118,11 +146,13 @@ func (p *WorkerPool[T, R]) execTask(ctx context.Context, task T) (result WorkerR
 func RunFunc[T any, R any](
 	ctx context.Context,
 	maxWorkers int,
+	maxTasks int,
 	tasks []T,
 	fn func(ctx context.Context, task T) (R, error),
-) []WorkerResult[R] {
+) ([]WorkerResult[R], error) {
 	pool := &WorkerPool[T, R]{
 		MaxWorkers: maxWorkers,
+		MaxTasks:   maxTasks,
 		Func:       fn,
 	}
 	return pool.Run(ctx, tasks)

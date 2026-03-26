@@ -271,7 +271,8 @@ func validateCoreExtSpendQ(
 
 // RunTxValidationWorkers validates multiple transactions in parallel using
 // WorkerPool. Returns results in submission order; use FirstTxError to get
-// the first failing transaction.
+// the first failing transaction. Returns a run error only if the worker-pool
+// substrate itself rejects the batch before task execution starts.
 func RunTxValidationWorkers(
 	ctx context.Context,
 	maxWorkers int,
@@ -281,8 +282,8 @@ func RunTxValidationWorkers(
 	blockMTP uint64,
 	coreExtProfiles CoreExtProfileProvider,
 	sigCache *SigCache,
-) []WorkerResult[TxValidationResult] {
-	return RunFunc(ctx, maxWorkers, txcs, func(ctx context.Context, tvc TxValidationContext) (TxValidationResult, error) {
+) ([]WorkerResult[TxValidationResult], error) {
+	return RunFunc(ctx, maxWorkers, len(txcs), txcs, func(ctx context.Context, tvc TxValidationContext) (TxValidationResult, error) {
 		r := ValidateTxLocal(tvc, chainID, blockHeight, blockMTP, coreExtProfiles, sigCache)
 		if r.Err != nil {
 			return r, r.Err
