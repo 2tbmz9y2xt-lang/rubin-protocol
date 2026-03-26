@@ -12,7 +12,7 @@ use crate::p2p_runtime::{
     perform_version_handshake, PeerManager, PeerRelayContext, PeerRuntimeConfig, VersionPayloadV1,
 };
 use crate::tx_relay::{PeerOutbox, TxRelayState};
-use crate::SyncEngine;
+use crate::{SyncEngine, TxPool};
 
 const ACCEPT_LOOP_SLEEP: Duration = Duration::from_millis(100);
 const RECONNECT_LOOP_SLEEP: Duration = Duration::from_millis(250);
@@ -39,6 +39,7 @@ pub struct NodeP2PServiceConfig {
     pub runtime_cfg: PeerRuntimeConfig,
     pub peer_manager: Arc<PeerManager>,
     pub sync_engine: Arc<Mutex<SyncEngine>>,
+    pub tx_pool: Arc<Mutex<TxPool>>,
     pub chain_id: [u8; 32],
     pub genesis_hash: [u8; 32],
 }
@@ -59,6 +60,7 @@ struct SharedServiceState {
     worker_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
     peer_manager: Arc<PeerManager>,
     sync_engine: Arc<Mutex<SyncEngine>>,
+    tx_pool: Arc<Mutex<TxPool>>,
     bootstrap_peers: Arc<Vec<String>>,
     bootstrap_rotate_idx: Arc<AtomicUsize>,
     in_flight_dials: Arc<Mutex<HashSet<String>>>,
@@ -143,6 +145,7 @@ pub fn start_node_p2p_service(cfg: NodeP2PServiceConfig) -> Result<RunningNodeP2
         worker_handles: Arc::new(Mutex::new(Vec::new())),
         peer_manager: cfg.peer_manager,
         sync_engine: cfg.sync_engine,
+        tx_pool: cfg.tx_pool,
         bootstrap_peers: Arc::new(cfg.bootstrap_peers),
         bootstrap_rotate_idx: Arc::new(AtomicUsize::new(0)),
         in_flight_dials: Arc::new(Mutex::new(HashSet::new())),
@@ -754,9 +757,14 @@ fn handle_peer(
                 .sync_engine
                 .lock()
                 .map_err(|_| "sync engine unavailable".to_string())?;
+            let mut tx_pool = shared
+                .tx_pool
+                .lock()
+                .map_err(|_| "tx pool unavailable".to_string())?;
             let responses = session
-                .collect_live_responses(msg, &mut engine, Some(&relay_ctx))
+                .collect_live_responses(msg, &mut engine, Some(&mut tx_pool), Some(&relay_ctx))
                 .map_err(|err| format!("handle live message: {err}"))?;
+            drop(tx_pool);
             drop(engine);
             responses
         };
@@ -873,7 +881,9 @@ mod tests {
     };
     use crate::tx_relay::PeerOutbox;
     use crate::tx_relay::TxRelayState;
-    use crate::{block_store_path, default_sync_config, BlockStore, ChainState, SyncEngine};
+    use crate::{
+        block_store_path, default_sync_config, BlockStore, ChainState, SyncEngine, TxPool,
+    };
     use std::collections::HashMap;
 
     fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
@@ -911,6 +921,7 @@ mod tests {
             worker_handles: Arc::new(Mutex::new(Vec::new())),
             peer_manager: Arc::new(PeerManager::new(runtime_cfg)),
             sync_engine,
+            tx_pool: Arc::new(Mutex::new(TxPool::new())),
             bootstrap_peers: Arc::new(bootstrap_peers),
             bootstrap_rotate_idx: Arc::new(AtomicUsize::new(0)),
             in_flight_dials: Arc::new(Mutex::new(HashSet::new())),
@@ -1332,6 +1343,7 @@ mod tests {
             runtime_cfg: runtime_cfg.clone(),
             peer_manager: Arc::new(PeerManager::new(runtime_cfg.clone())),
             sync_engine,
+            tx_pool: Arc::new(Mutex::new(TxPool::new())),
             chain_id: devnet_genesis_chain_id(),
             genesis_hash: test_genesis_hash(),
         })
@@ -1385,6 +1397,7 @@ mod tests {
             runtime_cfg: default_peer_runtime_config("devnet", 8),
             peer_manager: Arc::clone(&peer_manager),
             sync_engine,
+            tx_pool: Arc::new(Mutex::new(TxPool::new())),
             chain_id: devnet_genesis_chain_id(),
             genesis_hash: test_genesis_hash(),
         })
@@ -1420,6 +1433,7 @@ mod tests {
             runtime_cfg: runtime_cfg.clone(),
             peer_manager,
             sync_engine,
+            tx_pool: Arc::new(Mutex::new(TxPool::new())),
             chain_id: devnet_genesis_chain_id(),
             genesis_hash: test_genesis_hash(),
         })
@@ -1869,6 +1883,7 @@ mod tests {
             runtime_cfg,
             peer_manager,
             sync_engine,
+            tx_pool: Arc::new(Mutex::new(TxPool::new())),
             chain_id: devnet_genesis_chain_id(),
             genesis_hash: test_genesis_hash(),
         });

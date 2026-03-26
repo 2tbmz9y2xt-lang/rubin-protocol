@@ -13,6 +13,7 @@ use rubin_consensus::{
 use sha3::{Digest, Sha3_256};
 
 use crate::sync::SyncEngine;
+use crate::txpool::TxPool;
 
 /// Maximum reasonable best_height delta before clamping peer claims.
 /// Prevents malicious peers from forcing unnecessary sync with absurdly high values.
@@ -387,7 +388,7 @@ impl PeerSession {
                     })?;
                 }
                 MESSAGE_BLOCK => {
-                    self.handle_block(&msg.payload, sync_engine)?;
+                    self.handle_block(&msg.payload, sync_engine, None)?;
                     self.request_more_blocks_if_behind(sync_engine)?;
                 }
                 MESSAGE_TX | "headers" | "pong" => {}
@@ -439,6 +440,7 @@ impl PeerSession {
         &mut self,
         msg: WireMessage,
         sync_engine: &mut SyncEngine,
+        tx_pool: Option<&mut TxPool>,
         relay_ctx: Option<&PeerRelayContext<'_>>,
     ) -> io::Result<Vec<WireMessage>> {
         if msg.payload.len() > MAX_RELAY_MSG_BYTES as usize {
@@ -481,7 +483,7 @@ impl PeerSession {
                 }
             }
             MESSAGE_BLOCK => {
-                self.handle_block(&msg.payload, sync_engine)?;
+                self.handle_block(&msg.payload, sync_engine, tx_pool)?;
                 Ok(self
                     .prepare_block_request_if_behind(sync_engine)?
                     .into_iter()
@@ -525,9 +527,10 @@ impl PeerSession {
         &mut self,
         msg: WireMessage,
         sync_engine: &mut SyncEngine,
+        tx_pool: Option<&mut TxPool>,
         relay_ctx: Option<&PeerRelayContext<'_>>,
     ) -> io::Result<()> {
-        for response in self.collect_live_responses(msg, sync_engine, relay_ctx)? {
+        for response in self.collect_live_responses(msg, sync_engine, tx_pool, relay_ctx)? {
             self.write_message(&response)?;
         }
         Ok(())
@@ -607,6 +610,7 @@ impl PeerSession {
         &mut self,
         block_bytes: &[u8],
         sync_engine: &mut SyncEngine,
+        mut tx_pool: Option<&mut TxPool>,
     ) -> io::Result<()> {
         let parsed = parse_block_bytes(block_bytes).map_err(io::Error::other)?;
         let block_hash_bytes = block_hash(&parsed.header_bytes).map_err(io::Error::other)?;
@@ -626,13 +630,14 @@ impl PeerSession {
                 parsed.header.prev_block_hash,
                 block_bytes,
                 sync_engine,
+                tx_pool.as_deref_mut(),
             )?;
             return Ok(());
         }
-        match sync_engine.apply_block_with_reorg(block_bytes, None, None) {
+        match sync_engine.apply_block_with_reorg(block_bytes, None, tx_pool.as_deref_mut()) {
             Ok(summary) => {
                 sync_engine.record_best_known_height(summary.block_height);
-                self.resolve_orphans(block_hash_bytes, sync_engine)?;
+                self.resolve_orphans(block_hash_bytes, sync_engine, tx_pool.as_deref_mut())?;
             }
             Err(err) if is_parent_not_found_err(&err) => {
                 return Err(io::Error::other(format!(
@@ -650,6 +655,7 @@ impl PeerSession {
         parent_hash: [u8; 32],
         block_bytes: &[u8],
         sync_engine: &mut SyncEngine,
+        tx_pool: Option<&mut TxPool>,
     ) -> io::Result<()> {
         self.orphans.add(
             block_hash,
@@ -661,7 +667,7 @@ impl PeerSession {
             .has_block(parent_hash)
             .map_err(io::Error::other)?
         {
-            self.resolve_orphans(parent_hash, sync_engine)?;
+            self.resolve_orphans(parent_hash, sync_engine, tx_pool)?;
         }
         Ok(())
     }
@@ -670,10 +676,15 @@ impl PeerSession {
         &mut self,
         parent_hash: [u8; 32],
         sync_engine: &mut SyncEngine,
+        mut tx_pool: Option<&mut TxPool>,
     ) -> io::Result<()> {
         let mut ready = self.orphans.take_children(parent_hash);
         while let Some(child) = ready.pop() {
-            match sync_engine.apply_block_with_reorg(&child.block_bytes, None, None) {
+            match sync_engine.apply_block_with_reorg(
+                &child.block_bytes,
+                None,
+                tx_pool.as_deref_mut(),
+            ) {
                 Ok(summary) => {
                     sync_engine.record_best_known_height(summary.block_height);
                     ready.extend(self.orphans.take_children(child.block_hash));
@@ -1711,7 +1722,10 @@ mod tests {
     use crate::chainstate::ChainState;
     use crate::coinbase::{build_coinbase_tx, default_mine_address};
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
-    use crate::test_helpers::coinbase_only_block_with_gen;
+    use crate::test_helpers::{
+        block_with_txs, coinbase_only_block_with_gen, signed_conflicting_p2pk_state_and_txs,
+    };
+    use crate::TxPool;
     use rubin_consensus::constants::{MAX_FUTURE_DRIFT, POW_LIMIT};
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
     use rubin_consensus::{
@@ -2268,8 +2282,103 @@ mod tests {
                 .expect("session");
             let mut engine = test_sync_engine_with_genesis();
             session
-                .handle_block(&devnet_genesis_block_bytes(), &mut engine)
+                .handle_block(&devnet_genesis_block_bytes(), &mut engine, None)
                 .expect("duplicate block should be ignored");
+        });
+
+        let _client = TcpStream::connect(addr).expect("connect");
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn handle_block_evicts_confirmed_pool_transactions_when_pool_provided() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut session = PeerSession::new(stream, default_peer_runtime_config("devnet", 8))
+                .expect("session");
+            let mut engine = test_sync_engine_with_genesis();
+            engine.cfg.chain_id = devnet_genesis_chain_id();
+
+            let (state, admitted_raw, _block_raw) =
+                signed_conflicting_p2pk_state_and_txs(20, 10, 9);
+            engine.chain_state.utxos = state.utxos.clone();
+
+            let genesis = parse_block_bytes(&devnet_genesis_block_bytes()).expect("parse genesis");
+            let genesis_hash = block_hash(&genesis.header_bytes).expect("genesis hash");
+            let mut pool = TxPool::new();
+            pool.admit(
+                &admitted_raw,
+                &engine.chain_state,
+                engine.block_store.as_ref(),
+                engine.cfg.chain_id,
+            )
+            .expect("admit");
+
+            let block = block_with_txs(
+                1,
+                0,
+                genesis_hash,
+                genesis.header.timestamp + 1,
+                &[admitted_raw],
+            );
+            session
+                .handle_block(&block, &mut engine, Some(&mut pool))
+                .expect("block with admitted tx");
+
+            assert!(
+                pool.is_empty(),
+                "confirmed tx must be evicted from the shared runtime pool"
+            );
+        });
+
+        let _client = TcpStream::connect(addr).expect("connect");
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn handle_block_removes_conflicting_pool_transactions_when_pool_provided() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut session = PeerSession::new(stream, default_peer_runtime_config("devnet", 8))
+                .expect("session");
+            let mut engine = test_sync_engine_with_genesis();
+            engine.cfg.chain_id = devnet_genesis_chain_id();
+
+            let (state, admitted_raw, block_raw) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
+            engine.chain_state.utxos = state.utxos.clone();
+
+            let genesis = parse_block_bytes(&devnet_genesis_block_bytes()).expect("parse genesis");
+            let genesis_hash = block_hash(&genesis.header_bytes).expect("genesis hash");
+            let mut pool = TxPool::new();
+            pool.admit(
+                &admitted_raw,
+                &engine.chain_state,
+                engine.block_store.as_ref(),
+                engine.cfg.chain_id,
+            )
+            .expect("admit");
+
+            let block = block_with_txs(
+                1,
+                0,
+                genesis_hash,
+                genesis.header.timestamp + 1,
+                &[block_raw],
+            );
+            session
+                .handle_block(&block, &mut engine, Some(&mut pool))
+                .expect("conflicting block");
+
+            assert!(
+                pool.is_empty(),
+                "conflicting mempool tx must be removed on the block-apply boundary"
+            );
         });
 
         let _client = TcpStream::connect(addr).expect("connect");
@@ -2296,7 +2405,7 @@ mod tests {
                     .saturating_add(MAX_FUTURE_DRIFT + 1),
             );
             let err = session
-                .handle_block(&block, &mut engine)
+                .handle_block(&block, &mut engine, None)
                 .expect_err("future timestamp must be rejected");
             assert_eq!(err.kind(), io::ErrorKind::Other);
             assert!(
@@ -2333,7 +2442,7 @@ mod tests {
             let block2_hash = block_hash(&block2[..BLOCK_HEADER_BYTES]).expect("block2 hash");
 
             session
-                .handle_block(&block2, &mut engine)
+                .handle_block(&block2, &mut engine, None)
                 .expect("orphan block should be retained");
             assert_eq!(engine.chain_state.height, 0, "orphan must not advance tip");
             assert_eq!(
@@ -2348,7 +2457,7 @@ mod tests {
             );
 
             session
-                .handle_block(&block1, &mut engine)
+                .handle_block(&block1, &mut engine, None)
                 .expect("parent block should connect and resolve orphan");
 
             assert_eq!(session.orphans.len(), 0, "orphan pool should drain");
@@ -2386,7 +2495,7 @@ mod tests {
             let block2_hash = block_hash(&block2[..BLOCK_HEADER_BYTES]).expect("block2 hash");
 
             session
-                .handle_block(&block2, &mut engine)
+                .handle_block(&block2, &mut engine, None)
                 .expect("orphan should be retained until parent arrives");
             assert!(
                 !engine
@@ -2395,7 +2504,7 @@ mod tests {
                 "invalid orphan should remain memory-only until parent arrives"
             );
             let err = session
-                .handle_block(&block1, &mut engine)
+                .handle_block(&block1, &mut engine, None)
                 .expect_err("invalid orphan should surface after parent arrives");
 
             assert_eq!(session.orphans.len(), 0, "invalid orphan should be dropped");
