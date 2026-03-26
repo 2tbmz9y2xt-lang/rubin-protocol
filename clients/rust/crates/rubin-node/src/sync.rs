@@ -327,12 +327,18 @@ impl SyncEngine {
         cfg.pv_shadow_max_samples = cfg.pv_shadow_max_samples.min(MAX_PV_SHADOW_MAX_SAMPLES);
         let pv_mode = parse_parallel_validation_mode(&cfg.parallel_validation_mode)?;
         let pv_shadow_max_samples = cfg.pv_shadow_max_samples;
+        let tip_timestamp = load_persisted_tip_timestamp(&chain_state, block_store.as_ref())?;
+        let best_known_height = if chain_state.has_tip {
+            chain_state.height
+        } else {
+            0
+        };
         Ok(Self {
             chain_state,
             block_store,
             cfg,
-            tip_timestamp: 0,
-            best_known_height: 0,
+            tip_timestamp,
+            best_known_height,
             pv_mode,
             pv_shadow_max_samples,
             pv_shadow_mismatches: 0,
@@ -808,6 +814,21 @@ fn pv_error_code(err: &str) -> String {
     )
 }
 
+fn load_persisted_tip_timestamp(
+    chain_state: &ChainState,
+    block_store: Option<&BlockStore>,
+) -> Result<u64, String> {
+    if !chain_state.has_tip {
+        return Ok(0);
+    }
+    let Some(block_store) = block_store else {
+        return Ok(0);
+    };
+    let header_bytes = block_store.get_header_by_hash(chain_state.tip_hash)?;
+    let header = parse_block_header_bytes(&header_bytes).map_err(|e| e.to_string())?;
+    Ok(header.timestamp)
+}
+
 fn run_pv_shadow_validation(
     snapshot: &ChainState,
     block_bytes: &[u8],
@@ -843,6 +864,7 @@ where
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use rubin_consensus::constants::{COV_TYPE_EXT, COV_TYPE_P2PK, POW_LIMIT, SUITE_ID_ML_DSA_87};
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
@@ -1038,6 +1060,38 @@ mod tests {
         let (mismatches, samples) = engine.pv_shadow_stats();
         assert_eq!(mismatches, 2);
         assert_eq!(samples, vec!["first".to_string()]);
+    }
+
+    #[test]
+    fn sync_engine_hydrates_tip_timestamp_from_persisted_tip_header() {
+        let dir = unique_temp_path("rubin-node-sync-tip-timestamp");
+        let block_store_root = block_store_path(&dir);
+        let mut store = BlockStore::open(block_store_root).expect("open blockstore");
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("unix time")
+            .as_secs();
+        let block = build_block_bytes([0u8; 32], [0x11; 32], POW_LIMIT, now, &[]);
+        let tip_hash = block_hash(&block[..BLOCK_HEADER_BYTES]).expect("tip hash");
+        store
+            .put_block(0, tip_hash, &block[..BLOCK_HEADER_BYTES], &block)
+            .expect("persist tip block");
+
+        let mut chain_state = ChainState::new();
+        chain_state.has_tip = true;
+        chain_state.height = 0;
+        chain_state.tip_hash = tip_hash;
+
+        let mut cfg = default_sync_config(Some(POW_LIMIT), devnet_genesis_chain_id(), None);
+        cfg.parallel_validation_mode = "shadow".to_string();
+        cfg.ibd_lag_seconds = 60;
+
+        let engine = SyncEngine::new(chain_state, Some(store), cfg).expect("new sync");
+        assert_eq!(engine.tip_timestamp, now);
+        assert!(!engine.pv_shadow_active());
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]
