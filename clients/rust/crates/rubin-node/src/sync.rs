@@ -152,6 +152,8 @@ struct PVTelemetry {
     mismatch_state: u64,
     validate_count: u64,
     validate_total_ns: u128,
+    commit_count: u64,
+    commit_total_ns: u128,
 }
 
 impl PVTelemetry {
@@ -165,6 +167,8 @@ impl PVTelemetry {
             mismatch_state: 0,
             validate_count: 0,
             validate_total_ns: 0,
+            commit_count: 0,
+            commit_total_ns: 0,
         }
     }
 
@@ -193,11 +197,23 @@ impl PVTelemetry {
         self.validate_total_ns = self.validate_total_ns.saturating_add(latency.as_nanos());
     }
 
+    fn record_commit_latency(&mut self, latency: Duration) {
+        self.commit_count = self.commit_count.saturating_add(1);
+        self.commit_total_ns = self.commit_total_ns.saturating_add(latency.as_nanos());
+    }
+
     fn snapshot(&self) -> PVTelemetrySnapshot {
         let validate_avg_ns = if self.validate_count == 0 {
             0
         } else {
             (self.validate_total_ns / u128::from(self.validate_count))
+                .try_into()
+                .unwrap_or(u64::MAX)
+        };
+        let commit_avg_ns = if self.commit_count == 0 {
+            0
+        } else {
+            (self.commit_total_ns / u128::from(self.commit_count))
                 .try_into()
                 .unwrap_or(u64::MAX)
         };
@@ -215,8 +231,8 @@ impl PVTelemetry {
             worker_panics: 0,
             validate_count: self.validate_count,
             validate_avg_ns,
-            commit_count: 0,
-            commit_avg_ns: 0,
+            commit_count: self.commit_count,
+            commit_avg_ns,
         }
     }
 }
@@ -554,6 +570,7 @@ impl SyncEngine {
             self.pv_telemetry.record_block_skipped();
         }
 
+        let commit_start = Instant::now();
         let canonical_len_before = self.block_store.as_ref().map_or(0, |bs| bs.canonical_len());
         if let Some(block_store) = self.block_store.as_mut() {
             if let Err(err) = block_store.put_block(
@@ -599,6 +616,10 @@ impl SyncEngine {
         self.tip_timestamp = parsed.header.timestamp;
         if summary.block_height > self.best_known_height {
             self.best_known_height = summary.block_height;
+        }
+        if pv_active {
+            self.pv_telemetry
+                .record_commit_latency(commit_start.elapsed());
         }
 
         Ok(summary)
@@ -925,6 +946,8 @@ mod tests {
         assert_eq!(telemetry.mismatch_error, 0);
         assert_eq!(telemetry.mismatch_state, 0);
         assert_eq!(telemetry.validate_count, 1);
+        assert_eq!(telemetry.commit_count, 1);
+        assert!(telemetry.commit_avg_ns > 0);
 
         let (mismatches, samples) = engine.pv_shadow_stats();
         assert_eq!(mismatches, 0);
