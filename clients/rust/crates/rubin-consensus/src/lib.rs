@@ -28,6 +28,7 @@ pub mod utxo_snapshot;
 mod vault;
 mod verify_sig_openssl;
 mod wire_read;
+pub mod worker_pool;
 
 pub use block::{block_hash, parse_block_header_bytes, BlockHeader, BLOCK_HEADER_BYTES};
 pub use block_basic::{
@@ -97,6 +98,10 @@ pub use vault::{
     witness_slots, MultisigCovenant, VaultCovenant,
 };
 pub use verify_sig_openssl::{verify_sig, verify_sig_with_registry, Mldsa87Keypair};
+pub use worker_pool::{
+    collect_values, first_error, run_worker_pool, WorkerCancellationToken, WorkerPool,
+    WorkerPoolError, WorkerResult,
+};
 
 #[cfg(test)]
 mod compact_relay_tests;
