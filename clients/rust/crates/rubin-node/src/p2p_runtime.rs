@@ -242,6 +242,10 @@ impl PeerSession {
         self.read_message_with_timeout(self.cfg.read_deadline)
     }
 
+    pub fn read_deadline(&self) -> Duration {
+        self.cfg.read_deadline
+    }
+
     pub fn read_message_with_timeout(&mut self, timeout: Duration) -> io::Result<WireMessage> {
         self.stream
             .set_read_timeout(Some(timeout))
@@ -2480,6 +2484,23 @@ mod tests {
         });
 
         // Connect but never send anything — simulates a slowloris peer.
+        let _client = TcpStream::connect(addr).expect("connect");
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn peer_session_zero_read_deadline_normalizes_to_default() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut cfg = default_peer_runtime_config("devnet", 8);
+            cfg.read_deadline = Duration::from_secs(0);
+            let session = PeerSession::new(stream, cfg).expect("session");
+            assert_eq!(session.read_deadline(), DEFAULT_READ_DEADLINE);
+        });
+
         let _client = TcpStream::connect(addr).expect("connect");
         server.join().expect("server join");
     }

@@ -718,20 +718,21 @@ fn handle_peer(
 
     while !shared.stop.load(Ordering::SeqCst) {
         flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
-        let msg =
-            match session.read_message_with_timeout(live_loop_read_timeout(&shared.runtime_cfg)) {
-                Ok(msg) => msg,
-                Err(err)
-                    if matches!(
-                        err.kind(),
-                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                    ) =>
-                {
-                    flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
-                    continue;
-                }
-                Err(err) => return Err(format!("read message: {err}")),
-            };
+        let msg = match session
+            .read_message_with_timeout(live_loop_read_timeout(session.read_deadline()))
+        {
+            Ok(msg) => msg,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) =>
+            {
+                flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
+                continue;
+            }
+            Err(err) => return Err(format!("read message: {err}")),
+        };
         let outbound_messages = {
             // Validate payload size before acquiring engine lock.
             if msg.payload.len() > rubin_consensus::constants::MAX_RELAY_MSG_BYTES as usize {
@@ -764,8 +765,8 @@ fn handle_peer(
     Ok(())
 }
 
-fn live_loop_read_timeout(cfg: &PeerRuntimeConfig) -> Duration {
-    cfg.read_deadline.min(LIVE_LOOP_IDLE_DRAIN_POLL_INTERVAL)
+fn live_loop_read_timeout(read_deadline: Duration) -> Duration {
+    read_deadline.min(LIVE_LOOP_IDLE_DRAIN_POLL_INTERVAL)
 }
 
 fn flush_peer_outbox<F>(
