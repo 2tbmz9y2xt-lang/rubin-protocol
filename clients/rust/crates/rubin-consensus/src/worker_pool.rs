@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 
 const FIXED_WORKER_PANIC_MESSAGE: &str = "worker panic";
@@ -55,8 +55,6 @@ impl<E> std::error::Error for WorkerPoolError<E> where E: std::error::Error + 's
 pub enum WorkerPoolRunError {
     InvalidMaxTasks,
     TooManyTasks { task_count: usize, max_tasks: usize },
-    QueuePoisoned,
-    ResultCollectionIncomplete { expected: usize, received: usize },
 }
 
 impl fmt::Display for WorkerPoolRunError {
@@ -69,11 +67,6 @@ impl fmt::Display for WorkerPoolRunError {
             } => write!(
                 f,
                 "worker pool task count {task_count} exceeds configured limit {max_tasks}"
-            ),
-            Self::QueuePoisoned => write!(f, "worker queue poisoned"),
-            Self::ResultCollectionIncomplete { expected, received } => write!(
-                f,
-                "worker result collection incomplete: expected {expected}, received {received}"
             ),
         }
     }
@@ -155,66 +148,38 @@ impl<F> WorkerPool<F> {
             return Ok(vec![exec_task(&self.func, token, task)]);
         }
 
-        let queue = Arc::new(Mutex::new(
-            tasks.into_iter().enumerate().collect::<VecDeque<_>>(),
-        ));
-        let (tx, rx) = mpsc::channel::<(usize, WorkerResult<R, E>)>();
-        let hard_failure = Arc::new(Mutex::new(None::<WorkerPoolRunError>));
-        let mut results = std::iter::repeat_with(|| None)
-            .take(task_count)
-            .collect::<Vec<Option<WorkerResult<R, E>>>>();
-        let mut received = 0usize;
+        let queue = Mutex::new(tasks.into_iter().enumerate().collect::<VecDeque<_>>());
+        let results = (0..task_count)
+            .map(|_| Mutex::new(None::<WorkerResult<R, E>>))
+            .collect::<Vec<_>>();
 
         thread::scope(|scope| {
             for _ in 0..worker_count {
-                let queue = Arc::clone(&queue);
-                let tx = tx.clone();
                 let token = token.clone();
                 let func = &self.func;
-                let hard_failure = Arc::clone(&hard_failure);
+                let queue = &queue;
+                let results = &results;
                 scope.spawn(move || loop {
                     let next = {
-                        let Ok(mut guard) = queue.lock() else {
-                            record_run_error(&hard_failure, WorkerPoolRunError::QueuePoisoned);
-                            break;
-                        };
+                        let mut guard = lock_recover(queue);
                         guard.pop_front()
                     };
                     let Some((idx, task)) = next else {
                         break;
                     };
                     let result = exec_task(func, &token, task);
-                    if tx.send((idx, result)).is_err() {
-                        break;
-                    }
+                    *lock_recover(&results[idx]) = Some(result);
                 });
-            }
-            drop(tx);
-            for (idx, result) in rx {
-                results[idx] = Some(result);
-                received += 1;
             }
         });
 
-        if let Some(err) = take_run_error(&hard_failure) {
-            return Err(err);
-        }
-        if received != task_count {
-            return Err(WorkerPoolRunError::ResultCollectionIncomplete {
-                expected: task_count,
-                received,
-            });
-        }
-
-        results
+        Ok(results
             .into_iter()
-            .map(|item| {
-                item.ok_or(WorkerPoolRunError::ResultCollectionIncomplete {
-                    expected: task_count,
-                    received,
-                })
+            .map(|slot| {
+                let slot = slot.into_inner().unwrap_or_else(PoisonError::into_inner);
+                slot.unwrap_or_else(worker_result_missing_failure)
             })
-            .collect::<Result<Vec<_>, _>>()
+            .collect())
     }
 }
 
@@ -283,16 +248,14 @@ fn panic_payload_to_string(_: Box<dyn std::any::Any + Send>) -> String {
     FIXED_WORKER_PANIC_MESSAGE.to_string()
 }
 
-fn record_run_error(target: &Mutex<Option<WorkerPoolRunError>>, err: WorkerPoolRunError) {
-    if let Ok(mut guard) = target.lock() {
-        if guard.is_none() {
-            *guard = Some(err);
-        }
-    }
+fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn take_run_error(source: &Mutex<Option<WorkerPoolRunError>>) -> Option<WorkerPoolRunError> {
-    source.lock().ok().and_then(|mut guard| guard.take())
+fn worker_result_missing_failure<R, E>() -> WorkerResult<R, E> {
+    WorkerResult::failure(WorkerPoolError::Panic(
+        FIXED_WORKER_PANIC_MESSAGE.to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -650,18 +613,6 @@ mod tests {
             }
             .to_string(),
             "worker pool task count 7 exceeds configured limit 3"
-        );
-        assert_eq!(
-            WorkerPoolRunError::QueuePoisoned.to_string(),
-            "worker queue poisoned"
-        );
-        assert_eq!(
-            WorkerPoolRunError::ResultCollectionIncomplete {
-                expected: 5,
-                received: 4,
-            }
-            .to_string(),
-            "worker result collection incomplete: expected 5, received 4"
         );
     }
 }
