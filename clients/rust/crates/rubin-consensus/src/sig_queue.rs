@@ -3,7 +3,6 @@ use crate::error::{ErrorCode, TxError};
 use crate::suite_registry::SuiteRegistry;
 use crate::verify_sig_openssl::{verify_sig, verify_sig_with_registry};
 use std::mem::size_of;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 
 const MAX_SIGCHECK_QUEUE_BYTES: usize =
     (MAX_BLOCK_WEIGHT as usize) * (WITNESS_DISCOUNT_DIVISOR as usize);
@@ -51,13 +50,20 @@ impl Default for SigCheckQueue {
     }
 }
 
+impl Drop for SigCheckQueue {
+    fn drop(&mut self) {
+        if !self.tasks.is_empty() && !std::thread::panicking() {
+            panic!("SigCheckQueue dropped with unflushed tasks");
+        }
+    }
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 impl SigCheckQueue {
     pub(crate) fn new(workers: usize) -> Self {
-        Self {
-            workers: workers.max(1),
-            ..Self::default()
-        }
+        let mut queue = Self::default();
+        queue.workers = workers.max(1);
+        queue
     }
 
     pub(crate) fn with_registry(mut self, registry: &SuiteRegistry) -> Self {
@@ -109,7 +115,7 @@ impl SigCheckQueue {
         let tasks = std::mem::take(&mut self.tasks);
         self.queued_bytes = 0;
         for task in tasks {
-            verify_queued_task_catch_unwind(task, self.registry.as_ref())?;
+            verify_queued_task(task, self.registry.as_ref())?;
         }
         Ok(())
     }
@@ -195,19 +201,6 @@ fn verify_queued_task(task: SigCheckTask, registry: Option<&SuiteRegistry>) -> R
         return Err(task.err_on_fail);
     }
     Ok(())
-}
-
-fn verify_queued_task_catch_unwind(
-    task: SigCheckTask,
-    registry: Option<&SuiteRegistry>,
-) -> Result<(), TxError> {
-    match catch_unwind(AssertUnwindSafe(|| verify_queued_task(task, registry))) {
-        Ok(result) => result,
-        Err(_) => Err(TxError::new(
-            ErrorCode::TxErrSigInvalid,
-            "SigCheckQueue verification panic (fail-closed)",
-        )),
-    }
 }
 
 fn next_queued_bytes(current: usize, task_bytes: usize) -> Result<usize, TxError> {
@@ -540,6 +533,27 @@ mod tests {
 
         let err = queue.assert_flushed().expect_err("pending tasks must fail");
         assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+        queue
+            .flush()
+            .expect("cleanup queued task after fail-closed check");
+    }
+
+    #[test]
+    #[should_panic(expected = "SigCheckQueue dropped with unflushed tasks")]
+    fn sig_check_queue_drop_panics_when_tasks_remain() {
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let digest = [0x77; 32];
+        let sig = keypair.sign_digest32(digest).expect("sign");
+        let mut queue = SigCheckQueue::new(1);
+        queue
+            .push(
+                SUITE_ID_ML_DSA_87,
+                &keypair.pubkey_bytes(),
+                &sig,
+                digest,
+                TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
+            )
+            .expect("enqueue");
     }
 
     #[test]
@@ -615,11 +629,8 @@ mod tests {
 
     #[test]
     fn sig_check_queue_rejects_byte_budget_overflow() {
-        let mut queue = SigCheckQueue {
-            queued_bytes: MAX_SIGCHECK_QUEUE_BYTES,
-            workers: 1,
-            ..SigCheckQueue::default()
-        };
+        let mut queue = SigCheckQueue::new(1);
+        queue.queued_bytes = MAX_SIGCHECK_QUEUE_BYTES;
 
         let err = queue
             .push(
