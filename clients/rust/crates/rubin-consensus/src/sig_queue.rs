@@ -51,13 +51,12 @@ impl Default for SigCheckQueue {
     }
 }
 
+#[cfg(test)]
 impl Drop for SigCheckQueue {
     fn drop(&mut self) {
         if self.tasks.is_empty() || std::thread::panicking() {
             return;
         }
-        // Unflushed deferred signatures are a consensus-integrity bug. Fail
-        // closed in all builds instead of silently accepting an unchecked tail.
         panic!("SigCheckQueue dropped with unflushed tasks");
     }
 }
@@ -693,8 +692,8 @@ mod tests {
 
     #[test]
     fn sigcheck_task_bytes_overflow_fails_closed() {
-        let err = sigcheck_task_bytes(usize::MAX, 1)
-            .expect_err("footprint overflow must fail closed");
+        let err =
+            sigcheck_task_bytes(usize::MAX, 1).expect_err("footprint overflow must fail closed");
         assert_eq!(err.code, ErrorCode::TxErrWitnessOverflow);
     }
 

@@ -339,12 +339,15 @@ pub(crate) fn validate_threshold_sig_spend_q(
         Ok(())
     })();
 
-    if result.is_err() {
-        if let (Some(mark), Some(queue)) = (queue_mark, sig_queue) {
-            queue.rollback_to(mark);
+    match result {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if let (Some(mark), Some(queue)) = (queue_mark, sig_queue) {
+                queue.rollback_to(mark);
+            }
+            Err(err)
         }
     }
-    result
 }
 
 #[allow(clippy::too_many_arguments)]

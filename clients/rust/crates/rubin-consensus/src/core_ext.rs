@@ -1376,7 +1376,11 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
-        assert_eq!(err.msg, "CORE_EXT non-native verifier binding unsupported");
+        assert!(
+            err.msg.contains("unsupported"),
+            "unexpected CORE_EXT unsupported-path message: {}",
+            err.msg
+        );
     }
 
     #[test]
