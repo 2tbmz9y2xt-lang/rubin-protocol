@@ -15,6 +15,12 @@ struct SigCheckTask {
     err_on_fail: TxError,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SigCheckQueueMark {
+    len: usize,
+    queued_bytes: usize,
+}
+
 /// SigCheckQueue collects deferred signature verification tasks during
 /// sequential transaction validation. When flushed, it verifies all collected
 /// signatures and returns the first error by submission order.
@@ -79,6 +85,18 @@ impl SigCheckQueue {
             verify_queued_task(task, self.registry.as_ref())?;
         }
         Ok(())
+    }
+
+    pub(crate) fn mark(&self) -> SigCheckQueueMark {
+        SigCheckQueueMark {
+            len: self.tasks.len(),
+            queued_bytes: self.queued_bytes,
+        }
+    }
+
+    pub(crate) fn rollback_to(&mut self, mark: SigCheckQueueMark) {
+        self.tasks.truncate(mark.len);
+        self.queued_bytes = mark.queued_bytes;
     }
 
     fn ensure_registry(&mut self, registry: &SuiteRegistry) -> Result<(), TxError> {
@@ -590,6 +608,48 @@ mod tests {
         .expect("queued threshold");
         assert_eq!(queue.len(), 1);
         queue.flush().expect("flush");
+    }
+
+    #[test]
+    fn validate_threshold_sig_spend_q_rolls_back_queue_on_threshold_failure() {
+        let kp1 = Mldsa87Keypair::generate().expect("kp1");
+        let kp2 = Mldsa87Keypair::generate().expect("kp2");
+        let key_id_1 = sha3_256(&kp1.pubkey_bytes());
+        let key_id_2 = sha3_256(&kp2.pubkey_bytes());
+        let (tx, input_index, input_value, chain_id) = test_tx_context();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let witness = sign_witness(&kp1, &tx, input_index, input_value, chain_id);
+        let registry = SuiteRegistry::default_registry();
+        let mut queue = SigCheckQueue::new(1).with_registry(&registry);
+
+        let err = validate_threshold_sig_spend_q(
+            &[key_id_1, key_id_2],
+            2,
+            &[
+                witness,
+                WitnessItem {
+                    suite_id: SUITE_ID_SENTINEL,
+                    pubkey: Vec::new(),
+                    signature: Vec::new(),
+                },
+            ],
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            "TEST_THRESHOLD",
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&registry),
+        )
+        .expect_err("threshold failure must reject");
+
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+        assert!(
+            queue.is_empty(),
+            "threshold failure must roll back queued tasks"
+        );
     }
 
     #[test]

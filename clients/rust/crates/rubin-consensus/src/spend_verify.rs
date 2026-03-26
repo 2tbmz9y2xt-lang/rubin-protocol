@@ -287,54 +287,64 @@ pub(crate) fn validate_threshold_sig_spend_q(
 
     let native_spend = rp.native_spend_suites(block_height);
     let mut valid: u8 = 0;
+    let queue_mark = sig_queue.as_ref().map(|queue| queue.mark());
 
-    for i in 0..keys.len() {
-        let w = &ws[i];
-        if w.suite_id == SUITE_ID_SENTINEL {
-            if !w.pubkey.is_empty() || !w.signature.is_empty() {
+    let result = (|| -> Result<(), TxError> {
+        for i in 0..keys.len() {
+            let w = &ws[i];
+            if w.suite_id == SUITE_ID_SENTINEL {
+                if !w.pubkey.is_empty() || !w.signature.is_empty() {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrParse,
+                        "SENTINEL witness must be keyless",
+                    ));
+                }
+                continue;
+            }
+
+            if !native_spend.contains(w.suite_id) {
+                return Err(TxError::new(ErrorCode::TxErrSigAlgInvalid, context));
+            }
+
+            let params = reg
+                .lookup(w.suite_id)
+                .ok_or_else(|| TxError::new(ErrorCode::TxErrSigAlgInvalid, context))?;
+
+            if w.pubkey.len() as u64 != params.pubkey_len
+                || w.signature.len() as u64 != params.sig_len + 1
+            {
                 return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "SENTINEL witness must be keyless",
+                    ErrorCode::TxErrSigNoncanonical,
+                    "non-canonical witness item lengths",
                 ));
             }
-            continue;
+
+            verify_mldsa_key_and_sig_q(
+                w,
+                keys[i],
+                input_index,
+                input_value,
+                chain_id,
+                cache,
+                reg,
+                &mut sig_queue,
+                TxError::new(ErrorCode::TxErrSigInvalid, context),
+                TxError::new(ErrorCode::TxErrSigInvalid, context),
+            )?;
+            valid = valid.saturating_add(1);
         }
-
-        if !native_spend.contains(w.suite_id) {
-            return Err(TxError::new(ErrorCode::TxErrSigAlgInvalid, context));
+        if valid < threshold {
+            return Err(TxError::new(ErrorCode::TxErrSigInvalid, context));
         }
+        Ok(())
+    })();
 
-        let params = reg
-            .lookup(w.suite_id)
-            .ok_or_else(|| TxError::new(ErrorCode::TxErrSigAlgInvalid, context))?;
-
-        if w.pubkey.len() as u64 != params.pubkey_len
-            || w.signature.len() as u64 != params.sig_len + 1
-        {
-            return Err(TxError::new(
-                ErrorCode::TxErrSigNoncanonical,
-                "non-canonical witness item lengths",
-            ));
+    if result.is_err() {
+        if let (Some(mark), Some(queue)) = (queue_mark, sig_queue) {
+            queue.rollback_to(mark);
         }
-
-        verify_mldsa_key_and_sig_q(
-            w,
-            keys[i],
-            input_index,
-            input_value,
-            chain_id,
-            cache,
-            reg,
-            &mut sig_queue,
-            TxError::new(ErrorCode::TxErrSigInvalid, context),
-            TxError::new(ErrorCode::TxErrSigInvalid, context),
-        )?;
-        valid = valid.saturating_add(1);
     }
-    if valid < threshold {
-        return Err(TxError::new(ErrorCode::TxErrSigInvalid, context));
-    }
-    Ok(())
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
