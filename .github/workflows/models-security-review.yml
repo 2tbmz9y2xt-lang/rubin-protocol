@@ -171,6 +171,112 @@ jobs:
             }
             const changedFilePayload = entries.join(SEPARATOR);
 
+            // ── Dependency context extraction ──────────────────────────
+            // For each changed Rust file, parse `use crate::` imports,
+            // resolve source modules, and extract doc-comments + public
+            // signatures.  This gives the model cross-module invariant
+            // awareness and reduces false-positive findings.
+            const DEP_BUDGET = 20000;          // max chars for this section
+            const depEntries = [];
+            let depUsed = 0;
+
+            for (const file of changedFiles) {
+              if (!file.endsWith('.rs')) continue;
+              const content = readChangedFile(file);
+              if (!content) continue;
+
+              // Locate crate src/ root from the file path
+              const srcMatch = file.match(/^(.*\/src)\//);
+              if (!srcMatch) continue;
+              const crateRoot = srcMatch[1];
+
+              // Join multi-line `use crate::` statements into single lines
+              const fileLines = content.split('\n');
+              const useStatements = [];
+              let inUse = false, useAccum = '';
+              for (const ln of fileLines) {
+                if (/^\s*use\s+crate::/.test(ln) && !ln.includes(';')) {
+                  inUse = true; useAccum = ln;
+                } else if (inUse) {
+                  useAccum += ' ' + ln.trim();
+                  if (ln.includes(';')) { useStatements.push(useAccum); inUse = false; useAccum = ''; }
+                } else if (/^\s*use\s+crate::/.test(ln) && ln.includes(';')) {
+                  useStatements.push(ln);
+                }
+              }
+
+              // Parse module paths and imported symbols
+              const modImports = new Map(); // modulePath -> Set<symbol>
+              for (const stmt of useStatements) {
+                // use crate::foo::bar::{A, B};  OR  use crate::foo::bar::Baz;
+                const m = stmt.match(/use\s+crate::([^{;]+?)(?:::(\{[^}]+\})|::(\w+))\s*;/);
+                if (!m) continue;
+                const modPath = m[1].trim();
+                const existing = modImports.get(modPath) || new Set();
+                if (m[2]) {
+                  m[2].replace(/[{}]/g, '').split(',').map(s => s.trim()).filter(Boolean)
+                    .forEach(s => existing.add(s));
+                } else if (m[3]) {
+                  existing.add(m[3]);
+                }
+                modImports.set(modPath, existing);
+              }
+
+              // Resolve each module path to a source file
+              for (const [modPath, symbols] of modImports) {
+                const parts = modPath.split('::');
+                let modFile = null;
+                const candidates = [
+                  path.join(repoRoot, crateRoot, ...parts) + '.rs',
+                  path.join(repoRoot, crateRoot, ...parts, 'mod.rs'),
+                ];
+                // Last segment might be a symbol inside the parent module
+                if (parts.length > 1) {
+                  candidates.push(
+                    path.join(repoRoot, crateRoot, ...parts.slice(0, -1)) + '.rs'
+                  );
+                }
+                for (const cand of candidates) {
+                  try { if (fs.statSync(cand).isFile()) { modFile = cand; break; } } catch {}
+                }
+                if (!modFile) continue;
+                const modRel = path.relative(repoRoot, modFile);
+                // Skip files already in changedFilePayload
+                if (changedFiles.includes(modRel)) continue;
+
+                let modContent;
+                try { modContent = fs.readFileSync(modFile, 'utf8'); } catch { continue; }
+
+                for (const sym of symbols) {
+                  if (depUsed >= DEP_BUDGET) break;
+                  // Find /// doc-comments + pub/pub(crate) fn/struct/enum/type/const/trait signature
+                  // Also skip #[...] attribute lines between doc-comments and signature
+                  const sigRe = new RegExp(
+                    '((?:^[ \\t]*///[^\\n]*\\n)*)' +
+                    '(?:^[ \\t]*#\\[[^\\]]*\\]\\s*\\n)*' +
+                    '^[ \\t]*pub(?:\\([^)]*\\))?\\s+(?:fn|struct|enum|const|type|trait)\\s+' +
+                    sym + '\\b[^\\n]*',
+                    'gm'
+                  );
+                  const hit = sigRe.exec(modContent);
+                  if (!hit) continue;
+                  const docLines = (hit[1] || '').split('\n')
+                    .filter(l => l.trim().startsWith('///'))
+                    .map(l => l.trim()).join('\n');
+                  const sigLine = hit[0].replace(hit[1] || '', '').split('\n')[0].trim();
+                  if (!sigLine) continue;
+                  const entry = `### ${sym} (${modRel})\n${docLines ? docLines + '\n' : ''}${sigLine}\n`;
+                  if (depUsed + entry.length > DEP_BUDGET) continue;
+                  depEntries.push(entry);
+                  depUsed += entry.length;
+                }
+              }
+            }
+
+            const dependencyContext = depEntries.length > 0
+              ? '\n\n---\nDEPENDENCY CONTRACTS (doc-comments and signatures of functions imported by changed files — use these to verify cross-module invariants before reporting findings):\n\n' + depEntries.join('\n')
+              : '';
+
             const systemPrompt = [
               'You are a HOSTILE protocol security auditor for the RUBIN blockchain protocol.',
               'Your job is NOT to help the author — it is to BREAK their code and find every exploitable flaw.',
@@ -217,6 +323,11 @@ jobs:
               '  If diff is truncated, assume unseen code exists and flag as unreviewed, not missing.',
               '- You will receive BOTH the diff AND the full content of changed files. Use the full file content',
               '  to verify function definitions, imports, and call sites before claiming anything is missing.',
+              '- CROSS-MODULE INVARIANTS: You may receive DEPENDENCY CONTRACTS — doc-comments and signatures',
+              '  of functions/types imported by changed files. These document ordering guarantees, filtering',
+              '  guarantees, and return value bounds. BEFORE reporting a finding about cross-module behavior,',
+              '  check if an imported function\'s doc-comment documents the guarantee in question. If it does,',
+              '  do NOT report the finding unless you have explicit counter-evidence from the code.',
               '',
               'OUTPUT FORMAT — strict JSON only, no markdown, no commentary:',
               '{',
@@ -259,7 +370,7 @@ jobs:
                     model: modelId,
                     messages: [
                       { role: 'system', content: systemPrompt },
-                      { role: 'user', content: `Review this PR diff for security vulnerabilities. Be hostile — assume every change is a potential exploit vector.\n\nDIFF:\n${diff}${changedFilePayload ? `\n\n---\nFULL CHANGED FILES (use to verify definitions before claiming anything missing):\n${changedFilePayload}` : ''}${previousFindings}` }
+                      { role: 'user', content: `Review this PR diff for security vulnerabilities. Be hostile — assume every change is a potential exploit vector.\n\nDIFF:\n${diff}${changedFilePayload ? `\n\n---\nFULL CHANGED FILES (use to verify definitions before claiming anything missing):\n${changedFilePayload}` : ''}${dependencyContext}${previousFindings}` }
                     ],
                     temperature: 0.6,
                     top_p: 0.95
