@@ -8,9 +8,10 @@ use std::time::Duration;
 
 use rubin_node::{
     block_store_path, chain_state_path, default_peer_runtime_config, default_sync_config,
-    load_chain_state, load_genesis_config, new_devnet_rpc_state, parse_mine_address_arg,
-    start_devnet_rpc_server, start_node_p2p_service, BlockStore, LoadedGenesisConfig, Miner,
-    MinerConfig, NodeP2PServiceConfig, PeerManager, SyncEngine,
+    load_chain_state, load_genesis_config, new_devnet_rpc_state_with_tx_pool,
+    new_shared_runtime_tx_pool, parse_mine_address_arg, start_devnet_rpc_server,
+    start_node_p2p_service, BlockStore, LoadedGenesisConfig, Miner, MinerConfig,
+    NodeP2PServiceConfig, PeerManager, SyncEngine,
 };
 use serde::Serialize;
 
@@ -223,6 +224,7 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         }
     };
     let sync_engine = Arc::new(Mutex::new(sync_engine));
+    let tx_pool = new_shared_runtime_tx_pool(&sync_engine);
     let peer_runtime_cfg = default_peer_runtime_config(&cfg.network, cfg.max_peers);
     let peer_manager = Arc::new(PeerManager::new(peer_runtime_cfg.clone()));
     let mut p2p_service = match start_node_p2p_service(NodeP2PServiceConfig {
@@ -231,6 +233,7 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         runtime_cfg: peer_runtime_cfg,
         peer_manager: Arc::clone(&peer_manager),
         sync_engine: Arc::clone(&sync_engine),
+        tx_pool: Arc::clone(&tx_pool),
         chain_id,
         genesis_hash,
     }) {
@@ -251,9 +254,10 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
             rubin_node::tx_relay::announce_tx(tx_bytes, meta, &relay_state, &pm, &local, &pw)
         }))
     };
-    let state = new_devnet_rpc_state(
+    let state = new_devnet_rpc_state_with_tx_pool(
         Arc::clone(&sync_engine),
         Some(block_store),
+        Arc::clone(&tx_pool),
         Arc::clone(&peer_manager),
         announce_tx,
     );

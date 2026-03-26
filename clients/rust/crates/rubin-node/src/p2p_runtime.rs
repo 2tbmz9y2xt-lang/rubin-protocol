@@ -13,11 +13,11 @@ use rubin_consensus::{
 use sha3::{Digest, Sha3_256};
 
 use crate::sync::SyncEngine;
+use crate::sync_reorg::{TxPoolCleanupPlan, PARENT_BLOCK_NOT_FOUND_ERR};
 
 /// Maximum reasonable best_height delta before clamping peer claims.
 /// Prevents malicious peers from forcing unnecessary sync with absurdly high values.
 const MAX_BEST_HEIGHT_DELTA: u64 = 100_000;
-use crate::sync_reorg::PARENT_BLOCK_NOT_FOUND_ERR;
 
 const DEFAULT_READ_DEADLINE: Duration = Duration::from_secs(15);
 const DEFAULT_WRITE_DEADLINE: Duration = Duration::from_secs(15);
@@ -129,6 +129,11 @@ pub struct PeerRelayContext<'a> {
     pub peer_writers: &'a std::sync::Mutex<HashMap<String, crate::tx_relay::PeerOutbox>>,
 }
 
+pub struct LiveMessageOutcome {
+    pub responses: Vec<WireMessage>,
+    pub tx_pool_cleanup: TxPoolCleanupPlan,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OrphanBlockEntry {
     block_hash: [u8; 32],
@@ -157,6 +162,7 @@ pub struct PeerSession {
     cfg: PeerRuntimeConfig,
     peer: PeerState,
     orphans: OrphanBlockPool,
+    pending_tx_pool_cleanup: TxPoolCleanupPlan,
     prefetched_read_byte: Option<u8>,
 }
 
@@ -232,12 +238,25 @@ impl PeerSession {
                 ..PeerState::default()
             },
             orphans: OrphanBlockPool::new(DEFAULT_ORPHAN_LIMIT, DEFAULT_ORPHAN_BYTE_LIMIT),
+            pending_tx_pool_cleanup: TxPoolCleanupPlan::default(),
             prefetched_read_byte: None,
         })
     }
 
     pub fn state(&self) -> PeerState {
         self.peer.clone()
+    }
+
+    pub fn take_pending_tx_pool_cleanup(&mut self) -> TxPoolCleanupPlan {
+        std::mem::take(&mut self.pending_tx_pool_cleanup)
+    }
+
+    fn stash_pending_tx_pool_cleanup(&mut self, cleanup: TxPoolCleanupPlan) {
+        if cleanup.is_empty() {
+            return;
+        }
+        let pending = self.take_pending_tx_pool_cleanup();
+        self.pending_tx_pool_cleanup = pending.merge(cleanup);
     }
 
     pub fn read_message(&mut self) -> io::Result<WireMessage> {
@@ -387,7 +406,7 @@ impl PeerSession {
                     })?;
                 }
                 MESSAGE_BLOCK => {
-                    self.handle_block(&msg.payload, sync_engine)?;
+                    let _ = self.handle_block(&msg.payload, sync_engine)?;
                     self.request_more_blocks_if_behind(sync_engine)?;
                 }
                 MESSAGE_TX | "headers" | "pong" => {}
@@ -440,7 +459,7 @@ impl PeerSession {
         msg: WireMessage,
         sync_engine: &mut SyncEngine,
         relay_ctx: Option<&PeerRelayContext<'_>>,
-    ) -> io::Result<Vec<WireMessage>> {
+    ) -> io::Result<LiveMessageOutcome> {
         if msg.payload.len() > MAX_RELAY_MSG_BYTES as usize {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -456,36 +475,54 @@ impl PeerSession {
                 let requests =
                     self.handle_inv(&msg.payload, sync_engine, relay_ctx.map(|c| c.relay_state))?;
                 if requests.is_empty() {
-                    Ok(Vec::new())
+                    Ok(LiveMessageOutcome {
+                        responses: Vec::new(),
+                        tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                    })
                 } else {
-                    Ok(vec![WireMessage {
-                        command: MESSAGE_GETDATA.to_string(),
-                        payload: encode_inventory_vectors(&requests)?,
-                    }])
+                    Ok(LiveMessageOutcome {
+                        responses: vec![WireMessage {
+                            command: MESSAGE_GETDATA.to_string(),
+                            payload: encode_inventory_vectors(&requests)?,
+                        }],
+                        tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                    })
                 }
             }
-            MESSAGE_GETDATA => self.collect_getdata_responses(
-                &msg.payload,
-                sync_engine,
-                relay_ctx.map(|c| c.relay_state),
-            ),
+            MESSAGE_GETDATA => Ok(LiveMessageOutcome {
+                responses: self.collect_getdata_responses(
+                    &msg.payload,
+                    sync_engine,
+                    relay_ctx.map(|c| c.relay_state),
+                )?,
+                tx_pool_cleanup: TxPoolCleanupPlan::default(),
+            }),
             MESSAGE_GETBLOCKS => {
                 let items = self.handle_getblocks(&msg.payload, sync_engine)?;
                 if items.is_empty() {
-                    Ok(Vec::new())
+                    Ok(LiveMessageOutcome {
+                        responses: Vec::new(),
+                        tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                    })
                 } else {
-                    Ok(vec![WireMessage {
-                        command: MESSAGE_INV.to_string(),
-                        payload: encode_inventory_vectors(&items)?,
-                    }])
+                    Ok(LiveMessageOutcome {
+                        responses: vec![WireMessage {
+                            command: MESSAGE_INV.to_string(),
+                            payload: encode_inventory_vectors(&items)?,
+                        }],
+                        tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                    })
                 }
             }
             MESSAGE_BLOCK => {
-                self.handle_block(&msg.payload, sync_engine)?;
-                Ok(self
-                    .prepare_block_request_if_behind(sync_engine)?
-                    .into_iter()
-                    .collect())
+                let tx_pool_cleanup = self.handle_block(&msg.payload, sync_engine)?;
+                Ok(LiveMessageOutcome {
+                    responses: self
+                        .prepare_block_request_if_behind(sync_engine)?
+                        .into_iter()
+                        .collect(),
+                    tx_pool_cleanup,
+                })
             }
             MESSAGE_TX => {
                 if let Some(ctx) = relay_ctx {
@@ -499,20 +536,35 @@ impl PeerSession {
                         ctx.peer_writers,
                     )?;
                 }
-                Ok(Vec::new())
+                Ok(LiveMessageOutcome {
+                    responses: Vec::new(),
+                    tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                })
             }
-            "headers" | "pong" => Ok(Vec::new()),
-            "ping" => Ok(vec![WireMessage {
-                command: "pong".to_string(),
-                payload: Vec::new(),
-            }]),
-            MESSAGE_GETADDR => Ok(vec![WireMessage {
-                command: MESSAGE_ADDR.to_string(),
-                payload: marshal_empty_addr_payload(),
-            }]),
+            "headers" | "pong" => Ok(LiveMessageOutcome {
+                responses: Vec::new(),
+                tx_pool_cleanup: TxPoolCleanupPlan::default(),
+            }),
+            "ping" => Ok(LiveMessageOutcome {
+                responses: vec![WireMessage {
+                    command: "pong".to_string(),
+                    payload: Vec::new(),
+                }],
+                tx_pool_cleanup: TxPoolCleanupPlan::default(),
+            }),
+            MESSAGE_GETADDR => Ok(LiveMessageOutcome {
+                responses: vec![WireMessage {
+                    command: MESSAGE_ADDR.to_string(),
+                    payload: marshal_empty_addr_payload(),
+                }],
+                tx_pool_cleanup: TxPoolCleanupPlan::default(),
+            }),
             MESSAGE_ADDR => {
                 let _ = unmarshal_addr_payload(&msg.payload)?;
-                Ok(Vec::new())
+                Ok(LiveMessageOutcome {
+                    responses: Vec::new(),
+                    tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                })
             }
             other => {
                 self.peer.last_error = format!("unknown command: {other}");
@@ -526,11 +578,12 @@ impl PeerSession {
         msg: WireMessage,
         sync_engine: &mut SyncEngine,
         relay_ctx: Option<&PeerRelayContext<'_>>,
-    ) -> io::Result<()> {
-        for response in self.collect_live_responses(msg, sync_engine, relay_ctx)? {
+    ) -> io::Result<TxPoolCleanupPlan> {
+        let outcome = self.collect_live_responses(msg, sync_engine, relay_ctx)?;
+        for response in outcome.responses {
             self.write_message(&response)?;
         }
-        Ok(())
+        Ok(outcome.tx_pool_cleanup)
     }
 
     fn request_more_blocks_if_behind(&mut self, sync_engine: &SyncEngine) -> io::Result<()> {
@@ -607,41 +660,44 @@ impl PeerSession {
         &mut self,
         block_bytes: &[u8],
         sync_engine: &mut SyncEngine,
-    ) -> io::Result<()> {
+    ) -> io::Result<TxPoolCleanupPlan> {
         let parsed = parse_block_bytes(block_bytes).map_err(io::Error::other)?;
         let block_hash_bytes = block_hash(&parsed.header_bytes).map_err(io::Error::other)?;
         if sync_engine
             .has_block(block_hash_bytes)
             .map_err(io::Error::other)?
         {
-            return Ok(());
+            return Ok(TxPoolCleanupPlan::default());
         }
         if parsed.header.prev_block_hash != [0u8; 32]
             && !sync_engine
                 .has_block(parsed.header.prev_block_hash)
                 .map_err(io::Error::other)?
         {
-            self.retain_or_resolve_orphan(
+            return self.retain_or_resolve_orphan(
                 block_hash_bytes,
                 parsed.header.prev_block_hash,
                 block_bytes,
                 sync_engine,
-            )?;
-            return Ok(());
+            );
         }
-        match sync_engine.apply_block_with_reorg(block_bytes, None, None) {
-            Ok(summary) => {
-                sync_engine.record_best_known_height(summary.block_height);
-                self.resolve_orphans(block_hash_bytes, sync_engine)?;
+        match sync_engine.apply_block_with_reorg(block_bytes, None) {
+            Ok(outcome) => {
+                sync_engine.record_best_known_height(outcome.summary.block_height);
+                let mut tx_pool_cleanup = outcome.tx_pool_cleanup;
+                if let Err(err) =
+                    self.resolve_orphans(block_hash_bytes, sync_engine, &mut tx_pool_cleanup)
+                {
+                    self.stash_pending_tx_pool_cleanup(tx_pool_cleanup);
+                    return Err(err);
+                }
+                Ok(tx_pool_cleanup)
             }
-            Err(err) if is_parent_not_found_err(&err) => {
-                return Err(io::Error::other(format!(
-                    "unexpected missing-parent after precheck: {err}"
-                )));
-            }
-            Err(err) => return Err(io::Error::other(err)),
+            Err(err) if is_parent_not_found_err(&err) => Err(io::Error::other(format!(
+                "unexpected missing-parent after precheck: {err}"
+            ))),
+            Err(err) => Err(io::Error::other(err)),
         }
-        Ok(())
     }
 
     fn retain_or_resolve_orphan(
@@ -650,7 +706,7 @@ impl PeerSession {
         parent_hash: [u8; 32],
         block_bytes: &[u8],
         sync_engine: &mut SyncEngine,
-    ) -> io::Result<()> {
+    ) -> io::Result<TxPoolCleanupPlan> {
         self.orphans.add(
             block_hash,
             parent_hash,
@@ -661,21 +717,29 @@ impl PeerSession {
             .has_block(parent_hash)
             .map_err(io::Error::other)?
         {
-            self.resolve_orphans(parent_hash, sync_engine)?;
+            let mut tx_pool_cleanup = TxPoolCleanupPlan::default();
+            if let Err(err) = self.resolve_orphans(parent_hash, sync_engine, &mut tx_pool_cleanup) {
+                self.stash_pending_tx_pool_cleanup(tx_pool_cleanup);
+                return Err(err);
+            }
+            return Ok(tx_pool_cleanup);
         }
-        Ok(())
+        Ok(TxPoolCleanupPlan::default())
     }
 
     fn resolve_orphans(
         &mut self,
         parent_hash: [u8; 32],
         sync_engine: &mut SyncEngine,
+        tx_pool_cleanup: &mut TxPoolCleanupPlan,
     ) -> io::Result<()> {
         let mut ready = self.orphans.take_children(parent_hash);
         while let Some(child) = ready.pop() {
-            match sync_engine.apply_block_with_reorg(&child.block_bytes, None, None) {
-                Ok(summary) => {
-                    sync_engine.record_best_known_height(summary.block_height);
+            match sync_engine.apply_block_with_reorg(&child.block_bytes, None) {
+                Ok(outcome) => {
+                    sync_engine.record_best_known_height(outcome.summary.block_height);
+                    *tx_pool_cleanup =
+                        std::mem::take(tx_pool_cleanup).merge(outcome.tx_pool_cleanup);
                     ready.extend(self.orphans.take_children(child.block_hash));
                 }
                 Err(err) if is_parent_not_found_err(&err) => {
@@ -1711,7 +1775,10 @@ mod tests {
     use crate::chainstate::ChainState;
     use crate::coinbase::{build_coinbase_tx, default_mine_address};
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
-    use crate::test_helpers::coinbase_only_block_with_gen;
+    use crate::test_helpers::{
+        block_with_txs, coinbase_only_block_with_gen, signed_conflicting_p2pk_state_and_txs,
+    };
+    use crate::TxPool;
     use rubin_consensus::constants::{MAX_FUTURE_DRIFT, POW_LIMIT};
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
     use rubin_consensus::{
@@ -2277,6 +2344,113 @@ mod tests {
     }
 
     #[test]
+    fn handle_block_evicts_confirmed_pool_transactions_when_pool_provided() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut session = PeerSession::new(stream, default_peer_runtime_config("devnet", 8))
+                .expect("session");
+            let mut engine = test_sync_engine_with_genesis();
+            engine.cfg.chain_id = devnet_genesis_chain_id();
+
+            let (state, admitted_raw, _block_raw) =
+                signed_conflicting_p2pk_state_and_txs(20, 10, 9);
+            engine.chain_state.utxos = state.utxos.clone();
+
+            let genesis = parse_block_bytes(&devnet_genesis_block_bytes()).expect("parse genesis");
+            let genesis_hash = block_hash(&genesis.header_bytes).expect("genesis hash");
+            let mut pool = TxPool::new();
+            pool.admit(
+                &admitted_raw,
+                &engine.chain_state,
+                engine.block_store.as_ref(),
+                engine.cfg.chain_id,
+            )
+            .expect("admit");
+
+            let block = block_with_txs(
+                1,
+                0,
+                genesis_hash,
+                genesis.header.timestamp + 1,
+                &[admitted_raw],
+            );
+            let cleanup = session
+                .handle_block(&block, &mut engine)
+                .expect("block with admitted tx");
+            cleanup.apply(
+                &mut pool,
+                &engine.chain_state,
+                engine.block_store.as_ref(),
+                engine.cfg.chain_id,
+            );
+
+            assert!(
+                pool.is_empty(),
+                "confirmed tx must be evicted from the shared runtime pool"
+            );
+        });
+
+        let _client = TcpStream::connect(addr).expect("connect");
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn handle_block_removes_conflicting_pool_transactions_when_pool_provided() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut session = PeerSession::new(stream, default_peer_runtime_config("devnet", 8))
+                .expect("session");
+            let mut engine = test_sync_engine_with_genesis();
+            engine.cfg.chain_id = devnet_genesis_chain_id();
+
+            let (state, admitted_raw, block_raw) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
+            engine.chain_state.utxos = state.utxos.clone();
+
+            let genesis = parse_block_bytes(&devnet_genesis_block_bytes()).expect("parse genesis");
+            let genesis_hash = block_hash(&genesis.header_bytes).expect("genesis hash");
+            let mut pool = TxPool::new();
+            pool.admit(
+                &admitted_raw,
+                &engine.chain_state,
+                engine.block_store.as_ref(),
+                engine.cfg.chain_id,
+            )
+            .expect("admit");
+
+            let block = block_with_txs(
+                1,
+                0,
+                genesis_hash,
+                genesis.header.timestamp + 1,
+                &[block_raw],
+            );
+            let cleanup = session
+                .handle_block(&block, &mut engine)
+                .expect("conflicting block");
+            cleanup.apply(
+                &mut pool,
+                &engine.chain_state,
+                engine.block_store.as_ref(),
+                engine.cfg.chain_id,
+            );
+
+            assert!(
+                pool.is_empty(),
+                "conflicting mempool tx must be removed on the block-apply boundary"
+            );
+        });
+
+        let _client = TcpStream::connect(addr).expect("connect");
+        server.join().expect("server join");
+    }
+
+    #[test]
     fn handle_block_rejects_future_timestamp_during_sync() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
@@ -2397,11 +2571,20 @@ mod tests {
             let err = session
                 .handle_block(&block1, &mut engine)
                 .expect_err("invalid orphan should surface after parent arrives");
+            let pending_cleanup = session.take_pending_tx_pool_cleanup();
 
             assert_eq!(session.orphans.len(), 0, "invalid orphan should be dropped");
             assert_eq!(
                 engine.chain_state.height, 1,
                 "parent block must remain connected"
+            );
+            assert!(
+                !pending_cleanup.is_empty(),
+                "accepted parent block cleanup must survive the later orphan error"
+            );
+            assert!(
+                session.take_pending_tx_pool_cleanup().is_empty(),
+                "pending cleanup should drain once observed"
             );
             assert_eq!(
                 session.state().ban_score,

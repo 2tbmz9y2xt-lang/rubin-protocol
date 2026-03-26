@@ -1,8 +1,10 @@
 use rubin_consensus::{
     block_hash, parse_block_bytes, parse_tx, read_compact_size_bytes,
-    validate_block_basic_with_context_at_height, ParsedBlock, BLOCK_HEADER_BYTES,
+    validate_block_basic_with_context_at_height, Outpoint, ParsedBlock, BLOCK_HEADER_BYTES,
 };
+use std::ops::Deref;
 
+use crate::blockstore::BlockStore;
 use crate::chainstate::ChainStateConnectSummary;
 use crate::sync::SyncEngine;
 use crate::txpool::TxPool;
@@ -20,6 +22,93 @@ struct ReorgBranchBlock {
     txids: Vec<[u8; 32]>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct TxPoolCleanupPlan {
+    confirmed_txids: Vec<[u8; 32]>,
+    conflicting_inputs: Vec<Outpoint>,
+    requeue_block_hashes: Vec<[u8; 32]>,
+}
+
+impl TxPoolCleanupPlan {
+    pub fn is_empty(&self) -> bool {
+        self.confirmed_txids.is_empty()
+            && self.conflicting_inputs.is_empty()
+            && self.requeue_block_hashes.is_empty()
+    }
+
+    pub fn apply(
+        &self,
+        pool: &mut TxPool,
+        chain_state: &crate::ChainState,
+        block_store: Option<&BlockStore>,
+        chain_id: [u8; 32],
+    ) {
+        if !self.confirmed_txids.is_empty() {
+            pool.evict_txids(&self.confirmed_txids);
+        }
+        if !self.conflicting_inputs.is_empty() {
+            pool.remove_conflicting_outpoints(&self.conflicting_inputs);
+        }
+        if let Some(block_store) = block_store {
+            for block_hash in self.requeue_block_hashes.iter().rev() {
+                let Ok(block_bytes) = block_store.get_block_by_hash(*block_hash) else {
+                    continue;
+                };
+                let Ok(txs) = non_coinbase_tx_bytes(&block_bytes) else {
+                    continue;
+                };
+                for tx_bytes in txs {
+                    let _ = pool.admit(&tx_bytes, chain_state, Some(block_store), chain_id);
+                }
+            }
+        }
+    }
+
+    pub fn merge(mut self, mut other: Self) -> Self {
+        self.confirmed_txids.append(&mut other.confirmed_txids);
+        self.conflicting_inputs
+            .append(&mut other.conflicting_inputs);
+        self.requeue_block_hashes
+            .append(&mut other.requeue_block_hashes);
+        self
+    }
+
+    fn from_validated_block(parsed: &ParsedBlock, block_bytes: &[u8]) -> Result<Self, String> {
+        Ok(Self {
+            confirmed_txids: parsed.txids.clone(),
+            conflicting_inputs: non_coinbase_inputs(block_bytes)?,
+            ..Self::default()
+        })
+    }
+
+    #[cfg(test)]
+    pub fn from_parts_for_test(
+        confirmed_txids: Vec<[u8; 32]>,
+        conflicting_inputs: Vec<Outpoint>,
+        requeue_block_hashes: Vec<[u8; 32]>,
+    ) -> Self {
+        Self {
+            confirmed_txids,
+            conflicting_inputs,
+            requeue_block_hashes,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ApplyBlockWithReorgOutcome {
+    pub summary: ChainStateConnectSummary,
+    pub tx_pool_cleanup: TxPoolCleanupPlan,
+}
+
+impl Deref for ApplyBlockWithReorgOutcome {
+    type Target = ChainStateConnectSummary;
+
+    fn deref(&self) -> &Self::Target {
+        &self.summary
+    }
+}
+
 impl SyncEngine {
     /// Apply a block that may extend the canonical chain directly or trigger
     /// a reorg if it builds on a side chain with strictly more cumulative work.
@@ -29,18 +118,16 @@ impl SyncEngine {
         &mut self,
         block_bytes: &[u8],
         prev_timestamps: Option<&[u64]>,
-        tx_pool: Option<&mut TxPool>,
-    ) -> Result<ChainStateConnectSummary, String> {
+    ) -> Result<ApplyBlockWithReorgOutcome, String> {
         let parsed = parse_block_bytes(block_bytes).map_err(|e| e.to_string())?;
         let bh = block_hash(&parsed.header_bytes).map_err(|e| e.to_string())?;
 
         // Fast path: block extends current tip or is genesis.
         if let Some(summary) = self.apply_direct_if_possible(block_bytes, prev_timestamps)? {
-            if let Some(pool) = tx_pool {
-                evict_confirmed_from_pool(pool, block_bytes);
-                remove_conflicting_from_pool(pool, &parsed);
-            }
-            return Ok(summary);
+            return Ok(ApplyBlockWithReorgOutcome {
+                summary,
+                tx_pool_cleanup: TxPoolCleanupPlan::from_validated_block(&parsed, block_bytes)?,
+            });
         }
 
         let block_store = self
@@ -79,11 +166,14 @@ impl SyncEngine {
             .map_err(|e| e.to_string())?;
 
             // Already stored above; return a synthetic summary.
-            return Ok(self.synthetic_side_chain_summary(candidate_height, bh));
+            return Ok(ApplyBlockWithReorgOutcome {
+                summary: self.synthetic_side_chain_summary(candidate_height, bh),
+                tx_pool_cleanup: TxPoolCleanupPlan::default(),
+            });
         }
 
         // Execute the reorg.
-        self.apply_heavier_branch(branch, common_ancestor_height, prev_timestamps, tx_pool)
+        self.apply_heavier_branch(branch, common_ancestor_height, prev_timestamps)
     }
 
     /// Fast path: apply the block directly if it extends the current tip
@@ -150,8 +240,7 @@ impl SyncEngine {
         branch: Vec<ReorgBranchBlock>,
         common_ancestor_height: u64,
         prev_timestamps: Option<&[u64]>,
-        tx_pool: Option<&mut TxPool>,
-    ) -> Result<ChainStateConnectSummary, String> {
+    ) -> Result<ApplyBlockWithReorgOutcome, String> {
         let rollback = self.capture_reorg_rollback_state(common_ancestor_height);
 
         // Dry-run: preview the disconnect + reconnect on a cloned state.
@@ -183,14 +272,24 @@ impl SyncEngine {
         // Mempool maintenance: evict txs confirmed in the winning branch,
         // then requeue txs from the disconnected blocks (those that are still
         // valid against the new chain state will be re-admitted).
-        if let Some(pool) = tx_pool {
-            for item in &branch {
-                pool.evict_txids(&item.txids);
-            }
-            requeue_disconnected_transactions(pool, self, &disconnected_blocks);
-        }
+        let cleanup = TxPoolCleanupPlan {
+            confirmed_txids: branch
+                .iter()
+                .flat_map(|item| item.txids.iter().copied())
+                .collect(),
+            conflicting_inputs: branch
+                .iter()
+                .flat_map(|item| non_coinbase_inputs(&item.block_bytes).unwrap_or_default())
+                .collect(),
+            requeue_block_hashes: collect_disconnected_block_hashes(&disconnected_blocks),
+        };
 
-        last_summary.ok_or_else(|| "reorg branch was empty".into())
+        last_summary
+            .map(|summary| ApplyBlockWithReorgOutcome {
+                summary,
+                tx_pool_cleanup: cleanup,
+            })
+            .ok_or_else(|| "reorg branch was empty".into())
     }
 
     /// Dry-run validation: clone chain state, preview disconnect, then
@@ -292,31 +391,21 @@ impl SyncEngine {
 // Mempool helpers
 // ---------------------------------------------------------------------------
 
-/// Requeue non-coinbase transactions from disconnected blocks into the
-/// mempool. Processes blocks in reverse order (oldest first) so that
-/// dependency chains re-admit correctly.
-fn requeue_disconnected_transactions(
-    pool: &mut TxPool,
-    engine: &SyncEngine,
-    disconnected_blocks: &[Vec<u8>],
-) {
-    for block_bytes in disconnected_blocks.iter().rev() {
-        let Ok(txs) = non_coinbase_tx_bytes(block_bytes) else {
-            continue;
-        };
-        for tx_bytes in txs {
-            let block_store_ref = engine.block_store.as_ref();
-            let _ = pool.admit(
-                &tx_bytes,
-                &engine.chain_state,
-                block_store_ref,
-                engine.cfg.chain_id,
-            );
-        }
-    }
+/// Track disconnected blocks by hash and re-load them from blockstore when
+/// applying mempool cleanup, instead of copying every tx into the cleanup plan.
+fn collect_disconnected_block_hashes(disconnected_blocks: &[Vec<u8>]) -> Vec<[u8; 32]> {
+    disconnected_blocks
+        .iter()
+        .filter_map(|block_bytes| {
+            parse_block_bytes(block_bytes)
+                .ok()
+                .and_then(|parsed| block_hash(&parsed.header_bytes).ok())
+        })
+        .collect()
 }
 
 /// Remove transactions confirmed in the given block from the mempool.
+#[cfg(test)]
 fn evict_confirmed_from_pool(pool: &mut TxPool, block_bytes: &[u8]) {
     let Ok(parsed) = parse_block_bytes(block_bytes) else {
         return;
@@ -324,11 +413,30 @@ fn evict_confirmed_from_pool(pool: &mut TxPool, block_bytes: &[u8]) {
     pool.evict_txids(&parsed.txids);
 }
 
-fn remove_conflicting_from_pool(pool: &mut TxPool, parsed: &ParsedBlock) {
-    if parsed.txs.len() <= 1 {
-        return;
+fn non_coinbase_inputs(block_bytes: &[u8]) -> Result<Vec<Outpoint>, String> {
+    if block_bytes.len() < BLOCK_HEADER_BYTES {
+        return Err("block too short".into());
     }
-    pool.remove_conflicting_inputs(&parsed.txs[1..]);
+    let after_header = &block_bytes[BLOCK_HEADER_BYTES..];
+    let (tx_count, cs_size) = read_compact_size_bytes(after_header).map_err(|e| e.to_string())?;
+    if tx_count <= 1 {
+        return Ok(Vec::new());
+    }
+
+    let mut offset = BLOCK_HEADER_BYTES + cs_size;
+    let mut outpoints = Vec::new();
+    for i in 0..tx_count {
+        let (tx, _txid, _wtxid, consumed) =
+            parse_tx(&block_bytes[offset..]).map_err(|e| e.to_string())?;
+        if i > 0 {
+            outpoints.extend(tx.inputs.into_iter().map(|input| Outpoint {
+                txid: input.prev_txid,
+                vout: input.prev_vout,
+            }));
+        }
+        offset += consumed;
+    }
+    Ok(outpoints)
 }
 
 /// Extract raw bytes for each non-coinbase transaction in a block.
@@ -504,7 +612,7 @@ mod tests {
         let (genesis, _, _) = genesis_info();
 
         let summary = engine
-            .apply_block_with_reorg(&genesis, None, None)
+            .apply_block_with_reorg(&genesis, None)
             .expect("genesis via reorg");
         assert_eq!(summary.block_height, 0);
         assert!(engine.chain_state.has_tip);
@@ -518,14 +626,20 @@ mod tests {
         let (genesis, genesis_hash, gen_ts) = genesis_info();
 
         engine
-            .apply_block_with_reorg(&genesis, None, None)
+            .apply_block_with_reorg(&genesis, None)
             .expect("genesis");
 
         let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 1);
         let mut pool = TxPool::new();
         let summary = engine
-            .apply_block_with_reorg(&block1, None, Some(&mut pool))
+            .apply_block_with_reorg(&block1, None)
             .expect("block 1");
+        summary.tx_pool_cleanup.apply(
+            &mut pool,
+            &engine.chain_state,
+            engine.block_store.as_ref(),
+            engine.cfg.chain_id,
+        );
         assert_eq!(summary.block_height, 1);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -536,7 +650,7 @@ mod tests {
         let (mut engine, dir) = engine_with_store("rubin-reorg-tip-conflict");
         let (genesis, genesis_hash, gen_ts) = genesis_info();
         engine
-            .apply_block_with_reorg(&genesis, None, None)
+            .apply_block_with_reorg(&genesis, None)
             .expect("genesis");
         engine.cfg.chain_id = devnet_genesis_chain_id();
 
@@ -553,9 +667,15 @@ mod tests {
         .expect("admit");
 
         let block1 = block_with_txs(1, 0, genesis_hash, gen_ts + 1, &[block_raw]);
-        engine
-            .apply_block_with_reorg(&block1, None, Some(&mut pool))
+        let outcome = engine
+            .apply_block_with_reorg(&block1, None)
             .expect("block 1");
+        outcome.tx_pool_cleanup.apply(
+            &mut pool,
+            &engine.chain_state,
+            engine.block_store.as_ref(),
+            engine.cfg.chain_id,
+        );
 
         assert!(pool.is_empty());
         std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -568,20 +688,20 @@ mod tests {
         let (genesis, genesis_hash, gen_ts) = genesis_info();
 
         engine
-            .apply_block_with_reorg(&genesis, None, None)
+            .apply_block_with_reorg(&genesis, None)
             .expect("genesis");
 
         // Extend tip with explicit timestamps (no blockstore for auto-derive).
         let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 1);
         engine
-            .apply_block_with_reorg(&block1, Some(&[gen_ts]), None)
+            .apply_block_with_reorg(&block1, Some(&[gen_ts]))
             .expect("extends tip");
 
         // Alternate block with parent = genesis (not tip).
         // Without blockstore → error on side-chain path.
         let alt = height_one_coinbase_only_block(genesis_hash, gen_ts + 2);
         let err = engine
-            .apply_block_with_reorg(&alt, Some(&[gen_ts]), None)
+            .apply_block_with_reorg(&alt, Some(&[gen_ts]))
             .unwrap_err();
         assert!(err.contains("missing blockstore"), "got: {err}");
     }
@@ -592,19 +712,19 @@ mod tests {
         let (genesis, genesis_hash, gen_ts) = genesis_info();
 
         engine
-            .apply_block_with_reorg(&genesis, None, None)
+            .apply_block_with_reorg(&genesis, None)
             .expect("genesis");
 
         let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 1);
         engine
-            .apply_block_with_reorg(&block1, None, None)
+            .apply_block_with_reorg(&block1, None)
             .expect("block 1");
 
         // Alternate block at same height with parent = genesis.
         // Same cumulative work → no reorg (not strictly greater).
         let alt = height_one_coinbase_only_block(genesis_hash, gen_ts + 2);
         let summary = engine
-            .apply_block_with_reorg(&alt, None, None)
+            .apply_block_with_reorg(&alt, None)
             .expect("side chain stored");
 
         // Stored as side chain; canonical tip unchanged.
@@ -627,13 +747,13 @@ mod tests {
         let (genesis, genesis_hash, gen_ts) = genesis_info();
 
         engine
-            .apply_block_with_reorg(&genesis, None, None)
+            .apply_block_with_reorg(&genesis, None)
             .expect("genesis");
 
         // Canonical: genesis → block1
         let block1 = coinbase_only_block(1, genesis_hash, gen_ts + 1);
         engine
-            .apply_block_with_reorg(&block1, None, None)
+            .apply_block_with_reorg(&block1, None)
             .expect("block1 canonical");
         assert_eq!(engine.chain_state.height, 1);
 
@@ -662,8 +782,14 @@ mod tests {
         // Reorg: branch [block1', block2'] work=2 > canonical [block1] work=1.
         let mut pool = TxPool::new();
         let summary = engine
-            .apply_block_with_reorg(&block2_alt, None, Some(&mut pool))
+            .apply_block_with_reorg(&block2_alt, None)
             .expect("reorg to heavier branch");
+        summary.tx_pool_cleanup.apply(
+            &mut pool,
+            &engine.chain_state,
+            engine.block_store.as_ref(),
+            engine.cfg.chain_id,
+        );
 
         assert_eq!(engine.chain_state.height, 2);
         assert_eq!(summary.block_height, 2);
@@ -676,7 +802,7 @@ mod tests {
         let (mut engine, dir) = engine_with_store("rubin-reorg-native-suite");
         let (genesis, genesis_hash, gen_ts) = genesis_info();
         engine
-            .apply_block_with_reorg(&genesis, None, None)
+            .apply_block_with_reorg(&genesis, None)
             .expect("genesis");
         engine.cfg.chain_id = devnet_genesis_chain_id();
 
@@ -755,13 +881,25 @@ mod tests {
             std::slice::from_ref(&admitted_raw),
         );
         let summary_a1 = engine
-            .apply_block_with_reorg(&block1, None, Some(&mut pool))
+            .apply_block_with_reorg(&block1, None)
             .expect("A1 canonical");
+        summary_a1.tx_pool_cleanup.apply(
+            &mut pool,
+            &engine.chain_state,
+            engine.block_store.as_ref(),
+            engine.cfg.chain_id,
+        );
 
         let block1_alt = block_with_txs(1, 0, genesis_hash, gen_ts + 2, &[block_raw]);
-        engine
-            .apply_block_with_reorg(&block1_alt, None, Some(&mut pool))
+        let summary_b1 = engine
+            .apply_block_with_reorg(&block1_alt, None)
             .expect("B1 side chain stored");
+        summary_b1.tx_pool_cleanup.apply(
+            &mut pool,
+            &engine.chain_state,
+            engine.block_store.as_ref(),
+            engine.cfg.chain_id,
+        );
 
         let block1_alt_hash =
             rubin_consensus::block_hash(&block1_alt[..rubin_consensus::BLOCK_HEADER_BYTES])
@@ -769,9 +907,15 @@ mod tests {
         let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
         let block2_alt = coinbase_only_block_with_gen(2, subsidy1, block1_alt_hash, gen_ts + 3);
 
-        engine
-            .apply_block_with_reorg(&block2_alt, None, Some(&mut pool))
+        let outcome = engine
+            .apply_block_with_reorg(&block2_alt, None)
             .expect("reorg to heavier branch");
+        outcome.tx_pool_cleanup.apply(
+            &mut pool,
+            &engine.chain_state,
+            engine.block_store.as_ref(),
+            engine.cfg.chain_id,
+        );
 
         assert_eq!(pool.len(), 1, "disconnected tx requeued into mempool");
         assert!(
@@ -794,7 +938,7 @@ mod tests {
         // Craft a block with prev_hash != [0;32] but chain has no tip.
         let bad_genesis = coinbase_only_block(0, [0xaa; 32], 1);
         let err = engine
-            .apply_block_with_reorg(&bad_genesis, None, None)
+            .apply_block_with_reorg(&bad_genesis, None)
             .unwrap_err();
         assert!(err.contains(PARENT_BLOCK_NOT_FOUND_ERR), "got: {err}");
         std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -812,12 +956,12 @@ mod tests {
         let (genesis, genesis_hash, gen_ts) = genesis_info();
 
         engine
-            .apply_block_with_reorg(&genesis, None, None)
+            .apply_block_with_reorg(&genesis, None)
             .expect("genesis");
 
         let block1 = coinbase_only_block(1, genesis_hash, gen_ts + 1);
         engine
-            .apply_block_with_reorg(&block1, None, None)
+            .apply_block_with_reorg(&block1, None)
             .expect("block1");
 
         // Build heavier branch: block1' → block2'.
@@ -847,7 +991,7 @@ mod tests {
         std::fs::set_permissions(&dir, perms).expect("set dir ro");
 
         let err = engine
-            .apply_block_with_reorg(&block2_alt, None, None)
+            .apply_block_with_reorg(&block2_alt, None)
             .unwrap_err();
 
         // Restore permissions for cleanup.
@@ -878,12 +1022,12 @@ mod tests {
         let (genesis, genesis_hash, gen_ts) = genesis_info();
 
         engine
-            .apply_block_with_reorg(&genesis, None, None)
+            .apply_block_with_reorg(&genesis, None)
             .expect("genesis");
 
         let block1 = coinbase_only_block(1, genesis_hash, gen_ts + 1);
         engine
-            .apply_block_with_reorg(&block1, None, None)
+            .apply_block_with_reorg(&block1, None)
             .expect("block1");
 
         // Build heavier branch.
@@ -914,7 +1058,7 @@ mod tests {
         std::fs::set_permissions(&undo_dir, perms).expect("set ro");
 
         let err = engine
-            .apply_block_with_reorg(&block2_alt, None, None)
+            .apply_block_with_reorg(&block2_alt, None)
             .unwrap_err();
 
         // Restore permissions for cleanup.

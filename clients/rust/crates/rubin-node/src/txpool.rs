@@ -313,16 +313,21 @@ impl TxPool {
     }
 
     pub fn remove_conflicting_inputs(&mut self, txs: &[rubin_consensus::Tx]) {
-        let mut conflicting = HashSet::new();
+        let mut outpoints = Vec::new();
         for tx in txs {
-            for input in &tx.inputs {
-                let outpoint = Outpoint {
-                    txid: input.prev_txid,
-                    vout: input.prev_vout,
-                };
-                if let Some(txid) = self.spenders.get(&outpoint) {
-                    conflicting.insert(*txid);
-                }
+            outpoints.extend(tx.inputs.iter().map(|input| Outpoint {
+                txid: input.prev_txid,
+                vout: input.prev_vout,
+            }));
+        }
+        self.remove_conflicting_outpoints(&outpoints);
+    }
+
+    pub fn remove_conflicting_outpoints(&mut self, outpoints: &[Outpoint]) {
+        let mut conflicting = HashSet::new();
+        for outpoint in outpoints {
+            if let Some(txid) = self.spenders.get(outpoint) {
+                conflicting.insert(*txid);
             }
         }
         if conflicting.is_empty() {

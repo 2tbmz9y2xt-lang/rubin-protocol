@@ -9,10 +9,12 @@ use std::time::{Duration, Instant};
 use std::collections::HashMap;
 
 use crate::p2p_runtime::{
-    perform_version_handshake, PeerManager, PeerRelayContext, PeerRuntimeConfig, VersionPayloadV1,
+    perform_version_handshake, LiveMessageOutcome, PeerManager, PeerRelayContext,
+    PeerRuntimeConfig, VersionPayloadV1, WireMessage,
 };
+use crate::sync_reorg::TxPoolCleanupPlan;
 use crate::tx_relay::{PeerOutbox, TxRelayState};
-use crate::SyncEngine;
+use crate::{SyncEngine, TxPool};
 
 const ACCEPT_LOOP_SLEEP: Duration = Duration::from_millis(100);
 const RECONNECT_LOOP_SLEEP: Duration = Duration::from_millis(250);
@@ -39,6 +41,7 @@ pub struct NodeP2PServiceConfig {
     pub runtime_cfg: PeerRuntimeConfig,
     pub peer_manager: Arc<PeerManager>,
     pub sync_engine: Arc<Mutex<SyncEngine>>,
+    pub tx_pool: Arc<Mutex<TxPool>>,
     pub chain_id: [u8; 32],
     pub genesis_hash: [u8; 32],
 }
@@ -59,6 +62,7 @@ struct SharedServiceState {
     worker_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
     peer_manager: Arc<PeerManager>,
     sync_engine: Arc<Mutex<SyncEngine>>,
+    tx_pool: Arc<Mutex<TxPool>>,
     bootstrap_peers: Arc<Vec<String>>,
     bootstrap_rotate_idx: Arc<AtomicUsize>,
     in_flight_dials: Arc<Mutex<HashSet<String>>>,
@@ -143,6 +147,7 @@ pub fn start_node_p2p_service(cfg: NodeP2PServiceConfig) -> Result<RunningNodeP2
         worker_handles: Arc::new(Mutex::new(Vec::new())),
         peer_manager: cfg.peer_manager,
         sync_engine: cfg.sync_engine,
+        tx_pool: cfg.tx_pool,
         bootstrap_peers: Arc::new(cfg.bootstrap_peers),
         bootstrap_rotate_idx: Arc::new(AtomicUsize::new(0)),
         in_flight_dials: Arc::new(Mutex::new(HashSet::new())),
@@ -750,14 +755,17 @@ fn handle_peer(
             // Lock scope minimized: engine lock held only during
             // collect_live_responses.  Payload size check above ensures
             // no unbounded deserialization under lock.
-            let mut engine = shared
-                .sync_engine
-                .lock()
-                .map_err(|_| "sync engine unavailable".to_string())?;
-            let responses = session
-                .collect_live_responses(msg, &mut engine, Some(&relay_ctx))
-                .map_err(|err| format!("handle live message: {err}"))?;
-            drop(engine);
+            let (responses, tx_pool_cleanup) = {
+                let mut engine = shared
+                    .sync_engine
+                    .lock()
+                    .map_err(|_| "sync engine unavailable".to_string())?;
+                let outcome = session.collect_live_responses(msg, &mut engine, Some(&relay_ctx));
+                let pending_cleanup = session.take_pending_tx_pool_cleanup();
+                drop(engine);
+                finalize_live_message_outcome(&shared, outcome, pending_cleanup)?
+            };
+            maybe_apply_tx_pool_cleanup(&shared, tx_pool_cleanup)?;
             responses
         };
         for outbound in outbound_messages {
@@ -794,6 +802,56 @@ where
         write_frame(&frame).map_err(|err| format!("relay drain: {err}"))?;
     }
     Ok(())
+}
+
+fn apply_tx_pool_cleanup(
+    shared: &SharedServiceState,
+    tx_pool_cleanup: TxPoolCleanupPlan,
+) -> Result<(), String> {
+    let (chain_state, block_store, chain_id) = {
+        let engine = shared
+            .sync_engine
+            .lock()
+            .map_err(|_| "sync engine unavailable".to_string())?;
+        (
+            engine.chain_state_snapshot(),
+            engine.block_store_snapshot(),
+            engine.chain_id(),
+        )
+    };
+    let mut tx_pool = shared
+        .tx_pool
+        .lock()
+        .map_err(|_| "tx pool unavailable".to_string())?;
+    tx_pool_cleanup.apply(&mut tx_pool, &chain_state, block_store.as_ref(), chain_id);
+    Ok(())
+}
+
+fn maybe_apply_tx_pool_cleanup(
+    shared: &SharedServiceState,
+    tx_pool_cleanup: TxPoolCleanupPlan,
+) -> Result<(), String> {
+    if tx_pool_cleanup.is_empty() {
+        return Ok(());
+    }
+    apply_tx_pool_cleanup(shared, tx_pool_cleanup)
+}
+
+fn finalize_live_message_outcome(
+    shared: &SharedServiceState,
+    outcome: io::Result<LiveMessageOutcome>,
+    pending_cleanup: TxPoolCleanupPlan,
+) -> Result<(Vec<WireMessage>, TxPoolCleanupPlan), String> {
+    match outcome {
+        Ok(outcome) => Ok((
+            outcome.responses,
+            outcome.tx_pool_cleanup.merge(pending_cleanup),
+        )),
+        Err(err) => {
+            maybe_apply_tx_pool_cleanup(shared, pending_cleanup)?;
+            Err(format!("handle live message: {err}"))
+        }
+    }
 }
 
 fn service_local_version(
@@ -850,6 +908,7 @@ impl Drop for SessionSlotGuard {
 mod tests {
     use std::collections::HashSet;
     use std::fs;
+    use std::io;
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -859,21 +918,25 @@ mod tests {
     use rubin_consensus::{block_hash, constants::POW_LIMIT, BLOCK_HEADER_BYTES};
 
     use super::{
-        connect_with_timeout, flush_peer_outbox, join_all_service_workers, lock_in_flight_dials,
-        outbound_connect_timeout, reconnect_missing_bootstrap_peers, should_skip_outbound_dial,
-        start_node_p2p_service, wait_for_service_shutdown, NodeP2PServiceConfig,
-        SharedServiceState,
+        apply_tx_pool_cleanup, connect_with_timeout, finalize_live_message_outcome,
+        flush_peer_outbox, join_all_service_workers, lock_in_flight_dials,
+        maybe_apply_tx_pool_cleanup, outbound_connect_timeout, reconnect_missing_bootstrap_peers,
+        should_skip_outbound_dial, start_node_p2p_service, wait_for_service_shutdown,
+        NodeP2PServiceConfig, SharedServiceState,
     };
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use crate::interop::local_version;
     use crate::p2p_runtime::{
         build_envelope_header, decode_inventory_vectors, default_peer_runtime_config,
         encode_inventory_vectors, network_magic, perform_version_handshake, InventoryVector,
-        PeerManager, PeerRuntimeConfig, WireMessage, MSG_TX,
+        LiveMessageOutcome, PeerManager, PeerRuntimeConfig, WireMessage, MSG_TX,
     };
+    use crate::sync_reorg::TxPoolCleanupPlan;
     use crate::tx_relay::PeerOutbox;
     use crate::tx_relay::TxRelayState;
-    use crate::{block_store_path, default_sync_config, BlockStore, ChainState, SyncEngine};
+    use crate::{
+        block_store_path, default_sync_config, BlockStore, ChainState, SyncEngine, TxPool,
+    };
     use std::collections::HashMap;
 
     fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
@@ -911,6 +974,7 @@ mod tests {
             worker_handles: Arc::new(Mutex::new(Vec::new())),
             peer_manager: Arc::new(PeerManager::new(runtime_cfg)),
             sync_engine,
+            tx_pool: Arc::new(Mutex::new(TxPool::new())),
             bootstrap_peers: Arc::new(bootstrap_peers),
             bootstrap_rotate_idx: Arc::new(AtomicUsize::new(0)),
             in_flight_dials: Arc::new(Mutex::new(HashSet::new())),
@@ -958,6 +1022,89 @@ mod tests {
 
         assert_eq!(drained, vec![vec![0xAA, 0xBB, 0xCC]]);
         assert!(shared.peer_outboxes.lock().unwrap()["peer:8333"].is_empty());
+    }
+
+    #[test]
+    fn apply_tx_pool_cleanup_accepts_non_empty_plan() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-apply-cleanup");
+        let shared = test_shared_state(
+            default_peer_runtime_config("devnet", 8),
+            Vec::new(),
+            sync_engine,
+        );
+        let cleanup =
+            TxPoolCleanupPlan::from_parts_for_test(vec![[0x11; 32]], Vec::new(), Vec::new());
+
+        apply_tx_pool_cleanup(&shared, cleanup).expect("cleanup should apply");
+
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn maybe_apply_tx_pool_cleanup_skips_empty_plan() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-maybe-cleanup");
+        let shared = test_shared_state(
+            default_peer_runtime_config("devnet", 8),
+            Vec::new(),
+            sync_engine,
+        );
+
+        maybe_apply_tx_pool_cleanup(&shared, TxPoolCleanupPlan::default())
+            .expect("empty cleanup should noop");
+
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn finalize_live_message_outcome_merges_pending_cleanup_on_success() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-finalize-success");
+        let shared = test_shared_state(
+            default_peer_runtime_config("devnet", 8),
+            Vec::new(),
+            sync_engine,
+        );
+        let outcome = LiveMessageOutcome {
+            responses: vec![WireMessage {
+                command: "pong".to_string(),
+                payload: Vec::new(),
+            }],
+            tx_pool_cleanup: TxPoolCleanupPlan::default(),
+        };
+        let pending =
+            TxPoolCleanupPlan::from_parts_for_test(vec![[0x22; 32]], Vec::new(), Vec::new());
+
+        let (responses, merged_cleanup) =
+            finalize_live_message_outcome(&shared, Ok(outcome), pending).expect("success path");
+
+        assert_eq!(responses.len(), 1);
+        assert!(
+            !merged_cleanup.is_empty(),
+            "pending cleanup must survive the success path"
+        );
+
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn finalize_live_message_outcome_applies_pending_cleanup_on_error() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-finalize-error");
+        let shared = test_shared_state(
+            default_peer_runtime_config("devnet", 8),
+            Vec::new(),
+            sync_engine,
+        );
+        let pending =
+            TxPoolCleanupPlan::from_parts_for_test(vec![[0x33; 32]], Vec::new(), Vec::new());
+
+        let err = finalize_live_message_outcome(&shared, Err(io::Error::other("boom")), pending)
+            .expect_err("error path should bubble up");
+
+        assert!(
+            err.contains("handle live message: boom"),
+            "unexpected error text: {err}"
+        );
+
+        fs::remove_dir_all(dir).expect("cleanup");
     }
 
     fn test_wire_frame(runtime_cfg: &PeerRuntimeConfig, command: &str, payload: &[u8]) -> Vec<u8> {
@@ -1332,6 +1479,7 @@ mod tests {
             runtime_cfg: runtime_cfg.clone(),
             peer_manager: Arc::new(PeerManager::new(runtime_cfg.clone())),
             sync_engine,
+            tx_pool: Arc::new(Mutex::new(TxPool::new())),
             chain_id: devnet_genesis_chain_id(),
             genesis_hash: test_genesis_hash(),
         })
@@ -1385,6 +1533,7 @@ mod tests {
             runtime_cfg: default_peer_runtime_config("devnet", 8),
             peer_manager: Arc::clone(&peer_manager),
             sync_engine,
+            tx_pool: Arc::new(Mutex::new(TxPool::new())),
             chain_id: devnet_genesis_chain_id(),
             genesis_hash: test_genesis_hash(),
         })
@@ -1420,6 +1569,7 @@ mod tests {
             runtime_cfg: runtime_cfg.clone(),
             peer_manager,
             sync_engine,
+            tx_pool: Arc::new(Mutex::new(TxPool::new())),
             chain_id: devnet_genesis_chain_id(),
             genesis_hash: test_genesis_hash(),
         })
@@ -1869,6 +2019,7 @@ mod tests {
             runtime_cfg,
             peer_manager,
             sync_engine,
+            tx_pool: Arc::new(Mutex::new(TxPool::new())),
             chain_id: devnet_genesis_chain_id(),
             genesis_hash: test_genesis_hash(),
         });

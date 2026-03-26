@@ -90,6 +90,29 @@ pub fn new_devnet_rpc_state(
     peer_manager: Arc<PeerManager>,
     announce_tx: Option<AnnounceTxFn>,
 ) -> DevnetRPCState {
+    let tx_pool = new_shared_runtime_tx_pool(&sync_engine);
+    new_devnet_rpc_state_with_tx_pool(sync_engine, block_store, tx_pool, peer_manager, announce_tx)
+}
+
+pub fn new_devnet_rpc_state_with_tx_pool(
+    sync_engine: Arc<Mutex<SyncEngine>>,
+    block_store: Option<BlockStore>,
+    tx_pool: Arc<Mutex<TxPool>>,
+    peer_manager: Arc<PeerManager>,
+    announce_tx: Option<AnnounceTxFn>,
+) -> DevnetRPCState {
+    DevnetRPCState {
+        sync_engine,
+        block_store,
+        tx_pool,
+        peer_manager,
+        metrics: Arc::new(RpcMetrics::default()),
+        now_unix: current_unix,
+        announce_tx,
+    }
+}
+
+pub fn new_shared_runtime_tx_pool(sync_engine: &Arc<Mutex<SyncEngine>>) -> Arc<Mutex<TxPool>> {
     let (core_ext_deployments, suite_context) = sync_engine
         .lock()
         .map(|engine| {
@@ -99,19 +122,11 @@ pub fn new_devnet_rpc_state(
             )
         })
         .unwrap_or_else(|_| (Default::default(), None));
-    DevnetRPCState {
-        sync_engine,
-        block_store,
-        tx_pool: Arc::new(Mutex::new(TxPool::new_with_config(TxPoolConfig {
-            core_ext_deployments,
-            suite_context,
-            ..TxPoolConfig::default()
-        }))),
-        peer_manager,
-        metrics: Arc::new(RpcMetrics::default()),
-        now_unix: current_unix,
-        announce_tx,
-    }
+    Arc::new(Mutex::new(TxPool::new_with_config(TxPoolConfig {
+        core_ext_deployments,
+        suite_context,
+        ..TxPoolConfig::default()
+    })))
 }
 
 pub fn start_devnet_rpc_server(
