@@ -80,6 +80,19 @@ impl TxPoolCleanupPlan {
             ..Self::default()
         })
     }
+
+    #[cfg(test)]
+    pub fn from_parts_for_test(
+        confirmed_txids: Vec<[u8; 32]>,
+        conflicting_inputs: Vec<Outpoint>,
+        requeue_block_hashes: Vec<[u8; 32]>,
+    ) -> Self {
+        Self {
+            confirmed_txids,
+            conflicting_inputs,
+            requeue_block_hashes,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
