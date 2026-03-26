@@ -810,7 +810,7 @@ fn validate_core_ext_spend_with_cache_impl(
         let verify_tx_context_fn = p.verify_sig_ext_tx_context_fn.ok_or_else(|| {
             TxError::new(
                 ErrorCode::TxErrSigAlgInvalid,
-                "CORE_EXT verify_sig_ext unsupported",
+                "CORE_EXT non-native verifier binding unsupported",
             )
         })?;
         let tx_context = tx_context.ok_or_else(|| {
@@ -1376,7 +1376,7 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
-        assert_eq!(err.msg, "CORE_EXT verify_sig_ext unsupported");
+        assert_eq!(err.msg, "CORE_EXT non-native verifier binding unsupported");
     }
 
     #[test]

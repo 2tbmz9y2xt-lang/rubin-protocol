@@ -51,12 +51,13 @@ impl Default for SigCheckQueue {
     }
 }
 
-#[cfg(test)]
 impl Drop for SigCheckQueue {
     fn drop(&mut self) {
         if self.tasks.is_empty() || std::thread::panicking() {
             return;
         }
+        // Unflushed deferred signatures are a consensus-integrity bug. Fail
+        // closed in all builds instead of silently accepting an unchecked tail.
         panic!("SigCheckQueue dropped with unflushed tasks");
     }
 }
@@ -85,12 +86,7 @@ impl SigCheckQueue {
         digest: [u8; 32],
         err_on_fail: TxError,
     ) -> Result<(), TxError> {
-        if self.tasks.len() >= MAX_SIGCHECK_QUEUE_TASKS {
-            return Err(TxError::new(
-                ErrorCode::TxErrWitnessOverflow,
-                "SigCheckQueue task budget exceeded",
-            ));
-        }
+        ensure_task_budget(self.tasks.len())?;
         self.queued_bytes = next_queued_bytes(
             self.queued_bytes,
             sigcheck_task_bytes(pubkey.len(), sig.len())?,
@@ -205,6 +201,16 @@ fn verify_queued_task(task: SigCheckTask, registry: Option<&SuiteRegistry>) -> R
     };
     if !ok {
         return Err(task.err_on_fail);
+    }
+    Ok(())
+}
+
+fn ensure_task_budget(task_count: usize) -> Result<(), TxError> {
+    if task_count >= MAX_SIGCHECK_QUEUE_TASKS {
+        return Err(TxError::new(
+            ErrorCode::TxErrWitnessOverflow,
+            "SigCheckQueue task budget exceeded",
+        ));
     }
     Ok(())
 }
@@ -545,6 +551,12 @@ mod tests {
     }
 
     #[test]
+    fn sig_check_queue_empty_flush_is_ok() {
+        let mut queue = SigCheckQueue::new(1);
+        queue.flush().expect("empty flush");
+    }
+
+    #[test]
     fn sig_check_queue_assert_flushed_accepts_after_explicit_flush() {
         let keypair = Mldsa87Keypair::generate().expect("keypair");
         let digest = [0x77; 32];
@@ -663,6 +675,26 @@ mod tests {
                 TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
             )
             .expect_err("byte budget overflow must fail closed");
+        assert_eq!(err.code, ErrorCode::TxErrWitnessOverflow);
+    }
+
+    #[test]
+    fn sig_check_queue_rejects_task_budget_overflow() {
+        let err = ensure_task_budget(MAX_SIGCHECK_QUEUE_TASKS)
+            .expect_err("task budget boundary must fail closed");
+        assert_eq!(err.code, ErrorCode::TxErrWitnessOverflow);
+    }
+
+    #[test]
+    fn next_queued_bytes_overflow_fails_closed() {
+        let err = next_queued_bytes(usize::MAX, 1).expect_err("usize overflow must fail closed");
+        assert_eq!(err.code, ErrorCode::TxErrWitnessOverflow);
+    }
+
+    #[test]
+    fn sigcheck_task_bytes_overflow_fails_closed() {
+        let err = sigcheck_task_bytes(usize::MAX, 1)
+            .expect_err("footprint overflow must fail closed");
         assert_eq!(err.code, ErrorCode::TxErrWitnessOverflow);
     }
 
