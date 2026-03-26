@@ -863,7 +863,7 @@ mod tests {
     use crate::p2p_runtime::{
         build_envelope_header, default_peer_runtime_config, encode_inventory_vectors,
         network_magic, perform_version_handshake, InventoryVector, PeerManager, PeerRuntimeConfig,
-        MSG_TX,
+        WireMessage, MSG_TX,
     };
     use crate::tx_relay::PeerOutbox;
     use crate::tx_relay::TxRelayState;
@@ -1086,6 +1086,63 @@ mod tests {
             1,
             "quiet healthy peer must remain connected across repeated sub-timeouts"
         );
+
+        shared.stop.store(true, Ordering::SeqCst);
+        drop(session);
+        handler.join().expect("handler join");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn service_handles_live_message_without_waiting_for_timeout() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-live-read");
+        let mut runtime_cfg = default_peer_runtime_config("devnet", 8);
+        runtime_cfg.read_deadline = Duration::from_secs(2);
+        runtime_cfg.write_deadline = Duration::from_secs(1);
+        let shared = test_shared_state(runtime_cfg.clone(), Vec::new(), sync_engine);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let handler_shared = shared.clone();
+        let handler = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept peer");
+            let _ = super::handle_peer(stream, None, handler_shared);
+        });
+
+        let mut client_cfg = runtime_cfg.clone();
+        client_cfg.read_deadline = Duration::from_millis(1200);
+        let stream = TcpStream::connect(addr).expect("connect service");
+        let local = local_version(0).expect("local version");
+        let mut session = perform_version_handshake(
+            stream,
+            client_cfg,
+            local,
+            local.chain_id,
+            local.genesis_hash,
+        )
+        .expect("handshake");
+
+        session
+            .write_message(&WireMessage {
+                command: "ping".to_string(),
+                payload: Vec::new(),
+            })
+            .expect("send live ping");
+
+        let deadline = Instant::now() + Duration::from_millis(1200);
+        loop {
+            let msg = session.read_message().expect("read live response");
+            if msg.command == "pong" {
+                assert!(
+                    Instant::now() < deadline,
+                    "live loop must process immediate inbound messages without waiting for the full read timeout"
+                );
+                break;
+            }
+            assert_eq!(
+                msg.command, "getblocks",
+                "unexpected pre-pong message while validating live-loop immediate reads"
+            );
+        }
 
         shared.stop.store(true, Ordering::SeqCst);
         drop(session);
