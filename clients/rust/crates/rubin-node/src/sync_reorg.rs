@@ -1,11 +1,11 @@
 use rubin_consensus::{
     block_hash, parse_block_bytes, parse_tx, read_compact_size_bytes,
-    validate_block_basic_with_context_at_height, ParsedBlock, BLOCK_HEADER_BYTES,
+    validate_block_basic_with_context_at_height, Outpoint, ParsedBlock, BLOCK_HEADER_BYTES,
 };
 use std::ops::Deref;
 
 use crate::blockstore::BlockStore;
-use crate::chainstate::{ChainState, ChainStateConnectSummary};
+use crate::chainstate::ChainStateConnectSummary;
 use crate::sync::SyncEngine;
 use crate::txpool::TxPool;
 
@@ -25,61 +25,58 @@ struct ReorgBranchBlock {
 #[derive(Clone, Debug, Default)]
 pub struct TxPoolCleanupPlan {
     confirmed_txids: Vec<[u8; 32]>,
-    conflicting_txs: Vec<Vec<u8>>,
-    requeue_txs: Vec<Vec<u8>>,
-    requeue_chain_state: Option<ChainState>,
-    requeue_block_store: Option<BlockStore>,
-    requeue_chain_id: Option<[u8; 32]>,
+    conflicting_inputs: Vec<Outpoint>,
+    requeue_block_hashes: Vec<[u8; 32]>,
 }
 
 impl TxPoolCleanupPlan {
     pub fn is_empty(&self) -> bool {
         self.confirmed_txids.is_empty()
-            && self.conflicting_txs.is_empty()
-            && self.requeue_txs.is_empty()
+            && self.conflicting_inputs.is_empty()
+            && self.requeue_block_hashes.is_empty()
     }
 
-    pub fn apply(&self, pool: &mut TxPool) {
+    pub fn apply(
+        &self,
+        pool: &mut TxPool,
+        chain_state: &crate::ChainState,
+        block_store: Option<&BlockStore>,
+        chain_id: [u8; 32],
+    ) {
         if !self.confirmed_txids.is_empty() {
             pool.evict_txids(&self.confirmed_txids);
         }
-        if !self.conflicting_txs.is_empty() {
-            remove_conflicting_from_pool_bytes(pool, &self.conflicting_txs);
+        if !self.conflicting_inputs.is_empty() {
+            pool.remove_conflicting_outpoints(&self.conflicting_inputs);
         }
-        if let (Some(chain_state), Some(chain_id)) =
-            (self.requeue_chain_state.as_ref(), self.requeue_chain_id)
-        {
-            for tx_bytes in &self.requeue_txs {
-                let _ = pool.admit(
-                    tx_bytes,
-                    chain_state,
-                    self.requeue_block_store.as_ref(),
-                    chain_id,
-                );
+        if let Some(block_store) = block_store {
+            for block_hash in self.requeue_block_hashes.iter().rev() {
+                let Ok(block_bytes) = block_store.get_block_by_hash(*block_hash) else {
+                    continue;
+                };
+                let Ok(txs) = non_coinbase_tx_bytes(&block_bytes) else {
+                    continue;
+                };
+                for tx_bytes in txs {
+                    let _ = pool.admit(&tx_bytes, chain_state, Some(block_store), chain_id);
+                }
             }
         }
     }
 
     pub fn merge(mut self, mut other: Self) -> Self {
         self.confirmed_txids.append(&mut other.confirmed_txids);
-        self.conflicting_txs.append(&mut other.conflicting_txs);
-        self.requeue_txs.append(&mut other.requeue_txs);
-        if self.requeue_chain_state.is_none() {
-            self.requeue_chain_state = other.requeue_chain_state.take();
-        }
-        if self.requeue_block_store.is_none() {
-            self.requeue_block_store = other.requeue_block_store.take();
-        }
-        if self.requeue_chain_id.is_none() {
-            self.requeue_chain_id = other.requeue_chain_id.take();
-        }
+        self.conflicting_inputs
+            .append(&mut other.conflicting_inputs);
+        self.requeue_block_hashes
+            .append(&mut other.requeue_block_hashes);
         self
     }
 
     fn from_validated_block(parsed: &ParsedBlock, block_bytes: &[u8]) -> Result<Self, String> {
         Ok(Self {
             confirmed_txids: parsed.txids.clone(),
-            conflicting_txs: non_coinbase_tx_bytes(block_bytes)?,
+            conflicting_inputs: non_coinbase_inputs(block_bytes)?,
             ..Self::default()
         })
     }
@@ -267,14 +264,11 @@ impl SyncEngine {
                 .iter()
                 .flat_map(|item| item.txids.iter().copied())
                 .collect(),
-            conflicting_txs: branch
+            conflicting_inputs: branch
                 .iter()
-                .flat_map(|item| non_coinbase_tx_bytes(&item.block_bytes).unwrap_or_default())
+                .flat_map(|item| non_coinbase_inputs(&item.block_bytes).unwrap_or_default())
                 .collect(),
-            requeue_txs: collect_disconnected_transactions(&disconnected_blocks),
-            requeue_chain_state: Some(self.chain_state.clone()),
-            requeue_block_store: self.block_store.clone(),
-            requeue_chain_id: Some(self.cfg.chain_id),
+            requeue_block_hashes: collect_disconnected_block_hashes(&disconnected_blocks),
         };
 
         last_summary
@@ -384,18 +378,17 @@ impl SyncEngine {
 // Mempool helpers
 // ---------------------------------------------------------------------------
 
-/// Requeue non-coinbase transactions from disconnected blocks into the
-/// mempool. Processes blocks in reverse order (oldest first) so that
-/// dependency chains re-admit correctly.
-fn collect_disconnected_transactions(disconnected_blocks: &[Vec<u8>]) -> Vec<Vec<u8>> {
-    let mut txs = Vec::new();
-    for block_bytes in disconnected_blocks.iter().rev() {
-        let Ok(block_txs) = non_coinbase_tx_bytes(block_bytes) else {
-            continue;
-        };
-        txs.extend(block_txs);
-    }
-    txs
+/// Track disconnected blocks by hash and re-load them from blockstore when
+/// applying mempool cleanup, instead of copying every tx into the cleanup plan.
+fn collect_disconnected_block_hashes(disconnected_blocks: &[Vec<u8>]) -> Vec<[u8; 32]> {
+    disconnected_blocks
+        .iter()
+        .filter_map(|block_bytes| {
+            parse_block_bytes(block_bytes)
+                .ok()
+                .and_then(|parsed| block_hash(&parsed.header_bytes).ok())
+        })
+        .collect()
 }
 
 /// Remove transactions confirmed in the given block from the mempool.
@@ -407,15 +400,30 @@ fn evict_confirmed_from_pool(pool: &mut TxPool, block_bytes: &[u8]) {
     pool.evict_txids(&parsed.txids);
 }
 
-fn remove_conflicting_from_pool_bytes(pool: &mut TxPool, txs: &[Vec<u8>]) {
-    if txs.is_empty() {
-        return;
+fn non_coinbase_inputs(block_bytes: &[u8]) -> Result<Vec<Outpoint>, String> {
+    if block_bytes.len() < BLOCK_HEADER_BYTES {
+        return Err("block too short".into());
     }
-    let parsed: Vec<_> = txs
-        .iter()
-        .filter_map(|tx| parse_tx(tx).ok().map(|(p, _, _, _)| p))
-        .collect();
-    pool.remove_conflicting_inputs(&parsed);
+    let after_header = &block_bytes[BLOCK_HEADER_BYTES..];
+    let (tx_count, cs_size) = read_compact_size_bytes(after_header).map_err(|e| e.to_string())?;
+    if tx_count <= 1 {
+        return Ok(Vec::new());
+    }
+
+    let mut offset = BLOCK_HEADER_BYTES + cs_size;
+    let mut outpoints = Vec::new();
+    for i in 0..tx_count {
+        let (tx, _txid, _wtxid, consumed) =
+            parse_tx(&block_bytes[offset..]).map_err(|e| e.to_string())?;
+        if i > 0 {
+            outpoints.extend(tx.inputs.into_iter().map(|input| Outpoint {
+                txid: input.prev_txid,
+                vout: input.prev_vout,
+            }));
+        }
+        offset += consumed;
+    }
+    Ok(outpoints)
 }
 
 /// Extract raw bytes for each non-coinbase transaction in a block.
@@ -613,7 +621,12 @@ mod tests {
         let summary = engine
             .apply_block_with_reorg(&block1, None)
             .expect("block 1");
-        summary.tx_pool_cleanup.apply(&mut pool);
+        summary.tx_pool_cleanup.apply(
+            &mut pool,
+            &engine.chain_state,
+            engine.block_store.as_ref(),
+            engine.cfg.chain_id,
+        );
         assert_eq!(summary.block_height, 1);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -644,7 +657,12 @@ mod tests {
         let outcome = engine
             .apply_block_with_reorg(&block1, None)
             .expect("block 1");
-        outcome.tx_pool_cleanup.apply(&mut pool);
+        outcome.tx_pool_cleanup.apply(
+            &mut pool,
+            &engine.chain_state,
+            engine.block_store.as_ref(),
+            engine.cfg.chain_id,
+        );
 
         assert!(pool.is_empty());
         std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -753,7 +771,12 @@ mod tests {
         let summary = engine
             .apply_block_with_reorg(&block2_alt, None)
             .expect("reorg to heavier branch");
-        summary.tx_pool_cleanup.apply(&mut pool);
+        summary.tx_pool_cleanup.apply(
+            &mut pool,
+            &engine.chain_state,
+            engine.block_store.as_ref(),
+            engine.cfg.chain_id,
+        );
 
         assert_eq!(engine.chain_state.height, 2);
         assert_eq!(summary.block_height, 2);
@@ -847,13 +870,23 @@ mod tests {
         let summary_a1 = engine
             .apply_block_with_reorg(&block1, None)
             .expect("A1 canonical");
-        summary_a1.tx_pool_cleanup.apply(&mut pool);
+        summary_a1.tx_pool_cleanup.apply(
+            &mut pool,
+            &engine.chain_state,
+            engine.block_store.as_ref(),
+            engine.cfg.chain_id,
+        );
 
         let block1_alt = block_with_txs(1, 0, genesis_hash, gen_ts + 2, &[block_raw]);
         let summary_b1 = engine
             .apply_block_with_reorg(&block1_alt, None)
             .expect("B1 side chain stored");
-        summary_b1.tx_pool_cleanup.apply(&mut pool);
+        summary_b1.tx_pool_cleanup.apply(
+            &mut pool,
+            &engine.chain_state,
+            engine.block_store.as_ref(),
+            engine.cfg.chain_id,
+        );
 
         let block1_alt_hash =
             rubin_consensus::block_hash(&block1_alt[..rubin_consensus::BLOCK_HEADER_BYTES])
@@ -864,7 +897,12 @@ mod tests {
         let outcome = engine
             .apply_block_with_reorg(&block2_alt, None)
             .expect("reorg to heavier branch");
-        outcome.tx_pool_cleanup.apply(&mut pool);
+        outcome.tx_pool_cleanup.apply(
+            &mut pool,
+            &engine.chain_state,
+            engine.block_store.as_ref(),
+            engine.cfg.chain_id,
+        );
 
         assert_eq!(pool.len(), 1, "disconnected tx requeued into mempool");
         assert!(

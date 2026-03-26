@@ -2356,7 +2356,12 @@ mod tests {
             let cleanup = session
                 .handle_block(&block, &mut engine)
                 .expect("block with admitted tx");
-            cleanup.apply(&mut pool);
+            cleanup.apply(
+                &mut pool,
+                &engine.chain_state,
+                engine.block_store.as_ref(),
+                engine.cfg.chain_id,
+            );
 
             assert!(
                 pool.is_empty(),
@@ -2404,7 +2409,12 @@ mod tests {
             let cleanup = session
                 .handle_block(&block, &mut engine)
                 .expect("conflicting block");
-            cleanup.apply(&mut pool);
+            cleanup.apply(
+                &mut pool,
+                &engine.chain_state,
+                engine.block_store.as_ref(),
+                engine.cfg.chain_id,
+            );
 
             assert!(
                 pool.is_empty(),

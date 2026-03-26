@@ -150,6 +150,10 @@ impl SyncEngine {
         self.cfg.chain_id
     }
 
+    pub fn block_store_snapshot(&self) -> Option<BlockStore> {
+        self.block_store.clone()
+    }
+
     pub fn core_ext_deployments(&self) -> CoreExtDeploymentProfiles {
         self.cfg.core_ext_deployments.clone()
     }

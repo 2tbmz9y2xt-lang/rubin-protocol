@@ -764,11 +764,22 @@ fn handle_peer(
                 (outcome.responses, outcome.tx_pool_cleanup)
             };
             if !tx_pool_cleanup.is_empty() {
+                let (chain_state, block_store, chain_id) = {
+                    let engine = shared
+                        .sync_engine
+                        .lock()
+                        .map_err(|_| "sync engine unavailable".to_string())?;
+                    (
+                        engine.chain_state_snapshot(),
+                        engine.block_store_snapshot(),
+                        engine.chain_id(),
+                    )
+                };
                 let mut tx_pool = shared
                     .tx_pool
                     .lock()
                     .map_err(|_| "tx pool unavailable".to_string())?;
-                tx_pool_cleanup.apply(&mut tx_pool);
+                tx_pool_cleanup.apply(&mut tx_pool, &chain_state, block_store.as_ref(), chain_id);
             }
             responses
         };
