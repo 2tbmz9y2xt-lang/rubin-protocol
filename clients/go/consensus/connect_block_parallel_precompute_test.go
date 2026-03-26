@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -541,5 +542,146 @@ func TestPrecomputeTxContexts_HTLCWitnessSlots(t *testing.T) {
 	// HTLC = 2 witness slots.
 	if results[0].WitnessStart != 0 || results[0].WitnessEnd != 2 {
 		t.Errorf("HTLC witness: got [%d,%d), want [0,2)", results[0].WitnessStart, results[0].WitnessEnd)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hardening guard tests (#897)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestPrecomputeTxContexts_TxidsTxsLengthMismatch(t *testing.T) {
+	dummyWitness := WitnessItem{
+		SuiteID:   SUITE_ID_ML_DSA_87,
+		Pubkey:    make([]byte, ML_DSA_87_PUBKEY_BYTES),
+		Signature: make([]byte, ML_DSA_87_SIG_BYTES+1),
+	}
+
+	prevTxid := sha3_256([]byte("txid-len-mismatch"))
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prevTxid, Vout: 0}: {
+			Value: 1000, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData(),
+		},
+	}
+
+	tx := &Tx{
+		Version: 1, TxKind: 0x00, TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0}},
+		Outputs: []TxOutput{{Value: 900, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+		Witness: []WitnessItem{dummyWitness},
+	}
+
+	pb := makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx})
+	// Remove one txid to create mismatch.
+	pb.Txids = pb.Txids[:len(pb.Txids)-1]
+
+	_, err := PrecomputeTxContexts(pb, utxos, 100)
+	if err == nil {
+		t.Fatal("expected error for txids/txs length mismatch")
+	}
+	if !strings.Contains(err.Error(), "txids/txs length mismatch") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestPrecomputeTxContexts_ImmatureCoinbaseSpendRejected(t *testing.T) {
+	dummyWitness := WitnessItem{
+		SuiteID:   SUITE_ID_ML_DSA_87,
+		Pubkey:    make([]byte, ML_DSA_87_PUBKEY_BYTES),
+		Signature: make([]byte, ML_DSA_87_SIG_BYTES+1),
+	}
+
+	prevTxid := sha3_256([]byte("coinbase-immature"))
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prevTxid, Vout: 0}: {
+			Value: 1000, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData(),
+			CreationHeight: 50, CreatedByCoinbase: true,
+		},
+	}
+
+	tx := &Tx{
+		Version: 1, TxKind: 0x00, TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0}},
+		Outputs: []TxOutput{{Value: 900, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+		Witness: []WitnessItem{dummyWitness},
+	}
+
+	pb := makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx})
+
+	// Block height 100: maturity gap = 100 - 50 = 50 < COINBASE_MATURITY (100).
+	_, err := PrecomputeTxContexts(pb, utxos, 100)
+	if err == nil {
+		t.Fatal("expected error for immature coinbase spend")
+	}
+	if !strings.Contains(err.Error(), "coinbase immature") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestPrecomputeTxContexts_MatureCoinbaseSpendAccepted(t *testing.T) {
+	dummyWitness := WitnessItem{
+		SuiteID:   SUITE_ID_ML_DSA_87,
+		Pubkey:    make([]byte, ML_DSA_87_PUBKEY_BYTES),
+		Signature: make([]byte, ML_DSA_87_SIG_BYTES+1),
+	}
+
+	prevTxid := sha3_256([]byte("coinbase-mature"))
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prevTxid, Vout: 0}: {
+			Value: 1000, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData(),
+			CreationHeight: 50, CreatedByCoinbase: true,
+		},
+	}
+
+	tx := &Tx{
+		Version: 1, TxKind: 0x00, TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0}},
+		Outputs: []TxOutput{{Value: 900, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+		Witness: []WitnessItem{dummyWitness},
+	}
+
+	pb := makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx})
+
+	// Block height 150: maturity gap = 150 - 50 = 100 == COINBASE_MATURITY. Should pass.
+	results, err := PrecomputeTxContexts(pb, utxos, 150)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 context, got %d", len(results))
+	}
+}
+
+func TestAddWitnessSlots_Overflow(t *testing.T) {
+	// Normal addition succeeds.
+	total, err := addWitnessSlots(10, 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if total != 15 {
+		t.Fatalf("expected 15, got %d", total)
+	}
+
+	// Boundary: maxInt + 0 succeeds.
+	total, err = addWitnessSlots(maxInt, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if total != maxInt {
+		t.Fatalf("expected maxInt, got %d", total)
+	}
+
+	// Overflow: maxInt + 1 fails.
+	_, err = addWitnessSlots(maxInt, 1)
+	if err == nil {
+		t.Fatal("expected overflow error")
+	}
+	if !strings.Contains(err.Error(), "witness slot count overflow") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Overflow: large values.
+	_, err = addWitnessSlots(maxInt-10, 20)
+	if err == nil {
+		t.Fatal("expected overflow error")
 	}
 }

@@ -1,5 +1,18 @@
 package consensus
 
+import "math"
+
+const maxInt = int(math.MaxInt)
+
+// addWitnessSlots returns total + slots, or an error if the addition
+// would overflow int.
+func addWitnessSlots(total, slots int) (int, error) {
+	if slots > maxInt-total {
+		return 0, txerr(TX_ERR_PARSE, "witness slot count overflow")
+	}
+	return total + slots, nil
+}
+
 // TxValidationContext holds the immutable, precomputed context for a single
 // non-coinbase transaction within a block. It is computed once against the
 // block-start UTXO snapshot and passed to read-only validation workers.
@@ -65,6 +78,10 @@ func PrecomputeTxContexts(
 		return nil, txerr(BLOCK_ERR_PARSE, "nil or empty parsed block")
 	}
 
+	if len(pb.Txids) != len(pb.Txs) {
+		return nil, txerr(BLOCK_ERR_PARSE, "txids/txs length mismatch")
+	}
+
 	txCount := len(pb.Txs) - 1 // exclude coinbase
 	if txCount == 0 {
 		return nil, nil // coinbase-only block
@@ -119,6 +136,12 @@ func PrecomputeTxContexts(
 				return nil, txerr(TX_ERR_MISSING_UTXO, "utxo not found")
 			}
 
+			// Early-reject immature coinbase outputs (defense-in-depth;
+			// also checked downstream in the sequential validation path).
+			if entry.CreatedByCoinbase && (blockHeight < entry.CreationHeight || blockHeight-entry.CreationHeight < COINBASE_MATURITY) {
+				return nil, txerr(TX_ERR_COINBASE_IMMATURE, "coinbase immature")
+			}
+
 			if entry.CovenantType == COV_TYPE_ANCHOR || entry.CovenantType == COV_TYPE_DA_COMMIT {
 				return nil, txerr(TX_ERR_MISSING_UTXO, "attempt to spend non-spendable covenant")
 			}
@@ -130,7 +153,11 @@ func PrecomputeTxContexts(
 			if slots <= 0 {
 				return nil, txerr(TX_ERR_PARSE, "invalid witness slots")
 			}
-			totalWitnessSlots += slots
+			newTotal, err3 := addWitnessSlots(totalWitnessSlots, slots)
+			if err3 != nil {
+				return nil, err3
+			}
+			totalWitnessSlots = newTotal
 
 			resolvedInputs[j] = entry
 			inputOutpoints[j] = op
