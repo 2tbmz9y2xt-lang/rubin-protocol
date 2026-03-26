@@ -1,3 +1,4 @@
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -15,6 +16,7 @@ use crate::undo::build_block_undo;
 pub const DEFAULT_IBD_LAG_SECONDS: u64 = 24 * 60 * 60;
 const DEFAULT_HEADER_BATCH_LIMIT: u64 = 512;
 const DEFAULT_PV_SHADOW_MAX_SAMPLES: u64 = 3;
+const MAX_PV_SHADOW_MAX_SAMPLES: u64 = 10_000;
 
 #[derive(Clone, Debug)]
 pub struct SyncConfig {
@@ -150,6 +152,7 @@ struct PVTelemetry {
     mismatch_verdict: u64,
     mismatch_error: u64,
     mismatch_state: u64,
+    worker_panics: u64,
     validate_count: u64,
     validate_total_ns: u128,
     commit_count: u64,
@@ -165,6 +168,7 @@ impl PVTelemetry {
             mismatch_verdict: 0,
             mismatch_error: 0,
             mismatch_state: 0,
+            worker_panics: 0,
             validate_count: 0,
             validate_total_ns: 0,
             commit_count: 0,
@@ -190,6 +194,10 @@ impl PVTelemetry {
 
     fn record_mismatch_state(&mut self) {
         self.mismatch_state = self.mismatch_state.saturating_add(1);
+    }
+
+    fn record_worker_panic(&mut self) {
+        self.worker_panics = self.worker_panics.saturating_add(1);
     }
 
     fn record_validate_latency(&mut self, latency: Duration) {
@@ -228,7 +236,7 @@ impl PVTelemetry {
             sig_total: 0,
             sig_cache_hits: 0,
             worker_tasks_total: 0,
-            worker_panics: 0,
+            worker_panics: self.worker_panics,
             validate_count: self.validate_count,
             validate_avg_ns,
             commit_count: self.commit_count,
@@ -316,6 +324,7 @@ impl SyncEngine {
         if cfg.pv_shadow_max_samples == 0 {
             cfg.pv_shadow_max_samples = DEFAULT_PV_SHADOW_MAX_SAMPLES;
         }
+        cfg.pv_shadow_max_samples = cfg.pv_shadow_max_samples.min(MAX_PV_SHADOW_MAX_SAMPLES);
         let pv_mode = parse_parallel_validation_mode(&cfg.parallel_validation_mode)?;
         let pv_shadow_max_samples = cfg.pv_shadow_max_samples;
         Ok(Self {
@@ -506,13 +515,10 @@ impl SyncEngine {
                 if pv_active {
                     self.pv_telemetry.record_block_validated();
                     let validate_start = Instant::now();
-                    match run_pv_shadow_validation(
-                        &snapshot,
-                        block_bytes,
-                        prev_timestamps,
-                        &self.cfg,
-                    ) {
-                        Ok(_) => {
+                    match run_pv_shadow_validation_guarded(|| {
+                        run_pv_shadow_validation(&snapshot, block_bytes, prev_timestamps, &self.cfg)
+                    }) {
+                        Ok(Ok(_)) => {
                             self.record_pv_shadow_mismatch(format!(
                                 "pv_shadow mismatch(height={}): seq_err={} shadow_ok",
                                 next_height,
@@ -520,7 +526,7 @@ impl SyncEngine {
                             ));
                             self.pv_telemetry.record_mismatch_verdict();
                         }
-                        Err(shadow_err) => {
+                        Ok(Err(shadow_err)) => {
                             let seq_code = pv_error_code(&err);
                             let shadow_code = pv_error_code(&shadow_err);
                             if seq_code != shadow_code {
@@ -530,6 +536,16 @@ impl SyncEngine {
                                 ));
                                 self.pv_telemetry.record_mismatch_error();
                             }
+                        }
+                        Err(shadow_panic) => {
+                            self.record_pv_shadow_mismatch(format!(
+                                "pv_shadow mismatch(height={}): seq_err={} shadow_panic={}",
+                                next_height,
+                                pv_error_code(&err),
+                                shadow_panic
+                            ));
+                            self.pv_telemetry.record_mismatch_verdict();
+                            self.pv_telemetry.record_worker_panic();
                         }
                     }
                     self.pv_telemetry
@@ -544,8 +560,10 @@ impl SyncEngine {
         if pv_active {
             self.pv_telemetry.record_block_validated();
             let validate_start = Instant::now();
-            match run_pv_shadow_validation(&snapshot, block_bytes, prev_timestamps, &self.cfg) {
-                Ok(shadow_digest) => {
+            match run_pv_shadow_validation_guarded(|| {
+                run_pv_shadow_validation(&snapshot, block_bytes, prev_timestamps, &self.cfg)
+            }) {
+                Ok(Ok(shadow_digest)) => {
                     let current_digest = self.chain_state.utxo_set_hash();
                     if shadow_digest != current_digest {
                         self.record_pv_shadow_mismatch(format!(
@@ -555,13 +573,21 @@ impl SyncEngine {
                         self.pv_telemetry.record_mismatch_state();
                     }
                 }
-                Err(shadow_err) => {
+                Ok(Err(shadow_err)) => {
                     self.record_pv_shadow_mismatch(format!(
                         "pv_shadow mismatch(height={}): seq_ok shadow_err={}",
                         summary.block_height,
                         pv_error_code(&shadow_err)
                     ));
                     self.pv_telemetry.record_mismatch_verdict();
+                }
+                Err(shadow_panic) => {
+                    self.record_pv_shadow_mismatch(format!(
+                        "pv_shadow mismatch(height={}): seq_ok shadow_panic={}",
+                        summary.block_height, shadow_panic
+                    ));
+                    self.pv_telemetry.record_mismatch_verdict();
+                    self.pv_telemetry.record_worker_panic();
                 }
             }
             self.pv_telemetry
@@ -806,6 +832,13 @@ fn run_pv_shadow_validation(
     Ok(shadow_state.utxo_set_hash())
 }
 
+fn run_pv_shadow_validation_guarded<F>(run: F) -> Result<Result<[u8; 32], String>, String>
+where
+    F: FnOnce() -> Result<[u8; 32], String>,
+{
+    catch_unwind(AssertUnwindSafe(run)).map_err(|_| "pv_shadow panic".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use rubin_consensus::constants::{COV_TYPE_EXT, COV_TYPE_P2PK, POW_LIMIT, SUITE_ID_ML_DSA_87};
@@ -822,7 +855,10 @@ mod tests {
     use crate::coinbase::{build_coinbase_tx, default_mine_address};
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use crate::io_utils::unique_temp_path;
-    use crate::sync::{default_sync_config, SuiteContext, SyncEngine};
+    use crate::sync::{
+        default_sync_config, run_pv_shadow_validation_guarded, SuiteContext, SyncEngine,
+        MAX_PV_SHADOW_MAX_SAMPLES,
+    };
 
     const VALID_BLOCK_HEX: &str = "01000000111111111111111111111111111111111111111111111111111111111111111102e66000bf8ce870908df4a8689554852ccef681ee0b5df32246162a53e36e290100000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff07000000000000000101000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff010000000000000000020020b716a4b7f4c0fab665298ab9b8199b601ab9fa7e0a27f0713383f34cf37071a8000000000000";
     const CORE_EXT_NATIVE_BINDING_SPEND_TX_HEX: &str = "0100000000010000000000000001eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee000000000000000000015a0000000000000000002101111111111111111111111111111111111111111111111111111111111111111100000000010300010100";
@@ -952,6 +988,23 @@ mod tests {
         let (mismatches, samples) = engine.pv_shadow_stats();
         assert_eq!(mismatches, 0);
         assert!(samples.is_empty());
+    }
+
+    #[test]
+    fn sync_engine_caps_pv_shadow_max_samples() {
+        let mut cfg = default_sync_config(Some(POW_LIMIT), devnet_genesis_chain_id(), None);
+        cfg.pv_shadow_max_samples = u64::MAX;
+        let engine = SyncEngine::new(ChainState::new(), None, cfg).expect("new sync");
+        assert_eq!(engine.pv_shadow_max_samples, MAX_PV_SHADOW_MAX_SAMPLES);
+    }
+
+    #[test]
+    fn pv_shadow_validation_guarded_converts_panics_to_error() {
+        let err = run_pv_shadow_validation_guarded(|| -> Result<[u8; 32], String> {
+            panic!("boom");
+        })
+        .unwrap_err();
+        assert_eq!(err, "pv_shadow panic");
     }
 
     #[test]
