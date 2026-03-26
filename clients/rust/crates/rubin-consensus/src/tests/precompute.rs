@@ -678,3 +678,163 @@ fn precompute_snapshot_not_mutated() {
     assert!(utxos.contains_key(&op));
     assert_eq!(utxos.len(), 1);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hardening guard tests (#897)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn precompute_txids_txs_length_mismatch() {
+    let cov_data = valid_p2pk_covenant_data();
+    let prev_txid = sha3_256(b"txid-len-mismatch");
+    let op = Outpoint {
+        txid: prev_txid,
+        vout: 0,
+    };
+    let mut utxos = HashMap::new();
+    utxos.insert(
+        op.clone(),
+        UtxoEntry {
+            value: 1000,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data.clone(),
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    );
+
+    let tx = Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: vec![],
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 900,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data,
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![dummy_witness()],
+        da_payload: Vec::new(),
+    };
+
+    // Build a ParsedBlock with mismatched txids length.
+    let mut pb = make_parsed_block(simple_coinbase(), vec![tx]);
+    pb.txids.pop(); // Now txids.len() < txs.len()
+
+    let err = precompute_tx_contexts(&pb, &utxos, 100).unwrap_err();
+    assert!(
+        err.msg.contains("txids/txs length mismatch"),
+        "unexpected error: {}",
+        err.msg
+    );
+}
+
+#[test]
+fn precompute_immature_coinbase_spend_rejected() {
+    let cov_data = valid_p2pk_covenant_data();
+    let prev_txid = sha3_256(b"coinbase-immature");
+    let op = Outpoint {
+        txid: prev_txid,
+        vout: 0,
+    };
+    let mut utxos = HashMap::new();
+    utxos.insert(
+        op.clone(),
+        UtxoEntry {
+            value: 1000,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data.clone(),
+            creation_height: 50, // created at height 50
+            created_by_coinbase: true,
+        },
+    );
+
+    let tx = Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: vec![],
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 900,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data,
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![dummy_witness()],
+        da_payload: Vec::new(),
+    };
+
+    let pb = make_parsed_block(simple_coinbase(), vec![tx]);
+
+    // Block height 100: maturity gap = 100 - 50 = 50 < COINBASE_MATURITY (100).
+    let err = precompute_tx_contexts(&pb, &utxos, 100).unwrap_err();
+    assert!(
+        err.msg.contains("coinbase immature"),
+        "unexpected error: {}",
+        err.msg
+    );
+    assert_eq!(err.code, crate::error::ErrorCode::TxErrCoinbaseImmature);
+}
+
+#[test]
+fn precompute_mature_coinbase_spend_accepted() {
+    let cov_data = valid_p2pk_covenant_data();
+    let prev_txid = sha3_256(b"coinbase-mature");
+    let op = Outpoint {
+        txid: prev_txid,
+        vout: 0,
+    };
+    let mut utxos = HashMap::new();
+    utxos.insert(
+        op.clone(),
+        UtxoEntry {
+            value: 1000,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data.clone(),
+            creation_height: 50,
+            created_by_coinbase: true,
+        },
+    );
+
+    let tx = Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: vec![],
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 900,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data,
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![dummy_witness()],
+        da_payload: Vec::new(),
+    };
+
+    let pb = make_parsed_block(simple_coinbase(), vec![tx]);
+
+    // Block height 150: maturity gap = 150 - 50 = 100 == COINBASE_MATURITY. Should pass.
+    precompute_tx_contexts(&pb, &utxos, 150).unwrap();
+}

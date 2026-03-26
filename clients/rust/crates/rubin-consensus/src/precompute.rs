@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::block_basic::ParsedBlock;
-use crate::constants::{COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT};
+use crate::constants::{COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT};
 use crate::error::{ErrorCode, TxError};
 use crate::utxo_basic::{Outpoint, UtxoEntry};
 use crate::vault::witness_slots;
@@ -55,6 +55,13 @@ pub fn precompute_tx_contexts(
         return Err(TxError::new(
             ErrorCode::BlockErrParse,
             "nil or empty parsed block",
+        ));
+    }
+
+    if pb.txids.len() != pb.txs.len() {
+        return Err(TxError::new(
+            ErrorCode::BlockErrParse,
+            "txids/txs length mismatch",
         ));
     }
 
@@ -117,6 +124,18 @@ pub fn precompute_tx_contexts(
                 .cloned()
                 .ok_or_else(|| TxError::new(ErrorCode::TxErrMissingUtxo, "utxo not found"))?;
 
+            // Early-reject immature coinbase outputs (defense-in-depth;
+            // also checked downstream in the sequential validation path).
+            if entry.created_by_coinbase
+                && (block_height < entry.creation_height
+                    || block_height - entry.creation_height < COINBASE_MATURITY)
+            {
+                return Err(TxError::new(
+                    ErrorCode::TxErrCoinbaseImmature,
+                    "coinbase immature",
+                ));
+            }
+
             if entry.covenant_type == COV_TYPE_ANCHOR || entry.covenant_type == COV_TYPE_DA_COMMIT {
                 return Err(TxError::new(
                     ErrorCode::TxErrMissingUtxo,
@@ -128,7 +147,9 @@ pub fn precompute_tx_contexts(
             if slots == 0 {
                 return Err(TxError::new(ErrorCode::TxErrParse, "invalid witness slots"));
             }
-            total_witness_slots += slots;
+            total_witness_slots = total_witness_slots.checked_add(slots).ok_or_else(|| {
+                TxError::new(ErrorCode::TxErrParse, "witness slot count overflow")
+            })?;
 
             sum_in = sum_in.checked_add(u128::from(entry.value)).ok_or_else(|| {
                 TxError::new(ErrorCode::TxErrValueConservation, "input sum overflow")
