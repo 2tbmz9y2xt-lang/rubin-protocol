@@ -27,6 +27,8 @@ struct CliConfig {
     mine_address: Option<String>,
     mine_blocks: usize,
     mine_exit: bool,
+    pv_mode: String,
+    pv_shadow_max: u64,
     dry_run: bool,
 }
 
@@ -43,6 +45,8 @@ struct EffectiveConfig {
     mine_address: Option<String>,
     mine_blocks: usize,
     mine_exit: bool,
+    pv_mode: String,
+    pv_shadow_max: u64,
 }
 
 fn main() {
@@ -131,6 +135,8 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     sync_cfg.network = cfg.network.clone();
     sync_cfg.core_ext_deployments = genesis_cfg.core_ext_deployments.clone();
     sync_cfg.suite_context = genesis_cfg.suite_context.clone();
+    sync_cfg.parallel_validation_mode = cfg.pv_mode.clone();
+    sync_cfg.pv_shadow_max_samples = cfg.pv_shadow_max;
     let mut sync_engine = match SyncEngine::new(chain_state, Some(block_store.clone()), sync_cfg) {
         Ok(engine) => engine,
         Err(err) => {
@@ -161,6 +167,8 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         mine_address: cfg.mine_address.clone(),
         mine_blocks: cfg.mine_blocks,
         mine_exit: cfg.mine_exit,
+        pv_mode: cfg.pv_mode.clone(),
+        pv_shadow_max: cfg.pv_shadow_max,
     };
     if serde_json::to_writer_pretty(&mut *stdout, &effective).is_err() {
         let _ = writeln!(stderr, "config encode failed");
@@ -303,6 +311,8 @@ fn parse_args(args: &[String]) -> Result<CliConfig, String> {
         mine_address: None,
         mine_blocks: 0,
         mine_exit: false,
+        pv_mode: "off".to_string(),
+        pv_shadow_max: 3,
         dry_run: false,
     };
     let mut peer_tokens = Vec::new();
@@ -387,6 +397,22 @@ fn parse_args(args: &[String]) -> Result<CliConfig, String> {
             "--mine-exit" => {
                 cfg.mine_exit = true;
             }
+            "--pv-mode" => {
+                idx += 1;
+                let value = args
+                    .get(idx)
+                    .ok_or_else(|| "missing value for --pv-mode".to_string())?;
+                cfg.pv_mode = value.clone();
+            }
+            "--pv-shadow-max" => {
+                idx += 1;
+                let value = args
+                    .get(idx)
+                    .ok_or_else(|| "missing value for --pv-shadow-max".to_string())?;
+                cfg.pv_shadow_max = value
+                    .parse::<u64>()
+                    .map_err(|_| "invalid value for --pv-shadow-max".to_string())?;
+            }
             "--dry-run" => {
                 cfg.dry_run = true;
             }
@@ -411,7 +437,7 @@ fn default_data_dir() -> PathBuf {
 fn usage(stdout: &mut dyn Write) {
     let _ = writeln!(
         stdout,
-        "usage: rubin-node [--network <name>] [--datadir <path>] [--genesis-file <path>] [--bind <host:port>] [--peer <host:port>]... [--peers <csv>] [--max-peers <n>] [--rpc-bind <host:port>] [--mine-address <hex>] [--mine-blocks <n>] [--mine-exit] [--dry-run]"
+        "usage: rubin-node [--network <name>] [--datadir <path>] [--genesis-file <path>] [--bind <host:port>] [--peer <host:port>]... [--peers <csv>] [--max-peers <n>] [--rpc-bind <host:port>] [--mine-address <hex>] [--mine-blocks <n>] [--mine-exit] [--pv-mode <off|shadow|on>] [--pv-shadow-max <n>] [--dry-run]"
     );
 }
 
@@ -463,6 +489,14 @@ fn validate_config(cfg: &mut CliConfig) -> Result<(), String> {
     }
     if cfg.max_peers > 4096 {
         return Err("max_peers must be <= 4096".to_string());
+    }
+    let pv_mode = cfg.pv_mode.trim().to_ascii_lowercase();
+    if !["off", "shadow", "on"].contains(&pv_mode.as_str()) {
+        return Err("pv_mode must be one of: off, shadow, on".to_string());
+    }
+    cfg.pv_mode = pv_mode;
+    if cfg.pv_shadow_max == 0 {
+        cfg.pv_shadow_max = 3;
     }
     Ok(())
 }
@@ -787,6 +821,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_args_accepts_pv_flags() {
+        let cfg = parse_args(&[
+            "--pv-mode".to_string(),
+            "shadow".to_string(),
+            "--pv-shadow-max".to_string(),
+            "7".to_string(),
+        ])
+        .expect("parse");
+        assert_eq!(cfg.pv_mode, "shadow");
+        assert_eq!(cfg.pv_shadow_max, 7);
+    }
+
+    #[test]
+    fn validate_config_rejects_invalid_pv_mode() {
+        let mut cfg =
+            parse_args(&["--pv-mode".to_string(), "bogus".to_string()]).expect("parse args");
+        let err = validate_config(&mut cfg).unwrap_err();
+        assert!(err.contains("pv_mode"), "unexpected error: {err}");
+    }
+
+    #[test]
     fn dry_run_emits_rpc_bind_when_present() {
         let dir = unique_temp_dir("rubin-node-bin-rpc-bind");
         let args = vec![
@@ -830,6 +885,30 @@ mod tests {
         assert_eq!(json["bind_addr"].as_str(), Some("127.0.0.1:19111"));
         assert_eq!(json["max_peers"].as_u64(), Some(16));
         assert_eq!(json["peers"][0].as_str(), Some("127.0.0.1:19112"));
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn dry_run_emits_pv_fields() {
+        let dir = unique_temp_dir("rubin-node-bin-pv");
+        let args = vec![
+            "--dry-run".to_string(),
+            "--datadir".to_string(),
+            dir.display().to_string(),
+            "--pv-mode".to_string(),
+            "on".to_string(),
+            "--pv-shadow-max".to_string(),
+            "9".to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run(&args, &mut stdout, &mut stderr);
+        assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
+        let json: Value = serde_json::from_slice(&stdout).expect("json");
+        assert_eq!(json["pv_mode"].as_str(), Some("on"));
+        assert_eq!(json["pv_shadow_max"].as_u64(), Some(9));
 
         fs::remove_dir_all(&dir).expect("cleanup");
     }

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rubin_consensus::constants::POW_LIMIT;
 use rubin_consensus::{
@@ -13,6 +14,7 @@ use crate::undo::build_block_undo;
 
 pub const DEFAULT_IBD_LAG_SECONDS: u64 = 24 * 60 * 60;
 const DEFAULT_HEADER_BATCH_LIMIT: u64 = 512;
+const DEFAULT_PV_SHADOW_MAX_SAMPLES: u64 = 3;
 
 #[derive(Clone, Debug)]
 pub struct SyncConfig {
@@ -24,6 +26,8 @@ pub struct SyncConfig {
     pub network: String,
     pub core_ext_deployments: CoreExtDeploymentProfiles,
     pub suite_context: Option<SuiteContext>,
+    pub parallel_validation_mode: String,
+    pub pv_shadow_max_samples: u64,
 }
 
 #[derive(Clone)]
@@ -41,6 +45,182 @@ impl std::fmt::Debug for SuiteContext {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParallelValidationMode {
+    Off,
+    Shadow,
+    On,
+}
+
+impl ParallelValidationMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Shadow => "shadow",
+            Self::On => "on",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PVTelemetrySnapshot {
+    pub mode: String,
+    pub blocks_validated: u64,
+    pub blocks_skipped: u64,
+    pub mismatch_verdict: u64,
+    pub mismatch_error: u64,
+    pub mismatch_state: u64,
+    pub mismatch_witness: u64,
+    pub sig_total: u64,
+    pub sig_cache_hits: u64,
+    pub worker_tasks_total: u64,
+    pub worker_panics: u64,
+    pub validate_count: u64,
+    pub validate_avg_ns: u64,
+    pub commit_count: u64,
+    pub commit_avg_ns: u64,
+}
+
+impl PVTelemetrySnapshot {
+    pub fn prometheus_lines(&self) -> Vec<String> {
+        vec![
+            "# HELP rubin_pv_mode Current parallel validation mode (0=off, 1=shadow, 2=on)."
+                .to_string(),
+            "# TYPE rubin_pv_mode gauge".to_string(),
+            format!("rubin_pv_mode{{mode=\"{}\"}} 1", self.mode),
+            "# HELP rubin_pv_blocks_validated_total Blocks processed through PV path.".to_string(),
+            "# TYPE rubin_pv_blocks_validated_total counter".to_string(),
+            format!("rubin_pv_blocks_validated_total {}", self.blocks_validated),
+            "# HELP rubin_pv_blocks_skipped_total Blocks skipped (mode=off or not in IBD)."
+                .to_string(),
+            "# TYPE rubin_pv_blocks_skipped_total counter".to_string(),
+            format!("rubin_pv_blocks_skipped_total {}", self.blocks_skipped),
+            "# HELP rubin_pv_shadow_mismatches_total Shadow mismatch count by type.".to_string(),
+            "# TYPE rubin_pv_shadow_mismatches_total counter".to_string(),
+            format!(
+                "rubin_pv_shadow_mismatches_total{{type=\"verdict\"}} {}",
+                self.mismatch_verdict
+            ),
+            format!(
+                "rubin_pv_shadow_mismatches_total{{type=\"error\"}} {}",
+                self.mismatch_error
+            ),
+            format!(
+                "rubin_pv_shadow_mismatches_total{{type=\"state\"}} {}",
+                self.mismatch_state
+            ),
+            format!(
+                "rubin_pv_shadow_mismatches_total{{type=\"witness\"}} {}",
+                self.mismatch_witness
+            ),
+            "# HELP rubin_pv_sig_total Total PV signature checks attempted.".to_string(),
+            "# TYPE rubin_pv_sig_total counter".to_string(),
+            format!("rubin_pv_sig_total {}", self.sig_total),
+            "# HELP rubin_pv_sig_cache_hits_total Total PV signature cache hits.".to_string(),
+            "# TYPE rubin_pv_sig_cache_hits_total counter".to_string(),
+            format!("rubin_pv_sig_cache_hits_total {}", self.sig_cache_hits),
+            "# HELP rubin_pv_worker_tasks_total Total PV worker tasks dispatched.".to_string(),
+            "# TYPE rubin_pv_worker_tasks_total counter".to_string(),
+            format!("rubin_pv_worker_tasks_total {}", self.worker_tasks_total),
+            "# HELP rubin_pv_worker_panics_total Total recovered PV worker panics.".to_string(),
+            "# TYPE rubin_pv_worker_panics_total counter".to_string(),
+            format!("rubin_pv_worker_panics_total {}", self.worker_panics),
+            "# HELP rubin_pv_validate_runs_total Total PV validation runs.".to_string(),
+            "# TYPE rubin_pv_validate_runs_total counter".to_string(),
+            format!("rubin_pv_validate_runs_total {}", self.validate_count),
+            "# HELP rubin_pv_validate_avg_ns Average PV validation latency in nanoseconds."
+                .to_string(),
+            "# TYPE rubin_pv_validate_avg_ns gauge".to_string(),
+            format!("rubin_pv_validate_avg_ns {}", self.validate_avg_ns),
+            "# HELP rubin_pv_commit_runs_total Total PV commit runs.".to_string(),
+            "# TYPE rubin_pv_commit_runs_total counter".to_string(),
+            format!("rubin_pv_commit_runs_total {}", self.commit_count),
+            "# HELP rubin_pv_commit_avg_ns Average PV commit latency in nanoseconds.".to_string(),
+            "# TYPE rubin_pv_commit_avg_ns gauge".to_string(),
+            format!("rubin_pv_commit_avg_ns {}", self.commit_avg_ns),
+        ]
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PVTelemetry {
+    mode: ParallelValidationMode,
+    blocks_validated: u64,
+    blocks_skipped: u64,
+    mismatch_verdict: u64,
+    mismatch_error: u64,
+    mismatch_state: u64,
+    validate_count: u64,
+    validate_total_ns: u128,
+}
+
+impl PVTelemetry {
+    fn new(mode: ParallelValidationMode) -> Self {
+        Self {
+            mode,
+            blocks_validated: 0,
+            blocks_skipped: 0,
+            mismatch_verdict: 0,
+            mismatch_error: 0,
+            mismatch_state: 0,
+            validate_count: 0,
+            validate_total_ns: 0,
+        }
+    }
+
+    fn record_block_validated(&mut self) {
+        self.blocks_validated = self.blocks_validated.saturating_add(1);
+    }
+
+    fn record_block_skipped(&mut self) {
+        self.blocks_skipped = self.blocks_skipped.saturating_add(1);
+    }
+
+    fn record_mismatch_verdict(&mut self) {
+        self.mismatch_verdict = self.mismatch_verdict.saturating_add(1);
+    }
+
+    fn record_mismatch_error(&mut self) {
+        self.mismatch_error = self.mismatch_error.saturating_add(1);
+    }
+
+    fn record_mismatch_state(&mut self) {
+        self.mismatch_state = self.mismatch_state.saturating_add(1);
+    }
+
+    fn record_validate_latency(&mut self, latency: Duration) {
+        self.validate_count = self.validate_count.saturating_add(1);
+        self.validate_total_ns = self.validate_total_ns.saturating_add(latency.as_nanos());
+    }
+
+    fn snapshot(&self) -> PVTelemetrySnapshot {
+        let validate_avg_ns = if self.validate_count == 0 {
+            0
+        } else {
+            (self.validate_total_ns / u128::from(self.validate_count))
+                .try_into()
+                .unwrap_or(u64::MAX)
+        };
+        PVTelemetrySnapshot {
+            mode: self.mode.as_str().to_string(),
+            blocks_validated: self.blocks_validated,
+            blocks_skipped: self.blocks_skipped,
+            mismatch_verdict: self.mismatch_verdict,
+            mismatch_error: self.mismatch_error,
+            mismatch_state: self.mismatch_state,
+            mismatch_witness: 0,
+            sig_total: 0,
+            sig_cache_hits: 0,
+            worker_tasks_total: 0,
+            worker_panics: 0,
+            validate_count: self.validate_count,
+            validate_avg_ns,
+            commit_count: 0,
+            commit_avg_ns: 0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeaderRequest {
     pub from_hash: [u8; 32],
@@ -55,6 +235,11 @@ pub struct SyncEngine {
     pub(crate) cfg: SyncConfig,
     pub(crate) tip_timestamp: u64,
     pub(crate) best_known_height: u64,
+    pv_mode: ParallelValidationMode,
+    pv_shadow_max_samples: u64,
+    pv_shadow_mismatches: u64,
+    pv_shadow_samples: Vec<String>,
+    pv_telemetry: PVTelemetry,
 }
 
 /// Captured state for rollback on failure during reorg.
@@ -85,6 +270,8 @@ pub fn default_sync_config(
         network: "devnet".to_string(),
         core_ext_deployments: CoreExtDeploymentProfiles::empty(),
         suite_context: None,
+        parallel_validation_mode: "off".to_string(),
+        pv_shadow_max_samples: DEFAULT_PV_SHADOW_MAX_SAMPLES,
     }
 }
 
@@ -108,12 +295,24 @@ impl SyncEngine {
         if cfg.ibd_lag_seconds == 0 {
             cfg.ibd_lag_seconds = DEFAULT_IBD_LAG_SECONDS;
         }
+        cfg.parallel_validation_mode =
+            normalize_parallel_validation_mode(&cfg.parallel_validation_mode);
+        if cfg.pv_shadow_max_samples == 0 {
+            cfg.pv_shadow_max_samples = DEFAULT_PV_SHADOW_MAX_SAMPLES;
+        }
+        let pv_mode = parse_parallel_validation_mode(&cfg.parallel_validation_mode)?;
+        let pv_shadow_max_samples = cfg.pv_shadow_max_samples;
         Ok(Self {
             chain_state,
             block_store,
             cfg,
             tip_timestamp: 0,
             best_known_height: 0,
+            pv_mode,
+            pv_shadow_max_samples,
+            pv_shadow_mismatches: 0,
+            pv_shadow_samples: Vec::new(),
+            pv_telemetry: PVTelemetry::new(pv_mode),
         })
     }
 
@@ -213,6 +412,35 @@ impl SyncEngine {
         now_unix - self.tip_timestamp > self.cfg.ibd_lag_seconds
     }
 
+    pub fn pv_shadow_stats(&self) -> (u64, Vec<String>) {
+        (self.pv_shadow_mismatches, self.pv_shadow_samples.clone())
+    }
+
+    pub fn pv_telemetry_snapshot(&self) -> PVTelemetrySnapshot {
+        self.pv_telemetry.snapshot()
+    }
+
+    fn pv_shadow_active(&self) -> bool {
+        matches!(
+            self.pv_mode,
+            ParallelValidationMode::Shadow | ParallelValidationMode::On
+        ) && self.is_in_ibd_unchecked()
+    }
+
+    fn is_in_ibd_unchecked(&self) -> bool {
+        let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+            return true;
+        };
+        self.is_in_ibd(now.as_secs())
+    }
+
+    fn record_pv_shadow_mismatch(&mut self, line: String) {
+        self.pv_shadow_mismatches = self.pv_shadow_mismatches.saturating_add(1);
+        if self.pv_shadow_samples.len() < self.pv_shadow_max_samples as usize {
+            self.pv_shadow_samples.push(line);
+        }
+    }
+
     pub fn apply_block(
         &mut self,
         block_bytes: &[u8],
@@ -226,6 +454,7 @@ impl SyncEngine {
             None
         };
         let prev_timestamps = prev_timestamps.or(derived_prev_timestamps.as_deref());
+        let pv_active = self.pv_shadow_active();
 
         let snapshot = self.chain_state.clone();
         let old_tip_timestamp = self.tip_timestamp;
@@ -245,7 +474,7 @@ impl SyncEngine {
                 Some(ctx) => (Some(ctx.rotation.as_ref()), Some(ctx.registry.as_ref())),
                 None => (None, None),
             };
-        let summary = self
+        let summary = match self
             .chain_state
             .connect_block_with_core_ext_deployments_and_suite_context(
                 block_bytes,
@@ -255,7 +484,75 @@ impl SyncEngine {
                 &self.cfg.core_ext_deployments,
                 rotation,
                 registry,
-            )?;
+            ) {
+            Ok(summary) => summary,
+            Err(err) => {
+                if pv_active {
+                    self.pv_telemetry.record_block_validated();
+                    let validate_start = Instant::now();
+                    match run_pv_shadow_validation(
+                        &snapshot,
+                        block_bytes,
+                        prev_timestamps,
+                        &self.cfg,
+                    ) {
+                        Ok(_) => {
+                            self.record_pv_shadow_mismatch(format!(
+                                "pv_shadow mismatch(height={}): seq_err={} shadow_ok",
+                                next_height,
+                                pv_error_code(&err)
+                            ));
+                            self.pv_telemetry.record_mismatch_verdict();
+                        }
+                        Err(shadow_err) => {
+                            let seq_code = pv_error_code(&err);
+                            let shadow_code = pv_error_code(&shadow_err);
+                            if seq_code != shadow_code {
+                                self.record_pv_shadow_mismatch(format!(
+                                    "pv_shadow mismatch(height={}): seq_err={} shadow_err={}",
+                                    next_height, seq_code, shadow_code
+                                ));
+                                self.pv_telemetry.record_mismatch_error();
+                            }
+                        }
+                    }
+                    self.pv_telemetry
+                        .record_validate_latency(validate_start.elapsed());
+                } else {
+                    self.pv_telemetry.record_block_skipped();
+                }
+                return Err(err);
+            }
+        };
+
+        if pv_active {
+            self.pv_telemetry.record_block_validated();
+            let validate_start = Instant::now();
+            match run_pv_shadow_validation(&snapshot, block_bytes, prev_timestamps, &self.cfg) {
+                Ok(shadow_digest) => {
+                    let current_digest = self.chain_state.utxo_set_hash();
+                    if shadow_digest != current_digest {
+                        self.record_pv_shadow_mismatch(format!(
+                            "pv_shadow mismatch(height={}): post_state_digest",
+                            summary.block_height
+                        ));
+                        self.pv_telemetry.record_mismatch_state();
+                    }
+                }
+                Err(shadow_err) => {
+                    self.record_pv_shadow_mismatch(format!(
+                        "pv_shadow mismatch(height={}): seq_ok shadow_err={}",
+                        summary.block_height,
+                        pv_error_code(&shadow_err)
+                    ));
+                    self.pv_telemetry.record_mismatch_verdict();
+                }
+            }
+            self.pv_telemetry
+                .record_validate_latency(validate_start.elapsed());
+        } else {
+            self.pv_telemetry.record_block_skipped();
+        }
 
         let canonical_len_before = self.block_store.as_ref().map_or(0, |bs| bs.canonical_len());
         if let Some(block_store) = self.block_store.as_mut() {
@@ -437,6 +734,57 @@ fn validate_mainnet_genesis_guard(cfg: &SyncConfig) -> Result<(), String> {
     Ok(())
 }
 
+fn normalize_parallel_validation_mode(mode: &str) -> String {
+    let mode = mode.trim().to_ascii_lowercase();
+    if mode.is_empty() {
+        "off".to_string()
+    } else {
+        mode
+    }
+}
+
+fn parse_parallel_validation_mode(mode: &str) -> Result<ParallelValidationMode, String> {
+    match normalize_parallel_validation_mode(mode).as_str() {
+        "off" => Ok(ParallelValidationMode::Off),
+        "shadow" => Ok(ParallelValidationMode::Shadow),
+        "on" => Ok(ParallelValidationMode::On),
+        other => Err(format!(
+            "invalid parallel_validation_mode: {other:?} (want off|shadow|on)"
+        )),
+    }
+}
+
+fn pv_error_code(err: &str) -> String {
+    err.split_once(':').map_or_else(
+        || err.trim().to_string(),
+        |(code, _)| code.trim().to_string(),
+    )
+}
+
+fn run_pv_shadow_validation(
+    snapshot: &ChainState,
+    block_bytes: &[u8],
+    prev_timestamps: Option<&[u64]>,
+    cfg: &SyncConfig,
+) -> Result<[u8; 32], String> {
+    let mut shadow_state = snapshot.clone();
+    let (rotation, registry): (Option<&dyn RotationProvider>, Option<&SuiteRegistry>) =
+        match cfg.suite_context.as_ref() {
+            Some(ctx) => (Some(ctx.rotation.as_ref()), Some(ctx.registry.as_ref())),
+            None => (None, None),
+        };
+    shadow_state.connect_block_with_core_ext_deployments_and_suite_context(
+        block_bytes,
+        cfg.expected_target,
+        prev_timestamps,
+        cfg.chain_id,
+        &cfg.core_ext_deployments,
+        rotation,
+        registry,
+    )?;
+    Ok(shadow_state.utxo_set_hash())
+}
+
 #[cfg(test)]
 mod tests {
     use rubin_consensus::constants::{COV_TYPE_EXT, COV_TYPE_P2PK, POW_LIMIT, SUITE_ID_ML_DSA_87};
@@ -556,6 +904,46 @@ mod tests {
         assert_eq!(tip.0, 0);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn sync_engine_shadow_mode_executes_rust_pv_lane() {
+        let mut cfg = default_sync_config(Some(POW_LIMIT), devnet_genesis_chain_id(), None);
+        cfg.parallel_validation_mode = "shadow".to_string();
+        cfg.pv_shadow_max_samples = 2;
+        let mut engine = SyncEngine::new(ChainState::new(), None, cfg).expect("new sync");
+
+        engine
+            .apply_block(&devnet_genesis_block_bytes(), None)
+            .expect("apply genesis in shadow mode");
+
+        let telemetry = engine.pv_telemetry_snapshot();
+        assert_eq!(telemetry.mode, "shadow");
+        assert_eq!(telemetry.blocks_validated, 1);
+        assert_eq!(telemetry.blocks_skipped, 0);
+        assert_eq!(telemetry.mismatch_verdict, 0);
+        assert_eq!(telemetry.mismatch_error, 0);
+        assert_eq!(telemetry.mismatch_state, 0);
+        assert_eq!(telemetry.validate_count, 1);
+
+        let (mismatches, samples) = engine.pv_shadow_stats();
+        assert_eq!(mismatches, 0);
+        assert!(samples.is_empty());
+    }
+
+    #[test]
+    fn sync_engine_shadow_mismatch_samples_are_bounded() {
+        let mut cfg = default_sync_config(Some(POW_LIMIT), devnet_genesis_chain_id(), None);
+        cfg.parallel_validation_mode = "shadow".to_string();
+        cfg.pv_shadow_max_samples = 1;
+        let mut engine = SyncEngine::new(ChainState::new(), None, cfg).expect("new sync");
+
+        engine.record_pv_shadow_mismatch("first".to_string());
+        engine.record_pv_shadow_mismatch("second".to_string());
+
+        let (mismatches, samples) = engine.pv_shadow_stats();
+        assert_eq!(mismatches, 2);
+        assert_eq!(samples, vec!["first".to_string()]);
     }
 
     #[test]

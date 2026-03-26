@@ -400,6 +400,11 @@ jobs:
         run: |
           python3 conformance/runner/run_cv_bundle.py
 
+      - name: PV soak parity gate
+        run: |
+          ./scripts/pv-soak-ci-gate.sh --report /tmp/pv-soak-report.json
+          cat /tmp/pv-soak-report.json
+
   formal_refinement:
     needs: policy
     runs-on: ubuntu-latest

@@ -20,14 +20,22 @@ done
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FIXTURES_DIR="$REPO_ROOT/conformance/fixtures"
 EVIDENCE_DIR="$REPO_ROOT/conformance/evidence/pv-soak"
+PV_GATES=(
+  CV-PV-CACHE
+  CV-PV-CURSOR
+  CV-PV-DA
+  CV-PV-DAG
+  CV-PV-ERR
+  CV-PV-MIXED
+  CV-PV-STRESS
+)
 
 echo "[pv-soak-gate] Running CV-PV-* conformance fixtures..."
 
 # Step 1: Run conformance bundle for PV fixtures
 if [[ -f "$REPO_ROOT/conformance/runner/run_cv_bundle.py" ]]; then
   python3 "$REPO_ROOT/conformance/runner/run_cv_bundle.py" \
-    --fixtures-dir "$FIXTURES_DIR" \
-    --filter "CV-PV-*" 2>&1 || {
+    --only-gates "${PV_GATES[@]}" 2>&1 || {
     echo "[pv-soak-gate] FAIL: CV-PV conformance fixtures failed" >&2
     exit 1
   }
@@ -46,8 +54,23 @@ go test ./consensus/ -run "TestParallel|TestPV|TestShadow" -count=1 -timeout=120
 echo "[pv-soak-gate] Go parity tests: PASS"
 cd "$REPO_ROOT"
 
-# Step 3: Generate soak report
+# Step 3: Run Rust PV/shadow runtime parity tests
+echo "[pv-soak-gate] Running Rust PV/shadow runtime tests..."
+cd "$REPO_ROOT/clients/rust"
+cargo test -p rubin-node sync_engine_shadow_mode_executes_rust_pv_lane -- --test-threads=1 2>&1 || {
+  echo "[pv-soak-gate] FAIL: Rust PV shadow runtime test failed" >&2
+  exit 1
+}
+cargo test -p rubin-node metrics_render_includes_v1_names -- --test-threads=1 2>&1 || {
+  echo "[pv-soak-gate] FAIL: Rust PV metrics surface test failed" >&2
+  exit 1
+}
+echo "[pv-soak-gate] Rust PV/shadow runtime tests: PASS"
+cd "$REPO_ROOT"
+
+# Step 4: Generate soak report
 GO_COMMIT="$(git rev-parse HEAD)"
+RUST_COMMIT="$GO_COMMIT"
 TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 python3 -c "
@@ -64,7 +87,14 @@ report = {
     'mismatch_count': 0,
     'verdict': 'PASS',
     'go_commit': '$GO_COMMIT',
-    'rust_commit': '',
+    'go_execution_evidence': [
+        'go test ./consensus/ -run TestParallel|TestPV|TestShadow -count=1 -timeout=120s'
+    ],
+    'rust_commit': '$RUST_COMMIT',
+    'rust_execution_evidence': [
+        'cargo test -p rubin-node sync_engine_shadow_mode_executes_rust_pv_lane -- --test-threads=1',
+        'cargo test -p rubin-node metrics_render_includes_v1_names -- --test-threads=1'
+    ],
     'timestamp_utc': '$TIMESTAMP'
 }
 
