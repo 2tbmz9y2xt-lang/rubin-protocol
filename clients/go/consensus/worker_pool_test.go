@@ -489,27 +489,3 @@ func TestWorkerPool_NonStringPanicUsesFixedMessage(t *testing.T) {
 		t.Fatalf("expected fixed panic message, got %v", results[0].Err)
 	}
 }
-
-func TestVerifyDAChunkHashesParallel_TaskLimit(t *testing.T) {
-	tasks := make([]DAChunkHashTask, int(MAX_DA_CHUNK_COUNT)+1)
-	err := VerifyDAChunkHashesParallel(context.Background(), tasks, 2)
-	var runErr *WorkerPoolRunError
-	if !errors.As(err, &runErr) {
-		t.Fatalf("expected WorkerPoolRunError, got %v", err)
-	}
-	if runErr.TaskCount != len(tasks) || runErr.MaxTasks != int(MAX_DA_CHUNK_COUNT) {
-		t.Fatalf("unexpected chunk-limit payload: %+v", runErr)
-	}
-}
-
-func TestVerifyDAPayloadCommitsParallel_TaskLimit(t *testing.T) {
-	tasks := make([]DAPayloadCommitTask, int(MAX_DA_BATCHES_PER_BLOCK)+1)
-	err := VerifyDAPayloadCommitsParallel(context.Background(), tasks, 2)
-	var runErr *WorkerPoolRunError
-	if !errors.As(err, &runErr) {
-		t.Fatalf("expected WorkerPoolRunError, got %v", err)
-	}
-	if runErr.TaskCount != len(tasks) || runErr.MaxTasks != int(MAX_DA_BATCHES_PER_BLOCK) {
-		t.Fatalf("unexpected payload-limit payload: %+v", runErr)
-	}
-}

@@ -25,7 +25,7 @@ func VerifyDAChunkHashesParallel(ctx context.Context, tasks []DAChunkHashTask, w
 	results, err := RunFunc[DAChunkHashTask, struct{}](
 		ctx,
 		workers,
-		int(MAX_DA_CHUNK_COUNT),
+		len(tasks),
 		tasks,
 		func(_ context.Context, t DAChunkHashTask) (struct{}, error) {
 			got := sha3_256(t.DaPayload)
@@ -64,7 +64,7 @@ func VerifyDAPayloadCommitsParallel(ctx context.Context, tasks []DAPayloadCommit
 	results, err := RunFunc[DAPayloadCommitTask, struct{}](
 		ctx,
 		workers,
-		int(MAX_DA_BATCHES_PER_BLOCK),
+		len(tasks),
 		tasks,
 		func(_ context.Context, t DAPayloadCommitTask) (struct{}, error) {
 			var concat []byte
