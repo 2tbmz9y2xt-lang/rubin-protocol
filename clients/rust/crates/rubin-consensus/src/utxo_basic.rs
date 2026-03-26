@@ -152,7 +152,8 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_sui
     registry: Option<&SuiteRegistry>,
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
     let mut sig_queue = SigCheckQueue::new(1);
-    let (work, summary) =
+    let queue_mark = sig_queue.mark();
+    let result =
         apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_impl(
             tx,
             txid,
@@ -165,7 +166,14 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_sui
             rotation,
             registry,
             Some(&mut sig_queue),
-        )?;
+        );
+    let (work, summary) = match result {
+        Ok(ok) => ok,
+        Err(err) => {
+            sig_queue.rollback_to(queue_mark);
+            return Err(err);
+        }
+    };
     sig_queue.flush()?;
     Ok((work, summary))
 }
@@ -1286,5 +1294,27 @@ mod tests {
         .expect_err("bad signature must fail");
 
         assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    }
+
+    #[test]
+    fn apply_non_coinbase_tx_basic_update_deferred_sigchecks_rolls_back_queue_on_late_tx_error() {
+        let (mut tx, utxo_set, txid, chain_id) = signed_p2pk_case();
+        tx.outputs[0].value = 101;
+
+        let err = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks(
+            &tx,
+            txid,
+            &utxo_set,
+            1,
+            0,
+            0,
+            chain_id,
+            &CoreExtProfiles::empty(),
+            None,
+            None,
+        )
+        .expect_err("late value-conservation failure must return error, not leave queued tasks");
+
+        assert_eq!(err.code, ErrorCode::TxErrValueConservation);
     }
 }

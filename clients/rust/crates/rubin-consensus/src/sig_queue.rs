@@ -5,8 +5,9 @@ use crate::verify_sig_openssl::{verify_sig, verify_sig_with_registry};
 
 const MAX_SIGCHECK_QUEUE_BYTES: usize =
     (MAX_BLOCK_WEIGHT as usize) * (WITNESS_DISCOUNT_DIVISOR as usize);
-const MAX_SIGCHECK_QUEUE_TASKS: usize = MAX_BLOCK_WEIGHT as usize;
 const SIGCHECK_TASK_FIXED_OVERHEAD_BYTES: usize = 1 + 32 + 1;
+const MAX_SIGCHECK_QUEUE_TASKS: usize =
+    MAX_SIGCHECK_QUEUE_BYTES / SIGCHECK_TASK_FIXED_OVERHEAD_BYTES;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SigCheckTask {
