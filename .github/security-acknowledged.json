@@ -204,6 +204,20 @@
       "reason": "ACCEPTED_RISK: single parse per tx relay path. Optimizing to reuse parsed tx is premature — relay is not hot path.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
+    },
+    {
+      "title_pattern": "Worker Pool Hanging Causes Node Denial-of-Service",
+      "file_pattern": "worker_pool.rs",
+      "reason": "FALSE_POSITIVE: Go parity — go/consensus/worker_pool.go is the same cooperative primitive with no per-task kill switch. Tasks are internal consensus closures, not attacker-supplied code; adding forceful timeouts would change semantics and is not implementable safely in std threads.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-26"
+    },
+    {
+      "title_pattern": "Unbounded Memory Consumption in Results Buffer",
+      "file_pattern": "worker_pool.rs",
+      "reason": "ACCEPTED_RISK: Go parity — ordered reduction requires one result slot per submitted task just like Go make([]WorkerResult, n). The caller already materializes the task batch; concrete task-count bounds belong at future block-level integration sites, not this infrastructure primitive.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-26"
     }
   ]
 }
