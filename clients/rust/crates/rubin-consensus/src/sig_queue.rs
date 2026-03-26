@@ -1,7 +1,11 @@
 use crate::error::{ErrorCode, TxError};
 use crate::suite_registry::SuiteRegistry;
 use crate::verify_sig_openssl::{verify_sig, verify_sig_with_registry};
-use crate::worker_pool::{run_worker_pool, WorkerCancellationToken, WorkerPoolError};
+use std::collections::VecDeque;
+use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SigCheckTask {
@@ -12,11 +16,19 @@ struct SigCheckTask {
     err_on_fail: TxError,
 }
 
-#[derive(Clone, Debug, Default)]
+/// SigCheckQueue collects deferred signature verification tasks during
+/// sequential transaction validation. When flushed, it verifies all collected
+/// signatures in parallel and returns the first error by submission order.
+///
+/// When no caller wires this queue into block validation, the sequential path
+/// still verifies inline. Callers that do use the queue must flush it before
+/// accepting a block; `assert_flushed` is the defensive postcondition for that.
+#[derive(Debug, Default)]
 pub struct SigCheckQueue {
     tasks: Vec<SigCheckTask>,
     workers: usize,
     registry: Option<SuiteRegistry>,
+    panics: Arc<AtomicU64>,
 }
 
 impl SigCheckQueue {
@@ -25,6 +37,7 @@ impl SigCheckQueue {
             tasks: Vec::new(),
             workers,
             registry: None,
+            panics: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -81,23 +94,77 @@ impl SigCheckQueue {
             );
         }
 
+        let workers = normalized_worker_count(self.workers, tasks.len());
         let registry = self.registry.clone();
-        let cancel = WorkerCancellationToken::new();
-        let results = run_worker_pool(
-            &cancel,
-            self.workers,
-            tasks.len(),
-            tasks,
-            move |_token, task| verify_queued_task(task, registry.as_ref()),
-        )
-        .map_err(|_| TxError::new(ErrorCode::TxErrParse, "SigCheckQueue worker pool failure"))?;
+        let panics = Arc::clone(&self.panics);
+        let any_failed = Arc::new(AtomicBool::new(false));
+        let queue = Mutex::new(tasks.into_iter().enumerate().collect::<VecDeque<_>>());
+        let results = (0..workers.max(1))
+            .map(|_| Vec::<(usize, TxError)>::new())
+            .collect::<Vec<_>>();
+        let results = Arc::new(Mutex::new(results));
 
-        for result in results {
-            if let Some(err) = result.error {
-                return Err(map_worker_error(err));
+        thread::scope(|scope| {
+            for worker_id in 0..workers {
+                let any_failed = Arc::clone(&any_failed);
+                let panics = Arc::clone(&panics);
+                let registry = registry.clone();
+                let results = Arc::clone(&results);
+                let queue = &queue;
+                scope.spawn(move || {
+                    let mut current_idx = None;
+                    let worker_run = || loop {
+                        let next = {
+                            let mut guard = lock_recover(queue);
+                            guard.pop_front()
+                        };
+                        let Some((idx, task)) = next else {
+                            break;
+                        };
+                        current_idx = Some(idx);
+                        if any_failed.load(Ordering::SeqCst) {
+                            continue;
+                        }
+                        if let Err(err) = verify_queued_task(task, registry.as_ref()) {
+                            any_failed.store(true, Ordering::SeqCst);
+                            lock_recover(&results)[worker_id].push((idx, err));
+                        }
+                    };
+
+                    if panic::catch_unwind(AssertUnwindSafe(worker_run)).is_err() {
+                        if let Some(idx) = current_idx {
+                            panics.fetch_add(1, Ordering::SeqCst);
+                            any_failed.store(true, Ordering::SeqCst);
+                            lock_recover(&results)[worker_id].push((
+                                idx,
+                                TxError::new(
+                                    ErrorCode::TxErrSigInvalid,
+                                    "signature worker panic (fail-closed)",
+                                ),
+                            ));
+                        }
+                    }
+                });
+            }
+        });
+
+        let mut first_error: Option<(usize, TxError)> = None;
+        for worker_results in lock_recover(&results).iter() {
+            for (idx, err) in worker_results {
+                match &first_error {
+                    Some((best_idx, _)) if idx >= best_idx => {}
+                    _ => first_error = Some((*idx, err.clone())),
+                }
             }
         }
+        if let Some((_, err)) = first_error {
+            return Err(err);
+        }
         Ok(())
+    }
+
+    pub fn panics(&self) -> u64 {
+        self.panics.load(Ordering::SeqCst)
     }
 }
 
@@ -139,17 +206,19 @@ fn verify_queued_task(task: SigCheckTask, registry: Option<&SuiteRegistry>) -> R
     Ok(())
 }
 
-fn map_worker_error(err: WorkerPoolError<TxError>) -> TxError {
-    match err {
-        WorkerPoolError::Task(err) => err,
-        WorkerPoolError::Cancelled => {
-            TxError::new(ErrorCode::TxErrSigInvalid, "SigCheckQueue cancelled")
-        }
-        WorkerPoolError::Panic(_) => TxError::new(
-            ErrorCode::TxErrSigInvalid,
-            "signature worker panic (fail-closed)",
-        ),
+fn normalized_worker_count(max_workers: usize, task_count: usize) -> usize {
+    let mut workers = max_workers;
+    if workers == 0 {
+        workers = thread::available_parallelism()
+            .map(|v| v.get())
+            .unwrap_or(1)
+            .max(1);
     }
+    workers.min(task_count).max(1)
+}
+
+fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -338,6 +407,75 @@ mod tests {
         );
         queue.flush().expect("second flush");
         queue.assert_flushed().expect("queue empty again");
+    }
+
+    #[test]
+    fn sig_check_queue_zero_value_flush_fails_closed() {
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+
+        let mut queue = SigCheckQueue::default();
+        for i in 0..4u8 {
+            let mut digest = [0u8; 32];
+            digest[0] = i;
+            let sig = keypair.sign_digest32(digest).expect("sign");
+            queue.push(
+                SUITE_ID_ML_DSA_87,
+                &keypair.pubkey_bytes(),
+                &sig,
+                digest,
+                TxError::new(ErrorCode::TxErrSigInvalid, "zero-value"),
+            );
+        }
+        queue.flush().expect("valid zero-value flush");
+
+        for i in 0..4u8 {
+            let mut digest = [0u8; 32];
+            digest[0] = i;
+            let sig = keypair.sign_digest32(digest).expect("sign");
+            digest[0] ^= 0xff;
+            queue.push(
+                SUITE_ID_ML_DSA_87,
+                &keypair.pubkey_bytes(),
+                &sig,
+                digest,
+                TxError::new(ErrorCode::TxErrSigInvalid, "zero-value-invalid"),
+            );
+        }
+        assert!(queue.flush().is_err(), "invalid zero-value flush must fail");
+    }
+
+    #[test]
+    fn sig_check_queue_assert_flushed_unflushed() {
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let digest = [0x44; 32];
+        let sig = keypair.sign_digest32(digest).expect("sign");
+
+        let mut queue = SigCheckQueue::new(1);
+        queue.push(
+            SUITE_ID_ML_DSA_87,
+            &keypair.pubkey_bytes(),
+            &sig,
+            digest,
+            TxError::new(ErrorCode::TxErrSigInvalid, "test"),
+        );
+
+        let err = queue
+            .assert_flushed()
+            .expect_err("must detect unflushed queue");
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    }
+
+    #[test]
+    fn sig_check_queue_single_bad_suite_error() {
+        let mut queue = SigCheckQueue::new(1);
+        queue.push(
+            0xfe,
+            b"fake-pubkey",
+            b"fake-sig",
+            [0u8; 32],
+            TxError::new(ErrorCode::TxErrSigInvalid, "test"),
+        );
+        assert!(queue.flush().is_err(), "bad suite id must fail");
     }
 
     #[test]
