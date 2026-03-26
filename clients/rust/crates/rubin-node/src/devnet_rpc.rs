@@ -667,7 +667,7 @@ fn handle_metrics(state: &DevnetRPCState, method: &str) -> HttpResponse {
 }
 
 fn render_prometheus_metrics(state: &DevnetRPCState) -> String {
-    let (tip_height, best_known_height, in_ibd) = match state.sync_engine.lock() {
+    let (tip_height, best_known_height, in_ibd, pv_lines) = match state.sync_engine.lock() {
         Ok(engine) => {
             let tip_height = match engine.tip() {
                 Ok(Some((height, _))) => height,
@@ -679,9 +679,10 @@ fn render_prometheus_metrics(state: &DevnetRPCState) -> String {
             } else {
                 0
             };
-            (tip_height, best_known_height, in_ibd)
+            let pv_lines = engine.pv_telemetry_snapshot().prometheus_lines();
+            (tip_height, best_known_height, in_ibd, pv_lines)
         }
-        Err(_) => (0, 0, 1),
+        Err(_) => (0, 0, 1, Vec::new()),
     };
     let mempool_txs = match state.tx_pool.lock() {
         Ok(pool) => pool.len() as u64,
@@ -733,6 +734,7 @@ fn render_prometheus_metrics(state: &DevnetRPCState) -> String {
             "rubin_node_submit_tx_total{{result=\"{result}\"}} {value}"
         ));
     }
+    lines.extend(pv_lines);
     lines.join("\n") + "\n"
 }
 
@@ -1826,11 +1828,17 @@ mod tests {
             "rubin_node_mempool_txs",
             "rubin_node_rpc_requests_total",
             "rubin_node_submit_tx_total",
+            "rubin_pv_mode",
+            "rubin_pv_blocks_validated_total",
+            "rubin_pv_blocks_skipped_total",
+            "rubin_pv_shadow_mismatches_total",
+            "rubin_pv_validate_runs_total",
         ] {
             assert!(body.contains(name), "missing metric {name}");
         }
         assert!(body.contains(r#"rubin_node_rpc_requests_total{route="/get_tip",status="200"} 1"#));
         assert!(body.contains(r#"rubin_node_submit_tx_total{result="rejected"} 1"#));
+        assert!(body.contains(r#"rubin_pv_mode{mode="off"} 1"#));
         fs::remove_dir_all(dir).expect("cleanup");
     }
 

@@ -41,6 +41,7 @@ pub use miner::{parse_mine_address_arg, MinedBlock, Miner, MinerConfig};
 pub use p2p_runtime::{default_peer_runtime_config, PeerManager};
 pub use p2p_service::{start_node_p2p_service, NodeP2PServiceConfig, RunningNodeP2PService};
 pub use sync::{
-    default_sync_config, HeaderRequest, SyncConfig, SyncEngine, DEFAULT_IBD_LAG_SECONDS,
+    default_sync_config, HeaderRequest, PVTelemetrySnapshot, SyncConfig, SyncEngine,
+    DEFAULT_IBD_LAG_SECONDS,
 };
 pub use txpool::{TxPool, TxPoolAdmitError, TxPoolAdmitErrorKind, TxPoolConfig};
