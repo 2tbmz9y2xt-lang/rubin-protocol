@@ -13,12 +13,11 @@ use rubin_consensus::{
 use sha3::{Digest, Sha3_256};
 
 use crate::sync::SyncEngine;
-use crate::txpool::TxPool;
+use crate::sync_reorg::{TxPoolCleanupPlan, PARENT_BLOCK_NOT_FOUND_ERR};
 
 /// Maximum reasonable best_height delta before clamping peer claims.
 /// Prevents malicious peers from forcing unnecessary sync with absurdly high values.
 const MAX_BEST_HEIGHT_DELTA: u64 = 100_000;
-use crate::sync_reorg::PARENT_BLOCK_NOT_FOUND_ERR;
 
 const DEFAULT_READ_DEADLINE: Duration = Duration::from_secs(15);
 const DEFAULT_WRITE_DEADLINE: Duration = Duration::from_secs(15);
@@ -128,6 +127,11 @@ pub struct PeerRelayContext<'a> {
     /// Outbound relay queues: serialized wire frames enqueued by broadcast,
     /// drained by the peer thread to avoid concurrent TcpStream writes.
     pub peer_writers: &'a std::sync::Mutex<HashMap<String, crate::tx_relay::PeerOutbox>>,
+}
+
+pub struct LiveMessageOutcome {
+    pub responses: Vec<WireMessage>,
+    pub tx_pool_cleanup: TxPoolCleanupPlan,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -388,7 +392,7 @@ impl PeerSession {
                     })?;
                 }
                 MESSAGE_BLOCK => {
-                    self.handle_block(&msg.payload, sync_engine, None)?;
+                    let _ = self.handle_block(&msg.payload, sync_engine)?;
                     self.request_more_blocks_if_behind(sync_engine)?;
                 }
                 MESSAGE_TX | "headers" | "pong" => {}
@@ -440,9 +444,8 @@ impl PeerSession {
         &mut self,
         msg: WireMessage,
         sync_engine: &mut SyncEngine,
-        tx_pool: Option<&mut TxPool>,
         relay_ctx: Option<&PeerRelayContext<'_>>,
-    ) -> io::Result<Vec<WireMessage>> {
+    ) -> io::Result<LiveMessageOutcome> {
         if msg.payload.len() > MAX_RELAY_MSG_BYTES as usize {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -458,36 +461,54 @@ impl PeerSession {
                 let requests =
                     self.handle_inv(&msg.payload, sync_engine, relay_ctx.map(|c| c.relay_state))?;
                 if requests.is_empty() {
-                    Ok(Vec::new())
+                    Ok(LiveMessageOutcome {
+                        responses: Vec::new(),
+                        tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                    })
                 } else {
-                    Ok(vec![WireMessage {
-                        command: MESSAGE_GETDATA.to_string(),
-                        payload: encode_inventory_vectors(&requests)?,
-                    }])
+                    Ok(LiveMessageOutcome {
+                        responses: vec![WireMessage {
+                            command: MESSAGE_GETDATA.to_string(),
+                            payload: encode_inventory_vectors(&requests)?,
+                        }],
+                        tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                    })
                 }
             }
-            MESSAGE_GETDATA => self.collect_getdata_responses(
-                &msg.payload,
-                sync_engine,
-                relay_ctx.map(|c| c.relay_state),
-            ),
+            MESSAGE_GETDATA => Ok(LiveMessageOutcome {
+                responses: self.collect_getdata_responses(
+                    &msg.payload,
+                    sync_engine,
+                    relay_ctx.map(|c| c.relay_state),
+                )?,
+                tx_pool_cleanup: TxPoolCleanupPlan::default(),
+            }),
             MESSAGE_GETBLOCKS => {
                 let items = self.handle_getblocks(&msg.payload, sync_engine)?;
                 if items.is_empty() {
-                    Ok(Vec::new())
+                    Ok(LiveMessageOutcome {
+                        responses: Vec::new(),
+                        tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                    })
                 } else {
-                    Ok(vec![WireMessage {
-                        command: MESSAGE_INV.to_string(),
-                        payload: encode_inventory_vectors(&items)?,
-                    }])
+                    Ok(LiveMessageOutcome {
+                        responses: vec![WireMessage {
+                            command: MESSAGE_INV.to_string(),
+                            payload: encode_inventory_vectors(&items)?,
+                        }],
+                        tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                    })
                 }
             }
             MESSAGE_BLOCK => {
-                self.handle_block(&msg.payload, sync_engine, tx_pool)?;
-                Ok(self
-                    .prepare_block_request_if_behind(sync_engine)?
-                    .into_iter()
-                    .collect())
+                let tx_pool_cleanup = self.handle_block(&msg.payload, sync_engine)?;
+                Ok(LiveMessageOutcome {
+                    responses: self
+                        .prepare_block_request_if_behind(sync_engine)?
+                        .into_iter()
+                        .collect(),
+                    tx_pool_cleanup,
+                })
             }
             MESSAGE_TX => {
                 if let Some(ctx) = relay_ctx {
@@ -501,20 +522,35 @@ impl PeerSession {
                         ctx.peer_writers,
                     )?;
                 }
-                Ok(Vec::new())
+                Ok(LiveMessageOutcome {
+                    responses: Vec::new(),
+                    tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                })
             }
-            "headers" | "pong" => Ok(Vec::new()),
-            "ping" => Ok(vec![WireMessage {
-                command: "pong".to_string(),
-                payload: Vec::new(),
-            }]),
-            MESSAGE_GETADDR => Ok(vec![WireMessage {
-                command: MESSAGE_ADDR.to_string(),
-                payload: marshal_empty_addr_payload(),
-            }]),
+            "headers" | "pong" => Ok(LiveMessageOutcome {
+                responses: Vec::new(),
+                tx_pool_cleanup: TxPoolCleanupPlan::default(),
+            }),
+            "ping" => Ok(LiveMessageOutcome {
+                responses: vec![WireMessage {
+                    command: "pong".to_string(),
+                    payload: Vec::new(),
+                }],
+                tx_pool_cleanup: TxPoolCleanupPlan::default(),
+            }),
+            MESSAGE_GETADDR => Ok(LiveMessageOutcome {
+                responses: vec![WireMessage {
+                    command: MESSAGE_ADDR.to_string(),
+                    payload: marshal_empty_addr_payload(),
+                }],
+                tx_pool_cleanup: TxPoolCleanupPlan::default(),
+            }),
             MESSAGE_ADDR => {
                 let _ = unmarshal_addr_payload(&msg.payload)?;
-                Ok(Vec::new())
+                Ok(LiveMessageOutcome {
+                    responses: Vec::new(),
+                    tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                })
             }
             other => {
                 self.peer.last_error = format!("unknown command: {other}");
@@ -527,13 +563,13 @@ impl PeerSession {
         &mut self,
         msg: WireMessage,
         sync_engine: &mut SyncEngine,
-        tx_pool: Option<&mut TxPool>,
         relay_ctx: Option<&PeerRelayContext<'_>>,
-    ) -> io::Result<()> {
-        for response in self.collect_live_responses(msg, sync_engine, tx_pool, relay_ctx)? {
+    ) -> io::Result<TxPoolCleanupPlan> {
+        let outcome = self.collect_live_responses(msg, sync_engine, relay_ctx)?;
+        for response in outcome.responses {
             self.write_message(&response)?;
         }
-        Ok(())
+        Ok(outcome.tx_pool_cleanup)
     }
 
     fn request_more_blocks_if_behind(&mut self, sync_engine: &SyncEngine) -> io::Result<()> {
@@ -610,15 +646,14 @@ impl PeerSession {
         &mut self,
         block_bytes: &[u8],
         sync_engine: &mut SyncEngine,
-        mut tx_pool: Option<&mut TxPool>,
-    ) -> io::Result<()> {
+    ) -> io::Result<TxPoolCleanupPlan> {
         let parsed = parse_block_bytes(block_bytes).map_err(io::Error::other)?;
         let block_hash_bytes = block_hash(&parsed.header_bytes).map_err(io::Error::other)?;
         if sync_engine
             .has_block(block_hash_bytes)
             .map_err(io::Error::other)?
         {
-            return Ok(());
+            return Ok(TxPoolCleanupPlan::default());
         }
         if parsed.header.prev_block_hash != [0u8; 32]
             && !sync_engine
@@ -630,23 +665,21 @@ impl PeerSession {
                 parsed.header.prev_block_hash,
                 block_bytes,
                 sync_engine,
-                tx_pool.as_deref_mut(),
             )?;
-            return Ok(());
+            return Ok(TxPoolCleanupPlan::default());
         }
-        match sync_engine.apply_block_with_reorg(block_bytes, None, tx_pool.as_deref_mut()) {
-            Ok(summary) => {
-                sync_engine.record_best_known_height(summary.block_height);
-                self.resolve_orphans(block_hash_bytes, sync_engine, tx_pool)?;
+        match sync_engine.apply_block_with_reorg(block_bytes, None) {
+            Ok(outcome) => {
+                sync_engine.record_best_known_height(outcome.summary.block_height);
+                Ok(outcome
+                    .tx_pool_cleanup
+                    .merge(self.resolve_orphans(block_hash_bytes, sync_engine)?))
             }
-            Err(err) if is_parent_not_found_err(&err) => {
-                return Err(io::Error::other(format!(
-                    "unexpected missing-parent after precheck: {err}"
-                )));
-            }
-            Err(err) => return Err(io::Error::other(err)),
+            Err(err) if is_parent_not_found_err(&err) => Err(io::Error::other(format!(
+                "unexpected missing-parent after precheck: {err}"
+            ))),
+            Err(err) => Err(io::Error::other(err)),
         }
-        Ok(())
     }
 
     fn retain_or_resolve_orphan(
@@ -655,7 +688,6 @@ impl PeerSession {
         parent_hash: [u8; 32],
         block_bytes: &[u8],
         sync_engine: &mut SyncEngine,
-        tx_pool: Option<&mut TxPool>,
     ) -> io::Result<()> {
         self.orphans.add(
             block_hash,
@@ -667,7 +699,7 @@ impl PeerSession {
             .has_block(parent_hash)
             .map_err(io::Error::other)?
         {
-            self.resolve_orphans(parent_hash, sync_engine, tx_pool)?;
+            let _ = self.resolve_orphans(parent_hash, sync_engine)?;
         }
         Ok(())
     }
@@ -676,17 +708,14 @@ impl PeerSession {
         &mut self,
         parent_hash: [u8; 32],
         sync_engine: &mut SyncEngine,
-        mut tx_pool: Option<&mut TxPool>,
-    ) -> io::Result<()> {
+    ) -> io::Result<TxPoolCleanupPlan> {
         let mut ready = self.orphans.take_children(parent_hash);
+        let mut cleanup = TxPoolCleanupPlan::default();
         while let Some(child) = ready.pop() {
-            match sync_engine.apply_block_with_reorg(
-                &child.block_bytes,
-                None,
-                tx_pool.as_deref_mut(),
-            ) {
-                Ok(summary) => {
-                    sync_engine.record_best_known_height(summary.block_height);
+            match sync_engine.apply_block_with_reorg(&child.block_bytes, None) {
+                Ok(outcome) => {
+                    sync_engine.record_best_known_height(outcome.summary.block_height);
+                    cleanup = cleanup.merge(outcome.tx_pool_cleanup);
                     ready.extend(self.orphans.take_children(child.block_hash));
                 }
                 Err(err) if is_parent_not_found_err(&err) => {
@@ -703,7 +732,7 @@ impl PeerSession {
                 }
             }
         }
-        Ok(())
+        Ok(cleanup)
     }
 
     fn respond_to_getdata(
@@ -2282,7 +2311,7 @@ mod tests {
                 .expect("session");
             let mut engine = test_sync_engine_with_genesis();
             session
-                .handle_block(&devnet_genesis_block_bytes(), &mut engine, None)
+                .handle_block(&devnet_genesis_block_bytes(), &mut engine)
                 .expect("duplicate block should be ignored");
         });
 
@@ -2324,9 +2353,10 @@ mod tests {
                 genesis.header.timestamp + 1,
                 &[admitted_raw],
             );
-            session
-                .handle_block(&block, &mut engine, Some(&mut pool))
+            let cleanup = session
+                .handle_block(&block, &mut engine)
                 .expect("block with admitted tx");
+            cleanup.apply(&mut pool);
 
             assert!(
                 pool.is_empty(),
@@ -2371,9 +2401,10 @@ mod tests {
                 genesis.header.timestamp + 1,
                 &[block_raw],
             );
-            session
-                .handle_block(&block, &mut engine, Some(&mut pool))
+            let cleanup = session
+                .handle_block(&block, &mut engine)
                 .expect("conflicting block");
+            cleanup.apply(&mut pool);
 
             assert!(
                 pool.is_empty(),
@@ -2405,7 +2436,7 @@ mod tests {
                     .saturating_add(MAX_FUTURE_DRIFT + 1),
             );
             let err = session
-                .handle_block(&block, &mut engine, None)
+                .handle_block(&block, &mut engine)
                 .expect_err("future timestamp must be rejected");
             assert_eq!(err.kind(), io::ErrorKind::Other);
             assert!(
@@ -2442,7 +2473,7 @@ mod tests {
             let block2_hash = block_hash(&block2[..BLOCK_HEADER_BYTES]).expect("block2 hash");
 
             session
-                .handle_block(&block2, &mut engine, None)
+                .handle_block(&block2, &mut engine)
                 .expect("orphan block should be retained");
             assert_eq!(engine.chain_state.height, 0, "orphan must not advance tip");
             assert_eq!(
@@ -2457,7 +2488,7 @@ mod tests {
             );
 
             session
-                .handle_block(&block1, &mut engine, None)
+                .handle_block(&block1, &mut engine)
                 .expect("parent block should connect and resolve orphan");
 
             assert_eq!(session.orphans.len(), 0, "orphan pool should drain");
@@ -2495,7 +2526,7 @@ mod tests {
             let block2_hash = block_hash(&block2[..BLOCK_HEADER_BYTES]).expect("block2 hash");
 
             session
-                .handle_block(&block2, &mut engine, None)
+                .handle_block(&block2, &mut engine)
                 .expect("orphan should be retained until parent arrives");
             assert!(
                 !engine
@@ -2504,7 +2535,7 @@ mod tests {
                 "invalid orphan should remain memory-only until parent arrives"
             );
             let err = session
-                .handle_block(&block1, &mut engine, None)
+                .handle_block(&block1, &mut engine)
                 .expect_err("invalid orphan should surface after parent arrives");
 
             assert_eq!(session.orphans.len(), 0, "invalid orphan should be dropped");

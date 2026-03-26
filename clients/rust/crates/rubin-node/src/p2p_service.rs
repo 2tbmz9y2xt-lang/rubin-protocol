@@ -753,19 +753,23 @@ fn handle_peer(
             // Lock scope minimized: engine lock held only during
             // collect_live_responses.  Payload size check above ensures
             // no unbounded deserialization under lock.
-            let mut engine = shared
-                .sync_engine
-                .lock()
-                .map_err(|_| "sync engine unavailable".to_string())?;
-            let mut tx_pool = shared
-                .tx_pool
-                .lock()
-                .map_err(|_| "tx pool unavailable".to_string())?;
-            let responses = session
-                .collect_live_responses(msg, &mut engine, Some(&mut tx_pool), Some(&relay_ctx))
-                .map_err(|err| format!("handle live message: {err}"))?;
-            drop(tx_pool);
-            drop(engine);
+            let (responses, tx_pool_cleanup) = {
+                let mut engine = shared
+                    .sync_engine
+                    .lock()
+                    .map_err(|_| "sync engine unavailable".to_string())?;
+                let outcome = session
+                    .collect_live_responses(msg, &mut engine, Some(&relay_ctx))
+                    .map_err(|err| format!("handle live message: {err}"))?;
+                (outcome.responses, outcome.tx_pool_cleanup)
+            };
+            if !tx_pool_cleanup.is_empty() {
+                let mut tx_pool = shared
+                    .tx_pool
+                    .lock()
+                    .map_err(|_| "tx pool unavailable".to_string())?;
+                tx_pool_cleanup.apply(&mut tx_pool);
+            }
             responses
         };
         for outbound in outbound_messages {
