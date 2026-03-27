@@ -253,5 +253,6 @@ mod verification {
             return;
         };
         assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+        assert_eq!(err.msg, "CORE_MULTISIG key_count out of range");
     }
 }
