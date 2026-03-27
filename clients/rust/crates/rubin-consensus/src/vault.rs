@@ -225,32 +225,24 @@ mod verification {
     use super::*;
 
     #[kani::proof]
-    fn verify_parse_vault_covenant_data_for_spend_accepts_minimal_shape() {
+    fn verify_parse_vault_covenant_data_rejects_whitelist_length_mismatch() {
         let owner_lock_id = [1u8; 32];
         let key = [2u8; 32];
-        let whitelist_entry = [3u8; 32];
 
-        let mut covenant_data = Vec::with_capacity(32 + 1 + 1 + 32 + 2 + 32);
+        let mut covenant_data = Vec::with_capacity(32 + 1 + 1 + 32 + 2 + 31);
         covenant_data.extend_from_slice(&owner_lock_id);
         covenant_data.push(1); // threshold
         covenant_data.push(1); // key_count
         covenant_data.extend_from_slice(&key);
         covenant_data.extend_from_slice(&1u16.to_le_bytes()); // whitelist_count
-        covenant_data.extend_from_slice(&whitelist_entry);
+        covenant_data.extend_from_slice(&[3u8; 31]); // truncated whitelist payload
 
         let parsed = parse_vault_covenant_data_for_spend(&covenant_data);
-        assert!(parsed.is_ok());
-        let Ok(parsed) = parsed else {
+        assert!(parsed.is_err());
+        let Err(err) = parsed else {
             return;
         };
-        assert_eq!(parsed.owner_lock_id, owner_lock_id);
-        assert_eq!(parsed.threshold, 1);
-        assert_eq!(parsed.key_count, 1);
-        assert_eq!(parsed.keys.len(), 1);
-        assert_eq!(parsed.keys[0], key);
-        assert_eq!(parsed.whitelist_count, 1);
-        assert_eq!(parsed.whitelist.len(), 1);
-        assert_eq!(parsed.whitelist[0], whitelist_entry);
+        assert_eq!(err.code, ErrorCode::TxErrVaultMalformed);
     }
 
     #[kani::proof]
