@@ -104,7 +104,7 @@ fn collect_da_payload_commit_tasks_sorts_da_ids_and_orders_chunks() {
         .0,
     ];
 
-    let tasks = collect_da_payload_commit_tasks(&txs);
+    let tasks = collect_da_payload_commit_tasks(&txs).expect("collect payload commit tasks");
     assert_eq!(tasks.len(), 2);
     assert_eq!(tasks[0].da_id, da_id_lo);
     assert_eq!(tasks[0].chunk_payloads, vec![lo_chunk_0, lo_chunk_1]);
@@ -163,9 +163,11 @@ fn verify_da_payload_commits_parallel_matches_block_basic_error_code() {
 
     let block_err = validate_block_basic(&block, None, None).expect_err("bad commitment");
     let parsed = parse_block_bytes(&block).expect("parse block");
-    let helper_err =
-        verify_da_payload_commits_parallel(collect_da_payload_commit_tasks(&parsed.txs), 4)
-            .unwrap_err();
+    let helper_err = verify_da_payload_commits_parallel(
+        collect_da_payload_commit_tasks(&parsed.txs).expect("collect payload commit tasks"),
+        4,
+    )
+    .unwrap_err();
 
     assert_eq!(block_err.code, ErrorCode::BlockErrDaPayloadCommitInvalid);
     assert_eq!(helper_err.code, block_err.code);
@@ -214,6 +216,9 @@ fn verify_da_parallel_helpers_accept_valid_multi_set_block() {
 
     verify_da_chunk_hashes_parallel(collect_da_chunk_hash_tasks(&parsed.txs), 0)
         .expect("chunk hashes");
-    verify_da_payload_commits_parallel(collect_da_payload_commit_tasks(&parsed.txs), 0)
-        .expect("payload commitments");
+    verify_da_payload_commits_parallel(
+        collect_da_payload_commit_tasks(&parsed.txs).expect("collect payload commit tasks"),
+        0,
+    )
+    .expect("payload commitments");
 }

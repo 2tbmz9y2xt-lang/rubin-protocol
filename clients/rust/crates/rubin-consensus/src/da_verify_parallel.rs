@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 
-use crate::constants::{COV_TYPE_DA_COMMIT, MAX_DA_BYTES_PER_BLOCK};
+use crate::constants::{
+    COV_TYPE_DA_COMMIT, MAX_DA_BATCHES_PER_BLOCK, MAX_DA_BYTES_PER_BLOCK, MAX_DA_CHUNK_COUNT,
+};
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
 use crate::tx::Tx;
@@ -105,16 +107,15 @@ pub fn collect_da_chunk_hash_tasks(txs: &[Tx]) -> Vec<DaChunkHashTask> {
     tasks
 }
 
-/// Collect payload-commit verification tasks after the caller has already
-/// enforced DA-set structural integrity for the block.
+/// Collect payload-commit verification tasks in deterministic DA-ID order.
 ///
-/// Precondition, matching Go `CollectDAPayloadCommitTasks`:
-/// - no duplicate DA commit exists for a DA ID,
-/// - every DA commit has a contiguous chunk set of exact `chunk_count`,
-/// - every chunk index in `[0, chunk_count - 1]` is present.
-pub fn collect_da_payload_commit_tasks(txs: &[Tx]) -> Vec<DaPayloadCommitTask> {
+/// Unlike the Go helper, this helper re-checks the DA-set structural envelope so
+/// helper-only callers fail closed instead of silently inheriting missing
+/// `validate_block_basic` preconditions.
+pub fn collect_da_payload_commit_tasks(txs: &[Tx]) -> Result<Vec<DaPayloadCommitTask>, TxError> {
     let mut commits: BTreeMap<[u8; 32], &Tx> = BTreeMap::new();
     let mut chunks: BTreeMap<[u8; 32], HashMap<u16, &Tx>> = BTreeMap::new();
+    let mut total_da_payload_bytes: u64 = 0;
 
     for tx in txs {
         match tx.tx_kind {
@@ -122,23 +123,63 @@ pub fn collect_da_payload_commit_tasks(txs: &[Tx]) -> Vec<DaPayloadCommitTask> {
                 let Some(core) = tx.da_commit_core.as_ref() else {
                     continue;
                 };
-                commits.insert(core.da_id, tx);
+                if commits.insert(core.da_id, tx).is_some() {
+                    return Err(TxError::new(
+                        ErrorCode::BlockErrDaSetInvalid,
+                        "duplicate DA commit for da_id",
+                    ));
+                }
             }
             0x02 => {
                 let Some(core) = tx.da_chunk_core.as_ref() else {
                     continue;
                 };
-                chunks
-                    .entry(core.da_id)
-                    .or_default()
-                    .insert(core.chunk_index, tx);
+                total_da_payload_bytes = total_da_payload_bytes
+                    .checked_add(tx.da_payload.len() as u64)
+                    .ok_or_else(|| {
+                        TxError::new(
+                            ErrorCode::BlockErrDaBatchExceeded,
+                            "DA payload bytes overflow",
+                        )
+                    })?;
+                if total_da_payload_bytes > MAX_DA_BYTES_PER_BLOCK {
+                    return Err(TxError::new(
+                        ErrorCode::BlockErrDaBatchExceeded,
+                        "DA payload batch exceeds block cap",
+                    ));
+                }
+                chunks.entry(core.da_id).or_default();
+                if chunks
+                    .get_mut(&core.da_id)
+                    .expect("entry inserted")
+                    .insert(core.chunk_index, tx)
+                    .is_some()
+                {
+                    return Err(TxError::new(
+                        ErrorCode::BlockErrDaSetInvalid,
+                        "duplicate DA chunk index",
+                    ));
+                }
             }
             _ => {}
         }
     }
 
     if commits.is_empty() {
-        return Vec::new();
+        if chunks.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Err(TxError::new(
+            ErrorCode::BlockErrDaSetInvalid,
+            "DA chunks without DA commit",
+        ));
+    }
+
+    if commits.len() > MAX_DA_BATCHES_PER_BLOCK as usize {
+        return Err(TxError::new(
+            ErrorCode::BlockErrDaBatchExceeded,
+            "too many DA commits in block",
+        ));
     }
 
     let mut tasks = Vec::with_capacity(commits.len());
@@ -148,23 +189,46 @@ pub fn collect_da_payload_commit_tasks(txs: &[Tx]) -> Vec<DaPayloadCommitTask> {
             .as_ref()
             .expect("commit map stores only DA commit txs");
         let chunk_count = commit_core.chunk_count;
-        let chunk_set = chunks.get(da_id);
+        if chunk_count == 0 || u64::from(chunk_count) > MAX_DA_CHUNK_COUNT {
+            return Err(TxError::new(
+                ErrorCode::TxErrParse,
+                "chunk_count out of range for tx_kind=0x01",
+            ));
+        }
+        let chunk_set = chunks.get(da_id).ok_or_else(|| {
+            TxError::new(ErrorCode::BlockErrDaIncomplete, "DA commit without chunks")
+        })?;
+        if chunk_set.len() != chunk_count as usize {
+            return Err(TxError::new(
+                ErrorCode::BlockErrDaIncomplete,
+                "DA chunk count mismatch",
+            ));
+        }
 
         let mut chunk_payloads = Vec::with_capacity(chunk_count as usize);
         for chunk_index in 0..chunk_count {
-            let payload = chunk_set
-                .and_then(|set| set.get(&chunk_index))
-                .map(|tx| tx.da_payload.clone())
-                .unwrap_or_default();
-            chunk_payloads.push(payload);
+            let payload = chunk_set.get(&chunk_index).ok_or_else(|| {
+                TxError::new(ErrorCode::BlockErrDaIncomplete, "missing DA chunk index")
+            })?;
+            chunk_payloads.push(payload.da_payload.clone());
         }
 
         let mut expected_commit = [0u8; 32];
+        let mut da_commit_outputs: u32 = 0;
         for output in &commit_tx.outputs {
-            if output.covenant_type == COV_TYPE_DA_COMMIT && output.covenant_data.len() == 32 {
-                expected_commit.copy_from_slice(&output.covenant_data);
-                break;
+            if output.covenant_type != COV_TYPE_DA_COMMIT {
+                continue;
             }
+            da_commit_outputs += 1;
+            if output.covenant_data.len() == 32 {
+                expected_commit.copy_from_slice(&output.covenant_data);
+            }
+        }
+        if da_commit_outputs != 1 {
+            return Err(TxError::new(
+                ErrorCode::BlockErrDaPayloadCommitInvalid,
+                "DA commitment output missing or duplicated",
+            ));
         }
 
         tasks.push(DaPayloadCommitTask {
@@ -175,7 +239,7 @@ pub fn collect_da_payload_commit_tasks(txs: &[Tx]) -> Vec<DaPayloadCommitTask> {
         });
     }
 
-    tasks
+    Ok(tasks)
 }
 
 fn reduce_da_results(
@@ -238,7 +302,7 @@ mod tests {
         reduce_da_results, total_payload_len, verify_da_chunk_hashes_parallel,
         verify_da_payload_commits_parallel, DaChunkHashTask, DaPayloadCommitTask,
     };
-    use crate::constants::MAX_DA_BYTES_PER_BLOCK;
+    use crate::constants::{COV_TYPE_DA_COMMIT, MAX_DA_BYTES_PER_BLOCK};
     use crate::error::{ErrorCode, TxError};
     use crate::tx::Tx;
     use crate::worker_pool::{WorkerPoolError, WorkerPoolRunError, WorkerResult};
@@ -293,7 +357,9 @@ mod tests {
         bad_commit.tx_kind = 0x01;
 
         assert!(collect_da_chunk_hash_tasks(&[bad_chunk]).is_empty());
-        assert!(collect_da_payload_commit_tasks(&[bad_commit]).is_empty());
+        assert!(collect_da_payload_commit_tasks(&[bad_commit])
+            .expect("skip malformed commit core")
+            .is_empty());
 
         let mixed = vec![
             empty_tx(),
@@ -308,7 +374,156 @@ mod tests {
                 tx
             },
         ];
-        assert!(collect_da_payload_commit_tasks(&mixed).is_empty());
+        assert!(collect_da_payload_commit_tasks(&mixed)
+            .expect("skip malformed mixed records")
+            .is_empty());
+    }
+
+    #[test]
+    fn collect_da_payload_commit_tasks_rejects_duplicate_commits() {
+        let mut first = empty_tx();
+        first.tx_kind = 0x01;
+        first.da_commit_core = Some(crate::tx::DaCommitCore {
+            da_id: [0x11; 32],
+            chunk_count: 1,
+            retl_domain_id: [0u8; 32],
+            batch_number: 0,
+            tx_data_root: [0u8; 32],
+            state_root: [0u8; 32],
+            withdrawals_root: [0u8; 32],
+            batch_sig_suite: 0,
+            batch_sig: Vec::new(),
+        });
+        let second = first.clone();
+
+        let err = collect_da_payload_commit_tasks(&[first, second]).expect_err("duplicate commit");
+        assert_eq!(err.code, ErrorCode::BlockErrDaSetInvalid);
+    }
+
+    #[test]
+    fn collect_da_payload_commit_tasks_rejects_chunks_without_commit() {
+        let mut chunk = empty_tx();
+        chunk.tx_kind = 0x02;
+        chunk.da_chunk_core = Some(crate::tx::DaChunkCore {
+            da_id: [0x22; 32],
+            chunk_index: 0,
+            chunk_hash: [0u8; 32],
+        });
+        chunk.da_payload = vec![0x42];
+
+        let err = collect_da_payload_commit_tasks(&[chunk]).expect_err("missing commit");
+        assert_eq!(err.code, ErrorCode::BlockErrDaSetInvalid);
+    }
+
+    #[test]
+    fn collect_da_payload_commit_tasks_rejects_duplicate_chunk_indices() {
+        let da_id = [0x23; 32];
+        let mut first = empty_tx();
+        first.tx_kind = 0x02;
+        first.da_chunk_core = Some(crate::tx::DaChunkCore {
+            da_id,
+            chunk_index: 0,
+            chunk_hash: [0u8; 32],
+        });
+        first.da_payload = vec![0x01];
+        let second = first.clone();
+        let mut commit = empty_tx();
+        commit.tx_kind = 0x01;
+        commit.da_commit_core = Some(crate::tx::DaCommitCore {
+            da_id,
+            chunk_count: 1,
+            retl_domain_id: [0u8; 32],
+            batch_number: 0,
+            tx_data_root: [0u8; 32],
+            state_root: [0u8; 32],
+            withdrawals_root: [0u8; 32],
+            batch_sig_suite: 0,
+            batch_sig: Vec::new(),
+        });
+        commit.outputs.push(crate::tx::TxOutput {
+            value: 0,
+            covenant_type: COV_TYPE_DA_COMMIT,
+            covenant_data: vec![0u8; 32],
+        });
+
+        let err = collect_da_payload_commit_tasks(&[commit, first, second])
+            .expect_err("duplicate chunk index");
+        assert_eq!(err.code, ErrorCode::BlockErrDaSetInvalid);
+    }
+
+    #[test]
+    fn collect_da_payload_commit_tasks_rejects_missing_chunk_index() {
+        let da_id = [0x33; 32];
+        let mut commit = empty_tx();
+        commit.tx_kind = 0x01;
+        commit.da_commit_core = Some(crate::tx::DaCommitCore {
+            da_id,
+            chunk_count: 2,
+            retl_domain_id: [0u8; 32],
+            batch_number: 0,
+            tx_data_root: [0u8; 32],
+            state_root: [0u8; 32],
+            withdrawals_root: [0u8; 32],
+            batch_sig_suite: 0,
+            batch_sig: Vec::new(),
+        });
+        commit.outputs.push(crate::tx::TxOutput {
+            value: 0,
+            covenant_type: COV_TYPE_DA_COMMIT,
+            covenant_data: vec![0u8; 32],
+        });
+        let mut chunk = empty_tx();
+        chunk.tx_kind = 0x02;
+        chunk.da_chunk_core = Some(crate::tx::DaChunkCore {
+            da_id,
+            chunk_index: 1,
+            chunk_hash: [0u8; 32],
+        });
+        chunk.da_payload = vec![0x24];
+
+        let err =
+            collect_da_payload_commit_tasks(&[commit, chunk]).expect_err("missing chunk index 0");
+        assert_eq!(err.code, ErrorCode::BlockErrDaIncomplete);
+    }
+
+    #[test]
+    fn collect_da_payload_commit_tasks_rejects_duplicate_da_commit_outputs() {
+        let da_id = [0x44; 32];
+        let mut commit = empty_tx();
+        commit.tx_kind = 0x01;
+        commit.da_commit_core = Some(crate::tx::DaCommitCore {
+            da_id,
+            chunk_count: 1,
+            retl_domain_id: [0u8; 32],
+            batch_number: 0,
+            tx_data_root: [0u8; 32],
+            state_root: [0u8; 32],
+            withdrawals_root: [0u8; 32],
+            batch_sig_suite: 0,
+            batch_sig: Vec::new(),
+        });
+        commit.outputs.push(crate::tx::TxOutput {
+            value: 0,
+            covenant_type: COV_TYPE_DA_COMMIT,
+            covenant_data: vec![0u8; 32],
+        });
+        commit.outputs.push(crate::tx::TxOutput {
+            value: 0,
+            covenant_type: COV_TYPE_DA_COMMIT,
+            covenant_data: vec![1u8; 32],
+        });
+        let mut chunk = empty_tx();
+        chunk.tx_kind = 0x02;
+        chunk.da_chunk_core = Some(crate::tx::DaChunkCore {
+            da_id,
+            chunk_index: 0,
+            chunk_hash: [0u8; 32],
+        });
+        chunk.da_payload = vec![0x99];
+
+        let err = collect_da_payload_commit_tasks(&[commit, chunk])
+            .expect_err("duplicate da_commit outputs");
+        assert_eq!(err.code, ErrorCode::BlockErrDaPayloadCommitInvalid);
     }
 
     #[test]
