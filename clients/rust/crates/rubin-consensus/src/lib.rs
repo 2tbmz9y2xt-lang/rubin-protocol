@@ -47,6 +47,8 @@ pub use connect_block_inmem::{
     connect_block_basic_in_memory_at_height,
     connect_block_basic_in_memory_at_height_and_core_ext_deployments,
     connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context,
+    connect_block_parallel_sig_verify, connect_block_parallel_sig_verify_and_core_ext_deployments,
+    connect_block_parallel_sig_verify_and_core_ext_deployments_with_suite_context,
     ConnectBlockBasicSummary, InMemoryChainState,
 };
 pub use core_ext::{

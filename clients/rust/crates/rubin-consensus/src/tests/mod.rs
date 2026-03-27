@@ -614,6 +614,7 @@ fn encode_htlc_covenant_data(
 }
 
 mod block_basic;
+mod connect_block_parallel;
 mod covenant_genesis;
 mod precompute;
 mod tx_parse;
