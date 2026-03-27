@@ -55,6 +55,21 @@ func TestParseCoreExtCovenantData_RejectsHugePayloadLenWithoutPanic(t *testing.T
 	}
 }
 
+func TestParseCoreExtCovenantData_RejectsUint64MaxPayloadLenWithoutPanic(t *testing.T) {
+	covData := []byte{0x34, 0x12, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00}
+
+	_, err := ParseCoreExtCovenantData(covData)
+	if err == nil {
+		t.Fatalf("expected error for uint64-max payload length")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	}
+	if !strings.Contains(err.Error(), "ext_payload parse failure") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestStaticCoreExtProfileProviderEmptyReturnsInactiveProvider(t *testing.T) {
 	provider, err := NewStaticCoreExtProfileProvider(nil)
 	if err != nil {

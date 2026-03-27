@@ -576,6 +576,7 @@ pub fn parse_core_ext_covenant_data(cov_data: &[u8]) -> Result<CoreExtCovenant<'
                 "CORE_EXT ext_payload_len CompactSize invalid",
             )
         })?;
+    #[cfg(target_pointer_width = "32")]
     if ext_payload_len_u64 > usize::MAX as u64 {
         return Err(TxError::new(
             ErrorCode::TxErrCovenantTypeInvalid,
