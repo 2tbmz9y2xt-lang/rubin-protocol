@@ -29,6 +29,8 @@ type GovernanceReplayToken struct {
 }
 
 func IssueGovernanceReplayToken(extID uint16, nonce uint64, currentHeight uint64, validityWindow uint64) GovernanceReplayToken {
+	// Keep zero-window behavior aligned with Rust: the token is created
+	// successfully but is immediately expired at issued_at_height.
 	return GovernanceReplayToken{
 		ExtID:          extID,
 		Nonce:          nonce,
@@ -97,11 +99,11 @@ func (t GovernanceReplayToken) expiryHeight() uint64 {
 }
 
 func (t GovernanceReplayToken) ToBytes() []byte {
-	out := make([]byte, 0, governanceReplayTokenBytes)
-	out = AppendU16le(out, t.ExtID)
-	out = AppendU64le(out, t.Nonce)
-	out = AppendU64le(out, t.IssuedAtHeight)
-	out = AppendU64le(out, t.ValidityWindow)
+	out := make([]byte, governanceReplayTokenBytes)
+	binary.LittleEndian.PutUint16(out[0:2], t.ExtID)
+	binary.LittleEndian.PutUint64(out[2:10], t.Nonce)
+	binary.LittleEndian.PutUint64(out[10:18], t.IssuedAtHeight)
+	binary.LittleEndian.PutUint64(out[18:26], t.ValidityWindow)
 	return out
 }
 

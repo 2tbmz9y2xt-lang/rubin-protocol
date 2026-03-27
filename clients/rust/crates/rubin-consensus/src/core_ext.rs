@@ -2276,6 +2276,30 @@ mod tests {
     }
 
     #[test]
+    fn governance_replay_token_zero_window_is_immediately_expired() {
+        let token = GovernanceReplayToken::issue(7, 1, 100, 0);
+        let err = token.validate(7, 100, 1).unwrap_err();
+        assert!(err.contains("expired"));
+    }
+
+    #[test]
+    fn governance_replay_token_validation_order_is_ext_nonce_issued_expiry() {
+        let token = GovernanceReplayToken::issue(7, 1, 100, 0);
+
+        let err = token.validate(9, 50, 2).unwrap_err();
+        assert!(err.contains("ext_id mismatch"));
+
+        let err = token.validate(7, 50, 2).unwrap_err();
+        assert!(err.contains("nonce mismatch"));
+
+        let err = token.validate(7, 99, 1).unwrap_err();
+        assert!(err.contains("not yet valid"));
+
+        let err = token.validate(7, 100, 1).unwrap_err();
+        assert!(err.contains("expired"));
+    }
+
+    #[test]
     fn parse_core_ext_covenant_data_rejects_huge_payload_len_without_panicking() {
         let cov_data = [
             0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f, 0x00,

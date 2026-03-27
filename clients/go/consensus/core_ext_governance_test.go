@@ -97,3 +97,35 @@ func TestGovernanceReplayTokenNonceZeroAllowed(t *testing.T) {
 		t.Fatalf("nonce zero should remain valid: %v", err)
 	}
 }
+
+func TestGovernanceReplayTokenZeroWindowExpiresImmediately(t *testing.T) {
+	token := IssueGovernanceReplayToken(7, 1, 100, 0)
+	err := token.Validate(7, 100, 1)
+	if err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("unexpected err: %v", err)
+	}
+}
+
+func TestGovernanceReplayTokenValidationOrderMatchesRust(t *testing.T) {
+	token := IssueGovernanceReplayToken(7, 1, 100, 0)
+
+	err := token.Validate(9, 50, 2)
+	if err == nil || !strings.Contains(err.Error(), "ext_id mismatch") {
+		t.Fatalf("ext_id should win, got: %v", err)
+	}
+
+	err = token.Validate(7, 50, 2)
+	if err == nil || !strings.Contains(err.Error(), "nonce mismatch") {
+		t.Fatalf("nonce should win after ext_id, got: %v", err)
+	}
+
+	err = token.Validate(7, 99, 1)
+	if err == nil || !strings.Contains(err.Error(), "not yet valid") {
+		t.Fatalf("issued_at should win after nonce, got: %v", err)
+	}
+
+	err = token.Validate(7, 100, 1)
+	if err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("expiry should be last branch, got: %v", err)
+	}
+}
