@@ -139,7 +139,7 @@ func ParseCoreExtCovenantData(covenantData []byte) (*CoreExtCovenantData, error)
 		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT covenant_data ext_payload_len parse failure")
 	}
 	if payloadLenU64 > uint64(math.MaxInt) {
-		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT ext_payload_len overflows int")
+		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT covenant_data ext_payload parse failure")
 	}
 	payloadLen := int(payloadLenU64)
 

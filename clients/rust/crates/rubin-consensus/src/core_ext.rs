@@ -579,27 +579,35 @@ pub fn parse_core_ext_covenant_data(cov_data: &[u8]) -> Result<CoreExtCovenant<'
     if ext_payload_len_u64 > usize::MAX as u64 {
         return Err(TxError::new(
             ErrorCode::TxErrCovenantTypeInvalid,
-            "CORE_EXT ext_payload_len overflows usize",
+            "CORE_EXT covenant_data ext_payload parse failure",
         ));
     }
     let ext_payload_len = ext_payload_len_u64 as usize;
-    let expected_len = 2usize
-        .checked_add(varint_bytes)
-        .and_then(|v| v.checked_add(ext_payload_len))
-        .ok_or_else(|| {
-            TxError::new(
-                ErrorCode::TxErrCovenantTypeInvalid,
-                "CORE_EXT length overflow",
-            )
-        })?;
-    if cov_data.len() != expected_len {
+    let payload_start = 2usize.checked_add(varint_bytes).ok_or_else(|| {
+        TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_EXT covenant_data ext_payload parse failure",
+        )
+    })?;
+    let payload_end = payload_start.checked_add(ext_payload_len).ok_or_else(|| {
+        TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_EXT covenant_data ext_payload parse failure",
+        )
+    })?;
+    if cov_data.len() < payload_end {
+        return Err(TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_EXT covenant_data ext_payload parse failure",
+        ));
+    }
+    if cov_data.len() != payload_end {
         return Err(TxError::new(
             ErrorCode::TxErrCovenantTypeInvalid,
             "CORE_EXT covenant_data length mismatch",
         ));
     }
-    let payload_start = 2 + varint_bytes;
-    let ext_payload = &cov_data[payload_start..payload_start + ext_payload_len];
+    let ext_payload = &cov_data[payload_start..payload_end];
 
     Ok(CoreExtCovenant {
         ext_id,
@@ -2280,10 +2288,7 @@ mod tests {
 
         let err = parse_core_ext_covenant_data(&cov_data).unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
-        assert!(matches!(
-            err.msg,
-            "CORE_EXT covenant_data length mismatch" | "CORE_EXT ext_payload_len overflows usize"
-        ));
+        assert_eq!(err.msg, "CORE_EXT covenant_data ext_payload parse failure");
     }
 }
 
