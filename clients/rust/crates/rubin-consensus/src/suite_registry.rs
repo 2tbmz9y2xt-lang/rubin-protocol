@@ -54,6 +54,17 @@ impl SuiteRegistry {
     pub fn is_registered(&self, suite_id: u8) -> bool {
         self.suites.contains_key(&suite_id)
     }
+
+    pub fn min_sigcheck_payload_bytes(&self) -> Option<usize> {
+        self.suites
+            .values()
+            .filter_map(|params| {
+                let pubkey_len = usize::try_from(params.pubkey_len).ok()?;
+                let sig_len = usize::try_from(params.sig_len).ok()?;
+                pubkey_len.checked_add(sig_len)
+            })
+            .min()
+    }
 }
 
 /// Set of suite IDs valid for native covenant operations at a given height.
@@ -291,6 +302,34 @@ mod tests {
         let p = reg.lookup(0x01).unwrap();
         assert_eq!(p.pubkey_len, 100);
         assert_eq!(p.sig_len, 200);
+        assert_eq!(reg.min_sigcheck_payload_bytes(), Some(300));
+    }
+
+    #[test]
+    fn test_suite_registry_min_sigcheck_payload_bytes_picks_smallest_registered_suite() {
+        let mut suites = BTreeMap::new();
+        suites.insert(
+            0x01,
+            SuiteParams {
+                suite_id: 0x01,
+                pubkey_len: 2592,
+                sig_len: 4627,
+                verify_cost: 8,
+                openssl_alg: "ML-DSA-87",
+            },
+        );
+        suites.insert(
+            0x02,
+            SuiteParams {
+                suite_id: 0x02,
+                pubkey_len: 64,
+                sig_len: 100,
+                verify_cost: 1,
+                openssl_alg: "ML-DSA-87",
+            },
+        );
+        let reg = SuiteRegistry::with_suites(suites);
+        assert_eq!(reg.min_sigcheck_payload_bytes(), Some(164));
     }
 
     #[test]
