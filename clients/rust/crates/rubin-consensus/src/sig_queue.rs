@@ -1,4 +1,4 @@
-use crate::constants::MAX_BLOCK_WEIGHT;
+use crate::constants::{MAX_BLOCK_WEIGHT, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES};
 use crate::error::{ErrorCode, TxError};
 use crate::suite_registry::SuiteRegistry;
 use crate::verify_sig_openssl::{verify_sig, verify_sig_with_registry};
@@ -8,11 +8,16 @@ use crate::verify_sig_openssl::{verify_sig, verify_sig_with_registry};
 // the block weight budget because witness data is charged 1:1 in weight.
 const MAX_SIGCHECK_QUEUE_BYTES: usize = MAX_BLOCK_WEIGHT as usize;
 const SIGCHECK_TASK_FIXED_OVERHEAD_BYTES: usize = 1 + 32 + 1;
-// The task cap is a secondary guardrail: derive it from the smallest
-// architecture-stable in-memory task footprint so pathological tiny tasks
-// cannot evade the byte budget through per-task overhead.
-const MAX_SIGCHECK_QUEUE_TASKS: usize =
-    MAX_SIGCHECK_QUEUE_BYTES / SIGCHECK_TASK_FIXED_OVERHEAD_BYTES;
+// In live consensus paths the queue only accepts canonical native ML-DSA
+// witness items after length validation in the caller. Use that smallest
+// currently-queued payload shape as the secondary task-count guard so a flood
+// of artificially tiny tasks cannot bypass the byte budget through per-task
+// overhead. If a future native queued suite has smaller canonical lengths, this
+// constant must be revisited together with the suite activation.
+const MIN_QUEUED_SIGCHECK_PAYLOAD_BYTES: usize =
+    (ML_DSA_87_PUBKEY_BYTES as usize) + (ML_DSA_87_SIG_BYTES as usize);
+const MAX_SIGCHECK_QUEUE_TASKS: usize = MAX_SIGCHECK_QUEUE_BYTES
+    / (SIGCHECK_TASK_FIXED_OVERHEAD_BYTES + MIN_QUEUED_SIGCHECK_PAYLOAD_BYTES);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SigCheckTask {
@@ -692,6 +697,15 @@ mod tests {
     #[test]
     fn sig_check_queue_byte_budget_is_bounded_by_block_weight() {
         assert_eq!(MAX_SIGCHECK_QUEUE_BYTES, MAX_BLOCK_WEIGHT as usize);
+    }
+
+    #[test]
+    fn sig_check_queue_task_budget_is_bounded_by_smallest_native_payload() {
+        assert_eq!(
+            MAX_SIGCHECK_QUEUE_TASKS,
+            MAX_SIGCHECK_QUEUE_BYTES
+                / (SIGCHECK_TASK_FIXED_OVERHEAD_BYTES + MIN_QUEUED_SIGCHECK_PAYLOAD_BYTES)
+        );
     }
 
     #[test]
