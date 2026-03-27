@@ -298,3 +298,38 @@ mod tests {
         assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
     }
 }
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    fn verify_parse_stealth_covenant_data_accepts_exact_length() {
+        let mut cov_data = [0u8; MAX_STEALTH_COVENANT_DATA as usize];
+        cov_data[..ML_KEM_1024_CT_BYTES as usize].fill(0x5a);
+        cov_data[ML_KEM_1024_CT_BYTES as usize..].fill(0xa5);
+        let parsed = parse_stealth_covenant_data(&cov_data);
+        assert!(parsed.is_ok());
+        let Ok(parsed) = parsed else {
+            return;
+        };
+
+        let expected_ciphertext = cov_data[..ML_KEM_1024_CT_BYTES as usize].to_vec();
+        let mut expected_one_time_key_id = [0u8; 32];
+        expected_one_time_key_id.copy_from_slice(&cov_data[ML_KEM_1024_CT_BYTES as usize..]);
+
+        assert_eq!(parsed.ciphertext, expected_ciphertext);
+        assert_eq!(parsed.one_time_key_id, expected_one_time_key_id);
+    }
+
+    #[kani::proof]
+    fn verify_parse_stealth_covenant_data_rejects_short_length() {
+        let cov_data: [u8; (MAX_STEALTH_COVENANT_DATA as usize) - 1] = kani::any();
+        let parsed = parse_stealth_covenant_data(&cov_data);
+        assert!(parsed.is_err());
+        let Err(err) = parsed else {
+            return;
+        };
+        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    }
+}

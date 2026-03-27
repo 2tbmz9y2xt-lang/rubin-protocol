@@ -2246,3 +2246,58 @@ mod tests {
         assert!(token.validate(7, 110, 0).is_ok());
     }
 }
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    fn verify_parse_core_ext_covenant_data_accepts_empty_payload() {
+        let ext_id: u16 = kani::any();
+        let mut cov_data = Vec::with_capacity(3);
+        cov_data.extend_from_slice(&ext_id.to_le_bytes());
+        cov_data.push(0); // CompactSize(0)
+
+        let parsed = parse_core_ext_covenant_data(&cov_data);
+        assert!(parsed.is_ok());
+        let Ok(parsed) = parsed else {
+            return;
+        };
+        assert_eq!(parsed.ext_id, ext_id);
+        assert!(parsed.ext_payload.is_empty());
+    }
+
+    #[kani::proof]
+    fn verify_parse_core_ext_covenant_data_accepts_single_byte_payload() {
+        let ext_id: u16 = kani::any();
+        let payload_byte: u8 = kani::any();
+        let mut cov_data = Vec::with_capacity(4);
+        cov_data.extend_from_slice(&ext_id.to_le_bytes());
+        cov_data.push(1); // CompactSize(1)
+        cov_data.push(payload_byte);
+
+        let parsed = parse_core_ext_covenant_data(&cov_data);
+        assert!(parsed.is_ok());
+        let Ok(parsed) = parsed else {
+            return;
+        };
+        assert_eq!(parsed.ext_id, ext_id);
+        assert_eq!(parsed.ext_payload, &[payload_byte]);
+    }
+
+    #[kani::proof]
+    fn verify_parse_core_ext_covenant_data_rejects_truncated_payload() {
+        let ext_id: u16 = kani::any();
+        let mut cov_data = Vec::with_capacity(4);
+        cov_data.extend_from_slice(&ext_id.to_le_bytes());
+        cov_data.push(2); // CompactSize(2)
+        cov_data.push(0xaa); // only one payload byte present
+
+        let parsed = parse_core_ext_covenant_data(&cov_data);
+        assert!(parsed.is_err());
+        let Err(err) = parsed else {
+            return;
+        };
+        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    }
+}

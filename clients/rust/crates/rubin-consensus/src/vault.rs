@@ -219,3 +219,41 @@ pub fn hash_in_sorted_32(list: &[[u8; 32]], target: &[u8; 32]) -> bool {
 fn strictly_sorted_unique_32(xs: &[[u8; 32]]) -> bool {
     xs.windows(2).all(|w| w[0] < w[1])
 }
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    fn verify_parse_vault_covenant_data_rejects_zero_key_count() {
+        let owner_lock_id = [0u8; 32];
+        let mut covenant_data = Vec::with_capacity(34);
+        covenant_data.extend_from_slice(&owner_lock_id);
+        covenant_data.push(1); // threshold
+        covenant_data.push(0); // key_count
+
+        let parsed = parse_vault_covenant_data(&covenant_data);
+        assert!(parsed.is_err());
+        let Err(err) = parsed else {
+            return;
+        };
+        assert_eq!(err.code, ErrorCode::TxErrVaultParamsInvalid);
+        assert_eq!(err.msg, "CORE_VAULT key_count out of range");
+    }
+
+    #[kani::proof]
+    fn verify_parse_multisig_covenant_data_rejects_zero_key_count() {
+        let mut covenant_data = Vec::with_capacity(34);
+        covenant_data.push(1); // threshold
+        covenant_data.push(0); // key_count
+        covenant_data.extend_from_slice(&[7u8; 32]); // satisfy len >= 34 guard
+
+        let parsed = parse_multisig_covenant_data(&covenant_data);
+        assert!(parsed.is_err());
+        let Err(err) = parsed else {
+            return;
+        };
+        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+        assert_eq!(err.msg, "CORE_MULTISIG key_count out of range");
+    }
+}
