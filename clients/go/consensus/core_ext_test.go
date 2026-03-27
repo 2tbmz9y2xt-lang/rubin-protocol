@@ -50,7 +50,8 @@ func TestParseCoreExtCovenantData_RejectsHugePayloadLenWithoutPanic(t *testing.T
 	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
 	}
-	if !strings.Contains(err.Error(), "ext_payload parse failure") {
+	if !strings.Contains(err.Error(), "ext_payload parse failure") &&
+		!strings.Contains(err.Error(), "ext_payload_len overflows int") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

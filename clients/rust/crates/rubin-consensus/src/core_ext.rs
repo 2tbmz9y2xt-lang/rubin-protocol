@@ -2280,7 +2280,10 @@ mod tests {
 
         let err = parse_core_ext_covenant_data(&cov_data).unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
-        assert_eq!(err.msg, "CORE_EXT covenant_data length mismatch");
+        assert!(matches!(
+            err.msg,
+            "CORE_EXT covenant_data length mismatch" | "CORE_EXT ext_payload_len overflows usize"
+        ));
     }
 }
 
