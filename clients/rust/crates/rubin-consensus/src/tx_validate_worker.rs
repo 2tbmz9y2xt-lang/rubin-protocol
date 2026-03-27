@@ -3,13 +3,15 @@ use crate::constants::{
     CORE_EXT_WITNESS_SLOTS, CORE_STEALTH_WITNESS_SLOTS, COV_TYPE_EXT, COV_TYPE_HTLC,
     COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_STEALTH, COV_TYPE_VAULT,
 };
-use crate::core_ext::{validate_core_ext_spend_with_cache_and_suite_context, CoreExtProfiles};
+use crate::core_ext::{validate_core_ext_spend_with_cache_and_suite_context_q, CoreExtProfiles};
 use crate::error::{ErrorCode, TxError};
-use crate::htlc::validate_htlc_spend_at_height;
+use crate::htlc::validate_htlc_spend_q;
 use crate::precompute::PrecomputedTxContext;
+use crate::sig_cache::SigCache;
+use crate::sig_queue::SigCheckQueue;
 use crate::sighash::SighashV1PrehashCache;
-use crate::spend_verify::{validate_p2pk_spend_at_height, validate_threshold_sig_spend_at_height};
-use crate::stealth::validate_stealth_spend_at_height;
+use crate::spend_verify::{validate_p2pk_spend_q, validate_threshold_sig_spend_q};
+use crate::stealth::validate_stealth_spend_q;
 use crate::suite_registry::{DefaultRotationProvider, RotationProvider, SuiteRegistry};
 use crate::tx::{Tx, WitnessItem};
 use crate::txcontext::{
@@ -61,6 +63,7 @@ pub fn validate_tx_local(
     block_height: u64,
     block_mtp: u64,
     core_ext_profiles: &CoreExtProfiles,
+    sig_cache: Option<&SigCache>,
 ) -> TxValidationResult {
     let mut result = TxValidationResult {
         tx_index: ptc.tx_index,
@@ -94,6 +97,10 @@ pub fn validate_tx_local(
 
     let rotation = DefaultRotationProvider;
     let registry = SuiteRegistry::default_registry();
+    let mut sig_queue = SigCheckQueue::new(1).with_registry(&registry);
+    if let Some(sig_cache) = sig_cache {
+        sig_queue = sig_queue.with_cache(sig_cache.clone());
+    }
 
     let mut witness_cursor = ptc.witness_start;
     for (input_index, entry) in ptc.resolved_inputs.iter().enumerate() {
@@ -116,7 +123,6 @@ pub fn validate_tx_local(
         if let Err(e) = validate_input_spend(
             entry,
             assigned,
-            tx,
             input_index as u32,
             entry.value,
             chain_id,
@@ -127,15 +133,11 @@ pub fn validate_tx_local(
             &rotation,
             &registry,
             tx_context.as_ref(),
+            Some(&mut sig_queue),
         ) {
             result.err = Some(e);
             return result;
         }
-
-        // Count one sig verification per input that carries a signature.
-        // Covenant types with zero witness slots or no-op validation (anchor,
-        // da_commit) are excluded by the precompute stage.
-        result.sig_count += 1;
 
         witness_cursor += slots;
     }
@@ -145,6 +147,12 @@ pub fn validate_tx_local(
             ErrorCode::TxErrParse,
             "witness_count mismatch",
         ));
+        return result;
+    }
+
+    result.sig_count = sig_queue.len();
+    if let Err(e) = sig_queue.flush() {
+        result.err = Some(e);
         return result;
     }
 
@@ -160,7 +168,6 @@ pub fn validate_tx_local(
 fn validate_input_spend(
     entry: &UtxoEntry,
     assigned: &[WitnessItem],
-    tx: &Tx,
     input_index: u32,
     input_value: u64,
     chain_id: [u8; 32],
@@ -171,6 +178,7 @@ fn validate_input_spend(
     rotation: &dyn RotationProvider,
     registry: &SuiteRegistry,
     tx_context: Option<&TxContextBundle>,
+    sig_queue: Option<&mut SigCheckQueue>,
 ) -> Result<(), TxError> {
     match entry.covenant_type {
         COV_TYPE_P2PK => {
@@ -180,15 +188,15 @@ fn validate_input_spend(
                     "CORE_P2PK witness_slots must be 1",
                 ));
             }
-            validate_p2pk_spend_at_height(
+            validate_p2pk_spend_q(
                 entry,
                 &assigned[0],
-                tx,
                 input_index,
                 input_value,
                 chain_id,
                 block_height,
                 sighash_cache,
+                sig_queue,
                 Some(rotation),
                 Some(registry),
             )
@@ -196,17 +204,17 @@ fn validate_input_spend(
 
         COV_TYPE_MULTISIG => {
             let m = parse_multisig_covenant_data(&entry.covenant_data)?;
-            validate_threshold_sig_spend_at_height(
+            validate_threshold_sig_spend_q(
                 &m.keys,
                 m.threshold,
                 assigned,
-                tx,
                 input_index,
                 input_value,
                 chain_id,
                 block_height,
                 "CORE_MULTISIG",
                 sighash_cache,
+                sig_queue,
                 Some(rotation),
                 Some(registry),
             )
@@ -217,17 +225,17 @@ fn validate_input_spend(
             // Full vault policy (whitelist, owner lock, output checks) is
             // enforced in the sequential commit stage.
             let v = parse_vault_covenant_data_for_spend(&entry.covenant_data)?;
-            validate_threshold_sig_spend_at_height(
+            validate_threshold_sig_spend_q(
                 &v.keys,
                 v.threshold,
                 assigned,
-                tx,
                 input_index,
                 input_value,
                 chain_id,
                 block_height,
                 "CORE_VAULT",
                 sighash_cache,
+                sig_queue,
                 Some(rotation),
                 Some(registry),
             )
@@ -240,17 +248,17 @@ fn validate_input_spend(
                     "CORE_HTLC witness_slots must be 2",
                 ));
             }
-            validate_htlc_spend_at_height(
+            validate_htlc_spend_q(
                 entry,
                 &assigned[0], // path_item
                 &assigned[1], // sig_item
-                tx,
                 input_index,
                 input_value,
                 chain_id,
                 block_height,
                 block_mtp,
                 sighash_cache,
+                sig_queue,
                 Some(rotation),
                 Some(registry),
             )
@@ -263,10 +271,9 @@ fn validate_input_spend(
                     "CORE_EXT witness_slots must be 1",
                 ));
             }
-            validate_core_ext_spend_with_cache_and_suite_context(
+            validate_core_ext_spend_with_cache_and_suite_context_q(
                 entry,
                 &assigned[0],
-                tx,
                 input_index,
                 input_value,
                 chain_id,
@@ -275,6 +282,7 @@ fn validate_input_spend(
                 Some(rotation),
                 Some(registry),
                 tx_context,
+                sig_queue,
                 sighash_cache,
             )
         }
@@ -286,15 +294,15 @@ fn validate_input_spend(
                     "CORE_STEALTH witness_slots must be 1",
                 ));
             }
-            validate_stealth_spend_at_height(
+            validate_stealth_spend_q(
                 entry,
                 &assigned[0],
-                tx,
                 input_index,
                 input_value,
                 chain_id,
                 block_height,
                 sighash_cache,
+                sig_queue,
                 Some(rotation),
                 Some(registry),
             )
@@ -344,6 +352,7 @@ pub fn run_tx_validation_workers(
     block_height: u64,
     block_mtp: u64,
     core_ext_profiles: &CoreExtProfiles,
+    sig_cache: Option<SigCache>,
 ) -> Result<Vec<WorkerResult<TxValidationResult, TxError>>, WorkerPoolRunError> {
     let max_tasks = ptcs.len();
     if max_tasks == 0 {
@@ -357,6 +366,7 @@ pub fn run_tx_validation_workers(
             block_height,
             block_mtp,
             core_ext_profiles,
+            sig_cache.as_ref(),
         );
         if let Some(ref e) = r.err {
             Err(e.clone())

@@ -6,6 +6,7 @@ pub mod connect_block_inmem;
 pub mod constants;
 pub mod core_ext;
 mod covenant_genesis;
+pub mod da_verify_parallel;
 pub mod error;
 pub mod featurebits;
 pub mod flagday;
@@ -15,6 +16,7 @@ mod htlc;
 pub mod merkle;
 pub mod pow;
 pub mod precompute;
+mod sig_cache;
 mod sig_queue;
 pub mod sighash;
 mod spend_verify;
@@ -61,6 +63,10 @@ pub use core_ext::{
     GovernanceReplayToken, CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
 };
 pub use covenant_genesis::validate_tx_covenants_genesis;
+pub use da_verify_parallel::{
+    collect_da_chunk_hash_tasks, collect_da_payload_commit_tasks, verify_da_chunk_hashes_parallel,
+    verify_da_payload_commits_parallel, DaChunkHashTask, DaPayloadCommitTask,
+};
 pub use error::{ErrorCode, TxError};
 pub use featurebits::{
     featurebit_state_at_height_from_window_counts, FeatureBitDeployment, FeatureBitEval,
@@ -72,6 +78,7 @@ pub use htlc::{parse_htlc_covenant_data, validate_htlc_spend, HtlcCovenant};
 pub use merkle::merkle_root_txids;
 pub use pow::{pow_check, retarget_v1, retarget_v1_clamped};
 pub use precompute::{precompute_tx_contexts, PrecomputedTxContext};
+pub use sig_cache::SigCache;
 pub use sighash::{
     is_valid_sighash_type, sighash_v1_digest, sighash_v1_digest_with_cache,
     sighash_v1_digest_with_type, SighashV1PrehashCache,
