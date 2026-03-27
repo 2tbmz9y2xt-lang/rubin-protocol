@@ -118,3 +118,81 @@ pub fn featurebit_state_at_height_from_window_counts(
         signal_threshold: SIGNAL_THRESHOLD,
     })
 }
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    fn verify_featurebit_enters_started_at_start_boundary() {
+        let deployment = FeatureBitDeployment {
+            name: "fb".to_string(),
+            bit: 1,
+            start_height: 0,
+            timeout_height: SIGNAL_WINDOW * 4,
+        };
+
+        let eval = featurebit_state_at_height_from_window_counts(&deployment, 0, &[]);
+        assert!(eval.is_ok());
+        let Ok(eval) = eval else {
+            return;
+        };
+        assert_eq!(eval.state, FeatureBitState::Started);
+        assert_eq!(eval.boundary_height, 0);
+        assert_eq!(eval.prev_window_signal_count, 0);
+    }
+
+    #[kani::proof]
+    fn verify_featurebit_threshold_locks_in_on_next_boundary() {
+        let deployment = FeatureBitDeployment {
+            name: "fb".to_string(),
+            bit: 1,
+            start_height: 0,
+            timeout_height: SIGNAL_WINDOW * 4,
+        };
+        let counts = [SIGNAL_THRESHOLD];
+
+        let eval =
+            featurebit_state_at_height_from_window_counts(&deployment, SIGNAL_WINDOW, &counts);
+        assert!(eval.is_ok());
+        let Ok(eval) = eval else {
+            return;
+        };
+        assert_eq!(eval.state, FeatureBitState::LockedIn);
+        assert_eq!(eval.boundary_height, SIGNAL_WINDOW);
+        assert_eq!(eval.prev_window_signal_count, SIGNAL_THRESHOLD);
+    }
+
+    #[kani::proof]
+    fn verify_featurebit_timeout_boundary_fails_without_threshold() {
+        let deployment = FeatureBitDeployment {
+            name: "fb".to_string(),
+            bit: 1,
+            start_height: 0,
+            timeout_height: SIGNAL_WINDOW,
+        };
+        let counts = [0u32];
+
+        let eval =
+            featurebit_state_at_height_from_window_counts(&deployment, SIGNAL_WINDOW, &counts);
+        assert!(eval.is_ok());
+        let Ok(eval) = eval else {
+            return;
+        };
+        assert_eq!(eval.state, FeatureBitState::Failed);
+        assert_eq!(eval.prev_window_signal_count, 0);
+    }
+
+    #[kani::proof]
+    fn verify_featurebit_rejects_timeout_before_start_height() {
+        let deployment = FeatureBitDeployment {
+            name: "fb".to_string(),
+            bit: 1,
+            start_height: SIGNAL_WINDOW,
+            timeout_height: SIGNAL_WINDOW - 1,
+        };
+
+        let eval = featurebit_state_at_height_from_window_counts(&deployment, 0, &[]);
+        assert!(eval.is_err());
+    }
+}

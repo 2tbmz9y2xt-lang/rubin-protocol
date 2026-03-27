@@ -120,6 +120,15 @@ pub struct GovernanceReplayToken {
 
 const GOVERNANCE_REPLAY_TOKEN_BYTES: usize = 26;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GovernanceReplayTokenValidation {
+    Valid,
+    ExtIdMismatch,
+    NonceMismatch,
+    NotYetValid,
+    Expired,
+}
+
 impl GovernanceReplayToken {
     /// Create a new replay token for the given profile deployment.
     pub fn issue(ext_id: u16, nonce: u64, current_height: u64, validity_window: u64) -> Self {
@@ -139,38 +148,53 @@ impl GovernanceReplayToken {
         current_height: u64,
         expected_nonce: u64,
     ) -> Result<(), String> {
-        if self.ext_id != expected_ext_id {
-            return Err(format!(
+        match self.validation_outcome(expected_ext_id, current_height, expected_nonce) {
+            GovernanceReplayTokenValidation::Valid => Ok(()),
+            GovernanceReplayTokenValidation::ExtIdMismatch => Err(format!(
                 "governance replay token ext_id mismatch: token={} expected={}",
                 self.ext_id, expected_ext_id
-            ));
-        }
-        if self.nonce != expected_nonce {
-            return Err(format!(
+            )),
+            GovernanceReplayTokenValidation::NonceMismatch => Err(format!(
                 "governance replay token nonce mismatch: token={} expected={}",
                 self.nonce, expected_nonce
-            ));
-        }
-        if current_height < self.issued_at_height {
-            return Err(format!(
+            )),
+            GovernanceReplayTokenValidation::NotYetValid => Err(format!(
                 "governance replay token not yet valid: issued_at={} current={}",
                 self.issued_at_height, current_height
-            ));
-        }
-        let expiry = self.expiry_height();
-        if current_height >= expiry {
-            return Err(format!(
+            )),
+            GovernanceReplayTokenValidation::Expired => Err(format!(
                 "governance replay token expired: expiry={} current={}",
-                expiry, current_height
-            ));
+                self.expiry_height(),
+                current_height
+            )),
         }
-        Ok(())
     }
 
     fn expiry_height(&self) -> u64 {
         // Tokens intentionally saturate to u64::MAX rather than wrapping so an
         // oversized validity window cannot become valid again after overflow.
         self.issued_at_height.saturating_add(self.validity_window)
+    }
+
+    fn validation_outcome(
+        &self,
+        expected_ext_id: u16,
+        current_height: u64,
+        expected_nonce: u64,
+    ) -> GovernanceReplayTokenValidation {
+        if self.ext_id != expected_ext_id {
+            return GovernanceReplayTokenValidation::ExtIdMismatch;
+        }
+        if self.nonce != expected_nonce {
+            return GovernanceReplayTokenValidation::NonceMismatch;
+        }
+        if current_height < self.issued_at_height {
+            return GovernanceReplayTokenValidation::NotYetValid;
+        }
+        if current_height >= self.expiry_height() {
+            return GovernanceReplayTokenValidation::Expired;
+        }
+        GovernanceReplayTokenValidation::Valid
     }
 
     /// Serialize the token to a deterministic byte representation.
@@ -2299,5 +2323,42 @@ mod verification {
             return;
         };
         assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    }
+
+    #[kani::proof]
+    fn verify_governance_replay_token_roundtrip_bytes() {
+        let ext_id: u16 = kani::any();
+        let nonce: u64 = kani::any();
+        let issued_at_height: u64 = kani::any();
+        let validity_window: u64 = kani::any();
+
+        let token = GovernanceReplayToken::issue(ext_id, nonce, issued_at_height, validity_window);
+        let bytes = token.to_bytes();
+        assert_eq!(bytes.len(), GOVERNANCE_REPLAY_TOKEN_BYTES);
+
+        let parsed = GovernanceReplayToken::from_bytes(&bytes);
+        assert!(parsed.is_ok());
+        let Ok(parsed) = parsed else {
+            return;
+        };
+        assert_eq!(parsed, token);
+    }
+
+    #[kani::proof]
+    fn verify_governance_replay_token_validate_rejects_wrong_nonce() {
+        let token = GovernanceReplayToken::issue(7, 1, 100, 50);
+        assert_eq!(
+            token.validation_outcome(7, 100, 2),
+            GovernanceReplayTokenValidation::NonceMismatch
+        );
+    }
+
+    #[kani::proof]
+    fn verify_governance_replay_token_validate_rejects_expired_boundary() {
+        let token = GovernanceReplayToken::issue(7, 1, 100, 1);
+        assert_eq!(
+            token.validation_outcome(7, 101, 1),
+            GovernanceReplayTokenValidation::Expired
+        );
     }
 }
