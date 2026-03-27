@@ -2,6 +2,9 @@ use crate::constants::{MAX_BLOCK_WEIGHT, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_B
 use crate::error::{ErrorCode, TxError};
 use crate::suite_registry::SuiteRegistry;
 use crate::verify_sig_openssl::{verify_sig, verify_sig_with_registry};
+use crate::worker_pool::{
+    collect_values, run_worker_pool, WorkerCancellationToken, WorkerPoolError,
+};
 
 // Deferred sigcheck payload comes from witness bytes. Even in a maximally
 // witness-heavy valid block, raw queued pubkey+signature bytes cannot exceed
@@ -28,6 +31,14 @@ struct SigCheckTask {
     err_on_fail: TxError,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SigVerifyRequest {
+    pub(crate) suite_id: u8,
+    pub(crate) pubkey: Vec<u8>,
+    pub(crate) sig: Vec<u8>,
+    pub(crate) digest: [u8; 32],
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SigCheckQueueMark {
     len: usize,
@@ -38,10 +49,9 @@ pub(crate) struct SigCheckQueueMark {
 /// sequential transaction validation. When flushed, it verifies all collected
 /// signatures and returns the first error by submission order.
 ///
-/// This slice intentionally keeps Flush deterministic and sequential. The
-/// bounded parallel executor belongs to the follow-up SIG-BATCH task; mixing it
-/// in here created Rust-only panic/error behavior that diverged from this
-/// queue primitive's acceptance gate.
+/// The queue stays deterministic even when multiple workers are configured:
+/// batch execution may complete out of order internally, but the returned
+/// error is always reduced by submission order.
 #[derive(Debug)]
 pub(crate) struct SigCheckQueue {
     tasks: Vec<SigCheckTask>,
@@ -74,6 +84,13 @@ impl Drop for SigCheckQueue {
 #[cfg_attr(not(test), allow(dead_code))]
 impl SigCheckQueue {
     pub(crate) fn new(workers: usize) -> Self {
+        let workers = if workers == 0 {
+            std::thread::available_parallelism()
+                .map(|parallelism| parallelism.get())
+                .unwrap_or(1)
+        } else {
+            workers
+        };
         Self {
             tasks: Vec::new(),
             queued_bytes: 0,
@@ -125,10 +142,14 @@ impl SigCheckQueue {
 
         let tasks = std::mem::take(&mut self.tasks);
         self.queued_bytes = 0;
-        for task in tasks {
-            verify_queued_task(task, self.registry.as_ref())?;
+        if tasks.len() == 1 || self.workers <= 1 {
+            for task in tasks {
+                verify_queued_task(task, self.registry.as_ref())?;
+            }
+            return Ok(());
         }
-        Ok(())
+
+        verify_queued_tasks_batch(tasks, self.workers, self.registry.as_ref())
     }
 
     pub(crate) fn assert_flushed(&self) -> Result<(), TxError> {
@@ -212,6 +233,66 @@ fn verify_queued_task(task: SigCheckTask, registry: Option<&SuiteRegistry>) -> R
         return Err(task.err_on_fail);
     }
     Ok(())
+}
+
+fn verify_queued_tasks_batch(
+    tasks: Vec<SigCheckTask>,
+    workers: usize,
+    registry: Option<&SuiteRegistry>,
+) -> Result<(), TxError> {
+    let token = WorkerCancellationToken::new();
+    let max_tasks = tasks.len();
+    let results = run_worker_pool(&token, workers, max_tasks, tasks, |_cancel, task| {
+        verify_queued_task(task, registry)
+    })
+    .expect("sigcheck batch max_tasks derived from task vector length");
+
+    collect_values(results)
+        .map(|_| ())
+        .map_err(worker_pool_sigcheck_error_to_tx_error)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn verify_signatures_batch(
+    tasks: Vec<SigVerifyRequest>,
+    workers: usize,
+) -> Vec<Option<TxError>> {
+    if tasks.is_empty() {
+        return Vec::new();
+    }
+
+    let token = WorkerCancellationToken::new();
+    let max_tasks = tasks.len();
+    let results = run_worker_pool(&token, workers, max_tasks, tasks, |_cancel, task| {
+        let ok = verify_sig(task.suite_id, &task.pubkey, &task.sig, &task.digest)?;
+        if !ok {
+            return Err(TxError::new(
+                ErrorCode::TxErrSigInvalid,
+                "batch: signature invalid",
+            ));
+        }
+        Ok(())
+    })
+    .expect("sigverify batch max_tasks derived from task vector length");
+
+    results
+        .into_iter()
+        .map(|result| result.error.map(worker_pool_sigcheck_error_to_tx_error))
+        .collect()
+}
+
+fn worker_pool_sigcheck_error_to_tx_error(err: WorkerPoolError<TxError>) -> TxError {
+    match err {
+        WorkerPoolError::Task(err) => err,
+        WorkerPoolError::Cancelled => TxError::new(
+            ErrorCode::TxErrSigInvalid,
+            "signature worker canceled (fail-closed)",
+        ),
+        WorkerPoolError::Panic(_) => TxError::new(
+            ErrorCode::TxErrSigInvalid,
+            "signature worker panic (fail-closed)",
+        ),
+    }
 }
 
 fn ensure_task_budget(task_count: usize) -> Result<(), TxError> {
@@ -420,6 +501,15 @@ mod tests {
     }
 
     #[test]
+    fn sig_check_queue_new_zero_workers_defaults_to_parallelism() {
+        let queue = SigCheckQueue::new(0);
+        assert!(
+            queue.workers() >= 1,
+            "zero workers must normalize to available parallelism"
+        );
+    }
+
+    #[test]
     fn sig_check_queue_is_reusable_after_flush() {
         let keypair = Mldsa87Keypair::generate().expect("keypair");
         let digest = [0x33; 32];
@@ -563,6 +653,71 @@ mod tests {
     fn sig_check_queue_empty_flush_is_ok() {
         let mut queue = SigCheckQueue::new(1);
         queue.flush().expect("empty flush");
+    }
+
+    #[test]
+    fn verify_signatures_batch_all_valid() {
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let tasks = (0..4u8)
+            .map(|i| {
+                let mut digest = [0u8; 32];
+                digest[0] = i;
+                let sig = keypair.sign_digest32(digest).expect("sign");
+                SigVerifyRequest {
+                    suite_id: SUITE_ID_ML_DSA_87,
+                    pubkey: keypair.pubkey_bytes(),
+                    sig,
+                    digest,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let results = verify_signatures_batch(tasks, 2);
+        assert_eq!(results, vec![None, None, None, None]);
+    }
+
+    #[test]
+    fn verify_signatures_batch_mixed_validity_preserves_alignment() {
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let tasks = (0..4u8)
+            .map(|i| {
+                let mut digest = [0u8; 32];
+                digest[0] = i;
+                let sig = keypair.sign_digest32(digest).expect("sign");
+                if i == 1 || i == 3 {
+                    digest[1] ^= 0xff;
+                }
+                SigVerifyRequest {
+                    suite_id: SUITE_ID_ML_DSA_87,
+                    pubkey: keypair.pubkey_bytes(),
+                    sig,
+                    digest,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let results = verify_signatures_batch(tasks, 4);
+        assert!(results[0].is_none(), "task 0 must be valid");
+        assert_eq!(
+            results[1],
+            Some(TxError::new(
+                ErrorCode::TxErrSigInvalid,
+                "batch: signature invalid"
+            ))
+        );
+        assert!(results[2].is_none(), "task 2 must be valid");
+        assert_eq!(
+            results[3],
+            Some(TxError::new(
+                ErrorCode::TxErrSigInvalid,
+                "batch: signature invalid"
+            ))
+        );
+    }
+
+    #[test]
+    fn verify_signatures_batch_empty_is_empty() {
+        assert!(verify_signatures_batch(Vec::new(), 4).is_empty());
     }
 
     #[test]
