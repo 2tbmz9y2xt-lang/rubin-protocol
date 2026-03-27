@@ -42,7 +42,10 @@ func readBytes(b []byte, off *int, n int) ([]byte, error) {
 	if n < 0 {
 		return nil, txerr(TX_ERR_PARSE, "negative length")
 	}
-	if *off+n > len(b) {
+	if *off < 0 || *off > len(b) {
+		return nil, txerr(TX_ERR_PARSE, "unexpected EOF (bytes)")
+	}
+	if n > len(b)-*off {
 		return nil, txerr(TX_ERR_PARSE, "unexpected EOF (bytes)")
 	}
 	v := b[*off : *off+n]
