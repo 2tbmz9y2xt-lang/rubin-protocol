@@ -405,12 +405,8 @@ fn max_sigcheck_queue_tasks(registry: Option<&SuiteRegistry>) -> Result<usize, T
             )
         })?;
     let max_tasks = (MAX_SIGCHECK_QUEUE_BYTES as u64) / min_task_bytes;
-    usize::try_from(max_tasks).map_err(|_| {
-        TxError::new(
-            ErrorCode::TxErrWitnessOverflow,
-            "SigCheckQueue task budget exceeds host usize",
-        )
-    })
+    debug_assert!(max_tasks <= (MAX_SIGCHECK_QUEUE_BYTES as u64));
+    Ok(max_tasks as usize)
 }
 
 fn next_queued_bytes(current: usize, task_bytes: usize) -> Result<usize, TxError> {
@@ -1084,6 +1080,36 @@ mod tests {
         let err =
             ensure_task_budget(limit, None).expect_err("task budget boundary must fail closed");
         assert_eq!(err.code, ErrorCode::TxErrWitnessOverflow);
+    }
+
+    #[test]
+    fn sig_check_queue_rejects_empty_registry_task_budget() {
+        let registry = SuiteRegistry::with_suites(BTreeMap::new());
+        let err =
+            max_sigcheck_queue_tasks(Some(&registry)).expect_err("empty registry must fail closed");
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+        assert_eq!(err.msg, "SigCheckQueue registry has no registered suites");
+    }
+
+    #[test]
+    fn sig_check_queue_task_budget_footprint_overflow_fails_closed() {
+        let mut suites = BTreeMap::new();
+        suites.insert(
+            SUITE_ID_ML_DSA_87,
+            SuiteParams {
+                suite_id: SUITE_ID_ML_DSA_87,
+                pubkey_len: u64::MAX,
+                sig_len: 0,
+                verify_cost: VERIFY_COST_ML_DSA_87,
+                openssl_alg: "ML-DSA-87",
+            },
+        );
+        let registry = SuiteRegistry::with_suites(suites);
+
+        let err = max_sigcheck_queue_tasks(Some(&registry))
+            .expect_err("task footprint overflow must fail closed");
+        assert_eq!(err.code, ErrorCode::TxErrWitnessOverflow);
+        assert_eq!(err.msg, "SigCheckQueue task budget footprint overflow");
     }
 
     #[test]
