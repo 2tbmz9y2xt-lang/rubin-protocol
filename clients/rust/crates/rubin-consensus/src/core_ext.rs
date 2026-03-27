@@ -2,13 +2,15 @@ use crate::compactsize::{encode_compact_size, read_compact_size_bytes};
 use crate::constants::{ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_SENTINEL};
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
+use crate::sig_queue::{queue_or_verify_signature, SigCheckQueue};
 use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_cache, SighashV1PrehashCache};
+use crate::spend_verify::extract_crypto_sig_and_sighash;
 use crate::suite_registry::{DefaultRotationProvider, RotationProvider, SuiteRegistry};
 use crate::tx::Tx;
 use crate::tx::WitnessItem;
 use crate::txcontext::{TxContextBase, TxContextBundle, TxContextContinuing};
 use crate::utxo_basic::UtxoEntry;
-use crate::verify_sig_openssl::{openssl_verify_sig_digest_oneshot, verify_sig_with_registry};
+use crate::verify_sig_openssl::openssl_verify_sig_digest_oneshot;
 use core::ffi::CStr;
 use std::sync::OnceLock;
 
@@ -650,6 +652,37 @@ pub(crate) fn validate_core_ext_spend_with_cache_and_suite_context(
     tx_context: Option<&TxContextBundle>,
     cache: &mut SighashV1PrehashCache<'_>,
 ) -> Result<(), TxError> {
+    validate_core_ext_spend_with_cache_and_suite_context_q(
+        entry,
+        w,
+        input_index,
+        input_value,
+        chain_id,
+        block_height,
+        profiles_at_height,
+        rotation,
+        registry,
+        tx_context,
+        None,
+        cache,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_core_ext_spend_with_cache_and_suite_context_q(
+    entry: &UtxoEntry,
+    w: &WitnessItem,
+    input_index: u32,
+    input_value: u64,
+    chain_id: [u8; 32],
+    block_height: u64,
+    profiles_at_height: &CoreExtProfiles,
+    rotation: Option<&dyn RotationProvider>,
+    registry: Option<&SuiteRegistry>,
+    tx_context: Option<&TxContextBundle>,
+    sig_queue: Option<&mut SigCheckQueue>,
+    cache: &mut SighashV1PrehashCache<'_>,
+) -> Result<(), TxError> {
     let default_rotation = DefaultRotationProvider;
     let rotation = rotation.unwrap_or(&default_rotation);
     let registry = match registry {
@@ -668,6 +701,7 @@ pub(crate) fn validate_core_ext_spend_with_cache_and_suite_context(
         rotation,
         registry,
         tx_context,
+        sig_queue,
         cache,
     )
 }
@@ -684,6 +718,7 @@ fn validate_core_ext_spend_with_cache_impl(
     rotation: &dyn RotationProvider,
     registry: &SuiteRegistry,
     tx_context: Option<&TxContextBundle>,
+    sig_queue: Option<&mut SigCheckQueue>,
     cache: &mut SighashV1PrehashCache<'_>,
 ) -> Result<(), TxError> {
     let cov = parse_core_ext_covenant_data(&entry.covenant_data)?;
@@ -729,29 +764,19 @@ fn validate_core_ext_spend_with_cache_impl(
                 "non-canonical CORE_EXT native witness item lengths",
             ));
         }
-        let Some((&sighash_type, crypto_sig)) = w.signature.split_last() else {
-            return Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "missing sighash_type byte",
-            ));
-        };
-        if !is_valid_sighash_type(sighash_type) {
-            return Err(TxError::new(
-                ErrorCode::TxErrSighashTypeInvalid,
-                "invalid sighash_type",
-            ));
-        }
+        let mut sig_queue = sig_queue;
+        let (crypto_sig, sighash_type) = extract_crypto_sig_and_sighash(w)?;
         let digest32 =
             sighash_v1_digest_with_cache(cache, input_index, input_value, chain_id, sighash_type)?;
-        let ok =
-            verify_sig_with_registry(w.suite_id, &w.pubkey, crypto_sig, &digest32, Some(registry))?;
-        if !ok {
-            return Err(TxError::new(
-                ErrorCode::TxErrSigInvalid,
-                "CORE_EXT signature invalid",
-            ));
-        }
-        return Ok(());
+        return queue_or_verify_signature(
+            w.suite_id,
+            &w.pubkey,
+            crypto_sig,
+            digest32,
+            registry,
+            &mut sig_queue,
+            TxError::new(ErrorCode::TxErrSigInvalid, "CORE_EXT signature invalid"),
+        );
     }
     if native_spend_suites.contains(w.suite_id) {
         return Err(TxError::new(
@@ -1345,7 +1370,11 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
-        assert_eq!(err.msg, "CORE_EXT verify_sig_ext unsupported");
+        assert!(
+            err.msg.contains("unsupported"),
+            "unexpected CORE_EXT unsupported-path message: {}",
+            err.msg
+        );
     }
 
     #[test]

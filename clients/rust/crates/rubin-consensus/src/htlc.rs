@@ -4,7 +4,9 @@ use crate::constants::{
 };
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
-use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_cache, SighashV1PrehashCache};
+use crate::sig_queue::{queue_or_verify_signature, SigCheckQueue};
+use crate::sighash::{sighash_v1_digest_with_cache, SighashV1PrehashCache};
+use crate::spend_verify::extract_crypto_sig_and_sighash;
 use crate::suite_registry::{DefaultRotationProvider, RotationProvider, SuiteRegistry};
 use crate::tx::{Tx, WitnessItem};
 use crate::utxo_basic::UtxoEntry;
@@ -138,6 +140,37 @@ pub(crate) fn validate_htlc_spend_at_height(
     rotation: Option<&dyn RotationProvider>,
     registry: Option<&SuiteRegistry>,
 ) -> Result<(), TxError> {
+    validate_htlc_spend_q(
+        entry,
+        path_item,
+        sig_item,
+        input_index,
+        input_value,
+        chain_id,
+        block_height,
+        block_mtp,
+        cache,
+        None,
+        rotation,
+        registry,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_htlc_spend_q(
+    entry: &UtxoEntry,
+    path_item: &WitnessItem,
+    sig_item: &WitnessItem,
+    input_index: u32,
+    input_value: u64,
+    chain_id: [u8; 32],
+    block_height: u64,
+    block_mtp: u64,
+    cache: &mut SighashV1PrehashCache<'_>,
+    sig_queue: Option<&mut SigCheckQueue>,
+    rotation: Option<&dyn RotationProvider>,
+    registry: Option<&SuiteRegistry>,
+) -> Result<(), TxError> {
     let cov = parse_htlc_covenant_data(&entry.covenant_data)?;
 
     if path_item.suite_id != SUITE_ID_SENTINEL {
@@ -250,6 +283,7 @@ pub(crate) fn validate_htlc_spend_at_height(
     let default_reg = SuiteRegistry::default_registry();
     let rp: &dyn RotationProvider = rotation.unwrap_or(&default_rp);
     let reg = registry.unwrap_or(&default_reg);
+    let mut sig_queue = sig_queue;
 
     let native_spend = rp.native_spend_suites(block_height);
     if !native_spend.contains(sig_item.suite_id) {
@@ -282,36 +316,18 @@ pub(crate) fn validate_htlc_spend_at_height(
         ));
     }
 
-    let Some((&sighash_type, crypto_sig)) = sig_item.signature.split_last() else {
-        return Err(TxError::new(
-            ErrorCode::TxErrParse,
-            "missing sighash_type byte",
-        ));
-    };
-    if !is_valid_sighash_type(sighash_type) {
-        return Err(TxError::new(
-            ErrorCode::TxErrSighashTypeInvalid,
-            "invalid sighash_type",
-        ));
-    }
+    let (crypto_sig, sighash_type) = extract_crypto_sig_and_sighash(sig_item)?;
     let digest32 =
         sighash_v1_digest_with_cache(cache, input_index, input_value, chain_id, sighash_type)?;
-
-    let ok = crate::verify_sig_openssl::verify_sig_with_registry(
+    queue_or_verify_signature(
         sig_item.suite_id,
         &sig_item.pubkey,
         crypto_sig,
-        &digest32,
-        Some(reg),
-    )?;
-    if !ok {
-        return Err(TxError::new(
-            ErrorCode::TxErrSigInvalid,
-            "CORE_HTLC signature invalid",
-        ));
-    }
-
-    Ok(())
+        digest32,
+        reg,
+        &mut sig_queue,
+        TxError::new(ErrorCode::TxErrSigInvalid, "CORE_HTLC signature invalid"),
+    )
 }
 
 #[cfg(test)]

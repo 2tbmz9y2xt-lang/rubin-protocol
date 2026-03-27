@@ -1,11 +1,12 @@
 use crate::constants::{MAX_STEALTH_COVENANT_DATA, ML_KEM_1024_CT_BYTES};
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
-use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_cache, SighashV1PrehashCache};
+use crate::sig_queue::{queue_or_verify_signature, SigCheckQueue};
+use crate::sighash::{sighash_v1_digest_with_cache, SighashV1PrehashCache};
+use crate::spend_verify::extract_crypto_sig_and_sighash;
 use crate::suite_registry::{DefaultRotationProvider, RotationProvider, SuiteRegistry};
 use crate::tx::{Tx, WitnessItem};
 use crate::utxo_basic::UtxoEntry;
-use crate::verify_sig_openssl::verify_sig_with_registry;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StealthCovenant {
@@ -99,10 +100,38 @@ pub(crate) fn validate_stealth_spend_at_height(
     rotation: Option<&dyn RotationProvider>,
     registry: Option<&SuiteRegistry>,
 ) -> Result<(), TxError> {
+    validate_stealth_spend_q(
+        entry,
+        w,
+        input_index,
+        input_value,
+        chain_id,
+        block_height,
+        cache,
+        None,
+        rotation,
+        registry,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_stealth_spend_q(
+    entry: &UtxoEntry,
+    w: &WitnessItem,
+    input_index: u32,
+    input_value: u64,
+    chain_id: [u8; 32],
+    block_height: u64,
+    cache: &mut SighashV1PrehashCache<'_>,
+    sig_queue: Option<&mut SigCheckQueue>,
+    rotation: Option<&dyn RotationProvider>,
+    registry: Option<&SuiteRegistry>,
+) -> Result<(), TxError> {
     let default_rp = DefaultRotationProvider;
     let default_reg = SuiteRegistry::default_registry();
     let rp: &dyn RotationProvider = rotation.unwrap_or(&default_rp);
     let reg = registry.unwrap_or(&default_reg);
+    let mut sig_queue = sig_queue;
 
     let cov = parse_stealth_covenant_data(&entry.covenant_data)?;
     let _ = cov.ciphertext;
@@ -137,28 +166,18 @@ pub(crate) fn validate_stealth_spend_at_height(
         ));
     }
 
-    let Some((&sighash_type, crypto_sig)) = w.signature.split_last() else {
-        return Err(TxError::new(
-            ErrorCode::TxErrParse,
-            "missing sighash_type byte",
-        ));
-    };
-    if !is_valid_sighash_type(sighash_type) {
-        return Err(TxError::new(
-            ErrorCode::TxErrSighashTypeInvalid,
-            "invalid sighash_type",
-        ));
-    }
+    let (crypto_sig, sighash_type) = extract_crypto_sig_and_sighash(w)?;
     let digest =
         sighash_v1_digest_with_cache(cache, input_index, input_value, chain_id, sighash_type)?;
-    let ok = verify_sig_with_registry(w.suite_id, &w.pubkey, crypto_sig, &digest, Some(reg))?;
-    if !ok {
-        return Err(TxError::new(
-            ErrorCode::TxErrSigInvalid,
-            "CORE_STEALTH signature invalid",
-        ));
-    }
-    Ok(())
+    queue_or_verify_signature(
+        w.suite_id,
+        &w.pubkey,
+        crypto_sig,
+        digest,
+        reg,
+        &mut sig_queue,
+        TxError::new(ErrorCode::TxErrSigInvalid, "CORE_STEALTH signature invalid"),
+    )
 }
 
 #[cfg(test)]
