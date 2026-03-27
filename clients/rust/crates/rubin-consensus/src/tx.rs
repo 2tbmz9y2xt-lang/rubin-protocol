@@ -60,7 +60,7 @@ pub struct DaChunkCore {
     pub chunk_hash: [u8; 32],
 }
 
-pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
+pub(crate) fn parse_tx_without_hashes(b: &[u8]) -> Result<(Tx, usize, usize), TxError> {
     let mut r = Reader::new(b);
 
     let version = r.read_u32_le()?;
@@ -386,9 +386,6 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
     }
     let total_end = r.offset();
 
-    let txid = sha3_256(&b[..core_end]);
-    let wtxid = sha3_256(&b[..total_end]);
-
     let tx = Tx {
         version,
         tx_kind,
@@ -402,6 +399,13 @@ pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
         da_payload,
     };
 
+    Ok((tx, core_end, total_end))
+}
+
+pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
+    let (tx, core_end, total_end) = parse_tx_without_hashes(b)?;
+    let txid = sha3_256(&b[..core_end]);
+    let wtxid = sha3_256(&b[..total_end]);
     Ok((tx, txid, wtxid, total_end))
 }
 
