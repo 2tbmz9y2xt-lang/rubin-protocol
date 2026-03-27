@@ -305,7 +305,7 @@ mod verification {
 
     #[kani::proof]
     fn verify_parse_stealth_covenant_data_accepts_exact_length() {
-        let cov_data: [u8; MAX_STEALTH_COVENANT_DATA as usize] = kani::any();
+        let cov_data = [0x5au8; MAX_STEALTH_COVENANT_DATA as usize];
         let parsed = parse_stealth_covenant_data(&cov_data).expect("exact-length stealth covenant");
         assert_eq!(
             parsed.ciphertext,

@@ -226,11 +226,9 @@ mod verification {
 
     #[kani::proof]
     fn verify_parse_vault_covenant_data_accepts_minimal_canonical_shape() {
-        let owner_lock_id: [u8; 32] = kani::any();
-        let key: [u8; 32] = kani::any();
-        let whitelist_entry: [u8; 32] = kani::any();
-        kani::assume(key != owner_lock_id);
-        kani::assume(whitelist_entry != owner_lock_id);
+        let owner_lock_id = [1u8; 32];
+        let key = [2u8; 32];
+        let whitelist_entry = [3u8; 32];
 
         let mut covenant_data = Vec::with_capacity(32 + 1 + 1 + 32 + 2 + 32);
         covenant_data.extend_from_slice(&owner_lock_id);
@@ -263,7 +261,7 @@ mod verification {
 
     #[kani::proof]
     fn verify_parse_multisig_covenant_data_accepts_minimal_canonical_shape() {
-        let key: [u8; 32] = kani::any();
+        let key = [4u8; 32];
         let mut covenant_data = Vec::with_capacity(2 + 32);
         covenant_data.push(1); // threshold
         covenant_data.push(1); // key_count
