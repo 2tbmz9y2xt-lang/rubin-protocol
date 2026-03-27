@@ -139,6 +139,35 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_sui
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
+    tx: &Tx,
+    txid: [u8; 32],
+    utxo_set: &HashMap<Outpoint, UtxoEntry>,
+    height: u64,
+    block_timestamp: u64,
+    block_mtp: u64,
+    chain_id: [u8; 32],
+    core_ext_profiles_at_height: &CoreExtProfiles,
+    rotation: Option<&dyn RotationProvider>,
+    registry: Option<&SuiteRegistry>,
+    sig_queue: &mut SigCheckQueue,
+) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
+    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_impl(
+        tx,
+        txid,
+        utxo_set,
+        height,
+        block_timestamp,
+        block_mtp,
+        chain_id,
+        core_ext_profiles_at_height,
+        rotation,
+        registry,
+        Some(sig_queue),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks(
     tx: &Tx,
     txid: [u8; 32],
@@ -154,7 +183,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_sui
     let mut sig_queue = SigCheckQueue::new(1);
     let queue_mark = sig_queue.mark();
     let result =
-        apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_impl(
+        apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
             tx,
             txid,
             utxo_set,
@@ -165,7 +194,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_sui
             core_ext_profiles_at_height,
             rotation,
             registry,
-            Some(&mut sig_queue),
+            &mut sig_queue,
         );
     let (work, summary) = match result {
         Ok(ok) => ok,

@@ -211,20 +211,8 @@ impl PVTelemetry {
     }
 
     fn snapshot(&self) -> PVTelemetrySnapshot {
-        let validate_avg_ns = if self.validate_count == 0 {
-            0
-        } else {
-            (self.validate_total_ns / u128::from(self.validate_count))
-                .try_into()
-                .unwrap_or(u64::MAX)
-        };
-        let commit_avg_ns = if self.commit_count == 0 {
-            0
-        } else {
-            (self.commit_total_ns / u128::from(self.commit_count))
-                .try_into()
-                .unwrap_or(u64::MAX)
-        };
+        let validate_avg_ns = averaged_latency_ns(self.validate_total_ns, self.validate_count);
+        let commit_avg_ns = averaged_latency_ns(self.commit_total_ns, self.commit_count);
         PVTelemetrySnapshot {
             mode: self.mode.as_str().to_string(),
             blocks_validated: self.blocks_validated,
@@ -243,6 +231,16 @@ impl PVTelemetry {
             commit_avg_ns,
         }
     }
+}
+
+fn averaged_latency_ns(total_ns: u128, count: u64) -> u64 {
+    if count == 0 {
+        return 0;
+    }
+    let avg = (total_ns / u128::from(count))
+        .try_into()
+        .unwrap_or(u64::MAX);
+    avg.max(1)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
