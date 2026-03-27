@@ -274,6 +274,13 @@
       "reason": "FALSE_POSITIVE for Rust-vs-Go parity: Go already keeps registry-native suites on the native queue path and non-native verify_sig_ext suites inline. Rust mirrors that split; this is not a new divergence.",
       "acknowledged_by": "architect",
       "date": "2026-03-27"
+    },
+    {
+      "title_pattern": "Consensus Divergence Risk Due to Multiple DA Commit Outputs",
+      "file_pattern": "da_verify_parallel.rs",
+      "reason": "FALSE_POSITIVE: Go parity — CollectDAPayloadCommitTasks also scans outputs, takes the first COV_TYPE_DA_COMMIT entry with 32-byte covenant data, and breaks. Structural DA-set integrity is enforced earlier in validateDASetIntegrity / validate_block_basic before this helper is reachable.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-27"
     }
   ]
 }
