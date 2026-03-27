@@ -121,7 +121,10 @@ pub fn collect_da_payload_commit_tasks(txs: &[Tx]) -> Result<Vec<DaPayloadCommit
         match tx.tx_kind {
             0x01 => {
                 let Some(core) = tx.da_commit_core.as_ref() else {
-                    continue;
+                    return Err(TxError::new(
+                        ErrorCode::TxErrParse,
+                        "missing da_commit_core for tx_kind=0x01",
+                    ));
                 };
                 if commits.insert(core.da_id, tx).is_some() {
                     return Err(TxError::new(
@@ -132,7 +135,10 @@ pub fn collect_da_payload_commit_tasks(txs: &[Tx]) -> Result<Vec<DaPayloadCommit
             }
             0x02 => {
                 let Some(core) = tx.da_chunk_core.as_ref() else {
-                    continue;
+                    return Err(TxError::new(
+                        ErrorCode::TxErrParse,
+                        "missing da_chunk_core for tx_kind=0x02",
+                    ));
                 };
                 total_da_payload_bytes = total_da_payload_bytes
                     .checked_add(tx.da_payload.len() as u64)
@@ -357,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_da_helpers_skip_malformed_da_core_records() {
+    fn collect_da_helpers_reject_malformed_da_core_records() {
         let mut bad_chunk = empty_tx();
         bad_chunk.tx_kind = 0x02;
         bad_chunk.da_payload = vec![0x11, 0x22];
@@ -366,9 +372,10 @@ mod tests {
         bad_commit.tx_kind = 0x01;
 
         assert!(collect_da_chunk_hash_tasks(&[bad_chunk]).is_empty());
-        assert!(collect_da_payload_commit_tasks(&[bad_commit])
-            .expect("skip malformed commit core")
-            .is_empty());
+        let commit_err =
+            collect_da_payload_commit_tasks(&[bad_commit]).expect_err("missing commit core");
+        assert_eq!(commit_err.code, ErrorCode::TxErrParse);
+        assert_eq!(commit_err.msg, "missing da_commit_core for tx_kind=0x01");
 
         let mixed = vec![
             empty_tx(),
@@ -383,9 +390,10 @@ mod tests {
                 tx
             },
         ];
-        assert!(collect_da_payload_commit_tasks(&mixed)
-            .expect("skip malformed mixed records")
-            .is_empty());
+        let mixed_err =
+            collect_da_payload_commit_tasks(&mixed).expect_err("missing chunk core in mixed set");
+        assert_eq!(mixed_err.code, ErrorCode::TxErrParse);
+        assert_eq!(mixed_err.msg, "missing da_chunk_core for tx_kind=0x02");
     }
 
     #[test]
