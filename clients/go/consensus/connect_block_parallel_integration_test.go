@@ -8,7 +8,6 @@ import (
 // Integration parity suite (Q-PV-15): tests that sequential and parallel
 // validation produce the same verdict, error code, first-invalid behavior,
 // and post-state digest for valid, invalid, and mixed scenarios.
-// See RUBIN_PARALLEL_VALIDATION_IMPLEMENTATION_PLAN.md §6 (determinism replay).
 
 func TestIntegrationParity_ValidOnly(t *testing.T) {
 	height := uint64(1)
