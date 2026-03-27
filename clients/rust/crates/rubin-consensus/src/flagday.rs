@@ -82,6 +82,40 @@ pub fn flagday_active_at_height(d: &FlagDayDeployment, height: u64) -> Result<bo
     Ok(height >= d.activation_height)
 }
 
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    fn verify_flagday_flips_exactly_at_activation_height() {
+        let deployment = FlagDayDeployment {
+            name: "flag".to_string(),
+            activation_height: 100,
+            bit: Some(7),
+        };
+
+        let before = flagday_active_at_height(&deployment, 99);
+        assert!(before.is_ok());
+        assert!(!before.unwrap_or(true));
+
+        let at_boundary = flagday_active_at_height(&deployment, 100);
+        assert!(at_boundary.is_ok());
+        assert!(at_boundary.unwrap_or(false));
+    }
+
+    #[kani::proof]
+    fn verify_flagday_rejects_empty_name() {
+        let deployment = FlagDayDeployment {
+            name: String::new(),
+            activation_height: 0,
+            bit: None,
+        };
+
+        let active = flagday_active_at_height(&deployment, 0);
+        assert!(active.is_err());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
