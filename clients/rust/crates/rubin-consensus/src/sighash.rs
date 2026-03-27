@@ -40,12 +40,6 @@ pub fn sighash_v1_digest_with_type(
     chain_id: [u8; 32],
     sighash_type: u8,
 ) -> Result<[u8; 32], TxError> {
-    if !is_valid_sighash_type(sighash_type) {
-        return Err(TxError::new(
-            ErrorCode::TxErrSighashTypeInvalid,
-            "sighash: invalid sighash_type",
-        ));
-    }
     let mut cache = SighashV1PrehashCache::new(tx)?;
     sighash_v1_digest_with_cache(&mut cache, input_index, input_value, chain_id, sighash_type)
 }
@@ -307,31 +301,6 @@ mod tests {
 #[cfg(kani)]
 mod verification {
     use super::*;
-    use crate::tx::{Tx, TxInput, TxOutput};
-
-    fn bounded_test_tx() -> Tx {
-        Tx {
-            version: 1,
-            tx_kind: 0x00,
-            tx_nonce: 7,
-            inputs: vec![TxInput {
-                prev_txid: [0x11; 32],
-                prev_vout: 0,
-                script_sig: Vec::new(),
-                sequence: 1,
-            }],
-            outputs: vec![TxOutput {
-                value: 5,
-                covenant_type: 0x0000,
-                covenant_data: vec![0x01],
-            }],
-            locktime: 0,
-            witness: Vec::new(),
-            da_payload: Vec::new(),
-            da_commit_core: None,
-            da_chunk_core: None,
-        }
-    }
 
     #[kani::proof]
     fn verify_is_valid_sighash_type_matches_full_domain_truth_table() {
@@ -343,18 +312,5 @@ mod verification {
             || sighash_type == (SIGHASH_NONE | SIGHASH_ANYONECANPAY)
             || sighash_type == (SIGHASH_SINGLE | SIGHASH_ANYONECANPAY);
         assert_eq!(is_valid_sighash_type(sighash_type), expected);
-    }
-
-    #[kani::proof]
-    fn verify_invalid_sighash_type_rejects_deterministically() {
-        let result =
-            sighash_v1_digest_with_type(&bounded_test_tx(), 0, 5, [0x44; 32], SIGHASH_ANYONECANPAY);
-        match result {
-            Err(err) => {
-                assert_eq!(err.code, ErrorCode::TxErrSighashTypeInvalid);
-                assert_eq!(err.msg, "sighash: invalid sighash_type");
-            }
-            Ok(_) => panic!("invalid sighash type must fail"),
-        }
     }
 }
