@@ -16,6 +16,7 @@ mod htlc;
 pub mod merkle;
 pub mod pow;
 pub mod precompute;
+mod sig_cache;
 mod sig_queue;
 pub mod sighash;
 mod spend_verify;
@@ -77,6 +78,7 @@ pub use htlc::{parse_htlc_covenant_data, validate_htlc_spend, HtlcCovenant};
 pub use merkle::merkle_root_txids;
 pub use pow::{pow_check, retarget_v1, retarget_v1_clamped};
 pub use precompute::{precompute_tx_contexts, PrecomputedTxContext};
+pub use sig_cache::SigCache;
 pub use sighash::{
     is_valid_sighash_type, sighash_v1_digest, sighash_v1_digest_with_cache,
     sighash_v1_digest_with_type, SighashV1PrehashCache,
