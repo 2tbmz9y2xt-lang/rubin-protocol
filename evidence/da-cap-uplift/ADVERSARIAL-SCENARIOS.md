@@ -5,7 +5,7 @@
 **Parent:** rubin-protocol#820  
 **Issue:** rubin-protocol#822  
 **Depends:** Q-DEVNET-DA-CAP-MATRIX-01 (BENCHMARK-MATRIX.md)  
-**Source:** EVIDENCE-PLAN-DA-CAP-UPLIFT-48M.md §5.2
+**Source:** `./EVIDENCE-PLAN-DA-CAP-UPLIFT-48M.md` §5.2
 
 ---
 

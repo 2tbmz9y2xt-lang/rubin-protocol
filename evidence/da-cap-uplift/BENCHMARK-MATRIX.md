@@ -4,7 +4,7 @@
 **Type:** Evidence-only — no consensus changes, no policy changes  
 **Parent:** rubin-protocol#820  
 **Issue:** rubin-protocol#821  
-**Source:** EVIDENCE-PLAN-DA-CAP-UPLIFT-48M.md (rubin-spec-private@89563d69)
+**Source:** `./EVIDENCE-PLAN-DA-CAP-UPLIFT-48M.md`
 
 ---
 
