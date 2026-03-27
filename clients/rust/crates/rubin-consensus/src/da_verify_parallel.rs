@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::constants::COV_TYPE_DA_COMMIT;
+use crate::constants::{COV_TYPE_DA_COMMIT, MAX_DA_BYTES_PER_BLOCK};
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
 use crate::tx::Tx;
@@ -23,6 +23,8 @@ pub struct DaPayloadCommitTask {
     pub expected_commit: [u8; 32],
 }
 
+/// Verify DA chunk hashes in bounded parallel workers and reduce the first
+/// error by submission order, which must already match block tx order.
 pub fn verify_da_chunk_hashes_parallel(
     tasks: Vec<DaChunkHashTask>,
     workers: usize,
@@ -60,6 +62,12 @@ pub fn verify_da_payload_commits_parallel(
     let max_tasks = tasks.len();
     let results = run_worker_pool(&token, workers, max_tasks, tasks, |_cancel, task| {
         let total_len = total_payload_len(task.chunk_payloads.iter().map(Vec::len))?;
+        if total_len as u64 > MAX_DA_BYTES_PER_BLOCK {
+            return Err(TxError::new(
+                ErrorCode::BlockErrDaBatchExceeded,
+                "DA payload batch exceeds block cap",
+            ));
+        }
         let mut concat = Vec::with_capacity(total_len);
         for payload in task.chunk_payloads {
             concat.extend_from_slice(&payload);
@@ -78,6 +86,7 @@ pub fn verify_da_payload_commits_parallel(
     reduce_da_results(results, ErrorCode::BlockErrDaSetInvalid)
 }
 
+/// Collect DA chunk-hash verification tasks in the same order as block txs.
 pub fn collect_da_chunk_hash_tasks(txs: &[Tx]) -> Vec<DaChunkHashTask> {
     let mut tasks = Vec::new();
     for (tx_index, tx) in txs.iter().enumerate() {
@@ -96,6 +105,13 @@ pub fn collect_da_chunk_hash_tasks(txs: &[Tx]) -> Vec<DaChunkHashTask> {
     tasks
 }
 
+/// Collect payload-commit verification tasks after the caller has already
+/// enforced DA-set structural integrity for the block.
+///
+/// Precondition, matching Go `CollectDAPayloadCommitTasks`:
+/// - no duplicate DA commit exists for a DA ID,
+/// - every DA commit has a contiguous chunk set of exact `chunk_count`,
+/// - every chunk index in `[0, chunk_count - 1]` is present.
 pub fn collect_da_payload_commit_tasks(txs: &[Tx]) -> Vec<DaPayloadCommitTask> {
     let mut commits: HashMap<[u8; 32], &Tx> = HashMap::new();
     let mut chunks: HashMap<[u8; 32], HashMap<u16, &Tx>> = HashMap::new();
@@ -227,8 +243,9 @@ mod tests {
     use super::{
         collect_da_chunk_hash_tasks, collect_da_payload_commit_tasks, da_run_error_to_tx_error,
         reduce_da_results, total_payload_len, verify_da_chunk_hashes_parallel,
-        verify_da_payload_commits_parallel, DaChunkHashTask,
+        verify_da_payload_commits_parallel, DaChunkHashTask, DaPayloadCommitTask,
     };
+    use crate::constants::MAX_DA_BYTES_PER_BLOCK;
     use crate::error::{ErrorCode, TxError};
     use crate::tx::Tx;
     use crate::worker_pool::{WorkerPoolError, WorkerPoolRunError, WorkerResult};
@@ -256,6 +273,21 @@ mod tests {
     #[test]
     fn verify_da_payload_commits_parallel_empty_is_ok() {
         verify_da_payload_commits_parallel(Vec::new(), 4).expect("empty queue");
+    }
+
+    #[test]
+    fn verify_da_payload_commits_parallel_rejects_payloads_above_block_cap() {
+        let err = verify_da_payload_commits_parallel(
+            vec![DaPayloadCommitTask {
+                da_id: [0x44; 32],
+                chunk_count: 1,
+                chunk_payloads: vec![vec![0u8; (MAX_DA_BYTES_PER_BLOCK as usize) + 1]],
+                expected_commit: [0u8; 32],
+            }],
+            1,
+        )
+        .expect_err("oversized payload");
+        assert_eq!(err.code, ErrorCode::BlockErrDaBatchExceeded);
     }
 
     #[test]
