@@ -396,9 +396,10 @@ jobs:
       - name: Conformance fixtures policy check
         run: python3 tools/check_conformance_fixtures_policy.py
 
-      - name: Conformance bundle
+      - name: Rust consensus total parity gate
         run: |
-          python3 conformance/runner/run_cv_bundle.py
+          ./scripts/rust-consensus-total-parity-gate.sh
+          cat /tmp/rust-consensus-total-parity-report.json
 
       - name: Node runtime total parity gate
         run: |
