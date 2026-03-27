@@ -250,23 +250,15 @@ mod verification {
     }
 
     #[kani::proof]
-    fn verify_parse_vault_covenant_data_rejects_unsorted_keys() {
+    fn verify_parse_vault_covenant_data_rejects_zero_key_count() {
         let owner_lock_id = [0u8; 32];
-        let key_hi = [2u8; 32];
-        let key_lo = [1u8; 32];
-        let whitelist_entry = [3u8; 32];
-
-        let mut covenant_data = Vec::with_capacity(32 + 1 + 1 + 64 + 2 + 32);
+        let mut covenant_data = Vec::with_capacity(34);
         covenant_data.extend_from_slice(&owner_lock_id);
         covenant_data.push(1); // threshold
-        covenant_data.push(2); // key_count
-        covenant_data.extend_from_slice(&key_hi);
-        covenant_data.extend_from_slice(&key_lo);
-        covenant_data.extend_from_slice(&1u16.to_le_bytes()); // whitelist_count
-        covenant_data.extend_from_slice(&whitelist_entry);
+        covenant_data.push(0); // key_count
 
         let err = parse_vault_covenant_data(&covenant_data).unwrap_err();
-        assert_eq!(err.code, ErrorCode::TxErrVaultKeysNotCanonical);
+        assert_eq!(err.code, ErrorCode::TxErrVaultParamsInvalid);
     }
 
     #[kani::proof]
