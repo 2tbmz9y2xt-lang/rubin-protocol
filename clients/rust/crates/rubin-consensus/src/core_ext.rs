@@ -583,31 +583,25 @@ pub fn parse_core_ext_covenant_data(cov_data: &[u8]) -> Result<CoreExtCovenant<'
         ));
     }
     let ext_payload_len = ext_payload_len_u64 as usize;
-    let payload_start = 2usize.checked_add(varint_bytes).ok_or_else(|| {
-        TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
-            "CORE_EXT covenant_data ext_payload parse failure",
-        )
-    })?;
-    let payload_end = payload_start.checked_add(ext_payload_len).ok_or_else(|| {
-        TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
-            "CORE_EXT covenant_data ext_payload parse failure",
-        )
-    })?;
-    if cov_data.len() < payload_end {
-        return Err(TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
-            "CORE_EXT covenant_data ext_payload parse failure",
-        ));
+    let expected_len = 2usize
+        .checked_add(varint_bytes)
+        .and_then(|v| v.checked_add(ext_payload_len))
+        .ok_or_else(|| {
+            TxError::new(
+                ErrorCode::TxErrCovenantTypeInvalid,
+                "CORE_EXT covenant_data ext_payload parse failure",
+            )
+        })?;
+    if cov_data.len() != expected_len {
+        let msg = if cov_data.len() < expected_len {
+            "CORE_EXT covenant_data ext_payload parse failure"
+        } else {
+            "CORE_EXT covenant_data length mismatch"
+        };
+        return Err(TxError::new(ErrorCode::TxErrCovenantTypeInvalid, msg));
     }
-    if cov_data.len() != payload_end {
-        return Err(TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
-            "CORE_EXT covenant_data length mismatch",
-        ));
-    }
-    let ext_payload = &cov_data[payload_start..payload_end];
+    let payload_start = 2 + varint_bytes;
+    let ext_payload = &cov_data[payload_start..expected_len];
 
     Ok(CoreExtCovenant {
         ext_id,
@@ -2289,6 +2283,15 @@ mod tests {
         let err = parse_core_ext_covenant_data(&cov_data).unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
         assert_eq!(err.msg, "CORE_EXT covenant_data ext_payload parse failure");
+    }
+
+    #[test]
+    fn parse_core_ext_covenant_data_rejects_trailing_bytes() {
+        let cov_data = [0x34, 0x12, 0x01, 0xaa, 0xbb];
+
+        let err = parse_core_ext_covenant_data(&cov_data).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+        assert_eq!(err.msg, "CORE_EXT covenant_data length mismatch");
     }
 }
 
