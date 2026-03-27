@@ -242,12 +242,8 @@ fn verify_queued_tasks_batch(
 ) -> Result<(), TxError> {
     let token = WorkerCancellationToken::new();
     let max_tasks = tasks.len();
-    let results = run_worker_pool(&token, workers, max_tasks, tasks, |cancel, task| {
-        let result = verify_queued_task(task, registry);
-        if result.is_err() {
-            cancel.cancel();
-        }
-        result
+    let results = run_worker_pool(&token, workers, max_tasks, tasks, |_cancel, task| {
+        verify_queued_task(task, registry)
     })
     .map_err(sigcheck_batch_run_error_to_tx_error)?;
 
@@ -305,10 +301,9 @@ fn verify_signatures_batch_with_limit(
 }
 
 fn reduce_queued_task_results(results: Vec<WorkerResult<(), TxError>>) -> Result<(), TxError> {
-    // WorkerPool preserves submission order in its result vector. We ignore
-    // cancellation markers here so the reduction still returns the earliest
-    // actual verification failure, while late tasks can stop spending CPU once
-    // another worker has already proven the block invalid.
+    // WorkerPool preserves submission order in its result vector. We reduce
+    // the batch strictly in that order so the queue returns the same earliest
+    // failing signature it would have surfaced sequentially.
     for result in results {
         match result.error {
             Some(WorkerPoolError::Task(err)) => return Err(err),
