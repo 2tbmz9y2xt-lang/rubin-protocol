@@ -175,6 +175,15 @@ pub fn collect_da_payload_commit_tasks(txs: &[Tx]) -> Result<Vec<DaPayloadCommit
         ));
     }
 
+    for da_id in chunks.keys() {
+        if !commits.contains_key(da_id) {
+            return Err(TxError::new(
+                ErrorCode::BlockErrDaSetInvalid,
+                "DA chunks without DA commit",
+            ));
+        }
+    }
+
     if commits.len() > MAX_DA_BATCHES_PER_BLOCK as usize {
         return Err(TxError::new(
             ErrorCode::BlockErrDaBatchExceeded,
@@ -412,6 +421,53 @@ mod tests {
         chunk.da_payload = vec![0x42];
 
         let err = collect_da_payload_commit_tasks(&[chunk]).expect_err("missing commit");
+        assert_eq!(err.code, ErrorCode::BlockErrDaSetInvalid);
+    }
+
+    #[test]
+    fn collect_da_payload_commit_tasks_rejects_mixed_orphan_chunk_ids() {
+        let valid_da_id = [0x24; 32];
+        let orphan_da_id = [0x25; 32];
+
+        let mut commit = empty_tx();
+        commit.tx_kind = 0x01;
+        commit.da_commit_core = Some(crate::tx::DaCommitCore {
+            da_id: valid_da_id,
+            chunk_count: 1,
+            retl_domain_id: [0u8; 32],
+            batch_number: 0,
+            tx_data_root: [0u8; 32],
+            state_root: [0u8; 32],
+            withdrawals_root: [0u8; 32],
+            batch_sig_suite: 0,
+            batch_sig: Vec::new(),
+        });
+        commit.outputs.push(crate::tx::TxOutput {
+            value: 0,
+            covenant_type: COV_TYPE_DA_COMMIT,
+            covenant_data: vec![0u8; 32],
+        });
+
+        let mut valid_chunk = empty_tx();
+        valid_chunk.tx_kind = 0x02;
+        valid_chunk.da_chunk_core = Some(crate::tx::DaChunkCore {
+            da_id: valid_da_id,
+            chunk_index: 0,
+            chunk_hash: [0u8; 32],
+        });
+        valid_chunk.da_payload = vec![0x01];
+
+        let mut orphan_chunk = empty_tx();
+        orphan_chunk.tx_kind = 0x02;
+        orphan_chunk.da_chunk_core = Some(crate::tx::DaChunkCore {
+            da_id: orphan_da_id,
+            chunk_index: 0,
+            chunk_hash: [0u8; 32],
+        });
+        orphan_chunk.da_payload = vec![0x02];
+
+        let err = collect_da_payload_commit_tasks(&[commit, valid_chunk, orphan_chunk])
+            .expect_err("orphan chunk id");
         assert_eq!(err.code, ErrorCode::BlockErrDaSetInvalid);
     }
 
