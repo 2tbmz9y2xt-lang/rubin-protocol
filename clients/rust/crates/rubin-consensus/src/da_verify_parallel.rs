@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::constants::{COV_TYPE_DA_COMMIT, MAX_DA_BYTES_PER_BLOCK};
 use crate::error::{ErrorCode, TxError};
@@ -113,8 +113,8 @@ pub fn collect_da_chunk_hash_tasks(txs: &[Tx]) -> Vec<DaChunkHashTask> {
 /// - every DA commit has a contiguous chunk set of exact `chunk_count`,
 /// - every chunk index in `[0, chunk_count - 1]` is present.
 pub fn collect_da_payload_commit_tasks(txs: &[Tx]) -> Vec<DaPayloadCommitTask> {
-    let mut commits: HashMap<[u8; 32], &Tx> = HashMap::new();
-    let mut chunks: HashMap<[u8; 32], HashMap<u16, &Tx>> = HashMap::new();
+    let mut commits: BTreeMap<[u8; 32], &Tx> = BTreeMap::new();
+    let mut chunks: BTreeMap<[u8; 32], HashMap<u16, &Tx>> = BTreeMap::new();
 
     for tx in txs {
         match tx.tx_kind {
@@ -141,21 +141,14 @@ pub fn collect_da_payload_commit_tasks(txs: &[Tx]) -> Vec<DaPayloadCommitTask> {
         return Vec::new();
     }
 
-    let mut ids: Vec<[u8; 32]> = commits.keys().copied().collect();
-    ids.sort_unstable();
-
-    let mut tasks = Vec::with_capacity(ids.len());
-    for da_id in ids {
-        let commit_tx = commits
-            .get(&da_id)
-            .copied()
-            .expect("sorted IDs come from commit map");
+    let mut tasks = Vec::with_capacity(commits.len());
+    for (da_id, commit_tx) in &commits {
         let commit_core = commit_tx
             .da_commit_core
             .as_ref()
             .expect("commit map stores only DA commit txs");
         let chunk_count = commit_core.chunk_count;
-        let chunk_set = chunks.get(&da_id);
+        let chunk_set = chunks.get(da_id);
 
         let mut chunk_payloads = Vec::with_capacity(chunk_count as usize);
         for chunk_index in 0..chunk_count {
@@ -175,7 +168,7 @@ pub fn collect_da_payload_commit_tasks(txs: &[Tx]) -> Vec<DaPayloadCommitTask> {
         }
 
         tasks.push(DaPayloadCommitTask {
-            da_id,
+            da_id: *da_id,
             chunk_count,
             chunk_payloads,
             expected_commit,
