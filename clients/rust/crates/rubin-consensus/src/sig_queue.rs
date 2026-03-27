@@ -3,7 +3,7 @@ use crate::error::{ErrorCode, TxError};
 use crate::suite_registry::SuiteRegistry;
 use crate::verify_sig_openssl::{verify_sig, verify_sig_with_registry};
 use crate::worker_pool::{
-    run_worker_pool, WorkerCancellationToken, WorkerPoolError, WorkerPoolRunError,
+    run_worker_pool, WorkerCancellationToken, WorkerPoolError, WorkerPoolRunError, WorkerResult,
 };
 
 // Deferred sigcheck payload comes from witness bytes. Even in a maximally
@@ -251,33 +251,7 @@ fn verify_queued_tasks_batch(
     })
     .map_err(sigcheck_batch_run_error_to_tx_error)?;
 
-    // WorkerPool preserves submission order in its result vector. We skip
-    // cancellation markers here so the reduction still returns the earliest
-    // actual verification failure, while late tasks can stop spending CPU once
-    // another worker has already proven the block invalid.
-    let mut saw_cancelled = false;
-    for result in results {
-        match result.error {
-            Some(WorkerPoolError::Task(err)) => return Err(err),
-            Some(WorkerPoolError::Panic(_)) => {
-                return Err(TxError::new(
-                    ErrorCode::TxErrSigInvalid,
-                    "signature worker panic (fail-closed)",
-                ));
-            }
-            Some(WorkerPoolError::Cancelled) => {
-                saw_cancelled = true;
-            }
-            None => {}
-        }
-    }
-    if saw_cancelled {
-        return Err(TxError::new(
-            ErrorCode::TxErrSigInvalid,
-            "signature worker canceled (fail-closed)",
-        ));
-    }
-    Ok(())
+    reduce_queued_task_results(results)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -289,8 +263,18 @@ pub(crate) fn verify_signatures_batch(
         return Vec::new();
     }
 
-    let token = WorkerCancellationToken::new();
     let max_tasks = tasks.len();
+    verify_signatures_batch_with_limit(tasks, workers, max_tasks)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn verify_signatures_batch_with_limit(
+    tasks: Vec<SigVerifyRequest>,
+    workers: usize,
+    max_tasks: usize,
+) -> Vec<Option<TxError>> {
+    let token = WorkerCancellationToken::new();
+    let task_count = tasks.len();
     let registry = SuiteRegistry::default_registry();
     let results = match run_worker_pool(&token, workers, max_tasks, tasks, |_cancel, task| {
         let ok = verify_sig_with_registry(
@@ -310,7 +294,7 @@ pub(crate) fn verify_signatures_batch(
     }) {
         Ok(results) => results,
         Err(run_err) => {
-            return vec![Some(sigcheck_batch_run_error_to_tx_error(run_err)); max_tasks];
+            return vec![Some(sigcheck_batch_run_error_to_tx_error(run_err)); task_count];
         }
     };
 
@@ -318,6 +302,26 @@ pub(crate) fn verify_signatures_batch(
         .into_iter()
         .map(|result| result.error.map(worker_pool_sigcheck_error_to_tx_error))
         .collect()
+}
+
+fn reduce_queued_task_results(results: Vec<WorkerResult<(), TxError>>) -> Result<(), TxError> {
+    // WorkerPool preserves submission order in its result vector. We ignore
+    // cancellation markers here so the reduction still returns the earliest
+    // actual verification failure, while late tasks can stop spending CPU once
+    // another worker has already proven the block invalid.
+    for result in results {
+        match result.error {
+            Some(WorkerPoolError::Task(err)) => return Err(err),
+            Some(WorkerPoolError::Panic(_)) => {
+                return Err(TxError::new(
+                    ErrorCode::TxErrSigInvalid,
+                    "signature worker panic (fail-closed)",
+                ));
+            }
+            Some(WorkerPoolError::Cancelled) | None => {}
+        }
+    }
+    Ok(())
 }
 
 fn worker_pool_sigcheck_error_to_tx_error(err: WorkerPoolError<TxError>) -> TxError {
@@ -770,6 +774,81 @@ mod tests {
     #[test]
     fn verify_signatures_batch_empty_is_empty() {
         assert!(verify_signatures_batch(Vec::new(), 4).is_empty());
+    }
+
+    #[test]
+    fn reduce_queued_task_results_maps_worker_panic_fail_closed() {
+        let err = reduce_queued_task_results(vec![
+            WorkerResult {
+                value: Some(()),
+                error: None,
+            },
+            WorkerResult {
+                value: None,
+                error: Some(WorkerPoolError::Cancelled),
+            },
+            WorkerResult {
+                value: None,
+                error: Some(WorkerPoolError::Panic("boom".to_string())),
+            },
+        ])
+        .expect_err("panic must fail closed");
+
+        assert_eq!(
+            err,
+            TxError::new(
+                ErrorCode::TxErrSigInvalid,
+                "signature worker panic (fail-closed)"
+            )
+        );
+    }
+
+    #[test]
+    fn reduce_queued_task_results_ignores_cancelled_tail_without_error() {
+        reduce_queued_task_results(vec![
+            WorkerResult {
+                value: Some(()),
+                error: None,
+            },
+            WorkerResult {
+                value: None,
+                error: Some(WorkerPoolError::Cancelled),
+            },
+        ])
+        .expect("cancelled tail without preceding task error is ignored");
+    }
+
+    #[test]
+    fn verify_signatures_batch_run_error_maps_all_results() {
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let tasks = (0..2u8)
+            .map(|i| {
+                let mut digest = [0u8; 32];
+                digest[0] = i;
+                let sig = keypair.sign_digest32(digest).expect("sign");
+                SigVerifyRequest {
+                    suite_id: SUITE_ID_ML_DSA_87,
+                    pubkey: keypair.pubkey_bytes(),
+                    sig,
+                    digest,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let results = verify_signatures_batch_with_limit(tasks, 2, 1);
+        assert_eq!(
+            results,
+            vec![
+                Some(TxError::new(
+                    ErrorCode::TxErrWitnessOverflow,
+                    "signature batch task budget exceeded",
+                )),
+                Some(TxError::new(
+                    ErrorCode::TxErrWitnessOverflow,
+                    "signature batch task budget exceeded",
+                )),
+            ]
+        );
     }
 
     #[test]
