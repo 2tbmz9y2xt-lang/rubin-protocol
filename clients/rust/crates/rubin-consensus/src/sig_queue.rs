@@ -1,5 +1,6 @@
 use crate::constants::{MAX_BLOCK_WEIGHT, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES};
 use crate::error::{ErrorCode, TxError};
+use crate::sig_cache::SigCache;
 use crate::suite_registry::SuiteRegistry;
 use crate::verify_sig_openssl::{verify_sig, verify_sig_with_registry};
 use crate::worker_pool::{
@@ -57,6 +58,7 @@ pub(crate) struct SigCheckQueue {
     tasks: Vec<SigCheckTask>,
     queued_bytes: usize,
     registry: Option<SuiteRegistry>,
+    cache: Option<SigCache>,
     workers: usize,
 }
 
@@ -66,6 +68,7 @@ impl Default for SigCheckQueue {
             tasks: Vec::new(),
             queued_bytes: 0,
             registry: None,
+            cache: None,
             workers: 1,
         }
     }
@@ -95,12 +98,18 @@ impl SigCheckQueue {
             tasks: Vec::new(),
             queued_bytes: 0,
             registry: None,
+            cache: None,
             workers: workers.max(1),
         }
     }
 
     pub(crate) fn with_registry(mut self, registry: &SuiteRegistry) -> Self {
         self.registry = Some(registry.clone());
+        self
+    }
+
+    pub(crate) fn with_cache(mut self, cache: SigCache) -> Self {
+        self.cache = Some(cache);
         self
     }
 
@@ -144,12 +153,17 @@ impl SigCheckQueue {
         self.queued_bytes = 0;
         if tasks.len() == 1 || self.workers <= 1 {
             for task in tasks {
-                verify_queued_task(task, self.registry.as_ref())?;
+                verify_queued_task(task, self.registry.as_ref(), self.cache.as_ref())?;
             }
             return Ok(());
         }
 
-        verify_queued_tasks_batch(tasks, self.workers, self.registry.as_ref())
+        verify_queued_tasks_batch(
+            tasks,
+            self.workers,
+            self.registry.as_ref(),
+            self.cache.as_ref(),
+        )
     }
 
     pub(crate) fn assert_flushed(&self) -> Result<(), TxError> {
@@ -218,7 +232,17 @@ pub(crate) fn queue_or_verify_signature(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-fn verify_queued_task(task: SigCheckTask, registry: Option<&SuiteRegistry>) -> Result<(), TxError> {
+fn verify_queued_task(
+    task: SigCheckTask,
+    registry: Option<&SuiteRegistry>,
+    cache: Option<&SigCache>,
+) -> Result<(), TxError> {
+    if let Some(cache) = cache {
+        if cache.lookup(task.suite_id, &task.pubkey, &task.sig, task.digest) {
+            return Ok(());
+        }
+    }
+
     let ok = match registry {
         Some(registry) => verify_sig_with_registry(
             task.suite_id,
@@ -232,6 +256,9 @@ fn verify_queued_task(task: SigCheckTask, registry: Option<&SuiteRegistry>) -> R
     if !ok {
         return Err(task.err_on_fail);
     }
+    if let Some(cache) = cache {
+        cache.insert(task.suite_id, &task.pubkey, &task.sig, task.digest);
+    }
     Ok(())
 }
 
@@ -239,11 +266,13 @@ fn verify_queued_tasks_batch(
     tasks: Vec<SigCheckTask>,
     workers: usize,
     registry: Option<&SuiteRegistry>,
+    cache: Option<&SigCache>,
 ) -> Result<(), TxError> {
     let token = WorkerCancellationToken::new();
     let max_tasks = tasks.len();
+    let cache = cache.cloned();
     let results = run_worker_pool(&token, workers, max_tasks, tasks, |_cancel, task| {
-        verify_queued_task(task, registry)
+        verify_queued_task(task, registry, cache.as_ref())
     })
     .map_err(sigcheck_batch_run_error_to_tx_error)?;
 
@@ -401,6 +430,7 @@ mod tests {
     use crate::hash::sha3_256;
     use crate::htlc::parse_htlc_covenant_data;
     use crate::htlc::validate_htlc_spend_q;
+    use crate::sig_cache::SigCache;
     use crate::spend_verify::{validate_p2pk_spend_q, validate_threshold_sig_spend_q};
     use crate::stealth::parse_stealth_covenant_data;
     use crate::stealth::validate_stealth_spend_q;
@@ -468,6 +498,58 @@ mod tests {
             pubkey: keypair.pubkey_bytes(),
             signature,
         }
+    }
+
+    #[test]
+    fn sig_check_queue_with_cache_single_hit() {
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let cache = SigCache::new(100);
+        let digest = [0x42; 32];
+        let sig = keypair.sign_digest32(digest).expect("sign");
+        let pubkey = keypair.pubkey_bytes();
+
+        cache.insert(SUITE_ID_ML_DSA_87, &pubkey, &sig, digest);
+
+        let mut queue = SigCheckQueue::new(1).with_cache(cache.clone());
+        queue
+            .push(
+                SUITE_ID_ML_DSA_87,
+                &pubkey,
+                &sig,
+                digest,
+                TxError::new(ErrorCode::TxErrSigInvalid, "test"),
+            )
+            .expect("push");
+        queue.flush().expect("flush");
+
+        assert_eq!(cache.hits(), 1);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn sig_check_queue_with_cache_invalid_not_cached() {
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let cache = SigCache::new(100);
+        let digest = [0x42; 32];
+        let sig = keypair.sign_digest32(digest).expect("sign");
+        let pubkey = keypair.pubkey_bytes();
+        let mut bad_digest = digest;
+        bad_digest[0] ^= 0xff;
+
+        let mut queue = SigCheckQueue::new(1).with_cache(cache.clone());
+        queue
+            .push(
+                SUITE_ID_ML_DSA_87,
+                &pubkey,
+                &sig,
+                bad_digest,
+                TxError::new(ErrorCode::TxErrSigInvalid, "invalid"),
+            )
+            .expect("push");
+
+        let err = queue.flush().expect_err("invalid signature must fail");
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+        assert_eq!(cache.len(), 0);
     }
 
     fn encode_htlc_claim_payload(preimage: &[u8]) -> Vec<u8> {

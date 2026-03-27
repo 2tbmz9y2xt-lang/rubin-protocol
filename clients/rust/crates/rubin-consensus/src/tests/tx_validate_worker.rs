@@ -150,7 +150,7 @@ fn validate_tx_local_witness_underflow() {
     ptcs[0].witness_end = ptcs[0].witness_start;
 
     let profiles = CoreExtProfiles::empty();
-    let r = validate_tx_local(&ptcs[0], &pb, [0u8; 32], 100, 0, &profiles);
+    let r = validate_tx_local(&ptcs[0], &pb, [0u8; 32], 100, 0, &profiles, None);
     assert!(!r.valid);
     assert!(r.err.is_some());
     let err = r.err.unwrap();
@@ -175,7 +175,7 @@ fn validate_tx_local_witness_count_mismatch() {
         fee: 0,
     };
     let profiles = CoreExtProfiles::empty();
-    let r = validate_tx_local(&ptc, &pb, [0u8; 32], 100, 0, &profiles);
+    let r = validate_tx_local(&ptc, &pb, [0u8; 32], 100, 0, &profiles, None);
     assert!(!r.valid);
     assert!(r.err.is_some());
     let err = r.err.unwrap();
@@ -189,7 +189,7 @@ fn validate_tx_local_fee_and_index_preserved() {
     let (pb, ptcs, _snap) = precompute_single_tx(tx, 100, 100);
 
     let profiles = CoreExtProfiles::empty();
-    let r = validate_tx_local(&ptcs[0], &pb, [0u8; 32], 100, 0, &profiles);
+    let r = validate_tx_local(&ptcs[0], &pb, [0u8; 32], 100, 0, &profiles, None);
     // Note: this test will likely fail at signature verification (dummy witness
     // won't pass ML-DSA verify) — we're testing that fee/index are set correctly
     // before any validation error is returned.
@@ -215,7 +215,7 @@ fn validate_tx_local_default_covenant_passthrough() {
         fee: 0,
     };
     let profiles = CoreExtProfiles::empty();
-    let r = validate_tx_local(&ptc, &pb, [0u8; 32], 100, 0, &profiles);
+    let r = validate_tx_local(&ptc, &pb, [0u8; 32], 100, 0, &profiles, None);
     assert!(r.valid);
     assert!(r.err.is_none());
 }
@@ -229,7 +229,7 @@ fn validate_tx_local_p2pk_dispatch_enters_branch() {
     let (pb, ptcs, _snap) = precompute_single_tx(tx, 100, 100);
 
     let profiles = CoreExtProfiles::empty();
-    let r = validate_tx_local(&ptcs[0], &pb, [0u8; 32], 100, 0, &profiles);
+    let r = validate_tx_local(&ptcs[0], &pb, [0u8; 32], 100, 0, &profiles, None);
     // Dummy sig will fail at ML-DSA verify but the P2PK branch was entered.
     // Dummy sig will fail ML-DSA verify but the P2PK branch was entered.
     // We only care that the path was exercised, not that it passed.
@@ -279,7 +279,7 @@ fn validate_tx_local_multisig_dispatch_enters_branch() {
         fee: 10,
     };
     let profiles = CoreExtProfiles::empty();
-    let r = validate_tx_local(&ptc, &pb, [0u8; 32], 100, 0, &profiles);
+    let r = validate_tx_local(&ptc, &pb, [0u8; 32], 100, 0, &profiles, None);
     // Will fail at sig verify but MULTISIG branch was entered.
     assert_eq!(r.tx_index, 1);
     assert_eq!(r.fee, 10);
@@ -327,7 +327,7 @@ fn validate_tx_local_vault_dispatch_enters_branch() {
         fee: 10,
     };
     let profiles = CoreExtProfiles::empty();
-    let r = validate_tx_local(&ptc, &pb, [0u8; 32], 100, 0, &profiles);
+    let r = validate_tx_local(&ptc, &pb, [0u8; 32], 100, 0, &profiles, None);
     assert_eq!(r.tx_index, 1);
 }
 
@@ -363,7 +363,7 @@ fn validate_tx_local_htlc_dispatch_enters_branch() {
         fee: 10,
     };
     let profiles = CoreExtProfiles::empty();
-    let r = validate_tx_local(&ptc, &pb, [0u8; 32], 100, 0, &profiles);
+    let r = validate_tx_local(&ptc, &pb, [0u8; 32], 100, 0, &profiles, None);
     assert_eq!(r.tx_index, 1);
 }
 
@@ -396,7 +396,7 @@ fn validate_tx_local_unknown_covenant_witness_slots_error() {
         fee: 10,
     };
     let profiles = CoreExtProfiles::empty();
-    let r = validate_tx_local(&ptc, &pb, [0u8; 32], 100, 0, &profiles);
+    let r = validate_tx_local(&ptc, &pb, [0u8; 32], 100, 0, &profiles, None);
     assert!(!r.valid);
     assert!(r.err.is_some());
     assert_eq!(r.err.unwrap().code, ErrorCode::TxErrCovenantTypeInvalid);
@@ -450,7 +450,7 @@ fn validate_tx_local_ext_context_build_error() {
         }],
         fee: 10,
     };
-    let r = validate_tx_local(&ptc, &pb, [0u8; 32], 100, 0, &profiles);
+    let r = validate_tx_local(&ptc, &pb, [0u8; 32], 100, 0, &profiles, None);
     assert!(!r.valid);
     assert!(r.err.is_some());
 }
@@ -460,6 +460,7 @@ fn validate_tx_local_ext_context_build_error() {
 /// result.valid = true (line 151), and the complete P2PK branch (lines 183-194).
 #[test]
 fn validate_tx_local_real_signature_full_path() {
+    use crate::sig_cache::SigCache;
     use crate::tx_helpers::{p2pk_covenant_data_for_pubkey, sign_transaction};
     use crate::verify_sig_openssl::Mldsa87Keypair;
 
@@ -516,11 +517,130 @@ fn validate_tx_local_real_signature_full_path() {
     let ptcs = precompute_tx_contexts(&pb, &utxo_map, 100).unwrap();
 
     let profiles = CoreExtProfiles::empty();
-    let r = validate_tx_local(&ptcs[0], &pb, [0u8; 32], 100, 0, &profiles);
+    let r = validate_tx_local(&ptcs[0], &pb, [0u8; 32], 100, 0, &profiles, None);
     assert!(r.valid, "expected valid tx, got err: {:?}", r.err);
     assert!(r.err.is_none());
     assert_eq!(r.sig_count, 1);
     assert_eq!(r.fee, 10); // 100 - 90
+
+    let cache = SigCache::new(100);
+    let cached_first = validate_tx_local(&ptcs[0], &pb, [0u8; 32], 100, 0, &profiles, Some(&cache));
+    assert!(
+        cached_first.valid,
+        "expected cached first run to pass: {:?}",
+        cached_first.err
+    );
+    assert_eq!(cache.hits(), 0);
+
+    let cached_second =
+        validate_tx_local(&ptcs[0], &pb, [0u8; 32], 100, 0, &profiles, Some(&cache));
+    assert!(
+        cached_second.valid,
+        "expected cached second run to pass: {:?}",
+        cached_second.err
+    );
+    assert_eq!(cache.hits(), 1);
+}
+
+#[test]
+fn run_tx_validation_workers_with_sig_cache_reuses_positive_result() {
+    use crate::sig_cache::SigCache;
+    use crate::tx_helpers::{p2pk_covenant_data_for_pubkey, sign_transaction};
+    use crate::verify_sig_openssl::Mldsa87Keypair;
+
+    let keypair = match Mldsa87Keypair::generate() {
+        Ok(kp) => kp,
+        Err(_) => return,
+    };
+    let pubkey = keypair.pubkey_bytes();
+    let cov_data = p2pk_covenant_data_for_pubkey(&pubkey);
+    let prev_txid = [0x24u8; 32];
+    let outpoint = Outpoint {
+        txid: prev_txid,
+        vout: 0,
+    };
+
+    let mut utxo_map = HashMap::new();
+    utxo_map.insert(
+        outpoint,
+        UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data.clone(),
+            creation_height: 1,
+            created_by_coinbase: false,
+        },
+    );
+
+    let mut tx = Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 2,
+        inputs: vec![TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 90,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data,
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: Vec::new(),
+        da_payload: Vec::new(),
+    };
+
+    sign_transaction(&mut tx, &utxo_map, [0u8; 32], &keypair).expect("sign tx");
+
+    let pb = make_parsed_block(simple_coinbase(), vec![tx]);
+    let ptcs = precompute_tx_contexts(&pb, &utxo_map, 100).unwrap();
+    let token = WorkerCancellationToken::new();
+    let profiles = CoreExtProfiles::empty();
+    let cache = SigCache::new(100);
+
+    let first = run_tx_validation_workers(
+        &token,
+        1,
+        ptcs.clone(),
+        &pb,
+        [0u8; 32],
+        100,
+        0,
+        &profiles,
+        Some(cache.clone()),
+    )
+    .unwrap();
+    assert_eq!(first.len(), 1);
+    assert!(
+        first[0].error.is_none(),
+        "first run err: {:?}",
+        first[0].error
+    );
+    assert_eq!(cache.hits(), 0);
+
+    let second = run_tx_validation_workers(
+        &token,
+        1,
+        ptcs,
+        &pb,
+        [0u8; 32],
+        100,
+        0,
+        &profiles,
+        Some(cache.clone()),
+    )
+    .unwrap();
+    assert_eq!(second.len(), 1);
+    assert!(
+        second[0].error.is_none(),
+        "second run err: {:?}",
+        second[0].error
+    );
+    assert_eq!(cache.hits(), 1);
 }
 
 /// Exercises run_tx_validation_workers worker closure (lines 351-367).
@@ -532,7 +652,8 @@ fn validate_tx_local_worker_pool_closure() {
     let token = WorkerCancellationToken::new();
     let profiles = CoreExtProfiles::empty();
     let results =
-        run_tx_validation_workers(&token, 2, ptcs, &pb, [0u8; 32], 100, 0, &profiles).unwrap();
+        run_tx_validation_workers(&token, 2, ptcs, &pb, [0u8; 32], 100, 0, &profiles, None)
+            .unwrap();
     assert_eq!(results.len(), 1);
     // The result will have an error (dummy sig) but the worker was exercised.
     assert!(results[0].error.is_some() || results[0].value.is_some());
@@ -548,7 +669,8 @@ fn run_tx_validation_workers_empty() {
     let profiles = CoreExtProfiles::empty();
     let pb = make_parsed_block(simple_coinbase(), vec![]);
     let results =
-        run_tx_validation_workers(&token, 4, vec![], &pb, [0u8; 32], 1, 0, &profiles).unwrap();
+        run_tx_validation_workers(&token, 4, vec![], &pb, [0u8; 32], 1, 0, &profiles, None)
+            .unwrap();
     assert!(results.is_empty());
 }
 
@@ -562,7 +684,8 @@ fn run_tx_validation_workers_cancelled_token() {
 
     let profiles = CoreExtProfiles::empty();
     let results =
-        run_tx_validation_workers(&token, 2, ptcs, &pb, [0u8; 32], 100, 0, &profiles).unwrap();
+        run_tx_validation_workers(&token, 2, ptcs, &pb, [0u8; 32], 100, 0, &profiles, None)
+            .unwrap();
     assert_eq!(results.len(), 1);
     assert!(results[0].error.is_some());
     match &results[0].error {
