@@ -89,3 +89,95 @@ func FuzzParseBlockBytes(f *testing.F) {
 		}
 	})
 }
+
+func FuzzParseBlockHeaderBytes(f *testing.F) {
+	header := minimalBlockBytesForFuzz()[:BLOCK_HEADER_BYTES]
+	f.Add(header)
+	f.Add(make([]byte, BLOCK_HEADER_BYTES-1))
+	f.Add(append(append([]byte(nil), header...), 0x99))
+
+	f.Fuzz(func(t *testing.T, b []byte) {
+		h1, err1 := ParseBlockHeaderBytes(b)
+		h2, err2 := ParseBlockHeaderBytes(b)
+
+		if (err1 == nil) != (err2 == nil) {
+			t.Fatalf("ParseBlockHeaderBytes non-deterministic error presence: first=%v second=%v", err1, err2)
+		}
+		if err1 != nil {
+			return
+		}
+		if len(b) < BLOCK_HEADER_BYTES {
+			t.Fatalf("accepted short header length=%d", len(b))
+		}
+		if h1 != h2 {
+			t.Fatalf("ParseBlockHeaderBytes non-deterministic output")
+		}
+		hPrefix, err := ParseBlockHeaderBytes(b[:BLOCK_HEADER_BYTES])
+		if err != nil {
+			t.Fatalf("ParseBlockHeaderBytes(prefix): %v", err)
+		}
+		if h1 != hPrefix {
+			t.Fatalf("trailing bytes changed parsed header")
+		}
+	})
+}
+
+func FuzzParseStealthCovenantData(f *testing.F) {
+	var keyID [32]byte
+	keyID[0] = 0xAA
+	keyID[31] = 0x55
+
+	f.Add([]byte{})
+	f.Add(make([]byte, MAX_STEALTH_COVENANT_DATA-1))
+	f.Add(stealthCovenantDataForKeyID(keyID))
+
+	f.Fuzz(func(t *testing.T, covData []byte) {
+		got, err := ParseStealthCovenantData(covData)
+		if err != nil {
+			return
+		}
+		if len(covData) != MAX_STEALTH_COVENANT_DATA {
+			t.Fatalf("accepted non-canonical stealth covenant length=%d", len(covData))
+		}
+		if len(got.Ciphertext) != ML_KEM_1024_CT_BYTES {
+			t.Fatalf("ciphertext_len=%d, want %d", len(got.Ciphertext), ML_KEM_1024_CT_BYTES)
+		}
+
+		var expectedKeyID [32]byte
+		copy(expectedKeyID[:], covData[ML_KEM_1024_CT_BYTES:])
+		if got.OneTimeKeyID != expectedKeyID {
+			t.Fatalf("one_time_key_id mismatch")
+		}
+
+		if len(covData) > 0 {
+			clone := append([]byte(nil), covData...)
+			parsed, err := ParseStealthCovenantData(clone)
+			if err != nil {
+				t.Fatalf("ParseStealthCovenantData second parse: %v", err)
+			}
+			clone[0] ^= 0xFF
+			if len(parsed.Ciphertext) > 0 && parsed.Ciphertext[0] != covData[0] {
+				t.Fatalf("ciphertext aliases caller input")
+			}
+		}
+	})
+}
+
+func FuzzParseCoreExtCovenantData(f *testing.F) {
+	f.Add([]byte{0x01})
+	f.Add([]byte{0x34, 0x12, 0x00})
+	f.Add(coreExtCovenantData(0x1234, []byte{0xAA, 0xBB, 0xCC}))
+	f.Add([]byte{0x34, 0x12, 0x02, 0xAA})
+
+	f.Fuzz(func(t *testing.T, covenantData []byte) {
+		got, err := ParseCoreExtCovenantData(covenantData)
+		if err != nil {
+			return
+		}
+
+		canonical := coreExtCovenantData(got.ExtID, got.ExtPayload)
+		if !bytes.Equal(canonical, covenantData) {
+			t.Fatalf("non-canonical or non-roundtripping CORE_EXT covenant data")
+		}
+	})
+}

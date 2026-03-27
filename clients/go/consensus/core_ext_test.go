@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -37,6 +38,36 @@ func coreExtCovenantData(extID uint16, payload []byte) []byte {
 	out = AppendCompactSize(out, uint64(len(payload)))
 	out = append(out, payload...)
 	return out
+}
+
+func TestParseCoreExtCovenantData_RejectsHugePayloadLenWithoutPanic(t *testing.T) {
+	covData := []byte{0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f, 0x00}
+
+	_, err := ParseCoreExtCovenantData(covData)
+	if err == nil {
+		t.Fatalf("expected error for oversized payload length")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	}
+	if !strings.Contains(err.Error(), "ext_payload parse failure") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParseCoreExtCovenantData_RejectsUint64MaxPayloadLenWithoutPanic(t *testing.T) {
+	covData := []byte{0x34, 0x12, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00}
+
+	_, err := ParseCoreExtCovenantData(covData)
+	if err == nil {
+		t.Fatalf("expected error for uint64-max payload length")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	}
+	if !strings.Contains(err.Error(), "ext_payload parse failure") {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
 
 func TestStaticCoreExtProfileProviderEmptyReturnsInactiveProvider(t *testing.T) {
