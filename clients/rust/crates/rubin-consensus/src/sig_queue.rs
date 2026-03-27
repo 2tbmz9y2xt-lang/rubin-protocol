@@ -1,4 +1,4 @@
-use crate::constants::MAX_BLOCK_WEIGHT;
+use crate::constants::{MAX_BLOCK_WEIGHT, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES};
 use crate::error::{ErrorCode, TxError};
 use crate::sig_cache::SigCache;
 use crate::suite_registry::SuiteRegistry;
@@ -12,6 +12,7 @@ use crate::worker_pool::{
 // the block weight budget because witness data is charged 1:1 in weight.
 const MAX_SIGCHECK_QUEUE_BYTES: usize = MAX_BLOCK_WEIGHT as usize;
 const SIGCHECK_TASK_FIXED_OVERHEAD_BYTES: usize = 1 + 32 + 1;
+const CURRENT_NATIVE_QUEUE_PAYLOAD_FLOOR_BYTES: u64 = ML_DSA_87_PUBKEY_BYTES + ML_DSA_87_SIG_BYTES;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SigCheckTask {
@@ -384,21 +385,32 @@ fn max_sigcheck_queue_tasks(registry: Option<&SuiteRegistry>) -> Result<usize, T
             &default_registry
         }
     };
-    let min_payload_bytes = registry.min_sigcheck_payload_bytes().ok_or_else(|| {
-        TxError::new(
-            ErrorCode::TxErrSigAlgInvalid,
-            "SigCheckQueue registry has no registered suites",
-        )
-    })?;
-    let min_task_bytes = SIGCHECK_TASK_FIXED_OVERHEAD_BYTES
-        .checked_add(min_payload_bytes)
+    let min_payload_bytes = registry
+        .min_sigcheck_payload_bytes()
+        .map_err(|msg| TxError::new(ErrorCode::TxErrSigAlgInvalid, msg))?
+        .ok_or_else(|| {
+            TxError::new(
+                ErrorCode::TxErrSigAlgInvalid,
+                "SigCheckQueue registry has no registered suites",
+            )
+        })?;
+    let effective_min_payload_bytes =
+        min_payload_bytes.max(CURRENT_NATIVE_QUEUE_PAYLOAD_FLOOR_BYTES);
+    let min_task_bytes = (SIGCHECK_TASK_FIXED_OVERHEAD_BYTES as u64)
+        .checked_add(effective_min_payload_bytes)
         .ok_or_else(|| {
             TxError::new(
                 ErrorCode::TxErrWitnessOverflow,
                 "SigCheckQueue task budget footprint overflow",
             )
         })?;
-    Ok(MAX_SIGCHECK_QUEUE_BYTES / min_task_bytes)
+    let max_tasks = (MAX_SIGCHECK_QUEUE_BYTES as u64) / min_task_bytes;
+    usize::try_from(max_tasks).map_err(|_| {
+        TxError::new(
+            ErrorCode::TxErrWitnessOverflow,
+            "SigCheckQueue task budget exceeds host usize",
+        )
+    })
 }
 
 fn next_queued_bytes(current: usize, task_bytes: usize) -> Result<usize, TxError> {
@@ -1084,16 +1096,21 @@ mod tests {
         let registry = SuiteRegistry::default_registry();
         assert_eq!(
             max_sigcheck_queue_tasks(Some(&registry)).expect("default registry"),
-            MAX_SIGCHECK_QUEUE_BYTES
-                / (SIGCHECK_TASK_FIXED_OVERHEAD_BYTES
-                    + registry
-                        .min_sigcheck_payload_bytes()
-                        .expect("mldsa payload"))
+            usize::try_from(
+                (MAX_SIGCHECK_QUEUE_BYTES as u64)
+                    / ((SIGCHECK_TASK_FIXED_OVERHEAD_BYTES as u64)
+                        + registry
+                            .min_sigcheck_payload_bytes()
+                            .expect("payload lookup")
+                            .expect("mldsa payload")
+                            .max(CURRENT_NATIVE_QUEUE_PAYLOAD_FLOOR_BYTES))
+            )
+            .expect("fits usize")
         );
     }
 
     #[test]
-    fn sig_check_queue_task_budget_tracks_smallest_registered_suite() {
+    fn sig_check_queue_task_budget_does_not_widen_below_current_native_floor() {
         let mut suites = BTreeMap::new();
         suites.insert(
             SUITE_ID_ML_DSA_87,
@@ -1119,7 +1136,7 @@ mod tests {
 
         assert_eq!(
             max_sigcheck_queue_tasks(Some(&registry)).expect("custom registry"),
-            MAX_SIGCHECK_QUEUE_BYTES / (SIGCHECK_TASK_FIXED_OVERHEAD_BYTES + 164)
+            max_sigcheck_queue_tasks(None).expect("default registry")
         );
     }
 
