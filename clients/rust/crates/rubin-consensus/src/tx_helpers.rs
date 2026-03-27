@@ -384,3 +384,62 @@ mod tests {
         assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
     }
 }
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+    use crate::constants::{COV_TYPE_P2PK, TX_WIRE_VERSION};
+    use crate::tx::{parse_tx, Tx, TxInput, TxOutput};
+
+    // This proof intentionally keeps the transaction shape bounded:
+    // one input, one output, tx_kind=0x00, empty script/covenant/witness data.
+    // That is enough to exercise the live marshal/parse wire helpers without
+    // pretending Kani can search the full unbounded transaction space or
+    // paying solver cost for allocator-heavy optional vectors.
+    #[kani::proof]
+    #[kani::unwind(16)]
+    fn verify_marshal_tx_roundtrip_bounded_shape() {
+        let tx = Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0x00,
+            tx_nonce: 7,
+            inputs: vec![TxInput {
+                prev_txid: [0x11; 32],
+                prev_vout: 3,
+                script_sig: Vec::new(),
+                sequence: 9,
+            }],
+            outputs: vec![TxOutput {
+                value: 11,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: Vec::new(),
+            }],
+            locktime: 5,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: Vec::new(),
+        };
+
+        let bytes = marshal_tx(&tx).expect("marshal bounded tx");
+        let (parsed, _, _, consumed) = parse_tx(&bytes).expect("parse bounded tx");
+        assert_eq!(consumed, bytes.len());
+        assert_eq!(parsed.version, tx.version);
+        assert_eq!(parsed.tx_kind, tx.tx_kind);
+        assert_eq!(parsed.tx_nonce, tx.tx_nonce);
+        assert_eq!(parsed.locktime, tx.locktime);
+        assert_eq!(parsed.da_commit_core, tx.da_commit_core);
+        assert_eq!(parsed.da_chunk_core, tx.da_chunk_core);
+        assert!(parsed.da_payload.is_empty());
+        assert!(parsed.witness.is_empty());
+        assert_eq!(parsed.inputs.len(), 1);
+        assert_eq!(parsed.outputs.len(), 1);
+        assert_eq!(parsed.inputs[0].prev_vout, tx.inputs[0].prev_vout);
+        assert_eq!(parsed.inputs[0].sequence, tx.inputs[0].sequence);
+        assert!(parsed.inputs[0].script_sig.is_empty());
+        assert_eq!(parsed.outputs[0].value, tx.outputs[0].value);
+        assert_eq!(parsed.outputs[0].covenant_type, tx.outputs[0].covenant_type);
+        assert!(parsed.outputs[0].covenant_data.is_empty());
+        assert_eq!(marshal_tx(&parsed).expect("re-marshal"), bytes);
+    }
+}
