@@ -225,7 +225,7 @@ mod verification {
     use super::*;
 
     #[kani::proof]
-    fn verify_parse_vault_covenant_data_accepts_minimal_canonical_shape() {
+    fn verify_parse_vault_covenant_data_for_spend_accepts_minimal_shape() {
         let owner_lock_id = [1u8; 32];
         let key = [2u8; 32];
         let whitelist_entry = [3u8; 32];
@@ -238,7 +238,7 @@ mod verification {
         covenant_data.extend_from_slice(&1u16.to_le_bytes()); // whitelist_count
         covenant_data.extend_from_slice(&whitelist_entry);
 
-        let parsed = parse_vault_covenant_data(&covenant_data);
+        let parsed = parse_vault_covenant_data_for_spend(&covenant_data);
         assert!(parsed.is_ok());
         let Ok(parsed) = parsed else {
             return;
@@ -246,9 +246,11 @@ mod verification {
         assert_eq!(parsed.owner_lock_id, owner_lock_id);
         assert_eq!(parsed.threshold, 1);
         assert_eq!(parsed.key_count, 1);
-        assert_eq!(parsed.keys, vec![key]);
+        assert_eq!(parsed.keys.len(), 1);
+        assert_eq!(parsed.keys[0], key);
         assert_eq!(parsed.whitelist_count, 1);
-        assert_eq!(parsed.whitelist, vec![whitelist_entry]);
+        assert_eq!(parsed.whitelist.len(), 1);
+        assert_eq!(parsed.whitelist[0], whitelist_entry);
     }
 
     #[kani::proof]
@@ -282,7 +284,8 @@ mod verification {
         };
         assert_eq!(parsed.threshold, 1);
         assert_eq!(parsed.key_count, 1);
-        assert_eq!(parsed.keys, vec![key]);
+        assert_eq!(parsed.keys.len(), 1);
+        assert_eq!(parsed.keys[0], key);
     }
 
     #[kani::proof]
