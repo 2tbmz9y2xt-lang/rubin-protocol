@@ -1,6 +1,6 @@
 {
   "$schema_note": "Acknowledged security findings. DeepSeek workflow skips these when counting CRITICAL/HIGH blockers. Each entry has a title pattern (case-insensitive substring match) and explanation.",
-  "version": 2,
+  "version": 3,
   "acknowledged": [
     {
       "title_pattern": "Worker Thread",
@@ -237,6 +237,41 @@
       "title_pattern": "integer overflow in witness",
       "file_pattern": "tx_validate_worker.rs",
       "reason": "FALSE_POSITIVE: witness_cursor <= witness_end <= tx.witness.len() bounded by block weight limit. slots from witness_slots() max 255 (u8). On 64-bit (RUBIN requirement) overflow impossible. Block size limits prevent >4B witness items even on 32-bit.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-27"
+    },
+    {
+      "title_pattern": "Consensus Divergence via Deferred Verification",
+      "file_pattern": "utxo_basic.rs",
+      "reason": "FALSE_POSITIVE: Go already has queued/deferred signature validation in the parallel block path. Rust deferred helper is parity scaffolding, not a new Rust-only acceptance rule. Structural errors still fail inline; signature errors are only deferred to flush within the same tx/block validation boundary.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-27"
+    },
+    {
+      "title_pattern": "Vault whitelist check before signature flush",
+      "file_pattern": "utxo_basic.rs",
+      "reason": "FALSE_POSITIVE: Go parallel vault validation already queues threshold signatures before whitelist checks and flushes later at the block validation boundary. Rust mirrors that ordering, so this is not a Rust-only divergence.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-27"
+    },
+    {
+      "title_pattern": "Registry Mismatch Under Concurrent Modification",
+      "file_pattern": "sig_queue.rs",
+      "reason": "FALSE_POSITIVE: SigCheckQueue::ensure_registry compares SuiteRegistry by value (PartialEq/Eq), not pointer identity. The queue is tx-local on the live path; there is no concurrent cross-registry mutation surface here.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-27"
+    },
+    {
+      "title_pattern": "Unbounded queue growth via usize overflow",
+      "file_pattern": "sig_queue.rs",
+      "reason": "FALSE_POSITIVE: queue byte accounting uses checked_add in both sigcheck_task_bytes() and next_queued_bytes(); overflow fails closed with TxErrWitnessOverflow instead of bypassing the budget.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-27"
+    },
+    {
+      "title_pattern": "Inconsistent Error Handling in Native Path",
+      "file_pattern": "core_ext.rs",
+      "reason": "FALSE_POSITIVE for Rust-vs-Go parity: Go already keeps registry-native suites on the native queue path and non-native verify_sig_ext suites inline. Rust mirrors that split; this is not a new divergence.",
       "acknowledged_by": "architect",
       "date": "2026-03-27"
     }
