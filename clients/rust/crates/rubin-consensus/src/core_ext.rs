@@ -182,6 +182,8 @@ impl GovernanceReplayToken {
         current_height: u64,
         expected_nonce: u64,
     ) -> GovernanceReplayTokenValidation {
+        // Keep this check order canonical for any future multi-impl parity:
+        // ext_id -> nonce -> issued_at -> expiry.
         if self.ext_id != expected_ext_id {
             return GovernanceReplayTokenValidation::ExtIdMismatch;
         }
