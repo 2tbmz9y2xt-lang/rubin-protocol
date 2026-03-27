@@ -54,6 +54,21 @@ impl SuiteRegistry {
     pub fn is_registered(&self, suite_id: u8) -> bool {
         self.suites.contains_key(&suite_id)
     }
+
+    pub fn min_sigcheck_payload_bytes(&self) -> Result<Option<u64>, &'static str> {
+        let mut min_payload: Option<u64> = None;
+        for params in self.suites.values() {
+            let payload_bytes = params
+                .pubkey_len
+                .checked_add(params.sig_len)
+                .ok_or("SuiteRegistry payload footprint overflow")?;
+            min_payload = Some(match min_payload {
+                Some(current) => current.min(payload_bytes),
+                None => payload_bytes,
+            });
+        }
+        Ok(min_payload)
+    }
 }
 
 /// Set of suite IDs valid for native covenant operations at a given height.
@@ -291,6 +306,60 @@ mod tests {
         let p = reg.lookup(0x01).unwrap();
         assert_eq!(p.pubkey_len, 100);
         assert_eq!(p.sig_len, 200);
+        assert_eq!(
+            reg.min_sigcheck_payload_bytes().expect("payload"),
+            Some(300)
+        );
+    }
+
+    #[test]
+    fn test_suite_registry_min_sigcheck_payload_bytes_picks_smallest_registered_suite() {
+        let mut suites = BTreeMap::new();
+        suites.insert(
+            0x01,
+            SuiteParams {
+                suite_id: 0x01,
+                pubkey_len: 2592,
+                sig_len: 4627,
+                verify_cost: 8,
+                openssl_alg: "ML-DSA-87",
+            },
+        );
+        suites.insert(
+            0x02,
+            SuiteParams {
+                suite_id: 0x02,
+                pubkey_len: 64,
+                sig_len: 100,
+                verify_cost: 1,
+                openssl_alg: "ML-DSA-87",
+            },
+        );
+        let reg = SuiteRegistry::with_suites(suites);
+        assert_eq!(
+            reg.min_sigcheck_payload_bytes().expect("payload"),
+            Some(164)
+        );
+    }
+
+    #[test]
+    fn test_suite_registry_min_sigcheck_payload_bytes_fails_closed_on_overflow() {
+        let mut suites = BTreeMap::new();
+        suites.insert(
+            0x01,
+            SuiteParams {
+                suite_id: 0x01,
+                pubkey_len: u64::MAX,
+                sig_len: 1,
+                verify_cost: 1,
+                openssl_alg: "ML-DSA-87",
+            },
+        );
+        let reg = SuiteRegistry::with_suites(suites);
+        assert_eq!(
+            reg.min_sigcheck_payload_bytes(),
+            Err("SuiteRegistry payload footprint overflow")
+        );
     }
 
     #[test]
