@@ -87,12 +87,12 @@ jobs:
           fi
 
       # Keep the current proof surface. Step-level timeout fails closed if a
-      # harness or cargo-kani stalls, while the job-level timeout remains a
-      # backstop for cleanup/cache save.
+      # harness or cargo-kani stalls; add a kill-after backstop so a trapped
+      # TERM cannot silently stretch the lane until the job-level timeout.
       - name: Run Kani proofs
         shell: bash
         working-directory: clients/rust/crates/rubin-consensus
         run: |
           set -euo pipefail
           export PATH="$HOME/.cargo/bin:$PATH"
-          timeout --signal=TERM 900 cargo kani --output-format=terse
+          timeout --signal=TERM --kill-after=30s 900 cargo kani --output-format=terse
