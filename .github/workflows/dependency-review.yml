@@ -20,4 +20,6 @@ jobs:
         with:
           fail-on-severity: high
           deny-licenses: AGPL-3.0, GPL-3.0
-          comment-summary-in-pr: always
+          comment-summary-in-pr: on-failure
+          retry-on-snapshot-warnings: true
+          retry-on-snapshot-warnings-timeout: 120
