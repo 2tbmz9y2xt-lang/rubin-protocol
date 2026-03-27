@@ -3,7 +3,7 @@ use crate::error::{ErrorCode, TxError};
 use crate::suite_registry::SuiteRegistry;
 use crate::verify_sig_openssl::{verify_sig, verify_sig_with_registry};
 use crate::worker_pool::{
-    collect_values, run_worker_pool, WorkerCancellationToken, WorkerPoolError, WorkerPoolRunError,
+    run_worker_pool, WorkerCancellationToken, WorkerPoolError, WorkerPoolRunError,
 };
 
 // Deferred sigcheck payload comes from witness bytes. Even in a maximally
@@ -242,17 +242,42 @@ fn verify_queued_tasks_batch(
 ) -> Result<(), TxError> {
     let token = WorkerCancellationToken::new();
     let max_tasks = tasks.len();
-    let results = run_worker_pool(&token, workers, max_tasks, tasks, |_cancel, task| {
-        verify_queued_task(task, registry)
+    let results = run_worker_pool(&token, workers, max_tasks, tasks, |cancel, task| {
+        let result = verify_queued_task(task, registry);
+        if result.is_err() {
+            cancel.cancel();
+        }
+        result
     })
     .map_err(sigcheck_batch_run_error_to_tx_error)?;
 
-    // WorkerPool preserves submission order in its result vector. Reducing via
-    // collect_values therefore preserves the deterministic "lowest index
-    // failure wins" contract required by SigCheckQueue.
-    collect_values(results)
-        .map(|_| ())
-        .map_err(worker_pool_sigcheck_error_to_tx_error)
+    // WorkerPool preserves submission order in its result vector. We skip
+    // cancellation markers here so the reduction still returns the earliest
+    // actual verification failure, while late tasks can stop spending CPU once
+    // another worker has already proven the block invalid.
+    let mut saw_cancelled = false;
+    for result in results {
+        match result.error {
+            Some(WorkerPoolError::Task(err)) => return Err(err),
+            Some(WorkerPoolError::Panic(_)) => {
+                return Err(TxError::new(
+                    ErrorCode::TxErrSigInvalid,
+                    "signature worker panic (fail-closed)",
+                ));
+            }
+            Some(WorkerPoolError::Cancelled) => {
+                saw_cancelled = true;
+            }
+            None => {}
+        }
+    }
+    if saw_cancelled {
+        return Err(TxError::new(
+            ErrorCode::TxErrSigInvalid,
+            "signature worker canceled (fail-closed)",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
