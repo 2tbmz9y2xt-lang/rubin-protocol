@@ -28,6 +28,9 @@ jobs:
     name: Kani Proof Check
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      KANI_VERSION: 0.67.0
+      KANI_NIGHTLY: nightly-2025-11-21
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -36,12 +39,19 @@ jobs:
       - name: Install OpenSSL dev headers
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
 
-      # Cache Kani toolchain to avoid re-downloading CBMC (~200 MB) every run.
-      - name: Cache Kani toolchain
+      # Cache the installed Kani CLI, release bundle, and pinned nightly toolchain
+      # so PR reruns do not rebuild/download them from scratch.
+      - name: Cache Kani toolchain + CLI
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
         with:
-          path: ~/.kani
-          key: kani-toolchain-${{ runner.os }}-${{ hashFiles('.github/workflows/kani.yml') }}
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+            ~/.kani
+            ~/.rustup/toolchains/nightly-2025-11-21-x86_64-unknown-linux-gnu
+            ~/.rustup/update-hashes
+          key: kani-toolchain-${{ runner.os }}-${{ env.KANI_VERSION }}-${{ env.KANI_NIGHTLY }}
 
       # Cache Cargo build artifacts for faster recompilation.
       - name: Cache Cargo registry + target
@@ -53,13 +63,32 @@ jobs:
             clients/rust/target
           key: kani-cargo-${{ runner.os }}-${{ hashFiles('clients/rust/Cargo.lock', 'clients/rust/Cargo.toml') }}
 
-      # Keep the current proof surface. Job-level timeout-minutes is the
-      # active fail-closed guard until the Kani action/toolchain supports a
-      # compatible per-harness timeout flag again.
-      - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
-        with:
-          working-directory: clients/rust/crates/rubin-consensus
-          # Keep CLI flags compatible with the Kani action's installed cargo-kani.
-          # Current Kani already fails UB by default; harness timeout needs a
-          # separate toolchain/action upgrade before it can be enforced here.
-          args: '--output-format=terse'
+      - name: Install cached-or-pinned Kani toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+
+          if ! command -v cargo-kani >/dev/null 2>&1 \
+            || ! cargo kani --version | grep -Fq "Kani Rust Verifier ${KANI_VERSION}"; then
+            cargo install --locked kani-verifier --version "${KANI_VERSION}"
+          fi
+
+          if ! rustup toolchain list | grep -Fq "${KANI_NIGHTLY}-x86_64-unknown-linux-gnu"; then
+            rustup toolchain install "${KANI_NIGHTLY}" --profile minimal
+          fi
+
+          if [ ! -d "$HOME/.kani/kani-${KANI_VERSION}" ]; then
+            cargo kani setup
+          fi
+
+      # Keep the current proof surface. Step-level timeout fails closed if a
+      # harness or cargo-kani stalls, while the job-level timeout remains a
+      # backstop for cleanup/cache save.
+      - name: Run Kani proofs
+        shell: bash
+        working-directory: clients/rust/crates/rubin-consensus
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          timeout --signal=TERM 900 cargo kani --output-format=terse

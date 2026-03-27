@@ -2258,7 +2258,11 @@ mod verification {
         cov_data.extend_from_slice(&ext_id.to_le_bytes());
         cov_data.push(0); // CompactSize(0)
 
-        let parsed = parse_core_ext_covenant_data(&cov_data).expect("empty payload core_ext");
+        let parsed = parse_core_ext_covenant_data(&cov_data);
+        assert!(parsed.is_ok());
+        let Ok(parsed) = parsed else {
+            return;
+        };
         assert_eq!(parsed.ext_id, ext_id);
         assert!(parsed.ext_payload.is_empty());
     }
@@ -2272,7 +2276,11 @@ mod verification {
         cov_data.push(1); // CompactSize(1)
         cov_data.push(payload_byte);
 
-        let parsed = parse_core_ext_covenant_data(&cov_data).expect("single-byte payload core_ext");
+        let parsed = parse_core_ext_covenant_data(&cov_data);
+        assert!(parsed.is_ok());
+        let Ok(parsed) = parsed else {
+            return;
+        };
         assert_eq!(parsed.ext_id, ext_id);
         assert_eq!(parsed.ext_payload, &[payload_byte]);
     }
@@ -2285,7 +2293,11 @@ mod verification {
         cov_data.push(2); // CompactSize(2)
         cov_data.push(0xaa); // only one payload byte present
 
-        let err = parse_core_ext_covenant_data(&cov_data).unwrap_err();
+        let parsed = parse_core_ext_covenant_data(&cov_data);
+        assert!(parsed.is_err());
+        let Err(err) = parsed else {
+            return;
+        };
         assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
     }
 }

@@ -238,7 +238,11 @@ mod verification {
         covenant_data.extend_from_slice(&1u16.to_le_bytes()); // whitelist_count
         covenant_data.extend_from_slice(&whitelist_entry);
 
-        let parsed = parse_vault_covenant_data(&covenant_data).expect("minimal canonical vault");
+        let parsed = parse_vault_covenant_data(&covenant_data);
+        assert!(parsed.is_ok());
+        let Ok(parsed) = parsed else {
+            return;
+        };
         assert_eq!(parsed.owner_lock_id, owner_lock_id);
         assert_eq!(parsed.threshold, 1);
         assert_eq!(parsed.key_count, 1);
@@ -255,7 +259,11 @@ mod verification {
         covenant_data.push(1); // threshold
         covenant_data.push(0); // key_count
 
-        let err = parse_vault_covenant_data(&covenant_data).unwrap_err();
+        let parsed = parse_vault_covenant_data(&covenant_data);
+        assert!(parsed.is_err());
+        let Err(err) = parsed else {
+            return;
+        };
         assert_eq!(err.code, ErrorCode::TxErrVaultParamsInvalid);
     }
 
@@ -267,8 +275,11 @@ mod verification {
         covenant_data.push(1); // key_count
         covenant_data.extend_from_slice(&key);
 
-        let parsed =
-            parse_multisig_covenant_data(&covenant_data).expect("minimal canonical multisig");
+        let parsed = parse_multisig_covenant_data(&covenant_data);
+        assert!(parsed.is_ok());
+        let Ok(parsed) = parsed else {
+            return;
+        };
         assert_eq!(parsed.threshold, 1);
         assert_eq!(parsed.key_count, 1);
         assert_eq!(parsed.keys, vec![key]);
@@ -276,12 +287,15 @@ mod verification {
 
     #[kani::proof]
     fn verify_parse_multisig_covenant_data_rejects_zero_key_count() {
-        let mut covenant_data = Vec::with_capacity(2 + 32);
+        let mut covenant_data = Vec::with_capacity(2);
         covenant_data.push(1); // threshold
         covenant_data.push(0); // key_count
-        covenant_data.extend_from_slice(&[7u8; 32]);
 
-        let err = parse_multisig_covenant_data(&covenant_data).unwrap_err();
+        let parsed = parse_multisig_covenant_data(&covenant_data);
+        assert!(parsed.is_err());
+        let Err(err) = parsed else {
+            return;
+        };
         assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
     }
 }
