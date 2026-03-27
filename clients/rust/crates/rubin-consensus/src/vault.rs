@@ -285,12 +285,11 @@ mod verification {
     }
 
     #[kani::proof]
-    fn verify_parse_multisig_covenant_data_rejects_truncated_keys() {
-        let mut covenant_data = Vec::with_capacity(2 + 63);
+    fn verify_parse_multisig_covenant_data_rejects_zero_key_count() {
+        let mut covenant_data = Vec::with_capacity(2 + 32);
         covenant_data.push(1); // threshold
-        covenant_data.push(2); // key_count
+        covenant_data.push(0); // key_count
         covenant_data.extend_from_slice(&[7u8; 32]);
-        covenant_data.extend_from_slice(&[9u8; 31]);
 
         let err = parse_multisig_covenant_data(&covenant_data).unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
