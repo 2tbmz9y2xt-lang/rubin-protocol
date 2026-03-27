@@ -238,6 +238,7 @@ mod verification {
             return;
         };
         assert_eq!(err.code, ErrorCode::TxErrVaultParamsInvalid);
+        assert_eq!(err.msg, "CORE_VAULT key_count out of range");
     }
 
     #[kani::proof]
