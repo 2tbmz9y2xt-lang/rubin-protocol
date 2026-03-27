@@ -89,9 +89,14 @@ pub fn verify_da_payload_commits_parallel(
 }
 
 /// Collect DA chunk-hash verification tasks in the same order as block txs.
-pub fn collect_da_chunk_hash_tasks(txs: &[Tx]) -> Vec<DaChunkHashTask> {
+pub fn collect_da_chunk_hash_tasks(txs: &[Tx]) -> Result<Vec<DaChunkHashTask>, TxError> {
     let mut tasks = Vec::new();
+    let mut total_da_payload_bytes: u64 = 0;
     for (tx_index, tx) in txs.iter().enumerate() {
+        if tx.tx_kind != 0x00 {
+            total_da_payload_bytes =
+                next_block_da_payload_bytes(total_da_payload_bytes, tx.da_payload.len())?;
+        }
         if tx.tx_kind != 0x02 {
             continue;
         }
@@ -104,7 +109,7 @@ pub fn collect_da_chunk_hash_tasks(txs: &[Tx]) -> Vec<DaChunkHashTask> {
             expected: core.chunk_hash,
         });
     }
-    tasks
+    Ok(tasks)
 }
 
 /// Collect payload-commit verification tasks in deterministic DA-ID order.
@@ -378,7 +383,9 @@ mod tests {
         let mut bad_commit = empty_tx();
         bad_commit.tx_kind = 0x01;
 
-        assert!(collect_da_chunk_hash_tasks(&[bad_chunk]).is_empty());
+        assert!(collect_da_chunk_hash_tasks(&[bad_chunk])
+            .expect("malformed helper record should still skip chunk task")
+            .is_empty());
         let commit_err =
             collect_da_payload_commit_tasks(&[bad_commit]).expect_err("missing commit core");
         assert_eq!(commit_err.code, ErrorCode::TxErrParse);
@@ -712,6 +719,37 @@ mod tests {
 
         let err =
             collect_da_payload_commit_tasks(&[commit, chunk]).expect_err("manifest exceeds cap");
+        assert_eq!(err.code, ErrorCode::BlockErrDaBatchExceeded);
+    }
+
+    #[test]
+    fn collect_da_chunk_hash_tasks_counts_commit_manifest_bytes_toward_cap() {
+        let da_id = [0x66; 32];
+        let mut commit = empty_tx();
+        commit.tx_kind = 0x01;
+        commit.da_payload = vec![0u8; MAX_DA_BYTES_PER_BLOCK as usize];
+        commit.da_commit_core = Some(crate::tx::DaCommitCore {
+            da_id,
+            chunk_count: 1,
+            retl_domain_id: [0u8; 32],
+            batch_number: 0,
+            tx_data_root: [0u8; 32],
+            state_root: [0u8; 32],
+            withdrawals_root: [0u8; 32],
+            batch_sig_suite: 0,
+            batch_sig: Vec::new(),
+        });
+
+        let mut chunk = empty_tx();
+        chunk.tx_kind = 0x02;
+        chunk.da_payload = vec![0x01];
+        chunk.da_chunk_core = Some(crate::tx::DaChunkCore {
+            da_id,
+            chunk_index: 0,
+            chunk_hash: [0u8; 32],
+        });
+
+        let err = collect_da_chunk_hash_tasks(&[commit, chunk]).expect_err("manifest exceeds cap");
         assert_eq!(err.code, ErrorCode::BlockErrDaBatchExceeded);
     }
 }

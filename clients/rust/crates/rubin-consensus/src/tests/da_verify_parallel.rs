@@ -48,7 +48,7 @@ fn collect_da_chunk_hash_tasks_preserves_block_tx_order() {
     );
     let parsed = parse_block_bytes(&block).expect("parse block");
 
-    let tasks = collect_da_chunk_hash_tasks(&parsed.txs);
+    let tasks = collect_da_chunk_hash_tasks(&parsed.txs).expect("collect chunk hash tasks");
     assert_eq!(tasks.len(), 2);
     assert_eq!(tasks[0].tx_index, 2);
     assert_eq!(tasks[0].da_payload, payload_b);
@@ -134,8 +134,11 @@ fn verify_da_chunk_hashes_parallel_matches_block_basic_error_code() {
 
     let block_err = validate_block_basic(&block, None, None).expect_err("bad chunk hash");
     let parsed = parse_block_bytes(&block).expect("parse block");
-    let helper_err =
-        verify_da_chunk_hashes_parallel(collect_da_chunk_hash_tasks(&parsed.txs), 4).unwrap_err();
+    let helper_err = verify_da_chunk_hashes_parallel(
+        collect_da_chunk_hash_tasks(&parsed.txs).expect("collect chunk hash tasks"),
+        4,
+    )
+    .unwrap_err();
 
     assert_eq!(block_err.code, ErrorCode::BlockErrDaChunkHashInvalid);
     assert_eq!(helper_err.code, block_err.code);
@@ -214,8 +217,11 @@ fn verify_da_parallel_helpers_accept_valid_multi_set_block() {
     validate_block_basic(&block, None, None).expect("valid DA block");
     let parsed = parse_block_bytes(&block).expect("parse valid block");
 
-    verify_da_chunk_hashes_parallel(collect_da_chunk_hash_tasks(&parsed.txs), 0)
-        .expect("chunk hashes");
+    verify_da_chunk_hashes_parallel(
+        collect_da_chunk_hash_tasks(&parsed.txs).expect("collect chunk hash tasks"),
+        0,
+    )
+    .expect("chunk hashes");
     verify_da_payload_commits_parallel(
         collect_da_payload_commit_tasks(&parsed.txs).expect("collect payload commit tasks"),
         0,
