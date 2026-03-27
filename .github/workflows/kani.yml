@@ -50,11 +50,12 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            clients/rust/crates/rubin-consensus/target
-          key: kani-cargo-${{ runner.os }}-${{ hashFiles('clients/rust/crates/rubin-consensus/Cargo.toml') }}
+            clients/rust/target
+          key: kani-cargo-${{ runner.os }}-${{ hashFiles('clients/rust/Cargo.lock', 'clients/rust/Cargo.toml') }}
 
-      # Keep the current proof surface, but turn on UB diagnostics and cap
-      # per-harness solver time so one pathological proof cannot stall CI.
+      # Keep the current proof surface. Job-level timeout-minutes is the
+      # active fail-closed guard until the Kani action/toolchain supports a
+      # compatible per-harness timeout flag again.
       - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
         with:
           working-directory: clients/rust/crates/rubin-consensus
