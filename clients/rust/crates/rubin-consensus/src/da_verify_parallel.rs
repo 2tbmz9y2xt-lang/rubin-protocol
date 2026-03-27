@@ -120,6 +120,8 @@ pub fn collect_da_payload_commit_tasks(txs: &[Tx]) -> Result<Vec<DaPayloadCommit
     for tx in txs {
         match tx.tx_kind {
             0x01 => {
+                total_da_payload_bytes =
+                    next_block_da_payload_bytes(total_da_payload_bytes, tx.da_payload.len())?;
                 let Some(core) = tx.da_commit_core.as_ref() else {
                     return Err(TxError::new(
                         ErrorCode::TxErrParse,
@@ -140,20 +142,8 @@ pub fn collect_da_payload_commit_tasks(txs: &[Tx]) -> Result<Vec<DaPayloadCommit
                         "missing da_chunk_core for tx_kind=0x02",
                     ));
                 };
-                total_da_payload_bytes = total_da_payload_bytes
-                    .checked_add(tx.da_payload.len() as u64)
-                    .ok_or_else(|| {
-                        TxError::new(
-                            ErrorCode::BlockErrDaBatchExceeded,
-                            "DA payload bytes overflow",
-                        )
-                    })?;
-                if total_da_payload_bytes > MAX_DA_BYTES_PER_BLOCK {
-                    return Err(TxError::new(
-                        ErrorCode::BlockErrDaBatchExceeded,
-                        "DA payload batch exceeds block cap",
-                    ));
-                }
+                total_da_payload_bytes =
+                    next_block_da_payload_bytes(total_da_payload_bytes, tx.da_payload.len())?;
                 chunks.entry(core.da_id).or_default();
                 if chunks
                     .get_mut(&core.da_id)
@@ -257,6 +247,22 @@ pub fn collect_da_payload_commit_tasks(txs: &[Tx]) -> Result<Vec<DaPayloadCommit
     Ok(tasks)
 }
 
+fn next_block_da_payload_bytes(current: u64, da_payload_len: usize) -> Result<u64, TxError> {
+    let next = current.checked_add(da_payload_len as u64).ok_or_else(|| {
+        TxError::new(
+            ErrorCode::BlockErrDaBatchExceeded,
+            "DA payload bytes overflow",
+        )
+    })?;
+    if next > MAX_DA_BYTES_PER_BLOCK {
+        return Err(TxError::new(
+            ErrorCode::BlockErrDaBatchExceeded,
+            "DA payload batch exceeds block cap",
+        ));
+    }
+    Ok(next)
+}
+
 fn reduce_da_results(
     results: Vec<WorkerResult<(), TxError>>,
     infra_code: ErrorCode,
@@ -314,8 +320,9 @@ fn da_run_error_to_tx_error(err: WorkerPoolRunError) -> TxError {
 mod tests {
     use super::{
         collect_da_chunk_hash_tasks, collect_da_payload_commit_tasks, da_run_error_to_tx_error,
-        reduce_da_results, total_payload_len, verify_da_chunk_hashes_parallel,
-        verify_da_payload_commits_parallel, DaChunkHashTask, DaPayloadCommitTask,
+        next_block_da_payload_bytes, reduce_da_results, total_payload_len,
+        verify_da_chunk_hashes_parallel, verify_da_payload_commits_parallel, DaChunkHashTask,
+        DaPayloadCommitTask,
     };
     use crate::constants::{COV_TYPE_DA_COMMIT, MAX_DA_BYTES_PER_BLOCK};
     use crate::error::{ErrorCode, TxError};
@@ -663,5 +670,48 @@ mod tests {
         )
         .expect_err("bad hash");
         assert_eq!(err.code, ErrorCode::BlockErrDaChunkHashInvalid);
+    }
+
+    #[test]
+    fn next_block_da_payload_bytes_rejects_commit_manifest_bytes_above_cap() {
+        let err = next_block_da_payload_bytes(MAX_DA_BYTES_PER_BLOCK, 1).expect_err("cap");
+        assert_eq!(err.code, ErrorCode::BlockErrDaBatchExceeded);
+    }
+
+    #[test]
+    fn collect_da_payload_commit_tasks_counts_commit_manifest_bytes_toward_cap() {
+        let da_id = [0x55; 32];
+        let mut commit = empty_tx();
+        commit.tx_kind = 0x01;
+        commit.da_payload = vec![0u8; MAX_DA_BYTES_PER_BLOCK as usize];
+        commit.da_commit_core = Some(crate::tx::DaCommitCore {
+            da_id,
+            chunk_count: 1,
+            retl_domain_id: [0u8; 32],
+            batch_number: 0,
+            tx_data_root: [0u8; 32],
+            state_root: [0u8; 32],
+            withdrawals_root: [0u8; 32],
+            batch_sig_suite: 0,
+            batch_sig: Vec::new(),
+        });
+        commit.outputs.push(crate::tx::TxOutput {
+            value: 0,
+            covenant_type: COV_TYPE_DA_COMMIT,
+            covenant_data: vec![0u8; 32],
+        });
+
+        let mut chunk = empty_tx();
+        chunk.tx_kind = 0x02;
+        chunk.da_payload = vec![0x01];
+        chunk.da_chunk_core = Some(crate::tx::DaChunkCore {
+            da_id,
+            chunk_index: 0,
+            chunk_hash: [0u8; 32],
+        });
+
+        let err =
+            collect_da_payload_commit_tasks(&[commit, chunk]).expect_err("manifest exceeds cap");
+        assert_eq!(err.code, ErrorCode::BlockErrDaBatchExceeded);
     }
 }
