@@ -219,3 +219,83 @@ pub fn hash_in_sorted_32(list: &[[u8; 32]], target: &[u8; 32]) -> bool {
 fn strictly_sorted_unique_32(xs: &[[u8; 32]]) -> bool {
     xs.windows(2).all(|w| w[0] < w[1])
 }
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    fn verify_parse_vault_covenant_data_accepts_minimal_canonical_shape() {
+        let owner_lock_id: [u8; 32] = kani::any();
+        let key: [u8; 32] = kani::any();
+        let whitelist_entry: [u8; 32] = kani::any();
+        kani::assume(key != owner_lock_id);
+        kani::assume(whitelist_entry != owner_lock_id);
+
+        let mut covenant_data = Vec::with_capacity(32 + 1 + 1 + 32 + 2 + 32);
+        covenant_data.extend_from_slice(&owner_lock_id);
+        covenant_data.push(1); // threshold
+        covenant_data.push(1); // key_count
+        covenant_data.extend_from_slice(&key);
+        covenant_data.extend_from_slice(&1u16.to_le_bytes()); // whitelist_count
+        covenant_data.extend_from_slice(&whitelist_entry);
+
+        let parsed = parse_vault_covenant_data(&covenant_data).expect("minimal canonical vault");
+        assert_eq!(parsed.owner_lock_id, owner_lock_id);
+        assert_eq!(parsed.threshold, 1);
+        assert_eq!(parsed.key_count, 1);
+        assert_eq!(parsed.keys, vec![key]);
+        assert_eq!(parsed.whitelist_count, 1);
+        assert_eq!(parsed.whitelist, vec![whitelist_entry]);
+    }
+
+    #[kani::proof]
+    fn verify_parse_vault_covenant_data_rejects_unsorted_keys() {
+        let owner_lock_id = [0u8; 32];
+        let key_hi = [2u8; 32];
+        let key_lo = [1u8; 32];
+        let whitelist_entry = [3u8; 32];
+
+        let mut covenant_data = Vec::with_capacity(32 + 1 + 1 + 64 + 2 + 32);
+        covenant_data.extend_from_slice(&owner_lock_id);
+        covenant_data.push(1); // threshold
+        covenant_data.push(2); // key_count
+        covenant_data.extend_from_slice(&key_hi);
+        covenant_data.extend_from_slice(&key_lo);
+        covenant_data.extend_from_slice(&1u16.to_le_bytes()); // whitelist_count
+        covenant_data.extend_from_slice(&whitelist_entry);
+
+        let err = parse_vault_covenant_data(&covenant_data).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrVaultKeysNotCanonical);
+    }
+
+    #[kani::proof]
+    fn verify_parse_multisig_covenant_data_accepts_minimal_canonical_shape() {
+        let key: [u8; 32] = kani::any();
+        let mut covenant_data = Vec::with_capacity(2 + 32);
+        covenant_data.push(1); // threshold
+        covenant_data.push(1); // key_count
+        covenant_data.extend_from_slice(&key);
+
+        let parsed =
+            parse_multisig_covenant_data(&covenant_data).expect("minimal canonical multisig");
+        assert_eq!(parsed.threshold, 1);
+        assert_eq!(parsed.key_count, 1);
+        assert_eq!(parsed.keys, vec![key]);
+    }
+
+    #[kani::proof]
+    fn verify_parse_multisig_covenant_data_rejects_unsorted_keys() {
+        let key_hi = [2u8; 32];
+        let key_lo = [1u8; 32];
+
+        let mut covenant_data = Vec::with_capacity(2 + 64);
+        covenant_data.push(1); // threshold
+        covenant_data.push(2); // key_count
+        covenant_data.extend_from_slice(&key_hi);
+        covenant_data.extend_from_slice(&key_lo);
+
+        let err = parse_multisig_covenant_data(&covenant_data).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    }
+}

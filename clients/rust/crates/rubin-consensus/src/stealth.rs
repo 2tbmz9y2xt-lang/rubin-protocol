@@ -298,3 +298,29 @@ mod tests {
         assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
     }
 }
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    fn verify_parse_stealth_covenant_data_accepts_exact_length() {
+        let cov_data: [u8; MAX_STEALTH_COVENANT_DATA as usize] = kani::any();
+        let parsed = parse_stealth_covenant_data(&cov_data).expect("exact-length stealth covenant");
+        assert_eq!(
+            parsed.ciphertext,
+            cov_data[..ML_KEM_1024_CT_BYTES as usize].to_vec()
+        );
+        assert_eq!(
+            parsed.one_time_key_id,
+            <[u8; 32]>::try_from(&cov_data[ML_KEM_1024_CT_BYTES as usize..]).expect("key slice")
+        );
+    }
+
+    #[kani::proof]
+    fn verify_parse_stealth_covenant_data_rejects_short_length() {
+        let cov_data: [u8; (MAX_STEALTH_COVENANT_DATA as usize) - 1] = kani::any();
+        let err = parse_stealth_covenant_data(&cov_data).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    }
+}

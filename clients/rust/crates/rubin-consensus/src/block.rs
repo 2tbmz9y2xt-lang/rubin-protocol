@@ -50,3 +50,46 @@ pub fn block_hash(header_bytes: &[u8]) -> Result<[u8; 32], TxError> {
     }
     Ok(sha3_256(header_bytes))
 }
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    fn verify_parse_block_header_bytes_accepts_exact_length() {
+        let buf: [u8; BLOCK_HEADER_BYTES] = kani::any();
+        let header = parse_block_header_bytes(&buf).expect("exact-length header must parse");
+
+        assert_eq!(
+            header.version,
+            u32::from_le_bytes(buf[0..4].try_into().unwrap())
+        );
+        assert_eq!(
+            header.prev_block_hash,
+            <[u8; 32]>::try_from(&buf[4..36]).expect("prev_block_hash slice")
+        );
+        assert_eq!(
+            header.merkle_root,
+            <[u8; 32]>::try_from(&buf[36..68]).expect("merkle_root slice")
+        );
+        assert_eq!(
+            header.timestamp,
+            u64::from_le_bytes(buf[68..76].try_into().unwrap())
+        );
+        assert_eq!(
+            header.target,
+            <[u8; 32]>::try_from(&buf[76..108]).expect("target slice")
+        );
+        assert_eq!(
+            header.nonce,
+            u64::from_le_bytes(buf[108..116].try_into().unwrap())
+        );
+    }
+
+    #[kani::proof]
+    fn verify_parse_block_header_bytes_rejects_short_length() {
+        let buf: [u8; BLOCK_HEADER_BYTES - 1] = kani::any();
+        let err = parse_block_header_bytes(&buf).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+    }
+}
