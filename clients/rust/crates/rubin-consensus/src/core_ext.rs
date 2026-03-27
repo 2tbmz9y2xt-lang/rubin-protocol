@@ -2271,6 +2271,17 @@ mod tests {
         let token = GovernanceReplayToken::issue(7, 0, 100, 25);
         assert!(token.validate(7, 110, 0).is_ok());
     }
+
+    #[test]
+    fn parse_core_ext_covenant_data_rejects_huge_payload_len_without_panicking() {
+        let cov_data = [
+            0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f, 0x00,
+        ];
+
+        let err = parse_core_ext_covenant_data(&cov_data).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+        assert_eq!(err.msg, "CORE_EXT covenant_data length mismatch");
+    }
 }
 
 #[cfg(kani)]
