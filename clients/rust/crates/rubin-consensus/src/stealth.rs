@@ -305,7 +305,9 @@ mod verification {
 
     #[kani::proof]
     fn verify_parse_stealth_covenant_data_accepts_exact_length() {
-        let cov_data = [0x5au8; MAX_STEALTH_COVENANT_DATA as usize];
+        let mut cov_data = [0u8; MAX_STEALTH_COVENANT_DATA as usize];
+        cov_data[..ML_KEM_1024_CT_BYTES as usize].fill(0x5a);
+        cov_data[ML_KEM_1024_CT_BYTES as usize..].fill(0xa5);
         let parsed = parse_stealth_covenant_data(&cov_data);
         assert!(parsed.is_ok());
         let Ok(parsed) = parsed else {

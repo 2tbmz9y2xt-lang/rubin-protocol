@@ -69,8 +69,12 @@ jobs:
           set -euo pipefail
           export PATH="$HOME/.cargo/bin:$PATH"
 
-          if ! command -v cargo-kani >/dev/null 2>&1 \
-            || ! cargo kani --version | grep -Fq "Kani Rust Verifier ${KANI_VERSION}"; then
+          current_kani_version=""
+          if command -v cargo-kani >/dev/null 2>&1; then
+            current_kani_version="$(cargo-kani --version | awk '{print $2}')"
+          fi
+
+          if [ "${current_kani_version}" != "${KANI_VERSION}" ]; then
             cargo install --locked kani-verifier --version "${KANI_VERSION}"
           fi
 
