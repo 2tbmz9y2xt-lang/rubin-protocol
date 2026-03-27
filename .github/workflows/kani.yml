@@ -58,4 +58,7 @@ jobs:
       - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
         with:
           working-directory: clients/rust/crates/rubin-consensus
-          args: '--output-format=terse --ub-check --harness-timeout 120'
+          # Keep CLI flags compatible with the Kani action's installed cargo-kani.
+          # Current Kani already fails UB by default; harness timeout needs a
+          # separate toolchain/action upgrade before it can be enforced here.
+          args: '--output-format=terse'
