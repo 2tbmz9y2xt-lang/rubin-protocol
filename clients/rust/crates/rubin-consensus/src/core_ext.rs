@@ -766,12 +766,6 @@ fn validate_core_ext_spend_with_cache_impl(
         }
         let mut sig_queue = sig_queue;
         let (crypto_sig, sighash_type) = extract_crypto_sig_and_sighash(w)?;
-        if !is_valid_sighash_type(sighash_type) {
-            return Err(TxError::new(
-                ErrorCode::TxErrSighashTypeInvalid,
-                "invalid sighash_type",
-            ));
-        }
         let digest32 =
             sighash_v1_digest_with_cache(cache, input_index, input_value, chain_id, sighash_type)?;
         return queue_or_verify_signature(

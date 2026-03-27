@@ -5,7 +5,7 @@ use crate::constants::{
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
 use crate::sig_queue::{queue_or_verify_signature, SigCheckQueue};
-use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_cache, SighashV1PrehashCache};
+use crate::sighash::{sighash_v1_digest_with_cache, SighashV1PrehashCache};
 use crate::spend_verify::extract_crypto_sig_and_sighash;
 use crate::suite_registry::{DefaultRotationProvider, RotationProvider, SuiteRegistry};
 use crate::tx::{Tx, WitnessItem};
@@ -317,12 +317,6 @@ pub(crate) fn validate_htlc_spend_q(
     }
 
     let (crypto_sig, sighash_type) = extract_crypto_sig_and_sighash(sig_item)?;
-    if !is_valid_sighash_type(sighash_type) {
-        return Err(TxError::new(
-            ErrorCode::TxErrSighashTypeInvalid,
-            "invalid sighash_type",
-        ));
-    }
     let digest32 =
         sighash_v1_digest_with_cache(cache, input_index, input_value, chain_id, sighash_type)?;
     queue_or_verify_signature(
