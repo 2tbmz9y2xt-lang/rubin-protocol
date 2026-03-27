@@ -3,7 +3,7 @@ use crate::error::{ErrorCode, TxError};
 use crate::suite_registry::SuiteRegistry;
 use crate::verify_sig_openssl::{verify_sig, verify_sig_with_registry};
 use crate::worker_pool::{
-    collect_values, run_worker_pool, WorkerCancellationToken, WorkerPoolError,
+    collect_values, run_worker_pool, WorkerCancellationToken, WorkerPoolError, WorkerPoolRunError,
 };
 
 // Deferred sigcheck payload comes from witness bytes. Even in a maximally
@@ -245,8 +245,11 @@ fn verify_queued_tasks_batch(
     let results = run_worker_pool(&token, workers, max_tasks, tasks, |_cancel, task| {
         verify_queued_task(task, registry)
     })
-    .expect("sigcheck batch max_tasks derived from task vector length");
+    .map_err(sigcheck_batch_run_error_to_tx_error)?;
 
+    // WorkerPool preserves submission order in its result vector. Reducing via
+    // collect_values therefore preserves the deterministic "lowest index
+    // failure wins" contract required by SigCheckQueue.
     collect_values(results)
         .map(|_| ())
         .map_err(worker_pool_sigcheck_error_to_tx_error)
@@ -263,8 +266,15 @@ pub(crate) fn verify_signatures_batch(
 
     let token = WorkerCancellationToken::new();
     let max_tasks = tasks.len();
-    let results = run_worker_pool(&token, workers, max_tasks, tasks, |_cancel, task| {
-        let ok = verify_sig(task.suite_id, &task.pubkey, &task.sig, &task.digest)?;
+    let registry = SuiteRegistry::default_registry();
+    let results = match run_worker_pool(&token, workers, max_tasks, tasks, |_cancel, task| {
+        let ok = verify_sig_with_registry(
+            task.suite_id,
+            &task.pubkey,
+            &task.sig,
+            &task.digest,
+            Some(&registry),
+        )?;
         if !ok {
             return Err(TxError::new(
                 ErrorCode::TxErrSigInvalid,
@@ -272,8 +282,12 @@ pub(crate) fn verify_signatures_batch(
             ));
         }
         Ok(())
-    })
-    .expect("sigverify batch max_tasks derived from task vector length");
+    }) {
+        Ok(results) => results,
+        Err(run_err) => {
+            return vec![Some(sigcheck_batch_run_error_to_tx_error(run_err)); max_tasks];
+        }
+    };
 
     results
         .into_iter()
@@ -291,6 +305,19 @@ fn worker_pool_sigcheck_error_to_tx_error(err: WorkerPoolError<TxError>) -> TxEr
         WorkerPoolError::Panic(_) => TxError::new(
             ErrorCode::TxErrSigInvalid,
             "signature worker panic (fail-closed)",
+        ),
+    }
+}
+
+fn sigcheck_batch_run_error_to_tx_error(err: WorkerPoolRunError) -> TxError {
+    match err {
+        WorkerPoolRunError::InvalidMaxTasks => TxError::new(
+            ErrorCode::TxErrSigInvalid,
+            "signature batch worker pool misconfigured",
+        ),
+        WorkerPoolRunError::TooManyTasks { .. } => TxError::new(
+            ErrorCode::TxErrWitnessOverflow,
+            "signature batch task budget exceeded",
         ),
     }
 }
