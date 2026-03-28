@@ -277,6 +277,45 @@ jobs:
               ? '\n\n---\nDEPENDENCY CONTRACTS (doc-comments and signatures of functions imported by changed files — use these to verify cross-module invariants before reporting findings):\n\n' + depEntries.join('\n')
               : '';
 
+            // ── Cross-language parity context ────────────────────────────
+            // When consensus-critical Go files change, inject the Rust
+            // counterpart (and vice versa) so the model can verify parity
+            // claims with actual evidence instead of hallucinating.
+            const PARITY_BUDGET = 30000;
+            const parityMap = [
+              // Go → Rust parity pairs (consensus-critical files)
+              ['clients/go/consensus/wire_read.go',   'clients/rust/crates/rubin-consensus/src/wire_read.rs'],
+              ['clients/go/consensus/tx_helpers.go',   'clients/rust/crates/rubin-consensus/src/tx_helpers.rs'],
+              ['clients/go/consensus/transaction.go',  'clients/rust/crates/rubin-consensus/src/transaction.rs'],
+              ['clients/go/consensus/block.go',        'clients/rust/crates/rubin-consensus/src/block.rs'],
+              ['clients/go/consensus/script_engine.go','clients/rust/crates/rubin-consensus/src/script_engine.rs'],
+              ['clients/go/consensus/constants.go',    'clients/rust/crates/rubin-consensus/src/constants.rs'],
+              ['clients/go/consensus/covenant.go',     'clients/rust/crates/rubin-consensus/src/covenant.rs'],
+            ];
+            const parityEntries = [];
+            let parityUsed = 0;
+            for (const file of changedFiles) {
+              if (parityUsed >= PARITY_BUDGET) break;
+              // Find the parity counterpart (either direction)
+              for (const [goFile, rsFile] of parityMap) {
+                let counterpart = null;
+                if (file === goFile && !changedFiles.includes(rsFile)) counterpart = rsFile;
+                else if (file === rsFile && !changedFiles.includes(goFile)) counterpart = goFile;
+                if (!counterpart) continue;
+                const content = readChangedFile(counterpart);
+                if (!content) continue;
+                const header = `PARITY FILE: ${counterpart} (counterpart of changed ${file})\n`;
+                const cap = Math.min(PARITY_BUDGET - parityUsed - header.length, PER_FILE_CAP);
+                if (cap < 200) continue;
+                const entry = header + content.slice(0, cap);
+                parityEntries.push(entry);
+                parityUsed += entry.length;
+              }
+            }
+            const parityContext = parityEntries.length > 0
+              ? '\n\n---\nPARITY CONTEXT (counterpart files from the other client — use to verify cross-client consistency BEFORE reporting divergence):\n\n' + parityEntries.join(SEPARATOR)
+              : '';
+
             const systemPrompt = [
               'You are a HOSTILE protocol security auditor for the RUBIN blockchain protocol.',
               'Your job is NOT to help the author — it is to BREAK their code and find every exploitable flaw.',
@@ -309,7 +348,16 @@ jobs:
               '- Check EVERY error path: does it fail-closed or fail-open?',
               '- If Go code changed: would the same logic in Rust produce identical results? Flag if uncertain.',
               '- If Rust code changed: would the same logic in Go produce identical results? Flag if uncertain.',
+              '- CROSS-CLIENT EVIDENCE RULE (MANDATORY): BEFORE reporting consensus divergence between Go and Rust,',
+              '  you MUST cite concrete evidence from BOTH clients\' code. If you only see one client\'s code in the',
+              '  diff/context, check the PARITY CONTEXT section below. If you have NO evidence from the other client,',
+              '  do NOT report divergence — add it to unreviewed_sections instead.',
               '- If cryptographic code changed: verify parameter sizes, check for timing side-channels.',
+              '- CRYPTO STANDARD ANTI-HALLUCINATION (MANDATORY): NEVER claim a cryptographic standard (FIPS, NIST,',
+              '  RFC) allows, requires, or forbids something based on your training knowledge. Crypto standards are',
+              '  complex — only report findings about standard compliance if the SPECIFIC requirement is visible in',
+              '  the code diff or context. ML-DSA-87 (FIPS 204) signatures are EXACTLY 4627 bytes (fixed-length,',
+              '  lattice bitpacking). Do NOT assume variable-length encoding unless code explicitly shows it.',
               '- NEVER say "looks good" or "no issues found" if you have not verified every line.',
               '- If the diff is too large to fully verify, say so explicitly and flag unreviewed sections.',
               '- DEDUPLICATION (MANDATORY): Check the PREVIOUSLY REPORTED section below the diff.',
@@ -370,7 +418,7 @@ jobs:
                     model: modelId,
                     messages: [
                       { role: 'system', content: systemPrompt },
-                      { role: 'user', content: `Review this PR diff for security vulnerabilities. Be hostile — assume every change is a potential exploit vector.\n\nDIFF:\n${diff}${changedFilePayload ? `\n\n---\nFULL CHANGED FILES (use to verify definitions before claiming anything missing):\n${changedFilePayload}` : ''}${dependencyContext}${previousFindings}` }
+                      { role: 'user', content: `Review this PR diff for security vulnerabilities. Be hostile — assume every change is a potential exploit vector.\n\nDIFF:\n${diff}${changedFilePayload ? `\n\n---\nFULL CHANGED FILES (use to verify definitions before claiming anything missing):\n${changedFilePayload}` : ''}${dependencyContext}${parityContext}${previousFindings}` }
                     ],
                     temperature: 0.6,
                     top_p: 0.95

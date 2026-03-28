@@ -3,7 +3,7 @@ package consensus
 import "encoding/binary"
 
 func readU8(b []byte, off *int) (uint8, error) {
-	if *off+1 > len(b) {
+	if *off < 0 || *off >= len(b) {
 		return 0, txerr(TX_ERR_PARSE, "unexpected EOF (u8)")
 	}
 	v := b[*off]
@@ -12,7 +12,7 @@ func readU8(b []byte, off *int) (uint8, error) {
 }
 
 func readU16le(b []byte, off *int) (uint16, error) {
-	if *off+2 > len(b) {
+	if *off < 0 || *off > len(b) || 2 > len(b)-*off {
 		return 0, txerr(TX_ERR_PARSE, "unexpected EOF (u16le)")
 	}
 	v := binary.LittleEndian.Uint16(b[*off : *off+2])
@@ -21,7 +21,7 @@ func readU16le(b []byte, off *int) (uint16, error) {
 }
 
 func readU32le(b []byte, off *int) (uint32, error) {
-	if *off+4 > len(b) {
+	if *off < 0 || *off > len(b) || 4 > len(b)-*off {
 		return 0, txerr(TX_ERR_PARSE, "unexpected EOF (u32le)")
 	}
 	v := binary.LittleEndian.Uint32(b[*off : *off+4])
@@ -30,7 +30,7 @@ func readU32le(b []byte, off *int) (uint32, error) {
 }
 
 func readU64le(b []byte, off *int) (uint64, error) {
-	if *off+8 > len(b) {
+	if *off < 0 || *off > len(b) || 8 > len(b)-*off {
 		return 0, txerr(TX_ERR_PARSE, "unexpected EOF (u64le)")
 	}
 	v := binary.LittleEndian.Uint64(b[*off : *off+8])
