@@ -488,10 +488,9 @@ fn try_acquire_session_slot(
                 active_sessions: Arc::clone(&shared.active_sessions),
             });
         }
-        // CAS contention — yield the CPU before retrying.
-        // `yield_now()` is a regular function call (unlike `spin_loop()` which
-        // is a CPU intrinsic with no debug-info), so tarpaulin can instrument it.
-        std::thread::yield_now();
+        // CAS contention — spin_loop tells the CPU to pause briefly (PAUSE
+        // on x86, YIELD on ARM) before retrying, reducing bus contention.
+        std::hint::spin_loop();
     }
 }
 
