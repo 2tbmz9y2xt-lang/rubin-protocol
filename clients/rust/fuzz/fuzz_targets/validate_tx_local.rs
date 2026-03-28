@@ -82,25 +82,32 @@ fuzz_target!(|data: &[u8]| {
                 cd
             }
             0x0100 => {
-                // HTLC: hash_type(1) + hash(32) + timeout(4) + suite_id(1) + pubkey_a(32) + pubkey_b(32)
-                let mut cd = vec![0x01u8]; // hash_type
-                cd.extend_from_slice(&[0u8; 32]); // hash
-                cd.extend_from_slice(&[0x00, 0x00, 0x01, 0x00]); // timeout=256
-                cd.push(suite_id);
-                // pubkey_a
-                let mut ka = [0u8; 32];
+                // HTLC: hash[32] + lock_mode[1] + lock_value[8] + claim_key_id[32] + refund_key_id[32] = 105 bytes
+                // (MAX_HTLC_COVENANT_DATA). Matches parse_htlc_covenant_data layout.
+                let mut cd = Vec::with_capacity(105);
+                // hash (32 bytes) — fill from fuzz pk data
+                let mut hash = [0u8; 32];
                 for (j, b) in pk.iter().take(32).enumerate() {
-                    ka[j] = *b;
+                    hash[j] = *b;
                 }
-                cd.extend_from_slice(&ka);
-                // pubkey_b
+                cd.extend_from_slice(&hash);
+                // lock_mode: 0x00 = LOCK_MODE_HEIGHT
+                cd.push(0x00);
+                // lock_value: non-zero height
+                cd.extend_from_slice(&256u64.to_le_bytes());
+                // claim_key_id (32 bytes)
+                let mut claim = [0u8; 32];
+                claim[0] = suite_id;
+                cd.extend_from_slice(&claim);
+                // refund_key_id (32 bytes)
                 cd.extend_from_slice(&[0x02u8; 32]);
                 cd
             }
             0x0104 => {
-                // MULTISIG: suite_id(1) + threshold(1) + key_count(1) + keys(N*32)
-                // threshold=1, key_count=1 for simplicity → 1 witness slot
-                let mut cd = vec![suite_id, 1u8, 1u8];
+                // MULTISIG: threshold(1) + key_count(1) + keys(N*32)
+                // Matches parse_multisig_covenant_data: NO suite_id prefix.
+                // threshold=1, key_count=1 → total = 2 + 32 = 34 bytes, 1 witness slot
+                let mut cd = vec![1u8, 1u8]; // threshold, key_count
                 let mut key = [0u8; 32];
                 for (j, b) in pk.iter().take(32).enumerate() {
                     key[j] = *b;
@@ -110,7 +117,9 @@ fuzz_target!(|data: &[u8]| {
             }
             0x0101 => {
                 // VAULT: owner_lock_id(32) + threshold(1) + key_count(1) + keys(N*32)
-                // threshold at byte 33 = 1, key_count = 1 → 1 witness slot
+                //      + whitelist_count(2) + whitelist(N*32)
+                // Matches parse_vault_covenant_data_for_spend. threshold=1, key_count=1,
+                // whitelist_count=1. Total = 32+1+1+32+2+32 = 100 bytes.
                 let mut cd = vec![0u8; 32]; // owner_lock_id
                 cd.push(1u8); // threshold
                 cd.push(1u8); // key_count
@@ -119,6 +128,10 @@ fuzz_target!(|data: &[u8]| {
                     key[j] = *b;
                 }
                 cd.extend_from_slice(&key);
+                // whitelist_count = 1 (little-endian u16)
+                cd.extend_from_slice(&1u16.to_le_bytes());
+                // whitelist entry: 32 bytes
+                cd.extend_from_slice(&[0x01u8; 32]);
                 cd
             }
             _ => {
