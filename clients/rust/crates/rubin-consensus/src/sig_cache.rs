@@ -267,23 +267,10 @@ mod tests {
 mod verification {
     use super::*;
 
-    /// Proves that sig_cache_key is deterministic: same inputs always produce
-    /// the same output.
-    #[kani::proof]
-    fn sig_cache_key_deterministic() {
-        let suite_id: u8 = kani::any();
-        let pubkey = [kani::any::<u8>(); 4];
-        let sig = [kani::any::<u8>(); 4];
-        let digest: [u8; 32] = kani::any();
-
-        let k1 = sig_cache_key(suite_id, &pubkey, &sig, digest);
-        let k2 = sig_cache_key(suite_id, &pubkey, &sig, digest);
-        assert_eq!(k1, k2);
-    }
-
-    // NOTE: sig_cache_key_suite_sensitivity removed — asserts collision-freedom
-    // on SHA3-256 which is SAT-intractable for Kani (see kani.yml header).
-    // Collision resistance is tested empirically in unit tests instead.
+    // NOTE: sig_cache_key_deterministic and sig_cache_key_suite_sensitivity removed —
+    // both call sig_cache_key → sha3_256 (Keccak-f[1600] 24-round permutation)
+    // which is SAT-intractable for Kani (see kani.yml header lines 8-9).
+    // Determinism and collision resistance are tested empirically in unit tests.
 
     /// Proves that capacity clamping always produces capacity >= 1.
     #[kani::proof]
