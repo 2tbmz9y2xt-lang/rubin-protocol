@@ -347,7 +347,14 @@ func FuzzUtxoApplyNonCoinbase(f *testing.F) {
 			tx.Version = uint32(txData[0])
 		}
 
-		const utxoValue uint64 = 1000
+		// Derive UTXO value from fuzz data to exercise value conservation edge cases.
+		var utxoValue uint64 = 1000
+		if len(txData) > 6 {
+			utxoValue = uint64(txData[5])<<8 | uint64(txData[6])
+		}
+		if utxoValue == 0 {
+			utxoValue = 1 // must be non-zero for valid UTXO
+		}
 
 		// Build inputs — each with a unique prevTxid derived from seedA.
 		for i := 0; i < inputCount; i++ {

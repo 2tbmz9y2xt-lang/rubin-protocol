@@ -34,15 +34,6 @@ fuzz_target!(|data: &[u8]| {
         chain_id,
     );
 
-    // Invariant (Rust-specific): Result<T,E> guarantees exactly-one-of Ok/Err
-    // by type system. Verify Ok-path fields are internally consistent.
-    if let Ok(ref s1) = r1 {
-        assert!(
-            s1.sum_fees <= u64::MAX,
-            "sum_fees overflow"
-        );
-    }
-
     // Determinism: second call with fresh state must produce same result class.
     let mut state2 = rubin_consensus::InMemoryChainState {
         utxos: HashMap::new(),
@@ -59,6 +50,8 @@ fuzz_target!(|data: &[u8]| {
         chain_id,
     );
 
+    // Invariant: Result<T,E> guarantees exactly-one-of Ok/Err by Rust type system.
+    // Verify summary fields and state consistency across both calls.
     match (&r1, &r2) {
         (Ok(s1), Ok(s2)) => {
             assert_eq!(s1.sum_fees, s2.sum_fees, "non-deterministic fees");
@@ -66,8 +59,25 @@ fuzz_target!(|data: &[u8]| {
                 s1.post_state_digest, s2.post_state_digest,
                 "non-deterministic post-state digest"
             );
+            // On success: UTXO set must have been mutated (at least coinbase output).
+            assert!(
+                !state.utxos.is_empty(),
+                "successful block connection left UTXO set empty"
+            );
+            // Both states must be identical after processing identical input.
+            assert_eq!(
+                state.utxos.len(), state2.utxos.len(),
+                "non-deterministic UTXO set size"
+            );
         }
-        (Err(_), Err(_)) => {} // both error — ok
+        (Err(_), Err(_)) => {
+            // On error: both states should have identical partial mutations
+            // (coinbase may have been applied before a later tx failed).
+            assert_eq!(
+                state.utxos.len(), state2.utxos.len(),
+                "non-deterministic UTXO set size on error"
+            );
+        }
         _ => panic!("non-deterministic: one ok, one err"),
     }
 });
