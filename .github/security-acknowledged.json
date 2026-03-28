@@ -302,6 +302,20 @@
       "reason": "ADDRESSED: hash module is private (mod hash, not pub mod hash). Fuzz target mirrors rubin_consensus::hash::sha3_256 using same sha3 crate and algorithm. Documented with comment referencing consensus module.",
       "acknowledged_by": "architect",
       "date": "2026-03-28"
+    },
+    {
+      "title_pattern": "Consensus divergence in UTXO state handling",
+      "file_pattern": "fuzz_state_transition_test.go",
+      "reason": "FALSE_POSITIVE: Fuzz test UTXO map has exactly 1 entry \u2014 iteration order irrelevant. Determinism check compares two calls of same Go code, not Go vs Rust. Production PostStateDigest uses sorted iteration for cross-client determinism.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-28"
+    },
+    {
+      "title_pattern": "Signature validation bypass in fuzz test",
+      "file_pattern": "fuzz_state_transition_test.go",
+      "reason": "FALSE_POSITIVE: ML_DSA_87_SIG_BYTES+1 (4628) is the standard wire format: 4627-byte signature + 1 sighash type byte. Production block_basic.go:507 validates this exact length. Used in all existing tests (block_basic_additional_test.go, connect_block_parallel_branches_test.go).",
+      "acknowledged_by": "architect",
+      "date": "2026-03-28"
     }
   ]
 }
