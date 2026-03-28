@@ -489,16 +489,13 @@ fn try_acquire_session_slot(
             });
         }
         // CAS failed due to contention — hint the CPU before retrying.
-        cas_spin_backoff();
+        // `compiler_fence` is a no-op at runtime (zero instructions on all
+        // architectures) but is opaque to LLVM, preventing it from merging
+        // this block's debug-info with the CAS branch above.  This ensures
+        // tarpaulin sees a distinct coverage counter for the retry path.
+        std::sync::atomic::compiler_fence(Ordering::SeqCst);
+        std::hint::spin_loop();
     }
-}
-
-/// CPU spin-wait hint wrapper.  Extracted so tarpaulin can instrument the
-/// call-site (compiler intrinsics like `core::hint::spin_loop` inline away
-/// and produce no debug-info coverage counters).
-#[inline(never)]
-fn cas_spin_backoff() {
-    std::hint::spin_loop();
 }
 
 fn outbound_connect_timeout(cfg: &PeerRuntimeConfig) -> Duration {
@@ -1668,12 +1665,6 @@ mod tests {
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
-    /// Direct call to `cas_spin_backoff` to guarantee tarpaulin coverage
-    /// of the wrapper function body, independent of CAS contention timing.
-    #[test]
-    fn cas_spin_backoff_covered() {
-        super::cas_spin_backoff();
-    }
 
     #[test]
     fn accept_error_backoff_constants_valid() {
