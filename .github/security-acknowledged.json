@@ -19,7 +19,7 @@
     {
       "title_pattern": "DNS Resolution",
       "file_pattern": "p2p_service.rs",
-      "reason": "MITIGATED: same as DNS Resolver — bounded pool with timeout",
+      "reason": "MITIGATED: same as DNS Resolver \u2014 bounded pool with timeout",
       "acknowledged_by": "architect",
       "date": "2026-03-25"
     },
@@ -33,7 +33,7 @@
     {
       "title_pattern": "Orphan Pool",
       "file_pattern": "p2p_runtime.rs",
-      "reason": "MITIGATED: same as Orphan Block Pool — byte limit + eviction + size check",
+      "reason": "MITIGATED: same as Orphan Block Pool \u2014 byte limit + eviction + size check",
       "acknowledged_by": "architect",
       "date": "2026-03-25"
     },
@@ -68,7 +68,7 @@
     {
       "title_pattern": "SyncEngine Lock",
       "file_pattern": "p2p_service.rs",
-      "reason": "ACCEPTED_RISK: lock held during message processing bounded by MAX_RELAY_MSG_BYTES + block validation. Splitting requires major async refactor — deferred to post-MVP.",
+      "reason": "ACCEPTED_RISK: lock held during message processing bounded by MAX_RELAY_MSG_BYTES + block validation. Splitting requires major async refactor \u2014 deferred to post-MVP.",
       "acknowledged_by": "architect",
       "date": "2026-03-25"
     },
@@ -82,70 +82,70 @@
     {
       "title_pattern": "Transaction ID Malleability Due to Non-Canonical Parsing",
       "file_pattern": "tx_relay.rs",
-      "reason": "FALSE_POSITIVE: matches the exact DeepSeek title. Go canonicalTxID (handlers_tx.go:41) uses identical consumed!=len check. Zero divergence — both reject trailing bytes.",
+      "reason": "FALSE_POSITIVE: matches the exact DeepSeek title. Go canonicalTxID (handlers_tx.go:41) uses identical consumed!=len check. Zero divergence \u2014 both reject trailing bytes.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
     {
       "title_pattern": "Consensus Divergence Risk in Transaction ID Calculation",
       "file_pattern": "tx_relay.rs",
-      "reason": "FALSE_POSITIVE: matches the exact earlier DeepSeek title for the same parser concern. Rust canonical_txid mirrors Go canonicalTxID exactly (consumed != len → error).",
+      "reason": "FALSE_POSITIVE: matches the exact earlier DeepSeek title for the same parser concern. Rust canonical_txid mirrors Go canonicalTxID exactly (consumed != len \u2192 error).",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
     {
       "title_pattern": "Unbounded Memory in Peer Outboxes",
       "file_pattern": "p2p_service.rs",
-      "reason": "ACCEPTED_RISK: Go parity — Go also has no per-peer send queue limit. Each frame ~70 bytes (INV). Real risk LOW at current throughput. Follow-up: add per-peer cap.",
+      "reason": "ACCEPTED_RISK: Go parity \u2014 Go also has no per-peer send queue limit. Each frame ~70 bytes (INV). Real risk LOW at current throughput. Follow-up: add per-peer cap.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
     {
       "title_pattern": "Transaction Relay Without Validation",
       "file_pattern": "tx_relay.rs",
-      "reason": "FALSE_POSITIVE: Go handleTx (handlers_tx.go:9-34) also does NOT submit to consensus mempool — only relay pool + re-announce. Mempool admission is a separate RPC path.",
+      "reason": "FALSE_POSITIVE: Go handleTx (handlers_tx.go:9-34) also does NOT submit to consensus mempool \u2014 only relay pool + re-announce. Mempool admission is a separate RPC path.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
     {
       "title_pattern": "Invalid Transactions Stored in Relay Pool",
       "file_pattern": "tx_relay.rs",
-      "reason": "FALSE_POSITIVE: same Go-parity rationale as Transaction Relay Without Validation — the relay pool is intentionally separate from consensus mempool admission on both Rust and Go paths.",
+      "reason": "FALSE_POSITIVE: same Go-parity rationale as Transaction Relay Without Validation \u2014 the relay pool is intentionally separate from consensus mempool admission on both Rust and Go paths.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
     {
       "title_pattern": "Network transactions not submitted to mempool",
       "file_pattern": "tx_relay.rs",
-      "reason": "FALSE_POSITIVE: Go parity — network tx relay does not imply consensus mempool admission. Rust mirrors Go by relaying through the relay pool and keeping mempool admission as a separate path.",
+      "reason": "FALSE_POSITIVE: Go parity \u2014 network tx relay does not imply consensus mempool admission. Rust mirrors Go by relaying through the relay pool and keeping mempool admission as a separate path.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
     {
       "title_pattern": "Unvalidated Transactions in Relay Pool",
       "file_pattern": "tx_relay.rs",
-      "reason": "FALSE_POSITIVE: Go parity — relay pool storage is intentionally decoupled from consensus mempool validation, so this is the same reviewed false-positive family as Transaction Relay Without Validation.",
+      "reason": "FALSE_POSITIVE: Go parity \u2014 relay pool storage is intentionally decoupled from consensus mempool validation, so this is the same reviewed false-positive family as Transaction Relay Without Validation.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
     {
       "title_pattern": "Memory Exhaustion via Large Transactions",
       "file_pattern": "relay_pool.rs",
-      "reason": "ACCEPTED_RISK: Go parity — Go MemoryTxPool also count-based (1000) without byte limit. MAX_RELAY_MSG_BYTES limits individual tx size.",
+      "reason": "ACCEPTED_RISK: Go parity \u2014 Go MemoryTxPool also count-based (1000) without byte limit. MAX_RELAY_MSG_BYTES limits individual tx size.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
     {
       "title_pattern": "Unbounded Relay Pool Growth Under Attack",
       "file_pattern": "relay_pool.rs",
-      "reason": "ACCEPTED_RISK: same reviewed risk family as Memory Exhaustion via Large Transactions — Go parity, bounded entry count, and MAX_RELAY_MSG_BYTES cap keep this as a non-blocking follow-up rather than a merge blocker.",
+      "reason": "ACCEPTED_RISK: same reviewed risk family as Memory Exhaustion via Large Transactions \u2014 Go parity, bounded entry count, and MAX_RELAY_MSG_BYTES cap keep this as a non-blocking follow-up rather than a merge blocker.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
     {
       "title_pattern": "Poisoned Lock in Broadcast",
       "file_pattern": "tx_relay.rs",
-      "reason": "ACCEPTED_RISK: poison = thread panic = node already degraded. Returning error is correct — no recovery possible from panicked thread.",
+      "reason": "ACCEPTED_RISK: poison = thread panic = node already degraded. Returning error is correct \u2014 no recovery possible from panicked thread.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
@@ -159,14 +159,14 @@
     {
       "title_pattern": "Mempool Not Updated with P2P Transactions",
       "file_pattern": "p2p_runtime.rs",
-      "reason": "FALSE_POSITIVE: Go parity — P2P relay plumbing is separate from consensus mempool accounting. The reviewed claim conflates relay propagation with mempool lifecycle management.",
+      "reason": "FALSE_POSITIVE: Go parity \u2014 P2P relay plumbing is separate from consensus mempool accounting. The reviewed claim conflates relay propagation with mempool lifecycle management.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
     {
       "title_pattern": "Mempool Bypass for P2P Transactions",
       "file_pattern": "p2p_runtime.rs",
-      "reason": "FALSE_POSITIVE: same Go-parity rationale as the tx_relay mempool comments — P2P relay intentionally does not imply immediate consensus mempool admission.",
+      "reason": "FALSE_POSITIVE: same Go-parity rationale as the tx_relay mempool comments \u2014 P2P relay intentionally does not imply immediate consensus mempool admission.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
@@ -180,7 +180,7 @@
     {
       "title_pattern": "Fee=0 for RPC Transactions Causes Priority Distortion",
       "file_pattern": "relay_pool.rs",
-      "reason": "ACCEPTED_RISK: same reviewed relay-metadata tradeoff as the tx_relay finding — Go parity keeps relay metadata separate from consensus fee accounting.",
+      "reason": "ACCEPTED_RISK: same reviewed relay-metadata tradeoff as the tx_relay finding \u2014 Go parity keeps relay metadata separate from consensus fee accounting.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
@@ -201,28 +201,28 @@
     {
       "title_pattern": "Redundant Tx Parsing",
       "file_pattern": "tx_relay.rs",
-      "reason": "ACCEPTED_RISK: single parse per tx relay path. Optimizing to reuse parsed tx is premature — relay is not hot path.",
+      "reason": "ACCEPTED_RISK: single parse per tx relay path. Optimizing to reuse parsed tx is premature \u2014 relay is not hot path.",
       "acknowledged_by": "controller",
       "date": "2026-03-25"
     },
     {
       "title_pattern": "Worker Pool Hanging Causes Node Denial-of-Service",
       "file_pattern": "worker_pool.rs",
-      "reason": "FALSE_POSITIVE: Go parity — go/consensus/worker_pool.go is the same cooperative primitive with no per-task kill switch. Tasks are internal consensus closures, not attacker-supplied code; adding forceful timeouts would change semantics and is not implementable safely in std threads.",
+      "reason": "FALSE_POSITIVE: Go parity \u2014 go/consensus/worker_pool.go is the same cooperative primitive with no per-task kill switch. Tasks are internal consensus closures, not attacker-supplied code; adding forceful timeouts would change semantics and is not implementable safely in std threads.",
       "acknowledged_by": "architect",
       "date": "2026-03-26"
     },
     {
       "title_pattern": "Unbounded Memory Consumption in Results Buffer",
       "file_pattern": "worker_pool.rs",
-      "reason": "ACCEPTED_RISK: Go parity — ordered reduction requires one result slot per submitted task just like Go make([]WorkerResult, n). The caller already materializes the task batch; concrete task-count bounds belong at future block-level integration sites, not this infrastructure primitive.",
+      "reason": "ACCEPTED_RISK: Go parity \u2014 ordered reduction requires one result slot per submitted task just like Go make([]WorkerResult, n). The caller already materializes the task batch; concrete task-count bounds belong at future block-level integration sites, not this infrastructure primitive.",
       "acknowledged_by": "architect",
       "date": "2026-03-26"
     },
     {
       "title_pattern": "worker pool error reporting loses transaction index",
       "file_pattern": "tx_validate_worker.rs",
-      "reason": "FALSE_POSITIVE: run_worker_pool returns results in submission order (deterministic). PTCs are in tx_index order from precompute. first_tx_error iterates in this order, so first-by-iteration ≡ first-by-tx_index. tx_index=0 impossible (coinbase excluded).",
+      "reason": "FALSE_POSITIVE: run_worker_pool returns results in submission order (deterministic). PTCs are in tx_index order from precompute. first_tx_error iterates in this order, so first-by-iteration \u2261 first-by-tx_index. tx_index=0 impossible (coinbase excluded).",
       "acknowledged_by": "architect",
       "date": "2026-03-27"
     },
@@ -278,9 +278,44 @@
     {
       "title_pattern": "Consensus Divergence Risk Due to Multiple DA Commit Outputs",
       "file_pattern": "da_verify_parallel.rs",
-      "reason": "FALSE_POSITIVE: Go parity — CollectDAPayloadCommitTasks also scans outputs, takes the first COV_TYPE_DA_COMMIT entry with 32-byte covenant data, and breaks. Structural DA-set integrity is enforced earlier in validateDASetIntegrity / validate_block_basic before this helper is reachable.",
+      "reason": "FALSE_POSITIVE: Go parity \u2014 CollectDAPayloadCommitTasks also scans outputs, takes the first COV_TYPE_DA_COMMIT entry with 32-byte covenant data, and breaks. Structural DA-set integrity is enforced earlier in validateDASetIntegrity / validate_block_basic before this helper is reachable.",
       "acknowledged_by": "architect",
       "date": "2026-03-27"
+    },
+    {
+      "title_pattern": "Undefined ML-DSA constants risk consensus divergence masking",
+      "file_pattern": "fuzz_state_transition_test.go",
+      "reason": "FALSE_POSITIVE: ML_DSA_87_PUBKEY_BYTES (2592), ML_DSA_87_SIG_BYTES (4627), SUITE_ID_ML_DSA_87 are exported constants defined in constants.go:66+ of the same consensus package. Test file is in-package (_test.go) with direct access.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-28"
+    },
+    {
+      "title_pattern": "Missing panic handling in DA chunk fuzz target",
+      "file_pattern": "da_chunk_hash_verify.rs",
+      "reason": "FALSE_POSITIVE: cargo-fuzz/libfuzzer catches panics via Rust panic hook automatically. catch_unwind in fuzz targets is an anti-pattern that hides real bugs instead of exposing them.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-28"
+    },
+    {
+      "title_pattern": "Non-production hash in fuzz target",
+      "file_pattern": "da_chunk_hash_verify.rs",
+      "reason": "ADDRESSED: hash module is private (mod hash). Fuzz target mirrors rubin_consensus::hash::sha3_256 using same sha3 crate and algorithm.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-28"
+    },
+    {
+      "title_pattern": "Consensus divergence in UTXO state handling",
+      "file_pattern": "fuzz_state_transition_test.go",
+      "reason": "FALSE_POSITIVE: Fuzz test UTXO map has exactly 1 entry \u2014 iteration order irrelevant. Determinism check compares two calls of same Go code, not Go vs Rust. Production PostStateDigest uses sorted iteration.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-28"
+    },
+    {
+      "title_pattern": "Signature validation bypass in fuzz test",
+      "file_pattern": "fuzz_state_transition_test.go",
+      "reason": "FALSE_POSITIVE: ML_DSA_87_SIG_BYTES+1 (4628) is standard wire format: 4627-byte signature + 1 sighash type byte. Production block_basic.go:507 validates this exact length. Used in all existing tests.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-28"
     }
   ]
 }
