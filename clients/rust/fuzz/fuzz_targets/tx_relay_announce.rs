@@ -1,6 +1,6 @@
 #![no_main]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use libfuzzer_sys::fuzz_target;
@@ -17,7 +17,7 @@ struct AnnounceSnapshot {
     result: Result<(), String>,
     tx_seen_len: usize,
     relay_pool_len: usize,
-    outboxes: HashMap<String, PeerOutbox>,
+    outboxes: BTreeMap<String, PeerOutbox>,
 }
 
 fn sample_tx_bytes(mode: u8, data: &[u8]) -> Vec<u8> {
@@ -80,7 +80,12 @@ fn run_once(
     }
 
     let result = announce_tx(tx_bytes, meta, &relay, &peer_manager, "local:8333", &outboxes);
-    let outboxes_snapshot = outboxes.lock().expect("peer outboxes").clone();
+    let outboxes_snapshot = outboxes
+        .lock()
+        .expect("peer outboxes")
+        .iter()
+        .map(|(addr, queue)| (addr.clone(), queue.clone()))
+        .collect();
     AnnounceSnapshot {
         result,
         tx_seen_len: relay.tx_seen.len(),
@@ -117,7 +122,7 @@ fuzz_target!(|data: &[u8]| {
     let fanout = usize::from(data[1]) % (MAX_PEERS + 2);
     let tx_bytes = sample_tx_bytes(data[2], &data[8..]);
     let fee = u64::from_le_bytes(data[3..11].try_into().unwrap_or([0u8; 8]));
-    let size = usize::from(u16::from_le_bytes([data[11], data[12]]));
+    let size = usize::from(u16::from_le_bytes([data[11], data[12]])).min(MAX_RAW_BYTES);
     let network = selected_network(data[13]);
     let meta = RelayTxMetadata { fee, size };
 

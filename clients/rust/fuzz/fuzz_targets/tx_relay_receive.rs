@@ -1,6 +1,6 @@
 #![no_main]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use libfuzzer_sys::fuzz_target;
@@ -16,7 +16,7 @@ struct ReceiveSnapshot {
     result: String,
     tx_seen_len: usize,
     relay_pool_len: usize,
-    outboxes: HashMap<String, PeerOutbox>,
+    outboxes: BTreeMap<String, PeerOutbox>,
 }
 
 fn sample_tx_bytes(mode: u8, data: &[u8]) -> Vec<u8> {
@@ -86,7 +86,12 @@ fn run_once(network: &str, peer_count: usize, tx_bytes: &[u8]) -> ReceiveSnapsho
         "local:8333",
         &outboxes,
     );
-    let outboxes_snapshot = outboxes.lock().expect("peer outboxes").clone();
+    let outboxes_snapshot = outboxes
+        .lock()
+        .expect("peer outboxes")
+        .iter()
+        .map(|(addr, queue)| (addr.clone(), queue.clone()))
+        .collect();
     ReceiveSnapshot {
         result: match result {
             Ok(()) => "ok".to_string(),
@@ -121,7 +126,12 @@ fn run_twice_same_state(network: &str, peer_count: usize, tx_bytes: &[u8]) -> (R
         "local:8333",
         &outboxes,
     );
-    let first_outboxes = outboxes.lock().expect("peer outboxes").clone();
+    let first_outboxes = outboxes
+        .lock()
+        .expect("peer outboxes")
+        .iter()
+        .map(|(addr, queue)| (addr.clone(), queue.clone()))
+        .collect();
     let first = ReceiveSnapshot {
         result: match first_result {
             Ok(()) => "ok".to_string(),
@@ -141,7 +151,12 @@ fn run_twice_same_state(network: &str, peer_count: usize, tx_bytes: &[u8]) -> (R
         "local:8333",
         &outboxes,
     );
-    let second_outboxes = outboxes.lock().expect("peer outboxes").clone();
+    let second_outboxes = outboxes
+        .lock()
+        .expect("peer outboxes")
+        .iter()
+        .map(|(addr, queue)| (addr.clone(), queue.clone()))
+        .collect();
     let second = ReceiveSnapshot {
         result: match second_result {
             Ok(()) => "ok".to_string(),
@@ -161,11 +176,19 @@ fuzz_target!(|data: &[u8]| {
 
     let peer_count = usize::from(data[0] % (MAX_PEERS as u8 + 1));
     let network = selected_network(data[1]);
-    let tx_bytes = sample_tx_bytes(data[2], &data[3..]);
+    let mode = data[2];
+    let tx_bytes = sample_tx_bytes(mode, &data[3..]);
 
     let first = run_once(network, peer_count, &tx_bytes);
     let second = run_once(network, peer_count, &tx_bytes);
     assert_eq!(first, second, "handle_received_tx must be deterministic on fresh state");
+
+    if mode % 4 == 2 {
+        assert_ne!(first.result, "ok");
+        assert_eq!(first.tx_seen_len, 0);
+        assert_eq!(first.relay_pool_len, 0);
+        assert!(first.outboxes.values().all(PeerOutbox::is_empty));
+    }
 
     let (before, after) = run_twice_same_state(network, peer_count, &tx_bytes);
     assert_eq!(after.tx_seen_len, before.tx_seen_len);
@@ -175,6 +198,7 @@ fuzz_target!(|data: &[u8]| {
     for queue in after.outboxes.values() {
         let frame_bytes: usize = queue.frames().iter().map(Vec::len).sum();
         assert_eq!(queue.total_bytes(), frame_bytes);
+        assert!(queue.len() <= 1);
         assert!(queue.total_bytes() <= (1 << 20));
     }
 });
