@@ -45,8 +45,7 @@ func FuzzConnectBlockInMemory(f *testing.F) {
 			chainID,
 		)
 
-		// Invariant: exactly one of summary or error must be non-nil for valid blocks,
-		// but both nil is valid (block parsing failed before summary construction).
+		// Invariant: summary and error are mutually exclusive.
 		if summary != nil && err != nil {
 			t.Fatalf("both summary and error non-nil: summary=%+v err=%v", summary, err)
 		}
@@ -69,6 +68,25 @@ func FuzzConnectBlockInMemory(f *testing.F) {
 			if summary.PostStateDigest != summary2.PostStateDigest {
 				t.Fatal("non-deterministic post-state digest")
 			}
+		}
+		// Deep-compare mutated chain state (UTXO set + AlreadyGenerated).
+		if len(state.Utxos) != len(state2.Utxos) {
+			t.Fatalf("non-deterministic UTXO set size: %d vs %d", len(state.Utxos), len(state2.Utxos))
+		}
+		for op, e1 := range state.Utxos {
+			e2, ok := state2.Utxos[op]
+			if !ok {
+				t.Fatalf("non-deterministic UTXO set: outpoint %v in run1 but not run2", op)
+			}
+			if e1.Value != e2.Value || e1.CovenantType != e2.CovenantType ||
+				e1.CreationHeight != e2.CreationHeight || e1.CreatedByCoinbase != e2.CreatedByCoinbase ||
+				!bytes.Equal(e1.CovenantData, e2.CovenantData) {
+				t.Fatalf("non-deterministic UTXO entry at %v: %+v vs %+v", op, e1, e2)
+			}
+		}
+		if state.AlreadyGenerated.Cmp(state2.AlreadyGenerated) != 0 {
+			t.Fatalf("non-deterministic AlreadyGenerated: %s vs %s",
+				state.AlreadyGenerated.String(), state2.AlreadyGenerated.String())
 		}
 	})
 }
@@ -189,6 +207,12 @@ func FuzzTxDepGraphBuild(f *testing.F) {
 		}
 		if len(graph.Edges) != len(graph2.Edges) {
 			t.Fatal("non-deterministic edge count")
+		}
+		for i, e := range graph.Edges {
+			e2 := graph2.Edges[i]
+			if e.ProducerIdx != e2.ProducerIdx || e.ConsumerIdx != e2.ConsumerIdx || e.Kind != e2.Kind {
+				t.Fatalf("non-deterministic edge at %d: %+v vs %+v", i, e, e2)
+			}
 		}
 		for i, lvl := range graph.Levels {
 			if lvl != graph2.Levels[i] {
