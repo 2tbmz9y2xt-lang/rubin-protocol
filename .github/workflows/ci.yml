@@ -406,6 +406,58 @@ jobs:
           ./scripts/node-runtime-total-parity-gate.sh
           cat /tmp/node-runtime-total-parity-report.json
 
+  go_race_node:
+    name: Go node race gate
+    needs: policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Cache OpenSSL 3.5 bundle
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: |
+            ~/.cache/rubin-openssl/bundle-3.5.5
+            ~/.cache/rubin-openssl/work/openssl-3.5.5.tar.gz
+          key: openssl-bundle-${{ runner.os }}-3.5.5-v2
+
+      - name: Build OpenSSL 3.5.5 bundle
+        run: |
+          set -euo pipefail
+          PREFIX="$HOME/.cache/rubin-openssl/bundle-3.5.5"
+          MODULES_DIR="$PREFIX/lib/ossl-modules"
+          if [ ! -d "$MODULES_DIR" ] && [ -d "$PREFIX/lib64/ossl-modules" ]; then
+            MODULES_DIR="$PREFIX/lib64/ossl-modules"
+          fi
+          if [ ! -x "$PREFIX/bin/openssl" ] || [ ! -f "$PREFIX/ssl/openssl-fips.cnf" ] || [ ! -d "$MODULES_DIR" ]; then
+            OPENSSL_VERSION=3.5.5 PREFIX="$PREFIX" bash scripts/crypto/openssl/build-openssl-bundle.sh
+          fi
+          if [ -d "$PREFIX/lib/ossl-modules" ]; then
+            MODULES_DIR="$PREFIX/lib/ossl-modules"
+          elif [ -d "$PREFIX/lib64/ossl-modules" ]; then
+            MODULES_DIR="$PREFIX/lib64/ossl-modules"
+          else
+            echo "ERROR: OpenSSL modules directory not found under $PREFIX/lib*/ossl-modules" >&2
+            exit 1
+          fi
+          echo "$PREFIX/bin" >> "$GITHUB_PATH"
+          echo "OPENSSL_DIR=$PREFIX" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$PREFIX/lib64:$PREFIX/lib" >> "$GITHUB_ENV"
+          echo "OPENSSL_MODULES=$MODULES_DIR" >> "$GITHUB_ENV"
+          echo "OPENSSL_CONF=$PREFIX/ssl/openssl-fips.cnf" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+        with:
+          go-version: '1.25.8'
+          cache: true
+          cache-dependency-path: clients/go/go.mod
+
+      - name: Targeted Go race tests for node concurrency
+        run: |
+          TEST_REGEX='Test(MempoolAddTxWaitsForChainStateWriter|MempoolAddTxRejectsWhenWriterInvalidatesSnapshotBeforeAdmission|MempoolAddTxWaitsForPolicyWriterBeforeSnapshot|ApplyBlockWithReorgRequeuesDisconnectedTransactionsIntoMempool|ApplyBlockWithReorgRollbackRestoresMempoolAfterPersistFailure)$'
+          scripts/dev-env.sh -- bash -lc "cd clients/go && go test -race ./node -run \"$TEST_REGEX\" -count=1"
+
   formal_refinement:
     needs: policy
     runs-on: ubuntu-latest
