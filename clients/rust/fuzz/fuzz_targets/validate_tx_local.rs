@@ -59,14 +59,24 @@ fuzz_target!(|data: &[u8]| {
     // Each type requires specific layout for witness_slots() to succeed.
     let build_covenant_data = |suite_id: u8, pk: &[u8]| -> Vec<u8> {
         match covenant_type {
-            0x0000 | 0x0102 => {
-                // P2PK / EXT: suite_id(1) + key_id(32)
+            0x0000 => {
+                // P2PK: suite_id(1) + key_id(32) = 33 bytes
                 let mut cd = vec![suite_id];
                 let mut key_id = [0u8; 32];
                 for (j, b) in pk.iter().take(32).enumerate() {
                     key_id[j] = *b;
                 }
                 cd.extend_from_slice(&key_id);
+                cd
+            }
+            0x0102 => {
+                // EXT: ext_id(2, LE u16) + compact_size(varint) + ext_payload(N)
+                // Matches parse_core_ext_covenant_data layout.
+                // Use ext_id=0x0001, payload=1 byte → total = 2 + 1 + 1 = 4 bytes.
+                let mut cd = Vec::with_capacity(4);
+                cd.extend_from_slice(&1u16.to_le_bytes()); // ext_id
+                cd.push(1u8); // compact_size varint: payload_len=1
+                cd.push(suite_id); // ext_payload (1 byte)
                 cd
             }
             0x0105 => {
