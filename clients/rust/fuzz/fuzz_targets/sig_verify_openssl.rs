@@ -35,10 +35,10 @@ fuzz_target!(|data: &[u8]| {
     let sig = &remaining[mid..];
 
     // Direct verify_sig call.
-    let r1 = rubin_consensus::verify_sig(suite_id, pubkey, sig, digest);
+    let r1 = rubin_consensus::verify_sig(suite_id, pubkey, sig, &digest);
 
     // Determinism check.
-    let r2 = rubin_consensus::verify_sig(suite_id, pubkey, sig, digest);
+    let r2 = rubin_consensus::verify_sig(suite_id, pubkey, sig, &digest);
     match (&r1, &r2) {
         (Ok(v1), Ok(v2)) => assert_eq!(v1, v2, "verify_sig non-deterministic"),
         (Err(_), Err(_)) => {} // Both error — OK.
@@ -47,7 +47,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Registry dispatch with default registry.
     let registry = rubin_consensus::SuiteRegistry::default_registry();
-    let r3 = rubin_consensus::verify_sig_with_registry(suite_id, pubkey, sig, digest, &registry);
+    let r3 = rubin_consensus::verify_sig_with_registry(suite_id, pubkey, sig, &digest, Some(&registry));
 
     // For registered suites, results must agree.
     if registry.is_registered(suite_id) {
