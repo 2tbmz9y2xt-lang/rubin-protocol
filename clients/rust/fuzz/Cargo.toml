@@ -170,3 +170,15 @@ name = "da_chunk_hash_verify"
 path = "fuzz_targets/da_chunk_hash_verify.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "tx_dep_graph"
+path = "fuzz_targets/tx_dep_graph.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "da_payload_commit_verify"
+path = "fuzz_targets/da_payload_commit_verify.rs"
+test = false
+doc = false

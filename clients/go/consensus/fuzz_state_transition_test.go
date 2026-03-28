@@ -302,6 +302,7 @@ func FuzzDAPayloadCommitVerify(f *testing.F) {
 //   - No panic regardless of input.
 //   - Deterministic result for identical inputs.
 //   - Valid signature reaches fee/value-conservation and UTXO-mutation paths.
+//   - ChainID, input count, output count, and covenant types are fuzz-varied.
 func FuzzUtxoApplyNonCoinbase(f *testing.F) {
 	// Generate ML-DSA-87 keypair once (expensive) — reused across all iterations.
 	kp, err := NewMLDSA87Keypair()
@@ -316,89 +317,143 @@ func FuzzUtxoApplyNonCoinbase(f *testing.F) {
 	pubkey := kp.PubkeyBytes()
 	covData := p2pkCovenantDataForPubkey(pubkey)
 
-	f.Add([]byte{0x01}, []byte{0x00}, []byte{0x00})
+	f.Add([]byte{0x01}, []byte{0x00}, []byte{0x00}, []byte{0x00})
 
-	f.Fuzz(func(t *testing.T, txData []byte, seedA []byte, seedB []byte) {
+	f.Fuzz(func(t *testing.T, txData []byte, seedA []byte, seedB []byte, chainIDRaw []byte) {
 		if len(txData) > maxStateTransitionFuzzBytes ||
 			len(seedA) > maxStateTransitionFuzzBytes ||
-			len(seedB) > maxStateTransitionFuzzBytes {
+			len(seedB) > maxStateTransitionFuzzBytes ||
+			len(chainIDRaw) > maxStateTransitionFuzzBytes {
 			return
 		}
 
-		// Construct a minimal Tx from fuzz data.
+		// Derive chainID from fuzz data — exercises chainID-specific sighash paths.
+		var chainID [32]byte
+		copy(chainID[:], chainIDRaw)
+
+		// Fuzz-driven input count (1–3) and output count (1–3).
+		inputCount := 1
+		outputCount := 1
+		if len(txData) > 3 {
+			inputCount = int(txData[3])%3 + 1
+		}
+		if len(txData) > 4 {
+			outputCount = int(txData[4])%3 + 1
+		}
+
+		// Construct Tx from fuzz data.
 		tx := &Tx{TxNonce: 1}
 		if len(txData) > 0 {
 			tx.Version = uint32(txData[0])
 		}
-		// Add one input.
-		var prevTxid [32]byte
-		if len(seedA) >= 32 {
-			copy(prevTxid[:], seedA[:32])
-		} else {
-			copy(prevTxid[:], seedA)
-		}
-		tx.Inputs = []TxInput{{
-			PrevTxid: prevTxid,
-			PrevVout: 0,
-		}}
 
-		// Add one output with fuzz-varied value.
-		var outValue uint64 = 500
-		if len(txData) > 2 {
-			outValue = uint64(txData[1])<<8 | uint64(txData[2])
-		}
-		if outValue == 0 {
-			outValue = 1 // P2PK requires value > 0
-		}
-		tx.Outputs = []TxOutput{{Value: outValue, CovenantType: COV_TYPE_P2PK, CovenantData: covData}}
-
-		// Placeholder witness — will be replaced after signing.
-		tx.Witness = []WitnessItem{{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: pubkey}}
-
-		var chainID [32]byte
 		const utxoValue uint64 = 1000
 
-		// Sign the fully-constructed tx with the real ML-DSA-87 key.
-		digest, err := SighashV1DigestWithType(tx, 0, utxoValue, chainID, SIGHASH_ALL)
-		if err != nil {
-			return // non-signable tx shape (e.g. no inputs) — skip
+		// Build inputs — each with a unique prevTxid derived from seedA.
+		for i := 0; i < inputCount; i++ {
+			var prevTxid [32]byte
+			offset := i * 32
+			if offset < len(seedA) {
+				end := offset + 32
+				if end > len(seedA) {
+					end = len(seedA)
+				}
+				copy(prevTxid[:], seedA[offset:end])
+			}
+			prevTxid[31] = byte(i) // ensure uniqueness across inputs
+			tx.Inputs = append(tx.Inputs, TxInput{
+				PrevTxid: prevTxid,
+				PrevVout: 0,
+			})
+			// Placeholder witness — will be replaced after signing.
+			tx.Witness = append(tx.Witness, WitnessItem{
+				SuiteID: SUITE_ID_ML_DSA_87,
+				Pubkey:  pubkey,
+			})
 		}
-		sig, err := kp.SignDigest32(digest)
-		if err != nil {
-			return // sign failure on this input — skip
+
+		// Build outputs — primary P2PK + optional ANCHOR or additional P2PK.
+		totalInputValue := utxoValue * uint64(inputCount)
+		for i := 0; i < outputCount; i++ {
+			if i == 0 {
+				// Primary P2PK output with fuzz-varied value.
+				var outValue uint64 = 500
+				if len(txData) > 2 {
+					outValue = uint64(txData[1])<<8 | uint64(txData[2])
+				}
+				if outValue == 0 {
+					outValue = 1 // P2PK requires value > 0
+				}
+				// Cap to total input value to exercise success paths.
+				if outValue > totalInputValue {
+					outValue = totalInputValue / 2
+					if outValue == 0 {
+						outValue = 1
+					}
+				}
+				tx.Outputs = append(tx.Outputs, TxOutput{
+					Value:        outValue,
+					CovenantType: COV_TYPE_P2PK,
+					CovenantData: covData,
+				})
+			} else if len(txData) > 5 && txData[5]%2 == 0 {
+				// ANCHOR output — exercises different covenant genesis path.
+				// ANCHOR requires Value==0 and non-empty CovenantData.
+				tx.Outputs = append(tx.Outputs, TxOutput{
+					Value:        0,
+					CovenantType: COV_TYPE_ANCHOR,
+					CovenantData: []byte{0x01},
+				})
+			} else {
+				// Additional P2PK output — exercises multi-output value conservation.
+				tx.Outputs = append(tx.Outputs, TxOutput{
+					Value:        1,
+					CovenantType: COV_TYPE_P2PK,
+					CovenantData: covData,
+				})
+			}
 		}
-		sig = append(sig, SIGHASH_ALL)
-		tx.Witness[0].Signature = sig
+
+		// Sign each input with the real ML-DSA-87 key.
+		// SighashV1 does NOT include witness in digest — safe to sign sequentially.
+		for i := 0; i < inputCount; i++ {
+			digest, signErr := SighashV1DigestWithType(tx, uint32(i), utxoValue, chainID, SIGHASH_ALL)
+			if signErr != nil {
+				return // non-signable tx shape — skip
+			}
+			sig, signErr := kp.SignDigest32(digest)
+			if signErr != nil {
+				return // sign failure — skip
+			}
+			sig = append(sig, SIGHASH_ALL)
+			tx.Witness[i].Signature = sig
+		}
 
 		var txid [32]byte
 		copy(txid[:], seedB)
 
-		// Seed UTXO set with the referenced input.
-		utxoSet := map[Outpoint]UtxoEntry{
-			{Txid: prevTxid, Vout: 0}: {
-				Value:          utxoValue,
-				CovenantType:   COV_TYPE_P2PK,
-				CovenantData:   covData,
-				CreationHeight: 0,
-			},
+		// Build UTXO set for all inputs.
+		buildUtxoSet := func() map[Outpoint]UtxoEntry {
+			s := make(map[Outpoint]UtxoEntry, inputCount)
+			for i := 0; i < inputCount; i++ {
+				s[Outpoint{Txid: tx.Inputs[i].PrevTxid, Vout: 0}] = UtxoEntry{
+					Value:          utxoValue,
+					CovenantType:   COV_TYPE_P2PK,
+					CovenantData:   covData,
+					CreationHeight: 0,
+				}
+			}
+			return s
 		}
 
 		// Must not panic.
 		summary, err := ApplyNonCoinbaseTxBasic(
-			tx, txid, utxoSet, 100, 0, chainID,
+			tx, txid, buildUtxoSet(), 100, 0, chainID,
 		)
 
-		// Determinism check.
-		utxoSet2 := map[Outpoint]UtxoEntry{
-			{Txid: prevTxid, Vout: 0}: {
-				Value:          utxoValue,
-				CovenantType:   COV_TYPE_P2PK,
-				CovenantData:   covData,
-				CreationHeight: 0,
-			},
-		}
+		// Determinism check — fresh UTXO set, same tx.
 		summary2, err2 := ApplyNonCoinbaseTxBasic(
-			tx, txid, utxoSet2, 100, 0, chainID,
+			tx, txid, buildUtxoSet(), 100, 0, chainID,
 		)
 
 		if (err == nil) != (err2 == nil) {

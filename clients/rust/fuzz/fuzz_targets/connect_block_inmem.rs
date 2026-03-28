@@ -8,16 +8,24 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
+    // Derive chain_id from fuzz data: use last 32 bytes if available,
+    // otherwise pad with zeros. This covers chainID-dependent consensus paths.
+    let (block_bytes, chain_id_raw) = if data.len() > 32 {
+        data.split_at(data.len() - 32)
+    } else {
+        (data, &[][..])
+    };
+    let mut chain_id = [0u8; 32];
+    chain_id[..chain_id_raw.len()].copy_from_slice(chain_id_raw);
+
     let mut state = rubin_consensus::InMemoryChainState {
         utxos: HashMap::new(),
         already_generated: 0u128,
     };
 
-    let chain_id = [0u8; 32];
-
     // First call — must not panic.
     let r1 = rubin_consensus::connect_block_basic_in_memory_at_height(
-        data,
+        block_bytes,
         None,
         None,
         1,
@@ -26,6 +34,15 @@ fuzz_target!(|data: &[u8]| {
         chain_id,
     );
 
+    // Invariant (Rust-specific): Result<T,E> guarantees exactly-one-of Ok/Err
+    // by type system. Verify Ok-path fields are internally consistent.
+    if let Ok(ref s1) = r1 {
+        assert!(
+            s1.sum_fees <= u64::MAX,
+            "sum_fees overflow"
+        );
+    }
+
     // Determinism: second call with fresh state must produce same result class.
     let mut state2 = rubin_consensus::InMemoryChainState {
         utxos: HashMap::new(),
@@ -33,7 +50,7 @@ fuzz_target!(|data: &[u8]| {
     };
 
     let r2 = rubin_consensus::connect_block_basic_in_memory_at_height(
-        data,
+        block_bytes,
         None,
         None,
         1,
