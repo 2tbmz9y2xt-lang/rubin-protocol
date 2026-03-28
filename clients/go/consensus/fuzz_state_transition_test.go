@@ -331,7 +331,13 @@ func FuzzUtxoApplyNonCoinbase(f *testing.F) {
 		if len(txData) > 8 {
 			outValue = uint64(txData[1])<<8 | uint64(txData[2])
 		}
-		tx.Outputs = []TxOutput{{Value: outValue, CovenantType: COV_TYPE_P2PK}}
+		if outValue == 0 {
+			outValue = 1 // P2PK requires value > 0
+		}
+		// P2PK covenant data: MAX_P2PK_COVENANT_DATA (33) bytes, first byte = suiteID.
+		p2pkCovData := make([]byte, MAX_P2PK_COVENANT_DATA)
+		p2pkCovData[0] = SUITE_ID_ML_DSA_87
+		tx.Outputs = []TxOutput{{Value: outValue, CovenantType: COV_TYPE_P2PK, CovenantData: p2pkCovData}}
 
 		// Witness.
 		tx.Witness = []WitnessItem{{
