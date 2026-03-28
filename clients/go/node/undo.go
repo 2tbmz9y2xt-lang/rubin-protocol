@@ -113,6 +113,8 @@ func (s *ChainState) DisconnectBlock(blockBytes []byte, undo *BlockUndo) (*Chain
 	if s == nil {
 		return nil, errors.New("nil chainstate")
 	}
+	s.admissionMu.Lock()
+	defer s.admissionMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.HasTip {

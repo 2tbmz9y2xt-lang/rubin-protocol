@@ -44,7 +44,7 @@ func TestMempoolAddTxWaitsForChainStateWriter(t *testing.T) {
 	}
 	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
 
-	st.mu.Lock()
+	st.admissionMu.Lock()
 	done := make(chan error, 1)
 	started := make(chan struct{})
 	go func() {
@@ -59,7 +59,7 @@ func TestMempoolAddTxWaitsForChainStateWriter(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	st.mu.Unlock()
+	st.admissionMu.Unlock()
 
 	select {
 	case err := <-done:
@@ -68,6 +68,51 @@ func TestMempoolAddTxWaitsForChainStateWriter(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("AddTx remained blocked after chainstate writer unlock")
+	}
+}
+
+func TestMempoolAddTxRejectsWhenWriterInvalidatesSnapshotBeforeAdmission(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+
+	st.admissionMu.Lock()
+	st.mu.Lock()
+	delete(st.Utxos, outpoints[0])
+	st.mu.Unlock()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- mp.AddTx(txBytes)
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("AddTx returned while writer gate held: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	st.admissionMu.Unlock()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), string(consensus.TX_ERR_MISSING_UTXO)) {
+			t.Fatalf("expected missing utxo after writer mutation, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("AddTx remained blocked after writer gate unlock")
+	}
+
+	if got := mp.Len(); got != 0 {
+		t.Fatalf("mempool len=%d, want 0", got)
 	}
 }
 

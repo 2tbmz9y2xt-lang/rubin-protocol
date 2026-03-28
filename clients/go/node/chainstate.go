@@ -58,6 +58,7 @@ const (
 )
 
 type ChainState struct {
+	admissionMu      sync.RWMutex
 	mu               sync.RWMutex
 	Utxos            map[consensus.Outpoint]consensus.UtxoEntry
 	Height           uint64
@@ -136,6 +137,8 @@ func (s *ChainState) replaceFrom(src *ChainState) {
 	if snapshot == nil {
 		return
 	}
+	s.admissionMu.Lock()
+	defer s.admissionMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Utxos = snapshot.Utxos
@@ -244,6 +247,8 @@ func (s *ChainState) ConnectBlockWithCoreExtProfilesAndSuiteContext(
 	if s == nil {
 		return nil, errors.New("nil chainstate")
 	}
+	s.admissionMu.Lock()
+	defer s.admissionMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -345,6 +350,8 @@ func (s *ChainState) ConnectBlockParallelSigsWithSuiteContext(
 	if s == nil {
 		return nil, errors.New("nil chainstate")
 	}
+	s.admissionMu.Lock()
+	defer s.admissionMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

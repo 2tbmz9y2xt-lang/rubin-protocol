@@ -173,6 +173,12 @@ func (m *Mempool) AddTx(txBytes []byte) error {
 	if m == nil {
 		return txAdmitUnavailable("nil mempool")
 	}
+	if m.chainState == nil {
+		return txAdmitUnavailable("nil chainstate")
+	}
+
+	m.chainState.admissionMu.RLock()
+	defer m.chainState.admissionMu.RUnlock()
 
 	state := cloneChainState(m.chainState)
 	checked, inputs, err := m.checkTransactionWithState(txBytes, state)
@@ -196,6 +202,11 @@ func (m *Mempool) RelayMetadata(txBytes []byte) (RelayTxMetadata, error) {
 	if m == nil {
 		return RelayTxMetadata{}, txAdmitUnavailable("nil mempool")
 	}
+	if m.chainState == nil {
+		return RelayTxMetadata{}, txAdmitUnavailable("nil chainstate")
+	}
+	m.chainState.admissionMu.RLock()
+	defer m.chainState.admissionMu.RUnlock()
 	state := cloneChainState(m.chainState)
 	checked, _, err := m.checkTransactionWithState(txBytes, state)
 	if err != nil {
