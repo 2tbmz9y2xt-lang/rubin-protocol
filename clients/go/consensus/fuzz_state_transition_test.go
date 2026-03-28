@@ -21,7 +21,8 @@ func FuzzConnectBlockInMemory(f *testing.F) {
 	f.Add(make([]byte, 80), make([]byte, 32)) // minimal header-sized input
 
 	f.Fuzz(func(t *testing.T, blockBytes []byte, chainIDRaw []byte) {
-		if len(blockBytes) > maxStateTransitionFuzzBytes {
+		if len(blockBytes) > maxStateTransitionFuzzBytes ||
+			len(chainIDRaw) > maxStateTransitionFuzzBytes {
 			return
 		}
 		var chainID [32]byte
@@ -80,7 +81,7 @@ func FuzzTxDepGraphBuild(f *testing.F) {
 	f.Add([]byte{0x00}, []byte{0x01}, []byte{0x02})
 
 	f.Fuzz(func(t *testing.T, txCountRaw []byte, edgeDataA []byte, edgeDataB []byte) {
-		if len(txCountRaw) == 0 {
+		if len(txCountRaw) == 0 || len(txCountRaw) > maxStateTransitionFuzzBytes {
 			return
 		}
 		txCount := int(txCountRaw[0])%8 + 1 // 1-8 txs
@@ -188,7 +189,8 @@ func FuzzDAChunkHashVerify(f *testing.F) {
 	f.Add([]byte{}, []byte{0x42})
 
 	f.Fuzz(func(t *testing.T, payload []byte, hashSuffix []byte) {
-		if len(payload) > maxStateTransitionFuzzBytes {
+		if len(payload) > maxStateTransitionFuzzBytes ||
+			len(hashSuffix) > maxStateTransitionFuzzBytes {
 			return
 		}
 
@@ -292,7 +294,9 @@ func FuzzUtxoApplyNonCoinbase(f *testing.F) {
 	f.Add([]byte{0x01}, []byte{0x00}, []byte{0x00})
 
 	f.Fuzz(func(t *testing.T, txData []byte, seedA []byte, seedB []byte) {
-		if len(txData) > maxStateTransitionFuzzBytes {
+		if len(txData) > maxStateTransitionFuzzBytes ||
+			len(seedA) > maxStateTransitionFuzzBytes ||
+			len(seedB) > maxStateTransitionFuzzBytes {
 			return
 		}
 
