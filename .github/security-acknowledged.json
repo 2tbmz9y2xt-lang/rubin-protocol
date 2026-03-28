@@ -316,6 +316,27 @@
       "reason": "FALSE_POSITIVE: ML_DSA_87_SIG_BYTES+1 (4628) is standard wire format: 4627-byte signature + 1 sighash type byte. Production block_basic.go:507 validates this exact length. Used in all existing tests.",
       "acknowledged_by": "architect",
       "date": "2026-03-28"
+    },
+    {
+      "title_pattern": "Consensus Divergence Risk in UTXO State Representation",
+      "file_pattern": "fuzz_state_transition_test.go",
+      "reason": "FALSE POSITIVE: finding is in fuzz test code, not production consensus logic. Fuzz targets intentionally construct minimal state representations to exercise error paths.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-28"
+    },
+    {
+      "title_pattern": "Signature Malleability in Fuzzed Transaction",
+      "file_pattern": "fuzz_state_transition_test.go",
+      "reason": "FALSE POSITIVE: fuzz test uses real ML-DSA-87 signatures via test keypair; signature structure is dictated by consensus signing API.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-28"
+    },
+    {
+      "title_pattern": "Hash Function Divergence",
+      "file_pattern": "da_chunk_hash_verify.rs",
+      "reason": "FALSE POSITIVE: local sha3_256 mirrors rubin_consensus::hash::sha3_256 (private module). Both use identical sha3 crate. No divergence risk.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-28"
     }
   ]
 }
