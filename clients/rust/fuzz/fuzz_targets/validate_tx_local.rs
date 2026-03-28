@@ -59,14 +59,26 @@ fuzz_target!(|data: &[u8]| {
     // Each type requires specific layout for witness_slots() to succeed.
     let build_covenant_data = |suite_id: u8, pk: &[u8]| -> Vec<u8> {
         match covenant_type {
-            0x0000 | 0x0102 | 0x0105 => {
-                // P2PK / EXT / STEALTH: suite_id(1) + key_id(32)
+            0x0000 | 0x0102 => {
+                // P2PK / EXT: suite_id(1) + key_id(32)
                 let mut cd = vec![suite_id];
                 let mut key_id = [0u8; 32];
                 for (j, b) in pk.iter().take(32).enumerate() {
                     key_id[j] = *b;
                 }
                 cd.extend_from_slice(&key_id);
+                cd
+            }
+            0x0105 => {
+                // STEALTH: ciphertext(1568) + one_time_key_id(32) = 1600 bytes
+                // (MAX_STEALTH_COVENANT_DATA). Fill from fuzz data for variety.
+                let mut cd = vec![0u8; 1600];
+                for (j, b) in pk.iter().enumerate() {
+                    if j >= 1600 {
+                        break;
+                    }
+                    cd[j] = *b;
+                }
                 cd
             }
             0x0100 => {

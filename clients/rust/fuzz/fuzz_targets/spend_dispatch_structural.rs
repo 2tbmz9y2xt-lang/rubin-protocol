@@ -29,13 +29,37 @@ fuzz_target!(|data: &[u8]| {
     let suite_id = data[pos];
     pos += 1;
 
-    let cov_data_len = data[pos] as usize;
+    // For STEALTH (0x0105), covenant_data must be exactly 1600 bytes.
+    // For other types, read length from a single byte (max 255).
+    let (cov_data_len, cov_data_fixed) = if covenant_type == 0x0105 {
+        // Skip the length byte but use remaining fuzz bytes to fill 1600-byte buffer.
+        let _ = data[pos]; // consume the byte for layout consistency
+        (0usize, true)
+    } else {
+        (data[pos] as usize, false)
+    };
     pos += 1;
-    if pos + cov_data_len > data.len() - 44 {
-        return;
-    }
-    let covenant_data = data[pos..pos + cov_data_len].to_vec();
-    pos += cov_data_len;
+
+    let covenant_data = if cov_data_fixed {
+        // STEALTH: build 1600-byte covenant_data from available fuzz bytes.
+        let available = if pos + 44 < data.len() {
+            data.len() - pos - 44
+        } else {
+            0
+        };
+        let take = available.min(1600);
+        let mut cd = vec![0u8; 1600];
+        cd[..take].copy_from_slice(&data[pos..pos + take]);
+        pos += take;
+        cd
+    } else {
+        if pos + cov_data_len > data.len() - 44 {
+            return;
+        }
+        let cd = data[pos..pos + cov_data_len].to_vec();
+        pos += cov_data_len;
+        cd
+    };
 
     if pos + 4 > data.len() - 40 {
         return;
