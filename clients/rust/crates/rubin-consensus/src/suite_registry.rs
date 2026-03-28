@@ -552,7 +552,11 @@ mod tests {
             if id == crate::constants::SUITE_ID_ML_DSA_87 {
                 assert!(r.is_registered(id));
             } else {
-                assert!(!r.is_registered(id), "unexpected registered suite: 0x{:02x}", id);
+                assert!(
+                    !r.is_registered(id),
+                    "unexpected registered suite: 0x{:02x}",
+                    id
+                );
             }
         }
     }
