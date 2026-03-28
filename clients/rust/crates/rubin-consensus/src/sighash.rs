@@ -297,3 +297,20 @@ mod tests {
         assert!(cache.hash_all_outputs.is_none());
     }
 }
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    fn verify_is_valid_sighash_type_matches_full_domain_truth_table() {
+        let sighash_type: u8 = kani::any();
+        let expected = sighash_type == SIGHASH_ALL
+            || sighash_type == SIGHASH_NONE
+            || sighash_type == SIGHASH_SINGLE
+            || sighash_type == (SIGHASH_ALL | SIGHASH_ANYONECANPAY)
+            || sighash_type == (SIGHASH_NONE | SIGHASH_ANYONECANPAY)
+            || sighash_type == (SIGHASH_SINGLE | SIGHASH_ANYONECANPAY);
+        assert_eq!(is_valid_sighash_type(sighash_type), expected);
+    }
+}
