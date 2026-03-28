@@ -59,12 +59,9 @@ fuzz_target!(|data: &[u8]| {
                 s1.post_state_digest, s2.post_state_digest,
                 "non-deterministic post-state digest"
             );
-            // On success: UTXO set must have been mutated (at least coinbase output).
-            assert!(
-                !state.utxos.is_empty(),
-                "successful block connection left UTXO set empty"
-            );
             // Both states must be identical after processing identical input.
+            // Note: empty UTXO set on success IS valid — coinbase with only
+            // ANCHOR/DA_COMMIT outputs skips UTXO insertion (by design).
             assert_eq!(
                 state.utxos.len(), state2.utxos.len(),
                 "non-deterministic UTXO set size"
