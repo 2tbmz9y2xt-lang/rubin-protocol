@@ -185,6 +185,9 @@ func signWitnessItem(
 	if err != nil {
 		return WitnessItem{}, err
 	}
+	if len(signature) != int(ML_DSA_87_SIG_BYTES) {
+		return WitnessItem{}, txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA signature length")
+	}
 	signature = append(signature, SIGHASH_ALL)
 	return WitnessItem{
 		SuiteID:   SUITE_ID_ML_DSA_87,

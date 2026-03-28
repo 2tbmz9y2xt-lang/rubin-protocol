@@ -293,3 +293,23 @@ func TestSignWitnessItem_NilCacheUsesDirectSighash(t *testing.T) {
 		t.Fatalf("missing sighash type trailer")
 	}
 }
+
+func TestSignWitnessItem_RejectsNonCanonicalSignatureLength(t *testing.T) {
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	pub := make([]byte, ML_DSA_87_PUBKEY_BYTES)
+	// Signer returns a signature that is one byte too short.
+	shortSig := make([]byte, ML_DSA_87_SIG_BYTES-1)
+	signer := stubDigestSigner{pub: pub, sig: shortSig}
+
+	_, err := signWitnessItem(tx, inputIndex, inputValue, chainID, nil, signer, pub)
+	if err == nil {
+		t.Fatal("expected non-canonical signature length error")
+	}
+	txErr, ok := err.(*TxError)
+	if !ok {
+		t.Fatalf("expected *TxError, got %T", err)
+	}
+	if txErr.Code != TX_ERR_SIG_NONCANONICAL {
+		t.Fatalf("error code = %s, want %s", txErr.Code, TX_ERR_SIG_NONCANONICAL)
+	}
+}
