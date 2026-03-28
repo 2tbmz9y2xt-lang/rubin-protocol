@@ -10,10 +10,10 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 rubin-consensus = { path = "../crates/rubin-consensus" }
+sha3 = "0.10"
 rubin-node = { path = "../crates/rubin-node" }
 num-bigint = "0.4"
 num-traits = "0.2"
-sha3 = "0.10"
 
 [[bin]]
 name = "parse_tx"

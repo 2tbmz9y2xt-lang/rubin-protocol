@@ -288,6 +288,20 @@
       "reason": "FALSE_POSITIVE: ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87 are exported constants defined in constants.go (line 66+) of the same consensus package. Test file is in-package (_test.go), has direct access.",
       "acknowledged_by": "architect",
       "date": "2026-03-28"
+    },
+    {
+      "title_pattern": "Missing panic handling in DA chunk fuzz target",
+      "file_pattern": "da_chunk_hash_verify.rs",
+      "reason": "FALSE_POSITIVE: cargo-fuzz/libfuzzer catches panics via Rust panic hook automatically. catch_unwind in fuzz targets is an anti-pattern that hides real bugs instead of exposing them. A panic IS a found bug.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-28"
+    },
+    {
+      "title_pattern": "Non-production hash in fuzz target",
+      "file_pattern": "da_chunk_hash_verify.rs",
+      "reason": "ADDRESSED: hash module is private (mod hash, not pub mod hash). Fuzz target mirrors rubin_consensus::hash::sha3_256 using same sha3 crate and algorithm. Documented with comment referencing consensus module.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-28"
     }
   ]
 }

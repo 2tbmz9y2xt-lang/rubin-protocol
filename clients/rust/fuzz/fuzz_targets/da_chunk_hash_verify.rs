@@ -2,14 +2,16 @@
 use libfuzzer_sys::fuzz_target;
 use sha3::{Digest, Sha3_256};
 
+/// Mirrors rubin_consensus::hash::sha3_256 (private module).
 fn sha3_256(data: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha3_256::new();
-    hasher.update(data);
-    let result = hasher.finalize();
+    let mut h = Sha3_256::new();
+    h.update(data);
+    let r = h.finalize();
     let mut out = [0u8; 32];
-    out.copy_from_slice(&result);
+    out.copy_from_slice(&r);
     out
 }
+
 
 fuzz_target!(|data: &[u8]| {
     if data.len() > 8192 {
