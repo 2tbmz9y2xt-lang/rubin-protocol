@@ -281,23 +281,9 @@ mod verification {
         assert_eq!(k1, k2);
     }
 
-    /// Proves that different suite_id values produce different keys
-    /// (probabilistically — SHA3-256 collision resistance).
-    #[kani::proof]
-    fn sig_cache_key_suite_sensitivity() {
-        let s1: u8 = kani::any();
-        let s2: u8 = kani::any();
-        kani::assume(s1 != s2);
-
-        let pubkey = [0u8; 4];
-        let sig = [0u8; 4];
-        let digest = [0u8; 32];
-
-        let k1 = sig_cache_key(s1, &pubkey, &sig, digest);
-        let k2 = sig_cache_key(s2, &pubkey, &sig, digest);
-        // Different suite → different preimage → different hash (collision-resistant).
-        assert_ne!(k1, k2);
-    }
+    // NOTE: sig_cache_key_suite_sensitivity removed — asserts collision-freedom
+    // on SHA3-256 which is SAT-intractable for Kani (see kani.yml header).
+    // Collision resistance is tested empirically in unit tests instead.
 
     /// Proves that capacity clamping always produces capacity >= 1.
     #[kani::proof]
