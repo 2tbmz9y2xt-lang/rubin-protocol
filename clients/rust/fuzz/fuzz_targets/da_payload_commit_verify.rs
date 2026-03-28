@@ -18,13 +18,13 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Split fuzz data into two chunks at a fuzz-derived midpoint.
-    let mid = data[0] as usize % data.len();
-    let chunk1 = &data[1..=mid.min(data.len() - 1)];
-    let chunk2 = if mid + 1 < data.len() {
-        &data[mid + 1..]
-    } else {
-        &[][..]
-    };
+    let rest = &data[1..];
+    if rest.is_empty() {
+        return; // need at least 1 byte of payload
+    }
+    let mid = data[0] as usize % rest.len();
+    let chunk1 = &rest[..mid];
+    let chunk2 = &rest[mid..];
 
     // Compute correct commitment: sha3_256(chunk1 || chunk2).
     let mut concat = Vec::with_capacity(chunk1.len() + chunk2.len());

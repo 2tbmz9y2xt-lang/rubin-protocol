@@ -177,6 +177,28 @@ func FuzzTxDepGraphBuild(f *testing.F) {
 					graph.Levels[e.ProducerIdx], graph.Levels[e.ConsumerIdx])
 			}
 		}
+
+		// Determinism: same input must produce identical graph.
+		graph2 := BuildTxDepGraph(contexts)
+		if graph.TxCount != graph2.TxCount {
+			t.Fatal("non-deterministic TxCount")
+		}
+		if graph.MaxLevel != graph2.MaxLevel {
+			t.Fatal("non-deterministic MaxLevel")
+		}
+		if len(graph.Edges) != len(graph2.Edges) {
+			t.Fatal("non-deterministic edge count")
+		}
+		for i, lvl := range graph.Levels {
+			if lvl != graph2.Levels[i] {
+				t.Fatalf("non-deterministic level at index %d: %d vs %d", i, lvl, graph2.Levels[i])
+			}
+		}
+		for i, idx := range graph.LevelOrder {
+			if idx != graph2.LevelOrder[i] {
+				t.Fatalf("non-deterministic LevelOrder at index %d: %d vs %d", i, idx, graph2.LevelOrder[i])
+			}
+		}
 	})
 }
 
