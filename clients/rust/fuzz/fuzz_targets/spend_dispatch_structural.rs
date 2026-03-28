@@ -23,8 +23,20 @@ fuzz_target!(|data: &[u8]| {
 
     let mut pos = 0;
 
-    let covenant_type = u16::from_le_bytes([data[pos], data[pos + 1]]);
-    pos += 2;
+    // Map raw fuzz bytes to valid covenant IDs so spend-dispatch branches
+    // are reliably reached instead of failing at witness_slots() for ~99.99%
+    // of random u16 values.
+    let cov_selector = data[pos] % 6;
+    let covenant_type: u16 = match cov_selector {
+        0 => 0x0000, // COV_TYPE_P2PK
+        1 => 0x0100, // COV_TYPE_HTLC
+        2 => 0x0101, // COV_TYPE_VAULT
+        3 => 0x0104, // COV_TYPE_MULTISIG
+        4 => 0x0102, // COV_TYPE_EXT
+        5 => 0x0105, // COV_TYPE_STEALTH
+        _ => unreachable!(),
+    };
+    pos += 2; // consume both bytes for layout stability
 
     let suite_id = data[pos];
     pos += 1;
