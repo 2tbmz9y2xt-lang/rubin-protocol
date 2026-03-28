@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::utxo_basic::Outpoint;
 
 /// Immutable per-transaction context needed to build deterministic same-block
@@ -50,17 +52,7 @@ fn tx_dep_edge_sort_key(edge: &TxDepEdge) -> (usize, usize, TxDepEdgeKind) {
 }
 
 fn sort_tx_dep_edges(edges: &mut [TxDepEdge]) {
-    let mut i = 1usize;
-    while i < edges.len() {
-        let current = edges[i];
-        let mut j = i;
-        while j > 0 && tx_dep_edge_sort_key(&current) < tx_dep_edge_sort_key(&edges[j - 1]) {
-            edges[j] = edges[j - 1];
-            j -= 1;
-        }
-        edges[j] = current;
-        i += 1;
-    }
+    edges.sort_by_key(tx_dep_edge_sort_key);
 }
 
 fn compute_tx_dep_levels(tx_count: usize, edges: &[TxDepEdge]) -> (Vec<usize>, usize) {
@@ -82,20 +74,7 @@ fn tx_dep_level_order_key(
 
 fn compute_tx_dep_level_order(contexts: &[TxValidationContext], levels: &[usize]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..contexts.len()).collect();
-    let mut i = 1usize;
-    while i < order.len() {
-        let current = order[i];
-        let mut j = i;
-        while j > 0
-            && tx_dep_level_order_key(contexts, levels, current)
-                < tx_dep_level_order_key(contexts, levels, order[j - 1])
-        {
-            order[j] = order[j - 1];
-            j -= 1;
-        }
-        order[j] = current;
-        i += 1;
-    }
+    order.sort_by_key(|idx| tx_dep_level_order_key(contexts, levels, *idx));
     order
 }
 
@@ -115,44 +94,28 @@ pub fn build_tx_dep_graph(contexts: &[TxValidationContext]) -> TxDepGraph {
         return TxDepGraph::default();
     }
 
-    let mut outpoint_first_consumer: Vec<(Outpoint, usize)> = Vec::new();
+    let mut txid_to_idx = HashMap::with_capacity(tx_count);
+    for (idx, ctx) in contexts.iter().enumerate() {
+        txid_to_idx.insert(ctx.txid, idx);
+    }
+
+    let mut outpoint_first_consumer: HashMap<Outpoint, usize> = HashMap::new();
     let mut edges = Vec::new();
 
-    let mut consumer_idx = 0usize;
-    while consumer_idx < tx_count {
-        let ctx = &contexts[consumer_idx];
+    for (consumer_idx, ctx) in contexts.iter().enumerate() {
         for outpoint in &ctx.input_outpoints {
-            let mut parent_idx = None;
-            let mut scan_idx = 0usize;
-            while scan_idx < consumer_idx {
-                if contexts[scan_idx].txid == outpoint.txid {
-                    parent_idx = Some(scan_idx);
-                    break;
+            if let Some(&producer_idx) = txid_to_idx.get(&outpoint.txid) {
+                if producer_idx < consumer_idx {
+                    edges.push(TxDepEdge {
+                        producer_idx,
+                        consumer_idx,
+                        kind: TxDepEdgeKind::ParentChild,
+                    });
+                    continue;
                 }
-                scan_idx += 1;
             }
 
-            if let Some(producer_idx) = parent_idx {
-                edges.push(TxDepEdge {
-                    producer_idx,
-                    consumer_idx,
-                    kind: TxDepEdgeKind::ParentChild,
-                });
-                continue;
-            }
-
-            let mut first_consumer_idx = None;
-            let mut seen_idx = 0usize;
-            while seen_idx < outpoint_first_consumer.len() {
-                let (seen_outpoint, first_idx) = &outpoint_first_consumer[seen_idx];
-                if seen_outpoint == outpoint {
-                    first_consumer_idx = Some(*first_idx);
-                    break;
-                }
-                seen_idx += 1;
-            }
-
-            match first_consumer_idx {
+            match outpoint_first_consumer.get(outpoint).copied() {
                 Some(first_idx) if first_idx != consumer_idx => {
                     let (producer_idx, consumer_idx) = if first_idx < consumer_idx {
                         (first_idx, consumer_idx)
@@ -166,13 +129,11 @@ pub fn build_tx_dep_graph(contexts: &[TxValidationContext]) -> TxDepGraph {
                     });
                 }
                 None => {
-                    outpoint_first_consumer.push((outpoint.clone(), consumer_idx));
+                    outpoint_first_consumer.insert(outpoint.clone(), consumer_idx);
                 }
                 Some(_) => {}
             }
         }
-
-        consumer_idx += 1;
     }
 
     sort_tx_dep_edges(&mut edges);
