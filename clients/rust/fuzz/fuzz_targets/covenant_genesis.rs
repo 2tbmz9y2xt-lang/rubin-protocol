@@ -20,5 +20,5 @@ fuzz_target!(|data: &[u8]| {
         Err(_) => return,
     };
 
-    let _ = rubin_consensus::validate_tx_covenants_genesis(&tx, height);
+    let _ = rubin_consensus::validate_tx_covenants_genesis(&tx, height, None);
 });

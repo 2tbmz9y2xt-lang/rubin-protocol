@@ -121,3 +121,15 @@ name = "p2p_version_payload"
 path = "fuzz_targets/p2p_version_payload.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "validate_tx_local"
+path = "fuzz_targets/validate_tx_local.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "spend_dispatch_structural"
+path = "fuzz_targets/spend_dispatch_structural.rs"
+test = false
+doc = false
