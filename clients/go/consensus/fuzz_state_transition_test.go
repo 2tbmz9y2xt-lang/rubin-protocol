@@ -354,7 +354,7 @@ func FuzzUtxoApplyNonCoinbase(f *testing.F) {
 			{Txid: prevTxid, Vout: 0}: {
 				Value:          1000,
 				CovenantType:   COV_TYPE_P2PK,
-				CovenantData:   make([]byte, ML_DSA_87_PUBKEY_BYTES),
+				CovenantData:   p2pkCovData,
 				CreationHeight: 0,
 			},
 		}
@@ -371,7 +371,7 @@ func FuzzUtxoApplyNonCoinbase(f *testing.F) {
 			{Txid: prevTxid, Vout: 0}: {
 				Value:          1000,
 				CovenantType:   COV_TYPE_P2PK,
-				CovenantData:   make([]byte, ML_DSA_87_PUBKEY_BYTES),
+				CovenantData:   p2pkCovData,
 				CreationHeight: 0,
 			},
 		}
