@@ -17,12 +17,12 @@ use libfuzzer_sys::fuzz_target;
 // - Valid↔Err consistency: valid==true iff err==None.
 // - TxIndex and Fee preservation from PrecomputedTxContext.
 fuzz_target!(|data: &[u8]| {
-    // Minimum: tx bytes + chain_id(32) + block_height(8) + block_mtp(8) = 48 tail bytes
-    if data.len() < 49 {
+    // Minimum: tx bytes + chain_id(32) + block_height(8) + block_mtp(8) + cov_selector(1) = 49 tail bytes
+    if data.len() < 50 {
         return;
     }
 
-    let tail_len = 48;
+    let tail_len = 49;
     let tx_end = data.len() - tail_len;
     let tx_bytes = &data[..tx_end];
     let params = &data[tx_end..];
@@ -41,38 +41,116 @@ fuzz_target!(|data: &[u8]| {
     let block_height = u64::from_le_bytes(params[32..40].try_into().unwrap());
     let block_mtp = u64::from_le_bytes(params[40..48].try_into().unwrap());
 
-    // Build resolved inputs — use P2PK covenant with first byte as suite_id.
-    // This exercises the most common spend path.
-    let resolved_inputs: Vec<rubin_consensus::UtxoEntry> = tx
-        .inputs
-        .iter()
-        .enumerate()
-        .map(|(i, _)| {
-            // Cycle covenant data from witness if available, else default.
-            let cov_data = if i < tx.witness.len() && !tx.witness[i].pubkey.is_empty() {
-                let suite_id = tx.witness[i].suite_id;
+    // Select covenant type from fuzz data to exercise all dispatch branches,
+    // not just P2PK. This ensures HTLC/VAULT/MULTISIG/EXT/STEALTH paths
+    // are reachable.
+    let cov_selector = params[48] % 6;
+    let covenant_type: u16 = match cov_selector {
+        0 => 0x0000, // COV_TYPE_P2PK
+        1 => 0x0100, // COV_TYPE_HTLC
+        2 => 0x0101, // COV_TYPE_VAULT
+        3 => 0x0104, // COV_TYPE_MULTISIG
+        4 => 0x0102, // COV_TYPE_EXT
+        5 => 0x0105, // COV_TYPE_STEALTH
+        _ => unreachable!(),
+    };
+
+    // Build covenant_data matching the selected covenant type.
+    // Each type requires specific layout for witness_slots() to succeed.
+    let build_covenant_data = |suite_id: u8, pk: &[u8]| -> Vec<u8> {
+        match covenant_type {
+            0x0000 | 0x0102 | 0x0105 => {
+                // P2PK / EXT / STEALTH: suite_id(1) + key_id(32)
                 let mut cd = vec![suite_id];
-                // key_id = 32 bytes from pubkey hash (or zero-padded)
-                let pk = &tx.witness[i].pubkey;
                 let mut key_id = [0u8; 32];
                 for (j, b) in pk.iter().take(32).enumerate() {
                     key_id[j] = *b;
                 }
                 cd.extend_from_slice(&key_id);
                 cd
-            } else {
-                // Default: suite_id=0x01 + 32 zero bytes
-                let mut cd = vec![0x01u8];
+            }
+            0x0100 => {
+                // HTLC: hash_type(1) + hash(32) + timeout(4) + suite_id(1) + pubkey_a(32) + pubkey_b(32)
+                let mut cd = vec![0x01u8]; // hash_type
+                cd.extend_from_slice(&[0u8; 32]); // hash
+                cd.extend_from_slice(&[0x00, 0x00, 0x01, 0x00]); // timeout=256
+                cd.push(suite_id);
+                // pubkey_a
+                let mut ka = [0u8; 32];
+                for (j, b) in pk.iter().take(32).enumerate() {
+                    ka[j] = *b;
+                }
+                cd.extend_from_slice(&ka);
+                // pubkey_b
+                cd.extend_from_slice(&[0x02u8; 32]);
+                cd
+            }
+            0x0104 => {
+                // MULTISIG: suite_id(1) + threshold(1) + key_count(1) + keys(N*32)
+                // threshold=1, key_count=1 for simplicity → 1 witness slot
+                let mut cd = vec![suite_id, 1u8, 1u8];
+                let mut key = [0u8; 32];
+                for (j, b) in pk.iter().take(32).enumerate() {
+                    key[j] = *b;
+                }
+                cd.extend_from_slice(&key);
+                cd
+            }
+            0x0101 => {
+                // VAULT: owner_lock_id(32) + threshold(1) + key_count(1) + keys(N*32)
+                // threshold at byte 33 = 1, key_count = 1 → 1 witness slot
+                let mut cd = vec![0u8; 32]; // owner_lock_id
+                cd.push(1u8); // threshold
+                cd.push(1u8); // key_count
+                let mut key = [0u8; 32];
+                for (j, b) in pk.iter().take(32).enumerate() {
+                    key[j] = *b;
+                }
+                cd.extend_from_slice(&key);
+                cd
+            }
+            _ => {
+                let mut cd = vec![suite_id];
                 cd.extend_from_slice(&[0u8; 32]);
                 cd
+            }
+        }
+    };
+
+    // Compute witness slots per input for this covenant type.
+    // Mirrors consensus witness_slots() logic.
+    let slots_per_input: usize = match covenant_type {
+        0x0000 | 0x0102 | 0x0105 => 1, // P2PK / EXT / STEALTH
+        0x0100 => 2,                     // HTLC
+        0x0104 => 1,                     // MULTISIG (threshold=1)
+        0x0101 => 1,                     // VAULT (threshold=1)
+        _ => 1,
+    };
+
+    // Build resolved inputs with the selected covenant type.
+    let resolved_inputs: Vec<rubin_consensus::UtxoEntry> = tx
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let (suite_id, pk) = if i * slots_per_input < tx.witness.len()
+                && !tx.witness[i * slots_per_input].pubkey.is_empty()
+            {
+                (
+                    tx.witness[i * slots_per_input].suite_id,
+                    tx.witness[i * slots_per_input].pubkey.as_slice(),
+                )
+            } else {
+                (0x01u8, [0u8; 32].as_slice())
             };
+            let cov_data = build_covenant_data(suite_id, pk);
             rubin_consensus::UtxoEntry {
                 value: if i < tx.outputs.len() {
                     tx.outputs[i].value.saturating_add(1)
                 } else {
                     1
                 },
-                covenant_type: 0x0000, // COV_TYPE_P2PK
+                covenant_type,
                 covenant_data: cov_data,
                 creation_height: 0,
                 created_by_coinbase: false,
@@ -80,8 +158,9 @@ fuzz_target!(|data: &[u8]| {
         })
         .collect();
 
-    // witness_start=0, witness_end=witness.len() — let the validator do slot accounting.
-    let witness_end = tx.witness.len();
+    // witness_end accounts for slots_per_input * num_inputs, capped by actual witness len.
+    let expected_witness = tx.inputs.len() * slots_per_input;
+    let witness_end = expected_witness.min(tx.witness.len());
 
     // Sum input values for fee calculation.
     let sum_in: u64 = resolved_inputs.iter().map(|e| e.value).fold(0u64, |a, b| a.saturating_add(b));
