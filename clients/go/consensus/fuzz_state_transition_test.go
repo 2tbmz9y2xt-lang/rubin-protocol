@@ -310,7 +310,7 @@ func FuzzUtxoApplyNonCoinbase(f *testing.F) {
 		}
 
 		// Construct a minimal Tx from fuzz data.
-		tx := &Tx{}
+		tx := &Tx{TxNonce: 1}
 		if len(txData) > 0 {
 			tx.Version = uint32(txData[0])
 		}
