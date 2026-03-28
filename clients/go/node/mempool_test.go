@@ -116,6 +116,49 @@ func TestMempoolAddTxRejectsWhenWriterInvalidatesSnapshotBeforeAdmission(t *test
 	}
 }
 
+func TestMempoolAddTxWaitsForPolicyWriterBeforeSnapshot(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	txBytes := mustBuildSignedAnchorOutputTx(t, st.Utxos, outpoints[0], 0, 1, 1, fromKey, toAddress)
+
+	mp.mu.Lock()
+	mp.policy.PolicyRejectNonCoinbaseAnchorOutputs = true
+
+	done := make(chan error, 1)
+	go func() {
+		done <- mp.AddTx(txBytes)
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("AddTx returned while policy writer lock held: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	mp.mu.Unlock()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "non-coinbase CORE_ANCHOR") {
+			t.Fatalf("expected policy rejection after writer unlock, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("AddTx remained blocked after policy writer unlock")
+	}
+
+	if got := mp.Len(); got != 0 {
+		t.Fatalf("mempool len=%d, want 0", got)
+	}
+}
+
 func TestMempoolRelayMetadata(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
@@ -378,10 +421,10 @@ func TestMempoolPolicyAllowsCoreExtPayloadUnderLimit(t *testing.T) {
 
 func TestMempoolPolicyRejectsNilCheckedTransaction(t *testing.T) {
 	mp := &Mempool{}
-	if err := mp.applyPolicyAgainstState(nil, 0, nil); err == nil || !strings.Contains(err.Error(), "nil checked transaction") {
+	if err := mp.applyPolicyAgainstState(nil, 0, nil, MempoolConfig{}); err == nil || !strings.Contains(err.Error(), "nil checked transaction") {
 		t.Fatalf("expected nil checked transaction rejection, got %v", err)
 	}
-	if err := mp.applyPolicyAgainstState(&consensus.CheckedTransaction{}, 0, nil); err == nil || !strings.Contains(err.Error(), "nil checked transaction") {
+	if err := mp.applyPolicyAgainstState(&consensus.CheckedTransaction{}, 0, nil, MempoolConfig{}); err == nil || !strings.Contains(err.Error(), "nil checked transaction") {
 		t.Fatalf("expected nil checked tx rejection, got %v", err)
 	}
 }
@@ -404,7 +447,7 @@ func TestMempoolPolicyPropagatesDaFeeComputationErrors(t *testing.T) {
 			PolicyDaSurchargePerByte: 1,
 		},
 	}
-	if err := mp.applyPolicyAgainstState(&consensus.CheckedTransaction{Tx: tx}, 101, nil); err == nil || !strings.Contains(err.Error(), "nil utxo set") {
+	if err := mp.applyPolicyAgainstState(&consensus.CheckedTransaction{Tx: tx}, 101, nil, mp.policySnapshot()); err == nil || !strings.Contains(err.Error(), "nil utxo set") {
 		t.Fatalf("expected DA fee computation error, got %v", err)
 	}
 }
