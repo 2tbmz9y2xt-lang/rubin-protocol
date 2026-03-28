@@ -1656,11 +1656,11 @@ mod tests {
             })
             .collect();
 
-        let won: usize = handles
+        let results: Vec<_> = handles
             .into_iter()
             .map(|h| h.join().expect("thread panicked"))
-            .filter(|slot| slot.is_some())
-            .count();
+            .collect();
+        let won = results.iter().filter(|slot| slot.is_some()).count();
 
         assert_eq!(won, 4, "exactly max_peers threads should acquire slots");
         // On x86 under tarpaulin (CI) this race reliably triggers CAS
