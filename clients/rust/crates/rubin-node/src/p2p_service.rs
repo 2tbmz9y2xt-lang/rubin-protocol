@@ -1690,7 +1690,6 @@ mod tests {
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
-
     #[test]
     fn accept_error_backoff_constants_valid() {
         use super::{ACCEPT_ERROR_BACKOFF_CAP, ACCEPT_ERROR_BACKOFF_INIT};
