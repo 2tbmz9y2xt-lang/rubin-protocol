@@ -133,3 +133,15 @@ name = "spend_dispatch_structural"
 path = "fuzz_targets/spend_dispatch_structural.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "sig_verify_openssl"
+path = "fuzz_targets/sig_verify_openssl.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "sig_cache_structural"
+path = "fuzz_targets/sig_cache_structural.rs"
+test = false
+doc = false
