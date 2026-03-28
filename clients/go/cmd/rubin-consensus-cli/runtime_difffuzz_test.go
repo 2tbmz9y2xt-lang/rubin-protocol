@@ -47,6 +47,15 @@ type sighashParityResponse struct {
 	DigestHex string
 }
 
+type cargoCompilerArtifactForDiffFuzz struct {
+	Reason     string `json:"reason"`
+	Executable string `json:"executable"`
+	Target     struct {
+		Name string   `json:"name"`
+		Kind []string `json:"kind"`
+	} `json:"target"`
+}
+
 func TestRubinConsensusCLI_RustParity_SeedRequests(t *testing.T) {
 	bin := requireRustConsensusCLI(t)
 
@@ -130,6 +139,23 @@ func FuzzRubinConsensusCLI_RustParity_Sighash(f *testing.F) {
 	})
 }
 
+func TestCargoExecutablePathForDiffFuzz_UsesExecutableField(t *testing.T) {
+	const expected = "/tmp/target/difffuzz-cache/fingerprint/x86_64-unknown-linux-gnu/debug/rubin-consensus-cli"
+	stdout := []byte(
+		"{\"reason\":\"build-script-executed\"}\n" +
+			"{\"reason\":\"compiler-artifact\",\"target\":{\"name\":\"rubin-consensus\",\"kind\":[\"lib\"]}}\n" +
+			"{\"reason\":\"compiler-artifact\",\"target\":{\"name\":\"rubin-consensus-cli\",\"kind\":[\"bin\"]},\"executable\":\"" + expected + "\"}\n",
+	)
+
+	got, err := cargoExecutablePathForDiffFuzz(stdout, "rubin-consensus-cli")
+	if err != nil {
+		t.Fatalf("cargoExecutablePathForDiffFuzz: %v", err)
+	}
+	if got != expected {
+		t.Fatalf("unexpected executable path: got %q want %q", got, expected)
+	}
+}
+
 func assertParseTxParity(t *testing.T, bin string, req Request) {
 	t.Helper()
 
@@ -210,16 +236,32 @@ func requireRustConsensusCLI(t *testing.T) string {
 			rustConsensusCLIBuildErr = fmt.Errorf("mkdir difffuzz target dir: %w", err)
 			return
 		}
-		cmd := exec.Command("cargo", "build", "--target-dir", targetDir, "-p", "rubin-consensus-cli", "--bin", "rubin-consensus-cli")
+		cmd := exec.Command(
+			"cargo",
+			"build",
+			"--message-format=json-render-diagnostics",
+			"--target-dir",
+			targetDir,
+			"-p",
+			"rubin-consensus-cli",
+			"--bin",
+			"rubin-consensus-cli",
+		)
 		cmd.Dir = rustDir
-		cmd.Stdout = io.Discard
+		var stdout bytes.Buffer
+		cmd.Stdout = &stdout
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
 			rustConsensusCLIBuildErr = fmt.Errorf("cargo build rubin-consensus-cli: %w\n%s", err, stderr.String())
 			return
 		}
-		rustConsensusCLIBinPath = filepath.Join(targetDir, "debug", binaryNameForDiffFuzz("rubin-consensus-cli"))
+		binPath, err := cargoExecutablePathForDiffFuzz(stdout.Bytes(), "rubin-consensus-cli")
+		if err != nil {
+			rustConsensusCLIBuildErr = fmt.Errorf("resolve cargo executable path: %w", err)
+			return
+		}
+		rustConsensusCLIBinPath = binPath
 	})
 	if rustConsensusCLIBuildErr != nil {
 		t.Fatalf("build rust consensus cli: %v", rustConsensusCLIBuildErr)
@@ -368,6 +410,32 @@ func hashPathForDiffFuzz(hasher io.Writer, root, path string) error {
 	})
 }
 
+func cargoExecutablePathForDiffFuzz(stdout []byte, targetName string) (string, error) {
+	var sawArtifact bool
+	for _, line := range bytes.Split(stdout, []byte{'\n'}) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+
+		var msg cargoCompilerArtifactForDiffFuzz
+		if err := json.Unmarshal(line, &msg); err != nil {
+			continue
+		}
+		if msg.Reason != "compiler-artifact" {
+			continue
+		}
+		sawArtifact = true
+		if msg.Target.Name == targetName && msg.Executable != "" {
+			return msg.Executable, nil
+		}
+	}
+	if !sawArtifact {
+		return "", fmt.Errorf("cargo emitted no compiler-artifact messages")
+	}
+	return "", fmt.Errorf("compiler-artifact for %s not found", targetName)
+}
+
 func hashFileForDiffFuzz(hasher io.Writer, root, path string) error {
 	rel, err := filepath.Rel(root, path)
 	if err != nil {
@@ -404,11 +472,4 @@ func repoRootForDiffFuzz(t *testing.T) string {
 		t.Fatal("runtime.Caller failed")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
-}
-
-func binaryNameForDiffFuzz(name string) string {
-	if runtime.GOOS == "windows" {
-		return name + ".exe"
-	}
-	return name
 }
