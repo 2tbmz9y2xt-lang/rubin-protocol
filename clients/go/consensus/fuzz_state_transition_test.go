@@ -328,7 +328,7 @@ func FuzzUtxoApplyNonCoinbase(f *testing.F) {
 
 		// Add one output.
 		var outValue uint64 = 500
-		if len(txData) > 8 {
+		if len(txData) > 2 {
 			outValue = uint64(txData[1])<<8 | uint64(txData[2])
 		}
 		if outValue == 0 {
