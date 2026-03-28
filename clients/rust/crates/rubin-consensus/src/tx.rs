@@ -60,6 +60,10 @@ pub struct DaChunkCore {
     pub chunk_hash: [u8; 32],
 }
 
+/// Internal split parser used by `parse_tx` and helper/property tests.
+///
+/// Callers that need stable identifiers must hash `b[..core_end]` for `txid`
+/// and `b[..total_end]` for `wtxid`; this helper only parses wire structure.
 pub(crate) fn parse_tx_without_hashes(b: &[u8]) -> Result<(Tx, usize, usize), TxError> {
     let mut r = Reader::new(b);
 
