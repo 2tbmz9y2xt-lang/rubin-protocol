@@ -225,6 +225,25 @@ mod verification {
     use super::*;
 
     #[kani::proof]
+    fn verify_witness_slots_defaults_to_one_for_short_multisig_payload() {
+        let slots = witness_slots(COV_TYPE_MULTISIG, &[]).expect("short multisig");
+        assert_eq!(slots, 1);
+    }
+
+    #[kani::proof]
+    fn verify_witness_slots_defaults_to_one_for_short_vault_payload() {
+        let slots = witness_slots(COV_TYPE_VAULT, &[0u8; 33]).expect("short vault");
+        assert_eq!(slots, 1);
+    }
+
+    #[kani::proof]
+    fn verify_witness_slots_rejects_unknown_covenant_type() {
+        let err = witness_slots(0xffff, &[]).expect_err("unknown covenant must fail");
+        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+        assert_eq!(err.msg, "unsupported covenant in witness_slots");
+    }
+
+    #[kani::proof]
     fn verify_parse_vault_covenant_data_rejects_zero_key_count() {
         let owner_lock_id = [0u8; 32];
         let mut covenant_data = Vec::with_capacity(34);

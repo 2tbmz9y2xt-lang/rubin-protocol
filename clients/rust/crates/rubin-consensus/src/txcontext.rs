@@ -34,6 +34,44 @@ mod verification {
         let split = Uint128 { lo, hi };
         assert_eq!(Uint128::from_native(split.to_native()), split);
     }
+
+    #[kani::proof]
+    fn verify_txcontext_get_output_checked_accepts_highest_valid_index() {
+        let mut continuing = TxContextContinuing::default();
+        continuing.continuing_output_count = 2;
+        continuing.continuing_outputs[0] = Some(TxOutputView {
+            value: 11,
+            ext_payload: Arc::from(&[0x71][..]),
+        });
+        continuing.continuing_outputs[1] = Some(TxOutputView {
+            value: 12,
+            ext_payload: Arc::from(&[0x72][..]),
+        });
+
+        let output = continuing.get_output_checked(1).expect("index 1");
+        assert_eq!(output.value, 12);
+        assert_eq!(output.ext_payload.as_ref(), &[0x72]);
+    }
+
+    #[kani::proof]
+    fn verify_txcontext_get_output_checked_rejects_count_boundary_index() {
+        let mut continuing = TxContextContinuing::default();
+        continuing.continuing_output_count = 2;
+        continuing.continuing_outputs[0] = Some(TxOutputView {
+            value: 11,
+            ext_payload: Arc::from(&[0x71][..]),
+        });
+        continuing.continuing_outputs[1] = Some(TxOutputView {
+            value: 12,
+            ext_payload: Arc::from(&[0x72][..]),
+        });
+
+        let err = continuing
+            .get_output_checked(TXCONTEXT_MAX_CONTINUING_OUTPUTS)
+            .expect_err("boundary index must fail");
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+        assert_eq!(err.msg, "txcontext continuing output index out of bounds");
+    }
 }
 
 impl Uint128 {
@@ -329,6 +367,45 @@ mod tests {
         )
         .unwrap();
         assert!(bundle.is_none());
+    }
+
+    #[test]
+    fn collect_txcontext_ext_ids_skips_disabled_profiles_and_deduplicates() {
+        let resolved_inputs = vec![
+            UtxoEntry {
+                value: 11,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: core_ext_covdata(9, &[0x90]),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+            UtxoEntry {
+                value: 12,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: core_ext_covdata(7, &[0x71]),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+            UtxoEntry {
+                value: 13,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: core_ext_covdata(7, &[0x72]),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+            UtxoEntry {
+                value: 14,
+                covenant_type: crate::constants::COV_TYPE_P2PK,
+                covenant_data: vec![],
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        ];
+
+        let ext_ids =
+            collect_txcontext_ext_ids(&resolved_inputs, &static_profiles(&[(7, true), (9, false)]))
+                .expect("collect ext_ids");
+        assert_eq!(ext_ids, vec![7]);
     }
 
     #[test]

@@ -230,6 +230,18 @@ mod tests {
     }
 
     #[test]
+    fn p2pk_covenant_data_for_pubkey_emits_canonical_shape_and_is_deterministic() {
+        let pubkey = b"rubin-p2pk-shape";
+        let covenant_data = p2pk_covenant_data_for_pubkey(pubkey);
+        let repeated = p2pk_covenant_data_for_pubkey(pubkey);
+
+        assert_eq!(covenant_data.len(), MAX_P2PK_COVENANT_DATA as usize);
+        assert_eq!(covenant_data[0], SUITE_ID_ML_DSA_87);
+        assert_eq!(covenant_data[1..33], sha3_256(pubkey));
+        assert_eq!(covenant_data, repeated);
+    }
+
+    #[test]
     fn marshal_tx_roundtrips_via_parse_tx() {
         let tx = test_tx();
         let bytes = marshal_tx(&tx).expect("marshal");
