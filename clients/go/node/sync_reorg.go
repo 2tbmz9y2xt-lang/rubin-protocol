@@ -62,14 +62,15 @@ func (s *SyncEngine) applyDirectBlockIfPossible(
 	prevTimestamps []uint64,
 ) (*ChainStateConnectSummary, bool, error) {
 	var zero [32]byte
+	view := s.chainState.view()
 	switch {
-	case !s.chainState.HasTip:
+	case !view.hasTip:
 		if pb.Header.PrevBlockHash != zero {
 			return nil, true, ErrParentNotFound
 		}
 		summary, err := s.applyCanonicalParsedBlock(pb, blockBytes, prevTimestamps)
 		return summary, true, err
-	case pb.Header.PrevBlockHash == s.chainState.TipHash:
+	case pb.Header.PrevBlockHash == view.tipHash:
 		summary, err := s.applyCanonicalParsedBlock(pb, blockBytes, prevTimestamps)
 		return summary, true, err
 	default:
@@ -214,8 +215,9 @@ func (s *SyncEngine) syntheticSideChainSummary(height uint64, blockHash [32]byte
 	utxoCount := uint64(0)
 	alreadyGenerated := uint64(0)
 	if s != nil && s.chainState != nil {
-		utxoCount = uint64(len(s.chainState.Utxos))
-		alreadyGenerated = s.chainState.AlreadyGenerated
+		view := s.chainState.view()
+		utxoCount = uint64(view.utxoCount)
+		alreadyGenerated = view.alreadyGenerated
 	}
 	return &ChainStateConnectSummary{
 		BlockHeight:        height,

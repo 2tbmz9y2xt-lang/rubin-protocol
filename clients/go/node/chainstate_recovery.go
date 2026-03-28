@@ -14,10 +14,11 @@ func shouldPersistChainStateSnapshot(state *ChainState, summary *ChainStateConne
 	if state == nil || summary == nil {
 		return true
 	}
-	if !state.HasTip || summary.BlockHeight == 0 {
+	view := state.view()
+	if !view.hasTip || summary.BlockHeight == 0 {
 		return true
 	}
-	if len(state.Utxos) <= chainStateSnapshotSmallUtxoCutoff {
+	if view.utxoCount <= chainStateSnapshotSmallUtxoCutoff {
 		return true
 	}
 	return summary.BlockHeight%chainStateSnapshotIntervalBlocks == 0
@@ -27,12 +28,16 @@ func cloneChainState(src *ChainState) *ChainState {
 	if src == nil {
 		return nil
 	}
+	src.mu.RLock()
+	defer src.mu.RUnlock()
 	return &ChainState{
 		Utxos:            copyUtxoSet(src.Utxos),
 		Height:           src.Height,
 		AlreadyGenerated: src.AlreadyGenerated,
 		TipHash:          src.TipHash,
 		HasTip:           src.HasTip,
+		Rotation:         src.Rotation,
+		Registry:         src.Registry,
 	}
 }
 
@@ -99,8 +104,9 @@ func ReconcileChainStateWithBlockStore(state *ChainState, store *BlockStore, cfg
 		return false, err
 	}
 	if !ok {
-		if truncated || state.HasTip || len(state.Utxos) != 0 || state.AlreadyGenerated != 0 || state.Height != 0 || state.TipHash != ([32]byte{}) {
-			*state = *NewChainState()
+		view := state.view()
+		if truncated || view.hasTip || view.utxoCount != 0 || view.alreadyGenerated != 0 || view.height != 0 || view.tipHash != ([32]byte{}) {
+			state.replaceFrom(NewChainState())
 			return true, nil
 		}
 		return false, nil
@@ -108,27 +114,28 @@ func ReconcileChainStateWithBlockStore(state *ChainState, store *BlockStore, cfg
 
 	replayFrom := uint64(0)
 	changed := truncated
-	if state.HasTip {
-		if state.Height <= tipHeight {
-			canonicalHash, hasHeight, err := store.CanonicalHash(state.Height)
+	view := state.view()
+	if view.hasTip {
+		if view.height <= tipHeight {
+			canonicalHash, hasHeight, err := store.CanonicalHash(view.height)
 			if err != nil {
 				return false, err
 			}
-			if hasHeight && canonicalHash == state.TipHash {
-				if state.Height == tipHeight {
+			if hasHeight && canonicalHash == view.tipHash {
+				if view.height == tipHeight {
 					return changed, nil
 				}
-				replayFrom = state.Height + 1
+				replayFrom = view.height + 1
 			} else {
-				*state = *NewChainState()
+				state.replaceFrom(NewChainState())
 				changed = true
 			}
 		} else {
-			*state = *NewChainState()
+			state.replaceFrom(NewChainState())
 			changed = true
 		}
 	} else {
-		*state = *NewChainState()
+		state.replaceFrom(NewChainState())
 		changed = true
 	}
 

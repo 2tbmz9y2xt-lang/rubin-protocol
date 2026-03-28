@@ -240,11 +240,12 @@ func (s *SyncEngine) HeaderSyncRequest() HeaderRequest {
 	if s == nil || s.chainState == nil {
 		return HeaderRequest{}
 	}
-	if !s.chainState.HasTip {
+	view := s.chainState.view()
+	if !view.hasTip {
 		return HeaderRequest{Limit: s.cfg.HeaderBatchLimit}
 	}
 	return HeaderRequest{
-		FromHash: s.chainState.TipHash,
+		FromHash: view.tipHash,
 		HasFrom:  true,
 		Limit:    s.cfg.HeaderBatchLimit,
 	}
@@ -298,7 +299,7 @@ func (s *SyncEngine) isInIBDUnchecked() bool {
 	if s == nil || s.chainState == nil {
 		return true
 	}
-	if !s.chainState.HasTip {
+	if !s.chainState.view().hasTip {
 		return true
 	}
 	s.mu.RLock()
@@ -323,7 +324,7 @@ func (s *SyncEngine) IsInIBD(nowUnix uint64) bool {
 	if s == nil || s.chainState == nil {
 		return true
 	}
-	if !s.chainState.HasTip {
+	if !s.chainState.view().hasTip {
 		return true
 	}
 	s.mu.RLock()
@@ -385,7 +386,7 @@ func (s *SyncEngine) rollbackApplyBlock(cause error, state syncRollbackState) er
 		if recovered == nil {
 			return errors.New("nil rollback chainstate")
 		}
-		*s.chainState = *recovered
+		s.chainState.replaceFrom(recovered)
 		return nil
 	}()
 	if s.blockStore != nil {
