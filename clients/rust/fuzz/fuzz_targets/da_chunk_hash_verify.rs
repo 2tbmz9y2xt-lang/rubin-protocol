@@ -28,19 +28,22 @@ fuzz_target!(|data: &[u8]| {
     let r = rubin_consensus::verify_da_chunk_hashes_parallel(vec![correct_task.clone()], 1);
     assert!(r.is_ok(), "correct hash rejected: {:?}", r);
 
-    // Mutated hash — must fail.
+    // Mutated hash — must fail regardless of worker count.
     let mut bad_hash = correct_hash;
     bad_hash[0] ^= 0xFF;
-    let bad_task = rubin_consensus::DaChunkHashTask {
-        tx_index: 0,
-        da_payload: data.to_vec(),
-        expected: bad_hash,
-    };
-    let r = rubin_consensus::verify_da_chunk_hashes_parallel(vec![bad_task], 1);
-    assert!(r.is_err(), "mutated hash accepted — collision");
+    for w in [1, 2, 4] {
+        let bad_task_w = rubin_consensus::DaChunkHashTask {
+            tx_index: 0,
+            da_payload: data.to_vec(),
+            expected: bad_hash,
+        };
+        let r = rubin_consensus::verify_da_chunk_hashes_parallel(vec![bad_task_w], w);
+        assert!(r.is_err(), "mutated hash accepted with {} workers", w);
+    }
 
-    // Multi-worker determinism.
-    let r1 = rubin_consensus::verify_da_chunk_hashes_parallel(vec![correct_task.clone()], 2);
-    let r2 = rubin_consensus::verify_da_chunk_hashes_parallel(vec![correct_task], 4);
-    assert_eq!(r1.is_ok(), r2.is_ok(), "worker count affects result");
+    // Correct hash must pass regardless of worker count.
+    for w in [1, 2, 4] {
+        let r = rubin_consensus::verify_da_chunk_hashes_parallel(vec![correct_task.clone()], w);
+        assert!(r.is_ok(), "correct hash rejected with {} workers: {:?}", w, r);
+    }
 });

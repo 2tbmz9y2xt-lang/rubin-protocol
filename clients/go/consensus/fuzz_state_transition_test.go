@@ -233,11 +233,20 @@ func FuzzDAChunkHashVerify(f *testing.F) {
 			t.Fatalf("empty tasks failed: %v", err)
 		}
 
-		// Determinism: same input → same result.
-		err1 := VerifyDAChunkHashesParallel(context.Background(), []DAChunkHashTask{correctTask}, 2)
-		err2 := VerifyDAChunkHashesParallel(context.Background(), []DAChunkHashTask{correctTask}, 2)
-		if (err1 == nil) != (err2 == nil) {
-			t.Fatalf("non-deterministic: %v vs %v", err1, err2)
+		// Determinism across worker counts: 1, 2, 4 must all agree.
+		for _, w := range []int{1, 2, 4} {
+			errW := VerifyDAChunkHashesParallel(context.Background(), []DAChunkHashTask{correctTask}, w)
+			if errW != nil {
+				t.Fatalf("correct hash rejected with %d workers: %v", w, errW)
+			}
+		}
+
+		// Mutated hash must fail regardless of worker count.
+		for _, w := range []int{1, 2, 4} {
+			errW := VerifyDAChunkHashesParallel(context.Background(), []DAChunkHashTask{wrongTask}, w)
+			if errW == nil {
+				t.Fatalf("mutated hash accepted with %d workers", w)
+			}
 		}
 	})
 }
