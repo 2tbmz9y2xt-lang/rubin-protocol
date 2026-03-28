@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -197,7 +200,17 @@ func requireRustConsensusCLI(t *testing.T) string {
 	rustConsensusCLIBuildOnce.Do(func() {
 		root := repoRootForDiffFuzz(t)
 		rustDir := filepath.Join(root, "clients", "rust")
-		cmd := exec.Command("cargo", "build", "-p", "rubin-consensus-cli", "--bin", "rubin-consensus-cli")
+		fingerprint, err := rustConsensusSourceFingerprint(root)
+		if err != nil {
+			rustConsensusCLIBuildErr = fmt.Errorf("fingerprint rust consensus sources: %w", err)
+			return
+		}
+		targetDir := filepath.Join(rustDir, "target", "difffuzz-cache", fingerprint)
+		if err := os.MkdirAll(targetDir, 0o755); err != nil {
+			rustConsensusCLIBuildErr = fmt.Errorf("mkdir difffuzz target dir: %w", err)
+			return
+		}
+		cmd := exec.Command("cargo", "build", "--target-dir", targetDir, "-p", "rubin-consensus-cli", "--bin", "rubin-consensus-cli")
 		cmd.Dir = rustDir
 		cmd.Stdout = io.Discard
 		var stderr bytes.Buffer
@@ -206,7 +219,7 @@ func requireRustConsensusCLI(t *testing.T) string {
 			rustConsensusCLIBuildErr = fmt.Errorf("cargo build rubin-consensus-cli: %w\n%s", err, stderr.String())
 			return
 		}
-		rustConsensusCLIBinPath = filepath.Join(rustDir, "target", "debug", binaryNameForDiffFuzz("rubin-consensus-cli"))
+		rustConsensusCLIBinPath = filepath.Join(targetDir, "debug", binaryNameForDiffFuzz("rubin-consensus-cli"))
 	})
 	if rustConsensusCLIBuildErr != nil {
 		t.Fatalf("build rust consensus cli: %v", rustConsensusCLIBuildErr)
@@ -313,6 +326,68 @@ func anchorOnlyCoinbaseLikeTxSeed() []byte {
 	out = append(out, consensus.EncodeCompactSize(0)...)
 	out = append(out, consensus.EncodeCompactSize(0)...)
 	return out
+}
+
+func rustConsensusSourceFingerprint(root string) (string, error) {
+	hasher := sha256.New()
+	paths := []string{
+		filepath.Join(root, "clients", "rust", "Cargo.toml"),
+		filepath.Join(root, "clients", "rust", "Cargo.lock"),
+		filepath.Join(root, "clients", "rust", "crates", "rubin-consensus"),
+		filepath.Join(root, "clients", "rust", "crates", "rubin-consensus-cli"),
+	}
+	for _, path := range paths {
+		if err := hashPathForDiffFuzz(hasher, root, path); err != nil {
+			return "", err
+		}
+	}
+	sum := hasher.Sum(nil)
+	return hex.EncodeToString(sum[:8]), nil
+}
+
+func hashPathForDiffFuzz(hasher io.Writer, root, path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return hashFileForDiffFuzz(hasher, root, path)
+	}
+	return filepath.WalkDir(path, func(entryPath string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		base := filepath.Base(entryPath)
+		if filepath.Ext(entryPath) != ".rs" && base != "Cargo.toml" {
+			return nil
+		}
+		return hashFileForDiffFuzz(hasher, root, entryPath)
+	})
+}
+
+func hashFileForDiffFuzz(hasher io.Writer, root, path string) error {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(hasher, rel); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(hasher, "\n"); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if _, err := hasher.Write(data); err != nil {
+		return err
+	}
+	_, err = io.WriteString(hasher, "\n")
+	return err
 }
 
 func minDiffFuzzInt(a, b int) int {
