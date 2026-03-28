@@ -182,4 +182,130 @@ mod tests {
         let cache = SigCache::new(0);
         assert_eq!(cache.inner.capacity, 1);
     }
+
+    #[test]
+    fn different_pubkey_same_sig_yields_different_keys() {
+        let sig = [0xABu8; 100];
+        let digest = [0u8; 32];
+        let k1 = sig_cache_key(0x01, &[1, 2, 3], &sig, digest);
+        let k2 = sig_cache_key(0x01, &[4, 5, 6], &sig, digest);
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn empty_pubkey_and_sig_accepted() {
+        let cache = SigCache::new(10);
+        let digest = [0x42u8; 32];
+        // Insert with empty pubkey and sig — must not panic.
+        cache.insert(0x01, &[], &[], digest);
+        assert!(cache.lookup(0x01, &[], &[], digest));
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn capacity_exactly_reached_then_dropped() {
+        let cache = SigCache::new(2);
+        let digest = [0u8; 32];
+        // Fill to capacity.
+        cache.insert(0x01, &[1], &[1], digest);
+        cache.insert(0x01, &[2], &[2], digest);
+        assert_eq!(cache.len(), 2);
+        // Third entry is silently dropped.
+        cache.insert(0x01, &[3], &[3], digest);
+        assert_eq!(cache.len(), 2);
+        // First two still present.
+        assert!(cache.lookup(0x01, &[1], &[1], digest));
+        assert!(cache.lookup(0x01, &[2], &[2], digest));
+        // Third was dropped.
+        assert!(!cache.lookup(0x01, &[3], &[3], digest));
+    }
+
+    #[test]
+    fn concurrent_insert_lookup_no_panic() {
+        use std::thread;
+        let cache = SigCache::new(64);
+        let mut handles = vec![];
+        for i in 0..8u8 {
+            let c = cache.clone();
+            handles.push(thread::spawn(move || {
+                let mut digest = [0u8; 32];
+                digest[0] = i;
+                for j in 0..10u8 {
+                    c.insert(i, &[j], &[j], digest);
+                    c.lookup(i, &[j], &[j], digest);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert!(cache.len() <= 64);
+    }
+
+    #[test]
+    fn is_empty_reflects_state() {
+        let cache = SigCache::new(10);
+        assert!(cache.is_empty());
+        cache.insert(0x01, &[1], &[1], [0u8; 32]);
+        assert!(!cache.is_empty());
+        cache.reset();
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn length_prefix_prevents_ambiguity() {
+        // Ensure that (pubkey=[1,2], sig=[3]) differs from (pubkey=[1], sig=[2,3])
+        // even though concatenated bytes are the same.
+        let digest = [0u8; 32];
+        let k1 = sig_cache_key(0x01, &[1, 2], &[3], digest);
+        let k2 = sig_cache_key(0x01, &[1], &[2, 3], digest);
+        assert_ne!(k1, k2, "length prefix must disambiguate pubkey/sig splits");
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Proves that sig_cache_key is deterministic: same inputs always produce
+    /// the same output.
+    #[kani::proof]
+    fn sig_cache_key_deterministic() {
+        let suite_id: u8 = kani::any();
+        let pubkey = [kani::any::<u8>(); 4];
+        let sig = [kani::any::<u8>(); 4];
+        let digest: [u8; 32] = kani::any();
+
+        let k1 = sig_cache_key(suite_id, &pubkey, &sig, digest);
+        let k2 = sig_cache_key(suite_id, &pubkey, &sig, digest);
+        assert_eq!(k1, k2);
+    }
+
+    /// Proves that different suite_id values produce different keys
+    /// (probabilistically — SHA3-256 collision resistance).
+    #[kani::proof]
+    fn sig_cache_key_suite_sensitivity() {
+        let s1: u8 = kani::any();
+        let s2: u8 = kani::any();
+        kani::assume(s1 != s2);
+
+        let pubkey = [0u8; 4];
+        let sig = [0u8; 4];
+        let digest = [0u8; 32];
+
+        let k1 = sig_cache_key(s1, &pubkey, &sig, digest);
+        let k2 = sig_cache_key(s2, &pubkey, &sig, digest);
+        // Different suite → different preimage → different hash (collision-resistant).
+        assert_ne!(k1, k2);
+    }
+
+    /// Proves that capacity clamping always produces capacity >= 1.
+    #[kani::proof]
+    fn new_cache_capacity_always_at_least_one() {
+        let cap: usize = kani::any();
+        // Restrict to avoid OOM in proof.
+        kani::assume(cap <= 16);
+        let cache = SigCache::new(cap);
+        assert!(cache.inner.capacity >= 1);
+    }
 }
