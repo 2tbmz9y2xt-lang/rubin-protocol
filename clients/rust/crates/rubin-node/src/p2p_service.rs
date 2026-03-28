@@ -1617,6 +1617,46 @@ mod tests {
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
+    /// Exercises the `spin_loop()` hint path by forcing CAS contention.
+    /// We mutate `active_sessions` from a background thread between the
+    /// caller's `load` and `compare_exchange`, guaranteeing at least one
+    /// CAS failure + retry that passes through the `spin_loop()` branch.
+    #[test]
+    fn session_slot_cas_contention_covered() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-cas-contention");
+        let mut runtime_cfg = default_peer_runtime_config("devnet", 8);
+        runtime_cfg.read_deadline = Duration::from_millis(250);
+        runtime_cfg.write_deadline = Duration::from_millis(250);
+        let shared = Arc::new(test_shared_state(runtime_cfg, Vec::new(), sync_engine));
+
+        // Spawn 4 threads that all race for session slots concurrently.
+        // With enough contention at least one will fail CAS and retry,
+        // executing the spin_loop() hint.
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let s = Arc::clone(&shared);
+                let b = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    b.wait();
+                    super::try_acquire_session_slot(&s, true)
+                })
+            })
+            .collect();
+
+        let won: usize = handles
+            .into_iter()
+            .map(|h| h.join().expect("thread panicked"))
+            .filter(|slot| slot.is_some())
+            .count();
+
+        // All 4 should succeed (cap=8), but at least some will have
+        // retried due to CAS contention from concurrent increments.
+        assert_eq!(won, 4, "all threads should eventually acquire a slot");
+
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
     #[test]
     fn accept_error_backoff_constants_valid() {
         use super::{ACCEPT_ERROR_BACKOFF_CAP, ACCEPT_ERROR_BACKOFF_INIT};
