@@ -32,6 +32,11 @@ TARGETS=(
   "./consensus:FuzzSigCacheConcurrentAccess"
   "./consensus:FuzzSuiteRegistryLookup"
   "./consensus:FuzzSigCheckQueueWithCacheIntegration"
+  "./consensus:FuzzConnectBlockInMemory"
+  "./consensus:FuzzTxDepGraphBuild"
+  "./consensus:FuzzDAChunkHashVerify"
+  "./consensus:FuzzDAPayloadCommitVerify"
+  "./consensus:FuzzUtxoApplyNonCoinbase"
   "./node/p2p:FuzzReadFrame"
   "./node/p2p:FuzzDecodeVersionPayload"
 )
