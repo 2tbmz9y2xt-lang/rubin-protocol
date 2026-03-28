@@ -22,6 +22,7 @@ fuzz_target!(|data: &[u8]| {
     let cache = rubin_consensus::SigCache::new(capacity);
 
     let mut pos = 2;
+    #[allow(clippy::type_complexity)]
     let mut inserted_keys: Vec<(u8, Vec<u8>, Vec<u8>, [u8; 32])> = Vec::new();
 
     for _ in 0..num_ops {
