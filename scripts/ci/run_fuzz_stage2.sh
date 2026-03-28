@@ -26,6 +26,12 @@ TARGETS=(
   "./consensus:FuzzBlockSubsidy"
   "./consensus:FuzzMerkleRootTxids"
   "./consensus:FuzzMarshalTxRoundtrip"
+  "./consensus:FuzzVerifySigDispatch"
+  "./consensus:FuzzSigCacheDeterminism"
+  "./consensus:FuzzSigCheckQueueFlush"
+  "./consensus:FuzzSigCacheConcurrentAccess"
+  "./consensus:FuzzSuiteRegistryLookup"
+  "./consensus:FuzzSigCheckQueueWithCacheIntegration"
   "./node/p2p:FuzzReadFrame"
   "./node/p2p:FuzzDecodeVersionPayload"
 )
