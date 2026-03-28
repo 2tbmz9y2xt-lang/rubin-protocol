@@ -1167,7 +1167,7 @@ func testRestoreChainState(dst *ChainState, snapshot chainStateDisk) error {
 	if err != nil {
 		return err
 	}
-	*dst = *recovered
+	dst.replaceFrom(recovered)
 	return nil
 }
 

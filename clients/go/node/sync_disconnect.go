@@ -18,7 +18,8 @@ func (s *SyncEngine) DisconnectTip() (*ChainStateDisconnectSummary, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !s.chainState.HasTip || s.chainState.Height != tipHeight || s.chainState.TipHash != tipHash {
+	view := s.chainState.view()
+	if !view.hasTip || view.height != tipHeight || view.tipHash != tipHash {
 		return nil, errors.New("chainstate tip does not match blockstore tip")
 	}
 

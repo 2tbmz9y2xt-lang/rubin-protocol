@@ -74,10 +74,12 @@ type minedCandidate struct {
 }
 
 type miningBuildContext struct {
-	prevHash        [32]byte
-	remainingWeight uint64
-	nextHeight      uint64
-	candidateTxs    [][]byte
+	prevHash         [32]byte
+	remainingWeight  uint64
+	nextHeight       uint64
+	alreadyGenerated uint64
+	utxos            map[consensus.Outpoint]consensus.UtxoEntry
+	candidateTxs     [][]byte
 }
 
 func DefaultMinerConfig() MinerConfig {
@@ -175,7 +177,7 @@ func (m *Miner) buildBlock(ctx context.Context, txs [][]byte) ([]byte, []uint64,
 		return nil, nil, 0, 0, 0, err
 	}
 
-	parsed, err := m.selectCandidateTransactions(buildCtx.candidateTxs, buildCtx.nextHeight, buildCtx.remainingWeight)
+	parsed, err := m.selectCandidateTransactions(buildCtx.candidateTxs, buildCtx.utxos, buildCtx.nextHeight, buildCtx.remainingWeight)
 	if err != nil {
 		return nil, nil, 0, 0, 0, err
 	}
@@ -183,7 +185,7 @@ func (m *Miner) buildBlock(ctx context.Context, txs [][]byte) ([]byte, []uint64,
 	if err != nil {
 		return nil, nil, 0, 0, 0, err
 	}
-	coinbase, merkleRoot, err := m.buildCoinbaseAndMerkleRoot(buildCtx.nextHeight, witnessCommitment, parsed)
+	coinbase, merkleRoot, err := m.buildCoinbaseAndMerkleRoot(buildCtx.nextHeight, buildCtx.alreadyGenerated, witnessCommitment, parsed)
 	if err != nil {
 		return nil, nil, 0, 0, 0, err
 	}
@@ -196,7 +198,11 @@ func (m *Miner) buildBlock(ctx context.Context, txs [][]byte) ([]byte, []uint64,
 }
 
 func (m *Miner) buildContext(txs [][]byte) (miningBuildContext, error) {
-	nextHeight, expectedPrev, err := nextBlockContext(m.chainState)
+	state := cloneChainState(m.chainState)
+	if state == nil {
+		return miningBuildContext{}, errors.New("nil chainstate")
+	}
+	nextHeight, expectedPrev, err := nextBlockContext(state)
 	if err != nil {
 		return miningBuildContext{}, err
 	}
@@ -204,15 +210,17 @@ func (m *Miner) buildContext(txs [][]byte) (miningBuildContext, error) {
 	if expectedPrev != nil {
 		prevHash = *expectedPrev
 	}
-	remainingWeight, err := m.remainingWeightBudget(nextHeight)
+	remainingWeight, err := m.remainingWeightBudget(nextHeight, state.AlreadyGenerated)
 	if err != nil {
 		return miningBuildContext{}, err
 	}
 	return miningBuildContext{
-		nextHeight:      nextHeight,
-		prevHash:        prevHash,
-		remainingWeight: remainingWeight,
-		candidateTxs:    m.candidateTransactions(txs),
+		nextHeight:       nextHeight,
+		prevHash:         prevHash,
+		remainingWeight:  remainingWeight,
+		alreadyGenerated: state.AlreadyGenerated,
+		utxos:            state.Utxos,
+		candidateTxs:     m.candidateTransactions(txs),
 	}, nil
 }
 
@@ -231,8 +239,8 @@ func (m *Miner) candidateTransactions(txs [][]byte) [][]byte {
 	return candidateTxs
 }
 
-func (m *Miner) remainingWeightBudget(nextHeight uint64) (uint64, error) {
-	coinbaseTemplate, err := buildCoinbaseTx(nextHeight, m.chainState.AlreadyGenerated, m.cfg.MineAddress, [32]byte{})
+func (m *Miner) remainingWeightBudget(nextHeight uint64, alreadyGenerated uint64) (uint64, error) {
+	coinbaseTemplate, err := buildCoinbaseTx(nextHeight, alreadyGenerated, m.cfg.MineAddress, [32]byte{})
 	if err != nil {
 		return 0, err
 	}
@@ -243,7 +251,7 @@ func (m *Miner) remainingWeightBudget(nextHeight uint64) (uint64, error) {
 	return consensus.MAX_BLOCK_WEIGHT - coinbaseWeight, nil
 }
 
-func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, nextHeight uint64, remainingWeight uint64) ([]minedCandidate, error) {
+func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, remainingWeight uint64) ([]minedCandidate, error) {
 	parsed := make([]minedCandidate, 0, len(candidateTxs))
 	var selectedWeight uint64
 	var policyDaIncluded uint64
@@ -252,7 +260,7 @@ func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, nextHeight ui
 		if err != nil {
 			return nil, err
 		}
-		reject, nextDaIncluded, err := m.rejectCandidate(candidate.tx, nextHeight, policyDaIncluded)
+		reject, nextDaIncluded, err := m.rejectCandidate(candidate.tx, utxos, nextHeight, policyDaIncluded)
 		if err != nil {
 			// Policy checks should never abort block construction.
 			// Treat policy evaluation errors as a rejected candidate and continue.
@@ -296,9 +304,9 @@ func (m *Miner) parseMiningCandidate(raw []byte) (miningCandidate, error) {
 	}, nil
 }
 
-func (m *Miner) rejectCandidate(tx *consensus.Tx, nextHeight uint64, policyDaIncluded uint64) (bool, uint64, error) {
+func (m *Miner) rejectCandidate(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, policyDaIncluded uint64) (bool, uint64, error) {
 	if m.cfg.PolicyDaAnchorAntiAbuse {
-		reject, daBytes, _, err := RejectDaAnchorTxPolicy(tx, m.chainState.Utxos, m.cfg.PolicyDaSurchargePerByte)
+		reject, daBytes, _, err := RejectDaAnchorTxPolicy(tx, utxos, m.cfg.PolicyDaSurchargePerByte)
 		if err != nil {
 			return false, policyDaIncluded, err
 		}
@@ -321,7 +329,7 @@ func (m *Miner) rejectCandidate(tx *consensus.Tx, nextHeight uint64, policyDaInc
 		}
 	}
 	if m.cfg.PolicyRejectCoreExtPreActivation {
-		reject, _, err := RejectCoreExtTxPreActivation(tx, m.chainState.Utxos, nextHeight, m.cfg.CoreExtProfiles)
+		reject, _, err := RejectCoreExtTxPreActivation(tx, utxos, nextHeight, m.cfg.CoreExtProfiles)
 		if err != nil {
 			return false, policyDaIncluded, err
 		}
@@ -355,8 +363,8 @@ func buildWitnessCommitment(parsed []minedCandidate) ([32]byte, error) {
 	return consensus.WitnessCommitmentHash(witnessRoot), nil
 }
 
-func (m *Miner) buildCoinbaseAndMerkleRoot(nextHeight uint64, witnessCommitment [32]byte, parsed []minedCandidate) ([]byte, [32]byte, error) {
-	coinbase, err := buildCoinbaseTx(nextHeight, m.chainState.AlreadyGenerated, m.cfg.MineAddress, witnessCommitment)
+func (m *Miner) buildCoinbaseAndMerkleRoot(nextHeight uint64, alreadyGenerated uint64, witnessCommitment [32]byte, parsed []minedCandidate) ([]byte, [32]byte, error) {
+	coinbase, err := buildCoinbaseTx(nextHeight, alreadyGenerated, m.cfg.MineAddress, witnessCommitment)
 	if err != nil {
 		return nil, [32]byte{}, err
 	}

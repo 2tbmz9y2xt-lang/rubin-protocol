@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -57,6 +58,7 @@ const (
 )
 
 type ChainState struct {
+	mu               sync.RWMutex
 	Utxos            map[consensus.Outpoint]consensus.UtxoEntry
 	Height           uint64
 	AlreadyGenerated uint64
@@ -97,10 +99,52 @@ type utxoDiskEntry struct {
 	CreatedByCoinbase bool   `json:"created_by_coinbase"`
 }
 
+type chainStateView struct {
+	hasTip           bool
+	height           uint64
+	tipHash          [32]byte
+	alreadyGenerated uint64
+	utxoCount        int
+}
+
 func NewChainState() *ChainState {
 	return &ChainState{
 		Utxos: make(map[consensus.Outpoint]consensus.UtxoEntry),
 	}
+}
+
+func (s *ChainState) view() chainStateView {
+	if s == nil {
+		return chainStateView{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return chainStateView{
+		hasTip:           s.HasTip,
+		height:           s.Height,
+		tipHash:          s.TipHash,
+		alreadyGenerated: s.AlreadyGenerated,
+		utxoCount:        len(s.Utxos),
+	}
+}
+
+func (s *ChainState) replaceFrom(src *ChainState) {
+	if s == nil || src == nil {
+		return
+	}
+	snapshot := cloneChainState(src)
+	if snapshot == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Utxos = snapshot.Utxos
+	s.Height = snapshot.Height
+	s.AlreadyGenerated = snapshot.AlreadyGenerated
+	s.TipHash = snapshot.TipHash
+	s.HasTip = snapshot.HasTip
+	s.Rotation = snapshot.Rotation
+	s.Registry = snapshot.Registry
 }
 
 // rotationOrNil returns s.Rotation if set, otherwise nil.
@@ -200,7 +244,10 @@ func (s *ChainState) ConnectBlockWithCoreExtProfilesAndSuiteContext(
 	if s == nil {
 		return nil, errors.New("nil chainstate")
 	}
-	blockHeight, expectedPrevHash, err := nextBlockContext(s)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	blockHeight, expectedPrevHash, err := nextBlockContextFromFields(s.HasTip, s.Height, s.TipHash)
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +345,10 @@ func (s *ChainState) ConnectBlockParallelSigsWithSuiteContext(
 	if s == nil {
 		return nil, errors.New("nil chainstate")
 	}
-	blockHeight, expectedPrevHash, err := nextBlockContext(s)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	blockHeight, expectedPrevHash, err := nextBlockContextFromFields(s.HasTip, s.Height, s.TipHash)
 	if err != nil {
 		return nil, err
 	}
@@ -378,14 +428,20 @@ func nextBlockContext(s *ChainState) (uint64, *[32]byte, error) {
 	if s == nil {
 		return 0, nil, errors.New("nil chainstate")
 	}
-	if !s.HasTip {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return nextBlockContextFromFields(s.HasTip, s.Height, s.TipHash)
+}
+
+func nextBlockContextFromFields(hasTip bool, height uint64, tipHash [32]byte) (uint64, *[32]byte, error) {
+	if !hasTip {
 		return 0, nil, nil
 	}
-	if s.Height == math.MaxUint64 {
+	if height == math.MaxUint64 {
 		return 0, nil, errors.New("height overflow")
 	}
-	nextHeight := s.Height + 1
-	prev := s.TipHash
+	nextHeight := height + 1
+	prev := tipHash
 	return nextHeight, &prev, nil
 }
 
@@ -407,6 +463,8 @@ func stateToDisk(s *ChainState) (chainStateDisk, error) {
 	if s == nil {
 		return chainStateDisk{}, errors.New("nil chainstate")
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	utxos := make([]utxoDiskEntry, 0, len(s.Utxos))
 	for op, entry := range s.Utxos {
 		utxos = append(utxos, utxoDiskEntry{
