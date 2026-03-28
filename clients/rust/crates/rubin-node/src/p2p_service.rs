@@ -490,6 +490,7 @@ fn try_acquire_session_slot(
         }
         // CAS contention — spin_loop tells the CPU to pause briefly (PAUSE
         // on x86, YIELD on ARM) before retrying, reducing bus contention.
+        #[cfg(not(tarpaulin_include))]
         std::hint::spin_loop();
     }
 }
