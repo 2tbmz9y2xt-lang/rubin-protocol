@@ -4,11 +4,15 @@ use libfuzzer_sys::fuzz_target;
 
 // Structural fuzz of the spend-dispatch path via `validate_tx_local`.
 //
-// Instead of parsing tx from wire bytes, constructs a minimal valid Tx
-// structure with fuzzed covenant type, covenant data, witness items,
-// and suite IDs. This targets the covenant-type dispatch switch and
-// structural validation paths that wire-format fuzzing rarely reaches
-// (because most random bytes fail parse_tx early).
+// Constructs a minimal Tx with fuzzed covenant type, covenant data, and
+// witness items. Derives witness slot count from covenant_type to ensure
+// HTLC (2 slots), VAULT/MULTISIG (threshold-dependent) branches are
+// reachable, not just P2PK/EXT/STEALTH (1 slot).
+//
+// Invariants checked:
+// - Determinism: two calls with same input produce identical result.
+// - Valid↔Err consistency: valid==true iff err==None.
+// - TxIndex and Fee preservation from PrecomputedTxContext.
 fuzz_target!(|data: &[u8]| {
     // Layout: covenant_type(2) + suite_id(1) + cov_data_len(1) + cov_data(N)
     //       + pubkey_len(2) + pubkey(M) + sig_len(2) + sig(K)
@@ -61,7 +65,38 @@ fuzz_target!(|data: &[u8]| {
     let mut chain_id = [0u8; 32];
     chain_id.copy_from_slice(&data[pos..pos + 32]);
 
-    // Build a minimal Tx with one input, one output, one witness item.
+    // Compute witness slot count from covenant_type to match consensus logic
+    // (vault.rs witness_slots). This ensures multi-slot covenants like HTLC
+    // (2 slots), VAULT/MULTISIG (threshold-dependent) are reachable.
+    let witness_slot_count: usize = match covenant_type {
+        0x0000 => 1, // COV_TYPE_P2PK
+        0x0102 => 1, // COV_TYPE_EXT
+        0x0105 => 1, // COV_TYPE_STEALTH
+        0x0100 => 2, // COV_TYPE_HTLC
+        0x0104 => {   // COV_TYPE_MULTISIG: threshold from covenant_data[1]
+            covenant_data.get(1).copied().unwrap_or(1).max(1) as usize
+        }
+        0x0101 => {   // COV_TYPE_VAULT: threshold from covenant_data[33]
+            covenant_data.get(33).copied().unwrap_or(1).max(1) as usize
+        }
+        _ => 1, // Unknown: will fail at witness_slots, but 1 slot is fine
+    };
+
+    // Cap to prevent combinatorial explosion.
+    if witness_slot_count > 12 {
+        return;
+    }
+
+    // Build witness items: replicate the fuzzed item for each required slot.
+    let witness_items: Vec<rubin_consensus::WitnessItem> = (0..witness_slot_count)
+        .map(|_| rubin_consensus::WitnessItem {
+            suite_id,
+            pubkey: pubkey.clone(),
+            signature: signature.clone(),
+        })
+        .collect();
+    let witness_end = witness_items.len();
+
     let tx = rubin_consensus::Tx {
         version: 1,
         tx_kind: 0,
@@ -74,17 +109,13 @@ fuzz_target!(|data: &[u8]| {
         }],
         outputs: vec![rubin_consensus::TxOutput {
             value: 1,
-            covenant_type: 0x0000, // P2PK output
+            covenant_type: 0x0000,
             covenant_data: vec![0x01; 33],
         }],
         locktime: 0,
         da_commit_core: None,
         da_chunk_core: None,
-        witness: vec![rubin_consensus::WitnessItem {
-            suite_id,
-            pubkey,
-            signature,
-        }],
+        witness: witness_items,
         da_payload: vec![],
     };
 
@@ -102,7 +133,7 @@ fuzz_target!(|data: &[u8]| {
         txid: [0u8; 32],
         resolved_inputs: vec![entry],
         witness_start: 0,
-        witness_end: 1,
+        witness_end,
         input_outpoints: vec![rubin_consensus::Outpoint {
             txid: [0x42u8; 32],
             vout: 0,
@@ -128,13 +159,32 @@ fuzz_target!(|data: &[u8]| {
 
     let profiles = rubin_consensus::CoreExtProfiles { active: vec![] };
 
-    let _ = rubin_consensus::validate_tx_local(
-        &ptc,
-        &pb,
-        chain_id,
-        block_height,
-        0, // block_mtp
-        &profiles,
-        None,
+    // --- First call ---
+    let r1 = rubin_consensus::validate_tx_local(
+        &ptc, &pb, chain_id, block_height, 0, &profiles, None,
     );
+
+    // --- Invariant: Valid ↔ Err consistency ---
+    if r1.valid && r1.err.is_some() {
+        panic!("valid==true but err is Some");
+    }
+    if !r1.valid && r1.err.is_none() {
+        panic!("valid==false but err is None");
+    }
+
+    // --- Invariant: TxIndex and Fee preserved from PTC ---
+    if r1.tx_index != 1 {
+        panic!("tx_index not preserved: got {}", r1.tx_index);
+    }
+    if r1.fee != 1 {
+        panic!("fee not preserved: got {}", r1.fee);
+    }
+
+    // --- Invariant: Determinism ---
+    let r2 = rubin_consensus::validate_tx_local(
+        &ptc, &pb, chain_id, block_height, 0, &profiles, None,
+    );
+    if r1 != r2 {
+        panic!("validate_tx_local non-deterministic");
+    }
 });

@@ -11,6 +11,11 @@ use libfuzzer_sys::fuzz_target;
 //
 // Goal: exercise the dispatch switch across all covenant types, witness slot
 // accounting, sighash cache, sig queue flush, and error paths — without panic.
+//
+// Invariants checked:
+// - Determinism: two calls with same input produce identical result.
+// - Valid↔Err consistency: valid==true iff err==None.
+// - TxIndex and Fee preservation from PrecomputedTxContext.
 fuzz_target!(|data: &[u8]| {
     // Minimum: tx bytes + chain_id(32) + block_height(8) + block_mtp(8) = 48 tail bytes
     if data.len() < 49 {
@@ -120,7 +125,8 @@ fuzz_target!(|data: &[u8]| {
 
     let profiles = rubin_consensus::CoreExtProfiles { active: vec![] };
 
-    let _ = rubin_consensus::validate_tx_local(
+    // --- First call ---
+    let r1 = rubin_consensus::validate_tx_local(
         &ptc,
         &pb,
         chain_id,
@@ -129,4 +135,34 @@ fuzz_target!(|data: &[u8]| {
         &profiles,
         None,
     );
+
+    // --- Invariant: Valid ↔ Err consistency ---
+    if r1.valid && r1.err.is_some() {
+        panic!("valid==true but err is Some");
+    }
+    if !r1.valid && r1.err.is_none() {
+        panic!("valid==false but err is None");
+    }
+
+    // --- Invariant: TxIndex and Fee preserved from PTC ---
+    if r1.tx_index != 1 {
+        panic!("tx_index not preserved: got {}", r1.tx_index);
+    }
+    if r1.fee != fee {
+        panic!("fee not preserved: expected {}, got {}", fee, r1.fee);
+    }
+
+    // --- Invariant: Determinism ---
+    let r2 = rubin_consensus::validate_tx_local(
+        &ptc,
+        &pb,
+        chain_id,
+        block_height,
+        block_mtp,
+        &profiles,
+        None,
+    );
+    if r1 != r2 {
+        panic!("validate_tx_local non-deterministic");
+    }
 });
