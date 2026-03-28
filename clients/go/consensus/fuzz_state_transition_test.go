@@ -334,16 +334,22 @@ func FuzzUtxoApplyNonCoinbase(f *testing.F) {
 		if outValue == 0 {
 			outValue = 1 // P2PK requires value > 0
 		}
-		// P2PK covenant data: MAX_P2PK_COVENANT_DATA (33) bytes, first byte = suiteID.
+		// P2PK covenant data: MAX_P2PK_COVENANT_DATA (33) bytes.
+		// Byte 0 = suiteID, bytes 1..33 = sha3_256(pubkey) so key binding check passes.
+		pubkey := make([]byte, ML_DSA_87_PUBKEY_BYTES)
+		keyID := sha3_256(pubkey)
 		p2pkCovData := make([]byte, MAX_P2PK_COVENANT_DATA)
 		p2pkCovData[0] = SUITE_ID_ML_DSA_87
+		copy(p2pkCovData[1:], keyID[:])
 		tx.Outputs = []TxOutput{{Value: outValue, CovenantType: COV_TYPE_P2PK, CovenantData: p2pkCovData}}
 
-		// Witness.
+		// Witness: last byte must be a valid sighash type (SIGHASH_ALL = 0x01).
+		sigBuf := make([]byte, ML_DSA_87_SIG_BYTES+1)
+		sigBuf[len(sigBuf)-1] = SIGHASH_ALL
 		tx.Witness = []WitnessItem{{
 			SuiteID:   SUITE_ID_ML_DSA_87,
-			Pubkey:    make([]byte, ML_DSA_87_PUBKEY_BYTES),
-			Signature: make([]byte, ML_DSA_87_SIG_BYTES+1),
+			Pubkey:    pubkey,
+			Signature: sigBuf,
 		}}
 
 		var txid [32]byte
