@@ -7,6 +7,11 @@ import (
 	"testing"
 )
 
+// maxFuzzSliceBytes caps pubkey/sig slices to avoid OOM and allocation churn
+// during nightly fuzz runs. ML-DSA-87 pubkey=2592, sig=4627; 8192 covers both
+// with headroom for mutation while keeping sigCacheKey hashing efficient.
+const maxFuzzSliceBytes = 8192
+
 // digestFrom pads or truncates raw bytes into a [32]byte digest.
 func digestFrom(raw []byte) [32]byte {
 	var d [32]byte
@@ -29,6 +34,9 @@ func FuzzVerifySigDispatch(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, suiteRaw []byte, pubkey []byte, sig []byte, digestRaw []byte) {
 		if len(suiteRaw) == 0 {
+			return
+		}
+		if len(pubkey) > maxFuzzSliceBytes || len(sig) > maxFuzzSliceBytes {
 			return
 		}
 		suiteID := suiteRaw[0]
@@ -79,6 +87,9 @@ func FuzzSigCacheDeterminism(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, suiteRaw []byte, pubkey []byte, sig []byte, digestRaw []byte) {
 		if len(suiteRaw) == 0 {
+			return
+		}
+		if len(pubkey) > maxFuzzSliceBytes || len(sig) > maxFuzzSliceBytes {
 			return
 		}
 		suiteID := suiteRaw[0]
@@ -141,6 +152,9 @@ func FuzzSigCheckQueueFlush(f *testing.F) {
 		if len(suiteRaw) == 0 {
 			return
 		}
+		if len(pubkey) > maxFuzzSliceBytes || len(sig) > maxFuzzSliceBytes {
+			return
+		}
 		suiteID := suiteRaw[0]
 		digest := digestFrom(digestRaw)
 
@@ -177,6 +191,9 @@ func FuzzSigCacheConcurrentAccess(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, suiteRaw []byte, pubkey []byte, sig []byte) {
 		if len(suiteRaw) == 0 {
+			return
+		}
+		if len(pubkey) > maxFuzzSliceBytes || len(sig) > maxFuzzSliceBytes {
 			return
 		}
 		suiteID := suiteRaw[0]
