@@ -176,6 +176,16 @@
         "name": "covenant_genesis",
         "property": "validate_tx_covenants_genesis no-panic for arbitrary parsed transactions at any height",
         "conformance_gate": "CV-VALIDATION-ORDER"
+      },
+      {
+        "name": "tx_relay_announce",
+        "property": "announce_tx determinism plus bounded peer-outbox fanout semantics for live tx relay runtime entrypoint",
+        "conformance_gate": "CV-P2P"
+      },
+      {
+        "name": "tx_relay_receive",
+        "property": "handle_received_tx determinism plus duplicate-idempotent relay state for live peer->mempool runtime entrypoint",
+        "conformance_gate": "CV-P2P"
       }
     ]
   },

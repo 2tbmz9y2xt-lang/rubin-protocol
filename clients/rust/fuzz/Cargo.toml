@@ -123,6 +123,18 @@ test = false
 doc = false
 
 [[bin]]
+name = "tx_relay_announce"
+path = "fuzz_targets/tx_relay_announce.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "tx_relay_receive"
+path = "fuzz_targets/tx_relay_receive.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "validate_tx_local"
 path = "fuzz_targets/validate_tx_local.rs"
 test = false
