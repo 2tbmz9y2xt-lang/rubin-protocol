@@ -3,6 +3,7 @@
 package consensus
 
 import (
+	"bytes"
 	"context"
 	"math/big"
 	"strings"
@@ -475,13 +476,13 @@ func FuzzUtxoApplyNonCoinbase(f *testing.F) {
 			return s
 		}
 
-		// Must not panic.
-		summary, err := ApplyNonCoinbaseTxBasic(
+		// Must not panic. Use Update variant to get mutated UTXO set back.
+		work1, summary, err := ApplyNonCoinbaseTxBasicUpdate(
 			tx, txid, buildUtxoSet(), 100, 0, chainID,
 		)
 
 		// Determinism check — fresh UTXO set, same tx.
-		summary2, err2 := ApplyNonCoinbaseTxBasic(
+		work2, summary2, err2 := ApplyNonCoinbaseTxBasicUpdate(
 			tx, txid, buildUtxoSet(), 100, 0, chainID,
 		)
 
@@ -491,6 +492,24 @@ func FuzzUtxoApplyNonCoinbase(f *testing.F) {
 		if summary != nil && summary2 != nil {
 			if summary.Fee != summary2.Fee {
 				t.Fatalf("non-deterministic fee: %d vs %d", summary.Fee, summary2.Fee)
+			}
+			if summary.UtxoCount != summary2.UtxoCount {
+				t.Fatalf("non-deterministic UtxoCount: %d vs %d", summary.UtxoCount, summary2.UtxoCount)
+			}
+			// Deep-compare mutated UTXO sets.
+			if len(work1) != len(work2) {
+				t.Fatalf("non-deterministic UTXO set size: %d vs %d", len(work1), len(work2))
+			}
+			for op, e1 := range work1 {
+				e2, ok := work2[op]
+				if !ok {
+					t.Fatalf("non-deterministic UTXO set: outpoint %v in run1 but not run2", op)
+				}
+				if e1.Value != e2.Value || e1.CovenantType != e2.CovenantType ||
+					e1.CreationHeight != e2.CreationHeight || e1.CreatedByCoinbase != e2.CreatedByCoinbase ||
+					!bytes.Equal(e1.CovenantData, e2.CovenantData) {
+					t.Fatalf("non-deterministic UTXO entry at %v: %+v vs %+v", op, e1, e2)
+				}
 			}
 		}
 	})

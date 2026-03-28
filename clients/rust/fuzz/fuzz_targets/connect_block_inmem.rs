@@ -59,20 +59,28 @@ fuzz_target!(|data: &[u8]| {
                 s1.post_state_digest, s2.post_state_digest,
                 "non-deterministic post-state digest"
             );
-            // Both states must be identical after processing identical input.
+            // Deep-compare full state: UTXO content + already_generated.
             // Note: empty UTXO set on success IS valid — coinbase with only
             // ANCHOR/DA_COMMIT outputs skips UTXO insertion (by design).
             assert_eq!(
-                state.utxos.len(), state2.utxos.len(),
-                "non-deterministic UTXO set size"
+                state.utxos, state2.utxos,
+                "non-deterministic UTXO set content"
+            );
+            assert_eq!(
+                state.already_generated, state2.already_generated,
+                "non-deterministic already_generated"
             );
         }
         (Err(_), Err(_)) => {
             // On error: both states should have identical partial mutations
             // (coinbase may have been applied before a later tx failed).
             assert_eq!(
-                state.utxos.len(), state2.utxos.len(),
-                "non-deterministic UTXO set size on error"
+                state.utxos, state2.utxos,
+                "non-deterministic UTXO set content on error"
+            );
+            assert_eq!(
+                state.already_generated, state2.already_generated,
+                "non-deterministic already_generated on error"
             );
         }
         _ => panic!("non-deterministic: one ok, one err"),
