@@ -5,6 +5,7 @@ package consensus
 import (
 	"context"
 	"math/big"
+	"strings"
 	"testing"
 )
 
@@ -297,9 +298,24 @@ func FuzzDAPayloadCommitVerify(f *testing.F) {
 }
 
 // FuzzUtxoApplyNonCoinbase exercises UTXO application of non-coinbase transactions
-// with fuzz-derived transaction data. The primary goal is no-panic and determinism
-// on the public entrypoint, not valid transaction construction.
+// with fuzz-derived transaction data and a real ML-DSA-87 signature. Invariants:
+//   - No panic regardless of input.
+//   - Deterministic result for identical inputs.
+//   - Valid signature reaches fee/value-conservation and UTXO-mutation paths.
 func FuzzUtxoApplyNonCoinbase(f *testing.F) {
+	// Generate ML-DSA-87 keypair once (expensive) — reused across all iterations.
+	kp, err := NewMLDSA87Keypair()
+	if err != nil {
+		if strings.Contains(err.Error(), "unsupported") {
+			f.Skipf("ML-DSA backend unavailable: %v", err)
+		}
+		f.Fatalf("NewMLDSA87Keypair: %v", err)
+	}
+	defer kp.Close()
+
+	pubkey := kp.PubkeyBytes()
+	covData := p2pkCovenantDataForPubkey(pubkey)
+
 	f.Add([]byte{0x01}, []byte{0x00}, []byte{0x00})
 
 	f.Fuzz(func(t *testing.T, txData []byte, seedA []byte, seedB []byte) {
@@ -326,7 +342,7 @@ func FuzzUtxoApplyNonCoinbase(f *testing.F) {
 			PrevVout: 0,
 		}}
 
-		// Add one output.
+		// Add one output with fuzz-varied value.
 		var outValue uint64 = 500
 		if len(txData) > 2 {
 			outValue = uint64(txData[1])<<8 | uint64(txData[2])
@@ -334,23 +350,25 @@ func FuzzUtxoApplyNonCoinbase(f *testing.F) {
 		if outValue == 0 {
 			outValue = 1 // P2PK requires value > 0
 		}
-		// P2PK covenant data: MAX_P2PK_COVENANT_DATA (33) bytes.
-		// Byte 0 = suiteID, bytes 1..33 = sha3_256(pubkey) so key binding check passes.
-		pubkey := make([]byte, ML_DSA_87_PUBKEY_BYTES)
-		keyID := sha3_256(pubkey)
-		p2pkCovData := make([]byte, MAX_P2PK_COVENANT_DATA)
-		p2pkCovData[0] = SUITE_ID_ML_DSA_87
-		copy(p2pkCovData[1:], keyID[:])
-		tx.Outputs = []TxOutput{{Value: outValue, CovenantType: COV_TYPE_P2PK, CovenantData: p2pkCovData}}
+		tx.Outputs = []TxOutput{{Value: outValue, CovenantType: COV_TYPE_P2PK, CovenantData: covData}}
 
-		// Witness: last byte must be a valid sighash type (SIGHASH_ALL = 0x01).
-		sigBuf := make([]byte, ML_DSA_87_SIG_BYTES+1)
-		sigBuf[len(sigBuf)-1] = SIGHASH_ALL
-		tx.Witness = []WitnessItem{{
-			SuiteID:   SUITE_ID_ML_DSA_87,
-			Pubkey:    pubkey,
-			Signature: sigBuf,
-		}}
+		// Placeholder witness — will be replaced after signing.
+		tx.Witness = []WitnessItem{{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: pubkey}}
+
+		var chainID [32]byte
+		const utxoValue uint64 = 1000
+
+		// Sign the fully-constructed tx with the real ML-DSA-87 key.
+		digest, err := SighashV1DigestWithType(tx, 0, utxoValue, chainID, SIGHASH_ALL)
+		if err != nil {
+			return // non-signable tx shape (e.g. no inputs) — skip
+		}
+		sig, err := kp.SignDigest32(digest)
+		if err != nil {
+			return // sign failure on this input — skip
+		}
+		sig = append(sig, SIGHASH_ALL)
+		tx.Witness[0].Signature = sig
 
 		var txid [32]byte
 		copy(txid[:], seedB)
@@ -358,14 +376,12 @@ func FuzzUtxoApplyNonCoinbase(f *testing.F) {
 		// Seed UTXO set with the referenced input.
 		utxoSet := map[Outpoint]UtxoEntry{
 			{Txid: prevTxid, Vout: 0}: {
-				Value:          1000,
+				Value:          utxoValue,
 				CovenantType:   COV_TYPE_P2PK,
-				CovenantData:   p2pkCovData,
+				CovenantData:   covData,
 				CreationHeight: 0,
 			},
 		}
-
-		var chainID [32]byte
 
 		// Must not panic.
 		summary, err := ApplyNonCoinbaseTxBasic(
@@ -375,9 +391,9 @@ func FuzzUtxoApplyNonCoinbase(f *testing.F) {
 		// Determinism check.
 		utxoSet2 := map[Outpoint]UtxoEntry{
 			{Txid: prevTxid, Vout: 0}: {
-				Value:          1000,
+				Value:          utxoValue,
 				CovenantType:   COV_TYPE_P2PK,
-				CovenantData:   p2pkCovData,
+				CovenantData:   covData,
 				CreationHeight: 0,
 			},
 		}
