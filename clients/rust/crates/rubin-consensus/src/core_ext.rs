@@ -1,5 +1,7 @@
 use crate::compactsize::{encode_compact_size, read_compact_size_bytes};
-use crate::constants::{ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_SENTINEL};
+use crate::constants::{
+    MAX_COVENANT_DATA_PER_OUTPUT, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_SENTINEL,
+};
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
 use crate::sig_queue::{queue_or_verify_signature, SigCheckQueue};
@@ -557,6 +559,12 @@ fn verify_core_ext_openssl_digest32_binding(
 }
 
 pub fn parse_core_ext_covenant_data(cov_data: &[u8]) -> Result<CoreExtCovenant<'_>, TxError> {
+    if cov_data.len() as u64 > MAX_COVENANT_DATA_PER_OUTPUT {
+        return Err(TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_EXT covenant_data length exceeds MAX_COVENANT_DATA_PER_OUTPUT",
+        ));
+    }
     if cov_data.len() < 2 {
         return Err(TxError::new(
             ErrorCode::TxErrCovenantTypeInvalid,
@@ -2317,6 +2325,19 @@ mod tests {
         let err = parse_core_ext_covenant_data(&cov_data).unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
         assert_eq!(err.msg, "CORE_EXT covenant_data length mismatch");
+    }
+
+    #[test]
+    fn parse_core_ext_covenant_data_rejects_oversized_buffer() {
+        let mut cov_data = vec![0x34, 0x12, 0x00];
+        cov_data.resize(MAX_COVENANT_DATA_PER_OUTPUT as usize + 1, 0x00);
+
+        let err = parse_core_ext_covenant_data(&cov_data).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+        assert_eq!(
+            err.msg,
+            "CORE_EXT covenant_data length exceeds MAX_COVENANT_DATA_PER_OUTPUT"
+        );
     }
 }
 

@@ -56,6 +56,12 @@ fn sort_tx_dep_edges(edges: &mut [TxDepEdge]) {
 }
 
 fn compute_tx_dep_levels(tx_count: usize, edges: &[TxDepEdge]) -> (Vec<usize>, usize) {
+    debug_assert!(
+        edges
+            .iter()
+            .all(|edge| { edge.producer_idx < edge.consumer_idx && edge.consumer_idx < tx_count }),
+        "tx_dep_graph edges must reference earlier in-range producers and in-range consumers",
+    );
     let mut levels = vec![0usize; tx_count];
     for edge in edges {
         levels[edge.consumer_idx] = levels[edge.consumer_idx].max(levels[edge.producer_idx] + 1);
@@ -73,6 +79,11 @@ fn tx_dep_level_order_key(
 }
 
 fn compute_tx_dep_level_order(contexts: &[TxValidationContext], levels: &[usize]) -> Vec<usize> {
+    debug_assert_eq!(
+        contexts.len(),
+        levels.len(),
+        "tx_dep_graph level_order requires one level per validation context",
+    );
     let mut order: Vec<usize> = (0..contexts.len()).collect();
     order.sort_by_key(|idx| tx_dep_level_order_key(contexts, levels, *idx));
     order
