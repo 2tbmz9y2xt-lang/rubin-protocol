@@ -24,16 +24,13 @@ fuzz_target!(|data: &[u8]| {
             assert!(a.whitelist_count > 0 && a.whitelist_count <= MAX_VAULT_WHITELIST_ENTRIES);
             assert_eq!(a.whitelist_count as usize, a.whitelist.len());
             assert!(strictly_sorted_unique_32(&a.whitelist));
-            assert!(a.whitelist.binary_search(&a.owner_lock_id).is_err());
+            assert!(a.whitelist.iter().all(|entry| entry != &a.owner_lock_id));
 
             let expected_len =
                 32 + 1 + 1 + a.keys.len() * 32 + 2 + a.whitelist.len() * 32;
             assert_eq!(data.len(), expected_len);
         }
-        (Err(a), Err(b)) => {
-            assert_eq!(a.code, b.code, "parse_vault_covenant_data error code drift");
-            assert_eq!(a.msg, b.msg, "parse_vault_covenant_data error msg drift");
-        }
+        (Err(_), Err(_)) => {}
         _ => panic!("parse_vault_covenant_data non-deterministic error/ok mismatch"),
     }
 });

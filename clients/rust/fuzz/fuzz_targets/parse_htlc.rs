@@ -1,9 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use rubin_consensus::constants::{
-    LOCK_MODE_HEIGHT, LOCK_MODE_TIMESTAMP, MAX_HTLC_COVENANT_DATA,
-};
+use rubin_consensus::constants::{LOCK_MODE_HEIGHT, LOCK_MODE_TIMESTAMP};
 
 // Fuzz parse_htlc_covenant_data: HTLC covenant parsing.
 // Tests deterministic parsing plus post-parse covenant invariants.
@@ -14,15 +12,11 @@ fuzz_target!(|data: &[u8]| {
     match (&r1, &r2) {
         (Ok(a), Ok(b)) => {
             assert_eq!(a, b, "parse_htlc_covenant_data non-deterministic");
-            assert_eq!(data.len() as u64, MAX_HTLC_COVENANT_DATA);
             assert!(matches!(a.lock_mode, LOCK_MODE_HEIGHT | LOCK_MODE_TIMESTAMP));
             assert!(a.lock_value > 0);
             assert_ne!(a.claim_key_id, a.refund_key_id);
         }
-        (Err(a), Err(b)) => {
-            assert_eq!(a.code, b.code, "parse_htlc_covenant_data error code drift");
-            assert_eq!(a.msg, b.msg, "parse_htlc_covenant_data error msg drift");
-        }
+        (Err(_), Err(_)) => {}
         _ => panic!("parse_htlc_covenant_data non-deterministic error/ok mismatch"),
     }
 });

@@ -149,7 +149,7 @@
       },
       {
         "name": "parse_htlc",
-        "property": "parse_htlc_covenant_data determinism plus post-parse HTLC invariants (exact length, valid lock_mode, positive lock_value, distinct claim/refund keys)",
+        "property": "parse_htlc_covenant_data determinism plus post-parse HTLC invariants (valid lock_mode, positive lock_value, distinct claim/refund keys)",
         "conformance_gate": "CV-HTLC"
       },
       {

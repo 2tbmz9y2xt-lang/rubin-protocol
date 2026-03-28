@@ -57,11 +57,7 @@ fuzz_target!(|data: &[u8]| {
     assert!(got_bi >= BigUint::one());
     assert!(got_bi <= pow_limit);
 
-    let t_actual = if ts_last <= ts_first {
-        1u64
-    } else {
-        ts_last - ts_first
-    };
+    let t_actual = ts_last.saturating_sub(ts_first).max(1);
     let t_expected = TARGET_BLOCK_INTERVAL
         .checked_mul(WINDOW_SIZE)
         .expect("canonical constants keep t_expected in range");
