@@ -123,10 +123,10 @@ func FuzzSigCacheDeterminism(f *testing.F) {
 			t.Fatal("sigCacheKey non-deterministic")
 		}
 
-		// Different suiteID → different key.
+		// Different suiteID → different key (SHA3-256 collision resistance).
 		k3 := sigCacheKey(suiteID^0x01, pubkey, sig, digest)
 		if k1 == k3 {
-			t.Log("warning: sigCacheKey collision on suite flip")
+			t.Errorf("sigCacheKey collision: suite 0x%02x and 0x%02x produced identical key", suiteID, suiteID^0x01)
 		}
 	})
 }
