@@ -488,6 +488,8 @@ fn try_acquire_session_slot(
                 active_sessions: Arc::clone(&shared.active_sessions),
             });
         }
+        // CAS failed due to contention — hint the CPU before retrying.
+        std::hint::spin_loop();
     }
 }
 
