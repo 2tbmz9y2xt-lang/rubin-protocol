@@ -106,7 +106,7 @@
       {
         "name": "retarget_no_panic",
         "replaces_kani": "verify_retarget_no_panic",
-        "property": "retarget_v1 determinism and no-panic for arbitrary target/timestamps",
+        "property": "retarget_v1 determinism plus exact clamp/range invariants for arbitrary target/timestamps",
         "conformance_gate": "CV-POW"
       },
       {
@@ -139,7 +139,7 @@
       },
       {
         "name": "pow_check",
-        "property": "pow_check no-panic and determinism for arbitrary 80-byte header + 32-byte target",
+        "property": "pow_check determinism plus exact target-range and strict block_hash < target semantics for arbitrary 80-byte header + 32-byte target",
         "conformance_gate": "CV-POW"
       },
       {
@@ -149,12 +149,12 @@
       },
       {
         "name": "parse_htlc",
-        "property": "parse_htlc_covenant_data no-panic and determinism for arbitrary bytes",
+        "property": "parse_htlc_covenant_data determinism plus post-parse HTLC invariants (valid lock_mode, positive lock_value, distinct claim/refund keys)",
         "conformance_gate": "CV-HTLC"
       },
       {
         "name": "parse_vault",
-        "property": "parse_vault_covenant_data no-panic and determinism for arbitrary bytes",
+        "property": "parse_vault_covenant_data determinism plus canonical vault invariants (threshold/key_count bounds, exact length, sorted unique keys/whitelist, owner exclusion)",
         "conformance_gate": "CV-VAULT"
       },
       {
