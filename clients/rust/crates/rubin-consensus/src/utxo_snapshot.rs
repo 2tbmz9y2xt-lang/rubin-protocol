@@ -72,6 +72,49 @@ pub fn utxo_snapshot_shard(op: &Outpoint, num_shards: usize) -> usize {
     (h % num_shards as u32) as usize
 }
 
+#[cfg(kani)]
+mod verification {
+    use super::utxo_snapshot_shard;
+    use crate::utxo_basic::Outpoint;
+
+    #[kani::proof]
+    fn verify_utxo_snapshot_shard_zero_and_one_return_zero_for_any_outpoint() {
+        let txid: [u8; 32] = kani::any();
+        let vout: u32 = kani::any();
+        let op = Outpoint { txid, vout };
+
+        assert_eq!(utxo_snapshot_shard(&op, 0), 0);
+        assert_eq!(utxo_snapshot_shard(&op, 1), 0);
+    }
+
+    #[kani::proof]
+    fn verify_utxo_snapshot_shard_is_bounded_and_deterministic_for_representative_count() {
+        let txid: [u8; 32] = kani::any();
+        let vout: u32 = kani::any();
+        let op = Outpoint { txid, vout };
+        let num_shards = 17usize;
+        let shard = utxo_snapshot_shard(&op, num_shards);
+
+        assert!(shard < num_shards);
+        assert_eq!(shard, utxo_snapshot_shard(&op, num_shards));
+    }
+
+    #[kani::proof]
+    fn verify_utxo_snapshot_shard_ignores_vout_for_representative_count() {
+        let txid: [u8; 32] = kani::any();
+        let vout_a: u32 = kani::any();
+        let vout_b: u32 = kani::any();
+        let op_a = Outpoint { txid, vout: vout_a };
+        let op_b = Outpoint { txid, vout: vout_b };
+        let num_shards = 31usize;
+
+        assert_eq!(
+            utxo_snapshot_shard(&op_a, num_shards),
+            utxo_snapshot_shard(&op_b, num_shards)
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;

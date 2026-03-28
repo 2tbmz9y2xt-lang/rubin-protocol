@@ -47,6 +47,37 @@ pub struct TxDepGraph {
     pub max_level: usize,
 }
 
+fn tx_dep_edge_sort_key(edge: &TxDepEdge) -> (usize, usize, TxDepEdgeKind) {
+    (edge.consumer_idx, edge.producer_idx, edge.kind)
+}
+
+fn sort_tx_dep_edges(edges: &mut [TxDepEdge]) {
+    edges.sort_by_key(tx_dep_edge_sort_key);
+}
+
+fn compute_tx_dep_levels(tx_count: usize, edges: &[TxDepEdge]) -> (Vec<usize>, usize) {
+    let mut levels = vec![0usize; tx_count];
+    for edge in edges {
+        levels[edge.consumer_idx] = levels[edge.consumer_idx].max(levels[edge.producer_idx] + 1);
+    }
+    let max_level = levels.iter().copied().max().unwrap_or(0);
+    (levels, max_level)
+}
+
+fn tx_dep_level_order_key(
+    contexts: &[TxValidationContext],
+    levels: &[usize],
+    idx: usize,
+) -> (usize, [u8; 32]) {
+    (levels[idx], contexts[idx].txid)
+}
+
+fn compute_tx_dep_level_order(contexts: &[TxValidationContext], levels: &[usize]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..contexts.len()).collect();
+    order.sort_by_key(|idx| tx_dep_level_order_key(contexts, levels, *idx));
+    order
+}
+
 /// Build the deterministic dependency graph over non-coinbase transactions.
 ///
 /// The graph detects:
@@ -105,26 +136,9 @@ pub fn build_tx_dep_graph(contexts: &[TxValidationContext]) -> TxDepGraph {
         }
     }
 
-    edges.sort_by(|a, b| {
-        a.consumer_idx
-            .cmp(&b.consumer_idx)
-            .then_with(|| a.producer_idx.cmp(&b.producer_idx))
-            .then_with(|| a.kind.cmp(&b.kind))
-    });
-
-    let mut levels = vec![0usize; tx_count];
-    for edge in &edges {
-        levels[edge.consumer_idx] = levels[edge.consumer_idx].max(levels[edge.producer_idx] + 1);
-    }
-
-    let max_level = levels.iter().copied().max().unwrap_or(0);
-
-    let mut level_order: Vec<usize> = (0..tx_count).collect();
-    level_order.sort_by(|a, b| {
-        levels[*a]
-            .cmp(&levels[*b])
-            .then_with(|| contexts[*a].txid.cmp(&contexts[*b].txid))
-    });
+    sort_tx_dep_edges(&mut edges);
+    let (levels, max_level) = compute_tx_dep_levels(tx_count, &edges);
+    let level_order = compute_tx_dep_level_order(contexts, &levels);
 
     TxDepGraph {
         tx_count,
@@ -132,6 +146,148 @@ pub fn build_tx_dep_graph(contexts: &[TxValidationContext]) -> TxDepGraph {
         levels,
         level_order,
         max_level,
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::{
+        compute_tx_dep_level_order, compute_tx_dep_levels, tx_dep_edge_sort_key, TxDepEdge,
+        TxDepEdgeKind, TxValidationContext,
+    };
+    use crate::utxo_basic::Outpoint;
+
+    fn make_tx_context(idx: usize, txid_byte: u8, outpoints: &[(u8, u32)]) -> TxValidationContext {
+        let mut txid = [0u8; 32];
+        txid[0] = txid_byte;
+        TxValidationContext {
+            tx_index: idx + 1,
+            txid,
+            input_outpoints: outpoints
+                .iter()
+                .map(|(outpoint_txid, vout)| {
+                    let mut outpoint_id = [0u8; 32];
+                    outpoint_id[0] = *outpoint_txid;
+                    Outpoint {
+                        txid: outpoint_id,
+                        vout: *vout,
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    fn assert_sorted_edges(edges: &[TxDepEdge]) {
+        for window in edges.windows(2) {
+            let prev = window[0];
+            let cur = window[1];
+            assert!(prev.consumer_idx <= cur.consumer_idx);
+            if prev.consumer_idx == cur.consumer_idx {
+                assert!(prev.producer_idx <= cur.producer_idx);
+                if prev.producer_idx == cur.producer_idx {
+                    assert!(prev.kind <= cur.kind);
+                }
+            }
+        }
+    }
+
+    fn assert_level_order(contexts: &[TxValidationContext], levels: &[usize], order: &[usize]) {
+        for window in order.windows(2) {
+            let left = window[0];
+            let right = window[1];
+            let left_level = levels[left];
+            let right_level = levels[right];
+            assert!(left_level <= right_level);
+            if left_level == right_level {
+                assert!(contexts[left].txid <= contexts[right].txid);
+            }
+        }
+    }
+
+    fn assert_edge_and_level_invariants(tx_count: usize, edges: &[TxDepEdge], levels: &[usize]) {
+        assert_eq!(levels.len(), tx_count);
+        for edge in edges {
+            assert!(edge.producer_idx < edge.consumer_idx);
+            assert!(edge.consumer_idx < tx_count);
+            assert!(levels[edge.producer_idx] < levels[edge.consumer_idx]);
+        }
+        assert_sorted_edges(edges);
+    }
+
+    #[kani::proof]
+    fn verify_tx_dep_edge_sort_key_orders_consumer_then_producer_then_kind() {
+        let early = TxDepEdge {
+            producer_idx: 0,
+            consumer_idx: 1,
+            kind: TxDepEdgeKind::ParentChild,
+        };
+        let late = TxDepEdge {
+            producer_idx: 1,
+            consumer_idx: 2,
+            kind: TxDepEdgeKind::SamePrevout,
+        };
+
+        assert!(tx_dep_edge_sort_key(&early) < tx_dep_edge_sort_key(&late));
+    }
+
+    #[kani::proof]
+    fn verify_compute_tx_dep_levels_parent_child_chain_is_acyclic() {
+        let edges = vec![
+            TxDepEdge {
+                producer_idx: 0,
+                consumer_idx: 1,
+                kind: TxDepEdgeKind::ParentChild,
+            },
+            TxDepEdge {
+                producer_idx: 1,
+                consumer_idx: 2,
+                kind: TxDepEdgeKind::ParentChild,
+            },
+        ];
+        let (levels, max_level) = compute_tx_dep_levels(3, &edges);
+
+        assert_edge_and_level_invariants(3, &edges, &levels);
+        assert_eq!(levels, vec![0, 1, 2]);
+        assert_eq!(max_level, 2);
+    }
+
+    #[kani::proof]
+    fn verify_compute_tx_dep_levels_same_prevout_fanout_is_stable() {
+        let edges = vec![
+            TxDepEdge {
+                producer_idx: 0,
+                consumer_idx: 1,
+                kind: TxDepEdgeKind::SamePrevout,
+            },
+            TxDepEdge {
+                producer_idx: 0,
+                consumer_idx: 2,
+                kind: TxDepEdgeKind::SamePrevout,
+            },
+        ];
+        let (levels, max_level) = compute_tx_dep_levels(3, &edges);
+
+        assert_edge_and_level_invariants(3, &edges, &levels);
+        assert_eq!(levels, vec![0, 1, 1]);
+        assert_eq!(max_level, 1);
+        for edge in &edges {
+            assert_eq!(edge.producer_idx, 0);
+            assert_eq!(edge.kind, TxDepEdgeKind::SamePrevout);
+        }
+    }
+
+    #[kani::proof]
+    fn verify_compute_tx_dep_level_order_uses_level_then_txid() {
+        let contexts = vec![
+            make_tx_context(0, 0xcc, &[(0x01, 0)]),
+            make_tx_context(1, 0xaa, &[(0x02, 0)]),
+            make_tx_context(2, 0xbb, &[(0x03, 0)]),
+        ];
+        let levels = vec![0, 0, 0];
+        let order = compute_tx_dep_level_order(&contexts, &levels);
+
+        assert_level_order(&contexts, &levels, &order);
+        assert_eq!(order, vec![1, 2, 0]);
     }
 }
 
