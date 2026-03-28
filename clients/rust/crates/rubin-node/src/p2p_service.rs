@@ -462,45 +462,29 @@ fn join_service_workers_bounded(shared: &SharedServiceState, timeout: Duration) 
 /// always have room to dial even when inbound slots are saturated.
 const OUTBOUND_SLOT_RESERVE: usize = 2;
 
-/// Tracks total CAS retries across all `try_acquire_session_slot` calls.
-/// Useful for observability and ensures the retry path is instrumentable
-/// by tarpaulin (intrinsics like `spin_loop` emit no debug-info counters).
-static CAS_RETRY_COUNT: AtomicUsize = AtomicUsize::new(0);
-
 fn try_acquire_session_slot(
     shared: &SharedServiceState,
     is_outbound: bool,
 ) -> Option<SessionSlotGuard> {
-    loop {
-        let current = shared.active_sessions.load(Ordering::SeqCst);
-        let cap = if is_outbound {
-            shared.runtime_cfg.max_peers
-        } else {
-            // Inbound: leave up to OUTBOUND_SLOT_RESERVE slots for outbound dials,
-            // but never reduce inbound cap below 1 (for max_peers <= 2).
-            let reserve = OUTBOUND_SLOT_RESERVE.min(shared.runtime_cfg.max_peers.saturating_sub(1));
-            shared.runtime_cfg.max_peers.saturating_sub(reserve)
-        };
-        if current >= cap {
-            return None;
-        }
-        // `compare_exchange_weak` is the correct choice for CAS-in-a-loop:
-        // it avoids the LL/SC internal retry on ARM and is strictly faster
-        // than `compare_exchange` when the caller already retries on failure.
-        if shared
-            .active_sessions
-            .compare_exchange_weak(current, current + 1, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            return Some(SessionSlotGuard {
-                active_sessions: Arc::clone(&shared.active_sessions),
-            });
-        }
-        // CAS failed (real contention or spurious on ARM).  Count the
-        // retry for observability, then yield the CPU before spinning.
-        CAS_RETRY_COUNT.fetch_add(1, Ordering::Relaxed);
-        std::hint::spin_loop();
+    let cap = if is_outbound {
+        shared.runtime_cfg.max_peers
+    } else {
+        // Inbound: leave up to OUTBOUND_SLOT_RESERVE slots for outbound dials,
+        // but never reduce inbound cap below 1 (for max_peers <= 2).
+        let reserve = OUTBOUND_SLOT_RESERVE.min(shared.runtime_cfg.max_peers.saturating_sub(1));
+        shared.runtime_cfg.max_peers.saturating_sub(reserve)
+    };
+    // Optimistic increment: bump the counter, then check against cap.
+    // If over cap, immediately roll back.  This avoids a CAS retry loop
+    // whose spin_loop() intrinsic cannot be instrumented by tarpaulin.
+    let prev = shared.active_sessions.fetch_add(1, Ordering::SeqCst);
+    if prev < cap {
+        return Some(SessionSlotGuard {
+            active_sessions: Arc::clone(&shared.active_sessions),
+        });
     }
+    shared.active_sessions.fetch_sub(1, Ordering::SeqCst);
+    None
 }
 
 fn outbound_connect_timeout(cfg: &PeerRuntimeConfig) -> Duration {
@@ -1628,21 +1612,18 @@ mod tests {
     }
 
     /// Exercises the CAS retry + `cas_spin_backoff()` path by forcing
-    /// contention: set `active_sessions` to `max_peers - 1` so only ONE
-    /// slot remains, then race 8 threads for it. At least 7 will fail CAS
-    /// (or see `current >= cap`) and the winner's CAS may also fail on the
-    /// first attempt if another thread incremented between load and CAS.
+    /// Verify optimistic session slot acquisition: exactly `max_peers`
+    /// threads should win when racing, and the rest get `None`.  The
+    /// optimistic fetch_add/fetch_sub pattern means `active_sessions`
+    /// never durably exceeds `cap`.
     #[test]
-    fn session_slot_cas_contention_covered() {
-        let (sync_engine, dir) = test_engine("rubin-node-p2p-cas-contention");
+    fn session_slot_concurrent_acquire_respects_cap() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-slot-cap");
         let mut runtime_cfg = default_peer_runtime_config("devnet", 4);
         runtime_cfg.read_deadline = Duration::from_millis(250);
         runtime_cfg.write_deadline = Duration::from_millis(250);
         let shared = Arc::new(test_shared_state(runtime_cfg, Vec::new(), sync_engine));
 
-        // Start from 0 with cap=4: all 16 threads will attempt CAS on
-        // small counters, guaranteeing contention (only one CAS per value
-        // can succeed; the rest fail and hit the retry path).
         let n_threads = 16usize;
         let barrier = Arc::new(std::sync::Barrier::new(n_threads));
         let handles: Vec<_> = (0..n_threads)
@@ -1663,10 +1644,48 @@ mod tests {
         let won = results.iter().filter(|slot| slot.is_some()).count();
 
         assert_eq!(won, 4, "exactly max_peers threads should acquire slots");
-        // On x86 under tarpaulin (CI) this race reliably triggers CAS
-        // retries, covering the fetch_add + spin_loop path.  On fast ARM
-        // (Apple M-series) spurious failures are rare, so we only assert
-        // the functional invariant here — coverage is validated by CI.
+        assert_eq!(
+            shared.active_sessions.load(Ordering::SeqCst),
+            4,
+            "active_sessions must equal won count after all threads finish",
+        );
+
+        // Dropping guards should bring count back to 0.
+        drop(results);
+        assert_eq!(shared.active_sessions.load(Ordering::SeqCst), 0);
+
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// Both branches (success and over-cap rollback) are covered
+    /// deterministically without relying on thread contention timing.
+    #[test]
+    fn session_slot_rollback_on_cap_exceeded() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-slot-rollback");
+        let mut runtime_cfg = default_peer_runtime_config("devnet", 2);
+        runtime_cfg.read_deadline = Duration::from_millis(250);
+        runtime_cfg.write_deadline = Duration::from_millis(250);
+        let shared = Arc::new(test_shared_state(runtime_cfg, Vec::new(), sync_engine));
+
+        // Acquire both slots.
+        let g1 = super::try_acquire_session_slot(&shared, true);
+        let g2 = super::try_acquire_session_slot(&shared, true);
+        assert!(g1.is_some());
+        assert!(g2.is_some());
+        assert_eq!(shared.active_sessions.load(Ordering::SeqCst), 2);
+
+        // Third acquire must fail and roll back.
+        let g3 = super::try_acquire_session_slot(&shared, true);
+        assert!(g3.is_none());
+        assert_eq!(
+            shared.active_sessions.load(Ordering::SeqCst),
+            2,
+            "fetch_sub rollback must restore count after over-cap attempt",
+        );
+
+        drop(g1);
+        drop(g2);
+        assert_eq!(shared.active_sessions.load(Ordering::SeqCst), 0);
 
         fs::remove_dir_all(dir).expect("cleanup");
     }
