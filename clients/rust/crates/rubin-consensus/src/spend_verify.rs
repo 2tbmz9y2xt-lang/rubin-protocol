@@ -384,8 +384,8 @@ pub(crate) fn verify_mldsa_key_and_sig_q(
 mod tests {
     use super::*;
     use crate::constants::{
-        COV_TYPE_P2PK, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES,
-        SIGHASH_ALL, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
+        COV_TYPE_P2PK, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SIGHASH_ALL,
+        SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
     };
     use crate::hash::sha3_256;
     use crate::sighash_v1_digest_with_cache;
@@ -506,8 +506,14 @@ mod tests {
         let sig = vec![0x02; ML_DSA_87_SIG_BYTES as usize];
         let digest = [0x42; 32];
 
-        let err = crate::verify_sig_openssl::verify_sig_with_registry(0xFF, &pubkey, &sig, &digest, Some(&registry))
-            .expect_err("unknown suite should error");
+        let err = crate::verify_sig_openssl::verify_sig_with_registry(
+            0xFF,
+            &pubkey,
+            &sig,
+            &digest,
+            Some(&registry),
+        )
+        .expect_err("unknown suite should error");
 
         assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
     }
@@ -517,7 +523,7 @@ mod tests {
         // Suite registered but pubkey/sig lengths mismatch
         let registry = SuiteRegistry::default_registry();
         let pubkey = vec![0x01; 10]; // wrong length
-        let sig = vec![0x02; 10];    // wrong length
+        let sig = vec![0x02; 10]; // wrong length
         let digest = [0x42; 32];
 
         let result = crate::verify_sig_openssl::verify_sig_with_registry(
@@ -983,7 +989,7 @@ mod tests {
         let err = validate_threshold_sig_spend_at_height(
             &[key_id, key_id], // 2 keys
             1,
-            &[],                // 0 witnesses
+            &[], // 0 witnesses
             &tx,
             input_index,
             input_value,
