@@ -3,6 +3,9 @@ use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
 
+const PARALLEL_TEST_WORKERS: usize = 4;
+const MAX_FIXTURE_HEX_BYTES: usize = 1 << 20;
+
 fn clone_chain_state(
     utxos: &HashMap<Outpoint, UtxoEntry>,
     already_generated: u128,
@@ -21,6 +24,13 @@ fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
     let value = value.trim();
     if value.len() % 2 != 0 {
         return Err(format!("hex string must have even length: {}", value.len()));
+    }
+    let decoded_len = value.len() / 2;
+    if decoded_len > MAX_FIXTURE_HEX_BYTES {
+        return Err(format!(
+            "hex string exceeds fixture limit: {} bytes > {} bytes",
+            decoded_len, MAX_FIXTURE_HEX_BYTES
+        ));
     }
     let mut out = Vec::with_capacity(value.len() / 2);
     for idx in (0..value.len()).step_by(2) {
@@ -145,7 +155,7 @@ fn test_parallel_parity_from_vector(v: &ConnectBlockVector) {
         Some(v.prev_timestamps.as_slice()),
         &mut par_state,
         chain_id,
-        0,
+        PARALLEL_TEST_WORKERS,
     )
     .expect("parallel connect");
 

@@ -4,9 +4,13 @@ use crate::{
     CoreExtActiveProfile, CoreExtProfiles, CoreExtVerificationBinding, TxContextBase,
     TxContextContinuing,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
 
 static CORE_EXT_TXCTX_CALLED: AtomicBool = AtomicBool::new(false);
+static CORE_EXT_TXCTX_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn record_txctx_verifier(
     _ext_id: u16,
@@ -962,6 +966,8 @@ fn apply_non_coinbase_tx_basic_workq_vault_error_paths() {
 
 #[test]
 fn apply_non_coinbase_tx_basic_workq_core_ext_branches() {
+    let _guard = CORE_EXT_TXCTX_TEST_LOCK.lock().expect("core ext test lock");
+    CORE_EXT_TXCTX_CALLED.store(false, Ordering::SeqCst);
     let out_kp = kp_or_skip!();
     let out_cov = p2pk_covenant_data_for_pubkey(&out_kp.pubkey);
     let prev_txid = [0xa0; 32];
