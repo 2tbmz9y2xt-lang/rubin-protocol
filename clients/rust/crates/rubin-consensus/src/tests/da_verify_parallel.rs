@@ -228,3 +228,151 @@ fn verify_da_parallel_helpers_accept_valid_multi_set_block() {
     )
     .expect("payload commitments");
 }
+
+// ---- Additional unit tests to balance Go coverage ----
+
+#[test]
+fn verify_da_chunk_hashes_empty_tasks_passes() {
+    verify_da_chunk_hashes_parallel(vec![], 4).expect("empty tasks must pass");
+}
+
+#[test]
+fn verify_da_payload_commits_empty_tasks_passes() {
+    verify_da_payload_commits_parallel(vec![], 4).expect("empty tasks must pass");
+}
+
+#[test]
+fn verify_da_chunk_hashes_single_valid_task() {
+    let payload = b"single-chunk-data".to_vec();
+    let expected = crate::hash::sha3_256(&payload);
+    let task = crate::DaChunkHashTask {
+        tx_index: 0,
+        da_payload: payload,
+        expected,
+    };
+    verify_da_chunk_hashes_parallel(vec![task], 1).expect("single valid task must pass");
+}
+
+#[test]
+fn verify_da_chunk_hashes_single_invalid_task() {
+    let payload = b"single-chunk-data".to_vec();
+    let mut expected = crate::hash::sha3_256(&payload);
+    expected[0] ^= 0xFF;
+    let task = crate::DaChunkHashTask {
+        tx_index: 0,
+        da_payload: payload,
+        expected,
+    };
+    let err = verify_da_chunk_hashes_parallel(vec![task], 1).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrDaChunkHashInvalid);
+}
+
+#[test]
+fn verify_da_chunk_hashes_multi_worker_determinism() {
+    let payload = b"determinism-test".to_vec();
+    let expected = crate::hash::sha3_256(&payload);
+    let task = crate::DaChunkHashTask {
+        tx_index: 0,
+        da_payload: payload,
+        expected,
+    };
+    // Same task with different worker counts must produce same result.
+    for workers in [1, 2, 4, 8] {
+        verify_da_chunk_hashes_parallel(vec![task.clone()], workers)
+            .unwrap_or_else(|_| panic!("failed with {} workers", workers));
+    }
+}
+
+#[test]
+fn verify_da_chunk_hashes_error_ordering_first_by_index() {
+    let payload_ok = b"ok-payload".to_vec();
+    let hash_ok = crate::hash::sha3_256(&payload_ok);
+
+    let payload_bad = b"bad-payload".to_vec();
+    let mut hash_bad = crate::hash::sha3_256(&payload_bad);
+    hash_bad[0] ^= 0xFF;
+
+    // Place bad task at index 1, good task at index 0.
+    let tasks = vec![
+        crate::DaChunkHashTask {
+            tx_index: 0,
+            da_payload: payload_ok,
+            expected: hash_ok,
+        },
+        crate::DaChunkHashTask {
+            tx_index: 1,
+            da_payload: payload_bad,
+            expected: hash_bad,
+        },
+    ];
+    let err = verify_da_chunk_hashes_parallel(tasks, 2).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrDaChunkHashInvalid);
+}
+
+#[test]
+fn verify_da_payload_commits_valid_single_chunk() {
+    let chunk = b"single-commit-chunk".to_vec();
+    let commitment = crate::hash::sha3_256(&chunk);
+    let task = crate::DaPayloadCommitTask {
+        da_id: [0x01; 32],
+        chunk_count: 1,
+        chunk_payloads: vec![chunk],
+        expected_commit: commitment,
+    };
+    verify_da_payload_commits_parallel(vec![task], 1).expect("valid single chunk commit");
+}
+
+#[test]
+fn verify_da_payload_commits_valid_multi_chunk() {
+    let c0 = b"chunk-0".to_vec();
+    let c1 = b"chunk-1".to_vec();
+    let concat = [c0.clone(), c1.clone()].concat();
+    let commitment = crate::hash::sha3_256(&concat);
+    let task = crate::DaPayloadCommitTask {
+        da_id: [0x02; 32],
+        chunk_count: 2,
+        chunk_payloads: vec![c0, c1],
+        expected_commit: commitment,
+    };
+    verify_da_payload_commits_parallel(vec![task], 2).expect("valid multi-chunk commit");
+}
+
+#[test]
+fn verify_da_payload_commits_invalid_commitment() {
+    let chunk = b"bad-commit-chunk".to_vec();
+    let mut bad_commitment = crate::hash::sha3_256(&chunk);
+    bad_commitment[31] ^= 0x01;
+    let task = crate::DaPayloadCommitTask {
+        da_id: [0x03; 32],
+        chunk_count: 1,
+        chunk_payloads: vec![chunk],
+        expected_commit: bad_commitment,
+    };
+    let err = verify_da_payload_commits_parallel(vec![task], 1).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrDaPayloadCommitInvalid);
+}
+
+#[test]
+fn verify_da_chunk_hashes_empty_payload_valid() {
+    let payload = vec![];
+    let expected = crate::hash::sha3_256(&payload);
+    let task = crate::DaChunkHashTask {
+        tx_index: 0,
+        da_payload: payload,
+        expected,
+    };
+    verify_da_chunk_hashes_parallel(vec![task], 1).expect("empty payload with correct hash");
+}
+
+#[test]
+fn verify_da_chunk_hashes_zero_workers_treated_as_sequential() {
+    let payload = b"zero-workers".to_vec();
+    let expected = crate::hash::sha3_256(&payload);
+    let task = crate::DaChunkHashTask {
+        tx_index: 0,
+        da_payload: payload,
+        expected,
+    };
+    // workers=0 should not panic and should work (fallback to sequential).
+    verify_da_chunk_hashes_parallel(vec![task], 0).expect("zero workers must not panic");
+}

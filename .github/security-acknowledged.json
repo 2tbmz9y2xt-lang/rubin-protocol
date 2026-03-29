@@ -337,6 +337,41 @@
       "reason": "FALSE POSITIVE: local sha3_256 mirrors rubin_consensus::hash::sha3_256 (private module). Both use identical sha3 crate. No divergence risk.",
       "acknowledged_by": "architect",
       "date": "2026-03-28"
+    },
+    {
+      "title_pattern": "UTXO state divergence risk between Go and Rust",
+      "file_pattern": "fuzz_state_transition_test.go",
+      "reason": "FALSE POSITIVE: Go big.Int and Rust u128 are both overflow-safe for AlreadyGenerated. Go checks overflow explicitly (connect_block_inmem.go:198-202), Rust uses checked_add (connect_block_inmem.rs:183). Max subsidy bounded by spec; u128 sufficient. Architectural decision, not a bug.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-29"
+    },
+    {
+      "title_pattern": "Missing ML-DSA-87 signature verification in fuzz test",
+      "file_pattern": "fuzz_state_transition_test.go",
+      "reason": "FALSE POSITIVE: ApplyNonCoinbaseTxBasicUpdate internally verifies ML-DSA-87 signatures through the full consensus validation path. Redundant external VerifyDigest32 would test the signing API, not the consensus pipeline.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-29"
+    },
+    {
+      "title_pattern": "Inconsistent worker=0 handling in DA verification",
+      "file_pattern": "da_verify_parallel.rs",
+      "reason": "FALSE POSITIVE: finding references test file outside PR diff. Go worker_pool.go:84-88 falls back to GOMAXPROCS(0) for workers<=0. Rust worker pool has equivalent fallback. Not a consensus divergence.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-29"
+    },
+    {
+      "title_pattern": "Insufficient input validation in block connection fuzz",
+      "file_pattern": "connect_block_inmem.rs",
+      "reason": "FALSE POSITIVE: fuzz targets intentionally feed arbitrary bytes including sub-header-size inputs. Adding minimum header check would REDUCE fuzz coverage by excluding deserialization error paths that must not panic.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-29"
+    },
+    {
+      "title_pattern": "Inconsistent fuzz input structures between Go and Rust",
+      "file_pattern": "multiple",
+      "reason": "FALSE POSITIVE: Go testing.F supports multiple corpus entries natively; libfuzzer only supports single byte slice. Input structure difference is a platform limitation, not a test quality issue. Both achieve equivalent coverage through different decomposition strategies.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-29"
     }
   ]
 }
