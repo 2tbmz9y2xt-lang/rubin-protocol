@@ -379,6 +379,27 @@
       "reason": "FALSE POSITIVE: validate_coinbase_value_bound (coinbase.rs:61-63) intentionally skips value check at height 0 — genesis block has no subsidy. Go parity: TestConnectBlockBasicInMemoryAtHeight_Height0_DoesNotAdvanceAlreadyGenerated passes coinbase value=1 at height 0. This is protocol design, not a bug.",
       "acknowledged_by": "architect",
       "date": "2026-03-29"
+    },
+    {
+      "title_pattern": "Incorrect Genesis Block Coinbase Validation",
+      "file_pattern": "tests/connect_block_inmem.rs",
+      "reason": "FALSE POSITIVE: test connect_block_coinbase_only_at_height0_succeeds uses anchor(value=0) — standard witness commitment. Test connect_block_height0_does_not_advance passes coinbase value=1 at height 0 and SUCCEEDS — proving the code accepts non-zero coinbase at height 0. DeepSeek did not read both tests.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-29"
+    },
+    {
+      "title_pattern": "Anchor Output Value Enforcement Bypass",
+      "file_pattern": "tests/connect_block_inmem.rs",
+      "reason": "FALSE POSITIVE: test builds correct witness commitment hash (lines 561-563: witness_merkle_root_wtxids + witness_commitment_hash). Non-zero anchor value is rejected BEFORE witness commitment check by covenant_genesis.rs:50-53 CORE_ANCHOR value=0 invariant.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-29"
+    },
+    {
+      "title_pattern": "Insufficient Vault Output Validation",
+      "file_pattern": "tests/connect_block_inmem.rs",
+      "reason": "FALSE POSITIVE: owner_lock_id is computed as sha3_256(output_descriptor_bytes(COV_TYPE_P2PK, &cov_data)) at line 631, exactly matching the P2PK input's lock_id. Production code validates this in utxo_basic.rs:616 has_owner_authorized_input. Test passes because owner_lock_id IS correctly derived from the input.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-29"
     }
   ]
 }
