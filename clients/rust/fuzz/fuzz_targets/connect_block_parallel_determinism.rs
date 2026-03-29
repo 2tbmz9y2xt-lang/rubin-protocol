@@ -93,7 +93,8 @@ fuzz_target!(|data: &[u8]| {
                 "state already_generated mismatch"
             );
         }
-        (Err(_), Err(_)) => {
+        (Err(seq_err), Err(par_err)) => {
+            assert_eq!(seq_err.code, par_err.code, "error-code mismatch");
             assert_eq!(seq_state.utxos, par_state.utxos, "error-path utxo mismatch");
             assert_eq!(
                 seq_state.already_generated,
