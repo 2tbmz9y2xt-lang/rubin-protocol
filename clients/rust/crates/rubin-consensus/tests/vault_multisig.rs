@@ -233,6 +233,17 @@ fn vault_parse_whitelist_contains_owner() {
     assert_eq!(err.code, ErrorCode::TxErrVaultOwnerDestinationForbidden);
 }
 
+#[test]
+fn vault_parse_whitelist_duplicate_entries() {
+    let owner = [0u8; 32];
+    let keys = sorted_keys(1);
+    let dup = [0xaa; 32];
+    let data = build_vault_data(owner, 1, &keys, &[dup, dup]);
+    let err = parse_vault_covenant_data(&data).unwrap_err();
+    // Duplicates violate strictly_sorted_unique — same check as unsorted
+    assert_eq!(err.code, ErrorCode::TxErrVaultWhitelistNotCanonical);
+}
+
 // NOTE: parse_vault_covenant_data_for_spend is pub(crate) — tested via
 // inline unit tests in vault.rs, not reachable from integration tests.
 
@@ -436,7 +447,7 @@ fn witness_slots_unknown_covenant_rejected() {
 fn output_descriptor_bytes_p2pk_shape() {
     let cov_data = vec![0xaa; 33];
     let desc = output_descriptor_bytes(0x0000, &cov_data); // COV_TYPE_P2PK
-    // type(2) + compactsize(1, since 33 < 253) + data(33) = 36
+                                                           // type(2) + compactsize(1, since 33 < 253) + data(33) = 36
     assert_eq!(desc.len(), 36);
     assert_eq!(desc[0..2], 0x0000u16.to_le_bytes());
     assert_eq!(desc[2], 33); // compact size

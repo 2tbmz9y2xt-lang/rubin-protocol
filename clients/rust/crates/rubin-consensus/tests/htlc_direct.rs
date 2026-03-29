@@ -160,6 +160,20 @@ fn htlc_parse_lock_value_zero() {
 }
 
 #[test]
+fn htlc_parse_lock_value_zero_timestamp() {
+    let data = build_htlc_data(
+        [0; 32],
+        LOCK_MODE_TIMESTAMP,
+        0,
+        default_claim_key(),
+        default_refund_key(),
+    );
+    let err = parse_htlc_covenant_data(&data).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    assert!(err.msg.contains("lock_value"));
+}
+
+#[test]
 fn htlc_parse_claim_equals_refund_key() {
     let same_key = [0xCC; 32];
     let data = build_htlc_data([0; 32], LOCK_MODE_HEIGHT, 100, same_key, same_key);
@@ -228,26 +242,14 @@ fn htlc_struct_debug() {
 #[test]
 fn htlc_parse_lock_mode_height_is_0x00() {
     // Ensure LOCK_MODE_HEIGHT == 0x00 (consensus constant)
-    let data = build_htlc_data(
-        [0; 32],
-        0x00,
-        1,
-        default_claim_key(),
-        default_refund_key(),
-    );
+    let data = build_htlc_data([0; 32], 0x00, 1, default_claim_key(), default_refund_key());
     let h = parse_htlc_covenant_data(&data).unwrap();
     assert_eq!(h.lock_mode, 0x00);
 }
 
 #[test]
 fn htlc_parse_lock_mode_timestamp_is_0x01() {
-    let data = build_htlc_data(
-        [0; 32],
-        0x01,
-        1,
-        default_claim_key(),
-        default_refund_key(),
-    );
+    let data = build_htlc_data([0; 32], 0x01, 1, default_claim_key(), default_refund_key());
     let h = parse_htlc_covenant_data(&data).unwrap();
     assert_eq!(h.lock_mode, 0x01);
 }
