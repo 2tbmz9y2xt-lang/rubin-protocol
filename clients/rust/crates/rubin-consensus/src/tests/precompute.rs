@@ -1,3 +1,4 @@
+use super::{encode_htlc_covenant_data, p2pk_covenant_data_for_pubkey, test_mldsa87_keypair};
 use std::collections::HashMap;
 
 use crate::block::{BlockHeader, BLOCK_HEADER_BYTES};
@@ -7,6 +8,7 @@ use crate::hash::sha3_256;
 use crate::precompute::precompute_tx_contexts;
 use crate::tx::{Tx, TxInput, TxOutput, WitnessItem};
 use crate::utxo_basic::{Outpoint, UtxoEntry};
+use crate::ErrorCode;
 
 fn valid_p2pk_covenant_data() -> Vec<u8> {
     vec![0u8; 32] // key-id placeholder
@@ -632,6 +634,27 @@ fn precompute_no_inputs() {
 }
 
 #[test]
+fn precompute_nil_like_non_coinbase_tx_rejected() {
+    // Rust cannot encode a literal nil tx pointer, so this covers the same
+    // guard class with an all-default non-coinbase placeholder.
+    let tx = Tx {
+        version: 0,
+        tx_kind: 0x00,
+        tx_nonce: 0,
+        inputs: vec![],
+        outputs: vec![],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![],
+        da_payload: Vec::new(),
+    };
+    let pb = make_parsed_block(simple_coinbase(), vec![tx]);
+    let err = precompute_tx_contexts(&pb, &HashMap::new(), 0).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+}
+
+#[test]
 fn precompute_snapshot_not_mutated() {
     let cov_data = valid_p2pk_covenant_data();
     let prev_txid = sha3_256(b"snapshot-immutable");
@@ -677,6 +700,77 @@ fn precompute_snapshot_not_mutated() {
     // Original snapshot must still have the UTXO.
     assert!(utxos.contains_key(&op));
     assert_eq!(utxos.len(), 1);
+}
+
+#[test]
+fn precompute_htlc_witness_slots() {
+    let claim_kp = kp_or_skip!();
+    let refund_kp = kp_or_skip!();
+    let claim_key_id = sha3_256(&claim_kp.pubkey);
+    let refund_key_id = sha3_256(&refund_kp.pubkey);
+    let prev_txid = sha3_256(b"htlc-precompute-prev");
+    let preimage = b"htlc-branch-preimage";
+    let entry = UtxoEntry {
+        value: 100,
+        covenant_type: COV_TYPE_HTLC,
+        covenant_data: encode_htlc_covenant_data(
+            sha3_256(preimage),
+            LOCK_MODE_HEIGHT,
+            1,
+            claim_key_id,
+            refund_key_id,
+        ),
+        creation_height: 0,
+        created_by_coinbase: false,
+    };
+    let utxos = HashMap::from([(
+        Outpoint {
+            txid: prev_txid,
+            vout: 0,
+        },
+        entry.clone(),
+    )]);
+    let tx = Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 90,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: p2pk_covenant_data_for_pubkey(&claim_kp.pubkey),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![
+            WitnessItem {
+                suite_id: SUITE_ID_SENTINEL,
+                pubkey: claim_key_id.to_vec(),
+                signature: {
+                    let mut payload = Vec::new();
+                    payload.push(0x00);
+                    payload.extend_from_slice(&(preimage.len() as u16).to_le_bytes());
+                    payload.extend_from_slice(preimage);
+                    payload
+                },
+            },
+            dummy_witness(),
+        ],
+        da_payload: Vec::new(),
+    };
+    let pb = make_parsed_block(simple_coinbase(), vec![tx]);
+    let results = precompute_tx_contexts(&pb, &utxos, 100).expect("precompute htlc tx");
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].witness_start, 0);
+    assert_eq!(results[0].witness_end, 2);
+    assert_eq!(results[0].resolved_inputs[0], entry);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
