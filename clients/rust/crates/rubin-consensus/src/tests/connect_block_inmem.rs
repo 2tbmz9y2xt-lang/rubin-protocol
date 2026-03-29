@@ -158,6 +158,45 @@ fn connect_block_ok_computes_fees_and_updates_state() {
         u128::from(subsidy),
         "state.already_generated not advanced"
     );
+
+    // Per-element UTXO verification: covenant_type, value, created_by_coinbase for each entry.
+    let spend_entry = state
+        .utxos
+        .get(&Outpoint {
+            txid: spend_txid,
+            vout: 0,
+        })
+        .expect("spend output missing from UTXO set");
+    assert_eq!(
+        spend_entry.covenant_type, COV_TYPE_P2PK,
+        "spend output covenant_type mismatch"
+    );
+    assert_eq!(spend_entry.value, 90, "spend output value mismatch");
+    assert!(
+        !spend_entry.created_by_coinbase,
+        "spend output created_by_coinbase should be false"
+    );
+
+    let cb_entry = state
+        .utxos
+        .get(&Outpoint {
+            txid: coinbase_txid,
+            vout: 0,
+        })
+        .expect("coinbase output missing from UTXO set");
+    assert_eq!(
+        cb_entry.covenant_type, COV_TYPE_P2PK,
+        "coinbase output covenant_type mismatch"
+    );
+    assert_eq!(
+        cb_entry.value,
+        subsidy + sum_fees,
+        "coinbase output value mismatch"
+    );
+    assert!(
+        cb_entry.created_by_coinbase,
+        "coinbase output created_by_coinbase should be true"
+    );
 }
 
 /// Go parity: TestConnectBlockBasicInMemoryAtHeight_NilState
