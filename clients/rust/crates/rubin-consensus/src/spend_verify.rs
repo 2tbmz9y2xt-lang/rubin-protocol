@@ -383,8 +383,17 @@ pub(crate) fn verify_mldsa_key_and_sig_q(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::COV_TYPE_P2PK;
-    use crate::tx::{Tx, TxInput, TxOutput};
+    use crate::constants::{
+        COV_TYPE_P2PK, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SIGHASH_ALL,
+        SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
+    };
+    use crate::hash::sha3_256;
+    use crate::sighash_v1_digest_with_cache;
+    use crate::suite_registry::{SuiteParams, SuiteRegistry};
+    use crate::tx::{Tx, TxInput, TxOutput, WitnessItem};
+    use crate::verify_sig_openssl::Mldsa87Keypair;
+    use crate::SighashV1PrehashCache;
+    use std::collections::BTreeMap;
 
     fn dummy_entry() -> UtxoEntry {
         UtxoEntry {
@@ -427,6 +436,915 @@ mod tests {
             1,
             chain_id,
         )
+    }
+
+    fn sign_witness(
+        keypair: &Mldsa87Keypair,
+        tx: &Tx,
+        input_index: u32,
+        input_value: u64,
+        chain_id: [u8; 32],
+    ) -> WitnessItem {
+        let mut cache = SighashV1PrehashCache::new(tx).expect("cache");
+        let digest = sighash_v1_digest_with_cache(
+            &mut cache,
+            input_index,
+            input_value,
+            chain_id,
+            SIGHASH_ALL,
+        )
+        .expect("digest");
+        let mut signature = keypair.sign_digest32(digest).expect("sign");
+        signature.push(SIGHASH_ALL);
+        WitnessItem {
+            suite_id: SUITE_ID_ML_DSA_87,
+            pubkey: keypair.pubkey_bytes(),
+            signature,
+        }
+    }
+
+    fn make_p2pk_entry(pubkey: &[u8]) -> UtxoEntry {
+        let pubkey_hash = sha3_256(pubkey);
+        let mut covenant_data = vec![SUITE_ID_ML_DSA_87];
+        covenant_data.extend_from_slice(&pubkey_hash);
+        UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data,
+            creation_height: 0,
+            created_by_coinbase: false,
+        }
+    }
+
+    // ======== Registry & Lookup Tests (8) ========
+
+    #[test]
+    fn verify_sig_with_registry_nil_falls_back_to_legacy() {
+        // When registry is None, verify_sig_with_registry should fall back to verify_sig
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let pubkey = keypair.pubkey_bytes();
+        let digest = [0x42; 32];
+        let sig = keypair.sign_digest32(digest).expect("sign");
+
+        let result = crate::verify_sig_openssl::verify_sig_with_registry(
+            SUITE_ID_ML_DSA_87,
+            &pubkey,
+            &sig,
+            &digest,
+            None,
+        )
+        .expect("verify");
+
+        assert!(result, "valid signature should verify");
+    }
+
+    #[test]
+    fn verify_sig_with_registry_unknown_suite_returns_error() {
+        // Suite 0xFF not in registry
+        let registry = SuiteRegistry::default_registry();
+        let pubkey = vec![0x01; ML_DSA_87_PUBKEY_BYTES as usize];
+        let sig = vec![0x02; ML_DSA_87_SIG_BYTES as usize];
+        let digest = [0x42; 32];
+
+        let err = crate::verify_sig_openssl::verify_sig_with_registry(
+            0xFF,
+            &pubkey,
+            &sig,
+            &digest,
+            Some(&registry),
+        )
+        .expect_err("unknown suite should error");
+
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    }
+
+    #[test]
+    fn verify_sig_with_registry_known_suite_wrong_lengths() {
+        // Suite registered but pubkey/sig lengths mismatch
+        let registry = SuiteRegistry::default_registry();
+        let pubkey = vec![0x01; 10]; // wrong length
+        let sig = vec![0x02; 10]; // wrong length
+        let digest = [0x42; 32];
+
+        let result = crate::verify_sig_openssl::verify_sig_with_registry(
+            SUITE_ID_ML_DSA_87,
+            &pubkey,
+            &sig,
+            &digest,
+            Some(&registry),
+        )
+        .expect("should not error on length check");
+
+        assert!(!result, "wrong lengths should return false, not error");
+    }
+
+    #[test]
+    fn verify_sig_with_registry_known_suite_correct_lengths() {
+        // Valid suite with correct lengths passes through to OpenSSL
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let pubkey = keypair.pubkey_bytes();
+        let digest = [0x42; 32];
+        let sig = keypair.sign_digest32(digest).expect("sign");
+        let registry = SuiteRegistry::default_registry();
+
+        let result = crate::verify_sig_openssl::verify_sig_with_registry(
+            SUITE_ID_ML_DSA_87,
+            &pubkey,
+            &sig,
+            &digest,
+            Some(&registry),
+        )
+        .expect("verify with registry");
+
+        assert!(result, "valid signature with registry should verify");
+    }
+
+    #[test]
+    fn verify_sig_with_registry_custom_suite() {
+        // Custom registry entry with different suite ID
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let pubkey = keypair.pubkey_bytes();
+        let digest = [0x42; 32];
+        let sig = keypair.sign_digest32(digest).expect("sign");
+
+        let mut suites = BTreeMap::new();
+        suites.insert(
+            0x05,
+            SuiteParams {
+                suite_id: 0x05,
+                pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+                sig_len: ML_DSA_87_SIG_BYTES,
+                verify_cost: 8,
+                openssl_alg: "ML-DSA-87",
+            },
+        );
+        let registry = SuiteRegistry::with_suites(suites);
+
+        let result = crate::verify_sig_openssl::verify_sig_with_registry(
+            0x05,
+            &pubkey,
+            &sig,
+            &digest,
+            Some(&registry),
+        )
+        .expect("verify custom suite");
+
+        assert!(result, "custom suite entry should verify");
+    }
+
+    #[test]
+    fn verify_sig_with_registry_consensus_init_error() {
+        // Empty inputs should trigger OpenSSL parse error
+        let registry = SuiteRegistry::default_registry();
+        let digest = [0x42; 32];
+
+        let result = crate::verify_sig_openssl::verify_sig_with_registry(
+            SUITE_ID_ML_DSA_87,
+            &[],
+            &[],
+            &digest,
+            Some(&registry),
+        );
+
+        // Empty inputs return false, not an error (length check happens first)
+        let ok = result.expect("should not error");
+        assert!(!ok, "empty inputs should fail verification");
+    }
+
+    #[test]
+    fn verify_sig_with_registry_openssl_error() {
+        // Corrupted signature should fail verification
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let pubkey = keypair.pubkey_bytes();
+        let digest = [0x42; 32];
+        let mut sig = keypair.sign_digest32(digest).expect("sign");
+        sig[0] ^= 0xFF; // corrupt first byte
+        let registry = SuiteRegistry::default_registry();
+
+        let result = crate::verify_sig_openssl::verify_sig_with_registry(
+            SUITE_ID_ML_DSA_87,
+            &pubkey,
+            &sig,
+            &digest,
+            Some(&registry),
+        )
+        .expect("verify");
+
+        assert!(!result, "corrupted signature should not verify");
+    }
+
+    #[test]
+    fn verify_sig_with_registry_verify_returns_false() {
+        // Valid signature over different digest should fail
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let pubkey = keypair.pubkey_bytes();
+        let digest1 = [0x42; 32];
+        let sig = keypair.sign_digest32(digest1).expect("sign");
+        let mut digest2 = digest1;
+        digest2[0] ^= 0xFF;
+        let registry = SuiteRegistry::default_registry();
+
+        let result = crate::verify_sig_openssl::verify_sig_with_registry(
+            SUITE_ID_ML_DSA_87,
+            &pubkey,
+            &sig,
+            &digest2,
+            Some(&registry),
+        )
+        .expect("verify");
+
+        assert!(!result, "signature over different digest should not verify");
+    }
+
+    // ======== P2PK Spend at Height Tests (7) ========
+
+    #[test]
+    fn p2pk_at_height_nil_providers_falls_back() {
+        // No rotation, no registry -> use defaults (ML-DSA-87)
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let entry = make_p2pk_entry(&keypair.pubkey_bytes());
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let w = sign_witness(&keypair, &tx, input_index, input_value, chain_id);
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let result = validate_p2pk_spend_at_height(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            &mut cache,
+            None,
+            None,
+        );
+
+        assert!(result.is_ok(), "default fallback should verify valid P2PK");
+    }
+
+    #[test]
+    fn p2pk_at_height_suite_not_in_spend_set() {
+        // Suite 0xFF not in native spend set at height
+        let entry = dummy_entry();
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let w = WitnessItem {
+            suite_id: 0xFF,
+            pubkey: vec![0x01; ML_DSA_87_PUBKEY_BYTES as usize],
+            signature: vec![0x02; ML_DSA_87_SIG_BYTES as usize + 1],
+        };
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let err = validate_p2pk_spend_at_height(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            &mut cache,
+            None,
+            None,
+        )
+        .expect_err("unknown suite");
+
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    }
+
+    #[test]
+    fn p2pk_at_height_wrong_lengths() {
+        // Correct suite, wrong pubkey/sig lengths
+        let entry = dummy_entry();
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let w = WitnessItem {
+            suite_id: SUITE_ID_ML_DSA_87,
+            pubkey: vec![0x01; 10], // wrong length
+            signature: vec![0x02; 10],
+        };
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let err = validate_p2pk_spend_at_height(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            &mut cache,
+            None,
+            None,
+        )
+        .expect_err("wrong lengths");
+
+        assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
+    }
+
+    #[test]
+    fn p2pk_at_height_valid_sig_success() {
+        // Full valid P2PK spend path
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let entry = make_p2pk_entry(&keypair.pubkey_bytes());
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let w = sign_witness(&keypair, &tx, input_index, input_value, chain_id);
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let result = validate_p2pk_spend_at_height(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            &mut cache,
+            None,
+            None,
+        );
+
+        assert!(result.is_ok(), "valid P2PK should verify");
+    }
+
+    #[test]
+    fn p2pk_at_height_bad_covenant_data() {
+        // Malformed covenant_data
+        let entry = UtxoEntry {
+            value: 1,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: vec![0x99; 10], // too short
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let w = WitnessItem {
+            suite_id: SUITE_ID_ML_DSA_87,
+            pubkey: vec![0x01; ML_DSA_87_PUBKEY_BYTES as usize],
+            signature: vec![0x02; ML_DSA_87_SIG_BYTES as usize + 1],
+        };
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let err = validate_p2pk_spend_at_height(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            &mut cache,
+            None,
+            None,
+        )
+        .expect_err("bad covenant");
+
+        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    }
+
+    #[test]
+    fn p2pk_at_height_suite_not_registered() {
+        // Suite in spend set but not in registry
+        let mut covenant_data = vec![0xAA];
+        covenant_data.extend_from_slice(&[0x11; 32]);
+        let entry = UtxoEntry {
+            value: 1,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data,
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+
+        // Create custom registry with only SUITE_ID_ML_DSA_87
+        let mut suites = BTreeMap::new();
+        suites.insert(
+            SUITE_ID_ML_DSA_87,
+            SuiteParams {
+                suite_id: SUITE_ID_ML_DSA_87,
+                pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+                sig_len: ML_DSA_87_SIG_BYTES,
+                verify_cost: 8,
+                openssl_alg: "ML-DSA-87",
+            },
+        );
+        let registry = SuiteRegistry::with_suites(suites);
+
+        let w = WitnessItem {
+            suite_id: 0xAA, // suite in covenant but not registered
+            pubkey: vec![0x01; ML_DSA_87_PUBKEY_BYTES as usize],
+            signature: vec![0x02; ML_DSA_87_SIG_BYTES as usize + 1],
+        };
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let err = validate_p2pk_spend_at_height(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            &mut cache,
+            None,
+            Some(&registry),
+        )
+        .expect_err("unregistered suite");
+
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    }
+
+    #[test]
+    fn p2pk_at_height_key_binding_mismatch() {
+        // sha3(pubkey) != covenant key_id
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let mut covenant_data = vec![SUITE_ID_ML_DSA_87];
+        covenant_data.extend_from_slice(&[0xFF; 32]); // wrong key_id
+        let entry = UtxoEntry {
+            value: 1,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data,
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let w = sign_witness(&keypair, &tx, input_index, input_value, chain_id);
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let err = validate_p2pk_spend_at_height(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            &mut cache,
+            None,
+            None,
+        )
+        .expect_err("key binding mismatch");
+
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    }
+
+    // ======== Threshold Sig at Height Tests (10) ========
+
+    #[test]
+    fn threshold_at_height_nil_providers_falls_back() {
+        // No rotation, no registry -> defaults
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let key_id = sha3_256(&keypair.pubkey_bytes());
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let w = sign_witness(&keypair, &tx, input_index, input_value, chain_id);
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let result = validate_threshold_sig_spend_at_height(
+            &[key_id],
+            1,
+            &[w],
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            "test",
+            &mut cache,
+            None,
+            None,
+        );
+
+        assert!(result.is_ok(), "1-of-1 valid threshold should verify");
+    }
+
+    #[test]
+    fn threshold_at_height_sentinel_passthrough() {
+        // SENTINEL suite should be skipped (keyless)
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let key_id = sha3_256(&keypair.pubkey_bytes());
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let w1 = WitnessItem {
+            suite_id: SUITE_ID_SENTINEL,
+            pubkey: vec![],
+            signature: vec![],
+        };
+        let w2 = sign_witness(&keypair, &tx, input_index, input_value, chain_id);
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let result = validate_threshold_sig_spend_at_height(
+            &[key_id, key_id],
+            1,
+            &[w1, w2],
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            "test",
+            &mut cache,
+            None,
+            None,
+        );
+
+        assert!(result.is_ok(), "sentinel should be skipped");
+    }
+
+    #[test]
+    fn threshold_at_height_non_native_suite_rejects() {
+        // Suite 0xFF not in native spend set
+        let key_id = [0x11; 32];
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let w = WitnessItem {
+            suite_id: 0xFF,
+            pubkey: vec![0x01; ML_DSA_87_PUBKEY_BYTES as usize],
+            signature: vec![0x02; ML_DSA_87_SIG_BYTES as usize + 1],
+        };
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let err = validate_threshold_sig_spend_at_height(
+            &[key_id],
+            1,
+            &[w],
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            "test",
+            &mut cache,
+            None,
+            None,
+        )
+        .expect_err("bad suite");
+
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    }
+
+    #[test]
+    fn threshold_at_height_slot_count_mismatch() {
+        // Different number of witnesses vs keys
+        let key_id = [0x11; 32];
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let err = validate_threshold_sig_spend_at_height(
+            &[key_id, key_id], // 2 keys
+            1,
+            &[], // 0 witnesses
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            "test",
+            &mut cache,
+            None,
+            None,
+        )
+        .expect_err("mismatch");
+
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+    }
+
+    #[test]
+    fn threshold_at_height_valid_sigs_meets_threshold() {
+        // 1-of-2 threshold with one valid signature
+        let keypair1 = Mldsa87Keypair::generate().expect("keypair1");
+        let keypair2 = Mldsa87Keypair::generate().expect("keypair2");
+        let key_id1 = sha3_256(&keypair1.pubkey_bytes());
+        let key_id2 = sha3_256(&keypair2.pubkey_bytes());
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let w1 = sign_witness(&keypair1, &tx, input_index, input_value, chain_id);
+        let w2 = WitnessItem {
+            suite_id: SUITE_ID_SENTINEL,
+            pubkey: vec![],
+            signature: vec![],
+        };
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let result = validate_threshold_sig_spend_at_height(
+            &[key_id1, key_id2],
+            1,
+            &[w1, w2],
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            "test",
+            &mut cache,
+            None,
+            None,
+        );
+
+        assert!(result.is_ok(), "1-of-2 with one valid should pass");
+    }
+
+    #[test]
+    fn threshold_at_height_threshold_not_met() {
+        // Threshold 2 but only 1 valid signature
+        let keypair1 = Mldsa87Keypair::generate().expect("keypair1");
+        let keypair2 = Mldsa87Keypair::generate().expect("keypair2");
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let mut bad_sig = sign_witness(&keypair1, &tx, input_index, input_value, chain_id);
+        bad_sig.signature[0] ^= 0xFF; // corrupt signature
+        let w2 = sign_witness(&keypair2, &tx, input_index, input_value, chain_id);
+
+        let key_id1 = sha3_256(&keypair1.pubkey_bytes());
+        let key_id2 = sha3_256(&keypair2.pubkey_bytes());
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let err = validate_threshold_sig_spend_at_height(
+            &[key_id1, key_id2],
+            2,
+            &[bad_sig, w2],
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            "test",
+            &mut cache,
+            None,
+            None,
+        )
+        .expect_err("threshold not met");
+
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    }
+
+    #[test]
+    fn threshold_at_height_sentinel_with_payload_rejects() {
+        // SENTINEL suite with non-empty pubkey/signature
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let w = WitnessItem {
+            suite_id: SUITE_ID_SENTINEL,
+            pubkey: vec![0x01], // sentinel must be keyless
+            signature: vec![],
+        };
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let err = validate_threshold_sig_spend_at_height(
+            &[[0x11; 32]],
+            1,
+            &[w],
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            "test",
+            &mut cache,
+            None,
+            None,
+        )
+        .expect_err("sentinel payload");
+
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+    }
+
+    #[test]
+    fn threshold_at_height_wrong_lengths() {
+        // Non-canonical witness item lengths
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let w = WitnessItem {
+            suite_id: SUITE_ID_ML_DSA_87,
+            pubkey: vec![0x01; 10], // wrong length
+            signature: vec![0x02; 10],
+        };
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let err = validate_threshold_sig_spend_at_height(
+            &[[0x11; 32]],
+            1,
+            &[w],
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            "test",
+            &mut cache,
+            None,
+            None,
+        )
+        .expect_err("wrong lengths");
+
+        assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
+    }
+
+    #[test]
+    fn threshold_at_height_not_registered() {
+        // Suite not in registry
+        let mut suites = BTreeMap::new();
+        suites.insert(
+            SUITE_ID_ML_DSA_87,
+            SuiteParams {
+                suite_id: SUITE_ID_ML_DSA_87,
+                pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+                sig_len: ML_DSA_87_SIG_BYTES,
+                verify_cost: 8,
+                openssl_alg: "ML-DSA-87",
+            },
+        );
+        let registry = SuiteRegistry::with_suites(suites);
+
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let w = WitnessItem {
+            suite_id: 0xBB, // not in registry
+            pubkey: vec![0x01; ML_DSA_87_PUBKEY_BYTES as usize],
+            signature: vec![0x02; ML_DSA_87_SIG_BYTES as usize + 1],
+        };
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let err = validate_threshold_sig_spend_at_height(
+            &[[0x11; 32]],
+            1,
+            &[w],
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            "test",
+            &mut cache,
+            None,
+            Some(&registry),
+        )
+        .expect_err("unregistered suite");
+
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    }
+
+    #[test]
+    fn threshold_at_height_sig_verify_error() {
+        // Corrupted signature should fail verification
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let key_id = sha3_256(&keypair.pubkey_bytes());
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let mut w = sign_witness(&keypair, &tx, input_index, input_value, chain_id);
+        w.signature[0] ^= 0xFF; // corrupt
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let err = validate_threshold_sig_spend_at_height(
+            &[key_id],
+            1,
+            &[w],
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            "test",
+            &mut cache,
+            None,
+            None,
+        )
+        .expect_err("bad signature");
+
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    }
+
+    // ======== Key & Sig with Registry Cache Tests (5) ========
+
+    #[test]
+    fn verify_key_sig_registry_cache_key_mismatch() {
+        // sha3(pubkey) != expected_key_id
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let wrong_key_id = [0xFF; 32];
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let w = sign_witness(&keypair, &tx, input_index, input_value, chain_id);
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let registry = SuiteRegistry::default_registry();
+        let err = verify_mldsa_key_and_sig_q(
+            &w,
+            wrong_key_id,
+            input_index,
+            input_value,
+            chain_id,
+            &mut cache,
+            &registry,
+            &mut None,
+            TxError::new(ErrorCode::TxErrSigInvalid, "key mismatch"),
+            TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
+        )
+        .expect_err("key mismatch");
+
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    }
+
+    #[test]
+    fn verify_key_sig_registry_cache_sig_invalid() {
+        // Valid key but bad signature
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let key_id = sha3_256(&keypair.pubkey_bytes());
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let mut w = sign_witness(&keypair, &tx, input_index, input_value, chain_id);
+        w.signature[0] ^= 0xFF; // corrupt signature
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let registry = SuiteRegistry::default_registry();
+        let err = verify_mldsa_key_and_sig_q(
+            &w,
+            key_id,
+            input_index,
+            input_value,
+            chain_id,
+            &mut cache,
+            &registry,
+            &mut None,
+            TxError::new(ErrorCode::TxErrSigInvalid, "key mismatch"),
+            TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
+        )
+        .expect_err("bad sig");
+
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    }
+
+    #[test]
+    fn verify_key_sig_registry_cache_openssl_error() {
+        // Empty pubkey should trigger key binding mismatch (sha3 of empty != key_id)
+        let key_id = [0x11; 32];
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let w = WitnessItem {
+            suite_id: SUITE_ID_ML_DSA_87,
+            pubkey: vec![],
+            signature: vec![SIGHASH_ALL],
+        };
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let registry = SuiteRegistry::default_registry();
+        let err = verify_mldsa_key_and_sig_q(
+            &w,
+            key_id,
+            input_index,
+            input_value,
+            chain_id,
+            &mut cache,
+            &registry,
+            &mut None,
+            TxError::new(ErrorCode::TxErrSigInvalid, "key mismatch"),
+            TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
+        )
+        .expect_err("key binding mismatch on empty pubkey");
+
+        // Empty pubkey SHA3 won't match [0x11; 32], so we get key mismatch error
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    }
+
+    #[test]
+    fn verify_key_sig_registry_cache_bad_sighash() {
+        // Invalid sighash_type byte
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let key_id = sha3_256(&keypair.pubkey_bytes());
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let mut w = sign_witness(&keypair, &tx, input_index, input_value, chain_id);
+        let last_idx = w.signature.len() - 1;
+        w.signature[last_idx] = 0xFF; // invalid sighash_type
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let registry = SuiteRegistry::default_registry();
+        let err = verify_mldsa_key_and_sig_q(
+            &w,
+            key_id,
+            input_index,
+            input_value,
+            chain_id,
+            &mut cache,
+            &registry,
+            &mut None,
+            TxError::new(ErrorCode::TxErrSigInvalid, "key mismatch"),
+            TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
+        )
+        .expect_err("bad sighash");
+
+        assert_eq!(err.code, ErrorCode::TxErrSighashTypeInvalid);
+    }
+
+    #[test]
+    fn verify_key_sig_registry_cache_success() {
+        // Full valid roundtrip: correct key, valid signature
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let key_id = sha3_256(&keypair.pubkey_bytes());
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let w = sign_witness(&keypair, &tx, input_index, input_value, chain_id);
+
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let registry = SuiteRegistry::default_registry();
+        let result = verify_mldsa_key_and_sig_q(
+            &w,
+            key_id,
+            input_index,
+            input_value,
+            chain_id,
+            &mut cache,
+            &registry,
+            &mut None,
+            TxError::new(ErrorCode::TxErrSigInvalid, "key mismatch"),
+            TxError::new(ErrorCode::TxErrSigInvalid, "sig invalid"),
+        );
+
+        assert!(result.is_ok(), "valid key and sig should verify");
     }
 
     #[test]

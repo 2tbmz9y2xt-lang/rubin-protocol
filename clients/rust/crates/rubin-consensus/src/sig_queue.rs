@@ -1419,4 +1419,974 @@ mod tests {
         queue.flush().expect("flush");
         assert!(parse_core_ext_covenant_data(&entry.covenant_data).is_ok());
     }
+
+    // --- Helper: build a valid HTLC claim fixture, returns (entry, path_item, sig_item, queue) ---
+    fn htlc_claim_fixture() -> (
+        UtxoEntry,
+        WitnessItem,
+        WitnessItem,
+        Tx,
+        u32,
+        u64,
+        [u8; 32],
+        SuiteRegistry,
+    ) {
+        let claim_kp = Mldsa87Keypair::generate().expect("claim kp");
+        let refund_kp = Mldsa87Keypair::generate().expect("refund kp");
+        let claim_key_id = sha3_256(&claim_kp.pubkey_bytes());
+        let refund_key_id = sha3_256(&refund_kp.pubkey_bytes());
+        let preimage = b"htlc-fixture-preimage";
+        let mut cov = Vec::with_capacity(MAX_HTLC_COVENANT_DATA as usize);
+        cov.extend_from_slice(&sha3_256(preimage));
+        cov.push(LOCK_MODE_HEIGHT);
+        cov.extend_from_slice(&100u64.to_le_bytes());
+        cov.extend_from_slice(&claim_key_id);
+        cov.extend_from_slice(&refund_key_id);
+        let entry = UtxoEntry {
+            value: 1000,
+            covenant_type: COV_TYPE_HTLC,
+            covenant_data: cov,
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let (tx, input_index, input_value, chain_id) = test_tx_context();
+        let sig_item = sign_witness(&claim_kp, &tx, input_index, input_value, chain_id);
+        let path_item = WitnessItem {
+            suite_id: SUITE_ID_SENTINEL,
+            pubkey: claim_key_id.to_vec(),
+            signature: encode_htlc_claim_payload(preimage),
+        };
+        let registry = SuiteRegistry::default_registry();
+        (
+            entry,
+            path_item,
+            sig_item,
+            tx,
+            input_index,
+            input_value,
+            chain_id,
+            registry,
+        )
+    }
+
+    // HTLC Error Path Tests (11)
+
+    #[test]
+    fn validate_htlc_claim_payload_suite_id_mismatch_q() {
+        // path_item.suite_id must be SENTINEL
+        let (entry, mut path_item, sig_item, tx, ii, iv, cid, reg) = htlc_claim_fixture();
+        path_item.suite_id = SUITE_ID_ML_DSA_87; // wrong: not SENTINEL
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_htlc_spend_q(
+            &entry,
+            &path_item,
+            &sig_item,
+            ii,
+            iv,
+            cid,
+            1,
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject non-SENTINEL selector");
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+    }
+
+    #[test]
+    fn validate_htlc_claim_selector_key_length_invalid_q() {
+        // path_item.pubkey must be exactly 32 bytes
+        let (entry, mut path_item, sig_item, tx, ii, iv, cid, reg) = htlc_claim_fixture();
+        path_item.pubkey = vec![0u8; 16]; // wrong length
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_htlc_spend_q(
+            &entry,
+            &path_item,
+            &sig_item,
+            ii,
+            iv,
+            cid,
+            1,
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject non-32-byte selector key");
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+    }
+
+    #[test]
+    fn validate_htlc_claim_payload_empty_q() {
+        // path_item.signature (payload) cannot be empty
+        let (entry, mut path_item, sig_item, tx, ii, iv, cid, reg) = htlc_claim_fixture();
+        path_item.signature = vec![]; // empty
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_htlc_spend_q(
+            &entry,
+            &path_item,
+            &sig_item,
+            ii,
+            iv,
+            cid,
+            1,
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject empty payload");
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+    }
+
+    #[test]
+    fn validate_htlc_unknown_path_byte_q() {
+        // First byte of claim payload must be 0x00 (claim) or 0x01 (refund)
+        let (entry, mut path_item, sig_item, tx, ii, iv, cid, reg) = htlc_claim_fixture();
+        path_item.signature[0] = 0xFF; // invalid path selector
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_htlc_spend_q(
+            &entry,
+            &path_item,
+            &sig_item,
+            ii,
+            iv,
+            cid,
+            1,
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject unknown path byte");
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+    }
+
+    #[test]
+    fn validate_htlc_preimage_too_short_q() {
+        // Preimage shorter than MIN_HTLC_PREIMAGE_BYTES (16)
+        let claim_kp = Mldsa87Keypair::generate().expect("claim kp");
+        let refund_kp = Mldsa87Keypair::generate().expect("refund kp");
+        let claim_key_id = sha3_256(&claim_kp.pubkey_bytes());
+        let refund_key_id = sha3_256(&refund_kp.pubkey_bytes());
+        let short_preimage = b"tiny"; // 4 bytes < 16
+        let mut cov = Vec::with_capacity(MAX_HTLC_COVENANT_DATA as usize);
+        cov.extend_from_slice(&sha3_256(short_preimage.as_slice()));
+        cov.push(LOCK_MODE_HEIGHT);
+        cov.extend_from_slice(&100u64.to_le_bytes());
+        cov.extend_from_slice(&claim_key_id);
+        cov.extend_from_slice(&refund_key_id);
+        let entry = UtxoEntry {
+            value: 1000,
+            covenant_type: COV_TYPE_HTLC,
+            covenant_data: cov,
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let (tx, ii, iv, cid) = test_tx_context();
+        let sig_item = sign_witness(&claim_kp, &tx, ii, iv, cid);
+        let path_item = WitnessItem {
+            suite_id: SUITE_ID_SENTINEL,
+            pubkey: claim_key_id.to_vec(),
+            signature: encode_htlc_claim_payload(short_preimage),
+        };
+        let reg = SuiteRegistry::default_registry();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_htlc_spend_q(
+            &entry,
+            &path_item,
+            &sig_item,
+            ii,
+            iv,
+            cid,
+            1,
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject short preimage");
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+    }
+
+    #[test]
+    fn validate_htlc_preimage_hash_mismatch_q() {
+        // Valid-length preimage that doesn't match the stored hash
+        let (entry, mut path_item, sig_item, tx, ii, iv, cid, reg) = htlc_claim_fixture();
+        // Replace preimage with different valid-length data
+        let bad_preimage = b"wrong-preimage-1234!";
+        path_item.signature = encode_htlc_claim_payload(bad_preimage);
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_htlc_spend_q(
+            &entry,
+            &path_item,
+            &sig_item,
+            ii,
+            iv,
+            cid,
+            1,
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject wrong preimage");
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    }
+
+    #[test]
+    fn validate_htlc_claim_key_id_mismatch_q() {
+        // Selector key_id doesn't match claim_key_id in covenant
+        let (entry, mut path_item, sig_item, tx, ii, iv, cid, reg) = htlc_claim_fixture();
+        path_item.pubkey = vec![0xAA; 32]; // wrong key_id
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_htlc_spend_q(
+            &entry,
+            &path_item,
+            &sig_item,
+            ii,
+            iv,
+            cid,
+            1,
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject wrong claim key_id");
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    }
+
+    #[test]
+    fn validate_htlc_refund_timelock_not_met_q() {
+        // Refund path with block_height below lock_value
+        let claim_kp = Mldsa87Keypair::generate().expect("claim kp");
+        let refund_kp = Mldsa87Keypair::generate().expect("refund kp");
+        let claim_key_id = sha3_256(&claim_kp.pubkey_bytes());
+        let refund_key_id = sha3_256(&refund_kp.pubkey_bytes());
+        let mut cov = Vec::with_capacity(MAX_HTLC_COVENANT_DATA as usize);
+        cov.extend_from_slice(&sha3_256(b"refund-preimage-test"));
+        cov.push(LOCK_MODE_HEIGHT);
+        cov.extend_from_slice(&500u64.to_le_bytes()); // lock at height 500
+        cov.extend_from_slice(&claim_key_id);
+        cov.extend_from_slice(&refund_key_id);
+        let entry = UtxoEntry {
+            value: 1000,
+            covenant_type: COV_TYPE_HTLC,
+            covenant_data: cov,
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let (tx, ii, iv, cid) = test_tx_context();
+        let sig_item = sign_witness(&refund_kp, &tx, ii, iv, cid);
+        // Refund path: path_id=0x01
+        let path_item = WitnessItem {
+            suite_id: SUITE_ID_SENTINEL,
+            pubkey: refund_key_id.to_vec(),
+            signature: vec![0x01], // refund path
+        };
+        let reg = SuiteRegistry::default_registry();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_htlc_spend_q(
+            &entry,
+            &path_item,
+            &sig_item,
+            ii,
+            iv,
+            cid,
+            10, // block_height=10, below lock_value=500
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject: timelock not met");
+        assert_eq!(err.code, ErrorCode::TxErrTimelockNotMet);
+    }
+
+    #[test]
+    fn validate_htlc_refund_key_id_mismatch_q() {
+        // Refund path with wrong selector key_id
+        let claim_kp = Mldsa87Keypair::generate().expect("claim kp");
+        let refund_kp = Mldsa87Keypair::generate().expect("refund kp");
+        let claim_key_id = sha3_256(&claim_kp.pubkey_bytes());
+        let refund_key_id = sha3_256(&refund_kp.pubkey_bytes());
+        let mut cov = Vec::with_capacity(MAX_HTLC_COVENANT_DATA as usize);
+        cov.extend_from_slice(&sha3_256(b"refund-key-mismatch"));
+        cov.push(LOCK_MODE_HEIGHT);
+        cov.extend_from_slice(&1u64.to_le_bytes());
+        cov.extend_from_slice(&claim_key_id);
+        cov.extend_from_slice(&refund_key_id);
+        let entry = UtxoEntry {
+            value: 1000,
+            covenant_type: COV_TYPE_HTLC,
+            covenant_data: cov,
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let (tx, ii, iv, cid) = test_tx_context();
+        let sig_item = sign_witness(&refund_kp, &tx, ii, iv, cid);
+        let path_item = WitnessItem {
+            suite_id: SUITE_ID_SENTINEL,
+            pubkey: vec![0xBB; 32], // wrong refund key_id
+            signature: vec![0x01],
+        };
+        let reg = SuiteRegistry::default_registry();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_htlc_spend_q(
+            &entry,
+            &path_item,
+            &sig_item,
+            ii,
+            iv,
+            cid,
+            100,
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject wrong refund key_id");
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    }
+
+    #[test]
+    fn validate_htlc_claim_suite_not_native_q() {
+        // sig_item with a suite_id not in native spend set
+        let (entry, path_item, mut sig_item, tx, ii, iv, cid, reg) = htlc_claim_fixture();
+        sig_item.suite_id = 0xFE; // unknown suite
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_htlc_spend_q(
+            &entry,
+            &path_item,
+            &sig_item,
+            ii,
+            iv,
+            cid,
+            1,
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject non-native suite");
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    }
+
+    #[test]
+    fn validate_htlc_claim_sig_non_canonical_q() {
+        // sig_item with correct suite but wrong pubkey/sig lengths
+        let (entry, path_item, mut sig_item, tx, ii, iv, cid, reg) = htlc_claim_fixture();
+        sig_item.pubkey = vec![0u8; 10]; // wrong pubkey length (not 2592)
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_htlc_spend_q(
+            &entry,
+            &path_item,
+            &sig_item,
+            ii,
+            iv,
+            cid,
+            1,
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject non-canonical lengths");
+        assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
+    }
+
+    // Threshold Error Path Tests (5)
+
+    #[test]
+    fn validate_threshold_slot_count_mismatch_q() {
+        // ws.len() != keys.len()
+        let kp1 = Mldsa87Keypair::generate().expect("kp1");
+        let key_id_1 = sha3_256(&kp1.pubkey_bytes());
+        let (tx, ii, iv, cid) = test_tx_context();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let witness = sign_witness(&kp1, &tx, ii, iv, cid);
+        let reg = SuiteRegistry::default_registry();
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        // 2 keys but only 1 witness slot
+        let err = validate_threshold_sig_spend_q(
+            &[key_id_1, [0xAA; 32]],
+            1,
+            &[witness],
+            ii,
+            iv,
+            cid,
+            0,
+            "TEST",
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject slot count mismatch");
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+    }
+
+    #[test]
+    fn validate_threshold_sentinel_with_data_q() {
+        // SENTINEL witness slot with non-empty pubkey
+        let kp1 = Mldsa87Keypair::generate().expect("kp1");
+        let key_id_1 = sha3_256(&kp1.pubkey_bytes());
+        let (tx, ii, iv, cid) = test_tx_context();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let reg = SuiteRegistry::default_registry();
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let bad_sentinel = WitnessItem {
+            suite_id: SUITE_ID_SENTINEL,
+            pubkey: vec![0x42; 32], // SENTINEL must have empty pubkey
+            signature: Vec::new(),
+        };
+        let err = validate_threshold_sig_spend_q(
+            &[key_id_1],
+            1,
+            &[bad_sentinel],
+            ii,
+            iv,
+            cid,
+            0,
+            "TEST",
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject SENTINEL with pubkey data");
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+    }
+
+    #[test]
+    fn validate_threshold_invalid_suite_q() {
+        // Non-SENTINEL witness with unknown suite_id
+        let kp1 = Mldsa87Keypair::generate().expect("kp1");
+        let key_id_1 = sha3_256(&kp1.pubkey_bytes());
+        let (tx, ii, iv, cid) = test_tx_context();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let mut witness = sign_witness(&kp1, &tx, ii, iv, cid);
+        witness.suite_id = 0xFE; // unknown suite
+        let reg = SuiteRegistry::default_registry();
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_threshold_sig_spend_q(
+            &[key_id_1],
+            1,
+            &[witness],
+            ii,
+            iv,
+            cid,
+            0,
+            "TEST",
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject unknown suite");
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    }
+
+    #[test]
+    fn validate_threshold_non_canonical_sig_q() {
+        // Witness with correct suite but wrong pubkey length
+        let kp1 = Mldsa87Keypair::generate().expect("kp1");
+        let key_id_1 = sha3_256(&kp1.pubkey_bytes());
+        let (tx, ii, iv, cid) = test_tx_context();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let mut witness = sign_witness(&kp1, &tx, ii, iv, cid);
+        witness.pubkey = vec![0u8; 10]; // non-canonical length
+        let reg = SuiteRegistry::default_registry();
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_threshold_sig_spend_q(
+            &[key_id_1],
+            1,
+            &[witness],
+            ii,
+            iv,
+            cid,
+            0,
+            "TEST",
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject non-canonical lengths");
+        assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
+    }
+
+    #[test]
+    fn validate_threshold_multiple_signers_all_required_q() {
+        // threshold=2 but only 1 valid signer → must fail
+        let kp1 = Mldsa87Keypair::generate().expect("kp1");
+        let kp2 = Mldsa87Keypair::generate().expect("kp2");
+        let key_id_1 = sha3_256(&kp1.pubkey_bytes());
+        let key_id_2 = sha3_256(&kp2.pubkey_bytes());
+        let (tx, ii, iv, cid) = test_tx_context();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let witness1 = sign_witness(&kp1, &tx, ii, iv, cid);
+        let sentinel = WitnessItem {
+            suite_id: SUITE_ID_SENTINEL,
+            pubkey: Vec::new(),
+            signature: Vec::new(),
+        };
+        let reg = SuiteRegistry::default_registry();
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_threshold_sig_spend_q(
+            &[key_id_1, key_id_2],
+            2,                     // threshold=2
+            &[witness1, sentinel], // only 1 signer
+            ii,
+            iv,
+            cid,
+            0,
+            "TEST",
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject: insufficient signers");
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+        assert!(queue.is_empty(), "threshold failure must roll back queue");
+    }
+
+    // P2PK Error Path Tests (3)
+
+    #[test]
+    fn validate_p2pk_suite_not_in_native_q() {
+        let kp = Mldsa87Keypair::generate().expect("kp");
+        let pubkey = kp.pubkey_bytes();
+        let entry = UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: p2pk_covenant_data_for_pubkey(&pubkey),
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let (tx, ii, iv, cid) = test_tx_context();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let mut witness = sign_witness(&kp, &tx, ii, iv, cid);
+        witness.suite_id = 0xFE; // unknown suite
+        let reg = SuiteRegistry::default_registry();
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_p2pk_spend_q(
+            &entry,
+            &witness,
+            ii,
+            iv,
+            cid,
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject non-native suite");
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    }
+
+    #[test]
+    fn validate_p2pk_non_canonical_sig_q() {
+        let kp = Mldsa87Keypair::generate().expect("kp");
+        let pubkey = kp.pubkey_bytes();
+        let entry = UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: p2pk_covenant_data_for_pubkey(&pubkey),
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let (tx, ii, iv, cid) = test_tx_context();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let mut witness = sign_witness(&kp, &tx, ii, iv, cid);
+        witness.pubkey = vec![0u8; 10]; // non-canonical pubkey length
+        let reg = SuiteRegistry::default_registry();
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_p2pk_spend_q(
+            &entry,
+            &witness,
+            ii,
+            iv,
+            cid,
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject non-canonical");
+        assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
+    }
+
+    #[test]
+    fn validate_p2pk_covenant_data_invalid_q() {
+        let kp = Mldsa87Keypair::generate().expect("kp");
+        let entry = UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: vec![0u8; 5], // wrong covenant data length
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let (tx, ii, iv, cid) = test_tx_context();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let witness = sign_witness(&kp, &tx, ii, iv, cid);
+        let reg = SuiteRegistry::default_registry();
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_p2pk_spend_q(
+            &entry,
+            &witness,
+            ii,
+            iv,
+            cid,
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject invalid covenant data");
+        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    }
+
+    // Stealth Error Path Tests (4)
+
+    #[test]
+    fn validate_stealth_invalid_suite_q() {
+        let kp = Mldsa87Keypair::generate().expect("kp");
+        let one_time_key_id = sha3_256(&kp.pubkey_bytes());
+        let entry = make_stealth_entry(one_time_key_id);
+        let (tx, ii, iv, cid) = test_tx_context();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let mut witness = sign_witness(&kp, &tx, ii, iv, cid);
+        witness.suite_id = 0xFE; // unknown suite
+        let reg = SuiteRegistry::default_registry();
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_stealth_spend_q(
+            &entry,
+            &witness,
+            ii,
+            iv,
+            cid,
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject non-native suite");
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    }
+
+    #[test]
+    fn validate_stealth_bad_covenant_data_q() {
+        let kp = Mldsa87Keypair::generate().expect("kp");
+        let entry = UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_STEALTH,
+            covenant_data: vec![0u8; 10], // wrong length (not 1600)
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let (tx, ii, iv, cid) = test_tx_context();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let witness = sign_witness(&kp, &tx, ii, iv, cid);
+        let reg = SuiteRegistry::default_registry();
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_stealth_spend_q(
+            &entry,
+            &witness,
+            ii,
+            iv,
+            cid,
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject bad covenant data");
+        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    }
+
+    #[test]
+    fn validate_stealth_non_canonical_sig_q() {
+        let kp = Mldsa87Keypair::generate().expect("kp");
+        let one_time_key_id = sha3_256(&kp.pubkey_bytes());
+        let entry = make_stealth_entry(one_time_key_id);
+        let (tx, ii, iv, cid) = test_tx_context();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let mut witness = sign_witness(&kp, &tx, ii, iv, cid);
+        witness.pubkey = vec![0u8; 10]; // non-canonical length
+        let reg = SuiteRegistry::default_registry();
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_stealth_spend_q(
+            &entry,
+            &witness,
+            ii,
+            iv,
+            cid,
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject non-canonical");
+        assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
+    }
+
+    #[test]
+    fn validate_stealth_key_binding_mismatch_q() {
+        // Valid witness but pubkey hash doesn't match one_time_key_id in covenant
+        let kp = Mldsa87Keypair::generate().expect("kp");
+        let wrong_key_id = [0xCC; 32]; // doesn't match sha3_256(kp.pubkey_bytes())
+        let entry = make_stealth_entry(wrong_key_id);
+        let (tx, ii, iv, cid) = test_tx_context();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let witness = sign_witness(&kp, &tx, ii, iv, cid);
+        let reg = SuiteRegistry::default_registry();
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_stealth_spend_q(
+            &entry,
+            &witness,
+            ii,
+            iv,
+            cid,
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject key binding mismatch");
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    }
+
+    // Queue Concurrency Tests (2)
+
+    #[test]
+    fn parallel_stress_valid_sigs_q() {
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let mut queue = SigCheckQueue::new(4);
+        for i in 0..16u8 {
+            let mut digest = [0u8; 32];
+            digest[0] = i;
+            let sig = keypair.sign_digest32(digest).expect("sign");
+            queue
+                .push(
+                    SUITE_ID_ML_DSA_87,
+                    &keypair.pubkey_bytes(),
+                    &sig,
+                    digest,
+                    TxError::new(ErrorCode::TxErrSigInvalid, "parallel"),
+                )
+                .expect("push");
+        }
+        queue.flush().expect("parallel flush must succeed");
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn concurrent_flush_safety_q() {
+        // Flush after mixed valid/invalid ensures deterministic error from first failure
+        let kp_good = Mldsa87Keypair::generate().expect("good kp");
+        let kp_bad = Mldsa87Keypair::generate().expect("bad kp");
+        let mut queue = SigCheckQueue::new(2);
+        let digest = [0x99; 32];
+        let good_sig = kp_good.sign_digest32(digest).expect("sign");
+        let bad_sig = kp_bad.sign_digest32(digest).expect("sign");
+        // First: valid
+        queue
+            .push(
+                SUITE_ID_ML_DSA_87,
+                &kp_good.pubkey_bytes(),
+                &good_sig,
+                digest,
+                TxError::new(ErrorCode::TxErrSigInvalid, "good"),
+            )
+            .expect("push good");
+        // Second: invalid (signed by kp_bad, verified against kp_good's pubkey)
+        queue
+            .push(
+                SUITE_ID_ML_DSA_87,
+                &kp_good.pubkey_bytes(),
+                &bad_sig,
+                digest,
+                TxError::new(ErrorCode::TxErrSigInvalid, "bad-cross"),
+            )
+            .expect("push bad");
+        let err = queue.flush().expect_err("mixed flush must fail");
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    }
+
+    // Extended error path tests (4)
+
+    #[test]
+    fn validate_htlc_extended_payload_validation_q() {
+        // Claim payload declares preimage length but actual data doesn't match
+        let (entry, mut path_item, sig_item, tx, ii, iv, cid, reg) = htlc_claim_fixture();
+        // Build payload with declared length=32 but only 3 bytes of payload data total
+        let mut bad_payload = vec![0x00]; // claim path
+        bad_payload.extend_from_slice(&32u16.to_le_bytes()); // declares 32 bytes
+                                                             // but we only have the 3-byte header, no actual preimage data → length mismatch
+        path_item.signature = bad_payload;
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_htlc_spend_q(
+            &entry,
+            &path_item,
+            &sig_item,
+            ii,
+            iv,
+            cid,
+            1,
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject payload length mismatch");
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+    }
+
+    #[test]
+    fn validate_htlc_refund_extended_safety_q() {
+        // Refund path with extra bytes in payload (should be exactly 1 byte)
+        let claim_kp = Mldsa87Keypair::generate().expect("claim kp");
+        let refund_kp = Mldsa87Keypair::generate().expect("refund kp");
+        let claim_key_id = sha3_256(&claim_kp.pubkey_bytes());
+        let refund_key_id = sha3_256(&refund_kp.pubkey_bytes());
+        let mut cov = Vec::with_capacity(MAX_HTLC_COVENANT_DATA as usize);
+        cov.extend_from_slice(&sha3_256(b"refund-extended-test"));
+        cov.push(LOCK_MODE_HEIGHT);
+        cov.extend_from_slice(&1u64.to_le_bytes());
+        cov.extend_from_slice(&claim_key_id);
+        cov.extend_from_slice(&refund_key_id);
+        let entry = UtxoEntry {
+            value: 1000,
+            covenant_type: COV_TYPE_HTLC,
+            covenant_data: cov,
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let (tx, ii, iv, cid) = test_tx_context();
+        let sig_item = sign_witness(&refund_kp, &tx, ii, iv, cid);
+        let path_item = WitnessItem {
+            suite_id: SUITE_ID_SENTINEL,
+            pubkey: refund_key_id.to_vec(),
+            signature: vec![0x01, 0x00], // 2 bytes instead of 1
+        };
+        let reg = SuiteRegistry::default_registry();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_htlc_spend_q(
+            &entry,
+            &path_item,
+            &sig_item,
+            ii,
+            iv,
+            cid,
+            100,
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject refund payload with extra bytes");
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+    }
+
+    #[test]
+    fn validate_p2pk_extended_validation_q() {
+        // P2PK covenant_data has correct length but wrong suite_id byte
+        let kp = Mldsa87Keypair::generate().expect("kp");
+        let pubkey = kp.pubkey_bytes();
+        let mut cov = p2pk_covenant_data_for_pubkey(&pubkey);
+        cov[0] = 0xFE; // wrong suite_id prefix
+        let entry = UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov,
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let (tx, ii, iv, cid) = test_tx_context();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let witness = sign_witness(&kp, &tx, ii, iv, cid);
+        let reg = SuiteRegistry::default_registry();
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        let err = validate_p2pk_spend_q(
+            &entry,
+            &witness,
+            ii,
+            iv,
+            cid,
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect_err("must reject covenant suite mismatch");
+        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    }
+
+    #[test]
+    fn validate_stealth_extended_safety_q() {
+        // Stealth covenant data with exact right length but
+        // embedded ciphertext is zeroed — key binding still must match
+        let kp = Mldsa87Keypair::generate().expect("kp");
+        let one_time_key_id = sha3_256(&kp.pubkey_bytes());
+        let entry = make_stealth_entry(one_time_key_id);
+        let (tx, ii, iv, cid) = test_tx_context();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let witness = sign_witness(&kp, &tx, ii, iv, cid);
+        let reg = SuiteRegistry::default_registry();
+        let mut queue = SigCheckQueue::new(1).with_registry(&reg);
+        // This should SUCCEED (key binding matches)
+        validate_stealth_spend_q(
+            &entry,
+            &witness,
+            ii,
+            iv,
+            cid,
+            0,
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&reg),
+        )
+        .expect("stealth with zeroed ciphertext must pass validation");
+        assert_eq!(queue.len(), 1);
+        queue.flush().expect("flush");
+    }
 }
