@@ -400,6 +400,13 @@
       "reason": "FALSE POSITIVE: owner_lock_id is computed as sha3_256(output_descriptor_bytes(COV_TYPE_P2PK, &cov_data)) at line 631, exactly matching the P2PK input's lock_id. Production code validates this in utxo_basic.rs:616 has_owner_authorized_input. Test passes because owner_lock_id IS correctly derived from the input.",
       "acknowledged_by": "architect",
       "date": "2026-03-29"
+    },
+    {
+      "title_pattern": "Missing Vault Authorization Validation",
+      "file_pattern": "tests/connect_block_inmem.rs",
+      "reason": "FALSE POSITIVE: test connect_block_non_coinbase_vault_output_accepted explicitly computes owner_lock_id = sha3_256(output_descriptor_bytes(COV_TYPE_P2PK, &cov_data)) matching the P2PK input. Production code enforces via has_owner_authorized_input (utxo_basic.rs:781-791). The test PASSES precisely because authorization is correct.",
+      "acknowledged_by": "architect",
+      "date": "2026-03-29"
     }
   ]
 }
