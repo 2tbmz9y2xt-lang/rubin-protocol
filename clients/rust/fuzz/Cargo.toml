@@ -166,6 +166,18 @@ test = false
 doc = false
 
 [[bin]]
+name = "connect_block_parallel_determinism"
+path = "fuzz_targets/connect_block_parallel_determinism.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "connect_block_parallel_worker_parity"
+path = "fuzz_targets/connect_block_parallel_worker_parity.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "da_chunk_hash_verify"
 path = "fuzz_targets/da_chunk_hash_verify.rs"
 test = false

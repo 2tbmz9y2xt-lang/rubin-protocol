@@ -1,4 +1,5 @@
 use super::*;
+use crate::CoreExtProfiles;
 
 fn clone_state(
     utxos: &HashMap<Outpoint, UtxoEntry>,
@@ -8,6 +9,51 @@ fn clone_state(
         utxos: utxos.clone(),
         already_generated,
     }
+}
+
+fn signed_p2pk_apply_case() -> Option<(crate::tx::Tx, HashMap<Outpoint, UtxoEntry>, [u8; 32])> {
+    let kp = test_mldsa87_keypair()?;
+    let cov_data = p2pk_covenant_data_for_pubkey(&kp.pubkey);
+    let mut prev_txid = [0u8; 32];
+    prev_txid[0] = 0x42;
+    let utxo_set = HashMap::from([(
+        Outpoint {
+            txid: prev_txid,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 500,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data.clone(),
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    )]);
+    let mut tx = crate::tx::Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![crate::tx::TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: vec![],
+            sequence: 0,
+        }],
+        outputs: vec![crate::tx::TxOutput {
+            value: 490,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data,
+        }],
+        locktime: 0,
+        witness: vec![],
+        da_payload: vec![],
+        da_commit_core: None,
+        da_chunk_core: None,
+    };
+    tx.witness = vec![sign_input_witness(&tx, 0, 500, ZERO_CHAIN_ID, &kp)];
+    let mut txid = [0u8; 32];
+    txid[0] = 0x43;
+    Some((tx, utxo_set, txid))
 }
 
 #[test]
@@ -356,4 +402,272 @@ fn connect_block_parallel_sig_verify_coinbase_only_reports_empty_sig_queue() {
     assert_eq!(summary.worker_panics, 0);
     assert_eq!(summary.post_state_digest, seq_summary.post_state_digest);
     assert_eq!(par_state.utxos, seq_state.utxos);
+}
+
+#[test]
+fn connect_block_parallel_sig_verify_zero_workers_matches_sequential() {
+    let height = 1u64;
+    let mut prev = [0u8; 32];
+    prev[0] = 0xab;
+    let target = [0xffu8; 32];
+
+    let kp = kp_or_skip!();
+    let cov_data = p2pk_covenant_data_for_pubkey(&kp.pubkey);
+    let prev_out = Outpoint {
+        txid: prev,
+        vout: 0,
+    };
+    let mut spend_tx = crate::tx::Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![crate::tx::TxInput {
+            prev_txid: prev,
+            prev_vout: 0,
+            script_sig: vec![],
+            sequence: 0,
+        }],
+        outputs: vec![crate::tx::TxOutput {
+            value: 90,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data.clone(),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![],
+        da_payload: vec![],
+    };
+    let witness = sign_input_witness(&spend_tx, 0, 100, ZERO_CHAIN_ID, &kp);
+    spend_tx.witness = vec![witness.clone()];
+    let spend_bytes = tx_with_one_input_one_output_with_witness(
+        prev,
+        0,
+        90,
+        COV_TYPE_P2PK,
+        &cov_data,
+        witness.suite_id,
+        &witness.pubkey,
+        &witness.signature,
+    );
+    let (_tx, spend_txid, _wtxid, _n) = parse_tx(&spend_bytes).expect("parse spend tx");
+
+    let start_utxos = HashMap::from([(
+        prev_out,
+        UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data,
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    )]);
+    let subsidy = crate::subsidy::block_subsidy(height, 0);
+    let coinbase = coinbase_with_witness_commitment_and_p2pk_value(
+        height as u32,
+        subsidy + 10,
+        std::slice::from_ref(&spend_bytes),
+    );
+    let (_cb, coinbase_txid, _cbw, _cbn) = parse_tx(&coinbase).expect("parse coinbase");
+    let root = merkle_root_txids(&[coinbase_txid, spend_txid]).expect("merkle root");
+    let block = build_block_bytes(prev, root, target, 1, &[coinbase, spend_bytes]);
+
+    let mut seq_state = clone_state(&start_utxos, 0);
+    let seq_summary = crate::connect_block_basic_in_memory_at_height(
+        &block,
+        Some(prev),
+        Some(target),
+        height,
+        Some(&[0]),
+        &mut seq_state,
+        ZERO_CHAIN_ID,
+    )
+    .expect("sequential connect");
+    let mut par_state = clone_state(&start_utxos, 0);
+    let par_summary = crate::connect_block_parallel_sig_verify(
+        &block,
+        Some(prev),
+        Some(target),
+        height,
+        Some(&[0]),
+        &mut par_state,
+        ZERO_CHAIN_ID,
+        0,
+    )
+    .expect("parallel connect with zero workers");
+
+    assert_eq!(seq_summary.sum_fees, par_summary.sum_fees);
+    assert_eq!(seq_summary.post_state_digest, par_summary.post_state_digest);
+    assert_eq!(seq_state.utxos, par_state.utxos);
+}
+
+#[test]
+fn connect_block_parallel_sig_verify_post_state_digest_matches_sequential() {
+    let height = 1u64;
+    let mut prev = [0u8; 32];
+    prev[0] = 0xac;
+    let target = [0xffu8; 32];
+
+    let kp = kp_or_skip!();
+    let prev_txid = [0x10u8; 32];
+    let cov_data = p2pk_covenant_data_for_pubkey(&kp.pubkey);
+    let start_utxos = HashMap::from([(
+        Outpoint {
+            txid: prev_txid,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 1_000,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data.clone(),
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    )]);
+
+    let mut spend_tx = crate::tx::Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![crate::tx::TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: vec![],
+            sequence: 0,
+        }],
+        outputs: vec![crate::tx::TxOutput {
+            value: 990,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data,
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![],
+        da_payload: vec![],
+    };
+    spend_tx.witness = vec![sign_input_witness(&spend_tx, 0, 1_000, ZERO_CHAIN_ID, &kp)];
+    let spend_bytes = crate::tx_helpers::marshal_tx(&spend_tx).expect("marshal spend tx");
+    let (_tx, spend_txid, _wtxid, _n) = parse_tx(&spend_bytes).expect("parse spend tx");
+
+    let subsidy = crate::subsidy::block_subsidy(height, 0);
+    let coinbase = coinbase_with_witness_commitment_and_p2pk_value(
+        height as u32,
+        subsidy + 10,
+        std::slice::from_ref(&spend_bytes),
+    );
+    let (_cb, coinbase_txid, _cbw, _cbn) = parse_tx(&coinbase).expect("parse coinbase");
+    let root = merkle_root_txids(&[coinbase_txid, spend_txid]).expect("merkle root");
+    let block = build_block_bytes(prev, root, target, 1, &[coinbase, spend_bytes]);
+
+    let mut seq_state = clone_state(&start_utxos, 0);
+    let seq_summary = crate::connect_block_basic_in_memory_at_height(
+        &block,
+        Some(prev),
+        Some(target),
+        height,
+        Some(&[0]),
+        &mut seq_state,
+        ZERO_CHAIN_ID,
+    )
+    .expect("sequential connect");
+    let mut par_state = clone_state(&start_utxos, 0);
+    let par_summary = crate::connect_block_parallel_sig_verify(
+        &block,
+        Some(prev),
+        Some(target),
+        height,
+        Some(&[0]),
+        &mut par_state,
+        ZERO_CHAIN_ID,
+        2,
+    )
+    .expect("parallel connect");
+
+    assert_eq!(seq_summary.post_state_digest, par_summary.post_state_digest);
+    assert_eq!(seq_state.utxos, par_state.utxos);
+}
+
+#[test]
+fn apply_non_coinbase_tx_basic_update_deferred_sigchecks_matches_sequential() {
+    let Some((tx, utxo_set, txid)) = signed_p2pk_apply_case() else {
+        return;
+    };
+
+    let sequential =
+        crate::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+            &tx,
+            txid,
+            &utxo_set,
+            1,
+            0,
+            0,
+            ZERO_CHAIN_ID,
+            &CoreExtProfiles::empty(),
+            None,
+            None,
+        )
+        .expect("sequential apply");
+
+    let deferred =
+        crate::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks(
+            &tx,
+            txid,
+            &utxo_set,
+            1,
+            0,
+            0,
+            ZERO_CHAIN_ID,
+            &CoreExtProfiles::empty(),
+            None,
+            None,
+        )
+        .expect("deferred apply");
+
+    assert_eq!(deferred, sequential);
+}
+
+#[test]
+fn apply_non_coinbase_tx_basic_update_deferred_sigchecks_missing_utxo_fails_before_flush() {
+    let kp = kp_or_skip!();
+    let cov_data = p2pk_covenant_data_for_pubkey(&kp.pubkey);
+    let mut tx = crate::tx::Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![crate::tx::TxInput {
+            prev_txid: [0x01; 32],
+            prev_vout: 0,
+            script_sig: vec![],
+            sequence: 0,
+        }],
+        outputs: vec![crate::tx::TxOutput {
+            value: 1,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data,
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![],
+        da_payload: vec![],
+    };
+    tx.witness = vec![sign_input_witness(&tx, 0, 100, ZERO_CHAIN_ID, &kp)];
+
+    let err =
+        crate::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks(
+            &tx,
+            [0u8; 32],
+            &HashMap::new(),
+            1,
+            0,
+            0,
+            ZERO_CHAIN_ID,
+            &CoreExtProfiles::empty(),
+            None,
+            None,
+        )
+        .expect_err("missing utxo must fail before flush");
+
+    assert_eq!(err.code, ErrorCode::TxErrMissingUtxo);
 }
