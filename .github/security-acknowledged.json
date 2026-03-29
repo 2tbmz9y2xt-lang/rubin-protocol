@@ -375,7 +375,7 @@
     },
     {
       "title_pattern": "invalid coinbase at height 0",
-      "file_pattern": "connect_block_inmem.rs",
+      "file_pattern": "tests/connect_block_inmem.rs",
       "reason": "FALSE POSITIVE: validate_coinbase_value_bound (coinbase.rs:61-63) intentionally skips value check at height 0 — genesis block has no subsidy. Go parity: TestConnectBlockBasicInMemoryAtHeight_Height0_DoesNotAdvanceAlreadyGenerated passes coinbase value=1 at height 0. This is protocol design, not a bug.",
       "acknowledged_by": "architect",
       "date": "2026-03-29"
