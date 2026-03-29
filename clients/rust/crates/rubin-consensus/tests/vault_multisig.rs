@@ -483,3 +483,67 @@ fn multisig_parse_max_keys() {
     assert_eq!(m.key_count, 12);
     assert_eq!(m.threshold, 12);
 }
+
+// =============================================================
+// DeepSeek R2 findings — coverage gaps
+// =============================================================
+
+#[test]
+fn vault_parse_max_whitelist_count_1024() {
+    let owner = [0u8; 32];
+    let keys = sorted_keys(1);
+    // Build 1024 sorted unique whitelist entries
+    let wl: Vec<[u8; 32]> = (0..1024u16)
+        .map(|i| {
+            let mut h = [0u8; 32];
+            // Encode i as big-endian in first 2 bytes for lexicographic sort
+            h[0] = (i >> 8) as u8;
+            h[1] = (i & 0xff) as u8;
+            // Ensure > owner ([0;32]) — first entry has h[0]=0,h[1]=0 which == owner
+            // Shift all by +1 in last byte to avoid collision with owner
+            h[31] = 1;
+            h
+        })
+        .collect();
+    let data = build_vault_data(owner, 1, &keys, &wl);
+    let v = parse_vault_covenant_data(&data).expect("max whitelist valid");
+    assert_eq!(v.whitelist_count, 1024);
+}
+
+#[test]
+fn vault_whitelist_count_le_byte_order() {
+    let owner = [0u8; 32];
+    let keys = sorted_keys(1);
+    let wl = [[0xbb; 32]]; // single entry
+    let data = build_vault_data(owner, 1, &keys, &wl);
+    // whitelist_count at offset 32(owner) + 1(threshold) + 1(key_count) + 32(key) = 66
+    let wl_offset = 32 + 1 + 1 + 32;
+    assert_eq!(data[wl_offset], 1); // LE: low byte = 1
+    assert_eq!(data[wl_offset + 1], 0); // LE: high byte = 0
+}
+
+#[test]
+fn witness_slots_vault_max_keys() {
+    let mut data = vec![0u8; 34];
+    data[33] = 12; // key_count = MAX_VAULT_KEYS
+    assert_eq!(witness_slots(0x0101, &data).unwrap(), 12); // COV_TYPE_VAULT
+}
+
+#[test]
+fn witness_slots_multisig_max_keys() {
+    let mut data = vec![0u8; 2];
+    data[1] = 12; // key_count = MAX_MULTISIG_KEYS
+    assert_eq!(witness_slots(0x0104, &data).unwrap(), 12); // COV_TYPE_MULTISIG
+}
+
+#[test]
+fn output_descriptor_bytes_large_data_3byte_compact_size() {
+    let cov_data = vec![0x42; 300]; // 300 >= 253 → 3-byte compact size
+    let desc = output_descriptor_bytes(0x0101, &cov_data); // COV_TYPE_VAULT
+                                                           // type(2) + compactsize(3: 0xfd + u16 LE) + data(300) = 305
+    assert_eq!(desc.len(), 305);
+    assert_eq!(desc[0..2], 0x0101u16.to_le_bytes());
+    assert_eq!(desc[2], 0xfd); // compact size marker for 253..65535
+    assert_eq!(desc[3..5], 300u16.to_le_bytes()); // 300 as u16 LE
+    assert_eq!(&desc[5..], &cov_data[..]);
+}
