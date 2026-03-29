@@ -1,6 +1,7 @@
 use super::*;
 
 use crate::connect_block_inmem::InMemoryChainState;
+use crate::hash::sha3_256;
 
 // ───────────────────────────────────────────────────────────────────
 // Helpers
@@ -543,4 +544,189 @@ fn connect_block_coinbase_vault_reject_does_not_mutate_applied_spends() {
         state.already_generated, 0,
         "already_generated mutated on rejected block"
     );
+}
+
+/// DeepSeek finding 1: non-zero-value anchor output in coinbase is rejected by consensus.
+///
+/// CORE_ANCHOR outputs must have value=0 (covenant_genesis.rs). Connect_block must
+/// enforce this invariant end-to-end. Also verifies state is not mutated on rejection.
+#[test]
+fn connect_block_rejects_nonzero_anchor_in_coinbase() {
+    let height = 1u64;
+    let mut prev = [0u8; 32];
+    prev[0] = 0xc1;
+    let target = [0xffu8; 32];
+
+    // Build coinbase with non-zero anchor: P2PK(1) + Anchor(value=5, commit).
+    let wtxids: Vec<[u8; 32]> = vec![[0u8; 32]];
+    let wroot = crate::merkle::witness_merkle_root_wtxids(&wtxids).expect("witness merkle root");
+    let commit = crate::merkle::witness_commitment_hash(wroot);
+
+    let coinbase = coinbase_tx_with_outputs(
+        height as u32,
+        &[
+            TestOutput {
+                value: 1,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: valid_p2pk_covenant_data(),
+            },
+            TestOutput {
+                value: 5, // non-zero anchor — protocol violation
+                covenant_type: COV_TYPE_ANCHOR,
+                covenant_data: commit.to_vec(),
+            },
+        ],
+    );
+    let (_cb, cb_txid, _cbw, _cbn) = parse_tx(&coinbase).expect("parse coinbase");
+    let root = merkle_root_txids(&[cb_txid]).expect("merkle root");
+    let block = build_block_bytes(prev, root, target, 60, &[coinbase]);
+
+    let mut state = InMemoryChainState {
+        utxos: HashMap::new(),
+        already_generated: 0,
+    };
+
+    let err = crate::connect_block_basic_in_memory_at_height(
+        &block,
+        Some(prev),
+        Some(target),
+        height,
+        None,
+        &mut state,
+        ZERO_CHAIN_ID,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err.code,
+        ErrorCode::TxErrCovenantTypeInvalid,
+        "non-zero anchor must be rejected"
+    );
+    assert!(
+        state.utxos.is_empty(),
+        "state mutated on rejected block with non-zero anchor"
+    );
+}
+
+/// DeepSeek finding 2: non-coinbase tx creating a vault output must be accepted.
+///
+/// P2PK input (100) → Vault output (90), fee = 10. Vault's owner_lock_id
+/// matches the P2PK input's lock_id, satisfying CORE_VAULT creation rules.
+/// Verifies vault output ends up in UTXO set.
+#[test]
+fn connect_block_non_coinbase_vault_output_accepted() {
+    let height = 1u64;
+    let mut prev = [0u8; 32];
+    prev[0] = 0xc2;
+    let target = [0xffu8; 32];
+
+    let kp = kp_or_skip!();
+    let cov_data = p2pk_covenant_data_for_pubkey(&kp.pubkey);
+    let prev_out = Outpoint {
+        txid: prev,
+        vout: 0,
+    };
+
+    // Compute the P2PK input's lock_id to use as vault owner_lock_id.
+    let input_lock_id = sha3_256(&crate::vault::output_descriptor_bytes(
+        COV_TYPE_P2PK,
+        &cov_data,
+    ));
+
+    // Build valid vault covenant data with owner_lock_id matching the P2PK input.
+    let dest_descriptor =
+        crate::vault::output_descriptor_bytes(COV_TYPE_P2PK, &valid_p2pk_covenant_data());
+    let dest_hash = sha3_256(&dest_descriptor);
+    let vault_cov_data =
+        encode_vault_covenant_data(input_lock_id, 1, &make_keys(1, 0x22), &[dest_hash]);
+
+    // Spend tx: P2PK(100) → Vault(90), fee = 10.
+    let mut spend_tx = crate::tx::Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![crate::tx::TxInput {
+            prev_txid: prev,
+            prev_vout: 0,
+            script_sig: vec![],
+            sequence: 0,
+        }],
+        outputs: vec![crate::tx::TxOutput {
+            value: 90,
+            covenant_type: COV_TYPE_VAULT,
+            covenant_data: vault_cov_data.clone(),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![],
+        da_payload: vec![],
+    };
+    let witness = sign_input_witness(&spend_tx, 0, 100, ZERO_CHAIN_ID, &kp);
+    spend_tx.witness = vec![witness.clone()];
+    let spend_bytes = tx_with_one_input_one_output_with_witness(
+        prev,
+        0,
+        90,
+        COV_TYPE_VAULT,
+        &vault_cov_data,
+        witness.suite_id,
+        &witness.pubkey,
+        &witness.signature,
+    );
+    let (_tx, spend_txid, _wtxid, _n) = parse_tx(&spend_bytes).expect("parse spend tx");
+
+    let mut state = InMemoryChainState {
+        utxos: HashMap::from([(
+            prev_out,
+            UtxoEntry {
+                value: 100,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: cov_data.clone(),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        )]),
+        already_generated: 0,
+    };
+
+    let sum_fees = 10u64;
+    let subsidy = crate::subsidy::block_subsidy(height, state.already_generated);
+    let coinbase = coinbase_with_witness_commitment_and_p2pk_value(
+        height as u32,
+        subsidy + sum_fees,
+        std::slice::from_ref(&spend_bytes),
+    );
+    let (_cb, coinbase_txid, _cbw, _cbn) = parse_tx(&coinbase).expect("parse coinbase");
+    let root = merkle_root_txids(&[coinbase_txid, spend_txid]).expect("merkle root");
+    let block = build_block_bytes(prev, root, target, 61, &[coinbase, spend_bytes]);
+
+    let s = crate::connect_block_basic_in_memory_at_height(
+        &block,
+        Some(prev),
+        Some(target),
+        height,
+        Some(&[0]),
+        &mut state,
+        ZERO_CHAIN_ID,
+    )
+    .expect("connect_block with vault output in non-coinbase tx");
+
+    assert_eq!(s.sum_fees, sum_fees);
+    // 2 UTXO entries: vault output (90) + coinbase P2PK output.
+    assert_eq!(s.utxo_count, 2, "vault output must be in UTXO set");
+
+    // Verify vault output is actually present.
+    let mut found_vault = false;
+    for (_outpoint, entry) in &state.utxos {
+        if entry.covenant_type == COV_TYPE_VAULT {
+            assert_eq!(entry.value, 90, "vault UTXO value mismatch");
+            assert_eq!(
+                entry.covenant_data, vault_cov_data,
+                "vault UTXO covenant_data mismatch"
+            );
+            found_vault = true;
+        }
+    }
+    assert!(found_vault, "vault output not found in UTXO set");
 }
