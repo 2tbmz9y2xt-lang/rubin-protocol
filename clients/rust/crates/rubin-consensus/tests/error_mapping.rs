@@ -6,7 +6,8 @@ use rubin_consensus::{ErrorCode, TxError};
 fn error_code_clone() {
     let a = ErrorCode::TxErrParse;
     let b = a;
-    let c = a.clone();
+    #[allow(clippy::clone_on_copy)]
+    let c = a.clone(); // intentional: exercises Clone impl on Copy type
     assert_eq!(b, c);
 }
 
