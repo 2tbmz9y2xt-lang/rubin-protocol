@@ -142,6 +142,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "txcontext_bundle"
+path = "fuzz_targets/txcontext_bundle.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "spend_dispatch_structural"
 path = "fuzz_targets/spend_dispatch_structural.rs"
 test = false

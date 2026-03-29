@@ -274,11 +274,8 @@ mod tests {
     use crate::tx::{Tx, TxInput, TxOutput};
 
     fn core_ext_covdata(ext_id: u16, payload: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(&ext_id.to_le_bytes());
-        crate::compactsize::encode_compact_size(payload.len() as u64, &mut out);
-        out.extend_from_slice(payload);
-        out
+        crate::core_ext::encode_core_ext_covenant_data(ext_id, payload)
+            .expect("CORE_EXT covenant_data encode")
     }
 
     fn static_profiles(entries: &[(u16, bool)]) -> CoreExtProfiles {
@@ -324,6 +321,18 @@ mod tests {
 
         let err = build_tx_context_output_ext_id_cache(&tx).unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    }
+
+    #[test]
+    fn txcontext_get_output_checked_rejects_missing_slot() {
+        let continuing = TxContextContinuing {
+            continuing_output_count: 1,
+            continuing_outputs: [None, None],
+        };
+
+        let err = continuing.get_output_checked(0).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+        assert_eq!(err.msg, "txcontext continuing output missing");
     }
 
     #[test]
@@ -409,6 +418,43 @@ mod tests {
     }
 
     #[test]
+    fn collect_txcontext_ext_ids_rejects_duplicate_active_profiles() {
+        let resolved_inputs = vec![UtxoEntry {
+            value: 11,
+            covenant_type: COV_TYPE_EXT,
+            covenant_data: core_ext_covdata(7, &[0x71]),
+            creation_height: 0,
+            created_by_coinbase: false,
+        }];
+        let profiles = CoreExtProfiles {
+            active: vec![
+                CoreExtActiveProfile {
+                    ext_id: 7,
+                    tx_context_enabled: true,
+                    allowed_suite_ids: vec![0x42],
+                    verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+                    verify_sig_ext_tx_context_fn: None,
+                    binding_descriptor: b"accept-a".to_vec(),
+                    ext_payload_schema: b"schema-a".to_vec(),
+                },
+                CoreExtActiveProfile {
+                    ext_id: 7,
+                    tx_context_enabled: true,
+                    allowed_suite_ids: vec![0x43],
+                    verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+                    verify_sig_ext_tx_context_fn: None,
+                    binding_descriptor: b"accept-b".to_vec(),
+                    ext_payload_schema: b"schema-b".to_vec(),
+                },
+            ],
+        };
+
+        let err = collect_txcontext_ext_ids(&resolved_inputs, &profiles).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+        assert_eq!(err.msg, "CORE_EXT multiple ACTIVE profiles for ext_id");
+    }
+
+    #[test]
     fn build_tx_context_requires_output_cache_when_enabled() {
         let tx = Tx {
             version: 1,
@@ -448,6 +494,90 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    }
+
+    #[test]
+    fn build_tx_context_rejects_resolved_input_count_mismatch() {
+        let tx = Tx {
+            version: 1,
+            tx_kind: 0,
+            tx_nonce: 1,
+            inputs: vec![TxInput {
+                prev_txid: [0u8; 32],
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: 33,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: core_ext_covdata(7, &[]),
+            }],
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: vec![],
+            da_payload: vec![],
+        };
+
+        let err = build_tx_context(
+            &tx,
+            &[],
+            Some(&BTreeMap::new()),
+            12,
+            &static_profiles(&[(7, true)]),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+        assert_eq!(err.msg, "txcontext resolved input count mismatch");
+    }
+
+    #[test]
+    fn build_tx_context_keeps_enabled_ext_id_with_empty_continuations() {
+        let tx = Tx {
+            version: 1,
+            tx_kind: 0,
+            tx_nonce: 1,
+            inputs: vec![TxInput {
+                prev_txid: [0u8; 32],
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: 33,
+                covenant_type: crate::constants::COV_TYPE_P2PK,
+                covenant_data: vec![0x01],
+            }],
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: vec![],
+            da_payload: vec![],
+        };
+        let resolved_inputs = vec![UtxoEntry {
+            value: 50,
+            covenant_type: COV_TYPE_EXT,
+            covenant_data: core_ext_covdata(7, &[0xbb]),
+            creation_height: 0,
+            created_by_coinbase: false,
+        }];
+
+        let cache = build_tx_context_output_ext_id_cache(&tx).expect("cache");
+        let bundle = build_tx_context(
+            &tx,
+            &resolved_inputs,
+            Some(&cache),
+            12,
+            &static_profiles(&[(7, true)]),
+        )
+        .unwrap()
+        .expect("bundle");
+
+        assert_eq!(bundle.sorted_ext_ids(), vec![7]);
+        let continuing = bundle.get_continuing(7).expect("ext 7");
+        assert_eq!(continuing.continuing_output_count, 0);
+        assert!(continuing.valid_outputs().is_empty());
     }
 
     #[test]
