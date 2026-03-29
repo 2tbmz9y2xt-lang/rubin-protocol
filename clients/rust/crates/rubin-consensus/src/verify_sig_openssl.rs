@@ -708,12 +708,19 @@ mod tests {
     }
 
     /// Helper: generate keypair or skip test if OpenSSL state is corrupted
-    /// (bootstrap FIPS tests can pollute global EVP provider config).
+    /// by bootstrap FIPS tests polluting global EVP provider config.
+    /// Only skips the narrow "CTX_new_from_name failed" case — any other
+    /// keygen failure is a real regression and must panic.
     fn generate_or_skip() -> Option<Mldsa87Keypair> {
         match Mldsa87Keypair::generate() {
             Ok(kp) => Some(kp),
             Err(err) => {
                 assert_eq!(err.code, ErrorCode::TxErrParse);
+                assert!(
+                    err.msg.contains("EVP_PKEY_CTX_new_from_name"),
+                    "keygen failed for unexpected reason (not bootstrap pollution): {}",
+                    err.msg
+                );
                 None // skip: OpenSSL state poisoned by bootstrap test
             }
         }
