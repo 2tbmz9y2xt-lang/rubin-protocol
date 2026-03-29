@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 const PARALLEL_TEST_WORKERS: usize = 4;
-const MAX_FIXTURE_HEX_BYTES: usize = 1 << 20;
+const MAX_FIXTURE_HEX_BYTES: usize = 100 * 1024;
 
 fn clone_chain_state(
     utxos: &HashMap<Outpoint, UtxoEntry>,

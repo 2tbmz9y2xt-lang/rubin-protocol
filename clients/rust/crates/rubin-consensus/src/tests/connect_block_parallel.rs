@@ -405,7 +405,7 @@ fn connect_block_parallel_sig_verify_coinbase_only_reports_empty_sig_queue() {
 }
 
 #[test]
-fn connect_block_parallel_sig_verify_zero_workers_matches_sequential() {
+fn connect_block_parallel_sig_verify_single_worker_matches_sequential() {
     let height = 1u64;
     let mut prev = [0u8; 32];
     prev[0] = 0xab;
@@ -492,9 +492,9 @@ fn connect_block_parallel_sig_verify_zero_workers_matches_sequential() {
         Some(&[0]),
         &mut par_state,
         ZERO_CHAIN_ID,
-        0,
+        1,
     )
-    .expect("parallel connect with zero workers");
+    .expect("parallel connect with single worker");
 
     assert_eq!(seq_summary.sum_fees, par_summary.sum_fees);
     assert_eq!(seq_summary.post_state_digest, par_summary.post_state_digest);
