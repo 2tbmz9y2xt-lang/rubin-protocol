@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 const PARALLEL_TEST_WORKERS: usize = 4;
 const MAX_FIXTURE_HEX_BYTES: usize = 100 * 1024;
+const MAX_FIXTURE_UTXOS: usize = 1_000;
+const MAX_FIXTURE_PREV_TIMESTAMPS: usize = 1_000;
 type TestBlockContext = (Vec<u8>, [u8; 32], [u8; 32], HashMap<Outpoint, UtxoEntry>);
 
 fn clone_chain_state(
@@ -110,7 +112,25 @@ fn build_utxo_map_from_vector(utxos: &[VectorUtxo]) -> HashMap<Outpoint, UtxoEnt
         .collect()
 }
 
+fn validate_fixture_bounds(v: &ConnectBlockVector) {
+    assert!(
+        v.utxos.len() <= MAX_FIXTURE_UTXOS,
+        "fixture {} exceeds UTXO bound: {} > {}",
+        v.id,
+        v.utxos.len(),
+        MAX_FIXTURE_UTXOS
+    );
+    assert!(
+        v.prev_timestamps.len() <= MAX_FIXTURE_PREV_TIMESTAMPS,
+        "fixture {} exceeds prev_timestamps bound: {} > {}",
+        v.id,
+        v.prev_timestamps.len(),
+        MAX_FIXTURE_PREV_TIMESTAMPS
+    );
+}
+
 fn test_parallel_parity_from_vector(v: &ConnectBlockVector) {
+    validate_fixture_bounds(v);
     let block_bytes = decode_hex(&v.block_hex).expect("decode block_hex");
     let chain_id = if v.chain_id.is_empty() {
         ZERO_CHAIN_ID
