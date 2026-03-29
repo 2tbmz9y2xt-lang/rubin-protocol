@@ -242,6 +242,9 @@ fn build_test_block(
 
 #[test]
 fn connect_block_parallel_sig_verify_conformance_parity() {
+    if test_mldsa87_keypair().is_none() {
+        return;
+    }
     let fixtures = fixture_dir();
     if !fixtures.exists() {
         return;
