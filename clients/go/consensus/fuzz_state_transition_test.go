@@ -45,9 +45,12 @@ func FuzzConnectBlockInMemory(f *testing.F) {
 			chainID,
 		)
 
-		// Invariant: summary and error are mutually exclusive.
+		// Invariant: exactly one of summary or error must be non-nil.
 		if summary != nil && err != nil {
 			t.Fatalf("both summary and error non-nil: summary=%+v err=%v", summary, err)
+		}
+		if summary == nil && err == nil {
+			t.Fatal("both summary and error nil — broken result contract")
 		}
 
 		// Determinism: same input → same result.
