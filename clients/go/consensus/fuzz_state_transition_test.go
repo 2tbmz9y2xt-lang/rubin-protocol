@@ -138,7 +138,7 @@ func FuzzTxDepGraphBuild(f *testing.F) {
 			}
 
 			contexts[i] = TxValidationContext{
-				TxIndex:        i,
+				TxIndex:        i + 1, // 1-based (coinbase excluded)
 				Tx:             tx,
 				Txid:           txid,
 				InputOutpoints: inputs,
@@ -334,12 +334,14 @@ func FuzzDAPayloadCommitVerify(f *testing.F) {
 			}
 		}
 
-		// Mutated commitment — must fail.
+		// Mutated commitment — must fail regardless of worker count.
 		badTask := task
 		badTask.ExpectedCommit[0] ^= 0xFF
-		err := VerifyDAPayloadCommitsParallel(context.Background(), []DAPayloadCommitTask{badTask}, 1)
-		if err == nil {
-			t.Fatal("mutated commit accepted")
+		for _, w := range []int{1, 2, 4} {
+			err := VerifyDAPayloadCommitsParallel(context.Background(), []DAPayloadCommitTask{badTask}, w)
+			if err == nil {
+				t.Fatalf("mutated commit accepted with %d workers", w)
+			}
 		}
 	})
 }
