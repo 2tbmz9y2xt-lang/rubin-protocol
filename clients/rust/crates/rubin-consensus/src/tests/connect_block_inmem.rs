@@ -757,7 +757,7 @@ fn connect_block_non_coinbase_vault_output_accepted() {
 
     // Verify vault output is actually present.
     let mut found_vault = false;
-    for (_outpoint, entry) in &state.utxos {
+    for entry in state.utxos.values() {
         if entry.covenant_type == COV_TYPE_VAULT {
             assert_eq!(entry.value, 90, "vault UTXO value mismatch");
             assert_eq!(
