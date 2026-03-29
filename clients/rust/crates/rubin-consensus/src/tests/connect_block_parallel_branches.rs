@@ -12,6 +12,8 @@ use std::sync::{
 static CORE_EXT_TXCTX_CALLED: AtomicBool = AtomicBool::new(false);
 static CORE_EXT_TXCTX_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+// Mirrors the production core-ext verifier callback signature.
+#[allow(clippy::too_many_arguments)]
 fn record_txctx_verifier(
     _ext_id: u16,
     _suite_id: u8,

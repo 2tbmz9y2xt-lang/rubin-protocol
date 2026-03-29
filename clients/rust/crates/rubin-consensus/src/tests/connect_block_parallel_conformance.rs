@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 const PARALLEL_TEST_WORKERS: usize = 4;
 const MAX_FIXTURE_HEX_BYTES: usize = 100 * 1024;
+type TestBlockContext = (Vec<u8>, [u8; 32], [u8; 32], HashMap<Outpoint, UtxoEntry>);
 
 fn clone_chain_state(
     utxos: &HashMap<Outpoint, UtxoEntry>,
@@ -22,7 +23,7 @@ fn fixture_dir() -> PathBuf {
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
     let value = value.trim();
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err(format!("hex string must have even length: {}", value.len()));
     }
     let decoded_len = value.len() / 2;
@@ -179,9 +180,7 @@ fn test_parallel_parity_from_vector(v: &ConnectBlockVector) {
     assert_eq!(seq_state.utxos, par_state.utxos, "{}", v.id);
 }
 
-fn build_test_block(
-    coinbase_value: u64,
-) -> Option<(Vec<u8>, [u8; 32], [u8; 32], HashMap<Outpoint, UtxoEntry>)> {
+fn build_test_block(coinbase_value: u64) -> Option<TestBlockContext> {
     let height = 1u64;
     let mut prev = [0u8; 32];
     prev[0] = 0x99;
@@ -333,7 +332,7 @@ fn connect_block_parallel_sig_verify_tx_validation_error_missing_utxo() {
 #[test]
 fn connect_block_parallel_sig_verify_coinbase_value_bound() {
     let height = 1u64;
-    let coinbase_value = (crate::constants::TAIL_EMISSION_PER_BLOCK as u64) + 11;
+    let coinbase_value = crate::constants::TAIL_EMISSION_PER_BLOCK + 11;
     let Some((block, prev, target, utxos)) = build_test_block(coinbase_value) else {
         return;
     };
@@ -355,7 +354,7 @@ fn connect_block_parallel_sig_verify_coinbase_value_bound() {
 #[test]
 fn connect_block_parallel_sig_verify_already_generated_overflow() {
     let height = 1u64;
-    let coinbase_value = (crate::constants::TAIL_EMISSION_PER_BLOCK as u64) + 10;
+    let coinbase_value = crate::constants::TAIL_EMISSION_PER_BLOCK + 10;
     let Some((block, prev, target, utxos)) = build_test_block(coinbase_value) else {
         return;
     };
@@ -378,7 +377,7 @@ fn connect_block_parallel_sig_verify_already_generated_overflow() {
 fn connect_block_parallel_sig_verify_already_generated_n1_overflow() {
     let height = 1u64;
     let subsidy = crate::subsidy::block_subsidy(height, u128::MAX);
-    let coinbase_value = (crate::constants::TAIL_EMISSION_PER_BLOCK as u64) + 10;
+    let coinbase_value = crate::constants::TAIL_EMISSION_PER_BLOCK + 10;
     let Some((block, prev, target, utxos)) = build_test_block(coinbase_value) else {
         return;
     };
