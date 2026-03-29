@@ -72,8 +72,14 @@ mod tests {
     fn sha3_256_go_rust_parity_empty() {
         // Cross-check: Go crypto/sha3.Sum256(nil) must produce same result
         // as Rust sha3::Sha3_256. Both use NIST FIPS 202.
+        // Full 32-byte comparison — partial checks are insufficient for
+        // consensus parity (DeepSeek R1 review).
         let got = sha3_256(b"");
-        assert_eq!(got[0], 0xa7, "first byte mismatch with NIST vector");
-        assert_eq!(got[31], 0x4a, "last byte mismatch with NIST vector");
+        let want: [u8; 32] = [
+            0xa7, 0xff, 0xc6, 0xf8, 0xbf, 0x1e, 0xd7, 0x66, 0x51, 0xc1, 0x47, 0x56, 0xa0, 0x61,
+            0xd6, 0x62, 0xf5, 0x80, 0xff, 0x4d, 0xe4, 0x3b, 0x49, 0xfa, 0x82, 0xd8, 0x0a, 0x4b,
+            0x80, 0xf8, 0x43, 0x4a,
+        ];
+        assert_eq!(got, want, "Go-Rust parity: full NIST vector mismatch");
     }
 }
