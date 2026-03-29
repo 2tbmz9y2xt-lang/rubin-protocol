@@ -51,11 +51,8 @@ fn deferred_apply(
 }
 
 fn core_ext_covdata(ext_id: u16, payload: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(&ext_id.to_le_bytes());
-    crate::compactsize::encode_compact_size(payload.len() as u64, &mut out);
-    out.extend_from_slice(payload);
-    out
+    crate::core_ext::encode_core_ext_covenant_data(ext_id, payload)
+        .expect("CORE_EXT covenant_data encode")
 }
 
 fn stealth_covenant_data_for_pubkey(pubkey: &[u8]) -> Vec<u8> {
