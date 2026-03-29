@@ -558,6 +558,24 @@ fn verify_core_ext_openssl_digest32_binding(
     openssl_verify_sig_digest_oneshot(alg, pubkey, signature, digest32)
 }
 
+#[cfg(test)]
+pub(crate) fn encode_core_ext_covenant_data(
+    ext_id: u16,
+    payload: &[u8],
+) -> Result<Vec<u8>, TxError> {
+    let mut out = Vec::with_capacity(2 + payload.len() + 10);
+    out.extend_from_slice(&ext_id.to_le_bytes());
+    encode_compact_size(payload.len() as u64, &mut out);
+    out.extend_from_slice(payload);
+    if out.len() as u64 > MAX_COVENANT_DATA_PER_OUTPUT {
+        return Err(TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_EXT covenant_data length exceeds MAX_COVENANT_DATA_PER_OUTPUT",
+        ));
+    }
+    Ok(out)
+}
+
 pub fn parse_core_ext_covenant_data(cov_data: &[u8]) -> Result<CoreExtCovenant<'_>, TxError> {
     if cov_data.len() as u64 > MAX_COVENANT_DATA_PER_OUTPUT {
         return Err(TxError::new(
