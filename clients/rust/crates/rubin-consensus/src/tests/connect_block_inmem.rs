@@ -141,8 +141,15 @@ fn connect_block_ok_computes_fees_and_updates_state() {
     .expect("connect_block_basic_in_memory_at_height");
 
     assert_eq!(s.sum_fees, sum_fees, "sum_fees mismatch");
-    assert_eq!(s.already_generated, 0, "already_generated should be 0 (pre-block)");
-    assert_eq!(s.already_generated_n1, u128::from(subsidy), "already_generated_n1 mismatch");
+    assert_eq!(
+        s.already_generated, 0,
+        "already_generated should be 0 (pre-block)"
+    );
+    assert_eq!(
+        s.already_generated_n1,
+        u128::from(subsidy),
+        "already_generated_n1 mismatch"
+    );
     // spend output + coinbase p2pk output (anchor not added to UTXO set).
     assert_eq!(s.utxo_count, 2, "utxo_count mismatch");
     assert_eq!(
@@ -174,7 +181,11 @@ fn connect_block_empty_block_bytes_returns_error() {
     )
     .unwrap_err();
 
-    assert_eq!(err.code, ErrorCode::BlockErrParse, "expected BlockErrParse for empty bytes");
+    assert_eq!(
+        err.code,
+        ErrorCode::BlockErrParse,
+        "expected BlockErrParse for empty bytes"
+    );
 }
 
 /// Go parity: TestParseAndValidateBlockBasicWithContextAtHeight_ReturnsParsedBlock
@@ -250,7 +261,10 @@ fn connect_block_height0_does_not_advance_already_generated() {
     .expect("connect_block at height 0");
 
     assert_eq!(s.sum_fees, 0, "sum_fees should be 0 at height 0");
-    assert_eq!(s.already_generated, 123, "already_generated should not change at height 0");
+    assert_eq!(
+        s.already_generated, 123,
+        "already_generated should not change at height 0"
+    );
     assert_eq!(
         s.already_generated_n1, 123,
         "already_generated_n1 should not change at height 0"
@@ -507,14 +521,24 @@ fn connect_block_coinbase_vault_reject_does_not_mutate_applied_spends() {
         "expected BlockErrCoinbaseInvalid"
     );
     // Atomicity: original UTXO must still be present.
-    assert_eq!(state.utxos.len(), 1, "state.utxos len changed on rejected block");
+    assert_eq!(
+        state.utxos.len(),
+        1,
+        "state.utxos len changed on rejected block"
+    );
     let entry = state
         .utxos
         .get(&prev_out)
         .expect("original UTXO removed on rejected block");
     assert_eq!(entry.value, 100, "original UTXO value mutated");
-    assert_eq!(entry.covenant_type, COV_TYPE_P2PK, "original UTXO covenant_type mutated");
-    assert!(!entry.created_by_coinbase, "original UTXO created_by_coinbase mutated");
+    assert_eq!(
+        entry.covenant_type, COV_TYPE_P2PK,
+        "original UTXO covenant_type mutated"
+    );
+    assert!(
+        !entry.created_by_coinbase,
+        "original UTXO created_by_coinbase mutated"
+    );
     assert_eq!(
         state.already_generated, 0,
         "already_generated mutated on rejected block"
