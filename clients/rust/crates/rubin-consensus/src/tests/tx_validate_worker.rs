@@ -1,9 +1,13 @@
 use std::collections::HashMap;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
 
 use crate::block::{BlockHeader, BLOCK_HEADER_BYTES};
 use crate::block_basic::ParsedBlock;
 use crate::constants::*;
-use crate::core_ext::CoreExtProfiles;
+use crate::core_ext::{CoreExtActiveProfile, CoreExtProfiles, CoreExtVerificationBinding};
 use crate::error::ErrorCode;
 use crate::hash::sha3_256;
 use crate::precompute::{precompute_tx_contexts, PrecomputedTxContext};
@@ -11,8 +15,12 @@ use crate::tx::{Tx, TxInput, TxOutput, WitnessItem};
 use crate::tx_validate_worker::{
     first_tx_error, run_tx_validation_workers, validate_tx_local, TxValidationResult,
 };
+use crate::txcontext::{TxContextBase, TxContextContinuing};
 use crate::utxo_basic::{Outpoint, UtxoEntry};
 use crate::worker_pool::{WorkerCancellationToken, WorkerPoolError, WorkerResult};
+
+static CORE_EXT_TXCTX_CALLED: AtomicBool = AtomicBool::new(false);
+static CORE_EXT_TXCTX_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn valid_p2pk_covenant_data() -> Vec<u8> {
     vec![0u8; 32]
@@ -23,6 +31,55 @@ fn dummy_witness() -> WitnessItem {
         suite_id: SUITE_ID_ML_DSA_87,
         pubkey: vec![0u8; ML_DSA_87_PUBKEY_BYTES as usize],
         signature: vec![0u8; (ML_DSA_87_SIG_BYTES + 1) as usize],
+    }
+}
+
+fn core_ext_covdata(ext_id: u16, payload: &[u8]) -> Vec<u8> {
+    crate::core_ext::encode_core_ext_covenant_data(ext_id, payload)
+        .expect("CORE_EXT covenant_data encode")
+}
+
+fn stealth_covenant_data_for_pubkey(pubkey: &[u8]) -> Vec<u8> {
+    let mut cov = vec![0u8; MAX_STEALTH_COVENANT_DATA as usize];
+    let split = cov.len() - 32;
+    cov[split..].copy_from_slice(&sha3_256(pubkey));
+    cov
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_txctx_verifier(
+    ext_id: u16,
+    suite_id: u8,
+    _pubkey: &[u8],
+    _signature: &[u8],
+    _digest32: &[u8; 32],
+    ext_payload: &[u8],
+    ctx_base: &TxContextBase,
+    ctx_continuing: &TxContextContinuing,
+    self_input_value: u64,
+) -> Result<bool, crate::error::TxError> {
+    assert_eq!(ext_id, 7);
+    assert_eq!(suite_id, 0x42);
+    assert_eq!(ext_payload, [0x99]);
+    assert_eq!(ctx_base.total_in, crate::Uint128::from_native(100));
+    assert_eq!(ctx_base.total_out, crate::Uint128::from_native(90));
+    assert_eq!(ctx_base.height, 1);
+    assert_eq!(ctx_continuing.continuing_output_count, 1);
+    let first = ctx_continuing
+        .get_output_checked(0)
+        .expect("continuing output");
+    assert_eq!(first.value, 90);
+    assert!(first.ext_payload.is_empty());
+    assert_eq!(self_input_value, 100);
+    CORE_EXT_TXCTX_CALLED.store(true, Ordering::SeqCst);
+    Ok(true)
+}
+
+fn txcontext_dispatch_witness() -> WitnessItem {
+    WitnessItem {
+        suite_id: 0x42,
+        pubkey: vec![0x01, 0x02, 0x03],
+        signature: vec![0x04, 0x01],
     }
 }
 
@@ -540,6 +597,341 @@ fn validate_tx_local_real_signature_full_path() {
         cached_second.err
     );
     assert_eq!(cache.hits(), 1);
+}
+
+#[test]
+fn validate_tx_local_stealth_valid() {
+    let kp = match super::test_mldsa87_keypair() {
+        Some(kp) => kp,
+        None => return,
+    };
+
+    let prev_txid = [0x55u8; 32];
+    let mut tx = Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 3,
+        inputs: vec![TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 90,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: super::p2pk_covenant_data_for_pubkey(&kp.pubkey),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: Vec::new(),
+        da_payload: Vec::new(),
+    };
+    tx.witness = vec![super::sign_input_witness(&tx, 0, 100, [0u8; 32], &kp)];
+
+    let pb = make_parsed_block(simple_coinbase(), vec![tx]);
+    let ptc = PrecomputedTxContext {
+        tx_index: 1,
+        tx_block_idx: 1,
+        txid: [0u8; 32],
+        resolved_inputs: vec![UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_STEALTH,
+            covenant_data: stealth_covenant_data_for_pubkey(&kp.pubkey),
+            creation_height: 1,
+            created_by_coinbase: false,
+        }],
+        witness_start: 0,
+        witness_end: 1,
+        input_outpoints: vec![Outpoint {
+            txid: prev_txid,
+            vout: 0,
+        }],
+        fee: 10,
+    };
+
+    let profiles = CoreExtProfiles::empty();
+    let result = validate_tx_local(&ptc, &pb, [0u8; 32], 100, 0, &profiles, None);
+    assert!(result.valid, "expected valid, got {:?}", result.err);
+    assert!(result.err.is_none());
+    assert_eq!(result.sig_count, 1);
+}
+
+#[test]
+fn validate_tx_local_core_ext_active_profile_valid() {
+    let kp = match super::test_mldsa87_keypair() {
+        Some(kp) => kp,
+        None => return,
+    };
+
+    let prev_txid = [0x77u8; 32];
+    let mut tx = Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 4,
+        inputs: vec![TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 90,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: super::p2pk_covenant_data_for_pubkey(&kp.pubkey),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: Vec::new(),
+        da_payload: Vec::new(),
+    };
+    tx.witness = vec![super::sign_input_witness(&tx, 0, 100, [0u8; 32], &kp)];
+
+    let pb = make_parsed_block(simple_coinbase(), vec![tx]);
+    let ptc = PrecomputedTxContext {
+        tx_index: 1,
+        tx_block_idx: 1,
+        txid: [0u8; 32],
+        resolved_inputs: vec![UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_EXT,
+            covenant_data: core_ext_covdata(1, &[0x99]),
+            creation_height: 1,
+            created_by_coinbase: false,
+        }],
+        witness_start: 0,
+        witness_end: 1,
+        input_outpoints: vec![Outpoint {
+            txid: prev_txid,
+            vout: 0,
+        }],
+        fee: 10,
+    };
+    let profiles = CoreExtProfiles {
+        active: vec![CoreExtActiveProfile {
+            ext_id: 1,
+            tx_context_enabled: false,
+            allowed_suite_ids: vec![SUITE_ID_ML_DSA_87],
+            verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+            verify_sig_ext_tx_context_fn: None,
+            binding_descriptor: b"accept".to_vec(),
+            ext_payload_schema: b"schema".to_vec(),
+        }],
+    };
+
+    let result = validate_tx_local(&ptc, &pb, [0u8; 32], 100, 0, &profiles, None);
+    assert!(result.valid, "expected valid, got {:?}", result.err);
+    assert!(result.err.is_none());
+    assert_eq!(result.sig_count, 1);
+}
+
+#[test]
+fn validate_tx_local_core_ext_txcontext_enabled_dispatches_verifier() {
+    let _guard = CORE_EXT_TXCTX_TEST_LOCK.lock().expect("txctx lock");
+    CORE_EXT_TXCTX_CALLED.store(false, Ordering::SeqCst);
+
+    let prev_txid = [0xb0u8; 32];
+    let tx = Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 5,
+        inputs: vec![TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 90,
+            covenant_type: COV_TYPE_EXT,
+            covenant_data: core_ext_covdata(7, &[]),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![txcontext_dispatch_witness()],
+        da_payload: Vec::new(),
+    };
+    let pb = make_parsed_block(simple_coinbase(), vec![tx]);
+    let ptc = PrecomputedTxContext {
+        tx_index: 1,
+        tx_block_idx: 1,
+        txid: [0u8; 32],
+        resolved_inputs: vec![UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_EXT,
+            covenant_data: core_ext_covdata(7, &[0x99]),
+            creation_height: 1,
+            created_by_coinbase: false,
+        }],
+        witness_start: 0,
+        witness_end: 1,
+        input_outpoints: vec![Outpoint {
+            txid: prev_txid,
+            vout: 0,
+        }],
+        fee: 10,
+    };
+    let profiles = CoreExtProfiles {
+        active: vec![CoreExtActiveProfile {
+            ext_id: 7,
+            tx_context_enabled: true,
+            allowed_suite_ids: vec![0x42],
+            verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+            verify_sig_ext_tx_context_fn: Some(record_txctx_verifier),
+            binding_descriptor: b"accept".to_vec(),
+            ext_payload_schema: b"schema".to_vec(),
+        }],
+    };
+
+    let result = validate_tx_local(&ptc, &pb, [0u8; 32], 1, 0, &profiles, None);
+    assert!(result.valid, "expected valid, got {:?}", result.err);
+    assert!(result.err.is_none());
+    assert!(CORE_EXT_TXCTX_CALLED.load(Ordering::SeqCst));
+}
+
+#[test]
+fn validate_tx_local_core_ext_txcontext_malformed_output_fails_before_verifier() {
+    let _guard = CORE_EXT_TXCTX_TEST_LOCK.lock().expect("txctx lock");
+    CORE_EXT_TXCTX_CALLED.store(false, Ordering::SeqCst);
+
+    let prev_txid = [0xb3u8; 32];
+    let tx = Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 6,
+        inputs: vec![TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 90,
+            covenant_type: COV_TYPE_EXT,
+            covenant_data: vec![0x01],
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![txcontext_dispatch_witness()],
+        da_payload: Vec::new(),
+    };
+    let pb = make_parsed_block(simple_coinbase(), vec![tx]);
+    let ptc = PrecomputedTxContext {
+        tx_index: 1,
+        tx_block_idx: 1,
+        txid: [0u8; 32],
+        resolved_inputs: vec![UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_EXT,
+            covenant_data: core_ext_covdata(7, &[0x99]),
+            creation_height: 1,
+            created_by_coinbase: false,
+        }],
+        witness_start: 0,
+        witness_end: 1,
+        input_outpoints: vec![Outpoint {
+            txid: prev_txid,
+            vout: 0,
+        }],
+        fee: 10,
+    };
+    let profiles = CoreExtProfiles {
+        active: vec![CoreExtActiveProfile {
+            ext_id: 7,
+            tx_context_enabled: true,
+            allowed_suite_ids: vec![0x42],
+            verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+            verify_sig_ext_tx_context_fn: Some(record_txctx_verifier),
+            binding_descriptor: b"accept".to_vec(),
+            ext_payload_schema: b"schema".to_vec(),
+        }],
+    };
+
+    let result = validate_tx_local(&ptc, &pb, [0u8; 32], 1, 0, &profiles, None);
+    let err = result.err.expect("expected err");
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    assert!(!CORE_EXT_TXCTX_CALLED.load(Ordering::SeqCst));
+}
+
+#[test]
+fn validate_tx_local_core_ext_txcontext_too_many_continuing_outputs_fails_before_verifier() {
+    let _guard = CORE_EXT_TXCTX_TEST_LOCK.lock().expect("txctx lock");
+    CORE_EXT_TXCTX_CALLED.store(false, Ordering::SeqCst);
+
+    let prev_txid = [0xb4u8; 32];
+    let tx = Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 7,
+        inputs: vec![TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![
+            TxOutput {
+                value: 30,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: core_ext_covdata(7, &[]),
+            },
+            TxOutput {
+                value: 30,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: core_ext_covdata(7, &[0x01]),
+            },
+            TxOutput {
+                value: 30,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: core_ext_covdata(7, &[0x02]),
+            },
+        ],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![txcontext_dispatch_witness()],
+        da_payload: Vec::new(),
+    };
+    let pb = make_parsed_block(simple_coinbase(), vec![tx]);
+    let ptc = PrecomputedTxContext {
+        tx_index: 1,
+        tx_block_idx: 1,
+        txid: [0u8; 32],
+        resolved_inputs: vec![UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_EXT,
+            covenant_data: core_ext_covdata(7, &[0x99]),
+            creation_height: 1,
+            created_by_coinbase: false,
+        }],
+        witness_start: 0,
+        witness_end: 1,
+        input_outpoints: vec![Outpoint {
+            txid: prev_txid,
+            vout: 0,
+        }],
+        fee: 10,
+    };
+    let profiles = CoreExtProfiles {
+        active: vec![CoreExtActiveProfile {
+            ext_id: 7,
+            tx_context_enabled: true,
+            allowed_suite_ids: vec![0x42],
+            verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+            verify_sig_ext_tx_context_fn: Some(record_txctx_verifier),
+            binding_descriptor: b"accept".to_vec(),
+            ext_payload_schema: b"schema".to_vec(),
+        }],
+    };
+
+    let result = validate_tx_local(&ptc, &pb, [0u8; 32], 1, 0, &profiles, None);
+    let err = result.err.expect("expected err");
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    assert!(!CORE_EXT_TXCTX_CALLED.load(Ordering::SeqCst));
 }
 
 #[test]
