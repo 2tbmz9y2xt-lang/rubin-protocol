@@ -124,6 +124,37 @@ func TestConnectBlockBasicInMemoryAtHeight_OK_ComputesFeesAndUpdatesState(t *tes
 	if got := state.AlreadyGenerated.Uint64(); got != subsidy {
 		t.Fatalf("state.already_generated=%d, want %d", got, subsidy)
 	}
+
+	// Per-element UTXO verification: CovenantType, Value, CreatedByCoinbase for each entry.
+	spendOut := Outpoint{Txid: spendTxid, Vout: 0}
+	spendEntry, ok := state.Utxos[spendOut]
+	if !ok {
+		t.Fatalf("spend output missing from UTXO set")
+	}
+	if spendEntry.CovenantType != COV_TYPE_P2PK {
+		t.Fatalf("spend output CovenantType=%d, want %d", spendEntry.CovenantType, COV_TYPE_P2PK)
+	}
+	if spendEntry.Value != 90 {
+		t.Fatalf("spend output Value=%d, want 90", spendEntry.Value)
+	}
+	if spendEntry.CreatedByCoinbase {
+		t.Fatalf("spend output CreatedByCoinbase should be false")
+	}
+
+	cbOut := Outpoint{Txid: cbTxid, Vout: 0}
+	cbEntry, ok := state.Utxos[cbOut]
+	if !ok {
+		t.Fatalf("coinbase output missing from UTXO set")
+	}
+	if cbEntry.CovenantType != COV_TYPE_P2PK {
+		t.Fatalf("coinbase output CovenantType=%d, want %d", cbEntry.CovenantType, COV_TYPE_P2PK)
+	}
+	if cbEntry.Value != subsidy+sumFees {
+		t.Fatalf("coinbase output Value=%d, want %d", cbEntry.Value, subsidy+sumFees)
+	}
+	if !cbEntry.CreatedByCoinbase {
+		t.Fatalf("coinbase output CreatedByCoinbase should be true")
+	}
 }
 
 func TestConnectBlockBasicInMemoryAtHeight_NilState(t *testing.T) {
