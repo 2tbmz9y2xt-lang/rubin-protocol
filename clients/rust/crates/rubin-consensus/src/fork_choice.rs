@@ -35,3 +35,30 @@ pub fn fork_chainwork_from_targets(targets: &[[u8; 32]]) -> Result<BigUint, TxEr
     }
     Ok(total)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fork_work_accepts_pow_limit_boundary() {
+        let work = fork_work_from_target(POW_LIMIT).expect("pow_limit must be accepted");
+        assert_eq!(work, BigUint::one());
+    }
+
+    #[test]
+    fn fork_work_is_deterministic() {
+        let target = POW_LIMIT;
+        let w1 = fork_work_from_target(target).expect("work 1");
+        let w2 = fork_work_from_target(target).expect("work 2");
+        assert_eq!(w1, w2);
+    }
+
+    #[test]
+    fn fork_chainwork_is_deterministic() {
+        let targets = [POW_LIMIT, POW_LIMIT];
+        let w1 = fork_chainwork_from_targets(&targets).expect("chainwork 1");
+        let w2 = fork_chainwork_from_targets(&targets).expect("chainwork 2");
+        assert_eq!(w1, w2);
+    }
+}
