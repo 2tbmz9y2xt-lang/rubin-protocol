@@ -236,10 +236,10 @@ fn featurebit_boundary_height_calculation() {
     for h in [0, 1, SIGNAL_WINDOW - 1, SIGNAL_WINDOW, SIGNAL_WINDOW + 1] {
         let counts_needed = (h / SIGNAL_WINDOW) as usize;
         let counts: Vec<u32> = vec![0; counts_needed];
-        if let Ok(ev) = featurebit_state_at_height_from_window_counts(&d, h, &counts) {
-            let expected_boundary = h - (h % SIGNAL_WINDOW);
-            assert_eq!(ev.boundary_height, expected_boundary);
-        }
+        let ev = featurebit_state_at_height_from_window_counts(&d, h, &counts)
+            .expect("valid deployment + correct counts_needed must succeed");
+        let expected_boundary = h - (h % SIGNAL_WINDOW);
+        assert_eq!(ev.boundary_height, expected_boundary);
     }
 }
 
