@@ -184,6 +184,18 @@ test = false
 doc = false
 
 [[bin]]
+name = "sig_cache_concurrent"
+path = "fuzz_targets/sig_cache_concurrent.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "suite_registry_surface"
+path = "fuzz_targets/suite_registry_surface.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "connect_block_inmem"
 path = "fuzz_targets/connect_block_inmem.rs"
 test = false
