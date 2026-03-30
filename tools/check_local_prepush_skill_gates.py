@@ -12,8 +12,55 @@ from pathlib import Path
 MAX_RENDERED_CHANGED_PATHS = 25
 MAX_RENDERED_PATH_CHARS = 160
 CONTRACT_PATH = Path(__file__).resolve().with_name("prepush_review_contract.json")
+TOOLS_REPO_ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_REASONING = {"low", "medium", "high", "xhigh"}
 ALLOWED_CHECK_TYPES = {"auto", "consensus_critical", "formal_lean", "code_noncritical", "diff_only"}
+
+RUST_FUZZ_TARGET_PREFIX = "clients/rust/fuzz/fuzz_targets/"
+RUST_FUZZ_CARGO_PATH = "clients/rust/fuzz/Cargo.toml"
+RUST_BENCH_PREFIX = "clients/rust/crates/rubin-consensus/benches/"
+RUST_CONSENSUS_CARGO_PATH = "clients/rust/crates/rubin-consensus/Cargo.toml"
+
+RUST_FUZZ_RUNTIME_MAP: dict[str, tuple[str, ...]] = {
+    "clients/rust/crates/rubin-consensus/src/block.rs": ("parse_block_bytes", "block_header_surface"),
+    "clients/rust/crates/rubin-consensus/src/block_basic.rs": ("validate_block_basic",),
+    "clients/rust/crates/rubin-consensus/src/compact_relay.rs": ("compact_shortid",),
+    "clients/rust/crates/rubin-consensus/src/compactsize.rs": ("compactsize",),
+    "clients/rust/crates/rubin-consensus/src/connect_block_inmem.rs": ("connect_block_inmem",),
+    "clients/rust/crates/rubin-consensus/src/connect_block_parallel.rs": (
+        "connect_block_parallel_determinism",
+        "connect_block_parallel_worker_parity",
+    ),
+    "clients/rust/crates/rubin-consensus/src/covenant_genesis.rs": ("covenant_genesis",),
+    "clients/rust/crates/rubin-consensus/src/da_chunk_hash.rs": ("da_chunk_hash_verify",),
+    "clients/rust/crates/rubin-consensus/src/da_payload_commit.rs": ("da_payload_commit_verify",),
+    "clients/rust/crates/rubin-consensus/src/featurebits.rs": ("featurebits_state",),
+    "clients/rust/crates/rubin-consensus/src/flagday.rs": ("flagday_helpers",),
+    "clients/rust/crates/rubin-consensus/src/fork_choice.rs": ("fork_work",),
+    "clients/rust/crates/rubin-consensus/src/pow.rs": ("pow_check",),
+    "clients/rust/crates/rubin-consensus/src/sig_cache.rs": ("sig_cache_structural", "sig_cache_concurrent"),
+    "clients/rust/crates/rubin-consensus/src/sighash.rs": ("sighash",),
+    "clients/rust/crates/rubin-consensus/src/spend_verify.rs": ("spend_dispatch_structural",),
+    "clients/rust/crates/rubin-consensus/src/suite_registry.rs": ("suite_registry_surface",),
+    "clients/rust/crates/rubin-consensus/src/tx.rs": ("parse_tx", "parse_tx_determinism", "marshal_tx_roundtrip"),
+    "clients/rust/crates/rubin-consensus/src/tx_dep_graph.rs": ("tx_dep_graph",),
+    "clients/rust/crates/rubin-consensus/src/txcontext.rs": ("txcontext_bundle",),
+    "clients/rust/crates/rubin-consensus/src/tx_validate_worker.rs": ("validate_tx_local",),
+    "clients/rust/crates/rubin-consensus/src/verify_sig_openssl.rs": ("sig_verify_openssl",),
+    "clients/rust/crates/rubin-node/src/p2p/relay.rs": ("tx_relay_announce", "tx_relay_receive"),
+    "clients/rust/crates/rubin-node/src/p2p/version.rs": ("p2p_version_payload",),
+    "clients/rust/crates/rubin-node/src/p2p/wire.rs": ("p2p_wire_message",),
+}
+
+RUST_BENCH_RUNTIME_MAP: dict[str, tuple[str, ...]] = {
+    "clients/rust/crates/rubin-consensus/src/sig_cache.rs": ("sig_cache",),
+    "clients/rust/crates/rubin-consensus/src/connect_block_parallel.rs": ("connect_block_parallel",),
+    "clients/rust/crates/rubin-consensus/src/sig_queue.rs": ("connect_block_parallel",),
+    "clients/rust/crates/rubin-consensus/src/spend_verify.rs": ("connect_block_parallel", "combined_load"),
+    "clients/rust/crates/rubin-consensus/src/verify_sig_openssl.rs": ("connect_block_parallel",),
+    "clients/rust/crates/rubin-consensus/src/da_verify_parallel.rs": ("combined_load",),
+    "clients/rust/crates/rubin-consensus/src/da_rules.rs": ("combined_load",),
+}
 
 
 @dataclass(frozen=True)
@@ -156,6 +203,62 @@ def matches_any(path: str, prefixes: tuple[str, ...], suffixes: tuple[str, ...],
         or any(is_under(path, prefix) for prefix in prefixes)
         or any(path.endswith(suffix) for suffix in suffixes)
     )
+
+
+def available_rust_fuzz_targets(repo_root: Path = TOOLS_REPO_ROOT) -> set[str]:
+    root = repo_root / "clients" / "rust" / "fuzz" / "fuzz_targets"
+    if not root.exists():
+        return set()
+    return {path.stem for path in root.glob("*.rs")}
+
+
+def available_rust_bench_targets(repo_root: Path = TOOLS_REPO_ROOT) -> set[str]:
+    root = repo_root / "clients" / "rust" / "crates" / "rubin-consensus" / "benches"
+    if not root.exists():
+        return set()
+    return {path.stem for path in root.glob("*.rs")}
+
+
+def resolve_rust_fuzz_targets(changed: set[str], repo_root: Path = TOOLS_REPO_ROOT) -> tuple[set[str], bool]:
+    available = available_rust_fuzz_targets(repo_root)
+    if not available:
+        return set(), False
+
+    targets: set[str] = set()
+    build_all = RUST_FUZZ_CARGO_PATH in changed
+    for path in changed:
+        if path.startswith(RUST_FUZZ_TARGET_PREFIX):
+            stem = Path(path).stem
+            if stem in available:
+                targets.add(stem)
+        mapped = RUST_FUZZ_RUNTIME_MAP.get(path)
+        if mapped:
+            targets.update(name for name in mapped if name in available)
+    if build_all:
+        targets = set(available)
+    return targets, build_all
+
+
+def resolve_rust_bench_targets(changed: set[str], repo_root: Path = TOOLS_REPO_ROOT) -> tuple[set[str], set[str], bool]:
+    available = available_rust_bench_targets(repo_root)
+    if not available:
+        return set(), set(), False
+
+    direct_changes: set[str] = set()
+    targets: set[str] = set()
+    build_all = RUST_CONSENSUS_CARGO_PATH in changed
+    for path in changed:
+        if path.startswith(RUST_BENCH_PREFIX):
+            stem = Path(path).stem
+            if stem in available:
+                direct_changes.add(stem)
+                targets.add(stem)
+        mapped = RUST_BENCH_RUNTIME_MAP.get(path)
+        if mapped:
+            targets.update(name for name in mapped if name in available)
+    if build_all:
+        targets = set(available)
+    return targets, direct_changes, build_all
 
 
 def run_check(name: str, cmd: list[str], repo_root: Path) -> int:
@@ -361,6 +464,47 @@ def build_plan(
             "rust_consensus_tests",
             ["scripts/dev-env.sh", "--", "bash", "-lc", "cd clients/rust && cargo test -p rubin-consensus"],
         )
+
+    rust_fuzz_targets, rust_fuzz_all = resolve_rust_fuzz_targets(changed)
+    if rust_fuzz_targets:
+        add_focus("Rust native fuzz companions are mandatory local gates: touched fuzz surfaces must at least build before push, otherwise push is blocked.")
+        if rust_fuzz_all:
+            add_check(
+                "rust_fuzz_build_all",
+                ["scripts/dev-env.sh", "--", "bash", "-lc", "cd clients/rust/fuzz && cargo build --bins"],
+            )
+        else:
+            for target in sorted(rust_fuzz_targets):
+                add_check(
+                    f"rust_fuzz_build:{target}",
+                    ["scripts/dev-env.sh", "--", "bash", "-lc", f"cd clients/rust/fuzz && cargo build --bin {shlex.quote(target)}"],
+                )
+
+    rust_bench_targets, rust_direct_bench_changes, rust_bench_all = resolve_rust_bench_targets(changed)
+    if rust_bench_targets:
+        add_focus("Rust benchmark companions are mandatory local gates: perf-sensitive surfaces with dedicated benches must compile locally before push, and edited bench files must get a tiny smoke run.")
+        if rust_bench_all:
+            add_check(
+                "rust_bench_norun_all",
+                ["scripts/dev-env.sh", "--", "bash", "-lc", "cd clients/rust && cargo bench -p rubin-consensus --benches --no-run"],
+            )
+        else:
+            for target in sorted(rust_bench_targets):
+                add_check(
+                    f"rust_bench_norun:{target}",
+                    ["scripts/dev-env.sh", "--", "bash", "-lc", f"cd clients/rust && cargo bench -p rubin-consensus --bench {shlex.quote(target)} --no-run"],
+                )
+        for target in sorted(rust_direct_bench_changes):
+            add_check(
+                f"rust_bench_smoke:{target}",
+                [
+                    "scripts/dev-env.sh",
+                    "--",
+                    "bash",
+                    "-lc",
+                    f"cd clients/rust && cargo bench -p rubin-consensus --bench {shlex.quote(target)} -- --sample-size 10 --measurement-time 0.01 --warm-up-time 0.01",
+                ],
+            )
 
     formal_bridge_exact_paths = {
         "tools/check_formal_refinement_bridge.py",

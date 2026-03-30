@@ -246,6 +246,26 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "expected >= 1"):
                 m.load_profile_contract("diff_only", path=contract_path)
 
+    def test_build_plan_adds_native_fuzz_builds_for_changed_runtime_surface(self):
+        changed = {"clients/rust/crates/rubin-consensus/src/connect_block_parallel.rs"}
+
+        checks, focuses, _lenses, _profile = m.build_plan(changed)
+        check_names = {name for name, _cmd in checks}
+
+        self.assertIn("rust_fuzz_build:connect_block_parallel_determinism", check_names)
+        self.assertIn("rust_fuzz_build:connect_block_parallel_worker_parity", check_names)
+        self.assertTrue(any("native fuzz companions" in focus for focus in focuses))
+
+    def test_build_plan_adds_bench_compile_and_smoke_for_direct_bench_edit(self):
+        changed = {"clients/rust/crates/rubin-consensus/benches/sig_cache.rs"}
+
+        checks, focuses, _lenses, _profile = m.build_plan(changed)
+        check_names = {name for name, _cmd in checks}
+
+        self.assertIn("rust_bench_norun:sig_cache", check_names)
+        self.assertIn("rust_bench_smoke:sig_cache", check_names)
+        self.assertTrue(any("benchmark companions are mandatory local gates" in focus for focus in focuses))
+
 
 if __name__ == "__main__":
     unittest.main()

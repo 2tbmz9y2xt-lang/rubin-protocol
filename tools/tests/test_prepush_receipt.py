@@ -32,9 +32,22 @@ class PrepushReceiptTests(unittest.TestCase):
             self.init_repo(repo_root)
             result = m.write_receipt(repo_root, base_ref="origin/main", source="test")
             self.assertTrue(result["fresh"])
+            self.assertEqual(result["receipt"]["steps"], ["local-skill-gates", "coverage-preflight"])
             checked = m.check_receipt(repo_root, base_ref="origin/main")
             self.assertTrue(checked["fresh"])
             self.assertEqual(checked["reason"], "fresh")
+
+    def test_write_receipt_accepts_explicit_steps(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            self.init_repo(repo_root)
+            result = m.write_receipt(
+                repo_root,
+                base_ref="origin/main",
+                source="test",
+                steps=["local-skill-gates", "coverage-preflight", "extra-step"],
+            )
+            self.assertEqual(result["receipt"]["steps"], ["local-skill-gates", "coverage-preflight", "extra-step"])
 
     def test_check_detects_dirty_worktree(self):
         with tempfile.TemporaryDirectory() as td:
