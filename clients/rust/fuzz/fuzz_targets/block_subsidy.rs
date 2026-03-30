@@ -1,6 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use rubin_consensus::constants::TAIL_EMISSION_PER_BLOCK;
 
 // Fuzz block_subsidy: emission schedule calculation.
 // Verifies no-panic, determinism, and subsidy floor invariant.
@@ -22,5 +23,10 @@ fuzz_target!(|data: &[u8]| {
     // Invariant: genesis block subsidy is always 0.
     if height == 0 && s1 != 0 {
         panic!("block_subsidy(0, _) != 0: got {s1}");
+    }
+
+    // Invariant: positive heights must never undercut tail emission.
+    if height > 0 && s1 < TAIL_EMISSION_PER_BLOCK {
+        panic!("block_subsidy floor violated: {s1} < {}", TAIL_EMISSION_PER_BLOCK);
     }
 });

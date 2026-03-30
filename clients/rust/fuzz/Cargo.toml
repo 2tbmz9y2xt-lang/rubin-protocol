@@ -118,6 +118,18 @@ test = false
 doc = false
 
 [[bin]]
+name = "featurebits_state"
+path = "fuzz_targets/featurebits_state.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "flagday_helpers"
+path = "fuzz_targets/flagday_helpers.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "covenant_genesis"
 path = "fuzz_targets/covenant_genesis.rs"
 test = false
