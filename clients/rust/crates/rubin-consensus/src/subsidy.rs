@@ -59,6 +59,22 @@ mod tests {
             ((u128::from(MINEABLE_CAP) - already_generated) >> EMISSION_SPEED_FACTOR) as u64;
         assert_eq!(block_subsidy(1, already_generated), expected);
     }
+
+    #[test]
+    fn block_subsidy_positive_height_never_undercuts_tail() {
+        assert!(block_subsidy(1, 0) >= TAIL_EMISSION_PER_BLOCK);
+        assert!(block_subsidy(u64::MAX, u128::from(MINEABLE_CAP) - 1) >= TAIL_EMISSION_PER_BLOCK);
+    }
+
+    #[test]
+    fn block_subsidy_repeat_is_deterministic() {
+        let height = 42;
+        let already_generated = 123_456_789u128;
+        assert_eq!(
+            block_subsidy(height, already_generated),
+            block_subsidy(height, already_generated)
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
