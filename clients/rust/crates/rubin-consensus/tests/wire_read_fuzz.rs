@@ -181,7 +181,7 @@ fn wire_read_wrong_version_max() {
 fn wire_read_incremental_lengths_no_panic() {
     for len in 0..=256 {
         let buf = vec![0x01; len]; // version byte 0x01 at offset 0 → version=0x01010101 ≠ 1
-        let _ = parse_tx(&buf);
+        assert!(parse_tx(&buf).is_err());
     }
 }
 
@@ -199,7 +199,10 @@ fn wire_read_incremental_valid_prefix_no_panic() {
     full.push(0x00); // da_payload_len=0
 
     for cutoff in 0..full.len() {
-        let _ = parse_tx(&full[..cutoff]);
+        assert!(
+            parse_tx(&full[..cutoff]).is_err(),
+            "cutoff={cutoff} should fail"
+        );
     }
     // Full buffer should parse successfully (0 inputs, 0 outputs)
     assert!(parse_tx(&full).is_ok());
@@ -243,12 +246,12 @@ fn wire_read_deterministic_success() {
 
 #[test]
 fn wire_read_all_zeros_256() {
-    let _ = parse_tx(&[0x00; 256]);
+    assert!(parse_tx(&[0x00; 256]).is_err());
 }
 
 #[test]
 fn wire_read_all_ff_256() {
-    let _ = parse_tx(&[0xFF; 256]);
+    assert!(parse_tx(&[0xFF; 256]).is_err());
 }
 
 // =============================================================
