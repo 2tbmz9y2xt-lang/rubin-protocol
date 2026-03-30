@@ -476,6 +476,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn extract_crypto_sig_and_sighash_rejects_missing_trailer() {
+        let w = WitnessItem {
+            suite_id: SUITE_ID_ML_DSA_87,
+            pubkey: vec![],
+            signature: vec![],
+        };
+        let err = extract_crypto_sig_and_sighash(&w).expect_err("missing sighash trailer");
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+    }
+
+    #[test]
+    fn extract_crypto_sig_and_sighash_rejects_invalid_type() {
+        let w = WitnessItem {
+            suite_id: SUITE_ID_ML_DSA_87,
+            pubkey: vec![],
+            signature: vec![0xAA, 0xFF],
+        };
+        let err = extract_crypto_sig_and_sighash(&w).expect_err("invalid sighash type");
+        assert_eq!(err.code, ErrorCode::TxErrSighashTypeInvalid);
+    }
+
+    #[test]
+    fn extract_crypto_sig_and_sighash_preserves_crypto_sig_bytes() {
+        let w = WitnessItem {
+            suite_id: SUITE_ID_ML_DSA_87,
+            pubkey: vec![],
+            signature: vec![0xAA, 0xBB, SIGHASH_ALL],
+        };
+        let (crypto_sig, sighash_type) =
+            extract_crypto_sig_and_sighash(&w).expect("valid trailing sighash");
+        assert_eq!(crypto_sig, &[0xAA, 0xBB]);
+        assert_eq!(sighash_type, SIGHASH_ALL);
+    }
+
     // ======== Registry & Lookup Tests (8) ========
 
     #[test]
