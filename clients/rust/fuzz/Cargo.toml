@@ -22,8 +22,20 @@ test = false
 doc = false
 
 [[bin]]
+name = "parse_tx_determinism"
+path = "fuzz_targets/parse_tx_determinism.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "parse_block_bytes"
 path = "fuzz_targets/parse_block_bytes.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "block_header_surface"
+path = "fuzz_targets/block_header_surface.rs"
 test = false
 doc = false
 
@@ -132,6 +144,12 @@ doc = false
 [[bin]]
 name = "tx_relay_receive"
 path = "fuzz_targets/tx_relay_receive.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "marshal_tx_roundtrip"
+path = "fuzz_targets/marshal_tx_roundtrip.rs"
 test = false
 doc = false
 
