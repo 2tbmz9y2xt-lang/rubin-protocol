@@ -10,6 +10,15 @@ fn parse_tx_rejects_unsupported_version() {
 }
 
 #[test]
+fn parse_tx_rejects_unsupported_tx_kind() {
+    let mut tx = minimal_tx_bytes();
+    tx[4] = 0x03;
+
+    let err = parse_tx(&tx).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+}
+
+#[test]
 fn parse_tx_minimal_txid_wtxid() {
     let tx_bytes = minimal_tx_bytes();
     let (_tx, txid, wtxid, n) = parse_tx(&tx_bytes).expect("parse");
@@ -70,6 +79,41 @@ fn parse_tx_covenant_data_len_exceeds_cap() {
     crate::compactsize::encode_compact_size(0, &mut b); // da_payload_len
 
     let err = parse_tx(&b).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+}
+
+#[test]
+fn parse_tx_input_count_overflow() {
+    let mut b = Vec::new();
+    b.extend_from_slice(&1u32.to_le_bytes());
+    b.push(0x00);
+    b.extend_from_slice(&0u64.to_le_bytes());
+    crate::compactsize::encode_compact_size(MAX_TX_INPUTS + 1, &mut b);
+
+    let err = parse_tx(&b).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+}
+
+#[test]
+fn parse_tx_output_count_overflow() {
+    let mut b = Vec::new();
+    b.extend_from_slice(&1u32.to_le_bytes());
+    b.push(0x00);
+    b.extend_from_slice(&0u64.to_le_bytes());
+    crate::compactsize::encode_compact_size(0, &mut b);
+    crate::compactsize::encode_compact_size(MAX_TX_OUTPUTS + 1, &mut b);
+
+    let err = parse_tx(&b).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+}
+
+#[test]
+fn parse_tx_tx_kind_zero_rejects_nonzero_da_payload_len() {
+    let mut tx = minimal_tx_bytes();
+    let last = tx.len() - 1;
+    tx[last] = 0x01;
+
+    let err = parse_tx(&tx).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrParse);
 }
 
@@ -182,6 +226,37 @@ fn parse_tx_witness_item_canonicalization() {
 }
 
 #[test]
+fn parse_tx_sentinel_empty_witness_is_canonical() {
+    let mut tx = minimal_tx_bytes();
+    tx.truncate(core_end());
+    tx.push(0x01);
+    tx.push(SUITE_ID_SENTINEL);
+    tx.push(0x00);
+    tx.push(0x00);
+    tx.push(0x00);
+
+    let (parsed, _, _, _) = parse_tx(&tx).expect("parse sentinel");
+    assert_eq!(parsed.witness.len(), 1);
+    assert_eq!(parsed.witness[0].suite_id, SUITE_ID_SENTINEL);
+    assert!(parsed.witness[0].pubkey.is_empty());
+    assert!(parsed.witness[0].signature.is_empty());
+}
+
+#[test]
+fn parse_tx_missing_sighash_type_byte_rejected() {
+    let mut tx = minimal_tx_bytes();
+    tx.truncate(core_end());
+    tx.push(0x01);
+    tx.push(0x03);
+    tx.push(0x00);
+    tx.push(0x00);
+    tx.push(0x00);
+
+    let err = parse_tx(&tx).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+}
+
+#[test]
 fn parse_tx_witness_bytes_overflow() {
     let mut tx = minimal_tx_bytes();
     tx.truncate(core_end());
@@ -233,6 +308,67 @@ fn parse_tx_unknown_suite_id_accepted() {
     assert_eq!(t.witness[0].suite_id, 0x03);
     assert!(t.witness[0].pubkey.is_empty());
     assert_eq!(t.witness[0].signature, vec![0x01]);
+}
+
+#[test]
+fn parse_tx_da_commit_and_chunk_minimal_ok() {
+    let da_id = [0xa1u8; 32];
+    let payload = b"abc";
+    let payload_commitment = sha3_256(payload);
+
+    let commit = da_commit_tx(da_id, 1, payload_commitment, 1);
+    let parsed_commit = parse_tx(&commit).expect("parse commit").0;
+    assert_eq!(parsed_commit.tx_kind, 0x01);
+    assert!(parsed_commit.da_commit_core.is_some());
+
+    let chunk = da_chunk_tx(da_id, 0, sha3_256(payload), payload, 2);
+    let parsed_chunk = parse_tx(&chunk).expect("parse chunk").0;
+    assert_eq!(parsed_chunk.tx_kind, 0x02);
+    assert!(parsed_chunk.da_chunk_core.is_some());
+}
+
+#[test]
+fn parse_tx_da_commit_rejects_oversize_manifest_payload_len() {
+    let mut b = Vec::new();
+    b.extend_from_slice(&1u32.to_le_bytes());
+    b.push(0x01);
+    b.extend_from_slice(&0u64.to_le_bytes());
+    crate::compactsize::encode_compact_size(0, &mut b);
+    crate::compactsize::encode_compact_size(0, &mut b);
+    b.extend_from_slice(&0u32.to_le_bytes());
+    b.extend_from_slice(&[0xa2; 32]);
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&[0xa3; 32]);
+    b.extend_from_slice(&1u64.to_le_bytes());
+    b.extend_from_slice(&[0xa4; 32]);
+    b.extend_from_slice(&[0xa5; 32]);
+    b.extend_from_slice(&[0xa6; 32]);
+    b.push(0x00);
+    crate::compactsize::encode_compact_size(0, &mut b);
+    crate::compactsize::encode_compact_size(0, &mut b);
+    crate::compactsize::encode_compact_size(MAX_DA_MANIFEST_BYTES_PER_TX + 1, &mut b);
+
+    let err = parse_tx(&b).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+}
+
+#[test]
+fn parse_tx_da_chunk_rejects_zero_payload_len() {
+    let mut b = Vec::new();
+    b.extend_from_slice(&1u32.to_le_bytes());
+    b.push(0x02);
+    b.extend_from_slice(&0u64.to_le_bytes());
+    crate::compactsize::encode_compact_size(0, &mut b);
+    crate::compactsize::encode_compact_size(0, &mut b);
+    b.extend_from_slice(&0u32.to_le_bytes());
+    b.extend_from_slice(&[0xb1; 32]);
+    b.extend_from_slice(&0u16.to_le_bytes());
+    b.extend_from_slice(&[0xb2; 32]);
+    crate::compactsize::encode_compact_size(0, &mut b);
+    crate::compactsize::encode_compact_size(0, &mut b);
+
+    let err = parse_tx(&b).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrParse);
 }
 
 #[test]
