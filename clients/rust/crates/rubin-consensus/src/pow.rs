@@ -139,6 +139,61 @@ fn biguint_to_bytes32(x: &BigUint) -> Result<[u8; 32], TxError> {
     Ok(out)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bytes32_u16(value: u16) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        out[30..32].copy_from_slice(&value.to_be_bytes());
+        out
+    }
+
+    #[test]
+    fn retarget_v1_target_old_zero_errors() {
+        let err = retarget_v1([0u8; 32], 1, 2).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+    }
+
+    #[test]
+    fn retarget_v1_clamped_clamps_underflow_to_lo() {
+        let target_old = bytes32_u16(0x1000);
+        let first = 10_000u64;
+        let mut window = vec![0u64; WINDOW_SIZE as usize];
+        window[0] = first;
+        let got = retarget_v1_clamped(target_old, &window).expect("retarget");
+        let want = retarget_v1(target_old, 0, WINDOW_SIZE - 1).expect("expected");
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn retarget_v1_clamped_timestamp_clamp_overflow_lo() {
+        let mut target_old = [0u8; 32];
+        target_old[31] = 1;
+        let mut window = vec![0u64; WINDOW_SIZE as usize];
+        window[0] = u64::MAX;
+        let err = retarget_v1_clamped(target_old, &window).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+    }
+
+    #[test]
+    fn retarget_v1_clamped_timestamp_clamp_overflow_hi() {
+        let mut target_old = [0u8; 32];
+        target_old[31] = 1;
+        let mut window = vec![0u64; WINDOW_SIZE as usize];
+        window[0] = u64::MAX - MAX_TIMESTAMP_STEP_PER_BLOCK + 1;
+        let err = retarget_v1_clamped(target_old, &window).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+    }
+
+    #[test]
+    fn biguint_to_bytes32_overflow_errors() {
+        let overflow = BigUint::one() << 256usize;
+        let err = biguint_to_bytes32(&overflow).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Kani bounded model checking proofs
 // ---------------------------------------------------------------------------

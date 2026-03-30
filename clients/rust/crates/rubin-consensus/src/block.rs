@@ -51,6 +51,63 @@ pub fn block_hash(header_bytes: &[u8]) -> Result<[u8; 32], TxError> {
     Ok(sha3_256(header_bytes))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn header_bytes() -> [u8; BLOCK_HEADER_BYTES] {
+        let mut bytes = [0u8; BLOCK_HEADER_BYTES];
+        bytes[0..4].copy_from_slice(&7u32.to_le_bytes());
+        bytes[4..36].fill(0x01);
+        bytes[36..68].fill(0x02);
+        bytes[68..76].copy_from_slice(&11u64.to_le_bytes());
+        bytes[76..108].fill(0xff);
+        bytes[108..116].copy_from_slice(&13u64.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn parse_block_header_bytes_roundtrip_fields() {
+        let bytes = header_bytes();
+        let parsed = parse_block_header_bytes(&bytes).expect("parse block header");
+
+        assert_eq!(parsed.version, 7);
+        assert_eq!(parsed.prev_block_hash, [0x01; 32]);
+        assert_eq!(parsed.merkle_root, [0x02; 32]);
+        assert_eq!(parsed.timestamp, 11);
+        assert_eq!(parsed.target, [0xff; 32]);
+        assert_eq!(parsed.nonce, 13);
+    }
+
+    #[test]
+    fn parse_block_header_bytes_rejects_short_length() {
+        let err = parse_block_header_bytes(&[0u8; BLOCK_HEADER_BYTES - 1]).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+    }
+
+    #[test]
+    fn parse_block_header_bytes_rejects_truncation_points() {
+        for len in [0usize, 3, 35, 67, 75, 107, BLOCK_HEADER_BYTES - 1] {
+            let err = parse_block_header_bytes(&vec![0u8; len]).unwrap_err();
+            assert_eq!(err.code, ErrorCode::TxErrParse, "len={len}");
+        }
+    }
+
+    #[test]
+    fn block_hash_rejects_invalid_length() {
+        let err = block_hash(&[]).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+    }
+
+    #[test]
+    fn block_hash_matches_sha3() {
+        let mut bytes = [0u8; BLOCK_HEADER_BYTES];
+        bytes[0] = 0x42;
+        let got = block_hash(&bytes).expect("hash");
+        assert_eq!(got, sha3_256(&bytes));
+    }
+}
+
 #[cfg(kani)]
 mod verification {
     use super::*;
