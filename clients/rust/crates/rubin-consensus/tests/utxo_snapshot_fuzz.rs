@@ -195,7 +195,7 @@ fn snapshot_for_each_visits_all() {
         count += 1;
     });
     assert_eq!(count, 5);
-    assert_eq!(total_value, 0 + 100 + 200 + 300 + 400);
+    assert_eq!(total_value, 100 + 200 + 300 + 400);
 }
 
 // =============================================================
