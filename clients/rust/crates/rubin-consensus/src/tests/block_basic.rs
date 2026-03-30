@@ -1,4 +1,5 @@
 use super::*;
+use crate::tx::{Tx, TxInput, TxOutput, WitnessItem};
 
 #[test]
 fn parse_block_bytes_ok() {
@@ -824,6 +825,173 @@ fn tx_weight_at_height_unknown_suite_uses_floor() {
             .expect("at_height");
     let (w_legacy, _, _) = crate::block_basic::tx_weight_and_stats_public(&tx).expect("legacy");
     // Both should use VERIFY_COST_UNKNOWN_SUITE for suite 0xFE.
+    assert_eq!(w_reg, w_legacy);
+}
+
+#[test]
+fn tx_weight_at_height_native_suite_uses_registry_cost() {
+    use crate::suite_registry::{DefaultRotationProvider, SuiteRegistry};
+
+    let tx = Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 0,
+        inputs: vec![TxInput {
+            prev_txid: [0u8; 32],
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 1000,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: Vec::new(),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![WitnessItem {
+            suite_id: SUITE_ID_ML_DSA_87,
+            pubkey: vec![0u8; ML_DSA_87_PUBKEY_BYTES as usize],
+            signature: vec![0u8; (ML_DSA_87_SIG_BYTES + 1) as usize],
+        }],
+        da_payload: Vec::new(),
+    };
+
+    let rp = DefaultRotationProvider;
+    let reg = SuiteRegistry::default_registry();
+    let (w_reg, _, _) =
+        crate::block_basic::tx_weight_and_stats_at_height(&tx, 100, Some(&rp), Some(&reg))
+            .expect("at_height");
+    let (w_legacy, _, _) = crate::block_basic::tx_weight_and_stats_public(&tx).expect("legacy");
+    assert_eq!(w_reg, w_legacy);
+}
+
+#[test]
+fn tx_weight_at_height_native_not_in_spend_set_uses_unknown_floor() {
+    use crate::suite_registry::{NativeSuiteSet, RotationProvider, SuiteParams, SuiteRegistry};
+    use std::collections::BTreeMap;
+
+    struct SpendWithout02;
+    impl RotationProvider for SpendWithout02 {
+        fn native_create_suites(&self, _h: u64) -> NativeSuiteSet {
+            NativeSuiteSet::new(&[SUITE_ID_ML_DSA_87, 0x02])
+        }
+        fn native_spend_suites(&self, _h: u64) -> NativeSuiteSet {
+            NativeSuiteSet::new(&[SUITE_ID_ML_DSA_87])
+        }
+    }
+
+    struct SpendWith02;
+    impl RotationProvider for SpendWith02 {
+        fn native_create_suites(&self, _h: u64) -> NativeSuiteSet {
+            NativeSuiteSet::new(&[SUITE_ID_ML_DSA_87, 0x02])
+        }
+        fn native_spend_suites(&self, _h: u64) -> NativeSuiteSet {
+            NativeSuiteSet::new(&[SUITE_ID_ML_DSA_87, 0x02])
+        }
+    }
+
+    let mut suites = BTreeMap::new();
+    suites.insert(
+        SUITE_ID_ML_DSA_87,
+        SuiteParams {
+            suite_id: SUITE_ID_ML_DSA_87,
+            pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+            sig_len: ML_DSA_87_SIG_BYTES,
+            verify_cost: VERIFY_COST_ML_DSA_87,
+            openssl_alg: "ML-DSA-87",
+        },
+    );
+    suites.insert(
+        0x02,
+        SuiteParams {
+            suite_id: 0x02,
+            pubkey_len: 1312,
+            sig_len: 2420,
+            verify_cost: 4,
+            openssl_alg: "ML-DSA-65",
+        },
+    );
+    let reg = SuiteRegistry::with_suites(suites);
+
+    let tx = Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 0,
+        inputs: vec![TxInput {
+            prev_txid: [0u8; 32],
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 1000,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: Vec::new(),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![WitnessItem {
+            suite_id: 0x02,
+            pubkey: vec![0u8; 1312],
+            signature: vec![0u8; 2421],
+        }],
+        da_payload: Vec::new(),
+    };
+
+    let (w_floor, _, _) = crate::block_basic::tx_weight_and_stats_at_height(
+        &tx,
+        100,
+        Some(&SpendWithout02),
+        Some(&reg),
+    )
+    .expect("unknown floor");
+    let (w_native, _, _) =
+        crate::block_basic::tx_weight_and_stats_at_height(&tx, 100, Some(&SpendWith02), Some(&reg))
+            .expect("native cost");
+
+    assert!(w_floor > w_native);
+    assert_eq!(w_floor - w_native, VERIFY_COST_UNKNOWN_SUITE - 4);
+}
+
+#[test]
+fn tx_weight_at_height_wrong_lengths_match_legacy_zero_sig_cost() {
+    use crate::suite_registry::{DefaultRotationProvider, SuiteRegistry};
+
+    let tx = Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 0,
+        inputs: vec![TxInput {
+            prev_txid: [0u8; 32],
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 1000,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: Vec::new(),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![WitnessItem {
+            suite_id: SUITE_ID_ML_DSA_87,
+            pubkey: vec![0u8; (ML_DSA_87_PUBKEY_BYTES + 1) as usize],
+            signature: vec![0u8; (ML_DSA_87_SIG_BYTES + 1) as usize],
+        }],
+        da_payload: Vec::new(),
+    };
+
+    let rp = DefaultRotationProvider;
+    let reg = SuiteRegistry::default_registry();
+    let (w_reg, _, _) =
+        crate::block_basic::tx_weight_and_stats_at_height(&tx, 100, Some(&rp), Some(&reg))
+            .expect("at_height");
+    let (w_legacy, _, _) = crate::block_basic::tx_weight_and_stats_public(&tx).expect("legacy");
     assert_eq!(w_reg, w_legacy);
 }
 
