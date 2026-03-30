@@ -192,8 +192,8 @@ fn minimal_tx_bytes() -> Vec<u8> {
     buf.extend_from_slice(&0u32.to_le_bytes());
     //   script_sig_len: compact_size = 0
     buf.push(0x00);
-    //   sequence: u32 LE
-    buf.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+    //   sequence: u32 LE (max allowed = 0x7FFFFFFF)
+    buf.extend_from_slice(&0x7FFFFFFFu32.to_le_bytes());
 
     // output_count: compact_size = 1
     buf.push(0x01);
