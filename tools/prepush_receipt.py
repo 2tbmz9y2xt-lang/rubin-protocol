@@ -54,8 +54,15 @@ def tracked_worktree_clean(repo_root: Path) -> bool:
     return run_git(repo_root, "status", "--short", "--untracked-files=no") == ""
 
 
-def write_receipt(repo_root: Path, *, base_ref: str, source: str) -> dict[str, object]:
+def write_receipt(
+    repo_root: Path,
+    *,
+    base_ref: str,
+    source: str,
+    steps: list[str] | None = None,
+) -> dict[str, object]:
     path = receipt_path(repo_root)
+    receipt_steps = list(steps or ["local-skill-gates", "coverage-preflight"])
     payload = {
         "schema_version": 1,
         "note": "rubin-protocol pre-push preflight receipt",
@@ -67,7 +74,7 @@ def write_receipt(repo_root: Path, *, base_ref: str, source: str) -> dict[str, o
         "merge_base": current_merge_base(repo_root, base_ref),
         "tracked_worktree_clean": tracked_worktree_clean(repo_root),
         "generated_at": now_utc_iso(),
-        "steps": ["coverage-preflight"],
+        "steps": receipt_steps,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
