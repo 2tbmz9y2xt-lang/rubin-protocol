@@ -22,6 +22,25 @@ const DEFAULT_UNKNOWN_SUITE_TXS: usize = 8;
 const DEFAULT_DA_CHUNKS: usize = 32;
 const DEFAULT_CHUNK_BYTES: usize = 65_536;
 const DEFAULT_UNKNOWN_SUITE_SIG_BYTES: usize = 49_856;
+const UNKNOWN_SUITE_PUBKEY_BYTES: usize = 64;
+
+fn compact_size_len(value: u64) -> usize {
+    match value {
+        0x00..=0xfc => 1,
+        0xfd..=0xffff => 3,
+        0x1_0000..=0xffff_ffff => 5,
+        _ => 9,
+    }
+}
+
+fn max_unknown_suite_sig_bytes(pubkey_len: usize) -> usize {
+    let base_overhead = 1 + 1 + compact_size_len(pubkey_len as u64) + pubkey_len;
+    let mut sig_len = MAX_WITNESS_BYTES_PER_TX.saturating_sub(base_overhead);
+    while sig_len + compact_size_len(sig_len as u64) + base_overhead > MAX_WITNESS_BYTES_PER_TX {
+        sig_len -= 1;
+    }
+    sig_len
+}
 
 fn bench_env_usize(key: &str, default: usize, min: usize, max: usize) -> usize {
     let Ok(raw) = env::var(key) else {
@@ -178,11 +197,11 @@ fn build_combined_load_fixture() -> (Vec<u8>, [u8; 32], [u8; 32], u64) {
         "RUBIN_COMBINED_LOAD_UNKNOWN_SUITE_SIG_BYTES",
         DEFAULT_UNKNOWN_SUITE_SIG_BYTES,
         1,
-        MAX_WITNESS_BYTES_PER_TX,
+        max_unknown_suite_sig_bytes(UNKNOWN_SUITE_PUBKEY_BYTES),
     );
 
     let height = 1u64;
-    let unknown_suite_pub = vec![0x42; 64];
+    let unknown_suite_pub = vec![0x42; UNKNOWN_SUITE_PUBKEY_BYTES];
     let unknown_suite_sig = vec![0x5a; unknown_suite_sig_bytes];
     let mut nonce = 1u64;
 
