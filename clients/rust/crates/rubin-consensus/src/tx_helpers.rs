@@ -213,6 +213,58 @@ mod tests {
         }
     }
 
+    fn da_commit_tx() -> Tx {
+        Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0x01,
+            tx_nonce: 7,
+            inputs: Vec::new(),
+            outputs: vec![TxOutput {
+                value: 0,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: Vec::new(),
+            }],
+            locktime: 0,
+            da_commit_core: Some(crate::tx::DaCommitCore {
+                da_id: [0x10; 32],
+                chunk_count: 1,
+                retl_domain_id: [0x20; 32],
+                batch_number: 9,
+                tx_data_root: [0x30; 32],
+                state_root: [0x40; 32],
+                withdrawals_root: [0x50; 32],
+                batch_sig_suite: 0x00,
+                batch_sig: vec![0xaa, 0xbb],
+            }),
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: vec![0xde, 0xad, 0xbe, 0xef],
+        }
+    }
+
+    fn da_chunk_tx() -> Tx {
+        Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0x02,
+            tx_nonce: 9,
+            inputs: Vec::new(),
+            outputs: vec![TxOutput {
+                value: 0,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: Vec::new(),
+            }],
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: Some(crate::tx::DaChunkCore {
+                da_id: [0x11; 32],
+                chunk_index: 0,
+                chunk_hash: [0x22; 32],
+            }),
+            witness: Vec::new(),
+            da_payload: vec![0x01],
+        }
+    }
+
     fn test_utxos(pubkey: &[u8]) -> HashMap<Outpoint, UtxoEntry> {
         HashMap::from([(
             Outpoint {
@@ -248,6 +300,112 @@ mod tests {
         let (parsed, _, _, consumed) = parse_tx(&bytes).expect("parse");
         assert_eq!(consumed, bytes.len());
         assert_eq!(parsed, tx);
+    }
+
+    #[test]
+    fn marshal_tx_with_inputs_outputs_roundtrips() {
+        let mut tx = test_tx();
+        tx.tx_nonce = 42;
+        tx.inputs[0].prev_txid[0..3].copy_from_slice(&[0x01, 0x02, 0x03]);
+        tx.inputs[0].prev_vout = 7;
+        tx.inputs[0].script_sig = vec![0xaa, 0xbb];
+        tx.inputs[0].sequence = u32::MAX;
+        tx.outputs = vec![
+            TxOutput {
+                value: 50_000,
+                covenant_type: 0,
+                covenant_data: Vec::new(),
+            },
+            TxOutput {
+                value: 10_000,
+                covenant_type: 1,
+                covenant_data: vec![0xcc],
+            },
+        ];
+        tx.locktime = 100;
+
+        let bytes = marshal_tx(&tx).expect("marshal");
+        let (parsed, _, _, consumed) = parse_tx(&bytes).expect("parse");
+        assert_eq!(consumed, bytes.len());
+        assert_eq!(parsed.inputs.len(), 1);
+        assert_eq!(parsed.inputs[0].prev_txid, tx.inputs[0].prev_txid);
+        assert_eq!(parsed.outputs.len(), 2);
+        assert_eq!(parsed.outputs[0].value, 50_000);
+        assert_eq!(parsed.locktime, 100);
+    }
+
+    #[test]
+    fn marshal_tx_empty_da_payload_roundtrips() {
+        let tx = Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0x00,
+            tx_nonce: 0,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: Vec::new(),
+        };
+
+        let bytes = marshal_tx(&tx).expect("marshal");
+        let (parsed, _, _, consumed) = parse_tx(&bytes).expect("parse");
+        assert_eq!(consumed, bytes.len());
+        assert!(parsed.da_payload.is_empty());
+    }
+
+    #[test]
+    fn marshal_tx_da_commit_roundtrips() {
+        let tx = da_commit_tx();
+        let bytes = marshal_tx(&tx).expect("marshal commit");
+        let (parsed, _, _, consumed) = parse_tx(&bytes).expect("parse commit");
+        assert_eq!(consumed, bytes.len());
+        assert_eq!(parsed.da_commit_core, tx.da_commit_core);
+        assert_eq!(parsed.da_payload, tx.da_payload);
+    }
+
+    #[test]
+    fn marshal_tx_da_chunk_roundtrips() {
+        let tx = da_chunk_tx();
+        let bytes = marshal_tx(&tx).expect("marshal chunk");
+        let (parsed, _, _, consumed) = parse_tx(&bytes).expect("parse chunk");
+        assert_eq!(consumed, bytes.len());
+        assert_eq!(parsed.da_chunk_core, tx.da_chunk_core);
+        assert_eq!(parsed.da_payload, tx.da_payload);
+    }
+
+    #[test]
+    fn marshal_tx_da_kind_missing_core_errors() {
+        let tx_commit = Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0x01,
+            tx_nonce: 0,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: vec![0x01],
+        };
+        let err = marshal_tx(&tx_commit).expect_err("missing commit core must fail");
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+
+        let tx_chunk = Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0x02,
+            tx_nonce: 0,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: vec![0x01],
+        };
+        let err = marshal_tx(&tx_chunk).expect_err("missing chunk core must fail");
+        assert_eq!(err.code, ErrorCode::TxErrParse);
     }
 
     #[test]
