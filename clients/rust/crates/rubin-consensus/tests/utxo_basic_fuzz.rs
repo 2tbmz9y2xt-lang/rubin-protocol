@@ -181,7 +181,7 @@ fn minimal_tx_bytes() -> Vec<u8> {
     // tx_kind: u8
     buf.push(0x00);
     // tx_nonce: u64 LE
-    buf.extend_from_slice(&0u64.to_le_bytes());
+    buf.extend_from_slice(&1u64.to_le_bytes());
 
     // input_count: compact_size = 1
     buf.push(0x01);
@@ -210,8 +210,17 @@ fn minimal_tx_bytes() -> Vec<u8> {
     // locktime: u32 LE
     buf.extend_from_slice(&0u32.to_le_bytes());
 
-    // witness_count: compact_size = 0 (no witnesses)
-    buf.push(0x00);
+    // witness_count: compact_size = 1 (one witness for the P2PK input)
+    buf.push(0x01);
+    // witness[0]: suite_id=ML_DSA_87 (0x01) + pk + sig (fake but structurally valid)
+    buf.push(0x01); // suite_id
+                    // pk_len: compact_size encoding of 2592
+    rubin_consensus::encode_compact_size(2592, &mut buf);
+    buf.extend_from_slice(&[0x42u8; 2592]); // dummy ML-DSA-87 pubkey
+                                            // sig_len: compact_size = 4627 (ML_DSA_87_SIG_BYTES) + 1 (sighash_type) = 4628
+    rubin_consensus::encode_compact_size(4627 + 1, &mut buf);
+    buf.extend_from_slice(&[0x01]); // sighash_type byte
+    buf.extend_from_slice(&[0x00u8; 4627]); // dummy ML-DSA-87 signature
 
     // da_payload_len: compact_size = 0
     buf.push(0x00);
