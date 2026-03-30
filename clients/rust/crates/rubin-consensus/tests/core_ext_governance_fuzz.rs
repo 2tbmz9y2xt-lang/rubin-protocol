@@ -222,12 +222,11 @@ fn featurebit_timeout_before_start() {
 fn featurebit_deterministic() {
     let d = basic_deployment();
     let counts = [100u32, 200, 300];
-    let r1 = featurebit_state_at_height_from_window_counts(&d, SIGNAL_WINDOW * 2 + 10, &counts);
-    let r2 = featurebit_state_at_height_from_window_counts(&d, SIGNAL_WINDOW * 2 + 10, &counts);
-    assert_eq!(r1.is_ok(), r2.is_ok());
-    if let (Ok(e1), Ok(e2)) = (r1, r2) {
-        assert_eq!(e1, e2);
-    }
+    let e1 = featurebit_state_at_height_from_window_counts(&d, SIGNAL_WINDOW * 2 + 10, &counts)
+        .expect("valid deployment + counts must succeed deterministically");
+    let e2 = featurebit_state_at_height_from_window_counts(&d, SIGNAL_WINDOW * 2 + 10, &counts)
+        .expect("valid deployment + counts must succeed deterministically");
+    assert_eq!(e1, e2);
 }
 
 #[test]
