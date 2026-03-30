@@ -33,9 +33,15 @@ fuzz_target!(|data: &[u8]| {
     cursor += 8;
     let timeout_height = u64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap());
     cursor += 8;
-    let height = u64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap());
+    let raw_height = u64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap());
     cursor += 8;
     let counts = decode_window_counts(&data[cursor..]);
+    let max_height_exclusive = ((counts.len() as u64).saturating_add(1)).saturating_mul(SIGNAL_WINDOW);
+    let height = if max_height_exclusive == 0 {
+        0
+    } else {
+        raw_height % max_height_exclusive
+    };
 
     let deployment = FeatureBitDeployment {
         name,
