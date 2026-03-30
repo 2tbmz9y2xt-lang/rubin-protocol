@@ -953,7 +953,10 @@ fn tx_weight_at_height_native_not_in_spend_set_uses_unknown_floor() {
             .expect("native cost");
 
     assert!(w_floor > w_native);
-    assert_eq!(w_floor - w_native, VERIFY_COST_UNKNOWN_SUITE - 4);
+    let expected_delta = VERIFY_COST_UNKNOWN_SUITE
+        .checked_sub(4)
+        .expect("unknown-suite verify cost must stay above the 0x02 native registry cost");
+    assert_eq!(w_floor, w_native + expected_delta);
 }
 
 #[test]
