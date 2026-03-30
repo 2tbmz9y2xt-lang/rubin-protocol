@@ -1086,6 +1086,80 @@ fn run_tx_validation_workers_cancelled_token() {
     }
 }
 
+#[test]
+fn run_tx_validation_workers_valid_p2pk_real_signature() {
+    use crate::tx_helpers::{p2pk_covenant_data_for_pubkey, sign_transaction};
+    use crate::verify_sig_openssl::Mldsa87Keypair;
+
+    let keypair = match Mldsa87Keypair::generate() {
+        Ok(kp) => kp,
+        Err(_) => return,
+    };
+
+    let pubkey = keypair.pubkey_bytes();
+    let cov_data = p2pk_covenant_data_for_pubkey(&pubkey);
+    let prev_txid = [0x42u8; 32];
+    let outpoint = Outpoint {
+        txid: prev_txid,
+        vout: 0,
+    };
+
+    let mut utxo_map = HashMap::new();
+    utxo_map.insert(
+        outpoint,
+        UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data.clone(),
+            creation_height: 1,
+            created_by_coinbase: false,
+        },
+    );
+
+    let mut tx = Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 90,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data,
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: Vec::new(),
+        da_payload: Vec::new(),
+    };
+
+    sign_transaction(&mut tx, &utxo_map, [0u8; 32], &keypair).expect("sign tx");
+
+    let pb = make_parsed_block(simple_coinbase(), vec![tx]);
+    let ptcs = precompute_tx_contexts(&pb, &utxo_map, 100).expect("precompute");
+    let token = WorkerCancellationToken::new();
+    let profiles = CoreExtProfiles::empty();
+
+    let results =
+        run_tx_validation_workers(&token, 2, ptcs, &pb, [0u8; 32], 100, 0, &profiles, None)
+            .expect("run workers");
+    assert_eq!(results.len(), 1);
+    assert!(
+        results[0].error.is_none(),
+        "unexpected error: {:?}",
+        results[0].error
+    );
+    let value = results[0].value.as_ref().expect("worker value");
+    assert!(value.valid, "expected valid result, got {:?}", value.err);
+    assert_eq!(value.tx_index, 1);
+    assert_eq!(value.fee, 10);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // first_tx_error
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1121,6 +1195,27 @@ fn first_tx_error_all_valid() {
 fn first_tx_error_nil() {
     let results: Vec<WorkerResult<TxValidationResult, _>> = vec![];
     assert!(first_tx_error(&results).is_none());
+}
+
+#[test]
+fn first_tx_error_single_error() {
+    use crate::error::TxError;
+
+    let err = TxError::new(ErrorCode::TxErrSigInvalid, "sig");
+    let results: Vec<WorkerResult<TxValidationResult, _>> = vec![WorkerResult {
+        value: Some(TxValidationResult {
+            tx_index: 2,
+            valid: false,
+            err: Some(err.clone()),
+            sig_count: 0,
+            fee: 0,
+        }),
+        error: Some(WorkerPoolError::Task(err.clone())),
+    }];
+
+    let got = first_tx_error(&results).expect("single error");
+    assert_eq!(got.code, ErrorCode::TxErrSigInvalid);
+    assert!(got.msg.contains("sig"));
 }
 
 #[test]
