@@ -180,9 +180,11 @@ func (m *Mempool) AddTx(txBytes []byte) error {
 	m.chainState.admissionMu.RLock()
 	defer m.chainState.admissionMu.RUnlock()
 
-	state := cloneChainState(m.chainState)
 	policy := m.policySnapshot()
-	checked, inputs, err := m.checkTransactionWithState(txBytes, state, policy)
+	// admissionMu excludes chainstate writers, so AddTx can validate against the
+	// live chainstate view without paying an outer full clone. The consensus
+	// check path still clones the UTXO set internally before mutating work state.
+	checked, inputs, err := m.checkTransactionWithState(txBytes, m.chainState, policy)
 	if err != nil {
 		return err
 	}
