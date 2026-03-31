@@ -282,10 +282,6 @@ func BenchmarkMempoolRelayMetadata(b *testing.B) {
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
 	state, outpoints := benchmarkSpendableChainState(fromAddress, []uint64{100})
-	mp, err := NewMempool(state, nil, devnetGenesisChainID)
-	if err != nil {
-		b.Fatalf("NewMempool: %v", err)
-	}
 	txBytes := mustBenchmarkSignedTransferTx(
 		b,
 		state.Utxos,
@@ -301,6 +297,12 @@ func BenchmarkMempoolRelayMetadata(b *testing.B) {
 	b.SetBytes(int64(len(txBytes)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		mp, err := NewMempool(state, nil, devnetGenesisChainID)
+		if err != nil {
+			b.Fatalf("NewMempool: %v", err)
+		}
+		b.StartTimer()
 		if _, err := mp.RelayMetadata(txBytes); err != nil {
 			b.Fatalf("RelayMetadata: %v", err)
 		}
