@@ -478,6 +478,81 @@ mod tests {
         (prev_state, source_outpoint, block_bytes, block_height)
     }
 
+    fn duplicate_prev_state_spend_fixture() -> (ChainState, Vec<u8>, u64) {
+        let funding_key = Mldsa87Keypair::generate().expect("funding key");
+        let funding_address = p2pk_covenant_data_for_pubkey(&funding_key.pubkey_bytes());
+        let recv_key = Mldsa87Keypair::generate().expect("recv key");
+        let recv_address = p2pk_covenant_data_for_pubkey(&recv_key.pubkey_bytes());
+        let source_outpoint = Outpoint {
+            txid: [0x33; 32],
+            vout: 0,
+        };
+        let mut prev_state = ChainState {
+            has_tip: true,
+            height: 7,
+            tip_hash: [0x44; 32],
+            already_generated: 3,
+            utxos: HashMap::new(),
+        };
+        prev_state.utxos.insert(
+            source_outpoint.clone(),
+            UtxoEntry {
+                value: 100,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: funding_address.clone(),
+                creation_height: 1,
+                created_by_coinbase: false,
+            },
+        );
+
+        let mut tx = Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0x00,
+            tx_nonce: 1,
+            inputs: vec![
+                TxInput {
+                    prev_txid: source_outpoint.txid,
+                    prev_vout: source_outpoint.vout,
+                    script_sig: Vec::new(),
+                    sequence: 0,
+                },
+                TxInput {
+                    prev_txid: source_outpoint.txid,
+                    prev_vout: source_outpoint.vout,
+                    script_sig: Vec::new(),
+                    sequence: 0,
+                },
+            ],
+            outputs: vec![TxOutput {
+                value: 90,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: recv_address,
+            }],
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: Vec::new(),
+        };
+        sign_transaction(
+            &mut tx,
+            &prev_state.utxos,
+            devnet_genesis_chain_id(),
+            &funding_key,
+        )
+        .expect("sign tx");
+        let tx_bytes = marshal_tx(&tx).expect("marshal tx");
+        let block_height = prev_state.height + 1;
+        let block_bytes = block_with_txs(
+            block_height,
+            prev_state.already_generated,
+            prev_state.tip_hash,
+            1_777_000_456,
+            &[tx_bytes],
+        );
+        (prev_state, block_bytes, block_height)
+    }
+
     #[test]
     fn test_undo_roundtrip_serialization() {
         let undo = BlockUndo {
@@ -599,6 +674,23 @@ mod tests {
     }
 
     #[test]
+    fn build_block_undo_errors_on_missing_prev_state_utxo() {
+        let (mut prev_state, source_outpoint, block_bytes, block_height) = same_block_spend_fixture();
+        prev_state.utxos.remove(&source_outpoint);
+
+        let err = build_block_undo(&prev_state, &block_bytes, block_height).expect_err("missing utxo");
+        assert!(err.contains("undo missing utxo"));
+    }
+
+    #[test]
+    fn build_block_undo_errors_on_duplicate_prev_state_spend() {
+        let (prev_state, block_bytes, block_height) = duplicate_prev_state_spend_fixture();
+
+        let err = build_block_undo(&prev_state, &block_bytes, block_height).expect_err("duplicate spend");
+        assert!(err.contains("undo missing utxo"));
+    }
+
+    #[test]
     fn disconnect_block_restores_prev_state_after_same_block_spend() {
         let (prev_state, _source_outpoint, block_bytes, block_height) = same_block_spend_fixture();
         let undo = build_block_undo(&prev_state, &block_bytes, block_height).expect("build undo");
@@ -621,5 +713,73 @@ mod tests {
         assert_eq!(summary.new_height, prev_state.height);
         assert_eq!(summary.new_tip_hash, prev_state.tip_hash);
         assert_eq!(summary.utxo_count, prev_state.utxos.len() as u64);
+    }
+
+    #[test]
+    fn disconnect_block_rejects_undo_tx_count_mismatch() {
+        let (prev_state, _source_outpoint, block_bytes, block_height) = same_block_spend_fixture();
+        let mut undo = build_block_undo(&prev_state, &block_bytes, block_height).expect("build undo");
+        undo.txs.pop();
+        let mut connected_state = prev_state.clone();
+        let prev_timestamps = [1_777_000_000u64; 11];
+        connected_state
+            .connect_block(
+                &block_bytes,
+                Some(POW_LIMIT),
+                Some(&prev_timestamps),
+                devnet_genesis_chain_id(),
+            )
+            .expect("connect block");
+
+        let err = connected_state
+            .disconnect_block(&block_bytes, &undo)
+            .expect_err("undo tx count mismatch");
+        assert!(err.contains("undo tx count mismatch"));
+    }
+
+    #[test]
+    fn disconnect_block_rejects_tip_mismatch() {
+        let (prev_state, _source_outpoint, block_bytes, block_height) = same_block_spend_fixture();
+        let undo = build_block_undo(&prev_state, &block_bytes, block_height).expect("build undo");
+        let mut connected_state = prev_state.clone();
+        let prev_timestamps = [1_777_000_000u64; 11];
+        connected_state
+            .connect_block(
+                &block_bytes,
+                Some(POW_LIMIT),
+                Some(&prev_timestamps),
+                devnet_genesis_chain_id(),
+            )
+            .expect("connect block");
+        connected_state.tip_hash = [0xAA; 32];
+
+        let err = connected_state
+            .disconnect_block(&block_bytes, &undo)
+            .expect_err("tip mismatch");
+        assert!(err.contains("disconnect block is not current tip"));
+    }
+
+    #[test]
+    fn disconnect_block_rejects_restore_collision() {
+        let (prev_state, source_outpoint, block_bytes, block_height) = same_block_spend_fixture();
+        let undo = build_block_undo(&prev_state, &block_bytes, block_height).expect("build undo");
+        let mut connected_state = prev_state.clone();
+        let prev_timestamps = [1_777_000_000u64; 11];
+        connected_state
+            .connect_block(
+                &block_bytes,
+                Some(POW_LIMIT),
+                Some(&prev_timestamps),
+                devnet_genesis_chain_id(),
+            )
+            .expect("connect block");
+        connected_state
+            .utxos
+            .insert(source_outpoint, sample_entry(77));
+
+        let err = connected_state
+            .disconnect_block(&block_bytes, &undo)
+            .expect_err("restore collision");
+        assert!(err.contains("undo restore collision"));
     }
 }
