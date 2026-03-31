@@ -108,6 +108,13 @@ type chainStateView struct {
 	utxoCount        int
 }
 
+type chainStateAdmissionSnapshot struct {
+	utxos   map[consensus.Outpoint]consensus.UtxoEntry
+	hasTip  bool
+	height  uint64
+	tipHash [32]byte
+}
+
 func NewChainState() *ChainState {
 	return &ChainState{
 		Utxos: make(map[consensus.Outpoint]consensus.UtxoEntry),
@@ -126,6 +133,20 @@ func (s *ChainState) view() chainStateView {
 		tipHash:          s.TipHash,
 		alreadyGenerated: s.AlreadyGenerated,
 		utxoCount:        len(s.Utxos),
+	}
+}
+
+func (s *ChainState) admissionSnapshot() *chainStateAdmissionSnapshot {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return &chainStateAdmissionSnapshot{
+		utxos:   copyUtxoSet(s.Utxos),
+		hasTip:  s.HasTip,
+		height:  s.Height,
+		tipHash: s.TipHash,
 	}
 }
 
