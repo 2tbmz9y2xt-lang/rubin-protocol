@@ -593,6 +593,33 @@ func TestPolicyInputSnapshotCopiesOnlySpentInputs(t *testing.T) {
 	}
 }
 
+func TestChainStateAdmissionSnapshotForInputsCopiesOnlyRequestedEntries(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 200})
+
+	snapshot := st.admissionSnapshotForInputs([]consensus.Outpoint{outpoints[0], outpoints[0]})
+	if snapshot == nil {
+		t.Fatal("admissionSnapshotForInputs returned nil")
+	}
+	if len(snapshot.utxos) != 1 {
+		t.Fatalf("snapshot len=%d, want 1", len(snapshot.utxos))
+	}
+	if _, ok := snapshot.utxos[outpoints[0]]; !ok {
+		t.Fatal("snapshot missing requested input")
+	}
+	if _, ok := snapshot.utxos[outpoints[1]]; ok {
+		t.Fatal("snapshot unexpectedly copied unrelated utxo")
+	}
+
+	entry := snapshot.utxos[outpoints[0]]
+	entry.CovenantData[0] ^= 0xff
+	snapshot.utxos[outpoints[0]] = entry
+	if reflect.DeepEqual(snapshot.utxos[outpoints[0]].CovenantData, st.Utxos[outpoints[0]].CovenantData) {
+		t.Fatal("mutating input snapshot leaked into original utxo set")
+	}
+}
+
 func TestPolicyInputSnapshotRejectsMissingInput(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)

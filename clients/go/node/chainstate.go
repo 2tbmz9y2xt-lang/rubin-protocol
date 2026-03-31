@@ -150,6 +150,33 @@ func (s *ChainState) admissionSnapshot() *chainStateAdmissionSnapshot {
 	}
 }
 
+func (s *ChainState) admissionSnapshotForInputs(inputs []consensus.Outpoint) *chainStateAdmissionSnapshot {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	utxos := make(map[consensus.Outpoint]consensus.UtxoEntry, len(inputs))
+	for _, op := range inputs {
+		if _, seen := utxos[op]; seen {
+			continue
+		}
+		entry, ok := s.Utxos[op]
+		if !ok {
+			continue
+		}
+		utxos[op] = copyUtxoEntry(entry)
+	}
+
+	return &chainStateAdmissionSnapshot{
+		utxos:   utxos,
+		hasTip:  s.HasTip,
+		height:  s.Height,
+		tipHash: s.TipHash,
+	}
+}
+
 func (s *ChainState) replaceFrom(src *ChainState) {
 	if s == nil || src == nil {
 		return

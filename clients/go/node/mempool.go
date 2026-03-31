@@ -206,11 +206,15 @@ func (m *Mempool) RelayMetadata(txBytes []byte) (RelayTxMetadata, error) {
 	if m.chainState == nil {
 		return RelayTxMetadata{}, txAdmitUnavailable("nil chainstate")
 	}
+	tx, txid, wtxid, err := parseRelayMetadataTx(txBytes)
+	if err != nil {
+		return RelayTxMetadata{}, err
+	}
 	m.chainState.admissionMu.RLock()
 	defer m.chainState.admissionMu.RUnlock()
-	snapshot := m.chainState.admissionSnapshot()
+	snapshot := m.chainState.admissionSnapshotForInputs(relayMetadataInputs(tx))
 	policy := m.policySnapshot()
-	checked, _, err := m.checkTransactionWithSnapshot(txBytes, snapshot, policy)
+	checked, _, err := m.checkParsedTransactionWithSnapshot(txBytes, tx, txid, wtxid, snapshot, policy)
 	if err != nil {
 		return RelayTxMetadata{}, err
 	}
@@ -218,6 +222,80 @@ func (m *Mempool) RelayMetadata(txBytes []byte) (RelayTxMetadata, error) {
 		Fee:  checked.Fee,
 		Size: checked.SerializedSize,
 	}, nil
+}
+
+func parseRelayMetadataTx(txBytes []byte) (*consensus.Tx, [32]byte, [32]byte, error) {
+	tx, txid, wtxid, consumed, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		return nil, [32]byte{}, [32]byte{}, txAdmitRejected(err.Error())
+	}
+	if consumed != len(txBytes) {
+		return nil, [32]byte{}, [32]byte{}, txAdmitRejected("trailing bytes after canonical tx")
+	}
+	return tx, txid, wtxid, nil
+}
+
+func relayMetadataInputs(tx *consensus.Tx) []consensus.Outpoint {
+	inputs := make([]consensus.Outpoint, 0, len(tx.Inputs))
+	for _, in := range tx.Inputs {
+		inputs = append(inputs, consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout})
+	}
+	return inputs
+}
+
+func (m *Mempool) checkParsedTransactionWithSnapshot(
+	txBytes []byte,
+	tx *consensus.Tx,
+	txid [32]byte,
+	wtxid [32]byte,
+	snapshot *chainStateAdmissionSnapshot,
+	policy MempoolConfig,
+) (*consensus.CheckedTransaction, []consensus.Outpoint, error) {
+	if snapshot == nil {
+		return nil, nil, txAdmitUnavailable("nil chainstate")
+	}
+	nextHeight, _, err := nextBlockContextFromFields(snapshot.hasTip, snapshot.height, snapshot.tipHash)
+	if err != nil {
+		return nil, nil, txAdmitUnavailable(err.Error())
+	}
+
+	blockMTP, err := m.nextBlockMTP(nextHeight)
+	if err != nil {
+		return nil, nil, txAdmitUnavailable(err.Error())
+	}
+
+	var policyUtxos map[consensus.Outpoint]consensus.UtxoEntry
+	if policyNeedsInputSnapshot(policy) {
+		policyUtxos, err = policyInputSnapshot(tx, snapshot.utxos)
+		if err != nil {
+			return nil, nil, txAdmitRejected(err.Error())
+		}
+	}
+
+	checked, err := consensus.CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+		txBytes,
+		tx,
+		txid,
+		wtxid,
+		snapshot.utxos,
+		nextHeight,
+		blockMTP,
+		m.chainID,
+		policy.CoreExtProfiles,
+		policy.RotationProvider,
+		policy.SuiteRegistry,
+	)
+	if err != nil {
+		return nil, nil, txAdmitRejected(err.Error())
+	}
+	if err := m.applyPolicyAgainstState(checked, nextHeight, policyUtxos, policy); err != nil {
+		return nil, nil, txAdmitRejected(err.Error())
+	}
+	inputs := make([]consensus.Outpoint, 0, len(checked.Tx.Inputs))
+	for _, in := range checked.Tx.Inputs {
+		inputs = append(inputs, consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout})
+	}
+	return checked, inputs, nil
 }
 
 func (m *Mempool) SelectTransactions(maxCount int, maxBytes int) [][]byte {
