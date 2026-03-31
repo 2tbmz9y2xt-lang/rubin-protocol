@@ -180,9 +180,9 @@ func (m *Mempool) AddTx(txBytes []byte) error {
 	m.chainState.admissionMu.RLock()
 	defer m.chainState.admissionMu.RUnlock()
 
-	state := cloneChainState(m.chainState)
+	snapshot := cloneChainState(m.chainState)
 	policy := m.policySnapshot()
-	checked, inputs, err := m.checkTransactionWithState(txBytes, state, policy)
+	checked, inputs, err := m.checkTransactionWithSnapshot(txBytes, snapshot, policy)
 	if err != nil {
 		return err
 	}
@@ -208,9 +208,9 @@ func (m *Mempool) RelayMetadata(txBytes []byte) (RelayTxMetadata, error) {
 	}
 	m.chainState.admissionMu.RLock()
 	defer m.chainState.admissionMu.RUnlock()
-	state := cloneChainState(m.chainState)
+	snapshot := cloneChainState(m.chainState)
 	policy := m.policySnapshot()
-	checked, _, err := m.checkTransactionWithState(txBytes, state, policy)
+	checked, _, err := m.checkTransactionWithSnapshot(txBytes, snapshot, policy)
 	if err != nil {
 		return RelayTxMetadata{}, err
 	}
@@ -290,13 +290,13 @@ func (m *Mempool) policySnapshot() MempoolConfig {
 	return m.policy
 }
 
-// checkTransactionWithState validates a transaction against a consistent
-// chainstate snapshot plus an immutable mempool policy snapshot.
-func (m *Mempool) checkTransactionWithState(txBytes []byte, state *ChainState, policy MempoolConfig) (*consensus.CheckedTransaction, []consensus.Outpoint, error) {
-	if state == nil {
+// checkTransactionWithSnapshot validates a transaction against a consistent
+// cloned chainstate snapshot plus an immutable mempool policy snapshot.
+func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *ChainState, policy MempoolConfig) (*consensus.CheckedTransaction, []consensus.Outpoint, error) {
+	if snapshot == nil {
 		return nil, nil, txAdmitUnavailable("nil chainstate")
 	}
-	nextHeight, _, err := nextBlockContext(state)
+	nextHeight, _, err := nextBlockContext(snapshot)
 	if err != nil {
 		return nil, nil, txAdmitUnavailable(err.Error())
 	}
@@ -305,10 +305,10 @@ func (m *Mempool) checkTransactionWithState(txBytes []byte, state *ChainState, p
 	if err != nil {
 		return nil, nil, txAdmitUnavailable(err.Error())
 	}
-	policyUtxos := policyUtxoSnapshot(state.Utxos)
+	policyUtxos := policyUtxoSnapshot(snapshot.Utxos)
 	checked, err := consensus.CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 		txBytes,
-		state.Utxos,
+		snapshot.Utxos,
 		nextHeight,
 		blockMTP,
 		m.chainID,
@@ -335,9 +335,19 @@ func (m *Mempool) checkTransactionWithState(txBytes []byte, state *ChainState, p
 func policyUtxoSnapshot(utxos map[consensus.Outpoint]consensus.UtxoEntry) map[consensus.Outpoint]consensus.UtxoEntry {
 	out := make(map[consensus.Outpoint]consensus.UtxoEntry, len(utxos))
 	for op, entry := range utxos {
-		out[op] = copyUtxoEntry(entry)
+		out[op] = policyCopyUtxoEntry(entry)
 	}
 	return out
+}
+
+func policyCopyUtxoEntry(entry consensus.UtxoEntry) consensus.UtxoEntry {
+	return consensus.UtxoEntry{
+		Value:             entry.Value,
+		CovenantType:      entry.CovenantType,
+		CovenantData:      append([]byte(nil), entry.CovenantData...),
+		CreationHeight:    entry.CreationHeight,
+		CreatedByCoinbase: entry.CreatedByCoinbase,
+	}
 }
 
 func (m *Mempool) applyPolicyAgainstState(checked *consensus.CheckedTransaction, nextHeight uint64, utxos map[consensus.Outpoint]consensus.UtxoEntry, policy MempoolConfig) error {
