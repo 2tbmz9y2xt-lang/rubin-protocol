@@ -593,6 +593,27 @@ func TestPolicyInputSnapshotCopiesOnlySpentInputs(t *testing.T) {
 	}
 }
 
+func TestPolicyInputSnapshotRejectsMissingInput(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+	tx, _, _, _, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("ParseTx: %v", err)
+	}
+
+	delete(st.Utxos, outpoints[0])
+
+	_, err = policyInputSnapshot(tx, st.Utxos)
+	if err == nil || !strings.Contains(err.Error(), string(consensus.TX_ERR_MISSING_UTXO)) {
+		t.Fatalf("expected missing utxo rejection, got %v", err)
+	}
+}
+
 func TestMempoolDoubleSpend(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)

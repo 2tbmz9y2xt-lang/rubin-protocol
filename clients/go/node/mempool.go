@@ -364,7 +364,7 @@ func policyInputSnapshot(tx *consensus.Tx, utxos map[consensus.Outpoint]consensu
 		}
 		entry, ok := utxos[op]
 		if !ok {
-			continue
+			return nil, &consensus.TxError{Code: consensus.TX_ERR_MISSING_UTXO, Msg: "utxo not found"}
 		}
 		out[op] = policyCopyUtxoEntry(entry)
 	}
