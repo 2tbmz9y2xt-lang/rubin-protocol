@@ -95,6 +95,40 @@ func CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 		return nil, txerr(TX_ERR_PARSE, "trailing bytes after canonical tx")
 	}
 
+	return CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+		txBytes,
+		tx,
+		txid,
+		wtxid,
+		workUtxos,
+		height,
+		blockMTP,
+		chainID,
+		coreExtProfiles,
+		rotation,
+		registry,
+	)
+}
+
+// CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext validates an already
+// parsed canonical transaction against a caller-owned mutable UTXO work set.
+func CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+	txBytes []byte,
+	tx *Tx,
+	txid [32]byte,
+	wtxid [32]byte,
+	workUtxos map[Outpoint]UtxoEntry,
+	height uint64,
+	blockMTP uint64,
+	chainID [32]byte,
+	coreExtProfiles CoreExtProfileProvider,
+	rotation RotationProvider,
+	registry *SuiteRegistry,
+) (*CheckedTransaction, error) {
+	if tx == nil {
+		return nil, txerr(TX_ERR_PARSE, "nil tx")
+	}
+
 	weight, daBytes, _, err := TxWeightAndStats(tx)
 	if err != nil {
 		return nil, err
