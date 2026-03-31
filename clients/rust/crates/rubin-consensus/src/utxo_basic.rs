@@ -843,7 +843,10 @@ fn check_spend_covenant(covenant_type: u16, covenant_data: &[u8]) -> Result<(), 
 mod tests {
     use super::*;
     use crate::compactsize::encode_compact_size;
-    use crate::constants::{LOCK_MODE_HEIGHT, SIGHASH_ALL, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL};
+    use crate::constants::{
+        LOCK_MODE_HEIGHT, MAX_STEALTH_COVENANT_DATA, SIGHASH_ALL, SUITE_ID_ML_DSA_87,
+        SUITE_ID_SENTINEL,
+    };
     use crate::core_ext::{CoreExtActiveProfile, CoreExtVerificationBinding};
     use crate::sighash::sighash_v1_digest;
     use crate::tx::{Tx, TxInput, TxOutput, WitnessItem};
@@ -1332,6 +1335,13 @@ mod tests {
         data
     }
 
+    fn stealth_covenant_data_for_pubkey(pubkey: &[u8]) -> Vec<u8> {
+        let mut covenant_data = vec![0u8; MAX_STEALTH_COVENANT_DATA as usize];
+        let split = covenant_data.len() - 32;
+        covenant_data[split..].copy_from_slice(&sha3_256(pubkey));
+        covenant_data
+    }
+
     fn signed_vault_case() -> (Tx, HashMap<Outpoint, UtxoEntry>, [u8; 32], [u8; 32]) {
         let prev_vault = [0x81; 32];
         let prev_fee = [0x82; 32];
@@ -1568,6 +1578,91 @@ mod tests {
         (tx, utxo_set, txid, chain_id)
     }
 
+    fn signed_stealth_case() -> (Tx, HashMap<Outpoint, UtxoEntry>, [u8; 32], [u8; 32]) {
+        let prev_txid = [0xb1; 32];
+        let txid = [0xb2; 32];
+        let chain_id = [0xb3; 32];
+
+        let keypair = Mldsa87Keypair::generate().expect("stealth keypair");
+        let output_cov = p2pk_covenant_data_for_pubkey(&keypair.pubkey_bytes());
+
+        let mut tx = Tx {
+            version: 1,
+            tx_kind: 0x00,
+            tx_nonce: 1,
+            inputs: vec![TxInput {
+                prev_txid,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: 400,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: output_cov,
+            }],
+            locktime: 0,
+            witness: vec![],
+            da_payload: vec![],
+            da_commit_core: None,
+            da_chunk_core: None,
+        };
+        tx.witness = vec![sign_input_witness(&tx, 0, 500, chain_id, &keypair)];
+
+        let utxo_set = HashMap::from([(
+            Outpoint {
+                txid: prev_txid,
+                vout: 0,
+            },
+            UtxoEntry {
+                value: 500,
+                covenant_type: COV_TYPE_STEALTH,
+                covenant_data: stealth_covenant_data_for_pubkey(&keypair.pubkey_bytes()),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        )]);
+
+        (tx, utxo_set, txid, chain_id)
+    }
+
+    fn signed_core_ext_case() -> (Tx, HashMap<Outpoint, UtxoEntry>, [u8; 32], [u8; 32]) {
+        let mut chain_id = [0u8; 32];
+        chain_id[0] = 0xc1;
+        let mut prev_txid = [0u8; 32];
+        prev_txid[0] = 0xc2;
+        let mut txid = [0u8; 32];
+        txid[0] = 0xc3;
+
+        let tx = Tx {
+            version: 1,
+            tx_kind: 0x00,
+            tx_nonce: 1,
+            inputs: vec![TxInput {
+                prev_txid,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: 90,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: core_ext_covdata(7, &[]),
+            }],
+            locktime: 0,
+            witness: vec![WitnessItem {
+                suite_id: 0x42,
+                pubkey: vec![0x01, 0x02, 0x03],
+                signature: vec![0x04, 0x01],
+            }],
+            da_payload: vec![],
+            da_commit_core: None,
+            da_chunk_core: None,
+        };
+
+        (tx, txcontext_input_utxos(prev_txid), txid, chain_id)
+    }
+
     fn assert_apply_preserves_caller_utxos(
         tx: &Tx,
         utxo_set: &HashMap<Outpoint, UtxoEntry>,
@@ -1587,6 +1682,23 @@ mod tests {
                 &CoreExtProfiles::empty(),
                 None,
                 None,
+            )
+            .expect("apply");
+        assert!(summary.fee > 0);
+        assert_eq!(utxo_set, &original, "caller utxo set mutated");
+    }
+
+    fn assert_apply_preserves_caller_utxos_with_profiles(
+        tx: &Tx,
+        utxo_set: &HashMap<Outpoint, UtxoEntry>,
+        txid: [u8; 32],
+        chain_id: [u8; 32],
+        profiles: &CoreExtProfiles,
+    ) {
+        let original = utxo_set.clone();
+        let (_work, summary) =
+            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+                tx, txid, utxo_set, 1, 0, 0, chain_id, profiles, None, None,
             )
             .expect("apply");
         assert!(summary.fee > 0);
@@ -1651,6 +1763,28 @@ mod tests {
     fn apply_non_coinbase_tx_basic_update_htlc_does_not_mutate_caller_utxos() {
         let (tx, utxo_set, txid, chain_id) = signed_htlc_case();
         assert_apply_preserves_caller_utxos(&tx, &utxo_set, txid, chain_id);
+    }
+
+    #[test]
+    fn apply_non_coinbase_tx_basic_update_stealth_does_not_mutate_caller_utxos() {
+        let (tx, utxo_set, txid, chain_id) = signed_stealth_case();
+        assert_apply_preserves_caller_utxos(&tx, &utxo_set, txid, chain_id);
+    }
+
+    #[test]
+    fn apply_non_coinbase_tx_basic_update_core_ext_does_not_mutate_caller_utxos() {
+        let _guard = test_lock().lock().expect("test lock");
+        reset_txctx_record();
+
+        let (tx, utxo_set, txid, chain_id) = signed_core_ext_case();
+        assert_apply_preserves_caller_utxos_with_profiles(
+            &tx,
+            &utxo_set,
+            txid,
+            chain_id,
+            &txcontext_profiles(),
+        );
+        assert!(take_txctx_record().is_some(), "txcontext verifier must run");
     }
 
     #[test]
