@@ -180,7 +180,7 @@ func (m *Mempool) AddTx(txBytes []byte) error {
 	m.chainState.admissionMu.RLock()
 	defer m.chainState.admissionMu.RUnlock()
 
-	snapshot := cloneChainState(m.chainState)
+	snapshot := m.chainState.admissionSnapshot()
 	policy := m.policySnapshot()
 	checked, inputs, err := m.checkTransactionWithSnapshot(txBytes, snapshot, policy)
 	if err != nil {
@@ -208,7 +208,7 @@ func (m *Mempool) RelayMetadata(txBytes []byte) (RelayTxMetadata, error) {
 	}
 	m.chainState.admissionMu.RLock()
 	defer m.chainState.admissionMu.RUnlock()
-	snapshot := cloneChainState(m.chainState)
+	snapshot := m.chainState.admissionSnapshot()
 	policy := m.policySnapshot()
 	checked, _, err := m.checkTransactionWithSnapshot(txBytes, snapshot, policy)
 	if err != nil {
@@ -291,12 +291,12 @@ func (m *Mempool) policySnapshot() MempoolConfig {
 }
 
 // checkTransactionWithSnapshot validates a transaction against a consistent
-// cloned chainstate snapshot plus an immutable mempool policy snapshot.
-func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *ChainState, policy MempoolConfig) (*consensus.CheckedTransaction, []consensus.Outpoint, error) {
+// owned admission snapshot plus an immutable mempool policy snapshot.
+func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainStateAdmissionSnapshot, policy MempoolConfig) (*consensus.CheckedTransaction, []consensus.Outpoint, error) {
 	if snapshot == nil {
 		return nil, nil, txAdmitUnavailable("nil chainstate")
 	}
-	nextHeight, _, err := nextBlockContext(snapshot)
+	nextHeight, _, err := nextBlockContextFromFields(snapshot.hasTip, snapshot.height, snapshot.tipHash)
 	if err != nil {
 		return nil, nil, txAdmitUnavailable(err.Error())
 	}
@@ -314,14 +314,14 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *ChainSt
 	}
 	var policyUtxos map[consensus.Outpoint]consensus.UtxoEntry
 	if policyNeedsInputSnapshot(policy) {
-		policyUtxos, err = policyInputSnapshot(parsedTx, snapshot.Utxos)
+		policyUtxos, err = policyInputSnapshot(parsedTx, snapshot.utxos)
 		if err != nil {
 			return nil, nil, txAdmitRejected(err.Error())
 		}
 	}
 	checked, err := consensus.CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 		txBytes,
-		snapshot.Utxos,
+		snapshot.utxos,
 		nextHeight,
 		blockMTP,
 		m.chainID,
@@ -364,7 +364,7 @@ func policyInputSnapshot(tx *consensus.Tx, utxos map[consensus.Outpoint]consensu
 		}
 		entry, ok := utxos[op]
 		if !ok {
-			continue
+			return nil, &consensus.TxError{Code: consensus.TX_ERR_MISSING_UTXO, Msg: "utxo not found"}
 		}
 		out[op] = policyCopyUtxoEntry(entry)
 	}
