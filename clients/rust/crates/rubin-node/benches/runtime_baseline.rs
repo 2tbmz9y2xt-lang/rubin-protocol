@@ -48,11 +48,12 @@ fn chainstate_clone_bench(c: &mut Criterion) {
 }
 
 fn sync_snapshot_bench(c: &mut Criterion) {
-    let fixture = engine_after_genesis("rubin-node-sync-snapshot");
     c.bench_function("rubin_node_sync_chain_state_snapshot", |b| {
+        let fixture = engine_after_genesis("rubin-node-sync-snapshot");
         b.iter(|| {
             let _ = fixture.engine.chain_state_snapshot();
-        })
+        });
+        fixture.cleanup();
     });
 }
 
