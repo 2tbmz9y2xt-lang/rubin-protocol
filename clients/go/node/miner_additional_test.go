@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"encoding/binary"
+	"math"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -367,6 +368,315 @@ func TestMinerBuildContextAndAssembleBlockBytes(t *testing.T) {
 	want := append(append(append(append([]byte{}, header...), 0x03), coinbase...), 0xbb, 0xcc)
 	if string(block) != string(want) {
 		t.Fatalf("assembled block mismatch: got=%x want=%x", block, want)
+	}
+}
+
+func TestCanonicalCoinbaseWeightMatchesLegacyWeight(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name             string
+		height           uint64
+		alreadyGenerated uint64
+		mineAddress      []byte
+	}{
+		{name: "genesis_anchor_only", height: 0, alreadyGenerated: 0, mineAddress: nil},
+		{name: "subsidy_height", height: 1, alreadyGenerated: 0, mineAddress: testMineAddress(0x41)},
+		{name: "later_height", height: 101, alreadyGenerated: 50 * consensus.BASE_UNITS_PER_RBN, mineAddress: testMineAddress(0x52)},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := canonicalCoinbaseWeight(tc.height, tc.alreadyGenerated, tc.mineAddress)
+			if err != nil {
+				t.Fatalf("canonicalCoinbaseWeight: %v", err)
+			}
+			raw, err := buildCoinbaseTx(tc.height, tc.alreadyGenerated, tc.mineAddress, [32]byte{})
+			if err != nil {
+				t.Fatalf("buildCoinbaseTx: %v", err)
+			}
+			want, err := canonicalTxWeight(raw, "coinbase")
+			if err != nil {
+				t.Fatalf("canonicalTxWeight: %v", err)
+			}
+			if got != want {
+				t.Fatalf("coinbase weight=%d, want %d", got, want)
+			}
+		})
+	}
+}
+
+func TestCanonicalCoinbaseWeightRejectsOverflowAndInvalidAddress(t *testing.T) {
+	t.Parallel()
+
+	if _, err := canonicalCoinbaseWeight(^uint64(0), 0, nil); err == nil {
+		t.Fatal("expected height overflow error")
+	}
+	if _, err := canonicalCoinbaseWeight(1, 0, nil); err == nil {
+		t.Fatal("expected invalid mine address error")
+	}
+	tooLong := make([]byte, consensus.MAX_P2PK_COVENANT_DATA+1)
+	tooLong[0] = consensus.SUITE_ID_ML_DSA_87
+	if _, err := canonicalCoinbaseWeight(1, 0, tooLong); err == nil {
+		t.Fatal("expected oversized mine address error")
+	}
+}
+
+func TestCompactSizeLenForMinerCoversAllBranches(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		value uint64
+		want  uint64
+	}{
+		{value: 0, want: 1},
+		{value: 0xfc, want: 1},
+		{value: 0xfd, want: 3},
+		{value: 0xffff, want: 3},
+		{value: 0x1_0000, want: 5},
+		{value: 0xffff_ffff, want: 5},
+		{value: 0x1_0000_0000, want: 9},
+	}
+	for _, tc := range cases {
+		if got := compactSizeLenForMiner(tc.value); got != tc.want {
+			t.Fatalf("compactSizeLenForMiner(%d)=%d, want %d", tc.value, got, tc.want)
+		}
+	}
+}
+
+func TestPolicyNeedsReadonlyUtxoSnapshotMatrix(t *testing.T) {
+	t.Parallel()
+
+	var nilMiner *Miner
+	if nilMiner.policyNeedsReadonlyUtxoSnapshot() {
+		t.Fatal("nil miner should not require snapshot")
+	}
+
+	base := &Miner{cfg: DefaultMinerConfig()}
+	if !base.policyNeedsReadonlyUtxoSnapshot() {
+		t.Fatal("default miner should require snapshot")
+	}
+
+	disabled := &Miner{cfg: DefaultMinerConfig()}
+	disabled.cfg.PolicyRejectCoreExtPreActivation = false
+	disabled.cfg.PolicyDaAnchorAntiAbuse = false
+	if disabled.policyNeedsReadonlyUtxoSnapshot() {
+		t.Fatal("fully disabled policy matrix should not require snapshot")
+	}
+
+	coreExt := &Miner{cfg: DefaultMinerConfig()}
+	coreExt.cfg.PolicyRejectCoreExtPreActivation = true
+	if !coreExt.policyNeedsReadonlyUtxoSnapshot() {
+		t.Fatal("core-ext policy should require snapshot")
+	}
+
+	da := &Miner{cfg: DefaultMinerConfig()}
+	da.cfg.PolicyRejectCoreExtPreActivation = false
+	da.cfg.PolicyDaAnchorAntiAbuse = true
+	if !da.policyNeedsReadonlyUtxoSnapshot() {
+		t.Fatal("da anchor policy should require snapshot")
+	}
+
+	da.cfg.PolicyDaSurchargePerByte = 1
+	if !da.policyNeedsReadonlyUtxoSnapshot() {
+		t.Fatal("da anchor surcharge path should require snapshot")
+	}
+}
+
+func TestSnapshotBuildContextStateHandlesNilAndNoPolicyPaths(t *testing.T) {
+	t.Parallel()
+
+	var nilMiner *Miner
+	if _, err := nilMiner.snapshotBuildContextState(); err == nil {
+		t.Fatal("expected nil miner error")
+	}
+
+	minerWithNilState := &Miner{cfg: DefaultMinerConfig()}
+	if _, err := minerWithNilState.snapshotBuildContextState(); err == nil {
+		t.Fatal("expected nil chainstate error")
+	}
+
+	state := NewChainState()
+	state.HasTip = true
+	state.Height = 9
+	state.TipHash = [32]byte{0x99}
+	op := consensus.Outpoint{Txid: [32]byte{0x42}, Vout: 0}
+	state.Utxos[op] = consensus.UtxoEntry{
+		Value:             12,
+		CovenantType:      consensus.COV_TYPE_P2PK,
+		CovenantData:      testP2PKCovenantData(0x11),
+		CreationHeight:    1,
+		CreatedByCoinbase: true,
+	}
+
+	miner := &Miner{chainState: state, cfg: DefaultMinerConfig()}
+	snapshot, err := miner.snapshotBuildContextState()
+	if err != nil {
+		t.Fatalf("snapshotBuildContextState: %v", err)
+	}
+	if !snapshot.hasTip || snapshot.height != 9 || snapshot.tipHash != state.TipHash {
+		t.Fatal("snapshot lost chainstate fields")
+	}
+	if snapshot.utxos == nil {
+		t.Fatal("default policy path should copy utxo map")
+	}
+	miner.cfg.PolicyRejectCoreExtPreActivation = false
+	miner.cfg.PolicyDaAnchorAntiAbuse = true
+	snapshot, err = miner.snapshotBuildContextState()
+	if err != nil {
+		t.Fatalf("snapshotBuildContextState without surcharge: %v", err)
+	}
+	if snapshot.utxos == nil {
+		t.Fatal("da anti-abuse path should still copy utxo map when surcharge is disabled")
+	}
+	miner.cfg.PolicyDaAnchorAntiAbuse = false
+	snapshot, err = miner.snapshotBuildContextState()
+	if err != nil {
+		t.Fatalf("snapshotBuildContextState without policy snapshot: %v", err)
+	}
+	if snapshot.utxos != nil {
+		t.Fatal("disabled policy path should not copy utxo map")
+	}
+}
+
+func TestMinerBuildContextUtxoMapDoesNotAliasChainStateMap(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := ChainStatePath(dir)
+
+	chainState := NewChainState()
+	chainState.HasTip = true
+	chainState.Height = 2
+	var txid [32]byte
+	txid[0] = 0x7a
+	outpoint := consensus.Outpoint{Txid: txid, Vout: 1}
+	chainState.Utxos[outpoint] = consensus.UtxoEntry{
+		Value:             33,
+		CovenantType:      consensus.COV_TYPE_P2PK,
+		CovenantData:      testP2PKCovenantData(0x31),
+		CreationHeight:    1,
+		CreatedByCoinbase: true,
+	}
+
+	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("open blockstore: %v", err)
+	}
+	syncEngine, err := NewSyncEngine(chainState, blockStore, DefaultSyncConfig(nil, [32]byte{}, chainStatePath))
+	if err != nil {
+		t.Fatalf("new sync engine: %v", err)
+	}
+	miner, err := NewMiner(chainState, blockStore, syncEngine, DefaultMinerConfig())
+	if err != nil {
+		t.Fatalf("new miner: %v", err)
+	}
+
+	buildCtx, err := miner.buildContext(nil)
+	if err != nil {
+		t.Fatalf("buildContext: %v", err)
+	}
+	delete(buildCtx.utxos, outpoint)
+	if _, ok := chainState.Utxos[outpoint]; !ok {
+		t.Fatal("buildContext utxo map aliases chainstate map")
+	}
+
+	buildCtx, err = miner.buildContext(nil)
+	if err != nil {
+		t.Fatalf("buildContext second pass: %v", err)
+	}
+	entry := buildCtx.utxos[outpoint]
+	entry.CovenantData[0] ^= 0xff
+	buildCtx.utxos[outpoint] = entry
+	if chainState.Utxos[outpoint].CovenantData[0] == entry.CovenantData[0] {
+		t.Fatal("buildContext utxo covenant data aliases chainstate entry")
+	}
+}
+
+func TestAddU64NoOverflow(t *testing.T) {
+	t.Parallel()
+
+	v := uint64(7)
+	if err := addU64NoOverflow(&v, 5); err != nil {
+		t.Fatalf("unexpected add error: %v", err)
+	}
+	if v != 12 {
+		t.Fatalf("sum=%d, want 12", v)
+	}
+
+	v = math.MaxUint64 - 1
+	if err := addU64NoOverflow(&v, 2); err == nil {
+		t.Fatal("expected overflow error")
+	}
+}
+
+func TestAddCoinbaseBaseSize(t *testing.T) {
+	t.Parallel()
+
+	v := uint64(10)
+	if err := addCoinbaseBaseSize(&v, 5, 7); err != nil {
+		t.Fatalf("unexpected add error: %v", err)
+	}
+	if v != 22 {
+		t.Fatalf("sum=%d, want 22", v)
+	}
+
+	v = math.MaxUint64
+	if err := addCoinbaseBaseSize(&v, 1); err == nil {
+		t.Fatal("expected overflow error")
+	}
+}
+
+func TestFinalizeCoinbaseWeight(t *testing.T) {
+	t.Parallel()
+
+	const witnessSize = uint64(1)
+	const daSize = uint64(1)
+	const maxBaseSize = (math.MaxUint64 - witnessSize - daSize) / consensus.WITNESS_DISCOUNT_DIVISOR
+	got, err := finalizeCoinbaseWeight(maxBaseSize, witnessSize, daSize)
+	if err != nil {
+		t.Fatalf("unexpected finalize error: %v", err)
+	}
+	want := uint64(consensus.WITNESS_DISCOUNT_DIVISOR)*maxBaseSize + witnessSize + daSize
+	if got != want {
+		t.Fatalf("weight=%d, want %d", got, want)
+	}
+
+	if _, err := finalizeCoinbaseWeight(maxBaseSize+1, witnessSize, daSize); err == nil {
+		t.Fatal("expected overflow error")
+	}
+}
+
+func TestRemainingWeightFromCoinbase(t *testing.T) {
+	t.Parallel()
+
+	got, err := remainingWeightFromCoinbase(consensus.MAX_BLOCK_WEIGHT - 1)
+	if err != nil {
+		t.Fatalf("unexpected remaining weight error: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("remaining=%d, want 1", got)
+	}
+
+	if _, err := remainingWeightFromCoinbase(consensus.MAX_BLOCK_WEIGHT + 1); err == nil {
+		t.Fatal("expected oversize coinbase error")
+	}
+}
+
+func TestAddU64NoOverflowValue(t *testing.T) {
+	t.Parallel()
+
+	got, err := addU64NoOverflowValue(3, 4)
+	if err != nil {
+		t.Fatalf("unexpected add error: %v", err)
+	}
+	if got != 7 {
+		t.Fatalf("sum=%d, want 7", got)
+	}
+
+	if _, err := addU64NoOverflowValue(math.MaxUint64, 1); err == nil {
+		t.Fatal("expected overflow error")
 	}
 }
 

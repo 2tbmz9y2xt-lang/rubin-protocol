@@ -82,6 +82,14 @@ type miningBuildContext struct {
 	candidateTxs     [][]byte
 }
 
+type miningChainStateSnapshot struct {
+	hasTip           bool
+	height           uint64
+	tipHash          [32]byte
+	alreadyGenerated uint64
+	utxos            map[consensus.Outpoint]consensus.UtxoEntry
+}
+
 func DefaultMinerConfig() MinerConfig {
 	return MinerConfig{
 		Target: consensus.POW_LIMIT,
@@ -198,11 +206,11 @@ func (m *Miner) buildBlock(ctx context.Context, txs [][]byte) ([]byte, []uint64,
 }
 
 func (m *Miner) buildContext(txs [][]byte) (miningBuildContext, error) {
-	state := cloneChainState(m.chainState)
-	if state == nil {
-		return miningBuildContext{}, errors.New("nil chainstate")
+	state, err := m.snapshotBuildContextState()
+	if err != nil {
+		return miningBuildContext{}, err
 	}
-	nextHeight, expectedPrev, err := nextBlockContext(state)
+	nextHeight, expectedPrev, err := nextBlockContextFromFields(state.hasTip, state.height, state.tipHash)
 	if err != nil {
 		return miningBuildContext{}, err
 	}
@@ -210,7 +218,7 @@ func (m *Miner) buildContext(txs [][]byte) (miningBuildContext, error) {
 	if expectedPrev != nil {
 		prevHash = *expectedPrev
 	}
-	remainingWeight, err := m.remainingWeightBudget(nextHeight, state.AlreadyGenerated)
+	remainingWeight, err := m.remainingWeightBudget(nextHeight, state.alreadyGenerated)
 	if err != nil {
 		return miningBuildContext{}, err
 	}
@@ -218,10 +226,30 @@ func (m *Miner) buildContext(txs [][]byte) (miningBuildContext, error) {
 		nextHeight:       nextHeight,
 		prevHash:         prevHash,
 		remainingWeight:  remainingWeight,
-		alreadyGenerated: state.AlreadyGenerated,
-		utxos:            state.Utxos,
+		alreadyGenerated: state.alreadyGenerated,
+		utxos:            state.utxos,
 		candidateTxs:     m.candidateTransactions(txs),
 	}, nil
+}
+
+func (m *Miner) snapshotBuildContextState() (miningChainStateSnapshot, error) {
+	if m == nil || m.chainState == nil {
+		return miningChainStateSnapshot{}, errors.New("nil chainstate")
+	}
+	state := m.chainState
+	state.mu.RLock()
+	defer state.mu.RUnlock()
+
+	snapshot := miningChainStateSnapshot{
+		hasTip:           state.HasTip,
+		height:           state.Height,
+		tipHash:          state.TipHash,
+		alreadyGenerated: state.AlreadyGenerated,
+	}
+	if m.policyNeedsReadonlyUtxoSnapshot() {
+		snapshot.utxos = copyMinerReadonlyUtxoSet(state.Utxos)
+	}
+	return snapshot, nil
 }
 
 func (m *Miner) candidateTransactions(txs [][]byte) [][]byte {
@@ -239,16 +267,132 @@ func (m *Miner) candidateTransactions(txs [][]byte) [][]byte {
 	return candidateTxs
 }
 
+func (m *Miner) policyNeedsReadonlyUtxoSnapshot() bool {
+	if m == nil {
+		return false
+	}
+	if m.cfg.PolicyRejectCoreExtPreActivation {
+		return true
+	}
+	// DA anti-abuse policy always runs RejectDaAnchorTxPolicy to account for
+	// per-template DA bytes, even when the surcharge floor is disabled. Keep
+	// a readonly snapshot available for that path so custom configs cannot
+	// accidentally call into policy with a nil UTXO map.
+	return m.cfg.PolicyDaAnchorAntiAbuse
+}
+
+func copyMinerReadonlyUtxoEntry(entry consensus.UtxoEntry) consensus.UtxoEntry {
+	entry.CovenantData = append([]byte(nil), entry.CovenantData...)
+	return entry
+}
+
+func copyMinerReadonlyUtxoSet(src map[consensus.Outpoint]consensus.UtxoEntry) map[consensus.Outpoint]consensus.UtxoEntry {
+	out := make(map[consensus.Outpoint]consensus.UtxoEntry, len(src))
+	for k, v := range src {
+		out[k] = copyMinerReadonlyUtxoEntry(v)
+	}
+	return out
+}
+
 func (m *Miner) remainingWeightBudget(nextHeight uint64, alreadyGenerated uint64) (uint64, error) {
-	coinbaseTemplate, err := buildCoinbaseTx(nextHeight, alreadyGenerated, m.cfg.MineAddress, [32]byte{})
+	coinbaseWeight, err := canonicalCoinbaseWeight(nextHeight, alreadyGenerated, m.cfg.MineAddress)
 	if err != nil {
 		return 0, err
 	}
-	coinbaseWeight, err := canonicalTxWeight(coinbaseTemplate, "coinbase")
-	if err != nil {
+	return remainingWeightFromCoinbase(coinbaseWeight)
+}
+
+func canonicalCoinbaseWeight(height uint64, alreadyGenerated uint64, mineAddress []byte) (uint64, error) {
+	if height > math.MaxUint32 {
+		return 0, errors.New("block height exceeds coinbase locktime range")
+	}
+	subsidy := consensus.BlockSubsidy(height, alreadyGenerated)
+	if subsidy > 0 {
+		if err := validateMineAddress(mineAddress); err != nil {
+			return 0, err
+		}
+	}
+
+	outputCount := uint64(1)
+	strippedSize := uint64(4 + 1 + 8) // version + tx_kind + tx_nonce
+	parts := []uint64{
+		compactSizeLenForMiner(1),
+		32 + 4 + compactSizeLenForMiner(0) + 4,
+	}
+	if subsidy > 0 {
+		outputCount++
+		addrLen := uint64(len(mineAddress))
+		parts = append(parts, 8+2+compactSizeLenForMiner(addrLen)+addrLen)
+	}
+	parts = append(parts,
+		compactSizeLenForMiner(outputCount),
+		8+2+compactSizeLenForMiner(32)+32,
+		4,
+	)
+	if err := addCoinbaseBaseSize(&strippedSize, parts...); err != nil {
 		return 0, err
+	}
+
+	// Canonical coinbase carries zero witness items and no DA payload, so the
+	// discounted trailer still contributes one CompactSize byte for each field.
+	witnessSize := compactSizeLenForMiner(0)
+	daSize := compactSizeLenForMiner(0)
+	return finalizeCoinbaseWeight(strippedSize, witnessSize, daSize)
+}
+
+func addU64NoOverflow(dst *uint64, value uint64) error {
+	if value > math.MaxUint64-*dst {
+		return errors.New("u64 overflow")
+	}
+	*dst += value
+	return nil
+}
+
+func addCoinbaseBaseSize(dst *uint64, values ...uint64) error {
+	for _, value := range values {
+		if err := addU64NoOverflow(dst, value); err != nil {
+			return errors.New("coinbase weight overflow")
+		}
+	}
+	return nil
+}
+
+func finalizeCoinbaseWeight(strippedSize uint64, witnessSize uint64, daSize uint64) (uint64, error) {
+	extraWeight, err := addU64NoOverflowValue(witnessSize, daSize)
+	if err != nil {
+		return 0, errors.New("coinbase weight overflow")
+	}
+	if strippedSize > (math.MaxUint64-extraWeight)/consensus.WITNESS_DISCOUNT_DIVISOR {
+		return 0, errors.New("coinbase weight overflow")
+	}
+	return uint64(consensus.WITNESS_DISCOUNT_DIVISOR)*strippedSize + extraWeight, nil
+}
+
+func remainingWeightFromCoinbase(coinbaseWeight uint64) (uint64, error) {
+	if coinbaseWeight > consensus.MAX_BLOCK_WEIGHT {
+		return 0, errors.New("coinbase weight exceeds max block weight")
 	}
 	return consensus.MAX_BLOCK_WEIGHT - coinbaseWeight, nil
+}
+
+func addU64NoOverflowValue(left uint64, right uint64) (uint64, error) {
+	if right > math.MaxUint64-left {
+		return 0, errors.New("u64 overflow")
+	}
+	return left + right, nil
+}
+
+func compactSizeLenForMiner(n uint64) uint64 {
+	switch {
+	case n < 0xfd:
+		return 1
+	case n <= 0xffff:
+		return 3
+	case n <= 0xffff_ffff:
+		return 5
+	default:
+		return 9
+	}
 }
 
 func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, remainingWeight uint64) ([]minedCandidate, error) {
