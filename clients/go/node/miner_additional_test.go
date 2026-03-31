@@ -646,6 +646,22 @@ func TestFinalizeCoinbaseWeight(t *testing.T) {
 	}
 }
 
+func TestRemainingWeightFromCoinbase(t *testing.T) {
+	t.Parallel()
+
+	got, err := remainingWeightFromCoinbase(consensus.MAX_BLOCK_WEIGHT - 1)
+	if err != nil {
+		t.Fatalf("unexpected remaining weight error: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("remaining=%d, want 1", got)
+	}
+
+	if _, err := remainingWeightFromCoinbase(consensus.MAX_BLOCK_WEIGHT + 1); err == nil {
+		t.Fatal("expected oversize coinbase error")
+	}
+}
+
 func TestParseCanonicalTx(t *testing.T) {
 	raw, err := buildCoinbaseTx(0, 0, nil, [32]byte{})
 	if err != nil {

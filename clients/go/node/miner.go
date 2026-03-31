@@ -299,7 +299,7 @@ func (m *Miner) remainingWeightBudget(nextHeight uint64, alreadyGenerated uint64
 	if err != nil {
 		return 0, err
 	}
-	return consensus.MAX_BLOCK_WEIGHT - coinbaseWeight, nil
+	return remainingWeightFromCoinbase(coinbaseWeight)
 }
 
 func canonicalCoinbaseWeight(height uint64, alreadyGenerated uint64, mineAddress []byte) (uint64, error) {
@@ -358,6 +358,13 @@ func finalizeCoinbaseWeight(baseSize uint64) (uint64, error) {
 		return 0, errors.New("coinbase weight overflow")
 	}
 	return consensus.WITNESS_DISCOUNT_DIVISOR*baseSize + 2, nil
+}
+
+func remainingWeightFromCoinbase(coinbaseWeight uint64) (uint64, error) {
+	if coinbaseWeight > consensus.MAX_BLOCK_WEIGHT {
+		return 0, errors.New("coinbase weight exceeds max block weight")
+	}
+	return consensus.MAX_BLOCK_WEIGHT - coinbaseWeight, nil
 }
 
 func compactSizeLenForMiner(n uint64) uint64 {
