@@ -274,7 +274,11 @@ func (m *Miner) policyNeedsReadonlyUtxoSnapshot() bool {
 	if m.cfg.PolicyRejectCoreExtPreActivation {
 		return true
 	}
-	return m.cfg.PolicyDaAnchorAntiAbuse && m.cfg.PolicyDaSurchargePerByte > 0
+	// DA anti-abuse policy always runs RejectDaAnchorTxPolicy to account for
+	// per-template DA bytes, even when the surcharge floor is disabled. Keep
+	// a readonly snapshot available for that path so custom configs cannot
+	// accidentally call into policy with a nil UTXO map.
+	return m.cfg.PolicyDaAnchorAntiAbuse
 }
 
 // Miner policy only reads UTXO entries, so a top-level map copy is enough to

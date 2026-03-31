@@ -470,9 +470,13 @@ func TestPolicyNeedsReadonlyUtxoSnapshotMatrix(t *testing.T) {
 	da := &Miner{cfg: DefaultMinerConfig()}
 	da.cfg.PolicyRejectCoreExtPreActivation = false
 	da.cfg.PolicyDaAnchorAntiAbuse = true
-	da.cfg.PolicyDaSurchargePerByte = 1
 	if !da.policyNeedsReadonlyUtxoSnapshot() {
 		t.Fatal("da anchor policy should require snapshot")
+	}
+
+	da.cfg.PolicyDaSurchargePerByte = 1
+	if !da.policyNeedsReadonlyUtxoSnapshot() {
+		t.Fatal("da anchor surcharge path should require snapshot")
 	}
 }
 
@@ -514,6 +518,14 @@ func TestSnapshotBuildContextStateHandlesNilAndNoPolicyPaths(t *testing.T) {
 		t.Fatal("default policy path should copy utxo map")
 	}
 	miner.cfg.PolicyRejectCoreExtPreActivation = false
+	miner.cfg.PolicyDaAnchorAntiAbuse = true
+	snapshot, err = miner.snapshotBuildContextState()
+	if err != nil {
+		t.Fatalf("snapshotBuildContextState without surcharge: %v", err)
+	}
+	if snapshot.utxos == nil {
+		t.Fatal("da anti-abuse path should still copy utxo map when surcharge is disabled")
+	}
 	miner.cfg.PolicyDaAnchorAntiAbuse = false
 	snapshot, err = miner.snapshotBuildContextState()
 	if err != nil {
