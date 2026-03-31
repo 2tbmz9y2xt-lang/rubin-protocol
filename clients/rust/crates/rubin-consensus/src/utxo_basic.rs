@@ -1272,6 +1272,104 @@ mod tests {
         (tx, utxo_set, txid, chain_id)
     }
 
+    fn signed_anchor_output_case() -> (Tx, HashMap<Outpoint, UtxoEntry>, [u8; 32], [u8; 32]) {
+        let keypair = Mldsa87Keypair::generate().expect("anchor keypair");
+        let pubkey = keypair.pubkey_bytes();
+        let prev_txid = [0x74; 32];
+        let txid = [0x75; 32];
+        let chain_id = [0x76; 32];
+        let utxo_set = HashMap::from([(
+            Outpoint {
+                txid: prev_txid,
+                vout: 0,
+            },
+            UtxoEntry {
+                value: 100,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&pubkey),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        )]);
+        let mut tx = Tx {
+            version: 1,
+            tx_kind: 0x00,
+            tx_nonce: 1,
+            inputs: vec![TxInput {
+                prev_txid,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: 0,
+                covenant_type: COV_TYPE_ANCHOR,
+                covenant_data: vec![0x41, 0x4e, 0x43, 0x48],
+            }],
+            locktime: 0,
+            witness: vec![],
+            da_payload: vec![],
+            da_commit_core: None,
+            da_chunk_core: None,
+        };
+        sign_transaction(&mut tx, &utxo_set, chain_id, &keypair).expect("sign");
+        (tx, utxo_set, txid, chain_id)
+    }
+
+    fn signed_da_commit_output_case() -> (Tx, HashMap<Outpoint, UtxoEntry>, [u8; 32], [u8; 32]) {
+        let keypair = Mldsa87Keypair::generate().expect("da commit keypair");
+        let pubkey = keypair.pubkey_bytes();
+        let prev_txid = [0x77; 32];
+        let txid = [0x78; 32];
+        let chain_id = [0x79; 32];
+        let utxo_set = HashMap::from([(
+            Outpoint {
+                txid: prev_txid,
+                vout: 0,
+            },
+            UtxoEntry {
+                value: 100,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&pubkey),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        )]);
+        let mut tx = Tx {
+            version: 1,
+            tx_kind: 0x01,
+            tx_nonce: 7,
+            inputs: vec![TxInput {
+                prev_txid,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: 0,
+                covenant_type: COV_TYPE_DA_COMMIT,
+                covenant_data: vec![0x33; 32],
+            }],
+            locktime: 0,
+            witness: vec![],
+            da_payload: vec![0xde, 0xad, 0xbe, 0xef],
+            da_commit_core: Some(crate::tx::DaCommitCore {
+                da_id: [0x10; 32],
+                chunk_count: 1,
+                retl_domain_id: [0x20; 32],
+                batch_number: 9,
+                tx_data_root: [0x30; 32],
+                state_root: [0x40; 32],
+                withdrawals_root: [0x50; 32],
+                batch_sig_suite: 0x00,
+                batch_sig: vec![0xaa, 0xbb],
+            }),
+            da_chunk_core: None,
+        };
+        sign_transaction(&mut tx, &utxo_set, chain_id, &keypair).expect("sign");
+        (tx, utxo_set, txid, chain_id)
+    }
+
     fn sign_input_witness(
         tx: &Tx,
         input_index: u32,
@@ -1768,6 +1866,18 @@ mod tests {
     #[test]
     fn apply_non_coinbase_tx_basic_update_stealth_does_not_mutate_caller_utxos() {
         let (tx, utxo_set, txid, chain_id) = signed_stealth_case();
+        assert_apply_preserves_caller_utxos(&tx, &utxo_set, txid, chain_id);
+    }
+
+    #[test]
+    fn apply_non_coinbase_tx_basic_update_anchor_output_does_not_mutate_caller_utxos() {
+        let (tx, utxo_set, txid, chain_id) = signed_anchor_output_case();
+        assert_apply_preserves_caller_utxos(&tx, &utxo_set, txid, chain_id);
+    }
+
+    #[test]
+    fn apply_non_coinbase_tx_basic_update_da_commit_output_does_not_mutate_caller_utxos() {
+        let (tx, utxo_set, txid, chain_id) = signed_da_commit_output_case();
         assert_apply_preserves_caller_utxos(&tx, &utxo_set, txid, chain_id);
     }
 
