@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -256,6 +257,59 @@ func TestMempoolPolicyAllowsSufficientFeeDaCommit(t *testing.T) {
 	}
 }
 
+func TestMempoolPolicySnapshot_DoesNotMutateForDaPolicy(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		PolicyDaSurchargePerByte: 1,
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+
+	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 80, 10, 1, fromKey, toAddress, []byte("0123456789"))
+	nextHeight, _, err := nextBlockContext(st)
+	if err != nil {
+		t.Fatalf("nextBlockContext: %v", err)
+	}
+	blockMTP, err := mp.nextBlockMTP(nextHeight)
+	if err != nil {
+		t.Fatalf("nextBlockMTP: %v", err)
+	}
+	checked, err := consensus.CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+		txBytes,
+		copyUtxoSet(st.Utxos),
+		nextHeight,
+		blockMTP,
+		devnetGenesisChainID,
+		mp.policy.CoreExtProfiles,
+		mp.policy.RotationProvider,
+		mp.policy.SuiteRegistry,
+	)
+	if err != nil {
+		t.Fatalf("CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext: %v", err)
+	}
+	policyUtxos, err := policyInputSnapshot(checked.Tx, st.Utxos)
+	if err != nil {
+		t.Fatalf("policyInputSnapshot: %v", err)
+	}
+	before, err := policyInputSnapshot(checked.Tx, policyUtxos)
+	if err != nil {
+		t.Fatalf("policyInputSnapshot(before): %v", err)
+	}
+
+	if err := mp.applyPolicyAgainstState(checked, nextHeight, policyUtxos, mp.policySnapshot()); err != nil {
+		t.Fatalf("applyPolicyAgainstState: %v", err)
+	}
+	if !reflect.DeepEqual(policyUtxos, before) {
+		t.Fatalf("policy path mutated DA snapshot")
+	}
+}
+
 func TestMempoolPolicyRejectsCoreExtOutputPreActivation(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
@@ -332,6 +386,58 @@ func TestMempoolPolicyAllowsCoreExtWhenProfileActive(t *testing.T) {
 	}
 	if meta.Fee != 1 {
 		t.Fatalf("relay fee=%d, want 1", meta.Fee)
+	}
+}
+
+func TestMempoolPolicySnapshot_DoesNotMutateForCoreExtPolicy(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		PolicyRejectCoreExtPreActivation: true,
+		CoreExtProfiles:                  testCoreExtProfiles{activeByExtID: map[uint16]bool{7: true}},
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+
+	txBytes := mustBuildSignedCoreExtOutputTx(t, st.Utxos, outpoints[0], 90, 1, 1, fromKey, fromAddress, 7)
+	nextHeight, _, err := nextBlockContext(st)
+	if err != nil {
+		t.Fatalf("nextBlockContext: %v", err)
+	}
+	blockMTP, err := mp.nextBlockMTP(nextHeight)
+	if err != nil {
+		t.Fatalf("nextBlockMTP: %v", err)
+	}
+	checked, err := consensus.CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+		txBytes,
+		copyUtxoSet(st.Utxos),
+		nextHeight,
+		blockMTP,
+		devnetGenesisChainID,
+		mp.policy.CoreExtProfiles,
+		mp.policy.RotationProvider,
+		mp.policy.SuiteRegistry,
+	)
+	if err != nil {
+		t.Fatalf("CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext: %v", err)
+	}
+	policyUtxos, err := policyInputSnapshot(checked.Tx, st.Utxos)
+	if err != nil {
+		t.Fatalf("policyInputSnapshot: %v", err)
+	}
+	before, err := policyInputSnapshot(checked.Tx, policyUtxos)
+	if err != nil {
+		t.Fatalf("policyInputSnapshot(before): %v", err)
+	}
+
+	if err := mp.applyPolicyAgainstState(checked, nextHeight, policyUtxos, mp.policySnapshot()); err != nil {
+		t.Fatalf("applyPolicyAgainstState: %v", err)
+	}
+	if !reflect.DeepEqual(policyUtxos, before) {
+		t.Fatalf("policy path mutated CORE_EXT snapshot")
 	}
 }
 
@@ -449,6 +555,41 @@ func TestMempoolPolicyPropagatesDaFeeComputationErrors(t *testing.T) {
 	}
 	if err := mp.applyPolicyAgainstState(&consensus.CheckedTransaction{Tx: tx}, 101, nil, mp.policySnapshot()); err == nil || !strings.Contains(err.Error(), "nil utxo set") {
 		t.Fatalf("expected DA fee computation error, got %v", err)
+	}
+}
+
+func TestPolicyInputSnapshotCopiesOnlySpentInputs(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 200})
+
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+	tx, _, _, _, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("ParseTx: %v", err)
+	}
+
+	snapshot, err := policyInputSnapshot(tx, st.Utxos)
+	if err != nil {
+		t.Fatalf("policyInputSnapshot: %v", err)
+	}
+	if len(snapshot) != 1 {
+		t.Fatalf("snapshot len=%d, want 1", len(snapshot))
+	}
+	if _, ok := snapshot[outpoints[0]]; !ok {
+		t.Fatalf("snapshot missing spent input")
+	}
+	if _, ok := snapshot[outpoints[1]]; ok {
+		t.Fatalf("snapshot unexpectedly copied unrelated utxo")
+	}
+
+	entry := snapshot[outpoints[0]]
+	entry.CovenantData[0] ^= 0xff
+	snapshot[outpoints[0]] = entry
+	if reflect.DeepEqual(snapshot[outpoints[0]].CovenantData, st.Utxos[outpoints[0]].CovenantData) {
+		t.Fatal("mutating snapshot covenant data leaked into original utxo set")
 	}
 }
 

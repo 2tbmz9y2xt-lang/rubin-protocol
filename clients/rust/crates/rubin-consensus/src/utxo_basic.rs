@@ -843,7 +843,12 @@ fn check_spend_covenant(covenant_type: u16, covenant_data: &[u8]) -> Result<(), 
 mod tests {
     use super::*;
     use crate::compactsize::encode_compact_size;
+    use crate::constants::{
+        LOCK_MODE_HEIGHT, MAX_STEALTH_COVENANT_DATA, SIGHASH_ALL, SUITE_ID_ML_DSA_87,
+        SUITE_ID_SENTINEL,
+    };
     use crate::core_ext::{CoreExtActiveProfile, CoreExtVerificationBinding};
+    use crate::sighash::sighash_v1_digest;
     use crate::tx::{Tx, TxInput, TxOutput, WitnessItem};
     use crate::tx_helpers::{p2pk_covenant_data_for_pubkey, sign_transaction};
     use crate::verify_sig_openssl::Mldsa87Keypair;
@@ -1267,6 +1272,537 @@ mod tests {
         (tx, utxo_set, txid, chain_id)
     }
 
+    fn signed_anchor_output_case() -> (Tx, HashMap<Outpoint, UtxoEntry>, [u8; 32], [u8; 32]) {
+        let keypair = Mldsa87Keypair::generate().expect("anchor keypair");
+        let pubkey = keypair.pubkey_bytes();
+        let prev_txid = [0x74; 32];
+        let txid = [0x75; 32];
+        let chain_id = [0x76; 32];
+        let utxo_set = HashMap::from([(
+            Outpoint {
+                txid: prev_txid,
+                vout: 0,
+            },
+            UtxoEntry {
+                value: 100,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&pubkey),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        )]);
+        let mut tx = Tx {
+            version: 1,
+            tx_kind: 0x00,
+            tx_nonce: 1,
+            inputs: vec![TxInput {
+                prev_txid,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: 0,
+                covenant_type: COV_TYPE_ANCHOR,
+                covenant_data: vec![0x41, 0x4e, 0x43, 0x48],
+            }],
+            locktime: 0,
+            witness: vec![],
+            da_payload: vec![],
+            da_commit_core: None,
+            da_chunk_core: None,
+        };
+        sign_transaction(&mut tx, &utxo_set, chain_id, &keypair).expect("sign");
+        (tx, utxo_set, txid, chain_id)
+    }
+
+    fn signed_da_commit_output_case() -> (Tx, HashMap<Outpoint, UtxoEntry>, [u8; 32], [u8; 32]) {
+        let keypair = Mldsa87Keypair::generate().expect("da commit keypair");
+        let pubkey = keypair.pubkey_bytes();
+        let prev_txid = [0x77; 32];
+        let txid = [0x78; 32];
+        let chain_id = [0x79; 32];
+        let utxo_set = HashMap::from([(
+            Outpoint {
+                txid: prev_txid,
+                vout: 0,
+            },
+            UtxoEntry {
+                value: 100,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&pubkey),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        )]);
+        let mut tx = Tx {
+            version: 1,
+            tx_kind: 0x01,
+            tx_nonce: 7,
+            inputs: vec![TxInput {
+                prev_txid,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: 0,
+                covenant_type: COV_TYPE_DA_COMMIT,
+                covenant_data: vec![0x33; 32],
+            }],
+            locktime: 0,
+            witness: vec![],
+            da_payload: vec![0xde, 0xad, 0xbe, 0xef],
+            da_commit_core: Some(crate::tx::DaCommitCore {
+                da_id: [0x10; 32],
+                chunk_count: 1,
+                retl_domain_id: [0x20; 32],
+                batch_number: 9,
+                tx_data_root: [0x30; 32],
+                state_root: [0x40; 32],
+                withdrawals_root: [0x50; 32],
+                batch_sig_suite: 0x00,
+                batch_sig: vec![0xaa, 0xbb],
+            }),
+            da_chunk_core: None,
+        };
+        sign_transaction(&mut tx, &utxo_set, chain_id, &keypair).expect("sign");
+        (tx, utxo_set, txid, chain_id)
+    }
+
+    fn sign_input_witness(
+        tx: &Tx,
+        input_index: u32,
+        input_value: u64,
+        chain_id: [u8; 32],
+        keypair: &Mldsa87Keypair,
+    ) -> WitnessItem {
+        let digest = sighash_v1_digest(tx, input_index, input_value, chain_id).expect("digest");
+        let mut signature = keypair.sign_digest32(digest).expect("sign");
+        signature.push(SIGHASH_ALL);
+        WitnessItem {
+            suite_id: SUITE_ID_ML_DSA_87,
+            pubkey: keypair.pubkey_bytes(),
+            signature,
+        }
+    }
+
+    fn encode_vault_covenant_data(
+        owner_lock_id: [u8; 32],
+        threshold: u8,
+        keys: &[[u8; 32]],
+        whitelist: &[[u8; 32]],
+    ) -> Vec<u8> {
+        let mut data = Vec::with_capacity(32 + 1 + 1 + keys.len() * 32 + 2 + whitelist.len() * 32);
+        data.extend_from_slice(&owner_lock_id);
+        data.push(threshold);
+        data.push(keys.len() as u8);
+        for key in keys {
+            data.extend_from_slice(key);
+        }
+        data.extend_from_slice(&(whitelist.len() as u16).to_le_bytes());
+        for entry in whitelist {
+            data.extend_from_slice(entry);
+        }
+        data
+    }
+
+    fn encode_multisig_covenant_data(threshold: u8, keys: &[[u8; 32]]) -> Vec<u8> {
+        let mut data = Vec::with_capacity(2 + keys.len() * 32);
+        data.push(threshold);
+        data.push(keys.len() as u8);
+        for key in keys {
+            data.extend_from_slice(key);
+        }
+        data
+    }
+
+    fn encode_htlc_covenant_data(
+        hash: [u8; 32],
+        lock_mode: u8,
+        lock_value: u64,
+        claim_key_id: [u8; 32],
+        refund_key_id: [u8; 32],
+    ) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&hash);
+        data.push(lock_mode);
+        data.extend_from_slice(&lock_value.to_le_bytes());
+        data.extend_from_slice(&claim_key_id);
+        data.extend_from_slice(&refund_key_id);
+        data
+    }
+
+    fn stealth_covenant_data_for_pubkey(pubkey: &[u8]) -> Vec<u8> {
+        let mut covenant_data = vec![0u8; MAX_STEALTH_COVENANT_DATA as usize];
+        let split = covenant_data.len() - 32;
+        covenant_data[split..].copy_from_slice(&sha3_256(pubkey));
+        covenant_data
+    }
+
+    fn signed_vault_case() -> (Tx, HashMap<Outpoint, UtxoEntry>, [u8; 32], [u8; 32]) {
+        let prev_vault = [0x81; 32];
+        let prev_fee = [0x82; 32];
+        let txid = [0x83; 32];
+        let chain_id = [0x84; 32];
+
+        let vault_kp = Mldsa87Keypair::generate().expect("vault keypair");
+        let owner_kp = Mldsa87Keypair::generate().expect("owner keypair");
+        let dest_kp = Mldsa87Keypair::generate().expect("dest keypair");
+
+        let owner_cov = p2pk_covenant_data_for_pubkey(&owner_kp.pubkey_bytes());
+        let owner_lock_id = sha3_256(&output_descriptor_bytes(COV_TYPE_P2PK, &owner_cov));
+
+        let dest_cov = p2pk_covenant_data_for_pubkey(&dest_kp.pubkey_bytes());
+        let whitelist_h = sha3_256(&output_descriptor_bytes(COV_TYPE_P2PK, &dest_cov));
+        let vault_key_id = sha3_256(&vault_kp.pubkey_bytes());
+        let vault_cov =
+            encode_vault_covenant_data(owner_lock_id, 1, &[vault_key_id], &[whitelist_h]);
+
+        let mut tx = Tx {
+            version: 1,
+            tx_kind: 0x00,
+            tx_nonce: 1,
+            inputs: vec![
+                TxInput {
+                    prev_txid: prev_vault,
+                    prev_vout: 0,
+                    script_sig: vec![],
+                    sequence: 0,
+                },
+                TxInput {
+                    prev_txid: prev_fee,
+                    prev_vout: 0,
+                    script_sig: vec![],
+                    sequence: 0,
+                },
+            ],
+            outputs: vec![TxOutput {
+                value: 100,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: dest_cov,
+            }],
+            locktime: 0,
+            witness: vec![],
+            da_payload: vec![],
+            da_commit_core: None,
+            da_chunk_core: None,
+        };
+        tx.witness = vec![
+            sign_input_witness(&tx, 0, 100, chain_id, &vault_kp),
+            sign_input_witness(&tx, 1, 10, chain_id, &owner_kp),
+        ];
+
+        let utxo_set = HashMap::from([
+            (
+                Outpoint {
+                    txid: prev_vault,
+                    vout: 0,
+                },
+                UtxoEntry {
+                    value: 100,
+                    covenant_type: COV_TYPE_VAULT,
+                    covenant_data: vault_cov,
+                    creation_height: 0,
+                    created_by_coinbase: false,
+                },
+            ),
+            (
+                Outpoint {
+                    txid: prev_fee,
+                    vout: 0,
+                },
+                UtxoEntry {
+                    value: 10,
+                    covenant_type: COV_TYPE_P2PK,
+                    covenant_data: owner_cov,
+                    creation_height: 0,
+                    created_by_coinbase: false,
+                },
+            ),
+        ]);
+
+        (tx, utxo_set, txid, chain_id)
+    }
+
+    fn signed_multisig_case() -> (Tx, HashMap<Outpoint, UtxoEntry>, [u8; 32], [u8; 32]) {
+        let prev_txid = [0x91; 32];
+        let txid = [0x92; 32];
+        let chain_id = [0x93; 32];
+
+        let multisig_kp = Mldsa87Keypair::generate().expect("multisig keypair");
+        let dest_kp = Mldsa87Keypair::generate().expect("dest keypair");
+
+        let multisig_cov =
+            encode_multisig_covenant_data(1, &[sha3_256(&multisig_kp.pubkey_bytes())]);
+        let dest_cov = p2pk_covenant_data_for_pubkey(&dest_kp.pubkey_bytes());
+
+        let mut tx = Tx {
+            version: 1,
+            tx_kind: 0x00,
+            tx_nonce: 1,
+            inputs: vec![TxInput {
+                prev_txid,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: 90,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: dest_cov,
+            }],
+            locktime: 0,
+            witness: vec![],
+            da_payload: vec![],
+            da_commit_core: None,
+            da_chunk_core: None,
+        };
+        tx.witness = vec![sign_input_witness(&tx, 0, 100, chain_id, &multisig_kp)];
+
+        let utxo_set = HashMap::from([(
+            Outpoint {
+                txid: prev_txid,
+                vout: 0,
+            },
+            UtxoEntry {
+                value: 100,
+                covenant_type: COV_TYPE_MULTISIG,
+                covenant_data: multisig_cov,
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        )]);
+
+        (tx, utxo_set, txid, chain_id)
+    }
+
+    fn signed_htlc_case() -> (Tx, HashMap<Outpoint, UtxoEntry>, [u8; 32], [u8; 32]) {
+        let prev_htlc = [0xa1; 32];
+        let prev_p2pk = [0xa2; 32];
+        let txid = [0xa3; 32];
+        let chain_id = [0xa4; 32];
+
+        let claim_kp = Mldsa87Keypair::generate().expect("claim keypair");
+        let refund_kp = Mldsa87Keypair::generate().expect("refund keypair");
+        let p2pk_kp = Mldsa87Keypair::generate().expect("p2pk keypair");
+        let dest_kp = Mldsa87Keypair::generate().expect("dest keypair");
+
+        let claim_key_id = sha3_256(&claim_kp.pubkey_bytes());
+        let refund_key_id = sha3_256(&refund_kp.pubkey_bytes());
+        let p2pk_cov = p2pk_covenant_data_for_pubkey(&p2pk_kp.pubkey_bytes());
+        let dest_cov = p2pk_covenant_data_for_pubkey(&dest_kp.pubkey_bytes());
+
+        let preimage = b"htlc-claim-preimage";
+        let mut selector_payload = Vec::with_capacity(3 + preimage.len());
+        selector_payload.push(0x00);
+        selector_payload.extend_from_slice(&(preimage.len() as u16).to_le_bytes());
+        selector_payload.extend_from_slice(preimage);
+
+        let mut tx = Tx {
+            version: 1,
+            tx_kind: 0x00,
+            tx_nonce: 1,
+            inputs: vec![
+                TxInput {
+                    prev_txid: prev_htlc,
+                    prev_vout: 0,
+                    script_sig: vec![],
+                    sequence: 0,
+                },
+                TxInput {
+                    prev_txid: prev_p2pk,
+                    prev_vout: 0,
+                    script_sig: vec![],
+                    sequence: 0,
+                },
+            ],
+            outputs: vec![TxOutput {
+                value: 150,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: dest_cov,
+            }],
+            locktime: 0,
+            witness: vec![],
+            da_payload: vec![],
+            da_commit_core: None,
+            da_chunk_core: None,
+        };
+        tx.witness = vec![
+            WitnessItem {
+                suite_id: SUITE_ID_SENTINEL,
+                pubkey: claim_key_id.to_vec(),
+                signature: selector_payload,
+            },
+            sign_input_witness(&tx, 0, 100, chain_id, &claim_kp),
+            sign_input_witness(&tx, 1, 70, chain_id, &p2pk_kp),
+        ];
+
+        let utxo_set = HashMap::from([
+            (
+                Outpoint {
+                    txid: prev_htlc,
+                    vout: 0,
+                },
+                UtxoEntry {
+                    value: 100,
+                    covenant_type: COV_TYPE_HTLC,
+                    covenant_data: encode_htlc_covenant_data(
+                        sha3_256(preimage),
+                        LOCK_MODE_HEIGHT,
+                        1,
+                        claim_key_id,
+                        refund_key_id,
+                    ),
+                    creation_height: 0,
+                    created_by_coinbase: false,
+                },
+            ),
+            (
+                Outpoint {
+                    txid: prev_p2pk,
+                    vout: 0,
+                },
+                UtxoEntry {
+                    value: 70,
+                    covenant_type: COV_TYPE_P2PK,
+                    covenant_data: p2pk_cov,
+                    creation_height: 0,
+                    created_by_coinbase: false,
+                },
+            ),
+        ]);
+
+        (tx, utxo_set, txid, chain_id)
+    }
+
+    fn signed_stealth_case() -> (Tx, HashMap<Outpoint, UtxoEntry>, [u8; 32], [u8; 32]) {
+        let prev_txid = [0xb1; 32];
+        let txid = [0xb2; 32];
+        let chain_id = [0xb3; 32];
+
+        let keypair = Mldsa87Keypair::generate().expect("stealth keypair");
+        let output_cov = p2pk_covenant_data_for_pubkey(&keypair.pubkey_bytes());
+
+        let mut tx = Tx {
+            version: 1,
+            tx_kind: 0x00,
+            tx_nonce: 1,
+            inputs: vec![TxInput {
+                prev_txid,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: 400,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: output_cov,
+            }],
+            locktime: 0,
+            witness: vec![],
+            da_payload: vec![],
+            da_commit_core: None,
+            da_chunk_core: None,
+        };
+        tx.witness = vec![sign_input_witness(&tx, 0, 500, chain_id, &keypair)];
+
+        let utxo_set = HashMap::from([(
+            Outpoint {
+                txid: prev_txid,
+                vout: 0,
+            },
+            UtxoEntry {
+                value: 500,
+                covenant_type: COV_TYPE_STEALTH,
+                covenant_data: stealth_covenant_data_for_pubkey(&keypair.pubkey_bytes()),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        )]);
+
+        (tx, utxo_set, txid, chain_id)
+    }
+
+    fn signed_core_ext_case() -> (Tx, HashMap<Outpoint, UtxoEntry>, [u8; 32], [u8; 32]) {
+        let mut chain_id = [0u8; 32];
+        chain_id[0] = 0xc1;
+        let mut prev_txid = [0u8; 32];
+        prev_txid[0] = 0xc2;
+        let mut txid = [0u8; 32];
+        txid[0] = 0xc3;
+
+        let tx = Tx {
+            version: 1,
+            tx_kind: 0x00,
+            tx_nonce: 1,
+            inputs: vec![TxInput {
+                prev_txid,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: 90,
+                covenant_type: COV_TYPE_EXT,
+                covenant_data: core_ext_covdata(7, &[]),
+            }],
+            locktime: 0,
+            witness: vec![WitnessItem {
+                suite_id: 0x42,
+                pubkey: vec![0x01, 0x02, 0x03],
+                signature: vec![0x04, 0x01],
+            }],
+            da_payload: vec![],
+            da_commit_core: None,
+            da_chunk_core: None,
+        };
+
+        (tx, txcontext_input_utxos(prev_txid), txid, chain_id)
+    }
+
+    fn assert_apply_preserves_caller_utxos(
+        tx: &Tx,
+        utxo_set: &HashMap<Outpoint, UtxoEntry>,
+        txid: [u8; 32],
+        chain_id: [u8; 32],
+    ) {
+        let original = utxo_set.clone();
+        let (_work, summary) =
+            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+                tx,
+                txid,
+                utxo_set,
+                200,
+                1_000,
+                1_000,
+                chain_id,
+                &CoreExtProfiles::empty(),
+                None,
+                None,
+            )
+            .expect("apply");
+        assert!(summary.fee > 0);
+        assert_eq!(utxo_set, &original, "caller utxo set mutated");
+    }
+
+    fn assert_apply_preserves_caller_utxos_with_profiles(
+        tx: &Tx,
+        utxo_set: &HashMap<Outpoint, UtxoEntry>,
+        txid: [u8; 32],
+        chain_id: [u8; 32],
+        profiles: &CoreExtProfiles,
+    ) {
+        let original = utxo_set.clone();
+        let (_work, summary) =
+            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+                tx, txid, utxo_set, 1, 0, 0, chain_id, profiles, None, None,
+            )
+            .expect("apply");
+        assert!(summary.fee > 0);
+        assert_eq!(utxo_set, &original, "caller utxo set mutated");
+    }
+
     #[test]
     fn apply_non_coinbase_tx_basic_update_deferred_sigchecks_matches_sequential() {
         let (tx, utxo_set, txid, chain_id) = signed_p2pk_case();
@@ -1301,6 +1837,64 @@ mod tests {
         .expect("deferred apply");
 
         assert_eq!(deferred, sequential);
+    }
+
+    #[test]
+    fn apply_non_coinbase_tx_basic_update_with_suite_context_does_not_mutate_caller_utxos() {
+        let (tx, utxo_set, txid, chain_id) = signed_p2pk_case();
+        assert_apply_preserves_caller_utxos(&tx, &utxo_set, txid, chain_id);
+    }
+
+    #[test]
+    fn apply_non_coinbase_tx_basic_update_vault_does_not_mutate_caller_utxos() {
+        let (tx, utxo_set, txid, chain_id) = signed_vault_case();
+        assert_apply_preserves_caller_utxos(&tx, &utxo_set, txid, chain_id);
+    }
+
+    #[test]
+    fn apply_non_coinbase_tx_basic_update_multisig_does_not_mutate_caller_utxos() {
+        let (tx, utxo_set, txid, chain_id) = signed_multisig_case();
+        assert_apply_preserves_caller_utxos(&tx, &utxo_set, txid, chain_id);
+    }
+
+    #[test]
+    fn apply_non_coinbase_tx_basic_update_htlc_does_not_mutate_caller_utxos() {
+        let (tx, utxo_set, txid, chain_id) = signed_htlc_case();
+        assert_apply_preserves_caller_utxos(&tx, &utxo_set, txid, chain_id);
+    }
+
+    #[test]
+    fn apply_non_coinbase_tx_basic_update_stealth_does_not_mutate_caller_utxos() {
+        let (tx, utxo_set, txid, chain_id) = signed_stealth_case();
+        assert_apply_preserves_caller_utxos(&tx, &utxo_set, txid, chain_id);
+    }
+
+    #[test]
+    fn apply_non_coinbase_tx_basic_update_anchor_output_does_not_mutate_caller_utxos() {
+        let (tx, utxo_set, txid, chain_id) = signed_anchor_output_case();
+        assert_apply_preserves_caller_utxos(&tx, &utxo_set, txid, chain_id);
+    }
+
+    #[test]
+    fn apply_non_coinbase_tx_basic_update_da_commit_output_does_not_mutate_caller_utxos() {
+        let (tx, utxo_set, txid, chain_id) = signed_da_commit_output_case();
+        assert_apply_preserves_caller_utxos(&tx, &utxo_set, txid, chain_id);
+    }
+
+    #[test]
+    fn apply_non_coinbase_tx_basic_update_core_ext_does_not_mutate_caller_utxos() {
+        let _guard = test_lock().lock().expect("test lock");
+        reset_txctx_record();
+
+        let (tx, utxo_set, txid, chain_id) = signed_core_ext_case();
+        assert_apply_preserves_caller_utxos_with_profiles(
+            &tx,
+            &utxo_set,
+            txid,
+            chain_id,
+            &txcontext_profiles(),
+        );
+        assert!(take_txctx_record().is_some(), "txcontext verifier must run");
     }
 
     #[test]

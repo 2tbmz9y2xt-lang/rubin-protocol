@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"reflect"
 	"testing"
 )
 
@@ -8,6 +9,20 @@ type stubDigestSigner struct {
 	pub []byte
 	sig []byte
 	err error
+}
+
+func copyTestUtxoSet(src map[Outpoint]UtxoEntry) map[Outpoint]UtxoEntry {
+	out := make(map[Outpoint]UtxoEntry, len(src))
+	for k, v := range src {
+		out[k] = UtxoEntry{
+			Value:             v.Value,
+			CovenantType:      v.CovenantType,
+			CovenantData:      append([]byte(nil), v.CovenantData...),
+			CreationHeight:    v.CreationHeight,
+			CreatedByCoinbase: v.CreatedByCoinbase,
+		}
+	}
+	return out
 }
 
 func (s stubDigestSigner) PubkeyBytes() []byte {
@@ -153,6 +168,72 @@ func TestCheckTransaction_ValidTx(t *testing.T) {
 	}
 	if len(utxoSet) != 1 {
 		t.Fatalf("utxo set size changed: %d", len(utxoSet))
+	}
+}
+
+func TestCheckTransactionWithCoreExtProfilesAndSuiteContext_DoesNotMutateCallerUtxoSet(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	covData := P2PKCovenantDataForPubkey(kp.PubkeyBytes())
+
+	var prevTxid [32]byte
+	prevTxid[0] = 0xAB
+	op := Outpoint{Txid: prevTxid, Vout: 0}
+	utxoSet := map[Outpoint]UtxoEntry{
+		op: {
+			Value:             100_000_000,
+			CovenantType:      COV_TYPE_P2PK,
+			CovenantData:      covData,
+			CreationHeight:    1,
+			CreatedByCoinbase: true,
+		},
+	}
+
+	tx := &Tx{
+		Version:  1,
+		TxNonce:  2,
+		Locktime: 0,
+		Inputs: []TxInput{{
+			PrevTxid: prevTxid,
+			PrevVout: 0,
+			Sequence: 0x7FFFFFFF,
+		}},
+		Outputs: []TxOutput{{
+			Value:        90_000_000,
+			CovenantType: COV_TYPE_P2PK,
+			CovenantData: covData,
+		}},
+	}
+	var chainID [32]byte
+	chainID[0] = 0x77
+
+	if err := SignTransaction(tx, utxoSet, chainID, kp); err != nil {
+		t.Fatalf("SignTransaction: %v", err)
+	}
+
+	txBytes, err := MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx: %v", err)
+	}
+
+	original := copyTestUtxoSet(utxoSet)
+	checked, err := CheckTransactionWithCoreExtProfilesAndSuiteContext(
+		txBytes,
+		utxoSet,
+		200,
+		0,
+		chainID,
+		nil,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("CheckTransactionWithCoreExtProfilesAndSuiteContext: %v", err)
+	}
+	if checked.Fee != 10_000_000 {
+		t.Fatalf("expected fee 10_000_000, got %d", checked.Fee)
+	}
+	if !reflect.DeepEqual(utxoSet, original) {
+		t.Fatalf("CheckTransactionWithCoreExtProfilesAndSuiteContext mutated caller utxo set")
 	}
 }
 
