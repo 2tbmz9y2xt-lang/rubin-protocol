@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"encoding/binary"
+	"math"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -579,6 +580,34 @@ func TestMinerBuildContextUtxoMapDoesNotAliasChainStateMap(t *testing.T) {
 	delete(buildCtx.utxos, outpoint)
 	if _, ok := chainState.Utxos[outpoint]; !ok {
 		t.Fatal("buildContext utxo map aliases chainstate map")
+	}
+
+	buildCtx, err = miner.buildContext(nil)
+	if err != nil {
+		t.Fatalf("buildContext second pass: %v", err)
+	}
+	entry := buildCtx.utxos[outpoint]
+	entry.CovenantData[0] ^= 0xff
+	buildCtx.utxos[outpoint] = entry
+	if chainState.Utxos[outpoint].CovenantData[0] == entry.CovenantData[0] {
+		t.Fatal("buildContext utxo covenant data aliases chainstate entry")
+	}
+}
+
+func TestAddU64NoOverflow(t *testing.T) {
+	t.Parallel()
+
+	v := uint64(7)
+	if err := addU64NoOverflow(&v, 5); err != nil {
+		t.Fatalf("unexpected add error: %v", err)
+	}
+	if v != 12 {
+		t.Fatalf("sum=%d, want 12", v)
+	}
+
+	v = math.MaxUint64 - 1
+	if err := addU64NoOverflow(&v, 2); err == nil {
+		t.Fatal("expected overflow error")
 	}
 }
 

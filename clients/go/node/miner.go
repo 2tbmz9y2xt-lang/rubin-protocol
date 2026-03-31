@@ -281,13 +281,15 @@ func (m *Miner) policyNeedsReadonlyUtxoSnapshot() bool {
 	return m.cfg.PolicyDaAnchorAntiAbuse
 }
 
-// Miner policy only reads UTXO entries, so a top-level map copy is enough to
-// isolate against concurrent map writes without paying per-entry covenant-data
-// cloning costs.
+func copyMinerReadonlyUtxoEntry(entry consensus.UtxoEntry) consensus.UtxoEntry {
+	entry.CovenantData = append([]byte(nil), entry.CovenantData...)
+	return entry
+}
+
 func copyMinerReadonlyUtxoSet(src map[consensus.Outpoint]consensus.UtxoEntry) map[consensus.Outpoint]consensus.UtxoEntry {
 	out := make(map[consensus.Outpoint]consensus.UtxoEntry, len(src))
 	for k, v := range src {
-		out[k] = v
+		out[k] = copyMinerReadonlyUtxoEntry(v)
 	}
 	return out
 }
@@ -313,18 +315,41 @@ func canonicalCoinbaseWeight(height uint64, alreadyGenerated uint64, mineAddress
 
 	outputCount := uint64(1)
 	baseSize := uint64(4 + 1 + 8) // version + tx_kind + tx_nonce
-	baseSize += compactSizeLenForMiner(1)
-	baseSize += 32 + 4 + compactSizeLenForMiner(0) + 4 // single coinbase input
+	if err := addU64NoOverflow(&baseSize, compactSizeLenForMiner(1)); err != nil {
+		return 0, errors.New("coinbase weight overflow")
+	}
+	if err := addU64NoOverflow(&baseSize, 32+4+compactSizeLenForMiner(0)+4); err != nil {
+		return 0, errors.New("coinbase weight overflow")
+	}
 	if subsidy > 0 {
 		outputCount++
 		addrLen := uint64(len(mineAddress))
-		baseSize += 8 + 2 + compactSizeLenForMiner(addrLen) + addrLen
+		if err := addU64NoOverflow(&baseSize, 8+2+compactSizeLenForMiner(addrLen)+addrLen); err != nil {
+			return 0, errors.New("coinbase weight overflow")
+		}
 	}
-	baseSize += compactSizeLenForMiner(outputCount)
-	baseSize += 8 + 2 + compactSizeLenForMiner(32) + 32 // witness-commitment anchor output
-	baseSize += 4                                       // locktime
+	if err := addU64NoOverflow(&baseSize, compactSizeLenForMiner(outputCount)); err != nil {
+		return 0, errors.New("coinbase weight overflow")
+	}
+	if err := addU64NoOverflow(&baseSize, 8+2+compactSizeLenForMiner(32)+32); err != nil {
+		return 0, errors.New("coinbase weight overflow")
+	}
+	if err := addU64NoOverflow(&baseSize, 4); err != nil {
+		return 0, errors.New("coinbase weight overflow")
+	}
+	if baseSize > (math.MaxUint64-2)/consensus.WITNESS_DISCOUNT_DIVISOR {
+		return 0, errors.New("coinbase weight overflow")
+	}
 
 	return consensus.WITNESS_DISCOUNT_DIVISOR*baseSize + 2, nil
+}
+
+func addU64NoOverflow(dst *uint64, value uint64) error {
+	if value > math.MaxUint64-*dst {
+		return errors.New("u64 overflow")
+	}
+	*dst += value
+	return nil
 }
 
 func compactSizeLenForMiner(n uint64) uint64 {
