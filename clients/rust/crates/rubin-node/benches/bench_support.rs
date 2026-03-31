@@ -1,14 +1,51 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rubin_consensus::constants::POW_LIMIT;
+use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
 use rubin_consensus::{
-    marshal_tx, p2pk_covenant_data_for_pubkey, sign_transaction, Mldsa87Keypair, Outpoint, Tx,
-    TxInput, TxOutput, UtxoEntry,
+    encode_compact_size, marshal_tx, merkle_root_txids, p2pk_covenant_data_for_pubkey, parse_tx,
+    sign_transaction, Mldsa87Keypair, Outpoint, Tx, TxInput, TxOutput, UtxoEntry,
+    BLOCK_HEADER_BYTES,
 };
+use rubin_node::undo::{build_block_undo, BlockUndo};
 use rubin_node::{
-    block_store_path, chain_state_path, default_sync_config, devnet_genesis_block_bytes,
-    devnet_genesis_chain_id, BlockStore, ChainState, SyncEngine, TxPool,
+    block_store_path, build_coinbase_tx, chain_state_path, default_mine_address,
+    default_sync_config, devnet_genesis_block_bytes, devnet_genesis_chain_id, BlockStore,
+    ChainState, SyncEngine, TxPool,
 };
+
+#[allow(dead_code)]
+pub const RUNTIME_BASELINE_BENCH_COMMAND: &str =
+    "cargo bench --manifest-path clients/rust/Cargo.toml -p rubin-node --bench runtime_baseline -- --noplot --sample-size 10 --measurement-time 2";
+pub const RUNTIME_BASELINE_TXPOOL_GROUP: &str = "rubin_node_txpool";
+pub const RUNTIME_BASELINE_TXPOOL_ADMIT: &str = "admit";
+pub const RUNTIME_BASELINE_TXPOOL_RELAY_METADATA: &str = "relay_metadata";
+pub const RUNTIME_BASELINE_CHAINSTATE_CLONE: &str = "rubin_node_chainstate_clone";
+pub const RUNTIME_BASELINE_SYNC_SNAPSHOT: &str = "rubin_node_sync_chain_state_snapshot";
+pub const RUNTIME_BASELINE_SYNC_GROUP: &str = "rubin_node_sync";
+pub const RUNTIME_BASELINE_SYNC_APPLY_GENESIS: &str = "apply_genesis";
+pub const RUNTIME_BASELINE_SYNC_DISCONNECT_TIP: &str = "disconnect_tip_after_genesis";
+pub const RUNTIME_BASELINE_UNDO_GROUP: &str = "rubin_node_undo";
+pub const RUNTIME_BASELINE_UNDO_BUILD_LARGE_BLOCK: &str = "build_large_block";
+pub const RUNTIME_BASELINE_UNDO_DISCONNECT_LARGE_BLOCK: &str = "disconnect_large_block";
+pub const RUNTIME_BASELINE_MINER_MINE_ONE: &str = "rubin_node_miner_mine_one";
+#[allow(dead_code)]
+pub const RUNTIME_BASELINE_EVIDENCE_TARGETS: &[&str] = &[
+    "rubin_node_txpool/admit",
+    "rubin_node_txpool/relay_metadata",
+    "rubin_node_chainstate_clone",
+    "rubin_node_sync_chain_state_snapshot",
+    "rubin_node_sync/apply_genesis",
+    "rubin_node_sync/disconnect_tip_after_genesis",
+    "rubin_node_undo/build_large_block",
+    "rubin_node_undo/disconnect_large_block",
+    "rubin_node_miner_mine_one",
+];
+
+const BENCH_BLOCK_TIMESTAMP: u64 = 1_777_000_123;
+const BENCH_UTXO_COUNT: usize = 4096;
+const BENCH_SPEND_COUNT: usize = 256;
 
 pub fn unique_temp_dir(prefix: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -26,6 +63,15 @@ pub struct SyncFixture {
     pub engine: SyncEngine,
 }
 
+#[derive(Clone)]
+pub struct UndoBenchmarkFixture {
+    pub prev_state: ChainState,
+    pub connected_state: ChainState,
+    pub block_bytes: Vec<u8>,
+    pub block_height: u64,
+    pub undo: BlockUndo,
+}
+
 impl SyncFixture {
     pub fn cleanup(self) {
         let SyncFixture { dir, store, engine } = self;
@@ -33,6 +79,74 @@ impl SyncFixture {
         drop(store);
         std::fs::remove_dir_all(&dir).expect("cleanup temp dir");
     }
+}
+
+fn build_block_bytes(
+    prev_hash: [u8; 32],
+    merkle_root: [u8; 32],
+    target: [u8; 32],
+    timestamp: u64,
+    txs: &[Vec<u8>],
+) -> Vec<u8> {
+    let mut header = Vec::with_capacity(BLOCK_HEADER_BYTES);
+    header.extend_from_slice(&1u32.to_le_bytes());
+    header.extend_from_slice(&prev_hash);
+    header.extend_from_slice(&merkle_root);
+    header.extend_from_slice(&timestamp.to_le_bytes());
+    header.extend_from_slice(&target);
+    header.extend_from_slice(&0u64.to_le_bytes());
+    assert_eq!(header.len(), BLOCK_HEADER_BYTES);
+
+    let mut block = header;
+    encode_compact_size(txs.len() as u64, &mut block);
+    for tx in txs {
+        block.extend_from_slice(tx);
+    }
+    block
+}
+
+fn block_with_txs(
+    height: u64,
+    already_generated: u64,
+    prev_hash: [u8; 32],
+    timestamp: u64,
+    txs: &[Vec<u8>],
+) -> Vec<u8> {
+    let mut txids = Vec::with_capacity(1 + txs.len());
+    let mut wtxids = Vec::with_capacity(1 + txs.len());
+    wtxids.push([0u8; 32]);
+    for tx_bytes in txs {
+        let (_tx, txid, wtxid, consumed) = parse_tx(tx_bytes).expect("parse tx");
+        assert_eq!(consumed, tx_bytes.len());
+        txids.push(txid);
+        wtxids.push(wtxid);
+    }
+
+    let witness_root = witness_merkle_root_wtxids(&wtxids).expect("witness root");
+    let witness_commitment = witness_commitment_hash(witness_root);
+    let coinbase = build_coinbase_tx(
+        height,
+        already_generated,
+        &default_mine_address(),
+        witness_commitment,
+    )
+    .expect("coinbase");
+    let (_tx, coinbase_txid, _wtxid, consumed) = parse_tx(&coinbase).expect("parse coinbase");
+    assert_eq!(consumed, coinbase.len());
+
+    let mut all_txids = Vec::with_capacity(1 + txids.len());
+    all_txids.push(coinbase_txid);
+    all_txids.extend_from_slice(&txids);
+    let merkle_root = merkle_root_txids(&all_txids).expect("merkle root");
+
+    let mut block_txs = Vec::with_capacity(1 + txs.len());
+    block_txs.push(coinbase);
+    block_txs.extend(txs.iter().cloned());
+    build_block_bytes(prev_hash, merkle_root, POW_LIMIT, timestamp, &block_txs)
+}
+
+fn bench_prev_timestamps() -> Vec<u64> {
+    vec![BENCH_BLOCK_TIMESTAMP.saturating_sub(60); 11]
 }
 
 pub fn chain_state_with_spendable_utxos(
@@ -179,4 +293,56 @@ pub fn fresh_txpool_fixture() -> (ChainState, Vec<u8>) {
 
 pub fn fresh_pool() -> TxPool {
     TxPool::new()
+}
+
+pub fn large_block_undo_fixture() -> UndoBenchmarkFixture {
+    let (prev_state, outpoints, signer, from_address) =
+        chain_state_with_spendable_utxos(BENCH_UTXO_COUNT);
+    let to_signer = Mldsa87Keypair::generate().expect("OpenSSL signer unavailable");
+    let to_address = p2pk_covenant_data_for_pubkey(&to_signer.pubkey_bytes());
+    let spend_txs: Vec<Vec<u8>> = outpoints
+        .iter()
+        .take(BENCH_SPEND_COUNT)
+        .enumerate()
+        .map(|(nonce, outpoint)| {
+            signed_transfer_tx(
+                &prev_state,
+                std::slice::from_ref(outpoint),
+                &signer,
+                SignedTransferSpec {
+                    amount: 50,
+                    fee: 1,
+                    nonce: (nonce as u64) + 1,
+                    change_address: &from_address,
+                    to_address: &to_address,
+                },
+            )
+        })
+        .collect();
+    let block_height = prev_state.height + 1;
+    let block_bytes = block_with_txs(
+        block_height,
+        prev_state.already_generated,
+        prev_state.tip_hash,
+        BENCH_BLOCK_TIMESTAMP,
+        &spend_txs,
+    );
+    let undo = build_block_undo(&prev_state, &block_bytes, block_height).expect("build undo");
+    let mut connected_state = prev_state.clone();
+    connected_state
+        .connect_block(
+            &block_bytes,
+            Some(POW_LIMIT),
+            Some(&bench_prev_timestamps()),
+            devnet_genesis_chain_id(),
+        )
+        .expect("connect block");
+
+    UndoBenchmarkFixture {
+        prev_state,
+        connected_state,
+        block_bytes,
+        block_height,
+        undo,
+    }
 }
