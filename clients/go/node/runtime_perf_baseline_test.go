@@ -262,6 +262,7 @@ func BenchmarkMempoolAddTx(b *testing.B) {
 	)
 	b.ReportAllocs()
 	b.SetBytes(int64(len(txBytes)))
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
 		mp, err := NewMempool(state, nil, devnetGenesisChainID)
@@ -298,6 +299,7 @@ func BenchmarkMempoolRelayMetadata(b *testing.B) {
 	)
 	b.ReportAllocs()
 	b.SetBytes(int64(len(txBytes)))
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if _, err := mp.RelayMetadata(txBytes); err != nil {
 			b.Fatalf("RelayMetadata: %v", err)
@@ -335,6 +337,7 @@ func BenchmarkMinerBuildContext(b *testing.B) {
 		toAddress,
 	)
 	b.ReportAllocs()
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if _, err := miner.buildContext([][]byte{txBytes}); err != nil {
 			b.Fatalf("buildContext: %v", err)
@@ -352,6 +355,7 @@ func BenchmarkCloneChainState(b *testing.B) {
 		124, 125, 126, 127, 128, 129, 130, 131,
 	})
 	b.ReportAllocs()
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if clone := cloneChainState(state); clone == nil {
 			b.Fatal("cloneChainState returned nil")
@@ -369,6 +373,7 @@ func BenchmarkCopyUtxoSet(b *testing.B) {
 		124, 125, 126, 127, 128, 129, 130, 131,
 	})
 	b.ReportAllocs()
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if cloned := copyUtxoSet(state.Utxos); len(cloned) != len(state.Utxos) {
 			b.Fatalf("copyUtxoSet len=%d want=%d", len(cloned), len(state.Utxos))
@@ -380,6 +385,7 @@ func BenchmarkConnectBlockWithCoreExtProfilesAndSuiteContext(b *testing.B) {
 	baseState, blockBytes, prevTimestamps := benchmarkConnectBlockFixture(b)
 	b.ReportAllocs()
 	b.SetBytes(int64(len(blockBytes)))
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
 		state := cloneChainState(baseState)
@@ -402,6 +408,7 @@ func BenchmarkConnectBlockParallelSigsWithSuiteContext(b *testing.B) {
 	baseState, blockBytes, prevTimestamps := benchmarkConnectBlockFixture(b)
 	b.ReportAllocs()
 	b.SetBytes(int64(len(blockBytes)))
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
 		state := cloneChainState(baseState)
