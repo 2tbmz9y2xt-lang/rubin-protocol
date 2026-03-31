@@ -408,6 +408,122 @@ func TestCanonicalCoinbaseWeightMatchesLegacyWeight(t *testing.T) {
 	}
 }
 
+func TestCanonicalCoinbaseWeightRejectsOverflowAndInvalidAddress(t *testing.T) {
+	t.Parallel()
+
+	if _, err := canonicalCoinbaseWeight(^uint64(0), 0, nil); err == nil {
+		t.Fatal("expected height overflow error")
+	}
+	if _, err := canonicalCoinbaseWeight(1, 0, nil); err == nil {
+		t.Fatal("expected invalid mine address error")
+	}
+}
+
+func TestCompactSizeLenForMinerCoversAllBranches(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		value uint64
+		want  uint64
+	}{
+		{value: 0, want: 1},
+		{value: 0xfc, want: 1},
+		{value: 0xfd, want: 3},
+		{value: 0xffff, want: 3},
+		{value: 0x1_0000, want: 5},
+		{value: 0xffff_ffff, want: 5},
+		{value: 0x1_0000_0000, want: 9},
+	}
+	for _, tc := range cases {
+		if got := compactSizeLenForMiner(tc.value); got != tc.want {
+			t.Fatalf("compactSizeLenForMiner(%d)=%d, want %d", tc.value, got, tc.want)
+		}
+	}
+}
+
+func TestPolicyNeedsReadonlyUtxoSnapshotMatrix(t *testing.T) {
+	t.Parallel()
+
+	var nilMiner *Miner
+	if nilMiner.policyNeedsReadonlyUtxoSnapshot() {
+		t.Fatal("nil miner should not require snapshot")
+	}
+
+	base := &Miner{cfg: DefaultMinerConfig()}
+	if !base.policyNeedsReadonlyUtxoSnapshot() {
+		t.Fatal("default miner should require snapshot")
+	}
+
+	disabled := &Miner{cfg: DefaultMinerConfig()}
+	disabled.cfg.PolicyRejectCoreExtPreActivation = false
+	disabled.cfg.PolicyDaAnchorAntiAbuse = false
+	if disabled.policyNeedsReadonlyUtxoSnapshot() {
+		t.Fatal("fully disabled policy matrix should not require snapshot")
+	}
+
+	coreExt := &Miner{cfg: DefaultMinerConfig()}
+	coreExt.cfg.PolicyRejectCoreExtPreActivation = true
+	if !coreExt.policyNeedsReadonlyUtxoSnapshot() {
+		t.Fatal("core-ext policy should require snapshot")
+	}
+
+	da := &Miner{cfg: DefaultMinerConfig()}
+	da.cfg.PolicyRejectCoreExtPreActivation = false
+	da.cfg.PolicyDaAnchorAntiAbuse = true
+	da.cfg.PolicyDaSurchargePerByte = 1
+	if !da.policyNeedsReadonlyUtxoSnapshot() {
+		t.Fatal("da anchor policy should require snapshot")
+	}
+}
+
+func TestSnapshotBuildContextStateHandlesNilAndNoPolicyPaths(t *testing.T) {
+	t.Parallel()
+
+	var nilMiner *Miner
+	if _, err := nilMiner.snapshotBuildContextState(); err == nil {
+		t.Fatal("expected nil miner error")
+	}
+
+	minerWithNilState := &Miner{cfg: DefaultMinerConfig()}
+	if _, err := minerWithNilState.snapshotBuildContextState(); err == nil {
+		t.Fatal("expected nil chainstate error")
+	}
+
+	state := NewChainState()
+	state.HasTip = true
+	state.Height = 9
+	state.TipHash = [32]byte{0x99}
+	op := consensus.Outpoint{Txid: [32]byte{0x42}, Vout: 0}
+	state.Utxos[op] = consensus.UtxoEntry{
+		Value:             12,
+		CovenantType:      consensus.COV_TYPE_P2PK,
+		CovenantData:      testP2PKCovenantData(0x11),
+		CreationHeight:    1,
+		CreatedByCoinbase: true,
+	}
+
+	miner := &Miner{chainState: state, cfg: DefaultMinerConfig()}
+	snapshot, err := miner.snapshotBuildContextState()
+	if err != nil {
+		t.Fatalf("snapshotBuildContextState: %v", err)
+	}
+	if !snapshot.hasTip || snapshot.height != 9 || snapshot.tipHash != state.TipHash {
+		t.Fatal("snapshot lost chainstate fields")
+	}
+	if snapshot.utxos == nil {
+		t.Fatal("default policy path should copy utxo map")
+	}
+	miner.cfg.PolicyRejectCoreExtPreActivation = false
+	miner.cfg.PolicyDaAnchorAntiAbuse = false
+	snapshot, err = miner.snapshotBuildContextState()
+	if err != nil {
+		t.Fatalf("snapshotBuildContextState without policy snapshot: %v", err)
+	}
+	if snapshot.utxos != nil {
+		t.Fatal("disabled policy path should not copy utxo map")
+	}
+}
+
 func TestMinerBuildContextUtxoMapDoesNotAliasChainStateMap(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)
