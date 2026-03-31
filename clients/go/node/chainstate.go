@@ -510,7 +510,7 @@ func copyUtxoSet(src map[consensus.Outpoint]consensus.UtxoEntry) map[consensus.O
 }
 
 func copySelectedUtxoSet(src map[consensus.Outpoint]consensus.UtxoEntry, outpoints []consensus.Outpoint) map[consensus.Outpoint]consensus.UtxoEntry {
-	out := make(map[consensus.Outpoint]consensus.UtxoEntry, len(outpoints))
+	out := make(map[consensus.Outpoint]consensus.UtxoEntry, countExistingUniqueOutpoints(src, outpoints))
 	for _, op := range outpoints {
 		if _, seen := out[op]; seen {
 			continue
@@ -522,6 +522,24 @@ func copySelectedUtxoSet(src map[consensus.Outpoint]consensus.UtxoEntry, outpoin
 		out[op] = copyUtxoEntry(entry)
 	}
 	return out
+}
+
+func countExistingUniqueOutpoints(src map[consensus.Outpoint]consensus.UtxoEntry, outpoints []consensus.Outpoint) int {
+	if len(src) == 0 || len(outpoints) == 0 {
+		return 0
+	}
+	seen := make(map[consensus.Outpoint]struct{}, len(outpoints))
+	count := 0
+	for _, op := range outpoints {
+		if _, ok := seen[op]; ok {
+			continue
+		}
+		seen[op] = struct{}{}
+		if _, ok := src[op]; ok {
+			count++
+		}
+	}
+	return count
 }
 
 func stateToDisk(s *ChainState) (chainStateDisk, error) {

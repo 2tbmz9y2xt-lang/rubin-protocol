@@ -98,6 +98,25 @@ func TestCopySelectedUtxoSetCopiesRequestedEntries(t *testing.T) {
 	}
 }
 
+func TestCountExistingUniqueOutpointsSkipsMissingAndDuplicates(t *testing.T) {
+	t.Parallel()
+
+	var txidA, txidB [32]byte
+	txidA[0] = 0xaa
+	txidB[0] = 0xbb
+	opA := consensus.Outpoint{Txid: txidA, Vout: 1}
+	opB := consensus.Outpoint{Txid: txidB, Vout: 2}
+
+	src := map[consensus.Outpoint]consensus.UtxoEntry{
+		opA: {Value: 11, CovenantType: consensus.COV_TYPE_P2PK},
+	}
+
+	count := countExistingUniqueOutpoints(src, []consensus.Outpoint{opA, opA, opB})
+	if count != 1 {
+		t.Fatalf("countExistingUniqueOutpoints=%d, want 1", count)
+	}
+}
+
 func TestStateToDisk_SortsByVoutWhenSameTxid(t *testing.T) {
 	txid := mustHash32Hex(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	st := &ChainState{
