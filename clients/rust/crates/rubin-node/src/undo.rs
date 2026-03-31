@@ -167,15 +167,15 @@ impl ChainState {
         let mut restored_outpoints = HashSet::new();
         for tx_undo in &undo.txs {
             for spent in &tx_undo.spent {
-                if created_outpoints.contains(&spent.outpoint) {
-                    continue;
-                }
                 if !restored_outpoints.insert(spent.outpoint.clone()) {
                     return Err(format!(
                         "undo restore collision for {}:{}",
                         hex::encode(spent.outpoint.txid),
                         spent.outpoint.vout
                     ));
+                }
+                if created_outpoints.contains(&spent.outpoint) {
+                    continue;
                 }
                 if self.utxos.contains_key(&spent.outpoint) {
                     return Err(format!(
@@ -818,6 +818,39 @@ mod tests {
         let err = connected_state
             .disconnect_block(&block_bytes, &undo)
             .expect_err("duplicate restore");
+        assert!(err.contains("undo restore collision"));
+    }
+
+    #[test]
+    fn disconnect_block_rejects_duplicate_created_restore_entries_in_undo() {
+        let (prev_state, _source_outpoint, block_bytes, block_height) = same_block_spend_fixture();
+        let mut undo =
+            build_block_undo(&prev_state, &block_bytes, block_height).expect("build undo");
+        let pb = parse_block_bytes(&block_bytes).expect("parse block");
+        let duplicate = SpentUndo {
+            outpoint: Outpoint {
+                txid: pb.txids[1],
+                vout: 0,
+            },
+            entry: sample_entry(55),
+        };
+        undo.txs[2].spent.push(duplicate.clone());
+        undo.txs[2].spent.push(duplicate);
+
+        let mut connected_state = prev_state.clone();
+        let prev_timestamps = [1_777_000_000u64; 11];
+        connected_state
+            .connect_block(
+                &block_bytes,
+                Some(POW_LIMIT),
+                Some(&prev_timestamps),
+                devnet_genesis_chain_id(),
+            )
+            .expect("connect block");
+
+        let err = connected_state
+            .disconnect_block(&block_bytes, &undo)
+            .expect_err("duplicate created restore");
         assert!(err.contains("undo restore collision"));
     }
 }
