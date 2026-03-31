@@ -315,33 +315,25 @@ func canonicalCoinbaseWeight(height uint64, alreadyGenerated uint64, mineAddress
 
 	outputCount := uint64(1)
 	baseSize := uint64(4 + 1 + 8) // version + tx_kind + tx_nonce
-	if err := addU64NoOverflow(&baseSize, compactSizeLenForMiner(1)); err != nil {
-		return 0, errors.New("coinbase weight overflow")
-	}
-	if err := addU64NoOverflow(&baseSize, 32+4+compactSizeLenForMiner(0)+4); err != nil {
-		return 0, errors.New("coinbase weight overflow")
+	parts := []uint64{
+		compactSizeLenForMiner(1),
+		32 + 4 + compactSizeLenForMiner(0) + 4,
 	}
 	if subsidy > 0 {
 		outputCount++
 		addrLen := uint64(len(mineAddress))
-		if err := addU64NoOverflow(&baseSize, 8+2+compactSizeLenForMiner(addrLen)+addrLen); err != nil {
-			return 0, errors.New("coinbase weight overflow")
-		}
+		parts = append(parts, 8+2+compactSizeLenForMiner(addrLen)+addrLen)
 	}
-	if err := addU64NoOverflow(&baseSize, compactSizeLenForMiner(outputCount)); err != nil {
-		return 0, errors.New("coinbase weight overflow")
-	}
-	if err := addU64NoOverflow(&baseSize, 8+2+compactSizeLenForMiner(32)+32); err != nil {
-		return 0, errors.New("coinbase weight overflow")
-	}
-	if err := addU64NoOverflow(&baseSize, 4); err != nil {
-		return 0, errors.New("coinbase weight overflow")
-	}
-	if baseSize > (math.MaxUint64-2)/consensus.WITNESS_DISCOUNT_DIVISOR {
-		return 0, errors.New("coinbase weight overflow")
+	parts = append(parts,
+		compactSizeLenForMiner(outputCount),
+		8+2+compactSizeLenForMiner(32)+32,
+		4,
+	)
+	if err := addCoinbaseBaseSize(&baseSize, parts...); err != nil {
+		return 0, err
 	}
 
-	return consensus.WITNESS_DISCOUNT_DIVISOR*baseSize + 2, nil
+	return finalizeCoinbaseWeight(baseSize)
 }
 
 func addU64NoOverflow(dst *uint64, value uint64) error {
@@ -350,6 +342,22 @@ func addU64NoOverflow(dst *uint64, value uint64) error {
 	}
 	*dst += value
 	return nil
+}
+
+func addCoinbaseBaseSize(dst *uint64, values ...uint64) error {
+	for _, value := range values {
+		if err := addU64NoOverflow(dst, value); err != nil {
+			return errors.New("coinbase weight overflow")
+		}
+	}
+	return nil
+}
+
+func finalizeCoinbaseWeight(baseSize uint64) (uint64, error) {
+	if baseSize > (math.MaxUint64-2)/consensus.WITNESS_DISCOUNT_DIVISOR {
+		return 0, errors.New("coinbase weight overflow")
+	}
+	return consensus.WITNESS_DISCOUNT_DIVISOR*baseSize + 2, nil
 }
 
 func compactSizeLenForMiner(n uint64) uint64 {
