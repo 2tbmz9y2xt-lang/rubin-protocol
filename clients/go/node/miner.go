@@ -314,7 +314,7 @@ func canonicalCoinbaseWeight(height uint64, alreadyGenerated uint64, mineAddress
 	}
 
 	outputCount := uint64(1)
-	baseSize := uint64(4 + 1 + 8) // version + tx_kind + tx_nonce
+	strippedSize := uint64(4 + 1 + 8) // version + tx_kind + tx_nonce
 	parts := []uint64{
 		compactSizeLenForMiner(1),
 		32 + 4 + compactSizeLenForMiner(0) + 4,
@@ -329,11 +329,15 @@ func canonicalCoinbaseWeight(height uint64, alreadyGenerated uint64, mineAddress
 		8+2+compactSizeLenForMiner(32)+32,
 		4,
 	)
-	if err := addCoinbaseBaseSize(&baseSize, parts...); err != nil {
+	if err := addCoinbaseBaseSize(&strippedSize, parts...); err != nil {
 		return 0, err
 	}
 
-	return finalizeCoinbaseWeight(baseSize)
+	// Canonical coinbase carries zero witness items and no DA payload, so the
+	// discounted trailer still contributes one CompactSize byte for each field.
+	witnessSize := compactSizeLenForMiner(0)
+	daSize := compactSizeLenForMiner(0)
+	return finalizeCoinbaseWeight(strippedSize, witnessSize, daSize)
 }
 
 func addU64NoOverflow(dst *uint64, value uint64) error {
@@ -353,11 +357,15 @@ func addCoinbaseBaseSize(dst *uint64, values ...uint64) error {
 	return nil
 }
 
-func finalizeCoinbaseWeight(baseSize uint64) (uint64, error) {
-	if baseSize > (math.MaxUint64-2)/consensus.WITNESS_DISCOUNT_DIVISOR {
+func finalizeCoinbaseWeight(strippedSize uint64, witnessSize uint64, daSize uint64) (uint64, error) {
+	extraWeight, err := addU64NoOverflowValue(witnessSize, daSize)
+	if err != nil {
 		return 0, errors.New("coinbase weight overflow")
 	}
-	return consensus.WITNESS_DISCOUNT_DIVISOR*baseSize + 2, nil
+	if strippedSize > (math.MaxUint64-extraWeight)/consensus.WITNESS_DISCOUNT_DIVISOR {
+		return 0, errors.New("coinbase weight overflow")
+	}
+	return uint64(consensus.WITNESS_DISCOUNT_DIVISOR)*strippedSize + extraWeight, nil
 }
 
 func remainingWeightFromCoinbase(coinbaseWeight uint64) (uint64, error) {
@@ -365,6 +373,13 @@ func remainingWeightFromCoinbase(coinbaseWeight uint64) (uint64, error) {
 		return 0, errors.New("coinbase weight exceeds max block weight")
 	}
 	return consensus.MAX_BLOCK_WEIGHT - coinbaseWeight, nil
+}
+
+func addU64NoOverflowValue(left uint64, right uint64) (uint64, error) {
+	if right > math.MaxUint64-left {
+		return 0, errors.New("u64 overflow")
+	}
+	return left + right, nil
 }
 
 func compactSizeLenForMiner(n uint64) uint64 {

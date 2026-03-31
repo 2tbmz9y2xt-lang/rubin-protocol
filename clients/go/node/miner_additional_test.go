@@ -631,17 +631,19 @@ func TestAddCoinbaseBaseSize(t *testing.T) {
 func TestFinalizeCoinbaseWeight(t *testing.T) {
 	t.Parallel()
 
-	const maxBaseSize = (math.MaxUint64 - 2) / consensus.WITNESS_DISCOUNT_DIVISOR
-	got, err := finalizeCoinbaseWeight(maxBaseSize)
+	const witnessSize = uint64(1)
+	const daSize = uint64(1)
+	const maxBaseSize = (math.MaxUint64 - witnessSize - daSize) / consensus.WITNESS_DISCOUNT_DIVISOR
+	got, err := finalizeCoinbaseWeight(maxBaseSize, witnessSize, daSize)
 	if err != nil {
 		t.Fatalf("unexpected finalize error: %v", err)
 	}
-	want := uint64(consensus.WITNESS_DISCOUNT_DIVISOR)*maxBaseSize + 2
+	want := uint64(consensus.WITNESS_DISCOUNT_DIVISOR)*maxBaseSize + witnessSize + daSize
 	if got != want {
 		t.Fatalf("weight=%d, want %d", got, want)
 	}
 
-	if _, err := finalizeCoinbaseWeight(maxBaseSize + 1); err == nil {
+	if _, err := finalizeCoinbaseWeight(maxBaseSize+1, witnessSize, daSize); err == nil {
 		t.Fatal("expected overflow error")
 	}
 }
@@ -659,6 +661,22 @@ func TestRemainingWeightFromCoinbase(t *testing.T) {
 
 	if _, err := remainingWeightFromCoinbase(consensus.MAX_BLOCK_WEIGHT + 1); err == nil {
 		t.Fatal("expected oversize coinbase error")
+	}
+}
+
+func TestAddU64NoOverflowValue(t *testing.T) {
+	t.Parallel()
+
+	got, err := addU64NoOverflowValue(3, 4)
+	if err != nil {
+		t.Fatalf("unexpected add error: %v", err)
+	}
+	if got != 7 {
+		t.Fatalf("sum=%d, want 7", got)
+	}
+
+	if _, err := addU64NoOverflowValue(math.MaxUint64, 1); err == nil {
+		t.Fatal("expected overflow error")
 	}
 }
 
