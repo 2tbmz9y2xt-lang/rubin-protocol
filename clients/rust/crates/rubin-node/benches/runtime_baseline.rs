@@ -7,9 +7,8 @@ use std::time::{Duration, Instant};
 
 use bench_support::{
     chain_state_with_spendable_utxos, engine_after_genesis, fresh_pool, fresh_sync_engine,
-    fresh_txpool_fixture, large_block_undo_fixture,
+    fresh_txpool_fixture,
 };
-use rubin_node::undo::build_block_undo;
 
 fn txpool_admit_bench(c: &mut Criterion) {
     let (state, raw) = fresh_txpool_fixture();
@@ -99,35 +98,6 @@ fn sync_apply_disconnect_bench(c: &mut Criterion) {
     group.finish();
 }
 
-fn sync_undo_large_block_bench(c: &mut Criterion) {
-    let fixture = large_block_undo_fixture();
-    let mut group = c.benchmark_group("rubin_node_undo");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(3));
-    group.bench_function("build_large_block", |b| {
-        b.iter(|| {
-            let _ = build_block_undo(
-                &fixture.prev_state,
-                &fixture.block_bytes,
-                fixture.block_height,
-            )
-            .expect("build undo");
-        })
-    });
-    group.bench_function("disconnect_large_block", |b| {
-        b.iter_batched(
-            || fixture.connected_state.clone(),
-            |mut state| {
-                let _ = state
-                    .disconnect_block(&fixture.block_bytes, &fixture.undo)
-                    .expect("disconnect");
-            },
-            BatchSize::SmallInput,
-        )
-    });
-    group.finish();
-}
-
 fn miner_bench(c: &mut Criterion) {
     c.bench_function("rubin_node_miner_mine_one", |b| {
         b.iter_custom(|iters| {
@@ -156,7 +126,6 @@ criterion_group!(
     chainstate_clone_bench,
     sync_snapshot_bench,
     sync_apply_disconnect_bench,
-    sync_undo_large_block_bench,
     miner_bench
 );
 criterion_main!(runtime_baseline_benches);
