@@ -82,7 +82,7 @@ pub fn build_block_undo(
                 })?;
                 if !spent_prev_outpoints.insert(op.clone()) {
                     return Err(format!(
-                        "undo missing utxo for {}:{}",
+                        "undo duplicate prev-state spend for {}:{}",
                         hex::encode(op.txid),
                         op.vout
                     ));
@@ -169,7 +169,7 @@ impl ChainState {
             for spent in &tx_undo.spent {
                 if !restored_outpoints.insert(spent.outpoint.clone()) {
                     return Err(format!(
-                        "undo restore collision for {}:{}",
+                        "undo duplicate restore entry for {}:{}",
                         hex::encode(spent.outpoint.txid),
                         spent.outpoint.vout
                     ));
@@ -179,7 +179,7 @@ impl ChainState {
                 }
                 if self.utxos.contains_key(&spent.outpoint) {
                     return Err(format!(
-                        "undo restore collision for {}:{}",
+                        "undo restore target already present for {}:{}",
                         hex::encode(spent.outpoint.txid),
                         spent.outpoint.vout
                     ));
@@ -698,7 +698,7 @@ mod tests {
 
         let err =
             build_block_undo(&prev_state, &block_bytes, block_height).expect_err("duplicate spend");
-        assert!(err.contains("undo missing utxo"));
+        assert!(err.contains("undo duplicate prev-state spend"));
     }
 
     #[test]
@@ -792,7 +792,7 @@ mod tests {
         let err = connected_state
             .disconnect_block(&block_bytes, &undo)
             .expect_err("restore collision");
-        assert!(err.contains("undo restore collision"));
+        assert!(err.contains("undo restore target already present"));
     }
 
     #[test]
@@ -818,7 +818,7 @@ mod tests {
         let err = connected_state
             .disconnect_block(&block_bytes, &undo)
             .expect_err("duplicate restore");
-        assert!(err.contains("undo restore collision"));
+        assert!(err.contains("undo duplicate restore entry"));
     }
 
     #[test]
@@ -851,6 +851,6 @@ mod tests {
         let err = connected_state
             .disconnect_block(&block_bytes, &undo)
             .expect_err("duplicate created restore");
-        assert!(err.contains("undo restore collision"));
+        assert!(err.contains("undo duplicate restore entry"));
     }
 }
