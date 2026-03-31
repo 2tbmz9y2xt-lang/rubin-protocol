@@ -237,6 +237,99 @@ func TestCheckTransactionWithCoreExtProfilesAndSuiteContext_DoesNotMutateCallerU
 	}
 }
 
+func TestCheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext_NilTx(t *testing.T) {
+	_, err := CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+		nil,
+		nil,
+		[32]byte{},
+		[32]byte{},
+		map[Outpoint]UtxoEntry{},
+		1,
+		0,
+		[32]byte{},
+		nil,
+		nil,
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected nil tx error")
+	}
+}
+
+func TestCheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext_ValidTx(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	covData := P2PKCovenantDataForPubkey(kp.PubkeyBytes())
+
+	var prevTxid [32]byte
+	prevTxid[0] = 0xAC
+	op := Outpoint{Txid: prevTxid, Vout: 0}
+	utxoSet := map[Outpoint]UtxoEntry{
+		op: {
+			Value:             100_000_000,
+			CovenantType:      COV_TYPE_P2PK,
+			CovenantData:      covData,
+			CreationHeight:    1,
+			CreatedByCoinbase: true,
+		},
+	}
+
+	tx := &Tx{
+		Version:  1,
+		TxNonce:  3,
+		Locktime: 0,
+		Inputs: []TxInput{{
+			PrevTxid: prevTxid,
+			PrevVout: 0,
+			Sequence: 0x7FFFFFFF,
+		}},
+		Outputs: []TxOutput{{
+			Value:        90_000_000,
+			CovenantType: COV_TYPE_P2PK,
+			CovenantData: covData,
+		}},
+	}
+	var chainID [32]byte
+	chainID[0] = 0x66
+
+	if err := SignTransaction(tx, utxoSet, chainID, kp); err != nil {
+		t.Fatalf("SignTransaction: %v", err)
+	}
+	txBytes, err := MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx: %v", err)
+	}
+	parsed, txid, wtxid, consumed, err := ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("ParseTx: %v", err)
+	}
+	if consumed != len(txBytes) {
+		t.Fatalf("consumed=%d len=%d", consumed, len(txBytes))
+	}
+
+	checked, err := CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+		txBytes,
+		parsed,
+		txid,
+		wtxid,
+		copyTestUtxoSet(utxoSet),
+		200,
+		0,
+		chainID,
+		nil,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext: %v", err)
+	}
+	if checked.Fee != 10_000_000 {
+		t.Fatalf("expected fee 10_000_000, got %d", checked.Fee)
+	}
+	if checked.SerializedSize != len(txBytes) {
+		t.Fatalf("serialized size mismatch: %d vs %d", checked.SerializedSize, len(txBytes))
+	}
+}
+
 func TestSignTransaction_NilTx(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	var chainID [32]byte

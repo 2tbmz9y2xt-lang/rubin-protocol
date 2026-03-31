@@ -184,6 +184,24 @@ func TestMempoolRelayMetadata(t *testing.T) {
 	}
 }
 
+func TestMempoolRelayMetadataTrailingBytes(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 3, 5, fromKey, fromAddress, toAddress)
+	txBytes = append(txBytes, 0x00)
+	if _, err := mp.RelayMetadata(txBytes); err == nil || !strings.Contains(err.Error(), "trailing bytes after canonical tx") {
+		t.Fatalf("expected trailing-bytes rejection, got %v", err)
+	}
+}
+
 func TestMempoolRelayMetadataNil(t *testing.T) {
 	var mp *Mempool
 	if _, err := mp.RelayMetadata([]byte{0x01}); err == nil {
@@ -597,8 +615,14 @@ func TestChainStateAdmissionSnapshotForInputsCopiesOnlyRequestedEntries(t *testi
 	fromKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 200})
+	var missingTxid [32]byte
+	missingTxid[0] = 0xee
 
-	snapshot := st.admissionSnapshotForInputs([]consensus.Outpoint{outpoints[0], outpoints[0]})
+	snapshot := st.admissionSnapshotForInputs([]consensus.Outpoint{
+		outpoints[0],
+		outpoints[0],
+		{Txid: missingTxid, Vout: 9},
+	})
 	if snapshot == nil {
 		t.Fatal("admissionSnapshotForInputs returned nil")
 	}
