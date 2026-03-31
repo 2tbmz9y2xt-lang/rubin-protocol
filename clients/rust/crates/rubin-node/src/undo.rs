@@ -164,10 +164,18 @@ impl ChainState {
             }
         }
 
+        let mut restored_outpoints = HashSet::new();
         for tx_undo in &undo.txs {
             for spent in &tx_undo.spent {
                 if created_outpoints.contains(&spent.outpoint) {
                     continue;
+                }
+                if !restored_outpoints.insert(spent.outpoint.clone()) {
+                    return Err(format!(
+                        "undo restore collision for {}:{}",
+                        hex::encode(spent.outpoint.txid),
+                        spent.outpoint.vout
+                    ));
                 }
                 if self.utxos.contains_key(&spent.outpoint) {
                     return Err(format!(
@@ -675,10 +683,12 @@ mod tests {
 
     #[test]
     fn build_block_undo_errors_on_missing_prev_state_utxo() {
-        let (mut prev_state, source_outpoint, block_bytes, block_height) = same_block_spend_fixture();
+        let (mut prev_state, source_outpoint, block_bytes, block_height) =
+            same_block_spend_fixture();
         prev_state.utxos.remove(&source_outpoint);
 
-        let err = build_block_undo(&prev_state, &block_bytes, block_height).expect_err("missing utxo");
+        let err =
+            build_block_undo(&prev_state, &block_bytes, block_height).expect_err("missing utxo");
         assert!(err.contains("undo missing utxo"));
     }
 
@@ -686,7 +696,8 @@ mod tests {
     fn build_block_undo_errors_on_duplicate_prev_state_spend() {
         let (prev_state, block_bytes, block_height) = duplicate_prev_state_spend_fixture();
 
-        let err = build_block_undo(&prev_state, &block_bytes, block_height).expect_err("duplicate spend");
+        let err =
+            build_block_undo(&prev_state, &block_bytes, block_height).expect_err("duplicate spend");
         assert!(err.contains("undo missing utxo"));
     }
 
@@ -718,7 +729,8 @@ mod tests {
     #[test]
     fn disconnect_block_rejects_undo_tx_count_mismatch() {
         let (prev_state, _source_outpoint, block_bytes, block_height) = same_block_spend_fixture();
-        let mut undo = build_block_undo(&prev_state, &block_bytes, block_height).expect("build undo");
+        let mut undo =
+            build_block_undo(&prev_state, &block_bytes, block_height).expect("build undo");
         undo.txs.pop();
         let mut connected_state = prev_state.clone();
         let prev_timestamps = [1_777_000_000u64; 11];
@@ -780,6 +792,32 @@ mod tests {
         let err = connected_state
             .disconnect_block(&block_bytes, &undo)
             .expect_err("restore collision");
+        assert!(err.contains("undo restore collision"));
+    }
+
+    #[test]
+    fn disconnect_block_rejects_duplicate_restore_entries_in_undo() {
+        let (prev_state, source_outpoint, block_bytes, block_height) = same_block_spend_fixture();
+        let mut undo =
+            build_block_undo(&prev_state, &block_bytes, block_height).expect("build undo");
+        let duplicate = undo.txs[1].spent[0].clone();
+        undo.txs[1].spent.push(duplicate);
+
+        let mut connected_state = prev_state.clone();
+        let prev_timestamps = [1_777_000_000u64; 11];
+        connected_state
+            .connect_block(
+                &block_bytes,
+                Some(POW_LIMIT),
+                Some(&prev_timestamps),
+                devnet_genesis_chain_id(),
+            )
+            .expect("connect block");
+        connected_state.utxos.remove(&source_outpoint);
+
+        let err = connected_state
+            .disconnect_block(&block_bytes, &undo)
+            .expect_err("duplicate restore");
         assert!(err.contains("undo restore collision"));
     }
 }
