@@ -6,7 +6,7 @@ use rubin_node::{devnet_genesis_chain_id, Miner, MinerConfig};
 
 use bench_support::{
     chain_state_with_spendable_utxos, engine_after_genesis, fresh_pool, fresh_sync_engine,
-    fresh_txpool_fixture,
+    fresh_txpool_fixture, SyncFixture,
 };
 
 fn txpool_admit_bench(c: &mut Criterion) {
@@ -47,10 +47,10 @@ fn chainstate_clone_bench(c: &mut Criterion) {
 }
 
 fn sync_snapshot_bench(c: &mut Criterion) {
-    let (_dir, _store, engine) = engine_after_genesis("rubin-node-sync-snapshot");
+    let fixture = engine_after_genesis("rubin-node-sync-snapshot");
     c.bench_function("rubin_node_sync_chain_state_snapshot", |b| {
         b.iter(|| {
-            let _ = engine.chain_state_snapshot();
+            let _ = fixture.engine.chain_state_snapshot();
         })
     });
 }
@@ -60,10 +60,12 @@ fn sync_apply_disconnect_bench(c: &mut Criterion) {
     group.bench_function("apply_genesis", |b| {
         b.iter_batched(
             || fresh_sync_engine("rubin-node-sync-apply"),
-            |(_dir, _store, mut engine)| {
-                let _ = engine
+            |mut fixture: SyncFixture| {
+                let _ = fixture
+                    .engine
                     .apply_block(&rubin_node::devnet_genesis_block_bytes(), None)
                     .expect("apply genesis");
+                fixture.cleanup();
             },
             BatchSize::SmallInput,
         )
@@ -71,8 +73,9 @@ fn sync_apply_disconnect_bench(c: &mut Criterion) {
     group.bench_function("disconnect_tip_after_genesis", |b| {
         b.iter_batched(
             || engine_after_genesis("rubin-node-sync-disconnect"),
-            |(_dir, _store, mut engine)| {
-                let _ = engine.disconnect_tip().expect("disconnect tip");
+            |mut fixture: SyncFixture| {
+                let _ = fixture.engine.disconnect_tip().expect("disconnect tip");
+                fixture.cleanup();
             },
             BatchSize::SmallInput,
         )
@@ -84,13 +87,15 @@ fn miner_bench(c: &mut Criterion) {
     c.bench_function("rubin_node_miner_mine_one", |b| {
         b.iter_batched(
             || fresh_sync_engine("rubin-node-miner-bench"),
-            |(_dir, _store, mut engine)| {
+            |mut fixture: SyncFixture| {
                 let cfg = MinerConfig {
                     timestamp_source: || 1_777_000_000,
                     ..MinerConfig::default()
                 };
-                let mut miner = Miner::new(&mut engine, None, cfg).expect("miner");
+                let mut miner = Miner::new(&mut fixture.engine, None, cfg).expect("miner");
                 let _ = miner.mine_one(&[]).expect("mine one");
+                drop(miner);
+                fixture.cleanup();
             },
             BatchSize::SmallInput,
         )

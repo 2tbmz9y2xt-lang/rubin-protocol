@@ -20,6 +20,21 @@ pub fn unique_temp_dir(prefix: &str) -> PathBuf {
     dir
 }
 
+pub struct SyncFixture {
+    pub dir: PathBuf,
+    pub store: BlockStore,
+    pub engine: SyncEngine,
+}
+
+impl SyncFixture {
+    pub fn cleanup(self) {
+        let SyncFixture { dir, store, engine } = self;
+        drop(engine);
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 pub fn chain_state_with_spendable_utxos(
     count: usize,
 ) -> (ChainState, Vec<Outpoint>, Mldsa87Keypair, Vec<u8>) {
@@ -54,15 +69,19 @@ pub fn chain_state_with_spendable_utxos(
     (state, outpoints, keypair, from_address)
 }
 
+pub struct SignedTransferSpec<'a> {
+    pub amount: u64,
+    pub fee: u64,
+    pub nonce: u64,
+    pub change_address: &'a [u8],
+    pub to_address: &'a [u8],
+}
+
 pub fn signed_transfer_tx(
     state: &ChainState,
     inputs: &[Outpoint],
-    amount: u64,
-    fee: u64,
-    nonce: u64,
     signer: &Mldsa87Keypair,
-    change_address: &[u8],
-    to_address: &[u8],
+    spec: SignedTransferSpec<'_>,
 ) -> Vec<u8> {
     let mut tx_inputs = Vec::with_capacity(inputs.len());
     let mut total_in = 0u64;
@@ -77,26 +96,26 @@ pub fn signed_transfer_tx(
         });
     }
     let mut outputs = vec![TxOutput {
-        value: amount,
+        value: spec.amount,
         covenant_type: rubin_consensus::constants::COV_TYPE_P2PK,
-        covenant_data: to_address.to_vec(),
+        covenant_data: spec.to_address.to_vec(),
     }];
     let change = total_in
-        .checked_sub(amount)
-        .and_then(|v| v.checked_sub(fee))
+        .checked_sub(spec.amount)
+        .and_then(|v| v.checked_sub(spec.fee))
         .expect("valid change");
     if change > 0 {
         outputs.push(TxOutput {
             value: change,
             covenant_type: rubin_consensus::constants::COV_TYPE_P2PK,
-            covenant_data: change_address.to_vec(),
+            covenant_data: spec.change_address.to_vec(),
         });
     }
 
     let mut tx = Tx {
         version: rubin_consensus::constants::TX_WIRE_VERSION,
         tx_kind: 0x00,
-        tx_nonce: nonce,
+        tx_nonce: spec.nonce,
         inputs: tx_inputs,
         outputs,
         locktime: 0,
@@ -109,7 +128,7 @@ pub fn signed_transfer_tx(
     marshal_tx(&tx).expect("marshal tx")
 }
 
-pub fn fresh_sync_engine(prefix: &str) -> (PathBuf, BlockStore, SyncEngine) {
+pub fn fresh_sync_engine(prefix: &str) -> SyncFixture {
     let dir = unique_temp_dir(prefix);
     let chain_state_file = chain_state_path(&dir);
     let block_store = BlockStore::open(block_store_path(&dir)).expect("open block store");
@@ -123,15 +142,20 @@ pub fn fresh_sync_engine(prefix: &str) -> (PathBuf, BlockStore, SyncEngine) {
         default_sync_config(None, devnet_genesis_chain_id(), Some(chain_state_file)),
     )
     .expect("new sync engine");
-    (dir, block_store, sync)
+    SyncFixture {
+        dir,
+        store: block_store,
+        engine: sync,
+    }
 }
 
-pub fn engine_after_genesis(prefix: &str) -> (PathBuf, BlockStore, SyncEngine) {
-    let (dir, store, mut engine) = fresh_sync_engine(prefix);
-    engine
+pub fn engine_after_genesis(prefix: &str) -> SyncFixture {
+    let mut fixture = fresh_sync_engine(prefix);
+    fixture
+        .engine
         .apply_block(&devnet_genesis_block_bytes(), None)
         .expect("apply genesis");
-    (dir, store, engine)
+    fixture
 }
 
 pub fn fresh_txpool_fixture() -> (ChainState, Vec<u8>) {
@@ -141,12 +165,14 @@ pub fn fresh_txpool_fixture() -> (ChainState, Vec<u8>) {
     let raw = signed_transfer_tx(
         &state,
         &[outpoints[0].clone()],
-        90,
-        1,
-        1,
         &signer,
-        &from_address,
-        &to_address,
+        SignedTransferSpec {
+            amount: 90,
+            fee: 1,
+            nonce: 1,
+            change_address: &from_address,
+            to_address: &to_address,
+        },
     );
     (state, raw)
 }
