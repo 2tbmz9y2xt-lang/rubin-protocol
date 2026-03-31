@@ -500,6 +500,7 @@ dependencies = [
 name = "rubin-node"
 version = "0.0.0"
 dependencies = [
+ "criterion",
  "hex",
  "num-bigint",
  "rubin-consensus",

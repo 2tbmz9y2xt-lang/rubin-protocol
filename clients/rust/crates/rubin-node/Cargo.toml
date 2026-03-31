@@ -12,5 +12,12 @@ sha3 = "0.10"
 
 rubin-consensus = { path = "../rubin-consensus" }
 
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "runtime_baseline"
+harness = false
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }
