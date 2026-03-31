@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use rubin_consensus::constants::{COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT};
 use rubin_consensus::{block_hash, parse_block_bytes, Outpoint, UtxoEntry};
 use serde::{Deserialize, Serialize};
@@ -59,11 +61,12 @@ pub fn build_block_undo(
         return Err("parsed block txid length mismatch".into());
     }
 
-    let mut work = prev_state.utxos.clone();
+    let mut spent_prev_outpoints = HashSet::new();
+    let mut block_outputs = HashSet::new();
     let mut tx_undos = Vec::with_capacity(pb.txs.len());
 
     for (i, tx) in pb.txs.iter().enumerate() {
-        let mut spent = Vec::new();
+        let mut spent = Vec::with_capacity(tx.inputs.len());
         // Coinbase (index 0) has no real inputs to consume.
         if i > 0 {
             for input in &tx.inputs {
@@ -71,33 +74,35 @@ pub fn build_block_undo(
                     txid: input.prev_txid,
                     vout: input.prev_vout,
                 };
-                let entry = work.remove(&op).ok_or_else(|| {
+                if block_outputs.remove(&op) {
+                    continue;
+                }
+                let entry = prev_state.utxos.get(&op).ok_or_else(|| {
                     format!("undo missing utxo for {}:{}", hex::encode(op.txid), op.vout)
                 })?;
+                if !spent_prev_outpoints.insert(op.clone()) {
+                    return Err(format!(
+                        "undo missing utxo for {}:{}",
+                        hex::encode(op.txid),
+                        op.vout
+                    ));
+                }
                 spent.push(SpentUndo {
                     outpoint: op,
-                    entry,
+                    entry: entry.clone(),
                 });
             }
         }
-        // Add outputs to the working set so subsequent txs can spend them.
+        // Track new spendable outputs so later txs can consume them without
+        // cloning the full previous-state UTXO map.
         for (output_index, out) in tx.outputs.iter().enumerate() {
             if !is_spendable_output(out.covenant_type) {
                 continue;
             }
-            work.insert(
-                Outpoint {
-                    txid: pb.txids[i],
-                    vout: output_index as u32,
-                },
-                UtxoEntry {
-                    value: out.value,
-                    covenant_type: out.covenant_type,
-                    covenant_data: out.covenant_data.clone(),
-                    creation_height: block_height,
-                    created_by_coinbase: i == 0,
-                },
-            );
+            block_outputs.insert(Outpoint {
+                txid: pb.txids[i],
+                vout: output_index as u32,
+            });
         }
         tx_undos.push(TxUndo { spent });
     }
@@ -146,7 +151,33 @@ impl ChainState {
             return Err("disconnect block is not current tip".into());
         }
 
-        let mut work = self.utxos.clone();
+        let mut created_outpoints = HashSet::new();
+        for (tx_index, tx) in pb.txs.iter().enumerate() {
+            for (output_index, out) in tx.outputs.iter().enumerate() {
+                if !is_spendable_output(out.covenant_type) {
+                    continue;
+                }
+                created_outpoints.insert(Outpoint {
+                    txid: pb.txids[tx_index],
+                    vout: output_index as u32,
+                });
+            }
+        }
+
+        for tx_undo in &undo.txs {
+            for spent in &tx_undo.spent {
+                if created_outpoints.contains(&spent.outpoint) {
+                    continue;
+                }
+                if self.utxos.contains_key(&spent.outpoint) {
+                    return Err(format!(
+                        "undo restore collision for {}:{}",
+                        hex::encode(spent.outpoint.txid),
+                        spent.outpoint.vout
+                    ));
+                }
+            }
+        }
 
         // Process transactions in **reverse** order.
         for tx_index in (0..pb.txs.len()).rev() {
@@ -158,7 +189,7 @@ impl ChainState {
                 if !is_spendable_output(out.covenant_type) {
                     continue;
                 }
-                work.remove(&Outpoint {
+                self.utxos.remove(&Outpoint {
                     txid,
                     vout: output_index as u32,
                 });
@@ -166,18 +197,10 @@ impl ChainState {
 
             // 2. Restore spent inputs from the undo record.
             for spent in &undo.txs[tx_index].spent {
-                if work.contains_key(&spent.outpoint) {
-                    return Err(format!(
-                        "undo restore collision for {}:{}",
-                        hex::encode(spent.outpoint.txid),
-                        spent.outpoint.vout
-                    ));
-                }
-                work.insert(spent.outpoint.clone(), spent.entry.clone());
+                self.utxos
+                    .insert(spent.outpoint.clone(), spent.entry.clone());
             }
         }
-
-        self.utxos = work;
         self.already_generated = undo.previous_already_generated;
 
         if self.height == 0 {
@@ -307,7 +330,15 @@ fn block_undo_from_disk(disk: BlockUndoDisk) -> Result<BlockUndo, String> {
 mod tests {
     use std::collections::HashMap;
 
+    use crate::devnet_genesis_chain_id;
+    use crate::test_helpers::block_with_txs;
+
     use super::*;
+    use rubin_consensus::constants::{COV_TYPE_P2PK, POW_LIMIT, TX_WIRE_VERSION};
+    use rubin_consensus::{
+        marshal_tx, p2pk_covenant_data_for_pubkey, parse_tx, sign_transaction, Mldsa87Keypair, Tx,
+        TxInput, TxOutput,
+    };
 
     fn sample_outpoint(seed: u8) -> Outpoint {
         Outpoint {
@@ -319,11 +350,132 @@ mod tests {
     fn sample_entry(value: u64) -> UtxoEntry {
         UtxoEntry {
             value,
-            covenant_type: 0x0001, // COV_TYPE_P2PK
+            covenant_type: COV_TYPE_P2PK,
             covenant_data: vec![0xAB; 33],
             creation_height: 0,
             created_by_coinbase: false,
         }
+    }
+
+    fn same_block_spend_fixture() -> (ChainState, Outpoint, Vec<u8>, u64) {
+        let funding_key = Mldsa87Keypair::generate().expect("funding key");
+        let funding_address = p2pk_covenant_data_for_pubkey(&funding_key.pubkey_bytes());
+        let middle_key = Mldsa87Keypair::generate().expect("middle key");
+        let middle_address = p2pk_covenant_data_for_pubkey(&middle_key.pubkey_bytes());
+        let final_key = Mldsa87Keypair::generate().expect("final key");
+        let final_address = p2pk_covenant_data_for_pubkey(&final_key.pubkey_bytes());
+
+        let source_outpoint = Outpoint {
+            txid: [0x11; 32],
+            vout: 0,
+        };
+        let mut prev_state = ChainState {
+            has_tip: true,
+            height: 42,
+            tip_hash: [0x22; 32],
+            already_generated: 7,
+            utxos: HashMap::new(),
+        };
+        prev_state.utxos.insert(
+            source_outpoint.clone(),
+            UtxoEntry {
+                value: 100,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: funding_address,
+                creation_height: 1,
+                created_by_coinbase: false,
+            },
+        );
+
+        let mut parent = Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0x00,
+            tx_nonce: 1,
+            inputs: vec![TxInput {
+                prev_txid: source_outpoint.txid,
+                prev_vout: source_outpoint.vout,
+                script_sig: Vec::new(),
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: 90,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: middle_address.clone(),
+            }],
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: Vec::new(),
+        };
+        sign_transaction(
+            &mut parent,
+            &prev_state.utxos,
+            devnet_genesis_chain_id(),
+            &funding_key,
+        )
+        .expect("sign parent");
+        let parent_bytes = marshal_tx(&parent).expect("marshal parent");
+        let (_parent_tx, parent_txid, _parent_wtxid, parent_consumed) =
+            parse_tx(&parent_bytes).expect("parse parent");
+        assert_eq!(parent_consumed, parent_bytes.len());
+
+        let mut middle_view = prev_state.utxos.clone();
+        middle_view.remove(&source_outpoint);
+        middle_view.insert(
+            Outpoint {
+                txid: parent_txid,
+                vout: 0,
+            },
+            UtxoEntry {
+                value: 90,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: middle_address,
+                creation_height: prev_state.height + 1,
+                created_by_coinbase: false,
+            },
+        );
+
+        let mut child = Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0x00,
+            tx_nonce: 2,
+            inputs: vec![TxInput {
+                prev_txid: parent_txid,
+                prev_vout: 0,
+                script_sig: Vec::new(),
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: 80,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: final_address,
+            }],
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: Vec::new(),
+        };
+        sign_transaction(
+            &mut child,
+            &middle_view,
+            devnet_genesis_chain_id(),
+            &middle_key,
+        )
+        .expect("sign child");
+        let child_bytes = marshal_tx(&child).expect("marshal child");
+
+        let block_height = prev_state.height + 1;
+        let block_bytes = block_with_txs(
+            block_height,
+            prev_state.already_generated,
+            prev_state.tip_hash,
+            1_777_000_123,
+            &[parent_bytes, child_bytes],
+        );
+
+        (prev_state, source_outpoint, block_bytes, block_height)
     }
 
     #[test]
@@ -424,5 +576,50 @@ mod tests {
         }"#;
         let err = unmarshal_block_undo(json.as_bytes()).expect_err("should fail");
         assert!(err.contains("txid"));
+    }
+
+    #[test]
+    fn build_block_undo_ignores_same_block_spends() {
+        let (prev_state, source_outpoint, block_bytes, block_height) = same_block_spend_fixture();
+
+        let undo = build_block_undo(&prev_state, &block_bytes, block_height).expect("build undo");
+
+        assert_eq!(undo.txs.len(), 3, "coinbase + parent + child");
+        assert!(undo.txs[0].spent.is_empty(), "coinbase has no undo inputs");
+        assert_eq!(
+            undo.txs[1].spent.len(),
+            1,
+            "parent spends previous-state utxo"
+        );
+        assert_eq!(undo.txs[1].spent[0].outpoint, source_outpoint);
+        assert!(
+            undo.txs[2].spent.is_empty(),
+            "child spends same-block output and must not require prev-state undo"
+        );
+    }
+
+    #[test]
+    fn disconnect_block_restores_prev_state_after_same_block_spend() {
+        let (prev_state, _source_outpoint, block_bytes, block_height) = same_block_spend_fixture();
+        let undo = build_block_undo(&prev_state, &block_bytes, block_height).expect("build undo");
+        let mut connected_state = prev_state.clone();
+        let prev_timestamps = [1_777_000_000u64; 11];
+        connected_state
+            .connect_block(
+                &block_bytes,
+                Some(POW_LIMIT),
+                Some(&prev_timestamps),
+                devnet_genesis_chain_id(),
+            )
+            .expect("connect block");
+
+        let summary = connected_state
+            .disconnect_block(&block_bytes, &undo)
+            .expect("disconnect block");
+
+        assert_eq!(connected_state, prev_state);
+        assert_eq!(summary.new_height, prev_state.height);
+        assert_eq!(summary.new_tip_hash, prev_state.tip_hash);
+        assert_eq!(summary.utxo_count, prev_state.utxos.len() as u64);
     }
 }
