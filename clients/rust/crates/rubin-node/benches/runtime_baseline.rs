@@ -3,10 +3,11 @@ mod bench_support;
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use rubin_node::{devnet_genesis_chain_id, Miner, MinerConfig};
+use std::time::{Duration, Instant};
 
 use bench_support::{
     chain_state_with_spendable_utxos, engine_after_genesis, fresh_pool, fresh_sync_engine,
-    fresh_txpool_fixture, SyncFixture,
+    fresh_txpool_fixture,
 };
 
 fn txpool_admit_bench(c: &mut Criterion) {
@@ -58,47 +59,56 @@ fn sync_snapshot_bench(c: &mut Criterion) {
 fn sync_apply_disconnect_bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("rubin_node_sync");
     group.bench_function("apply_genesis", |b| {
-        b.iter_batched(
-            || fresh_sync_engine("rubin-node-sync-apply"),
-            |mut fixture: SyncFixture| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let mut fixture = fresh_sync_engine("rubin-node-sync-apply");
+                let start = Instant::now();
                 let _ = fixture
                     .engine
                     .apply_block(&rubin_node::devnet_genesis_block_bytes(), None)
                     .expect("apply genesis");
+                total += start.elapsed();
                 fixture.cleanup();
-            },
-            BatchSize::SmallInput,
-        )
+            }
+            total
+        })
     });
     group.bench_function("disconnect_tip_after_genesis", |b| {
-        b.iter_batched(
-            || engine_after_genesis("rubin-node-sync-disconnect"),
-            |mut fixture: SyncFixture| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let mut fixture = engine_after_genesis("rubin-node-sync-disconnect");
+                let start = Instant::now();
                 let _ = fixture.engine.disconnect_tip().expect("disconnect tip");
+                total += start.elapsed();
                 fixture.cleanup();
-            },
-            BatchSize::SmallInput,
-        )
+            }
+            total
+        })
     });
     group.finish();
 }
 
 fn miner_bench(c: &mut Criterion) {
     c.bench_function("rubin_node_miner_mine_one", |b| {
-        b.iter_batched(
-            || fresh_sync_engine("rubin-node-miner-bench"),
-            |mut fixture: SyncFixture| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let mut fixture = fresh_sync_engine("rubin-node-miner-bench");
                 let cfg = MinerConfig {
                     timestamp_source: || 1_777_000_000,
                     ..MinerConfig::default()
                 };
+                let start = Instant::now();
                 let mut miner = Miner::new(&mut fixture.engine, None, cfg).expect("miner");
                 let _ = miner.mine_one(&[]).expect("mine one");
+                total += start.elapsed();
                 drop(miner);
                 fixture.cleanup();
-            },
-            BatchSize::SmallInput,
-        )
+            }
+            total
+        })
     });
 }
 

@@ -71,6 +71,9 @@ func mustBenchmarkSignedTransferTx(
 			Sequence: 0,
 		})
 	}
+	if totalIn < amount || totalIn-amount < fee {
+		tb.Fatalf("insufficient inputs: total=%d amount=%d fee=%d", totalIn, amount, fee)
+	}
 	change := totalIn - amount - fee
 	outputs := []consensus.TxOutput{{
 		Value:        amount,
