@@ -31,7 +31,7 @@ impl SyncFixture {
         let SyncFixture { dir, store, engine } = self;
         drop(engine);
         drop(store);
-        let _ = std::fs::remove_dir_all(dir);
+        std::fs::remove_dir_all(&dir).expect("cleanup temp dir");
     }
 }
 

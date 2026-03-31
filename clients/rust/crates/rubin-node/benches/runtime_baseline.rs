@@ -40,6 +40,13 @@ fn txpool_admit_bench(c: &mut Criterion) {
 
 fn chainstate_clone_bench(c: &mut Criterion) {
     let (state, _outpoints, _signer, _addr) = chain_state_with_spendable_utxos(256);
+    let original_utxo_len = state.utxos.len();
+    let clone = state.clone();
+    assert_eq!(
+        clone.utxos.len(),
+        original_utxo_len,
+        "chainstate clone preserves utxo set size"
+    );
     c.bench_function("rubin_node_chainstate_clone", |b| {
         b.iter(|| {
             let _ = state.clone();
