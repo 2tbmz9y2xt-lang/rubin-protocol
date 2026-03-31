@@ -417,6 +417,11 @@ func TestCanonicalCoinbaseWeightRejectsOverflowAndInvalidAddress(t *testing.T) {
 	if _, err := canonicalCoinbaseWeight(1, 0, nil); err == nil {
 		t.Fatal("expected invalid mine address error")
 	}
+	tooLong := make([]byte, consensus.MAX_P2PK_COVENANT_DATA+1)
+	tooLong[0] = consensus.SUITE_ID_ML_DSA_87
+	if _, err := canonicalCoinbaseWeight(1, 0, tooLong); err == nil {
+		t.Fatal("expected oversized mine address error")
+	}
 }
 
 func TestCompactSizeLenForMinerCoversAllBranches(t *testing.T) {
