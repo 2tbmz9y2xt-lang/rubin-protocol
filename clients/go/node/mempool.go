@@ -305,7 +305,20 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *ChainSt
 	if err != nil {
 		return nil, nil, txAdmitUnavailable(err.Error())
 	}
-	policyUtxos := policyUtxoSnapshot(snapshot.Utxos)
+	parsedTx, _, _, consumed, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		return nil, nil, txAdmitRejected(err.Error())
+	}
+	if consumed != len(txBytes) {
+		return nil, nil, txAdmitRejected("trailing bytes after canonical tx")
+	}
+	var policyUtxos map[consensus.Outpoint]consensus.UtxoEntry
+	if policyNeedsInputSnapshot(policy) {
+		policyUtxos, err = policyInputSnapshot(parsedTx, snapshot.Utxos)
+		if err != nil {
+			return nil, nil, txAdmitRejected(err.Error())
+		}
+	}
 	checked, err := consensus.CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 		txBytes,
 		snapshot.Utxos,
@@ -319,9 +332,9 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *ChainSt
 	if err != nil {
 		return nil, nil, txAdmitRejected(err.Error())
 	}
-	// Policy checks read from a full pre-validation UTXO snapshot, so they can
-	// inspect the whole chainstate view without mutating either live state or the
-	// consensus workset consumed above.
+	// Policy checks consume an immutable pre-validation snapshot of only the
+	// transaction inputs they inspect, avoiding both live-state mutation and
+	// whole-chainstate copying on mempool admission.
 	if err := m.applyPolicyAgainstState(checked, nextHeight, policyUtxos, policy); err != nil {
 		return nil, nil, txAdmitRejected(err.Error())
 	}
@@ -332,12 +345,30 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *ChainSt
 	return checked, inputs, nil
 }
 
-func policyUtxoSnapshot(utxos map[consensus.Outpoint]consensus.UtxoEntry) map[consensus.Outpoint]consensus.UtxoEntry {
-	out := make(map[consensus.Outpoint]consensus.UtxoEntry, len(utxos))
-	for op, entry := range utxos {
+func policyNeedsInputSnapshot(policy MempoolConfig) bool {
+	return policy.PolicyDaSurchargePerByte > 0 || policy.PolicyRejectCoreExtPreActivation
+}
+
+func policyInputSnapshot(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (map[consensus.Outpoint]consensus.UtxoEntry, error) {
+	if tx == nil {
+		return nil, errors.New("nil tx")
+	}
+	if utxos == nil {
+		return nil, errors.New("nil utxo set")
+	}
+	out := make(map[consensus.Outpoint]consensus.UtxoEntry, len(tx.Inputs))
+	for _, in := range tx.Inputs {
+		op := consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
+		if _, ok := out[op]; ok {
+			continue
+		}
+		entry, ok := utxos[op]
+		if !ok {
+			continue
+		}
 		out[op] = policyCopyUtxoEntry(entry)
 	}
-	return out
+	return out, nil
 }
 
 func policyCopyUtxoEntry(entry consensus.UtxoEntry) consensus.UtxoEntry {
