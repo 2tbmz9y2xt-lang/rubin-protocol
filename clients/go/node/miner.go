@@ -82,6 +82,14 @@ type miningBuildContext struct {
 	candidateTxs     [][]byte
 }
 
+type miningChainStateSnapshot struct {
+	hasTip           bool
+	height           uint64
+	tipHash          [32]byte
+	alreadyGenerated uint64
+	utxos            map[consensus.Outpoint]consensus.UtxoEntry
+}
+
 func DefaultMinerConfig() MinerConfig {
 	return MinerConfig{
 		Target: consensus.POW_LIMIT,
@@ -198,11 +206,11 @@ func (m *Miner) buildBlock(ctx context.Context, txs [][]byte) ([]byte, []uint64,
 }
 
 func (m *Miner) buildContext(txs [][]byte) (miningBuildContext, error) {
-	state := cloneChainState(m.chainState)
-	if state == nil {
-		return miningBuildContext{}, errors.New("nil chainstate")
+	state, err := m.snapshotBuildContextState()
+	if err != nil {
+		return miningBuildContext{}, err
 	}
-	nextHeight, expectedPrev, err := nextBlockContext(state)
+	nextHeight, expectedPrev, err := nextBlockContextFromFields(state.hasTip, state.height, state.tipHash)
 	if err != nil {
 		return miningBuildContext{}, err
 	}
@@ -210,7 +218,7 @@ func (m *Miner) buildContext(txs [][]byte) (miningBuildContext, error) {
 	if expectedPrev != nil {
 		prevHash = *expectedPrev
 	}
-	remainingWeight, err := m.remainingWeightBudget(nextHeight, state.AlreadyGenerated)
+	remainingWeight, err := m.remainingWeightBudget(nextHeight, state.alreadyGenerated)
 	if err != nil {
 		return miningBuildContext{}, err
 	}
@@ -218,10 +226,30 @@ func (m *Miner) buildContext(txs [][]byte) (miningBuildContext, error) {
 		nextHeight:       nextHeight,
 		prevHash:         prevHash,
 		remainingWeight:  remainingWeight,
-		alreadyGenerated: state.AlreadyGenerated,
-		utxos:            state.Utxos,
+		alreadyGenerated: state.alreadyGenerated,
+		utxos:            state.utxos,
 		candidateTxs:     m.candidateTransactions(txs),
 	}, nil
+}
+
+func (m *Miner) snapshotBuildContextState() (miningChainStateSnapshot, error) {
+	if m == nil || m.chainState == nil {
+		return miningChainStateSnapshot{}, errors.New("nil chainstate")
+	}
+	state := m.chainState
+	state.mu.RLock()
+	defer state.mu.RUnlock()
+
+	snapshot := miningChainStateSnapshot{
+		hasTip:           state.HasTip,
+		height:           state.Height,
+		tipHash:          state.TipHash,
+		alreadyGenerated: state.AlreadyGenerated,
+	}
+	if m.policyNeedsReadonlyUtxoSnapshot() {
+		snapshot.utxos = copyMinerReadonlyUtxoSet(state.Utxos)
+	}
+	return snapshot, nil
 }
 
 func (m *Miner) candidateTransactions(txs [][]byte) [][]byte {
@@ -239,16 +267,73 @@ func (m *Miner) candidateTransactions(txs [][]byte) [][]byte {
 	return candidateTxs
 }
 
-func (m *Miner) remainingWeightBudget(nextHeight uint64, alreadyGenerated uint64) (uint64, error) {
-	coinbaseTemplate, err := buildCoinbaseTx(nextHeight, alreadyGenerated, m.cfg.MineAddress, [32]byte{})
-	if err != nil {
-		return 0, err
+func (m *Miner) policyNeedsReadonlyUtxoSnapshot() bool {
+	if m == nil {
+		return false
 	}
-	coinbaseWeight, err := canonicalTxWeight(coinbaseTemplate, "coinbase")
+	if m.cfg.PolicyRejectCoreExtPreActivation {
+		return true
+	}
+	return m.cfg.PolicyDaAnchorAntiAbuse && m.cfg.PolicyDaSurchargePerByte > 0
+}
+
+// Miner policy only reads UTXO entries, so a top-level map copy is enough to
+// isolate against concurrent map writes without paying per-entry covenant-data
+// cloning costs.
+func copyMinerReadonlyUtxoSet(src map[consensus.Outpoint]consensus.UtxoEntry) map[consensus.Outpoint]consensus.UtxoEntry {
+	out := make(map[consensus.Outpoint]consensus.UtxoEntry, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+func (m *Miner) remainingWeightBudget(nextHeight uint64, alreadyGenerated uint64) (uint64, error) {
+	coinbaseWeight, err := canonicalCoinbaseWeight(nextHeight, alreadyGenerated, m.cfg.MineAddress)
 	if err != nil {
 		return 0, err
 	}
 	return consensus.MAX_BLOCK_WEIGHT - coinbaseWeight, nil
+}
+
+func canonicalCoinbaseWeight(height uint64, alreadyGenerated uint64, mineAddress []byte) (uint64, error) {
+	if height > math.MaxUint32 {
+		return 0, errors.New("block height exceeds coinbase locktime range")
+	}
+	subsidy := consensus.BlockSubsidy(height, alreadyGenerated)
+	if subsidy > 0 {
+		if err := validateMineAddress(mineAddress); err != nil {
+			return 0, err
+		}
+	}
+
+	outputCount := uint64(1)
+	baseSize := uint64(4 + 1 + 8) // version + tx_kind + tx_nonce
+	baseSize += compactSizeLenForMiner(1)
+	baseSize += 32 + 4 + compactSizeLenForMiner(0) + 4 // single coinbase input
+	if subsidy > 0 {
+		outputCount++
+		addrLen := uint64(len(mineAddress))
+		baseSize += 8 + 2 + compactSizeLenForMiner(addrLen) + addrLen
+	}
+	baseSize += compactSizeLenForMiner(outputCount)
+	baseSize += 8 + 2 + compactSizeLenForMiner(32) + 32 // witness-commitment anchor output
+	baseSize += 4                                       // locktime
+
+	return consensus.WITNESS_DISCOUNT_DIVISOR*baseSize + 2, nil
+}
+
+func compactSizeLenForMiner(n uint64) uint64 {
+	switch {
+	case n < 0xfd:
+		return 1
+	case n <= 0xffff:
+		return 3
+	case n <= 0xffff_ffff:
+		return 5
+	default:
+		return 9
+	}
 }
 
 func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, remainingWeight uint64) ([]minedCandidate, error) {

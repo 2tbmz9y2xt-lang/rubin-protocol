@@ -370,6 +370,85 @@ func TestMinerBuildContextAndAssembleBlockBytes(t *testing.T) {
 	}
 }
 
+func TestCanonicalCoinbaseWeightMatchesLegacyWeight(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name             string
+		height           uint64
+		alreadyGenerated uint64
+		mineAddress      []byte
+	}{
+		{name: "genesis_anchor_only", height: 0, alreadyGenerated: 0, mineAddress: nil},
+		{name: "subsidy_height", height: 1, alreadyGenerated: 0, mineAddress: testMineAddress(0x41)},
+		{name: "later_height", height: 101, alreadyGenerated: 50 * consensus.BASE_UNITS_PER_RBN, mineAddress: testMineAddress(0x52)},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := canonicalCoinbaseWeight(tc.height, tc.alreadyGenerated, tc.mineAddress)
+			if err != nil {
+				t.Fatalf("canonicalCoinbaseWeight: %v", err)
+			}
+			raw, err := buildCoinbaseTx(tc.height, tc.alreadyGenerated, tc.mineAddress, [32]byte{})
+			if err != nil {
+				t.Fatalf("buildCoinbaseTx: %v", err)
+			}
+			want, err := canonicalTxWeight(raw, "coinbase")
+			if err != nil {
+				t.Fatalf("canonicalTxWeight: %v", err)
+			}
+			if got != want {
+				t.Fatalf("coinbase weight=%d, want %d", got, want)
+			}
+		})
+	}
+}
+
+func TestMinerBuildContextUtxoMapDoesNotAliasChainStateMap(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := ChainStatePath(dir)
+
+	chainState := NewChainState()
+	chainState.HasTip = true
+	chainState.Height = 2
+	var txid [32]byte
+	txid[0] = 0x7a
+	outpoint := consensus.Outpoint{Txid: txid, Vout: 1}
+	chainState.Utxos[outpoint] = consensus.UtxoEntry{
+		Value:             33,
+		CovenantType:      consensus.COV_TYPE_P2PK,
+		CovenantData:      testP2PKCovenantData(0x31),
+		CreationHeight:    1,
+		CreatedByCoinbase: true,
+	}
+
+	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("open blockstore: %v", err)
+	}
+	syncEngine, err := NewSyncEngine(chainState, blockStore, DefaultSyncConfig(nil, [32]byte{}, chainStatePath))
+	if err != nil {
+		t.Fatalf("new sync engine: %v", err)
+	}
+	miner, err := NewMiner(chainState, blockStore, syncEngine, DefaultMinerConfig())
+	if err != nil {
+		t.Fatalf("new miner: %v", err)
+	}
+
+	buildCtx, err := miner.buildContext(nil)
+	if err != nil {
+		t.Fatalf("buildContext: %v", err)
+	}
+	delete(buildCtx.utxos, outpoint)
+	if _, ok := chainState.Utxos[outpoint]; !ok {
+		t.Fatal("buildContext utxo map aliases chainstate map")
+	}
+}
+
 func TestParseCanonicalTx(t *testing.T) {
 	raw, err := buildCoinbaseTx(0, 0, nil, [32]byte{})
 	if err != nil {
