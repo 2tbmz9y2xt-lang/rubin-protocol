@@ -59,6 +59,34 @@ func CheckTransactionWithCoreExtProfilesAndSuiteContext(
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 ) (*CheckedTransaction, error) {
+	workUtxos := cloneUtxoSet(utxoSet)
+	return CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+		txBytes,
+		workUtxos,
+		height,
+		blockMTP,
+		chainID,
+		coreExtProfiles,
+		rotation,
+		registry,
+	)
+}
+
+// CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext validates
+// a transaction against a caller-owned mutable UTXO work set. The caller must
+// not pass a live shared chainstate map; this helper may mutate the supplied
+// work set while preserving the same CheckedTransaction result contract as the
+// cloned wrapper above.
+func CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+	txBytes []byte,
+	workUtxos map[Outpoint]UtxoEntry,
+	height uint64,
+	blockMTP uint64,
+	chainID [32]byte,
+	coreExtProfiles CoreExtProfileProvider,
+	rotation RotationProvider,
+	registry *SuiteRegistry,
+) (*CheckedTransaction, error) {
 	tx, txid, wtxid, consumed, err := ParseTx(txBytes)
 	if err != nil {
 		return nil, err
@@ -71,7 +99,6 @@ func CheckTransactionWithCoreExtProfilesAndSuiteContext(
 	if err != nil {
 		return nil, err
 	}
-	workUtxos := cloneUtxoSet(utxoSet)
 	_, fee, err := applyNonCoinbaseTxBasicWork(
 		tx,
 		txid,

@@ -180,11 +180,9 @@ func (m *Mempool) AddTx(txBytes []byte) error {
 	m.chainState.admissionMu.RLock()
 	defer m.chainState.admissionMu.RUnlock()
 
+	state := cloneChainState(m.chainState)
 	policy := m.policySnapshot()
-	// admissionMu excludes chainstate writers, so AddTx can validate against the
-	// live chainstate view without paying an outer full clone. The consensus
-	// check path still clones the UTXO set internally before mutating work state.
-	checked, inputs, err := m.checkTransactionWithState(txBytes, m.chainState, policy)
+	checked, inputs, err := m.checkTransactionWithState(txBytes, state, policy)
 	if err != nil {
 		return err
 	}
@@ -307,7 +305,11 @@ func (m *Mempool) checkTransactionWithState(txBytes []byte, state *ChainState, p
 	if err != nil {
 		return nil, nil, txAdmitUnavailable(err.Error())
 	}
-	checked, err := consensus.CheckTransactionWithCoreExtProfilesAndSuiteContext(
+	policyInputs, err := policyInputSnapshot(txBytes, state.Utxos)
+	if err != nil {
+		return nil, nil, txAdmitRejected(err.Error())
+	}
+	checked, err := consensus.CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 		txBytes,
 		state.Utxos,
 		nextHeight,
@@ -320,7 +322,7 @@ func (m *Mempool) checkTransactionWithState(txBytes []byte, state *ChainState, p
 	if err != nil {
 		return nil, nil, txAdmitRejected(err.Error())
 	}
-	if err := m.applyPolicyAgainstState(checked, nextHeight, state.Utxos, policy); err != nil {
+	if err := m.applyPolicyAgainstState(checked, nextHeight, policyInputs, policy); err != nil {
 		return nil, nil, txAdmitRejected(err.Error())
 	}
 	inputs := make([]consensus.Outpoint, 0, len(checked.Tx.Inputs))
@@ -328,6 +330,24 @@ func (m *Mempool) checkTransactionWithState(txBytes []byte, state *ChainState, p
 		inputs = append(inputs, consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout})
 	}
 	return checked, inputs, nil
+}
+
+func policyInputSnapshot(txBytes []byte, utxos map[consensus.Outpoint]consensus.UtxoEntry) (map[consensus.Outpoint]consensus.UtxoEntry, error) {
+	tx, _, _, consumed, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		return nil, err
+	}
+	if consumed != len(txBytes) {
+		return nil, txAdmitRejected("trailing bytes after canonical tx")
+	}
+	out := make(map[consensus.Outpoint]consensus.UtxoEntry, len(tx.Inputs))
+	for _, in := range tx.Inputs {
+		op := consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
+		if entry, ok := utxos[op]; ok {
+			out[op] = copyUtxoEntry(entry)
+		}
+	}
+	return out, nil
 }
 
 func (m *Mempool) applyPolicyAgainstState(checked *consensus.CheckedTransaction, nextHeight uint64, utxos map[consensus.Outpoint]consensus.UtxoEntry, policy MempoolConfig) error {

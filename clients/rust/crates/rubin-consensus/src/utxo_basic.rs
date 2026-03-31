@@ -1304,6 +1304,30 @@ mod tests {
     }
 
     #[test]
+    fn apply_non_coinbase_tx_basic_update_with_suite_context_does_not_mutate_caller_utxos() {
+        let (tx, utxo_set, txid, chain_id) = signed_p2pk_case();
+        let original = utxo_set.clone();
+
+        let (_work, summary) =
+            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+                &tx,
+                txid,
+                &utxo_set,
+                1,
+                0,
+                0,
+                chain_id,
+                &CoreExtProfiles::empty(),
+                None,
+                None,
+            )
+            .expect("apply");
+
+        assert_eq!(summary.fee, 10);
+        assert_eq!(utxo_set, original, "caller utxo set mutated");
+    }
+
+    #[test]
     fn apply_non_coinbase_tx_basic_update_deferred_sigchecks_fails_closed_on_bad_signature() {
         let (mut tx, utxo_set, txid, chain_id) = signed_p2pk_case();
         tx.witness[0].signature[0] ^= 0x01;
