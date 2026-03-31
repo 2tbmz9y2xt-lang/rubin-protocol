@@ -61,6 +61,7 @@ pub fn build_block_undo(
         return Err("parsed block txid length mismatch".into());
     }
 
+    // Membership-only sets: undo ordering still follows canonical tx/input order.
     let mut spent_prev_outpoints = HashSet::new();
     let mut block_outputs = HashSet::new();
     let mut tx_undos = Vec::with_capacity(pb.txs.len());
@@ -152,7 +153,19 @@ impl ChainState {
         }
 
         let mut created_outpoints = HashSet::new();
+        let mut same_block_spent_outpoints = HashSet::new();
         for (tx_index, tx) in pb.txs.iter().enumerate() {
+            if tx_index > 0 {
+                for input in &tx.inputs {
+                    let op = Outpoint {
+                        txid: input.prev_txid,
+                        vout: input.prev_vout,
+                    };
+                    if created_outpoints.contains(&op) {
+                        same_block_spent_outpoints.insert(op);
+                    }
+                }
+            }
             for (output_index, out) in tx.outputs.iter().enumerate() {
                 if !is_spendable_output(out.covenant_type) {
                     continue;
@@ -164,29 +177,8 @@ impl ChainState {
             }
         }
 
+        let mut work = self.utxos.clone();
         let mut restored_outpoints = HashSet::new();
-        for tx_undo in &undo.txs {
-            for spent in &tx_undo.spent {
-                if !restored_outpoints.insert(spent.outpoint.clone()) {
-                    return Err(format!(
-                        "undo duplicate restore entry for {}:{}",
-                        hex::encode(spent.outpoint.txid),
-                        spent.outpoint.vout
-                    ));
-                }
-                if created_outpoints.contains(&spent.outpoint) {
-                    continue;
-                }
-                if self.utxos.contains_key(&spent.outpoint) {
-                    return Err(format!(
-                        "undo restore target already present for {}:{}",
-                        hex::encode(spent.outpoint.txid),
-                        spent.outpoint.vout
-                    ));
-                }
-            }
-        }
-
         // Process transactions in **reverse** order.
         for tx_index in (0..pb.txs.len()).rev() {
             let tx = &pb.txs[tx_index];
@@ -197,18 +189,41 @@ impl ChainState {
                 if !is_spendable_output(out.covenant_type) {
                     continue;
                 }
-                self.utxos.remove(&Outpoint {
+                let created_outpoint = Outpoint {
                     txid,
                     vout: output_index as u32,
-                });
+                };
+                if work.remove(&created_outpoint).is_none()
+                    && !same_block_spent_outpoints.contains(&created_outpoint)
+                {
+                    return Err(format!(
+                        "disconnect missing created output for {}:{}",
+                        hex::encode(created_outpoint.txid),
+                        created_outpoint.vout
+                    ));
+                }
             }
 
             // 2. Restore spent inputs from the undo record.
             for spent in &undo.txs[tx_index].spent {
-                self.utxos
-                    .insert(spent.outpoint.clone(), spent.entry.clone());
+                if !restored_outpoints.insert(spent.outpoint.clone()) {
+                    return Err(format!(
+                        "undo duplicate restore entry for {}:{}",
+                        hex::encode(spent.outpoint.txid),
+                        spent.outpoint.vout
+                    ));
+                }
+                if work.contains_key(&spent.outpoint) {
+                    return Err(format!(
+                        "undo restore target already present for {}:{}",
+                        hex::encode(spent.outpoint.txid),
+                        spent.outpoint.vout
+                    ));
+                }
+                work.insert(spent.outpoint.clone(), spent.entry.clone());
             }
         }
+        self.utxos = work;
         self.already_generated = undo.previous_already_generated;
 
         if self.height == 0 {
@@ -852,5 +867,32 @@ mod tests {
             .disconnect_block(&block_bytes, &undo)
             .expect_err("duplicate created restore");
         assert!(err.contains("undo duplicate restore entry"));
+    }
+
+    #[test]
+    fn disconnect_block_rejects_missing_created_output() {
+        let (prev_state, _source_outpoint, block_bytes, block_height) = same_block_spend_fixture();
+        let undo = build_block_undo(&prev_state, &block_bytes, block_height).expect("build undo");
+        let pb = parse_block_bytes(&block_bytes).expect("parse block");
+
+        let mut connected_state = prev_state.clone();
+        let prev_timestamps = [1_777_000_000u64; 11];
+        connected_state
+            .connect_block(
+                &block_bytes,
+                Some(POW_LIMIT),
+                Some(&prev_timestamps),
+                devnet_genesis_chain_id(),
+            )
+            .expect("connect block");
+        connected_state.utxos.remove(&Outpoint {
+            txid: pb.txids[2],
+            vout: 0,
+        });
+
+        let err = connected_state
+            .disconnect_block(&block_bytes, &undo)
+            .expect_err("missing created output");
+        assert!(err.contains("disconnect missing created output"));
     }
 }
