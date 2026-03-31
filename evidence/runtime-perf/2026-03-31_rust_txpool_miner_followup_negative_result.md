@@ -17,8 +17,7 @@ optimization slice right now.
 ## Benchmark Command
 
 ```bash
-cd /Users/gpt/Documents/rubin-protocol/clients/rust
-cargo bench -p rubin-node --bench runtime_baseline -- --noplot --sample-size 10 --measurement-time 2
+cargo bench --manifest-path clients/rust/Cargo.toml -p rubin-node --bench runtime_baseline -- --noplot --sample-size 10 --measurement-time 2
 ```
 
 ## Observed Results
