@@ -3,10 +3,6 @@ name: "DeepSeek Security Review"
 on:
   pull_request:
     types: [opened, synchronize]
-    paths:
-      - '**/*.go'
-      - '**/*.rs'
-      - '**/*.lean'
 
 permissions:
   contents: read
@@ -25,6 +21,13 @@ jobs:
       - name: Get PR diff
         id: diff
         run: |
+          FILES=$(gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --name-only)
+          RELEVANT=$(printf '%s\n' "$FILES" | grep -E '(\.go$|\.rs$|\.lean$)' || true)
+          if [ -z "$RELEVANT" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "SKIP: no changed Go/Rust/Lean files for hostile code review"
+            exit 0
+          fi
           DIFF=$(gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }})
           if [ -z "$DIFF" ]; then
             echo "skip=true" >> $GITHUB_OUTPUT

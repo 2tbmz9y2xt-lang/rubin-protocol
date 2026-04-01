@@ -14,11 +14,7 @@ name: Kani Verification
 on:
   push:
     branches: [main]
-    paths:
-      - 'clients/rust/**'
   pull_request:
-    paths:
-      - 'clients/rust/**'
   schedule:
     # Weekly: Wednesday 04:00 UTC — catches regressions from Kani updates.
     - cron: '0 4 * * 3'
@@ -33,15 +29,52 @@ jobs:
       KANI_NIGHTLY: nightly-2025-11-21
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      # Always emit the check on PRs so it can be made required safely.
+      # Relevance is decided inside the job to preserve a lawful path for
+      # workflow-only and non-Rust PR classes.
+      - name: Determine Kani diff scope
+        id: scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "reason=schedule" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git fetch --no-tags --prune --depth=1 origin "${{ github.base_ref }}"
+            base_ref="origin/${{ github.base_ref }}"
+          else
+            base_ref="${{ github.event.before }}"
+          fi
+
+          changed="$(git diff --name-only "${base_ref}"..HEAD -- 'clients/rust/**' || true)"
+          if [[ -n "${changed}" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "reason=clients-rust-diff" >> "$GITHUB_OUTPUT"
+            printf '%s\n' "${changed}"
+            exit 0
+          fi
+
+          echo "run=false" >> "$GITHUB_OUTPUT"
+          echo "reason=no-clients-rust-diff" >> "$GITHUB_OUTPUT"
+          echo "SKIP: no clients/rust changes in diff scope"
 
       # OpenSSL dev headers required to compile openssl-sys FFI crate.
       # Kani proofs only exercise pure-Rust logic, but the crate must compile.
       - name: Install OpenSSL dev headers
+        if: steps.scope.outputs.run == 'true'
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
 
       # Cache the installed Kani CLI, release bundle, and pinned nightly toolchain
       # so PR reruns do not rebuild/download them from scratch.
       - name: Cache Kani toolchain + CLI
+        if: steps.scope.outputs.run == 'true'
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
         with:
           path: |
@@ -55,6 +88,7 @@ jobs:
 
       # Cache Cargo build artifacts for faster recompilation.
       - name: Cache Cargo registry + target
+        if: steps.scope.outputs.run == 'true'
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
         with:
           path: |
@@ -64,6 +98,7 @@ jobs:
           key: kani-cargo-${{ runner.os }}-${{ hashFiles('clients/rust/Cargo.lock', 'clients/rust/Cargo.toml') }}
 
       - name: Install cached-or-pinned Kani toolchain
+        if: steps.scope.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -90,6 +125,7 @@ jobs:
       # harness or cargo-kani stalls; add a kill-after backstop so a trapped
       # TERM cannot silently stretch the lane until the job-level timeout.
       - name: Run Kani proofs
+        if: steps.scope.outputs.run == 'true'
         shell: bash
         working-directory: clients/rust/crates/rubin-consensus
         run: |
