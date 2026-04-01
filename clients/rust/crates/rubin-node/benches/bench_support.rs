@@ -46,7 +46,9 @@ pub const RUNTIME_BASELINE_EVIDENCE_TARGETS: &[&str] = &[
 const BENCH_BLOCK_TIMESTAMP: u64 = 1_777_000_123;
 const BENCH_UTXO_COUNT: usize = 4096;
 const BENCH_SPEND_COUNT: usize = 256;
+#[allow(dead_code)]
 const TEST_UTXO_COUNT: usize = 512;
+#[allow(dead_code)]
 const TEST_SPEND_COUNT: usize = 32;
 
 pub fn unique_temp_dir(prefix: &str) -> PathBuf {
@@ -353,6 +355,7 @@ pub fn large_block_undo_fixture() -> UndoBenchmarkFixture {
     block_undo_fixture(BENCH_UTXO_COUNT, BENCH_SPEND_COUNT)
 }
 
+#[allow(dead_code)]
 pub fn test_block_undo_fixture() -> UndoBenchmarkFixture {
     block_undo_fixture(TEST_UTXO_COUNT, TEST_SPEND_COUNT)
 }
