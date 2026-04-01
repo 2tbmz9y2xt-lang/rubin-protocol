@@ -493,8 +493,7 @@ func BenchmarkConnectBlockParallelSigsWithSuiteContext(b *testing.B) {
 
 func benchmarkLargeChainState(tb testing.TB, count int) *ChainState {
 	tb.Helper()
-	fromKey := mustBenchmarkNodeMLDSA87Keypair(tb)
-	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	fromAddress := testP2PKCovenantData(0x41)
 	values := make([]uint64, count)
 	for i := range values {
 		values[i] = 100 + uint64(i)
