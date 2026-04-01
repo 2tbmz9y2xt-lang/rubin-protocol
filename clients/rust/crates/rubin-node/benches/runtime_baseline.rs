@@ -7,13 +7,19 @@ use std::time::{Duration, Instant};
 
 use bench_support::{
     chain_state_with_spendable_utxos, engine_after_genesis, fresh_pool, fresh_sync_engine,
-    fresh_txpool_fixture,
+    fresh_txpool_fixture, large_block_undo_fixture, RUNTIME_BASELINE_CHAINSTATE_CLONE,
+    RUNTIME_BASELINE_MINER_MINE_ONE, RUNTIME_BASELINE_SYNC_APPLY_GENESIS,
+    RUNTIME_BASELINE_SYNC_DISCONNECT_TIP, RUNTIME_BASELINE_SYNC_GROUP,
+    RUNTIME_BASELINE_SYNC_SNAPSHOT, RUNTIME_BASELINE_TXPOOL_ADMIT, RUNTIME_BASELINE_TXPOOL_GROUP,
+    RUNTIME_BASELINE_TXPOOL_RELAY_METADATA, RUNTIME_BASELINE_UNDO_BUILD_LARGE_BLOCK,
+    RUNTIME_BASELINE_UNDO_DISCONNECT_LARGE_BLOCK, RUNTIME_BASELINE_UNDO_GROUP,
 };
+use rubin_node::undo::build_block_undo;
 
 fn txpool_admit_bench(c: &mut Criterion) {
     let (state, raw) = fresh_txpool_fixture();
-    let mut group = c.benchmark_group("rubin_node_txpool");
-    group.bench_function("admit", |b| {
+    let mut group = c.benchmark_group(RUNTIME_BASELINE_TXPOOL_GROUP);
+    group.bench_function(RUNTIME_BASELINE_TXPOOL_ADMIT, |b| {
         b.iter_batched(
             fresh_pool,
             |mut pool| {
@@ -24,7 +30,7 @@ fn txpool_admit_bench(c: &mut Criterion) {
             BatchSize::SmallInput,
         )
     });
-    group.bench_function("relay_metadata", |b| {
+    group.bench_function(RUNTIME_BASELINE_TXPOOL_RELAY_METADATA, |b| {
         b.iter_batched(
             fresh_pool,
             |pool| {
@@ -47,7 +53,7 @@ fn chainstate_clone_bench(c: &mut Criterion) {
         original_utxo_len,
         "chainstate clone preserves utxo set size"
     );
-    c.bench_function("rubin_node_chainstate_clone", |b| {
+    c.bench_function(RUNTIME_BASELINE_CHAINSTATE_CLONE, |b| {
         b.iter(|| {
             let _ = state.clone();
         })
@@ -55,7 +61,7 @@ fn chainstate_clone_bench(c: &mut Criterion) {
 }
 
 fn sync_snapshot_bench(c: &mut Criterion) {
-    c.bench_function("rubin_node_sync_chain_state_snapshot", |b| {
+    c.bench_function(RUNTIME_BASELINE_SYNC_SNAPSHOT, |b| {
         let fixture = engine_after_genesis("rubin-node-sync-snapshot");
         b.iter(|| {
             let _ = fixture.engine.chain_state_snapshot();
@@ -65,8 +71,8 @@ fn sync_snapshot_bench(c: &mut Criterion) {
 }
 
 fn sync_apply_disconnect_bench(c: &mut Criterion) {
-    let mut group = c.benchmark_group("rubin_node_sync");
-    group.bench_function("apply_genesis", |b| {
+    let mut group = c.benchmark_group(RUNTIME_BASELINE_SYNC_GROUP);
+    group.bench_function(RUNTIME_BASELINE_SYNC_APPLY_GENESIS, |b| {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
@@ -82,7 +88,7 @@ fn sync_apply_disconnect_bench(c: &mut Criterion) {
             total
         })
     });
-    group.bench_function("disconnect_tip_after_genesis", |b| {
+    group.bench_function(RUNTIME_BASELINE_SYNC_DISCONNECT_TIP, |b| {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
@@ -98,8 +104,37 @@ fn sync_apply_disconnect_bench(c: &mut Criterion) {
     group.finish();
 }
 
+fn sync_undo_large_block_bench(c: &mut Criterion) {
+    let fixture = large_block_undo_fixture();
+    let mut group = c.benchmark_group(RUNTIME_BASELINE_UNDO_GROUP);
+    group.sample_size(20);
+    group.measurement_time(Duration::from_secs(3));
+    group.bench_function(RUNTIME_BASELINE_UNDO_BUILD_LARGE_BLOCK, |b| {
+        b.iter(|| {
+            let _ = build_block_undo(
+                &fixture.prev_state,
+                &fixture.block_bytes,
+                fixture.block_height,
+            )
+            .expect("build undo");
+        })
+    });
+    group.bench_function(RUNTIME_BASELINE_UNDO_DISCONNECT_LARGE_BLOCK, |b| {
+        b.iter_batched(
+            || fixture.connected_state.clone(),
+            |mut state| {
+                let _ = state
+                    .disconnect_block(&fixture.block_bytes, &fixture.undo)
+                    .expect("disconnect");
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    group.finish();
+}
+
 fn miner_bench(c: &mut Criterion) {
-    c.bench_function("rubin_node_miner_mine_one", |b| {
+    c.bench_function(RUNTIME_BASELINE_MINER_MINE_ONE, |b| {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
@@ -126,6 +161,7 @@ criterion_group!(
     chainstate_clone_bench,
     sync_snapshot_bench,
     sync_apply_disconnect_bench,
+    sync_undo_large_block_bench,
     miner_bench
 );
 criterion_main!(runtime_baseline_benches);
