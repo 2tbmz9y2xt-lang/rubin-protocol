@@ -273,7 +273,7 @@ def resolve_rust_bench_targets(changed: set[str], repo_root: Path = TOOLS_REPO_R
 def current_workflow_shell_targets(repo_root: Path = TOOLS_REPO_ROOT) -> tuple[set[str], bool]:
     try:
         return set(collect_workflow_shell_targets(repo_root)), False
-    except Exception:
+    except (OSError, UnicodeDecodeError):
         # Keep planning alive, but mark discovery failure so workflow-target edits
         # still schedule the fail-closed integrity companion.
         return set(), True

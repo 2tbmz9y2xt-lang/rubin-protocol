@@ -304,10 +304,10 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
         self.assertNotIn("workflow_yaml_syntax", check_names)
         self.assertTrue(any("Workflow hygiene parity" in focus for focus in focuses))
 
-    def test_build_plan_fail_closes_workflow_target_edits_on_unexpected_discovery_error(self):
+    def test_build_plan_fail_closes_workflow_target_edits_on_permission_error(self):
         changed = {"scripts/security/precheck.sh"}
 
-        with mock.patch.object(m, "collect_workflow_shell_targets", side_effect=RuntimeError("boom")):
+        with mock.patch.object(m, "collect_workflow_shell_targets", side_effect=PermissionError("denied")):
             checks, focuses, _lenses, profile = m.build_plan(changed)
 
         check_names = {name for name, _cmd in checks}
@@ -316,6 +316,13 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
         self.assertIn("workflow_shell_target_integrity", check_names)
         self.assertNotIn("workflow_yaml_syntax", check_names)
         self.assertTrue(any("Workflow hygiene parity" in focus for focus in focuses))
+
+    def test_build_plan_propagates_unexpected_workflow_target_errors(self):
+        changed = {"scripts/security/precheck.sh"}
+
+        with mock.patch.object(m, "collect_workflow_shell_targets", side_effect=RuntimeError("boom")):
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                m.build_plan(changed)
 
 
 if __name__ == "__main__":
