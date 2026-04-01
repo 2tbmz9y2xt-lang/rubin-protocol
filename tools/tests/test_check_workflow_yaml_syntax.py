@@ -12,8 +12,11 @@ sys.path.insert(0, str(TOOLS_DIR))
 
 import check_workflow_yaml_syntax as m
 
+HAS_PYYAML = m.load_yaml_module() is not None
+
 
 class WorkflowYamlSyntaxTests(unittest.TestCase):
+    @unittest.skipUnless(HAS_PYYAML, "PyYAML unavailable")
     def test_validate_paths_accepts_valid_yaml(self):
         with tempfile.TemporaryDirectory() as td:
             workflow = Path(td) / "ok.yml"
@@ -24,6 +27,7 @@ class WorkflowYamlSyntaxTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("OK: parsed 1 workflow file", message)
 
+    @unittest.skipUnless(HAS_PYYAML, "PyYAML unavailable")
     def test_validate_paths_rejects_invalid_yaml(self):
         with tempfile.TemporaryDirectory() as td:
             workflow = Path(td) / "bad.yml"
