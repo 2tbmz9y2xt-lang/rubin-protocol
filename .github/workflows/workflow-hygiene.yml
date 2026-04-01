@@ -45,7 +45,18 @@ jobs:
             exit 0
           fi
 
+          workflow_files="$(printf '%s\n' "${relevant}" | grep -E '^\.github/workflows/.*\.ya?ml$' || true)"
           echo "skip=false" >> "$GITHUB_OUTPUT"
+          if [[ -n "${workflow_files}" ]]; then
+            echo "run_actionlint=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "workflow_files<<EOF"
+              printf '%s\n' "${workflow_files}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "run_actionlint=false" >> "$GITHUB_OUTPUT"
+          fi
           echo "Relevant files:"
           printf '%s\n' "${relevant}"
 
@@ -80,9 +91,14 @@ jobs:
           install "${RUNNER_TEMP}/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" "${bin_dir}/shellcheck"
           echo "${bin_dir}" >> "${GITHUB_PATH}"
 
-      - name: Lint GitHub Actions workflows
-        if: steps.scope.outputs.skip != 'true'
-        run: actionlint -color
+      - name: Run actionlint on changed workflows
+        if: steps.scope.outputs.run_actionlint == 'true'
+        env:
+          ACTIONLINT_FILES: ${{ steps.scope.outputs.workflow_files }}
+        run: |
+          set -euo pipefail
+          mapfile -t workflow_files < <(printf '%s\n' "${ACTIONLINT_FILES}" | sed '/^$/d')
+          actionlint -color "${workflow_files[@]}"
 
       - name: Lint workflow-referenced CI shell targets
         if: steps.scope.outputs.skip != 'true'
