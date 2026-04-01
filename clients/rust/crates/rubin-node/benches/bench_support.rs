@@ -46,6 +46,8 @@ pub const RUNTIME_BASELINE_EVIDENCE_TARGETS: &[&str] = &[
 const BENCH_BLOCK_TIMESTAMP: u64 = 1_777_000_123;
 const BENCH_UTXO_COUNT: usize = 4096;
 const BENCH_SPEND_COUNT: usize = 256;
+const TEST_UTXO_COUNT: usize = 512;
+const TEST_SPEND_COUNT: usize = 32;
 
 pub fn unique_temp_dir(prefix: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -295,14 +297,14 @@ pub fn fresh_pool() -> TxPool {
     TxPool::new()
 }
 
-pub fn large_block_undo_fixture() -> UndoBenchmarkFixture {
+fn block_undo_fixture(utxo_count: usize, spend_count: usize) -> UndoBenchmarkFixture {
     let (prev_state, outpoints, signer, from_address) =
-        chain_state_with_spendable_utxos(BENCH_UTXO_COUNT);
+        chain_state_with_spendable_utxos(utxo_count);
     let to_signer = Mldsa87Keypair::generate().expect("OpenSSL signer unavailable");
     let to_address = p2pk_covenant_data_for_pubkey(&to_signer.pubkey_bytes());
     let spend_txs: Vec<Vec<u8>> = outpoints
         .iter()
-        .take(BENCH_SPEND_COUNT)
+        .take(spend_count)
         .enumerate()
         .map(|(nonce, outpoint)| {
             signed_transfer_tx(
@@ -345,4 +347,12 @@ pub fn large_block_undo_fixture() -> UndoBenchmarkFixture {
         block_height,
         undo,
     }
+}
+
+pub fn large_block_undo_fixture() -> UndoBenchmarkFixture {
+    block_undo_fixture(BENCH_UTXO_COUNT, BENCH_SPEND_COUNT)
+}
+
+pub fn test_block_undo_fixture() -> UndoBenchmarkFixture {
+    block_undo_fixture(TEST_UTXO_COUNT, TEST_SPEND_COUNT)
 }

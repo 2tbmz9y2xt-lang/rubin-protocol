@@ -40,7 +40,7 @@ fn runtime_baseline_txpool_fixture_stays_parity_safe() {
 
 #[test]
 fn runtime_baseline_undo_fixture_round_trips_prev_state() {
-    let fixture = bench_support::large_block_undo_fixture();
+    let fixture = bench_support::test_block_undo_fixture();
     let expected_digest = fixture.prev_state.state_digest();
     let mut restored = fixture.connected_state.clone();
 
