@@ -5,6 +5,8 @@ import argparse
 import sys
 from pathlib import Path
 
+MAX_WORKFLOW_YAML_BYTES = 2 * 1024 * 1024
+
 
 def load_yaml_module():
     try:
@@ -22,6 +24,11 @@ def validate_paths(paths: list[Path]) -> tuple[bool, str]:
     for path in paths:
         if not path.is_file():
             return False, f"missing workflow file: {path}"
+        if path.stat().st_size > MAX_WORKFLOW_YAML_BYTES:
+            return False, (
+                f"workflow yaml too large: {path} exceeds "
+                f"{MAX_WORKFLOW_YAML_BYTES} bytes"
+            )
         try:
             yaml.safe_load(path.read_text(encoding="utf-8"))
         except yaml.YAMLError as exc:  # type: ignore[attr-defined]

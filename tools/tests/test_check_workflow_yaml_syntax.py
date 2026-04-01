@@ -38,6 +38,16 @@ class WorkflowYamlSyntaxTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("invalid workflow yaml", message)
 
+    def test_validate_paths_rejects_oversized_yaml(self):
+        with tempfile.TemporaryDirectory() as td:
+            workflow = Path(td) / "huge.yml"
+            workflow.write_text("a" * (m.MAX_WORKFLOW_YAML_BYTES + 1), encoding="utf-8")
+
+            ok, message = m.validate_paths([workflow])
+
+        self.assertFalse(ok)
+        self.assertIn("workflow yaml too large", message)
+
     def test_validate_paths_skips_when_pyyaml_missing(self):
         with tempfile.TemporaryDirectory() as td:
             workflow = Path(td) / "ok.yml"
