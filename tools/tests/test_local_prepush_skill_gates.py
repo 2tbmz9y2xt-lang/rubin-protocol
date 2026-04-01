@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS_DIR))
@@ -103,7 +104,6 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
         checks, focuses, lenses, profile = m.build_plan(changed)
 
         self.assertEqual(checks, [])
-        self.assertEqual(focuses, [])
         self.assertEqual(profile.name, "code_noncritical")
         self.assertEqual(profile.check_type, "code_noncritical")
         self.assertEqual(profile.model, "gpt-5.4-mini")
@@ -113,6 +113,7 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
             ("code-review", "diff-scan", "combined-security-scan", "semgrep-scan"),
         )
         self.assertTrue(any(lens.name == "combined-security-scan" and lens.active for lens in lenses))
+        self.assertTrue(any("Kani remains final truth" in focus for focus in focuses))
 
     def test_build_plan_selects_diff_only_profile_for_tooling_only(self):
         changed = {"tools/check_local_prepush_skill_gates.py", "tools/tests/test_local_prepush_skill_gates.py"}
@@ -130,10 +131,10 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
         checks, focuses, _lenses, profile = m.build_plan(changed, check_type_override="formal_lean")
 
         self.assertEqual(checks, [])
-        self.assertEqual(focuses, [])
         self.assertEqual(profile.check_type, "formal_lean")
         self.assertEqual(profile.model, "gpt-5.4")
         self.assertEqual(profile.model_reasoning_effort, "xhigh")
+        self.assertTrue(any("Kani remains final truth" in focus for focus in focuses))
 
     def test_build_plan_auto_selects_formal_lean_for_lean_only_changes(self):
         changed = {"rubin-formal/RubinFormal/Conformance/CVUtxoBasicVectors.lean"}
@@ -265,6 +266,63 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
         self.assertIn("rust_bench_norun:sig_cache", check_names)
         self.assertIn("rust_bench_smoke:sig_cache", check_names)
         self.assertTrue(any("benchmark companions are mandatory local gates" in focus for focus in focuses))
+
+    def test_build_plan_adds_local_workflow_hygiene_companions(self):
+        changed = {
+            ".github/workflows/workflow-hygiene.yml",
+            "scripts/security/precheck.sh",
+        }
+
+        checks, focuses, _lenses, profile = m.build_plan(changed)
+        check_names = {name for name, _cmd in checks}
+
+        self.assertEqual(profile.name, "diff_only")
+        self.assertIn("workflow_yaml_syntax", check_names)
+        self.assertIn("workflow_target_helper_tests", check_names)
+        self.assertIn("workflow_shell_target_integrity", check_names)
+        self.assertTrue(any("Workflow hygiene parity" in focus for focus in focuses))
+        self.assertTrue(any("Server-only required checks" in focus for focus in focuses))
+
+    def test_build_plan_adds_kani_server_only_focus_for_rust_surfaces(self):
+        changed = {"clients/rust/crates/rubin-consensus/src/tx.rs"}
+
+        _checks, focuses, _lenses, profile = m.build_plan(changed)
+
+        self.assertEqual(profile.name, "consensus_critical")
+        self.assertTrue(any("Kani remains final truth" in focus for focus in focuses))
+
+    def test_build_plan_fail_closes_workflow_target_edits_when_target_discovery_fails(self):
+        changed = {"scripts/security/precheck.sh"}
+
+        with mock.patch.object(m, "collect_workflow_shell_targets", side_effect=FileNotFoundError("missing target")):
+            checks, focuses, _lenses, profile = m.build_plan(changed)
+
+        check_names = {name for name, _cmd in checks}
+        self.assertEqual(profile.name, "diff_only")
+        self.assertIn("workflow_target_helper_tests", check_names)
+        self.assertIn("workflow_shell_target_integrity", check_names)
+        self.assertNotIn("workflow_yaml_syntax", check_names)
+        self.assertTrue(any("Workflow hygiene parity" in focus for focus in focuses))
+
+    def test_build_plan_fail_closes_workflow_target_edits_on_permission_error(self):
+        changed = {"scripts/security/precheck.sh"}
+
+        with mock.patch.object(m, "collect_workflow_shell_targets", side_effect=PermissionError("denied")):
+            checks, focuses, _lenses, profile = m.build_plan(changed)
+
+        check_names = {name for name, _cmd in checks}
+        self.assertEqual(profile.name, "diff_only")
+        self.assertIn("workflow_target_helper_tests", check_names)
+        self.assertIn("workflow_shell_target_integrity", check_names)
+        self.assertNotIn("workflow_yaml_syntax", check_names)
+        self.assertTrue(any("Workflow hygiene parity" in focus for focus in focuses))
+
+    def test_build_plan_propagates_unexpected_workflow_target_errors(self):
+        changed = {"scripts/security/precheck.sh"}
+
+        with mock.patch.object(m, "collect_workflow_shell_targets", side_effect=RuntimeError("boom")):
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                m.build_plan(changed)
 
 
 if __name__ == "__main__":
