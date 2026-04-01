@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS_DIR))
@@ -289,6 +290,19 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
 
         self.assertEqual(profile.name, "consensus_critical")
         self.assertTrue(any("Kani remains final truth" in focus for focus in focuses))
+
+    def test_build_plan_fail_closes_workflow_target_edits_when_target_discovery_fails(self):
+        changed = {"scripts/security/precheck.sh"}
+
+        with mock.patch.object(m, "collect_workflow_shell_targets", side_effect=FileNotFoundError("missing target")):
+            checks, focuses, _lenses, profile = m.build_plan(changed)
+
+        check_names = {name for name, _cmd in checks}
+        self.assertEqual(profile.name, "diff_only")
+        self.assertIn("workflow_target_helper_tests", check_names)
+        self.assertIn("workflow_shell_target_integrity", check_names)
+        self.assertNotIn("workflow_yaml_syntax", check_names)
+        self.assertTrue(any("Workflow hygiene parity" in focus for focus in focuses))
 
 
 if __name__ == "__main__":

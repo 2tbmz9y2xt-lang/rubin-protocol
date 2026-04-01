@@ -270,13 +270,13 @@ def resolve_rust_bench_targets(changed: set[str], repo_root: Path = TOOLS_REPO_R
     return targets, direct_changes, build_all
 
 
-def current_workflow_shell_targets(repo_root: Path = TOOLS_REPO_ROOT) -> set[str]:
+def current_workflow_shell_targets(repo_root: Path = TOOLS_REPO_ROOT) -> tuple[set[str], bool]:
     try:
-        return set(collect_workflow_shell_targets(repo_root))
+        return set(collect_workflow_shell_targets(repo_root)), False
     except FileNotFoundError:
-        # The actual local gate re-runs the helper and fails closed.
-        # For planning, keep routing conservative and avoid crashing early.
-        return set()
+        # Keep planning alive, but mark discovery failure so workflow-target edits
+        # still schedule the fail-closed integrity companion.
+        return set(), True
 
 
 def run_check(name: str, cmd: list[str], repo_root: Path) -> int:
@@ -345,13 +345,13 @@ def build_plan(
         for path in changed
     )
 
-    workflow_shell_targets = current_workflow_shell_targets(repo_root)
+    workflow_shell_targets, workflow_target_discovery_failed = current_workflow_shell_targets(repo_root)
     changed_workflow_files = {
         path
         for path in changed
         if is_under(path, ".github/workflows") and path.endswith((".yml", ".yaml"))
     }
-    workflow_hygiene_related = bool(changed_workflow_files) or any(
+    workflow_hygiene_related = bool(changed_workflow_files) or workflow_target_discovery_failed or any(
         path in WORKFLOW_HELPER_EXACT_PATHS or path in workflow_shell_targets for path in changed
     )
     if workflow_hygiene_related:
