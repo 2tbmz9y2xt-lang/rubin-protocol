@@ -20,6 +20,15 @@ RUST_FUZZ_TARGET_PREFIX = "clients/rust/fuzz/fuzz_targets/"
 RUST_FUZZ_CARGO_PATH = "clients/rust/fuzz/Cargo.toml"
 RUST_BENCH_PREFIX = "clients/rust/crates/rubin-consensus/benches/"
 RUST_CONSENSUS_CARGO_PATH = "clients/rust/crates/rubin-consensus/Cargo.toml"
+WORKFLOW_HELPER_EXACT_PATHS = (
+    "tools/list_workflow_shell_targets.py",
+    "tools/tests/test_list_workflow_shell_targets.py",
+)
+
+try:
+    from list_workflow_shell_targets import collect_targets as collect_workflow_shell_targets
+except ModuleNotFoundError:
+    from tools.list_workflow_shell_targets import collect_targets as collect_workflow_shell_targets
 
 RUST_FUZZ_RUNTIME_MAP: dict[str, tuple[str, ...]] = {
     "clients/rust/crates/rubin-consensus/src/block.rs": ("parse_block_bytes", "block_header_surface"),
@@ -261,6 +270,15 @@ def resolve_rust_bench_targets(changed: set[str], repo_root: Path = TOOLS_REPO_R
     return targets, direct_changes, build_all
 
 
+def current_workflow_shell_targets(repo_root: Path = TOOLS_REPO_ROOT) -> set[str]:
+    try:
+        return set(collect_workflow_shell_targets(repo_root))
+    except FileNotFoundError:
+        # The actual local gate re-runs the helper and fails closed.
+        # For planning, keep routing conservative and avoid crashing early.
+        return set()
+
+
 def run_check(name: str, cmd: list[str], repo_root: Path) -> int:
     print(f"[local-prepush-gate] {name}: {shlex.join(cmd)}")
     proc = subprocess.run(cmd, cwd=repo_root, text=True, capture_output=True, check=False)
@@ -283,6 +301,7 @@ def sanitize_path_for_prompt(path: str) -> str:
 def build_plan(
     changed: set[str],
     *,
+    repo_root: Path = TOOLS_REPO_ROOT,
     check_type_override: str = "auto",
 ) -> tuple[list[tuple[str, list[str]]], list[str], list[ScanLens], ReviewProfile]:
     if check_type_override not in ALLOWED_CHECK_TYPES:
@@ -325,6 +344,37 @@ def build_plan(
         and Path(path).name.startswith("CV-")
         for path in changed
     )
+
+    workflow_shell_targets = current_workflow_shell_targets(repo_root)
+    changed_workflow_files = {
+        path
+        for path in changed
+        if is_under(path, ".github/workflows") and path.endswith((".yml", ".yaml"))
+    }
+    workflow_hygiene_related = bool(changed_workflow_files) or any(
+        path in WORKFLOW_HELPER_EXACT_PATHS or path in workflow_shell_targets for path in changed
+    )
+    if workflow_hygiene_related:
+        add_focus(
+            "Workflow hygiene parity: local push runs deterministic companions for this surface "
+            "(workflow YAML syntax, shell-target integrity, helper tests), while actionlint and "
+            "shellcheck remain the server-side required truth."
+        )
+        if changed_workflow_files:
+            add_check(
+                "workflow_yaml_syntax",
+                [
+                    "ruby",
+                    "-e",
+                    'require "yaml"; ARGV.each { |path| YAML.load_file(path) }',
+                    *sorted(changed_workflow_files),
+                ],
+            )
+        add_check(
+            "workflow_target_helper_tests",
+            ["python3", "-m", "unittest", "tools.tests.test_list_workflow_shell_targets"],
+        )
+        add_check("workflow_shell_target_integrity", ["python3", "tools/list_workflow_shell_targets.py"])
 
     conformance_hygiene_related = fixture_json_changed or any(
         matches_any(
@@ -568,6 +618,7 @@ def build_plan(
         path.startswith(("tools/", "scripts/", ".github/workflows/", ".git/hooks-disabled/"))
         for path in changed
     )
+    rust_required_check_related = any(is_under(path, "clients/rust") for path in changed)
     coverage_related = any(
         matches_any(
             path,
@@ -577,6 +628,16 @@ def build_plan(
         )
         for path in changed
     )
+    if rust_required_check_related:
+        add_focus(
+            "Required server-side Kani remains final truth on clients/rust surfaces: local push does "
+            "not run cargo kani and must not claim proof parity from companion tests alone."
+        )
+    if internal_tooling_related or workflow_hygiene_related:
+        add_focus(
+            "Server-only required checks still remain server-only here unless explicitly mirrored: "
+            "CodeQL, dependency-review, hostile security-review, and semgrep."
+        )
 
     add_lens(
         "code-review",
