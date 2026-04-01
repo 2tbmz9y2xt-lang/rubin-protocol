@@ -3,8 +3,14 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT_DIR="${1:-$REPO_ROOT/evidence/runtime-perf/go-chainstate-recovery}"
+CALLER_PWD="$(pwd)"
+
+if [[ "$OUT_DIR" != /* ]]; then
+  OUT_DIR="$CALLER_PWD/$OUT_DIR"
+fi
 
 mkdir -p "$OUT_DIR"
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 RAW_OUT="$OUT_DIR/raw.txt"
 JSON_OUT="$OUT_DIR/parsed.json"
 
