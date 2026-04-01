@@ -22,10 +22,10 @@ jobs:
         id: diff
         run: |
           FILES=$(gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --name-only)
-          RELEVANT=$(printf '%s\n' "$FILES" | grep -E '(\.go$|\.rs$|\.lean$)' || true)
+          RELEVANT=$(printf '%s\n' "$FILES" | grep -E '(\.go$|\.rs$|\.lean$|^\.github/workflows/|^scripts/security/|^tools/.*\.(py|sh|json)$)' || true)
           if [ -z "$RELEVANT" ]; then
             echo "skip=true" >> $GITHUB_OUTPUT
-            echo "SKIP: no changed Go/Rust/Lean files for hostile code review"
+            echo "SKIP: no enforcement-sensitive code/workflow/tooling changes for hostile review"
             exit 0
           fi
           DIFF=$(gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }})
@@ -133,10 +133,18 @@ jobs:
             const repoRootReal = fs.realpathSync(repoRoot);
             const baseSha = '${{ github.event.pull_request.base.sha }}';
             const headSha = '${{ github.event.pull_request.head.sha }}';
+            const isReviewRelevantFile = (file) => (
+              file.endsWith('.go')
+              || file.endsWith('.rs')
+              || file.endsWith('.lean')
+              || file.startsWith('.github/workflows/')
+              || file.startsWith('scripts/security/')
+              || (/^tools\/.*\.(py|sh|json)$/).test(file)
+            );
             const changedFiles = execSync(
-              `git diff --diff-filter=ACMR --name-only ${baseSha} ${headSha} -- '*.go' '*.rs' '*.lean'`,
+              `git diff --diff-filter=ACMR --name-only ${baseSha} ${headSha}`,
               { maxBuffer: 20 * 1024 * 1024 }
-            ).toString().split('\n').map(s => s.trim()).filter(Boolean);
+            ).toString().split('\n').map(s => s.trim()).filter(isReviewRelevantFile);
 
             const readChangedFile = (file) => {
               const fullPath = path.resolve(repoRoot, file);
