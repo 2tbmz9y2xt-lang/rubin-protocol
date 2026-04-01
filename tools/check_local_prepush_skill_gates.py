@@ -363,12 +363,7 @@ def build_plan(
         if changed_workflow_files:
             add_check(
                 "workflow_yaml_syntax",
-                [
-                    "ruby",
-                    "-e",
-                    'require "yaml"; ARGV.each { |path| YAML.load_file(path) }',
-                    *sorted(changed_workflow_files),
-                ],
+                ["python3", "tools/check_workflow_yaml_syntax.py", *sorted(changed_workflow_files)],
             )
         add_check(
             "workflow_target_helper_tests",

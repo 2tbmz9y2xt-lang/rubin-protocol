@@ -34,7 +34,8 @@ jobs:
           mapfile -t workflow_shell_targets < <(printf '%s\n' "${workflow_shell_targets_raw}" | sed '/^$/d')
           tracked_regex='^\.github/workflows/.*\.ya?ml$|^tools/list_workflow_shell_targets\.py$|^tools/tests/test_list_workflow_shell_targets\.py$'
           for target in "${workflow_shell_targets[@]}"; do
-            tracked_regex="${tracked_regex}|^${target//./\\.}$"
+            escaped_target="$(printf '%s' "${target}" | sed 's/[][\\^$.*+?(){}|]/\\&/g')"
+            tracked_regex="${tracked_regex}|^${escaped_target}$"
           done
 
           changed_files="$(git diff --diff-filter=ACMR --name-only "${base_sha}" "${head_sha}")"

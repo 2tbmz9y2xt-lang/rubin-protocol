@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+TOOLS_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(TOOLS_DIR))
+
+import check_workflow_yaml_syntax as m
+
+
+class WorkflowYamlSyntaxTests(unittest.TestCase):
+    def test_validate_paths_accepts_valid_yaml(self):
+        with tempfile.TemporaryDirectory() as td:
+            workflow = Path(td) / "ok.yml"
+            workflow.write_text("name: test\non: [push]\njobs: {}\n", encoding="utf-8")
+
+            ok, message = m.validate_paths([workflow])
+
+        self.assertTrue(ok)
+        self.assertIn("OK: parsed 1 workflow file", message)
+
+    def test_validate_paths_rejects_invalid_yaml(self):
+        with tempfile.TemporaryDirectory() as td:
+            workflow = Path(td) / "bad.yml"
+            workflow.write_text("name: [broken\n", encoding="utf-8")
+
+            ok, message = m.validate_paths([workflow])
+
+        self.assertFalse(ok)
+        self.assertIn("invalid workflow yaml", message)
+
+    def test_validate_paths_skips_when_pyyaml_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            workflow = Path(td) / "ok.yml"
+            workflow.write_text("name: test\n", encoding="utf-8")
+
+            with mock.patch.object(m, "load_yaml_module", return_value=None):
+                ok, message = m.validate_paths([workflow])
+
+        self.assertTrue(ok)
+        self.assertIn("SKIP: PyYAML unavailable", message)
+
+
+if __name__ == "__main__":
+    unittest.main()
