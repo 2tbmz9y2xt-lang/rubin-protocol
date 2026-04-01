@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MODE="${1:---local}"
-export PATH="$(go env GOPATH)/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+go_bin_dir="$(go env GOPATH)/bin"
+export PATH="${go_bin_dir}:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 
 usage() {
   cat <<'EOF'
@@ -45,7 +46,8 @@ ensure_go_tool() {
   fi
   echo "$tool_name not found; installing via go install $module_path"
   go install "$module_path"
-  export PATH="$(go env GOPATH)/bin:$PATH"
+  go_bin_dir="$(go env GOPATH)/bin"
+  export PATH="${go_bin_dir}:$PATH"
   require_cmd "$tool_name"
 }
 
