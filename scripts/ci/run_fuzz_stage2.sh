@@ -44,6 +44,8 @@ TARGETS=(
 mkdir -p "${ARTIFACTS_DIR}"
 STATUS=0
 
+# shellcheck disable=SC2329
+# Invoked indirectly via trap on EXIT.
 collect_artifacts() {
   : > "${ARTIFACTS_DIR}/go-fuzz-files.txt"
   for dir in "${CONSENSUS_DIR}" "${P2P_DIR}"; do

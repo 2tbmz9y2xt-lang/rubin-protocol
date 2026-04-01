@@ -94,7 +94,8 @@ select_openssl() {
         rubin_pkg_paths+=("${RUBIN_OPENSSL_PREFIX}/lib/pkgconfig")
       fi
       if [[ ${#rubin_pkg_paths[@]} -gt 0 ]]; then
-        export PKG_CONFIG_PATH="$(IFS=:; echo "${rubin_pkg_paths[*]}")${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+        joined_pkg_paths="$(IFS=:; echo "${rubin_pkg_paths[*]}")"
+        export PKG_CONFIG_PATH="${joined_pkg_paths}${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
       fi
       if [[ -d "${RUBIN_OPENSSL_PREFIX}/lib/ossl-modules" ]]; then
         export OPENSSL_MODULES="${RUBIN_OPENSSL_PREFIX}/lib/ossl-modules"
