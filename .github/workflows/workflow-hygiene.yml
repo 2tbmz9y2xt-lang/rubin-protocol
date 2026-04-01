@@ -30,7 +30,8 @@ jobs:
             head_sha="${{ github.sha }}"
           fi
 
-          mapfile -t workflow_shell_targets < <(python3 tools/list_workflow_shell_targets.py)
+          workflow_shell_targets_raw="$(python3 tools/list_workflow_shell_targets.py)"
+          mapfile -t workflow_shell_targets < <(printf '%s\n' "${workflow_shell_targets_raw}" | sed '/^$/d')
           tracked_regex='^\.github/workflows/.*\.ya?ml$|^tools/list_workflow_shell_targets\.py$|^tools/tests/test_list_workflow_shell_targets\.py$'
           for target in "${workflow_shell_targets[@]}"; do
             tracked_regex="${tracked_regex}|^${target//./\\.}$"
@@ -104,7 +105,8 @@ jobs:
         if: steps.scope.outputs.skip != 'true'
         run: |
           set -euo pipefail
-          mapfile -t targets < <(python3 tools/list_workflow_shell_targets.py)
+          targets_raw="$(python3 tools/list_workflow_shell_targets.py)"
+          mapfile -t targets < <(printf '%s\n' "${targets_raw}" | sed '/^$/d')
           printf 'Shellcheck targets (%s):\n' "${#targets[@]}"
           printf '%s\n' "${targets[@]}"
           shellcheck -x "${targets[@]}"
