@@ -304,6 +304,19 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
         self.assertNotIn("workflow_yaml_syntax", check_names)
         self.assertTrue(any("Workflow hygiene parity" in focus for focus in focuses))
 
+    def test_build_plan_fail_closes_workflow_target_edits_on_unexpected_discovery_error(self):
+        changed = {"scripts/security/precheck.sh"}
+
+        with mock.patch.object(m, "collect_workflow_shell_targets", side_effect=RuntimeError("boom")):
+            checks, focuses, _lenses, profile = m.build_plan(changed)
+
+        check_names = {name for name, _cmd in checks}
+        self.assertEqual(profile.name, "diff_only")
+        self.assertIn("workflow_target_helper_tests", check_names)
+        self.assertIn("workflow_shell_target_integrity", check_names)
+        self.assertNotIn("workflow_yaml_syntax", check_names)
+        self.assertTrue(any("Workflow hygiene parity" in focus for focus in focuses))
+
 
 if __name__ == "__main__":
     unittest.main()

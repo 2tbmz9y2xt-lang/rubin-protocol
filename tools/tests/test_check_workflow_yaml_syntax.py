@@ -38,6 +38,17 @@ class WorkflowYamlSyntaxTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("invalid workflow yaml", message)
 
+    @unittest.skipUnless(HAS_PYYAML, "PyYAML unavailable")
+    def test_validate_paths_rejects_invalid_utf8(self):
+        with tempfile.TemporaryDirectory() as td:
+            workflow = Path(td) / "bad-encoding.yml"
+            workflow.write_bytes(b"\xff\xfe\xfd")
+
+            ok, message = m.validate_paths([workflow])
+
+        self.assertFalse(ok)
+        self.assertIn("invalid workflow yaml encoding", message)
+
     def test_validate_paths_rejects_oversized_yaml(self):
         with tempfile.TemporaryDirectory() as td:
             workflow = Path(td) / "huge.yml"

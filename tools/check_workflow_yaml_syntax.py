@@ -17,10 +17,6 @@ def load_yaml_module():
 
 
 def validate_paths(paths: list[Path]) -> tuple[bool, str]:
-    yaml = load_yaml_module()
-    if yaml is None:
-        return True, "SKIP: PyYAML unavailable; workflow YAML syntax remains a server-side actionlint truth"
-
     for path in paths:
         if not path.is_file():
             return False, f"missing workflow file: {path}"
@@ -29,8 +25,18 @@ def validate_paths(paths: list[Path]) -> tuple[bool, str]:
                 f"workflow yaml too large: {path} exceeds "
                 f"{MAX_WORKFLOW_YAML_BYTES} bytes"
             )
+
+    yaml = load_yaml_module()
+    if yaml is None:
+        return True, "SKIP: PyYAML unavailable; workflow YAML syntax remains a server-side actionlint truth"
+
+    for path in paths:
         try:
-            yaml.safe_load(path.read_text(encoding="utf-8"))
+            content = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            return False, f"invalid workflow yaml encoding in {path}: {exc}"
+        try:
+            yaml.safe_load(content)
         except yaml.YAMLError as exc:  # type: ignore[attr-defined]
             return False, f"invalid workflow yaml in {path}: {exc}"
     return True, f"OK: parsed {len(paths)} workflow file(s)"
