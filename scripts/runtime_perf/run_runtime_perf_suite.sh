@@ -37,8 +37,13 @@ pushd "$REPO_ROOT" >/dev/null
 
 go_bench_regex='^(BenchmarkMempoolAddTx|BenchmarkMempoolRelayMetadata|BenchmarkMinerBuildContext|BenchmarkCloneChainState|BenchmarkCopyUtxoSet|BenchmarkConnectBlockWithCoreExtProfilesAndSuiteContext|BenchmarkConnectBlockParallelSigsWithSuiteContext)$'
 
+set +e
 (cd clients/go && go test ./node -run '^$' -bench "$go_bench_regex" -benchmem -count=1) | tee "$GO_OUT"
-python3 "$SCRIPT_DIR/parse_go_runtime_metrics.py" --input "$GO_OUT" --output "$GO_JSON"
+go_status=${PIPESTATUS[0]}
+set -e
+if [[ $go_status -eq 0 ]]; then
+  python3 "$SCRIPT_DIR/parse_go_runtime_metrics.py" --input "$GO_OUT" --output "$GO_JSON"
+fi
 
 for path in \
   clients/rust/target/criterion/rubin_node_txpool \
@@ -51,9 +56,24 @@ do
   rm -rf "$path"
 done
 
+set +e
 (cd clients/rust && cargo bench -p rubin-node --bench runtime_baseline -- --noplot --sample-size 10 --measurement-time 1)
-python3 "$SCRIPT_DIR/parse_rust_runtime_metrics.py" \
-  --criterion-root "$REPO_ROOT/clients/rust/target/criterion" \
-  --output "$RUST_JSON"
+rust_status=$?
+set -e
+if [[ $rust_status -eq 0 ]]; then
+  python3 "$SCRIPT_DIR/parse_rust_runtime_metrics.py" \
+    --criterion-root "$REPO_ROOT/clients/rust/target/criterion" \
+    --output "$RUST_JSON"
+fi
 
 popd >/dev/null
+
+exit_code=0
+if [[ $go_status -ne 0 ]]; then
+  exit_code=$((exit_code | 1))
+fi
+if [[ $rust_status -ne 0 ]]; then
+  exit_code=$((exit_code | 2))
+fi
+
+exit "$exit_code"
