@@ -42,7 +42,13 @@ set +e
 go_status=${PIPESTATUS[0]}
 set -e
 if [[ $go_status -eq 0 ]]; then
+  set +e
   python3 "$SCRIPT_DIR/parse_go_runtime_metrics.py" --input "$GO_OUT" --output "$GO_JSON"
+  go_parse_status=$?
+  set -e
+  if [[ $go_parse_status -ne 0 ]]; then
+    go_status=$go_parse_status
+  fi
 fi
 
 for path in \
