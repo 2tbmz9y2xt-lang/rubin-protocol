@@ -1,0 +1,46 @@
+{
+  "benchmarks": [
+    {
+      "benchmark": "BenchmarkChainStateSave/utxos_4096",
+      "iterations": 234,
+      "ns_per_op": 4925552.0,
+      "b_per_op": 5267255.0,
+      "allocs_per_op": 16423.0
+    },
+    {
+      "benchmark": "BenchmarkChainStateSave/utxos_8192",
+      "iterations": 100,
+      "ns_per_op": 10201125.0,
+      "b_per_op": 10294602.0,
+      "allocs_per_op": 32805.0
+    },
+    {
+      "benchmark": "BenchmarkChainStateLoad/utxos_4096",
+      "iterations": 213,
+      "ns_per_op": 5530935.0,
+      "b_per_op": 3769672.0,
+      "allocs_per_op": 16435.0
+    },
+    {
+      "benchmark": "BenchmarkChainStateLoad/utxos_8192",
+      "iterations": 100,
+      "ns_per_op": 11587776.0,
+      "b_per_op": 7997119.0,
+      "allocs_per_op": 32838.0
+    },
+    {
+      "benchmark": "BenchmarkReconcileChainState/noop_tip_32_blocks",
+      "iterations": 1032,
+      "ns_per_op": 1163321.0,
+      "b_per_op": 160487.0,
+      "allocs_per_op": 1488.0
+    },
+    {
+      "benchmark": "BenchmarkReconcileChainState/replay_32_blocks",
+      "iterations": 238,
+      "ns_per_op": 5192942.0,
+      "b_per_op": 1010021.0,
+      "allocs_per_op": 7685.0
+    }
+  ]
+}

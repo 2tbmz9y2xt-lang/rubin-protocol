@@ -1,0 +1,12 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node
+cpu: Apple M4 Max
+BenchmarkChainStateSave/utxos_4096-16         	     234	   4925552 ns/op	 5267255 B/op	   16423 allocs/op
+BenchmarkChainStateSave/utxos_8192-16         	     100	  10201125 ns/op	10294602 B/op	   32805 allocs/op
+BenchmarkChainStateLoad/utxos_4096-16         	     213	   5530935 ns/op	 3769672 B/op	   16435 allocs/op
+BenchmarkChainStateLoad/utxos_8192-16         	     100	  11587776 ns/op	 7997119 B/op	   32838 allocs/op
+BenchmarkReconcileChainState/noop_tip_32_blocks-16         	    1032	   1163321 ns/op	  160487 B/op	    1488 allocs/op
+BenchmarkReconcileChainState/replay_32_blocks-16           	     238	   5192942 ns/op	 1010021 B/op	    7685 allocs/op
+PASS
+ok  	github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node	9.190s

@@ -2,6 +2,8 @@ package node
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -487,4 +489,187 @@ func BenchmarkConnectBlockParallelSigsWithSuiteContext(b *testing.B) {
 			b.Fatalf("ConnectBlockParallelSigsWithSuiteContext: %v", err)
 		}
 	}
+}
+
+func benchmarkLargeChainState(tb testing.TB, count int) *ChainState {
+	tb.Helper()
+	fromKey := mustBenchmarkNodeMLDSA87Keypair(tb)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	values := make([]uint64, count)
+	for i := range values {
+		values[i] = 100 + uint64(i)
+	}
+	state, _ := benchmarkSpendableChainState(fromAddress, values)
+	state.HasTip = true
+	state.Height = 100
+	state.AlreadyGenerated = 50_000
+	state.TipHash[0] = 0x44
+	return state
+}
+
+func benchmarkRecoveryReplayFixture(tb testing.TB, blocks int) (*BlockStore, SyncConfig, *ChainState) {
+	tb.Helper()
+	dir := tb.TempDir()
+	chainStatePath := ChainStatePath(dir)
+	store, err := OpenBlockStore(BlockStorePath(dir))
+	if err != nil {
+		tb.Fatalf("OpenBlockStore: %v", err)
+	}
+
+	target := consensus.POW_LIMIT
+	cfg := DefaultSyncConfig(&target, devnetGenesisChainID, chainStatePath)
+	liveState := NewChainState()
+	engine, err := NewSyncEngine(liveState, store, cfg)
+	if err != nil {
+		tb.Fatalf("NewSyncEngine: %v", err)
+	}
+	if _, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil); err != nil {
+		tb.Fatalf("ApplyBlock(genesis): %v", err)
+	}
+
+	genesisParsed, err := consensus.ParseBlockBytes(devnetGenesisBlockBytes)
+	if err != nil {
+		tb.Fatalf("ParseBlockBytes(genesis): %v", err)
+	}
+
+	prevHash := devnetGenesisBlockHash
+	prevTimestamps := []uint64{genesisParsed.Header.Timestamp}
+	now := genesisParsed.Header.Timestamp + 60
+	for height := uint64(1); height <= uint64(blocks); height++ {
+		subsidy := consensus.BlockSubsidy(height, liveState.AlreadyGenerated)
+		timestamp := chooseValidTimestamp(height, prevTimestamps, now)
+		block := benchmarkBuildSingleTxBlock(
+			tb,
+			prevHash,
+			target,
+			timestamp,
+			benchmarkCoinbaseWithWitnessCommitmentAndP2PKValueAtHeight(tb, height, subsidy),
+		)
+		summary, err := engine.ApplyBlock(block, nil)
+		if err != nil {
+			tb.Fatalf("ApplyBlock(%d): %v", height, err)
+		}
+		prevHash = summary.BlockHash
+		prevTimestamps = append(prevTimestamps, timestamp)
+		if len(prevTimestamps) > 11 {
+			prevTimestamps = append([]uint64(nil), prevTimestamps[len(prevTimestamps)-11:]...)
+		}
+		now = timestamp + 60
+	}
+
+	return store, cfg, cloneChainState(liveState)
+}
+
+func benchmarkBuildSingleTxBlock(tb testing.TB, prevHash [32]byte, target [32]byte, timestamp uint64, tx []byte) []byte {
+	tb.Helper()
+	_, txid, _, _, err := consensus.ParseTx(tx)
+	if err != nil {
+		tb.Fatalf("parse tx: %v", err)
+	}
+	root, err := consensus.MerkleRootTxids([][32]byte{txid})
+	if err != nil {
+		tb.Fatalf("merkle root: %v", err)
+	}
+	header := make([]byte, 0, consensus.BLOCK_HEADER_BYTES)
+	header = consensus.AppendU32le(header, 1)
+	header = append(header, prevHash[:]...)
+	header = append(header, root[:]...)
+	header = consensus.AppendU64le(header, timestamp)
+	header = append(header, target[:]...)
+	header = consensus.AppendU64le(header, 7)
+
+	block := make([]byte, 0, len(header)+len(tx)+4)
+	block = append(block, header...)
+	block = consensus.AppendCompactSize(block, 1)
+	block = append(block, tx...)
+	return block
+}
+
+func benchmarkCoinbaseWithWitnessCommitmentAndP2PKValueAtHeight(tb testing.TB, height uint64, value uint64) []byte {
+	tb.Helper()
+	wtxids := [][32]byte{{}}
+	wroot, err := consensus.WitnessMerkleRootWtxids(wtxids)
+	if err != nil {
+		tb.Fatalf("witness merkle root: %v", err)
+	}
+	commitment := consensus.WitnessCommitmentHash(wroot)
+	return coinbaseTxWithOutputs(uint32(height), []testOutput{
+		{value: value, covenantType: consensus.COV_TYPE_P2PK, covenantData: testP2PKCovenantData(0x11)},
+		{value: 0, covenantType: consensus.COV_TYPE_ANCHOR, covenantData: commitment[:]},
+	})
+}
+
+func BenchmarkChainStateSave(b *testing.B) {
+	for _, count := range []int{4096, 8192} {
+		b.Run(fmt.Sprintf("utxos_%d", count), func(b *testing.B) {
+			state := benchmarkLargeChainState(b, count)
+			path := filepath.Join(b.TempDir(), chainStateFileName)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := state.Save(path); err != nil {
+					b.Fatalf("Save: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkChainStateLoad(b *testing.B) {
+	for _, count := range []int{4096, 8192} {
+		b.Run(fmt.Sprintf("utxos_%d", count), func(b *testing.B) {
+			state := benchmarkLargeChainState(b, count)
+			path := filepath.Join(b.TempDir(), chainStateFileName)
+			if err := state.Save(path); err != nil {
+				b.Fatalf("Save: %v", err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				loaded, err := LoadChainState(path)
+				if err != nil {
+					b.Fatalf("LoadChainState: %v", err)
+				}
+				if loaded == nil || len(loaded.Utxos) != len(state.Utxos) {
+					b.Fatalf("LoadChainState len=%d want=%d", len(loaded.Utxos), len(state.Utxos))
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkReconcileChainState(b *testing.B) {
+	store, cfg, canonicalState := benchmarkRecoveryReplayFixture(b, 32)
+	b.Run("noop_tip_32_blocks", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			b.StopTimer()
+			state := cloneChainState(canonicalState)
+			b.StartTimer()
+			changed, err := ReconcileChainStateWithBlockStore(state, store, cfg)
+			if err != nil {
+				b.Fatalf("ReconcileChainStateWithBlockStore: %v", err)
+			}
+			if changed {
+				b.Fatal("noop reconcile unexpectedly changed state")
+			}
+		}
+	})
+	b.Run("replay_32_blocks", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			b.StopTimer()
+			state := NewChainState()
+			b.StartTimer()
+			changed, err := ReconcileChainStateWithBlockStore(state, store, cfg)
+			if err != nil {
+				b.Fatalf("ReconcileChainStateWithBlockStore: %v", err)
+			}
+			if !changed {
+				b.Fatal("replay reconcile unexpectedly reported no change")
+			}
+		}
+	})
 }
