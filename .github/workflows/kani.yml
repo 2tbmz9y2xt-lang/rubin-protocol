@@ -29,6 +29,8 @@ jobs:
       KANI_NIGHTLY: nightly-2025-11-21
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
 
       # Always emit the check on PRs so it can be made required safely.
       # Relevance is decided inside the job to preserve a lawful path for
