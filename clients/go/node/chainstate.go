@@ -157,20 +157,8 @@ func (s *ChainState) admissionSnapshotForInputs(inputs []consensus.Outpoint) *ch
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	utxos := make(map[consensus.Outpoint]consensus.UtxoEntry, len(inputs))
-	for _, op := range inputs {
-		if _, seen := utxos[op]; seen {
-			continue
-		}
-		entry, ok := s.Utxos[op]
-		if !ok {
-			continue
-		}
-		utxos[op] = copyUtxoEntry(entry)
-	}
-
 	return &chainStateAdmissionSnapshot{
-		utxos:   utxos,
+		utxos:   copySelectedUtxoSet(s.Utxos, inputs),
 		hasTip:  s.HasTip,
 		height:  s.Height,
 		tipHash: s.TipHash,
@@ -500,18 +488,58 @@ func nextBlockContextFromFields(hasTip bool, height uint64, tipHash [32]byte) (u
 	return nextHeight, &prev, nil
 }
 
+// copyUtxoEntry is the canonical deep-copy helper for readonly snapshot/work-copy
+// contracts in node package code. Callers should build full-set or subset copies
+// from this helper rather than open-coding new UTXO copy variants.
+func copyUtxoEntry(entry consensus.UtxoEntry) consensus.UtxoEntry {
+	return consensus.UtxoEntry{
+		Value:             entry.Value,
+		CovenantType:      entry.CovenantType,
+		CovenantData:      append([]byte(nil), entry.CovenantData...),
+		CreationHeight:    entry.CreationHeight,
+		CreatedByCoinbase: entry.CreatedByCoinbase,
+	}
+}
+
 func copyUtxoSet(src map[consensus.Outpoint]consensus.UtxoEntry) map[consensus.Outpoint]consensus.UtxoEntry {
 	out := make(map[consensus.Outpoint]consensus.UtxoEntry, len(src))
 	for k, v := range src {
-		out[k] = consensus.UtxoEntry{
-			Value:             v.Value,
-			CovenantType:      v.CovenantType,
-			CovenantData:      append([]byte(nil), v.CovenantData...),
-			CreationHeight:    v.CreationHeight,
-			CreatedByCoinbase: v.CreatedByCoinbase,
-		}
+		out[k] = copyUtxoEntry(v)
 	}
 	return out
+}
+
+func copySelectedUtxoSet(src map[consensus.Outpoint]consensus.UtxoEntry, outpoints []consensus.Outpoint) map[consensus.Outpoint]consensus.UtxoEntry {
+	out := make(map[consensus.Outpoint]consensus.UtxoEntry, countExistingUniqueOutpoints(src, outpoints))
+	for _, op := range outpoints {
+		if _, seen := out[op]; seen {
+			continue
+		}
+		entry, ok := src[op]
+		if !ok {
+			continue
+		}
+		out[op] = copyUtxoEntry(entry)
+	}
+	return out
+}
+
+func countExistingUniqueOutpoints(src map[consensus.Outpoint]consensus.UtxoEntry, outpoints []consensus.Outpoint) int {
+	if len(src) == 0 || len(outpoints) == 0 {
+		return 0
+	}
+	seen := make(map[consensus.Outpoint]struct{}, len(outpoints))
+	count := 0
+	for _, op := range outpoints {
+		if _, ok := seen[op]; ok {
+			continue
+		}
+		seen[op] = struct{}{}
+		if _, ok := src[op]; ok {
+			count++
+		}
+	}
+	return count
 }
 
 func stateToDisk(s *ChainState) (chainStateDisk, error) {

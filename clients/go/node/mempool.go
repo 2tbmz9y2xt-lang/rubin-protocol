@@ -434,29 +434,17 @@ func policyInputSnapshot(tx *consensus.Tx, utxos map[consensus.Outpoint]consensu
 	if utxos == nil {
 		return nil, errors.New("nil utxo set")
 	}
-	out := make(map[consensus.Outpoint]consensus.UtxoEntry, len(tx.Inputs))
+	inputs := make([]consensus.Outpoint, 0, len(tx.Inputs))
 	for _, in := range tx.Inputs {
-		op := consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
-		if _, ok := out[op]; ok {
-			continue
-		}
-		entry, ok := utxos[op]
-		if !ok {
+		inputs = append(inputs, consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout})
+	}
+	out := copySelectedUtxoSet(utxos, inputs)
+	for _, op := range inputs {
+		if _, ok := out[op]; !ok {
 			return nil, &consensus.TxError{Code: consensus.TX_ERR_MISSING_UTXO, Msg: "utxo not found"}
 		}
-		out[op] = policyCopyUtxoEntry(entry)
 	}
 	return out, nil
-}
-
-func policyCopyUtxoEntry(entry consensus.UtxoEntry) consensus.UtxoEntry {
-	return consensus.UtxoEntry{
-		Value:             entry.Value,
-		CovenantType:      entry.CovenantType,
-		CovenantData:      append([]byte(nil), entry.CovenantData...),
-		CreationHeight:    entry.CreationHeight,
-		CreatedByCoinbase: entry.CreatedByCoinbase,
-	}
 }
 
 func (m *Mempool) applyPolicyAgainstState(checked *consensus.CheckedTransaction, nextHeight uint64, utxos map[consensus.Outpoint]consensus.UtxoEntry, policy MempoolConfig) error {

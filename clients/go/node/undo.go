@@ -190,16 +190,6 @@ func isSpendableOutput(covenantType uint16) bool {
 	return covenantType != consensus.COV_TYPE_ANCHOR && covenantType != consensus.COV_TYPE_DA_COMMIT
 }
 
-func copyUtxoEntry(entry consensus.UtxoEntry) consensus.UtxoEntry {
-	return consensus.UtxoEntry{
-		Value:             entry.Value,
-		CovenantType:      entry.CovenantType,
-		CovenantData:      append([]byte(nil), entry.CovenantData...),
-		CreationHeight:    entry.CreationHeight,
-		CreatedByCoinbase: entry.CreatedByCoinbase,
-	}
-}
-
 func marshalBlockUndo(undo *BlockUndo) ([]byte, error) {
 	disk, err := blockUndoToDisk(undo)
 	if err != nil {
