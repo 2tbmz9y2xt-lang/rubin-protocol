@@ -506,7 +506,7 @@ func benchmarkLargeChainState(tb testing.TB, count int) *ChainState {
 	return state
 }
 
-func benchmarkRecoveryReplayFixture(tb testing.TB, blocks int) (*BlockStore, SyncConfig, *ChainState) {
+func benchmarkRecoveryReplayFixture(tb testing.TB, blocks int) (*BlockStore, SyncConfig, *ChainState, *ChainState) {
 	tb.Helper()
 	dir := tb.TempDir()
 	chainStatePath := ChainStatePath(dir)
@@ -525,6 +525,7 @@ func benchmarkRecoveryReplayFixture(tb testing.TB, blocks int) (*BlockStore, Syn
 	if _, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil); err != nil {
 		tb.Fatalf("ApplyBlock(genesis): %v", err)
 	}
+	genesisState := cloneChainState(liveState)
 
 	genesisParsed, err := consensus.ParseBlockBytes(devnetGenesisBlockBytes)
 	if err != nil {
@@ -556,7 +557,7 @@ func benchmarkRecoveryReplayFixture(tb testing.TB, blocks int) (*BlockStore, Syn
 		now = timestamp + 60
 	}
 
-	return store, cfg, cloneChainState(liveState)
+	return store, cfg, genesisState, cloneChainState(liveState)
 }
 
 func benchmarkBuildSingleTxBlock(tb testing.TB, prevHash [32]byte, target [32]byte, timestamp uint64, tx []byte) []byte {
@@ -638,7 +639,7 @@ func BenchmarkChainStateLoad(b *testing.B) {
 }
 
 func BenchmarkReconcileChainState(b *testing.B) {
-	store, cfg, canonicalState := benchmarkRecoveryReplayFixture(b, 32)
+	store, cfg, genesisState, canonicalState := benchmarkRecoveryReplayFixture(b, 32)
 	b.Run("noop_tip_32_blocks", func(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
@@ -660,7 +661,7 @@ func BenchmarkReconcileChainState(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			b.StopTimer()
-			state := NewChainState()
+			state := cloneChainState(genesisState)
 			b.StartTimer()
 			changed, err := ReconcileChainStateWithBlockStore(state, store, cfg)
 			if err != nil {

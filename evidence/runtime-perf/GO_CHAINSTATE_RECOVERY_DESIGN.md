@@ -29,20 +29,21 @@ Measured points:
 
 | Target | ns/op | B/op | allocs/op |
 |--------|------:|-----:|----------:|
-| `BenchmarkChainStateSave/utxos_4096` | `4,925,552` | `5,267,255` | `16,423` |
-| `BenchmarkChainStateSave/utxos_8192` | `10,201,125` | `10,294,602` | `32,805` |
-| `BenchmarkChainStateLoad/utxos_4096` | `5,530,935` | `3,769,672` | `16,435` |
-| `BenchmarkChainStateLoad/utxos_8192` | `11,587,776` | `7,997,119` | `32,838` |
-| `BenchmarkReconcileChainState/noop_tip_32_blocks` | `1,163,321` | `160,487` | `1,488` |
-| `BenchmarkReconcileChainState/replay_32_blocks` | `5,192,942` | `1,010,021` | `7,685` |
+| `BenchmarkChainStateSave/utxos_4096` | `5,230,623` | `5,262,206` | `16,423` |
+| `BenchmarkChainStateSave/utxos_8192` | `9,605,862` | `10,426,923` | `32,806` |
+| `BenchmarkChainStateLoad/utxos_4096` | `5,381,177` | `3,769,688` | `16,435` |
+| `BenchmarkChainStateLoad/utxos_8192` | `10,900,992` | `7,997,136` | `32,838` |
+| `BenchmarkReconcileChainState/noop_tip_32_blocks` | `1,155,632` | `160,484` | `1,488` |
+| `BenchmarkReconcileChainState/replay_32_blocks` | `4,868,931` | `1,004,933` | `7,637` |
 
 ## What the numbers mean
 
 - current JSON snapshot save/load cost scales close to linearly with UTXO count;
 - moving from `4096` to `8192` UTXOs roughly doubles both CPU time and allocation
   pressure for `Save` and `Load`;
-- a `32`-block canonical replay gap already costs about the same wall-clock time
-  as saving or loading a `4096`-UTXO snapshot;
+- a true `32`-block missing-tip replay gap, starting from a reconciled genesis
+  snapshot, already costs about the same wall-clock time as saving or loading a
+  `4096`-UTXO snapshot;
 - the current model is safe and simple, but it pays twice:
   - full JSON snapshot cost on persistence/reload;
   - linear replay cost when the persisted snapshot lags the canonical tip.
