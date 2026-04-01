@@ -247,7 +247,7 @@ func (m *Miner) snapshotBuildContextState() (miningChainStateSnapshot, error) {
 		alreadyGenerated: state.AlreadyGenerated,
 	}
 	if m.policyNeedsReadonlyUtxoSnapshot() {
-		snapshot.utxos = copyMinerReadonlyUtxoSet(state.Utxos)
+		snapshot.utxos = copyUtxoSet(state.Utxos)
 	}
 	return snapshot, nil
 }
@@ -279,19 +279,6 @@ func (m *Miner) policyNeedsReadonlyUtxoSnapshot() bool {
 	// a readonly snapshot available for that path so custom configs cannot
 	// accidentally call into policy with a nil UTXO map.
 	return m.cfg.PolicyDaAnchorAntiAbuse
-}
-
-func copyMinerReadonlyUtxoEntry(entry consensus.UtxoEntry) consensus.UtxoEntry {
-	entry.CovenantData = append([]byte(nil), entry.CovenantData...)
-	return entry
-}
-
-func copyMinerReadonlyUtxoSet(src map[consensus.Outpoint]consensus.UtxoEntry) map[consensus.Outpoint]consensus.UtxoEntry {
-	out := make(map[consensus.Outpoint]consensus.UtxoEntry, len(src))
-	for k, v := range src {
-		out[k] = copyMinerReadonlyUtxoEntry(v)
-	}
-	return out
 }
 
 func (m *Miner) remainingWeightBudget(nextHeight uint64, alreadyGenerated uint64) (uint64, error) {

@@ -54,6 +54,69 @@ func TestStateToDisk_NilReceiver(t *testing.T) {
 	}
 }
 
+func TestCopySelectedUtxoSetCopiesRequestedEntries(t *testing.T) {
+	t.Parallel()
+
+	var txidA, txidB [32]byte
+	txidA[0] = 0xaa
+	txidB[0] = 0xbb
+	opA := consensus.Outpoint{Txid: txidA, Vout: 1}
+	opB := consensus.Outpoint{Txid: txidB, Vout: 2}
+	src := map[consensus.Outpoint]consensus.UtxoEntry{
+		opA: {
+			Value:             11,
+			CovenantType:      consensus.COV_TYPE_P2PK,
+			CovenantData:      []byte{0x01, 0x02},
+			CreationHeight:    7,
+			CreatedByCoinbase: true,
+		},
+		opB: {
+			Value:             22,
+			CovenantType:      consensus.COV_TYPE_P2PK,
+			CovenantData:      []byte{0x03, 0x04},
+			CreationHeight:    8,
+			CreatedByCoinbase: false,
+		},
+	}
+
+	out := copySelectedUtxoSet(src, []consensus.Outpoint{opA, opA, {Txid: [32]byte{0xcc}, Vout: 9}})
+	if len(out) != 1 {
+		t.Fatalf("len(out)=%d, want 1", len(out))
+	}
+	if _, ok := out[opA]; !ok {
+		t.Fatal("copied set missing requested outpoint")
+	}
+	if _, ok := out[opB]; ok {
+		t.Fatal("copied set unexpectedly contains unrelated outpoint")
+	}
+
+	entry := out[opA]
+	entry.CovenantData[0] ^= 0xff
+	out[opA] = entry
+	if src[opA].CovenantData[0] == out[opA].CovenantData[0] {
+		t.Fatal("copySelectedUtxoSet aliased covenant data")
+	}
+}
+
+func TestCountExistingUniqueOutpointsSkipsMissingAndDuplicates(t *testing.T) {
+	t.Parallel()
+
+	var txidA, txidB [32]byte
+	txidA[0] = 0xaa
+	txidB[0] = 0xbb
+	opA := consensus.Outpoint{Txid: txidA, Vout: 1}
+	opB := consensus.Outpoint{Txid: txidB, Vout: 2}
+
+	src := map[consensus.Outpoint]consensus.UtxoEntry{
+		opA: {Value: 11, CovenantType: consensus.COV_TYPE_P2PK},
+	}
+
+	count := countExistingUniqueOutpoints(src, []consensus.Outpoint{opA, opA, opB})
+	if count != 1 {
+		t.Fatalf("countExistingUniqueOutpoints=%d, want 1", count)
+	}
+}
+
 func TestStateToDisk_SortsByVoutWhenSameTxid(t *testing.T) {
 	txid := mustHash32Hex(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	st := &ChainState{
