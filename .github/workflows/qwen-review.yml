@@ -1,7 +1,16 @@
 name: '🔎 Qwen Code Review'
 
 on:
-  workflow_call:
+  pull_request:
+    types:
+      - 'opened'
+      - 'reopened'
+      - 'synchronize'
+      - 'ready_for_review'
+    branches:
+      - 'main'
+      - 'release/**/*'
+  workflow_dispatch:
     inputs:
       additional_context:
         type: 'string'
@@ -18,6 +27,13 @@ defaults:
 
 jobs:
   review:
+    if: |-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.head.repo.fork == false
+      )
     runs-on: 'ubuntu-latest'
     timeout-minutes: 7
     permissions:
@@ -46,11 +62,11 @@ jobs:
         id: 'qwen_pr_review'
         env:
           GITHUB_TOKEN: '${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}'
-          ISSUE_TITLE: '${{ github.event.pull_request.title || github.event.issue.title }}'
-          ISSUE_BODY: '${{ github.event.pull_request.body || github.event.issue.body }}'
-          PULL_REQUEST_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number }}'
+          ISSUE_TITLE: '${{ github.event.pull_request.title }}'
+          ISSUE_BODY: '${{ github.event.pull_request.body }}'
+          PULL_REQUEST_NUMBER: '${{ github.event.pull_request.number }}'
           REPOSITORY: '${{ github.repository }}'
-          ADDITIONAL_CONTEXT: '${{ inputs.additional_context }}'
+          ADDITIONAL_CONTEXT: '${{ github.event.inputs.additional_context || '' }}'
         with:
           openai_api_key: '${{ secrets.QWEN_API_KEY || secrets.QWENAPIKEY }}'
           openai_base_url: '${{ vars.QWEN_BASE_URL || vars.QWENBASEURL }}'
