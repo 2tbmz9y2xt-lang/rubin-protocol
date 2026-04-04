@@ -36,7 +36,7 @@ jobs:
       pull-requests: 'read'
     outputs:
       available_labels: '${{ steps.get_labels.outputs.available_labels }}'
-      triaged_issues: '${{ env.TRIAGED_ISSUES }}'
+      triaged_issues: '${{ steps.capture_triaged_issues.outputs.triaged_issues }}'
     steps:
       - name: 'Get repository labels'
         id: 'get_labels'
@@ -71,12 +71,13 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN || github.token }}'
         run: |-
           echo '🔍 Finding unlabeled issues and issues marked for triage...'
-          ISSUES="$(gh issue list \
-            --state 'open' \
-            --search 'no:label label:"status/needs-triage"' \
-            --json number,title,body \
-            --limit '100' \
-            --repo "${GITHUB_REPOSITORY}"
+          ISSUES="$(
+            gh issue list \
+              --state 'open' \
+              --json number,title,body,labels \
+              --limit '100' \
+              --repo "${GITHUB_REPOSITORY}" |
+            jq '[.[] | select((.labels | length) == 0 or any(.labels[]?; .name == "status/needs-triage")) | {number, title, body}]'
           )"
 
           echo '📝 Setting output for GitHub Actions...'
@@ -121,14 +122,12 @@ jobs:
                 ]
               }
             }
-          prompt: |-
-            Triage the listed open issues for RUBIN conservatively.
+          prompt: '/qwen-scheduled-triage'
 
-            Requirements:
-            - use only labels from AVAILABLE_LABELS
-            - do not infer hidden repository state
-            - leave ambiguous issues in a needs-triage bucket instead of over-classifying
-            - optimize for safe label application, not cleverness
+      - name: 'Capture triaged issues'
+        id: 'capture_triaged_issues'
+        run: |-
+          echo "triaged_issues=${TRIAGED_ISSUES:-}" >> "${GITHUB_OUTPUT}"
 
   label:
     runs-on: 'ubuntu-latest'
@@ -142,7 +141,6 @@ jobs:
     permissions:
       contents: 'read'
       issues: 'write'
-      pull-requests: 'write'
     steps:
       - name: 'Mint identity token'
         id: 'mint_identity_token'

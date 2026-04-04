@@ -57,7 +57,10 @@ jobs:
         contains(fromJSON('["opened", "reopened"]'), github.event.action)
       ) || (
         github.event.sender.type == 'User' &&
-        startsWith(github.event.comment.body || github.event.review.body || github.event.issue.body, '@qwen-code') &&
+        (
+          startsWith(github.event.comment.body || github.event.review.body || github.event.issue.body, '@qwencoder') ||
+          startsWith(github.event.comment.body || github.event.review.body || github.event.issue.body, '@qwen-code')
+        ) &&
         contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association || github.event.review.author_association || github.event.issue.author_association)
       )
     runs-on: 'ubuntu-latest'
@@ -99,14 +102,14 @@ jobs:
               core.setOutput('command', 'review');
             } else if (['issues.opened', 'issues.reopened'].includes(eventType)) {
               core.setOutput('command', 'triage');
-            } else if (request.startsWith("@qwen-code /review")) {
+            } else if (request.startsWith("@qwencoder /review") || request.startsWith("@qwen-code /review")) {
               core.setOutput('command', 'review');
-              const additionalContext = request.replace(/^@qwen-code \/review/, '').trim();
+              const additionalContext = request.replace(/^@(qwencoder|qwen-code) \/review/, '').trim();
               core.setOutput('additional_context', additionalContext);
-            } else if (request.startsWith("@qwen-code /triage")) {
+            } else if (request.startsWith("@qwencoder /triage") || request.startsWith("@qwen-code /triage")) {
               core.setOutput('command', 'triage');
-            } else if (request.startsWith("@qwen-code")) {
-              const additionalContext = request.replace(/^@qwen-code/, '').trim();
+            } else if (request.startsWith("@qwencoder") || request.startsWith("@qwen-code")) {
+              const additionalContext = request.replace(/^@(qwencoder|qwen-code)/, '').trim();
               core.setOutput('command', 'invoke');
               core.setOutput('additional_context', additionalContext);
             } else {

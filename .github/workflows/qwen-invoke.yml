@@ -113,12 +113,4 @@ jobs:
                 ]
               }
             }
-          prompt: |-
-            Handle the explicit `@qwen-code` request for RUBIN conservatively.
-
-            Rules:
-            - do only what the request explicitly asks
-            - do not merge PRs
-            - do not weaken CI, security, or consensus guards
-            - if the request touches consensus/formal/spec semantics, explain that controller approval is required
-            - keep comments short and operational
+          prompt: '/qwen-invoke'
