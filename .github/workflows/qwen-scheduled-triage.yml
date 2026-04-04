@@ -90,7 +90,7 @@ jobs:
         id: 'qwen_issue_analysis'
         if: |-
           ${{ steps.find_issues.outputs.issues_to_triage != '[]' }}
-        uses: 'QwenLM/qwen-code-action@v1' # ratchet:exclude
+        uses: 'QwenLM/qwen-code-action@b3ed0261c3ad58a162a29b6feca3b45cc17db913' # ratchet:QwenLM/qwen-code-action@v1
         env:
           GITHUB_TOKEN: '' # Do not pass any auth token here since this runs on untrusted inputs
           ISSUES_TO_TRIAGE: '${{ steps.find_issues.outputs.issues_to_triage }}'
@@ -175,6 +175,8 @@ jobs:
 
             core.debug(`Triaged issues: ${JSON.stringify(triagedIssues)}`);
 
+            const triageMarkerLabels = new Set(['status/needs-triage']);
+
             // Iterate over each label
             for (const issue of triagedIssues) {
               if (!issue) {
@@ -202,12 +204,27 @@ jobs:
                 continue;
               }
 
-              core.debug(`Setting labels on issue #${issueNumber} to ${labelsToSet.join(', ')} (${issue.explanation || 'no explanation'})`)
+              const currentIssue = await github.rest.issues.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+              });
+
+              const existingLabels = (currentIssue.data.labels || [])
+                .map((label) => typeof label === 'string' ? label : label.name)
+                .filter((label) => typeof label === 'string' && label.length > 0);
+
+              const mergedLabels = [...new Set([
+                ...existingLabels.filter((label) => !triageMarkerLabels.has(label)),
+                ...labelsToSet,
+              ])].sort();
+
+              core.debug(`Setting labels on issue #${issueNumber} to ${mergedLabels.join(', ')} (${issue.explanation || 'no explanation'})`)
 
               await github.rest.issues.setLabels({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: issueNumber,
-                labels: labelsToSet,
+                labels: mergedLabels,
               });
             }

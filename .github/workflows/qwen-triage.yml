@@ -59,7 +59,7 @@ jobs:
         id: 'qwen_analysis'
         if: |-
           ${{ steps.get_labels.outputs.available_labels != '' }}
-        uses: 'QwenLM/qwen-code-action@v1' # ratchet:exclude
+        uses: 'QwenLM/qwen-code-action@b3ed0261c3ad58a162a29b6feca3b45cc17db913' # ratchet:QwenLM/qwen-code-action@v1
         env:
           GITHUB_TOKEN: '' # Do NOT pass any auth tokens here since this runs on untrusted inputs
           ISSUE_TITLE: '${{ github.event.issue.title }}'

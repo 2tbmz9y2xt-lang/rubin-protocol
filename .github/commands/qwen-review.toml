@@ -92,7 +92,9 @@ Do not report:
 
 1. Create a pending PR review.
 2. Add focused inline comments for concrete issues only.
-3. Submit a final review with event type `COMMENT`.
+3. If you found any blocking issue that should stop merge, submit the final review with event type `REQUEST_CHANGES`.
+4. If you found no blocking issue, submit the final review with event type `APPROVE`.
+5. Do not submit the final review with event type `COMMENT`.
 
 The final summary must use this format:
 
