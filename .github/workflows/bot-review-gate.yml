@@ -22,14 +22,23 @@ jobs:
             const prNumber = pr.number;
             const headSha = pr.head.sha;
 
-            const reviews = await github.paginate(
-              github.rest.pulls.listReviews,
-              {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: prNumber
-              }
-            );
+            let reviews;
+            try {
+              reviews = await github.paginate(
+                github.rest.pulls.listReviews,
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: prNumber
+                }
+              );
+            } catch (err) {
+              core.warning(
+                `Failed to fetch reviews: ${err.message}. ` +
+                `Skipping bot-review-gate (will not block merge).`
+              );
+              return;
+            }
 
             // Keep only the latest review per monitored bot
             const latestByBot = {};
@@ -42,6 +51,9 @@ jobs:
 
             const blocking = [];
             for (const [bot, review] of Object.entries(latestByBot)) {
+              const commitShort = (review.commit_id || 'unknown').slice(0, 7);
+              const headShort = headSha.slice(0, 7);
+
               // DISMISSED is a pass — but ONLY if it was for the current head SHA.
               // A stale dismiss (on an older commit) does not count as
               // acknowledgment of current changes.
@@ -50,7 +62,7 @@ jobs:
                   continue; // legitimately dismissed for current commit
                 }
                 blocking.push(
-                  `  • ${bot} — dismissed review is stale (commit ${review.commit_id?.slice(0, 7)}, head is ${headSha.slice(0, 7)}). Awaiting new review.`
+                  `  • ${bot} — dismissed review is stale (commit ${commitShort}, head is ${headShort}). Awaiting new review.`
                 );
                 continue;
               }
@@ -59,7 +71,7 @@ jobs:
               // on current or stale commit — blocks until dismissed
               if (review.commit_id !== headSha) {
                 blocking.push(
-                  `  • ${bot} — review #${review.id} is for old commit (${review.commit_id?.slice(0, 7)}). Awaiting re-review on ${headSha.slice(0, 7)}.`
+                  `  • ${bot} — review #${review.id} is for old commit (${commitShort}). Awaiting re-review on ${headShort}.`
                 );
               } else {
                 blocking.push(
