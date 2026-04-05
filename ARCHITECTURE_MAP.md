@@ -75,7 +75,7 @@ rubin-spec (private) /*
 
 - `scripts/` contains spec integrity tooling and reproducible env helpers.
 - `tools/` contains policy and integrity checks used by CI and local validation.
-- `rubin-formal/` maintains a toy/model formal baseline and risk-gate metadata.
+- `rubin-formal/` maintains the Lean formal proof surface and risk-gate metadata used by CI and public coverage claims.
 
 ## 6) Practical Change Path (Recommended)
 
