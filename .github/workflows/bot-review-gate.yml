@@ -33,9 +33,9 @@ jobs:
                 }
               );
             } catch (err) {
-              core.warning(
+              core.setFailed(
                 `Failed to fetch reviews: ${err.message}. ` +
-                `Skipping bot-review-gate (will not block merge).`
+                `Bot-review-gate blocked (fail-closed). Re-run this check to retry.`
               );
               return;
             }
