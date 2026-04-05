@@ -5,6 +5,8 @@ on:
     types: [opened, synchronize, reopened]
   pull_request_review:
     types: [submitted, dismissed, edited]
+  pull_request_review_thread:
+    types: [resolved, unresolved]
 
 permissions:
   pull-requests: read
@@ -27,11 +29,12 @@ jobs:
 
             const prNumber = context.payload.pull_request.number;
 
-            // Use GraphQL to get review threads with resolution status
-            const query = `query($owner:String!, $repo:String!, $pr:Int!) {
+            // Use GraphQL to get review threads with resolution status.
+            // Paginate until hasNextPage is false to avoid missing threads on large PRs.
+            const query = `query($owner:String!, $repo:String!, $pr:Int!, $cursor:String) {
               repository(owner:$owner, name:$repo) {
                 pullRequest(number:$pr) {
-                  reviewThreads(first:100) {
+                  reviewThreads(first:100, after:$cursor) {
                     nodes {
                       isResolved
                       comments(first:1) {
@@ -40,19 +43,29 @@ jobs:
                         }
                       }
                     }
+                    pageInfo {
+                      hasNextPage
+                      endCursor
+                    }
                   }
                 }
               }
             }`;
 
-            let threads;
+            let threads = [];
+            let cursor = null;
             try {
-              const result = await github.graphql(query, {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pr: prNumber,
-              });
-              threads = result.repository.pullRequest.reviewThreads.nodes;
+              do {
+                const result = await github.graphql(query, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pr: prNumber,
+                  cursor,
+                });
+                const page = result.repository.pullRequest.reviewThreads;
+                threads = threads.concat(page.nodes);
+                cursor = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+              } while (cursor);
             } catch (err) {
               core.setFailed(
                 `Failed to fetch review threads: ${err.message}. ` +

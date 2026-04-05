@@ -513,8 +513,9 @@ jobs:
             try { parsed = JSON.parse(review); } catch(e) { parsed = null; }
             const verdict = parsed && parsed.verdict ? parsed.verdict : 'UNKNOWN';
             const emoji = verdict === 'PASS' ? '\u2705' : verdict === 'WARN' ? '\u26a0\ufe0f' : '\ud83d\uded1';
-            // Post as PR review (not issue comment) so bot-review-gate can track it.
-            // Always COMMENT event — the separate "Block on critical/high" step handles fail logic.
+            // Post as a PR review to keep the security result attached to the PR review UI.
+            // Always use COMMENT event; blocking/fail behavior is handled by the separate
+            // "Block on critical/high findings" step below, not by bot-review-gate.
             await github.rest.pulls.createReview({
               owner: context.repo.owner,
               repo: context.repo.repo,
