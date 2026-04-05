@@ -26,8 +26,8 @@ There is no delayed wire-activation mechanism.
 - `./clients/go/cmd/rubin-node/` Go node skeleton entrypoint (daemon bootstrap)
 - `./clients/rust/` Rust reference consensus library + CLI
 - `./conformance/` fixtures + runner (Go↔Rust parity)
-- `./rubin-formal/` Lean4 proof-pack **mirror/bootstrap** (for CI and local replay)
-  - Authoritative formal baseline lives in the standalone repository: `https://github.com/2tbmz9y2xt-lang/rubin-formal`
+- `./rubin-formal/` Lean4 formal proof surface used by CI and local replay
+  - Authoritative standalone repository: `https://github.com/2tbmz9y2xt-lang/rubin-formal`
 - `./ARCHITECTURE_MAP.md` architecture map (spec → fixtures → clients → CI)
 
 Quick references:
