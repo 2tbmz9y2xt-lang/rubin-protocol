@@ -36,6 +36,7 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
+          config-file: ./.github/codeql/codeql-config.yml
           # queries: security-extended — uncomment for extended rule set
 
       - name: Autobuild
