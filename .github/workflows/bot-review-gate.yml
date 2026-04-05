@@ -42,31 +42,38 @@ jobs:
 
             const blocking = [];
             for (const [bot, review] of Object.entries(latestByBot)) {
-              // Only DISMISSED is a pass state — anything else blocks
+              // DISMISSED is a pass — but ONLY if it was for the current head SHA.
+              // A stale dismiss (on an older commit) does not count as
+              // acknowledgment of current changes.
               if (review.state === 'DISMISSED') {
+                if (review.commit_id === headSha) {
+                  continue; // legitimately dismissed for current commit
+                }
+                blocking.push(
+                  `  • ${bot} — dismissed review is stale (commit ${review.commit_id?.slice(0, 7)}, head is ${headSha.slice(0, 7)}). Awaiting new review.`
+                );
                 continue;
               }
-              // Review must be for current head SHA — stale dismissed reviews
-              // don't count as acknowledgment of new changes
+
+              // Any other state (COMMENTED, APPROVED, CHANGES_REQUESTED)
+              // on current or stale commit — blocks until dismissed
               if (review.commit_id !== headSha) {
                 blocking.push(
-                  `  • ${bot} — no review for current commit (${headSha.slice(0, 7)})`
+                  `  • ${bot} — review #${review.id} is for old commit (${review.commit_id?.slice(0, 7)}). Awaiting re-review on ${headSha.slice(0, 7)}.`
                 );
               } else {
                 blocking.push(
-                  `  • ${bot} — review #${review.id} (${review.state})`
+                  `  • ${bot} — review #${review.id} (${review.state}) on current commit. Dismiss to unblock.`
                 );
               }
             }
 
-            // Also block if a monitored bot has no review at all yet
-            // (bot hasn't reviewed this PR yet — wait for it)
-            for (const bot of MONITORED_BOTS) {
-              if (!latestByBot[bot]) {
-                // No review from this bot yet — pass (bot may not review all PRs)
-                continue;
-              }
-            }
+            // If a monitored bot has never reviewed this PR, pass.
+            // The bot may not review all PRs, and blocking indefinitely
+            // waiting for a bot that may never come is worse than
+            // letting the PR through. The copilot_code_review ruleset rule
+            // ensures the bot IS triggered; once it reviews, this gate
+            // catches it on the re-trigger from pull_request_review event.
 
             if (blocking.length > 0) {
               core.setFailed(
@@ -78,5 +85,5 @@ jobs:
                 ].join('\n')
               );
             } else {
-              core.info('All bot reviews acknowledged (dismissed) or none present.');
+              core.info('All bot reviews acknowledged (dismissed for current head) or none present.');
             }
