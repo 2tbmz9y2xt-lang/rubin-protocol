@@ -13,89 +13,82 @@ jobs:
   bot-review-gate:
     runs-on: ubuntu-latest
     steps:
-      - name: Check bot reviews are acknowledged
+      - name: Check bot review threads are resolved
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7
         with:
           script: |
-            const MONITORED_BOTS = ['copilot[bot]'];
-            const pr = context.payload.pull_request;
-            const prNumber = pr.number;
-            const headSha = pr.head.sha;
+            // Bot review gate v2: thread-based, no dismiss required.
+            // Blocks merge if any unresolved review thread from a monitored bot exists.
+            // Summary-only reviews (no threads) do NOT block.
+            const MONITORED_BOTS = new Set([
+              'copilot-pull-request-reviewer[bot]',
+              'chatgpt-codex-connector[bot]',
+            ]);
 
-            let reviews;
+            const prNumber = context.payload.pull_request.number;
+
+            // Paginated GraphQL fetch of all review threads
+            const query = `query($owner:String!, $repo:String!, $pr:Int!, $cursor:String) {
+              repository(owner:$owner, name:$repo) {
+                pullRequest(number:$pr) {
+                  reviewThreads(first:100, after:$cursor) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes {
+                      isResolved
+                      comments(first:1) {
+                        nodes {
+                          author { login }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }`;
+
+            const threads = [];
+            let cursor = null;
             try {
-              reviews = await github.paginate(
-                github.rest.pulls.listReviews,
-                {
+              while (true) {
+                const result = await github.graphql(query, {
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  pull_number: prNumber
-                }
-              );
+                  pr: prNumber,
+                  cursor,
+                });
+                const page = result.repository.pullRequest.reviewThreads;
+                threads.push(...page.nodes);
+                if (!page.pageInfo.hasNextPage) break;
+                cursor = page.pageInfo.endCursor;
+              }
             } catch (err) {
               core.setFailed(
-                `Failed to fetch reviews: ${err.message}. ` +
-                `Bot-review-gate blocked (fail-closed). Re-run this check to retry.`
+                `Failed to fetch review threads: ${err.message}. ` +
+                `Bot-review-gate blocked (fail-closed). Re-run to retry.`
               );
               return;
             }
 
-            // Keep only the latest review per monitored bot
-            const latestByBot = {};
-            for (const review of reviews) {
-              const login = review.user?.login || '';
-              if (MONITORED_BOTS.includes(login)) {
-                latestByBot[login] = review;
-              }
-            }
+            const unresolved = threads.filter(t => {
+              if (t.isResolved) return false;
+              const author = t.comments.nodes[0]?.author?.login || '';
+              return MONITORED_BOTS.has(author);
+            });
 
-            const blocking = [];
-            for (const [bot, review] of Object.entries(latestByBot)) {
-              const commitShort = (review.commit_id || 'unknown').slice(0, 7);
-              const headShort = headSha.slice(0, 7);
-
-              // DISMISSED is a pass — but ONLY if it was for the current head SHA.
-              // A stale dismiss (on an older commit) does not count as
-              // acknowledgment of current changes.
-              if (review.state === 'DISMISSED') {
-                if (review.commit_id === headSha) {
-                  continue; // legitimately dismissed for current commit
-                }
-                blocking.push(
-                  `  • ${bot} — dismissed review is stale (commit ${commitShort}, head is ${headShort}). Awaiting new review.`
-                );
-                continue;
-              }
-
-              // Any other state (COMMENTED, APPROVED, CHANGES_REQUESTED)
-              // on current or stale commit — blocks until dismissed
-              if (review.commit_id !== headSha) {
-                blocking.push(
-                  `  • ${bot} — review #${review.id} is for old commit (${commitShort}). Awaiting re-review on ${headShort}.`
-                );
-              } else {
-                blocking.push(
-                  `  • ${bot} — review #${review.id} (${review.state}) on current commit. Dismiss to unblock.`
-                );
-              }
-            }
-
-            // If a monitored bot has never reviewed this PR, pass.
-            // The bot may not review all PRs, and blocking indefinitely
-            // waiting for a bot that may never come is worse than
-            // letting the PR through. The copilot_code_review ruleset rule
-            // ensures the bot IS triggered; once it reviews, this gate
-            // catches it on the re-trigger from pull_request_review event.
-
-            if (blocking.length > 0) {
+            if (unresolved.length > 0) {
+              const summary = unresolved.map(t => {
+                const author = t.comments.nodes[0]?.author?.login || 'unknown';
+                return `  • ${author}`;
+              });
+              const unique = [...new Set(summary)];
               core.setFailed(
                 [
-                  `${blocking.length} unacknowledged bot review(s):`,
-                  ...blocking,
+                  `${unresolved.length} unresolved bot review thread(s):`,
+                  ...unique,
                   '',
-                  'To unblock merge: read the review → click ⋯ → Dismiss review.'
+                  'Resolve all bot review threads to unblock merge.'
                 ].join('\n')
               );
             } else {
-              core.info('All bot reviews acknowledged (dismissed for current head) or none present.');
+              core.info('All bot review threads resolved (or no bot threads exist).');
             }

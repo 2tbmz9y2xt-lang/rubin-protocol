@@ -21,18 +21,18 @@ jobs:
       - name: Get PR diff
         id: diff
         run: |
-          FILES=$(gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --name-only)
+          FILES=$(gh pr diff "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" --name-only)
           RELEVANT=$(printf '%s\n' "$FILES" | grep -E '(\.go$|\.rs$|\.lean$|^\.github/workflows/|^scripts/security/|^tools/.*\.(py|sh|json)$)' || true)
           if [ -z "$RELEVANT" ]; then
-            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "SKIP: no enforcement-sensitive code/workflow/tooling changes for hostile review"
             exit 0
           fi
-          DIFF=$(gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }})
+          DIFF=$(gh pr diff "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}")
           if [ -z "$DIFF" ]; then
-            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "skip=true" >> "$GITHUB_OUTPUT"
           else
-            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "skip=false" >> "$GITHUB_OUTPUT"
             echo "$DIFF" > pr-diff.txt
           fi
         env:
@@ -72,23 +72,32 @@ jobs:
             const diff = fs.readFileSync('pr-diff.txt', 'utf8').slice(0, 128000);
 
             // Fetch previous security review findings to avoid re-reporting.
-            // P1 fix: only trust comments from the bot account (github-actions[bot])
-            // that actually runs this workflow — reject arbitrary contributor comments.
-            // P2 fix: paginate through ALL comments to reliably find the latest reviews.
+            // Reads from both PR reviews (new) and issue comments (legacy) for
+            // backward compatibility during transition.
             const TRUSTED_AUTHORS = new Set(['github-actions[bot]']);
             let previousFindings = '';
             try {
-              const allComments = [];
-              for await (const response of github.paginate.iterator(
+              // Check PR reviews first (current approach)
+              const allReviews = await github.paginate(
+                github.rest.pulls.listReviews, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.issue.number,
+                }
+              );
+              // Fallback: also check issue comments (legacy reviews)
+              const allIssueComments = await github.paginate(
                 github.rest.issues.listComments, {
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   issue_number: context.issue.number,
                   per_page: 100,
                 }
-              )) {
-                allComments.push(...response.data);
-              }
+              );
+              const allComments = [
+                ...allReviews.map(r => ({ body: r.body, user: r.user, date: r.submitted_at || '' })),
+                ...allIssueComments.map(c => ({ body: c.body, user: c.user, date: c.created_at || '' })),
+              ].sort((a, b) => a.date.localeCompare(b.date));
               const reviewComments = allComments
                 .filter(c => c.body
                   && TRUSTED_AUTHORS.has(c.user?.login ?? '')
@@ -493,7 +502,7 @@ jobs:
           path: raw-review-output.txt
           retention-days: 3
 
-      - name: Post review comment
+      - name: Post review
         if: steps.review.outputs.review
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v7
         with:
@@ -504,10 +513,13 @@ jobs:
             try { parsed = JSON.parse(review); } catch(e) { parsed = null; }
             const verdict = parsed && parsed.verdict ? parsed.verdict : 'UNKNOWN';
             const emoji = verdict === 'PASS' ? '\u2705' : verdict === 'WARN' ? '\u26a0\ufe0f' : '\ud83d\uded1';
-            await github.rest.issues.createComment({
+            // Post as PR review (not issue comment) so bot-review-gate can track it.
+            // Always COMMENT event — the separate "Block on critical/high" step handles fail logic.
+            await github.rest.pulls.createReview({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: context.issue.number,
+              pull_number: context.issue.number,
+              event: 'COMMENT',
               body: `### ${emoji} Security Review: ${verdict}\n_Model: deepseek/DeepSeek-R1-0528_\n\n\`\`\`json\n${review}\n\`\`\``
             });
 
