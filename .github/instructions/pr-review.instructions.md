@@ -21,6 +21,7 @@ This is a blockchain protocol repository containing:
 - **Go↔Rust parity**: changes to one client without equivalent change in the other client MUST be flagged
 - **Unsafe code**: new `unsafe` blocks in Rust require safety comments and justification
 - **Formal proof breakage**: changes that invalidate existing Lean4 proofs in `rubin-formal/`
+- **Wire format changes**: any change to transaction/block serialization, hash computation, or encoding MUST update conformance vectors in `conformance/fixtures/`
 
 ### P1 — Request changes
 - Missing or inadequate error handling in consensus-critical paths
@@ -28,6 +29,7 @@ This is a blockchain protocol repository containing:
 - New dependencies without security review justification
 - Test coverage gaps for modified consensus logic
 - UTXO state transitions without validation proof coverage
+- Cross-language parity drift: logic change in Go or Rust without matching change in the other client
 
 ### P2 — Comment (non-blocking)
 - Code style, naming, documentation improvements
@@ -61,3 +63,24 @@ This is a blockchain protocol repository containing:
 - Proofs must be `sorry`-free before merge
 - New theorems need docstrings explaining what property they verify
 - Verify that proof dependencies match the implementation they formalize
+
+## False Positive Guidance
+
+To reduce noise, do NOT flag the following patterns:
+- `unwrap()` inside `#[cfg(test)]` modules or test files (`_test.go`, `*_test.rs`)
+- `panic!()` / `panic()` in `init()`, `main()`, CLI entry points, or test helpers
+- Missing `Debug` on types that contain `dyn Trait`, external FFI types, or raw pointers
+- Style-only issues (formatting, import order) — these are enforced by `gofmt`/`rustfmt`
+- Single-use variables in test fixtures
+
+## Severity Calibration
+
+- P0 is reserved for changes that could cause consensus failure, data loss, or security vulnerabilities. Do not use P0 for style, naming, or documentation issues
+- When in doubt between P1 and P2, prefer P2. Over-escalation creates review fatigue
+- A finding without a concrete failure scenario or code path is P2 at most
+
+## Review Output Format
+
+- Leave findings as **line-level comments** on the specific code lines, not as summary-only reviews
+- Each comment should state: severity (P0/P1/P2), what the issue is, and a suggested fix or action
+- Group related findings into a single thread rather than scattering across lines
