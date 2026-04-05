@@ -1,0 +1,11 @@
+name: "RUBIN CodeQL Configuration"
+
+paths-ignore:
+  # Rust test modules and test files
+  - clients/rust/**/tests/**
+  - clients/rust/**/src/tests/**
+  - clients/rust/**/benches/**
+  # Go test files
+  - clients/go/**/*_test.go
+  # Conformance test fixtures
+  - conformance/fixtures/**
