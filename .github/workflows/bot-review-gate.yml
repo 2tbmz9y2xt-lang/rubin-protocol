@@ -1,0 +1,63 @@
+name: Bot Review Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  bot-review-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check bot reviews are acknowledged
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const MONITORED_BOTS = ['copilot[bot]'];
+            const prNumber = context.payload.pull_request.number;
+
+            const reviews = await github.paginate(
+              github.rest.pulls.listReviews,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber
+              }
+            );
+
+            // Keep only the latest review per monitored bot
+            const latestByBot = {};
+            for (const review of reviews) {
+              const login = review.user?.login || '';
+              if (MONITORED_BOTS.includes(login)) {
+                latestByBot[login] = review;
+              }
+            }
+
+            const blocking = [];
+            for (const [bot, review] of Object.entries(latestByBot)) {
+              // COMMENTED = active review that hasn't been dismissed
+              // DISMISSED = human acknowledged and dismissed → OK
+              if (review.state === 'COMMENTED') {
+                blocking.push(
+                  `  • ${bot} — review #${review.id}`
+                );
+              }
+            }
+
+            if (blocking.length > 0) {
+              core.setFailed(
+                [
+                  `${blocking.length} unacknowledged bot review(s):`,
+                  ...blocking,
+                  '',
+                  'To unblock merge: read the review → click ⋯ → Dismiss review.'
+                ].join('\n')
+              );
+            } else {
+              core.info('All bot reviews acknowledged (dismissed) or none present.');
+            }
