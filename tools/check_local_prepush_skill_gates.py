@@ -351,6 +351,9 @@ def build_plan(
         for path in changed
         if is_under(path, ".github/workflows") and path.endswith((".yml", ".yaml"))
     }
+    existing_changed_workflow_files = sorted(
+        path for path in changed_workflow_files if (repo_root / path).is_file()
+    )
     workflow_hygiene_related = bool(changed_workflow_files) or workflow_target_discovery_failed or any(
         path in WORKFLOW_HELPER_EXACT_PATHS or path in workflow_shell_targets for path in changed
     )
@@ -360,10 +363,10 @@ def build_plan(
             "(workflow YAML syntax, shell-target integrity, helper tests), while actionlint and "
             "shellcheck remain the server-side required truth."
         )
-        if changed_workflow_files:
+        if existing_changed_workflow_files:
             add_check(
                 "workflow_yaml_syntax",
-                ["python3", "tools/check_workflow_yaml_syntax.py", *sorted(changed_workflow_files)],
+                ["python3", "tools/check_workflow_yaml_syntax.py", *existing_changed_workflow_files],
             )
         add_check(
             "workflow_target_helper_tests",
