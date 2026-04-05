@@ -48,16 +48,16 @@ This is a blockchain protocol repository containing:
 ## Language-Specific Rules
 
 ### Rust
-- No `unwrap()` in consensus paths — use proper error propagation
-- Prefer `#[must_use]` on functions returning Results
-- All public types must implement `Debug`
+- No bare `unwrap()` in consensus paths — use proper error propagation. Guard-checked `unwrap()` (e.g., after length validation) is acceptable with a `// SAFETY:` comment explaining the invariant
+- Prefer `#[must_use]` on functions whose return value (especially `Result<T, E>`) must not be silently discarded by the caller
+- Public types in consensus crates should implement `Debug` where feasible. Types with lifetime parameters or external constraints may omit it with a justification comment
 
 ### Go
-- Return explicit errors, no panic in library code
+- Return explicit errors; no `panic()` in library code except for hard invariant violations that indicate a programming bug (not runtime conditions). Document such panics with a comment
 - Use structured logging
 - Context propagation for cancellable operations
 
 ### Lean4
 - Proofs must be `sorry`-free before merge
-- New theorems need doc-strings explaining what property they verify
+- New theorems need docstrings explaining what property they verify
 - Verify that proof dependencies match the implementation they formalize
