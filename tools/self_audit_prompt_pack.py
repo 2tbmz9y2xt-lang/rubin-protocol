@@ -10,22 +10,22 @@ from pathlib import Path
 CONTRACT_PATH = Path(__file__).resolve().with_name("prepush_review_contract.json")
 MAX_GIT_OUTPUT_BYTES = 10 * 1024 * 1024
 REVIEWABLE_PATHS = (
-    "*.go",
-    "*.rs",
-    "*.c",
-    "*.cc",
-    "*.cpp",
-    "*.h",
-    "*.hpp",
-    "*.lean",
-    "*.proto",
-    "*.sh",
-    "*.py",
-    "*.yml",
-    "*.yaml",
-    "*.json",
-    "*.toml",
-    "*.md",
+    ":(glob)**/*.go",
+    ":(glob)**/*.rs",
+    ":(glob)**/*.c",
+    ":(glob)**/*.cc",
+    ":(glob)**/*.cpp",
+    ":(glob)**/*.h",
+    ":(glob)**/*.hpp",
+    ":(glob)**/*.lean",
+    ":(glob)**/*.proto",
+    ":(glob)**/*.sh",
+    ":(glob)**/*.py",
+    ":(glob)**/*.yml",
+    ":(glob)**/*.yaml",
+    ":(glob)**/*.json",
+    ":(glob)**/*.toml",
+    ":(glob)**/*.md",
 )
 
 BASE_PROMPT = """You are running RUBIN local self-audit before commit in FAIL-CLOSED mode.
@@ -89,6 +89,15 @@ def run_git(repo_root: Path, *args: str) -> str:
     return stdout_text
 
 
+def required_string(value: object, *, label: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a string")
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{label} must be non-empty")
+    return normalized
+
+
 def load_self_audit_contract(path: Path = CONTRACT_PATH) -> dict[str, object]:
     if not path.exists():
         raise FileNotFoundError(f"self-audit contract missing: {path}")
@@ -98,24 +107,27 @@ def load_self_audit_contract(path: Path = CONTRACT_PATH) -> dict[str, object]:
     section = data.get("self_audit")
     if not isinstance(section, dict):
         raise ValueError(f"self-audit contract at {path} must define self_audit object")
-    version = str(section.get("prompt_pack_version") or "").strip()
+    version = required_string(section.get("prompt_pack_version"), label=f"{path} self_audit.prompt_pack_version")
     families = section.get("required_pattern_families")
-    if not version:
-        raise ValueError(f"self-audit contract at {path} must define prompt_pack_version")
     if not isinstance(families, list) or not families:
         raise ValueError(f"self-audit contract at {path} must define non-empty required_pattern_families")
     normalized: list[dict[str, object]] = []
-    for raw in families:
+    for idx, raw in enumerate(families):
         if not isinstance(raw, dict):
             raise ValueError(f"self-audit contract at {path} has non-object pattern family")
-        family_id = str(raw.get("id") or "").strip()
-        title = str(raw.get("title") or "").strip()
+        family_id = required_string(raw.get("id"), label=f"{path} required_pattern_families[{idx}].id")
+        title = required_string(raw.get("title"), label=f"{path} required_pattern_families[{idx}].title")
         checks_raw = raw.get("checks")
-        if not family_id or not title or not isinstance(checks_raw, list) or not checks_raw:
+        if not isinstance(checks_raw, list) or not checks_raw:
             raise ValueError(f"self-audit contract at {path} has malformed pattern family")
-        checks = [str(item).strip() for item in checks_raw if str(item).strip()]
-        if not checks:
-            raise ValueError(f"self-audit contract at {path} pattern family {family_id!r} has empty checks")
+        checks: list[str] = []
+        for check_idx, item in enumerate(checks_raw):
+            checks.append(
+                required_string(
+                    item,
+                    label=f"{path} required_pattern_families[{idx}].checks[{check_idx}]",
+                )
+            )
         normalized.append({"id": family_id, "title": title, "checks": checks})
     return {"prompt_pack_version": version, "required_pattern_families": normalized}
 

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -50,7 +52,7 @@ class SelfAuditPromptPackTests(unittest.TestCase):
                 m.normalize_repo_root(Path(tmp))
 
     def test_reviewable_paths_include_native_extensions(self):
-        for pattern in ("*.proto", "*.cpp", "*.h"):
+        for pattern in (":(glob)**/*.proto", ":(glob)**/*.cpp", ":(glob)**/*.h"):
             self.assertIn(pattern, m.REVIEWABLE_PATHS)
 
     def test_staged_bundle_falls_back_to_head_bundle(self):
@@ -66,6 +68,78 @@ class SelfAuditPromptPackTests(unittest.TestCase):
         self.assertIn("MODE=head", bundle)
         self.assertIn("--- REVIEW CHANGED FILES ---", bundle)
         self.assertIn("tools/self_audit_prompt_pack.py", bundle)
+
+    def test_staged_changed_files_captures_subdirectory_paths(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo_root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_root, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_root, check=True)
+            nested = repo_root / "clients" / "go" / "node"
+            nested.mkdir(parents=True)
+            tracked = nested / "config.go"
+            tracked.write_text("package node\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=repo_root, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo_root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            tracked.write_text("package node\n\nconst x = 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", str(tracked.relative_to(repo_root))], cwd=repo_root, check=True)
+            files = m.staged_changed_files(repo_root)
+            self.assertEqual(files, ["clients/go/node/config.go"])
+            bundle = m.staged_bundle(repo_root)
+            self.assertIn("clients/go/node/config.go", bundle)
+            self.assertIn("+const x = 1", bundle)
+
+    def test_load_contract_rejects_non_string_family_fields(self):
+        with tempfile.TemporaryDirectory() as td:
+            contract_path = Path(td) / "contract.json"
+            contract_path.write_text(
+                json.dumps(
+                    {
+                        "self_audit": {
+                            "prompt_pack_version": "self-audit-v1",
+                            "required_pattern_families": [
+                                {
+                                    "id": 7,
+                                    "title": "Family",
+                                    "checks": ["ok"],
+                                }
+                            ],
+                        }
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                m.load_self_audit_contract(contract_path)
+
+    def test_load_contract_rejects_non_string_checks(self):
+        with tempfile.TemporaryDirectory() as td:
+            contract_path = Path(td) / "contract.json"
+            contract_path.write_text(
+                json.dumps(
+                    {
+                        "self_audit": {
+                            "prompt_pack_version": "self-audit-v1",
+                            "required_pattern_families": [
+                                {
+                                    "id": "family",
+                                    "title": "Family",
+                                    "checks": ["ok", {"bad": True}],
+                                }
+                            ],
+                        }
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                m.load_self_audit_contract(contract_path)
 
 
 if __name__ == "__main__":
