@@ -282,10 +282,11 @@ pub fn validate_rotation_set_for_network(
 }
 
 /// Finite H4 (sunset) only for the v1 production profile.
-/// Caller must already have run [`CryptoRotationDescriptor::validate`], or use [`validate_rotation_descriptor_for_network`].
+///
+/// Does not call [`CryptoRotationDescriptor::validate`] (suite IDs, heights, overlap). For call sites
+/// that need both, use [`validate_rotation_descriptor_for_network`].
 pub fn validate_v1_production_rotation_descriptor(
     d: &CryptoRotationDescriptor,
-    _registry: &SuiteRegistry,
 ) -> Result<(), String> {
     if d.sunset_height == 0 {
         return Err("rotation: v1 production profile requires finite sunset_height (H4)".into());
@@ -560,7 +561,7 @@ mod tests {
             spend_height: 20,
             sunset_height: 0,
         };
-        assert!(validate_v1_production_rotation_descriptor(&d, &reg).is_err());
+        assert!(validate_v1_production_rotation_descriptor(&d).is_err());
         assert!(validate_rotation_descriptor_for_network("mainnet", &d, &reg).is_err());
         assert!(validate_rotation_descriptor_for_network("devnet", &d, &reg).is_ok());
         let d_h4 = CryptoRotationDescriptor {
