@@ -267,6 +267,66 @@ func TestLoadChainStateNotFoundReturnsEmpty(t *testing.T) {
 	}
 }
 
+func TestChainStateSuiteExposureQueriesByExplicitSuiteID(t *testing.T) {
+	st := NewChainState()
+	first := consensus.Outpoint{
+		Txid: mustHash32Hex(t, "0303030303030303030303030303030303030303030303030303030303030303"),
+		Vout: 2,
+	}
+	second := consensus.Outpoint{
+		Txid: mustHash32Hex(t, "0101010101010101010101010101010101010101010101010101010101010101"),
+		Vout: 0,
+	}
+	third := consensus.Outpoint{
+		Txid: mustHash32Hex(t, "0202020202020202020202020202020202020202020202020202020202020202"),
+		Vout: 1,
+	}
+	ignored := consensus.Outpoint{
+		Txid: mustHash32Hex(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		Vout: 9,
+	}
+
+	st.Utxos[first] = consensus.UtxoEntry{
+		Value:             10,
+		CovenantType:      consensus.COV_TYPE_P2PK,
+		CovenantData:      testP2PKCovenantData(0x10),
+		CreationHeight:    3,
+		CreatedByCoinbase: false,
+	}
+	entry := consensus.UtxoEntry{
+		Value:             11,
+		CovenantType:      consensus.COV_TYPE_P2PK,
+		CovenantData:      testP2PKCovenantData(0x11),
+		CreationHeight:    4,
+		CreatedByCoinbase: false,
+	}
+	entry.CovenantData[0] = 0x42
+	st.Utxos[second] = entry
+	st.Utxos[third] = entry
+	st.Utxos[ignored] = consensus.UtxoEntry{
+		Value:             7,
+		CovenantType:      consensus.COV_TYPE_HTLC,
+		CovenantData:      make([]byte, consensus.MAX_HTLC_COVENANT_DATA),
+		CreationHeight:    5,
+		CreatedByCoinbase: false,
+	}
+
+	if got := st.IndexedSuiteIDs(); !reflect.DeepEqual(got, []uint8{consensus.SUITE_ID_ML_DSA_87, 0x42}) {
+		t.Fatalf("indexed suite ids=%v", got)
+	}
+	if got := st.UtxoExposureCountBySuiteID(0x42); got != 2 {
+		t.Fatalf("suite 0x42 exposure=%d, want 2", got)
+	}
+	gotOutpoints := st.UtxoOutpointsBySuiteID(0x42)
+	wantOutpoints := []consensus.Outpoint{second, third}
+	if !reflect.DeepEqual(gotOutpoints, wantOutpoints) {
+		t.Fatalf("suite 0x42 outpoints=%v, want %v", gotOutpoints, wantOutpoints)
+	}
+	if got := st.UtxoExposureCountBySuiteID(0x99); got != 0 {
+		t.Fatalf("suite 0x99 exposure=%d, want 0", got)
+	}
+}
+
 func equalChainState(a, b *ChainState) bool {
 	if a == nil || b == nil {
 		return a == b
