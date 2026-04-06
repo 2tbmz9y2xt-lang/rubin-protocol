@@ -244,6 +244,9 @@ fn build_suite_context_from_descriptor(
     network: &str,
 ) -> Result<Option<crate::sync::SuiteContext>, String> {
     use std::sync::Arc;
+    if network.trim().is_empty() {
+        return Err("network is required".to_string());
+    }
     let normalized_network = normalized_rotation_network_name(network);
     canonical_rotation_network_name_normalized(normalized_network.as_ref()).ok_or_else(|| {
         format!(
@@ -749,6 +752,31 @@ mod tests {
             err.contains("unknown network"),
             "unexpected error for unknown network: {err}"
         );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_whitespace_only_network_name() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-whitespace-network-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            "{\
+              \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\"\
+            }",
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path), "   ").expect_err("must reject");
+        assert_eq!(err, "network is required");
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }

@@ -182,6 +182,9 @@ func (cfg Config) BuildRotationProvider() (consensus.RotationProvider, *consensu
 	if err != nil {
 		return nil, nil, fmt.Errorf("suite_registry: %w", err)
 	}
+	if strings.TrimSpace(cfg.Network) == "" {
+		return nil, nil, errors.New("network is required")
+	}
 	network, err := canonicalConfigNetworkName(cfg.Network)
 	if err != nil {
 		return nil, nil, err

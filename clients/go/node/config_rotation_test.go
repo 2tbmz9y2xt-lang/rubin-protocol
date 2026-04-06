@@ -306,6 +306,36 @@ func TestBuildRotationProvider_RejectsUnknownNetworkWithoutSeparateValidateConfi
 	}
 }
 
+func TestBuildRotationProvider_RejectsWhitespaceOnlyNetworkWithoutSeparateValidateConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Network = "   "
+	cfg.RotationDescriptor = &RotationConfigJSON{
+		Name:         "dev-rotation",
+		OldSuiteID:   consensus.SUITE_ID_ML_DSA_87,
+		NewSuiteID:   0x42,
+		CreateHeight: 1,
+		SpendHeight:  5,
+		SunsetHeight: 10,
+	}
+	cfg.SuiteRegistry = []SuiteParamsJSON{
+		{
+			SuiteID:    0x42,
+			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+			OpenSSLAlg: stringPtr("ML-DSA-87"),
+		},
+	}
+
+	_, _, err := cfg.BuildRotationProvider()
+	if err == nil {
+		t.Fatal("expected whitespace-only network error")
+	}
+	if got, want := err.Error(), "network is required"; got != want {
+		t.Fatalf("error=%q, want %q", got, want)
+	}
+}
+
 func TestValidateConfig_RejectsProductionLocalRotationDescriptor(t *testing.T) {
 	for _, network := range productionRotationNetworks {
 		t.Run(quotedSubtestName(network), func(t *testing.T) {
