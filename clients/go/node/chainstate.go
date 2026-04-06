@@ -253,7 +253,19 @@ func (s *ChainState) UtxoOutpointsBySuiteID(suiteID uint8) []consensus.Outpoint 
 // UtxoExposureCountBySuiteID reports how many current UTXOs explicitly bind to
 // suiteID in their covenant data.
 func (s *ChainState) UtxoExposureCountBySuiteID(suiteID uint8) uint64 {
-	return uint64(len(s.UtxoOutpointsBySuiteID(suiteID)))
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var count uint64
+	for _, entry := range s.Utxos {
+		if utxoEntryExplicitlyUsesSuite(entry, suiteID) {
+			count++
+		}
+	}
+	return count
 }
 
 func explicitSuiteIDsForUtxoEntry(entry consensus.UtxoEntry) []uint8 {

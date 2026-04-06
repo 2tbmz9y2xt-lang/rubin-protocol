@@ -213,7 +213,10 @@ impl ChainState {
 
     /// Returns how many current UTXOs explicitly bind to suite_id.
     pub fn utxo_exposure_count_by_suite_id(&self, suite_id: u8) -> u64 {
-        self.utxo_outpoints_by_suite_id(suite_id).len() as u64
+        self.utxos
+            .values()
+            .filter(|entry| utxo_entry_explicitly_uses_suite(entry, suite_id))
+            .count() as u64
     }
 
     fn next_block_context(&self) -> Result<(u64, Option<[u8; 32]>), String> {
@@ -649,7 +652,10 @@ mod tests {
             },
         );
 
-        assert_eq!(st.indexed_suite_ids(), vec![0x01, 0x42]);
+        assert_eq!(
+            st.indexed_suite_ids(),
+            vec![rubin_consensus::constants::SUITE_ID_ML_DSA_87, 0x42]
+        );
         assert_eq!(st.utxo_exposure_count_by_suite_id(0x42), 2);
         assert_eq!(
             st.utxo_outpoints_by_suite_id(0x42),
