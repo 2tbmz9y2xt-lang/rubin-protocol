@@ -4,10 +4,9 @@ use std::path::Path;
 use rubin_consensus::encode_compact_size;
 use rubin_consensus::{
     block_hash, core_ext_profile_set_anchor_v1,
-    core_ext_verification_binding_from_name_and_descriptor, is_v1_production_rotation_network,
-    validate_v1_production_rotation_descriptor, CoreExtDeploymentProfile,
-    CoreExtDeploymentProfiles, CryptoRotationDescriptor, DescriptorRotationProvider, SuiteRegistry,
-    BLOCK_HEADER_BYTES,
+    core_ext_verification_binding_from_name_and_descriptor,
+    validate_rotation_descriptor_for_network, CoreExtDeploymentProfile, CoreExtDeploymentProfiles,
+    CryptoRotationDescriptor, DescriptorRotationProvider, SuiteRegistry, BLOCK_HEADER_BYTES,
 };
 use serde::Deserialize;
 
@@ -159,19 +158,30 @@ fn build_suite_context_from_descriptor(
         spend_height: rd.spend_height,
         sunset_height: rd.sunset_height,
     };
-    descriptor
-        .validate(&registry)
+    validate_rotation_descriptor_for_network(network, &descriptor, &registry)
         .map_err(|e| format!("rotation_descriptor: {e}"))?;
-    if is_v1_production_rotation_network(network) {
-        validate_v1_production_rotation_descriptor(&descriptor, &registry)
-            .map_err(|e| format!("rotation_descriptor: {e}"))?;
-    }
     let rotation = Arc::new(DescriptorRotationProvider { descriptor });
     Ok(Some(crate::sync::SuiteContext { rotation, registry }))
 }
 
 pub fn load_chain_id_from_genesis_file(path: Option<&Path>) -> Result<[u8; 32], String> {
-    Ok(load_genesis_config(path, "devnet")?.chain_id)
+    let Some(path) = path else {
+        return Ok(devnet_genesis_chain_id());
+    };
+    let raw = fs::read_to_string(path)
+        .map_err(|e| format!("read genesis file {}: {e}", path.display()))?;
+    let payload: GenesisPack = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse genesis file {}: {e}", path.display()))?;
+    let mut trimmed = payload.chain_id_hex.trim();
+    if trimmed.is_empty() {
+        return Err("chain_id_hex missing".to_string());
+    }
+    if let Some(rest) = trimmed.strip_prefix("0x") {
+        trimmed = rest;
+    } else if let Some(rest) = trimmed.strip_prefix("0X") {
+        trimmed = rest;
+    }
+    parse_hex32("chain_id", trimmed)
 }
 
 pub fn validate_incoming_chain_id(block_height: u64, chain_id: [u8; 32]) -> Result<(), String> {

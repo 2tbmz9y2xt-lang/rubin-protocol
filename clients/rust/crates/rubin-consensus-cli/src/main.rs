@@ -10,15 +10,14 @@ use rubin_consensus::{
     connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context,
     core_ext_profile_set_anchor_v1, core_ext_verification_binding_from_name_and_descriptor,
     featurebit_state_at_height_from_window_counts, flagday_active_at_height, fork_work_from_target,
-    is_v1_production_rotation_network, merkle_root_txids, parse_core_ext_covenant_data, parse_tx,
-    pow_check, retarget_v1, retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_at_height,
+    merkle_root_txids, parse_core_ext_covenant_data, parse_tx, pow_check, retarget_v1,
+    retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_at_height,
     tx_weight_and_stats_public, validate_block_basic_with_context_and_fees_at_height,
-    validate_block_basic_with_context_at_height, validate_rotation_set,
-    validate_tx_covenants_genesis, validate_v1_production_rotation_descriptor,
-    validate_v1_production_rotation_set, CoreExtDeploymentProfile, CoreExtDeploymentProfiles,
-    CryptoRotationDescriptor, DescriptorRotationProvider, ErrorCode, FeatureBitDeployment,
-    FeatureBitState, FlagDayDeployment, InMemoryChainState, Outpoint, RotationProvider,
-    SuiteParams, SuiteRegistry, UtxoEntry,
+    validate_block_basic_with_context_at_height, validate_rotation_descriptor_for_network,
+    validate_rotation_set_for_network, validate_tx_covenants_genesis, CoreExtDeploymentProfile,
+    CoreExtDeploymentProfiles, CryptoRotationDescriptor, DescriptorRotationProvider, ErrorCode,
+    FeatureBitDeployment, FeatureBitState, FlagDayDeployment, InMemoryChainState, Outpoint,
+    RotationProvider, SuiteParams, SuiteRegistry, UtxoEntry,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -1035,12 +1034,8 @@ fn build_core_ext_suite_context(
                 spend_height: rd.spend_height,
                 sunset_height: rd.sunset_height,
             };
-            desc.validate(registry_ref)
+            validate_rotation_descriptor_for_network(&req.network, &desc, registry_ref)
                 .map_err(|_| "descriptor-not-activated".to_string())?;
-            if is_v1_production_rotation_network(&req.network) {
-                validate_v1_production_rotation_descriptor(&desc, registry_ref)
-                    .map_err(|_| "descriptor-not-activated".to_string())?;
-            }
             Some(DescriptorRotationProvider { descriptor: desc })
         }
         None => None,
@@ -1635,17 +1630,7 @@ fn main() {
                     spend_height: rd.spend_height,
                     sunset_height: rd.sunset_height,
                 };
-                if desc.validate(&registry).is_err() {
-                    let resp = Response {
-                        ok: false,
-                        err: Some("descriptor-not-activated".to_string()),
-                        ..Default::default()
-                    };
-                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                    return;
-                }
-                if is_v1_production_rotation_network(&req.network)
-                    && validate_v1_production_rotation_descriptor(&desc, &registry).is_err()
+                if validate_rotation_descriptor_for_network(&req.network, &desc, &registry).is_err()
                 {
                     let resp = Response {
                         ok: false,
@@ -1714,18 +1699,7 @@ fn main() {
                 spend_height: rd.spend_height,
                 sunset_height: rd.sunset_height,
             };
-            if desc.validate(&registry).is_err() {
-                let resp = Response {
-                    ok: false,
-                    err: Some("descriptor-not-activated".to_string()),
-                    ..Default::default()
-                };
-                let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                return;
-            }
-            if is_v1_production_rotation_network(&req.network)
-                && validate_v1_production_rotation_descriptor(&desc, &registry).is_err()
-            {
+            if validate_rotation_descriptor_for_network(&req.network, &desc, &registry).is_err() {
                 let resp = Response {
                     ok: false,
                     err: Some("descriptor-not-activated".to_string()),
@@ -1784,18 +1758,7 @@ fn main() {
                 spend_height: rd.spend_height,
                 sunset_height: rd.sunset_height,
             };
-            if desc.validate(&registry).is_err() {
-                let resp = Response {
-                    ok: false,
-                    err: Some("descriptor-not-activated".to_string()),
-                    ..Default::default()
-                };
-                let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                return;
-            }
-            if is_v1_production_rotation_network(&req.network)
-                && validate_v1_production_rotation_descriptor(&desc, &registry).is_err()
-            {
+            if validate_rotation_descriptor_for_network(&req.network, &desc, &registry).is_err() {
                 let resp = Response {
                     ok: false,
                     err: Some("descriptor-not-activated".to_string()),
@@ -1846,18 +1809,7 @@ fn main() {
                 spend_height: rd.spend_height,
                 sunset_height: rd.sunset_height,
             };
-            if desc.validate(&registry).is_err() {
-                let resp = Response {
-                    ok: false,
-                    err: Some("descriptor-not-activated".to_string()),
-                    ..Default::default()
-                };
-                let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                return;
-            }
-            if is_v1_production_rotation_network(&req.network)
-                && validate_v1_production_rotation_descriptor(&desc, &registry).is_err()
-            {
+            if validate_rotation_descriptor_for_network(&req.network, &desc, &registry).is_err() {
                 let resp = Response {
                     ok: false,
                     err: Some("descriptor-not-activated".to_string()),
@@ -1909,11 +1861,7 @@ fn main() {
                         sunset_height: rd.sunset_height,
                     })
                     .collect();
-                let set_ok = if is_v1_production_rotation_network(&req.network) {
-                    validate_v1_production_rotation_set(&ds, &registry)
-                } else {
-                    validate_rotation_set(&ds, &registry)
-                };
+                let set_ok = validate_rotation_set_for_network(&req.network, &ds, &registry);
                 if set_ok.is_err() {
                     let resp = Response {
                         ok: false,
@@ -1950,18 +1898,7 @@ fn main() {
                 spend_height: rd.spend_height,
                 sunset_height: rd.sunset_height,
             };
-            if desc.validate(&registry).is_err() {
-                let resp = Response {
-                    ok: false,
-                    err: Some("descriptor-not-activated".to_string()),
-                    ..Default::default()
-                };
-                let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                return;
-            }
-            if is_v1_production_rotation_network(&req.network)
-                && validate_v1_production_rotation_descriptor(&desc, &registry).is_err()
-            {
+            if validate_rotation_descriptor_for_network(&req.network, &desc, &registry).is_err() {
                 let resp = Response {
                     ok: false,
                     err: Some("descriptor-not-activated".to_string()),

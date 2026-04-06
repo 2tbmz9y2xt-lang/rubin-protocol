@@ -254,12 +254,39 @@ pub fn is_v1_production_rotation_network(network: &str) -> bool {
     n.eq_ignore_ascii_case("mainnet") || n.eq_ignore_ascii_case("testnet")
 }
 
-/// Production profile enforcement for a single descriptor (after [`CryptoRotationDescriptor::validate`]).
-pub fn validate_v1_production_rotation_descriptor(
+/// Runs [`CryptoRotationDescriptor::validate`], then on mainnet/testnet requires finite `sunset_height` (H4).
+/// Prefer this at call sites instead of `validate` + [`validate_v1_production_rotation_descriptor`].
+pub fn validate_rotation_descriptor_for_network(
+    network: &str,
     d: &CryptoRotationDescriptor,
     registry: &SuiteRegistry,
 ) -> Result<(), String> {
     d.validate(registry)?;
+    if is_v1_production_rotation_network(network) && d.sunset_height == 0 {
+        return Err("rotation: v1 production profile requires finite sunset_height (H4)".into());
+    }
+    Ok(())
+}
+
+/// [`validate_rotation_set`] on non-production networks; [`validate_v1_production_rotation_set`] on mainnet/testnet.
+pub fn validate_rotation_set_for_network(
+    network: &str,
+    descriptors: &[CryptoRotationDescriptor],
+    registry: &SuiteRegistry,
+) -> Result<(), String> {
+    if is_v1_production_rotation_network(network) {
+        validate_v1_production_rotation_set(descriptors, registry)
+    } else {
+        validate_rotation_set(descriptors, registry)
+    }
+}
+
+/// Finite H4 (sunset) only for the v1 production profile.
+/// Caller must already have run [`CryptoRotationDescriptor::validate`], or use [`validate_rotation_descriptor_for_network`].
+pub fn validate_v1_production_rotation_descriptor(
+    d: &CryptoRotationDescriptor,
+    _registry: &SuiteRegistry,
+) -> Result<(), String> {
     if d.sunset_height == 0 {
         return Err("rotation: v1 production profile requires finite sunset_height (H4)".into());
     }
@@ -534,6 +561,13 @@ mod tests {
             sunset_height: 0,
         };
         assert!(validate_v1_production_rotation_descriptor(&d, &reg).is_err());
+        assert!(validate_rotation_descriptor_for_network("mainnet", &d, &reg).is_err());
+        assert!(validate_rotation_descriptor_for_network("devnet", &d, &reg).is_ok());
+        let d_h4 = CryptoRotationDescriptor {
+            sunset_height: 100,
+            ..d.clone()
+        };
+        validate_rotation_descriptor_for_network("mainnet", &d_h4, &reg).expect("mainnet with H4");
     }
 
     fn test_registry_three_suites() -> SuiteRegistry {
