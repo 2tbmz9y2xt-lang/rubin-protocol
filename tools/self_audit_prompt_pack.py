@@ -125,27 +125,46 @@ def staged_changed_files(repo_root: Path) -> list[str]:
     return [line.strip() for line in raw.splitlines() if line.strip()]
 
 
-def staged_bundle(repo_root: Path) -> str:
-    paths = staged_changed_files(repo_root)
+def head_changed_files(repo_root: Path) -> list[str]:
+    raw = run_git(repo_root, "show", "--pretty=format:", "--name-only", "--find-renames", "HEAD", "--", *REVIEWABLE_PATHS)
+    return [line.strip() for line in raw.splitlines() if line.strip()]
+
+
+def build_bundle(repo_root: Path, *, mode: str, paths: list[str]) -> str:
     if not paths:
-        raise ValueError("no staged reviewable diff")
-    stat = run_git(repo_root, "diff", "--cached", "--stat=160", "--find-renames", "--", *paths)
-    patch = run_git(repo_root, "diff", "--cached", "--no-color", "--unified=3", "--find-renames", "--", *paths)
+        raise ValueError(f"no {mode} reviewable diff")
+    if mode == "staged":
+        stat = run_git(repo_root, "diff", "--cached", "--stat=160", "--find-renames", "--", *paths)
+        patch = run_git(repo_root, "diff", "--cached", "--no-color", "--unified=3", "--find-renames", "--", *paths)
+    else:
+        stat = run_git(repo_root, "show", "--stat=160", "--format=medium", "--find-renames", "--no-color", "HEAD", "--", *paths)
+        patch = run_git(repo_root, "show", "--format=medium", "--find-renames", "--no-color", "--unified=3", "HEAD", "--", *paths)
     head = run_git(repo_root, "rev-parse", "--short", "HEAD").strip()
     lines = [
+        f"MODE={mode}",
         f"HEAD={head}",
         "",
-        "--- STAGED CHANGED FILES ---",
+        "--- REVIEW CHANGED FILES ---",
         *paths,
         "",
-        "--- STAGED DIFF STAT ---",
+        "--- REVIEW DIFF STAT ---",
         stat.rstrip(),
         "",
-        "--- STAGED PATCH ---",
+        "--- REVIEW PATCH ---",
         patch.rstrip(),
         "",
     ]
     return "\n".join(lines)
+
+
+def staged_bundle(repo_root: Path) -> str:
+    paths = staged_changed_files(repo_root)
+    if paths:
+        return build_bundle(repo_root, mode="staged", paths=paths)
+    head_paths = head_changed_files(repo_root)
+    if head_paths:
+        return build_bundle(repo_root, mode="head", paths=head_paths)
+    raise ValueError("no staged or HEAD reviewable diff")
 
 
 def compose_prompt(*, contract: dict[str, object], bundle_text: str) -> str:
