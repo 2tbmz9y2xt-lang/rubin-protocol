@@ -326,7 +326,7 @@ func networkMagic(network string) [4]byte {
 		return [4]byte{'R', 'B', 'M', 'N'}
 	case "testnet":
 		return [4]byte{'R', 'B', 'T', 'N'}
-	case "", "devnet":
+	case "devnet":
 		return [4]byte{'R', 'B', 'D', 'V'}
 	default:
 		return [4]byte{'R', 'B', 'O', 'P'}
