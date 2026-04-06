@@ -184,6 +184,8 @@ fn validate_suite_registry_item(item: &GenesisSuiteParams) -> Result<SuiteParams
     if item.suite_id == SUITE_ID_SENTINEL
         || item.pubkey_len == 0
         || item.sig_len == 0
+        || item.pubkey_len > usize::MAX as u64
+        || item.sig_len > usize::MAX as u64
         || item.pubkey_len > MAX_SUITE_REGISTRY_PARAM_LEN
         || item.sig_len > MAX_SUITE_REGISTRY_PARAM_LEN
         || item.verify_cost == 0

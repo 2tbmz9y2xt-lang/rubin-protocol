@@ -160,7 +160,7 @@ func TestValidateConfig_RejectsBadSuiteRegistry(t *testing.T) {
 		},
 		{
 			SuiteID:    0x42,
-			PubkeyLen:  -1,
+			PubkeyLen:  64,
 			SigLen:     96,
 			VerifyCost: 30,
 			OpenSSLAlg: stringPtr("ML-DSA-87"),
@@ -207,6 +207,22 @@ func TestValidateConfig_RejectsBadSuiteRegistry(t *testing.T) {
 		if err := ValidateConfig(cfg); err == nil {
 			t.Fatalf("expected validation error for bad suite_registry case %+v", tc)
 		}
+	}
+}
+
+func TestValidateConfig_RejectsNegativeSuiteRegistryLengthsJSON(t *testing.T) {
+	var cfg Config
+	err := json.Unmarshal([]byte(`{
+		"network":"devnet",
+		"data_dir":"/tmp/test",
+		"bind_addr":"0.0.0.0:19111",
+		"log_level":"info",
+		"max_peers":64,
+		"mine_address":"",
+		"suite_registry":[{"suite_id":66,"pubkey_len":-1,"sig_len":4627,"verify_cost":19,"openssl_alg":"ML-DSA-87"}]
+	}`), &cfg)
+	if err == nil {
+		t.Fatal("expected unmarshal error for negative suite_registry.pubkey_len")
 	}
 }
 

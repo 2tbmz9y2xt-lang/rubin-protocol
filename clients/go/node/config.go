@@ -43,13 +43,20 @@ type RotationConfigJSON struct {
 // native-suite bootstrap without editing the built-in default registry.
 type SuiteParamsJSON struct {
 	SuiteID    uint8   `json:"suite_id"`
-	PubkeyLen  int     `json:"pubkey_len"`
-	SigLen     int     `json:"sig_len"`
+	PubkeyLen  uint64  `json:"pubkey_len"`
+	SigLen     uint64  `json:"sig_len"`
 	VerifyCost uint64  `json:"verify_cost"`
 	OpenSSLAlg *string `json:"openssl_alg"`
 }
 
 const maxSuiteRegistryParamLen = consensus.MAX_WITNESS_BYTES_PER_TX
+
+func validateSuiteRegistryParamLen(value uint64) (int, error) {
+	if value == 0 || value > uint64(maxSuiteRegistryParamLen) {
+		return 0, errors.New("bad suite_registry")
+	}
+	return int(value), nil
+}
 
 func normalizeSuiteRegistryOpenSSLAlg(value *string) (string, error) {
 	if value == nil {
@@ -74,13 +81,16 @@ func defaultSuiteRegistryParams() consensus.SuiteParams {
 }
 
 func validateSuiteRegistryItem(item SuiteParamsJSON) (consensus.SuiteParams, error) {
-	if item.SuiteID == consensus.SUITE_ID_SENTINEL ||
-		item.PubkeyLen <= 0 ||
-		item.SigLen <= 0 ||
-		item.PubkeyLen > maxSuiteRegistryParamLen ||
-		item.SigLen > maxSuiteRegistryParamLen ||
-		item.VerifyCost == 0 {
+	if item.SuiteID == consensus.SUITE_ID_SENTINEL || item.VerifyCost == 0 {
 		return consensus.SuiteParams{}, errors.New("bad suite_registry")
+	}
+	pubkeyLen, err := validateSuiteRegistryParamLen(item.PubkeyLen)
+	if err != nil {
+		return consensus.SuiteParams{}, err
+	}
+	sigLen, err := validateSuiteRegistryParamLen(item.SigLen)
+	if err != nil {
+		return consensus.SuiteParams{}, err
 	}
 	alg, err := normalizeSuiteRegistryOpenSSLAlg(item.OpenSSLAlg)
 	if err != nil {
@@ -88,8 +98,8 @@ func validateSuiteRegistryItem(item SuiteParamsJSON) (consensus.SuiteParams, err
 	}
 	params := consensus.SuiteParams{
 		SuiteID:    item.SuiteID,
-		PubkeyLen:  item.PubkeyLen,
-		SigLen:     item.SigLen,
+		PubkeyLen:  pubkeyLen,
+		SigLen:     sigLen,
 		VerifyCost: item.VerifyCost,
 		OpenSSLAlg: alg,
 	}
