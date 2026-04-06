@@ -608,10 +608,13 @@ mod tests {
 
     #[test]
     fn load_genesis_config_rejects_production_rotation_descriptor() {
-        for network in ["mainnet", "testnet", " MAINNET ", "\tTestNet\t"] {
+        for (case_idx, network) in ["mainnet", "testnet", " MAINNET ", "\tTestNet\t"]
+            .into_iter()
+            .enumerate()
+        {
             let dir = std::env::temp_dir().join(format!(
                 "rubin-node-genesis-production-rotation-{}-{}",
-                network,
+                case_idx,
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .expect("time")

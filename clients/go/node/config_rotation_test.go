@@ -2,6 +2,7 @@ package node
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -13,6 +14,10 @@ func stringPtr(s string) *string {
 }
 
 var productionRotationNetworks = []string{"mainnet", "testnet", " MAINNET ", "\tTestNet\t"}
+
+func quotedSubtestName(raw string) string {
+	return fmt.Sprintf("%q", raw)
+}
 
 func TestBuildRotationProvider_NilDescriptor(t *testing.T) {
 	cfg := DefaultConfig()
@@ -67,7 +72,7 @@ func TestBuildRotationProvider_ValidDescriptorOnNonProductionNetwork(t *testing.
 
 func TestBuildRotationProvider_RejectsProductionLocalRotationDescriptor(t *testing.T) {
 	for _, network := range productionRotationNetworks {
-		t.Run(network, func(t *testing.T) {
+		t.Run(quotedSubtestName(network), func(t *testing.T) {
 			cfg := DefaultConfig()
 			cfg.Network = network
 			cfg.SuiteRegistry = []SuiteParamsJSON{
@@ -245,7 +250,7 @@ func TestBuildRotationProvider_ExplicitSuiteRegistryWithoutDescriptor(t *testing
 
 func TestBuildRotationProvider_ProductionExplicitSuiteRegistryWithoutDescriptor(t *testing.T) {
 	for _, network := range productionRotationNetworks {
-		t.Run(network, func(t *testing.T) {
+		t.Run(quotedSubtestName(network), func(t *testing.T) {
 			cfg := DefaultConfig()
 			cfg.Network = network
 			cfg.SuiteRegistry = []SuiteParamsJSON{
@@ -303,7 +308,7 @@ func TestBuildRotationProvider_RejectsUnknownNetworkWithoutSeparateValidateConfi
 
 func TestValidateConfig_RejectsProductionLocalRotationDescriptor(t *testing.T) {
 	for _, network := range productionRotationNetworks {
-		t.Run(network, func(t *testing.T) {
+		t.Run(quotedSubtestName(network), func(t *testing.T) {
 			cfg := DefaultConfig()
 			cfg.Network = network
 			cfg.SuiteRegistry = []SuiteParamsJSON{
