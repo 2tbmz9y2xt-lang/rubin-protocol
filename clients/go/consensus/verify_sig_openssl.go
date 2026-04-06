@@ -341,6 +341,9 @@ func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []
 func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
 	switch suiteID {
 	case SUITE_ID_ML_DSA_87:
+		if err := ensureOpenSSLConsensusInit(); err != nil {
+			return false, err
+		}
 		binding, err := resolveSuiteVerifierBinding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
 		if err != nil {
 			return false, err
@@ -380,9 +383,6 @@ func resolveSuiteVerifierBinding(opensslAlg string, pubkeyLen int, sigLen int) (
 }
 
 func verifySigWithBinding(binding suiteVerifierBinding, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
-	if err := ensureOpenSSLConsensusInit(); err != nil {
-		return false, err
-	}
 	if len(pubkey) != binding.pubkeyLen || len(signature) != binding.sigLen {
 		return false, nil
 	}
@@ -413,6 +413,9 @@ func verifySigWithRegistry(suiteID uint8, pubkey []byte, signature []byte, diges
 	params, ok := registry.Lookup(suiteID)
 	if !ok {
 		return false, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: unsupported suite_id")
+	}
+	if err := ensureOpenSSLConsensusInit(); err != nil {
+		return false, err
 	}
 	binding, err := resolveSuiteVerifierBinding(params.OpenSSLAlg, params.PubkeyLen, params.SigLen)
 	if err != nil {

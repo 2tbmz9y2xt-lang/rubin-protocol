@@ -412,6 +412,7 @@ pub fn verify_sig(
             "verify_sig: unsupported suite_id",
         ));
     }
+    ensure_openssl_consensus_init()?;
     let binding =
         resolve_suite_verifier_binding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)?;
     verify_sig_with_binding(&binding, pubkey, signature, digest32)
@@ -464,7 +465,6 @@ fn verify_sig_with_binding(
             if pubkey.len() as u64 != *pubkey_len || signature.len() as u64 != *sig_len {
                 return Ok(false);
             }
-            ensure_openssl_consensus_init()?;
             openssl_verify_sig_digest_oneshot(*alg, pubkey, signature, digest32)
         }
     }
@@ -492,6 +492,7 @@ pub fn verify_sig_with_registry(
             "verify_sig_with_registry: suite not registered",
         ));
     };
+    ensure_openssl_consensus_init()?;
     let binding =
         resolve_suite_verifier_binding(params.openssl_alg, params.pubkey_len, params.sig_len)?;
     verify_sig_with_binding(&binding, pubkey, signature, digest32)
