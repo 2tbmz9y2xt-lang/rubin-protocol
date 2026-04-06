@@ -53,14 +53,9 @@ func (cfg Config) BuildRotationProvider() (consensus.RotationProvider, *consensu
 		SpendHeight:  rd.SpendHeight,
 		SunsetHeight: rd.SunsetHeight,
 	}
-	if err := desc.Validate(registry); err != nil {
-		return nil, nil, fmt.Errorf("rotation_descriptor: %w", err)
-	}
 	network := strings.ToLower(strings.TrimSpace(cfg.Network))
-	if consensus.IsV1ProductionRotationNetwork(network) {
-		if err := consensus.ValidateV1ProductionRotationDescriptor(desc, registry); err != nil {
-			return nil, nil, fmt.Errorf("rotation_descriptor: %w", err)
-		}
+	if err := consensus.ValidateRotationDescriptorForNetwork(network, desc, registry); err != nil {
+		return nil, nil, fmt.Errorf("rotation_descriptor: %w", err)
 	}
 	return consensus.DescriptorRotationProvider{Descriptor: desc}, registry, nil
 }

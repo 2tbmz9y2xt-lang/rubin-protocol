@@ -392,13 +392,8 @@ func buildCoreExtSuiteContext(req Request) (consensus.RotationProvider, *consens
 		SpendHeight:  req.RotationDescriptor.SpendHeight,
 		SunsetHeight: req.RotationDescriptor.SunsetHeight,
 	}
-	if err := desc.Validate(reg); err != nil {
+	if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
 		return nil, nil, fmt.Errorf("descriptor-not-activated")
-	}
-	if consensus.IsV1ProductionRotationNetwork(req.Network) {
-		if err := consensus.ValidateV1ProductionRotationDescriptor(desc, reg); err != nil {
-			return nil, nil, fmt.Errorf("descriptor-not-activated")
-		}
 	}
 	return consensus.DescriptorRotationProvider{Descriptor: desc}, reg, nil
 }
@@ -1022,15 +1017,9 @@ func runFromStdin() {
 				SpendHeight:  req.RotationDescriptor.SpendHeight,
 				SunsetHeight: req.RotationDescriptor.SunsetHeight,
 			}
-			if err := desc.Validate(reg); err != nil {
+			if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
 				writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
 				return
-			}
-			if consensus.IsV1ProductionRotationNetwork(req.Network) {
-				if err := consensus.ValidateV1ProductionRotationDescriptor(desc, reg); err != nil {
-					writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
-					return
-				}
 			}
 			rp := consensus.DescriptorRotationProvider{Descriptor: desc}
 			w, da, anchor, err = consensus.TxWeightAndStatsAtHeight(tx, req.Height, rp, reg)
@@ -1058,15 +1047,9 @@ func runFromStdin() {
 			SpendHeight:  req.RotationDescriptor.SpendHeight,
 			SunsetHeight: req.RotationDescriptor.SunsetHeight,
 		}
-		if err := desc.Validate(reg); err != nil {
+		if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
 			return
-		}
-		if consensus.IsV1ProductionRotationNetwork(req.Network) {
-			if err := consensus.ValidateV1ProductionRotationDescriptor(desc, reg); err != nil {
-				writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
-				return
-			}
 		}
 		rp := consensus.DescriptorRotationProvider{Descriptor: desc}
 		suiteID := uint8OrDefault(req.SuiteID, 0)
@@ -1091,15 +1074,9 @@ func runFromStdin() {
 			SpendHeight:  req.RotationDescriptor.SpendHeight,
 			SunsetHeight: req.RotationDescriptor.SunsetHeight,
 		}
-		if err := desc.Validate(reg); err != nil {
+		if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
 			return
-		}
-		if consensus.IsV1ProductionRotationNetwork(req.Network) {
-			if err := consensus.ValidateV1ProductionRotationDescriptor(desc, reg); err != nil {
-				writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
-				return
-			}
 		}
 		rp := consensus.DescriptorRotationProvider{Descriptor: desc}
 		writeResp(os.Stdout, Response{Ok: true, SuiteIDs: rp.NativeCreateSuites(req.Height).SuiteIDs()})
@@ -1119,15 +1096,9 @@ func runFromStdin() {
 			SpendHeight:  req.RotationDescriptor.SpendHeight,
 			SunsetHeight: req.RotationDescriptor.SunsetHeight,
 		}
-		if err := desc.Validate(reg); err != nil {
+		if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
 			return
-		}
-		if consensus.IsV1ProductionRotationNetwork(req.Network) {
-			if err := consensus.ValidateV1ProductionRotationDescriptor(desc, reg); err != nil {
-				writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
-				return
-			}
 		}
 		rp := consensus.DescriptorRotationProvider{Descriptor: desc}
 		suiteID := uint8OrDefault(req.SuiteID, 0)
@@ -1152,13 +1123,7 @@ func runFromStdin() {
 					SunsetHeight: rd.SunsetHeight,
 				})
 			}
-			var err error
-			if consensus.IsV1ProductionRotationNetwork(req.Network) {
-				err = consensus.ValidateV1ProductionRotationSet(ds, reg)
-			} else {
-				err = consensus.ValidateRotationSet(ds, reg)
-			}
-			if err != nil {
+			if err := consensus.ValidateRotationSetForNetwork(req.Network, ds, reg); err != nil {
 				writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
 				return
 			}
@@ -1177,15 +1142,9 @@ func runFromStdin() {
 			SpendHeight:  req.RotationDescriptor.SpendHeight,
 			SunsetHeight: req.RotationDescriptor.SunsetHeight,
 		}
-		if err := desc.Validate(reg); err != nil {
+		if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
 			return
-		}
-		if consensus.IsV1ProductionRotationNetwork(req.Network) {
-			if err := consensus.ValidateV1ProductionRotationDescriptor(desc, reg); err != nil {
-				writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
-				return
-			}
 		}
 		writeResp(os.Stdout, Response{Ok: true})
 		return
