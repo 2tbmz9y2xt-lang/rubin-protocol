@@ -339,34 +339,72 @@ func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []
 }
 
 func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
-	verifyWithMapping := func(alg string) (bool, error) {
-		ok, err := opensslVerifySigOneShotFn(alg, pubkey, signature, digest32[:])
-		if err != nil {
-			return false, txerr(TX_ERR_SIG_INVALID, "verify_sig: EVP_DigestVerify internal error")
-		}
-		return ok, nil
-	}
-
 	switch suiteID {
 	case SUITE_ID_ML_DSA_87:
-		if err := ensureOpenSSLConsensusInit(); err != nil {
+		binding, err := resolveSuiteVerifierBinding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+		if err != nil {
 			return false, err
 		}
-		if len(pubkey) != ML_DSA_87_PUBKEY_BYTES || len(signature) != ML_DSA_87_SIG_BYTES {
-			return false, nil
-		}
-		return verifyWithMapping("ML-DSA-87")
+		return verifySigWithBinding(binding, pubkey, signature, digest32)
 	default:
 		return false, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: unsupported suite_id")
 	}
 }
 
+type suiteVerifierBindingKind uint8
+
+const (
+	suiteVerifierBindingOpenSSLDigest32V1 suiteVerifierBindingKind = iota + 1
+)
+
+type suiteVerifierBinding struct {
+	kind       suiteVerifierBindingKind
+	opensslAlg string
+	pubkeyLen  int
+	sigLen     int
+}
+
+// v1 keeps the legacy ML-DSA-87 verifier on the OpenSSL archival/runtime path.
+// Runtime dispatch must resolve an explicit binding instead of trusting a raw
+// registry OpenSSLAlg string as an implicit backend switch.
+func resolveSuiteVerifierBinding(opensslAlg string, pubkeyLen int, sigLen int) (suiteVerifierBinding, error) {
+	if opensslAlg == "ML-DSA-87" && pubkeyLen == ML_DSA_87_PUBKEY_BYTES && sigLen == ML_DSA_87_SIG_BYTES {
+		return suiteVerifierBinding{
+			kind:       suiteVerifierBindingOpenSSLDigest32V1,
+			opensslAlg: "ML-DSA-87",
+			pubkeyLen:  ML_DSA_87_PUBKEY_BYTES,
+			sigLen:     ML_DSA_87_SIG_BYTES,
+		}, nil
+	}
+	return suiteVerifierBinding{}, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: unsupported suite verifier binding")
+}
+
+func verifySigWithBinding(binding suiteVerifierBinding, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+	if err := ensureOpenSSLConsensusInit(); err != nil {
+		return false, err
+	}
+	if len(pubkey) != binding.pubkeyLen || len(signature) != binding.sigLen {
+		return false, nil
+	}
+	switch binding.kind {
+	case suiteVerifierBindingOpenSSLDigest32V1:
+		ok, err := opensslVerifySigOneShotFn(binding.opensslAlg, pubkey, signature, digest32[:])
+		if err != nil {
+			return false, txerr(TX_ERR_SIG_INVALID, "verify_sig: EVP_DigestVerify internal error")
+		}
+		return ok, nil
+	default:
+		return false, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: unsupported suite verifier binding")
+	}
+}
+
 // verifySigWithRegistry dispatches signature verification using the suite
-// registry for algorithm lookup instead of hardcoded suite_id → algorithm
-// mapping. Falls back to legacy verifySig when registry is nil.
+// registry for suite lookup instead of hardcoded suite_id → algorithm mapping.
+// Falls back to legacy verifySig when registry is nil.
 //
-// This enables transparent support for new signature suites added to the
-// registry without code changes to the verification dispatch path.
+// The registry no longer gets to select the verifier backend implicitly through
+// OpenSSLAlg alone. Runtime verification resolves an explicit v1 binding from
+// the suite parameters so existing suites cannot switch backend silently.
 func verifySigWithRegistry(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte, registry *SuiteRegistry) (bool, error) {
 	if registry == nil {
 		return verifySig(suiteID, pubkey, signature, digest32)
@@ -376,18 +414,9 @@ func verifySigWithRegistry(suiteID uint8, pubkey []byte, signature []byte, diges
 	if !ok {
 		return false, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: unsupported suite_id")
 	}
-
-	if err := ensureOpenSSLConsensusInit(); err != nil {
+	binding, err := resolveSuiteVerifierBinding(params.OpenSSLAlg, params.PubkeyLen, params.SigLen)
+	if err != nil {
 		return false, err
 	}
-
-	if len(pubkey) != params.PubkeyLen || len(signature) != params.SigLen {
-		return false, nil
-	}
-
-	verifyOk, err := opensslVerifySigOneShotFn(params.OpenSSLAlg, pubkey, signature, digest32[:])
-	if err != nil {
-		return false, txerr(TX_ERR_SIG_INVALID, "verify_sig: EVP_DigestVerify internal error")
-	}
-	return verifyOk, nil
+	return verifySigWithBinding(binding, pubkey, signature, digest32)
 }

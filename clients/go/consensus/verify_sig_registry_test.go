@@ -72,15 +72,15 @@ func TestVerifySigWithRegistry_KnownSuite_CorrectLengths_CallsOpenSSL(t *testing
 	}
 }
 
-func TestVerifySigWithRegistry_CustomSuite_UsesRegistryAlg(t *testing.T) {
+func TestVerifySigWithRegistry_CustomSuite_ExactV1BindingAllowed(t *testing.T) {
 	reg := &SuiteRegistry{
 		suites: map[uint8]SuiteParams{
 			0x02: {
 				SuiteID:    0x02,
-				PubkeyLen:  1312,
-				SigLen:     2420,
-				VerifyCost: 4,
-				OpenSSLAlg: "ML-DSA-65",
+				PubkeyLen:  ML_DSA_87_PUBKEY_BYTES,
+				SigLen:     ML_DSA_87_SIG_BYTES,
+				VerifyCost: VERIFY_COST_ML_DSA_87,
+				OpenSSLAlg: "ML-DSA-87",
 			},
 		},
 	}
@@ -93,8 +93,8 @@ func TestVerifySigWithRegistry_CustomSuite_UsesRegistryAlg(t *testing.T) {
 		return true, nil
 	}
 
-	pub := make([]byte, 1312)
-	sig := make([]byte, 2420)
+	pub := make([]byte, ML_DSA_87_PUBKEY_BYTES)
+	sig := make([]byte, ML_DSA_87_SIG_BYTES)
 	var d [32]byte
 
 	ok, err := verifySigWithRegistry(0x02, pub, sig, d, reg)
@@ -104,8 +104,34 @@ func TestVerifySigWithRegistry_CustomSuite_UsesRegistryAlg(t *testing.T) {
 	if !ok {
 		t.Fatal("expected true from mocked verify")
 	}
-	if capturedAlg != "ML-DSA-65" {
-		t.Fatalf("alg=%q, want %q", capturedAlg, "ML-DSA-65")
+	if capturedAlg != "ML-DSA-87" {
+		t.Fatalf("alg=%q, want %q", capturedAlg, "ML-DSA-87")
+	}
+}
+
+func TestVerifySigWithRegistry_CustomSuite_UnsupportedBindingRejected(t *testing.T) {
+	reg := &SuiteRegistry{
+		suites: map[uint8]SuiteParams{
+			0x02: {
+				SuiteID:    0x02,
+				PubkeyLen:  1312,
+				SigLen:     2420,
+				VerifyCost: 4,
+				OpenSSLAlg: "ML-DSA-65",
+			},
+		},
+	}
+
+	pub := make([]byte, 1312)
+	sig := make([]byte, 2420)
+	var d [32]byte
+
+	_, err := verifySigWithRegistry(0x02, pub, sig, d, reg)
+	if err == nil {
+		t.Fatal("expected explicit binding rejection")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
 	}
 }
 

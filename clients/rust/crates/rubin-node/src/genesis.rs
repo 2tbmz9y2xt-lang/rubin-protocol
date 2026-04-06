@@ -408,12 +408,6 @@ fn core_ext_deployments_from_json(
                 rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
             ));
         }
-        if item.tx_context_enabled {
-            return Err(format!(
-                "core_ext ext_id={} txcontext-enabled profile requires runtime verifier wiring",
-                item.ext_id
-            ));
-        }
         let verification_binding = core_ext_verification_binding_from_name_and_descriptor(
             binding_name,
             &binding_descriptor,
@@ -1103,7 +1097,7 @@ mod tests {
     }
 
     #[test]
-    fn load_genesis_config_rejects_tx_context_enabled_until_runtime_verifier_lands() {
+    fn load_genesis_config_accepts_tx_context_enabled_profile() {
         let dir = std::env::temp_dir().join(format!(
             "rubin-node-genesis-core-ext-txcontext-{}",
             std::time::SystemTime::now()
@@ -1119,8 +1113,9 @@ mod tests {
         )
         .expect("write");
 
-        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
-        assert!(err.contains("requires runtime verifier wiring"));
+        let cfg = load_genesis_config(Some(&path), "devnet").expect("load");
+        assert_eq!(cfg.core_ext_deployments.deployments.len(), 1);
+        assert!(cfg.core_ext_deployments.deployments[0].tx_context_enabled);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }

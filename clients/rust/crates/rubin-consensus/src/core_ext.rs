@@ -456,6 +456,43 @@ fn core_ext_supported_openssl_alg(openssl_alg: &str) -> Option<(u64, u64)> {
     }
 }
 
+fn run_core_ext_verify_sig_ext_binding(
+    binding: &CoreExtVerificationBinding,
+    pubkey: &[u8],
+    crypto_sig: &[u8],
+    digest32: &[u8; 32],
+) -> Result<(), TxError> {
+    match binding {
+        CoreExtVerificationBinding::NativeVerifySig => Err(TxError::new(
+            ErrorCode::TxErrSigAlgInvalid,
+            "CORE_EXT non-native verifier binding unsupported",
+        )),
+        CoreExtVerificationBinding::VerifySigExtAccept => Ok(()),
+        CoreExtVerificationBinding::VerifySigExtReject => Err(TxError::new(
+            ErrorCode::TxErrSigInvalid,
+            "CORE_EXT signature invalid",
+        )),
+        CoreExtVerificationBinding::VerifySigExtError => Err(TxError::new(
+            ErrorCode::TxErrSigAlgInvalid,
+            "CORE_EXT verify_sig_ext error",
+        )),
+        CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(descriptor) => {
+            match verify_core_ext_openssl_digest32_binding(descriptor, pubkey, crypto_sig, digest32)
+            {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(TxError::new(
+                    ErrorCode::TxErrSigInvalid,
+                    "CORE_EXT signature invalid",
+                )),
+                Err(_) => Err(TxError::new(
+                    ErrorCode::TxErrSigAlgInvalid,
+                    "CORE_EXT verify_sig_ext error",
+                )),
+            }
+        }
+    }
+}
+
 fn validate_core_ext_openssl_binding_descriptor(
     openssl_alg: &str,
     pubkey_len: u64,
@@ -856,12 +893,6 @@ fn validate_core_ext_spend_with_cache_impl(
         sighash_v1_digest_with_cache(cache, input_index, input_value, chain_id, sighash_type)?;
 
     if p.tx_context_enabled {
-        let verify_tx_context_fn = p.verify_sig_ext_tx_context_fn.ok_or_else(|| {
-            TxError::new(
-                ErrorCode::TxErrSigAlgInvalid,
-                "CORE_EXT verify_sig_ext unsupported",
-            )
-        })?;
         let tx_context = tx_context.ok_or_else(|| {
             TxError::new(
                 ErrorCode::TxErrSigInvalid,
@@ -874,63 +905,41 @@ fn validate_core_ext_spend_with_cache_impl(
                 "CORE_EXT txcontext continuing bundle missing",
             )
         })?;
-        let ok = verify_tx_context_fn(
-            cov.ext_id,
-            w.suite_id,
+        if let Some(verify_tx_context_fn) = p.verify_sig_ext_tx_context_fn {
+            let ok = verify_tx_context_fn(
+                cov.ext_id,
+                w.suite_id,
+                &w.pubkey,
+                crypto_sig,
+                &digest32,
+                cov.ext_payload,
+                tx_context.base.as_ref(),
+                ctx_continuing.as_ref(),
+                input_value,
+            )
+            .map_err(|_| {
+                TxError::new(
+                    ErrorCode::TxErrSigAlgInvalid,
+                    "CORE_EXT verify_sig_ext error",
+                )
+            })?;
+            return if ok {
+                Ok(())
+            } else {
+                Err(TxError::new(
+                    ErrorCode::TxErrSigInvalid,
+                    "CORE_EXT signature invalid",
+                ))
+            };
+        }
+        return run_core_ext_verify_sig_ext_binding(
+            &p.verification_binding,
             &w.pubkey,
             crypto_sig,
             &digest32,
-            cov.ext_payload,
-            tx_context.base.as_ref(),
-            ctx_continuing.as_ref(),
-            input_value,
-        )
-        .map_err(|_| {
-            TxError::new(
-                ErrorCode::TxErrSigAlgInvalid,
-                "CORE_EXT verify_sig_ext error",
-            )
-        })?;
-        return if ok {
-            Ok(())
-        } else {
-            Err(TxError::new(
-                ErrorCode::TxErrSigInvalid,
-                "CORE_EXT signature invalid",
-            ))
-        };
+        );
     }
-
-    match p.verification_binding {
-        CoreExtVerificationBinding::NativeVerifySig => Err(TxError::new(
-            ErrorCode::TxErrSigAlgInvalid,
-            "CORE_EXT non-native verifier binding unsupported",
-        )),
-        CoreExtVerificationBinding::VerifySigExtAccept => Ok(()),
-        CoreExtVerificationBinding::VerifySigExtReject => Err(TxError::new(
-            ErrorCode::TxErrSigInvalid,
-            "CORE_EXT signature invalid",
-        )),
-        CoreExtVerificationBinding::VerifySigExtError => Err(TxError::new(
-            ErrorCode::TxErrSigAlgInvalid,
-            "CORE_EXT verify_sig_ext error",
-        )),
-        CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(ref descriptor) => {
-            match verify_core_ext_openssl_digest32_binding(
-                descriptor, &w.pubkey, crypto_sig, &digest32,
-            ) {
-                Ok(true) => Ok(()),
-                Ok(false) => Err(TxError::new(
-                    ErrorCode::TxErrSigInvalid,
-                    "CORE_EXT signature invalid",
-                )),
-                Err(_) => Err(TxError::new(
-                    ErrorCode::TxErrSigAlgInvalid,
-                    "CORE_EXT verify_sig_ext error",
-                )),
-            }
-        }
-    }
+    run_core_ext_verify_sig_ext_binding(&p.verification_binding, &w.pubkey, crypto_sig, &digest32)
 }
 
 #[cfg(test)]
@@ -1389,7 +1398,7 @@ mod tests {
     }
 
     #[test]
-    fn core_ext_active_txcontext_missing_runtime_verifier_rejected_sig_alg_invalid() {
+    fn core_ext_active_txcontext_missing_runtime_verifier_falls_back_to_binding() {
         let entry = UtxoEntry {
             value: 100,
             covenant_type: COV_TYPE_EXT,
@@ -1413,23 +1422,24 @@ mod tests {
             pubkey: vec![0x01, 0x02, 0x03],
             signature: vec![0x04, 0x01],
         };
-        let (tx, input_index, input_value, chain_id) = dummy_tx();
-        let err = validate_core_ext_spend(
+        let (tx, tx_context, input_index, input_value, chain_id) =
+            build_test_txcontext_bundle(7, 55);
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        validate_core_ext_spend_with_cache_and_suite_context(
             &entry,
             &w,
             &tx,
             input_index,
             input_value,
             chain_id,
+            55,
             &profiles,
+            None,
+            None,
+            Some(&tx_context),
+            &mut cache,
         )
-        .unwrap_err();
-        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
-        assert!(
-            err.msg.contains("unsupported"),
-            "unexpected CORE_EXT unsupported-path message: {}",
-            err.msg
-        );
+        .expect("binding fallback should accept");
     }
 
     #[test]

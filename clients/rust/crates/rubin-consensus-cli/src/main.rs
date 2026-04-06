@@ -981,12 +981,6 @@ fn core_ext_profiles_from_json(
                 rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
             ));
         }
-        if item.tx_context_enabled {
-            return Err(format!(
-                "core_ext ext_id={} txcontext-enabled profile requires runtime verifier wiring",
-                item.ext_id
-            ));
-        }
         let binding = core_ext_verification_binding_from_name_and_descriptor(
             binding_name,
             &binding_descriptor,
@@ -4963,8 +4957,8 @@ mod tests {
     }
 
     #[test]
-    fn core_ext_profiles_reject_tx_context_enabled_until_runtime_verifier_lands() {
-        let err = core_ext_profiles_from_json(
+    fn core_ext_profiles_accept_tx_context_enabled_profile() {
+        let profiles = core_ext_profiles_from_json(
             &[CoreExtProfileJson {
                 ext_id: 9,
                 activation_height: 42,
@@ -4976,8 +4970,9 @@ mod tests {
             [0u8; 32],
             "",
         )
-        .unwrap_err();
-        assert!(err.contains("requires runtime verifier wiring"));
+        .expect("txcontext-enabled profiles should parse");
+        assert_eq!(profiles.deployments.len(), 1);
+        assert!(profiles.deployments[0].tx_context_enabled);
     }
 
     #[test]

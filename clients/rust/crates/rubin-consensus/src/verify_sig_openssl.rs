@@ -412,24 +412,70 @@ pub fn verify_sig(
             "verify_sig: unsupported suite_id",
         ));
     }
+    let binding =
+        resolve_suite_verifier_binding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)?;
+    verify_sig_with_binding(&binding, pubkey, signature, digest32)
+}
 
-    let alg = suite_alg_name(suite_id)?;
+enum SuiteVerifierBinding {
+    OpenSslDigest32V1 {
+        alg: &'static CStr,
+        pubkey_len: u64,
+        sig_len: u64,
+    },
+}
 
-    if pubkey.len() != ML_DSA_87_PUBKEY_BYTES as usize
-        || signature.len() != ML_DSA_87_SIG_BYTES as usize
+// v1 keeps the legacy ML-DSA-87 verifier on the explicit OpenSSL
+// archival/runtime path. Runtime dispatch must resolve a concrete binding
+// instead of treating registry.openssl_alg as an implicit backend switch.
+fn resolve_suite_verifier_binding(
+    openssl_alg: &str,
+    pubkey_len: u64,
+    sig_len: u64,
+) -> Result<SuiteVerifierBinding, TxError> {
+    if openssl_alg == "ML-DSA-87"
+        && pubkey_len == ML_DSA_87_PUBKEY_BYTES
+        && sig_len == ML_DSA_87_SIG_BYTES
     {
-        return Ok(false);
+        return Ok(SuiteVerifierBinding::OpenSslDigest32V1 {
+            alg: c"ML-DSA-87",
+            pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+            sig_len: ML_DSA_87_SIG_BYTES,
+        });
     }
+    Err(TxError::new(
+        ErrorCode::TxErrSigAlgInvalid,
+        "verify_sig: unsupported suite verifier binding",
+    ))
+}
 
-    ensure_openssl_consensus_init()?;
-
-    openssl_verify_sig_digest_oneshot(alg, pubkey, signature, digest32)
+fn verify_sig_with_binding(
+    binding: &SuiteVerifierBinding,
+    pubkey: &[u8],
+    signature: &[u8],
+    digest32: &[u8; 32],
+) -> Result<bool, TxError> {
+    match binding {
+        SuiteVerifierBinding::OpenSslDigest32V1 {
+            alg,
+            pubkey_len,
+            sig_len,
+        } => {
+            if pubkey.len() as u64 != *pubkey_len || signature.len() as u64 != *sig_len {
+                return Ok(false);
+            }
+            ensure_openssl_consensus_init()?;
+            openssl_verify_sig_digest_oneshot(*alg, pubkey, signature, digest32)
+        }
+    }
 }
 
 /// Registry-aware signature verification. When registry is Some, looks up
-/// the suite's OpenSSL algorithm name and expected lengths from the registry.
-/// When registry is None, falls back to the hardcoded verify_sig path.
-/// Parity with Go `verifySigWithRegistry`.
+/// the suite's parameters from the registry. When registry is None, falls back
+/// to the hardcoded verify_sig path. The registry no longer selects a backend
+/// implicitly through `openssl_alg`; runtime verification resolves an explicit
+/// v1 binding from the suite parameters instead. Parity with Go
+/// `verifySigWithRegistry`.
 pub fn verify_sig_with_registry(
     suite_id: u8,
     pubkey: &[u8],
@@ -446,25 +492,9 @@ pub fn verify_sig_with_registry(
             "verify_sig_with_registry: suite not registered",
         ));
     };
-
-    if pubkey.len() as u64 != params.pubkey_len || signature.len() as u64 != params.sig_len {
-        return Ok(false);
-    }
-
-    ensure_openssl_consensus_init()?;
-
-    // Convert the static str to CStr for OpenSSL.
-    let alg = match params.openssl_alg {
-        "ML-DSA-87" => c"ML-DSA-87",
-        _ => {
-            return Err(TxError::new(
-                ErrorCode::TxErrSigAlgInvalid,
-                "verify_sig_with_registry: unknown OpenSSL alg",
-            ))
-        }
-    };
-
-    openssl_verify_sig_digest_oneshot(alg, pubkey, signature, digest32)
+    let binding =
+        resolve_suite_verifier_binding(params.openssl_alg, params.pubkey_len, params.sig_len)?;
+    verify_sig_with_binding(&binding, pubkey, signature, digest32)
 }
 
 fn map_digest_verify_rc(rc: core::ffi::c_int) -> Result<bool, TxError> {
