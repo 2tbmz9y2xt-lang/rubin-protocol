@@ -214,7 +214,6 @@ fn build_suite_registry_from_json(
     if items.is_empty() {
         return Ok(None);
     }
-
     let mut suites = BTreeMap::new();
     suites.insert(SUITE_ID_ML_DSA_87, default_suite_registry_params());
     let mut seen = BTreeSet::new();
@@ -247,9 +246,6 @@ fn build_suite_context_from_descriptor(
                 spend_height: rd.spend_height,
                 sunset_height: rd.sunset_height,
             };
-            descriptor
-                .validate(&registry)
-                .map_err(|e| format!("rotation_descriptor: {e}"))?;
             validate_rotation_descriptor_for_network(network, &descriptor, &registry)
                 .map_err(|e| format!("rotation_descriptor: {e}"))?;
             Arc::new(DescriptorRotationProvider { descriptor })
