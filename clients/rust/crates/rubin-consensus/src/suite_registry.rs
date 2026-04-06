@@ -590,7 +590,9 @@ mod tests {
         };
         assert!(validate_v1_production_rotation_descriptor(&d, &reg).is_err());
         assert!(validate_rotation_descriptor_for_network("mainnet", &d, &reg).is_err());
+        assert!(validate_rotation_descriptor_for_network("  MAINNET  ", &d, &reg).is_err());
         assert!(validate_rotation_descriptor_for_network("devnet", &d, &reg).is_ok());
+        assert!(validate_rotation_descriptor_for_network("", &d, &reg).is_ok());
         let d_h4 = CryptoRotationDescriptor {
             sunset_height: 100,
             ..d.clone()
@@ -662,6 +664,31 @@ mod tests {
             sunset_height: 200,
         };
         validate_v1_production_rotation_set(&[d1, d2_ok], &reg).expect("ordered chain");
+    }
+
+    #[test]
+    fn test_validate_rotation_set_for_network_normalized_inputs() {
+        let reg = test_registry_three_suites();
+        let d1 = CryptoRotationDescriptor {
+            name: "first".into(),
+            old_suite_id: 0x01,
+            new_suite_id: 0x02,
+            create_height: 10,
+            spend_height: 20,
+            sunset_height: 100,
+        };
+        let d2 = CryptoRotationDescriptor {
+            name: "second".into(),
+            old_suite_id: 0x02,
+            new_suite_id: 0x03,
+            create_height: 100,
+            spend_height: 110,
+            sunset_height: 200,
+        };
+        validate_rotation_set_for_network("  MAINNET  ", &[d1.clone(), d2.clone()], &reg)
+            .expect("normalized production path");
+        validate_rotation_set_for_network("", &[d1, d2], &reg)
+            .expect("empty network falls back to devnet path");
     }
 
     fn test_registry_four_suites() -> SuiteRegistry {
