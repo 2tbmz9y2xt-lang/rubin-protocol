@@ -4,13 +4,21 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import tempfile
 from pathlib import Path
 
 CONTRACT_PATH = Path(__file__).resolve().with_name("prepush_review_contract.json")
+MAX_GIT_OUTPUT_BYTES = 10 * 1024 * 1024
 REVIEWABLE_PATHS = (
     "*.go",
     "*.rs",
+    "*.c",
+    "*.cc",
+    "*.cpp",
+    "*.h",
+    "*.hpp",
     "*.lean",
+    "*.proto",
     "*.sh",
     "*.py",
     "*.yml",
@@ -41,18 +49,44 @@ REVIEWER MINDSET:
 """
 
 
+def normalize_repo_root(repo_root: Path) -> Path:
+    normalized = repo_root.resolve()
+    if not normalized.is_absolute():
+        raise ValueError("repo_root must be absolute")
+    if not normalized.exists() or not normalized.is_dir():
+        raise ValueError(f"repo_root must be an existing directory: {normalized}")
+    if normalized.name.startswith("-"):
+        raise ValueError(f"repo_root must not start with '-': {normalized}")
+    git_marker = normalized / ".git"
+    if not git_marker.exists():
+        raise ValueError(f"repo_root is not a git worktree: {normalized}")
+    return normalized
+
+
+def _read_limited(handle: tempfile.TemporaryFile[bytes], *, label: str) -> str:
+    handle.flush()
+    size = handle.tell()
+    if size > MAX_GIT_OUTPUT_BYTES:
+        raise ValueError(f"{label} exceeds {MAX_GIT_OUTPUT_BYTES} bytes")
+    handle.seek(0)
+    return handle.read().decode("utf-8", errors="replace")
+
+
 def run_git(repo_root: Path, *args: str) -> str:
-    proc = subprocess.run(
-        ["git", "-C", str(repo_root), *args],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
+    repo_root = normalize_repo_root(repo_root)
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_root), *args],
+            stdout=stdout,
+            stderr=stderr,
+            check=False,
+        )
+        stdout_text = _read_limited(stdout, label=f"git {' '.join(args)} stdout")
+        stderr_text = _read_limited(stderr, label=f"git {' '.join(args)} stderr")
     if proc.returncode != 0:
-        msg = proc.stderr.strip() or proc.stdout.strip() or "unknown git error"
+        msg = stderr_text.strip() or stdout_text.strip() or "unknown git error"
         raise RuntimeError(f"git {' '.join(args)} :: {msg}")
-    return proc.stdout
+    return stdout_text
 
 
 def load_self_audit_contract(path: Path = CONTRACT_PATH) -> dict[str, object]:
@@ -151,7 +185,7 @@ def main() -> int:
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
-    repo_root = Path(args.repo_root).resolve()
+    repo_root = normalize_repo_root(Path(args.repo_root))
     output_path = Path(args.output).resolve()
     contract = load_self_audit_contract()
     prompt = compose_prompt(contract=contract, bundle_text=staged_bundle(repo_root))

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -41,6 +42,15 @@ class SelfAuditPromptPackTests(unittest.TestCase):
         contract = m.load_self_audit_contract()
         self.assertEqual(contract["prompt_pack_version"], "self-audit-v1")
         self.assertTrue(contract["required_pattern_families"])
+
+    def test_normalize_repo_root_requires_git_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                m.normalize_repo_root(Path(tmp))
+
+    def test_reviewable_paths_include_native_extensions(self):
+        for pattern in ("*.proto", "*.cpp", "*.h"):
+            self.assertIn(pattern, m.REVIEWABLE_PATHS)
 
 
 if __name__ == "__main__":
