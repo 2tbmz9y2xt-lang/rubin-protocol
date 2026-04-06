@@ -23,6 +23,7 @@ type Config struct {
 	ChainID            string              `json:"chain_id_hex,omitempty"`
 	MineAddress        string              `json:"mine_address"`
 	RotationDescriptor *RotationConfigJSON `json:"rotation_descriptor,omitempty"`
+	SuiteRegistry      []SuiteParamsJSON   `json:"suite_registry,omitempty"`
 }
 
 // RotationConfigJSON is the JSON-serializable rotation descriptor for node config.
@@ -37,14 +38,65 @@ type RotationConfigJSON struct {
 	SunsetHeight uint64 `json:"sunset_height,omitempty"`
 }
 
+// SuiteParamsJSON is the JSON-serializable registry entry used for controlled
+// native-suite bootstrap without editing the built-in default registry.
+type SuiteParamsJSON struct {
+	SuiteID    uint8  `json:"suite_id"`
+	PubkeyLen  int    `json:"pubkey_len"`
+	SigLen     int    `json:"sig_len"`
+	VerifyCost uint64 `json:"verify_cost"`
+	OpenSSLAlg string `json:"openssl_alg"`
+}
+
+func normalizeSuiteRegistryOpenSSLAlg(value string) (string, error) {
+	switch strings.TrimSpace(value) {
+	case "", "ML-DSA-87":
+		return "ML-DSA-87", nil
+	default:
+		return "", errors.New("bad suite_registry")
+	}
+}
+
+func (cfg Config) buildSuiteRegistry() (*consensus.SuiteRegistry, error) {
+	if len(cfg.SuiteRegistry) == 0 {
+		return nil, nil
+	}
+	params := make([]consensus.SuiteParams, 0, len(cfg.SuiteRegistry))
+	seen := make(map[uint8]struct{}, len(cfg.SuiteRegistry))
+	for _, item := range cfg.SuiteRegistry {
+		if _, ok := seen[item.SuiteID]; ok {
+			return nil, errors.New("bad suite_registry")
+		}
+		alg, err := normalizeSuiteRegistryOpenSSLAlg(item.OpenSSLAlg)
+		if err != nil {
+			return nil, err
+		}
+		seen[item.SuiteID] = struct{}{}
+		params = append(params, consensus.SuiteParams{
+			SuiteID:    item.SuiteID,
+			PubkeyLen:  item.PubkeyLen,
+			SigLen:     item.SigLen,
+			VerifyCost: item.VerifyCost,
+			OpenSSLAlg: alg,
+		})
+	}
+	return consensus.NewSuiteRegistryFromParams(params), nil
+}
+
 // BuildRotationProvider constructs a RotationProvider from the config.
 // Returns nil (=> default) if no rotation descriptor is configured.
 func (cfg Config) BuildRotationProvider() (consensus.RotationProvider, *consensus.SuiteRegistry, error) {
+	registry, err := cfg.buildSuiteRegistry()
+	if err != nil {
+		return nil, nil, fmt.Errorf("suite_registry: %w", err)
+	}
 	if cfg.RotationDescriptor == nil {
-		return nil, nil, nil
+		return nil, registry, nil
 	}
 	rd := cfg.RotationDescriptor
-	registry := consensus.DefaultSuiteRegistry()
+	if registry == nil {
+		registry = consensus.DefaultSuiteRegistry()
+	}
 	desc := consensus.CryptoRotationDescriptor{
 		Name:         rd.Name,
 		OldSuiteID:   rd.OldSuiteID,
@@ -143,6 +195,9 @@ func ValidateConfig(cfg Config) error {
 		if len(raw) != 32 && len(raw) != 33 {
 			return fmt.Errorf("mine_address must be 32 (key_id) or 33 (suite_id||key_id) bytes, got %d", len(raw))
 		}
+	}
+	if _, err := cfg.buildSuiteRegistry(); err != nil {
+		return fmt.Errorf("suite_registry: %w", err)
 	}
 	if cfg.RotationDescriptor != nil {
 		if _, _, err := cfg.BuildRotationProvider(); err != nil {

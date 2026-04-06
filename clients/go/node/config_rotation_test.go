@@ -23,6 +23,22 @@ func TestBuildRotationProvider_NilDescriptor(t *testing.T) {
 
 func TestBuildRotationProvider_ValidDescriptor(t *testing.T) {
 	cfg := DefaultConfig()
+	cfg.SuiteRegistry = []SuiteParamsJSON{
+		{
+			SuiteID:    consensus.SUITE_ID_ML_DSA_87,
+			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+			OpenSSLAlg: "ML-DSA-87",
+		},
+		{
+			SuiteID:    0x02,
+			PubkeyLen:  32,
+			SigLen:     64,
+			VerifyCost: 100,
+			OpenSSLAlg: "ML-DSA-87",
+		},
+	}
 	cfg.RotationDescriptor = &RotationConfigJSON{
 		Name:         "test-rotation",
 		OldSuiteID:   consensus.SUITE_ID_ML_DSA_87,
@@ -31,8 +47,30 @@ func TestBuildRotationProvider_ValidDescriptor(t *testing.T) {
 		SpendHeight:  5,
 		SunsetHeight: 10,
 	}
-	// Need suite 0x02 in registry — but default registry only has ML-DSA-87.
-	// Validation will fail because new suite is not registered.
+	rot, reg, err := cfg.BuildRotationProvider()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rot == nil {
+		t.Fatal("expected descriptor-backed rotation")
+	}
+	if reg == nil {
+		t.Fatal("expected explicit suite registry")
+	}
+	if _, ok := reg.Lookup(0x02); !ok {
+		t.Fatal("expected explicit suite registry to include suite 0x02")
+	}
+}
+
+func TestBuildRotationProvider_DescriptorRejectsUnregisteredNewSuiteWithoutExplicitRegistry(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RotationDescriptor = &RotationConfigJSON{
+		Name:         "needs-registry",
+		OldSuiteID:   consensus.SUITE_ID_ML_DSA_87,
+		NewSuiteID:   0x02,
+		CreateHeight: 1,
+		SpendHeight:  5,
+	}
 	_, _, err := cfg.BuildRotationProvider()
 	if err == nil {
 		t.Fatal("expected error: new suite 0x02 not registered")
@@ -75,6 +113,52 @@ func TestValidateConfig_AcceptsNoRotation(t *testing.T) {
 	}
 }
 
+func TestBuildRotationProvider_ExplicitSuiteRegistryWithoutDescriptor(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SuiteRegistry = []SuiteParamsJSON{
+		{
+			SuiteID:    0x42,
+			PubkeyLen:  64,
+			SigLen:     96,
+			VerifyCost: 321,
+			OpenSSLAlg: "ML-DSA-87",
+		},
+	}
+	rot, reg, err := cfg.BuildRotationProvider()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rot != nil {
+		t.Fatal("rotation must remain nil without rotation_descriptor")
+	}
+	if reg == nil {
+		t.Fatal("expected explicit suite registry")
+	}
+	params, ok := reg.Lookup(0x42)
+	if !ok {
+		t.Fatal("expected suite 0x42 in registry")
+	}
+	if params.VerifyCost != 321 {
+		t.Fatalf("verify_cost=%d, want 321", params.VerifyCost)
+	}
+}
+
+func TestValidateConfig_RejectsBadSuiteRegistry(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SuiteRegistry = []SuiteParamsJSON{
+		{
+			SuiteID:    0x01,
+			PubkeyLen:  10,
+			SigLen:     20,
+			VerifyCost: 30,
+			OpenSSLAlg: "NO_SUCH_ALG",
+		},
+	}
+	if err := ValidateConfig(cfg); err == nil {
+		t.Fatal("expected validation error for bad suite_registry")
+	}
+}
+
 func TestRotationConfigJSON_Roundtrip(t *testing.T) {
 	cfg := Config{
 		Network:  "devnet",
@@ -89,6 +173,15 @@ func TestRotationConfigJSON_Roundtrip(t *testing.T) {
 			CreateHeight: 100,
 			SpendHeight:  200,
 			SunsetHeight: 300,
+		},
+		SuiteRegistry: []SuiteParamsJSON{
+			{
+				SuiteID:    0x02,
+				PubkeyLen:  32,
+				SigLen:     64,
+				VerifyCost: 100,
+				OpenSSLAlg: "ML-DSA-87",
+			},
 		},
 	}
 	data, err := json.Marshal(cfg)
@@ -108,6 +201,12 @@ func TestRotationConfigJSON_Roundtrip(t *testing.T) {
 	if restored.RotationDescriptor.SunsetHeight != 300 {
 		t.Fatalf("sunset=%d, want 300", restored.RotationDescriptor.SunsetHeight)
 	}
+	if len(restored.SuiteRegistry) != 1 {
+		t.Fatalf("suite_registry len=%d, want 1", len(restored.SuiteRegistry))
+	}
+	if restored.SuiteRegistry[0].SuiteID != 0x02 {
+		t.Fatalf("suite_id=0x%02x, want 0x02", restored.SuiteRegistry[0].SuiteID)
+	}
 }
 
 func TestRotationConfigJSON_OmittedInDefault(t *testing.T) {
@@ -122,5 +221,8 @@ func TestRotationConfigJSON_OmittedInDefault(t *testing.T) {
 	}
 	if _, ok := m["rotation_descriptor"]; ok {
 		t.Fatal("rotation_descriptor should be omitted when nil")
+	}
+	if _, ok := m["suite_registry"]; ok {
+		t.Fatal("suite_registry should be omitted when empty")
 	}
 }
