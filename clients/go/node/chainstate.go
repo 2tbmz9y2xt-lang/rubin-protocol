@@ -291,8 +291,8 @@ func utxoEntryExplicitlyUsesSuite(entry consensus.UtxoEntry, suiteID uint8) bool
 
 func sortOutpointsDeterministically(outpoints []consensus.Outpoint) {
 	sort.Slice(outpoints, func(i, j int) bool {
-		if bytes.Compare(outpoints[i].Txid[:], outpoints[j].Txid[:]) != 0 {
-			return bytes.Compare(outpoints[i].Txid[:], outpoints[j].Txid[:]) < 0
+		if cmp := bytes.Compare(outpoints[i].Txid[:], outpoints[j].Txid[:]); cmp != 0 {
+			return cmp < 0
 		}
 		return outpoints[i].Vout < outpoints[j].Vout
 	})
