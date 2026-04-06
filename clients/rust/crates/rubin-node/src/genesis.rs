@@ -178,6 +178,8 @@ fn validate_suite_registry_item(item: &GenesisSuiteParams) -> Result<SuiteParams
     if item.suite_id == SUITE_ID_SENTINEL
         || item.pubkey_len == 0
         || item.sig_len == 0
+        || item.sig_len.checked_add(1).is_none()
+        || item.pubkey_len.checked_add(item.sig_len).is_none()
         || item.verify_cost == 0
     {
         return Err("bad suite_registry".to_string());
@@ -621,6 +623,34 @@ mod tests {
                 ML_DSA_87_SIG_BYTES,
                 VERIFY_COST_ML_DSA_87
             ),
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path)).unwrap_err();
+        assert!(err.contains("bad suite_registry"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_suite_registry_length_overflow() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-suite-registry-overflow-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            "{\
+              \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+              \"suite_registry\":[\
+                {\"suite_id\":66,\"pubkey_len\":1,\"sig_len\":18446744073709551615,\"verify_cost\":321,\"openssl_alg\":\"ML-DSA-87\"}\
+              ]\
+            }",
         )
         .expect("write");
 

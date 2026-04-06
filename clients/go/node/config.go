@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -72,6 +73,7 @@ func validateSuiteRegistryItem(item SuiteParamsJSON) (consensus.SuiteParams, err
 	if item.SuiteID == consensus.SUITE_ID_SENTINEL ||
 		item.PubkeyLen <= 0 ||
 		item.SigLen <= 0 ||
+		item.PubkeyLen > math.MaxInt-item.SigLen ||
 		item.VerifyCost == 0 {
 		return consensus.SuiteParams{}, errors.New("bad suite_registry")
 	}
