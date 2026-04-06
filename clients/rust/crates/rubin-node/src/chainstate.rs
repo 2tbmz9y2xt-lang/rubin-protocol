@@ -188,7 +188,9 @@ impl ChainState {
     pub fn indexed_suite_ids(&self) -> Vec<u8> {
         let mut ids = Vec::new();
         for entry in self.utxos.values() {
-            ids.extend(explicit_suite_ids_for_utxo_entry(entry));
+            if let Some(suite_id) = explicit_suite_id_for_utxo_entry(entry) {
+                ids.push(suite_id);
+            }
         }
         ids.sort_unstable();
         ids.dedup();
@@ -308,22 +310,20 @@ fn utxo_set_hash(utxos: &HashMap<Outpoint, UtxoEntry>) -> [u8; 32] {
     Sha3_256::digest(&buf).into()
 }
 
-fn explicit_suite_ids_for_utxo_entry(entry: &UtxoEntry) -> Vec<u8> {
+fn explicit_suite_id_for_utxo_entry(entry: &UtxoEntry) -> Option<u8> {
     match entry.covenant_type {
         rubin_consensus::constants::COV_TYPE_P2PK
             if entry.covenant_data.len()
                 == rubin_consensus::constants::MAX_P2PK_COVENANT_DATA as usize =>
         {
-            vec![entry.covenant_data[0]]
+            Some(entry.covenant_data[0])
         }
-        _ => Vec::new(),
+        _ => None,
     }
 }
 
 fn utxo_entry_explicitly_uses_suite(entry: &UtxoEntry, suite_id: u8) -> bool {
-    explicit_suite_ids_for_utxo_entry(entry)
-        .into_iter()
-        .any(|id| id == suite_id)
+    explicit_suite_id_for_utxo_entry(entry) == Some(suite_id)
 }
 
 fn chain_state_from_disk(disk: ChainStateDisk) -> Result<ChainState, String> {
@@ -606,12 +606,14 @@ mod tests {
             vout: 9,
         };
 
+        let mut first_cov = vec![0x01; 33];
+        first_cov[0] = rubin_consensus::constants::SUITE_ID_ML_DSA_87;
         st.utxos.insert(
             first.clone(),
             UtxoEntry {
                 value: 10,
                 covenant_type: rubin_consensus::constants::COV_TYPE_P2PK,
-                covenant_data: vec![0x01; 33],
+                covenant_data: first_cov,
                 creation_height: 3,
                 created_by_coinbase: false,
             },

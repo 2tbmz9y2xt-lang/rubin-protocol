@@ -219,8 +219,8 @@ func (s *ChainState) IndexedSuiteIDs() []uint8 {
 	seen := make(map[uint8]struct{})
 	ids := make([]uint8, 0)
 	for _, entry := range s.Utxos {
-		for _, suiteID := range explicitSuiteIDsForUtxoEntry(entry) {
-			if _, ok := seen[suiteID]; ok {
+		if suiteID, ok := explicitSuiteIDForUtxoEntry(entry); ok {
+			if _, seenAlready := seen[suiteID]; seenAlready {
 				continue
 			}
 			seen[suiteID] = struct{}{}
@@ -268,25 +268,21 @@ func (s *ChainState) UtxoExposureCountBySuiteID(suiteID uint8) uint64 {
 	return count
 }
 
-func explicitSuiteIDsForUtxoEntry(entry consensus.UtxoEntry) []uint8 {
+func explicitSuiteIDForUtxoEntry(entry consensus.UtxoEntry) (uint8, bool) {
 	switch entry.CovenantType {
 	case consensus.COV_TYPE_P2PK:
 		if len(entry.CovenantData) != consensus.MAX_P2PK_COVENANT_DATA {
-			return nil
+			return 0, false
 		}
-		return []uint8{entry.CovenantData[0]}
+		return entry.CovenantData[0], true
 	default:
-		return nil
+		return 0, false
 	}
 }
 
 func utxoEntryExplicitlyUsesSuite(entry consensus.UtxoEntry, suiteID uint8) bool {
-	for _, id := range explicitSuiteIDsForUtxoEntry(entry) {
-		if id == suiteID {
-			return true
-		}
-	}
-	return false
+	id, ok := explicitSuiteIDForUtxoEntry(entry)
+	return ok && id == suiteID
 }
 
 func sortOutpointsDeterministically(outpoints []consensus.Outpoint) {
