@@ -192,13 +192,14 @@ fn validate_suite_registry_item(item: &GenesisSuiteParams) -> Result<SuiteParams
         verify_cost: item.verify_cost,
         openssl_alg: normalize_suite_openssl_alg(&item.openssl_alg)?,
     };
+    let want = default_suite_registry_params();
+    if params.openssl_alg == want.openssl_alg
+        && (params.pubkey_len != want.pubkey_len || params.sig_len != want.sig_len)
+    {
+        return Err("bad suite_registry".to_string());
+    }
     if item.suite_id == SUITE_ID_ML_DSA_87 {
-        let want = default_suite_registry_params();
-        if params.pubkey_len != want.pubkey_len
-            || params.sig_len != want.sig_len
-            || params.verify_cost != want.verify_cost
-            || params.openssl_alg != want.openssl_alg
-        {
+        if params.verify_cost != want.verify_cost || params.openssl_alg != want.openssl_alg {
             return Err("bad suite_registry".to_string());
         }
     }
@@ -512,7 +513,7 @@ mod tests {
                   \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
                   \"suite_registry\":[\
                     {{\"suite_id\":1,\"pubkey_len\":{},\"sig_len\":{},\"verify_cost\":{},\"openssl_alg\":\"ML-DSA-87\"}},\
-                    {{\"suite_id\":2,\"pubkey_len\":32,\"sig_len\":64,\"verify_cost\":100,\"openssl_alg\":\"ML-DSA-87\"}}\
+                    {{\"suite_id\":2,\"pubkey_len\":{},\"sig_len\":{},\"verify_cost\":100,\"openssl_alg\":\"ML-DSA-87\"}}\
                   ],\
                   \"rotation_descriptor\":{{\
                     \"name\":\"test-rotation\",\
@@ -525,7 +526,9 @@ mod tests {
                 }}",
                 ML_DSA_87_PUBKEY_BYTES,
                 ML_DSA_87_SIG_BYTES,
-                VERIFY_COST_ML_DSA_87
+                VERIFY_COST_ML_DSA_87,
+                ML_DSA_87_PUBKEY_BYTES,
+                ML_DSA_87_SIG_BYTES
             ),
         )
         .expect("write");
@@ -554,7 +557,7 @@ mod tests {
             "{\
               \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
               \"suite_registry\":[\
-                {\"suite_id\":66,\"pubkey_len\":64,\"sig_len\":96,\"verify_cost\":321,\"openssl_alg\":\"ML-DSA-87\"}\
+                {\"suite_id\":66,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":321,\"openssl_alg\":\"ML-DSA-87\"}\
               ]\
             }",
         )
@@ -651,6 +654,34 @@ mod tests {
               \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
               \"suite_registry\":[\
                 {\"suite_id\":66,\"pubkey_len\":1,\"sig_len\":1048577,\"verify_cost\":321,\"openssl_alg\":\"ML-DSA-87\"}\
+              ]\
+            }",
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path)).unwrap_err();
+        assert!(err.contains("bad suite_registry"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_noncanonical_ml_dsa_lengths_for_custom_suite() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-suite-registry-noncanonical-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            "{\
+              \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+              \"suite_registry\":[\
+                {\"suite_id\":66,\"pubkey_len\":64,\"sig_len\":96,\"verify_cost\":321,\"openssl_alg\":\"ML-DSA-87\"}\
               ]\
             }",
         )

@@ -90,11 +90,13 @@ func validateSuiteRegistryItem(item SuiteParamsJSON) (consensus.SuiteParams, err
 		VerifyCost: item.VerifyCost,
 		OpenSSLAlg: alg,
 	}
+	want := defaultSuiteRegistryParams()
+	if params.OpenSSLAlg == want.OpenSSLAlg &&
+		(params.PubkeyLen != want.PubkeyLen || params.SigLen != want.SigLen) {
+		return consensus.SuiteParams{}, errors.New("bad suite_registry")
+	}
 	if item.SuiteID == consensus.SUITE_ID_ML_DSA_87 {
-		want := defaultSuiteRegistryParams()
-		if params.PubkeyLen != want.PubkeyLen ||
-			params.SigLen != want.SigLen ||
-			params.VerifyCost != want.VerifyCost ||
+		if params.VerifyCost != want.VerifyCost ||
 			params.OpenSSLAlg != want.OpenSSLAlg {
 			return consensus.SuiteParams{}, errors.New("bad suite_registry")
 		}

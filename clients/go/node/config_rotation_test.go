@@ -26,8 +26,8 @@ func TestBuildRotationProvider_ValidDescriptor(t *testing.T) {
 	cfg.SuiteRegistry = []SuiteParamsJSON{
 		{
 			SuiteID:    0x02,
-			PubkeyLen:  32,
-			SigLen:     64,
+			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 			VerifyCost: 100,
 			OpenSSLAlg: "ML-DSA-87",
 		},
@@ -114,8 +114,8 @@ func TestBuildRotationProvider_ExplicitSuiteRegistryWithoutDescriptor(t *testing
 	cfg.SuiteRegistry = []SuiteParamsJSON{
 		{
 			SuiteID:    0x42,
-			PubkeyLen:  64,
-			SigLen:     96,
+			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 			VerifyCost: 321,
 			OpenSSLAlg: "ML-DSA-87",
 		},
@@ -185,6 +185,13 @@ func TestValidateConfig_RejectsBadSuiteRegistry(t *testing.T) {
 		{
 			SuiteID:    0x42,
 			PubkeyLen:  maxSuiteRegistryParamLen + 1,
+			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+			VerifyCost: 30,
+			OpenSSLAlg: "ML-DSA-87",
+		},
+		{
+			SuiteID:    0x42,
+			PubkeyLen:  64,
 			SigLen:     96,
 			VerifyCost: 30,
 			OpenSSLAlg: "ML-DSA-87",
@@ -217,8 +224,8 @@ func TestRotationConfigJSON_Roundtrip(t *testing.T) {
 		SuiteRegistry: []SuiteParamsJSON{
 			{
 				SuiteID:    0x02,
-				PubkeyLen:  32,
-				SigLen:     64,
+				PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+				SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 				VerifyCost: 100,
 				OpenSSLAlg: "ML-DSA-87",
 			},
