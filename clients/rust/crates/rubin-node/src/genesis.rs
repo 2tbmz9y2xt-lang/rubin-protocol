@@ -84,8 +84,8 @@ pub struct LoadedGenesisConfig {
     pub chain_id: [u8; 32],
     pub genesis_hash: Option<[u8; 32]>,
     pub core_ext_deployments: CoreExtDeploymentProfiles,
-    /// Optional SuiteContext from rotation_descriptor in config.
-    /// None means use DefaultRotationProvider (ML-DSA-87 at all heights).
+    /// Optional SuiteContext built from rotation_descriptor or suite_registry config.
+    /// None means use the implicit default registry/provider with no explicit suite overlay.
     pub suite_context: Option<crate::sync::SuiteContext>,
 }
 

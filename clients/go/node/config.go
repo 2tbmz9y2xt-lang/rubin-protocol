@@ -135,8 +135,9 @@ func (cfg Config) buildSuiteRegistry() (*consensus.SuiteRegistry, error) {
 	return consensus.NewSuiteRegistryFromParams(params), nil
 }
 
-// BuildRotationProvider constructs a RotationProvider from the config.
-// Returns nil (=> default) if no rotation descriptor is configured.
+// BuildRotationProvider constructs rotation state from config.
+// Returns (nil, nil) when neither rotation_descriptor nor suite_registry is configured.
+// Returns DefaultRotationProvider with a non-nil registry for suite_registry-only bootstrap.
 func (cfg Config) BuildRotationProvider() (consensus.RotationProvider, *consensus.SuiteRegistry, error) {
 	registry, err := cfg.buildSuiteRegistry()
 	if err != nil {
