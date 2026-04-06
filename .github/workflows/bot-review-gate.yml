@@ -13,21 +13,76 @@ jobs:
   bot-review-gate:
     runs-on: ubuntu-latest
     steps:
-      - name: Check bot review threads are resolved
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v7
+      - name: Check bot reviews completed and threads resolved
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7
         with:
           script: |
-            // Bot review gate v2: thread-based, no dismiss required.
-            // Blocks merge if any unresolved review thread from a monitored bot exists.
-            // Summary-only reviews (no threads) do NOT block.
-            const MONITORED_BOTS = new Set([
+            // Bot review gate v3: pending-check + thread-check.
+            //
+            // Phase 1 — Pending check:
+            //   Blocks merge until Copilot has submitted at least one review
+            //   on this PR. Any commit counts — HEAD-staleness is handled by
+            //   the copilot_code_review ruleset rule separately.
+            //
+            // Phase 2 — Thread check:
+            //   Blocks merge if any unresolved review thread authored by a
+            //   MONITORED bot exists (paginated GraphQL).
+            //
+            // Re-triggers on pull_request_review:submitted — once the bot
+            // finishes its review, the gate re-evaluates automatically.
+
+            // Bots that MUST have reviewed this PR at least once.
+            const REQUIRED_REVIEWERS = new Set([
+              'copilot-pull-request-reviewer[bot]',
+            ]);
+
+            // Bots whose unresolved threads block merge.
+            const MONITORED_FOR_THREADS = new Set([
               'copilot-pull-request-reviewer[bot]',
               'chatgpt-codex-connector[bot]',
             ]);
 
             const prNumber = context.payload.pull_request.number;
+            const errors = [];
 
-            // Paginated GraphQL fetch of all review threads
+            // --- Phase 1: Pending check ---
+            let reviews;
+            try {
+              reviews = await github.paginate(
+                github.rest.pulls.listReviews,
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: prNumber,
+                }
+              );
+            } catch (err) {
+              core.setFailed(
+                `Failed to fetch reviews: ${err.message}. ` +
+                `Bot-review-gate blocked (fail-closed). Re-run to retry.`
+              );
+              return;
+            }
+
+            const reviewedBots = new Set();
+            for (const review of reviews) {
+              const login = review.user?.login || '';
+              if (REQUIRED_REVIEWERS.has(login)) {
+                reviewedBots.add(login);
+              }
+            }
+
+            const pendingBots = [...REQUIRED_REVIEWERS].filter(
+              b => !reviewedBots.has(b)
+            );
+            if (pendingBots.length > 0) {
+              errors.push(
+                `Waiting for first review from ${pendingBots.length} bot(s):`,
+                ...pendingBots.map(b => `  - ${b} (no review yet)`),
+              );
+            }
+
+            // --- Phase 2: Thread check (paginated) ---
             const query = `query($owner:String!, $repo:String!, $pr:Int!, $cursor:String) {
               repository(owner:$owner, name:$repo) {
                 pullRequest(number:$pr) {
@@ -72,23 +127,36 @@ jobs:
             const unresolved = threads.filter(t => {
               if (t.isResolved) return false;
               const author = t.comments.nodes[0]?.author?.login || '';
-              return MONITORED_BOTS.has(author);
+              return MONITORED_FOR_THREADS.has(author);
             });
 
             if (unresolved.length > 0) {
-              const summary = unresolved.map(t => {
+              const byBot = {};
+              for (const t of unresolved) {
                 const author = t.comments.nodes[0]?.author?.login || 'unknown';
-                return `  • ${author}`;
-              });
-              const unique = [...new Set(summary)];
+                byBot[author] = (byBot[author] || 0) + 1;
+              }
+              errors.push(
+                `${unresolved.length} unresolved bot review thread(s):`,
+                ...Object.entries(byBot).map(
+                  ([bot, count]) => `  - ${bot}: ${count} unresolved`
+                ),
+              );
+            }
+
+            // --- Verdict ---
+            if (errors.length > 0) {
               core.setFailed(
                 [
-                  `${unresolved.length} unresolved bot review thread(s):`,
-                  ...unique,
+                  ...errors,
                   '',
-                  'Resolve all bot review threads to unblock merge.'
+                  'To unblock merge:',
+                  '  1. Wait for required bots to complete their review.',
+                  '  2. Resolve all bot review threads.',
                 ].join('\n')
               );
             } else {
-              core.info('All bot review threads resolved (or no bot threads exist).');
+              core.info(
+                'All required bots reviewed. All bot review threads resolved.'
+              );
             }
