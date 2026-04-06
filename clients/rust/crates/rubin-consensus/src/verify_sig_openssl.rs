@@ -446,7 +446,7 @@ fn resolve_suite_verifier_binding(
     }
     Err(TxError::new(
         ErrorCode::TxErrSigAlgInvalid,
-        "verify_sig: unsupported suite verifier binding",
+        "unsupported suite verifier binding",
     ))
 }
 
@@ -465,7 +465,7 @@ fn verify_sig_with_binding(
             if pubkey.len() as u64 != *pubkey_len || signature.len() as u64 != *sig_len {
                 return Ok(false);
             }
-            openssl_verify_sig_digest_oneshot(*alg, pubkey, signature, digest32)
+            openssl_verify_sig_digest_oneshot(alg, pubkey, signature, digest32)
         }
     }
 }

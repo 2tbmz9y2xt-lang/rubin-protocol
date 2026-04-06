@@ -379,7 +379,7 @@ func resolveSuiteVerifierBinding(opensslAlg string, pubkeyLen int, sigLen int) (
 			sigLen:     ML_DSA_87_SIG_BYTES,
 		}, nil
 	}
-	return suiteVerifierBinding{}, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: unsupported suite verifier binding")
+	return suiteVerifierBinding{}, txerr(TX_ERR_SIG_ALG_INVALID, "unsupported suite verifier binding")
 }
 
 func verifySigWithBinding(binding suiteVerifierBinding, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
@@ -394,7 +394,7 @@ func verifySigWithBinding(binding suiteVerifierBinding, pubkey []byte, signature
 		}
 		return ok, nil
 	default:
-		return false, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: unsupported suite verifier binding")
+		return false, txerr(TX_ERR_SIG_ALG_INVALID, "unsupported suite verifier binding")
 	}
 }
 

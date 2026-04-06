@@ -465,7 +465,7 @@ fn run_core_ext_verify_sig_ext_binding(
     match binding {
         CoreExtVerificationBinding::NativeVerifySig => Err(TxError::new(
             ErrorCode::TxErrSigAlgInvalid,
-            "CORE_EXT non-native verifier binding unsupported",
+            "CORE_EXT native verifier binding unsupported on verify_sig_ext path",
         )),
         CoreExtVerificationBinding::VerifySigExtAccept => Ok(()),
         CoreExtVerificationBinding::VerifySigExtReject => Err(TxError::new(
@@ -1440,6 +1440,56 @@ mod tests {
             &mut cache,
         )
         .expect("binding fallback should accept");
+    }
+
+    #[test]
+    fn core_ext_active_txcontext_native_binding_without_runtime_verifier_fails_closed() {
+        let entry = UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_EXT,
+            covenant_data: core_ext_covdata(7, &[0x99]),
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let profiles = CoreExtProfiles {
+            active: vec![CoreExtActiveProfile {
+                ext_id: 7,
+                tx_context_enabled: true,
+                allowed_suite_ids: vec![0x42],
+                verification_binding: CoreExtVerificationBinding::NativeVerifySig,
+                verify_sig_ext_tx_context_fn: None,
+                binding_descriptor: Vec::new(),
+                ext_payload_schema: b"schema".to_vec(),
+            }],
+        };
+        let w = WitnessItem {
+            suite_id: 0x42,
+            pubkey: vec![0x01, 0x02, 0x03],
+            signature: vec![0x04, 0x01],
+        };
+        let (tx, tx_context, input_index, input_value, chain_id) =
+            build_test_txcontext_bundle(7, 55);
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let err = validate_core_ext_spend_with_cache_and_suite_context(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            55,
+            &profiles,
+            None,
+            None,
+            Some(&tx_context),
+            &mut cache,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+        assert_eq!(
+            err.msg,
+            "CORE_EXT native verifier binding unsupported on verify_sig_ext path"
+        );
     }
 
     #[test]
