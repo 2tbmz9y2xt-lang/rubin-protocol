@@ -42,17 +42,20 @@ type RotationConfigJSON struct {
 // SuiteParamsJSON is the JSON-serializable registry entry used for controlled
 // native-suite bootstrap without editing the built-in default registry.
 type SuiteParamsJSON struct {
-	SuiteID    uint8  `json:"suite_id"`
-	PubkeyLen  int    `json:"pubkey_len"`
-	SigLen     int    `json:"sig_len"`
-	VerifyCost uint64 `json:"verify_cost"`
-	OpenSSLAlg string `json:"openssl_alg"`
+	SuiteID    uint8   `json:"suite_id"`
+	PubkeyLen  int     `json:"pubkey_len"`
+	SigLen     int     `json:"sig_len"`
+	VerifyCost uint64  `json:"verify_cost"`
+	OpenSSLAlg *string `json:"openssl_alg"`
 }
 
 const maxSuiteRegistryParamLen = 1 << 20
 
-func normalizeSuiteRegistryOpenSSLAlg(value string) (string, error) {
-	switch strings.TrimSpace(value) {
+func normalizeSuiteRegistryOpenSSLAlg(value *string) (string, error) {
+	if value == nil {
+		return "", errors.New("bad suite_registry")
+	}
+	switch strings.TrimSpace(*value) {
 	case "", "ML-DSA-87":
 		return "ML-DSA-87", nil
 	default:
