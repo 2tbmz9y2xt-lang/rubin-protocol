@@ -54,8 +54,9 @@ const maxExplicitSuiteRegistryEntries = 16
 const productionLocalRotationDescriptorErr = "rotation_descriptor: production networks forbid local rotation_descriptor"
 const supportedNetworkNamesCSV = "devnet, testnet, mainnet"
 
-// CanonicalNetworkName returns the normalized supported network name and whether
-// that name is accepted by the node config/runtime surface.
+// CanonicalNetworkName returns the canonical network token for normalized
+// devnet/testnet/mainnet inputs. Callers that care about distinguishing an
+// explicitly blank raw config value must reject that before canonicalization.
 func CanonicalNetworkName(network string) (string, bool) {
 	normalized := normalizedNetworkName(network)
 	switch normalized {
