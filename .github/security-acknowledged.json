@@ -241,6 +241,13 @@
       "date": "2026-03-27"
     },
     {
+      "title_pattern": "Inconsistent Error Handling for Production Rotation",
+      "file_pattern": "genesis.rs",
+      "reason": "FALSE_POSITIVE: Go and Rust expose the exact same production-guard error text (`rotation_descriptor: production networks forbid local rotation_descriptor`). The reported difference is only the internal host-language error representation (`errors.New` vs `String`), which is not a consensus, RPC, or CLI compatibility contract.",
+      "acknowledged_by": "architect",
+      "date": "2026-04-06"
+    },
+    {
       "title_pattern": "Consensus Divergence via Deferred Verification",
       "file_pattern": "utxo_basic.rs",
       "reason": "FALSE_POSITIVE: Go already has queued/deferred signature validation in the parallel block path. Rust deferred helper is parity scaffolding, not a new Rust-only acceptance rule. Structural errors still fail inline; signature errors are only deferred to flush within the same tx/block validation boundary.",
