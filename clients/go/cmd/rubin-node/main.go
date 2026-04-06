@@ -388,6 +388,7 @@ type genesisPack struct {
 type genesisCoreExtProfile struct {
 	ExtID                uint16  `json:"ext_id"`
 	ActivationHeight     uint64  `json:"activation_height"`
+	TxContextEnabled     bool    `json:"tx_context_enabled,omitempty"`
 	AllowedSuiteIDs      []uint8 `json:"allowed_suite_ids,omitempty"`
 	Binding              string  `json:"binding,omitempty"`
 	BindingDescriptorHex string  `json:"binding_descriptor_hex,omitempty"`
@@ -519,6 +520,7 @@ func buildGenesisCoreExtProfiles(items []genesisCoreExtProfile, chainID [32]byte
 		deployments = append(deployments, consensus.CoreExtDeploymentProfile{
 			ExtID:             item.ExtID,
 			ActivationHeight:  item.ActivationHeight,
+			TxContextEnabled:  item.TxContextEnabled,
 			AllowedSuites:     allowed,
 			VerifySigExtFn:    verifySigExtFn,
 			BindingDescriptor: bindingDescriptor,

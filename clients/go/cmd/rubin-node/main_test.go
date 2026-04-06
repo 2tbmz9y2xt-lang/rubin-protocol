@@ -549,6 +549,57 @@ func TestParseGenesisConfigFullRejectsInvalidCoreExtAnchorProfiles(t *testing.T)
 	}
 }
 
+func TestParseGenesisConfigFullPropagatesTxContextEnabledCoreExtProfile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	chainIDBytes := node.DevnetGenesisChainID()
+	genesisHashBytes := node.DevnetGenesisBlockHash()
+	chainID := hex.EncodeToString(chainIDBytes[:])
+	genesisHash := hex.EncodeToString(genesisHashBytes[:])
+	if err := os.WriteFile(path, []byte(`{
+		"chain_id_hex":"0x`+chainID+`",
+		"genesis_hash_hex":"0x`+genesisHash+`",
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"tx_context_enabled":true,"allowed_suite_ids":[3],"binding":"native_verify_sig"}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+
+	cfg, err := parseGenesisConfigFull(path)
+	if err != nil {
+		t.Fatalf("parseGenesisConfigFull: %v", err)
+	}
+	profile, ok, err := cfg.CoreExtProfiles.LookupCoreExtProfile(7, 12)
+	if err != nil {
+		t.Fatalf("LookupCoreExtProfile: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected active core_ext profile")
+	}
+	if !profile.TxContextEnabled {
+		t.Fatalf("expected tx_context_enabled=true to propagate from genesis")
+	}
+}
+
+func TestParseGenesisConfigFullRejectsNonBooleanTxContextEnabled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	chainIDBytes := node.DevnetGenesisChainID()
+	genesisHashBytes := node.DevnetGenesisBlockHash()
+	chainID := hex.EncodeToString(chainIDBytes[:])
+	genesisHash := hex.EncodeToString(genesisHashBytes[:])
+	if err := os.WriteFile(path, []byte(`{
+		"chain_id_hex":"0x`+chainID+`",
+		"genesis_hash_hex":"0x`+genesisHash+`",
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"tx_context_enabled":1,"allowed_suite_ids":[3],"binding":"native_verify_sig"}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+
+	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "cannot unmarshal number into Go struct field") || !strings.Contains(err.Error(), "tx_context_enabled") {
+		t.Fatalf("expected invalid tx_context_enabled parse failure, got %v", err)
+	}
+}
+
 func TestParseGenesisHashRejectsInvalidHeaderBytes(t *testing.T) {
 	if _, err := parseGenesisHash(genesisPack{GenesisHeaderBytesHex: "zz"}); err == nil {
 		t.Fatalf("expected invalid hex error")
