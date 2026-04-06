@@ -493,6 +493,17 @@ fn run_core_ext_verify_sig_ext_binding(
     }
 }
 
+// Go reaches the txcontext fallback only through runtime-capable bindings:
+// parser-supported `verify_sig_ext` verifiers that can be wrapped into the
+// txcontext signature. Keep the Rust fallback equally narrow so legacy
+// harness-only bindings cannot silently bypass the txcontext verifier path.
+fn core_ext_binding_supports_txcontext_fallback(binding: &CoreExtVerificationBinding) -> bool {
+    matches!(
+        binding,
+        CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(_)
+    )
+}
+
 fn validate_core_ext_openssl_binding_descriptor(
     openssl_alg: &str,
     pubkey_len: u64,
@@ -931,6 +942,12 @@ fn validate_core_ext_spend_with_cache_impl(
                     "CORE_EXT signature invalid",
                 ))
             };
+        }
+        if !core_ext_binding_supports_txcontext_fallback(&p.verification_binding) {
+            return Err(TxError::new(
+                ErrorCode::TxErrSigAlgInvalid,
+                "CORE_EXT verify_sig_ext unsupported",
+            ));
         }
         return run_core_ext_verify_sig_ext_binding(
             &p.verification_binding,
@@ -1398,7 +1415,70 @@ mod tests {
     }
 
     #[test]
-    fn core_ext_active_txcontext_missing_runtime_verifier_falls_back_to_binding() {
+    fn core_ext_active_txcontext_missing_runtime_verifier_falls_back_to_openssl_binding() {
+        let entry = UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_EXT,
+            covenant_data: core_ext_covdata(7, &[0x99]),
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let binding_descriptor = core_ext_openssl_digest32_binding_descriptor_bytes(
+            "ML-DSA-87",
+            ML_DSA_87_PUBKEY_BYTES,
+            ML_DSA_87_SIG_BYTES,
+        )
+        .expect("descriptor");
+        let descriptor =
+            parse_core_ext_openssl_digest32_binding_descriptor(&binding_descriptor).expect("parse");
+        let profiles = CoreExtProfiles {
+            active: vec![CoreExtActiveProfile {
+                ext_id: 7,
+                tx_context_enabled: true,
+                allowed_suite_ids: vec![SUITE_ID_ML_DSA_87],
+                verification_binding: CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(
+                    descriptor,
+                ),
+                verify_sig_ext_tx_context_fn: None,
+                binding_descriptor,
+                ext_payload_schema: b"schema".to_vec(),
+            }],
+        };
+        let (mut tx, tx_context, input_index, input_value, chain_id) =
+            build_test_txcontext_bundle(7, 55);
+        let keypair = crate::verify_sig_openssl::Mldsa87Keypair::generate().expect("keypair");
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let digest =
+            sighash_v1_digest_with_cache(&mut cache, input_index, input_value, chain_id, 0x01)
+                .expect("digest");
+        let mut signature = keypair.sign_digest32(digest).expect("sign");
+        signature.push(0x01);
+        let witness = WitnessItem {
+            suite_id: SUITE_ID_ML_DSA_87,
+            pubkey: keypair.pubkey_bytes(),
+            signature,
+        };
+        tx.witness[0] = witness.clone();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        validate_core_ext_spend_with_cache_and_suite_context(
+            &entry,
+            &witness,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            55,
+            &profiles,
+            None,
+            None,
+            Some(&tx_context),
+            &mut cache,
+        )
+        .expect("binding fallback should accept");
+    }
+
+    #[test]
+    fn core_ext_active_txcontext_legacy_binding_without_runtime_verifier_fails_closed() {
         let entry = UtxoEntry {
             value: 100,
             covenant_type: COV_TYPE_EXT,
@@ -1425,7 +1505,7 @@ mod tests {
         let (tx, tx_context, input_index, input_value, chain_id) =
             build_test_txcontext_bundle(7, 55);
         let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
-        validate_core_ext_spend_with_cache_and_suite_context(
+        let err = validate_core_ext_spend_with_cache_and_suite_context(
             &entry,
             &w,
             &tx,
@@ -1439,7 +1519,9 @@ mod tests {
             Some(&tx_context),
             &mut cache,
         )
-        .expect("binding fallback should accept");
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+        assert_eq!(err.msg, "CORE_EXT verify_sig_ext unsupported");
     }
 
     #[test]
@@ -1486,10 +1568,7 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
-        assert_eq!(
-            err.msg,
-            "CORE_EXT native verifier binding unsupported on verify_sig_ext path"
-        );
+        assert_eq!(err.msg, "CORE_EXT verify_sig_ext unsupported");
     }
 
     #[test]
