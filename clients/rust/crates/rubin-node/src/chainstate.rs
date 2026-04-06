@@ -182,6 +182,40 @@ impl ChainState {
         self.utxo_set_hash()
     }
 
+    /// Returns the sorted suite IDs that are explicitly bound in current UTXO
+    /// covenant data. Today this covers explicit suite_id carriers such as
+    /// CORE_P2PK outputs.
+    pub fn indexed_suite_ids(&self) -> Vec<u8> {
+        let mut ids = Vec::new();
+        for entry in self.utxos.values() {
+            ids.extend(explicit_suite_ids_for_utxo_entry(entry));
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// Returns deterministically sorted outpoints whose covenant data
+    /// explicitly binds to suite_id.
+    pub fn utxo_outpoints_by_suite_id(&self, suite_id: u8) -> Vec<Outpoint> {
+        let mut outpoints = Vec::new();
+        for (outpoint, entry) in &self.utxos {
+            if utxo_entry_explicitly_uses_suite(entry, suite_id) {
+                outpoints.push(outpoint.clone());
+            }
+        }
+        outpoints.sort_by(|a, b| match a.txid.cmp(&b.txid) {
+            Ordering::Equal => a.vout.cmp(&b.vout),
+            other => other,
+        });
+        outpoints
+    }
+
+    /// Returns how many current UTXOs explicitly bind to suite_id.
+    pub fn utxo_exposure_count_by_suite_id(&self, suite_id: u8) -> u64 {
+        self.utxo_outpoints_by_suite_id(suite_id).len() as u64
+    }
+
     fn next_block_context(&self) -> Result<(u64, Option<[u8; 32]>), String> {
         if !self.has_tip {
             return Ok((0, None));
@@ -269,6 +303,24 @@ fn utxo_set_hash(utxos: &HashMap<Outpoint, UtxoEntry>) -> [u8; 32] {
     }
 
     Sha3_256::digest(&buf).into()
+}
+
+fn explicit_suite_ids_for_utxo_entry(entry: &UtxoEntry) -> Vec<u8> {
+    match entry.covenant_type {
+        rubin_consensus::constants::COV_TYPE_P2PK
+            if entry.covenant_data.len()
+                == rubin_consensus::constants::MAX_P2PK_COVENANT_DATA as usize =>
+        {
+            vec![entry.covenant_data[0]]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn utxo_entry_explicitly_uses_suite(entry: &UtxoEntry, suite_id: u8) -> bool {
+    explicit_suite_ids_for_utxo_entry(entry)
+        .into_iter()
+        .any(|id| id == suite_id)
 }
 
 fn chain_state_from_disk(disk: ChainStateDisk) -> Result<ChainState, String> {
@@ -529,6 +581,81 @@ mod tests {
         assert_eq!(got, st);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn chainstate_suite_exposure_queries_by_explicit_suite_id() {
+        let mut st = ChainState::new();
+        let first = Outpoint {
+            txid: [0x03; 32],
+            vout: 2,
+        };
+        let second = Outpoint {
+            txid: [0x01; 32],
+            vout: 0,
+        };
+        let third = Outpoint {
+            txid: [0x02; 32],
+            vout: 1,
+        };
+        let ignored = Outpoint {
+            txid: [0xaa; 32],
+            vout: 9,
+        };
+
+        st.utxos.insert(
+            first.clone(),
+            UtxoEntry {
+                value: 10,
+                covenant_type: rubin_consensus::constants::COV_TYPE_P2PK,
+                covenant_data: vec![0x01; 33],
+                creation_height: 3,
+                created_by_coinbase: false,
+            },
+        );
+        let mut rotated_cov = vec![0x11; 33];
+        rotated_cov[0] = 0x42;
+        st.utxos.insert(
+            second.clone(),
+            UtxoEntry {
+                value: 11,
+                covenant_type: rubin_consensus::constants::COV_TYPE_P2PK,
+                covenant_data: rotated_cov.clone(),
+                creation_height: 4,
+                created_by_coinbase: false,
+            },
+        );
+        st.utxos.insert(
+            third.clone(),
+            UtxoEntry {
+                value: 12,
+                covenant_type: rubin_consensus::constants::COV_TYPE_P2PK,
+                covenant_data: rotated_cov,
+                creation_height: 5,
+                created_by_coinbase: false,
+            },
+        );
+        st.utxos.insert(
+            ignored,
+            UtxoEntry {
+                value: 7,
+                covenant_type: rubin_consensus::constants::COV_TYPE_HTLC,
+                covenant_data: vec![
+                    0x00;
+                    rubin_consensus::constants::MAX_HTLC_COVENANT_DATA as usize
+                ],
+                creation_height: 6,
+                created_by_coinbase: false,
+            },
+        );
+
+        assert_eq!(st.indexed_suite_ids(), vec![0x01, 0x42]);
+        assert_eq!(st.utxo_exposure_count_by_suite_id(0x42), 2);
+        assert_eq!(
+            st.utxo_outpoints_by_suite_id(0x42),
+            vec![second.clone(), third.clone()]
+        );
+        assert_eq!(st.utxo_exposure_count_by_suite_id(0x99), 0);
     }
 
     #[test]

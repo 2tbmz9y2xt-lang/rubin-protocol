@@ -206,6 +206,86 @@ func (s *ChainState) registryOrNil() *consensus.SuiteRegistry {
 	return nil
 }
 
+// IndexedSuiteIDs returns the sorted suite IDs that are explicitly bound in
+// UTXO covenant data. Today this covers covenant forms that carry suite_id
+// directly in the output itself, such as CORE_P2PK.
+func (s *ChainState) IndexedSuiteIDs() []uint8 {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	seen := make(map[uint8]struct{})
+	ids := make([]uint8, 0)
+	for _, entry := range s.Utxos {
+		for _, suiteID := range explicitSuiteIDsForUtxoEntry(entry) {
+			if _, ok := seen[suiteID]; ok {
+				continue
+			}
+			seen[suiteID] = struct{}{}
+			ids = append(ids, suiteID)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids
+}
+
+// UtxoOutpointsBySuiteID returns the deterministically sorted outpoints whose
+// covenant data explicitly binds to suiteID.
+func (s *ChainState) UtxoOutpointsBySuiteID(suiteID uint8) []consensus.Outpoint {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	outpoints := make([]consensus.Outpoint, 0)
+	for op, entry := range s.Utxos {
+		if utxoEntryExplicitlyUsesSuite(entry, suiteID) {
+			outpoints = append(outpoints, op)
+		}
+	}
+	sortOutpointsDeterministically(outpoints)
+	return outpoints
+}
+
+// UtxoExposureCountBySuiteID reports how many current UTXOs explicitly bind to
+// suiteID in their covenant data.
+func (s *ChainState) UtxoExposureCountBySuiteID(suiteID uint8) uint64 {
+	return uint64(len(s.UtxoOutpointsBySuiteID(suiteID)))
+}
+
+func explicitSuiteIDsForUtxoEntry(entry consensus.UtxoEntry) []uint8 {
+	switch entry.CovenantType {
+	case consensus.COV_TYPE_P2PK:
+		if len(entry.CovenantData) != consensus.MAX_P2PK_COVENANT_DATA {
+			return nil
+		}
+		return []uint8{entry.CovenantData[0]}
+	default:
+		return nil
+	}
+}
+
+func utxoEntryExplicitlyUsesSuite(entry consensus.UtxoEntry, suiteID uint8) bool {
+	for _, id := range explicitSuiteIDsForUtxoEntry(entry) {
+		if id == suiteID {
+			return true
+		}
+	}
+	return false
+}
+
+func sortOutpointsDeterministically(outpoints []consensus.Outpoint) {
+	sort.Slice(outpoints, func(i, j int) bool {
+		if bytes.Compare(outpoints[i].Txid[:], outpoints[j].Txid[:]) != 0 {
+			return bytes.Compare(outpoints[i].Txid[:], outpoints[j].Txid[:]) < 0
+		}
+		return outpoints[i].Vout < outpoints[j].Vout
+	})
+}
+
 func ChainStatePath(dataDir string) string {
 	return filepath.Join(dataDir, chainStateFileName)
 }
