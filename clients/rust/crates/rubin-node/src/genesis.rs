@@ -8,11 +8,11 @@ use rubin_consensus::constants::{
 use rubin_consensus::encode_compact_size;
 use rubin_consensus::{
     block_hash, core_ext_profile_set_anchor_v1,
-    core_ext_verification_binding_from_name_and_descriptor, is_v1_production_rotation_network,
-    normalized_rotation_network_name, validate_rotation_descriptor_for_network,
-    CoreExtDeploymentProfile, CoreExtDeploymentProfiles, CryptoRotationDescriptor,
-    DefaultRotationProvider, DescriptorRotationProvider, SuiteParams, SuiteRegistry,
-    BLOCK_HEADER_BYTES,
+    core_ext_verification_binding_from_name_and_descriptor,
+    is_v1_production_rotation_network_normalized, normalized_rotation_network_name,
+    validate_rotation_descriptor_for_normalized_network, CoreExtDeploymentProfile,
+    CoreExtDeploymentProfiles, CryptoRotationDescriptor, DefaultRotationProvider,
+    DescriptorRotationProvider, SuiteParams, SuiteRegistry, BLOCK_HEADER_BYTES,
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,7 +22,7 @@ const GENESIS_TX_HEX: &str = "01000000000000000000000000010000000000000000000000
 const GENESIS_CHAIN_ID_HEX: &str =
     "88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103";
 const MAX_SUITE_REGISTRY_PARAM_LEN: u64 = MAX_WITNESS_BYTES_PER_TX as u64;
-const PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR: &str =
+pub const PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR: &str =
     "rotation_descriptor: production networks forbid local rotation_descriptor";
 #[cfg(test)]
 const GENESIS_MAGIC_SEPARATOR: &[u8] = b"RUBIN-GENESIS-v1";
@@ -249,7 +249,7 @@ fn build_suite_context_from_descriptor(
     let registry = Arc::new(registry);
     let rotation: Arc<dyn rubin_consensus::RotationProvider + Send + Sync> = match desc {
         Some(rd) => {
-            if is_v1_production_rotation_network(&normalized_network) {
+            if is_v1_production_rotation_network_normalized(normalized_network.as_ref()) {
                 return Err(PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR.to_string());
             }
             let descriptor = CryptoRotationDescriptor {
@@ -260,8 +260,12 @@ fn build_suite_context_from_descriptor(
                 spend_height: rd.spend_height,
                 sunset_height: rd.sunset_height,
             };
-            validate_rotation_descriptor_for_network(&normalized_network, &descriptor, &registry)
-                .map_err(|e| format!("rotation_descriptor: {e}"))?;
+            validate_rotation_descriptor_for_normalized_network(
+                normalized_network.as_ref(),
+                &descriptor,
+                &registry,
+            )
+            .map_err(|e| format!("rotation_descriptor: {e}"))?;
             Arc::new(DescriptorRotationProvider { descriptor })
         }
         None if !suite_registry.is_empty() => Arc::new(DefaultRotationProvider),
@@ -443,6 +447,32 @@ mod tests {
         validate_incoming_chain_id, PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR,
     };
 
+    fn suite_registry_entry_json(
+        suite_id: u8,
+        pubkey_len: u64,
+        sig_len: u64,
+        verify_cost: u64,
+        openssl_alg: &str,
+    ) -> String {
+        format!(
+            "{{\"suite_id\":{suite_id},\"pubkey_len\":{pubkey_len},\"sig_len\":{sig_len},\"verify_cost\":{verify_cost},\"openssl_alg\":\"{openssl_alg}\"}}"
+        )
+    }
+
+    fn canonical_suite_registry_entry_json(suite_id: u8) -> String {
+        suite_registry_entry_json(
+            suite_id,
+            ML_DSA_87_PUBKEY_BYTES,
+            ML_DSA_87_SIG_BYTES,
+            VERIFY_COST_ML_DSA_87,
+            "ML-DSA-87",
+        )
+    }
+
+    fn production_rotation_networks() -> [&'static str; 4] {
+        ["mainnet", "testnet", " MAINNET ", "\tTestNet\t"]
+    }
+
     #[test]
     fn derived_devnet_chain_id_matches_constant() {
         assert_eq!(derive_devnet_genesis_chain_id(), devnet_genesis_chain_id());
@@ -543,8 +573,8 @@ mod tests {
                 "{{\
                   \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
                   \"suite_registry\":[\
-                    {{\"suite_id\":1,\"pubkey_len\":{},\"sig_len\":{},\"verify_cost\":{},\"openssl_alg\":\"ML-DSA-87\"}},\
-                    {{\"suite_id\":2,\"pubkey_len\":{},\"sig_len\":{},\"verify_cost\":{},\"openssl_alg\":\"ML-DSA-87\"}}\
+                    {},\
+                    {}\
                   ],\
                   \"rotation_descriptor\":{{\
                     \"name\":\"test-rotation\",\
@@ -555,12 +585,8 @@ mod tests {
                     \"sunset_height\":10\
                   }}\
                 }}",
-                ML_DSA_87_PUBKEY_BYTES,
-                ML_DSA_87_SIG_BYTES,
-                VERIFY_COST_ML_DSA_87,
-                ML_DSA_87_PUBKEY_BYTES,
-                ML_DSA_87_SIG_BYTES,
-                VERIFY_COST_ML_DSA_87
+                canonical_suite_registry_entry_json(1),
+                canonical_suite_registry_entry_json(2)
             ),
         )
         .expect("write");
@@ -592,8 +618,8 @@ mod tests {
                     "{{\
                       \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
                       \"suite_registry\":[\
-                        {{\"suite_id\":1,\"pubkey_len\":{},\"sig_len\":{},\"verify_cost\":{},\"openssl_alg\":\"ML-DSA-87\"}},\
-                        {{\"suite_id\":2,\"pubkey_len\":{},\"sig_len\":{},\"verify_cost\":{},\"openssl_alg\":\"ML-DSA-87\"}}\
+                        {},\
+                        {}\
                       ],\
                       \"rotation_descriptor\":{{\
                         \"name\":\"prod-rotation\",\
@@ -604,12 +630,8 @@ mod tests {
                         \"sunset_height\":10\
                       }}\
                     }}",
-                    ML_DSA_87_PUBKEY_BYTES,
-                    ML_DSA_87_SIG_BYTES,
-                    VERIFY_COST_ML_DSA_87,
-                    ML_DSA_87_PUBKEY_BYTES,
-                    ML_DSA_87_SIG_BYTES,
-                    VERIFY_COST_ML_DSA_87
+                    canonical_suite_registry_entry_json(1),
+                    canonical_suite_registry_entry_json(2)
                 ),
             )
             .expect("write");
@@ -637,12 +659,13 @@ mod tests {
         let path = dir.join("genesis.json");
         std::fs::write(
             &path,
-            "{\
-              \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
-              \"suite_registry\":[\
-                {\"suite_id\":66,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":8,\"openssl_alg\":\"ML-DSA-87\"}\
-              ]\
-            }",
+            format!(
+                "{{\
+                  \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+                  \"suite_registry\":[{}]\
+                }}",
+                canonical_suite_registry_entry_json(66)
+            ),
         )
         .expect("write");
 
@@ -661,32 +684,35 @@ mod tests {
 
     #[test]
     fn load_genesis_config_accepts_production_suite_registry_without_rotation_descriptor() {
-        let dir = std::env::temp_dir().join(format!(
-            "rubin-node-genesis-suite-registry-mainnet-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let path = dir.join("genesis.json");
-        std::fs::write(
-            &path,
-            "{\
-              \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
-              \"suite_registry\":[\
-                {\"suite_id\":66,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":8,\"openssl_alg\":\"ML-DSA-87\"}\
-              ]\
-            }",
-        )
-        .expect("write");
+        for network in production_rotation_networks() {
+            let dir = std::env::temp_dir().join(format!(
+                "rubin-node-genesis-suite-registry-mainnet-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("time")
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            let path = dir.join("genesis.json");
+            std::fs::write(
+                &path,
+                format!(
+                    "{{\
+                      \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+                      \"suite_registry\":[{}]\
+                    }}",
+                    canonical_suite_registry_entry_json(66)
+                ),
+            )
+            .expect("write");
 
-        let cfg = load_genesis_config(Some(&path), "mainnet").expect("load");
-        let suite_context = cfg.suite_context.expect("suite context");
-        assert!(suite_context.registry.lookup(SUITE_ID_ML_DSA_87).is_some());
-        assert!(suite_context.registry.lookup(66).is_some());
+            let cfg = load_genesis_config(Some(&path), network).expect("load");
+            let suite_context = cfg.suite_context.expect("suite context");
+            assert!(suite_context.registry.lookup(SUITE_ID_ML_DSA_87).is_some());
+            assert!(suite_context.registry.lookup(66).is_some());
 
-        std::fs::remove_dir_all(&dir).expect("cleanup");
+            std::fs::remove_dir_all(&dir).expect("cleanup");
+        }
     }
 
     #[test]
@@ -746,7 +772,7 @@ mod tests {
         .expect("write");
 
         let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
-        assert!(err.contains("bad suite_registry"));
+        assert_eq!(err, "bad suite_registry");
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
@@ -774,7 +800,7 @@ mod tests {
         .expect("write");
 
         let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
-        assert!(err.contains("bad suite_registry"));
+        assert_eq!(err, "bad suite_registry");
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
@@ -792,19 +818,63 @@ mod tests {
         let path = dir.join("genesis.json");
         std::fs::write(
             &path,
-            "{\
-              \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
-              \"suite_registry\":[\
-                {\"suite_id\":66,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":8,\"openssl_alg\":\"\"}\
-              ]\
-            }",
+            format!(
+                "{{\
+                  \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+                  \"suite_registry\":[{}]\
+                }}",
+                suite_registry_entry_json(
+                    66,
+                    ML_DSA_87_PUBKEY_BYTES,
+                    ML_DSA_87_SIG_BYTES,
+                    VERIFY_COST_ML_DSA_87,
+                    "",
+                )
+            ),
         )
         .expect("write");
 
         let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
-        assert!(err.contains("bad suite_registry"));
+        assert_eq!(err, "bad suite_registry");
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_alias_suite_registry_openssl_alg() {
+        for alg in ["ml-dsa-87", "MLDSA87"] {
+            let dir = std::env::temp_dir().join(format!(
+                "rubin-node-genesis-suite-registry-alias-openssl-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("time")
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            let path = dir.join("genesis.json");
+            std::fs::write(
+                &path,
+                format!(
+                    "{{\
+                      \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+                      \"suite_registry\":[{}]\
+                    }}",
+                    suite_registry_entry_json(
+                        66,
+                        ML_DSA_87_PUBKEY_BYTES,
+                        ML_DSA_87_SIG_BYTES,
+                        VERIFY_COST_ML_DSA_87,
+                        alg,
+                    )
+                ),
+            )
+            .expect("write");
+
+            let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
+            assert_eq!(err, "bad suite_registry");
+
+            std::fs::remove_dir_all(&dir).expect("cleanup");
+        }
     }
 
     #[test]
@@ -830,7 +900,7 @@ mod tests {
         .expect("write");
 
         let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
-        assert!(err.contains("bad suite_registry"));
+        assert_eq!(err, "bad suite_registry");
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
@@ -848,12 +918,19 @@ mod tests {
         let path = dir.join("genesis.json");
         std::fs::write(
             &path,
-            "{\
-              \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
-              \"suite_registry\":[\
-                {\"suite_id\":66,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":321,\"openssl_alg\":\"ML-DSA-87\"}\
-              ]\
-            }",
+            format!(
+                "{{\
+                  \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+                  \"suite_registry\":[{}]\
+                }}",
+                suite_registry_entry_json(
+                    66,
+                    ML_DSA_87_PUBKEY_BYTES,
+                    ML_DSA_87_SIG_BYTES,
+                    321,
+                    "ML-DSA-87",
+                )
+            ),
         )
         .expect("write");
 
@@ -879,10 +956,7 @@ mod tests {
             if i != 0 {
                 entries.push(',');
             }
-            entries.push_str(&format!(
-                "{{\"suite_id\":{},\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":8,\"openssl_alg\":\"ML-DSA-87\"}}",
-                i + 2
-            ));
+            entries.push_str(&canonical_suite_registry_entry_json((i + 2) as u8));
         }
         std::fs::write(
             &path,

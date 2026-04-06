@@ -51,6 +51,7 @@ type SuiteParamsJSON struct {
 
 const maxSuiteRegistryParamLen = consensus.MAX_WITNESS_BYTES_PER_TX
 const maxExplicitSuiteRegistryEntries = 16
+const productionLocalRotationDescriptorErr = "rotation_descriptor: production networks forbid local rotation_descriptor"
 
 func validateSuiteRegistryParamLen(value uint32) (int, error) {
 	if value == 0 || value > uint32(maxSuiteRegistryParamLen) {
@@ -157,7 +158,7 @@ func (cfg Config) BuildRotationProvider() (consensus.RotationProvider, *consensu
 	}
 	network := normalizedNetworkName(cfg.Network)
 	if cfg.RotationDescriptor != nil && consensus.IsV1ProductionRotationNetwork(network) {
-		return nil, nil, errors.New("rotation_descriptor: production networks forbid local rotation_descriptor")
+		return nil, nil, errors.New(productionLocalRotationDescriptorErr)
 	}
 	if cfg.RotationDescriptor == nil {
 		if registry == nil {
@@ -232,6 +233,16 @@ func NormalizePeers(raw ...string) []string {
 func ValidateConfig(cfg Config) error {
 	if strings.TrimSpace(cfg.Network) == "" {
 		return errors.New("network is required")
+	}
+	network := normalizedNetworkName(cfg.Network)
+	switch network {
+	case "devnet", "testnet", "mainnet":
+	default:
+		return fmt.Errorf(
+			"unknown network '%s' (expected: %s)",
+			network,
+			strings.Join([]string{"devnet", "testnet", "mainnet"}, ", "),
+		)
 	}
 	if strings.TrimSpace(cfg.DataDir) == "" {
 		return errors.New("data_dir is required")

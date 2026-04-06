@@ -620,10 +620,13 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    use rubin_consensus::constants::{
+        ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, VERIFY_COST_ML_DSA_87,
+    };
     use serde_json::Value;
 
     use super::{parse_args, run, runtime_genesis_hash, validate_config};
-    use rubin_node::load_genesis_config;
+    use rubin_node::{load_genesis_config, PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR};
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -633,6 +636,16 @@ mod tests {
                 .expect("time")
                 .as_nanos()
         ))
+    }
+
+    fn canonical_suite_registry_entry_json(suite_id: u8) -> String {
+        format!(
+            "{{\"suite_id\":{suite_id},\"pubkey_len\":{ML_DSA_87_PUBKEY_BYTES},\"sig_len\":{ML_DSA_87_SIG_BYTES},\"verify_cost\":{VERIFY_COST_ML_DSA_87},\"openssl_alg\":\"ML-DSA-87\"}}"
+        )
+    }
+
+    fn production_rotation_networks() -> [&'static str; 4] {
+        ["mainnet", "testnet", " MAINNET ", "\tTestNet\t"]
     }
 
     #[test]
@@ -693,52 +706,53 @@ mod tests {
 
     #[test]
     fn dry_run_rejects_production_local_rotation_descriptor() {
-        let dir = unique_temp_dir("rubin-node-bin-prod-rotation");
-        fs::create_dir_all(&dir).expect("mkdir");
-        let genesis_file = dir.join("genesis.json");
-        fs::write(
-            &genesis_file,
-            "{\
-              \"chain_id_hex\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\
-              \"suite_registry\":[\
-                {\"suite_id\":1,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":8,\"openssl_alg\":\"ML-DSA-87\"},\
-                {\"suite_id\":2,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":8,\"openssl_alg\":\"ML-DSA-87\"}\
-              ],\
-              \"rotation_descriptor\":{\
-                \"name\":\"prod-rotation\",\
-                \"old_suite_id\":1,\
-                \"new_suite_id\":2,\
-                \"create_height\":1,\
-                \"spend_height\":5,\
-                \"sunset_height\":10\
-              }\
-            }",
-        )
-        .expect("write genesis");
+        for network in production_rotation_networks() {
+            let dir = unique_temp_dir("rubin-node-bin-prod-rotation");
+            fs::create_dir_all(&dir).expect("mkdir");
+            let genesis_file = dir.join("genesis.json");
+            fs::write(
+                &genesis_file,
+                format!(
+                    "{{\
+                      \"chain_id_hex\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\
+                      \"suite_registry\":[{},{}],\
+                      \"rotation_descriptor\":{{\
+                        \"name\":\"prod-rotation\",\
+                        \"old_suite_id\":1,\
+                        \"new_suite_id\":2,\
+                        \"create_height\":1,\
+                        \"spend_height\":5,\
+                        \"sunset_height\":10\
+                      }}\
+                    }}",
+                    canonical_suite_registry_entry_json(1),
+                    canonical_suite_registry_entry_json(2),
+                ),
+            )
+            .expect("write genesis");
 
-        let args = vec![
-            "--dry-run".to_string(),
-            "--network".to_string(),
-            "mainnet".to_string(),
-            "--datadir".to_string(),
-            dir.display().to_string(),
-            "--genesis-file".to_string(),
-            genesis_file.display().to_string(),
-        ];
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
+            let args = vec![
+                "--dry-run".to_string(),
+                "--network".to_string(),
+                network.to_string(),
+                "--datadir".to_string(),
+                dir.display().to_string(),
+                "--genesis-file".to_string(),
+                genesis_file.display().to_string(),
+            ];
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
 
-        let code = run(&args, &mut stdout, &mut stderr);
-        assert_eq!(code, 2, "stdout={}", String::from_utf8_lossy(&stdout));
-        assert!(
-            String::from_utf8_lossy(&stderr).contains(
-                "rotation_descriptor: production networks forbid local rotation_descriptor"
-            ),
-            "stderr={}",
-            String::from_utf8_lossy(&stderr)
-        );
+            let code = run(&args, &mut stdout, &mut stderr);
+            assert_eq!(code, 2, "stdout={}", String::from_utf8_lossy(&stdout));
+            assert!(
+                String::from_utf8_lossy(&stderr).contains(PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR),
+                "network={network} stderr={}",
+                String::from_utf8_lossy(&stderr)
+            );
 
-        fs::remove_dir_all(&dir).expect("cleanup");
+            fs::remove_dir_all(&dir).expect("cleanup");
+        }
     }
 
     #[test]
@@ -831,6 +845,13 @@ mod tests {
     fn validate_config_rejects_unknown_network() {
         let mut cfg =
             parse_args(&["--network".to_string(), "foobar".to_string()]).expect("parse args");
+        let err = validate_config(&mut cfg).unwrap_err();
+        assert!(err.contains("unknown network"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_config_rejects_oversized_unknown_network() {
+        let mut cfg = parse_args(&["--network".to_string(), "M".repeat(1024)]).expect("parse args");
         let err = validate_config(&mut cfg).unwrap_err();
         assert!(err.contains("unknown network"), "unexpected error: {err}");
     }

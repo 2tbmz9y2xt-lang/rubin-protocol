@@ -1,6 +1,7 @@
 use crate::constants::{
     ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, VERIFY_COST_ML_DSA_87,
 };
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Consensus parameters for a single signature suite.
@@ -248,21 +249,38 @@ pub fn validate_rotation_set(
     Ok(())
 }
 
-pub fn normalized_rotation_network_name(network: &str) -> String {
-    let normalized = network.trim().to_ascii_lowercase();
-    if normalized.is_empty() {
-        "devnet".to_string()
-    } else {
-        normalized
+pub fn normalized_rotation_network_name(network: &str) -> Cow<'_, str> {
+    let trimmed = network.trim();
+    if trimmed.is_empty() {
+        return Cow::Borrowed("devnet");
     }
+    if trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
+        Cow::Owned(trimmed.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(trimmed)
+    }
+}
+
+pub fn is_v1_production_rotation_network_normalized(network: &str) -> bool {
+    matches!(network, "mainnet" | "testnet")
 }
 
 /// True for networks that use the v1 production rotation profile (finite H4 required).
 pub fn is_v1_production_rotation_network(network: &str) -> bool {
-    matches!(
-        normalized_rotation_network_name(network).as_str(),
-        "mainnet" | "testnet"
-    )
+    let normalized = normalized_rotation_network_name(network);
+    is_v1_production_rotation_network_normalized(normalized.as_ref())
+}
+
+/// Network-aware descriptor validation for already-normalized network names.
+pub fn validate_rotation_descriptor_for_normalized_network(
+    network: &str,
+    d: &CryptoRotationDescriptor,
+    registry: &SuiteRegistry,
+) -> Result<(), String> {
+    match network {
+        "mainnet" | "testnet" => validate_v1_production_rotation_descriptor(d, registry),
+        _ => d.validate(registry),
+    }
 }
 
 /// Network-aware descriptor validation: non-production networks run [`CryptoRotationDescriptor::validate`] only;
@@ -273,9 +291,20 @@ pub fn validate_rotation_descriptor_for_network(
     d: &CryptoRotationDescriptor,
     registry: &SuiteRegistry,
 ) -> Result<(), String> {
-    match normalized_rotation_network_name(network).as_str() {
-        "mainnet" | "testnet" => validate_v1_production_rotation_descriptor(d, registry),
-        _ => d.validate(registry),
+    let normalized = normalized_rotation_network_name(network);
+    validate_rotation_descriptor_for_normalized_network(normalized.as_ref(), d, registry)
+}
+
+/// [`validate_rotation_set`] on already-normalized non-production networks;
+/// [`validate_v1_production_rotation_set`] on normalized mainnet/testnet.
+pub fn validate_rotation_set_for_normalized_network(
+    network: &str,
+    descriptors: &[CryptoRotationDescriptor],
+    registry: &SuiteRegistry,
+) -> Result<(), String> {
+    match network {
+        "mainnet" | "testnet" => validate_v1_production_rotation_set(descriptors, registry),
+        _ => validate_rotation_set(descriptors, registry),
     }
 }
 
@@ -285,10 +314,8 @@ pub fn validate_rotation_set_for_network(
     descriptors: &[CryptoRotationDescriptor],
     registry: &SuiteRegistry,
 ) -> Result<(), String> {
-    match normalized_rotation_network_name(network).as_str() {
-        "mainnet" | "testnet" => validate_v1_production_rotation_set(descriptors, registry),
-        _ => validate_rotation_set(descriptors, registry),
-    }
+    let normalized = normalized_rotation_network_name(network);
+    validate_rotation_set_for_normalized_network(normalized.as_ref(), descriptors, registry)
 }
 
 /// Full descriptor validation plus finite `sunset_height` (H4) for the v1 production rotation profile.
@@ -420,6 +447,16 @@ mod tests {
         assert!(is_v1_production_rotation_network("\tTestNet\t"));
         assert!(!is_v1_production_rotation_network(""));
         assert!(!is_v1_production_rotation_network("devnet"));
+    }
+
+    #[test]
+    fn test_is_v1_production_rotation_network_normalized_helper_matches_public_entrypoint() {
+        for network in ["mainnet", "testnet", "devnet"] {
+            assert_eq!(
+                is_v1_production_rotation_network_normalized(network),
+                is_v1_production_rotation_network(network)
+            );
+        }
     }
 
     #[test]
