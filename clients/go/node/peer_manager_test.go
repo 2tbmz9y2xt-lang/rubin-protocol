@@ -21,6 +21,13 @@ func TestDefaultPeerRuntimeConfig_ClampMaxPeers(t *testing.T) {
 	}
 }
 
+func TestDefaultPeerRuntimeConfig_NormalizesNetwork(t *testing.T) {
+	cfg := DefaultPeerRuntimeConfig(" MAINNET ", 8)
+	if cfg.Network != "mainnet" {
+		t.Fatalf("network=%q, want mainnet", cfg.Network)
+	}
+}
+
 func TestNewPeerManager_DefaultsApplied(t *testing.T) {
 	pm := NewPeerManager(PeerRuntimeConfig{Network: "devnet"})
 	if pm.cfg.MaxPeers != 64 {

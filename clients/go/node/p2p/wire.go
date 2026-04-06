@@ -314,6 +314,13 @@ func decodeWireCommand(raw []byte) (string, error) {
 }
 
 func networkMagic(network string) [4]byte {
+	network, ok := node.CanonicalNetworkName(network)
+	if !ok {
+		// Low-level wire helpers still keep an isolation fallback for custom/private
+		// transports, but the node config/runtime surface rejects those names before
+		// startup. CanonicalNetworkName already normalized casing/whitespace, so the
+		// fallback path can reuse that exact normalized token.
+	}
 	switch network {
 	case "mainnet":
 		return [4]byte{'R', 'B', 'M', 'N'}

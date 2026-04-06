@@ -52,6 +52,19 @@ type SuiteParamsJSON struct {
 const maxSuiteRegistryParamLen = consensus.MAX_WITNESS_BYTES_PER_TX
 const maxExplicitSuiteRegistryEntries = 16
 const productionLocalRotationDescriptorErr = "rotation_descriptor: production networks forbid local rotation_descriptor"
+const supportedNetworkNamesCSV = "devnet, testnet, mainnet"
+
+// CanonicalNetworkName returns the normalized supported network name and whether
+// that name is accepted by the node config/runtime surface.
+func CanonicalNetworkName(network string) (string, bool) {
+	normalized := normalizedNetworkName(network)
+	switch normalized {
+	case "devnet", "testnet", "mainnet":
+		return normalized, true
+	default:
+		return normalized, false
+	}
+}
 
 func validateSuiteRegistryParamLen(value uint32) (int, error) {
 	if value == 0 || value > uint32(maxSuiteRegistryParamLen) {
@@ -234,14 +247,12 @@ func ValidateConfig(cfg Config) error {
 	if strings.TrimSpace(cfg.Network) == "" {
 		return errors.New("network is required")
 	}
-	network := normalizedNetworkName(cfg.Network)
-	switch network {
-	case "devnet", "testnet", "mainnet":
-	default:
+	network, ok := CanonicalNetworkName(cfg.Network)
+	if !ok {
 		return fmt.Errorf(
 			"unknown network '%s' (expected: %s)",
 			network,
-			strings.Join([]string{"devnet", "testnet", "mainnet"}, ", "),
+			supportedNetworkNamesCSV,
 		)
 	}
 	if strings.TrimSpace(cfg.DataDir) == "" {

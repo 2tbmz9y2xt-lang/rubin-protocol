@@ -81,6 +81,26 @@ func TestValidateConfigRejectsEmptyDataDir(t *testing.T) {
 	}
 }
 
+func TestCanonicalNetworkName(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		input  string
+		want   string
+		wantOK bool
+	}{
+		{name: "mainnet-trimmed", input: " MAINNET ", want: "mainnet", wantOK: true},
+		{name: "empty-defaults-devnet", input: " \t ", want: "devnet", wantOK: true},
+		{name: "unknown-stays-unknown", input: "private-net", want: "private-net", wantOK: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := CanonicalNetworkName(tc.input)
+			if got != tc.want || ok != tc.wantOK {
+				t.Fatalf("CanonicalNetworkName(%q)=(%q,%v), want (%q,%v)", tc.input, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestValidateConfigRejectsInvalidLogLevel(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.LogLevel = "verbose"
