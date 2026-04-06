@@ -86,11 +86,14 @@ pub use sighash::{
 pub use stealth::{parse_stealth_covenant_data, validate_stealth_spend, StealthCovenant};
 pub use subsidy::block_subsidy;
 pub use suite_registry::{
-    is_v1_production_rotation_network, validate_rotation_descriptor_for_network,
-    validate_rotation_set, validate_rotation_set_for_network,
+    canonical_rotation_network_name, canonical_rotation_network_name_normalized,
+    is_v1_production_rotation_network, is_v1_production_rotation_network_normalized,
+    normalized_rotation_network_name, validate_rotation_descriptor_for_network,
+    validate_rotation_descriptor_for_normalized_network, validate_rotation_set,
+    validate_rotation_set_for_network, validate_rotation_set_for_normalized_network,
     validate_v1_production_rotation_descriptor, validate_v1_production_rotation_set,
     CryptoRotationDescriptor, DefaultRotationProvider, DescriptorRotationProvider, NativeSuiteSet,
-    RotationProvider, SuiteParams, SuiteRegistry,
+    RotationProvider, SuiteParams, SuiteRegistry, SUPPORTED_ROTATION_NETWORK_NAMES_CSV,
 };
 pub use tx::{parse_tx, DaChunkCore, DaCommitCore, Tx, TxInput, TxOutput, WitnessItem};
 pub use tx_dep_graph::{

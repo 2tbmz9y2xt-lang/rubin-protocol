@@ -6,6 +6,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use rubin_consensus::{
+    canonical_rotation_network_name_normalized, normalized_rotation_network_name,
+    SUPPORTED_ROTATION_NETWORK_NAMES_CSV,
+};
 use rubin_node::{
     block_store_path, chain_state_path, default_peer_runtime_config, default_sync_config,
     load_chain_state, load_genesis_config, new_devnet_rpc_state_with_tx_pool,
@@ -456,21 +460,20 @@ fn normalize_peers(raw: &[String]) -> Vec<String> {
 }
 
 fn validate_config(cfg: &mut CliConfig) -> Result<(), String> {
-    // Normalize network name: trim + lowercase to prevent wire-magic mismatch.
-    // network_magic() in p2p_runtime.rs matches only exact lowercase names.
-    cfg.network = cfg.network.trim().to_lowercase();
-    if cfg.network.is_empty() {
+    if cfg.network.trim().is_empty() {
         return Err("network is required".to_string());
     }
-    // Reject unknown network names early, before P2P startup.
-    const KNOWN_NETWORKS: &[&str] = &["devnet", "testnet", "mainnet"];
-    if !KNOWN_NETWORKS.contains(&cfg.network.as_str()) {
-        return Err(format!(
-            "unknown network '{}' (expected: {})",
-            cfg.network,
-            KNOWN_NETWORKS.join(", ")
-        ));
-    }
+    // Normalize network name: trim + lowercase to prevent wire-magic mismatch.
+    // network_magic() in p2p_runtime.rs matches only exact lowercase names.
+    let normalized_network = normalized_rotation_network_name(&cfg.network);
+    cfg.network = canonical_rotation_network_name_normalized(normalized_network.as_ref())
+        .ok_or_else(|| {
+            format!(
+                "unknown network '{}' (expected: {})",
+                normalized_network, SUPPORTED_ROTATION_NETWORK_NAMES_CSV,
+            )
+        })?
+        .to_string();
     if cfg.data_dir.as_os_str().is_empty() {
         return Err("data_dir is required".to_string());
     }
@@ -620,10 +623,13 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    use rubin_consensus::constants::{
+        ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, VERIFY_COST_ML_DSA_87,
+    };
     use serde_json::Value;
 
     use super::{parse_args, run, runtime_genesis_hash, validate_config};
-    use rubin_node::load_genesis_config;
+    use rubin_node::{load_genesis_config, PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR};
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -633,6 +639,16 @@ mod tests {
                 .expect("time")
                 .as_nanos()
         ))
+    }
+
+    fn canonical_suite_registry_entry_json(suite_id: u8) -> String {
+        format!(
+            "{{\"suite_id\":{suite_id},\"pubkey_len\":{ML_DSA_87_PUBKEY_BYTES},\"sig_len\":{ML_DSA_87_SIG_BYTES},\"verify_cost\":{VERIFY_COST_ML_DSA_87},\"openssl_alg\":\"ML-DSA-87\"}}"
+        )
+    }
+
+    fn production_rotation_networks() -> [&'static str; 4] {
+        ["mainnet", "testnet", " MAINNET ", "\tTestNet\t"]
     }
 
     #[test]
@@ -689,6 +705,57 @@ mod tests {
         );
 
         fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn dry_run_rejects_production_local_rotation_descriptor() {
+        for network in production_rotation_networks() {
+            let dir = unique_temp_dir("rubin-node-bin-prod-rotation");
+            fs::create_dir_all(&dir).expect("mkdir");
+            let genesis_file = dir.join("genesis.json");
+            fs::write(
+                &genesis_file,
+                format!(
+                    "{{\
+                      \"chain_id_hex\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\
+                      \"suite_registry\":[{},{}],\
+                      \"rotation_descriptor\":{{\
+                        \"name\":\"prod-rotation\",\
+                        \"old_suite_id\":1,\
+                        \"new_suite_id\":2,\
+                        \"create_height\":1,\
+                        \"spend_height\":5,\
+                        \"sunset_height\":10\
+                      }}\
+                    }}",
+                    canonical_suite_registry_entry_json(1),
+                    canonical_suite_registry_entry_json(2),
+                ),
+            )
+            .expect("write genesis");
+
+            let args = vec![
+                "--dry-run".to_string(),
+                "--network".to_string(),
+                network.to_string(),
+                "--datadir".to_string(),
+                dir.display().to_string(),
+                "--genesis-file".to_string(),
+                genesis_file.display().to_string(),
+            ];
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+
+            let code = run(&args, &mut stdout, &mut stderr);
+            assert_eq!(code, 2, "stdout={}", String::from_utf8_lossy(&stdout));
+            assert!(
+                String::from_utf8_lossy(&stderr).contains(PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR),
+                "network={network} stderr={}",
+                String::from_utf8_lossy(&stderr)
+            );
+
+            fs::remove_dir_all(&dir).expect("cleanup");
+        }
     }
 
     #[test]
@@ -781,6 +848,21 @@ mod tests {
     fn validate_config_rejects_unknown_network() {
         let mut cfg =
             parse_args(&["--network".to_string(), "foobar".to_string()]).expect("parse args");
+        let err = validate_config(&mut cfg).unwrap_err();
+        assert!(err.contains("unknown network"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_config_rejects_whitespace_only_network() {
+        let mut cfg =
+            parse_args(&["--network".to_string(), " \t ".to_string()]).expect("parse args");
+        let err = validate_config(&mut cfg).unwrap_err();
+        assert_eq!(err, "network is required");
+    }
+
+    #[test]
+    fn validate_config_rejects_oversized_unknown_network() {
+        let mut cfg = parse_args(&["--network".to_string(), "M".repeat(1024)]).expect("parse args");
         let err = validate_config(&mut cfg).unwrap_err();
         assert!(err.contains("unknown network"), "unexpected error: {err}");
     }

@@ -51,6 +51,33 @@ type SuiteParamsJSON struct {
 
 const maxSuiteRegistryParamLen = consensus.MAX_WITNESS_BYTES_PER_TX
 const maxExplicitSuiteRegistryEntries = 16
+const productionLocalRotationDescriptorErr = "rotation_descriptor: production networks forbid local rotation_descriptor"
+const supportedNetworkNamesCSV = "devnet, testnet, mainnet"
+
+// CanonicalNetworkName returns the canonical network token for normalized
+// devnet/testnet/mainnet inputs. Callers that care about distinguishing an
+// explicitly blank raw config value must reject that before canonicalization.
+func CanonicalNetworkName(network string) (string, bool) {
+	normalized := normalizedNetworkName(network)
+	switch normalized {
+	case "devnet", "testnet", "mainnet":
+		return normalized, true
+	default:
+		return normalized, false
+	}
+}
+
+func canonicalConfigNetworkName(network string) (string, error) {
+	canonical, ok := CanonicalNetworkName(network)
+	if !ok {
+		return "", fmt.Errorf(
+			"unknown network '%s' (expected: %s)",
+			normalizedNetworkName(network),
+			supportedNetworkNamesCSV,
+		)
+	}
+	return canonical, nil
+}
 
 func validateSuiteRegistryParamLen(value uint32) (int, error) {
 	if value == 0 || value > uint32(maxSuiteRegistryParamLen) {
@@ -155,6 +182,16 @@ func (cfg Config) BuildRotationProvider() (consensus.RotationProvider, *consensu
 	if err != nil {
 		return nil, nil, fmt.Errorf("suite_registry: %w", err)
 	}
+	if strings.TrimSpace(cfg.Network) == "" {
+		return nil, nil, errors.New("network is required")
+	}
+	network, err := canonicalConfigNetworkName(cfg.Network)
+	if err != nil {
+		return nil, nil, err
+	}
+	if cfg.RotationDescriptor != nil && (network == "mainnet" || network == "testnet") {
+		return nil, nil, errors.New(productionLocalRotationDescriptorErr)
+	}
 	if cfg.RotationDescriptor == nil {
 		if registry == nil {
 			return nil, nil, nil
@@ -173,7 +210,6 @@ func (cfg Config) BuildRotationProvider() (consensus.RotationProvider, *consensu
 		SpendHeight:  rd.SpendHeight,
 		SunsetHeight: rd.SunsetHeight,
 	}
-	network := strings.ToLower(strings.TrimSpace(cfg.Network))
 	if err := consensus.ValidateRotationDescriptorForNetwork(network, desc, registry); err != nil {
 		return nil, nil, fmt.Errorf("rotation_descriptor: %w", err)
 	}
@@ -229,6 +265,9 @@ func NormalizePeers(raw ...string) []string {
 func ValidateConfig(cfg Config) error {
 	if strings.TrimSpace(cfg.Network) == "" {
 		return errors.New("network is required")
+	}
+	if _, err := canonicalConfigNetworkName(cfg.Network); err != nil {
+		return err
 	}
 	if strings.TrimSpace(cfg.DataDir) == "" {
 		return errors.New("data_dir is required")

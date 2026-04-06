@@ -36,6 +36,7 @@ pub use devnet_rpc::{
 pub use genesis::{
     devnet_genesis_block_bytes, devnet_genesis_chain_id, load_chain_id_from_genesis_file,
     load_genesis_config, validate_incoming_chain_id, LoadedGenesisConfig,
+    PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR,
 };
 pub use miner::{parse_mine_address_arg, MinedBlock, Miner, MinerConfig};
 pub use p2p_runtime::{default_peer_runtime_config, PeerManager};

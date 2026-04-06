@@ -2,6 +2,8 @@ package node
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -9,6 +11,12 @@ import (
 
 func stringPtr(s string) *string {
 	return &s
+}
+
+var productionRotationNetworks = []string{"mainnet", "testnet", " MAINNET ", "\tTestNet\t"}
+
+func quotedSubtestName(raw string) string {
+	return fmt.Sprintf("%q", raw)
 }
 
 func TestBuildRotationProvider_NilDescriptor(t *testing.T) {
@@ -25,7 +33,7 @@ func TestBuildRotationProvider_NilDescriptor(t *testing.T) {
 	}
 }
 
-func TestBuildRotationProvider_ValidDescriptor(t *testing.T) {
+func TestBuildRotationProvider_ValidDescriptorOnNonProductionNetwork(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.SuiteRegistry = []SuiteParamsJSON{
 		{
@@ -59,6 +67,97 @@ func TestBuildRotationProvider_ValidDescriptor(t *testing.T) {
 	}
 	if _, ok := reg.Lookup(0x02); !ok {
 		t.Fatal("expected explicit suite registry to include suite 0x02")
+	}
+}
+
+func TestBuildRotationProvider_RejectsProductionLocalRotationDescriptor(t *testing.T) {
+	for _, network := range productionRotationNetworks {
+		t.Run(quotedSubtestName(network), func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Network = network
+			cfg.SuiteRegistry = []SuiteParamsJSON{
+				{
+					SuiteID:    0x02,
+					PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+					SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+					VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+					OpenSSLAlg: stringPtr("ML-DSA-87"),
+				},
+			}
+			cfg.RotationDescriptor = &RotationConfigJSON{
+				Name:         "prod-rotation",
+				OldSuiteID:   consensus.SUITE_ID_ML_DSA_87,
+				NewSuiteID:   0x02,
+				CreateHeight: 1,
+				SpendHeight:  5,
+				SunsetHeight: 10,
+			}
+			_, _, err := cfg.BuildRotationProvider()
+			if err == nil {
+				t.Fatal("expected production local rotation_descriptor rejection")
+			}
+			if got, want := err.Error(), productionLocalRotationDescriptorErr; got != want {
+				t.Fatalf("error=%q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestBuildRotationProvider_RejectsSuiteRegistryEmptyOpenSSLAlg(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SuiteRegistry = []SuiteParamsJSON{{
+		SuiteID:    0x42,
+		PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+		SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+		VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+		OpenSSLAlg: stringPtr(""),
+	}}
+	_, _, err := cfg.BuildRotationProvider()
+	if err == nil {
+		t.Fatal("expected suite_registry rejection for empty openssl_alg")
+	}
+	if got, want := err.Error(), "suite_registry: bad suite_registry"; got != want {
+		t.Fatalf("error=%q, want %q", got, want)
+	}
+}
+
+func TestBuildRotationProvider_RejectsSuiteRegistryAliasOpenSSLAlg(t *testing.T) {
+	for _, alg := range []string{"ml-dsa-87", "MLDSA87"} {
+		t.Run(alg, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.SuiteRegistry = []SuiteParamsJSON{{
+				SuiteID:    0x42,
+				PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+				SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+				VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+				OpenSSLAlg: stringPtr(alg),
+			}}
+			_, _, err := cfg.BuildRotationProvider()
+			if err == nil {
+				t.Fatalf("expected suite_registry rejection for openssl_alg=%q", alg)
+			}
+			if got, want := err.Error(), "suite_registry: bad suite_registry"; got != want {
+				t.Fatalf("error=%q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestBuildRotationProvider_RejectsSuiteRegistryNoncanonicalVerifyCost(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SuiteRegistry = []SuiteParamsJSON{{
+		SuiteID:    0x42,
+		PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+		SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+		VerifyCost: consensus.VERIFY_COST_ML_DSA_87 + 1,
+		OpenSSLAlg: stringPtr("ML-DSA-87"),
+	}}
+	_, _, err := cfg.BuildRotationProvider()
+	if err == nil {
+		t.Fatal("expected suite_registry rejection for noncanonical verify_cost")
+	}
+	if got, want := err.Error(), "suite_registry: bad suite_registry"; got != want {
+		t.Fatalf("error=%q, want %q", got, want)
 	}
 }
 
@@ -149,6 +248,127 @@ func TestBuildRotationProvider_ExplicitSuiteRegistryWithoutDescriptor(t *testing
 	}
 }
 
+func TestBuildRotationProvider_ProductionExplicitSuiteRegistryWithoutDescriptor(t *testing.T) {
+	for _, network := range productionRotationNetworks {
+		t.Run(quotedSubtestName(network), func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Network = network
+			cfg.SuiteRegistry = []SuiteParamsJSON{
+				{
+					SuiteID:    0x42,
+					PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+					SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+					VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+					OpenSSLAlg: stringPtr("ML-DSA-87"),
+				},
+			}
+			rot, reg, err := cfg.BuildRotationProvider()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if rot == nil || reg == nil {
+				t.Fatal("expected production suite_registry-only bootstrap to remain available")
+			}
+			if _, ok := reg.Lookup(0x42); !ok {
+				t.Fatal("expected suite 0x42 in production registry")
+			}
+		})
+	}
+}
+
+func TestBuildRotationProvider_RejectsUnknownNetworkWithoutSeparateValidateConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Network = " not-a-network "
+	cfg.RotationDescriptor = &RotationConfigJSON{
+		Name:         "dev-rotation",
+		OldSuiteID:   consensus.SUITE_ID_ML_DSA_87,
+		NewSuiteID:   0x42,
+		CreateHeight: 1,
+		SpendHeight:  5,
+		SunsetHeight: 10,
+	}
+	cfg.SuiteRegistry = []SuiteParamsJSON{
+		{
+			SuiteID:    0x42,
+			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+			OpenSSLAlg: stringPtr("ML-DSA-87"),
+		},
+	}
+
+	_, _, err := cfg.BuildRotationProvider()
+	if err == nil {
+		t.Fatal("expected unknown network error")
+	}
+	if !strings.Contains(err.Error(), "unknown network") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestBuildRotationProvider_RejectsWhitespaceOnlyNetworkWithoutSeparateValidateConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Network = "   "
+	cfg.RotationDescriptor = &RotationConfigJSON{
+		Name:         "dev-rotation",
+		OldSuiteID:   consensus.SUITE_ID_ML_DSA_87,
+		NewSuiteID:   0x42,
+		CreateHeight: 1,
+		SpendHeight:  5,
+		SunsetHeight: 10,
+	}
+	cfg.SuiteRegistry = []SuiteParamsJSON{
+		{
+			SuiteID:    0x42,
+			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+			OpenSSLAlg: stringPtr("ML-DSA-87"),
+		},
+	}
+
+	_, _, err := cfg.BuildRotationProvider()
+	if err == nil {
+		t.Fatal("expected whitespace-only network error")
+	}
+	if got, want := err.Error(), "network is required"; got != want {
+		t.Fatalf("error=%q, want %q", got, want)
+	}
+}
+
+func TestValidateConfig_RejectsProductionLocalRotationDescriptor(t *testing.T) {
+	for _, network := range productionRotationNetworks {
+		t.Run(quotedSubtestName(network), func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Network = network
+			cfg.SuiteRegistry = []SuiteParamsJSON{
+				{
+					SuiteID:    0x02,
+					PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+					SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+					VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+					OpenSSLAlg: stringPtr("ML-DSA-87"),
+				},
+			}
+			cfg.RotationDescriptor = &RotationConfigJSON{
+				Name:         "prod-rotation",
+				OldSuiteID:   consensus.SUITE_ID_ML_DSA_87,
+				NewSuiteID:   0x02,
+				CreateHeight: 1,
+				SpendHeight:  5,
+				SunsetHeight: 10,
+			}
+			err := ValidateConfig(cfg)
+			if err == nil {
+				t.Fatal("expected validation error for production local rotation_descriptor")
+			}
+			if got, want := err.Error(), productionLocalRotationDescriptorErr; got != want {
+				t.Fatalf("error=%q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestValidateConfig_RejectsBadSuiteRegistry(t *testing.T) {
 	cases := []SuiteParamsJSON{
 		{
@@ -214,6 +434,26 @@ func TestValidateConfig_RejectsBadSuiteRegistry(t *testing.T) {
 		if err := ValidateConfig(cfg); err == nil {
 			t.Fatalf("expected validation error for bad suite_registry case %+v", tc)
 		}
+	}
+}
+
+func TestValidateConfig_RejectsUnknownNetwork(t *testing.T) {
+	for _, network := range []string{
+		"foobar",
+		"  not-a-network  ",
+		strings.Repeat("M", 1024),
+	} {
+		t.Run(network, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Network = network
+			err := ValidateConfig(cfg)
+			if err == nil {
+				t.Fatalf("expected validation error for network=%q", network)
+			}
+			if !strings.Contains(err.Error(), "unknown network") {
+				t.Fatalf("unexpected error for network=%q: %v", network, err)
+			}
+		})
 	}
 }
 

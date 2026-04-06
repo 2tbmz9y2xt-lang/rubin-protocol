@@ -100,6 +100,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "invalid config: %v\n", err)
 		return 2
 	}
+	if canonicalNetwork, ok := node.CanonicalNetworkName(cfg.Network); ok {
+		cfg.Network = canonicalNetwork
+	}
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		_, _ = fmt.Fprintf(stderr, "datadir create failed: %v\n", err)
 		return 2

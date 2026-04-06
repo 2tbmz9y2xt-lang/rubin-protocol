@@ -25,6 +25,14 @@ func TestNetworkMagic_Default(t *testing.T) {
 	}
 }
 
+func TestNetworkMagic_NormalizesKnownNetworkNames(t *testing.T) {
+	got := networkMagic(" MAINNET ")
+	want := [4]byte{'R', 'B', 'M', 'N'}
+	if got != want {
+		t.Fatalf("normalized mainnet magic=%v, want %v", got, want)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // decodeWireCommand — uncovered error branches
 // ---------------------------------------------------------------------------

@@ -55,6 +55,7 @@ func DefaultPeerRuntimeConfig(network string, maxPeers int) PeerRuntimeConfig {
 	if maxPeers <= 0 {
 		maxPeers = 64
 	}
+	network = normalizedNetworkName(network)
 	return PeerRuntimeConfig{
 		Network:          network,
 		MaxPeers:         maxPeers,
@@ -144,6 +145,7 @@ func clonePeerState(in *PeerState) *PeerState {
 }
 
 func normalizePeerRuntimeConfig(cfg PeerRuntimeConfig) PeerRuntimeConfig {
+	cfg.Network = normalizedNetworkName(cfg.Network)
 	if cfg.MaxPeers <= 0 {
 		cfg.MaxPeers = 64
 	}
