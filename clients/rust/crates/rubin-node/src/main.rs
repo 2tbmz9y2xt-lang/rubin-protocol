@@ -6,6 +6,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use rubin_consensus::{
+    canonical_rotation_network_name_normalized, normalized_rotation_network_name,
+    SUPPORTED_ROTATION_NETWORK_NAMES_CSV,
+};
 use rubin_node::{
     block_store_path, chain_state_path, default_peer_runtime_config, default_sync_config,
     load_chain_state, load_genesis_config, new_devnet_rpc_state_with_tx_pool,
@@ -458,19 +462,18 @@ fn normalize_peers(raw: &[String]) -> Vec<String> {
 fn validate_config(cfg: &mut CliConfig) -> Result<(), String> {
     // Normalize network name: trim + lowercase to prevent wire-magic mismatch.
     // network_magic() in p2p_runtime.rs matches only exact lowercase names.
-    cfg.network = cfg.network.trim().to_lowercase();
-    if cfg.network.is_empty() {
+    let normalized_network = normalized_rotation_network_name(&cfg.network);
+    if normalized_network.is_empty() {
         return Err("network is required".to_string());
     }
-    // Reject unknown network names early, before P2P startup.
-    const KNOWN_NETWORKS: &[&str] = &["devnet", "testnet", "mainnet"];
-    if !KNOWN_NETWORKS.contains(&cfg.network.as_str()) {
-        return Err(format!(
-            "unknown network '{}' (expected: {})",
-            cfg.network,
-            KNOWN_NETWORKS.join(", ")
-        ));
-    }
+    cfg.network = canonical_rotation_network_name_normalized(normalized_network.as_ref())
+        .ok_or_else(|| {
+            format!(
+                "unknown network '{}' (expected: {})",
+                normalized_network, SUPPORTED_ROTATION_NETWORK_NAMES_CSV,
+            )
+        })?
+        .to_string();
     if cfg.data_dir.as_os_str().is_empty() {
         return Err("data_dir is required".to_string());
     }

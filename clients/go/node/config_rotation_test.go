@@ -271,6 +271,36 @@ func TestBuildRotationProvider_ProductionExplicitSuiteRegistryWithoutDescriptor(
 	}
 }
 
+func TestBuildRotationProvider_RejectsUnknownNetworkWithoutSeparateValidateConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Network = " not-a-network "
+	cfg.RotationDescriptor = &RotationConfigJSON{
+		Name:         "dev-rotation",
+		OldSuiteID:   consensus.SUITE_ID_ML_DSA_87,
+		NewSuiteID:   0x42,
+		CreateHeight: 1,
+		SpendHeight:  5,
+		SunsetHeight: 10,
+	}
+	cfg.SuiteRegistry = []SuiteParamsJSON{
+		{
+			SuiteID:    0x42,
+			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+			OpenSSLAlg: stringPtr("ML-DSA-87"),
+		},
+	}
+
+	_, _, err := cfg.BuildRotationProvider()
+	if err == nil {
+		t.Fatal("expected unknown network error")
+	}
+	if !strings.Contains(err.Error(), "unknown network") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestValidateConfig_RejectsProductionLocalRotationDescriptor(t *testing.T) {
 	for _, network := range productionRotationNetworks {
 		t.Run(network, func(t *testing.T) {

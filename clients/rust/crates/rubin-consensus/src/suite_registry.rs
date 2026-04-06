@@ -261,6 +261,24 @@ pub fn normalized_rotation_network_name(network: &str) -> Cow<'_, str> {
     }
 }
 
+pub const SUPPORTED_ROTATION_NETWORK_NAMES_CSV: &str = "devnet, testnet, mainnet";
+
+pub fn canonical_rotation_network_name_normalized(network: &str) -> Option<&str> {
+    match network {
+        "devnet" | "testnet" | "mainnet" => Some(network),
+        _ => None,
+    }
+}
+
+pub fn canonical_rotation_network_name(network: &str) -> Option<Cow<'_, str>> {
+    let normalized = normalized_rotation_network_name(network);
+    if canonical_rotation_network_name_normalized(normalized.as_ref()).is_some() {
+        Some(normalized)
+    } else {
+        None
+    }
+}
+
 pub fn is_v1_production_rotation_network_normalized(network: &str) -> bool {
     matches!(network, "mainnet" | "testnet")
 }
@@ -457,6 +475,19 @@ mod tests {
                 is_v1_production_rotation_network(network)
             );
         }
+    }
+
+    #[test]
+    fn test_canonical_rotation_network_name_rejects_unknown_networks() {
+        assert_eq!(
+            canonical_rotation_network_name("  MAINNET  ").as_deref(),
+            Some("mainnet")
+        );
+        assert_eq!(
+            canonical_rotation_network_name("\tTestNet\t").as_deref(),
+            Some("testnet")
+        );
+        assert!(canonical_rotation_network_name("private-net").is_none());
     }
 
     #[test]

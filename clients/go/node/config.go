@@ -66,6 +66,18 @@ func CanonicalNetworkName(network string) (string, bool) {
 	}
 }
 
+func canonicalConfigNetworkName(network string) (string, error) {
+	canonical, ok := CanonicalNetworkName(network)
+	if !ok {
+		return "", fmt.Errorf(
+			"unknown network '%s' (expected: %s)",
+			normalizedNetworkName(network),
+			supportedNetworkNamesCSV,
+		)
+	}
+	return canonical, nil
+}
+
 func validateSuiteRegistryParamLen(value uint32) (int, error) {
 	if value == 0 || value > uint32(maxSuiteRegistryParamLen) {
 		return 0, errors.New("bad suite_registry")
@@ -169,8 +181,11 @@ func (cfg Config) BuildRotationProvider() (consensus.RotationProvider, *consensu
 	if err != nil {
 		return nil, nil, fmt.Errorf("suite_registry: %w", err)
 	}
-	network := normalizedNetworkName(cfg.Network)
-	if cfg.RotationDescriptor != nil && consensus.IsV1ProductionRotationNetwork(network) {
+	network, err := canonicalConfigNetworkName(cfg.Network)
+	if err != nil {
+		return nil, nil, err
+	}
+	if cfg.RotationDescriptor != nil && (network == "mainnet" || network == "testnet") {
 		return nil, nil, errors.New(productionLocalRotationDescriptorErr)
 	}
 	if cfg.RotationDescriptor == nil {
@@ -247,13 +262,8 @@ func ValidateConfig(cfg Config) error {
 	if strings.TrimSpace(cfg.Network) == "" {
 		return errors.New("network is required")
 	}
-	network, ok := CanonicalNetworkName(cfg.Network)
-	if !ok {
-		return fmt.Errorf(
-			"unknown network '%s' (expected: %s)",
-			network,
-			supportedNetworkNamesCSV,
-		)
+	if _, err := canonicalConfigNetworkName(cfg.Network); err != nil {
+		return err
 	}
 	if strings.TrimSpace(cfg.DataDir) == "" {
 		return errors.New("data_dir is required")
