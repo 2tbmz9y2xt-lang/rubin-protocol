@@ -549,7 +549,7 @@ func TestParseGenesisConfigFullRejectsInvalidCoreExtAnchorProfiles(t *testing.T)
 	}
 }
 
-func TestParseGenesisConfigFullPropagatesTxContextEnabledCoreExtProfile(t *testing.T) {
+func TestParseGenesisConfigFullRejectsTxContextEnabledCoreExtProfileWithoutRuntimeVerifier(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "genesis.json")
 	chainIDBytes := node.DevnetGenesisChainID()
@@ -564,19 +564,8 @@ func TestParseGenesisConfigFullPropagatesTxContextEnabledCoreExtProfile(t *testi
 		t.Fatalf("write genesis file: %v", err)
 	}
 
-	cfg, err := parseGenesisConfigFull(path)
-	if err != nil {
-		t.Fatalf("parseGenesisConfigFull: %v", err)
-	}
-	profile, ok, err := cfg.CoreExtProfiles.LookupCoreExtProfile(7, 12)
-	if err != nil {
-		t.Fatalf("LookupCoreExtProfile: %v", err)
-	}
-	if !ok {
-		t.Fatalf("expected active core_ext profile")
-	}
-	if !profile.TxContextEnabled {
-		t.Fatalf("expected tx_context_enabled=true to propagate from genesis")
+	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "tx_context_enabled core_ext profile requires runtime txcontext verifier wiring") {
+		t.Fatalf("expected tx_context_enabled runtime verifier rejection, got %v", err)
 	}
 }
 

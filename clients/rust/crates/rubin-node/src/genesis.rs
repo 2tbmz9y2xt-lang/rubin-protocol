@@ -393,6 +393,12 @@ fn core_ext_deployments_from_json(
                 item.ext_id
             ));
         }
+        if item.tx_context_enabled {
+            return Err(
+                "tx_context_enabled core_ext profile requires runtime txcontext verifier wiring"
+                    .to_string(),
+            );
+        }
         if !genesis_core_ext_binding_supported(binding_name) {
             return Err(format!("unsupported core_ext binding: {}", item.binding));
         }
@@ -1097,7 +1103,7 @@ mod tests {
     }
 
     #[test]
-    fn load_genesis_config_accepts_tx_context_enabled_profile() {
+    fn load_genesis_config_rejects_tx_context_enabled_profile_without_runtime_verifier() {
         let dir = std::env::temp_dir().join(format!(
             "rubin-node-genesis-core-ext-txcontext-{}",
             std::time::SystemTime::now()
@@ -1113,9 +1119,10 @@ mod tests {
         )
         .expect("write");
 
-        let cfg = load_genesis_config(Some(&path), "devnet").expect("load");
-        assert_eq!(cfg.core_ext_deployments.deployments.len(), 1);
-        assert!(cfg.core_ext_deployments.deployments[0].tx_context_enabled);
+        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
+        assert!(err.contains(
+            "tx_context_enabled core_ext profile requires runtime txcontext verifier wiring"
+        ));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }

@@ -966,6 +966,12 @@ fn core_ext_profiles_from_json(
                 item.ext_id
             ));
         }
+        if item.tx_context_enabled {
+            return Err(
+                "tx_context_enabled core_ext profile requires runtime txcontext verifier wiring"
+                    .to_string(),
+            );
+        }
         if !core_ext_runtime_binding_supported(binding_name) {
             return Err(format!("unsupported core_ext binding: {}", item.binding));
         }
@@ -4957,8 +4963,8 @@ mod tests {
     }
 
     #[test]
-    fn core_ext_profiles_accept_tx_context_enabled_profile() {
-        let profiles = core_ext_profiles_from_json(
+    fn core_ext_profiles_reject_tx_context_enabled_profile_without_runtime_verifier() {
+        let err = core_ext_profiles_from_json(
             &[CoreExtProfileJson {
                 ext_id: 9,
                 activation_height: 42,
@@ -4970,9 +4976,10 @@ mod tests {
             [0u8; 32],
             "",
         )
-        .expect("txcontext-enabled profiles should parse");
-        assert_eq!(profiles.deployments.len(), 1);
-        assert!(profiles.deployments[0].tx_context_enabled);
+        .unwrap_err();
+        assert!(err.contains(
+            "tx_context_enabled core_ext profile requires runtime txcontext verifier wiring"
+        ));
     }
 
     #[test]

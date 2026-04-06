@@ -286,6 +286,9 @@ func buildCoreExtDeployments(items []CoreExtProfileJSON) ([]consensus.CoreExtDep
 	deployments := make([]consensus.CoreExtDeploymentProfile, 0, len(items))
 	for _, item := range items {
 		binding := strings.TrimSpace(item.Binding)
+		if item.TxContextEnabled != 0 {
+			return nil, fmt.Errorf("tx_context_enabled core_ext profile requires runtime txcontext verifier wiring")
+		}
 		if err := runtimeCoreExtBindingIsSupported(binding); err != nil {
 			return nil, err
 		}

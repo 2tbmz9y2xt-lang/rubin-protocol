@@ -285,3 +285,17 @@ func TestBuildCoreExtProfilesRejectsUnsupportedBindingBeforeHexDecode(t *testing
 		t.Fatalf("expected unsupported binding error, got %v", err)
 	}
 }
+
+func TestBuildCoreExtProfilesRejectsTxContextEnabledWithoutRuntimeVerifier(t *testing.T) {
+	_, err := buildCoreExtProfiles([]CoreExtProfileJSON{{
+		ExtID:               7,
+		ActivationHeight:    12,
+		TxContextEnabled:    1,
+		AllowedSuiteIDs:     []uint8{3},
+		Binding:             "native_verify_sig",
+		ExtPayloadSchemaHex: "b2",
+	}}, "", "")
+	if err == nil || !strings.Contains(err.Error(), "tx_context_enabled core_ext profile requires runtime txcontext verifier wiring") {
+		t.Fatalf("expected tx_context_enabled runtime verifier rejection, got %v", err)
+	}
+}
