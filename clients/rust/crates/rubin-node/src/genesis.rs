@@ -1,19 +1,26 @@
 use std::fs;
 use std::path::Path;
 
+use rubin_consensus::constants::{
+    MAX_WITNESS_BYTES_PER_TX, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87,
+    SUITE_ID_SENTINEL, VERIFY_COST_ML_DSA_87,
+};
 use rubin_consensus::encode_compact_size;
 use rubin_consensus::{
     block_hash, core_ext_profile_set_anchor_v1,
     core_ext_verification_binding_from_name_and_descriptor,
     validate_rotation_descriptor_for_network, CoreExtDeploymentProfile, CoreExtDeploymentProfiles,
-    CryptoRotationDescriptor, DescriptorRotationProvider, SuiteRegistry, BLOCK_HEADER_BYTES,
+    CryptoRotationDescriptor, DefaultRotationProvider, DescriptorRotationProvider, SuiteParams,
+    SuiteRegistry, BLOCK_HEADER_BYTES,
 };
 use serde::Deserialize;
+use std::collections::{BTreeMap, BTreeSet};
 
 const GENESIS_HEADER_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000006f732e615e2f43337a53e9884adba7da32257d5bb5701adc7ed0bd406f2df91340e49e6900000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000";
 const GENESIS_TX_HEX: &str = "01000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff0200407a10f35a0000000021018448b91b88d1a6fbb65e872b72c381b2a9f3ce286a232f56309667f639dd72790000000000000000020020b716a4b7f4c0fab665298ab9b8199b601ab9fa7e0a27f0713383f34cf37071a8000000000000";
 const GENESIS_CHAIN_ID_HEX: &str =
     "88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103";
+const MAX_SUITE_REGISTRY_PARAM_LEN: u64 = MAX_WITNESS_BYTES_PER_TX as u64;
 #[cfg(test)]
 const GENESIS_MAGIC_SEPARATOR: &[u8] = b"RUBIN-GENESIS-v1";
 
@@ -28,6 +35,8 @@ struct GenesisPack {
     core_ext_profiles: Vec<GenesisCoreExtProfile>,
     #[serde(default)]
     rotation_descriptor: Option<GenesisRotationDescriptor>,
+    #[serde(default)]
+    suite_registry: Vec<GenesisSuiteParams>,
 }
 
 /// JSON-serializable rotation descriptor for genesis/config.
@@ -42,6 +51,15 @@ struct GenesisRotationDescriptor {
     spend_height: u64,
     #[serde(default)]
     sunset_height: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+struct GenesisSuiteParams {
+    suite_id: u8,
+    pubkey_len: u64,
+    sig_len: u64,
+    verify_cost: u64,
+    openssl_alg: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -67,8 +85,8 @@ pub struct LoadedGenesisConfig {
     pub chain_id: [u8; 32],
     pub genesis_hash: Option<[u8; 32]>,
     pub core_ext_deployments: CoreExtDeploymentProfiles,
-    /// Optional SuiteContext from rotation_descriptor in config.
-    /// None means use DefaultRotationProvider (ML-DSA-87 at all heights).
+    /// Optional SuiteContext built from rotation_descriptor or suite_registry config.
+    /// None means use the implicit default registry/provider with no explicit suite overlay.
     pub suite_context: Option<crate::sync::SuiteContext>,
 }
 
@@ -137,30 +155,111 @@ pub fn load_genesis_config(
             &payload.core_ext_profile_set_anchor_hex,
             &payload.core_ext_profiles,
         )?,
-        suite_context: build_suite_context_from_descriptor(&payload.rotation_descriptor, network)?,
+        suite_context: build_suite_context_from_descriptor(
+            &payload.rotation_descriptor,
+            &payload.suite_registry,
+            network,
+        )?,
     })
+}
+
+fn normalize_suite_openssl_alg(value: &str) -> Result<&'static str, String> {
+    match value.trim() {
+        "ML-DSA-87" => Ok("ML-DSA-87"),
+        _ => Err("bad suite_registry".to_string()),
+    }
+}
+
+fn default_suite_registry_params() -> SuiteParams {
+    SuiteParams {
+        suite_id: SUITE_ID_ML_DSA_87,
+        pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+        sig_len: ML_DSA_87_SIG_BYTES,
+        verify_cost: VERIFY_COST_ML_DSA_87,
+        openssl_alg: "ML-DSA-87",
+    }
+}
+
+const MAX_EXPLICIT_SUITE_REGISTRY_ITEMS: usize = 16;
+
+fn validate_suite_registry_param_len(value: u64) -> Result<u64, String> {
+    if value == 0 || value > usize::MAX as u64 || value > MAX_SUITE_REGISTRY_PARAM_LEN {
+        return Err("bad suite_registry".to_string());
+    }
+    Ok(value)
+}
+
+fn validate_suite_registry_item(item: &GenesisSuiteParams) -> Result<SuiteParams, String> {
+    if item.suite_id == SUITE_ID_SENTINEL || item.verify_cost == 0 {
+        return Err("bad suite_registry".to_string());
+    }
+    let pubkey_len = validate_suite_registry_param_len(item.pubkey_len)?;
+    let sig_len = validate_suite_registry_param_len(item.sig_len)?;
+    let params = SuiteParams {
+        suite_id: item.suite_id,
+        pubkey_len,
+        sig_len,
+        verify_cost: item.verify_cost,
+        openssl_alg: normalize_suite_openssl_alg(&item.openssl_alg)?,
+    };
+    let want = default_suite_registry_params();
+    if params.pubkey_len != want.pubkey_len
+        || params.sig_len != want.sig_len
+        || params.verify_cost != want.verify_cost
+    {
+        return Err("bad suite_registry".to_string());
+    }
+    Ok(params)
+}
+
+fn build_suite_registry_from_json(
+    items: &[GenesisSuiteParams],
+) -> Result<Option<SuiteRegistry>, String> {
+    if items.is_empty() {
+        return Ok(None);
+    }
+    if items.len() > MAX_EXPLICIT_SUITE_REGISTRY_ITEMS {
+        return Err("bad suite_registry".to_string());
+    }
+    let mut suites = BTreeMap::new();
+    suites.insert(SUITE_ID_ML_DSA_87, default_suite_registry_params());
+    let mut seen = BTreeSet::new();
+    for item in items {
+        if !seen.insert(item.suite_id) {
+            return Err("bad suite_registry".to_string());
+        }
+        suites.insert(item.suite_id, validate_suite_registry_item(item)?);
+    }
+
+    Ok(Some(SuiteRegistry::with_suites(suites)))
 }
 
 fn build_suite_context_from_descriptor(
     desc: &Option<GenesisRotationDescriptor>,
+    suite_registry: &[GenesisSuiteParams],
     network: &str,
 ) -> Result<Option<crate::sync::SuiteContext>, String> {
-    let Some(rd) = desc else {
-        return Ok(None);
-    };
     use std::sync::Arc;
-    let registry = Arc::new(SuiteRegistry::default_registry().clone());
-    let descriptor = CryptoRotationDescriptor {
-        name: rd.name.clone(),
-        old_suite_id: rd.old_suite_id,
-        new_suite_id: rd.new_suite_id,
-        create_height: rd.create_height,
-        spend_height: rd.spend_height,
-        sunset_height: rd.sunset_height,
+    let registry = build_suite_registry_from_json(suite_registry)?
+        .unwrap_or_else(SuiteRegistry::default_registry);
+    let registry = Arc::new(registry);
+    let rotation: Arc<dyn rubin_consensus::RotationProvider + Send + Sync> = match desc {
+        Some(rd) => {
+            let descriptor = CryptoRotationDescriptor {
+                name: rd.name.clone(),
+                old_suite_id: rd.old_suite_id,
+                new_suite_id: rd.new_suite_id,
+                create_height: rd.create_height,
+                spend_height: rd.spend_height,
+                sunset_height: rd.sunset_height,
+            };
+            validate_rotation_descriptor_for_network(network, &descriptor, &registry)
+                .map_err(|e| format!("rotation_descriptor: {e}"))?;
+            Arc::new(DescriptorRotationProvider { descriptor })
+        }
+        None if !suite_registry.is_empty() => Arc::new(DefaultRotationProvider),
+        None => return Ok(None),
     };
-    validate_rotation_descriptor_for_network(network, &descriptor, &registry)
-        .map_err(|e| format!("rotation_descriptor: {e}"))?;
-    let rotation = Arc::new(DescriptorRotationProvider { descriptor });
     Ok(Some(crate::sync::SuiteContext { rotation, registry }))
 }
 
@@ -324,6 +423,9 @@ fn core_ext_deployments_from_json(
 
 #[cfg(test)]
 mod tests {
+    use rubin_consensus::constants::{
+        ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, VERIFY_COST_ML_DSA_87,
+    };
     use rubin_consensus::{
         core_ext_profile_set_anchor_v1, CoreExtDeploymentProfile, CoreExtVerificationBinding,
     };
@@ -413,6 +515,301 @@ mod tests {
             12
         );
         assert!(!cfg.core_ext_deployments.deployments[0].tx_context_enabled);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_accepts_rotation_descriptor_with_explicit_suite_registry() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-rotation-suite-registry-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            format!(
+                "{{\
+                  \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+                  \"suite_registry\":[\
+                    {{\"suite_id\":1,\"pubkey_len\":{},\"sig_len\":{},\"verify_cost\":{},\"openssl_alg\":\"ML-DSA-87\"}},\
+                    {{\"suite_id\":2,\"pubkey_len\":{},\"sig_len\":{},\"verify_cost\":{},\"openssl_alg\":\"ML-DSA-87\"}}\
+                  ],\
+                  \"rotation_descriptor\":{{\
+                    \"name\":\"test-rotation\",\
+                    \"old_suite_id\":1,\
+                    \"new_suite_id\":2,\
+                    \"create_height\":1,\
+                    \"spend_height\":5,\
+                    \"sunset_height\":10\
+                  }}\
+                }}",
+                ML_DSA_87_PUBKEY_BYTES,
+                ML_DSA_87_SIG_BYTES,
+                VERIFY_COST_ML_DSA_87,
+                ML_DSA_87_PUBKEY_BYTES,
+                ML_DSA_87_SIG_BYTES,
+                VERIFY_COST_ML_DSA_87
+            ),
+        )
+        .expect("write");
+
+        let cfg = load_genesis_config(Some(&path), "devnet").expect("load");
+        let suite_context = cfg.suite_context.expect("suite context");
+        assert!(suite_context.registry.lookup(1).is_some());
+        assert!(suite_context.registry.lookup(2).is_some());
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_accepts_explicit_suite_registry_without_rotation_descriptor() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-suite-registry-only-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            "{\
+              \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+              \"suite_registry\":[\
+                {\"suite_id\":66,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":8,\"openssl_alg\":\"ML-DSA-87\"}\
+              ]\
+            }",
+        )
+        .expect("write");
+
+        let cfg = load_genesis_config(Some(&path), "devnet").expect("load");
+        let suite_context = cfg.suite_context.expect("suite context");
+        assert!(suite_context.registry.lookup(SUITE_ID_ML_DSA_87).is_some());
+        let params = suite_context.registry.lookup(66).expect("suite 66");
+        assert_eq!(params.verify_cost, VERIFY_COST_ML_DSA_87);
+        assert!(suite_context
+            .rotation
+            .native_spend_suites(0)
+            .contains(SUITE_ID_ML_DSA_87));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_suite_registry_missing_required_field() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-suite-registry-missing-field-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            "{\
+              \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+              \"suite_registry\":[\
+                {\"suite_id\":66,\"pubkey_len\":64,\"sig_len\":96,\"openssl_alg\":\"ML-DSA-87\"}\
+              ]\
+            }",
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
+        assert!(err.contains("missing field"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_bad_suite_registry_entry() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-suite-registry-bad-entry-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            format!(
+                "{{\
+                  \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+                  \"suite_registry\":[\
+                    {{\"suite_id\":{},\"pubkey_len\":{},\"sig_len\":{},\"verify_cost\":{},\"openssl_alg\":\"ML-DSA-87\"}}\
+                  ]\
+                }}",
+                SUITE_ID_ML_DSA_87,
+                ML_DSA_87_PUBKEY_BYTES - 1,
+                ML_DSA_87_SIG_BYTES,
+                VERIFY_COST_ML_DSA_87
+            ),
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
+        assert!(err.contains("bad suite_registry"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_suite_registry_length_overflow() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-suite-registry-overflow-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            "{\
+              \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+              \"suite_registry\":[\
+                {\"suite_id\":66,\"pubkey_len\":1,\"sig_len\":100001,\"verify_cost\":8,\"openssl_alg\":\"ML-DSA-87\"}\
+              ]\
+            }",
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
+        assert!(err.contains("bad suite_registry"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_empty_suite_registry_openssl_alg() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-suite-registry-empty-openssl-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            "{\
+              \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+              \"suite_registry\":[\
+                {\"suite_id\":66,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":8,\"openssl_alg\":\"\"}\
+              ]\
+            }",
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
+        assert!(err.contains("bad suite_registry"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_noncanonical_ml_dsa_lengths_for_custom_suite() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-suite-registry-noncanonical-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            "{\
+              \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+              \"suite_registry\":[\
+                {\"suite_id\":66,\"pubkey_len\":64,\"sig_len\":96,\"verify_cost\":321,\"openssl_alg\":\"ML-DSA-87\"}\
+              ]\
+            }",
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
+        assert!(err.contains("bad suite_registry"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_noncanonical_ml_dsa_verify_cost_for_custom_suite() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-suite-registry-verify-cost-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            "{\
+              \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+              \"suite_registry\":[\
+                {\"suite_id\":66,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":321,\"openssl_alg\":\"ML-DSA-87\"}\
+              ]\
+            }",
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
+        assert!(err.contains("bad suite_registry"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_oversized_suite_registry() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-suite-registry-too-many-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        let mut entries = String::new();
+        for i in 0..(super::MAX_EXPLICIT_SUITE_REGISTRY_ITEMS + 1) {
+            if i != 0 {
+                entries.push(',');
+            }
+            entries.push_str(&format!(
+                "{{\"suite_id\":{},\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":8,\"openssl_alg\":\"ML-DSA-87\"}}",
+                i + 2
+            ));
+        }
+        std::fs::write(
+            &path,
+            format!(
+                "{{\
+                  \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+                  \"suite_registry\":[{}]\
+                }}",
+                entries
+            ),
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
+        assert!(err.contains("bad suite_registry"));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
