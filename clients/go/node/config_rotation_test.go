@@ -2,7 +2,6 @@ package node
 
 import (
 	"encoding/json"
-	"math"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -185,8 +184,8 @@ func TestValidateConfig_RejectsBadSuiteRegistry(t *testing.T) {
 		},
 		{
 			SuiteID:    0x42,
-			PubkeyLen:  1,
-			SigLen:     math.MaxInt,
+			PubkeyLen:  maxSuiteRegistryParamLen + 1,
+			SigLen:     96,
 			VerifyCost: 30,
 			OpenSSLAlg: "ML-DSA-87",
 		},
