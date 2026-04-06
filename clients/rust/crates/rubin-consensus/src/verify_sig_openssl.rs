@@ -462,6 +462,13 @@ fn verify_sig_with_binding(
             pubkey_len,
             sig_len,
         } => {
+            #[cfg(target_pointer_width = "32")]
+            if *pubkey_len > usize::MAX as u64 || *sig_len > usize::MAX as u64 {
+                return Err(TxError::new(
+                    ErrorCode::TxErrSigAlgInvalid,
+                    "unsupported suite verifier binding",
+                ));
+            }
             if pubkey.len() as u64 != *pubkey_len || signature.len() as u64 != *sig_len {
                 return Ok(false);
             }

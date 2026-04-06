@@ -493,17 +493,9 @@ fn run_core_ext_verify_sig_ext_binding(
     }
 }
 
-// Go reaches the txcontext fallback only through runtime-capable bindings:
-// parser-supported `verify_sig_ext` verifiers that can be wrapped into the
-// txcontext signature. Keep the Rust fallback equally narrow so legacy
-// harness-only bindings cannot silently bypass the txcontext verifier path.
-fn core_ext_binding_supports_txcontext_fallback(binding: &CoreExtVerificationBinding) -> bool {
-    matches!(
-        binding,
-        CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(_)
-    )
-}
-
+// OpenSSL digest32 binding descriptors remain valid for non-txcontext
+// verify_sig_ext profiles. Once tx_context_enabled is active, both Go and Rust
+// require a runtime txcontext verifier and fail closed if it is unavailable.
 fn validate_core_ext_openssl_binding_descriptor(
     openssl_alg: &str,
     pubkey_len: u64,
@@ -597,6 +589,13 @@ fn verify_core_ext_openssl_digest32_binding(
     signature: &[u8],
     digest32: &[u8; 32],
 ) -> Result<bool, TxError> {
+    #[cfg(target_pointer_width = "32")]
+    if descriptor.pubkey_len > usize::MAX as u64 || descriptor.sig_len > usize::MAX as u64 {
+        return Err(TxError::new(
+            ErrorCode::TxErrSigAlgInvalid,
+            "CORE_EXT verify_sig_ext unsupported OpenSSL binding",
+        ));
+    }
     if pubkey.len() as u64 != descriptor.pubkey_len || signature.len() as u64 != descriptor.sig_len
     {
         return Ok(false);
@@ -943,18 +942,10 @@ fn validate_core_ext_spend_with_cache_impl(
                 ))
             };
         }
-        if !core_ext_binding_supports_txcontext_fallback(&p.verification_binding) {
-            return Err(TxError::new(
-                ErrorCode::TxErrSigAlgInvalid,
-                "CORE_EXT verify_sig_ext unsupported",
-            ));
-        }
-        return run_core_ext_verify_sig_ext_binding(
-            &p.verification_binding,
-            &w.pubkey,
-            crypto_sig,
-            &digest32,
-        );
+        return Err(TxError::new(
+            ErrorCode::TxErrSigAlgInvalid,
+            "CORE_EXT verify_sig_ext unsupported",
+        ));
     }
     run_core_ext_verify_sig_ext_binding(&p.verification_binding, &w.pubkey, crypto_sig, &digest32)
 }
@@ -1415,7 +1406,7 @@ mod tests {
     }
 
     #[test]
-    fn core_ext_active_txcontext_missing_runtime_verifier_falls_back_to_openssl_binding() {
+    fn core_ext_active_txcontext_openssl_binding_without_runtime_verifier_fails_closed() {
         let entry = UtxoEntry {
             value: 100,
             covenant_type: COV_TYPE_EXT,
@@ -1435,7 +1426,7 @@ mod tests {
             active: vec![CoreExtActiveProfile {
                 ext_id: 7,
                 tx_context_enabled: true,
-                allowed_suite_ids: vec![SUITE_ID_ML_DSA_87],
+                allowed_suite_ids: vec![0x42],
                 verification_binding: CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(
                     descriptor,
                 ),
@@ -1454,13 +1445,13 @@ mod tests {
         let mut signature = keypair.sign_digest32(digest).expect("sign");
         signature.push(0x01);
         let witness = WitnessItem {
-            suite_id: SUITE_ID_ML_DSA_87,
+            suite_id: 0x42,
             pubkey: keypair.pubkey_bytes(),
             signature,
         };
         tx.witness[0] = witness.clone();
         let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
-        validate_core_ext_spend_with_cache_and_suite_context(
+        let err = validate_core_ext_spend_with_cache_and_suite_context(
             &entry,
             &witness,
             &tx,
@@ -1474,7 +1465,9 @@ mod tests {
             Some(&tx_context),
             &mut cache,
         )
-        .expect("binding fallback should accept");
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+        assert_eq!(err.msg, "CORE_EXT verify_sig_ext unsupported");
     }
 
     #[test]
