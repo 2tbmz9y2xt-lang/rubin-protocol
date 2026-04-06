@@ -18,36 +18,39 @@ import (
 )
 
 type Request struct {
-	TxctxCase             *TxctxCaseJSON                 `json:"txctx_case,omitempty"`
-	IncomingHasCommit     *bool                          `json:"incoming_has_commit,omitempty"`
-	CommitArrives         *bool                          `json:"commit_arrives,omitempty"`
-	StructuralOK          *bool                          `json:"structural_ok,omitempty"`
-	ContainsBlockCommit   *bool                          `json:"contains_block_with_commit,omitempty"`
-	ContainsKnownChunk    *bool                          `json:"contains_chunk_for_known_commit,omitempty"`
-	SuiteID               *uint8                         `json:"suite_id,omitempty"`
-	ContainsCommit        *bool                          `json:"contains_commit,omitempty"`
-	MaxFutureDrift        *uint64                        `json:"max_future_drift,omitempty"`
-	KeyBindingOK          *bool                          `json:"key_binding_ok,omitempty"`
-	GracePeriodActive     *bool                          `json:"grace_period_active,omitempty"`
-	WarmupDone            *bool                          `json:"warmup_done,omitempty"`
-	PreimageOK            *bool                          `json:"preimage_ok,omitempty"`
-	VerifyOK              *bool                          `json:"verify_ok,omitempty"`
-	BlockMTP              *uint64                        `json:"block_mtp,omitempty"`
-	HasOwnerAuth          *bool                          `json:"has_owner_auth,omitempty"`
-	SigThresholdOK        *bool                          `json:"sig_threshold_ok,omitempty"`
-	InIBD                 *bool                          `json:"in_ibd,omitempty"`
-	SentinelVerifyCalled  *bool                          `json:"sentinel_verify_called,omitempty"`
-	LocktimeOK            *bool                          `json:"locktime_ok,omitempty"`
-	Telemetry             map[string]any                 `json:"telemetry,omitempty"`
-	GetblocktxnOK         *bool                          `json:"getblocktxn_ok,omitempty"`
-	InitialCommitSeen     *bool                          `json:"initial_commit_seen,omitempty"`
-	ChainIDHex            string                         `json:"chain_id,omitempty"`
-	DaID                  string                         `json:"da_id,omitempty"`
-	TxHex                 string                         `json:"tx_hex,omitempty"`
-	TargetOldHex          string                         `json:"target_old,omitempty"`
-	Target                string                         `json:"target,omitempty"`
-	ExpectedTarget        string                         `json:"expected_target,omitempty"`
-	Op                    string                         `json:"op"`
+	TxctxCase            *TxctxCaseJSON `json:"txctx_case,omitempty"`
+	IncomingHasCommit    *bool          `json:"incoming_has_commit,omitempty"`
+	CommitArrives        *bool          `json:"commit_arrives,omitempty"`
+	StructuralOK         *bool          `json:"structural_ok,omitempty"`
+	ContainsBlockCommit  *bool          `json:"contains_block_with_commit,omitempty"`
+	ContainsKnownChunk   *bool          `json:"contains_chunk_for_known_commit,omitempty"`
+	SuiteID              *uint8         `json:"suite_id,omitempty"`
+	ContainsCommit       *bool          `json:"contains_commit,omitempty"`
+	MaxFutureDrift       *uint64        `json:"max_future_drift,omitempty"`
+	KeyBindingOK         *bool          `json:"key_binding_ok,omitempty"`
+	GracePeriodActive    *bool          `json:"grace_period_active,omitempty"`
+	WarmupDone           *bool          `json:"warmup_done,omitempty"`
+	PreimageOK           *bool          `json:"preimage_ok,omitempty"`
+	VerifyOK             *bool          `json:"verify_ok,omitempty"`
+	BlockMTP             *uint64        `json:"block_mtp,omitempty"`
+	HasOwnerAuth         *bool          `json:"has_owner_auth,omitempty"`
+	SigThresholdOK       *bool          `json:"sig_threshold_ok,omitempty"`
+	InIBD                *bool          `json:"in_ibd,omitempty"`
+	SentinelVerifyCalled *bool          `json:"sentinel_verify_called,omitempty"`
+	LocktimeOK           *bool          `json:"locktime_ok,omitempty"`
+	Telemetry            map[string]any `json:"telemetry,omitempty"`
+	GetblocktxnOK        *bool          `json:"getblocktxn_ok,omitempty"`
+	InitialCommitSeen    *bool          `json:"initial_commit_seen,omitempty"`
+	ChainIDHex           string         `json:"chain_id,omitempty"`
+	DaID                 string         `json:"da_id,omitempty"`
+	TxHex                string         `json:"tx_hex,omitempty"`
+	TargetOldHex         string         `json:"target_old,omitempty"`
+	Target               string         `json:"target,omitempty"`
+	ExpectedTarget       string         `json:"expected_target,omitempty"`
+	Op                   string         `json:"op"`
+	// Network selects optional v1 production rotation rules (finite H4 on mainnet/testnet).
+	// Omitted or empty keeps legacy harness/dev behavior.
+	Network               string                         `json:"network,omitempty"`
 	OwnerLockID           string                         `json:"owner_lock_id,omitempty"`
 	TargetHex             string                         `json:"target_hex,omitempty"`
 	ExpectedPrev          string                         `json:"expected_prev_hash,omitempty"`
@@ -389,7 +392,7 @@ func buildCoreExtSuiteContext(req Request) (consensus.RotationProvider, *consens
 		SpendHeight:  req.RotationDescriptor.SpendHeight,
 		SunsetHeight: req.RotationDescriptor.SunsetHeight,
 	}
-	if err := desc.Validate(reg); err != nil {
+	if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
 		return nil, nil, fmt.Errorf("descriptor-not-activated")
 	}
 	return consensus.DescriptorRotationProvider{Descriptor: desc}, reg, nil
@@ -1014,7 +1017,7 @@ func runFromStdin() {
 				SpendHeight:  req.RotationDescriptor.SpendHeight,
 				SunsetHeight: req.RotationDescriptor.SunsetHeight,
 			}
-			if err := desc.Validate(reg); err != nil {
+			if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
 				writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
 				return
 			}
@@ -1044,7 +1047,7 @@ func runFromStdin() {
 			SpendHeight:  req.RotationDescriptor.SpendHeight,
 			SunsetHeight: req.RotationDescriptor.SunsetHeight,
 		}
-		if err := desc.Validate(reg); err != nil {
+		if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
 			return
 		}
@@ -1071,7 +1074,7 @@ func runFromStdin() {
 			SpendHeight:  req.RotationDescriptor.SpendHeight,
 			SunsetHeight: req.RotationDescriptor.SunsetHeight,
 		}
-		if err := desc.Validate(reg); err != nil {
+		if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
 			return
 		}
@@ -1093,7 +1096,7 @@ func runFromStdin() {
 			SpendHeight:  req.RotationDescriptor.SpendHeight,
 			SunsetHeight: req.RotationDescriptor.SunsetHeight,
 		}
-		if err := desc.Validate(reg); err != nil {
+		if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
 			return
 		}
@@ -1120,7 +1123,7 @@ func runFromStdin() {
 					SunsetHeight: rd.SunsetHeight,
 				})
 			}
-			if err := consensus.ValidateRotationSet(ds, reg); err != nil {
+			if err := consensus.ValidateRotationSetForNetwork(req.Network, ds, reg); err != nil {
 				writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
 				return
 			}
@@ -1139,7 +1142,7 @@ func runFromStdin() {
 			SpendHeight:  req.RotationDescriptor.SpendHeight,
 			SunsetHeight: req.RotationDescriptor.SunsetHeight,
 		}
-		if err := desc.Validate(reg); err != nil {
+		if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
 			return
 		}
