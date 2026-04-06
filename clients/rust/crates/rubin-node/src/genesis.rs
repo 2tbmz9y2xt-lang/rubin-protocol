@@ -19,6 +19,7 @@ const GENESIS_HEADER_HEX: &str = "0100000000000000000000000000000000000000000000
 const GENESIS_TX_HEX: &str = "01000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff0200407a10f35a0000000021018448b91b88d1a6fbb65e872b72c381b2a9f3ce286a232f56309667f639dd72790000000000000000020020b716a4b7f4c0fab665298ab9b8199b601ab9fa7e0a27f0713383f34cf37071a8000000000000";
 const GENESIS_CHAIN_ID_HEX: &str =
     "88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103";
+const MAX_SUITE_REGISTRY_PARAM_LEN: u64 = 1 << 20;
 #[cfg(test)]
 const GENESIS_MAGIC_SEPARATOR: &[u8] = b"RUBIN-GENESIS-v1";
 
@@ -178,8 +179,8 @@ fn validate_suite_registry_item(item: &GenesisSuiteParams) -> Result<SuiteParams
     if item.suite_id == SUITE_ID_SENTINEL
         || item.pubkey_len == 0
         || item.sig_len == 0
-        || item.sig_len.checked_add(1).is_none()
-        || item.pubkey_len.checked_add(item.sig_len).is_none()
+        || item.pubkey_len > MAX_SUITE_REGISTRY_PARAM_LEN
+        || item.sig_len > MAX_SUITE_REGISTRY_PARAM_LEN
         || item.verify_cost == 0
     {
         return Err("bad suite_registry".to_string());
@@ -196,6 +197,7 @@ fn validate_suite_registry_item(item: &GenesisSuiteParams) -> Result<SuiteParams
         if params.pubkey_len != want.pubkey_len
             || params.sig_len != want.sig_len
             || params.verify_cost != want.verify_cost
+            || params.openssl_alg != want.openssl_alg
         {
             return Err("bad suite_registry".to_string());
         }
@@ -648,7 +650,7 @@ mod tests {
             "{\
               \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
               \"suite_registry\":[\
-                {\"suite_id\":66,\"pubkey_len\":1,\"sig_len\":18446744073709551615,\"verify_cost\":321,\"openssl_alg\":\"ML-DSA-87\"}\
+                {\"suite_id\":66,\"pubkey_len\":1,\"sig_len\":1048577,\"verify_cost\":321,\"openssl_alg\":\"ML-DSA-87\"}\
               ]\
             }",
         )
