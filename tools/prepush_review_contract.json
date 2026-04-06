@@ -1,8 +1,61 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "note": "rubin-protocol local pre-push review contract",
   "default_profile": "diff_only",
   "fullscan_mode": "skill-backed",
+  "self_audit": {
+    "prompt_pack_version": "self-audit-v1",
+    "required_pattern_families": [
+      {
+        "id": "exact-native-suite-params",
+        "title": "Exact native-suite parameter binding",
+        "checks": [
+          "Reject empty or alias algorithm strings that silently collapse into ML-DSA-87.",
+          "If a staged change touches native suite bootstrap or registry parsing, verify exact ML-DSA-87 pubkey_len, sig_len, and verify_cost enforcement on every path."
+        ]
+      },
+      {
+        "id": "bounded-bootstrap-surface",
+        "title": "Bounded bootstrap and allocation surface",
+        "checks": [
+          "Look for new unbounded loops, registry item counts, or large allocation surfaces introduced by config or genesis parsing.",
+          "Require explicit fail-closed caps for item count, pubkey_len, sig_len, and related resource knobs."
+        ]
+      },
+      {
+        "id": "cross-client-int-parity",
+        "title": "Cross-client integer and cast parity",
+        "checks": [
+          "Replay Go vs Rust type parity for every changed numeric field, especially casts between uint64/u64, int/usize, and length checks.",
+          "Reject any path where one client accepts values that the other rejects or panics on."
+        ]
+      },
+      {
+        "id": "bootstrap-default-registry-parity",
+        "title": "Bootstrap/default registry parity",
+        "checks": [
+          "If staged changes touch suite registry construction, confirm both clients preserve the same default ML-DSA-87 entry and initialization semantics.",
+          "Check registry-only bootstrap paths, descriptor+registry paths, and missing-registry fallback paths for identical behavior."
+        ]
+      },
+      {
+        "id": "reviewer-raised-ordering-and-redundancy",
+        "title": "Ordering, redundancy, and reviewer-raised sharp edges",
+        "checks": [
+          "Remove redundant validation if a stronger network-aware validator already covers the same surface.",
+          "Re-read staged diffs for the exact bot-review smells already seen on this track before declaring self-audit complete."
+        ]
+      },
+      {
+        "id": "hostile-regression-tests",
+        "title": "Hostile regression test replay",
+        "checks": [
+          "For every new fail-closed guard, add or update a negative test that proves the guard actually fires.",
+          "If a reviewer-raised pattern changes behavior, add a targeted regression test covering that exact pattern."
+        ]
+      }
+    ]
+  },
   "profiles": {
     "consensus_critical": {
       "combine_review_units_when_at_most": 4,
