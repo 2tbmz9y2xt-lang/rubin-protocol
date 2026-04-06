@@ -254,18 +254,19 @@ pub fn is_v1_production_rotation_network(network: &str) -> bool {
     n.eq_ignore_ascii_case("mainnet") || n.eq_ignore_ascii_case("testnet")
 }
 
-/// Runs [`CryptoRotationDescriptor::validate`], then on mainnet/testnet requires finite `sunset_height` (H4).
-/// Prefer this at call sites instead of `validate` + [`validate_v1_production_rotation_descriptor`].
+/// Network-aware descriptor validation: non-production networks run [`CryptoRotationDescriptor::validate`] only;
+/// mainnet/testnet use [`validate_v1_production_rotation_descriptor`] (full validate + finite H4), matching Go
+/// `ValidateRotationDescriptorForNetwork`.
 pub fn validate_rotation_descriptor_for_network(
     network: &str,
     d: &CryptoRotationDescriptor,
     registry: &SuiteRegistry,
 ) -> Result<(), String> {
-    d.validate(registry)?;
-    if is_v1_production_rotation_network(network) && d.sunset_height == 0 {
-        return Err("rotation: v1 production profile requires finite sunset_height (H4)".into());
+    if is_v1_production_rotation_network(network) {
+        validate_v1_production_rotation_descriptor(d, registry)
+    } else {
+        d.validate(registry)
     }
-    Ok(())
 }
 
 /// [`validate_rotation_set`] on non-production networks; [`validate_v1_production_rotation_set`] on mainnet/testnet.
@@ -281,13 +282,13 @@ pub fn validate_rotation_set_for_network(
     }
 }
 
-/// Finite H4 (sunset) only for the v1 production profile.
-///
-/// Does not call [`CryptoRotationDescriptor::validate`] (suite IDs, heights, overlap). For call sites
-/// that need both, use [`validate_rotation_descriptor_for_network`].
+/// Full descriptor validation plus finite `sunset_height` (H4) for the v1 production rotation profile.
+/// Matches Go `ValidateV1ProductionRotationDescriptor`.
 pub fn validate_v1_production_rotation_descriptor(
     d: &CryptoRotationDescriptor,
+    registry: &SuiteRegistry,
 ) -> Result<(), String> {
+    d.validate(registry)?;
     if d.sunset_height == 0 {
         return Err("rotation: v1 production profile requires finite sunset_height (H4)".into());
     }
@@ -561,7 +562,7 @@ mod tests {
             spend_height: 20,
             sunset_height: 0,
         };
-        assert!(validate_v1_production_rotation_descriptor(&d).is_err());
+        assert!(validate_v1_production_rotation_descriptor(&d, &reg).is_err());
         assert!(validate_rotation_descriptor_for_network("mainnet", &d, &reg).is_err());
         assert!(validate_rotation_descriptor_for_network("devnet", &d, &reg).is_ok());
         let d_h4 = CryptoRotationDescriptor {
