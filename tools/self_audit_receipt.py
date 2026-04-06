@@ -168,10 +168,10 @@ def read_receipt(repo_root: Path) -> tuple[dict[str, object], dict[str, object] 
         schema_version = int(payload.get("schema_version") or 0)
     except (TypeError, ValueError):
         result["reason"] = "schema-malformed"
-        return result, payload
+        return result, None
     if schema_version != SCHEMA_VERSION:
         result["reason"] = "schema-mismatch"
-        return result, payload
+        return result, None
     return result, payload
 
 

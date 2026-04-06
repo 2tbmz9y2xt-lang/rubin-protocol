@@ -68,6 +68,7 @@ class SelfAuditPromptPackTests(unittest.TestCase):
         self.assertIn("MODE=head", bundle)
         self.assertIn("--- REVIEW CHANGED FILES ---", bundle)
         self.assertIn("tools/self_audit_prompt_pack.py", bundle)
+        self.assertIn("--no-patch", run_git.call_args_list[0].args[1:])
 
     def test_staged_changed_files_captures_subdirectory_paths(self):
         with tempfile.TemporaryDirectory() as td:
@@ -140,6 +141,23 @@ class SelfAuditPromptPackTests(unittest.TestCase):
             )
             with self.assertRaises(ValueError):
                 m.load_self_audit_contract(contract_path)
+
+    def test_staged_bundle_handles_unborn_head(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            subprocess.run(["git", "init"], cwd=repo_root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_root, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_root, check=True)
+            nested = repo_root / "clients" / "go" / "node"
+            nested.mkdir(parents=True)
+            tracked = nested / "config.go"
+            tracked.write_text("package node\n\nconst x = 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", str(tracked.relative_to(repo_root))], cwd=repo_root, check=True)
+            bundle = m.staged_bundle(repo_root)
+            self.assertIn("MODE=staged", bundle)
+            self.assertIn("HEAD=(unborn)", bundle)
+            self.assertIn("clients/go/node/config.go", bundle)
+            self.assertIn("+const x = 1", bundle)
 
 
 if __name__ == "__main__":

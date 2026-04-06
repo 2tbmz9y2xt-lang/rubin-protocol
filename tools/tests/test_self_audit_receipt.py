@@ -99,6 +99,19 @@ class SelfAuditReceiptTests(unittest.TestCase):
             self.assertFalse(checked["fresh"])
             self.assertEqual(checked["reason"], "self-audit-prompt-mismatch")
 
+    def test_check_rejects_schema_mismatch_fail_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            self.init_repo(repo_root)
+            payload = m.write_receipt(repo_root, source="test")
+            receipt_path = Path(payload["receipt_path"])
+            data = json.loads(receipt_path.read_text(encoding="utf-8"))
+            data["schema_version"] = 999
+            receipt_path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            checked = m.check_commit(repo_root)
+            self.assertFalse(checked["fresh"])
+            self.assertEqual(checked["reason"], "schema-mismatch")
+
 
 if __name__ == "__main__":
     unittest.main()

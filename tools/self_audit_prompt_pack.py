@@ -142,6 +142,13 @@ def head_changed_files(repo_root: Path) -> list[str]:
     return [line.strip() for line in raw.splitlines() if line.strip()]
 
 
+def render_head_label(repo_root: Path) -> str:
+    try:
+        return run_git(repo_root, "rev-parse", "--short", "HEAD").strip()
+    except RuntimeError:
+        return "(unborn)"
+
+
 def build_bundle(repo_root: Path, *, mode: str, paths: list[str]) -> str:
     if not paths:
         raise ValueError(f"no {mode} reviewable diff")
@@ -149,9 +156,20 @@ def build_bundle(repo_root: Path, *, mode: str, paths: list[str]) -> str:
         stat = run_git(repo_root, "diff", "--cached", "--stat=160", "--find-renames", "--", *paths)
         patch = run_git(repo_root, "diff", "--cached", "--no-color", "--unified=3", "--find-renames", "--", *paths)
     else:
-        stat = run_git(repo_root, "show", "--stat=160", "--format=medium", "--find-renames", "--no-color", "HEAD", "--", *paths)
+        stat = run_git(
+            repo_root,
+            "show",
+            "--stat=160",
+            "--no-patch",
+            "--format=medium",
+            "--find-renames",
+            "--no-color",
+            "HEAD",
+            "--",
+            *paths,
+        )
         patch = run_git(repo_root, "show", "--format=medium", "--find-renames", "--no-color", "--unified=3", "HEAD", "--", *paths)
-    head = run_git(repo_root, "rev-parse", "--short", "HEAD").strip()
+    head = render_head_label(repo_root)
     lines = [
         f"MODE={mode}",
         f"HEAD={head}",
