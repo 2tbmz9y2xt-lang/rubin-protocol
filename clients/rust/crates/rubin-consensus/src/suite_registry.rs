@@ -248,6 +248,90 @@ pub fn validate_rotation_set(
     Ok(())
 }
 
+/// True for networks that use the v1 production rotation profile (finite H4 required).
+pub fn is_v1_production_rotation_network(network: &str) -> bool {
+    let n = network.trim();
+    n.eq_ignore_ascii_case("mainnet") || n.eq_ignore_ascii_case("testnet")
+}
+
+/// Network-aware descriptor validation: non-production networks run [`CryptoRotationDescriptor::validate`] only;
+/// mainnet/testnet use [`validate_v1_production_rotation_descriptor`] (full validate + finite H4), matching Go
+/// `ValidateRotationDescriptorForNetwork`.
+pub fn validate_rotation_descriptor_for_network(
+    network: &str,
+    d: &CryptoRotationDescriptor,
+    registry: &SuiteRegistry,
+) -> Result<(), String> {
+    if is_v1_production_rotation_network(network) {
+        validate_v1_production_rotation_descriptor(d, registry)
+    } else {
+        d.validate(registry)
+    }
+}
+
+/// [`validate_rotation_set`] on non-production networks; [`validate_v1_production_rotation_set`] on mainnet/testnet.
+pub fn validate_rotation_set_for_network(
+    network: &str,
+    descriptors: &[CryptoRotationDescriptor],
+    registry: &SuiteRegistry,
+) -> Result<(), String> {
+    if is_v1_production_rotation_network(network) {
+        validate_v1_production_rotation_set(descriptors, registry)
+    } else {
+        validate_rotation_set(descriptors, registry)
+    }
+}
+
+/// Full descriptor validation plus finite `sunset_height` (H4) for the v1 production rotation profile.
+/// Matches Go `ValidateV1ProductionRotationDescriptor`.
+pub fn validate_v1_production_rotation_descriptor(
+    d: &CryptoRotationDescriptor,
+    registry: &SuiteRegistry,
+) -> Result<(), String> {
+    d.validate(registry)?;
+    if d.sunset_height == 0 {
+        return Err("rotation: v1 production profile requires finite sunset_height (H4)".into());
+    }
+    Ok(())
+}
+
+/// Production checks: overlap rules, finite H4, chained H1 ≥ prior H4.
+pub fn validate_v1_production_rotation_set(
+    descriptors: &[CryptoRotationDescriptor],
+    registry: &SuiteRegistry,
+) -> Result<(), String> {
+    validate_rotation_set(descriptors, registry)?;
+    for (i, d) in descriptors.iter().enumerate() {
+        if d.sunset_height == 0 {
+            return Err(format!(
+                "rotation[{i}] {:?}: v1 production profile requires finite sunset_height (H4)",
+                d.name
+            ));
+        }
+    }
+    if descriptors.len() <= 1 {
+        return Ok(());
+    }
+    let mut order: Vec<usize> = (0..descriptors.len()).collect();
+    order.sort_by(|&i, &j| {
+        descriptors[i]
+            .create_height
+            .cmp(&descriptors[j].create_height)
+            .then_with(|| descriptors[i].name.cmp(&descriptors[j].name))
+    });
+    for w in order.windows(2) {
+        let prev = &descriptors[w[0]];
+        let cur = &descriptors[w[1]];
+        if cur.create_height < prev.sunset_height {
+            return Err(format!(
+                "rotation: successor {:?} H1 ({}) must be >= prior {:?} H4 ({})",
+                cur.name, cur.create_height, prev.name, prev.sunset_height
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,6 +549,166 @@ mod tests {
         assert!(validate_rotation_set(&overlap, &reg)
             .unwrap_err()
             .contains("overlapping"));
+    }
+
+    #[test]
+    fn test_v1_production_requires_h4() {
+        let reg = test_registry();
+        let d = CryptoRotationDescriptor {
+            name: "r".into(),
+            old_suite_id: 0x01,
+            new_suite_id: 0x02,
+            create_height: 10,
+            spend_height: 20,
+            sunset_height: 0,
+        };
+        assert!(validate_v1_production_rotation_descriptor(&d, &reg).is_err());
+        assert!(validate_rotation_descriptor_for_network("mainnet", &d, &reg).is_err());
+        assert!(validate_rotation_descriptor_for_network("devnet", &d, &reg).is_ok());
+        let d_h4 = CryptoRotationDescriptor {
+            sunset_height: 100,
+            ..d.clone()
+        };
+        validate_rotation_descriptor_for_network("mainnet", &d_h4, &reg).expect("mainnet with H4");
+    }
+
+    fn test_registry_three_suites() -> SuiteRegistry {
+        let mut suites = BTreeMap::new();
+        suites.insert(
+            0x01,
+            SuiteParams {
+                suite_id: 0x01,
+                pubkey_len: 2592,
+                sig_len: 4627,
+                verify_cost: 8,
+                openssl_alg: "ML-DSA-87",
+            },
+        );
+        suites.insert(
+            0x02,
+            SuiteParams {
+                suite_id: 0x02,
+                pubkey_len: 1024,
+                sig_len: 512,
+                verify_cost: 4,
+                openssl_alg: "ML-DSA-87",
+            },
+        );
+        suites.insert(
+            0x03,
+            SuiteParams {
+                suite_id: 0x03,
+                pubkey_len: 1024,
+                sig_len: 512,
+                verify_cost: 4,
+                openssl_alg: "ML-DSA-87",
+            },
+        );
+        SuiteRegistry::with_suites(suites)
+    }
+
+    #[test]
+    fn test_v1_production_chained_h1_after_prior_h4() {
+        let reg = test_registry_three_suites();
+        let d1 = CryptoRotationDescriptor {
+            name: "first".into(),
+            old_suite_id: 0x01,
+            new_suite_id: 0x02,
+            create_height: 10,
+            spend_height: 20,
+            sunset_height: 100,
+        };
+        let d2 = CryptoRotationDescriptor {
+            name: "second".into(),
+            old_suite_id: 0x02,
+            new_suite_id: 0x03,
+            create_height: 50,
+            spend_height: 60,
+            sunset_height: 200,
+        };
+        assert!(validate_v1_production_rotation_set(&[d1.clone(), d2.clone()], &reg).is_err());
+        let d2_ok = CryptoRotationDescriptor {
+            name: "second".into(),
+            old_suite_id: 0x02,
+            new_suite_id: 0x03,
+            create_height: 100,
+            spend_height: 110,
+            sunset_height: 200,
+        };
+        validate_v1_production_rotation_set(&[d1, d2_ok], &reg).expect("ordered chain");
+    }
+
+    fn test_registry_four_suites() -> SuiteRegistry {
+        let mut suites = BTreeMap::new();
+        suites.insert(
+            0x01,
+            SuiteParams {
+                suite_id: 0x01,
+                pubkey_len: 2592,
+                sig_len: 4627,
+                verify_cost: 8,
+                openssl_alg: "ML-DSA-87",
+            },
+        );
+        for id in [0x02u8, 0x03, 0x04] {
+            suites.insert(
+                id,
+                SuiteParams {
+                    suite_id: id,
+                    pubkey_len: 1024,
+                    sig_len: 512,
+                    verify_cost: 4,
+                    openssl_alg: "ML-DSA-87",
+                },
+            );
+        }
+        SuiteRegistry::with_suites(suites)
+    }
+
+    #[test]
+    fn test_v1_production_three_descriptor_chain() {
+        let reg = test_registry_four_suites();
+        let d1 = CryptoRotationDescriptor {
+            name: "r1".into(),
+            old_suite_id: 0x01,
+            new_suite_id: 0x02,
+            create_height: 10,
+            spend_height: 20,
+            sunset_height: 100,
+        };
+        let d2 = CryptoRotationDescriptor {
+            name: "r2".into(),
+            old_suite_id: 0x02,
+            new_suite_id: 0x03,
+            create_height: 100,
+            spend_height: 110,
+            sunset_height: 200,
+        };
+        let d3 = CryptoRotationDescriptor {
+            name: "r3".into(),
+            old_suite_id: 0x03,
+            new_suite_id: 0x04,
+            create_height: 200,
+            spend_height: 210,
+            sunset_height: 300,
+        };
+        validate_v1_production_rotation_set(&[d1.clone(), d2.clone(), d3.clone()], &reg)
+            .expect("three-step chain");
+        validate_v1_production_rotation_set(&[d3, d1.clone(), d2.clone()], &reg)
+            .expect("shuffled order");
+        let d3_early = CryptoRotationDescriptor {
+            name: "r3".into(),
+            old_suite_id: 0x03,
+            new_suite_id: 0x04,
+            create_height: 150,
+            spend_height: 160,
+            sunset_height: 300,
+        };
+        assert!(
+            validate_v1_production_rotation_set(&[d1, d2, d3_early], &reg)
+                .unwrap_err()
+                .contains("successor")
+        );
     }
 
     #[test]

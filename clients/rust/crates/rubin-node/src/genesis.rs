@@ -4,9 +4,9 @@ use std::path::Path;
 use rubin_consensus::encode_compact_size;
 use rubin_consensus::{
     block_hash, core_ext_profile_set_anchor_v1,
-    core_ext_verification_binding_from_name_and_descriptor, CoreExtDeploymentProfile,
-    CoreExtDeploymentProfiles, CryptoRotationDescriptor, DescriptorRotationProvider, SuiteRegistry,
-    BLOCK_HEADER_BYTES,
+    core_ext_verification_binding_from_name_and_descriptor,
+    validate_rotation_descriptor_for_network, CoreExtDeploymentProfile, CoreExtDeploymentProfiles,
+    CryptoRotationDescriptor, DescriptorRotationProvider, SuiteRegistry, BLOCK_HEADER_BYTES,
 };
 use serde::Deserialize;
 
@@ -91,7 +91,10 @@ pub fn devnet_genesis_hash() -> [u8; 32] {
     block_hash(&bytes[..BLOCK_HEADER_BYTES]).expect("devnet genesis hash")
 }
 
-pub fn load_genesis_config(path: Option<&Path>) -> Result<LoadedGenesisConfig, String> {
+pub fn load_genesis_config(
+    path: Option<&Path>,
+    network: &str,
+) -> Result<LoadedGenesisConfig, String> {
     let Some(path) = path else {
         return Ok(LoadedGenesisConfig {
             chain_id: devnet_genesis_chain_id(),
@@ -134,12 +137,13 @@ pub fn load_genesis_config(path: Option<&Path>) -> Result<LoadedGenesisConfig, S
             &payload.core_ext_profile_set_anchor_hex,
             &payload.core_ext_profiles,
         )?,
-        suite_context: build_suite_context_from_descriptor(&payload.rotation_descriptor)?,
+        suite_context: build_suite_context_from_descriptor(&payload.rotation_descriptor, network)?,
     })
 }
 
 fn build_suite_context_from_descriptor(
     desc: &Option<GenesisRotationDescriptor>,
+    network: &str,
 ) -> Result<Option<crate::sync::SuiteContext>, String> {
     let Some(rd) = desc else {
         return Ok(None);
@@ -154,15 +158,30 @@ fn build_suite_context_from_descriptor(
         spend_height: rd.spend_height,
         sunset_height: rd.sunset_height,
     };
-    descriptor
-        .validate(&registry)
+    validate_rotation_descriptor_for_network(network, &descriptor, &registry)
         .map_err(|e| format!("rotation_descriptor: {e}"))?;
     let rotation = Arc::new(DescriptorRotationProvider { descriptor });
     Ok(Some(crate::sync::SuiteContext { rotation, registry }))
 }
 
 pub fn load_chain_id_from_genesis_file(path: Option<&Path>) -> Result<[u8; 32], String> {
-    Ok(load_genesis_config(path)?.chain_id)
+    let Some(path) = path else {
+        return Ok(devnet_genesis_chain_id());
+    };
+    let raw = fs::read_to_string(path)
+        .map_err(|e| format!("read genesis file {}: {e}", path.display()))?;
+    let payload: GenesisPack = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse genesis file {}: {e}", path.display()))?;
+    let mut trimmed = payload.chain_id_hex.trim();
+    if trimmed.is_empty() {
+        return Err("chain_id_hex missing".to_string());
+    }
+    if let Some(rest) = trimmed.strip_prefix("0x") {
+        trimmed = rest;
+    } else if let Some(rest) = trimmed.strip_prefix("0X") {
+        trimmed = rest;
+    }
+    parse_hex32("chain_id", trimmed)
 }
 
 pub fn validate_incoming_chain_id(block_height: u64, chain_id: [u8; 32]) -> Result<(), String> {
@@ -384,7 +403,7 @@ mod tests {
         )
         .expect("write");
 
-        let cfg = load_genesis_config(Some(&path)).expect("load");
+        let cfg = load_genesis_config(Some(&path), "devnet").expect("load");
         assert_eq!(cfg.chain_id, devnet_genesis_chain_id());
         assert_eq!(cfg.genesis_hash, Some(devnet_genesis_hash()));
         assert_eq!(cfg.core_ext_deployments.deployments.len(), 1);
@@ -415,7 +434,7 @@ mod tests {
         )
         .expect("write");
 
-        let err = load_genesis_config(Some(&path)).unwrap_err();
+        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
         assert!(err.contains("non-empty allowed_suite_ids"));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -449,7 +468,7 @@ mod tests {
         )
         .expect("write");
 
-        let cfg = load_genesis_config(Some(&path)).expect("load");
+        let cfg = load_genesis_config(Some(&path), "devnet").expect("load");
         assert_eq!(cfg.genesis_hash, Some(devnet_genesis_hash()));
         assert_eq!(cfg.core_ext_deployments.deployments.len(), 1);
 
@@ -473,7 +492,7 @@ mod tests {
         )
         .expect("write");
 
-        let err = load_genesis_config(Some(&path)).unwrap_err();
+        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
         assert!(err.contains("requires runtime verifier wiring"));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -496,7 +515,7 @@ mod tests {
         )
         .expect("write");
 
-        let err = load_genesis_config(Some(&path)).unwrap_err();
+        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
         assert!(err.contains("expected a boolean"));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -530,7 +549,7 @@ mod tests {
         )
         .expect("write");
 
-        let err = load_genesis_config(Some(&path)).unwrap_err();
+        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
         assert!(err.contains("requires ext_payload_schema_hex"));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -587,7 +606,7 @@ mod tests {
         )
         .expect("write");
 
-        let err = load_genesis_config(Some(&path)).unwrap_err();
+        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
         assert!(err.contains("anchor mismatch"));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -614,7 +633,7 @@ mod tests {
         )
         .expect("write");
 
-        let err = load_genesis_config(Some(&path)).unwrap_err();
+        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
         assert!(err.contains("bad binding_descriptor_hex"));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -637,7 +656,7 @@ mod tests {
         )
         .expect("write");
 
-        let err = load_genesis_config(Some(&path)).unwrap_err();
+        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
         assert!(err.contains("unsupported core_ext binding"));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -671,7 +690,7 @@ mod tests {
         )
         .expect("write");
 
-        let cfg = load_genesis_config(Some(&path)).expect("load genesis");
+        let cfg = load_genesis_config(Some(&path), "devnet").expect("load genesis");
         assert_eq!(cfg.genesis_hash, Some(devnet_genesis_hash()));
         let profiles = cfg
             .core_ext_deployments
@@ -713,7 +732,7 @@ mod tests {
         )
         .expect("write");
 
-        let cfg = load_genesis_config(Some(&path)).expect("load");
+        let cfg = load_genesis_config(Some(&path), "devnet").expect("load");
         assert_eq!(cfg.chain_id, [0x11; 32]);
         assert_eq!(cfg.genesis_hash, Some([0x22; 32]));
 
@@ -737,7 +756,7 @@ mod tests {
         )
         .expect("write");
 
-        let cfg = load_genesis_config(Some(&path)).expect("load");
+        let cfg = load_genesis_config(Some(&path), "devnet").expect("load");
         assert_eq!(cfg.chain_id, [0x11; 32]);
         assert_eq!(cfg.genesis_hash, None);
 

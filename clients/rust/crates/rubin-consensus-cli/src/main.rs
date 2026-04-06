@@ -4,7 +4,6 @@ mod txctx_harness;
 use num_bigint::BigUint;
 use num_traits::Zero;
 use rubin_consensus::merkle::witness_merkle_root_wtxids;
-use rubin_consensus::suite_registry::validate_rotation_set;
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
     block_hash, compact_shortid,
@@ -14,11 +13,11 @@ use rubin_consensus::{
     merkle_root_txids, parse_core_ext_covenant_data, parse_tx, pow_check, retarget_v1,
     retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_at_height,
     tx_weight_and_stats_public, validate_block_basic_with_context_and_fees_at_height,
-    validate_block_basic_with_context_at_height, validate_tx_covenants_genesis,
-    CoreExtDeploymentProfile, CoreExtDeploymentProfiles, CryptoRotationDescriptor,
-    DescriptorRotationProvider, ErrorCode, FeatureBitDeployment, FeatureBitState,
-    FlagDayDeployment, InMemoryChainState, Outpoint, RotationProvider, SuiteParams, SuiteRegistry,
-    UtxoEntry,
+    validate_block_basic_with_context_at_height, validate_rotation_descriptor_for_network,
+    validate_rotation_set_for_network, validate_tx_covenants_genesis, CoreExtDeploymentProfile,
+    CoreExtDeploymentProfiles, CryptoRotationDescriptor, DescriptorRotationProvider, ErrorCode,
+    FeatureBitDeployment, FeatureBitState, FlagDayDeployment, InMemoryChainState, Outpoint,
+    RotationProvider, SuiteParams, SuiteRegistry, UtxoEntry,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -31,6 +30,10 @@ use txctx_harness::{run_txctx_spend_vector, TxctxCase};
 #[derive(Deserialize, Default)]
 struct Request {
     op: String,
+
+    /// When set to mainnet/testnet, applies v1 production rotation rules (finite H4).
+    #[serde(default)]
+    network: String,
 
     #[serde(default)]
     txctx_case: Option<TxctxCase>,
@@ -1031,7 +1034,7 @@ fn build_core_ext_suite_context(
                 spend_height: rd.spend_height,
                 sunset_height: rd.sunset_height,
             };
-            desc.validate(registry_ref)
+            validate_rotation_descriptor_for_network(&req.network, &desc, registry_ref)
                 .map_err(|_| "descriptor-not-activated".to_string())?;
             Some(DescriptorRotationProvider { descriptor: desc })
         }
@@ -1627,7 +1630,8 @@ fn main() {
                     spend_height: rd.spend_height,
                     sunset_height: rd.sunset_height,
                 };
-                if desc.validate(&registry).is_err() {
+                if validate_rotation_descriptor_for_network(&req.network, &desc, &registry).is_err()
+                {
                     let resp = Response {
                         ok: false,
                         err: Some("descriptor-not-activated".to_string()),
@@ -1695,7 +1699,7 @@ fn main() {
                 spend_height: rd.spend_height,
                 sunset_height: rd.sunset_height,
             };
-            if desc.validate(&registry).is_err() {
+            if validate_rotation_descriptor_for_network(&req.network, &desc, &registry).is_err() {
                 let resp = Response {
                     ok: false,
                     err: Some("descriptor-not-activated".to_string()),
@@ -1754,7 +1758,7 @@ fn main() {
                 spend_height: rd.spend_height,
                 sunset_height: rd.sunset_height,
             };
-            if desc.validate(&registry).is_err() {
+            if validate_rotation_descriptor_for_network(&req.network, &desc, &registry).is_err() {
                 let resp = Response {
                     ok: false,
                     err: Some("descriptor-not-activated".to_string()),
@@ -1805,7 +1809,7 @@ fn main() {
                 spend_height: rd.spend_height,
                 sunset_height: rd.sunset_height,
             };
-            if desc.validate(&registry).is_err() {
+            if validate_rotation_descriptor_for_network(&req.network, &desc, &registry).is_err() {
                 let resp = Response {
                     ok: false,
                     err: Some("descriptor-not-activated".to_string()),
@@ -1857,7 +1861,8 @@ fn main() {
                         sunset_height: rd.sunset_height,
                     })
                     .collect();
-                if validate_rotation_set(&ds, &registry).is_err() {
+                let set_ok = validate_rotation_set_for_network(&req.network, &ds, &registry);
+                if set_ok.is_err() {
                     let resp = Response {
                         ok: false,
                         err: Some("descriptor-not-activated".to_string()),
@@ -1893,7 +1898,7 @@ fn main() {
                 spend_height: rd.spend_height,
                 sunset_height: rd.sunset_height,
             };
-            if desc.validate(&registry).is_err() {
+            if validate_rotation_descriptor_for_network(&req.network, &desc, &registry).is_err() {
                 let resp = Response {
                     ok: false,
                     err: Some("descriptor-not-activated".to_string()),
