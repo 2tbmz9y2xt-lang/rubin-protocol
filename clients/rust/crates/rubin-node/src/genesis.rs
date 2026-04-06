@@ -697,9 +697,10 @@ mod tests {
 
     #[test]
     fn load_genesis_config_accepts_production_suite_registry_without_rotation_descriptor() {
-        for network in production_rotation_networks() {
+        for (case_idx, network) in production_rotation_networks().into_iter().enumerate() {
             let dir = std::env::temp_dir().join(format!(
-                "rubin-node-genesis-suite-registry-mainnet-{}",
+                "rubin-node-genesis-suite-registry-production-{}-{}",
+                case_idx,
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .expect("time")
@@ -908,9 +909,10 @@ mod tests {
 
     #[test]
     fn load_genesis_config_rejects_alias_suite_registry_openssl_alg() {
-        for alg in ["ml-dsa-87", "MLDSA87"] {
+        for (case_idx, alg) in ["ml-dsa-87", "MLDSA87"].into_iter().enumerate() {
             let dir = std::env::temp_dir().join(format!(
-                "rubin-node-genesis-suite-registry-alias-openssl-{}",
+                "rubin-node-genesis-suite-registry-alias-openssl-{}-{}",
+                case_idx,
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .expect("time")
