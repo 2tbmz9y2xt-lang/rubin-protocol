@@ -460,12 +460,12 @@ fn normalize_peers(raw: &[String]) -> Vec<String> {
 }
 
 fn validate_config(cfg: &mut CliConfig) -> Result<(), String> {
+    if cfg.network.trim().is_empty() {
+        return Err("network is required".to_string());
+    }
     // Normalize network name: trim + lowercase to prevent wire-magic mismatch.
     // network_magic() in p2p_runtime.rs matches only exact lowercase names.
     let normalized_network = normalized_rotation_network_name(&cfg.network);
-    if normalized_network.is_empty() {
-        return Err("network is required".to_string());
-    }
     cfg.network = canonical_rotation_network_name_normalized(normalized_network.as_ref())
         .ok_or_else(|| {
             format!(
@@ -850,6 +850,14 @@ mod tests {
             parse_args(&["--network".to_string(), "foobar".to_string()]).expect("parse args");
         let err = validate_config(&mut cfg).unwrap_err();
         assert!(err.contains("unknown network"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_config_rejects_whitespace_only_network() {
+        let mut cfg =
+            parse_args(&["--network".to_string(), " \t ".to_string()]).expect("parse args");
+        let err = validate_config(&mut cfg).unwrap_err();
+        assert_eq!(err, "network is required");
     }
 
     #[test]
