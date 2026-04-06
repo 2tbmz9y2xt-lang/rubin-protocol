@@ -73,7 +73,7 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         return 2;
     }
 
-    let genesis_cfg = match load_genesis_config(cfg.genesis_file.as_deref()) {
+    let genesis_cfg = match load_genesis_config(cfg.genesis_file.as_deref(), cfg.network.as_str()) {
         Ok(cfg) => cfg,
         Err(err) => {
             let _ = writeln!(stderr, "invalid genesis file: {err}");
@@ -702,7 +702,7 @@ mod tests {
         )
         .expect("write genesis");
 
-        let genesis_cfg = load_genesis_config(Some(&genesis_file)).expect("load");
+        let genesis_cfg = load_genesis_config(Some(&genesis_file), "devnet").expect("load");
         let err = runtime_genesis_hash(&genesis_cfg).unwrap_err();
         assert!(err.contains("genesis_hash_hex"), "unexpected error: {err}");
 

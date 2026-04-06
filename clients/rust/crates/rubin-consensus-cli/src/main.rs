@@ -4,21 +4,21 @@ mod txctx_harness;
 use num_bigint::BigUint;
 use num_traits::Zero;
 use rubin_consensus::merkle::witness_merkle_root_wtxids;
-use rubin_consensus::suite_registry::validate_rotation_set;
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
     block_hash, compact_shortid,
     connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context,
     core_ext_profile_set_anchor_v1, core_ext_verification_binding_from_name_and_descriptor,
     featurebit_state_at_height_from_window_counts, flagday_active_at_height, fork_work_from_target,
-    merkle_root_txids, parse_core_ext_covenant_data, parse_tx, pow_check, retarget_v1,
-    retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_at_height,
+    is_v1_production_rotation_network, merkle_root_txids, parse_core_ext_covenant_data, parse_tx,
+    pow_check, retarget_v1, retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_at_height,
     tx_weight_and_stats_public, validate_block_basic_with_context_and_fees_at_height,
-    validate_block_basic_with_context_at_height, validate_tx_covenants_genesis,
-    CoreExtDeploymentProfile, CoreExtDeploymentProfiles, CryptoRotationDescriptor,
-    DescriptorRotationProvider, ErrorCode, FeatureBitDeployment, FeatureBitState,
-    FlagDayDeployment, InMemoryChainState, Outpoint, RotationProvider, SuiteParams, SuiteRegistry,
-    UtxoEntry,
+    validate_block_basic_with_context_at_height, validate_rotation_set,
+    validate_tx_covenants_genesis, validate_v1_production_rotation_descriptor,
+    validate_v1_production_rotation_set, CoreExtDeploymentProfile, CoreExtDeploymentProfiles,
+    CryptoRotationDescriptor, DescriptorRotationProvider, ErrorCode, FeatureBitDeployment,
+    FeatureBitState, FlagDayDeployment, InMemoryChainState, Outpoint, RotationProvider,
+    SuiteParams, SuiteRegistry, UtxoEntry,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -31,6 +31,10 @@ use txctx_harness::{run_txctx_spend_vector, TxctxCase};
 #[derive(Deserialize, Default)]
 struct Request {
     op: String,
+
+    /// When set to mainnet/testnet, applies v1 production rotation rules (finite H4).
+    #[serde(default)]
+    network: String,
 
     #[serde(default)]
     txctx_case: Option<TxctxCase>,
@@ -1033,6 +1037,10 @@ fn build_core_ext_suite_context(
             };
             desc.validate(registry_ref)
                 .map_err(|_| "descriptor-not-activated".to_string())?;
+            if is_v1_production_rotation_network(&req.network) {
+                validate_v1_production_rotation_descriptor(&desc, registry_ref)
+                    .map_err(|_| "descriptor-not-activated".to_string())?;
+            }
             Some(DescriptorRotationProvider { descriptor: desc })
         }
         None => None,
@@ -1636,6 +1644,17 @@ fn main() {
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                     return;
                 }
+                if is_v1_production_rotation_network(&req.network)
+                    && validate_v1_production_rotation_descriptor(&desc, &registry).is_err()
+                {
+                    let resp = Response {
+                        ok: false,
+                        err: Some("descriptor-not-activated".to_string()),
+                        ..Default::default()
+                    };
+                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                    return;
+                }
                 let rp = DescriptorRotationProvider { descriptor: desc };
                 tx_weight_and_stats_at_height(&tx, req.height, Some(&rp), Some(&registry))
             } else {
@@ -1704,6 +1723,17 @@ fn main() {
                 let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 return;
             }
+            if is_v1_production_rotation_network(&req.network)
+                && validate_v1_production_rotation_descriptor(&desc, &registry).is_err()
+            {
+                let resp = Response {
+                    ok: false,
+                    err: Some("descriptor-not-activated".to_string()),
+                    ..Default::default()
+                };
+                let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                return;
+            }
             let rp = DescriptorRotationProvider { descriptor: desc };
             let suite_id = req.suite_id.unwrap_or(0);
             if !rp.native_create_suites(req.height).contains(suite_id) {
@@ -1763,6 +1793,17 @@ fn main() {
                 let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 return;
             }
+            if is_v1_production_rotation_network(&req.network)
+                && validate_v1_production_rotation_descriptor(&desc, &registry).is_err()
+            {
+                let resp = Response {
+                    ok: false,
+                    err: Some("descriptor-not-activated".to_string()),
+                    ..Default::default()
+                };
+                let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                return;
+            }
             let rp = DescriptorRotationProvider { descriptor: desc };
             let ids = rp.native_create_suites(req.height).suite_ids();
             let resp = Response {
@@ -1814,6 +1855,17 @@ fn main() {
                 let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 return;
             }
+            if is_v1_production_rotation_network(&req.network)
+                && validate_v1_production_rotation_descriptor(&desc, &registry).is_err()
+            {
+                let resp = Response {
+                    ok: false,
+                    err: Some("descriptor-not-activated".to_string()),
+                    ..Default::default()
+                };
+                let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                return;
+            }
             let rp = DescriptorRotationProvider { descriptor: desc };
             let suite_id = req.suite_id.unwrap_or(0);
             if !rp.native_spend_suites(req.height).contains(suite_id) {
@@ -1857,7 +1909,12 @@ fn main() {
                         sunset_height: rd.sunset_height,
                     })
                     .collect();
-                if validate_rotation_set(&ds, &registry).is_err() {
+                let set_ok = if is_v1_production_rotation_network(&req.network) {
+                    validate_v1_production_rotation_set(&ds, &registry)
+                } else {
+                    validate_rotation_set(&ds, &registry)
+                };
+                if set_ok.is_err() {
                     let resp = Response {
                         ok: false,
                         err: Some("descriptor-not-activated".to_string()),
@@ -1894,6 +1951,17 @@ fn main() {
                 sunset_height: rd.sunset_height,
             };
             if desc.validate(&registry).is_err() {
+                let resp = Response {
+                    ok: false,
+                    err: Some("descriptor-not-activated".to_string()),
+                    ..Default::default()
+                };
+                let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                return;
+            }
+            if is_v1_production_rotation_network(&req.network)
+                && validate_v1_production_rotation_descriptor(&desc, &registry).is_err()
+            {
                 let resp = Response {
                     ok: false,
                     err: Some("descriptor-not-activated".to_string()),
