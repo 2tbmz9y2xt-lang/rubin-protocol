@@ -636,6 +636,79 @@ mod tests {
         validate_v1_production_rotation_set(&[d1, d2_ok], &reg).expect("ordered chain");
     }
 
+    fn test_registry_four_suites() -> SuiteRegistry {
+        let mut suites = BTreeMap::new();
+        suites.insert(
+            0x01,
+            SuiteParams {
+                suite_id: 0x01,
+                pubkey_len: 2592,
+                sig_len: 4627,
+                verify_cost: 8,
+                openssl_alg: "ML-DSA-87",
+            },
+        );
+        for id in [0x02u8, 0x03, 0x04] {
+            suites.insert(
+                id,
+                SuiteParams {
+                    suite_id: id,
+                    pubkey_len: 1024,
+                    sig_len: 512,
+                    verify_cost: 4,
+                    openssl_alg: "ML-DSA-87",
+                },
+            );
+        }
+        SuiteRegistry::with_suites(suites)
+    }
+
+    #[test]
+    fn test_v1_production_three_descriptor_chain() {
+        let reg = test_registry_four_suites();
+        let d1 = CryptoRotationDescriptor {
+            name: "r1".into(),
+            old_suite_id: 0x01,
+            new_suite_id: 0x02,
+            create_height: 10,
+            spend_height: 20,
+            sunset_height: 100,
+        };
+        let d2 = CryptoRotationDescriptor {
+            name: "r2".into(),
+            old_suite_id: 0x02,
+            new_suite_id: 0x03,
+            create_height: 100,
+            spend_height: 110,
+            sunset_height: 200,
+        };
+        let d3 = CryptoRotationDescriptor {
+            name: "r3".into(),
+            old_suite_id: 0x03,
+            new_suite_id: 0x04,
+            create_height: 200,
+            spend_height: 210,
+            sunset_height: 300,
+        };
+        validate_v1_production_rotation_set(&[d1.clone(), d2.clone(), d3.clone()], &reg)
+            .expect("three-step chain");
+        validate_v1_production_rotation_set(&[d3, d1.clone(), d2.clone()], &reg)
+            .expect("shuffled order");
+        let d3_early = CryptoRotationDescriptor {
+            name: "r3".into(),
+            old_suite_id: 0x03,
+            new_suite_id: 0x04,
+            create_height: 150,
+            spend_height: 160,
+            sunset_height: 300,
+        };
+        assert!(
+            validate_v1_production_rotation_set(&[d1, d2, d3_early], &reg)
+                .unwrap_err()
+                .contains("successor")
+        );
+    }
+
     #[test]
     fn test_descriptor_rotation_provider_create() {
         let d = CryptoRotationDescriptor {
