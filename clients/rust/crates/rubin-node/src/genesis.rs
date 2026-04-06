@@ -198,10 +198,10 @@ fn validate_suite_registry_item(item: &GenesisSuiteParams) -> Result<SuiteParams
     {
         return Err("bad suite_registry".to_string());
     }
-    if item.suite_id == SUITE_ID_ML_DSA_87 {
-        if params.verify_cost != want.verify_cost || params.openssl_alg != want.openssl_alg {
-            return Err("bad suite_registry".to_string());
-        }
+    if item.suite_id == SUITE_ID_ML_DSA_87
+        && (params.verify_cost != want.verify_cost || params.openssl_alg != want.openssl_alg)
+    {
+        return Err("bad suite_registry".to_string());
     }
     Ok(params)
 }
