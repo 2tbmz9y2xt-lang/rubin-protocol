@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -57,28 +58,72 @@ func normalizeSuiteRegistryOpenSSLAlg(value string) (string, error) {
 	}
 }
 
+func defaultSuiteRegistryParams() consensus.SuiteParams {
+	return consensus.SuiteParams{
+		SuiteID:    consensus.SUITE_ID_ML_DSA_87,
+		PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+		SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+		VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+		OpenSSLAlg: "ML-DSA-87",
+	}
+}
+
+func validateSuiteRegistryItem(item SuiteParamsJSON) (consensus.SuiteParams, error) {
+	if item.SuiteID == consensus.SUITE_ID_SENTINEL ||
+		item.PubkeyLen <= 0 ||
+		item.SigLen <= 0 ||
+		item.VerifyCost == 0 {
+		return consensus.SuiteParams{}, errors.New("bad suite_registry")
+	}
+	alg, err := normalizeSuiteRegistryOpenSSLAlg(item.OpenSSLAlg)
+	if err != nil {
+		return consensus.SuiteParams{}, err
+	}
+	params := consensus.SuiteParams{
+		SuiteID:    item.SuiteID,
+		PubkeyLen:  item.PubkeyLen,
+		SigLen:     item.SigLen,
+		VerifyCost: item.VerifyCost,
+		OpenSSLAlg: alg,
+	}
+	if item.SuiteID == consensus.SUITE_ID_ML_DSA_87 {
+		want := defaultSuiteRegistryParams()
+		if params.PubkeyLen != want.PubkeyLen ||
+			params.SigLen != want.SigLen ||
+			params.VerifyCost != want.VerifyCost {
+			return consensus.SuiteParams{}, errors.New("bad suite_registry")
+		}
+	}
+	return params, nil
+}
+
 func (cfg Config) buildSuiteRegistry() (*consensus.SuiteRegistry, error) {
 	if len(cfg.SuiteRegistry) == 0 {
 		return nil, nil
 	}
-	params := make([]consensus.SuiteParams, 0, len(cfg.SuiteRegistry))
 	seen := make(map[uint8]struct{}, len(cfg.SuiteRegistry))
+	paramsByID := map[uint8]consensus.SuiteParams{
+		consensus.SUITE_ID_ML_DSA_87: defaultSuiteRegistryParams(),
+	}
 	for _, item := range cfg.SuiteRegistry {
 		if _, ok := seen[item.SuiteID]; ok {
 			return nil, errors.New("bad suite_registry")
 		}
-		alg, err := normalizeSuiteRegistryOpenSSLAlg(item.OpenSSLAlg)
+		params, err := validateSuiteRegistryItem(item)
 		if err != nil {
 			return nil, err
 		}
 		seen[item.SuiteID] = struct{}{}
-		params = append(params, consensus.SuiteParams{
-			SuiteID:    item.SuiteID,
-			PubkeyLen:  item.PubkeyLen,
-			SigLen:     item.SigLen,
-			VerifyCost: item.VerifyCost,
-			OpenSSLAlg: alg,
-		})
+		paramsByID[item.SuiteID] = params
+	}
+	ids := make([]uint8, 0, len(paramsByID))
+	for id := range paramsByID {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	params := make([]consensus.SuiteParams, 0, len(ids))
+	for _, id := range ids {
+		params = append(params, paramsByID[id])
 	}
 	return consensus.NewSuiteRegistryFromParams(params), nil
 }
@@ -91,7 +136,10 @@ func (cfg Config) BuildRotationProvider() (consensus.RotationProvider, *consensu
 		return nil, nil, fmt.Errorf("suite_registry: %w", err)
 	}
 	if cfg.RotationDescriptor == nil {
-		return nil, registry, nil
+		if registry == nil {
+			return nil, nil, nil
+		}
+		return consensus.DefaultRotationProvider{}, registry, nil
 	}
 	rd := cfg.RotationDescriptor
 	if registry == nil {

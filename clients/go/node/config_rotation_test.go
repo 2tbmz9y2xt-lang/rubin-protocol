@@ -25,13 +25,6 @@ func TestBuildRotationProvider_ValidDescriptor(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.SuiteRegistry = []SuiteParamsJSON{
 		{
-			SuiteID:    consensus.SUITE_ID_ML_DSA_87,
-			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
-			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
-			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
-			OpenSSLAlg: "ML-DSA-87",
-		},
-		{
 			SuiteID:    0x02,
 			PubkeyLen:  32,
 			SigLen:     64,
@@ -56,6 +49,9 @@ func TestBuildRotationProvider_ValidDescriptor(t *testing.T) {
 	}
 	if reg == nil {
 		t.Fatal("expected explicit suite registry")
+	}
+	if _, ok := reg.Lookup(consensus.SUITE_ID_ML_DSA_87); !ok {
+		t.Fatal("expected overlay registry to preserve ML-DSA-87")
 	}
 	if _, ok := reg.Lookup(0x02); !ok {
 		t.Fatal("expected explicit suite registry to include suite 0x02")
@@ -128,11 +124,14 @@ func TestBuildRotationProvider_ExplicitSuiteRegistryWithoutDescriptor(t *testing
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if rot != nil {
-		t.Fatal("rotation must remain nil without rotation_descriptor")
+	if rot == nil {
+		t.Fatal("expected default rotation with explicit suite registry")
 	}
 	if reg == nil {
 		t.Fatal("expected explicit suite registry")
+	}
+	if _, ok := reg.Lookup(consensus.SUITE_ID_ML_DSA_87); !ok {
+		t.Fatal("expected overlay registry to preserve ML-DSA-87")
 	}
 	params, ok := reg.Lookup(0x42)
 	if !ok {
@@ -141,11 +140,13 @@ func TestBuildRotationProvider_ExplicitSuiteRegistryWithoutDescriptor(t *testing
 	if params.VerifyCost != 321 {
 		t.Fatalf("verify_cost=%d, want 321", params.VerifyCost)
 	}
+	if !rot.NativeSpendSuites(0).Contains(consensus.SUITE_ID_ML_DSA_87) {
+		t.Fatal("default rotation must continue to expose ML-DSA-87")
+	}
 }
 
 func TestValidateConfig_RejectsBadSuiteRegistry(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.SuiteRegistry = []SuiteParamsJSON{
+	cases := []SuiteParamsJSON{
 		{
 			SuiteID:    0x01,
 			PubkeyLen:  10,
@@ -153,9 +154,41 @@ func TestValidateConfig_RejectsBadSuiteRegistry(t *testing.T) {
 			VerifyCost: 30,
 			OpenSSLAlg: "NO_SUCH_ALG",
 		},
+		{
+			SuiteID:    0x42,
+			PubkeyLen:  -1,
+			SigLen:     96,
+			VerifyCost: 30,
+			OpenSSLAlg: "ML-DSA-87",
+		},
+		{
+			SuiteID:    consensus.SUITE_ID_SENTINEL,
+			PubkeyLen:  64,
+			SigLen:     96,
+			VerifyCost: 30,
+			OpenSSLAlg: "ML-DSA-87",
+		},
+		{
+			SuiteID:    0x42,
+			PubkeyLen:  64,
+			SigLen:     96,
+			VerifyCost: 0,
+			OpenSSLAlg: "ML-DSA-87",
+		},
+		{
+			SuiteID:    consensus.SUITE_ID_ML_DSA_87,
+			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES - 1,
+			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+			OpenSSLAlg: "ML-DSA-87",
+		},
 	}
-	if err := ValidateConfig(cfg); err == nil {
-		t.Fatal("expected validation error for bad suite_registry")
+	for _, tc := range cases {
+		cfg := DefaultConfig()
+		cfg.SuiteRegistry = []SuiteParamsJSON{tc}
+		if err := ValidateConfig(cfg); err == nil {
+			t.Fatalf("expected validation error for bad suite_registry case %+v", tc)
+		}
 	}
 }
 

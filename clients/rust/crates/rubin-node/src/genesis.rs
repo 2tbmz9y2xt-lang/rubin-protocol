@@ -1,6 +1,10 @@
 use std::fs;
 use std::path::Path;
 
+use rubin_consensus::constants::{
+    ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
+    VERIFY_COST_ML_DSA_87,
+};
 use rubin_consensus::encode_compact_size;
 use rubin_consensus::{
     block_hash, core_ext_profile_set_anchor_v1,
@@ -9,7 +13,7 @@ use rubin_consensus::{
     DescriptorRotationProvider, SuiteParams, SuiteRegistry, BLOCK_HEADER_BYTES,
 };
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const GENESIS_HEADER_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000006f732e615e2f43337a53e9884adba7da32257d5bb5701adc7ed0bd406f2df91340e49e6900000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000";
 const GENESIS_TX_HEX: &str = "01000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff0200407a10f35a0000000021018448b91b88d1a6fbb65e872b72c381b2a9f3ce286a232f56309667f639dd72790000000000000000020020b716a4b7f4c0fab665298ab9b8199b601ab9fa7e0a27f0713383f34cf37071a8000000000000";
@@ -49,15 +53,10 @@ struct GenesisRotationDescriptor {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 struct GenesisSuiteParams {
-    #[serde(default)]
     suite_id: u8,
-    #[serde(default)]
     pubkey_len: u64,
-    #[serde(default)]
     sig_len: u64,
-    #[serde(default)]
     verify_cost: u64,
-    #[serde(default)]
     openssl_alg: String,
 }
 
@@ -165,6 +164,43 @@ fn normalize_suite_openssl_alg(value: &str) -> Result<&'static str, String> {
     }
 }
 
+fn default_suite_registry_params() -> SuiteParams {
+    SuiteParams {
+        suite_id: SUITE_ID_ML_DSA_87,
+        pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+        sig_len: ML_DSA_87_SIG_BYTES,
+        verify_cost: VERIFY_COST_ML_DSA_87,
+        openssl_alg: "ML-DSA-87",
+    }
+}
+
+fn validate_suite_registry_item(item: &GenesisSuiteParams) -> Result<SuiteParams, String> {
+    if item.suite_id == SUITE_ID_SENTINEL
+        || item.pubkey_len == 0
+        || item.sig_len == 0
+        || item.verify_cost == 0
+    {
+        return Err("bad suite_registry".to_string());
+    }
+    let params = SuiteParams {
+        suite_id: item.suite_id,
+        pubkey_len: item.pubkey_len,
+        sig_len: item.sig_len,
+        verify_cost: item.verify_cost,
+        openssl_alg: normalize_suite_openssl_alg(&item.openssl_alg)?,
+    };
+    if item.suite_id == SUITE_ID_ML_DSA_87 {
+        let want = default_suite_registry_params();
+        if params.pubkey_len != want.pubkey_len
+            || params.sig_len != want.sig_len
+            || params.verify_cost != want.verify_cost
+        {
+            return Err("bad suite_registry".to_string());
+        }
+    }
+    Ok(params)
+}
+
 fn build_suite_registry_from_json(
     items: &[GenesisSuiteParams],
 ) -> Result<Option<SuiteRegistry>, String> {
@@ -173,23 +209,13 @@ fn build_suite_registry_from_json(
     }
 
     let mut suites = BTreeMap::new();
+    suites.insert(SUITE_ID_ML_DSA_87, default_suite_registry_params());
+    let mut seen = BTreeSet::new();
     for item in items {
-        let alg = normalize_suite_openssl_alg(&item.openssl_alg)?;
-        if suites
-            .insert(
-                item.suite_id,
-                SuiteParams {
-                    suite_id: item.suite_id,
-                    pubkey_len: item.pubkey_len,
-                    sig_len: item.sig_len,
-                    verify_cost: item.verify_cost,
-                    openssl_alg: alg,
-                },
-            )
-            .is_some()
-        {
+        if !seen.insert(item.suite_id) {
             return Err("bad suite_registry".to_string());
         }
+        suites.insert(item.suite_id, validate_suite_registry_item(item)?);
     }
 
     Ok(Some(SuiteRegistry::with_suites(suites)))
@@ -368,6 +394,9 @@ fn core_ext_deployments_from_json(
 
 #[cfg(test)]
 mod tests {
+    use rubin_consensus::constants::{
+        ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, VERIFY_COST_ML_DSA_87,
+    };
     use rubin_consensus::{
         core_ext_profile_set_anchor_v1, CoreExtDeploymentProfile, CoreExtVerificationBinding,
     };
@@ -474,21 +503,26 @@ mod tests {
         let path = dir.join("genesis.json");
         std::fs::write(
             &path,
-            "{\
-              \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
-              \"suite_registry\":[\
-                {\"suite_id\":1,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":41000,\"openssl_alg\":\"ML-DSA-87\"},\
-                {\"suite_id\":2,\"pubkey_len\":32,\"sig_len\":64,\"verify_cost\":100,\"openssl_alg\":\"ML-DSA-87\"}\
-              ],\
-              \"rotation_descriptor\":{\
-                \"name\":\"test-rotation\",\
-                \"old_suite_id\":1,\
-                \"new_suite_id\":2,\
-                \"create_height\":1,\
-                \"spend_height\":5,\
-                \"sunset_height\":10\
-              }\
-            }",
+            format!(
+                "{{\
+                  \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+                  \"suite_registry\":[\
+                    {{\"suite_id\":1,\"pubkey_len\":{},\"sig_len\":{},\"verify_cost\":{},\"openssl_alg\":\"ML-DSA-87\"}},\
+                    {{\"suite_id\":2,\"pubkey_len\":32,\"sig_len\":64,\"verify_cost\":100,\"openssl_alg\":\"ML-DSA-87\"}}\
+                  ],\
+                  \"rotation_descriptor\":{{\
+                    \"name\":\"test-rotation\",\
+                    \"old_suite_id\":1,\
+                    \"new_suite_id\":2,\
+                    \"create_height\":1,\
+                    \"spend_height\":5,\
+                    \"sunset_height\":10\
+                  }}\
+                }}",
+                ML_DSA_87_PUBKEY_BYTES,
+                ML_DSA_87_SIG_BYTES,
+                VERIFY_COST_ML_DSA_87
+            ),
         )
         .expect("write");
 
@@ -524,7 +558,74 @@ mod tests {
 
         let cfg = load_genesis_config(Some(&path)).expect("load");
         let suite_context = cfg.suite_context.expect("suite context");
+        assert!(suite_context.registry.lookup(SUITE_ID_ML_DSA_87).is_some());
         assert!(suite_context.registry.lookup(66).is_some());
+        assert!(suite_context
+            .rotation
+            .native_spend_suites(0)
+            .contains(SUITE_ID_ML_DSA_87));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_suite_registry_missing_required_field() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-suite-registry-missing-field-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            "{\
+              \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+              \"suite_registry\":[\
+                {\"suite_id\":66,\"pubkey_len\":64,\"sig_len\":96,\"openssl_alg\":\"ML-DSA-87\"}\
+              ]\
+            }",
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path)).unwrap_err();
+        assert!(err.contains("missing field"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_bad_suite_registry_entry() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-suite-registry-bad-entry-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            format!(
+                "{{\
+                  \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+                  \"suite_registry\":[\
+                    {{\"suite_id\":{},\"pubkey_len\":{},\"sig_len\":{},\"verify_cost\":{},\"openssl_alg\":\"ML-DSA-87\"}}\
+                  ]\
+                }}",
+                SUITE_ID_ML_DSA_87,
+                ML_DSA_87_PUBKEY_BYTES - 1,
+                ML_DSA_87_SIG_BYTES,
+                VERIFY_COST_ML_DSA_87
+            ),
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path)).unwrap_err();
+        assert!(err.contains("bad suite_registry"));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
