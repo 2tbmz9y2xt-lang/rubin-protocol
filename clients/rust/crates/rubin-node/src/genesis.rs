@@ -8,7 +8,7 @@ use rubin_consensus::constants::{
 use rubin_consensus::encode_compact_size;
 use rubin_consensus::{
     block_hash, core_ext_profile_set_anchor_v1,
-    core_ext_verification_binding_from_name_and_descriptor,
+    core_ext_verification_binding_from_name_and_descriptor, is_v1_production_rotation_network,
     validate_rotation_descriptor_for_network, CoreExtDeploymentProfile, CoreExtDeploymentProfiles,
     CryptoRotationDescriptor, DefaultRotationProvider, DescriptorRotationProvider, SuiteParams,
     SuiteRegistry, BLOCK_HEADER_BYTES,
@@ -245,6 +245,12 @@ fn build_suite_context_from_descriptor(
     let registry = Arc::new(registry);
     let rotation: Arc<dyn rubin_consensus::RotationProvider + Send + Sync> = match desc {
         Some(rd) => {
+            if is_v1_production_rotation_network(network) {
+                return Err(
+                    "rotation_descriptor: production networks forbid local rotation_descriptor"
+                        .to_string(),
+                );
+            }
             let descriptor = CryptoRotationDescriptor {
                 name: rd.name.clone(),
                 old_suite_id: rd.old_suite_id,
@@ -520,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn load_genesis_config_accepts_rotation_descriptor_with_explicit_suite_registry() {
+    fn load_genesis_config_accepts_rotation_descriptor_with_explicit_suite_registry_on_devnet() {
         let dir = std::env::temp_dir().join(format!(
             "rubin-node-genesis-rotation-suite-registry-{}",
             std::time::SystemTime::now()
@@ -567,6 +573,59 @@ mod tests {
     }
 
     #[test]
+    fn load_genesis_config_rejects_production_rotation_descriptor() {
+        for network in ["mainnet", "testnet"] {
+            let dir = std::env::temp_dir().join(format!(
+                "rubin-node-genesis-production-rotation-{}-{}",
+                network,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("time")
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            let path = dir.join("genesis.json");
+            std::fs::write(
+                &path,
+                format!(
+                    "{{\
+                      \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+                      \"suite_registry\":[\
+                        {{\"suite_id\":1,\"pubkey_len\":{},\"sig_len\":{},\"verify_cost\":{},\"openssl_alg\":\"ML-DSA-87\"}},\
+                        {{\"suite_id\":2,\"pubkey_len\":{},\"sig_len\":{},\"verify_cost\":{},\"openssl_alg\":\"ML-DSA-87\"}}\
+                      ],\
+                      \"rotation_descriptor\":{{\
+                        \"name\":\"prod-rotation\",\
+                        \"old_suite_id\":1,\
+                        \"new_suite_id\":2,\
+                        \"create_height\":1,\
+                        \"spend_height\":5,\
+                        \"sunset_height\":10\
+                      }}\
+                    }}",
+                    ML_DSA_87_PUBKEY_BYTES,
+                    ML_DSA_87_SIG_BYTES,
+                    VERIFY_COST_ML_DSA_87,
+                    ML_DSA_87_PUBKEY_BYTES,
+                    ML_DSA_87_SIG_BYTES,
+                    VERIFY_COST_ML_DSA_87
+                ),
+            )
+            .expect("write");
+
+            let err = load_genesis_config(Some(&path), network).expect_err("must reject");
+            assert!(
+                err.contains(
+                    "rotation_descriptor: production networks forbid local rotation_descriptor"
+                ),
+                "unexpected error for {network}: {err}"
+            );
+
+            std::fs::remove_dir_all(&dir).expect("cleanup");
+        }
+    }
+
+    #[test]
     fn load_genesis_config_accepts_explicit_suite_registry_without_rotation_descriptor() {
         let dir = std::env::temp_dir().join(format!(
             "rubin-node-genesis-suite-registry-only-{}",
@@ -597,6 +656,36 @@ mod tests {
             .rotation
             .native_spend_suites(0)
             .contains(SUITE_ID_ML_DSA_87));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_accepts_production_suite_registry_without_rotation_descriptor() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-suite-registry-mainnet-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            "{\
+              \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+              \"suite_registry\":[\
+                {\"suite_id\":66,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":8,\"openssl_alg\":\"ML-DSA-87\"}\
+              ]\
+            }",
+        )
+        .expect("write");
+
+        let cfg = load_genesis_config(Some(&path), "mainnet").expect("load");
+        let suite_context = cfg.suite_context.expect("suite context");
+        assert!(suite_context.registry.lookup(SUITE_ID_ML_DSA_87).is_some());
+        assert!(suite_context.registry.lookup(66).is_some());
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }

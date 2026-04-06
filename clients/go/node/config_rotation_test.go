@@ -25,7 +25,7 @@ func TestBuildRotationProvider_NilDescriptor(t *testing.T) {
 	}
 }
 
-func TestBuildRotationProvider_ValidDescriptor(t *testing.T) {
+func TestBuildRotationProvider_ValidDescriptorOnNonProductionNetwork(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.SuiteRegistry = []SuiteParamsJSON{
 		{
@@ -59,6 +59,39 @@ func TestBuildRotationProvider_ValidDescriptor(t *testing.T) {
 	}
 	if _, ok := reg.Lookup(0x02); !ok {
 		t.Fatal("expected explicit suite registry to include suite 0x02")
+	}
+}
+
+func TestBuildRotationProvider_RejectsProductionLocalRotationDescriptor(t *testing.T) {
+	for _, network := range []string{"mainnet", "testnet"} {
+		t.Run(network, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Network = network
+			cfg.SuiteRegistry = []SuiteParamsJSON{
+				{
+					SuiteID:    0x02,
+					PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+					SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+					VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+					OpenSSLAlg: stringPtr("ML-DSA-87"),
+				},
+			}
+			cfg.RotationDescriptor = &RotationConfigJSON{
+				Name:         "prod-rotation",
+				OldSuiteID:   consensus.SUITE_ID_ML_DSA_87,
+				NewSuiteID:   0x02,
+				CreateHeight: 1,
+				SpendHeight:  5,
+				SunsetHeight: 10,
+			}
+			_, _, err := cfg.BuildRotationProvider()
+			if err == nil {
+				t.Fatal("expected production local rotation_descriptor rejection")
+			}
+			if got, want := err.Error(), "rotation_descriptor: production networks forbid local rotation_descriptor"; got != want {
+				t.Fatalf("error=%q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -146,6 +179,59 @@ func TestBuildRotationProvider_ExplicitSuiteRegistryWithoutDescriptor(t *testing
 	}
 	if !rot.NativeSpendSuites(0).Contains(consensus.SUITE_ID_ML_DSA_87) {
 		t.Fatal("default rotation must continue to expose ML-DSA-87")
+	}
+}
+
+func TestBuildRotationProvider_ProductionExplicitSuiteRegistryWithoutDescriptor(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Network = "mainnet"
+	cfg.SuiteRegistry = []SuiteParamsJSON{
+		{
+			SuiteID:    0x42,
+			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+			OpenSSLAlg: stringPtr("ML-DSA-87"),
+		},
+	}
+	rot, reg, err := cfg.BuildRotationProvider()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rot == nil || reg == nil {
+		t.Fatal("expected production suite_registry-only bootstrap to remain available")
+	}
+	if _, ok := reg.Lookup(0x42); !ok {
+		t.Fatal("expected suite 0x42 in production registry")
+	}
+}
+
+func TestValidateConfig_RejectsProductionLocalRotationDescriptor(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Network = "mainnet"
+	cfg.SuiteRegistry = []SuiteParamsJSON{
+		{
+			SuiteID:    0x02,
+			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+			OpenSSLAlg: stringPtr("ML-DSA-87"),
+		},
+	}
+	cfg.RotationDescriptor = &RotationConfigJSON{
+		Name:         "prod-rotation",
+		OldSuiteID:   consensus.SUITE_ID_ML_DSA_87,
+		NewSuiteID:   0x02,
+		CreateHeight: 1,
+		SpendHeight:  5,
+		SunsetHeight: 10,
+	}
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected validation error for production local rotation_descriptor")
+	}
+	if got, want := err.Error(), "rotation_descriptor: production networks forbid local rotation_descriptor"; got != want {
+		t.Fatalf("error=%q, want %q", got, want)
 	}
 }
 

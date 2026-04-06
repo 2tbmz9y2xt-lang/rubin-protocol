@@ -692,6 +692,56 @@ mod tests {
     }
 
     #[test]
+    fn dry_run_rejects_production_local_rotation_descriptor() {
+        let dir = unique_temp_dir("rubin-node-bin-prod-rotation");
+        fs::create_dir_all(&dir).expect("mkdir");
+        let genesis_file = dir.join("genesis.json");
+        fs::write(
+            &genesis_file,
+            "{\
+              \"chain_id_hex\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\
+              \"suite_registry\":[\
+                {\"suite_id\":1,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":8,\"openssl_alg\":\"ML-DSA-87\"},\
+                {\"suite_id\":2,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":8,\"openssl_alg\":\"ML-DSA-87\"}\
+              ],\
+              \"rotation_descriptor\":{\
+                \"name\":\"prod-rotation\",\
+                \"old_suite_id\":1,\
+                \"new_suite_id\":2,\
+                \"create_height\":1,\
+                \"spend_height\":5,\
+                \"sunset_height\":10\
+              }\
+            }",
+        )
+        .expect("write genesis");
+
+        let args = vec![
+            "--dry-run".to_string(),
+            "--network".to_string(),
+            "mainnet".to_string(),
+            "--datadir".to_string(),
+            dir.display().to_string(),
+            "--genesis-file".to_string(),
+            genesis_file.display().to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run(&args, &mut stdout, &mut stderr);
+        assert_eq!(code, 2, "stdout={}", String::from_utf8_lossy(&stdout));
+        assert!(
+            String::from_utf8_lossy(&stderr).contains(
+                "rotation_descriptor: production networks forbid local rotation_descriptor"
+            ),
+            "stderr={}",
+            String::from_utf8_lossy(&stderr)
+        );
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
     fn runtime_requires_explicit_genesis_hash_for_custom_chain_id() {
         let dir = unique_temp_dir("rubin-node-bin-runtime-genesis-hash");
         fs::create_dir_all(&dir).expect("mkdir");
