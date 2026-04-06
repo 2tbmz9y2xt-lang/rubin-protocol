@@ -137,6 +137,11 @@ def staged_changed_files(repo_root: Path) -> list[str]:
     return [line.strip() for line in raw.splitlines() if line.strip()]
 
 
+def has_any_staged_changes(repo_root: Path) -> bool:
+    raw = run_git(repo_root, "diff", "--cached", "--name-only", "--find-renames")
+    return any(line.strip() for line in raw.splitlines())
+
+
 def head_changed_files(repo_root: Path) -> list[str]:
     raw = run_git(repo_root, "show", "--pretty=format:", "--name-only", "--find-renames", "HEAD", "--", *REVIEWABLE_PATHS)
     return [line.strip() for line in raw.splitlines() if line.strip()]
@@ -191,6 +196,8 @@ def staged_bundle(repo_root: Path) -> str:
     paths = staged_changed_files(repo_root)
     if paths:
         return build_bundle(repo_root, mode="staged", paths=paths)
+    if has_any_staged_changes(repo_root):
+        raise ValueError("no staged reviewable diff")
     head_paths = head_changed_files(repo_root)
     if head_paths:
         return build_bundle(repo_root, mode="head", paths=head_paths)

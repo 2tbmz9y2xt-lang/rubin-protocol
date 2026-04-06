@@ -57,6 +57,8 @@ class SelfAuditPromptPackTests(unittest.TestCase):
 
     def test_staged_bundle_falls_back_to_head_bundle(self):
         with mock.patch.object(m, "staged_changed_files", return_value=[]), mock.patch.object(
+            m, "has_any_staged_changes", return_value=False
+        ), mock.patch.object(
             m, "head_changed_files", return_value=["tools/self_audit_prompt_pack.py"]
         ), mock.patch.object(m, "run_git") as run_git:
             run_git.side_effect = [
@@ -158,6 +160,20 @@ class SelfAuditPromptPackTests(unittest.TestCase):
             self.assertIn("HEAD=(unborn)", bundle)
             self.assertIn("clients/go/node/config.go", bundle)
             self.assertIn("+const x = 1", bundle)
+
+    def test_staged_bundle_rejects_non_reviewable_staged_changes(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo_root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_root, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_root, check=True)
+            (repo_root / "README.md").write_text("hello\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=repo_root, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo_root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            (repo_root / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+            subprocess.run(["git", "add", "Dockerfile"], cwd=repo_root, check=True)
+            with self.assertRaisesRegex(ValueError, "no staged reviewable diff"):
+                m.staged_bundle(repo_root)
 
 
 if __name__ == "__main__":
