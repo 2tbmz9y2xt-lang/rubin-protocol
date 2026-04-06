@@ -2,8 +2,8 @@ use std::fs;
 use std::path::Path;
 
 use rubin_consensus::constants::{
-    ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
-    VERIFY_COST_ML_DSA_87,
+    MAX_WITNESS_BYTES_PER_TX, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87,
+    SUITE_ID_SENTINEL, VERIFY_COST_ML_DSA_87,
 };
 use rubin_consensus::encode_compact_size;
 use rubin_consensus::{
@@ -20,7 +20,7 @@ const GENESIS_HEADER_HEX: &str = "0100000000000000000000000000000000000000000000
 const GENESIS_TX_HEX: &str = "01000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff0200407a10f35a0000000021018448b91b88d1a6fbb65e872b72c381b2a9f3ce286a232f56309667f639dd72790000000000000000020020b716a4b7f4c0fab665298ab9b8199b601ab9fa7e0a27f0713383f34cf37071a8000000000000";
 const GENESIS_CHAIN_ID_HEX: &str =
     "88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103";
-const MAX_SUITE_REGISTRY_PARAM_LEN: u64 = 1 << 20;
+const MAX_SUITE_REGISTRY_PARAM_LEN: u64 = MAX_WITNESS_BYTES_PER_TX as u64;
 #[cfg(test)]
 const GENESIS_MAGIC_SEPARATOR: &[u8] = b"RUBIN-GENESIS-v1";
 
@@ -199,12 +199,9 @@ fn validate_suite_registry_item(item: &GenesisSuiteParams) -> Result<SuiteParams
     };
     let want = default_suite_registry_params();
     if params.openssl_alg == want.openssl_alg
-        && (params.pubkey_len != want.pubkey_len || params.sig_len != want.sig_len)
-    {
-        return Err("bad suite_registry".to_string());
-    }
-    if item.suite_id == SUITE_ID_ML_DSA_87
-        && (params.verify_cost != want.verify_cost || params.openssl_alg != want.openssl_alg)
+        && (params.pubkey_len != want.pubkey_len
+            || params.sig_len != want.sig_len
+            || params.verify_cost != want.verify_cost)
     {
         return Err("bad suite_registry".to_string());
     }
@@ -537,7 +534,7 @@ mod tests {
                   \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
                   \"suite_registry\":[\
                     {{\"suite_id\":1,\"pubkey_len\":{},\"sig_len\":{},\"verify_cost\":{},\"openssl_alg\":\"ML-DSA-87\"}},\
-                    {{\"suite_id\":2,\"pubkey_len\":{},\"sig_len\":{},\"verify_cost\":100,\"openssl_alg\":\"ML-DSA-87\"}}\
+                    {{\"suite_id\":2,\"pubkey_len\":{},\"sig_len\":{},\"verify_cost\":{},\"openssl_alg\":\"ML-DSA-87\"}}\
                   ],\
                   \"rotation_descriptor\":{{\
                     \"name\":\"test-rotation\",\
@@ -552,7 +549,8 @@ mod tests {
                 ML_DSA_87_SIG_BYTES,
                 VERIFY_COST_ML_DSA_87,
                 ML_DSA_87_PUBKEY_BYTES,
-                ML_DSA_87_SIG_BYTES
+                ML_DSA_87_SIG_BYTES,
+                VERIFY_COST_ML_DSA_87
             ),
         )
         .expect("write");
@@ -581,7 +579,7 @@ mod tests {
             "{\
               \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
               \"suite_registry\":[\
-                {\"suite_id\":66,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":321,\"openssl_alg\":\"ML-DSA-87\"}\
+                {\"suite_id\":66,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":8,\"openssl_alg\":\"ML-DSA-87\"}\
               ]\
             }",
         )
@@ -590,7 +588,8 @@ mod tests {
         let cfg = load_genesis_config(Some(&path), "devnet").expect("load");
         let suite_context = cfg.suite_context.expect("suite context");
         assert!(suite_context.registry.lookup(SUITE_ID_ML_DSA_87).is_some());
-        assert!(suite_context.registry.lookup(66).is_some());
+        let params = suite_context.registry.lookup(66).expect("suite 66");
+        assert_eq!(params.verify_cost, VERIFY_COST_ML_DSA_87);
         assert!(suite_context
             .rotation
             .native_spend_suites(0)
@@ -677,7 +676,7 @@ mod tests {
             "{\
               \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
               \"suite_registry\":[\
-                {\"suite_id\":66,\"pubkey_len\":1,\"sig_len\":1048577,\"verify_cost\":321,\"openssl_alg\":\"ML-DSA-87\"}\
+                {\"suite_id\":66,\"pubkey_len\":1,\"sig_len\":100001,\"verify_cost\":8,\"openssl_alg\":\"ML-DSA-87\"}\
               ]\
             }",
         )
@@ -706,6 +705,34 @@ mod tests {
               \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
               \"suite_registry\":[\
                 {\"suite_id\":66,\"pubkey_len\":64,\"sig_len\":96,\"verify_cost\":321,\"openssl_alg\":\"ML-DSA-87\"}\
+              ]\
+            }",
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
+        assert!(err.contains("bad suite_registry"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_noncanonical_ml_dsa_verify_cost_for_custom_suite() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-suite-registry-verify-cost-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            "{\
+              \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+              \"suite_registry\":[\
+                {\"suite_id\":66,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":321,\"openssl_alg\":\"ML-DSA-87\"}\
               ]\
             }",
         )

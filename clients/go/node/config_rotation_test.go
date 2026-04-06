@@ -32,7 +32,7 @@ func TestBuildRotationProvider_ValidDescriptor(t *testing.T) {
 			SuiteID:    0x02,
 			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
 			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
-			VerifyCost: 100,
+			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
 			OpenSSLAlg: stringPtr("ML-DSA-87"),
 		},
 	}
@@ -120,7 +120,7 @@ func TestBuildRotationProvider_ExplicitSuiteRegistryWithoutDescriptor(t *testing
 			SuiteID:    0x42,
 			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
 			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
-			VerifyCost: 321,
+			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
 			OpenSSLAlg: stringPtr("ML-DSA-87"),
 		},
 	}
@@ -141,8 +141,8 @@ func TestBuildRotationProvider_ExplicitSuiteRegistryWithoutDescriptor(t *testing
 	if !ok {
 		t.Fatal("expected suite 0x42 in registry")
 	}
-	if params.VerifyCost != 321 {
-		t.Fatalf("verify_cost=%d, want 321", params.VerifyCost)
+	if params.VerifyCost != consensus.VERIFY_COST_ML_DSA_87 {
+		t.Fatalf("verify_cost=%d, want %d", params.VerifyCost, consensus.VERIFY_COST_ML_DSA_87)
 	}
 	if !rot.NativeSpendSuites(0).Contains(consensus.SUITE_ID_ML_DSA_87) {
 		t.Fatal("default rotation must continue to expose ML-DSA-87")
@@ -195,8 +195,8 @@ func TestValidateConfig_RejectsBadSuiteRegistry(t *testing.T) {
 		},
 		{
 			SuiteID:    0x42,
-			PubkeyLen:  64,
-			SigLen:     96,
+			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 			VerifyCost: 30,
 			OpenSSLAlg: stringPtr("ML-DSA-87"),
 		},
@@ -248,7 +248,7 @@ func TestRotationConfigJSON_Roundtrip(t *testing.T) {
 				SuiteID:    0x02,
 				PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
 				SigLen:     consensus.ML_DSA_87_SIG_BYTES,
-				VerifyCost: 100,
+				VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
 				OpenSSLAlg: stringPtr("ML-DSA-87"),
 			},
 		},

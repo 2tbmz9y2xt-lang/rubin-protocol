@@ -49,7 +49,7 @@ type SuiteParamsJSON struct {
 	OpenSSLAlg *string `json:"openssl_alg"`
 }
 
-const maxSuiteRegistryParamLen = 1 << 20
+const maxSuiteRegistryParamLen = consensus.MAX_WITNESS_BYTES_PER_TX
 
 func normalizeSuiteRegistryOpenSSLAlg(value *string) (string, error) {
 	if value == nil {
@@ -95,14 +95,10 @@ func validateSuiteRegistryItem(item SuiteParamsJSON) (consensus.SuiteParams, err
 	}
 	want := defaultSuiteRegistryParams()
 	if params.OpenSSLAlg == want.OpenSSLAlg &&
-		(params.PubkeyLen != want.PubkeyLen || params.SigLen != want.SigLen) {
+		(params.PubkeyLen != want.PubkeyLen ||
+			params.SigLen != want.SigLen ||
+			params.VerifyCost != want.VerifyCost) {
 		return consensus.SuiteParams{}, errors.New("bad suite_registry")
-	}
-	if item.SuiteID == consensus.SUITE_ID_ML_DSA_87 {
-		if params.VerifyCost != want.VerifyCost ||
-			params.OpenSSLAlg != want.OpenSSLAlg {
-			return consensus.SuiteParams{}, errors.New("bad suite_registry")
-		}
 	}
 	return params, nil
 }
