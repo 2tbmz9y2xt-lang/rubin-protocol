@@ -9,9 +9,10 @@ use rubin_consensus::encode_compact_size;
 use rubin_consensus::{
     block_hash, core_ext_profile_set_anchor_v1,
     core_ext_verification_binding_from_name_and_descriptor, is_v1_production_rotation_network,
-    validate_rotation_descriptor_for_network, CoreExtDeploymentProfile, CoreExtDeploymentProfiles,
-    CryptoRotationDescriptor, DefaultRotationProvider, DescriptorRotationProvider, SuiteParams,
-    SuiteRegistry, BLOCK_HEADER_BYTES,
+    normalized_rotation_network_name, validate_rotation_descriptor_for_network,
+    CoreExtDeploymentProfile, CoreExtDeploymentProfiles, CryptoRotationDescriptor,
+    DefaultRotationProvider, DescriptorRotationProvider, SuiteParams, SuiteRegistry,
+    BLOCK_HEADER_BYTES,
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -21,6 +22,8 @@ const GENESIS_TX_HEX: &str = "01000000000000000000000000010000000000000000000000
 const GENESIS_CHAIN_ID_HEX: &str =
     "88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103";
 const MAX_SUITE_REGISTRY_PARAM_LEN: u64 = MAX_WITNESS_BYTES_PER_TX as u64;
+const PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR: &str =
+    "rotation_descriptor: production networks forbid local rotation_descriptor";
 #[cfg(test)]
 const GENESIS_MAGIC_SEPARATOR: &[u8] = b"RUBIN-GENESIS-v1";
 
@@ -240,16 +243,14 @@ fn build_suite_context_from_descriptor(
     network: &str,
 ) -> Result<Option<crate::sync::SuiteContext>, String> {
     use std::sync::Arc;
+    let normalized_network = normalized_rotation_network_name(network);
     let registry = build_suite_registry_from_json(suite_registry)?
         .unwrap_or_else(SuiteRegistry::default_registry);
     let registry = Arc::new(registry);
     let rotation: Arc<dyn rubin_consensus::RotationProvider + Send + Sync> = match desc {
         Some(rd) => {
-            if is_v1_production_rotation_network(network) {
-                return Err(
-                    "rotation_descriptor: production networks forbid local rotation_descriptor"
-                        .to_string(),
-                );
+            if is_v1_production_rotation_network(&normalized_network) {
+                return Err(PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR.to_string());
             }
             let descriptor = CryptoRotationDescriptor {
                 name: rd.name.clone(),
@@ -259,7 +260,7 @@ fn build_suite_context_from_descriptor(
                 spend_height: rd.spend_height,
                 sunset_height: rd.sunset_height,
             };
-            validate_rotation_descriptor_for_network(network, &descriptor, &registry)
+            validate_rotation_descriptor_for_network(&normalized_network, &descriptor, &registry)
                 .map_err(|e| format!("rotation_descriptor: {e}"))?;
             Arc::new(DescriptorRotationProvider { descriptor })
         }
@@ -439,7 +440,7 @@ mod tests {
     use super::{
         derive_devnet_genesis_chain_id, devnet_genesis_block_bytes, devnet_genesis_chain_id,
         devnet_genesis_hash, load_chain_id_from_genesis_file, load_genesis_config,
-        validate_incoming_chain_id,
+        validate_incoming_chain_id, PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR,
     };
 
     #[test]
@@ -574,7 +575,7 @@ mod tests {
 
     #[test]
     fn load_genesis_config_rejects_production_rotation_descriptor() {
-        for network in ["mainnet", "testnet"] {
+        for network in ["mainnet", "testnet", " MAINNET ", "\tTestNet\t"] {
             let dir = std::env::temp_dir().join(format!(
                 "rubin-node-genesis-production-rotation-{}-{}",
                 network,
@@ -614,10 +615,8 @@ mod tests {
             .expect("write");
 
             let err = load_genesis_config(Some(&path), network).expect_err("must reject");
-            assert!(
-                err.contains(
-                    "rotation_descriptor: production networks forbid local rotation_descriptor"
-                ),
+            assert_eq!(
+                err, PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR,
                 "unexpected error for {network}: {err}"
             );
 

@@ -248,10 +248,21 @@ pub fn validate_rotation_set(
     Ok(())
 }
 
+pub fn normalized_rotation_network_name(network: &str) -> String {
+    let normalized = network.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        "devnet".to_string()
+    } else {
+        normalized
+    }
+}
+
 /// True for networks that use the v1 production rotation profile (finite H4 required).
 pub fn is_v1_production_rotation_network(network: &str) -> bool {
-    let n = network.trim();
-    n.eq_ignore_ascii_case("mainnet") || n.eq_ignore_ascii_case("testnet")
+    matches!(
+        normalized_rotation_network_name(network).as_str(),
+        "mainnet" | "testnet"
+    )
 }
 
 /// Network-aware descriptor validation: non-production networks run [`CryptoRotationDescriptor::validate`] only;
@@ -262,10 +273,9 @@ pub fn validate_rotation_descriptor_for_network(
     d: &CryptoRotationDescriptor,
     registry: &SuiteRegistry,
 ) -> Result<(), String> {
-    if is_v1_production_rotation_network(network) {
-        validate_v1_production_rotation_descriptor(d, registry)
-    } else {
-        d.validate(registry)
+    match normalized_rotation_network_name(network).as_str() {
+        "mainnet" | "testnet" => validate_v1_production_rotation_descriptor(d, registry),
+        _ => d.validate(registry),
     }
 }
 
@@ -275,10 +285,9 @@ pub fn validate_rotation_set_for_network(
     descriptors: &[CryptoRotationDescriptor],
     registry: &SuiteRegistry,
 ) -> Result<(), String> {
-    if is_v1_production_rotation_network(network) {
-        validate_v1_production_rotation_set(descriptors, registry)
-    } else {
-        validate_rotation_set(descriptors, registry)
+    match normalized_rotation_network_name(network).as_str() {
+        "mainnet" | "testnet" => validate_v1_production_rotation_set(descriptors, registry),
+        _ => validate_rotation_set(descriptors, registry),
     }
 }
 
@@ -394,6 +403,23 @@ mod tests {
             reg.min_sigcheck_payload_bytes().expect("payload"),
             Some(300)
         );
+    }
+
+    #[test]
+    fn test_normalized_rotation_network_name_matches_go_semantics() {
+        assert_eq!(normalized_rotation_network_name(""), "devnet");
+        assert_eq!(normalized_rotation_network_name(" DevNet "), "devnet");
+        assert_eq!(normalized_rotation_network_name("  MAINNET  "), "mainnet");
+        assert_eq!(normalized_rotation_network_name("\tTestNet\t"), "testnet");
+    }
+
+    #[test]
+    fn test_is_v1_production_rotation_network_normalized_inputs() {
+        assert!(is_v1_production_rotation_network("mainnet"));
+        assert!(is_v1_production_rotation_network("  MAINNET  "));
+        assert!(is_v1_production_rotation_network("\tTestNet\t"));
+        assert!(!is_v1_production_rotation_network(""));
+        assert!(!is_v1_production_rotation_network("devnet"));
     }
 
     #[test]

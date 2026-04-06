@@ -63,7 +63,7 @@ func TestBuildRotationProvider_ValidDescriptorOnNonProductionNetwork(t *testing.
 }
 
 func TestBuildRotationProvider_RejectsProductionLocalRotationDescriptor(t *testing.T) {
-	for _, network := range []string{"mainnet", "testnet"} {
+	for _, network := range []string{"mainnet", "testnet", " MAINNET ", "\tTestNet\t"} {
 		t.Run(network, func(t *testing.T) {
 			cfg := DefaultConfig()
 			cfg.Network = network

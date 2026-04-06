@@ -155,7 +155,8 @@ func (cfg Config) BuildRotationProvider() (consensus.RotationProvider, *consensu
 	if err != nil {
 		return nil, nil, fmt.Errorf("suite_registry: %w", err)
 	}
-	if cfg.RotationDescriptor != nil && consensus.IsV1ProductionRotationNetwork(normalizedNetworkName(cfg.Network)) {
+	network := normalizedNetworkName(cfg.Network)
+	if cfg.RotationDescriptor != nil && consensus.IsV1ProductionRotationNetwork(network) {
 		return nil, nil, errors.New("rotation_descriptor: production networks forbid local rotation_descriptor")
 	}
 	if cfg.RotationDescriptor == nil {
@@ -176,7 +177,6 @@ func (cfg Config) BuildRotationProvider() (consensus.RotationProvider, *consensu
 		SpendHeight:  rd.SpendHeight,
 		SunsetHeight: rd.SunsetHeight,
 	}
-	network := strings.ToLower(strings.TrimSpace(cfg.Network))
 	if err := consensus.ValidateRotationDescriptorForNetwork(network, desc, registry); err != nil {
 		return nil, nil, fmt.Errorf("rotation_descriptor: %w", err)
 	}
