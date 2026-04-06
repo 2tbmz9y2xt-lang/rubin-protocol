@@ -160,6 +160,13 @@ func TestValidateConfig_RejectsBadSuiteRegistry(t *testing.T) {
 		},
 		{
 			SuiteID:    0x42,
+			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+			OpenSSLAlg: stringPtr(""),
+		},
+		{
+			SuiteID:    0x42,
 			PubkeyLen:  64,
 			SigLen:     96,
 			VerifyCost: 30,
@@ -207,6 +214,24 @@ func TestValidateConfig_RejectsBadSuiteRegistry(t *testing.T) {
 		if err := ValidateConfig(cfg); err == nil {
 			t.Fatalf("expected validation error for bad suite_registry case %+v", tc)
 		}
+	}
+}
+
+func TestValidateConfig_RejectsTooManySuiteRegistryEntries(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SuiteRegistry = make([]SuiteParamsJSON, 0, maxExplicitSuiteRegistryEntries+1)
+	for i := 0; i < maxExplicitSuiteRegistryEntries+1; i++ {
+		suiteID := uint8(i + 2)
+		cfg.SuiteRegistry = append(cfg.SuiteRegistry, SuiteParamsJSON{
+			SuiteID:    suiteID,
+			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+			OpenSSLAlg: stringPtr("ML-DSA-87"),
+		})
+	}
+	if err := ValidateConfig(cfg); err == nil {
+		t.Fatal("expected validation error for oversized suite_registry")
 	}
 }
 

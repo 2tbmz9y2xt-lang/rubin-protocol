@@ -43,16 +43,17 @@ type RotationConfigJSON struct {
 // native-suite bootstrap without editing the built-in default registry.
 type SuiteParamsJSON struct {
 	SuiteID    uint8   `json:"suite_id"`
-	PubkeyLen  uint64  `json:"pubkey_len"`
-	SigLen     uint64  `json:"sig_len"`
+	PubkeyLen  uint32  `json:"pubkey_len"`
+	SigLen     uint32  `json:"sig_len"`
 	VerifyCost uint64  `json:"verify_cost"`
 	OpenSSLAlg *string `json:"openssl_alg"`
 }
 
 const maxSuiteRegistryParamLen = consensus.MAX_WITNESS_BYTES_PER_TX
+const maxExplicitSuiteRegistryEntries = 16
 
-func validateSuiteRegistryParamLen(value uint64) (int, error) {
-	if value == 0 || value > uint64(maxSuiteRegistryParamLen) {
+func validateSuiteRegistryParamLen(value uint32) (int, error) {
+	if value == 0 || value > uint32(maxSuiteRegistryParamLen) {
 		return 0, errors.New("bad suite_registry")
 	}
 	return int(value), nil
@@ -63,7 +64,7 @@ func normalizeSuiteRegistryOpenSSLAlg(value *string) (string, error) {
 		return "", errors.New("bad suite_registry")
 	}
 	switch strings.TrimSpace(*value) {
-	case "", "ML-DSA-87":
+	case "ML-DSA-87":
 		return "ML-DSA-87", nil
 	default:
 		return "", errors.New("bad suite_registry")
@@ -104,10 +105,9 @@ func validateSuiteRegistryItem(item SuiteParamsJSON) (consensus.SuiteParams, err
 		OpenSSLAlg: alg,
 	}
 	want := defaultSuiteRegistryParams()
-	if params.OpenSSLAlg == want.OpenSSLAlg &&
-		(params.PubkeyLen != want.PubkeyLen ||
-			params.SigLen != want.SigLen ||
-			params.VerifyCost != want.VerifyCost) {
+	if params.PubkeyLen != want.PubkeyLen ||
+		params.SigLen != want.SigLen ||
+		params.VerifyCost != want.VerifyCost {
 		return consensus.SuiteParams{}, errors.New("bad suite_registry")
 	}
 	return params, nil
@@ -116,6 +116,9 @@ func validateSuiteRegistryItem(item SuiteParamsJSON) (consensus.SuiteParams, err
 func (cfg Config) buildSuiteRegistry() (*consensus.SuiteRegistry, error) {
 	if len(cfg.SuiteRegistry) == 0 {
 		return nil, nil
+	}
+	if len(cfg.SuiteRegistry) > maxExplicitSuiteRegistryEntries {
+		return nil, errors.New("bad suite_registry")
 	}
 	seen := make(map[uint8]struct{}, len(cfg.SuiteRegistry))
 	paramsByID := map[uint8]consensus.SuiteParams{

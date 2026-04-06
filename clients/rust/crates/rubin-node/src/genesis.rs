@@ -165,7 +165,7 @@ pub fn load_genesis_config(
 
 fn normalize_suite_openssl_alg(value: &str) -> Result<&'static str, String> {
     match value.trim() {
-        "" | "ML-DSA-87" => Ok("ML-DSA-87"),
+        "ML-DSA-87" => Ok("ML-DSA-87"),
         _ => Err("bad suite_registry".to_string()),
     }
 }
@@ -180,30 +180,32 @@ fn default_suite_registry_params() -> SuiteParams {
     }
 }
 
-fn validate_suite_registry_item(item: &GenesisSuiteParams) -> Result<SuiteParams, String> {
-    if item.suite_id == SUITE_ID_SENTINEL
-        || item.pubkey_len == 0
-        || item.sig_len == 0
-        || item.pubkey_len > usize::MAX as u64
-        || item.sig_len > usize::MAX as u64
-        || item.pubkey_len > MAX_SUITE_REGISTRY_PARAM_LEN
-        || item.sig_len > MAX_SUITE_REGISTRY_PARAM_LEN
-        || item.verify_cost == 0
-    {
+const MAX_EXPLICIT_SUITE_REGISTRY_ITEMS: usize = 16;
+
+fn validate_suite_registry_param_len(value: u64) -> Result<u64, String> {
+    if value == 0 || value > usize::MAX as u64 || value > MAX_SUITE_REGISTRY_PARAM_LEN {
         return Err("bad suite_registry".to_string());
     }
+    Ok(value)
+}
+
+fn validate_suite_registry_item(item: &GenesisSuiteParams) -> Result<SuiteParams, String> {
+    if item.suite_id == SUITE_ID_SENTINEL || item.verify_cost == 0 {
+        return Err("bad suite_registry".to_string());
+    }
+    let pubkey_len = validate_suite_registry_param_len(item.pubkey_len)?;
+    let sig_len = validate_suite_registry_param_len(item.sig_len)?;
     let params = SuiteParams {
         suite_id: item.suite_id,
-        pubkey_len: item.pubkey_len,
-        sig_len: item.sig_len,
+        pubkey_len,
+        sig_len,
         verify_cost: item.verify_cost,
         openssl_alg: normalize_suite_openssl_alg(&item.openssl_alg)?,
     };
     let want = default_suite_registry_params();
-    if params.openssl_alg == want.openssl_alg
-        && (params.pubkey_len != want.pubkey_len
-            || params.sig_len != want.sig_len
-            || params.verify_cost != want.verify_cost)
+    if params.pubkey_len != want.pubkey_len
+        || params.sig_len != want.sig_len
+        || params.verify_cost != want.verify_cost
     {
         return Err("bad suite_registry".to_string());
     }
@@ -215,6 +217,9 @@ fn build_suite_registry_from_json(
 ) -> Result<Option<SuiteRegistry>, String> {
     if items.is_empty() {
         return Ok(None);
+    }
+    if items.len() > MAX_EXPLICIT_SUITE_REGISTRY_ITEMS {
+        return Err("bad suite_registry".to_string());
     }
     let mut suites = BTreeMap::new();
     suites.insert(SUITE_ID_ML_DSA_87, default_suite_registry_params());
@@ -687,6 +692,34 @@ mod tests {
     }
 
     #[test]
+    fn load_genesis_config_rejects_empty_suite_registry_openssl_alg() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-suite-registry-empty-openssl-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            "{\
+              \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+              \"suite_registry\":[\
+                {\"suite_id\":66,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":8,\"openssl_alg\":\"\"}\
+              ]\
+            }",
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
+        assert!(err.contains("bad suite_registry"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
     fn load_genesis_config_rejects_noncanonical_ml_dsa_lengths_for_custom_suite() {
         let dir = std::env::temp_dir().join(format!(
             "rubin-node-genesis-suite-registry-noncanonical-{}",
@@ -733,6 +766,45 @@ mod tests {
                 {\"suite_id\":66,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":321,\"openssl_alg\":\"ML-DSA-87\"}\
               ]\
             }",
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
+        assert!(err.contains("bad suite_registry"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_oversized_suite_registry() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-suite-registry-too-many-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        let mut entries = String::new();
+        for i in 0..(super::MAX_EXPLICIT_SUITE_REGISTRY_ITEMS + 1) {
+            if i != 0 {
+                entries.push(',');
+            }
+            entries.push_str(&format!(
+                "{{\"suite_id\":{},\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":8,\"openssl_alg\":\"ML-DSA-87\"}}",
+                i + 2
+            ));
+        }
+        std::fs::write(
+            &path,
+            format!(
+                "{{\
+                  \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+                  \"suite_registry\":[{}]\
+                }}",
+                entries
+            ),
         )
         .expect("write");
 
