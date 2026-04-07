@@ -58,7 +58,7 @@ struct EffectiveConfig {
 
 #[derive(Serialize)]
 struct LegacyExposureSuiteReport {
-    suite_id: u8,
+    suite_id: u64,
     utxo_exposure_count: u64,
     outpoint_count: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -73,8 +73,8 @@ struct LegacyExposureReport {
     data_dir: String,
     chainstate_height: u64,
     chainstate_has_tip: bool,
-    indexed_suite_ids: Vec<u8>,
-    watched_legacy_suite_ids: Vec<u8>,
+    indexed_suite_ids: Vec<u64>,
+    watched_legacy_suite_ids: Vec<u64>,
     legacy_exposure_total: u64,
     sunset_readiness: String,
     warning_hook: String,
@@ -603,27 +603,31 @@ fn build_legacy_exposure_report(
     let mut legacy_suite_reports = Vec::with_capacity(cfg.legacy_suite_ids.len());
     let mut legacy_exposure_total = 0u64;
     for suite_id in &cfg.legacy_suite_ids {
-        let mut report_count = chain_state.utxo_exposure_count_by_suite_id(*suite_id);
-        let mut report = LegacyExposureSuiteReport {
-            suite_id: *suite_id,
+        if cfg.legacy_exposure_include_outpoints {
+            let outpoints = chain_state.utxo_outpoints_by_suite_id(*suite_id);
+            let report_count = outpoints.len() as u64;
+            legacy_exposure_total = legacy_exposure_total.saturating_add(report_count);
+            legacy_suite_reports.push(LegacyExposureSuiteReport {
+                suite_id: u64::from(*suite_id),
+                utxo_exposure_count: report_count,
+                outpoint_count: report_count,
+                outpoints: Some(
+                    outpoints
+                        .iter()
+                        .map(|op| format_legacy_exposure_outpoint(&op.txid, op.vout))
+                        .collect(),
+                ),
+            });
+            continue;
+        }
+        let report_count = chain_state.utxo_exposure_count_by_suite_id(*suite_id);
+        legacy_exposure_total = legacy_exposure_total.saturating_add(report_count);
+        legacy_suite_reports.push(LegacyExposureSuiteReport {
+            suite_id: u64::from(*suite_id),
             utxo_exposure_count: report_count,
             outpoint_count: report_count,
             outpoints: None,
-        };
-        if cfg.legacy_exposure_include_outpoints {
-            let outpoints = chain_state.utxo_outpoints_by_suite_id(*suite_id);
-            report_count = outpoints.len() as u64;
-            report.utxo_exposure_count = report_count;
-            report.outpoint_count = report_count;
-            report.outpoints = Some(
-                outpoints
-                    .iter()
-                    .map(|op| format_legacy_exposure_outpoint(&op.txid, op.vout))
-                    .collect(),
-            );
-        }
-        legacy_exposure_total = legacy_exposure_total.saturating_add(report_count);
-        legacy_suite_reports.push(report);
+        });
     }
     let (sunset_readiness, warning_hook, grace_hook) = legacy_exposure_hooks(chain_state.has_tip, legacy_exposure_total);
     LegacyExposureReport {
@@ -633,8 +637,8 @@ fn build_legacy_exposure_report(
         data_dir: cfg.data_dir.display().to_string(),
         chainstate_height: chain_state.height,
         chainstate_has_tip: chain_state.has_tip,
-        indexed_suite_ids: chain_state.indexed_suite_ids(),
-        watched_legacy_suite_ids: cfg.legacy_suite_ids.clone(),
+        indexed_suite_ids: suite_ids_to_json_numbers(&chain_state.indexed_suite_ids()),
+        watched_legacy_suite_ids: suite_ids_to_json_numbers(&cfg.legacy_suite_ids),
         legacy_exposure_total,
         sunset_readiness: sunset_readiness.to_string(),
         warning_hook: warning_hook.to_string(),
@@ -642,6 +646,10 @@ fn build_legacy_exposure_report(
         include_outpoints: cfg.legacy_exposure_include_outpoints,
         legacy_suite_reports,
     }
+}
+
+fn suite_ids_to_json_numbers(ids: &[u8]) -> Vec<u64> {
+    ids.iter().map(|id| u64::from(*id)).collect()
 }
 
 fn normalize_peers(raw: &[String]) -> Vec<String> {

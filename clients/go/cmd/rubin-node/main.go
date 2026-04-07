@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/bits"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -42,7 +43,7 @@ func applySuiteContextToSyncConfig(cfg *node.SyncConfig, rotation consensus.Rota
 const legacyExposureReportVersion = 1
 
 type legacyExposureSuiteReport struct {
-	SuiteID           uint8     `json:"suite_id"`
+	SuiteID           uint64    `json:"suite_id"`
 	UtxoExposureCount uint64    `json:"utxo_exposure_count"`
 	OutpointCount     uint64    `json:"outpoint_count"`
 	Outpoints         *[]string `json:"outpoints,omitempty"`
@@ -135,10 +136,11 @@ func legacyExposureHooks(hasTip bool, total uint64) (string, string, string) {
 }
 
 func saturatingAddUint64(total, value uint64) uint64 {
-	if value > ^uint64(0)-total {
+	sum, carry := bits.Add64(total, value, 0)
+	if carry != 0 {
 		return ^uint64(0)
 	}
-	return total + value
+	return sum
 }
 
 func suiteIDsToJSONNumbers(ids []uint8) []uint64 {
@@ -156,25 +158,29 @@ func buildLegacyExposureReport(network, dataDir string, chainState *node.ChainSt
 	reports := make([]legacyExposureSuiteReport, 0, len(legacySuiteIDs))
 	var total uint64
 	for _, suiteID := range legacySuiteIDs {
-		reportCount := chainState.UtxoExposureCountBySuiteID(suiteID)
-		report := legacyExposureSuiteReport{
-			SuiteID:           suiteID,
-			UtxoExposureCount: reportCount,
-			OutpointCount:     reportCount,
-		}
 		if includeOutpoints {
 			outpoints := chainState.UtxoOutpointsBySuiteID(suiteID)
-			reportCount = uint64(len(outpoints))
-			report.UtxoExposureCount = reportCount
-			report.OutpointCount = reportCount
+			reportCount := uint64(len(outpoints))
 			reportOutpoints := make([]string, 0, len(outpoints))
 			for _, op := range outpoints {
 				reportOutpoints = append(reportOutpoints, formatLegacyExposureOutpoint(op))
 			}
-			report.Outpoints = &reportOutpoints
+			total = saturatingAddUint64(total, reportCount)
+			reports = append(reports, legacyExposureSuiteReport{
+				SuiteID:           uint64(suiteID),
+				UtxoExposureCount: reportCount,
+				OutpointCount:     reportCount,
+				Outpoints:         &reportOutpoints,
+			})
+			continue
 		}
+		reportCount := chainState.UtxoExposureCountBySuiteID(suiteID)
 		total = saturatingAddUint64(total, reportCount)
-		reports = append(reports, report)
+		reports = append(reports, legacyExposureSuiteReport{
+			SuiteID:           uint64(suiteID),
+			UtxoExposureCount: reportCount,
+			OutpointCount:     reportCount,
+		})
 	}
 	sunsetReadiness, warningHook, graceHook := legacyExposureHooks(chainState.HasTip, total)
 	return legacyExposureReport{
