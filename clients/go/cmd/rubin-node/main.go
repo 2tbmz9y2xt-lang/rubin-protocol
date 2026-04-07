@@ -186,6 +186,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	defaults := node.DefaultConfig()
 	var peers multiStringFlag
 	var legacySuiteIDs multiStringFlag
+	var watchedSuiteIDs []uint8
 
 	cfg := defaults
 	fs := flag.NewFlagSet("rubin-node", flag.ContinueOnError)
@@ -223,6 +224,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if canonicalNetwork, ok := node.CanonicalNetworkName(cfg.Network); ok {
 		cfg.Network = canonicalNetwork
 	}
+	if *legacyExposureScan {
+		var err error
+		watchedSuiteIDs, err = normalizeLegacySuiteIDs([]string(legacySuiteIDs))
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "legacy exposure scan config failed: %v\n", err)
+			return 2
+		}
+	}
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		_, _ = fmt.Fprintf(stderr, "datadir create failed: %v\n", err)
 		return 2
@@ -234,11 +243,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if *legacyExposureScan {
-		watchedSuiteIDs, err := normalizeLegacySuiteIDs([]string(legacySuiteIDs))
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "legacy exposure scan config failed: %v\n", err)
-			return 2
-		}
 		report := buildLegacyExposureReport(cfg.Network, cfg.DataDir, chainState, watchedSuiteIDs, *legacyExposureIncludeOutpoints)
 		if err := printLegacyExposureReport(stdout, report); err != nil {
 			_, _ = fmt.Fprintf(stderr, "legacy exposure encode failed: %v\n", err)

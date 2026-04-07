@@ -287,6 +287,53 @@ func TestRunLegacyExposureScanRejectsMissingSuiteIDs(t *testing.T) {
 	}
 }
 
+func TestRunLegacyExposureScanRejectsInvalidSuiteID(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile(blocker): %v", err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run(
+		[]string{
+			"--datadir", blocker,
+			"--legacy-exposure-scan",
+			"--legacy-suite-id", "0x100",
+		},
+		&out,
+		&errOut,
+	)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d", code)
+	}
+	if !strings.Contains(errOut.String(), "invalid legacy suite_id") {
+		t.Fatalf("stderr=%q", errOut.String())
+	}
+}
+
+func TestRunLegacyExposureScanValidatesSuiteIDsBeforeDataDirCreate(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile(blocker): %v", err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run([]string{"--datadir", blocker, "--legacy-exposure-scan"}, &out, &errOut)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d", code)
+	}
+	if !strings.Contains(errOut.String(), "requires at least one --legacy-suite-id") {
+		t.Fatalf("stderr=%q", errOut.String())
+	}
+	if strings.Contains(errOut.String(), "datadir create failed") {
+		t.Fatalf("suite-id validation ran too late: %q", errOut.String())
+	}
+}
+
 func TestRunLegacyExposureScanDoesNotRequireGenesisFileForNamedNetwork(t *testing.T) {
 	dir := t.TempDir()
 	if err := node.NewChainState().Save(node.ChainStatePath(dir)); err != nil {
@@ -318,6 +365,30 @@ func TestRunLegacyExposureScanDoesNotRequireGenesisFileForNamedNetwork(t *testin
 	}
 	if report.LegacyExposureTotal != 0 {
 		t.Fatalf("legacy exposure total=%d, want 0", report.LegacyExposureTotal)
+	}
+}
+
+func TestRunLegacyExposureScanPropagatesEncodeFailure(t *testing.T) {
+	dir := t.TempDir()
+	if err := node.NewChainState().Save(node.ChainStatePath(dir)); err != nil {
+		t.Fatalf("Save(chainstate): %v", err)
+	}
+
+	var errOut bytes.Buffer
+	code := run(
+		[]string{
+			"--datadir", dir,
+			"--legacy-exposure-scan",
+			"--legacy-suite-id", "1",
+		},
+		failWriter{},
+		&errOut,
+	)
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(errOut.String(), "legacy exposure encode failed") {
+		t.Fatalf("stderr=%q", errOut.String())
 	}
 }
 

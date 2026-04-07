@@ -1333,6 +1333,48 @@ mod tests {
     }
 
     #[test]
+    fn legacy_exposure_scan_rejects_invalid_suite_id() {
+        let dir = unique_temp_dir("rubin-node-bin-legacy-invalid");
+        let blocker = dir.join("not-a-dir");
+        fs::create_dir_all(&dir).expect("mkdir");
+        fs::write(&blocker, b"x").expect("write blocker");
+        let args = vec![
+            "--datadir".to_string(),
+            blocker.display().to_string(),
+            "--legacy-exposure-scan".to_string(),
+            "--legacy-suite-id".to_string(),
+            "0x100".to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run(&args, &mut stdout, &mut stderr);
+        assert_eq!(code, 2);
+        assert!(String::from_utf8_lossy(&stderr).contains("invalid legacy suite_id"));
+    }
+
+    #[test]
+    fn legacy_exposure_scan_validates_suite_ids_before_datadir_create() {
+        let dir = unique_temp_dir("rubin-node-bin-legacy-ordering");
+        let blocker = dir.join("not-a-dir");
+        fs::create_dir_all(&dir).expect("mkdir");
+        fs::write(&blocker, b"x").expect("write blocker");
+        let args = vec![
+            "--datadir".to_string(),
+            blocker.display().to_string(),
+            "--legacy-exposure-scan".to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run(&args, &mut stdout, &mut stderr);
+        assert_eq!(code, 2);
+        let stderr = String::from_utf8_lossy(&stderr);
+        assert!(stderr.contains("legacy exposure scan requires at least one --legacy-suite-id"));
+        assert!(!stderr.contains("datadir create failed"));
+    }
+
+    #[test]
     fn legacy_exposure_scan_does_not_require_genesis_file_for_named_network() {
         let dir = unique_temp_dir("rubin-node-bin-legacy-mainnet");
         fs::create_dir_all(&dir).expect("mkdir");
