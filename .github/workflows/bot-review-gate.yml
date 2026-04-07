@@ -5,20 +5,97 @@ on:
     types: [opened, synchronize, reopened]
   pull_request_review:
     types: [submitted, dismissed, edited]
+  issue_comment:
+    types: [created]
 
 permissions:
+  actions: write
   issues: read
   pull-requests: read
 
 jobs:
+  refresh-bot-review-gate:
+    if: github.event_name == 'issue_comment'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Re-run PR gate after fallback bot comment
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const prNumber = context.payload.issue?.pull_request
+              ? context.payload.issue.number
+              : null;
+            if (!prNumber) {
+              core.info('Not a pull request issue_comment; skipping refresh.');
+              return;
+            }
+
+            // GitHub surfaces disagree on whether this bot login includes the
+            // [bot] suffix, so accept both spellings but still require Bot type.
+            const FALLBACK_COMMENT_AUTHORS = new Set([
+              'copilot-swe-agent',
+              'copilot-swe-agent[bot]',
+            ]);
+            const authorLogin = context.payload.comment?.user?.login || '';
+            const authorType = context.payload.comment?.user?.type || '';
+            if (!FALLBACK_COMMENT_AUTHORS.has(authorLogin) || authorType !== 'Bot') {
+              core.info(
+                `Comment by ${authorLogin || 'unknown'} is not a fallback bot review; skipping refresh.`
+              );
+              return;
+            }
+
+            const { data: pullRequest } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+
+            const workflowRunsResponse = await github.request(
+              'GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs',
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'bot-review-gate.yml',
+                event: 'pull_request',
+                branch: pullRequest.head.ref,
+                per_page: 100,
+              }
+            );
+            const workflowRuns = workflowRunsResponse.data.workflow_runs || [];
+
+            const prRun = workflowRuns.find(
+              run =>
+                run.name === 'Bot Review Gate' &&
+                run.head_sha === pullRequest.head.sha
+            );
+
+            if (!prRun) {
+              core.setFailed(
+                `No pull_request bot-review-gate run found for PR #${prNumber} head ${pullRequest.head.sha}.`
+              );
+              return;
+            }
+
+            await github.request('POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun', {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: prRun.id,
+            });
+
+            core.info(
+              `Re-ran pull_request bot-review-gate run ${prRun.id} for PR #${prNumber} head ${pullRequest.head.sha}.`
+            );
+
   bot-review-gate:
+    if: github.event_name != 'issue_comment'
     runs-on: ubuntu-latest
     steps:
       - name: Check bot reviews completed and threads resolved
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
-            // Bot review gate v4: pending-check + thread-check.
+            // Bot review gate v5: pending-check + thread-check.
             //
             // Phase 1 — Pending check:
             //   Blocks merge until Copilot has either submitted at least one
@@ -30,9 +107,9 @@ jobs:
             //   Blocks merge if any unresolved review thread authored by a
             //   MONITORED bot exists (paginated GraphQL).
             //
-            // Re-triggers on pull_request and pull_request_review — once the
-            // PR updates or the bot finishes its formal review, the gate
-            // re-evaluates while also inspecting any existing PR comments.
+            // Re-triggers on pull_request and pull_request_review. If Copilot
+            // only answers via issue_comment later, the issue_comment path
+            // above re-runs the latest PR-bound gate for the current head.
 
             // Bots that MUST have reviewed this PR at least once.
             const REQUIRED_REVIEWERS = new Set([
@@ -43,7 +120,10 @@ jobs:
             // review objects. Treat those comments as satisfying phase 1;
             // HEAD freshness is enforced separately by the Copilot ruleset.
             const FALLBACK_COMMENT_AUTHORS = new Map([
-              ['copilot-pull-request-reviewer[bot]', new Set(['copilot-swe-agent[bot]'])],
+              ['copilot-pull-request-reviewer[bot]', new Set([
+                'copilot-swe-agent',
+                'copilot-swe-agent[bot]',
+              ])],
             ]);
 
             // Bots whose unresolved threads block merge.
