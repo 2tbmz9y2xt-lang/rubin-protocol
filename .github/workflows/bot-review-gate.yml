@@ -67,7 +67,8 @@ jobs:
             const prRun = workflowRuns.find(
               run =>
                 run.name === 'Bot Review Gate' &&
-                run.head_sha === pullRequest.head.sha
+                run.head_sha === pullRequest.head.sha &&
+                (run.pull_requests || []).some(pr => pr.number === prNumber)
             );
 
             if (!prRun) {
