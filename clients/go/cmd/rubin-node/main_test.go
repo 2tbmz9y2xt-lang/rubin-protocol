@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"math"
@@ -546,6 +547,54 @@ func TestParseGenesisConfigFullRejectsInvalidCoreExtAnchorProfiles(t *testing.T)
 	}
 	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "must have non-empty allowed suites") {
 		t.Fatalf("expected invalid profile rejection during anchor check, got %v", err)
+	}
+}
+
+func TestParseGenesisConfigFullRejectsTxContextEnabledCoreExtProfileWithoutRuntimeVerifier(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	chainIDBytes := node.DevnetGenesisChainID()
+	genesisHashBytes := node.DevnetGenesisBlockHash()
+	chainID := hex.EncodeToString(chainIDBytes[:])
+	genesisHash := hex.EncodeToString(genesisHashBytes[:])
+	if err := os.WriteFile(path, []byte(`{
+		"chain_id_hex":"0x`+chainID+`",
+		"genesis_hash_hex":"0x`+genesisHash+`",
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"tx_context_enabled":true,"allowed_suite_ids":[3],"binding":"native_verify_sig"}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+
+	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "tx_context_enabled core_ext profile for ext_id=7 requires runtime txcontext verifier wiring") {
+		t.Fatalf("expected tx_context_enabled runtime verifier rejection, got %v", err)
+	}
+}
+
+func TestParseGenesisConfigFullRejectsNonBooleanTxContextEnabled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	chainIDBytes := node.DevnetGenesisChainID()
+	genesisHashBytes := node.DevnetGenesisBlockHash()
+	chainID := hex.EncodeToString(chainIDBytes[:])
+	genesisHash := hex.EncodeToString(genesisHashBytes[:])
+	if err := os.WriteFile(path, []byte(`{
+		"chain_id_hex":"0x`+chainID+`",
+		"genesis_hash_hex":"0x`+genesisHash+`",
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"tx_context_enabled":1,"allowed_suite_ids":[3],"binding":"native_verify_sig"}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+
+	_, err := parseGenesisConfigFull(path)
+	if err == nil {
+		t.Fatalf("expected invalid tx_context_enabled parse failure")
+	}
+	var typeErr *json.UnmarshalTypeError
+	if !errors.As(err, &typeErr) {
+		t.Fatalf("expected UnmarshalTypeError, got %T (%v)", err, err)
+	}
+	if !strings.Contains(typeErr.Field, "tx_context_enabled") {
+		t.Fatalf("expected tx_context_enabled field in type error, got %q", typeErr.Field)
 	}
 }
 

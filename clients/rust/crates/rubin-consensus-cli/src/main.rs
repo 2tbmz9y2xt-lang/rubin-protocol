@@ -966,6 +966,12 @@ fn core_ext_profiles_from_json(
                 item.ext_id
             ));
         }
+        if item.tx_context_enabled {
+            return Err(format!(
+                "tx_context_enabled core_ext profile for ext_id={} requires runtime txcontext verifier wiring",
+                item.ext_id
+            ));
+        }
         if !core_ext_runtime_binding_supported(binding_name) {
             return Err(format!("unsupported core_ext binding: {}", item.binding));
         }
@@ -979,12 +985,6 @@ fn core_ext_profiles_from_json(
             return Err(format!(
                 "core_ext binding {} requires ext_payload_schema_hex",
                 rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
-            ));
-        }
-        if item.tx_context_enabled {
-            return Err(format!(
-                "core_ext ext_id={} txcontext-enabled profile requires runtime verifier wiring",
-                item.ext_id
             ));
         }
         let binding = core_ext_verification_binding_from_name_and_descriptor(
@@ -4963,7 +4963,7 @@ mod tests {
     }
 
     #[test]
-    fn core_ext_profiles_reject_tx_context_enabled_until_runtime_verifier_lands() {
+    fn core_ext_profiles_reject_tx_context_enabled_profile_without_runtime_verifier() {
         let err = core_ext_profiles_from_json(
             &[CoreExtProfileJson {
                 ext_id: 9,
@@ -4977,7 +4977,9 @@ mod tests {
             "",
         )
         .unwrap_err();
-        assert!(err.contains("requires runtime verifier wiring"));
+        assert!(err.contains(
+            "tx_context_enabled core_ext profile for ext_id=9 requires runtime txcontext verifier wiring"
+        ));
     }
 
     #[test]
