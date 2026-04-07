@@ -629,7 +629,8 @@ fn build_legacy_exposure_report(
             outpoints: None,
         });
     }
-    let (sunset_readiness, warning_hook, grace_hook) = legacy_exposure_hooks(chain_state.has_tip, legacy_exposure_total);
+    let (sunset_readiness, warning_hook, grace_hook) =
+        legacy_exposure_hooks(chain_state.has_tip, legacy_exposure_total);
     LegacyExposureReport {
         report_version: LEGACY_EXPOSURE_REPORT_VERSION,
         measurement_scope: "explicit_suite_id_utxos".to_string(),
@@ -895,7 +896,10 @@ mod tests {
     fn legacy_exposure_hooks_with_tip_nonzero_total_returns_not_ready() {
         let (readiness, warning, grace) = legacy_exposure_hooks(true, 3);
         assert_eq!(readiness, "not_ready_legacy_exposure_present");
-        assert_eq!(warning, "legacy_exposure_present_notify_operator_and_council");
+        assert_eq!(
+            warning,
+            "legacy_exposure_present_notify_operator_and_council"
+        );
         assert_eq!(grace, "not_applicable_legacy_exposure_present");
     }
 
