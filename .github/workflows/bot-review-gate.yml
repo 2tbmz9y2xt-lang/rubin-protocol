@@ -30,15 +30,15 @@ jobs:
               return;
             }
 
-            // GitHub surfaces disagree on whether this bot login includes the
-            // [bot] suffix, so accept both spellings but still require Bot type.
+            // GitHub surfaces disagree on both the bot login spelling and the
+            // reported account type, so trust the exact reserved bot login(s)
+            // and do not additionally gate on user.type here.
             const FALLBACK_COMMENT_AUTHORS = new Set([
               'copilot-swe-agent',
               'copilot-swe-agent[bot]',
             ]);
             const authorLogin = context.payload.comment?.user?.login || '';
-            const authorType = context.payload.comment?.user?.type || '';
-            if (!FALLBACK_COMMENT_AUTHORS.has(authorLogin) || authorType !== 'Bot') {
+            if (!FALLBACK_COMMENT_AUTHORS.has(authorLogin)) {
               core.info(
                 `Comment by ${authorLogin || 'unknown'} is not a fallback bot review; skipping refresh.`
               );
@@ -195,8 +195,7 @@ jobs:
                 if (!authors) continue;
                 const hasFallbackComment = issueComments.some(comment => {
                   const login = comment.user?.login || '';
-                  const userType = comment.user?.type || '';
-                  return authors.has(login) && userType === 'Bot';
+                  return authors.has(login);
                 });
                 if (hasFallbackComment) {
                   reviewedBots.add(bot);
