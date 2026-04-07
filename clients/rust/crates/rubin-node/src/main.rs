@@ -573,7 +573,14 @@ fn format_legacy_exposure_outpoint(txid: &[u8; 32], vout: u32) -> String {
     format!("{}:{vout}", hex::encode(txid))
 }
 
-fn legacy_exposure_hooks(total: u64) -> (&'static str, &'static str, &'static str) {
+fn legacy_exposure_hooks(has_tip: bool, total: u64) -> (&'static str, &'static str, &'static str) {
+    if !has_tip {
+        return (
+            "invalid_no_chainstate_tip",
+            "none",
+            "not_applicable_no_chainstate_tip",
+        );
+    }
     if total == 0 {
         (
             "ready_for_operator_defined_grace_window",
@@ -618,7 +625,7 @@ fn build_legacy_exposure_report(
         legacy_exposure_total = legacy_exposure_total.saturating_add(report_count);
         legacy_suite_reports.push(report);
     }
-    let (sunset_readiness, warning_hook, grace_hook) = legacy_exposure_hooks(legacy_exposure_total);
+    let (sunset_readiness, warning_hook, grace_hook) = legacy_exposure_hooks(chain_state.has_tip, legacy_exposure_total);
     LegacyExposureReport {
         report_version: LEGACY_EXPOSURE_REPORT_VERSION,
         measurement_scope: "explicit_suite_id_utxos".to_string(),
@@ -823,7 +830,7 @@ mod tests {
     };
     use serde_json::Value;
 
-    use super::{parse_args, run, runtime_genesis_hash, validate_config};
+    use super::{legacy_exposure_hooks, parse_args, run, runtime_genesis_hash, validate_config};
     use rubin_node::{load_genesis_config, PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR};
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
@@ -850,6 +857,38 @@ mod tests {
 
     fn production_rotation_networks() -> [&'static str; 4] {
         ["mainnet", "testnet", " MAINNET ", "\tTestNet\t"]
+    }
+
+    #[test]
+    fn legacy_exposure_hooks_no_tip_returns_invalid_state() {
+        let (readiness, warning, grace) = legacy_exposure_hooks(false, 0);
+        assert_eq!(readiness, "invalid_no_chainstate_tip");
+        assert_eq!(warning, "none");
+        assert_eq!(grace, "not_applicable_no_chainstate_tip");
+    }
+
+    #[test]
+    fn legacy_exposure_hooks_no_tip_with_nonzero_total_returns_invalid_state() {
+        let (readiness, warning, grace) = legacy_exposure_hooks(false, 5);
+        assert_eq!(readiness, "invalid_no_chainstate_tip");
+        assert_eq!(warning, "none");
+        assert_eq!(grace, "not_applicable_no_chainstate_tip");
+    }
+
+    #[test]
+    fn legacy_exposure_hooks_with_tip_zero_total_returns_grace_window() {
+        let (readiness, warning, grace) = legacy_exposure_hooks(true, 0);
+        assert_eq!(readiness, "ready_for_operator_defined_grace_window");
+        assert_eq!(warning, "none");
+        assert_eq!(grace, "start_operator_defined_grace_window");
+    }
+
+    #[test]
+    fn legacy_exposure_hooks_with_tip_nonzero_total_returns_not_ready() {
+        let (readiness, warning, grace) = legacy_exposure_hooks(true, 3);
+        assert_eq!(readiness, "not_ready_legacy_exposure_present");
+        assert_eq!(warning, "legacy_exposure_present_notify_operator_and_council");
+        assert_eq!(grace, "not_applicable_legacy_exposure_present");
     }
 
     #[test]

@@ -124,7 +124,10 @@ func formatLegacyExposureOutpoint(op consensus.Outpoint) string {
 	return fmt.Sprintf("%x:%d", op.Txid[:], op.Vout)
 }
 
-func legacyExposureHooks(total uint64) (string, string, string) {
+func legacyExposureHooks(hasTip bool, total uint64) (string, string, string) {
+	if !hasTip {
+		return "invalid_no_chainstate_tip", "none", "not_applicable_no_chainstate_tip"
+	}
 	if total == 0 {
 		return "ready_for_operator_defined_grace_window", "none", "start_operator_defined_grace_window"
 	}
@@ -173,7 +176,7 @@ func buildLegacyExposureReport(network, dataDir string, chainState *node.ChainSt
 		total = saturatingAddUint64(total, reportCount)
 		reports = append(reports, report)
 	}
-	sunsetReadiness, warningHook, graceHook := legacyExposureHooks(total)
+	sunsetReadiness, warningHook, graceHook := legacyExposureHooks(chainState.HasTip, total)
 	return legacyExposureReport{
 		ReportVersion:         legacyExposureReportVersion,
 		MeasurementScope:      "explicit_suite_id_utxos",

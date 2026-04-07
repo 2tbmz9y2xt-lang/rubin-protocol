@@ -96,6 +96,58 @@ func TestMultiStringFlagSetAppends(t *testing.T) {
 	}
 }
 
+func TestLegacyExposureHooksNoTipReturnsInvalidState(t *testing.T) {
+	readiness, warning, grace := legacyExposureHooks(false, 0)
+	if readiness != "invalid_no_chainstate_tip" {
+		t.Fatalf("sunset_readiness=%q, want invalid_no_chainstate_tip", readiness)
+	}
+	if warning != "none" {
+		t.Fatalf("warning_hook=%q, want none", warning)
+	}
+	if grace != "not_applicable_no_chainstate_tip" {
+		t.Fatalf("grace_hook=%q, want not_applicable_no_chainstate_tip", grace)
+	}
+}
+
+func TestLegacyExposureHooksNoTipWithNonZeroTotalReturnsInvalidState(t *testing.T) {
+	readiness, warning, grace := legacyExposureHooks(false, 5)
+	if readiness != "invalid_no_chainstate_tip" {
+		t.Fatalf("sunset_readiness=%q, want invalid_no_chainstate_tip", readiness)
+	}
+	if warning != "none" {
+		t.Fatalf("warning_hook=%q, want none", warning)
+	}
+	if grace != "not_applicable_no_chainstate_tip" {
+		t.Fatalf("grace_hook=%q, want not_applicable_no_chainstate_tip", grace)
+	}
+}
+
+func TestLegacyExposureHooksWithTipZeroTotalReturnsGraceWindow(t *testing.T) {
+	readiness, warning, grace := legacyExposureHooks(true, 0)
+	if readiness != "ready_for_operator_defined_grace_window" {
+		t.Fatalf("sunset_readiness=%q, want ready_for_operator_defined_grace_window", readiness)
+	}
+	if warning != "none" {
+		t.Fatalf("warning_hook=%q, want none", warning)
+	}
+	if grace != "start_operator_defined_grace_window" {
+		t.Fatalf("grace_hook=%q, want start_operator_defined_grace_window", grace)
+	}
+}
+
+func TestLegacyExposureHooksWithTipNonZeroTotalReturnsNotReady(t *testing.T) {
+	readiness, warning, grace := legacyExposureHooks(true, 3)
+	if readiness != "not_ready_legacy_exposure_present" {
+		t.Fatalf("sunset_readiness=%q, want not_ready_legacy_exposure_present", readiness)
+	}
+	if warning != "legacy_exposure_present_notify_operator_and_council" {
+		t.Fatalf("warning_hook=%q, want legacy_exposure_present_notify_operator_and_council", warning)
+	}
+	if grace != "not_applicable_legacy_exposure_present" {
+		t.Fatalf("grace_hook=%q, want not_applicable_legacy_exposure_present", grace)
+	}
+}
+
 func TestRunDryRunOK(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer
