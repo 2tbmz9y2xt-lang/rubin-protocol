@@ -5,8 +5,6 @@ on:
     types: [opened, synchronize, reopened]
   pull_request_review:
     types: [submitted, dismissed, edited]
-  issue_comment:
-    types: [created, edited]
 
 permissions:
   issues: read
@@ -32,8 +30,9 @@ jobs:
             //   Blocks merge if any unresolved review thread authored by a
             //   MONITORED bot exists (paginated GraphQL).
             //
-            // Re-triggers on pull_request_review and issue_comment — once the
-            // bot finishes its review/comment, the gate re-evaluates.
+            // Re-triggers on pull_request and pull_request_review — once the
+            // PR updates or the bot finishes its formal review, the gate
+            // re-evaluates while also inspecting any existing PR comments.
 
             // Bots that MUST have reviewed this PR at least once.
             const REQUIRED_REVIEWERS = new Set([
@@ -44,7 +43,7 @@ jobs:
             // review objects. Treat those comments as satisfying phase 1;
             // HEAD freshness is enforced separately by the Copilot ruleset.
             const FALLBACK_COMMENT_AUTHORS = new Map([
-              ['copilot-pull-request-reviewer[bot]', new Set(['Copilot'])],
+              ['copilot-pull-request-reviewer[bot]', new Set(['copilot-swe-agent[bot]'])],
             ]);
 
             // Bots whose unresolved threads block merge.
@@ -116,7 +115,8 @@ jobs:
                 if (!authors) continue;
                 const hasFallbackComment = issueComments.some(comment => {
                   const login = comment.user?.login || '';
-                  return authors.has(login);
+                  const userType = comment.user?.type || '';
+                  return authors.has(login) && userType === 'Bot';
                 });
                 if (hasFallbackComment) {
                   reviewedBots.add(bot);
