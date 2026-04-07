@@ -55,8 +55,8 @@ type legacyExposureReport struct {
 	DataDir               string                      `json:"data_dir"`
 	ChainstateHeight      uint64                      `json:"chainstate_height"`
 	ChainstateHasTip      bool                        `json:"chainstate_has_tip"`
-	IndexedSuiteIDs       []uint8                     `json:"indexed_suite_ids"`
-	WatchedLegacySuiteIDs []uint8                     `json:"watched_legacy_suite_ids"`
+	IndexedSuiteIDs       []uint64                    `json:"indexed_suite_ids"`
+	WatchedLegacySuiteIDs []uint64                    `json:"watched_legacy_suite_ids"`
 	LegacyExposureTotal   uint64                      `json:"legacy_exposure_total"`
 	SunsetReadiness       string                      `json:"sunset_readiness"`
 	WarningHook           string                      `json:"warning_hook"`
@@ -138,26 +138,39 @@ func saturatingAddUint64(total, value uint64) uint64 {
 	return total + value
 }
 
+func suiteIDsToJSONNumbers(ids []uint8) []uint64 {
+	if len(ids) == 0 {
+		return []uint64{}
+	}
+	values := make([]uint64, 0, len(ids))
+	for _, id := range ids {
+		values = append(values, uint64(id))
+	}
+	return values
+}
+
 func buildLegacyExposureReport(network, dataDir string, chainState *node.ChainState, legacySuiteIDs []uint8, includeOutpoints bool) legacyExposureReport {
 	reports := make([]legacyExposureSuiteReport, 0, len(legacySuiteIDs))
 	var total uint64
 	for _, suiteID := range legacySuiteIDs {
-		count := chainState.UtxoExposureCountBySuiteID(suiteID)
+		reportCount := chainState.UtxoExposureCountBySuiteID(suiteID)
 		report := legacyExposureSuiteReport{
 			SuiteID:           suiteID,
-			UtxoExposureCount: count,
-			OutpointCount:     count,
+			UtxoExposureCount: reportCount,
+			OutpointCount:     reportCount,
 		}
 		if includeOutpoints {
 			outpoints := chainState.UtxoOutpointsBySuiteID(suiteID)
-			report.OutpointCount = uint64(len(outpoints))
+			reportCount = uint64(len(outpoints))
+			report.UtxoExposureCount = reportCount
+			report.OutpointCount = reportCount
 			reportOutpoints := make([]string, 0, len(outpoints))
 			for _, op := range outpoints {
 				reportOutpoints = append(reportOutpoints, formatLegacyExposureOutpoint(op))
 			}
 			report.Outpoints = &reportOutpoints
 		}
-		total = saturatingAddUint64(total, count)
+		total = saturatingAddUint64(total, reportCount)
 		reports = append(reports, report)
 	}
 	sunsetReadiness, warningHook, graceHook := legacyExposureHooks(total)
@@ -168,8 +181,8 @@ func buildLegacyExposureReport(network, dataDir string, chainState *node.ChainSt
 		DataDir:               dataDir,
 		ChainstateHeight:      chainState.Height,
 		ChainstateHasTip:      chainState.HasTip,
-		IndexedSuiteIDs:       chainState.IndexedSuiteIDs(),
-		WatchedLegacySuiteIDs: legacySuiteIDs,
+		IndexedSuiteIDs:       suiteIDsToJSONNumbers(chainState.IndexedSuiteIDs()),
+		WatchedLegacySuiteIDs: suiteIDsToJSONNumbers(legacySuiteIDs),
 		LegacyExposureTotal:   total,
 		SunsetReadiness:       sunsetReadiness,
 		WarningHook:           warningHook,
@@ -184,6 +197,23 @@ func printLegacyExposureReport(w io.Writer, report legacyExposureReport) error {
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
 	return enc.Encode(report)
+}
+
+func loadLegacyExposureScanChainState(path string) (*node.ChainState, error) {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("legacy exposure scan requires an existing chainstate file with a tip: %s", path)
+		}
+		return nil, fmt.Errorf("legacy exposure scan chainstate stat failed: %w", err)
+	}
+	chainState, err := node.LoadChainState(path)
+	if err != nil {
+		return nil, fmt.Errorf("chainstate load failed: %w", err)
+	}
+	if !chainState.HasTip {
+		return nil, fmt.Errorf("legacy exposure scan requires a chainstate with a tip: %s", path)
+	}
+	return chainState, nil
 }
 
 func main() {
@@ -240,23 +270,28 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 	}
-	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
-		_, _ = fmt.Fprintf(stderr, "datadir create failed: %v\n", err)
-		return 2
-	}
 	chainStatePath := node.ChainStatePath(cfg.DataDir)
-	chainState, err := node.LoadChainState(chainStatePath)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "chainstate load failed: %v\n", err)
-		return 2
-	}
 	if *legacyExposureScan {
+		chainState, err := loadLegacyExposureScanChainState(chainStatePath)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "%v\n", err)
+			return 2
+		}
 		report := buildLegacyExposureReport(cfg.Network, cfg.DataDir, chainState, watchedSuiteIDs, *legacyExposureIncludeOutpoints)
 		if err := printLegacyExposureReport(stdout, report); err != nil {
 			_, _ = fmt.Fprintf(stderr, "legacy exposure encode failed: %v\n", err)
 			return 1
 		}
 		return 0
+	}
+	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
+		_, _ = fmt.Fprintf(stderr, "datadir create failed: %v\n", err)
+		return 2
+	}
+	chainState, err := node.LoadChainState(chainStatePath)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "chainstate load failed: %v\n", err)
+		return 2
 	}
 	genesisCfg, err := parseGenesisConfigFull(*genesisFile)
 	if err != nil {

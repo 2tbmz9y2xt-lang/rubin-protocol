@@ -124,6 +124,14 @@ func testLegacyExposureP2PKCovenantData(suiteID uint8) []byte {
 	return cov
 }
 
+func testLegacyExposureTippedChainState() *node.ChainState {
+	state := node.NewChainState()
+	state.HasTip = true
+	state.Height = 7
+	state.TipHash = [32]byte{0x42}
+	return state
+}
+
 func TestRunLegacyExposureScanEmitsDeterministicJSON(t *testing.T) {
 	dir := t.TempDir()
 	state := node.NewChainState()
@@ -178,6 +186,10 @@ func TestRunLegacyExposureScanEmitsDeterministicJSON(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
 		t.Fatalf("json.Unmarshal: %v", err)
 	}
+	var raw map[string]any
+	if err := json.Unmarshal(out.Bytes(), &raw); err != nil {
+		t.Fatalf("json.Unmarshal(raw): %v", err)
+	}
 	if report.ReportVersion != legacyExposureReportVersion {
 		t.Fatalf("report_version=%d, want %d", report.ReportVersion, legacyExposureReportVersion)
 	}
@@ -192,6 +204,20 @@ func TestRunLegacyExposureScanEmitsDeterministicJSON(t *testing.T) {
 	}
 	if !reflect.DeepEqual(report.IndexedSuiteIDs, []uint8{consensus.SUITE_ID_ML_DSA_87, 0x42}) {
 		t.Fatalf("indexed ids=%v", report.IndexedSuiteIDs)
+	}
+	indexedRaw, ok := raw["indexed_suite_ids"].([]any)
+	if !ok {
+		t.Fatalf("indexed_suite_ids encoded as %T, want JSON array", raw["indexed_suite_ids"])
+	}
+	if len(indexedRaw) != 2 || indexedRaw[0] != float64(consensus.SUITE_ID_ML_DSA_87) || indexedRaw[1] != float64(0x42) {
+		t.Fatalf("indexed_suite_ids raw=%v", indexedRaw)
+	}
+	watchedRaw, ok := raw["watched_legacy_suite_ids"].([]any)
+	if !ok {
+		t.Fatalf("watched_legacy_suite_ids encoded as %T, want JSON array", raw["watched_legacy_suite_ids"])
+	}
+	if len(watchedRaw) != 2 || watchedRaw[0] != float64(consensus.SUITE_ID_ML_DSA_87) || watchedRaw[1] != float64(0x42) {
+		t.Fatalf("watched_legacy_suite_ids raw=%v", watchedRaw)
 	}
 	if report.LegacyExposureTotal != 3 {
 		t.Fatalf("legacy exposure total=%d, want 3", report.LegacyExposureTotal)
@@ -218,7 +244,7 @@ func TestRunLegacyExposureScanEmitsDeterministicJSON(t *testing.T) {
 
 func TestRunLegacyExposureScanIncludesOutpoints(t *testing.T) {
 	dir := t.TempDir()
-	state := node.NewChainState()
+	state := testLegacyExposureTippedChainState()
 	first := consensus.Outpoint{Txid: [32]byte{0x02}, Vout: 1}
 	second := consensus.Outpoint{Txid: [32]byte{0x01}, Vout: 0}
 	state.Utxos[first] = consensus.UtxoEntry{
@@ -265,6 +291,15 @@ func TestRunLegacyExposureScanIncludesOutpoints(t *testing.T) {
 	if len(report.LegacySuiteReports) != 1 {
 		t.Fatalf("legacy suite reports=%d, want 1", len(report.LegacySuiteReports))
 	}
+	if report.LegacyExposureTotal != 2 {
+		t.Fatalf("legacy exposure total=%d, want 2", report.LegacyExposureTotal)
+	}
+	if report.LegacySuiteReports[0].UtxoExposureCount != 2 {
+		t.Fatalf("utxo_exposure_count=%d, want 2", report.LegacySuiteReports[0].UtxoExposureCount)
+	}
+	if report.LegacySuiteReports[0].OutpointCount != 2 {
+		t.Fatalf("outpoint_count=%d, want 2", report.LegacySuiteReports[0].OutpointCount)
+	}
 	want := []string{
 		"0100000000000000000000000000000000000000000000000000000000000000:0",
 		"0200000000000000000000000000000000000000000000000000000000000000:1",
@@ -276,7 +311,7 @@ func TestRunLegacyExposureScanIncludesOutpoints(t *testing.T) {
 
 func TestRunLegacyExposureScanEmitsEmptyOutpointsWhenDetailModeHasNoMatches(t *testing.T) {
 	dir := t.TempDir()
-	if err := node.NewChainState().Save(node.ChainStatePath(dir)); err != nil {
+	if err := testLegacyExposureTippedChainState().Save(node.ChainStatePath(dir)); err != nil {
 		t.Fatalf("Save(chainstate): %v", err)
 	}
 
@@ -304,6 +339,15 @@ func TestRunLegacyExposureScanEmitsEmptyOutpointsWhenDetailModeHasNoMatches(t *t
 	if len(report.LegacySuiteReports) != 1 {
 		t.Fatalf("legacy suite reports=%d, want 1", len(report.LegacySuiteReports))
 	}
+	if report.LegacyExposureTotal != 0 {
+		t.Fatalf("legacy exposure total=%d, want 0", report.LegacyExposureTotal)
+	}
+	if report.LegacySuiteReports[0].UtxoExposureCount != 0 {
+		t.Fatalf("utxo_exposure_count=%d, want 0", report.LegacySuiteReports[0].UtxoExposureCount)
+	}
+	if report.LegacySuiteReports[0].OutpointCount != 0 {
+		t.Fatalf("outpoint_count=%d, want 0", report.LegacySuiteReports[0].OutpointCount)
+	}
 	if report.LegacySuiteReports[0].Outpoints == nil {
 		t.Fatalf("expected outpoints field to be present as [] in detail mode")
 	}
@@ -321,6 +365,52 @@ func TestRunLegacyExposureScanRejectsMissingSuiteIDs(t *testing.T) {
 		t.Fatalf("expected exit code 2, got %d", code)
 	}
 	if !strings.Contains(errOut.String(), "requires at least one --legacy-suite-id") {
+		t.Fatalf("stderr=%q", errOut.String())
+	}
+}
+
+func TestRunLegacyExposureScanRequiresExistingChainstateWithTip(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "missing")
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run(
+		[]string{
+			"--datadir", dir,
+			"--legacy-exposure-scan",
+			"--legacy-suite-id", "1",
+		},
+		&out,
+		&errOut,
+	)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d", code)
+	}
+	if !strings.Contains(errOut.String(), "legacy exposure scan requires an existing chainstate file with a tip") {
+		t.Fatalf("stderr=%q", errOut.String())
+	}
+}
+
+func TestRunLegacyExposureScanRequiresChainstateTip(t *testing.T) {
+	dir := t.TempDir()
+	if err := node.NewChainState().Save(node.ChainStatePath(dir)); err != nil {
+		t.Fatalf("Save(chainstate): %v", err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run(
+		[]string{
+			"--datadir", dir,
+			"--legacy-exposure-scan",
+			"--legacy-suite-id", "1",
+		},
+		&out,
+		&errOut,
+	)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d", code)
+	}
+	if !strings.Contains(errOut.String(), "legacy exposure scan requires a chainstate with a tip") {
 		t.Fatalf("stderr=%q", errOut.String())
 	}
 }
@@ -374,7 +464,8 @@ func TestRunLegacyExposureScanValidatesSuiteIDsBeforeDataDirCreate(t *testing.T)
 
 func TestRunLegacyExposureScanDoesNotRequireGenesisFileForNamedNetwork(t *testing.T) {
 	dir := t.TempDir()
-	if err := node.NewChainState().Save(node.ChainStatePath(dir)); err != nil {
+	state := testLegacyExposureTippedChainState()
+	if err := state.Save(node.ChainStatePath(dir)); err != nil {
 		t.Fatalf("Save(chainstate): %v", err)
 	}
 
@@ -408,7 +499,7 @@ func TestRunLegacyExposureScanDoesNotRequireGenesisFileForNamedNetwork(t *testin
 
 func TestRunLegacyExposureScanPropagatesEncodeFailure(t *testing.T) {
 	dir := t.TempDir()
-	if err := node.NewChainState().Save(node.ChainStatePath(dir)); err != nil {
+	if err := testLegacyExposureTippedChainState().Save(node.ChainStatePath(dir)); err != nil {
 		t.Fatalf("Save(chainstate): %v", err)
 	}
 

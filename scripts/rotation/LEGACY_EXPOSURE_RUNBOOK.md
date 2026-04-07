@@ -55,14 +55,16 @@ The scanner emits deterministic JSON with:
 - `legacy_suite_reports[*].utxo_exposure_count`: per-suite exposure count
 - `legacy_suite_reports[*].outpoint_count`: per-suite outpoint count
 - `legacy_suite_reports[*].outpoints`: deterministic outpoint list when detail mode is enabled; emitted as `[]` for watched suites with zero matching UTXOs
-- `sunset_readiness`, `warning_hook`, `grace_hook`: advisory ops hooks derived from current exposure only
+- `sunset_readiness`, `warning_hook`, `grace_hook`: advisory ops hooks derived from current exposure only after validating a tipped chainstate snapshot
 
 Today this measurement surface covers UTXOs whose covenant data explicitly
 stores a `suite_id` byte. In current node code that means the explicit suite-id
 index surface, not every possible migration-related interpretation layer.
 The scanner is chainstate-only: it reads the local datadir and exits without
 starting runtime services, so this measurement mode does not require a genesis
-file just to inspect an already indexed chainstate snapshot.
+file just to inspect an already indexed chainstate snapshot. Scans against a
+missing chainstate file or a snapshot without a tip are invalid and must be
+treated as hard errors, not as zero-exposure readiness.
 
 ## 4) Explicit Trigger Criteria
 
@@ -86,10 +88,11 @@ In other words:
 ## 5) Operator Workflow
 
 1. Run the scanner against the candidate network datadir.
-2. Record the JSON report with UTC timestamp and chainstate height.
-3. If `warning_hook != "none"`, notify operators and council that legacy exposure remains.
-4. If `grace_hook == "start_operator_defined_grace_window"`, begin the separately approved grace process.
-5. Repeat the scan during the grace period until the council has enough evidence for its own approval flow.
+2. Confirm `chainstate_has_tip == true` before acting on `sunset_readiness`, `warning_hook`, or `grace_hook`.
+3. Record the JSON report with UTC timestamp and chainstate height.
+4. If `warning_hook != "none"`, notify operators and council that legacy exposure remains.
+5. If `grace_hook == "start_operator_defined_grace_window"`, begin the separately approved grace process.
+6. Repeat the scan during the grace period until the council has enough evidence for its own approval flow.
 
 ## 6) Council Workflow Hooks
 
