@@ -33,6 +33,9 @@ struct CliConfig {
     mine_exit: bool,
     pv_mode: String,
     pv_shadow_max: u64,
+    legacy_exposure_scan: bool,
+    legacy_suite_ids: Vec<u8>,
+    legacy_exposure_include_outpoints: bool,
     dry_run: bool,
 }
 
@@ -52,6 +55,35 @@ struct EffectiveConfig {
     pv_mode: String,
     pv_shadow_max: u64,
 }
+
+#[derive(Serialize)]
+struct LegacyExposureSuiteReport {
+    suite_id: u8,
+    utxo_exposure_count: u64,
+    outpoint_count: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    outpoints: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct LegacyExposureReport {
+    report_version: u64,
+    measurement_scope: String,
+    network: String,
+    data_dir: String,
+    chainstate_height: u64,
+    chainstate_has_tip: bool,
+    indexed_suite_ids: Vec<u8>,
+    watched_legacy_suite_ids: Vec<u8>,
+    legacy_exposure_total: u64,
+    sunset_readiness: String,
+    warning_hook: String,
+    grace_hook: String,
+    include_outpoints: bool,
+    legacy_suite_reports: Vec<LegacyExposureSuiteReport>,
+}
+
+const LEGACY_EXPOSURE_REPORT_VERSION: u64 = 1;
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -77,26 +109,6 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         return 2;
     }
 
-    let genesis_cfg = match load_genesis_config(cfg.genesis_file.as_deref(), cfg.network.as_str()) {
-        Ok(cfg) => cfg,
-        Err(err) => {
-            let _ = writeln!(stderr, "invalid genesis file: {err}");
-            return 2;
-        }
-    };
-    let chain_id = genesis_cfg.chain_id;
-
-    // Fail early if non-devnet network has no explicit genesis file — devnet defaults
-    // will cause handshake failures against real testnet/mainnet peers.
-    if cfg.network != "devnet" && cfg.genesis_file.is_none() {
-        let _ = writeln!(
-            stderr,
-            "error: --network {} requires a genesis file (--genesis-file) with chain_id and genesis_hash",
-            cfg.network
-        );
-        return 2;
-    }
-
     if let Err(err) = fs::create_dir_all(&cfg.data_dir) {
         let _ = writeln!(
             stderr,
@@ -118,6 +130,34 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
             return 2;
         }
     };
+    if cfg.legacy_exposure_scan {
+        let report = build_legacy_exposure_report(&cfg, &chain_state);
+        if serde_json::to_writer_pretty(&mut *stdout, &report).is_err() {
+            let _ = writeln!(stderr, "legacy exposure encode failed");
+            return 1;
+        }
+        let _ = writeln!(stdout);
+        return 0;
+    }
+    let genesis_cfg = match load_genesis_config(cfg.genesis_file.as_deref(), cfg.network.as_str()) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            let _ = writeln!(stderr, "invalid genesis file: {err}");
+            return 2;
+        }
+    };
+    let chain_id = genesis_cfg.chain_id;
+
+    // Fail early if non-devnet network has no explicit genesis file — devnet defaults
+    // will cause handshake failures against real testnet/mainnet peers.
+    if cfg.network != "devnet" && cfg.genesis_file.is_none() {
+        let _ = writeln!(
+            stderr,
+            "error: --network {} requires a genesis file (--genesis-file) with chain_id and genesis_hash",
+            cfg.network
+        );
+        return 2;
+    }
     if let Err(err) = chain_state.save(&chain_state_file) {
         let _ = writeln!(
             stderr,
@@ -317,6 +357,9 @@ fn parse_args(args: &[String]) -> Result<CliConfig, String> {
         mine_exit: false,
         pv_mode: "off".to_string(),
         pv_shadow_max: 3,
+        legacy_exposure_scan: false,
+        legacy_suite_ids: Vec::new(),
+        legacy_exposure_include_outpoints: false,
         dry_run: false,
     };
     let mut peer_tokens = Vec::new();
@@ -417,6 +460,19 @@ fn parse_args(args: &[String]) -> Result<CliConfig, String> {
                     .parse::<u64>()
                     .map_err(|_| "invalid value for --pv-shadow-max".to_string())?;
             }
+            "--legacy-exposure-scan" => {
+                cfg.legacy_exposure_scan = true;
+            }
+            "--legacy-suite-id" => {
+                idx += 1;
+                let value = args
+                    .get(idx)
+                    .ok_or_else(|| "missing value for --legacy-suite-id".to_string())?;
+                cfg.legacy_suite_ids.push(parse_legacy_suite_id(value)?);
+            }
+            "--legacy-exposure-include-outpoints" => {
+                cfg.legacy_exposure_include_outpoints = true;
+            }
             "--dry-run" => {
                 cfg.dry_run = true;
             }
@@ -427,6 +483,8 @@ fn parse_args(args: &[String]) -> Result<CliConfig, String> {
         idx += 1;
     }
     cfg.peers = normalize_peers(&peer_tokens);
+    cfg.legacy_suite_ids.sort_unstable();
+    cfg.legacy_suite_ids.dedup();
 
     Ok(cfg)
 }
@@ -441,8 +499,93 @@ fn default_data_dir() -> PathBuf {
 fn usage(stdout: &mut dyn Write) {
     let _ = writeln!(
         stdout,
-        "usage: rubin-node [--network <name>] [--datadir <path>] [--genesis-file <path>] [--bind <host:port>] [--peer <host:port>]... [--peers <csv>] [--max-peers <n>] [--rpc-bind <host:port>] [--mine-address <hex>] [--mine-blocks <n>] [--mine-exit] [--pv-mode <off|shadow|on>] [--pv-shadow-max <n>] [--dry-run]"
+        "usage: rubin-node [--network <name>] [--datadir <path>] [--genesis-file <path>] [--bind <host:port>] [--peer <host:port>]... [--peers <csv>] [--max-peers <n>] [--rpc-bind <host:port>] [--mine-address <hex>] [--mine-blocks <n>] [--mine-exit] [--pv-mode <off|shadow|on>] [--pv-shadow-max <n>] [--legacy-exposure-scan] [--legacy-suite-id <id>]... [--legacy-exposure-include-outpoints] [--dry-run]"
     );
+}
+
+fn parse_legacy_suite_id(value: &str) -> Result<u8, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("legacy suite_id is required".to_string());
+    }
+    let (digits, radix) = if let Some(rest) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        (rest, 16)
+    } else {
+        (trimmed, 10)
+    };
+    if digits.is_empty() {
+        return Err("legacy suite_id is required".to_string());
+    }
+    let parsed = u16::from_str_radix(digits, radix)
+        .map_err(|_| format!("invalid legacy suite_id '{value}'"))?;
+    u8::try_from(parsed).map_err(|_| format!("invalid legacy suite_id '{value}'"))
+}
+
+fn format_legacy_exposure_outpoint(txid: &[u8; 32], vout: u32) -> String {
+    format!("{}:{vout}", hex::encode(txid))
+}
+
+fn legacy_exposure_hooks(total: u64) -> (&'static str, &'static str, &'static str) {
+    if total == 0 {
+        (
+            "ready_for_operator_defined_grace_window",
+            "none",
+            "start_operator_defined_grace_window",
+        )
+    } else {
+        (
+            "not_ready_legacy_exposure_present",
+            "legacy_exposure_present_notify_operator_and_council",
+            "not_applicable_legacy_exposure_present",
+        )
+    }
+}
+
+fn build_legacy_exposure_report(
+    cfg: &CliConfig,
+    chain_state: &rubin_node::ChainState,
+) -> LegacyExposureReport {
+    let mut legacy_suite_reports = Vec::with_capacity(cfg.legacy_suite_ids.len());
+    let mut legacy_exposure_total = 0u64;
+    for suite_id in &cfg.legacy_suite_ids {
+        let utxo_exposure_count = chain_state.utxo_exposure_count_by_suite_id(*suite_id);
+        let mut report = LegacyExposureSuiteReport {
+            suite_id: *suite_id,
+            utxo_exposure_count,
+            outpoint_count: utxo_exposure_count,
+            outpoints: Vec::new(),
+        };
+        if cfg.legacy_exposure_include_outpoints {
+            let outpoints = chain_state.utxo_outpoints_by_suite_id(*suite_id);
+            report.outpoint_count = outpoints.len() as u64;
+            report.outpoints = outpoints
+                .iter()
+                .map(|op| format_legacy_exposure_outpoint(&op.txid, op.vout))
+                .collect();
+        }
+        legacy_exposure_total = legacy_exposure_total.saturating_add(utxo_exposure_count);
+        legacy_suite_reports.push(report);
+    }
+    let (sunset_readiness, warning_hook, grace_hook) = legacy_exposure_hooks(legacy_exposure_total);
+    LegacyExposureReport {
+        report_version: LEGACY_EXPOSURE_REPORT_VERSION,
+        measurement_scope: "explicit_suite_id_utxos".to_string(),
+        network: cfg.network.clone(),
+        data_dir: cfg.data_dir.display().to_string(),
+        chainstate_height: chain_state.height,
+        chainstate_has_tip: chain_state.has_tip,
+        indexed_suite_ids: chain_state.indexed_suite_ids(),
+        watched_legacy_suite_ids: cfg.legacy_suite_ids.clone(),
+        legacy_exposure_total,
+        sunset_readiness: sunset_readiness.to_string(),
+        warning_hook: warning_hook.to_string(),
+        grace_hook: grace_hook.to_string(),
+        include_outpoints: cfg.legacy_exposure_include_outpoints,
+        legacy_suite_reports,
+    }
 }
 
 fn normalize_peers(raw: &[String]) -> Vec<String> {
@@ -500,6 +643,9 @@ fn validate_config(cfg: &mut CliConfig) -> Result<(), String> {
     cfg.pv_mode = pv_mode;
     if cfg.pv_shadow_max == 0 {
         cfg.pv_shadow_max = 3;
+    }
+    if cfg.legacy_exposure_scan && cfg.legacy_suite_ids.is_empty() {
+        return Err("legacy exposure scan requires at least one --legacy-suite-id".to_string());
     }
     Ok(())
 }
@@ -991,6 +1137,225 @@ mod tests {
         let json: Value = serde_json::from_slice(&stdout).expect("json");
         assert_eq!(json["pv_mode"].as_str(), Some("on"));
         assert_eq!(json["pv_shadow_max"].as_u64(), Some(9));
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn legacy_exposure_scan_emits_deterministic_json() {
+        let dir = unique_temp_dir("rubin-node-bin-legacy-exposure");
+        fs::create_dir_all(&dir).expect("mkdir");
+        let mut state = rubin_node::ChainState::new();
+        state.has_tip = true;
+        state.height = 42;
+        let first = rubin_consensus::Outpoint {
+            txid: [0x01; 32],
+            vout: 0,
+        };
+        let second = rubin_consensus::Outpoint {
+            txid: [0x02; 32],
+            vout: 1,
+        };
+        let third = rubin_consensus::Outpoint {
+            txid: [0x03; 32],
+            vout: 2,
+        };
+        let mut cov_legacy = vec![0u8; 33];
+        cov_legacy[0] = rubin_consensus::constants::SUITE_ID_ML_DSA_87;
+        state.utxos.insert(
+            first,
+            rubin_consensus::UtxoEntry {
+                value: 10,
+                covenant_type: rubin_consensus::constants::COV_TYPE_P2PK,
+                covenant_data: cov_legacy,
+                creation_height: 2,
+                created_by_coinbase: false,
+            },
+        );
+        let mut cov_rotated = vec![0u8; 33];
+        cov_rotated[0] = 0x42;
+        state.utxos.insert(
+            second,
+            rubin_consensus::UtxoEntry {
+                value: 11,
+                covenant_type: rubin_consensus::constants::COV_TYPE_P2PK,
+                covenant_data: cov_rotated.clone(),
+                creation_height: 3,
+                created_by_coinbase: false,
+            },
+        );
+        state.utxos.insert(
+            third,
+            rubin_consensus::UtxoEntry {
+                value: 12,
+                covenant_type: rubin_consensus::constants::COV_TYPE_P2PK,
+                covenant_data: cov_rotated,
+                creation_height: 4,
+                created_by_coinbase: false,
+            },
+        );
+        state
+            .save(&rubin_node::chain_state_path(&dir))
+            .expect("save chainstate");
+
+        let args = vec![
+            "--datadir".to_string(),
+            dir.display().to_string(),
+            "--legacy-exposure-scan".to_string(),
+            "--legacy-suite-id".to_string(),
+            "0x42".to_string(),
+            "--legacy-suite-id".to_string(),
+            "1".to_string(),
+            "--legacy-suite-id".to_string(),
+            "0x42".to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run(&args, &mut stdout, &mut stderr);
+        assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
+        let json: Value = serde_json::from_slice(&stdout).expect("json");
+        assert_eq!(
+            json["report_version"].as_u64(),
+            Some(super::LEGACY_EXPOSURE_REPORT_VERSION)
+        );
+        assert_eq!(
+            json["measurement_scope"].as_str(),
+            Some("explicit_suite_id_utxos")
+        );
+        assert_eq!(json["network"].as_str(), Some("devnet"));
+        assert_eq!(
+            json["indexed_suite_ids"],
+            serde_json::json!([rubin_consensus::constants::SUITE_ID_ML_DSA_87, 0x42])
+        );
+        assert_eq!(
+            json["watched_legacy_suite_ids"],
+            serde_json::json!([rubin_consensus::constants::SUITE_ID_ML_DSA_87, 0x42])
+        );
+        assert_eq!(json["legacy_exposure_total"].as_u64(), Some(3));
+        assert_eq!(
+            json["sunset_readiness"].as_str(),
+            Some("not_ready_legacy_exposure_present")
+        );
+        assert_eq!(
+            json["warning_hook"].as_str(),
+            Some("legacy_exposure_present_notify_operator_and_council")
+        );
+        assert_eq!(
+            json["grace_hook"].as_str(),
+            Some("not_applicable_legacy_exposure_present")
+        );
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn legacy_exposure_scan_includes_outpoints() {
+        let dir = unique_temp_dir("rubin-node-bin-legacy-outpoints");
+        fs::create_dir_all(&dir).expect("mkdir");
+        let mut state = rubin_node::ChainState::new();
+        let first = rubin_consensus::Outpoint {
+            txid: [0x02; 32],
+            vout: 1,
+        };
+        let second = rubin_consensus::Outpoint {
+            txid: [0x01; 32],
+            vout: 0,
+        };
+        let mut cov = vec![0u8; 33];
+        cov[0] = 0x42;
+        state.utxos.insert(
+            first,
+            rubin_consensus::UtxoEntry {
+                value: 11,
+                covenant_type: rubin_consensus::constants::COV_TYPE_P2PK,
+                covenant_data: cov.clone(),
+                creation_height: 3,
+                created_by_coinbase: false,
+            },
+        );
+        state.utxos.insert(
+            second,
+            rubin_consensus::UtxoEntry {
+                value: 12,
+                covenant_type: rubin_consensus::constants::COV_TYPE_P2PK,
+                covenant_data: cov,
+                creation_height: 4,
+                created_by_coinbase: false,
+            },
+        );
+        state
+            .save(&rubin_node::chain_state_path(&dir))
+            .expect("save chainstate");
+
+        let args = vec![
+            "--datadir".to_string(),
+            dir.display().to_string(),
+            "--legacy-exposure-scan".to_string(),
+            "--legacy-suite-id".to_string(),
+            "66".to_string(),
+            "--legacy-exposure-include-outpoints".to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run(&args, &mut stdout, &mut stderr);
+        assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
+        let json: Value = serde_json::from_slice(&stdout).expect("json");
+        assert_eq!(json["include_outpoints"].as_bool(), Some(true));
+        assert_eq!(
+            json["legacy_suite_reports"][0]["outpoints"][0].as_str(),
+            Some("0101010101010101010101010101010101010101010101010101010101010101:0")
+        );
+        assert_eq!(
+            json["legacy_suite_reports"][0]["outpoints"][1].as_str(),
+            Some("0202020202020202020202020202020202020202020202020202020202020202:1")
+        );
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn legacy_exposure_scan_requires_suite_ids() {
+        let dir = unique_temp_dir("rubin-node-bin-legacy-empty");
+        let args = vec![
+            "--datadir".to_string(),
+            dir.display().to_string(),
+            "--legacy-exposure-scan".to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run(&args, &mut stdout, &mut stderr);
+        assert_eq!(code, 2);
+        assert!(String::from_utf8_lossy(&stderr)
+            .contains("legacy exposure scan requires at least one --legacy-suite-id"));
+    }
+
+    #[test]
+    fn legacy_exposure_scan_does_not_require_genesis_file_for_named_network() {
+        let dir = unique_temp_dir("rubin-node-bin-legacy-mainnet");
+        fs::create_dir_all(&dir).expect("mkdir");
+        rubin_node::ChainState::new()
+            .save(&rubin_node::chain_state_path(&dir))
+            .expect("save chainstate");
+        let args = vec![
+            "--datadir".to_string(),
+            dir.display().to_string(),
+            "--network".to_string(),
+            "mainnet".to_string(),
+            "--legacy-exposure-scan".to_string(),
+            "--legacy-suite-id".to_string(),
+            "1".to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run(&args, &mut stdout, &mut stderr);
+        assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
+        let json: Value = serde_json::from_slice(&stdout).expect("json");
+        assert_eq!(json["network"].as_str(), Some("mainnet"));
+        assert_eq!(json["legacy_exposure_total"].as_u64(), Some(0));
 
         fs::remove_dir_all(&dir).expect("cleanup");
     }

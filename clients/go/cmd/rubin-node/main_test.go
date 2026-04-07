@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -23,6 +24,28 @@ import (
 type failWriter struct{}
 
 func (failWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
+type legacyExposureReportJSON struct {
+	ReportVersion         uint64  `json:"report_version"`
+	MeasurementScope      string  `json:"measurement_scope"`
+	Network               string  `json:"network"`
+	DataDir               string  `json:"data_dir"`
+	ChainstateHeight      uint64  `json:"chainstate_height"`
+	ChainstateHasTip      bool    `json:"chainstate_has_tip"`
+	IndexedSuiteIDs       []uint8 `json:"indexed_suite_ids"`
+	WatchedLegacySuiteIDs []uint8 `json:"watched_legacy_suite_ids"`
+	LegacyExposureTotal   uint64  `json:"legacy_exposure_total"`
+	SunsetReadiness       string  `json:"sunset_readiness"`
+	WarningHook           string  `json:"warning_hook"`
+	GraceHook             string  `json:"grace_hook"`
+	IncludeOutpoints      bool    `json:"include_outpoints"`
+	LegacySuiteReports    []struct {
+		SuiteID           uint8    `json:"suite_id"`
+		UtxoExposureCount uint64   `json:"utxo_exposure_count"`
+		OutpointCount     uint64   `json:"outpoint_count"`
+		Outpoints         []string `json:"outpoints"`
+	} `json:"legacy_suite_reports"`
+}
 
 func mustCoreExtOpenSSLDigest32DescriptorHex(t *testing.T) string {
 	t.Helper()
@@ -92,6 +115,209 @@ func TestRunDryRunOK(t *testing.T) {
 	// Basic sanity: should have created chainstate file.
 	if _, err := os.Stat(node.ChainStatePath(dir)); err != nil {
 		t.Fatalf("expected chainstate file to exist: %v", err)
+	}
+}
+
+func testLegacyExposureP2PKCovenantData(suiteID uint8) []byte {
+	cov := make([]byte, consensus.MAX_P2PK_COVENANT_DATA)
+	cov[0] = suiteID
+	return cov
+}
+
+func TestRunLegacyExposureScanEmitsDeterministicJSON(t *testing.T) {
+	dir := t.TempDir()
+	state := node.NewChainState()
+	state.HasTip = true
+	state.Height = 42
+	first := consensus.Outpoint{Txid: [32]byte{0x01}, Vout: 0}
+	second := consensus.Outpoint{Txid: [32]byte{0x02}, Vout: 1}
+	third := consensus.Outpoint{Txid: [32]byte{0x03}, Vout: 2}
+	state.Utxos[first] = consensus.UtxoEntry{
+		Value:             10,
+		CovenantType:      consensus.COV_TYPE_P2PK,
+		CovenantData:      testLegacyExposureP2PKCovenantData(consensus.SUITE_ID_ML_DSA_87),
+		CreationHeight:    2,
+		CreatedByCoinbase: false,
+	}
+	state.Utxos[second] = consensus.UtxoEntry{
+		Value:             11,
+		CovenantType:      consensus.COV_TYPE_P2PK,
+		CovenantData:      testLegacyExposureP2PKCovenantData(0x42),
+		CreationHeight:    3,
+		CreatedByCoinbase: false,
+	}
+	state.Utxos[third] = consensus.UtxoEntry{
+		Value:             12,
+		CovenantType:      consensus.COV_TYPE_P2PK,
+		CovenantData:      testLegacyExposureP2PKCovenantData(0x42),
+		CreationHeight:    4,
+		CreatedByCoinbase: false,
+	}
+	if err := state.Save(node.ChainStatePath(dir)); err != nil {
+		t.Fatalf("Save(chainstate): %v", err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run(
+		[]string{
+			"--datadir", dir,
+			"--legacy-exposure-scan",
+			"--legacy-suite-id", "0x42",
+			"--legacy-suite-id", "1",
+			"--legacy-suite-id", "0x42",
+		},
+		&out,
+		&errOut,
+	)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr=%q)", code, errOut.String())
+	}
+
+	var report legacyExposureReportJSON
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if report.ReportVersion != legacyExposureReportVersion {
+		t.Fatalf("report_version=%d, want %d", report.ReportVersion, legacyExposureReportVersion)
+	}
+	if report.MeasurementScope != "explicit_suite_id_utxos" {
+		t.Fatalf("measurement_scope=%q", report.MeasurementScope)
+	}
+	if report.Network != "devnet" {
+		t.Fatalf("network=%q, want devnet", report.Network)
+	}
+	if !reflect.DeepEqual(report.WatchedLegacySuiteIDs, []uint8{consensus.SUITE_ID_ML_DSA_87, 0x42}) {
+		t.Fatalf("watched ids=%v", report.WatchedLegacySuiteIDs)
+	}
+	if !reflect.DeepEqual(report.IndexedSuiteIDs, []uint8{consensus.SUITE_ID_ML_DSA_87, 0x42}) {
+		t.Fatalf("indexed ids=%v", report.IndexedSuiteIDs)
+	}
+	if report.LegacyExposureTotal != 3 {
+		t.Fatalf("legacy exposure total=%d, want 3", report.LegacyExposureTotal)
+	}
+	if report.SunsetReadiness != "not_ready_legacy_exposure_present" {
+		t.Fatalf("sunset readiness=%q", report.SunsetReadiness)
+	}
+	if report.WarningHook != "legacy_exposure_present_notify_operator_and_council" {
+		t.Fatalf("warning hook=%q", report.WarningHook)
+	}
+	if report.GraceHook != "not_applicable_legacy_exposure_present" {
+		t.Fatalf("grace hook=%q", report.GraceHook)
+	}
+	if len(report.LegacySuiteReports) != 2 {
+		t.Fatalf("legacy suite reports=%d, want 2", len(report.LegacySuiteReports))
+	}
+	if report.LegacySuiteReports[0].SuiteID != consensus.SUITE_ID_ML_DSA_87 || report.LegacySuiteReports[0].UtxoExposureCount != 1 {
+		t.Fatalf("suite report[0]=%+v", report.LegacySuiteReports[0])
+	}
+	if report.LegacySuiteReports[1].SuiteID != 0x42 || report.LegacySuiteReports[1].UtxoExposureCount != 2 {
+		t.Fatalf("suite report[1]=%+v", report.LegacySuiteReports[1])
+	}
+}
+
+func TestRunLegacyExposureScanIncludesOutpoints(t *testing.T) {
+	dir := t.TempDir()
+	state := node.NewChainState()
+	first := consensus.Outpoint{Txid: [32]byte{0x02}, Vout: 1}
+	second := consensus.Outpoint{Txid: [32]byte{0x01}, Vout: 0}
+	state.Utxos[first] = consensus.UtxoEntry{
+		Value:             11,
+		CovenantType:      consensus.COV_TYPE_P2PK,
+		CovenantData:      testLegacyExposureP2PKCovenantData(0x42),
+		CreationHeight:    3,
+		CreatedByCoinbase: false,
+	}
+	state.Utxos[second] = consensus.UtxoEntry{
+		Value:             12,
+		CovenantType:      consensus.COV_TYPE_P2PK,
+		CovenantData:      testLegacyExposureP2PKCovenantData(0x42),
+		CreationHeight:    4,
+		CreatedByCoinbase: false,
+	}
+	if err := state.Save(node.ChainStatePath(dir)); err != nil {
+		t.Fatalf("Save(chainstate): %v", err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run(
+		[]string{
+			"--datadir", dir,
+			"--legacy-exposure-scan",
+			"--legacy-suite-id", "66",
+			"--legacy-exposure-include-outpoints",
+		},
+		&out,
+		&errOut,
+	)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr=%q)", code, errOut.String())
+	}
+
+	var report legacyExposureReportJSON
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if !report.IncludeOutpoints {
+		t.Fatalf("expected include_outpoints=true")
+	}
+	if len(report.LegacySuiteReports) != 1 {
+		t.Fatalf("legacy suite reports=%d, want 1", len(report.LegacySuiteReports))
+	}
+	want := []string{
+		"0100000000000000000000000000000000000000000000000000000000000000:0",
+		"0200000000000000000000000000000000000000000000000000000000000000:1",
+	}
+	if !reflect.DeepEqual(report.LegacySuiteReports[0].Outpoints, want) {
+		t.Fatalf("outpoints=%v, want %v", report.LegacySuiteReports[0].Outpoints, want)
+	}
+}
+
+func TestRunLegacyExposureScanRejectsMissingSuiteIDs(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run([]string{"--datadir", dir, "--legacy-exposure-scan"}, &out, &errOut)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d", code)
+	}
+	if !strings.Contains(errOut.String(), "requires at least one --legacy-suite-id") {
+		t.Fatalf("stderr=%q", errOut.String())
+	}
+}
+
+func TestRunLegacyExposureScanDoesNotRequireGenesisFileForNamedNetwork(t *testing.T) {
+	dir := t.TempDir()
+	if err := node.NewChainState().Save(node.ChainStatePath(dir)); err != nil {
+		t.Fatalf("Save(chainstate): %v", err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run(
+		[]string{
+			"--datadir", dir,
+			"--network", "mainnet",
+			"--legacy-exposure-scan",
+			"--legacy-suite-id", "1",
+		},
+		&out,
+		&errOut,
+	)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr=%q)", code, errOut.String())
+	}
+
+	var report legacyExposureReportJSON
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if report.Network != "mainnet" {
+		t.Fatalf("network=%q, want mainnet", report.Network)
+	}
+	if report.LegacyExposureTotal != 0 {
+		t.Fatalf("legacy exposure total=%d, want 0", report.LegacyExposureTotal)
 	}
 }
 
