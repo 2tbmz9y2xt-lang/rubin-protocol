@@ -388,6 +388,7 @@ type genesisPack struct {
 type genesisCoreExtProfile struct {
 	ExtID                uint16  `json:"ext_id"`
 	ActivationHeight     uint64  `json:"activation_height"`
+	TxContextEnabled     bool    `json:"tx_context_enabled,omitempty"`
 	AllowedSuiteIDs      []uint8 `json:"allowed_suite_ids,omitempty"`
 	Binding              string  `json:"binding,omitempty"`
 	BindingDescriptorHex string  `json:"binding_descriptor_hex,omitempty"`
@@ -497,6 +498,12 @@ func buildGenesisCoreExtProfiles(items []genesisCoreExtProfile, chainID [32]byte
 	deployments := make([]consensus.CoreExtDeploymentProfile, 0, len(items))
 	for _, item := range items {
 		binding := strings.TrimSpace(item.Binding)
+		if item.TxContextEnabled {
+			return nil, fmt.Errorf(
+				"tx_context_enabled core_ext profile for ext_id=%d requires runtime txcontext verifier wiring",
+				item.ExtID,
+			)
+		}
 		if !genesisCoreExtBindingIsSupported(binding) {
 			return nil, fmt.Errorf("unsupported core_ext binding: %s", item.Binding)
 		}
@@ -519,6 +526,7 @@ func buildGenesisCoreExtProfiles(items []genesisCoreExtProfile, chainID [32]byte
 		deployments = append(deployments, consensus.CoreExtDeploymentProfile{
 			ExtID:             item.ExtID,
 			ActivationHeight:  item.ActivationHeight,
+			TxContextEnabled:  item.TxContextEnabled,
 			AllowedSuites:     allowed,
 			VerifySigExtFn:    verifySigExtFn,
 			BindingDescriptor: bindingDescriptor,

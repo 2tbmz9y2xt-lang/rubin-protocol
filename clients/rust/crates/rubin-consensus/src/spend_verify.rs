@@ -385,7 +385,7 @@ mod tests {
     use super::*;
     use crate::constants::{
         COV_TYPE_P2PK, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SIGHASH_ALL,
-        SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
+        SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL, VERIFY_COST_ML_DSA_87,
     };
     use crate::hash::sha3_256;
     use crate::sighash_v1_digest_with_cache;
@@ -609,7 +609,7 @@ mod tests {
                 suite_id: 0x05,
                 pubkey_len: ML_DSA_87_PUBKEY_BYTES,
                 sig_len: ML_DSA_87_SIG_BYTES,
-                verify_cost: 8,
+                verify_cost: VERIFY_COST_ML_DSA_87,
                 openssl_alg: "ML-DSA-87",
             },
         );
@@ -625,6 +625,37 @@ mod tests {
         .expect("verify custom suite");
 
         assert!(result, "custom suite entry should verify");
+    }
+
+    #[test]
+    fn verify_sig_with_registry_rejects_unsupported_binding() {
+        let mut suites = BTreeMap::new();
+        suites.insert(
+            0x05,
+            SuiteParams {
+                suite_id: 0x05,
+                pubkey_len: 1312,
+                sig_len: 2420,
+                verify_cost: 4,
+                openssl_alg: "ML-DSA-65",
+            },
+        );
+        let registry = SuiteRegistry::with_suites(suites);
+        let pubkey = vec![0x01; 1312];
+        let sig = vec![0x02; 2420];
+        let digest = [0x42; 32];
+
+        let err = crate::verify_sig_openssl::verify_sig_with_registry(
+            0x05,
+            &pubkey,
+            &sig,
+            &digest,
+            Some(&registry),
+        )
+        .expect_err("unsupported binding should fail closed");
+
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+        assert!(err.msg.contains("unsupported suite verifier binding"));
     }
 
     #[test]
