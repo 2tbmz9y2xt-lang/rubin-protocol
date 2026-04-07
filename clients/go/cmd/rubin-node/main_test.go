@@ -549,6 +549,89 @@ func TestRunLegacyExposureScanDoesNotRequireGenesisFileForNamedNetwork(t *testin
 	}
 }
 
+func TestRunRejectsLegacyExposureFlagsWithoutScanMode(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile(blocker): %v", err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run(
+		[]string{
+			"--datadir", blocker,
+			"--legacy-suite-id", "1",
+			"--legacy-exposure-include-outpoints",
+		},
+		&out,
+		&errOut,
+	)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d", code)
+	}
+	if !strings.Contains(errOut.String(), "legacy exposure flags require --legacy-exposure-scan") {
+		t.Fatalf("stderr=%q", errOut.String())
+	}
+	if strings.Contains(errOut.String(), "datadir create failed") {
+		t.Fatalf("scanner-only flags should fail before datadir create: %q", errOut.String())
+	}
+}
+
+func TestRunRejectsNonDevnetWithoutGenesisFileBeforeDataDirCreate(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile(blocker): %v", err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run([]string{"--network", "mainnet", "--datadir", blocker}, &out, &errOut)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d", code)
+	}
+	if !strings.Contains(errOut.String(), "requires a genesis file (--genesis-file)") {
+		t.Fatalf("stderr=%q", errOut.String())
+	}
+	if strings.Contains(errOut.String(), "datadir create failed") {
+		t.Fatalf("genesis validation should run before datadir create: %q", errOut.String())
+	}
+}
+
+func TestRunRejectsInvalidGenesisFileBeforeDataDirCreate(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile(blocker): %v", err)
+	}
+	genesisPath := filepath.Join(dir, "invalid-genesis.json")
+	if err := os.WriteFile(genesisPath, []byte("{"), 0o600); err != nil {
+		t.Fatalf("WriteFile(genesis): %v", err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run(
+		[]string{
+			"--network", "mainnet",
+			"--datadir", blocker,
+			"--genesis-file", genesisPath,
+		},
+		&out,
+		&errOut,
+	)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d", code)
+	}
+	if !strings.Contains(errOut.String(), "invalid genesis file:") {
+		t.Fatalf("stderr=%q", errOut.String())
+	}
+	if strings.Contains(errOut.String(), "datadir create failed") {
+		t.Fatalf("invalid genesis should fail before datadir create: %q", errOut.String())
+	}
+}
+
 func TestRunLegacyExposureScanPropagatesEncodeFailure(t *testing.T) {
 	dir := t.TempDir()
 	if err := testLegacyExposureTippedChainState().Save(node.ChainStatePath(dir)); err != nil {
@@ -1458,7 +1541,7 @@ func TestRunMineBlocksPassesMineAddressToMiner(t *testing.T) {
 	}
 }
 
-func TestRunMainnetFailsWithoutExplicitTarget(t *testing.T) {
+func TestRunMainnetFailsWithoutGenesisFileBeforeExplicitTargetCheck(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer
 	var errOut bytes.Buffer
@@ -1466,7 +1549,7 @@ func TestRunMainnetFailsWithoutExplicitTarget(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("expected exit code 2, got %d", code)
 	}
-	if !bytes.Contains(errOut.Bytes(), []byte("mainnet requires explicit expected_target")) {
+	if !bytes.Contains(errOut.Bytes(), []byte("requires a genesis file (--genesis-file)")) {
 		t.Fatalf("unexpected stderr: %q", errOut.String())
 	}
 }
@@ -1497,7 +1580,7 @@ func TestRunMainnetFailsBeforeReconcilingChainState(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("expected exit code 2, got %d (stderr=%q)", code, errOut.String())
 	}
-	if !bytes.Contains(errOut.Bytes(), []byte("mainnet requires explicit expected_target")) {
+	if !bytes.Contains(errOut.Bytes(), []byte("requires a genesis file (--genesis-file)")) {
 		t.Fatalf("unexpected stderr: %q", errOut.String())
 	}
 

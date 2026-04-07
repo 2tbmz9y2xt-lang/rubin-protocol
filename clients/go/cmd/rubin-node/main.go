@@ -278,6 +278,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 			_, _ = fmt.Fprintf(stderr, "legacy exposure scan config failed: %v\n", err)
 			return 2
 		}
+	} else if len(legacySuiteIDs) > 0 || *legacyExposureIncludeOutpoints {
+		_, _ = fmt.Fprintln(stderr, "legacy exposure flags require --legacy-exposure-scan")
+		return 2
 	}
 	chainStatePath := node.ChainStatePath(cfg.DataDir)
 	if *legacyExposureScan {
@@ -293,6 +296,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
+	if cfg.Network != "devnet" && strings.TrimSpace(*genesisFile) == "" {
+		_, _ = fmt.Fprintf(stderr, "error: --network %s requires a genesis file (--genesis-file) with chain_id and genesis_hash\n", cfg.Network)
+		return 2
+	}
+	genesisCfg, err := parseGenesisConfigFull(*genesisFile)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "invalid genesis file: %v\n", err)
+		return 2
+	}
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		_, _ = fmt.Fprintf(stderr, "datadir create failed: %v\n", err)
 		return 2
@@ -300,11 +312,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 	chainState, err := node.LoadChainState(chainStatePath)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "chainstate load failed: %v\n", err)
-		return 2
-	}
-	genesisCfg, err := parseGenesisConfigFull(*genesisFile)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "invalid genesis file: %v\n", err)
 		return 2
 	}
 	chainIDFromGenesis := genesisCfg.ChainID

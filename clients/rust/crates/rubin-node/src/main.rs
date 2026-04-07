@@ -165,6 +165,21 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         let _ = writeln!(stdout);
         return 0;
     }
+    if cfg.network != "devnet" && cfg.genesis_file.is_none() {
+        let _ = writeln!(
+            stderr,
+            "error: --network {} requires a genesis file (--genesis-file) with chain_id and genesis_hash",
+            cfg.network
+        );
+        return 2;
+    }
+    let genesis_cfg = match load_genesis_config(cfg.genesis_file.as_deref(), cfg.network.as_str()) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            let _ = writeln!(stderr, "invalid genesis file: {err}");
+            return 2;
+        }
+    };
     if let Err(err) = fs::create_dir_all(&cfg.data_dir) {
         let _ = writeln!(
             stderr,
@@ -184,25 +199,7 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
             return 2;
         }
     };
-    let genesis_cfg = match load_genesis_config(cfg.genesis_file.as_deref(), cfg.network.as_str()) {
-        Ok(cfg) => cfg,
-        Err(err) => {
-            let _ = writeln!(stderr, "invalid genesis file: {err}");
-            return 2;
-        }
-    };
     let chain_id = genesis_cfg.chain_id;
-
-    // Fail early if non-devnet network has no explicit genesis file — devnet defaults
-    // will cause handshake failures against real testnet/mainnet peers.
-    if cfg.network != "devnet" && cfg.genesis_file.is_none() {
-        let _ = writeln!(
-            stderr,
-            "error: --network {} requires a genesis file (--genesis-file) with chain_id and genesis_hash",
-            cfg.network
-        );
-        return 2;
-    }
     if let Err(err) = chain_state.save(&chain_state_file) {
         let _ = writeln!(
             stderr,
@@ -709,8 +706,12 @@ fn validate_config(cfg: &mut CliConfig) -> Result<(), String> {
     if cfg.pv_shadow_max == 0 {
         cfg.pv_shadow_max = 3;
     }
-    if cfg.legacy_exposure_scan && cfg.legacy_suite_ids.is_empty() {
-        return Err("legacy exposure scan requires at least one --legacy-suite-id".to_string());
+    if cfg.legacy_exposure_scan {
+        if cfg.legacy_suite_ids.is_empty() {
+            return Err("legacy exposure scan requires at least one --legacy-suite-id".to_string());
+        }
+    } else if !cfg.legacy_suite_ids.is_empty() || cfg.legacy_exposure_include_outpoints {
+        return Err("legacy exposure flags require --legacy-exposure-scan".to_string());
     }
     Ok(())
 }
@@ -1120,22 +1121,27 @@ mod tests {
     }
 
     #[test]
-    fn non_devnet_without_genesis_file_is_rejected() {
-        // --network testnet without --genesis-file should fail early.
-        // load_genesis_config(None) returns devnet defaults, which would cause
-        // handshake failures against real testnet peers.
-        let args: Vec<String> = vec!["--network", "testnet"]
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect();
-        let mut cfg = parse_args(&args).expect("parse args");
-        validate_config(&mut cfg).expect("config valid");
-        // The guard is in run_node, not validate_config. Verify the condition
-        // that would trigger the guard: non-devnet + no genesis file.
-        assert!(
-            cfg.network != "devnet" && cfg.genesis_file.is_none(),
-            "testnet without genesis file should trigger non-devnet guard in run_node"
-        );
+    fn non_devnet_without_genesis_file_is_rejected_before_datadir_create() {
+        let dir = unique_temp_dir("rubin-node-bin-non-devnet-no-genesis");
+        fs::create_dir_all(&dir).expect("mkdir");
+        let blocker = dir.join("not-a-dir");
+        fs::write(&blocker, b"x").expect("write blocker");
+        let args = vec![
+            "--network".to_string(),
+            "testnet".to_string(),
+            "--datadir".to_string(),
+            blocker.display().to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run(&args, &mut stdout, &mut stderr);
+        assert_eq!(code, 2);
+        let stderr = String::from_utf8_lossy(&stderr);
+        assert!(stderr.contains("requires a genesis file (--genesis-file)"));
+        assert!(!stderr.contains("datadir create failed"));
+
+        fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]
@@ -1608,6 +1614,59 @@ mod tests {
         let json: Value = serde_json::from_slice(&stdout).expect("json");
         assert_eq!(json["network"].as_str(), Some("mainnet"));
         assert_eq!(json["legacy_exposure_total"].as_u64(), Some(0));
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn legacy_exposure_flags_require_scan_mode() {
+        let dir = unique_temp_dir("rubin-node-bin-legacy-flags-without-scan");
+        fs::create_dir_all(&dir).expect("mkdir");
+        let blocker = dir.join("not-a-dir");
+        fs::write(&blocker, b"x").expect("write blocker");
+        let args = vec![
+            "--datadir".to_string(),
+            blocker.display().to_string(),
+            "--legacy-suite-id".to_string(),
+            "1".to_string(),
+            "--legacy-exposure-include-outpoints".to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run(&args, &mut stdout, &mut stderr);
+        assert_eq!(code, 2);
+        let stderr = String::from_utf8_lossy(&stderr);
+        assert!(stderr.contains("legacy exposure flags require --legacy-exposure-scan"));
+        assert!(!stderr.contains("datadir create failed"));
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn invalid_genesis_file_is_rejected_before_datadir_create() {
+        let dir = unique_temp_dir("rubin-node-bin-invalid-genesis-before-datadir");
+        fs::create_dir_all(&dir).expect("mkdir");
+        let blocker = dir.join("not-a-dir");
+        fs::write(&blocker, b"x").expect("write blocker");
+        let genesis_file = dir.join("invalid-genesis.json");
+        fs::write(&genesis_file, b"{").expect("write genesis");
+        let args = vec![
+            "--network".to_string(),
+            "mainnet".to_string(),
+            "--datadir".to_string(),
+            blocker.display().to_string(),
+            "--genesis-file".to_string(),
+            genesis_file.display().to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run(&args, &mut stdout, &mut stderr);
+        assert_eq!(code, 2);
+        let stderr = String::from_utf8_lossy(&stderr);
+        assert!(stderr.contains("invalid genesis file:"));
+        assert!(!stderr.contains("datadir create failed"));
 
         fs::remove_dir_all(&dir).expect("cleanup");
     }
