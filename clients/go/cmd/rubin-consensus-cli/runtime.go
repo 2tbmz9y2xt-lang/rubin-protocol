@@ -314,6 +314,7 @@ func buildCoreExtDeployments(items []CoreExtProfileJSON) ([]consensus.CoreExtDep
 		deployments = append(deployments, consensus.CoreExtDeploymentProfile{
 			ExtID:             item.ExtID,
 			ActivationHeight:  item.ActivationHeight,
+			TxContextEnabled:  item.TxContextEnabled != 0,
 			AllowedSuites:     allowed,
 			VerifySigExtFn:    verifySigExtFn,
 			BindingDescriptor: bindingDescriptor,
