@@ -5,8 +5,11 @@ on:
     types: [opened, synchronize, reopened]
   pull_request_review:
     types: [submitted, dismissed, edited]
+  issue_comment:
+    types: [created, edited]
 
 permissions:
+  issues: read
   pull-requests: read
 
 jobs:
@@ -17,23 +20,32 @@ jobs:
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
-            // Bot review gate v3: pending-check + thread-check.
+            // Bot review gate v4: pending-check + thread-check.
             //
             // Phase 1 — Pending check:
-            //   Blocks merge until Copilot has submitted at least one review
-            //   on this PR. Any commit counts — HEAD-staleness is handled by
-            //   the copilot_code_review ruleset rule separately.
+            //   Blocks merge until Copilot has either submitted at least one
+            //   formal PR review or posted an explicit issue-comment review
+            //   that names the current HEAD SHA. Any commit counts — HEAD
+            //   staleness is handled by requiring the current SHA in the
+            //   fallback comment.
             //
             // Phase 2 — Thread check:
             //   Blocks merge if any unresolved review thread authored by a
             //   MONITORED bot exists (paginated GraphQL).
             //
-            // Re-triggers on pull_request_review:submitted — once the bot
-            // finishes its review, the gate re-evaluates automatically.
+            // Re-triggers on pull_request_review and issue_comment — once the
+            // bot finishes its review/comment, the gate re-evaluates.
 
             // Bots that MUST have reviewed this PR at least once.
             const REQUIRED_REVIEWERS = new Set([
               'copilot-pull-request-reviewer[bot]',
+            ]);
+
+            // Some bots currently answer via PR issue comments rather than
+            // review objects. We only accept comments that explicitly mention
+            // the current HEAD SHA to avoid stale approval carry-over.
+            const FALLBACK_COMMENT_AUTHORS = new Map([
+              ['copilot-pull-request-reviewer[bot]', new Set(['Copilot'])],
             ]);
 
             // Bots whose unresolved threads block merge.
@@ -42,8 +54,32 @@ jobs:
               'chatgpt-codex-connector[bot]',
             ]);
 
-            const prNumber = context.payload.pull_request.number;
+            const prNumber =
+              context.payload.pull_request?.number ??
+              (context.payload.issue?.pull_request ? context.payload.issue.number : null);
+            if (!prNumber) {
+              core.info('Not a pull request event; skipping bot-review-gate.');
+              return;
+            }
             const errors = [];
+            let currentHeadSha;
+            let currentHeadShortSha;
+
+            try {
+              const pr = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+              });
+              currentHeadSha = pr.data.head.sha;
+              currentHeadShortSha = currentHeadSha.slice(0, 7);
+            } catch (err) {
+              core.setFailed(
+                `Failed to fetch PR head SHA: ${err.message}. ` +
+                `Bot-review-gate blocked (fail-closed). Re-run to retry.`
+              );
+              return;
+            }
 
             // --- Phase 1: Pending check ---
             let reviews;
@@ -72,13 +108,54 @@ jobs:
               }
             }
 
-            const pendingBots = [...REQUIRED_REVIEWERS].filter(
+            let pendingBots = [...REQUIRED_REVIEWERS].filter(
               b => !reviewedBots.has(b)
             );
             if (pendingBots.length > 0) {
+              let issueComments;
+              try {
+                issueComments = await github.paginate(
+                  github.rest.issues.listComments,
+                  {
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: prNumber,
+                  }
+                );
+              } catch (err) {
+                core.setFailed(
+                  `Failed to fetch issue comments: ${err.message}. ` +
+                  `Bot-review-gate blocked (fail-closed). Re-run to retry.`
+                );
+                return;
+              }
+
+              const mentionsCurrentHead = body =>
+                body.includes(currentHeadSha) || body.includes(currentHeadShortSha);
+
+              for (const bot of pendingBots) {
+                const authors = FALLBACK_COMMENT_AUTHORS.get(bot);
+                if (!authors) continue;
+                const hasFallbackComment = issueComments.some(comment => {
+                  const login = comment.user?.login || '';
+                  const body = comment.body || '';
+                  return authors.has(login) && mentionsCurrentHead(body);
+                });
+                if (hasFallbackComment) {
+                  reviewedBots.add(bot);
+                }
+              }
+
+              pendingBots = [...REQUIRED_REVIEWERS].filter(
+                b => !reviewedBots.has(b)
+              );
+            }
+            if (pendingBots.length > 0) {
               errors.push(
                 `Waiting for first review from ${pendingBots.length} bot(s):`,
-                ...pendingBots.map(b => `  - ${b} (no review yet)`),
+                ...pendingBots.map(
+                  b => `  - ${b} (no review or current-HEAD fallback comment yet)`
+                ),
               );
             }
 
