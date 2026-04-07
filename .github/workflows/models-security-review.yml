@@ -62,7 +62,7 @@ jobs:
 
       - name: Run security review
         id: review
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v7
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8
         with:
           script: |
             const fs = require('fs');
@@ -504,7 +504,7 @@ jobs:
 
       - name: Post review
         if: steps.review.outputs.review
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v7
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8
         with:
           script: |
             const review = ${{ toJSON(steps.review.outputs.review) }};
@@ -525,7 +525,7 @@ jobs:
 
       - name: Block on critical/high findings (with acknowledged-list filter)
         if: steps.review.outputs.review
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v7
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8
         with:
           script: |
             const fs = require('fs');
