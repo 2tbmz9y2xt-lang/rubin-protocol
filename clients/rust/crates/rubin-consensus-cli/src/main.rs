@@ -967,10 +967,10 @@ fn core_ext_profiles_from_json(
             ));
         }
         if item.tx_context_enabled {
-            return Err(
-                "tx_context_enabled core_ext profile requires runtime txcontext verifier wiring"
-                    .to_string(),
-            );
+            return Err(format!(
+                "tx_context_enabled core_ext profile for ext_id={} requires runtime txcontext verifier wiring",
+                item.ext_id
+            ));
         }
         if !core_ext_runtime_binding_supported(binding_name) {
             return Err(format!("unsupported core_ext binding: {}", item.binding));
@@ -4978,7 +4978,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains(
-            "tx_context_enabled core_ext profile requires runtime txcontext verifier wiring"
+            "tx_context_enabled core_ext profile for ext_id=9 requires runtime txcontext verifier wiring"
         ));
     }
 

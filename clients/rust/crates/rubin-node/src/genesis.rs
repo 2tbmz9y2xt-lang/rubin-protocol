@@ -394,10 +394,10 @@ fn core_ext_deployments_from_json(
             ));
         }
         if item.tx_context_enabled {
-            return Err(
-                "tx_context_enabled core_ext profile requires runtime txcontext verifier wiring"
-                    .to_string(),
-            );
+            return Err(format!(
+                "tx_context_enabled core_ext profile for ext_id={} requires runtime txcontext verifier wiring",
+                item.ext_id
+            ));
         }
         if !genesis_core_ext_binding_supported(binding_name) {
             return Err(format!("unsupported core_ext binding: {}", item.binding));
@@ -1121,7 +1121,7 @@ mod tests {
 
         let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
         assert!(err.contains(
-            "tx_context_enabled core_ext profile requires runtime txcontext verifier wiring"
+            "tx_context_enabled core_ext profile for ext_id=7 requires runtime txcontext verifier wiring"
         ));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");

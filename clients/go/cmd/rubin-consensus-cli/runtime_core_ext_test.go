@@ -295,7 +295,7 @@ func TestBuildCoreExtProfilesRejectsTxContextEnabledWithoutRuntimeVerifier(t *te
 		Binding:             "native_verify_sig",
 		ExtPayloadSchemaHex: "b2",
 	}}, "", "")
-	if err == nil || !strings.Contains(err.Error(), "tx_context_enabled core_ext profile requires runtime txcontext verifier wiring") {
+	if err == nil || !strings.Contains(err.Error(), "tx_context_enabled core_ext profile for ext_id=7 requires runtime txcontext verifier wiring") {
 		t.Fatalf("expected tx_context_enabled runtime verifier rejection, got %v", err)
 	}
 }

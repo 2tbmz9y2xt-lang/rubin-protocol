@@ -903,6 +903,12 @@ fn validate_core_ext_spend_with_cache_impl(
         sighash_v1_digest_with_cache(cache, input_index, input_value, chain_id, sighash_type)?;
 
     if p.tx_context_enabled {
+        let Some(verify_tx_context_fn) = p.verify_sig_ext_tx_context_fn else {
+            return Err(TxError::new(
+                ErrorCode::TxErrSigAlgInvalid,
+                "CORE_EXT verify_sig_ext unsupported",
+            ));
+        };
         let tx_context = tx_context.ok_or_else(|| {
             TxError::new(
                 ErrorCode::TxErrSigInvalid,
@@ -915,37 +921,31 @@ fn validate_core_ext_spend_with_cache_impl(
                 "CORE_EXT txcontext continuing bundle missing",
             )
         })?;
-        if let Some(verify_tx_context_fn) = p.verify_sig_ext_tx_context_fn {
-            let ok = verify_tx_context_fn(
-                cov.ext_id,
-                w.suite_id,
-                &w.pubkey,
-                crypto_sig,
-                &digest32,
-                cov.ext_payload,
-                tx_context.base.as_ref(),
-                ctx_continuing.as_ref(),
-                input_value,
+        let ok = verify_tx_context_fn(
+            cov.ext_id,
+            w.suite_id,
+            &w.pubkey,
+            crypto_sig,
+            &digest32,
+            cov.ext_payload,
+            tx_context.base.as_ref(),
+            ctx_continuing.as_ref(),
+            input_value,
+        )
+        .map_err(|_| {
+            TxError::new(
+                ErrorCode::TxErrSigAlgInvalid,
+                "CORE_EXT verify_sig_ext error",
             )
-            .map_err(|_| {
-                TxError::new(
-                    ErrorCode::TxErrSigAlgInvalid,
-                    "CORE_EXT verify_sig_ext error",
-                )
-            })?;
-            return if ok {
-                Ok(())
-            } else {
-                Err(TxError::new(
-                    ErrorCode::TxErrSigInvalid,
-                    "CORE_EXT signature invalid",
-                ))
-            };
-        }
-        return Err(TxError::new(
-            ErrorCode::TxErrSigAlgInvalid,
-            "CORE_EXT verify_sig_ext unsupported",
-        ));
+        })?;
+        return if ok {
+            Ok(())
+        } else {
+            Err(TxError::new(
+                ErrorCode::TxErrSigInvalid,
+                "CORE_EXT signature invalid",
+            ))
+        };
     }
     run_core_ext_verify_sig_ext_binding(&p.verification_binding, &w.pubkey, crypto_sig, &digest32)
 }
@@ -1403,6 +1403,46 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
         assert_eq!(err.msg, "CORE_EXT txcontext bundle missing");
+    }
+
+    #[test]
+    fn core_ext_active_txcontext_missing_runtime_verifier_wins_before_bundle_checks() {
+        let entry = UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_EXT,
+            covenant_data: core_ext_covdata(7, &[0x99]),
+            creation_height: 0,
+            created_by_coinbase: false,
+        };
+        let profiles = CoreExtProfiles {
+            active: vec![CoreExtActiveProfile {
+                ext_id: 7,
+                tx_context_enabled: true,
+                allowed_suite_ids: vec![0x42],
+                verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
+                verify_sig_ext_tx_context_fn: None,
+                binding_descriptor: b"accept".to_vec(),
+                ext_payload_schema: b"schema".to_vec(),
+            }],
+        };
+        let w = WitnessItem {
+            suite_id: 0x42,
+            pubkey: vec![0x01, 0x02, 0x03],
+            signature: vec![0x04, 0x01],
+        };
+        let (tx, input_index, input_value, chain_id) = dummy_tx();
+        let err = validate_core_ext_spend(
+            &entry,
+            &w,
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            &profiles,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+        assert_eq!(err.msg, "CORE_EXT verify_sig_ext unsupported");
     }
 
     #[test]

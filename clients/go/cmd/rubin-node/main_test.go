@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"math"
@@ -564,7 +565,7 @@ func TestParseGenesisConfigFullRejectsTxContextEnabledCoreExtProfileWithoutRunti
 		t.Fatalf("write genesis file: %v", err)
 	}
 
-	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "tx_context_enabled core_ext profile requires runtime txcontext verifier wiring") {
+	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "tx_context_enabled core_ext profile for ext_id=7 requires runtime txcontext verifier wiring") {
 		t.Fatalf("expected tx_context_enabled runtime verifier rejection, got %v", err)
 	}
 }
@@ -584,8 +585,16 @@ func TestParseGenesisConfigFullRejectsNonBooleanTxContextEnabled(t *testing.T) {
 		t.Fatalf("write genesis file: %v", err)
 	}
 
-	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "cannot unmarshal number into Go struct field") || !strings.Contains(err.Error(), "tx_context_enabled") {
-		t.Fatalf("expected invalid tx_context_enabled parse failure, got %v", err)
+	_, err := parseGenesisConfigFull(path)
+	if err == nil {
+		t.Fatalf("expected invalid tx_context_enabled parse failure")
+	}
+	var typeErr *json.UnmarshalTypeError
+	if !errors.As(err, &typeErr) {
+		t.Fatalf("expected UnmarshalTypeError, got %T (%v)", err, err)
+	}
+	if !strings.Contains(typeErr.Field, "tx_context_enabled") {
+		t.Fatalf("expected tx_context_enabled field in type error, got %q", typeErr.Field)
 	}
 }
 

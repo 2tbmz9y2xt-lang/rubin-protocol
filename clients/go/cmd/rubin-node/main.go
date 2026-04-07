@@ -499,7 +499,10 @@ func buildGenesisCoreExtProfiles(items []genesisCoreExtProfile, chainID [32]byte
 	for _, item := range items {
 		binding := strings.TrimSpace(item.Binding)
 		if item.TxContextEnabled {
-			return nil, fmt.Errorf("tx_context_enabled core_ext profile requires runtime txcontext verifier wiring")
+			return nil, fmt.Errorf(
+				"tx_context_enabled core_ext profile for ext_id=%d requires runtime txcontext verifier wiring",
+				item.ExtID,
+			)
 		}
 		if !genesisCoreExtBindingIsSupported(binding) {
 			return nil, fmt.Errorf("unsupported core_ext binding: %s", item.Binding)
