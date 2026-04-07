@@ -172,19 +172,37 @@ jobs:
               b => !reviewedBots.has(b)
             );
             if (pendingBots.length > 0) {
-              let issueComments;
+              const commentsQuery = `query($owner:String!, $repo:String!, $pr:Int!, $cursor:String) {
+                repository(owner:$owner, name:$repo) {
+                  pullRequest(number:$pr) {
+                    comments(first:100, after:$cursor) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes {
+                        author { login }
+                      }
+                    }
+                  }
+                }
+              }`;
+
+              const prComments = [];
+              let commentCursor = null;
               try {
-                issueComments = await github.paginate(
-                  github.rest.issues.listComments,
-                  {
+                while (true) {
+                  const result = await github.graphql(commentsQuery, {
                     owner: context.repo.owner,
                     repo: context.repo.repo,
-                    issue_number: prNumber,
-                  }
-                );
+                    pr: prNumber,
+                    cursor: commentCursor,
+                  });
+                  const page = result.repository.pullRequest.comments;
+                  prComments.push(...page.nodes);
+                  if (!page.pageInfo.hasNextPage) break;
+                  commentCursor = page.pageInfo.endCursor;
+                }
               } catch (err) {
                 core.setFailed(
-                  `Failed to fetch issue comments: ${err.message}. ` +
+                  `Failed to fetch PR comments: ${err.message}. ` +
                   `Bot-review-gate blocked (fail-closed). Re-run to retry.`
                 );
                 return;
@@ -193,8 +211,8 @@ jobs:
               for (const bot of pendingBots) {
                 const authors = FALLBACK_COMMENT_AUTHORS.get(bot);
                 if (!authors) continue;
-                const hasFallbackComment = issueComments.some(comment => {
-                  const login = comment.user?.login || '';
+                const hasFallbackComment = prComments.some(comment => {
+                  const login = comment.author?.login || '';
                   return authors.has(login);
                 });
                 if (hasFallbackComment) {
