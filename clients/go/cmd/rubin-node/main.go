@@ -42,10 +42,10 @@ func applySuiteContextToSyncConfig(cfg *node.SyncConfig, rotation consensus.Rota
 const legacyExposureReportVersion = 1
 
 type legacyExposureSuiteReport struct {
-	SuiteID           uint8    `json:"suite_id"`
-	UtxoExposureCount uint64   `json:"utxo_exposure_count"`
-	OutpointCount     uint64   `json:"outpoint_count"`
-	Outpoints         []string `json:"outpoints,omitempty"`
+	SuiteID           uint8     `json:"suite_id"`
+	UtxoExposureCount uint64    `json:"utxo_exposure_count"`
+	OutpointCount     uint64    `json:"outpoint_count"`
+	Outpoints         *[]string `json:"outpoints,omitempty"`
 }
 
 type legacyExposureReport struct {
@@ -131,6 +131,13 @@ func legacyExposureHooks(total uint64) (string, string, string) {
 	return "not_ready_legacy_exposure_present", "legacy_exposure_present_notify_operator_and_council", "not_applicable_legacy_exposure_present"
 }
 
+func saturatingAddUint64(total, value uint64) uint64 {
+	if value > ^uint64(0)-total {
+		return ^uint64(0)
+	}
+	return total + value
+}
+
 func buildLegacyExposureReport(network, dataDir string, chainState *node.ChainState, legacySuiteIDs []uint8, includeOutpoints bool) legacyExposureReport {
 	reports := make([]legacyExposureSuiteReport, 0, len(legacySuiteIDs))
 	var total uint64
@@ -144,12 +151,13 @@ func buildLegacyExposureReport(network, dataDir string, chainState *node.ChainSt
 		if includeOutpoints {
 			outpoints := chainState.UtxoOutpointsBySuiteID(suiteID)
 			report.OutpointCount = uint64(len(outpoints))
-			report.Outpoints = make([]string, 0, len(outpoints))
+			reportOutpoints := make([]string, 0, len(outpoints))
 			for _, op := range outpoints {
-				report.Outpoints = append(report.Outpoints, formatLegacyExposureOutpoint(op))
+				reportOutpoints = append(reportOutpoints, formatLegacyExposureOutpoint(op))
 			}
+			report.Outpoints = &reportOutpoints
 		}
-		total += count
+		total = saturatingAddUint64(total, count)
 		reports = append(reports, report)
 	}
 	sunsetReadiness, warningHook, graceHook := legacyExposureHooks(total)

@@ -9,26 +9,28 @@ This runbook makes legacy suite exposure measurable before any optional `H4`
 sunset proposal. It is an ops package, not a consensus-rule change.
 
 If anyone wants to use this package as the sole gate for an irreversible `H4`
-decision: **НУЖНО ОДОБРЕНИЕ КОНТРОЛЕРА**.
+decision, controller approval is required.
 
 ## 2) Scanner Commands
 
 Go node CLI:
 
 ```bash
-go run ./clients/go/cmd/rubin-node \
+(cd clients/go && go run ./cmd/rubin-node \
+  --network testnet \
   --datadir /path/to/datadir \
   --legacy-exposure-scan \
-  --legacy-suite-id 0x01
+  --legacy-suite-id 0x01)
 ```
 
 Rust node CLI:
 
 ```bash
-cargo run -p rubin-node -- \
+(cd clients/rust && cargo run -p rubin-node -- \
+  --network testnet \
   --datadir /path/to/datadir \
   --legacy-exposure-scan \
-  --legacy-suite-id 0x01
+  --legacy-suite-id 0x01)
 ```
 
 Optional detail mode:
@@ -38,6 +40,7 @@ Optional detail mode:
 ```
 
 `--legacy-suite-id` is repeatable. Inputs accept decimal or `0xNN`.
+Set `--network` to match the datadir being inspected; if omitted, both CLIs default to `devnet`.
 The watched suite list is operator-supplied; this task does not auto-infer an
 irreversible governance decision from a future `H4` artifact.
 
@@ -51,7 +54,7 @@ The scanner emits deterministic JSON with:
 - `legacy_exposure_total`: sum of current explicit UTXO exposure across watched legacy suite IDs
 - `legacy_suite_reports[*].utxo_exposure_count`: per-suite exposure count
 - `legacy_suite_reports[*].outpoint_count`: per-suite outpoint count
-- `legacy_suite_reports[*].outpoints`: deterministic outpoint list when detail mode is enabled
+- `legacy_suite_reports[*].outpoints`: deterministic outpoint list when detail mode is enabled; emitted as `[]` for watched suites with zero matching UTXOs
 - `sunset_readiness`, `warning_hook`, `grace_hook`: advisory ops hooks derived from current exposure only
 
 Today this measurement surface covers UTXOs whose covenant data explicitly

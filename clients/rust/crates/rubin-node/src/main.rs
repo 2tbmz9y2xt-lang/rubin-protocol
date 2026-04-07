@@ -61,8 +61,8 @@ struct LegacyExposureSuiteReport {
     suite_id: u8,
     utxo_exposure_count: u64,
     outpoint_count: u64,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    outpoints: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outpoints: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -556,15 +556,17 @@ fn build_legacy_exposure_report(
             suite_id: *suite_id,
             utxo_exposure_count,
             outpoint_count: utxo_exposure_count,
-            outpoints: Vec::new(),
+            outpoints: None,
         };
         if cfg.legacy_exposure_include_outpoints {
             let outpoints = chain_state.utxo_outpoints_by_suite_id(*suite_id);
             report.outpoint_count = outpoints.len() as u64;
-            report.outpoints = outpoints
-                .iter()
-                .map(|op| format_legacy_exposure_outpoint(&op.txid, op.vout))
-                .collect();
+            report.outpoints = Some(
+                outpoints
+                    .iter()
+                    .map(|op| format_legacy_exposure_outpoint(&op.txid, op.vout))
+                    .collect(),
+            );
         }
         legacy_exposure_total = legacy_exposure_total.saturating_add(utxo_exposure_count);
         legacy_suite_reports.push(report);
@@ -791,6 +793,12 @@ mod tests {
         format!(
             "{{\"suite_id\":{suite_id},\"pubkey_len\":{ML_DSA_87_PUBKEY_BYTES},\"sig_len\":{ML_DSA_87_SIG_BYTES},\"verify_cost\":{VERIFY_COST_ML_DSA_87},\"openssl_alg\":\"ML-DSA-87\"}}"
         )
+    }
+
+    fn test_legacy_exposure_p2pk_covenant_data(suite_id: u8) -> Vec<u8> {
+        let mut cov = vec![0u8; rubin_consensus::constants::MAX_P2PK_COVENANT_DATA as usize];
+        cov[0] = suite_id;
+        cov
     }
 
     fn production_rotation_networks() -> [&'static str; 4] {
@@ -1160,8 +1168,8 @@ mod tests {
             txid: [0x03; 32],
             vout: 2,
         };
-        let mut cov_legacy = vec![0u8; 33];
-        cov_legacy[0] = rubin_consensus::constants::SUITE_ID_ML_DSA_87;
+        let cov_legacy =
+            test_legacy_exposure_p2pk_covenant_data(rubin_consensus::constants::SUITE_ID_ML_DSA_87);
         state.utxos.insert(
             first,
             rubin_consensus::UtxoEntry {
@@ -1172,8 +1180,7 @@ mod tests {
                 created_by_coinbase: false,
             },
         );
-        let mut cov_rotated = vec![0u8; 33];
-        cov_rotated[0] = 0x42;
+        let cov_rotated = test_legacy_exposure_p2pk_covenant_data(0x42);
         state.utxos.insert(
             second,
             rubin_consensus::UtxoEntry {
@@ -1195,7 +1202,7 @@ mod tests {
             },
         );
         state
-            .save(&rubin_node::chain_state_path(&dir))
+            .save(rubin_node::chain_state_path(&dir))
             .expect("save chainstate");
 
         let args = vec![
@@ -1262,8 +1269,7 @@ mod tests {
             txid: [0x01; 32],
             vout: 0,
         };
-        let mut cov = vec![0u8; 33];
-        cov[0] = 0x42;
+        let cov = test_legacy_exposure_p2pk_covenant_data(0x42);
         state.utxos.insert(
             first,
             rubin_consensus::UtxoEntry {
@@ -1285,7 +1291,7 @@ mod tests {
             },
         );
         state
-            .save(&rubin_node::chain_state_path(&dir))
+            .save(rubin_node::chain_state_path(&dir))
             .expect("save chainstate");
 
         let args = vec![
@@ -1310,6 +1316,39 @@ mod tests {
         assert_eq!(
             json["legacy_suite_reports"][0]["outpoints"][1].as_str(),
             Some("0202020202020202020202020202020202020202020202020202020202020202:1")
+        );
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn legacy_exposure_scan_emits_empty_outpoints_when_detail_mode_has_no_matches() {
+        let dir = unique_temp_dir("rubin-node-bin-legacy-empty-outpoints");
+        fs::create_dir_all(&dir).expect("mkdir");
+        rubin_node::ChainState::new()
+            .save(rubin_node::chain_state_path(&dir))
+            .expect("save chainstate");
+
+        let args = vec![
+            "--datadir".to_string(),
+            dir.display().to_string(),
+            "--network".to_string(),
+            "mainnet".to_string(),
+            "--legacy-exposure-scan".to_string(),
+            "--legacy-suite-id".to_string(),
+            "1".to_string(),
+            "--legacy-exposure-include-outpoints".to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run(&args, &mut stdout, &mut stderr);
+        assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
+        let json: Value = serde_json::from_slice(&stdout).expect("json");
+        assert_eq!(json["include_outpoints"].as_bool(), Some(true));
+        assert_eq!(
+            json["legacy_suite_reports"][0]["outpoints"],
+            serde_json::json!([])
         );
 
         fs::remove_dir_all(&dir).expect("cleanup");
@@ -1379,7 +1418,7 @@ mod tests {
         let dir = unique_temp_dir("rubin-node-bin-legacy-mainnet");
         fs::create_dir_all(&dir).expect("mkdir");
         rubin_node::ChainState::new()
-            .save(&rubin_node::chain_state_path(&dir))
+            .save(rubin_node::chain_state_path(&dir))
             .expect("save chainstate");
         let args = vec![
             "--datadir".to_string(),

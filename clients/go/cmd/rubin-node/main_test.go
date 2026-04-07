@@ -274,6 +274,44 @@ func TestRunLegacyExposureScanIncludesOutpoints(t *testing.T) {
 	}
 }
 
+func TestRunLegacyExposureScanEmitsEmptyOutpointsWhenDetailModeHasNoMatches(t *testing.T) {
+	dir := t.TempDir()
+	if err := node.NewChainState().Save(node.ChainStatePath(dir)); err != nil {
+		t.Fatalf("Save(chainstate): %v", err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run(
+		[]string{
+			"--datadir", dir,
+			"--network", "mainnet",
+			"--legacy-exposure-scan",
+			"--legacy-suite-id", "1",
+			"--legacy-exposure-include-outpoints",
+		},
+		&out,
+		&errOut,
+	)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr=%q)", code, errOut.String())
+	}
+
+	var report legacyExposureReportJSON
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if len(report.LegacySuiteReports) != 1 {
+		t.Fatalf("legacy suite reports=%d, want 1", len(report.LegacySuiteReports))
+	}
+	if report.LegacySuiteReports[0].Outpoints == nil {
+		t.Fatalf("expected outpoints field to be present as [] in detail mode")
+	}
+	if len(report.LegacySuiteReports[0].Outpoints) != 0 {
+		t.Fatalf("outpoints=%v, want []", report.LegacySuiteReports[0].Outpoints)
+	}
+}
+
 func TestRunLegacyExposureScanRejectsMissingSuiteIDs(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer
@@ -389,6 +427,15 @@ func TestRunLegacyExposureScanPropagatesEncodeFailure(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "legacy exposure encode failed") {
 		t.Fatalf("stderr=%q", errOut.String())
+	}
+}
+
+func TestSaturatingAddUint64(t *testing.T) {
+	if got := saturatingAddUint64(5, 7); got != 12 {
+		t.Fatalf("saturatingAddUint64(5, 7)=%d, want 12", got)
+	}
+	if got := saturatingAddUint64(math.MaxUint64-1, 2); got != math.MaxUint64 {
+		t.Fatalf("saturatingAddUint64(max-1, 2)=%d, want %d", got, uint64(math.MaxUint64))
 	}
 }
 
