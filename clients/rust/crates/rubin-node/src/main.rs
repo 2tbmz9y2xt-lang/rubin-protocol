@@ -158,8 +158,8 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
             Err(code) => return code,
         };
         let report = build_legacy_exposure_report(&cfg, &chain_state);
-        if serde_json::to_writer_pretty(&mut *stdout, &report).is_err() {
-            let _ = writeln!(stderr, "legacy exposure encode failed");
+        if let Err(err) = serde_json::to_writer_pretty(&mut *stdout, &report) {
+            let _ = writeln!(stderr, "legacy exposure encode failed: {err}");
             return 1;
         }
         let _ = writeln!(stdout);
@@ -604,16 +604,16 @@ fn build_legacy_exposure_report(
             let outpoints = chain_state.utxo_outpoints_by_suite_id(*suite_id);
             let report_count = outpoints.len() as u64;
             legacy_exposure_total = legacy_exposure_total.saturating_add(report_count);
+            let mut report_outpoints: Vec<String> = outpoints
+                .iter()
+                .map(|op| format_legacy_exposure_outpoint(&op.txid, op.vout))
+                .collect();
+            report_outpoints.sort_unstable();
             legacy_suite_reports.push(LegacyExposureSuiteReport {
                 suite_id: u64::from(*suite_id),
                 utxo_exposure_count: report_count,
                 outpoint_count: report_count,
-                outpoints: Some(
-                    outpoints
-                        .iter()
-                        .map(|op| format_legacy_exposure_outpoint(&op.txid, op.vout))
-                        .collect(),
-                ),
+                outpoints: Some(report_outpoints),
             });
             continue;
         }
@@ -628,6 +628,8 @@ fn build_legacy_exposure_report(
     }
     let (sunset_readiness, warning_hook, grace_hook) =
         legacy_exposure_hooks(chain_state.has_tip, legacy_exposure_total);
+    let mut indexed_suite_ids = chain_state.indexed_suite_ids();
+    indexed_suite_ids.sort_unstable();
     LegacyExposureReport {
         report_version: LEGACY_EXPOSURE_REPORT_VERSION,
         measurement_scope: "explicit_suite_id_utxos".to_string(),
@@ -635,7 +637,7 @@ fn build_legacy_exposure_report(
         data_dir: cfg.data_dir.display().to_string(),
         chainstate_height: chain_state.height,
         chainstate_has_tip: chain_state.has_tip,
-        indexed_suite_ids: suite_ids_to_json_numbers(&chain_state.indexed_suite_ids()),
+        indexed_suite_ids: suite_ids_to_json_numbers(&indexed_suite_ids),
         watched_legacy_suite_ids: suite_ids_to_json_numbers(&cfg.legacy_suite_ids),
         legacy_exposure_total,
         sunset_readiness: sunset_readiness.to_string(),
@@ -833,6 +835,7 @@ fn validate_peer_addr(addr: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io;
     use std::path::PathBuf;
 
     use rubin_consensus::constants::{
@@ -842,6 +845,18 @@ mod tests {
 
     use super::{legacy_exposure_hooks, parse_args, run, runtime_genesis_hash, validate_config};
     use rubin_node::{load_genesis_config, PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR};
+
+    struct FailingWriter;
+
+    impl io::Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("write failed"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -1614,6 +1629,36 @@ mod tests {
         let json: Value = serde_json::from_slice(&stdout).expect("json");
         assert_eq!(json["network"].as_str(), Some("mainnet"));
         assert_eq!(json["legacy_exposure_total"].as_u64(), Some(0));
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn legacy_exposure_scan_propagates_encode_failure_details() {
+        let dir = unique_temp_dir("rubin-node-bin-legacy-encode-failure");
+        fs::create_dir_all(&dir).expect("mkdir");
+        let mut state = rubin_node::ChainState::new();
+        state.has_tip = true;
+        state.height = 7;
+        state.tip_hash = [0x42; 32];
+        state
+            .save(rubin_node::chain_state_path(&dir))
+            .expect("save chainstate");
+        let args = vec![
+            "--datadir".to_string(),
+            dir.display().to_string(),
+            "--legacy-exposure-scan".to_string(),
+            "--legacy-suite-id".to_string(),
+            "1".to_string(),
+        ];
+        let mut stdout = FailingWriter;
+        let mut stderr = Vec::new();
+
+        let code = run(&args, &mut stdout, &mut stderr);
+        assert_eq!(code, 1);
+        let stderr = String::from_utf8_lossy(&stderr);
+        assert!(stderr.contains("legacy exposure encode failed:"));
+        assert!(stderr.contains("write failed"));
 
         fs::remove_dir_all(&dir).expect("cleanup");
     }

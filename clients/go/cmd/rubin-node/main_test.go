@@ -467,6 +467,39 @@ func TestRunLegacyExposureScanRequiresChainstateTip(t *testing.T) {
 	}
 }
 
+func TestLoadLegacyExposureScanChainStateIncludesPathOnStatFailure(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile(blocker): %v", err)
+	}
+	path := filepath.Join(blocker, "chainstate.json")
+
+	_, err := loadLegacyExposureScanChainState(path)
+	if err == nil {
+		t.Fatal("expected stat failure")
+	}
+	if !strings.Contains(err.Error(), "legacy exposure scan chainstate stat failed for "+path) {
+		t.Fatalf("err=%q", err)
+	}
+}
+
+func TestLoadLegacyExposureScanChainStateIncludesPathOnLoadFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chainstate.json")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("Mkdir(chainstate): %v", err)
+	}
+
+	_, err := loadLegacyExposureScanChainState(path)
+	if err == nil {
+		t.Fatal("expected load failure")
+	}
+	if !strings.Contains(err.Error(), "chainstate load failed for "+path) {
+		t.Fatalf("err=%q", err)
+	}
+}
+
 func TestRunLegacyExposureScanRejectsInvalidSuiteID(t *testing.T) {
 	dir := t.TempDir()
 	blocker := filepath.Join(dir, "not-a-dir")

@@ -165,6 +165,7 @@ func buildLegacyExposureReport(network, dataDir string, chainState *node.ChainSt
 			for _, op := range outpoints {
 				reportOutpoints = append(reportOutpoints, formatLegacyExposureOutpoint(op))
 			}
+			sort.Strings(reportOutpoints)
 			total = saturatingAddUint64(total, reportCount)
 			reports = append(reports, legacyExposureSuiteReport{
 				SuiteID:           uint64(suiteID),
@@ -182,6 +183,8 @@ func buildLegacyExposureReport(network, dataDir string, chainState *node.ChainSt
 			OutpointCount:     reportCount,
 		})
 	}
+	indexedSuiteIDs := chainState.IndexedSuiteIDs()
+	sort.Slice(indexedSuiteIDs, func(i, j int) bool { return indexedSuiteIDs[i] < indexedSuiteIDs[j] })
 	sunsetReadiness, warningHook, graceHook := legacyExposureHooks(chainState.HasTip, total)
 	return legacyExposureReport{
 		ReportVersion:         legacyExposureReportVersion,
@@ -190,7 +193,7 @@ func buildLegacyExposureReport(network, dataDir string, chainState *node.ChainSt
 		DataDir:               dataDir,
 		ChainstateHeight:      chainState.Height,
 		ChainstateHasTip:      chainState.HasTip,
-		IndexedSuiteIDs:       suiteIDsToJSONNumbers(chainState.IndexedSuiteIDs()),
+		IndexedSuiteIDs:       suiteIDsToJSONNumbers(indexedSuiteIDs),
 		WatchedLegacySuiteIDs: suiteIDsToJSONNumbers(legacySuiteIDs),
 		LegacyExposureTotal:   total,
 		SunsetReadiness:       sunsetReadiness,
@@ -213,11 +216,11 @@ func loadLegacyExposureScanChainState(path string) (*node.ChainState, error) {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("legacy exposure scan requires an existing chainstate file with a tip: %s", path)
 		}
-		return nil, fmt.Errorf("legacy exposure scan chainstate stat failed: %w", err)
+		return nil, fmt.Errorf("legacy exposure scan chainstate stat failed for %s: %w", path, err)
 	}
 	chainState, err := node.LoadChainState(path)
 	if err != nil {
-		return nil, fmt.Errorf("chainstate load failed: %w", err)
+		return nil, fmt.Errorf("chainstate load failed for %s: %w", path, err)
 	}
 	if !chainState.HasTip {
 		return nil, fmt.Errorf("legacy exposure scan requires a chainstate with a tip: %s", path)
