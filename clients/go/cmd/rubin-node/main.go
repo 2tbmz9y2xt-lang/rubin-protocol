@@ -7,9 +7,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/bits"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -37,6 +40,32 @@ func applySuiteContextToSyncConfig(cfg *node.SyncConfig, rotation consensus.Rota
 	cfg.SuiteRegistry = registry
 }
 
+const legacyExposureReportVersion = 1
+
+type legacyExposureSuiteReport struct {
+	SuiteID           uint64    `json:"suite_id"`
+	UtxoExposureCount uint64    `json:"utxo_exposure_count"`
+	OutpointCount     uint64    `json:"outpoint_count"`
+	Outpoints         *[]string `json:"outpoints,omitempty"`
+}
+
+type legacyExposureReport struct {
+	ReportVersion         uint64                      `json:"report_version"`
+	MeasurementScope      string                      `json:"measurement_scope"`
+	Network               string                      `json:"network"`
+	DataDir               string                      `json:"data_dir"`
+	ChainstateHeight      uint64                      `json:"chainstate_height"`
+	ChainstateHasTip      bool                        `json:"chainstate_has_tip"`
+	IndexedSuiteIDs       []uint64                    `json:"indexed_suite_ids"`
+	WatchedLegacySuiteIDs []uint64                    `json:"watched_legacy_suite_ids"`
+	LegacyExposureTotal   uint64                      `json:"legacy_exposure_total"`
+	SunsetReadiness       string                      `json:"sunset_readiness"`
+	WarningHook           string                      `json:"warning_hook"`
+	GraceHook             string                      `json:"grace_hook"`
+	IncludeOutpoints      bool                        `json:"include_outpoints"`
+	LegacySuiteReports    []legacyExposureSuiteReport `json:"legacy_suite_reports"`
+}
+
 type multiStringFlag []string
 
 func (m *multiStringFlag) String() string {
@@ -51,6 +80,152 @@ func (m *multiStringFlag) Set(value string) error {
 	return nil
 }
 
+func parseLegacySuiteID(value string) (uint8, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0, fmt.Errorf("legacy suite_id is required")
+	}
+	base := 10
+	if strings.HasPrefix(trimmed, "0x") || strings.HasPrefix(trimmed, "0X") {
+		trimmed = trimmed[2:]
+		base = 16
+	}
+	if trimmed == "" {
+		return 0, fmt.Errorf("legacy suite_id is required")
+	}
+	parsed, err := strconv.ParseUint(trimmed, base, 8)
+	if err != nil {
+		return 0, fmt.Errorf("invalid legacy suite_id %q", value)
+	}
+	return uint8(parsed), nil
+}
+
+func normalizeLegacySuiteIDs(raw []string) ([]uint8, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("legacy exposure scan requires at least one --legacy-suite-id")
+	}
+	seen := make(map[uint8]struct{}, len(raw))
+	ids := make([]uint8, 0, len(raw))
+	for _, value := range raw {
+		suiteID, err := parseLegacySuiteID(value)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[suiteID]; ok {
+			continue
+		}
+		seen[suiteID] = struct{}{}
+		ids = append(ids, suiteID)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids, nil
+}
+
+func formatLegacyExposureOutpoint(op consensus.Outpoint) string {
+	return fmt.Sprintf("%x:%d", op.Txid[:], op.Vout)
+}
+
+func legacyExposureHooks(hasTip bool, total uint64) (string, string, string) {
+	if !hasTip {
+		return "invalid_no_chainstate_tip", "none", "not_applicable_no_chainstate_tip"
+	}
+	if total == 0 {
+		return "ready_for_operator_defined_grace_window", "none", "start_operator_defined_grace_window"
+	}
+	return "not_ready_legacy_exposure_present", "legacy_exposure_present_notify_operator_and_council", "not_applicable_legacy_exposure_present"
+}
+
+func saturatingAddUint64(total, value uint64) uint64 {
+	sum, carry := bits.Add64(total, value, 0)
+	if carry != 0 {
+		return ^uint64(0)
+	}
+	return sum
+}
+
+func suiteIDsToJSONNumbers(ids []uint8) []uint64 {
+	if len(ids) == 0 {
+		return []uint64{}
+	}
+	values := make([]uint64, 0, len(ids))
+	for _, id := range ids {
+		values = append(values, uint64(id))
+	}
+	return values
+}
+
+func buildLegacyExposureReport(network, dataDir string, chainState *node.ChainState, legacySuiteIDs []uint8, includeOutpoints bool) legacyExposureReport {
+	reports := make([]legacyExposureSuiteReport, 0, len(legacySuiteIDs))
+	var total uint64
+	for _, suiteID := range legacySuiteIDs {
+		if includeOutpoints {
+			outpoints := chainState.UtxoOutpointsBySuiteID(suiteID)
+			reportCount := uint64(len(outpoints))
+			reportOutpoints := make([]string, 0, len(outpoints))
+			for _, op := range outpoints {
+				reportOutpoints = append(reportOutpoints, formatLegacyExposureOutpoint(op))
+			}
+			total = saturatingAddUint64(total, reportCount)
+			reports = append(reports, legacyExposureSuiteReport{
+				SuiteID:           uint64(suiteID),
+				UtxoExposureCount: reportCount,
+				OutpointCount:     reportCount,
+				Outpoints:         &reportOutpoints,
+			})
+			continue
+		}
+		reportCount := chainState.UtxoExposureCountBySuiteID(suiteID)
+		total = saturatingAddUint64(total, reportCount)
+		reports = append(reports, legacyExposureSuiteReport{
+			SuiteID:           uint64(suiteID),
+			UtxoExposureCount: reportCount,
+			OutpointCount:     reportCount,
+		})
+	}
+	indexedSuiteIDs := chainState.IndexedSuiteIDs()
+	sunsetReadiness, warningHook, graceHook := legacyExposureHooks(chainState.HasTip, total)
+	return legacyExposureReport{
+		ReportVersion:         legacyExposureReportVersion,
+		MeasurementScope:      "explicit_suite_id_utxos",
+		Network:               network,
+		DataDir:               dataDir,
+		ChainstateHeight:      chainState.Height,
+		ChainstateHasTip:      chainState.HasTip,
+		IndexedSuiteIDs:       suiteIDsToJSONNumbers(indexedSuiteIDs),
+		WatchedLegacySuiteIDs: suiteIDsToJSONNumbers(legacySuiteIDs),
+		LegacyExposureTotal:   total,
+		SunsetReadiness:       sunsetReadiness,
+		WarningHook:           warningHook,
+		GraceHook:             graceHook,
+		IncludeOutpoints:      includeOutpoints,
+		LegacySuiteReports:    reports,
+	}
+}
+
+func printLegacyExposureReport(w io.Writer, report legacyExposureReport) error {
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	return enc.Encode(report)
+}
+
+func loadLegacyExposureScanChainState(path string) (*node.ChainState, error) {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("legacy exposure scan requires an existing chainstate file with a tip: %s", path)
+		}
+		return nil, fmt.Errorf("legacy exposure scan chainstate stat failed for %s: %w", path, err)
+	}
+	chainState, err := node.LoadChainState(path)
+	if err != nil {
+		return nil, fmt.Errorf("chainstate load failed for %s: %w", path, err)
+	}
+	if !chainState.HasTip {
+		return nil, fmt.Errorf("legacy exposure scan requires a chainstate with a tip: %s", path)
+	}
+	return chainState, nil
+}
+
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
@@ -58,6 +233,8 @@ func main() {
 func run(args []string, stdout, stderr io.Writer) int {
 	defaults := node.DefaultConfig()
 	var peers multiStringFlag
+	var legacySuiteIDs multiStringFlag
+	var watchedSuiteIDs []uint8
 
 	cfg := defaults
 	fs := flag.NewFlagSet("rubin-node", flag.ContinueOnError)
@@ -78,6 +255,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	featurebitsDeploymentsPath := fs.String("featurebits-deployments", "", "path to JSON file with featurebit deployments (telemetry-only)")
 	pvMode := fs.String("pv-mode", "off", "parallel validation mode: off|shadow|on (truth path is sequential)")
 	pvShadowMax := fs.Uint64("pv-shadow-max", 3, "max pv shadow mismatch samples to record/print (bounded)")
+	legacyExposureScan := fs.Bool("legacy-exposure-scan", false, "emit legacy suite exposure report and exit")
+	fs.Var(&legacySuiteIDs, "legacy-suite-id", "legacy suite_id to watch (decimal or 0xNN); repeatable")
+	legacyExposureIncludeOutpoints := fs.Bool("legacy-exposure-include-outpoints", false, "include deterministic outpoint lists in legacy exposure report")
 	dryRun := fs.Bool("dry-run", false, "print effective config and exit")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -85,17 +265,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	cfg.LogLevel = strings.ToLower(strings.TrimSpace(cfg.LogLevel))
 	cfg.Peers = node.NormalizePeers(append([]string{*peerCSV}, peers...)...)
-	genesisCfg, err := parseGenesisConfigFull(*genesisFile)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "invalid genesis file: %v\n", err)
-		return 2
-	}
-	chainIDFromGenesis := genesisCfg.ChainID
-	genesisHashFromGenesis := genesisCfg.GenesisHash
-	var zeroChainID [32]byte
-	if chainIDFromGenesis != zeroChainID {
-		cfg.ChainID = fmt.Sprintf("%x", chainIDFromGenesis[:])
-	}
 	if err := node.ValidateConfig(cfg); err != nil {
 		_, _ = fmt.Fprintf(stderr, "invalid config: %v\n", err)
 		return 2
@@ -103,15 +272,54 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if canonicalNetwork, ok := node.CanonicalNetworkName(cfg.Network); ok {
 		cfg.Network = canonicalNetwork
 	}
+	if *legacyExposureScan {
+		var err error
+		watchedSuiteIDs, err = normalizeLegacySuiteIDs([]string(legacySuiteIDs))
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "legacy exposure scan config failed: %v\n", err)
+			return 2
+		}
+	} else if len(legacySuiteIDs) > 0 || *legacyExposureIncludeOutpoints {
+		_, _ = fmt.Fprintln(stderr, "legacy exposure flags require --legacy-exposure-scan")
+		return 2
+	}
+	chainStatePath := node.ChainStatePath(cfg.DataDir)
+	if *legacyExposureScan {
+		chainState, err := loadLegacyExposureScanChainState(chainStatePath)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "%v\n", err)
+			return 2
+		}
+		report := buildLegacyExposureReport(cfg.Network, cfg.DataDir, chainState, watchedSuiteIDs, *legacyExposureIncludeOutpoints)
+		if err := printLegacyExposureReport(stdout, report); err != nil {
+			_, _ = fmt.Fprintf(stderr, "legacy exposure encode failed: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	if cfg.Network != "devnet" && strings.TrimSpace(*genesisFile) == "" {
+		_, _ = fmt.Fprintf(stderr, "error: --network %s requires a genesis file (--genesis-file) with chain_id and genesis_hash\n", cfg.Network)
+		return 2
+	}
+	genesisCfg, err := parseGenesisConfigFull(*genesisFile)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "invalid genesis file: %v\n", err)
+		return 2
+	}
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		_, _ = fmt.Fprintf(stderr, "datadir create failed: %v\n", err)
 		return 2
 	}
-	chainStatePath := node.ChainStatePath(cfg.DataDir)
 	chainState, err := node.LoadChainState(chainStatePath)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "chainstate load failed: %v\n", err)
 		return 2
+	}
+	chainIDFromGenesis := genesisCfg.ChainID
+	genesisHashFromGenesis := genesisCfg.GenesisHash
+	var zeroChainID [32]byte
+	if chainIDFromGenesis != zeroChainID {
+		cfg.ChainID = fmt.Sprintf("%x", chainIDFromGenesis[:])
 	}
 	// Wire rotation descriptor from config into ChainState.
 	rotation, registry, err := cfg.BuildRotationProvider()
