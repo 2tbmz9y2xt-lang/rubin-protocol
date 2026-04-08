@@ -165,12 +165,11 @@ func buildLegacyExposureReport(network, dataDir string, chainState *node.ChainSt
 			for _, op := range outpoints {
 				reportOutpoints = append(reportOutpoints, formatLegacyExposureOutpoint(op))
 			}
-			sort.Strings(reportOutpoints)
-			total = saturatingAddUint64(total, reportCount)
-			reports = append(reports, legacyExposureSuiteReport{
-				SuiteID:           uint64(suiteID),
-				UtxoExposureCount: reportCount,
-				OutpointCount:     reportCount,
+            total = saturatingAddUint64(total, reportCount)
+            reports = append(reports, legacyExposureSuiteReport{
+                SuiteID:           uint64(suiteID),
+                UtxoExposureCount: reportCount,
+                OutpointCount:     reportCount,
 				Outpoints:         &reportOutpoints,
 			})
 			continue

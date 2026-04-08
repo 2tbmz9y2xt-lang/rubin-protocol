@@ -604,11 +604,10 @@ fn build_legacy_exposure_report(
             let outpoints = chain_state.utxo_outpoints_by_suite_id(*suite_id);
             let report_count = outpoints.len() as u64;
             legacy_exposure_total = legacy_exposure_total.saturating_add(report_count);
-            let mut report_outpoints: Vec<String> = outpoints
+            let report_outpoints: Vec<String> = outpoints
                 .iter()
                 .map(|op| format_legacy_exposure_outpoint(&op.txid, op.vout))
                 .collect();
-            report_outpoints.sort_unstable();
             legacy_suite_reports.push(LegacyExposureSuiteReport {
                 suite_id: u64::from(*suite_id),
                 utxo_exposure_count: report_count,
