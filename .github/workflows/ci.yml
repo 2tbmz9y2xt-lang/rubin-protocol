@@ -76,7 +76,7 @@ jobs:
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
-          go-version: '1.25.8'
+          go-version: '1.25.9'
           cache: true
           cache-dependency-path: |
             clients/go/go.mod
@@ -257,7 +257,7 @@ jobs:
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
-          go-version: '1.25.8'
+          go-version: '1.25.9'
           cache: true
           cache-dependency-path: clients/go/go.mod
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
@@ -449,7 +449,7 @@ jobs:
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
-          go-version: '1.25.8'
+          go-version: '1.25.9'
           cache: true
           cache-dependency-path: clients/go/go.mod
 
@@ -559,7 +559,7 @@ jobs:
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
-          go-version: '1.25.8'
+          go-version: '1.25.9'
           cache: true
           cache-dependency-path: clients/go/go.mod
 
