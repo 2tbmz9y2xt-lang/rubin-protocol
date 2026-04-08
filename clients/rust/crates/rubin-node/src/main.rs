@@ -627,8 +627,7 @@ fn build_legacy_exposure_report(
     }
     let (sunset_readiness, warning_hook, grace_hook) =
         legacy_exposure_hooks(chain_state.has_tip, legacy_exposure_total);
-    let mut indexed_suite_ids = chain_state.indexed_suite_ids();
-    indexed_suite_ids.sort_unstable();
+    let indexed_suite_ids = chain_state.indexed_suite_ids();
     LegacyExposureReport {
         report_version: LEGACY_EXPOSURE_REPORT_VERSION,
         measurement_scope: "explicit_suite_id_utxos".to_string(),

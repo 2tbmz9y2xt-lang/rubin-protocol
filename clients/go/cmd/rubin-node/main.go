@@ -183,7 +183,6 @@ func buildLegacyExposureReport(network, dataDir string, chainState *node.ChainSt
 		})
 	}
 	indexedSuiteIDs := chainState.IndexedSuiteIDs()
-	sort.Slice(indexedSuiteIDs, func(i, j int) bool { return indexedSuiteIDs[i] < indexedSuiteIDs[j] })
 	sunsetReadiness, warningHook, graceHook := legacyExposureHooks(chainState.HasTip, total)
 	return legacyExposureReport{
 		ReportVersion:         legacyExposureReportVersion,
