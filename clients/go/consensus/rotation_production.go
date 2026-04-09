@@ -48,17 +48,17 @@ func ValidateV1ProductionRotationDescriptor(d CryptoRotationDescriptor, registry
 }
 
 // ValidateV1ProductionRotationSet checks a descriptor batch for production:
-// generic overlap rules, finite H4 on every descriptor, at most two descriptors,
+// at most two descriptors, generic overlap rules, finite H4 on every descriptor,
 // and chained H1 ≥ prior H4.
 func ValidateV1ProductionRotationSet(descriptors []CryptoRotationDescriptor, registry *SuiteRegistry) error {
-	if err := ValidateRotationSet(descriptors, registry); err != nil {
-		return err
-	}
 	if len(descriptors) > 2 {
 		return fmt.Errorf(
 			"rotation: v1 production profile allows at most two descriptors, got %d",
 			len(descriptors),
 		)
+	}
+	if err := ValidateRotationSet(descriptors, registry); err != nil {
+		return err
 	}
 	for i, d := range descriptors {
 		if d.SunsetHeight == 0 {

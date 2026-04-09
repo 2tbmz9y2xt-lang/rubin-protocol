@@ -140,6 +140,20 @@ func TestValidateV1ProductionRotationSet_RejectsThreeDescriptorChain(t *testing.
 	if err == nil || !strings.Contains(err.Error(), "at most two descriptors") {
 		t.Fatalf("expected max-2 error to win over finite-H4 check, got %v", err)
 	}
+	d2overlap := d2
+	d2overlap.CreateHeight = 15
+	d2overlap.SpendHeight = 25
+	err = ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d1, d2overlap, d3}, reg)
+	if err == nil || !strings.Contains(err.Error(), "at most two descriptors") {
+		t.Fatalf("expected max-2 error to win over overlap validation, got %v", err)
+	}
+	d3bad := d3
+	d3bad.CreateHeight = 220
+	d3bad.SpendHeight = 210
+	err = ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d1, d2, d3bad}, reg)
+	if err == nil || !strings.Contains(err.Error(), "at most two descriptors") {
+		t.Fatalf("expected max-2 error to win over descriptor validation, got %v", err)
+	}
 }
 
 func TestValidateRotationSetForNetwork_DevnetStillAllowsThreeDescriptorChain(t *testing.T) {

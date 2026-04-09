@@ -349,18 +349,18 @@ pub fn validate_v1_production_rotation_descriptor(
     Ok(())
 }
 
-/// Production checks: overlap rules, finite H4, at most two descriptors, chained H1 ≥ prior H4.
+/// Production checks: at most two descriptors, overlap rules, finite H4, chained H1 ≥ prior H4.
 pub fn validate_v1_production_rotation_set(
     descriptors: &[CryptoRotationDescriptor],
     registry: &SuiteRegistry,
 ) -> Result<(), String> {
-    validate_rotation_set(descriptors, registry)?;
     if descriptors.len() > 2 {
         return Err(format!(
             "rotation: v1 production profile allows at most two descriptors, got {}",
             descriptors.len()
         ));
     }
+    validate_rotation_set(descriptors, registry)?;
     for (i, d) in descriptors.iter().enumerate() {
         if d.sunset_height == 0 {
             return Err(format!(
@@ -832,10 +832,24 @@ mod tests {
         let mut d2_bad = d2.clone();
         d2_bad.sunset_height = 0;
         assert!(
-            validate_v1_production_rotation_set(&[d1, d2_bad, d3.clone()], &reg)
+            validate_v1_production_rotation_set(&[d1.clone(), d2_bad, d3.clone()], &reg)
                 .unwrap_err()
                 .contains("at most two descriptors")
         );
+        let mut d2_overlap = d2.clone();
+        d2_overlap.create_height = 15;
+        d2_overlap.spend_height = 25;
+        assert!(
+            validate_v1_production_rotation_set(&[d1.clone(), d2_overlap, d3.clone()], &reg)
+                .unwrap_err()
+                .contains("at most two descriptors")
+        );
+        let mut d3_bad = d3.clone();
+        d3_bad.create_height = 220;
+        d3_bad.spend_height = 210;
+        assert!(validate_v1_production_rotation_set(&[d1, d2, d3_bad], &reg)
+            .unwrap_err()
+            .contains("at most two descriptors"));
     }
 
     #[test]
