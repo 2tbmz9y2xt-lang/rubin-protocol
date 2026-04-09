@@ -355,6 +355,12 @@ pub fn validate_v1_production_rotation_set(
     registry: &SuiteRegistry,
 ) -> Result<(), String> {
     validate_rotation_set(descriptors, registry)?;
+    if descriptors.len() > 2 {
+        return Err(format!(
+            "rotation: v1 production profile allows at most two descriptors, got {}",
+            descriptors.len()
+        ));
+    }
     for (i, d) in descriptors.iter().enumerate() {
         if d.sunset_height == 0 {
             return Err(format!(
@@ -362,12 +368,6 @@ pub fn validate_v1_production_rotation_set(
                 d.name
             ));
         }
-    }
-    if descriptors.len() > 2 {
-        return Err(format!(
-            "rotation: v1 production profile allows at most two descriptors, got {}",
-            descriptors.len()
-        ));
     }
     if descriptors.len() <= 1 {
         return Ok(());
@@ -824,9 +824,18 @@ mod tests {
                 .unwrap_err()
                 .contains("at most two descriptors")
         );
-        assert!(validate_v1_production_rotation_set(&[d3, d1, d2], &reg)
-            .unwrap_err()
-            .contains("at most two descriptors"));
+        assert!(
+            validate_v1_production_rotation_set(&[d3.clone(), d1.clone(), d2.clone()], &reg)
+                .unwrap_err()
+                .contains("at most two descriptors")
+        );
+        let mut d2_bad = d2.clone();
+        d2_bad.sunset_height = 0;
+        assert!(
+            validate_v1_production_rotation_set(&[d1, d2_bad, d3.clone()], &reg)
+                .unwrap_err()
+                .contains("at most two descriptors")
+        );
     }
 
     #[test]

@@ -54,16 +54,16 @@ func ValidateV1ProductionRotationSet(descriptors []CryptoRotationDescriptor, reg
 	if err := ValidateRotationSet(descriptors, registry); err != nil {
 		return err
 	}
-	for i, d := range descriptors {
-		if d.SunsetHeight == 0 {
-			return fmt.Errorf("rotation[%d] %q: v1 production profile requires finite sunset_height (H4)", i, d.Name)
-		}
-	}
 	if len(descriptors) > 2 {
 		return fmt.Errorf(
 			"rotation: v1 production profile allows at most two descriptors, got %d",
 			len(descriptors),
 		)
+	}
+	for i, d := range descriptors {
+		if d.SunsetHeight == 0 {
+			return fmt.Errorf("rotation[%d] %q: v1 production profile requires finite sunset_height (H4)", i, d.Name)
+		}
 	}
 	if len(descriptors) <= 1 {
 		return nil

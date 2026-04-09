@@ -134,6 +134,12 @@ func TestValidateV1ProductionRotationSet_RejectsThreeDescriptorChain(t *testing.
 	if err == nil || !strings.Contains(err.Error(), "at most two descriptors") {
 		t.Fatalf("expected max-2 error for shuffled order, got %v", err)
 	}
+	d2bad := d2
+	d2bad.SunsetHeight = 0
+	err = ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d1, d2bad, d3}, reg)
+	if err == nil || !strings.Contains(err.Error(), "at most two descriptors") {
+		t.Fatalf("expected max-2 error to win over finite-H4 check, got %v", err)
+	}
 }
 
 func TestValidateRotationSetForNetwork_DevnetStillAllowsThreeDescriptorChain(t *testing.T) {
