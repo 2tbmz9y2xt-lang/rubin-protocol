@@ -21,13 +21,10 @@ func IsV1ProductionRotationNetwork(network string) bool {
 // ValidateRotationDescriptorForNetwork runs generic descriptor validation, then applies
 // v1 production profile rules (finite H4) when network is mainnet or testnet.
 func ValidateRotationDescriptorForNetwork(network string, d CryptoRotationDescriptor, registry *SuiteRegistry) error {
-	if err := d.Validate(registry); err != nil {
-		return err
-	}
 	if IsV1ProductionRotationNetwork(network) {
-		return RequireFiniteV1ProductionRotationSunsetHeight(d)
+		return ValidateV1ProductionRotationDescriptor(d, registry)
 	}
-	return nil
+	return d.Validate(registry)
 }
 
 // ValidateRotationSetForNetwork runs ValidateRotationSet on devnet and private nets,
@@ -46,7 +43,10 @@ func ValidateV1ProductionRotationDescriptor(d CryptoRotationDescriptor, registry
 	if err := d.Validate(registry); err != nil {
 		return err
 	}
-	return RequireFiniteV1ProductionRotationSunsetHeight(d)
+	if d.SunsetHeight == 0 {
+		return fmt.Errorf(RotationV1ProductionFiniteH4RequiredErrStem)
+	}
+	return nil
 }
 
 // RequireFiniteV1ProductionRotationSunsetHeight applies the production-only H4

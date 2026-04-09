@@ -174,30 +174,37 @@ const (
 	rotationNameRequiredMsg           = "rotation: name required"
 )
 
-var rotationValidationErrorPatterns = []struct {
-	match string
-	code  string
-}{
-	{match: consensus.RotationV1ProductionAtMostOneDescriptorErrStem, code: rotationTooManyDescriptorsErr},
-	{match: consensus.RotationV1ProductionFiniteH4RequiredErrStem, code: rotationFiniteH4RequiredErr},
-	{match: "rotation: overlapping rotations", code: rotationOverlappingDescriptorsErr},
-	{match: rotationNameRequiredMsg, code: rotationInvalidDescriptorErr},
-	{match: "must differ from new suite", code: rotationEqualSuiteIDsErr},
-	{match: "rotation: old suite ", code: rotationUnregisteredSuiteErr},
-	{match: "rotation: new suite ", code: rotationUnregisteredSuiteErr},
-	{match: "rotation: create_height (", code: rotationInvalidHeightOrderErr},
+func matchesExactOrWrappedValidationErr(msg, match string) bool {
+	return msg == match || strings.HasPrefix(msg, match) || strings.Contains(msg, ": "+match)
 }
 
-func matchesRotationValidationErr(msg, match string) bool {
-	return strings.Contains(msg, match)
+func matchesWrappedPrefixValidationErr(msg, match string) bool {
+	return strings.HasPrefix(msg, match) || strings.Contains(msg, ": "+match)
+}
+
+func matchesWrappedSuffixValidationErr(msg, match string) bool {
+	return msg == match || strings.HasSuffix(msg, match)
 }
 
 func sanitizeRotationValidationErr(err error) string {
 	msg := err.Error()
-	for _, pattern := range rotationValidationErrorPatterns {
-		if matchesRotationValidationErr(msg, pattern.match) {
-			return pattern.code
-		}
+	switch {
+	case matchesExactOrWrappedValidationErr(msg, consensus.RotationV1ProductionAtMostOneDescriptorErrStem):
+		return rotationTooManyDescriptorsErr
+	case matchesExactOrWrappedValidationErr(msg, consensus.RotationV1ProductionFiniteH4RequiredErrStem):
+		return rotationFiniteH4RequiredErr
+	case matchesExactOrWrappedValidationErr(msg, "rotation: overlapping rotations"):
+		return rotationOverlappingDescriptorsErr
+	case matchesExactOrWrappedValidationErr(msg, rotationNameRequiredMsg):
+		return rotationInvalidDescriptorErr
+	case matchesWrappedSuffixValidationErr(msg, "must differ from new suite"):
+		return rotationEqualSuiteIDsErr
+	case matchesWrappedPrefixValidationErr(msg, "rotation: old suite "):
+		return rotationUnregisteredSuiteErr
+	case matchesWrappedPrefixValidationErr(msg, "rotation: new suite "):
+		return rotationUnregisteredSuiteErr
+	case matchesWrappedPrefixValidationErr(msg, "rotation: create_height ("):
+		return rotationInvalidHeightOrderErr
 	}
 	return rotationInvalidDescriptorErr
 }

@@ -44,46 +44,44 @@ const ROTATION_NEW_SUITE_NOT_REGISTERED_MSG: &str = "rotation: new suite ";
 const ROTATION_EQUAL_SUITE_IDS_MSG: &str = "must differ from new suite";
 const ROTATION_INVALID_HEIGHT_ORDER_MSG: &str = "rotation: create_height (";
 
-const ROTATION_VALIDATION_ERROR_MAP: [(&str, &str); 8] = [
-    (
-        ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM,
-        ROTATION_TOO_MANY_DESCRIPTORS_ERR,
-    ),
-    (
-        ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM,
-        ROTATION_FINITE_H4_REQUIRED_ERR,
-    ),
-    (
-        ROTATION_OVERLAPPING_DESCRIPTORS_MSG,
-        ROTATION_OVERLAPPING_DESCRIPTORS_ERR,
-    ),
-    (ROTATION_NAME_REQUIRED_MSG, ROTATION_INVALID_DESCRIPTOR_ERR),
-    (ROTATION_EQUAL_SUITE_IDS_MSG, ROTATION_EQUAL_SUITE_IDS_ERR),
-    (
-        ROTATION_OLD_SUITE_NOT_REGISTERED_MSG,
-        ROTATION_UNREGISTERED_SUITE_ERR,
-    ),
-    (
-        ROTATION_NEW_SUITE_NOT_REGISTERED_MSG,
-        ROTATION_UNREGISTERED_SUITE_ERR,
-    ),
-    (
-        ROTATION_INVALID_HEIGHT_ORDER_MSG,
-        ROTATION_INVALID_HEIGHT_ORDER_ERR,
-    ),
-];
+fn matches_exact_or_wrapped_validation_err(err: &str, expected: &str) -> bool {
+    err == expected || err.starts_with(expected) || err.contains(&format!(": {expected}"))
+}
 
-fn matches_rotation_validation_err(err: &str, expected: &str) -> bool {
-    err.contains(expected)
+fn matches_wrapped_prefix_validation_err(err: &str, expected: &str) -> bool {
+    err.starts_with(expected) || err.contains(&format!(": {expected}"))
+}
+
+fn matches_wrapped_suffix_validation_err(err: &str, expected: &str) -> bool {
+    err == expected || err.ends_with(expected)
 }
 
 fn sanitize_rotation_validation_err(err: &str) -> &'static str {
-    ROTATION_VALIDATION_ERROR_MAP
-        .iter()
-        .find_map(|(validator_msg, cli_code)| {
-            matches_rotation_validation_err(err, validator_msg).then_some(*cli_code)
-        })
-        .unwrap_or(ROTATION_INVALID_DESCRIPTOR_ERR)
+    if matches_exact_or_wrapped_validation_err(
+        err,
+        ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM,
+    ) {
+        ROTATION_TOO_MANY_DESCRIPTORS_ERR
+    } else if matches_exact_or_wrapped_validation_err(
+        err,
+        ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM,
+    ) {
+        ROTATION_FINITE_H4_REQUIRED_ERR
+    } else if matches_exact_or_wrapped_validation_err(err, ROTATION_OVERLAPPING_DESCRIPTORS_MSG) {
+        ROTATION_OVERLAPPING_DESCRIPTORS_ERR
+    } else if matches_exact_or_wrapped_validation_err(err, ROTATION_NAME_REQUIRED_MSG) {
+        ROTATION_INVALID_DESCRIPTOR_ERR
+    } else if matches_wrapped_suffix_validation_err(err, ROTATION_EQUAL_SUITE_IDS_MSG) {
+        ROTATION_EQUAL_SUITE_IDS_ERR
+    } else if matches_wrapped_prefix_validation_err(err, ROTATION_OLD_SUITE_NOT_REGISTERED_MSG) {
+        ROTATION_UNREGISTERED_SUITE_ERR
+    } else if matches_wrapped_prefix_validation_err(err, ROTATION_NEW_SUITE_NOT_REGISTERED_MSG) {
+        ROTATION_UNREGISTERED_SUITE_ERR
+    } else if matches_wrapped_prefix_validation_err(err, ROTATION_INVALID_HEIGHT_ORDER_MSG) {
+        ROTATION_INVALID_HEIGHT_ORDER_ERR
+    } else {
+        ROTATION_INVALID_DESCRIPTOR_ERR
+    }
 }
 
 fn rotation_descriptor_validation_response(err: String) -> Response {

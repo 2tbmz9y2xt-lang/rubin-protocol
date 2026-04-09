@@ -301,10 +301,7 @@ pub fn validate_rotation_descriptor_for_normalized_network(
     registry: &SuiteRegistry,
 ) -> Result<(), String> {
     match network {
-        "mainnet" | "testnet" => {
-            d.validate(registry)?;
-            require_finite_v1_production_rotation_sunset_height(d)
-        }
+        "mainnet" | "testnet" => validate_v1_production_rotation_descriptor(d, registry),
         _ => d.validate(registry),
     }
 }
@@ -351,7 +348,10 @@ pub fn validate_v1_production_rotation_descriptor(
     registry: &SuiteRegistry,
 ) -> Result<(), String> {
     d.validate(registry)?;
-    require_finite_v1_production_rotation_sunset_height(d)
+    if d.sunset_height == 0 {
+        return Err(ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM.into());
+    }
+    Ok(())
 }
 
 pub fn require_finite_v1_production_rotation_sunset_height(
