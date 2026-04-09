@@ -47,6 +47,24 @@ type legacyExposureReportJSON struct {
 	} `json:"legacy_suite_reports"`
 }
 
+type legacyExposureHookVectorsJSON struct {
+	ContractVersion uint64 `json:"contract_version"`
+	FixtureKind     string `json:"fixture_kind"`
+	Cases           []struct {
+		Name                string `json:"name"`
+		HasChainstateTip    bool   `json:"has_chainstate_tip"`
+		LegacyExposureTotal uint64 `json:"legacy_exposure_total"`
+		SunsetReadiness     string `json:"sunset_readiness"`
+		WarningHook         string `json:"warning_hook"`
+		GraceHook           string `json:"grace_hook"`
+	} `json:"cases"`
+}
+
+func legacyExposureContractRepoPath(parts ...string) string {
+	segments := append([]string{"..", "..", "..", ".."}, parts...)
+	return filepath.Join(segments...)
+}
+
 func mustCoreExtOpenSSLDigest32DescriptorHex(t *testing.T) string {
 	t.Helper()
 	descriptor, err := consensus.CoreExtOpenSSLDigest32BindingDescriptorBytes("ML-DSA-87", consensus.ML_DSA_87_PUBKEY_BYTES, consensus.ML_DSA_87_SIG_BYTES)
@@ -149,31 +167,22 @@ func TestLegacyExposureHooksWithTipNonZeroTotalReturnsNotReady(t *testing.T) {
 }
 
 func TestLegacyExposureHookVectorsFixtureParity(t *testing.T) {
-	fixturePath := filepath.Join("..", "..", "..", "..", "conformance", "fixtures", "protocol", "legacy_exposure_hook_vectors.json")
-	raw, err := os.ReadFile(fixturePath)
+	raw, err := os.ReadFile(legacyExposureContractRepoPath("conformance", "fixtures", "protocol", "legacy_exposure_hook_vectors.json"))
 	if err != nil {
-		t.Fatalf("hook vectors fixture required for parity lock (read %s: %v)", fixturePath, err)
+		t.Fatalf("ReadFile(hook vectors): %v", err)
 	}
-	var doc struct {
-		ContractVersion int    `json:"contract_version"`
-		FixtureKind     string `json:"fixture_kind"`
-		Cases           []struct {
-			Name                string `json:"name"`
-			HasChainstateTip    bool   `json:"has_chainstate_tip"`
-			LegacyExposureTotal uint64 `json:"legacy_exposure_total"`
-			SunsetReadiness     string `json:"sunset_readiness"`
-			WarningHook         string `json:"warning_hook"`
-			GraceHook           string `json:"grace_hook"`
-		} `json:"cases"`
-	}
+	var doc legacyExposureHookVectorsJSON
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		t.Fatalf("unmarshal hook vectors: %v", err)
+		t.Fatalf("json.Unmarshal(hook vectors): %v", err)
 	}
-	if doc.ContractVersion != 1 {
-		t.Fatalf("contract_version=%d, want 1", doc.ContractVersion)
+	if doc.ContractVersion != legacyExposureReportVersion {
+		t.Fatalf("contract_version=%d, want %d", doc.ContractVersion, legacyExposureReportVersion)
 	}
 	if doc.FixtureKind != "legacy_exposure_hook_vectors" {
 		t.Fatalf("fixture_kind=%q, want legacy_exposure_hook_vectors", doc.FixtureKind)
+	}
+	if len(doc.Cases) == 0 {
+		t.Fatalf("expected at least one hook vector")
 	}
 	for _, c := range doc.Cases {
 		t.Run(c.Name, func(t *testing.T) {
@@ -188,6 +197,54 @@ func TestLegacyExposureHookVectorsFixtureParity(t *testing.T) {
 				t.Fatalf("grace_hook=%q, want %q", g, c.GraceHook)
 			}
 		})
+	}
+}
+
+func TestLegacyExposureExampleFixtureMatchesFrozenContract(t *testing.T) {
+	raw, err := os.ReadFile(legacyExposureContractRepoPath("conformance", "fixtures", "protocol", "legacy_exposure_report_v1_example.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(example fixture): %v", err)
+	}
+	var report legacyExposureReportJSON
+	if err := json.Unmarshal(raw, &report); err != nil {
+		t.Fatalf("json.Unmarshal(example fixture): %v", err)
+	}
+	if report.ReportVersion != legacyExposureReportVersion {
+		t.Fatalf("report_version=%d, want %d", report.ReportVersion, legacyExposureReportVersion)
+	}
+	if report.MeasurementScope != "explicit_suite_id_utxos" {
+		t.Fatalf("measurement_scope=%q", report.MeasurementScope)
+	}
+	if report.Network != "devnet" {
+		t.Fatalf("network=%q, want devnet", report.Network)
+	}
+	if !report.ChainstateHasTip {
+		t.Fatalf("expected chainstate_has_tip=true")
+	}
+	if report.LegacyExposureTotal != 3 {
+		t.Fatalf("legacy_exposure_total=%d, want 3", report.LegacyExposureTotal)
+	}
+	if report.IncludeOutpoints {
+		t.Fatalf("expected include_outpoints=false")
+	}
+	if !reflect.DeepEqual(report.IndexedSuiteIDs, []uint8{consensus.SUITE_ID_ML_DSA_87, 0x42}) {
+		t.Fatalf("indexed_suite_ids=%v", report.IndexedSuiteIDs)
+	}
+	if !reflect.DeepEqual(report.WatchedLegacySuiteIDs, []uint8{consensus.SUITE_ID_ML_DSA_87, 0x42}) {
+		t.Fatalf("watched_legacy_suite_ids=%v", report.WatchedLegacySuiteIDs)
+	}
+	if len(report.LegacySuiteReports) != 2 {
+		t.Fatalf("legacy_suite_reports=%d, want 2", len(report.LegacySuiteReports))
+	}
+	readiness, warning, grace := legacyExposureHooks(report.ChainstateHasTip, report.LegacyExposureTotal)
+	if report.SunsetReadiness != readiness {
+		t.Fatalf("sunset_readiness=%q, want %q", report.SunsetReadiness, readiness)
+	}
+	if report.WarningHook != warning {
+		t.Fatalf("warning_hook=%q, want %q", report.WarningHook, warning)
+	}
+	if report.GraceHook != grace {
+		t.Fatalf("grace_hook=%q, want %q", report.GraceHook, grace)
 	}
 }
 

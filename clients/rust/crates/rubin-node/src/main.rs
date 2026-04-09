@@ -17,7 +17,7 @@ use rubin_node::{
     start_node_p2p_service, BlockStore, LoadedGenesisConfig, Miner, MinerConfig,
     NodeP2PServiceConfig, PeerManager, SyncEngine,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CliConfig {
@@ -56,7 +56,7 @@ struct EffectiveConfig {
     pv_shadow_max: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct LegacyExposureSuiteReport {
     suite_id: u64,
     utxo_exposure_count: u64,
@@ -65,7 +65,7 @@ struct LegacyExposureSuiteReport {
     outpoints: Option<Vec<String>>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct LegacyExposureReport {
     report_version: u64,
     measurement_scope: String,
@@ -839,10 +839,25 @@ mod tests {
     use rubin_consensus::constants::{
         ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, VERIFY_COST_ML_DSA_87,
     };
-    use serde_json::Value;
-
     use super::{legacy_exposure_hooks, parse_args, run, runtime_genesis_hash, validate_config};
     use rubin_node::{load_genesis_config, PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR};
+
+    #[derive(serde::Deserialize)]
+    struct LegacyExposureHookVectorsDoc {
+        contract_version: u64,
+        fixture_kind: String,
+        cases: Vec<LegacyExposureHookVectorCase>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct LegacyExposureHookVectorCase {
+        name: String,
+        has_chainstate_tip: bool,
+        legacy_exposure_total: u64,
+        sunset_readiness: String,
+        warning_hook: String,
+        grace_hook: String,
+    }
 
     struct FailingWriter;
 
@@ -864,6 +879,12 @@ mod tests {
                 .expect("time")
                 .as_nanos()
         ))
+    }
+
+    fn legacy_exposure_contract_repo_path(rel: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../")
+            .join(rel)
     }
 
     fn canonical_suite_registry_entry_json(suite_id: u8) -> String {
@@ -919,49 +940,46 @@ mod tests {
 
     #[test]
     fn legacy_exposure_hook_vectors_fixture_parity() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../../conformance/fixtures/protocol/legacy_exposure_hook_vectors.json");
-        let raw =
-            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let doc: Value = serde_json::from_str(&raw).expect("hook vectors json");
-        assert_eq!(
-            doc["contract_version"].as_u64(),
-            Some(1),
-            "unexpected contract_version in {}",
-            path.display()
+        let path = legacy_exposure_contract_repo_path(
+            "conformance/fixtures/protocol/legacy_exposure_hook_vectors.json",
         );
-        assert_eq!(
-            doc["fixture_kind"].as_str(),
-            Some("legacy_exposure_hook_vectors"),
-            "unexpected fixture_kind in {}",
-            path.display()
-        );
-        let cases = doc["cases"].as_array().expect("cases array");
-        for c in cases {
-            let name = c["name"].as_str().expect("case name");
-            let has_tip = c["has_chainstate_tip"]
-                .as_bool()
-                .expect("has_chainstate_tip");
-            let total = c["legacy_exposure_total"]
-                .as_u64()
-                .expect("legacy_exposure_total");
-            let (r, w, g) = legacy_exposure_hooks(has_tip, total);
-            assert_eq!(
-                r,
-                c["sunset_readiness"].as_str().expect("sunset_readiness"),
-                "case {name}"
-            );
-            assert_eq!(
-                w,
-                c["warning_hook"].as_str().expect("warning_hook"),
-                "case {name}"
-            );
-            assert_eq!(
-                g,
-                c["grace_hook"].as_str().expect("grace_hook"),
-                "case {name}"
-            );
+        let raw = fs::read_to_string(&path).expect("read hook vectors");
+        let doc: LegacyExposureHookVectorsDoc =
+            serde_json::from_str(&raw).expect("parse hook vectors");
+        assert_eq!(doc.contract_version, super::LEGACY_EXPOSURE_REPORT_VERSION);
+        assert_eq!(doc.fixture_kind, "legacy_exposure_hook_vectors");
+        assert!(!doc.cases.is_empty(), "expected at least one hook vector");
+        for vector in doc.cases {
+            let (readiness, warning, grace) =
+                legacy_exposure_hooks(vector.has_chainstate_tip, vector.legacy_exposure_total);
+            assert_eq!(readiness, vector.sunset_readiness, "{}", vector.name);
+            assert_eq!(warning, vector.warning_hook, "{}", vector.name);
+            assert_eq!(grace, vector.grace_hook, "{}", vector.name);
         }
+    }
+
+    #[test]
+    fn legacy_exposure_example_fixture_matches_frozen_contract() {
+        let path = legacy_exposure_contract_repo_path(
+            "conformance/fixtures/protocol/legacy_exposure_report_v1_example.json",
+        );
+        let raw = fs::read(&path).expect("read example fixture");
+        let report: LegacyExposureReport =
+            serde_json::from_slice(&raw).expect("parse example fixture");
+        assert_eq!(report.report_version, super::LEGACY_EXPOSURE_REPORT_VERSION);
+        assert_eq!(report.measurement_scope, "explicit_suite_id_utxos");
+        assert_eq!(report.network, "devnet");
+        assert!(report.chainstate_has_tip);
+        assert_eq!(report.legacy_exposure_total, 3);
+        assert!(!report.include_outpoints);
+        assert_eq!(report.indexed_suite_ids, vec![1, 66]);
+        assert_eq!(report.watched_legacy_suite_ids, vec![1, 66]);
+        assert_eq!(report.legacy_suite_reports.len(), 2);
+        let (readiness, warning, grace) =
+            legacy_exposure_hooks(report.chainstate_has_tip, report.legacy_exposure_total);
+        assert_eq!(report.sunset_readiness, readiness);
+        assert_eq!(report.warning_hook, warning);
+        assert_eq!(report.grace_hook, grace);
     }
 
     #[test]
