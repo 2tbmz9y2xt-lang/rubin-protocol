@@ -79,16 +79,6 @@ GO_VERIFY_ML_DSA_BINDING_HANDOFF_SNIPPET = (
     "return verifySigWithBinding(binding, pubkey, signature, digest32)"
 )
 
-GO_VERIFY_SIG_FUNC_RE = re.compile(
-    r"func verifySig\([^)]*\)\s*\([^)]*\)\s*\{(?P<body>.*?)^\}",
-    re.DOTALL | re.MULTILINE,
-)
-
-GO_VERIFY_ML_DSA_CASE_RE = re.compile(
-    r"^\s*case SUITE_ID_ML_DSA_87:\s*(?P<body>.*?)(?=^\s*(?:case |default:))",
-    re.DOTALL | re.MULTILINE,
-)
-
 RUST_VERIFY_REQUIRED_SNIPPETS = [
     "pub fn verify_sig(",
     'SUITE_ID_ML_DSA_87 => Ok(c"ML-DSA-87")',
@@ -194,17 +184,60 @@ def check_required_snippet_groups(
 
 def extract_go_verify_mldsa_case(path: Path, text: str) -> tuple[str | None, list[str]]:
     errors: list[str] = []
-    func_match = GO_VERIFY_SIG_FUNC_RE.search(text)
-    if not func_match:
-        errors.append(f"{path}: missing verifySig function body for ML-DSA-87 policy checks")
-        return None, errors
+    lines = text.splitlines()
+    in_verify_sig = False
+    verify_sig_depth = 0
+    switch_depth: int | None = None
+    collecting_case = False
+    collected_lines: list[str] = []
 
-    case_match = GO_VERIFY_ML_DSA_CASE_RE.search(func_match.group("body"))
-    if not case_match:
-        errors.append(f"{path}: missing verifySig ML-DSA-87 case body for policy checks")
-        return None, errors
+    for line in lines:
+        current_depth = verify_sig_depth
+        next_depth = current_depth + line.count("{") - line.count("}")
+        stripped = line.lstrip()
 
-    return case_match.group("body"), errors
+        if not in_verify_sig:
+            if "func verifySig(" in line:
+                in_verify_sig = True
+                verify_sig_depth = next_depth
+            continue
+
+        if switch_depth is None:
+            if re.match(r"^\s*switch\s+suiteID\s*\{", line):
+                switch_depth = next_depth
+            verify_sig_depth = next_depth
+            if verify_sig_depth <= 0:
+                break
+            continue
+
+        if collecting_case:
+            if current_depth < switch_depth:
+                return "\n".join(collected_lines), errors
+            if current_depth == switch_depth and re.match(r"^\s*(case |default:)", stripped):
+                return "\n".join(collected_lines), errors
+            collected_lines.append(line)
+            verify_sig_depth = next_depth
+            if verify_sig_depth <= 0:
+                break
+            continue
+
+        if current_depth == switch_depth and stripped.startswith("case SUITE_ID_ML_DSA_87:"):
+            collecting_case = True
+            _, _, same_line_tail = line.partition("case SUITE_ID_ML_DSA_87:")
+            if same_line_tail.strip():
+                collected_lines.append(same_line_tail)
+            verify_sig_depth = next_depth
+            continue
+
+        verify_sig_depth = next_depth
+        if verify_sig_depth <= 0:
+            break
+
+    if collecting_case:
+        return "\n".join(collected_lines), errors
+
+    errors.append(f"{path}: missing verifySig ML-DSA-87 case body for policy checks")
+    return None, errors
 
 
 def check_go_verify_required_snippets(path: Path, text: str) -> list[str]:
