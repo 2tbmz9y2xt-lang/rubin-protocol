@@ -160,6 +160,8 @@ type requestEnvelope struct {
 	CoreExtProfileSetAnchorHex string               `json:"core_ext_profile_set_anchor_hex,omitempty"`
 }
 
+const rotationDescriptorNotActivatedErr = "descriptor-not-activated"
+
 type UtxoJSON struct {
 	Txid              string `json:"txid"`
 	CovenantDataHex   string `json:"covenant_data"`
@@ -400,7 +402,7 @@ func buildCoreExtSuiteContext(req Request) (consensus.RotationProvider, *consens
 		SunsetHeight: req.RotationDescriptor.SunsetHeight,
 	}
 	if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
-		return nil, nil, fmt.Errorf("descriptor-not-activated")
+		return nil, nil, fmt.Errorf(rotationDescriptorNotActivatedErr)
 	}
 	return consensus.DescriptorRotationProvider{Descriptor: desc}, reg, nil
 }
@@ -1025,7 +1027,7 @@ func runFromStdin() {
 				SunsetHeight: req.RotationDescriptor.SunsetHeight,
 			}
 			if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
-				writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
+				writeResp(os.Stdout, Response{Ok: false, Err: rotationDescriptorNotActivatedErr})
 				return
 			}
 			rp := consensus.DescriptorRotationProvider{Descriptor: desc}
@@ -1055,7 +1057,7 @@ func runFromStdin() {
 			SunsetHeight: req.RotationDescriptor.SunsetHeight,
 		}
 		if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
-			writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
+			writeResp(os.Stdout, Response{Ok: false, Err: rotationDescriptorNotActivatedErr})
 			return
 		}
 		rp := consensus.DescriptorRotationProvider{Descriptor: desc}
@@ -1082,7 +1084,7 @@ func runFromStdin() {
 			SunsetHeight: req.RotationDescriptor.SunsetHeight,
 		}
 		if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
-			writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
+			writeResp(os.Stdout, Response{Ok: false, Err: rotationDescriptorNotActivatedErr})
 			return
 		}
 		rp := consensus.DescriptorRotationProvider{Descriptor: desc}
@@ -1104,7 +1106,7 @@ func runFromStdin() {
 			SunsetHeight: req.RotationDescriptor.SunsetHeight,
 		}
 		if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
-			writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
+			writeResp(os.Stdout, Response{Ok: false, Err: rotationDescriptorNotActivatedErr})
 			return
 		}
 		rp := consensus.DescriptorRotationProvider{Descriptor: desc}
@@ -1130,8 +1132,11 @@ func runFromStdin() {
 					SunsetHeight: rd.SunsetHeight,
 				})
 			}
+			// Keep the CLI surface stable: any descriptor-set validation failure,
+			// including the production max-2 guard, normalizes to the same
+			// descriptor-not-activated error exposed by the harness.
 			if err := consensus.ValidateRotationSetForNetwork(req.Network, ds, reg); err != nil {
-				writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
+				writeResp(os.Stdout, Response{Ok: false, Err: rotationDescriptorNotActivatedErr})
 				return
 			}
 			writeResp(os.Stdout, Response{Ok: true})
@@ -1150,7 +1155,7 @@ func runFromStdin() {
 			SunsetHeight: req.RotationDescriptor.SunsetHeight,
 		}
 		if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
-			writeResp(os.Stdout, Response{Ok: false, Err: "descriptor-not-activated"})
+			writeResp(os.Stdout, Response{Ok: false, Err: rotationDescriptorNotActivatedErr})
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true})
