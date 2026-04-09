@@ -14,7 +14,9 @@ use rubin_consensus::{
     retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_at_height,
     tx_weight_and_stats_public, validate_block_basic_with_context_and_fees_at_height,
     validate_block_basic_with_context_at_height, validate_rotation_descriptor_for_network,
-    validate_rotation_set_for_network, validate_tx_covenants_genesis, CoreExtDeploymentProfile,
+    validate_rotation_set_for_network, validate_tx_covenants_genesis,
+    ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM,
+    ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM, CoreExtDeploymentProfile,
     CoreExtDeploymentProfiles, CryptoRotationDescriptor, DescriptorRotationProvider, ErrorCode,
     FeatureBitDeployment, FeatureBitState, FlagDayDeployment, InMemoryChainState, Outpoint,
     RotationProvider, SuiteParams, SuiteRegistry, UtxoEntry,
@@ -28,23 +30,58 @@ use txctx_governance::run_txctx_governance_vector;
 use txctx_harness::{run_txctx_spend_vector, TxctxCase};
 
 const ROTATION_DESCRIPTOR_NOT_ACTIVATED_ERR: &str = "descriptor-not-activated";
+const ROTATION_TOO_MANY_DESCRIPTORS_ERR: &str = "rotation-too-many-descriptors";
+const ROTATION_FINITE_H4_REQUIRED_ERR: &str = "rotation-finite-h4-required";
+const ROTATION_OVERLAPPING_DESCRIPTORS_ERR: &str = "rotation-overlapping-descriptors";
+const ROTATION_UNREGISTERED_SUITE_ERR: &str = "rotation-unregistered-suite";
+const ROTATION_EQUAL_SUITE_IDS_ERR: &str = "rotation-equal-suite-ids";
+const ROTATION_INVALID_HEIGHT_ORDER_ERR: &str = "rotation-invalid-height-order";
+const ROTATION_INVALID_DESCRIPTOR_ERR: &str = "rotation-invalid-descriptor";
+const ROTATION_OVERLAPPING_DESCRIPTORS_MSG: &str = "rotation: overlapping rotations";
+const ROTATION_OLD_SUITE_NOT_REGISTERED_MSG: &str = "rotation: old suite ";
+const ROTATION_NEW_SUITE_NOT_REGISTERED_MSG: &str = "rotation: new suite ";
+const ROTATION_EQUAL_SUITE_IDS_MSG: &str = "must differ from new suite";
+const ROTATION_INVALID_HEIGHT_ORDER_MSG: &str = "rotation: create_height (";
+
+const ROTATION_VALIDATION_ERROR_MAP: [(&str, &str); 7] = [
+    (
+        ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM,
+        ROTATION_TOO_MANY_DESCRIPTORS_ERR,
+    ),
+    (
+        ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM,
+        ROTATION_FINITE_H4_REQUIRED_ERR,
+    ),
+    (
+        ROTATION_OVERLAPPING_DESCRIPTORS_MSG,
+        ROTATION_OVERLAPPING_DESCRIPTORS_ERR,
+    ),
+    (
+        ROTATION_OLD_SUITE_NOT_REGISTERED_MSG,
+        ROTATION_UNREGISTERED_SUITE_ERR,
+    ),
+    (
+        ROTATION_NEW_SUITE_NOT_REGISTERED_MSG,
+        ROTATION_UNREGISTERED_SUITE_ERR,
+    ),
+    (ROTATION_EQUAL_SUITE_IDS_MSG, ROTATION_EQUAL_SUITE_IDS_ERR),
+    (
+        ROTATION_INVALID_HEIGHT_ORDER_MSG,
+        ROTATION_INVALID_HEIGHT_ORDER_ERR,
+    ),
+];
+
+fn matches_rotation_validation_err(err: &str, expected: &str) -> bool {
+    err == expected || err.starts_with(expected) || err.contains(&format!(": {expected}"))
+}
 
 fn sanitize_rotation_validation_err(err: &str) -> &'static str {
-    if err.contains("at most one descriptor") {
-        "rotation-too-many-descriptors"
-    } else if err.contains("finite sunset_height") {
-        "rotation-finite-h4-required"
-    } else if err.contains("overlapping rotations") {
-        "rotation-overlapping-descriptors"
-    } else if err.contains("not registered") {
-        "rotation-unregistered-suite"
-    } else if err.contains("must differ from new suite") {
-        "rotation-equal-suite-ids"
-    } else if err.contains("create_height") {
-        "rotation-invalid-height-order"
-    } else {
-        "rotation-invalid-descriptor"
-    }
+    ROTATION_VALIDATION_ERROR_MAP
+        .iter()
+        .find_map(|(validator_msg, cli_code)| {
+            matches_rotation_validation_err(err, validator_msg).then_some(*cli_code)
+        })
+        .unwrap_or(ROTATION_INVALID_DESCRIPTOR_ERR)
 }
 
 fn rotation_descriptor_validation_response(err: String) -> Response {
@@ -4695,6 +4732,26 @@ mod tests {
             ..Default::default()
         });
         assert!(resp.ok);
+    }
+
+    #[test]
+    fn sanitize_rotation_validation_err_uses_shared_stems() {
+        assert_eq!(
+            sanitize_rotation_validation_err(&format!(
+                "{ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM}, got 2"
+            )),
+            ROTATION_TOO_MANY_DESCRIPTORS_ERR
+        );
+        assert_eq!(
+            sanitize_rotation_validation_err(
+                r#"rotation[0] "bad": rotation: new suite 0x03 not registered"#,
+            ),
+            ROTATION_UNREGISTERED_SUITE_ERR
+        );
+        assert_eq!(
+            sanitize_rotation_validation_err(ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM),
+            ROTATION_FINITE_H4_REQUIRED_ERR
+        );
     }
 
     #[test]

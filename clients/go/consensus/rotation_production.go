@@ -5,6 +5,11 @@ import (
 	"strings"
 )
 
+const (
+	RotationV1ProductionAtMostOneDescriptorErrStem = "rotation: v1 production profile allows at most one descriptor"
+	RotationV1ProductionFiniteH4RequiredErrStem    = "rotation: v1 production profile requires finite sunset_height (H4)"
+)
+
 // IsV1ProductionRotationNetwork reports whether the node or harness network name
 // uses the v1 production rotation profile (finite H4 required). This matches
 // RUBIN_NATIVE_CRYPTO_ROTATION_SPEC_v1.md: mainnet and public testnet.
@@ -19,8 +24,8 @@ func ValidateRotationDescriptorForNetwork(network string, d CryptoRotationDescri
 	if err := d.Validate(registry); err != nil {
 		return err
 	}
-	if IsV1ProductionRotationNetwork(network) && d.SunsetHeight == 0 {
-		return fmt.Errorf("rotation: v1 production profile requires finite sunset_height (H4)")
+	if IsV1ProductionRotationNetwork(network) {
+		return RequireFiniteV1ProductionRotationSunsetHeight(d)
 	}
 	return nil
 }
@@ -41,8 +46,14 @@ func ValidateV1ProductionRotationDescriptor(d CryptoRotationDescriptor, registry
 	if err := d.Validate(registry); err != nil {
 		return err
 	}
+	return RequireFiniteV1ProductionRotationSunsetHeight(d)
+}
+
+// RequireFiniteV1ProductionRotationSunsetHeight applies the production-only H4
+// rule to an already-validated descriptor.
+func RequireFiniteV1ProductionRotationSunsetHeight(d CryptoRotationDescriptor) error {
 	if d.SunsetHeight == 0 {
-		return fmt.Errorf("rotation: v1 production profile requires finite sunset_height (H4)")
+		return fmt.Errorf(RotationV1ProductionFiniteH4RequiredErrStem)
 	}
 	return nil
 }
@@ -61,10 +72,11 @@ func ValidateV1ProductionRotationSet(descriptors []CryptoRotationDescriptor, reg
 		if err := ValidateRotationSet(descriptors, registry); err != nil {
 			return err
 		}
-		return ValidateV1ProductionRotationDescriptor(descriptors[0], registry)
+		return RequireFiniteV1ProductionRotationSunsetHeight(descriptors[0])
 	default:
 		return fmt.Errorf(
-			"rotation: v1 production profile allows at most one descriptor, got %d",
+			"%s, got %d",
+			RotationV1ProductionAtMostOneDescriptorErrStem,
 			len(descriptors),
 		)
 	}

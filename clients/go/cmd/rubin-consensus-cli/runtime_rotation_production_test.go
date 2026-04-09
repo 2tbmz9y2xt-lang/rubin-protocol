@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -144,5 +145,36 @@ func TestRubinConsensusCLI_RotationDescriptorCheck_PreservesStableErrAndDiagnost
 	}, rotationDescriptorNotActivatedErr)
 	if got, _ := resp.Diagnostics["rotation_validation_err"].(string); got != "rotation-too-many-descriptors" {
 		t.Fatalf("expected concrete validation diagnostics, got %+v", resp.Diagnostics)
+	}
+}
+
+func TestSanitizeRotationValidationErr_UsesSharedStems(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "exact production cap stem",
+			err:  errors.New(consensus.RotationV1ProductionAtMostOneDescriptorErrStem + ", got 2"),
+			want: rotationTooManyDescriptorsErr,
+		},
+		{
+			name: "wrapped generic validation stem",
+			err:  errors.New(`rotation[0] "bad": rotation: new suite 0x03 not registered`),
+			want: rotationUnregisteredSuiteErr,
+		},
+		{
+			name: "exact finite H4 stem",
+			err:  errors.New(consensus.RotationV1ProductionFiniteH4RequiredErrStem),
+			want: rotationFiniteH4RequiredErr,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sanitizeRotationValidationErr(tc.err); got != tc.want {
+				t.Fatalf("sanitizeRotationValidationErr() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

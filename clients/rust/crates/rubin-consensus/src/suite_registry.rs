@@ -4,6 +4,11 @@ use crate::constants::{
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
+pub const ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM: &str =
+    "rotation: v1 production profile allows at most one descriptor";
+pub const ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM: &str =
+    "rotation: v1 production profile requires finite sunset_height (H4)";
+
 /// Consensus parameters for a single signature suite.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuiteParams {
@@ -296,7 +301,10 @@ pub fn validate_rotation_descriptor_for_normalized_network(
     registry: &SuiteRegistry,
 ) -> Result<(), String> {
     match network {
-        "mainnet" | "testnet" => validate_v1_production_rotation_descriptor(d, registry),
+        "mainnet" | "testnet" => {
+            d.validate(registry)?;
+            require_finite_v1_production_rotation_sunset_height(d)
+        }
         _ => d.validate(registry),
     }
 }
@@ -343,8 +351,14 @@ pub fn validate_v1_production_rotation_descriptor(
     registry: &SuiteRegistry,
 ) -> Result<(), String> {
     d.validate(registry)?;
+    require_finite_v1_production_rotation_sunset_height(d)
+}
+
+pub fn require_finite_v1_production_rotation_sunset_height(
+    d: &CryptoRotationDescriptor,
+) -> Result<(), String> {
     if d.sunset_height == 0 {
-        return Err("rotation: v1 production profile requires finite sunset_height (H4)".into());
+        return Err(ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM.into());
     }
     Ok(())
 }
@@ -361,10 +375,10 @@ pub fn validate_v1_production_rotation_set(
             // Preserve the generic set-validation baseline even on the single
             // allowed production path before the stricter finite-H4 rule.
             validate_rotation_set(descriptors, registry)?;
-            validate_v1_production_rotation_descriptor(descriptor, registry)
+            require_finite_v1_production_rotation_sunset_height(descriptor)
         }
         many => Err(format!(
-            "rotation: v1 production profile allows at most one descriptor, got {}",
+            "{ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM}, got {}",
             many.len()
         )),
     }

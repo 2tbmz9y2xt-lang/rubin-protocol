@@ -163,24 +163,41 @@ type requestEnvelope struct {
 
 const rotationDescriptorNotActivatedErr = "descriptor-not-activated"
 
+const (
+	rotationTooManyDescriptorsErr     = "rotation-too-many-descriptors"
+	rotationFiniteH4RequiredErr       = "rotation-finite-h4-required"
+	rotationOverlappingDescriptorsErr = "rotation-overlapping-descriptors"
+	rotationUnregisteredSuiteErr      = "rotation-unregistered-suite"
+	rotationEqualSuiteIDsErr          = "rotation-equal-suite-ids"
+	rotationInvalidHeightOrderErr     = "rotation-invalid-height-order"
+	rotationInvalidDescriptorErr      = "rotation-invalid-descriptor"
+)
+
+var rotationValidationErrorPatterns = []struct {
+	match string
+	code  string
+}{
+	{match: consensus.RotationV1ProductionAtMostOneDescriptorErrStem, code: rotationTooManyDescriptorsErr},
+	{match: consensus.RotationV1ProductionFiniteH4RequiredErrStem, code: rotationFiniteH4RequiredErr},
+	{match: "rotation: overlapping rotations", code: rotationOverlappingDescriptorsErr},
+	{match: "rotation: old suite ", code: rotationUnregisteredSuiteErr},
+	{match: "rotation: new suite ", code: rotationUnregisteredSuiteErr},
+	{match: "must differ from new suite", code: rotationEqualSuiteIDsErr},
+	{match: "rotation: create_height (", code: rotationInvalidHeightOrderErr},
+}
+
+func matchesRotationValidationErr(msg, match string) bool {
+	return msg == match || strings.HasPrefix(msg, match) || strings.Contains(msg, ": "+match)
+}
+
 func sanitizeRotationValidationErr(err error) string {
 	msg := err.Error()
-	switch {
-	case strings.Contains(msg, "at most one descriptor"):
-		return "rotation-too-many-descriptors"
-	case strings.Contains(msg, "finite sunset_height"):
-		return "rotation-finite-h4-required"
-	case strings.Contains(msg, "overlapping rotations"):
-		return "rotation-overlapping-descriptors"
-	case strings.Contains(msg, "not registered"):
-		return "rotation-unregistered-suite"
-	case strings.Contains(msg, "must differ from new suite"):
-		return "rotation-equal-suite-ids"
-	case strings.Contains(msg, "create_height"):
-		return "rotation-invalid-height-order"
-	default:
-		return "rotation-invalid-descriptor"
+	for _, pattern := range rotationValidationErrorPatterns {
+		if matchesRotationValidationErr(msg, pattern.match) {
+			return pattern.code
+		}
 	}
+	return rotationInvalidDescriptorErr
 }
 
 func rotationDescriptorValidationResp(err error) Response {
