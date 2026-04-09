@@ -104,7 +104,7 @@ func TestValidateV1ProductionRotationSet_ChainedH1AfterPriorH4(t *testing.T) {
 	}
 }
 
-func TestValidateV1ProductionRotationSet_ThreeDescriptorChain(t *testing.T) {
+func TestValidateV1ProductionRotationSet_RejectsThreeDescriptorChain(t *testing.T) {
 	reg := &SuiteRegistry{
 		suites: map[uint8]SuiteParams{
 			0x01: {SuiteID: 0x01, PubkeyLen: 2592, SigLen: 4627},
@@ -125,20 +125,40 @@ func TestValidateV1ProductionRotationSet_ThreeDescriptorChain(t *testing.T) {
 		Name: "r3", OldSuiteID: 0x03, NewSuiteID: 0x04,
 		CreateHeight: 200, SpendHeight: 210, SunsetHeight: 300,
 	}
-	if err := ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d1, d2, d3}, reg); err != nil {
-		t.Fatal(err)
+	err := ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d1, d2, d3}, reg)
+	if err == nil || !strings.Contains(err.Error(), "at most two descriptors") {
+		t.Fatalf("expected max-2 error, got %v", err)
 	}
-	// Out-of-order slice must still validate (sort by H1, then name).
-	if err := ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d3, d1, d2}, reg); err != nil {
-		t.Fatal(err)
+	// Out-of-order slice must still fail through the same structural cap.
+	err = ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d3, d1, d2}, reg)
+	if err == nil || !strings.Contains(err.Error(), "at most two descriptors") {
+		t.Fatalf("expected max-2 error for shuffled order, got %v", err)
 	}
-	d3Early := CryptoRotationDescriptor{
+}
+
+func TestValidateRotationSetForNetwork_DevnetStillAllowsThreeDescriptorChain(t *testing.T) {
+	reg := &SuiteRegistry{
+		suites: map[uint8]SuiteParams{
+			0x01: {SuiteID: 0x01, PubkeyLen: 2592, SigLen: 4627},
+			0x02: {SuiteID: 0x02, PubkeyLen: 1024, SigLen: 512},
+			0x03: {SuiteID: 0x03, PubkeyLen: 1024, SigLen: 512},
+			0x04: {SuiteID: 0x04, PubkeyLen: 1024, SigLen: 512},
+		},
+	}
+	d1 := CryptoRotationDescriptor{
+		Name: "r1", OldSuiteID: 0x01, NewSuiteID: 0x02,
+		CreateHeight: 10, SpendHeight: 20, SunsetHeight: 100,
+	}
+	d2 := CryptoRotationDescriptor{
+		Name: "r2", OldSuiteID: 0x02, NewSuiteID: 0x03,
+		CreateHeight: 100, SpendHeight: 110, SunsetHeight: 200,
+	}
+	d3 := CryptoRotationDescriptor{
 		Name: "r3", OldSuiteID: 0x03, NewSuiteID: 0x04,
-		CreateHeight: 150, SpendHeight: 160, SunsetHeight: 300,
+		CreateHeight: 200, SpendHeight: 210, SunsetHeight: 300,
 	}
-	err := ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d1, d2, d3Early}, reg)
-	if err == nil || !strings.Contains(err.Error(), "successor") {
-		t.Fatalf("expected chain error when third H1 < second H4, got %v", err)
+	if err := ValidateRotationSetForNetwork("devnet", []CryptoRotationDescriptor{d1, d2, d3}, reg); err != nil {
+		t.Fatalf("devnet should preserve non-production experimentation, got %v", err)
 	}
 }
 

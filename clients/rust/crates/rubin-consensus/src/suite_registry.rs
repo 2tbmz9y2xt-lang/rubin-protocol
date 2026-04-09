@@ -349,7 +349,7 @@ pub fn validate_v1_production_rotation_descriptor(
     Ok(())
 }
 
-/// Production checks: overlap rules, finite H4, chained H1 ≥ prior H4.
+/// Production checks: overlap rules, finite H4, at most two descriptors, chained H1 ≥ prior H4.
 pub fn validate_v1_production_rotation_set(
     descriptors: &[CryptoRotationDescriptor],
     registry: &SuiteRegistry,
@@ -362,6 +362,12 @@ pub fn validate_v1_production_rotation_set(
                 d.name
             ));
         }
+    }
+    if descriptors.len() > 2 {
+        return Err(format!(
+            "rotation: v1 production profile allows at most two descriptors, got {}",
+            descriptors.len()
+        ));
     }
     if descriptors.len() <= 1 {
         return Ok(());
@@ -787,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    fn test_v1_production_three_descriptor_chain() {
+    fn test_v1_production_rejects_three_descriptor_chain() {
         let reg = test_registry_four_suites();
         let d1 = CryptoRotationDescriptor {
             name: "r1".into(),
@@ -813,23 +819,45 @@ mod tests {
             spend_height: 210,
             sunset_height: 300,
         };
-        validate_v1_production_rotation_set(&[d1.clone(), d2.clone(), d3.clone()], &reg)
-            .expect("three-step chain");
-        validate_v1_production_rotation_set(&[d3, d1.clone(), d2.clone()], &reg)
-            .expect("shuffled order");
-        let d3_early = CryptoRotationDescriptor {
+        assert!(
+            validate_v1_production_rotation_set(&[d1.clone(), d2.clone(), d3.clone()], &reg)
+                .unwrap_err()
+                .contains("at most two descriptors")
+        );
+        assert!(validate_v1_production_rotation_set(&[d3, d1, d2], &reg)
+            .unwrap_err()
+            .contains("at most two descriptors"));
+    }
+
+    #[test]
+    fn test_devnet_still_allows_three_descriptor_chain() {
+        let reg = test_registry_four_suites();
+        let d1 = CryptoRotationDescriptor {
+            name: "r1".into(),
+            old_suite_id: 0x01,
+            new_suite_id: 0x02,
+            create_height: 10,
+            spend_height: 20,
+            sunset_height: 100,
+        };
+        let d2 = CryptoRotationDescriptor {
+            name: "r2".into(),
+            old_suite_id: 0x02,
+            new_suite_id: 0x03,
+            create_height: 100,
+            spend_height: 110,
+            sunset_height: 200,
+        };
+        let d3 = CryptoRotationDescriptor {
             name: "r3".into(),
             old_suite_id: 0x03,
             new_suite_id: 0x04,
-            create_height: 150,
-            spend_height: 160,
+            create_height: 200,
+            spend_height: 210,
             sunset_height: 300,
         };
-        assert!(
-            validate_v1_production_rotation_set(&[d1, d2, d3_early], &reg)
-                .unwrap_err()
-                .contains("successor")
-        );
+        validate_rotation_set_for_network("devnet", &[d1, d2, d3], &reg)
+            .expect("devnet preserves non-production experimentation");
     }
 
     #[test]
