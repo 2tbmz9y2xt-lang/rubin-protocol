@@ -92,29 +92,18 @@ GO_VERIFY_ML_DSA_DIRECT_DISPATCH_PATTERNS = [
     re.compile(r'return\s+verifyWithMapping\s*\(\s*\)'),
 ]
 
-GO_VERIFY_ML_DSA_DIRECT_DISPATCH_EXACT_PATTERNS = [
-    re.compile(
-        r'(^|[^`"\\])return\s+opensslVerifySigOneShot\s*\(\s*"ML-DSA-87"\s*,\s*pubkey\s*,\s*signature\s*,\s*digest32\[:\]\s*,?\s*\)'
-    ),
-    re.compile(
-        r'(^|[^`"\\])return\s+opensslVerifySigMessage\s*\(\s*"ML-DSA-87"\s*,\s*pubkey\s*,\s*signature\s*,\s*digest32\[:\]\s*,?\s*\)'
-    ),
-    re.compile(
-        r'(^|[^`"\\])return\s+verifyWithMapping\s*\(\s*"ML-DSA-87"\s*,?\s*\)'
-    ),
-]
-
 GO_VERIFY_ML_DSA_BINDING_RESOLUTION_PATTERN = re.compile(
     r'binding\s*,\s*err\s*:=\s*resolveSuiteVerifierBinding\s*\(\s*,\s*ML_DSA_87_PUBKEY_BYTES\s*,\s*ML_DSA_87_SIG_BYTES\s*,?\s*\)'
-)
-
-GO_VERIFY_ML_DSA_BINDING_RESOLUTION_EXACT_PATTERN = re.compile(
-    r'(^|[^`"\\])binding\s*,\s*err\s*:=\s*resolveSuiteVerifierBinding\s*\(\s*"ML-DSA-87"\s*,\s*ML_DSA_87_PUBKEY_BYTES\s*,\s*ML_DSA_87_SIG_BYTES\s*,?\s*\)'
 )
 
 GO_VERIFY_ML_DSA_BINDING_HANDOFF_PATTERN = re.compile(
     r'return\s+verifySigWithBinding\s*\(\s*binding\s*,\s*pubkey\s*,\s*signature\s*,\s*digest32\s*,?\s*\)'
 )
+
+GO_VERIFY_FUNC_PATTERN = re.compile(r"^\s*func\s+verifySig\s*\(")
+GO_VERIFY_SWITCH_PATTERN = re.compile(r"^\s*switch\s+suiteID\s*\{")
+GO_VERIFY_CASE_PATTERN = re.compile(r"^\s*case SUITE_ID_ML_DSA_87:")
+GO_VERIFY_NEXT_ARM_PATTERN = re.compile(r"^\s*(case |default:)")
 
 RUST_VERIFY_REQUIRED_SNIPPETS = [
     "pub fn verify_sig(",
@@ -360,34 +349,54 @@ def sanitize_go_source(text: str, *, strip_strings: bool) -> str:
 
 
 def extract_go_cgo_preamble(path: Path, text: str) -> tuple[str | None, list[str]]:
-    match = re.search(r"/\*(?P<body>[\s\S]*?)\*/\s*import\s+\"C\"", text)
-    if match is None:
-        return None, [f"{path}: missing cgo preamble before import \"C\" for policy checks"]
-    return match.group("body"), []
+    block_match = re.search(r"/\*(?P<body>[\s\S]*?)\*/\s*import\s+\"C\"", text)
+    if block_match is not None:
+        return block_match.group("body"), []
+
+    line_match = re.search(
+        r"(?P<body>(?:^[ \t]*//[^\n]*(?:\n|$))+)[ \t]*import\s+\"C\"",
+        text,
+        re.MULTILINE,
+    )
+    if line_match is not None:
+        body_lines: list[str] = []
+        for line in line_match.group("body").splitlines():
+            stripped = line.lstrip()
+            if not stripped.startswith("//"):
+                continue
+            body = stripped[2:]
+            if body.startswith(" "):
+                body = body[1:]
+            body_lines.append(body)
+        return "\n".join(body_lines), []
+
+    return None, [f"{path}: missing cgo preamble before import \"C\" for policy checks"]
 
 
-def extract_go_verify_mldsa_case(path: Path, text: str) -> tuple[str | None, list[str]]:
+def extract_go_verify_mldsa_case_line_range(
+    path: Path, text: str
+) -> tuple[tuple[int, int] | None, list[str]]:
     errors: list[str] = []
     lines = text.splitlines()
     in_verify_sig = False
     verify_sig_depth = 0
     switch_depth: int | None = None
     collecting_case = False
-    collected_lines: list[str] = []
+    case_start: int | None = None
 
-    for line in lines:
+    for line_no, line in enumerate(lines):
         current_depth = verify_sig_depth
         next_depth = current_depth + line.count("{") - line.count("}")
         stripped = line.lstrip()
 
         if not in_verify_sig:
-            if "func verifySig(" in line:
+            if GO_VERIFY_FUNC_PATTERN.match(line):
                 in_verify_sig = True
                 verify_sig_depth = next_depth
             continue
 
         if switch_depth is None:
-            if re.match(r"^\s*switch\s+suiteID\s*\{", line):
+            if GO_VERIFY_SWITCH_PATTERN.match(line):
                 switch_depth = next_depth
             verify_sig_depth = next_depth
             if verify_sig_depth <= 0:
@@ -396,20 +405,17 @@ def extract_go_verify_mldsa_case(path: Path, text: str) -> tuple[str | None, lis
 
         if collecting_case:
             if current_depth < switch_depth:
-                return "\n".join(collected_lines), errors
-            if current_depth == switch_depth and re.match(r"^\s*(case |default:)", stripped):
-                return "\n".join(collected_lines), errors
-            collected_lines.append(line)
+                return (case_start if case_start is not None else line_no, line_no), errors
+            if current_depth == switch_depth and GO_VERIFY_NEXT_ARM_PATTERN.match(stripped):
+                return (case_start if case_start is not None else line_no, line_no), errors
             verify_sig_depth = next_depth
             if verify_sig_depth <= 0:
                 break
             continue
 
-        if current_depth == switch_depth and stripped.startswith("case SUITE_ID_ML_DSA_87:"):
+        if current_depth == switch_depth and GO_VERIFY_CASE_PATTERN.match(stripped):
             collecting_case = True
-            _, _, same_line_tail = line.partition("case SUITE_ID_ML_DSA_87:")
-            if same_line_tail.strip():
-                collected_lines.append(same_line_tail)
+            case_start = line_no
             verify_sig_depth = next_depth
             continue
 
@@ -418,15 +424,37 @@ def extract_go_verify_mldsa_case(path: Path, text: str) -> tuple[str | None, lis
             break
 
     if collecting_case:
-        return "\n".join(collected_lines), errors
+        return (
+            case_start if case_start is not None else len(lines),
+            len(lines),
+        ), errors
 
     errors.append(f"{path}: missing verifySig ML-DSA-87 case body for policy checks")
     return None, errors
 
 
+def slice_go_verify_case_body(text: str, line_range: tuple[int, int]) -> str:
+    start, end = line_range
+    lines = text.splitlines()
+    selected = lines[start:end]
+    if not selected:
+        return ""
+    head = selected[0]
+    _, _, same_line_tail = head.partition("case SUITE_ID_ML_DSA_87:")
+    selected[0] = same_line_tail
+    return "\n".join(selected)
+
+
+def find_first_match(patterns: list[re.Pattern[str]], text: str) -> re.Match[str] | None:
+    for pattern in patterns:
+        match = pattern.search(text)
+        if match is not None:
+            return match
+    return None
+
+
 def check_go_verify_required_snippets(path: Path, text: str) -> list[str]:
     structure_text = sanitize_go_source(text, strip_strings=True)
-    comment_stripped_text = sanitize_go_source(text, strip_strings=False)
     cgo_preamble, cgo_errors = extract_go_cgo_preamble(path, text)
     errors = check_required_snippet_groups_normalized(
         path, structure_text, GO_VERIFY_GO_REQUIRED_SNIPPET_GROUPS
@@ -440,33 +468,27 @@ def check_go_verify_required_snippets(path: Path, text: str) -> list[str]:
             path, cgo_structure_text, GO_VERIFY_CGO_REQUIRED_SNIPPET_GROUPS
         )
     )
-    case_body, case_errors = extract_go_verify_mldsa_case(path, structure_text)
+    case_line_range, case_errors = extract_go_verify_mldsa_case_line_range(path, structure_text)
     errors.extend(case_errors)
-    if case_body is None:
+    if case_line_range is None:
         return errors
-    comment_case_body, comment_case_errors = extract_go_verify_mldsa_case(
-        path, comment_stripped_text
+    case_body = slice_go_verify_case_body(structure_text, case_line_range)
+    raw_case_body = slice_go_verify_case_body(text, case_line_range)
+    direct_dispatch_match = find_first_match(GO_VERIFY_ML_DSA_DIRECT_DISPATCH_PATTERNS, case_body)
+    has_direct_dispatch = (
+        direct_dispatch_match is not None
+        and '"ML-DSA-87"' in raw_case_body[
+            direct_dispatch_match.start() : direct_dispatch_match.end()
+        ]
     )
-    if comment_case_body is None:
-        errors.extend(comment_case_errors)
-        return errors
-    normalized_case_body = normalize_for_match(case_body)
-    normalized_comment_case_body = normalize_for_match(comment_case_body)
-    has_direct_dispatch = any(
-        pattern.search(normalized_case_body)
-        for pattern in GO_VERIFY_ML_DSA_DIRECT_DISPATCH_PATTERNS
-    ) and any(
-        pattern.search(normalized_comment_case_body)
-        for pattern in GO_VERIFY_ML_DSA_DIRECT_DISPATCH_EXACT_PATTERNS
+    binding_resolution_match = GO_VERIFY_ML_DSA_BINDING_RESOLUTION_PATTERN.search(case_body)
+    has_binding_resolution = (
+        binding_resolution_match is not None
+        and '"ML-DSA-87"' in raw_case_body[
+            binding_resolution_match.start() : binding_resolution_match.end()
+        ]
     )
-    has_binding_resolution = GO_VERIFY_ML_DSA_BINDING_RESOLUTION_PATTERN.search(
-        normalized_case_body
-    ) is not None and GO_VERIFY_ML_DSA_BINDING_RESOLUTION_EXACT_PATTERN.search(
-        normalized_comment_case_body
-    ) is not None
-    has_binding_handoff = GO_VERIFY_ML_DSA_BINDING_HANDOFF_PATTERN.search(
-        normalized_case_body
-    ) is not None
+    has_binding_handoff = GO_VERIFY_ML_DSA_BINDING_HANDOFF_PATTERN.search(case_body) is not None
 
     if not (has_direct_dispatch or has_binding_resolution or has_binding_handoff):
         errors.append(
