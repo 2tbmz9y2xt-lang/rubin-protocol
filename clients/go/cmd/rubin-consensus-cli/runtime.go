@@ -48,7 +48,8 @@ type Request struct {
 	Target               string         `json:"target,omitempty"`
 	ExpectedTarget       string         `json:"expected_target,omitempty"`
 	Op                   string         `json:"op"`
-	// Network selects optional v1 production rotation rules (finite H4 on mainnet/testnet).
+	// Network selects optional v1 production rotation rules (strict single descriptor + finite H4
+	// on mainnet/testnet).
 	// Omitted or empty keeps legacy harness/dev behavior.
 	Network               string                         `json:"network,omitempty"`
 	OwnerLockID           string                         `json:"owner_lock_id,omitempty"`
@@ -161,6 +162,16 @@ type requestEnvelope struct {
 }
 
 const rotationDescriptorNotActivatedErr = "descriptor-not-activated"
+
+func rotationDescriptorValidationResp(err error) Response {
+	return Response{
+		Ok:  false,
+		Err: rotationDescriptorNotActivatedErr,
+		Diagnostics: map[string]any{
+			"rotation_validation_err": err.Error(),
+		},
+	}
+}
 
 type UtxoJSON struct {
 	Txid              string `json:"txid"`
@@ -1132,11 +1143,8 @@ func runFromStdin() {
 					SunsetHeight: rd.SunsetHeight,
 				})
 			}
-			// Keep the CLI surface stable: any descriptor-set validation failure,
-			// including the production max-2 guard, normalizes to the same
-			// descriptor-not-activated error exposed by the harness.
 			if err := consensus.ValidateRotationSetForNetwork(req.Network, ds, reg); err != nil {
-				writeResp(os.Stdout, Response{Ok: false, Err: rotationDescriptorNotActivatedErr})
+				writeResp(os.Stdout, rotationDescriptorValidationResp(err))
 				return
 			}
 			writeResp(os.Stdout, Response{Ok: true})
@@ -1155,7 +1163,7 @@ func runFromStdin() {
 			SunsetHeight: req.RotationDescriptor.SunsetHeight,
 		}
 		if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
-			writeResp(os.Stdout, Response{Ok: false, Err: rotationDescriptorNotActivatedErr})
+			writeResp(os.Stdout, rotationDescriptorValidationResp(err))
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true})

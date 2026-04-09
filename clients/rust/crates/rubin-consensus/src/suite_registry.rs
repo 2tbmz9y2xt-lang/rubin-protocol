@@ -349,47 +349,20 @@ pub fn validate_v1_production_rotation_descriptor(
     Ok(())
 }
 
-/// Production checks: at most two descriptors, overlap rules, finite H4, chained H1 ≥ prior H4.
+/// Production checks: at most one descriptor, and for the single allowed
+/// descriptor enforce the full production helper (generic validation + finite H4).
 pub fn validate_v1_production_rotation_set(
     descriptors: &[CryptoRotationDescriptor],
     registry: &SuiteRegistry,
 ) -> Result<(), String> {
-    if descriptors.len() > 2 {
-        return Err(format!(
-            "rotation: v1 production profile allows at most two descriptors, got {}",
-            descriptors.len()
-        ));
+    match descriptors {
+        [] => Ok(()),
+        [descriptor] => validate_v1_production_rotation_descriptor(descriptor, registry),
+        many => Err(format!(
+            "rotation: v1 production profile allows at most one descriptor, got {}",
+            many.len()
+        )),
     }
-    validate_rotation_set(descriptors, registry)?;
-    for (i, d) in descriptors.iter().enumerate() {
-        if d.sunset_height == 0 {
-            return Err(format!(
-                "rotation[{i}] {:?}: v1 production profile requires finite sunset_height (H4)",
-                d.name
-            ));
-        }
-    }
-    if descriptors.len() <= 1 {
-        return Ok(());
-    }
-    let mut order: Vec<usize> = (0..descriptors.len()).collect();
-    order.sort_by(|&i, &j| {
-        descriptors[i]
-            .create_height
-            .cmp(&descriptors[j].create_height)
-            .then_with(|| descriptors[i].name.cmp(&descriptors[j].name))
-    });
-    for w in order.windows(2) {
-        let prev = &descriptors[w[0]];
-        let cur = &descriptors[w[1]];
-        if cur.create_height < prev.sunset_height {
-            return Err(format!(
-                "rotation: successor {:?} H1 ({}) must be >= prior {:?} H4 ({})",
-                cur.name, cur.create_height, prev.name, prev.sunset_height
-            ));
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -710,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn test_v1_production_chained_h1_after_prior_h4() {
+    fn test_v1_production_rejects_two_descriptor_batch() {
         let reg = test_registry_three_suites();
         let d1 = CryptoRotationDescriptor {
             name: "first".into(),
@@ -724,20 +697,20 @@ mod tests {
             name: "second".into(),
             old_suite_id: 0x02,
             new_suite_id: 0x03,
-            create_height: 50,
-            spend_height: 60,
-            sunset_height: 200,
-        };
-        assert!(validate_v1_production_rotation_set(&[d1.clone(), d2.clone()], &reg).is_err());
-        let d2_ok = CryptoRotationDescriptor {
-            name: "second".into(),
-            old_suite_id: 0x02,
-            new_suite_id: 0x03,
             create_height: 100,
             spend_height: 110,
             sunset_height: 200,
         };
-        validate_v1_production_rotation_set(&[d1, d2_ok], &reg).expect("ordered chain");
+        assert!(
+            validate_v1_production_rotation_set(&[d1.clone(), d2.clone()], &reg)
+                .unwrap_err()
+                .contains("at most one descriptor")
+        );
+        let mut d2_bad = d2.clone();
+        d2_bad.sunset_height = 0;
+        assert!(validate_v1_production_rotation_set(&[d1, d2_bad], &reg)
+            .unwrap_err()
+            .contains("at most one descriptor"));
     }
 
     #[test]
@@ -759,8 +732,11 @@ mod tests {
             spend_height: 110,
             sunset_height: 200,
         };
-        validate_rotation_set_for_network("  MAINNET  ", &[d1.clone(), d2.clone()], &reg)
-            .expect("normalized production path");
+        assert!(
+            validate_rotation_set_for_network("  MAINNET  ", &[d1.clone(), d2.clone()], &reg)
+                .unwrap_err()
+                .contains("at most one descriptor")
+        );
         validate_rotation_set_for_network("", &[d1, d2], &reg)
             .expect("empty network falls back to devnet path");
     }
@@ -793,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn test_v1_production_rejects_three_descriptor_chain() {
+    fn test_v1_production_rejects_multi_descriptor_batch() {
         let reg = test_registry_four_suites();
         let d1 = CryptoRotationDescriptor {
             name: "r1".into(),
@@ -822,19 +798,19 @@ mod tests {
         assert!(
             validate_v1_production_rotation_set(&[d1.clone(), d2.clone(), d3.clone()], &reg)
                 .unwrap_err()
-                .contains("at most two descriptors")
+                .contains("at most one descriptor")
         );
         assert!(
-            validate_v1_production_rotation_set(&[d3.clone(), d1.clone(), d2.clone()], &reg)
+            validate_v1_production_rotation_set(&[d1.clone(), d2.clone()], &reg)
                 .unwrap_err()
-                .contains("at most two descriptors")
+                .contains("at most one descriptor")
         );
         let mut d2_bad = d2.clone();
         d2_bad.sunset_height = 0;
         assert!(
             validate_v1_production_rotation_set(&[d1.clone(), d2_bad, d3.clone()], &reg)
                 .unwrap_err()
-                .contains("at most two descriptors")
+                .contains("at most one descriptor")
         );
         let mut d2_overlap = d2.clone();
         d2_overlap.create_height = 15;
@@ -842,14 +818,30 @@ mod tests {
         assert!(
             validate_v1_production_rotation_set(&[d1.clone(), d2_overlap, d3.clone()], &reg)
                 .unwrap_err()
-                .contains("at most two descriptors")
+                .contains("at most one descriptor")
         );
         let mut d3_bad = d3.clone();
         d3_bad.create_height = 220;
         d3_bad.spend_height = 210;
         assert!(validate_v1_production_rotation_set(&[d1, d2, d3_bad], &reg)
             .unwrap_err()
-            .contains("at most two descriptors"));
+            .contains("at most one descriptor"));
+    }
+
+    #[test]
+    fn test_v1_production_single_descriptor_still_runs_descriptor_validation() {
+        let reg = test_registry_three_suites();
+        let invalid = CryptoRotationDescriptor {
+            name: "".into(),
+            old_suite_id: 0x01,
+            new_suite_id: 0x02,
+            create_height: 10,
+            spend_height: 20,
+            sunset_height: 100,
+        };
+        assert!(validate_v1_production_rotation_set(&[invalid], &reg)
+            .unwrap_err()
+            .contains("name required"));
     }
 
     #[test]

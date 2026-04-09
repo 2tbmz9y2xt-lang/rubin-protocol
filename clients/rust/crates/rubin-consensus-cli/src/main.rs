@@ -29,11 +29,23 @@ use txctx_harness::{run_txctx_spend_vector, TxctxCase};
 
 const ROTATION_DESCRIPTOR_NOT_ACTIVATED_ERR: &str = "descriptor-not-activated";
 
+fn rotation_descriptor_validation_response(err: String) -> Response {
+    Response {
+        ok: false,
+        err: Some(ROTATION_DESCRIPTOR_NOT_ACTIVATED_ERR.to_string()),
+        diagnostics: Some(serde_json::json!({
+            "rotation_validation_err": err,
+        })),
+        ..Default::default()
+    }
+}
+
 #[derive(Deserialize, Default)]
 struct Request {
     op: String,
 
-    /// When set to mainnet/testnet, applies v1 production rotation rules (finite H4).
+    /// When set to mainnet/testnet, applies v1 production rotation rules
+    /// (strict single descriptor + finite H4).
     #[serde(default)]
     network: String,
 
@@ -1111,6 +1123,65 @@ fn op_featurebits_state(req: &Request) -> Response {
     }
 }
 
+fn op_rotation_descriptor_check(req: &Request) -> Response {
+    let registry = match build_suite_registry_from_json(&req.suite_registry) {
+        Ok(Some(registry)) => registry,
+        _ => {
+            return Response {
+                ok: false,
+                err: Some("bad suite_registry".to_string()),
+                ..Default::default()
+            };
+        }
+    };
+    if !req.rotation_descriptors.is_empty() {
+        let ds: Vec<CryptoRotationDescriptor> = req
+            .rotation_descriptors
+            .iter()
+            .map(|rd| CryptoRotationDescriptor {
+                name: rd.name.clone(),
+                old_suite_id: rd.old_suite_id,
+                new_suite_id: rd.new_suite_id,
+                create_height: rd.create_height,
+                spend_height: rd.spend_height,
+                sunset_height: rd.sunset_height,
+            })
+            .collect();
+        if let Err(err) = validate_rotation_set_for_network(&req.network, &ds, &registry) {
+            return rotation_descriptor_validation_response(err);
+        }
+        return Response {
+            ok: true,
+            ..Default::default()
+        };
+    }
+    let rd = match &req.rotation_descriptor {
+        Some(v) => v,
+        None => {
+            return Response {
+                ok: false,
+                err: Some("bad rotation_descriptor".to_string()),
+                ..Default::default()
+            };
+        }
+    };
+    let desc = CryptoRotationDescriptor {
+        name: rd.name.clone(),
+        old_suite_id: rd.old_suite_id,
+        new_suite_id: rd.new_suite_id,
+        create_height: rd.create_height,
+        spend_height: rd.spend_height,
+        sunset_height: rd.sunset_height,
+    };
+    if let Err(err) = validate_rotation_descriptor_for_network(&req.network, &desc, &registry) {
+        return rotation_descriptor_validation_response(err);
+    }
+    Response {
+        ok: true,
+        ..Default::default()
+    }
+}
+
 fn main() {
     let req: Request = match serde_json::from_reader(std::io::stdin()) {
         Ok(v) => v,
@@ -1838,84 +1909,7 @@ fn main() {
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
         "rotation_descriptor_check" => {
-            let registry = match build_suite_registry_from_json(&req.suite_registry) {
-                Ok(Some(registry)) => registry,
-                _ => {
-                    let resp = Response {
-                        ok: false,
-                        err: Some("bad suite_registry".to_string()),
-                        ..Default::default()
-                    };
-                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                    return;
-                }
-            };
-            if !req.rotation_descriptors.is_empty() {
-                let ds: Vec<CryptoRotationDescriptor> = req
-                    .rotation_descriptors
-                    .iter()
-                    .map(|rd| CryptoRotationDescriptor {
-                        name: rd.name.clone(),
-                        old_suite_id: rd.old_suite_id,
-                        new_suite_id: rd.new_suite_id,
-                        create_height: rd.create_height,
-                        spend_height: rd.spend_height,
-                        sunset_height: rd.sunset_height,
-                    })
-                    .collect();
-                let set_ok = validate_rotation_set_for_network(&req.network, &ds, &registry);
-                // Keep the CLI surface stable: any descriptor-set validation
-                // failure, including the production max-2 guard, normalizes to
-                // descriptor-not-activated.
-                if set_ok.is_err() {
-                    let resp = Response {
-                        ok: false,
-                        err: Some(ROTATION_DESCRIPTOR_NOT_ACTIVATED_ERR.to_string()),
-                        ..Default::default()
-                    };
-                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                    return;
-                }
-                let resp = Response {
-                    ok: true,
-                    ..Default::default()
-                };
-                let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                return;
-            }
-            let rd = match &req.rotation_descriptor {
-                Some(v) => v,
-                None => {
-                    let resp = Response {
-                        ok: false,
-                        err: Some("bad rotation_descriptor".to_string()),
-                        ..Default::default()
-                    };
-                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                    return;
-                }
-            };
-            let desc = CryptoRotationDescriptor {
-                name: rd.name.clone(),
-                old_suite_id: rd.old_suite_id,
-                new_suite_id: rd.new_suite_id,
-                create_height: rd.create_height,
-                spend_height: rd.spend_height,
-                sunset_height: rd.sunset_height,
-            };
-            if validate_rotation_descriptor_for_network(&req.network, &desc, &registry).is_err() {
-                let resp = Response {
-                    ok: false,
-                    err: Some(ROTATION_DESCRIPTOR_NOT_ACTIVATED_ERR.to_string()),
-                    ..Default::default()
-                };
-                let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                return;
-            }
-            let resp = Response {
-                ok: true,
-                ..Default::default()
-            };
+            let resp = op_rotation_descriptor_check(&req);
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
         "block_hash" => {
@@ -4589,6 +4583,101 @@ fn encode_compact_size(n: u64) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cli_test_rotation_suites() -> Vec<SuiteParamsJson> {
+        vec![
+            SuiteParamsJson {
+                suite_id: 1,
+                pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+                sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+                verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+                openssl_alg: "ML-DSA-87".to_string(),
+            },
+            SuiteParamsJson {
+                suite_id: 2,
+                pubkey_len: 1024,
+                sig_len: 512,
+                verify_cost: 9,
+                openssl_alg: "ML-DSA-87".to_string(),
+            },
+            SuiteParamsJson {
+                suite_id: 3,
+                pubkey_len: 1024,
+                sig_len: 512,
+                verify_cost: 9,
+                openssl_alg: "ML-DSA-87".to_string(),
+            },
+        ]
+    }
+
+    #[test]
+    fn rotation_descriptor_check_mainnet_rejects_multi_descriptor_batch() {
+        let resp = op_rotation_descriptor_check(&Request {
+            op: "rotation_descriptor_check".to_string(),
+            network: "mainnet".to_string(),
+            suite_registry: cli_test_rotation_suites(),
+            rotation_descriptors: vec![
+                RotationDescriptorJson {
+                    name: "a".to_string(),
+                    old_suite_id: 1,
+                    new_suite_id: 2,
+                    create_height: 10,
+                    spend_height: 20,
+                    sunset_height: 100,
+                },
+                RotationDescriptorJson {
+                    name: "b".to_string(),
+                    old_suite_id: 2,
+                    new_suite_id: 3,
+                    create_height: 100,
+                    spend_height: 110,
+                    sunset_height: 200,
+                },
+            ],
+            ..Default::default()
+        });
+        assert!(!resp.ok);
+        assert_eq!(
+            resp.err.as_deref(),
+            Some(ROTATION_DESCRIPTOR_NOT_ACTIVATED_ERR)
+        );
+        assert_eq!(
+            resp.diagnostics
+                .as_ref()
+                .and_then(|value| value.get("rotation_validation_err"))
+                .and_then(|value| value.as_str()),
+            Some("rotation: v1 production profile allows at most one descriptor, got 2")
+        );
+    }
+
+    #[test]
+    fn rotation_descriptor_check_devnet_preserves_multi_descriptor_batch() {
+        let resp = op_rotation_descriptor_check(&Request {
+            op: "rotation_descriptor_check".to_string(),
+            network: "devnet".to_string(),
+            suite_registry: cli_test_rotation_suites(),
+            rotation_descriptors: vec![
+                RotationDescriptorJson {
+                    name: "a".to_string(),
+                    old_suite_id: 1,
+                    new_suite_id: 2,
+                    create_height: 10,
+                    spend_height: 20,
+                    sunset_height: 100,
+                },
+                RotationDescriptorJson {
+                    name: "b".to_string(),
+                    old_suite_id: 2,
+                    new_suite_id: 3,
+                    create_height: 100,
+                    spend_height: 110,
+                    sunset_height: 200,
+                },
+            ],
+            ..Default::default()
+        });
+        assert!(resp.ok);
+    }
 
     #[test]
     fn featurebits_state_ok_locked_in() {
