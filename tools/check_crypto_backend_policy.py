@@ -59,6 +59,13 @@ GO_VERIFY_REQUIRED_SNIPPET_GROUPS = [
         'return opensslVerifySigOneShot("ML-DSA-87", pubkey, signature, digest32[:])',
         'return opensslVerifySigMessage("ML-DSA-87", pubkey, signature, digest32[:])',
         'return verifyWithMapping("ML-DSA-87")',
+        'binding, err := resolveSuiteVerifierBinding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)',
+    ],
+    [
+        'return opensslVerifySigOneShot("ML-DSA-87", pubkey, signature, digest32[:])',
+        'return opensslVerifySigMessage("ML-DSA-87", pubkey, signature, digest32[:])',
+        'return verifyWithMapping("ML-DSA-87")',
+        "return verifySigWithBinding(binding, pubkey, signature, digest32)",
     ],
     [
         "func opensslVerifySigOneShot(",
