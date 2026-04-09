@@ -52,21 +52,9 @@ DOC_OPS_REQUIRED_PHRASES = [
     "not automatic production FIPS compliance",
 ]
 
-GO_VERIFY_REQUIRED_SNIPPET_GROUPS = [
+GO_VERIFY_GLOBAL_REQUIRED_SNIPPET_GROUPS = [
     ["func verifySig("],
     ["case SUITE_ID_ML_DSA_87:"],
-    [
-        'return opensslVerifySigOneShot("ML-DSA-87", pubkey, signature, digest32[:])',
-        'return opensslVerifySigMessage("ML-DSA-87", pubkey, signature, digest32[:])',
-        'return verifyWithMapping("ML-DSA-87")',
-        'binding, err := resolveSuiteVerifierBinding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)',
-    ],
-    [
-        'return opensslVerifySigOneShot("ML-DSA-87", pubkey, signature, digest32[:])',
-        'return opensslVerifySigMessage("ML-DSA-87", pubkey, signature, digest32[:])',
-        'return verifyWithMapping("ML-DSA-87")',
-        "return verifySigWithBinding(binding, pubkey, signature, digest32)",
-    ],
     [
         "func opensslVerifySigOneShot(",
         "func opensslVerifySigDigestOneShot(",
@@ -75,6 +63,31 @@ GO_VERIFY_REQUIRED_SNIPPET_GROUPS = [
     ["EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL)"],
     ["EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)"],
 ]
+
+GO_VERIFY_ML_DSA_DIRECT_DISPATCH_SNIPPETS = [
+    'return opensslVerifySigOneShot("ML-DSA-87", pubkey, signature, digest32[:])',
+    'return opensslVerifySigMessage("ML-DSA-87", pubkey, signature, digest32[:])',
+    'return verifyWithMapping("ML-DSA-87")',
+]
+
+GO_VERIFY_ML_DSA_BINDING_RESOLUTION_SNIPPET = (
+    'binding, err := resolveSuiteVerifierBinding("ML-DSA-87", '
+    "ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)"
+)
+
+GO_VERIFY_ML_DSA_BINDING_HANDOFF_SNIPPET = (
+    "return verifySigWithBinding(binding, pubkey, signature, digest32)"
+)
+
+GO_VERIFY_SIG_FUNC_RE = re.compile(
+    r"func verifySig\([^)]*\)\s*\([^)]*\)\s*\{(?P<body>.*?)^\}",
+    re.DOTALL | re.MULTILINE,
+)
+
+GO_VERIFY_ML_DSA_CASE_RE = re.compile(
+    r"^\s*case SUITE_ID_ML_DSA_87:\s*(?P<body>.*?)(?=^\s*(?:case |default:))",
+    re.DOTALL | re.MULTILINE,
+)
 
 RUST_VERIFY_REQUIRED_SNIPPETS = [
     "pub fn verify_sig(",
@@ -179,6 +192,54 @@ def check_required_snippet_groups(
     return errors
 
 
+def extract_go_verify_mldsa_case(path: Path, text: str) -> tuple[str | None, list[str]]:
+    errors: list[str] = []
+    func_match = GO_VERIFY_SIG_FUNC_RE.search(text)
+    if not func_match:
+        errors.append(f"{path}: missing verifySig function body for ML-DSA-87 policy checks")
+        return None, errors
+
+    case_match = GO_VERIFY_ML_DSA_CASE_RE.search(func_match.group("body"))
+    if not case_match:
+        errors.append(f"{path}: missing verifySig ML-DSA-87 case body for policy checks")
+        return None, errors
+
+    return case_match.group("body"), errors
+
+
+def check_go_verify_required_snippets(path: Path, text: str) -> list[str]:
+    errors = check_required_snippet_groups(path, text, GO_VERIFY_GLOBAL_REQUIRED_SNIPPET_GROUPS)
+    case_body, case_errors = extract_go_verify_mldsa_case(path, text)
+    errors.extend(case_errors)
+    if case_body is None:
+        return errors
+
+    has_direct_dispatch = any(
+        snippet in case_body for snippet in GO_VERIFY_ML_DSA_DIRECT_DISPATCH_SNIPPETS
+    )
+    has_binding_resolution = GO_VERIFY_ML_DSA_BINDING_RESOLUTION_SNIPPET in case_body
+    has_binding_handoff = GO_VERIFY_ML_DSA_BINDING_HANDOFF_SNIPPET in case_body
+
+    if not (has_direct_dispatch or has_binding_resolution or has_binding_handoff):
+        errors.append(
+            f"{path}: verifySig ML-DSA-87 case missing required dispatch group (any-of): "
+            f"{GO_VERIFY_ML_DSA_DIRECT_DISPATCH_SNIPPETS + [GO_VERIFY_ML_DSA_BINDING_RESOLUTION_SNIPPET]!r}"
+        )
+
+    if has_binding_resolution and not has_binding_handoff:
+        errors.append(
+            f"{path}: verifySig ML-DSA-87 case missing required binding handoff snippet: "
+            f"{GO_VERIFY_ML_DSA_BINDING_HANDOFF_SNIPPET!r}"
+        )
+    if has_binding_handoff and not has_binding_resolution:
+        errors.append(
+            f"{path}: verifySig ML-DSA-87 case missing required binding resolution snippet: "
+            f"{GO_VERIFY_ML_DSA_BINDING_RESOLUTION_SNIPPET!r}"
+        )
+
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Crypto backend policy lint (docs + OpenSSL binding invariants)."
@@ -275,11 +336,7 @@ def main() -> int:
 
         if go_verify.exists():
             go_text = read_text(go_verify)
-            errors.extend(
-                check_required_snippet_groups(
-                    go_verify, go_text, GO_VERIFY_REQUIRED_SNIPPET_GROUPS
-                )
-            )
+            errors.extend(check_go_verify_required_snippets(go_verify, go_text))
         if rust_verify.exists():
             rust_text = read_text(rust_verify)
             errors.extend(
