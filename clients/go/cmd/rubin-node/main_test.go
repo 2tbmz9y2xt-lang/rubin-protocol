@@ -156,12 +156,12 @@ func TestLegacyExposureHookVectorsFixtureParity(t *testing.T) {
 	}
 	var doc struct {
 		Cases []struct {
-			Name                 string `json:"name"`
-			HasChainstateTip     bool   `json:"has_chainstate_tip"`
-			LegacyExposureTotal  uint64 `json:"legacy_exposure_total"`
-			SunsetReadiness      string `json:"sunset_readiness"`
-			WarningHook          string `json:"warning_hook"`
-			GraceHook            string `json:"grace_hook"`
+			Name                string `json:"name"`
+			HasChainstateTip    bool   `json:"has_chainstate_tip"`
+			LegacyExposureTotal uint64 `json:"legacy_exposure_total"`
+			SunsetReadiness     string `json:"sunset_readiness"`
+			WarningHook         string `json:"warning_hook"`
+			GraceHook           string `json:"grace_hook"`
 		} `json:"cases"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
