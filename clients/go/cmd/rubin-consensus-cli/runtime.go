@@ -163,12 +163,32 @@ type requestEnvelope struct {
 
 const rotationDescriptorNotActivatedErr = "descriptor-not-activated"
 
+func sanitizeRotationValidationErr(err error) string {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "at most one descriptor"):
+		return "rotation-too-many-descriptors"
+	case strings.Contains(msg, "finite sunset_height"):
+		return "rotation-finite-h4-required"
+	case strings.Contains(msg, "overlapping rotations"):
+		return "rotation-overlapping-descriptors"
+	case strings.Contains(msg, "not registered"):
+		return "rotation-unregistered-suite"
+	case strings.Contains(msg, "must differ from new suite"):
+		return "rotation-equal-suite-ids"
+	case strings.Contains(msg, "create_height"):
+		return "rotation-invalid-height-order"
+	default:
+		return "rotation-invalid-descriptor"
+	}
+}
+
 func rotationDescriptorValidationResp(err error) Response {
 	return Response{
 		Ok:  false,
 		Err: rotationDescriptorNotActivatedErr,
 		Diagnostics: map[string]any{
-			"rotation_validation_err": err.Error(),
+			"rotation_validation_err": sanitizeRotationValidationErr(err),
 		},
 	}
 }

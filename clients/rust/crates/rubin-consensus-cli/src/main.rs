@@ -29,12 +29,30 @@ use txctx_harness::{run_txctx_spend_vector, TxctxCase};
 
 const ROTATION_DESCRIPTOR_NOT_ACTIVATED_ERR: &str = "descriptor-not-activated";
 
+fn sanitize_rotation_validation_err(err: &str) -> &'static str {
+    if err.contains("at most one descriptor") {
+        "rotation-too-many-descriptors"
+    } else if err.contains("finite sunset_height") {
+        "rotation-finite-h4-required"
+    } else if err.contains("overlapping rotations") {
+        "rotation-overlapping-descriptors"
+    } else if err.contains("not registered") {
+        "rotation-unregistered-suite"
+    } else if err.contains("must differ from new suite") {
+        "rotation-equal-suite-ids"
+    } else if err.contains("create_height") {
+        "rotation-invalid-height-order"
+    } else {
+        "rotation-invalid-descriptor"
+    }
+}
+
 fn rotation_descriptor_validation_response(err: String) -> Response {
     Response {
         ok: false,
         err: Some(ROTATION_DESCRIPTOR_NOT_ACTIVATED_ERR.to_string()),
         diagnostics: Some(serde_json::json!({
-            "rotation_validation_err": err,
+            "rotation_validation_err": sanitize_rotation_validation_err(&err),
         })),
         ..Default::default()
     }
@@ -4646,7 +4664,7 @@ mod tests {
                 .as_ref()
                 .and_then(|value| value.get("rotation_validation_err"))
                 .and_then(|value| value.as_str()),
-            Some("rotation: v1 production profile allows at most one descriptor, got 2")
+            Some("rotation-too-many-descriptors")
         );
     }
 

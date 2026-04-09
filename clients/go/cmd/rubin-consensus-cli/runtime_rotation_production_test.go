@@ -142,7 +142,7 @@ func TestRubinConsensusCLI_RotationDescriptorCheck_PreservesStableErrAndDiagnost
 			{Name: "b", OldSuiteID: 2, NewSuiteID: 3, CreateHeight: 100, SpendHeight: 110, SunsetHeight: 200},
 		},
 	}, rotationDescriptorNotActivatedErr)
-	if got, _ := resp.Diagnostics["rotation_validation_err"].(string); got == "" || got == rotationDescriptorNotActivatedErr {
+	if got, _ := resp.Diagnostics["rotation_validation_err"].(string); got != "rotation-too-many-descriptors" {
 		t.Fatalf("expected concrete validation diagnostics, got %+v", resp.Diagnostics)
 	}
 }

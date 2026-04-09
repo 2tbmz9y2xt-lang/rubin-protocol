@@ -38,6 +38,27 @@ func TestValidateV1ProductionRotationDescriptor_PropagateValidateError(t *testin
 	}
 }
 
+func TestValidateV1ProductionRotationSet_SingleDescriptorPreservesGenericSetValidation(t *testing.T) {
+	reg := &SuiteRegistry{
+		suites: map[uint8]SuiteParams{
+			0x01: {SuiteID: 0x01, PubkeyLen: 2592, SigLen: 4627},
+			0x02: {SuiteID: 0x02, PubkeyLen: 1024, SigLen: 512},
+		},
+	}
+	d := CryptoRotationDescriptor{
+		Name:         "bad-suite",
+		OldSuiteID:   0x01,
+		NewSuiteID:   0x03,
+		CreateHeight: 10,
+		SpendHeight:  20,
+		SunsetHeight: 100,
+	}
+	err := ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d}, reg)
+	if err == nil || !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("expected generic set validation error, got %v", err)
+	}
+}
+
 func TestValidateV1ProductionRotationDescriptor_RequiresH4(t *testing.T) {
 	reg := &SuiteRegistry{
 		suites: map[uint8]SuiteParams{

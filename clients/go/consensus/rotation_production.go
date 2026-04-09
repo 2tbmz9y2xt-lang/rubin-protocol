@@ -55,6 +55,12 @@ func ValidateV1ProductionRotationSet(descriptors []CryptoRotationDescriptor, reg
 	case 0:
 		return nil
 	case 1:
+		// Keep the generic set validator on the single-descriptor path so
+		// production and non-production share the same descriptor/set baseline
+		// before the stricter finite-H4 production rule applies.
+		if err := ValidateRotationSet(descriptors, registry); err != nil {
+			return err
+		}
 		return ValidateV1ProductionRotationDescriptor(descriptors[0], registry)
 	default:
 		return fmt.Errorf(

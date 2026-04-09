@@ -357,7 +357,12 @@ pub fn validate_v1_production_rotation_set(
 ) -> Result<(), String> {
     match descriptors {
         [] => Ok(()),
-        [descriptor] => validate_v1_production_rotation_descriptor(descriptor, registry),
+        [descriptor] => {
+            // Preserve the generic set-validation baseline even on the single
+            // allowed production path before the stricter finite-H4 rule.
+            validate_rotation_set(descriptors, registry)?;
+            validate_v1_production_rotation_descriptor(descriptor, registry)
+        }
         many => Err(format!(
             "rotation: v1 production profile allows at most one descriptor, got {}",
             many.len()
@@ -842,6 +847,22 @@ mod tests {
         assert!(validate_v1_production_rotation_set(&[invalid], &reg)
             .unwrap_err()
             .contains("name required"));
+    }
+
+    #[test]
+    fn test_v1_production_single_descriptor_preserves_generic_set_validation() {
+        let reg = test_registry();
+        let invalid = CryptoRotationDescriptor {
+            name: "bad-suite".into(),
+            old_suite_id: 0x01,
+            new_suite_id: 0x03,
+            create_height: 10,
+            spend_height: 20,
+            sunset_height: 100,
+        };
+        assert!(validate_v1_production_rotation_set(&[invalid], &reg)
+            .unwrap_err()
+            .contains("not registered"));
     }
 
     #[test]
