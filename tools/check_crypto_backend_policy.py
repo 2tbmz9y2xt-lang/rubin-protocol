@@ -186,6 +186,10 @@ def normalize_for_match(text: str) -> str:
     return " ".join(text.split())
 
 
+def normalize_go_code_for_match(text: str) -> str:
+    return normalize_for_match(sanitize_go_source(text, strip_strings=True))
+
+
 def check_required_snippet_groups_normalized(
     path: Path, text: str, snippet_groups: list[list[str]]
 ) -> list[str]:
@@ -381,7 +385,6 @@ def extract_go_verify_mldsa_case(path: Path, text: str) -> tuple[str | None, lis
 
 
 def check_go_verify_required_snippets(path: Path, text: str) -> list[str]:
-    comment_stripped_text = sanitize_go_source(text, strip_strings=False)
     structure_text = sanitize_go_source(text, strip_strings=True)
     errors = check_required_snippet_groups_normalized(
         path, text, GO_VERIFY_GLOBAL_REQUIRED_SNIPPET_GROUPS
@@ -390,20 +393,17 @@ def check_go_verify_required_snippets(path: Path, text: str) -> list[str]:
     errors.extend(case_errors)
     if case_body is None:
         return errors
-    match_case_body, _ = extract_go_verify_mldsa_case(path, comment_stripped_text)
-    if match_case_body is None:
-        return errors
-    normalized_case_body = normalize_for_match(match_case_body)
+    normalized_case_body = normalize_for_match(case_body)
     has_direct_dispatch = any(
-        normalize_for_match(snippet) in normalized_case_body
+        normalize_go_code_for_match(snippet) in normalized_case_body
         for snippet in GO_VERIFY_ML_DSA_DIRECT_DISPATCH_SNIPPETS
     )
     has_binding_resolution = (
-        normalize_for_match(GO_VERIFY_ML_DSA_BINDING_RESOLUTION_SNIPPET)
+        normalize_go_code_for_match(GO_VERIFY_ML_DSA_BINDING_RESOLUTION_SNIPPET)
         in normalized_case_body
     )
     has_binding_handoff = (
-        normalize_for_match(GO_VERIFY_ML_DSA_BINDING_HANDOFF_SNIPPET)
+        normalize_go_code_for_match(GO_VERIFY_ML_DSA_BINDING_HANDOFF_SNIPPET)
         in normalized_case_body
     )
 
