@@ -180,14 +180,14 @@ var rotationValidationErrorPatterns = []struct {
 	{match: consensus.RotationV1ProductionAtMostOneDescriptorErrStem, code: rotationTooManyDescriptorsErr},
 	{match: consensus.RotationV1ProductionFiniteH4RequiredErrStem, code: rotationFiniteH4RequiredErr},
 	{match: "rotation: overlapping rotations", code: rotationOverlappingDescriptorsErr},
+	{match: "must differ from new suite", code: rotationEqualSuiteIDsErr},
 	{match: "rotation: old suite ", code: rotationUnregisteredSuiteErr},
 	{match: "rotation: new suite ", code: rotationUnregisteredSuiteErr},
-	{match: "must differ from new suite", code: rotationEqualSuiteIDsErr},
 	{match: "rotation: create_height (", code: rotationInvalidHeightOrderErr},
 }
 
 func matchesRotationValidationErr(msg, match string) bool {
-	return msg == match || strings.HasPrefix(msg, match) || strings.Contains(msg, ": "+match)
+	return msg == match || strings.HasPrefix(msg, match) || strings.Contains(msg, match)
 }
 
 func sanitizeRotationValidationErr(err error) string {

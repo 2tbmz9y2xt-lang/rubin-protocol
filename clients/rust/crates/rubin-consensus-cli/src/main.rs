@@ -14,12 +14,12 @@ use rubin_consensus::{
     retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_at_height,
     tx_weight_and_stats_public, validate_block_basic_with_context_and_fees_at_height,
     validate_block_basic_with_context_at_height, validate_rotation_descriptor_for_network,
-    validate_rotation_set_for_network, validate_tx_covenants_genesis,
-    ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM,
-    ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM, CoreExtDeploymentProfile,
+    validate_rotation_set_for_network, validate_tx_covenants_genesis, CoreExtDeploymentProfile,
     CoreExtDeploymentProfiles, CryptoRotationDescriptor, DescriptorRotationProvider, ErrorCode,
     FeatureBitDeployment, FeatureBitState, FlagDayDeployment, InMemoryChainState, Outpoint,
     RotationProvider, SuiteParams, SuiteRegistry, UtxoEntry,
+    ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM,
+    ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -56,6 +56,7 @@ const ROTATION_VALIDATION_ERROR_MAP: [(&str, &str); 7] = [
         ROTATION_OVERLAPPING_DESCRIPTORS_MSG,
         ROTATION_OVERLAPPING_DESCRIPTORS_ERR,
     ),
+    (ROTATION_EQUAL_SUITE_IDS_MSG, ROTATION_EQUAL_SUITE_IDS_ERR),
     (
         ROTATION_OLD_SUITE_NOT_REGISTERED_MSG,
         ROTATION_UNREGISTERED_SUITE_ERR,
@@ -64,7 +65,6 @@ const ROTATION_VALIDATION_ERROR_MAP: [(&str, &str); 7] = [
         ROTATION_NEW_SUITE_NOT_REGISTERED_MSG,
         ROTATION_UNREGISTERED_SUITE_ERR,
     ),
-    (ROTATION_EQUAL_SUITE_IDS_MSG, ROTATION_EQUAL_SUITE_IDS_ERR),
     (
         ROTATION_INVALID_HEIGHT_ORDER_MSG,
         ROTATION_INVALID_HEIGHT_ORDER_ERR,
@@ -72,7 +72,7 @@ const ROTATION_VALIDATION_ERROR_MAP: [(&str, &str); 7] = [
 ];
 
 fn matches_rotation_validation_err(err: &str, expected: &str) -> bool {
-    err == expected || err.starts_with(expected) || err.contains(&format!(": {expected}"))
+    err == expected || err.starts_with(expected) || err.contains(expected)
 }
 
 fn sanitize_rotation_validation_err(err: &str) -> &'static str {
@@ -4741,6 +4741,12 @@ mod tests {
                 "{ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM}, got 2"
             )),
             ROTATION_TOO_MANY_DESCRIPTORS_ERR
+        );
+        assert_eq!(
+            sanitize_rotation_validation_err(
+                r#"rotation[0] "bad": rotation: old suite (0x01) must differ from new suite"#,
+            ),
+            ROTATION_EQUAL_SUITE_IDS_ERR
         );
         assert_eq!(
             sanitize_rotation_validation_err(

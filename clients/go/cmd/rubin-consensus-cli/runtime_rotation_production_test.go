@@ -165,6 +165,11 @@ func TestSanitizeRotationValidationErr_UsesSharedStems(t *testing.T) {
 			want: rotationUnregisteredSuiteErr,
 		},
 		{
+			name: "equal suite must not be mislabeled as unregistered",
+			err:  errors.New(`rotation[0] "bad": rotation: old suite (0x01) must differ from new suite`),
+			want: rotationEqualSuiteIDsErr,
+		},
+		{
 			name: "exact finite H4 stem",
 			err:  errors.New(consensus.RotationV1ProductionFiniteH4RequiredErrStem),
 			want: rotationFiniteH4RequiredErr,

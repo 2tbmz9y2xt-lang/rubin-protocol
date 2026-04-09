@@ -3,9 +3,19 @@ from pathlib import Path
 from unittest import mock
 
 if __package__:
-    from .run_cv_bundle import TXCTX_GOVERNANCE_VECTOR_IDS, normalized_vector_op, validate_vector
+    from .run_cv_bundle import (
+        TXCTX_GOVERNANCE_VECTOR_IDS,
+        normalize_validation_result,
+        normalized_vector_op,
+        validate_vector,
+    )
 else:
-    from run_cv_bundle import TXCTX_GOVERNANCE_VECTOR_IDS, normalized_vector_op, validate_vector
+    from run_cv_bundle import (
+        TXCTX_GOVERNANCE_VECTOR_IDS,
+        normalize_validation_result,
+        normalized_vector_op,
+        validate_vector,
+    )
 
 
 class RunCvBundleOpNormalizationTests(unittest.TestCase):
@@ -27,7 +37,9 @@ class RunCvBundleOpNormalizationTests(unittest.TestCase):
         self.assertEqual(op, " txctx_spend_vector ")
 
     def test_txctx_invalid_nonstring_op_returns_validation_error_instead_of_crashing(self):
-        problems, skipped = validate_vector("CV-TXCTX", {"id": "CV-TXCTX-01", "op": 0}, None, None, {})
+        problems, skipped = normalize_validation_result(
+            validate_vector("CV-TXCTX", {"id": "CV-TXCTX-01", "op": 0}, None, None, {})
+        )
         self.assertEqual(problems, ["CV-TXCTX/CV-TXCTX-01: missing op"])
         self.assertFalse(skipped)
 
@@ -134,12 +146,14 @@ class RunCvBundleOpNormalizationTests(unittest.TestCase):
                 with mock.patch(
                     f"{validate_vector.__module__}.call_tool", side_effect=fake_call_tool
                 ):
-                    problems, skipped = validate_vector(
-                        "CV-NATIVE-ROTATION-DESCRIPTOR",
-                        vector,
-                        Path("/tmp/go-cli"),
-                        Path("/tmp/rust-cli"),
-                        {},
+                    problems, skipped = normalize_validation_result(
+                        validate_vector(
+                            "CV-NATIVE-ROTATION-DESCRIPTOR",
+                            vector,
+                            Path("/tmp/go-cli"),
+                            Path("/tmp/rust-cli"),
+                            {},
+                        )
                     )
                 self.assertEqual(problems, [])
                 self.assertFalse(skipped)
