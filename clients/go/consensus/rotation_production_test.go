@@ -84,6 +84,18 @@ func TestValidateV1ProductionRotationDescriptor_RequiresH4(t *testing.T) {
 	}
 }
 
+func TestRequireFiniteV1ProductionRotationSunsetHeight(t *testing.T) {
+	d := CryptoRotationDescriptor{SunsetHeight: 0}
+	err := RequireFiniteV1ProductionRotationSunsetHeight(d)
+	if err == nil || !strings.Contains(err.Error(), "sunset_height") {
+		t.Fatalf("expected finite-H4 helper error, got %v", err)
+	}
+	d.SunsetHeight = 100
+	if err := RequireFiniteV1ProductionRotationSunsetHeight(d); err != nil {
+		t.Fatalf("expected finite-H4 helper success, got %v", err)
+	}
+}
+
 func TestValidateV1ProductionRotationSet_RejectsMultiDescriptorBatch(t *testing.T) {
 	reg := &SuiteRegistry{
 		suites: map[uint8]SuiteParams{

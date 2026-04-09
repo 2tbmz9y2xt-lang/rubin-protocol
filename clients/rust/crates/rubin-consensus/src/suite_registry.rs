@@ -860,6 +860,26 @@ mod tests {
     }
 
     #[test]
+    fn test_require_finite_v1_production_rotation_sunset_height_helper() {
+        let mut descriptor = CryptoRotationDescriptor {
+            name: "r1".into(),
+            old_suite_id: 0x01,
+            new_suite_id: 0x02,
+            create_height: 10,
+            spend_height: 20,
+            sunset_height: 0,
+        };
+        assert!(
+            require_finite_v1_production_rotation_sunset_height(&descriptor)
+                .unwrap_err()
+                .contains("sunset_height")
+        );
+        descriptor.sunset_height = 100;
+        require_finite_v1_production_rotation_sunset_height(&descriptor)
+            .expect("finite H4 helper should accept non-zero sunset");
+    }
+
+    #[test]
     fn test_v1_production_single_descriptor_preserves_generic_set_validation() {
         let reg = test_registry();
         let invalid = CryptoRotationDescriptor {
