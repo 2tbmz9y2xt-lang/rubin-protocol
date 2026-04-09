@@ -72,7 +72,7 @@ const ROTATION_VALIDATION_ERROR_MAP: [(&str, &str); 7] = [
 ];
 
 fn matches_rotation_validation_err(err: &str, expected: &str) -> bool {
-    err == expected || err.starts_with(expected) || err.contains(expected)
+    err.contains(expected)
 }
 
 fn sanitize_rotation_validation_err(err: &str) -> &'static str {

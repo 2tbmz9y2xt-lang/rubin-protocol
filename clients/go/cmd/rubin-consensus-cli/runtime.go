@@ -187,7 +187,7 @@ var rotationValidationErrorPatterns = []struct {
 }
 
 func matchesRotationValidationErr(msg, match string) bool {
-	return msg == match || strings.HasPrefix(msg, match) || strings.Contains(msg, match)
+	return strings.Contains(msg, match)
 }
 
 func sanitizeRotationValidationErr(err error) string {
