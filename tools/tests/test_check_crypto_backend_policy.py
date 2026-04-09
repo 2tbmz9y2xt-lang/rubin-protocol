@@ -271,6 +271,44 @@ func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []
             any("missing required binding handoff snippet" in err for err in errors)
         )
 
+    def test_go_multiline_binding_resolution_and_handoff_are_accepted(self):
+        text = """
+func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+    switch suiteID {
+    case SUITE_ID_ML_DSA_87:
+        binding, err := resolveSuiteVerifierBinding(
+            "ML-DSA-87",
+            ML_DSA_87_PUBKEY_BYTES,
+            ML_DSA_87_SIG_BYTES,
+        )
+        if err != nil {
+            return false, err
+        }
+        return verifySigWithBinding(
+            binding,
+            pubkey,
+            signature,
+            digest32,
+        )
+    default:
+        return false, nil
+    }
+}
+
+func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []byte) (bool, error) {
+    EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL)
+    EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)
+    return true, nil
+}
+"""
+        self.assertEqual(
+            m.check_go_verify_required_snippets(
+                Path("clients/go/consensus/verify_sig_openssl.go"),
+                text,
+            ),
+            [],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

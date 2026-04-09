@@ -79,6 +79,24 @@ GO_VERIFY_ML_DSA_BINDING_HANDOFF_SNIPPET = (
     "return verifySigWithBinding(binding, pubkey, signature, digest32)"
 )
 
+GO_VERIFY_ML_DSA_DIRECT_DISPATCH_PATTERNS = [
+    re.compile(
+        r'return\s+opensslVerifySigOneShot\s*\(\s*,\s*pubkey\s*,\s*signature\s*,\s*digest32\[:\]\s*,?\s*\)'
+    ),
+    re.compile(
+        r'return\s+opensslVerifySigMessage\s*\(\s*,\s*pubkey\s*,\s*signature\s*,\s*digest32\[:\]\s*,?\s*\)'
+    ),
+    re.compile(r'return\s+verifyWithMapping\s*\(\s*\)'),
+]
+
+GO_VERIFY_ML_DSA_BINDING_RESOLUTION_PATTERN = re.compile(
+    r'binding\s*,\s*err\s*:=\s*resolveSuiteVerifierBinding\s*\(\s*,\s*ML_DSA_87_PUBKEY_BYTES\s*,\s*ML_DSA_87_SIG_BYTES\s*,?\s*\)'
+)
+
+GO_VERIFY_ML_DSA_BINDING_HANDOFF_PATTERN = re.compile(
+    r'return\s+verifySigWithBinding\s*\(\s*binding\s*,\s*pubkey\s*,\s*signature\s*,\s*digest32\s*,?\s*\)'
+)
+
 RUST_VERIFY_REQUIRED_SNIPPETS = [
     "pub fn verify_sig(",
     'SUITE_ID_ML_DSA_87 => Ok(c"ML-DSA-87")',
@@ -184,10 +202,6 @@ def check_required_snippet_groups(
 
 def normalize_for_match(text: str) -> str:
     return " ".join(text.split())
-
-
-def normalize_go_code_for_match(text: str) -> str:
-    return normalize_for_match(sanitize_go_source(text, strip_strings=True))
 
 
 def check_required_snippet_groups_normalized(
@@ -395,17 +409,15 @@ def check_go_verify_required_snippets(path: Path, text: str) -> list[str]:
         return errors
     normalized_case_body = normalize_for_match(case_body)
     has_direct_dispatch = any(
-        normalize_go_code_for_match(snippet) in normalized_case_body
-        for snippet in GO_VERIFY_ML_DSA_DIRECT_DISPATCH_SNIPPETS
+        pattern.search(normalized_case_body)
+        for pattern in GO_VERIFY_ML_DSA_DIRECT_DISPATCH_PATTERNS
     )
-    has_binding_resolution = (
-        normalize_go_code_for_match(GO_VERIFY_ML_DSA_BINDING_RESOLUTION_SNIPPET)
-        in normalized_case_body
-    )
-    has_binding_handoff = (
-        normalize_go_code_for_match(GO_VERIFY_ML_DSA_BINDING_HANDOFF_SNIPPET)
-        in normalized_case_body
-    )
+    has_binding_resolution = GO_VERIFY_ML_DSA_BINDING_RESOLUTION_PATTERN.search(
+        normalized_case_body
+    ) is not None
+    has_binding_handoff = GO_VERIFY_ML_DSA_BINDING_HANDOFF_PATTERN.search(
+        normalized_case_body
+    ) is not None
 
     if not (has_direct_dispatch or has_binding_resolution or has_binding_handoff):
         errors.append(
