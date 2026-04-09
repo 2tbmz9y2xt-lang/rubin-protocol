@@ -148,6 +148,41 @@ func TestLegacyExposureHooksWithTipNonZeroTotalReturnsNotReady(t *testing.T) {
 	}
 }
 
+func TestLegacyExposureHookVectorsFixtureParity(t *testing.T) {
+	fixturePath := filepath.Join("..", "..", "..", "..", "conformance", "fixtures", "protocol", "legacy_exposure_hook_vectors.json")
+	raw, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatalf("hook vectors fixture required for parity lock (read %s: %v)", fixturePath, err)
+	}
+	var doc struct {
+		Cases []struct {
+			Name                 string `json:"name"`
+			HasChainstateTip     bool   `json:"has_chainstate_tip"`
+			LegacyExposureTotal  uint64 `json:"legacy_exposure_total"`
+			SunsetReadiness      string `json:"sunset_readiness"`
+			WarningHook          string `json:"warning_hook"`
+			GraceHook            string `json:"grace_hook"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal hook vectors: %v", err)
+	}
+	for _, c := range doc.Cases {
+		t.Run(c.Name, func(t *testing.T) {
+			r, w, g := legacyExposureHooks(c.HasChainstateTip, c.LegacyExposureTotal)
+			if r != c.SunsetReadiness {
+				t.Fatalf("sunset_readiness=%q, want %q", r, c.SunsetReadiness)
+			}
+			if w != c.WarningHook {
+				t.Fatalf("warning_hook=%q, want %q", w, c.WarningHook)
+			}
+			if g != c.GraceHook {
+				t.Fatalf("grace_hook=%q, want %q", g, c.GraceHook)
+			}
+		})
+	}
+}
+
 func TestRunDryRunOK(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer

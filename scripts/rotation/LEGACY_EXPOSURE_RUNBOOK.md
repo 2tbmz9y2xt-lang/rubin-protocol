@@ -46,16 +46,23 @@ irreversible governance decision from a future `H4` artifact.
 
 ## 3) Report Fields
 
+Normative typed contract (v1): [`LEGACY_EXPOSURE_REPORT_CONTRACT_V1.md`](./LEGACY_EXPOSURE_REPORT_CONTRACT_V1.md)  
+Machine validation: `conformance/schemas/legacy_exposure_report_v1.json` (example instance: `conformance/fixtures/protocol/legacy_exposure_report_v1_example.json`).  
+Hook string parity is locked against `conformance/fixtures/protocol/legacy_exposure_hook_vectors.json` in Go/Rust tests.
+
 The scanner emits deterministic JSON with:
 
+- `report_version`: integer contract version (`1` for this runbook)
 - `measurement_scope`: currently `explicit_suite_id_utxos`
+- `network`, `data_dir`, `chainstate_height`, `chainstate_has_tip`
 - `indexed_suite_ids`: suite IDs currently visible in explicit UTXO covenant data
 - `watched_legacy_suite_ids`: legacy suite IDs the operator asked to watch
 - `legacy_exposure_total`: sum of current explicit UTXO exposure across watched legacy suite IDs
+- `include_outpoints`: whether detailed outpoints were requested
 - `legacy_suite_reports[*].utxo_exposure_count`: per-suite exposure count
 - `legacy_suite_reports[*].outpoint_count`: per-suite outpoint count
 - `legacy_suite_reports[*].outpoints`: deterministic outpoint list when detail mode is enabled; emitted as `[]` for watched suites with zero matching UTXOs
-- `sunset_readiness`, `warning_hook`, `grace_hook`: advisory ops hooks derived from current exposure only after validating a tipped chainstate snapshot
+- `sunset_readiness`, `warning_hook`, `grace_hook`: advisory ops hooks derived from current exposure only after validating a tipped chainstate snapshot (see contract doc for the full hook table)
 
 Today this measurement surface covers UTXOs whose covenant data explicitly
 stores a `suite_id` byte. In current node code that means the explicit suite-id

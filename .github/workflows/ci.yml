@@ -37,6 +37,9 @@ jobs:
           pip install --quiet jsonschema
           python3 tools/check_cv_txctx_schema.py
 
+      - name: Legacy exposure report v1 contract (policy)
+        run: python3 tools/check_legacy_exposure_report_contract.py
+
       - name: OpenSSL CVE response policy
         run: |
           python3 tools/check_openssl_cve_response.py --code-root .
