@@ -12,6 +12,21 @@ sys.path.insert(0, str(TOOLS_DIR))
 import check_crypto_backend_policy as m
 
 
+CGO_PREAMBLE = """
+/*
+static int rubin_verify_sig_oneshot() {
+    EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL);
+    return EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len);
+}
+*/
+import "C"
+"""
+
+
+def go_fixture(text: str) -> str:
+    return CGO_PREAMBLE + "\n" + text
+
+
 class CryptoBackendPolicyTests(unittest.TestCase):
     def test_go_required_snippet_groups_accept_legacy_direct_dispatch(self):
         text = """
@@ -31,12 +46,12 @@ func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []
 }
 """
         self.assertEqual(
-            m.check_go_verify_required_snippets(
-                Path("clients/go/consensus/verify_sig_openssl.go"),
-                text,
-            ),
-            [],
-        )
+                m.check_go_verify_required_snippets(
+                    Path("clients/go/consensus/verify_sig_openssl.go"),
+                    go_fixture(text),
+                ),
+                [],
+            )
 
     def test_go_required_snippet_groups_accept_binding_resolution_path(self):
         text = """
@@ -62,7 +77,7 @@ func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []
         self.assertEqual(
             m.check_go_verify_required_snippets(
                 Path("clients/go/consensus/verify_sig_openssl.go"),
-                text,
+                go_fixture(text),
             ),
             [],
         )
@@ -90,7 +105,7 @@ func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []
 """
         errors = m.check_go_verify_required_snippets(
             Path("clients/go/consensus/verify_sig_openssl.go"),
-            text,
+            go_fixture(text),
         )
         self.assertTrue(
             any("missing required binding handoff snippet" in err for err in errors)
@@ -115,7 +130,7 @@ func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []
 """
         errors = m.check_go_verify_required_snippets(
             Path("clients/go/consensus/verify_sig_openssl.go"),
-            text,
+            go_fixture(text),
         )
         self.assertTrue(
             any("missing required binding resolution snippet" in err for err in errors)
@@ -142,12 +157,12 @@ func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []
 }
 """
         self.assertEqual(
-            m.check_go_verify_required_snippets(
-                Path("clients/go/consensus/verify_sig_openssl.go"),
-                text,
-            ),
-            [],
-        )
+                m.check_go_verify_required_snippets(
+                    Path("clients/go/consensus/verify_sig_openssl.go"),
+                    go_fixture(text),
+                ),
+                [],
+            )
 
     def test_go_binding_resolution_path_ignores_nested_default(self):
         text = """
@@ -174,12 +189,12 @@ func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []
 }
 """
         self.assertEqual(
-            m.check_go_verify_required_snippets(
-                Path("clients/go/consensus/verify_sig_openssl.go"),
-                text,
-            ),
-            [],
-        )
+                m.check_go_verify_required_snippets(
+                    Path("clients/go/consensus/verify_sig_openssl.go"),
+                    go_fixture(text),
+                ),
+                [],
+            )
 
     def test_go_comment_braces_do_not_break_case_extraction(self):
         text = """
@@ -204,12 +219,12 @@ func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []
 }
 """
         self.assertEqual(
-            m.check_go_verify_required_snippets(
-                Path("clients/go/consensus/verify_sig_openssl.go"),
-                text,
-            ),
-            [],
-        )
+                m.check_go_verify_required_snippets(
+                    Path("clients/go/consensus/verify_sig_openssl.go"),
+                    go_fixture(text),
+                ),
+                [],
+            )
 
     def test_go_comment_spoofed_handoff_does_not_count(self):
         text = """
@@ -235,7 +250,7 @@ func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []
 """
         errors = m.check_go_verify_required_snippets(
             Path("clients/go/consensus/verify_sig_openssl.go"),
-            text,
+            go_fixture(text),
         )
         self.assertTrue(
             any("missing required binding handoff snippet" in err for err in errors)
@@ -265,7 +280,7 @@ func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []
 """
         errors = m.check_go_verify_required_snippets(
             Path("clients/go/consensus/verify_sig_openssl.go"),
-            text,
+            go_fixture(text),
         )
         self.assertTrue(
             any("missing required binding handoff snippet" in err for err in errors)
@@ -302,12 +317,12 @@ func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []
 }
 """
         self.assertEqual(
-            m.check_go_verify_required_snippets(
-                Path("clients/go/consensus/verify_sig_openssl.go"),
-                text,
-            ),
-            [],
-        )
+                m.check_go_verify_required_snippets(
+                    Path("clients/go/consensus/verify_sig_openssl.go"),
+                    go_fixture(text),
+                ),
+                [],
+            )
 
     def test_go_global_verify_helper_snippet_in_string_does_not_count(self):
         text = """
@@ -329,7 +344,7 @@ EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)
 """
         errors = m.check_go_verify_required_snippets(
             Path("clients/go/consensus/verify_sig_openssl.go"),
-            text,
+            go_fixture(text),
         )
         self.assertTrue(
             any("missing required snippet group" in err for err in errors)
@@ -358,10 +373,31 @@ func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []
 """
         errors = m.check_go_verify_required_snippets(
             Path("clients/go/consensus/verify_sig_openssl.go"),
+            go_fixture(text),
+        )
+
+    def test_go_cgo_required_snippet_in_go_string_does_not_count(self):
+        text = """
+func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+    switch suiteID {
+    case SUITE_ID_ML_DSA_87:
+        return opensslVerifySigOneShot("ML-DSA-87", pubkey, signature, digest32[:])
+    default:
+        return false, nil
+    }
+}
+
+var spoof = "EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL) EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)"
+"""
+        errors = m.check_go_verify_required_snippets(
+            Path("clients/go/consensus/verify_sig_openssl.go"),
             text,
         )
         self.assertTrue(
-            any("missing required binding resolution snippet" in err for err in errors)
+            any("missing cgo preamble" in err for err in errors)
+        )
+        self.assertTrue(
+            any("missing required snippet group" in err for err in errors)
         )
 
 

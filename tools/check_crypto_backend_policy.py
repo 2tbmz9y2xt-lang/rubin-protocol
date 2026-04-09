@@ -359,6 +359,13 @@ def sanitize_go_source(text: str, *, strip_strings: bool) -> str:
     return "".join(out)
 
 
+def extract_go_cgo_preamble(path: Path, text: str) -> tuple[str | None, list[str]]:
+    match = re.search(r"/\*(?P<body>[\s\S]*?)\*/\s*import\s+\"C\"", text)
+    if match is None:
+        return None, [f"{path}: missing cgo preamble before import \"C\" for policy checks"]
+    return match.group("body"), []
+
+
 def extract_go_verify_mldsa_case(path: Path, text: str) -> tuple[str | None, list[str]]:
     errors: list[str] = []
     lines = text.splitlines()
@@ -420,12 +427,17 @@ def extract_go_verify_mldsa_case(path: Path, text: str) -> tuple[str | None, lis
 def check_go_verify_required_snippets(path: Path, text: str) -> list[str]:
     structure_text = sanitize_go_source(text, strip_strings=True)
     comment_stripped_text = sanitize_go_source(text, strip_strings=False)
+    cgo_preamble, cgo_errors = extract_go_cgo_preamble(path, text)
     errors = check_required_snippet_groups_normalized(
         path, structure_text, GO_VERIFY_GO_REQUIRED_SNIPPET_GROUPS
     )
+    errors.extend(cgo_errors)
+    if cgo_preamble is None:
+        return errors
+    cgo_structure_text = sanitize_go_source(cgo_preamble, strip_strings=True)
     errors.extend(
         check_required_snippet_groups_normalized(
-            path, text, GO_VERIFY_CGO_REQUIRED_SNIPPET_GROUPS
+            path, cgo_structure_text, GO_VERIFY_CGO_REQUIRED_SNIPPET_GROUPS
         )
     )
     case_body, case_errors = extract_go_verify_mldsa_case(path, structure_text)
