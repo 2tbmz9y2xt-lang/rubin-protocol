@@ -13,6 +13,8 @@ Out of scope: governance thresholds, H4 policy engines, irreversible sunset auth
 | Example report (valid instance) | `conformance/fixtures/protocol/legacy_exposure_report_v1_example.json` |
 | Hook parity vectors | `conformance/fixtures/protocol/legacy_exposure_hook_vectors.json` |
 
+CI (`tools/check_legacy_exposure_report_contract.py`) validates the example against the JSON Schema and checks that every hook string in the parity fixture is a member of the schema enums (so typos fail in the policy job without relying on step ordering). Go/Rust tests still assert the fixture matches the implementation.
+
 Any change to top-level keys, hook string values, or `measurement_scope`/`report_version` semantics requires:
 
 1. Bumping `report_version` in Go (`legacyExposureReportVersion`) and Rust (`LEGACY_EXPOSURE_REPORT_VERSION`) together  

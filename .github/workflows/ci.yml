@@ -37,8 +37,11 @@ jobs:
           pip install --quiet jsonschema
           python3 tools/check_cv_txctx_schema.py
 
+      # Self-contained: do not rely on jsonschema being installed by another step.
       - name: Legacy exposure report v1 contract (policy)
-        run: python3 tools/check_legacy_exposure_report_contract.py
+        run: |
+          pip install --quiet jsonschema
+          python3 tools/check_legacy_exposure_report_contract.py
 
       - name: OpenSSL CVE response policy
         run: |

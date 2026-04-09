@@ -15,7 +15,26 @@ EXAMPLE = REPO_ROOT / "conformance" / "fixtures" / "protocol" / "legacy_exposure
 HOOK_VECTORS = REPO_ROOT / "conformance" / "fixtures" / "protocol" / "legacy_exposure_hook_vectors.json"
 
 
-def _validate_hook_vectors_structure(data: object) -> list[str]:
+def _schema_enum_strings(schema: dict, property_name: str) -> frozenset[str] | None:
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return None
+    prop = props.get(property_name)
+    if not isinstance(prop, dict):
+        return None
+    raw = prop.get("enum")
+    if not isinstance(raw, list):
+        return None
+    out: list[str] = []
+    for x in raw:
+        if isinstance(x, str):
+            out.append(x)
+    return frozenset(out)
+
+
+def _validate_hook_vectors_structure(
+    data: object, schema: dict
+) -> list[str]:
     errors: list[str] = []
     if not isinstance(data, dict):
         return ["hook vectors: top-level must be an object"]
@@ -35,6 +54,12 @@ def _validate_hook_vectors_structure(data: object) -> list[str]:
         "warning_hook",
         "grace_hook",
     )
+    sr_enum = _schema_enum_strings(schema, "sunset_readiness")
+    wh_enum = _schema_enum_strings(schema, "warning_hook")
+    gh_enum = _schema_enum_strings(schema, "grace_hook")
+    if sr_enum is None or wh_enum is None or gh_enum is None:
+        errors.append("hook vectors: schema missing enum lists for hook fields")
+        return errors
     for i, c in enumerate(cases):
         if not isinstance(c, dict):
             errors.append(f"cases[{i}]: expected object")
@@ -42,6 +67,21 @@ def _validate_hook_vectors_structure(data: object) -> list[str]:
         for k in required:
             if k not in c:
                 errors.append(f"cases[{i}]: missing {k}")
+        for k, allowed, label in (
+            ("sunset_readiness", sr_enum, "sunset_readiness"),
+            ("warning_hook", wh_enum, "warning_hook"),
+            ("grace_hook", gh_enum, "grace_hook"),
+        ):
+            if k not in c:
+                continue
+            val = c.get(k)
+            if not isinstance(val, str):
+                errors.append(f"cases[{i}]: {label} must be a string")
+                continue
+            if val not in allowed:
+                errors.append(
+                    f"cases[{i}]: {label}={val!r} not in schema enum for {label}"
+                )
     return errors
 
 
@@ -67,7 +107,7 @@ def main() -> int:
 
     with open(HOOK_VECTORS) as f:
         hook_doc = json.load(f)
-    struct_errors = _validate_hook_vectors_structure(hook_doc)
+    struct_errors = _validate_hook_vectors_structure(hook_doc, schema)
     if struct_errors:
         for msg in struct_errors:
             print(msg, file=sys.stderr)
