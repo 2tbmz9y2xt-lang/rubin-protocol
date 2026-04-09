@@ -52,7 +52,7 @@ DOC_OPS_REQUIRED_PHRASES = [
     "not automatic production FIPS compliance",
 ]
 
-GO_VERIFY_GLOBAL_REQUIRED_SNIPPET_GROUPS = [
+GO_VERIFY_GO_REQUIRED_SNIPPET_GROUPS = [
     ["func verifySig("],
     ["case SUITE_ID_ML_DSA_87:"],
     [
@@ -60,6 +60,9 @@ GO_VERIFY_GLOBAL_REQUIRED_SNIPPET_GROUPS = [
         "func opensslVerifySigDigestOneShot(",
         "func opensslVerifySigMessage(",
     ],
+]
+
+GO_VERIFY_CGO_REQUIRED_SNIPPET_GROUPS = [
     ["EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL)"],
     ["EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)"],
 ]
@@ -89,8 +92,24 @@ GO_VERIFY_ML_DSA_DIRECT_DISPATCH_PATTERNS = [
     re.compile(r'return\s+verifyWithMapping\s*\(\s*\)'),
 ]
 
+GO_VERIFY_ML_DSA_DIRECT_DISPATCH_EXACT_PATTERNS = [
+    re.compile(
+        r'(^|[^`"\\])return\s+opensslVerifySigOneShot\s*\(\s*"ML-DSA-87"\s*,\s*pubkey\s*,\s*signature\s*,\s*digest32\[:\]\s*,?\s*\)'
+    ),
+    re.compile(
+        r'(^|[^`"\\])return\s+opensslVerifySigMessage\s*\(\s*"ML-DSA-87"\s*,\s*pubkey\s*,\s*signature\s*,\s*digest32\[:\]\s*,?\s*\)'
+    ),
+    re.compile(
+        r'(^|[^`"\\])return\s+verifyWithMapping\s*\(\s*"ML-DSA-87"\s*,?\s*\)'
+    ),
+]
+
 GO_VERIFY_ML_DSA_BINDING_RESOLUTION_PATTERN = re.compile(
     r'binding\s*,\s*err\s*:=\s*resolveSuiteVerifierBinding\s*\(\s*,\s*ML_DSA_87_PUBKEY_BYTES\s*,\s*ML_DSA_87_SIG_BYTES\s*,?\s*\)'
+)
+
+GO_VERIFY_ML_DSA_BINDING_RESOLUTION_EXACT_PATTERN = re.compile(
+    r'(^|[^`"\\])binding\s*,\s*err\s*:=\s*resolveSuiteVerifierBinding\s*\(\s*"ML-DSA-87"\s*,\s*ML_DSA_87_PUBKEY_BYTES\s*,\s*ML_DSA_87_SIG_BYTES\s*,?\s*\)'
 )
 
 GO_VERIFY_ML_DSA_BINDING_HANDOFF_PATTERN = re.compile(
@@ -400,20 +419,38 @@ def extract_go_verify_mldsa_case(path: Path, text: str) -> tuple[str | None, lis
 
 def check_go_verify_required_snippets(path: Path, text: str) -> list[str]:
     structure_text = sanitize_go_source(text, strip_strings=True)
+    comment_stripped_text = sanitize_go_source(text, strip_strings=False)
     errors = check_required_snippet_groups_normalized(
-        path, text, GO_VERIFY_GLOBAL_REQUIRED_SNIPPET_GROUPS
+        path, structure_text, GO_VERIFY_GO_REQUIRED_SNIPPET_GROUPS
+    )
+    errors.extend(
+        check_required_snippet_groups_normalized(
+            path, text, GO_VERIFY_CGO_REQUIRED_SNIPPET_GROUPS
+        )
     )
     case_body, case_errors = extract_go_verify_mldsa_case(path, structure_text)
     errors.extend(case_errors)
     if case_body is None:
         return errors
+    comment_case_body, comment_case_errors = extract_go_verify_mldsa_case(
+        path, comment_stripped_text
+    )
+    if comment_case_body is None:
+        errors.extend(comment_case_errors)
+        return errors
     normalized_case_body = normalize_for_match(case_body)
+    normalized_comment_case_body = normalize_for_match(comment_case_body)
     has_direct_dispatch = any(
         pattern.search(normalized_case_body)
         for pattern in GO_VERIFY_ML_DSA_DIRECT_DISPATCH_PATTERNS
+    ) and any(
+        pattern.search(normalized_comment_case_body)
+        for pattern in GO_VERIFY_ML_DSA_DIRECT_DISPATCH_EXACT_PATTERNS
     )
     has_binding_resolution = GO_VERIFY_ML_DSA_BINDING_RESOLUTION_PATTERN.search(
         normalized_case_body
+    ) is not None and GO_VERIFY_ML_DSA_BINDING_RESOLUTION_EXACT_PATTERN.search(
+        normalized_comment_case_body
     ) is not None
     has_binding_handoff = GO_VERIFY_ML_DSA_BINDING_HANDOFF_PATTERN.search(
         normalized_case_body
