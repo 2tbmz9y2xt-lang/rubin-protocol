@@ -51,6 +51,21 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
         self.assertIn("internal-tools", active_lenses)
         self.assertNotIn("cargo-audit-scan", active_lenses)
 
+    def test_build_plan_adds_crypto_backend_policy_tooling_tests(self):
+        changed = {
+            "tools/check_crypto_backend_policy.py",
+            "tools/tests/test_check_crypto_backend_policy.py",
+        }
+
+        checks, focuses, lenses, profile = m.build_plan(changed)
+        check_names = {name for name, _cmd in checks}
+        active_lenses = {lens.name for lens in lenses if lens.active}
+
+        self.assertIn("crypto_backend_policy_tooling_tests", check_names)
+        self.assertTrue(any("OpenSSL isolation" in focus for focus in focuses))
+        self.assertEqual(profile.name, "consensus_critical")
+        self.assertIn("internal-tools", active_lenses)
+
     def test_render_fullscan_reports_active_and_standby_lenses(self):
         changed = {"docs/README.md"}
         checks, focuses, lenses, profile = m.build_plan(changed)

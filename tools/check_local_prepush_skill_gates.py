@@ -435,6 +435,8 @@ def build_plan(
             exact=(
                 ".github/workflows/ci.yml",
                 "tools/check_consensus_openssl_isolation.py",
+                "tools/check_crypto_backend_policy.py",
+                "tools/tests/test_check_crypto_backend_policy.py",
                 "scripts/dev-env.sh",
                 "clients/go/consensus/verify_sig_openssl.go",
                 "clients/go/consensus/verify_sig_openssl_bootstrap_test.go",
@@ -461,6 +463,14 @@ def build_plan(
             add_check(
                 "consensus_openssl_source_policy",
                 ["python3", "tools/check_consensus_openssl_isolation.py", *consensus_openssl_sources],
+            )
+        if any(
+            path in {"tools/check_crypto_backend_policy.py", "tools/tests/test_check_crypto_backend_policy.py"}
+            for path in changed
+        ):
+            add_check(
+                "crypto_backend_policy_tooling_tests",
+                ["python3", "-m", "unittest", "tools.tests.test_check_crypto_backend_policy"],
             )
         if any(
             path in {".github/workflows/ci.yml", "tools/check_consensus_openssl_isolation.py"}
