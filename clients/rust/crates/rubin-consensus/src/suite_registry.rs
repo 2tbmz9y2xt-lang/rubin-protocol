@@ -844,6 +844,13 @@ mod tests {
     }
 
     #[test]
+    fn test_v1_production_empty_set_is_allowed() {
+        let reg = test_registry();
+        validate_v1_production_rotation_set(&[], &reg)
+            .expect("empty production set should stay a no-op");
+    }
+
+    #[test]
     fn test_v1_production_single_descriptor_still_runs_descriptor_validation() {
         let reg = test_registry_three_suites();
         let invalid = CryptoRotationDescriptor {

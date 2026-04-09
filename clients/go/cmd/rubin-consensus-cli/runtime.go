@@ -172,6 +172,8 @@ const (
 	rotationInvalidHeightOrderErr     = "rotation-invalid-height-order"
 	rotationInvalidDescriptorErr      = "rotation-invalid-descriptor"
 	rotationNameRequiredMsg           = "rotation: name required"
+	rotationCreateHeightOrderMsg      = "rotation: create_height ("
+	rotationSunsetHeightOrderMsg      = "rotation: sunset_height ("
 )
 
 func matchesExactOrWrappedValidationErr(msg, match string) bool {
@@ -203,7 +205,9 @@ func sanitizeRotationValidationErr(err error) string {
 		return rotationUnregisteredSuiteErr
 	case matchesWrappedPrefixValidationErr(msg, "rotation: new suite "):
 		return rotationUnregisteredSuiteErr
-	case matchesWrappedPrefixValidationErr(msg, "rotation: create_height ("):
+	case matchesWrappedPrefixValidationErr(msg, rotationCreateHeightOrderMsg):
+		return rotationInvalidHeightOrderErr
+	case matchesWrappedPrefixValidationErr(msg, rotationSunsetHeightOrderMsg):
 		return rotationInvalidHeightOrderErr
 	}
 	return rotationInvalidDescriptorErr

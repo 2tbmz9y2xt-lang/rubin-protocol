@@ -22,7 +22,7 @@ Policy:
 - синхронизация матрицы: `python3 tools/gen_conformance_matrix.py`.
 
 Изменённые fixtures:
-- `CV-NATIVE-ROTATION-DESCRIPTOR.json` (added `NATIVE-ROT-DESC-06..08`)
+- `CV-NATIVE-ROTATION-DESCRIPTOR.json` (added `NATIVE-ROT-DESC-06..09`)
 
 ## 2026-03-21 — TXCTX spend-time conformance harness intake (Q-CONF-TXCTX-HARNESS-01)
 

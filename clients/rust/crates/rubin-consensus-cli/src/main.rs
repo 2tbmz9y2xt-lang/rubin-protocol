@@ -42,7 +42,8 @@ const ROTATION_NAME_REQUIRED_MSG: &str = "rotation: name required";
 const ROTATION_OLD_SUITE_NOT_REGISTERED_MSG: &str = "rotation: old suite ";
 const ROTATION_NEW_SUITE_NOT_REGISTERED_MSG: &str = "rotation: new suite ";
 const ROTATION_EQUAL_SUITE_IDS_MSG: &str = "must differ from new suite";
-const ROTATION_INVALID_HEIGHT_ORDER_MSG: &str = "rotation: create_height (";
+const ROTATION_CREATE_HEIGHT_ORDER_MSG: &str = "rotation: create_height (";
+const ROTATION_SUNSET_HEIGHT_ORDER_MSG: &str = "rotation: sunset_height (";
 
 fn matches_exact_or_wrapped_validation_err(err: &str, expected: &str) -> bool {
     err == expected || err.starts_with(expected) || err.contains(&format!(": {expected}"))
@@ -73,11 +74,13 @@ fn sanitize_rotation_validation_err(err: &str) -> &'static str {
         ROTATION_INVALID_DESCRIPTOR_ERR
     } else if matches_wrapped_suffix_validation_err(err, ROTATION_EQUAL_SUITE_IDS_MSG) {
         ROTATION_EQUAL_SUITE_IDS_ERR
-    } else if matches_wrapped_prefix_validation_err(err, ROTATION_OLD_SUITE_NOT_REGISTERED_MSG) {
+    } else if matches_wrapped_prefix_validation_err(err, ROTATION_OLD_SUITE_NOT_REGISTERED_MSG)
+        || matches_wrapped_prefix_validation_err(err, ROTATION_NEW_SUITE_NOT_REGISTERED_MSG)
+    {
         ROTATION_UNREGISTERED_SUITE_ERR
-    } else if matches_wrapped_prefix_validation_err(err, ROTATION_NEW_SUITE_NOT_REGISTERED_MSG) {
-        ROTATION_UNREGISTERED_SUITE_ERR
-    } else if matches_wrapped_prefix_validation_err(err, ROTATION_INVALID_HEIGHT_ORDER_MSG) {
+    } else if matches_wrapped_prefix_validation_err(err, ROTATION_CREATE_HEIGHT_ORDER_MSG)
+        || matches_wrapped_prefix_validation_err(err, ROTATION_SUNSET_HEIGHT_ORDER_MSG)
+    {
         ROTATION_INVALID_HEIGHT_ORDER_ERR
     } else {
         ROTATION_INVALID_DESCRIPTOR_ERR
@@ -4761,6 +4764,18 @@ mod tests {
         assert_eq!(
             sanitize_rotation_validation_err(ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM),
             ROTATION_FINITE_H4_REQUIRED_ERR
+        );
+        assert_eq!(
+            sanitize_rotation_validation_err(
+                r#"rotation[0] "bad": rotation: create_height (20) must be < spend_height (10)"#,
+            ),
+            ROTATION_INVALID_HEIGHT_ORDER_ERR
+        );
+        assert_eq!(
+            sanitize_rotation_validation_err(
+                r#"rotation[0] "bad": rotation: sunset_height (20) must be > spend_height (20)"#,
+            ),
+            ROTATION_INVALID_HEIGHT_ORDER_ERR
         );
     }
 

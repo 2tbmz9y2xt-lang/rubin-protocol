@@ -179,6 +179,16 @@ func TestSanitizeRotationValidationErr_UsesSharedStems(t *testing.T) {
 			err:  errors.New(consensus.RotationV1ProductionFiniteH4RequiredErrStem),
 			want: rotationFiniteH4RequiredErr,
 		},
+		{
+			name: "create height ordering keeps concrete code",
+			err:  errors.New(`rotation[0] "bad": rotation: create_height (20) must be < spend_height (10)`),
+			want: rotationInvalidHeightOrderErr,
+		},
+		{
+			name: "sunset height ordering keeps concrete code",
+			err:  errors.New(`rotation[0] "bad": rotation: sunset_height (20) must be > spend_height (20)`),
+			want: rotationInvalidHeightOrderErr,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
