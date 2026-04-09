@@ -354,15 +354,6 @@ pub fn validate_v1_production_rotation_descriptor(
     Ok(())
 }
 
-pub fn require_finite_v1_production_rotation_sunset_height(
-    d: &CryptoRotationDescriptor,
-) -> Result<(), String> {
-    if d.sunset_height == 0 {
-        return Err(ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM.into());
-    }
-    Ok(())
-}
-
 /// Production checks: at most one descriptor, and for the single allowed
 /// descriptor enforce the full production helper directly (generic validation +
 /// finite H4) without running set-only overlap logic.
@@ -864,26 +855,6 @@ mod tests {
         assert!(validate_v1_production_rotation_set(&[invalid], &reg)
             .unwrap_err()
             .contains("name required"));
-    }
-
-    #[test]
-    fn test_require_finite_v1_production_rotation_sunset_height_helper() {
-        let mut descriptor = CryptoRotationDescriptor {
-            name: "r1".into(),
-            old_suite_id: 0x01,
-            new_suite_id: 0x02,
-            create_height: 10,
-            spend_height: 20,
-            sunset_height: 0,
-        };
-        assert!(
-            require_finite_v1_production_rotation_sunset_height(&descriptor)
-                .unwrap_err()
-                .contains("sunset_height")
-        );
-        descriptor.sunset_height = 100;
-        require_finite_v1_production_rotation_sunset_height(&descriptor)
-            .expect("finite H4 helper should accept non-zero sunset");
     }
 
     #[test]

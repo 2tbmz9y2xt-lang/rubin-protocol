@@ -49,15 +49,6 @@ func ValidateV1ProductionRotationDescriptor(d CryptoRotationDescriptor, registry
 	return nil
 }
 
-// RequireFiniteV1ProductionRotationSunsetHeight applies the production-only H4
-// rule to an already-validated descriptor.
-func RequireFiniteV1ProductionRotationSunsetHeight(d CryptoRotationDescriptor) error {
-	if d.SunsetHeight == 0 {
-		return fmt.Errorf(RotationV1ProductionFiniteH4RequiredErrStem)
-	}
-	return nil
-}
-
 // ValidateV1ProductionRotationSet checks a descriptor batch for production:
 // at most one descriptor, and for the only allowed descriptor it enforces the
 // full production descriptor helper directly (generic descriptor validation +
