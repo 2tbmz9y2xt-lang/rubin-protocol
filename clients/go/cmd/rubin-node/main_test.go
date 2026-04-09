@@ -155,7 +155,9 @@ func TestLegacyExposureHookVectorsFixtureParity(t *testing.T) {
 		t.Fatalf("hook vectors fixture required for parity lock (read %s: %v)", fixturePath, err)
 	}
 	var doc struct {
-		Cases []struct {
+		ContractVersion int    `json:"contract_version"`
+		FixtureKind     string `json:"fixture_kind"`
+		Cases           []struct {
 			Name                string `json:"name"`
 			HasChainstateTip    bool   `json:"has_chainstate_tip"`
 			LegacyExposureTotal uint64 `json:"legacy_exposure_total"`
@@ -166,6 +168,12 @@ func TestLegacyExposureHookVectorsFixtureParity(t *testing.T) {
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("unmarshal hook vectors: %v", err)
+	}
+	if doc.ContractVersion != 1 {
+		t.Fatalf("contract_version=%d, want 1", doc.ContractVersion)
+	}
+	if doc.FixtureKind != "legacy_exposure_hook_vectors" {
+		t.Fatalf("fixture_kind=%q, want legacy_exposure_hook_vectors", doc.FixtureKind)
 	}
 	for _, c := range doc.Cases {
 		t.Run(c.Name, func(t *testing.T) {

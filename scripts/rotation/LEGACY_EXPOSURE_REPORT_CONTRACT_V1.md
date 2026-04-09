@@ -41,7 +41,7 @@ All keys are required in emitted output (pretty-printed deterministic JSON).
 | `warning_hook` | string | Advisory warning hook (see hooks below) |
 | `grace_hook` | string | Advisory grace-process hook (see hooks below) |
 | `include_outpoints` | boolean | Whether `--legacy-exposure-include-outpoints` was set |
-| `legacy_suite_reports` | array | Per-suite breakdown (see below) |
+| `legacy_suite_reports` | array | Per-suite breakdown (non-empty: one entry per watched legacy suite id; see below) |
 
 Per-suite objects:
 
@@ -50,7 +50,7 @@ Per-suite objects:
 | `suite_id` | integer | Watched legacy suite id |
 | `utxo_exposure_count` | integer | Matching UTXO count for that suite |
 | `outpoint_count` | integer | Same as exposure count in current implementations |
-| `outpoints` | array of strings | Required when `include_outpoints` is true (may be empty); must be absent when false; deterministic `txid_hex:vout` strings |
+| `outpoints` | array of strings | Required when `include_outpoints` is true (may be empty); must be absent when false; each string is lowercase 64-hex txid, `:`, decimal vout (matches `formatLegacyExposureOutpoint` / Rust equivalent) |
 
 ## Hook semantics (parity-locked)
 
