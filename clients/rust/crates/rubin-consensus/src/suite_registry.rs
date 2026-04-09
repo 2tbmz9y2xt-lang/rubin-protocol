@@ -364,19 +364,15 @@ pub fn require_finite_v1_production_rotation_sunset_height(
 }
 
 /// Production checks: at most one descriptor, and for the single allowed
-/// descriptor enforce the full production helper (generic validation + finite H4).
+/// descriptor enforce the full production helper directly (generic validation +
+/// finite H4) without running set-only overlap logic.
 pub fn validate_v1_production_rotation_set(
     descriptors: &[CryptoRotationDescriptor],
     registry: &SuiteRegistry,
 ) -> Result<(), String> {
     match descriptors {
         [] => Ok(()),
-        [descriptor] => {
-            // Preserve the generic set-validation baseline even on the single
-            // allowed production path before the stricter finite-H4 rule.
-            validate_rotation_set(descriptors, registry)?;
-            require_finite_v1_production_rotation_sunset_height(descriptor)
-        }
+        [descriptor] => validate_v1_production_rotation_descriptor(descriptor, registry),
         many => Err(format!(
             "{ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM}, got {}",
             many.len()

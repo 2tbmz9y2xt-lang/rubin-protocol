@@ -60,19 +60,14 @@ func RequireFiniteV1ProductionRotationSunsetHeight(d CryptoRotationDescriptor) e
 
 // ValidateV1ProductionRotationSet checks a descriptor batch for production:
 // at most one descriptor, and for the only allowed descriptor it enforces the
-// full production helper (generic descriptor validation + finite H4).
+// full production descriptor helper directly (generic descriptor validation +
+// finite H4) without running set-only overlap logic.
 func ValidateV1ProductionRotationSet(descriptors []CryptoRotationDescriptor, registry *SuiteRegistry) error {
 	switch len(descriptors) {
 	case 0:
 		return nil
 	case 1:
-		// Keep the generic set validator on the single-descriptor path so
-		// production and non-production share the same descriptor/set baseline
-		// before the stricter finite-H4 production rule applies.
-		if err := ValidateRotationSet(descriptors, registry); err != nil {
-			return err
-		}
-		return RequireFiniteV1ProductionRotationSunsetHeight(descriptors[0])
+		return ValidateV1ProductionRotationDescriptor(descriptors[0], registry)
 	default:
 		return fmt.Errorf(
 			"%s, got %d",

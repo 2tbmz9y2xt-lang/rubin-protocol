@@ -171,6 +171,7 @@ const (
 	rotationEqualSuiteIDsErr          = "rotation-equal-suite-ids"
 	rotationInvalidHeightOrderErr     = "rotation-invalid-height-order"
 	rotationInvalidDescriptorErr      = "rotation-invalid-descriptor"
+	rotationNameRequiredMsg           = "rotation: name required"
 )
 
 var rotationValidationErrorPatterns = []struct {
@@ -180,6 +181,7 @@ var rotationValidationErrorPatterns = []struct {
 	{match: consensus.RotationV1ProductionAtMostOneDescriptorErrStem, code: rotationTooManyDescriptorsErr},
 	{match: consensus.RotationV1ProductionFiniteH4RequiredErrStem, code: rotationFiniteH4RequiredErr},
 	{match: "rotation: overlapping rotations", code: rotationOverlappingDescriptorsErr},
+	{match: rotationNameRequiredMsg, code: rotationInvalidDescriptorErr},
 	{match: "must differ from new suite", code: rotationEqualSuiteIDsErr},
 	{match: "rotation: old suite ", code: rotationUnregisteredSuiteErr},
 	{match: "rotation: new suite ", code: rotationUnregisteredSuiteErr},

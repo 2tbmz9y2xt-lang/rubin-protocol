@@ -38,12 +38,13 @@ const ROTATION_EQUAL_SUITE_IDS_ERR: &str = "rotation-equal-suite-ids";
 const ROTATION_INVALID_HEIGHT_ORDER_ERR: &str = "rotation-invalid-height-order";
 const ROTATION_INVALID_DESCRIPTOR_ERR: &str = "rotation-invalid-descriptor";
 const ROTATION_OVERLAPPING_DESCRIPTORS_MSG: &str = "rotation: overlapping rotations";
+const ROTATION_NAME_REQUIRED_MSG: &str = "rotation: name required";
 const ROTATION_OLD_SUITE_NOT_REGISTERED_MSG: &str = "rotation: old suite ";
 const ROTATION_NEW_SUITE_NOT_REGISTERED_MSG: &str = "rotation: new suite ";
 const ROTATION_EQUAL_SUITE_IDS_MSG: &str = "must differ from new suite";
 const ROTATION_INVALID_HEIGHT_ORDER_MSG: &str = "rotation: create_height (";
 
-const ROTATION_VALIDATION_ERROR_MAP: [(&str, &str); 7] = [
+const ROTATION_VALIDATION_ERROR_MAP: [(&str, &str); 8] = [
     (
         ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM,
         ROTATION_TOO_MANY_DESCRIPTORS_ERR,
@@ -56,6 +57,7 @@ const ROTATION_VALIDATION_ERROR_MAP: [(&str, &str); 7] = [
         ROTATION_OVERLAPPING_DESCRIPTORS_MSG,
         ROTATION_OVERLAPPING_DESCRIPTORS_ERR,
     ),
+    (ROTATION_NAME_REQUIRED_MSG, ROTATION_INVALID_DESCRIPTOR_ERR),
     (ROTATION_EQUAL_SUITE_IDS_MSG, ROTATION_EQUAL_SUITE_IDS_ERR),
     (
         ROTATION_OLD_SUITE_NOT_REGISTERED_MSG,
@@ -4753,6 +4755,10 @@ mod tests {
                 r#"rotation[0] "bad": rotation: new suite 0x03 not registered"#,
             ),
             ROTATION_UNREGISTERED_SUITE_ERR
+        );
+        assert_eq!(
+            sanitize_rotation_validation_err(r#"rotation[0] "bad": rotation: name required"#),
+            ROTATION_INVALID_DESCRIPTOR_ERR
         );
         assert_eq!(
             sanitize_rotation_validation_err(ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM),

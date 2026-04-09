@@ -165,6 +165,11 @@ func TestSanitizeRotationValidationErr_UsesSharedStems(t *testing.T) {
 			want: rotationUnregisteredSuiteErr,
 		},
 		{
+			name: "name required stays invalid descriptor",
+			err:  errors.New(`rotation[0] "bad": rotation: name required`),
+			want: rotationInvalidDescriptorErr,
+		},
+		{
 			name: "equal suite must not be mislabeled as unregistered",
 			err:  errors.New(`rotation[0] "bad": rotation: old suite (0x01) must differ from new suite`),
 			want: rotationEqualSuiteIDsErr,
