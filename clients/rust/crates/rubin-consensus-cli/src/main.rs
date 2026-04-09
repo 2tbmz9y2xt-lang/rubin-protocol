@@ -27,6 +27,8 @@ use std::collections::{HashMap, HashSet};
 use txctx_governance::run_txctx_governance_vector;
 use txctx_harness::{run_txctx_spend_vector, TxctxCase};
 
+const ROTATION_DESCRIPTOR_NOT_ACTIVATED_ERR: &str = "descriptor-not-activated";
+
 #[derive(Deserialize, Default)]
 struct Request {
     op: String,
@@ -1035,7 +1037,7 @@ fn build_core_ext_suite_context(
                 sunset_height: rd.sunset_height,
             };
             validate_rotation_descriptor_for_network(&req.network, &desc, registry_ref)
-                .map_err(|_| "descriptor-not-activated".to_string())?;
+                .map_err(|_| ROTATION_DESCRIPTOR_NOT_ACTIVATED_ERR.to_string())?;
             Some(DescriptorRotationProvider { descriptor: desc })
         }
         None => None,
@@ -1634,7 +1636,7 @@ fn main() {
                 {
                     let resp = Response {
                         ok: false,
-                        err: Some("descriptor-not-activated".to_string()),
+                        err: Some(ROTATION_DESCRIPTOR_NOT_ACTIVATED_ERR.to_string()),
                         ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
@@ -1702,7 +1704,7 @@ fn main() {
             if validate_rotation_descriptor_for_network(&req.network, &desc, &registry).is_err() {
                 let resp = Response {
                     ok: false,
-                    err: Some("descriptor-not-activated".to_string()),
+                    err: Some(ROTATION_DESCRIPTOR_NOT_ACTIVATED_ERR.to_string()),
                     ..Default::default()
                 };
                 let _ = serde_json::to_writer(std::io::stdout(), &resp);
@@ -1761,7 +1763,7 @@ fn main() {
             if validate_rotation_descriptor_for_network(&req.network, &desc, &registry).is_err() {
                 let resp = Response {
                     ok: false,
-                    err: Some("descriptor-not-activated".to_string()),
+                    err: Some(ROTATION_DESCRIPTOR_NOT_ACTIVATED_ERR.to_string()),
                     ..Default::default()
                 };
                 let _ = serde_json::to_writer(std::io::stdout(), &resp);
@@ -1812,7 +1814,7 @@ fn main() {
             if validate_rotation_descriptor_for_network(&req.network, &desc, &registry).is_err() {
                 let resp = Response {
                     ok: false,
-                    err: Some("descriptor-not-activated".to_string()),
+                    err: Some(ROTATION_DESCRIPTOR_NOT_ACTIVATED_ERR.to_string()),
                     ..Default::default()
                 };
                 let _ = serde_json::to_writer(std::io::stdout(), &resp);
@@ -1862,10 +1864,13 @@ fn main() {
                     })
                     .collect();
                 let set_ok = validate_rotation_set_for_network(&req.network, &ds, &registry);
+                // Keep the CLI surface stable: any descriptor-set validation
+                // failure, including the production max-2 guard, normalizes to
+                // descriptor-not-activated.
                 if set_ok.is_err() {
                     let resp = Response {
                         ok: false,
-                        err: Some("descriptor-not-activated".to_string()),
+                        err: Some(ROTATION_DESCRIPTOR_NOT_ACTIVATED_ERR.to_string()),
                         ..Default::default()
                     };
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
@@ -1901,7 +1906,7 @@ fn main() {
             if validate_rotation_descriptor_for_network(&req.network, &desc, &registry).is_err() {
                 let resp = Response {
                     ok: false,
-                    err: Some("descriptor-not-activated".to_string()),
+                    err: Some(ROTATION_DESCRIPTOR_NOT_ACTIVATED_ERR.to_string()),
                     ..Default::default()
                 };
                 let _ = serde_json::to_writer(std::io::stdout(), &resp);

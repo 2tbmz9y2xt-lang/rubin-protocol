@@ -115,7 +115,7 @@ func TestRubinConsensusCLI_RotationProduction_MainnetRejectsThreeDescriptorBatch
 			{Name: "b", OldSuiteID: 2, NewSuiteID: 3, CreateHeight: 100, SpendHeight: 110, SunsetHeight: 200},
 			{Name: "c", OldSuiteID: 3, NewSuiteID: 4, CreateHeight: 200, SpendHeight: 210, SunsetHeight: 300},
 		},
-	}, "descriptor-not-activated")
+	}, rotationDescriptorNotActivatedErr)
 	mustRunOk(t, Request{
 		Op:            "rotation_descriptor_check",
 		Network:       "devnet",
