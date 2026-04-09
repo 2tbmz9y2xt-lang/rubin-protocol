@@ -31,7 +31,7 @@ All keys are required in emitted output (pretty-printed deterministic JSON).
 | `report_version` | integer | Contract version; `1` for this document |
 | `measurement_scope` | string | Constant: `explicit_suite_id_utxos` |
 | `network` | string | CLI `--network` value used for the scan |
-| `data_dir` | string | Resolved datadir path |
+| `data_dir` | string | `--datadir` value as passed to the CLI for this scan (verbatim; not canonicalized to an absolute path and may be relative) |
 | `chainstate_height` | integer | Height from loaded chainstate |
 | `chainstate_has_tip` | boolean | Whether chainstate reports a tip |
 | `indexed_suite_ids` | array of integers | Suite IDs present in explicit UTXO index (0–255) |

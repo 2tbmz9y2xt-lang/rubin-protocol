@@ -54,7 +54,9 @@ The scanner emits deterministic JSON with:
 
 - `report_version`: integer contract version (`1` for this runbook)
 - `measurement_scope`: currently `explicit_suite_id_utxos`
-- `network`, `data_dir`, `chainstate_height`, `chainstate_has_tip`
+- `network`: CLI `--network` value used for the scan
+- `data_dir`: `--datadir` string as supplied to the CLI (may be relative; not normalized to a canonical absolute path in current Go/Rust output)
+- `chainstate_height`, `chainstate_has_tip`: values from the loaded chainstate snapshot
 - `indexed_suite_ids`: suite IDs currently visible in explicit UTXO covenant data
 - `watched_legacy_suite_ids`: legacy suite IDs the operator asked to watch
 - `legacy_exposure_total`: sum of current explicit UTXO exposure across watched legacy suite IDs

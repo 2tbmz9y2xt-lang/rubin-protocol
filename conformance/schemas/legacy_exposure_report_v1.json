@@ -31,7 +31,10 @@
       "const": "explicit_suite_id_utxos"
     },
     "network": { "type": "string" },
-    "data_dir": { "type": "string" },
+    "data_dir": {
+      "type": "string",
+      "description": "CLI --datadir as passed to the scanner (verbatim; may be relative; not canonicalized in current implementations)"
+    },
     "chainstate_height": { "type": "integer", "minimum": 0 },
     "chainstate_has_tip": { "type": "boolean" },
     "indexed_suite_ids": {
