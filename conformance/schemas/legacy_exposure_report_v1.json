@@ -39,10 +39,15 @@
     "chainstate_has_tip": { "type": "boolean" },
     "indexed_suite_ids": {
       "type": "array",
-      "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+      "description": "Set-like list of indexed suite IDs (no duplicates); order is implementation-defined.",
+      "items": { "type": "integer", "minimum": 0, "maximum": 255 },
+      "uniqueItems": true
     },
     "watched_legacy_suite_ids": {
       "type": "array",
+      "description": "Non-empty deduplicated sorted suite IDs from CLI --legacy-suite-id (scanner requires at least one).",
+      "minItems": 1,
+      "uniqueItems": true,
       "items": { "type": "integer", "minimum": 0, "maximum": 255 }
     },
     "legacy_exposure_total": { "type": "integer", "minimum": 0 },
@@ -68,21 +73,53 @@
     },
     "include_outpoints": { "type": "boolean" },
     "legacy_suite_reports": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["suite_id", "utxo_exposure_count", "outpoint_count"],
+      "type": "array"
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "include_outpoints": { "const": false } } },
+      "then": {
         "properties": {
-          "suite_id": { "type": "integer", "minimum": 0, "maximum": 255 },
-          "utxo_exposure_count": { "type": "integer", "minimum": 0 },
-          "outpoint_count": { "type": "integer", "minimum": 0 },
-          "outpoints": {
+          "legacy_suite_reports": {
             "type": "array",
-            "items": { "type": "string" }
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["suite_id", "utxo_exposure_count", "outpoint_count"],
+              "properties": {
+                "suite_id": { "type": "integer", "minimum": 0, "maximum": 255 },
+                "utxo_exposure_count": { "type": "integer", "minimum": 0 },
+                "outpoint_count": { "type": "integer", "minimum": 0 }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "include_outpoints": { "const": true } } },
+      "then": {
+        "properties": {
+          "legacy_suite_reports": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["suite_id", "utxo_exposure_count", "outpoint_count", "outpoints"],
+              "properties": {
+                "suite_id": { "type": "integer", "minimum": 0, "maximum": 255 },
+                "utxo_exposure_count": { "type": "integer", "minimum": 0 },
+                "outpoint_count": { "type": "integer", "minimum": 0 },
+                "outpoints": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                }
+              }
+            }
           }
         }
       }
     }
-  }
+  ]
 }

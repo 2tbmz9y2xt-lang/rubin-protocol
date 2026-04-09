@@ -34,8 +34,8 @@ All keys are required in emitted output (pretty-printed deterministic JSON).
 | `data_dir` | string | `--datadir` value as passed to the CLI for this scan (verbatim; not canonicalized to an absolute path and may be relative) |
 | `chainstate_height` | integer | Height from loaded chainstate |
 | `chainstate_has_tip` | boolean | Whether chainstate reports a tip |
-| `indexed_suite_ids` | array of integers | Suite IDs present in explicit UTXO index (0–255) |
-| `watched_legacy_suite_ids` | integer array | Sorted unique `--legacy-suite-id` values (0–255) |
+| `indexed_suite_ids` | array of integers | Suite IDs present in explicit UTXO index (0–255); no duplicates (set-like) |
+| `watched_legacy_suite_ids` | integer array | Non-empty sorted unique `--legacy-suite-id` values (0–255); scanner requires ≥1 id |
 | `legacy_exposure_total` | integer | Sum of exposure counts across watched legacy suite IDs |
 | `sunset_readiness` | string | Advisory readiness label (see hooks below) |
 | `warning_hook` | string | Advisory warning hook (see hooks below) |
@@ -50,7 +50,7 @@ Per-suite objects:
 | `suite_id` | integer | Watched legacy suite id |
 | `utxo_exposure_count` | integer | Matching UTXO count for that suite |
 | `outpoint_count` | integer | Same as exposure count in current implementations |
-| `outpoints` | array of strings | Present only in detail mode; deterministic `txid_hex:vout` strings |
+| `outpoints` | array of strings | Required when `include_outpoints` is true (may be empty); must be absent when false; deterministic `txid_hex:vout` strings |
 
 ## Hook semantics (parity-locked)
 

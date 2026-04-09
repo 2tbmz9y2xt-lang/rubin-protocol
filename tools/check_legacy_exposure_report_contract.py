@@ -15,6 +15,10 @@ EXAMPLE = REPO_ROOT / "conformance" / "fixtures" / "protocol" / "legacy_exposure
 HOOK_VECTORS = REPO_ROOT / "conformance" / "fixtures" / "protocol" / "legacy_exposure_hook_vectors.json"
 
 
+def _fail(msg: str) -> None:
+    print(f"FAIL: {msg}", file=sys.stderr)
+
+
 def _schema_enum_strings(schema: dict, property_name: str) -> frozenset[str] | None:
     props = schema.get("properties")
     if not isinstance(props, dict):
@@ -67,6 +71,16 @@ def _validate_hook_vectors_structure(
         for k in required:
             if k not in c:
                 errors.append(f"cases[{i}]: missing {k}")
+        if "name" in c and not isinstance(c.get("name"), str):
+            errors.append(f"cases[{i}]: name must be a string")
+        if "has_chainstate_tip" in c and not isinstance(c.get("has_chainstate_tip"), bool):
+            errors.append(f"cases[{i}]: has_chainstate_tip must be a boolean")
+        if "legacy_exposure_total" in c:
+            t = c.get("legacy_exposure_total")
+            if not isinstance(t, int) or isinstance(t, bool):
+                errors.append(f"cases[{i}]: legacy_exposure_total must be an integer")
+            elif t < 0:
+                errors.append(f"cases[{i}]: legacy_exposure_total must be >= 0")
         for k, allowed, label in (
             ("sunset_readiness", sr_enum, "sunset_readiness"),
             ("warning_hook", wh_enum, "warning_hook"),
@@ -89,28 +103,60 @@ def main() -> int:
     try:
         import jsonschema  # type: ignore[import-untyped]
     except ImportError:
-        print("jsonschema required", file=sys.stderr)
+        _fail("jsonschema required (pip install jsonschema)")
         return 1
 
-    with open(SCHEMA) as f:
-        schema = json.load(f)
-    with open(EXAMPLE) as f:
-        example = json.load(f)
+    for label, path in (
+        ("schema", SCHEMA),
+        ("example fixture", EXAMPLE),
+        ("hook vectors fixture", HOOK_VECTORS),
+    ):
+        if not path.is_file():
+            _fail(f"missing {label}: {path}")
+            return 1
+
+    try:
+        with open(SCHEMA) as f:
+            schema = json.load(f)
+    except OSError as e:
+        _fail(f"cannot read schema {SCHEMA}: {e}")
+        return 1
+    except json.JSONDecodeError as e:
+        _fail(f"invalid JSON in schema {SCHEMA}: {e}")
+        return 1
+
+    try:
+        with open(EXAMPLE) as f:
+            example = json.load(f)
+    except OSError as e:
+        _fail(f"cannot read example {EXAMPLE}: {e}")
+        return 1
+    except json.JSONDecodeError as e:
+        _fail(f"invalid JSON in example {EXAMPLE}: {e}")
+        return 1
 
     validator = jsonschema.Draft202012Validator(schema)
     schema_errors = sorted(validator.iter_errors(example), key=lambda e: list(e.path))
     if schema_errors:
         for e in schema_errors:
             path = ".".join(str(p) for p in e.absolute_path)
-            print(f"example JSON: {path}: {e.message}", file=sys.stderr)
+            print(f"FAIL: example JSON at {path}: {e.message}", file=sys.stderr)
         return 1
 
-    with open(HOOK_VECTORS) as f:
-        hook_doc = json.load(f)
+    try:
+        with open(HOOK_VECTORS) as f:
+            hook_doc = json.load(f)
+    except OSError as e:
+        _fail(f"cannot read hook vectors {HOOK_VECTORS}: {e}")
+        return 1
+    except json.JSONDecodeError as e:
+        _fail(f"invalid JSON in hook vectors {HOOK_VECTORS}: {e}")
+        return 1
+
     struct_errors = _validate_hook_vectors_structure(hook_doc, schema)
     if struct_errors:
         for msg in struct_errors:
-            print(msg, file=sys.stderr)
+            _fail(msg)
         return 1
 
     return 0
