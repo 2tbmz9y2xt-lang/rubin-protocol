@@ -918,6 +918,53 @@ mod tests {
     }
 
     #[test]
+    fn legacy_exposure_hook_vectors_fixture_parity() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../conformance/fixtures/protocol/legacy_exposure_hook_vectors.json");
+        let raw =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let doc: Value = serde_json::from_str(&raw).expect("hook vectors json");
+        assert_eq!(
+            doc["contract_version"].as_u64(),
+            Some(1),
+            "unexpected contract_version in {}",
+            path.display()
+        );
+        assert_eq!(
+            doc["fixture_kind"].as_str(),
+            Some("legacy_exposure_hook_vectors"),
+            "unexpected fixture_kind in {}",
+            path.display()
+        );
+        let cases = doc["cases"].as_array().expect("cases array");
+        for c in cases {
+            let name = c["name"].as_str().expect("case name");
+            let has_tip = c["has_chainstate_tip"]
+                .as_bool()
+                .expect("has_chainstate_tip");
+            let total = c["legacy_exposure_total"]
+                .as_u64()
+                .expect("legacy_exposure_total");
+            let (r, w, g) = legacy_exposure_hooks(has_tip, total);
+            assert_eq!(
+                r,
+                c["sunset_readiness"].as_str().expect("sunset_readiness"),
+                "case {name}"
+            );
+            assert_eq!(
+                w,
+                c["warning_hook"].as_str().expect("warning_hook"),
+                "case {name}"
+            );
+            assert_eq!(
+                g,
+                c["grace_hook"].as_str().expect("grace_hook"),
+                "case {name}"
+            );
+        }
+    }
+
+    #[test]
     fn dry_run_defaults_to_devnet_chain_id() {
         let dir = unique_temp_dir("rubin-node-bin-default");
         let args = vec![

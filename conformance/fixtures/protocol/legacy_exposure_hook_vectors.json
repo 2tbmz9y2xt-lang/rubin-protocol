@@ -1,0 +1,39 @@
+{
+  "contract_version": 1,
+  "fixture_kind": "legacy_exposure_hook_vectors",
+  "description": "Canonical hook outputs for legacyExposureHooks(has_chainstate_tip, legacy_exposure_total). Go and Rust parity tests must match this file.",
+  "cases": [
+    {
+      "name": "no_chainstate_tip_zero_total",
+      "has_chainstate_tip": false,
+      "legacy_exposure_total": 0,
+      "sunset_readiness": "invalid_no_chainstate_tip",
+      "warning_hook": "none",
+      "grace_hook": "not_applicable_no_chainstate_tip"
+    },
+    {
+      "name": "no_chainstate_tip_nonzero_total",
+      "has_chainstate_tip": false,
+      "legacy_exposure_total": 5,
+      "sunset_readiness": "invalid_no_chainstate_tip",
+      "warning_hook": "none",
+      "grace_hook": "not_applicable_no_chainstate_tip"
+    },
+    {
+      "name": "tipped_chain_zero_exposure",
+      "has_chainstate_tip": true,
+      "legacy_exposure_total": 0,
+      "sunset_readiness": "ready_for_operator_defined_grace_window",
+      "warning_hook": "none",
+      "grace_hook": "start_operator_defined_grace_window"
+    },
+    {
+      "name": "tipped_chain_nonzero_exposure",
+      "has_chainstate_tip": true,
+      "legacy_exposure_total": 3,
+      "sunset_readiness": "not_ready_legacy_exposure_present",
+      "warning_hook": "legacy_exposure_present_notify_operator_and_council",
+      "grace_hook": "not_applicable_legacy_exposure_present"
+    }
+  ]
+}
