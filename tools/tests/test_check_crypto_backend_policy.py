@@ -1,0 +1,526 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+
+
+TOOLS_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(TOOLS_DIR))
+
+import check_crypto_backend_policy as m
+
+
+CGO_PREAMBLE = """
+/*
+static int rubin_verify_sig_oneshot() {
+    EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL);
+    return EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len);
+}
+*/
+import "C"
+"""
+
+
+CGO_LINE_PREAMBLE = """
+// static int rubin_verify_sig_oneshot() {
+//     EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL);
+//     return EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len);
+// }
+import "C"
+"""
+
+
+def go_fixture(text: str) -> str:
+    return CGO_PREAMBLE + "\n" + text
+
+
+class CryptoBackendPolicyTests(unittest.TestCase):
+    def test_go_required_snippet_groups_accept_legacy_direct_dispatch(self):
+        text = """
+func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+    switch suiteID {
+    case SUITE_ID_ML_DSA_87:
+        return opensslVerifySigOneShot("ML-DSA-87", pubkey, signature, digest32[:])
+    default:
+        return false, nil
+    }
+}
+
+func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []byte) (bool, error) {
+    EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL)
+    EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)
+    return true, nil
+}
+"""
+        self.assertEqual(
+                m.check_go_verify_required_snippets(
+                    Path("clients/go/consensus/verify_sig_openssl.go"),
+                    go_fixture(text),
+                ),
+                [],
+            )
+
+    def test_go_required_snippet_groups_accept_binding_resolution_path(self):
+        text = """
+func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+    switch suiteID {
+    case SUITE_ID_ML_DSA_87:
+        binding, err := resolveSuiteVerifierBinding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+        if err != nil {
+            return false, err
+        }
+        return verifySigWithBinding(binding, pubkey, signature, digest32)
+    default:
+        return false, nil
+    }
+}
+
+func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []byte) (bool, error) {
+    EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL)
+    EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)
+    return true, nil
+}
+"""
+        self.assertEqual(
+            m.check_go_verify_required_snippets(
+                Path("clients/go/consensus/verify_sig_openssl.go"),
+                go_fixture(text),
+            ),
+            [],
+        )
+
+    def test_go_binding_resolution_without_handoff_fails(self):
+        text = """
+func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+    switch suiteID {
+    case SUITE_ID_ML_DSA_87:
+        binding, err := resolveSuiteVerifierBinding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+        if err != nil {
+            return false, err
+        }
+        return false, err
+    default:
+        return false, nil
+    }
+}
+
+func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []byte) (bool, error) {
+    EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL)
+    EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)
+    return true, nil
+}
+"""
+        errors = m.check_go_verify_required_snippets(
+            Path("clients/go/consensus/verify_sig_openssl.go"),
+            go_fixture(text),
+        )
+        self.assertTrue(
+            any("missing required binding handoff snippet" in err for err in errors)
+        )
+
+    def test_go_binding_handoff_without_resolution_fails(self):
+        text = """
+func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+    switch suiteID {
+    case SUITE_ID_ML_DSA_87:
+        return verifySigWithBinding(binding, pubkey, signature, digest32)
+    default:
+        return false, nil
+    }
+}
+
+func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []byte) (bool, error) {
+    EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL)
+    EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)
+    return true, nil
+}
+"""
+        errors = m.check_go_verify_required_snippets(
+            Path("clients/go/consensus/verify_sig_openssl.go"),
+            go_fixture(text),
+        )
+        self.assertTrue(
+            any("missing required binding resolution snippet" in err for err in errors)
+        )
+
+    def test_go_binding_resolution_path_accepts_last_switch_arm(self):
+        text = """
+func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+    switch suiteID {
+    case SUITE_ID_ML_DSA_87:
+        binding, err := resolveSuiteVerifierBinding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+        if err != nil {
+            return false, err
+        }
+        return verifySigWithBinding(binding, pubkey, signature, digest32)
+    }
+    return false, nil
+}
+
+func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []byte) (bool, error) {
+    EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL)
+    EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)
+    return true, nil
+}
+"""
+        self.assertEqual(
+                m.check_go_verify_required_snippets(
+                    Path("clients/go/consensus/verify_sig_openssl.go"),
+                    go_fixture(text),
+                ),
+                [],
+            )
+
+    def test_go_binding_resolution_path_ignores_nested_default(self):
+        text = """
+func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+    switch suiteID {
+    case SUITE_ID_ML_DSA_87:
+        switch len(signature) {
+        default:
+            binding, err := resolveSuiteVerifierBinding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+            if err != nil {
+                return false, err
+            }
+            return verifySigWithBinding(binding, pubkey, signature, digest32)
+        }
+    default:
+        return false, nil
+    }
+}
+
+func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []byte) (bool, error) {
+    EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL)
+    EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)
+    return true, nil
+}
+"""
+        self.assertEqual(
+                m.check_go_verify_required_snippets(
+                    Path("clients/go/consensus/verify_sig_openssl.go"),
+                    go_fixture(text),
+                ),
+                [],
+            )
+
+    def test_go_comment_braces_do_not_break_case_extraction(self):
+        text = """
+func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+    switch suiteID {
+    case SUITE_ID_ML_DSA_87:
+        // } comment-only brace must not terminate the function early
+        binding, err := resolveSuiteVerifierBinding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+        if err != nil {
+            return false, err
+        }
+        return verifySigWithBinding(binding, pubkey, signature, digest32)
+    default:
+        return false, nil
+    }
+}
+
+func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []byte) (bool, error) {
+    EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL)
+    EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)
+    return true, nil
+}
+"""
+        self.assertEqual(
+                m.check_go_verify_required_snippets(
+                    Path("clients/go/consensus/verify_sig_openssl.go"),
+                    go_fixture(text),
+                ),
+                [],
+            )
+
+    def test_go_comment_spoofed_handoff_does_not_count(self):
+        text = """
+func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+    switch suiteID {
+    case SUITE_ID_ML_DSA_87:
+        binding, err := resolveSuiteVerifierBinding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+        if err != nil {
+            return false, err
+        }
+        // return verifySigWithBinding(binding, pubkey, signature, digest32)
+        return false, err
+    default:
+        return false, nil
+    }
+}
+
+func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []byte) (bool, error) {
+    EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL)
+    EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)
+    return true, nil
+}
+"""
+        errors = m.check_go_verify_required_snippets(
+            Path("clients/go/consensus/verify_sig_openssl.go"),
+            go_fixture(text),
+        )
+        self.assertTrue(
+            any("missing required binding handoff snippet" in err for err in errors)
+        )
+
+    def test_go_string_literal_spoofed_handoff_does_not_count(self):
+        text = """
+func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+    switch suiteID {
+    case SUITE_ID_ML_DSA_87:
+        binding, err := resolveSuiteVerifierBinding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+        if err != nil {
+            return false, err
+        }
+        _ = "return verifySigWithBinding(binding, pubkey, signature, digest32)"
+        return false, err
+    default:
+        return false, nil
+    }
+}
+
+func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []byte) (bool, error) {
+    EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL)
+    EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)
+    return true, nil
+}
+"""
+        errors = m.check_go_verify_required_snippets(
+            Path("clients/go/consensus/verify_sig_openssl.go"),
+            go_fixture(text),
+        )
+        self.assertTrue(
+            any("missing required binding handoff snippet" in err for err in errors)
+        )
+
+    def test_go_multiline_binding_resolution_and_handoff_are_accepted(self):
+        text = """
+func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+    switch suiteID {
+    case SUITE_ID_ML_DSA_87:
+        binding, err := resolveSuiteVerifierBinding(
+            "ML-DSA-87",
+            ML_DSA_87_PUBKEY_BYTES,
+            ML_DSA_87_SIG_BYTES,
+        )
+        if err != nil {
+            return false, err
+        }
+        return verifySigWithBinding(
+            binding,
+            pubkey,
+            signature,
+            digest32,
+        )
+    default:
+        return false, nil
+    }
+}
+
+func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []byte) (bool, error) {
+    EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL)
+    EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)
+    return true, nil
+}
+"""
+        self.assertEqual(
+                m.check_go_verify_required_snippets(
+                    Path("clients/go/consensus/verify_sig_openssl.go"),
+                    go_fixture(text),
+                ),
+                [],
+            )
+
+    def test_go_global_verify_helper_snippet_in_string_does_not_count(self):
+        text = """
+func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+    switch suiteID {
+    case SUITE_ID_ML_DSA_87:
+        return opensslVerifySigOneShot("ML-DSA-87", pubkey, signature, digest32[:])
+    default:
+        return false, nil
+    }
+}
+
+var spoof = "func opensslVerifySigOneShot("
+
+/*
+EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL)
+EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)
+*/
+"""
+        errors = m.check_go_verify_required_snippets(
+            Path("clients/go/consensus/verify_sig_openssl.go"),
+            go_fixture(text),
+        )
+        self.assertTrue(
+            any("missing required snippet group" in err for err in errors)
+        )
+
+    def test_go_binding_resolution_requires_exact_alg_literal(self):
+        text = """
+func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+    switch suiteID {
+    case SUITE_ID_ML_DSA_87:
+        binding, err := resolveSuiteVerifierBinding("WRONG-ALG", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+        if err != nil {
+            return false, err
+        }
+        return verifySigWithBinding(binding, pubkey, signature, digest32)
+    default:
+        return false, nil
+    }
+}
+
+func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []byte) (bool, error) {
+    EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL)
+    EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)
+    return true, nil
+}
+"""
+        errors = m.check_go_verify_required_snippets(
+            Path("clients/go/consensus/verify_sig_openssl.go"),
+            go_fixture(text),
+        )
+        self.assertTrue(
+            any("missing required binding resolution snippet" in err for err in errors)
+        )
+
+    def test_go_direct_dispatch_requires_exact_alg_literal(self):
+        text = """
+func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+    switch suiteID {
+    case SUITE_ID_ML_DSA_87:
+        return opensslVerifySigOneShot("WRONG-ALG", pubkey, signature, digest32[:])
+    default:
+        return false, nil
+    }
+}
+
+func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []byte) (bool, error) {
+    EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL)
+    EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)
+    return true, nil
+}
+"""
+        errors = m.check_go_verify_required_snippets(
+            Path("clients/go/consensus/verify_sig_openssl.go"),
+            go_fixture(text),
+        )
+        self.assertTrue(
+            any("missing required dispatch group" in err for err in errors)
+        )
+
+    def test_go_raw_string_binding_snippet_does_not_spoof_exact_literal(self):
+        text = """
+func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+    switch suiteID {
+    case SUITE_ID_ML_DSA_87:
+        _ = `binding, err := resolveSuiteVerifierBinding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)`
+        binding, err := resolveSuiteVerifierBinding("WRONG-ALG", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+        if err != nil {
+            return false, err
+        }
+        return verifySigWithBinding(binding, pubkey, signature, digest32)
+    default:
+        return false, nil
+    }
+}
+
+func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []byte) (bool, error) {
+    EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL)
+    EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)
+    return true, nil
+}
+"""
+        errors = m.check_go_verify_required_snippets(
+            Path("clients/go/consensus/verify_sig_openssl.go"),
+            go_fixture(text),
+        )
+        self.assertTrue(
+            any("missing required binding resolution snippet" in err for err in errors)
+        )
+
+    def test_go_cgo_required_snippet_in_go_string_does_not_count(self):
+        text = """
+func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+    switch suiteID {
+    case SUITE_ID_ML_DSA_87:
+        return opensslVerifySigOneShot("ML-DSA-87", pubkey, signature, digest32[:])
+    default:
+        return false, nil
+    }
+}
+
+var spoof = "EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL) EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)"
+"""
+        errors = m.check_go_verify_required_snippets(
+            Path("clients/go/consensus/verify_sig_openssl.go"),
+            text,
+        )
+        self.assertTrue(
+            any("missing cgo preamble" in err for err in errors)
+        )
+        self.assertTrue(
+            any("missing required snippet group" in err for err in errors)
+        )
+
+    def test_go_line_comment_cgo_preamble_is_accepted(self):
+        text = """
+func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+    switch suiteID {
+    case SUITE_ID_ML_DSA_87:
+        return opensslVerifySigOneShot("ML-DSA-87", pubkey, signature, digest32[:])
+    default:
+        return false, nil
+    }
+}
+
+func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []byte) (bool, error) {
+    return true, nil
+}
+"""
+        self.assertEqual(
+            m.check_go_verify_required_snippets(
+                Path("clients/go/consensus/verify_sig_openssl.go"),
+                CGO_LINE_PREAMBLE + "\n" + text,
+            ),
+            [],
+        )
+
+    def test_go_string_literal_func_verify_sig_does_not_confuse_parser(self):
+        text = '''
+var banner = "func verifySig("
+
+func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+    switch suiteID {
+    case SUITE_ID_ML_DSA_87:
+        binding, err := resolveSuiteVerifierBinding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+        if err != nil {
+            return false, err
+        }
+        return verifySigWithBinding(binding, pubkey, signature, digest32)
+    default:
+        return false, nil
+    }
+}
+
+func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []byte) (bool, error) {
+    EVP_DigestVerifyInit_ex(mctx, NULL, NULL, NULL, NULL, pkey, NULL)
+    EVP_DigestVerify(mctx, sig, sig_len, msg, msg_len)
+    return true, nil
+}
+'''
+        self.assertEqual(
+            m.check_go_verify_required_snippets(
+                Path("clients/go/consensus/verify_sig_openssl.go"),
+                go_fixture(text),
+            ),
+            [],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
