@@ -182,6 +182,146 @@ def check_required_snippet_groups(
     return errors
 
 
+def normalize_for_match(text: str) -> str:
+    return " ".join(text.split())
+
+
+def check_required_snippet_groups_normalized(
+    path: Path, text: str, snippet_groups: list[list[str]]
+) -> list[str]:
+    errors: list[str] = []
+    normalized_text = normalize_for_match(text)
+    for group in snippet_groups:
+        if not any(normalize_for_match(snippet) in normalized_text for snippet in group):
+            errors.append(
+                f"{path}: missing required snippet group (any-of): {group!r}"
+            )
+    return errors
+
+
+def sanitize_go_source(text: str, *, strip_strings: bool) -> str:
+    out: list[str] = []
+    i = 0
+    state = "normal"
+    while i < len(text):
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+
+        if state == "normal":
+            if ch == "/" and nxt == "/":
+                out.extend("  ")
+                i += 2
+                state = "line_comment"
+                continue
+            if ch == "/" and nxt == "*":
+                out.extend("  ")
+                i += 2
+                state = "block_comment"
+                continue
+            if ch == '"':
+                out.append(" " if strip_strings else ch)
+                i += 1
+                state = "string"
+                continue
+            if ch == "`":
+                out.append(" " if strip_strings else ch)
+                i += 1
+                state = "raw_string"
+                continue
+            if ch == "'":
+                out.append(" " if strip_strings else ch)
+                i += 1
+                state = "rune"
+                continue
+            out.append(ch)
+            i += 1
+            continue
+
+        if state == "line_comment":
+            if ch == "\n":
+                out.append("\n")
+                i += 1
+                state = "normal"
+            else:
+                out.append(" ")
+                i += 1
+            continue
+
+        if state == "block_comment":
+            if ch == "*" and nxt == "/":
+                out.extend("  ")
+                i += 2
+                state = "normal"
+            elif ch == "\n":
+                out.append("\n")
+                i += 1
+            else:
+                out.append(" ")
+                i += 1
+            continue
+
+        if state == "string":
+            if ch == "\\":
+                out.append(" " if strip_strings else ch)
+                i += 1
+                if i < len(text):
+                    if strip_strings:
+                        out.append("\n" if text[i] == "\n" else " ")
+                    else:
+                        out.append(text[i])
+                    i += 1
+                continue
+            if ch == '"':
+                out.append(" " if strip_strings else ch)
+                i += 1
+                state = "normal"
+            elif ch == "\n":
+                out.append("\n")
+                i += 1
+            else:
+                out.append(" " if strip_strings else ch)
+                i += 1
+            continue
+
+        if state == "raw_string":
+            if ch == "`":
+                out.append(" " if strip_strings else ch)
+                i += 1
+                state = "normal"
+            elif ch == "\n":
+                out.append("\n")
+                i += 1
+            else:
+                out.append(" " if strip_strings else ch)
+                i += 1
+            continue
+
+        if state == "rune":
+            if ch == "\\":
+                out.append(" " if strip_strings else ch)
+                i += 1
+                if i < len(text):
+                    if strip_strings:
+                        out.append("\n" if text[i] == "\n" else " ")
+                    else:
+                        out.append(text[i])
+                    i += 1
+                continue
+            if ch == "'":
+                out.append(" " if strip_strings else ch)
+                i += 1
+                state = "normal"
+            elif ch == "\n":
+                out.append("\n")
+                i += 1
+            else:
+                out.append(" " if strip_strings else ch)
+                i += 1
+            continue
+
+    return "".join(out)
+
+
 def extract_go_verify_mldsa_case(path: Path, text: str) -> tuple[str | None, list[str]]:
     errors: list[str] = []
     lines = text.splitlines()
@@ -241,17 +381,31 @@ def extract_go_verify_mldsa_case(path: Path, text: str) -> tuple[str | None, lis
 
 
 def check_go_verify_required_snippets(path: Path, text: str) -> list[str]:
-    errors = check_required_snippet_groups(path, text, GO_VERIFY_GLOBAL_REQUIRED_SNIPPET_GROUPS)
-    case_body, case_errors = extract_go_verify_mldsa_case(path, text)
+    comment_stripped_text = sanitize_go_source(text, strip_strings=False)
+    structure_text = sanitize_go_source(text, strip_strings=True)
+    errors = check_required_snippet_groups_normalized(
+        path, text, GO_VERIFY_GLOBAL_REQUIRED_SNIPPET_GROUPS
+    )
+    case_body, case_errors = extract_go_verify_mldsa_case(path, structure_text)
     errors.extend(case_errors)
     if case_body is None:
         return errors
-
+    match_case_body, _ = extract_go_verify_mldsa_case(path, comment_stripped_text)
+    if match_case_body is None:
+        return errors
+    normalized_case_body = normalize_for_match(match_case_body)
     has_direct_dispatch = any(
-        snippet in case_body for snippet in GO_VERIFY_ML_DSA_DIRECT_DISPATCH_SNIPPETS
+        normalize_for_match(snippet) in normalized_case_body
+        for snippet in GO_VERIFY_ML_DSA_DIRECT_DISPATCH_SNIPPETS
     )
-    has_binding_resolution = GO_VERIFY_ML_DSA_BINDING_RESOLUTION_SNIPPET in case_body
-    has_binding_handoff = GO_VERIFY_ML_DSA_BINDING_HANDOFF_SNIPPET in case_body
+    has_binding_resolution = (
+        normalize_for_match(GO_VERIFY_ML_DSA_BINDING_RESOLUTION_SNIPPET)
+        in normalized_case_body
+    )
+    has_binding_handoff = (
+        normalize_for_match(GO_VERIFY_ML_DSA_BINDING_HANDOFF_SNIPPET)
+        in normalized_case_body
+    )
 
     if not (has_direct_dispatch or has_binding_resolution or has_binding_handoff):
         errors.append(
