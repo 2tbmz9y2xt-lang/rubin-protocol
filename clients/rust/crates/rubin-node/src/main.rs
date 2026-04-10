@@ -841,7 +841,7 @@ mod tests {
         LegacyExposureReport,
     };
     use rubin_consensus::constants::{
-        ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, VERIFY_COST_ML_DSA_87,
+        ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, VERIFY_COST_ML_DSA_87,
     };
     use rubin_node::{load_genesis_config, PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR};
     use serde_json::Value;
@@ -976,8 +976,14 @@ mod tests {
         assert!(report.chainstate_has_tip);
         assert_eq!(report.legacy_exposure_total, 3);
         assert!(!report.include_outpoints);
-        assert_eq!(report.indexed_suite_ids, vec![1, 66]);
-        assert_eq!(report.watched_legacy_suite_ids, vec![1, 66]);
+        assert_eq!(
+            report.indexed_suite_ids,
+            vec![u64::from(SUITE_ID_ML_DSA_87), 66]
+        );
+        assert_eq!(
+            report.watched_legacy_suite_ids,
+            vec![u64::from(SUITE_ID_ML_DSA_87), 66]
+        );
         assert_eq!(report.legacy_suite_reports.len(), 2);
         let (readiness, warning, grace) =
             legacy_exposure_hooks(report.chainstate_has_tip, report.legacy_exposure_total);
