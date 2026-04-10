@@ -227,13 +227,14 @@ func resolveProductionRotationState(
 	localDescriptor *RotationConfigJSON,
 	productionLookup func(string) (*consensus.CryptoRotationDescriptor, *consensus.SuiteRegistry, error),
 ) (*consensus.CryptoRotationDescriptor, *consensus.SuiteRegistry, bool, error) {
-	if network != "mainnet" && network != "testnet" {
+	canonicalNetwork, ok := CanonicalNetworkName(network)
+	if !ok || (canonicalNetwork != "mainnet" && canonicalNetwork != "testnet") {
 		return nil, nil, false, nil
 	}
 	if localDescriptor != nil {
 		return nil, nil, true, errors.New(productionLocalRotationDescriptorErr)
 	}
-	desc, registry, err := productionLookup(network)
+	desc, registry, err := productionLookup(canonicalNetwork)
 	if err != nil {
 		return nil, nil, true, err
 	}

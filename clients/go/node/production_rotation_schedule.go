@@ -186,10 +186,10 @@ func (wire productionRotationDescriptorWire) toRotationConfigJSON() (RotationCon
 	if err != nil {
 		return RotationConfigJSON{}, err
 	}
-	if err := rejectReservedProductionRotationScheduleSuiteID("old_suite_id", oldSuiteID); err != nil {
+	if err := rejectSentinelProductionRotationScheduleSuiteID("old_suite_id", oldSuiteID); err != nil {
 		return RotationConfigJSON{}, err
 	}
-	if err := rejectReservedProductionRotationScheduleSuiteID("new_suite_id", newSuiteID); err != nil {
+	if err := rejectSentinelProductionRotationScheduleSuiteID("new_suite_id", newSuiteID); err != nil {
 		return RotationConfigJSON{}, err
 	}
 	createHeight, err := requireProductionRotationScheduleField("create_height", wire.CreateHeight)
@@ -214,9 +214,9 @@ func (wire productionRotationDescriptorWire) toRotationConfigJSON() (RotationCon
 	}, nil
 }
 
-func rejectReservedProductionRotationScheduleSuiteID(field string, suiteID uint8) error {
+func rejectSentinelProductionRotationScheduleSuiteID(field string, suiteID uint8) error {
 	if suiteID == consensus.SUITE_ID_SENTINEL {
-		return fmt.Errorf("%s 0x%02x reserved", field, suiteID)
+		return fmt.Errorf("%s 0x%02x is the sentinel suite_id", field, suiteID)
 	}
 	return nil
 }

@@ -190,14 +190,14 @@ func TestLoadCompiledProductionRotationScheduleRejectsReservedSentinelSuiteID(t 
 			field:      "old_suite_id",
 			oldSuiteID: 0,
 			newSuiteID: 66,
-			want:       `production_rotation_schedule: networks.mainnet: old_suite_id 0x00 reserved`,
+			want:       `production_rotation_schedule: networks.mainnet: old_suite_id 0x00 is the sentinel suite_id`,
 		},
 		{
 			name:       "new_suite_id",
 			field:      "new_suite_id",
 			oldSuiteID: 1,
 			newSuiteID: 0,
-			want:       `production_rotation_schedule: networks.mainnet: new_suite_id 0x00 reserved`,
+			want:       `production_rotation_schedule: networks.mainnet: new_suite_id 0x00 is the sentinel suite_id`,
 		},
 	}
 

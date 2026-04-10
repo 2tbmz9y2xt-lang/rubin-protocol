@@ -9,7 +9,7 @@ use rubin_consensus::constants::{
 use rubin_consensus::encode_compact_size;
 use rubin_consensus::{
     block_hash, canonical_rotation_network_name_normalized, core_ext_profile_set_anchor_v1,
-    is_v1_production_rotation_network_normalized, normalized_rotation_network_name,
+    is_v1_production_rotation_network_normalized,
     validate_rotation_descriptor_for_normalized_network, CoreExtDeploymentProfile,
     CoreExtDeploymentProfiles, CryptoRotationDescriptor, DefaultRotationProvider,
     DescriptorRotationProvider, SuiteParams, SuiteRegistry, BLOCK_HEADER_BYTES,
@@ -305,11 +305,11 @@ where
         return Err("network is required".to_string());
     }
     let normalized_network = canonical_config_network_name(network)?;
-    if is_v1_production_rotation_network_normalized(normalized_network.as_ref()) {
+    if is_v1_production_rotation_network_normalized(normalized_network.as_str()) {
         if desc.is_some() {
             return Err(PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR.to_string());
         }
-        let (descriptor, registry) = production_lookup(normalized_network.as_ref())?;
+        let (descriptor, registry) = production_lookup(normalized_network.as_str())?;
         return match descriptor {
             Some(descriptor) => Ok(Some(crate::sync::SuiteContext {
                 rotation: Arc::new(DescriptorRotationProvider { descriptor }),
@@ -335,7 +335,7 @@ where
                 sunset_height: rd.sunset_height,
             };
             validate_rotation_descriptor_for_normalized_network(
-                normalized_network.as_ref(),
+                normalized_network.as_str(),
                 &descriptor,
                 &registry,
             )
@@ -348,9 +348,9 @@ where
     Ok(Some(crate::sync::SuiteContext { rotation, registry }))
 }
 
-fn canonical_config_network_name(network: &str) -> Result<std::borrow::Cow<'_, str>, String> {
-    let normalized = normalized_rotation_network_name(network);
-    if canonical_rotation_network_name_normalized(normalized.as_ref()).is_some() {
+fn canonical_config_network_name(network: &str) -> Result<String, String> {
+    let normalized = network.trim().to_ascii_lowercase();
+    if canonical_rotation_network_name_normalized(normalized.as_str()).is_some() {
         Ok(normalized)
     } else {
         Err(format!(

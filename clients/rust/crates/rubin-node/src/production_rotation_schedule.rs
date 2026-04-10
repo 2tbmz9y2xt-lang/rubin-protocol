@@ -69,16 +69,16 @@ fn parse_descriptor_slot_wire(
     }
     let descriptor_wire: ProductionRotationDescriptorWire = serde_json::from_value(value)
         .map_err(|err| production_rotation_schedule_error(format!("networks.{network}: {err}")))?;
-    reject_reserved_suite_id("old_suite_id", descriptor_wire.old_suite_id)
+    reject_sentinel_suite_id("old_suite_id", descriptor_wire.old_suite_id)
         .map_err(|err| production_rotation_schedule_error(format!("networks.{network}: {err}")))?;
-    reject_reserved_suite_id("new_suite_id", descriptor_wire.new_suite_id)
+    reject_sentinel_suite_id("new_suite_id", descriptor_wire.new_suite_id)
         .map_err(|err| production_rotation_schedule_error(format!("networks.{network}: {err}")))?;
     Ok(Some(descriptor_wire))
 }
 
-fn reject_reserved_suite_id(field: &str, suite_id: u8) -> Result<(), String> {
+fn reject_sentinel_suite_id(field: &str, suite_id: u8) -> Result<(), String> {
     if suite_id == SUITE_ID_SENTINEL {
-        return Err(format!("{field} 0x{suite_id:02x} reserved"));
+        return Err(format!("{field} 0x{suite_id:02x} is the sentinel suite_id"));
     }
     Ok(())
 }
@@ -348,19 +348,19 @@ mod tests {
     }
 
     #[test]
-    fn production_rotation_schedule_rejects_reserved_sentinel_suite_id() {
+    fn production_rotation_schedule_rejects_sentinel_suite_id() {
         for (field_name, old_suite_id, new_suite_id, want) in [
             (
                 "old_suite_id",
                 0,
                 66,
-                "production_rotation_schedule: networks.mainnet: old_suite_id 0x00 reserved",
+                "production_rotation_schedule: networks.mainnet: old_suite_id 0x00 is the sentinel suite_id",
             ),
             (
                 "new_suite_id",
                 1,
                 0,
-                "production_rotation_schedule: networks.mainnet: new_suite_id 0x00 reserved",
+                "production_rotation_schedule: networks.mainnet: new_suite_id 0x00 is the sentinel suite_id",
             ),
         ] {
             let err = production_rotation_descriptor_for_network_with_registry_for_test(
