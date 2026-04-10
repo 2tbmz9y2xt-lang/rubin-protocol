@@ -2373,12 +2373,9 @@ mod tests {
             native_named,
             CoreExtVerificationBinding::NativeVerifySig
         ));
-        let native_normalized = core_ext_verification_binding_from_normalized_name_and_descriptor(
-            "",
-            &[],
-            &[],
-        )
-        .expect("normalized empty native");
+        let native_normalized =
+            core_ext_verification_binding_from_normalized_name_and_descriptor("", &[], &[])
+                .expect("normalized empty native");
         assert!(matches!(
             native_normalized,
             CoreExtVerificationBinding::NativeVerifySig
