@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"sort"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -63,7 +62,7 @@ func decodeSingleJSONValue(data []byte, dest any) error {
 func loadCompiledProductionRotationSchedule() (*productionRotationSchedule, *consensus.SuiteRegistry, error) {
 	return loadCompiledProductionRotationScheduleFromJSONWithRegistry(
 		embeddedProductionRotationScheduleV1,
-		nil,
+		consensus.DefaultSuiteRegistry(),
 	)
 }
 
@@ -109,8 +108,12 @@ func loadCompiledProductionRotationScheduleFromJSONWithRegistry(
 		}
 		parsedDescriptors[network] = descriptorJSON
 	}
+	// The compiled production schedule is activation-only authority. When the
+	// caller does not supply an explicit canonical registry contract, fail
+	// closed to the default live manifest instead of synthesizing suite params
+	// from schedule IDs.
 	if registry == nil {
-		registry = canonicalProductionScheduleRegistryFromDescriptors(parsedDescriptors)
+		registry = consensus.DefaultSuiteRegistry()
 	}
 	for _, network := range []string{"mainnet", "testnet"} {
 		desc, err := buildProductionRotationScheduleDescriptor(
@@ -168,41 +171,6 @@ func buildProductionRotationScheduleDescriptor(
 		)
 	}
 	return &descriptor, nil
-}
-
-func canonicalProductionScheduleRegistryFromDescriptors(
-	descriptors map[string]*RotationConfigJSON,
-) *consensus.SuiteRegistry {
-	paramsByID := map[uint8]consensus.SuiteParams{
-		consensus.SUITE_ID_ML_DSA_87: canonicalProductionScheduleSuiteParams(consensus.SUITE_ID_ML_DSA_87),
-	}
-	for _, descriptor := range descriptors {
-		if descriptor == nil {
-			continue
-		}
-		paramsByID[descriptor.OldSuiteID] = canonicalProductionScheduleSuiteParams(descriptor.OldSuiteID)
-		paramsByID[descriptor.NewSuiteID] = canonicalProductionScheduleSuiteParams(descriptor.NewSuiteID)
-	}
-	params := make([]consensus.SuiteParams, 0, len(paramsByID))
-	for _, suiteID := range sortedSuiteIDs(paramsByID) {
-		params = append(params, paramsByID[suiteID])
-	}
-	return consensus.NewSuiteRegistryFromParams(params)
-}
-
-func canonicalProductionScheduleSuiteParams(suiteID uint8) consensus.SuiteParams {
-	params := defaultSuiteRegistryParams()
-	params.SuiteID = suiteID
-	return params
-}
-
-func sortedSuiteIDs(paramsByID map[uint8]consensus.SuiteParams) []uint8 {
-	ids := make([]uint8, 0, len(paramsByID))
-	for suiteID := range paramsByID {
-		ids = append(ids, suiteID)
-	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	return ids
 }
 
 func (wire productionRotationDescriptorWire) toRotationConfigJSON() (RotationConfigJSON, error) {

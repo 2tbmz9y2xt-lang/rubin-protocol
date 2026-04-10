@@ -8,7 +8,7 @@ use rubin_consensus::constants::{
 };
 use rubin_consensus::encode_compact_size;
 use rubin_consensus::{
-    block_hash, canonical_rotation_network_name, core_ext_profile_set_anchor_v1,
+    block_hash, canonical_rotation_network_name_normalized, core_ext_profile_set_anchor_v1,
     is_v1_production_rotation_network_normalized, normalized_rotation_network_name,
     validate_rotation_descriptor_for_normalized_network, CoreExtDeploymentProfile,
     CoreExtDeploymentProfiles, CryptoRotationDescriptor, DefaultRotationProvider,
@@ -304,13 +304,7 @@ where
     if network.trim().is_empty() {
         return Err("network is required".to_string());
     }
-    let normalized_network = canonical_rotation_network_name(network).ok_or_else(|| {
-        format!(
-            "unknown network '{}' (expected: {})",
-            normalized_rotation_network_name(network),
-            SUPPORTED_ROTATION_NETWORK_NAMES_CSV,
-        )
-    })?;
+    let normalized_network = canonical_config_network_name(network)?;
     if is_v1_production_rotation_network_normalized(normalized_network.as_ref()) {
         if desc.is_some() {
             return Err(PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR.to_string());
@@ -352,6 +346,18 @@ where
         None => return Ok(None),
     };
     Ok(Some(crate::sync::SuiteContext { rotation, registry }))
+}
+
+fn canonical_config_network_name(network: &str) -> Result<std::borrow::Cow<'_, str>, String> {
+    let normalized = normalized_rotation_network_name(network);
+    if canonical_rotation_network_name_normalized(normalized.as_ref()).is_some() {
+        Ok(normalized)
+    } else {
+        Err(format!(
+            "unknown network '{}' (expected: {})",
+            normalized, SUPPORTED_ROTATION_NETWORK_NAMES_CSV,
+        ))
+    }
 }
 
 pub fn load_chain_id_from_genesis_file(path: Option<&Path>) -> Result<[u8; 32], String> {

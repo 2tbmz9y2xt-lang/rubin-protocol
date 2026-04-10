@@ -1,10 +1,6 @@
-use rubin_consensus::constants::{
-    ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
-    VERIFY_COST_ML_DSA_87,
-};
+use rubin_consensus::constants::SUITE_ID_SENTINEL;
 use rubin_consensus::{
-    validate_rotation_descriptor_for_normalized_network, CryptoRotationDescriptor, SuiteParams,
-    SuiteRegistry,
+    validate_rotation_descriptor_for_normalized_network, CryptoRotationDescriptor, SuiteRegistry,
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -14,12 +10,11 @@ use std::collections::BTreeMap;
 pub(crate) const PRODUCTION_ROTATION_SCHEDULE_VERSION: u64 = 1;
 pub(crate) const PRODUCTION_ROTATION_SCHEDULE_ERR_STEM: &str = "production_rotation_schedule";
 
-// Rust embeds the canonical protocol fixture directly; there is no client-local
-// copy of the production schedule artifact to keep in sync.
-const PRODUCTION_ROTATION_SCHEDULE_V1_JSON: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../../../conformance/fixtures/protocol/production_rotation_schedule_v1.json"
-));
+// Derived runtime copy of conformance/fixtures/protocol/production_rotation_schedule_v1.json.
+// Rust keeps a client-local embed, and tests pin JSON-equivalence to the
+// canonical protocol fixture so Go/Rust update through the same rebuild path.
+const PRODUCTION_ROTATION_SCHEDULE_V1_JSON: &str =
+    include_str!("production_rotation_schedule_v1_embedded.json");
 
 #[derive(Debug)]
 pub(crate) struct ProductionRotationSchedule {
@@ -88,38 +83,6 @@ fn reject_reserved_suite_id(field: &str, suite_id: u8) -> Result<(), String> {
     Ok(())
 }
 
-fn canonical_production_schedule_suite_params(suite_id: u8) -> SuiteParams {
-    SuiteParams {
-        suite_id,
-        pubkey_len: ML_DSA_87_PUBKEY_BYTES,
-        sig_len: ML_DSA_87_SIG_BYTES,
-        verify_cost: VERIFY_COST_ML_DSA_87,
-        alg_name: "ML-DSA-87",
-    }
-}
-
-fn derived_production_schedule_registry(
-    mainnet: &Option<ProductionRotationDescriptorWire>,
-    testnet: &Option<ProductionRotationDescriptorWire>,
-) -> SuiteRegistry {
-    let mut suites = BTreeMap::new();
-    suites.insert(
-        SUITE_ID_ML_DSA_87,
-        canonical_production_schedule_suite_params(SUITE_ID_ML_DSA_87),
-    );
-    for descriptor in [mainnet.as_ref(), testnet.as_ref()].into_iter().flatten() {
-        suites.insert(
-            descriptor.old_suite_id,
-            canonical_production_schedule_suite_params(descriptor.old_suite_id),
-        );
-        suites.insert(
-            descriptor.new_suite_id,
-            canonical_production_schedule_suite_params(descriptor.new_suite_id),
-        );
-    }
-    SuiteRegistry::with_suites(suites)
-}
-
 fn validate_descriptor_wire(
     descriptor_wire: Option<ProductionRotationDescriptorWire>,
     network: &str,
@@ -172,8 +135,11 @@ fn parse_schedule_with_registry(
             .ok_or_else(|| production_rotation_schedule_error("networks.testnet missing"))?,
         "testnet",
     )?;
-    let registry = registry
-        .unwrap_or_else(|| derived_production_schedule_registry(&mainnet_wire, &testnet_wire));
+    // The compiled production schedule is activation-only authority. Without an
+    // explicit canonical registry contract from the caller, fail closed to the
+    // default live manifest instead of synthesizing suite params from schedule
+    // IDs.
+    let registry = registry.unwrap_or_else(SuiteRegistry::default_registry);
     let mainnet = validate_descriptor_wire(mainnet_wire, "mainnet", &registry)?;
     let testnet = validate_descriptor_wire(testnet_wire, "testnet", &registry)?;
     Ok((
@@ -483,8 +449,8 @@ mod tests {
     }
 
     #[test]
-    fn production_rotation_schedule_derives_scheduled_suites_when_registry_is_implicit() {
-        let (schedule, registry) = parse_schedule_with_registry(
+    fn production_rotation_schedule_implicit_registry_rejects_unsanctioned_scheduled_suite() {
+        let err = parse_schedule_with_registry(
             r#"{
                 "version": 1,
                 "networks": {
@@ -501,19 +467,16 @@ mod tests {
             }"#,
             None,
         )
-        .expect("must load");
-        let descriptor = schedule.mainnet.expect("mainnet descriptor");
-        assert_eq!(descriptor.new_suite_id, 66);
-        let params = registry.lookup(66).expect("suite 66");
-        assert_eq!(params.pubkey_len, ML_DSA_87_PUBKEY_BYTES);
-        assert_eq!(params.sig_len, ML_DSA_87_SIG_BYTES);
-        assert_eq!(params.verify_cost, VERIFY_COST_ML_DSA_87);
-        assert_eq!(params.alg_name, "ML-DSA-87");
+        .expect_err("must reject");
+        assert_eq!(
+            err,
+            "production_rotation_schedule: networks.mainnet: rotation_descriptor: rotation: new suite 0x42 not registered"
+        );
     }
 
     #[test]
-    fn production_rotation_schedule_empty_slot_does_not_erase_foreign_slot_suites() {
-        let (schedule, registry) = parse_schedule_with_registry(
+    fn production_rotation_schedule_implicit_registry_rejects_foreign_slot_suite_ids() {
+        let err = parse_schedule_with_registry(
             r#"{
                 "version": 1,
                 "networks": {
@@ -530,10 +493,11 @@ mod tests {
             }"#,
             None,
         )
-        .expect("must load");
-        assert!(schedule.mainnet.is_none());
-        assert!(schedule.testnet.is_some());
-        assert!(registry.lookup(66).is_some());
+        .expect_err("must reject");
+        assert_eq!(
+            err,
+            "production_rotation_schedule: networks.testnet: rotation_descriptor: rotation: new suite 0x42 not registered"
+        );
     }
 
     #[test]

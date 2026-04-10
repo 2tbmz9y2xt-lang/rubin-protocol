@@ -261,8 +261,8 @@ func TestLoadCompiledProductionRotationScheduleParsesSingleDescriptorWithCanonic
 	}
 }
 
-func TestLoadCompiledProductionRotationScheduleNilRegistryDerivesScheduledSuites(t *testing.T) {
-	schedule, registry, err := loadCompiledProductionRotationScheduleFromJSONWithRegistry([]byte(`{
+func TestLoadCompiledProductionRotationScheduleNilRegistryRejectsUnsanctionedScheduledSuite(t *testing.T) {
+	_, _, err := loadCompiledProductionRotationScheduleFromJSONWithRegistry([]byte(`{
 		"version": 1,
 		"networks": {
 			"mainnet": {
@@ -276,22 +276,11 @@ func TestLoadCompiledProductionRotationScheduleNilRegistryDerivesScheduledSuites
 			"testnet": null
 		}
 	}`), nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected compiled schedule to reject unsanctioned suite ID without explicit canonical registry")
 	}
-	desc := schedule.Networks["mainnet"]
-	if desc == nil {
-		t.Fatal("expected mainnet descriptor")
-	}
-	params, ok := registry.Lookup(0x42)
-	if !ok {
-		t.Fatal("expected derived production registry to include suite 0x42")
-	}
-	if params.PubkeyLen != consensus.ML_DSA_87_PUBKEY_BYTES ||
-		params.SigLen != consensus.ML_DSA_87_SIG_BYTES ||
-		params.VerifyCost != consensus.VERIFY_COST_ML_DSA_87 ||
-		params.AlgName != "ML-DSA-87" {
-		t.Fatalf("suite 0x42 params=%+v, want canonical production schedule params", params)
+	if got, want := err.Error(), `production_rotation_schedule: networks.mainnet: rotation_descriptor: rotation: new suite 0x42 not registered`; got != want {
+		t.Fatalf("error=%q, want %q", got, want)
 	}
 }
 
@@ -337,8 +326,8 @@ func TestLoadCompiledProductionRotationScheduleNilRegistryFallsBackToCanonicalDe
 	}
 }
 
-func TestLoadCompiledProductionRotationScheduleNullNetworkDoesNotEraseForeignSlotSuites(t *testing.T) {
-	schedule, registry, err := loadCompiledProductionRotationScheduleFromJSONWithRegistry([]byte(`{
+func TestLoadCompiledProductionRotationScheduleNilRegistryRejectsForeignSlotSuiteIDs(t *testing.T) {
+	_, _, err := loadCompiledProductionRotationScheduleFromJSONWithRegistry([]byte(`{
 		"version": 1,
 		"networks": {
 			"mainnet": null,
@@ -352,17 +341,11 @@ func TestLoadCompiledProductionRotationScheduleNullNetworkDoesNotEraseForeignSlo
 			}
 		}
 	}`), nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected compiled schedule to reject foreign-slot suite ID without explicit canonical registry")
 	}
-	if schedule.Networks["mainnet"] != nil {
-		t.Fatal("expected mainnet slot to remain empty")
-	}
-	if schedule.Networks["testnet"] == nil {
-		t.Fatal("expected testnet descriptor")
-	}
-	if _, ok := registry.Lookup(66); !ok {
-		t.Fatal("expected derived registry to retain foreign-slot suite 66")
+	if got, want := err.Error(), `production_rotation_schedule: networks.testnet: rotation_descriptor: rotation: new suite 0x42 not registered`; got != want {
+		t.Fatalf("error=%q, want %q", got, want)
 	}
 }
 
