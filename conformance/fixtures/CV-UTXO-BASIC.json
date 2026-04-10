@@ -456,9 +456,7 @@
           "allowed_suite_ids": [
             3
           ],
-          "binding": "verify_sig_ext_openssl_digest32_v1",
-          "binding_descriptor_hex": "525542494e2d434f52452d4558542d5645524946592d5349472d4f50454e53534c2d44494745535433322d7631094d4c2d4453412d3837fd200afd1312",
-          "ext_payload_schema_hex": "b2"
+          "binding": "native_verify_sig"
         }
       ],
       "utxos": [

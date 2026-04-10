@@ -32,17 +32,27 @@ func TestBuildCoreExtProfilesEmpty(t *testing.T) {
 	}
 }
 
-func TestBuildCoreExtProfilesRejectsNonManifestLiveBindings(t *testing.T) {
+func TestBuildCoreExtProfilesAcceptsNativeBindingOnHarnessPath(t *testing.T) {
 	for _, binding := range []string{"", " native_verify_sig \n"} {
-		_, err := buildCoreExtProfiles([]CoreExtProfileJSON{{
+		provider, err := buildCoreExtProfiles([]CoreExtProfileJSON{{
 			ExtID:               7,
 			ActivationHeight:    5,
 			AllowedSuiteIDs:     []uint8{1, 3},
 			Binding:             binding,
 			ExtPayloadSchemaHex: "b2",
 		}}, "", "")
-		if err == nil || !strings.Contains(err.Error(), "unsupported core_ext binding") {
-			t.Fatalf("expected live binding rejection for %q, got %v", binding, err)
+		if err != nil {
+			t.Fatalf("expected harness binding acceptance for %q, got %v", binding, err)
+		}
+		profile, ok, err := provider.LookupCoreExtProfile(7, 5)
+		if err != nil {
+			t.Fatalf("LookupCoreExtProfile(%q): %v", binding, err)
+		}
+		if !ok {
+			t.Fatalf("expected profile for %q", binding)
+		}
+		if profile.VerifySigExtFn != nil {
+			t.Fatalf("expected native harness binding %q to keep nil VerifySigExtFn", binding)
 		}
 	}
 }

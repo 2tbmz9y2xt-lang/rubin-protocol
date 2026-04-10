@@ -1077,8 +1077,12 @@ fn parse_optional_chain_id_hex(chain_id: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
-fn core_ext_runtime_binding_supported(binding: &str) -> bool {
-    rubin_consensus::normalize_live_core_ext_binding_name(binding).is_ok()
+// CLI core_ext_profiles are a conformance/archive harness surface, not the
+// live node/genesis loader. Keep the full repository binding vocabulary here
+// so malformed/negative vectors reach consensus validation instead of failing
+// in a live-only parser.
+fn validate_harness_core_ext_binding(binding: &str) -> Result<&'static str, String> {
+    rubin_consensus::normalize_core_ext_binding_name(binding)
 }
 
 fn core_ext_profiles_from_json(
@@ -1102,17 +1106,22 @@ fn core_ext_profiles_from_json(
                 item.ext_id
             ));
         }
-        if !core_ext_runtime_binding_supported(binding_name) {
-            return Err(format!("unsupported core_ext binding: {}", item.binding));
-        }
+        let binding_name = validate_harness_core_ext_binding(binding_name)?;
         let binding_descriptor =
             decode_optional_hex_bytes("binding_descriptor_hex", &item.binding_descriptor_hex)?;
         let ext_payload_schema =
             decode_optional_hex_bytes("ext_payload_schema_hex", &item.ext_payload_schema_hex)?;
-        let binding = rubin_consensus::live_core_ext_verification_binding_from_name_and_descriptor(
+        if binding_name == rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+            && ext_payload_schema.is_empty()
+        {
+            return Err(format!(
+                "core_ext binding {} requires ext_payload_schema_hex",
+                rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+            ));
+        }
+        let binding = rubin_consensus::core_ext_verification_binding_from_name_and_descriptor(
             binding_name,
             &binding_descriptor,
-            &ext_payload_schema,
         )?;
         deployments.push(CoreExtDeploymentProfile {
             ext_id: item.ext_id,
@@ -5472,8 +5481,8 @@ mod tests {
     }
 
     #[test]
-    fn core_ext_profiles_reject_native_binding_on_live_runtime_path() {
-        let err = core_ext_profiles_from_json(
+    fn core_ext_profiles_accept_native_binding_on_harness_path() {
+        let profiles = core_ext_profiles_from_json(
             &[CoreExtProfileJson {
                 ext_id: 9,
                 activation_height: 42,
@@ -5485,7 +5494,12 @@ mod tests {
             [0u8; 32],
             "",
         )
-        .unwrap_err();
-        assert!(err.contains("unsupported core_ext binding"));
+        .expect("profiles");
+        let active = profiles.active_profiles_at_height(42).expect("active");
+        assert_eq!(active.active.len(), 1);
+        assert!(matches!(
+            active.active[0].verification_binding,
+            rubin_consensus::CoreExtVerificationBinding::NativeVerifySig
+        ));
     }
 }

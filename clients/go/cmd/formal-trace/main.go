@@ -130,8 +130,8 @@ type coreExtProfileJSON struct {
 	ExtPayloadSchemaHex  string  `json:"ext_payload_schema_hex,omitempty"`
 }
 
-func traceCoreExtBindingIsSupported(binding string) error {
-	_, err := consensus.NormalizeLiveCoreExtBindingName(binding)
+func validateTraceCoreExtBinding(binding string) error {
+	_, err := consensus.NormalizeCoreExtBindingName(binding)
 	return err
 }
 
@@ -142,7 +142,7 @@ func buildCoreExtProfiles(items []coreExtProfileJSON) (consensus.CoreExtProfileP
 	deployments := make([]consensus.CoreExtDeploymentProfile, 0, len(items))
 	for _, item := range items {
 		binding := strings.TrimSpace(item.Binding)
-		if err := traceCoreExtBindingIsSupported(binding); err != nil {
+		if err := validateTraceCoreExtBinding(binding); err != nil {
 			return nil, err
 		}
 		bindingDescriptor, err := decodeOptionalTraceHexBytes("binding_descriptor_hex", item.BindingDescriptorHex)
@@ -153,7 +153,12 @@ func buildCoreExtProfiles(items []coreExtProfileJSON) (consensus.CoreExtProfileP
 		if err != nil {
 			return nil, err
 		}
-		verifySigExtFn, err := consensus.ParseLiveCoreExtVerifySigExtBinding(binding, bindingDescriptor, extPayloadSchema)
+		// formal-trace replays helper/conformance fixtures and must preserve
+		// non-live bindings so negative vectors reach consensus validation.
+		if binding == consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 && len(extPayloadSchema) == 0 {
+			return nil, fmt.Errorf("core_ext binding %s requires ext_payload_schema_hex", consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
+		}
+		verifySigExtFn, err := consensus.ParseCoreExtVerifySigExtBinding(binding, bindingDescriptor)
 		if err != nil {
 			return nil, err
 		}

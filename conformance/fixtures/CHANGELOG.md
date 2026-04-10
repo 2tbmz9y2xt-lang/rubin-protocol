@@ -13,7 +13,7 @@ Policy:
 
 Причина:
 - live runtime path больше не принимает `native_verify_sig`/empty binding как authority для `CORE_EXT`;
-- executable fixtures должны идти через тот же manifest-derived OpenSSL digest32 binding, что и live Go/Rust loaders;
+- executable fixtures должны идти через тот же manifest-derived OpenSSL digest32 binding, что и live Go/Rust loaders, кроме явных negative-case векторов, которые специально фиксируют reject для `native_verify_sig`;
 - historical retention остаётся отдельной archival boundary, а не частью live CLI/node config surface.
 
 Инструменты:

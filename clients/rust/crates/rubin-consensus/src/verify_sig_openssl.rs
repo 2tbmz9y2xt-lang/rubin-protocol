@@ -495,7 +495,7 @@ fn runtime_suite_params_for_verification(
     params.ok_or_else(|| {
         TxError::new(
             ErrorCode::TxErrSigAlgInvalid,
-            "verify_sig_with_registry: suite not registered",
+            "verify_sig: unsupported suite_id",
         )
     })
 }

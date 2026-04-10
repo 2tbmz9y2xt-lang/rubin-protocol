@@ -17,22 +17,41 @@ type CoreExtOpenSSLDigest32BindingDescriptor struct {
 	SigLen     int
 }
 
+// NormalizeCoreExtBindingName canonicalizes the repository-wide binding name
+// vocabulary shared by helper, archival, and conformance surfaces.
+func NormalizeCoreExtBindingName(binding string) (string, error) {
+	binding = strings.TrimSpace(binding)
+	switch binding {
+	case "", "native_verify_sig", CoreExtBindingNameVerifySigExtOpenSSLDigest32V1:
+		return binding, nil
+	default:
+		return "", fmt.Errorf("unsupported core_ext binding: %q", binding)
+	}
+}
+
 // NormalizeLiveCoreExtBindingName enforces the current chain-instance live
 // manifest contract. In the current repository baseline, live CORE_EXT
 // verification is pinned to the OpenSSL digest32 binding; native/empty
 // bindings remain non-live helper surfaces and must not reach runtime loaders.
 func NormalizeLiveCoreExtBindingName(binding string) (string, error) {
-	binding = strings.TrimSpace(binding)
+	binding, err := NormalizeCoreExtBindingName(binding)
+	if err != nil {
+		return "", err
+	}
 	switch binding {
 	case CoreExtBindingNameVerifySigExtOpenSSLDigest32V1:
 		return binding, nil
 	default:
-		return "", fmt.Errorf("unsupported core_ext binding: %s", binding)
+		return "", fmt.Errorf("unsupported core_ext binding: %q", binding)
 	}
 }
 
 func ParseCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte) (CoreExtVerifySigExtFunc, error) {
-	binding = strings.TrimSpace(binding)
+	var err error
+	binding, err = NormalizeCoreExtBindingName(binding)
+	if err != nil {
+		return nil, err
+	}
 	switch binding {
 	case "", "native_verify_sig":
 		return nil, nil
@@ -45,7 +64,7 @@ func ParseCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte) (
 			return verifyCoreExtOpenSSLDigest32(desc, pubkey, signature, digest32)
 		}, nil
 	default:
-		return nil, fmt.Errorf("unsupported core_ext binding: %s", binding)
+		return nil, fmt.Errorf("unsupported core_ext binding: %q", binding)
 	}
 }
 

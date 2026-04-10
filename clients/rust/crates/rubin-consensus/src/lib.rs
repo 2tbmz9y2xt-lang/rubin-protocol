@@ -57,7 +57,7 @@ pub use core_ext::{
     core_ext_openssl_digest32_binding_descriptor_bytes, core_ext_profile_set_anchor_v1,
     core_ext_verification_binding_from_name,
     core_ext_verification_binding_from_name_and_descriptor,
-    live_core_ext_verification_binding_from_name_and_descriptor,
+    live_core_ext_verification_binding_from_name_and_descriptor, normalize_core_ext_binding_name,
     normalize_live_core_ext_binding_name, parse_core_ext_covenant_data,
     parse_core_ext_openssl_digest32_binding_descriptor, validate_core_ext_spend,
     CoreExtActiveProfile, CoreExtDeploymentProfile, CoreExtDeploymentProfiles,

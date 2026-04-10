@@ -424,8 +424,11 @@ func parseOptionalHexBytes(name, value string) ([]byte, error) {
 	return raw, nil
 }
 
-func runtimeCoreExtBindingIsSupported(binding string) error {
-	_, err := consensus.NormalizeLiveCoreExtBindingName(binding)
+// CLI core_ext_profiles are a conformance/archive harness surface, not the
+// live node genesis loader. They accept the repository-wide binding vocabulary
+// so negative vectors can still reach consensus validation.
+func validateHarnessCoreExtBinding(binding string) error {
+	_, err := consensus.NormalizeCoreExtBindingName(binding)
 	return err
 }
 
@@ -442,7 +445,7 @@ func buildCoreExtDeployments(items []CoreExtProfileJSON) ([]consensus.CoreExtDep
 				item.ExtID,
 			)
 		}
-		if err := runtimeCoreExtBindingIsSupported(binding); err != nil {
+		if err := validateHarnessCoreExtBinding(binding); err != nil {
 			return nil, err
 		}
 		bindingDescriptor, err := parseOptionalHexBytes("binding_descriptor_hex", item.BindingDescriptorHex)
@@ -475,7 +478,14 @@ func buildCoreExtDeployments(items []CoreExtProfileJSON) ([]consensus.CoreExtDep
 }
 
 func parseRuntimeCoreExtBinding(binding string, bindingDescriptor []byte, extPayloadSchema []byte) (consensus.CoreExtVerifySigExtFunc, error) {
-	return consensus.ParseLiveCoreExtVerifySigExtBinding(binding, bindingDescriptor, extPayloadSchema)
+	binding, err := consensus.NormalizeCoreExtBindingName(binding)
+	if err != nil {
+		return nil, err
+	}
+	if binding == consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 && len(extPayloadSchema) == 0 {
+		return nil, fmt.Errorf("core_ext binding %s requires ext_payload_schema_hex", consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
+	}
+	return consensus.ParseCoreExtVerifySigExtBinding(binding, bindingDescriptor)
 }
 
 func buildCoreExtProfiles(items []CoreExtProfileJSON, chainIDHex string, expectedSetAnchorHex string) (consensus.CoreExtProfileProvider, error) {

@@ -433,11 +433,23 @@ pub fn core_ext_verification_binding_from_name(
     core_ext_verification_binding_from_name_and_descriptor(binding_name, &[])
 }
 
+pub fn normalize_core_ext_binding_name(binding_name: &str) -> Result<&'static str, String> {
+    let binding_name = binding_name.trim();
+    match binding_name {
+        "" => Ok(""),
+        "native_verify_sig" => Ok("native_verify_sig"),
+        CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1 => {
+            Ok(CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1)
+        }
+        _ => Err(format!("unsupported core_ext binding: {binding_name:?}")),
+    }
+}
+
 pub fn core_ext_verification_binding_from_name_and_descriptor(
     binding_name: &str,
     binding_descriptor: &[u8],
 ) -> Result<CoreExtVerificationBinding, String> {
-    let binding_name = binding_name.trim();
+    let binding_name = normalize_core_ext_binding_name(binding_name)?;
     match binding_name {
         "" | "native_verify_sig" => Ok(CoreExtVerificationBinding::NativeVerifySig),
         CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1 => {
@@ -445,17 +457,17 @@ pub fn core_ext_verification_binding_from_name_and_descriptor(
                 parse_core_ext_openssl_digest32_binding_descriptor(binding_descriptor)?,
             ))
         }
-        _ => Err(format!("unsupported core_ext binding: {binding_name}")),
+        _ => Err(format!("unsupported core_ext binding: {binding_name:?}")),
     }
 }
 
 pub fn normalize_live_core_ext_binding_name(binding_name: &str) -> Result<&'static str, String> {
-    let binding_name = binding_name.trim();
+    let binding_name = normalize_core_ext_binding_name(binding_name)?;
     match binding_name {
         CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1 => {
             Ok(CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1)
         }
-        _ => Err(format!("unsupported core_ext binding: {binding_name}")),
+        _ => Err(format!("unsupported core_ext binding: {binding_name:?}")),
     }
 }
 

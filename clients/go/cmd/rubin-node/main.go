@@ -693,7 +693,7 @@ func decodeOptionalHexBytesField(name, value string) ([]byte, error) {
 	return raw, nil
 }
 
-func genesisCoreExtBindingIsSupported(binding string) error {
+func validateGenesisCoreExtBinding(binding string) error {
 	_, err := consensus.NormalizeLiveCoreExtBindingName(binding)
 	return err
 }
@@ -708,7 +708,7 @@ func buildGenesisCoreExtProfiles(items []genesisCoreExtProfile, chainID [32]byte
 				item.ExtID,
 			)
 		}
-		if err := genesisCoreExtBindingIsSupported(binding); err != nil {
+		if err := validateGenesisCoreExtBinding(binding); err != nil {
 			return nil, err
 		}
 		bindingDescriptor, err := decodeOptionalHexBytesField("binding_descriptor_hex", item.BindingDescriptorHex)

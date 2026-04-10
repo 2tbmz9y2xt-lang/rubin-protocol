@@ -431,7 +431,7 @@ fn core_ext_deployments_from_json(
             ));
         }
         if !genesis_core_ext_binding_supported(binding_name) {
-            return Err(format!("unsupported core_ext binding: {}", item.binding));
+            return Err(format!("unsupported core_ext binding: {:?}", item.binding));
         }
         let binding_descriptor =
             decode_optional_hex_bytes("binding_descriptor_hex", &item.binding_descriptor_hex)?;

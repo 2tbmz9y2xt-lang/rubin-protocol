@@ -48,7 +48,8 @@ func verifyMLDSAKeyAndSigWithCache(w WitnessItem, expectedKeyID [32]byte, tx *Tx
 
 // verifyKeyAndSigWithRegistryCache verifies a witness item's key binding and
 // cryptographic signature using registry-aware algorithm dispatch. When registry
-// is nil, falls back to the hardcoded ML-DSA-87 verification path.
+// is nil, the canonical default live registry is used; callers do not get a
+// separate implicit legacy verifier path.
 func verifyKeyAndSigWithRegistryCache(w WitnessItem, expectedKeyID [32]byte, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte, cache *SighashV1PrehashCache, registry *SuiteRegistry, context string) error {
 	if sha3_256(w.Pubkey) != expectedKeyID {
 		return txerr(TX_ERR_SIG_INVALID, context+" key binding mismatch")
