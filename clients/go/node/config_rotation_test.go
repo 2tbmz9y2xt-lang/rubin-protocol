@@ -288,7 +288,7 @@ func TestBuildRotationProvider_ExplicitSuiteRegistryWithoutDescriptor(t *testing
 	}
 }
 
-func TestBuildRotationProvider_ProductionExplicitSuiteRegistryWithoutDescriptor(t *testing.T) {
+func TestBuildRotationProvider_ProductionExplicitSuiteRegistryWithoutDescriptorDoesNotActivateRotation(t *testing.T) {
 	for _, network := range productionRotationNetworks {
 		t.Run(quotedSubtestName(network), func(t *testing.T) {
 			cfg := DefaultConfig()
@@ -306,11 +306,11 @@ func TestBuildRotationProvider_ProductionExplicitSuiteRegistryWithoutDescriptor(
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if rot == nil || reg == nil {
-				t.Fatal("expected production suite_registry-only bootstrap to remain available")
+			if rot != nil {
+				t.Fatal("expected compiled empty production schedule to leave rotation nil")
 			}
-			if _, ok := reg.Lookup(0x42); !ok {
-				t.Fatal("expected suite 0x42 in production registry")
+			if reg != nil {
+				t.Fatal("expected production suite_registry-only bootstrap to remain non-authoritative")
 			}
 		})
 	}

@@ -29,8 +29,9 @@ type Config struct {
 }
 
 // RotationConfigJSON is the JSON-serializable rotation descriptor for node config.
-// When present, the node constructs a DescriptorRotationProvider from it.
-// When absent (nil), DefaultRotationProvider is used (ML-DSA-87 at all heights).
+// When present on non-production networks, the node constructs a
+// DescriptorRotationProvider from it. Production networks derive activation
+// only from the compiled schedule artifact.
 type RotationConfigJSON struct {
 	Name         string `json:"name"`
 	OldSuiteID   uint8  `json:"old_suite_id"`
@@ -213,11 +214,12 @@ func (cfg Config) buildSuiteRegistry() (*consensus.SuiteRegistry, error) {
 	return consensus.NewSuiteRegistryFromParams(params), nil
 }
 
-// BuildRotationProvider constructs rotation state from config.
-// Returns (nil, nil) when neither rotation_descriptor nor suite_registry is configured.
-// Returns DefaultRotationProvider with a non-nil registry for suite_registry-only bootstrap.
+// BuildRotationProvider constructs node startup rotation state.
+// On mainnet/testnet, activation authority comes only from the compiled
+// production schedule artifact; local suite_registry remains validated input
+// but never becomes a live activation or live binding source by itself.
 func (cfg Config) BuildRotationProvider() (consensus.RotationProvider, *consensus.SuiteRegistry, error) {
-	registry, err := cfg.buildSuiteRegistry()
+	explicitRegistry, err := cfg.buildSuiteRegistry()
 	if err != nil {
 		return nil, nil, fmt.Errorf("suite_registry: %w", err)
 	}
@@ -231,13 +233,24 @@ func (cfg Config) BuildRotationProvider() (consensus.RotationProvider, *consensu
 	if cfg.RotationDescriptor != nil && (network == "mainnet" || network == "testnet") {
 		return nil, nil, errors.New(productionLocalRotationDescriptorErr)
 	}
-	if cfg.RotationDescriptor == nil {
-		if registry == nil {
+	if network == "mainnet" || network == "testnet" {
+		desc, registry, err := productionRotationDescriptorForNetwork(network)
+		if err != nil {
+			return nil, nil, err
+		}
+		if desc == nil {
 			return nil, nil, nil
 		}
-		return consensus.DefaultRotationProvider{}, registry, nil
+		return consensus.DescriptorRotationProvider{Descriptor: *desc}, registry, nil
+	}
+	if cfg.RotationDescriptor == nil {
+		if explicitRegistry == nil {
+			return nil, nil, nil
+		}
+		return consensus.DefaultRotationProvider{}, explicitRegistry, nil
 	}
 	rd := cfg.RotationDescriptor
+	registry := explicitRegistry
 	if registry == nil {
 		registry = consensus.DefaultSuiteRegistry()
 	}
@@ -346,7 +359,11 @@ func ValidateConfig(cfg Config) error {
 	if _, err := cfg.buildSuiteRegistry(); err != nil {
 		return fmt.Errorf("suite_registry: %w", err)
 	}
-	if cfg.RotationDescriptor != nil {
+	network, err := canonicalConfigNetworkName(cfg.Network)
+	if err != nil {
+		return err
+	}
+	if cfg.RotationDescriptor != nil || network == "mainnet" || network == "testnet" {
 		if _, _, err := cfg.BuildRotationProvider(); err != nil {
 			return err
 		}

@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 
+use crate::production_rotation_schedule::production_rotation_descriptor_for_network;
 use rubin_consensus::constants::{
     MAX_WITNESS_BYTES_PER_TX, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87,
     SUITE_ID_SENTINEL, VERIFY_COST_ML_DSA_87,
@@ -43,8 +44,9 @@ struct GenesisPack {
 }
 
 /// JSON-serializable rotation descriptor for genesis/config.
-/// When present, constructs a DescriptorRotationProvider.
-/// When absent, DefaultRotationProvider is used (ML-DSA-87 at all heights).
+/// When present on non-production networks, constructs a
+/// DescriptorRotationProvider. Production networks derive activation only from
+/// the compiled schedule artifact.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 struct GenesisRotationDescriptor {
     name: String,
@@ -121,8 +123,9 @@ pub struct LoadedGenesisConfig {
     pub chain_id: [u8; 32],
     pub genesis_hash: Option<[u8; 32]>,
     pub core_ext_deployments: CoreExtDeploymentProfiles,
-    /// Optional SuiteContext built from rotation_descriptor or suite_registry config.
-    /// None means use the implicit default registry/provider with no explicit suite overlay.
+    /// Optional SuiteContext built from non-production config or the compiled
+    /// production activation schedule. None means use the implicit default
+    /// registry/provider with no explicit suite overlay.
     pub suite_context: Option<crate::sync::SuiteContext>,
 }
 
@@ -290,14 +293,23 @@ fn build_suite_context_from_descriptor(
             normalized_network, SUPPORTED_ROTATION_NETWORK_NAMES_CSV,
         )
     })?;
-    let registry = build_suite_registry_from_json(suite_registry)?
-        .unwrap_or_else(SuiteRegistry::default_registry);
+    let explicit_registry = build_suite_registry_from_json(suite_registry)?;
+    if is_v1_production_rotation_network_normalized(normalized_network.as_ref()) {
+        if desc.is_some() {
+            return Err(PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR.to_string());
+        }
+        return match production_rotation_descriptor_for_network(normalized_network.as_ref())? {
+            Some((descriptor, registry)) => Ok(Some(crate::sync::SuiteContext {
+                rotation: Arc::new(DescriptorRotationProvider { descriptor }),
+                registry: Arc::new(registry),
+            })),
+            None => Ok(None),
+        };
+    }
+    let registry = explicit_registry.unwrap_or_else(SuiteRegistry::default_registry);
     let registry = Arc::new(registry);
     let rotation: Arc<dyn rubin_consensus::RotationProvider + Send + Sync> = match desc {
         Some(rd) => {
-            if is_v1_production_rotation_network_normalized(normalized_network.as_ref()) {
-                return Err(PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR.to_string());
-            }
             let descriptor = CryptoRotationDescriptor {
                 name: rd.name.clone(),
                 old_suite_id: rd.old_suite_id,
@@ -715,7 +727,8 @@ mod tests {
     }
 
     #[test]
-    fn load_genesis_config_accepts_production_suite_registry_without_rotation_descriptor() {
+    fn load_genesis_config_production_suite_registry_without_rotation_descriptor_does_not_activate()
+    {
         for (case_idx, network) in production_rotation_networks().into_iter().enumerate() {
             let dir = std::env::temp_dir().join(format!(
                 "rubin-node-genesis-suite-registry-production-{}-{}",
@@ -740,9 +753,10 @@ mod tests {
             .expect("write");
 
             let cfg = load_genesis_config(Some(&path), network).expect("load");
-            let suite_context = cfg.suite_context.expect("suite context");
-            assert!(suite_context.registry.lookup(SUITE_ID_ML_DSA_87).is_some());
-            assert!(suite_context.registry.lookup(66).is_some());
+            assert!(
+                cfg.suite_context.is_none(),
+                "expected explicit empty production schedule to keep suite_context=None for {network}"
+            );
 
             std::fs::remove_dir_all(&dir).expect("cleanup");
         }
