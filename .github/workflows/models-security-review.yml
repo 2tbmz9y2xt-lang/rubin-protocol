@@ -154,6 +154,7 @@ jobs:
               `git diff --diff-filter=ACMR --name-only ${baseSha} ${headSha}`,
               { maxBuffer: 20 * 1024 * 1024 }
             ).toString().split('\n').map(s => s.trim()).filter(isReviewRelevantFile);
+            const changedFilesSet = new Set(changedFiles);
 
             const readChangedFile = (file) => {
               const fullPath = path.resolve(repoRoot, file);
@@ -262,7 +263,7 @@ jobs:
                 if (!modFile) continue;
                 const modRel = path.relative(repoRoot, modFile);
                 // Skip files already in changedFilePayload
-                if (changedFiles.includes(modRel)) continue;
+                if (changedFilesSet.has(modRel)) continue;
 
                 let modContent;
                 try { modContent = fs.readFileSync(modFile, 'utf8'); } catch { continue; }
@@ -309,8 +310,6 @@ jobs:
               // Consensus reference clients
               ['clients/go/consensus/wire_read.go',   'clients/rust/crates/rubin-consensus/src/wire_read.rs'],
               ['clients/go/consensus/tx_helpers.go',   'clients/rust/crates/rubin-consensus/src/tx_helpers.rs'],
-              ['clients/go/consensus/transaction.go',  'clients/rust/crates/rubin-consensus/src/transaction.rs'],
-              ['clients/go/consensus/block.go',        'clients/rust/crates/rubin-consensus/src/block.rs'],
               ['clients/go/consensus/block_parse.go',   'clients/rust/crates/rubin-consensus/src/block.rs'],
               ['clients/go/consensus/constants.go',    'clients/rust/crates/rubin-consensus/src/constants.rs'],
               ['clients/go/consensus/connect_block_inmem.go', 'clients/rust/crates/rubin-consensus/src/connect_block_inmem.rs'],
@@ -400,8 +399,8 @@ jobs:
               // Find the parity counterpart (either direction)
               for (const [goFile, rsFile] of parityMap) {
                 let counterpart = null;
-                if (file === goFile && !changedFiles.includes(rsFile)) counterpart = rsFile;
-                else if (file === rsFile && !changedFiles.includes(goFile)) counterpart = goFile;
+                if (file === goFile && !changedFilesSet.has(rsFile)) counterpart = rsFile;
+                else if (file === rsFile && !changedFilesSet.has(goFile)) counterpart = goFile;
                 if (!counterpart) continue;
                 if (parityCounterpartsSeen.has(counterpart)) continue;
                 const content = readChangedFile(counterpart);
@@ -523,6 +522,22 @@ jobs:
 
             try {
               core.info(`Trying model: ${modelId}`);
+              const userContentPreamble = 'Review this PR diff for security issues. Be strict and skeptical, but follow the system severity definitions — do not inflate node/bootstrap/API differences to CRITICAL or HIGH without a proven consensus path.\n\nDIFF:\n';
+              let userContent = userContentPreamble + diff +
+                (changedFilePayload ? `\n\n---\nFULL CHANGED FILES (use to verify definitions before claiming anything missing):\n${changedFilePayload}` : '') +
+                dependencyContext + parityContext + previousFindings;
+              const MAX_USER_CHARS = 260000;
+              core.info(
+                `security-review payload sizes: diff=${diff.length} changedFiles=${changedFilePayload.length} ` +
+                `dep=${dependencyContext.length} parity=${parityContext.length} prev=${previousFindings.length} user=${userContent.length}`
+              );
+              if (userContent.length > MAX_USER_CHARS) {
+                core.warning(
+                  `User message length ${userContent.length} exceeds cap ${MAX_USER_CHARS}; truncating with explicit notice`
+                );
+                userContent = userContent.slice(0, MAX_USER_CHARS) +
+                  '\n\n[TRUNCATED: user payload exceeded workflow cap; treat tail sections as unreviewed]\n';
+              }
               const response = await fetch(
                 'https://models.github.ai/inference/chat/completions',
                 {
@@ -535,7 +550,7 @@ jobs:
                     model: modelId,
                     messages: [
                       { role: 'system', content: systemPrompt },
-                      { role: 'user', content: `Review this PR diff for security issues. Be strict and skeptical, but follow the system severity definitions — do not inflate node/bootstrap/API differences to CRITICAL or HIGH without a proven consensus path.\n\nDIFF:\n${diff}${changedFilePayload ? `\n\n---\nFULL CHANGED FILES (use to verify definitions before claiming anything missing):\n${changedFilePayload}` : ''}${dependencyContext}${parityContext}${previousFindings}` }
+                      { role: 'user', content: userContent }
                     ],
                     temperature: 0.2,
                     top_p: 0.9
