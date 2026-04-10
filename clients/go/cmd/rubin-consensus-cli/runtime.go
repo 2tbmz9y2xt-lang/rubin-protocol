@@ -176,10 +176,6 @@ const (
 	rotationSunsetHeightOrderMsg      = "rotation: sunset_height ("
 )
 
-func matchesExactOrWrappedValidationErr(msg, match string) bool {
-	return msg == match || strings.HasPrefix(msg, match) || strings.Contains(msg, ": "+match)
-}
-
 func matchesWrappedPrefixValidationErr(msg, match string) bool {
 	return strings.HasPrefix(msg, match) || strings.Contains(msg, ": "+match)
 }
@@ -191,13 +187,13 @@ func matchesWrappedSuffixValidationErr(msg, match string) bool {
 func sanitizeRotationValidationErr(err error) string {
 	msg := err.Error()
 	switch {
-	case matchesExactOrWrappedValidationErr(msg, consensus.RotationV1ProductionAtMostOneDescriptorErrStem):
+	case matchesWrappedPrefixValidationErr(msg, consensus.RotationV1ProductionAtMostOneDescriptorErrStem):
 		return rotationTooManyDescriptorsErr
-	case matchesExactOrWrappedValidationErr(msg, consensus.RotationV1ProductionFiniteH4RequiredErrStem):
+	case matchesWrappedPrefixValidationErr(msg, consensus.RotationV1ProductionFiniteH4RequiredErrStem):
 		return rotationFiniteH4RequiredErr
-	case matchesExactOrWrappedValidationErr(msg, "rotation: overlapping rotations"):
+	case matchesWrappedPrefixValidationErr(msg, "rotation: overlapping rotations"):
 		return rotationOverlappingDescriptorsErr
-	case matchesExactOrWrappedValidationErr(msg, rotationNameRequiredMsg):
+	case matchesWrappedPrefixValidationErr(msg, rotationNameRequiredMsg):
 		return rotationInvalidDescriptorErr
 	case matchesWrappedSuffixValidationErr(msg, "must differ from new suite"):
 		return rotationEqualSuiteIDsErr

@@ -45,10 +45,6 @@ const ROTATION_EQUAL_SUITE_IDS_MSG: &str = "must differ from new suite";
 const ROTATION_CREATE_HEIGHT_ORDER_MSG: &str = "rotation: create_height (";
 const ROTATION_SUNSET_HEIGHT_ORDER_MSG: &str = "rotation: sunset_height (";
 
-fn matches_exact_or_wrapped_validation_err(err: &str, expected: &str) -> bool {
-    err == expected || err.starts_with(expected) || err.contains(&format!(": {expected}"))
-}
-
 fn matches_wrapped_prefix_validation_err(err: &str, expected: &str) -> bool {
     err.starts_with(expected) || err.contains(&format!(": {expected}"))
 }
@@ -58,19 +54,19 @@ fn matches_wrapped_suffix_validation_err(err: &str, expected: &str) -> bool {
 }
 
 fn sanitize_rotation_validation_err(err: &str) -> &'static str {
-    if matches_exact_or_wrapped_validation_err(
+    if matches_wrapped_prefix_validation_err(
         err,
         ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM,
     ) {
         ROTATION_TOO_MANY_DESCRIPTORS_ERR
-    } else if matches_exact_or_wrapped_validation_err(
+    } else if matches_wrapped_prefix_validation_err(
         err,
         ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM,
     ) {
         ROTATION_FINITE_H4_REQUIRED_ERR
-    } else if matches_exact_or_wrapped_validation_err(err, ROTATION_OVERLAPPING_DESCRIPTORS_MSG) {
+    } else if matches_wrapped_prefix_validation_err(err, ROTATION_OVERLAPPING_DESCRIPTORS_MSG) {
         ROTATION_OVERLAPPING_DESCRIPTORS_ERR
-    } else if matches_exact_or_wrapped_validation_err(err, ROTATION_NAME_REQUIRED_MSG) {
+    } else if matches_wrapped_prefix_validation_err(err, ROTATION_NAME_REQUIRED_MSG) {
         ROTATION_INVALID_DESCRIPTOR_ERR
     } else if matches_wrapped_suffix_validation_err(err, ROTATION_EQUAL_SUITE_IDS_MSG) {
         ROTATION_EQUAL_SUITE_IDS_ERR
