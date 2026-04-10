@@ -430,23 +430,101 @@ pub fn core_ext_profile_set_anchor_v1(
 pub fn core_ext_verification_binding_from_name(
     binding_name: &str,
 ) -> Result<CoreExtVerificationBinding, String> {
-    core_ext_verification_binding_from_name_and_descriptor(binding_name, &[])
+    core_ext_verification_binding_from_name_and_descriptor(binding_name, &[], &[])
+}
+
+fn unsupported_core_ext_binding_error(binding_name: &str) -> String {
+    format!("unsupported core_ext binding: {binding_name:?}")
+}
+
+pub fn normalize_core_ext_binding_name(binding_name: &str) -> Result<&'static str, String> {
+    let binding_name = binding_name.trim();
+    match binding_name {
+        "" => Ok(""),
+        "native_verify_sig" => Ok("native_verify_sig"),
+        CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1 => {
+            Ok(CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1)
+        }
+        _ => Err(unsupported_core_ext_binding_error(binding_name)),
+    }
 }
 
 pub fn core_ext_verification_binding_from_name_and_descriptor(
     binding_name: &str,
     binding_descriptor: &[u8],
+    ext_payload_schema: &[u8],
 ) -> Result<CoreExtVerificationBinding, String> {
-    let binding_name = binding_name.trim();
+    let binding_name = normalize_core_ext_binding_name(binding_name)?;
+    core_ext_verification_binding_from_normalized_name_and_descriptor(
+        binding_name,
+        binding_descriptor,
+        ext_payload_schema,
+    )
+}
+
+pub fn core_ext_verification_binding_from_normalized_name_and_descriptor(
+    binding_name: &str,
+    binding_descriptor: &[u8],
+    ext_payload_schema: &[u8],
+) -> Result<CoreExtVerificationBinding, String> {
     match binding_name {
         "" | "native_verify_sig" => Ok(CoreExtVerificationBinding::NativeVerifySig),
         CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1 => {
+            if ext_payload_schema.is_empty() {
+                return Err(format!(
+                    "core_ext binding {} requires ext_payload_schema_hex",
+                    CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+                ));
+            }
             Ok(CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(
                 parse_core_ext_openssl_digest32_binding_descriptor(binding_descriptor)?,
             ))
         }
-        _ => Err(format!("unsupported core_ext binding: {binding_name}")),
+        _ => Err(unsupported_core_ext_binding_error(binding_name)),
     }
+}
+
+/// Live/runtime helper for callers that already normalized the binding through
+/// `normalize_live_core_ext_binding_name` and still need fail-closed
+/// ext_payload_schema enforcement on the active chain path.
+pub fn live_core_ext_verification_binding_from_normalized_name_and_descriptor(
+    binding_name: &str,
+    binding_descriptor: &[u8],
+    ext_payload_schema: &[u8],
+) -> Result<CoreExtVerificationBinding, String> {
+    match binding_name {
+        CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1 => {
+            core_ext_verification_binding_from_normalized_name_and_descriptor(
+                binding_name,
+                binding_descriptor,
+                ext_payload_schema,
+            )
+        }
+        _ => Err(unsupported_core_ext_binding_error(binding_name)),
+    }
+}
+
+pub fn normalize_live_core_ext_binding_name(binding_name: &str) -> Result<&'static str, String> {
+    let binding_name = normalize_core_ext_binding_name(binding_name)?;
+    match binding_name {
+        CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1 => {
+            Ok(CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1)
+        }
+        _ => Err(unsupported_core_ext_binding_error(binding_name)),
+    }
+}
+
+pub fn live_core_ext_verification_binding_from_name_and_descriptor(
+    binding_name: &str,
+    binding_descriptor: &[u8],
+    ext_payload_schema: &[u8],
+) -> Result<CoreExtVerificationBinding, String> {
+    let binding_name = normalize_live_core_ext_binding_name(binding_name)?;
+    live_core_ext_verification_binding_from_normalized_name_and_descriptor(
+        binding_name,
+        binding_descriptor,
+        ext_payload_schema,
+    )
 }
 
 fn core_ext_supported_openssl_alg(openssl_alg: &str) -> Option<(u64, u64)> {
@@ -2304,6 +2382,24 @@ mod tests {
             native_named,
             CoreExtVerificationBinding::NativeVerifySig
         ));
+        let native_normalized =
+            core_ext_verification_binding_from_normalized_name_and_descriptor("", &[], &[])
+                .expect("normalized empty native");
+        assert!(matches!(
+            native_normalized,
+            CoreExtVerificationBinding::NativeVerifySig
+        ));
+        let native_named_normalized =
+            core_ext_verification_binding_from_normalized_name_and_descriptor(
+                "native_verify_sig",
+                &[],
+                &[],
+            )
+            .expect("normalized native alias");
+        assert!(matches!(
+            native_named_normalized,
+            CoreExtVerificationBinding::NativeVerifySig
+        ));
         let descriptor = core_ext_openssl_digest32_binding_descriptor_bytes(
             "ML-DSA-87",
             ML_DSA_87_PUBKEY_BYTES,
@@ -2313,15 +2409,97 @@ mod tests {
         let openssl = core_ext_verification_binding_from_name_and_descriptor(
             &format!("  {CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1}\n"),
             &descriptor,
+            &[0xb2],
         )
         .expect("openssl binding");
         assert!(matches!(
             openssl,
             CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(_)
         ));
+        let err = core_ext_verification_binding_from_name_and_descriptor(
+            CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
+            &descriptor,
+            &[],
+        )
+        .expect_err("missing schema must fail");
+        assert_eq!(
+            err,
+            format!(
+                "core_ext binding {} requires ext_payload_schema_hex",
+                CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+            )
+        );
         let err =
             core_ext_verification_binding_from_name("unsupported").expect_err("unsupported bind");
         assert!(err.contains("unsupported core_ext binding"));
+    }
+
+    #[test]
+    fn live_core_ext_binding_helper_rejects_non_manifest_bindings() {
+        let err = normalize_live_core_ext_binding_name("").expect_err("empty must fail");
+        assert!(err.contains("unsupported core_ext binding"));
+
+        let err = normalize_live_core_ext_binding_name(" native_verify_sig ")
+            .expect_err("native alias must fail");
+        assert!(err.contains("unsupported core_ext binding"));
+
+        let descriptor = core_ext_openssl_digest32_binding_descriptor_bytes(
+            "ML-DSA-87",
+            ML_DSA_87_PUBKEY_BYTES,
+            ML_DSA_87_SIG_BYTES,
+        )
+        .expect("descriptor");
+        let binding = live_core_ext_verification_binding_from_name_and_descriptor(
+            &format!("  {CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1}\n"),
+            &descriptor,
+            &[0xb2],
+        )
+        .expect("live binding");
+        assert!(matches!(
+            binding,
+            CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(_)
+        ));
+
+        let normalized = live_core_ext_verification_binding_from_normalized_name_and_descriptor(
+            CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
+            &descriptor,
+            &[0xb2],
+        )
+        .expect("normalized live binding");
+        assert!(matches!(
+            normalized,
+            CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(_)
+        ));
+
+        let err = live_core_ext_verification_binding_from_normalized_name_and_descriptor(
+            "",
+            &descriptor,
+            &[0xb2],
+        )
+        .expect_err("empty normalized live binding must fail");
+        assert_eq!(err, unsupported_core_ext_binding_error(""));
+
+        let err = live_core_ext_verification_binding_from_normalized_name_and_descriptor(
+            "native_verify_sig",
+            &descriptor,
+            &[0xb2],
+        )
+        .expect_err("native normalized live binding must fail");
+        assert_eq!(err, unsupported_core_ext_binding_error("native_verify_sig"));
+
+        let err = live_core_ext_verification_binding_from_name_and_descriptor(
+            CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
+            &descriptor,
+            &[],
+        )
+        .expect_err("missing schema must fail on live path");
+        assert_eq!(
+            err,
+            format!(
+                "core_ext binding {} requires ext_payload_schema_hex",
+                CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+            )
+        );
     }
 
     #[test]

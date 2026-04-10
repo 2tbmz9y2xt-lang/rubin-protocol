@@ -90,3 +90,21 @@ func TestVerifySig_OpenSSLBackendErrorMapsToSigInvalid(t *testing.T) {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_INVALID)
 	}
 }
+
+func TestDefaultRuntimeSuiteRegistry_CachesSharedInstance(t *testing.T) {
+	first := defaultRuntimeSuiteRegistry()
+	second := defaultRuntimeSuiteRegistry()
+	if first == nil || second == nil {
+		t.Fatalf("expected cached runtime registry")
+	}
+	if first != second {
+		t.Fatalf("expected shared cached runtime registry instance")
+	}
+}
+
+func TestDefaultRuntimeSuiteRegistry_IsCanonicalDefaultLiveManifest(t *testing.T) {
+	reg := defaultRuntimeSuiteRegistry()
+	if !reg.IsCanonicalDefaultLiveManifest() {
+		t.Fatalf("default runtime registry must stay pinned to the canonical live ML-DSA-87 manifest")
+	}
+}

@@ -184,14 +184,23 @@ import (
 )
 
 var (
-	opensslBootstrapOnce      sync.Once
-	opensslBootstrapErr       error
-	opensslConsensusInitOnce  sync.Once
-	opensslConsensusInitErr   error
-	opensslVerifySigOneShotFn = opensslVerifySigOneShot
-	opensslBootstrapFn        = opensslBootstrap
-	opensslConsensusInitFn    = opensslConsensusInit
+	opensslBootstrapOnce       sync.Once
+	opensslBootstrapErr        error
+	opensslConsensusInitOnce   sync.Once
+	opensslConsensusInitErr    error
+	defaultRuntimeRegistryOnce sync.Once
+	defaultRuntimeRegistry     *SuiteRegistry
+	opensslVerifySigOneShotFn  = opensslVerifySigOneShot
+	opensslBootstrapFn         = opensslBootstrap
+	opensslConsensusInitFn     = opensslConsensusInit
 )
+
+func defaultRuntimeSuiteRegistry() *SuiteRegistry {
+	defaultRuntimeRegistryOnce.Do(func() {
+		defaultRuntimeRegistry = DefaultSuiteRegistry()
+	})
+	return defaultRuntimeRegistry
+}
 
 // ensureOpenSSLConsensusInit performs bare OpenSSL initialization for the consensus
 // verification path. It does NOT read any RUBIN_OPENSSL_* environment variables,
@@ -398,21 +407,45 @@ func verifySigWithBinding(binding suiteVerifierBinding, pubkey []byte, signature
 	}
 }
 
+var defaultRuntimeSuiteRegistryForVerification = defaultRuntimeSuiteRegistry
+
+func runtimeVerificationRegistry(registry *SuiteRegistry) (*SuiteRegistry, error) {
+	if registry != nil {
+		return registry, nil
+	}
+	registry = defaultRuntimeSuiteRegistryForVerification()
+	if !registry.IsCanonicalDefaultLiveManifest() {
+		return nil, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: default runtime registry drift")
+	}
+	return registry, nil
+}
+
+func runtimeSuiteParamsForVerification(suiteID uint8, registry *SuiteRegistry) (SuiteParams, error) {
+	registry, err := runtimeVerificationRegistry(registry)
+	if err != nil {
+		return SuiteParams{}, err
+	}
+	params, ok := registry.Lookup(suiteID)
+	if !ok {
+		return SuiteParams{}, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: unsupported suite_id")
+	}
+	return params, nil
+}
+
 // verifySigWithRegistry dispatches signature verification using the suite
 // registry for suite lookup instead of hardcoded suite_id → algorithm mapping.
-// Falls back to legacy verifySig when registry is nil.
+// A nil registry means "use the canonical default live manifest registry", not
+// "silently switch to a separate legacy verifier path". The canonical nil path
+// also fail-closes if the cached default registry drifts away from the current
+// single-suite ML-DSA-87 live manifest contract.
 //
 // The registry no longer gets to select the verifier backend implicitly through
 // AlgName alone. Runtime verification resolves an explicit v1 binding from
 // the suite parameters so existing suites cannot switch backend silently.
 func verifySigWithRegistry(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte, registry *SuiteRegistry) (bool, error) {
-	if registry == nil {
-		return verifySig(suiteID, pubkey, signature, digest32)
-	}
-
-	params, ok := registry.Lookup(suiteID)
-	if !ok {
-		return false, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: unsupported suite_id")
+	params, err := runtimeSuiteParamsForVerification(suiteID, registry)
+	if err != nil {
+		return false, err
 	}
 	if err := ensureOpenSSLConsensusInit(); err != nil {
 		return false, err

@@ -32,47 +32,28 @@ func TestBuildCoreExtProfilesEmpty(t *testing.T) {
 	}
 }
 
-func TestBuildCoreExtProfilesNativeBinding(t *testing.T) {
-	provider, err := buildCoreExtProfiles([]CoreExtProfileJSON{
-		{
+func TestBuildCoreExtProfilesAcceptsNativeBindingOnHarnessPath(t *testing.T) {
+	for _, binding := range []string{"", " native_verify_sig \n"} {
+		provider, err := buildCoreExtProfiles([]CoreExtProfileJSON{{
 			ExtID:               7,
 			ActivationHeight:    5,
 			AllowedSuiteIDs:     []uint8{1, 3},
-			Binding:             " native_verify_sig \n",
+			Binding:             binding,
 			ExtPayloadSchemaHex: "b2",
-		},
-	}, "", "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if provider == nil {
-		t.Fatalf("expected non-nil provider")
-	}
-
-	if _, ok, err := provider.LookupCoreExtProfile(7, 4); err != nil {
-		t.Fatalf("lookup failed: %v", err)
-	} else if ok {
-		t.Fatalf("profile must be inactive before activation height")
-	}
-
-	profile, ok, err := provider.LookupCoreExtProfile(7, 5)
-	if err != nil {
-		t.Fatalf("lookup failed: %v", err)
-	}
-	if !ok {
-		t.Fatalf("expected active profile for ext_id=7")
-	}
-	if !profile.Active {
-		t.Fatalf("expected profile active")
-	}
-	if profile.VerifySigExtFn != nil {
-		t.Fatalf("expected nil VerifySigExtFn for native binding")
-	}
-	if _, has := profile.AllowedSuites[1]; !has {
-		t.Fatalf("expected allowed suite 1")
-	}
-	if _, has := profile.AllowedSuites[3]; !has {
-		t.Fatalf("expected allowed suite 3")
+		}}, "", "")
+		if err != nil {
+			t.Fatalf("expected harness binding acceptance for %q, got %v", binding, err)
+		}
+		profile, ok, err := provider.LookupCoreExtProfile(7, 5)
+		if err != nil {
+			t.Fatalf("LookupCoreExtProfile(%q): %v", binding, err)
+		}
+		if !ok {
+			t.Fatalf("expected profile for %q", binding)
+		}
+		if profile.VerifySigExtFn != nil {
+			t.Fatalf("expected native harness binding %q to keep nil VerifySigExtFn", binding)
+		}
 	}
 }
 
@@ -201,8 +182,16 @@ func TestBuildCoreExtProfilesUnsupportedBindingRejected(t *testing.T) {
 }
 
 func TestBuildCoreExtProfilesRejectsEmptyAllowedSuites(t *testing.T) {
+	descriptorHex := hex.EncodeToString(mustRuntimeOpenSSLDigest32Descriptor(t))
 	_, err := buildCoreExtProfiles([]CoreExtProfileJSON{
-		{ExtID: 10, ActivationHeight: 0, AllowedSuiteIDs: nil, Binding: "native_verify_sig"},
+		{
+			ExtID:                10,
+			ActivationHeight:     0,
+			AllowedSuiteIDs:      nil,
+			Binding:              consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
+			BindingDescriptorHex: descriptorHex,
+			ExtPayloadSchemaHex:  "b2",
+		},
 	}, "", "")
 	if err == nil {
 		t.Fatalf("expected empty allowed suites error")
@@ -288,12 +277,13 @@ func TestBuildCoreExtProfilesRejectsUnsupportedBindingBeforeHexDecode(t *testing
 
 func TestBuildCoreExtProfilesRejectsTxContextEnabledWithoutRuntimeVerifier(t *testing.T) {
 	_, err := buildCoreExtProfiles([]CoreExtProfileJSON{{
-		ExtID:               7,
-		ActivationHeight:    12,
-		TxContextEnabled:    1,
-		AllowedSuiteIDs:     []uint8{3},
-		Binding:             "native_verify_sig",
-		ExtPayloadSchemaHex: "b2",
+		ExtID:                7,
+		ActivationHeight:     12,
+		TxContextEnabled:     1,
+		AllowedSuiteIDs:      []uint8{3},
+		Binding:              consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
+		BindingDescriptorHex: hex.EncodeToString(mustRuntimeOpenSSLDigest32Descriptor(t)),
+		ExtPayloadSchemaHex:  "b2",
 	}}, "", "")
 	if err == nil || !strings.Contains(err.Error(), "tx_context_enabled core_ext profile for ext_id=7 requires runtime txcontext verifier wiring") {
 		t.Fatalf("expected tx_context_enabled runtime verifier rejection, got %v", err)

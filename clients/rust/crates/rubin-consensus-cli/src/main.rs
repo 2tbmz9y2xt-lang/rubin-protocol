@@ -9,11 +9,11 @@ use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
     block_hash, compact_shortid,
     connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context,
-    core_ext_profile_set_anchor_v1, core_ext_verification_binding_from_name_and_descriptor,
-    featurebit_state_at_height_from_window_counts, flagday_active_at_height, fork_work_from_target,
-    merkle_root_txids, parse_core_ext_covenant_data, parse_tx, pow_check, retarget_v1,
-    retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_at_height,
-    tx_weight_and_stats_public, validate_block_basic_with_context_and_fees_at_height,
+    core_ext_profile_set_anchor_v1, featurebit_state_at_height_from_window_counts,
+    flagday_active_at_height, fork_work_from_target, merkle_root_txids,
+    parse_core_ext_covenant_data, parse_tx, pow_check, retarget_v1, retarget_v1_clamped,
+    sighash_v1_digest, tx_weight_and_stats_at_height, tx_weight_and_stats_public,
+    validate_block_basic_with_context_and_fees_at_height,
     validate_block_basic_with_context_at_height, validate_rotation_descriptor_for_network,
     validate_rotation_set_for_network, validate_tx_covenants_genesis, CoreExtDeploymentProfile,
     CoreExtDeploymentProfiles, CryptoRotationDescriptor, DescriptorRotationProvider, ErrorCode,
@@ -1077,15 +1077,6 @@ fn parse_optional_chain_id_hex(chain_id: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
-fn core_ext_runtime_binding_supported(binding: &str) -> bool {
-    let binding = binding.trim();
-    matches!(
-        binding,
-        "" | "native_verify_sig"
-            | rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
-    )
-}
-
 fn core_ext_profiles_from_json(
     items: &[CoreExtProfileJson],
     chain_id: [u8; 32],
@@ -1094,7 +1085,7 @@ fn core_ext_profiles_from_json(
     let mut deployments = Vec::with_capacity(items.len());
     let mut ext_ids = HashSet::new();
     for item in items {
-        let binding_name = item.binding.trim();
+        let binding_name = rubin_consensus::normalize_core_ext_binding_name(item.binding.trim())?;
         if !ext_ids.insert(item.ext_id) {
             return Err(format!(
                 "duplicate core_ext deployment for ext_id={}",
@@ -1107,25 +1098,16 @@ fn core_ext_profiles_from_json(
                 item.ext_id
             ));
         }
-        if !core_ext_runtime_binding_supported(binding_name) {
-            return Err(format!("unsupported core_ext binding: {}", item.binding));
-        }
         let binding_descriptor =
             decode_optional_hex_bytes("binding_descriptor_hex", &item.binding_descriptor_hex)?;
         let ext_payload_schema =
             decode_optional_hex_bytes("ext_payload_schema_hex", &item.ext_payload_schema_hex)?;
-        if binding_name == rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
-            && ext_payload_schema.is_empty()
-        {
-            return Err(format!(
-                "core_ext binding {} requires ext_payload_schema_hex",
-                rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
-            ));
-        }
-        let binding = core_ext_verification_binding_from_name_and_descriptor(
-            binding_name,
-            &binding_descriptor,
-        )?;
+        let binding =
+            rubin_consensus::core_ext_verification_binding_from_normalized_name_and_descriptor(
+                binding_name,
+                &binding_descriptor,
+                &ext_payload_schema,
+            )?;
         deployments.push(CoreExtDeploymentProfile {
             ext_id: item.ext_id,
             activation_height: item.activation_height,
@@ -4991,12 +4973,22 @@ mod tests {
 
     #[test]
     fn core_ext_profiles_empty_allowed_suites_rejected() {
+        let binding_descriptor =
+            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
+                "ML-DSA-87",
+                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            )
+            .expect("descriptor");
         let err = core_ext_profiles_from_json(
             &[CoreExtProfileJson {
                 ext_id: 9,
                 activation_height: 42,
                 allowed_suite_ids: vec![],
-                binding: "native_verify_sig".to_string(),
+                binding: rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+                    .to_string(),
+                binding_descriptor_hex: hex::encode(binding_descriptor),
+                ext_payload_schema_hex: "b2".to_string(),
                 ..Default::default()
             }],
             [0u8; 32],
@@ -5434,13 +5426,23 @@ mod tests {
 
     #[test]
     fn core_ext_profiles_reject_tx_context_enabled_profile_without_runtime_verifier() {
+        let binding_descriptor =
+            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
+                "ML-DSA-87",
+                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            )
+            .expect("descriptor");
         let err = core_ext_profiles_from_json(
             &[CoreExtProfileJson {
                 ext_id: 9,
                 activation_height: 42,
                 tx_context_enabled: true,
                 allowed_suite_ids: vec![3],
-                binding: "native_verify_sig".to_string(),
+                binding: rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+                    .to_string(),
+                binding_descriptor_hex: hex::encode(binding_descriptor),
+                ext_payload_schema_hex: "b2".to_string(),
                 ..Default::default()
             }],
             [0u8; 32],
@@ -5461,5 +5463,28 @@ mod tests {
             Err(err) => err.to_string(),
         };
         assert!(err.contains("tx_context_enabled must be bool or 0/1"));
+    }
+
+    #[test]
+    fn core_ext_profiles_accept_native_binding_on_harness_path() {
+        let profiles = core_ext_profiles_from_json(
+            &[CoreExtProfileJson {
+                ext_id: 9,
+                activation_height: 42,
+                allowed_suite_ids: vec![3],
+                binding: " native_verify_sig ".to_string(),
+                ext_payload_schema_hex: "b2".to_string(),
+                ..Default::default()
+            }],
+            [0u8; 32],
+            "",
+        )
+        .expect("profiles");
+        let active = profiles.active_profiles_at_height(42).expect("active");
+        assert_eq!(active.active.len(), 1);
+        assert!(matches!(
+            active.active[0].verification_binding,
+            rubin_consensus::CoreExtVerificationBinding::NativeVerifySig
+        ));
     }
 }

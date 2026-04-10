@@ -48,6 +48,24 @@ func DefaultSuiteRegistry() *SuiteRegistry {
 	}
 }
 
+// IsCanonicalDefaultLiveManifest reports whether the registry still matches the
+// current chain-instance live manifest contract: exactly one ML-DSA-87 entry
+// with the canonical lengths, verify cost, and algorithm identity.
+func (r *SuiteRegistry) IsCanonicalDefaultLiveManifest() bool {
+	if r == nil || len(r.suites) != 1 {
+		return false
+	}
+	params, ok := r.Lookup(SUITE_ID_ML_DSA_87)
+	if !ok {
+		return false
+	}
+	return params.SuiteID == SUITE_ID_ML_DSA_87 &&
+		params.PubkeyLen == ML_DSA_87_PUBKEY_BYTES &&
+		params.SigLen == ML_DSA_87_SIG_BYTES &&
+		params.VerifyCost == VERIFY_COST_ML_DSA_87 &&
+		params.AlgName == "ML-DSA-87"
+}
+
 // Lookup returns the parameters for suiteID, or (zero, false) if not registered.
 func (r *SuiteRegistry) Lookup(suiteID uint8) (SuiteParams, bool) {
 	if r == nil {

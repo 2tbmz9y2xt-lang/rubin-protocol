@@ -19,7 +19,8 @@ import "encoding/binary"
 // When sigQueue is non-nil, it performs all fast pre-checks (key binding, sighash
 // computation) inline and defers the expensive crypto verification to the queue
 // (Flush uses registry when set for rotation-aware dispatch). When sigQueue is nil,
-// it verifies inline using verifySigWithRegistry if registry is non-nil, else verifySig.
+// it still routes through verifySigWithRegistry so the live path always uses the
+// explicit manifest-derived registry contract, even when the caller passes nil.
 func verifyMLDSAKeyAndSigQ(
 	w WitnessItem,
 	expectedKeyID [32]byte,
@@ -44,11 +45,7 @@ func verifyMLDSAKeyAndSigQ(
 		return nil
 	}
 	var ok bool
-	if registry != nil {
-		ok, err = verifySigWithRegistry(w.SuiteID, w.Pubkey, cryptoSig, digest, registry)
-	} else {
-		ok, err = verifySig(w.SuiteID, w.Pubkey, cryptoSig, digest)
-	}
+	ok, err = verifySigWithRegistry(w.SuiteID, w.Pubkey, cryptoSig, digest, registry)
 	if err != nil {
 		return err
 	}
@@ -286,11 +283,7 @@ func validateHTLCSpendQ(
 	}
 	var sigOk bool
 	var verifyErr error
-	if registry != nil {
-		sigOk, verifyErr = verifySigWithRegistry(sigItem.SuiteID, sigItem.Pubkey, cryptoSig, digest, registry)
-	} else {
-		sigOk, verifyErr = verifySig(sigItem.SuiteID, sigItem.Pubkey, cryptoSig, digest)
-	}
+	sigOk, verifyErr = verifySigWithRegistry(sigItem.SuiteID, sigItem.Pubkey, cryptoSig, digest, registry)
 	if verifyErr != nil {
 		return verifyErr
 	}

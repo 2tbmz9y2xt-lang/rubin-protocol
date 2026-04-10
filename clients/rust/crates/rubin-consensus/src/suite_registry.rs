@@ -44,6 +44,23 @@ impl SuiteRegistry {
         Self { suites }
     }
 
+    /// Returns true only when this registry still matches the canonical live
+    /// manifest contract: a single ML-DSA-87 entry with the exact v1 params.
+    pub fn is_canonical_default_live_manifest(&self) -> bool {
+        if self.suites.len() != 1 {
+            return false;
+        }
+        matches!(
+            self.suites.get(&SUITE_ID_ML_DSA_87),
+            Some(params)
+                if params.suite_id == SUITE_ID_ML_DSA_87
+                    && params.pubkey_len == ML_DSA_87_PUBKEY_BYTES
+                    && params.sig_len == ML_DSA_87_SIG_BYTES
+                    && params.verify_cost == VERIFY_COST_ML_DSA_87
+                    && params.alg_name == "ML-DSA-87"
+        )
+    }
+
     /// Builds a registry from a map of suite ID to parameters. Use this for
     /// custom rotation deployments or tests that need additional suites beyond
     /// the default (e.g. `CryptoRotationDescriptor::validate` with old→new transition).
@@ -980,6 +997,7 @@ mod tests {
         assert_eq!(p.sig_len, crate::constants::ML_DSA_87_SIG_BYTES);
         assert_eq!(p.alg_name, "ML-DSA-87");
         assert_eq!(p.verify_cost, crate::constants::VERIFY_COST_ML_DSA_87);
+        assert!(r.is_canonical_default_live_manifest());
     }
 
     #[test]

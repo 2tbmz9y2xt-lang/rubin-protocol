@@ -4,18 +4,272 @@ package consensus
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
-func TestVerifySigWithRegistry_NilRegistry_FallsBackToLegacy(t *testing.T) {
+func canonicalDefaultRuntimeSuiteParams() SuiteParams {
+	params, ok := DefaultSuiteRegistry().Lookup(SUITE_ID_ML_DSA_87)
+	if !ok {
+		panic("default runtime registry missing ML-DSA-87")
+	}
+	return params
+}
+
+func assertDefaultRuntimeRegistryDriftError(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected default runtime registry drift error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
+	}
+	if got, want := err.Error(), fmt.Sprintf("%s: verify_sig: default runtime registry drift", TX_ERR_SIG_ALG_INVALID); got != want {
+		t.Fatalf("err=%q, want %q", got, want)
+	}
+}
+
+func TestVerifySigWithRegistry_NilRegistry_UsesDefaultLiveRegistry(t *testing.T) {
 	var d [32]byte
-	// ML-DSA-87 with wrong lengths → returns (false, nil) via legacy path.
+	// ML-DSA-87 with wrong lengths still routes through the canonical default
+	// live registry and returns (false, nil) without a transport error.
 	ok, err := verifySigWithRegistry(SUITE_ID_ML_DSA_87, []byte{0x01}, []byte{0x02}, d, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if ok {
 		t.Fatal("expected false for wrong-length ML-DSA-87")
+	}
+}
+
+func TestVerifySigWithRegistry_NilRegistry_MatchesExplicitDefaultLiveRegistry(t *testing.T) {
+	reg := DefaultSuiteRegistry()
+	var captured []string
+	origFn := opensslVerifySigOneShotFn
+	defer func() { opensslVerifySigOneShotFn = origFn }()
+	opensslVerifySigOneShotFn = func(alg string, pub, sig, msg []byte) (bool, error) {
+		captured = append(captured, alg)
+		return true, nil
+	}
+
+	pub := make([]byte, ML_DSA_87_PUBKEY_BYTES)
+	sig := make([]byte, ML_DSA_87_SIG_BYTES)
+	var d [32]byte
+
+	ok, err := verifySigWithRegistry(SUITE_ID_ML_DSA_87, pub, sig, d, nil)
+	if err != nil {
+		t.Fatalf("nil registry verify: %v", err)
+	}
+	if !ok {
+		t.Fatal("nil registry must verify canonical default live registry")
+	}
+
+	ok, err = verifySigWithRegistry(SUITE_ID_ML_DSA_87, pub, sig, d, reg)
+	if err != nil {
+		t.Fatalf("explicit registry verify: %v", err)
+	}
+	if !ok {
+		t.Fatal("explicit registry must verify canonical default live registry")
+	}
+
+	if len(captured) != 2 {
+		t.Fatalf("captured=%d calls, want 2", len(captured))
+	}
+	wantAlg := canonicalDefaultRuntimeSuiteParams().AlgName
+	for i, got := range captured {
+		if got != wantAlg {
+			t.Fatalf("call %d alg=%q, want %q", i, got, wantAlg)
+		}
+	}
+}
+
+func TestRuntimeSuiteParamsForVerification_NilRegistryMatchesExplicitDefaultLiveRegistry(t *testing.T) {
+	reg := DefaultSuiteRegistry()
+
+	gotNil, err := runtimeSuiteParamsForVerification(SUITE_ID_ML_DSA_87, nil)
+	if err != nil {
+		t.Fatalf("runtimeSuiteParamsForVerification(nil): %v", err)
+	}
+	gotExplicit, err := runtimeSuiteParamsForVerification(SUITE_ID_ML_DSA_87, reg)
+	if err != nil {
+		t.Fatalf("runtimeSuiteParamsForVerification(explicit): %v", err)
+	}
+
+	want := canonicalDefaultRuntimeSuiteParams()
+	if gotNil != want {
+		t.Fatalf("nil params=%+v, want %+v", gotNil, want)
+	}
+	if gotExplicit != want {
+		t.Fatalf("explicit params=%+v, want %+v", gotExplicit, want)
+	}
+	if gotNil != gotExplicit {
+		t.Fatalf("nil params=%+v != explicit params=%+v", gotNil, gotExplicit)
+	}
+}
+
+func TestRuntimeSuiteParamsForVerification_NilRegistry_DefaultRegistryDriftFailsClosed(t *testing.T) {
+	testCases := []struct {
+		name   string
+		mutate func(*SuiteParams)
+	}{
+		{
+			name: "alg_name_empty",
+			mutate: func(params *SuiteParams) {
+				params.AlgName = ""
+			},
+		},
+		{
+			name: "alg_name_alias",
+			mutate: func(params *SuiteParams) {
+				params.AlgName = strings.ToLower(params.AlgName)
+			},
+		},
+		{
+			name: "pubkey_len",
+			mutate: func(params *SuiteParams) {
+				params.PubkeyLen--
+			},
+		},
+		{
+			name: "sig_len",
+			mutate: func(params *SuiteParams) {
+				params.SigLen--
+			},
+		},
+		{
+			name: "verify_cost",
+			mutate: func(params *SuiteParams) {
+				params.VerifyCost--
+			},
+		},
+	}
+
+	orig := defaultRuntimeSuiteRegistryForVerification
+	defer func() { defaultRuntimeSuiteRegistryForVerification = orig }()
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			defaultRuntimeSuiteRegistryForVerification = func() *SuiteRegistry {
+				params := canonicalDefaultRuntimeSuiteParams()
+				tc.mutate(&params)
+				return &SuiteRegistry{
+					suites: map[uint8]SuiteParams{
+						SUITE_ID_ML_DSA_87: params,
+					},
+				}
+			}
+
+			_, err := runtimeSuiteParamsForVerification(SUITE_ID_ML_DSA_87, nil)
+			assertDefaultRuntimeRegistryDriftError(t, err)
+		})
+	}
+}
+
+func TestVerifySigWithRegistry_NilRegistry_DefaultRegistryDriftFailsClosed(t *testing.T) {
+	testCases := []struct {
+		name   string
+		mutate func(*SuiteParams)
+	}{
+		{
+			name: "alg_name",
+			mutate: func(params *SuiteParams) {
+				params.AlgName = "ML-DSA-65"
+			},
+		},
+		{
+			name: "alg_name_empty",
+			mutate: func(params *SuiteParams) {
+				params.AlgName = ""
+			},
+		},
+		{
+			name: "alg_name_alias",
+			mutate: func(params *SuiteParams) {
+				params.AlgName = strings.ToLower(params.AlgName)
+			},
+		},
+		{
+			name: "pubkey_len",
+			mutate: func(params *SuiteParams) {
+				params.PubkeyLen--
+			},
+		},
+		{
+			name: "sig_len",
+			mutate: func(params *SuiteParams) {
+				params.SigLen--
+			},
+		},
+	}
+
+	orig := defaultRuntimeSuiteRegistryForVerification
+	defer func() { defaultRuntimeSuiteRegistryForVerification = orig }()
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			defaultRuntimeSuiteRegistryForVerification = func() *SuiteRegistry {
+				params := canonicalDefaultRuntimeSuiteParams()
+				tc.mutate(&params)
+				return &SuiteRegistry{
+					suites: map[uint8]SuiteParams{
+						SUITE_ID_ML_DSA_87: params,
+					},
+				}
+			}
+
+			var d [32]byte
+			_, err := verifySigWithRegistry(SUITE_ID_ML_DSA_87, []byte{0x01}, []byte{0x02}, d, nil)
+			assertDefaultRuntimeRegistryDriftError(t, err)
+		})
+	}
+}
+
+func TestVerifySigWithRegistry_NilRegistry_VerifyCostDriftFailsClosed(t *testing.T) {
+	params := canonicalDefaultRuntimeSuiteParams()
+	if got, want := params.VerifyCost, uint64(VERIFY_COST_ML_DSA_87); got != want {
+		t.Fatalf("canonical verify_cost=%d, want %d", got, want)
+	}
+
+	orig := defaultRuntimeSuiteRegistryForVerification
+	defer func() { defaultRuntimeSuiteRegistryForVerification = orig }()
+	defaultRuntimeSuiteRegistryForVerification = func() *SuiteRegistry {
+		params := canonicalDefaultRuntimeSuiteParams()
+		params.VerifyCost--
+		return &SuiteRegistry{
+			suites: map[uint8]SuiteParams{
+				SUITE_ID_ML_DSA_87: params,
+			},
+		}
+	}
+
+	var d [32]byte
+	_, err := verifySigWithRegistry(SUITE_ID_ML_DSA_87, []byte{0x01}, []byte{0x02}, d, nil)
+	assertDefaultRuntimeRegistryDriftError(t, err)
+}
+
+func TestResolveSuiteVerifierBinding_MatchesCanonicalOpenSSLDescriptor(t *testing.T) {
+	params := canonicalDefaultRuntimeSuiteParams()
+	binding, err := resolveSuiteVerifierBinding(params.AlgName, params.PubkeyLen, params.SigLen)
+	if err != nil {
+		t.Fatalf("resolveSuiteVerifierBinding: %v", err)
+	}
+	raw, err := CoreExtOpenSSLDigest32BindingDescriptorBytes(params.AlgName, params.PubkeyLen, params.SigLen)
+	if err != nil {
+		t.Fatalf("CoreExtOpenSSLDigest32BindingDescriptorBytes: %v", err)
+	}
+	desc, err := ParseCoreExtOpenSSLDigest32BindingDescriptor(raw)
+	if err != nil {
+		t.Fatalf("ParseCoreExtOpenSSLDigest32BindingDescriptor: %v", err)
+	}
+	if binding.kind != suiteVerifierBindingOpenSSLDigest32V1 {
+		t.Fatalf("binding.kind=%v, want %v", binding.kind, suiteVerifierBindingOpenSSLDigest32V1)
+	}
+	if binding.opensslAlg != desc.OpenSSLAlg {
+		t.Fatalf("binding.opensslAlg=%q, want %q", binding.opensslAlg, desc.OpenSSLAlg)
+	}
+	if binding.pubkeyLen != desc.PubkeyLen {
+		t.Fatalf("binding.pubkeyLen=%d, want %d", binding.pubkeyLen, desc.PubkeyLen)
+	}
+	if binding.sigLen != desc.SigLen {
+		t.Fatalf("binding.sigLen=%d, want %d", binding.sigLen, desc.SigLen)
 	}
 }
 
@@ -135,9 +389,9 @@ func TestVerifySigWithRegistry_CustomSuite_UnsupportedBindingRejected(t *testing
 	}
 }
 
-func TestValidateP2PKSpendAtHeight_NilProviders_FallsBackToLegacy(t *testing.T) {
-	// With nil rotation/registry, should fallback to legacy path.
-	// Legacy rejects non-ML-DSA-87 suite.
+func TestValidateP2PKSpendAtHeight_NilProviders_UseDefaultProviders(t *testing.T) {
+	// With nil rotation/registry, consensus uses canonical default providers.
+	// The default live registry still rejects non-ML-DSA-87 suites.
 	w := WitnessItem{SuiteID: 0xFF, Pubkey: []byte{0x01}, Signature: []byte{0x02}}
 	entry := UtxoEntry{}
 	tx := &Tx{Version: TX_WIRE_VERSION}
