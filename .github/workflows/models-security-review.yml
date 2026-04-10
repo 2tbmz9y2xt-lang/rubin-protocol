@@ -346,7 +346,7 @@ jobs:
               ['clients/go/consensus/utxo_snapshot.go', 'clients/rust/crates/rubin-consensus/src/utxo_snapshot.rs'],
               ['clients/go/consensus/compactsize.go', 'clients/rust/crates/rubin-consensus/src/compactsize.rs'],
               ['clients/go/consensus/errors.go', 'clients/rust/crates/rubin-consensus/src/error.rs'],
-              // Node bootstrap vs consensus rotation (real paths; no separate production_rotation_schedule.* in tree)
+              // Node bootstrap vs consensus rotation (config/genesis + suite_registry; schedule modules when touched)
               ['clients/go/node/config.go', 'clients/rust/crates/rubin-node/src/genesis.rs'],
               ['clients/go/node/config.go', 'clients/rust/crates/rubin-consensus/src/suite_registry.rs'],
               ['clients/rust/crates/rubin-node/src/genesis.rs', 'clients/go/consensus/rotation_production.go'],
@@ -409,12 +409,16 @@ jobs:
                 const content = readChangedFile(counterpart);
                 if (!content) continue;
                 const header = `PARITY FILE: ${counterpart} (counterpart of changed ${file})\n`;
-                const cap = Math.min(PARITY_BUDGET - parityUsed - header.length, PER_FILE_CAP);
+                const separatorOverhead = parityEntries.length > 0 ? SEPARATOR.length : 0;
+                const cap = Math.min(
+                  PARITY_BUDGET - parityUsed - separatorOverhead - header.length,
+                  PER_FILE_CAP
+                );
                 if (cap < 200) continue;
                 const entry = header + content.slice(0, cap);
                 parityCounterpartsSeen.add(counterpart);
                 parityEntries.push(entry);
-                parityUsed += entry.length;
+                parityUsed += separatorOverhead + entry.length;
               }
             }
             const parityContext = parityEntries.length > 0
@@ -526,24 +530,65 @@ jobs:
             try {
               core.info(`Trying model: ${modelId}`);
               const userContentPreamble = 'Review this PR diff for security issues. Be strict and skeptical, but follow the system severity definitions — do not inflate node/bootstrap/API differences to CRITICAL or HIGH without a proven consensus path.\n\nDIFF:\n';
-              let userContent = userContentPreamble + diff +
-                (changedFilePayload ? `\n\n---\nFULL CHANGED FILES (use to verify definitions before claiming anything missing):\n${changedFilePayload}` : '') +
-                dependencyContext + parityContext + previousFindings;
+              const changedFilesSection = changedFilePayload
+                ? `\n\n---\nFULL CHANGED FILES (use to verify definitions before claiming anything missing):\n${changedFilePayload}`
+                : '';
               const MAX_USER_CHARS = 260000;
               const truncationNotice =
                 '\n\n[TRUNCATED: user payload exceeded workflow cap; treat tail sections as unreviewed]\n';
+
+              const buildUserContent = (sections) => sections.map((s) => s.content).join('');
+              const shrinkSectionToFit = (section, overflow) => {
+                if (overflow <= 0 || !section.content) return 0;
+                const removed = Math.min(overflow, section.content.length);
+                section.content = section.content.slice(0, section.content.length - removed);
+                return removed;
+              };
+
+              const sections = [
+                { name: 'preamble', content: userContentPreamble },
+                { name: 'diff', content: diff },
+                { name: 'changedFiles', content: changedFilesSection },
+                { name: 'dependencyContext', content: dependencyContext },
+                { name: 'parityContext', content: parityContext },
+                { name: 'previousFindings', content: previousFindings },
+              ];
+
+              let userContent = buildUserContent(sections);
               core.info(
                 `security-review payload sizes: diff=${diff.length} changedFileCount=${changedFiles.length} ` +
                 `changedFilePayloadChars=${changedFilePayload.length} ` +
                 `dep=${dependencyContext.length} parity=${parityContext.length} prev=${previousFindings.length} user=${userContent.length}`
               );
               if (userContent.length > MAX_USER_CHARS) {
-                const maxUserPrefixChars = Math.max(0, MAX_USER_CHARS - truncationNotice.length);
+                const maxUserCharsBeforeNotice = Math.max(0, MAX_USER_CHARS - truncationNotice.length);
+                let overflow = userContent.length - maxUserCharsBeforeNotice;
                 core.warning(
-                  `User message length ${userContent.length} exceeds cap ${MAX_USER_CHARS}; truncating with explicit notice`
+                  `User message length ${userContent.length} exceeds cap ${MAX_USER_CHARS}; ` +
+                  'truncating lower-priority sections from the tail first, then appending explicit notice'
                 );
-                userContent = userContent.slice(0, maxUserPrefixChars) + truncationNotice;
+
+                for (const sectionName of ['changedFiles', 'diff', 'parityContext', 'dependencyContext']) {
+                  if (overflow <= 0) break;
+                  const section = sections.find((c) => c.name === sectionName);
+                  overflow -= shrinkSectionToFit(section, overflow);
+                }
+                if (overflow > 0) {
+                  const prevSec = sections.find((c) => c.name === 'previousFindings');
+                  overflow -= shrinkSectionToFit(prevSec, overflow);
+                }
+                if (overflow > 0) {
+                  const pre = sections.find((c) => c.name === 'preamble');
+                  overflow -= shrinkSectionToFit(pre, overflow);
+                }
+
+                userContent = buildUserContent(sections) + truncationNotice;
+                if (userContent.length > MAX_USER_CHARS) {
+                  const maxFinal = Math.max(0, MAX_USER_CHARS - truncationNotice.length);
+                  userContent = userContent.slice(0, maxFinal) + truncationNotice;
+                }
               }
+              core.info(`security-review final user message length: ${userContent.length}`);
               const response = await fetch(
                 'https://models.github.ai/inference/chat/completions',
                 {
