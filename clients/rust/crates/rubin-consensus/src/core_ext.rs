@@ -450,6 +450,16 @@ pub fn core_ext_verification_binding_from_name_and_descriptor(
     binding_descriptor: &[u8],
 ) -> Result<CoreExtVerificationBinding, String> {
     let binding_name = normalize_core_ext_binding_name(binding_name)?;
+    core_ext_verification_binding_from_normalized_name_and_descriptor(
+        binding_name,
+        binding_descriptor,
+    )
+}
+
+pub fn core_ext_verification_binding_from_normalized_name_and_descriptor(
+    binding_name: &str,
+    binding_descriptor: &[u8],
+) -> Result<CoreExtVerificationBinding, String> {
     match binding_name {
         "" | "native_verify_sig" => Ok(CoreExtVerificationBinding::NativeVerifySig),
         CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1 => {
@@ -483,7 +493,10 @@ pub fn live_core_ext_verification_binding_from_name_and_descriptor(
             CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
         ));
     }
-    core_ext_verification_binding_from_name_and_descriptor(binding_name, binding_descriptor)
+    core_ext_verification_binding_from_normalized_name_and_descriptor(
+        binding_name,
+        binding_descriptor,
+    )
 }
 
 fn core_ext_supported_openssl_alg(openssl_alg: &str) -> Option<(u64, u64)> {

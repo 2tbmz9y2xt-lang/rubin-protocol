@@ -405,10 +405,6 @@ fn decode_optional_hex_bytes(name: &str, value: &str) -> Result<Vec<u8>, String>
     hex::decode(trimmed).map_err(|e| format!("{name}: {e}"))
 }
 
-fn genesis_core_ext_binding_supported(binding: &str) -> bool {
-    rubin_consensus::normalize_live_core_ext_binding_name(binding).is_ok()
-}
-
 fn core_ext_deployments_from_json(
     chain_id: [u8; 32],
     expected_set_anchor_hex: &str,
@@ -417,7 +413,8 @@ fn core_ext_deployments_from_json(
     let mut seen = std::collections::HashSet::new();
     let mut deployments = Vec::with_capacity(items.len());
     for item in items {
-        let binding_name = item.binding.trim();
+        let binding_name =
+            rubin_consensus::normalize_live_core_ext_binding_name(item.binding.trim())?;
         if !seen.insert(item.ext_id) {
             return Err(format!(
                 "duplicate core_ext deployment for ext_id={}",
@@ -430,18 +427,20 @@ fn core_ext_deployments_from_json(
                 item.ext_id
             ));
         }
-        if !genesis_core_ext_binding_supported(binding_name) {
-            return Err(format!("unsupported core_ext binding: {:?}", item.binding));
-        }
         let binding_descriptor =
             decode_optional_hex_bytes("binding_descriptor_hex", &item.binding_descriptor_hex)?;
         let ext_payload_schema =
             decode_optional_hex_bytes("ext_payload_schema_hex", &item.ext_payload_schema_hex)?;
+        if ext_payload_schema.is_empty() {
+            return Err(format!(
+                "core_ext binding {} requires ext_payload_schema_hex",
+                rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+            ));
+        }
         let verification_binding =
-            rubin_consensus::live_core_ext_verification_binding_from_name_and_descriptor(
+            rubin_consensus::core_ext_verification_binding_from_normalized_name_and_descriptor(
                 binding_name,
                 &binding_descriptor,
-                &ext_payload_schema,
             )?;
         deployments.push(CoreExtDeploymentProfile {
             ext_id: item.ext_id,

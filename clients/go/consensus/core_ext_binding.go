@@ -46,12 +46,9 @@ func NormalizeLiveCoreExtBindingName(binding string) (string, error) {
 	}
 }
 
-func ParseCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte) (CoreExtVerifySigExtFunc, error) {
-	var err error
-	binding, err = NormalizeCoreExtBindingName(binding)
-	if err != nil {
-		return nil, err
-	}
+// ParseNormalizedCoreExtVerifySigExtBinding assumes binding already came from
+// NormalizeCoreExtBindingName or NormalizeLiveCoreExtBindingName.
+func ParseNormalizedCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte) (CoreExtVerifySigExtFunc, error) {
 	switch binding {
 	case "", "native_verify_sig":
 		return nil, nil
@@ -68,6 +65,15 @@ func ParseCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte) (
 	}
 }
 
+func ParseCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte) (CoreExtVerifySigExtFunc, error) {
+	var err error
+	binding, err = NormalizeCoreExtBindingName(binding)
+	if err != nil {
+		return nil, err
+	}
+	return ParseNormalizedCoreExtVerifySigExtBinding(binding, bindingDescriptor)
+}
+
 // ParseLiveCoreExtVerifySigExtBinding is the live runtime loader path for
 // manifest-derived CORE_EXT verification. Historical/helper paths may still
 // use ParseCoreExtVerifySigExtBinding directly, but live consumers must call
@@ -80,7 +86,7 @@ func ParseLiveCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byt
 	if len(extPayloadSchema) == 0 {
 		return nil, fmt.Errorf("core_ext binding %s requires ext_payload_schema_hex", CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
 	}
-	return ParseCoreExtVerifySigExtBinding(binding, bindingDescriptor)
+	return ParseNormalizedCoreExtVerifySigExtBinding(binding, bindingDescriptor)
 }
 
 func CoreExtOpenSSLDigest32BindingDescriptorBytes(opensslAlg string, pubkeyLen int, sigLen int) ([]byte, error) {

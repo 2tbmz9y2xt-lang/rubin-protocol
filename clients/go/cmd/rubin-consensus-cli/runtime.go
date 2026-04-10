@@ -424,29 +424,21 @@ func parseOptionalHexBytes(name, value string) ([]byte, error) {
 	return raw, nil
 }
 
-// CLI core_ext_profiles are a conformance/archive harness surface, not the
-// live node genesis loader. They accept the repository-wide binding vocabulary
-// so negative vectors can still reach consensus validation.
-func validateHarnessCoreExtBinding(binding string) error {
-	_, err := consensus.NormalizeCoreExtBindingName(binding)
-	return err
-}
-
 func buildCoreExtDeployments(items []CoreExtProfileJSON) ([]consensus.CoreExtDeploymentProfile, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
 	deployments := make([]consensus.CoreExtDeploymentProfile, 0, len(items))
 	for _, item := range items {
-		binding := strings.TrimSpace(item.Binding)
+		binding, err := consensus.NormalizeCoreExtBindingName(strings.TrimSpace(item.Binding))
+		if err != nil {
+			return nil, err
+		}
 		if item.TxContextEnabled != 0 {
 			return nil, fmt.Errorf(
 				"tx_context_enabled core_ext profile for ext_id=%d requires runtime txcontext verifier wiring",
 				item.ExtID,
 			)
-		}
-		if err := validateHarnessCoreExtBinding(binding); err != nil {
-			return nil, err
 		}
 		bindingDescriptor, err := parseOptionalHexBytes("binding_descriptor_hex", item.BindingDescriptorHex)
 		if err != nil {
@@ -478,14 +470,10 @@ func buildCoreExtDeployments(items []CoreExtProfileJSON) ([]consensus.CoreExtDep
 }
 
 func parseRuntimeCoreExtBinding(binding string, bindingDescriptor []byte, extPayloadSchema []byte) (consensus.CoreExtVerifySigExtFunc, error) {
-	binding, err := consensus.NormalizeCoreExtBindingName(binding)
-	if err != nil {
-		return nil, err
-	}
 	if binding == consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 && len(extPayloadSchema) == 0 {
 		return nil, fmt.Errorf("core_ext binding %s requires ext_payload_schema_hex", consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
 	}
-	return consensus.ParseCoreExtVerifySigExtBinding(binding, bindingDescriptor)
+	return consensus.ParseNormalizedCoreExtVerifySigExtBinding(binding, bindingDescriptor)
 }
 
 func buildCoreExtProfiles(items []CoreExtProfileJSON, chainIDHex string, expectedSetAnchorHex string) (consensus.CoreExtProfileProvider, error) {

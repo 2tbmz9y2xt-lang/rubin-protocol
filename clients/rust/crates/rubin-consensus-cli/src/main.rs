@@ -1077,14 +1077,6 @@ fn parse_optional_chain_id_hex(chain_id: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
-// CLI core_ext_profiles are a conformance/archive harness surface, not the
-// live node/genesis loader. Keep the full repository binding vocabulary here
-// so malformed/negative vectors reach consensus validation instead of failing
-// in a live-only parser.
-fn validate_harness_core_ext_binding(binding: &str) -> Result<&'static str, String> {
-    rubin_consensus::normalize_core_ext_binding_name(binding)
-}
-
 fn core_ext_profiles_from_json(
     items: &[CoreExtProfileJson],
     chain_id: [u8; 32],
@@ -1093,7 +1085,7 @@ fn core_ext_profiles_from_json(
     let mut deployments = Vec::with_capacity(items.len());
     let mut ext_ids = HashSet::new();
     for item in items {
-        let binding_name = item.binding.trim();
+        let binding_name = rubin_consensus::normalize_core_ext_binding_name(item.binding.trim())?;
         if !ext_ids.insert(item.ext_id) {
             return Err(format!(
                 "duplicate core_ext deployment for ext_id={}",
@@ -1106,7 +1098,6 @@ fn core_ext_profiles_from_json(
                 item.ext_id
             ));
         }
-        let binding_name = validate_harness_core_ext_binding(binding_name)?;
         let binding_descriptor =
             decode_optional_hex_bytes("binding_descriptor_hex", &item.binding_descriptor_hex)?;
         let ext_payload_schema =
@@ -1119,10 +1110,11 @@ fn core_ext_profiles_from_json(
                 rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
             ));
         }
-        let binding = rubin_consensus::core_ext_verification_binding_from_name_and_descriptor(
-            binding_name,
-            &binding_descriptor,
-        )?;
+        let binding =
+            rubin_consensus::core_ext_verification_binding_from_normalized_name_and_descriptor(
+                binding_name,
+                &binding_descriptor,
+            )?;
         deployments.push(CoreExtDeploymentProfile {
             ext_id: item.ext_id,
             activation_height: item.activation_height,
