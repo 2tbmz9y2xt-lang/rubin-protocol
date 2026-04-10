@@ -263,6 +263,9 @@ func productionRotationDescriptorForNetwork(
 	}
 	descriptor := schedule.Networks[network]
 	if descriptor == nil {
+		// A null slot means this network has no authoritative production activation state.
+		// The compiled registry is derived across schedule entries, so returning it here
+		// would leak foreign-network suites into an empty-slot caller.
 		return nil, nil, nil
 	}
 	return descriptor, registry, nil

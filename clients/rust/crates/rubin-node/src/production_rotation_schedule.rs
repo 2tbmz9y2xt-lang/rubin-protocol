@@ -41,8 +41,7 @@ struct ProductionRotationDescriptorWire {
     new_suite_id: u8,
     create_height: u64,
     spend_height: u64,
-    #[serde(default)]
-    sunset_height: u64,
+    sunset_height: Option<u64>,
 }
 
 fn production_rotation_schedule_error(message: impl Into<String>) -> String {
@@ -190,6 +189,9 @@ pub(crate) fn production_rotation_descriptor_for_network(
             )))
         }
     };
+    // A null slot means this network has no authoritative production activation state.
+    // The compiled registry is derived across schedule entries, so returning it here
+    // would leak foreign-network suites into an empty-slot caller.
     Ok(descriptor.map(|descriptor| (descriptor, registry)))
 }
 
@@ -220,7 +222,7 @@ impl ProductionRotationDescriptorWire {
             new_suite_id: self.new_suite_id,
             create_height: self.create_height,
             spend_height: self.spend_height,
-            sunset_height: self.sunset_height,
+            sunset_height: self.sunset_height.unwrap_or_default(),
         }
     }
 }
@@ -405,6 +407,58 @@ mod tests {
         assert_eq!(params.sig_len, ML_DSA_87_SIG_BYTES);
         assert_eq!(params.verify_cost, VERIFY_COST_ML_DSA_87);
         assert_eq!(params.alg_name, "ML-DSA-87");
+    }
+
+    #[test]
+    fn production_rotation_schedule_empty_slot_does_not_erase_foreign_slot_suites() {
+        let (schedule, registry) = parse_schedule_with_registry(
+            r#"{
+                "version": 1,
+                "networks": {
+                    "mainnet": null,
+                    "testnet": {
+                        "name": "rotation-v1",
+                        "old_suite_id": 1,
+                        "new_suite_id": 66,
+                        "create_height": 10,
+                        "spend_height": 20,
+                        "sunset_height": 30
+                    }
+                }
+            }"#,
+            None,
+        )
+        .expect("must load");
+        assert!(schedule.mainnet.is_none());
+        assert!(schedule.testnet.is_some());
+        assert!(registry.lookup(66).is_some());
+    }
+
+    #[test]
+    fn production_rotation_schedule_rejects_null_sunset_height_on_production_profile() {
+        let err = production_rotation_descriptor_for_network_with_registry_for_test(
+            r#"{
+                "version": 1,
+                "networks": {
+                    "mainnet": {
+                        "name": "rotation-v1",
+                        "old_suite_id": 1,
+                        "new_suite_id": 66,
+                        "create_height": 10,
+                        "spend_height": 20,
+                        "sunset_height": null
+                    },
+                    "testnet": null
+                }
+            }"#,
+            "mainnet",
+            canonical_production_schedule_registry(),
+        )
+        .expect_err("must reject");
+        assert_eq!(
+            err,
+            "production_rotation_schedule: networks.mainnet: rotation_descriptor: rotation: v1 production profile requires finite sunset_height (H4)"
+        );
     }
 
     #[test]

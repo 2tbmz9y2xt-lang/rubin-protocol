@@ -283,6 +283,35 @@ func TestLoadCompiledProductionRotationScheduleNilRegistryFallsBackToCanonicalDe
 	}
 }
 
+func TestLoadCompiledProductionRotationScheduleNullNetworkDoesNotEraseForeignSlotSuites(t *testing.T) {
+	schedule, registry, err := loadCompiledProductionRotationScheduleFromJSONWithRegistry([]byte(`{
+		"version": 1,
+		"networks": {
+			"mainnet": null,
+			"testnet": {
+				"name": "rotation-v1",
+				"old_suite_id": 1,
+				"new_suite_id": 66,
+				"create_height": 10,
+				"spend_height": 20,
+				"sunset_height": 30
+			}
+		}
+	}`), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if schedule.Networks["mainnet"] != nil {
+		t.Fatal("expected mainnet slot to remain empty")
+	}
+	if schedule.Networks["testnet"] == nil {
+		t.Fatal("expected testnet descriptor")
+	}
+	if _, ok := registry.Lookup(66); !ok {
+		t.Fatal("expected derived registry to retain foreign-slot suite 66")
+	}
+}
+
 func TestProductionRotationDescriptorForNetworkRejectsNonProductionCaller(t *testing.T) {
 	_, _, err := productionRotationDescriptorForNetwork("devnet")
 	if err == nil {
