@@ -222,6 +222,36 @@ func (cfg Config) BuildRotationProvider() (consensus.RotationProvider, *consensu
 	return cfg.buildRotationProviderWithProductionLookup(productionRotationDescriptorForNetwork)
 }
 
+func resolveProductionRotationState(
+	network string,
+	localDescriptor *RotationConfigJSON,
+	productionLookup func(string) (*consensus.CryptoRotationDescriptor, *consensus.SuiteRegistry, error),
+) (*consensus.CryptoRotationDescriptor, *consensus.SuiteRegistry, bool, error) {
+	if network != "mainnet" && network != "testnet" {
+		return nil, nil, false, nil
+	}
+	if localDescriptor != nil {
+		return nil, nil, true, errors.New(productionLocalRotationDescriptorErr)
+	}
+	desc, registry, err := productionLookup(network)
+	if err != nil {
+		return nil, nil, true, err
+	}
+	if desc == nil {
+		if registry == nil {
+			registry = consensus.DefaultSuiteRegistry()
+		}
+		if !registry.IsCanonicalDefaultLiveManifest() {
+			return nil, nil, true, errors.New("production_rotation_schedule: invalid empty-slot registry")
+		}
+		return nil, registry, true, nil
+	}
+	if registry == nil {
+		return nil, nil, true, errors.New("production_rotation_schedule: missing registry")
+	}
+	return desc, registry, true, nil
+}
+
 func (cfg Config) buildRotationProviderWithProductionLookup(
 	productionLookup func(string) (*consensus.CryptoRotationDescriptor, *consensus.SuiteRegistry, error),
 ) (consensus.RotationProvider, *consensus.SuiteRegistry, error) {
@@ -232,23 +262,21 @@ func (cfg Config) buildRotationProviderWithProductionLookup(
 	if err != nil {
 		return nil, nil, err
 	}
-	if cfg.RotationDescriptor != nil && (network == "mainnet" || network == "testnet") {
-		return nil, nil, errors.New(productionLocalRotationDescriptorErr)
+	productionDesc, productionRegistry, productionHandled, err := resolveProductionRotationState(
+		network,
+		cfg.RotationDescriptor,
+		productionLookup,
+	)
+	if err != nil {
+		return nil, nil, err
 	}
-	if network == "mainnet" || network == "testnet" {
-		desc, registry, err := productionLookup(network)
-		if err != nil {
-			return nil, nil, err
-		}
-		if desc == nil {
+	if productionHandled {
+		if productionDesc == nil {
 			// Production empty slots use an explicit default pre-rotation runtime
 			// and must ignore any local suite_registry override entirely.
-			if registry == nil {
-				registry = consensus.DefaultSuiteRegistry()
-			}
-			return consensus.DefaultRotationProvider{}, registry, nil
+			return consensus.DefaultRotationProvider{}, productionRegistry, nil
 		}
-		return consensus.DescriptorRotationProvider{Descriptor: *desc}, registry, nil
+		return consensus.DescriptorRotationProvider{Descriptor: *productionDesc}, productionRegistry, nil
 	}
 	explicitRegistry, err := cfg.buildSuiteRegistry()
 	if err != nil {
@@ -368,23 +396,13 @@ func ValidateConfig(cfg Config) error {
 			return fmt.Errorf("mine_address must be 32 (key_id) or 33 (suite_id||key_id) bytes, got %d", len(raw))
 		}
 	}
-	if network == "mainnet" || network == "testnet" {
-		if cfg.RotationDescriptor != nil {
-			return errors.New(productionLocalRotationDescriptorErr)
-		}
-		// Production validation checks only the compiled schedule artifact and
-		// requires the helper to supply the canonical registry that matches the
-		// compiled activation state.
-		desc, registry, err := productionRotationDescriptorForNetwork(network)
-		if err != nil {
-			return err
-		}
-		if registry == nil {
-			return errors.New("production_rotation_schedule: missing registry")
-		}
-		if desc == nil && !registry.IsCanonicalDefaultLiveManifest() {
-			return errors.New("production_rotation_schedule: invalid empty-slot registry")
-		}
+	if _, _, productionHandled, err := resolveProductionRotationState(
+		network,
+		cfg.RotationDescriptor,
+		productionRotationDescriptorForNetwork,
+	); err != nil {
+		return err
+	} else if productionHandled {
 		return nil
 	}
 	if _, err := cfg.buildSuiteRegistry(); err != nil {

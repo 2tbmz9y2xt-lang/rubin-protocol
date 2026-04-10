@@ -8,7 +8,7 @@ use rubin_consensus::constants::{
 };
 use rubin_consensus::encode_compact_size;
 use rubin_consensus::{
-    block_hash, canonical_rotation_network_name_normalized, core_ext_profile_set_anchor_v1,
+    block_hash, canonical_rotation_network_name, core_ext_profile_set_anchor_v1,
     is_v1_production_rotation_network_normalized, normalized_rotation_network_name,
     validate_rotation_descriptor_for_normalized_network, CoreExtDeploymentProfile,
     CoreExtDeploymentProfiles, CryptoRotationDescriptor, DefaultRotationProvider,
@@ -304,11 +304,11 @@ where
     if network.trim().is_empty() {
         return Err("network is required".to_string());
     }
-    let normalized_network = normalized_rotation_network_name(network);
-    canonical_rotation_network_name_normalized(normalized_network.as_ref()).ok_or_else(|| {
+    let normalized_network = canonical_rotation_network_name(network).ok_or_else(|| {
         format!(
             "unknown network '{}' (expected: {})",
-            normalized_network, SUPPORTED_ROTATION_NETWORK_NAMES_CSV,
+            normalized_rotation_network_name(network),
+            SUPPORTED_ROTATION_NETWORK_NAMES_CSV,
         )
     })?;
     if is_v1_production_rotation_network_normalized(normalized_network.as_ref()) {

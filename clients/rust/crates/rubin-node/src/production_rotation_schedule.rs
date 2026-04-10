@@ -14,6 +14,8 @@ use std::collections::BTreeMap;
 pub(crate) const PRODUCTION_ROTATION_SCHEDULE_VERSION: u64 = 1;
 pub(crate) const PRODUCTION_ROTATION_SCHEDULE_ERR_STEM: &str = "production_rotation_schedule";
 
+// Rust embeds the canonical protocol fixture directly; there is no client-local
+// copy of the production schedule artifact to keep in sync.
 const PRODUCTION_ROTATION_SCHEDULE_V1_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../../../conformance/fixtures/protocol/production_rotation_schedule_v1.json"
@@ -252,13 +254,31 @@ mod tests {
         load_compiled_production_rotation_schedule, parse_schedule_with_registry,
         production_rotation_descriptor_for_network,
         production_rotation_descriptor_for_network_with_registry_for_test,
-        PRODUCTION_ROTATION_SCHEDULE_ERR_STEM, PRODUCTION_ROTATION_SCHEDULE_VERSION,
+        PRODUCTION_ROTATION_SCHEDULE_ERR_STEM, PRODUCTION_ROTATION_SCHEDULE_V1_JSON,
+        PRODUCTION_ROTATION_SCHEDULE_VERSION,
     };
     use rubin_consensus::constants::{
         ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, VERIFY_COST_ML_DSA_87,
     };
     use rubin_consensus::{SuiteParams, SuiteRegistry};
+    use serde_json::Value;
     use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn production_rotation_schedule_repo_path(parts: &[&str]) -> PathBuf {
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("../../../../");
+        for part in parts {
+            path.push(part);
+        }
+        path
+    }
+
+    fn compact_json_bytes(raw: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::from_str::<Value>(raw).expect("compact json"))
+            .expect("serialize compact json")
+    }
 
     fn canonical_production_schedule_registry() -> SuiteRegistry {
         let mut suites = BTreeMap::new();
@@ -293,6 +313,22 @@ mod tests {
         assert!(schedule.mainnet.is_none());
         assert!(schedule.testnet.is_none());
         assert!(registry.is_canonical_default_live_manifest());
+    }
+
+    #[test]
+    fn embedded_production_rotation_schedule_matches_canonical_fixture() {
+        let path = production_rotation_schedule_repo_path(&[
+            "conformance",
+            "fixtures",
+            "protocol",
+            "production_rotation_schedule_v1.json",
+        ]);
+        let raw = fs::read_to_string(&path).expect("read canonical production schedule fixture");
+        assert_eq!(
+            compact_json_bytes(&raw),
+            compact_json_bytes(PRODUCTION_ROTATION_SCHEDULE_V1_JSON),
+            "embedded production schedule drifted from canonical fixture"
+        );
     }
 
     #[test]
