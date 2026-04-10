@@ -987,6 +987,12 @@ fn build_suite_registry_from_json(
         let pubkey_len = validate_suite_registry_param_len(s.pubkey_len)?;
         let sig_len = validate_suite_registry_param_len(s.sig_len)?;
         let alg = normalize_suite_alg_name(&s.alg_name)?;
+        if pubkey_len != rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES
+            || sig_len != rubin_consensus::constants::ML_DSA_87_SIG_BYTES
+            || s.verify_cost != rubin_consensus::constants::VERIFY_COST_ML_DSA_87
+        {
+            return Err("bad suite_registry".to_string());
+        }
         if suites
             .insert(
                 s.suite_id,
@@ -4667,16 +4673,16 @@ mod tests {
             },
             SuiteParamsJson {
                 suite_id: 2,
-                pubkey_len: 1024,
-                sig_len: 512,
-                verify_cost: 9,
+                pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+                sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+                verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
                 alg_name: "ML-DSA-87".to_string(),
             },
             SuiteParamsJson {
                 suite_id: 3,
-                pubkey_len: 1024,
-                sig_len: 512,
-                verify_cost: 9,
+                pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+                sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+                verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
                 alg_name: "ML-DSA-87".to_string(),
             },
         ]
@@ -5154,6 +5160,32 @@ mod tests {
     }
 
     #[test]
+    fn suite_registry_rejects_noncanonical_params() {
+        let err = build_suite_registry_from_json(&[SuiteParamsJson {
+            suite_id: 3,
+            pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES - 1,
+            verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+            alg_name: "ML-DSA-87".to_string(),
+        }])
+        .unwrap_err();
+        assert_eq!(err, "bad suite_registry");
+    }
+
+    #[test]
+    fn suite_registry_rejects_lowercase_alg_name() {
+        let err = build_suite_registry_from_json(&[SuiteParamsJson {
+            suite_id: 3,
+            pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+            alg_name: "ml-dsa-87".to_string(),
+        }])
+        .unwrap_err();
+        assert_eq!(err, "bad suite_registry");
+    }
+
+    #[test]
     fn rotation_descriptor_check_accepts_legacy_openssl_alg_alias() {
         let req: Request = serde_json::from_str(
             r#"{
@@ -5161,7 +5193,7 @@ mod tests {
                 "network":"devnet",
                 "suite_registry":[
                     {"suite_id":1,"pubkey_len":2592,"sig_len":4627,"verify_cost":8,"openssl_alg":"ML-DSA-87"},
-                    {"suite_id":2,"pubkey_len":1024,"sig_len":512,"verify_cost":9,"openssl_alg":"ML-DSA-87"}
+                    {"suite_id":2,"pubkey_len":2592,"sig_len":4627,"verify_cost":8,"openssl_alg":"ML-DSA-87"}
                 ],
                 "rotation_descriptor":{"name":"r1","old_suite_id":1,"new_suite_id":2,"create_height":10,"spend_height":20,"sunset_height":100}
             }"#,

@@ -379,6 +379,11 @@ func validateSuiteRegistryItem(item SuiteParamsJSON) (consensus.SuiteParams, err
 	if err != nil {
 		return consensus.SuiteParams{}, err
 	}
+	if pubkeyLen != consensus.ML_DSA_87_PUBKEY_BYTES ||
+		sigLen != consensus.ML_DSA_87_SIG_BYTES ||
+		item.VerifyCost != consensus.VERIFY_COST_ML_DSA_87 {
+		return consensus.SuiteParams{}, fmt.Errorf("bad suite_registry")
+	}
 	return consensus.SuiteParams{
 		SuiteID:    item.SuiteID,
 		PubkeyLen:  pubkeyLen,

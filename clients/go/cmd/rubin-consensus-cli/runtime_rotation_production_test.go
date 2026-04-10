@@ -19,9 +19,9 @@ func cliTestRotationSuites() []SuiteParamsJSON {
 		},
 		{
 			SuiteID:    2,
-			PubkeyLen:  1024,
-			SigLen:     512,
-			VerifyCost: 9,
+			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
 			AlgName:    "ML-DSA-87",
 		},
 	}
@@ -97,8 +97,8 @@ func TestRubinConsensusCLI_RotationProduction_MainnetSingleDescriptorAndDevnetBa
 func TestRubinConsensusCLI_RotationProduction_MainnetRejectsMultiDescriptorBatch(t *testing.T) {
 	reg := append(
 		cliTestRotationSuites(),
-		SuiteParamsJSON{SuiteID: 3, PubkeyLen: 1024, SigLen: 512, VerifyCost: 9, AlgName: "ML-DSA-87"},
-		SuiteParamsJSON{SuiteID: 4, PubkeyLen: 1024, SigLen: 512, VerifyCost: 9, AlgName: "ML-DSA-87"},
+		SuiteParamsJSON{SuiteID: 3, PubkeyLen: consensus.ML_DSA_87_PUBKEY_BYTES, SigLen: consensus.ML_DSA_87_SIG_BYTES, VerifyCost: consensus.VERIFY_COST_ML_DSA_87, AlgName: "ML-DSA-87"},
+		SuiteParamsJSON{SuiteID: 4, PubkeyLen: consensus.ML_DSA_87_PUBKEY_BYTES, SigLen: consensus.ML_DSA_87_SIG_BYTES, VerifyCost: consensus.VERIFY_COST_ML_DSA_87, AlgName: "ML-DSA-87"},
 	)
 	mustRunErr(t, Request{
 		Op:            "rotation_descriptor_check",
@@ -133,7 +133,7 @@ func TestRubinConsensusCLI_RotationProduction_MainnetRejectsMultiDescriptorBatch
 func TestRubinConsensusCLI_RotationDescriptorCheck_PreservesStableErrAndDiagnostics(t *testing.T) {
 	reg := append(
 		cliTestRotationSuites(),
-		SuiteParamsJSON{SuiteID: 3, PubkeyLen: 1024, SigLen: 512, VerifyCost: 9, AlgName: "ML-DSA-87"},
+		SuiteParamsJSON{SuiteID: 3, PubkeyLen: consensus.ML_DSA_87_PUBKEY_BYTES, SigLen: consensus.ML_DSA_87_SIG_BYTES, VerifyCost: consensus.VERIFY_COST_ML_DSA_87, AlgName: "ML-DSA-87"},
 	)
 	resp := mustRunErr(t, Request{
 		Op:            "rotation_descriptor_check",
@@ -207,7 +207,7 @@ func TestRubinConsensusCLI_RotationDescriptorCheck_AcceptsLegacyOpenSSLAlgAlias(
 		"network":"devnet",
 		"suite_registry":[
 			{"suite_id":1,"pubkey_len":2592,"sig_len":4627,"verify_cost":8,"openssl_alg":"ML-DSA-87"},
-			{"suite_id":2,"pubkey_len":1024,"sig_len":512,"verify_cost":9,"openssl_alg":"ML-DSA-87"}
+			{"suite_id":2,"pubkey_len":2592,"sig_len":4627,"verify_cost":8,"openssl_alg":"ML-DSA-87"}
 		],
 		"rotation_descriptor":{"name":"r1","old_suite_id":1,"new_suite_id":2,"create_height":10,"spend_height":20,"sunset_height":100}
 	}`), &req); err != nil {
@@ -226,7 +226,7 @@ func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsMissingSuiteRegistryAl
 		"network":"devnet",
 		"suite_registry":[
 			{"suite_id":1,"pubkey_len":2592,"sig_len":4627,"verify_cost":8},
-			{"suite_id":2,"pubkey_len":1024,"sig_len":512,"verify_cost":9,"alg_name":"ML-DSA-87"}
+			{"suite_id":2,"pubkey_len":2592,"sig_len":4627,"verify_cost":8,"alg_name":"ML-DSA-87"}
 		],
 		"rotation_descriptor":{"name":"r1","old_suite_id":1,"new_suite_id":2,"create_height":10,"spend_height":20,"sunset_height":100}
 	}`), &req); err != nil {
@@ -241,7 +241,7 @@ func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsDuplicateSuiteID(t *te
 		Network: "devnet",
 		SuiteRegistry: []SuiteParamsJSON{
 			{SuiteID: 1, PubkeyLen: 2592, SigLen: 4627, VerifyCost: 8, AlgName: "ML-DSA-87"},
-			{SuiteID: 1, PubkeyLen: 1024, SigLen: 512, VerifyCost: 9, AlgName: "ML-DSA-87"},
+			{SuiteID: 1, PubkeyLen: 2592, SigLen: 4627, VerifyCost: 8, AlgName: "ML-DSA-87"},
 		},
 		RotationDescriptor: &RotationDescriptorJSON{
 			Name:         "r1",
@@ -260,7 +260,45 @@ func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsUnknownSuiteRegistryAl
 		Network: "devnet",
 		SuiteRegistry: []SuiteParamsJSON{
 			{SuiteID: 1, PubkeyLen: 2592, SigLen: 4627, VerifyCost: 8, AlgName: "NO_SUCH_ALG"},
-			{SuiteID: 2, PubkeyLen: 1024, SigLen: 512, VerifyCost: 9, AlgName: "ML-DSA-87"},
+			{SuiteID: 2, PubkeyLen: 2592, SigLen: 4627, VerifyCost: 8, AlgName: "ML-DSA-87"},
+		},
+		RotationDescriptor: &RotationDescriptorJSON{
+			Name:         "r1",
+			OldSuiteID:   1,
+			NewSuiteID:   2,
+			CreateHeight: 10,
+			SpendHeight:  20,
+			SunsetHeight: 100,
+		},
+	}, "bad suite_registry")
+}
+
+func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsNonCanonicalSuiteRegistryParams(t *testing.T) {
+	mustRunErr(t, Request{
+		Op:      "rotation_descriptor_check",
+		Network: "devnet",
+		SuiteRegistry: []SuiteParamsJSON{
+			{SuiteID: 1, PubkeyLen: consensus.ML_DSA_87_PUBKEY_BYTES, SigLen: consensus.ML_DSA_87_SIG_BYTES - 1, VerifyCost: consensus.VERIFY_COST_ML_DSA_87, AlgName: "ML-DSA-87"},
+			{SuiteID: 2, PubkeyLen: consensus.ML_DSA_87_PUBKEY_BYTES, SigLen: consensus.ML_DSA_87_SIG_BYTES, VerifyCost: consensus.VERIFY_COST_ML_DSA_87, AlgName: "ML-DSA-87"},
+		},
+		RotationDescriptor: &RotationDescriptorJSON{
+			Name:         "r1",
+			OldSuiteID:   1,
+			NewSuiteID:   2,
+			CreateHeight: 10,
+			SpendHeight:  20,
+			SunsetHeight: 100,
+		},
+	}, "bad suite_registry")
+}
+
+func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsLowercaseSuiteRegistryAlgName(t *testing.T) {
+	mustRunErr(t, Request{
+		Op:      "rotation_descriptor_check",
+		Network: "devnet",
+		SuiteRegistry: []SuiteParamsJSON{
+			{SuiteID: 1, PubkeyLen: consensus.ML_DSA_87_PUBKEY_BYTES, SigLen: consensus.ML_DSA_87_SIG_BYTES, VerifyCost: consensus.VERIFY_COST_ML_DSA_87, AlgName: "ml-dsa-87"},
+			{SuiteID: 2, PubkeyLen: consensus.ML_DSA_87_PUBKEY_BYTES, SigLen: consensus.ML_DSA_87_SIG_BYTES, VerifyCost: consensus.VERIFY_COST_ML_DSA_87, AlgName: "ML-DSA-87"},
 		},
 		RotationDescriptor: &RotationDescriptorJSON{
 			Name:         "r1",
