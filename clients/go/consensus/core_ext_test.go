@@ -1405,6 +1405,44 @@ func TestParseCoreExtVerifySigExtBinding_NativeAndUnsupported(t *testing.T) {
 	}
 }
 
+func TestNormalizeLiveCoreExtBindingName(t *testing.T) {
+	got, err := NormalizeLiveCoreExtBindingName(" " + CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 + " ")
+	if err != nil {
+		t.Fatalf("NormalizeLiveCoreExtBindingName(valid): %v", err)
+	}
+	if got != CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 {
+		t.Fatalf("got %q, want %q", got, CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
+	}
+
+	for _, binding := range []string{"", "native_verify_sig", "unsupported"} {
+		if _, err := NormalizeLiveCoreExtBindingName(binding); err == nil {
+			t.Fatalf("binding %q must fail live normalization", binding)
+		}
+	}
+}
+
+func TestParseLiveCoreExtVerifySigExtBinding(t *testing.T) {
+	descriptor, err := CoreExtOpenSSLDigest32BindingDescriptorBytes("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+	if err != nil {
+		t.Fatalf("descriptor bytes: %v", err)
+	}
+
+	if _, err := ParseLiveCoreExtVerifySigExtBinding("native_verify_sig", descriptor, []byte{0xb2}); err == nil {
+		t.Fatalf("native binding must fail on live path")
+	}
+	if _, err := ParseLiveCoreExtVerifySigExtBinding(CoreExtBindingNameVerifySigExtOpenSSLDigest32V1, descriptor, nil); err == nil {
+		t.Fatalf("missing ext_payload_schema must fail on live path")
+	}
+
+	verifyFn, err := ParseLiveCoreExtVerifySigExtBinding(" "+CoreExtBindingNameVerifySigExtOpenSSLDigest32V1+" ", descriptor, []byte{0xb2})
+	if err != nil {
+		t.Fatalf("ParseLiveCoreExtVerifySigExtBinding(valid): %v", err)
+	}
+	if verifyFn == nil {
+		t.Fatalf("valid live binding must create verify function")
+	}
+}
+
 func TestCoreExtOpenSSLDigest32BindingDescriptorErrors(t *testing.T) {
 	if _, err := CoreExtOpenSSLDigest32BindingDescriptorBytes("bad", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES); err == nil {
 		t.Fatalf("unsupported alg must fail")

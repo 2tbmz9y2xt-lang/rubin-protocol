@@ -514,8 +514,9 @@ mod tests {
     // ======== Registry & Lookup Tests (8) ========
 
     #[test]
-    fn verify_sig_with_registry_nil_falls_back_to_legacy() {
-        // When registry is None, verify_sig_with_registry should fall back to verify_sig
+    fn verify_sig_with_registry_nil_uses_default_live_registry() {
+        // When registry is None, verify_sig_with_registry should use the
+        // canonical default live registry rather than a separate legacy path.
         let keypair = Mldsa87Keypair::generate().expect("keypair");
         let pubkey = keypair.pubkey_bytes();
         let digest = [0x42; 32];
@@ -530,7 +531,10 @@ mod tests {
         )
         .expect("verify");
 
-        assert!(result, "valid signature should verify");
+        assert!(
+            result,
+            "valid signature should verify via default live registry"
+        );
     }
 
     #[test]
@@ -746,7 +750,7 @@ mod tests {
             None,
         );
 
-        assert!(result.is_ok(), "default fallback should verify valid P2PK");
+        assert!(result.is_ok(), "default providers should verify valid P2PK");
     }
 
     #[test]

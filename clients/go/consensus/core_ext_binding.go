@@ -17,6 +17,20 @@ type CoreExtOpenSSLDigest32BindingDescriptor struct {
 	SigLen     int
 }
 
+// NormalizeLiveCoreExtBindingName enforces the current chain-instance live
+// manifest contract. In the current repository baseline, live CORE_EXT
+// verification is pinned to the OpenSSL digest32 binding; native/empty
+// bindings remain non-live helper surfaces and must not reach runtime loaders.
+func NormalizeLiveCoreExtBindingName(binding string) (string, error) {
+	binding = strings.TrimSpace(binding)
+	switch binding {
+	case CoreExtBindingNameVerifySigExtOpenSSLDigest32V1:
+		return binding, nil
+	default:
+		return "", fmt.Errorf("unsupported core_ext binding: %s", binding)
+	}
+}
+
 func ParseCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte) (CoreExtVerifySigExtFunc, error) {
 	binding = strings.TrimSpace(binding)
 	switch binding {
@@ -33,6 +47,21 @@ func ParseCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte) (
 	default:
 		return nil, fmt.Errorf("unsupported core_ext binding: %s", binding)
 	}
+}
+
+// ParseLiveCoreExtVerifySigExtBinding is the live runtime loader path for
+// manifest-derived CORE_EXT verification. Historical/helper paths may still
+// use ParseCoreExtVerifySigExtBinding directly, but live consumers must call
+// this stricter entrypoint so manifest drift cannot silently switch bindings.
+func ParseLiveCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte, extPayloadSchema []byte) (CoreExtVerifySigExtFunc, error) {
+	binding, err := NormalizeLiveCoreExtBindingName(binding)
+	if err != nil {
+		return nil, err
+	}
+	if len(extPayloadSchema) == 0 {
+		return nil, fmt.Errorf("core_ext binding %s requires ext_payload_schema_hex", CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
+	}
+	return ParseCoreExtVerifySigExtBinding(binding, bindingDescriptor)
 }
 
 func CoreExtOpenSSLDigest32BindingDescriptorBytes(opensslAlg string, pubkeyLen int, sigLen int) ([]byte, error) {

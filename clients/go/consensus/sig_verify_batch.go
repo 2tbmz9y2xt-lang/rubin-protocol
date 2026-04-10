@@ -131,11 +131,7 @@ func (q *SigCheckQueue) Flush() error {
 		}
 		var ok bool
 		var err error
-		if q.registry != nil {
-			ok, err = verifySigWithRegistry(t.suiteID, t.pubkey, t.sig, t.digest, q.registry)
-		} else {
-			ok, err = verifySig(t.suiteID, t.pubkey, t.sig, t.digest)
-		}
+		ok, err = verifySigWithRegistry(t.suiteID, t.pubkey, t.sig, t.digest, q.registry)
 		if err != nil {
 			return err
 		}
@@ -196,11 +192,7 @@ func (q *SigCheckQueue) Flush() error {
 				}
 				var ok bool
 				var err error
-				if q.registry != nil {
-					ok, err = verifySigWithRegistry(t.suiteID, t.pubkey, t.sig, t.digest, q.registry)
-				} else {
-					ok, err = verifySig(t.suiteID, t.pubkey, t.sig, t.digest)
-				}
+				ok, err = verifySigWithRegistry(t.suiteID, t.pubkey, t.sig, t.digest, q.registry)
 				if err != nil {
 					results[idx] = err
 					anyFailed.Store(true)

@@ -449,6 +449,31 @@ pub fn core_ext_verification_binding_from_name_and_descriptor(
     }
 }
 
+pub fn normalize_live_core_ext_binding_name(binding_name: &str) -> Result<&'static str, String> {
+    let binding_name = binding_name.trim();
+    match binding_name {
+        CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1 => {
+            Ok(CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1)
+        }
+        _ => Err(format!("unsupported core_ext binding: {binding_name}")),
+    }
+}
+
+pub fn live_core_ext_verification_binding_from_name_and_descriptor(
+    binding_name: &str,
+    binding_descriptor: &[u8],
+    ext_payload_schema: &[u8],
+) -> Result<CoreExtVerificationBinding, String> {
+    let binding_name = normalize_live_core_ext_binding_name(binding_name)?;
+    if ext_payload_schema.is_empty() {
+        return Err(format!(
+            "core_ext binding {} requires ext_payload_schema_hex",
+            CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+        ));
+    }
+    core_ext_verification_binding_from_name_and_descriptor(binding_name, binding_descriptor)
+}
+
 fn core_ext_supported_openssl_alg(openssl_alg: &str) -> Option<(u64, u64)> {
     match openssl_alg {
         "ML-DSA-87" => Some((ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)),
@@ -2322,6 +2347,33 @@ mod tests {
         let err =
             core_ext_verification_binding_from_name("unsupported").expect_err("unsupported bind");
         assert!(err.contains("unsupported core_ext binding"));
+    }
+
+    #[test]
+    fn live_core_ext_binding_helper_rejects_non_manifest_bindings() {
+        let err = normalize_live_core_ext_binding_name("").expect_err("empty must fail");
+        assert!(err.contains("unsupported core_ext binding"));
+
+        let err = normalize_live_core_ext_binding_name(" native_verify_sig ")
+            .expect_err("native alias must fail");
+        assert!(err.contains("unsupported core_ext binding"));
+
+        let descriptor = core_ext_openssl_digest32_binding_descriptor_bytes(
+            "ML-DSA-87",
+            ML_DSA_87_PUBKEY_BYTES,
+            ML_DSA_87_SIG_BYTES,
+        )
+        .expect("descriptor");
+        let binding = live_core_ext_verification_binding_from_name_and_descriptor(
+            &format!("  {CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1}\n"),
+            &descriptor,
+            &[0xb2],
+        )
+        .expect("live binding");
+        assert!(matches!(
+            binding,
+            CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(_)
+        ));
     }
 
     #[test]

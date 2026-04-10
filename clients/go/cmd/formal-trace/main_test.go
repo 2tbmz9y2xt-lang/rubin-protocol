@@ -45,6 +45,19 @@ func TestBuildCoreExtProfiles_TrimsBindingAndBoundsHex(t *testing.T) {
 	}
 }
 
+func TestBuildCoreExtProfiles_RejectsNativeBindingOnLiveTracePath(t *testing.T) {
+	items := []coreExtProfileJSON{{
+		ExtID:               1,
+		ActivationHeight:    10,
+		AllowedSuiteIDs:     []uint8{consensus.SUITE_ID_ML_DSA_87},
+		Binding:             " native_verify_sig ",
+		ExtPayloadSchemaHex: "b2",
+	}}
+	if _, err := buildCoreExtProfiles(items); err == nil || !strings.Contains(err.Error(), "unsupported core_ext binding") {
+		t.Fatalf("expected live trace binding rejection, got %v", err)
+	}
+}
+
 func TestListFixtureNamesSortedAndFiltered(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite := func(name, content string) {

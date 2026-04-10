@@ -2,7 +2,7 @@ use crate::constants::{MAX_BLOCK_WEIGHT, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_B
 use crate::error::{ErrorCode, TxError};
 use crate::sig_cache::SigCache;
 use crate::suite_registry::SuiteRegistry;
-use crate::verify_sig_openssl::{verify_sig, verify_sig_with_registry};
+use crate::verify_sig_openssl::verify_sig_with_registry;
 use crate::worker_pool::{
     run_worker_pool, WorkerCancellationToken, WorkerPoolError, WorkerPoolRunError, WorkerResult,
 };
@@ -234,16 +234,13 @@ fn verify_queued_task(
         }
     }
 
-    let ok = match registry {
-        Some(registry) => verify_sig_with_registry(
-            task.suite_id,
-            &task.pubkey,
-            &task.sig,
-            &task.digest,
-            Some(registry),
-        )?,
-        None => verify_sig(task.suite_id, &task.pubkey, &task.sig, &task.digest)?,
-    };
+    let ok = verify_sig_with_registry(
+        task.suite_id,
+        &task.pubkey,
+        &task.sig,
+        &task.digest,
+        registry,
+    )?;
     if !ok {
         return Err(task.err_on_fail);
     }

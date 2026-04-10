@@ -398,21 +398,29 @@ func verifySigWithBinding(binding suiteVerifierBinding, pubkey []byte, signature
 	}
 }
 
+func runtimeSuiteParamsForVerification(suiteID uint8, registry *SuiteRegistry) (SuiteParams, error) {
+	if registry == nil {
+		registry = DefaultSuiteRegistry()
+	}
+	params, ok := registry.Lookup(suiteID)
+	if !ok {
+		return SuiteParams{}, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: unsupported suite_id")
+	}
+	return params, nil
+}
+
 // verifySigWithRegistry dispatches signature verification using the suite
 // registry for suite lookup instead of hardcoded suite_id → algorithm mapping.
-// Falls back to legacy verifySig when registry is nil.
+// A nil registry means "use the canonical default live manifest registry", not
+// "silently switch to a separate legacy verifier path".
 //
 // The registry no longer gets to select the verifier backend implicitly through
 // AlgName alone. Runtime verification resolves an explicit v1 binding from
 // the suite parameters so existing suites cannot switch backend silently.
 func verifySigWithRegistry(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte, registry *SuiteRegistry) (bool, error) {
-	if registry == nil {
-		return verifySig(suiteID, pubkey, signature, digest32)
-	}
-
-	params, ok := registry.Lookup(suiteID)
-	if !ok {
-		return false, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: unsupported suite_id")
+	params, err := runtimeSuiteParamsForVerification(suiteID, registry)
+	if err != nil {
+		return false, err
 	}
 	if err := ensureOpenSSLConsensusInit(); err != nil {
 		return false, err

@@ -1002,10 +1002,11 @@ func TestParseGenesisConfigFullRejectsInvalidChainID(t *testing.T) {
 func TestParseGenesisConfigFullRejectsEmptyCoreExtAllowedSuites(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "genesis.json")
+	descriptorHex := mustCoreExtOpenSSLDigest32DescriptorHex(t)
 	if err := os.WriteFile(path, []byte(`{
 		"chain_id_hex":"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
 		"genesis_hash_hex":"0x8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff",
-		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[],"binding":"native_verify_sig"}]
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[],"binding":"`+consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1+`","binding_descriptor_hex":"`+descriptorHex+`","ext_payload_schema_hex":"b2"}]
 	}`), 0o600); err != nil {
 		t.Fatalf("write genesis file: %v", err)
 	}
@@ -1240,11 +1241,12 @@ func TestParseGenesisConfigFullRejectsInvalidCoreExtAnchorProfiles(t *testing.T)
 	genesisHashBytes := node.DevnetGenesisBlockHash()
 	chainID := hex.EncodeToString(chainIDBytes[:])
 	genesisHash := hex.EncodeToString(genesisHashBytes[:])
+	descriptorHex := mustCoreExtOpenSSLDigest32DescriptorHex(t)
 	if err := os.WriteFile(path, []byte(`{
 		"chain_id_hex":"0x`+chainID+`",
 		"genesis_hash_hex":"0x`+genesisHash+`",
 		"core_ext_profile_set_anchor_hex":"0x`+strings.Repeat("00", 32)+`",
-		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[],"binding":"native_verify_sig","ext_payload_schema_hex":"b2"}]
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[],"binding":"`+consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1+`","binding_descriptor_hex":"`+descriptorHex+`","ext_payload_schema_hex":"b2"}]
 	}`), 0o600); err != nil {
 		t.Fatalf("write genesis file: %v", err)
 	}
@@ -1260,10 +1262,11 @@ func TestParseGenesisConfigFullRejectsTxContextEnabledCoreExtProfileWithoutRunti
 	genesisHashBytes := node.DevnetGenesisBlockHash()
 	chainID := hex.EncodeToString(chainIDBytes[:])
 	genesisHash := hex.EncodeToString(genesisHashBytes[:])
+	descriptorHex := mustCoreExtOpenSSLDigest32DescriptorHex(t)
 	if err := os.WriteFile(path, []byte(`{
 		"chain_id_hex":"0x`+chainID+`",
 		"genesis_hash_hex":"0x`+genesisHash+`",
-		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"tx_context_enabled":true,"allowed_suite_ids":[3],"binding":"native_verify_sig"}]
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"tx_context_enabled":true,"allowed_suite_ids":[3],"binding":"`+consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1+`","binding_descriptor_hex":"`+descriptorHex+`","ext_payload_schema_hex":"b2"}]
 	}`), 0o600); err != nil {
 		t.Fatalf("write genesis file: %v", err)
 	}
@@ -1280,10 +1283,11 @@ func TestParseGenesisConfigFullRejectsNonBooleanTxContextEnabled(t *testing.T) {
 	genesisHashBytes := node.DevnetGenesisBlockHash()
 	chainID := hex.EncodeToString(chainIDBytes[:])
 	genesisHash := hex.EncodeToString(genesisHashBytes[:])
+	descriptorHex := mustCoreExtOpenSSLDigest32DescriptorHex(t)
 	if err := os.WriteFile(path, []byte(`{
 		"chain_id_hex":"0x`+chainID+`",
 		"genesis_hash_hex":"0x`+genesisHash+`",
-		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"tx_context_enabled":1,"allowed_suite_ids":[3],"binding":"native_verify_sig"}]
+		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"tx_context_enabled":1,"allowed_suite_ids":[3],"binding":"`+consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1+`","binding_descriptor_hex":"`+descriptorHex+`","ext_payload_schema_hex":"b2"}]
 	}`), 0o600); err != nil {
 		t.Fatalf("write genesis file: %v", err)
 	}
@@ -1320,11 +1324,11 @@ func TestParseCoreExtBindingVariants(t *testing.T) {
 		binding           string
 		bindingDescriptor []byte
 		extPayloadSchema  []byte
-		wantNil           bool
+		wantErr           string
 		skipCall          bool
 	}{
-		{name: "empty", binding: "", wantNil: true},
-		{name: "native", binding: "native_verify_sig", wantNil: true},
+		{name: "empty", binding: "", wantErr: "unsupported core_ext binding"},
+		{name: "native", binding: "native_verify_sig", wantErr: "unsupported core_ext binding"},
 		{
 			name:              "openssl-digest32",
 			binding:           consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
@@ -1337,14 +1341,14 @@ func TestParseCoreExtBindingVariants(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fn, err := parseCoreExtBinding(tt.binding, tt.bindingDescriptor, tt.extPayloadSchema)
-			if err != nil {
-				t.Fatalf("parseCoreExtBinding(%q): %v", tt.binding, err)
-			}
-			if tt.wantNil {
-				if fn != nil {
-					t.Fatalf("expected nil verifier for %q", tt.binding)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("parseCoreExtBinding(%q) err=%v, want %q", tt.binding, err, tt.wantErr)
 				}
 				return
+			}
+			if err != nil {
+				t.Fatalf("parseCoreExtBinding(%q): %v", tt.binding, err)
 			}
 			if fn == nil {
 				t.Fatalf("expected verifier for %q", tt.binding)

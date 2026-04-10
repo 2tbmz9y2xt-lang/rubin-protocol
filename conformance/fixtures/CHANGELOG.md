@@ -9,6 +9,22 @@ Policy:
 
 ---
 
+## 2026-04-10 — Live CORE_EXT manifest binding normalization (Q-IMPL-ROTATION-MANIFEST-ARCHIVAL-RUNTIME-SPLIT-01)
+
+Причина:
+- live runtime path больше не принимает `native_verify_sig`/empty binding как authority для `CORE_EXT`;
+- executable fixtures должны идти через тот же manifest-derived OpenSSL digest32 binding, что и live Go/Rust loaders;
+- historical retention остаётся отдельной archival boundary, а не частью live CLI/node config surface.
+
+Инструменты:
+- точечное обновление `CV-EXT.json` и `CV-UTXO-BASIC.json`,
+- проверка через `go test ./cmd/rubin-consensus-cli ./cmd/rubin-node`,
+- синхронизация матрицы: `python3 tools/gen_conformance_matrix.py`.
+
+Изменённые fixtures:
+- `CV-EXT.json`
+- `CV-UTXO-BASIC.json`
+
 ## 2026-04-09 — Production single-descriptor conformance network coverage (Q-IMPL-ROTATION-PRODUCTION-SINGLE-DESCRIPTOR-GATE-01)
 
 Причина:

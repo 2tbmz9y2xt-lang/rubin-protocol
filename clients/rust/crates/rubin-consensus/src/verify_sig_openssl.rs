@@ -16,6 +16,8 @@ enum OpenSslFipsMode {
 
 static OPENSSL_BOOTSTRAP_STATE: OnceLock<Result<(), TxError>> = OnceLock::new();
 static OPENSSL_CONSENSUS_INIT: OnceLock<Result<(), TxError>> = OnceLock::new();
+static DEFAULT_RUNTIME_SUITE_REGISTRY: OnceLock<crate::suite_registry::SuiteRegistry> =
+    OnceLock::new();
 
 extern "C" {
     fn EVP_PKEY_CTX_new_from_name(
@@ -477,12 +479,33 @@ fn verify_sig_with_binding(
     }
 }
 
+fn default_runtime_suite_registry() -> &'static crate::suite_registry::SuiteRegistry {
+    DEFAULT_RUNTIME_SUITE_REGISTRY
+        .get_or_init(crate::suite_registry::SuiteRegistry::default_registry)
+}
+
+fn runtime_suite_params_for_verification(
+    suite_id: u8,
+    registry: Option<&crate::suite_registry::SuiteRegistry>,
+) -> Result<crate::suite_registry::SuiteParams, TxError> {
+    let params = match registry {
+        Some(registry) => registry.lookup(suite_id).cloned(),
+        None => default_runtime_suite_registry().lookup(suite_id).cloned(),
+    };
+    params.ok_or_else(|| {
+        TxError::new(
+            ErrorCode::TxErrSigAlgInvalid,
+            "verify_sig_with_registry: suite not registered",
+        )
+    })
+}
+
 /// Registry-aware signature verification. When registry is Some, looks up
-/// the suite's parameters from the registry. When registry is None, falls back
-/// to the hardcoded verify_sig path. The registry no longer selects a backend
-/// implicitly through `alg_name`; runtime verification resolves an explicit
-/// v1 binding from the suite parameters instead. Parity with Go
-/// `verifySigWithRegistry`.
+/// the suite's parameters from the registry. When registry is None, the
+/// canonical default live registry is used instead of a separate legacy
+/// verifier path. The registry no longer selects a backend implicitly through
+/// `alg_name`; runtime verification resolves an explicit v1 binding from the
+/// suite parameters instead. Parity with Go `verifySigWithRegistry`.
 pub fn verify_sig_with_registry(
     suite_id: u8,
     pubkey: &[u8],
@@ -490,15 +513,7 @@ pub fn verify_sig_with_registry(
     digest32: &[u8; 32],
     registry: Option<&crate::suite_registry::SuiteRegistry>,
 ) -> Result<bool, TxError> {
-    let Some(reg) = registry else {
-        return verify_sig(suite_id, pubkey, signature, digest32);
-    };
-    let Some(params) = reg.lookup(suite_id) else {
-        return Err(TxError::new(
-            ErrorCode::TxErrSigAlgInvalid,
-            "verify_sig_with_registry: suite not registered",
-        ));
-    };
+    let params = runtime_suite_params_for_verification(suite_id, registry)?;
     ensure_openssl_consensus_init()?;
     let binding =
         resolve_suite_verifier_binding(params.alg_name, params.pubkey_len, params.sig_len)?;
@@ -955,7 +970,7 @@ mod tests {
 
     // Registry Extension (2)
     #[test]
-    fn verify_sig_with_registry_nil_falls_back() {
+    fn verify_sig_with_registry_nil_uses_default_live_registry() {
         let Some(kp) = generate_or_skip() else { return };
         let digest = [0x66; 32];
         let sig = kp.sign_digest32(digest).expect("sign");
@@ -967,7 +982,7 @@ mod tests {
             None,
         )
         .expect("verify");
-        assert!(ok, "nil registry fallback must work");
+        assert!(ok, "default live registry must verify canonical suite");
     }
 
     #[test]

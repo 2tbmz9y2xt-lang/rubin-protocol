@@ -7,9 +7,10 @@ import (
 	"testing"
 )
 
-func TestVerifySigWithRegistry_NilRegistry_FallsBackToLegacy(t *testing.T) {
+func TestVerifySigWithRegistry_NilRegistry_UsesDefaultLiveRegistry(t *testing.T) {
 	var d [32]byte
-	// ML-DSA-87 with wrong lengths → returns (false, nil) via legacy path.
+	// ML-DSA-87 with wrong lengths still routes through the canonical default
+	// live registry and returns (false, nil) without a transport error.
 	ok, err := verifySigWithRegistry(SUITE_ID_ML_DSA_87, []byte{0x01}, []byte{0x02}, d, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -135,9 +136,9 @@ func TestVerifySigWithRegistry_CustomSuite_UnsupportedBindingRejected(t *testing
 	}
 }
 
-func TestValidateP2PKSpendAtHeight_NilProviders_FallsBackToLegacy(t *testing.T) {
-	// With nil rotation/registry, should fallback to legacy path.
-	// Legacy rejects non-ML-DSA-87 suite.
+func TestValidateP2PKSpendAtHeight_NilProviders_UseDefaultProviders(t *testing.T) {
+	// With nil rotation/registry, consensus uses canonical default providers.
+	// The default live registry still rejects non-ML-DSA-87 suites.
 	w := WitnessItem{SuiteID: 0xFF, Pubkey: []byte{0x01}, Signature: []byte{0x02}}
 	entry := UtxoEntry{}
 	tx := &Tx{Version: TX_WIRE_VERSION}
