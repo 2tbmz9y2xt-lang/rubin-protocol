@@ -288,7 +288,7 @@ func TestBuildRotationProvider_ExplicitSuiteRegistryWithoutDescriptor(t *testing
 	}
 }
 
-func TestBuildRotationProvider_ProductionExplicitSuiteRegistryWithoutDescriptorDoesNotActivateRotation(t *testing.T) {
+func TestBuildRotationProvider_ProductionExplicitSuiteRegistryWithoutDescriptorUsesDefaultPreRotationRuntime(t *testing.T) {
 	for _, network := range productionRotationNetworks {
 		t.Run(quotedSubtestName(network), func(t *testing.T) {
 			cfg := DefaultConfig()
@@ -306,8 +306,8 @@ func TestBuildRotationProvider_ProductionExplicitSuiteRegistryWithoutDescriptorD
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if rot != nil {
-				t.Fatal("expected compiled empty production schedule to leave rotation nil")
+			if rot == nil {
+				t.Fatal("expected explicit default rotation for empty production schedule")
 			}
 			if reg == nil {
 				t.Fatal("expected canonical default registry for explicit empty production schedule")
@@ -317,6 +317,12 @@ func TestBuildRotationProvider_ProductionExplicitSuiteRegistryWithoutDescriptorD
 			}
 			if _, ok := reg.Lookup(0x42); ok {
 				t.Fatal("unexpected local suite_registry authority leak into empty production schedule")
+			}
+			if !rot.NativeSpendSuites(0).Contains(consensus.SUITE_ID_ML_DSA_87) {
+				t.Fatal("expected default pre-rotation runtime to expose ML-DSA-87")
+			}
+			if rot.NativeSpendSuites(0).Contains(0x42) {
+				t.Fatal("unexpected local suite_registry leak into production default rotation")
 			}
 		})
 	}
@@ -467,7 +473,7 @@ func TestBuildRotationProvider_ProductionHelperRejectsLocalRotationDescriptor(t 
 	}
 }
 
-func TestBuildRotationProvider_ProductionLookupNoneKeepsSuiteRegistryNonAuthoritative(t *testing.T) {
+func TestBuildRotationProvider_ProductionLookupNoneUsesDefaultPreRotationRuntime(t *testing.T) {
 	for _, network := range productionRotationNetworks {
 		t.Run(quotedSubtestName(network), func(t *testing.T) {
 			cfg := DefaultConfig()
@@ -492,8 +498,8 @@ func TestBuildRotationProvider_ProductionLookupNoneKeepsSuiteRegistryNonAuthorit
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if rot != nil {
-				t.Fatal("expected nil rotation when compiled production schedule is empty")
+			if rot == nil {
+				t.Fatal("expected explicit default rotation when compiled production schedule is empty")
 			}
 			if reg == nil {
 				t.Fatal("expected canonical default registry when production lookup is empty")
@@ -503,6 +509,49 @@ func TestBuildRotationProvider_ProductionLookupNoneKeepsSuiteRegistryNonAuthorit
 			}
 			if _, ok := reg.Lookup(0x77); ok {
 				t.Fatal("expected local suite_registry to remain non-authoritative on production lookup none")
+			}
+			if !rot.NativeSpendSuites(0).Contains(consensus.SUITE_ID_ML_DSA_87) {
+				t.Fatal("expected default pre-rotation runtime to expose ML-DSA-87")
+			}
+			if rot.NativeSpendSuites(0).Contains(0x77) {
+				t.Fatal("unexpected local suite_registry leak into production default rotation")
+			}
+		})
+	}
+}
+
+func TestValidateConfig_ProductionIgnoresBadSuiteRegistryWithoutDescriptor(t *testing.T) {
+	for _, network := range productionRotationNetworks {
+		t.Run(quotedSubtestName(network), func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Network = network
+			cfg.SuiteRegistry = []SuiteParamsJSON{
+				{
+					SuiteID:    0x42,
+					PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+					SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+					VerifyCost: 0,
+					AlgName:    stringPtr("ML-DSA-87"),
+				},
+			}
+			if err := ValidateConfig(cfg); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			rot, reg, err := cfg.BuildRotationProvider()
+			if err != nil {
+				t.Fatalf("build rotation provider: %v", err)
+			}
+			if rot == nil {
+				t.Fatal("expected explicit default rotation on production empty schedule")
+			}
+			if reg == nil || !reg.IsCanonicalDefaultLiveManifest() {
+				t.Fatal("expected canonical default production registry")
+			}
+			if _, ok := reg.Lookup(0x42); ok {
+				t.Fatal("unexpected malformed local suite_registry leak into production registry")
+			}
+			if rot.NativeSpendSuites(0).Contains(0x42) {
+				t.Fatal("unexpected malformed local suite_registry leak into production rotation")
 			}
 		})
 	}

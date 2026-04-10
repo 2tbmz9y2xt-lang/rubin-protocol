@@ -124,8 +124,9 @@ pub struct LoadedGenesisConfig {
     pub genesis_hash: Option<[u8; 32]>,
     pub core_ext_deployments: CoreExtDeploymentProfiles,
     /// Optional SuiteContext built from non-production config or the compiled
-    /// production activation schedule. None means use the implicit default
-    /// registry/provider with no explicit suite overlay.
+    /// production activation schedule. Non-production callers without an
+    /// explicit overlay keep this as None; production empty slots use an
+    /// explicit default pre-rotation context.
     pub suite_context: Option<crate::sync::SuiteContext>,
 }
 
@@ -310,7 +311,6 @@ where
             normalized_network, SUPPORTED_ROTATION_NETWORK_NAMES_CSV,
         )
     })?;
-    let explicit_registry = build_suite_registry_from_json(suite_registry)?;
     if is_v1_production_rotation_network_normalized(normalized_network.as_ref()) {
         if desc.is_some() {
             return Err(PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR.to_string());
@@ -320,9 +320,15 @@ where
                 rotation: Arc::new(DescriptorRotationProvider { descriptor }),
                 registry: Arc::new(registry),
             })),
-            None => Ok(None),
+            // Production empty slots use an explicit default pre-rotation
+            // context and never consult local suite_registry input.
+            None => Ok(Some(crate::sync::SuiteContext {
+                rotation: Arc::new(DefaultRotationProvider),
+                registry: Arc::new(SuiteRegistry::default_registry()),
+            })),
         };
     }
+    let explicit_registry = build_suite_registry_from_json(suite_registry)?;
     let registry = explicit_registry.unwrap_or_else(SuiteRegistry::default_registry);
     let registry = Arc::new(registry);
     let rotation: Arc<dyn rubin_consensus::RotationProvider + Send + Sync> = match desc {
@@ -495,7 +501,6 @@ mod tests {
     use rubin_consensus::constants::{
         ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, VERIFY_COST_ML_DSA_87,
     };
-    use rubin_consensus::RotationProvider;
     use rubin_consensus::{
         core_ext_profile_set_anchor_v1, CoreExtDeploymentProfile, CoreExtVerificationBinding,
     };
@@ -773,8 +778,8 @@ mod tests {
     }
 
     #[test]
-    fn load_genesis_config_production_suite_registry_without_rotation_descriptor_does_not_activate()
-    {
+    fn load_genesis_config_production_suite_registry_without_descriptor_uses_default_pre_rotation_runtime(
+    ) {
         for (case_idx, network) in production_rotation_networks().into_iter().enumerate() {
             let dir = std::env::temp_dir().join(format!(
                 "rubin-node-genesis-suite-registry-production-{}-{}",
@@ -799,10 +804,55 @@ mod tests {
             .expect("write");
 
             let cfg = load_genesis_config(Some(&path), network).expect("load");
-            assert!(
-                cfg.suite_context.is_none(),
-                "expected explicit empty production schedule to keep suite_context=None for {network}"
-            );
+            let suite_context = cfg
+                .suite_context
+                .expect("expected explicit default production suite_context");
+            assert!(suite_context.registry.is_canonical_default_live_manifest());
+            assert!(suite_context.registry.lookup(SUITE_ID_ML_DSA_87).is_some());
+            assert!(suite_context.registry.lookup(66).is_none());
+            assert!(suite_context
+                .rotation
+                .native_spend_suites(0)
+                .contains(SUITE_ID_ML_DSA_87));
+            assert!(!suite_context.rotation.native_spend_suites(0).contains(66));
+
+            std::fs::remove_dir_all(&dir).expect("cleanup");
+        }
+    }
+
+    #[test]
+    fn load_genesis_config_production_ignores_bad_local_suite_registry() {
+        for (case_idx, network) in production_rotation_networks().into_iter().enumerate() {
+            let dir = std::env::temp_dir().join(format!(
+                "rubin-node-genesis-bad-suite-registry-production-{}-{}",
+                case_idx,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("time")
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            let path = dir.join("genesis.json");
+            std::fs::write(
+                &path,
+                "{\
+                  \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+                  \"suite_registry\":[{\"suite_id\":77,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":0,\"alg_name\":\"ML-DSA-87\"}]\
+                }",
+            )
+            .expect("write");
+
+            let cfg = load_genesis_config(Some(&path), network).expect("load");
+            let suite_context = cfg
+                .suite_context
+                .expect("expected explicit default production suite_context");
+            assert!(suite_context.registry.is_canonical_default_live_manifest());
+            assert!(suite_context.registry.lookup(77).is_none());
+            assert!(suite_context
+                .rotation
+                .native_spend_suites(0)
+                .contains(SUITE_ID_ML_DSA_87));
+            assert!(!suite_context.rotation.native_spend_suites(0).contains(77));
 
             std::fs::remove_dir_all(&dir).expect("cleanup");
         }
@@ -910,7 +960,7 @@ mod tests {
     }
 
     #[test]
-    fn build_suite_context_from_descriptor_production_lookup_none_keeps_suite_registry_non_authoritative(
+    fn build_suite_context_from_descriptor_production_lookup_none_uses_default_pre_rotation_runtime(
     ) {
         let local_suite_registry = vec![GenesisSuiteParams {
             suite_id: 77,
@@ -934,16 +984,21 @@ mod tests {
                     Ok(None)
                 },
             )
-            .expect("must load");
-            assert!(
-                suite_context.is_none(),
-                "expected empty production schedule to keep suite_context=None for {input}"
-            );
+            .expect("must load")
+            .expect("suite context");
+            assert!(suite_context.registry.is_canonical_default_live_manifest());
+            assert!(suite_context.registry.lookup(SUITE_ID_ML_DSA_87).is_some());
+            assert!(suite_context.registry.lookup(77).is_none());
+            assert!(suite_context
+                .rotation
+                .native_spend_suites(0)
+                .contains(SUITE_ID_ML_DSA_87));
+            assert!(!suite_context.rotation.native_spend_suites(0).contains(77));
         }
     }
 
     #[test]
-    fn build_suite_context_from_descriptor_production_lookup_none_defers_to_default_pre_rotation_semantics(
+    fn build_suite_context_from_descriptor_production_lookup_none_returns_explicit_default_pre_rotation_semantics(
     ) {
         let suite_context = build_suite_context_from_descriptor_with_production_lookup(
             &None,
@@ -951,15 +1006,40 @@ mod tests {
             "testnet",
             |_| Ok(None),
         )
-        .expect("must load");
-        assert!(suite_context.is_none());
-        let default_registry = rubin_consensus::SuiteRegistry::default_registry();
-        assert!(default_registry.is_canonical_default_live_manifest());
-        assert!(default_registry.lookup(SUITE_ID_ML_DSA_87).is_some());
-        let default_rotation = rubin_consensus::DefaultRotationProvider;
-        assert!(default_rotation
+        .expect("must load")
+        .expect("suite context");
+        assert!(suite_context.registry.is_canonical_default_live_manifest());
+        assert!(suite_context.registry.lookup(SUITE_ID_ML_DSA_87).is_some());
+        assert!(suite_context
+            .rotation
             .native_spend_suites(0)
             .contains(SUITE_ID_ML_DSA_87));
+    }
+
+    #[test]
+    fn build_suite_context_from_descriptor_production_ignores_bad_local_suite_registry() {
+        let local_suite_registry = vec![GenesisSuiteParams {
+            suite_id: 77,
+            pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+            sig_len: ML_DSA_87_SIG_BYTES,
+            verify_cost: 0,
+            alg_name: "ML-DSA-87".to_string(),
+        }];
+        let suite_context = build_suite_context_from_descriptor_with_production_lookup(
+            &None,
+            &local_suite_registry,
+            "mainnet",
+            |_| Ok(None),
+        )
+        .expect("must load")
+        .expect("suite context");
+        assert!(suite_context.registry.is_canonical_default_live_manifest());
+        assert!(suite_context.registry.lookup(77).is_none());
+        assert!(suite_context
+            .rotation
+            .native_spend_suites(0)
+            .contains(SUITE_ID_ML_DSA_87));
+        assert!(!suite_context.rotation.native_spend_suites(0).contains(77));
     }
 
     #[test]

@@ -216,8 +216,8 @@ func (cfg Config) buildSuiteRegistry() (*consensus.SuiteRegistry, error) {
 
 // BuildRotationProvider constructs node startup rotation state.
 // On mainnet/testnet, activation authority comes only from the compiled
-// production schedule artifact; local suite_registry remains validated input
-// but never becomes a live activation or live binding source by itself.
+// production schedule artifact; local suite_registry is ignored there and
+// never becomes a live activation or live binding source.
 func (cfg Config) BuildRotationProvider() (consensus.RotationProvider, *consensus.SuiteRegistry, error) {
 	return cfg.buildRotationProviderWithProductionLookup(productionRotationDescriptorForNetwork)
 }
@@ -225,10 +225,6 @@ func (cfg Config) BuildRotationProvider() (consensus.RotationProvider, *consensu
 func (cfg Config) buildRotationProviderWithProductionLookup(
 	productionLookup func(string) (*consensus.CryptoRotationDescriptor, *consensus.SuiteRegistry, error),
 ) (consensus.RotationProvider, *consensus.SuiteRegistry, error) {
-	explicitRegistry, err := cfg.buildSuiteRegistry()
-	if err != nil {
-		return nil, nil, fmt.Errorf("suite_registry: %w", err)
-	}
 	if strings.TrimSpace(cfg.Network) == "" {
 		return nil, nil, errors.New("network is required")
 	}
@@ -245,9 +241,18 @@ func (cfg Config) buildRotationProviderWithProductionLookup(
 			return nil, nil, err
 		}
 		if desc == nil {
-			return nil, registry, nil
+			// Production empty slots use an explicit default pre-rotation runtime
+			// and must ignore any local suite_registry override entirely.
+			if registry == nil {
+				registry = consensus.DefaultSuiteRegistry()
+			}
+			return consensus.DefaultRotationProvider{}, registry, nil
 		}
 		return consensus.DescriptorRotationProvider{Descriptor: *desc}, registry, nil
+	}
+	explicitRegistry, err := cfg.buildSuiteRegistry()
+	if err != nil {
+		return nil, nil, fmt.Errorf("suite_registry: %w", err)
 	}
 	if cfg.RotationDescriptor == nil {
 		if explicitRegistry == nil {
@@ -362,14 +367,24 @@ func ValidateConfig(cfg Config) error {
 			return fmt.Errorf("mine_address must be 32 (key_id) or 33 (suite_id||key_id) bytes, got %d", len(raw))
 		}
 	}
-	if _, err := cfg.buildSuiteRegistry(); err != nil {
-		return fmt.Errorf("suite_registry: %w", err)
-	}
 	network, err := canonicalConfigNetworkName(cfg.Network)
 	if err != nil {
 		return err
 	}
-	if cfg.RotationDescriptor != nil || network == "mainnet" || network == "testnet" {
+	if network == "mainnet" || network == "testnet" {
+		if cfg.RotationDescriptor != nil {
+			return errors.New(productionLocalRotationDescriptorErr)
+		}
+		// Production validation checks only the compiled schedule artifact.
+		if _, _, err := productionRotationDescriptorForNetwork(network); err != nil {
+			return err
+		}
+		return nil
+	}
+	if _, err := cfg.buildSuiteRegistry(); err != nil {
+		return fmt.Errorf("suite_registry: %w", err)
+	}
+	if cfg.RotationDescriptor != nil {
 		if _, _, err := cfg.BuildRotationProvider(); err != nil {
 			return err
 		}
