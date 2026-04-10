@@ -96,14 +96,14 @@ func loadCompiledProductionRotationScheduleFromJSONWithRegistry(
 	}
 	parsedDescriptors := make(map[string]*RotationConfigJSON, len(wire.Networks))
 	for _, network := range []string{"mainnet", "testnet"} {
-		raw, ok := wire.Networks[network]
+		entryRaw, ok := wire.Networks[network]
 		if !ok {
 			return nil, nil, productionRotationScheduleError(
 				"networks.%s missing",
 				network,
 			)
 		}
-		descriptorJSON, err := parseProductionRotationScheduleDescriptorJSON(raw, network)
+		descriptorJSON, err := parseProductionRotationScheduleDescriptorJSON(entryRaw, network)
 		if err != nil {
 			return nil, nil, err
 		}
