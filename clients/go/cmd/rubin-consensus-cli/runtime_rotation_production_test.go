@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -46,7 +47,7 @@ func TestRubinConsensusCLI_RotationProduction_MainnetRequiresH4(t *testing.T) {
 	}, "descriptor-not-activated")
 }
 
-func TestRubinConsensusCLI_RotationProduction_MainnetAndBatchOK(t *testing.T) {
+func TestRubinConsensusCLI_RotationProduction_MainnetSingleDescriptorAndDevnetBatchOK(t *testing.T) {
 	reg := cliTestRotationSuites()
 	rd := &RotationDescriptorJSON{
 		Name:         "r1",
@@ -85,15 +86,6 @@ func TestRubinConsensusCLI_RotationProduction_MainnetAndBatchOK(t *testing.T) {
 		t.Fatalf("expected two create suites at H15, got %+v", resp.SuiteIDs)
 	}
 	mustRunOk(t, Request{
-		Op:            "rotation_descriptor_check",
-		Network:       "mainnet",
-		SuiteRegistry: reg,
-		RotationDescriptors: []RotationDescriptorJSON{
-			{Name: "a", OldSuiteID: 1, NewSuiteID: 2, CreateHeight: 10, SpendHeight: 20, SunsetHeight: 100},
-			{Name: "b", OldSuiteID: 2, NewSuiteID: 1, CreateHeight: 100, SpendHeight: 110, SunsetHeight: 200},
-		},
-	})
-	mustRunOk(t, Request{
 		Op:                 "rotation_descriptor_check",
 		Network:            "devnet",
 		RotationDescriptor: rd,
@@ -101,8 +93,9 @@ func TestRubinConsensusCLI_RotationProduction_MainnetAndBatchOK(t *testing.T) {
 	})
 }
 
-func TestRubinConsensusCLI_RotationProduction_MainnetRejectsThreeDescriptorBatch(t *testing.T) {
-	reg := append(cliTestRotationSuites(),
+func TestRubinConsensusCLI_RotationProduction_MainnetRejectsMultiDescriptorBatch(t *testing.T) {
+	reg := append(
+		cliTestRotationSuites(),
 		SuiteParamsJSON{SuiteID: 3, PubkeyLen: 1024, SigLen: 512, VerifyCost: 9, OpenSSLAlg: "ML-DSA-87"},
 		SuiteParamsJSON{SuiteID: 4, PubkeyLen: 1024, SigLen: 512, VerifyCost: 9, OpenSSLAlg: "ML-DSA-87"},
 	)
@@ -113,7 +106,15 @@ func TestRubinConsensusCLI_RotationProduction_MainnetRejectsThreeDescriptorBatch
 		RotationDescriptors: []RotationDescriptorJSON{
 			{Name: "a", OldSuiteID: 1, NewSuiteID: 2, CreateHeight: 10, SpendHeight: 20, SunsetHeight: 100},
 			{Name: "b", OldSuiteID: 2, NewSuiteID: 3, CreateHeight: 100, SpendHeight: 110, SunsetHeight: 200},
-			{Name: "c", OldSuiteID: 3, NewSuiteID: 4, CreateHeight: 200, SpendHeight: 210, SunsetHeight: 300},
+		},
+	}, rotationDescriptorNotActivatedErr)
+	mustRunErr(t, Request{
+		Op:            "rotation_descriptor_check",
+		Network:       "testnet",
+		SuiteRegistry: reg,
+		RotationDescriptors: []RotationDescriptorJSON{
+			{Name: "a", OldSuiteID: 1, NewSuiteID: 2, CreateHeight: 10, SpendHeight: 20, SunsetHeight: 100},
+			{Name: "b", OldSuiteID: 2, NewSuiteID: 3, CreateHeight: 100, SpendHeight: 110, SunsetHeight: 0},
 		},
 	}, rotationDescriptorNotActivatedErr)
 	mustRunOk(t, Request{
@@ -126,4 +127,74 @@ func TestRubinConsensusCLI_RotationProduction_MainnetRejectsThreeDescriptorBatch
 			{Name: "c", OldSuiteID: 3, NewSuiteID: 4, CreateHeight: 200, SpendHeight: 210, SunsetHeight: 300},
 		},
 	})
+}
+
+func TestRubinConsensusCLI_RotationDescriptorCheck_PreservesStableErrAndDiagnostics(t *testing.T) {
+	reg := append(
+		cliTestRotationSuites(),
+		SuiteParamsJSON{SuiteID: 3, PubkeyLen: 1024, SigLen: 512, VerifyCost: 9, OpenSSLAlg: "ML-DSA-87"},
+	)
+	resp := mustRunErr(t, Request{
+		Op:            "rotation_descriptor_check",
+		Network:       "mainnet",
+		SuiteRegistry: reg,
+		RotationDescriptors: []RotationDescriptorJSON{
+			{Name: "a", OldSuiteID: 1, NewSuiteID: 2, CreateHeight: 10, SpendHeight: 20, SunsetHeight: 100},
+			{Name: "b", OldSuiteID: 2, NewSuiteID: 3, CreateHeight: 100, SpendHeight: 110, SunsetHeight: 200},
+		},
+	}, rotationDescriptorNotActivatedErr)
+	if got, _ := resp.Diagnostics["rotation_validation_err"].(string); got != "rotation-too-many-descriptors" {
+		t.Fatalf("expected concrete validation diagnostics, got %+v", resp.Diagnostics)
+	}
+}
+
+func TestSanitizeRotationValidationErr_UsesSharedStems(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "exact production cap stem",
+			err:  errors.New(consensus.RotationV1ProductionAtMostOneDescriptorErrStem + ", got 2"),
+			want: rotationTooManyDescriptorsErr,
+		},
+		{
+			name: "wrapped generic validation stem",
+			err:  errors.New(`rotation[0] "bad": rotation: new suite 0x03 not registered`),
+			want: rotationUnregisteredSuiteErr,
+		},
+		{
+			name: "name required stays invalid descriptor",
+			err:  errors.New(`rotation[0] "bad": rotation: name required`),
+			want: rotationInvalidDescriptorErr,
+		},
+		{
+			name: "equal suite must not be mislabeled as unregistered",
+			err:  errors.New(`rotation[0] "bad": rotation: old suite (0x01) must differ from new suite`),
+			want: rotationEqualSuiteIDsErr,
+		},
+		{
+			name: "exact finite H4 stem",
+			err:  errors.New(consensus.RotationV1ProductionFiniteH4RequiredErrStem),
+			want: rotationFiniteH4RequiredErr,
+		},
+		{
+			name: "create height ordering keeps concrete code",
+			err:  errors.New(`rotation[0] "bad": rotation: create_height (20) must be < spend_height (10)`),
+			want: rotationInvalidHeightOrderErr,
+		},
+		{
+			name: "sunset height ordering keeps concrete code",
+			err:  errors.New(`rotation[0] "bad": rotation: sunset_height (20) must be > spend_height (20)`),
+			want: rotationInvalidHeightOrderErr,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sanitizeRotationValidationErr(tc.err); got != tc.want {
+				t.Fatalf("sanitizeRotationValidationErr() = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }

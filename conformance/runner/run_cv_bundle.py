@@ -1569,6 +1569,10 @@ def validate_vector(
 
     req: Dict[str, Any] = {"op": op}
 
+    def include_rotation_network() -> None:
+        if "network" in v:
+            req["network"] = str(v["network"])
+
     def include_block_context(*, require_height: bool) -> None:
         if require_height:
             req["height"] = int(v["height"])
@@ -1605,6 +1609,7 @@ def validate_vector(
         if "suite_registry" in v:
             req["suite_registry"] = v.get("suite_registry", [])
     elif op in ("rotation_create_suite_check", "rotation_native_create_suites"):
+        include_rotation_network()
         if "height" not in v:
             return [f"{gate}/{v.get('id','?')}: missing height"]
         req["height"] = int(v["height"])
@@ -1617,6 +1622,7 @@ def validate_vector(
         if op == "rotation_create_suite_check" and "suite_id" not in v:
             return [f"{gate}/{v.get('id','?')}: missing suite_id"]
     elif op == "rotation_spend_suite_check":
+        include_rotation_network()
         if "height" not in v:
             return [f"{gate}/{v.get('id','?')}: missing height"]
         if "suite_id" not in v:
@@ -1631,6 +1637,7 @@ def validate_vector(
         req["rotation_descriptor"] = v["rotation_descriptor"]
         req["suite_registry"] = v.get("suite_registry", [])
     elif op == "rotation_descriptor_check":
+        include_rotation_network()
         if "rotation_descriptor" in v:
             req["rotation_descriptor"] = v["rotation_descriptor"]
         if "rotation_descriptors" in v:
