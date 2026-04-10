@@ -471,6 +471,26 @@ pub fn core_ext_verification_binding_from_normalized_name_and_descriptor(
     }
 }
 
+/// Live/runtime helper for callers that already normalized the binding through
+/// `normalize_live_core_ext_binding_name` and still need fail-closed
+/// ext_payload_schema enforcement on the active chain path.
+pub fn live_core_ext_verification_binding_from_normalized_name_and_descriptor(
+    binding_name: &str,
+    binding_descriptor: &[u8],
+    ext_payload_schema: &[u8],
+) -> Result<CoreExtVerificationBinding, String> {
+    if ext_payload_schema.is_empty() {
+        return Err(format!(
+            "core_ext binding {} requires ext_payload_schema_hex",
+            CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+        ));
+    }
+    core_ext_verification_binding_from_normalized_name_and_descriptor(
+        binding_name,
+        binding_descriptor,
+    )
+}
+
 pub fn normalize_live_core_ext_binding_name(binding_name: &str) -> Result<&'static str, String> {
     let binding_name = normalize_core_ext_binding_name(binding_name)?;
     match binding_name {
@@ -487,15 +507,10 @@ pub fn live_core_ext_verification_binding_from_name_and_descriptor(
     ext_payload_schema: &[u8],
 ) -> Result<CoreExtVerificationBinding, String> {
     let binding_name = normalize_live_core_ext_binding_name(binding_name)?;
-    if ext_payload_schema.is_empty() {
-        return Err(format!(
-            "core_ext binding {} requires ext_payload_schema_hex",
-            CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
-        ));
-    }
-    core_ext_verification_binding_from_normalized_name_and_descriptor(
+    live_core_ext_verification_binding_from_normalized_name_and_descriptor(
         binding_name,
         binding_descriptor,
+        ext_payload_schema,
     )
 }
 
@@ -2397,6 +2412,17 @@ mod tests {
         .expect("live binding");
         assert!(matches!(
             binding,
+            CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(_)
+        ));
+
+        let normalized = live_core_ext_verification_binding_from_normalized_name_and_descriptor(
+            CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
+            &descriptor,
+            &[0xb2],
+        )
+        .expect("normalized live binding");
+        assert!(matches!(
+            normalized,
             CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(_)
         ));
     }

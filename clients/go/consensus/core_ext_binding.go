@@ -48,6 +48,11 @@ func NormalizeLiveCoreExtBindingName(binding string) (string, error) {
 
 // ParseNormalizedCoreExtVerifySigExtBinding assumes binding already came from
 // NormalizeCoreExtBindingName or NormalizeLiveCoreExtBindingName.
+//
+// This helper intentionally does not enforce live-only ext_payload_schema
+// requirements because helper/conformance/archive surfaces still replay
+// normalized bindings directly. Live/runtime callers must use the stricter
+// ParseNormalizedLiveCoreExtVerifySigExtBinding or ParseLiveCoreExtVerifySigExtBinding.
 func ParseNormalizedCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte) (CoreExtVerifySigExtFunc, error) {
 	switch binding {
 	case "", "native_verify_sig":
@@ -63,6 +68,16 @@ func ParseNormalizedCoreExtVerifySigExtBinding(binding string, bindingDescriptor
 	default:
 		return nil, fmt.Errorf("unsupported core_ext binding: %q", binding)
 	}
+}
+
+// ParseNormalizedLiveCoreExtVerifySigExtBinding assumes binding already passed
+// NormalizeLiveCoreExtBindingName and enforces the live manifest requirement
+// that verify_sig_ext OpenSSL bindings carry a non-empty ext_payload_schema.
+func ParseNormalizedLiveCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte, extPayloadSchema []byte) (CoreExtVerifySigExtFunc, error) {
+	if len(extPayloadSchema) == 0 {
+		return nil, fmt.Errorf("core_ext binding %s requires ext_payload_schema_hex", CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
+	}
+	return ParseNormalizedCoreExtVerifySigExtBinding(binding, bindingDescriptor)
 }
 
 func ParseCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte) (CoreExtVerifySigExtFunc, error) {
@@ -83,10 +98,7 @@ func ParseLiveCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byt
 	if err != nil {
 		return nil, err
 	}
-	if len(extPayloadSchema) == 0 {
-		return nil, fmt.Errorf("core_ext binding %s requires ext_payload_schema_hex", CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
-	}
-	return ParseNormalizedCoreExtVerifySigExtBinding(binding, bindingDescriptor)
+	return ParseNormalizedLiveCoreExtVerifySigExtBinding(binding, bindingDescriptor, extPayloadSchema)
 }
 
 func CoreExtOpenSSLDigest32BindingDescriptorBytes(opensslAlg string, pubkeyLen int, sigLen int) ([]byte, error) {

@@ -410,6 +410,9 @@ func verifySigWithBinding(binding suiteVerifierBinding, pubkey []byte, signature
 func runtimeSuiteParamsForVerification(suiteID uint8, registry *SuiteRegistry) (SuiteParams, error) {
 	if registry == nil {
 		registry = defaultRuntimeSuiteRegistry()
+		if !registry.IsCanonicalDefaultLiveManifest() {
+			return SuiteParams{}, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: default runtime registry drift")
+		}
 	}
 	params, ok := registry.Lookup(suiteID)
 	if !ok {
@@ -421,7 +424,9 @@ func runtimeSuiteParamsForVerification(suiteID uint8, registry *SuiteRegistry) (
 // verifySigWithRegistry dispatches signature verification using the suite
 // registry for suite lookup instead of hardcoded suite_id → algorithm mapping.
 // A nil registry means "use the canonical default live manifest registry", not
-// "silently switch to a separate legacy verifier path".
+// "silently switch to a separate legacy verifier path". The canonical nil path
+// also fail-closes if the cached default registry drifts away from the current
+// single-suite ML-DSA-87 live manifest contract.
 //
 // The registry no longer gets to select the verifier backend implicitly through
 // AlgName alone. Runtime verification resolves an explicit v1 binding from

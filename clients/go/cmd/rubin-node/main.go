@@ -760,10 +760,7 @@ func parseCoreExtBinding(binding string, bindingDescriptor []byte, extPayloadSch
 }
 
 func parseNormalizedCoreExtBinding(binding string, bindingDescriptor []byte, extPayloadSchema []byte) (consensus.CoreExtVerifySigExtFunc, error) {
-	if len(extPayloadSchema) == 0 {
-		return nil, fmt.Errorf("core_ext binding %s requires ext_payload_schema_hex", consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
-	}
-	return consensus.ParseNormalizedCoreExtVerifySigExtBinding(binding, bindingDescriptor)
+	return consensus.ParseNormalizedLiveCoreExtVerifySigExtBinding(binding, bindingDescriptor, extPayloadSchema)
 }
 
 func parseHex32Field(name, value string) ([32]byte, error) {

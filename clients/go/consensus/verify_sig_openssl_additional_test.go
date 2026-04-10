@@ -101,3 +101,10 @@ func TestDefaultRuntimeSuiteRegistry_CachesSharedInstance(t *testing.T) {
 		t.Fatalf("expected shared cached runtime registry instance")
 	}
 }
+
+func TestDefaultRuntimeSuiteRegistry_IsCanonicalDefaultLiveManifest(t *testing.T) {
+	reg := defaultRuntimeSuiteRegistry()
+	if !reg.IsCanonicalDefaultLiveManifest() {
+		t.Fatalf("default runtime registry must stay pinned to the canonical live ML-DSA-87 manifest")
+	}
+}

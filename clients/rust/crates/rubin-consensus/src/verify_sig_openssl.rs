@@ -490,7 +490,16 @@ fn runtime_suite_params_for_verification(
 ) -> Result<crate::suite_registry::SuiteParams, TxError> {
     let params = match registry {
         Some(registry) => registry.lookup(suite_id).cloned(),
-        None => default_runtime_suite_registry().lookup(suite_id).cloned(),
+        None => {
+            let registry = default_runtime_suite_registry();
+            if !registry.is_canonical_default_live_manifest() {
+                return Err(TxError::new(
+                    ErrorCode::TxErrSigAlgInvalid,
+                    "verify_sig: default runtime registry drift",
+                ));
+            }
+            registry.lookup(suite_id).cloned()
+        }
     };
     params.ok_or_else(|| {
         TxError::new(
@@ -503,9 +512,11 @@ fn runtime_suite_params_for_verification(
 /// Registry-aware signature verification. When registry is Some, looks up
 /// the suite's parameters from the registry. When registry is None, the
 /// canonical default live registry is used instead of a separate legacy
-/// verifier path. The registry no longer selects a backend implicitly through
-/// `alg_name`; runtime verification resolves an explicit v1 binding from the
-/// suite parameters instead. Parity with Go `verifySigWithRegistry`.
+/// verifier path. The nil path also fail-closes if that cached default
+/// registry stops matching the canonical single-suite ML-DSA-87 live manifest.
+/// The registry no longer selects a backend implicitly through `alg_name`;
+/// runtime verification resolves an explicit v1 binding from the suite
+/// parameters instead. Parity with Go `verifySigWithRegistry`.
 pub fn verify_sig_with_registry(
     suite_id: u8,
     pubkey: &[u8],
@@ -983,6 +994,7 @@ mod tests {
         )
         .expect("verify");
         assert!(ok, "default live registry must verify canonical suite");
+        assert!(super::default_runtime_suite_registry().is_canonical_default_live_manifest());
     }
 
     #[test]
