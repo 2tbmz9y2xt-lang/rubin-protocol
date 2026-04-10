@@ -610,7 +610,7 @@ mod tests {
                 pubkey_len: ML_DSA_87_PUBKEY_BYTES,
                 sig_len: ML_DSA_87_SIG_BYTES,
                 verify_cost: VERIFY_COST_ML_DSA_87,
-                openssl_alg: "ML-DSA-87",
+                alg_name: "ML-DSA-87",
             },
         );
         let registry = SuiteRegistry::with_suites(suites);
@@ -637,7 +637,7 @@ mod tests {
                 pubkey_len: 1312,
                 sig_len: 2420,
                 verify_cost: 4,
-                openssl_alg: "ML-DSA-65",
+                alg_name: "ML-DSA-65",
             },
         );
         let registry = SuiteRegistry::with_suites(suites);
@@ -890,7 +890,7 @@ mod tests {
                 pubkey_len: ML_DSA_87_PUBKEY_BYTES,
                 sig_len: ML_DSA_87_SIG_BYTES,
                 verify_cost: 8,
-                openssl_alg: "ML-DSA-87",
+                alg_name: "ML-DSA-87",
             },
         );
         let registry = SuiteRegistry::with_suites(suites);
@@ -1209,7 +1209,7 @@ mod tests {
                 pubkey_len: ML_DSA_87_PUBKEY_BYTES,
                 sig_len: ML_DSA_87_SIG_BYTES,
                 verify_cost: 8,
-                openssl_alg: "ML-DSA-87",
+                alg_name: "ML-DSA-87",
             },
         );
         let registry = SuiteRegistry::with_suites(suites);

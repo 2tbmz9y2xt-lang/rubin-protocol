@@ -1087,14 +1087,14 @@ func reorgTestSuiteRegistry(extraSuiteID uint8) *consensus.SuiteRegistry {
 			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
 			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
-			OpenSSLAlg: "ML-DSA-87",
+			AlgName:    "ML-DSA-87",
 		},
 		{
 			SuiteID:    extraSuiteID,
 			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
 			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
-			OpenSSLAlg: "ML-DSA-87",
+			AlgName:    "ML-DSA-87",
 		},
 	})
 }

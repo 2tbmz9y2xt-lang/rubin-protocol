@@ -72,11 +72,11 @@ func TestTxWeightAtHeight_NativeNotInSpendSet_UsesFloor(t *testing.T) {
 		suites: map[uint8]SuiteParams{
 			SUITE_ID_ML_DSA_87: {
 				SuiteID: SUITE_ID_ML_DSA_87, PubkeyLen: ML_DSA_87_PUBKEY_BYTES,
-				SigLen: ML_DSA_87_SIG_BYTES, VerifyCost: VERIFY_COST_ML_DSA_87, OpenSSLAlg: "ML-DSA-87",
+				SigLen: ML_DSA_87_SIG_BYTES, VerifyCost: VERIFY_COST_ML_DSA_87, AlgName: "ML-DSA-87",
 			},
 			0x02: {
 				SuiteID: 0x02, PubkeyLen: 1312, SigLen: 2420,
-				VerifyCost: 4, OpenSSLAlg: "ML-DSA-65",
+				VerifyCost: 4, AlgName: "ML-DSA-65",
 			},
 		},
 	}

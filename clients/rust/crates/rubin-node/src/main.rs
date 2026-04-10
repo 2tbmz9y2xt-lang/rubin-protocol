@@ -893,7 +893,7 @@ mod tests {
 
     fn canonical_suite_registry_entry_json(suite_id: u8) -> String {
         format!(
-            "{{\"suite_id\":{suite_id},\"pubkey_len\":{ML_DSA_87_PUBKEY_BYTES},\"sig_len\":{ML_DSA_87_SIG_BYTES},\"verify_cost\":{VERIFY_COST_ML_DSA_87},\"openssl_alg\":\"ML-DSA-87\"}}"
+            "{{\"suite_id\":{suite_id},\"pubkey_len\":{ML_DSA_87_PUBKEY_BYTES},\"sig_len\":{ML_DSA_87_SIG_BYTES},\"verify_cost\":{VERIFY_COST_ML_DSA_87},\"alg_name\":\"ML-DSA-87\"}}"
         )
     }
 

@@ -18,7 +18,7 @@ fn two_suite_registry() -> SuiteRegistry {
             pubkey_len: 2592,
             sig_len: 4627,
             verify_cost: 8,
-            openssl_alg: "ML-DSA-87",
+            alg_name: "ML-DSA-87",
         },
     );
     m.insert(
@@ -28,7 +28,7 @@ fn two_suite_registry() -> SuiteRegistry {
             pubkey_len: 1024,
             sig_len: 512,
             verify_cost: 4,
-            openssl_alg: "SLH-DSA-256s",
+            alg_name: "SLH-DSA-256s",
         },
     );
     SuiteRegistry::with_suites(m)
@@ -57,7 +57,7 @@ fn registry_default_has_ml_dsa_87() {
         .lookup(0x01)
         .expect("default registry must contain suite 0x01");
     assert_eq!(p.suite_id, 0x01);
-    assert_eq!(p.openssl_alg, "ML-DSA-87");
+    assert_eq!(p.alg_name, "ML-DSA-87");
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn registry_min_sigcheck_overflow() {
             pubkey_len: u64::MAX,
             sig_len: 1,
             verify_cost: 0,
-            openssl_alg: "overflow",
+            alg_name: "overflow",
         },
     );
     let reg = SuiteRegistry::with_suites(m);

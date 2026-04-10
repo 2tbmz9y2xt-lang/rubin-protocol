@@ -3,6 +3,7 @@ mod txctx_harness;
 
 use num_bigint::BigUint;
 use num_traits::Zero;
+use rubin_consensus::constants::MAX_WITNESS_BYTES_PER_TX;
 use rubin_consensus::merkle::witness_merkle_root_wtxids;
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
@@ -605,18 +606,62 @@ struct RotationDescriptorJson {
     sunset_height: u64,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Default)]
 struct SuiteParamsJson {
-    #[serde(default)]
     suite_id: u8,
-    #[serde(default)]
     pubkey_len: u64,
-    #[serde(default)]
     sig_len: u64,
-    #[serde(default)]
     verify_cost: u64,
+    alg_name: String,
+}
+
+#[derive(Deserialize, Default)]
+struct SuiteParamsJsonWire {
     #[serde(default)]
-    openssl_alg: String,
+    suite_id: Option<u8>,
+    #[serde(default)]
+    pubkey_len: Option<u64>,
+    #[serde(default)]
+    sig_len: Option<u64>,
+    #[serde(default)]
+    verify_cost: Option<u64>,
+    #[serde(default)]
+    alg_name: Option<String>,
+    #[serde(default)]
+    openssl_alg: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for SuiteParamsJson {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = SuiteParamsJsonWire::deserialize(deserializer)?;
+        let suite_id = wire
+            .suite_id
+            .ok_or_else(|| serde::de::Error::custom("bad suite_registry"))?;
+        let pubkey_len = wire
+            .pubkey_len
+            .ok_or_else(|| serde::de::Error::custom("bad suite_registry"))?;
+        let sig_len = wire
+            .sig_len
+            .ok_or_else(|| serde::de::Error::custom("bad suite_registry"))?;
+        let verify_cost = wire
+            .verify_cost
+            .ok_or_else(|| serde::de::Error::custom("bad suite_registry"))?;
+        let alg_name = if let Some(value) = wire.alg_name {
+            value
+        } else {
+            wire.openssl_alg.unwrap_or_default()
+        };
+        Ok(Self {
+            suite_id,
+            pubkey_len,
+            sig_len,
+            verify_cost,
+            alg_name,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -952,11 +997,22 @@ fn decode_optional_hex_bytes(name: &str, value: &str) -> Result<Vec<u8>, String>
     hex::decode(trimmed).map_err(|_| format!("bad {name}"))
 }
 
-fn normalize_suite_openssl_alg(value: &str) -> Result<&'static str, String> {
-    match value.trim() {
-        "" | "ML-DSA-87" => Ok("ML-DSA-87"),
-        _ => Err("bad suite_registry".to_string()),
+fn normalize_suite_alg_name(value: &str) -> Result<&'static str, String> {
+    const CANONICAL_SUITE_ALG_NAME: &str = "ML-DSA-87";
+    let trimmed = value.trim();
+    if !trimmed.eq_ignore_ascii_case(CANONICAL_SUITE_ALG_NAME) {
+        return Err("bad suite_registry".to_string());
     }
+    Ok(CANONICAL_SUITE_ALG_NAME)
+}
+
+const MAX_EXPLICIT_SUITE_REGISTRY_ITEMS: usize = 16;
+
+fn validate_suite_registry_param_len(value: u64) -> Result<u64, String> {
+    if value > MAX_WITNESS_BYTES_PER_TX as u64 {
+        return Err("bad suite_registry".to_string());
+    }
+    Ok(value)
 }
 
 fn build_suite_registry_from_json(
@@ -965,19 +1021,30 @@ fn build_suite_registry_from_json(
     if items.is_empty() {
         return Ok(None);
     }
+    if items.len() > MAX_EXPLICIT_SUITE_REGISTRY_ITEMS {
+        return Err("bad suite_registry".to_string());
+    }
 
     let mut suites = std::collections::BTreeMap::new();
     for s in items {
-        let alg = normalize_suite_openssl_alg(&s.openssl_alg)?;
+        if s.suite_id == rubin_consensus::constants::SUITE_ID_SENTINEL || s.verify_cost == 0 {
+            return Err("bad suite_registry".to_string());
+        }
+        let pubkey_len = validate_suite_registry_param_len(s.pubkey_len)?;
+        let sig_len = validate_suite_registry_param_len(s.sig_len)?;
+        let alg = normalize_suite_alg_name(&s.alg_name)?;
+        // Missing required JSON fields are rejected during Deserialize above.
+        // Reaching this path means zero-valued lengths were explicit, which the
+        // CLI harness still permits for synthetic conformance vectors.
         if suites
             .insert(
                 s.suite_id,
                 SuiteParams {
                     suite_id: s.suite_id,
-                    pubkey_len: s.pubkey_len,
-                    sig_len: s.sig_len,
+                    pubkey_len,
+                    sig_len,
                     verify_cost: s.verify_cost,
-                    openssl_alg: alg,
+                    alg_name: alg,
                 },
             )
             .is_some()
@@ -4645,21 +4712,21 @@ mod tests {
                 pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
                 sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
                 verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
-                openssl_alg: "ML-DSA-87".to_string(),
+                alg_name: "ML-DSA-87".to_string(),
             },
             SuiteParamsJson {
                 suite_id: 2,
-                pubkey_len: 1024,
-                sig_len: 512,
-                verify_cost: 9,
-                openssl_alg: "ML-DSA-87".to_string(),
+                pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+                sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+                verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+                alg_name: "ML-DSA-87".to_string(),
             },
             SuiteParamsJson {
                 suite_id: 3,
-                pubkey_len: 1024,
-                sig_len: 512,
-                verify_cost: 9,
-                openssl_alg: "ML-DSA-87".to_string(),
+                pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+                sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+                verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+                alg_name: "ML-DSA-87".to_string(),
             },
         ]
     }
@@ -5073,13 +5140,26 @@ mod tests {
     }
 
     #[test]
-    fn suite_registry_rejects_unknown_openssl_alg() {
+    fn suite_registry_rejects_unknown_alg_name() {
         let err = build_suite_registry_from_json(&[SuiteParamsJson {
             suite_id: 3,
-            pubkey_len: 2592,
-            sig_len: 4627,
-            verify_cost: 990000,
-            openssl_alg: "SLH-DSA".to_string(),
+            pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+            alg_name: "SLH-DSA".to_string(),
+        }])
+        .unwrap_err();
+        assert_eq!(err, "bad suite_registry");
+    }
+
+    #[test]
+    fn suite_registry_rejects_empty_alg_name() {
+        let err = build_suite_registry_from_json(&[SuiteParamsJson {
+            suite_id: 3,
+            pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+            alg_name: "".to_string(),
         }])
         .unwrap_err();
         assert_eq!(err, "bad suite_registry");
@@ -5090,21 +5170,221 @@ mod tests {
         let err = build_suite_registry_from_json(&[
             SuiteParamsJson {
                 suite_id: 3,
-                pubkey_len: 2592,
-                sig_len: 4627,
-                verify_cost: 990000,
-                openssl_alg: "ML-DSA-87".to_string(),
+                pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+                sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+                verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+                alg_name: "ML-DSA-87".to_string(),
             },
             SuiteParamsJson {
                 suite_id: 3,
-                pubkey_len: 2592,
-                sig_len: 4627,
-                verify_cost: 990000,
-                openssl_alg: "ML-DSA-87".to_string(),
+                pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+                sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+                verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+                alg_name: "ML-DSA-87".to_string(),
             },
         ])
         .unwrap_err();
         assert_eq!(err, "bad suite_registry");
+    }
+
+    #[test]
+    fn suite_registry_rejects_oversized_registry() {
+        let items = (0..(MAX_EXPLICIT_SUITE_REGISTRY_ITEMS + 1))
+            .map(|idx| SuiteParamsJson {
+                suite_id: (idx + 1) as u8,
+                pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+                sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+                verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+                alg_name: "ML-DSA-87".to_string(),
+            })
+            .collect::<Vec<_>>();
+        let err = build_suite_registry_from_json(&items).unwrap_err();
+        assert_eq!(err, "bad suite_registry");
+    }
+
+    #[test]
+    fn suite_registry_rejects_oversized_pubkey_len() {
+        let err = build_suite_registry_from_json(&[SuiteParamsJson {
+            suite_id: 3,
+            pubkey_len: MAX_WITNESS_BYTES_PER_TX as u64 + 1,
+            sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+            alg_name: "ML-DSA-87".to_string(),
+        }])
+        .unwrap_err();
+        assert_eq!(err, "bad suite_registry");
+    }
+
+    #[test]
+    fn suite_registry_rejects_zero_verify_cost() {
+        let err = build_suite_registry_from_json(&[SuiteParamsJson {
+            suite_id: 3,
+            pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            verify_cost: 0,
+            alg_name: "ML-DSA-87".to_string(),
+        }])
+        .unwrap_err();
+        assert_eq!(err, "bad suite_registry");
+    }
+
+    #[test]
+    fn suite_registry_accepts_synthetic_params_for_harness_vectors() {
+        let registry = build_suite_registry_from_json(&[SuiteParamsJson {
+            suite_id: 3,
+            pubkey_len: 64,
+            sig_len: 0,
+            verify_cost: 9,
+            alg_name: "ML-DSA-87".to_string(),
+        }])
+        .expect("registry");
+        let registry = registry.expect("suite registry");
+        let params = registry.lookup(3).expect("suite 3 present");
+        assert_eq!(params.pubkey_len, 64);
+        assert_eq!(params.sig_len, 0);
+        assert_eq!(params.verify_cost, 9);
+    }
+
+    #[test]
+    fn suite_registry_accepts_case_insensitive_alg_name() {
+        let registry = build_suite_registry_from_json(&[SuiteParamsJson {
+            suite_id: 3,
+            pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+            alg_name: "mL-dSa-87".to_string(),
+        }])
+        .expect("registry")
+        .expect("suite registry");
+        let params = registry.lookup(3).expect("suite 3 present");
+        assert_eq!(params.alg_name, "ML-DSA-87");
+    }
+
+    #[test]
+    fn rotation_descriptor_check_accepts_legacy_openssl_alg_alias() {
+        let payload = format!(
+            r#"{{
+                "op":"rotation_descriptor_check",
+                "network":"devnet",
+                "suite_registry":[
+                    {{"suite_id":1,"pubkey_len":{},"sig_len":{},"verify_cost":{},"openssl_alg":"ML-DSA-87"}},
+                    {{"suite_id":2,"pubkey_len":{},"sig_len":{},"verify_cost":{},"openssl_alg":"ML-DSA-87"}}
+                ],
+                "rotation_descriptor":{{"name":"r1","old_suite_id":1,"new_suite_id":2,"create_height":10,"spend_height":20,"sunset_height":100}}
+            }}"#,
+            rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+            rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+        );
+        let req: Request = serde_json::from_str(&payload).expect("request");
+        assert_eq!(req.suite_registry[0].alg_name, "ML-DSA-87");
+        assert_eq!(req.suite_registry[1].alg_name, "ML-DSA-87");
+        let resp = op_rotation_descriptor_check(&req);
+        assert!(resp.ok, "unexpected err: {:?}", resp.err);
+    }
+
+    #[test]
+    fn rotation_descriptor_check_accepts_dual_alg_name_and_openssl_alg_keys() {
+        let payload = format!(
+            r#"{{
+                "op":"rotation_descriptor_check",
+                "network":"devnet",
+                "suite_registry":[
+                    {{"suite_id":1,"pubkey_len":{},"sig_len":{},"verify_cost":{},"alg_name":"ML-DSA-87","openssl_alg":"ML-DSA-87"}},
+                    {{"suite_id":2,"pubkey_len":{},"sig_len":{},"verify_cost":{},"alg_name":"ML-DSA-87","openssl_alg":"ML-DSA-87"}}
+                ],
+                "rotation_descriptor":{{"name":"r1","old_suite_id":1,"new_suite_id":2,"create_height":10,"spend_height":20,"sunset_height":100}}
+            }}"#,
+            rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+            rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+        );
+        let req: Request = serde_json::from_str(&payload).expect("request");
+        assert_eq!(req.suite_registry[0].alg_name, "ML-DSA-87");
+        assert_eq!(req.suite_registry[1].alg_name, "ML-DSA-87");
+        let resp = op_rotation_descriptor_check(&req);
+        assert!(resp.ok, "unexpected err: {:?}", resp.err);
+    }
+
+    #[test]
+    fn rotation_descriptor_check_rejects_empty_alg_name_even_with_legacy_alias() {
+        let payload = format!(
+            r#"{{
+                "op":"rotation_descriptor_check",
+                "network":"devnet",
+                "suite_registry":[
+                    {{"suite_id":1,"pubkey_len":{},"sig_len":{},"verify_cost":{},"alg_name":"","openssl_alg":"ML-DSA-87"}},
+                    {{"suite_id":2,"pubkey_len":{},"sig_len":{},"verify_cost":{},"alg_name":"ML-DSA-87","openssl_alg":"ML-DSA-87"}}
+                ],
+                "rotation_descriptor":{{"name":"r1","old_suite_id":1,"new_suite_id":2,"create_height":10,"spend_height":20,"sunset_height":100}}
+            }}"#,
+            rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+            rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+        );
+        let req: Request = serde_json::from_str(&payload).expect("request");
+        let resp = op_rotation_descriptor_check(&req);
+        assert!(!resp.ok);
+        assert_eq!(resp.err.as_deref(), Some("bad suite_registry"));
+    }
+
+    #[test]
+    fn rotation_descriptor_check_rejects_missing_suite_registry_pubkey_len() {
+        let payload = format!(
+            r#"{{
+                "op":"rotation_descriptor_check",
+                "network":"devnet",
+                "suite_registry":[
+                    {{"suite_id":1,"sig_len":{},"verify_cost":{},"alg_name":"ML-DSA-87"}},
+                    {{"suite_id":2,"pubkey_len":{},"sig_len":{},"verify_cost":{},"alg_name":"ML-DSA-87"}}
+                ],
+                "rotation_descriptor":{{"name":"r1","old_suite_id":1,"new_suite_id":2,"create_height":10,"spend_height":20,"sunset_height":100}}
+            }}"#,
+            rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+            rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+        );
+        let err = match serde_json::from_str::<Request>(&payload) {
+            Ok(_) => panic!("expected missing pubkey_len to fail closed during deserialize"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("bad suite_registry"));
+    }
+
+    #[test]
+    fn rotation_descriptor_check_rejects_missing_suite_registry_sig_len() {
+        let payload = format!(
+            r#"{{
+                "op":"rotation_descriptor_check",
+                "network":"devnet",
+                "suite_registry":[
+                    {{"suite_id":1,"pubkey_len":{},"verify_cost":{},"alg_name":"ML-DSA-87"}},
+                    {{"suite_id":2,"pubkey_len":{},"sig_len":{},"verify_cost":{},"alg_name":"ML-DSA-87"}}
+                ],
+                "rotation_descriptor":{{"name":"r1","old_suite_id":1,"new_suite_id":2,"create_height":10,"spend_height":20,"sunset_height":100}}
+            }}"#,
+            rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+            rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+        );
+        let err = match serde_json::from_str::<Request>(&payload) {
+            Ok(_) => panic!("expected missing sig_len to fail closed during deserialize"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("bad suite_registry"));
     }
 
     #[test]

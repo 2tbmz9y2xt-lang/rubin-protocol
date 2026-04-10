@@ -2,6 +2,7 @@ package node
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -46,7 +47,42 @@ type SuiteParamsJSON struct {
 	PubkeyLen  uint32  `json:"pubkey_len"`
 	SigLen     uint32  `json:"sig_len"`
 	VerifyCost uint64  `json:"verify_cost"`
-	OpenSSLAlg *string `json:"openssl_alg"`
+	AlgName    *string `json:"-"`
+}
+
+type suiteParamsJSONWire struct {
+	SuiteID    uint8   `json:"suite_id"`
+	PubkeyLen  uint32  `json:"pubkey_len"`
+	SigLen     uint32  `json:"sig_len"`
+	VerifyCost uint64  `json:"verify_cost"`
+	AlgName    *string `json:"alg_name,omitempty"`
+	OpenSSLAlg *string `json:"openssl_alg,omitempty"`
+}
+
+func (item *SuiteParamsJSON) UnmarshalJSON(data []byte) error {
+	var wire suiteParamsJSONWire
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	item.SuiteID = wire.SuiteID
+	item.PubkeyLen = wire.PubkeyLen
+	item.SigLen = wire.SigLen
+	item.VerifyCost = wire.VerifyCost
+	item.AlgName = wire.AlgName
+	if item.AlgName == nil {
+		item.AlgName = wire.OpenSSLAlg
+	}
+	return nil
+}
+
+func (item SuiteParamsJSON) MarshalJSON() ([]byte, error) {
+	return json.Marshal(suiteParamsJSONWire{
+		SuiteID:    item.SuiteID,
+		PubkeyLen:  item.PubkeyLen,
+		SigLen:     item.SigLen,
+		VerifyCost: item.VerifyCost,
+		AlgName:    item.AlgName,
+	})
 }
 
 const maxSuiteRegistryParamLen = consensus.MAX_WITNESS_BYTES_PER_TX
@@ -86,12 +122,12 @@ func validateSuiteRegistryParamLen(value uint32) (int, error) {
 	return int(value), nil
 }
 
-func normalizeSuiteRegistryOpenSSLAlg(value *string) (string, error) {
+func normalizeSuiteRegistryAlgName(value *string) (string, error) {
 	if value == nil {
 		return "", errors.New("bad suite_registry")
 	}
-	switch strings.TrimSpace(*value) {
-	case "ML-DSA-87":
+	switch trimmed := strings.TrimSpace(*value); {
+	case strings.EqualFold(trimmed, "ML-DSA-87"):
 		return "ML-DSA-87", nil
 	default:
 		return "", errors.New("bad suite_registry")
@@ -104,7 +140,7 @@ func defaultSuiteRegistryParams() consensus.SuiteParams {
 		PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
 		SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 		VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
-		OpenSSLAlg: "ML-DSA-87",
+		AlgName:    "ML-DSA-87",
 	}
 }
 
@@ -120,7 +156,7 @@ func validateSuiteRegistryItem(item SuiteParamsJSON) (consensus.SuiteParams, err
 	if err != nil {
 		return consensus.SuiteParams{}, err
 	}
-	alg, err := normalizeSuiteRegistryOpenSSLAlg(item.OpenSSLAlg)
+	alg, err := normalizeSuiteRegistryAlgName(item.AlgName)
 	if err != nil {
 		return consensus.SuiteParams{}, err
 	}
@@ -129,8 +165,11 @@ func validateSuiteRegistryItem(item SuiteParamsJSON) (consensus.SuiteParams, err
 		PubkeyLen:  pubkeyLen,
 		SigLen:     sigLen,
 		VerifyCost: item.VerifyCost,
-		OpenSSLAlg: alg,
+		AlgName:    alg,
 	}
+	// Live node config is canonical-only. Synthetic suite_registry shapes are
+	// reserved for the CLI harness/conformance surface and must never be
+	// accepted here on mainnet/testnet or devnet bootstrap.
 	want := defaultSuiteRegistryParams()
 	if params.PubkeyLen != want.PubkeyLen ||
 		params.SigLen != want.SigLen ||

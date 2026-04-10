@@ -477,7 +477,7 @@ func TestValidateCoreExtWitnessAtHeightMixedProfileNativeSuiteUsesNativePath(t *
 		PubkeyLen:  len(w.Pubkey),
 		SigLen:     len(w.Signature) - 1,
 		VerifyCost: 1,
-		OpenSSLAlg: "ML-DSA-87",
+		AlgName:    "ML-DSA-87",
 	}})
 	queue := NewSigCheckQueue(0).WithRegistry(registry)
 	if err := validateCoreExtWitnessAtHeight(
@@ -594,7 +594,7 @@ func TestValidateCoreExtWitnessAtHeightRegisteredNativeSuiteOutsideSpendSetRejec
 			PubkeyLen:  len(w.Pubkey),
 			SigLen:     len(w.Signature) - 1,
 			VerifyCost: 1,
-			OpenSSLAlg: "ML-DSA-87",
+			AlgName:    "ML-DSA-87",
 		}}),
 		nil,
 		nil,
@@ -1118,7 +1118,7 @@ func TestApplyNonCoinbaseTxBasic_CORE_EXT_RotatedNativeSuiteUsesRegistryPath(t *
 		PubkeyLen:  ML_DSA_87_PUBKEY_BYTES,
 		SigLen:     ML_DSA_87_SIG_BYTES,
 		VerifyCost: VERIFY_COST_ML_DSA_87,
-		OpenSSLAlg: "ML-DSA-87",
+		AlgName:    "ML-DSA-87",
 	}})
 	err = nil
 	_, _, err = ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(

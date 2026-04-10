@@ -1025,7 +1025,7 @@ mod tests {
                 pubkey_len: ML_DSA_87_PUBKEY_BYTES,
                 sig_len: ML_DSA_87_SIG_BYTES,
                 verify_cost: VERIFY_COST_ML_DSA_87,
-                openssl_alg: "ML-DSA-87",
+                alg_name: "ML-DSA-87",
             },
         );
         suites.insert(
@@ -1035,7 +1035,7 @@ mod tests {
                 pubkey_len: ML_DSA_87_PUBKEY_BYTES,
                 sig_len: ML_DSA_87_SIG_BYTES,
                 verify_cost: VERIFY_COST_ML_DSA_87,
-                openssl_alg: "ML-DSA-87",
+                alg_name: "ML-DSA-87",
             },
         );
         let mismatched_registry = SuiteRegistry::with_suites(suites);
@@ -1101,7 +1101,7 @@ mod tests {
                 pubkey_len: u64::MAX,
                 sig_len: 0,
                 verify_cost: VERIFY_COST_ML_DSA_87,
-                openssl_alg: "ML-DSA-87",
+                alg_name: "ML-DSA-87",
             },
         );
         let registry = SuiteRegistry::with_suites(suites);
@@ -1145,7 +1145,7 @@ mod tests {
                 pubkey_len: ML_DSA_87_PUBKEY_BYTES,
                 sig_len: ML_DSA_87_SIG_BYTES,
                 verify_cost: VERIFY_COST_ML_DSA_87,
-                openssl_alg: "ML-DSA-87",
+                alg_name: "ML-DSA-87",
             },
         );
         suites.insert(
@@ -1155,7 +1155,7 @@ mod tests {
                 pubkey_len: 64,
                 sig_len: 100,
                 verify_cost: 1,
-                openssl_alg: "ML-DSA-87",
+                alg_name: "ML-DSA-87",
             },
         );
         let registry = SuiteRegistry::with_suites(suites);

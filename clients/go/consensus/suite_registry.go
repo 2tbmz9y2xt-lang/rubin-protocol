@@ -8,7 +8,7 @@ type SuiteParams struct {
 	PubkeyLen  int
 	SigLen     int    // crypto sig length (without sighash byte)
 	VerifyCost uint64 // weight units per signature verification
-	OpenSSLAlg string // algorithm name for opensslVerifySigOneShot
+	AlgName    string // semantic algorithm identity for live verifier binding
 }
 
 // SuiteRegistry maps suite IDs to their consensus parameters.
@@ -42,7 +42,7 @@ func DefaultSuiteRegistry() *SuiteRegistry {
 				PubkeyLen:  ML_DSA_87_PUBKEY_BYTES,
 				SigLen:     ML_DSA_87_SIG_BYTES,
 				VerifyCost: VERIFY_COST_ML_DSA_87,
-				OpenSSLAlg: "ML-DSA-87",
+				AlgName:    "ML-DSA-87",
 			},
 		},
 	}

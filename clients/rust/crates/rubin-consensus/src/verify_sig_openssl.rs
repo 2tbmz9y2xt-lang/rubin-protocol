@@ -428,13 +428,13 @@ enum SuiteVerifierBinding {
 
 // v1 keeps the legacy ML-DSA-87 verifier on the explicit OpenSSL
 // archival/runtime path. Runtime dispatch must resolve a concrete binding
-// instead of treating registry.openssl_alg as an implicit backend switch.
+// instead of treating registry.alg_name as an implicit backend switch.
 fn resolve_suite_verifier_binding(
-    openssl_alg: &str,
+    alg_name: &str,
     pubkey_len: u64,
     sig_len: u64,
 ) -> Result<SuiteVerifierBinding, TxError> {
-    if openssl_alg == "ML-DSA-87"
+    if alg_name == "ML-DSA-87"
         && pubkey_len == ML_DSA_87_PUBKEY_BYTES
         && sig_len == ML_DSA_87_SIG_BYTES
     {
@@ -480,7 +480,7 @@ fn verify_sig_with_binding(
 /// Registry-aware signature verification. When registry is Some, looks up
 /// the suite's parameters from the registry. When registry is None, falls back
 /// to the hardcoded verify_sig path. The registry no longer selects a backend
-/// implicitly through `openssl_alg`; runtime verification resolves an explicit
+/// implicitly through `alg_name`; runtime verification resolves an explicit
 /// v1 binding from the suite parameters instead. Parity with Go
 /// `verifySigWithRegistry`.
 pub fn verify_sig_with_registry(
@@ -501,7 +501,7 @@ pub fn verify_sig_with_registry(
     };
     ensure_openssl_consensus_init()?;
     let binding =
-        resolve_suite_verifier_binding(params.openssl_alg, params.pubkey_len, params.sig_len)?;
+        resolve_suite_verifier_binding(params.alg_name, params.pubkey_len, params.sig_len)?;
     verify_sig_with_binding(&binding, pubkey, signature, digest32)
 }
 
