@@ -288,7 +288,7 @@ func TestBuildRotationProvider_ExplicitSuiteRegistryWithoutDescriptor(t *testing
 	}
 }
 
-func TestBuildRotationProvider_ProductionExplicitSuiteRegistryWithoutDescriptor(t *testing.T) {
+func TestBuildRotationProvider_ProductionExplicitSuiteRegistryWithoutDescriptorUsesDefaultPreRotationRuntime(t *testing.T) {
 	for _, network := range productionRotationNetworks {
 		t.Run(quotedSubtestName(network), func(t *testing.T) {
 			cfg := DefaultConfig()
@@ -306,11 +306,290 @@ func TestBuildRotationProvider_ProductionExplicitSuiteRegistryWithoutDescriptor(
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if rot == nil || reg == nil {
-				t.Fatal("expected production suite_registry-only bootstrap to remain available")
+			if rot == nil {
+				t.Fatal("expected explicit default rotation for empty production schedule")
+			}
+			if reg == nil {
+				t.Fatal("expected canonical default registry for explicit empty production schedule")
+			}
+			if !reg.IsCanonicalDefaultLiveManifest() {
+				t.Fatal("expected canonical default live manifest registry")
+			}
+			if _, ok := reg.Lookup(0x42); ok {
+				t.Fatal("unexpected local suite_registry authority leak into empty production schedule")
+			}
+			if !rot.NativeSpendSuites(0).Contains(consensus.SUITE_ID_ML_DSA_87) {
+				t.Fatal("expected default pre-rotation runtime to expose ML-DSA-87")
+			}
+			if rot.NativeSpendSuites(0).Contains(0x42) {
+				t.Fatal("unexpected local suite_registry leak into production default rotation")
+			}
+		})
+	}
+}
+
+func TestBuildRotationProvider_ProductionCompiledDescriptorActivatesRotation(t *testing.T) {
+	for _, network := range productionRotationNetworks {
+		t.Run(quotedSubtestName(network), func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Network = network
+			cfg.SuiteRegistry = []SuiteParamsJSON{
+				{
+					SuiteID:    0x77,
+					PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+					SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+					VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+					AlgName:    stringPtr("ML-DSA-87"),
+				},
+			}
+			rot, reg, err := cfg.buildRotationProviderWithProductionLookup(
+				func(gotNetwork string) (*consensus.CryptoRotationDescriptor, *consensus.SuiteRegistry, error) {
+					if gotNetwork != strings.ToLower(strings.TrimSpace(network)) {
+						t.Fatalf("lookup network=%q, want %q", gotNetwork, strings.ToLower(strings.TrimSpace(network)))
+					}
+					registry := canonicalProductionScheduleRegistry()
+					return &consensus.CryptoRotationDescriptor{
+						Name:         "rotation-v1",
+						OldSuiteID:   consensus.SUITE_ID_ML_DSA_87,
+						NewSuiteID:   0x42,
+						CreateHeight: 10,
+						SpendHeight:  20,
+						SunsetHeight: 30,
+					}, registry, nil
+				},
+			)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if rot == nil {
+				t.Fatal("expected descriptor-backed production rotation")
+			}
+			if reg == nil {
+				t.Fatal("expected compiled production registry")
+			}
+			if _, ok := reg.Lookup(consensus.SUITE_ID_ML_DSA_87); !ok {
+				t.Fatal("expected compiled production registry to retain ML-DSA-87")
+			}
+			if _, ok := reg.Lookup(0x77); ok {
+				t.Fatal("unexpected local suite_registry authority leak into production registry")
 			}
 			if _, ok := reg.Lookup(0x42); !ok {
-				t.Fatal("expected suite 0x42 in production registry")
+				t.Fatal("expected compiled production registry to include suite 0x42")
+			}
+			if rot.NativeSpendSuites(9).Contains(0x42) {
+				t.Fatal("expected new suite to remain inactive before create_height")
+			}
+			if !rot.NativeSpendSuites(10).Contains(0x42) {
+				t.Fatal("expected new suite to activate at create_height")
+			}
+		})
+	}
+}
+
+func TestBuildRotationProvider_ProductionLookupNormalizesNetworkVariants(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		input   string
+		wantNet string
+	}{
+		{name: "mainnet", input: "mainnet", wantNet: "mainnet"},
+		{name: "testnet", input: "testnet", wantNet: "testnet"},
+		{name: "trimmed-mainnet", input: " MAINNET ", wantNet: "mainnet"},
+		{name: "trimmed-testnet", input: "\tTestNet\t", wantNet: "testnet"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Network = tc.input
+			rot, reg, err := cfg.buildRotationProviderWithProductionLookup(
+				func(gotNetwork string) (*consensus.CryptoRotationDescriptor, *consensus.SuiteRegistry, error) {
+					if gotNetwork != tc.wantNet {
+						t.Fatalf("lookup network=%q, want %q", gotNetwork, tc.wantNet)
+					}
+					registry := canonicalProductionScheduleRegistry()
+					return &consensus.CryptoRotationDescriptor{
+						Name:         "rotation-v1",
+						OldSuiteID:   consensus.SUITE_ID_ML_DSA_87,
+						NewSuiteID:   0x42,
+						CreateHeight: 10,
+						SpendHeight:  20,
+						SunsetHeight: 30,
+					}, registry, nil
+				},
+			)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if rot == nil {
+				t.Fatal("expected compiled production rotation")
+			}
+			if reg == nil {
+				t.Fatal("expected compiled production registry")
+			}
+			if _, ok := reg.Lookup(consensus.SUITE_ID_ML_DSA_87); !ok {
+				t.Fatal("expected compiled production registry to retain ML-DSA-87")
+			}
+		})
+	}
+}
+
+func TestBuildRotationProvider_ProductionHelperRejectsLocalRotationDescriptor(t *testing.T) {
+	if got, want := productionLocalRotationDescriptorErr, "rotation_descriptor: production networks forbid local rotation_descriptor"; got != want {
+		t.Fatalf("production guard=%q, want %q", got, want)
+	}
+	for _, network := range productionRotationNetworks {
+		t.Run(quotedSubtestName(network), func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Network = network
+			cfg.SuiteRegistry = []SuiteParamsJSON{
+				{
+					SuiteID:    0x42,
+					PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+					SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+					VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+					AlgName:    stringPtr("ML-DSA-87"),
+				},
+			}
+			cfg.RotationDescriptor = &RotationConfigJSON{
+				Name:         "prod-rotation",
+				OldSuiteID:   consensus.SUITE_ID_ML_DSA_87,
+				NewSuiteID:   0x42,
+				CreateHeight: 10,
+				SpendHeight:  20,
+				SunsetHeight: 30,
+			}
+			_, _, err := cfg.buildRotationProviderWithProductionLookup(
+				func(string) (*consensus.CryptoRotationDescriptor, *consensus.SuiteRegistry, error) {
+					t.Fatal("production lookup must not run after local production rotation_descriptor reject")
+					return nil, nil, nil
+				},
+			)
+			if err == nil {
+				t.Fatal("expected production local rotation_descriptor rejection")
+			}
+			if got, want := err.Error(), productionLocalRotationDescriptorErr; got != want {
+				t.Fatalf("error=%q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestBuildRotationProvider_ProductionLookupNoneUsesDefaultPreRotationRuntime(t *testing.T) {
+	for _, network := range productionRotationNetworks {
+		t.Run(quotedSubtestName(network), func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Network = network
+			cfg.SuiteRegistry = []SuiteParamsJSON{
+				{
+					SuiteID:    0x77,
+					PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+					SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+					VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+					AlgName:    stringPtr("ML-DSA-87"),
+				},
+			}
+			rot, reg, err := cfg.buildRotationProviderWithProductionLookup(
+				func(gotNetwork string) (*consensus.CryptoRotationDescriptor, *consensus.SuiteRegistry, error) {
+					if gotNetwork != strings.ToLower(strings.TrimSpace(network)) {
+						t.Fatalf("lookup network=%q, want %q", gotNetwork, strings.ToLower(strings.TrimSpace(network)))
+					}
+					return nil, consensus.DefaultSuiteRegistry(), nil
+				},
+			)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if rot == nil {
+				t.Fatal("expected explicit default rotation when compiled production schedule is empty")
+			}
+			if reg == nil {
+				t.Fatal("expected canonical default registry when production lookup is empty")
+			}
+			if !reg.IsCanonicalDefaultLiveManifest() {
+				t.Fatal("expected canonical default live manifest registry")
+			}
+			if _, ok := reg.Lookup(0x77); ok {
+				t.Fatal("expected local suite_registry to remain non-authoritative on production lookup none")
+			}
+			if !rot.NativeSpendSuites(0).Contains(consensus.SUITE_ID_ML_DSA_87) {
+				t.Fatal("expected default pre-rotation runtime to expose ML-DSA-87")
+			}
+			if rot.NativeSpendSuites(0).Contains(0x77) {
+				t.Fatal("unexpected local suite_registry leak into production default rotation")
+			}
+		})
+	}
+}
+
+func TestValidateConfig_ProductionIgnoresBadSuiteRegistryWithoutDescriptor(t *testing.T) {
+	for _, network := range productionRotationNetworks {
+		t.Run(quotedSubtestName(network), func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Network = network
+			cfg.SuiteRegistry = []SuiteParamsJSON{
+				{
+					SuiteID:    0x42,
+					PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+					SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+					VerifyCost: 0,
+					AlgName:    stringPtr("ML-DSA-87"),
+				},
+			}
+			if err := ValidateConfig(cfg); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			rot, reg, err := cfg.BuildRotationProvider()
+			if err != nil {
+				t.Fatalf("build rotation provider: %v", err)
+			}
+			if rot == nil {
+				t.Fatal("expected explicit default rotation on production empty schedule")
+			}
+			if reg == nil || !reg.IsCanonicalDefaultLiveManifest() {
+				t.Fatal("expected canonical default production registry")
+			}
+			if _, ok := reg.Lookup(0x42); ok {
+				t.Fatal("unexpected malformed local suite_registry leak into production registry")
+			}
+			if rot.NativeSpendSuites(0).Contains(0x42) {
+				t.Fatal("unexpected malformed local suite_registry leak into production rotation")
+			}
+		})
+	}
+}
+
+func TestBuildRotationProvider_ProductionLookupNoneRejectsNoncanonicalRegistry(t *testing.T) {
+	for _, network := range productionRotationNetworks {
+		t.Run(quotedSubtestName(network), func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Network = network
+			_, _, err := cfg.buildRotationProviderWithProductionLookup(
+				func(gotNetwork string) (*consensus.CryptoRotationDescriptor, *consensus.SuiteRegistry, error) {
+					if gotNetwork != strings.ToLower(strings.TrimSpace(network)) {
+						t.Fatalf("lookup network=%q, want %q", gotNetwork, strings.ToLower(strings.TrimSpace(network)))
+					}
+					return nil, consensus.NewSuiteRegistryFromParams([]consensus.SuiteParams{
+						{
+							SuiteID:    consensus.SUITE_ID_ML_DSA_87,
+							PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+							SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+							VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+							AlgName:    "ML-DSA-87",
+						},
+						{
+							SuiteID:    0x77,
+							PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+							SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+							VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+							AlgName:    "ML-DSA-87",
+						},
+					}), nil
+				},
+			)
+			if err == nil {
+				t.Fatal("expected invalid empty-slot registry rejection")
+			}
+			if got, want := err.Error(), "production_rotation_schedule: invalid empty-slot registry"; got != want {
+				t.Fatalf("error=%q, want %q", got, want)
 			}
 		})
 	}

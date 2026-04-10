@@ -8,6 +8,7 @@ mod io_utils;
 pub mod miner;
 pub mod p2p_runtime;
 pub mod p2p_service;
+mod production_rotation_schedule;
 pub mod relay_pool;
 pub mod sync;
 pub mod sync_disconnect;
