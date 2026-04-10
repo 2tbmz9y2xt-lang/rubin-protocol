@@ -7,6 +7,16 @@ import (
 	"testing"
 )
 
+func canonicalDefaultRuntimeSuiteParams() SuiteParams {
+	return SuiteParams{
+		SuiteID:    SUITE_ID_ML_DSA_87,
+		PubkeyLen:  ML_DSA_87_PUBKEY_BYTES,
+		SigLen:     ML_DSA_87_SIG_BYTES,
+		VerifyCost: VERIFY_COST_ML_DSA_87,
+		AlgName:    "ML-DSA-87",
+	}
+}
+
 func TestVerifySigWithRegistry_NilRegistry_UsesDefaultLiveRegistry(t *testing.T) {
 	var d [32]byte
 	// ML-DSA-87 with wrong lengths still routes through the canonical default
@@ -20,30 +30,103 @@ func TestVerifySigWithRegistry_NilRegistry_UsesDefaultLiveRegistry(t *testing.T)
 	}
 }
 
-func TestVerifySigWithRegistry_NilRegistry_DefaultRegistryDriftFailsClosed(t *testing.T) {
-	orig := defaultRuntimeSuiteRegistryForVerification
-	defaultRuntimeSuiteRegistryForVerification = func() *SuiteRegistry {
-		return &SuiteRegistry{
-			suites: map[uint8]SuiteParams{
-				SUITE_ID_ML_DSA_87: {
-					SuiteID:    SUITE_ID_ML_DSA_87,
-					PubkeyLen:  ML_DSA_87_PUBKEY_BYTES,
-					SigLen:     ML_DSA_87_SIG_BYTES,
-					VerifyCost: VERIFY_COST_ML_DSA_87,
-					AlgName:    "ML-DSA-65",
-				},
-			},
+func TestVerifySigWithRegistry_NilRegistry_MatchesExplicitDefaultLiveRegistry(t *testing.T) {
+	reg := DefaultSuiteRegistry()
+	var captured []string
+	origFn := opensslVerifySigOneShotFn
+	defer func() { opensslVerifySigOneShotFn = origFn }()
+	opensslVerifySigOneShotFn = func(alg string, pub, sig, msg []byte) (bool, error) {
+		captured = append(captured, alg)
+		return true, nil
+	}
+
+	pub := make([]byte, ML_DSA_87_PUBKEY_BYTES)
+	sig := make([]byte, ML_DSA_87_SIG_BYTES)
+	var d [32]byte
+
+	ok, err := verifySigWithRegistry(SUITE_ID_ML_DSA_87, pub, sig, d, nil)
+	if err != nil {
+		t.Fatalf("nil registry verify: %v", err)
+	}
+	if !ok {
+		t.Fatal("nil registry must verify canonical default live registry")
+	}
+
+	ok, err = verifySigWithRegistry(SUITE_ID_ML_DSA_87, pub, sig, d, reg)
+	if err != nil {
+		t.Fatalf("explicit registry verify: %v", err)
+	}
+	if !ok {
+		t.Fatal("explicit registry must verify canonical default live registry")
+	}
+
+	if len(captured) != 2 {
+		t.Fatalf("captured=%d calls, want 2", len(captured))
+	}
+	for i, got := range captured {
+		if got != "ML-DSA-87" {
+			t.Fatalf("call %d alg=%q, want %q", i, got, "ML-DSA-87")
 		}
 	}
-	defer func() { defaultRuntimeSuiteRegistryForVerification = orig }()
+}
 
-	var d [32]byte
-	_, err := verifySigWithRegistry(SUITE_ID_ML_DSA_87, []byte{0x01}, []byte{0x02}, d, nil)
-	if err == nil {
-		t.Fatal("expected default runtime registry drift error")
+func TestVerifySigWithRegistry_NilRegistry_DefaultRegistryDriftFailsClosed(t *testing.T) {
+	testCases := []struct {
+		name   string
+		mutate func(*SuiteParams)
+	}{
+		{
+			name: "alg_name",
+			mutate: func(params *SuiteParams) {
+				params.AlgName = "ML-DSA-65"
+			},
+		},
+		{
+			name: "pubkey_len",
+			mutate: func(params *SuiteParams) {
+				params.PubkeyLen--
+			},
+		},
+		{
+			name: "sig_len",
+			mutate: func(params *SuiteParams) {
+				params.SigLen--
+			},
+		},
+		{
+			name: "verify_cost",
+			mutate: func(params *SuiteParams) {
+				params.VerifyCost--
+			},
+		},
 	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
+
+	orig := defaultRuntimeSuiteRegistryForVerification
+	defer func() { defaultRuntimeSuiteRegistryForVerification = orig }()
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			defaultRuntimeSuiteRegistryForVerification = func() *SuiteRegistry {
+				params := canonicalDefaultRuntimeSuiteParams()
+				tc.mutate(&params)
+				return &SuiteRegistry{
+					suites: map[uint8]SuiteParams{
+						SUITE_ID_ML_DSA_87: params,
+					},
+				}
+			}
+
+			var d [32]byte
+			_, err := verifySigWithRegistry(SUITE_ID_ML_DSA_87, []byte{0x01}, []byte{0x02}, d, nil)
+			if err == nil {
+				t.Fatal("expected default runtime registry drift error")
+			}
+			if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
+				t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
+			}
+			if got, want := err.Error(), fmt.Sprintf("%s: verify_sig: default runtime registry drift", TX_ERR_SIG_ALG_INVALID); got != want {
+				t.Fatalf("err=%q, want %q", got, want)
+			}
+		})
 	}
 }
 

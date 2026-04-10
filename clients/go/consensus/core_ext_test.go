@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -1405,6 +1406,8 @@ func TestParseCoreExtVerifySigExtBinding_NativeAndUnsupported(t *testing.T) {
 	}
 	if _, err := ParseCoreExtVerifySigExtBinding(CoreExtBindingNameVerifySigExtOpenSSLDigest32V1, []byte{0x01}, nil); err == nil {
 		t.Fatalf("openssl binding without ext_payload_schema must fail")
+	} else if got, want := err.Error(), fmt.Sprintf("core_ext binding %s requires ext_payload_schema_hex", CoreExtBindingNameVerifySigExtOpenSSLDigest32V1); got != want {
+		t.Fatalf("err=%q, want %q", got, want)
 	}
 }
 

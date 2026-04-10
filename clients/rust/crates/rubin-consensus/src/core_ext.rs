@@ -2373,6 +2373,27 @@ mod tests {
             native_named,
             CoreExtVerificationBinding::NativeVerifySig
         ));
+        let native_normalized = core_ext_verification_binding_from_normalized_name_and_descriptor(
+            "",
+            &[],
+            &[],
+        )
+        .expect("normalized empty native");
+        assert!(matches!(
+            native_normalized,
+            CoreExtVerificationBinding::NativeVerifySig
+        ));
+        let native_named_normalized =
+            core_ext_verification_binding_from_normalized_name_and_descriptor(
+                "native_verify_sig",
+                &[],
+                &[],
+            )
+            .expect("normalized native alias");
+        assert!(matches!(
+            native_named_normalized,
+            CoreExtVerificationBinding::NativeVerifySig
+        ));
         let descriptor = core_ext_openssl_digest32_binding_descriptor_bytes(
             "ML-DSA-87",
             ML_DSA_87_PUBKEY_BYTES,
@@ -2395,7 +2416,13 @@ mod tests {
             &[],
         )
         .expect_err("missing schema must fail");
-        assert!(err.contains("requires ext_payload_schema_hex"));
+        assert_eq!(
+            err,
+            format!(
+                "core_ext binding {} requires ext_payload_schema_hex",
+                CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+            )
+        );
         let err =
             core_ext_verification_binding_from_name("unsupported").expect_err("unsupported bind");
         assert!(err.contains("unsupported core_ext binding"));
@@ -2437,6 +2464,20 @@ mod tests {
             normalized,
             CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(_)
         ));
+
+        let err = live_core_ext_verification_binding_from_name_and_descriptor(
+            CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
+            &descriptor,
+            &[],
+        )
+        .expect_err("missing schema must fail on live path");
+        assert_eq!(
+            err,
+            format!(
+                "core_ext binding {} requires ext_payload_schema_hex",
+                CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+            )
+        );
     }
 
     #[test]
