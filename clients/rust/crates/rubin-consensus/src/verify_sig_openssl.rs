@@ -502,24 +502,15 @@ fn runtime_verification_registry_with_default<'a>(
     }
 }
 
-fn runtime_verification_registry(
-    registry: Option<&crate::suite_registry::SuiteRegistry>,
-) -> Result<&crate::suite_registry::SuiteRegistry, TxError> {
-    runtime_verification_registry_with_default(registry, default_runtime_suite_registry())
-}
-
 fn runtime_suite_params_for_verification(
     suite_id: u8,
     registry: Option<&crate::suite_registry::SuiteRegistry>,
 ) -> Result<crate::suite_registry::SuiteParams, TxError> {
-    let registry = runtime_verification_registry(registry)?;
-    let params = registry.lookup(suite_id).cloned();
-    params.ok_or_else(|| {
-        TxError::new(
-            ErrorCode::TxErrSigAlgInvalid,
-            "verify_sig: unsupported suite_id",
-        )
-    })
+    runtime_suite_params_for_verification_with_default(
+        suite_id,
+        registry,
+        default_runtime_suite_registry(),
+    )
 }
 
 fn runtime_suite_params_for_verification_with_default(
@@ -1102,6 +1093,47 @@ mod tests {
         assert_eq!(nil_params, canonical);
         assert_eq!(explicit_params, canonical);
         assert_eq!(nil_params, explicit_params);
+    }
+
+    #[test]
+    fn runtime_suite_params_for_verification_public_wrapper_matches_helper() {
+        let explicit = crate::suite_registry::SuiteRegistry::default_registry();
+
+        let public_nil = super::runtime_suite_params_for_verification(
+            crate::constants::SUITE_ID_ML_DSA_87,
+            None,
+        )
+        .expect("public nil params");
+        let helper_nil = super::runtime_suite_params_for_verification_with_default(
+            crate::constants::SUITE_ID_ML_DSA_87,
+            None,
+            &explicit,
+        )
+        .expect("helper nil params");
+
+        let public_explicit = super::runtime_suite_params_for_verification(
+            crate::constants::SUITE_ID_ML_DSA_87,
+            Some(&explicit),
+        )
+        .expect("public explicit params");
+        let helper_explicit = super::runtime_suite_params_for_verification_with_default(
+            crate::constants::SUITE_ID_ML_DSA_87,
+            Some(&explicit),
+            &explicit,
+        )
+        .expect("helper explicit params");
+
+        assert_eq!(public_nil, helper_nil);
+        assert_eq!(public_explicit, helper_explicit);
+        assert_eq!(public_nil, public_explicit);
+    }
+
+    #[test]
+    fn runtime_suite_params_for_verification_unknown_suite_preserves_error_surface() {
+        let err = super::runtime_suite_params_for_verification(0xff, None)
+            .expect_err("unknown suite must fail closed");
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+        assert_eq!(err.msg, "verify_sig: unsupported suite_id");
     }
 
     #[test]
