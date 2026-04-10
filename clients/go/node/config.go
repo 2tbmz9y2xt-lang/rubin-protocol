@@ -329,7 +329,8 @@ func ValidateConfig(cfg Config) error {
 	if strings.TrimSpace(cfg.Network) == "" {
 		return errors.New("network is required")
 	}
-	if _, err := canonicalConfigNetworkName(cfg.Network); err != nil {
+	network, err := canonicalConfigNetworkName(cfg.Network)
+	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(cfg.DataDir) == "" {
@@ -366,10 +367,6 @@ func ValidateConfig(cfg Config) error {
 		if len(raw) != 32 && len(raw) != 33 {
 			return fmt.Errorf("mine_address must be 32 (key_id) or 33 (suite_id||key_id) bytes, got %d", len(raw))
 		}
-	}
-	network, err := canonicalConfigNetworkName(cfg.Network)
-	if err != nil {
-		return err
 	}
 	if network == "mainnet" || network == "testnet" {
 		if cfg.RotationDescriptor != nil {
