@@ -910,7 +910,7 @@ mod tests {
     #[test]
     fn load_genesis_config_rejects_empty_suite_registry_alg_name() {
         let dir = std::env::temp_dir().join(format!(
-            "rubin-node-genesis-suite-registry-empty-openssl-{}",
+            "rubin-node-genesis-suite-registry-empty-alg-name-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("time")
@@ -946,7 +946,7 @@ mod tests {
     fn load_genesis_config_rejects_alias_suite_registry_alg_name() {
         for (case_idx, alg) in ["ml-dsa-87", "MLDSA87"].into_iter().enumerate() {
             let dir = std::env::temp_dir().join(format!(
-                "rubin-node-genesis-suite-registry-alias-openssl-{}-{}",
+                "rubin-node-genesis-suite-registry-alg-name-alias-{}-{}",
                 case_idx,
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
