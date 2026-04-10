@@ -262,11 +262,14 @@ jobs:
                 }
                 if (!modFile) continue;
                 const modRel = path.relative(repoRoot, modFile);
+                if (!modRel || path.isAbsolute(modRel) || modRel === '..' || modRel.startsWith('..' + path.sep)) {
+                  continue;
+                }
                 // Skip module sources that are already part of the PR file list (not the same as "in changedFilePayload", which can omit files due to TOTAL_FILE_BUDGET).
                 if (changedFilesSet.has(modRel)) continue;
 
-                let modContent;
-                try { modContent = fs.readFileSync(modFile, 'utf8'); } catch { continue; }
+                const modContent = readChangedFile(modRel);
+                if (!modContent) continue;
 
                 for (const sym of symbols) {
                   if (depUsed >= DEP_BUDGET) break;
