@@ -261,6 +261,54 @@ func TestLoadCompiledProductionRotationScheduleParsesSingleDescriptorWithCanonic
 	}
 }
 
+func TestLoadCompiledProductionRotationScheduleRejectsNonFiniteSunsetHeightOnProductionProfile(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name          string
+		sunsetField   string
+		expectedError string
+	}{
+		{
+			name:        "null",
+			sunsetField: `"sunset_height": null`,
+		},
+		{
+			name:        "missing",
+			sunsetField: ``,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			sunsetField := ""
+			if tc.sunsetField != "" {
+				sunsetField = ",\n\t\t\t\t" + tc.sunsetField
+			}
+			_, _, err := loadCompiledProductionRotationScheduleFromJSONWithRegistry([]byte(`{
+				"version": 1,
+				"networks": {
+					"mainnet": {
+						"name": "rotation-v1",
+						"old_suite_id": 1,
+						"new_suite_id": 66,
+						"create_height": 10,
+						"spend_height": 20`+sunsetField+`
+					},
+					"testnet": null
+				}
+			}`), canonicalProductionScheduleRegistry())
+			if err == nil {
+				t.Fatalf("expected %s sunset_height rejection", tc.name)
+			}
+			if got, want := err.Error(), `production_rotation_schedule: networks.mainnet: rotation_descriptor: rotation: v1 production profile requires finite sunset_height (H4)`; got != want {
+				t.Fatalf("error=%q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestLoadCompiledProductionRotationScheduleNilRegistryRejectsUnsanctionedScheduledSuite(t *testing.T) {
 	_, _, err := loadCompiledProductionRotationScheduleFromJSONWithRegistry([]byte(`{
 		"version": 1,

@@ -501,30 +501,35 @@ mod tests {
     }
 
     #[test]
-    fn production_rotation_schedule_rejects_null_sunset_height_on_production_profile() {
-        let err = production_rotation_descriptor_for_network_with_registry_for_test(
-            r#"{
+    fn production_rotation_schedule_rejects_non_finite_sunset_height_on_production_profile() {
+        for (name, sunset_field) in [("null", r#","sunset_height": null"#), ("missing", "")] {
+            let err = production_rotation_descriptor_for_network_with_registry_for_test(
+                &format!(
+                    r#"{{
                 "version": 1,
-                "networks": {
-                    "mainnet": {
+                "networks": {{
+                    "mainnet": {{
                         "name": "rotation-v1",
                         "old_suite_id": 1,
                         "new_suite_id": 66,
                         "create_height": 10,
-                        "spend_height": 20,
-                        "sunset_height": null
-                    },
+                        "spend_height": 20{}
+                    }},
                     "testnet": null
-                }
-            }"#,
-            "mainnet",
-            canonical_production_schedule_registry(),
-        )
-        .expect_err("must reject");
-        assert_eq!(
-            err,
-            "production_rotation_schedule: networks.mainnet: rotation_descriptor: rotation: v1 production profile requires finite sunset_height (H4)"
-        );
+                }}
+            }}"#,
+                    sunset_field
+                ),
+                "mainnet",
+                canonical_production_schedule_registry(),
+            )
+            .expect_err("must reject");
+            assert_eq!(
+                err,
+                "production_rotation_schedule: networks.mainnet: rotation_descriptor: rotation: v1 production profile requires finite sunset_height (H4)",
+                "{name}"
+            );
+        }
     }
 
     #[test]
