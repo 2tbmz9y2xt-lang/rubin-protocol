@@ -48,7 +48,8 @@ type Request struct {
 	Target               string         `json:"target,omitempty"`
 	ExpectedTarget       string         `json:"expected_target,omitempty"`
 	Op                   string         `json:"op"`
-	// Network selects optional v1 production rotation rules (finite H4 on mainnet/testnet).
+	// Network selects optional v1 production rotation rules (strict single descriptor + finite H4
+	// on mainnet/testnet).
 	// Omitted or empty keeps legacy harness/dev behavior.
 	Network               string                         `json:"network,omitempty"`
 	OwnerLockID           string                         `json:"owner_lock_id,omitempty"`
@@ -161,6 +162,62 @@ type requestEnvelope struct {
 }
 
 const rotationDescriptorNotActivatedErr = "descriptor-not-activated"
+
+const (
+	rotationTooManyDescriptorsErr     = "rotation-too-many-descriptors"
+	rotationFiniteH4RequiredErr       = "rotation-finite-h4-required"
+	rotationOverlappingDescriptorsErr = "rotation-overlapping-descriptors"
+	rotationUnregisteredSuiteErr      = "rotation-unregistered-suite"
+	rotationEqualSuiteIDsErr          = "rotation-equal-suite-ids"
+	rotationInvalidHeightOrderErr     = "rotation-invalid-height-order"
+	rotationInvalidDescriptorErr      = "rotation-invalid-descriptor"
+	rotationNameRequiredMsg           = "rotation: name required"
+	rotationCreateHeightOrderMsg      = "rotation: create_height ("
+	rotationSunsetHeightOrderMsg      = "rotation: sunset_height ("
+)
+
+func matchesWrappedPrefixValidationErr(msg, match string) bool {
+	return strings.HasPrefix(msg, match) || strings.Contains(msg, ": "+match)
+}
+
+func matchesWrappedSuffixValidationErr(msg, match string) bool {
+	return msg == match || strings.HasSuffix(msg, match)
+}
+
+func sanitizeRotationValidationErr(err error) string {
+	msg := err.Error()
+	switch {
+	case matchesWrappedPrefixValidationErr(msg, consensus.RotationV1ProductionAtMostOneDescriptorErrStem):
+		return rotationTooManyDescriptorsErr
+	case matchesWrappedPrefixValidationErr(msg, consensus.RotationV1ProductionFiniteH4RequiredErrStem):
+		return rotationFiniteH4RequiredErr
+	case matchesWrappedPrefixValidationErr(msg, "rotation: overlapping rotations"):
+		return rotationOverlappingDescriptorsErr
+	case matchesWrappedPrefixValidationErr(msg, rotationNameRequiredMsg):
+		return rotationInvalidDescriptorErr
+	case matchesWrappedSuffixValidationErr(msg, "must differ from new suite"):
+		return rotationEqualSuiteIDsErr
+	case matchesWrappedPrefixValidationErr(msg, "rotation: old suite "):
+		return rotationUnregisteredSuiteErr
+	case matchesWrappedPrefixValidationErr(msg, "rotation: new suite "):
+		return rotationUnregisteredSuiteErr
+	case matchesWrappedPrefixValidationErr(msg, rotationCreateHeightOrderMsg):
+		return rotationInvalidHeightOrderErr
+	case matchesWrappedPrefixValidationErr(msg, rotationSunsetHeightOrderMsg):
+		return rotationInvalidHeightOrderErr
+	}
+	return rotationInvalidDescriptorErr
+}
+
+func rotationDescriptorValidationResp(err error) Response {
+	return Response{
+		Ok:  false,
+		Err: rotationDescriptorNotActivatedErr,
+		Diagnostics: map[string]any{
+			"rotation_validation_err": sanitizeRotationValidationErr(err),
+		},
+	}
+}
 
 type UtxoJSON struct {
 	Txid              string `json:"txid"`
@@ -1132,11 +1189,8 @@ func runFromStdin() {
 					SunsetHeight: rd.SunsetHeight,
 				})
 			}
-			// Keep the CLI surface stable: any descriptor-set validation failure,
-			// including the production max-2 guard, normalizes to the same
-			// descriptor-not-activated error exposed by the harness.
 			if err := consensus.ValidateRotationSetForNetwork(req.Network, ds, reg); err != nil {
-				writeResp(os.Stdout, Response{Ok: false, Err: rotationDescriptorNotActivatedErr})
+				writeResp(os.Stdout, rotationDescriptorValidationResp(err))
 				return
 			}
 			writeResp(os.Stdout, Response{Ok: true})
@@ -1155,7 +1209,7 @@ func runFromStdin() {
 			SunsetHeight: req.RotationDescriptor.SunsetHeight,
 		}
 		if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
-			writeResp(os.Stdout, Response{Ok: false, Err: rotationDescriptorNotActivatedErr})
+			writeResp(os.Stdout, rotationDescriptorValidationResp(err))
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true})

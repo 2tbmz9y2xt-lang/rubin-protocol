@@ -2,21 +2,26 @@
   "report_version": 1,
   "measurement_scope": "explicit_suite_id_utxos",
   "network": "devnet",
-  "data_dir": "/tmp/example-datadir",
-  "chainstate_height": 1,
+  "data_dir": "/var/lib/rubin/devnet",
+  "chainstate_height": 42,
   "chainstate_has_tip": true,
   "indexed_suite_ids": [1, 66],
-  "watched_legacy_suite_ids": [1],
-  "legacy_exposure_total": 0,
-  "sunset_readiness": "ready_for_operator_defined_grace_window",
-  "warning_hook": "none",
-  "grace_hook": "start_operator_defined_grace_window",
+  "watched_legacy_suite_ids": [1, 66],
+  "legacy_exposure_total": 3,
+  "sunset_readiness": "not_ready_legacy_exposure_present",
+  "warning_hook": "legacy_exposure_present_notify_operator_and_council",
+  "grace_hook": "not_applicable_legacy_exposure_present",
   "include_outpoints": false,
   "legacy_suite_reports": [
     {
       "suite_id": 1,
-      "utxo_exposure_count": 0,
-      "outpoint_count": 0
+      "utxo_exposure_count": 1,
+      "outpoint_count": 1
+    },
+    {
+      "suite_id": 66,
+      "utxo_exposure_count": 2,
+      "outpoint_count": 2
     }
   ]
 }

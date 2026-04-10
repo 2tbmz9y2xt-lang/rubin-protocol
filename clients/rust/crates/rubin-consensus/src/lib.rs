@@ -93,7 +93,9 @@ pub use suite_registry::{
     validate_rotation_set_for_network, validate_rotation_set_for_normalized_network,
     validate_v1_production_rotation_descriptor, validate_v1_production_rotation_set,
     CryptoRotationDescriptor, DefaultRotationProvider, DescriptorRotationProvider, NativeSuiteSet,
-    RotationProvider, SuiteParams, SuiteRegistry, SUPPORTED_ROTATION_NETWORK_NAMES_CSV,
+    RotationProvider, SuiteParams, SuiteRegistry,
+    ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM,
+    ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM, SUPPORTED_ROTATION_NETWORK_NAMES_CSV,
 };
 pub use tx::{parse_tx, DaChunkCore, DaCommitCore, Tx, TxInput, TxOutput, WitnessItem};
 pub use tx_dep_graph::{

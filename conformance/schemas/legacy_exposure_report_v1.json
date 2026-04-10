@@ -30,27 +30,48 @@
       "type": "string",
       "const": "explicit_suite_id_utxos"
     },
-    "network": { "type": "string" },
+    "network": {
+      "type": "string",
+      "minLength": 1
+    },
     "data_dir": {
       "type": "string",
+      "minLength": 1,
       "description": "CLI --datadir as passed to the scanner (verbatim; may be relative; not canonicalized in current implementations)"
     },
-    "chainstate_height": { "type": "integer", "minimum": 0 },
-    "chainstate_has_tip": { "type": "boolean" },
+    "chainstate_height": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "chainstate_has_tip": {
+      "type": "boolean",
+      "description": "Successful scanner runs emit true; false is retained only for hook-helper/conformance parity."
+    },
     "indexed_suite_ids": {
       "type": "array",
-      "description": "Set-like list of indexed suite IDs (no duplicates); order is implementation-defined.",
-      "items": { "type": "integer", "minimum": 0, "maximum": 255 },
+      "description": "Unique indexed suite IDs serialized as JSON integers in the range 0..255 and emitted in ascending numeric order.",
+      "items": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 255
+      },
       "uniqueItems": true
     },
     "watched_legacy_suite_ids": {
       "type": "array",
       "description": "Non-empty deduplicated sorted suite IDs from CLI --legacy-suite-id (scanner requires at least one).",
       "minItems": 1,
-      "uniqueItems": true,
-      "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+      "items": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 255
+      },
+      "uniqueItems": true
     },
-    "legacy_exposure_total": { "type": "integer", "minimum": 0 },
+    "legacy_exposure_total": {
+      "type": "integer",
+      "minimum": 0
+    },
     "sunset_readiness": {
       "type": "string",
       "enum": [
@@ -61,7 +82,10 @@
     },
     "warning_hook": {
       "type": "string",
-      "enum": ["none", "legacy_exposure_present_notify_operator_and_council"]
+      "enum": [
+        "none",
+        "legacy_exposure_present_notify_operator_and_council"
+      ]
     },
     "grace_hook": {
       "type": "string",
@@ -71,7 +95,9 @@
         "not_applicable_legacy_exposure_present"
       ]
     },
-    "include_outpoints": { "type": "boolean" },
+    "include_outpoints": {
+      "type": "boolean"
+    },
     "legacy_suite_reports": {
       "type": "array",
       "minItems": 1,
@@ -80,7 +106,13 @@
   },
   "allOf": [
     {
-      "if": { "properties": { "include_outpoints": { "const": false } } },
+      "if": {
+        "properties": {
+          "include_outpoints": {
+            "const": false
+          }
+        }
+      },
       "then": {
         "properties": {
           "legacy_suite_reports": {
@@ -89,11 +121,37 @@
             "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["suite_id", "utxo_exposure_count", "outpoint_count"],
+              "required": [
+                "suite_id",
+                "utxo_exposure_count",
+                "outpoint_count"
+              ],
               "properties": {
-                "suite_id": { "type": "integer", "minimum": 0, "maximum": 255 },
-                "utxo_exposure_count": { "type": "integer", "minimum": 0 },
-                "outpoint_count": { "type": "integer", "minimum": 0 }
+                "suite_id": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 255
+                },
+                "utxo_exposure_count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "outpoint_count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "outpoints": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}:[0-9]+$"
+                  }
+                }
+              },
+              "not": {
+                "required": [
+                  "outpoints"
+                ]
               }
             }
           }
@@ -101,7 +159,13 @@
       }
     },
     {
-      "if": { "properties": { "include_outpoints": { "const": true } } },
+      "if": {
+        "properties": {
+          "include_outpoints": {
+            "const": true
+          }
+        }
+      },
       "then": {
         "properties": {
           "legacy_suite_reports": {
@@ -110,11 +174,26 @@
             "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["suite_id", "utxo_exposure_count", "outpoint_count", "outpoints"],
+              "required": [
+                "suite_id",
+                "utxo_exposure_count",
+                "outpoint_count",
+                "outpoints"
+              ],
               "properties": {
-                "suite_id": { "type": "integer", "minimum": 0, "maximum": 255 },
-                "utxo_exposure_count": { "type": "integer", "minimum": 0 },
-                "outpoint_count": { "type": "integer", "minimum": 0 },
+                "suite_id": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 255
+                },
+                "utxo_exposure_count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "outpoint_count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
                 "outpoints": {
                   "type": "array",
                   "items": {
