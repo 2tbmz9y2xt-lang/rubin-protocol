@@ -310,10 +310,10 @@ type SuiteParamsJSON struct {
 }
 
 type suiteParamsJSONWire struct {
-	SuiteID    uint8   `json:"suite_id"`
-	PubkeyLen  int     `json:"pubkey_len"`
-	SigLen     int     `json:"sig_len"`
-	VerifyCost uint64  `json:"verify_cost"`
+	SuiteID    *uint8  `json:"suite_id"`
+	PubkeyLen  *int    `json:"pubkey_len"`
+	SigLen     *int    `json:"sig_len"`
+	VerifyCost *uint64 `json:"verify_cost"`
 	AlgName    *string `json:"alg_name,omitempty"`
 	OpenSSLAlg *string `json:"openssl_alg,omitempty"`
 }
@@ -323,10 +323,13 @@ func (item *SuiteParamsJSON) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
 	}
-	item.SuiteID = wire.SuiteID
-	item.PubkeyLen = wire.PubkeyLen
-	item.SigLen = wire.SigLen
-	item.VerifyCost = wire.VerifyCost
+	if wire.SuiteID == nil || wire.PubkeyLen == nil || wire.SigLen == nil || wire.VerifyCost == nil {
+		return fmt.Errorf("bad suite_registry")
+	}
+	item.SuiteID = *wire.SuiteID
+	item.PubkeyLen = *wire.PubkeyLen
+	item.SigLen = *wire.SigLen
+	item.VerifyCost = *wire.VerifyCost
 	item.AlgName = ""
 	if wire.AlgName != nil {
 		item.AlgName = *wire.AlgName
@@ -337,12 +340,16 @@ func (item *SuiteParamsJSON) UnmarshalJSON(data []byte) error {
 }
 
 func (item SuiteParamsJSON) MarshalJSON() ([]byte, error) {
+	suiteID := item.SuiteID
+	pubkeyLen := item.PubkeyLen
+	sigLen := item.SigLen
+	verifyCost := item.VerifyCost
 	algName := item.AlgName
 	return json.Marshal(suiteParamsJSONWire{
-		SuiteID:    item.SuiteID,
-		PubkeyLen:  item.PubkeyLen,
-		SigLen:     item.SigLen,
-		VerifyCost: item.VerifyCost,
+		SuiteID:    &suiteID,
+		PubkeyLen:  &pubkeyLen,
+		SigLen:     &sigLen,
+		VerifyCost: &verifyCost,
 		AlgName:    &algName,
 	})
 }
@@ -382,6 +389,9 @@ func validateSuiteRegistryItem(item SuiteParamsJSON) (consensus.SuiteParams, err
 	if err != nil {
 		return consensus.SuiteParams{}, err
 	}
+	// Required JSON field presence is enforced in UnmarshalJSON. Reaching this
+	// point means explicit zero values came from the caller intentionally, which
+	// the CLI harness still allows for synthetic conformance vectors.
 	return consensus.SuiteParams{
 		SuiteID:    item.SuiteID,
 		PubkeyLen:  pubkeyLen,

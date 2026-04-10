@@ -303,6 +303,50 @@ func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsMissingSuiteRegistryAl
 	mustRunErr(t, req, "bad suite_registry")
 }
 
+func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsMissingSuiteRegistryPubkeyLen(t *testing.T) {
+	var req Request
+	payload := fmt.Sprintf(`{
+		"op":"rotation_descriptor_check",
+		"network":"devnet",
+		"suite_registry":[
+			{"suite_id":1,"sig_len":%d,"verify_cost":%d,"alg_name":"ML-DSA-87"},
+			{"suite_id":2,"pubkey_len":%d,"sig_len":%d,"verify_cost":%d,"alg_name":"ML-DSA-87"}
+		],
+		"rotation_descriptor":{"name":"r1","old_suite_id":1,"new_suite_id":2,"create_height":10,"spend_height":20,"sunset_height":100}
+	}`,
+		consensus.ML_DSA_87_SIG_BYTES,
+		consensus.VERIFY_COST_ML_DSA_87,
+		consensus.ML_DSA_87_PUBKEY_BYTES,
+		consensus.ML_DSA_87_SIG_BYTES,
+		consensus.VERIFY_COST_ML_DSA_87,
+	)
+	if err := json.Unmarshal([]byte(payload), &req); err == nil {
+		t.Fatal("expected missing pubkey_len to fail closed during unmarshal")
+	}
+}
+
+func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsMissingSuiteRegistrySigLen(t *testing.T) {
+	var req Request
+	payload := fmt.Sprintf(`{
+		"op":"rotation_descriptor_check",
+		"network":"devnet",
+		"suite_registry":[
+			{"suite_id":1,"pubkey_len":%d,"verify_cost":%d,"alg_name":"ML-DSA-87"},
+			{"suite_id":2,"pubkey_len":%d,"sig_len":%d,"verify_cost":%d,"alg_name":"ML-DSA-87"}
+		],
+		"rotation_descriptor":{"name":"r1","old_suite_id":1,"new_suite_id":2,"create_height":10,"spend_height":20,"sunset_height":100}
+	}`,
+		consensus.ML_DSA_87_PUBKEY_BYTES,
+		consensus.VERIFY_COST_ML_DSA_87,
+		consensus.ML_DSA_87_PUBKEY_BYTES,
+		consensus.ML_DSA_87_SIG_BYTES,
+		consensus.VERIFY_COST_ML_DSA_87,
+	)
+	if err := json.Unmarshal([]byte(payload), &req); err == nil {
+		t.Fatal("expected missing sig_len to fail closed during unmarshal")
+	}
+}
+
 func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsDuplicateSuiteID(t *testing.T) {
 	mustRunErr(t, Request{
 		Op:      "rotation_descriptor_check",

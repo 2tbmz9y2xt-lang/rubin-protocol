@@ -241,6 +241,8 @@ fn validate_suite_registry_item(item: &GenesisSuiteParams) -> Result<SuiteParams
         verify_cost: item.verify_cost,
         alg_name: normalize_suite_alg_name(&item.alg_name)?,
     };
+    // Live node genesis/config is canonical-only. Synthetic suite_registry
+    // parameter shapes are CLI-harness fixtures and must not enter node boot.
     let want = default_suite_registry_params();
     if params.pubkey_len != want.pubkey_len
         || params.sig_len != want.sig_len
@@ -1132,6 +1134,35 @@ mod tests {
                     321,
                     "ML-DSA-87",
                 )
+            ),
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
+        assert!(err.contains("bad suite_registry"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_synthetic_harness_suite_params() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-suite-registry-synthetic-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            format!(
+                "{{\
+                  \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+                  \"suite_registry\":[{}]\
+                }}",
+                suite_registry_entry_json(66, 64, 0, 9, "ML-DSA-87")
             ),
         )
         .expect("write");

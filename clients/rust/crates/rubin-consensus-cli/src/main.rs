@@ -618,13 +618,13 @@ struct SuiteParamsJson {
 #[derive(Deserialize, Default)]
 struct SuiteParamsJsonWire {
     #[serde(default)]
-    suite_id: u8,
+    suite_id: Option<u8>,
     #[serde(default)]
-    pubkey_len: u64,
+    pubkey_len: Option<u64>,
     #[serde(default)]
-    sig_len: u64,
+    sig_len: Option<u64>,
     #[serde(default)]
-    verify_cost: u64,
+    verify_cost: Option<u64>,
     #[serde(default)]
     alg_name: Option<String>,
     #[serde(default)]
@@ -637,16 +637,28 @@ impl<'de> Deserialize<'de> for SuiteParamsJson {
         D: Deserializer<'de>,
     {
         let wire = SuiteParamsJsonWire::deserialize(deserializer)?;
+        let suite_id = wire
+            .suite_id
+            .ok_or_else(|| serde::de::Error::custom("bad suite_registry"))?;
+        let pubkey_len = wire
+            .pubkey_len
+            .ok_or_else(|| serde::de::Error::custom("bad suite_registry"))?;
+        let sig_len = wire
+            .sig_len
+            .ok_or_else(|| serde::de::Error::custom("bad suite_registry"))?;
+        let verify_cost = wire
+            .verify_cost
+            .ok_or_else(|| serde::de::Error::custom("bad suite_registry"))?;
         let alg_name = if let Some(value) = wire.alg_name {
             value
         } else {
             wire.openssl_alg.unwrap_or_default()
         };
         Ok(Self {
-            suite_id: wire.suite_id,
-            pubkey_len: wire.pubkey_len,
-            sig_len: wire.sig_len,
-            verify_cost: wire.verify_cost,
+            suite_id,
+            pubkey_len,
+            sig_len,
+            verify_cost,
             alg_name,
         })
     }
@@ -1021,8 +1033,9 @@ fn build_suite_registry_from_json(
         let pubkey_len = validate_suite_registry_param_len(s.pubkey_len)?;
         let sig_len = validate_suite_registry_param_len(s.sig_len)?;
         let alg = normalize_suite_alg_name(&s.alg_name)?;
-        // CLI suite_registry is a harness overlay: keep synthetic param shapes
-        // for conformance vectors, but normalize/validate the renamed alg_name surface.
+        // Missing required JSON fields are rejected during Deserialize above.
+        // Reaching this path means zero-valued lengths were explicit, which the
+        // CLI harness still permits for synthetic conformance vectors.
         if suites
             .insert(
                 s.suite_id,
@@ -5320,6 +5333,56 @@ mod tests {
         let resp = op_rotation_descriptor_check(&req);
         assert!(!resp.ok);
         assert_eq!(resp.err.as_deref(), Some("bad suite_registry"));
+    }
+
+    #[test]
+    fn rotation_descriptor_check_rejects_missing_suite_registry_pubkey_len() {
+        let payload = format!(
+            r#"{{
+                "op":"rotation_descriptor_check",
+                "network":"devnet",
+                "suite_registry":[
+                    {{"suite_id":1,"sig_len":{},"verify_cost":{},"alg_name":"ML-DSA-87"}},
+                    {{"suite_id":2,"pubkey_len":{},"sig_len":{},"verify_cost":{},"alg_name":"ML-DSA-87"}}
+                ],
+                "rotation_descriptor":{{"name":"r1","old_suite_id":1,"new_suite_id":2,"create_height":10,"spend_height":20,"sunset_height":100}}
+            }}"#,
+            rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+            rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+        );
+        let err = match serde_json::from_str::<Request>(&payload) {
+            Ok(_) => panic!("expected missing pubkey_len to fail closed during deserialize"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("bad suite_registry"));
+    }
+
+    #[test]
+    fn rotation_descriptor_check_rejects_missing_suite_registry_sig_len() {
+        let payload = format!(
+            r#"{{
+                "op":"rotation_descriptor_check",
+                "network":"devnet",
+                "suite_registry":[
+                    {{"suite_id":1,"pubkey_len":{},"verify_cost":{},"alg_name":"ML-DSA-87"}},
+                    {{"suite_id":2,"pubkey_len":{},"sig_len":{},"verify_cost":{},"alg_name":"ML-DSA-87"}}
+                ],
+                "rotation_descriptor":{{"name":"r1","old_suite_id":1,"new_suite_id":2,"create_height":10,"spend_height":20,"sunset_height":100}}
+            }}"#,
+            rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+            rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+        );
+        let err = match serde_json::from_str::<Request>(&payload) {
+            Ok(_) => panic!("expected missing sig_len to fail closed during deserialize"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("bad suite_registry"));
     }
 
     #[test]

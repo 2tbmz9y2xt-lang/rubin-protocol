@@ -167,6 +167,9 @@ func validateSuiteRegistryItem(item SuiteParamsJSON) (consensus.SuiteParams, err
 		VerifyCost: item.VerifyCost,
 		AlgName:    alg,
 	}
+	// Live node config is canonical-only. Synthetic suite_registry shapes are
+	// reserved for the CLI harness/conformance surface and must never be
+	// accepted here on mainnet/testnet or devnet bootstrap.
 	want := defaultSuiteRegistryParams()
 	if params.PubkeyLen != want.PubkeyLen ||
 		params.SigLen != want.SigLen ||

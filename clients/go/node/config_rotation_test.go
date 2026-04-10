@@ -161,6 +161,24 @@ func TestBuildRotationProvider_RejectsSuiteRegistryNoncanonicalVerifyCost(t *tes
 	}
 }
 
+func TestBuildRotationProvider_RejectsSuiteRegistrySyntheticHarnessParams(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SuiteRegistry = []SuiteParamsJSON{{
+		SuiteID:    0x42,
+		PubkeyLen:  64,
+		SigLen:     0,
+		VerifyCost: 9,
+		AlgName:    stringPtr("ML-DSA-87"),
+	}}
+	_, _, err := cfg.BuildRotationProvider()
+	if err == nil {
+		t.Fatal("expected live node suite_registry to reject synthetic harness params")
+	}
+	if got, want := err.Error(), "suite_registry: bad suite_registry"; got != want {
+		t.Fatalf("error=%q, want %q", got, want)
+	}
+}
+
 func TestBuildRotationProvider_DescriptorRejectsUnregisteredNewSuiteWithoutExplicitRegistry(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.RotationDescriptor = &RotationConfigJSON{
