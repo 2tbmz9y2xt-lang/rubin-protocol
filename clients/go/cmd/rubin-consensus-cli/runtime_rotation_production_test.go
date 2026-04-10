@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -14,14 +15,14 @@ func cliTestRotationSuites() []SuiteParamsJSON {
 			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
 			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
-			OpenSSLAlg: "ML-DSA-87",
+			AlgName:    "ML-DSA-87",
 		},
 		{
 			SuiteID:    2,
 			PubkeyLen:  1024,
 			SigLen:     512,
 			VerifyCost: 9,
-			OpenSSLAlg: "ML-DSA-87",
+			AlgName:    "ML-DSA-87",
 		},
 	}
 }
@@ -96,8 +97,8 @@ func TestRubinConsensusCLI_RotationProduction_MainnetSingleDescriptorAndDevnetBa
 func TestRubinConsensusCLI_RotationProduction_MainnetRejectsMultiDescriptorBatch(t *testing.T) {
 	reg := append(
 		cliTestRotationSuites(),
-		SuiteParamsJSON{SuiteID: 3, PubkeyLen: 1024, SigLen: 512, VerifyCost: 9, OpenSSLAlg: "ML-DSA-87"},
-		SuiteParamsJSON{SuiteID: 4, PubkeyLen: 1024, SigLen: 512, VerifyCost: 9, OpenSSLAlg: "ML-DSA-87"},
+		SuiteParamsJSON{SuiteID: 3, PubkeyLen: 1024, SigLen: 512, VerifyCost: 9, AlgName: "ML-DSA-87"},
+		SuiteParamsJSON{SuiteID: 4, PubkeyLen: 1024, SigLen: 512, VerifyCost: 9, AlgName: "ML-DSA-87"},
 	)
 	mustRunErr(t, Request{
 		Op:            "rotation_descriptor_check",
@@ -132,7 +133,7 @@ func TestRubinConsensusCLI_RotationProduction_MainnetRejectsMultiDescriptorBatch
 func TestRubinConsensusCLI_RotationDescriptorCheck_PreservesStableErrAndDiagnostics(t *testing.T) {
 	reg := append(
 		cliTestRotationSuites(),
-		SuiteParamsJSON{SuiteID: 3, PubkeyLen: 1024, SigLen: 512, VerifyCost: 9, OpenSSLAlg: "ML-DSA-87"},
+		SuiteParamsJSON{SuiteID: 3, PubkeyLen: 1024, SigLen: 512, VerifyCost: 9, AlgName: "ML-DSA-87"},
 	)
 	resp := mustRunErr(t, Request{
 		Op:            "rotation_descriptor_check",
@@ -197,4 +198,23 @@ func TestSanitizeRotationValidationErr_UsesSharedStems(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRubinConsensusCLI_RotationDescriptorCheck_AcceptsLegacyOpenSSLAlgAlias(t *testing.T) {
+	var req Request
+	if err := json.Unmarshal([]byte(`{
+		"op":"rotation_descriptor_check",
+		"network":"devnet",
+		"suite_registry":[
+			{"suite_id":1,"pubkey_len":2592,"sig_len":4627,"verify_cost":8,"openssl_alg":"ML-DSA-87"},
+			{"suite_id":2,"pubkey_len":1024,"sig_len":512,"verify_cost":9,"openssl_alg":"ML-DSA-87"}
+		],
+		"rotation_descriptor":{"name":"r1","old_suite_id":1,"new_suite_id":2,"create_height":10,"spend_height":20,"sunset_height":100}
+	}`), &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if req.SuiteRegistry[0].AlgName != "ML-DSA-87" || req.SuiteRegistry[1].AlgName != "ML-DSA-87" {
+		t.Fatalf("legacy alias failed to populate alg_name: %+v", req.SuiteRegistry)
+	}
+	mustRunOk(t, req)
 }

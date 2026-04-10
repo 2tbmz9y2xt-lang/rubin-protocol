@@ -16,8 +16,8 @@ pub struct SuiteParams {
     pub pubkey_len: u64,
     pub sig_len: u64,
     pub verify_cost: u64,
-    /// OpenSSL algorithm name for verify_sig dispatch (e.g. "ML-DSA-87").
-    pub openssl_alg: &'static str,
+    /// Semantic algorithm identity used to resolve the live verifier binding.
+    pub alg_name: &'static str,
 }
 
 /// Maps suite IDs to their consensus parameters. Single source of truth for
@@ -38,7 +38,7 @@ impl SuiteRegistry {
                 pubkey_len: ML_DSA_87_PUBKEY_BYTES,
                 sig_len: ML_DSA_87_SIG_BYTES,
                 verify_cost: VERIFY_COST_ML_DSA_87,
-                openssl_alg: "ML-DSA-87",
+                alg_name: "ML-DSA-87",
             },
         );
         Self { suites }
@@ -384,7 +384,7 @@ mod tests {
                 pubkey_len: 2592,
                 sig_len: 4627,
                 verify_cost: 8,
-                openssl_alg: "ML-DSA-87",
+                alg_name: "ML-DSA-87",
             },
         );
         suites.insert(
@@ -394,7 +394,7 @@ mod tests {
                 pubkey_len: 1024,
                 sig_len: 512,
                 verify_cost: 4,
-                openssl_alg: "ML-DSA-87",
+                alg_name: "ML-DSA-87",
             },
         );
         SuiteRegistry { suites }
@@ -420,7 +420,7 @@ mod tests {
                 pubkey_len: 100,
                 sig_len: 200,
                 verify_cost: 1,
-                openssl_alg: "ML-DSA-87",
+                alg_name: "ML-DSA-87",
             },
         );
         let reg = SuiteRegistry::with_suites(suites);
@@ -485,7 +485,7 @@ mod tests {
                 pubkey_len: 2592,
                 sig_len: 4627,
                 verify_cost: 8,
-                openssl_alg: "ML-DSA-87",
+                alg_name: "ML-DSA-87",
             },
         );
         suites.insert(
@@ -495,7 +495,7 @@ mod tests {
                 pubkey_len: 64,
                 sig_len: 100,
                 verify_cost: 1,
-                openssl_alg: "ML-DSA-87",
+                alg_name: "ML-DSA-87",
             },
         );
         let reg = SuiteRegistry::with_suites(suites);
@@ -515,7 +515,7 @@ mod tests {
                 pubkey_len: u64::MAX,
                 sig_len: 1,
                 verify_cost: 1,
-                openssl_alg: "ML-DSA-87",
+                alg_name: "ML-DSA-87",
             },
         );
         let reg = SuiteRegistry::with_suites(suites);
@@ -662,7 +662,7 @@ mod tests {
                 pubkey_len: 2592,
                 sig_len: 4627,
                 verify_cost: 8,
-                openssl_alg: "ML-DSA-87",
+                alg_name: "ML-DSA-87",
             },
         );
         suites.insert(
@@ -672,7 +672,7 @@ mod tests {
                 pubkey_len: 1024,
                 sig_len: 512,
                 verify_cost: 4,
-                openssl_alg: "ML-DSA-87",
+                alg_name: "ML-DSA-87",
             },
         );
         suites.insert(
@@ -682,7 +682,7 @@ mod tests {
                 pubkey_len: 1024,
                 sig_len: 512,
                 verify_cost: 4,
-                openssl_alg: "ML-DSA-87",
+                alg_name: "ML-DSA-87",
             },
         );
         SuiteRegistry::with_suites(suites)
@@ -756,7 +756,7 @@ mod tests {
                 pubkey_len: 2592,
                 sig_len: 4627,
                 verify_cost: 8,
-                openssl_alg: "ML-DSA-87",
+                alg_name: "ML-DSA-87",
             },
         );
         for id in [0x02u8, 0x03, 0x04] {
@@ -767,7 +767,7 @@ mod tests {
                     pubkey_len: 1024,
                     sig_len: 512,
                     verify_cost: 4,
-                    openssl_alg: "ML-DSA-87",
+                    alg_name: "ML-DSA-87",
                 },
             );
         }
@@ -978,7 +978,7 @@ mod tests {
         let p = r.lookup(crate::constants::SUITE_ID_ML_DSA_87).unwrap();
         assert_eq!(p.pubkey_len, crate::constants::ML_DSA_87_PUBKEY_BYTES);
         assert_eq!(p.sig_len, crate::constants::ML_DSA_87_SIG_BYTES);
-        assert_eq!(p.openssl_alg, "ML-DSA-87");
+        assert_eq!(p.alg_name, "ML-DSA-87");
         assert_eq!(p.verify_cost, crate::constants::VERIFY_COST_ML_DSA_87);
     }
 

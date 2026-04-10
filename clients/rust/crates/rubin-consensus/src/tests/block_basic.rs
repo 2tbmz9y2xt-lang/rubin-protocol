@@ -900,7 +900,7 @@ fn tx_weight_at_height_native_not_in_spend_set_uses_unknown_floor() {
             pubkey_len: ML_DSA_87_PUBKEY_BYTES,
             sig_len: ML_DSA_87_SIG_BYTES,
             verify_cost: VERIFY_COST_ML_DSA_87,
-            openssl_alg: "ML-DSA-87",
+            alg_name: "ML-DSA-87",
         },
     );
     suites.insert(
@@ -910,7 +910,7 @@ fn tx_weight_at_height_native_not_in_spend_set_uses_unknown_floor() {
             pubkey_len: 1312,
             sig_len: 2420,
             verify_cost: 4,
-            openssl_alg: "ML-DSA-65",
+            alg_name: "ML-DSA-65",
         },
     );
     let reg = SuiteRegistry::with_suites(suites);

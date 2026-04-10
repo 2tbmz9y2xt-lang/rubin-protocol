@@ -26,8 +26,8 @@ func TestDefaultSuiteRegistry_LookupMLDSA87(t *testing.T) {
 	if p.VerifyCost != VERIFY_COST_ML_DSA_87 {
 		t.Errorf("VerifyCost = %d, want %d", p.VerifyCost, VERIFY_COST_ML_DSA_87)
 	}
-	if p.OpenSSLAlg != "ML-DSA-87" {
-		t.Errorf("OpenSSLAlg = %q, want %q", p.OpenSSLAlg, "ML-DSA-87")
+	if p.AlgName != "ML-DSA-87" {
+		t.Errorf("AlgName = %q, want %q", p.AlgName, "ML-DSA-87")
 	}
 }
 
@@ -73,8 +73,8 @@ func TestSuiteRegistry_NilSafe(t *testing.T) {
 
 func TestNewSuiteRegistryFromParams_BuildsIndependentRegistry(t *testing.T) {
 	params := []SuiteParams{
-		{SuiteID: 0x01, PubkeyLen: 10, SigLen: 20, VerifyCost: 8, OpenSSLAlg: "ML-DSA-87"},
-		{SuiteID: 0x02, PubkeyLen: 11, SigLen: 21, VerifyCost: 9, OpenSSLAlg: "ML-DSA-87"},
+		{SuiteID: 0x01, PubkeyLen: 10, SigLen: 20, VerifyCost: 8, AlgName: "ML-DSA-87"},
+		{SuiteID: 0x02, PubkeyLen: 11, SigLen: 21, VerifyCost: 9, AlgName: "ML-DSA-87"},
 	}
 	reg := NewSuiteRegistryFromParams(params)
 	if reg == nil {
@@ -293,14 +293,14 @@ func TestSuiteRegistry_MultiSuite(t *testing.T) {
 				PubkeyLen:  ML_DSA_87_PUBKEY_BYTES,
 				SigLen:     ML_DSA_87_SIG_BYTES,
 				VerifyCost: VERIFY_COST_ML_DSA_87,
-				OpenSSLAlg: "ML-DSA-87",
+				AlgName:    "ML-DSA-87",
 			},
 			0x02: {
 				SuiteID:    0x02,
 				PubkeyLen:  1312,
 				SigLen:     2420,
 				VerifyCost: 4,
-				OpenSSLAlg: "ML-DSA-65",
+				AlgName:    "ML-DSA-65",
 			},
 		},
 	}

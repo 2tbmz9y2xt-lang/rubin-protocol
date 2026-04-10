@@ -41,7 +41,7 @@ func TestBuildRotationProvider_ValidDescriptorOnNonProductionNetwork(t *testing.
 			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
 			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
-			OpenSSLAlg: stringPtr("ML-DSA-87"),
+			AlgName:    stringPtr("ML-DSA-87"),
 		},
 	}
 	cfg.RotationDescriptor = &RotationConfigJSON{
@@ -81,7 +81,7 @@ func TestBuildRotationProvider_RejectsProductionLocalRotationDescriptor(t *testi
 					PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
 					SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 					VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
-					OpenSSLAlg: stringPtr("ML-DSA-87"),
+					AlgName:    stringPtr("ML-DSA-87"),
 				},
 			}
 			cfg.RotationDescriptor = &RotationConfigJSON{
@@ -103,25 +103,25 @@ func TestBuildRotationProvider_RejectsProductionLocalRotationDescriptor(t *testi
 	}
 }
 
-func TestBuildRotationProvider_RejectsSuiteRegistryEmptyOpenSSLAlg(t *testing.T) {
+func TestBuildRotationProvider_RejectsSuiteRegistryEmptyAlgName(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.SuiteRegistry = []SuiteParamsJSON{{
 		SuiteID:    0x42,
 		PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
 		SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 		VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
-		OpenSSLAlg: stringPtr(""),
+		AlgName:    stringPtr(""),
 	}}
 	_, _, err := cfg.BuildRotationProvider()
 	if err == nil {
-		t.Fatal("expected suite_registry rejection for empty openssl_alg")
+		t.Fatal("expected suite_registry rejection for empty alg_name")
 	}
 	if got, want := err.Error(), "suite_registry: bad suite_registry"; got != want {
 		t.Fatalf("error=%q, want %q", got, want)
 	}
 }
 
-func TestBuildRotationProvider_RejectsSuiteRegistryAliasOpenSSLAlg(t *testing.T) {
+func TestBuildRotationProvider_RejectsSuiteRegistryAliasAlgName(t *testing.T) {
 	for _, alg := range []string{"ml-dsa-87", "MLDSA87"} {
 		t.Run(alg, func(t *testing.T) {
 			cfg := DefaultConfig()
@@ -130,11 +130,11 @@ func TestBuildRotationProvider_RejectsSuiteRegistryAliasOpenSSLAlg(t *testing.T)
 				PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
 				SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 				VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
-				OpenSSLAlg: stringPtr(alg),
+				AlgName:    stringPtr(alg),
 			}}
 			_, _, err := cfg.BuildRotationProvider()
 			if err == nil {
-				t.Fatalf("expected suite_registry rejection for openssl_alg=%q", alg)
+				t.Fatalf("expected suite_registry rejection for alg_name=%q", alg)
 			}
 			if got, want := err.Error(), "suite_registry: bad suite_registry"; got != want {
 				t.Fatalf("error=%q, want %q", got, want)
@@ -150,7 +150,7 @@ func TestBuildRotationProvider_RejectsSuiteRegistryNoncanonicalVerifyCost(t *tes
 		PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
 		SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 		VerifyCost: consensus.VERIFY_COST_ML_DSA_87 + 1,
-		OpenSSLAlg: stringPtr("ML-DSA-87"),
+		AlgName:    stringPtr("ML-DSA-87"),
 	}}
 	_, _, err := cfg.BuildRotationProvider()
 	if err == nil {
@@ -220,7 +220,7 @@ func TestBuildRotationProvider_ExplicitSuiteRegistryWithoutDescriptor(t *testing
 			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
 			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
-			OpenSSLAlg: stringPtr("ML-DSA-87"),
+			AlgName:    stringPtr("ML-DSA-87"),
 		},
 	}
 	rot, reg, err := cfg.BuildRotationProvider()
@@ -259,7 +259,7 @@ func TestBuildRotationProvider_ProductionExplicitSuiteRegistryWithoutDescriptor(
 					PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
 					SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 					VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
-					OpenSSLAlg: stringPtr("ML-DSA-87"),
+					AlgName:    stringPtr("ML-DSA-87"),
 				},
 			}
 			rot, reg, err := cfg.BuildRotationProvider()
@@ -293,7 +293,7 @@ func TestBuildRotationProvider_RejectsUnknownNetworkWithoutSeparateValidateConfi
 			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
 			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
-			OpenSSLAlg: stringPtr("ML-DSA-87"),
+			AlgName:    stringPtr("ML-DSA-87"),
 		},
 	}
 
@@ -323,7 +323,7 @@ func TestBuildRotationProvider_RejectsWhitespaceOnlyNetworkWithoutSeparateValida
 			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
 			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
-			OpenSSLAlg: stringPtr("ML-DSA-87"),
+			AlgName:    stringPtr("ML-DSA-87"),
 		},
 	}
 
@@ -347,7 +347,7 @@ func TestValidateConfig_RejectsProductionLocalRotationDescriptor(t *testing.T) {
 					PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
 					SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 					VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
-					OpenSSLAlg: stringPtr("ML-DSA-87"),
+					AlgName:    stringPtr("ML-DSA-87"),
 				},
 			}
 			cfg.RotationDescriptor = &RotationConfigJSON{
@@ -376,56 +376,56 @@ func TestValidateConfig_RejectsBadSuiteRegistry(t *testing.T) {
 			PubkeyLen:  10,
 			SigLen:     20,
 			VerifyCost: 30,
-			OpenSSLAlg: stringPtr("NO_SUCH_ALG"),
+			AlgName:    stringPtr("NO_SUCH_ALG"),
 		},
 		{
 			SuiteID:    0x42,
 			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
 			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
-			OpenSSLAlg: stringPtr(""),
+			AlgName:    stringPtr(""),
 		},
 		{
 			SuiteID:    0x42,
 			PubkeyLen:  64,
 			SigLen:     96,
 			VerifyCost: 30,
-			OpenSSLAlg: stringPtr("ML-DSA-87"),
+			AlgName:    stringPtr("ML-DSA-87"),
 		},
 		{
 			SuiteID:    consensus.SUITE_ID_SENTINEL,
 			PubkeyLen:  64,
 			SigLen:     96,
 			VerifyCost: 30,
-			OpenSSLAlg: stringPtr("ML-DSA-87"),
+			AlgName:    stringPtr("ML-DSA-87"),
 		},
 		{
 			SuiteID:    0x42,
 			PubkeyLen:  64,
 			SigLen:     96,
 			VerifyCost: 0,
-			OpenSSLAlg: stringPtr("ML-DSA-87"),
+			AlgName:    stringPtr("ML-DSA-87"),
 		},
 		{
 			SuiteID:    consensus.SUITE_ID_ML_DSA_87,
 			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES - 1,
 			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
-			OpenSSLAlg: stringPtr("ML-DSA-87"),
+			AlgName:    stringPtr("ML-DSA-87"),
 		},
 		{
 			SuiteID:    0x42,
 			PubkeyLen:  maxSuiteRegistryParamLen + 1,
 			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 			VerifyCost: 30,
-			OpenSSLAlg: stringPtr("ML-DSA-87"),
+			AlgName:    stringPtr("ML-DSA-87"),
 		},
 		{
 			SuiteID:    0x42,
 			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
 			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 			VerifyCost: 30,
-			OpenSSLAlg: stringPtr("ML-DSA-87"),
+			AlgName:    stringPtr("ML-DSA-87"),
 		},
 	}
 	for _, tc := range cases {
@@ -467,7 +467,7 @@ func TestValidateConfig_RejectsTooManySuiteRegistryEntries(t *testing.T) {
 			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
 			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
-			OpenSSLAlg: stringPtr("ML-DSA-87"),
+			AlgName:    stringPtr("ML-DSA-87"),
 		})
 	}
 	if err := ValidateConfig(cfg); err == nil {
@@ -484,14 +484,14 @@ func TestValidateConfig_RejectsNegativeSuiteRegistryLengthsJSON(t *testing.T) {
 		"log_level":"info",
 		"max_peers":64,
 		"mine_address":"",
-		"suite_registry":[{"suite_id":66,"pubkey_len":-1,"sig_len":4627,"verify_cost":19,"openssl_alg":"ML-DSA-87"}]
+		"suite_registry":[{"suite_id":66,"pubkey_len":-1,"sig_len":4627,"verify_cost":19,"alg_name":"ML-DSA-87"}]
 	}`), &cfg)
 	if err == nil {
 		t.Fatal("expected unmarshal error for negative suite_registry.pubkey_len")
 	}
 }
 
-func TestValidateConfig_RejectsMissingSuiteRegistryOpenSSLAlg(t *testing.T) {
+func TestValidateConfig_RejectsMissingSuiteRegistryAlgName(t *testing.T) {
 	var cfg Config
 	if err := json.Unmarshal([]byte(`{
 		"network":"devnet",
@@ -505,7 +505,7 @@ func TestValidateConfig_RejectsMissingSuiteRegistryOpenSSLAlg(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if err := ValidateConfig(cfg); err == nil {
-		t.Fatal("expected validation error for missing suite_registry.openssl_alg")
+		t.Fatal("expected validation error for missing suite_registry.alg_name")
 	}
 }
 
@@ -530,13 +530,31 @@ func TestRotationConfigJSON_Roundtrip(t *testing.T) {
 				PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
 				SigLen:     consensus.ML_DSA_87_SIG_BYTES,
 				VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
-				OpenSSLAlg: stringPtr("ML-DSA-87"),
+				AlgName:    stringPtr("ML-DSA-87"),
 			},
 		},
 	}
 	data, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal raw: %v", err)
+	}
+	suiteRegistry, ok := raw["suite_registry"].([]any)
+	if !ok || len(suiteRegistry) != 1 {
+		t.Fatalf("suite_registry raw=%#v, want singleton array", raw["suite_registry"])
+	}
+	entry, ok := suiteRegistry[0].(map[string]any)
+	if !ok {
+		t.Fatalf("suite_registry entry raw=%#v, want object", suiteRegistry[0])
+	}
+	if got := entry["alg_name"]; got != "ML-DSA-87" {
+		t.Fatalf("alg_name raw=%#v, want %q", got, "ML-DSA-87")
+	}
+	if _, ok := entry["openssl_alg"]; ok {
+		t.Fatal("marshal should not emit legacy openssl_alg key")
 	}
 	var restored Config
 	if err := json.Unmarshal(data, &restored); err != nil {
@@ -557,8 +575,29 @@ func TestRotationConfigJSON_Roundtrip(t *testing.T) {
 	if restored.SuiteRegistry[0].SuiteID != 0x02 {
 		t.Fatalf("suite_id=0x%02x, want 0x02", restored.SuiteRegistry[0].SuiteID)
 	}
-	if restored.SuiteRegistry[0].OpenSSLAlg == nil || *restored.SuiteRegistry[0].OpenSSLAlg != "ML-DSA-87" {
-		t.Fatal("openssl_alg lost in roundtrip")
+	if restored.SuiteRegistry[0].AlgName == nil || *restored.SuiteRegistry[0].AlgName != "ML-DSA-87" {
+		t.Fatal("alg_name lost in roundtrip")
+	}
+}
+
+func TestValidateConfig_AcceptsLegacySuiteRegistryOpenSSLAlgAlias(t *testing.T) {
+	var cfg Config
+	if err := json.Unmarshal([]byte(`{
+		"network":"devnet",
+		"data_dir":"/tmp/test",
+		"bind_addr":"0.0.0.0:19111",
+		"log_level":"info",
+		"max_peers":64,
+		"mine_address":"",
+		"suite_registry":[{"suite_id":66,"pubkey_len":2592,"sig_len":4627,"verify_cost":8,"openssl_alg":"ML-DSA-87"}]
+	}`), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("expected legacy openssl_alg alias to remain accepted, got %v", err)
+	}
+	if cfg.SuiteRegistry[0].AlgName == nil || *cfg.SuiteRegistry[0].AlgName != "ML-DSA-87" {
+		t.Fatal("legacy openssl_alg alias did not normalize into alg_name")
 	}
 }
 

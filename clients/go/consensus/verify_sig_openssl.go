@@ -369,9 +369,9 @@ type suiteVerifierBinding struct {
 
 // v1 keeps the legacy ML-DSA-87 verifier on the OpenSSL archival/runtime path.
 // Runtime dispatch must resolve an explicit binding instead of trusting a raw
-// registry OpenSSLAlg string as an implicit backend switch.
-func resolveSuiteVerifierBinding(opensslAlg string, pubkeyLen int, sigLen int) (suiteVerifierBinding, error) {
-	if opensslAlg == "ML-DSA-87" && pubkeyLen == ML_DSA_87_PUBKEY_BYTES && sigLen == ML_DSA_87_SIG_BYTES {
+// registry AlgName string as an implicit backend switch.
+func resolveSuiteVerifierBinding(algName string, pubkeyLen int, sigLen int) (suiteVerifierBinding, error) {
+	if algName == "ML-DSA-87" && pubkeyLen == ML_DSA_87_PUBKEY_BYTES && sigLen == ML_DSA_87_SIG_BYTES {
 		return suiteVerifierBinding{
 			kind:       suiteVerifierBindingOpenSSLDigest32V1,
 			opensslAlg: "ML-DSA-87",
@@ -403,7 +403,7 @@ func verifySigWithBinding(binding suiteVerifierBinding, pubkey []byte, signature
 // Falls back to legacy verifySig when registry is nil.
 //
 // The registry no longer gets to select the verifier backend implicitly through
-// OpenSSLAlg alone. Runtime verification resolves an explicit v1 binding from
+// AlgName alone. Runtime verification resolves an explicit v1 binding from
 // the suite parameters so existing suites cannot switch backend silently.
 func verifySigWithRegistry(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte, registry *SuiteRegistry) (bool, error) {
 	if registry == nil {
@@ -417,7 +417,7 @@ func verifySigWithRegistry(suiteID uint8, pubkey []byte, signature []byte, diges
 	if err := ensureOpenSSLConsensusInit(); err != nil {
 		return false, err
 	}
-	binding, err := resolveSuiteVerifierBinding(params.OpenSSLAlg, params.PubkeyLen, params.SigLen)
+	binding, err := resolveSuiteVerifierBinding(params.AlgName, params.PubkeyLen, params.SigLen)
 	if err != nil {
 		return false, err
 	}

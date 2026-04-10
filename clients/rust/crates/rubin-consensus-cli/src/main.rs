@@ -615,8 +615,8 @@ struct SuiteParamsJson {
     sig_len: u64,
     #[serde(default)]
     verify_cost: u64,
-    #[serde(default)]
-    openssl_alg: String,
+    #[serde(default, rename = "alg_name", alias = "openssl_alg")]
+    alg_name: String,
 }
 
 #[derive(Deserialize)]
@@ -952,7 +952,7 @@ fn decode_optional_hex_bytes(name: &str, value: &str) -> Result<Vec<u8>, String>
     hex::decode(trimmed).map_err(|_| format!("bad {name}"))
 }
 
-fn normalize_suite_openssl_alg(value: &str) -> Result<&'static str, String> {
+fn normalize_suite_alg_name(value: &str) -> Result<&'static str, String> {
     match value.trim() {
         "" | "ML-DSA-87" => Ok("ML-DSA-87"),
         _ => Err("bad suite_registry".to_string()),
@@ -968,7 +968,7 @@ fn build_suite_registry_from_json(
 
     let mut suites = std::collections::BTreeMap::new();
     for s in items {
-        let alg = normalize_suite_openssl_alg(&s.openssl_alg)?;
+        let alg = normalize_suite_alg_name(&s.alg_name)?;
         if suites
             .insert(
                 s.suite_id,
@@ -977,7 +977,7 @@ fn build_suite_registry_from_json(
                     pubkey_len: s.pubkey_len,
                     sig_len: s.sig_len,
                     verify_cost: s.verify_cost,
-                    openssl_alg: alg,
+                    alg_name: alg,
                 },
             )
             .is_some()
@@ -4645,21 +4645,21 @@ mod tests {
                 pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
                 sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
                 verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
-                openssl_alg: "ML-DSA-87".to_string(),
+                alg_name: "ML-DSA-87".to_string(),
             },
             SuiteParamsJson {
                 suite_id: 2,
                 pubkey_len: 1024,
                 sig_len: 512,
                 verify_cost: 9,
-                openssl_alg: "ML-DSA-87".to_string(),
+                alg_name: "ML-DSA-87".to_string(),
             },
             SuiteParamsJson {
                 suite_id: 3,
                 pubkey_len: 1024,
                 sig_len: 512,
                 verify_cost: 9,
-                openssl_alg: "ML-DSA-87".to_string(),
+                alg_name: "ML-DSA-87".to_string(),
             },
         ]
     }
@@ -5073,13 +5073,13 @@ mod tests {
     }
 
     #[test]
-    fn suite_registry_rejects_unknown_openssl_alg() {
+    fn suite_registry_rejects_unknown_alg_name() {
         let err = build_suite_registry_from_json(&[SuiteParamsJson {
             suite_id: 3,
             pubkey_len: 2592,
             sig_len: 4627,
             verify_cost: 990000,
-            openssl_alg: "SLH-DSA".to_string(),
+            alg_name: "SLH-DSA".to_string(),
         }])
         .unwrap_err();
         assert_eq!(err, "bad suite_registry");
@@ -5093,18 +5093,38 @@ mod tests {
                 pubkey_len: 2592,
                 sig_len: 4627,
                 verify_cost: 990000,
-                openssl_alg: "ML-DSA-87".to_string(),
+                alg_name: "ML-DSA-87".to_string(),
             },
             SuiteParamsJson {
                 suite_id: 3,
                 pubkey_len: 2592,
                 sig_len: 4627,
                 verify_cost: 990000,
-                openssl_alg: "ML-DSA-87".to_string(),
+                alg_name: "ML-DSA-87".to_string(),
             },
         ])
         .unwrap_err();
         assert_eq!(err, "bad suite_registry");
+    }
+
+    #[test]
+    fn rotation_descriptor_check_accepts_legacy_openssl_alg_alias() {
+        let req: Request = serde_json::from_str(
+            r#"{
+                "op":"rotation_descriptor_check",
+                "network":"devnet",
+                "suite_registry":[
+                    {"suite_id":1,"pubkey_len":2592,"sig_len":4627,"verify_cost":8,"openssl_alg":"ML-DSA-87"},
+                    {"suite_id":2,"pubkey_len":1024,"sig_len":512,"verify_cost":9,"openssl_alg":"ML-DSA-87"}
+                ],
+                "rotation_descriptor":{"name":"r1","old_suite_id":1,"new_suite_id":2,"create_height":10,"spend_height":20,"sunset_height":100}
+            }"#,
+        )
+        .expect("request");
+        assert_eq!(req.suite_registry[0].alg_name, "ML-DSA-87");
+        assert_eq!(req.suite_registry[1].alg_name, "ML-DSA-87");
+        let resp = op_rotation_descriptor_check(&req);
+        assert!(resp.ok, "unexpected err: {:?}", resp.err);
     }
 
     #[test]

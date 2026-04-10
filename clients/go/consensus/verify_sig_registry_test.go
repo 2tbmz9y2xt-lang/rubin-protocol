@@ -80,7 +80,7 @@ func TestVerifySigWithRegistry_CustomSuite_ExactV1BindingAllowed(t *testing.T) {
 				PubkeyLen:  ML_DSA_87_PUBKEY_BYTES,
 				SigLen:     ML_DSA_87_SIG_BYTES,
 				VerifyCost: VERIFY_COST_ML_DSA_87,
-				OpenSSLAlg: "ML-DSA-87",
+				AlgName:    "ML-DSA-87",
 			},
 		},
 	}
@@ -117,7 +117,7 @@ func TestVerifySigWithRegistry_CustomSuite_UnsupportedBindingRejected(t *testing
 				PubkeyLen:  1312,
 				SigLen:     2420,
 				VerifyCost: 4,
-				OpenSSLAlg: "ML-DSA-65",
+				AlgName:    "ML-DSA-65",
 			},
 		},
 	}

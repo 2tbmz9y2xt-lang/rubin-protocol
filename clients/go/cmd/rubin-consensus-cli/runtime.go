@@ -306,7 +306,42 @@ type SuiteParamsJSON struct {
 	PubkeyLen  int    `json:"pubkey_len"`
 	SigLen     int    `json:"sig_len"`
 	VerifyCost uint64 `json:"verify_cost"`
-	OpenSSLAlg string `json:"openssl_alg"`
+	AlgName    string `json:"-"`
+}
+
+type suiteParamsJSONWire struct {
+	SuiteID    uint8  `json:"suite_id"`
+	PubkeyLen  int    `json:"pubkey_len"`
+	SigLen     int    `json:"sig_len"`
+	VerifyCost uint64 `json:"verify_cost"`
+	AlgName    string `json:"alg_name,omitempty"`
+	OpenSSLAlg string `json:"openssl_alg,omitempty"`
+}
+
+func (item *SuiteParamsJSON) UnmarshalJSON(data []byte) error {
+	var wire suiteParamsJSONWire
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	item.SuiteID = wire.SuiteID
+	item.PubkeyLen = wire.PubkeyLen
+	item.SigLen = wire.SigLen
+	item.VerifyCost = wire.VerifyCost
+	item.AlgName = wire.AlgName
+	if strings.TrimSpace(item.AlgName) == "" {
+		item.AlgName = wire.OpenSSLAlg
+	}
+	return nil
+}
+
+func (item SuiteParamsJSON) MarshalJSON() ([]byte, error) {
+	return json.Marshal(suiteParamsJSONWire{
+		SuiteID:    item.SuiteID,
+		PubkeyLen:  item.PubkeyLen,
+		SigLen:     item.SigLen,
+		VerifyCost: item.VerifyCost,
+		AlgName:    item.AlgName,
+	})
 }
 
 const maxCoreExtHexFieldBytes = 4096
@@ -436,7 +471,7 @@ func buildSuiteRegistry(items []SuiteParamsJSON) *consensus.SuiteRegistry {
 			PubkeyLen:  it.PubkeyLen,
 			SigLen:     it.SigLen,
 			VerifyCost: it.VerifyCost,
-			OpenSSLAlg: it.OpenSSLAlg,
+			AlgName:    it.AlgName,
 		})
 	}
 	return consensus.NewSuiteRegistryFromParams(params)
