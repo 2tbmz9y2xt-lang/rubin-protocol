@@ -207,6 +207,40 @@ func TestLoadCompiledProductionRotationScheduleParsesSingleDescriptorWithCanonic
 	}
 }
 
+func TestLoadCompiledProductionRotationScheduleNilRegistryDerivesScheduledSuites(t *testing.T) {
+	schedule, registry, err := loadCompiledProductionRotationScheduleFromJSONWithRegistry([]byte(`{
+		"version": 1,
+		"networks": {
+			"mainnet": {
+				"name": "rotation-v1",
+				"old_suite_id": 1,
+				"new_suite_id": 66,
+				"create_height": 10,
+				"spend_height": 20,
+				"sunset_height": 30
+			},
+			"testnet": null
+		}
+	}`), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	desc := schedule.Networks["mainnet"]
+	if desc == nil {
+		t.Fatal("expected mainnet descriptor")
+	}
+	params, ok := registry.Lookup(0x42)
+	if !ok {
+		t.Fatal("expected derived production registry to include suite 0x42")
+	}
+	if params.PubkeyLen != consensus.ML_DSA_87_PUBKEY_BYTES ||
+		params.SigLen != consensus.ML_DSA_87_SIG_BYTES ||
+		params.VerifyCost != consensus.VERIFY_COST_ML_DSA_87 ||
+		params.AlgName != "ML-DSA-87" {
+		t.Fatalf("suite 0x42 params=%+v, want canonical production schedule params", params)
+	}
+}
+
 func TestLoadCompiledProductionRotationScheduleRejectsTrailingJSONTokens(t *testing.T) {
 	_, _, err := loadCompiledProductionRotationScheduleFromJSONWithRegistry([]byte(`{
 		"version": 1,

@@ -1,5 +1,9 @@
+use rubin_consensus::constants::{
+    ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, VERIFY_COST_ML_DSA_87,
+};
 use rubin_consensus::{
-    validate_rotation_descriptor_for_normalized_network, CryptoRotationDescriptor, SuiteRegistry,
+    validate_rotation_descriptor_for_normalized_network, CryptoRotationDescriptor, SuiteParams,
+    SuiteRegistry,
 };
 use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::Deserialize;
@@ -58,24 +62,59 @@ fn decode_single_json_value<T: DeserializeOwned>(raw: &str) -> Result<T, String>
     }
 }
 
-fn parse_descriptor_slot(
+fn parse_descriptor_slot_wire(
     value: Value,
     network: &str,
-    registry: &SuiteRegistry,
-) -> Result<Option<CryptoRotationDescriptor>, String> {
+) -> Result<Option<ProductionRotationDescriptorWire>, String> {
     if value.is_null() {
         return Ok(None);
     }
     let descriptor_wire: ProductionRotationDescriptorWire = serde_json::from_value(value)
         .map_err(|err| production_rotation_schedule_error(format!("networks.{network}: {err}")))?;
-    let descriptor = CryptoRotationDescriptor {
-        name: descriptor_wire.name,
-        old_suite_id: descriptor_wire.old_suite_id,
-        new_suite_id: descriptor_wire.new_suite_id,
-        create_height: descriptor_wire.create_height,
-        spend_height: descriptor_wire.spend_height,
-        sunset_height: descriptor_wire.sunset_height,
+    Ok(Some(descriptor_wire))
+}
+
+fn canonical_production_schedule_suite_params(suite_id: u8) -> SuiteParams {
+    SuiteParams {
+        suite_id,
+        pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+        sig_len: ML_DSA_87_SIG_BYTES,
+        verify_cost: VERIFY_COST_ML_DSA_87,
+        alg_name: "ML-DSA-87",
+    }
+}
+
+fn derived_production_schedule_registry(
+    mainnet: &Option<ProductionRotationDescriptorWire>,
+    testnet: &Option<ProductionRotationDescriptorWire>,
+) -> SuiteRegistry {
+    let mut suites = BTreeMap::new();
+    suites.insert(
+        SUITE_ID_ML_DSA_87,
+        canonical_production_schedule_suite_params(SUITE_ID_ML_DSA_87),
+    );
+    for descriptor in [mainnet.as_ref(), testnet.as_ref()].into_iter().flatten() {
+        suites.insert(
+            descriptor.old_suite_id,
+            canonical_production_schedule_suite_params(descriptor.old_suite_id),
+        );
+        suites.insert(
+            descriptor.new_suite_id,
+            canonical_production_schedule_suite_params(descriptor.new_suite_id),
+        );
+    }
+    SuiteRegistry::with_suites(suites)
+}
+
+fn validate_descriptor_wire(
+    descriptor_wire: Option<ProductionRotationDescriptorWire>,
+    network: &str,
+    registry: &SuiteRegistry,
+) -> Result<Option<CryptoRotationDescriptor>, String> {
+    let Some(descriptor_wire) = descriptor_wire else {
+        return Ok(None);
     };
+    let descriptor = descriptor_wire.into_descriptor();
     validate_rotation_descriptor_for_normalized_network(network, &descriptor, registry).map_err(
         |err| {
             production_rotation_schedule_error(format!(
@@ -88,7 +127,7 @@ fn parse_descriptor_slot(
 
 fn parse_schedule_with_registry(
     raw: &str,
-    registry: SuiteRegistry,
+    registry: Option<SuiteRegistry>,
 ) -> Result<(ProductionRotationSchedule, SuiteRegistry), String> {
     let wire: ProductionRotationScheduleWire = decode_single_json_value(raw).map_err(|err| {
         production_rotation_schedule_error(format!("parse embedded artifact: {err}"))
@@ -107,20 +146,22 @@ fn parse_schedule_with_registry(
             )));
         }
     }
-    let mainnet = parse_descriptor_slot(
+    let mainnet_wire = parse_descriptor_slot_wire(
         networks
             .remove("mainnet")
             .ok_or_else(|| production_rotation_schedule_error("networks.mainnet missing"))?,
         "mainnet",
-        &registry,
     )?;
-    let testnet = parse_descriptor_slot(
+    let testnet_wire = parse_descriptor_slot_wire(
         networks
             .remove("testnet")
             .ok_or_else(|| production_rotation_schedule_error("networks.testnet missing"))?,
         "testnet",
-        &registry,
     )?;
+    let registry = registry
+        .unwrap_or_else(|| derived_production_schedule_registry(&mainnet_wire, &testnet_wire));
+    let mainnet = validate_descriptor_wire(mainnet_wire, "mainnet", &registry)?;
+    let testnet = validate_descriptor_wire(testnet_wire, "testnet", &registry)?;
     Ok((
         ProductionRotationSchedule {
             version: wire.version,
@@ -133,10 +174,7 @@ fn parse_schedule_with_registry(
 
 pub(crate) fn load_compiled_production_rotation_schedule(
 ) -> Result<(ProductionRotationSchedule, SuiteRegistry), String> {
-    parse_schedule_with_registry(
-        PRODUCTION_ROTATION_SCHEDULE_V1_JSON,
-        SuiteRegistry::default_registry(),
-    )
+    parse_schedule_with_registry(PRODUCTION_ROTATION_SCHEDULE_V1_JSON, None)
 }
 
 pub(crate) fn production_rotation_descriptor_for_network(
@@ -161,7 +199,7 @@ pub(crate) fn production_rotation_descriptor_for_network_with_registry_for_test(
     network: &str,
     registry: SuiteRegistry,
 ) -> Result<Option<(CryptoRotationDescriptor, SuiteRegistry)>, String> {
-    let (schedule, registry) = parse_schedule_with_registry(raw, registry)?;
+    let (schedule, registry) = parse_schedule_with_registry(raw, Some(registry))?;
     let descriptor = match network {
         "mainnet" => schedule.mainnet,
         "testnet" => schedule.testnet,
@@ -174,10 +212,24 @@ pub(crate) fn production_rotation_descriptor_for_network_with_registry_for_test(
     Ok(descriptor.map(|descriptor| (descriptor, registry)))
 }
 
+impl ProductionRotationDescriptorWire {
+    fn into_descriptor(self) -> CryptoRotationDescriptor {
+        CryptoRotationDescriptor {
+            name: self.name,
+            old_suite_id: self.old_suite_id,
+            new_suite_id: self.new_suite_id,
+            create_height: self.create_height,
+            spend_height: self.spend_height,
+            sunset_height: self.sunset_height,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        load_compiled_production_rotation_schedule, production_rotation_descriptor_for_network,
+        load_compiled_production_rotation_schedule, parse_schedule_with_registry,
+        production_rotation_descriptor_for_network,
         production_rotation_descriptor_for_network_with_registry_for_test,
         PRODUCTION_ROTATION_SCHEDULE_ERR_STEM, PRODUCTION_ROTATION_SCHEDULE_VERSION,
     };
@@ -324,6 +376,35 @@ mod tests {
         assert_eq!(descriptor.old_suite_id, 1);
         assert_eq!(descriptor.new_suite_id, 66);
         assert!(registry.lookup(66).is_some());
+    }
+
+    #[test]
+    fn production_rotation_schedule_derives_scheduled_suites_when_registry_is_implicit() {
+        let (schedule, registry) = parse_schedule_with_registry(
+            r#"{
+                "version": 1,
+                "networks": {
+                    "mainnet": {
+                        "name": "rotation-v1",
+                        "old_suite_id": 1,
+                        "new_suite_id": 66,
+                        "create_height": 10,
+                        "spend_height": 20,
+                        "sunset_height": 30
+                    },
+                    "testnet": null
+                }
+            }"#,
+            None,
+        )
+        .expect("must load");
+        let descriptor = schedule.mainnet.expect("mainnet descriptor");
+        assert_eq!(descriptor.new_suite_id, 66);
+        let params = registry.lookup(66).expect("suite 66");
+        assert_eq!(params.pubkey_len, ML_DSA_87_PUBKEY_BYTES);
+        assert_eq!(params.sig_len, ML_DSA_87_SIG_BYTES);
+        assert_eq!(params.verify_cost, VERIFY_COST_ML_DSA_87);
+        assert_eq!(params.alg_name, "ML-DSA-87");
     }
 
     #[test]

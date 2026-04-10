@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -62,7 +63,7 @@ func decodeSingleJSONValue(data []byte, dest any) error {
 func loadCompiledProductionRotationSchedule() (*productionRotationSchedule, *consensus.SuiteRegistry, error) {
 	return loadCompiledProductionRotationScheduleFromJSONWithRegistry(
 		embeddedProductionRotationScheduleV1,
-		consensus.DefaultSuiteRegistry(),
+		nil,
 	)
 }
 
@@ -70,9 +71,6 @@ func loadCompiledProductionRotationScheduleFromJSONWithRegistry(
 	raw []byte,
 	registry *consensus.SuiteRegistry,
 ) (*productionRotationSchedule, *consensus.SuiteRegistry, error) {
-	if registry == nil {
-		registry = consensus.DefaultSuiteRegistry()
-	}
 	var wire productionRotationScheduleWire
 	if err := decodeSingleJSONValue(raw, &wire); err != nil {
 		return nil, nil, productionRotationScheduleError("parse embedded artifact: %w", err)
@@ -96,6 +94,7 @@ func loadCompiledProductionRotationScheduleFromJSONWithRegistry(
 		Version:  wire.Version,
 		Networks: make(map[string]*consensus.CryptoRotationDescriptor, len(wire.Networks)),
 	}
+	parsedDescriptors := make(map[string]*RotationConfigJSON, len(wire.Networks))
 	for _, network := range []string{"mainnet", "testnet"} {
 		raw, ok := wire.Networks[network]
 		if !ok {
@@ -104,7 +103,21 @@ func loadCompiledProductionRotationScheduleFromJSONWithRegistry(
 				network,
 			)
 		}
-		desc, err := parseProductionRotationScheduleDescriptor(raw, network, registry)
+		descriptorJSON, err := parseProductionRotationScheduleDescriptorJSON(raw, network)
+		if err != nil {
+			return nil, nil, err
+		}
+		parsedDescriptors[network] = descriptorJSON
+	}
+	if registry == nil {
+		registry = canonicalProductionScheduleRegistryFromDescriptors(parsedDescriptors)
+	}
+	for _, network := range []string{"mainnet", "testnet"} {
+		desc, err := buildProductionRotationScheduleDescriptor(
+			parsedDescriptors[network],
+			network,
+			registry,
+		)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -113,11 +126,10 @@ func loadCompiledProductionRotationScheduleFromJSONWithRegistry(
 	return schedule, registry, nil
 }
 
-func parseProductionRotationScheduleDescriptor(
+func parseProductionRotationScheduleDescriptorJSON(
 	raw json.RawMessage,
 	network string,
-	registry *consensus.SuiteRegistry,
-) (*consensus.CryptoRotationDescriptor, error) {
+) (*RotationConfigJSON, error) {
 	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return nil, nil
 	}
@@ -128,6 +140,17 @@ func parseProductionRotationScheduleDescriptor(
 	descriptorJSON, err := wire.toRotationConfigJSON()
 	if err != nil {
 		return nil, productionRotationScheduleError("networks.%s: %w", network, err)
+	}
+	return &descriptorJSON, nil
+}
+
+func buildProductionRotationScheduleDescriptor(
+	descriptorJSON *RotationConfigJSON,
+	network string,
+	registry *consensus.SuiteRegistry,
+) (*consensus.CryptoRotationDescriptor, error) {
+	if descriptorJSON == nil {
+		return nil, nil
 	}
 	descriptor := consensus.CryptoRotationDescriptor{
 		Name:         descriptorJSON.Name,
@@ -145,6 +168,41 @@ func parseProductionRotationScheduleDescriptor(
 		)
 	}
 	return &descriptor, nil
+}
+
+func canonicalProductionScheduleRegistryFromDescriptors(
+	descriptors map[string]*RotationConfigJSON,
+) *consensus.SuiteRegistry {
+	paramsByID := map[uint8]consensus.SuiteParams{
+		consensus.SUITE_ID_ML_DSA_87: defaultSuiteRegistryParams(),
+	}
+	for _, descriptor := range descriptors {
+		if descriptor == nil {
+			continue
+		}
+		paramsByID[descriptor.OldSuiteID] = canonicalProductionScheduleSuiteParams(descriptor.OldSuiteID)
+		paramsByID[descriptor.NewSuiteID] = canonicalProductionScheduleSuiteParams(descriptor.NewSuiteID)
+	}
+	params := make([]consensus.SuiteParams, 0, len(paramsByID))
+	for _, suiteID := range sortedSuiteIDs(paramsByID) {
+		params = append(params, paramsByID[suiteID])
+	}
+	return consensus.NewSuiteRegistryFromParams(params)
+}
+
+func canonicalProductionScheduleSuiteParams(suiteID uint8) consensus.SuiteParams {
+	params := defaultSuiteRegistryParams()
+	params.SuiteID = suiteID
+	return params
+}
+
+func sortedSuiteIDs(paramsByID map[uint8]consensus.SuiteParams) []uint8 {
+	ids := make([]uint8, 0, len(paramsByID))
+	for suiteID := range paramsByID {
+		ids = append(ids, suiteID)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids
 }
 
 func (wire productionRotationDescriptorWire) toRotationConfigJSON() (RotationConfigJSON, error) {
@@ -173,20 +231,21 @@ func (wire productionRotationDescriptorWire) toRotationConfigJSON() (RotationCon
 		sunsetHeight = *wire.SunsetHeight
 	}
 	return RotationConfigJSON{
-		Name:         *name,
-		OldSuiteID:   *oldSuiteID,
-		NewSuiteID:   *newSuiteID,
-		CreateHeight: *createHeight,
-		SpendHeight:  *spendHeight,
+		Name:         name,
+		OldSuiteID:   oldSuiteID,
+		NewSuiteID:   newSuiteID,
+		CreateHeight: createHeight,
+		SpendHeight:  spendHeight,
 		SunsetHeight: sunsetHeight,
 	}, nil
 }
 
-func requireProductionRotationScheduleField[T any](name string, value *T) (*T, error) {
+func requireProductionRotationScheduleField[T any](name string, value *T) (T, error) {
 	if value == nil {
-		return nil, fmt.Errorf("missing required field %q", name)
+		var zero T
+		return zero, fmt.Errorf("missing required field %q", name)
 	}
-	return value, nil
+	return *value, nil
 }
 
 func productionRotationDescriptorForNetwork(
