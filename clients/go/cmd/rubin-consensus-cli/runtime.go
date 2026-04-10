@@ -344,7 +344,49 @@ func (item SuiteParamsJSON) MarshalJSON() ([]byte, error) {
 	})
 }
 
+const maxExplicitSuiteRegistryItems = 16
 const maxCoreExtHexFieldBytes = 4096
+
+func validateSuiteRegistryParamLen(value int) (int, error) {
+	if value <= 0 || value > consensus.MAX_WITNESS_BYTES_PER_TX {
+		return 0, fmt.Errorf("bad suite_registry")
+	}
+	return value, nil
+}
+
+func normalizeSuiteRegistryAlgName(value string) (string, error) {
+	switch strings.TrimSpace(value) {
+	case "ML-DSA-87":
+		return "ML-DSA-87", nil
+	default:
+		return "", fmt.Errorf("bad suite_registry")
+	}
+}
+
+func validateSuiteRegistryItem(item SuiteParamsJSON) (consensus.SuiteParams, error) {
+	if item.SuiteID == consensus.SUITE_ID_SENTINEL || item.VerifyCost == 0 {
+		return consensus.SuiteParams{}, fmt.Errorf("bad suite_registry")
+	}
+	pubkeyLen, err := validateSuiteRegistryParamLen(item.PubkeyLen)
+	if err != nil {
+		return consensus.SuiteParams{}, err
+	}
+	sigLen, err := validateSuiteRegistryParamLen(item.SigLen)
+	if err != nil {
+		return consensus.SuiteParams{}, err
+	}
+	algName, err := normalizeSuiteRegistryAlgName(item.AlgName)
+	if err != nil {
+		return consensus.SuiteParams{}, err
+	}
+	return consensus.SuiteParams{
+		SuiteID:    item.SuiteID,
+		PubkeyLen:  pubkeyLen,
+		SigLen:     sigLen,
+		VerifyCost: item.VerifyCost,
+		AlgName:    algName,
+	}, nil
+}
 
 func parseOptionalHexBytes(name, value string) ([]byte, error) {
 	value = strings.TrimSpace(value)
@@ -460,25 +502,34 @@ type ForkChoiceChain struct {
 	Targets []string `json:"targets"`
 }
 
-func buildSuiteRegistry(items []SuiteParamsJSON) *consensus.SuiteRegistry {
+func buildSuiteRegistry(items []SuiteParamsJSON) (*consensus.SuiteRegistry, error) {
 	if len(items) == 0 {
-		return nil
+		return nil, nil
 	}
+	if len(items) > maxExplicitSuiteRegistryItems {
+		return nil, fmt.Errorf("bad suite_registry")
+	}
+	seen := make(map[uint8]struct{}, len(items))
 	params := make([]consensus.SuiteParams, 0, len(items))
 	for _, it := range items {
-		params = append(params, consensus.SuiteParams{
-			SuiteID:    it.SuiteID,
-			PubkeyLen:  it.PubkeyLen,
-			SigLen:     it.SigLen,
-			VerifyCost: it.VerifyCost,
-			AlgName:    it.AlgName,
-		})
+		if _, ok := seen[it.SuiteID]; ok {
+			return nil, fmt.Errorf("bad suite_registry")
+		}
+		seen[it.SuiteID] = struct{}{}
+		param, err := validateSuiteRegistryItem(it)
+		if err != nil {
+			return nil, err
+		}
+		params = append(params, param)
 	}
-	return consensus.NewSuiteRegistryFromParams(params)
+	return consensus.NewSuiteRegistryFromParams(params), nil
 }
 
 func buildCoreExtSuiteContext(req Request) (consensus.RotationProvider, *consensus.SuiteRegistry, error) {
-	reg := buildSuiteRegistry(req.SuiteRegistry)
+	reg, err := buildSuiteRegistry(req.SuiteRegistry)
+	if err != nil {
+		return nil, nil, err
+	}
 	if req.RotationDescriptor == nil {
 		return nil, reg, nil
 	}
@@ -1109,7 +1160,11 @@ func runFromStdin() {
 			return
 		}
 		if req.RotationDescriptor != nil && len(req.SuiteRegistry) > 0 {
-			reg := buildSuiteRegistry(req.SuiteRegistry)
+			reg, err := buildSuiteRegistry(req.SuiteRegistry)
+			if err != nil {
+				writeResp(os.Stdout, Response{Ok: false, Err: "bad suite_registry"})
+				return
+			}
 			desc := consensus.CryptoRotationDescriptor{
 				Name:         req.RotationDescriptor.Name,
 				OldSuiteID:   req.RotationDescriptor.OldSuiteID,
@@ -1139,7 +1194,11 @@ func runFromStdin() {
 			writeResp(os.Stdout, Response{Ok: false, Err: "bad rotation_descriptor"})
 			return
 		}
-		reg := buildSuiteRegistry(req.SuiteRegistry)
+		reg, err := buildSuiteRegistry(req.SuiteRegistry)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad suite_registry"})
+			return
+		}
 		desc := consensus.CryptoRotationDescriptor{
 			Name:         req.RotationDescriptor.Name,
 			OldSuiteID:   req.RotationDescriptor.OldSuiteID,
@@ -1166,7 +1225,11 @@ func runFromStdin() {
 			writeResp(os.Stdout, Response{Ok: false, Err: "bad rotation_descriptor"})
 			return
 		}
-		reg := buildSuiteRegistry(req.SuiteRegistry)
+		reg, err := buildSuiteRegistry(req.SuiteRegistry)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad suite_registry"})
+			return
+		}
 		desc := consensus.CryptoRotationDescriptor{
 			Name:         req.RotationDescriptor.Name,
 			OldSuiteID:   req.RotationDescriptor.OldSuiteID,
@@ -1188,7 +1251,11 @@ func runFromStdin() {
 			writeResp(os.Stdout, Response{Ok: false, Err: "bad rotation_descriptor"})
 			return
 		}
-		reg := buildSuiteRegistry(req.SuiteRegistry)
+		reg, err := buildSuiteRegistry(req.SuiteRegistry)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad suite_registry"})
+			return
+		}
 		desc := consensus.CryptoRotationDescriptor{
 			Name:         req.RotationDescriptor.Name,
 			OldSuiteID:   req.RotationDescriptor.OldSuiteID,
@@ -1211,7 +1278,11 @@ func runFromStdin() {
 		return
 
 	case "rotation_descriptor_check":
-		reg := buildSuiteRegistry(req.SuiteRegistry)
+		reg, err := buildSuiteRegistry(req.SuiteRegistry)
+		if err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: "bad suite_registry"})
+			return
+		}
 		if len(req.RotationDescriptors) > 0 {
 			ds := make([]consensus.CryptoRotationDescriptor, 0, len(req.RotationDescriptors))
 			for _, rd := range req.RotationDescriptors {

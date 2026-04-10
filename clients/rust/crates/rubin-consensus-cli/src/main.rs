@@ -3,6 +3,7 @@ mod txctx_harness;
 
 use num_bigint::BigUint;
 use num_traits::Zero;
+use rubin_consensus::constants::MAX_WITNESS_BYTES_PER_TX;
 use rubin_consensus::merkle::witness_merkle_root_wtxids;
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
@@ -954,9 +955,18 @@ fn decode_optional_hex_bytes(name: &str, value: &str) -> Result<Vec<u8>, String>
 
 fn normalize_suite_alg_name(value: &str) -> Result<&'static str, String> {
     match value.trim() {
-        "" | "ML-DSA-87" => Ok("ML-DSA-87"),
+        "ML-DSA-87" => Ok("ML-DSA-87"),
         _ => Err("bad suite_registry".to_string()),
     }
+}
+
+const MAX_EXPLICIT_SUITE_REGISTRY_ITEMS: usize = 16;
+
+fn validate_suite_registry_param_len(value: u64) -> Result<u64, String> {
+    if value == 0 || value > MAX_WITNESS_BYTES_PER_TX as u64 {
+        return Err("bad suite_registry".to_string());
+    }
+    Ok(value)
 }
 
 fn build_suite_registry_from_json(
@@ -965,17 +975,25 @@ fn build_suite_registry_from_json(
     if items.is_empty() {
         return Ok(None);
     }
+    if items.len() > MAX_EXPLICIT_SUITE_REGISTRY_ITEMS {
+        return Err("bad suite_registry".to_string());
+    }
 
     let mut suites = std::collections::BTreeMap::new();
     for s in items {
+        if s.suite_id == rubin_consensus::constants::SUITE_ID_SENTINEL || s.verify_cost == 0 {
+            return Err("bad suite_registry".to_string());
+        }
+        let pubkey_len = validate_suite_registry_param_len(s.pubkey_len)?;
+        let sig_len = validate_suite_registry_param_len(s.sig_len)?;
         let alg = normalize_suite_alg_name(&s.alg_name)?;
         if suites
             .insert(
                 s.suite_id,
                 SuiteParams {
                     suite_id: s.suite_id,
-                    pubkey_len: s.pubkey_len,
-                    sig_len: s.sig_len,
+                    pubkey_len,
+                    sig_len,
                     verify_cost: s.verify_cost,
                     alg_name: alg,
                 },
@@ -5086,6 +5104,19 @@ mod tests {
     }
 
     #[test]
+    fn suite_registry_rejects_empty_alg_name() {
+        let err = build_suite_registry_from_json(&[SuiteParamsJson {
+            suite_id: 3,
+            pubkey_len: 2592,
+            sig_len: 4627,
+            verify_cost: 990000,
+            alg_name: "".to_string(),
+        }])
+        .unwrap_err();
+        assert_eq!(err, "bad suite_registry");
+    }
+
+    #[test]
     fn suite_registry_rejects_duplicate_suite_ids() {
         let err = build_suite_registry_from_json(&[
             SuiteParamsJson {
@@ -5104,6 +5135,21 @@ mod tests {
             },
         ])
         .unwrap_err();
+        assert_eq!(err, "bad suite_registry");
+    }
+
+    #[test]
+    fn suite_registry_rejects_oversized_registry() {
+        let items = (0..(MAX_EXPLICIT_SUITE_REGISTRY_ITEMS + 1))
+            .map(|idx| SuiteParamsJson {
+                suite_id: (idx + 1) as u8,
+                pubkey_len: 2592,
+                sig_len: 4627,
+                verify_cost: 990000,
+                alg_name: "ML-DSA-87".to_string(),
+            })
+            .collect::<Vec<_>>();
+        let err = build_suite_registry_from_json(&items).unwrap_err();
         assert_eq!(err, "bad suite_registry");
     }
 
