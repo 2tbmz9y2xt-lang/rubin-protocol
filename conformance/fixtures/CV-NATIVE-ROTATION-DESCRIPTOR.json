@@ -101,7 +101,114 @@
       ],
       "expect_ok": false,
       "expect_err": "descriptor-not-activated"
+    },
+    {
+      "id": "NATIVE-ROT-DESC-06",
+      "op": "rotation_descriptor_check",
+      "network": "mainnet",
+      "rotation_descriptors": [
+        {
+          "name": "r1",
+          "old_suite_id": 1,
+          "new_suite_id": 2,
+          "create_height": 10,
+          "spend_height": 20,
+          "sunset_height": 100
+        },
+        {
+          "name": "r2",
+          "old_suite_id": 2,
+          "new_suite_id": 3,
+          "create_height": 100,
+          "spend_height": 110,
+          "sunset_height": 200
+        }
+      ],
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 3, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": false,
+      "expect_err": "descriptor-not-activated"
+    },
+    {
+      "id": "NATIVE-ROT-DESC-07",
+      "op": "rotation_descriptor_check",
+      "network": "testnet",
+      "rotation_descriptors": [
+        {
+          "name": "r1",
+          "old_suite_id": 1,
+          "new_suite_id": 2,
+          "create_height": 10,
+          "spend_height": 20,
+          "sunset_height": 100
+        },
+        {
+          "name": "r2",
+          "old_suite_id": 2,
+          "new_suite_id": 3,
+          "create_height": 100,
+          "spend_height": 110,
+          "sunset_height": 200
+        }
+      ],
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 3, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": false,
+      "expect_err": "descriptor-not-activated"
+    },
+    {
+      "id": "NATIVE-ROT-DESC-08",
+      "op": "rotation_descriptor_check",
+      "network": "devnet",
+      "rotation_descriptors": [
+        {
+          "name": "r1",
+          "old_suite_id": 1,
+          "new_suite_id": 2,
+          "create_height": 10,
+          "spend_height": 20,
+          "sunset_height": 100
+        },
+        {
+          "name": "r2",
+          "old_suite_id": 2,
+          "new_suite_id": 3,
+          "create_height": 100,
+          "spend_height": 110,
+          "sunset_height": 200
+        }
+      ],
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 3, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": true
+    },
+    {
+      "id": "NATIVE-ROT-DESC-09",
+      "op": "rotation_descriptor_check",
+      "network": "mainnet",
+      "rotation_descriptor": {
+        "name": "prod-infinite-h4",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 0
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": false,
+      "expect_err": "descriptor-not-activated"
     }
   ]
 }
-

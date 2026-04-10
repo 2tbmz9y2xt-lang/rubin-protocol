@@ -9,6 +9,21 @@ Policy:
 
 ---
 
+## 2026-04-09 — Production single-descriptor conformance network coverage (Q-IMPL-ROTATION-PRODUCTION-SINGLE-DESCRIPTOR-GATE-01)
+
+Причина:
+- production-only single-descriptor semantics для `rotation_descriptor_check` должна быть закреплена executable conformance;
+- runner раньше не прокидывал `network` в rotation ops, поэтому mainnet/testnet reject и devnet allow для multi-descriptor batches не проверялись на Go↔Rust parity.
+
+Инструменты:
+- обновление `conformance/runner/run_cv_bundle.py`,
+- новые runner unit tests,
+- проверка через `python3 conformance/runner/run_cv_bundle.py --only-gates CV-NATIVE-ROTATION-DESCRIPTOR`,
+- синхронизация матрицы: `python3 tools/gen_conformance_matrix.py`.
+
+Изменённые fixtures:
+- `CV-NATIVE-ROTATION-DESCRIPTOR.json` (added `NATIVE-ROT-DESC-06..09`)
+
 ## 2026-03-21 — TXCTX spend-time conformance harness intake (Q-CONF-TXCTX-HARNESS-01)
 
 Причина:

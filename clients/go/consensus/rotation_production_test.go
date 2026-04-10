@@ -38,6 +38,27 @@ func TestValidateV1ProductionRotationDescriptor_PropagateValidateError(t *testin
 	}
 }
 
+func TestValidateV1ProductionRotationSet_SingleDescriptorPreservesGenericSetValidation(t *testing.T) {
+	reg := &SuiteRegistry{
+		suites: map[uint8]SuiteParams{
+			0x01: {SuiteID: 0x01, PubkeyLen: 2592, SigLen: 4627},
+			0x02: {SuiteID: 0x02, PubkeyLen: 1024, SigLen: 512},
+		},
+	}
+	d := CryptoRotationDescriptor{
+		Name:         "bad-suite",
+		OldSuiteID:   0x01,
+		NewSuiteID:   0x03,
+		CreateHeight: 10,
+		SpendHeight:  20,
+		SunsetHeight: 100,
+	}
+	err := ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d}, reg)
+	if err == nil || !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("expected generic set validation error, got %v", err)
+	}
+}
+
 func TestValidateV1ProductionRotationDescriptor_RequiresH4(t *testing.T) {
 	reg := &SuiteRegistry{
 		suites: map[uint8]SuiteParams{
@@ -63,12 +84,13 @@ func TestValidateV1ProductionRotationDescriptor_RequiresH4(t *testing.T) {
 	}
 }
 
-func TestValidateV1ProductionRotationSet_ChainedH1AfterPriorH4(t *testing.T) {
+func TestValidateV1ProductionRotationSet_RejectsMultiDescriptorBatch(t *testing.T) {
 	reg := &SuiteRegistry{
 		suites: map[uint8]SuiteParams{
 			0x01: {SuiteID: 0x01, PubkeyLen: 2592, SigLen: 4627},
 			0x02: {SuiteID: 0x02, PubkeyLen: 1024, SigLen: 512},
 			0x03: {SuiteID: 0x03, PubkeyLen: 1024, SigLen: 512},
+			0x04: {SuiteID: 0x04, PubkeyLen: 1024, SigLen: 512},
 		},
 	}
 	d1 := CryptoRotationDescriptor{
@@ -83,76 +105,38 @@ func TestValidateV1ProductionRotationSet_ChainedH1AfterPriorH4(t *testing.T) {
 		Name:         "second",
 		OldSuiteID:   0x02,
 		NewSuiteID:   0x03,
-		CreateHeight: 50,
-		SpendHeight:  60,
-		SunsetHeight: 200,
-	}
-	err := ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d1, d2}, reg)
-	if err == nil || !strings.Contains(err.Error(), "successor") {
-		t.Fatalf("expected chained ordering error, got %v", err)
-	}
-	d2ok := CryptoRotationDescriptor{
-		Name:         "second",
-		OldSuiteID:   0x02,
-		NewSuiteID:   0x03,
 		CreateHeight: 100,
 		SpendHeight:  110,
 		SunsetHeight: 200,
 	}
-	if err := ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d1, d2ok}, reg); err != nil {
-		t.Fatal(err)
+	err := ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d1, d2}, reg)
+	if err == nil || !strings.Contains(err.Error(), "at most one descriptor") {
+		t.Fatalf("expected max-1 error, got %v", err)
 	}
-}
-
-func TestValidateV1ProductionRotationSet_RejectsThreeDescriptorChain(t *testing.T) {
-	reg := &SuiteRegistry{
-		suites: map[uint8]SuiteParams{
-			0x01: {SuiteID: 0x01, PubkeyLen: 2592, SigLen: 4627},
-			0x02: {SuiteID: 0x02, PubkeyLen: 1024, SigLen: 512},
-			0x03: {SuiteID: 0x03, PubkeyLen: 1024, SigLen: 512},
-			0x04: {SuiteID: 0x04, PubkeyLen: 1024, SigLen: 512},
-		},
-	}
-	d1 := CryptoRotationDescriptor{
-		Name: "r1", OldSuiteID: 0x01, NewSuiteID: 0x02,
-		CreateHeight: 10, SpendHeight: 20, SunsetHeight: 100,
-	}
-	d2 := CryptoRotationDescriptor{
-		Name: "r2", OldSuiteID: 0x02, NewSuiteID: 0x03,
-		CreateHeight: 100, SpendHeight: 110, SunsetHeight: 200,
-	}
-	d3 := CryptoRotationDescriptor{
-		Name: "r3", OldSuiteID: 0x03, NewSuiteID: 0x04,
-		CreateHeight: 200, SpendHeight: 210, SunsetHeight: 300,
-	}
-	err := ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d1, d2, d3}, reg)
-	if err == nil || !strings.Contains(err.Error(), "at most two descriptors") {
-		t.Fatalf("expected max-2 error, got %v", err)
-	}
-	// Out-of-order slice must still fail through the same structural cap.
-	err = ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d3, d1, d2}, reg)
-	if err == nil || !strings.Contains(err.Error(), "at most two descriptors") {
-		t.Fatalf("expected max-2 error for shuffled order, got %v", err)
+	err = ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d2, d1}, reg)
+	if err == nil || !strings.Contains(err.Error(), "at most one descriptor") {
+		t.Fatalf("expected max-1 error for reversed batch, got %v", err)
 	}
 	d2bad := d2
 	d2bad.SunsetHeight = 0
-	err = ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d1, d2bad, d3}, reg)
-	if err == nil || !strings.Contains(err.Error(), "at most two descriptors") {
-		t.Fatalf("expected max-2 error to win over finite-H4 check, got %v", err)
+	err = ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d1, d2bad}, reg)
+	if err == nil || !strings.Contains(err.Error(), "at most one descriptor") {
+		t.Fatalf("expected max-1 error to win over finite-H4 check, got %v", err)
 	}
 	d2overlap := d2
 	d2overlap.CreateHeight = 15
 	d2overlap.SpendHeight = 25
-	err = ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d1, d2overlap, d3}, reg)
-	if err == nil || !strings.Contains(err.Error(), "at most two descriptors") {
-		t.Fatalf("expected max-2 error to win over overlap validation, got %v", err)
+	err = ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d1, d2overlap}, reg)
+	if err == nil || !strings.Contains(err.Error(), "at most one descriptor") {
+		t.Fatalf("expected max-1 error to win over overlap validation, got %v", err)
 	}
-	d3bad := d3
-	d3bad.CreateHeight = 220
-	d3bad.SpendHeight = 210
-	err = ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d1, d2, d3bad}, reg)
-	if err == nil || !strings.Contains(err.Error(), "at most two descriptors") {
-		t.Fatalf("expected max-2 error to win over descriptor validation, got %v", err)
+	d3 := CryptoRotationDescriptor{
+		Name: "third", OldSuiteID: 0x03, NewSuiteID: 0x04,
+		CreateHeight: 200, SpendHeight: 210, SunsetHeight: 300,
+	}
+	err = ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d1, d2, d3}, reg)
+	if err == nil || !strings.Contains(err.Error(), "at most one descriptor") {
+		t.Fatalf("expected max-1 error for 3-descriptor batch, got %v", err)
 	}
 }
 
@@ -227,14 +211,14 @@ func TestValidateRotationSetForNetwork(t *testing.T) {
 		t.Fatal("expected overlap error on devnet")
 	}
 	if err := ValidateRotationSetForNetwork("mainnet", []CryptoRotationDescriptor{a, b}, reg); err == nil {
-		t.Fatal("expected error on mainnet (overlap and H4)")
+		t.Fatal("expected production reject on mainnet")
 	}
 	if err := ValidateRotationSetForNetwork("mainnet", []CryptoRotationDescriptor{}, reg); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestValidateV1ProductionRotationSet_EmptySingleAndH4Gap(t *testing.T) {
+func TestValidateV1ProductionRotationSet_EmptySingleAndValidationPaths(t *testing.T) {
 	reg := &SuiteRegistry{
 		suites: map[uint8]SuiteParams{
 			0x01: {SuiteID: 0x01, PubkeyLen: 2592, SigLen: 4627},
@@ -261,42 +245,15 @@ func TestValidateV1ProductionRotationSet_EmptySingleAndH4Gap(t *testing.T) {
 		CreateHeight: 100, SpendHeight: 110, SunsetHeight: 0,
 	}
 	err := ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{d1, d2bad}, reg)
-	if err == nil || !strings.Contains(err.Error(), "rotation[1]") || !strings.Contains(err.Error(), "sunset_height") {
-		t.Fatalf("expected H4 error on second descriptor, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "at most one descriptor") {
+		t.Fatalf("expected max-1 error on multi-descriptor batch, got %v", err)
 	}
 	baseFail := CryptoRotationDescriptor{
 		Name: "", OldSuiteID: 0x01, NewSuiteID: 0x02,
 		CreateHeight: 10, SpendHeight: 20, SunsetHeight: 100,
 	}
 	err = ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{baseFail}, reg)
-	if err == nil || !strings.Contains(err.Error(), "rotation[0]") {
+	if err == nil || !strings.Contains(err.Error(), "name required") {
 		t.Fatalf("expected wrapped validate error, got %v", err)
-	}
-}
-
-func TestValidateV1ProductionRotationSet_SortTieBreakStableChain(t *testing.T) {
-	reg := &SuiteRegistry{
-		suites: map[uint8]SuiteParams{
-			0x01: {SuiteID: 0x01, PubkeyLen: 2592, SigLen: 4627},
-			0x02: {SuiteID: 0x02, PubkeyLen: 1024, SigLen: 512},
-			0x03: {SuiteID: 0x03, PubkeyLen: 1024, SigLen: 512},
-		},
-	}
-	// Same H1 is impossible under ValidateRotationSet; exercise tie-break via equal H1 only on
-	// the chained-order check by passing a set that is invalid for another reason first, then
-	// use descriptors with distinct H1 values where the sort still compares names only if H1 equal.
-	// Direct coverage of name branch: two entries with same CreateHeight would overlap — instead
-	// call sort helper logic by duplicating the production validation ordering invariant:
-	dEarly := CryptoRotationDescriptor{
-		Name: "z", OldSuiteID: 0x01, NewSuiteID: 0x02,
-		CreateHeight: 10, SpendHeight: 20, SunsetHeight: 100,
-	}
-	dLate := CryptoRotationDescriptor{
-		Name: "a", OldSuiteID: 0x02, NewSuiteID: 0x03,
-		CreateHeight: 100, SpendHeight: 110, SunsetHeight: 200,
-	}
-	// Reversed slice order should still validate (sort by H1 then name).
-	if err := ValidateV1ProductionRotationSet([]CryptoRotationDescriptor{dLate, dEarly}, reg); err != nil {
-		t.Fatal(err)
 	}
 }
