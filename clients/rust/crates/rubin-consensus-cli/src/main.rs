@@ -986,10 +986,12 @@ fn decode_optional_hex_bytes(name: &str, value: &str) -> Result<Vec<u8>, String>
 }
 
 fn normalize_suite_alg_name(value: &str) -> Result<&'static str, String> {
-    match value.trim() {
-        "ML-DSA-87" => Ok("ML-DSA-87"),
-        _ => Err("bad suite_registry".to_string()),
+    const CANONICAL_SUITE_ALG_NAME: &str = "ML-DSA-87";
+    let trimmed = value.trim();
+    if trimmed != CANONICAL_SUITE_ALG_NAME {
+        return Err("bad suite_registry".to_string());
     }
+    Ok(CANONICAL_SUITE_ALG_NAME)
 }
 
 const MAX_EXPLICIT_SUITE_REGISTRY_ITEMS: usize = 16;

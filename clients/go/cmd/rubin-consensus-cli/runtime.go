@@ -349,6 +349,7 @@ func (item SuiteParamsJSON) MarshalJSON() ([]byte, error) {
 
 const maxExplicitSuiteRegistryItems = 16
 const maxCoreExtHexFieldBytes = 4096
+const canonicalSuiteRegistryAlgName = "ML-DSA-87"
 
 func validateSuiteRegistryParamLen(value int) (int, error) {
 	if value < 0 || value > consensus.MAX_WITNESS_BYTES_PER_TX {
@@ -358,12 +359,11 @@ func validateSuiteRegistryParamLen(value int) (int, error) {
 }
 
 func normalizeSuiteRegistryAlgName(value string) (string, error) {
-	switch strings.TrimSpace(value) {
-	case "ML-DSA-87":
-		return "ML-DSA-87", nil
-	default:
+	trimmed := strings.TrimSpace(value)
+	if trimmed != canonicalSuiteRegistryAlgName {
 		return "", fmt.Errorf("bad suite_registry")
 	}
+	return canonicalSuiteRegistryAlgName, nil
 }
 
 func validateSuiteRegistryItem(item SuiteParamsJSON) (consensus.SuiteParams, error) {

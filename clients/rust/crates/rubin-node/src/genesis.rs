@@ -201,10 +201,12 @@ pub fn load_genesis_config(
 }
 
 fn normalize_suite_alg_name(value: &str) -> Result<&'static str, String> {
-    match value.trim() {
-        "ML-DSA-87" => Ok("ML-DSA-87"),
-        _ => Err("bad suite_registry".to_string()),
+    const CANONICAL_SUITE_ALG_NAME: &str = "ML-DSA-87";
+    let trimmed = value.trim();
+    if trimmed != CANONICAL_SUITE_ALG_NAME {
+        return Err("bad suite_registry".to_string());
     }
+    Ok(CANONICAL_SUITE_ALG_NAME)
 }
 
 fn default_suite_registry_params() -> SuiteParams {
