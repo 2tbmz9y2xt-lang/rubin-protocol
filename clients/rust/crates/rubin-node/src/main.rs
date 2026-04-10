@@ -836,11 +836,15 @@ mod tests {
     use std::io;
     use std::path::PathBuf;
 
+    use super::{
+        legacy_exposure_hooks, parse_args, run, runtime_genesis_hash, validate_config,
+        LegacyExposureReport,
+    };
     use rubin_consensus::constants::{
         ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, VERIFY_COST_ML_DSA_87,
     };
-    use super::{legacy_exposure_hooks, parse_args, run, runtime_genesis_hash, validate_config};
     use rubin_node::{load_genesis_config, PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR};
+    use serde_json::Value;
 
     #[derive(serde::Deserialize)]
     struct LegacyExposureHookVectorsDoc {
