@@ -49,7 +49,7 @@
     },
     "indexed_suite_ids": {
       "type": "array",
-      "description": "Set-like list of indexed suite IDs serialized as JSON integers in the range 0..255.",
+      "description": "Unique indexed suite IDs serialized as JSON integers in the range 0..255 and emitted in ascending numeric order.",
       "items": {
         "type": "integer",
         "minimum": 0,

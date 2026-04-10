@@ -34,7 +34,7 @@ All top-level keys are required in emitted output (pretty-printed deterministic 
 | `data_dir` | string | `--datadir` value as passed to the CLI for this scan (verbatim; not canonicalized to an absolute path and may be relative) |
 | `chainstate_height` | integer | Height from loaded chainstate |
 | `chainstate_has_tip` | boolean | Whether chainstate reports a tip. Successful scanner runs that emit JSON reports use `true`; the `false` row is retained only for shared hook-helper and conformance parity |
-| `indexed_suite_ids` | array of JSON integers | Suite IDs present in explicit UTXO index; values are byte-sized suite ids in the range `0..255`; no duplicates (set-like) |
+| `indexed_suite_ids` | array of JSON integers | Suite IDs present in explicit UTXO index; values are byte-sized suite ids in the range `0..255`; unique and emitted in ascending numeric order |
 | `watched_legacy_suite_ids` | array of JSON integers | Non-empty sorted unique `--legacy-suite-id` values; values are byte-sized suite ids in the range `0..255` and the scanner requires at least one id |
 | `legacy_exposure_total` | integer | Sum of exposure counts across watched legacy suite IDs |
 | `sunset_readiness` | string | Advisory readiness label (see hooks below) |
