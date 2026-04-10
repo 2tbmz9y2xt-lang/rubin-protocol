@@ -47,22 +47,61 @@ type legacyExposureReportJSON struct {
 	} `json:"legacy_suite_reports"`
 }
 
+type legacyExposureHookVectorJSON struct {
+	Name                string `json:"name"`
+	HasChainstateTip    bool   `json:"has_chainstate_tip"`
+	LegacyExposureTotal uint64 `json:"legacy_exposure_total"`
+	SunsetReadiness     string `json:"sunset_readiness"`
+	WarningHook         string `json:"warning_hook"`
+	GraceHook           string `json:"grace_hook"`
+}
+
 type legacyExposureHookVectorsJSON struct {
-	ContractVersion uint64 `json:"contract_version"`
-	FixtureKind     string `json:"fixture_kind"`
-	Cases           []struct {
-		Name                string `json:"name"`
-		HasChainstateTip    bool   `json:"has_chainstate_tip"`
-		LegacyExposureTotal uint64 `json:"legacy_exposure_total"`
-		SunsetReadiness     string `json:"sunset_readiness"`
-		WarningHook         string `json:"warning_hook"`
-		GraceHook           string `json:"grace_hook"`
-	} `json:"cases"`
+	ContractVersion uint64                         `json:"contract_version"`
+	FixtureKind     string                         `json:"fixture_kind"`
+	Cases           []legacyExposureHookVectorJSON `json:"cases"`
 }
 
 func legacyExposureContractRepoPath(parts ...string) string {
 	segments := append([]string{"..", "..", "..", ".."}, parts...)
 	return filepath.Join(segments...)
+}
+
+func canonicalLegacyExposureHookVectors() []legacyExposureHookVectorJSON {
+	return []legacyExposureHookVectorJSON{
+		{
+			Name:                "no_chainstate_tip_zero_total",
+			HasChainstateTip:    false,
+			LegacyExposureTotal: 0,
+			SunsetReadiness:     "invalid_no_chainstate_tip",
+			WarningHook:         "none",
+			GraceHook:           "not_applicable_no_chainstate_tip",
+		},
+		{
+			Name:                "no_chainstate_tip_nonzero_total",
+			HasChainstateTip:    false,
+			LegacyExposureTotal: 5,
+			SunsetReadiness:     "invalid_no_chainstate_tip",
+			WarningHook:         "none",
+			GraceHook:           "not_applicable_no_chainstate_tip",
+		},
+		{
+			Name:                "tipped_chain_zero_exposure",
+			HasChainstateTip:    true,
+			LegacyExposureTotal: 0,
+			SunsetReadiness:     "ready_for_operator_defined_grace_window",
+			WarningHook:         "none",
+			GraceHook:           "start_operator_defined_grace_window",
+		},
+		{
+			Name:                "tipped_chain_nonzero_exposure",
+			HasChainstateTip:    true,
+			LegacyExposureTotal: 3,
+			SunsetReadiness:     "not_ready_legacy_exposure_present",
+			WarningHook:         "legacy_exposure_present_notify_operator_and_council",
+			GraceHook:           "not_applicable_legacy_exposure_present",
+		},
+	}
 }
 
 func mustCoreExtOpenSSLDigest32DescriptorHex(t *testing.T) string {
@@ -181,8 +220,9 @@ func TestLegacyExposureHookVectorsFixtureParity(t *testing.T) {
 	if doc.FixtureKind != "legacy_exposure_hook_vectors" {
 		t.Fatalf("fixture_kind=%q, want legacy_exposure_hook_vectors", doc.FixtureKind)
 	}
-	if len(doc.Cases) == 0 {
-		t.Fatalf("expected at least one hook vector")
+	expected := canonicalLegacyExposureHookVectors()
+	if !reflect.DeepEqual(doc.Cases, expected) {
+		t.Fatalf("hook vectors=%+v, want %+v", doc.Cases, expected)
 	}
 	for _, c := range doc.Cases {
 		t.Run(c.Name, func(t *testing.T) {

@@ -14,6 +14,41 @@ SCHEMA = REPO_ROOT / "conformance" / "schemas" / "legacy_exposure_report_v1.json
 EXAMPLE = REPO_ROOT / "conformance" / "fixtures" / "protocol" / "legacy_exposure_report_v1_example.json"
 HOOK_VECTORS = REPO_ROOT / "conformance" / "fixtures" / "protocol" / "legacy_exposure_hook_vectors.json"
 
+CANONICAL_HOOK_CASES: list[tuple[str, bool, int, str, str, str]] = [
+    (
+        "no_chainstate_tip_zero_total",
+        False,
+        0,
+        "invalid_no_chainstate_tip",
+        "none",
+        "not_applicable_no_chainstate_tip",
+    ),
+    (
+        "no_chainstate_tip_nonzero_total",
+        False,
+        5,
+        "invalid_no_chainstate_tip",
+        "none",
+        "not_applicable_no_chainstate_tip",
+    ),
+    (
+        "tipped_chain_zero_exposure",
+        True,
+        0,
+        "ready_for_operator_defined_grace_window",
+        "none",
+        "start_operator_defined_grace_window",
+    ),
+    (
+        "tipped_chain_nonzero_exposure",
+        True,
+        3,
+        "not_ready_legacy_exposure_present",
+        "legacy_exposure_present_notify_operator_and_council",
+        "not_applicable_legacy_exposure_present",
+    ),
+]
+
 
 def _fail(msg: str) -> None:
     print(f"FAIL: {msg}", file=sys.stderr)
@@ -64,6 +99,7 @@ def _validate_hook_vectors_structure(
     if sr_enum is None or wh_enum is None or gh_enum is None:
         errors.append("hook vectors: schema missing enum lists for hook fields")
         return errors
+    normalized_cases: list[tuple[str, bool, int, str, str, str]] = []
     for i, c in enumerate(cases):
         if not isinstance(c, dict):
             errors.append(f"cases[{i}]: expected object")
@@ -96,6 +132,124 @@ def _validate_hook_vectors_structure(
                 errors.append(
                     f"cases[{i}]: {label}={val!r} not in schema enum for {label}"
                 )
+        if all(k in c for k in required):
+            normalized_cases.append(
+                (
+                    c["name"],
+                    c["has_chainstate_tip"],
+                    c["legacy_exposure_total"],
+                    c["sunset_readiness"],
+                    c["warning_hook"],
+                    c["grace_hook"],
+                )
+            )
+    if errors:
+        return errors
+    if normalized_cases != CANONICAL_HOOK_CASES:
+        errors.append(
+            f"hook vectors: cases drifted from frozen canonical truth table: {normalized_cases!r}"
+        )
+    return errors
+
+
+def _legacy_exposure_hooks(has_tip: bool, total: int) -> tuple[str, str, str]:
+    if not has_tip:
+        return (
+            "invalid_no_chainstate_tip",
+            "none",
+            "not_applicable_no_chainstate_tip",
+        )
+    if total == 0:
+        return (
+            "ready_for_operator_defined_grace_window",
+            "none",
+            "start_operator_defined_grace_window",
+        )
+    return (
+        "not_ready_legacy_exposure_present",
+        "legacy_exposure_present_notify_operator_and_council",
+        "not_applicable_legacy_exposure_present",
+    )
+
+
+def _validate_example_semantics(example: object) -> list[str]:
+    if not isinstance(example, dict):
+        return ["example fixture: top-level must be an object"]
+    errors: list[str] = []
+    if example.get("chainstate_has_tip") is not True:
+        errors.append("example fixture: chainstate_has_tip must be true for emitted scanner JSON")
+    watched = example.get("watched_legacy_suite_ids")
+    if not isinstance(watched, list) or not all(isinstance(x, int) for x in watched):
+        return errors + ["example fixture: watched_legacy_suite_ids must be an integer array"]
+    reports = example.get("legacy_suite_reports")
+    if not isinstance(reports, list) or not all(isinstance(x, dict) for x in reports):
+        return errors + ["example fixture: legacy_suite_reports must be an array of objects"]
+    if len(reports) != len(watched):
+        errors.append(
+            "example fixture: legacy_suite_reports must contain exactly one row per watched_legacy_suite_id"
+        )
+    report_suite_ids: list[int] = []
+    total = 0
+    include_outpoints = example.get("include_outpoints")
+    for idx, report in enumerate(reports):
+        suite_id = report.get("suite_id")
+        utxo_exposure_count = report.get("utxo_exposure_count")
+        outpoint_count = report.get("outpoint_count")
+        if not isinstance(suite_id, int):
+            errors.append(f"example fixture: legacy_suite_reports[{idx}].suite_id must be an integer")
+            continue
+        report_suite_ids.append(suite_id)
+        if not isinstance(utxo_exposure_count, int):
+            errors.append(
+                f"example fixture: legacy_suite_reports[{idx}].utxo_exposure_count must be an integer"
+            )
+            continue
+        if not isinstance(outpoint_count, int):
+            errors.append(
+                f"example fixture: legacy_suite_reports[{idx}].outpoint_count must be an integer"
+            )
+            continue
+        if outpoint_count != utxo_exposure_count:
+            errors.append(
+                f"example fixture: legacy_suite_reports[{idx}] outpoint_count must equal utxo_exposure_count"
+            )
+        total += utxo_exposure_count
+        outpoints = report.get("outpoints")
+        if include_outpoints is True:
+            if not isinstance(outpoints, list):
+                errors.append(
+                    f"example fixture: legacy_suite_reports[{idx}].outpoints must be present when include_outpoints=true"
+                )
+            elif len(outpoints) != outpoint_count:
+                errors.append(
+                    f"example fixture: legacy_suite_reports[{idx}] outpoints length must equal outpoint_count"
+                )
+        elif "outpoints" in report:
+            errors.append(
+                f"example fixture: legacy_suite_reports[{idx}].outpoints must be absent when include_outpoints=false"
+            )
+    if report_suite_ids != watched:
+        errors.append(
+            f"example fixture: legacy_suite_reports suite_id order {report_suite_ids!r} must match watched_legacy_suite_ids {watched!r}"
+        )
+    legacy_exposure_total = example.get("legacy_exposure_total")
+    if not isinstance(legacy_exposure_total, int):
+        errors.append("example fixture: legacy_exposure_total must be an integer")
+        return errors
+    if legacy_exposure_total != total:
+        errors.append(
+            f"example fixture: legacy_exposure_total={legacy_exposure_total} must equal summed utxo_exposure_count={total}"
+        )
+    expected_hooks = _legacy_exposure_hooks(True, legacy_exposure_total)
+    for field, expected in (
+        ("sunset_readiness", expected_hooks[0]),
+        ("warning_hook", expected_hooks[1]),
+        ("grace_hook", expected_hooks[2]),
+    ):
+        if example.get(field) != expected:
+            errors.append(
+                f"example fixture: {field}={example.get(field)!r} must equal canonical hook output {expected!r}"
+            )
     return errors
 
 
@@ -141,6 +295,11 @@ def main() -> int:
         for e in schema_errors:
             path = ".".join(str(p) for p in e.absolute_path)
             print(f"FAIL: example JSON at {path}: {e.message}", file=sys.stderr)
+        return 1
+    example_errors = _validate_example_semantics(example)
+    if example_errors:
+        for msg in example_errors:
+            _fail(msg)
         return 1
 
     try:

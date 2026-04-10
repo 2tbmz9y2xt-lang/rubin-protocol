@@ -1,13 +1,30 @@
 # Conformance Fixtures Changelog
 
-Этот файл фиксирует **осознанные** изменения `conformance/fixtures/CV-*.json`.
+Этот файл фиксирует **осознанные** изменения `conformance/fixtures/CV-*.json`
+и shared protocol artifacts под `conformance/fixtures/protocol/*.json`.
 
 Policy:
 - при любом изменении `CV-*.json` обновление этого файла обязательно;
+- при любом изменении `conformance/fixtures/protocol/*.json` обновление этого файла обязательно;
 - указывать причину, инструмент регенерации и список изменённых fixtures;
 - генератор `clients/go/cmd/gen-conformance-fixtures` используется только вручную (не CI).
 
 ---
+
+## 2026-04-10 — Production activation schedule fixture (Q-IMPL-ROTATION-PRODUCTION-ACTIVATION-SCHEDULE-01)
+
+Причина:
+- production node startup больше не должен выводить activation state из local `suite_registry` bootstrap;
+- нужен один compiled authoritative per-network schedule artifact с явным empty-schedule поведением для `mainnet/testnet`;
+- локальный `rotation_descriptor` остаётся non-production only, а production activation authority теперь идёт из общего protocol fixture.
+
+Инструменты:
+- новый protocol fixture `conformance/fixtures/protocol/production_rotation_schedule_v1.json`,
+- Go/Rust node loader tests,
+- проверка через `go test ./node ./cmd/rubin-node` и `cargo test -p rubin-node`.
+
+Изменённые fixtures:
+- `protocol/production_rotation_schedule_v1.json` (new)
 
 ## 2026-04-10 — Live CORE_EXT manifest binding normalization (Q-IMPL-ROTATION-MANIFEST-ARCHIVAL-RUNTIME-SPLIT-01)
 
