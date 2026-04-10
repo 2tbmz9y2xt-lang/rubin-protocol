@@ -484,7 +484,7 @@ fn default_runtime_suite_registry() -> &'static crate::suite_registry::SuiteRegi
         .get_or_init(crate::suite_registry::SuiteRegistry::default_registry)
 }
 
-fn runtime_verification_registry<'a>(
+fn runtime_verification_registry_with_default<'a>(
     registry: Option<&'a crate::suite_registry::SuiteRegistry>,
     default_registry: &'a crate::suite_registry::SuiteRegistry,
 ) -> Result<&'a crate::suite_registry::SuiteRegistry, TxError> {
@@ -502,11 +502,32 @@ fn runtime_verification_registry<'a>(
     }
 }
 
+fn runtime_verification_registry(
+    registry: Option<&crate::suite_registry::SuiteRegistry>,
+) -> Result<&crate::suite_registry::SuiteRegistry, TxError> {
+    runtime_verification_registry_with_default(registry, default_runtime_suite_registry())
+}
+
 fn runtime_suite_params_for_verification(
     suite_id: u8,
     registry: Option<&crate::suite_registry::SuiteRegistry>,
 ) -> Result<crate::suite_registry::SuiteParams, TxError> {
-    let registry = runtime_verification_registry(registry, default_runtime_suite_registry())?;
+    let registry = runtime_verification_registry(registry)?;
+    let params = registry.lookup(suite_id).cloned();
+    params.ok_or_else(|| {
+        TxError::new(
+            ErrorCode::TxErrSigAlgInvalid,
+            "verify_sig: unsupported suite_id",
+        )
+    })
+}
+
+fn runtime_suite_params_for_verification_with_default(
+    suite_id: u8,
+    registry: Option<&crate::suite_registry::SuiteRegistry>,
+    default_registry: &crate::suite_registry::SuiteRegistry,
+) -> Result<crate::suite_registry::SuiteParams, TxError> {
+    let registry = runtime_verification_registry_with_default(registry, default_registry)?;
     let params = registry.lookup(suite_id).cloned();
     params.ok_or_else(|| {
         TxError::new(
@@ -1063,6 +1084,27 @@ mod tests {
     }
 
     #[test]
+    fn runtime_suite_params_for_verification_nil_matches_explicit_default_live_registry() {
+        let canonical = canonical_default_suite_params();
+        let explicit = crate::suite_registry::SuiteRegistry::default_registry();
+
+        let nil_params = super::runtime_suite_params_for_verification(
+            crate::constants::SUITE_ID_ML_DSA_87,
+            None,
+        )
+        .expect("nil params");
+        let explicit_params = super::runtime_suite_params_for_verification(
+            crate::constants::SUITE_ID_ML_DSA_87,
+            Some(&explicit),
+        )
+        .expect("explicit params");
+
+        assert_eq!(nil_params, canonical);
+        assert_eq!(explicit_params, canonical);
+        assert_eq!(nil_params, explicit_params);
+    }
+
+    #[test]
     fn resolve_suite_verifier_binding_matches_core_ext_descriptor() {
         let params = canonical_default_suite_params();
         let binding = super::resolve_suite_verifier_binding(
@@ -1121,7 +1163,7 @@ mod tests {
         ];
 
         for (name, registry) in test_cases {
-            let err = super::runtime_verification_registry(None, &registry)
+            let err = super::runtime_verification_registry_with_default(None, &registry)
                 .expect_err("noncanonical default registry must fail closed");
             assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid, "{name}");
             assert_eq!(
@@ -1145,7 +1187,7 @@ mod tests {
         ];
 
         for (name, registry) in test_cases {
-            let err = super::runtime_verification_registry(None, &registry)
+            let err = super::runtime_verification_registry_with_default(None, &registry)
                 .expect_err("noncanonical default registry must fail closed");
             assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid, "{name}");
             assert_eq!(
@@ -1173,8 +1215,48 @@ mod tests {
         ];
 
         for (name, registry) in test_cases {
-            let err = super::runtime_verification_registry(None, &registry)
+            let err = super::runtime_verification_registry_with_default(None, &registry)
                 .expect_err("noncanonical default registry must fail closed");
+            assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid, "{name}");
+            assert_eq!(
+                err.msg, "verify_sig: default runtime registry drift",
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_suite_params_for_verification_with_default_rejects_noncanonical_default_manifest() {
+        let test_cases = [
+            (
+                "alg_name_empty",
+                drifted_default_runtime_registry(|params| params.alg_name = ""),
+            ),
+            (
+                "alg_name_alias",
+                drifted_default_runtime_registry(|params| params.alg_name = "ml-dsa-87"),
+            ),
+            (
+                "pubkey_len",
+                drifted_default_runtime_registry(|params| params.pubkey_len -= 1),
+            ),
+            (
+                "sig_len",
+                drifted_default_runtime_registry(|params| params.sig_len -= 1),
+            ),
+            (
+                "verify_cost",
+                drifted_default_runtime_registry(|params| params.verify_cost -= 1),
+            ),
+        ];
+
+        for (name, registry) in test_cases {
+            let err = super::runtime_suite_params_for_verification_with_default(
+                crate::constants::SUITE_ID_ML_DSA_87,
+                None,
+                &registry,
+            )
+            .expect_err("noncanonical default registry must fail closed");
             assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid, "{name}");
             assert_eq!(
                 err.msg, "verify_sig: default runtime registry drift",

@@ -433,6 +433,10 @@ pub fn core_ext_verification_binding_from_name(
     core_ext_verification_binding_from_name_and_descriptor(binding_name, &[], &[])
 }
 
+fn unsupported_core_ext_binding_error(binding_name: &str) -> String {
+    format!("unsupported core_ext binding: {binding_name:?}")
+}
+
 pub fn normalize_core_ext_binding_name(binding_name: &str) -> Result<&'static str, String> {
     let binding_name = binding_name.trim();
     match binding_name {
@@ -441,7 +445,7 @@ pub fn normalize_core_ext_binding_name(binding_name: &str) -> Result<&'static st
         CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1 => {
             Ok(CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1)
         }
-        _ => Err(format!("unsupported core_ext binding: {binding_name:?}")),
+        _ => Err(unsupported_core_ext_binding_error(binding_name)),
     }
 }
 
@@ -476,7 +480,7 @@ pub fn core_ext_verification_binding_from_normalized_name_and_descriptor(
                 parse_core_ext_openssl_digest32_binding_descriptor(binding_descriptor)?,
             ))
         }
-        _ => Err(format!("unsupported core_ext binding: {binding_name:?}")),
+        _ => Err(unsupported_core_ext_binding_error(binding_name)),
     }
 }
 
@@ -488,11 +492,16 @@ pub fn live_core_ext_verification_binding_from_normalized_name_and_descriptor(
     binding_descriptor: &[u8],
     ext_payload_schema: &[u8],
 ) -> Result<CoreExtVerificationBinding, String> {
-    core_ext_verification_binding_from_normalized_name_and_descriptor(
-        binding_name,
-        binding_descriptor,
-        ext_payload_schema,
-    )
+    match binding_name {
+        CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1 => {
+            core_ext_verification_binding_from_normalized_name_and_descriptor(
+                binding_name,
+                binding_descriptor,
+                ext_payload_schema,
+            )
+        }
+        _ => Err(unsupported_core_ext_binding_error(binding_name)),
+    }
 }
 
 pub fn normalize_live_core_ext_binding_name(binding_name: &str) -> Result<&'static str, String> {
@@ -501,7 +510,7 @@ pub fn normalize_live_core_ext_binding_name(binding_name: &str) -> Result<&'stat
         CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1 => {
             Ok(CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1)
         }
-        _ => Err(format!("unsupported core_ext binding: {binding_name:?}")),
+        _ => Err(unsupported_core_ext_binding_error(binding_name)),
     }
 }
 
@@ -2461,6 +2470,22 @@ mod tests {
             normalized,
             CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(_)
         ));
+
+        let err = live_core_ext_verification_binding_from_normalized_name_and_descriptor(
+            "",
+            &descriptor,
+            &[0xb2],
+        )
+        .expect_err("empty normalized live binding must fail");
+        assert_eq!(err, unsupported_core_ext_binding_error(""));
+
+        let err = live_core_ext_verification_binding_from_normalized_name_and_descriptor(
+            "native_verify_sig",
+            &descriptor,
+            &[0xb2],
+        )
+        .expect_err("native normalized live binding must fail");
+        assert_eq!(err, unsupported_core_ext_binding_error("native_verify_sig"));
 
         let err = live_core_ext_verification_binding_from_name_and_descriptor(
             CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,

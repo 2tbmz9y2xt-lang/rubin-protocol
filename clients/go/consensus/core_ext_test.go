@@ -1455,6 +1455,16 @@ func TestParseLiveCoreExtVerifySigExtBinding(t *testing.T) {
 	if verifyFn == nil {
 		t.Fatalf("normalized live binding must create verify function")
 	}
+	if _, err := ParseNormalizedLiveCoreExtVerifySigExtBinding("", descriptor, []byte{0xb2}); err == nil {
+		t.Fatalf("empty normalized live binding must fail")
+	} else if got, want := err.Error(), unsupportedCoreExtBindingError("").Error(); got != want {
+		t.Fatalf("err=%q, want %q", got, want)
+	}
+	if _, err := ParseNormalizedLiveCoreExtVerifySigExtBinding("native_verify_sig", descriptor, []byte{0xb2}); err == nil {
+		t.Fatalf("native normalized live binding must fail")
+	} else if got, want := err.Error(), unsupportedCoreExtBindingError("native_verify_sig").Error(); got != want {
+		t.Fatalf("err=%q, want %q", got, want)
+	}
 }
 
 func TestCoreExtOpenSSLDigest32BindingDescriptorErrors(t *testing.T) {

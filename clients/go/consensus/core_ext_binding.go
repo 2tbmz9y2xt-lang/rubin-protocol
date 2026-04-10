@@ -11,6 +11,10 @@ const CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 = "verify_sig_ext_openssl_
 
 var coreExtOpenSSLDigest32BindingDescriptorPrefix = []byte("RUBIN-CORE-EXT-VERIFY-SIG-OPENSSL-DIGEST32-v1")
 
+func unsupportedCoreExtBindingError(binding string) error {
+	return fmt.Errorf("unsupported core_ext binding: %q", binding)
+}
+
 type CoreExtOpenSSLDigest32BindingDescriptor struct {
 	OpenSSLAlg string
 	PubkeyLen  int
@@ -25,7 +29,7 @@ func NormalizeCoreExtBindingName(binding string) (string, error) {
 	case "", "native_verify_sig", CoreExtBindingNameVerifySigExtOpenSSLDigest32V1:
 		return binding, nil
 	default:
-		return "", fmt.Errorf("unsupported core_ext binding: %q", binding)
+		return "", unsupportedCoreExtBindingError(binding)
 	}
 }
 
@@ -42,7 +46,7 @@ func NormalizeLiveCoreExtBindingName(binding string) (string, error) {
 	case CoreExtBindingNameVerifySigExtOpenSSLDigest32V1:
 		return binding, nil
 	default:
-		return "", fmt.Errorf("unsupported core_ext binding: %q", binding)
+		return "", unsupportedCoreExtBindingError(binding)
 	}
 }
 
@@ -62,7 +66,7 @@ func parseNormalizedCoreExtVerifySigExtBinding(binding string, bindingDescriptor
 			return verifyCoreExtOpenSSLDigest32(desc, pubkey, signature, digest32)
 		}, nil
 	default:
-		return nil, fmt.Errorf("unsupported core_ext binding: %q", binding)
+		return nil, unsupportedCoreExtBindingError(binding)
 	}
 }
 
@@ -80,6 +84,9 @@ func ParseNormalizedCoreExtVerifySigExtBinding(binding string, bindingDescriptor
 // NormalizeLiveCoreExtBindingName and enforces the live manifest requirement
 // that verify_sig_ext OpenSSL bindings carry a non-empty ext_payload_schema.
 func ParseNormalizedLiveCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte, extPayloadSchema []byte) (CoreExtVerifySigExtFunc, error) {
+	if binding != CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 {
+		return nil, unsupportedCoreExtBindingError(binding)
+	}
 	return parseNormalizedCoreExtVerifySigExtBinding(binding, bindingDescriptor, extPayloadSchema)
 }
 

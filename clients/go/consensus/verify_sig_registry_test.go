@@ -16,6 +16,19 @@ func canonicalDefaultRuntimeSuiteParams() SuiteParams {
 	return params
 }
 
+func assertDefaultRuntimeRegistryDriftError(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected default runtime registry drift error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
+	}
+	if got, want := err.Error(), fmt.Sprintf("%s: verify_sig: default runtime registry drift", TX_ERR_SIG_ALG_INVALID); got != want {
+		t.Fatalf("err=%q, want %q", got, want)
+	}
+}
+
 func TestVerifySigWithRegistry_NilRegistry_UsesDefaultLiveRegistry(t *testing.T) {
 	var d [32]byte
 	// ML-DSA-87 with wrong lengths still routes through the canonical default
@@ -67,6 +80,87 @@ func TestVerifySigWithRegistry_NilRegistry_MatchesExplicitDefaultLiveRegistry(t 
 		if got != wantAlg {
 			t.Fatalf("call %d alg=%q, want %q", i, got, wantAlg)
 		}
+	}
+}
+
+func TestRuntimeSuiteParamsForVerification_NilRegistryMatchesExplicitDefaultLiveRegistry(t *testing.T) {
+	reg := DefaultSuiteRegistry()
+
+	gotNil, err := runtimeSuiteParamsForVerification(SUITE_ID_ML_DSA_87, nil)
+	if err != nil {
+		t.Fatalf("runtimeSuiteParamsForVerification(nil): %v", err)
+	}
+	gotExplicit, err := runtimeSuiteParamsForVerification(SUITE_ID_ML_DSA_87, reg)
+	if err != nil {
+		t.Fatalf("runtimeSuiteParamsForVerification(explicit): %v", err)
+	}
+
+	want := canonicalDefaultRuntimeSuiteParams()
+	if gotNil != want {
+		t.Fatalf("nil params=%+v, want %+v", gotNil, want)
+	}
+	if gotExplicit != want {
+		t.Fatalf("explicit params=%+v, want %+v", gotExplicit, want)
+	}
+	if gotNil != gotExplicit {
+		t.Fatalf("nil params=%+v != explicit params=%+v", gotNil, gotExplicit)
+	}
+}
+
+func TestRuntimeSuiteParamsForVerification_NilRegistry_DefaultRegistryDriftFailsClosed(t *testing.T) {
+	testCases := []struct {
+		name   string
+		mutate func(*SuiteParams)
+	}{
+		{
+			name: "alg_name_empty",
+			mutate: func(params *SuiteParams) {
+				params.AlgName = ""
+			},
+		},
+		{
+			name: "alg_name_alias",
+			mutate: func(params *SuiteParams) {
+				params.AlgName = strings.ToLower(params.AlgName)
+			},
+		},
+		{
+			name: "pubkey_len",
+			mutate: func(params *SuiteParams) {
+				params.PubkeyLen--
+			},
+		},
+		{
+			name: "sig_len",
+			mutate: func(params *SuiteParams) {
+				params.SigLen--
+			},
+		},
+		{
+			name: "verify_cost",
+			mutate: func(params *SuiteParams) {
+				params.VerifyCost--
+			},
+		},
+	}
+
+	orig := defaultRuntimeSuiteRegistryForVerification
+	defer func() { defaultRuntimeSuiteRegistryForVerification = orig }()
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			defaultRuntimeSuiteRegistryForVerification = func() *SuiteRegistry {
+				params := canonicalDefaultRuntimeSuiteParams()
+				tc.mutate(&params)
+				return &SuiteRegistry{
+					suites: map[uint8]SuiteParams{
+						SUITE_ID_ML_DSA_87: params,
+					},
+				}
+			}
+
+			_, err := runtimeSuiteParamsForVerification(SUITE_ID_ML_DSA_87, nil)
+			assertDefaultRuntimeRegistryDriftError(t, err)
+		})
 	}
 }
 
@@ -123,15 +217,7 @@ func TestVerifySigWithRegistry_NilRegistry_DefaultRegistryDriftFailsClosed(t *te
 
 			var d [32]byte
 			_, err := verifySigWithRegistry(SUITE_ID_ML_DSA_87, []byte{0x01}, []byte{0x02}, d, nil)
-			if err == nil {
-				t.Fatal("expected default runtime registry drift error")
-			}
-			if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
-				t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
-			}
-			if got, want := err.Error(), fmt.Sprintf("%s: verify_sig: default runtime registry drift", TX_ERR_SIG_ALG_INVALID); got != want {
-				t.Fatalf("err=%q, want %q", got, want)
-			}
+			assertDefaultRuntimeRegistryDriftError(t, err)
 		})
 	}
 }
@@ -156,15 +242,7 @@ func TestVerifySigWithRegistry_NilRegistry_VerifyCostDriftFailsClosed(t *testing
 
 	var d [32]byte
 	_, err := verifySigWithRegistry(SUITE_ID_ML_DSA_87, []byte{0x01}, []byte{0x02}, d, nil)
-	if err == nil {
-		t.Fatal("expected default runtime registry verify_cost drift error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
-	}
-	if got, want := err.Error(), fmt.Sprintf("%s: verify_sig: default runtime registry drift", TX_ERR_SIG_ALG_INVALID); got != want {
-		t.Fatalf("err=%q, want %q", got, want)
-	}
+	assertDefaultRuntimeRegistryDriftError(t, err)
 }
 
 func TestResolveSuiteVerifierBinding_MatchesCanonicalOpenSSLDescriptor(t *testing.T) {
