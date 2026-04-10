@@ -5128,9 +5128,9 @@ mod tests {
     fn suite_registry_rejects_unknown_alg_name() {
         let err = build_suite_registry_from_json(&[SuiteParamsJson {
             suite_id: 3,
-            pubkey_len: 2592,
-            sig_len: 4627,
-            verify_cost: 990000,
+            pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
             alg_name: "SLH-DSA".to_string(),
         }])
         .unwrap_err();
@@ -5141,9 +5141,9 @@ mod tests {
     fn suite_registry_rejects_empty_alg_name() {
         let err = build_suite_registry_from_json(&[SuiteParamsJson {
             suite_id: 3,
-            pubkey_len: 2592,
-            sig_len: 4627,
-            verify_cost: 990000,
+            pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
             alg_name: "".to_string(),
         }])
         .unwrap_err();
@@ -5155,16 +5155,16 @@ mod tests {
         let err = build_suite_registry_from_json(&[
             SuiteParamsJson {
                 suite_id: 3,
-                pubkey_len: 2592,
-                sig_len: 4627,
-                verify_cost: 990000,
+                pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+                sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+                verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
                 alg_name: "ML-DSA-87".to_string(),
             },
             SuiteParamsJson {
                 suite_id: 3,
-                pubkey_len: 2592,
-                sig_len: 4627,
-                verify_cost: 990000,
+                pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+                sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+                verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
                 alg_name: "ML-DSA-87".to_string(),
             },
         ])
@@ -5177,9 +5177,9 @@ mod tests {
         let items = (0..(MAX_EXPLICIT_SUITE_REGISTRY_ITEMS + 1))
             .map(|idx| SuiteParamsJson {
                 suite_id: (idx + 1) as u8,
-                pubkey_len: 2592,
-                sig_len: 4627,
-                verify_cost: 990000,
+                pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+                sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+                verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
                 alg_name: "ML-DSA-87".to_string(),
             })
             .collect::<Vec<_>>();

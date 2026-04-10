@@ -991,12 +991,17 @@ mod tests {
         let path = dir.join("genesis.json");
         std::fs::write(
             &path,
-            "{\
-              \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
-              \"suite_registry\":[\
-                {\"suite_id\":66,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":8,\"openssl_alg\":\"ML-DSA-87\"}\
-              ]\
-            }",
+            format!(
+                "{{\
+                  \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+                  \"suite_registry\":[\
+                    {{\"suite_id\":66,\"pubkey_len\":{},\"sig_len\":{},\"verify_cost\":{},\"openssl_alg\":\"ML-DSA-87\"}}\
+                  ]\
+                }}",
+                ML_DSA_87_PUBKEY_BYTES,
+                ML_DSA_87_SIG_BYTES,
+                VERIFY_COST_ML_DSA_87
+            ),
         )
         .expect("write");
 
