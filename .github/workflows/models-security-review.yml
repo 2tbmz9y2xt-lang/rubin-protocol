@@ -262,7 +262,7 @@ jobs:
                 }
                 if (!modFile) continue;
                 const modRel = path.relative(repoRoot, modFile);
-                // Skip files already in changedFilePayload
+                // Skip module sources that are already part of the PR file list (not the same as "in changedFilePayload", which can omit files due to TOTAL_FILE_BUDGET).
                 if (changedFilesSet.has(modRel)) continue;
 
                 let modContent;
@@ -397,10 +397,10 @@ jobs:
             for (const file of changedFiles) {
               if (parityUsed >= PARITY_BUDGET) break;
               // Find the parity counterpart (either direction)
-              for (const [goFile, rsFile] of parityMap) {
+              for (const [pathA, pathB] of parityMap) {
                 let counterpart = null;
-                if (file === goFile && !changedFilesSet.has(rsFile)) counterpart = rsFile;
-                else if (file === rsFile && !changedFilesSet.has(goFile)) counterpart = goFile;
+                if (file === pathA && !changedFilesSet.has(pathB)) counterpart = pathB;
+                else if (file === pathB && !changedFilesSet.has(pathA)) counterpart = pathA;
                 if (!counterpart) continue;
                 if (parityCounterpartsSeen.has(counterpart)) continue;
                 const content = readChangedFile(counterpart);
@@ -527,16 +527,19 @@ jobs:
                 (changedFilePayload ? `\n\n---\nFULL CHANGED FILES (use to verify definitions before claiming anything missing):\n${changedFilePayload}` : '') +
                 dependencyContext + parityContext + previousFindings;
               const MAX_USER_CHARS = 260000;
+              const truncationNotice =
+                '\n\n[TRUNCATED: user payload exceeded workflow cap; treat tail sections as unreviewed]\n';
               core.info(
-                `security-review payload sizes: diff=${diff.length} changedFiles=${changedFilePayload.length} ` +
+                `security-review payload sizes: diff=${diff.length} changedFileCount=${changedFiles.length} ` +
+                `changedFilePayloadChars=${changedFilePayload.length} ` +
                 `dep=${dependencyContext.length} parity=${parityContext.length} prev=${previousFindings.length} user=${userContent.length}`
               );
               if (userContent.length > MAX_USER_CHARS) {
+                const maxUserPrefixChars = Math.max(0, MAX_USER_CHARS - truncationNotice.length);
                 core.warning(
                   `User message length ${userContent.length} exceeds cap ${MAX_USER_CHARS}; truncating with explicit notice`
                 );
-                userContent = userContent.slice(0, MAX_USER_CHARS) +
-                  '\n\n[TRUNCATED: user payload exceeded workflow cap; treat tail sections as unreviewed]\n';
+                userContent = userContent.slice(0, maxUserPrefixChars) + truncationNotice;
               }
               const response = await fetch(
                 'https://models.github.ai/inference/chat/completions',
