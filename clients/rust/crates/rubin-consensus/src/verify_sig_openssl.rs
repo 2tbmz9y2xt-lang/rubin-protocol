@@ -484,23 +484,30 @@ fn default_runtime_suite_registry() -> &'static crate::suite_registry::SuiteRegi
         .get_or_init(crate::suite_registry::SuiteRegistry::default_registry)
 }
 
-fn runtime_suite_params_for_verification(
-    suite_id: u8,
-    registry: Option<&crate::suite_registry::SuiteRegistry>,
-) -> Result<crate::suite_registry::SuiteParams, TxError> {
-    let params = match registry {
-        Some(registry) => registry.lookup(suite_id).cloned(),
+fn runtime_verification_registry<'a>(
+    registry: Option<&'a crate::suite_registry::SuiteRegistry>,
+    default_registry: &'a crate::suite_registry::SuiteRegistry,
+) -> Result<&'a crate::suite_registry::SuiteRegistry, TxError> {
+    match registry {
+        Some(registry) => Ok(registry),
         None => {
-            let registry = default_runtime_suite_registry();
-            if !registry.is_canonical_default_live_manifest() {
+            if !default_registry.is_canonical_default_live_manifest() {
                 return Err(TxError::new(
                     ErrorCode::TxErrSigAlgInvalid,
                     "verify_sig: default runtime registry drift",
                 ));
             }
-            registry.lookup(suite_id).cloned()
+            Ok(default_registry)
         }
-    };
+    }
+}
+
+fn runtime_suite_params_for_verification(
+    suite_id: u8,
+    registry: Option<&crate::suite_registry::SuiteRegistry>,
+) -> Result<crate::suite_registry::SuiteParams, TxError> {
+    let registry = runtime_verification_registry(registry, default_runtime_suite_registry())?;
+    let params = registry.lookup(suite_id).cloned();
     params.ok_or_else(|| {
         TxError::new(
             ErrorCode::TxErrSigAlgInvalid,
@@ -1002,6 +1009,26 @@ mod tests {
         let err = super::verify_sig_with_registry(0xFF, &[0u8; 32], &[0u8; 32], &[0u8; 32], None)
             .expect_err("bad suite");
         assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    }
+
+    #[test]
+    fn runtime_verification_registry_rejects_noncanonical_default_manifest() {
+        let mut suites = std::collections::BTreeMap::new();
+        suites.insert(
+            crate::constants::SUITE_ID_ML_DSA_87,
+            crate::suite_registry::SuiteParams {
+                suite_id: crate::constants::SUITE_ID_ML_DSA_87,
+                pubkey_len: crate::constants::ML_DSA_87_PUBKEY_BYTES,
+                sig_len: crate::constants::ML_DSA_87_SIG_BYTES,
+                verify_cost: crate::constants::VERIFY_COST_ML_DSA_87,
+                alg_name: "ML-DSA-65",
+            },
+        );
+        let registry = crate::suite_registry::SuiteRegistry::with_suites(suites);
+        let err = super::runtime_verification_registry(None, &registry)
+            .expect_err("noncanonical default registry must fail closed");
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+        assert_eq!(err.msg, "verify_sig: default runtime registry drift");
     }
 
     // Error Parsing (2)

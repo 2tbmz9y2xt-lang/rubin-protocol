@@ -150,10 +150,7 @@ func buildCoreExtProfiles(items []coreExtProfileJSON) (consensus.CoreExtProfileP
 		}
 		// formal-trace replays helper/conformance fixtures and must preserve
 		// non-live bindings so negative vectors reach consensus validation.
-		if binding == consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 && len(extPayloadSchema) == 0 {
-			return nil, fmt.Errorf("core_ext binding %s requires ext_payload_schema_hex", consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
-		}
-		verifySigExtFn, err := consensus.ParseNormalizedCoreExtVerifySigExtBinding(binding, bindingDescriptor)
+		verifySigExtFn, err := consensus.ParseNormalizedCoreExtVerifySigExtBinding(binding, bindingDescriptor, extPayloadSchema)
 		if err != nil {
 			return nil, err
 		}

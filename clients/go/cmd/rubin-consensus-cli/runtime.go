@@ -470,10 +470,7 @@ func buildCoreExtDeployments(items []CoreExtProfileJSON) ([]consensus.CoreExtDep
 }
 
 func parseRuntimeCoreExtBinding(binding string, bindingDescriptor []byte, extPayloadSchema []byte) (consensus.CoreExtVerifySigExtFunc, error) {
-	if binding == consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 && len(extPayloadSchema) == 0 {
-		return nil, fmt.Errorf("core_ext binding %s requires ext_payload_schema_hex", consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
-	}
-	return consensus.ParseNormalizedCoreExtVerifySigExtBinding(binding, bindingDescriptor)
+	return consensus.ParseNormalizedCoreExtVerifySigExtBinding(binding, bindingDescriptor, extPayloadSchema)
 }
 
 func buildCoreExtProfiles(items []CoreExtProfileJSON, chainIDHex string, expectedSetAnchorHex string) (consensus.CoreExtProfileProvider, error) {

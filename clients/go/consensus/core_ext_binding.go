@@ -46,18 +46,14 @@ func NormalizeLiveCoreExtBindingName(binding string) (string, error) {
 	}
 }
 
-// ParseNormalizedCoreExtVerifySigExtBinding assumes binding already came from
-// NormalizeCoreExtBindingName or NormalizeLiveCoreExtBindingName.
-//
-// This helper intentionally does not enforce live-only ext_payload_schema
-// requirements because helper/conformance/archive surfaces still replay
-// normalized bindings directly. Live/runtime callers must use the stricter
-// ParseNormalizedLiveCoreExtVerifySigExtBinding or ParseLiveCoreExtVerifySigExtBinding.
-func ParseNormalizedCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte) (CoreExtVerifySigExtFunc, error) {
+func parseNormalizedCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte, extPayloadSchema []byte) (CoreExtVerifySigExtFunc, error) {
 	switch binding {
 	case "", "native_verify_sig":
 		return nil, nil
 	case CoreExtBindingNameVerifySigExtOpenSSLDigest32V1:
+		if len(extPayloadSchema) == 0 {
+			return nil, fmt.Errorf("core_ext binding %s requires ext_payload_schema_hex", CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
+		}
 		desc, err := ParseCoreExtOpenSSLDigest32BindingDescriptor(bindingDescriptor)
 		if err != nil {
 			return nil, err
@@ -70,23 +66,30 @@ func ParseNormalizedCoreExtVerifySigExtBinding(binding string, bindingDescriptor
 	}
 }
 
+// ParseNormalizedCoreExtVerifySigExtBinding assumes binding already came from
+// NormalizeCoreExtBindingName or NormalizeLiveCoreExtBindingName.
+//
+// Even helper/conformance/archive surfaces must provide ext_payload_schema_hex
+// for the OpenSSL verify_sig_ext binding so Go/Rust do not expose a looser
+// helper-only parser surface than the live runtime.
+func ParseNormalizedCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte, extPayloadSchema []byte) (CoreExtVerifySigExtFunc, error) {
+	return parseNormalizedCoreExtVerifySigExtBinding(binding, bindingDescriptor, extPayloadSchema)
+}
+
 // ParseNormalizedLiveCoreExtVerifySigExtBinding assumes binding already passed
 // NormalizeLiveCoreExtBindingName and enforces the live manifest requirement
 // that verify_sig_ext OpenSSL bindings carry a non-empty ext_payload_schema.
 func ParseNormalizedLiveCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte, extPayloadSchema []byte) (CoreExtVerifySigExtFunc, error) {
-	if len(extPayloadSchema) == 0 {
-		return nil, fmt.Errorf("core_ext binding %s requires ext_payload_schema_hex", CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
-	}
-	return ParseNormalizedCoreExtVerifySigExtBinding(binding, bindingDescriptor)
+	return parseNormalizedCoreExtVerifySigExtBinding(binding, bindingDescriptor, extPayloadSchema)
 }
 
-func ParseCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte) (CoreExtVerifySigExtFunc, error) {
+func ParseCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte, extPayloadSchema []byte) (CoreExtVerifySigExtFunc, error) {
 	var err error
 	binding, err = NormalizeCoreExtBindingName(binding)
 	if err != nil {
 		return nil, err
 	}
-	return ParseNormalizedCoreExtVerifySigExtBinding(binding, bindingDescriptor)
+	return ParseNormalizedCoreExtVerifySigExtBinding(binding, bindingDescriptor, extPayloadSchema)
 }
 
 // ParseLiveCoreExtVerifySigExtBinding is the live runtime loader path for

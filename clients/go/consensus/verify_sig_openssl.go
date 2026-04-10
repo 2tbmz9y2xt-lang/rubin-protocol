@@ -407,12 +407,23 @@ func verifySigWithBinding(binding suiteVerifierBinding, pubkey []byte, signature
 	}
 }
 
+var defaultRuntimeSuiteRegistryForVerification = defaultRuntimeSuiteRegistry
+
+func runtimeVerificationRegistry(registry *SuiteRegistry) (*SuiteRegistry, error) {
+	if registry != nil {
+		return registry, nil
+	}
+	registry = defaultRuntimeSuiteRegistryForVerification()
+	if !registry.IsCanonicalDefaultLiveManifest() {
+		return nil, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: default runtime registry drift")
+	}
+	return registry, nil
+}
+
 func runtimeSuiteParamsForVerification(suiteID uint8, registry *SuiteRegistry) (SuiteParams, error) {
-	if registry == nil {
-		registry = defaultRuntimeSuiteRegistry()
-		if !registry.IsCanonicalDefaultLiveManifest() {
-			return SuiteParams{}, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: default runtime registry drift")
-		}
+	registry, err := runtimeVerificationRegistry(registry)
+	if err != nil {
+		return SuiteParams{}, err
 	}
 	params, ok := registry.Lookup(suiteID)
 	if !ok {

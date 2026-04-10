@@ -1102,18 +1102,11 @@ fn core_ext_profiles_from_json(
             decode_optional_hex_bytes("binding_descriptor_hex", &item.binding_descriptor_hex)?;
         let ext_payload_schema =
             decode_optional_hex_bytes("ext_payload_schema_hex", &item.ext_payload_schema_hex)?;
-        if binding_name == rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
-            && ext_payload_schema.is_empty()
-        {
-            return Err(format!(
-                "core_ext binding {} requires ext_payload_schema_hex",
-                rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
-            ));
-        }
         let binding =
             rubin_consensus::core_ext_verification_binding_from_normalized_name_and_descriptor(
                 binding_name,
                 &binding_descriptor,
+                &ext_payload_schema,
             )?;
         deployments.push(CoreExtDeploymentProfile {
             ext_id: item.ext_id,

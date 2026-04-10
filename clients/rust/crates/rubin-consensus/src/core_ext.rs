@@ -430,7 +430,7 @@ pub fn core_ext_profile_set_anchor_v1(
 pub fn core_ext_verification_binding_from_name(
     binding_name: &str,
 ) -> Result<CoreExtVerificationBinding, String> {
-    core_ext_verification_binding_from_name_and_descriptor(binding_name, &[])
+    core_ext_verification_binding_from_name_and_descriptor(binding_name, &[], &[])
 }
 
 pub fn normalize_core_ext_binding_name(binding_name: &str) -> Result<&'static str, String> {
@@ -448,21 +448,30 @@ pub fn normalize_core_ext_binding_name(binding_name: &str) -> Result<&'static st
 pub fn core_ext_verification_binding_from_name_and_descriptor(
     binding_name: &str,
     binding_descriptor: &[u8],
+    ext_payload_schema: &[u8],
 ) -> Result<CoreExtVerificationBinding, String> {
     let binding_name = normalize_core_ext_binding_name(binding_name)?;
     core_ext_verification_binding_from_normalized_name_and_descriptor(
         binding_name,
         binding_descriptor,
+        ext_payload_schema,
     )
 }
 
 pub fn core_ext_verification_binding_from_normalized_name_and_descriptor(
     binding_name: &str,
     binding_descriptor: &[u8],
+    ext_payload_schema: &[u8],
 ) -> Result<CoreExtVerificationBinding, String> {
     match binding_name {
         "" | "native_verify_sig" => Ok(CoreExtVerificationBinding::NativeVerifySig),
         CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1 => {
+            if ext_payload_schema.is_empty() {
+                return Err(format!(
+                    "core_ext binding {} requires ext_payload_schema_hex",
+                    CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+                ));
+            }
             Ok(CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(
                 parse_core_ext_openssl_digest32_binding_descriptor(binding_descriptor)?,
             ))
@@ -479,15 +488,10 @@ pub fn live_core_ext_verification_binding_from_normalized_name_and_descriptor(
     binding_descriptor: &[u8],
     ext_payload_schema: &[u8],
 ) -> Result<CoreExtVerificationBinding, String> {
-    if ext_payload_schema.is_empty() {
-        return Err(format!(
-            "core_ext binding {} requires ext_payload_schema_hex",
-            CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
-        ));
-    }
     core_ext_verification_binding_from_normalized_name_and_descriptor(
         binding_name,
         binding_descriptor,
+        ext_payload_schema,
     )
 }
 
@@ -2378,12 +2382,20 @@ mod tests {
         let openssl = core_ext_verification_binding_from_name_and_descriptor(
             &format!("  {CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1}\n"),
             &descriptor,
+            &[0xb2],
         )
         .expect("openssl binding");
         assert!(matches!(
             openssl,
             CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(_)
         ));
+        let err = core_ext_verification_binding_from_name_and_descriptor(
+            CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
+            &descriptor,
+            &[],
+        )
+        .expect_err("missing schema must fail");
+        assert!(err.contains("requires ext_payload_schema_hex"));
         let err =
             core_ext_verification_binding_from_name("unsupported").expect_err("unsupported bind");
         assert!(err.contains("unsupported core_ext binding"));

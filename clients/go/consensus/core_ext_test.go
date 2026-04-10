@@ -1275,7 +1275,7 @@ func TestApplyNonCoinbaseTxBasic_CORE_EXT_OpenSSLDigest32BindingVerifiesNonNativ
 	if err != nil {
 		t.Fatalf("CoreExtOpenSSLDigest32BindingDescriptorBytes: %v", err)
 	}
-	verifyFn, err := ParseCoreExtVerifySigExtBinding(CoreExtBindingNameVerifySigExtOpenSSLDigest32V1, descriptor)
+	verifyFn, err := ParseCoreExtVerifySigExtBinding(CoreExtBindingNameVerifySigExtOpenSSLDigest32V1, descriptor, []byte{0xb2})
 	if err != nil {
 		t.Fatalf("ParseCoreExtVerifySigExtBinding: %v", err)
 	}
@@ -1321,7 +1321,7 @@ func TestApplyNonCoinbaseTxBasic_CORE_EXT_TxContextEnabledOpenSSLDigest32Binding
 	if err != nil {
 		t.Fatalf("CoreExtOpenSSLDigest32BindingDescriptorBytes: %v", err)
 	}
-	verifyFn, err := ParseCoreExtVerifySigExtBinding(CoreExtBindingNameVerifySigExtOpenSSLDigest32V1, descriptor)
+	verifyFn, err := ParseCoreExtVerifySigExtBinding(CoreExtBindingNameVerifySigExtOpenSSLDigest32V1, descriptor, []byte{0xb2})
 	if err != nil {
 		t.Fatalf("ParseCoreExtVerifySigExtBinding: %v", err)
 	}
@@ -1386,22 +1386,25 @@ func TestVerifyCoreExtOpenSSLDigest32_LengthMismatchSkipsConsensusInit(t *testin
 }
 
 func TestParseCoreExtVerifySigExtBinding_NativeAndUnsupported(t *testing.T) {
-	verifyFn, err := ParseCoreExtVerifySigExtBinding("", nil)
+	verifyFn, err := ParseCoreExtVerifySigExtBinding("", nil, nil)
 	if err != nil {
 		t.Fatalf("native empty binding: %v", err)
 	}
 	if verifyFn != nil {
 		t.Fatalf("native empty binding must not create verify function")
 	}
-	verifyFn, err = ParseCoreExtVerifySigExtBinding("native_verify_sig", nil)
+	verifyFn, err = ParseCoreExtVerifySigExtBinding("native_verify_sig", nil, nil)
 	if err != nil {
 		t.Fatalf("native binding: %v", err)
 	}
 	if verifyFn != nil {
 		t.Fatalf("native binding must not create verify function")
 	}
-	if _, err := ParseCoreExtVerifySigExtBinding("unsupported", nil); err == nil {
+	if _, err := ParseCoreExtVerifySigExtBinding("unsupported", nil, nil); err == nil {
 		t.Fatalf("unsupported binding must fail")
+	}
+	if _, err := ParseCoreExtVerifySigExtBinding(CoreExtBindingNameVerifySigExtOpenSSLDigest32V1, []byte{0x01}, nil); err == nil {
+		t.Fatalf("openssl binding without ext_payload_schema must fail")
 	}
 }
 

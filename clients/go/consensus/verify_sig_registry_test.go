@@ -20,6 +20,33 @@ func TestVerifySigWithRegistry_NilRegistry_UsesDefaultLiveRegistry(t *testing.T)
 	}
 }
 
+func TestVerifySigWithRegistry_NilRegistry_DefaultRegistryDriftFailsClosed(t *testing.T) {
+	orig := defaultRuntimeSuiteRegistryForVerification
+	defaultRuntimeSuiteRegistryForVerification = func() *SuiteRegistry {
+		return &SuiteRegistry{
+			suites: map[uint8]SuiteParams{
+				SUITE_ID_ML_DSA_87: {
+					SuiteID:    SUITE_ID_ML_DSA_87,
+					PubkeyLen:  ML_DSA_87_PUBKEY_BYTES,
+					SigLen:     ML_DSA_87_SIG_BYTES,
+					VerifyCost: VERIFY_COST_ML_DSA_87,
+					AlgName:    "ML-DSA-65",
+				},
+			},
+		}
+	}
+	defer func() { defaultRuntimeSuiteRegistryForVerification = orig }()
+
+	var d [32]byte
+	_, err := verifySigWithRegistry(SUITE_ID_ML_DSA_87, []byte{0x01}, []byte{0x02}, d, nil)
+	if err == nil {
+		t.Fatal("expected default runtime registry drift error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
+	}
+}
+
 func TestVerifySigWithRegistry_UnknownSuite_ReturnsError(t *testing.T) {
 	reg := DefaultSuiteRegistry()
 	var d [32]byte
