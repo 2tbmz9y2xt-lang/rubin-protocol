@@ -375,9 +375,18 @@ func ValidateConfig(cfg Config) error {
 		if cfg.RotationDescriptor != nil {
 			return errors.New(productionLocalRotationDescriptorErr)
 		}
-		// Production validation checks only the compiled schedule artifact.
-		if _, _, err := productionRotationDescriptorForNetwork(network); err != nil {
+		// Production validation checks only the compiled schedule artifact and
+		// requires the helper to supply the canonical registry that matches the
+		// compiled activation state.
+		desc, registry, err := productionRotationDescriptorForNetwork(network)
+		if err != nil {
 			return err
+		}
+		if registry == nil {
+			return errors.New("production_rotation_schedule: missing registry")
+		}
+		if desc == nil && !registry.IsCanonicalDefaultLiveManifest() {
+			return errors.New("production_rotation_schedule: invalid empty-slot registry")
 		}
 		return nil
 	}

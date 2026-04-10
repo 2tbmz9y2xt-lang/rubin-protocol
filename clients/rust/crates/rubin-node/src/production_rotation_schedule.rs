@@ -55,9 +55,11 @@ fn production_rotation_schedule_error(message: impl Into<String>) -> String {
 fn decode_single_json_value<T: DeserializeOwned>(raw: &str) -> Result<T, String> {
     let mut deserializer = serde_json::Deserializer::from_str(raw);
     let value = T::deserialize(&mut deserializer).map_err(|err| err.to_string())?;
-    deserializer
-        .end()
-        .map_err(|_| "trailing JSON tokens".to_owned())?;
+    match Value::deserialize(&mut deserializer) {
+        Ok(_) => return Err("trailing JSON tokens".to_owned()),
+        Err(err) if err.is_eof() => {}
+        Err(err) => return Err(err.to_string()),
+    }
     Ok(value)
 }
 
@@ -189,7 +191,7 @@ pub(crate) fn load_compiled_production_rotation_schedule(
 
 pub(crate) fn production_rotation_descriptor_for_network(
     network: &str,
-) -> Result<Option<(CryptoRotationDescriptor, SuiteRegistry)>, String> {
+) -> Result<(Option<CryptoRotationDescriptor>, SuiteRegistry), String> {
     let (schedule, registry) = load_compiled_production_rotation_schedule()?;
     let descriptor = match network {
         "mainnet" => schedule.mainnet,
@@ -200,10 +202,13 @@ pub(crate) fn production_rotation_descriptor_for_network(
             )))
         }
     };
-    // A null slot means this network has no authoritative production activation state.
-    // The compiled registry is derived across schedule entries, so returning it here
-    // would leak foreign-network suites into an empty-slot caller.
-    Ok(descriptor.map(|descriptor| (descriptor, registry)))
+    if descriptor.is_none() {
+        // A null slot means this network has no authoritative production activation state.
+        // Empty-slot callers must use the canonical default pre-rotation registry and must
+        // not inherit foreign-network suites from the compiled schedule.
+        return Ok((None, SuiteRegistry::default_registry()));
+    }
+    Ok((descriptor, registry))
 }
 
 #[cfg(test)]
@@ -211,7 +216,7 @@ pub(crate) fn production_rotation_descriptor_for_network_with_registry_for_test(
     raw: &str,
     network: &str,
     registry: SuiteRegistry,
-) -> Result<Option<(CryptoRotationDescriptor, SuiteRegistry)>, String> {
+) -> Result<(Option<CryptoRotationDescriptor>, SuiteRegistry), String> {
     let (schedule, registry) = parse_schedule_with_registry(raw, Some(registry))?;
     let descriptor = match network {
         "mainnet" => schedule.mainnet,
@@ -222,7 +227,10 @@ pub(crate) fn production_rotation_descriptor_for_network_with_registry_for_test(
             )))
         }
     };
-    Ok(descriptor.map(|descriptor| (descriptor, registry)))
+    if descriptor.is_none() {
+        return Ok((None, SuiteRegistry::default_registry()));
+    }
+    Ok((descriptor, registry))
 }
 
 impl ProductionRotationDescriptorWire {
@@ -288,13 +296,19 @@ mod tests {
     }
 
     #[test]
-    fn production_rotation_descriptor_for_network_returns_none_for_explicit_empty_schedule() {
-        assert!(production_rotation_descriptor_for_network("mainnet")
-            .expect("mainnet schedule")
-            .is_none());
-        assert!(production_rotation_descriptor_for_network("testnet")
-            .expect("testnet schedule")
-            .is_none());
+    fn production_rotation_descriptor_for_network_returns_default_registry_for_explicit_empty_schedule(
+    ) {
+        let (mainnet_desc, mainnet_registry) =
+            production_rotation_descriptor_for_network("mainnet").expect("mainnet schedule");
+        assert!(mainnet_desc.is_none());
+        assert!(mainnet_registry.is_canonical_default_live_manifest());
+        assert!(mainnet_registry.lookup(66).is_none());
+
+        let (testnet_desc, testnet_registry) =
+            production_rotation_descriptor_for_network("testnet").expect("testnet schedule");
+        assert!(testnet_desc.is_none());
+        assert!(testnet_registry.is_canonical_default_live_manifest());
+        assert!(testnet_registry.lookup(66).is_none());
     }
 
     #[test]
@@ -424,9 +438,9 @@ mod tests {
             "mainnet",
             canonical_production_schedule_registry(),
         )
-        .expect("must load")
-        .expect("descriptor");
-        let (descriptor, registry) = loaded;
+        .expect("must load");
+        let descriptor = loaded.0.expect("descriptor");
+        let registry = loaded.1;
         assert_eq!(descriptor.old_suite_id, 1);
         assert_eq!(descriptor.new_suite_id, 66);
         assert!(registry.lookup(66).is_some());

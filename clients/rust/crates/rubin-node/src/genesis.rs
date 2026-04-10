@@ -298,7 +298,7 @@ fn build_suite_context_from_descriptor_with_production_lookup<F>(
     production_lookup: F,
 ) -> Result<Option<crate::sync::SuiteContext>, String>
 where
-    F: FnOnce(&str) -> Result<Option<(CryptoRotationDescriptor, SuiteRegistry)>, String>,
+    F: FnOnce(&str) -> Result<(Option<CryptoRotationDescriptor>, SuiteRegistry), String>,
 {
     use std::sync::Arc;
     if network.trim().is_empty() {
@@ -315,16 +315,15 @@ where
         if desc.is_some() {
             return Err(PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR.to_string());
         }
-        return match production_lookup(normalized_network.as_ref())? {
-            Some((descriptor, registry)) => Ok(Some(crate::sync::SuiteContext {
+        let (descriptor, registry) = production_lookup(normalized_network.as_ref())?;
+        return match descriptor {
+            Some(descriptor) => Ok(Some(crate::sync::SuiteContext {
                 rotation: Arc::new(DescriptorRotationProvider { descriptor }),
                 registry: Arc::new(registry),
             })),
-            // Production empty slots use an explicit default pre-rotation
-            // context and never consult local suite_registry input.
             None => Ok(Some(crate::sync::SuiteContext {
                 rotation: Arc::new(DefaultRotationProvider),
-                registry: Arc::new(SuiteRegistry::default_registry()),
+                registry: Arc::new(registry),
             })),
         };
     }
@@ -503,6 +502,7 @@ mod tests {
     };
     use rubin_consensus::{
         core_ext_profile_set_anchor_v1, CoreExtDeploymentProfile, CoreExtVerificationBinding,
+        SuiteRegistry,
     };
 
     use super::{
@@ -873,17 +873,17 @@ mod tests {
             " mainnet ",
             |network| {
                 assert_eq!(network, "mainnet");
-                Ok(Some((
-                    CryptoRotationDescriptor {
+                Ok((
+                    Some(CryptoRotationDescriptor {
                         name: "rotation-v1".to_string(),
                         old_suite_id: SUITE_ID_ML_DSA_87,
                         new_suite_id: 66,
                         create_height: 10,
                         spend_height: 20,
                         sunset_height: 30,
-                    },
+                    }),
                     canonical_production_schedule_registry(),
-                )))
+                ))
             },
         )
         .expect("must load")
@@ -909,17 +909,17 @@ mod tests {
                 input,
                 |network| {
                     assert_eq!(network, expected);
-                    Ok(Some((
-                        CryptoRotationDescriptor {
+                    Ok((
+                        Some(CryptoRotationDescriptor {
                             name: "rotation-v1".to_string(),
                             old_suite_id: SUITE_ID_ML_DSA_87,
                             new_suite_id: 66,
                             create_height: 10,
                             spend_height: 20,
                             sunset_height: 30,
-                        },
+                        }),
                         canonical_production_schedule_registry(),
-                    )))
+                    ))
                 },
             )
             .expect("must load")
@@ -981,7 +981,7 @@ mod tests {
                 input,
                 |network| {
                     assert_eq!(network, expected);
-                    Ok(None)
+                    Ok((None, SuiteRegistry::default_registry()))
                 },
             )
             .expect("must load")
@@ -1004,7 +1004,7 @@ mod tests {
             &None,
             &[],
             "testnet",
-            |_| Ok(None),
+            |_| Ok((None, SuiteRegistry::default_registry())),
         )
         .expect("must load")
         .expect("suite context");
@@ -1029,7 +1029,7 @@ mod tests {
             &None,
             &local_suite_registry,
             "mainnet",
-            |_| Ok(None),
+            |_| Ok((None, SuiteRegistry::default_registry())),
         )
         .expect("must load")
         .expect("suite context");
