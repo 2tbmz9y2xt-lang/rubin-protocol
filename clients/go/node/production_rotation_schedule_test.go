@@ -3,8 +3,10 @@ package node
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -127,7 +129,35 @@ func TestLoadCompiledProductionRotationScheduleRejectsMalformedDescriptorShape(t
 	if err == nil {
 		t.Fatal("expected malformed descriptor rejection")
 	}
-	if got, want := err.Error(), `production_rotation_schedule: networks.mainnet: json: cannot unmarshal array into Go value of type node.RotationConfigJSON`; got != want {
+	if !strings.Contains(err.Error(), `production_rotation_schedule: networks.mainnet:`) {
+		t.Fatalf("error=%q, want production schedule stem + mainnet path", err)
+	}
+	var typeErr *json.UnmarshalTypeError
+	if !errors.As(err, &typeErr) {
+		t.Fatalf("error=%q, want wrapped *json.UnmarshalTypeError", err)
+	}
+	if got, want := typeErr.Value, "array"; got != want {
+		t.Fatalf("unmarshal value=%q, want %q", got, want)
+	}
+}
+
+func TestLoadCompiledProductionRotationScheduleRejectsMissingRequiredDescriptorField(t *testing.T) {
+	_, _, err := loadCompiledProductionRotationScheduleFromJSONWithRegistry([]byte(`{
+		"version": 1,
+		"networks": {
+			"mainnet": {
+				"name": "rotation-v1",
+				"old_suite_id": 1,
+				"new_suite_id": 66,
+				"spend_height": 20
+			},
+			"testnet": null
+		}
+	}`), canonicalProductionScheduleRegistry())
+	if err == nil {
+		t.Fatal("expected missing required descriptor field rejection")
+	}
+	if got, want := err.Error(), `production_rotation_schedule: networks.mainnet: missing required field "create_height"`; got != want {
 		t.Fatalf("error=%q, want %q", got, want)
 	}
 }

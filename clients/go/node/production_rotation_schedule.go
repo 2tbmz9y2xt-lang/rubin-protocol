@@ -14,8 +14,8 @@ const productionRotationScheduleVersion = 1
 const productionRotationScheduleErrStem = "production_rotation_schedule"
 
 // Derived runtime copy of conformance/fixtures/protocol/production_rotation_schedule_v1.json.
-// Go embed cannot read a parent-path artifact directly, so tests keep this byte-equivalent
-// to the canonical protocol fixture.
+// Go embed cannot read a parent-path artifact directly, so tests keep this JSON-equivalent
+// to the canonical protocol fixture (ignoring insignificant whitespace differences).
 //
 //go:embed production_rotation_schedule_v1_embedded.json
 var embeddedProductionRotationScheduleV1 []byte
@@ -28,6 +28,15 @@ type productionRotationSchedule struct {
 type productionRotationScheduleWire struct {
 	Version  uint64                     `json:"version"`
 	Networks map[string]json.RawMessage `json:"networks"`
+}
+
+type productionRotationDescriptorWire struct {
+	Name         *string `json:"name"`
+	OldSuiteID   *uint8  `json:"old_suite_id"`
+	NewSuiteID   *uint8  `json:"new_suite_id"`
+	CreateHeight *uint64 `json:"create_height"`
+	SpendHeight  *uint64 `json:"spend_height"`
+	SunsetHeight *uint64 `json:"sunset_height,omitempty"`
 }
 
 func productionRotationScheduleError(format string, args ...any) error {
@@ -66,7 +75,7 @@ func loadCompiledProductionRotationScheduleFromJSONWithRegistry(
 	}
 	var wire productionRotationScheduleWire
 	if err := decodeSingleJSONValue(raw, &wire); err != nil {
-		return nil, nil, productionRotationScheduleError("parse embedded artifact: %v", err)
+		return nil, nil, productionRotationScheduleError("parse embedded artifact: %w", err)
 	}
 	if wire.Version != productionRotationScheduleVersion {
 		return nil, nil, productionRotationScheduleError(
@@ -112,9 +121,13 @@ func parseProductionRotationScheduleDescriptor(
 	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return nil, nil
 	}
-	var descriptorJSON RotationConfigJSON
-	if err := decodeSingleJSONValue(raw, &descriptorJSON); err != nil {
-		return nil, productionRotationScheduleError("networks.%s: %v", network, err)
+	var wire productionRotationDescriptorWire
+	if err := decodeSingleJSONValue(raw, &wire); err != nil {
+		return nil, productionRotationScheduleError("networks.%s: %w", network, err)
+	}
+	descriptorJSON, err := wire.toRotationConfigJSON()
+	if err != nil {
+		return nil, productionRotationScheduleError("networks.%s: %w", network, err)
 	}
 	descriptor := consensus.CryptoRotationDescriptor{
 		Name:         descriptorJSON.Name,
@@ -132,6 +145,48 @@ func parseProductionRotationScheduleDescriptor(
 		)
 	}
 	return &descriptor, nil
+}
+
+func (wire productionRotationDescriptorWire) toRotationConfigJSON() (RotationConfigJSON, error) {
+	name, err := requireProductionRotationScheduleField("name", wire.Name)
+	if err != nil {
+		return RotationConfigJSON{}, err
+	}
+	oldSuiteID, err := requireProductionRotationScheduleField("old_suite_id", wire.OldSuiteID)
+	if err != nil {
+		return RotationConfigJSON{}, err
+	}
+	newSuiteID, err := requireProductionRotationScheduleField("new_suite_id", wire.NewSuiteID)
+	if err != nil {
+		return RotationConfigJSON{}, err
+	}
+	createHeight, err := requireProductionRotationScheduleField("create_height", wire.CreateHeight)
+	if err != nil {
+		return RotationConfigJSON{}, err
+	}
+	spendHeight, err := requireProductionRotationScheduleField("spend_height", wire.SpendHeight)
+	if err != nil {
+		return RotationConfigJSON{}, err
+	}
+	var sunsetHeight uint64
+	if wire.SunsetHeight != nil {
+		sunsetHeight = *wire.SunsetHeight
+	}
+	return RotationConfigJSON{
+		Name:         *name,
+		OldSuiteID:   *oldSuiteID,
+		NewSuiteID:   *newSuiteID,
+		CreateHeight: *createHeight,
+		SpendHeight:  *spendHeight,
+		SunsetHeight: sunsetHeight,
+	}, nil
+}
+
+func requireProductionRotationScheduleField[T any](name string, value *T) (*T, error) {
+	if value == nil {
+		return nil, fmt.Errorf("missing required field %q", name)
+	}
+	return value, nil
 }
 
 func productionRotationDescriptorForNetwork(

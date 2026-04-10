@@ -1,9 +1,11 @@
 # Conformance Fixtures Changelog
 
-Этот файл фиксирует **осознанные** изменения `conformance/fixtures/CV-*.json`.
+Этот файл фиксирует **осознанные** изменения `conformance/fixtures/CV-*.json`
+и shared protocol artifacts под `conformance/fixtures/protocol/*.json`.
 
 Policy:
 - при любом изменении `CV-*.json` обновление этого файла обязательно;
+- при любом изменении `conformance/fixtures/protocol/*.json` обновление этого файла обязательно;
 - указывать причину, инструмент регенерации и список изменённых fixtures;
 - генератор `clients/go/cmd/gen-conformance-fixtures` используется только вручную (не CI).
 
