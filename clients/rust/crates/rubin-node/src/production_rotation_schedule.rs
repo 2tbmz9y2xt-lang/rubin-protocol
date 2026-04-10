@@ -1,6 +1,7 @@
 use rubin_consensus::{
     validate_rotation_descriptor_for_normalized_network, CryptoRotationDescriptor, SuiteRegistry,
 };
+use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -47,6 +48,16 @@ fn production_rotation_schedule_error(message: impl Into<String>) -> String {
     )
 }
 
+fn decode_single_json_value<T: DeserializeOwned>(raw: &str) -> Result<T, String> {
+    let mut deserializer = serde_json::Deserializer::from_str(raw);
+    let value = T::deserialize(&mut deserializer).map_err(|err| err.to_string())?;
+    match IgnoredAny::deserialize(&mut deserializer) {
+        Ok(_) => Err("trailing JSON tokens".to_owned()),
+        Err(err) if err.classify() == serde_json::error::Category::Eof => Ok(value),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
 fn parse_descriptor_slot(
     value: Value,
     network: &str,
@@ -79,7 +90,7 @@ fn parse_schedule_with_registry(
     raw: &str,
     registry: SuiteRegistry,
 ) -> Result<(ProductionRotationSchedule, SuiteRegistry), String> {
-    let wire: ProductionRotationScheduleWire = serde_json::from_str(raw).map_err(|err| {
+    let wire: ProductionRotationScheduleWire = decode_single_json_value(raw).map_err(|err| {
         production_rotation_schedule_error(format!("parse embedded artifact: {err}"))
     })?;
     if wire.version != PRODUCTION_ROTATION_SCHEDULE_VERSION {
@@ -326,13 +337,26 @@ mod tests {
             SuiteRegistry::default_registry(),
         )
         .expect_err("must reject");
-        assert!(
-            err.contains("parse embedded artifact"),
-            "unexpected error: {err}"
+        assert_eq!(
+            err,
+            "production_rotation_schedule: parse embedded artifact: trailing JSON tokens"
         );
-        assert!(
-            err.contains("trailing characters"),
-            "unexpected error: {err}"
+    }
+
+    #[test]
+    fn production_rotation_schedule_rejects_second_json_value() {
+        let err = production_rotation_descriptor_for_network_with_registry_for_test(
+            r#"{
+                "version": 1,
+                "networks": {"mainnet": null, "testnet": null}
+            } {"version":1,"networks":{"mainnet":null,"testnet":null}}"#,
+            "mainnet",
+            SuiteRegistry::default_registry(),
+        )
+        .expect_err("must reject");
+        assert_eq!(
+            err,
+            "production_rotation_schedule: parse embedded artifact: trailing JSON tokens"
         );
     }
 

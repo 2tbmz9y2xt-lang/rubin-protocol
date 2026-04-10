@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -13,8 +14,12 @@ import (
 )
 
 func productionRotationScheduleRepoPath(parts ...string) string {
-	segments := append([]string{"..", "..", ".."}, parts...)
-	return filepath.Join(segments...)
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		return ""
+	}
+	segments := append([]string{filepath.Dir(currentFile), "..", "..", ".."}, parts...)
+	return filepath.Clean(filepath.Join(segments...))
 }
 
 func canonicalProductionScheduleRegistry() *consensus.SuiteRegistry {
@@ -46,14 +51,21 @@ func compactJSONBytes(t *testing.T, raw []byte) []byte {
 }
 
 func TestEmbeddedProductionRotationScheduleMatchesCanonicalFixture(t *testing.T) {
-	raw, err := os.ReadFile(productionRotationScheduleRepoPath(
+	path := productionRotationScheduleRepoPath(
 		"conformance",
 		"fixtures",
 		"protocol",
 		"production_rotation_schedule_v1.json",
-	))
+	)
+	if path == "" {
+		t.Fatal("runtime.Caller failed")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("Stat(%s): %v", path, err)
+	}
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("ReadFile(canonical fixture): %v", err)
+		t.Fatalf("ReadFile(%s): %v", path, err)
 	}
 	if !bytes.Equal(
 		compactJSONBytes(t, raw),
@@ -202,6 +214,19 @@ func TestLoadCompiledProductionRotationScheduleRejectsTrailingJSONTokens(t *test
 	} true`), consensus.DefaultSuiteRegistry())
 	if err == nil {
 		t.Fatal("expected trailing token rejection")
+	}
+	if got, want := err.Error(), `production_rotation_schedule: parse embedded artifact: trailing JSON tokens`; got != want {
+		t.Fatalf("error=%q, want %q", got, want)
+	}
+}
+
+func TestLoadCompiledProductionRotationScheduleRejectsSecondJSONValue(t *testing.T) {
+	_, _, err := loadCompiledProductionRotationScheduleFromJSONWithRegistry([]byte(`{
+		"version": 1,
+		"networks": {"mainnet": null, "testnet": null}
+	} {"version":1,"networks":{"mainnet":null,"testnet":null}}`), consensus.DefaultSuiteRegistry())
+	if err == nil {
+		t.Fatal("expected second JSON value rejection")
 	}
 	if got, want := err.Error(), `production_rotation_schedule: parse embedded artifact: trailing JSON tokens`; got != want {
 		t.Fatalf("error=%q, want %q", got, want)

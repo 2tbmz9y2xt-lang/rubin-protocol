@@ -219,6 +219,12 @@ func (cfg Config) buildSuiteRegistry() (*consensus.SuiteRegistry, error) {
 // production schedule artifact; local suite_registry remains validated input
 // but never becomes a live activation or live binding source by itself.
 func (cfg Config) BuildRotationProvider() (consensus.RotationProvider, *consensus.SuiteRegistry, error) {
+	return cfg.buildRotationProviderWithProductionLookup(productionRotationDescriptorForNetwork)
+}
+
+func (cfg Config) buildRotationProviderWithProductionLookup(
+	productionLookup func(string) (*consensus.CryptoRotationDescriptor, *consensus.SuiteRegistry, error),
+) (consensus.RotationProvider, *consensus.SuiteRegistry, error) {
 	explicitRegistry, err := cfg.buildSuiteRegistry()
 	if err != nil {
 		return nil, nil, fmt.Errorf("suite_registry: %w", err)
@@ -234,7 +240,7 @@ func (cfg Config) BuildRotationProvider() (consensus.RotationProvider, *consensu
 		return nil, nil, errors.New(productionLocalRotationDescriptorErr)
 	}
 	if network == "mainnet" || network == "testnet" {
-		desc, registry, err := productionRotationDescriptorForNetwork(network)
+		desc, registry, err := productionLookup(network)
 		if err != nil {
 			return nil, nil, err
 		}
