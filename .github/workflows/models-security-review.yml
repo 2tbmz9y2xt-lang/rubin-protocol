@@ -302,8 +302,8 @@ jobs:
             // counterpart (and vice versa) so the model can verify parity
             // claims with actual evidence instead of hallucinating.
             // Pairs are symmetric: either path may be the "changed" file.
-            // Multiple entries with the same first path intentionally pull
-            // more than one counterpart (mirrors tools/run_local_hostile_review.py).
+            // Multiple entries with the same left-hand path intentionally pull
+            // more than one counterpart when one side maps to several peers.
             const PARITY_BUDGET = 60000;
             const parityMap = [
               // Consensus reference clients
@@ -344,11 +344,10 @@ jobs:
               ['clients/go/consensus/utxo_snapshot.go', 'clients/rust/crates/rubin-consensus/src/utxo_snapshot.rs'],
               ['clients/go/consensus/compactsize.go', 'clients/rust/crates/rubin-consensus/src/compactsize.rs'],
               ['clients/go/consensus/errors.go', 'clients/rust/crates/rubin-consensus/src/error.rs'],
-              // Node: config / genesis / embedded production schedule (rotation)
+              // Node bootstrap vs consensus rotation (real paths; no separate production_rotation_schedule.* in tree)
               ['clients/go/node/config.go', 'clients/rust/crates/rubin-node/src/genesis.rs'],
-              ['clients/go/node/production_rotation_schedule.go', 'clients/rust/crates/rubin-node/src/production_rotation_schedule.rs'],
-              ['clients/go/node/production_rotation_schedule.go', 'clients/rust/crates/rubin-node/src/genesis.rs'],
-              ['clients/rust/crates/rubin-node/src/production_rotation_schedule.rs', 'clients/go/node/config.go'],
+              ['clients/go/node/config.go', 'clients/rust/crates/rubin-consensus/src/suite_registry.rs'],
+              ['clients/rust/crates/rubin-node/src/genesis.rs', 'clients/go/consensus/rotation_production.go'],
               // Node: core state and sync
               ['clients/go/node/chainstate.go', 'clients/rust/crates/rubin-node/src/chainstate.rs'],
               ['clients/go/node/sync.go', 'clients/rust/crates/rubin-node/src/sync.rs'],
@@ -395,6 +394,7 @@ jobs:
             ];
             const parityEntries = [];
             let parityUsed = 0;
+            const parityCounterpartsSeen = new Set();
             for (const file of changedFiles) {
               if (parityUsed >= PARITY_BUDGET) break;
               // Find the parity counterpart (either direction)
@@ -403,12 +403,14 @@ jobs:
                 if (file === goFile && !changedFiles.includes(rsFile)) counterpart = rsFile;
                 else if (file === rsFile && !changedFiles.includes(goFile)) counterpart = goFile;
                 if (!counterpart) continue;
+                if (parityCounterpartsSeen.has(counterpart)) continue;
                 const content = readChangedFile(counterpart);
                 if (!content) continue;
                 const header = `PARITY FILE: ${counterpart} (counterpart of changed ${file})\n`;
                 const cap = Math.min(PARITY_BUDGET - parityUsed - header.length, PER_FILE_CAP);
                 if (cap < 200) continue;
                 const entry = header + content.slice(0, cap);
+                parityCounterpartsSeen.add(counterpart);
                 parityEntries.push(entry);
                 parityUsed += entry.length;
               }
