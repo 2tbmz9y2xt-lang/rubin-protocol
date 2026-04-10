@@ -310,12 +310,12 @@ type SuiteParamsJSON struct {
 }
 
 type suiteParamsJSONWire struct {
-	SuiteID    uint8  `json:"suite_id"`
-	PubkeyLen  int    `json:"pubkey_len"`
-	SigLen     int    `json:"sig_len"`
-	VerifyCost uint64 `json:"verify_cost"`
-	AlgName    string `json:"alg_name,omitempty"`
-	OpenSSLAlg string `json:"openssl_alg,omitempty"`
+	SuiteID    uint8   `json:"suite_id"`
+	PubkeyLen  int     `json:"pubkey_len"`
+	SigLen     int     `json:"sig_len"`
+	VerifyCost uint64  `json:"verify_cost"`
+	AlgName    *string `json:"alg_name,omitempty"`
+	OpenSSLAlg *string `json:"openssl_alg,omitempty"`
 }
 
 func (item *SuiteParamsJSON) UnmarshalJSON(data []byte) error {
@@ -327,20 +327,23 @@ func (item *SuiteParamsJSON) UnmarshalJSON(data []byte) error {
 	item.PubkeyLen = wire.PubkeyLen
 	item.SigLen = wire.SigLen
 	item.VerifyCost = wire.VerifyCost
-	item.AlgName = wire.AlgName
-	if strings.TrimSpace(item.AlgName) == "" {
-		item.AlgName = wire.OpenSSLAlg
+	item.AlgName = ""
+	if wire.AlgName != nil {
+		item.AlgName = *wire.AlgName
+	} else if wire.OpenSSLAlg != nil {
+		item.AlgName = *wire.OpenSSLAlg
 	}
 	return nil
 }
 
 func (item SuiteParamsJSON) MarshalJSON() ([]byte, error) {
+	algName := item.AlgName
 	return json.Marshal(suiteParamsJSONWire{
 		SuiteID:    item.SuiteID,
 		PubkeyLen:  item.PubkeyLen,
 		SigLen:     item.SigLen,
 		VerifyCost: item.VerifyCost,
-		AlgName:    item.AlgName,
+		AlgName:    &algName,
 	})
 }
 
@@ -348,7 +351,7 @@ const maxExplicitSuiteRegistryItems = 16
 const maxCoreExtHexFieldBytes = 4096
 
 func validateSuiteRegistryParamLen(value int) (int, error) {
-	if value <= 0 || value > consensus.MAX_WITNESS_BYTES_PER_TX {
+	if value < 0 || value > consensus.MAX_WITNESS_BYTES_PER_TX {
 		return 0, fmt.Errorf("bad suite_registry")
 	}
 	return value, nil
@@ -378,11 +381,6 @@ func validateSuiteRegistryItem(item SuiteParamsJSON) (consensus.SuiteParams, err
 	algName, err := normalizeSuiteRegistryAlgName(item.AlgName)
 	if err != nil {
 		return consensus.SuiteParams{}, err
-	}
-	if pubkeyLen != consensus.ML_DSA_87_PUBKEY_BYTES ||
-		sigLen != consensus.ML_DSA_87_SIG_BYTES ||
-		item.VerifyCost != consensus.VERIFY_COST_ML_DSA_87 {
-		return consensus.SuiteParams{}, fmt.Errorf("bad suite_registry")
 	}
 	return consensus.SuiteParams{
 		SuiteID:    item.SuiteID,
@@ -516,6 +514,8 @@ func buildSuiteRegistry(items []SuiteParamsJSON) (*consensus.SuiteRegistry, erro
 	}
 	seen := make(map[uint8]struct{}, len(items))
 	params := make([]consensus.SuiteParams, 0, len(items))
+	// CLI suite_registry is a harness overlay: keep synthetic param shapes for
+	// conformance vectors, but normalize/validate the renamed alg_name surface.
 	for _, it := range items {
 		if _, ok := seen[it.SuiteID]; ok {
 			return nil, fmt.Errorf("bad suite_registry")

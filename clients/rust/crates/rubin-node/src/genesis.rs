@@ -57,14 +57,46 @@ struct GenesisRotationDescriptor {
     sunset_height: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct GenesisSuiteParams {
     suite_id: u8,
     pubkey_len: u64,
     sig_len: u64,
     verify_cost: u64,
-    #[serde(default, rename = "alg_name", alias = "openssl_alg")]
     alg_name: String,
+}
+
+#[derive(Deserialize)]
+struct GenesisSuiteParamsWire {
+    suite_id: u8,
+    pubkey_len: u64,
+    sig_len: u64,
+    verify_cost: u64,
+    #[serde(default)]
+    alg_name: Option<String>,
+    #[serde(default)]
+    openssl_alg: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for GenesisSuiteParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = GenesisSuiteParamsWire::deserialize(deserializer)?;
+        let alg_name = if let Some(value) = wire.alg_name {
+            value
+        } else {
+            wire.openssl_alg.unwrap_or_default()
+        };
+        Ok(Self {
+            suite_id: wire.suite_id,
+            pubkey_len: wire.pubkey_len,
+            sig_len: wire.sig_len,
+            verify_cost: wire.verify_cost,
+            alg_name,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -972,6 +1004,70 @@ mod tests {
         let ctx = loaded.suite_context.expect("suite context");
         let params = ctx.registry.lookup(66).expect("suite 66");
         assert_eq!(params.alg_name, "ML-DSA-87");
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_accepts_dual_suite_registry_keys_with_alg_name_precedence() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-suite-registry-dual-keys-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            format!(
+                "{{\
+                  \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+                  \"suite_registry\":[\
+                    {{\"suite_id\":66,\"pubkey_len\":{},\"sig_len\":{},\"verify_cost\":{},\"alg_name\":\"ML-DSA-87\",\"openssl_alg\":\"ML-DSA-87\"}}\
+                  ]\
+                }}",
+                ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, VERIFY_COST_ML_DSA_87
+            ),
+        )
+        .expect("write");
+
+        let loaded = load_genesis_config(Some(&path), "devnet").expect("must load");
+        let ctx = loaded.suite_context.expect("suite context");
+        let params = ctx.registry.lookup(66).expect("suite 66");
+        assert_eq!(params.alg_name, "ML-DSA-87");
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_empty_alg_name_even_with_legacy_alias() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-suite-registry-empty-dual-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            format!(
+                "{{\
+                  \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+                  \"suite_registry\":[\
+                    {{\"suite_id\":66,\"pubkey_len\":{},\"sig_len\":{},\"verify_cost\":{},\"alg_name\":\"\",\"openssl_alg\":\"ML-DSA-87\"}}\
+                  ]\
+                }}",
+                ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, VERIFY_COST_ML_DSA_87
+            ),
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
+        assert_eq!(err, "bad suite_registry");
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
