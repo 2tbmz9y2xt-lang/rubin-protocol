@@ -184,14 +184,23 @@ import (
 )
 
 var (
-	opensslBootstrapOnce      sync.Once
-	opensslBootstrapErr       error
-	opensslConsensusInitOnce  sync.Once
-	opensslConsensusInitErr   error
-	opensslVerifySigOneShotFn = opensslVerifySigOneShot
-	opensslBootstrapFn        = opensslBootstrap
-	opensslConsensusInitFn    = opensslConsensusInit
+	opensslBootstrapOnce       sync.Once
+	opensslBootstrapErr        error
+	opensslConsensusInitOnce   sync.Once
+	opensslConsensusInitErr    error
+	defaultRuntimeRegistryOnce sync.Once
+	defaultRuntimeRegistry     *SuiteRegistry
+	opensslVerifySigOneShotFn  = opensslVerifySigOneShot
+	opensslBootstrapFn         = opensslBootstrap
+	opensslConsensusInitFn     = opensslConsensusInit
 )
+
+func defaultRuntimeSuiteRegistry() *SuiteRegistry {
+	defaultRuntimeRegistryOnce.Do(func() {
+		defaultRuntimeRegistry = DefaultSuiteRegistry()
+	})
+	return defaultRuntimeRegistry
+}
 
 // ensureOpenSSLConsensusInit performs bare OpenSSL initialization for the consensus
 // verification path. It does NOT read any RUBIN_OPENSSL_* environment variables,
@@ -400,7 +409,7 @@ func verifySigWithBinding(binding suiteVerifierBinding, pubkey []byte, signature
 
 func runtimeSuiteParamsForVerification(suiteID uint8, registry *SuiteRegistry) (SuiteParams, error) {
 	if registry == nil {
-		registry = DefaultSuiteRegistry()
+		registry = defaultRuntimeSuiteRegistry()
 	}
 	params, ok := registry.Lookup(suiteID)
 	if !ok {
