@@ -174,7 +174,7 @@ func canonicalProductionScheduleRegistryFromDescriptors(
 	descriptors map[string]*RotationConfigJSON,
 ) *consensus.SuiteRegistry {
 	paramsByID := map[uint8]consensus.SuiteParams{
-		consensus.SUITE_ID_ML_DSA_87: defaultSuiteRegistryParams(),
+		consensus.SUITE_ID_ML_DSA_87: canonicalProductionScheduleSuiteParams(consensus.SUITE_ID_ML_DSA_87),
 	}
 	for _, descriptor := range descriptors {
 		if descriptor == nil {

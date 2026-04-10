@@ -5,7 +5,7 @@ use rubin_consensus::{
     validate_rotation_descriptor_for_normalized_network, CryptoRotationDescriptor, SuiteParams,
     SuiteRegistry,
 };
-use serde::de::{DeserializeOwned, IgnoredAny};
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -54,11 +54,10 @@ fn production_rotation_schedule_error(message: impl Into<String>) -> String {
 fn decode_single_json_value<T: DeserializeOwned>(raw: &str) -> Result<T, String> {
     let mut deserializer = serde_json::Deserializer::from_str(raw);
     let value = T::deserialize(&mut deserializer).map_err(|err| err.to_string())?;
-    match IgnoredAny::deserialize(&mut deserializer) {
-        Ok(_) => Err("trailing JSON tokens".to_owned()),
-        Err(err) if err.classify() == serde_json::error::Category::Eof => Ok(value),
-        Err(err) => Err(err.to_string()),
-    }
+    deserializer
+        .end()
+        .map_err(|_| "trailing JSON tokens".to_owned())?;
+    Ok(value)
 }
 
 fn parse_descriptor_slot_wire(
