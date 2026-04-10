@@ -245,7 +245,7 @@ func (cfg Config) buildRotationProviderWithProductionLookup(
 			return nil, nil, err
 		}
 		if desc == nil {
-			return nil, nil, nil
+			return nil, registry, nil
 		}
 		return consensus.DescriptorRotationProvider{Descriptor: *desc}, registry, nil
 	}

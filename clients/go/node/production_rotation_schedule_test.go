@@ -366,6 +366,25 @@ func TestLoadCompiledProductionRotationScheduleNullNetworkDoesNotEraseForeignSlo
 	}
 }
 
+func TestProductionRotationDescriptorForNetworkEmptySlotReturnsCanonicalDefaultRegistry(t *testing.T) {
+	desc, registry, err := productionRotationDescriptorForNetwork("mainnet")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if desc != nil {
+		t.Fatal("expected explicit empty production slot to keep descriptor nil")
+	}
+	if registry == nil {
+		t.Fatal("expected canonical default registry for empty production slot")
+	}
+	if !registry.IsCanonicalDefaultLiveManifest() {
+		t.Fatal("expected canonical default live manifest registry")
+	}
+	if _, ok := registry.Lookup(66); ok {
+		t.Fatal("unexpected foreign-slot suite leak into empty production caller")
+	}
+}
+
 func TestProductionRotationDescriptorForNetworkRejectsNonProductionCaller(t *testing.T) {
 	_, _, err := productionRotationDescriptorForNetwork("devnet")
 	if err == nil {

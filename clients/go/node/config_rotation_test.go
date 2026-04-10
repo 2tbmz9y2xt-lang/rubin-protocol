@@ -309,8 +309,14 @@ func TestBuildRotationProvider_ProductionExplicitSuiteRegistryWithoutDescriptorD
 			if rot != nil {
 				t.Fatal("expected compiled empty production schedule to leave rotation nil")
 			}
-			if reg != nil {
-				t.Fatal("expected production suite_registry-only bootstrap to remain non-authoritative")
+			if reg == nil {
+				t.Fatal("expected canonical default registry for explicit empty production schedule")
+			}
+			if !reg.IsCanonicalDefaultLiveManifest() {
+				t.Fatal("expected canonical default live manifest registry")
+			}
+			if _, ok := reg.Lookup(0x42); ok {
+				t.Fatal("unexpected local suite_registry authority leak into empty production schedule")
 			}
 		})
 	}
@@ -480,7 +486,7 @@ func TestBuildRotationProvider_ProductionLookupNoneKeepsSuiteRegistryNonAuthorit
 					if gotNetwork != strings.ToLower(strings.TrimSpace(network)) {
 						t.Fatalf("lookup network=%q, want %q", gotNetwork, strings.ToLower(strings.TrimSpace(network)))
 					}
-					return nil, nil, nil
+					return nil, consensus.DefaultSuiteRegistry(), nil
 				},
 			)
 			if err != nil {
@@ -489,7 +495,13 @@ func TestBuildRotationProvider_ProductionLookupNoneKeepsSuiteRegistryNonAuthorit
 			if rot != nil {
 				t.Fatal("expected nil rotation when compiled production schedule is empty")
 			}
-			if reg != nil {
+			if reg == nil {
+				t.Fatal("expected canonical default registry when production lookup is empty")
+			}
+			if !reg.IsCanonicalDefaultLiveManifest() {
+				t.Fatal("expected canonical default live manifest registry")
+			}
+			if _, ok := reg.Lookup(0x77); ok {
 				t.Fatal("expected local suite_registry to remain non-authoritative on production lookup none")
 			}
 		})
