@@ -853,7 +853,7 @@ mod tests {
         cases: Vec<LegacyExposureHookVectorCase>,
     }
 
-    #[derive(serde::Deserialize)]
+    #[derive(Debug, PartialEq, Eq, serde::Deserialize)]
     struct LegacyExposureHookVectorCase {
         name: String,
         has_chainstate_tip: bool,
@@ -861,6 +861,43 @@ mod tests {
         sunset_readiness: String,
         warning_hook: String,
         grace_hook: String,
+    }
+
+    fn canonical_legacy_exposure_hook_vectors() -> Vec<LegacyExposureHookVectorCase> {
+        vec![
+            LegacyExposureHookVectorCase {
+                name: "no_chainstate_tip_zero_total".to_string(),
+                has_chainstate_tip: false,
+                legacy_exposure_total: 0,
+                sunset_readiness: "invalid_no_chainstate_tip".to_string(),
+                warning_hook: "none".to_string(),
+                grace_hook: "not_applicable_no_chainstate_tip".to_string(),
+            },
+            LegacyExposureHookVectorCase {
+                name: "no_chainstate_tip_nonzero_total".to_string(),
+                has_chainstate_tip: false,
+                legacy_exposure_total: 5,
+                sunset_readiness: "invalid_no_chainstate_tip".to_string(),
+                warning_hook: "none".to_string(),
+                grace_hook: "not_applicable_no_chainstate_tip".to_string(),
+            },
+            LegacyExposureHookVectorCase {
+                name: "tipped_chain_zero_exposure".to_string(),
+                has_chainstate_tip: true,
+                legacy_exposure_total: 0,
+                sunset_readiness: "ready_for_operator_defined_grace_window".to_string(),
+                warning_hook: "none".to_string(),
+                grace_hook: "start_operator_defined_grace_window".to_string(),
+            },
+            LegacyExposureHookVectorCase {
+                name: "tipped_chain_nonzero_exposure".to_string(),
+                has_chainstate_tip: true,
+                legacy_exposure_total: 3,
+                sunset_readiness: "not_ready_legacy_exposure_present".to_string(),
+                warning_hook: "legacy_exposure_present_notify_operator_and_council".to_string(),
+                grace_hook: "not_applicable_legacy_exposure_present".to_string(),
+            },
+        ]
     }
 
     struct FailingWriter;
@@ -952,8 +989,8 @@ mod tests {
             serde_json::from_str(&raw).expect("parse hook vectors");
         assert_eq!(doc.contract_version, super::LEGACY_EXPOSURE_REPORT_VERSION);
         assert_eq!(doc.fixture_kind, "legacy_exposure_hook_vectors");
-        assert!(!doc.cases.is_empty(), "expected at least one hook vector");
-        for vector in doc.cases {
+        assert_eq!(doc.cases, canonical_legacy_exposure_hook_vectors());
+        for vector in &doc.cases {
             let (readiness, warning, grace) =
                 legacy_exposure_hooks(vector.has_chainstate_tip, vector.legacy_exposure_total);
             assert_eq!(readiness, vector.sunset_readiness, "{}", vector.name);
