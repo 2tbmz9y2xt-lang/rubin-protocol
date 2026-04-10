@@ -4,17 +4,16 @@ package consensus
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
 func canonicalDefaultRuntimeSuiteParams() SuiteParams {
-	return SuiteParams{
-		SuiteID:    SUITE_ID_ML_DSA_87,
-		PubkeyLen:  ML_DSA_87_PUBKEY_BYTES,
-		SigLen:     ML_DSA_87_SIG_BYTES,
-		VerifyCost: VERIFY_COST_ML_DSA_87,
-		AlgName:    "ML-DSA-87",
+	params, ok := DefaultSuiteRegistry().Lookup(SUITE_ID_ML_DSA_87)
+	if !ok {
+		panic("default runtime registry missing ML-DSA-87")
 	}
+	return params
 }
 
 func TestVerifySigWithRegistry_NilRegistry_UsesDefaultLiveRegistry(t *testing.T) {
@@ -63,9 +62,10 @@ func TestVerifySigWithRegistry_NilRegistry_MatchesExplicitDefaultLiveRegistry(t 
 	if len(captured) != 2 {
 		t.Fatalf("captured=%d calls, want 2", len(captured))
 	}
+	wantAlg := canonicalDefaultRuntimeSuiteParams().AlgName
 	for i, got := range captured {
-		if got != "ML-DSA-87" {
-			t.Fatalf("call %d alg=%q, want %q", i, got, "ML-DSA-87")
+		if got != wantAlg {
+			t.Fatalf("call %d alg=%q, want %q", i, got, wantAlg)
 		}
 	}
 }
@@ -82,6 +82,18 @@ func TestVerifySigWithRegistry_NilRegistry_DefaultRegistryDriftFailsClosed(t *te
 			},
 		},
 		{
+			name: "alg_name_empty",
+			mutate: func(params *SuiteParams) {
+				params.AlgName = ""
+			},
+		},
+		{
+			name: "alg_name_alias",
+			mutate: func(params *SuiteParams) {
+				params.AlgName = strings.ToLower(params.AlgName)
+			},
+		},
+		{
 			name: "pubkey_len",
 			mutate: func(params *SuiteParams) {
 				params.PubkeyLen--
@@ -91,12 +103,6 @@ func TestVerifySigWithRegistry_NilRegistry_DefaultRegistryDriftFailsClosed(t *te
 			name: "sig_len",
 			mutate: func(params *SuiteParams) {
 				params.SigLen--
-			},
-		},
-		{
-			name: "verify_cost",
-			mutate: func(params *SuiteParams) {
-				params.VerifyCost--
 			},
 		},
 	}
@@ -127,6 +133,65 @@ func TestVerifySigWithRegistry_NilRegistry_DefaultRegistryDriftFailsClosed(t *te
 				t.Fatalf("err=%q, want %q", got, want)
 			}
 		})
+	}
+}
+
+func TestVerifySigWithRegistry_NilRegistry_VerifyCostDriftFailsClosed(t *testing.T) {
+	params := canonicalDefaultRuntimeSuiteParams()
+	if got, want := params.VerifyCost, uint64(VERIFY_COST_ML_DSA_87); got != want {
+		t.Fatalf("canonical verify_cost=%d, want %d", got, want)
+	}
+
+	orig := defaultRuntimeSuiteRegistryForVerification
+	defer func() { defaultRuntimeSuiteRegistryForVerification = orig }()
+	defaultRuntimeSuiteRegistryForVerification = func() *SuiteRegistry {
+		params := canonicalDefaultRuntimeSuiteParams()
+		params.VerifyCost--
+		return &SuiteRegistry{
+			suites: map[uint8]SuiteParams{
+				SUITE_ID_ML_DSA_87: params,
+			},
+		}
+	}
+
+	var d [32]byte
+	_, err := verifySigWithRegistry(SUITE_ID_ML_DSA_87, []byte{0x01}, []byte{0x02}, d, nil)
+	if err == nil {
+		t.Fatal("expected default runtime registry verify_cost drift error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
+	}
+	if got, want := err.Error(), fmt.Sprintf("%s: verify_sig: default runtime registry drift", TX_ERR_SIG_ALG_INVALID); got != want {
+		t.Fatalf("err=%q, want %q", got, want)
+	}
+}
+
+func TestResolveSuiteVerifierBinding_MatchesCanonicalOpenSSLDescriptor(t *testing.T) {
+	params := canonicalDefaultRuntimeSuiteParams()
+	binding, err := resolveSuiteVerifierBinding(params.AlgName, params.PubkeyLen, params.SigLen)
+	if err != nil {
+		t.Fatalf("resolveSuiteVerifierBinding: %v", err)
+	}
+	raw, err := CoreExtOpenSSLDigest32BindingDescriptorBytes(params.AlgName, params.PubkeyLen, params.SigLen)
+	if err != nil {
+		t.Fatalf("CoreExtOpenSSLDigest32BindingDescriptorBytes: %v", err)
+	}
+	desc, err := ParseCoreExtOpenSSLDigest32BindingDescriptor(raw)
+	if err != nil {
+		t.Fatalf("ParseCoreExtOpenSSLDigest32BindingDescriptor: %v", err)
+	}
+	if binding.kind != suiteVerifierBindingOpenSSLDigest32V1 {
+		t.Fatalf("binding.kind=%v, want %v", binding.kind, suiteVerifierBindingOpenSSLDigest32V1)
+	}
+	if binding.opensslAlg != desc.OpenSSLAlg {
+		t.Fatalf("binding.opensslAlg=%q, want %q", binding.opensslAlg, desc.OpenSSLAlg)
+	}
+	if binding.pubkeyLen != desc.PubkeyLen {
+		t.Fatalf("binding.pubkeyLen=%d, want %d", binding.pubkeyLen, desc.PubkeyLen)
+	}
+	if binding.sigLen != desc.SigLen {
+		t.Fatalf("binding.sigLen=%d, want %d", binding.sigLen, desc.SigLen)
 	}
 }
 

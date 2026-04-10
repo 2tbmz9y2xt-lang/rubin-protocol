@@ -629,13 +629,10 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     fn canonical_default_suite_params() -> crate::suite_registry::SuiteParams {
-        crate::suite_registry::SuiteParams {
-            suite_id: crate::constants::SUITE_ID_ML_DSA_87,
-            pubkey_len: crate::constants::ML_DSA_87_PUBKEY_BYTES,
-            sig_len: crate::constants::ML_DSA_87_SIG_BYTES,
-            verify_cost: crate::constants::VERIFY_COST_ML_DSA_87,
-            alg_name: "ML-DSA-87",
-        }
+        crate::suite_registry::SuiteRegistry::default_registry()
+            .lookup(crate::constants::SUITE_ID_ML_DSA_87)
+            .cloned()
+            .expect("default runtime registry missing ML-DSA-87")
     }
 
     fn drifted_default_runtime_registry(
@@ -1030,6 +1027,11 @@ mod tests {
         let digest = [0x67; 32];
         let sig = kp.sign_digest32(digest).expect("sign");
         let explicit = crate::suite_registry::SuiteRegistry::default_registry();
+        let canonical = canonical_default_suite_params();
+        assert_eq!(
+            canonical.verify_cost,
+            crate::constants::VERIFY_COST_ML_DSA_87
+        );
 
         let nil_ok = super::verify_sig_with_registry(
             crate::constants::SUITE_ID_ML_DSA_87,
@@ -1053,6 +1055,41 @@ mod tests {
             nil_ok,
             "canonical default live registry must verify on both paths"
         );
+        let explicit_params = explicit
+            .lookup(crate::constants::SUITE_ID_ML_DSA_87)
+            .cloned()
+            .expect("explicit default registry missing ML-DSA-87");
+        assert_eq!(canonical, explicit_params);
+    }
+
+    #[test]
+    fn resolve_suite_verifier_binding_matches_core_ext_descriptor() {
+        let params = canonical_default_suite_params();
+        let binding = super::resolve_suite_verifier_binding(
+            params.alg_name,
+            params.pubkey_len,
+            params.sig_len,
+        )
+        .expect("binding");
+        let descriptor = crate::core_ext_openssl_digest32_binding_descriptor_bytes(
+            params.alg_name,
+            params.pubkey_len,
+            params.sig_len,
+        )
+        .expect("descriptor");
+        let parsed =
+            crate::parse_core_ext_openssl_digest32_binding_descriptor(&descriptor).expect("parse");
+        match binding {
+            super::SuiteVerifierBinding::OpenSslDigest32V1 {
+                alg,
+                pubkey_len,
+                sig_len,
+            } => {
+                assert_eq!(alg.to_str().expect("alg utf8"), parsed.openssl_alg);
+                assert_eq!(pubkey_len, parsed.pubkey_len);
+                assert_eq!(sig_len, parsed.sig_len);
+            }
+        }
     }
 
     #[test]
@@ -1069,6 +1106,58 @@ mod tests {
                 "alg_name",
                 drifted_default_runtime_registry(|params| params.alg_name = "ML-DSA-65"),
             ),
+            (
+                "pubkey_len",
+                drifted_default_runtime_registry(|params| params.pubkey_len -= 1),
+            ),
+            (
+                "sig_len",
+                drifted_default_runtime_registry(|params| params.sig_len -= 1),
+            ),
+            (
+                "verify_cost",
+                drifted_default_runtime_registry(|params| params.verify_cost -= 1),
+            ),
+        ];
+
+        for (name, registry) in test_cases {
+            let err = super::runtime_verification_registry(None, &registry)
+                .expect_err("noncanonical default registry must fail closed");
+            assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid, "{name}");
+            assert_eq!(
+                err.msg, "verify_sig: default runtime registry drift",
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_verification_registry_rejects_empty_and_alias_alg_name() {
+        let test_cases = [
+            (
+                "alg_name_empty",
+                drifted_default_runtime_registry(|params| params.alg_name = ""),
+            ),
+            (
+                "alg_name_alias",
+                drifted_default_runtime_registry(|params| params.alg_name = "ml-dsa-87"),
+            ),
+        ];
+
+        for (name, registry) in test_cases {
+            let err = super::runtime_verification_registry(None, &registry)
+                .expect_err("noncanonical default registry must fail closed");
+            assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid, "{name}");
+            assert_eq!(
+                err.msg, "verify_sig: default runtime registry drift",
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_verification_registry_rejects_pubkey_sig_and_verify_cost_drift() {
+        let test_cases = [
             (
                 "pubkey_len",
                 drifted_default_runtime_registry(|params| params.pubkey_len -= 1),
