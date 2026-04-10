@@ -311,8 +311,8 @@ type SuiteParamsJSON struct {
 
 type suiteParamsJSONWire struct {
 	SuiteID    *uint8  `json:"suite_id"`
-	PubkeyLen  *int    `json:"pubkey_len"`
-	SigLen     *int    `json:"sig_len"`
+	PubkeyLen  *uint64 `json:"pubkey_len"`
+	SigLen     *uint64 `json:"sig_len"`
 	VerifyCost *uint64 `json:"verify_cost"`
 	AlgName    *string `json:"alg_name,omitempty"`
 	OpenSSLAlg *string `json:"openssl_alg,omitempty"`
@@ -326,9 +326,13 @@ func (item *SuiteParamsJSON) UnmarshalJSON(data []byte) error {
 	if wire.SuiteID == nil || wire.PubkeyLen == nil || wire.SigLen == nil || wire.VerifyCost == nil {
 		return fmt.Errorf("bad suite_registry")
 	}
+	maxInt := int(^uint(0) >> 1)
+	if *wire.PubkeyLen > uint64(maxInt) || *wire.SigLen > uint64(maxInt) {
+		return fmt.Errorf("bad suite_registry")
+	}
 	item.SuiteID = *wire.SuiteID
-	item.PubkeyLen = *wire.PubkeyLen
-	item.SigLen = *wire.SigLen
+	item.PubkeyLen = int(*wire.PubkeyLen)
+	item.SigLen = int(*wire.SigLen)
 	item.VerifyCost = *wire.VerifyCost
 	item.AlgName = ""
 	if wire.AlgName != nil {
@@ -341,8 +345,8 @@ func (item *SuiteParamsJSON) UnmarshalJSON(data []byte) error {
 
 func (item SuiteParamsJSON) MarshalJSON() ([]byte, error) {
 	suiteID := item.SuiteID
-	pubkeyLen := item.PubkeyLen
-	sigLen := item.SigLen
+	pubkeyLen := uint64(item.PubkeyLen)
+	sigLen := uint64(item.SigLen)
 	verifyCost := item.VerifyCost
 	algName := item.AlgName
 	return json.Marshal(suiteParamsJSONWire{
@@ -359,6 +363,9 @@ const maxCoreExtHexFieldBytes = 4096
 const canonicalSuiteRegistryAlgName = "ML-DSA-87"
 
 func validateSuiteRegistryParamLen(value int) (int, error) {
+	// Negative lengths fail closed during JSON decode because the wire surface
+	// uses unsigned lengths. Reaching this helper means the caller provided an
+	// in-range int value, and explicit zero remains reserved for harness vectors.
 	if value < 0 || value > consensus.MAX_WITNESS_BYTES_PER_TX {
 		return 0, fmt.Errorf("bad suite_registry")
 	}
@@ -367,7 +374,7 @@ func validateSuiteRegistryParamLen(value int) (int, error) {
 
 func normalizeSuiteRegistryAlgName(value string) (string, error) {
 	trimmed := strings.TrimSpace(value)
-	if trimmed != canonicalSuiteRegistryAlgName {
+	if !strings.EqualFold(trimmed, canonicalSuiteRegistryAlgName) {
 		return "", fmt.Errorf("bad suite_registry")
 	}
 	return canonicalSuiteRegistryAlgName, nil

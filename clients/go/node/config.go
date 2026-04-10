@@ -126,8 +126,8 @@ func normalizeSuiteRegistryAlgName(value *string) (string, error) {
 	if value == nil {
 		return "", errors.New("bad suite_registry")
 	}
-	switch strings.TrimSpace(*value) {
-	case "ML-DSA-87":
+	switch trimmed := strings.TrimSpace(*value); {
+	case strings.EqualFold(trimmed, "ML-DSA-87"):
 		return "ML-DSA-87", nil
 	default:
 		return "", errors.New("bad suite_registry")

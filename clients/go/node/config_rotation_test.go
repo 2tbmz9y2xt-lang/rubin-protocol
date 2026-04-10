@@ -121,8 +121,8 @@ func TestBuildRotationProvider_RejectsSuiteRegistryEmptyAlgName(t *testing.T) {
 	}
 }
 
-func TestBuildRotationProvider_RejectsSuiteRegistryAliasAlgName(t *testing.T) {
-	for _, alg := range []string{"ml-dsa-87", "MLDSA87"} {
+func TestBuildRotationProvider_AcceptsCaseInsensitiveSuiteRegistryAlgName(t *testing.T) {
+	for _, alg := range []string{"ml-dsa-87", "ML-dSa-87"} {
 		t.Run(alg, func(t *testing.T) {
 			cfg := DefaultConfig()
 			cfg.SuiteRegistry = []SuiteParamsJSON{{
@@ -132,14 +132,36 @@ func TestBuildRotationProvider_RejectsSuiteRegistryAliasAlgName(t *testing.T) {
 				VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
 				AlgName:    stringPtr(alg),
 			}}
-			_, _, err := cfg.BuildRotationProvider()
-			if err == nil {
-				t.Fatalf("expected suite_registry rejection for alg_name=%q", alg)
+			_, reg, err := cfg.BuildRotationProvider()
+			if err != nil {
+				t.Fatalf("unexpected error for alg_name=%q: %v", alg, err)
 			}
-			if got, want := err.Error(), "suite_registry: bad suite_registry"; got != want {
-				t.Fatalf("error=%q, want %q", got, want)
+			params, ok := reg.Lookup(0x42)
+			if !ok {
+				t.Fatalf("missing suite 0x42 for alg_name=%q", alg)
+			}
+			if got, want := params.AlgName, "ML-DSA-87"; got != want {
+				t.Fatalf("alg_name=%q normalized to %q, want %q", alg, got, want)
 			}
 		})
+	}
+}
+
+func TestBuildRotationProvider_RejectsMalformedSuiteRegistryAlgName(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SuiteRegistry = []SuiteParamsJSON{{
+		SuiteID:    0x42,
+		PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+		SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+		VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+		AlgName:    stringPtr("MLDSA87"),
+	}}
+	_, _, err := cfg.BuildRotationProvider()
+	if err == nil {
+		t.Fatal("expected suite_registry rejection for malformed alg_name")
+	}
+	if got, want := err.Error(), "suite_registry: bad suite_registry"; got != want {
+		t.Fatalf("error=%q, want %q", got, want)
 	}
 }
 

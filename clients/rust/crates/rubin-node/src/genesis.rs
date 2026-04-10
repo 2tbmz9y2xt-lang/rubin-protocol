@@ -203,7 +203,7 @@ pub fn load_genesis_config(
 fn normalize_suite_alg_name(value: &str) -> Result<&'static str, String> {
     const CANONICAL_SUITE_ALG_NAME: &str = "ML-DSA-87";
     let trimmed = value.trim();
-    if trimmed != CANONICAL_SUITE_ALG_NAME {
+    if !trimmed.eq_ignore_ascii_case(CANONICAL_SUITE_ALG_NAME) {
         return Err("bad suite_registry".to_string());
     }
     Ok(CANONICAL_SUITE_ALG_NAME)
@@ -945,8 +945,8 @@ mod tests {
     }
 
     #[test]
-    fn load_genesis_config_rejects_alias_suite_registry_alg_name() {
-        for (case_idx, alg) in ["ml-dsa-87", "MLDSA87"].into_iter().enumerate() {
+    fn load_genesis_config_accepts_case_insensitive_suite_registry_alg_name() {
+        for (case_idx, alg) in ["ml-dsa-87", "ML-dSa-87"].into_iter().enumerate() {
             let dir = std::env::temp_dir().join(format!(
                 "rubin-node-genesis-suite-registry-alg-name-alias-{}-{}",
                 case_idx,
@@ -975,11 +975,48 @@ mod tests {
             )
             .expect("write");
 
-            let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
-            assert_eq!(err, "bad suite_registry");
+            let loaded = load_genesis_config(Some(&path), "devnet").expect("must load");
+            let ctx = loaded.suite_context.expect("suite context");
+            let params = ctx.registry.lookup(66).expect("suite 66");
+            assert_eq!(params.alg_name, "ML-DSA-87");
 
             std::fs::remove_dir_all(&dir).expect("cleanup");
         }
+    }
+
+    #[test]
+    fn load_genesis_config_rejects_malformed_suite_registry_alg_name() {
+        let dir = std::env::temp_dir().join(format!(
+            "rubin-node-genesis-suite-registry-bad-alg-name-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("genesis.json");
+        std::fs::write(
+            &path,
+            format!(
+                "{{\
+                  \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+                  \"suite_registry\":[{}]\
+                }}",
+                suite_registry_entry_json(
+                    66,
+                    ML_DSA_87_PUBKEY_BYTES,
+                    ML_DSA_87_SIG_BYTES,
+                    VERIFY_COST_ML_DSA_87,
+                    "MLDSA87",
+                )
+            ),
+        )
+        .expect("write");
+
+        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
+        assert_eq!(err, "bad suite_registry");
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]

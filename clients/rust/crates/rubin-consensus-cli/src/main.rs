@@ -1000,7 +1000,7 @@ fn decode_optional_hex_bytes(name: &str, value: &str) -> Result<Vec<u8>, String>
 fn normalize_suite_alg_name(value: &str) -> Result<&'static str, String> {
     const CANONICAL_SUITE_ALG_NAME: &str = "ML-DSA-87";
     let trimmed = value.trim();
-    if trimmed != CANONICAL_SUITE_ALG_NAME {
+    if !trimmed.eq_ignore_ascii_case(CANONICAL_SUITE_ALG_NAME) {
         return Err("bad suite_registry".to_string());
     }
     Ok(CANONICAL_SUITE_ALG_NAME)
@@ -5246,16 +5246,18 @@ mod tests {
     }
 
     #[test]
-    fn suite_registry_rejects_lowercase_alg_name() {
-        let err = build_suite_registry_from_json(&[SuiteParamsJson {
+    fn suite_registry_accepts_case_insensitive_alg_name() {
+        let registry = build_suite_registry_from_json(&[SuiteParamsJson {
             suite_id: 3,
             pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
             sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
             verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
-            alg_name: "ml-dsa-87".to_string(),
+            alg_name: "mL-dSa-87".to_string(),
         }])
-        .unwrap_err();
-        assert_eq!(err, "bad suite_registry");
+        .expect("registry")
+        .expect("suite registry");
+        let params = registry.lookup(3).expect("suite 3 present");
+        assert_eq!(params.alg_name, "ML-DSA-87");
     }
 
     #[test]

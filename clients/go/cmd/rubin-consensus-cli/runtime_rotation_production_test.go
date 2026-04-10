@@ -255,6 +255,30 @@ func TestRubinConsensusCLI_RotationDescriptorCheck_AcceptsDualAlgNameAndOpenSSLA
 	mustRunOk(t, req)
 }
 
+func TestRubinConsensusCLI_RotationDescriptorCheck_AcceptsCaseInsensitiveAlgName(t *testing.T) {
+	var req Request
+	payload := fmt.Sprintf(`{
+		"op":"rotation_descriptor_check",
+		"network":"devnet",
+		"suite_registry":[
+			{"suite_id":1,"pubkey_len":%d,"sig_len":%d,"verify_cost":%d,"alg_name":"ml-dsa-87"},
+			{"suite_id":2,"pubkey_len":%d,"sig_len":%d,"verify_cost":%d,"alg_name":"ML-dSa-87"}
+		],
+		"rotation_descriptor":{"name":"r1","old_suite_id":1,"new_suite_id":2,"create_height":10,"spend_height":20,"sunset_height":100}
+	}`,
+		consensus.ML_DSA_87_PUBKEY_BYTES,
+		consensus.ML_DSA_87_SIG_BYTES,
+		consensus.VERIFY_COST_ML_DSA_87,
+		consensus.ML_DSA_87_PUBKEY_BYTES,
+		consensus.ML_DSA_87_SIG_BYTES,
+		consensus.VERIFY_COST_ML_DSA_87,
+	)
+	if err := json.Unmarshal([]byte(payload), &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	mustRunOk(t, req)
+}
+
 func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsEmptyAlgNameEvenWithLegacyAlias(t *testing.T) {
 	var req Request
 	payload := fmt.Sprintf(`{
@@ -344,6 +368,50 @@ func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsMissingSuiteRegistrySi
 	)
 	if err := json.Unmarshal([]byte(payload), &req); err == nil {
 		t.Fatal("expected missing sig_len to fail closed during unmarshal")
+	}
+}
+
+func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsNegativeSuiteRegistryPubkeyLen(t *testing.T) {
+	var req Request
+	payload := fmt.Sprintf(`{
+		"op":"rotation_descriptor_check",
+		"network":"devnet",
+		"suite_registry":[
+			{"suite_id":1,"pubkey_len":-1,"sig_len":%d,"verify_cost":%d,"alg_name":"ML-DSA-87"},
+			{"suite_id":2,"pubkey_len":%d,"sig_len":%d,"verify_cost":%d,"alg_name":"ML-DSA-87"}
+		],
+		"rotation_descriptor":{"name":"r1","old_suite_id":1,"new_suite_id":2,"create_height":10,"spend_height":20,"sunset_height":100}
+	}`,
+		consensus.ML_DSA_87_SIG_BYTES,
+		consensus.VERIFY_COST_ML_DSA_87,
+		consensus.ML_DSA_87_PUBKEY_BYTES,
+		consensus.ML_DSA_87_SIG_BYTES,
+		consensus.VERIFY_COST_ML_DSA_87,
+	)
+	if err := json.Unmarshal([]byte(payload), &req); err == nil {
+		t.Fatal("expected negative pubkey_len to fail closed during unmarshal")
+	}
+}
+
+func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsNegativeSuiteRegistrySigLen(t *testing.T) {
+	var req Request
+	payload := fmt.Sprintf(`{
+		"op":"rotation_descriptor_check",
+		"network":"devnet",
+		"suite_registry":[
+			{"suite_id":1,"pubkey_len":%d,"sig_len":-1,"verify_cost":%d,"alg_name":"ML-DSA-87"},
+			{"suite_id":2,"pubkey_len":%d,"sig_len":%d,"verify_cost":%d,"alg_name":"ML-DSA-87"}
+		],
+		"rotation_descriptor":{"name":"r1","old_suite_id":1,"new_suite_id":2,"create_height":10,"spend_height":20,"sunset_height":100}
+	}`,
+		consensus.ML_DSA_87_PUBKEY_BYTES,
+		consensus.VERIFY_COST_ML_DSA_87,
+		consensus.ML_DSA_87_PUBKEY_BYTES,
+		consensus.ML_DSA_87_SIG_BYTES,
+		consensus.VERIFY_COST_ML_DSA_87,
+	)
+	if err := json.Unmarshal([]byte(payload), &req); err == nil {
+		t.Fatal("expected negative sig_len to fail closed during unmarshal")
 	}
 }
 
@@ -490,13 +558,13 @@ func TestRubinConsensusCLI_TxWeightAndStats_RejectsRotationDescriptorWithoutSuit
 	}, "bad suite_registry")
 }
 
-func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsLowercaseSuiteRegistryAlgName(t *testing.T) {
-	mustRunErr(t, Request{
+func TestRubinConsensusCLI_RotationDescriptorCheck_AcceptsCaseInsensitiveSuiteRegistryAlgName(t *testing.T) {
+	mustRunOk(t, Request{
 		Op:      "rotation_descriptor_check",
 		Network: "devnet",
 		SuiteRegistry: []SuiteParamsJSON{
 			{SuiteID: 1, PubkeyLen: consensus.ML_DSA_87_PUBKEY_BYTES, SigLen: consensus.ML_DSA_87_SIG_BYTES, VerifyCost: consensus.VERIFY_COST_ML_DSA_87, AlgName: "ml-dsa-87"},
-			{SuiteID: 2, PubkeyLen: consensus.ML_DSA_87_PUBKEY_BYTES, SigLen: consensus.ML_DSA_87_SIG_BYTES, VerifyCost: consensus.VERIFY_COST_ML_DSA_87, AlgName: "ML-DSA-87"},
+			{SuiteID: 2, PubkeyLen: consensus.ML_DSA_87_PUBKEY_BYTES, SigLen: consensus.ML_DSA_87_SIG_BYTES, VerifyCost: consensus.VERIFY_COST_ML_DSA_87, AlgName: "ML-dSa-87"},
 		},
 		RotationDescriptor: &RotationDescriptorJSON{
 			Name:         "r1",
@@ -506,5 +574,5 @@ func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsLowercaseSuiteRegistry
 			SpendHeight:  20,
 			SunsetHeight: 100,
 		},
-	}, "bad suite_registry")
+	})
 }
