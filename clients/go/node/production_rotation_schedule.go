@@ -218,6 +218,12 @@ func (wire productionRotationDescriptorWire) toRotationConfigJSON() (RotationCon
 	if err != nil {
 		return RotationConfigJSON{}, err
 	}
+	if err := rejectReservedProductionRotationScheduleSuiteID("old_suite_id", oldSuiteID); err != nil {
+		return RotationConfigJSON{}, err
+	}
+	if err := rejectReservedProductionRotationScheduleSuiteID("new_suite_id", newSuiteID); err != nil {
+		return RotationConfigJSON{}, err
+	}
 	createHeight, err := requireProductionRotationScheduleField("create_height", wire.CreateHeight)
 	if err != nil {
 		return RotationConfigJSON{}, err
@@ -238,6 +244,13 @@ func (wire productionRotationDescriptorWire) toRotationConfigJSON() (RotationCon
 		SpendHeight:  spendHeight,
 		SunsetHeight: sunsetHeight,
 	}, nil
+}
+
+func rejectReservedProductionRotationScheduleSuiteID(field string, suiteID uint8) error {
+	if suiteID == consensus.SUITE_ID_SENTINEL {
+		return fmt.Errorf("%s 0x%02x reserved", field, suiteID)
+	}
+	return nil
 }
 
 func requireProductionRotationScheduleField[T any](name string, value *T) (T, error) {

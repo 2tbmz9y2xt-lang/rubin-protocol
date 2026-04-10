@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -171,6 +172,59 @@ func TestLoadCompiledProductionRotationScheduleRejectsMissingRequiredDescriptorF
 	}
 	if got, want := err.Error(), `production_rotation_schedule: networks.mainnet: missing required field "create_height"`; got != want {
 		t.Fatalf("error=%q, want %q", got, want)
+	}
+}
+
+func TestLoadCompiledProductionRotationScheduleRejectsReservedSentinelSuiteID(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		field      string
+		oldSuiteID int
+		newSuiteID int
+		want       string
+	}{
+		{
+			name:       "old_suite_id",
+			field:      "old_suite_id",
+			oldSuiteID: 0,
+			newSuiteID: 66,
+			want:       `production_rotation_schedule: networks.mainnet: old_suite_id 0x00 reserved`,
+		},
+		{
+			name:       "new_suite_id",
+			field:      "new_suite_id",
+			oldSuiteID: 1,
+			newSuiteID: 0,
+			want:       `production_rotation_schedule: networks.mainnet: new_suite_id 0x00 reserved`,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := loadCompiledProductionRotationScheduleFromJSONWithRegistry([]byte(`{
+				"version": 1,
+				"networks": {
+					"mainnet": {
+						"name": "rotation-v1",
+						"old_suite_id": `+strconv.Itoa(tc.oldSuiteID)+`,
+						"new_suite_id": `+strconv.Itoa(tc.newSuiteID)+`,
+						"create_height": 10,
+						"spend_height": 20,
+						"sunset_height": 30
+					},
+					"testnet": null
+				}
+			}`), canonicalProductionScheduleRegistry())
+			if err == nil {
+				t.Fatalf("expected reserved %s rejection", tc.field)
+			}
+			if got := err.Error(); got != tc.want {
+				t.Fatalf("error=%q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

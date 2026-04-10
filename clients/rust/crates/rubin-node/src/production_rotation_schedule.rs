@@ -1,5 +1,6 @@
 use rubin_consensus::constants::{
-    ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, VERIFY_COST_ML_DSA_87,
+    ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
+    VERIFY_COST_ML_DSA_87,
 };
 use rubin_consensus::{
     validate_rotation_descriptor_for_normalized_network, CryptoRotationDescriptor, SuiteParams,
@@ -69,7 +70,18 @@ fn parse_descriptor_slot_wire(
     }
     let descriptor_wire: ProductionRotationDescriptorWire = serde_json::from_value(value)
         .map_err(|err| production_rotation_schedule_error(format!("networks.{network}: {err}")))?;
+    reject_reserved_suite_id("old_suite_id", descriptor_wire.old_suite_id)
+        .map_err(|err| production_rotation_schedule_error(format!("networks.{network}: {err}")))?;
+    reject_reserved_suite_id("new_suite_id", descriptor_wire.new_suite_id)
+        .map_err(|err| production_rotation_schedule_error(format!("networks.{network}: {err}")))?;
     Ok(Some(descriptor_wire))
+}
+
+fn reject_reserved_suite_id(field: &str, suite_id: u8) -> Result<(), String> {
+    if suite_id == SUITE_ID_SENTINEL {
+        return Err(format!("{field} 0x{suite_id:02x} reserved"));
+    }
+    Ok(())
 }
 
 fn canonical_production_schedule_suite_params(suite_id: u8) -> SuiteParams {
@@ -317,6 +329,47 @@ mod tests {
             err,
             "production_rotation_schedule: networks.testnet missing"
         );
+    }
+
+    #[test]
+    fn production_rotation_schedule_rejects_reserved_sentinel_suite_id() {
+        for (field_name, old_suite_id, new_suite_id, want) in [
+            (
+                "old_suite_id",
+                0,
+                66,
+                "production_rotation_schedule: networks.mainnet: old_suite_id 0x00 reserved",
+            ),
+            (
+                "new_suite_id",
+                1,
+                0,
+                "production_rotation_schedule: networks.mainnet: new_suite_id 0x00 reserved",
+            ),
+        ] {
+            let err = production_rotation_descriptor_for_network_with_registry_for_test(
+                &format!(
+                    r#"{{
+                        "version": 1,
+                        "networks": {{
+                            "mainnet": {{
+                                "name": "rotation-v1",
+                                "old_suite_id": {old_suite_id},
+                                "new_suite_id": {new_suite_id},
+                                "create_height": 10,
+                                "spend_height": 20,
+                                "sunset_height": 30
+                            }},
+                            "testnet": null
+                        }}
+                    }}"#
+                ),
+                "mainnet",
+                canonical_production_schedule_registry(),
+            )
+            .expect_err("must reject");
+            assert_eq!(err, want, "field {field_name}");
+        }
     }
 
     #[test]
