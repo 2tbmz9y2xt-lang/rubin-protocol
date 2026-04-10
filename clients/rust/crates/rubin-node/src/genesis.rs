@@ -835,10 +835,19 @@ mod tests {
             let path = dir.join("genesis.json");
             std::fs::write(
                 &path,
-                "{\
-                  \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
-                  \"suite_registry\":[{\"suite_id\":77,\"pubkey_len\":2592,\"sig_len\":4627,\"verify_cost\":0,\"alg_name\":\"ML-DSA-87\"}]\
-                }",
+                format!(
+                    "{{\
+                      \"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\
+                      \"suite_registry\":[{}]\
+                    }}",
+                    suite_registry_entry_json(
+                        77,
+                        ML_DSA_87_PUBKEY_BYTES,
+                        ML_DSA_87_SIG_BYTES,
+                        0,
+                        "ML-DSA-87",
+                    )
+                ),
             )
             .expect("write");
 
