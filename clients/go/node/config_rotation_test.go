@@ -557,6 +557,44 @@ func TestValidateConfig_ProductionIgnoresBadSuiteRegistryWithoutDescriptor(t *te
 	}
 }
 
+func TestBuildRotationProvider_ProductionLookupNoneRejectsNoncanonicalRegistry(t *testing.T) {
+	for _, network := range productionRotationNetworks {
+		t.Run(quotedSubtestName(network), func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Network = network
+			_, _, err := cfg.buildRotationProviderWithProductionLookup(
+				func(gotNetwork string) (*consensus.CryptoRotationDescriptor, *consensus.SuiteRegistry, error) {
+					if gotNetwork != strings.ToLower(strings.TrimSpace(network)) {
+						t.Fatalf("lookup network=%q, want %q", gotNetwork, strings.ToLower(strings.TrimSpace(network)))
+					}
+					return nil, consensus.NewSuiteRegistryFromParams([]consensus.SuiteParams{
+						{
+							SuiteID:    consensus.SUITE_ID_ML_DSA_87,
+							PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+							SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+							VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+							AlgName:    "ML-DSA-87",
+						},
+						{
+							SuiteID:    0x77,
+							PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+							SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+							VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+							AlgName:    "ML-DSA-87",
+						},
+					}), nil
+				},
+			)
+			if err == nil {
+				t.Fatal("expected invalid empty-slot registry rejection")
+			}
+			if got, want := err.Error(), "production_rotation_schedule: invalid empty-slot registry"; got != want {
+				t.Fatalf("error=%q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestBuildRotationProvider_RejectsUnknownNetworkWithoutSeparateValidateConfig(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Network = " not-a-network "

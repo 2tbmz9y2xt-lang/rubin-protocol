@@ -315,10 +315,15 @@ where
                 rotation: Arc::new(DescriptorRotationProvider { descriptor }),
                 registry: Arc::new(registry),
             })),
-            None => Ok(Some(crate::sync::SuiteContext {
-                rotation: Arc::new(DefaultRotationProvider),
-                registry: Arc::new(registry),
-            })),
+            None => {
+                if !registry.is_canonical_default_live_manifest() {
+                    return Err("production_rotation_schedule: invalid empty-slot registry".into());
+                }
+                Ok(Some(crate::sync::SuiteContext {
+                    rotation: Arc::new(DefaultRotationProvider),
+                    registry: Arc::new(registry),
+                }))
+            }
         };
     }
     let explicit_registry = build_suite_registry_from_json(suite_registry)?;
@@ -1029,6 +1034,47 @@ mod tests {
             .rotation
             .native_spend_suites(0)
             .contains(SUITE_ID_ML_DSA_87));
+    }
+
+    #[test]
+    fn build_suite_context_from_descriptor_production_lookup_none_rejects_noncanonical_registry() {
+        let err = build_suite_context_from_descriptor_with_production_lookup(
+            &None,
+            &[],
+            "mainnet",
+            |_| {
+                Ok((
+                    None,
+                    rubin_consensus::SuiteRegistry::with_suites(BTreeMap::from([
+                        (
+                            SUITE_ID_ML_DSA_87,
+                            rubin_consensus::SuiteParams {
+                                suite_id: SUITE_ID_ML_DSA_87,
+                                pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+                                sig_len: ML_DSA_87_SIG_BYTES,
+                                verify_cost: VERIFY_COST_ML_DSA_87,
+                                alg_name: "ML-DSA-87",
+                            },
+                        ),
+                        (
+                            77,
+                            rubin_consensus::SuiteParams {
+                                suite_id: 77,
+                                pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+                                sig_len: ML_DSA_87_SIG_BYTES,
+                                verify_cost: VERIFY_COST_ML_DSA_87,
+                                alg_name: "ML-DSA-87",
+                            },
+                        ),
+                    ])),
+                ))
+            },
+        )
+        .expect_err("must reject");
+        assert_eq!(
+            err,
+            "production_rotation_schedule: invalid empty-slot registry"
+        );
     }
 
     #[test]
