@@ -124,39 +124,26 @@ func TestSleepOrStopNilReceiver(t *testing.T) {
 	}
 }
 
-func reserveTCPAddr(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserve listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	if err := ln.Close(); err != nil {
-		t.Fatalf("reserve close: %v", err)
-	}
-	return addr
-}
-
-func waitForAddrBindState(t *testing.T, addr string, wantBusy bool) {
+// waitForAddrFree polls until net.Listen can bind addr (proving nothing
+// holds the port) or the deadline elapses. Unlike the previous
+// reserveTCPAddr helper, callers of waitForAddrFree observe the real
+// listener address captured from Start's post-listen hook, not a
+// pre-reserved and released port. The earlier reserveTCPAddr pattern had a
+// TOCTOU race: another process could bind the reserved port between
+// Close() and the next net.Listen in the Service under test. Capturing
+// the address after net.Listen already succeeded inside Start eliminates
+// that window — the address is guaranteed to be the exact port Start used.
+func waitForAddrFree(t *testing.T, addr string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		ln, err := net.Listen("tcp", addr)
-		switch {
-		case wantBusy && err != nil:
-			return
-		case !wantBusy && err == nil:
+		if err == nil {
 			_ = ln.Close()
 			return
-		case err == nil:
-			_ = ln.Close()
 		}
 		if time.Now().After(deadline) {
-			state := "free"
-			if wantBusy {
-				state = "busy"
-			}
-			t.Fatalf("timed out waiting for %s to become %s", addr, state)
+			t.Fatalf("timed out waiting for %s to become free", addr)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -201,12 +188,20 @@ func TestService_StartAlreadyStarted_ReturnsAlreadyStarted(t *testing.T) {
 }
 
 func TestService_StartPostListenClosedRace_ReturnsAlreadyClosed(t *testing.T) {
-	addr := reserveTCPAddr(t)
-	s := &Service{cfg: ServiceConfig{BindAddr: addr}}
+	// Bind to an ephemeral loopback port inside Start rather than pre-
+	// reserving a port with a separate net.Listen/Close pair — reserving
+	// introduces a TOCTOU race where another process can grab the port
+	// before Start's internal net.Listen runs. The post-listen hook
+	// captures the actual listener address after net.Listen has already
+	// succeeded inside Start, so later assertions operate on a known-
+	// stable concrete endpoint instead of a potentially stale reservation.
+	s := &Service{cfg: ServiceConfig{BindAddr: "127.0.0.1:0"}}
 	serviceStartPostListenHookMu.Lock()
 	defer serviceStartPostListenHookMu.Unlock()
 	prevHook := serviceStartPostListenHook
-	serviceStartPostListenHook = func(s *Service, _ net.Listener) {
+	var capturedAddr string
+	serviceStartPostListenHook = func(s *Service, ln net.Listener) {
+		capturedAddr = ln.Addr().String()
 		s.peersMu.Lock()
 		s.closed = true
 		s.peersMu.Unlock()
@@ -217,7 +212,10 @@ func TestService_StartPostListenClosedRace_ReturnsAlreadyClosed(t *testing.T) {
 	if err == nil || err.Error() != "service already closed" {
 		t.Fatalf("Start() post-listen closed race: err=%v want %q", err, "service already closed")
 	}
-	waitForAddrBindState(t, addr, false)
+	if capturedAddr == "" {
+		t.Fatalf("post-listen hook did not capture the bound address")
+	}
+	waitForAddrFree(t, capturedAddr)
 	if got := s.boundAddr; got != "" {
 		t.Fatalf("boundAddr published on closed race: got %q want empty", got)
 	}
@@ -227,18 +225,24 @@ func TestService_StartPostListenClosedRace_ReturnsAlreadyClosed(t *testing.T) {
 }
 
 func TestService_StartPostListenStartedRace_ReturnsAlreadyStarted(t *testing.T) {
-	addr := reserveTCPAddr(t)
+	// Same TOCTOU-avoidance strategy as ClosedRace: the Service itself
+	// binds "127.0.0.1:0" and the post-listen hook observes the real
+	// listener address. A separate existing listener is bound ahead of
+	// time on a different ephemeral port to impersonate a concurrent
+	// Start that already published a listener.
 	existing, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("existing listen: %v", err)
 	}
 	defer func() { _ = existing.Close() }()
 
-	s := &Service{cfg: ServiceConfig{BindAddr: addr}}
+	s := &Service{cfg: ServiceConfig{BindAddr: "127.0.0.1:0"}}
 	serviceStartPostListenHookMu.Lock()
 	defer serviceStartPostListenHookMu.Unlock()
 	prevHook := serviceStartPostListenHook
-	serviceStartPostListenHook = func(s *Service, _ net.Listener) {
+	var capturedAddr string
+	serviceStartPostListenHook = func(s *Service, ln net.Listener) {
+		capturedAddr = ln.Addr().String()
 		s.peersMu.Lock()
 		s.listener = existing
 		s.peersMu.Unlock()
@@ -249,7 +253,13 @@ func TestService_StartPostListenStartedRace_ReturnsAlreadyStarted(t *testing.T) 
 	if err == nil || err.Error() != "service already started" {
 		t.Fatalf("Start() post-listen started race: err=%v want %q", err, "service already started")
 	}
-	waitForAddrBindState(t, addr, false)
+	if capturedAddr == "" {
+		t.Fatalf("post-listen hook did not capture the bound address")
+	}
+	if capturedAddr == existing.Addr().String() {
+		t.Fatalf("captured bound addr collided with existing listener addr %q", capturedAddr)
+	}
+	waitForAddrFree(t, capturedAddr)
 	if got := s.listener; got != existing {
 		t.Fatalf("existing listener overwritten on started race: got %v want %v", got, existing)
 	}

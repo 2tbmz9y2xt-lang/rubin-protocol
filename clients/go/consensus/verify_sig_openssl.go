@@ -187,15 +187,22 @@ import (
 // that tests can swap to substitute mock implementations of the CGO-backed
 // verify/bootstrap/init entry points.
 //
-// These hooks are DELIBERATELY not guarded by a mutex. Tests that reassign
-// them MUST NOT run with t.Parallel(), because concurrent assignment and
-// read is a data race under the Go memory model. Production code only reads
-// the hooks from within ensureOpenSSL* wrappers that are serialized by the
-// paired sync.Once values below, so production behaviour is unaffected —
-// the race window only exists inside the test harness, and only if a future
-// test both swaps a hook and calls t.Parallel(). If that ever becomes
-// necessary, convert each hook to sync/atomic.Pointer at the same time so
-// all existing call sites migrate together.
+// These hooks are DELIBERATELY not guarded by a mutex. In production they
+// are expected to remain immutable after package initialization, so
+// concurrent reads of their values are safe under the Go memory model.
+// Tests that reassign them MUST NOT run concurrently with code that reads
+// them — in particular, such tests must not call t.Parallel() and must not
+// kick off background goroutines that hit the hook while the assignment
+// is live, because concurrent assignment + read is a data race.
+//
+// The sync.Once values below serialize the ensureOpenSSLBootstrap and
+// ensureOpenSSLConsensusInit bootstrap paths, but they do NOT cover every
+// hook read: opensslVerifySigOneShotFn is read on every verifySig call
+// through verifySigWithBinding, outside any sync.Once guard. If concurrent
+// hook swapping ever becomes necessary (e.g. to let a t.Parallel() test
+// swap backends mid-run), convert all three hooks to sync/atomic.Pointer
+// at the same time so every call site loads them through the same safe
+// primitive.
 var (
 	opensslBootstrapOnce       sync.Once
 	opensslBootstrapErr        error
