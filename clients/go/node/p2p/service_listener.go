@@ -3,9 +3,51 @@ package p2p
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"os"
 	"strings"
+	"time"
 )
+
+// Non-terminal Accept errors (e.g. EMFILE on transient file-descriptor
+// exhaustion) are retried with an exponential backoff capped at
+// acceptErrorBackoffCap. The constants mirror rubin-node Rust
+// ACCEPT_ERROR_BACKOFF_INIT / ACCEPT_ERROR_BACKOFF_CAP for cross-client
+// behavioural parity; see
+// clients/rust/crates/rubin-node/src/p2p_service.rs.
+const (
+	acceptErrorBackoffInit = 100 * time.Millisecond
+	acceptErrorBackoffCap  = 5 * time.Second
+)
+
+// nextAcceptErrorBackoff doubles current, capped at acceptErrorBackoffCap.
+// A non-positive current resets to acceptErrorBackoffInit. The helper is
+// pure so tests can exhaustively verify the progression without touching a
+// real listener.
+func nextAcceptErrorBackoff(current time.Duration) time.Duration {
+	if current <= 0 {
+		return acceptErrorBackoffInit
+	}
+	next := current * 2
+	if next > acceptErrorBackoffCap {
+		return acceptErrorBackoffCap
+	}
+	return next
+}
+
+// isAcceptLoopTerminal reports whether an Accept error should exit the
+// accept loop. Terminal conditions are: the service context has been
+// cancelled (Close path), or the listener has been closed.
+func isAcceptLoopTerminal(ctx context.Context, err error) bool {
+	if ctx != nil && ctx.Err() != nil {
+		return true
+	}
+	if errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	return false
+}
 
 func (s *Service) Start(ctx context.Context) error {
 	if s == nil {
@@ -81,23 +123,58 @@ func (s *Service) Addr() string {
 
 func (s *Service) acceptLoop() {
 	defer s.loopWG.Done()
+	errorBackoff := acceptErrorBackoffInit
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
-			if s.ctx != nil && s.ctx.Err() != nil {
+			if isAcceptLoopTerminal(s.ctx, err) {
 				return
 			}
-			if errors.Is(err, net.ErrClosed) {
+			// Non-terminal Accept error (e.g. EMFILE, ENFILE, transient
+			// socket failure). Log a diagnostic, sleep with the current
+			// backoff, then double it for the next occurrence (capped at
+			// acceptErrorBackoffCap). Mirrors rubin-node Rust
+			// run_accept_loop; prevents a hot-loop that previously would
+			// spin on a bare `continue` and drown the process.
+			fmt.Fprintf(os.Stderr,
+				"p2p: accept error on %s: %v (sleeping %s before retry)\n",
+				s.cfg.BindAddr, err, errorBackoff)
+			if !s.sleepOrStop(errorBackoff) {
 				return
 			}
+			errorBackoff = nextAcceptErrorBackoff(errorBackoff)
 			continue
 		}
+		errorBackoff = acceptErrorBackoffInit
 		if !s.tryAcquireHandshakeSlot() {
 			_ = conn.Close()
 			continue
 		}
 		s.loopWG.Add(1)
 		go s.runConn(conn, true)
+	}
+}
+
+// sleepOrStop sleeps for d unless the service context is cancelled first.
+// Returns true if the full sleep elapsed, false if cancellation unblocked
+// the sleep (callers treat false as "exit the loop"). A non-positive d or
+// nil receiver/context falls back to the obvious no-op or unconditional
+// time.Sleep respectively so callers never need to branch themselves.
+func (s *Service) sleepOrStop(d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	if s == nil || s.ctx == nil {
+		time.Sleep(d)
+		return true
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-s.ctx.Done():
+		return false
 	}
 }
 
