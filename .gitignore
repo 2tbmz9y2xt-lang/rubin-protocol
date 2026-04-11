@@ -1,55 +1,84 @@
-# Build outputs
-**/target/
-**/bin/
-!clients/rust/crates/rubin-node/src/bin/
-!clients/rust/crates/rubin-node/src/bin/*.rs
-**/*.exe
-**/*.out
+```
+# Dependencies
+go/pkg/mod/
+vendor/
 
-# Node / spec tooling
-node_modules/
-analysis/
-output/
-tmp/
-.claude/
-.codex/
-artifacts/
-.worktrees/
+# Compiled binaries
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.o
+*.obj
+*.out
 
-# Local UI tooling (not part of genesis rewrite)
-rubin-ui/
+# Build artifacts
+bin/
+build/
+dist/
+target/
 
-# Conformance build outputs
-conformance/bin/
+# Go-specific
+*.mod
+*.sum
+!go.mod
+!go.sum
 
-# Audit pack outputs
-artifacts/audit-pack/
+# Environment
+.env
+.env.local
+.env.*
 
-# Lean formal build outputs
-rubin-formal/.lake/
-rubin-formal/.lean/
-rubin-formal/build/
+# Logs
+*.log
 
-# Local data
-*.db
-*.sqlite
-*.sqlite3
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
+
+# OS
 .DS_Store
+Thumbs.db
 
-# Python bytecode
-**/__pycache__/
-**/*.pyc
+# Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.coverage
+coverage/
+htmlcov/
+.mypy_cache/
+.pytest_cache/
+.tox/
+.coverage*
 
-# JSON guard artifacts (never commit)
-*.invalid.*.json
-
-# Vault draft (local)
-spec/RUBIN_CORE_VAULT_V1_SPEC_v0.9.md
-
-# Local control docs (must stay off GitHub)
-spec/RUBIN_AGENT_EXECUTION_TZ.md
-spec/RUBIN_IMPLEMENTATION_ROADMAP.md
-
-# Local orchestration files (must stay local-only)
-scripts/orchestration/
-operational/orchestration/
+# Compressed
+*.zip
+*.gz
+*.tar
+*.tgz
+*.bz2
+*.xz
+*.7z
+*.rar
+*.zst
+*.lz4
+*.lzh
+*.cab
+*.arj
+*.rpm
+*.deb
+*.Z
+*.lz
+*.lzo
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar.zst
+```
