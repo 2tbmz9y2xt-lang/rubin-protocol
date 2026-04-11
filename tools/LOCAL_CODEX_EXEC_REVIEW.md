@@ -4,7 +4,7 @@ This machine's sanctioned `rubin-protocol` push path is:
 
 1. run local stack checks and `pre-pr` coverage preflight
 2. call `cl push ...`
-3. let `rubin-protocol/.git/hooks-disabled/pre-push` build the review bundle
+3. let `$(git rev-parse --git-path hooks-disabled/pre-push)` build the review bundle
 4. let the hook run deterministic local gates plus isolated local `codex exec`
 5. allow the network push only if there are no blocking findings
 
