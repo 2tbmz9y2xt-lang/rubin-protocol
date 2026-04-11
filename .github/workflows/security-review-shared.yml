@@ -531,7 +531,7 @@ jobs:
               'OUTPUT FORMAT (JSON only):',
               '```',
               '{',
-              '  "model": "${{ inputs.model_id }}",',
+              `  "model": "${modelId}",`,
               '  "verdict": "PASS|WARN|BLOCK",',
               '  "findings": [{"severity":"...","file":"...","line":N,"title":"...","details":"...","suggestion":"..."}]',
               '}',
@@ -672,6 +672,14 @@ jobs:
         with:
           script: |
             const fs = require('fs');
+            // Hoist model_display_name through toJSON BEFORE building the
+            // template-literal header. Embedding a raw workflow_call input
+            // directly inside backticks is dangerous: any dollar-brace
+            // expression substring in a future caller's display name would
+            // be evaluated as a JS expression at template-literal
+            // interpolation time, which could leak process.env.GITHUB_TOKEN
+            // or other secrets into the posted PR comment.
+            const modelDisplayName = ${{ toJSON(inputs.model_display_name) }};
             const reviewFile = '${{ steps.review.outputs.review_file }}';
             if (!reviewFile || !fs.existsSync(reviewFile)) return;
             const review = fs.readFileSync(reviewFile, 'utf8');
@@ -679,7 +687,7 @@ jobs:
             try { parsed = JSON.parse(review); } catch(e) { parsed = null; }
             const verdict = parsed?.verdict || 'UNKNOWN';
             const emoji = verdict === 'PASS' ? '✅' : verdict === 'WARN' ? '⚠️' : '🛑';
-            const header = `### ${emoji} Security Review: ${verdict}\n_Model: ${{ inputs.model_display_name }}_\n\n\`\`\`json\n`;
+            const header = `### ${emoji} Security Review: ${verdict}\n_Model: ${modelDisplayName}_\n\n\`\`\`json\n`;
             const footer = '\n```';
             // Produce a VALID shortened JSON when the body needs truncation,
             // not a sliced byte buffer. The next run's dedup parser reads
