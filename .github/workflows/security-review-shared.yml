@@ -672,17 +672,56 @@ jobs:
             const emoji = verdict === 'PASS' ? '✅' : verdict === 'WARN' ? '⚠️' : '🛑';
             const header = `### ${emoji} Security Review: ${verdict}\n_Model: ${{ inputs.model_display_name }}_\n\n\`\`\`json\n`;
             const footer = '\n```';
-            // Append a visible truncation notice OUTSIDE the fence so the
-            // markdown renders cleanly even when the JSON inside is cut
-            // mid-token. The merge gate consumes the on-disk review file
-            // (full, untruncated), so cosmetic truncation here does not
-            // affect blocking severity counts.
-            const truncationNotice = '\n\n> ⚠️ Review body was truncated to fit the GitHub PR-comment size cap. The JSON above is incomplete; the merge gate uses the full on-disk artifact.';
+            // Produce a VALID shortened JSON when the body needs truncation,
+            // not a sliced byte buffer. The next run's dedup parser reads
+            // the fenced ```json block from past PR comments via JSON.parse;
+            // if we slice raw bytes, the parser silently drops dedup data
+            // for that comment. Reducing the findings array preserves
+            // parseability while still fitting under GitHub's size cap.
+            const truncationNotice = '\n\n> ⚠️ Review body was shortened to fit the GitHub PR-comment size cap. The JSON above is a parseable subset; the full review lives in the workflow artifacts and is what the merge gate consumes.';
             const safetyMargin = 64;
             const maxJsonLen = 65000 - header.length - footer.length - truncationNotice.length - safetyMargin;
-            const body = review.length > maxJsonLen
-              ? header + review.slice(0, maxJsonLen) + footer + truncationNotice
-              : header + review + footer;
+            let body;
+            if (review.length <= maxJsonLen) {
+              body = header + review + footer;
+            } else {
+              let shortenedStr = null;
+              try {
+                const parsedFull = JSON.parse(review);
+                if (Array.isArray(parsedFull.findings)) {
+                  let n = parsedFull.findings.length;
+                  while (n >= 0) {
+                    const candidate = {
+                      ...parsedFull,
+                      findings: parsedFull.findings.slice(0, n),
+                      _truncated: true,
+                      _original_findings_count: parsedFull.findings.length,
+                    };
+                    const candidateStr = JSON.stringify(candidate, null, 2);
+                    if (candidateStr.length <= maxJsonLen) {
+                      shortenedStr = candidateStr;
+                      break;
+                    }
+                    n--;
+                  }
+                }
+                if (shortenedStr === null) {
+                  // Fall back to a minimal stub that is still valid JSON.
+                  shortenedStr = JSON.stringify({
+                    verdict: parsedFull.verdict || 'UNKNOWN',
+                    findings: [],
+                    _truncated: true,
+                    _note: 'Full review available in workflow artifacts; comment cap exceeded',
+                  }, null, 2);
+                }
+              } catch (parseErr) {
+                // The on-disk review file should be valid JSON by this point
+                // (validated above), but be defensive: byte-slice as a last
+                // resort and let the truncation notice explain.
+                shortenedStr = review.slice(0, maxJsonLen);
+              }
+              body = header + shortenedStr + footer + truncationNotice;
+            }
             await github.rest.pulls.createReview({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -757,8 +796,22 @@ jobs:
               return;
             }
 
+            // Strict findings validation: an absent `findings` key is a
+            // legitimate "nothing to report" review, but a present-but-
+            // non-array value (e.g., `{"findings": {"weird": true}}`)
+            // is a contract violation that must fail-closed. Silently
+            // coercing it to [] would let HIGH/CRITICAL content emitted
+            // in an unexpected shape bypass the merge gate.
+            let findings;
+            if (parsed.findings === undefined) {
+              findings = [];
+            } else if (Array.isArray(parsed.findings)) {
+              findings = parsed.findings;
+            } else {
+              core.setFailed(`Review JSON contract violation: 'findings' must be an array (or omitted), got ${typeof parsed.findings}`);
+              return;
+            }
             const dominated = new Set();
-            const findings = Array.isArray(parsed.findings) ? parsed.findings : [];
             for (let i = 0; i < findings.length; i++) {
               for (let j = 0; j < findings.length; j++) {
                 if (i === j) continue;
