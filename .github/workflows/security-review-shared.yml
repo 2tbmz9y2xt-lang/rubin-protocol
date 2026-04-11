@@ -48,9 +48,10 @@ permissions:
   contents: read
   pull-requests: write
   # models: read is required for the DeepSeek caller that targets
-  # https://models.github.ai. Reusable workflows do not inherit caller
-  # permissions — any scope not listed here is set to `none` for GITHUB_TOKEN,
-  # so this must be declared explicitly even though only one caller uses it.
+  # https://models.github.ai. Reusable workflows receive the caller's
+  # GITHUB_TOKEN permissions and can only further restrict them, and any
+  # scope not listed here is set to `none` for this workflow, so declare
+  # models: read explicitly even though only one caller uses it.
   models: read
 
 jobs:
@@ -466,10 +467,22 @@ jobs:
             }
             const parityContext = parityEntries.length > 0 ? parityIntro + parityEntries.join(SEPARATOR) : '';
 
-            // Parse model-specific anti-hallucination rules
+            // Parse model-specific anti-hallucination rules.
+            // toJSON(inputs.anti_hallucination_rules) emits a JS literal whose value
+            // is the workflow_call string. We must JSON.parse THAT string to get the
+            // intended array; spreading the raw string would leak per-character
+            // tokens into the system prompt.
+            const antiHallucinationRulesInput = ${{ toJSON(inputs.anti_hallucination_rules) }};
             let antiHallucinationRules = [];
             try {
-              antiHallucinationRules = JSON.parse(${{ toJSON(inputs.anti_hallucination_rules) }});
+              const parsedAntiHallucinationRules = Array.isArray(antiHallucinationRulesInput)
+                ? antiHallucinationRulesInput
+                : typeof antiHallucinationRulesInput === 'string'
+                  ? JSON.parse(antiHallucinationRulesInput)
+                  : [];
+              antiHallucinationRules = Array.isArray(parsedAntiHallucinationRules)
+                ? parsedAntiHallucinationRules
+                : [];
             } catch {}
 
             const systemPrompt = [
@@ -656,7 +669,9 @@ jobs:
               // because the truthy file_pattern alone would satisfy the return.
               if (!ack.title_pattern) return false;
               if (!f.title?.toLowerCase().includes(ack.title_pattern.toLowerCase())) return false;
-              if (ack.file_pattern && !f.file?.includes(ack.file_pattern)) return false;
+              // file_pattern is matched case-insensitively to honor the schema
+              // contract documented in .github/security-acknowledged.json.
+              if (ack.file_pattern && !f.file?.toLowerCase().includes(ack.file_pattern.toLowerCase())) return false;
               return true;
             });
 
