@@ -63,14 +63,15 @@ func isAcceptLoopTerminal(ctx context.Context, err error) bool {
 // for a fresh lifecycle.
 //
 // Lifecycle transitions (dormant → running → closed) are linearized under
-// peersMu. A fast-path read-lock rejects the obvious cases without paying
-// for net.Listen; the authoritative decision re-checks the flags under the
-// write lock AFTER net.Listen returns, so a concurrent Close that lands
-// between the fast-path check and the listener publish still wins the race
-// and the freshly created listener is closed immediately. This guarantees
-// that an observed successful Start return implies the Service is running,
-// and no acceptLoop/reconnectLoop goroutine is ever started on a Service
-// that was already marked closed.
+// peersMu. The entry check, startWG registration, and the post-net.Listen
+// authoritative publish all take the write lock; Close takes the same
+// lock to transition closed. This gives two invariants: (1) startWG.Add
+// only happens when closed=false, so Close's startWG.Wait cannot race
+// a concurrent Add (which would panic sync.WaitGroup), and (2) an
+// observed successful Start return implies the Service is running — if
+// a concurrent Close ran between net.Listen and the re-check, the
+// freshly created listener is closed and Start returns the dormant
+// error instead of publishing.
 func (s *Service) Start(ctx context.Context) error {
 	if s == nil {
 		return errors.New("nil service")
@@ -79,18 +80,27 @@ func (s *Service) Start(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
-	// Fast-path rejection: snapshot the dormant/started state. This may be
-	// racy — the authoritative check happens under the write lock below.
-	s.peersMu.RLock()
-	closed := s.closed
-	started := s.listener != nil
-	s.peersMu.RUnlock()
-	if closed {
+	// Register this Start invocation with startWG atomically with the
+	// dormant/started check, under the same peersMu that guards closed.
+	// This is critical for sync.WaitGroup correctness: Go panics with
+	// "Add called concurrently with Wait" if Add transitions the counter
+	// from 0 while Wait is running. Close sets s.closed=true under peersMu
+	// and then calls startWG.Wait. By taking the write lock here and
+	// reading s.closed before calling Add, we guarantee that once Close
+	// has published closed=true, no subsequent Start can Add — it will
+	// observe closed=true and return without touching startWG.
+	s.peersMu.Lock()
+	if s.closed {
+		s.peersMu.Unlock()
 		return errors.New("service already closed")
 	}
-	if started {
+	if s.listener != nil {
+		s.peersMu.Unlock()
 		return errors.New("service already started")
 	}
+	s.startWG.Add(1)
+	s.peersMu.Unlock()
+	defer s.startWG.Done()
 
 	listener, err := net.Listen("tcp", s.cfg.BindAddr)
 	if err != nil {
@@ -148,17 +158,39 @@ func (s *Service) Start(ctx context.Context) error {
 // idempotent on a nil receiver. The boundAddr cache is retained so that
 // post-close Addr() calls still surface the last resolved listener address
 // for diagnostics/metrics.
+//
+// Close guarantees that no bound listener remains after it returns, even
+// under a concurrent Start race. It does so by first marking the Service
+// closed and then waiting on startWG: an in-progress Start that has already
+// returned from net.Listen but not yet published into s.listener will
+// observe the closed flag in its write-lock re-check and close the freshly
+// created listener on its own before returning. Close's subsequent
+// startWG.Wait blocks until that cleanup is done, so the listener snapshot
+// below always reflects final state — either a published listener that
+// Close itself closes, or nil if Start aborted and cleaned up.
 func (s *Service) Close() error {
 	if s == nil {
 		return nil
 	}
-	// Mark closed first and snapshot the cancel/listener references under
-	// the write lock so we operate on stable local copies below. This also
-	// linearizes with the Start re-check above: a Start that sees closed
-	// under its write-lock re-check will drop its freshly created listener
-	// instead of publishing it and racing the acceptLoop spawn.
+	// Phase 1: publish the closed flag so any in-progress Start observes
+	// it on its write-lock re-check and aborts with "service already
+	// closed", closing its local listener before returning.
 	s.peersMu.Lock()
 	s.closed = true
+	s.peersMu.Unlock()
+
+	// Phase 2: wait for every in-progress Start to return. After this
+	// wait, s.listener is in its final state — either published by a
+	// Start call that won the race and returned nil, or still nil
+	// because every Start either failed the fast-path check or aborted
+	// in the write-lock re-check and cleaned up its own local listener.
+	s.startWG.Wait()
+
+	// Phase 3: snapshot cancel + listener and drive the rest of the
+	// shutdown sequence. The snapshot is stable because no Start is in
+	// flight anymore, and any future Start will return "service already
+	// closed" immediately without touching either field.
+	s.peersMu.Lock()
 	cancel := s.cancel
 	listener := s.listener
 	s.peersMu.Unlock()
@@ -219,9 +251,14 @@ func (s *Service) acceptLoop() {
 			// acceptErrorBackoffCap). Mirrors rubin-node Rust
 			// run_accept_loop; prevents a hot-loop that previously would
 			// spin on a bare `continue` and drown the process.
+			//
+			// Use s.Addr() instead of s.cfg.BindAddr so wildcard /
+			// ephemeral binds (":0") surface the concrete resolved port
+			// from the cached boundAddr, keeping the log diagnostic
+			// consistent with what Addr reports elsewhere.
 			fmt.Fprintf(os.Stderr,
 				"p2p: accept error on %s: %v (sleeping %s before retry)\n",
-				s.cfg.BindAddr, err, errorBackoff)
+				s.Addr(), err, errorBackoff)
 			if !s.sleepOrStop(errorBackoff) {
 				return
 			}
