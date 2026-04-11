@@ -13,8 +13,9 @@ This machine's sanctioned `rubin-protocol` push path is:
 - Entry command: `cl push ...`
 - Hook: `$(git rev-parse --git-path hooks-disabled/pre-push)`
 - Public repo contract stops here on purpose.
-- This repository keeps only this README as the repo-facing pointer for the
-  local push contract.
+- This repository keeps only this README as the repo-facing pointer for this
+  local push contract; unrelated repository tooling remains outside this
+  contract boundary.
 - The actual machine-local runtime assets live in the private orchestration
   repository under `inbox/operational/local_push_gate/protocol/`.
 - That private path owns:
