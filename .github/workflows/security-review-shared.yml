@@ -672,14 +672,23 @@ jobs:
             const emoji = verdict === 'PASS' ? '✅' : verdict === 'WARN' ? '⚠️' : '🛑';
             const header = `### ${emoji} Security Review: ${verdict}\n_Model: ${{ inputs.model_display_name }}_\n\n\`\`\`json\n`;
             const footer = '\n```';
-            const maxLen = 65000 - header.length - footer.length;
-            const truncated = review.length > maxLen ? review.slice(0, maxLen) + '\n... [truncated]' : review;
+            // Append a visible truncation notice OUTSIDE the fence so the
+            // markdown renders cleanly even when the JSON inside is cut
+            // mid-token. The merge gate consumes the on-disk review file
+            // (full, untruncated), so cosmetic truncation here does not
+            // affect blocking severity counts.
+            const truncationNotice = '\n\n> ⚠️ Review body was truncated to fit the GitHub PR-comment size cap. The JSON above is incomplete; the merge gate uses the full on-disk artifact.';
+            const safetyMargin = 64;
+            const maxJsonLen = 65000 - header.length - footer.length - truncationNotice.length - safetyMargin;
+            const body = review.length > maxJsonLen
+              ? header + review.slice(0, maxJsonLen) + footer + truncationNotice
+              : header + review + footer;
             await github.rest.pulls.createReview({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: context.issue.number,
               event: 'COMMENT',
-              body: header + truncated + footer
+              body
             });
 
       - name: Block on critical/high findings
