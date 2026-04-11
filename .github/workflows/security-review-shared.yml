@@ -559,24 +559,23 @@ jobs:
                   'X-Title': 'RUBIN Protocol Security Review'
                 };
 
+            // Common generation params for both providers.
             const requestBody = {
               model: '${{ inputs.model_id }}',
               messages: [
                 { role: 'system', content: systemPrompt },
                 { role: 'user', content: userPrompt }
               ],
-              temperature: 0.2
+              temperature: 0.2,
+              top_p: 0.9
             };
-            if (usesGitHubModels) {
-              // GitHub Models (DeepSeek-R1): nucleus sampling tuned for the
-              // non-CoT chat endpoint.
-              requestBody.top_p = 0.9;
-            } else {
+            if (!usesGitHubModels) {
               // OpenRouter Qwen 3.6 Plus has always-on chain-of-thought.
               // Cap the thinking budget so the model leaves room for the
               // structured JSON answer; without this the entire max_tokens
               // budget can be consumed by `<think>` tokens, leaving an empty
-              // post-strip content.
+              // post-strip content. 50000 leaves ~15k of the 65k total for
+              // the structured JSON answer.
               requestBody.reasoning = { max_tokens: 50000 };
             }
             if (${{ inputs.max_tokens }} > 0) requestBody.max_tokens = ${{ inputs.max_tokens }};
