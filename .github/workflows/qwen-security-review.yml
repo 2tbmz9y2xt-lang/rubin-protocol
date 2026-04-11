@@ -7,6 +7,13 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  # models: read is technically unused by Qwen (it authenticates against
+  # OpenRouter via OPENROUTER_API_KEY_QWEN, not GitHub Models), but the
+  # called reusable workflow declares `permissions.models: read` and
+  # reusable workflows cannot elevate GITHUB_TOKEN beyond the caller's
+  # grant. Listing it here keeps the caller↔reusable permission set
+  # consistent and avoids silently dropping the scope.
+  models: read
 
 jobs:
   qwen-review:

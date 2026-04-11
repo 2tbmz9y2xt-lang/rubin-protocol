@@ -164,12 +164,18 @@ jobs:
                 ...allIssueComments.map(c => ({ body: c.body, user: c.user, date: c.created_at || '' })),
               ].sort((a, b) => a.date.localeCompare(b.date));
 
+              // Match by the FULL model_id (e.g. "qwen/qwen3.6-plus"), not
+              // the provider prefix ("qwen"). Otherwise a DeepSeek review
+              // that mentions a Qwen filename like
+              // ".github/workflows/qwen-security-review.yml" would be
+              // ingested as a Qwen previous review and falsely deduped.
               const modelId = '${{ inputs.model_id }}';
+              const modelIdLower = modelId.toLowerCase();
               const reviewComments = allComments
                 .filter(c => c.body
                   && TRUSTED_AUTHORS.has(c.user?.login ?? '')
                   && c.body.includes('Security Review:')
-                  && c.body.toLowerCase().includes(modelId.split('/')[0].toLowerCase()))
+                  && c.body.toLowerCase().includes(modelIdLower))
                 .slice(-3);
               if (reviewComments.length > 0) {
                 const titles = [];
@@ -588,7 +594,17 @@ jobs:
               return;
             }
 
-            const data = await response.json();
+            // Read body as text first so a non-JSON 2xx (proxy HTML, plain
+            // text error, etc.) fails closed with a useful preview instead
+            // of throwing an unguarded TypeError from response.json().
+            const responseText = await response.text();
+            let data;
+            try {
+              data = JSON.parse(responseText);
+            } catch (jsonErr) {
+              core.setFailed(`Provider returned 2xx but non-JSON body: ${jsonErr.message}. Body preview: ${responseText.slice(0, 500)}`);
+              return;
+            }
             const rawContent = data.choices?.[0]?.message?.content || '';
             if (!rawContent) {
               core.setFailed('Empty response from model');
